@@ -243,6 +243,10 @@ if ($changeCount -gt 10 -and -not $NoConfirm) {
     $confirm = Read-Host "  继续 commit + push?(y/N)"
     if ($confirm -ne 'y' -and $confirm -ne 'Y') {
         Write-Host "  [ABORT] 用户取消" -ForegroundColor Yellow
+        # 撤销 git add (但保留工作区改动,因为这些改动可能来自源项目真实变更)
+        # 下次跑 sync 时 robocopy 会重新同步,git add 会重新加入
+        & git reset HEAD -- . 2>&1 | Out-Null
+        Write-Host "  [OK] 已撤销 git add,工作区文件保留" -ForegroundColor Yellow
         Pop-Location
         exit 0
     }
