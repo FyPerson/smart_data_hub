@@ -72,10 +72,14 @@ $excludeFiles = @(
     "*.pbix", "*.log", "*.xlsx",
     "d3_manual_verify_seed.js", "d3_manual_verify_submit.js",
     "CLAUDE.md", ".mcp.json", "reference.docx",
-    "gen_notice.py"
+    "gen_notice.py",
+    # 镜像专属文件 — 源目录没有,但镜像必须保留,robocopy /MIR 不能删
+    "LICENSE", ".env.example", ".gitignore", "README.md"
 )
-$copyResult = robocopy $SourcePath $MirrorPath /MIR /XD $excludeDirs /XF $excludeFiles /NFL /NDL /NJH /NJS /NP /XO 2>&1
-# robocopy /MIR + /XO: 镜像模式 + 仅复制源更新的文件
+# robocopy 选项说明：
+#   /E  : 复制所有子目录(含空目录),不用 /MIR(/MIR=/E+/PURGE,/PURGE 会删源没有的文件,会误删镜像专属文件)
+#   /XO : Older—仅复制源更新的文件(同字节跳过,且不会用源的旧版本覆盖镜像的新版本——保护已改写的 README.md)
+$copyResult = robocopy $SourcePath $MirrorPath /E /XD $excludeDirs /XF $excludeFiles /NFL /NDL /NJH /NJS /NP /XO 2>&1
 # 退出码 0-7 都是成功（8+ 是错误）
 if ($LASTEXITCODE -ge 8) {
     Write-Host "  [ERROR] robocopy 失败 (exit $LASTEXITCODE)" -ForegroundColor Red
