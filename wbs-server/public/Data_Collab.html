@@ -1,0 +1,1632 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>数据协作 - 智数协同平台</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="assets/css/style.css?v=1.2">
+    <style>
+        /* 筛选栏 */
+        .filter-bar {
+            background: #fff;
+            border: 1px solid #e2e8f0;
+            border-radius: 10px;
+            padding: 14px 18px;
+            margin-bottom: 16px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            align-items: center;
+        }
+        .filter-bar select,
+        .filter-bar input {
+            padding: 6px 10px;
+            border: 1px solid #d1d5db;
+            border-radius: 6px;
+            font-size: 13px;
+            outline: none;
+            transition: border-color 0.15s;
+        }
+        .filter-bar select:focus,
+        .filter-bar input:focus {
+            border-color: #d97706;
+        }
+        .filter-bar input[type="text"] {
+            min-width: 200px;
+            flex: 1;
+        }
+        .filter-bar .filter-label {
+            font-size: 12px;
+            color: #6b7280;
+            margin-right: -4px;
+        }
+        .filter-bar .btn-new {
+            margin-left: auto;
+            padding: 7px 16px;
+            background: linear-gradient(135deg, #d97706, #b45309);
+            color: #fff;
+            border: none;
+            border-radius: 6px;
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .filter-bar .btn-new:hover {
+            box-shadow: 0 2px 8px rgba(217, 119, 6, 0.35);
+        }
+        .filter-bar .btn-new svg {
+            width: 14px;
+            height: 14px;
+        }
+
+        /* 表格 */
+        .data-table {
+            width: 100%;
+            background: #fff;
+            border: 1px solid #e2e8f0;
+            border-radius: 10px;
+            overflow: hidden;
+            border-collapse: collapse;
+            font-size: 13px;
+        }
+        .data-table th {
+            background: #f8fafc;
+            padding: 11px 14px;
+            text-align: left;
+            font-weight: 600;
+            color: #475569;
+            border-bottom: 1px solid #e2e8f0;
+            white-space: nowrap;
+        }
+        .data-table td {
+            padding: 12px 14px;
+            border-bottom: 1px solid #f1f5f9;
+            color: #1f2937;
+            vertical-align: middle;
+        }
+        .data-table tr:last-child td {
+            border-bottom: none;
+        }
+        .data-table tbody tr {
+            transition: background 0.12s;
+            cursor: pointer;
+        }
+        .data-table tbody tr:hover {
+            background: #fffbeb;
+        }
+        .data-table .empty-row td {
+            text-align: center;
+            color: #9ca3af;
+            padding: 36px 0;
+            cursor: default;
+        }
+        .data-table .empty-row tr:hover {
+            background: transparent;
+        }
+        .data-table .col-id {
+            color: #6b7280;
+            font-family: ui-monospace, monospace;
+            font-size: 12px;
+        }
+        .data-table .col-desc {
+            max-width: 380px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .data-table .col-reject {
+            text-align: center;
+        }
+        .data-table .col-reject.has-reject {
+            color: #dc2626;
+            font-weight: 600;
+        }
+
+        /* 状态徽章 */
+        .status-badge {
+            display: inline-block;
+            padding: 3px 10px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+        .status-PENDING { background: #dbeafe; color: #1e40af; }
+        .status-SUBMITTED { background: #fef3c7; color: #92400e; }
+        .status-DONE { background: #ddd6fe; color: #5b21b6; }
+        .status-ARCHIVED { background: #d1fae5; color: #065f46; }
+        /* 旧状态值兼容（D1 残留数据可能存在） */
+        .status-CONFIRMED { background: #e5e7eb; color: #4b5563; }
+        .status-CLAIMED { background: #e5e7eb; color: #4b5563; }
+
+        /* 验收状态色块 */
+        .val-badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px; white-space: nowrap; }
+        .val-pending  { color: #9ca3af; }
+        .val-passed   { background: #d1fae5; color: #065f46; }
+        .val-failed   { background: #fee2e2; color: #991b1b; }
+        .val-running  { background: #fef3c7; color: #92400e; }
+        .val-bypassed { background: #fde68a; color: #78350f; }
+        .friction-mark { color: #b91c1c; font-size: 16px; }
+
+        /* 类型徽章 */
+        .type-badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 11px;
+            background: #f3f4f6;
+            color: #4b5563;
+            white-space: nowrap;
+        }
+
+        /* 模态框 */
+        .modal-overlay {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0, 0, 0, 0.45);
+            display: none;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+        }
+        .modal-overlay.show { display: flex; }
+        .modal-card {
+            background: #fff;
+            border-radius: 12px;
+            width: 520px;
+            max-width: 92%;
+            max-height: 88vh;
+            overflow-y: auto;
+            box-shadow: 0 24px 64px rgba(0, 0, 0, 0.18);
+        }
+        .modal-card.detail-card { width: 720px; }
+        .detail-section {
+            margin-bottom: 18px;
+            border: 1px solid #e5e7eb;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        .detail-section-title {
+            padding: 10px 14px;
+            background: #f9fafb;
+            border-bottom: 1px solid #e5e7eb;
+            font-size: 13px;
+            font-weight: 600;
+            color: #374151;
+        }
+        .detail-section-body { padding: 14px; }
+        .detail-section-body.empty { color: #9ca3af; font-size: 13px; }
+        .detail-kv {
+            display: grid;
+            grid-template-columns: 110px 1fr;
+            gap: 8px 12px;
+            font-size: 13px;
+            line-height: 1.7;
+        }
+        .detail-kv-label { color: #6b7280; }
+        .detail-kv-value { color: #111827; word-break: break-all; }
+        .notify-status-text { font-size: 13px; color: #4b5563; margin-right: 12px; }
+        .notify-btn {
+            padding: 6px 14px;
+            background: #2563eb;
+            color: #fff;
+            border: none;
+            border-radius: 6px;
+            font-size: 13px;
+            cursor: pointer;
+        }
+        .notify-btn:hover { background: #1d4ed8; }
+        .notify-btn:disabled { background: #9ca3af; cursor: not-allowed; }
+        .notify-error-box {
+            margin-top: 10px;
+            padding: 10px 12px;
+            background: #fee2e2;
+            border-left: 3px solid #dc2626;
+            border-radius: 4px;
+            font-size: 12px;
+            color: #991b1b;
+            white-space: pre-wrap;
+        }
+
+        /* D3 模块 7 详情抽屉 3 区块 */
+        .delivery-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 13px;
+            padding: 6px 0;
+            border-bottom: 1px dashed #e5e7eb;
+        }
+        .delivery-item:last-child { border-bottom: none; }
+        .delivery-type { color: #374151; font-weight: 500; min-width: 88px; }
+        .delivery-link { color: #2563eb; text-decoration: none; flex: 1; word-break: break-all; }
+        .delivery-link:hover { text-decoration: underline; }
+        .delivery-meta { color: #6b7280; font-size: 12px; }
+        .val-box {
+            padding: 12px 14px;
+            border-radius: 6px;
+            font-size: 13px;
+        }
+        .val-passed-bg   { background: #d1fae5; color: #065f46; }
+        .val-failed-bg   { background: #fee2e2; color: #991b1b; }
+        .val-bypassed-bg { background: #fef3c7; color: #78350f; }
+        .val-running-bg  { background: #e0e7ff; color: #3730a3; }
+        .val-title { font-weight: 600; font-size: 14px; margin-bottom: 6px; }
+        .val-meta  { color: #6b7280; font-size: 12px; margin-bottom: 4px; }
+        .val-reason {
+            margin-top: 6px;
+            padding: 8px 10px;
+            background: rgba(255,255,255,0.6);
+            border-radius: 4px;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+        .val-error {
+            margin-top: 6px;
+            padding: 8px 10px;
+            background: rgba(255,255,255,0.7);
+            border-radius: 4px;
+            font-family: ui-monospace, "SF Mono", Consolas, monospace;
+            font-size: 12px;
+            white-space: pre-wrap;
+            word-break: break-all;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        .val-actions { margin-top: 10px; display: flex; gap: 8px; }
+        .val-btn {
+            padding: 6px 14px;
+            border: none;
+            border-radius: 6px;
+            font-size: 13px;
+            cursor: pointer;
+        }
+        .val-btn-retry  { background: #2563eb; color: #fff; }
+        .val-btn-retry:hover  { background: #1d4ed8; }
+        .val-btn-bypass { background: #f59e0b; color: #fff; }
+        .val-btn-bypass:hover { background: #d97706; }
+        .friction-row { font-size: 13px; line-height: 1.8; }
+        .friction-label { color: #6b7280; margin-right: 6px; }
+        .friction-note-row { display: flex; align-items: flex-start; }
+        .friction-note { white-space: pre-wrap; word-break: break-all; }
+        .friction-saved-meta {
+            font-size: 12px; color: #16a34a;
+            margin-bottom: 10px;
+        }
+        .friction-form { display: flex; flex-direction: column; gap: 6px; }
+        .friction-form-label { font-size: 12px; color: #6b7280; margin-top: 6px; }
+        .friction-select, .friction-textarea {
+            font-size: 13px;
+            padding: 6px 10px;
+            border: 1px solid #d1d5db;
+            border-radius: 4px;
+            font-family: inherit;
+        }
+        .friction-textarea { min-height: 80px; resize: vertical; }
+        .friction-submit-btn {
+            align-self: flex-start;
+            margin-top: 10px;
+            padding: 6px 16px;
+            background: #2563eb;
+            color: #fff;
+            border: none;
+            border-radius: 6px;
+            font-size: 13px;
+            cursor: pointer;
+        }
+        .friction-submit-btn:hover { background: #1d4ed8; }
+        .friction-submit-btn:disabled { background: #9ca3af; cursor: not-allowed; }
+
+        .modal-header {
+            padding: 18px 22px;
+            border-bottom: 1px solid #e5e7eb;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .modal-header h3 {
+            margin: 0;
+            font-size: 17px;
+            color: #111827;
+        }
+        .modal-close {
+            background: none;
+            border: none;
+            font-size: 22px;
+            color: #9ca3af;
+            cursor: pointer;
+            padding: 0;
+            line-height: 1;
+        }
+        .modal-close:hover { color: #4b5563; }
+        .modal-body { padding: 18px 22px; }
+        .modal-footer {
+            padding: 14px 22px;
+            border-top: 1px solid #e5e7eb;
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+        }
+
+        /* 表单 */
+        .form-row {
+            margin-bottom: 14px;
+        }
+        .form-row label {
+            display: block;
+            font-size: 13px;
+            color: #374151;
+            margin-bottom: 5px;
+            font-weight: 500;
+        }
+        .form-row label .required { color: #dc2626; }
+        .form-row input,
+        .form-row select,
+        .form-row textarea {
+            width: 100%;
+            padding: 8px 10px;
+            border: 1px solid #d1d5db;
+            border-radius: 6px;
+            font-size: 13px;
+            outline: none;
+            font-family: inherit;
+            box-sizing: border-box;
+        }
+        .form-row input:focus,
+        .form-row select:focus,
+        .form-row textarea:focus {
+            border-color: #d97706;
+        }
+        .form-row textarea {
+            resize: vertical;
+            min-height: 70px;
+        }
+        .form-row .hint {
+            font-size: 11px;
+            color: #9ca3af;
+            margin-top: 3px;
+        }
+        .file-preview {
+            margin-top: 8px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+        .file-preview .file-item {
+            position: relative;
+            width: 76px;
+            height: 76px;
+            border: 1px solid #e5e7eb;
+            border-radius: 6px;
+            overflow: hidden;
+            background: #f9fafb;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 11px;
+            color: #6b7280;
+            text-align: center;
+            padding: 4px;
+            box-sizing: border-box;
+        }
+        .file-preview .file-item img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+        .file-preview .file-item .pdf-icon {
+            font-size: 22px;
+            color: #dc2626;
+            margin-bottom: 4px;
+        }
+        .file-preview .file-item .file-name {
+            font-size: 10px;
+            color: #6b7280;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            max-width: 64px;
+        }
+        .file-preview .file-item .remove-btn {
+            position: absolute;
+            top: 2px;
+            right: 2px;
+            width: 18px;
+            height: 18px;
+            border-radius: 50%;
+            background: rgba(0, 0, 0, 0.6);
+            color: #fff;
+            border: none;
+            cursor: pointer;
+            font-size: 12px;
+            line-height: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .file-preview .file-item .remove-btn:hover {
+            background: #dc2626;
+        }
+
+        /* 按钮 */
+        .btn {
+            padding: 8px 18px;
+            border-radius: 6px;
+            font-size: 13px;
+            cursor: pointer;
+            border: none;
+            font-weight: 500;
+        }
+        .btn-primary {
+            background: #d97706;
+            color: #fff;
+        }
+        .btn-primary:hover { background: #b45309; }
+        .btn-primary:disabled {
+            background: #fbbf24;
+            cursor: not-allowed;
+        }
+        .btn-cancel {
+            background: #f3f4f6;
+            color: #374151;
+        }
+        .btn-cancel:hover { background: #e5e7eb; }
+
+        /* 提示 */
+        .toast {
+            position: fixed;
+            top: 80px;
+            right: 24px;
+            padding: 12px 18px;
+            border-radius: 8px;
+            font-size: 13px;
+            color: #fff;
+            opacity: 0;
+            transform: translateY(-10px);
+            transition: opacity 0.2s, transform 0.2s;
+            z-index: 2000;
+            pointer-events: none;
+        }
+        .toast.show { opacity: 1; transform: translateY(0); }
+        .toast-success { background: #059669; }
+        .toast-error { background: #dc2626; }
+
+        .page-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            margin-bottom: 16px;
+        }
+        .page-header h1 {
+            margin: 0;
+            font-size: 22px;
+            color: #111827;
+        }
+        .page-header .subtitle {
+            color: #6b7280;
+            font-size: 13px;
+            margin-left: 12px;
+        }
+    </style>
+</head>
+
+<body>
+
+    <!-- 顶部导航栏 -->
+    <nav class="navbar fixed-header">
+        <div class="nav-left">
+            <div class="nav-logo">
+                <svg viewBox="0 0 24 24" fill="none" stroke="url(#logo-gradient)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <defs>
+                        <linearGradient id="logo-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                            <stop offset="0%" style="stop-color:#d97706"/>
+                            <stop offset="100%" style="stop-color:#b45309"/>
+                        </linearGradient>
+                    </defs>
+                    <circle cx="12" cy="12" r="10"/>
+                    <path d="M12 6v6l4 2"/>
+                </svg>
+            </div>
+            <div class="nav-title">智数协同平台</div>
+        </div>
+        <div class="nav-right">
+            <a href="/Task_Pool.html" class="nav-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M9 11l3 3L22 4"/>
+                    <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
+                </svg>
+                任务池
+            </a>
+            <a href="/Data_Collab.html" class="nav-item" aria-current="page" style="color:#d97706; font-weight:600;">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+                    <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+                </svg>
+                数据协作
+            </a>
+            <a href="/Issue_Tracker.html" class="nav-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="10"/>
+                    <line x1="12" y1="8" x2="12" y2="12"/>
+                    <line x1="12" y1="16" x2="12.01" y2="16"/>
+                </svg>
+                问题跟踪
+            </a>
+            <a href="/My_Workspace.html" class="nav-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+                    <circle cx="12" cy="7" r="4"/>
+                </svg>
+                我的工作台
+            </a>
+            <div class="nav-dropdown">
+                <button class="nav-dropdown-trigger">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <ellipse cx="12" cy="5" rx="9" ry="3"/>
+                        <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/>
+                        <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>
+                    </svg>
+                    数据中心
+                    <svg class="arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="6 9 12 15 18 9"/>
+                    </svg>
+                </button>
+                <div class="nav-dropdown-menu">
+                    <a href="/Dashboard.html">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+                            <line x1="3" y1="9" x2="21" y2="9"/>
+                            <line x1="9" y1="21" x2="9" y2="9"/>
+                        </svg>
+                        建设总览
+                    </a>
+                    <a href="/Asset_Center.html">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+                            <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
+                            <line x1="12" y1="22.08" x2="12" y2="12"/>
+                        </svg>
+                        资产中心
+                    </a>
+                    <a href="/Model_Center.html">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="3" y="3" width="7" height="7"/>
+                            <rect x="14" y="3" width="7" height="7"/>
+                            <rect x="14" y="14" width="7" height="7"/>
+                            <rect x="3" y="14" width="7" height="7"/>
+                        </svg>
+                        模型中心
+                    </a>
+                    <a href="/Metrics.html">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <line x1="18" y1="20" x2="18" y2="10"/>
+                            <line x1="12" y1="20" x2="12" y2="4"/>
+                            <line x1="6" y1="20" x2="6" y2="14"/>
+                        </svg>
+                        指标中心
+                    </a>
+                </div>
+            </div>
+            <a href="/Statistics.html" class="nav-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <line x1="12" y1="20" x2="12" y2="10"/>
+                    <line x1="18" y1="20" x2="18" y2="4"/>
+                    <line x1="6" y1="20" x2="6" y2="16"/>
+                </svg>
+                统计中心
+            </a>
+            <a href="/Doc_Viewer.html" target="_blank" class="nav-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+                    <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+                </svg>
+                文档中心
+            </a>
+            <div class="nav-divider"></div>
+            <div id="userProfileArea"></div>
+        </div>
+    </nav>
+
+    <!-- 主工作区 -->
+    <main class="workbench-container">
+        <div class="page-header">
+            <div>
+                <h1 style="display:inline-block;">数据协作</h1>
+                <span class="subtitle">跨部门数据需求登记 · 工作量留痕 · 一阶段</span>
+            </div>
+        </div>
+
+        <!-- 筛选栏 -->
+        <div class="filter-bar">
+            <span class="filter-label">状态</span>
+            <select id="filterStatus" onchange="loadList()">
+                <option value="">全部</option>
+                <option value="PENDING">待开发</option>
+                <option value="SUBMITTED">待验收</option>
+                <option value="DONE">已完成</option>
+                <option value="ARCHIVED">已归档</option>
+            </select>
+
+            <span class="filter-label">部门</span>
+            <select id="filterDept" onchange="loadList()">
+                <option value="">全部</option>
+            </select>
+
+            <input type="text" id="filterSearch" placeholder="搜索描述/业务方/OA 流程号..." onkeyup="debounceSearch()">
+
+            <button class="btn-new" onclick="openNewModal()">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <line x1="12" y1="5" x2="12" y2="19"/>
+                    <line x1="5" y1="12" x2="19" y2="12"/>
+                </svg>
+                新建协作单
+            </button>
+        </div>
+
+        <!-- 列表 -->
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>OA 流程号</th>
+                    <th>部门</th>
+                    <th>业务方</th>
+                    <th>目标业务库</th>
+                    <th>需求描述</th>
+                    <th>截止时间</th>
+                    <th>开发</th>
+                    <th>状态</th>
+                    <th>验收</th>
+                    <th>摩擦</th>
+                </tr>
+            </thead>
+            <tbody id="listBody">
+                <tr class="empty-row"><td colspan="11">加载中...</td></tr>
+            </tbody>
+        </table>
+    </main>
+
+    <!-- 新建协作单弹窗 -->
+    <div class="modal-overlay" id="newModal">
+        <div class="modal-card">
+            <div class="modal-header">
+                <h3>新建协作单</h3>
+                <button class="modal-close" onclick="closeNewModal()">×</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-row">
+                    <label>OA 流程号 <span class="required">*</span></label>
+                    <input type="text" id="f_oa_no" placeholder="如 OA20260511001">
+                    <div class="hint">业务方在集团 OA 提交的取数申请流程号。一个 OA 流程对应一个协作单（系统强制唯一）。</div>
+                </div>
+                <div class="form-row">
+                    <label>需求部门 <span class="required">*</span></label>
+                    <select id="f_dept"></select>
+                </div>
+                <div class="form-row">
+                    <label>业务方负责人 <span class="required">*</span></label>
+                    <input type="text" id="f_requester" placeholder="如 张三">
+                </div>
+                <div class="form-row">
+                    <label>需求描述 <span class="required">*</span></label>
+                    <textarea id="f_desc" placeholder="把和业务方对齐过的关键口径写清楚，作为书面证据"></textarea>
+                </div>
+                <div class="form-row">
+                    <label>期望完成时间 <span class="required">*</span></label>
+                    <input type="datetime-local" id="f_deadline">
+                </div>
+                <div class="form-row">
+                    <label>目标业务库 <span class="required">*</span></label>
+                    <select id="f_target_db">
+                        <option value="">加载中...</option>
+                    </select>
+                    <div class="hint">开发交付的 SQL 将在此库执行。下拉为空时联系管理员在「系统设置 → 数据库连接」配置 source 类型连接。</div>
+                </div>
+                <div class="form-row">
+                    <label>指派开发 <span class="required">*</span></label>
+                    <select id="f_dev">
+                        <option value="">加载中...</option>
+                    </select>
+                </div>
+                <div class="form-row">
+                    <label>原始单据截图 <span class="hint">（选传）</span></label>
+                    <input type="file" id="f_files" accept=".png,.jpg,.jpeg,.gif,.webp,image/*" multiple>
+                    <div class="hint">最多 5 个文件 / 单文件 ≤ 10MB / 支持 PNG·JPG·GIF·WEBP。OA 截图、对话截图、邮件截图等均可（选传）。</div>
+                    <div id="filePreview" class="file-preview"></div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-cancel" onclick="closeNewModal()">取消</button>
+                <button class="btn btn-primary" id="btnSubmit" onclick="submitNew()">提交</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 协作单详情弹窗（v2.0 Deploy 2 框架，交付/验收/摩擦区块见 Deploy 3）-->
+    <div class="modal-overlay" id="detailModal">
+        <div class="modal-card detail-card">
+            <div class="modal-header">
+                <h3 id="detailTitle">协作单详情</h3>
+                <button class="modal-close" onclick="closeDetailModal()">×</button>
+            </div>
+            <div class="modal-body" id="detailBody">
+                <div style="text-align:center;color:#9ca3af;padding:24px;">加载中...</div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-cancel" onclick="closeDetailModal()">关闭</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast -->
+    <div id="toast" class="toast"></div>
+
+    <script src="assets/js/app.js"></script>
+    <script>
+        // 部门枚举（与后端 COLLAB_REQUESTER_DEPTS 同步）
+        const REQUESTER_DEPTS = [
+            { group: '总部职能', value: '市场营销部' },
+            { group: '总部职能', value: '交付运营部' },
+            { group: '总部职能', value: '财务管理部' },
+            { group: '总部职能', value: '人事行政部' },
+            { group: '总部职能', value: '审计风控部' },
+            { group: '总部职能', value: '信息技术部' },
+            { group: '总部职能', value: '安全保卫部' },
+            { group: '总部职能', value: '其他归口部门' },
+            { group: '治理层', value: '董事会' },
+            { group: '治理层', value: '公司高管' },
+            { group: '分公司', value: '华北分公司' },
+            { group: '分公司', value: '华东分公司' },
+            { group: '分公司', value: '华南分公司' },
+            { group: '分公司', value: '华西分公司' },
+            { group: '分公司', value: '华中分公司' },
+            { group: '分公司', value: '西南分公司' },
+            { group: '分公司', value: '西北分公司' },
+            { group: '分公司', value: '杭州区域' },
+            { group: '分公司', value: '浙北区域' },
+            { group: '分公司', value: '浙南区域' },
+            { group: '关联公司', value: '示例关联方B' },
+            { group: '关联公司', value: '示例关联方C' },
+            { group: '关联公司', value: '示例集团关联方A' },
+            { group: '关联公司', value: '示例关联方D' },
+            { group: '关联公司', value: '示例海外子公司' },
+            { group: '其他', value: '其他' }
+        ];
+
+        const TYPE_LABELS = {
+            'DASHBOARD_NEW': '看板新增',
+            'METRIC_CHANGE': '指标改造',
+            'METRIC_ADD_FROM_SOURCE': '业务变更增指标',
+            'ONE_OFF_EXPORT': '一次性取数'
+        };
+
+        const STATUS_LABELS = {
+            'PENDING': '待开发',
+            'SUBMITTED': '待验收',
+            'DONE': '已完成',
+            'ARCHIVED': '已归档',
+            // 兼容旧 D1 数据
+            'CONFIRMED': '待领取(旧)',
+            'CLAIMED': '进行中(旧)'
+        };
+
+        // 验收状态文案（方案 §9.2）
+        const SQL_VALIDATION_LABELS = {
+            'passed':   { text: '✅ 已通过', cls: 'val-passed' },
+            'failed':   { text: '❌ 待重传', cls: 'val-failed' },
+            'running':  { text: '🕐 验收中', cls: 'val-running' },
+            'bypassed': { text: '⚠️ 旁路放行', cls: 'val-bypassed' }
+        };
+
+        // 摩擦归因文案（方案 §6.6）
+        const FRICTION_CAUSE_LABELS = {
+            'requirement_unclear':   '需求不清',
+            'tech_misunderstanding': '技术误解',
+            'other':                 '其他'
+        };
+
+        let activeUsers = [];
+
+        function showToast(msg, type = 'success') {
+            const toast = document.getElementById('toast');
+            toast.textContent = msg;
+            toast.className = `toast toast-${type} show`;
+            setTimeout(() => { toast.className = `toast toast-${type}`; }, 2400);
+        }
+
+        function escapeHtml(s) {
+            if (s === null || s === undefined) return '';
+            return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+        }
+
+        function fmtDate(s) {
+            if (!s) return '-';
+            return s.substring(0, 16).replace('T', ' ');
+        }
+
+        // 部门下拉填充（含 group）
+        function fillDeptSelect(selectEl, includeAllOption = false) {
+            const groups = {};
+            REQUESTER_DEPTS.forEach(item => {
+                if (!groups[item.group]) groups[item.group] = [];
+                groups[item.group].push(item.value);
+            });
+            let html = '';
+            if (includeAllOption) html += '<option value="">全部</option>';
+            for (const groupName of Object.keys(groups)) {
+                html += `<optgroup label="${groupName}">`;
+                for (const val of groups[groupName]) {
+                    html += `<option value="${val}">${val}</option>`;
+                }
+                html += '</optgroup>';
+            }
+            selectEl.innerHTML = html;
+        }
+
+        // 加载活跃用户作为开发候选
+        async function loadActiveDevelopers() {
+            try {
+                const res = await authFetch('/api/users/active');
+                if (!res || !res.ok) {
+                    document.getElementById('f_dev').innerHTML = '<option value="">加载失败</option>';
+                    return;
+                }
+                const users = await res.json();
+                // 过滤：role IN ('user','publisher')，隐藏 admin
+                activeUsers = users.filter(u => ['user', 'publisher'].includes(u.role));
+                activeUsers.sort((a, b) => (a.display_name || a.username).localeCompare(b.display_name || b.username, 'zh-CN'));
+                const sel = document.getElementById('f_dev');
+                sel.innerHTML = '<option value="">请选择</option>' + activeUsers.map(u => {
+                    const name = u.display_name || u.username;
+                    const roleTag = u.role === 'publisher' ? '（发布者）' : '';
+                    return `<option value="${u.id}">${escapeHtml(name)}${roleTag}</option>`;
+                }).join('');
+            } catch (e) {
+                console.error('加载开发列表失败', e);
+                document.getElementById('f_dev').innerHTML = '<option value="">加载失败</option>';
+            }
+        }
+
+        // 加载列表
+        let searchTimer = null;
+        function debounceSearch() {
+            clearTimeout(searchTimer);
+            searchTimer = setTimeout(loadList, 350);
+        }
+
+        async function loadList() {
+            const tbody = document.getElementById('listBody');
+            tbody.innerHTML = '<tr class="empty-row"><td colspan="9">加载中...</td></tr>';
+
+            const params = new URLSearchParams();
+            const status = document.getElementById('filterStatus').value;
+            const dept = document.getElementById('filterDept').value;
+            const search = document.getElementById('filterSearch').value.trim();
+            if (status) params.append('status', status);
+            if (dept) params.append('requester_dept', dept);
+            if (search) params.append('search', search);
+
+            try {
+                const res = await authFetch('/api/collab/requests?' + params.toString());
+                if (!res || !res.ok) {
+                    tbody.innerHTML = '<tr class="empty-row"><td colspan="11">加载失败</td></tr>';
+                    return;
+                }
+                const list = await res.json();
+                renderList(list);
+            } catch (e) {
+                console.error('加载协作单失败', e);
+                tbody.innerHTML = '<tr class="empty-row"><td colspan="11">加载失败</td></tr>';
+            }
+        }
+
+        // 目标业务库缓存（id → name）；列表渲染时按需查
+        let targetDbMap = {};
+        async function loadTargetDbMap() {
+            try {
+                const res = await authFetch('/api/collab/db-connections/source');
+                if (!res || !res.ok) return;
+                const list = await res.json();
+                targetDbMap = {};
+                (list || []).forEach(c => { targetDbMap[c.id] = c.name; });
+            } catch (e) { /* 静默 */ }
+        }
+
+        function renderList(list) {
+            const tbody = document.getElementById('listBody');
+            if (!list || list.length === 0) {
+                tbody.innerHTML = '<tr class="empty-row"><td colspan="11">暂无协作单。点击右上角"新建协作单"开始记录。</td></tr>';
+                return;
+            }
+            tbody.innerHTML = list.map(r => {
+                const desc = r.description.length > 60 ? r.description.substring(0, 60) + '…' : r.description;
+
+                // 验收状态：bypass 优先，其次按 sql_validation_status
+                let valCell = '<span class="val-pending">—</span>';
+                if (r.bypass_validation === 1 || r.sql_validation_status === 'bypassed') {
+                    valCell = `<span class="val-badge val-bypassed">${SQL_VALIDATION_LABELS.bypassed.text}</span>`;
+                } else if (r.sql_validation_status && SQL_VALIDATION_LABELS[r.sql_validation_status]) {
+                    const v = SQL_VALIDATION_LABELS[r.sql_validation_status];
+                    valCell = `<span class="val-badge ${v.cls}">${v.text}</span>`;
+                }
+
+                const frictionCell = r.friction_occurred === 1 ? '<span class="friction-mark" title="协作摩擦">💢</span>' : '';
+                const oa = r.oa_request_no ? escapeHtml(r.oa_request_no) : '<span style="color:#9ca3af">—</span>';
+                const targetDb = r.target_db_connection_id
+                    ? escapeHtml(targetDbMap[r.target_db_connection_id] || `#${r.target_db_connection_id}`)
+                    : '<span style="color:#9ca3af">—</span>';
+
+                return `<tr onclick="openDetail(${r.id})">
+                    <td class="col-id">#${r.id}</td>
+                    <td>${oa}</td>
+                    <td>${escapeHtml(r.requester_dept)}</td>
+                    <td>${escapeHtml(r.requester_name)}</td>
+                    <td>${targetDb}</td>
+                    <td class="col-desc" title="${escapeHtml(r.description)}">${escapeHtml(desc)}</td>
+                    <td>${fmtDate(r.deadline)}</td>
+                    <td>${escapeHtml(r.developer_name)}</td>
+                    <td><span class="status-badge status-${r.status}">${STATUS_LABELS[r.status] || r.status}</span></td>
+                    <td>${valCell}</td>
+                    <td>${frictionCell}</td>
+                </tr>`;
+            }).join('');
+        }
+
+        // ===== 详情弹窗（v2.0 Deploy 2 框架）=====
+        // Deploy 2 覆盖：任务信息 + 通知区块（钉钉按钮接通在 5/12）
+        // Deploy 3 补：交付内容 / 验收结果 / 协作摩擦记录 区块
+        let currentDetail = null;
+
+        async function openDetail(id, fromDeepLink = false) {
+            document.getElementById('detailTitle').textContent = `协作单 #${id}`;
+            document.getElementById('detailBody').innerHTML = '<div style="text-align:center;color:#9ca3af;padding:24px;">加载中...</div>';
+            document.getElementById('detailModal').classList.add('show');
+
+            // 深链：把 ?id=123 同步到 URL（用户主动点列表行打开也同步，便于复制链接）
+            try {
+                const url = new URL(window.location.href);
+                if (url.searchParams.get('id') !== String(id)) {
+                    url.searchParams.set('id', id);
+                    window.history.replaceState({}, '', url.toString());
+                }
+            } catch (e) { /* ignore */ }
+
+            try {
+                const res = await authFetch(`/api/collab/requests/${id}`);
+                if (!res) return;
+                if (!res.ok) {
+                    const data = await res.json().catch(() => ({}));
+                    if (fromDeepLink && res.status === 404) {
+                        // 深链对应的协作单已不存在 → toast + 关闭弹窗 + 清 URL
+                        closeDetailModal();
+                        showToast(`协作单 #${id} 不存在或已被删除`, 'error');
+                        return;
+                    }
+                    document.getElementById('detailBody').innerHTML = `<div style="color:#dc2626;padding:24px;text-align:center;">${escapeHtml(data.error || '加载失败')}</div>`;
+                    return;
+                }
+                currentDetail = await res.json();
+                renderDetail(currentDetail);
+            } catch (e) {
+                document.getElementById('detailBody').innerHTML = '<div style="color:#dc2626;padding:24px;text-align:center;">网络错误</div>';
+                console.error(e);
+            }
+        }
+
+        function closeDetailModal() {
+            document.getElementById('detailModal').classList.remove('show');
+            currentDetail = null;
+            // 清 URL 中的 id 参数
+            try {
+                const url = new URL(window.location.href);
+                if (url.searchParams.has('id')) {
+                    url.searchParams.delete('id');
+                    window.history.replaceState({}, '', url.toString());
+                }
+            } catch (e) { /* ignore */ }
+        }
+
+        function renderDetail(d) {
+            const isAdminUser = (typeof isAdmin === 'function') && isAdmin();
+            // codex 16 审 #5：id 数字化护栏（防后端将来返回字符串 id 导致内联 onclick 属性脆弱）
+            const safeId = Number(d.id);
+            if (!Number.isSafeInteger(safeId)) {
+                document.getElementById('detailBody').innerHTML =
+                    '<div style="color:#dc2626;padding:24px;text-align:center;">协作单 id 非法</div>';
+                return;
+            }
+            d = { ...d, id: safeId };  // 后续模板里 ${d.id} 已是 safeId
+            const targetDbName = d.target_db_connection_id
+                ? (targetDbMap[d.target_db_connection_id] || `#${d.target_db_connection_id}`)
+                : '—';
+
+            // 1. 任务信息区块
+            const taskInfoHtml = `
+                <div class="detail-section">
+                    <div class="detail-section-title">任务信息</div>
+                    <div class="detail-section-body">
+                        <div class="detail-kv">
+                            <div class="detail-kv-label">OA 流程号</div>
+                            <div class="detail-kv-value">${d.oa_request_no ? escapeHtml(d.oa_request_no) : '<span style="color:#9ca3af">—</span>'}</div>
+                            <div class="detail-kv-label">目标业务库</div>
+                            <div class="detail-kv-value">${escapeHtml(targetDbName)}</div>
+                            <div class="detail-kv-label">需求部门</div>
+                            <div class="detail-kv-value">${escapeHtml(d.requester_dept)}</div>
+                            <div class="detail-kv-label">业务方负责人</div>
+                            <div class="detail-kv-value">${escapeHtml(d.requester_name)}</div>
+                            <div class="detail-kv-label">需求描述</div>
+                            <div class="detail-kv-value">${escapeHtml(d.description)}</div>
+                            <div class="detail-kv-label">期望完成</div>
+                            <div class="detail-kv-value">${fmtDate(d.deadline)}</div>
+                            <div class="detail-kv-label">指派开发</div>
+                            <div class="detail-kv-value">${escapeHtml(d.developer_name)}</div>
+                            <div class="detail-kv-label">录入人</div>
+                            <div class="detail-kv-value">${escapeHtml(d.created_by_name)} · ${fmtDate(d.created_at)}</div>
+                            <div class="detail-kv-label">当前状态</div>
+                            <div class="detail-kv-value"><span class="status-badge status-${d.status}">${STATUS_LABELS[d.status] || d.status}</span></div>
+                        </div>
+                    </div>
+                </div>`;
+
+            // 2. 通知区块
+            let notifyBodyHtml;
+            if (d.notified_at) {
+                // 已固化 read_at → 直接展示,无按钮(钉钉无"取消已读"语义)
+                // 未固化 → 提供"查询已读状态"按钮触发主动查询
+                const readPart = d.read_at
+                    ? `<div style="margin-top:8px;font-size:13px;color:#16a34a;">📖 ${escapeHtml(d.developer_name)} 已读 · 于 ${fmtDate(d.read_at)}</div>`
+                    : `<button class="notify-btn" style="background:#f1f5f9;color:#475569;" onclick="checkReadStatus(${d.id})">查询已读状态</button>
+                       <div id="readStatusBox" style="margin-top:8px;font-size:13px;color:#64748b;"></div>`;
+                notifyBodyHtml = `
+                    <span class="notify-status-text">✅ 已于 ${fmtDate(d.notified_at)} 通知 ${escapeHtml(d.developer_name)}</span>
+                    ${isAdminUser ? `<button class="notify-btn" onclick="triggerNotify(${d.id})">重新通知</button>` : ''}
+                    ${readPart}`;
+            } else if (d.status === 'PENDING') {
+                notifyBodyHtml = `
+                    <span class="notify-status-text">⏳ 尚未通知开发</span>
+                    ${isAdminUser
+                        ? `<button class="notify-btn" onclick="triggerNotify(${d.id})">通知开发</button>`
+                        : '<span style="color:#9ca3af;font-size:12px;">（仅管理员可触发通知）</span>'}`;
+            } else {
+                notifyBodyHtml = '<span class="notify-status-text">—</span>';
+            }
+            const notifyHtml = `
+                <div class="detail-section">
+                    <div class="detail-section-title">通知</div>
+                    <div class="detail-section-body" id="notifyBody">${notifyBodyHtml}</div>
+                </div>`;
+
+            // 3. 交付内容 / 4. 验收结果 / 5. 协作摩擦（D3 模块 7）
+            const deliveryHtml = renderDeliverySection(d);
+            const validationHtml = renderValidationSection(d, isAdminUser);
+            const frictionHtml = renderFrictionSection(d, isAdminUser);
+
+            document.getElementById('detailBody').innerHTML =
+                taskInfoHtml + notifyHtml + deliveryHtml + validationHtml + frictionHtml;
+        }
+
+        // 交付内容区块（D3 模块 7）：仅在 attachments 中存在 result_data / result_script 时展示
+        // 过滤 status='active'（D3 模块 2 附件版本化引入,避免显示历史版本）
+        function renderDeliverySection(d) {
+            const deliveryFiles = (d.attachments || []).filter(
+                a => (a.attachment_type === 'result_data' || a.attachment_type === 'result_script')
+                  && (a.status === 'active' || !a.status)  // 兼容 status 字段未填的旧数据
+            );
+            if (deliveryFiles.length === 0) {
+                return ''; // 未提交过交付物，不显示区块
+            }
+            const items = deliveryFiles.map(f => {
+                const typeLabel = f.attachment_type === 'result_data' ? '📊 结果数据' : '📜 SQL 脚本';
+                // 下载走 /uploads/<file_name> 静态路径（file_name 已是 collab/xxx/yyy.ext 相对路径）
+                // codex 16 审 #4：按路径段编码,encodeURI 会保留 ?/# 等 URL 语义字符,极端文件名会被截断
+                const dlUrl = `/uploads/${String(f.file_name || '').split('/').map(encodeURIComponent).join('/')}`;
+                const displayName = f.original_name || (f.file_name ? f.file_name.split('/').pop() : '附件');
+                return `
+                    <div class="delivery-item">
+                        <span class="delivery-type">${typeLabel}</span>
+                        <a class="delivery-link" href="${dlUrl}" target="_blank" rel="noopener" download="${escapeHtml(displayName)}">${escapeHtml(displayName)}</a>
+                        <span class="delivery-meta">${escapeHtml(f.uploaded_by_name || '—')} · ${fmtDate(f.created_at)}</span>
+                    </div>`;
+            }).join('');
+            return `
+                <div class="detail-section">
+                    <div class="detail-section-title">交付内容</div>
+                    <div class="detail-section-body">${items}</div>
+                </div>`;
+        }
+
+        // 验收结果区块（D3 模块 7）：按 sql_validation_status 三色分支
+        function renderValidationSection(d, isAdminUser) {
+            // PENDING 状态（尚未提交过）不显示验收结果区块
+            if (d.status === 'PENDING') return '';
+
+            const vs = d.sql_validation_status;
+            // bypass 优先（虽然 sql_validation_status='bypassed' 已等价，但兼容旧数据）
+            const isBypassed = d.bypass_validation === 1 || vs === 'bypassed';
+
+            let bodyHtml = '';
+            if (isBypassed) {
+                bodyHtml = `
+                    <div class="val-box val-bypassed-bg">
+                        <div class="val-title">⚠️ 旁路放行</div>
+                        <div class="val-meta">操作人：${escapeHtml(d.bypass_by_name || '—')} · ${fmtDate(d.done_at)}</div>
+                        <div class="val-reason">${escapeHtml(d.bypass_reason || '—')}</div>
+                    </div>`;
+            } else if (vs === 'passed') {
+                bodyHtml = `
+                    <div class="val-box val-passed-bg">
+                        <div class="val-title">✅ 已通过 smoke test 验收</div>
+                        <div class="val-meta">验收完成：${fmtDate(d.sql_validated_at)}</div>
+                    </div>`;
+            } else if (vs === 'failed') {
+                // 本单 dev 或 admin 可见"重新上传"按钮（复用 POST /:id/submit 覆盖式重提）
+                // admin 额外可见"旁路放行"按钮
+                const retryBtn = (isAdminUser || (d.developer_id && Number(d.developer_id) === Number(getCurrentUserId())))
+                    ? `<button class="val-btn val-btn-retry" onclick="openRetryDialog(${d.id})">重新上传交付物</button>` : '';
+                const bypassBtn = isAdminUser
+                    ? `<button class="val-btn val-btn-bypass" onclick="openBypassDialog(${d.id})">旁路放行</button>` : '';
+                bodyHtml = `
+                    <div class="val-box val-failed-bg">
+                        <div class="val-title">❌ 验收失败</div>
+                        <div class="val-error">${escapeHtml(d.sql_validation_error || '（无错误详情）')}</div>
+                        <div class="val-actions">${retryBtn}${bypassBtn}</div>
+                    </div>`;
+            } else if (vs === 'running' || vs === 'queued') {
+                bodyHtml = `
+                    <div class="val-box val-running-bg">
+                        <div class="val-title">🕐 ${vs === 'queued' ? '排队中' : '验收中'}</div>
+                        <div class="val-meta">提交时间：${fmtDate(d.last_submitted_at || d.submitted_at)}</div>
+                    </div>`;
+            } else {
+                // SUBMITTED 但 sql_validation_status 为 null（异常态）
+                bodyHtml = `<div class="empty">— 暂无验收记录</div>`;
+            }
+            return `
+                <div class="detail-section">
+                    <div class="detail-section-title">验收结果</div>
+                    <div class="detail-section-body">${bodyHtml}</div>
+                </div>`;
+        }
+
+        // 协作摩擦区块（D3 模块 7，方案 §6.6）：DONE 后才展示
+        function renderFrictionSection(d, isAdminUser) {
+            if (d.status !== 'DONE') return '';
+
+            const cat = d.friction_cause_category || '';
+            const note = d.friction_note || '';
+            const occurred = d.friction_occurred === 1;
+
+            if (!isAdminUser) {
+                // 非 admin 只读展示
+                if (!occurred) {
+                    return `
+                        <div class="detail-section">
+                            <div class="detail-section-title">协作摩擦记录</div>
+                            <div class="detail-section-body empty">— 未记录</div>
+                        </div>`;
+                }
+                return `
+                    <div class="detail-section">
+                        <div class="detail-section-title">协作摩擦记录</div>
+                        <div class="detail-section-body">
+                            <div class="friction-row"><span class="friction-label">归因分类：</span>${escapeHtml(FRICTION_CAUSE_LABELS[cat] || cat || '—')}</div>
+                            <div class="friction-row"><span class="friction-label">记录时间：</span>${fmtDate(d.friction_recorded_at)}</div>
+                            <div class="friction-row friction-note-row"><span class="friction-label">备注：</span><span class="friction-note">${escapeHtml(note)}</span></div>
+                        </div>
+                    </div>`;
+            }
+
+            // admin：表单（已有记录预填，覆盖式提交）
+            const catOptions = ['requirement_unclear', 'tech_misunderstanding', 'other'].map(c => {
+                const sel = c === cat ? ' selected' : '';
+                return `<option value="${c}"${sel}>${FRICTION_CAUSE_LABELS[c]}</option>`;
+            }).join('');
+            const submitLabel = occurred ? '更新记录' : '保存记录';
+            const lastSavedHtml = occurred
+                ? `<div class="friction-saved-meta">已记录于 ${fmtDate(d.friction_recorded_at)}</div>` : '';
+            return `
+                <div class="detail-section">
+                    <div class="detail-section-title">协作摩擦记录</div>
+                    <div class="detail-section-body">
+                        ${lastSavedHtml}
+                        <div class="friction-form">
+                            <label class="friction-form-label">归因分类</label>
+                            <select id="frictionCategory_${d.id}" class="friction-select">
+                                ${cat ? '' : '<option value="">— 请选择 —</option>'}
+                                ${catOptions}
+                            </select>
+                            <label class="friction-form-label">备注（必填，≤1000 字）</label>
+                            <textarea id="frictionNote_${d.id}" class="friction-textarea" maxlength="1000" placeholder="描述业务方反馈了什么、解决方式等">${escapeHtml(note)}</textarea>
+                            <button class="friction-submit-btn" onclick="submitFriction(${d.id})">${submitLabel}</button>
+                        </div>
+                    </div>
+                </div>`;
+        }
+
+        // 提交 friction-record
+        async function submitFriction(id) {
+            const catEl = document.getElementById(`frictionCategory_${id}`);
+            const noteEl = document.getElementById(`frictionNote_${id}`);
+            const category = catEl ? catEl.value : '';
+            const note = noteEl ? noteEl.value.trim() : '';
+            if (!category) { showToast('请选择归因分类', 'error'); return; }
+            if (!note) { showToast('备注必填', 'error'); return; }
+            const btns = document.querySelectorAll(`.friction-submit-btn[onclick*="submitFriction(${id})"]`);
+            btns.forEach(b => { b.disabled = true; b.textContent = '保存中…'; });
+            try {
+                const res = await authFetch(`/api/collab/requests/${id}/friction-record`, {
+                    method: 'POST',
+                    headers: { 'content-type': 'application/json' },
+                    body: JSON.stringify({ friction_cause_category: category, friction_note: note }),
+                });
+                if (!res) return;
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) {
+                    showToast(data.error || '保存失败', 'error');
+                    return;
+                }
+                showToast('协作摩擦已记录', 'success');
+                // 刷新详情
+                await openDetail(id);
+                // 同时刷新列表(让 💢 角标更新)
+                if (typeof loadList === 'function') loadList();
+            } catch (e) {
+                showToast('网络错误', 'error');
+                console.error(e);
+            } finally {
+                btns.forEach(b => { b.disabled = false; b.textContent = '保存记录'; });
+            }
+        }
+
+        // 旁路放行弹窗（D3 模块 6 + 模块 7 接入）
+        async function openBypassDialog(id) {
+            const reason = prompt('请输入旁路放行原因（10..500 字符,必填）:');
+            if (reason === null) return; // 用户取消
+            const trimmed = reason.trim();
+            if (trimmed.length < 10) { showToast('旁路原因至少 10 个字符', 'error'); return; }
+            if (trimmed.length > 500) { showToast('旁路原因不能超过 500 个字符', 'error'); return; }
+            if (!confirm(`确认旁路放行协作单 #${id}?\n\n该操作将把状态强制标记为 DONE,sql_validation_status='bypassed'。`)) return;
+            try {
+                const res = await authFetch(`/api/collab/requests/${id}/bypass`, {
+                    method: 'POST',
+                    headers: { 'content-type': 'application/json' },
+                    body: JSON.stringify({ bypass_reason: trimmed }),
+                });
+                if (!res) return;
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) {
+                    showToast(data.error || '旁路失败', 'error');
+                    return;
+                }
+                showToast('旁路放行成功', 'success');
+                await openDetail(id);
+                if (typeof loadList === 'function') loadList();
+            } catch (e) {
+                showToast('网络错误', 'error');
+                console.error(e);
+            }
+        }
+
+        // 重新上传交付物（占位提示，复用列表页"提交"路径）
+        function openRetryDialog(id) {
+            // D3 模块 7 简化版：提示用户走"重新上传 result_data + result_script"路径
+            // 真正的上传 UI 由 D3 模块 4 提交 endpoint 的弹窗承载（如未来扩展）
+            showToast('请通过协作单录入侧的"重新上传"流程提交新版交付物', 'info');
+        }
+
+        // 取当前登录用户 id（从 JWT 解码,沿用项目已有 currentUserId 全局变量或 fallback）
+        function getCurrentUserId() {
+            if (typeof currentUserId !== 'undefined' && currentUserId) return currentUserId;
+            try {
+                const tok = localStorage.getItem('token');
+                if (!tok) return null;
+                const payload = JSON.parse(atob(tok.split('.')[1]));
+                return payload.id;
+            } catch (e) { return null; }
+        }
+
+        // 通知按钮 — Deploy 2 接通钉钉通知（v2.0 §7.4 + §7.6 错误分层）
+        async function triggerNotify(id) {
+            // 取按钮防重复点击
+            const btns = document.querySelectorAll(`.notify-btn[onclick*="triggerNotify(${id})"]`);
+            btns.forEach(b => { b.disabled = true; b.textContent = '发送中…'; });
+
+            // 清掉上次的错误框（如果有）
+            const oldErr = document.getElementById('notifyErrorBox');
+            if (oldErr) oldErr.remove();
+
+            try {
+                const res = await fetch(`/api/collab/requests/${id}/notify`, {
+                    method: 'POST',
+                    headers: { 'Authorization': 'Bearer ' + localStorage.getItem('token') }
+                });
+                const data = await res.json();
+
+                if (res.ok) {
+                    showToast(`✅ 已通知 ${escapeHtml(data.developer_name || '开发')}`, 'success');
+                    // 重新加载详情让 notify 区块刷成"已通知"态
+                    if (typeof openDetail === 'function') {
+                        await openDetail(id);
+                    }
+                    // 同时刷新列表（如果列表有"通知状态"指示）
+                    if (typeof loadList === 'function') loadList();
+                } else {
+                    // 失败：UI 红框显示 errcode + errmsg + suggestion + 重试按钮
+                    const notifyBody = document.getElementById('notifyBody');
+                    if (notifyBody) {
+                        const errcodePart = data.errcode ? ` <span style="font-family:monospace">errcode=${data.errcode}</span>` : '';
+                        const errmsgPart = data.errmsg ? ` · ${escapeHtml(data.errmsg)}` : '';
+                        const suggestionPart = data.suggestion
+                            ? `<div style="margin-top:6px;font-size:12px;color:#92400e">💡 ${escapeHtml(data.suggestion)}</div>` : '';
+                        const errBox = document.createElement('div');
+                        errBox.id = 'notifyErrorBox';
+                        errBox.className = 'notify-error-box';
+                        errBox.innerHTML = `
+                            <div style="font-weight:500;color:#b91c1c">❌ ${escapeHtml(data.error || '通知失败')}${errcodePart}${errmsgPart}</div>
+                            ${suggestionPart}
+                            <div style="margin-top:8px"><button class="notify-btn" onclick="triggerNotify(${id})">重试</button></div>
+                        `;
+                        notifyBody.appendChild(errBox);
+                    }
+                    showToast(data.error || '通知失败', 'error');
+                }
+            } catch (e) {
+                showToast('网络错误,请检查后端服务', 'error');
+            } finally {
+                btns.forEach(b => { b.disabled = false; b.textContent = b.textContent.replace('发送中…', '通知开发'); });
+            }
+        }
+
+        // 查询钉钉已读状态(Day 3 方案 1)
+        async function checkReadStatus(id) {
+            const box = document.getElementById('readStatusBox');
+            if (box) box.innerHTML = '<span style="color:#94a3b8">查询中…</span>';
+            try {
+                const res = await fetch(`/api/collab/requests/${id}/notify-read-status`, {
+                    headers: { 'Authorization': 'Bearer ' + localStorage.getItem('token') }
+                });
+                const data = await res.json();
+                if (!box) return;
+                if (res.ok) {
+                    if (data.read) {
+                        const timePart = data.read_at ? ` · 于 ${fmtDate(data.read_at)}` : '';
+                        box.innerHTML = `<span style="color:#16a34a">📖 ${escapeHtml(data.developer_name || '开发')} 已读${timePart}</span>`;
+                    } else {
+                        box.innerHTML = `<span style="color:#d97706">👀 ${escapeHtml(data.developer_name || '开发')} 尚未读取</span>`;
+                    }
+                } else {
+                    const detail = [data.error, data.errcode && `errcode=${data.errcode}`, data.errmsg].filter(Boolean).join(' · ');
+                    box.innerHTML = `<span style="color:#b91c1c">❌ ${escapeHtml(detail)}</span>`;
+                }
+            } catch (e) {
+                if (box) box.innerHTML = '<span style="color:#b91c1c">网络错误,请检查后端</span>';
+            }
+        }
+
+        // 文件选择状态（用 selectedFiles 数组持有，因为 input.files 不能直接增删）
+        let selectedFiles = [];
+        const MAX_FILES = 5;
+        const MAX_FILE_SIZE = 10 * 1024 * 1024;
+        // 录入弹窗 attachment_type=screenshot：仅图片，不含 PDF（PDF 走 example_xlsx / 'pdf' 类型走单独入口）
+        const ALLOWED_EXTS = ['png', 'jpg', 'jpeg', 'gif', 'webp'];
+
+        function onFilesChange(e) {
+            const newFiles = Array.from(e.target.files || []);
+            for (const f of newFiles) {
+                if (selectedFiles.length >= MAX_FILES) {
+                    showToast(`最多上传 ${MAX_FILES} 个文件`, 'error');
+                    break;
+                }
+                const ext = f.name.split('.').pop().toLowerCase();
+                if (!ALLOWED_EXTS.includes(ext)) {
+                    showToast(`不支持的文件类型: ${f.name}`, 'error');
+                    continue;
+                }
+                if (f.size > MAX_FILE_SIZE) {
+                    showToast(`${f.name} 超过 10MB`, 'error');
+                    continue;
+                }
+                selectedFiles.push(f);
+            }
+            renderFilePreview();
+            // 清空 input 的值，允许下次选同一个文件再次触发 change
+            e.target.value = '';
+        }
+
+        function removeFile(idx) {
+            selectedFiles.splice(idx, 1);
+            renderFilePreview();
+        }
+
+        function renderFilePreview() {
+            const wrap = document.getElementById('filePreview');
+            if (selectedFiles.length === 0) {
+                wrap.innerHTML = '';
+                return;
+            }
+            wrap.innerHTML = selectedFiles.map((f, idx) => {
+                const ext = f.name.split('.').pop().toLowerCase();
+                let inner;
+                if (ext === 'pdf') {
+                    inner = `<div><div class="pdf-icon">📄</div><div class="file-name" title="${escapeHtml(f.name)}">${escapeHtml(f.name)}</div></div>`;
+                } else {
+                    const url = URL.createObjectURL(f);
+                    inner = `<img src="${url}" alt="${escapeHtml(f.name)}" title="${escapeHtml(f.name)}">`;
+                }
+                return `<div class="file-item">
+                    ${inner}
+                    <button class="remove-btn" onclick="removeFile(${idx})" title="移除">×</button>
+                </div>`;
+            }).join('');
+        }
+
+        // 新建弹窗
+        async function openNewModal() {
+            // 重置表单
+            ['f_oa_no', 'f_requester', 'f_desc'].forEach(id => document.getElementById(id).value = '');
+            document.getElementById('f_dept').selectedIndex = 0;
+            document.getElementById('f_dev').selectedIndex = 0;
+            document.getElementById('f_files').value = '';
+            selectedFiles = [];
+            renderFilePreview();
+            // deadline 默认 +7 天
+            const d = new Date();
+            d.setDate(d.getDate() + 7);
+            d.setHours(18, 0, 0, 0);
+            document.getElementById('f_deadline').value = d.toISOString().substring(0, 16);
+
+            // 拉取 source 连接填充下拉
+            await loadTargetDbOptions();
+
+            document.getElementById('newModal').classList.add('show');
+        }
+
+        function closeNewModal() {
+            document.getElementById('newModal').classList.remove('show');
+        }
+
+        async function loadTargetDbOptions() {
+            const sel = document.getElementById('f_target_db');
+            sel.innerHTML = '<option value="">加载中...</option>';
+            try {
+                const res = await authFetch('/api/collab/db-connections/source');
+                if (!res) return;
+                const data = await res.json();
+                if (!res.ok) {
+                    sel.innerHTML = '<option value="">加载失败</option>';
+                    return;
+                }
+                if (!Array.isArray(data) || data.length === 0) {
+                    sel.innerHTML = '<option value="">尚无 source 连接，请管理员配置</option>';
+                    return;
+                }
+                sel.innerHTML = '<option value="">请选择</option>' + data.map(c =>
+                    `<option value="${c.id}">${escapeHtml(c.name)} · ${escapeHtml(c.host)} / ${escapeHtml(c.database || '')}</option>`
+                ).join('');
+            } catch (e) {
+                sel.innerHTML = '<option value="">加载失败</option>';
+                console.error(e);
+            }
+        }
+
+        async function submitNew() {
+            const payload = {
+                oa_request_no: document.getElementById('f_oa_no').value.trim(),
+                requester_dept: document.getElementById('f_dept').value,
+                requester_name: document.getElementById('f_requester').value.trim(),
+                description: document.getElementById('f_desc').value.trim(),
+                deadline: document.getElementById('f_deadline').value,
+                developer_id: parseInt(document.getElementById('f_dev').value, 10) || null,
+                target_db_connection_id: parseInt(document.getElementById('f_target_db').value, 10) || null
+            };
+
+            // 前端基础校验
+            if (!payload.oa_request_no) return showToast('请填写 OA 流程号', 'error');
+            if (!payload.requester_dept) return showToast('请选择需求部门', 'error');
+            if (!payload.requester_name) return showToast('请填写业务方负责人', 'error');
+            if (!payload.description) return showToast('请填写需求描述', 'error');
+            if (!payload.deadline) return showToast('请选择期望完成时间', 'error');
+            if (!payload.target_db_connection_id) return showToast('请选择目标业务库', 'error');
+            if (!payload.developer_id) return showToast('请指派开发', 'error');
+
+            // 时间格式：HTML5 datetime-local 是 "YYYY-MM-DDTHH:MM"，后端能处理
+            payload.deadline = payload.deadline.replace('T', ' ') + ':00';
+
+            const btn = document.getElementById('btnSubmit');
+            btn.disabled = true;
+            btn.textContent = '创建协作单...';
+
+            try {
+                // Step 1: 创建协作单
+                const res = await authFetch('/api/collab/requests', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                if (!res) return; // authFetch 已处理 401
+                const data = await res.json();
+                if (!res.ok) {
+                    showToast(data.error || '创建失败', 'error');
+                    return;
+                }
+
+                const newId = data.id;
+
+                // Step 2: 上传附件（v2.0 改选传：无截图直接收尾）
+                if (selectedFiles.length === 0) {
+                    showToast(`协作单 #${newId} 已创建`, 'success');
+                    closeNewModal();
+                    loadList();
+                    return;
+                }
+
+                btn.textContent = '上传截图...';
+                const formData = new FormData();
+                formData.append('attachment_type', 'screenshot');
+                selectedFiles.forEach(f => formData.append('files', f));
+
+                const uploadRes = await authFetch(`/api/collab/requests/${newId}/attachments`, {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (!uploadRes) return;
+                const uploadData = await uploadRes.json();
+
+                if (!uploadRes.ok) {
+                    showToast(`协作单 #${newId} 已创建，但截图上传失败：${uploadData.error || '请稍后重试'}`, 'error');
+                    closeNewModal();
+                    loadList();
+                    return;
+                }
+
+                showToast(`协作单 #${newId} 已创建（含 ${uploadData.attachments.length} 张截图）`, 'success');
+                closeNewModal();
+                loadList();
+            } catch (e) {
+                showToast('网络错误', 'error');
+                console.error(e);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '提交';
+            }
+        }
+
+        // 页面初始化
+        document.addEventListener('DOMContentLoaded', async () => {
+            // 部门下拉填充
+            fillDeptSelect(document.getElementById('filterDept'), true);
+            fillDeptSelect(document.getElementById('f_dept'), false);
+
+            // 文件上传 change 监听
+            document.getElementById('f_files').addEventListener('change', onFilesChange);
+
+            // 等 app.js 把用户信息加载好后再加载列表
+            await loadActiveDevelopers();
+            await loadTargetDbMap();
+            await loadList();
+
+            // 根据角色调整导航栏（viewer 隐藏工作台/任务池）
+            if (typeof adjustNavbarForRole === 'function') {
+                adjustNavbarForRole();
+            }
+
+            // 深链：URL ?id=123 自动打开详情（钉钉通知卡片"查看详情"链接走这条路径）
+            try {
+                const urlParams = new URLSearchParams(window.location.search);
+                const deepId = urlParams.get('id');
+                if (deepId && /^\d+$/.test(deepId)) {
+                    openDetail(parseInt(deepId, 10), true);
+                }
+            } catch (e) { /* ignore */ }
+        });
+    </script>
+</body>
+
+</html>

@@ -1,0 +1,1654 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>我的工作台 - 智数协同平台</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="assets/css/style.css?v=1.2">
+    <style>
+        /* 工作台专用样式 */
+        .workspace-container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 90px 20px 40px 20px;
+            /* 顶部留出导航栏空间 */
+        }
+
+        .workspace-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 24px;
+            padding: 20px 24px;
+            background: linear-gradient(135deg, #d97706 0%, #b45309 100%);
+            border-radius: 12px;
+            color: white;
+        }
+
+        .workspace-header h1 {
+            margin: 0;
+            font-size: 1.5em;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .workspace-header .welcome-text {
+            font-size: 0.9em;
+            opacity: 0.9;
+        }
+
+        /* 统计卡片 */
+        .stats-row {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+
+        .stat-card {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+            text-align: center;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .stat-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+        }
+
+        .stat-card .stat-icon {
+            font-size: 2em;
+            margin-bottom: 8px;
+        }
+
+        .stat-card .stat-value {
+            font-size: 2em;
+            font-weight: 700;
+            color: #2d3748;
+        }
+
+        .stat-card .stat-label {
+            font-size: 0.85em;
+            color: #718096;
+            margin-top: 4px;
+        }
+
+        .stat-card.highlight {
+            background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
+            border: 1px solid #f59e0b;
+        }
+
+        .stat-card.highlight .stat-value {
+            color: #b45309;
+        }
+
+        .stat-card.clickable {
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .stat-card.clickable:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.25);
+        }
+
+        .stat-card.clickable:active {
+            transform: translateY(0);
+        }
+
+        /* 统计详情弹窗样式 */
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.5);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+        }
+
+        .modal-content {
+            background: white;
+            border-radius: 12px;
+            width: 90%;
+            max-width: 500px;
+            max-height: 80vh;
+            overflow: hidden;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+        }
+
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 16px 20px;
+            border-bottom: 1px solid #e2e8f0;
+            background: linear-gradient(135deg, #d97706 0%, #b45309 100%);
+            color: white;
+        }
+
+        .modal-header h3 {
+            margin: 0;
+            font-size: 1.1em;
+        }
+
+        .modal-close-btn {
+            background: none;
+            border: none;
+            font-size: 1.5em;
+            color: white;
+            cursor: pointer;
+            opacity: 0.8;
+        }
+
+        .modal-close-btn:hover {
+            opacity: 1;
+        }
+
+        .modal-body {
+            padding: 20px;
+        }
+
+        .stats-detail-item {
+            display: flex;
+            align-items: center;
+            padding: 12px;
+            border-radius: 8px;
+            background: #f7fafc;
+            margin-bottom: 8px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .stats-detail-item:hover {
+            background: #edf2f7;
+        }
+
+        .stats-detail-item .priority-badge {
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.75em;
+            font-weight: 600;
+            margin-right: 12px;
+        }
+
+        .stats-detail-item .task-info {
+            flex: 1;
+        }
+
+        .stats-detail-item .task-title {
+            font-weight: 500;
+            color: #2d3748;
+            margin-bottom: 4px;
+        }
+
+        .stats-detail-item .task-meta {
+            font-size: 0.8em;
+            color: #718096;
+        }
+
+        .stats-detail-item .done-date {
+            font-size: 0.8em;
+            color: #a0aec0;
+            margin-left: 8px;
+        }
+
+        .stats-empty {
+            text-align: center;
+            padding: 40px 20px;
+            color: #a0aec0;
+        }
+
+        .count-badge.success {
+            background: #c6f6d5;
+            color: #22543d;
+        }
+
+        /* 任务区块 */
+        .workspace-section {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+        }
+
+        .section-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 16px;
+            padding-bottom: 12px;
+            border-bottom: 1px solid #e2e8f0;
+        }
+
+        .section-header h2 {
+            margin: 0;
+            font-size: 1.1em;
+            color: #2d3748;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .section-header .count-badge {
+            background: #e2e8f0;
+            color: #4a5568;
+            padding: 2px 10px;
+            border-radius: 12px;
+            font-size: 0.85em;
+            font-weight: 600;
+        }
+
+        .section-header .count-badge.warning {
+            background: #fed7aa;
+            color: #c2410c;
+        }
+
+        /* 任务列表 */
+        .task-list {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .task-item {
+            display: flex;
+            align-items: center;
+            padding: 14px 16px;
+            background: #f8fafc;
+            border-radius: 8px;
+            border-left: 4px solid #cbd5e0;
+            transition: all 0.2s;
+        }
+
+        .task-item:hover {
+            background: #f1f5f9;
+            transform: translateX(4px);
+        }
+
+        .task-item.overdue {
+            border-left-color: #ef4444;
+            background: #fef2f2;
+        }
+
+        .task-item.P0 {
+            border-left-color: #dc2626;
+        }
+
+        .task-item.P1 {
+            border-left-color: #f59e0b;
+        }
+
+        .task-item .task-priority {
+            font-size: 0.75em;
+            padding: 2px 6px;
+            border-radius: 4px;
+            margin-right: 10px;
+            font-weight: 600;
+        }
+
+        .task-item .task-priority.P0 {
+            background: #fecaca;
+            color: #b91c1c;
+        }
+
+        .task-item .task-priority.P1 {
+            background: #fed7aa;
+            color: #c2410c;
+        }
+
+        .task-item .task-priority.P2 {
+            background: #e2e8f0;
+            color: #64748b;
+        }
+
+        .task-item .task-info {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .task-item .task-title {
+            font-weight: 600;
+            color: #2d3748;
+            margin-bottom: 4px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .task-item .task-meta {
+            font-size: 0.8em;
+            color: #718096;
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+
+        .task-item .task-time {
+            font-size: 0.8em;
+            color: #64748b;
+            white-space: nowrap;
+        }
+
+        .task-item .task-time.overdue {
+            color: #dc2626;
+            font-weight: 600;
+        }
+
+        .task-item .task-actions {
+            display: flex;
+            gap: 8px;
+        }
+
+        .task-item .btn-action {
+            padding: 6px 12px;
+            font-size: 0.8em;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .task-item .btn-action.primary {
+            background: #d97706;
+            color: white;
+        }
+
+        .task-item .btn-action.primary:hover {
+            background: #5a67d8;
+        }
+
+        .task-item .btn-action.secondary {
+            background: #e2e8f0;
+            color: #4a5568;
+        }
+
+        .task-item .btn-action.secondary:hover {
+            background: #cbd5e0;
+        }
+
+        /* 空状态 */
+        .empty-state {
+            text-align: center;
+            padding: 40px 20px;
+            color: #a0aec0;
+        }
+
+        .empty-state .empty-icon {
+            font-size: 3em;
+            margin-bottom: 12px;
+        }
+
+        /* 转发请求卡片 */
+        .transfer-item {
+            background: #fffbeb;
+            border: 1px solid #fcd34d;
+            border-radius: 8px;
+            padding: 14px 16px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .transfer-item .transfer-info {
+            flex: 1;
+        }
+
+        .transfer-item .transfer-from {
+            font-size: 0.85em;
+            color: #92400e;
+            margin-bottom: 4px;
+        }
+
+        .transfer-item .transfer-task {
+            font-weight: 600;
+            color: #78350f;
+        }
+
+        .transfer-item .transfer-actions {
+            display: flex;
+            gap: 8px;
+        }
+
+        .transfer-item .btn-accept {
+            background: #22c55e;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 500;
+        }
+
+        .transfer-item .btn-accept:hover {
+            background: #16a34a;
+        }
+
+        .transfer-item .btn-reject {
+            background: #f1f5f9;
+            color: #64748b;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+        }
+
+        .transfer-item .btn-reject:hover {
+            background: #e2e8f0;
+        }
+
+        /* 快速入口 */
+        .quick-links {
+            display: flex;
+            gap: 12px;
+        }
+
+        .quick-link {
+            padding: 8px 16px;
+            background: rgba(255, 255, 255, 0.2);
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            border-radius: 8px;
+            color: white;
+            text-decoration: none;
+            font-size: 0.9em;
+            transition: all 0.2s;
+        }
+
+        .quick-link:hover {
+            background: rgba(255, 255, 255, 0.3);
+        }
+
+        /* 类型标签 */
+        .category-tag {
+            font-size: 0.75em;
+            padding: 2px 8px;
+            border-radius: 4px;
+            background: #e0f2fe;
+            color: #0369a1;
+        }
+
+        /* 加载状态 */
+        .loading-spinner {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 60px;
+            color: #a0aec0;
+        }
+
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+
+        .loading-spinner::before {
+            content: '';
+            width: 32px;
+            height: 32px;
+            border: 3px solid #e2e8f0;
+            border-top-color: #d97706;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+    </style>
+</head>
+
+<body>
+    <!-- 顶部导航栏 -->
+    <nav class="navbar fixed-header">
+        <div class="nav-left">
+            <div class="nav-logo">
+                <svg viewBox="0 0 24 24" fill="none" stroke="url(#logo-gradient)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <defs>
+                        <linearGradient id="logo-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                            <stop offset="0%" style="stop-color:#d97706"/>
+                            <stop offset="100%" style="stop-color:#b45309"/>
+                        </linearGradient>
+                    </defs>
+                    <circle cx="12" cy="12" r="10"/>
+                    <path d="M12 6v6l4 2"/>
+                </svg>
+            </div>
+            <div class="nav-title">智数协同平台</div>
+        </div>
+        <div class="nav-right">
+            <a href="/Task_Pool.html" class="nav-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M9 11l3 3L22 4"/>
+                    <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
+                </svg>
+                任务池
+            </a>
+            <a href="/Data_Collab.html" class="nav-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+                    <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+                </svg>
+                数据协作
+            </a>
+            <a href="/Issue_Tracker.html" class="nav-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="10"/>
+                    <line x1="12" y1="8" x2="12" y2="12"/>
+                    <line x1="12" y1="16" x2="12.01" y2="16"/>
+                </svg>
+                问题跟踪
+            </a>
+            <a href="/My_Workspace.html" class="nav-item" style="color:#d97706; font-weight:600;">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+                    <circle cx="12" cy="7" r="4"/>
+                </svg>
+                我的工作台
+            </a>
+            <div class="nav-dropdown">
+                <button class="nav-dropdown-trigger">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <ellipse cx="12" cy="5" rx="9" ry="3"/>
+                        <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/>
+                        <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>
+                    </svg>
+                    数据中心
+                    <svg class="arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="6 9 12 15 18 9"/>
+                    </svg>
+                </button>
+                <div class="nav-dropdown-menu">
+                    <a href="/Dashboard.html">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+                            <line x1="3" y1="9" x2="21" y2="9"/>
+                            <line x1="9" y1="21" x2="9" y2="9"/>
+                        </svg>
+                        建设总览
+                    </a>
+                    <a href="/Asset_Center.html">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+                            <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
+                            <line x1="12" y1="22.08" x2="12" y2="12"/>
+                        </svg>
+                        资产中心
+                    </a>
+                    <a href="/Model_Center.html">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="3" y="3" width="7" height="7"/>
+                            <rect x="14" y="3" width="7" height="7"/>
+                            <rect x="14" y="14" width="7" height="7"/>
+                            <rect x="3" y="14" width="7" height="7"/>
+                        </svg>
+                        模型中心
+                    </a>
+                    <a href="/Metrics.html">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <line x1="18" y1="20" x2="18" y2="10"/>
+                            <line x1="12" y1="20" x2="12" y2="4"/>
+                            <line x1="6" y1="20" x2="6" y2="14"/>
+                        </svg>
+                        指标中心
+                    </a>
+                </div>
+            </div>
+            <a href="/Statistics.html" class="nav-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <line x1="12" y1="20" x2="12" y2="10"/>
+                    <line x1="18" y1="20" x2="18" y2="4"/>
+                    <line x1="6" y1="20" x2="6" y2="16"/>
+                </svg>
+                统计中心
+            </a>
+            <a href="/Doc_Viewer.html" target="_blank" class="nav-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+                    <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+                </svg>
+                文档中心
+            </a>
+            <div class="nav-divider"></div>
+            <div id="userProfileArea"></div>
+        </div>
+    </nav>
+
+    <!-- 主内容区 -->
+    <main class="workbench-container workspace-container">
+        <!-- 欢迎区域 -->
+        <div class="workspace-header">
+            <div>
+                <h1><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 6px;"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>我的工作台</h1>
+                <div class="welcome-text" id="welcomeText">欢迎回来！</div>
+            </div>
+            <div class="quick-links">
+                <a href="/Task_Pool.html" class="quick-link"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/></svg>任务池</a>
+                <a href="/Model_Center.html" class="quick-link"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>模型中心</a>
+            </div>
+        </div>
+
+        <!-- 统计卡片 -->
+        <div class="stats-row" id="statsRow">
+            <div class="stat-card clickable" id="statInProgressCard" onclick="showStatsDetail('in_progress')" title="点击查看详情">
+                <div class="stat-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg></div>
+                <div class="stat-value" id="statInProgress">-</div>
+                <div class="stat-label">进行中</div>
+            </div>
+            <div class="stat-card clickable" id="statPendingCard" onclick="showStatsDetail('pending')" title="点击查看详情">
+                <div class="stat-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg></div>
+                <div class="stat-value" id="statPendingConfirm">-</div>
+                <div class="stat-label">待验收</div>
+            </div>
+            <div class="stat-card clickable" onclick="showStatsDetail('week')" title="点击查看详情">
+                <div class="stat-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></div>
+                <div class="stat-value" id="statWeek">-</div>
+                <div class="stat-label">近7天</div>
+            </div>
+            <div class="stat-card clickable" onclick="showStatsDetail('month')" title="点击查看详情">
+                <div class="stat-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg></div>
+                <div class="stat-value" id="statMonth">-</div>
+                <div class="stat-label">近30天</div>
+            </div>
+            <div class="stat-card clickable" onclick="showStatsDetail('total')" title="点击查看详情">
+                <div class="stat-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6"/><path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18"/><path d="M4 22h16"/><path d="M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22"/><path d="M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22"/><path d="M18 2H6v7a6 6 0 0 0 12 0V2Z"/></svg></div>
+                <div class="stat-value" id="statTotal">-</div>
+                <div class="stat-label">累计完成</div>
+            </div>
+            <div class="stat-card clickable" id="statPublishedCard" onclick="showStatsDetail('published')" title="点击查看详情" style="display:none;">
+                <div class="stat-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg></div>
+                <div class="stat-value" id="statPublished">-</div>
+                <div class="stat-label">已发布</div>
+            </div>
+        </div>
+
+        <!-- 待处理转发 -->
+        <div class="workspace-section" id="transfersSection" style="display:none;">
+            <div class="section-header">
+                <h2><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>待处理转发 <span class="count-badge warning" id="transfersCount">0</span></h2>
+            </div>
+            <div class="task-list" id="transfersList"></div>
+        </div>
+
+        <!-- 我的进行中任务 -->
+        <div class="workspace-section">
+            <div class="section-header">
+                <h2><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><polygon points="5 3 19 12 5 21 5 3"/></svg>我的进行中任务 <span class="count-badge" id="claimedCount">0</span></h2>
+                <a href="/Task_Pool.html" style="color:#d97706; font-size:0.9em;">查看全部 →</a>
+            </div>
+            <div class="task-list" id="claimedList">
+                <div class="loading-spinner"></div>
+            </div>
+        </div>
+
+        <!-- 我的待审任务 (开发者 - 我提交后等待验收的) -->
+        <div class="workspace-section" id="myPendingReviewSection" style="display:none;">
+            <div class="section-header">
+                <h2><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>我的待审任务 <span class="count-badge warning" id="myPendingReviewCount">0</span></h2>
+                <span class="section-hint" style="color:#888; font-size:0.85em; margin-left:8px;">已提交，等待管理员验收</span>
+            </div>
+            <div class="task-list" id="myPendingReviewList"></div>
+        </div>
+
+        <!-- 待我验收 (发布者/管理员) -->
+        <div class="workspace-section" id="pendingConfirmSection" style="display:none;">
+            <div class="section-header">
+                <h2><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>待我验收 <span class="count-badge warning" id="pendingConfirmCount">0</span></h2>
+            </div>
+            <div class="task-list" id="pendingConfirmList"></div>
+        </div>
+
+        <!-- 我发布的任务 (发布者/管理员) -->
+        <div class="workspace-section" id="publishedSection" style="display:none;">
+            <div class="section-header">
+                <h2><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>我发布的任务 <span class="count-badge" id="publishedCount">0</span></h2>
+            </div>
+            <div class="task-list" id="publishedList"></div>
+        </div>
+
+        <!-- 我的已完成 (所有用户) -->
+        <div class="workspace-section" id="myCompletedSection" style="display:none;">
+            <div class="section-header">
+                <h2><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6"/><path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18"/><path d="M4 22h16"/><path d="M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22"/><path d="M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22"/><path d="M18 2H6v7a6 6 0 0 0 12 0V2Z"/></svg>我的已完成 <span class="count-badge success" id="myCompletedCount">0</span></h2>
+                <span class="section-hint" style="color:#888; font-size:0.85em; margin-left:8px;">最近归档的任务</span>
+            </div>
+            <div class="task-list" id="myCompletedList"></div>
+        </div>
+    </main>
+
+    <!-- 统计详情弹窗 -->
+    <div class="modal-overlay" id="statsDetailModal" style="display:none;">
+        <div class="modal-content" style="max-width:600px;">
+            <div class="modal-header">
+                <h3 id="statsDetailTitle">统计详情</h3>
+                <button class="modal-close-btn" onclick="closeStatsDetailModal()">&times;</button>
+            </div>
+            <div class="modal-body" id="statsDetailBody" style="max-height:400px; overflow-y:auto;">
+                <!-- 动态填充 -->
+            </div>
+        </div>
+    </div>
+
+    <!-- 任务详情抽屉 (右侧滑出) -->
+    <div class="task-detail-drawer" id="taskDetailDrawer">
+        <div class="drawer-overlay" onclick="closeTaskDetailDrawer()"></div>
+        <div class="drawer-content">
+            <div class="drawer-header">
+                <h3 id="drawerTaskTitle">任务详情</h3>
+                <button class="drawer-close-btn" onclick="closeTaskDetailDrawer()">&times;</button>
+            </div>
+            <div class="drawer-body">
+                <!-- 基本信息区 -->
+                <div class="drawer-section">
+                    <div class="drawer-section-title">基本信息</div>
+                    <div class="drawer-info-grid">
+                        <div class="drawer-info-item">
+                            <span class="info-label">状态</span>
+                            <span class="info-value" id="drawerStatus">-</span>
+                        </div>
+                        <div class="drawer-info-item">
+                            <span class="info-label">优先级</span>
+                            <span class="info-value" id="drawerPriority">-</span>
+                        </div>
+                        <div class="drawer-info-item">
+                            <span class="info-label">类型</span>
+                            <span class="info-value" id="drawerCategory">-</span>
+                        </div>
+                        <div class="drawer-info-item">
+                            <span class="info-label">负责人</span>
+                            <span class="info-value" id="drawerOwner">-</span>
+                        </div>
+                        <div class="drawer-info-item">
+                            <span class="info-label">预估工时</span>
+                            <span class="info-value" id="drawerEstHours">-</span>
+                        </div>
+                        <div class="drawer-info-item">
+                            <span class="info-label">开发工时</span>
+                            <span class="info-value" id="drawerDevHours">-</span>
+                        </div>
+                        <div class="drawer-info-item">
+                            <span class="info-label">任务周期</span>
+                            <span class="info-value" id="drawerActualHours">-</span>
+                        </div>
+                        <div class="drawer-info-item">
+                            <span class="info-label">认领时间</span>
+                            <span class="info-value" id="drawerClaimedAt">-</span>
+                        </div>
+                        <div class="drawer-info-item">
+                            <span class="info-label">截止时间</span>
+                            <span class="info-value" id="drawerDeadline">-</span>
+                        </div>
+                        <div class="drawer-info-item">
+                            <span class="info-label">创建时间</span>
+                            <span class="info-value" id="drawerCreatedAt">-</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 关联模型区 -->
+                <div class="drawer-section">
+                    <div class="drawer-section-title">关联模型</div>
+                    <div id="drawerModelInfo" class="drawer-model-info">
+                        <span style="color:#a0aec0;">未关联模型</span>
+                    </div>
+                </div>
+
+                <!-- 备注区 -->
+                <div class="drawer-section">
+                    <div class="drawer-section-title">备注</div>
+                    <div id="drawerRemark" class="drawer-remark-content">
+                        <span style="color:#a0aec0;">暂无备注</span>
+                    </div>
+                </div>
+
+                <!-- 操作记录区 -->
+                <div class="drawer-section" id="drawerOperationHistorySection" style="display:none;">
+                    <div class="drawer-section-title"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/></svg>操作记录</div>
+                    <div id="drawerOperationHistory" class="drawer-operation-history">
+                    </div>
+                </div>
+
+                <!-- 开发笔记区 -->
+                <div class="drawer-section" id="drawerDevNotesSection" style="display:none;">
+                    <div class="drawer-section-title">开发笔记</div>
+                    <div id="drawerDevNotes" class="drawer-dev-notes">
+                        <span style="color:#a0aec0;">暂无笔记</span>
+                    </div>
+                </div>
+
+                <!-- 提交说明区 -->
+                <div class="drawer-section" id="drawerSubmissionSection" style="display:none;">
+                    <div class="drawer-section-title">提交说明</div>
+                    <div id="drawerSubmission" class="drawer-submission-content">
+                        <span style="color:#a0aec0;">暂无说明</span>
+                    </div>
+                </div>
+
+                <!-- 附件区 -->
+                <div class="drawer-section" id="drawerAttachmentsSection" style="display:none;">
+                    <div class="drawer-section-title">交付物</div>
+                    <div id="drawerAttachments" class="drawer-attachments">
+                        <span style="color:#a0aec0;">暂无附件</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 底部操作按钮 -->
+            <div class="drawer-footer" id="drawerFooter">
+                <button class="drawer-btn-primary" onclick="goToTaskFromDrawer()">前往任务池</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 文件预览模态框 -->
+    <div class="modal" id="filePreviewModal">
+        <div class="modal-content"
+            style="max-width:800px; width:90%; height:80vh; display:flex; flex-direction:column;">
+            <div class="modal-header">
+                <h3 id="previewFileName">文件预览</h3>
+                <button class="drawer-close-btn" onclick="closeModal('filePreviewModal')"
+                    style="width:24px; height:24px; font-size:1.2em;">&times;</button>
+            </div>
+            <div class="modal-body" style="flex:1; padding:0; overflow:hidden; background:#1e1e1e;">
+                <pre id="previewContent"
+                    style="margin:0; padding:15px; height:100%; overflow:auto; color:#d4d4d4; font-family:'Consolas', 'Monaco', monospace; font-size:14px; line-height:1.5; white-space:pre-wrap;"></pre>
+            </div>
+        </div>
+    </div>
+
+    <script src="assets/js/app.js"></script>
+    <script>
+        // SERVER_URL, API_URL, currentUser, CATEGORY_MAP 已在 app.js 中定义
+
+        // 页面加载
+        document.addEventListener('DOMContentLoaded', async () => {
+            await checkAuth();
+            if (currentUser) {
+                renderUserProfile();
+                loadWorkspaceData();
+            }
+        });
+
+        // 检查登录状态
+        async function checkAuth() {
+            const token = localStorage.getItem('token');
+            if (!token) {
+                window.location.href = '/login.html';
+                return;
+            }
+
+            try {
+                const res = await fetch(`${API_URL}/auth/me`, {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+
+                if (res.ok) {
+                    currentUser = await res.json();
+                } else {
+                    localStorage.removeItem('token');
+                    window.location.href = '/login.html';
+                }
+            } catch (e) {
+                console.error('Auth check failed:', e);
+                window.location.href = '/login.html';
+            }
+        }
+
+        // 渲染用户信息
+        function renderUserProfile() {
+            const profileArea = document.getElementById('userProfileArea');
+            if (!profileArea || !currentUser) return;
+
+            const roleText = currentUser.role === 'admin' ? '管理员' :
+                (currentUser.role === 'publisher' ? '发布者' :
+                    (currentUser.role === 'viewer' ? '查看者' : '开发者'));
+
+            const avatarChar = currentUser.display_name ? currentUser.display_name[0].toUpperCase() : 'U';
+
+            // 构造下拉菜单项（与 app.js 中 updateUserUI 保持一致）
+            let menuItems = '';
+            if (currentUser.role === 'admin') {
+                menuItems += `<a href="/admin.html" style="text-decoration:none;">👥 用户管理</a>`;
+            }
+            menuItems += `<a href="#" onclick="openChangePasswordModal()">🔑 修改密码</a>`;
+            menuItems += `<a href="#" onclick="logout()" style="color:#e53e3e;">🚪 退出登录</a>`;
+
+            profileArea.innerHTML = `
+                <div class="dropdown">
+                    <div class="user-profile">
+                        <div class="avatar-circle">${avatarChar}</div>
+                        <div class="profile-info">
+                            <span class="profile-name">${currentUser.display_name}</span>
+                            <span class="profile-role">${roleText}</span>
+                        </div>
+                        <span style="font-size:0.8em;color:#a0aec0;">▼</span>
+                    </div>
+                    <div class="dropdown-content">
+                        ${menuItems}
+                    </div>
+                </div>
+            `;
+
+            // 更新欢迎文字
+            document.getElementById('welcomeText').textContent = `欢迎回来，${currentUser.display_name}！`;
+        }
+
+        // 退出登录
+        function logout() {
+            localStorage.removeItem('token');
+            localStorage.removeItem('user');
+            window.location.href = '/login.html';
+        }
+
+        // authFetch 函数已在 app.js 中定义，此处不再重复
+
+        // 加载工作台数据
+        async function loadWorkspaceData() {
+            try {
+                const res = await authFetch(`${API_URL}/my-workspace`);
+                if (!res) return;
+
+                if (!res.ok) {
+                    const errData = await res.json();
+                    throw new Error(errData.error || `HTTP ${res.status}`);
+                }
+
+                const data = await res.json();
+
+                // 缓存任务数据供抽屉使用
+                cacheWorkspaceTasks(data);
+
+                // 更新统计
+                document.getElementById('statInProgress').textContent = data.stats.in_progress;
+                document.getElementById('statPendingConfirm').textContent = data.stats.pending_confirm;
+                document.getElementById('statWeek').textContent = data.stats.completed_week;
+                document.getElementById('statMonth').textContent = data.stats.completed_month;
+                document.getElementById('statTotal').textContent = data.stats.completed_total;
+
+                // 管理员/发布者显示"已发布"统计卡片
+                if (currentUser.role === 'admin' || currentUser.role === 'publisher') {
+                    document.getElementById('statPublishedCard').style.display = 'block';
+                    document.getElementById('statPublished').textContent = data.stats.published_count || 0;
+                }
+
+                // 高亮进行中和待验收
+                if (data.stats.in_progress > 0) {
+                    document.getElementById('statInProgressCard').classList.add('highlight');
+                }
+                if (data.stats.pending_confirm > 0) {
+                    document.getElementById('statPendingCard').classList.add('highlight');
+                }
+
+                // 渲染我认领的任务
+                renderClaimedTasks(data.claimed);
+
+                // 渲染我的待审任务（所有用户都可以看到自己提交后等待验收的任务）
+                renderMyPendingReviewTasks(data.my_pending_review || []);
+
+                // 渲染转发请求
+                renderTransfers(data.transfers);
+
+                // 发布者/管理员专属区块
+                if (currentUser.role === 'admin' || currentUser.role === 'publisher') {
+                    renderPendingConfirmTasks(data.pending_confirm);
+                    renderPublishedTasks(data.published);
+                }
+
+                // 渲染我的已完成任务（所有用户）
+                renderMyCompletedTasks(data.my_completed || []);
+
+            } catch (e) {
+                console.error('Failed to load workspace data:', e);
+                document.getElementById('claimedList').innerHTML = `
+                    <div class="empty-state">
+                        <div class="empty-icon"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></div>
+                        <div>加载失败，请刷新重试</div>
+                    </div>
+                `;
+            }
+        }
+
+        // 渲染我认领的任务
+        function renderClaimedTasks(tasks) {
+            const container = document.getElementById('claimedList');
+            document.getElementById('claimedCount').textContent = tasks.length;
+
+            if (tasks.length === 0) {
+                container.innerHTML = `
+                    <div class="empty-state">
+                        <div class="empty-icon"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></div>
+                        <div>暂无进行中的任务</div>
+                        <a href="/Task_Pool.html" style="color:#d97706; margin-top:8px; display:inline-block;">去任务池认领 →</a>
+                    </div>
+                `;
+                return;
+            }
+
+            container.innerHTML = tasks.map(task => renderTaskItem(task, 'claimed')).join('');
+            // 异步加载 DIM/DWD 任务的交付物进度
+            loadDevProgressIndicators();
+        }
+
+        // 渲染我的待审任务（我提交后等待验收的）
+        function renderMyPendingReviewTasks(tasks) {
+            const section = document.getElementById('myPendingReviewSection');
+            const container = document.getElementById('myPendingReviewList');
+            document.getElementById('myPendingReviewCount').textContent = tasks.length;
+
+            if (tasks.length === 0) {
+                section.style.display = 'none';
+                return;
+            }
+
+            section.style.display = 'block';
+            container.innerHTML = tasks.map(task => renderTaskItem(task, 'pending_review')).join('');
+        }
+
+        // 渲染待验收任务
+        function renderPendingConfirmTasks(tasks) {
+            const section = document.getElementById('pendingConfirmSection');
+            const container = document.getElementById('pendingConfirmList');
+            document.getElementById('pendingConfirmCount').textContent = tasks.length;
+
+            if (tasks.length === 0) {
+                section.style.display = 'none';
+                return;
+            }
+
+            section.style.display = 'block';
+            container.innerHTML = tasks.map(task => renderTaskItem(task, 'confirm')).join('');
+        }
+
+        // 渲染我发布的任务
+        function renderPublishedTasks(tasks) {
+            const section = document.getElementById('publishedSection');
+            const container = document.getElementById('publishedList');
+            document.getElementById('publishedCount').textContent = tasks.length;
+
+            if (tasks.length === 0) {
+                section.style.display = 'none';
+                return;
+            }
+
+            section.style.display = 'block';
+            container.innerHTML = tasks.map(task => renderTaskItem(task, 'published')).join('');
+        }
+
+        // 渲染我的已完成任务
+        function renderMyCompletedTasks(tasks) {
+            const section = document.getElementById('myCompletedSection');
+            const container = document.getElementById('myCompletedList');
+            document.getElementById('myCompletedCount').textContent = tasks.length;
+
+            if (tasks.length === 0) {
+                section.style.display = 'none';
+                return;
+            }
+
+            section.style.display = 'block';
+            container.innerHTML = tasks.map(task => renderTaskItem(task, 'completed')).join('');
+        }
+
+        // 渲染转发请求
+        function renderTransfers(transfers) {
+            const section = document.getElementById('transfersSection');
+            const container = document.getElementById('transfersList');
+            document.getElementById('transfersCount').textContent = transfers.length;
+
+            if (transfers.length === 0) {
+                section.style.display = 'none';
+                return;
+            }
+
+            section.style.display = 'block';
+            container.innerHTML = transfers.map(t => `
+                <div class="transfer-item">
+                    <div class="transfer-info">
+                        <div class="transfer-from">来自 <strong>${escapeHtml(t.from_user_name)}</strong> 的转发请求</div>
+                        <div class="transfer-task">${escapeHtml(t.task_title)}</div>
+                    </div>
+                    <div class="transfer-actions">
+                        <button class="btn-accept" onclick="acceptTransfer(${t.id})">接受</button>
+                        <button class="btn-reject" onclick="rejectTransfer(${t.id})">拒绝</button>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        // 渲染单个任务项
+        function renderTaskItem(task, type) {
+            const categoryLabel = CATEGORY_MAP[task.category] || task.category;
+            const isOverdue = task.is_overdue;
+            const priorityClass = task.priority || 'P2';
+
+            let timeInfo = '';
+            if (task.elapsed_hours > 0) {
+                const hours = task.elapsed_hours.toFixed(1);
+                const est = task.estimated_hours || 0;
+                if (est > 0) {
+                    timeInfo = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> ${hours}h / ${est}h`;
+                } else {
+                    timeInfo = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> ${hours}h`;
+                }
+            }
+
+            // 判断是否为模型开发任务，可深链到模型中心
+            const isModelDev = ['DIM_DEV', 'DWD_DEV', 'ODS_SYNC'].includes(task.category) && task.linked_model_id;
+            const devBtnColors = { 'DIM_DEV': '#d97706', 'DWD_DEV': '#10b981', 'ODS_SYNC': '#3b82f6' };
+
+            let actionBtn = '';
+            if (type === 'claimed') {
+                if (isModelDev) {
+                    const btnColor = devBtnColors[task.category] || '#6b7280';
+                    actionBtn = `<a href="Model_Center.html?id=${task.linked_model_id}&dev=1" style="display:inline-flex; align-items:center; gap:3px; padding:3px 10px; background:${btnColor}12; color:${btnColor}; border:1px solid ${btnColor}40; border-radius:5px; font-size:0.78em; font-weight:600; text-decoration:none; white-space:nowrap; transition:all 0.2s;" onmouseover="this.style.background='${btnColor}'; this.style.color='white';" onmouseout="this.style.background='${btnColor}12'; this.style.color='${btnColor}';"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>去开发</a>`;
+                } else {
+                    actionBtn = `<button class="btn-action primary" onclick="goToTask(${task.id})">继续</button>`;
+                }
+            } else if (type === 'confirm') {
+                actionBtn = `
+                    <button class="btn-action primary" onclick="goToTask(${task.id})">去验收</button>
+                `;
+            } else if (type === 'pending_review') {
+                // 我的待审任务 - 显示等待状态和查看按钮
+                actionBtn = `
+                    <span style="font-size:0.75em; color:#f59e0b; margin-right:8px;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> 等待验收</span>
+                    <button class="btn-action" onclick="goToTask(${task.id})" style="background:#e2e8f0; color:#475569;">查看</button>
+                `;
+            } else if (type === 'completed') {
+                // 已完成任务 - 显示完成时间和查看按钮
+                const doneDate = task.done_at ? formatDate(task.done_at) : '';
+                actionBtn = `
+                    <span style="font-size:0.75em; color:#10b981; margin-right:8px;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><polyline points="20 6 9 17 4 12"/></svg> ${doneDate}</span>
+                    <button class="btn-action" onclick="goToTask(${task.id})" style="background:#e2e8f0; color:#475569;">查看</button>
+                `;
+            } else if (type === 'published') {
+                const statusText = task.status === 'OPEN' ? '待认领' :
+                    (task.status === 'CLAIMED' ? '进行中' :
+                        (task.status === 'DONE' ? '待验收' : task.status));
+                actionBtn = `<span style="font-size:0.8em; color:#718096;">${statusText}</span>`;
+            }
+
+            return `
+                <div class="task-item ${priorityClass} ${isOverdue ? 'overdue' : ''}">
+                    <span class="task-priority ${priorityClass}">${priorityClass}</span>
+                    <div class="task-info">
+                        <div class="task-title" style="cursor:pointer;" onclick="openTaskDetailDrawer(${task.id})" title="点击查看详情">${escapeHtml(task.title)}</div>
+                        <div class="task-meta">
+                            <span class="category-tag">${categoryLabel}</span>
+                            ${task.linked_model_name ? `<span ${task.linked_model_is_deleted === 1 ? 'style="color:#e53e3e;"' : ''}><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg> ${escapeHtml(task.linked_model_name)}${task.linked_model_is_deleted === 1 ? ' (已删除)' : ''}</span>` : ''}
+                            ${task.owner_name ? `<span><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg> ${escapeHtml(task.owner_name)}</span>` : ''}
+                        </div>
+                        ${(type === 'claimed' && ['DIM_DEV', 'DWD_DEV'].includes(task.category) && task.linked_model_id) ? `<div class="dev-progress-bar" id="devProgress_${task.id}" data-model-id="${task.linked_model_id}" style="display:none; margin-top:6px; gap:8px; font-size:0.75em; color:#94a3b8;"></div>` : ''}
+                    </div>
+                    ${timeInfo ? `<div class="task-time ${isOverdue ? 'overdue' : ''}">${timeInfo}</div>` : ''}
+                    <div class="task-actions">
+                        ${actionBtn}
+                    </div>
+                </div>
+            `;
+        }
+
+        // 异步加载交付物进度指示器
+        async function loadDevProgressIndicators() {
+            const bars = document.querySelectorAll('.dev-progress-bar[data-model-id]');
+            bars.forEach(async (bar) => {
+                const modelId = bar.dataset.modelId;
+                try {
+                    const res = await authFetch(`${API_URL}/models/${modelId}/dev-status`);
+                    if (!res || !res.ok) return;
+                    const data = await res.json();
+                    const items = [
+                        { key: 'config', label: '配置' },
+                        { key: 'ddl', label: 'DDL' },
+                        { key: 'etl', label: 'ETL' },
+                        { key: 'validation', label: '验收' }
+                    ];
+                    const readyCount = items.filter(i => data.deliverables[i.key]?.ready).length;
+                    bar.style.display = 'flex';
+                    bar.innerHTML = items.map(i => {
+                        const ready = data.deliverables[i.key]?.ready;
+                        const color = ready ? '#10b981' : '#cbd5e1';
+                        return `<span style="display:inline-flex; align-items:center; gap:2px;"><svg width="8" height="8" viewBox="0 0 8 8"><circle cx="4" cy="4" r="4" fill="${color}"/></svg><span style="color:${ready ? '#10b981' : '#94a3b8'};">${i.label}</span></span>`;
+                    }).join('') + `<span style="margin-left:2px; color:${readyCount === 4 ? '#10b981' : '#94a3b8'}; font-weight:500;">${readyCount}/4</span>`;
+                } catch (e) { /* 静默失败 */ }
+            });
+        }
+
+        // 跳转到任务详情
+        function goToTask(taskId) {
+            window.location.href = `/Task_Pool.html?taskId=${taskId}`;
+        }
+
+        // 接受转发
+        async function acceptTransfer(transferId) {
+            if (!confirm('确定接受此转发请求？')) return;
+
+            try {
+                const res = await authFetch(`${API_URL}/transfers/${transferId}/accept`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+
+                if (res && res.ok) {
+                    alert('已接受转发');
+                    loadWorkspaceData();
+                } else {
+                    const data = await res.json();
+                    alert(data.error || '操作失败');
+                }
+            } catch (e) {
+                alert('操作失败: ' + e.message);
+            }
+        }
+
+        // 拒绝转发
+        async function rejectTransfer(transferId) {
+            if (!confirm('确定拒绝此转发请求？')) return;
+
+            try {
+                const res = await authFetch(`${API_URL}/transfers/${transferId}/reject`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+
+                if (res && res.ok) {
+                    alert('已拒绝转发');
+                    loadWorkspaceData();
+                } else {
+                    const data = await res.json();
+                    alert(data.error || '操作失败');
+                }
+            } catch (e) {
+                alert('操作失败: ' + e.message);
+            }
+        }
+
+        // escapeHtml 函数已在 app.js 中定义，此处不再重复
+
+        // ==================== 任务详情抽屉功能 ====================
+
+        // 工作台任务缓存
+        let workspaceTasksCache = [];
+        // currentDrawerTaskId, DRAWER_STATUS_MAP, DRAWER_PRIORITY_MAP, DRAWER_CATEGORY_MAP 已在 app.js 中定义
+
+        // 打开任务详情抽屉
+        async function openTaskDetailDrawer(taskId) {
+            // 先从缓存中查找
+            let task = workspaceTasksCache.find(t => t.id === taskId);
+
+            // 如果缓存中没有，从API获取
+            if (!task) {
+                try {
+                    const res = await authFetch(`${API_URL}/tasks/${taskId}`);
+                    if (res && res.ok) {
+                        task = await res.json();
+                    } else {
+                        alert('无法获取任务详情');
+                        return;
+                    }
+                } catch (e) {
+                    console.error('Failed to fetch task:', e);
+                    alert('获取任务详情失败');
+                    return;
+                }
+            }
+
+            currentDrawerTaskId = taskId;
+
+            // 填充基本信息
+            document.getElementById('drawerTaskTitle').textContent = task.title || '任务详情';
+
+            // 状态
+            const status = DRAWER_STATUS_MAP[task.status] || { text: task.status, class: '' };
+            document.getElementById('drawerStatus').innerHTML = `<span class="status-badge ${status.class}">${status.text}</span>`;
+
+            // 优先级
+            const priority = DRAWER_PRIORITY_MAP[task.priority] || { text: task.priority || '-', color: '#a0aec0' };
+            document.getElementById('drawerPriority').innerHTML = `<span style="color:${priority.color}; font-weight:600;">${priority.text}</span>`;
+
+            // 类型
+            const category = DRAWER_CATEGORY_MAP[task.category] || { text: task.category || '-', color: '#4a5568' };
+            document.getElementById('drawerCategory').innerHTML = `<span style="color:${category.color}; font-weight:600;">${category.text}</span>`;
+
+            // 负责人
+            document.getElementById('drawerOwner').textContent = task.owner || task.owner_name || '未分配';
+
+            // 工时
+            document.getElementById('drawerEstHours').textContent = task.estimated_hours ? `${task.estimated_hours}h` : '-';
+
+            // 开发工时（只计算进行中状态的累计时长）
+            const devSeconds = task.dev_hours || 0;
+            const estimatedSeconds = (task.estimated_hours || 0) * 3600;
+            const isDevOvertime = estimatedSeconds > 0 && devSeconds > estimatedSeconds;
+            document.getElementById('drawerDevHours').innerHTML = devSeconds > 0
+                ? `<span style="color:${isDevOvertime ? '#e53e3e' : '#38a169'}; font-weight:600;">${formatDuration(devSeconds)}</span>`
+                : '-';
+
+            // 任务周期（从认领到归档的总时长）
+            const actualSeconds = task.actual_hours || 0;
+            document.getElementById('drawerActualHours').innerHTML = actualSeconds > 0
+                ? `<span style="font-weight:600;">${formatDuration(actualSeconds)}</span>`
+                : '-';
+
+            // 认领时间
+            document.getElementById('drawerClaimedAt').textContent = task.claimed_at
+                ? formatDateTimeUnified(task.claimed_at)
+                : '-';
+
+            // 截止时间（显示完整日期时间）
+            document.getElementById('drawerDeadline').textContent = task.deadline
+                ? formatDateTimeUnified(task.deadline)
+                : '-';
+
+            // 创建时间
+            document.getElementById('drawerCreatedAt').textContent = formatDateTimeUnified(task.created_at);
+
+            // 关联模型
+            const modelInfo = document.getElementById('drawerModelInfo');
+            if (task.linked_model_id && task.linked_model_name) {
+                const isModelDeleted = task.linked_model_is_deleted === 1;
+                const deletedWarning = isModelDeleted
+                    ? `<div style="background:#fed7d7;color:#c53030;padding:6px 10px;border-radius:6px;font-size:0.85em;margin-bottom:8px;display:flex;align-items:center;gap:4px;">
+                        <span style="font-size:1.1em;">⚠</span> 该模型已被管理员删除
+                       </div>`
+                    : '';
+                let sourceInfo = '';
+                if (task.linked_model_source_system || task.linked_model_source_table) {
+                    sourceInfo = `
+                        <div style="margin-top:10px; padding-top:10px; border-top:1px dashed #e2e8f0;">
+                            <div style="font-size:0.8em; color:#718096; margin-bottom:6px;">数据来源</div>
+                            ${task.linked_model_source_system ? `<div style="font-size:0.9em;"><span style="color:#718096;">来源系统:</span> <strong style="color:#2c5282;">${escapeHtml(task.linked_model_source_system)}</strong></div>` : ''}
+                            ${task.linked_model_source_table ? `<div style="font-size:0.9em; margin-top:4px;"><span style="color:#718096;">来源表:</span> <code style="background:#edf2f7; padding:2px 6px; border-radius:3px; font-size:0.9em;">${escapeHtml(task.linked_model_source_table)}</code></div>` : ''}
+                        </div>`;
+                }
+                modelInfo.innerHTML = `
+                    ${deletedWarning}
+                    <div class="model-name" ${isModelDeleted ? 'style="text-decoration:line-through;color:#a0aec0;"' : ''}>${escapeHtml(task.linked_model_name)}</div>
+                    ${task.linked_model_desc ? `<div class="model-desc">${escapeHtml(task.linked_model_desc)}</div>` : ''}
+                    ${isModelDeleted ? '' : `<div class="model-actions">
+                        <a href="/Model_Center.html?search=${encodeURIComponent(task.linked_model_name)}" target="_blank">查看模型 →</a>
+                    </div>`}
+                    ${sourceInfo}
+                `;
+            } else {
+                modelInfo.innerHTML = '<span style="color:#a0aec0;">未关联模型</span>';
+            }
+
+            // 备注
+            const remarkEl = document.getElementById('drawerRemark');
+            remarkEl.innerHTML = task.remark
+                ? `<div style="white-space:pre-wrap;">${escapeHtml(task.remark)}</div>`
+                : '<span style="color:#a0aec0;">暂无备注</span>';
+
+            // 加载操作记录
+            loadTaskOperationLogs(taskId);
+
+            // 开发笔记
+            const devNotesSection = document.getElementById('drawerDevNotesSection');
+            const devNotesEl = document.getElementById('drawerDevNotes');
+            if (task.dev_notes) {
+                devNotesSection.style.display = 'block';
+                devNotesEl.innerHTML = `<div style="white-space:pre-wrap;">${escapeHtml(task.dev_notes)}</div>`;
+            } else {
+                devNotesSection.style.display = 'none';
+            }
+
+            // 提交说明
+            const submissionSection = document.getElementById('drawerSubmissionSection');
+            const submissionEl = document.getElementById('drawerSubmission');
+            if (task.submission && ['DONE', 'ARCHIVED'].includes(task.status)) {
+                submissionSection.style.display = 'block';
+                submissionEl.innerHTML = `<div style="white-space:pre-wrap;">${escapeHtml(task.submission)}</div>`;
+            } else {
+                submissionSection.style.display = 'none';
+            }
+
+            // 加载附件
+            loadTaskAttachments(taskId);
+
+            // 显示抽屉
+            document.getElementById('taskDetailDrawer').classList.add('open');
+            document.body.style.overflow = 'hidden';
+        }
+
+        // 关闭抽屉
+        function closeTaskDetailDrawer() {
+            document.getElementById('taskDetailDrawer').classList.remove('open');
+            document.body.style.overflow = '';
+            currentDrawerTaskId = null;
+        }
+
+        // 从抽屉跳转到任务池
+        function goToTaskFromDrawer() {
+            if (currentDrawerTaskId) {
+                window.location.href = `/Task_Pool.html?taskId=${currentDrawerTaskId}`;
+            }
+        }
+
+        // 加载操作记录
+        async function loadTaskOperationLogs(taskId) {
+            const sectionEl = document.getElementById('drawerOperationHistorySection');
+            const contentEl = document.getElementById('drawerOperationHistory');
+
+            try {
+                const response = await authFetch(`${API_URL}/tasks/${taskId}/operation-logs`);
+                if (!response || !response.ok) {
+                    sectionEl.style.display = 'none';
+                    return;
+                }
+
+                const logs = await response.json();
+                if (logs && logs.length > 0) {
+                    sectionEl.style.display = 'block';
+
+                    const operationTypeMap = {
+                        'PUBLISH': '发布任务',
+                        'CLAIM': '领取任务',
+                        'ASSIGN': '分配任务',
+                        'UNCLAIM': '放弃任务',
+                        'SUBMIT': '提交任务',
+                        'ARCHIVE': '验收归档',
+                        'REOPEN': '退回任务',
+                        'TRANSFER': '转发任务',
+                        'TRANSFER_ACCEPT': '接受转发',
+                        'TRANSFER_REJECT': '拒绝转发',
+                        'TRANSFER_CANCEL': '取消转发',
+                        'HOLD': '标记存疑',
+                        'RESOLVE': '解除存疑'
+                    };
+
+                    contentEl.innerHTML = logs.map(log => {
+                        const timeStr = log.created_at ? formatDateTimeUnified(log.created_at, 'short') : '-';
+                        const opType = operationTypeMap[log.operation_type] || log.operation_type;
+                        const operator = log.operator || '系统';
+                        const showReason = !['CLAIM', 'PUBLISH', 'ARCHIVE'].includes(log.operation_type);
+                        const reason = showReason && log.reason ? log.reason : '';
+
+                        return `<div class="operation-timeline-item">
+                            <div class="op-line-time">${timeStr}</div>
+                            <div class="op-line-content">
+                                <span class="op-tag op-tag-${log.operation_type}">${opType}</span>
+                                <span class="op-operator">${escapeHtml(operator)}</span>
+                                ${reason ? `<span class="op-reason">${escapeHtml(reason)}</span>` : ''}
+                            </div>
+                        </div>`;
+                    }).join('');
+                } else {
+                    sectionEl.style.display = 'none';
+                }
+            } catch (e) {
+                console.error('Failed to load operation logs:', e);
+                sectionEl.style.display = 'none';
+            }
+        }
+
+        // 加载附件
+        async function loadTaskAttachments(taskId) {
+            const sectionEl = document.getElementById('drawerAttachmentsSection');
+            const contentEl = document.getElementById('drawerAttachments');
+
+            try {
+                const response = await authFetch(`${API_URL}/tasks/${taskId}/attachments`);
+                if (!response || !response.ok) {
+                    sectionEl.style.display = 'none';
+                    return;
+                }
+
+                const attachments = await response.json();
+                if (attachments && attachments.length > 0) {
+                    sectionEl.style.display = 'block';
+                    contentEl.innerHTML = attachments.map(att => {
+                        const storedPath = att.file_name || att.file_path || '';
+                        const fileName = att.original_name || storedPath.split('/').pop();
+                        const filePath = `${SERVER_URL}/${storedPath}`;
+                        const isPreviewable = /\.(sql|txt|log|json|md|xml|csv)$/i.test(fileName);
+                        const previewBtn = isPreviewable
+                            ? `<button onclick="previewFile('${filePath}', '${escapeHtml(fileName)}')" class="btn-sm btn-primary" style="padding:2px 8px; font-size:0.8em; margin-right:8px;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 2px;"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg> 预览</button>`
+                            : '';
+
+                        return `<div class="drawer-attachment-item">
+                            <div style="flex:1; display:flex; align-items:center;">
+                                <a href="${filePath}" target="_blank" download>
+                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 2px;"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg> ${escapeHtml(fileName)}
+                                </a>
+                            </div>
+                            ${previewBtn}
+                        </div>`;
+                    }).join('');
+                } else {
+                    sectionEl.style.display = 'none';
+                }
+            } catch (e) {
+                console.error('Failed to load attachments:', e);
+                sectionEl.style.display = 'none';
+            }
+        }
+
+        // 缓存任务数据（在 loadWorkspaceData 中调用）
+        function cacheWorkspaceTasks(data) {
+            workspaceTasksCache = [
+                ...(data.claimed || []),
+                ...(data.my_pending_review || []),
+                ...(data.my_completed || []),
+                ...(data.pending_confirm || []),
+                ...(data.published || [])
+            ];
+        }
+
+        // ==================== 统计详情弹窗 ====================
+
+        // 缓存统计详情数据
+        let statsDetailData = {
+            in_progress: [],
+            pending: [],
+            week: [],
+            month: [],
+            total: []
+        };
+
+        // 显示统计详情弹窗
+        async function showStatsDetail(type) {
+            const modal = document.getElementById('statsDetailModal');
+            const titleEl = document.getElementById('statsDetailTitle');
+            const bodyEl = document.getElementById('statsDetailBody');
+
+            const titles = {
+                'in_progress': '进行中的任务',
+                'pending': '待验收的任务',
+                'week': '近7天完成',
+                'month': '近30天完成',
+                'total': '累计完成的任务',
+                'published': '我发布的任务'
+            };
+
+            titleEl.textContent = titles[type] || '任务详情';
+            bodyEl.innerHTML = '<div class="stats-empty">加载中...</div>';
+            modal.style.display = 'flex';
+
+            try {
+                const res = await authFetch(`${API_URL}/my-workspace/stats-detail?type=${type}`);
+                if (!res || !res.ok) throw new Error('加载失败');
+
+                const tasks = await res.json();
+                statsDetailData[type] = tasks;
+
+                if (tasks.length === 0) {
+                    bodyEl.innerHTML = '<div class="stats-empty">暂无数据</div>';
+                    return;
+                }
+
+                bodyEl.innerHTML = tasks.map(task => {
+                    const priorityClass = task.priority || 'P2';
+                    const categoryLabel = CATEGORY_MAP[task.category] || task.category;
+                    const doneDate = task.done_at ? formatDate(task.done_at) : '';
+
+                    // 已发布任务显示状态和负责人
+                    let extraInfo = '';
+                    if (type === 'published') {
+                        const statusMap = { 'OPEN': '待认领', 'CLAIMED': '进行中', 'DONE': '待验收', 'ON_HOLD': '暂停' };
+                        const statusLabel = statusMap[task.status] || task.status;
+                        const ownerInfo = task.owner_name ? ` · ${escapeHtml(task.owner_name)}` : '';
+                        extraInfo = `<span class="task-status" style="font-size:0.8em; color:#78716c;">${statusLabel}${ownerInfo}</span>`;
+                    }
+
+                    return `
+                        <div class="stats-detail-item" onclick="goToTask(${task.id})">
+                            <span class="priority-badge ${priorityClass}" style="background:${getPriorityColor(priorityClass)}">${priorityClass}</span>
+                            <div class="task-info">
+                                <div class="task-title">${escapeHtml(task.title)}</div>
+                                <div class="task-meta">
+                                    ${categoryLabel}
+                                    ${task.linked_model_name ? ` · <span ${task.linked_model_is_deleted === 1 ? 'style="color:#e53e3e;"' : ''}><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg> ${escapeHtml(task.linked_model_name)}${task.linked_model_is_deleted === 1 ? ' (已删除)' : ''}</span>` : ''}
+                                </div>
+                            </div>
+                            ${type === 'published' ? extraInfo : (doneDate ? `<span class="done-date">${doneDate}</span>` : '')}
+                        </div>
+                    `;
+                }).join('');
+
+            } catch (e) {
+                console.error('加载统计详情失败:', e);
+                bodyEl.innerHTML = '<div class="stats-empty">加载失败，请重试</div>';
+            }
+        }
+
+        // 关闭统计详情弹窗
+        function closeStatsDetailModal() {
+            document.getElementById('statsDetailModal').style.display = 'none';
+        }
+
+        // 获取优先级颜色
+        function getPriorityColor(priority) {
+            const colors = {
+                'P0': '#fee2e2',
+                'P1': '#fef3c7',
+                'P2': '#e0e7ff'
+            };
+            return colors[priority] || '#e2e8f0';
+        }
+
+        // 格式化日期
+        function formatDate(dateStr) {
+            if (!dateStr) return '';
+            const date = new Date(dateStr);
+            const month = (date.getMonth() + 1).toString().padStart(2, '0');
+            const day = date.getDate().toString().padStart(2, '0');
+            return `${month}-${day}`;
+        }
+
+        // 点击弹窗外部关闭
+        document.getElementById('statsDetailModal').addEventListener('click', function(e) {
+            if (e.target === this) {
+                closeStatsDetailModal();
+            }
+        });
+    </script>
+</body>
+
+</html>

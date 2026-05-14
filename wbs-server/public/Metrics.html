@@ -1,0 +1,2747 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>智数指标中心 (Metrics Center)</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="assets/css/style.css?v=2.0">
+    <style>
+        /* 指标中心局部样式 */
+        .metrics-layout {
+            display: flex;
+            gap: 24px;
+            min-height: calc(100vh - 140px);
+        }
+
+        /* 左侧筛选面板 */
+        .filter-panel {
+            width: 240px;
+            flex-shrink: 0;
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.05);
+            height: fit-content;
+            position: sticky;
+            top: 90px;
+        }
+
+        .filter-section {
+            margin-bottom: 24px;
+        }
+
+        .filter-section:last-child {
+            margin-bottom: 0;
+        }
+
+        .filter-title {
+            font-size: 0.85em;
+            font-weight: 600;
+            color: #718096;
+            margin-bottom: 12px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .filter-list {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+
+        .filter-list li {
+            padding: 8px 12px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.9em;
+            color: #4a5568;
+            transition: all 0.2s;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .filter-list li:hover {
+            background: #f7fafc;
+        }
+
+        .filter-list li.active {
+            background: #ebf4ff;
+            color: #d97706;
+            font-weight: 600;
+        }
+
+        .filter-count {
+            font-size: 0.8em;
+            background: #e2e8f0;
+            padding: 2px 8px;
+            border-radius: 10px;
+            color: #718096;
+        }
+
+        .filter-list li.active .filter-count {
+            background: #d97706;
+            color: white;
+        }
+
+        /* 标签筛选样式 */
+        .tag-filter {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+
+        .tag-filter-item {
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 0.8em;
+            cursor: pointer;
+            transition: all 0.2s;
+            border: 1px solid #e2e8f0;
+        }
+
+        .tag-filter-item:hover {
+            transform: scale(1.05);
+        }
+
+        .tag-filter-item.active {
+            border-width: 2px;
+            font-weight: 600;
+        }
+
+        /* 右侧内容区 */
+        .metrics-content {
+            flex: 1;
+            min-width: 0;
+        }
+
+        /* Tab 栏 */
+        .metrics-tabs {
+            display: flex;
+            gap: 0;
+            margin-bottom: 20px;
+            border-bottom: 2px solid #e2e8f0;
+        }
+        .metrics-tab {
+            padding: 12px 28px;
+            font-size: 0.95em;
+            font-weight: 500;
+            color: #718096;
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+            margin-bottom: -2px;
+            transition: all 0.2s;
+            user-select: none;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .metrics-tab:hover {
+            color: #4a5568;
+            background: #f7fafc;
+        }
+        .metrics-tab.active {
+            color: #d97706;
+            border-bottom-color: #d97706;
+            font-weight: 600;
+        }
+        .metrics-tab .tab-count {
+            font-size: 0.8em;
+            background: #edf2f7;
+            color: #718096;
+            padding: 1px 8px;
+            border-radius: 10px;
+        }
+        .metrics-tab.active .tab-count {
+            background: #fef3c7;
+            color: #d97706;
+        }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+
+        /* 考核口径标签 */
+        .assess-note-block {
+            background: #fffbeb;
+            border-left: 3px solid #d97706;
+            padding: 10px 14px;
+            margin-top: 8px;
+            border-radius: 0 6px 6px 0;
+            font-size: 0.88em;
+            color: #92400e;
+            line-height: 1.7;
+            white-space: pre-wrap;
+        }
+        .assess-note-label {
+            font-weight: 600;
+            color: #d97706;
+            margin-right: 6px;
+        }
+        /* 考核指标代码块 */
+        .assess-dax-block {
+            background: #1e293b;
+            color: #e2e8f0;
+            padding: 16px;
+            border-radius: 8px;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 0.85em;
+            line-height: 1.6;
+            overflow-x: auto;
+            white-space: pre-wrap;
+            position: relative;
+        }
+        .assess-dax-block .copy-btn {
+            position: absolute;
+            top: 8px; right: 8px;
+            background: rgba(255,255,255,0.1);
+            border: none; color: #a0aec0;
+            padding: 4px 10px; border-radius: 4px;
+            cursor: pointer; font-size: 0.85em;
+        }
+        .assess-dax-block .copy-btn:hover {
+            background: rgba(255,255,255,0.2); color: #fff;
+        }
+        .assess-empty {
+            text-align: center;
+            padding: 60px 20px;
+            color: #a0aec0;
+        }
+        .assess-empty svg {
+            width: 48px; height: 48px;
+            margin-bottom: 12px; stroke: #cbd5e0;
+        }
+
+        /* 顶部工具栏 */
+        .metrics-toolbar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            gap: 16px;
+        }
+
+        .search-box {
+            flex: 1;
+            max-width: 400px;
+            position: relative;
+        }
+
+        .search-box input {
+            width: 100%;
+            padding: 12px 16px 12px 44px;
+            border: 2px solid #e2e8f0;
+            border-radius: 10px;
+            font-size: 0.95em;
+            outline: none;
+            transition: all 0.2s;
+        }
+
+        .search-box input:focus {
+            border-color: #d97706;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+
+        .search-box svg {
+            position: absolute;
+            left: 14px;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 20px;
+            height: 20px;
+            stroke: #a0aec0;
+        }
+
+        .add-metric-btn {
+            background: linear-gradient(135deg, #d97706 0%, #b45309 100%);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 10px;
+            font-size: 0.95em;
+            font-weight: 600;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            transition: all 0.2s;
+        }
+
+        .add-metric-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        }
+
+        .add-metric-btn svg {
+            width: 18px;
+            height: 18px;
+        }
+
+        /* 指标卡片列表 */
+        .metrics-list {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        /* 统计概览 */
+        .metrics-overview {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 16px;
+            flex-wrap: wrap;
+        }
+        .overview-card {
+            flex: 1;
+            min-width: 120px;
+            background: white;
+            border-radius: 10px;
+            padding: 14px 18px;
+            border: 1px solid #e2e8f0;
+            text-align: center;
+        }
+        .overview-card .ov-num {
+            font-size: 1.6em;
+            font-weight: 700;
+            color: #2d3748;
+            line-height: 1.2;
+        }
+        .overview-card .ov-label {
+            font-size: 0.8em;
+            color: #718096;
+            margin-top: 2px;
+        }
+
+        /* 域分组 */
+        .domain-group {
+            background: white;
+            border-radius: 12px;
+            border: 1px solid #e2e8f0;
+            overflow: hidden;
+        }
+        .domain-group-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px 20px;
+            cursor: pointer;
+            user-select: none;
+            background: #f8fafc;
+            border-bottom: 1px solid #e2e8f0;
+            transition: background 0.15s;
+        }
+        .domain-group-header:hover {
+            background: #edf2f7;
+        }
+        .domain-group-header .dg-left {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .domain-group-header .dg-arrow {
+            transition: transform 0.2s;
+            color: #a0aec0;
+            font-size: 0.8em;
+        }
+        .domain-group-header.collapsed .dg-arrow {
+            transform: rotate(-90deg);
+        }
+        .domain-group-header .dg-name {
+            font-weight: 600;
+            font-size: 0.95em;
+            color: #2d3748;
+        }
+        .domain-group-header .dg-count {
+            font-size: 0.8em;
+            color: #718096;
+            background: #edf2f7;
+            padding: 2px 8px;
+            border-radius: 10px;
+        }
+        .domain-group-body {
+            transition: max-height 0.3s ease;
+            overflow: hidden;
+        }
+        .domain-group-body.collapsed {
+            max-height: 0 !important;
+        }
+
+        /* 紧凑行 */
+        .metric-row {
+            display: flex;
+            align-items: center;
+            padding: 10px 20px;
+            border-bottom: 1px solid #f0f0f0;
+            cursor: pointer;
+            transition: background 0.1s;
+            gap: 12px;
+        }
+        .metric-row:last-child {
+            border-bottom: none;
+        }
+        .metric-row:hover {
+            background: #f7fafc;
+        }
+        .metric-row .mr-code {
+            font-size: 0.78em;
+            color: #d97706;
+            font-family: 'Consolas', monospace;
+            background: #fffbeb;
+            padding: 2px 6px;
+            border-radius: 3px;
+            min-width: 70px;
+            text-align: center;
+        }
+        .metric-row .mr-name {
+            font-weight: 600;
+            font-size: 0.92em;
+            color: #2d3748;
+            flex: 1;
+            min-width: 0;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .metric-row .mr-source {
+            font-size: 0.75em;
+            color: #718096;
+            font-family: 'Consolas', monospace;
+            background: #f0f4f8;
+            padding: 1px 8px;
+            border-radius: 3px;
+            white-space: nowrap;
+            max-width: 280px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .metric-row .mr-unit {
+            font-size: 0.78em;
+            color: #a0aec0;
+            min-width: 36px;
+            text-align: center;
+        }
+        .metric-row .mr-status {
+            font-size: 0.72em;
+            padding: 2px 6px;
+            border-radius: 3px;
+        }
+        .metric-row .mr-status.active {
+            background: #c6f6d5;
+            color: #276749;
+        }
+        .metric-row .mr-status.deprecated {
+            background: #fed7d7;
+            color: #9b2c2c;
+        }
+        .metric-row .mr-expand {
+            color: #a0aec0;
+            font-size: 0.75em;
+            transition: transform 0.2s;
+        }
+        .metric-row.expanded .mr-expand {
+            transform: rotate(180deg);
+        }
+        .metric-row.expanded {
+            background: #f0f7ff;
+            border-left: 3px solid #3b82f6;
+        }
+        .mr-tree-line {
+            display: inline-flex;
+            align-items: center;
+            justify-content: flex-end;
+            flex-shrink: 0;
+            color: #cbd5e0;
+            font-size: 0.8em;
+            font-family: monospace;
+            letter-spacing: -2px;
+            user-select: none;
+        }
+
+        .mr-level {
+            font-size: 0.68em;
+            font-weight: 700;
+            font-family: 'Consolas', monospace;
+            padding: 1px 6px;
+            border-radius: 3px;
+            color: white;
+            flex-shrink: 0;
+            letter-spacing: 0.5px;
+        }
+        .mr-level.l0 { background: #6366f1; }
+        .mr-level.l1 { background: #8b5cf6; }
+        .mr-level.l2 { background: #a855f7; }
+        .mr-level.l3 { background: #d946ef; }
+        .mr-level.l4 { background: #ec4899; }
+        .mr-level.l5 { background: #f43f5e; }
+        .mr-level.l6 { background: #f97316; }
+        .mr-level.l7 { background: #eab308; }
+
+        /* 展开详情面板 */
+        .metric-detail {
+            display: none;
+            padding: 16px 20px 16px 40px;
+            background: #f7faff;
+            border-bottom: 1px solid #e2e8f0;
+            border-left: 3px solid #3b82f6;
+            animation: slideDown 0.2s ease;
+        }
+        .metric-detail.show {
+            display: block;
+        }
+        @keyframes slideDown {
+            from { opacity: 0; transform: translateY(-8px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .metric-detail .md-section {
+            margin-bottom: 10px;
+        }
+        .metric-detail .md-section:last-child {
+            margin-bottom: 0;
+        }
+        .metric-detail .md-label {
+            font-size: 0.75em;
+            color: #718096;
+            margin-bottom: 3px;
+            font-weight: 500;
+        }
+        .metric-detail .md-value {
+            font-size: 0.88em;
+            color: #4a5568;
+            line-height: 1.5;
+        }
+        .metric-detail .md-sql {
+            background: #1e293b;
+            color: #67e8f9;
+            padding: 10px 14px;
+            padding-top: 28px;
+            border-radius: 6px;
+            font-family: 'Consolas', monospace;
+            font-size: 0.82em;
+            line-height: 1.6;
+            white-space: pre;
+            position: relative;
+            overflow-x: auto;
+        }
+        .metric-detail .md-sql .sql-toolbar {
+            position: absolute;
+            top: 4px;
+            right: 6px;
+            display: flex;
+            gap: 4px;
+        }
+        .metric-detail .md-sql .copy-btn,
+        .metric-detail .md-sql .expand-btn {
+            background: rgba(255,255,255,0.1);
+            border: none;
+            color: #94a3b8;
+            padding: 2px 8px;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 0.85em;
+        }
+        .metric-detail .md-sql .copy-btn:hover,
+        .metric-detail .md-sql .expand-btn:hover {
+            background: rgba(255,255,255,0.2);
+            color: #e2e8f0;
+        }
+        .code-modal-overlay {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.6);
+            z-index: 9999;
+            justify-content: center;
+            align-items: center;
+            padding: 40px;
+        }
+        .code-modal-overlay.show { display: flex; }
+        .code-modal {
+            background: #1e293b;
+            border-radius: 10px;
+            width: 90vw;
+            max-height: 85vh;
+            overflow: auto;
+            padding: 20px 24px;
+            position: relative;
+        }
+        .code-modal-title { color: #94a3b8; font-size: 0.8em; margin-bottom: 12px; }
+        .code-modal pre {
+            color: #67e8f9;
+            font-family: 'Consolas', monospace;
+            font-size: 0.92em;
+            line-height: 1.7;
+            white-space: pre-wrap;
+            word-break: break-word;
+            margin: 0;
+        }
+        .code-modal pre.dax { color: #a5d8ff; }
+        .code-modal-toolbar {
+            position: absolute;
+            top: 12px;
+            right: 16px;
+            display: flex;
+            gap: 6px;
+        }
+        .code-modal-toolbar button {
+            background: rgba(255,255,255,0.1);
+            border: none;
+            color: #94a3b8;
+            padding: 4px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.85em;
+        }
+        .code-modal-toolbar button:hover { background: rgba(255,255,255,0.2); color: #e2e8f0; }
+        .metric-detail .md-sql.dax {
+            background: #1a2332;
+            color: #a5d8ff;
+        }
+        .metric-detail .md-tech-row {
+            display: flex;
+            gap: 12px;
+            align-items: stretch;
+        }
+        .metric-detail .md-tech-col {
+            flex: 1;
+            min-width: 0;
+            display: flex;
+            flex-direction: column;
+        }
+        .metric-detail .md-tech-col .md-sql {
+            flex: 1;
+        }
+        .metric-detail .md-tech-tag {
+            display: inline-block;
+            align-self: flex-start;
+            font-size: 0.72em;
+            font-weight: 600;
+            padding: 1px 8px;
+            border-radius: 3px;
+            margin-bottom: 4px;
+            background: #0ea5e9;
+            color: white;
+            letter-spacing: 0.5px;
+        }
+        .metric-detail .md-tech-tag.dax {
+            background: #8b5cf6;
+        }
+        .metric-detail .md-actions {
+            display: flex;
+            gap: 8px;
+            margin-top: 10px;
+            justify-content: flex-end;
+        }
+        .metric-detail .md-meta-row {
+            display: flex;
+            gap: 16px;
+            flex-wrap: wrap;
+            margin-bottom: 10px;
+        }
+        .metric-detail .md-meta-item {
+            font-size: 0.8em;
+            color: #718096;
+        }
+        .metric-detail .md-meta-item strong {
+            color: #4a5568;
+        }
+
+        .metric-type-badge {
+            font-size: 0.75em;
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-weight: 500;
+        }
+
+        .metric-type-badge.atomic {
+            background: #e6fffa;
+            color: #319795;
+        }
+
+        .metric-type-badge.derived {
+            background: #fef3c7;
+            color: #d97706;
+        }
+
+        .metric-type-badge.composite {
+            background: #ede9fe;
+            color: #7c3aed;
+        }
+
+        .metric-tag {
+            font-size: 0.75em;
+            padding: 3px 10px;
+            border-radius: 12px;
+            color: white;
+            font-weight: 500;
+        }
+
+        .metric-actions {
+            display: flex;
+            gap: 8px;
+        }
+
+        .metric-action-btn {
+            padding: 6px 12px;
+            border: 1px solid #e2e8f0;
+            background: white;
+            border-radius: 6px;
+            font-size: 0.8em;
+            color: #718096;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .metric-action-btn:hover {
+            border-color: #d97706;
+            color: #d97706;
+        }
+
+        .metric-action-btn-danger:hover {
+            border-color: #dc2626;
+            color: #dc2626;
+            background: #fef2f2;
+        }
+
+        .metric-action-btn svg {
+            width: 14px;
+            height: 14px;
+        }
+
+        /* 空状态 */
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: #a0aec0;
+        }
+
+        .empty-state svg {
+            width: 80px;
+            height: 80px;
+            stroke: #cbd5e0;
+            margin-bottom: 16px;
+        }
+
+        .empty-state h3 {
+            color: #718096;
+            margin-bottom: 8px;
+        }
+
+        /* 弹窗样式 */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.5);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .modal-overlay.show {
+            display: flex;
+        }
+
+        .modal-content {
+            background: white;
+            border-radius: 16px;
+            width: 90%;
+            max-width: 700px;
+            max-height: 90vh;
+            overflow-y: auto;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+        }
+
+        .modal-header {
+            padding: 20px 24px;
+            border-bottom: 1px solid #e2e8f0;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .modal-header h3 {
+            margin: 0;
+            color: #2d3748;
+        }
+
+        .modal-close {
+            background: none;
+            border: none;
+            font-size: 1.5em;
+            color: #a0aec0;
+            cursor: pointer;
+            padding: 0;
+            line-height: 1;
+        }
+
+        .modal-close:hover {
+            color: #718096;
+        }
+
+        .modal-body {
+            padding: 24px;
+        }
+
+        .form-row {
+            display: flex;
+            gap: 16px;
+            margin-bottom: 16px;
+        }
+
+        .form-group {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .form-group.full-width {
+            flex: none;
+            width: 100%;
+        }
+
+        .form-group label {
+            font-size: 0.85em;
+            font-weight: 600;
+            color: #4a5568;
+        }
+
+        .form-group label .required {
+            color: #e53e3e;
+        }
+
+        .form-group input,
+        .form-group select,
+        .form-group textarea {
+            padding: 10px 12px;
+            border: 2px solid #e2e8f0;
+            border-radius: 8px;
+            font-size: 0.95em;
+            outline: none;
+            transition: all 0.2s;
+        }
+
+        .form-group input:focus,
+        .form-group select:focus,
+        .form-group textarea:focus {
+            border-color: #d97706;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+
+        .form-group textarea {
+            min-height: 80px;
+            resize: vertical;
+            font-family: inherit;
+        }
+
+        .form-group textarea.code-input {
+            font-family: 'Consolas', monospace;
+            background: #f7fafc;
+        }
+
+        .tag-selector {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+
+        /* 依赖指标搜索输入框 */
+        .dep-input-wrap {
+            position: relative;
+            border: 1px solid #d1d5db;
+            border-radius: 6px;
+            padding: 4px 8px;
+            background: #fff;
+            cursor: text;
+            min-height: 38px;
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 4px;
+        }
+        .dep-input-wrap:focus-within {
+            border-color: #667eea;
+            box-shadow: 0 0 0 2px rgba(102,126,234,0.15);
+        }
+        .dep-tags {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 4px;
+        }
+        .dep-tag {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            background: #eef2ff;
+            color: #4338ca;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 0.82em;
+            white-space: nowrap;
+        }
+        .dep-tag .dep-tag-remove {
+            cursor: pointer;
+            font-size: 14px;
+            line-height: 1;
+            color: #6366f1;
+            opacity: 0.6;
+        }
+        .dep-tag .dep-tag-remove:hover { opacity: 1; }
+        #depSearchInput {
+            border: none;
+            outline: none;
+            flex: 1;
+            min-width: 120px;
+            font-size: 0.9em;
+            padding: 4px 0;
+            background: transparent;
+        }
+        .dep-dropdown {
+            display: none;
+            position: absolute;
+            top: 100%;
+            left: 0;
+            right: 0;
+            background: #fff;
+            border: 1px solid #d1d5db;
+            border-radius: 6px;
+            margin-top: 4px;
+            max-height: 200px;
+            overflow-y: auto;
+            z-index: 1100;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        }
+        .dep-dropdown.show { display: block; }
+        .dep-dropdown-item {
+            padding: 8px 12px;
+            cursor: pointer;
+            font-size: 0.88em;
+        }
+        .dep-dropdown-item:hover { background: #f3f4f6; }
+        .dep-dropdown-item .dep-item-code { color: #6b7280; }
+        .dep-dropdown-item .dep-item-name { color: #111827; margin-left: 6px; }
+        .dep-dropdown-empty {
+            padding: 8px 12px;
+            color: #9ca3af;
+            font-size: 0.85em;
+        }
+
+        .tag-checkbox {
+            display: none;
+        }
+
+        .tag-label {
+            padding: 6px 12px;
+            border-radius: 16px;
+            font-size: 0.85em;
+            cursor: pointer;
+            transition: all 0.2s;
+            border: 2px solid transparent;
+            opacity: 0.6;
+        }
+
+        .tag-checkbox:checked + .tag-label {
+            opacity: 1;
+            border-color: currentColor;
+        }
+
+        .modal-footer {
+            padding: 16px 24px;
+            border-top: 1px solid #e2e8f0;
+            display: flex;
+            justify-content: flex-end;
+            gap: 12px;
+        }
+
+        .btn-cancel {
+            padding: 10px 20px;
+            border: 1px solid #e2e8f0;
+            background: white;
+            border-radius: 8px;
+            font-size: 0.9em;
+            cursor: pointer;
+            color: #718096;
+        }
+
+        .btn-cancel:hover {
+            background: #f7fafc;
+        }
+
+        .btn-submit {
+            padding: 10px 24px;
+            border: none;
+            background: linear-gradient(135deg, #d97706 0%, #b45309 100%);
+            color: white;
+            border-radius: 8px;
+            font-size: 0.9em;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .btn-submit:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        }
+
+        /* 版本历史弹窗 */
+        .history-timeline {
+            position: relative;
+            padding-left: 24px;
+        }
+
+        .history-timeline::before {
+            content: '';
+            position: absolute;
+            left: 7px;
+            top: 0;
+            bottom: 0;
+            width: 2px;
+            background: #e2e8f0;
+        }
+
+        .history-item {
+            position: relative;
+            padding: 16px;
+            margin-bottom: 16px;
+            background: #f7fafc;
+            border-radius: 8px;
+        }
+
+        .history-item::before {
+            content: '';
+            position: absolute;
+            left: -21px;
+            top: 20px;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #d97706;
+            border: 2px solid white;
+        }
+
+        .history-item.current::before {
+            background: #38a169;
+        }
+
+        .history-version {
+            font-weight: 600;
+            color: #2d3748;
+            margin-bottom: 4px;
+        }
+
+        .history-meta {
+            font-size: 0.85em;
+            color: #718096;
+            margin-bottom: 8px;
+        }
+
+        .history-reason {
+            font-size: 0.9em;
+            color: #4a5568;
+            background: white;
+            padding: 8px 12px;
+            border-radius: 6px;
+            margin-top: 8px;
+        }
+
+        /* 状态徽章 */
+        .status-badge {
+            font-size: 0.75em;
+            padding: 2px 8px;
+            border-radius: 4px;
+        }
+
+        .status-badge.active {
+            background: #c6f6d5;
+            color: #276749;
+        }
+
+        .status-badge.deprecated {
+            background: #fed7d7;
+            color: #9b2c2c;
+        }
+    </style>
+</head>
+
+<body>
+
+    <!-- 顶部导航栏 (Fixed Header) -->
+    <nav class="navbar fixed-header">
+        <div class="nav-left">
+            <div class="nav-logo">
+                <svg viewBox="0 0 24 24" fill="none" stroke="url(#logo-gradient)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <defs>
+                        <linearGradient id="logo-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                            <stop offset="0%" style="stop-color:#d97706"/>
+                            <stop offset="100%" style="stop-color:#b45309"/>
+                        </linearGradient>
+                    </defs>
+                    <circle cx="12" cy="12" r="10"/>
+                    <path d="M12 6v6l4 2"/>
+                </svg>
+            </div>
+            <div class="nav-title">智数协同平台</div>
+        </div>
+        <div class="nav-right">
+            <a href="/Task_Pool.html" class="nav-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M9 11l3 3L22 4"/>
+                    <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
+                </svg>
+                任务池
+            </a>
+            <a href="/Data_Collab.html" class="nav-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+                    <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+                </svg>
+                数据协作
+            </a>
+            <a href="/Issue_Tracker.html" class="nav-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="10"/>
+                    <line x1="12" y1="8" x2="12" y2="12"/>
+                    <line x1="12" y1="16" x2="12.01" y2="16"/>
+                </svg>
+                问题跟踪
+            </a>
+            <a href="/My_Workspace.html" class="nav-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+                    <circle cx="12" cy="7" r="4"/>
+                </svg>
+                我的工作台
+            </a>
+            <!-- 数据中心下拉菜单 -->
+            <div class="nav-dropdown">
+                <button class="nav-dropdown-trigger" style="color:#d97706; font-weight:600;">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <ellipse cx="12" cy="5" rx="9" ry="3"/>
+                        <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/>
+                        <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>
+                    </svg>
+                    数据中心
+                    <svg class="arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="6 9 12 15 18 9"/>
+                    </svg>
+                </button>
+                <div class="nav-dropdown-menu">
+                    <a href="/Dashboard.html">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+                            <line x1="3" y1="9" x2="21" y2="9"/>
+                            <line x1="9" y1="21" x2="9" y2="9"/>
+                        </svg>
+                        建设总览
+                    </a>
+                    <a href="/Asset_Center.html">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+                            <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
+                            <line x1="12" y1="22.08" x2="12" y2="12"/>
+                        </svg>
+                        资产中心
+                    </a>
+                    <a href="/Model_Center.html">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="3" y="3" width="7" height="7"/>
+                            <rect x="14" y="3" width="7" height="7"/>
+                            <rect x="14" y="14" width="7" height="7"/>
+                            <rect x="3" y="14" width="7" height="7"/>
+                        </svg>
+                        模型中心
+                    </a>
+                    <a href="/Metrics.html" style="color:#d97706; font-weight:600;">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <line x1="18" y1="20" x2="18" y2="10"/>
+                            <line x1="12" y1="20" x2="12" y2="4"/>
+                            <line x1="6" y1="20" x2="6" y2="14"/>
+                        </svg>
+                        指标中心
+                    </a>
+                </div>
+            </div>
+            <a href="/Statistics.html" class="nav-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <line x1="12" y1="20" x2="12" y2="10"/>
+                    <line x1="18" y1="20" x2="18" y2="4"/>
+                    <line x1="6" y1="20" x2="6" y2="16"/>
+                </svg>
+                统计中心
+            </a>
+            <a href="/Doc_Viewer.html" target="_blank" class="nav-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+                    <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+                </svg>
+                文档中心
+            </a>
+            <div class="nav-divider"></div>
+            <!-- 用户头像区域 -->
+            <div id="userProfileArea"></div>
+        </div>
+    </nav>
+
+    <!-- 主工作区 -->
+    <main class="workbench-container">
+        <div class="metrics-layout">
+            <!-- 左侧筛选面板 -->
+            <aside class="filter-panel">
+                <!-- 基础指标筛选 -->
+                <div id="basicFilters">
+                <!-- 业务域筛选 -->
+                <div class="filter-section">
+                    <div class="filter-title">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+                            <path d="M3 3h18v18H3zM9 3v18M15 3v18M3 9h18M3 15h18"/>
+                        </svg>
+                        业务域
+                    </div>
+                    <ul class="filter-list" id="domainFilter">
+                        <li class="active" data-domain="">全部</li>
+                    </ul>
+                </div>
+
+                <!-- 指标类型筛选 -->
+                <div class="filter-section">
+                    <div class="filter-title">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+                            <polygon points="12 2 2 7 12 12 22 7 12 2"/>
+                            <polyline points="2 17 12 22 22 17"/>
+                            <polyline points="2 12 12 17 22 12"/>
+                        </svg>
+                        指标类型
+                    </div>
+                    <ul class="filter-list" id="typeFilter">
+                        <li class="active" data-type="">全部</li>
+                        <li data-type="atomic">原子指标</li>
+                        <li data-type="derived">派生指标</li>
+                        <li data-type="composite">复合指标</li>
+                    </ul>
+                </div>
+
+                <!-- 标签筛选 -->
+                <div class="filter-section">
+                    <div class="filter-title">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+                            <path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/>
+                            <line x1="7" y1="7" x2="7.01" y2="7"/>
+                        </svg>
+                        标签
+                    </div>
+                    <div class="tag-filter" id="tagFilter">
+                        <!-- 动态加载 -->
+                    </div>
+                </div>
+
+                <!-- 状态筛选 -->
+                <div class="filter-section">
+                    <div class="filter-title">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+                            <circle cx="12" cy="12" r="10"/>
+                            <polyline points="12 6 12 12 16 14"/>
+                        </svg>
+                        状态
+                    </div>
+                    <ul class="filter-list" id="statusFilter">
+                        <li class="active" data-status="">全部</li>
+                        <li data-status="active">启用中</li>
+                        <li data-status="deprecated">已废弃</li>
+                    </ul>
+                </div>
+                </div><!-- /basicFilters -->
+
+                <!-- 考核指标筛选 -->
+                <div id="assessFilters" style="display:none;">
+                <div class="filter-section">
+                    <div class="filter-title">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+                            <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
+                            <circle cx="9" cy="7" r="4"/>
+                            <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
+                            <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+                        </svg>
+                        考核部门
+                    </div>
+                    <ul class="filter-list" id="assessDeptFilter">
+                        <li class="active" data-dept="">全部</li>
+                    </ul>
+                </div>
+                </div><!-- /assessFilters -->
+            </aside>
+
+            <!-- 右侧内容区 -->
+            <div class="metrics-content">
+                <!-- Tab 栏 -->
+                <div class="metrics-tabs">
+                    <div class="metrics-tab active" data-tab="basic" onclick="switchTab('basic')">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+                            <line x1="18" y1="20" x2="18" y2="10"/>
+                            <line x1="12" y1="20" x2="12" y2="4"/>
+                            <line x1="6" y1="20" x2="6" y2="14"/>
+                        </svg>
+                        基础指标
+                        <span class="tab-count" id="basicCount">0</span>
+                    </div>
+                    <div class="metrics-tab" data-tab="assessment" onclick="switchTab('assessment')">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+                            <path d="M9 11l3 3L22 4"/>
+                            <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
+                        </svg>
+                        内部考核
+                        <span class="tab-count" id="assessCount">0</span>
+                    </div>
+                </div>
+
+                <!-- 基础指标 Tab -->
+                <div class="tab-content active" id="tabBasic">
+                    <!-- 工具栏 -->
+                    <div class="metrics-toolbar">
+                        <div class="search-box">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <circle cx="11" cy="11" r="8"/>
+                                <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+                            </svg>
+                            <input type="text" id="searchInput" placeholder="搜索指标编码、名称或业务定义...">
+                        </div>
+                        <button class="add-metric-btn" id="addMetricBtn" style="display:none;">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <line x1="12" y1="5" x2="12" y2="19"/>
+                                <line x1="5" y1="12" x2="19" y2="12"/>
+                            </svg>
+                            新增指标
+                        </button>
+                    </div>
+
+                    <!-- 统计概览 -->
+                    <div class="metrics-overview" id="metricsOverview"></div>
+
+                    <!-- 指标列表 -->
+                    <div class="metrics-list" id="metricsList">
+                        <!-- 动态加载 -->
+                    </div>
+                </div>
+
+                <!-- 内部考核 Tab -->
+                <div class="tab-content" id="tabAssessment">
+                    <div class="metrics-toolbar">
+                        <div style="flex:1"></div>
+                        <button class="add-metric-btn" id="addAssessBtn" style="display:none;">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <line x1="12" y1="5" x2="12" y2="19"/>
+                                <line x1="5" y1="12" x2="19" y2="12"/>
+                            </svg>
+                            新增考核指标
+                        </button>
+                    </div>
+                    <div id="assessMetricsList">
+                        <!-- 动态加载 -->
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- 新增/编辑指标弹窗 -->
+    <div class="modal-overlay" id="metricModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="modalTitle">新增指标</h3>
+                <button class="modal-close" onclick="closeModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="metricId">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>指标编码 <span class="required">*</span></label>
+                        <input type="text" id="metricCode" placeholder="如 GMV_MONTH">
+                    </div>
+                    <div class="form-group">
+                        <label>指标名称 <span class="required">*</span></label>
+                        <input type="text" id="metricName" placeholder="如 月度成交总额">
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>业务域</label>
+                        <select id="metricDomain">
+                            <option value="">-- 选择业务域 --</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>指标类型</label>
+                        <select id="metricType">
+                            <option value="atomic">原子指标</option>
+                            <option value="derived">派生指标</option>
+                            <option value="composite">复合指标</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>数据类型</label>
+                        <select id="metricDataType">
+                            <option value="">-- 选择 --</option>
+                            <option value="DECIMAL">DECIMAL (小数)</option>
+                            <option value="INTEGER">INTEGER (整数)</option>
+                            <option value="PERCENT">PERCENT (百分比)</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>单位</label>
+                        <input type="text" id="metricUnit" placeholder="如 元、人、次、%">
+                    </div>
+                </div>
+                <!-- 复合指标：计算公式 -->
+                <div class="form-group full-width" id="formulaGroup" style="display:none;">
+                    <label>计算公式</label>
+                    <input type="text" id="metricFormula" placeholder="如 FIN_001 / FIN_004 * 100">
+                </div>
+                <!-- 派生指标：父指标 -->
+                <div class="form-row" id="parentMetricGroup" style="display:none;">
+                    <div class="form-group">
+                        <label>父指标（原子指标）</label>
+                        <select id="parentMetricId">
+                            <option value="">-- 选择父指标 --</option>
+                        </select>
+                    </div>
+                    <div class="form-group" id="dependencyGroup" style="display:none;">
+                        <label>依赖指标</label>
+                        <div class="dep-input-wrap" id="depInputWrap">
+                            <div class="dep-tags" id="depTags"></div>
+                            <input type="text" id="depSearchInput" placeholder="输入指标名称或编码搜索..." autocomplete="off">
+                            <div class="dep-dropdown" id="depDropdown"></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="form-group full-width" id="assessDeptGroup" style="display:none;">
+                    <label>归属部门</label>
+                    <input type="text" id="metricAssessDept" list="assessDeptList" placeholder="输入部门名称，如：市场部">
+                    <datalist id="assessDeptList"></datalist>
+                </div>
+                <div class="form-group full-width" id="assessNoteGroup" style="display:none;">
+                    <label>考核口径</label>
+                    <textarea id="metricAssessNote" rows="3" placeholder="描述该指标的考核统计口径，如：延迟3个月、11月起始、关联approval_pass_time、每年2月重置"></textarea>
+                </div>
+                <div class="form-group full-width">
+                    <label>业务定义</label>
+                    <textarea id="metricBizDef" placeholder="用业务语言描述指标的含义，如：当月所有已支付且未退款的订单金额总和"></textarea>
+                </div>
+                <div class="form-group full-width">
+                    <label>技术口径 (SQL)</label>
+                    <textarea id="metricTechDef" class="code-input" placeholder="SELECT SUM(pay_amount) FROM orders WHERE status = 'paid' AND refund_status IS NULL"></textarea>
+                </div>
+                <div class="form-group full-width">
+                    <label>技术口径 (DAX)</label>
+                    <textarea id="metricDaxDef" class="code-input" placeholder="CALCULATE(COUNTROWS('dwd_cont_header_df'), 'dwd_cont_header_df'[is_out] = TRUE())"></textarea>
+                </div>
+                <div class="form-group full-width">
+                    <label>来源表</label>
+                    <textarea id="metricSourceTable" rows="2" placeholder="如：dwd_cont_header_df，多表可用逗号或换行分隔"></textarea>
+                </div>
+                <div class="form-group full-width" id="metricStatusGroup" style="display:none; margin-top: 16px;">
+                    <label>指标状态</label>
+                    <select id="metricStatus">
+                        <option value="active">启用</option>
+                        <option value="deprecated">废弃</option>
+                    </select>
+                </div>
+                <div class="form-group full-width" style="margin-top: 16px;">
+                    <label>标签</label>
+                    <div class="tag-selector" id="tagSelector">
+                        <!-- 动态加载 -->
+                    </div>
+                </div>
+                <div class="form-group full-width" id="changeReasonGroup" style="display:none; margin-top: 20px;">
+                    <label>变更原因</label>
+                    <input type="text" id="changeReason" placeholder="说明本次修改的原因">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-cancel" onclick="closeModal()">取消</button>
+                <button class="btn-submit" onclick="saveMetric()">保存</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 修改密码弹窗 -->
+    <div class="modal-overlay" id="changePasswordModal">
+        <div class="modal-content" style="max-width: 400px;">
+            <div class="modal-header">
+                <h3>修改密码</h3>
+                <button class="modal-close" onclick="document.getElementById('changePasswordModal').style.display='none'">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group full-width">
+                    <label>旧密码 <span class="required">*</span></label>
+                    <input type="password" id="oldPassword" placeholder="请输入旧密码">
+                </div>
+                <div class="form-group full-width" style="margin-top: 16px;">
+                    <label>新密码 <span class="required">*</span></label>
+                    <input type="password" id="newPassword" placeholder="请输入新密码">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-cancel" onclick="document.getElementById('changePasswordModal').style.display='none'">取消</button>
+                <button class="btn-submit" onclick="confirmChangePassword()">确认修改</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 版本历史弹窗 -->
+    <div class="modal-overlay" id="historyModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>版本历史</h3>
+                <button class="modal-close" onclick="closeHistoryModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="history-timeline" id="historyTimeline">
+                    <!-- 动态加载 -->
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // 全局变量
+        let currentUser = null;
+        let allMetrics = [];
+        let allTags = [];
+        let allDomains = [];
+        let allModels = [];
+        let currentTab = 'basic';
+        let assessMetrics = [];
+        let currentFilters = {
+            domain_id: '',
+            metric_type: '',
+            tag_id: '',
+            status: '',
+            keyword: ''
+        };
+
+        // 页面初始化
+        document.addEventListener('DOMContentLoaded', async () => {
+            const authOk = await checkAuth();
+            if (!authOk) return;
+
+            // 根据角色调整导航栏（查看者隐藏工作台和任务池）
+            adjustNavbarForViewer();
+
+            try {
+                await loadBaseData();
+                await loadMetrics();
+                loadAssessMetrics(); // 预加载计数，不 await
+                setupEventListeners();
+            } catch (e) {
+                console.error('页面初始化失败:', e);
+                document.getElementById('metricsList').innerHTML = `
+                    <div class="empty-state">
+                        <h3>加载失败</h3>
+                        <p>${e.message || '请刷新页面重试'}</p>
+                    </div>
+                `;
+            }
+        });
+
+        // 查看者角色导航栏调整
+        function adjustNavbarForViewer() {
+            if (!currentUser || currentUser.role !== 'viewer') return;
+            // 隐藏"我的工作台"和"任务池"导航链接
+            document.querySelectorAll('a[href*="My_Workspace"], a[href*="Task_Pool"]').forEach(el => {
+                if (el.classList.contains('nav-item')) {
+                    el.style.display = 'none';
+                }
+            });
+        }
+
+        // 权限检查
+        async function checkAuth() {
+            const token = localStorage.getItem('token');
+            if (!token) {
+                window.location.href = '/login.html';
+                return false;
+            }
+
+            try {
+                const res = await fetch('/api/auth/me', {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                if (!res.ok) throw new Error('Token invalid');
+                currentUser = await res.json();
+                renderUserProfile();
+
+                // publisher+ 可以新增指标
+                if (['publisher', 'admin'].includes(currentUser.role)) {
+                    document.getElementById('addMetricBtn').style.display = 'flex';
+                    document.getElementById('addAssessBtn').style.display = 'flex';
+                }
+                return true;
+            } catch (e) {
+                localStorage.removeItem('token');
+                window.location.href = '/login.html';
+                return false;
+            }
+        }
+
+        // 渲染用户信息
+        function renderUserProfile() {
+            const area = document.getElementById('userProfileArea');
+            const avatarChar = (currentUser.display_name || currentUser.username).charAt(0).toUpperCase();
+            const displayName = currentUser.display_name || currentUser.username;
+            const roleMap = { admin: '管理员', publisher: '发布者', user: '数据开发', viewer: '查看者' };
+            const roleText = roleMap[currentUser.role] || currentUser.role;
+
+            // 构造下拉菜单项（与 app.js 中 updateUserUI 保持一致）
+            let menuItems = '';
+            if (currentUser.role === 'admin') {
+                menuItems += `<a href="/admin.html" style="text-decoration:none;">👥 用户管理</a>`;
+            }
+            menuItems += `<a href="#" onclick="openChangePasswordModal()">🔑 修改密码</a>`;
+            menuItems += `<a href="#" onclick="logout()" style="color:#e53e3e;">🚪 退出登录</a>`;
+
+            area.innerHTML = `
+                <div class="dropdown">
+                    <div class="user-profile">
+                        <div class="avatar-circle">${avatarChar}</div>
+                        <div class="profile-info">
+                            <span class="profile-name">${displayName}</span>
+                            <span class="profile-role">${roleText}</span>
+                        </div>
+                        <span style="font-size:0.8em;color:#a0aec0;">▼</span>
+                    </div>
+                    <div class="dropdown-content">
+                        ${menuItems}
+                    </div>
+                </div>
+            `;
+        }
+
+        // 退出登录
+        function logout() {
+            localStorage.removeItem('token');
+            window.location.href = '/login.html';
+        }
+
+        // 打开修改密码模态框
+        function openChangePasswordModal() {
+            document.getElementById('oldPassword').value = '';
+            document.getElementById('newPassword').value = '';
+            document.getElementById('changePasswordModal').style.display = 'flex';
+        }
+
+        // 确认修改密码
+        async function confirmChangePassword() {
+            const oldPassword = document.getElementById('oldPassword').value;
+            const newPassword = document.getElementById('newPassword').value;
+
+            if (!oldPassword || !newPassword) {
+                return alert('请输入旧密码和新密码');
+            }
+
+            try {
+                const token = localStorage.getItem('token');
+                const res = await fetch('/api/auth/change-password', {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${token}`,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ oldPassword, newPassword })
+                });
+
+                const data = await res.json();
+                if (res.ok) {
+                    alert('修改成功，请使用新密码重新登录');
+                    logout();
+                } else {
+                    alert(data.error || '修改失败');
+                }
+            } catch (e) {
+                alert('修改失败: ' + e.message);
+            }
+        }
+
+        // 加载基础数据
+        async function loadBaseData() {
+            const token = localStorage.getItem('token');
+            const headers = { 'Authorization': `Bearer ${token}` };
+
+            // 并行加载
+            const [domainsRes, tagsRes, modelsRes] = await Promise.all([
+                fetch('/api/domains', { headers }),
+                fetch('/api/metrics/tags/list', { headers }),
+                fetch('/api/models', { headers })
+            ]);
+
+            // 检查响应状态
+            if (!domainsRes.ok) {
+                console.error('加载业务域失败:', domainsRes.status);
+                allDomains = [];
+            } else {
+                allDomains = await domainsRes.json();
+            }
+
+            if (!tagsRes.ok) {
+                console.error('加载标签失败:', tagsRes.status);
+                allTags = [];
+            } else {
+                allTags = await tagsRes.json();
+            }
+
+            if (!modelsRes.ok) {
+                console.error('加载模型失败:', modelsRes.status);
+                allModels = [];
+            } else {
+                allModels = await modelsRes.json();
+            }
+
+            renderDomainFilter();
+            renderTagFilter();
+            renderFormSelects();
+        }
+
+        // 渲染业务域筛选
+        function renderDomainFilter() {
+            const container = document.getElementById('domainFilter');
+            container.innerHTML = '<li class="active" data-domain="">全部</li>';
+            allDomains.forEach(d => {
+                container.innerHTML += `<li data-domain="${d.id}">${d.name}</li>`;
+            });
+        }
+
+        // 渲染标签筛选
+        function renderTagFilter() {
+            const container = document.getElementById('tagFilter');
+            container.innerHTML = `<span class="tag-filter-item active" data-tag="" style="background:#f7fafc; color:#718096;">全部</span>`;
+            allTags.forEach(t => {
+                container.innerHTML += `
+                    <span class="tag-filter-item" data-tag="${t.id}" style="background:${t.color}20; color:${t.color};">${t.tag_name}</span>
+                `;
+            });
+        }
+
+        // 渲染表单下拉框
+        function renderFormSelects() {
+            // 业务域
+            const domainSelect = document.getElementById('metricDomain');
+            domainSelect.innerHTML = '<option value="">-- 选择业务域 --</option>';
+            allDomains.forEach(d => {
+                domainSelect.innerHTML += `<option value="${d.id}">${d.name}</option>`;
+            });
+
+            // 标签选择器
+            const tagSelector = document.getElementById('tagSelector');
+            tagSelector.innerHTML = '';
+            allTags.forEach(t => {
+                tagSelector.innerHTML += `
+                    <input type="checkbox" class="tag-checkbox" id="tag_${t.id}" value="${t.id}">
+                    <label class="tag-label" for="tag_${t.id}" style="background:${t.color}20; color:${t.color};">${t.tag_name}</label>
+                `;
+            });
+        }
+
+        // 加载指标列表
+        async function loadMetrics() {
+            const token = localStorage.getItem('token');
+            const params = new URLSearchParams();
+            params.append('category', 'basic');
+
+            if (currentFilters.domain_id) params.append('domain_id', currentFilters.domain_id);
+            if (currentFilters.metric_type) params.append('metric_type', currentFilters.metric_type);
+            if (currentFilters.tag_id) params.append('tag_id', currentFilters.tag_id);
+            if (currentFilters.status) params.append('status', currentFilters.status);
+            if (currentFilters.keyword) params.append('keyword', currentFilters.keyword);
+
+            const res = await fetch(`/api/metrics?${params.toString()}`, {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+
+            if (!res.ok) {
+                const err = await res.json();
+                console.error('加载指标失败:', err);
+                allMetrics = [];
+            } else {
+                allMetrics = await res.json();
+                if (!Array.isArray(allMetrics)) {
+                    console.error('API 返回非数组:', allMetrics);
+                    allMetrics = [];
+                }
+            }
+            document.getElementById('basicCount').textContent = allMetrics.length;
+            renderMetrics();
+        }
+
+        // 加载考核指标
+        async function loadAssessMetrics() {
+            const token = localStorage.getItem('token');
+            const res = await fetch('/api/metrics?category=assessment', {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            if (!res.ok) {
+                assessMetrics = [];
+            } else {
+                assessMetrics = await res.json();
+                if (!Array.isArray(assessMetrics)) assessMetrics = [];
+            }
+            document.getElementById('assessCount').textContent = assessMetrics.length;
+            renderAssessDeptFilter();
+            renderAssessMetrics();
+        }
+
+        // 渲染考核部门侧边栏
+        function renderAssessDeptFilter() {
+            const ul = document.getElementById('assessDeptFilter');
+            const depts = {};
+            for (const m of assessMetrics) {
+                const dept = m.assess_dept || '未分类';
+                depts[dept] = (depts[dept] || 0) + 1;
+            }
+            let html = `<li class="${!currentAssessDept ? 'active' : ''}" data-dept="">全部 <span class="filter-count">${assessMetrics.length}</span></li>`;
+            Object.keys(depts).sort().forEach(dept => {
+                html += `<li class="${currentAssessDept === dept ? 'active' : ''}" data-dept="${escapeHtml(dept)}">${escapeHtml(dept)} <span class="filter-count">${depts[dept]}</span></li>`;
+            });
+            ul.innerHTML = html;
+        }
+
+        // 考核部门筛选点击
+        document.getElementById('assessDeptFilter').addEventListener('click', (e) => {
+            const li = e.target.closest('li');
+            if (!li) return;
+            document.querySelectorAll('#assessDeptFilter li').forEach(l => l.classList.remove('active'));
+            li.classList.add('active');
+            currentAssessDept = li.dataset.dept;
+            renderAssessMetrics();
+        });
+
+        // 渲染考核指标
+        function renderAssessMetrics() {
+            const container = document.getElementById('assessMetricsList');
+            if (assessMetrics.length === 0) {
+                container.innerHTML = `
+                    <div class="assess-empty">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                            <path d="M9 11l3 3L22 4"/>
+                            <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
+                        </svg>
+                        <h3>暂无考核指标</h3>
+                        <p>点击"新增考核指标"创建</p>
+                    </div>`;
+                return;
+            }
+
+            let html = '';
+
+            // 按部门筛选 + 分组
+            const filtered = currentAssessDept ? assessMetrics.filter(m => (m.assess_dept || '未分类') === currentAssessDept) : assessMetrics;
+            const aGroups = {};
+            for (const m of filtered) {
+                const dept = m.assess_dept || '未分类';
+                if (!aGroups[dept]) aGroups[dept] = [];
+                aGroups[dept].push(m);
+            }
+            const aOrderSorter = (a, b) => (a.sort_order || 0) - (b.sort_order || 0) || a.id - b.id;
+            Object.values(aGroups).forEach(arr => arr.sort(aOrderSorter));
+
+            const buildAssessRow = m => `
+                <div class="metric-row" onclick="toggleMetricDetail(this)" data-id="${m.id}">
+                    <span class="mr-code">${escapeHtml(m.metric_code)}</span>
+                    <span class="mr-name">${escapeHtml(m.metric_name)}</span>
+                    ${m.source_table ? `<span class="mr-source" title="${escapeHtml(m.source_table)}">${escapeHtml(m.source_table)}</span>` : ''}
+                    <span class="metric-type-badge derived" style="font-size:0.72em;padding:2px 8px;">考核</span>
+                    ${m.unit ? `<span class="mr-unit">${escapeHtml(m.unit)}</span>` : '<span class="mr-unit">-</span>'}
+                    <span class="mr-expand">▼</span>
+                </div>
+                <div class="metric-detail" data-id="${m.id}">
+                    <div class="md-meta-row">
+                        ${m.owner_name ? `<span class="md-meta-item">负责人: <strong>${escapeHtml(m.owner_name)}</strong></span>` : ''}
+                        <span class="md-meta-item">版本: <strong>v${m.version || 1}</strong></span>
+                        ${m.data_type ? `<span class="md-meta-item">数据类型: <strong>${escapeHtml(m.data_type)}</strong></span>` : ''}
+                    </div>
+                    ${m.biz_def ? `<div class="md-section"><div class="md-label">业务口径</div><div class="md-value">${escapeHtml(m.biz_def)}</div></div>` : ''}
+                    ${m.assess_note ? `<div class="assess-note-block"><span class="assess-note-label">考核口径</span>${escapeHtml(m.assess_note)}</div>` : ''}
+                    ${m.formula ? `<div class="md-section"><div class="md-label">计算公式</div><div class="md-value">${escapeHtml(m.formula)}</div></div>` : ''}
+                    ${(m.tech_def || m.dax_def) ? `<div class="md-section"><div class="md-label">技术口径</div><div class="md-tech-row">${m.tech_def ? `<div class="md-tech-col"><div class="md-tech-tag">SQL</div><div class="md-sql"><div class="sql-toolbar"><button class="copy-btn" onclick="event.stopPropagation();copySQL(this)">复制</button><button class="expand-btn" onclick="event.stopPropagation();expandCode(this,'SQL')">放大</button></div>${formatSQL(m.tech_def)}</div></div>` : ''}${m.dax_def ? `<div class="md-tech-col"><div class="md-tech-tag dax">DAX</div><div class="md-sql dax"><div class="sql-toolbar"><button class="copy-btn" onclick="event.stopPropagation();copySQL(this)">复制</button><button class="expand-btn" onclick="event.stopPropagation();expandCode(this,'DAX')">放大</button></div>${escapeHtml(m.dax_def)}</div></div>` : ''}</div></div>` : ''}
+                    <div class="md-actions">
+                        <button class="metric-action-btn" onclick="event.stopPropagation();showHistory(${m.id})">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px;"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                            历史
+                        </button>
+                        ${canEdit(m) ? `<button class="metric-action-btn" onclick="event.stopPropagation();editMetric(${m.id})">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px;"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                            编辑
+                        </button>` : ''}
+                    </div>
+                </div>`;
+
+            Object.keys(aGroups).sort().forEach(name => {
+                const metrics = aGroups[name];
+                html += `<div class="domain-group">
+                    <div class="domain-group-header" onclick="toggleDomainGroup(this)">
+                        <div class="dg-left">
+                            <span class="dg-arrow">▼</span>
+                            <span class="dg-name">${escapeHtml(name)}</span>
+                        </div>
+                        <span class="dg-count">${metrics.length} 项</span>
+                    </div>
+                    <div class="domain-group-body" style="max-height:none;">
+                        ${metrics.map(buildAssessRow).join('')}
+                    </div>
+                </div>`;
+            });
+
+            container.innerHTML = html;
+        }
+
+        // Tab 切换
+        let currentAssessDept = ''; // 当前选中的考核部门筛选
+        function switchTab(tab) {
+            currentTab = tab;
+            document.querySelectorAll('.metrics-tab').forEach(t => {
+                t.classList.toggle('active', t.dataset.tab === tab);
+            });
+            document.getElementById('tabBasic').classList.toggle('active', tab === 'basic');
+            document.getElementById('tabAssessment').classList.toggle('active', tab === 'assessment');
+
+            // 切换侧边栏内容
+            const basicFilters = document.getElementById('basicFilters');
+            const assessFilters = document.getElementById('assessFilters');
+            if (basicFilters) basicFilters.style.display = tab === 'basic' ? '' : 'none';
+            if (assessFilters) assessFilters.style.display = tab === 'assessment' ? '' : 'none';
+
+            if (tab === 'assessment' && assessMetrics.length === 0) {
+                loadAssessMetrics();
+            }
+        }
+
+        // 渲染统计概览
+        function renderOverview() {
+            const ov = document.getElementById('metricsOverview');
+            const total = allMetrics.length;
+            const atomicCount = allMetrics.filter(m => m.metric_type === 'atomic').length;
+            const derivedCount = allMetrics.filter(m => m.metric_type === 'derived').length;
+            const compositeCount = allMetrics.filter(m => m.metric_type === 'composite').length;
+            const domainSet = new Set(allMetrics.map(m => m.domain_name).filter(Boolean));
+
+            ov.innerHTML = `
+                <div class="overview-card"><div class="ov-num">${total}</div><div class="ov-label">指标总数</div></div>
+                <div class="overview-card"><div class="ov-num">${domainSet.size}</div><div class="ov-label">业务域</div></div>
+                <div class="overview-card"><div class="ov-num" style="color:#d97706">${atomicCount}</div><div class="ov-label">原子指标</div></div>
+                <div class="overview-card"><div class="ov-num" style="color:#2563eb">${derivedCount}</div><div class="ov-label">派生指标</div></div>
+                <div class="overview-card"><div class="ov-num" style="color:#7c3aed">${compositeCount}</div><div class="ov-label">复合指标</div></div>
+            `;
+        }
+
+        // 切换域分组折叠
+        function toggleDomainGroup(header) {
+            header.classList.toggle('collapsed');
+            const body = header.nextElementSibling;
+            if (body.classList.contains('collapsed')) {
+                body.classList.remove('collapsed');
+                body.style.maxHeight = body.scrollHeight + 'px';
+            } else {
+                body.style.maxHeight = body.scrollHeight + 'px';
+                requestAnimationFrame(() => { body.classList.add('collapsed'); });
+            }
+        }
+
+        // 切换指标详情展开
+        function toggleMetricDetail(rowEl) {
+            const detail = rowEl.nextElementSibling;
+            if (!detail || !detail.classList.contains('metric-detail')) return;
+            const isOpen = detail.classList.contains('show');
+            // 关闭同组其他已展开的
+            const group = rowEl.closest('.domain-group-body');
+            if (group) {
+                group.querySelectorAll('.metric-detail.show').forEach(d => {
+                    d.classList.remove('show');
+                    d.previousElementSibling.classList.remove('expanded');
+                });
+            }
+            if (!isOpen) {
+                detail.classList.add('show');
+                rowEl.classList.add('expanded');
+            }
+        }
+
+        // 渲染指标列表
+        function renderMetrics() {
+            const container = document.getElementById('metricsList');
+            renderOverview();
+
+            if (allMetrics.length === 0) {
+                const isViewer = currentUser && currentUser.role === 'viewer';
+                const emptyTip = isViewer
+                    ? '暂无可查看的指标'
+                    : '点击右上角"新增指标"创建第一个指标';
+                container.innerHTML = `
+                    <div class="empty-state">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                            <line x1="18" y1="20" x2="18" y2="10"/>
+                            <line x1="12" y1="20" x2="12" y2="4"/>
+                            <line x1="6" y1="20" x2="6" y2="14"/>
+                        </svg>
+                        <h3>暂无指标</h3>
+                        <p>${emptyTip}</p>
+                    </div>
+                `;
+                return;
+            }
+
+            // 按域分组，组内按编码排序
+            const groups = {};
+            const noGroup = [];
+            allMetrics.forEach(m => {
+                const key = m.domain_name || '';
+                if (!key) { noGroup.push(m); return; }
+                if (!groups[key]) groups[key] = [];
+                groups[key].push(m);
+            });
+            const orderSorter = (a, b) => (a.sort_order || 0) - (b.sort_order || 0) || a.id - b.id;
+            // 父子重排：先按 sort_order/id 排好，再把子节点紧跟到父节点后面（深度优先）
+            // 否则同一组内只有 sort_order 时，子节点会按 id 平铺，导致跨过父节点显示在错误位置
+            const reorderByParent = (arr) => {
+                arr.sort(orderSorter);
+                const idSet = new Set(arr.map(m => m.id));
+                const childrenMap = new Map();
+                const roots = [];
+                arr.forEach(m => {
+                    // 自引用直接当作根节点，避免在 childrenMap 里形成自环
+                    if (m.parent_metric_id && m.parent_metric_id !== m.id && idSet.has(m.parent_metric_id)) {
+                        if (!childrenMap.has(m.parent_metric_id)) childrenMap.set(m.parent_metric_id, []);
+                        childrenMap.get(m.parent_metric_id).push(m);
+                    } else {
+                        roots.push(m);
+                    }
+                });
+                // 显式栈代替递归，避免极深嵌套时浏览器栈溢出；visited 拦截循环引用
+                const result = [];
+                const visited = new Set();
+                const visit = (start) => {
+                    const stack = [start];
+                    while (stack.length) {
+                        const m = stack.pop();
+                        if (visited.has(m.id)) continue;
+                        visited.add(m.id);
+                        result.push(m);
+                        const children = childrenMap.get(m.id);
+                        if (children) {
+                            // 反向 push 保持原有兄弟顺序（栈是 LIFO）
+                            for (let i = children.length - 1; i >= 0; i--) stack.push(children[i]);
+                        }
+                    }
+                };
+                roots.forEach(visit);
+                // 兜底：循环引用形成的孤岛（A.parent=B,B.parent=A）没有任何根可达，
+                // 按原排序追加显示，避免节点从页面消失
+                arr.forEach(m => { if (!visited.has(m.id)) result.push(m); });
+                return result;
+            };
+            Object.keys(groups).forEach(k => { groups[k] = reorderByParent(groups[k]); });
+            const noGroupSorted = reorderByParent(noGroup);
+            noGroup.length = 0;
+            noGroup.push(...noGroupSorted);
+
+            const typeLabel = t => t === 'atomic' ? '原子' : t === 'derived' ? '派生' : '复合';
+
+            // 计算指标层级深度（根据 parent_metric_id）
+            const idMap = {};
+            allMetrics.forEach(m => idMap[m.id] = m);
+            function getDepth(m) {
+                let depth = 0, cur = m;
+                while (cur && cur.parent_metric_id && idMap[cur.parent_metric_id]) {
+                    depth++;
+                    cur = idMap[cur.parent_metric_id];
+                    if (depth > 10) break; // 防循环
+                }
+                return depth;
+            }
+
+            const buildRow = m => {
+                const depth = getDepth(m);
+                const indent = depth * 28;
+                return `
+                <div class="metric-row" onclick="toggleMetricDetail(this)" data-id="${m.id}" style="padding-left:${20 + indent}px;">
+                    ${depth > 0 ? `<span class="mr-tree-line">└─</span>` : ''}
+                    <span class="mr-level l${depth}">L${depth}</span>
+                    <span class="mr-code">${escapeHtml(m.metric_code)}</span>
+                    <span class="mr-name">${escapeHtml(m.metric_name)}</span>
+                    ${m.source_table ? `<span class="mr-source" title="${escapeHtml(m.source_table)}">${escapeHtml(m.source_table)}</span>` : ''}
+                    <span class="metric-type-badge ${m.metric_type}" style="font-size:0.72em;padding:2px 8px;">${typeLabel(m.metric_type)}</span>
+                    ${m.unit ? `<span class="mr-unit">${escapeHtml(m.unit)}</span>` : '<span class="mr-unit">-</span>'}
+                    <span class="mr-status ${m.status}">${m.status === 'active' ? '启用' : '废弃'}</span>
+                    <span class="mr-expand">▼</span>
+                </div>
+                <div class="metric-detail" data-id="${m.id}" style="padding-left:${40 + indent}px;">
+                    <div class="md-meta-row">
+                        ${m.owner_name ? `<span class="md-meta-item">负责人: <strong>${escapeHtml(m.owner_name)}</strong></span>` : ''}
+                        <span class="md-meta-item">版本: <strong>v${m.version}</strong></span>
+                        ${m.data_type ? `<span class="md-meta-item">数据类型: <strong>${escapeHtml(m.data_type)}</strong></span>` : ''}
+                    </div>
+                    ${m.biz_def ? `<div class="md-section"><div class="md-label">业务口径</div><div class="md-value">${escapeHtml(m.biz_def)}</div></div>` : ''}
+                    ${(m.tech_def || m.dax_def) ? `<div class="md-section"><div class="md-label">技术口径</div><div class="md-tech-row">${m.tech_def ? `<div class="md-tech-col"><div class="md-tech-tag">SQL</div><div class="md-sql"><div class="sql-toolbar"><button class="copy-btn" onclick="event.stopPropagation();copySQL(this)">复制</button><button class="expand-btn" onclick="event.stopPropagation();expandCode(this,'SQL')">放大</button></div>${formatSQL(m.tech_def)}</div></div>` : ''}${m.dax_def ? `<div class="md-tech-col"><div class="md-tech-tag dax">DAX</div><div class="md-sql dax"><div class="sql-toolbar"><button class="copy-btn" onclick="event.stopPropagation();copySQL(this)">复制</button><button class="expand-btn" onclick="event.stopPropagation();expandCode(this,'DAX')">放大</button></div>${escapeHtml(m.dax_def)}</div></div>` : ''}</div></div>` : ''}
+                    ${(m.tagList && m.tagList.length) ? `<div class="md-section"><div class="md-label">标签</div><div class="md-value">${m.tagList.map(t => `<span class="metric-tag" style="background:${t.color};margin-right:4px;">${escapeHtml(t.name)}</span>`).join('')}</div></div>` : ''}
+                    <div class="md-actions">
+                        <button class="metric-action-btn" onclick="event.stopPropagation();showHistory(${m.id})">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px;"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                            历史
+                        </button>
+                        ${canEdit(m) ? `
+                            <button class="metric-action-btn" onclick="event.stopPropagation();editMetric(${m.id})">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px;"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                                编辑
+                            </button>
+                        ` : ''}
+                        ${canDelete() ? `
+                            <button class="metric-action-btn metric-action-btn-danger" onclick="event.stopPropagation();deleteMetric(${m.id})">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px;"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-2 14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"/></svg>
+                                删除
+                            </button>
+                        ` : ''}
+                    </div>
+                </div>`};
+
+            const buildGroup = (name, metrics) => `
+                <div class="domain-group">
+                    <div class="domain-group-header" onclick="toggleDomainGroup(this)">
+                        <div class="dg-left">
+                            <span class="dg-arrow">▼</span>
+                            <span class="dg-name">${escapeHtml(name)}</span>
+                        </div>
+                        <span class="dg-count">${metrics.length} 项</span>
+                    </div>
+                    <div class="domain-group-body" style="max-height:none;">
+                        ${metrics.map(buildRow).join('')}
+                    </div>
+                </div>`;
+
+            let html = '';
+            // 按域名排序输出
+            Object.keys(groups).sort().forEach(name => {
+                html += buildGroup(name, groups[name]);
+            });
+            // 未分组的指标
+            if (noGroup.length) {
+                html += buildGroup('未分类', noGroup);
+            }
+            container.innerHTML = html;
+        }
+
+        // 检查是否可编辑
+        function canEdit(metric) {
+            if (!currentUser) return false;
+            if (currentUser.role === 'admin') return true;
+            if (currentUser.role === 'publisher') return true;
+            return false;
+        }
+
+        // 检查是否可删除（仅管理员）
+        function canDelete() {
+            return currentUser && currentUser.role === 'admin';
+        }
+
+        // 设置事件监听
+        function setupEventListeners() {
+            // 搜索
+            let searchTimer;
+            document.getElementById('searchInput').addEventListener('input', (e) => {
+                clearTimeout(searchTimer);
+                searchTimer = setTimeout(() => {
+                    currentFilters.keyword = e.target.value.trim();
+                    loadMetrics();
+                }, 300);
+            });
+
+            // 业务域筛选
+            document.getElementById('domainFilter').addEventListener('click', (e) => {
+                if (e.target.tagName === 'LI') {
+                    document.querySelectorAll('#domainFilter li').forEach(li => li.classList.remove('active'));
+                    e.target.classList.add('active');
+                    currentFilters.domain_id = e.target.dataset.domain;
+                    loadMetrics();
+                }
+            });
+
+            // 类型筛选
+            document.getElementById('typeFilter').addEventListener('click', (e) => {
+                if (e.target.tagName === 'LI') {
+                    document.querySelectorAll('#typeFilter li').forEach(li => li.classList.remove('active'));
+                    e.target.classList.add('active');
+                    currentFilters.metric_type = e.target.dataset.type;
+                    loadMetrics();
+                }
+            });
+
+            // 标签筛选
+            document.getElementById('tagFilter').addEventListener('click', (e) => {
+                if (e.target.classList.contains('tag-filter-item')) {
+                    document.querySelectorAll('#tagFilter .tag-filter-item').forEach(t => t.classList.remove('active'));
+                    e.target.classList.add('active');
+                    currentFilters.tag_id = e.target.dataset.tag;
+                    loadMetrics();
+                }
+            });
+
+            // 状态筛选
+            document.getElementById('statusFilter').addEventListener('click', (e) => {
+                if (e.target.tagName === 'LI') {
+                    document.querySelectorAll('#statusFilter li').forEach(li => li.classList.remove('active'));
+                    e.target.classList.add('active');
+                    currentFilters.status = e.target.dataset.status;
+                    loadMetrics();
+                }
+            });
+
+            // 新增按钮
+            document.getElementById('addMetricBtn').addEventListener('click', () => {
+                openModal();
+            });
+            document.getElementById('addAssessBtn').addEventListener('click', () => {
+                openModal(null, 'assessment');
+            });
+        }
+
+        // 复制 SQL
+        function copySQL(btn) {
+            const container = btn.closest('.md-sql');
+            let code = '';
+            container.childNodes.forEach(node => {
+                if (node.nodeType === 3) code += node.textContent;
+                else if (!node.classList || !node.classList.contains('sql-toolbar')) code += node.textContent;
+            });
+            code = code.trim();
+
+            // 优先用 clipboard API，HTTP 下 fallback 到 execCommand
+            if (navigator.clipboard && window.isSecureContext) {
+                navigator.clipboard.writeText(code).then(() => showCopyOk(btn));
+            } else {
+                const ta = document.createElement('textarea');
+                ta.value = code;
+                ta.style.cssText = 'position:fixed;left:-9999px';
+                document.body.appendChild(ta);
+                ta.select();
+                document.execCommand('copy');
+                document.body.removeChild(ta);
+                showCopyOk(btn);
+            }
+        }
+        function showCopyOk(btn) {
+            const orig = btn.textContent;
+            btn.textContent = '已复制!';
+            btn.style.color = '#4ade80';
+            setTimeout(() => { btn.textContent = orig; btn.style.color = ''; }, 1500);
+        }
+
+        // 打开新增/编辑弹窗
+        let editingCategory = 'basic';
+        function openModal(metric = null, category = null) {
+            editingCategory = category || (metric && metric.metric_category) || currentTab || 'basic';
+            const modal = document.getElementById('metricModal');
+            const title = document.getElementById('modalTitle');
+            const changeReasonGroup = document.getElementById('changeReasonGroup');
+            const statusGroup = document.getElementById('metricStatusGroup');
+
+            // 重置表单
+            document.getElementById('metricId').value = '';
+            document.getElementById('metricCode').value = '';
+            document.getElementById('metricName').value = '';
+            document.getElementById('metricDomain').value = '';
+            document.getElementById('metricType').value = 'atomic';
+            document.getElementById('metricDataType').value = '';
+            document.getElementById('metricUnit').value = '';
+            document.getElementById('metricBizDef').value = '';
+            document.getElementById('metricTechDef').value = '';
+            document.getElementById('metricDaxDef').value = '';
+            document.getElementById('metricSourceTable').value = '';
+            document.getElementById('metricStatus').value = 'active';
+            document.getElementById('changeReason').value = '';
+            document.getElementById('metricFormula').value = '';
+            document.getElementById('parentMetricId').value = '';
+            document.getElementById('metricAssessDept').value = '';
+            document.getElementById('metricAssessNote').value = '';
+            clearDepSelection();
+            document.querySelectorAll('.tag-checkbox').forEach(cb => cb.checked = false);
+            toggleMetricTypeFields('atomic');
+
+            // 归属部门：仅考核指标显示
+            const isAssess = editingCategory === 'assessment';
+            document.getElementById('assessDeptGroup').style.display = isAssess ? 'block' : 'none';
+            document.getElementById('assessNoteGroup').style.display = isAssess ? 'block' : 'none';
+            if (isAssess) {
+                // 填充 datalist（已有部门自动补全）
+                const deptSet = new Set(assessMetrics.map(m => m.assess_dept).filter(Boolean));
+                document.getElementById('assessDeptList').innerHTML = Array.from(deptSet).map(d => `<option value="${escapeHtml(d)}">`).join('');
+            }
+
+            if (metric) {
+                title.textContent = '编辑指标';
+                changeReasonGroup.style.display = 'block';
+                statusGroup.style.display = 'block';
+                document.getElementById('metricId').value = metric.id;
+                document.getElementById('metricCode').value = metric.metric_code || '';
+                document.getElementById('metricName').value = metric.metric_name || '';
+                document.getElementById('metricDomain').value = metric.domain_id || '';
+                document.getElementById('metricType').value = metric.metric_type || 'atomic';
+                document.getElementById('metricDataType').value = metric.data_type || '';
+                document.getElementById('metricUnit').value = metric.unit || '';
+                document.getElementById('metricBizDef').value = metric.biz_def || '';
+                document.getElementById('metricTechDef').value = metric.tech_def || '';
+                document.getElementById('metricDaxDef').value = metric.dax_def || '';
+                document.getElementById('metricSourceTable').value = metric.source_table || '';
+                document.getElementById('metricStatus').value = metric.status || 'active';
+                document.getElementById('metricFormula').value = metric.formula || '';
+                document.getElementById('parentMetricId').value = metric.parent_metric_id || '';
+                document.getElementById('metricAssessDept').value = metric.assess_dept || '';
+                document.getElementById('metricAssessNote').value = metric.assess_note || '';
+                toggleMetricTypeFields(metric.metric_type || 'atomic');
+
+                // 回填依赖指标
+                if (metric.id) {
+                    loadDependencies(metric.id);
+                }
+
+                // 设置标签
+                (metric.tagList || []).forEach(t => {
+                    const cb = document.getElementById(`tag_${t.id}`);
+                    if (cb) cb.checked = true;
+                });
+            } else {
+                title.textContent = '新增指标';
+                changeReasonGroup.style.display = 'none';
+                statusGroup.style.display = 'none';
+            }
+
+            modal.classList.add('show');
+        }
+
+        // 关闭弹窗
+        function closeModal() {
+            document.getElementById('metricModal').classList.remove('show');
+        }
+
+        // 根据指标类型切换显示/隐藏公式和父指标字段
+        function toggleMetricTypeFields(type) {
+            const formulaGroup = document.getElementById('formulaGroup');
+            const parentMetricGroup = document.getElementById('parentMetricGroup');
+            const dependencyGroup = document.getElementById('dependencyGroup');
+
+            if (type === 'composite') {
+                formulaGroup.style.display = 'block';
+                parentMetricGroup.style.display = 'flex';
+                dependencyGroup.style.display = 'block';
+                document.getElementById('parentMetricId').closest('.form-group').style.display = 'none';
+                loadMetricOptions('dependencyIds');
+            } else if (type === 'derived') {
+                formulaGroup.style.display = 'none';
+                parentMetricGroup.style.display = 'flex';
+                dependencyGroup.style.display = 'none';
+                document.getElementById('parentMetricId').closest('.form-group').style.display = 'block';
+                loadMetricOptions('parentMetricId');
+            } else {
+                formulaGroup.style.display = 'none';
+                parentMetricGroup.style.display = 'none';
+                dependencyGroup.style.display = 'none';
+            }
+        }
+
+        // 加载指标选项到下拉框（父指标）
+        async function loadMetricOptions(selectId, filterType) {
+            const token = localStorage.getItem('token');
+            let url = '/api/metrics?status=active';
+            if (filterType) url += `&metric_type=${filterType}`;
+            try {
+                const res = await fetch(url, { headers: { 'Authorization': `Bearer ${token}` } });
+                const data = await res.json();
+                if (selectId === 'parentMetricId') {
+                    const select = document.getElementById(selectId);
+                    const currentVal = select.value;
+                    select.innerHTML = '<option value="">-- 选择父指标 --</option>';
+                    (data.data || data || []).forEach(m => {
+                        const opt = document.createElement('option');
+                        opt.value = m.id;
+                        opt.textContent = `${m.metric_code} - ${m.metric_name}`;
+                        select.appendChild(opt);
+                    });
+                    if (currentVal) select.value = currentVal;
+                } else if (selectId === 'dependencyIds') {
+                    // 缓存所有指标供搜索用
+                    window._depMetricOptions = (data.data || data || []).map(m => ({
+                        id: m.id, code: m.metric_code, name: m.metric_name
+                    }));
+                }
+            } catch(e) { console.error('加载指标选项失败', e); }
+        }
+
+        // === 依赖指标搜索输入框逻辑 ===
+        window._selectedDepIds = new Set();
+
+        function clearDepSelection() {
+            window._selectedDepIds = new Set();
+            document.getElementById('depTags').innerHTML = '';
+            document.getElementById('depSearchInput').value = '';
+            document.getElementById('depDropdown').classList.remove('show');
+        }
+
+        function addDepTag(id, code, name) {
+            if (window._selectedDepIds.has(id)) return;
+            window._selectedDepIds.add(id);
+            const tag = document.createElement('span');
+            tag.className = 'dep-tag';
+            tag.dataset.id = id;
+            tag.innerHTML = `${name}<span class="dep-tag-remove" onclick="removeDepTag(${id})">&times;</span>`;
+            document.getElementById('depTags').appendChild(tag);
+        }
+
+        function removeDepTag(id) {
+            window._selectedDepIds.delete(id);
+            const tag = document.querySelector(`.dep-tag[data-id="${id}"]`);
+            if (tag) tag.remove();
+        }
+
+        (function initDepSearch() {
+            document.addEventListener('DOMContentLoaded', () => {
+                const input = document.getElementById('depSearchInput');
+                const dropdown = document.getElementById('depDropdown');
+
+                input.addEventListener('input', () => {
+                    const q = input.value.trim().toLowerCase();
+                    if (!q) { dropdown.classList.remove('show'); return; }
+                    const opts = (window._depMetricOptions || []).filter(m =>
+                        !window._selectedDepIds.has(m.id) &&
+                        (m.code.toLowerCase().includes(q) || m.name.toLowerCase().includes(q))
+                    );
+                    if (opts.length === 0) {
+                        dropdown.innerHTML = '<div class="dep-dropdown-empty">无匹配指标</div>';
+                    } else {
+                        dropdown.innerHTML = opts.slice(0, 10).map(m =>
+                            `<div class="dep-dropdown-item" data-id="${m.id}" data-code="${m.code}" data-name="${m.name}">` +
+                            `<span class="dep-item-code">${m.code}</span><span class="dep-item-name">${m.name}</span></div>`
+                        ).join('');
+                    }
+                    dropdown.classList.add('show');
+                });
+
+                input.addEventListener('focus', () => {
+                    if (input.value.trim()) input.dispatchEvent(new Event('input'));
+                });
+
+                dropdown.addEventListener('click', (e) => {
+                    const item = e.target.closest('.dep-dropdown-item');
+                    if (!item) return;
+                    addDepTag(parseInt(item.dataset.id), item.dataset.code, item.dataset.name);
+                    input.value = '';
+                    dropdown.classList.remove('show');
+                });
+
+                document.addEventListener('click', (e) => {
+                    if (!e.target.closest('.dep-input-wrap')) dropdown.classList.remove('show');
+                });
+            });
+        })();
+
+        // 加载依赖关系并回填
+        async function loadDependencies(metricId) {
+            const token = localStorage.getItem('token');
+            try {
+                const res = await fetch(`/api/metrics/${metricId}/dependencies`, {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                const deps = await res.json();
+                // 确保指标选项已加载后再回填
+                const waitForOptions = () => {
+                    if (window._depMetricOptions && window._depMetricOptions.length > 0) {
+                        deps.forEach(d => addDepTag(d.id, d.metric_code, d.metric_name));
+                    } else {
+                        setTimeout(waitForOptions, 100);
+                    }
+                };
+                waitForOptions();
+            } catch(e) { console.error('加载依赖关系失败', e); }
+        }
+
+        // 监听指标类型切换
+        document.getElementById('metricType').addEventListener('change', function() {
+            toggleMetricTypeFields(this.value);
+        });
+
+        // 编辑指标
+        async function editMetric(id) {
+            const token = localStorage.getItem('token');
+            const res = await fetch(`/api/metrics/${id}`, {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            const metric = await res.json();
+            openModal(metric);
+        }
+
+        // 删除指标（仅管理员）
+        async function deleteMetric(id) {
+            const token = localStorage.getItem('token');
+
+            // 拉取指标基本信息用于确认提示
+            let code = '';
+            let name = '';
+            try {
+                const metricRes = await fetch(`/api/metrics/${id}`, {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                const metric = await metricRes.json();
+                if (!metricRes.ok) {
+                    alert(metric.error || '获取指标信息失败');
+                    return;
+                }
+                code = metric.metric_code || '';
+                name = metric.metric_name || '';
+            } catch (e) {
+                alert('网络错误: ' + e.message);
+                return;
+            }
+
+            // 先查被依赖情况，如有下游引用则阻断
+            try {
+                const depRes = await fetch(`/api/metrics/${id}/dependents`, {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                const dependents = await depRes.json();
+                if (Array.isArray(dependents) && dependents.length > 0) {
+                    const list = dependents.slice(0, 10).map(d => `  · ${d.metric_code} ${d.metric_name}`).join('\n');
+                    const more = dependents.length > 10 ? `\n  ...还有 ${dependents.length - 10} 个` : '';
+                    alert(`无法删除：该指标被 ${dependents.length} 个下游指标依赖。\n\n${list}${more}\n\n请先解除依赖，或将其状态改为"废弃"。`);
+                    return;
+                }
+            } catch (e) {
+                alert('检查依赖失败：' + e.message);
+                return;
+            }
+
+            if (!confirm(`确定永久删除指标"${code} ${name}"？\n\n此操作不可恢复，将同时删除其标签关联、依赖关系与版本历史。\n如仅想停用，请使用"编辑"将状态改为"废弃"。`)) {
+                return;
+            }
+
+            try {
+                const res = await fetch(`/api/metrics/${id}`, {
+                    method: 'DELETE',
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                const result = await res.json();
+                if (!res.ok) {
+                    alert(result.error || '删除失败');
+                    return;
+                }
+                loadMetrics();
+                loadAssessMetrics();
+            } catch (e) {
+                alert('网络错误: ' + e.message);
+            }
+        }
+
+        // 保存指标
+        async function saveMetric() {
+            const token = localStorage.getItem('token');
+            const id = document.getElementById('metricId').value;
+
+            const data = {
+                metric_code: document.getElementById('metricCode').value.trim(),
+                metric_name: document.getElementById('metricName').value.trim(),
+                domain_id: document.getElementById('metricDomain').value || null,
+                metric_type: document.getElementById('metricType').value,
+                data_type: document.getElementById('metricDataType').value || null,
+                unit: document.getElementById('metricUnit').value.trim() || null,
+                biz_def: document.getElementById('metricBizDef').value.trim() || null,
+                tech_def: document.getElementById('metricTechDef').value.trim() || null,
+                dax_def: document.getElementById('metricDaxDef').value.trim() || null,
+                source_table: document.getElementById('metricSourceTable').value.trim() || null,
+                tag_ids: Array.from(document.querySelectorAll('.tag-checkbox:checked')).map(cb => parseInt(cb.value)),
+                formula: document.getElementById('metricFormula').value.trim() || null,
+                parent_metric_id: document.getElementById('parentMetricId').value || null,
+                dependency_ids: Array.from(window._selectedDepIds || []),
+                metric_category: editingCategory,
+                assess_dept: editingCategory === 'assessment' ? (document.getElementById('metricAssessDept').value.trim() || null) : null,
+                assess_note: editingCategory === 'assessment' ? (document.getElementById('metricAssessNote').value.trim() || null) : null
+            };
+
+            if (!data.metric_code || !data.metric_name) {
+                alert('指标编码和名称为必填项');
+                return;
+            }
+
+            if (id) {
+                data.change_reason = document.getElementById('changeReason').value.trim() || '内容更新';
+                data.status = document.getElementById('metricStatus').value;
+            }
+
+            try {
+                const res = await fetch(id ? `/api/metrics/${id}` : '/api/metrics', {
+                    method: id ? 'PUT' : 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${token}`,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(data)
+                });
+
+                const result = await res.json();
+                if (!res.ok) {
+                    alert(result.error || '保存失败');
+                    return;
+                }
+
+                closeModal();
+                loadMetrics();
+                loadAssessMetrics();
+            } catch (e) {
+                alert('网络错误: ' + e.message);
+            }
+        }
+
+        // 显示版本历史
+        async function showHistory(id) {
+            const token = localStorage.getItem('token');
+
+            // 获取当前指标信息
+            const metricRes = await fetch(`/api/metrics/${id}`, {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            const metric = await metricRes.json();
+
+            // 获取历史记录
+            const historyRes = await fetch(`/api/metrics/${id}/history`, {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            const history = await historyRes.json();
+
+            const timeline = document.getElementById('historyTimeline');
+
+            // 当前版本
+            let html = `
+                <div class="history-item current">
+                    <div class="history-version">v${metric.version} (当前版本)</div>
+                    <div class="history-meta">
+                        ${metric.metric_code} - ${metric.metric_name}
+                    </div>
+                    ${metric.biz_def ? `<div class="history-reason">${escapeHtml(metric.biz_def)}</div>` : ''}
+                </div>
+            `;
+
+            // 历史版本
+            history.forEach(h => {
+                html += `
+                    <div class="history-item">
+                        <div class="history-version">v${h.version}</div>
+                        <div class="history-meta">
+                            ${escapeHtml(h.metric_code)} - ${escapeHtml(h.metric_name)}<br>
+                            修改人: ${escapeHtml(h.updated_by_name || '未知')} | ${formatDate(h.updated_at)}
+                        </div>
+                        ${h.change_reason ? `<div class="history-reason">变更原因: ${escapeHtml(h.change_reason)}</div>` : ''}
+                    </div>
+                `;
+            });
+
+            if (history.length === 0) {
+                html += `<div class="empty-state" style="padding:20px;"><p>暂无历史版本</p></div>`;
+            }
+
+            timeline.innerHTML = html;
+            document.getElementById('historyModal').classList.add('show');
+        }
+
+        // 关闭历史弹窗
+        function closeHistoryModal() {
+            document.getElementById('historyModal').classList.remove('show');
+        }
+
+        // 工具函数
+        function formatSQL(text) {
+            if (!text) return '';
+            // 如果已有换行，直接返回转义结果
+            if (text.includes('\n')) return escapeHtml(text);
+            // 在主要SQL关键字前插入换行
+            const keywords = /\b(SELECT|FROM|WHERE|AND|OR|LEFT JOIN|INNER JOIN|RIGHT JOIN|JOIN|ON|GROUP BY|ORDER BY|HAVING|LIMIT|UNION|INSERT|UPDATE|SET|VALUES|DELETE|CREATE|ALTER|DROP|INTO)\b/gi;
+            let formatted = text.replace(keywords, (match, kw, offset) => {
+                // SELECT 开头不加换行
+                if (offset === 0) return match;
+                return '\n' + match;
+            });
+            // AND/OR 缩进两个空格
+            formatted = formatted.replace(/\n(AND|OR)\b/gi, '\n  $1');
+            return escapeHtml(formatted);
+        }
+
+        function escapeHtml(text) {
+            if (!text) return '';
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function formatDate(dateStr) {
+            if (!dateStr) return '';
+            const d = new Date(dateStr);
+            return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+        }
+    </script>
+
+    <!-- 代码放大模态框 -->
+    <div class="code-modal-overlay" id="codeModalOverlay" onclick="if(event.target===this)closeCodeModal()">
+        <div class="code-modal">
+            <div class="code-modal-title" id="codeModalTitle"></div>
+            <div class="code-modal-toolbar">
+                <button onclick="copyModalCode()">复制</button>
+                <button onclick="closeCodeModal()">关闭</button>
+            </div>
+            <pre id="codeModalPre"></pre>
+        </div>
+    </div>
+    <script>
+        function expandCode(btn, lang) {
+            const sqlDiv = btn.closest('.md-sql');
+            let code = '';
+            sqlDiv.childNodes.forEach(node => {
+                if (node.nodeType === 3) code += node.textContent;
+                else if (!node.classList || (!node.classList.contains('sql-toolbar'))) code += node.textContent;
+            });
+            code = code.trim();
+            document.getElementById('codeModalTitle').textContent = lang;
+            const pre = document.getElementById('codeModalPre');
+            pre.textContent = code;
+            pre.className = lang === 'DAX' ? 'dax' : '';
+            document.getElementById('codeModalOverlay').classList.add('show');
+        }
+        function closeCodeModal() {
+            document.getElementById('codeModalOverlay').classList.remove('show');
+        }
+        function copyModalCode() {
+            const code = document.getElementById('codeModalPre').textContent;
+            if (navigator.clipboard && window.isSecureContext) {
+                navigator.clipboard.writeText(code).then(() => showModalCopyOk());
+            } else {
+                const ta = document.createElement('textarea');
+                ta.value = code;
+                ta.style.cssText = 'position:fixed;left:-9999px';
+                document.body.appendChild(ta);
+                ta.select();
+                document.execCommand('copy');
+                document.body.removeChild(ta);
+                showModalCopyOk();
+            }
+        }
+        function showModalCopyOk() {
+            const btn = document.querySelector('.code-modal-toolbar button:first-child');
+            const orig = btn.textContent;
+            btn.textContent = '已复制!';
+            btn.style.color = '#4ade80';
+            setTimeout(() => { btn.textContent = orig; btn.style.color = ''; }, 1500);
+        }
+        document.addEventListener('keydown', e => { if (e.key === 'Escape') closeCodeModal(); });
+    </script>
+
+</body>
+</html>

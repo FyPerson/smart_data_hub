@@ -1,0 +1,1233 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>智数协同平台 (Smart Data Hub)</title>
+    <link rel="icon" href="data:,">
+    <!-- Markdown 解析库 -->
+    <script src="https://cdn.jsdelivr.net/npm/marked@11.1.1/marked.min.js"></script>
+    <!-- SheetJS (Excel解析库) - 延迟加载，仅在批量导入时按需加载 -->
+    <link rel="stylesheet" href="assets/css/style.css?v=1.2">
+</head>
+
+<body>
+
+
+
+    <!-- 顶部导航栏 (Fixed Header) -->
+    <nav class="navbar fixed-header">
+        <div class="nav-left">
+            <div class="nav-logo">
+                <svg viewBox="0 0 24 24" fill="none" stroke="url(#logo-gradient)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <defs>
+                        <linearGradient id="logo-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                            <stop offset="0%" style="stop-color:#d97706"/>
+                            <stop offset="100%" style="stop-color:#b45309"/>
+                        </linearGradient>
+                    </defs>
+                    <circle cx="12" cy="12" r="10"/>
+                    <path d="M12 6v6l4 2"/>
+                </svg>
+            </div>
+            <div class="nav-title">智数协同平台</div>
+        </div>
+        <div class="nav-right">
+            <a href="/Task_Pool.html" class="nav-item" style="color:#d97706; font-weight:600;">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M9 11l3 3L22 4"/>
+                    <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
+                </svg>
+                任务池
+            </a>
+            <a href="/Data_Collab.html" class="nav-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+                    <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+                </svg>
+                数据协作
+            </a>
+            <a href="/Issue_Tracker.html" class="nav-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="10"/>
+                    <line x1="12" y1="8" x2="12" y2="12"/>
+                    <line x1="12" y1="16" x2="12.01" y2="16"/>
+                </svg>
+                问题跟踪
+            </a>
+            <a href="/My_Workspace.html" class="nav-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+                    <circle cx="12" cy="7" r="4"/>
+                </svg>
+                我的工作台
+            </a>
+            <!-- 数据中心下拉菜单 -->
+            <div class="nav-dropdown">
+                <button class="nav-dropdown-trigger">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <ellipse cx="12" cy="5" rx="9" ry="3"/>
+                        <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/>
+                        <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>
+                    </svg>
+                    数据中心
+                    <svg class="arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="6 9 12 15 18 9"/>
+                    </svg>
+                </button>
+                <div class="nav-dropdown-menu">
+                    <a href="/Dashboard.html">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+                            <line x1="3" y1="9" x2="21" y2="9"/>
+                            <line x1="9" y1="21" x2="9" y2="9"/>
+                        </svg>
+                        建设总览
+                    </a>
+                    <a href="/Asset_Center.html">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+                            <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
+                            <line x1="12" y1="22.08" x2="12" y2="12"/>
+                        </svg>
+                        资产中心
+                    </a>
+                    <a href="/Model_Center.html">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="3" y="3" width="7" height="7"/>
+                            <rect x="14" y="3" width="7" height="7"/>
+                            <rect x="14" y="14" width="7" height="7"/>
+                            <rect x="3" y="14" width="7" height="7"/>
+                        </svg>
+                        模型中心
+                    </a>
+                    <a href="/Metrics.html">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <line x1="18" y1="20" x2="18" y2="10"/>
+                            <line x1="12" y1="20" x2="12" y2="4"/>
+                            <line x1="6" y1="20" x2="6" y2="14"/>
+                        </svg>
+                        指标中心
+                    </a>
+                </div>
+            </div>
+            <a href="/Statistics.html" class="nav-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <line x1="12" y1="20" x2="12" y2="10"/>
+                    <line x1="18" y1="20" x2="18" y2="4"/>
+                    <line x1="6" y1="20" x2="6" y2="16"/>
+                </svg>
+                统计中心
+            </a>
+            <a href="/Doc_Viewer.html" target="_blank" class="nav-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+                    <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+                </svg>
+                文档中心
+            </a>
+            <div class="nav-divider"></div>
+            <!-- 用户头像区域 (JS渲染) -->
+            <div id="userProfileArea"></div>
+        </div>
+    </nav>
+
+    <!-- 主工作区 -->
+    <main class="workbench-container">
+
+        <!-- 新手引导/流程指引 -->
+        <div class="user-guide-banner">
+            <div class="guide-header">
+                <span><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>开发作业流程指引</span>
+                <span style="font-size:0.8em; color:#718096; font-weight:normal;">(首次使用请阅读)</span>
+                <!-- 角色切换标签 -->
+                <div class="role-tabs" style="margin-left:auto; display:flex; gap:8px;">
+                    <button class="role-tab active" data-role="developer" onclick="switchWorkflowRole('developer')">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 2px;"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg> 开发者流程
+                    </button>
+                    <button class="role-tab" data-role="publisher" onclick="switchWorkflowRole('publisher')">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 2px;"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/></svg> 发布者流程
+                    </button>
+                </div>
+            </div>
+
+            <!-- 开发者流程 -->
+            <div class="process-steps" id="developerWorkflow">
+                <div class="step-item">
+                    <div class="step-icon">1</div>
+                    <div class="step-text">
+                        <strong>领取任务</strong>
+                        <span>在下方"待认领"列表中选择任务</span>
+                    </div>
+                    <div class="step-arrow">➜</div>
+                </div>
+                <div class="step-item" id="modelStep" onclick="window.location.href='Model_Center.html'"
+                    style="cursor:pointer;">
+                    <div class="step-icon step-active">2</div>
+                    <div class="step-text">
+                        <strong>模型注册/确认</strong>
+                        <span style="color:#3182ce; text-decoration:underline;" id="modelStepText">前往模型中心注册表名规范</span>
+                    </div>
+                    <div class="step-arrow">➜</div>
+                </div>
+                <div class="step-item">
+                    <div class="step-icon">3</div>
+                    <div class="step-text">
+                        <strong>开发调试</strong>
+                        <span>线下开发ETL脚本并自测</span>
+                    </div>
+                    <div class="step-arrow">➜</div>
+                </div>
+                <div class="step-item">
+                    <div class="step-icon">4</div>
+                    <div class="step-text">
+                        <strong>提交验收</strong>
+                        <span>上传SQL和测试报告进行归档</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 发布者流程 -->
+            <div class="process-steps" id="publisherWorkflow" style="display:none;">
+                <div class="step-item" onclick="window.location.href='Model_Center.html'" style="cursor:pointer;">
+                    <div class="step-icon">1</div>
+                    <div class="step-text">
+                        <strong>模型规划</strong>
+                        <span style="color:#3182ce; text-decoration:underline;">在模型中心预注册模型命名</span>
+                    </div>
+                    <div class="step-arrow">➜</div>
+                </div>
+                <div class="step-item">
+                    <div class="step-icon step-active">2</div>
+                    <div class="step-text">
+                        <strong>发布任务</strong>
+                        <span>填写任务信息并关联模型发布</span>
+                    </div>
+                    <div class="step-arrow">➜</div>
+                </div>
+                <div class="step-item">
+                    <div class="step-icon">3</div>
+                    <div class="step-text">
+                        <strong>进度跟踪</strong>
+                        <span>查看"进行中"列表监控开发进度</span>
+                    </div>
+                    <div class="step-arrow">➜</div>
+                </div>
+                <div class="step-item">
+                    <div class="step-icon">4</div>
+                    <div class="step-text">
+                        <strong>验收审核</strong>
+                        <span>在"待验收"列表审核并确认完成</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 流程说明提示 -->
+            <div id="workflowHint"
+                style="margin-top:12px; padding:10px 15px; background:#f0f9ff; border:1px solid #bae6fd; border-radius:8px; font-size:0.85em; color:#0369a1;">
+                <span id="workflowHintText">
+                    <strong><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 2px;"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg> 开发者提示：</strong>如果任务已关联模型，可跳过"模型注册"步骤，直接进行开发调试。
+                </span>
+            </div>
+        </div>
+
+        <!-- 顶部筛选器 -->
+        <div class="filter-bar" id="filterBar">
+            <div class="filter-pill active" data-cat="ALL" onclick="filterTasks('ALL')">全部</div>
+            <div class="filter-pill" data-cat="ODS_SYNC" onclick="filterTasks('ODS_SYNC')">ODS同步</div>
+            <div class="filter-pill" data-cat="DIM_DEV" onclick="filterTasks('DIM_DEV')">DIM开发</div>
+            <div class="filter-pill" data-cat="DWD_DEV" onclick="filterTasks('DWD_DEV')">DWD开发</div>
+            <div class="filter-pill" data-cat="ADS_RPT" onclick="filterTasks('ADS_RPT')">ADS报表</div>
+            <div class="filter-pill" data-cat="DATA_FIX" onclick="filterTasks('DATA_FIX')">数据运维</div>
+        </div>
+
+        <!-- 1. 发布区域 (管理员/发布者可见) -->
+        <div class="section" id="publishSection">
+            <div class="section-title" style="display:flex; justify-content:space-between; align-items:center;">
+                <span><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>发布新任务</span>
+                <span id="publishRoleLabel"
+                    style="font-size:0.75em; color:#d97706; background:linear-gradient(135deg, #eef2ff, #e0e7ff); padding:4px 12px; border-radius:20px; font-weight:600;">(管理员)</span>
+            </div>
+            <!-- 优化后的发布表单 -->
+            <div class="publish-form-container"
+                style="background:#fff; padding:20px; border-radius:14px; border:1px solid #e2e8f0; box-shadow:0 4px 12px rgba(0,0,0,0.03);">
+                <!-- 第一行：配置选项 -->
+                <div
+                    style="display:flex; gap:12px; align-items:center; flex-wrap:wrap; padding:12px 16px; background:linear-gradient(135deg, #f8fafc, #f1f5f9); border-radius:10px; margin-bottom:14px;">
+                    <!-- 优先级 -->
+                    <div class="form-field-inline">
+                        <label>优先级</label>
+                        <select id="newPriority">
+                            <option value="P2" selected>🔵 P2</option>
+                            <option value="P0">🔴 P0</option>
+                            <option value="P1">🟠 P1</option>
+                            <option value="P3">⚪ P3</option>
+                        </select>
+                    </div>
+
+                    <div class="form-divider"></div>
+
+                    <!-- 任务类型 -->
+                    <div class="form-field-inline">
+                        <label>类型</label>
+                        <select id="newCategory" onchange="updatePlaceholders()">
+                            <option value="ODS_SYNC">ODS同步</option>
+                            <option value="DIM_DEV">DIM开发</option>
+                            <option value="DWD_DEV">DWD开发</option>
+                            <option value="ADS_RPT">ADS报表</option>
+                            <option value="DATA_FIX">数据运维</option>
+                        </select>
+                    </div>
+
+                    <div class="form-divider"></div>
+
+                    <!-- 关联模型 -->
+                    <div class="form-field-inline" style="flex:1; min-width:180px;">
+                        <label>关联模型</label>
+                        <div style="position:relative; flex:1;">
+                            <input list="modelAllList" id="newModelInput" placeholder="搜索模型..." autocomplete="off"
+                                style="width:100%; padding:8px 30px 8px 10px; border:1px solid #e2e8f0; border-radius:6px; font-size:13px; background:#fff; outline:none;"
+                                onfocus="this.style.borderColor='#d97706'" onblur="this.style.borderColor='#e2e8f0'"
+                                oninput="onModelInput(this)" onchange="onModelSelect(this)">
+                            <button type="button" onclick="clearModelSelection()" title="清除"
+                                style="position:absolute; right:6px; top:50%; transform:translateY(-50%); background:none; border:none; cursor:pointer; color:#cbd5e0; font-size:12px; padding:2px;"
+                                onmouseover="this.style.color='#e53e3e'"
+                                onmouseout="this.style.color='#cbd5e0'">✕</button>
+                        </div>
+                        <datalist id="modelAllList"></datalist>
+                        <!-- 所有模型默认显示，已占用的通过状态标注区分 -->
+                    </div>
+
+                    <div class="form-divider"></div>
+
+                    <!-- 预估工时 -->
+                    <div class="form-field-inline">
+                        <label>预估</label>
+                        <div
+                            style="display:flex; align-items:center; background:#fff; border:1px solid #e2e8f0; border-radius:6px; overflow:hidden;">
+                            <input type="number" id="newEstHours" min="0" step="0.5" placeholder="0"
+                                style="width:50px; padding:8px; border:none; font-size:13px; text-align:center; outline:none;"
+                                oninput="this.dataset.userModified='true'">
+                            <span
+                                style="padding:0 8px; background:#f1f5f9; color:#64748b; font-size:12px; font-weight:600; height:100%; display:flex; align-items:center;">h</span>
+                        </div>
+                    </div>
+
+                    <div class="form-divider"></div>
+
+                    <!-- 截止时间 -->
+                    <div class="form-field-inline">
+                        <label>截止</label>
+                        <input type="datetime-local" id="newDeadline"
+                            style="padding:8px 10px; border:1px solid #e2e8f0; border-radius:6px; font-size:13px; background:#fff; color:#4a5568; outline:none;"
+                            onfocus="this.style.borderColor='#d97706'" onblur="this.style.borderColor='#e2e8f0'">
+                    </div>
+
+                    <div class="form-divider"></div>
+
+                    <!-- 备注 -->
+                    <div class="form-field-inline" style="flex:1; min-width:150px;">
+                        <label>备注</label>
+                        <input type="text" id="newDesc" placeholder="可选说明..."
+                            style="flex:1; padding:8px 10px; border:1px solid #e2e8f0; border-radius:6px; font-size:13px; background:#fff; outline:none;"
+                            onfocus="this.style.borderColor='#d97706'" onblur="this.style.borderColor='#e2e8f0'">
+                    </div>
+                </div>
+
+                <!-- 第二行：任务标题和按钮 -->
+                <div style="display:flex; align-items:center; gap:12px;">
+                    <div style="flex:1; position:relative;">
+                        <input type="text" id="newTitle" placeholder="输入任务标题..."
+                            style="width:100%; padding:14px 18px; border:2px solid #e2e8f0; border-radius:10px; font-size:15px; background:#fff; outline:none; transition:all 0.2s;"
+                            onfocus="this.style.borderColor='#d97706';this.style.boxShadow='0 0 0 3px rgba(217,119,6,0.1)'"
+                            onblur="this.style.borderColor='#e2e8f0';this.style.boxShadow='none'">
+                    </div>
+                    <button onclick="publishTask()"
+                        style="height:48px; padding:0 28px; background:linear-gradient(135deg, #d97706 0%, #b45309 100%); color:white; border:none; border-radius:10px; font-weight:600; font-size:15px; box-shadow:0 4px 12px rgba(118, 75, 162, 0.3); transition:all 0.2s; cursor:pointer; white-space:nowrap;"
+                        onmouseover="this.style.transform='translateY(-2px)';this.style.boxShadow='0 6px 16px rgba(118, 75, 162, 0.4)'"
+                        onmouseout="this.style.transform='translateY(0)';this.style.boxShadow='0 4px 12px rgba(118, 75, 162, 0.3)'">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>发布任务
+                    </button>
+                    <button onclick="openImportModal()"
+                        style="height:48px; padding:0 20px; background:#f8fafc; border:2px solid #e2e8f0; color:#64748b; border-radius:10px; font-weight:500; display:flex; align-items:center; gap:6px; transition:all 0.2s; cursor:pointer; white-space:nowrap;"
+                        onmouseover="this.style.background='#f1f5f9';this.style.borderColor='#cbd5e0'"
+                        onmouseout="this.style.background='#f8fafc';this.style.borderColor='#e2e8f0'">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>批量导入
+                    </button>
+                    <!-- 管理员专用：配置常见问题提示 -->
+                    <button id="btnTaskTipsConfig" onclick="openTaskTipsModal()"
+                        style="display:none; height:48px; padding:0 16px; background:#fef3c7; border:2px solid #fcd34d; color:#92400e; border-radius:10px; font-weight:500; transition:all 0.2s; cursor:pointer; white-space:nowrap;"
+                        onmouseover="this.style.background='#fde68a';this.style.borderColor='#f59e0b'"
+                        onmouseout="this.style.background='#fef3c7';this.style.borderColor='#fcd34d'"
+                        title="配置各任务类型的常见问题提示">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>提示配置
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- 模型信息预览卡片 (选中模型后显示) -->
+        <div id="modelInfoPreview"
+            style="display:none; margin-top:12px; padding:15px; background:linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%); border:1px solid #bae6fd; border-radius:10px;">
+            <div style="display:flex; align-items:center; gap:20px; flex-wrap:wrap;">
+                <div style="font-weight:600; color:#0369a1;">
+                    <span id="previewModelIcon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg></span>
+                    <span id="previewModelComment">-</span>
+                </div>
+                <div style="display:flex; gap:15px; flex-wrap:wrap; font-size:0.9em; color:#475569;">
+                    <span title="目标表名"><code id="previewTableName"
+                            style="background:#e0f2fe; padding:2px 8px; border-radius:4px;">-</code></span>
+                    <span id="previewSourceInfo" style="display:none;">
+                        <span style="color:#64748b;">来源:</span>
+                        <span id="previewSourceSystem" style="color:#0891b2; font-weight:500;">-</span>.<span
+                            id="previewSourceTable" style="font-family:monospace;">-</span>
+                    </span>
+                    <span>
+                        <span style="color:#64748b;">周期:</span>
+                        <span id="previewUpdateCycle" style="color:#0891b2;">-</span>
+                    </span>
+                    <span>
+                        <span style="color:#64748b;">负责人:</span>
+                        <span id="previewTechOwner" style="color:#0891b2;">-</span>
+                    </span>
+                </div>
+                <button onclick="clearModelSelection()"
+                    style="margin-left:auto; padding:4px 10px; font-size:0.8em; background:#fee2e2; color:#dc2626; border:none; border-radius:4px; cursor:pointer;">✕
+                    清除</button>
+            </div>
+        </div>
+
+        <!-- DIM/DWS层映射提示 -->
+        <div id="dimLayerTip"
+            style="display:none; margin-top:8px; padding:8px 12px; background:#dbeafe; border-radius:6px; font-size:0.85em;">
+        </div>
+
+        <!-- 模型关联提示 -->
+        <div id="modelLinkTip"
+            style="display:none; margin-top:8px; padding:8px 12px; background:#fefce8; border:1px solid #fbbf24; border-radius:6px; font-size:0.85em; color:#92400e;">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 2px;"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg> <strong>建议：</strong>开发类任务建议关联模型，以便自动同步模型状态。
+            <a href="Model_Center.html" style="color:#2563eb; margin-left:4px;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 2px;"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg> 前往模型中心</a>
+        </div>
+        </div>
+
+        <!-- 1.1 导入模态框 -->
+        <div class="modal" id="importModal">
+            <div class="modal-content" style="max-width:850px;width:90%;">
+                <div class="modal-header">
+                    <h3><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>批量导入任务</h3>
+                </div>
+                <div class="modal-body">
+                    <!-- 步骤区域 -->
+                    <div style="display:flex; gap:20px; margin-bottom:20px;">
+                        <div
+                            style="flex:1; padding:20px; background:#f0fdf4; border-radius:8px; border:1px solid #86efac;">
+                            <h4 style="margin:0 0 10px 0; color:#16a34a;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/></svg>第一步：下载模板</h4>
+                            <p style="font-size:0.9em; color:#4b5563; margin-bottom:15px;">
+                                下载 Excel 模板，按格式填写任务信息后上传导入。
+                            </p>
+                            <button onclick="downloadImportTemplate()"
+                                style="background:#16a34a; color:white; padding:10px 20px; border:none; border-radius:6px; cursor:pointer; font-weight:600;">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>下载模板
+                            </button>
+                        </div>
+                        <div
+                            style="flex:1; padding:20px; background:#eff6ff; border-radius:8px; border:1px solid #93c5fd;">
+                            <h4 style="margin:0 0 10px 0; color:#2563eb;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>第二步：上传文件</h4>
+                            <p style="font-size:0.9em; color:#4b5563; margin-bottom:15px;">
+                                选择填写好的 Excel 文件（支持 .xlsx, .xls 格式）
+                            </p>
+                            <input type="file" id="importFile" accept=".xlsx,.xls"
+                                onchange="handleImportFileSelect(event)" style="display:none;">
+                            <button onclick="document.getElementById('importFile').click()"
+                                style="background:#2563eb; color:white; padding:10px 20px; border:none; border-radius:6px; cursor:pointer; font-weight:600;">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>选择文件
+                            </button>
+                            <span id="selectedImportFileName" style="margin-left:10px; color:#6b7280;"></span>
+                        </div>
+                    </div>
+
+                    <!-- 模板说明 -->
+                    <div
+                        style="background:#fef3c7; padding:15px; border-radius:8px; font-size:0.85em; color:#92400e; margin-bottom:20px;">
+                        <strong><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 2px;"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg> 模板说明：</strong>
+                        <ul style="margin:10px 0 0 0; padding-left:20px;">
+                            <li><strong>标题</strong>: 必填，任务名称，如 [同步] 合同信息表</li>
+                            <li><strong>类型</strong>: 必填，可选值 <code>ODS_SYNC</code> / <code>DIM_DEV</code> / <code>DWD_DEV</code> /
+                                <code>ADS_RPT</code> / <code>DATA_FIX</code>，或中文 ODS同步 / DIM开发 / DWD开发 / ADS报表 / 数据运维
+                            </li>
+                            <li><strong>备注</strong>: 可选，任务补充说明</li>
+                        </ul>
+                        <p style="margin:10px 0 0 0; color:#b45309;"><strong><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 2px;"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg> 提示：</strong>批量导入的任务状态默认为"待认领 (OPEN)"</p>
+                    </div>
+
+                    <!-- 预览区域 -->
+                    <div id="importPreviewArea" style="display:none;">
+                        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+                            <span style="font-weight:bold;color:#2d3748;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>预览数据 (仅显示前 10 行)</span>
+                            <span id="importStatus" style="font-size:0.9em;"></span>
+                        </div>
+                        <div style="overflow-x:auto;max-height:300px;border:1px solid #e2e8f0;border-radius:8px;">
+                            <table class="task-table" id="importPreviewTable" style="margin:0;border:none;">
+                                <!-- 预览内容 -->
+                            </table>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn-cancel" onclick="closeModal('importModal')">取消</button>
+                    <button class="btn-confirm" id="btnConfirmImport" onclick="confirmImport()" disabled>确认导入</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- 1.2 任务提示配置模态框 (仅管理员可见) -->
+        <div class="modal" id="taskTipsModal">
+            <div class="modal-content" style="max-width:700px;width:90%;">
+                <div class="modal-header">
+                    <h3><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>常见问题提示配置</h3>
+                </div>
+                <div class="modal-body" style="max-height:60vh; overflow-y:auto;">
+                    <div
+                        style="background:#fffbeb;border:1px solid #fcd34d;border-radius:8px;padding:12px;margin-bottom:20px;font-size:0.9em;color:#92400e;">
+                        <strong>说明：</strong>配置各任务类型的常见问题提示，帮助开发人员避免常见坑点。每行一条提示。
+                    </div>
+                    <div id="taskTipsConfigList">
+                        <!-- 动态加载配置列表 -->
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn-cancel" onclick="closeModal('taskTipsModal')">关闭</button>
+                    <button class="btn-confirm" onclick="saveAllTaskTips()">保存全部</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- 待处理转发请求 (有请求时显示) -->
+        <div class="section" id="pendingTransfersSection" style="display:none;">
+            <div class="section-title" style="background:linear-gradient(135deg, #faf089, #f6e05e);">
+                <span><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>待处理的转发请求</span>
+                <span style="font-size:0.85em; font-weight:600; color:#744210;" id="pendingTransferCount">0</span>
+            </div>
+            <div id="pendingTransfers" class="pending-transfers-container"></div>
+        </div>
+
+        <!-- 1.5 存疑/阻碍任务 -->
+        <div class="section">
+            <div class="section-title">
+                <span><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>问题/阻碍 (On Hold)</span>
+                <span style="font-size:0.85em; font-weight:600; color:#e53e3e;" id="holdCount">0</span>
+            </div>
+            <div id="holdTasks" class="task-grid"></div>
+        </div>
+
+        <!-- 标签页导航 -->
+        <div class="tab-nav">
+            <button class="tab-btn active" onclick="switchTab('open')">待认领</button>
+            <button class="tab-btn" onclick="switchTab('claimed')">进行中</button>
+            <button class="tab-btn" onclick="switchTab('done')">已提交</button>
+            <button class="tab-btn" onclick="switchTab('archived')">已归档</button>
+        </div>
+
+        <!-- 2. 待认领任务 -->
+        <div class="section task-tab-content active" id="tab-open">
+            <div class="section-title">
+                <span>待认领任务池 (Open)</span>
+                <span style="font-size:0.85em; font-weight:600; color:#718096;" id="openCount">0</span>
+            </div>
+            <div id="openTasks"></div>
+        </div>
+
+        <!-- 3. 进行中任务 -->
+        <div class="section task-tab-content" id="tab-claimed">
+            <div class="section-title">
+                <span>进行中 (In Progress)</span>
+                <span style="font-size:0.85em; font-weight:600; color:#718096;" id="claimedCount">0</span>
+            </div>
+            <div class="task-grid" id="claimedTasks"></div>
+        </div>
+
+        <!-- 4. 已提交（待确认） -->
+        <div class="section task-tab-content" id="tab-done">
+            <div class="section-title">
+                <span>已提交,待确认 (Pending Review)</span>
+                <span style="font-size:0.85em; font-weight:600; color:#718096;" id="doneCount">0</span>
+            </div>
+            <div class="task-grid" id="doneTasks"></div>
+        </div>
+
+        <!-- 5. 已归档 -->
+        <div class="section task-tab-content" id="tab-archived">
+            <div class="section-title">
+                <span>已归档 (Archived)</span>
+                <span style="font-size:0.85em; font-weight:600; color:#718096;" id="archivedCount">0</span>
+            </div>
+            <div id="archivedTasks"></div>
+        </div>
+    </main>
+
+    <!-- 认领模态框 -->
+    <div class="modal" id="claimModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>认领任务</h3>
+            </div>
+            <div class="modal-body">
+                <p style="margin-top:0; color:#718096; font-size:0.95em;">您正在认领以下任务:</p>
+                <div class="modal-task-title" id="claimTaskTitle"></div>
+
+                <label>请输入您的姓名:</label>
+                <input type="text" id="claimOwner" placeholder="例如: 赵六">
+            </div>
+            <div class="modal-footer">
+                <button class="btn-cancel" onclick="closeModal('claimModal')">取消</button>
+                <button class="btn-confirm" onclick="confirmClaim()">确定认领</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 提交模态框(多附件版) -->
+    <div class="modal" id="submitModal">
+        <div class="modal-content" style="max-width:650px;">
+            <div class="modal-header">
+                <h3><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>提交任务</h3>
+            </div>
+            <div class="modal-body">
+                <p style="margin-top:0; color:#718096; font-size:0.95em;">提交任务成果:</p>
+                <div class="modal-task-title" id="submitTaskTitle"></div>
+
+                <label><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 2px;"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg> 数据表内容描述 <span style="color:#e53e3e;">*</span>:</label>
+                <input type="text" id="submitInfo" placeholder="技术落地: 产出表名、主键定义、分区策略、验证结果等">
+
+                <!-- 脚本来源：由后端根据 config_mode + script_modified 自动判断，无需用户选择 -->
+
+                <!-- 交付物自动检测面板 -->
+                <div id="devStatusPanel" style="display:none; margin-top:12px; margin-bottom:12px; border:1px solid #e2e8f0; border-radius:8px; overflow:hidden;">
+                    <div style="background:#f7fafc; padding:8px 12px; font-size:0.88em; font-weight:600; color:#4a5568; display:flex; align-items:center; gap:6px; border-bottom:1px solid #e2e8f0;">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#4a5568" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+                        平台交付物检测
+                    </div>
+                    <div id="devStatusContent" style="padding:10px 12px;">
+                        <div style="color:#a0aec0; font-size:0.85em;">检测中...</div>
+                    </div>
+                </div>
+
+                <!-- 附件上传区（可折叠） -->
+                <div id="attachmentSection">
+                    <label style="margin-top:12px;display:flex;align-items:center;gap:6px;cursor:pointer;" onclick="toggleAttachmentSection()">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+                        附件上传
+                        <span id="attachmentToggleHint" style="font-size:0.8em; color:#a0aec0; font-weight:normal;">（可选，点击展开）</span>
+                        <svg id="attachmentChevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#a0aec0" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="transition:transform 0.2s;"><polyline points="6 9 12 15 18 9"/></svg>
+                    </label>
+                    <div id="attachmentListWrap" style="display:none; margin-top:8px;">
+                        <div id="attachmentList" style="max-height:240px;overflow-y:auto;margin-bottom:10px;">
+                            <!-- 附件项由JS动态添加 -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-cancel" onclick="closeModal('submitModal')">取消</button>
+                <button class="btn-confirm" style="background: linear-gradient(135deg, #9f7aea, #805ad5);"
+                    onclick="confirmSubmit2()">确定提交</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 归档验收模态框 -->
+    <div class="modal" id="archiveReviewModal">
+        <div class="modal-content" style="max-width:580px;">
+            <div class="modal-header">
+                <h3><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>任务验收归档</h3>
+            </div>
+            <div class="modal-body">
+                <div class="modal-task-title" id="archiveTaskTitle"></div>
+
+                <!-- 验收勾选项（DIM/DWD 显示） -->
+                <div id="reviewChecklistSection" style="display:none; margin:12px 0; padding:12px 14px; background:#f0fff4; border:1px solid #c6f6d5; border-radius:8px;">
+                    <div style="font-size:0.88em; font-weight:600; color:#276749; margin-bottom:8px; display:flex; align-items:center; gap:5px;">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#276749" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+                        验收确认项
+                    </div>
+                    <div id="reviewChecklistItems" style="display:flex; flex-direction:column; gap:6px;"></div>
+                </div>
+
+                <!-- 验收备注 -->
+                <label style="margin-top:8px;">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle; margin-right:2px;"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>
+                    验收备注：
+                </label>
+                <textarea id="archiveReviewNote" rows="3" placeholder="可选，记录验收意见或说明..." style="width:100%; resize:vertical; font-size:0.9em;"></textarea>
+
+                <p style="margin-top:12px; color:#e53e3e; font-size:0.85em;">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#e53e3e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle; margin-right:2px;"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                    归档后任务将不可更改，脚本快照将自动保存。
+                </p>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-cancel" onclick="closeModal('archiveReviewModal')">取消</button>
+                <button class="btn-confirm" style="background: linear-gradient(135deg, #48bb78, #38a169);"
+                    onclick="submitArchiveReview()">确认归档</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 编辑模态框 -->
+    <div class="modal" id="editModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>编辑任务</h3>
+            </div>
+            <div class="modal-body">
+                <label>任务类型:</label>
+                <select id="editCategory" onchange="updateEditModelLinkTip()"
+                    style="width:100%;padding:10px;border:2px solid #e2e8f0;border-radius:8px;font-size:1em;margin-bottom:15px;">
+                    <option value="ODS_SYNC">ODS同步</option>
+                    <option value="DIM_DEV">DIM开发</option>
+                    <option value="DWD_DEV">DWD开发</option>
+                    <option value="ADS_RPT">ADS报表</option>
+                    <option value="DATA_FIX">数据运维</option>
+                </select>
+
+                <label>任务标题:</label>
+                <input type="text" id="editTitle" placeholder="任务标题">
+
+                <label>备注:</label>
+                <input type="text" id="editDesc" placeholder="备注 (可选)">
+
+                <label style="margin-top:15px;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 2px;"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg> 关联模型:</label>
+                <div style="display:flex; gap:8px; align-items:center;">
+                    <input list="editModelList" id="editModelInput" placeholder="搜索并选择已注册的模型..." autocomplete="off"
+                        style="flex:1; padding:10px; border:2px solid #e2e8f0; border-radius:8px; font-size:1em;"
+                        oninput="onEditModelInput(this)" onchange="onEditModelSelect(this)">
+                    <datalist id="editModelList"></datalist>
+                    <a href="Model_Center.html" target="_blank"
+                        style="padding:10px 16px; background:#d97706; color:white; border-radius:8px; text-decoration:none; font-size:0.9em; white-space:nowrap;"
+                        title="前往模型中心注册新模型">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 2px;"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg> 注册模型
+                    </a>
+                </div>
+                <div id="editModelLinkTip"
+                    style="display:none; margin-top:8px; padding:8px 12px; background:#fefce8; border:1px solid #fbbf24; border-radius:6px; font-size:0.85em; color:#92400e;">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 2px;"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg> <strong>提示：</strong>开发类任务建议关联模型，提交时模型状态会自动更新
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-cancel" onclick="closeModal('editModal')">取消</button>
+                <button class="btn-confirm" style="background: linear-gradient(135deg, #d97706, #b45309);"
+                    onclick="confirmEdit()">确定保存</button>
+            </div>
+        </div>
+    </div>
+
+
+
+    <!-- 转发任务模态框 -->
+    <div class="modal" id="transferModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><polyline points="15 14 20 9 15 4"/><path d="M4 20v-7a4 4 0 0 1 4-4h12"/></svg>转发任务</h3>
+            </div>
+            <div class="modal-body">
+                <div class="modal-task-title" id="transferTaskTitle"></div>
+                <label>选择接收人:</label>
+                <select id="transferTarget"
+                    style="width:100%;padding:10px;border:2px solid #e2e8f0;border-radius:8px;font-size:1em;">
+                    <option value="">加载中...</option>
+                </select>
+                <label style="margin-top:15px;display:block;">转发原因 <span style="color:#e53e3e;">*</span></label>
+                <textarea id="transferReason" rows="3"
+                    style="width:100%;padding:10px;border:2px solid #e2e8f0;border-radius:8px;font-size:1em;resize:vertical;"
+                    placeholder="请说明转发此任务的原因..."></textarea>
+                <p style="color:#718096;font-size:0.85em;margin-top:10px;">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 2px;"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg> 转发后需要接收人确认才能生效
+                </p>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-cancel" onclick="closeModal('transferModal')">取消</button>
+                <button class="btn-confirm" style="background:linear-gradient(135deg, #ed8936, #dd6b20);"
+                    onclick="confirmTransfer()">确认转发</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 管理员分配任务模态框 -->
+    <div class="modal" id="assignModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="20" y1="8" x2="20" y2="14"/><line x1="23" y1="11" x2="17" y2="11"/></svg>分配任务</h3>
+            </div>
+            <div class="modal-body">
+                <div class="modal-task-title" id="assignTaskTitle"></div>
+                <label>分配给:</label>
+                <select id="assignTarget"
+                    style="width:100%;padding:10px;border:2px solid #e2e8f0;border-radius:8px;font-size:1em;">
+                    <option value="">加载中...</option>
+                </select>
+                <p style="color:#e53e3e;font-size:0.85em;margin-top:10px;">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 2px;"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg> 管理员分配将立即生效,无需确认
+                </p>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-cancel" onclick="closeModal('assignModal')">取消</button>
+                <button class="btn-confirm" style="background:linear-gradient(135deg, #e53e3e, #c53030);"
+                    onclick="confirmAssign()">立即分配</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Excel预览模态框 -->
+    <div class="modal" id="excelPreviewModal" style="z-index:1001;">
+        <div class="modal-content" style="max-width:90%;width:90%;height:85vh;display:flex;flex-direction:column;">
+            <div class="modal-header" style="display:flex;justify-content:space-between;align-items:center;">
+                <h3 id="excelPreviewTitle"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>Excel预览</h3>
+                <button class="btn-cancel" onclick="closeModal('excelPreviewModal')" style="padding:8px 16px;">✕
+                    关闭</button>
+            </div>
+            <div id="excelPreviewBody" style="flex:1;overflow:auto;padding:15px;background:#f7fafc;border-radius:8px;">
+                <div style="text-align:center;color:#a0aec0;padding:40px;">加载中...</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 备注查看/编辑模态框 -->
+    <div class="modal" id="remarkModal">
+        <div class="modal-content" style="max-width:500px;">
+            <div class="modal-header">
+                <h3><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>任务备注</h3>
+            </div>
+            <div class="modal-body">
+                <div class="modal-task-title" id="remarkTaskTitle"></div>
+                <input type="hidden" id="remarkTaskId">
+                <label>备注内容:</label>
+                <textarea id="remarkContent" placeholder="添加备注信息..."
+                    style="width:100%; height:120px; padding:12px; border:2px solid #e2e8f0; border-radius:8px; font-size:1em; resize:vertical; font-family:inherit;"></textarea>
+                <p style="color:#718096; font-size:0.85em; margin-top:10px;">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 2px;"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg> 备注对所有人可见，发布者/管理员可编辑
+                </p>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-cancel" onclick="closeModal('remarkModal')">关闭</button>
+                <button class="btn-confirm" id="remarkSaveBtn" onclick="saveRemark()">保存</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 修改密码模态框 -->
+    <div class="modal" id="changePasswordModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>修改密码</h3>
+            </div>
+            <div class="modal-body">
+                <label>旧密码:</label>
+                <input type="password" id="oldPassword" placeholder="请输入当前密码">
+
+                <label>新密码:</label>
+                <input type="password" id="newPassword" placeholder="请输入新密码">
+            </div>
+            <div class="modal-footer">
+                <button class="btn-cancel" onclick="closeModal('changePasswordModal')">取消</button>
+                <button class="btn-confirm" style="background: linear-gradient(135deg, #d97706, #b45309);"
+                    onclick="confirmChangePassword()">确认修改</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 存疑理由模态框 -->
+    <div class="modal" id="holdModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 style="color:#e53e3e;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>标记存疑</h3>
+            </div>
+            <div class="modal-body">
+                <p style="margin-top:0; color:#718096; font-size:0.95em;">请说明任务存在的问题或阻碍:</p>
+                <div class="modal-task-title" id="holdTaskTitle"></div>
+
+                <label>原因说明 *:</label>
+                <textarea id="holdReason" rows="4" placeholder="例如: 需求文档缺失、依赖表未就绪等..."
+                    style="width:100%; border:2px solid #e2e8f0; border-radius:8px; padding:10px; font-family:inherit; resize:vertical;"></textarea>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-cancel" onclick="closeModal('holdModal')">取消</button>
+                <button class="btn-confirm" style="background:#e53e3e; color:white;" onclick="confirmHold()"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 2px;"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg> 标记</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 放弃领取原因模态框 -->
+    <div class="modal" id="unclaimModal">
+        <div class="modal-content" style="max-width:480px;">
+            <div class="modal-header">
+                <h3 style="color:#e53e3e;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>放弃任务</h3>
+            </div>
+            <div class="modal-body">
+                <p style="margin-top:0; color:#718096; font-size:0.95em;">任务将回到"待认领"池中，请说明放弃原因:</p>
+                <input type="hidden" id="unclaimTaskId">
+                <label>放弃原因 <span style="color:#e53e3e;">*</span></label>
+                <textarea id="unclaimReason" rows="3" placeholder="例如: 需求变更、工作调整、技术难度超出预期..." required
+                    style="width:100%; border:2px solid #e2e8f0; border-radius:8px; padding:10px; font-family:inherit; resize:vertical;"></textarea>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-cancel" onclick="closeModal('unclaimModal')">取消</button>
+                <button class="btn-confirm" style="background:#e53e3e; color:white;"
+                    onclick="confirmUnclaim()">确认放弃</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 退回任务原因模态框 -->
+    <div class="modal" id="reopenModal">
+        <div class="modal-content" style="max-width:520px;">
+            <div class="modal-header">
+                <h3 style="color:#e53e3e;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><polyline points="9 10 4 15 9 20"/><path d="M20 4v7a4 4 0 0 1-4 4H4"/></svg>退回任务</h3>
+            </div>
+            <div class="modal-body">
+                <p style="margin-top:0; color:#718096; font-size:0.95em;" id="reopenDescription"></p>
+                <input type="hidden" id="reopenTaskId">
+                <input type="hidden" id="reopenTargetStatus">
+
+                <!-- 下游依赖警告区域 -->
+                <div id="reopenDepsWarning" style="display:none;"></div>
+
+                <label style="display:block; margin-bottom:8px;">退回原因 <span style="color:#e53e3e;">*</span></label>
+                <div id="reopenReasonOptions" style="display:flex; flex-direction:column; gap:8px; margin-bottom:12px;">
+                    <label class="reopen-reason-option" style="display:flex; align-items:flex-start; gap:10px; padding:10px 12px; border:2px solid #e2e8f0; border-radius:8px; cursor:pointer; transition:all 0.15s;" onmouseover="this.style.borderColor='#fcd34d'" onmouseout="if(!this.querySelector('input').checked)this.style.borderColor='#e2e8f0'">
+                        <input type="radio" name="reopenReasonType" value="data_quality" style="margin-top:2px; accent-color:#d97706;">
+                        <div>
+                            <div style="font-weight:600; color:#374151;">数据质量问题</div>
+                            <div style="font-size:0.85em; color:#6b7280;">字段值异常、精度丢失、空值处理等</div>
+                        </div>
+                        <span style="margin-left:auto; padding:2px 8px; border-radius:4px; font-size:0.75em; background:#fef3c7; color:#92400e;">中</span>
+                    </label>
+                    <label class="reopen-reason-option" style="display:flex; align-items:flex-start; gap:10px; padding:10px 12px; border:2px solid #e2e8f0; border-radius:8px; cursor:pointer; transition:all 0.15s;" onmouseover="this.style.borderColor='#fcd34d'" onmouseout="if(!this.querySelector('input').checked)this.style.borderColor='#e2e8f0'">
+                        <input type="radio" name="reopenReasonType" value="schema_change" style="margin-top:2px; accent-color:#d97706;">
+                        <div>
+                            <div style="font-weight:600; color:#374151;">字段结构调整</div>
+                            <div style="font-size:0.85em; color:#6b7280;">新增/删除/重命名字段、类型变更</div>
+                        </div>
+                        <span style="margin-left:auto; padding:2px 8px; border-radius:4px; font-size:0.75em; background:#fee2e2; color:#991b1b;">高</span>
+                    </label>
+                    <label class="reopen-reason-option" style="display:flex; align-items:flex-start; gap:10px; padding:10px 12px; border:2px solid #e2e8f0; border-radius:8px; cursor:pointer; transition:all 0.15s;" onmouseover="this.style.borderColor='#fcd34d'" onmouseout="if(!this.querySelector('input').checked)this.style.borderColor='#e2e8f0'">
+                        <input type="radio" name="reopenReasonType" value="logic_fix" style="margin-top:2px; accent-color:#d97706;">
+                        <div>
+                            <div style="font-weight:600; color:#374151;">业务逻辑修正</div>
+                            <div style="font-size:0.85em; color:#6b7280;">ETL 转换逻辑、计算公式需要调整</div>
+                        </div>
+                        <span style="margin-left:auto; padding:2px 8px; border-radius:4px; font-size:0.75em; background:#fef3c7; color:#92400e;">中</span>
+                    </label>
+                    <label class="reopen-reason-option" style="display:flex; align-items:flex-start; gap:10px; padding:10px 12px; border:2px solid #e2e8f0; border-radius:8px; cursor:pointer; transition:all 0.15s;" onmouseover="this.style.borderColor='#fcd34d'" onmouseout="if(!this.querySelector('input').checked)this.style.borderColor='#e2e8f0'">
+                        <input type="radio" name="reopenReasonType" value="performance" style="margin-top:2px; accent-color:#d97706;">
+                        <div>
+                            <div style="font-weight:600; color:#374151;">性能优化</div>
+                            <div style="font-size:0.85em; color:#6b7280;">索引、分区、存储格式优化</div>
+                        </div>
+                        <span style="margin-left:auto; padding:2px 8px; border-radius:4px; font-size:0.75em; background:#dcfce7; color:#166534;">低</span>
+                    </label>
+                    <label class="reopen-reason-option" style="display:flex; align-items:flex-start; gap:10px; padding:10px 12px; border:2px solid #e2e8f0; border-radius:8px; cursor:pointer; transition:all 0.15s;" onmouseover="this.style.borderColor='#fcd34d'" onmouseout="if(!this.querySelector('input').checked)this.style.borderColor='#e2e8f0'">
+                        <input type="radio" name="reopenReasonType" value="upstream_change" style="margin-top:2px; accent-color:#d97706;">
+                        <div>
+                            <div style="font-weight:600; color:#374151;">上游表变更</div>
+                            <div style="font-size:0.85em; color:#6b7280;">依赖的源系统表发生变化</div>
+                        </div>
+                        <span style="margin-left:auto; padding:2px 8px; border-radius:4px; font-size:0.75em; background:#fef3c7; color:#92400e;">中</span>
+                    </label>
+                    <label class="reopen-reason-option" style="display:flex; align-items:flex-start; gap:10px; padding:10px 12px; border:2px solid #e2e8f0; border-radius:8px; cursor:pointer; transition:all 0.15s;" onmouseover="this.style.borderColor='#fcd34d'" onmouseout="if(!this.querySelector('input').checked)this.style.borderColor='#e2e8f0'">
+                        <input type="radio" name="reopenReasonType" value="rollback" style="margin-top:2px; accent-color:#d97706;">
+                        <div>
+                            <div style="font-weight:600; color:#374151;">误操作回退</div>
+                            <div style="font-size:0.85em; color:#6b7280;">错误发布，需要撤回</div>
+                        </div>
+                        <span style="margin-left:auto; padding:2px 8px; border-radius:4px; font-size:0.75em; background:#fee2e2; color:#991b1b;">高</span>
+                    </label>
+                    <label class="reopen-reason-option" style="display:flex; align-items:flex-start; gap:10px; padding:10px 12px; border:2px solid #e2e8f0; border-radius:8px; cursor:pointer; transition:all 0.15s;" onmouseover="this.style.borderColor='#fcd34d'" onmouseout="if(!this.querySelector('input').checked)this.style.borderColor='#e2e8f0'">
+                        <input type="radio" name="reopenReasonType" value="other" style="margin-top:2px; accent-color:#d97706;">
+                        <div>
+                            <div style="font-weight:600; color:#374151;">其他</div>
+                            <div style="font-size:0.85em; color:#6b7280;">请在备注中说明具体原因</div>
+                        </div>
+                        <span style="margin-left:auto; padding:2px 8px; border-radius:4px; font-size:0.75em; background:#f3f4f6; color:#6b7280;">中</span>
+                    </label>
+                </div>
+
+                <label style="display:block; margin-bottom:6px;">备注说明 <span style="color:#9ca3af; font-size:0.85em;">(选填)</span></label>
+                <textarea id="reopenRemark" rows="2" placeholder="补充说明退回的具体原因..."
+                    style="width:100%; border:2px solid #e2e8f0; border-radius:8px; padding:10px; font-family:inherit; resize:vertical;"></textarea>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-cancel" onclick="closeModal('reopenModal')">取消</button>
+                <button class="btn-confirm" style="background:#e53e3e; color:white;"
+                    onclick="confirmReopen()">确认退回</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 任务详情抽屉 (右侧滑出) -->
+    <div class="task-detail-drawer" id="taskDetailDrawer">
+        <div class="drawer-overlay" onclick="closeTaskDetailDrawer()"></div>
+        <div class="drawer-content">
+            <div class="drawer-header">
+                <h3 id="drawerTaskTitle">任务详情</h3>
+                <button class="drawer-close-btn" onclick="closeTaskDetailDrawer()">&times;</button>
+            </div>
+            <div class="drawer-body">
+                <!-- 基本信息区 -->
+                <div class="drawer-section">
+                    <div class="drawer-section-title">基本信息</div>
+                    <div class="drawer-info-grid">
+                        <div class="drawer-info-item">
+                            <span class="info-label">状态</span>
+                            <span class="info-value" id="drawerStatus">-</span>
+                        </div>
+                        <div class="drawer-info-item">
+                            <span class="info-label">优先级</span>
+                            <span class="info-value" id="drawerPriority">-</span>
+                        </div>
+                        <div class="drawer-info-item">
+                            <span class="info-label">类型</span>
+                            <span class="info-value" id="drawerCategory">-</span>
+                        </div>
+                        <div class="drawer-info-item">
+                            <span class="info-label">负责人</span>
+                            <span class="info-value" id="drawerOwner">-</span>
+                        </div>
+                        <div class="drawer-info-item">
+                            <span class="info-label">预估工时</span>
+                            <span class="info-value" id="drawerEstHours">-</span>
+                        </div>
+                        <div class="drawer-info-item">
+                            <span class="info-label">开发工时</span>
+                            <span class="info-value" id="drawerDevHours">-</span>
+                        </div>
+                        <div class="drawer-info-item">
+                            <span class="info-label">任务周期</span>
+                            <span class="info-value" id="drawerActualHours">-</span>
+                        </div>
+                        <div class="drawer-info-item">
+                            <span class="info-label">认领时间</span>
+                            <span class="info-value" id="drawerClaimedAt">-</span>
+                        </div>
+                        <div class="drawer-info-item">
+                            <span class="info-label">截止时间</span>
+                            <span class="info-value" id="drawerDeadline">-</span>
+                        </div>
+                        <div class="drawer-info-item">
+                            <span class="info-label">创建时间</span>
+                            <span class="info-value" id="drawerCreatedAt">-</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 关联模型区 -->
+                <div class="drawer-section">
+                    <div class="drawer-section-title">
+                        关联模型
+                        <button class="drawer-action-btn" id="drawerModelActionBtn" style="display:none;"
+                            onclick="openQuickModelRegister()">
+                            + 快速注册
+                        </button>
+                    </div>
+                    <div id="drawerModelInfo" class="drawer-model-info">
+                        <span style="color:#a0aec0;">未关联模型</span>
+                    </div>
+                </div>
+
+                <!-- 备注区 -->
+                <div class="drawer-section">
+                    <div class="drawer-section-title">
+                        备注
+                        <button class="drawer-action-btn" id="drawerRemarkEditBtn" style="display:none;"
+                            onclick="editDrawerRemark()">编辑</button>
+                    </div>
+                    <div id="drawerRemark" class="drawer-remark-content">
+                        <span style="color:#a0aec0;">暂无备注</span>
+                    </div>
+                </div>
+
+                <!-- 操作记录区 (退回/放弃原因) -->
+                <div class="drawer-section" id="drawerOperationHistorySection" style="display:none;">
+                    <div class="drawer-section-title"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/></svg>操作记录</div>
+                    <div id="drawerOperationHistory" class="drawer-operation-history">
+                    </div>
+                </div>
+
+                <!-- 开发笔记区 -->
+                <div class="drawer-section" id="drawerDevNotesSection" style="display:none;">
+                    <div class="drawer-section-title">开发笔记</div>
+                    <!-- 只读显示 (非所有者) -->
+                    <div id="drawerDevNotesReadonly" class="drawer-dev-notes">
+                        <span style="color:#a0aec0;">暂无笔记</span>
+                    </div>
+                    <!-- 可编辑 (任务所有者) -->
+                    <div id="drawerDevNotesEditable" style="display:none;">
+                        <textarea id="drawerDevNotesInput" class="drawer-notes-textarea"
+                            placeholder="记录开发过程中的问题、思路、注意事项..."></textarea>
+                        <div style="display:flex; justify-content:space-between; align-items:center; margin-top:8px;">
+                            <span style="font-size:0.8em; color:#a0aec0;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 2px;"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg> 点击保存按钮保存笔记</span>
+                            <button class="btn-claim" style="background:linear-gradient(135deg, #d97706, #b45309);"
+                                onclick="saveDrawerDevNotes()"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 2px;"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg> 保存</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 提交说明区 (已提交/已归档任务) -->
+                <div class="drawer-section" id="drawerSubmissionSection" style="display:none;">
+                    <div class="drawer-section-title">提交说明</div>
+                    <div id="drawerSubmission" class="drawer-submission-content">
+                        <span style="color:#a0aec0;">暂无说明</span>
+                    </div>
+                </div>
+
+                <!-- 附件区 -->
+                <div class="drawer-section" id="drawerAttachmentsSection" style="display:none;">
+                    <div class="drawer-section-title">交付物</div>
+                    <div id="drawerAttachments" class="drawer-attachments">
+                        <span style="color:#a0aec0;">暂无附件</span>
+                    </div>
+                </div>
+
+                <!-- 验收记录（已归档任务显示） -->
+                <div class="drawer-section" id="drawerReviewSection" style="display:none;">
+                    <div class="drawer-section-title" style="color:#276749;">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#276749" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle; margin-right:3px;"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+                        验收记录
+                    </div>
+                    <div id="drawerReviewContent" style="padding:4px 0;">
+                        <span style="color:#a0aec0; font-size:0.85em;">加载中...</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 底部操作按钮 -->
+            <div class="drawer-footer" id="drawerFooter">
+                <!-- 动态生成操作按钮 -->
+            </div>
+        </div>
+    </div>
+
+    <!-- 快速注册模型模态框 -->
+    <div class="modal" id="quickModelModal">
+        <div class="modal-content" style="max-width:500px;">
+            <div class="modal-header">
+                <h3>+ 快速注册模型</h3>
+            </div>
+            <div class="modal-body">
+                <p style="color:#718096; font-size:0.9em; margin-bottom:15px;">
+                    为当前任务快速注册并关联模型
+                </p>
+                <input type="hidden" id="quickModelTaskId">
+
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:15px;">
+                    <div class="form-group">
+                        <label>分层 *</label>
+                        <select id="quickModelLayer" onchange="updateQuickModelPreview()">
+                            <option value="ODS">ODS (贴源层)</option>
+                            <option value="DWD" selected>DWD (明细层)</option>
+                            <option value="DIM">DIM (维度层)</option>
+                            <option value="ADS">ADS (应用层)</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>更新周期</label>
+                        <select id="quickModelCycle">
+                            <option value="di" selected>di (日增量)</option>
+                            <option value="df">df (全量)</option>
+                            <option value="rt">rt (实时)</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="form-group" style="margin-top:15px;">
+                    <label>业务对象名 * <span style="color:#a0aec0; font-size:0.85em;">(英文，如 contract_info)</span></label>
+                    <input type="text" id="quickModelName" placeholder="例: contract_info, order_detail"
+                        oninput="updateQuickModelPreview()">
+                </div>
+
+                <div class="form-group" style="margin-top:15px;">
+                    <label>中文描述 *</label>
+                    <input type="text" id="quickModelComment" placeholder="例: 合同信息表, 订单明细表">
+                </div>
+
+                <!-- 预览 -->
+                <div style="margin-top:20px; background:#f7fafc; border-radius:8px; padding:15px;">
+                    <div style="font-size:0.85em; color:#718096; margin-bottom:8px;">生成的表名:</div>
+                    <div id="quickModelPreview"
+                        style="font-family:monospace; font-size:1.1em; color:#2c5282; font-weight:bold;">
+                        dwd_xxx_di
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-cancel" onclick="closeModal('quickModelModal')">取消</button>
+                <button class="btn-confirm" onclick="confirmQuickModelRegister()">注册并关联</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 编辑任务类型模态框 -->
+    <div class="modal" id="editCategoryModal">
+        <div class="modal-content" style="max-width:400px;">
+            <div class="modal-header"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg>编辑任务类型</div>
+            <div class="modal-body">
+                <p style="color:#718096;font-size:0.9em;">任务ID: <strong id="editTaskId"></strong></p>
+                <label style="display:block;margin-top:15px;margin-bottom:8px;font-weight:600;">选择新的开发类型:</label>
+                <select id="editCategorySelect"
+                    style="width:100%;padding:10px;border:2px solid #e2e8f0;border-radius:8px;font-size:0.95em;">
+                    <option value="ODS_SYNC">ODS同步</option>
+                    <option value="DIM_DEV">DIM开发</option>
+                    <option value="DWD_DEV">DWD开发</option>
+                    <option value="ADS_RPT">ADS报表</option>
+                    <option value="DATA_FIX">数据运维</option>
+                </select>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-cancel" onclick="closeModal('editCategoryModal')">取消</button>
+                <button class="btn-confirm" onclick="confirmEditCategory()"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 2px;"><polyline points="20 6 9 17 4 12"/></svg> 确认修改</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 文档中心按钮 - 放在body末尾确保不受其他元素影响 -->
+
+    <!-- 模板下拉菜单 (移至body末尾,避免被父元素overflow裁剪) -->
+    <div id="templateMenu" class="template-dropdown-menu">
+        <div class="template-item" onmousedown="applyTemplate('ODS', event);">
+            <span class="template-dot" style="background:#3182ce;"></span>
+            ODS 同步模板
+        </div>
+        <div class="template-item" onmousedown="applyTemplate('DWD', event);">
+            <span class="template-dot" style="background:#38a169;"></span>
+            DWD 开发模板
+        </div>
+        <div class="template-item" onmousedown="applyTemplate('ADS', event);">
+            <span class="template-dot" style="background:#805ad5;"></span>
+            ADS 报表模板
+        </div>
+        <div class="template-item" onmousedown="applyTemplate('FIX', event);">
+            <span class="template-dot" style="background:#dd6b20;"></span>
+            问题修复模板
+        </div>
+    </div>
+
+    <!-- 文件预览模态框 -->
+    <div class="modal" id="filePreviewModal">
+        <div class="modal-content"
+            style="max-width:800px; width:90%; height:80vh; display:flex; flex-direction:column;">
+            <div class="modal-header">
+                <h3 id="previewFileName">文件预览</h3>
+                <button class="drawer-close-btn" onclick="closeModal('filePreviewModal')"
+                    style="width:24px; height:24px; font-size:1.2em;">&times;</button>
+            </div>
+            <div class="modal-body" style="flex:1; padding:0; overflow:hidden; background:#1e1e1e;">
+                <pre id="previewContent"
+                    style="margin:0; padding:15px; height:100%; overflow:auto; color:#d4d4d4; font-family:'Consolas', 'Monaco', monospace; font-size:14px; line-height:1.5; white-space:pre-wrap;"></pre>
+            </div>
+        </div>
+    </div>
+
+    <!-- 核心应用脚本 -->
+    <script src="assets/js/app.js"></script>
+</body>
+
+</html>

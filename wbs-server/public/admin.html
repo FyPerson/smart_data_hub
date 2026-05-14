@@ -1,0 +1,387 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>用户管理 - 智数协同平台</title>
+    <link rel="stylesheet" href="assets/css/style.css?v=1.2">
+</head>
+
+<body class="admin-page">
+    <div class="container admin-container">
+        <div class="header">
+            <h1>
+                <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle; margin-right:8px;">
+                    <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
+                    <circle cx="9" cy="7" r="4"/>
+                    <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
+                    <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+                </svg>
+                用户管理
+            </h1>
+            <div class="nav-links">
+                <a href="/Domain_Manager.html" class="btn-secondary"
+                    style="padding:5px 10px; margin-right:10px; text-decoration:none; border:1px solid white; display:inline-flex; align-items:center; gap:5px;">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="12" cy="12" r="10"/>
+                        <line x1="2" y1="12" x2="22" y2="12"/>
+                        <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+                    </svg>
+                    业务域管理
+                </a>
+                <a href="/Task_Pool.html" style="display:inline-flex; align-items:center; gap:5px;">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M19 12H5"/>
+                        <polyline points="12 19 5 12 12 5"/>
+                    </svg>
+                    返回任务池
+                </a>
+                <button onclick="logout()">退出登录</button>
+            </div>
+        </div>
+
+        <div id="message" class="message"></div>
+
+        <!-- 添加用户 -->
+        <div class="card">
+            <div class="card-title"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>添加新用户</div>
+            <div class="form-grid">
+                <div class="form-group">
+                    <label>用户名 <span style="color:red">*</span></label>
+                    <input type="text" id="newUsername" placeholder="登录账号" autocomplete="off">
+                </div>
+                <div class="form-group">
+                    <label>显示名称</label>
+                    <input type="text" id="newDisplayName" placeholder="例如: 张三" autocomplete="off">
+                </div>
+                <div class="form-group">
+                    <label>密码 <span style="color:red">*</span></label>
+                    <input type="password" id="newPassword" placeholder="登录密码" autocomplete="new-password">
+                </div>
+                <div class="form-group">
+                    <label>角色</label>
+                    <select id="newRole">
+                        <option value="user">数据开发</option>
+                        <option value="publisher">发布者(开发负责人)</option>
+                        <option value="viewer">查看者(只读)</option>
+                        <option value="admin">管理员</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>手机号 <span style="color:#94a3b8; font-size:0.85em;">(数据协作通知用,选填)</span></label>
+                    <input type="text" id="newPhone" placeholder="11 位手机号" autocomplete="off" maxlength="11">
+                </div>
+            </div>
+            <div style="margin-top:20px; text-align:right;">
+                <button class="btn btn-primary" onclick="createUser()">创建用户</button>
+            </div>
+        </div>
+
+        <!-- 用户列表 -->
+        <div class="card">
+            <div class="card-title"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/></svg>用户列表</div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>用户名</th>
+                        <th>显示名称</th>
+                        <th>角色</th>
+                        <th>手机号</th>
+                        <th>状态</th>
+                        <th>创建时间</th>
+                        <th>操作</th>
+                    </tr>
+                </thead>
+                <tbody id="userList">
+                    <tr>
+                        <td colspan="8" style="text-align:center;color:#a0aec0;">加载中...</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- 数据库连接配置 -->
+        <div class="card" style="margin-top:30px;">
+            <div class="card-title"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>数据库连接配置 (ODS 验收)</div>
+            <p style="color:#64748b; margin-bottom:20px; font-size:0.9em;">配置数仓连接和源系统连接，用于 ODS 自动验收功能（含数据量对比）</p>
+
+            <!-- 添加新连接 -->
+            <div style="background:#f8fafc; padding:20px; border-radius:8px; margin-bottom:20px;">
+                <h4 style="margin:0 0 15px 0; color:#475569;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>添加新连接</h4>
+                <div class="form-grid" style="display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:15px;">
+                    <div class="form-group">
+                        <label>连接类型 <span style="color:red">*</span></label>
+                        <select id="dbConnType" onchange="toggleSourceSystemCode()">
+                            <option value="warehouse">数仓连接</option>
+                            <option value="source">源系统连接</option>
+                        </select>
+                    </div>
+                    <div class="form-group" id="sourceSystemCodeGroup" style="display:none;">
+                        <label>源系统代码 <span style="color:red">*</span></label>
+                        <input type="text" id="dbConnSourceSystemCode" placeholder="例如: BMS（需与模型中心的源系统一致）">
+                    </div>
+                    <div class="form-group">
+                        <label>连接名称 <span style="color:red">*</span></label>
+                        <input type="text" id="dbConnName" placeholder="例如: 生产数仓">
+                    </div>
+                    <div class="form-group">
+                        <label>服务器地址 <span style="color:red">*</span></label>
+                        <input type="text" id="dbConnHost" placeholder="例如: 192.168.1.100">
+                    </div>
+                    <div class="form-group">
+                        <label>端口</label>
+                        <input type="number" id="dbConnPort" value="1433" placeholder="1433">
+                    </div>
+                    <div class="form-group">
+                        <label>数据库名 <span style="color:red">*</span></label>
+                        <input type="text" id="dbConnDatabase" placeholder="例如: data_warehouse">
+                    </div>
+                    <div class="form-group">
+                        <label>默认 Schema</label>
+                        <input type="text" id="dbConnSchema" value="dbo" placeholder="dbo">
+                    </div>
+                    <div class="form-group">
+                        <label>用户名 <span style="color:red">*</span></label>
+                        <input type="text" id="dbConnUsername" placeholder="数据库用户名">
+                    </div>
+                    <div class="form-group">
+                        <label>密码 <span style="color:red">*</span></label>
+                        <input type="password" id="dbConnPassword" placeholder="数据库密码">
+                    </div>
+                    <div class="form-group" style="display:flex; align-items:flex-end;">
+                        <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+                            <input type="checkbox" id="dbConnIsDefault" style="width:18px; height:18px;">
+                            设为默认连接
+                        </label>
+                    </div>
+                </div>
+                <div style="margin-top:20px; display:flex; gap:10px; justify-content:flex-end;">
+                    <button class="btn" style="background:#3b82f6; color:white;" onclick="testNewDbConnection()"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 2px;"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg> 测试连接</button>
+                    <button class="btn btn-primary" onclick="createDbConnection()"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 2px;"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg> 保存连接</button>
+                </div>
+            </div>
+
+            <!-- 连接列表 -->
+            <table>
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>类型</th>
+                        <th>名称</th>
+                        <th>服务器</th>
+                        <th>数据库</th>
+                        <th>Schema</th>
+                        <th>默认</th>
+                        <th>操作</th>
+                    </tr>
+                </thead>
+                <tbody id="dbConnectionList">
+                    <tr>
+                        <td colspan="8" style="text-align:center;color:#a0aec0;">加载中...</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- 验收配置 -->
+        <div class="card" style="margin-top:30px;">
+            <div class="card-title"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>验收阈值配置</div>
+            <p style="color:#64748b; margin-bottom:20px; font-size:0.9em;">配置 ODS 验收检查的默认阈值</p>
+
+            <div class="form-grid" style="display:grid; grid-template-columns:repeat(auto-fit, minmax(250px, 1fr)); gap:20px;">
+                <div class="form-group">
+                    <label>空值率阈值 (%)</label>
+                    <input type="number" id="configNullRateThreshold" value="5" min="0" max="100" step="0.1">
+                    <small style="color:#94a3b8;">NOT NULL 字段允许的最大空值率</small>
+                </div>
+                <div class="form-group">
+                    <label>最小数据量</label>
+                    <input type="number" id="configMinRowCount" value="0" min="0">
+                    <small style="color:#94a3b8;">表中数据量需大于此值才算通过</small>
+                </div>
+                <div class="form-group">
+                    <label>审计字段</label>
+                    <input type="text" id="configAuditFields" value="dw_load_ts,dw_src_sys,dw_batch_id">
+                    <small style="color:#94a3b8;">需检查的审计字段，逗号分隔</small>
+                </div>
+            </div>
+            <div style="margin-top:20px; text-align:right;">
+                <button class="btn btn-primary" onclick="saveValidationConfig()"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 2px;"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg> 保存配置</button>
+            </div>
+        </div>
+
+        <!-- 评论管理 -->
+        <div class="card" style="margin-top:30px;">
+            <div class="card-title" style="display:flex; justify-content:space-between; align-items:center;">
+                <span>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;">
+                        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+                    </svg>
+                    评论管理
+                    <span id="pendingCommentsBadge" style="display:none; background:#ef4444; color:white; padding:2px 8px; border-radius:10px; font-size:0.75rem; margin-left:8px;">0</span>
+                </span>
+                <div style="display:flex; gap:8px;">
+                    <select id="commentStatusFilter" onchange="loadAllComments()" style="padding:5px 10px; border:1px solid #e2e8f0; border-radius:4px; font-size:0.85rem;">
+                        <option value="pending">待审核</option>
+                        <option value="approved">已通过</option>
+                        <option value="rejected">已拒绝</option>
+                        <option value="all">全部</option>
+                    </select>
+                    <button class="btn" style="background:#f1f5f9; padding:5px 10px;" onclick="loadAllComments()">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <polyline points="23 4 23 10 17 10"/>
+                            <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+            <p style="color:#64748b; margin-bottom:20px; font-size:0.9em;">管理用户对"关于平台"页面的评论</p>
+
+            <table>
+                <thead>
+                    <tr>
+                        <th style="width:60px;">ID</th>
+                        <th style="width:80px;">用户</th>
+                        <th style="width:80px;">分类</th>
+                        <th>评论内容</th>
+                        <th style="width:80px;">状态</th>
+                        <th style="width:120px;">时间</th>
+                        <th style="width:180px;">操作</th>
+                    </tr>
+                </thead>
+                <tbody id="commentsList">
+                    <tr>
+                        <td colspan="7" style="text-align:center;color:#a0aec0;">加载中...</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- 钉钉配置（数据协作模块 v2.0） -->
+        <div class="card" style="margin-top:30px;">
+            <div class="card-title">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;">
+                    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+                </svg>
+                钉钉配置
+                <span id="dingtalkConfigStatus" style="font-size:0.75em; margin-left:10px; padding:2px 8px; border-radius:4px; background:#f1f5f9; color:#64748b;">未配置</span>
+            </div>
+            <p style="color:#64748b; margin-bottom:20px; font-size:0.9em;">
+                数据协作模块用,配置后可向指派开发的钉钉账号推送临时取数任务通知。凭证加密存储在数据库,密码字段以 *** 显示;
+                如需修改,输入新值后保存(留空或保持 *** 不会改写原值)。
+            </p>
+
+            <div class="form-grid" style="display:grid; grid-template-columns:repeat(auto-fit, minmax(280px, 1fr)); gap:15px;">
+                <div class="form-group">
+                    <label>AppKey <span style="color:red">*</span></label>
+                    <input type="text" id="dingtalkAppKey" placeholder="钉钉企业内部应用 AppKey" autocomplete="off">
+                </div>
+                <div class="form-group">
+                    <label>AppSecret <span style="color:red">*</span></label>
+                    <input type="password" id="dingtalkAppSecret" placeholder="钉钉企业内部应用 AppSecret" autocomplete="new-password">
+                </div>
+                <div class="form-group">
+                    <label>RobotCode <span style="color:red">*</span></label>
+                    <input type="text" id="dingtalkRobotCode" placeholder="单聊机器人 RobotCode" autocomplete="off">
+                </div>
+                <div class="form-group">
+                    <label>平台 BaseURL <span style="color:#94a3b8; font-size:0.85em;">(钉钉卡片"查看详情"用)</span></label>
+                    <input type="text" id="dingtalkPlatformBaseUrl" placeholder="例如: http://192.168.1.100:3000">
+                </div>
+            </div>
+
+            <div style="margin-top:20px; display:flex; gap:10px; justify-content:flex-end;">
+                <button class="btn" style="background:#f1f5f9; color:#475569;" onclick="testDingtalkConfig()">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;">
+                        <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+                        <polyline points="22 4 12 14.01 9 11.01"/>
+                    </svg>
+                    测试连接
+                </button>
+                <button class="btn btn-primary" onclick="saveDingtalkConfig()">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;">
+                        <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
+                        <polyline points="17 21 17 13 7 13 7 21"/>
+                        <polyline points="7 3 7 8 15 8"/>
+                    </svg>
+                    保存配置
+                </button>
+            </div>
+
+            <div id="dingtalkTestResult" style="display:none; margin-top:15px; padding:12px; border-radius:6px; font-size:0.9em;"></div>
+        </div>
+    </div>
+
+    <!-- 编辑模态框 -->
+    <div class="modal" id="editModal">
+        <div class="modal-content">
+            <div class="modal-header"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>编辑用户</div>
+            <input type="hidden" id="editUserId">
+            <div class="form-group" style="margin-bottom:15px;">
+                <label>显示名称</label>
+                <input type="text" id="editDisplayName">
+            </div>
+            <div class="form-group" style="margin-bottom:15px;">
+                <label>角色</label>
+                <select id="editRole">
+                    <option value="user">数据开发</option>
+                    <option value="publisher">发布者(开发负责人)</option>
+                    <option value="viewer">查看者(只读)</option>
+                    <option value="admin">管理员</option>
+                </select>
+            </div>
+            <div class="form-group" style="margin-bottom:15px;">
+                <label>状态</label>
+                <select id="editStatus">
+                    <option value="active">启用</option>
+                    <option value="disabled">禁用</option>
+                </select>
+            </div>
+            <div class="form-group" style="margin-bottom:15px;">
+                <label>手机号 <span style="color:#94a3b8; font-size:0.85em;">(数据协作通知用,改后下次通知会重新解析钉钉 userId)</span></label>
+                <input type="text" id="editPhone" placeholder="11 位手机号,留空表示清除" maxlength="11">
+            </div>
+            <div class="form-group" style="margin-bottom:15px;">
+                <label>新密码 (留空则不修改)</label>
+                <input type="password" id="editPassword" placeholder="输入新密码">
+            </div>
+            <div class="modal-footer">
+                <button class="btn" style="background:#e2e8f0;" onclick="closeEditModal()">取消</button>
+                <button class="btn btn-primary" onclick="saveUser()">保存</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 回复评论模态框 -->
+    <div class="modal" id="replyModal">
+        <div class="modal-content" style="max-width:500px;">
+            <div class="modal-header">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;">
+                    <path d="M9 17H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+                    <polyline points="16 17 21 12 16 7"/>
+                    <line x1="21" y1="12" x2="9" y2="12"/>
+                </svg>
+                回复评论
+            </div>
+            <input type="hidden" id="replyCommentId">
+            <div style="background:#f8fafc; padding:12px; border-radius:6px; margin-bottom:15px;">
+                <div style="font-size:0.85rem; color:#64748b; margin-bottom:6px;">原评论：</div>
+                <div id="replyOriginalContent" style="color:#334155;"></div>
+            </div>
+            <div class="form-group" style="margin-bottom:15px;">
+                <label>回复内容</label>
+                <textarea id="replyContent" rows="4" style="width:100%; padding:10px; border:1px solid #e2e8f0; border-radius:6px; resize:vertical;" placeholder="输入回复内容..."></textarea>
+            </div>
+            <div class="modal-footer">
+                <button class="btn" style="background:#e2e8f0;" onclick="closeReplyModal()">取消</button>
+                <button class="btn btn-primary" onclick="submitReply()">提交回复</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="assets/js/admin.js?v=20260511_phone"></script>
+</body>
+
+</html>

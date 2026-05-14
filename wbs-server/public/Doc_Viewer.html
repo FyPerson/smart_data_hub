@@ -1,0 +1,1964 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>文档中心</title>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/github-markdown-css/5.2.0/github-markdown-light.min.css">
+    <style>
+        :root {
+            --sidebar-width: 280px;
+            --header-height: 60px;
+            --primary-color: #4299e1;
+            --bg-color: #f7fafc;
+            --border-color: #e2e8f0;
+            /* 科技风配色 */
+            --sidebar-bg-start: #0f172a;
+            --sidebar-bg-end: #1e293b;
+            --sidebar-text: #94a3b8;
+            --sidebar-text-hover: #e2e8f0;
+            --sidebar-active-bg: rgba(59, 130, 246, 0.15);
+            --sidebar-active-text: #60a5fa;
+            --sidebar-category-text: #64748b;
+            --sidebar-divider: rgba(148, 163, 184, 0.1);
+        }
+
+        body {
+            margin: 0;
+            padding: 0;
+            background: var(--bg-color);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        /* Top Header - 科技风格 */
+        .page-header {
+            height: var(--header-height);
+            background: linear-gradient(90deg, var(--sidebar-bg-start) 0%, #1e3a5f 100%);
+            border-bottom: 1px solid rgba(59, 130, 246, 0.3);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 20px;
+            z-index: 10;
+        }
+
+        .brand {
+            font-size: 1.25rem;
+            font-weight: 700;
+            color: #e2e8f0;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .brand::before {
+            content: '';
+            width: 24px;
+            height: 24px;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 24 24' stroke='%2360a5fa'%3E%3Cpath stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10'/%3E%3C/svg%3E");
+            background-size: contain;
+        }
+
+        .brand-divider {
+            color: rgba(148, 163, 184, 0.4);
+            font-weight: 300;
+            margin: 0 4px;
+        }
+
+        .about-link {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            color: #94a3b8;
+            font-size: 0.875rem;
+            font-weight: 400;
+            text-decoration: none;
+            transition: color 0.2s;
+        }
+
+        .about-link:hover {
+            color: #60a5fa;
+        }
+
+        .about-link svg {
+            opacity: 0.7;
+        }
+
+        .about-link:hover svg {
+            opacity: 1;
+        }
+
+        .header-actions {
+            display: flex;
+            gap: 12px;
+        }
+
+        .btn {
+            padding: 8px 16px;
+            border-radius: 6px;
+            border: 1px solid transparent;
+            cursor: pointer;
+            font-size: 0.9em;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            transition: all 0.2s;
+        }
+
+        .btn-primary {
+            background: var(--primary-color);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: #3182ce;
+        }
+
+        .btn-outline {
+            background: rgba(255, 255, 255, 0.1);
+            border-color: rgba(148, 163, 184, 0.3);
+            color: #e2e8f0;
+        }
+
+        .btn-outline:hover {
+            background: rgba(255, 255, 255, 0.2);
+            border-color: rgba(148, 163, 184, 0.5);
+        }
+
+        /* Main Layout */
+        .main-container {
+            display: flex;
+            flex: 1;
+            overflow: hidden;
+        }
+
+        /* Sidebar - 科技风格 */
+        .sidebar {
+            width: var(--sidebar-width);
+            min-width: 200px;
+            max-width: 500px;
+            background: linear-gradient(180deg, var(--sidebar-bg-start) 0%, var(--sidebar-bg-end) 100%);
+            border-right: 1px solid rgba(59, 130, 246, 0.2);
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            flex-shrink: 0;
+        }
+
+        .sidebar-resize-handle {
+            width: 6px;
+            cursor: col-resize;
+            flex-shrink: 0;
+            position: relative;
+            z-index: 10;
+        }
+
+        .sidebar-resize-handle::after {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: -3px;
+            width: 12px;
+            height: 100%;
+        }
+
+        .sidebar-resize-handle:hover,
+        .sidebar-resize-handle.dragging {
+            background: var(--sidebar-active-text);
+            opacity: 0.5;
+        }
+
+        .sidebar-search {
+            padding: 16px;
+            border-bottom: 1px solid var(--sidebar-divider);
+            position: sticky;
+            top: 0;
+            background: var(--sidebar-bg-start);
+            z-index: 5;
+        }
+
+        .search-input {
+            width: 100%;
+            padding: 10px 12px 10px 36px;
+            border: 1px solid rgba(148, 163, 184, 0.2);
+            border-radius: 8px;
+            font-size: 0.9em;
+            box-sizing: border-box;
+            background: rgba(30, 41, 59, 0.8);
+            color: var(--sidebar-text-hover);
+            transition: all 0.2s;
+        }
+
+        .search-input::placeholder {
+            color: var(--sidebar-category-text);
+        }
+
+        .search-input:focus {
+            outline: none;
+            border-color: var(--sidebar-active-text);
+            background: rgba(30, 41, 59, 1);
+            box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.1);
+        }
+
+        /* 搜索图标容器 */
+        .search-wrapper {
+            position: relative;
+        }
+
+        .search-wrapper::before {
+            content: '';
+            position: absolute;
+            left: 12px;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 16px;
+            height: 16px;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 24 24' stroke='%2364748b'%3E%3Cpath stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z'/%3E%3C/svg%3E");
+            background-size: contain;
+            pointer-events: none;
+        }
+
+        .doc-list {
+            padding: 8px;
+            flex: 1;
+        }
+
+        .category-title {
+            font-size: 0.7em;
+            font-weight: 600;
+            color: var(--sidebar-category-text);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            padding: 20px 12px 8px;
+            margin-top: 8px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            cursor: pointer;
+            user-select: none;
+        }
+
+        .category-title:hover {
+            color: var(--sidebar-text);
+        }
+
+        .category-title::before {
+            content: '';
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            flex-shrink: 0;
+            background-size: contain;
+            background-repeat: no-repeat;
+            background-position: center;
+            opacity: 0.6;
+        }
+
+        .category-title::after {
+            content: '';
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            margin-left: auto;
+            flex-shrink: 0;
+            border-right: 1.5px solid var(--sidebar-category-text);
+            border-bottom: 1.5px solid var(--sidebar-category-text);
+            transform: rotate(45deg);
+            transition: transform 0.2s ease;
+            opacity: 0.5;
+        }
+
+        .category-title.collapsed::after {
+            transform: rotate(-45deg);
+        }
+
+        .category-title:first-child {
+            margin-top: 0;
+        }
+
+        .category-docs {
+            overflow: hidden;
+            transition: max-height 0.25s ease;
+        }
+
+        .category-docs.collapsed {
+            max-height: 0 !important;
+        }
+
+        /* 二级目录 */
+        .sub-category-title {
+            font-size: 0.65em;
+            font-weight: 500;
+            color: var(--sidebar-category-text);
+            padding: 10px 12px 4px 28px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            cursor: pointer;
+            user-select: none;
+            opacity: 0.8;
+        }
+
+        .sub-category-title:hover {
+            opacity: 1;
+        }
+
+        .sub-category-title::before {
+            content: '▸';
+            font-size: 10px;
+            transition: transform 0.2s ease;
+        }
+
+        .sub-category-title.expanded::before {
+            transform: rotate(90deg);
+        }
+
+        .sub-category-docs {
+            overflow: hidden;
+            transition: max-height 0.2s ease;
+        }
+
+        .sub-category-docs.collapsed {
+            max-height: 0 !important;
+        }
+
+        .sub-category-docs .doc-item {
+            padding-left: 40px;
+        }
+
+        .category-divider {
+            height: 1px;
+            background: var(--sidebar-category-text);
+            margin: 12px 12px 4px;
+            opacity: 0.3;
+        }
+
+        /* 分类图标 — 按角色场景分组 */
+        /* 第一组：开发必读 */
+        .category-title[data-category="开发规范"]::before {
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 24 24' stroke='%2364748b'%3E%3Cpath stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M9 7h6m0 10v-3m-3 3h.01M9 17h.01M9 14h.01M12 14h.01M15 11h.01M12 11h.01M9 11h.01M7 21h10a2 2 0 002-2V5a2 2 0 00-2-2H7a2 2 0 00-2 2v14a2 2 0 002 2z'/%3E%3C/svg%3E");
+        }
+
+        .category-title[data-category="决策记录"]::before {
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 24 24' stroke='%2364748b'%3E%3Cpath stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4'/%3E%3C/svg%3E");
+        }
+
+        .category-title[data-category="使用指南"]::before {
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 24 24' stroke='%2364748b'%3E%3Cpath stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z'/%3E%3C/svg%3E");
+        }
+
+        /* 第二组：业务参考 */
+        .category-title[data-category="业务参考"]::before {
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 24 24' stroke='%2364748b'%3E%3Cpath stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4'/%3E%3C/svg%3E");
+        }
+
+        .category-title[data-category="需求文档"]::before {
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 24 24' stroke='%2364748b'%3E%3Cpath stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z'/%3E%3C/svg%3E");
+        }
+
+        /* 第三组：项目管理 */
+        .category-title[data-category="建设方案"]::before {
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 24 24' stroke='%2364748b'%3E%3Cpath stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4'/%3E%3C/svg%3E");
+        }
+
+        .category-title[data-category="制度规范"]::before {
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 24 24' stroke='%2364748b'%3E%3Cpath stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z'/%3E%3C/svg%3E");
+        }
+
+        .category-title[data-category="调研报告"]::before {
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 24 24' stroke='%2364748b'%3E%3Cpath stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z'/%3E%3C/svg%3E");
+        }
+
+        /* 第四组：辅助资源 */
+        .category-title[data-category="资源模板"]::before {
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 24 24' stroke='%2364748b'%3E%3Cpath stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4'/%3E%3C/svg%3E");
+        }
+
+        .category-title[data-category="归档文档"]::before {
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 24 24' stroke='%2364748b'%3E%3Cpath stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4'/%3E%3C/svg%3E");
+        }
+
+        /* 文件图标样式 */
+        .file-icon {
+            width: 16px;
+            height: 16px;
+            margin-right: 8px;
+            flex-shrink: 0;
+            stroke: var(--sidebar-text);
+        }
+
+        .file-icon.file-excel {
+            stroke: #22c55e;
+        }
+
+        .file-icon.file-word {
+            stroke: #3b82f6;
+        }
+
+        .file-icon.file-pdf {
+            stroke: #ef4444;
+        }
+
+        .download-icon {
+            margin-left: auto;
+            font-size: 12px;
+            color: var(--sidebar-text);
+            opacity: 0.6;
+        }
+
+        .doc-item:hover .download-icon {
+            opacity: 1;
+            color: #60a5fa;
+        }
+
+        .doc-item {
+            padding: 10px 12px 10px 24px;
+            margin: 2px 0;
+            border-radius: 6px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            color: var(--sidebar-text);
+            text-decoration: none;
+            transition: all 0.2s;
+            font-size: 0.875em;
+            position: relative;
+        }
+
+        .doc-item:hover {
+            background: rgba(148, 163, 184, 0.1);
+            color: var(--sidebar-text-hover);
+        }
+
+        .doc-item.active {
+            background: var(--sidebar-active-bg);
+            color: var(--sidebar-active-text);
+        }
+
+        .doc-item.active::before {
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 24 24' stroke='%2360a5fa'%3E%3Cpath stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z'/%3E%3C/svg%3E");
+            opacity: 1;
+        }
+
+        .doc-item .doc-title {
+            flex: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        /* 侧边栏滚动条样式 */
+        .sidebar::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        .sidebar::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        .sidebar::-webkit-scrollbar-thumb {
+            background: rgba(148, 163, 184, 0.3);
+            border-radius: 3px;
+        }
+
+        .sidebar::-webkit-scrollbar-thumb:hover {
+            background: rgba(148, 163, 184, 0.5);
+        }
+
+        /* 版本徽章 - 适配深色背景 */
+        .version-badge {
+            background: rgba(96, 165, 250, 0.2);
+            color: var(--sidebar-active-text);
+            font-size: 0.7em;
+            padding: 2px 6px;
+            border-radius: 10px;
+            margin-left: 6px;
+            font-weight: 500;
+            flex-shrink: 0;
+        }
+
+        /* Content Area */
+        .content-area {
+            flex: 1;
+            overflow-y: auto;
+            padding: 40px;
+            background: white;
+        }
+
+        /* 文档头部（含版本选择器） */
+        .doc-header {
+            max-width: 900px;
+            margin: 0 auto 20px;
+            display: flex;
+            justify-content: flex-end;
+            align-items: center;
+        }
+
+        .version-selector {
+            position: relative;
+        }
+
+        .version-btn {
+            background: #ebf8ff;
+            border: 1px solid #bee3f8;
+            border-radius: 6px;
+            padding: 6px 12px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 0.9em;
+            color: #2b6cb0;
+            transition: all 0.2s;
+        }
+
+        .version-btn:hover {
+            background: #bee3f8;
+        }
+
+        .version-dropdown {
+            position: absolute;
+            right: 0;
+            top: calc(100% + 4px);
+            background: white;
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+            min-width: 240px;
+            display: none;
+            z-index: 100;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .version-dropdown.show {
+            display: block;
+        }
+
+        .version-item {
+            padding: 10px 14px;
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid #f0f0f0;
+            transition: background 0.15s;
+        }
+
+        .version-item:last-child {
+            border-bottom: none;
+        }
+
+        .version-item:hover {
+            background: #f7fafc;
+        }
+
+        .version-item.current {
+            background: #ebf8ff;
+        }
+
+        .version-info {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .version-num {
+            font-weight: 600;
+            color: #2d3748;
+        }
+
+        .version-date {
+            font-size: 0.8em;
+            color: #718096;
+        }
+
+        .version-tag {
+            font-size: 0.75em;
+            padding: 2px 8px;
+            border-radius: 10px;
+        }
+
+        .version-tag.latest {
+            background: #c6f6d5;
+            color: #276749;
+        }
+
+        .version-tag.archived {
+            background: #feebc8;
+            color: #c05621;
+        }
+
+        .markdown-body {
+            max-width: 900px;
+            margin: 0 auto;
+            background: white;
+            /* markdown-css overrides */
+            box-sizing: border-box;
+            min-width: 200px;
+            font-family: 'Microsoft YaHei', '微软雅黑', -apple-system, BlinkMacSystemFont, sans-serif;
+        }
+
+        /* Blockquote Styles - 提示说明块 */
+        .markdown-body blockquote {
+            background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%);
+            border-left: 4px solid #0ea5e9;
+            border-radius: 0 8px 8px 0;
+            padding: 12px 16px;
+            margin: 16px 0;
+            color: #0c4a6e;
+            font-size: 0.9em;
+        }
+
+        .markdown-body blockquote p {
+            margin: 0;
+        }
+
+        /* Table Styles */
+        .markdown-body table {
+            font-size: 14px !important;
+        }
+
+        .markdown-body table th {
+            white-space: nowrap !important;
+        }
+
+        .markdown-body table td:first-child,
+        .markdown-body table td:nth-child(2) {
+            white-space: nowrap !important;
+        }
+
+        /* ==================== 文档内嵌标签页组件 ==================== */
+        .markdown-body .doc-tabs {
+            margin: 16px 0;
+        }
+
+        .markdown-body .doc-tab-nav {
+            display: flex;
+            gap: 0;
+            border-bottom: 2px solid #e7e5e4;
+            margin-bottom: 0;
+        }
+
+        .markdown-body .doc-tab {
+            padding: 10px 22px;
+            font-weight: 600;
+            font-size: 14px;
+            color: #a8a29e;
+            cursor: pointer;
+            border-bottom: 3px solid transparent;
+            margin-bottom: -2px;
+            transition: color 0.2s, border-color 0.2s;
+            user-select: none;
+        }
+
+        .markdown-body .doc-tab:hover {
+            color: #78716c;
+        }
+
+        .markdown-body .doc-tab.active {
+            color: #d97706;
+            border-bottom-color: #d97706;
+        }
+
+        .markdown-body .doc-tab-panel {
+            display: none;
+        }
+
+        .markdown-body .doc-tab-panel.active {
+            display: block;
+        }
+
+        /* Loading State */
+        .loading {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            color: #718096;
+            font-size: 1.1em;
+        }
+
+        /* 侧边栏内的loading适配深色背景 */
+        .doc-list .loading {
+            color: var(--sidebar-category-text);
+        }
+
+        /* Mobile Responsive */
+        @media (max-width: 768px) {
+            .sidebar {
+                display: none;
+                /* Can be improved later */
+            }
+        }
+
+        /* Print Styles - 完整打印支持 */
+        @page {
+            /* 设置页边距 */
+            margin: 15mm 10mm 20mm 10mm;
+
+            /* 右下角显示页码 */
+            @bottom-right {
+                content: "第 " counter(page) " 页";
+                font-size: 10pt;
+                color: #666;
+            }
+        }
+
+        @media print {
+
+            /* 隐藏不需要打印的元素 */
+            .page-header,
+            .sidebar,
+            .doc-header,
+            .version-selector {
+                display: none !important;
+            }
+
+            /* 重置body布局 */
+            body {
+                height: auto !important;
+                overflow: visible !important;
+                display: block !important;
+            }
+
+            /* 重置主容器 */
+            .main-container {
+                display: block !important;
+                overflow: visible !important;
+                height: auto !important;
+            }
+
+            /* 内容区域完整展开 */
+            .content-area {
+                padding: 0 !important;
+                margin: 0 !important;
+                overflow: visible !important;
+                height: auto !important;
+                position: static !important;
+            }
+
+            /* Markdown内容完整显示 */
+            .markdown-body {
+                max-width: 100% !important;
+                padding: 20px !important;
+                margin: 0 !important;
+                overflow: visible !important;
+            }
+
+            /* 避免表格被截断 */
+            table {
+                page-break-inside: auto;
+            }
+
+            tr {
+                page-break-inside: avoid;
+                page-break-after: auto;
+            }
+
+            thead {
+                display: table-header-group;
+            }
+
+            /* 避免代码块被截断 */
+            pre,
+            code {
+                page-break-inside: avoid;
+                white-space: pre-wrap !important;
+                word-wrap: break-word !important;
+            }
+
+            /* 避免标题与内容分离 */
+            h1,
+            h2,
+            h3,
+            h4,
+            h5,
+            h6 {
+                page-break-after: avoid;
+            }
+
+            /* 图片打印优化 */
+            img {
+                max-width: 100% !important;
+                page-break-inside: avoid;
+            }
+
+            /* 链接显示URL（可选） */
+            a[href]:after {
+                content: none;
+            }
+        }
+
+        /* ==================== 评论组件样式 ==================== */
+        .comments-section {
+            margin-top: 60px;
+            padding-top: 40px;
+            border-top: 2px solid #e2e8f0;
+        }
+
+        .comments-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 24px;
+        }
+
+        .comments-title {
+            font-size: 1.5rem;
+            font-weight: 600;
+            color: #1e293b;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .comments-title svg {
+            color: #3b82f6;
+        }
+
+        .comments-filter {
+            display: flex;
+            gap: 8px;
+        }
+
+        .filter-btn {
+            padding: 6px 12px;
+            border: 1px solid #e2e8f0;
+            border-radius: 6px;
+            background: white;
+            color: #64748b;
+            font-size: 0.85rem;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .filter-btn:hover {
+            border-color: #3b82f6;
+            color: #3b82f6;
+        }
+
+        .filter-btn.active {
+            background: #3b82f6;
+            color: white;
+            border-color: #3b82f6;
+        }
+
+        /* 评论表单 */
+        .comment-form {
+            background: #f8fafc;
+            border: 1px solid #e2e8f0;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 30px;
+        }
+
+        .comment-form-title {
+            font-size: 1rem;
+            font-weight: 500;
+            color: #334155;
+            margin-bottom: 16px;
+        }
+
+        .comment-textarea {
+            width: 100%;
+            min-height: 100px;
+            padding: 12px;
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+            font-size: 0.95rem;
+            resize: vertical;
+            box-sizing: border-box;
+            font-family: inherit;
+        }
+
+        .comment-textarea:focus {
+            outline: none;
+            border-color: #3b82f6;
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+        }
+
+        .comment-form-footer {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: 12px;
+        }
+
+        .category-select {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+
+        .category-select label {
+            font-size: 0.85rem;
+            color: #64748b;
+        }
+
+        .category-select select {
+            padding: 6px 10px;
+            border: 1px solid #e2e8f0;
+            border-radius: 6px;
+            font-size: 0.85rem;
+            background: white;
+        }
+
+        .submit-comment-btn {
+            padding: 10px 20px;
+            background: #3b82f6;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 0.95rem;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .submit-comment-btn:hover {
+            background: #2563eb;
+        }
+
+        .submit-comment-btn:disabled {
+            background: #94a3b8;
+            cursor: not-allowed;
+        }
+
+        .login-hint {
+            color: #64748b;
+            font-size: 0.9rem;
+        }
+
+        .login-hint a {
+            color: #3b82f6;
+            text-decoration: none;
+        }
+
+        .login-hint a:hover {
+            text-decoration: underline;
+        }
+
+        /* 评论列表 */
+        .comments-list {
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        .comment-card {
+            background: white;
+            border: 1px solid #e2e8f0;
+            border-radius: 12px;
+            padding: 20px;
+            transition: box-shadow 0.2s;
+        }
+
+        .comment-card:hover {
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
+        }
+
+        .comment-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 12px;
+        }
+
+        .comment-user {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .comment-avatar {
+            width: 32px;
+            height: 32px;
+            background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-size: 0.85rem;
+            font-weight: 500;
+        }
+
+        .comment-username {
+            font-weight: 500;
+            color: #1e293b;
+        }
+
+        .comment-meta {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .comment-category {
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 500;
+        }
+
+        .comment-category.general {
+            background: #e2e8f0;
+            color: #64748b;
+        }
+
+        .comment-category.feature {
+            background: #dbeafe;
+            color: #2563eb;
+        }
+
+        .comment-category.bug {
+            background: #fee2e2;
+            color: #dc2626;
+        }
+
+        .comment-category.experience {
+            background: #d1fae5;
+            color: #059669;
+        }
+
+        .comment-time {
+            color: #94a3b8;
+            font-size: 0.8rem;
+        }
+
+        .comment-content {
+            color: #334155;
+            line-height: 1.6;
+            margin-bottom: 12px;
+        }
+
+        /* 管理员回复 */
+        .admin-reply {
+            background: #f0f9ff;
+            border-left: 3px solid #3b82f6;
+            padding: 12px 16px;
+            border-radius: 0 8px 8px 0;
+            margin-top: 12px;
+        }
+
+        .admin-reply-header {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin-bottom: 8px;
+            font-size: 0.85rem;
+            color: #3b82f6;
+            font-weight: 500;
+        }
+
+        .admin-reply-content {
+            color: #334155;
+            font-size: 0.95rem;
+            line-height: 1.5;
+        }
+
+        .admin-reply-time {
+            color: #94a3b8;
+            font-size: 0.75rem;
+            margin-top: 6px;
+        }
+
+        /* 空状态 */
+        .comments-empty {
+            text-align: center;
+            padding: 40px 20px;
+            color: #64748b;
+        }
+
+        .comments-empty svg {
+            margin-bottom: 16px;
+            opacity: 0.5;
+        }
+
+        .comments-empty p {
+            margin: 0;
+        }
+
+        /* 提交成功提示 */
+        .comment-success {
+            background: #d1fae5;
+            color: #059669;
+            padding: 12px 16px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        @media print {
+            .comments-section {
+                display: none !important;
+            }
+        }
+    </style>
+</head>
+
+<body>
+
+    <!-- Header -->
+    <header class="page-header">
+        <div class="brand">
+            <span>文档中心</span>
+            <span class="brand-divider">|</span>
+            <a href="javascript:void(0)" class="about-link" onclick="loadDocContent('docs/guide/关于平台.md')">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="url(#aboutGradient)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <defs>
+                        <linearGradient id="aboutGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                            <stop offset="0%" style="stop-color:#60a5fa"/>
+                            <stop offset="100%" style="stop-color:#a78bfa"/>
+                        </linearGradient>
+                    </defs>
+                    <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" fill="url(#aboutGradient)" opacity="0.2"/>
+                    <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+                </svg>
+                关于平台
+            </a>
+        </div>
+        <div class="header-actions">
+            <a href="/Task_Pool.html" class="btn btn-outline">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M19 12H5"/>
+                    <polyline points="12 19 5 12 12 5"/>
+                </svg>
+                返回首页
+            </a>
+            <button onclick="window.print()" class="btn btn-outline">打印</button>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <div class="main-container">
+        <!-- Sidebar -->
+        <div class="sidebar" id="sidebar">
+            <div class="sidebar-search">
+                <div class="search-wrapper">
+                    <input type="text" class="search-input" placeholder="搜索文档..." id="searchInput"
+                        onkeyup="filterDocs()">
+                </div>
+            </div>
+            <div id="docList" class="doc-list">
+                <div class="loading" style="height:200px">加载目录...</div>
+            </div>
+        </div>
+
+        <!-- Sidebar Resize Handle -->
+        <div class="sidebar-resize-handle" id="sidebarResizeHandle"></div>
+
+        <!-- Document View -->
+        <main class="content-area" id="mainContent">
+            <!-- 版本选择器 -->
+            <div class="doc-header" id="docHeader" style="display: none;">
+                <div class="version-selector" id="versionSelector">
+                    <button class="version-btn" id="versionBtn" onclick="toggleVersionDropdown()">
+                        <span id="currentVersionLabel">v1.0</span>
+                        <span>▼</span>
+                    </button>
+                    <div class="version-dropdown" id="versionDropdown"></div>
+                </div>
+            </div>
+            <div class="markdown-body" id="markdownContent">
+                <div class="loading">请从左侧选择文档</div>
+            </div>
+        </main>
+    </div>
+
+    <script>
+        const SERVER_URL = 'http://localhost:3000';
+        const API_URL = window.location.protocol === 'file:' ? `${SERVER_URL}/api` : '/api';
+
+        let allDocs = [];
+        let currentDocFilename = null;
+        let currentDocVersions = [];
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', async () => {
+            // 配置 marked 允许 HTML 渲染
+            marked.setOptions({
+                breaks: true,        // 支持换行
+                gfm: true,           // GitHub Flavored Markdown
+                headerIds: true,     // 标题生成 ID
+                mangle: false,       // 不转义邮箱地址
+                sanitize: false      // 不转义 HTML（允许内嵌 HTML）
+            });
+
+            // 检查用户角色，调整返回首页链接
+            adjustHomeLink();
+
+            await loadDocList();
+
+            // 侧边栏拖拽调宽
+            const sidebar = document.getElementById('sidebar');
+            const handle = document.getElementById('sidebarResizeHandle');
+            let dragging = false;
+            handle.addEventListener('mousedown', (e) => {
+                dragging = true;
+                handle.classList.add('dragging');
+                document.body.style.cursor = 'col-resize';
+                document.body.style.userSelect = 'none';
+                e.preventDefault();
+            });
+            document.addEventListener('mousemove', (e) => {
+                if (!dragging) return;
+                const newWidth = Math.min(500, Math.max(200, e.clientX));
+                sidebar.style.width = newWidth + 'px';
+            });
+            document.addEventListener('mouseup', () => {
+                if (!dragging) return;
+                dragging = false;
+                handle.classList.remove('dragging');
+                document.body.style.cursor = '';
+                document.body.style.userSelect = '';
+            });
+
+            // Check URL params
+            const params = new URLSearchParams(window.location.search);
+            const file = params.get('file');
+
+            if (file) {
+                loadDocContent(file);
+            } else if (allDocs.length > 0) {
+                // Auto load first doc
+                // Find first doc in first category
+                const first = allDocs[0]; // Logic simplified, allDocs is flat list from API
+                if (first) loadDocContent(first.filename);
+            }
+        });
+
+        // 根据用户角色调整返回首页链接
+        async function adjustHomeLink() {
+            const token = localStorage.getItem('token');
+            if (!token) return;
+
+            try {
+                const res = await fetch('/api/auth/me', {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                if (res.ok) {
+                    const user = await res.json();
+                    if (user.role === 'viewer') {
+                        // 查看者角色返回统计中心
+                        const homeLink = document.querySelector('a[href="/Task_Pool.html"]');
+                        if (homeLink) {
+                            homeLink.href = '/Statistics.html';
+                        }
+                    }
+                }
+            } catch (e) {
+                // 忽略错误，使用默认链接
+            }
+        }
+
+        // Load Document List
+        async function loadDocList() {
+            try {
+                const res = await fetch(`${API_URL}/docs`);
+                const docs = await res.json();
+                allDocs = docs;
+                renderDocList(docs);
+            } catch (e) {
+                document.getElementById('docList').innerHTML = '<div style="padding:20px;color:red;text-align:center">加载目录失败</div>';
+                console.error(e);
+            }
+        }
+
+        // 清理分类名称中的 emoji
+        function cleanCategoryName(name) {
+            // 去掉开头的 emoji 和空格
+            return name.replace(/^[\u{1F300}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\s]+/u, '').trim();
+        }
+
+        // 分类排序顺序（按角色场景：开发必读 / 业务参考 / 项目管理 / 辅助资源）
+        const categoryOrder = [
+            '开发规范', '决策记录', '使用指南',
+            '---',
+            '业务参考', '需求文档',
+            '---',
+            '建设方案',
+            '---',
+            '归档文档', '其他文档'
+        ];
+
+        // 分类内文档排序（按阅读逻辑，未命中的排末尾）
+        const docSortPriority = {
+            '开发规范': [
+                '数据开发与治理规范手册',      // 总纲
+                '分层标准',                    // 架构
+                '命名标准',                    // 命名规则
+                '通用字段标准',                // 字段规格
+                '数据仓库术语说明',            // 术语速查
+                'DIM层开发验收规范',           // 验收参考
+            ],
+            '决策记录': [
+                '架构决策记录_ADR索引',
+            ],
+            '业务参考': [
+                '数据架构蓝图',                // 架构全景
+                '数仓总线矩阵',                // 总线矩阵
+                '数仓建设规划',                // 建设规划
+                '智慧数据指标分类与治理方案',   // 指标体系
+                'BMS数据探索报告',             // 源系统探索
+            ],
+            '建设方案': [
+                '数仓重构白皮书',              // 战略
+                '数据仓库建设实施方案',         // 执行
+                '数据团队自建方案',             // 团队
+            ],
+            '制度规范': [
+                '关于加强AI工具使用中数据安全管理的通知',  // 通知在前
+                '关于规范企业内部AI使用数据安全',          // 通知
+                '企业内部AI使用数据安全管理规范细则',      // 细则跟后
+                '2026年度数据治理考核指标',                // 考核
+                '数据开发专项驻场人员工作制度',            // 制度
+            ],
+            '调研报告': [
+                '数据治理现状梳理报告',         // 现状先行
+                '内网知识库问答机器人调研方案',  // 调研
+                '内网知识库问答机器人成本分析',  // 成本
+                '内网知识库问答机器人选型总结',  // 选型
+            ],
+        };
+
+        function sortDocsInCategory(category, docList) {
+            const priority = docSortPriority[category];
+            if (!priority) return docList;
+            return [...docList].sort((a, b) => {
+                const titleA = a.title || a.name || '';
+                const titleB = b.title || b.name || '';
+                let idxA = priority.findIndex(p => titleA.startsWith(p));
+                let idxB = priority.findIndex(p => titleB.startsWith(p));
+                if (idxA === -1) idxA = 999;
+                if (idxB === -1) idxB = 999;
+                return idxA - idxB;
+            });
+        }
+
+        // 从 filename 路径提取子目录名（如 docs/research/访谈/xxx.md → '访谈'）
+        // 一级分类目录列表，子目录才算二级
+        const topLevelDirs = new Set(['standard','decision','guide','design','req','solution','archive']);
+        function extractSubCategory(filename) {
+            if (!filename) return null;
+            const parts = filename.replace(/\\/g, '/').split('/');
+            // 格式: docs/{category}/{sub}/file 或 docs/{category}/file
+            if (parts.length >= 4 && parts[0] === 'docs' && topLevelDirs.has(parts[1])) {
+                return parts.slice(2, parts.length - 1).join('/'); // 子目录名
+            }
+            return null;
+        }
+
+        // 创建文档元素
+        function createDocItem(doc) {
+            const el = document.createElement('div');
+            el.className = 'doc-item';
+            el.dataset.filename = doc.filename;
+            const fullTitle = doc.title || doc.name || '';
+            el.title = fullTitle; // tooltip 显示完整名称
+
+            const fileTypeIcon = getFileTypeIcon(doc.file_type, doc.is_download);
+            const versionBadge = doc.version && doc.version !== '1.0'
+                ? `<span class="version-badge">v${doc.version}</span>`
+                : '';
+            const downloadIcon = doc.is_download
+                ? `<span class="download-icon" title="点击下载"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></span>`
+                : '';
+            el.innerHTML = `${fileTypeIcon}<span class="doc-title">${fullTitle}</span>${versionBadge}${downloadIcon}`;
+
+            if (doc.is_download) {
+                el.onclick = () => downloadFile(doc.filename, doc.title);
+                el.style.cursor = 'pointer';
+            } else {
+                el.onclick = () => loadDocContent(doc.filename);
+            }
+            return el;
+        }
+
+        // 折叠/展开 helper
+        function setupCollapse(trigger, target) {
+            trigger.addEventListener('click', () => {
+                const isCollapsed = trigger.classList.toggle('collapsed');
+                if (trigger.classList.contains('sub-category-title')) {
+                    trigger.classList.toggle('expanded', !isCollapsed);
+                }
+                if (isCollapsed) {
+                    target.style.maxHeight = target.scrollHeight + 'px';
+                    requestAnimationFrame(() => {
+                        target.classList.add('collapsed');
+                        target.style.maxHeight = '0';
+                    });
+                } else {
+                    target.classList.remove('collapsed');
+                    target.style.maxHeight = target.scrollHeight + 'px';
+                    target.addEventListener('transitionend', function handler() {
+                        if (!target.classList.contains('collapsed')) {
+                            target.style.maxHeight = '';
+                        }
+                        target.removeEventListener('transitionend', handler);
+                    });
+                }
+            });
+        }
+
+        // Render List
+        function renderDocList(docs) {
+            const container = document.getElementById('docList');
+            container.innerHTML = '';
+
+            // Grouping by category
+            const grouped = {};
+            docs.forEach(doc => {
+                const cat = cleanCategoryName(doc.category || '未分类');
+                if (!grouped[cat]) grouped[cat] = [];
+                grouped[cat].push(doc);
+            });
+
+            // 分类内排序
+            Object.keys(grouped).forEach(cat => {
+                grouped[cat] = sortDocsInCategory(cat, grouped[cat]);
+            });
+
+            // 按预定义顺序排序分类
+            const realOrder = categoryOrder.filter(c => c !== '---');
+            const sortedCategories = Object.keys(grouped).sort((a, b) => {
+                const idxA = realOrder.indexOf(a);
+                const idxB = realOrder.indexOf(b);
+                if (idxA === -1 && idxB === -1) return a.localeCompare(b);
+                if (idxA === -1) return 1;
+                if (idxB === -1) return -1;
+                return idxA - idxB;
+            });
+
+            // 计算分隔线
+            const dividerAfter = new Set();
+            for (let i = 0; i < categoryOrder.length; i++) {
+                if (categoryOrder[i] === '---') {
+                    for (let j = i - 1; j >= 0; j--) {
+                        if (categoryOrder[j] !== '---' && grouped[categoryOrder[j]]) {
+                            dividerAfter.add(categoryOrder[j]);
+                            break;
+                        }
+                    }
+                }
+            }
+
+            sortedCategories.forEach(cat => {
+                const catTitle = document.createElement('div');
+                catTitle.className = 'category-title';
+                catTitle.setAttribute('data-category', cat);
+                catTitle.textContent = cat;
+                container.appendChild(catTitle);
+
+                const docsWrap = document.createElement('div');
+                docsWrap.className = 'category-docs';
+                docsWrap.setAttribute('data-category', cat);
+
+                // 按子目录分组
+                const subGroups = {};
+                const topDocs = [];
+                grouped[cat].forEach(doc => {
+                    const sub = extractSubCategory(doc.filename);
+                    if (sub) {
+                        if (!subGroups[sub]) subGroups[sub] = [];
+                        subGroups[sub].push(doc);
+                    } else {
+                        topDocs.push(doc);
+                    }
+                });
+
+                // 先渲染无子目录的文档
+                topDocs.forEach(doc => docsWrap.appendChild(createDocItem(doc)));
+
+                // 再渲染有子目录的分组
+                Object.keys(subGroups).sort().forEach(sub => {
+                    const subTitle = document.createElement('div');
+                    subTitle.className = 'sub-category-title expanded';
+                    subTitle.textContent = sub;
+
+                    const subWrap = document.createElement('div');
+                    subWrap.className = 'sub-category-docs';
+
+                    subGroups[sub].forEach(doc => subWrap.appendChild(createDocItem(doc)));
+
+                    docsWrap.appendChild(subTitle);
+                    docsWrap.appendChild(subWrap);
+
+                    setupCollapse(subTitle, subWrap);
+                });
+
+                container.appendChild(docsWrap);
+                setupCollapse(catTitle, docsWrap);
+
+                if (dividerAfter.has(cat)) {
+                    const divider = document.createElement('div');
+                    divider.className = 'category-divider';
+                    container.appendChild(divider);
+                }
+            });
+        }
+
+        // 获取文件类型图标
+        function getFileTypeIcon(fileType, isDownload) {
+            if (!isDownload) {
+                // Markdown 文档图标
+                return `<svg class="file-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                    <polyline points="14 2 14 8 20 8"/>
+                </svg>`;
+            }
+            switch (fileType) {
+                case 'excel':
+                    return `<svg class="file-icon file-excel" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+                        <line x1="3" y1="9" x2="21" y2="9"/>
+                        <line x1="3" y1="15" x2="21" y2="15"/>
+                        <line x1="9" y1="3" x2="9" y2="21"/>
+                        <line x1="15" y1="3" x2="15" y2="21"/>
+                    </svg>`;
+                case 'word':
+                    return `<svg class="file-icon file-word" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                        <polyline points="14 2 14 8 20 8"/>
+                        <line x1="16" y1="13" x2="8" y2="13"/>
+                        <line x1="16" y1="17" x2="8" y2="17"/>
+                    </svg>`;
+                case 'pdf':
+                    return `<svg class="file-icon file-pdf" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                        <polyline points="14 2 14 8 20 8"/>
+                        <path d="M9 15v-2h2a1 1 0 0 1 0 2H9z"/>
+                    </svg>`;
+                default:
+                    return `<svg class="file-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                        <polyline points="14 2 14 8 20 8"/>
+                    </svg>`;
+            }
+        }
+
+        // 下载文件
+        function downloadFile(filename, title) {
+            const link = document.createElement('a');
+            link.href = '/' + filename;
+            link.download = filename.split('/').pop();
+            link.target = '_blank';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        }
+
+        // Load Content
+        async function loadDocContent(filename) {
+            const contentContainer = document.getElementById('markdownContent');
+
+            // Update Active State
+            document.querySelectorAll('.doc-item').forEach(el => el.classList.remove('active'));
+            const activeEl = document.querySelector(`.doc-item[data-filename="${filename}"]`);
+            if (activeEl) activeEl.classList.add('active');
+
+            // Update URL without reload
+            const newUrl = `${window.location.pathname}?file=${encodeURIComponent(filename)}`;
+            window.history.replaceState({ path: newUrl }, '', newUrl);
+
+            contentContainer.innerHTML = '<div class="loading">加载文档...</div>';
+
+            try {
+                const res = await fetch(`${API_URL}/docs/${encodeURIComponent(filename)}`);
+                const data = await res.json();
+
+                if (data.error) throw new Error(data.error);
+
+                // Render
+                contentContainer.innerHTML = marked.parse(data.content);
+                // 初始化文档内嵌交互组件（标签页等）
+                initDocTabs(contentContainer);
+                // Scroll to top
+                document.getElementById('mainContent').scrollTop = 0;
+
+                // 保存当前文件名并加载版本列表
+                currentDocFilename = filename;
+                await loadVersions(filename, data.version);
+
+                // 如果是"关于平台"文档，追加评论组件
+                if (filename === 'docs/guide/关于平台.md') {
+                    appendCommentsSection(filename);
+                }
+
+            } catch (e) {
+                contentContainer.innerHTML = `<div style="color:red;padding:40px;text-align:center">加载失败: ${e.message}</div>`;
+                document.getElementById('docHeader').style.display = 'none';
+            }
+        }
+
+        // 初始化文档内嵌标签页组件
+        function initDocTabs(container) {
+            container.querySelectorAll('.doc-tabs').forEach(tabGroup => {
+                const tabs = tabGroup.querySelectorAll('.doc-tab');
+                const panels = tabGroup.querySelectorAll('.doc-tab-panel');
+
+                tabs.forEach(tab => {
+                    tab.addEventListener('click', () => {
+                        const target = tab.getAttribute('data-tab');
+                        // 切换 tab active 状态
+                        tabs.forEach(t => t.classList.remove('active'));
+                        tab.classList.add('active');
+                        // 切换 panel 显示
+                        panels.forEach(p => {
+                            p.classList.toggle('active', p.getAttribute('data-tab-panel') === target);
+                        });
+                    });
+                });
+            });
+        }
+
+        // Filter Logic
+        function filterDocs() {
+            const term = document.getElementById('searchInput').value.toLowerCase();
+            const filtered = allDocs.filter(d =>
+                (d.title && d.title.toLowerCase().includes(term)) ||
+                (d.name && d.name.toLowerCase().includes(term))
+            );
+            renderDocList(filtered);
+        }
+
+        // 加载版本列表
+        async function loadVersions(filename, currentVersion) {
+            try {
+                const res = await fetch(`${API_URL}/docs/${encodeURIComponent(filename)}/versions`);
+                const versions = await res.json();
+                currentDocVersions = versions;
+
+                const docHeader = document.getElementById('docHeader');
+                const versionDropdown = document.getElementById('versionDropdown');
+                const currentVersionLabel = document.getElementById('currentVersionLabel');
+
+                // 如果只有一个版本，隐藏版本选择器
+                if (versions.length <= 1) {
+                    docHeader.style.display = 'none';
+                    return;
+                }
+
+                // 显示版本选择器
+                docHeader.style.display = 'flex';
+                currentVersionLabel.textContent = `v${currentVersion || '1.0'} ${versions[0]?.is_latest ? '最新' : ''}`;
+
+                // 渲染版本下拉列表
+                versionDropdown.innerHTML = versions.map(v => {
+                    const isCurrent = v.filename === filename;
+                    const tagClass = v.is_latest ? 'latest' : 'archived';
+                    const tagText = v.is_latest ? '当前版本' : '历史版本';
+                    const dateStr = v.updated_at ? v.updated_at.split('T')[0] : '';
+
+                    return `
+                        <div class="version-item ${isCurrent ? 'current' : ''}" onclick="switchVersion('${v.filename}')">
+                            <div class="version-info">
+                                <span class="version-num">v${v.version}</span>
+                                <span class="version-date">${dateStr}</span>
+                            </div>
+                            <span class="version-tag ${tagClass}">${isCurrent ? '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 2px;"><polyline points="20 6 9 17 4 12"/></svg>当前' : tagText}</span>
+                        </div>
+                    `;
+                }).join('');
+
+            } catch (e) {
+                console.error('加载版本列表失败:', e);
+                document.getElementById('docHeader').style.display = 'none';
+            }
+        }
+
+        // 切换版本下拉菜单
+        function toggleVersionDropdown() {
+            const dropdown = document.getElementById('versionDropdown');
+            dropdown.classList.toggle('show');
+        }
+
+        // 点击外部关闭下拉菜单
+        document.addEventListener('click', (e) => {
+            const selector = document.getElementById('versionSelector');
+            if (selector && !selector.contains(e.target)) {
+                document.getElementById('versionDropdown').classList.remove('show');
+            }
+        });
+
+        // 切换到指定版本
+        function switchVersion(filename) {
+            document.getElementById('versionDropdown').classList.remove('show');
+            loadDocContent(filename);
+        }
+
+        // ==================== 评论功能 ====================
+        let currentCommentsFilter = 'all';
+        let commentsDocFilename = '';
+
+        // 获取当前用户信息
+        function getCurrentUser() {
+            const token = localStorage.getItem('token');
+            const user = localStorage.getItem('user');
+            if (token && user) {
+                try {
+                    return JSON.parse(user);
+                } catch (e) {
+                    return null;
+                }
+            }
+            return null;
+        }
+
+        // 追加评论组件
+        function appendCommentsSection(filename) {
+            commentsDocFilename = filename;
+            const contentContainer = document.getElementById('markdownContent');
+            const user = getCurrentUser();
+
+            const commentsHtml = `
+                <div class="comments-section" id="commentsSection">
+                    <div class="comments-header">
+                        <h2 class="comments-title">
+                            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+                            </svg>
+                            用户评论
+                        </h2>
+                        <div class="comments-filter">
+                            <button class="filter-btn active" data-filter="all" onclick="filterComments('all')">全部</button>
+                            <button class="filter-btn" data-filter="feature" onclick="filterComments('feature')">功能建议</button>
+                            <button class="filter-btn" data-filter="bug" onclick="filterComments('bug')">问题反馈</button>
+                            <button class="filter-btn" data-filter="experience" onclick="filterComments('experience')">使用体验</button>
+                        </div>
+                    </div>
+
+                    <div id="commentSuccessMsg" style="display: none;" class="comment-success">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+                            <polyline points="22 4 12 14.01 9 11.01"/>
+                        </svg>
+                        评论提交成功，等待管理员审核后显示
+                    </div>
+
+                    <div class="comment-form">
+                        ${user ? `
+                            <div class="comment-form-title">发表评论</div>
+                            <textarea class="comment-textarea" id="commentContent" placeholder="分享您的想法、建议或反馈..." maxlength="1000"></textarea>
+                            <div class="comment-form-footer">
+                                <div class="category-select">
+                                    <label>分类：</label>
+                                    <select id="commentCategory">
+                                        <option value="general">其他</option>
+                                        <option value="feature">功能建议</option>
+                                        <option value="bug">问题反馈</option>
+                                        <option value="experience">使用体验</option>
+                                    </select>
+                                </div>
+                                <button class="submit-comment-btn" onclick="submitComment()">提交评论</button>
+                            </div>
+                        ` : `
+                            <div class="login-hint">
+                                <a href="/login.html?redirect=${encodeURIComponent(window.location.href)}">登录</a> 后可发表评论
+                            </div>
+                        `}
+                    </div>
+
+                    <div class="comments-list" id="commentsList">
+                        <div class="loading">加载评论中...</div>
+                    </div>
+                </div>
+            `;
+
+            contentContainer.insertAdjacentHTML('beforeend', commentsHtml);
+            loadComments(filename);
+        }
+
+        // 加载评论列表
+        async function loadComments(filename, category = 'all') {
+            const listContainer = document.getElementById('commentsList');
+            if (!listContainer) return;
+
+            try {
+                let url = `${API_URL}/comments?doc_filename=${encodeURIComponent(filename)}`;
+                if (category && category !== 'all') {
+                    url += `&category=${category}`;
+                }
+
+                const res = await fetch(url);
+                const comments = await res.json();
+
+                if (comments.length === 0) {
+                    listContainer.innerHTML = `
+                        <div class="comments-empty">
+                            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+                            </svg>
+                            <p>暂无评论，来发表第一条评论吧</p>
+                        </div>
+                    `;
+                    return;
+                }
+
+                listContainer.innerHTML = comments.map(comment => renderCommentCard(comment)).join('');
+
+            } catch (e) {
+                console.error('加载评论失败:', e);
+                listContainer.innerHTML = '<div class="comments-empty"><p>加载评论失败</p></div>';
+            }
+        }
+
+        // 渲染单个评论卡片
+        function renderCommentCard(comment) {
+            const categoryLabels = {
+                'general': '其他',
+                'feature': '功能建议',
+                'bug': '问题反馈',
+                'experience': '使用体验'
+            };
+
+            const avatar = comment.user_name ? comment.user_name.charAt(0).toUpperCase() : '?';
+            const categoryLabel = categoryLabels[comment.category] || '其他';
+            const timeStr = comment.created_at ? formatTime(comment.created_at) : '';
+
+            let adminReplyHtml = '';
+            if (comment.admin_reply) {
+                const replyTimeStr = comment.admin_reply_at ? formatTime(comment.admin_reply_at) : '';
+                adminReplyHtml = `
+                    <div class="admin-reply">
+                        <div class="admin-reply-header">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M9 17H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+                                <polyline points="16 17 21 12 16 7"/>
+                                <line x1="21" y1="12" x2="9" y2="12"/>
+                            </svg>
+                            管理员回复 · ${comment.admin_reply_by || ''}
+                        </div>
+                        <div class="admin-reply-content">${escapeHtml(comment.admin_reply)}</div>
+                        <div class="admin-reply-time">${replyTimeStr}</div>
+                    </div>
+                `;
+            }
+
+            return `
+                <div class="comment-card">
+                    <div class="comment-header">
+                        <div class="comment-user">
+                            <div class="comment-avatar">${avatar}</div>
+                            <span class="comment-username">${escapeHtml(comment.user_name || '匿名')}</span>
+                        </div>
+                        <div class="comment-meta">
+                            <span class="comment-category ${comment.category}">${categoryLabel}</span>
+                            <span class="comment-time">${timeStr}</span>
+                        </div>
+                    </div>
+                    <div class="comment-content">${escapeHtml(comment.content)}</div>
+                    ${adminReplyHtml}
+                </div>
+            `;
+        }
+
+        // 提交评论
+        async function submitComment() {
+            const content = document.getElementById('commentContent').value.trim();
+            const category = document.getElementById('commentCategory').value;
+
+            if (!content) {
+                alert('请输入评论内容');
+                return;
+            }
+
+            const token = localStorage.getItem('token');
+            if (!token) {
+                alert('请先登录');
+                return;
+            }
+
+            const submitBtn = document.querySelector('.submit-comment-btn');
+            submitBtn.disabled = true;
+            submitBtn.textContent = '提交中...';
+
+            try {
+                const res = await fetch(`${API_URL}/comments`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${token}`
+                    },
+                    body: JSON.stringify({
+                        doc_filename: commentsDocFilename,
+                        content: content,
+                        category: category
+                    })
+                });
+
+                const result = await res.json();
+
+                if (res.ok && result.success) {
+                    document.getElementById('commentContent').value = '';
+                    document.getElementById('commentCategory').value = 'general';
+
+                    // 显示成功提示
+                    const successMsg = document.getElementById('commentSuccessMsg');
+                    successMsg.style.display = 'flex';
+                    setTimeout(() => {
+                        successMsg.style.display = 'none';
+                    }, 5000);
+                } else {
+                    alert(result.error || '提交失败');
+                }
+
+            } catch (e) {
+                console.error('提交评论失败:', e);
+                alert('提交失败，请稍后重试');
+            } finally {
+                submitBtn.disabled = false;
+                submitBtn.textContent = '提交评论';
+            }
+        }
+
+        // 筛选评论
+        function filterComments(category) {
+            currentCommentsFilter = category;
+
+            // 更新按钮状态
+            document.querySelectorAll('.comments-filter .filter-btn').forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.filter === category);
+            });
+
+            // 重新加载评论
+            loadComments(commentsDocFilename, category);
+        }
+
+        // 格式化时间
+        function formatTime(dateStr) {
+            const date = new Date(dateStr);
+            const now = new Date();
+            const diff = now - date;
+
+            if (diff < 60000) return '刚刚';
+            if (diff < 3600000) return Math.floor(diff / 60000) + '分钟前';
+            if (diff < 86400000) return Math.floor(diff / 3600000) + '小时前';
+            if (diff < 604800000) return Math.floor(diff / 86400000) + '天前';
+
+            const year = date.getFullYear();
+            const month = String(date.getMonth() + 1).padStart(2, '0');
+            const day = String(date.getDate()).padStart(2, '0');
+            return `${year}-${month}-${day}`;
+        }
+
+        // HTML 转义
+        function escapeHtml(str) {
+            if (!str) return '';
+            const div = document.createElement('div');
+            div.textContent = str;
+            return div.innerHTML;
+        }
+    </script>
+</body>
+
+</html>

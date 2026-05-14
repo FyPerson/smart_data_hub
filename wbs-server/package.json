@@ -1,0 +1,29 @@
+{
+  "name": "wbs-tracker-server",
+  "version": "1.64.0",
+  "description": "Simple WBS Tracker Server",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "LOG_LEVEL=DEBUG node server.js",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix"
+  },
+  "dependencies": {
+    "bcrypt": "^5.1.1",
+    "body-parser": "^1.20.2",
+    "compression": "^1.8.1",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "jsonwebtoken": "^9.0.2",
+    "mssql": "^12.2.0",
+    "multer": "^2.0.2",
+    "node-sql-parser": "^5.4.0",
+    "sqlite3": "^5.1.7",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "eslint": "^8.56.0"
+  }
+}

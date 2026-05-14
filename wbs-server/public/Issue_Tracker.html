@@ -1,0 +1,1232 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>问题跟踪 - 智数协同平台</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="assets/css/style.css?v=1.2">
+    <style>
+        /* ===== 筛选栏 ===== */
+        .filter-bar {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 16px 20px;
+            background: #fff;
+            border-radius: 10px;
+            border: 1px solid #e2e8f0;
+            margin-bottom: 16px;
+            flex-wrap: wrap;
+        }
+        .filter-bar select,
+        .filter-bar input {
+            padding: 7px 12px;
+            border: 1px solid #d1d5db;
+            border-radius: 6px;
+            font-size: 13px;
+            background: #fff;
+            color: #374151;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+        .filter-bar select:focus,
+        .filter-bar input:focus {
+            border-color: #d97706;
+        }
+        .filter-bar input[type="text"] {
+            width: 200px;
+        }
+        .filter-bar .filter-label {
+            font-size: 12px;
+            color: #6b7280;
+            margin-right: -4px;
+        }
+        .btn-primary {
+            padding: 8px 18px;
+            background: linear-gradient(135deg, #d97706, #b45309);
+            color: #fff;
+            border: none;
+            border-radius: 6px;
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            transition: opacity 0.2s;
+            white-space: nowrap;
+        }
+        .btn-primary:hover { opacity: 0.9; }
+        .btn-secondary {
+            padding: 6px 14px;
+            background: #f3f4f6;
+            color: #374151;
+            border: 1px solid #d1d5db;
+            border-radius: 6px;
+            font-size: 13px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        .btn-secondary:hover { background: #e5e7eb; }
+        .btn-danger {
+            padding: 6px 14px;
+            background: #fee2e2;
+            color: #dc2626;
+            border: 1px solid #fca5a5;
+            border-radius: 6px;
+            font-size: 13px;
+            cursor: pointer;
+        }
+        .btn-danger:hover { background: #fecaca; }
+
+        /* ===== 统计卡片 ===== */
+        .stats-row {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 16px;
+        }
+        .stat-card {
+            flex: 1;
+            background: #fff;
+            border-radius: 10px;
+            border: 1px solid #e2e8f0;
+            padding: 14px 18px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            cursor: pointer;
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+        .stat-card:hover { border-color: #d97706; box-shadow: 0 2px 8px rgba(217,119,6,0.08); }
+        .stat-card.active { border-color: #d97706; background: #fffbeb; }
+        .stat-icon {
+            width: 36px; height: 36px;
+            border-radius: 8px;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 16px;
+        }
+        .stat-info .stat-num { font-size: 22px; font-weight: 700; color: #111827; }
+        .stat-info .stat-label { font-size: 12px; color: #6b7280; margin-top: 2px; }
+
+        /* ===== 表格 ===== */
+        .issue-table {
+            width: 100%;
+            border-collapse: separate;
+            border-spacing: 0;
+            background: #fff;
+            border-radius: 10px;
+            border: 1px solid #e2e8f0;
+            overflow: hidden;
+        }
+        .issue-table th {
+            background: #f8fafc;
+            padding: 10px 14px;
+            font-size: 12px;
+            font-weight: 600;
+            color: #64748b;
+            text-align: left;
+            border-bottom: 1px solid #e2e8f0;
+            white-space: nowrap;
+        }
+        .issue-table td {
+            padding: 12px 14px;
+            font-size: 13px;
+            color: #374151;
+            border-bottom: 1px solid #f1f5f9;
+            vertical-align: middle;
+        }
+        .issue-table tr:last-child td { border-bottom: none; }
+        .issue-table tbody tr {
+            cursor: pointer;
+            transition: background 0.15s;
+        }
+        .issue-table tbody tr:hover { background: #fffbeb; }
+
+        /* 优先级色点 */
+        .priority-dot {
+            display: inline-block;
+            width: 8px; height: 8px;
+            border-radius: 50%;
+            margin-right: 6px;
+        }
+        .priority-dot.P0 { background: #dc2626; }
+        .priority-dot.P1 { background: #f59e0b; }
+        .priority-dot.P2 { background: #3b82f6; }
+        .priority-dot.P3 { background: #9ca3af; }
+
+        /* 类型标签 */
+        .type-tag {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 500;
+        }
+        .type-tag.t-需求 { background: #dbeafe; color: #1d4ed8; }
+        .type-tag.t-缺陷 { background: #fee2e2; color: #dc2626; }
+        .type-tag.t-数据质量 { background: #fef3c7; color: #92400e; }
+        .type-tag.t-变更请求 { background: #e0e7ff; color: #4338ca; }
+        .type-tag.t-源系统变更 { background: #fce7f3; color: #9d174d; }
+        .type-tag.t-调度异常 { background: #fecaca; color: #991b1b; }
+
+        /* 状态徽章 */
+        .status-badge {
+            display: inline-block;
+            padding: 3px 10px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: 600;
+        }
+        .status-badge.s-待处理 { background: #f3f4f6; color: #6b7280; }
+        .status-badge.s-处理中 { background: #dbeafe; color: #1d4ed8; }
+        .status-badge.s-待验证 { background: #fef3c7; color: #92400e; }
+        .status-badge.s-已关闭 { background: #d1fae5; color: #065f46; }
+
+        /* 进度条 */
+        .progress-bar-wrap {
+            width: 80px;
+            height: 6px;
+            background: #e5e7eb;
+            border-radius: 3px;
+            overflow: hidden;
+            display: inline-block;
+            vertical-align: middle;
+            margin-right: 6px;
+        }
+        .progress-bar-fill {
+            height: 100%;
+            border-radius: 3px;
+            background: linear-gradient(90deg, #d97706, #f59e0b);
+            transition: width 0.3s;
+        }
+        .progress-text {
+            font-size: 11px;
+            color: #6b7280;
+            vertical-align: middle;
+        }
+
+        /* ===== 详情抽屉 ===== */
+        .drawer-overlay {
+            display: none;
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.3);
+            z-index: 900;
+        }
+        .drawer-overlay.open { display: block; }
+        .drawer {
+            position: fixed;
+            top: 0; right: -560px; bottom: 0;
+            width: 540px;
+            max-width: 90vw;
+            background: #fff;
+            box-shadow: -4px 0 20px rgba(0,0,0,0.12);
+            z-index: 901;
+            transition: right 0.3s ease;
+            display: flex;
+            flex-direction: column;
+        }
+        .drawer.open { right: 0; }
+        .drawer-header {
+            padding: 20px 24px 16px;
+            border-bottom: 1px solid #e2e8f0;
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+        }
+        .drawer-header h2 {
+            font-size: 16px;
+            font-weight: 700;
+            color: #111827;
+            margin: 0;
+            flex: 1;
+            line-height: 1.5;
+        }
+        .drawer-close {
+            background: none;
+            border: none;
+            font-size: 20px;
+            cursor: pointer;
+            color: #6b7280;
+            padding: 4px;
+            line-height: 1;
+        }
+        .drawer-close:hover { color: #111827; }
+        .drawer-body {
+            flex: 1;
+            overflow-y: auto;
+            padding: 20px 24px;
+        }
+        .detail-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px 20px;
+            margin-bottom: 20px;
+        }
+        .detail-item label {
+            display: block;
+            font-size: 11px;
+            color: #6b7280;
+            margin-bottom: 4px;
+            font-weight: 500;
+        }
+        .detail-item .detail-value {
+            font-size: 13px;
+            color: #111827;
+        }
+        .detail-item.full-width {
+            grid-column: 1 / -1;
+        }
+        .detail-desc {
+            background: #f9fafb;
+            border-radius: 8px;
+            padding: 14px;
+            font-size: 13px;
+            color: #374151;
+            line-height: 1.6;
+            white-space: pre-wrap;
+            word-break: break-word;
+            min-height: 40px;
+        }
+        .preview-link {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            color: #2563eb;
+            text-decoration: none;
+            font-size: 13px;
+        }
+        .preview-link:hover { text-decoration: underline; }
+
+        /* 进度编辑 */
+        .progress-edit-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 20px;
+            padding: 12px 14px;
+            background: #f9fafb;
+            border-radius: 8px;
+        }
+        .progress-edit-row input[type="range"] {
+            flex: 1;
+            accent-color: #d97706;
+        }
+        .progress-edit-row .progress-val {
+            font-size: 14px;
+            font-weight: 700;
+            color: #d97706;
+            min-width: 40px;
+            text-align: center;
+        }
+
+        /* 操作栏 */
+        .action-bar {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            margin-bottom: 20px;
+            padding-bottom: 16px;
+            border-bottom: 1px solid #e2e8f0;
+        }
+        .action-bar select {
+            padding: 6px 10px;
+            border: 1px solid #d1d5db;
+            border-radius: 6px;
+            font-size: 12px;
+            background: #fff;
+        }
+
+        /* 评论区 */
+        .comments-section h3 {
+            font-size: 14px;
+            font-weight: 600;
+            color: #374151;
+            margin: 0 0 12px;
+        }
+        .comment-item {
+            padding: 12px 0;
+            border-bottom: 1px solid #f1f5f9;
+        }
+        .comment-item:last-child { border-bottom: none; }
+        .comment-meta {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 6px;
+        }
+        .comment-author {
+            font-size: 13px;
+            font-weight: 600;
+            color: #111827;
+        }
+        .comment-time {
+            font-size: 11px;
+            color: #9ca3af;
+        }
+        .comment-content {
+            font-size: 13px;
+            color: #374151;
+            line-height: 1.6;
+            white-space: pre-wrap;
+        }
+        .comment-input-area {
+            margin-top: 16px;
+            display: flex;
+            gap: 8px;
+        }
+        .comment-input-area textarea {
+            flex: 1;
+            padding: 10px 12px;
+            border: 1px solid #d1d5db;
+            border-radius: 8px;
+            font-size: 13px;
+            resize: vertical;
+            min-height: 60px;
+            font-family: inherit;
+            outline: none;
+        }
+        .comment-input-area textarea:focus { border-color: #d97706; }
+        .comment-input-area button {
+            align-self: flex-end;
+        }
+
+        /* ===== 弹窗 ===== */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.4);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+        }
+        .modal-overlay.open { display: flex; }
+        .modal-box {
+            background: #fff;
+            border-radius: 14px;
+            width: 560px;
+            max-width: 92vw;
+            max-height: 90vh;
+            overflow-y: auto;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.15);
+        }
+        .modal-header {
+            padding: 20px 24px 0;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .modal-header h2 { font-size: 16px; font-weight: 700; color: #111827; margin: 0; }
+        .modal-body { padding: 20px 24px; }
+        .modal-footer {
+            padding: 0 24px 20px;
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+        }
+        .form-group { margin-bottom: 14px; }
+        .form-group label {
+            display: block;
+            font-size: 12px;
+            font-weight: 600;
+            color: #374151;
+            margin-bottom: 5px;
+        }
+        .form-group input,
+        .form-group select,
+        .form-group textarea {
+            width: 100%;
+            padding: 8px 12px;
+            border: 1px solid #d1d5db;
+            border-radius: 6px;
+            font-size: 13px;
+            font-family: inherit;
+            outline: none;
+            box-sizing: border-box;
+        }
+        .form-group input:focus,
+        .form-group select:focus,
+        .form-group textarea:focus { border-color: #d97706; }
+        .form-group textarea { resize: vertical; min-height: 80px; }
+        .form-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+        }
+
+        /* 空状态 */
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: #9ca3af;
+        }
+        .empty-state svg { margin-bottom: 12px; }
+        .empty-state p { font-size: 14px; }
+
+        /* 时间显示 */
+        .time-relative { color: #6b7280; font-size: 12px; }
+    </style>
+</head>
+
+<body>
+
+    <!-- 顶部导航栏 -->
+    <nav class="navbar fixed-header">
+        <div class="nav-left">
+            <div class="nav-logo">
+                <svg viewBox="0 0 24 24" fill="none" stroke="url(#logo-gradient)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <defs>
+                        <linearGradient id="logo-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                            <stop offset="0%" style="stop-color:#d97706"/>
+                            <stop offset="100%" style="stop-color:#b45309"/>
+                        </linearGradient>
+                    </defs>
+                    <circle cx="12" cy="12" r="10"/>
+                    <path d="M12 6v6l4 2"/>
+                </svg>
+            </div>
+            <div class="nav-title">智数协同平台</div>
+        </div>
+        <div class="nav-right">
+            <a href="/Task_Pool.html" class="nav-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M9 11l3 3L22 4"/>
+                    <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
+                </svg>
+                任务池
+            </a>
+            <a href="/Data_Collab.html" class="nav-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+                    <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+                </svg>
+                数据协作
+            </a>
+            <a href="/Issue_Tracker.html" class="nav-item" style="color:#d97706; font-weight:600;">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="10"/>
+                    <line x1="12" y1="8" x2="12" y2="12"/>
+                    <line x1="12" y1="16" x2="12.01" y2="16"/>
+                </svg>
+                问题跟踪
+            </a>
+            <a href="/My_Workspace.html" class="nav-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+                    <circle cx="12" cy="7" r="4"/>
+                </svg>
+                我的工作台
+            </a>
+            <div class="nav-dropdown">
+                <button class="nav-dropdown-trigger">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <ellipse cx="12" cy="5" rx="9" ry="3"/>
+                        <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/>
+                        <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>
+                    </svg>
+                    数据中心
+                    <svg class="arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="6 9 12 15 18 9"/>
+                    </svg>
+                </button>
+                <div class="nav-dropdown-menu">
+                    <a href="/Dashboard.html">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+                            <line x1="3" y1="9" x2="21" y2="9"/>
+                            <line x1="9" y1="21" x2="9" y2="9"/>
+                        </svg>
+                        建设总览
+                    </a>
+                    <a href="/Asset_Center.html">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+                            <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
+                            <line x1="12" y1="22.08" x2="12" y2="12"/>
+                        </svg>
+                        资产中心
+                    </a>
+                    <a href="/Model_Center.html">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="3" y="3" width="7" height="7"/>
+                            <rect x="14" y="3" width="7" height="7"/>
+                            <rect x="14" y="14" width="7" height="7"/>
+                            <rect x="3" y="14" width="7" height="7"/>
+                        </svg>
+                        模型中心
+                    </a>
+                    <a href="/Metrics.html">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <line x1="18" y1="20" x2="18" y2="10"/>
+                            <line x1="12" y1="20" x2="12" y2="4"/>
+                            <line x1="6" y1="20" x2="6" y2="14"/>
+                        </svg>
+                        指标中心
+                    </a>
+                </div>
+            </div>
+            <a href="/Statistics.html" class="nav-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <line x1="12" y1="20" x2="12" y2="10"/>
+                    <line x1="18" y1="20" x2="18" y2="4"/>
+                    <line x1="6" y1="20" x2="6" y2="16"/>
+                </svg>
+                统计中心
+            </a>
+            <a href="/Doc_Viewer.html" target="_blank" class="nav-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+                    <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+                </svg>
+                文档中心
+            </a>
+            <div class="nav-divider"></div>
+            <div id="userProfileArea"></div>
+        </div>
+    </nav>
+
+    <!-- 主工作区 -->
+    <main class="workbench-container">
+
+        <!-- 统计卡片 -->
+        <div class="stats-row" id="statsRow">
+            <div class="stat-card" onclick="filterByStatus('')" data-status="">
+                <div class="stat-icon" style="background:#f3f4f6;">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#6b7280" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/></svg>
+                </div>
+                <div class="stat-info">
+                    <div class="stat-num" id="statAll">0</div>
+                    <div class="stat-label">全部</div>
+                </div>
+            </div>
+            <div class="stat-card" onclick="filterByStatus('待处理')" data-status="待处理">
+                <div class="stat-icon" style="background:#f3f4f6;">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#6b7280" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                </div>
+                <div class="stat-info">
+                    <div class="stat-num" id="statPending">0</div>
+                    <div class="stat-label">待处理</div>
+                </div>
+            </div>
+            <div class="stat-card" onclick="filterByStatus('处理中')" data-status="处理中">
+                <div class="stat-icon" style="background:#dbeafe;">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#1d4ed8" stroke-width="2"><path d="M12 2v4"/><path d="M12 18v4"/><path d="M4.93 4.93l2.83 2.83"/><path d="M16.24 16.24l2.83 2.83"/><path d="M2 12h4"/><path d="M18 12h4"/></svg>
+                </div>
+                <div class="stat-info">
+                    <div class="stat-num" id="statInProgress">0</div>
+                    <div class="stat-label">处理中</div>
+                </div>
+            </div>
+            <div class="stat-card" onclick="filterByStatus('待验证')" data-status="待验证">
+                <div class="stat-icon" style="background:#fef3c7;">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#92400e" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                </div>
+                <div class="stat-info">
+                    <div class="stat-num" id="statVerify">0</div>
+                    <div class="stat-label">待验证</div>
+                </div>
+            </div>
+            <div class="stat-card" onclick="filterByStatus('已关闭')" data-status="已关闭">
+                <div class="stat-icon" style="background:#d1fae5;">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#065f46" stroke-width="2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+                </div>
+                <div class="stat-info">
+                    <div class="stat-num" id="statClosed">0</div>
+                    <div class="stat-label">已关闭</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 筛选栏 -->
+        <div class="filter-bar">
+            <span class="filter-label">类型</span>
+            <select id="filterType" onchange="loadIssues()">
+                <option value="">全部类型</option>
+                <option value="需求">需求</option>
+                <option value="缺陷">缺陷</option>
+                <option value="数据质量">数据质量</option>
+                <option value="变更请求">变更请求</option>
+                <option value="源系统变更">源系统变更</option>
+                <option value="调度异常">调度异常</option>
+            </select>
+            <span class="filter-label">优先级</span>
+            <select id="filterPriority" onchange="loadIssues()">
+                <option value="">全部优先级</option>
+                <option value="P0">P0 紧急</option>
+                <option value="P1">P1 高</option>
+                <option value="P2">P2 中</option>
+                <option value="P3">P3 低</option>
+            </select>
+            <span class="filter-label">指派人</span>
+            <select id="filterAssigned" onchange="loadIssues()">
+                <option value="">全部人员</option>
+            </select>
+            <input type="text" id="filterSearch" placeholder="搜索标题/描述/表名..." onkeyup="debounceSearch()">
+            <div style="flex:1;"></div>
+            <button class="btn-primary" onclick="openCreateModal()">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                新建问题
+            </button>
+        </div>
+
+        <!-- 问题列表 -->
+        <table class="issue-table">
+            <thead>
+                <tr>
+                    <th style="width:50px;">#</th>
+                    <th style="width:65px;">优先级</th>
+                    <th style="width:80px;">类型</th>
+                    <th>标题</th>
+                    <th style="width:80px;">状态</th>
+                    <th style="width:100px;">进度</th>
+                    <th style="width:80px;">指派人</th>
+                    <th style="width:80px;">创建人</th>
+                    <th style="width:110px;">更新时间</th>
+                </tr>
+            </thead>
+            <tbody id="issueTableBody">
+            </tbody>
+        </table>
+
+        <!-- 空状态 -->
+        <div class="empty-state" id="emptyState" style="display:none;">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#d1d5db" stroke-width="1.5">
+                <circle cx="12" cy="12" r="10"/>
+                <line x1="12" y1="8" x2="12" y2="12"/>
+                <line x1="12" y1="16" x2="12.01" y2="16"/>
+            </svg>
+            <p>暂无问题记录</p>
+        </div>
+    </main>
+
+    <!-- 详情抽屉 -->
+    <div class="drawer-overlay" id="drawerOverlay" onclick="closeDrawer()"></div>
+    <div class="drawer" id="drawer">
+        <div class="drawer-header">
+            <h2 id="drawerTitle">问题详情</h2>
+            <button class="drawer-close" onclick="closeDrawer()">&times;</button>
+        </div>
+        <div class="drawer-body" id="drawerBody">
+            <!-- 动态渲染 -->
+        </div>
+    </div>
+
+    <!-- 新建/编辑弹窗 -->
+    <div class="modal-overlay" id="createModal">
+        <div class="modal-box">
+            <div class="modal-header">
+                <h2 id="modalTitle">新建问题</h2>
+                <button class="drawer-close" onclick="closeCreateModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="editIssueId">
+                <div class="form-group">
+                    <label>标题 *</label>
+                    <input type="text" id="formTitle" placeholder="简要描述问题">
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>类型</label>
+                        <select id="formType">
+                            <option value="需求">需求</option>
+                            <option value="缺陷">缺陷</option>
+                            <option value="数据质量">数据质量</option>
+                            <option value="变更请求">变更请求</option>
+                            <option value="源系统变更">源系统变更</option>
+                            <option value="调度异常">调度异常</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>来源</label>
+                        <select id="formSource">
+                            <option value="内部发现">内部发现</option>
+                            <option value="业务方">业务方</option>
+                            <option value="外包反馈">外包反馈</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>优先级</label>
+                        <select id="formPriority">
+                            <option value="P0">P0 紧急</option>
+                            <option value="P1">P1 高</option>
+                            <option value="P2" selected>P2 中</option>
+                            <option value="P3">P3 低</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>关联表名</label>
+                        <input type="text" id="formRelatedTable" placeholder="如 dim_org（可选）">
+                    </div>
+                </div>
+                <div class="form-group" id="errorTimeGroup" style="display:none;">
+                    <label>异常发生时间</label>
+                    <input type="datetime-local" id="formErrorTime">
+                </div>
+                <div class="form-group">
+                    <label>描述</label>
+                    <textarea id="formDescription" rows="4" placeholder="详细描述问题、影响范围、复现步骤等"></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-secondary" onclick="closeCreateModal()">取消</button>
+                <button class="btn-primary" onclick="submitIssue()">提交</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="assets/js/app.js"></script>
+    <script>
+        let allIssues = [];
+        let allUsers = [];
+        let currentStatusFilter = '';
+        let searchTimer = null;
+
+        document.addEventListener('DOMContentLoaded', async () => {
+            if (typeof checkAuth === 'function') {
+                const ok = await checkAuth();
+                if (!ok) return;
+            }
+            await loadUsers();
+            await loadIssues();
+
+            // 调度异常显示异常时间字段
+            document.getElementById('formType').addEventListener('change', function() {
+                document.getElementById('errorTimeGroup').style.display = this.value === '调度异常' ? 'block' : 'none';
+            });
+        });
+
+        // ===== 数据加载 =====
+
+        async function loadUsers() {
+            try {
+                const res = await authFetch('/api/users/active');
+                if (!res || !res.ok) return;
+                allUsers = await res.json();
+                const sel = document.getElementById('filterAssigned');
+                allUsers.forEach(u => {
+                    const opt = document.createElement('option');
+                    opt.value = u.id;
+                    opt.textContent = u.display_name || u.username;
+                    sel.appendChild(opt);
+                });
+            } catch (e) { console.error('加载用户列表失败', e); }
+        }
+
+        async function loadIssues() {
+            try {
+                const params = new URLSearchParams();
+                const type = document.getElementById('filterType').value;
+                const priority = document.getElementById('filterPriority').value;
+                const assigned = document.getElementById('filterAssigned').value;
+                const search = document.getElementById('filterSearch').value.trim();
+
+                if (currentStatusFilter) params.set('status', currentStatusFilter);
+                if (type) params.set('type', type);
+                if (priority) params.set('priority', priority);
+                if (assigned) params.set('assigned_to', assigned);
+                if (search) params.set('search', search);
+
+                const res = await authFetch(`/api/issues?${params.toString()}`);
+                if (!res || !res.ok) return;
+                allIssues = await res.json();
+                renderTable();
+                updateStats();
+            } catch (e) { console.error('加载问题列表失败', e); }
+        }
+
+        function debounceSearch() {
+            clearTimeout(searchTimer);
+            searchTimer = setTimeout(() => loadIssues(), 300);
+        }
+
+        function filterByStatus(status) {
+            currentStatusFilter = status;
+            // 高亮卡片
+            document.querySelectorAll('.stat-card').forEach(card => {
+                card.classList.toggle('active', card.dataset.status === status);
+            });
+            loadIssues();
+        }
+
+        // ===== 渲染 =====
+
+        function renderTable() {
+            const tbody = document.getElementById('issueTableBody');
+            const empty = document.getElementById('emptyState');
+
+            if (!allIssues.length) {
+                tbody.innerHTML = '';
+                empty.style.display = 'block';
+                return;
+            }
+            empty.style.display = 'none';
+
+            tbody.innerHTML = allIssues.map(issue => `
+                <tr onclick="openDrawer(${issue.id})">
+                    <td style="color:#9ca3af; font-size:12px;">${issue.id}</td>
+                    <td><span class="priority-dot ${issue.priority}"></span>${issue.priority}</td>
+                    <td><span class="type-tag t-${issue.type}">${issue.type}</span></td>
+                    <td style="font-weight:500; max-width:300px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">
+                        ${escapeHtml(issue.title)}
+                        ${issue.preview_url ? '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#2563eb" stroke-width="2" style="margin-left:4px;vertical-align:middle;"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>' : ''}
+                    </td>
+                    <td><span class="status-badge s-${issue.status}">${issue.status}</span></td>
+                    <td>
+                        <div class="progress-bar-wrap"><div class="progress-bar-fill" style="width:${issue.progress}%"></div></div>
+                        <span class="progress-text">${issue.progress}%</span>
+                    </td>
+                    <td>${issue.assigned_to_name || '<span style="color:#d1d5db;">未指派</span>'}</td>
+                    <td>${issue.created_by_name || ''}</td>
+                    <td class="time-relative">${formatTime(issue.updated_at)}</td>
+                </tr>
+            `).join('');
+        }
+
+        async function updateStats() {
+            // 不带 status 筛选，获取全量统计
+            try {
+                const params = new URLSearchParams();
+                const type = document.getElementById('filterType').value;
+                const priority = document.getElementById('filterPriority').value;
+                const assigned = document.getElementById('filterAssigned').value;
+                const search = document.getElementById('filterSearch').value.trim();
+                if (type) params.set('type', type);
+                if (priority) params.set('priority', priority);
+                if (assigned) params.set('assigned_to', assigned);
+                if (search) params.set('search', search);
+
+                const res = await authFetch(`/api/issues?${params.toString()}`);
+                if (!res || !res.ok) return;
+                const all = await res.json();
+
+                document.getElementById('statAll').textContent = all.length;
+                document.getElementById('statPending').textContent = all.filter(i => i.status === '待处理').length;
+                document.getElementById('statInProgress').textContent = all.filter(i => i.status === '处理中').length;
+                document.getElementById('statVerify').textContent = all.filter(i => i.status === '待验证').length;
+                document.getElementById('statClosed').textContent = all.filter(i => i.status === '已关闭').length;
+            } catch (e) { /* ignore */ }
+        }
+
+        // ===== 详情抽屉 =====
+
+        async function openDrawer(issueId) {
+            try {
+                const res = await authFetch(`/api/issues/${issueId}`);
+                if (!res || !res.ok) return;
+                const issue = await res.json();
+                renderDrawer(issue);
+                document.getElementById('drawerOverlay').classList.add('open');
+                document.getElementById('drawer').classList.add('open');
+            } catch (e) { console.error('加载问题详情失败', e); }
+        }
+
+        function closeDrawer() {
+            document.getElementById('drawerOverlay').classList.remove('open');
+            document.getElementById('drawer').classList.remove('open');
+        }
+
+        function renderDrawer(issue) {
+            document.getElementById('drawerTitle').textContent = `#${issue.id} ${issue.title}`;
+            const isManager = currentUser && (currentUser.role === 'admin' || currentUser.role === 'publisher');
+            const statusTransitions = {
+                '待处理': ['处理中'],
+                '处理中': ['待验证'],
+                '待验证': ['已关闭', '处理中'],
+                '已关闭': ['处理中']
+            };
+            const nextStatuses = statusTransitions[issue.status] || [];
+
+            let html = '';
+
+            // 操作栏（管理员/发布者可见）
+            if (isManager) {
+                html += `<div class="action-bar">`;
+                // 状态流转
+                nextStatuses.forEach(s => {
+                    const btnClass = s === '已关闭' ? 'btn-secondary' : 'btn-primary';
+                    html += `<button class="${btnClass}" onclick="changeStatus(${issue.id}, '${s}')" style="font-size:12px; padding:5px 12px;">${s === '处理中' && issue.status === '待验证' ? '打回处理' : '转为' + s}</button>`;
+                });
+                // 指派
+                html += `<select onchange="assignIssue(${issue.id}, this)" style="font-size:12px;">
+                    <option value="">指派给...</option>`;
+                allUsers.forEach(u => {
+                    const sel = issue.assigned_to === u.id ? 'selected' : '';
+                    html += `<option value="${u.id}" data-name="${escapeHtml(u.display_name || u.username)}" ${sel}>${u.display_name || u.username}</option>`;
+                });
+                html += `</select>`;
+                // 编辑
+                html += `<button class="btn-secondary" onclick="openEditModal(${issue.id})" style="font-size:12px; padding:5px 12px;">编辑</button>`;
+                // 删除（仅admin）
+                if (currentUser.role === 'admin') {
+                    html += `<button class="btn-danger" onclick="deleteIssue(${issue.id})" style="font-size:12px; padding:5px 12px;">删除</button>`;
+                }
+                html += `</div>`;
+            }
+
+            // 详情网格
+            html += `<div class="detail-grid">
+                <div class="detail-item"><label>类型</label><div class="detail-value"><span class="type-tag t-${issue.type}">${issue.type}</span></div></div>
+                <div class="detail-item"><label>优先级</label><div class="detail-value"><span class="priority-dot ${issue.priority}"></span>${issue.priority}</div></div>
+                <div class="detail-item"><label>状态</label><div class="detail-value"><span class="status-badge s-${issue.status}">${issue.status}</span></div></div>
+                <div class="detail-item"><label>来源</label><div class="detail-value">${issue.source}</div></div>
+                <div class="detail-item"><label>指派人</label><div class="detail-value">${issue.assigned_to_name || '未指派'}</div></div>
+                <div class="detail-item"><label>创建人</label><div class="detail-value">${issue.created_by_name}</div></div>
+                <div class="detail-item"><label>创建时间</label><div class="detail-value">${issue.created_at || '-'}</div></div>
+                <div class="detail-item"><label>更新时间</label><div class="detail-value">${issue.updated_at || '-'}</div></div>`;
+            if (issue.related_table) {
+                html += `<div class="detail-item"><label>关联表名</label><div class="detail-value" style="font-family:monospace; color:#b45309;">${escapeHtml(issue.related_table)}</div></div>`;
+            }
+            if (issue.error_time) {
+                html += `<div class="detail-item"><label>异常时间</label><div class="detail-value">${issue.error_time}</div></div>`;
+            }
+            if (issue.closed_at) {
+                html += `<div class="detail-item"><label>关闭时间</label><div class="detail-value">${issue.closed_at}</div></div>`;
+            }
+            html += `</div>`;
+
+            // 预览地址
+            if (issue.preview_url) {
+                html += `<div style="margin-bottom:16px;"><label style="font-size:11px;color:#6b7280;display:block;margin-bottom:4px;font-weight:500;">预览地址</label>
+                    <a href="${escapeHtml(issue.preview_url)}" target="_blank" class="preview-link">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+                        ${escapeHtml(issue.preview_url)}
+                    </a></div>`;
+            }
+
+            // 进度条（可编辑）
+            html += `<div class="progress-edit-row">
+                <label style="font-size:12px; font-weight:600; color:#374151; white-space:nowrap;">开发进度</label>
+                <input type="range" min="0" max="100" step="5" value="${issue.progress}" oninput="this.nextElementSibling.textContent=this.value+'%'" onchange="updateProgress(${issue.id}, this.value)">
+                <span class="progress-val">${issue.progress}%</span>
+            </div>`;
+
+            // 描述
+            html += `<div style="margin-bottom:20px;">
+                <label style="font-size:11px;color:#6b7280;display:block;margin-bottom:4px;font-weight:500;">描述</label>
+                <div class="detail-desc">${issue.description ? escapeHtml(issue.description) : '<span style="color:#d1d5db;">无描述</span>'}</div>
+            </div>`;
+
+            // 预览地址编辑（所有用户可填写）
+            html += `<div style="margin-bottom:20px; padding:12px 14px; background:#f9fafb; border-radius:8px;">
+                <label style="font-size:12px; font-weight:600; color:#374151; display:block; margin-bottom:6px;">预览/验收地址</label>
+                <div style="display:flex; gap:8px;">
+                    <input type="text" id="previewUrlInput" value="${escapeHtml(issue.preview_url || '')}" placeholder="输入页面预览地址" style="flex:1; padding:6px 10px; border:1px solid #d1d5db; border-radius:6px; font-size:12px; outline:none;">
+                    <button class="btn-secondary" onclick="updatePreviewUrl(${issue.id})" style="font-size:12px; padding:5px 12px;">保存</button>
+                </div>
+            </div>`;
+
+            // 评论区
+            html += `<div class="comments-section">
+                <h3>评论 (${issue.comments ? issue.comments.length : 0})</h3>`;
+            if (issue.comments && issue.comments.length) {
+                issue.comments.forEach(c => {
+                    html += `<div class="comment-item">
+                        <div class="comment-meta">
+                            <span class="comment-author">${escapeHtml(c.user_name)}</span>
+                            <span class="comment-time">${formatTime(c.created_at)}</span>
+                        </div>
+                        <div class="comment-content">${escapeHtml(c.content)}</div>
+                    </div>`;
+                });
+            } else {
+                html += `<p style="color:#d1d5db; font-size:13px;">暂无评论</p>`;
+            }
+            html += `<div class="comment-input-area">
+                <textarea id="commentInput" placeholder="添加评论..."></textarea>
+                <button class="btn-primary" onclick="addComment(${issue.id})" style="padding:8px 14px; font-size:12px;">发送</button>
+            </div></div>`;
+
+            document.getElementById('drawerBody').innerHTML = html;
+        }
+
+        // ===== 操作 =====
+
+        async function changeStatus(id, status) {
+            try {
+                const res = await authFetch(`/api/issues/${id}/status`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ status })
+                });
+                if (!res || !res.ok) {
+                    const err = await res.json().catch(() => ({}));
+                    showToast(err.error || '操作失败', 'error');
+                    return;
+                }
+                showToast(`状态已更新为「${status}」`, 'success');
+                await loadIssues();
+                openDrawer(id);
+            } catch (e) { showToast('操作失败', 'error'); }
+        }
+
+        async function assignIssue(id, selectEl) {
+            const userId = selectEl.value;
+            const userName = selectEl.selectedOptions[0]?.dataset.name || '';
+            try {
+                const res = await authFetch(`/api/issues/${id}/assign`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ assigned_to: userId || null, assigned_to_name: userName || null })
+                });
+                if (!res || !res.ok) { showToast('指派失败', 'error'); return; }
+                showToast(userName ? `已指派给 ${userName}` : '已取消指派', 'success');
+                await loadIssues();
+                openDrawer(id);
+            } catch (e) { showToast('指派失败', 'error'); }
+        }
+
+        async function updateProgress(id, progress) {
+            try {
+                const res = await authFetch(`/api/issues/${id}/progress`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ progress: parseInt(progress) })
+                });
+                if (!res || !res.ok) { showToast('更新进度失败', 'error'); return; }
+                await loadIssues();
+            } catch (e) { showToast('更新进度失败', 'error'); }
+        }
+
+        async function updatePreviewUrl(id) {
+            const url = document.getElementById('previewUrlInput').value.trim();
+            try {
+                const res = await authFetch(`/api/issues/${id}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ preview_url: url })
+                });
+                if (!res || !res.ok) { showToast('保存失败', 'error'); return; }
+                showToast('预览地址已保存', 'success');
+                await loadIssues();
+                openDrawer(id);
+            } catch (e) { showToast('保存失败', 'error'); }
+        }
+
+        async function addComment(id) {
+            const input = document.getElementById('commentInput');
+            const content = input.value.trim();
+            if (!content) return;
+            try {
+                const res = await authFetch(`/api/issues/${id}/comments`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ content })
+                });
+                if (!res || !res.ok) { showToast('评论失败', 'error'); return; }
+                input.value = '';
+                await loadIssues();
+                openDrawer(id);
+            } catch (e) { showToast('评论失败', 'error'); }
+        }
+
+        async function deleteIssue(id) {
+            if (!confirm('确定要删除这个问题吗？此操作不可恢复。')) return;
+            try {
+                const res = await authFetch(`/api/issues/${id}`, { method: 'DELETE' });
+                if (!res || !res.ok) { showToast('删除失败', 'error'); return; }
+                showToast('问题已删除', 'success');
+                closeDrawer();
+                await loadIssues();
+            } catch (e) { showToast('删除失败', 'error'); }
+        }
+
+        // ===== 新建/编辑弹窗 =====
+
+        function openCreateModal() {
+            document.getElementById('modalTitle').textContent = '新建问题';
+            document.getElementById('editIssueId').value = '';
+            document.getElementById('formTitle').value = '';
+            document.getElementById('formDescription').value = '';
+            document.getElementById('formType').value = '需求';
+            document.getElementById('formSource').value = '内部发现';
+            document.getElementById('formPriority').value = 'P2';
+            document.getElementById('formRelatedTable').value = '';
+            document.getElementById('formErrorTime').value = '';
+            document.getElementById('errorTimeGroup').style.display = 'none';
+            document.getElementById('createModal').classList.add('open');
+        }
+
+        async function openEditModal(id) {
+            try {
+                const res = await authFetch(`/api/issues/${id}`);
+                if (!res || !res.ok) return;
+                const issue = await res.json();
+                document.getElementById('modalTitle').textContent = '编辑问题';
+                document.getElementById('editIssueId').value = id;
+                document.getElementById('formTitle').value = issue.title;
+                document.getElementById('formDescription').value = issue.description || '';
+                document.getElementById('formType').value = issue.type;
+                document.getElementById('formSource').value = issue.source;
+                document.getElementById('formPriority').value = issue.priority;
+                document.getElementById('formRelatedTable').value = issue.related_table || '';
+                document.getElementById('formErrorTime').value = issue.error_time || '';
+                document.getElementById('errorTimeGroup').style.display = issue.type === '调度异常' ? 'block' : 'none';
+                document.getElementById('createModal').classList.add('open');
+            } catch (e) { showToast('加载问题失败', 'error'); }
+        }
+
+        function closeCreateModal() {
+            document.getElementById('createModal').classList.remove('open');
+        }
+
+        async function submitIssue() {
+            const editId = document.getElementById('editIssueId').value;
+            const data = {
+                title: document.getElementById('formTitle').value.trim(),
+                description: document.getElementById('formDescription').value,
+                type: document.getElementById('formType').value,
+                source: document.getElementById('formSource').value,
+                priority: document.getElementById('formPriority').value,
+                related_table: document.getElementById('formRelatedTable').value.trim() || null,
+                error_time: document.getElementById('formErrorTime').value || null
+            };
+
+            if (!data.title) { showToast('请填写标题', 'error'); return; }
+
+            try {
+                const url = editId ? `/api/issues/${editId}` : '/api/issues';
+                const method = editId ? 'PUT' : 'POST';
+                const res = await authFetch(url, {
+                    method,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data)
+                });
+                if (!res || !res.ok) {
+                    const err = await res.json().catch(() => ({}));
+                    showToast(err.error || '提交失败', 'error');
+                    return;
+                }
+                showToast(editId ? '问题已更新' : '问题已创建', 'success');
+                closeCreateModal();
+                await loadIssues();
+                if (editId) openDrawer(parseInt(editId));
+            } catch (e) { showToast('提交失败', 'error'); }
+        }
+
+        // ===== 工具函数 =====
+
+        function escapeHtml(str) {
+            if (!str) return '';
+            return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        }
+
+        function formatTime(dateStr) {
+            if (!dateStr) return '-';
+            const d = new Date(dateStr);
+            const now = new Date();
+            const diff = now - d;
+            if (diff < 60000) return '刚刚';
+            if (diff < 3600000) return Math.floor(diff / 60000) + '分钟前';
+            if (diff < 86400000) return Math.floor(diff / 3600000) + '小时前';
+            if (diff < 604800000) return Math.floor(diff / 86400000) + '天前';
+            return dateStr.slice(0, 16).replace('T', ' ');
+        }
+    </script>
+
+</body>
+</html>

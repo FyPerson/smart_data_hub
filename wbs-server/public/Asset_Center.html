@@ -1,0 +1,3231 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>数据资产中心 - 智数协同平台</title>
+    <link rel="stylesheet" href="assets/css/style.css?v=2.0">
+    <style>
+        /* 资产中心布局 */
+        .asset-layout {
+            display: flex;
+            gap: 24px;
+            padding: 20px 40px;
+            margin-top: 70px;
+            min-height: calc(100vh - 70px);
+        }
+
+        /* 左侧筛选面板 */
+        .filter-panel {
+            width: 240px;
+            flex-shrink: 0;
+            position: sticky;
+            top: 90px;
+            height: fit-content;
+            background: var(--color-bg-card);
+            border-radius: var(--radius-lg);
+            border: 1px solid var(--color-border);
+            padding: 20px;
+        }
+
+        .filter-section {
+            margin-bottom: 24px;
+        }
+
+        .filter-section:last-child {
+            margin-bottom: 0;
+        }
+
+        .filter-title {
+            font-size: 0.85em;
+            font-weight: 700;
+            color: var(--color-text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 12px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .filter-list {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .filter-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 8px 12px;
+            border-radius: var(--radius-md);
+            cursor: pointer;
+            transition: all 0.15s ease;
+            font-size: 0.9em;
+            color: var(--color-text-secondary);
+        }
+
+        .filter-item:hover {
+            background: var(--color-bg-elevated);
+        }
+
+        .filter-item.active {
+            background: var(--color-accent-soft);
+            color: var(--color-accent);
+            font-weight: 600;
+        }
+
+        .filter-count {
+            background: var(--color-bg-elevated);
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 0.8em;
+            color: var(--color-text-muted);
+        }
+
+        .filter-item.active .filter-count {
+            background: var(--color-accent);
+            color: white;
+        }
+
+        /* 右侧内容区 */
+        .asset-content {
+            flex: 1;
+            min-width: 0;
+        }
+
+        /* 统计卡片区 */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+
+        .stat-card {
+            background: var(--color-bg-card);
+            border: 1px solid var(--color-border);
+            border-radius: var(--radius-lg);
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .stat-card-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .stat-icon {
+            width: 40px;
+            height: 40px;
+            border-radius: var(--radius-md);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.2em;
+        }
+
+        .stat-icon.tables { background: #dbeafe; color: #2563eb; }
+        .stat-icon.fields { background: #dcfce7; color: #16a34a; }
+        .stat-icon.metrics { background: #fef3c7; color: #d97706; }
+        .stat-icon.domains { background: #f3e8ff; color: #9333ea; }
+
+        .stat-value {
+            font-size: 2em;
+            font-weight: 700;
+            color: var(--color-text-primary);
+        }
+
+        .stat-label {
+            font-size: 0.85em;
+            color: var(--color-text-muted);
+        }
+
+        .stat-trend {
+            font-size: 0.8em;
+            color: var(--color-success);
+        }
+
+        /* 工具栏 */
+        .toolbar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 16px;
+        }
+
+        .search-box {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            background: var(--color-bg-card);
+            border: 1px solid var(--color-border);
+            border-radius: var(--radius-md);
+            padding: 8px 16px;
+            width: 320px;
+        }
+
+        .search-box input {
+            border: none;
+            outline: none;
+            flex: 1;
+            font-size: 0.9em;
+            background: transparent;
+        }
+
+        .search-box svg {
+            color: var(--color-text-muted);
+        }
+
+        .view-toggle {
+            display: flex;
+            gap: 4px;
+            background: var(--color-bg-elevated);
+            padding: 4px;
+            border-radius: var(--radius-md);
+        }
+
+        .view-btn {
+            padding: 8px 12px;
+            border: none;
+            background: transparent;
+            border-radius: var(--radius-sm);
+            cursor: pointer;
+            color: var(--color-text-muted);
+            transition: all 0.15s;
+        }
+
+        .view-btn.active {
+            background: var(--color-bg-card);
+            color: var(--color-text-primary);
+            box-shadow: var(--shadow-sm);
+        }
+
+        .toolbar-actions {
+            display: flex;
+            gap: 12px;
+            align-items: center;
+        }
+
+        .btn-export {
+            padding: 8px 16px;
+            border: 1px solid var(--color-border);
+            background: var(--color-bg-card);
+            border-radius: var(--radius-md);
+            cursor: pointer;
+            font-size: 0.9em;
+            color: var(--color-text-secondary);
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            transition: all 0.15s;
+        }
+
+        .btn-export:hover {
+            border-color: var(--color-accent);
+            color: var(--color-accent);
+        }
+
+        /* 资产表格 */
+        .asset-table-container {
+            background: var(--color-bg-card);
+            border: 1px solid var(--color-border);
+            border-radius: var(--radius-lg);
+            overflow: hidden;
+        }
+
+        .asset-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        .asset-table th {
+            background: var(--color-bg-page);
+            padding: 12px 10px;
+            text-align: left;
+            font-size: 0.75em;
+            font-weight: 700;
+            color: var(--color-text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            border-bottom: 1px solid var(--color-border);
+            white-space: nowrap;
+        }
+
+        .asset-table td {
+            padding: 12px 10px;
+            border-bottom: 1px solid var(--color-border);
+            font-size: 0.85em;
+            color: var(--color-text-primary);
+            white-space: nowrap;
+        }
+
+        .asset-table tbody tr:hover {
+            background: var(--color-bg-elevated);
+        }
+
+        .asset-table tbody tr:last-child td {
+            border-bottom: none;
+        }
+
+        .table-name {
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 0.8em;
+            background: var(--color-bg-elevated);
+            padding: 3px 6px;
+            border-radius: var(--radius-sm);
+            color: var(--color-text-primary);
+        }
+
+        .asset-desc {
+            max-width: 180px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        /* 状态徽章 */
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 0.8em;
+            font-weight: 600;
+        }
+
+        .status-badge.online { background: #dcfce7; color: #16a34a; }
+        .status-badge.developing { background: #dbeafe; color: #2563eb; }
+        .status-badge.reviewing { background: #fef3c7; color: #d97706; }
+        .status-badge.offline { background: #fee2e2; color: #dc2626; }
+        .status-badge.created { background: #f3f4f6; color: #6b7280; }
+
+        /* 分层徽章 */
+        .layer-badge {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: var(--radius-sm);
+            font-size: 0.75em;
+            font-weight: 700;
+            text-transform: uppercase;
+        }
+
+        .layer-badge.ods { background: #fef3c7; color: #92400e; }
+        .layer-badge.dwd { background: #dbeafe; color: #1e40af; }
+        .layer-badge.dim { background: #f3e8ff; color: #7c3aed; }
+        .layer-badge.dws { background: #dcfce7; color: #166534; }
+        .layer-badge.ads { background: #fee2e2; color: #b91c1c; }
+
+        /* 分类徽章 */
+        .category-badge {
+            display: inline-block;
+            padding: 3px 8px;
+            border-radius: var(--radius-sm);
+            font-size: 0.75em;
+            font-weight: 600;
+        }
+
+        .category-badge.core { background: #fef3c7; color: #d97706; }
+        .category-badge.general { background: #f3f4f6; color: #6b7280; }
+
+        /* 操作按钮 */
+        .action-btn {
+            padding: 4px 8px;
+            border: 1px solid var(--color-border);
+            background: transparent;
+            border-radius: var(--radius-sm);
+            cursor: pointer;
+            font-size: 0.75em;
+            color: var(--color-text-secondary);
+            transition: all 0.15s;
+        }
+
+        .action-btn:hover {
+            border-color: var(--color-accent);
+            color: var(--color-accent);
+        }
+
+        .action-btn.secondary {
+            color: var(--color-text-muted);
+            border-style: dashed;
+        }
+
+        .action-btn.secondary:hover {
+            border-color: #6366f1;
+            color: #6366f1;
+            border-style: solid;
+        }
+
+        .action-group {
+            display: flex;
+            gap: 6px;
+        }
+
+        /* 分页 */
+        .pagination {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 16px;
+            border-top: 1px solid var(--color-border);
+        }
+
+        .pagination-info {
+            font-size: 0.85em;
+            color: var(--color-text-muted);
+        }
+
+        .pagination-controls {
+            display: flex;
+            gap: 4px;
+        }
+
+        .page-btn {
+            padding: 6px 12px;
+            border: 1px solid var(--color-border);
+            background: var(--color-bg-card);
+            border-radius: var(--radius-sm);
+            cursor: pointer;
+            font-size: 0.85em;
+            color: var(--color-text-secondary);
+            transition: all 0.15s;
+        }
+
+        .page-btn:hover {
+            border-color: var(--color-accent);
+            color: var(--color-accent);
+        }
+
+        .page-btn.active {
+            background: var(--color-accent);
+            border-color: var(--color-accent);
+            color: white;
+        }
+
+        .page-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        /* 卡片视图 */
+        .asset-cards {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+            gap: 16px;
+        }
+
+        .asset-card {
+            background: var(--color-bg-card);
+            border: 1px solid var(--color-border);
+            border-radius: var(--radius-lg);
+            padding: 20px;
+            transition: all 0.2s;
+        }
+
+        .asset-card:hover {
+            border-color: var(--color-accent);
+            box-shadow: var(--shadow-md);
+        }
+
+        .asset-card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 12px;
+        }
+
+        .asset-card-title {
+            font-weight: 600;
+            color: var(--color-text-primary);
+            margin-bottom: 4px;
+        }
+
+        .asset-card-name {
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 0.85em;
+            color: var(--color-text-muted);
+        }
+
+        .asset-card-meta {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-top: 12px;
+            padding-top: 12px;
+            border-top: 1px solid var(--color-border);
+        }
+
+        .meta-item {
+            font-size: 0.8em;
+            color: var(--color-text-muted);
+        }
+
+        .meta-item span {
+            color: var(--color-text-secondary);
+            font-weight: 500;
+        }
+
+        /* 空状态 */
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: var(--color-text-muted);
+        }
+
+        .empty-state svg {
+            width: 64px;
+            height: 64px;
+            margin-bottom: 16px;
+            opacity: 0.5;
+        }
+
+        /* 隐藏 */
+        .hidden {
+            display: none !important;
+        }
+
+        /* 详情弹窗 */
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.5);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+            opacity: 0;
+            visibility: hidden;
+            transition: all 0.2s ease;
+        }
+
+        .modal-overlay.active {
+            opacity: 1;
+            visibility: visible;
+        }
+
+        .modal-content {
+            background: var(--color-bg-card);
+            border-radius: var(--radius-lg);
+            width: 95%;
+            max-width: 1200px;
+            max-height: 90vh;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            transform: scale(0.95);
+            transition: transform 0.2s ease;
+        }
+
+        .modal-overlay.active .modal-content {
+            transform: scale(1);
+        }
+
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 20px 24px;
+            border-bottom: 1px solid var(--color-border);
+        }
+
+        .modal-title {
+            font-size: 1.1em;
+            font-weight: 600;
+            color: var(--color-text-primary);
+        }
+
+        .modal-subtitle {
+            font-size: 0.85em;
+            color: var(--color-text-muted);
+            font-family: 'Consolas', 'Monaco', monospace;
+            margin-top: 4px;
+        }
+
+        .modal-close {
+            background: none;
+            border: none;
+            cursor: pointer;
+            padding: 8px;
+            color: var(--color-text-muted);
+            border-radius: var(--radius-sm);
+            transition: all 0.15s;
+        }
+
+        .modal-close:hover {
+            background: var(--color-bg-elevated);
+            color: var(--color-text-primary);
+        }
+
+        .modal-body {
+            flex: 1;
+            overflow-y: auto;
+            padding: 24px;
+        }
+
+        .modal-footer {
+            display: flex;
+            justify-content: flex-end;
+            gap: 12px;
+            padding: 16px 24px;
+            border-top: 1px solid var(--color-border);
+            background: var(--color-bg-page);
+        }
+
+        /* 详情页 Tab */
+        .detail-tabs {
+            display: flex;
+            gap: 4px;
+            margin-bottom: 20px;
+            border-bottom: 1px solid var(--color-border);
+        }
+
+        .detail-tab {
+            padding: 10px 20px;
+            border: none;
+            background: transparent;
+            cursor: pointer;
+            font-size: 0.9em;
+            color: var(--color-text-muted);
+            border-bottom: 2px solid transparent;
+            margin-bottom: -1px;
+            transition: all 0.15s;
+        }
+
+        .detail-tab:hover {
+            color: var(--color-text-primary);
+        }
+
+        .detail-tab.active {
+            color: var(--color-accent);
+            border-bottom-color: var(--color-accent);
+            font-weight: 600;
+        }
+
+        .detail-panel {
+            display: none;
+        }
+
+        .detail-panel.active {
+            display: block;
+        }
+
+        /* 基本信息卡片 */
+        .info-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+
+        .info-item {
+            padding: 12px 16px;
+            background: var(--color-bg-page);
+            border-radius: var(--radius-md);
+        }
+
+        .info-label {
+            font-size: 0.75em;
+            color: var(--color-text-muted);
+            margin-bottom: 4px;
+        }
+
+        .info-value {
+            font-size: 0.9em;
+            color: var(--color-text-primary);
+            font-weight: 500;
+        }
+
+        /* 字段列表表格 */
+        .field-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.85em;
+        }
+
+        .field-table th {
+            background: var(--color-bg-page);
+            padding: 10px 12px;
+            text-align: left;
+            font-weight: 600;
+            color: var(--color-text-secondary);
+            border-bottom: 1px solid var(--color-border);
+        }
+
+        .field-table td {
+            padding: 10px 12px;
+            border-bottom: 1px solid var(--color-border);
+            color: var(--color-text-primary);
+        }
+
+        .field-table tbody tr:hover {
+            background: var(--color-bg-elevated);
+        }
+
+        .field-name {
+            font-family: 'Consolas', 'Monaco', monospace;
+            color: var(--color-accent);
+        }
+
+        .field-type {
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 0.85em;
+            color: var(--color-text-muted);
+        }
+
+        /* 样例数据工具栏 */
+        .sample-toolbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px 16px;
+            background: var(--color-bg-page);
+            border-radius: var(--radius-md);
+            margin-bottom: 12px;
+        }
+
+        .sample-toolbar-left {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .sample-toolbar-hint {
+            font-size: 0.8em;
+            color: var(--color-text-muted);
+        }
+
+        /* 开关控件 */
+        .toggle-switch {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            cursor: pointer;
+            user-select: none;
+        }
+
+        .toggle-switch-label {
+            font-size: 0.85em;
+            color: var(--color-text-secondary);
+        }
+
+        .toggle-switch-track {
+            width: 36px;
+            height: 20px;
+            background: var(--color-border);
+            border-radius: 10px;
+            position: relative;
+            transition: background 0.2s ease;
+        }
+
+        .toggle-switch-track.active {
+            background: var(--color-accent);
+        }
+
+        .toggle-switch-thumb {
+            width: 16px;
+            height: 16px;
+            background: white;
+            border-radius: 50%;
+            position: absolute;
+            top: 2px;
+            left: 2px;
+            transition: transform 0.2s ease;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+        }
+
+        .toggle-switch-track.active .toggle-switch-thumb {
+            transform: translateX(16px);
+        }
+
+        /* 样例数据左右分栏布局 */
+        .sample-layout {
+            display: flex;
+            gap: 16px;
+            height: 400px;
+        }
+
+        /* 左侧列选择面板 */
+        .column-select-panel {
+            width: 220px;
+            flex-shrink: 0;
+            background: var(--color-bg-page);
+            border: 1px solid var(--color-border);
+            border-radius: var(--radius-md);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .column-select-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 10px 12px;
+            border-bottom: 1px solid var(--color-border);
+            background: var(--color-bg-card);
+        }
+
+        .column-select-title {
+            font-size: 0.85em;
+            font-weight: 600;
+            color: var(--color-text-primary);
+        }
+
+        .column-select-badge {
+            background: var(--color-accent);
+            color: white;
+            font-size: 0.7em;
+            padding: 2px 6px;
+            border-radius: 8px;
+            font-weight: 600;
+        }
+
+        .column-select-actions {
+            display: flex;
+            gap: 4px;
+            padding: 8px 12px;
+            border-bottom: 1px solid var(--color-border);
+            background: var(--color-bg-card);
+        }
+
+        .column-select-actions button {
+            flex: 1;
+            padding: 4px 6px;
+            font-size: 0.7em;
+            background: transparent;
+            border: 1px solid var(--color-border);
+            border-radius: var(--radius-sm);
+            color: var(--color-text-secondary);
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+
+        .column-select-actions button:hover {
+            border-color: var(--color-accent);
+            color: var(--color-accent);
+        }
+
+        .column-select-list {
+            flex: 1;
+            overflow-y: auto;
+            padding: 4px 0;
+        }
+
+        .column-select-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 12px;
+            cursor: pointer;
+            transition: background 0.1s;
+        }
+
+        .column-select-item:hover {
+            background: var(--color-bg-elevated);
+        }
+
+        .column-select-item input[type="checkbox"] {
+            width: 14px;
+            height: 14px;
+            accent-color: var(--color-accent);
+            cursor: pointer;
+            flex-shrink: 0;
+        }
+
+        .column-select-item-info {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .column-select-item-name {
+            font-size: 0.7em;
+            font-family: Consolas, Monaco, monospace;
+            color: var(--color-text-muted);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .column-select-item-comment {
+            font-size: 0.75em;
+            color: var(--color-text-primary);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .column-select-item-tag {
+            font-size: 0.65em;
+            padding: 1px 4px;
+            border-radius: 3px;
+            background: var(--color-bg-elevated);
+            color: var(--color-text-muted);
+            flex-shrink: 0;
+        }
+
+        .column-select-item-tag.id {
+            background: #fef3c7;
+            color: #d97706;
+        }
+
+        /* 右侧表格区域 */
+        .sample-table-area {
+            flex: 1;
+            min-width: 0;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* 样例数据表格 */
+        .sample-table-wrapper {
+            flex: 1;
+            overflow: auto;
+            border: 1px solid var(--color-border);
+            border-radius: var(--radius-md);
+        }
+
+        .sample-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.75em;
+            white-space: nowrap;
+        }
+
+        .sample-table th {
+            background: var(--color-bg-page);
+            padding: 6px 10px;
+            text-align: left;
+            font-weight: 600;
+            color: var(--color-text-secondary);
+            border: 1px solid var(--color-border);
+            position: sticky;
+            top: 0;
+            z-index: 1;
+        }
+
+        .sample-table td {
+            padding: 5px 10px;
+            border: 1px solid var(--color-border);
+            color: var(--color-text-primary);
+            max-width: 200px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        /* 样例数据子标签页 */
+        .sample-sub-tabs {
+            display: flex;
+            gap: 4px;
+            margin-bottom: 12px;
+            border-bottom: 1px solid var(--color-border);
+            padding-bottom: 8px;
+        }
+
+        .sample-sub-tab {
+            padding: 6px 16px;
+            background: transparent;
+            border: 1px solid transparent;
+            border-radius: var(--radius-md) var(--radius-md) 0 0;
+            cursor: pointer;
+            font-size: 0.85em;
+            color: var(--color-text-secondary);
+            transition: all 0.2s ease;
+        }
+
+        .sample-sub-tab:hover {
+            color: var(--color-accent);
+            background: var(--color-bg-page);
+        }
+
+        .sample-sub-tab.active {
+            color: var(--color-accent);
+            background: var(--color-bg-card);
+            border-color: var(--color-border);
+            border-bottom-color: var(--color-bg-card);
+            font-weight: 600;
+        }
+
+        .sample-sub-tab.disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .sample-sub-panel {
+            display: none;
+        }
+
+        .sample-sub-panel.active {
+            display: block;
+        }
+
+        /* 变更追踪面板 */
+        .change-track-search {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 12px 16px;
+            background: var(--color-bg-page);
+            border-radius: var(--radius-md);
+            margin-bottom: 12px;
+        }
+
+        .change-track-search label {
+            font-size: 0.85em;
+            color: var(--color-text-secondary);
+            white-space: nowrap;
+        }
+
+        .change-track-search input {
+            flex: 1;
+            max-width: 200px;
+            padding: 6px 10px;
+            border: 1px solid var(--color-border);
+            border-radius: var(--radius-sm);
+            font-size: 0.85em;
+        }
+
+        .change-track-search input:focus {
+            outline: none;
+            border-color: var(--color-accent);
+        }
+
+        .change-track-search button {
+            padding: 6px 16px;
+            background: var(--color-accent);
+            color: white;
+            border: none;
+            border-radius: var(--radius-sm);
+            cursor: pointer;
+            font-size: 0.85em;
+            transition: background 0.2s ease;
+        }
+
+        .change-track-search button:hover {
+            background: var(--color-accent-hover);
+        }
+
+        .change-track-hint {
+            font-size: 0.8em;
+            color: var(--color-text-muted);
+        }
+
+        /* 变更追踪结果 */
+        .change-track-result {
+            height: 380px;
+            overflow: auto;
+            border: 1px solid var(--color-border);
+            border-radius: var(--radius-md);
+        }
+
+        .change-track-empty {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            color: var(--color-text-muted);
+            font-size: 0.9em;
+        }
+
+        .change-track-empty svg {
+            width: 48px;
+            height: 48px;
+            margin-bottom: 12px;
+            opacity: 0.5;
+        }
+
+        /* 版本卡片 */
+        .version-card {
+            border-bottom: 1px solid var(--color-border);
+            padding: 12px 16px;
+        }
+
+        .version-card:last-child {
+            border-bottom: none;
+        }
+
+        .version-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 8px;
+        }
+
+        .version-badge {
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 0.75em;
+            font-weight: 600;
+        }
+
+        .version-badge.current {
+            background: #c6f6d5;
+            color: #276749;
+        }
+
+        .version-badge.initial {
+            background: #bee3f8;
+            color: #2b6cb0;
+        }
+
+        .version-badge.history {
+            background: var(--color-bg-page);
+            color: var(--color-text-secondary);
+        }
+
+        .version-date {
+            font-size: 0.8em;
+            color: var(--color-text-secondary);
+        }
+
+        .version-changes {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 6px;
+        }
+
+        .version-field {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.8em;
+            padding: 4px 8px;
+            border-radius: var(--radius-sm);
+        }
+
+        .version-field.changed {
+            background: #fef3c7;
+        }
+
+        .version-field-name {
+            color: var(--color-text-secondary);
+            min-width: 100px;
+        }
+
+        .version-field-value {
+            color: var(--color-text-primary);
+            font-weight: 500;
+        }
+
+        .version-field-arrow {
+            color: var(--color-accent);
+            font-weight: bold;
+        }
+
+        .version-field-old {
+            color: var(--color-text-muted);
+            text-decoration: line-through;
+        }
+
+        .version-field-empty {
+            color: #999;
+            font-style: italic;
+        }
+
+        /* 表未创建提示 */
+        .table-not-exists {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            text-align: center;
+            color: var(--color-text-secondary);
+            padding: 60px 40px;
+        }
+
+        .table-not-exists svg {
+            width: 64px;
+            height: 64px;
+            margin-bottom: 16px;
+            opacity: 0.5;
+            color: var(--color-accent);
+        }
+
+        .table-not-exists h3 {
+            margin: 0 0 12px 0;
+            font-size: 1.1em;
+            color: var(--color-text-primary);
+        }
+
+        .table-not-exists .table-name {
+            font-family: monospace;
+            background: var(--color-bg-page);
+            padding: 4px 12px;
+            border-radius: var(--radius-sm);
+            font-size: 0.9em;
+            color: var(--color-text-muted);
+        }
+
+        /* 操作按钮 */
+        .btn-primary {
+            padding: 10px 20px;
+            background: var(--color-accent);
+            color: white;
+            border: none;
+            border-radius: var(--radius-md);
+            cursor: pointer;
+            font-size: 0.9em;
+            font-weight: 500;
+            transition: all 0.15s;
+        }
+
+        .btn-primary:hover {
+            background: var(--color-accent-hover);
+        }
+
+        .btn-secondary {
+            padding: 10px 20px;
+            background: var(--color-bg-card);
+            color: var(--color-text-secondary);
+            border: 1px solid var(--color-border);
+            border-radius: var(--radius-md);
+            cursor: pointer;
+            font-size: 0.9em;
+            transition: all 0.15s;
+        }
+
+        .btn-secondary:hover {
+            border-color: var(--color-accent);
+            color: var(--color-accent);
+        }
+
+        /* 加载状态 */
+        .loading-spinner {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 40px;
+            color: var(--color-text-muted);
+        }
+
+        /* 提示信息 */
+        .hint-box {
+            display: flex;
+            align-items: flex-start;
+            gap: 12px;
+            padding: 16px;
+            background: #fef3c7;
+            border-radius: var(--radius-md);
+            margin-top: 20px;
+        }
+
+        .hint-box svg {
+            flex-shrink: 0;
+            color: #d97706;
+        }
+
+        .hint-box-content {
+            font-size: 0.85em;
+            color: #92400e;
+        }
+
+        /* 数据校验警告条 */
+        .warning-banner {
+            display: none;
+            align-items: center;
+            gap: 10px;
+            padding: 12px 16px;
+            background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
+            border-left: 4px solid #f59e0b;
+            border-radius: var(--radius-md);
+            margin-bottom: 16px;
+        }
+
+        .warning-banner.show {
+            display: flex;
+        }
+
+        .warning-banner svg {
+            flex-shrink: 0;
+            color: #d97706;
+        }
+
+        .warning-banner-content {
+            flex: 1;
+        }
+
+        .warning-banner-title {
+            font-size: 0.9em;
+            font-weight: 600;
+            color: #92400e;
+            margin-bottom: 2px;
+        }
+
+        .warning-banner-desc {
+            font-size: 0.8em;
+            color: #a16207;
+        }
+
+        /* ODS 层提示条（蓝色信息风格） */
+        .ods-banner {
+            display: none;
+            align-items: center;
+            gap: 10px;
+            padding: 12px 16px;
+            background: linear-gradient(135deg, #dbeafe 0%, #bfdbfe 100%);
+            border-left: 4px solid #3b82f6;
+            border-radius: var(--radius-md);
+            margin-bottom: 16px;
+        }
+
+        .ods-banner.show {
+            display: flex;
+        }
+
+        .ods-banner svg {
+            flex-shrink: 0;
+            color: #2563eb;
+        }
+
+        .ods-banner-content {
+            flex: 1;
+        }
+
+        .ods-banner-title {
+            font-size: 0.9em;
+            font-weight: 600;
+            color: #1e40af;
+            margin-bottom: 2px;
+        }
+
+        .ods-banner-desc {
+            font-size: 0.8em;
+            color: #1d4ed8;
+        }
+
+        /* 置灰按钮 */
+        .action-btn.disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+            pointer-events: none;
+        }
+
+        .action-btn-wrapper {
+            position: relative;
+            display: inline-block;
+        }
+
+        .action-btn-wrapper .tooltip {
+            visibility: hidden;
+            opacity: 0;
+            position: absolute;
+            bottom: 100%;
+            right: 0;
+            padding: 8px 12px;
+            background: #374151;
+            color: white;
+            font-size: 0.8em;
+            border-radius: 6px;
+            white-space: nowrap;
+            margin-bottom: 8px;
+            transition: opacity 0.15s, visibility 0.15s;
+            z-index: 1000;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+        }
+
+        .action-btn-wrapper .tooltip::after {
+            content: '';
+            position: absolute;
+            top: 100%;
+            right: 16px;
+            border: 6px solid transparent;
+            border-top-color: #374151;
+        }
+
+        .action-btn-wrapper:hover .tooltip {
+            visibility: visible;
+            opacity: 1;
+        }
+
+        /* 响应式 */
+        @media (max-width: 1200px) {
+            .stats-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+
+        @media (max-width: 768px) {
+            .asset-layout {
+                flex-direction: column;
+                padding: 20px;
+            }
+
+            .filter-panel {
+                width: 100%;
+                position: static;
+            }
+
+            .stats-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .toolbar {
+                flex-direction: column;
+                gap: 12px;
+                align-items: stretch;
+            }
+
+            .search-box {
+                width: 100%;
+            }
+        }
+
+        /* 数据中心下拉菜单当前页面高亮 */
+        .nav-dropdown-trigger.active {
+            color: var(--color-accent);
+        }
+        .nav-dropdown-menu a.active {
+            color: var(--color-accent);
+            background: var(--color-bg-page);
+        }
+    </style>
+    <!-- SheetJS 库 - 用于导出 Excel -->
+    <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
+</head>
+<body>
+    <!-- 导航栏 -->
+    <nav class="navbar fixed-header">
+        <div class="nav-left">
+            <div class="nav-logo">
+                <svg viewBox="0 0 24 24" fill="none" stroke="url(#logo-gradient)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <defs>
+                        <linearGradient id="logo-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                            <stop offset="0%" style="stop-color:#d97706"/>
+                            <stop offset="100%" style="stop-color:#b45309"/>
+                        </linearGradient>
+                    </defs>
+                    <circle cx="12" cy="12" r="10"/>
+                    <path d="M12 6v6l4 2"/>
+                </svg>
+            </div>
+            <div class="nav-title">智数协同平台</div>
+        </div>
+        <div class="nav-right">
+            <a href="/Task_Pool.html" class="nav-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M9 11l3 3L22 4"/>
+                    <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
+                </svg>
+                任务池
+            </a>
+            <a href="/Data_Collab.html" class="nav-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+                    <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+                </svg>
+                数据协作
+            </a>
+            <a href="/Issue_Tracker.html" class="nav-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="10"/>
+                    <line x1="12" y1="8" x2="12" y2="12"/>
+                    <line x1="12" y1="16" x2="12.01" y2="16"/>
+                </svg>
+                问题跟踪
+            </a>
+            <a href="/My_Workspace.html" class="nav-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+                    <circle cx="12" cy="7" r="4"/>
+                </svg>
+                我的工作台
+            </a>
+            <!-- 数据中心下拉菜单 -->
+            <div class="nav-dropdown">
+                <button class="nav-dropdown-trigger" style="color:#d97706; font-weight:600;">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <ellipse cx="12" cy="5" rx="9" ry="3"/>
+                        <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/>
+                        <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>
+                    </svg>
+                    数据中心
+                    <svg class="arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="6 9 12 15 18 9"/>
+                    </svg>
+                </button>
+                <div class="nav-dropdown-menu">
+                    <a href="/Dashboard.html">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+                            <line x1="3" y1="9" x2="21" y2="9"/>
+                            <line x1="9" y1="21" x2="9" y2="9"/>
+                        </svg>
+                        建设总览
+                    </a>
+                    <a href="/Asset_Center.html" style="color:#d97706; font-weight:600;">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+                            <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
+                            <line x1="12" y1="22.08" x2="12" y2="12"/>
+                        </svg>
+                        资产中心
+                    </a>
+                    <a href="/Model_Center.html">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="3" y="3" width="7" height="7"/>
+                            <rect x="14" y="3" width="7" height="7"/>
+                            <rect x="14" y="14" width="7" height="7"/>
+                            <rect x="3" y="14" width="7" height="7"/>
+                        </svg>
+                        模型中心
+                    </a>
+                    <a href="/Metrics.html">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <line x1="18" y1="20" x2="18" y2="10"/>
+                            <line x1="12" y1="20" x2="12" y2="4"/>
+                            <line x1="6" y1="20" x2="6" y2="14"/>
+                        </svg>
+                        指标中心
+                    </a>
+                </div>
+            </div>
+            <a href="/Statistics.html" class="nav-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <line x1="12" y1="20" x2="12" y2="10"/>
+                    <line x1="18" y1="20" x2="18" y2="4"/>
+                    <line x1="6" y1="20" x2="6" y2="16"/>
+                </svg>
+                统计中心
+            </a>
+            <a href="/Doc_Viewer.html" target="_blank" class="nav-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+                    <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+                </svg>
+                文档中心
+            </a>
+            <div class="nav-divider"></div>
+            <!-- 用户头像区域 -->
+            <div id="userProfileArea"></div>
+        </div>
+    </nav>
+
+    <!-- 主内容区 -->
+    <div class="asset-layout">
+        <!-- 左侧筛选面板 -->
+        <aside class="filter-panel">
+            <div class="filter-section">
+                <div class="filter-title">
+                    <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2 1 3 3 3h10c2 0 3-1 3-3V7c0-2-1-3-3-3H7c-2 0-3 1-3 3z"/>
+                    </svg>
+                    数仓分层
+                </div>
+                <div class="filter-list" id="layerFilter">
+                    <div class="filter-item active" data-value="all">
+                        全部 <span class="filter-count" id="countAll">0</span>
+                    </div>
+                    <div class="filter-item" data-value="ODS">
+                        ODS 贴源层 <span class="filter-count" id="countODS">0</span>
+                    </div>
+                    <div class="filter-item" data-value="DWD">
+                        DWD 明细层 <span class="filter-count" id="countDWD">0</span>
+                    </div>
+                    <div class="filter-item" data-value="DIM">
+                        DIM 维度层 <span class="filter-count" id="countDIM">0</span>
+                    </div>
+                    <div class="filter-item" data-value="DWS">
+                        DWS 汇总层 <span class="filter-count" id="countDWS">0</span>
+                    </div>
+                    <div class="filter-item" data-value="ADS">
+                        ADS 应用层 <span class="filter-count" id="countADS">0</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="filter-section">
+                <div class="filter-title">
+                    <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z"/>
+                    </svg>
+                    资产分类
+                </div>
+                <div class="filter-list" id="categoryFilter">
+                    <div class="filter-item active" data-value="all">
+                        全部
+                    </div>
+                    <div class="filter-item" data-value="core">
+                        核心资产
+                    </div>
+                    <div class="filter-item" data-value="general">
+                        一般资产
+                    </div>
+                </div>
+            </div>
+
+            <div class="filter-section">
+                <div class="filter-title">
+                    <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                    </svg>
+                    资产状态
+                </div>
+                <div class="filter-list" id="statusFilter">
+                    <div class="filter-item active" data-value="all">
+                        全部
+                    </div>
+                    <div class="filter-item" data-value="ONLINE">
+                        已上线
+                    </div>
+                    <div class="filter-item" data-value="DEVELOPING">
+                        开发中
+                    </div>
+                    <div class="filter-item" data-value="REVIEWING">
+                        待验收
+                    </div>
+                    <div class="filter-item" data-value="CREATED">
+                        规划中
+                    </div>
+                    <div class="filter-item" data-value="OFFLINE">
+                        已下线
+                    </div>
+                </div>
+            </div>
+
+            <div class="filter-section">
+                <div class="filter-title">
+                    <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"/>
+                    </svg>
+                    业务域
+                </div>
+                <div class="filter-list" id="domainFilter">
+                    <div class="filter-item active" data-value="all">
+                        全部
+                    </div>
+                    <!-- 动态加载 -->
+                </div>
+            </div>
+        </aside>
+
+        <!-- 右侧内容区 -->
+        <main class="asset-content">
+            <!-- 统计卡片 -->
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-card-header">
+                        <div class="stat-icon tables">
+                            <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h18M3 14h18m-9-4v8m-7 0h14a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"/>
+                            </svg>
+                        </div>
+                        <span class="stat-trend">+3 本月</span>
+                    </div>
+                    <div class="stat-value" id="statTables">0</div>
+                    <div class="stat-label">数据表</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-card-header">
+                        <div class="stat-icon fields">
+                            <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 10h16M4 14h16M4 18h16"/>
+                            </svg>
+                        </div>
+                    </div>
+                    <div class="stat-value" id="statFields">0</div>
+                    <div class="stat-label">字段总数</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-card-header">
+                        <div class="stat-icon metrics">
+                            <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/>
+                            </svg>
+                        </div>
+                    </div>
+                    <div class="stat-value" id="statMetrics">0</div>
+                    <div class="stat-label">业务指标</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-card-header">
+                        <div class="stat-icon domains">
+                            <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/>
+                            </svg>
+                        </div>
+                    </div>
+                    <div class="stat-value" id="statDomains">0</div>
+                    <div class="stat-label">业务域</div>
+                </div>
+            </div>
+
+            <!-- 工具栏 -->
+            <div class="toolbar">
+                <div class="search-box">
+                    <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+                    </svg>
+                    <input type="text" id="searchInput" placeholder="搜索表名、描述、负责人..." onkeyup="handleSearch(event)">
+                </div>
+                <div class="toolbar-actions">
+                    <div class="view-toggle">
+                        <button class="view-btn active" data-view="table" onclick="switchView('table')">
+                            <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 10h16M4 14h16M4 18h16"/>
+                            </svg>
+                        </button>
+                        <button class="view-btn" data-view="card" onclick="switchView('card')">
+                            <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"/>
+                            </svg>
+                        </button>
+                    </div>
+                    <button class="btn-export" onclick="exportAssets()">
+                        <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+                        </svg>
+                        导出台账
+                    </button>
+                </div>
+            </div>
+
+            <!-- 表格视图 -->
+            <div id="tableView" class="asset-table-container">
+                <table class="asset-table">
+                    <thead>
+                        <tr>
+                            <th>分层</th>
+                            <th>表名</th>
+                            <th>中文描述</th>
+                            <th>分类</th>
+                            <th>业务域</th>
+                            <th>技术负责人</th>
+                            <th>业务负责人</th>
+                            <th>状态</th>
+                            <th>维护时间</th>
+                            <th>操作</th>
+                        </tr>
+                    </thead>
+                    <tbody id="assetTableBody">
+                        <!-- 动态渲染 -->
+                    </tbody>
+                </table>
+                <div class="pagination">
+                    <div class="pagination-info" id="paginationInfo">
+                        显示 0 - 0 条，共 0 条
+                    </div>
+                    <div class="pagination-controls" id="paginationControls">
+                        <!-- 动态渲染 -->
+                    </div>
+                </div>
+            </div>
+
+            <!-- 卡片视图 -->
+            <div id="cardView" class="asset-cards hidden">
+                <!-- 动态渲染 -->
+            </div>
+        </main>
+    </div>
+
+    <!-- 资产详情弹窗 -->
+    <div class="modal-overlay" id="assetDetailModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <div>
+                    <div class="modal-title" id="modalTitle">资产详情</div>
+                    <div class="modal-subtitle" id="modalSubtitle">-</div>
+                </div>
+                <button class="modal-close" onclick="closeDetailModal()">
+                    <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+                    </svg>
+                </button>
+            </div>
+            <div class="modal-body">
+                <!-- ODS 层提示条（蓝色） -->
+                <div class="ods-banner" id="odsBanner">
+                    <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                    </svg>
+                    <div class="ods-banner-content">
+                        <div class="ods-banner-title">原始数据层 (ODS)</div>
+                        <div class="ods-banner-desc">此表为业务系统原始数据的镜像同步，保留源系统字段结构，供数据加工和溯源使用。</div>
+                    </div>
+                </div>
+
+                <!-- 数据校验警告条（黄色） -->
+                <div class="warning-banner" id="warningBanner">
+                    <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
+                    </svg>
+                    <div class="warning-banner-content">
+                        <div class="warning-banner-title">数据校验进行中</div>
+                        <div class="warning-banner-desc">该表尚未完成数据质量验证，当前数据仅供参考，请勿用于正式报表或决策依据。</div>
+                    </div>
+                </div>
+
+                <!-- Tab 导航 -->
+                <div class="detail-tabs">
+                    <button class="detail-tab active" onclick="switchDetailTab('info')">基本信息</button>
+                    <button class="detail-tab" onclick="switchDetailTab('fields')">字段列表</button>
+                    <button class="detail-tab" onclick="switchDetailTab('sample')">样例数据</button>
+                </div>
+
+                <!-- 基本信息面板 -->
+                <div class="detail-panel active" id="panel-info">
+                    <div class="info-grid" id="infoGrid">
+                        <!-- 动态填充 -->
+                    </div>
+                    <div class="hint-box">
+                        <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                        </svg>
+                        <div class="hint-box-content">
+                            如需获取完整数据，请通过公司内部数据申请流程提交申请，由数据团队审批后交付。
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 字段列表面板 -->
+                <div class="detail-panel" id="panel-fields">
+                    <table class="field-table">
+                        <thead>
+                            <tr>
+                                <th style="width:40px;">#</th>
+                                <th>字段名</th>
+                                <th>数据类型</th>
+                                <th>允许空</th>
+                                <th>字段说明</th>
+                            </tr>
+                        </thead>
+                        <tbody id="fieldTableBody">
+                            <!-- 动态填充 -->
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- 样例数据面板 -->
+                <div class="detail-panel" id="panel-sample">
+                    <!-- 子标签页（DIM层显示变更追踪） -->
+                    <div class="sample-sub-tabs" id="sampleSubTabs">
+                        <button class="sample-sub-tab active" onclick="switchSampleSubTab('data')">样例数据</button>
+                        <button class="sample-sub-tab" id="changeTrackTab" onclick="switchSampleSubTab('track')" style="display:none;">变更追踪</button>
+                    </div>
+
+                    <!-- 子面板：样例数据 -->
+                    <div class="sample-sub-panel active" id="subpanel-data">
+                        <!-- 样例数据工具栏 -->
+                        <div class="sample-toolbar">
+                            <div class="sample-toolbar-left">
+                                <div class="toggle-switch" onclick="toggleHideIdColumns()">
+                                    <span class="toggle-switch-label">隐藏 ID 列</span>
+                                    <div class="toggle-switch-track" id="hideIdToggle">
+                                        <div class="toggle-switch-thumb"></div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="sample-toolbar-hint">
+                                <span id="columnCountHint"></span>
+                            </div>
+                        </div>
+                        <!-- 左右分栏布局 -->
+                        <div class="sample-layout">
+                            <!-- 左侧：列选择面板 -->
+                            <div class="column-select-panel" id="columnSelectPanel">
+                                <div class="column-select-header">
+                                    <span class="column-select-title">选择列</span>
+                                    <span class="column-select-badge" id="columnSelectBadge">0/0</span>
+                                </div>
+                                <div class="column-select-actions">
+                                    <button onclick="selectAllColumns()">全选</button>
+                                    <button onclick="selectNoColumns()">清空</button>
+                                    <button onclick="resetColumnSelection()">重置</button>
+                                </div>
+                                <div class="column-select-list" id="columnSelectList">
+                                    <!-- 动态填充 -->
+                                </div>
+                            </div>
+                            <!-- 右侧：数据表格 -->
+                            <div class="sample-table-area">
+                                <div class="sample-table-wrapper">
+                                    <table class="sample-table" id="sampleTable">
+                                        <!-- 动态填充 -->
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 子面板：变更追踪（仅DIM层显示） -->
+                    <div class="sample-sub-panel" id="subpanel-track">
+                        <div class="change-track-search">
+                            <label id="changeTrackLabel">业务主键:</label>
+                            <input type="text" id="changeTrackKeyInput" placeholder="输入业务键值查询版本链">
+                            <button onclick="searchVersionChain()">查询</button>
+                            <span class="change-track-hint" id="changeTrackHint"></span>
+                        </div>
+                        <div class="change-track-result" id="changeTrackResult">
+                            <div class="change-track-empty">
+                                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"/>
+                                </svg>
+                                <div>输入业务键值查询该实体的版本变更历史</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-secondary" onclick="exportSampleData()">
+                    <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24" style="vertical-align: middle; margin-right: 4px;">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+                    </svg>
+                    导出样例
+                </button>
+                <button class="btn-primary" onclick="applyForData()">
+                    <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24" style="vertical-align: middle; margin-right: 4px;">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+                    </svg>
+                    申请完整数据
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script src="assets/js/app.js"></script>
+    <script>
+        // 使用 app.js 中定义的 API_URL（无需重复定义）
+
+        // 状态
+        let allAssets = [];
+        let filteredAssets = [];
+        let currentPage = 1;
+        const pageSize = 15;
+        let currentFilters = {
+            layer: 'all',
+            category: 'all',
+            status: 'all',
+            domain: 'all',
+            search: ''
+        };
+        let currentView = 'table';
+        let domainMap = {}; // 业务域代码 -> 名称映射
+
+        // 初始化
+        document.addEventListener('DOMContentLoaded', async () => {
+            // 使用 app.js 中的 checkAuth 函数（自动渲染用户下拉菜单）
+            if (typeof checkAuth === 'function') {
+                await checkAuth();
+            } else {
+                // 备用：简单认证检查
+                const token = localStorage.getItem('token');
+                if (!token) {
+                    window.location.href = 'login.html';
+                    return;
+                }
+            }
+            await loadDomains(); // 先加载业务域
+            loadAssets();        // 再加载资产
+            setupFilterEvents();
+        });
+
+        // 注意：logout、openChangePasswordModal 等函数已在 app.js 中定义
+
+        // 认证请求
+        async function authFetch(url, options = {}) {
+            const token = localStorage.getItem('token');
+            const headers = {
+                'Content-Type': 'application/json',
+                ...options.headers,
+            };
+            if (token) {
+                headers['Authorization'] = `Bearer ${token}`;
+            }
+            return fetch(url, { ...options, headers });
+        }
+
+        // 加载资产数据
+        async function loadAssets() {
+            try {
+                const res = await authFetch(`${API_URL}/models`);
+                const data = await res.json();
+
+                if (res.ok) {
+                    // 使用后端返回的分类字段，如果没有则默认为 general
+                    // 并通过 domainMap 添加业务域名称
+                    allAssets = data.map(item => ({
+                        ...item,
+                        category: item.category || 'general',
+                        domain_name: domainMap[item.domain] || item.domain || '-',
+                        field_count: Math.floor(Math.random() * 50) + 10 // 模拟字段数
+                    }));
+
+                    updateStats();
+                    applyFilters();
+                } else {
+                    console.error('加载资产失败:', data.error || '未知错误');
+                    // 如果是认证错误，跳转到登录页
+                    if (res.status === 401 || res.status === 403) {
+                        localStorage.removeItem('token');
+                        localStorage.removeItem('user');
+                        window.location.href = 'login.html';
+                    }
+                }
+            } catch (error) {
+                console.error('加载资产失败:', error);
+            }
+        }
+
+        // 加载业务域
+        async function loadDomains() {
+            try {
+                const res = await authFetch(`${API_URL}/domains`);
+                const data = await res.json();
+
+                if (res.ok && data.length > 0) {
+                    const container = document.getElementById('domainFilter');
+                    data.forEach(domain => {
+                        // 建立代码到名称的映射
+                        domainMap[domain.code] = domain.name;
+
+                        const item = document.createElement('div');
+                        item.className = 'filter-item';
+                        item.dataset.value = domain.code;
+                        item.textContent = domain.name;
+                        item.addEventListener('click', () => handleFilterClick('domain', domain.code, item));
+                        container.appendChild(item);
+                    });
+                }
+            } catch (error) {
+                console.error('加载业务域失败:', error);
+            }
+        }
+
+        // 更新统计
+        function updateStats() {
+            const layerCounts = {
+                ODS: 0, DWD: 0, DIM: 0, DWS: 0, ADS: 0
+            };
+
+            let totalFields = 0;
+            const domains = new Set();
+
+            allAssets.forEach(asset => {
+                const layerUpper = (asset.layer || '').toUpperCase();
+                if (layerCounts.hasOwnProperty(layerUpper)) {
+                    layerCounts[layerUpper]++;
+                }
+                totalFields += asset.field_count || 0;
+                // 只统计有效的业务域（在 domainMap 中存在的）
+                if (asset.domain && domainMap[asset.domain]) {
+                    domains.add(asset.domain);
+                }
+            });
+
+            document.getElementById('statTables').textContent = allAssets.length;
+            document.getElementById('statFields').textContent = totalFields;
+            document.getElementById('statDomains').textContent = domains.size || 1;
+
+            // 更新分层计数
+            document.getElementById('countAll').textContent = allAssets.length;
+            document.getElementById('countODS').textContent = layerCounts.ODS;
+            document.getElementById('countDWD').textContent = layerCounts.DWD;
+            document.getElementById('countDIM').textContent = layerCounts.DIM;
+            document.getElementById('countDWS').textContent = layerCounts.DWS;
+            document.getElementById('countADS').textContent = layerCounts.ADS;
+
+            // 加载指标数量
+            loadMetricsCount();
+        }
+
+        // 加载指标数量
+        async function loadMetricsCount() {
+            try {
+                const res = await authFetch(`${API_URL}/metrics`);
+                const data = await res.json();
+                if (res.ok) {
+                    document.getElementById('statMetrics').textContent = data.length;
+                }
+            } catch (error) {
+                document.getElementById('statMetrics').textContent = '0';
+            }
+        }
+
+        // 设置筛选事件
+        function setupFilterEvents() {
+            // 分层筛选
+            document.querySelectorAll('#layerFilter .filter-item').forEach(item => {
+                item.addEventListener('click', () => handleFilterClick('layer', item.dataset.value, item));
+            });
+
+            // 分类筛选
+            document.querySelectorAll('#categoryFilter .filter-item').forEach(item => {
+                item.addEventListener('click', () => handleFilterClick('category', item.dataset.value, item));
+            });
+
+            // 状态筛选
+            document.querySelectorAll('#statusFilter .filter-item').forEach(item => {
+                item.addEventListener('click', () => handleFilterClick('status', item.dataset.value, item));
+            });
+
+            // 业务域筛选（包括「全部」选项）
+            document.querySelectorAll('#domainFilter .filter-item').forEach(item => {
+                item.addEventListener('click', () => handleFilterClick('domain', item.dataset.value, item));
+            });
+        }
+
+        // 处理筛选点击
+        function handleFilterClick(filterType, value, element) {
+            // 更新选中状态
+            const container = element.parentElement;
+            container.querySelectorAll('.filter-item').forEach(item => item.classList.remove('active'));
+            element.classList.add('active');
+
+            // 更新筛选条件
+            currentFilters[filterType] = value;
+            currentPage = 1;
+            applyFilters();
+        }
+
+        // 搜索处理
+        function handleSearch(event) {
+            currentFilters.search = event.target.value.toLowerCase();
+            currentPage = 1;
+            applyFilters();
+        }
+
+        // 应用筛选
+        function applyFilters() {
+            filteredAssets = allAssets.filter(asset => {
+                // 分层筛选（忽略大小写）
+                const assetLayer = (asset.layer || '').toUpperCase();
+                if (currentFilters.layer !== 'all' && assetLayer !== currentFilters.layer) {
+                    return false;
+                }
+
+                // 分类筛选
+                if (currentFilters.category !== 'all' && asset.category !== currentFilters.category) {
+                    return false;
+                }
+
+                // 状态筛选
+                if (currentFilters.status !== 'all' && asset.status !== currentFilters.status) {
+                    return false;
+                }
+
+                // 业务域筛选
+                if (currentFilters.domain !== 'all' && asset.domain !== currentFilters.domain) {
+                    return false;
+                }
+
+                // 搜索筛选
+                if (currentFilters.search) {
+                    const searchText = currentFilters.search;
+                    const matchName = (asset.table_name || '').toLowerCase().includes(searchText);
+                    const matchComment = (asset.table_comment || '').toLowerCase().includes(searchText);
+                    const matchOwner = (asset.tech_owner || '').toLowerCase().includes(searchText) ||
+                                       (asset.biz_owner || '').toLowerCase().includes(searchText);
+                    if (!matchName && !matchComment && !matchOwner) {
+                        return false;
+                    }
+                }
+
+                return true;
+            });
+
+            renderAssets();
+        }
+
+        // 渲染资产
+        function renderAssets() {
+            if (currentView === 'table') {
+                renderTableView();
+            } else {
+                renderCardView();
+            }
+        }
+
+        // 渲染表格视图
+        function renderTableView() {
+            const tbody = document.getElementById('assetTableBody');
+            const start = (currentPage - 1) * pageSize;
+            const end = start + pageSize;
+            const pageData = filteredAssets.slice(start, end);
+
+            if (pageData.length === 0) {
+                tbody.innerHTML = `
+                    <tr>
+                        <td colspan="10" style="text-align:center; padding:40px; color:var(--color-text-muted);">
+                            暂无数据
+                        </td>
+                    </tr>
+                `;
+            } else {
+                tbody.innerHTML = pageData.map(asset => `
+                    <tr>
+                        <td><span class="layer-badge ${asset.layer.toLowerCase()}">${asset.layer}</span></td>
+                        <td><code class="table-name">${escapeHtml(asset.table_name)}</code></td>
+                        <td class="asset-desc" title="${escapeHtml(asset.table_comment || '')}">${escapeHtml(asset.table_comment || '-')}</td>
+                        <td><span class="category-badge ${asset.category}">${asset.category === 'core' ? '核心' : '一般'}</span></td>
+                        <td>${asset.domain_name || '-'}</td>
+                        <td>${escapeHtml(asset.tech_owner || '-')}</td>
+                        <td>${escapeHtml(asset.biz_owner || '-')}</td>
+                        <td>${renderStatusBadge(asset.status)}</td>
+                        <td>${formatDate(asset.updated_at)}</td>
+                        <td><button class="action-btn" onclick="viewAssetDetail(${asset.id})" title="查看详情">详情</button></td>
+                    </tr>
+                `).join('');
+            }
+
+            renderPagination();
+        }
+
+        // 渲染卡片视图
+        function renderCardView() {
+            const container = document.getElementById('cardView');
+            const start = (currentPage - 1) * pageSize;
+            const end = start + pageSize;
+            const pageData = filteredAssets.slice(start, end);
+
+            if (pageData.length === 0) {
+                container.innerHTML = `
+                    <div class="empty-state">
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4"/>
+                        </svg>
+                        <div>暂无数据</div>
+                    </div>
+                `;
+            } else {
+                container.innerHTML = pageData.map(asset => `
+                    <div class="asset-card" onclick="viewAsset(${asset.id})">
+                        <div class="asset-card-header">
+                            <div>
+                                <div class="asset-card-title">${escapeHtml(asset.table_comment || asset.table_name)}</div>
+                                <div class="asset-card-name">${escapeHtml(asset.table_name)}</div>
+                            </div>
+                            <span class="layer-badge ${asset.layer.toLowerCase()}">${asset.layer}</span>
+                        </div>
+                        <div style="display:flex; gap:8px; margin-bottom:8px;">
+                            ${renderStatusBadge(asset.status)}
+                            <span class="category-badge ${asset.category}">${asset.category === 'core' ? '核心' : '一般'}</span>
+                        </div>
+                        <div class="asset-card-meta">
+                            <div class="meta-item">技术负责人: <span>${escapeHtml(asset.tech_owner || '-')}</span></div>
+                            <div class="meta-item">业务负责人: <span>${escapeHtml(asset.biz_owner || '-')}</span></div>
+                            <div class="meta-item">更新: <span>${formatDate(asset.updated_at)}</span></div>
+                        </div>
+                    </div>
+                `).join('');
+            }
+        }
+
+        // 渲染状态徽章
+        function renderStatusBadge(status) {
+            const statusMap = {
+                'ONLINE': { label: '已上线', class: 'online' },
+                'DEVELOPING': { label: '开发中', class: 'developing' },
+                'REVIEWING': { label: '待验收', class: 'reviewing' },
+                'CREATED': { label: '规划中', class: 'created' },
+                'OFFLINE': { label: '已下线', class: 'offline' }
+            };
+            const info = statusMap[status] || { label: status || '-', class: 'created' };
+            return `<span class="status-badge ${info.class}">${info.label}</span>`;
+        }
+
+        // 渲染分页
+        function renderPagination() {
+            const total = filteredAssets.length;
+            const totalPages = Math.ceil(total / pageSize);
+            const start = (currentPage - 1) * pageSize + 1;
+            const end = Math.min(currentPage * pageSize, total);
+
+            document.getElementById('paginationInfo').textContent =
+                total > 0 ? `显示 ${start} - ${end} 条，共 ${total} 条` : '暂无数据';
+
+            const controls = document.getElementById('paginationControls');
+            if (totalPages <= 1) {
+                controls.innerHTML = '';
+                return;
+            }
+
+            let html = '';
+
+            // 上一页
+            html += `<button class="page-btn" onclick="goToPage(${currentPage - 1})" ${currentPage === 1 ? 'disabled' : ''}>上一页</button>`;
+
+            // 页码
+            for (let i = 1; i <= totalPages; i++) {
+                if (i === 1 || i === totalPages || (i >= currentPage - 2 && i <= currentPage + 2)) {
+                    html += `<button class="page-btn ${i === currentPage ? 'active' : ''}" onclick="goToPage(${i})">${i}</button>`;
+                } else if (i === currentPage - 3 || i === currentPage + 3) {
+                    html += `<span style="padding:0 8px;">...</span>`;
+                }
+            }
+
+            // 下一页
+            html += `<button class="page-btn" onclick="goToPage(${currentPage + 1})" ${currentPage === totalPages ? 'disabled' : ''}>下一页</button>`;
+
+            controls.innerHTML = html;
+        }
+
+        // 跳转页面
+        function goToPage(page) {
+            const totalPages = Math.ceil(filteredAssets.length / pageSize);
+            if (page < 1 || page > totalPages) return;
+            currentPage = page;
+            renderAssets();
+        }
+
+        // 切换视图
+        function switchView(view) {
+            currentView = view;
+
+            // 更新按钮状态
+            document.querySelectorAll('.view-btn').forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.view === view);
+            });
+
+            // 切换视图显示
+            document.getElementById('tableView').classList.toggle('hidden', view !== 'table');
+            document.getElementById('cardView').classList.toggle('hidden', view !== 'card');
+
+            renderAssets();
+        }
+
+        // 当前查看的资产
+        let currentAssetDetail = null;
+        let currentFieldsData = [];
+        let currentSampleData = [];
+        let hideIdColumns = false; // 是否隐藏 ID 列
+        let selectedColumns = new Set(); // 用户选中的列（字段名）
+
+        // 切换隐藏 ID 列
+        function toggleHideIdColumns() {
+            hideIdColumns = !hideIdColumns;
+            const toggle = document.getElementById('hideIdToggle');
+            toggle.classList.toggle('active', hideIdColumns);
+            // 同步更新列选择状态
+            updateColumnSelectionFromToggle();
+            // 重新渲染表格
+            renderSampleTable(currentFieldsData, currentSampleData);
+        }
+
+        // 判断字段是否为 ID 列
+        function isIdColumn(fieldName) {
+            const lowerName = fieldName.toLowerCase();
+            // 匹配常见的 ID 字段命名模式
+            return lowerName.endsWith('_id') ||
+                   lowerName.endsWith('id') && lowerName.length > 2 ||
+                   lowerName === 'id';
+        }
+
+        // 获取过滤后的字段列表（只依赖用户选择）
+        function getFilteredFields(fields) {
+            // 只显示用户选中的列
+            return fields.filter(f => selectedColumns.has(f.name));
+        }
+
+        // 初始化列选择状态（全选）
+        function initColumnSelection(fields) {
+            selectedColumns = new Set(fields.map(f => f.name));
+            renderColumnSelectList();
+            updateColumnSelectBadge();
+        }
+
+        // 根据隐藏 ID 开关更新列选择
+        function updateColumnSelectionFromToggle() {
+            if (hideIdColumns) {
+                // 隐藏 ID 列时，取消选中所有 ID 列
+                currentFieldsData.forEach(f => {
+                    if (isIdColumn(f.name)) {
+                        selectedColumns.delete(f.name);
+                    }
+                });
+            } else {
+                // 显示 ID 列时，选中所有 ID 列
+                currentFieldsData.forEach(f => {
+                    if (isIdColumn(f.name)) {
+                        selectedColumns.add(f.name);
+                    }
+                });
+            }
+            renderColumnSelectList();
+            updateColumnSelectBadge();
+        }
+
+        // 渲染列选择列表
+        function renderColumnSelectList() {
+            const list = document.getElementById('columnSelectList');
+            if (!list || !currentFieldsData.length) return;
+
+            list.innerHTML = currentFieldsData.map(f => {
+                const isId = isIdColumn(f.name);
+                const checked = selectedColumns.has(f.name);
+                return `
+                    <label class="column-select-item">
+                        <input type="checkbox"
+                            ${checked ? 'checked' : ''}
+                            onchange="toggleColumnSelect('${f.name}', this.checked)">
+                        <div class="column-select-item-info">
+                            <div class="column-select-item-comment">${escapeHtml(f.comment || f.name)}</div>
+                            <div class="column-select-item-name">${escapeHtml(f.name)}</div>
+                        </div>
+                        ${isId ? '<span class="column-select-item-tag id">ID</span>' : ''}
+                    </label>
+                `;
+            }).join('');
+        }
+
+        // 切换单个列的选中状态
+        function toggleColumnSelect(fieldName, checked) {
+            if (checked) {
+                selectedColumns.add(fieldName);
+            } else {
+                selectedColumns.delete(fieldName);
+            }
+            updateColumnSelectBadge();
+            // 实时更新表格
+            renderSampleTable(currentFieldsData, currentSampleData);
+        }
+
+        // 全选列
+        function selectAllColumns() {
+            currentFieldsData.forEach(f => {
+                selectedColumns.add(f.name);
+            });
+            // 全选时关闭隐藏ID开关
+            hideIdColumns = false;
+            document.getElementById('hideIdToggle').classList.remove('active');
+            renderColumnSelectList();
+            updateColumnSelectBadge();
+            renderSampleTable(currentFieldsData, currentSampleData);
+        }
+
+        // 全不选列
+        function selectNoColumns() {
+            selectedColumns.clear();
+            renderColumnSelectList();
+            updateColumnSelectBadge();
+            renderSampleTable(currentFieldsData, currentSampleData);
+        }
+
+        // 重置列选择（恢复默认：全选，关闭隐藏ID）
+        function resetColumnSelection() {
+            hideIdColumns = false;
+            document.getElementById('hideIdToggle').classList.remove('active');
+            selectedColumns = new Set(currentFieldsData.map(f => f.name));
+            renderColumnSelectList();
+            updateColumnSelectBadge();
+            renderSampleTable(currentFieldsData, currentSampleData);
+        }
+
+        // 更新列选择徽章（始终显示 已选/总数）
+        function updateColumnSelectBadge() {
+            const badge = document.getElementById('columnSelectBadge');
+            if (!badge) return;
+            const total = currentFieldsData.length;
+            const selected = selectedColumns.size;
+            badge.textContent = `${selected}/${total}`;
+            badge.style.display = total > 0 ? 'inline' : 'none';
+        }
+
+        // 查看资产详情（弹窗）
+        async function viewAssetDetail(id) {
+            const asset = allAssets.find(a => a.id === id);
+            if (!asset) return;
+
+            currentAssetDetail = asset;
+
+            // 设置标题
+            document.getElementById('modalTitle').textContent = asset.table_comment || asset.table_name;
+            document.getElementById('modalSubtitle').textContent = asset.table_name;
+
+            // 判断数据层和状态
+            const isOds = asset.layer.toUpperCase() === 'ODS';
+            const isArchived = asset.status === 'ONLINE';
+
+            // 根据分层和状态显示不同的提示条
+            const warningBanner = document.getElementById('warningBanner');
+            const odsBanner = document.getElementById('odsBanner');
+
+            // ODS 层显示蓝色提示条
+            odsBanner.classList.toggle('show', isOds);
+
+            // 非 ODS 层 + 未归档显示黄色警告条
+            warningBanner.classList.toggle('show', !isOds && !isArchived);
+
+            // 显示弹窗
+            document.getElementById('assetDetailModal').classList.add('active');
+
+            // 重置到第一个 tab
+            switchDetailTab('info');
+            // 重置样例数据子标签页
+            switchSampleSubTab('data');
+
+            // 加载基本信息
+            renderBasicInfo(asset);
+
+            // 从数仓加载表信息
+            await loadTableMetadata(asset.table_name);
+
+            // 初始化变更追踪面板（DIM层专用）
+            await initChangeTrackPanel(asset);
+        }
+
+        // 关闭详情弹窗
+        function closeDetailModal() {
+            document.getElementById('assetDetailModal').classList.remove('active');
+            currentAssetDetail = null;
+            currentFieldsData = [];
+            currentSampleData = [];
+            // 重置变更追踪状态
+            currentVersionChain = [];
+            document.getElementById('changeTrackKeyInput').value = '';
+        }
+
+        // 变更追踪相关状态
+        let currentVersionChain = [];
+        let currentBusinessKey = null;
+
+        // 切换样例数据子标签页
+        function switchSampleSubTab(tabId) {
+            // 更新子标签按钮状态
+            document.querySelectorAll('.sample-sub-tab').forEach(tab => {
+                tab.classList.remove('active');
+            });
+            document.querySelector(`.sample-sub-tab[onclick*="${tabId}"]`).classList.add('active');
+
+            // 显示对应子面板
+            document.querySelectorAll('.sample-sub-panel').forEach(panel => {
+                panel.classList.remove('active');
+            });
+            document.getElementById(`subpanel-${tabId}`).classList.add('active');
+        }
+
+        // 初始化变更追踪面板（从模型配置获取业务键）
+        async function initChangeTrackPanel(asset) {
+            const changeTrackTab = document.getElementById('changeTrackTab');
+            const isDim = asset.layer.toUpperCase() === 'DIM';
+
+            // 只有 DIM 层显示变更追踪标签
+            changeTrackTab.style.display = isDim ? 'inline-block' : 'none';
+
+            if (!isDim) return;
+
+            // 尝试从模型中心获取 DIM 配置
+            try {
+                const response = await authFetch(`/api/models?table_name=${encodeURIComponent(asset.table_name)}`);
+                if (response.ok) {
+                    const models = await response.json();
+                    const model = models.find(m => m.table_name === asset.table_name);
+                    if (model && model.dim_config) {
+                        const dimConfig = typeof model.dim_config === 'string'
+                            ? JSON.parse(model.dim_config)
+                            : model.dim_config;
+                        if (dimConfig.scdConfig && dimConfig.scdConfig.businessKey) {
+                            currentBusinessKey = dimConfig.scdConfig.businessKey;
+                            document.getElementById('changeTrackLabel').textContent =
+                                `${currentBusinessKey}:`;
+                            document.getElementById('changeTrackKeyInput').placeholder =
+                                `输入 ${currentBusinessKey} 值`;
+                            document.getElementById('changeTrackHint').textContent =
+                                '按 Enter 键快速查询';
+                        }
+                    }
+                }
+            } catch (err) {
+                console.log('获取 DIM 配置失败:', err);
+            }
+
+            // 如果没有从配置获取到，使用默认猜测
+            if (!currentBusinessKey) {
+                // 尝试从字段中找到业务主键
+                const possibleKeys = currentFieldsData.filter(f =>
+                    f.name.toLowerCase().includes('_id') &&
+                    !f.name.toLowerCase().startsWith('sk_') &&
+                    !f.name.toLowerCase().includes('dw_')
+                );
+                if (possibleKeys.length > 0) {
+                    currentBusinessKey = possibleKeys[0].name;
+                    document.getElementById('changeTrackLabel').textContent =
+                        `${currentBusinessKey}:`;
+                    document.getElementById('changeTrackKeyInput').placeholder =
+                        `输入 ${currentBusinessKey} 值`;
+                }
+            }
+
+            // 绑定 Enter 键查询
+            const input = document.getElementById('changeTrackKeyInput');
+            input.onkeypress = (e) => {
+                if (e.key === 'Enter') {
+                    searchVersionChain();
+                }
+            };
+        }
+
+        // 驼峰转下划线（用于字段名转换）
+        function camelToSnake(str) {
+            // 处理连续大写字母（如 HYID -> hy_id, ChangeID -> change_id）
+            return str
+                .replace(/([A-Z]+)([A-Z][a-z])/g, '$1_$2')
+                .replace(/([a-z\d])([A-Z])/g, '$1_$2')
+                .toLowerCase();
+        }
+
+        // 查询版本链
+        async function searchVersionChain() {
+            const keyValue = document.getElementById('changeTrackKeyInput').value.trim();
+            if (!keyValue) {
+                alert('请输入业务键值');
+                return;
+            }
+
+            if (!currentAssetDetail) {
+                alert('无法获取当前资产信息');
+                return;
+            }
+
+            // 如果没有从配置获取到业务键，使用默认值
+            // 并将驼峰命名转为下划线命名（DIM 表使用下划线命名）
+            let businessKey = currentBusinessKey || 'official_customer_id';
+            businessKey = camelToSnake(businessKey);
+
+            const resultDiv = document.getElementById('changeTrackResult');
+            resultDiv.innerHTML = '<div class="change-track-empty"><div>查询中...</div></div>';
+
+            try {
+                const requestBody = {
+                    tableName: currentAssetDetail.table_name,
+                    businessKey: businessKey,
+                    keyValue: keyValue
+                };
+                console.log('查询版本链参数:', requestBody);
+
+                const response = await authFetch('/api/warehouse/version-chain', {
+                    method: 'POST',
+                    body: JSON.stringify(requestBody)
+                });
+
+                const data = await response.json();
+
+                if (!response.ok) {
+                    throw new Error(data.error || '查询失败');
+                }
+
+                currentVersionChain = data.versions || [];
+                renderVersionChain();
+
+            } catch (err) {
+                console.error('查询版本链失败:', err);
+                resultDiv.innerHTML = `
+                    <div class="change-track-empty">
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                        </svg>
+                        <div>查询失败: ${err.message}</div>
+                    </div>
+                `;
+            }
+        }
+
+        // 渲染版本链
+        function renderVersionChain() {
+            const resultDiv = document.getElementById('changeTrackResult');
+
+            if (currentVersionChain.length === 0) {
+                resultDiv.innerHTML = `
+                    <div class="change-track-empty">
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9.172 16.172a4 4 0 015.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                        </svg>
+                        <div>未找到该业务键的记录</div>
+                    </div>
+                `;
+                return;
+            }
+
+            // 按生效日期倒序排列（最新版本在上）
+            const versions = [...currentVersionChain].sort((a, b) =>
+                new Date(b.dw_eff_dt) - new Date(a.dw_eff_dt)
+            );
+
+            // 获取要显示的字段（排除系统字段）
+            const displayFields = currentFieldsData.filter(f => {
+                const name = f.name.toLowerCase();
+                return !name.startsWith('sk_') &&
+                       !name.startsWith('dw_') &&
+                       name !== 'customer_create_dt';
+            });
+
+            let html = '';
+            versions.forEach((version, index) => {
+                const prevVersion = index < versions.length - 1 ? versions[index + 1] : null;
+                const isCurrent = version.dw_is_current_flg === 1;
+                const isInitial = version.dw_is_initial_flg === 1;
+
+                // 计算变更字段
+                const changedFields = [];
+                if (prevVersion) {
+                    displayFields.forEach(f => {
+                        const oldVal = prevVersion[f.name];
+                        const newVal = version[f.name];
+                        if (String(oldVal || '') !== String(newVal || '')) {
+                            changedFields.push({
+                                field: f,
+                                oldValue: oldVal,
+                                newValue: newVal
+                            });
+                        }
+                    });
+                }
+
+                // 版本标签
+                let badgeClass = 'history';
+                let badgeText = `版本 ${versions.length - index}`;
+                if (isCurrent) {
+                    badgeClass = 'current';
+                    badgeText = '当前版本';
+                } else if (isInitial) {
+                    badgeClass = 'initial';
+                    badgeText = '期初版本';
+                }
+
+                // 日期格式化
+                const effDate = formatDate(version.dw_eff_dt);
+                const expDate = version.dw_exp_dt === '9999-12-31' || version.dw_exp_dt?.includes('9999')
+                    ? '至今'
+                    : formatDate(version.dw_exp_dt);
+
+                html += `
+                    <div class="version-card">
+                        <div class="version-header">
+                            <span class="version-badge ${badgeClass}">${badgeText}</span>
+                            <span class="version-date">${effDate} ~ ${expDate}</span>
+                            ${changedFields.length > 0 ? `<span style="font-size:0.75em;color:var(--color-accent);">(${changedFields.length} 处变更)</span>` : ''}
+                        </div>
+                        <div class="version-changes">
+                            ${renderVersionFields(version, prevVersion, displayFields, changedFields)}
+                        </div>
+                    </div>
+                `;
+            });
+
+            resultDiv.innerHTML = html;
+        }
+
+        // 判断值是否为空
+        function isEmptyValue(val) {
+            return val === null || val === undefined || val === '' || val === '-';
+        }
+
+        // 格式化字段值显示（空值显示为灰色斜体的 —）
+        function formatFieldValue(val, isOldValue = false) {
+            if (isEmptyValue(val)) {
+                return '<span class="version-field-empty">—</span>';
+            }
+            const escaped = escapeHtml(String(val));
+            if (isOldValue) {
+                return `<span class="version-field-old">${escaped}</span>`;
+            }
+            return `<span class="version-field-value">${escaped}</span>`;
+        }
+
+        // 渲染版本字段
+        function renderVersionFields(version, prevVersion, displayFields, changedFields) {
+            // 如果有变更，只显示变更字段
+            if (changedFields.length > 0) {
+                return changedFields.map(change => {
+                    const fieldName = change.field.comment || change.field.name;
+                    const oldVal = change.oldValue;
+                    const newVal = change.newValue;
+                    return `
+                        <div class="version-field changed">
+                            <span class="version-field-name">${escapeHtml(fieldName)}</span>
+                            ${formatFieldValue(oldVal, true)}
+                            <span class="version-field-arrow">→</span>
+                            ${formatFieldValue(newVal, false)}
+                        </div>
+                    `;
+                }).join('');
+            }
+
+            // 期初版本显示关键字段
+            const keyFields = displayFields.filter(f => {
+                const name = f.name.toLowerCase();
+                return name.includes('name') || name.includes('code') || name.includes('type');
+            }).slice(0, 6);
+
+            if (keyFields.length === 0) {
+                return '<div class="version-field"><span style="color:var(--color-text-muted);">初始版本</span></div>';
+            }
+
+            return keyFields.map(f => {
+                const val = version[f.name];
+                return `
+                    <div class="version-field">
+                        <span class="version-field-name">${escapeHtml(f.comment || f.name)}</span>
+                        ${formatFieldValue(val, false)}
+                    </div>
+                `;
+            }).join('');
+        }
+
+        // 格式化日期
+        function formatDate(dateStr) {
+            if (!dateStr) return '-';
+            const date = new Date(dateStr);
+            if (isNaN(date.getTime())) return dateStr;
+            return date.toISOString().split('T')[0];
+        }
+
+        // 点击遮罩关闭
+        document.getElementById('assetDetailModal').addEventListener('click', (e) => {
+            if (e.target.classList.contains('modal-overlay')) {
+                closeDetailModal();
+            }
+        });
+
+        // ESC 键关闭
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                closeDetailModal();
+            }
+        });
+
+        // 切换详情 Tab
+        function switchDetailTab(tabId) {
+            // 更新 tab 按钮状态
+            document.querySelectorAll('.detail-tab').forEach(tab => {
+                tab.classList.toggle('active', tab.textContent.includes(
+                    tabId === 'info' ? '基本信息' : tabId === 'fields' ? '字段列表' : '样例数据'
+                ));
+            });
+
+            // 显示对应面板
+            document.querySelectorAll('.detail-panel').forEach(panel => {
+                panel.classList.remove('active');
+            });
+            document.getElementById(`panel-${tabId}`).classList.add('active');
+        }
+
+        // 渲染基本信息
+        function renderBasicInfo(asset) {
+            const infoGrid = document.getElementById('infoGrid');
+            infoGrid.innerHTML = `
+                <div class="info-item">
+                    <div class="info-label">数仓分层</div>
+                    <div class="info-value"><span class="layer-badge ${asset.layer.toLowerCase()}">${asset.layer}</span></div>
+                </div>
+                <div class="info-item">
+                    <div class="info-label">资产分类</div>
+                    <div class="info-value"><span class="category-badge ${asset.category}">${asset.category === 'core' ? '核心资产' : '一般资产'}</span></div>
+                </div>
+                <div class="info-item">
+                    <div class="info-label">资产状态</div>
+                    <div class="info-value">${renderStatusBadge(asset.status)}</div>
+                </div>
+                <div class="info-item">
+                    <div class="info-label">业务域</div>
+                    <div class="info-value">${asset.domain_name || '-'}</div>
+                </div>
+                <div class="info-item">
+                    <div class="info-label">技术负责人</div>
+                    <div class="info-value">${escapeHtml(asset.tech_owner || '-')}</div>
+                </div>
+                <div class="info-item">
+                    <div class="info-label">业务负责人</div>
+                    <div class="info-value">${escapeHtml(asset.biz_owner || '-')}</div>
+                </div>
+            `;
+        }
+
+        // 从数仓加载表元数据
+        async function loadTableMetadata(tableName) {
+            // 先重置样例数据面板（确保从"表不存在"状态能恢复）
+            resetSamplePanel();
+
+            // 显示加载状态
+            document.getElementById('fieldTableBody').innerHTML = '<tr><td colspan="5" style="text-align:center;padding:20px;color:var(--color-text-muted);">加载中...</td></tr>';
+            const sampleTable = document.getElementById('sampleTable');
+            if (sampleTable) sampleTable.innerHTML = '<tr><td style="text-align:center;padding:20px;color:var(--color-text-muted);">加载中...</td></tr>';
+
+            try {
+                // 调用后端 API 获取表结构
+                const res = await authFetch(`${API_URL}/warehouse/table-info?table=${encodeURIComponent(tableName)}`);
+                const data = await res.json();
+
+                if (res.ok) {
+                    // 渲染字段列表
+                    currentFieldsData = data.fields || [];
+                    renderFieldTable(currentFieldsData);
+
+                    // 初始化列选择（重置为全选）
+                    hideIdColumns = false;
+                    document.getElementById('hideIdToggle').classList.remove('active');
+                    initColumnSelection(currentFieldsData);
+
+                    // 渲染样例数据
+                    currentSampleData = data.sample_data || [];
+                    renderSampleTable(currentFieldsData, currentSampleData);
+                } else {
+                    // 表不存在或查询失败
+                    document.getElementById('fieldTableBody').innerHTML = `<tr><td colspan="5" style="text-align:center;padding:20px;color:var(--color-text-muted);">${data.error || '表不存在或无法访问'}</td></tr>`;
+                    // 显示表未创建的友好提示
+                    showTableNotExistsHint(tableName, data.error);
+                }
+            } catch (error) {
+                console.error('加载表元数据失败:', error);
+                document.getElementById('fieldTableBody').innerHTML = '<tr><td colspan="5" style="text-align:center;padding:20px;color:var(--color-text-muted);">加载失败，请稍后重试</td></tr>';
+                showTableNotExistsHint(tableName, '加载失败，请稍后重试');
+            }
+        }
+
+        // 显示表未创建的友好提示
+        function showTableNotExistsHint(tableName, errorMsg) {
+            // 隐藏列选择面板和工具栏
+            const columnPanel = document.getElementById('columnSelectPanel');
+            const sampleToolbar = document.querySelector('.sample-toolbar');
+            const sampleSubTabs = document.getElementById('sampleSubTabs');
+
+            if (columnPanel) columnPanel.style.display = 'none';
+            if (sampleToolbar) sampleToolbar.style.display = 'none';
+            if (sampleSubTabs) sampleSubTabs.style.display = 'none';
+
+            // 修改样例数据区域为全宽显示提示
+            const sampleLayout = document.querySelector('.sample-layout');
+            if (sampleLayout) {
+                sampleLayout.style.overflow = 'hidden';  // 移除滚动条
+                sampleLayout.style.height = 'auto';      // 高度自适应
+                sampleLayout.innerHTML = `
+                    <div class="table-not-exists">
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+                        </svg>
+                        <h3>该表尚未在数仓中创建</h3>
+                        <div class="table-name">${escapeHtml(tableName)}</div>
+                    </div>
+                `;
+            }
+
+            // 隐藏底部所有按钮
+            const modalFooter = document.querySelector('#assetDetailModal .modal-footer');
+            if (modalFooter) modalFooter.style.display = 'none';
+        }
+
+        // 重置样例数据面板（恢复正常状态）
+        function resetSamplePanel() {
+            const columnPanel = document.getElementById('columnSelectPanel');
+            const sampleToolbar = document.querySelector('.sample-toolbar');
+            const sampleSubTabs = document.getElementById('sampleSubTabs');
+            const modalFooter = document.querySelector('#assetDetailModal .modal-footer');
+
+            if (columnPanel) columnPanel.style.display = '';
+            if (sampleToolbar) sampleToolbar.style.display = '';
+            if (sampleSubTabs) sampleSubTabs.style.display = '';
+            if (modalFooter) modalFooter.style.display = '';
+
+            // 恢复样例数据布局
+            const sampleLayout = document.querySelector('.sample-layout');
+            if (sampleLayout) {
+                sampleLayout.style.overflow = '';  // 恢复滚动行为
+                sampleLayout.style.height = '';    // 恢复固定高度
+                sampleLayout.innerHTML = `
+                    <!-- 左侧：列选择面板 -->
+                    <div class="column-select-panel" id="columnSelectPanel">
+                        <div class="column-select-header">
+                            <span class="column-select-title">选择列</span>
+                            <span class="column-select-badge" id="columnSelectBadge">0/0</span>
+                        </div>
+                        <div class="column-select-actions">
+                            <button onclick="selectAllColumns()">全选</button>
+                            <button onclick="selectNoColumns()">清空</button>
+                            <button onclick="resetColumnSelection()">重置</button>
+                        </div>
+                        <div class="column-select-list" id="columnSelectList">
+                            <!-- 动态填充 -->
+                        </div>
+                    </div>
+                    <!-- 右侧：数据表格 -->
+                    <div class="sample-table-area">
+                        <div class="sample-table-wrapper">
+                            <table class="sample-table" id="sampleTable">
+                                <!-- 动态填充 -->
+                            </table>
+                        </div>
+                    </div>
+                `;
+            }
+        }
+
+        // 渲染字段表格
+        function renderFieldTable(fields) {
+            const tbody = document.getElementById('fieldTableBody');
+            if (!fields || fields.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:20px;color:var(--color-text-muted);">暂无字段信息</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = fields.map((field, index) => `
+                <tr>
+                    <td style="color:var(--color-text-muted);">${index + 1}</td>
+                    <td><span class="field-name">${escapeHtml(field.name)}</span></td>
+                    <td><span class="field-type">${escapeHtml(field.type)}</span></td>
+                    <td>${field.nullable ? '是' : '否'}</td>
+                    <td>${escapeHtml(field.comment || '-')}</td>
+                </tr>
+            `).join('');
+        }
+
+        // 渲染样例数据表格
+        function renderSampleTable(fields, sampleData) {
+            const table = document.getElementById('sampleTable');
+            const hintEl = document.getElementById('columnCountHint');
+
+            if (!sampleData || sampleData.length === 0) {
+                table.innerHTML = '<tr><td style="text-align:center;padding:20px;color:var(--color-text-muted);">暂无样例数据</td></tr>';
+                if (hintEl) hintEl.textContent = '';
+                return;
+            }
+
+            // 应用列过滤
+            const displayFields = getFilteredFields(fields);
+            const hiddenCount = fields.length - displayFields.length;
+
+            // 更新列数提示
+            if (hintEl) {
+                if (hiddenCount > 0) {
+                    hintEl.textContent = `显示 ${displayFields.length} / ${fields.length} 列`;
+                } else {
+                    hintEl.textContent = `共 ${fields.length} 列`;
+                }
+            }
+
+            // 构建双表头：第一行是字段注释，第二行是字段名
+            let html = '<thead>';
+
+            // 第一行：字段注释（中文说明）
+            html += '<tr class="sample-header-comment">';
+            html += '<th rowspan="2" style="vertical-align:middle;">#</th>';
+            displayFields.forEach(f => {
+                const comment = f.comment || f.name;
+                html += `<th style="font-weight:500; color:var(--color-text-primary); border-bottom:none;">${escapeHtml(comment)}</th>`;
+            });
+            html += '</tr>';
+
+            // 第二行：字段名（英文）
+            html += '<tr class="sample-header-name">';
+            displayFields.forEach(f => {
+                html += `<th style="font-size:0.75em; font-weight:400; color:var(--color-text-muted); font-family:Consolas,Monaco,monospace; padding-top:2px;">${escapeHtml(f.name)}</th>`;
+            });
+            html += '</tr>';
+            html += '</thead>';
+
+            // 构建表体
+            html += '<tbody>';
+            sampleData.forEach((row, idx) => {
+                html += '<tr>';
+                html += `<td style="color:var(--color-text-muted);">${idx + 1}</td>`;
+                displayFields.forEach(f => {
+                    let val = row[f.name];
+                    // 脱敏处理（示例：隐藏手机号、邮箱等）
+                    val = maskSensitiveData(f.name, val);
+                    html += `<td title="${escapeHtml(String(val || ''))}">${escapeHtml(String(val || '-'))}</td>`;
+                });
+                html += '</tr>';
+            });
+            html += '</tbody>';
+
+            table.innerHTML = html;
+        }
+
+        // 脱敏处理
+        function maskSensitiveData(fieldName, value) {
+            if (!value) return value;
+            const lowerName = fieldName.toLowerCase();
+
+            // 手机号脱敏
+            if (lowerName.includes('phone') || lowerName.includes('mobile') || lowerName.includes('tel')) {
+                return String(value).replace(/(\d{3})\d{4}(\d{4})/, '$1****$2');
+            }
+
+            // 邮箱脱敏
+            if (lowerName.includes('email') || lowerName.includes('mail')) {
+                return String(value).replace(/(.{2}).*(@.*)/, '$1***$2');
+            }
+
+            // 身份证脱敏
+            if (lowerName.includes('idcard') || lowerName.includes('id_card')) {
+                return String(value).replace(/(\d{4})\d{10}(\d{4})/, '$1**********$2');
+            }
+
+            return value;
+        }
+
+        // 格式化数字
+        function formatNumber(num) {
+            if (num >= 10000) {
+                return (num / 10000).toFixed(1) + '万';
+            }
+            return num.toLocaleString();
+        }
+
+        // 导出样例数据（XLSX 格式，双表头）
+        function exportSampleData() {
+            if (!currentAssetDetail || currentSampleData.length === 0) {
+                alert('暂无样例数据可导出');
+                return;
+            }
+
+            // 应用列过滤（与显示一致）
+            const exportFields = getFilteredFields(currentFieldsData);
+
+            // 构建双表头数据（不含行号列）
+            // 第一行：字段注释（中文）
+            const headerComments = exportFields.map(f => f.comment || f.name);
+            // 第二行：字段名（英文）
+            const headerNames = exportFields.map(f => f.name);
+
+            // 构建数据行（不含行号）
+            const dataRows = currentSampleData.map((row) => {
+                const rowData = [];
+                exportFields.forEach(f => {
+                    let val = row[f.name];
+                    val = maskSensitiveData(f.name, val);
+                    rowData.push(val ?? '');
+                });
+                return rowData;
+            });
+
+            // 合并：表头 + 数据
+            const wsData = [headerComments, headerNames, ...dataRows];
+
+            // 创建工作表
+            const ws = XLSX.utils.aoa_to_sheet(wsData);
+
+            // 设置列宽（自动适应）
+            const colWidths = headerComments.map((_, colIdx) => {
+                let maxLen = 10;
+                wsData.forEach(row => {
+                    const cellVal = String(row[colIdx] || '');
+                    // 中文字符算2个宽度
+                    const len = cellVal.split('').reduce((acc, char) => {
+                        return acc + (/[\u4e00-\u9fa5]/.test(char) ? 2 : 1);
+                    }, 0);
+                    if (len > maxLen) maxLen = Math.min(len, 40);
+                });
+                return { wch: maxLen + 2 };
+            });
+            ws['!cols'] = colWidths;
+
+            // 设置双表头样式（合并单元格不需要，但可以冻结前两行）
+            // 冻结前两行（表头）
+            ws['!freeze'] = { xSplit: 0, ySplit: 2 };
+
+            // 创建工作簿
+            const wb = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(wb, ws, '样例数据');
+
+            // 添加表信息 sheet
+            const hiddenCount = currentFieldsData.length - exportFields.length;
+            const fieldCountText = hiddenCount > 0
+                ? `${exportFields.length}（已隐藏 ${hiddenCount} 列）`
+                : String(exportFields.length);
+            const infoData = [
+                ['表名', currentAssetDetail.table_name],
+                ['中文名', currentAssetDetail.table_comment || '-'],
+                ['导出字段数', fieldCountText],
+                ['导出时间', new Date().toLocaleString('zh-CN')],
+                ['说明', '此为样例数据（前10条），敏感字段已脱敏处理']
+            ];
+            const wsInfo = XLSX.utils.aoa_to_sheet(infoData);
+            wsInfo['!cols'] = [{ wch: 12 }, { wch: 50 }];
+            XLSX.utils.book_append_sheet(wb, wsInfo, '表信息');
+
+            // 导出文件
+            const fileName = `${currentAssetDetail.table_name}_样例数据_${formatDateForFile(new Date())}.xlsx`;
+            XLSX.writeFile(wb, fileName);
+        }
+
+        // 申请完整数据
+        function applyForData() {
+            // 这里可以跳转到数据申请页面或显示申请流程说明
+            alert('请联系数据团队或通过公司内部数据申请流程提交申请。\n\n负责人：' + (currentAssetDetail?.tech_owner || '数据团队'));
+        }
+
+        // 兼容旧的 viewAsset（卡片视图点击）
+        function viewAsset(id) {
+            viewAssetDetail(id);
+        }
+
+        // 导出台账（XLSX 格式）
+        function exportAssets() {
+            const headers = ['分层', '表名', '中文描述', '分类', '技术负责人', '业务负责人', '状态', '维护时间'];
+            const rows = filteredAssets.map(asset => [
+                asset.layer,
+                asset.table_name,
+                asset.table_comment || '',
+                asset.category === 'core' ? '核心' : '一般',
+                asset.tech_owner || '',
+                asset.biz_owner || '',
+                getStatusLabel(asset.status),
+                formatDate(asset.updated_at)
+            ]);
+
+            // 构建工作表数据
+            const wsData = [headers, ...rows];
+            const ws = XLSX.utils.aoa_to_sheet(wsData);
+
+            // 设置列宽
+            ws['!cols'] = [
+                { wch: 8 },   // 分层
+                { wch: 35 },  // 表名
+                { wch: 25 },  // 中文描述
+                { wch: 8 },   // 分类
+                { wch: 12 },  // 技术负责人
+                { wch: 12 },  // 业务负责人
+                { wch: 10 },  // 状态
+                { wch: 12 }   // 维护时间
+            ];
+
+            // 创建工作簿并导出
+            const wb = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(wb, ws, '数据资产台账');
+
+            const fileName = `数据资产台账_${formatDateForFile(new Date())}.xlsx`;
+            XLSX.writeFile(wb, fileName);
+        }
+
+        // 获取状态标签
+        function getStatusLabel(status) {
+            const map = {
+                'ONLINE': '已上线',
+                'DEVELOPING': '开发中',
+                'REVIEWING': '待验收',
+                'CREATED': '规划中',
+                'OFFLINE': '已下线'
+            };
+            return map[status] || status || '';
+        }
+
+        // 格式化日期
+        function formatDate(dateStr) {
+            if (!dateStr) return '-';
+            const date = new Date(dateStr);
+            return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+        }
+
+        // 格式化日期用于文件名
+        function formatDateForFile(date) {
+            return `${date.getFullYear()}${String(date.getMonth() + 1).padStart(2, '0')}${String(date.getDate()).padStart(2, '0')}`;
+        }
+
+        // HTML转义
+        function escapeHtml(text) {
+            if (!text) return '';
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+    </script>
+</body>
+</html>

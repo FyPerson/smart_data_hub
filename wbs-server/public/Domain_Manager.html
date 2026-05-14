@@ -1,0 +1,504 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>业务域管理 - 智数协同平台</title>
+    <link rel="stylesheet" href="assets/css/style.css?v=1.2">
+    <style>
+        .domain-form {
+            background: linear-gradient(135deg, #f8fafc 0%, #edf2f7 100%);
+            padding: 24px;
+            border-radius: 12px;
+            margin-bottom: 24px;
+            border: 1px solid #e2e8f0;
+        }
+
+        .domain-form .form-row {
+            display: flex;
+            gap: 16px;
+            align-items: flex-end;
+            flex-wrap: wrap;
+        }
+
+        .domain-form .form-group {
+            flex: 1;
+            min-width: 180px;
+        }
+
+        .domain-form .form-group label {
+            display: block;
+            font-size: 13px;
+            font-weight: 600;
+            color: #4a5568;
+            margin-bottom: 6px;
+        }
+
+        .domain-form .form-group label .required {
+            color: #e53e3e;
+        }
+
+        .domain-form .form-group input {
+            width: 100%;
+            padding: 12px 14px;
+            border: 2px solid #e2e8f0;
+            border-radius: 8px;
+            font-size: 14px;
+            transition: all 0.2s;
+            background: white;
+        }
+
+        .domain-form .form-group input:focus {
+            outline: none;
+            border-color: #4299e1;
+            box-shadow: 0 0 0 3px rgba(66, 153, 225, 0.15);
+        }
+
+        .domain-form .form-group input::placeholder {
+            color: #a0aec0;
+        }
+
+        .btn-add-domain {
+            background: linear-gradient(135deg, #48bb78 0%, #38a169 100%);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            white-space: nowrap;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .btn-add-domain:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(72, 187, 120, 0.4);
+        }
+
+        .domain-table {
+            width: 100%;
+            border-collapse: separate;
+            border-spacing: 0;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+        }
+
+        .domain-table thead {
+            background: #f7fafc;
+            border-bottom: 2px solid #e2e8f0;
+        }
+
+        .domain-table thead th {
+            padding: 14px 16px;
+            text-align: left;
+            font-weight: 600;
+            color: #2d3748;
+            font-size: 14px;
+        }
+
+        .domain-table tbody tr {
+            background: white;
+            transition: all 0.2s;
+        }
+
+        .domain-table tbody tr:hover {
+            background: #f7fafc;
+        }
+
+        .domain-table tbody tr:not(:last-child) {
+            border-bottom: 1px solid #e2e8f0;
+        }
+
+        .domain-table tbody td {
+            padding: 14px 16px;
+            font-size: 14px;
+            color: #2d3748;
+        }
+
+        .domain-code {
+            display: inline-block;
+            background: linear-gradient(135deg, #d97706 0%, #b45309 100%);
+            color: white;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 13px;
+            font-weight: 600;
+            font-family: 'Monaco', 'Consolas', monospace;
+        }
+
+        .domain-name {
+            font-weight: 600;
+            color: #2d3748;
+        }
+
+        .domain-desc {
+            color: #718096;
+            font-size: 13px;
+        }
+
+        .btn-delete {
+            background: linear-gradient(135deg, #fc8181 0%, #e53e3e 100%);
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 6px;
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+            white-space: nowrap;
+        }
+
+        .btn-delete:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 2px 8px rgba(229, 62, 62, 0.4);
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 40px 20px;
+            color: #a0aec0;
+        }
+
+        .empty-state .icon {
+            font-size: 48px;
+            margin-bottom: 12px;
+        }
+
+        .stats-bar {
+            display: flex;
+            gap: 20px;
+            margin-bottom: 20px;
+            padding: 16px 20px;
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+        }
+
+        .stat-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .stat-item .stat-icon {
+            width: 36px;
+            height: 36px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+        }
+
+        .stat-item .stat-icon.blue {
+            background: #ebf8ff;
+            color: #3182ce;
+        }
+
+        .stat-item .stat-info .stat-value {
+            font-size: 20px;
+            font-weight: 700;
+            color: #2d3748;
+        }
+
+        .stat-item .stat-info .stat-label {
+            font-size: 12px;
+            color: #718096;
+        }
+
+        .btn-edit {
+            background: linear-gradient(135deg, #4299e1 0%, #3182ce 100%);
+            color: white;
+            border: none;
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+            white-space: nowrap;
+        }
+
+        .btn-edit:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 2px 8px rgba(66, 153, 225, 0.4);
+        }
+
+        .status-badge {
+            display: inline-block;
+            padding: 3px 10px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        .status-active {
+            background: #c6f6d5;
+            color: #22543d;
+        }
+
+        .status-deprecated {
+            background: #fed7d7;
+            color: #822727;
+        }
+
+        .domain-row-deprecated {
+            opacity: 0.6;
+            background: #f7fafc !important;
+        }
+
+        /* 编辑模态框 */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.5);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .modal-content {
+            background: white;
+            padding: 28px;
+            border-radius: 12px;
+            width: 480px;
+            max-width: 90%;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+        }
+
+        .modal-title {
+            font-size: 18px;
+            font-weight: 700;
+            color: #2d3748;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .modal-form .form-group {
+            margin-bottom: 16px;
+        }
+
+        .modal-form .form-group label {
+            display: block;
+            font-size: 13px;
+            font-weight: 600;
+            color: #4a5568;
+            margin-bottom: 6px;
+        }
+
+        .modal-form .form-group input,
+        .modal-form .form-group select {
+            width: 100%;
+            padding: 10px 12px;
+            border: 2px solid #e2e8f0;
+            border-radius: 8px;
+            font-size: 14px;
+            transition: all 0.2s;
+        }
+
+        .modal-form .form-group input:focus,
+        .modal-form .form-group select:focus {
+            outline: none;
+            border-color: #4299e1;
+            box-shadow: 0 0 0 3px rgba(66, 153, 225, 0.15);
+        }
+
+        .modal-form .form-group input:disabled {
+            background: #edf2f7;
+            color: #718096;
+            cursor: not-allowed;
+        }
+
+        .modal-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 12px;
+            margin-top: 24px;
+        }
+
+        .btn-cancel {
+            background: #e2e8f0;
+            color: #4a5568;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .btn-cancel:hover {
+            background: #cbd5e0;
+        }
+
+        .btn-save {
+            background: linear-gradient(135deg, #48bb78 0%, #38a169 100%);
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .btn-save:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(72, 187, 120, 0.4);
+        }
+
+        .code-hint {
+            font-size: 12px;
+            color: #a0aec0;
+            margin-top: 4px;
+        }
+    </style>
+</head>
+
+<body class="admin-page">
+    <div class="container admin-container">
+        <div class="header">
+            <h1>
+                <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle; margin-right:8px;">
+                    <circle cx="12" cy="12" r="10"/>
+                    <line x1="2" y1="12" x2="22" y2="12"/>
+                    <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+                </svg>
+                业务域管理
+            </h1>
+            <div class="nav-links">
+                <a href="/admin.html" style="display:inline-flex; align-items:center; gap:5px;">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M19 12H5"/>
+                        <polyline points="12 19 5 12 12 5"/>
+                    </svg>
+                    返回用户管理
+                </a>
+                <a href="/Task_Pool.html" style="display:inline-flex; align-items:center; gap:5px;">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M9 11l3 3L22 4"/>
+                        <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
+                    </svg>
+                    返回任务池
+                </a>
+                <button onclick="logout()">退出登录</button>
+            </div>
+        </div>
+
+        <div id="message" class="message"></div>
+
+        <!-- 统计栏 -->
+        <div class="stats-bar">
+            <div class="stat-item">
+                <div class="stat-icon blue">🌐</div>
+                <div class="stat-info">
+                    <div class="stat-value" id="domainCount">-</div>
+                    <div class="stat-label">业务域总数</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 域管理 (Domain Management) -->
+        <div class="card">
+            <div class="card-title"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>添加业务域</div>
+
+            <!-- Add Domain Form -->
+            <div class="domain-form">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>域代码 (英文) <span class="required">*</span></label>
+                        <input type="text" id="newDomCode" placeholder="例如: finance">
+                    </div>
+                    <div class="form-group">
+                        <label>域名称 (中文) <span class="required">*</span></label>
+                        <input type="text" id="newDomName" placeholder="例如: 财务域">
+                    </div>
+                    <div class="form-group" style="flex: 2;">
+                        <label>描述说明</label>
+                        <input type="text" id="newDomDesc" placeholder="业务域的用途说明（可选）">
+                    </div>
+                    <button class="btn-add-domain" onclick="createDomain()">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 2px;"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg> 添加域
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Domain List -->
+        <div class="card">
+            <div class="card-title"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/></svg>业务域列表</div>
+            <table class="domain-table">
+                <thead>
+                    <tr>
+                        <th style="width: 60px;">ID</th>
+                        <th style="width: 140px;">域代码</th>
+                        <th style="width: 160px;">域名称</th>
+                        <th>描述</th>
+                        <th style="width: 80px; text-align: center;">状态</th>
+                        <th style="width: 140px; text-align: center;">操作</th>
+                    </tr>
+                </thead>
+                <tbody id="domainList">
+                    <tr>
+                        <td colspan="6" style="text-align:center; padding: 40px; color: #a0aec0;">
+                            <div><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> 加载中...</div>
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- 编辑模态框 -->
+    <div class="modal-overlay" id="editModal">
+        <div class="modal-content">
+            <div class="modal-title"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>编辑业务域</div>
+            <div class="modal-form">
+                <input type="hidden" id="editDomainId">
+                <div class="form-group">
+                    <label>域代码 (不可修改)</label>
+                    <input type="text" id="editDomCode" disabled>
+                    <div class="code-hint">域代码创建后不可修改，以确保已有模型的表名一致性</div>
+                </div>
+                <div class="form-group">
+                    <label>域名称 (中文) <span style="color:#e53e3e;">*</span></label>
+                    <input type="text" id="editDomName" placeholder="例如: 财务域">
+                </div>
+                <div class="form-group">
+                    <label>描述说明</label>
+                    <input type="text" id="editDomDesc" placeholder="业务域的用途说明（可选）">
+                </div>
+                <div class="form-group">
+                    <label>状态</label>
+                    <select id="editDomStatus">
+                        <option value="active">启用中 - 可用于新模型命名</option>
+                        <option value="deprecated">已停用 - 仅保留历史记录</option>
+                    </select>
+                </div>
+            </div>
+            <div class="modal-actions">
+                <button class="btn-cancel" onclick="closeEditModal()">取消</button>
+                <button class="btn-save" onclick="saveDomain()"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 2px;"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg> 保存</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="assets/js/domain_manager.js"></script>
+</body>
+
+</html>
