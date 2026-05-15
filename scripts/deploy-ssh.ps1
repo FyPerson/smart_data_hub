@@ -57,10 +57,22 @@ try {
 Write-Host ""
 
 # 3. Backup task_pool.db on server (强制，失败则中止部署，避免 PM2 重启后无回滚点)
+# 用 EncodedCommand 规避三层 shell（本地 PowerShell → SSH → 远端 PowerShell）的嵌套引号
+# 转义问题——之前用单引号字符串拼接，远端 PowerShell 把 `''` 还原后大括号 `{}` 被 parser
+# 误当 hashtable 起始而剥掉，导致 `if (-not ...) { ... }` 解析失败（2026-05-15 踩坑）
 Write-Host "[3/4] Backup task_pool.db on server..." -ForegroundColor Yellow
 try {
-    $backupCmd = '$ts = Get-Date -Format yyyyMMdd_HHmmss; $src = ''E:\Task_Pool\wbs-server\task_pool.db''; $dst = ''E:\Task_Pool\wbs-server\task_pool.db.backup_'' + $ts; if (-not (Test-Path $src)) { Write-Error (''Source DB not found: '' + $src); exit 1 }; Copy-Item $src $dst -ErrorAction Stop; Write-Output (''BACKUP_OK::'' + $dst)'
-    $backupResult = ssh "$ServerUser@$ServerIP" "powershell -NoProfile -Command `"$backupCmd`"" 2>&1
+    $backupScript = @'
+$ts = Get-Date -Format yyyyMMdd_HHmmss
+$src = 'E:\Task_Pool\wbs-server\task_pool.db'
+$dst = 'E:\Task_Pool\wbs-server\task_pool.db.backup_' + $ts
+if (-not (Test-Path $src)) { Write-Error ('Source DB not found: ' + $src); exit 1 }
+Copy-Item $src $dst -ErrorAction Stop
+Write-Output ('BACKUP_OK::' + $dst)
+'@
+    $bytes = [System.Text.Encoding]::Unicode.GetBytes($backupScript)
+    $encoded = [Convert]::ToBase64String($bytes)
+    $backupResult = ssh "$ServerUser@$ServerIP" "powershell -NoProfile -EncodedCommand $encoded" 2>&1
     if ($LASTEXITCODE -ne 0) {
         throw "backup command failed (exit $LASTEXITCODE): $backupResult"
     }

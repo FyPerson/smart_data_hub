@@ -763,6 +763,35 @@
         </div>
     </div>
 
+    <!-- 上传交付物弹窗（D3 模块 7 补丁：PENDING/failed 状态调 POST /:id/submit）-->
+    <div class="modal-overlay" id="submitDeliveryModal">
+        <div class="modal-card">
+            <div class="modal-header">
+                <h3 id="submitDeliveryTitle">上传交付物</h3>
+                <button class="modal-close" onclick="closeSubmitDeliveryModal()">×</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-row">
+                    <label>SQL 脚本 <span class="required">*</span></label>
+                    <input type="file" id="f_delivery_script" accept=".sql,.txt">
+                    <div class="hint">扩展名 .sql / .txt，单文件 ≤ 5MB。脚本将在目标业务库执行 smoke test。</div>
+                </div>
+                <div class="form-row">
+                    <label>结果数据 <span class="required">*</span></label>
+                    <input type="file" id="f_delivery_data" accept=".xlsx,.xls">
+                    <div class="hint">扩展名 .xlsx / .xls，单文件 ≤ 20MB。在本地跑出来的取数结果，供业务方验收对照。</div>
+                </div>
+                <div class="hint" style="margin-top:8px;color:#6b7280;">
+                    提交后系统会对 SQL 脚本做 4 层防御 smoke test（语法解析 / 黑名单 / 只读校验 / 真连业务库试跑）。验收通过协作单进入 DONE，否则停留 SUBMITTED 状态并显示错误，可继续重提。
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-cancel" onclick="closeSubmitDeliveryModal()">取消</button>
+                <button class="btn btn-primary" id="btnSubmitDelivery" onclick="submitDelivery()">提交</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Toast -->
     <div id="toast" class="toast"></div>
 
@@ -1142,8 +1171,24 @@
 
         // 验收结果区块（D3 模块 7）：按 sql_validation_status 三色分支
         function renderValidationSection(d, isAdminUser) {
-            // PENDING 状态（尚未提交过）不显示验收结果区块
-            if (d.status === 'PENDING') return '';
+            // PENDING 状态：尚未提交，显示"上传交付物"入口（本单 dev 或 admin 可见）
+            if (d.status === 'PENDING') {
+                const canSubmit = isAdminUser || (d.developer_id && Number(d.developer_id) === Number(getCurrentUserId()));
+                if (!canSubmit) return '';
+                return `
+                    <div class="detail-section">
+                        <div class="detail-section-title">交付提交</div>
+                        <div class="detail-section-body">
+                            <div class="val-box" style="background:#eff6ff;border:1px solid #bfdbfe;">
+                                <div class="val-title" style="color:#1e40af;">📤 尚未提交交付物</div>
+                                <div class="val-meta">上传 SQL 脚本 + 结果数据，系统会自动跑 smoke test 验收</div>
+                                <div class="val-actions" style="margin-top:10px;">
+                                    <button class="val-btn val-btn-retry" onclick="openSubmitDeliveryDialog(${d.id})">上传交付物</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>`;
+            }
 
             const vs = d.sql_validation_status;
             // bypass 优先（虽然 sql_validation_status='bypassed' 已等价，但兼容旧数据）
@@ -1312,11 +1357,72 @@
             }
         }
 
-        // 重新上传交付物（占位提示，复用列表页"提交"路径）
+        // 当前打开提交弹窗对应的协作单 id（submitDelivery 用）
+        let _submitDeliveryCollabId = null;
+
+        // 首次提交（PENDING）入口：打开上传交付物弹窗
+        function openSubmitDeliveryDialog(id) {
+            _submitDeliveryCollabId = id;
+            document.getElementById('submitDeliveryTitle').textContent = `上传交付物 · 协作单 #${id}`;
+            document.getElementById('f_delivery_script').value = '';
+            document.getElementById('f_delivery_data').value = '';
+            const btn = document.getElementById('btnSubmitDelivery');
+            btn.disabled = false;
+            btn.textContent = '提交';
+            document.getElementById('submitDeliveryModal').classList.add('show');
+        }
+
+        // 验收 failed 重新上传：同款弹窗（后端 POST /:id/submit 本身就是覆盖式重提）
         function openRetryDialog(id) {
-            // D3 模块 7 简化版：提示用户走"重新上传 result_data + result_script"路径
-            // 真正的上传 UI 由 D3 模块 4 提交 endpoint 的弹窗承载（如未来扩展）
-            showToast('请通过协作单录入侧的"重新上传"流程提交新版交付物', 'info');
+            openSubmitDeliveryDialog(id);
+            document.getElementById('submitDeliveryTitle').textContent = `重新上传交付物 · 协作单 #${id}`;
+        }
+
+        function closeSubmitDeliveryModal() {
+            document.getElementById('submitDeliveryModal').classList.remove('show');
+            _submitDeliveryCollabId = null;
+        }
+
+        async function submitDelivery() {
+            const id = _submitDeliveryCollabId;
+            if (!id) { showToast('协作单 id 丢失，请重新打开弹窗', 'error'); return; }
+            const scriptFile = document.getElementById('f_delivery_script').files[0];
+            const dataFile = document.getElementById('f_delivery_data').files[0];
+            if (!scriptFile) { showToast('请选择 SQL 脚本文件', 'error'); return; }
+            if (!dataFile) { showToast('请选择结果数据文件', 'error'); return; }
+
+            const fd = new FormData();
+            // 后端按扩展名自动分类（xlsx/xls=result_data，sql/txt=result_script），两个文件都用 files 字段
+            fd.append('files', scriptFile);
+            fd.append('files', dataFile);
+
+            const btn = document.getElementById('btnSubmitDelivery');
+            btn.disabled = true;
+            btn.textContent = '提交中…';
+
+            try {
+                const res = await fetch(`/api/collab/requests/${id}/submit`, {
+                    method: 'POST',
+                    headers: { 'Authorization': 'Bearer ' + localStorage.getItem('token') },
+                    body: fd,
+                });
+                const data = await res.json().catch(() => ({}));
+                if (res.ok) {
+                    showToast('✅ 提交成功，系统正在跑 smoke test', 'success');
+                    closeSubmitDeliveryModal();
+                    if (typeof openDetail === 'function') await openDetail(id);
+                    if (typeof loadList === 'function') loadList();
+                } else {
+                    const detail = data.detail ? `（${data.detail}）` : '';
+                    showToast(`❌ ${data.error || '提交失败'}${detail}`, 'error');
+                    btn.disabled = false;
+                    btn.textContent = '提交';
+                }
+            } catch (e) {
+                showToast('网络错误，请检查后端服务', 'error');
+                btn.disabled = false;
+                btn.textContent = '提交';
+            }
         }
 
         // 取当前登录用户 id（从 JWT 解码,沿用项目已有 currentUserId 全局变量或 fallback）
