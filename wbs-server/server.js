@@ -1348,7 +1348,12 @@ function initTable() {
             ['contact_person_name', "TEXT NOT NULL DEFAULT ''"],
             ['assigned_at', 'DATETIME'],
             ['assigned_by', 'INTEGER'],
-            ['previous_developer_id', 'INTEGER']
+            ['previous_developer_id', 'INTEGER'],
+            // v1.66.1 对接人钉钉已读跟踪（PENDING_ASSIGN 路径发对接人时落）
+            // 与现有 notified_at/notify_message_key/read_at（发开发用）独立，避免心智模型混淆
+            ['contact_notified_at', 'DATETIME'],
+            ['contact_notify_message_key', 'TEXT'],
+            ['contact_read_at', 'TEXT']
         ];
         for (const [col, type] of v3CollabRequestColumns) {
             safeAlterAddColumn('collab_requests', col, type);
@@ -1374,7 +1379,9 @@ function verifyV2CollabSchema() {
         'attachment_dir',
         // v3 二级转派改造（2026-05-18）
         'contact_person_id', 'contact_person_name',
-        'assigned_at', 'assigned_by', 'previous_developer_id'
+        'assigned_at', 'assigned_by', 'previous_developer_id',
+        // v1.66.1 对接人钉钉已读跟踪（2026-05-19）
+        'contact_notified_at', 'contact_notify_message_key', 'contact_read_at'
     ];
     db.all("PRAGMA table_info(collab_requests)", [], (err, rows) => {
         if (err) {
@@ -1386,7 +1393,7 @@ function verifyV2CollabSchema() {
         if (missing.length > 0) {
             logger.error(`v2.0 schema 迁移不完整，collab_requests 缺失字段: ${missing.join(', ')}`);
         } else {
-            logger.info('v2.0 schema 健康检查通过：collab_requests 25 个新增字段齐全（含 D3 attachment_dir + v3 二级转派 5 字段）');
+            logger.info(`v2.0 schema 健康检查通过：collab_requests ${expectedCollabRequest.length} 个新增字段齐全（含 D3 attachment_dir + v3 二级转派 5 字段 + v1.66.1 对接人钉钉已读跟踪 3 字段）`);
         }
     });
     db.all("PRAGMA table_info(collab_attachments)", [], (err, rows) => {
@@ -10050,6 +10057,17 @@ app.get('/api/collab/requests/:id', authenticateToken, async (req, res) => {
             return res.status(403).json({ error: '无权查看此协作单', code: 'FORBIDDEN' });
         }
 
+        // v3 改派后展示前任：前端拿不到姓名只能显示 user#X，这里 JOIN users 查姓名作为派生字段返
+        if (request.previous_developer_id) {
+            const prevUser = await dbGetAsync(
+                'SELECT display_name, username FROM users WHERE id = ?',
+                [request.previous_developer_id]
+            );
+            if (prevUser) {
+                request.previous_developer_name = prevUser.display_name || prevUser.username;
+            }
+        }
+
         const items = await dbAllAsync(
             'SELECT * FROM collab_dev_plan_items WHERE collab_request_id = ? ORDER BY seq ASC, id ASC',
             [id]
@@ -10231,6 +10249,10 @@ app.put('/api/collab/requests/:id', authenticateToken, requireAdmin, async (req,
             updates.push('contact_person_id = ?');
             updates.push('contact_person_name = ?');
             params.push(newContact.id, newContact.display_name || newContact.username);
+            // v1.66.1：换对接人时清空对接人钉钉通知跟踪字段（旧对接人的已读痕迹不能沾染新对接人）
+            updates.push('contact_notified_at = NULL');
+            updates.push('contact_notify_message_key = NULL');
+            updates.push('contact_read_at = NULL');
         }
 
         if (updates.length === 0) return res.json({ message: '无字段需要更新' });
@@ -10442,9 +10464,16 @@ app.post('/api/collab/requests/:id/notify', authenticateToken, requireNonViewer,
         const result = await sendCollabDingtalkRaw(id, targetUser, title, markdown, operatorInfo);
         if (!result.ok) return res.status(result.status).json(result.body);
 
-        // 成功：PENDING 路径才落 notified_at + processQueryKey（已读回执跟踪开发；对接人路径不跟踪）
-        // codex 十六审 #4：notify 重发开发时清 read_at —— 旧 processQueryKey 对应的"已读时间"不能复用到新 processQueryKey
-        if (collab.status === 'PENDING') {
+        // 成功：按状态分支落不同字段组
+        // - PENDING_ASSIGN：落 contact_notified_at + contact_notify_message_key（v1.66.1 加，对接人已读跟踪）+ 清 contact_read_at
+        // - PENDING：落 notified_at + notify_message_key（开发已读跟踪）+ 清 read_at
+        // codex 十六审 #4：重发时清对应路径的 read_at —— 旧 processQueryKey 的"已读时间"不能复用到新 processQueryKey
+        if (collab.status === 'PENDING_ASSIGN') {
+            await dbRunAsync(
+                "UPDATE collab_requests SET contact_notified_at = datetime('now','localtime'), contact_notify_message_key = ?, contact_read_at = NULL WHERE id = ?",
+                [result.body.processQueryKey, id]
+            );
+        } else if (collab.status === 'PENDING') {
             await dbRunAsync(
                 "UPDATE collab_requests SET notified_at = datetime('now','localtime'), notify_message_key = ?, read_at = NULL WHERE id = ?",
                 [result.body.processQueryKey, id]
@@ -10466,23 +10495,55 @@ app.post('/api/collab/requests/:id/notify', authenticateToken, requireNonViewer,
 });
 
 // 6. 查询钉钉已读状态(Day 3 增补 · 方案 1 pull 模式)
-// 钉钉端约定:消息发出后 24h 内可查;processQueryKey 在 notify 成功时已落到 notify_message_key 列
+// 钉钉端约定:消息发出后 24h 内可查;processQueryKey 在 notify 成功时已落到对应 message_key 列
+// v1.66.1 加 ?recipient=contact|developer 参数：
+//   - recipient=developer（默认，向后兼容）：查 notify_message_key + 落 read_at（PENDING/SUBMITTED+ 用）
+//   - recipient=contact：查 contact_notify_message_key + 落 contact_read_at（PENDING_ASSIGN 用）
 app.get('/api/collab/requests/:id/notify-read-status', authenticateToken, async (req, res) => {
     const { id } = req.params;
+    const recipient = (req.query.recipient || 'developer').toLowerCase();
+    if (recipient !== 'contact' && recipient !== 'developer') {
+        return res.status(400).json({ error: '无效的 recipient 值（合法值：contact/developer）' });
+    }
+
+    // 字段名映射：选不同字段组
+    const fieldMap = recipient === 'contact'
+        ? {
+            notified_at: 'contact_notified_at',
+            message_key: 'contact_notify_message_key',
+            read_at: 'contact_read_at',
+            user_id: 'contact_person_id',
+            label: '对接人',
+        }
+        : {
+            notified_at: 'notified_at',
+            message_key: 'notify_message_key',
+            read_at: 'read_at',
+            user_id: 'developer_id',
+            label: '开发',
+        };
+
     try {
         const collab = await dbGetAsync(
-            'SELECT id, developer_id, notified_at, notify_message_key, read_at FROM collab_requests WHERE id = ?',
+            `SELECT id, ${fieldMap.user_id} AS recipient_user_id,
+                    ${fieldMap.notified_at} AS notified_at,
+                    ${fieldMap.message_key} AS message_key,
+                    ${fieldMap.read_at} AS read_at
+               FROM collab_requests WHERE id = ?`,
             [id]
         );
         if (!collab) return res.status(404).json({ error: '协作单不存在' });
-        if (!collab.notified_at) return res.status(400).json({ error: '尚未发送通知,无法查询已读状态' });
+        if (!collab.notified_at) return res.status(400).json({ error: `尚未通知${fieldMap.label},无法查询已读状态` });
 
         // 已固化 read_at → 直接返回,不再调钉钉(钉钉无"取消已读"语义,固化值即终态)
         if (collab.read_at) {
-            const dev0 = await dbGetAsync('SELECT display_name FROM users WHERE id = ?', [collab.developer_id]);
+            const u0 = await dbGetAsync('SELECT display_name FROM users WHERE id = ?', [collab.recipient_user_id]);
             return res.json({
+                recipient,
                 notified_at: collab.notified_at,
-                developer_name: dev0 && dev0.display_name,
+                // 兼容旧前端字段名（recipient=developer 时返 developer_name；recipient=contact 时返 contact_person_name 风格）
+                developer_name: u0 && u0.display_name,
+                recipient_name: u0 && u0.display_name,
                 read: true,
                 read_at: collab.read_at,
                 cached: true,
@@ -10490,9 +10551,8 @@ app.get('/api/collab/requests/:id/notify-read-status', authenticateToken, async 
             });
         }
 
-        if (!collab.notify_message_key) {
-            // notified_at 有但 message_key 缺 → 老协作单或 batchSend 当时未返回 processQueryKey
-            return res.status(400).json({ error: '该通知缺少消息标识,无法查询已读状态(老协作单或钉钉端未返回消息号)' });
+        if (!collab.message_key) {
+            return res.status(400).json({ error: `该${fieldMap.label}通知缺少消息标识,无法查询已读状态(老协作单或钉钉端未返回消息号)` });
         }
 
         // 取钉钉凭证(readStatus 需要 robotCode)
@@ -10511,16 +10571,16 @@ app.get('/api/collab/requests/:id/notify-read-status', authenticateToken, async 
             return res.status(502).json({ error: cls.hint, errcode: cls.errcode, reason: cls.reason });
         }
 
-        // 取开发账号的 dingtalk_user_id 做对照
-        const dev = await dbGetAsync(
+        // 取收件人的 dingtalk_user_id 做对照
+        const recipientUser = await dbGetAsync(
             'SELECT id, display_name, dingtalk_user_id FROM users WHERE id = ?',
-            [collab.developer_id]
+            [collab.recipient_user_id]
         );
 
-        // 调钉钉已读 API(GET, robotCode + processQueryKey 都在 query string)
+        // 调钉钉已读 API
         let readResult;
         try {
-            readResult = await dingtalkNotify.getReadStatus(token, robotCode, collab.notify_message_key);
+            readResult = await dingtalkNotify.getReadStatus(token, robotCode, collab.message_key);
         } catch (err) {
             const cls = dingtalkNotify.classifyError(err);
             return res.status(502).json({ error: cls.hint, errcode: cls.errcode, reason: cls.reason });
@@ -10537,32 +10597,31 @@ app.get('/api/collab/requests/:id/notify-read-status', authenticateToken, async 
             });
         }
 
-        // 成功:判断开发的 userId 是否在已读列表里
-        const devUserId = dev && dev.dingtalk_user_id;
-        const isRead = devUserId && readResult.readUserIds.includes(devUserId);
+        // 成功:判断收件人 userId 是否在已读列表里
+        const recipientDingUserId = recipientUser && recipientUser.dingtalk_user_id;
+        const isRead = recipientDingUserId && readResult.readUserIds.includes(recipientDingUserId);
 
-        // 从 messageReadInfoList 里提取开发的 readTimestamp(钉钉返回秒级 Unix 时间戳)
-        // → 转本地时间字符串(YYYY-MM-DD HH:mm:ss),与 notified_at 字段格式保持一致
-        // (前端 fmtDate 只能处理这种格式,不能处理 ISO UTC 字符串)
+        // 提取 readTimestamp 转本地时间字符串
         let readAt = null;
         if (isRead && Array.isArray(readResult.readDetails)) {
-            const myEntry = readResult.readDetails.find(item => item.userId === devUserId && item.readStatus === 'READ');
+            const myEntry = readResult.readDetails.find(item => item.userId === recipientDingUserId && item.readStatus === 'READ');
             if (myEntry && myEntry.readTimestamp) {
                 const d = new Date(myEntry.readTimestamp * 1000);
-                // 本地时间格式 YYYY-MM-DD HH:mm:ss
                 const pad = (n) => String(n).padStart(2, '0');
                 readAt = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
             }
         }
 
-        // 首次查到 READ → 固化到 DB,以后不再调钉钉(钉钉无"取消已读"语义)
+        // 首次查到 READ → 固化到对应 read_at 列（按 recipient 写不同字段）
         if (readAt && !collab.read_at) {
-            await dbRunAsync('UPDATE collab_requests SET read_at = ? WHERE id = ?', [readAt, id]);
+            await dbRunAsync(`UPDATE collab_requests SET ${fieldMap.read_at} = ? WHERE id = ?`, [readAt, id]);
         }
 
         res.json({
+            recipient,
             notified_at: collab.notified_at,
-            developer_name: dev && dev.display_name,
+            developer_name: recipientUser && recipientUser.display_name,  // 兼容旧前端
+            recipient_name: recipientUser && recipientUser.display_name,
             read: !!isRead,
             read_at: readAt,
             read_user_count: readResult.readUserIds.length,

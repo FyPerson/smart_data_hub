@@ -1162,40 +1162,43 @@
                     </div>
                 </div>`;
 
-            // 2. 通知区块
-            // v3 二级转派（codex 十六审 #6）：文案按状态分层
-            //   - PENDING_ASSIGN：admin 可见"通知对接人"按钮（调既有 /notify endpoint，后端按状态走创建模板）
-            //   - PENDING：admin 或本单对接人可见"通知开发"按钮（codex 十六审 #3 权限拆分配套）
-            //   - notified_at 字段仅对 PENDING 路径有意义（PENDING_ASSIGN 路径后端不落 notified_at）
+            // 2. 通知区块（v1.66.1 重构：按状态分层 + 双路径已读跟踪）
+            //   - PENDING_ASSIGN：看 contact_* 字段组（对接人钉钉跟踪）；admin 可触发"通知对接人"
+            //   - PENDING / 之后：看 notified_at / read_at 字段组（开发钉钉跟踪）；admin/对接人可触发"通知开发"
+            //   - 已通知（XX_notified_at 有）→ 显示"已通知 + 已读时间 / 查询已读 + 重新通知"
+            //   - 未通知 → 显示"尚未通知 + 触发按钮"
             const myUid = Number(getCurrentUserId());
             const isContactPersonView = Number(d.contact_person_id) === myUid;
+
+            // 按状态选字段组
+            const isPendingAssign = d.status === 'PENDING_ASSIGN';
+            const notifiedAt = isPendingAssign ? d.contact_notified_at : d.notified_at;
+            const readAt = isPendingAssign ? d.contact_read_at : d.read_at;
+            const recipientName = isPendingAssign ? d.contact_person_name : d.developer_name;
+            const recipientLabel = isPendingAssign ? '对接人' : '开发';
+            const recipientQueryParam = isPendingAssign ? 'contact' : 'developer';
+            const canTrigger = isPendingAssign ? isAdminUser : (isAdminUser || isContactPersonView);
+            const triggerLabel = isPendingAssign ? '通知对接人' : '通知开发';
+            const noPermHint = isPendingAssign
+                ? '（仅管理员可触发通知）'
+                : '（仅管理员/本单对接人可触发通知）';
+
             let notifyBodyHtml;
-            if (d.notified_at) {
-                // 已通知开发分支（仅 PENDING 状态会进入；PENDING_ASSIGN 后端不落 notified_at）
-                const readPart = d.read_at
-                    ? `<div style="margin-top:8px;font-size:13px;color:#16a34a;">📖 ${escapeHtml(d.developer_name)} 已读 · 于 ${fmtDate(d.read_at)}</div>`
-                    : `<button class="notify-btn" style="background:#f1f5f9;color:#475569;" onclick="checkReadStatus(${d.id})">查询已读状态</button>
+            if (notifiedAt) {
+                const readPart = readAt
+                    ? `<div style="margin-top:8px;font-size:13px;color:#16a34a;">📖 ${escapeHtml(recipientName || '')} 已读 · 于 ${fmtDate(readAt)}</div>`
+                    : `<button class="notify-btn" style="background:#f1f5f9;color:#475569;" onclick="checkReadStatus(${d.id}, '${recipientQueryParam}')">查询已读状态</button>
                        <div id="readStatusBox" style="margin-top:8px;font-size:13px;color:#64748b;"></div>`;
-                const canRenotify = isAdminUser || isContactPersonView;
                 notifyBodyHtml = `
-                    <span class="notify-status-text">✅ 已于 ${fmtDate(d.notified_at)} 通知 ${escapeHtml(d.developer_name)}</span>
-                    ${canRenotify ? `<button class="notify-btn" onclick="triggerNotify(${d.id})">重新通知</button>` : ''}
+                    <span class="notify-status-text">✅ 已于 ${fmtDate(notifiedAt)} 通知${recipientLabel} ${escapeHtml(recipientName || '')}</span>
+                    ${canTrigger ? `<button class="notify-btn" onclick="triggerNotify(${d.id})">重新通知</button>` : ''}
                     ${readPart}`;
-            } else if (d.status === 'PENDING_ASSIGN') {
-                // codex 十六审 #6：PENDING_ASSIGN 加"通知对接人"按钮（仅 admin 可见）
+            } else if (isPendingAssign || d.status === 'PENDING') {
                 notifyBodyHtml = `
-                    <span class="notify-status-text">⏳ 尚未通知对接人 ${escapeHtml(d.contact_person_name || '')}</span>
-                    ${isAdminUser
-                        ? `<button class="notify-btn" onclick="triggerNotify(${d.id})">通知对接人</button>`
-                        : '<span style="color:#9ca3af;font-size:12px;">（仅管理员可触发通知）</span>'}`;
-            } else if (d.status === 'PENDING') {
-                // PENDING：admin 或本单对接人可触发通知开发
-                const canNotify = isAdminUser || isContactPersonView;
-                notifyBodyHtml = `
-                    <span class="notify-status-text">⏳ 尚未通知开发 ${escapeHtml(d.developer_name || '')}</span>
-                    ${canNotify
-                        ? `<button class="notify-btn" onclick="triggerNotify(${d.id})">通知开发</button>`
-                        : '<span style="color:#9ca3af;font-size:12px;">（仅管理员/本单对接人可触发通知）</span>'}`;
+                    <span class="notify-status-text">⏳ 尚未通知${recipientLabel} ${escapeHtml(recipientName || '')}</span>
+                    ${canTrigger
+                        ? `<button class="notify-btn" onclick="triggerNotify(${d.id})">${triggerLabel}</button>`
+                        : `<span style="color:#9ca3af;font-size:12px;">${noPermHint}</span>`}`;
             } else {
                 notifyBodyHtml = '<span class="notify-status-text">—</span>';
             }
@@ -1309,7 +1312,7 @@
                             <div class="detail-section-body">
                                 <div class="val-box" style="background:#f0fdf4;border:1px solid #bbf7d0;">
                                     <div class="val-title" style="color:#166534;">✅ 已指派给 ${escapeHtml(d.developer_name)}</div>
-                                    <div class="val-meta">${d.assigned_at ? `指派于 ${fmtDate(d.assigned_at)}` : ''}${d.previous_developer_id ? ` · 上一任 user#${d.previous_developer_id}` : ''}</div>
+                                    <div class="val-meta">${d.assigned_at ? `指派于 ${fmtDate(d.assigned_at)}` : ''}${d.previous_developer_id ? ` · 上一任 ${escapeHtml(d.previous_developer_name || `user#${d.previous_developer_id}`)}` : ''}</div>
                                     <div class="val-actions" style="margin-top:10px;">
                                         <button class="val-btn val-btn-bypass" onclick="openAssignDialog(${d.id}, true)">改派开发</button>
                                     </div>
@@ -1714,21 +1717,24 @@
         }
 
         // 查询钉钉已读状态(Day 3 方案 1)
-        async function checkReadStatus(id) {
+        // v1.66.1 加 recipient 参数：contact（对接人） / developer（开发，默认）
+        async function checkReadStatus(id, recipient = 'developer') {
             const box = document.getElementById('readStatusBox');
             if (box) box.innerHTML = '<span style="color:#94a3b8">查询中…</span>';
+            const label = recipient === 'contact' ? '对接人' : '开发';
             try {
-                const res = await fetch(`/api/collab/requests/${id}/notify-read-status`, {
+                const res = await fetch(`/api/collab/requests/${id}/notify-read-status?recipient=${recipient}`, {
                     headers: { 'Authorization': 'Bearer ' + localStorage.getItem('token') }
                 });
                 const data = await res.json();
                 if (!box) return;
                 if (res.ok) {
+                    const recipientName = data.recipient_name || data.developer_name || label;
                     if (data.read) {
                         const timePart = data.read_at ? ` · 于 ${fmtDate(data.read_at)}` : '';
-                        box.innerHTML = `<span style="color:#16a34a">📖 ${escapeHtml(data.developer_name || '开发')} 已读${timePart}</span>`;
+                        box.innerHTML = `<span style="color:#16a34a">📖 ${escapeHtml(recipientName)} 已读${timePart}</span>`;
                     } else {
-                        box.innerHTML = `<span style="color:#d97706">👀 ${escapeHtml(data.developer_name || '开发')} 尚未读取</span>`;
+                        box.innerHTML = `<span style="color:#d97706">👀 ${escapeHtml(recipientName)} 尚未读取</span>`;
                     }
                 } else {
                     const detail = [data.error, data.errcode && `errcode=${data.errcode}`, data.errmsg].filter(Boolean).join(' · ');
