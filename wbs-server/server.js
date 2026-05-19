@@ -1353,7 +1353,12 @@ function initTable() {
             // 与现有 notified_at/notify_message_key/read_at（发开发用）独立，避免心智模型混淆
             ['contact_notified_at', 'DATETIME'],
             ['contact_notify_message_key', 'TEXT'],
-            ['contact_read_at', 'TEXT']
+            ['contact_read_at', 'TEXT'],
+            // v1.66.2 软删除（未提交脚本前 admin 可作废协作单）
+            // archived_at NOT NULL 视为已作废，列表默认过滤；不动 status 字段避免与 ARCHIVED 终态混淆
+            ['archived_at', 'DATETIME'],
+            ['archived_reason', 'TEXT'],
+            ['archived_by', 'INTEGER']
         ];
         for (const [col, type] of v3CollabRequestColumns) {
             safeAlterAddColumn('collab_requests', col, type);
@@ -1381,7 +1386,9 @@ function verifyV2CollabSchema() {
         'contact_person_id', 'contact_person_name',
         'assigned_at', 'assigned_by', 'previous_developer_id',
         // v1.66.1 对接人钉钉已读跟踪（2026-05-19）
-        'contact_notified_at', 'contact_notify_message_key', 'contact_read_at'
+        'contact_notified_at', 'contact_notify_message_key', 'contact_read_at',
+        // v1.66.2 软删除（2026-05-19）
+        'archived_at', 'archived_reason', 'archived_by'
     ];
     db.all("PRAGMA table_info(collab_requests)", [], (err, rows) => {
         if (err) {
@@ -1393,7 +1400,7 @@ function verifyV2CollabSchema() {
         if (missing.length > 0) {
             logger.error(`v2.0 schema 迁移不完整，collab_requests 缺失字段: ${missing.join(', ')}`);
         } else {
-            logger.info(`v2.0 schema 健康检查通过：collab_requests ${expectedCollabRequest.length} 个新增字段齐全（含 D3 attachment_dir + v3 二级转派 5 字段 + v1.66.1 对接人钉钉已读跟踪 3 字段）`);
+            logger.info(`v2.0 schema 健康检查通过：collab_requests ${expectedCollabRequest.length} 个新增字段齐全（含 D3 attachment_dir + v3 二级转派 5 字段 + v1.66.1 对接人钉钉已读跟踪 3 字段 + v1.66.2 软删除 3 字段）`);
         }
     });
     db.all("PRAGMA table_info(collab_attachments)", [], (err, rows) => {
@@ -9951,13 +9958,26 @@ app.get('/api/collab/db-connections/source', authenticateToken, requireAdmin, (r
 //   - 非 admin 默认仅看 contact_person_id=req.user.id OR (developer_id=req.user.id AND developer_id!=0)
 //   - my_role=contact|developer|admin 显式筛选优先于默认权限（仍受角色限制）
 //   - developer_id 显式查询：仅 admin 或查询自己的可用
+// v1.66.2 软删除（2026-05-19）：
+//   - 默认过滤 archived_at IS NULL
+//   - 仅 admin 可传 ?show_archived=1 看全部（含已作废）
 app.get('/api/collab/requests', authenticateToken, (req, res) => {
-    const { status, developer_id, request_type, requester_dept, search, my_role } = req.query;
+    const { status, developer_id, request_type, requester_dept, search, my_role, show_archived } = req.query;
 
     let sql = 'SELECT * FROM collab_requests WHERE 1=1';
     const params = [];
     const currentUserId = Number(req.user.id);
     const isAdmin = req.user.role === 'admin';
+
+    // v1.66.2 软删除过滤：默认不返已作废单；仅 admin 可传 show_archived=1 看全部
+    if (show_archived === '1' || show_archived === 'true') {
+        if (!isAdmin) {
+            return res.status(403).json({ error: 'show_archived 仅 admin 可用', code: 'NOT_ADMIN' });
+        }
+        // admin 显式要求看全部 → 不加 archived_at 过滤
+    } else {
+        sql += ' AND archived_at IS NULL';
+    }
 
     // v3 my_role 筛选（优先于 developer_id，互斥）
     if (my_role) {
@@ -10179,13 +10199,16 @@ app.post('/api/collab/requests', authenticateToken, requireAdmin, async (req, re
     }
 });
 
-// 4. 编辑协作单（仅 admin + 仅 PENDING_ASSIGN 状态）
-// v3 二级转派改造（2026-05-18）：
+// 4. 编辑协作单（仅 admin + PENDING_ASSIGN / PENDING + 未提交）
+// v3 二级转派改造（2026-05-18）+ v1.66.2 编辑功能放宽（2026-05-19）：
 //   - 权限收紧：仅 admin（v1.0.2 残留 publisher/developer 路径全部移除）
-//   - 状态白名单：仅 PENDING_ASSIGN（v1.0.2 残留 ['CONFIRMED','CLAIMED'] 修复）
+//   - 状态白名单：PENDING_ASSIGN / PENDING（前提是 submission_version=0，未提交脚本）
 //   - 移除 developer_id 编辑路径：改派走 POST /:id/assign endpoint
-//   - 可改字段：external_request_id / requester_dept / requester_name / description / deadline / contact_person_id
+//   - 可改字段：external_request_id / requester_dept / requester_name / description / deadline
+//     · contact_person_id 仅 PENDING_ASSIGN 可改（PENDING 已指派开发，换对接人会造成"指派归属"混乱）
 //   - request_type 不可改（v2.0 硬填 ONE_OFF_EXPORT，不再支持改）
+//   - archived 协作单不可编辑（已软删除）
+//   - oa_request_no（external_request_id）改变时需做 UNIQUE 预检
 app.put('/api/collab/requests/:id', authenticateToken, requireAdmin, async (req, res) => {
     const { id } = req.params;
     const userId = req.user.id;
@@ -10195,10 +10218,20 @@ app.put('/api/collab/requests/:id', authenticateToken, requireAdmin, async (req,
         const existing = await dbGetAsync('SELECT * FROM collab_requests WHERE id = ?', [id]);
         if (!existing) return res.status(404).json({ error: '协作单不存在' });
 
-        // 状态白名单：仅 PENDING_ASSIGN 可编辑
-        if (existing.status !== 'PENDING_ASSIGN') {
+        // 软删除拦截
+        if (existing.archived_at) {
             return res.status(409).json({
-                error: `当前状态 ${existing.status} 不可编辑（仅 PENDING_ASSIGN 状态可编辑文本字段）`,
+                error: '协作单已作废，不可编辑',
+                code: 'ARCHIVED'
+            });
+        }
+
+        // 状态白名单：PENDING_ASSIGN / PENDING 可编辑（PENDING 要求 submission_version=0 即未提交）
+        const isPendingAssign = existing.status === 'PENDING_ASSIGN';
+        const isPendingUnsubmitted = existing.status === 'PENDING' && (existing.submission_version || 0) === 0;
+        if (!isPendingAssign && !isPendingUnsubmitted) {
+            return res.status(409).json({
+                error: `当前状态 ${existing.status} 不可编辑（仅 PENDING_ASSIGN 或 PENDING+未提交可编辑文本字段）`,
                 code: 'INVALID_STATE',
                 current_status: existing.status
             });
@@ -10223,6 +10256,38 @@ app.put('/api/collab/requests/:id', authenticateToken, requireAdmin, async (req,
                 code: 'REQUEST_TYPE_LOCKED'
             });
         }
+        // PENDING 状态不允许改 contact_person_id（已指派开发，换对接人会破坏指派归属）
+        if (!isPendingAssign
+            && req.body.contact_person_id !== undefined
+            && Number(req.body.contact_person_id) !== existing.contact_person_id) {
+            return res.status(400).json({
+                error: 'PENDING 状态不允许更换对接人（仅 PENDING_ASSIGN 可改）',
+                code: 'CANNOT_CHANGE_CONTACT_IN_PENDING'
+            });
+        }
+
+        // oa_request_no（external_request_id）UNIQUE 预检：若改了，先看是否与其他协作单冲突
+        // v3 创建 endpoint 用的是 oa_request_no 字段，但实际 INSERT 时取了 external_request_id 字段（命名不一致）
+        // PUT 允许两个字段名传入，但实际编辑 oa_request_no 字段
+        const oaChanged = req.body.oa_request_no !== undefined
+            && String(req.body.oa_request_no).trim() !== (existing.oa_request_no || '');
+        if (oaChanged) {
+            const newOa = String(req.body.oa_request_no).trim();
+            if (!newOa) {
+                return res.status(400).json({ error: 'OA 流程号不能为空', code: 'OA_REQUIRED' });
+            }
+            const conflict = await dbGetAsync(
+                'SELECT id FROM collab_requests WHERE oa_request_no = ? AND id != ?',
+                [newOa, id]
+            );
+            if (conflict) {
+                return res.status(409).json({
+                    error: `OA 流程号 ${newOa} 已存在关联协作单 #${conflict.id}`,
+                    existing_id: conflict.id,
+                    code: 'OA_CONFLICT'
+                });
+            }
+        }
 
         // 字段校验（PUT 走非创建分支）
         const validation = await validateCollabRequestFields(req.body, false);
@@ -10239,8 +10304,14 @@ app.put('/api/collab/requests/:id', authenticateToken, requireAdmin, async (req,
                 params.push(typeof req.body[f] === 'string' ? req.body[f].trim() : req.body[f]);
             }
         }
-        // contact_person_id 可改（admin 把单转给其他对接人）
-        if (req.body.contact_person_id !== undefined
+        // oa_request_no 独立字段（部分前端用 oa_request_no 命名传入）
+        if (oaChanged) {
+            updates.push('oa_request_no = ?');
+            params.push(String(req.body.oa_request_no).trim());
+        }
+        // contact_person_id 可改（仅 PENDING_ASSIGN）
+        if (isPendingAssign
+            && req.body.contact_person_id !== undefined
             && Number(req.body.contact_person_id) !== existing.contact_person_id) {
             const newContact = validation.contactPerson;
             if (!newContact) {
@@ -10257,15 +10328,19 @@ app.put('/api/collab/requests/:id', authenticateToken, requireAdmin, async (req,
 
         if (updates.length === 0) return res.json({ message: '无字段需要更新' });
 
-        // 条件 UPDATE：兜底并发漂移（防 SELECT 后状态被推进到 PENDING）
-        params.push(id);
+        // 条件 UPDATE：兜底并发漂移（防 SELECT 后状态被推进；PENDING 还要兜底 submission_version 未变 + archived_at 未变）
+        params.push(id, existing.status);
         const result = await dbRunAsync(
-            `UPDATE collab_requests SET ${updates.join(', ')} WHERE id = ? AND status = 'PENDING_ASSIGN'`,
+            `UPDATE collab_requests SET ${updates.join(', ')}
+              WHERE id = ?
+                AND status = ?
+                AND archived_at IS NULL
+                AND (submission_version IS NULL OR submission_version = 0)`,
             params
         );
         if (!result || result.changes === 0) {
             return res.status(409).json({
-                error: '协作单状态已变化（可能已被对接人指派），请刷新后重试',
+                error: '协作单状态已变化（可能已被指派/提交/作废），请刷新后重试',
                 code: 'STATE_CHANGED'
             });
         }
@@ -10275,6 +10350,97 @@ app.put('/api/collab/requests/:id', authenticateToken, requireAdmin, async (req,
     } catch (err) {
         logger.error('编辑协作单失败:', err);
         res.status(500).json({ error: err.message });
+    }
+});
+
+// 4.5 软删除协作单（v1.66.2 加，2026-05-19）
+//   - 仅 admin
+//   - 仅 PENDING_ASSIGN / PENDING + submission_version=0（未提交脚本/附件）
+//   - archived_reason 选填（type=string，trim 后 ≤500 字符）
+//   - 写 archived_at + archived_reason + archived_by + 'ARCHIVE_SOFT' 操作日志
+//   - 列表 endpoint 默认过滤 archived_at IS NULL，需带 ?show_archived=1 才能看到
+app.post('/api/collab/requests/:id/archive', authenticateToken, requireAdmin, async (req, res) => {
+    const idStr = req.params.id;
+    const userId = Number(req.user.id);
+    const userName = req.user.display_name || req.user.username || `user#${userId}`;
+
+    // id 校验（沿用 bypass / assign endpoint 风格）
+    if (!/^[1-9]\d*$/.test(idStr)) {
+        return res.status(400).json({ error: 'id 必须是正整数', code: 'INVALID_ID' });
+    }
+    const id = parseInt(idStr, 10);
+    if (!Number.isSafeInteger(id)) {
+        return res.status(400).json({ error: 'id 超出安全整数范围', code: 'INVALID_ID' });
+    }
+
+    // archived_reason 校验（选填，type=string，trim 后 ≤500 字符）
+    let reason = null;
+    if (req.body && req.body.archived_reason !== undefined && req.body.archived_reason !== null) {
+        if (typeof req.body.archived_reason !== 'string') {
+            return res.status(400).json({ error: 'archived_reason 必须是字符串', code: 'INVALID_REASON' });
+        }
+        const trimmed = req.body.archived_reason.trim();
+        if (trimmed.length > 500) {
+            return res.status(400).json({ error: 'archived_reason 不能超过 500 字符', code: 'REASON_TOO_LONG' });
+        }
+        reason = trimmed || null;
+    }
+
+    try {
+        const collab = await dbGetAsync(
+            'SELECT id, status, submission_version, archived_at FROM collab_requests WHERE id = ?',
+            [id]
+        );
+        if (!collab) return res.status(404).json({ error: '协作单不存在' });
+
+        if (collab.archived_at) {
+            return res.status(409).json({
+                error: '协作单已作废，不可重复作废',
+                code: 'ALREADY_ARCHIVED'
+            });
+        }
+
+        const isPendingAssign = collab.status === 'PENDING_ASSIGN';
+        const isPendingUnsubmitted = collab.status === 'PENDING' && (collab.submission_version || 0) === 0;
+        if (!isPendingAssign && !isPendingUnsubmitted) {
+            return res.status(409).json({
+                error: `当前状态 ${collab.status} 不可作废（仅 PENDING_ASSIGN 或 PENDING+未提交可作废）`,
+                code: 'INVALID_STATE',
+                current_status: collab.status
+            });
+        }
+
+        // 条件 UPDATE：兜底并发漂移
+        const result = await dbRunAsync(
+            `UPDATE collab_requests
+                SET archived_at = datetime('now','localtime'),
+                    archived_reason = ?,
+                    archived_by = ?
+              WHERE id = ?
+                AND status = ?
+                AND archived_at IS NULL
+                AND (submission_version IS NULL OR submission_version = 0)`,
+            [reason, userId, id, collab.status]
+        );
+
+        if (!result || result.changes === 0) {
+            return res.status(409).json({
+                error: '协作单状态已变化（可能已被指派/提交/作废），请刷新后重试',
+                code: 'STATE_CHANGED'
+            });
+        }
+
+        insertCollabLog(id, 'ARCHIVE_SOFT', userId, userName, reason);
+        logger.info(`[collab-archive] 协作单 #${id} 软删除 by ${userName}${reason ? ` reason=${reason.slice(0, 50)}` : ''}`);
+
+        return res.json({
+            message: '协作单已作废',
+            id,
+            archived_at: new Date().toISOString()
+        });
+    } catch (e) {
+        logger.error(`[collab-archive] 协作单 #${id} 作废异常: ${e.message}`, e);
+        return res.status(500).json({ error: '作废失败，请联系管理员', code: 'ARCHIVE_FAILED' });
     }
 });
 

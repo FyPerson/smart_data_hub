@@ -20,7 +20,8 @@
  *   T08 对接人改派给对接人自己 → 400 SAME_AS_CONTACT
  *   T09 其他非对接人/非 admin 用户 assign → 403 NOT_ASSIGNER
  *   T10 admin assign 兜底（非本单对接人）→ 200
- *   T11 PUT 编辑 PENDING 状态 → 409 INVALID_STATE
+ *   T11 PUT 编辑 PENDING 状态 → 200（v1.66.2 改：PENDING+submission_version=0 允许编辑）
+ *   T11b PUT 改 contact_person_id @PENDING → 400 CANNOT_CHANGE_CONTACT_IN_PENDING（v1.66.2 加）
  *   T12 GET list ?my_role=contact → 仅返本人作为对接人的单
  *   T13 GET list ?my_role=developer → 仅返指派给本人的单
  *   T14 submit 时占位 developer_id=0 → 防御阻断（实际通过状态 PENDING_ASSIGN 阻断）
@@ -194,10 +195,17 @@ async function main() {
         record('T10 admin 兜底改派', false, `status=${r10.status} body=${JSON.stringify(r10.body)}`);
     }
 
-    // T11 PUT 编辑 PENDING 状态 → 409
-    console.log('T11 PUT 编辑 PENDING 状态 → 409');
-    const r11 = await apiCall('PUT', `/api/collab/requests/${createdId}`, tokens.admin, { description: '不应被改' });
-    record('T11 PENDING 状态拒绝编辑', r11.status === 409 && r11.body && r11.body.code === 'INVALID_STATE', `status=${r11.status} code=${r11.body && r11.body.code}`);
+    // T11 PUT 编辑 PENDING 状态 → 200（v1.66.2 改：PENDING+submission_version=0 允许编辑文本字段）
+    console.log('T11 PUT 编辑 PENDING+未提交 → 200');
+    const r11 = await apiCall('PUT', `/api/collab/requests/${createdId}`, tokens.admin, { description: 'v1.66.2 PENDING 状态可编辑文本' });
+    record('T11 PENDING+未提交允许编辑', r11.status === 200, `status=${r11.status} body=${JSON.stringify(r11.body).slice(0,80)}`);
+
+    // T11b PUT 改 contact_person_id @PENDING → 400（v1.66.2 加：PENDING 不允许换对接人）
+    console.log('T11b PUT 改对接人 @PENDING → 400 CANNOT_CHANGE_CONTACT_IN_PENDING');
+    const r11b = await apiCall('PUT', `/api/collab/requests/${createdId}`, tokens.admin, { contact_person_id: OTHER_USER_ID });
+    record('T11b PENDING 拒绝换对接人',
+        r11b.status === 400 && r11b.body && r11b.body.code === 'CANNOT_CHANGE_CONTACT_IN_PENDING',
+        `status=${r11b.status} code=${r11b.body && r11b.body.code}`);
 
     // T12 GET list ?my_role=contact
     console.log('T12 my_role=contact 仅返本人对接的单');

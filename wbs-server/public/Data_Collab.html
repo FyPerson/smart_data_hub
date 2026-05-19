@@ -701,11 +701,11 @@
         </table>
     </main>
 
-    <!-- 新建协作单弹窗 -->
+    <!-- 新建/编辑协作单弹窗（v1.66.2 复用同一 modal） -->
     <div class="modal-overlay" id="newModal">
         <div class="modal-card">
             <div class="modal-header">
-                <h3>新建协作单</h3>
+                <h3 id="newModalTitle">新建协作单</h3>
                 <button class="modal-close" onclick="closeNewModal()">×</button>
             </div>
             <div class="modal-body">
@@ -737,14 +737,14 @@
                     </select>
                     <div class="hint">开发交付的 SQL 将在此库执行。下拉为空时联系管理员在「系统设置 → 数据库连接」配置 source 类型连接。</div>
                 </div>
-                <div class="form-row">
+                <div class="form-row" id="formRow_contact">
                     <label>对接人 <span class="required">*</span></label>
                     <select id="f_contact">
                         <option value="">加载中...</option>
                     </select>
-                    <div class="hint">外包负责人，由其在平台内将协作单指派给具体开发。下拉显示全部活跃用户（含 admin 兜底），凭备注辨识。</div>
+                    <div class="hint" id="contactHint">外包负责人，由其在平台内将协作单指派给具体开发。下拉显示全部活跃用户（含 admin 兜底），凭备注辨识。</div>
                 </div>
-                <div class="form-row">
+                <div class="form-row" id="formRow_files">
                     <label>原始单据截图 <span class="hint">（选传）</span></label>
                     <input type="file" id="f_files" accept=".png,.jpg,.jpeg,.gif,.webp,image/*" multiple>
                     <div class="hint">最多 5 个文件 / 单文件 ≤ 10MB / 支持 PNG·JPG·GIF·WEBP。OA 截图、对话截图、邮件截图等均可（选传）。</div>
@@ -758,7 +758,7 @@
         </div>
     </div>
 
-    <!-- 协作单详情弹窗（v2.0 Deploy 2 框架，交付/验收/摩擦区块见 Deploy 3）-->
+    <!-- 协作单详情弹窗（v2.0 Deploy 2 框架，交付/验收/摩擦区块见 Deploy 3；v1.66.2 加编辑/作废）-->
     <div class="modal-overlay" id="detailModal">
         <div class="modal-card detail-card">
             <div class="modal-header">
@@ -768,8 +768,34 @@
             <div class="modal-body" id="detailBody">
                 <div style="text-align:center;color:#9ca3af;padding:24px;">加载中...</div>
             </div>
-            <div class="modal-footer">
+            <div class="modal-footer" style="display:flex;justify-content:space-between;align-items:center;">
+                <div style="display:flex;gap:8px;" id="detailFooterLeft">
+                    <!-- v1.66.2 编辑/作废按钮按状态动态显示 -->
+                </div>
                 <button class="btn btn-cancel" onclick="closeDetailModal()">关闭</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 作废确认弹窗（v1.66.2）-->
+    <div class="modal-overlay" id="archiveModal">
+        <div class="modal-card">
+            <div class="modal-header">
+                <h3 id="archiveTitle">作废协作单</h3>
+                <button class="modal-close" onclick="closeArchiveModal()">×</button>
+            </div>
+            <div class="modal-body">
+                <div style="padding:12px;background:#fef2f2;border:1px solid #fca5a5;border-radius:6px;margin-bottom:12px;color:#991b1b;font-size:13px;">
+                    ⚠️ 作废后此协作单将从列表消失，对接人/开发不再可见。<strong>此操作不可恢复</strong>，仅 admin 可在"显示已作废"筛选下找到。
+                </div>
+                <div class="form-row">
+                    <label>作废原因 <span class="hint">（选填，≤500 字）</span></label>
+                    <textarea id="f_archive_reason" placeholder="例如：业务方撤回需求 / OA 流程作废 / 重复登记 等" maxlength="500" style="min-height:80px;"></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-cancel" onclick="closeArchiveModal()">取消</button>
+                <button class="btn" id="btnArchive" style="background:#dc2626;color:white;" onclick="submitArchive()">确认作废</button>
             </div>
         </div>
     </div>
@@ -1204,6 +1230,24 @@
 
             document.getElementById('detailBody').innerHTML =
                 taskInfoHtml + notifyHtml + deliveryHtml + validationHtml + frictionHtml;
+
+            // v1.66.2 footer 按钮（编辑 / 作废）：仅 admin + 未提交 + 未作废
+            const footerLeft = document.getElementById('detailFooterLeft');
+            if (footerLeft) {
+                const isUnsubmitted = (d.status === 'PENDING_ASSIGN')
+                    || (d.status === 'PENDING' && Number(d.submission_version || 0) === 0);
+                const isArchived = !!d.archived_at;
+                if (isAdminUser && isUnsubmitted && !isArchived) {
+                    footerLeft.innerHTML = `
+                        <button class="btn" style="background:#3b82f6;color:white;" onclick="openEditModal()">编辑</button>
+                        <button class="btn" style="background:#fef2f2;color:#dc2626;border:1px solid #fca5a5;" onclick="openArchiveModal()">作废</button>
+                    `;
+                } else if (isArchived) {
+                    footerLeft.innerHTML = `<span style="color:#dc2626;font-size:13px;">⚠️ 已作废${d.archived_reason ? ` · ${escapeHtml(d.archived_reason)}` : ''}</span>`;
+                } else {
+                    footerLeft.innerHTML = '';
+                }
+            }
         }
 
         // 对接人通知子区（v1.66.1 修订）
@@ -1882,12 +1926,24 @@
             }).join('');
         }
 
+        // v1.66.2 新建/编辑共享 modal 状态
+        //   - editingCollabId=null：新建模式（POST /api/collab/requests）
+        //   - editingCollabId=N：编辑模式（PUT /api/collab/requests/N）
+        let editingCollabId = null;
+        let editingCollabStatus = null;  // 'PENDING_ASSIGN' / 'PENDING'（用于决定对接人是否可改）
+
         // 新建弹窗
         async function openNewModal() {
+            editingCollabId = null;
+            editingCollabStatus = null;
+            document.getElementById('newModalTitle').textContent = '新建协作单';
+            document.getElementById('btnSubmit').textContent = '提交';
+
             // 重置表单
             ['f_oa_no', 'f_requester', 'f_desc'].forEach(id => document.getElementById(id).value = '');
             document.getElementById('f_dept').selectedIndex = 0;
             document.getElementById('f_contact').selectedIndex = 0;
+            document.getElementById('f_target_db').selectedIndex = 0;
             document.getElementById('f_files').value = '';
             selectedFiles = [];
             renderFilePreview();
@@ -1897,14 +1953,66 @@
             d.setHours(18, 0, 0, 0);
             document.getElementById('f_deadline').value = d.toISOString().substring(0, 16);
 
+            // 截图区 + 对接人区都显示且可用（新建场景）
+            document.getElementById('formRow_files').style.display = '';
+            document.getElementById('formRow_contact').style.display = '';
+            document.getElementById('f_contact').disabled = false;
+            document.getElementById('contactHint').textContent = '外包负责人，由其在平台内将协作单指派给具体开发。下拉显示全部活跃用户（含 admin 兜底），凭备注辨识。';
+
             // 拉取 source 连接填充下拉
             await loadTargetDbOptions();
 
             document.getElementById('newModal').classList.add('show');
         }
 
+        // v1.66.2 编辑弹窗：复用 newModal，用 currentDetail 预填
+        async function openEditModal() {
+            if (!currentDetail) return showToast('协作单数据未加载', 'error');
+            const d = currentDetail;
+            editingCollabId = d.id;
+            editingCollabStatus = d.status;
+            document.getElementById('newModalTitle').textContent = `编辑协作单 #${d.id}`;
+            document.getElementById('btnSubmit').textContent = '保存';
+
+            // 预填字段
+            document.getElementById('f_oa_no').value = d.oa_request_no || '';
+            document.getElementById('f_dept').value = d.requester_dept || '';
+            document.getElementById('f_requester').value = d.requester_name || '';
+            document.getElementById('f_desc').value = d.description || '';
+            // deadline 后端存 'YYYY-MM-DD HH:mm:ss'，HTML datetime-local 要 'YYYY-MM-DDTHH:mm'
+            if (d.deadline) {
+                document.getElementById('f_deadline').value = String(d.deadline).replace(' ', 'T').slice(0, 16);
+            } else {
+                document.getElementById('f_deadline').value = '';
+            }
+
+            // 截图区编辑时隐藏（不动附件）
+            document.getElementById('formRow_files').style.display = 'none';
+            selectedFiles = [];
+            renderFilePreview();
+
+            // 对接人下拉：PENDING_ASSIGN 可改；PENDING 禁用
+            await loadTargetDbOptions();
+            document.getElementById('f_target_db').value = d.target_db_connection_id || '';
+            document.getElementById('f_contact').value = d.contact_person_id || '';
+            if (editingCollabStatus === 'PENDING_ASSIGN') {
+                document.getElementById('formRow_contact').style.display = '';
+                document.getElementById('f_contact').disabled = false;
+                document.getElementById('contactHint').textContent = '外包负责人，PENDING_ASSIGN 状态可更换；更换后会清空对接人钉钉通知痕迹。';
+            } else {
+                // PENDING 状态：保留显示但禁用（让用户知道当前对接人是谁，但不可改）
+                document.getElementById('formRow_contact').style.display = '';
+                document.getElementById('f_contact').disabled = true;
+                document.getElementById('contactHint').textContent = '已指派开发，不可更换对接人（如需更换请删除协作单重建）。';
+            }
+
+            document.getElementById('newModal').classList.add('show');
+        }
+
         function closeNewModal() {
             document.getElementById('newModal').classList.remove('show');
+            editingCollabId = null;
+            editingCollabStatus = null;
         }
 
         async function loadTargetDbOptions() {
@@ -1932,15 +2040,22 @@
         }
 
         async function submitNew() {
+            const isEdit = !!editingCollabId;
             const payload = {
                 oa_request_no: document.getElementById('f_oa_no').value.trim(),
                 requester_dept: document.getElementById('f_dept').value,
                 requester_name: document.getElementById('f_requester').value.trim(),
                 description: document.getElementById('f_desc').value.trim(),
                 deadline: document.getElementById('f_deadline').value,
-                contact_person_id: parseInt(document.getElementById('f_contact').value, 10) || null,
                 target_db_connection_id: parseInt(document.getElementById('f_target_db').value, 10) || null
             };
+            // 对接人：新建场景必填；编辑场景仅 PENDING_ASSIGN 允许带（PENDING 禁用，传了后端也会拒）
+            const contactId = parseInt(document.getElementById('f_contact').value, 10) || null;
+            if (!isEdit) {
+                payload.contact_person_id = contactId;
+            } else if (editingCollabStatus === 'PENDING_ASSIGN') {
+                payload.contact_person_id = contactId;
+            }
 
             // 前端基础校验
             if (!payload.oa_request_no) return showToast('请填写 OA 流程号', 'error');
@@ -1949,17 +2064,42 @@
             if (!payload.description) return showToast('请填写需求描述', 'error');
             if (!payload.deadline) return showToast('请选择期望完成时间', 'error');
             if (!payload.target_db_connection_id) return showToast('请选择目标业务库', 'error');
-            if (!payload.contact_person_id) return showToast('请选择对接人', 'error');
+            if (!isEdit && !payload.contact_person_id) return showToast('请选择对接人', 'error');
+            if (isEdit && editingCollabStatus === 'PENDING_ASSIGN' && !payload.contact_person_id) {
+                return showToast('请选择对接人', 'error');
+            }
 
             // 时间格式：HTML5 datetime-local 是 "YYYY-MM-DDTHH:MM"，后端能处理
             payload.deadline = payload.deadline.replace('T', ' ') + ':00';
 
             const btn = document.getElementById('btnSubmit');
             btn.disabled = true;
-            btn.textContent = '创建协作单...';
+            btn.textContent = isEdit ? '保存中...' : '创建协作单...';
 
             try {
-                // Step 1: 创建协作单
+                if (isEdit) {
+                    // 编辑模式：PUT，不动附件
+                    const res = await authFetch(`/api/collab/requests/${editingCollabId}`, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+                    if (!res) return;
+                    const data = await res.json();
+                    if (!res.ok) {
+                        showToast(data.error || '保存失败', 'error');
+                        return;
+                    }
+                    showToast(`协作单 #${editingCollabId} 已更新`, 'success');
+                    const updatedId = editingCollabId;
+                    closeNewModal();
+                    // 刷新详情 + 列表
+                    if (typeof openDetail === 'function') await openDetail(updatedId);
+                    if (typeof loadList === 'function') loadList();
+                    return;
+                }
+
+                // 新建模式：POST
                 const res = await authFetch('/api/collab/requests', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -2011,7 +2151,61 @@
                 console.error(e);
             } finally {
                 btn.disabled = false;
-                btn.textContent = '提交';
+                btn.textContent = editingCollabId ? '保存' : '提交';
+            }
+        }
+
+        // v1.66.2 作废协作单 modal
+        let archivingCollabId = null;
+
+        function openArchiveModal() {
+            if (!currentDetail) return showToast('协作单数据未加载', 'error');
+            archivingCollabId = currentDetail.id;
+            document.getElementById('archiveTitle').textContent = `作废协作单 #${currentDetail.id}`;
+            document.getElementById('f_archive_reason').value = '';
+            const btn = document.getElementById('btnArchive');
+            btn.disabled = false;
+            btn.textContent = '确认作废';
+            document.getElementById('archiveModal').classList.add('show');
+        }
+
+        function closeArchiveModal() {
+            document.getElementById('archiveModal').classList.remove('show');
+            archivingCollabId = null;
+        }
+
+        async function submitArchive() {
+            const id = archivingCollabId;
+            if (!id) return showToast('协作单 id 丢失', 'error');
+            const reason = document.getElementById('f_archive_reason').value.trim();
+
+            const btn = document.getElementById('btnArchive');
+            btn.disabled = true;
+            btn.textContent = '作废中…';
+
+            try {
+                const res = await authFetch(`/api/collab/requests/${id}/archive`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(reason ? { archived_reason: reason } : {})
+                });
+                if (!res) return;
+                const data = await res.json();
+                if (!res.ok) {
+                    showToast(data.error || '作废失败', 'error');
+                    btn.disabled = false;
+                    btn.textContent = '确认作废';
+                    return;
+                }
+                showToast(`协作单 #${id} 已作废`, 'success');
+                closeArchiveModal();
+                // 作废后关闭详情 + 刷新列表（已作废的单从列表中消失）
+                closeDetailModal();
+                if (typeof loadList === 'function') loadList();
+            } catch (e) {
+                showToast('网络错误', 'error');
+                btn.disabled = false;
+                btn.textContent = '确认作废';
             }
         }
 
