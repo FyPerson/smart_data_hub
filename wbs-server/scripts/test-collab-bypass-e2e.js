@@ -5,7 +5,9 @@
  *
  * 前置：
  *   - 本地 server 已启动（localhost:3000）
- *   - 本地 task_pool.db 有 id=3 协作单（用作测试目标）
+ *   - 用户表里有 admin / 13857133559 / demo_user_a / demo_user_b（角色 admin / publisher / user / user）
+ *   - target_db_connection_id=2（business_db source 连接）
+ *   - fixture 由 _test-fixture.js 动态创建（v3 协议：PENDING_ASSIGN → assign → PENDING → 直接 UPDATE 到 SUBMITTED+failed）
  *
  * 8 个测试场景：
  *   T1 正常旁路 SUBMITTED+failed → DONE+bypassed
@@ -33,7 +35,9 @@ const BASE = 'http://localhost:3000';
 const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
 const JWT_SECRET = process.env.JWT_SECRET || 'default_secret_key_change_me';
 
-const TEST_ID = 3;
+// v3 二级转派后 fixture 动态创建（2026-05-19）
+const fx = require('./_test-fixture');
+let TEST_ID = null;
 
 const tokens = {};
 
@@ -101,6 +105,11 @@ async function runTests() {
     tokens.publisher = await loginAs('13857133559');
     tokens.user = await loginAs('demo_user_a');
     console.log('✅ tokens prepared (admin/publisher/user)');
+
+    // v3 二级转派 fixture：创建一条 PENDING 单（v3 流程：admin 创建 → contact assign）
+    const fixture = await fx.createPendingFixture();
+    TEST_ID = fixture.id;
+    console.log(`✅ fixture created: id=${TEST_ID} oa=${fixture.oaNo}`);
 
     let passed = 0, failed = 0;
     const failures = [];
@@ -271,6 +280,17 @@ async function runTests() {
     console.log(`\n=== Summary ===`);
     console.log(`Passed: ${passed}`);
     console.log(`Failed: ${failed}`);
+
+    // 清掉 fixture（即使有失败也清，避免污染数据库）
+    if (TEST_ID) {
+        try {
+            await fx.cleanup(TEST_ID);
+            console.log(`✅ fixture cleaned up: id=${TEST_ID}`);
+        } catch (e) {
+            console.log(`⚠️ fixture cleanup failed: ${e.message}`);
+        }
+    }
+
     if (failures.length > 0) {
         console.log('\nFailures:');
         for (const f of failures) console.log(`  - ${f.name}: ${f.error}`);
@@ -278,7 +298,10 @@ async function runTests() {
     }
 }
 
-runTests().catch(e => {
+runTests().catch(async (e) => {
     console.error('FATAL:', e);
+    if (TEST_ID) {
+        try { await fx.cleanup(TEST_ID); } catch (_) { }
+    }
     process.exit(2);
 });

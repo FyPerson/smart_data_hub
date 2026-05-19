@@ -136,6 +136,7 @@
             font-weight: 600;
             white-space: nowrap;
         }
+        .status-PENDING_ASSIGN { background: #ffedd5; color: #9a3412; }
         .status-PENDING { background: #dbeafe; color: #1e40af; }
         .status-SUBMITTED { background: #fef3c7; color: #92400e; }
         .status-DONE { background: #ddd6fe; color: #5b21b6; }
@@ -646,10 +647,18 @@
             <span class="filter-label">状态</span>
             <select id="filterStatus" onchange="loadList()">
                 <option value="">全部</option>
+                <option value="PENDING_ASSIGN">待指派</option>
                 <option value="PENDING">待开发</option>
                 <option value="SUBMITTED">待验收</option>
                 <option value="DONE">已完成</option>
                 <option value="ARCHIVED">已归档</option>
+            </select>
+
+            <span class="filter-label">我的角色</span>
+            <select id="filterMyRole" onchange="loadList()">
+                <option value="">全部</option>
+                <option value="contact">我对接的</option>
+                <option value="developer">指派给我的</option>
             </select>
 
             <span class="filter-label">部门</span>
@@ -679,6 +688,7 @@
                     <th>目标业务库</th>
                     <th>需求描述</th>
                     <th>截止时间</th>
+                    <th>对接人</th>
                     <th>开发</th>
                     <th>状态</th>
                     <th>验收</th>
@@ -686,7 +696,7 @@
                 </tr>
             </thead>
             <tbody id="listBody">
-                <tr class="empty-row"><td colspan="11">加载中...</td></tr>
+                <tr class="empty-row"><td colspan="12">加载中...</td></tr>
             </tbody>
         </table>
     </main>
@@ -728,10 +738,11 @@
                     <div class="hint">开发交付的 SQL 将在此库执行。下拉为空时联系管理员在「系统设置 → 数据库连接」配置 source 类型连接。</div>
                 </div>
                 <div class="form-row">
-                    <label>指派开发 <span class="required">*</span></label>
-                    <select id="f_dev">
+                    <label>对接人 <span class="required">*</span></label>
+                    <select id="f_contact">
                         <option value="">加载中...</option>
                     </select>
+                    <div class="hint">外包负责人，由其在平台内将协作单指派给具体开发。下拉显示全部活跃用户（含 admin 兜底），凭备注辨识。</div>
                 </div>
                 <div class="form-row">
                     <label>原始单据截图 <span class="hint">（选传）</span></label>
@@ -763,6 +774,30 @@
         </div>
     </div>
 
+    <!-- 指派/改派开发弹窗（v1.66.0 二级转派：调 POST /:id/assign）-->
+    <div class="modal-overlay" id="assignModal">
+        <div class="modal-card">
+            <div class="modal-header">
+                <h3 id="assignTitle">指派开发</h3>
+                <button class="modal-close" onclick="closeAssignModal()">×</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-row">
+                    <label>开发人员 <span class="required">*</span></label>
+                    <select id="f_assign_dev">
+                        <option value="">加载中...</option>
+                    </select>
+                    <div class="hint">不能指派对接人本人；下拉显示全部活跃用户，凭备注辨识。</div>
+                </div>
+                <div id="assignPrevTip" class="hint" style="display:none;color:#92400e;background:#fef3c7;padding:8px 10px;border-radius:6px;margin-top:6px;"></div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-cancel" onclick="closeAssignModal()">取消</button>
+                <button class="btn btn-primary" id="btnAssign" onclick="submitAssign()">提交</button>
+            </div>
+        </div>
+    </div>
+
     <!-- 上传交付物弹窗（D3 模块 7 补丁：PENDING/failed 状态调 POST /:id/submit）-->
     <div class="modal-overlay" id="submitDeliveryModal">
         <div class="modal-card">
@@ -774,12 +809,12 @@
                 <div class="form-row">
                     <label>SQL 脚本 <span class="required">*</span></label>
                     <input type="file" id="f_delivery_script" accept=".sql,.txt">
-                    <div class="hint">扩展名 .sql / .txt，单文件 ≤ 5MB。脚本将在目标业务库执行 smoke test。</div>
+                    <div class="hint">扩展名 .sql / .txt，单文件 ≤ 1MB。脚本将在目标业务库执行 smoke test。</div>
                 </div>
                 <div class="form-row">
                     <label>结果数据 <span class="required">*</span></label>
                     <input type="file" id="f_delivery_data" accept=".xlsx,.xls">
-                    <div class="hint">扩展名 .xlsx / .xls，单文件 ≤ 20MB。在本地跑出来的取数结果，供业务方验收对照。</div>
+                    <div class="hint">扩展名 .xlsx / .xls，单文件 ≤ 100MB。在本地跑出来的取数结果，供业务方验收对照。</div>
                 </div>
                 <div class="hint" style="margin-top:8px;color:#6b7280;">
                     提交后系统会对 SQL 脚本做 4 层防御 smoke test（语法解析 / 黑名单 / 只读校验 / 真连业务库试跑）。验收通过协作单进入 DONE，否则停留 SUBMITTED 状态并显示错误，可继续重提。
@@ -835,6 +870,7 @@
         };
 
         const STATUS_LABELS = {
+            'PENDING_ASSIGN': '待指派',
             'PENDING': '待开发',
             'SUBMITTED': '待验收',
             'DONE': '已完成',
@@ -897,28 +933,33 @@
             selectEl.innerHTML = html;
         }
 
-        // 加载活跃用户作为开发候选
-        async function loadActiveDevelopers() {
+        // 加载活跃用户作为对接人/开发候选
+        // v3 二级转派（拍板 #5）：不过滤角色，全部 active 用户都可选；备注由 admin 在用户管理页维护，凭眼睛辨识
+        async function loadActiveUsers() {
             try {
                 const res = await authFetch('/api/users/active');
                 if (!res || !res.ok) {
-                    document.getElementById('f_dev').innerHTML = '<option value="">加载失败</option>';
+                    document.getElementById('f_contact').innerHTML = '<option value="">加载失败</option>';
                     return;
                 }
                 const users = await res.json();
-                // 过滤：role IN ('user','publisher')，隐藏 admin
-                activeUsers = users.filter(u => ['user', 'publisher'].includes(u.role));
+                // 隐藏 viewer（只读用户不应被指派任何角色）；admin/publisher/user 全部保留
+                activeUsers = users.filter(u => ['user', 'publisher', 'admin'].includes(u.role));
                 activeUsers.sort((a, b) => (a.display_name || a.username).localeCompare(b.display_name || b.username, 'zh-CN'));
-                const sel = document.getElementById('f_dev');
-                sel.innerHTML = '<option value="">请选择</option>' + activeUsers.map(u => {
-                    const name = u.display_name || u.username;
-                    const roleTag = u.role === 'publisher' ? '（发布者）' : '';
-                    return `<option value="${u.id}">${escapeHtml(name)}${roleTag}</option>`;
-                }).join('');
+                const sel = document.getElementById('f_contact');
+                sel.innerHTML = '<option value="">请选择</option>' + activeUsers.map(u => optionLabelForUser(u)).join('');
             } catch (e) {
-                console.error('加载开发列表失败', e);
-                document.getElementById('f_dev').innerHTML = '<option value="">加载失败</option>';
+                console.error('加载用户列表失败', e);
+                document.getElementById('f_contact').innerHTML = '<option value="">加载失败</option>';
             }
+        }
+
+        // 单选 option 文案：姓名（备注） · 角色标签
+        function optionLabelForUser(u) {
+            const name = u.display_name || u.username;
+            const remarkPart = u.remark ? `（${u.remark}）` : '';
+            const roleTag = u.role === 'admin' ? ' · 管理员' : (u.role === 'publisher' ? ' · 发布者' : '');
+            return `<option value="${u.id}">${escapeHtml(name)}${escapeHtml(remarkPart)}${roleTag}</option>`;
         }
 
         // 加载列表
@@ -930,27 +971,30 @@
 
         async function loadList() {
             const tbody = document.getElementById('listBody');
-            tbody.innerHTML = '<tr class="empty-row"><td colspan="9">加载中...</td></tr>';
+            tbody.innerHTML = '<tr class="empty-row"><td colspan="12">加载中...</td></tr>';
 
             const params = new URLSearchParams();
             const status = document.getElementById('filterStatus').value;
             const dept = document.getElementById('filterDept').value;
             const search = document.getElementById('filterSearch').value.trim();
+            const myRoleEl = document.getElementById('filterMyRole');
+            const myRole = myRoleEl ? myRoleEl.value : '';
             if (status) params.append('status', status);
             if (dept) params.append('requester_dept', dept);
             if (search) params.append('search', search);
+            if (myRole) params.append('my_role', myRole);
 
             try {
                 const res = await authFetch('/api/collab/requests?' + params.toString());
                 if (!res || !res.ok) {
-                    tbody.innerHTML = '<tr class="empty-row"><td colspan="11">加载失败</td></tr>';
+                    tbody.innerHTML = '<tr class="empty-row"><td colspan="12">加载失败</td></tr>';
                     return;
                 }
                 const list = await res.json();
                 renderList(list);
             } catch (e) {
                 console.error('加载协作单失败', e);
-                tbody.innerHTML = '<tr class="empty-row"><td colspan="11">加载失败</td></tr>';
+                tbody.innerHTML = '<tr class="empty-row"><td colspan="12">加载失败</td></tr>';
             }
         }
 
@@ -969,7 +1013,7 @@
         function renderList(list) {
             const tbody = document.getElementById('listBody');
             if (!list || list.length === 0) {
-                tbody.innerHTML = '<tr class="empty-row"><td colspan="11">暂无协作单。点击右上角"新建协作单"开始记录。</td></tr>';
+                tbody.innerHTML = '<tr class="empty-row"><td colspan="12">暂无协作单。点击右上角"新建协作单"开始记录。</td></tr>';
                 return;
             }
             tbody.innerHTML = list.map(r => {
@@ -990,6 +1034,15 @@
                     ? escapeHtml(targetDbMap[r.target_db_connection_id] || `#${r.target_db_connection_id}`)
                     : '<span style="color:#9ca3af">—</span>';
 
+                // v3：未指派开发用灰色显示占位文本
+                const isUnassigned = r.status === 'PENDING_ASSIGN' || Number(r.developer_id) === 0;
+                const devCell = isUnassigned
+                    ? `<span style="color:#9ca3af;">${escapeHtml(r.developer_name || '(待指派)')}</span>`
+                    : escapeHtml(r.developer_name || '—');
+                const contactCell = r.contact_person_name
+                    ? escapeHtml(r.contact_person_name)
+                    : '<span style="color:#9ca3af">—</span>';
+
                 return `<tr onclick="openDetail(${r.id})">
                     <td class="col-id">#${r.id}</td>
                     <td>${oa}</td>
@@ -998,7 +1051,8 @@
                     <td>${targetDb}</td>
                     <td class="col-desc" title="${escapeHtml(r.description)}">${escapeHtml(desc)}</td>
                     <td>${fmtDate(r.deadline)}</td>
-                    <td>${escapeHtml(r.developer_name)}</td>
+                    <td>${contactCell}</td>
+                    <td>${devCell}</td>
                     <td><span class="status-badge status-${r.status}">${STATUS_LABELS[r.status] || r.status}</span></td>
                     <td>${valCell}</td>
                     <td>${frictionCell}</td>
@@ -1074,7 +1128,11 @@
                 ? (targetDbMap[d.target_db_connection_id] || `#${d.target_db_connection_id}`)
                 : '—';
 
-            // 1. 任务信息区块
+            // 1. 任务信息区块（v3 加对接人 + 指派开发元数据）
+            const isUnassigned = d.status === 'PENDING_ASSIGN' || Number(d.developer_id) === 0;
+            const devValueHtml = isUnassigned
+                ? `<span style="color:#d97706;">${escapeHtml(d.developer_name || '(待指派)')}</span>`
+                : `${escapeHtml(d.developer_name)}${d.assigned_at ? `<span style="margin-left:8px;color:#64748b;font-size:12px;">· 指派于 ${fmtDate(d.assigned_at)}</span>` : ''}`;
             const taskInfoHtml = `
                 <div class="detail-section">
                     <div class="detail-section-title">任务信息</div>
@@ -1092,8 +1150,10 @@
                             <div class="detail-kv-value">${escapeHtml(d.description)}</div>
                             <div class="detail-kv-label">期望完成</div>
                             <div class="detail-kv-value">${fmtDate(d.deadline)}</div>
+                            <div class="detail-kv-label">对接人</div>
+                            <div class="detail-kv-value">${escapeHtml(d.contact_person_name || '—')}</div>
                             <div class="detail-kv-label">指派开发</div>
-                            <div class="detail-kv-value">${escapeHtml(d.developer_name)}</div>
+                            <div class="detail-kv-value">${devValueHtml}</div>
                             <div class="detail-kv-label">录入人</div>
                             <div class="detail-kv-value">${escapeHtml(d.created_by_name)} · ${fmtDate(d.created_at)}</div>
                             <div class="detail-kv-label">当前状态</div>
@@ -1103,24 +1163,39 @@
                 </div>`;
 
             // 2. 通知区块
+            // v3 二级转派（codex 十六审 #6）：文案按状态分层
+            //   - PENDING_ASSIGN：admin 可见"通知对接人"按钮（调既有 /notify endpoint，后端按状态走创建模板）
+            //   - PENDING：admin 或本单对接人可见"通知开发"按钮（codex 十六审 #3 权限拆分配套）
+            //   - notified_at 字段仅对 PENDING 路径有意义（PENDING_ASSIGN 路径后端不落 notified_at）
+            const myUid = Number(getCurrentUserId());
+            const isContactPersonView = Number(d.contact_person_id) === myUid;
             let notifyBodyHtml;
             if (d.notified_at) {
-                // 已固化 read_at → 直接展示,无按钮(钉钉无"取消已读"语义)
-                // 未固化 → 提供"查询已读状态"按钮触发主动查询
+                // 已通知开发分支（仅 PENDING 状态会进入；PENDING_ASSIGN 后端不落 notified_at）
                 const readPart = d.read_at
                     ? `<div style="margin-top:8px;font-size:13px;color:#16a34a;">📖 ${escapeHtml(d.developer_name)} 已读 · 于 ${fmtDate(d.read_at)}</div>`
                     : `<button class="notify-btn" style="background:#f1f5f9;color:#475569;" onclick="checkReadStatus(${d.id})">查询已读状态</button>
                        <div id="readStatusBox" style="margin-top:8px;font-size:13px;color:#64748b;"></div>`;
+                const canRenotify = isAdminUser || isContactPersonView;
                 notifyBodyHtml = `
                     <span class="notify-status-text">✅ 已于 ${fmtDate(d.notified_at)} 通知 ${escapeHtml(d.developer_name)}</span>
-                    ${isAdminUser ? `<button class="notify-btn" onclick="triggerNotify(${d.id})">重新通知</button>` : ''}
+                    ${canRenotify ? `<button class="notify-btn" onclick="triggerNotify(${d.id})">重新通知</button>` : ''}
                     ${readPart}`;
-            } else if (d.status === 'PENDING') {
+            } else if (d.status === 'PENDING_ASSIGN') {
+                // codex 十六审 #6：PENDING_ASSIGN 加"通知对接人"按钮（仅 admin 可见）
                 notifyBodyHtml = `
-                    <span class="notify-status-text">⏳ 尚未通知开发</span>
+                    <span class="notify-status-text">⏳ 尚未通知对接人 ${escapeHtml(d.contact_person_name || '')}</span>
                     ${isAdminUser
-                        ? `<button class="notify-btn" onclick="triggerNotify(${d.id})">通知开发</button>`
+                        ? `<button class="notify-btn" onclick="triggerNotify(${d.id})">通知对接人</button>`
                         : '<span style="color:#9ca3af;font-size:12px;">（仅管理员可触发通知）</span>'}`;
+            } else if (d.status === 'PENDING') {
+                // PENDING：admin 或本单对接人可触发通知开发
+                const canNotify = isAdminUser || isContactPersonView;
+                notifyBodyHtml = `
+                    <span class="notify-status-text">⏳ 尚未通知开发 ${escapeHtml(d.developer_name || '')}</span>
+                    ${canNotify
+                        ? `<button class="notify-btn" onclick="triggerNotify(${d.id})">通知开发</button>`
+                        : '<span style="color:#9ca3af;font-size:12px;">（仅管理员/本单对接人可触发通知）</span>'}`;
             } else {
                 notifyBodyHtml = '<span class="notify-status-text">—</span>';
             }
@@ -1170,24 +1245,79 @@
         }
 
         // 验收结果区块（D3 模块 7）：按 sql_validation_status 三色分支
+        // v3 二级转派（2026-05-18）：
+        //   - PENDING_ASSIGN：本单对接人或 admin 看到"指派开发"按钮
+        //   - PENDING：仅 developer 本人看到"上传交付物"按钮（admin 不再代提交）；对接人/admin 看到"改派开发"按钮
         function renderValidationSection(d, isAdminUser) {
-            // PENDING 状态：尚未提交，显示"上传交付物"入口（本单 dev 或 admin 可见）
-            if (d.status === 'PENDING') {
-                const canSubmit = isAdminUser || (d.developer_id && Number(d.developer_id) === Number(getCurrentUserId()));
-                if (!canSubmit) return '';
+            const myId = Number(getCurrentUserId());
+            const isContactPerson = Number(d.contact_person_id) === myId;
+            const isDeveloper = d.developer_id && Number(d.developer_id) === myId && Number(d.developer_id) !== 0;
+
+            // PENDING_ASSIGN 状态：对接人/admin 看到"指派开发"按钮
+            if (d.status === 'PENDING_ASSIGN') {
+                const canAssign = isAdminUser || isContactPerson;
+                if (!canAssign) {
+                    return `
+                        <div class="detail-section">
+                            <div class="detail-section-title">指派进展</div>
+                            <div class="detail-section-body">
+                                <div class="val-box" style="background:#fff7ed;border:1px solid #fed7aa;">
+                                    <div class="val-title" style="color:#9a3412;">⏳ 等对接人指派开发</div>
+                                    <div class="val-meta">对接人：${escapeHtml(d.contact_person_name || '—')}</div>
+                                </div>
+                            </div>
+                        </div>`;
+                }
                 return `
                     <div class="detail-section">
-                        <div class="detail-section-title">交付提交</div>
+                        <div class="detail-section-title">指派开发</div>
                         <div class="detail-section-body">
-                            <div class="val-box" style="background:#eff6ff;border:1px solid #bfdbfe;">
-                                <div class="val-title" style="color:#1e40af;">📤 尚未提交交付物</div>
-                                <div class="val-meta">上传 SQL 脚本 + 结果数据，系统会自动跑 smoke test 验收</div>
+                            <div class="val-box" style="background:#fff7ed;border:1px solid #fed7aa;">
+                                <div class="val-title" style="color:#9a3412;">📌 等指派开发</div>
+                                <div class="val-meta">对接人：${escapeHtml(d.contact_person_name || '—')}，请选择具体开发并指派</div>
                                 <div class="val-actions" style="margin-top:10px;">
-                                    <button class="val-btn val-btn-retry" onclick="openSubmitDeliveryDialog(${d.id})">上传交付物</button>
+                                    <button class="val-btn val-btn-retry" onclick="openAssignDialog(${d.id})">指派开发</button>
                                 </div>
                             </div>
                         </div>
                     </div>`;
+            }
+
+            // PENDING 状态：
+            //   · developer 本人 → 上传交付物
+            //   · 对接人 / admin → 改派开发（备用）
+            if (d.status === 'PENDING') {
+                if (isDeveloper) {
+                    return `
+                        <div class="detail-section">
+                            <div class="detail-section-title">交付提交</div>
+                            <div class="detail-section-body">
+                                <div class="val-box" style="background:#eff6ff;border:1px solid #bfdbfe;">
+                                    <div class="val-title" style="color:#1e40af;">📤 尚未提交交付物</div>
+                                    <div class="val-meta">上传 SQL 脚本 + 结果数据，系统会自动跑 smoke test 验收</div>
+                                    <div class="val-actions" style="margin-top:10px;">
+                                        <button class="val-btn val-btn-retry" onclick="openSubmitDeliveryDialog(${d.id})">上传交付物</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>`;
+                }
+                if (isAdminUser || isContactPerson) {
+                    return `
+                        <div class="detail-section">
+                            <div class="detail-section-title">指派状态</div>
+                            <div class="detail-section-body">
+                                <div class="val-box" style="background:#f0fdf4;border:1px solid #bbf7d0;">
+                                    <div class="val-title" style="color:#166534;">✅ 已指派给 ${escapeHtml(d.developer_name)}</div>
+                                    <div class="val-meta">${d.assigned_at ? `指派于 ${fmtDate(d.assigned_at)}` : ''}${d.previous_developer_id ? ` · 上一任 user#${d.previous_developer_id}` : ''}</div>
+                                    <div class="val-actions" style="margin-top:10px;">
+                                        <button class="val-btn val-btn-bypass" onclick="openAssignDialog(${d.id}, true)">改派开发</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>`;
+                }
+                return '';
             }
 
             const vs = d.sql_validation_status;
@@ -1209,9 +1339,9 @@
                         <div class="val-meta">验收完成：${fmtDate(d.sql_validated_at)}</div>
                     </div>`;
             } else if (vs === 'failed') {
-                // 本单 dev 或 admin 可见"重新上传"按钮（复用 POST /:id/submit 覆盖式重提）
-                // admin 额外可见"旁路放行"按钮
-                const retryBtn = (isAdminUser || (d.developer_id && Number(d.developer_id) === Number(getCurrentUserId())))
+                // v3：仅本单 developer 本人可见"重新上传"按钮（admin 不再代提交，与 §6 权限矩阵一致）
+                // admin 可见"旁路放行"按钮
+                const retryBtn = isDeveloper
                     ? `<button class="val-btn val-btn-retry" onclick="openRetryDialog(${d.id})">重新上传交付物</button>` : '';
                 const bypassBtn = isAdminUser
                     ? `<button class="val-btn val-btn-bypass" onclick="openBypassDialog(${d.id})">旁路放行</button>` : '';
@@ -1357,6 +1487,99 @@
             }
         }
 
+        // 指派/改派开发弹窗（v1.66.0 二级转派）
+        let _assignCollabId = null;
+        let _assignIsReassign = false;
+
+        function openAssignDialog(id, isReassign = false) {
+            _assignCollabId = id;
+            _assignIsReassign = !!isReassign;
+            const title = isReassign ? `改派开发 · 协作单 #${id}` : `指派开发 · 协作单 #${id}`;
+            document.getElementById('assignTitle').textContent = title;
+
+            // 当前 currentDetail 应该是这条单的明细
+            const d = currentDetail;
+            const contactPersonId = d ? Number(d.contact_person_id) : null;
+            const currentDevId = d ? Number(d.developer_id) : null;
+
+            // 下拉填充：复用 activeUsers（首屏已加载）；按拍板 #5 不过滤角色，但排除对接人本人
+            const sel = document.getElementById('f_assign_dev');
+            if (!activeUsers || activeUsers.length === 0) {
+                sel.innerHTML = '<option value="">用户列表未加载，请刷新页面</option>';
+            } else {
+                const opts = activeUsers
+                    .filter(u => u.id !== contactPersonId) // 不能指派对接人本人
+                    .map(u => optionLabelForUser(u))
+                    .join('');
+                sel.innerHTML = '<option value="">请选择</option>' + opts;
+                // 改派场景：预选当前 developer 便于辨识（提交时若未改会被后端幂等返回 no_change）
+                if (isReassign && currentDevId && currentDevId !== 0) {
+                    sel.value = String(currentDevId);
+                }
+            }
+
+            const tip = document.getElementById('assignPrevTip');
+            if (isReassign && currentDevId && currentDevId !== 0) {
+                // codex 十六审 #7：改派钉钉本版本不做，文案改为当前真实行为
+                tip.style.display = 'block';
+                tip.textContent = `⚠️ 改派会取消 ${d.developer_name} 的当前指派。本版本不会自动通知原开发，请线下同步或后续手动处理。`;
+            } else {
+                tip.style.display = 'none';
+                tip.textContent = '';
+            }
+
+            const btn = document.getElementById('btnAssign');
+            btn.disabled = false;
+            btn.textContent = '提交';
+            document.getElementById('assignModal').classList.add('show');
+        }
+
+        function closeAssignModal() {
+            document.getElementById('assignModal').classList.remove('show');
+            _assignCollabId = null;
+            _assignIsReassign = false;
+        }
+
+        async function submitAssign() {
+            const id = _assignCollabId;
+            if (!id) { showToast('协作单 id 丢失', 'error'); return; }
+            const developerId = parseInt(document.getElementById('f_assign_dev').value, 10);
+            if (!developerId) { showToast('请选择开发人员', 'error'); return; }
+
+            const btn = document.getElementById('btnAssign');
+            btn.disabled = true;
+            btn.textContent = '提交中…';
+            try {
+                const res = await authFetch(`/api/collab/requests/${id}/assign`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ developer_id: developerId })
+                });
+                if (!res) return;
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) {
+                    showToast(data.error || '指派失败', 'error');
+                    btn.disabled = false;
+                    btn.textContent = '提交';
+                    return;
+                }
+                if (data.no_change) {
+                    showToast(data.message || '该开发已是当前指派', 'success');
+                } else if (data.is_reassign) {
+                    showToast(`✅ 已改派给 ${escapeHtml(data.developer_name || '开发')}`, 'success');
+                } else {
+                    showToast(`✅ 已指派给 ${escapeHtml(data.developer_name || '开发')}`, 'success');
+                }
+                closeAssignModal();
+                await openDetail(id);
+                if (typeof loadList === 'function') loadList();
+            } catch (e) {
+                showToast('网络错误', 'error');
+                btn.disabled = false;
+                btn.textContent = '提交';
+            }
+        }
+
         // 当前打开提交弹窗对应的协作单 id（submitDelivery 用）
         let _submitDeliveryCollabId = null;
 
@@ -1454,7 +1677,9 @@
                 const data = await res.json();
 
                 if (res.ok) {
-                    showToast(`✅ 已通知 ${escapeHtml(data.developer_name || '开发')}`, 'success');
+                    // v3：后端按状态返 target_user_name（兼容旧 developer_name 字段），收件人可能是对接人或开发
+                    const targetName = data.target_user_name || data.developer_name || '收件人';
+                    showToast(`✅ 已通知 ${escapeHtml(targetName)}`, 'success');
                     // 重新加载详情让 notify 区块刷成"已通知"态
                     if (typeof openDetail === 'function') {
                         await openDetail(id);
@@ -1576,7 +1801,7 @@
             // 重置表单
             ['f_oa_no', 'f_requester', 'f_desc'].forEach(id => document.getElementById(id).value = '');
             document.getElementById('f_dept').selectedIndex = 0;
-            document.getElementById('f_dev').selectedIndex = 0;
+            document.getElementById('f_contact').selectedIndex = 0;
             document.getElementById('f_files').value = '';
             selectedFiles = [];
             renderFilePreview();
@@ -1627,7 +1852,7 @@
                 requester_name: document.getElementById('f_requester').value.trim(),
                 description: document.getElementById('f_desc').value.trim(),
                 deadline: document.getElementById('f_deadline').value,
-                developer_id: parseInt(document.getElementById('f_dev').value, 10) || null,
+                contact_person_id: parseInt(document.getElementById('f_contact').value, 10) || null,
                 target_db_connection_id: parseInt(document.getElementById('f_target_db').value, 10) || null
             };
 
@@ -1638,7 +1863,7 @@
             if (!payload.description) return showToast('请填写需求描述', 'error');
             if (!payload.deadline) return showToast('请选择期望完成时间', 'error');
             if (!payload.target_db_connection_id) return showToast('请选择目标业务库', 'error');
-            if (!payload.developer_id) return showToast('请指派开发', 'error');
+            if (!payload.contact_person_id) return showToast('请选择对接人', 'error');
 
             // 时间格式：HTML5 datetime-local 是 "YYYY-MM-DDTHH:MM"，后端能处理
             payload.deadline = payload.deadline.replace('T', ' ') + ':00';
@@ -1714,7 +1939,7 @@
             document.getElementById('f_files').addEventListener('change', onFilesChange);
 
             // 等 app.js 把用户信息加载好后再加载列表
-            await loadActiveDevelopers();
+            await loadActiveUsers();
             await loadTargetDbMap();
             await loadList();
 

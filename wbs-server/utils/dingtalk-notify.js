@@ -1,9 +1,10 @@
 /**
- * 钉钉通知模块（v2.0）
+ * 钉钉通知模块（v2.0 / v3 二级转派扩展）
  *
- * 数据协作模块用,把"协作单已录入"消息推到指派开发的钉钉。
+ * 数据协作模块用,按状态把消息推给对接人 / 开发 / admin。
  *
  * 设计来源:docs/local/数据协作模块_方案_v2.0.md §7.4 / §7.6
+ *          + docs/local/数据协作模块_二级转派_方案_20260518_v0.1.md §5
  * 参考实现:E:/数据处理/钉钉群消息文件推送_单点/send_user.py(企业内已跑通)
  *
  * 设计要点:
@@ -12,8 +13,11 @@
  *   - 并发刷新去重(多个请求同时撞过期 → 只发一次 gettoken)
  *   - 错误分层 7 类(network / rate_limit / server_5xx / invalid_response /
  *     token_expired / user_invalid / other),调用方据此决定是否清缓存 + UI 提示
- *   - token_expired 时模块内部"伪重试一次"(清 cache + 重取 token + 重发),
- *     业务层不需要手动处理
+ *   - token_expired 重试由业务发送路径负责(server.js: sendCollabDingtalkRaw),
+ *     classifyError 仅给出"建议清缓存重发"信号,本模块不再自己重试
+ *   - v3 模板 3 个(buildCollabCreatedCard 通知对接人 / buildCollabAssignedCard
+ *     通知开发 / buildCollabSubmittedCard 通知 admin)+ buildCollabNotifyCard
+ *     别名指向 Created（兼容 v2.0 调用）
  *
  * 依赖:Node ≥ 18 内置 fetch(已在生产 Node v24.12.0 验证)
  */
@@ -219,6 +223,7 @@ function classifyError(input) {
     }
 
     // userId 失效:errcode=88(用户不存在)/ 88002(消息接收者不在企业内)
+    // v3：收件人可能是对接人/开发/admin,文案保持中性(codex 十六审 #9)
     if (errcode === 88 || errcode === 88002) {
         return {
             reason: 'user_invalid',
@@ -226,7 +231,7 @@ function classifyError(input) {
             clearUserId: true,
             errcode,
             errmsg,
-            hint: '开发账号在钉钉端不存在,请管理员检查 phone 字段'
+            hint: '目标账号在钉钉端不存在,请管理员检查该用户的手机号是否已加入企业钉钉'
         };
     }
 
@@ -345,18 +350,32 @@ function escapeMarkdown(str) {
  *                                  用于拼接"查看详情"深链;为空时不放链接
  * @returns {string}  markdown 文本
  */
-function buildCollabNotifyCard(collab, platformBaseUrl) {
+function _buildDeepLink(collab, platformBaseUrl) {
     const baseUrl = (platformBaseUrl || '').replace(/\/+$/, '');
-    const deepLink = baseUrl ? `${baseUrl}/Data_Collab.html?id=${collab.id}` : '';
+    return baseUrl ? `${baseUrl}/Data_Collab.html?id=${collab.id}` : '';
+}
 
-    const lines = [
-        '#### 新临时取数任务',
-        '',
+function _buildCollabHeaderLines(collab) {
+    return [
         `- **OA 流程号**:${escapeMarkdown(collab.oa_request_no || '-')}`,
         `- **业务部门**:${escapeMarkdown(collab.requester_dept || '-')}`,
         `- **申请人**:${escapeMarkdown(collab.requester_name || '-')}`,
         `- **目标业务库**:${escapeMarkdown(collab.target_db_name || '-')}`,
         `- **截止时间**:${escapeMarkdown(collab.deadline || '-')}`,
+    ];
+}
+
+/**
+ * 模板 1：协作单创建后，通知对接人（v3 二级转派）
+ * 触发：admin 创建协作单 → 状态 PENDING_ASSIGN → 调 notify endpoint
+ * 收件人：对接人（contact_person）
+ */
+function buildCollabCreatedCard(collab, platformBaseUrl) {
+    const deepLink = _buildDeepLink(collab, platformBaseUrl);
+    const lines = [
+        '#### 新临时取数任务 · 待指派开发',
+        '',
+        ..._buildCollabHeaderLines(collab),
         '',
         '**需求描述**',
         '',
@@ -364,7 +383,61 @@ function buildCollabNotifyCard(collab, platformBaseUrl) {
         ''
     ];
     if (deepLink) {
-        lines.push(`[👉 查看详情并提交](${deepLink})`);
+        lines.push(`[👉 查看详情并指派开发](${deepLink})`);
+    }
+    return lines.join('\n');
+}
+
+/**
+ * 兼容旧调用名 — v2.0 D2 钉钉模块用的 buildCollabNotifyCard 现指向创建模板
+ */
+const buildCollabNotifyCard = buildCollabCreatedCard;
+
+/**
+ * 模板 2：协作单首次指派后，通知开发（v3 二级转派）
+ * 触发：对接人/admin 调 POST /:id/assign，状态 PENDING_ASSIGN → PENDING
+ * 收件人：被指派的开发
+ * 期望 collab 多带：contact_person_name
+ */
+function buildCollabAssignedCard(collab, platformBaseUrl) {
+    const deepLink = _buildDeepLink(collab, platformBaseUrl);
+    const lines = [
+        '#### 你被指派了协作单',
+        '',
+        ..._buildCollabHeaderLines(collab),
+        `- **对接人**:${escapeMarkdown(collab.contact_person_name || '-')}`,
+        '',
+        '**需求描述**',
+        '',
+        escapeMarkdown(collab.description || '(无描述)'),
+        ''
+    ];
+    if (deepLink) {
+        lines.push(`[👉 查看详情并上传交付物](${deepLink})`);
+    }
+    return lines.join('\n');
+}
+
+/**
+ * 模板 3：协作单提交后，通知 admin（v3 二级转派）
+ * 触发：开发调 POST /:id/submit，状态 PENDING → SUBMITTED
+ * 收件人：admin（验收人）
+ * 期望 collab 多带：developer_name / contact_person_name
+ */
+function buildCollabSubmittedCard(collab, platformBaseUrl) {
+    const deepLink = _buildDeepLink(collab, platformBaseUrl);
+    const lines = [
+        '#### 协作单已提交 · 待验收',
+        '',
+        ..._buildCollabHeaderLines(collab),
+        `- **对接人**:${escapeMarkdown(collab.contact_person_name || '-')}`,
+        `- **开发**:${escapeMarkdown(collab.developer_name || '-')}`,
+        '',
+        '系统已自动跑 smoke test 验收，请到平台查看结果',
+        ''
+    ];
+    if (deepLink) {
+        lines.push(`[👉 查看验收结果](${deepLink})`);
     }
     return lines.join('\n');
 }
@@ -408,6 +481,10 @@ module.exports = {
     classifyError,
     clearCachedToken,
     buildCollabNotifyCard,
+    // v3 二级转派 3 模板
+    buildCollabCreatedCard,
+    buildCollabAssignedCard,
+    buildCollabSubmittedCard,
     escapeMarkdown,
     // 测试导出(下划线前缀,生产代码不要用)
     _resetCacheForTest,

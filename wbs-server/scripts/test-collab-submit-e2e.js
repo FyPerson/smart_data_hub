@@ -5,7 +5,7 @@
  *
  * 前置：
  *   - 本地 server 已启动（localhost:3000）
- *   - 本地 task_pool.db 有 id ∈ {3..9} PENDING 协作单（target_db_connection_id=2 business_db）
+ *   - fixture 由 _test-fixture.js 动态创建（v3 协议）
  *
  * 6 个测试场景（对照 codex 九审归档的状态 × 结果对照表）：
  *   T1 健康 SQL 首次提交 → DONE
@@ -16,12 +16,15 @@
  *   T6 协作单不存在 → 404
  *
  * 每个测试：
- *   1. 登录拿 admin JWT
- *   2. POST /:id/submit 含 multipart files
+ *   1. fixture 造一条 PENDING 协作单（admin 创建 + contact 指派 dev1）
+ *   2. dev1 token POST /:id/submit 含 multipart files
  *   3. 校验 HTTP code + JSON 关键字段
  *   4. 查 task_pool.db 看状态字段是否符合预期
+ *   5. cleanup fixture
  *
- * 测试用 admin 账号身份模拟"代提交"路径（codex L2 验证）
+ * v3 二级转派改造（2026-05-19）：
+ *   - admin 不能代提交（codex 十六审决策 #4），改用 dev1 身份提交
+ *   - 每个测试独立 fixture（避免状态串扰，submit 推到 DONE/SUBMITTED 后不能复用）
  */
 
 'use strict';
@@ -40,23 +43,12 @@ const BASE = 'http://localhost:3000';
 const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
 const JWT_SECRET = process.env.JWT_SECRET || 'default_secret_key_change_me';
 
-let token = null;
-let testTmpDir = null;
+// v3 二级转派后 fixture 动态创建（2026-05-19）
+const fx = require('./_test-fixture');
 
-async function login() {
-    // 直接从 DB 读 admin user info，本地签 JWT
-    const user = await new Promise((resolve, reject) => {
-        const db = new sqlite3.Database(DB_PATH);
-        db.get(`SELECT id, username, display_name, role FROM users WHERE username='admin' LIMIT 1`,
-            (err, row) => { db.close(); err ? reject(err) : resolve(row); });
-    });
-    if (!user) throw new Error('admin user not found in local DB');
-    token = jwt.sign(
-        { id: user.id, username: user.username, display_name: user.display_name, role: user.role },
-        JWT_SECRET,
-        { expiresIn: '1h' }
-    );
-}
+let token = null;        // dev1 token（v3 后 admin 不能代提交）
+let testTmpDir = null;
+const createdFixtureIds = [];  // 待 cleanup 的 fixture id 列表
 
 function makeTmpFile(filename, content) {
     if (!testTmpDir) testTmpDir = fs.mkdtempSync(path.join(tmpdir(), 'collab-submit-test-'));
@@ -92,34 +84,23 @@ function dbGet(sql, params) {
     });
 }
 
-async function resetCollabToPending(id) {
-    // 测试前把协作单重置回 PENDING，submission_version=0，附件状态清零
-    return new Promise((resolve, reject) => {
-        const db = new sqlite3.Database(DB_PATH);
-        db.serialize(() => {
-            db.run(
-                `UPDATE collab_requests
-                    SET status='PENDING', submission_version=0,
-                        submitted_at=NULL, last_submitted_at=NULL,
-                        sql_validation_status=NULL, sql_validation_error=NULL,
-                        sql_validated_at=NULL, done_at=NULL,
-                        attachment_dir=NULL, validation_started_at=NULL
-                  WHERE id=?`,
-                [id]
-            );
-            db.run(`DELETE FROM collab_attachments WHERE collab_request_id=? AND attachment_type IN ('result_data','result_script')`, [id], (err) => {
-                db.close();
-                err ? reject(err) : resolve();
-            });
-        });
-    });
+// v3 改造：每个测试创建独立 fixture，避免状态串扰
+// 返回 PENDING 状态的 collab id（dev1 已被指派）
+async function freshFixture() {
+    const ctx = await fx.createPendingFixture();
+    createdFixtureIds.push(ctx.id);
+    if (!token) token = ctx.dev1Token;  // 首次设置 dev1 token
+    return ctx.id;
 }
 
 // === 6 个测试 ===
 
 async function runTests() {
-    await login();
-    console.log('✅ logged in as admin');
+    // v3：先造一个 fixture 拿到 dev1Token（admin 不能代提交，必须用 developer 本人 token）
+    const probe = await fx.createPendingFixture();
+    token = probe.dev1Token;
+    createdFixtureIds.push(probe.id);
+    console.log(`✅ tokens prepared (dev1) + probe fixture id=${probe.id}`);
 
     let passed = 0, failed = 0;
     const failures = [];
@@ -138,8 +119,7 @@ async function runTests() {
 
     // T1: 健康 SQL 首次提交 → DONE
     await check('T1 健康 SQL 首次提交 → DONE', async () => {
-        const id = 3;
-        await resetCollabToPending(id);
+        const id = await freshFixture();
         const r = await postSubmit(id, [
             { name: 'result.xlsx', content: 'fake xlsx binary content not validated' },
             { name: 'script.sql', content: 'SELECT 1 AS health_check' },
@@ -158,8 +138,7 @@ async function runTests() {
 
     // T2: 错字段 SQL → SUBMITTED + failed
     await check('T2 错字段 SQL → SUBMITTED + failed', async () => {
-        const id = 4;
-        await resetCollabToPending(id);
+        const id = await freshFixture();
         const r = await postSubmit(id, [
             { name: 'result.xlsx', content: 'fake xlsx' },
             { name: 'script.sql', content: 'SELECT ContTotalSum FROM crm_bid' },
@@ -176,8 +155,7 @@ async function runTests() {
 
     // T3: 危险 SQL (xp_) → SUBMITTED + failed at layer 0
     await check('T3 危险 SQL xp_ → SUBMITTED + failed', async () => {
-        const id = 5;
-        await resetCollabToPending(id);
+        const id = await freshFixture();
         const r = await postSubmit(id, [
             { name: 'result.xlsx', content: 'fake xlsx' },
             { name: 'script.sql', content: "EXEC xp_dirtree 'C:\\'" },
@@ -189,8 +167,7 @@ async function runTests() {
 
     // T4: 多语句 → SUBMITTED + failed at layer 0
     await check('T4 多语句 → SUBMITTED + failed', async () => {
-        const id = 6;
-        await resetCollabToPending(id);
+        const id = await freshFixture();
         const r = await postSubmit(id, [
             { name: 'result.xlsx', content: 'fake xlsx' },
             { name: 'script.sql', content: 'SELECT 1; DROP TABLE foo;' },
@@ -219,6 +196,16 @@ async function runTests() {
 
     console.log(`\n=== D3 模块 4 集成测试 ===`);
     console.log(`总数: ${passed + failed}, 通过: ${passed}, 失败: ${failed}`);
+
+    // 清理 fixture（v3 改造，每个测试独立单需统一清掉）
+    let cleanedCount = 0;
+    for (const id of createdFixtureIds) {
+        try { await fx.cleanup(id); cleanedCount++; } catch (e) {
+            console.log(`⚠️ cleanup id=${id} 失败: ${e.message}`);
+        }
+    }
+    console.log(`✅ fixtures cleaned up: ${cleanedCount}/${createdFixtureIds.length}`);
+
     if (failures.length > 0) {
         console.log('\n失败详情:');
         failures.forEach(f => console.log(`  ❌ ${f.name}: ${f.error}`));
@@ -232,7 +219,10 @@ async function runTests() {
     }
 }
 
-runTests().catch(e => {
+runTests().catch(async (e) => {
     console.error('测试执行异常:', e);
+    for (const id of createdFixtureIds) {
+        try { await fx.cleanup(id); } catch (_) { }
+    }
     process.exit(1);
 });

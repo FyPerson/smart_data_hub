@@ -138,14 +138,23 @@ async function loadUsers() {
         renderUsers(users);
     } catch (e) {
         document.getElementById('userList').innerHTML =
-            '<tr><td colspan="8" style="text-align:center;color:#e53e3e;">加载失败</td></tr>';
+            '<tr><td colspan="9" style="text-align:center;color:#e53e3e;">加载失败</td></tr>';
     }
 }
 
+// 缓存最近一次 GET /api/users 的结果，用于编辑时按 id 查 remark/display_name 等（避免 inline onclick 字符串拼接 remark 时引号被吃）
+let _adminUsersCache = [];
+
+function escapeHtmlAdmin(s) {
+    if (s === null || s === undefined) return '';
+    return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
 function renderUsers(users) {
+    _adminUsersCache = users || [];
     const tbody = document.getElementById('userList');
     if (users.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:#a0aec0;">暂无用户</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:#a0aec0;">暂无用户</td></tr>';
         return;
     }
 
@@ -153,20 +162,24 @@ function renderUsers(users) {
         const phoneCell = user.phone
             ? `<span style="font-family:monospace;color:#475569;">${user.phone}</span>${user.dingtalk_user_id ? '<span title="已缓存钉钉 userId" style="margin-left:4px;color:#16a34a;">●</span>' : ''}`
             : '<span style="color:#cbd5e1;">未填</span>';
+        const remarkCell = user.remark
+            ? `<span style="color:#475569;">${escapeHtmlAdmin(user.remark)}</span>`
+            : '<span style="color:#cbd5e1;">—</span>';
         return `
                 <tr>
                     <td>${user.id}</td>
-                    <td>${user.username}</td>
-                    <td>${user.display_name || '-'}</td>
+                    <td>${escapeHtmlAdmin(user.username)}</td>
+                    <td>${escapeHtmlAdmin(user.display_name) || '-'}</td>
                     <td><span class="badge ${user.role === 'admin' ? 'badge-admin' : (user.role === 'publisher' ? 'badge-publisher' : (user.role === 'viewer' ? 'badge-viewer' : 'badge-user'))}">${user.role === 'admin' ? '管理员' : (user.role === 'publisher' ? '发布者' : (user.role === 'viewer' ? '查看者' : '数据开发'))}</span></td>
                     <td>${phoneCell}</td>
+                    <td>${remarkCell}</td>
                     <td><span class="badge ${user.status === 'active' ? 'badge-active' : 'badge-disabled'}">${user.status === 'active' ? '启用' : '禁用'}</span></td>
                     <td>${formatDateTimeUnified(user.created_at)}</td>
                     <td class="action-btns">
-                        <button class="btn btn-success" onclick="openEditModal(${user.id}, '${user.display_name || ''}', '${user.role}', '${user.status}', '${user.phone || ''}')">编辑</button>
+                        <button class="btn btn-success" onclick="openEditModalById(${user.id})">编辑</button>
                         ${user.status === 'active' ?
             `<button class="btn btn-danger" onclick="disableUser(${user.id})">禁用</button>` :
-            `<button class="btn" style="background:#38a169;color:white;" onclick="enableUser(${user.id}, '${user.display_name || ''}', '${user.role}')">启用</button>`
+            `<button class="btn" style="background:#38a169;color:white;" onclick="enableUserById(${user.id})">启用</button>`
         }
                     </td>
                 </tr>
@@ -180,6 +193,8 @@ async function createUser() {
     const display_name = document.getElementById('newDisplayName').value.trim();
     const role = document.getElementById('newRole').value;
     const phone = document.getElementById('newPhone').value.trim();
+    const remarkEl = document.getElementById('newRemark');
+    const remark = remarkEl ? remarkEl.value.trim() : '';
 
     if (!username || !password) {
         return showMessage('请填写用户名和密码', false);
@@ -189,7 +204,7 @@ async function createUser() {
         const res = await fetch(`${API_URL}/users`, {
             method: 'POST',
             headers: getAuthHeaders(),
-            body: JSON.stringify({ username, password, display_name: display_name || username, role, phone })
+            body: JSON.stringify({ username, password, display_name: display_name || username, role, phone, remark })
         });
 
         const data = await res.json();
@@ -200,6 +215,7 @@ async function createUser() {
             document.getElementById('newDisplayName').value = '';
             document.getElementById('newRole').value = 'user';
             document.getElementById('newPhone').value = '';
+            if (remarkEl) remarkEl.value = '';
             loadUsers();
         } else {
             showMessage(data.error || '创建失败', false);
@@ -209,12 +225,41 @@ async function createUser() {
     }
 }
 
+// 通过 id 从缓存里取用户填编辑框（替代旧的 openEditModal 字符串拼接方式，避免 remark 含引号被吃）
+function openEditModalById(id) {
+    const u = _adminUsersCache.find(x => Number(x.id) === Number(id));
+    if (!u) return showMessage('未找到用户', false);
+    document.getElementById('editUserId').value = u.id;
+    document.getElementById('editDisplayName').value = u.display_name || '';
+    document.getElementById('editRole').value = u.role;
+    document.getElementById('editStatus').value = u.status;
+    document.getElementById('editPhone').value = u.phone || '';
+    const remarkEl = document.getElementById('editRemark');
+    if (remarkEl) remarkEl.value = u.remark || '';
+    document.getElementById('editPassword').value = '';
+    document.getElementById('editModal').style.display = 'flex';
+}
+
+// 启用按钮：旧 enableUser 接收 display_name/role 已废弃，用 enableUserById 走缓存
+function enableUserById(id) {
+    const u = _adminUsersCache.find(x => Number(x.id) === Number(id));
+    if (!u) return showMessage('未找到用户', false);
+    if (typeof enableUser === 'function') {
+        enableUser(u.id, u.display_name || '', u.role);
+    } else {
+        showMessage('启用函数缺失', false);
+    }
+}
+
+// 旧 API 兼容（保留以防其他地方还在调）
 function openEditModal(id, displayName, role, status, phone) {
     document.getElementById('editUserId').value = id;
     document.getElementById('editDisplayName').value = displayName;
     document.getElementById('editRole').value = role;
     document.getElementById('editStatus').value = status;
     document.getElementById('editPhone').value = phone || '';
+    const remarkEl = document.getElementById('editRemark');
+    if (remarkEl) remarkEl.value = '';
     document.getElementById('editPassword').value = '';
     document.getElementById('editModal').style.display = 'flex';
 }
@@ -229,10 +274,12 @@ async function saveUser() {
     const role = document.getElementById('editRole').value;
     const status = document.getElementById('editStatus').value;
     const phone = document.getElementById('editPhone').value.trim();
+    const remarkEl = document.getElementById('editRemark');
+    const remark = remarkEl ? remarkEl.value.trim() : '';
     const password = document.getElementById('editPassword').value;
 
-    // 编辑场景下 phone 总是带上(空串=用户主动清除);后端 validatePhone 把空串视为 null
-    const body = { display_name, role, status, phone };
+    // 编辑场景下 phone/remark 总是带上(空串=用户主动清除);后端把空串当 null/'' 处理
+    const body = { display_name, role, status, phone, remark };
     if (password) body.password = password;
 
     try {

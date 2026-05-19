@@ -1308,6 +1308,9 @@ function initTable() {
         safeAlterAddColumn('collab_attachments', 'status', "TEXT DEFAULT 'active'");
         safeAlterAddColumn('users', 'phone', 'TEXT');
         safeAlterAddColumn('users', 'dingtalk_user_id', 'TEXT');
+        // v3 二级转派（2026-05-18）：备注用于 admin 在用户管理页给"恒生科技负责人 / 中通文博开发"等自由文本标签
+        // 在协作单创建/指派下拉里展示，凭眼睛辨识
+        safeAlterAddColumn('users', 'remark', "TEXT NOT NULL DEFAULT ''");
 
         // ===== Deploy 3 追加（codex 七审 C3 + M1）=====
         // 方案 §5.4 + codex 七审拍板（详见 docs/local/codex审查记录/数据协作模块/08-D3-附件版本化取舍审-20260513.md）
@@ -1335,6 +1338,24 @@ function initTable() {
         db.run(`CREATE INDEX IF NOT EXISTS idx_collab_friction ON collab_requests(friction_occurred, friction_cause_category)`);
         db.run(`CREATE INDEX IF NOT EXISTS idx_collab_att_version ON collab_attachments(collab_request_id, submission_version, status)`);
 
+        // ===== v3 二级转派改造（2026-05-18 起，预期版本 v1.66.0）=====
+        // 方案 §3.1：B1 占位值方案
+        //   - 不动 developer_id NOT NULL 约束（避免 DROP+CREATE 主表的侵入性改动）
+        //   - 约定 developer_id=0、developer_name='(待指派)' 为未指派占位
+        //   - 以 status='PENDING_ASSIGN' 为权威判断"未指派"
+        const v3CollabRequestColumns = [
+            ['contact_person_id', 'INTEGER NOT NULL DEFAULT 0'],
+            ['contact_person_name', "TEXT NOT NULL DEFAULT ''"],
+            ['assigned_at', 'DATETIME'],
+            ['assigned_by', 'INTEGER'],
+            ['previous_developer_id', 'INTEGER']
+        ];
+        for (const [col, type] of v3CollabRequestColumns) {
+            safeAlterAddColumn('collab_requests', col, type);
+        }
+        db.run(`CREATE INDEX IF NOT EXISTS idx_collab_contact_person ON collab_requests(contact_person_id)`);
+        db.run(`CREATE INDEX IF NOT EXISTS idx_collab_contact_status ON collab_requests(contact_person_id, status)`);
+
         // 健康检查放在 serialize 末尾，确保所有 ALTER/INDEX 都已串行执行完
         verifyV2CollabSchema();
     });
@@ -1350,7 +1371,10 @@ function verifyV2CollabSchema() {
         'friction_occurred', 'friction_recorded_at', 'friction_cause_category', 'friction_note',
         'submission_version', 'validation_started_at',
         // Deploy 3 追加（codex 七审 M1）
-        'attachment_dir'
+        'attachment_dir',
+        // v3 二级转派改造（2026-05-18）
+        'contact_person_id', 'contact_person_name',
+        'assigned_at', 'assigned_by', 'previous_developer_id'
     ];
     db.all("PRAGMA table_info(collab_requests)", [], (err, rows) => {
         if (err) {
@@ -1362,7 +1386,7 @@ function verifyV2CollabSchema() {
         if (missing.length > 0) {
             logger.error(`v2.0 schema 迁移不完整，collab_requests 缺失字段: ${missing.join(', ')}`);
         } else {
-            logger.info('v2.0 schema 健康检查通过：collab_requests 20 个新增字段齐全（含 D3 attachment_dir）');
+            logger.info('v2.0 schema 健康检查通过：collab_requests 25 个新增字段齐全（含 D3 attachment_dir + v3 二级转派 5 字段）');
         }
     });
     db.all("PRAGMA table_info(collab_attachments)", [], (err, rows) => {
@@ -1376,7 +1400,7 @@ function verifyV2CollabSchema() {
     db.all("PRAGMA table_info(users)", [], (err, rows) => {
         if (err) return;
         const actualCols = rows.map(r => r.name);
-        const missing = ['phone', 'dingtalk_user_id'].filter(c => !actualCols.includes(c));
+        const missing = ['phone', 'dingtalk_user_id', 'remark'].filter(c => !actualCols.includes(c));
         if (missing.length > 0) {
             logger.error(`v2.0 schema 迁移不完整，users 缺失字段: ${missing.join(', ')}`);
         }
@@ -2852,7 +2876,7 @@ app.get('/api/auth/me', authenticateToken, (req, res) => {
 
 // 获取所有用户列表
 app.get('/api/users', authenticateToken, requireAdmin, (req, res) => {
-    db.all("SELECT id, username, display_name, role, status, phone, dingtalk_user_id, created_at FROM users ORDER BY created_at DESC", [], (err, rows) => {
+    db.all("SELECT id, username, display_name, role, status, phone, dingtalk_user_id, remark, created_at FROM users ORDER BY created_at DESC", [], (err, rows) => {
         if (err) return res.status(500).json({ error: err.message });
         res.json(rows);
     });
@@ -2868,9 +2892,9 @@ function validatePhone(phone) {
     return { ok: true, value: trimmed };
 }
 
-// 获取所有活跃用户(用于转发选择)
+// 获取所有活跃用户(用于转发选择 / v3 二级转派对接人&开发下拉)
 app.get('/api/users/active', authenticateToken, (req, res) => {
-    db.all("SELECT id, username, display_name, role FROM users WHERE status = 'active' ORDER BY display_name", [], (err, rows) => {
+    db.all("SELECT id, username, display_name, role, remark FROM users WHERE status = 'active' ORDER BY display_name", [], (err, rows) => {
         if (err) return res.status(500).json({ error: err.message });
         res.json(rows);
     });
@@ -2878,7 +2902,7 @@ app.get('/api/users/active', authenticateToken, (req, res) => {
 
 // 创建用户
 app.post('/api/users', authenticateToken, requireAdmin, async (req, res) => {
-    const { username, password, display_name, role, phone } = req.body;
+    const { username, password, display_name, role, phone, remark } = req.body;
 
     if (!username || !password) {
         return res.status(400).json({ error: '用户名和密码不能为空' });
@@ -2887,10 +2911,17 @@ app.post('/api/users', authenticateToken, requireAdmin, async (req, res) => {
     const phoneCheck = validatePhone(phone);
     if (!phoneCheck.ok) return res.status(400).json({ error: phoneCheck.error });
 
+    // remark 校验：可选，最长 100 字，trim
+    let remarkValue = '';
+    if (remark !== undefined && remark !== null) {
+        if (typeof remark !== 'string') return res.status(400).json({ error: 'remark 必须是字符串' });
+        remarkValue = remark.trim().substring(0, 100);
+    }
+
     try {
         const hashedPassword = await bcrypt.hash(password, 10);
-        const stmt = db.prepare("INSERT INTO users (username, password, display_name, role, phone, created_at) VALUES (?, ?, ?, ?, ?, datetime('now', 'localtime'))");
-        stmt.run(username, hashedPassword, display_name || username, role || 'user', phoneCheck.value, function (err) {
+        const stmt = db.prepare("INSERT INTO users (username, password, display_name, role, phone, remark, created_at) VALUES (?, ?, ?, ?, ?, ?, datetime('now', 'localtime'))");
+        stmt.run(username, hashedPassword, display_name || username, role || 'user', phoneCheck.value, remarkValue, function (err) {
             if (err) {
                 if (err.message.includes('UNIQUE')) {
                     return res.status(400).json({ error: '用户名已存在' });
@@ -2908,7 +2939,7 @@ app.post('/api/users', authenticateToken, requireAdmin, async (req, res) => {
 // 更新用户
 app.put('/api/users/:id', authenticateToken, requireAdmin, async (req, res) => {
     const { id } = req.params;
-    const { display_name, role, status, password, phone } = req.body;
+    const { display_name, role, status, password, phone, remark } = req.body;
 
     // 防止禁用自己
     if (req.user.id == id && status === 'disabled') {
@@ -2925,12 +2956,30 @@ app.put('/api/users/:id', authenticateToken, requireAdmin, async (req, res) => {
         phoneTouched = true;
     }
 
+    // remark 校验：可选；undefined 表示不动；空串表示清空
+    let remarkValue;
+    let remarkTouched = false;
+    if (remark !== undefined) {
+        if (remark === null) {
+            remarkValue = '';
+        } else if (typeof remark !== 'string') {
+            return res.status(400).json({ error: 'remark 必须是字符串' });
+        } else {
+            remarkValue = remark.trim().substring(0, 100);
+        }
+        remarkTouched = true;
+    }
+
     // 动态构造 SQL,避免给老调用方加未传字段:phone 改了 → 同时清掉旧的 dingtalk_user_id 缓存
     const fields = ['display_name = ?', 'role = ?', 'status = ?'];
     const params = [display_name, role, status];
     if (phoneTouched) {
         fields.push('phone = ?', 'dingtalk_user_id = NULL');
         params.push(phoneValue);
+    }
+    if (remarkTouched) {
+        fields.push('remark = ?');
+        params.push(remarkValue);
     }
     if (password) {
         try {
@@ -9683,8 +9732,14 @@ const COLLAB_REQUEST_TYPES = ['DASHBOARD_NEW', 'METRIC_CHANGE', 'METRIC_ADD_FROM
 const COLLAB_REQUEST_TYPE_V2_DEFAULT = 'ONE_OFF_EXPORT';
 
 // 主表状态枚举
-// v2.0 状态机：PENDING → SUBMITTED → DONE → ARCHIVED；CONFIRMED/CLAIMED 保留以兼容潜在旧数据筛选
-const COLLAB_STATUSES = ['PENDING', 'SUBMITTED', 'DONE', 'ARCHIVED', 'CONFIRMED', 'CLAIMED'];
+// v3 二级转派状态机（2026-05-18 起）：PENDING_ASSIGN → PENDING → SUBMITTED → DONE → ARCHIVED
+// CONFIRMED/CLAIMED 保留以兼容潜在旧数据筛选
+const COLLAB_STATUSES = ['PENDING_ASSIGN', 'PENDING', 'SUBMITTED', 'DONE', 'ARCHIVED', 'CONFIRMED', 'CLAIMED'];
+
+// 二级转派占位值（B1 方案）：未指派时 developer_id=0、developer_name='(待指派)'
+// 权威判断未指派：status === 'PENDING_ASSIGN'；developer_id=0 是冗余信号
+const COLLAB_UNASSIGNED_DEVELOPER_ID = 0;
+const COLLAB_UNASSIGNED_DEVELOPER_NAME = '(待指派)';
 
 // 协作单操作日志写入辅助
 function insertCollabLog(collabRequestId, operationType, operatorId, operator, reason = null) {
@@ -9806,7 +9861,7 @@ function getCollabAttachmentDir(requestId, description) {
 // v2.0：新建时 OA 流程号 + 目标业务库必填；request_type 不再由前端传（后端硬填 ONE_OFF_EXPORT）
 async function validateCollabRequestFields(body, isCreate = true) {
     const { requester_dept, requester_name, request_type, description, deadline, developer_id,
-            oa_request_no, target_db_connection_id } = body;
+            oa_request_no, target_db_connection_id, contact_person_id } = body;
 
     if (isCreate) {
         if (!oa_request_no || !String(oa_request_no).trim()) return 'OA 流程号必填';
@@ -9814,7 +9869,11 @@ async function validateCollabRequestFields(body, isCreate = true) {
         if (!requester_name || !String(requester_name).trim()) return '业务方负责人必填';
         if (!description || !String(description).trim()) return '需求描述必填';
         if (!deadline) return '期望完成时间必填';
-        if (!developer_id) return '指派开发必填';
+        // v3 二级转派改造：创建时填对接人，不填 developer（按拍板 #10 admin 不能越权直填）
+        if (!contact_person_id) return '对接人必填';
+        if (developer_id !== undefined && developer_id !== null && developer_id !== '') {
+            return '创建协作单时不应直接指定开发人员（请由对接人后续指派）';
+        }
         if (!target_db_connection_id) return '目标业务库必填';
     }
 
@@ -9832,7 +9891,22 @@ async function validateCollabRequestFields(body, isCreate = true) {
         if (!conn) return '指定的目标业务库不存在';
         if (conn.connection_type !== 'source') return '目标业务库必须是 source 类型连接';
     }
-    if (developer_id !== undefined) {
+    // v3 校验对接人
+    let contactPerson = null;
+    if (contact_person_id !== undefined && contact_person_id !== null) {
+        contactPerson = await dbGetAsync(
+            "SELECT id, display_name, username, role, status FROM users WHERE id = ?",
+            [contact_person_id]
+        );
+        if (!contactPerson) return '指定的对接人不存在';
+        if (contactPerson.status !== 'active') return '指定的对接人已停用';
+        // 对接人角色不限制（与 developer 校验对齐：user/publisher/admin 均可）
+        if (!['user', 'publisher', 'admin'].includes(contactPerson.role)) {
+            return '指定的对接人角色无效（仅 user/publisher/admin）';
+        }
+    }
+    if (developer_id !== undefined && developer_id !== null && developer_id !== ''
+        && developer_id !== COLLAB_UNASSIGNED_DEVELOPER_ID) {
         const dev = await dbGetAsync(
             "SELECT id, display_name, username, role, status FROM users WHERE id = ?",
             [developer_id]
@@ -9840,10 +9914,10 @@ async function validateCollabRequestFields(body, isCreate = true) {
         if (!dev) return '指派的开发人员不存在';
         if (dev.status !== 'active') return '指派的开发人员已停用';
         if (!['user', 'publisher', 'admin'].includes(dev.role)) return '指派的开发人员角色无效（仅 user/publisher/admin）';
-        return { ok: true, developer: dev };
+        return { ok: true, developer: dev, contactPerson };
     }
 
-    return { ok: true };
+    return { ok: true, contactPerson };
 }
 
 // 0. 获取 source 类型的 db_connections 列表（v2.0 录入弹窗目标业务库下拉用）
@@ -9864,19 +9938,57 @@ app.get('/api/collab/db-connections/source', authenticateToken, requireAdmin, (r
     );
 });
 
-// 1. 获取协作单列表（支持 status / developer / type / dept 筛选）
+// 1. 获取协作单列表（支持 status / developer / type / dept / my_role 筛选）
+// v3 二级转派改造（2026-05-18）+ codex 十六审 #2 high 权限收敛：
+//   - admin 默认可看全部
+//   - 非 admin 默认仅看 contact_person_id=req.user.id OR (developer_id=req.user.id AND developer_id!=0)
+//   - my_role=contact|developer|admin 显式筛选优先于默认权限（仍受角色限制）
+//   - developer_id 显式查询：仅 admin 或查询自己的可用
 app.get('/api/collab/requests', authenticateToken, (req, res) => {
-    const { status, developer_id, request_type, requester_dept, search } = req.query;
+    const { status, developer_id, request_type, requester_dept, search, my_role } = req.query;
 
     let sql = 'SELECT * FROM collab_requests WHERE 1=1';
     const params = [];
+    const currentUserId = Number(req.user.id);
+    const isAdmin = req.user.role === 'admin';
+
+    // v3 my_role 筛选（优先于 developer_id，互斥）
+    if (my_role) {
+        if (!['contact', 'developer', 'admin'].includes(my_role)) {
+            return res.status(400).json({ error: '无效的 my_role 值（合法值：contact/developer/admin）' });
+        }
+        if (my_role === 'admin' && !isAdmin) {
+            return res.status(403).json({ error: 'my_role=admin 仅 admin 角色可用' });
+        }
+        if (my_role === 'contact') {
+            sql += ' AND contact_person_id = ?';
+            params.push(currentUserId);
+        } else if (my_role === 'developer') {
+            // 排除占位值 0（PENDING_ASSIGN 状态的未指派单）
+            sql += ' AND developer_id = ? AND developer_id != 0';
+            params.push(currentUserId);
+        }
+        // my_role=admin：不加筛选，返回全部
+    } else if (!isAdmin) {
+        // codex 十六审 #2：未传 my_role 的普通用户默认按本人可见范围过滤
+        sql += ' AND (contact_person_id = ? OR (developer_id = ? AND developer_id != 0))';
+        params.push(currentUserId, currentUserId);
+    }
+    // 注：admin 不传 my_role 时不加筛选，保留"看全部"语义
 
     if (status) {
         if (!COLLAB_STATUSES.includes(status)) return res.status(400).json({ error: '无效的状态值' });
         sql += ' AND status = ?';
         params.push(status);
     }
-    if (developer_id) {
+    // developer_id 显式筛选：codex 十六审 #2 收紧
+    //   - admin 可查任意 developer_id
+    //   - 非 admin 仅能查自己（developer_id == currentUserId）
+    //   - my_role 优先时此参数被覆盖
+    if (developer_id && !my_role) {
+        if (!isAdmin && Number(developer_id) !== currentUserId) {
+            return res.status(403).json({ error: 'developer_id 仅 admin 可查询他人' });
+        }
         sql += ' AND developer_id = ?';
         params.push(developer_id);
     }
@@ -9894,13 +10006,15 @@ app.get('/api/collab/requests', authenticateToken, (req, res) => {
         params.push(`%${search}%`, `%${search}%`, `%${search}%`);
     }
 
+    // 状态排序：v3 加 PENDING_ASSIGN 在最前（"待指派"优先级最高）
     sql += ` ORDER BY
         CASE status
-            WHEN 'CLAIMED' THEN 0
-            WHEN 'DONE' THEN 1
-            WHEN 'CONFIRMED' THEN 2
-            WHEN 'ARCHIVED' THEN 3
-            ELSE 4
+            WHEN 'PENDING_ASSIGN' THEN 0
+            WHEN 'PENDING' THEN 1
+            WHEN 'SUBMITTED' THEN 2
+            WHEN 'DONE' THEN 3
+            WHEN 'ARCHIVED' THEN 4
+            ELSE 5
         END,
         deadline ASC,
         id DESC`;
@@ -9915,11 +10029,26 @@ app.get('/api/collab/requests', authenticateToken, (req, res) => {
 });
 
 // 2. 获取协作单详情（含 items + attachments + logs）
+// v3 二级转派改造（codex 十六审 #1 critical）：可见性闸门
+//   - admin 全部可见
+//   - 本单 contact_person_id === req.user.id 可见
+//   - 本单 developer_id !== 0 且 developer_id === req.user.id 可见
+//   - 其他 → 403
 app.get('/api/collab/requests/:id', authenticateToken, async (req, res) => {
     const { id } = req.params;
     try {
         const request = await dbGetAsync('SELECT * FROM collab_requests WHERE id = ?', [id]);
         if (!request) return res.status(404).json({ error: '协作单不存在' });
+
+        // 可见性校验（统一 Number 比较，规避 JWT id 字符串/数字混用导致的误判）
+        const currentUserId = Number(req.user.id);
+        const isAdmin = req.user.role === 'admin';
+        const isContact = Number(request.contact_person_id) === currentUserId;
+        const isDeveloper = Number(request.developer_id) !== 0
+                         && Number(request.developer_id) === currentUserId;
+        if (!isAdmin && !isContact && !isDeveloper) {
+            return res.status(403).json({ error: '无权查看此协作单', code: 'FORBIDDEN' });
+        }
 
         const items = await dbAllAsync(
             'SELECT * FROM collab_dev_plan_items WHERE collab_request_id = ? ORDER BY seq ASC, id ASC',
@@ -9942,7 +10071,9 @@ app.get('/api/collab/requests/:id', authenticateToken, async (req, res) => {
 });
 
 // 3. 新建协作单（admin 唯一）
-// v2.0：录入即指派，status 落 PENDING，request_type 硬填 ONE_OFF_EXPORT
+// v3 二级转派改造（2026-05-18）：admin 创建时只填对接人（contact_person_id），不填 developer
+//   - 状态落 PENDING_ASSIGN，developer_id 占位 0，developer_name 占位 '(待指派)'
+//   - 后续由对接人调 POST /:id/assign 指派具体开发，状态推进到 PENDING
 app.post('/api/collab/requests', authenticateToken, requireAdmin, async (req, res) => {
     const {
         external_request_id,
@@ -9951,7 +10082,7 @@ app.post('/api/collab/requests', authenticateToken, requireAdmin, async (req, re
         requester_name,
         description,
         deadline,
-        developer_id,
+        contact_person_id,
         target_db_connection_id
     } = req.body;
 
@@ -9960,8 +10091,8 @@ app.post('/api/collab/requests', authenticateToken, requireAdmin, async (req, re
         if (typeof validation === 'string') {
             return res.status(400).json({ error: validation });
         }
-        const developer = validation.developer;
-        const developerName = developer.display_name || developer.username;
+        const contactPerson = validation.contactPerson;
+        const contactPersonName = contactPerson.display_name || contactPerson.username;
 
         const operatorId = req.user.id;
         const operatorName = req.user.display_name || req.user.username;
@@ -9984,9 +10115,11 @@ app.post('/api/collab/requests', authenticateToken, requireAdmin, async (req, re
             const result = await dbRunAsync(
                 `INSERT INTO collab_requests
                     (external_request_id, oa_request_no, requester_dept, requester_name, request_type,
-                     description, deadline, status, created_by, created_by_name, developer_id, developer_name,
+                     description, deadline, status, created_by, created_by_name,
+                     developer_id, developer_name,
+                     contact_person_id, contact_person_name,
                      target_db_connection_id)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?, ?, ?, ?)`,
+                 VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING_ASSIGN', ?, ?, ?, ?, ?, ?, ?)`,
                 [
                     external_request_id || null,
                     oaTrimmed,
@@ -9997,8 +10130,10 @@ app.post('/api/collab/requests', authenticateToken, requireAdmin, async (req, re
                     deadline,
                     operatorId,
                     operatorName,
-                    developer_id,
-                    developerName,
+                    COLLAB_UNASSIGNED_DEVELOPER_ID,
+                    COLLAB_UNASSIGNED_DEVELOPER_NAME,
+                    contactPerson.id,
+                    contactPersonName,
                     target_db_connection_id
                 ]
             );
@@ -10026,10 +10161,15 @@ app.post('/api/collab/requests', authenticateToken, requireAdmin, async (req, re
     }
 });
 
-// 4. 编辑协作单（publisher+ 全字段；本单 developer 仅 description）
-app.put('/api/collab/requests/:id', authenticateToken, requireNonViewer, async (req, res) => {
+// 4. 编辑协作单（仅 admin + 仅 PENDING_ASSIGN 状态）
+// v3 二级转派改造（2026-05-18）：
+//   - 权限收紧：仅 admin（v1.0.2 残留 publisher/developer 路径全部移除）
+//   - 状态白名单：仅 PENDING_ASSIGN（v1.0.2 残留 ['CONFIRMED','CLAIMED'] 修复）
+//   - 移除 developer_id 编辑路径：改派走 POST /:id/assign endpoint
+//   - 可改字段：external_request_id / requester_dept / requester_name / description / deadline / contact_person_id
+//   - request_type 不可改（v2.0 硬填 ONE_OFF_EXPORT，不再支持改）
+app.put('/api/collab/requests/:id', authenticateToken, requireAdmin, async (req, res) => {
     const { id } = req.params;
-    const userRole = req.user.role;
     const userId = req.user.id;
     const operatorName = req.user.display_name || req.user.username;
 
@@ -10037,79 +10177,76 @@ app.put('/api/collab/requests/:id', authenticateToken, requireNonViewer, async (
         const existing = await dbGetAsync('SELECT * FROM collab_requests WHERE id = ?', [id]);
         if (!existing) return res.status(404).json({ error: '协作单不存在' });
 
-        const isPrivileged = userRole === 'admin' || userRole === 'publisher';
-        const isOwnDev = existing.developer_id === userId;
-
-        if (!isPrivileged && !isOwnDev) {
-            return res.status(403).json({ error: '无权编辑此协作单' });
+        // 状态白名单：仅 PENDING_ASSIGN 可编辑
+        if (existing.status !== 'PENDING_ASSIGN') {
+            return res.status(409).json({
+                error: `当前状态 ${existing.status} 不可编辑（仅 PENDING_ASSIGN 状态可编辑文本字段）`,
+                code: 'INVALID_STATE',
+                current_status: existing.status
+            });
         }
 
-        // 状态约束：仅 CONFIRMED / CLAIMED 可编辑（DONE/ARCHIVED 锁定）
-        if (!['CONFIRMED', 'CLAIMED'].includes(existing.status)) {
-            return res.status(409).json({ error: `当前状态 ${existing.status} 不可编辑` });
+        // 拒绝 developer_id / status / request_type 等字段更新（走对应 endpoint 或不可改）
+        if (req.body.developer_id !== undefined) {
+            return res.status(400).json({
+                error: '不能通过 PUT 修改 developer_id，请走 POST /:id/assign 指派/改派',
+                code: 'USE_ASSIGN_ENDPOINT'
+            });
+        }
+        if (req.body.status !== undefined && req.body.status !== existing.status) {
+            return res.status(400).json({
+                error: '不能通过 PUT 修改状态（状态由对应 endpoint 驱动）',
+                code: 'CANNOT_UPDATE_STATUS'
+            });
+        }
+        if (req.body.request_type !== undefined && req.body.request_type !== existing.request_type) {
+            return res.status(400).json({
+                error: '需求类型不可修改（v2.0 固定为 ONE_OFF_EXPORT）',
+                code: 'REQUEST_TYPE_LOCKED'
+            });
         }
 
-        // 本单 developer 仅可改 description
-        if (!isPrivileged && isOwnDev) {
-            const { description } = req.body;
-            if (!description || !String(description).trim()) {
-                return res.status(400).json({ error: '需求描述不能为空' });
-            }
-            const result = await dbRunAsync(
-                'UPDATE collab_requests SET description = ? WHERE id = ?',
-                [String(description).trim(), id]
-            );
-            if (result.changes === 0) return res.status(404).json({ error: '协作单不存在' });
-            insertCollabLog(id, 'EDIT', userId, operatorName, '开发修改需求描述');
-            return res.json({ message: '已更新' });
-        }
-
-        // publisher+ 可改的字段
+        // 字段校验（PUT 走非创建分支）
         const validation = await validateCollabRequestFields(req.body, false);
         if (typeof validation === 'string') {
             return res.status(400).json({ error: validation });
         }
 
-        // request_type 仅在 CONFIRMED 状态下可改（方案 7.1）
-        if (req.body.request_type !== undefined
-            && req.body.request_type !== existing.request_type
-            && existing.status !== 'CONFIRMED') {
-            return res.status(409).json({ error: '需求类型仅在 CONFIRMED 状态下可修改' });
-        }
-
-        // developer_id 仅在 CONFIRMED 状态下可改（方案 7.1）
-        if (req.body.developer_id !== undefined
-            && Number(req.body.developer_id) !== existing.developer_id
-            && existing.status !== 'CONFIRMED') {
-            return res.status(409).json({ error: '指派开发仅在 CONFIRMED 状态下可修改' });
-        }
-
         const updates = [];
         const params = [];
-        const fields = ['external_request_id', 'requester_dept', 'requester_name', 'request_type', 'description', 'deadline'];
+        const fields = ['external_request_id', 'requester_dept', 'requester_name', 'description', 'deadline'];
         for (const f of fields) {
             if (req.body[f] !== undefined) {
                 updates.push(`${f} = ?`);
                 params.push(typeof req.body[f] === 'string' ? req.body[f].trim() : req.body[f]);
             }
         }
-        if (req.body.developer_id !== undefined && Number(req.body.developer_id) !== existing.developer_id) {
-            updates.push('developer_id = ?');
-            updates.push('developer_name = ?');
-            const newDevName = validation.developer
-                ? (validation.developer.display_name || validation.developer.username)
-                : existing.developer_name;
-            params.push(req.body.developer_id, newDevName);
+        // contact_person_id 可改（admin 把单转给其他对接人）
+        if (req.body.contact_person_id !== undefined
+            && Number(req.body.contact_person_id) !== existing.contact_person_id) {
+            const newContact = validation.contactPerson;
+            if (!newContact) {
+                return res.status(400).json({ error: '指定的对接人无效', code: 'INVALID_CONTACT_PERSON' });
+            }
+            updates.push('contact_person_id = ?');
+            updates.push('contact_person_name = ?');
+            params.push(newContact.id, newContact.display_name || newContact.username);
         }
 
         if (updates.length === 0) return res.json({ message: '无字段需要更新' });
 
+        // 条件 UPDATE：兜底并发漂移（防 SELECT 后状态被推进到 PENDING）
         params.push(id);
         const result = await dbRunAsync(
-            `UPDATE collab_requests SET ${updates.join(', ')} WHERE id = ?`,
+            `UPDATE collab_requests SET ${updates.join(', ')} WHERE id = ? AND status = 'PENDING_ASSIGN'`,
             params
         );
-        if (result.changes === 0) return res.status(404).json({ error: '协作单不存在' });
+        if (!result || result.changes === 0) {
+            return res.status(409).json({
+                error: '协作单状态已变化（可能已被对接人指派），请刷新后重试',
+                code: 'STATE_CHANGED'
+            });
+        }
 
         insertCollabLog(id, 'EDIT', userId, operatorName, null);
         res.json({ message: '已更新' });
@@ -10119,143 +10256,208 @@ app.put('/api/collab/requests/:id', authenticateToken, requireNonViewer, async (
     }
 });
 
-// 5. 触发钉钉通知（admin 唯一，数据协作模块 v2.0 §7.4）
-// 流程:取协作单 → 取钉钉凭证 → 取 dev.phone → getAccessToken → 解析 dingtalk_user_id(首次缓存)
-//      → sendMarkdownToUser → classifyError → 写日志 → 更新 notified_at
-// 错误分层按 §7.6 表;token_expired 模块层伪重试一次;user_invalid 清 dingtalk_user_id 缓存
-app.post('/api/collab/requests/:id/notify', authenticateToken, requireAdmin, async (req, res) => {
+// ============================================================
+// 钉钉公用发送路径（v3 二级转派抽取，2026-05-19）
+// 输入：targetUser 必须含 { id, display_name, phone, dingtalk_user_id }
+//       title + markdown + operatorInfo { id, name } 用于审计日志
+// 输出：{ ok, status, body }
+//        - ok=true 时 status=200 + body={message, target_user_name, notified_at, processQueryKey}
+//        - ok=false 时 status=4xx/5xx + body 含 error/errcode/errmsg/reason/suggestion
+// 副作用：成功时返回 processQueryKey 让调用方决定是否落 notify_message_key（创建模板才需要落）
+// best-effort 调用方：拿 result 不要 throw；按 ok 分支处理或仅记日志
+// ============================================================
+async function sendCollabDingtalkRaw(collabId, targetUser, title, markdown, operatorInfo) {
+    // 1. 取凭证
+    const [appKey, appSecret, robotCode] = await Promise.all(
+        ['dingtalk_app_key', 'dingtalk_app_secret', 'dingtalk_robot_code'].map(readSystemConfig)
+    );
+    if (!appKey || !appSecret || !robotCode) {
+        return { ok: false, status: 500, body: { error: '钉钉配置未填写,请管理员先到系统配置 → 钉钉配置填写凭证', reason: 'no_config' } };
+    }
+
+    // 2. phone 校验
+    if (!targetUser.phone) {
+        return {
+            ok: false, status: 400,
+            body: {
+                error: `${targetUser.display_name || 'user#' + targetUser.id} 未绑定手机号`,
+                suggestion: '请到 admin → 用户管理 → 编辑该用户 → 填写手机号后重试',
+                reason: 'no_phone'
+            }
+        };
+    }
+
+    // 3. 取 access_token
+    let token;
+    try {
+        token = await dingtalkNotify.getAccessToken(appKey, appSecret);
+    } catch (err) {
+        const cls = dingtalkNotify.classifyError(err);
+        insertCollabLog(collabId, 'NOTIFY_FAIL', operatorInfo.id, operatorInfo.name, `gettoken:${cls.reason}`);
+        return { ok: false, status: 502, body: { error: cls.hint, errcode: cls.errcode, errmsg: cls.errmsg, reason: cls.reason } };
+    }
+
+    // 4. dingtalk_user_id 缓存
+    let dingUserId = targetUser.dingtalk_user_id;
+    if (!dingUserId) {
+        try {
+            dingUserId = await dingtalkNotify.getUserIdByMobile(token, targetUser.phone);
+            await dbRunAsync('UPDATE users SET dingtalk_user_id = ? WHERE id = ?', [dingUserId, targetUser.id]);
+        } catch (err) {
+            const cls = dingtalkNotify.classifyError(err);
+            insertCollabLog(collabId, 'NOTIFY_FAIL', operatorInfo.id, operatorInfo.name, `get_by_mobile:${cls.reason}`);
+            return {
+                ok: false, status: 400,
+                body: {
+                    error: '钉钉用户查询失败',
+                    detail: cls.hint, errcode: cls.errcode, errmsg: cls.errmsg,
+                    suggestion: '请确认手机号已加入企业钉钉',
+                    reason: cls.reason
+                }
+            };
+        }
+    }
+
+    // 5. 发送 + token_expired 伪重试一次
+    async function doSend(useToken) {
+        return await dingtalkNotify.sendMarkdownToUser(useToken, robotCode, [dingUserId], title, markdown);
+    }
+
+    let sendResult;
+    try {
+        sendResult = await doSend(token);
+    } catch (err) {
+        const cls = dingtalkNotify.classifyError(err);
+        insertCollabLog(collabId, 'NOTIFY_FAIL', operatorInfo.id, operatorInfo.name, `send:${cls.reason}`);
+        return { ok: false, status: 502, body: { error: cls.hint, errcode: cls.errcode, errmsg: cls.errmsg, reason: cls.reason } };
+    }
+
+    if (sendResult.errcode && sendResult.errcode !== 0) {
+        const cls = dingtalkNotify.classifyError(sendResult);
+        if (cls.reason === 'token_expired') {
+            dingtalkNotify.clearCachedToken();
+            try {
+                const freshToken = await dingtalkNotify.getAccessToken(appKey, appSecret);
+                sendResult = await doSend(freshToken);
+            } catch (retryErr) {
+                const retryCls = dingtalkNotify.classifyError(retryErr);
+                insertCollabLog(collabId, 'NOTIFY_FAIL', operatorInfo.id, operatorInfo.name, `retry:${retryCls.reason}`);
+                return { ok: false, status: 502, body: { error: retryCls.hint, errcode: retryCls.errcode, reason: retryCls.reason } };
+            }
+            if (sendResult.errcode && sendResult.errcode !== 0) {
+                const retryCls2 = dingtalkNotify.classifyError(sendResult);
+                insertCollabLog(collabId, 'NOTIFY_FAIL', operatorInfo.id, operatorInfo.name, `retry:${retryCls2.reason}`);
+                return { ok: false, status: 502, body: { error: retryCls2.hint, errcode: retryCls2.errcode, errmsg: retryCls2.errmsg, reason: retryCls2.reason } };
+            }
+        } else {
+            if (cls.clearUserId) {
+                await dbRunAsync('UPDATE users SET dingtalk_user_id = NULL WHERE id = ?', [targetUser.id]);
+            }
+            insertCollabLog(collabId, 'NOTIFY_FAIL', operatorInfo.id, operatorInfo.name, `send:${cls.reason}`);
+            return { ok: false, status: 502, body: { error: cls.hint, errcode: cls.errcode, errmsg: cls.errmsg, reason: cls.reason } };
+        }
+    }
+
+    return {
+        ok: true, status: 200,
+        body: {
+            target_user_name: targetUser.display_name,
+            notified_at: new Date().toISOString(),
+            processQueryKey: sendResult.processQueryKey || null
+        }
+    };
+}
+
+// 取协作单 + target_db_name 的辅助（钉钉模板拼装需要）
+async function getCollabWithDbName(id) {
+    return await dbGetAsync(
+        `SELECT c.*, dc.name AS target_db_name
+         FROM collab_requests c
+         LEFT JOIN db_connections dc ON dc.id = c.target_db_connection_id
+         WHERE c.id = ?`,
+        [id]
+    );
+}
+
+// 5. 触发钉钉通知（v3 二级转派改造：admin 在 PENDING_ASSIGN/PENDING 状态可调）
+// 流程:取协作单 → 按状态选模板 + 收件人 →（PENDING_ASSIGN 发对接人创建模板；PENDING 发开发指派模板）
+//      → sendCollabDingtalkRaw → 仅 PENDING 时落 notified_at + processQueryKey（已读回执跟踪用，对应开发端首次指派）
+// v3 注意：原 v2.0 PENDING 状态发开发的语义保留；新增 PENDING_ASSIGN 发对接人。已读回执（notify_message_key）只在
+//        "发开发"成功时落（PENDING 路径），因为对接人接收的"创建模板"不需要已读跟踪。
+// codex 十六审 #3 high 权限拆分：
+//   - PENDING_ASSIGN：仅 admin 可调（通知对接人）
+//   - PENDING：admin 或本单 contact_person 可调（通知开发；对接人指派后能自助通知）
+// codex 十六审 #4 high：notify 重发 PENDING 时同步清空 read_at（避免旧 processQueryKey 已读时间复用）
+app.post('/api/collab/requests/:id/notify', authenticateToken, requireNonViewer, async (req, res) => {
     const { id } = req.params;
     try {
-        // 1. 取协作单 + 目标库连接名(用于卡片)
-        const collab = await dbGetAsync(
-            `SELECT c.*, dc.name AS target_db_name
-             FROM collab_requests c
-             LEFT JOIN db_connections dc ON dc.id = c.target_db_connection_id
-             WHERE c.id = ?`,
-            [id]
-        );
+        const collab = await getCollabWithDbName(id);
         if (!collab) return res.status(404).json({ error: '协作单不存在' });
-        if (collab.status !== 'PENDING') {
-            return res.status(409).json({ error: `当前状态 ${collab.status} 不可发送通知,仅 PENDING 状态可触发` });
+        if (collab.status !== 'PENDING_ASSIGN' && collab.status !== 'PENDING') {
+            return res.status(409).json({ error: `当前状态 ${collab.status} 不可发送通知（仅 PENDING_ASSIGN / PENDING 可触发）` });
         }
 
-        // 2. 取钉钉凭证 + 平台 baseUrl
-        const [appKey, appSecret, robotCode, platformBaseUrl] = await Promise.all(
-            ['dingtalk_app_key', 'dingtalk_app_secret', 'dingtalk_robot_code', 'platform_base_url']
-                .map(readSystemConfig)
-        );
-        if (!appKey || !appSecret || !robotCode) {
-            return res.status(500).json({ error: '钉钉配置未填写,请管理员先到系统配置 → 钉钉配置填写凭证' });
+        // codex 十六审 #3：按状态分支权限
+        const currentUserId = Number(req.user.id);
+        const isAdmin = req.user.role === 'admin';
+        if (collab.status === 'PENDING_ASSIGN' && !isAdmin) {
+            return res.status(403).json({ error: 'PENDING_ASSIGN 状态仅 admin 可发送通知', code: 'NOT_NOTIFIER' });
+        }
+        if (collab.status === 'PENDING') {
+            const isContactPerson = Number(collab.contact_person_id) === currentUserId;
+            if (!isAdmin && !isContactPerson) {
+                return res.status(403).json({ error: '仅 admin 或本单对接人可发送通知', code: 'NOT_NOTIFIER' });
+            }
         }
 
-        // 3. 取开发账号 + 校验 phone
-        const dev = await dbGetAsync(
+        const platformBaseUrl = await readSystemConfig('platform_base_url');
+
+        // 按状态选收件人 + 模板
+        let targetUserId, title, markdown, opLogType;
+        if (collab.status === 'PENDING_ASSIGN') {
+            targetUserId = collab.contact_person_id;
+            title = `待指派协作单 · ${collab.requester_dept}`;
+            markdown = dingtalkNotify.buildCollabCreatedCard(collab, platformBaseUrl);
+            opLogType = 'NOTIFY_CONTACT';
+        } else {
+            // PENDING
+            targetUserId = collab.developer_id;
+            title = `新临时取数任务 · ${collab.requester_dept}`;
+            markdown = dingtalkNotify.buildCollabAssignedCard(collab, platformBaseUrl);
+            opLogType = 'NOTIFY';
+        }
+
+        if (!targetUserId || Number(targetUserId) === 0) {
+            return res.status(400).json({ error: '收件人未定（PENDING_ASSIGN 需有对接人，PENDING 需已指派开发）' });
+        }
+
+        const targetUser = await dbGetAsync(
             'SELECT id, display_name, phone, dingtalk_user_id, status FROM users WHERE id = ?',
-            [collab.developer_id]
+            [targetUserId]
         );
-        if (!dev) return res.status(400).json({ error: '开发账号不存在' });
-        if (dev.status !== 'active') return res.status(400).json({ error: `开发账号 ${dev.display_name} 已停用` });
-        if (!dev.phone) {
-            return res.status(400).json({
-                error: `开发 ${dev.display_name} 未绑定手机号`,
-                suggestion: '请到 admin → 用户管理 → 编辑该用户 → 填写手机号后重试'
-            });
+        if (!targetUser) return res.status(400).json({ error: '收件人账号不存在' });
+        if (targetUser.status !== 'active') return res.status(400).json({ error: `收件人 ${targetUser.display_name} 已停用` });
+
+        const operatorInfo = { id: req.user.id, name: req.user.display_name || req.user.username };
+        const result = await sendCollabDingtalkRaw(id, targetUser, title, markdown, operatorInfo);
+        if (!result.ok) return res.status(result.status).json(result.body);
+
+        // 成功：PENDING 路径才落 notified_at + processQueryKey（已读回执跟踪开发；对接人路径不跟踪）
+        // codex 十六审 #4：notify 重发开发时清 read_at —— 旧 processQueryKey 对应的"已读时间"不能复用到新 processQueryKey
+        if (collab.status === 'PENDING') {
+            await dbRunAsync(
+                "UPDATE collab_requests SET notified_at = datetime('now','localtime'), notify_message_key = ?, read_at = NULL WHERE id = ?",
+                [result.body.processQueryKey, id]
+            );
         }
+        insertCollabLog(id, opLogType, operatorInfo.id, operatorInfo.name, null);
 
-        // 4. 拿 access_token
-        let token;
-        try {
-            token = await dingtalkNotify.getAccessToken(appKey, appSecret);
-        } catch (err) {
-            const cls = dingtalkNotify.classifyError(err);
-            insertCollabLog(id, 'NOTIFY_FAIL', req.user.id, req.user.display_name, `gettoken:${cls.reason}`);
-            return res.status(502).json({ error: cls.hint, errcode: cls.errcode, errmsg: cls.errmsg, reason: cls.reason });
-        }
-
-        // 5. dingtalk_user_id 缓存:无则调 get_by_mobile + 写库
-        let dingUserId = dev.dingtalk_user_id;
-        if (!dingUserId) {
-            try {
-                dingUserId = await dingtalkNotify.getUserIdByMobile(token, dev.phone);
-                await dbRunAsync('UPDATE users SET dingtalk_user_id = ? WHERE id = ?', [dingUserId, dev.id]);
-            } catch (err) {
-                const cls = dingtalkNotify.classifyError(err);
-                insertCollabLog(id, 'NOTIFY_FAIL', req.user.id, req.user.display_name, `get_by_mobile:${cls.reason}`);
-                return res.status(400).json({
-                    error: '钉钉用户查询失败',
-                    detail: cls.hint,
-                    errcode: cls.errcode,
-                    errmsg: cls.errmsg,
-                    suggestion: '请确认开发的手机号已加入企业钉钉'
-                });
-            }
-        }
-
-        // 6. 发送 markdown 卡片;token_expired 时模块层伪重试一次
-        const title = `新临时取数任务 · ${collab.requester_dept}`;
-        const markdown = dingtalkNotify.buildCollabNotifyCard(collab, platformBaseUrl);
-
-        async function doSend(useToken) {
-            return await dingtalkNotify.sendMarkdownToUser(useToken, robotCode, [dingUserId], title, markdown);
-        }
-
-        let sendResult;
-        try {
-            sendResult = await doSend(token);
-        } catch (err) {
-            const cls = dingtalkNotify.classifyError(err);
-            insertCollabLog(id, 'NOTIFY_FAIL', req.user.id, req.user.display_name, `send:${cls.reason}`);
-            return res.status(502).json({ error: cls.hint, errcode: cls.errcode, errmsg: cls.errmsg, reason: cls.reason });
-        }
-
-        // 7. 处理 sendResult.errcode!=0
-        if (sendResult.errcode && sendResult.errcode !== 0) {
-            const cls = dingtalkNotify.classifyError(sendResult);
-
-            // token_expired:清缓存 + 重取 token + 再发一次(伪重试)
-            if (cls.reason === 'token_expired') {
-                dingtalkNotify.clearCachedToken();
-                try {
-                    const freshToken = await dingtalkNotify.getAccessToken(appKey, appSecret);
-                    sendResult = await doSend(freshToken);
-                } catch (retryErr) {
-                    const retryCls = dingtalkNotify.classifyError(retryErr);
-                    insertCollabLog(id, 'NOTIFY_FAIL', req.user.id, req.user.display_name, `retry:${retryCls.reason}`);
-                    return res.status(502).json({ error: retryCls.hint, errcode: retryCls.errcode, reason: retryCls.reason });
-                }
-                if (sendResult.errcode && sendResult.errcode !== 0) {
-                    const retryCls2 = dingtalkNotify.classifyError(sendResult);
-                    insertCollabLog(id, 'NOTIFY_FAIL', req.user.id, req.user.display_name, `retry:${retryCls2.reason}`);
-                    return res.status(502).json({ error: retryCls2.hint, errcode: retryCls2.errcode, errmsg: retryCls2.errmsg, reason: retryCls2.reason });
-                }
-                // 伪重试成功,落到下方 success 分支
-            } else {
-                // user_invalid 清 dingtalk_user_id 缓存
-                if (cls.clearUserId) {
-                    await dbRunAsync('UPDATE users SET dingtalk_user_id = NULL WHERE id = ?', [dev.id]);
-                }
-                insertCollabLog(id, 'NOTIFY_FAIL', req.user.id, req.user.display_name, `send:${cls.reason}`);
-                return res.status(502).json({
-                    error: cls.hint,
-                    errcode: cls.errcode,
-                    errmsg: cls.errmsg,
-                    reason: cls.reason
-                });
-            }
-        }
-
-        // 8. 成功:更新 notified_at + 存 processQueryKey + 写日志
-        // processQueryKey 用于后续调钉钉已读回执 API,字段名 notify_message_key
-        const messageKey = sendResult.processQueryKey || null;
-        await dbRunAsync(
-            "UPDATE collab_requests SET notified_at = datetime('now','localtime'), notify_message_key = ? WHERE id = ?",
-            [messageKey, id]
-        );
-        insertCollabLog(id, 'NOTIFY', req.user.id, req.user.display_name, null);
+        // 兼容旧前端字段名 developer_name（D2 钉钉模块原返回字段）
         res.json({
             message: '通知已发送',
-            developer_name: dev.display_name,
-            notified_at: new Date().toISOString()
+            developer_name: result.body.target_user_name,  // 兼容旧字段名
+            target_user_name: result.body.target_user_name,
+            notified_at: result.body.notified_at
         });
     } catch (err) {
         logger.error('POST /api/collab/requests/:id/notify 失败:', err);
@@ -10460,20 +10662,27 @@ app.post('/api/collab/requests/:id/submit',
                 });
             }
 
-            // === 前置校验：权限（developer 本人或 admin）===
-            // codex 十审 #6：JWT id 可能是字符串、SQLite developer_id 是数字，严格相等会误判
-            // 用 Number() 归一化；developer_id 为 null 时单独提示更明确（不是权限错，是协作单未指派）
-            if (collab.developer_id === null || collab.developer_id === undefined) {
+            // === 前置校验：权限（仅指派 developer 本人）===
+            // v3 二级转派方案 §6 拍板：负责人/admin 都不能代开发提交（权责清晰）
+            //   - admin 兜底场景请走改派 endpoint（POST /:id/assign 改派给其他在岗开发）
+            //   - codex 十审 #6：JWT id 可能是字符串、SQLite developer_id 是数字，用 Number() 归一化
+            // B1 占位值方案：developer_id=0 表示未指派（PENDING_ASSIGN 阶段），单独提示更明确
+            if (!collab.developer_id || collab.developer_id === COLLAB_UNASSIGNED_DEVELOPER_ID) {
                 cleanupPending();
-                return res.status(409).json({ error: '协作单未指派开发负责人，无法提交' });
+                return res.status(409).json({
+                    error: '协作单未指派开发，无法提交（请先由对接人指派开发）',
+                    code: 'NOT_ASSIGNED'
+                });
             }
             const userIdNum = Number(userId);
             const devIdNum = Number(collab.developer_id);
             const isDev = Number.isSafeInteger(userIdNum) && userIdNum === devIdNum;
-            const isAdmin = req.user.role === 'admin';
-            if (!isDev && !isAdmin) {
+            if (!isDev) {
                 cleanupPending();
-                return res.status(403).json({ error: '仅指派开发或管理员可提交' });
+                return res.status(403).json({
+                    error: '仅本单指派开发可提交交付物（admin 兜底请走改派）',
+                    code: 'NOT_DEVELOPER'
+                });
             }
 
             // === 前置校验：文件分类（必须恰好 result_data + result_script，codex M2 简化版）===
@@ -10540,6 +10749,40 @@ app.post('/api/collab/requests/:id/submit',
                     code: 'CONCURRENT_PRE_UPDATE',
                 });
             }
+
+            // === v3 best-effort 钉钉触发：通知 admin 协作单已提交 ===
+            // 5/18 决策：钉钉走部不阻塞主流程；admin 拿不到通知不影响 smoke test 推进
+            // 选 admin 用户：role='admin' + status='active' + phone 非空；多个则取最早创建的一个
+            // 失败仅记日志（NOTIFY_FAIL），不向调用方返回错误
+            (async () => {
+                try {
+                    const adminUser = await dbGetAsync(
+                        `SELECT id, display_name, phone, dingtalk_user_id
+                         FROM users
+                         WHERE role = 'admin' AND status = 'active' AND phone IS NOT NULL AND phone != ''
+                         ORDER BY created_at ASC LIMIT 1`
+                    );
+                    if (!adminUser) {
+                        logger.info(`[collab-submit-notify] 协作单 #${id} 提交后无可通知的 admin（无手机号或全停用），跳过钉钉`);
+                        return;
+                    }
+                    const collab = await getCollabWithDbName(id);
+                    if (!collab) return;
+                    const platformBaseUrl = await readSystemConfig('platform_base_url');
+                    const title = `协作单已提交 · ${collab.requester_dept}`;
+                    const markdown = dingtalkNotify.buildCollabSubmittedCard(collab, platformBaseUrl);
+                    const operatorInfo = { id: userId, name: userName };
+                    const result = await sendCollabDingtalkRaw(id, adminUser, title, markdown, operatorInfo);
+                    if (result.ok) {
+                        insertCollabLog(id, 'NOTIFY_ADMIN_SUBMIT', userId, userName, null);
+                        logger.info(`[collab-submit-notify] 协作单 #${id} 已通知 admin ${adminUser.display_name}`);
+                    } else {
+                        logger.warn(`[collab-submit-notify] 协作单 #${id} 通知 admin 失败：${result.body.error}（reason=${result.body.reason}）`);
+                    }
+                } catch (e) {
+                    logger.warn(`[collab-submit-notify] 协作单 #${id} 钉钉触发异常：${e.message}`);
+                }
+            })();
 
             // === 解密目标库密码 ===
             let dbPassword;
@@ -10775,6 +11018,162 @@ app.post('/api/collab/requests/:id/submit',
 //   - 双层守卫：前置 SELECT 给"当前状态 X"友好错误 + 条件 UPDATE 看 changes 兜底并发
 //   - 不写 sql_validated_at（保留 smoke test 真跑过的语义），bypass 走 done_at
 //   - BYPASS 日志 best-effort（fire-and-forget），跟项目其他 collab 写入风格一致
+// ==========================================================
+// v3 二级转派指派 endpoint（2026-05-18，预期 v1.66.0）
+// 方案 §4.1：负责人指派 / 改派开发
+//   - 权限：协作单 contact_person 本人 或 admin（admin 兜底）
+//   - 状态：PENDING_ASSIGN → PENDING（首次指派）；PENDING → PENDING（改派，保留状态）
+//   - 校验：developer_id 有效 active user；developer_id != 0；developer_id != contact_person_id
+//   - 副作用：UPDATE 字段 + 写改派前 developer_id 到 previous_developer_id（用于通知前任）
+//   - 钉钉通知：本 endpoint 不主动触发，由 admin/对接人调 /notify endpoint 手动发送（与既有风格一致，错误隔离）
+// ==========================================================
+app.post('/api/collab/requests/:id/assign', authenticateToken, requireNonViewer, async (req, res) => {
+    const idStr = req.params.id;
+    // codex 十六审 #5：JWT id 字符串/数字混用防误判，统一 Number
+    const userId = Number(req.user.id);
+    const userRole = req.user.role;
+    const userName = req.user.display_name || req.user.username || `user#${userId}`;
+
+    // === 前置：id 校验（沿用 bypass endpoint 风格）===
+    if (!/^[1-9]\d*$/.test(idStr)) {
+        return res.status(400).json({ error: 'id 必须是正整数', code: 'INVALID_ID' });
+    }
+    const id = parseInt(idStr, 10);
+    if (!Number.isSafeInteger(id)) {
+        return res.status(400).json({ error: 'id 超出安全整数范围', code: 'INVALID_ID' });
+    }
+
+    // === 前置：developer_id body 校验（codex 十六审 #5：用严格正则替换 parseInt，避免接受 '12abc' / '1.5'）===
+    const rawDeveloperId = req.body && req.body.developer_id;
+    if (rawDeveloperId === undefined || rawDeveloperId === null) {
+        return res.status(400).json({ error: 'developer_id 必填', code: 'MISSING_DEVELOPER' });
+    }
+    if (!/^[1-9]\d*$/.test(String(rawDeveloperId))) {
+        return res.status(400).json({ error: 'developer_id 必须是正整数', code: 'INVALID_DEVELOPER' });
+    }
+    const developerId = Number(rawDeveloperId);
+    if (!Number.isSafeInteger(developerId)) {
+        return res.status(400).json({ error: 'developer_id 超出安全整数范围', code: 'INVALID_DEVELOPER' });
+    }
+
+    try {
+        // === 取协作单 + 双重状态守卫 ===
+        const collab = await dbGetAsync(
+            `SELECT id, status, contact_person_id, developer_id, oa_request_no
+               FROM collab_requests WHERE id = ?`,
+            [id]
+        );
+        if (!collab) {
+            return res.status(404).json({ error: '协作单不存在' });
+        }
+
+        // 权限：仅 admin 或本单 contact_person 可指派（codex 十六审 #5：统一 Number 比较）
+        const isAdmin = userRole === 'admin';
+        const isContactPerson = Number(collab.contact_person_id) === userId;
+        if (!isAdmin && !isContactPerson) {
+            return res.status(403).json({
+                error: '仅本单对接人或 admin 可指派开发',
+                code: 'NOT_ASSIGNER'
+            });
+        }
+
+        // 状态：仅 PENDING_ASSIGN / PENDING 可指派或改派
+        if (collab.status !== 'PENDING_ASSIGN' && collab.status !== 'PENDING') {
+            return res.status(409).json({
+                error: `当前状态 ${collab.status} 不允许指派（仅 PENDING_ASSIGN / PENDING 可指派/改派）`,
+                code: 'INVALID_STATE',
+                current_status: collab.status
+            });
+        }
+
+        // 不能指派给对接人自己（按拍板 #10 严格走流程）— Number 比较防类型漂移
+        if (developerId === Number(collab.contact_person_id)) {
+            return res.status(400).json({
+                error: '不能将对接人本人指派为开发',
+                code: 'SAME_AS_CONTACT'
+            });
+        }
+
+        // 校验 developer 用户存在 + active + role 合法
+        const dev = await dbGetAsync(
+            'SELECT id, display_name, username, role, status FROM users WHERE id = ?',
+            [developerId]
+        );
+        if (!dev) {
+            return res.status(400).json({ error: '指派的开发人员不存在', code: 'DEVELOPER_NOT_FOUND' });
+        }
+        if (dev.status !== 'active') {
+            return res.status(400).json({ error: `开发人员 ${dev.display_name} 已停用`, code: 'DEVELOPER_INACTIVE' });
+        }
+        if (!['user', 'publisher', 'admin'].includes(dev.role)) {
+            return res.status(400).json({ error: '指派的开发人员角色无效', code: 'INVALID_ROLE' });
+        }
+
+        // 改派幂等：指派的人和当前相同时直接成功（避免误点重发）— Number 比较防类型漂移
+        if (collab.status === 'PENDING' && Number(collab.developer_id) === developerId) {
+            return res.json({
+                message: '该协作单已指派给此开发，无需重复操作',
+                current_status: 'PENDING',
+                developer_id: developerId,
+                no_change: true
+            });
+        }
+
+        const developerName = dev.display_name || dev.username;
+        const isReassign = collab.status === 'PENDING';
+        const previousDeveloperId = isReassign ? collab.developer_id : null;
+
+        // === 条件 UPDATE：兜底并发漂移（沿用 bypass endpoint 风格）===
+        // 双 WHERE 条件：id + status 必须仍是发起时的状态
+        // codex 十六审 #4 high：首次指派 / 改派时清空旧 developer 的通知跟踪字段
+        //   - notified_at / notify_message_key / read_at 三件套清空，避免前任已读时间沾染新开发
+        //   - 首次指派时这三字段本就应该是 NULL（PENDING_ASSIGN 阶段不会发开发钉钉），冗余清空也无害
+        const result = await dbRunAsync(
+            `UPDATE collab_requests SET
+                developer_id = ?,
+                developer_name = ?,
+                status = 'PENDING',
+                assigned_at = datetime('now','localtime'),
+                assigned_by = ?,
+                previous_developer_id = ?,
+                notified_at = NULL,
+                notify_message_key = NULL,
+                read_at = NULL
+              WHERE id = ?
+                AND status = ?
+                AND contact_person_id = ?`,
+            [developerId, developerName, userId, previousDeveloperId, id, collab.status, collab.contact_person_id]
+        );
+
+        if (!result || result.changes === 0) {
+            return res.status(409).json({
+                error: '协作单状态已变化，请刷新后重试',
+                code: 'STATE_CHANGED'
+            });
+        }
+
+        // 审计日志：ASSIGNED / REASSIGNED
+        const opType = isReassign ? 'REASSIGNED' : 'ASSIGNED';
+        const logReason = isReassign
+            ? `改派开发：${previousDeveloperId} → ${developerId}(${developerName})`
+            : `指派开发：${developerId}(${developerName})`;
+        insertCollabLog(id, opType, userId, userName, logReason);
+        logger.info(`[collab-assign] 协作单 #${id} ${opType} by ${userName}: dev=${developerId}(${developerName})${isReassign ? `, prev=${previousDeveloperId}` : ''}`);
+
+        return res.json({
+            message: isReassign ? '改派成功' : '指派成功',
+            current_status: 'PENDING',
+            developer_id: developerId,
+            developer_name: developerName,
+            previous_developer_id: previousDeveloperId,
+            is_reassign: isReassign
+        });
+    } catch (e) {
+        logger.error(`[collab-assign] 协作单 #${id} 指派异常: ${e.message}`, e);
+        return res.status(500).json({ error: '指派失败，请联系管理员', code: 'ASSIGN_FAILED' });
+    }
+});
+
 app.post('/api/collab/requests/:id/bypass', authenticateToken, requireAdmin, async (req, res) => {
     const idStr = req.params.id;
     const userId = req.user.id;

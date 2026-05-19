@@ -3,7 +3,7 @@
  *
  * 用法：node scripts/test-collab-friction-e2e.js
  *
- * 前置：本地 server 已启动（localhost:3000） + task_pool.db 有 id=3 协作单
+ * 前置：本地 server 已启动（localhost:3000）+ fixture 由 _test-fixture.js 动态创建
  *
  * 测试场景：
  *   T1 admin DONE 状态首次记录 → 200 + DB 字段写入 + FRICTION_RECORD 日志
@@ -35,7 +35,9 @@ const BASE = 'http://localhost:3000';
 const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
 const JWT_SECRET = process.env.JWT_SECRET || 'default_secret_key_change_me';
 
-const TEST_ID = 3;
+// v3 二级转派后 fixture 动态创建（2026-05-19）
+const fx = require('./_test-fixture');
+let TEST_ID = null;
 const tokens = {};
 
 async function loginAs(username) {
@@ -97,6 +99,11 @@ async function runTests() {
     tokens.publisher = await loginAs('13857133559');
     tokens.user = await loginAs('demo_user_a');
     console.log('✅ tokens prepared');
+
+    // v3 二级转派 fixture
+    const fixture = await fx.createPendingFixture();
+    TEST_ID = fixture.id;
+    console.log(`✅ fixture created: id=${TEST_ID} oa=${fixture.oaNo}`);
 
     let passed = 0, failed = 0;
     const failures = [];
@@ -237,10 +244,24 @@ async function runTests() {
     console.log(`\n=== Summary ===`);
     console.log(`Passed: ${passed}`);
     console.log(`Failed: ${failed}`);
+
+    if (TEST_ID) {
+        try {
+            await fx.cleanup(TEST_ID);
+            console.log(`✅ fixture cleaned up: id=${TEST_ID}`);
+        } catch (e) {
+            console.log(`⚠️ fixture cleanup failed: ${e.message}`);
+        }
+    }
+
     if (failures.length > 0) {
         for (const f of failures) console.log(`  - ${f.name}: ${f.error}`);
         process.exit(1);
     }
 }
 
-runTests().catch(e => { console.error('FATAL:', e); process.exit(2); });
+runTests().catch(async (e) => {
+    console.error('FATAL:', e);
+    if (TEST_ID) { try { await fx.cleanup(TEST_ID); } catch (_) { } }
+    process.exit(2);
+});
