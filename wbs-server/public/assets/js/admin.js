@@ -413,9 +413,23 @@ function toggleSourceSystemCode() {
     sourceGroup.style.display = connType === 'source' ? '' : 'none';
 }
 
+// v1.69.1：切换数据库方言时联动端口默认值（仅当当前端口为已知方言默认值时才覆盖）
+function onDialectChange() {
+    const dialect = document.getElementById('dbConnDialect').value;
+    const portInput = document.getElementById('dbConnPort');
+    const currentPort = parseInt(portInput.value);
+    // 只有当端口是另一方言默认值时才自动切换，避免覆盖用户已自定义的端口
+    if (dialect === 'mysql' && currentPort === 1433) {
+        portInput.value = 3306;
+    } else if (dialect === 'sqlserver' && currentPort === 3306) {
+        portInput.value = 1433;
+    }
+}
+
 async function testNewDbConnection() {
+    const type = document.getElementById('dbConnDialect').value;
     const host = document.getElementById('dbConnHost').value.trim();
-    const port = parseInt(document.getElementById('dbConnPort').value) || 1433;
+    const port = parseInt(document.getElementById('dbConnPort').value) || (type === 'mysql' ? 3306 : 1433);
     const database = document.getElementById('dbConnDatabase').value.trim();
     const username = document.getElementById('dbConnUsername').value.trim();
     const password = document.getElementById('dbConnPassword').value;
@@ -430,7 +444,7 @@ async function testNewDbConnection() {
         const res = await fetch(`${API_URL}/db-connections/test-new`, {
             method: 'POST',
             headers: getAuthHeaders(),
-            body: JSON.stringify({ host, port, database, username, password })
+            body: JSON.stringify({ type, host, port, database, username, password })
         });
 
         const data = await res.json();
@@ -446,10 +460,11 @@ async function testNewDbConnection() {
 
 async function createDbConnection() {
     const connection_type = document.getElementById('dbConnType').value;
+    const type = document.getElementById('dbConnDialect').value;  // v1.69.1：sqlserver / mysql
     const source_system_code = document.getElementById('dbConnSourceSystemCode')?.value.trim() || '';
     const name = document.getElementById('dbConnName').value.trim();
     const host = document.getElementById('dbConnHost').value.trim();
-    const port = parseInt(document.getElementById('dbConnPort').value) || 1433;
+    const port = parseInt(document.getElementById('dbConnPort').value) || (type === 'mysql' ? 3306 : 1433);
     const database = document.getElementById('dbConnDatabase').value.trim();
     const default_schema = document.getElementById('dbConnSchema').value.trim() || 'dbo';
     const username = document.getElementById('dbConnUsername').value.trim();
@@ -470,7 +485,7 @@ async function createDbConnection() {
             method: 'POST',
             headers: getAuthHeaders(),
             body: JSON.stringify({
-                name, type: 'sqlserver', host, port, database, default_schema,
+                name, type, host, port, database, default_schema,
                 username, password, is_default, connection_type, source_system_code
             })
         });
@@ -480,6 +495,7 @@ async function createDbConnection() {
             showMessage('数据库连接创建成功', true);
             // 清空表单
             document.getElementById('dbConnType').value = 'warehouse';
+            document.getElementById('dbConnDialect').value = 'sqlserver';
             document.getElementById('dbConnSourceSystemCode').value = '';
             document.getElementById('sourceSystemCodeGroup').style.display = 'none';
             document.getElementById('dbConnName').value = '';

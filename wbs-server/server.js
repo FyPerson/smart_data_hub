@@ -6797,35 +6797,54 @@ app.get('/api/db-connections', authenticateToken, requireAdmin, (req, res) => {
 
 // 1.5 测试新连接 (未保存的连接，仅管理员) - 必须在 :id 路由之前
 app.post('/api/db-connections/test-new', authenticateToken, requireAdmin, async (req, res) => {
-    const { host, port, database, username, password } = req.body;
+    const { type, host, port, database, username, password } = req.body;
 
     if (!host || !database || !username || !password) {
         return res.status(400).json({ error: '缺少必要参数' });
     }
 
-    try {
-        const config = {
-            user: username,
-            password: password,
-            server: host,
-            port: port || 1433,
-            database: database,
-            options: {
-                encrypt: false,
-                trustServerCertificate: true,
-                enableArithAbort: true,
-                requestTimeout: 10000
-            }
-        };
+    const dialect = (type === 'mysql') ? 'mysql' : 'sqlserver';  // v1.69.1：默认 sqlserver 保持向后兼容
 
-        const pool = new sql.ConnectionPool(config);
-        await pool.connect();
-        await pool.request().query('SELECT 1 as test');
-        await pool.close();
+    try {
+        if (dialect === 'mysql') {
+            // mysql2 一次性连接（不入池，避免污染 mysqlPools 缓存）
+            const conn = await mysql.createConnection({
+                host,
+                port: port || 3306,
+                database,
+                user: username,
+                password,
+                connectTimeout: 10000,
+                charset: 'utf8mb4'
+            });
+            try {
+                await conn.query('SELECT 1 AS test');
+            } finally {
+                await conn.end();
+            }
+        } else {
+            const config = {
+                user: username,
+                password: password,
+                server: host,
+                port: port || 1433,
+                database: database,
+                options: {
+                    encrypt: false,
+                    trustServerCertificate: true,
+                    enableArithAbort: true,
+                    requestTimeout: 10000
+                }
+            };
+            const pool = new sql.ConnectionPool(config);
+            await pool.connect();
+            await pool.request().query('SELECT 1 as test');
+            await pool.close();
+        }
 
         res.json({ success: true, message: '连接测试成功' });
     } catch (err) {
-        logger.error('Test new db connection error:', err.message);
+        logger.error(`Test new db connection error (dialect=${dialect}):`, err.message);
         res.status(500).json({ success: false, error: '连接失败: ' + err.message });
     }
 });
@@ -6933,16 +6952,27 @@ app.post('/api/db-connections/:id/test', authenticateToken, requireAdmin, async 
         }
 
         const password = decryptPassword(conn.password);
-        const pool = await getMssqlPool({
-            host: conn.host,
-            port: conn.port,
-            database: conn.database,
-            username: conn.username,
-            password: password
-        });
+        const dialect = (conn.type === 'mysql') ? 'mysql' : 'sqlserver';  // v1.69.1
 
-        // 执行简单查询测试
-        const result = await pool.request().query('SELECT 1 as test');
+        if (dialect === 'mysql') {
+            const pool = await getMysqlPool({
+                host: conn.host,
+                port: conn.port,
+                database: conn.database,
+                username: conn.username,
+                password
+            });
+            await pool.query('SELECT 1 AS test');
+        } else {
+            const pool = await getMssqlPool({
+                host: conn.host,
+                port: conn.port,
+                database: conn.database,
+                username: conn.username,
+                password
+            });
+            await pool.request().query('SELECT 1 as test');
+        }
         res.json({ success: true, message: '连接测试成功' });
     } catch (err) {
         logger.error('Test db connection error:', err.message);
