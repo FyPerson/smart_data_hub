@@ -1364,7 +1364,15 @@ function initTable() {
             // archived_at = 撤销前路径；status='ARCHIVED' = 完成后历史归档
             ['archived_final_at', 'DATETIME'],
             ['archived_final_reason', 'TEXT'],
-            ['archived_final_by', 'INTEGER']
+            ['archived_final_by', 'INTEGER'],
+            // v1.69.0 拉起钉钉沟通群（三方任一在未归档时触发，建群后无解散 API）
+            // 群主 = 触发人；群成员固定含示例用户A(admin) + 对接人 + 当前 developer
+            // 钉钉无 disband 服务端 API，群留作历史沟通记录，归档时按钮即不再展示
+            ['dingtalk_chat_id', 'TEXT'],
+            ['dingtalk_open_conversation_id', 'TEXT'],
+            ['dingtalk_chat_created_at', 'DATETIME'],
+            ['dingtalk_chat_created_by', 'INTEGER'],
+            ['dingtalk_chat_name', 'TEXT']
         ];
         for (const [col, type] of v3CollabRequestColumns) {
             safeAlterAddColumn('collab_requests', col, type);
@@ -1396,7 +1404,10 @@ function verifyV2CollabSchema() {
         // v1.66.2 软删除（2026-05-19）
         'archived_at', 'archived_reason', 'archived_by',
         // v1.67.1 归档锁定（2026-05-20）
-        'archived_final_at', 'archived_final_reason', 'archived_final_by'
+        'archived_final_at', 'archived_final_reason', 'archived_final_by',
+        // v1.69.0 钉钉沟通群（2026-05-20）
+        'dingtalk_chat_id', 'dingtalk_open_conversation_id',
+        'dingtalk_chat_created_at', 'dingtalk_chat_created_by', 'dingtalk_chat_name'
     ];
     db.all("PRAGMA table_info(collab_requests)", [], (err, rows) => {
         if (err) {
@@ -1408,7 +1419,7 @@ function verifyV2CollabSchema() {
         if (missing.length > 0) {
             logger.error(`v2.0 schema 迁移不完整，collab_requests 缺失字段: ${missing.join(', ')}`);
         } else {
-            logger.info(`v2.0 schema 健康检查通过：collab_requests ${expectedCollabRequest.length} 个新增字段齐全（含 D3 attachment_dir + v3 二级转派 5 字段 + v1.66.1 对接人钉钉已读跟踪 3 字段 + v1.66.2 软删除 3 字段）`);
+            logger.info(`v2.0 schema 健康检查通过：collab_requests ${expectedCollabRequest.length} 个新增字段齐全（含 D3 attachment_dir + v3 二级转派 5 字段 + v1.66.1 对接人钉钉已读跟踪 3 字段 + v1.66.2 软删除 3 字段 + v1.67.1 归档锁定 3 字段 + v1.69.0 钉钉沟通群 5 字段）`);
         }
     });
     db.all("PRAGMA table_info(collab_attachments)", [], (err, rows) => {
@@ -10602,6 +10613,293 @@ app.post('/api/collab/requests/:id/archive-final', authenticateToken, requireAdm
     } catch (e) {
         logger.error(`[collab-archive-final] 协作单 #${id} 归档异常: ${e.message}`, e);
         return res.status(500).json({ error: '归档失败，请联系管理员', code: 'ARCHIVE_FINAL_FAILED' });
+    }
+});
+
+// ============================================================
+// POST /api/collab/requests/:id/create-chat
+//   v1.69.0 拉起钉钉沟通群（数据协作模块）
+//   三方任一在未归档时可触发；幂等：已建群直接返回旧 chatid
+//   群主 = 触发人；群成员固定含示例用户A(ADMIN_ID=3) + 对接人 + 当前 developer(若已指派)
+//   钉钉无 disband 服务端 API，群留作历史沟通记录
+// ============================================================
+const COLLAB_CHAT_ADMIN_ID = 3;  // 示例用户A（user.id=3），数据协作模块固定 admin 群成员
+
+app.post('/api/collab/requests/:id/create-chat', authenticateToken, async (req, res) => {
+    const idStr = req.params.id;
+    const userId = Number(req.user.id);
+    const userName = req.user.display_name || req.user.username || `user#${userId}`;
+    const userRole = req.user.role;
+
+    if (!/^[1-9]\d*$/.test(idStr)) {
+        return res.status(400).json({ error: 'id 必须是正整数', code: 'INVALID_ID' });
+    }
+    const id = parseInt(idStr, 10);
+    if (!Number.isSafeInteger(id)) {
+        return res.status(400).json({ error: 'id 超出安全整数范围', code: 'INVALID_ID' });
+    }
+    // codex M2：userId 正整数守卫（与 developer_id=0/contact_person_id=0 占位策略对齐）
+    if (!Number.isSafeInteger(userId) || userId <= 0) {
+        return res.status(400).json({ error: '当前用户 id 非法', code: 'INVALID_USER_ID' });
+    }
+
+    try {
+        const collab = await dbGetAsync(
+            `SELECT id, status, archived_at, archived_final_at, oa_request_no,
+                    description, requester_name, contact_person_id, developer_id,
+                    dingtalk_chat_id, dingtalk_open_conversation_id, dingtalk_chat_name
+               FROM collab_requests WHERE id = ?`,
+            [id]
+        );
+        if (!collab) return res.status(404).json({ error: '协作单不存在' });
+
+        if (collab.archived_at) {
+            return res.status(409).json({ error: '协作单已作废，不可拉起群聊', code: 'ALREADY_SOFT_ARCHIVED' });
+        }
+        if (collab.status === 'ARCHIVED' || collab.archived_final_at) {
+            return res.status(409).json({ error: '协作单已归档，不可拉起群聊', code: 'ALREADY_ARCHIVED_FINAL' });
+        }
+
+        // 权限校验：三方任一（admin / 对接人 / 当前 developer）
+        // codex M2：contact_person_id 也显式排除 0 占位值（与 developer_id 一致）
+        const isAdmin = userRole === 'admin';
+        const isContactPerson = Number(collab.contact_person_id) > 0 && Number(collab.contact_person_id) === userId;
+        const isDeveloper = Number(collab.developer_id) > 0 && Number(collab.developer_id) === userId;
+        if (!isAdmin && !isContactPerson && !isDeveloper) {
+            return res.status(403).json({
+                error: '仅 admin / 对接人 / 当前开发可拉起群聊',
+                code: 'NOT_ALLOWED'
+            });
+        }
+
+        // 幂等：已建群直接返回旧值
+        if (collab.dingtalk_open_conversation_id) {
+            return res.json({
+                message: '协作单已有沟通群（请到钉钉客户端查看）',
+                id,
+                chat_id: collab.dingtalk_chat_id,
+                open_conversation_id: collab.dingtalk_open_conversation_id,
+                chat_name: collab.dingtalk_chat_name,
+                idempotent: true
+            });
+        }
+
+        // 取凭证
+        const [appKey, appSecret, robotCode] = await Promise.all(
+            ['dingtalk_app_key', 'dingtalk_app_secret', 'dingtalk_robot_code'].map(readSystemConfig)
+        );
+        if (!appKey || !appSecret || !robotCode) {
+            return res.status(500).json({ error: '钉钉配置未填写，请管理员先到系统配置 → 钉钉配置填写凭证', code: 'NO_DINGTALK_CONFIG' });
+        }
+
+        // 构造群成员：示例用户A（固定 admin）+ 对接人 + 当前 developer(若已指派) + 触发人
+        const memberUserIds = new Set();
+        memberUserIds.add(COLLAB_CHAT_ADMIN_ID);
+        if (collab.contact_person_id) memberUserIds.add(Number(collab.contact_person_id));
+        if (collab.developer_id && Number(collab.developer_id) !== 0) memberUserIds.add(Number(collab.developer_id));
+        memberUserIds.add(userId);
+
+        // 拉取所有成员的 dingtalk_user_id
+        const memberRows = await dbAllAsync(
+            `SELECT id, display_name, phone, dingtalk_user_id FROM users WHERE id IN (${[...memberUserIds].map(() => '?').join(',')})`,
+            [...memberUserIds]
+        );
+        if (memberRows.length !== memberUserIds.size) {
+            const foundIds = new Set(memberRows.map(r => r.id));
+            const missing = [...memberUserIds].filter(uid => !foundIds.has(uid));
+            return res.status(400).json({
+                error: `群成员账号查询不全，缺失 user.id=${missing.join(',')}`,
+                code: 'MEMBER_NOT_FOUND'
+            });
+        }
+
+        // 取 access_token
+        let token;
+        try {
+            token = await dingtalkNotify.getAccessToken(appKey, appSecret);
+        } catch (err) {
+            const cls = dingtalkNotify.classifyError(err);
+            return res.status(502).json({ error: cls.hint, errcode: cls.errcode, errmsg: cls.errmsg, reason: cls.reason, code: 'GETTOKEN_FAILED' });
+        }
+
+        // 补齐 dingtalk_user_id（缺失的按手机号反查）
+        const dingUserIds = [];
+        for (const m of memberRows) {
+            let dingUid = m.dingtalk_user_id;
+            if (!dingUid) {
+                if (!m.phone) {
+                    return res.status(400).json({
+                        error: `${m.display_name || 'user#' + m.id} 未绑定手机号，无法拉入钉钉群`,
+                        suggestion: '请到 admin → 用户管理 → 编辑该用户 → 填写手机号后重试',
+                        code: 'NO_PHONE',
+                        target_user_id: m.id
+                    });
+                }
+                try {
+                    dingUid = await dingtalkNotify.getUserIdByMobile(token, m.phone);
+                    // codex M3：仅在 dingtalk_user_id 为空时回写，避免并发或手动改过的值被覆盖
+                    await dbRunAsync(
+                        `UPDATE users SET dingtalk_user_id = ?
+                         WHERE id = ? AND (dingtalk_user_id IS NULL OR dingtalk_user_id = '')`,
+                        [dingUid, m.id]
+                    );
+                } catch (err) {
+                    const cls = dingtalkNotify.classifyError(err);
+                    return res.status(502).json({
+                        error: `${m.display_name} 钉钉账号查询失败：${cls.hint}`,
+                        errcode: cls.errcode, errmsg: cls.errmsg,
+                        target_user_id: m.id,
+                        code: 'DINGTALK_USER_LOOKUP_FAILED'
+                    });
+                }
+            }
+            dingUserIds.push({ userId: m.id, dingtalk_user_id: dingUid, display_name: m.display_name });
+        }
+
+        // 找触发人的 dingtalk_user_id 当群主
+        const owner = dingUserIds.find(u => u.userId === userId);
+        if (!owner) {
+            return res.status(500).json({ error: '触发人钉钉账号未找到', code: 'OWNER_NOT_FOUND' });
+        }
+
+        // 群名：[OA-{oa_request_no}] {requester_name} {YYYY-MM-DD}（≤20 字符兜底截断）
+        const oa = collab.oa_request_no || `id${id}`;
+        const today = new Date().toISOString().slice(0, 10);  // YYYY-MM-DD
+        let chatName = `[OA-${oa}] ${collab.requester_name || ''} ${today}`;
+        if (chatName.length > 20) chatName = chatName.slice(0, 20);
+
+        // 调钉钉建群
+        let chatCreateResult;
+        try {
+            chatCreateResult = await dingtalkNotify.createChatGroup(
+                token,
+                chatName,
+                owner.dingtalk_user_id,
+                dingUserIds.map(u => u.dingtalk_user_id)
+            );
+        } catch (err) {
+            const cls = dingtalkNotify.classifyError(err);
+            insertCollabLog(id, 'CREATE_CHAT_FAIL', userId, userName, `chat/create:${cls.reason}`);
+            return res.status(502).json({ error: cls.hint, errcode: cls.errcode, errmsg: cls.errmsg, reason: cls.reason, code: 'CHAT_CREATE_FAILED' });
+        }
+        if (chatCreateResult.errcode !== 0) {
+            const cls = dingtalkNotify.classifyError(chatCreateResult);
+            insertCollabLog(id, 'CREATE_CHAT_FAIL', userId, userName, `chat/create:errcode=${chatCreateResult.errcode}`);
+            return res.status(502).json({
+                error: cls.hint, errcode: chatCreateResult.errcode, errmsg: chatCreateResult.errmsg,
+                reason: cls.reason, code: 'CHAT_CREATE_REJECTED'
+            });
+        }
+
+        const newChatId = chatCreateResult.chatid;
+        const newOpenConvId = chatCreateResult.openConversationId;
+
+        // codex H1+H2+M1：条件 UPDATE 兜底三重风险
+        //   1. dingtalk_open_conversation_id IS NULL → 并发同时建群时，后写入者落不进库（H2）
+        //   2. archived_at/final_at/status 守卫 → 建群中协作单被归档/作废时拒绝落库（M1）
+        //   3. UPDATE 失败 → 结构化打印 collab_id/chatid/openConversationId 供管理员手工补录（H1）
+        // 钉钉无 disband 服务端 API，落库失败后群已存在但平台不可见，需要手工修复
+        let updateResult;
+        try {
+            updateResult = await dbRunAsync(
+                `UPDATE collab_requests
+                    SET dingtalk_chat_id = ?,
+                        dingtalk_open_conversation_id = ?,
+                        dingtalk_chat_created_at = datetime('now','localtime'),
+                        dingtalk_chat_created_by = ?,
+                        dingtalk_chat_name = ?
+                  WHERE id = ?
+                    AND archived_at IS NULL
+                    AND archived_final_at IS NULL
+                    AND status <> 'ARCHIVED'
+                    AND dingtalk_open_conversation_id IS NULL`,
+                [newChatId, newOpenConvId, userId, chatName, id]
+            );
+        } catch (dbErr) {
+            // H1：DB exception 时把已建群信息结构化记到日志，便于管理员按 SQL 补录
+            logger.error(`[collab-create-chat] CRITICAL 钉钉群已建但落库异常 collab_id=${id} chatid=${newChatId} open_conversation_id=${newOpenConvId} chat_name=${chatName} created_by=${userId}(${userName}) error=${dbErr.message}`);
+            insertCollabLog(id, 'CREATE_CHAT_DB_FAILED', userId, userName, `chatid=${newChatId} open_conv_id=${newOpenConvId} err=${dbErr.message}`);
+            return res.status(500).json({
+                error: '钉钉群已创建但平台落库失败，请联系管理员手工补录（详见后端日志 CREATE_CHAT_DB_FAILED）',
+                code: 'CHAT_CREATED_DB_UPDATE_FAILED',
+                chat_id: newChatId,
+                open_conversation_id: newOpenConvId,
+                chat_name: chatName
+            });
+        }
+        if (!updateResult || updateResult.changes === 0) {
+            // H2+M1：守卫未通过 → 协作单在 chat/create 期间被归档/作废 或 别人已抢先建群
+            // 重新读 db 决定返回路径
+            const refreshed = await dbGetAsync(
+                'SELECT status, archived_at, archived_final_at, dingtalk_chat_id, dingtalk_open_conversation_id, dingtalk_chat_name FROM collab_requests WHERE id = ?',
+                [id]
+            );
+            // 别人抢先建群 → 退化为幂等返回（旧群信息），把本次新建的群孤儿信息记日志
+            if (refreshed && refreshed.dingtalk_open_conversation_id) {
+                logger.warn(`[collab-create-chat] 并发竞态：协作单 #${id} 另一请求已先落库（${refreshed.dingtalk_chat_id}），本次新建群信息丢弃 chatid=${newChatId} open_conv_id=${newOpenConvId}`);
+                insertCollabLog(id, 'CREATE_CHAT_RACE_DROP', userId, userName, `dropped chatid=${newChatId}, kept=${refreshed.dingtalk_chat_id}`);
+                return res.json({
+                    message: '协作单已有沟通群（您本次新建的群因并发竞态被舍弃，请群主在钉钉客户端解散）',
+                    id,
+                    chat_id: refreshed.dingtalk_chat_id,
+                    open_conversation_id: refreshed.dingtalk_open_conversation_id,
+                    chat_name: refreshed.dingtalk_chat_name,
+                    idempotent: true,
+                    race_dropped_chat_id: newChatId
+                });
+            }
+            // 否则是归档/作废守卫拦下 → 群已建但协作单已锁定，记日志返回 STATE_CHANGED
+            logger.error(`[collab-create-chat] STATE_CHANGED 协作单 #${id} 在 chat/create 期间被归档/作废 chatid=${newChatId} open_conv_id=${newOpenConvId} chat_name=${chatName} created_by=${userId}(${userName})`);
+            insertCollabLog(id, 'CREATE_CHAT_STATE_CHANGED', userId, userName, `chatid=${newChatId} open_conv_id=${newOpenConvId}`);
+            return res.status(409).json({
+                error: '协作单状态已变化（可能已被作废/归档），群已建出但未关联到协作单，请群主在钉钉客户端手动解散',
+                code: 'STATE_CHANGED',
+                chat_id: newChatId,
+                open_conversation_id: newOpenConvId
+            });
+        }
+        insertCollabLog(id, 'CREATE_CHAT', userId, userName, `chatid=${newChatId}`);
+        logger.info(`[collab-create-chat] 协作单 #${id} 拉群成功 by ${userName} chatid=${newChatId}`);
+
+        // 发欢迎卡片 + 一段话（best-effort，失败不影响主流程）
+        const descText = String(collab.description || '').slice(0, 30);
+        const cardTitle = `关于 OA-${oa} 「${descText}」需求取数沟通群`;
+        const cardMarkdown = [
+            `## 协作单沟通群已创建`,
+            ``,
+            `**协作单**：OA-${oa}`,
+            `**业务方**：${collab.requester_name || '-'}`,
+            `**需求描述**：${dingtalkNotify.escapeMarkdown(descText)}`,
+            `**拉群人**：${userName}`,
+            ``,
+            `> 请相关方在群内同步上下文，推进协作单。`
+        ].join('\n');
+        try {
+            const cardResp = await dingtalkNotify.sendGroupMessage(token, robotCode, newOpenConvId, 'sampleMarkdown', { title: cardTitle, text: cardMarkdown });
+            if (cardResp && cardResp.code) {
+                logger.warn(`[collab-create-chat] #${id} 群卡片发送失败 code=${cardResp.code} msg=${cardResp.message || ''}`);
+            }
+            const plainText = `关于 OA-${oa} 「${descText}」需求取数沟通群`;
+            const textResp = await dingtalkNotify.sendGroupMessage(token, robotCode, newOpenConvId, 'sampleText', { content: plainText });
+            if (textResp && textResp.code) {
+                logger.warn(`[collab-create-chat] #${id} 群文本发送失败 code=${textResp.code} msg=${textResp.message || ''}`);
+            }
+        } catch (err) {
+            logger.warn(`[collab-create-chat] #${id} 群消息发送异常（不影响建群）: ${err.message}`);
+        }
+
+        return res.json({
+            message: '沟通群已创建，请到钉钉客户端查看（钉钉无解散接口，使用完后由群主在客户端手动解散）',
+            id,
+            chat_id: newChatId,
+            open_conversation_id: newOpenConvId,
+            chat_name: chatName,
+            member_count: dingUserIds.length,
+            idempotent: false
+        });
+    } catch (e) {
+        logger.error(`[collab-create-chat] 协作单 #${id} 拉群异常: ${e.message}`, e);
+        return res.status(500).json({ error: '拉群失败，请联系管理员', code: 'CREATE_CHAT_FAILED' });
     }
 });
 

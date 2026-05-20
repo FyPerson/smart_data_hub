@@ -28,6 +28,10 @@ const GETTOKEN_URL = 'https://oapi.dingtalk.com/gettoken';
 const GET_BY_MOBILE_URL = 'https://oapi.dingtalk.com/user/get_by_mobile';
 const BATCH_SEND_URL = 'https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend';
 const READ_STATUS_URL = 'https://api.dingtalk.com/v1.0/robot/oToMessages/readStatus';
+// v1.69.0 拉起钉钉沟通群（数据协作模块）
+// 2026-05-20 探针验证：qyapi_chat_manage 权限已开通；钉钉无 disband 服务端 API
+const CHAT_CREATE_URL = 'https://oapi.dingtalk.com/chat/create';
+const GROUP_SEND_URL = 'https://api.dingtalk.com/v1.0/robot/groupMessages/send';
 
 const TOKEN_EARLY_EXPIRE_MS = 200 * 1000;  // 提前 200s 重取,避开钉钉端实际过期边界
 
@@ -155,6 +159,111 @@ async function sendMarkdownToUser(token, robotCode, userIds, title, markdown) {
 }
 
 /**
+ * 创建钉钉群会话(v1.69.0 数据协作模块·拉起沟通群)。
+ *
+ * 钉钉接口:POST oapi.dingtalk.com/chat/create
+ *   - access_token 在 query string
+ *   - errcode!=0 不抛错,放返回对象里(与 sendMarkdownToUser 同模式)
+ *   - 需要应用具备 qyapi_chat_manage 权限(2026-05-20 已开通)
+ *   - 群上限 1000 人,首批 useridlist 最多 40 人,本函数不做切片(协作单场景实际 3-5 人)
+ *
+ * 注意:钉钉无解散群服务端 API,群创建后只能群主在客户端手动解散。
+ *
+ * @param {string} token       access_token
+ * @param {string} name        群名(≤20 字符,调用方负责截断)
+ * @param {string} owner       群主钉钉 userid(必须在 useridlist 中)
+ * @param {string[]} userIds   群成员钉钉 userid 数组(含 owner)
+ * @param {object} [options]   可选参数:validationType(入群验证 0/1)/ searchable(0/1)等
+ * @returns {Promise<object>}  钉钉原始响应,成功时 { errcode:0, chatid, openConversationId },
+ *                              失败时 { errcode, errmsg }
+ * @throws {Error}  HTTP 5xx / 非 JSON / 网络错误
+ */
+async function createChatGroup(token, name, owner, userIds, options = {}) {
+    if (!Array.isArray(userIds) || userIds.length < 2) {
+        throw new Error('createChatGroup: userIds 至少 2 个(含群主)');
+    }
+    if (!userIds.includes(owner)) {
+        throw new Error('createChatGroup: owner 必须在 userIds 中(钉钉硬约束)');
+    }
+    const url = `${CHAT_CREATE_URL}?access_token=${encodeURIComponent(token)}`;
+    const payload = {
+        name,
+        owner,
+        useridlist: userIds,
+        validationType: options.validationType || '0',  // 默认不开入群验证
+        searchable: options.searchable || 0,             // 默认不可被搜索
+        mentionAllAuthority: options.mentionAllAuthority || 0,
+        ...options
+    };
+    const resp = await fetchWithTimeout(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+    });
+
+    if (resp.status >= 500) {
+        const err = new Error(`chat/create HTTP ${resp.status}`);
+        err.httpStatus = resp.status;
+        throw err;
+    }
+
+    try {
+        return await resp.json();
+    } catch (parseErr) {
+        const err = new Error(`chat/create non-JSON response: ${parseErr.message}`);
+        err.httpStatus = resp.status;
+        throw err;
+    }
+}
+
+/**
+ * 发送群消息到指定钉钉群(v1.69.0 拉起群聊后发欢迎卡片用)。
+ *
+ * 钉钉接口:POST api.dingtalk.com/v1.0/robot/groupMessages/send
+ *   - token 在 header(x-acs-dingtalk-access-token)
+ *   - 需要 robotCode 和 openConversationId
+ *   - 同 sendMarkdownToUser 一样不抛 errcode 错,放返回里
+ *
+ * @param {string} token              access_token
+ * @param {string} robotCode          机器人 RobotCode(与单聊用同一个)
+ * @param {string} openConvId         钉钉 openConversationId
+ * @param {string} msgKey             消息类型(sampleMarkdown / sampleText 等)
+ * @param {object} msgParam           消息体(钉钉端 stringify 后传)
+ * @returns {Promise<object>}         钉钉原始响应
+ * @throws {Error}                    HTTP 5xx / 非 JSON / 网络错误
+ */
+async function sendGroupMessage(token, robotCode, openConvId, msgKey, msgParam) {
+    const payload = {
+        robotCode,
+        openConversationId: openConvId,
+        msgKey,
+        msgParam: typeof msgParam === 'string' ? msgParam : JSON.stringify(msgParam)
+    };
+    const resp = await fetchWithTimeout(GROUP_SEND_URL, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'x-acs-dingtalk-access-token': token
+        },
+        body: JSON.stringify(payload)
+    });
+
+    if (resp.status >= 500) {
+        const err = new Error(`groupMessages/send HTTP ${resp.status}`);
+        err.httpStatus = resp.status;
+        throw err;
+    }
+
+    try {
+        return await resp.json();
+    } catch (parseErr) {
+        const err = new Error(`groupMessages/send non-JSON response: ${parseErr.message}`);
+        err.httpStatus = resp.status;
+        throw err;
+    }
+}
+
+/**
  * 错误分类(v2.0 §7.6 codex 六审 M-5)
  *
  * 输入两种形态:
@@ -185,8 +294,8 @@ function classifyError(input) {
                 hint: '钉钉服务暂不可用,请稍后重试'
             };
         }
-        // 非 JSON 响应
-        if (input.message && input.message.startsWith('batchSend non-JSON')) {
+        // 非 JSON 响应（v1.69.0 codex L1：泛化匹配,覆盖 chat/create / groupMessages/send / readStatus）
+        if (input.message && input.message.includes('non-JSON response')) {
             return {
                 reason: 'invalid_response',
                 clearToken: false,
@@ -232,6 +341,18 @@ function classifyError(input) {
             errcode,
             errmsg,
             hint: '目标账号在钉钉端不存在,请管理员检查该用户的手机号是否已加入企业钉钉'
+        };
+    }
+
+    // 应用未开通权限:errcode=60011(v1.69.0 chat/create 已知错误)
+    if (errcode === 60011) {
+        return {
+            reason: 'no_scope',
+            clearToken: false,
+            clearUserId: false,
+            errcode,
+            errmsg,
+            hint: '钉钉应用未开通所需权限，请联系管理员在开放平台后台申请：' + (errmsg || '')
         };
     }
 
@@ -485,6 +606,9 @@ module.exports = {
     buildCollabCreatedCard,
     buildCollabAssignedCard,
     buildCollabSubmittedCard,
+    // v1.69.0 拉起钉钉沟通群
+    createChatGroup,
+    sendGroupMessage,
     escapeMarkdown,
     // 测试导出(下划线前缀,生产代码不要用)
     _resetCacheForTest,

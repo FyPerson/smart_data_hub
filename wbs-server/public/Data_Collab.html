@@ -1156,6 +1156,20 @@
             }
         }
 
+        // v1.69.0：仅隐藏详情弹窗 DOM，保留 currentDetail 状态变量
+        // 用途：点详情页"编辑/作废/归档/拉群"按钮时，详情弹窗自动收起让新弹窗独占焦点，
+        //      新弹窗 cancel/确认后由各自路径决定是否刷回详情或彻底关闭
+        function hideDetailModalOnly() {
+            document.getElementById('detailModal').classList.remove('show');
+        }
+
+        // 取消子弹窗时若还在详情上下文（currentDetail 未被清），把详情显示回来
+        function restoreDetailIfHidden() {
+            if (currentDetail) {
+                document.getElementById('detailModal').classList.add('show');
+            }
+        }
+
         function closeDetailModal() {
             document.getElementById('detailModal').classList.remove('show');
             currentDetail = null;
@@ -1266,13 +1280,14 @@
                     </div>
                 </div>`;
 
-            // 3. 交付内容 / 4. 验收结果 / 5. 协作摩擦（D3 模块 7）
+            // 3. 交付内容 / 4. 验收结果 / 5. 沟通管理（v1.69.0）/ 6. 协作摩擦（D3 模块 7）
             const deliveryHtml = renderDeliverySection(d);
             const validationHtml = renderValidationSection(d, isAdminUser);
+            const chatHtml = renderChatSection(d, isAdminUser);
             const frictionHtml = renderFrictionSection(d, isAdminUser);
 
             document.getElementById('detailBody').innerHTML =
-                taskInfoHtml + notifyHtml + deliveryHtml + validationHtml + frictionHtml;
+                taskInfoHtml + notifyHtml + deliveryHtml + validationHtml + chatHtml + frictionHtml;
 
             // v1.66.2 footer 按钮（编辑 / 作废 / 归档）：按状态和 admin 身份分支
             const footerLeft = document.getElementById('detailFooterLeft');
@@ -1574,6 +1589,53 @@
                 <div class="detail-section">
                     <div class="detail-section-title">验收结果</div>
                     <div class="detail-section-body">${bodyHtml}</div>
+                </div>`;
+        }
+
+        // v1.69.0 沟通管理区块：拉起钉钉沟通群入口（三方任一可点，未归档时显示）
+        // 业务语义：当前动作（"正在沟通"），与下方"协作摩擦记录"（事后复盘）分开
+        // 渲染条件：未软删除作废 且 未终态归档（即 archived_at IS NULL && status != 'ARCHIVED'）
+        // 已建群：所有人可见，绿色提示+toast 引导去钉钉；归档/作废后区块整体隐藏
+        function renderChatSection(d, isAdminUser) {
+            const isArchived = !!d.archived_at;
+            const isArchivedFinal = d.status === 'ARCHIVED';
+            const hasChat = !!d.dingtalk_open_conversation_id;
+            // 归档/作废后区块整体不展示（避免与 footer 状态文案冲突 + 业务上群已无意义）
+            if (isArchived || isArchivedFinal) return '';
+
+            const currentUid = Number(getCurrentUserId());
+            // 三方判定：admin 角色 / 对接人（id>0 且等于当前用户）/ 当前 developer（id>0 且等于当前用户）
+            const isContactPerson = Number(d.contact_person_id) > 0 && Number(d.contact_person_id) === currentUid;
+            const isCurrentDeveloper = Number(d.developer_id) > 0 && Number(d.developer_id) === currentUid;
+            const canTrigger = isAdminUser || isContactPerson || isCurrentDeveloper;
+
+            let body;
+            if (hasChat) {
+                const chatNameDisplay = d.dingtalk_chat_name ? escapeHtml(d.dingtalk_chat_name) : '沟通群';
+                const createdAt = d.dingtalk_chat_created_at ? fmtDate(d.dingtalk_chat_created_at) : '';
+                body = `
+                    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+                        <button class="btn" style="background:#22c55e;color:white;" onclick="showChatExistsToast()">💬 ${chatNameDisplay}（请到钉钉查看）</button>
+                        ${createdAt ? `<span style="color:#6b7280;font-size:12px;">建群于 ${createdAt}</span>` : ''}
+                    </div>
+                    <div style="margin-top:8px;color:#6b7280;font-size:12px;line-height:1.6;">
+                        💡 沟通完成后请在下方「协作摩擦记录」补充归因（admin 在 DONE 阶段填写）。<br/>
+                        ⚠️ 钉钉无解散群接口，使用完毕后由群主在钉钉客户端手动解散。
+                    </div>`;
+            } else if (canTrigger) {
+                body = `
+                    <button class="btn" style="background:#0ea5e9;color:white;" onclick="openCreateChatDialog()">💬 拉起讨论群</button>
+                    <div style="margin-top:8px;color:#6b7280;font-size:12px;line-height:1.6;">
+                        群成员：示例用户A + 对接人 + 当前开发 + 你（触发人即群主）<br/>
+                        💡 拉群通常意味着出现了协作摩擦，完成沟通后请在「协作摩擦记录」补充归因。
+                    </div>`;
+            } else {
+                body = `<div class="empty">— 暂未拉起沟通群</div>`;
+            }
+            return `
+                <div class="detail-section">
+                    <div class="detail-section-title">沟通管理</div>
+                    <div class="detail-section-body">${body}</div>
                 </div>`;
         }
 
@@ -2174,12 +2236,14 @@
             }
 
             document.getElementById('newModal').classList.add('show');
+            hideDetailModalOnly();  // v1.69.0：编辑弹窗独占焦点
         }
 
         function closeNewModal() {
             document.getElementById('newModal').classList.remove('show');
             editingCollabId = null;
             editingCollabStatus = null;
+            restoreDetailIfHidden();  // v1.69.0：取消时若详情还在，把详情显示回来
         }
 
         async function loadTargetDbOptions() {
@@ -2356,11 +2420,13 @@
             btn.disabled = false;
             btn.textContent = '确认作废';
             document.getElementById('archiveModal').classList.add('show');
+            hideDetailModalOnly();  // v1.69.0
         }
 
         function closeArchiveModal() {
             document.getElementById('archiveModal').classList.remove('show');
             archivingCollabId = null;
+            restoreDetailIfHidden();  // v1.69.0
         }
 
         async function submitArchive() {
@@ -2410,11 +2476,13 @@
             btn.disabled = false;
             btn.textContent = '确认归档';
             document.getElementById('archiveFinalModal').classList.add('show');
+            hideDetailModalOnly();  // v1.69.0
         }
 
         function closeArchiveFinalModal() {
             document.getElementById('archiveFinalModal').classList.remove('show');
             archivingFinalCollabId = null;
+            restoreDetailIfHidden();  // v1.69.0
         }
 
         async function submitArchiveFinal() {
@@ -2450,6 +2518,48 @@
                 btn.disabled = false;
                 btn.textContent = '确认归档';
             }
+        }
+
+        // v1.69.0 拉起钉钉沟通群
+        async function openCreateChatDialog() {
+            if (!currentDetail) return showToast('协作单数据未加载', 'error');
+            const id = currentDetail.id;
+            const oa = currentDetail.oa_request_no || `id${id}`;
+            hideDetailModalOnly();  // 让 confirm 独占焦点
+            const ok = confirm(
+                `将为协作单【OA-${oa}】拉起钉钉沟通群。\n\n` +
+                `群成员：示例用户A + 对接人 + 当前开发 + 你\n` +
+                `群主：你（钉钉无解散接口，使用完毕后请在钉钉客户端手动解散）\n\n` +
+                `继续？`
+            );
+            if (!ok) {
+                restoreDetailIfHidden();  // 取消则恢复详情
+                return;
+            }
+
+            try {
+                const res = await authFetch(`/api/collab/requests/${id}/create-chat`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+                if (!res) { restoreDetailIfHidden(); return; }
+                const data = await res.json();
+                if (!res.ok) {
+                    showToast(data.error || '拉群失败', 'error');
+                    restoreDetailIfHidden();
+                    return;
+                }
+                showToast(data.message || '群已创建，请到钉钉客户端查看', 'success');
+                // 刷新详情，按钮变成"已建群"状态（openDetail 会重新 show detailModal）
+                if (typeof openDetail === 'function') await openDetail(id);
+            } catch (e) {
+                showToast('网络错误', 'error');
+                restoreDetailIfHidden();
+            }
+        }
+
+        function showChatExistsToast() {
+            showToast('沟通群已建立，请到钉钉客户端查看消息列表', 'success');
         }
 
         // 页面初始化
