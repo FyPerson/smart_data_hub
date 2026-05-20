@@ -806,6 +806,29 @@
         </div>
     </div>
 
+    <!-- 归档锁定弹窗（v1.67.1）-->
+    <div class="modal-overlay" id="archiveFinalModal">
+        <div class="modal-card">
+            <div class="modal-header">
+                <h3 id="archiveFinalTitle">归档协作单</h3>
+                <button class="modal-close" onclick="closeArchiveFinalModal()">×</button>
+            </div>
+            <div class="modal-body">
+                <div style="padding:12px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:6px;margin-bottom:12px;color:#166534;font-size:13px;">
+                    📁 归档后此协作单将进入只读历史状态。<strong>开发不可再修改/重传交付物</strong>，仅 admin 可继续操作。归档与"作废"不同——归档是已完成的入库存档。
+                </div>
+                <div class="form-row">
+                    <label>归档备注 <span class="hint">（选填，≤500 字）</span></label>
+                    <textarea id="f_archive_final_reason" placeholder="例如：验收 OK 入库 / 数据已交付到 PowerBI / 业务方已确认 等" maxlength="500" style="min-height:80px;"></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-cancel" onclick="closeArchiveFinalModal()">取消</button>
+                <button class="btn" id="btnArchiveFinal" style="background:#16a34a;color:white;" onclick="submitArchiveFinal()">确认归档</button>
+            </div>
+        </div>
+    </div>
+
     <!-- 指派/改派开发弹窗（v1.66.0 二级转派：调 POST /:id/assign）-->
     <div class="modal-overlay" id="assignModal">
         <div class="modal-card">
@@ -1251,19 +1274,32 @@
             document.getElementById('detailBody').innerHTML =
                 taskInfoHtml + notifyHtml + deliveryHtml + validationHtml + frictionHtml;
 
-            // v1.66.2 footer 按钮（编辑 / 作废）：仅 admin + 未提交 + 未作废
+            // v1.66.2 footer 按钮（编辑 / 作废 / 归档）：按状态和 admin 身份分支
             const footerLeft = document.getElementById('detailFooterLeft');
             if (footerLeft) {
                 const isUnsubmitted = (d.status === 'PENDING_ASSIGN')
                     || (d.status === 'PENDING' && Number(d.submission_version || 0) === 0);
                 const isArchived = !!d.archived_at;
-                if (isAdminUser && isUnsubmitted && !isArchived) {
+                const isDone = d.status === 'DONE';
+                const isArchivedFinal = d.status === 'ARCHIVED';
+
+                if (isArchived) {
+                    // 软删除作废优先展示
+                    footerLeft.innerHTML = `<span style="color:#dc2626;font-size:13px;">⚠️ 已作废${d.archived_reason ? ` · ${escapeHtml(d.archived_reason)}` : ''}</span>`;
+                } else if (isArchivedFinal) {
+                    // v1.67.1 归档锁定展示
+                    footerLeft.innerHTML = `<span style="color:#166534;font-size:13px;">📁 已归档${d.archived_final_reason ? ` · ${escapeHtml(d.archived_final_reason)}` : ''}</span>`;
+                } else if (isAdminUser && isUnsubmitted) {
+                    // 编辑/作废（v1.66.2）
                     footerLeft.innerHTML = `
                         <button class="btn" style="background:#3b82f6;color:white;" onclick="openEditModal()">编辑</button>
                         <button class="btn" style="background:#fef2f2;color:#dc2626;border:1px solid #fca5a5;" onclick="openArchiveModal()">作废</button>
                     `;
-                } else if (isArchived) {
-                    footerLeft.innerHTML = `<span style="color:#dc2626;font-size:13px;">⚠️ 已作废${d.archived_reason ? ` · ${escapeHtml(d.archived_reason)}` : ''}</span>`;
+                } else if (isAdminUser && isDone) {
+                    // v1.67.1：DONE 状态 admin 可见"归档"按钮
+                    footerLeft.innerHTML = `
+                        <button class="btn" style="background:#16a34a;color:white;" onclick="openArchiveFinalModal()">📁 归档</button>
+                    `;
                 } else {
                     footerLeft.innerHTML = '';
                 }
@@ -1354,6 +1390,7 @@
 
         // 交付内容区块（D3 模块 7）：仅在 attachments 中存在 result_data / result_script 时展示
         // 过滤 status='active'（D3 模块 2 附件版本化引入,避免显示历史版本）
+        // v1.67.1：DONE 状态下当前 developer 本人可删除单个交付物 + 区块底部可重传（重走 smoke test）
         function renderDeliverySection(d) {
             const deliveryFiles = (d.attachments || []).filter(
                 a => (a.attachment_type === 'result_data' || a.attachment_type === 'result_script')
@@ -1362,24 +1399,58 @@
             if (deliveryFiles.length === 0) {
                 return ''; // 未提交过交付物，不显示区块
             }
+            // v1.67.1：判断当前用户是否为本单 developer，DONE 且非 ARCHIVED 允许删/重传交付物
+            const myId = Number(getCurrentUserId());
+            const isCurrentDeveloper = d.developer_id && Number(d.developer_id) === myId && Number(d.developer_id) !== 0;
+            const canModifyDelivery = isCurrentDeveloper && d.status === 'DONE';
+
             const items = deliveryFiles.map(f => {
                 const typeLabel = f.attachment_type === 'result_data' ? '📊 结果数据' : '📜 SQL 脚本';
                 // 下载走 /uploads/<file_name> 静态路径（file_name 已是 collab/xxx/yyy.ext 相对路径）
                 // codex 16 审 #4：按路径段编码,encodeURI 会保留 ?/# 等 URL 语义字符,极端文件名会被截断
                 const dlUrl = `/uploads/${String(f.file_name || '').split('/').map(encodeURIComponent).join('/')}`;
                 const displayName = f.original_name || (f.file_name ? f.file_name.split('/').pop() : '附件');
+                const deleteBtn = canModifyDelivery
+                    ? `<button class="btn" style="background:#fef2f2;color:#dc2626;border:1px solid #fca5a5;padding:2px 8px;font-size:12px;margin-left:8px;" onclick="deleteDeliveryAttachment(${f.id}, ${d.id})">删除</button>`
+                    : '';
                 return `
                     <div class="delivery-item">
                         <span class="delivery-type">${typeLabel}</span>
                         <a class="delivery-link" href="${dlUrl}" target="_blank" rel="noopener" download="${escapeHtml(displayName)}">${escapeHtml(displayName)}</a>
                         <span class="delivery-meta">${escapeHtml(f.uploaded_by_name || '—')} · ${fmtDate(f.created_at)}</span>
+                        ${deleteBtn}
                     </div>`;
             }).join('');
+            // v1.67.1：DONE 状态本单 developer 可触发"重新上传"，复用 submitDeliveryModal（走 POST /:id/submit 重走 smoke test）
+            const reuploadBtn = canModifyDelivery
+                ? `<div style="margin-top:12px;padding-top:12px;border-top:1px dashed #e5e7eb;">
+                       <button class="btn" style="background:#f59e0b;color:white;" onclick="openSubmitDeliveryDialog(${d.id})">🔄 重新上传交付物</button>
+                       <span style="color:#92400e;font-size:12px;margin-left:10px;">归档前可修改：重传后会自动重走 smoke test 验收</span>
+                   </div>`
+                : '';
             return `
                 <div class="detail-section">
                     <div class="detail-section-title">交付内容</div>
-                    <div class="detail-section-body">${items}</div>
+                    <div class="detail-section-body">${items}${reuploadBtn}</div>
                 </div>`;
+        }
+
+        // v1.67.1：开发人员删除已交付的 result_* 附件（仅 DONE 状态、本单 developer）
+        async function deleteDeliveryAttachment(attId, collabId) {
+            if (!confirm('确定删除此交付物？删除后请重新上传，将自动重走 smoke test 验收。')) return;
+            try {
+                const res = await authFetch(`/api/collab/attachments/${attId}`, { method: 'DELETE' });
+                if (!res) return;
+                const data = await res.json();
+                if (!res.ok) {
+                    showToast(data.error || '删除失败', 'error');
+                    return;
+                }
+                showToast('交付物已删除', 'success');
+                if (typeof openDetail === 'function') await openDetail(collabId);
+            } catch (e) {
+                showToast('网络错误', 'error');
+            }
         }
 
         // 验收结果区块（D3 模块 7）：按 sql_validation_status 三色分支
@@ -1506,16 +1577,19 @@
                 </div>`;
         }
 
-        // 协作摩擦区块（D3 模块 7，方案 §6.6）：DONE 后才展示
+        // 协作摩擦区块（D3 模块 7，方案 §6.6）：DONE 或 ARCHIVED 状态展示（v1.67.1 加 ARCHIVED）
         function renderFrictionSection(d, isAdminUser) {
-            if (d.status !== 'DONE') return '';
+            if (d.status !== 'DONE' && d.status !== 'ARCHIVED') return '';
 
             const cat = d.friction_cause_category || '';
             const note = d.friction_note || '';
             const occurred = d.friction_occurred === 1;
 
-            if (!isAdminUser) {
-                // 非 admin 只读展示
+            // v1.67.1：ARCHIVED 归档锁定后所有人只读（admin 也走只读，需先解归档才能改 — 当前版本暂未实现解归档）
+            const isArchivedLocked = d.status === 'ARCHIVED';
+
+            if (!isAdminUser || isArchivedLocked) {
+                // 非 admin 或已归档：只读展示
                 if (!occurred) {
                     return `
                         <div class="detail-section">
@@ -2321,6 +2395,60 @@
                 showToast('网络错误', 'error');
                 btn.disabled = false;
                 btn.textContent = '确认作废';
+            }
+        }
+
+        // v1.67.1 归档锁定 modal（DONE 状态 admin 可触发，推到 ARCHIVED 终态）
+        let archivingFinalCollabId = null;
+
+        function openArchiveFinalModal() {
+            if (!currentDetail) return showToast('协作单数据未加载', 'error');
+            archivingFinalCollabId = currentDetail.id;
+            document.getElementById('archiveFinalTitle').textContent = `归档协作单 #${currentDetail.id}`;
+            document.getElementById('f_archive_final_reason').value = '';
+            const btn = document.getElementById('btnArchiveFinal');
+            btn.disabled = false;
+            btn.textContent = '确认归档';
+            document.getElementById('archiveFinalModal').classList.add('show');
+        }
+
+        function closeArchiveFinalModal() {
+            document.getElementById('archiveFinalModal').classList.remove('show');
+            archivingFinalCollabId = null;
+        }
+
+        async function submitArchiveFinal() {
+            const id = archivingFinalCollabId;
+            if (!id) return showToast('协作单 id 丢失', 'error');
+            const reason = document.getElementById('f_archive_final_reason').value.trim();
+
+            const btn = document.getElementById('btnArchiveFinal');
+            btn.disabled = true;
+            btn.textContent = '归档中…';
+
+            try {
+                const res = await authFetch(`/api/collab/requests/${id}/archive-final`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(reason ? { archived_final_reason: reason } : {})
+                });
+                if (!res) return;
+                const data = await res.json();
+                if (!res.ok) {
+                    showToast(data.error || '归档失败', 'error');
+                    btn.disabled = false;
+                    btn.textContent = '确认归档';
+                    return;
+                }
+                showToast(`协作单 #${id} 已归档`, 'success');
+                closeArchiveFinalModal();
+                // 归档后刷新详情 + 列表（归档单仍在列表显示，但状态徽章变 ARCHIVED）
+                if (typeof openDetail === 'function') await openDetail(id);
+                if (typeof loadList === 'function') loadList();
+            } catch (e) {
+                showToast('网络错误', 'error');
+                btn.disabled = false;
+                btn.textContent = '确认归档';
             }
         }
 

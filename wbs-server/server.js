@@ -1358,7 +1358,13 @@ function initTable() {
             // archived_at NOT NULL 视为已作废，列表默认过滤；不动 status 字段避免与 ARCHIVED 终态混淆
             ['archived_at', 'DATETIME'],
             ['archived_reason', 'TEXT'],
-            ['archived_by', 'INTEGER']
+            ['archived_by', 'INTEGER'],
+            // v1.67.1 归档锁定（DONE 后 admin 推到 ARCHIVED 终态，所有人只读除 admin 外）
+            // 与 v1.66.2 archived_at 软删除完全独立 —— 软删除是"撤销/作废"，归档是"完成归档"
+            // archived_at = 撤销前路径；status='ARCHIVED' = 完成后历史归档
+            ['archived_final_at', 'DATETIME'],
+            ['archived_final_reason', 'TEXT'],
+            ['archived_final_by', 'INTEGER']
         ];
         for (const [col, type] of v3CollabRequestColumns) {
             safeAlterAddColumn('collab_requests', col, type);
@@ -1388,7 +1394,9 @@ function verifyV2CollabSchema() {
         // v1.66.1 对接人钉钉已读跟踪（2026-05-19）
         'contact_notified_at', 'contact_notify_message_key', 'contact_read_at',
         // v1.66.2 软删除（2026-05-19）
-        'archived_at', 'archived_reason', 'archived_by'
+        'archived_at', 'archived_reason', 'archived_by',
+        // v1.67.1 归档锁定（2026-05-20）
+        'archived_final_at', 'archived_final_reason', 'archived_final_by'
     ];
     db.all("PRAGMA table_info(collab_requests)", [], (err, rows) => {
         if (err) {
@@ -10444,6 +10452,109 @@ app.post('/api/collab/requests/:id/archive', authenticateToken, requireAdmin, as
     }
 });
 
+// 4.6 归档锁定协作单（v1.67.1 加，2026-05-20）
+//   - 仅 admin
+//   - 仅 DONE 可推到 ARCHIVED（已交付 + smoke test 通过的终态）
+//   - archived_final_reason 选填（type=string，trim 后 ≤500 字符）
+//   - 写 status='ARCHIVED' + archived_final_at + archived_final_reason + archived_final_by + 'ARCHIVE_FINAL' 操作日志
+//   - 与 v1.66.2 archived_at 软删除完全独立，互不重叠（软删除是 PENDING_ASSIGN/PENDING 前的撤销；本 endpoint 是 DONE 后的归档锁定）
+app.post('/api/collab/requests/:id/archive-final', authenticateToken, requireAdmin, async (req, res) => {
+    const idStr = req.params.id;
+    const userId = Number(req.user.id);
+    const userName = req.user.display_name || req.user.username || `user#${userId}`;
+
+    // id 校验（沿用 archive / bypass / assign endpoint 风格）
+    if (!/^[1-9]\d*$/.test(idStr)) {
+        return res.status(400).json({ error: 'id 必须是正整数', code: 'INVALID_ID' });
+    }
+    const id = parseInt(idStr, 10);
+    if (!Number.isSafeInteger(id)) {
+        return res.status(400).json({ error: 'id 超出安全整数范围', code: 'INVALID_ID' });
+    }
+
+    // archived_final_reason 校验（选填）
+    let reason = null;
+    if (req.body && req.body.archived_final_reason !== undefined && req.body.archived_final_reason !== null) {
+        if (typeof req.body.archived_final_reason !== 'string') {
+            return res.status(400).json({ error: 'archived_final_reason 必须是字符串', code: 'INVALID_REASON' });
+        }
+        const trimmed = req.body.archived_final_reason.trim();
+        if (trimmed.length > 500) {
+            return res.status(400).json({ error: 'archived_final_reason 不能超过 500 字符', code: 'REASON_TOO_LONG' });
+        }
+        reason = trimmed || null;
+    }
+
+    try {
+        const collab = await dbGetAsync(
+            'SELECT id, status, archived_at, archived_final_at FROM collab_requests WHERE id = ?',
+            [id]
+        );
+        if (!collab) return res.status(404).json({ error: '协作单不存在' });
+
+        if (collab.archived_at) {
+            return res.status(409).json({
+                error: '协作单已作废（软删除），不可归档',
+                code: 'ALREADY_SOFT_ARCHIVED'
+            });
+        }
+
+        if (collab.status === 'ARCHIVED' || collab.archived_final_at) {
+            return res.status(409).json({
+                error: '协作单已归档，不可重复归档',
+                code: 'ALREADY_ARCHIVED_FINAL'
+            });
+        }
+
+        if (collab.status !== 'DONE') {
+            return res.status(409).json({
+                error: `当前状态 ${collab.status} 不可归档（仅 DONE 可归档）`,
+                code: 'NOT_DONE',
+                current_status: collab.status
+            });
+        }
+
+        // 条件 UPDATE：兜底并发漂移
+        const result = await dbRunAsync(
+            `UPDATE collab_requests
+                SET status = 'ARCHIVED',
+                    archived_final_at = datetime('now','localtime'),
+                    archived_final_reason = ?,
+                    archived_final_by = ?
+              WHERE id = ?
+                AND status = 'DONE'
+                AND archived_at IS NULL
+                AND archived_final_at IS NULL`,
+            [reason, userId, id]
+        );
+
+        if (!result || result.changes === 0) {
+            return res.status(409).json({
+                error: '协作单状态已变化（可能已被作废/归档），请刷新后重试',
+                code: 'STATE_CHANGED'
+            });
+        }
+
+        insertCollabLog(id, 'ARCHIVE_FINAL', userId, userName, reason);
+        logger.info(`[collab-archive-final] 协作单 #${id} 归档锁定 by ${userName}${reason ? ` reason=${reason.slice(0, 50)}` : ''}`);
+
+        // codex 十八审 #4：返回真实落库值（localtime ISO），避免响应时区与 DB 落库值不一致导致前端跳变
+        const updated = await dbGetAsync(
+            'SELECT archived_final_at FROM collab_requests WHERE id = ?',
+            [id]
+        );
+        return res.json({
+            message: '协作单已归档',
+            id,
+            archived_final_at: updated && updated.archived_final_at ? updated.archived_final_at : null,
+            current_status: 'ARCHIVED'
+        });
+    } catch (e) {
+        logger.error(`[collab-archive-final] 协作单 #${id} 归档异常: ${e.message}`, e);
+        return res.status(500).json({ error: '归档失败，请联系管理员', code: 'ARCHIVE_FINAL_FAILED' });
+    }
+});
+
 // ============================================================
 // 钉钉公用发送路径（v3 二级转派抽取，2026-05-19）
 // 输入：targetUser 必须含 { id, display_name, phone, dingtalk_user_id }
@@ -10878,11 +10989,13 @@ app.post('/api/collab/requests/:id/submit',
                 return res.status(404).json({ error: '协作单不存在' });
             }
 
-            // === 前置校验：状态 ∈ {PENDING, SUBMITTED}（codex Q2）===
-            if (!['PENDING', 'SUBMITTED'].includes(collab.status)) {
+            // === 前置校验：状态 ∈ {PENDING, SUBMITTED, DONE}（v1.67.1 加 DONE 用于归档前重传）===
+            // DONE 状态允许 developer 重传交付物，submission_version + 1，重走 smoke test；
+            // ARCHIVED 由白名单默认拒绝（归档锁定后任何人不可改）
+            if (!['PENDING', 'SUBMITTED', 'DONE'].includes(collab.status)) {
                 cleanupPending();
                 return res.status(409).json({
-                    error: `当前状态 ${collab.status} 不允许提交（仅 PENDING/SUBMITTED 可提交）`,
+                    error: `当前状态 ${collab.status} 不允许提交（仅 PENDING/SUBMITTED/DONE 可提交）`,
                     current_status: collab.status,
                 });
             }
@@ -10957,14 +11070,21 @@ app.post('/api/collab/requests/:id/submit',
             //   - validation_started_at **不在此处写**，由 runRealSmokeTest 拿到锁后写
             //   - 这样模块 5 启动恢复扫描只处理真正的 running 超时（validation_started_at 非 NULL）
             //   - 不变量：sql_validation_status='running' ⇒ validation_started_at IS NOT NULL
+            //
+            // v1.67.1：白名单加 DONE（codex 十八审 #1）—— DONE 重传走归档前修改路径
+            //   - 同时清空 done_at + sql_validation_error，避免新一轮验收中详情页仍展示旧"已完成"
+            //     语义污染（友好用户：开发删了交付物准备重传时，原 DONE 视觉应消失）
+            //   - 不动 friction_* 字段（business 决策：摩擦记录跟"协作过程"而非"单次提交"绑定）
             const preUpdate = await dbRunAsync(
                 `UPDATE collab_requests
                     SET status = 'SUBMITTED',
                         submitted_at = COALESCE(submitted_at, datetime('now','localtime')),
                         last_submitted_at = datetime('now','localtime'),
                         sql_validation_status = 'queued',
-                        validation_started_at = NULL
-                  WHERE id = ? AND submission_version = ? AND status IN ('PENDING','SUBMITTED')`,
+                        validation_started_at = NULL,
+                        done_at = NULL,
+                        sql_validation_error = NULL
+                  WHERE id = ? AND submission_version = ? AND status IN ('PENDING','SUBMITTED','DONE') AND archived_at IS NULL`,
                 [id, oldVer]
             );
             if (!preUpdate || preUpdate.changes === 0) {
@@ -11714,9 +11834,24 @@ app.post('/api/collab/requests/:id/attachments',
                 cleanupTempFiles();
                 return res.status(409).json({ error: '交付附件只能在 CLAIMED 及以后状态上传' });
             }
-            if (request.status === 'ARCHIVED' && !isPrivileged) {
+            // v1.67.1 改造：ARCHIVED 归档锁定后仅 admin 可上传（publisher 也拒绝）
+            // 与 v1.66.2 archived_at 软删除独立：归档锁定是已交付的历史归档，软删除是未提交前的撤销
+            if (request.archived_at) {
                 cleanupTempFiles();
-                return res.status(403).json({ error: '已归档协作单的附件仅管理员/发布者可上传' });
+                return res.status(409).json({
+                    error: '协作单已作废，不可上传附件',
+                    code: 'PARENT_SOFT_ARCHIVED'
+                });
+            }
+            if (request.status === 'ARCHIVED') {
+                const isAdmin = req.user.role === 'admin';
+                if (!isAdmin) {
+                    cleanupTempFiles();
+                    return res.status(403).json({
+                        error: '协作单已归档锁定，仅管理员可上传附件',
+                        code: 'PARENT_ARCHIVED_LOCKED'
+                    });
+                }
             }
 
             const files = req.files || [];
@@ -11799,24 +11934,67 @@ app.use((err, req, res, next) => {
 });
 
 // 8. 删除附件
-//    父单 ARCHIVED：仅 publisher+ 可删
-//    父单非 ARCHIVED：上传人本人或 publisher+ 可删
+//    v1.67.1 权限矩阵改造（2026-05-20）：
+//    - ARCHIVED 协作单：仅 admin 可删（归档锁定，除 admin 外全员只读）
+//    - DONE 协作单 + result_* 类型：仅当前 developer 可删（用于修改交付物再重传走 smoke test）+ admin 兜底
+//    - DONE 协作单 + 非 result_* 类型（screenshot/example_xlsx）：仅 admin 可删（admin 创建附件，开发不应改）
+//    - 其他状态（PENDING_ASSIGN/PENDING/SUBMITTED）：上传人本人或 admin/publisher 可删
+//    - 软删除 archived_at：拒绝任何人删（数据保留审计）
 app.delete('/api/collab/attachments/:attId', authenticateToken, requireNonViewer, async (req, res) => {
     const { attId } = req.params;
     const userId = req.user.id;
     const userName = req.user.display_name || req.user.username;
+    const isAdmin = req.user.role === 'admin';
     const isPrivileged = ['admin', 'publisher'].includes(req.user.role);
 
     try {
         const att = await dbGetAsync('SELECT * FROM collab_attachments WHERE id = ?', [attId]);
         if (!att) return res.status(404).json({ error: '附件不存在' });
 
-        const parent = await dbGetAsync('SELECT id, status FROM collab_requests WHERE id = ?', [att.collab_request_id]);
+        const parent = await dbGetAsync(
+            'SELECT id, status, developer_id, archived_at FROM collab_requests WHERE id = ?',
+            [att.collab_request_id]
+        );
         if (!parent) return res.status(404).json({ error: '协作单不存在' });
 
+        // 软删除（v1.66.2）：任何人不可改附件
+        if (parent.archived_at) {
+            return res.status(409).json({
+                error: '协作单已作废，不可改动附件',
+                code: 'PARENT_SOFT_ARCHIVED'
+            });
+        }
+
+        // ARCHIVED 归档锁定（v1.67.1）：仅 admin 可改
         if (parent.status === 'ARCHIVED') {
-            if (!isPrivileged) return res.status(403).json({ error: '已归档协作单的附件仅管理员/发布者可删' });
+            if (!isAdmin) {
+                return res.status(403).json({
+                    error: '协作单已归档锁定，仅管理员可改附件',
+                    code: 'PARENT_ARCHIVED_LOCKED'
+                });
+            }
+        } else if (parent.status === 'DONE') {
+            // DONE 状态：开发本人可改自己单的 result_* 交付物（用于修改后重走 smoke test）
+            // 截图/example_xlsx 是 admin 创建产物，仅 admin 可改
+            const isResultType = att.attachment_type === 'result_data' || att.attachment_type === 'result_script';
+            const isCurrentDeveloper = Number(parent.developer_id) === Number(userId) && Number(parent.developer_id) !== 0;
+            if (isResultType) {
+                if (!isCurrentDeveloper && !isAdmin) {
+                    return res.status(403).json({
+                        error: '已完成状态下仅当前开发或管理员可改交付物',
+                        code: 'NOT_CURRENT_DEVELOPER'
+                    });
+                }
+            } else {
+                if (!isAdmin) {
+                    return res.status(403).json({
+                        error: '截图/数据模板仅管理员可改',
+                        code: 'NOT_ADMIN_FOR_TYPE'
+                    });
+                }
+            }
         } else {
+            // 其他状态（PENDING_ASSIGN / PENDING / SUBMITTED）：上传人本人或 admin/publisher 可删
             if (att.uploaded_by !== userId && !isPrivileged) {
                 return res.status(403).json({ error: '只能删除自己上传的附件' });
             }
