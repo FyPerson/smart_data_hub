@@ -2,8 +2,10 @@
 # Called by: /deploy skill (step 8)
 # Usage: powershell -ExecutionPolicy Bypass -File scripts/deploy-ssh.ps1
 #
-# 4 步：(1) push → (2) pull → (3) 备份 task_pool.db（v2.0 数据协作模块强制，失败中止）→ (4) PM2 restart
-# 备份策略：每次部署都备份；同目录 task_pool.db.backup_yyyyMMdd_HHmmss；不自动清理（季度初手动跑）
+# 5 步：(1) push → (2) pull → (3) 备份 task_pool.db（v2.0 数据协作模块强制，失败中止）→ (4) PM2 restart → (5) scp 拉生产 db 备份到本地（v1.69.x+，失败只 warn 不阻塞）
+# 备份策略：
+#   - 生产端：每次部署都备份；同目录 task_pool.db.backup_yyyyMMdd_HHmmss；不自动清理（季度初手动跑）
+#   - 本地端（v1.69.x+ 新增）：scp 拉本次新生成的 backup 到 E:\数据开发与治理规范手册\生产数据库备份\；保留最近 10 份，旧的自动删；失败只 warn 不阻塞主流程
 #
 # ⚠️ KNOWN ISSUES（已知结构性缺口，2026-05-14 / 05-15 踩过）：
 # 1. 不跑 npm install —— 仅做"代码 + db 备份 + 重启"，新增 npm 依赖需手工处理：
@@ -115,6 +117,51 @@ try {
 } catch {
     Write-Host "  [ERROR] Restart failed: $_" -ForegroundColor Red
     exit 1
+}
+
+Write-Host ""
+
+# 5. Pull production db backup to local (v1.69.x+，失败只 warn 不阻塞)
+# 用本次步骤 3 生成的 $backupPath（如 E:\Task_Pool\wbs-server\task_pool.db.backup_20260520_153500）
+# scp 拉到本地 E:\数据开发与治理规范手册\生产数据库备份\，保留最近 10 份
+Write-Host "[5/5] Pull production db backup to local..." -ForegroundColor Yellow
+try {
+    $localBackupDir = 'E:\数据开发与治理规范手册\生产数据库备份'
+    if (-not (Test-Path $localBackupDir)) {
+        New-Item -ItemType Directory -Path $localBackupDir -Force | Out-Null
+        Write-Host "  [INFO] Created local backup dir: $localBackupDir" -ForegroundColor Gray
+    }
+
+    # 从 $backupPath（如 E:\Task_Pool\wbs-server\task_pool.db.backup_20260520_153500）取文件名
+    $backupFileName = Split-Path $backupPath -Leaf
+    $localDst = Join-Path $localBackupDir $backupFileName
+
+    # scp 远端 Windows 路径必须用正斜杠：/E:/Task_Pool/wbs-server/task_pool.db.backup_xxx
+    $scpSrcPath = '/' + ($backupPath -replace '\\', '/')
+    $scpSrc = "${ServerUser}@${ServerIP}:$scpSrcPath"
+    $scpResult = scp $scpSrc $localDst 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "scp failed (exit $LASTEXITCODE): $scpResult"
+    }
+    if (-not (Test-Path $localDst)) {
+        throw "scp 成功但本地文件不存在: $localDst"
+    }
+    $sizeKB = [math]::Round((Get-Item $localDst).Length / 1KB, 1)
+    Write-Host "  [OK] Saved: $localDst ($sizeKB KB)" -ForegroundColor Green
+
+    # 保留最近 10 份，按文件名时间戳排序（task_pool.db.backup_YYYYMMDD_HHmmss）
+    $allBackups = Get-ChildItem -Path $localBackupDir -Filter 'task_pool.db.backup_*' -File |
+        Sort-Object Name -Descending
+    if ($allBackups.Count -gt 10) {
+        $toDelete = $allBackups | Select-Object -Skip 10
+        foreach ($f in $toDelete) {
+            Remove-Item $f.FullName -Force -ErrorAction SilentlyContinue
+        }
+        Write-Host "  [INFO] Cleaned $($toDelete.Count) old backup(s), kept latest 10" -ForegroundColor Gray
+    }
+} catch {
+    Write-Host "  [WARN] Local backup pull failed (deploy 主流程未受影响): $_" -ForegroundColor Yellow
+    Write-Host "  [HINT] 手动补拉: scp ${ServerUser}@${ServerIP}:$scpSrcPath E:\数据开发与治理规范手册\生产数据库备份\" -ForegroundColor Gray
 }
 
 Write-Host ""
