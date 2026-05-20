@@ -750,6 +750,12 @@
                     <div class="hint">最多 5 个文件 / 单文件 ≤ 10MB / 支持 PNG·JPG·GIF·WEBP。OA 截图、对话截图、邮件截图等均可（选传）。</div>
                     <div id="filePreview" class="file-preview"></div>
                 </div>
+                <div class="form-row" id="formRow_template">
+                    <label>数据模板 <span class="hint">（选传）</span></label>
+                    <input type="file" id="f_template" accept=".xlsx,.xls">
+                    <div class="hint">单个 Excel 文件（.xlsx / .xls），≤ 10MB。用于需求方以具体表格形式描述列名/示例数据，便于开发理解需求。</div>
+                    <div id="templatePreview" class="file-preview"></div>
+                </div>
             </div>
             <div class="modal-footer">
                 <button class="btn btn-cancel" onclick="closeNewModal()">取消</button>
@@ -1159,6 +1165,18 @@
             const devValueHtml = isUnassigned
                 ? `<span style="color:#d97706;">${escapeHtml(d.developer_name || '(待指派)')}</span>`
                 : `${escapeHtml(d.developer_name)}${d.assigned_at ? `<span style="margin-left:8px;color:#64748b;font-size:12px;">· 指派于 ${fmtDate(d.assigned_at)}</span>` : ''}`;
+            // v1.67.0 数据模板：从 attachments 拿 attachment_type='example_xlsx' 的活跃文件
+            // 取首个 active example_xlsx（admin 创建时前端仅允许单文件上传；理论上 API 直传多文件场景按 db 默认顺序取，不引入显式排序避免复杂度）
+            const templateFile = (d.attachments || []).filter(
+                a => a.attachment_type === 'example_xlsx' && (a.status === 'active' || !a.status)
+            )[0];
+            const templateHtml = templateFile ? (() => {
+                const dlUrl = `/uploads/${String(templateFile.file_name || '').split('/').map(encodeURIComponent).join('/')}`;
+                const displayName = templateFile.original_name || (templateFile.file_name ? templateFile.file_name.split('/').pop() : '数据模板');
+                // codex 十七审 #3：download 属性值用单引号包裹更稳（escapeHtml 已转 `&quot;`/`&#39;` 但属性边界双保险）
+                return `<a href='${dlUrl}' target='_blank' rel='noopener' download='${escapeHtml(displayName)}' style='color:#166534;text-decoration:none;'>📊 ${escapeHtml(displayName)}</a>`;
+            })() : '<span style="color:#9ca3af">—</span>';
+
             const taskInfoHtml = `
                 <div class="detail-section">
                     <div class="detail-section-title">任务信息</div>
@@ -1174,6 +1192,8 @@
                             <div class="detail-kv-value">${escapeHtml(d.requester_name)}</div>
                             <div class="detail-kv-label">需求描述</div>
                             <div class="detail-kv-value">${escapeHtml(d.description)}</div>
+                            <div class="detail-kv-label">数据模板</div>
+                            <div class="detail-kv-value">${templateHtml}</div>
                             <div class="detail-kv-label">期望完成</div>
                             <div class="detail-kv-value">${fmtDate(d.deadline)}</div>
                             <div class="detail-kv-label">对接人</div>
@@ -1885,6 +1905,12 @@
         // 录入弹窗 attachment_type=screenshot：仅图片，不含 PDF（PDF 走 example_xlsx / 'pdf' 类型走单独入口）
         const ALLOWED_EXTS = ['png', 'jpg', 'jpeg', 'gif', 'webp'];
 
+        // v1.67.0 数据模板：单文件 .xlsx/.xls，attachment_type=example_xlsx（后端 D2 已预留，本次接通前端入口）
+        // 前端限定仅 .xlsx/.xls，后端 example_xlsx 允许范围更宽（含 pdf/docx/img），UI 层拦截避免 admin 误用
+        let selectedTemplate = null;
+        const TEMPLATE_MAX_SIZE = 10 * 1024 * 1024;
+        const TEMPLATE_ALLOWED_EXTS = ['xlsx', 'xls'];
+
         function onFilesChange(e) {
             const newFiles = Array.from(e.target.files || []);
             for (const f of newFiles) {
@@ -1919,20 +1945,66 @@
                 wrap.innerHTML = '';
                 return;
             }
+            // codex 十七审 #5：删除 pdf 分支（截图白名单已不含 pdf，避免维护者误判 pdf 也走 screenshot）
             wrap.innerHTML = selectedFiles.map((f, idx) => {
-                const ext = f.name.split('.').pop().toLowerCase();
-                let inner;
-                if (ext === 'pdf') {
-                    inner = `<div><div class="pdf-icon">📄</div><div class="file-name" title="${escapeHtml(f.name)}">${escapeHtml(f.name)}</div></div>`;
-                } else {
-                    const url = URL.createObjectURL(f);
-                    inner = `<img src="${url}" alt="${escapeHtml(f.name)}" title="${escapeHtml(f.name)}">`;
-                }
+                const url = URL.createObjectURL(f);
                 return `<div class="file-item">
-                    ${inner}
+                    <img src="${url}" alt="${escapeHtml(f.name)}" title="${escapeHtml(f.name)}">
                     <button class="remove-btn" onclick="removeFile(${idx})" title="移除">×</button>
                 </div>`;
             }).join('');
+        }
+
+        // v1.67.0 数据模板：单文件 .xlsx/.xls 校验 + 预览
+        // codex 十七审 #1：非法/超大分支必须清 selectedTemplate + 刷新预览，否则用户先选合法 xlsx 再选 txt
+        // 会保留旧 selectedTemplate 在提交时误传
+        function onTemplateChange(e) {
+            const f = (e.target.files || [])[0];
+            if (!f) {
+                selectedTemplate = null;
+                renderTemplatePreview();
+                return;
+            }
+            const ext = f.name.split('.').pop().toLowerCase();
+            if (!TEMPLATE_ALLOWED_EXTS.includes(ext)) {
+                showToast(`仅支持 .xlsx / .xls 格式：${f.name}`, 'error');
+                e.target.value = '';
+                selectedTemplate = null;
+                renderTemplatePreview();
+                return;
+            }
+            if (f.size > TEMPLATE_MAX_SIZE) {
+                showToast(`${f.name} 超过 10MB`, 'error');
+                e.target.value = '';
+                selectedTemplate = null;
+                renderTemplatePreview();
+                return;
+            }
+            selectedTemplate = f;
+            renderTemplatePreview();
+        }
+
+        function removeTemplate() {
+            selectedTemplate = null;
+            const input = document.getElementById('f_template');
+            if (input) input.value = '';
+            renderTemplatePreview();
+        }
+
+        function renderTemplatePreview() {
+            const wrap = document.getElementById('templatePreview');
+            if (!wrap) return;
+            if (!selectedTemplate) {
+                wrap.innerHTML = '';
+                return;
+            }
+            const f = selectedTemplate;
+            const sizeKB = (f.size / 1024).toFixed(1);
+            wrap.innerHTML = `<div class="file-item" style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:6px;">
+                <span style="font-size:1.4em;">📊</span>
+                <span class="file-name" title="${escapeHtml(f.name)}" style="flex:1;font-size:0.9em;color:#166534;">${escapeHtml(f.name)} <span style="color:#9ca3af;">(${sizeKB} KB)</span></span>
+                <button class="remove-btn" onclick="removeTemplate()" title="移除" style="background:transparent;border:0;color:#dc2626;cursor:pointer;font-size:1.1em;">×</button>
+            </div>`;
         }
 
         // v1.66.2 新建/编辑共享 modal 状态
@@ -1956,14 +2028,21 @@
             document.getElementById('f_files').value = '';
             selectedFiles = [];
             renderFilePreview();
+            // v1.67.0 数据模板重置
+            const tplInput = document.getElementById('f_template');
+            if (tplInput) tplInput.value = '';
+            selectedTemplate = null;
+            renderTemplatePreview();
             // deadline 默认 +7 天
             const d = new Date();
             d.setDate(d.getDate() + 7);
             d.setHours(18, 0, 0, 0);
             document.getElementById('f_deadline').value = d.toISOString().substring(0, 16);
 
-            // 截图区 + 对接人区都显示且可用（新建场景）
+            // 截图区 + 数据模板区 + 对接人区都显示且可用（新建场景）
             document.getElementById('formRow_files').style.display = '';
+            const tplRow = document.getElementById('formRow_template');
+            if (tplRow) tplRow.style.display = '';
             document.getElementById('formRow_contact').style.display = '';
             document.getElementById('f_contact').disabled = false;
             document.getElementById('contactHint').textContent = '外包负责人，由其在平台内将协作单指派给具体开发。下拉显示全部活跃用户（含 admin 兜底），凭备注辨识。';
@@ -1999,6 +2078,11 @@
             document.getElementById('formRow_files').style.display = 'none';
             selectedFiles = [];
             renderFilePreview();
+            // v1.67.0 数据模板区编辑时隐藏（不动附件，与截图一致）
+            const tplRow = document.getElementById('formRow_template');
+            if (tplRow) tplRow.style.display = 'none';
+            selectedTemplate = null;
+            renderTemplatePreview();
 
             // 对接人下拉：PENDING_ASSIGN 可改；PENDING 禁用
             await loadTargetDbOptions();
@@ -2124,35 +2208,57 @@
 
                 const newId = data.id;
 
-                // Step 2: 上传附件（v2.0 改选传：无截图直接收尾）
-                if (selectedFiles.length === 0) {
-                    showToast(`协作单 #${newId} 已创建`, 'success');
-                    closeNewModal();
-                    loadList();
-                    return;
+                // Step 2: 上传截图（attachment_type=screenshot）
+                // Step 3: 上传数据模板（attachment_type=example_xlsx，v1.67.0 新增）
+                // 两步独立上传：任一失败不阻塞另一个；记录上传结果用于结尾 toast
+                const uploadResults = { screenshots: 0, template: false, errors: [] };
+
+                if (selectedFiles.length > 0) {
+                    btn.textContent = '上传截图...';
+                    const formData = new FormData();
+                    formData.append('attachment_type', 'screenshot');
+                    selectedFiles.forEach(f => formData.append('files', f));
+                    const uploadRes = await authFetch(`/api/collab/requests/${newId}/attachments`, {
+                        method: 'POST',
+                        body: formData
+                    });
+                    if (!uploadRes) return;
+                    const uploadData = await uploadRes.json();
+                    if (!uploadRes.ok) {
+                        uploadResults.errors.push(`截图上传失败：${uploadData.error || '请稍后重试'}`);
+                    } else {
+                        uploadResults.screenshots = uploadData.attachments.length;
+                    }
                 }
 
-                btn.textContent = '上传截图...';
-                const formData = new FormData();
-                formData.append('attachment_type', 'screenshot');
-                selectedFiles.forEach(f => formData.append('files', f));
-
-                const uploadRes = await authFetch(`/api/collab/requests/${newId}/attachments`, {
-                    method: 'POST',
-                    body: formData
-                });
-
-                if (!uploadRes) return;
-                const uploadData = await uploadRes.json();
-
-                if (!uploadRes.ok) {
-                    showToast(`协作单 #${newId} 已创建，但截图上传失败：${uploadData.error || '请稍后重试'}`, 'error');
-                    closeNewModal();
-                    loadList();
-                    return;
+                if (selectedTemplate) {
+                    btn.textContent = '上传数据模板...';
+                    const tplFormData = new FormData();
+                    tplFormData.append('attachment_type', 'example_xlsx');
+                    tplFormData.append('files', selectedTemplate);
+                    const tplRes = await authFetch(`/api/collab/requests/${newId}/attachments`, {
+                        method: 'POST',
+                        body: tplFormData
+                    });
+                    if (!tplRes) return;
+                    const tplData = await tplRes.json();
+                    if (!tplRes.ok) {
+                        uploadResults.errors.push(`数据模板上传失败：${tplData.error || '请稍后重试'}`);
+                    } else {
+                        uploadResults.template = true;
+                    }
                 }
 
-                showToast(`协作单 #${newId} 已创建（含 ${uploadData.attachments.length} 张截图）`, 'success');
+                // 结尾 toast：拼装上传摘要
+                const summaryParts = [];
+                if (uploadResults.screenshots > 0) summaryParts.push(`${uploadResults.screenshots} 张截图`);
+                if (uploadResults.template) summaryParts.push('数据模板');
+                const summary = summaryParts.length > 0 ? `（含 ${summaryParts.join(' + ')}）` : '';
+                if (uploadResults.errors.length > 0) {
+                    showToast(`协作单 #${newId} 已创建${summary}，但有上传失败：${uploadResults.errors.join('；')}`, 'error');
+                } else {
+                    showToast(`协作单 #${newId} 已创建${summary}`, 'success');
+                }
                 closeNewModal();
                 loadList();
             } catch (e) {
@@ -2226,6 +2332,9 @@
 
             // 文件上传 change 监听
             document.getElementById('f_files').addEventListener('change', onFilesChange);
+            // v1.67.0 数据模板 input change 绑定
+            const tplInput = document.getElementById('f_template');
+            if (tplInput) tplInput.addEventListener('change', onTemplateChange);
 
             // 等 app.js 把用户信息加载好后再加载列表
             await loadActiveUsers();
