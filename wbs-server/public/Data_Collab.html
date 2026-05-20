@@ -1767,12 +1767,21 @@
         }
 
         // 取当前登录用户 id（从 JWT 解码,沿用项目已有 currentUserId 全局变量或 fallback）
+        // v1.66.4 修复（2026-05-20）：JWT 第二段是 URL-safe base64（- 替 + / _ 替 /），
+        // 原生 atob 不支持，需先 replace；同时按 UTF-8 解码 payload 字节流（修中文名 display_name 显示乱码）
+        // 历史 bug：刘林航 display_name UTF-8 编码后 base64 含 `-`，原生 atob 报 InvalidCharacterError
+        // → getCurrentUserId() catch 返回 null → isDeveloper 永远 false → PENDING 状态看不到"上传交付物"按钮
         function getCurrentUserId() {
             if (typeof currentUserId !== 'undefined' && currentUserId) return currentUserId;
             try {
                 const tok = localStorage.getItem('token');
                 if (!tok) return null;
-                const payload = JSON.parse(atob(tok.split('.')[1]));
+                const base64Url = tok.split('.')[1];
+                const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+                const jsonPayload = decodeURIComponent(atob(base64).split('').map(c =>
+                    '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2)
+                ).join(''));
+                const payload = JSON.parse(jsonPayload);
                 return payload.id;
             } catch (e) { return null; }
         }
