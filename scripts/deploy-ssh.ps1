@@ -4,6 +4,16 @@
 #
 # 4 步：(1) push → (2) pull → (3) 备份 task_pool.db（v2.0 数据协作模块强制，失败中止）→ (4) PM2 restart
 # 备份策略：每次部署都备份；同目录 task_pool.db.backup_yyyyMMdd_HHmmss；不自动清理（季度初手动跑）
+#
+# ⚠️ KNOWN ISSUES（已知结构性缺口，2026-05-14 / 05-15 踩过）：
+# 1. 不跑 npm install —— 仅做"代码 + db 备份 + 重启"，新增 npm 依赖需手工处理：
+#    路径 A（一次性根治）：找网络/运维修生产 npm SSL，使其能直连 registry 或走内网镜像
+#    路径 B（每次手工）：本地 npm install 后 scp 主包+所有传递依赖到生产 node_modules/
+#    检查传递依赖：cat node_modules/<pkg>/package.json | grep -A 5 dependencies
+#    历史案例：v1.64.0 node-sql-parser（89MB）+ big-integer（186KB，传递依赖）
+# 2. 文件编码必须 UTF-8 with BOM —— 否则 PowerShell 5.1 按 GBK 解码中文，
+#    三字节 UTF-8 中文（如句号 U+3002 = E3 80 82）被 GBK 错误吞并下一字符
+#    引发"missing terminator"假错误（2026-05-14 踩过，编辑后用 UTF8Encoding($true) 重写）
 
 param(
     [string]$ServerIP = "192.168.1.100",
@@ -36,9 +46,9 @@ Write-Host ""
 # 2. Reset on server (force overwrite to avoid CRLF/merge issues)
 Write-Host "[2/4] Pull on server..." -ForegroundColor Yellow
 try {
-    # 远程 cmd 用 && 短路串联（任一步失败则停）
-    # ⚠️ PowerShell 5.1 解析双引号字符串时会把 && 当作 statement separator 报错,
-    # 改用单引号字符串(无变量插值,&& 保留为字面值)规避(2026-05-14 发现)
+    # 远程 cmd 用 && 短路串联（任一步失败则停）—— 这里的 && 是给远端 cmd.exe 解释的
+    # 用单引号字符串：① 阻止本地 PowerShell 5.1 把 && 当 statement separator 解析
+    # ② 字符串无变量插值，整串作为 SSH argv 单参数原样传到远端，由 cmd.exe 拆分
     $remoteCmd2 = 'cd /d E:\Task_Pool && git fetch production && git reset --hard production/main'
     $pullResult = ssh "$ServerUser@$ServerIP" $remoteCmd2 2>&1
     if ($LASTEXITCODE -eq 0) {
@@ -60,6 +70,8 @@ Write-Host ""
 # 用 EncodedCommand 规避三层 shell（本地 PowerShell → SSH → 远端 PowerShell）的嵌套引号
 # 转义问题——之前用单引号字符串拼接，远端 PowerShell 把 `''` 还原后大括号 `{}` 被 parser
 # 误当 hashtable 起始而剥掉，导致 `if (-not ...) { ... }` 解析失败（2026-05-15 踩坑）
+# 注：与 5/14 "UTF-8 无 BOM → GBK 误解析中文" 踩坑同源但不同症——前者是文件编码层，
+# 这里是 shell argv 转义层；EncodedCommand 用 UTF-16LE + base64 同时解决两类问题
 Write-Host "[3/4] Backup task_pool.db on server..." -ForegroundColor Yellow
 try {
     $backupScript = @'
