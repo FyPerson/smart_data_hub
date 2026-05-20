@@ -80,11 +80,27 @@ const parser = new Parser();
 // 常量定义
 // ============================================================================
 
-/** 当前业务库白名单（v2.0 单方言决策仅 SQL Server business_db）*/
+/**
+ * 默认业务库白名单（向后兼容 v2.0 D3 早期 sqlserver 单方言决策）
+ *
+ * v1.68.0（路由式多方言）：validateAndTransform 接收 dialect + allowedDb 参数，
+ * 此常量仅用于"未传 allowedDb 时的 sqlserver 默认值"兜底，新调用方应显式传参。
+ */
 const ALLOWED_DATABASE = 'business_db';
 
-/** TOP N 注入值（方案 §6.1）*/
+/** TOP N / LIMIT N 注入值（方案 §6.1）*/
 const TOP_LIMIT = 100;
+
+/**
+ * 支持的方言枚举（路由式多方言，v1.68.0 引入）
+ *   - sqlserver：T-SQL（node-sql-parser dialect 'transactsql'，含 [ ] 标识符 / TOP N / xp_*）
+ *   - mysql：MySQL 8.x（node-sql-parser dialect 'mysql'，含反引号标识符 / LIMIT / LOAD_FILE）
+ */
+const SUPPORTED_DIALECTS = new Set(['sqlserver', 'mysql']);
+const DIALECT_TO_PARSER = {
+    sqlserver: 'transactsql',
+    mysql: 'mysql',
+};
 
 /**
  * 高危过程名单（codex C2 Claude 扩展版）
@@ -108,7 +124,7 @@ const DANGEROUS_SP_PROCS = new Set([
 ]);
 
 /**
- * 无条件拒绝的危险关键字 token（层 0 词法层扫描）
+ * 无条件拒绝的危险关键字 token（层 0 词法层扫描）— SQL Server / T-SQL 方言
  *
  * 这些 token 一旦在词法层识别到（已排除字符串/注释/标识符），直接拒绝。
  */
@@ -121,6 +137,41 @@ const DANGEROUS_KEYWORDS = new Set([
     'BULK',
 ]);
 
+/**
+ * 无条件拒绝的危险关键字 token — MySQL 方言（v1.68.0）
+ *
+ * 约定（codex 十九审 low #2）：
+ *   - 非 SELECT/WITH 语句类关键字（CREATE/DROP/INSERT/UPDATE/DELETE/GRANT/LOAD DATA/FLUSH/SHOW 等）
+ *     依赖 layer 0 首 token 白名单 + layer 1 parser 拒绝，**不列入本名单**。
+ *   - 本名单只维护 SELECT/WITH 内可嵌入的风险 token。
+ *
+ * F1 探针验证（2026-05-20）：fy 账号无 FILE 权限，LOAD_FILE 返回 NULL 不报错、
+ * INTO OUTFILE 报权限拒绝。应用层仍兜底拒绝（防御纵深，避免账号意外被授权）。
+ */
+const DANGEROUS_MYSQL_KEYWORDS = new Set([
+    // 文件 I/O 系列（FILE 权限相关）
+    'OUTFILE',          // SELECT ... INTO OUTFILE '/tmp/x'
+    'DUMPFILE',         // SELECT ... INTO DUMPFILE '/tmp/x'
+    'LOAD_FILE',        // SELECT LOAD_FILE('/etc/passwd')（v1.68.0 自测发现漏列，F1 探针 fy 账号无权限返 NULL，应用层必须拒）
+    // 时间盲注 / 资源消耗
+    'SLEEP',            // SELECT SLEEP(10)（函数式时间盲注）
+    'BENCHMARK',        // SELECT BENCHMARK(1000000, MD5('x'))（CPU 消耗）
+    'GET_LOCK',         // 命名锁，可能造成长时间阻塞
+    // 复制等待 / 主从同步（codex 十九审 medium #3，函数名兜底拒）
+    'MASTER_POS_WAIT',  // 等待主库 binlog 位点
+    'SOURCE_POS_WAIT',  // MySQL 8.0.22+ 重命名
+    // 系统变量 / 配置探测
+    'PERFORMANCE_SCHEMA',  // 系统库（已由跨库检查覆盖，词法层兜底）
+    // 注：FOR UPDATE / LOCK IN SHARE MODE 不在本名单（UPDATE/SHARE 是常用列名前缀如 update_time，整 token 静态拒会大面积误杀）。
+    // 取舍：依赖 20s timeout 兜底锁等待场景，应用层不静态拒。codex 十九审 medium #3 已 acknowledge 此风险。
+]);
+
+/**
+ * 应用层补充：MySQL 跨库拒绝的库名（fy 账号可见但 D3 不允许）
+ * F1 探针发现 fy 账号可见：information_schema / newinterface / performance_schema
+ * 应用层 ALLOWED_DATABASE='newhrd'，任何其他库的引用都被层 2 拒绝。
+ */
+
 // ============================================================================
 // 主入口
 // ============================================================================
@@ -128,31 +179,49 @@ const DANGEROUS_KEYWORDS = new Set([
 /**
  * 校验并改写 SQL（4 层防御一次跑完）
  *
+ * v1.68.0 路由式多方言改造（2026-05-20）：
+ *   - 新增 dialect 参数：'sqlserver' / 'mysql'
+ *   - 新增 allowedDb 参数：业务库白名单（sqlserver 默认 business_db / mysql 调用方需显式传如 'newhrd'）
+ *   - 旧调用方（仅传 SQL 单参数）默认走 sqlserver + ALLOWED_DATABASE='business_db'，向后兼容
+ *
  * @param {string} originalSql 用户提交的 SQL 文本
+ * @param {object} [options] 路由参数（向后兼容，可省略）
+ * @param {string} [options.dialect='sqlserver'] 方言：'sqlserver' / 'mysql'
+ * @param {string} [options.allowedDb] 业务库白名单；省略时按 dialect 默认（sqlserver=business_db）
  * @returns {{ ok: true, smokeSql: string } | { ok: false, layer: number, reason: string, detail?: string }}
  *
- * 成功：ok=true，smokeSql 是注入 TOP 100 后的待执行 SQL
+ * 成功：ok=true，smokeSql 是注入 TOP/LIMIT 100 后的待执行 SQL
  * 失败：ok=false，layer 标记被哪一层拒绝，reason 是给用户看的简短描述
  */
-function validateAndTransform(originalSql) {
+function validateAndTransform(originalSql, options) {
     if (typeof originalSql !== 'string' || originalSql.trim().length === 0) {
         return { ok: false, layer: 0, reason: 'SQL 为空' };
     }
 
-    // 层 0：词法状态机
-    const layer0 = layer0_lexerScan(originalSql);
+    // 路由参数解析（默认 sqlserver + business_db，向后兼容）
+    const dialect = (options && options.dialect) || 'sqlserver';
+    if (!SUPPORTED_DIALECTS.has(dialect)) {
+        return { ok: false, layer: 0, reason: `不支持的方言：${dialect}（仅支持 ${Array.from(SUPPORTED_DIALECTS).join('/')}）` };
+    }
+    const allowedDb = (options && options.allowedDb) || (dialect === 'sqlserver' ? ALLOWED_DATABASE : null);
+    if (!allowedDb) {
+        return { ok: false, layer: 0, reason: `${dialect} 方言必须提供 allowedDb 业务库白名单` };
+    }
+
+    // 层 0：词法状态机（按 dialect 选不同的危险关键字集 + 反引号标识符支持）
+    const layer0 = layer0_lexerScan(originalSql, dialect);
     if (!layer0.ok) return { ok: false, layer: 0, ...layer0 };
 
-    // 层 1：parser 解析
-    const layer1 = layer1_parse(originalSql);
+    // 层 1：parser 解析（按 dialect 选 transactsql / mysql）
+    const layer1 = layer1_parse(originalSql, dialect);
     if (!layer1.ok) return { ok: false, layer: 1, ...layer1 };
 
-    // 层 2：AST walker 递归检查
-    const layer2 = layer2_astCheck(layer1.ast);
+    // 层 2：AST walker 递归检查（按 dialect + allowedDb 检查跨库引用）
+    const layer2 = layer2_astCheck(layer1.ast, dialect, allowedDb);
     if (!layer2.ok) return { ok: false, layer: 2, ...layer2 };
 
-    // 层 3：TOP 100 AST 注入
-    const layer3 = layer3_injectTop(layer1.ast);
+    // 层 3：TOP 100 / LIMIT 100 AST 注入（按 dialect 分支）
+    const layer3 = layer3_injectTop(layer1.ast, dialect);
     if (!layer3.ok) return { ok: false, layer: 3, ...layer3 };
 
     return { ok: true, smokeSql: layer3.smokeSql };
@@ -280,6 +349,28 @@ function tokenize(sql) {
             continue;
         }
 
+        // 反引号标识符 `xxx`（含 `` 转义） — MySQL 标准标识符引用（v1.68.0）
+        // SQL Server 不用反引号，但词法层统一识别不区分方言（识别后不参与危险关键字扫描即可）
+        if (ch === '`') {
+            const start = i;
+            i++;
+            let closed = false;
+            const inner = [];
+            while (i < n) {
+                if (sql[i] === '`') {
+                    if (sql[i + 1] === '`') { inner.push('`'); i += 2; continue; }
+                    i++; closed = true; break;
+                }
+                inner.push(sql[i]);
+                i++;
+            }
+            if (!closed) {
+                return { ok: false, reason: '未闭合的反引号标识符 `...`', detail: `start=${start}` };
+            }
+            tokens.push({ type: 'BACKTICK_ID', value: inner.join(''), start });
+            continue;
+        }
+
         // 分号
         if (ch === ';') {
             tokens.push({ type: 'SEMICOLON', start: i });
@@ -323,7 +414,9 @@ function tokenize(sql) {
     return { ok: true, tokens };
 }
 
-function layer0_lexerScan(sql) {
+function layer0_lexerScan(sql, dialect) {
+    // 默认 sqlserver（向后兼容旧调用方）
+    dialect = dialect || 'sqlserver';
     // 1. 词法切分（含未闭合检测）
     const tk = tokenize(sql);
     if (!tk.ok) return tk;
@@ -357,24 +450,29 @@ function layer0_lexerScan(sql) {
         }
     }
 
-    // 5. 危险关键字 token 扫描
-    //    WORD token 的 valueUpper 与 DANGEROUS_KEYWORDS 比较；
-    //    xp_* 整族 → 任一以 xp_ 开头的 WORD（不区分大小写）；
-    //    sp_* → 只匹配 DANGEROUS_SP_PROCS 名单。
-    //    BRACKET_ID / DQUOTE_ID / STRING 的内容不参与扫描（用户主动用了标识符引用，不可能是 SQL Server 自带过程名）。
+    // 5. 危险关键字 token 扫描（按方言选不同集合）
+    //    sqlserver：DANGEROUS_KEYWORDS + xp_* 整族 + DANGEROUS_SP_PROCS 名单
+    //    mysql：DANGEROUS_MYSQL_KEYWORDS（OUTFILE / DUMPFILE / SLEEP / BENCHMARK 等）
+    //    BRACKET_ID / DQUOTE_ID / BACKTICK_ID / STRING 的内容不参与扫描（用户主动用了标识符引用）。
     for (const t of effective) {
         if (t.type !== 'WORD') continue;
         const upper = t.valueUpper;
         const lower = t.value.toLowerCase();
 
-        if (DANGEROUS_KEYWORDS.has(upper)) {
-            return { ok: false, reason: `检测到禁用关键字：${upper}` };
-        }
-        if (lower.startsWith('xp_')) {
-            return { ok: false, reason: `检测到扩展存储过程：${t.value}（xp_* 系列不允许）` };
-        }
-        if (lower.startsWith('sp_') && DANGEROUS_SP_PROCS.has(lower)) {
-            return { ok: false, reason: `检测到高危系统过程：${t.value}` };
+        if (dialect === 'sqlserver') {
+            if (DANGEROUS_KEYWORDS.has(upper)) {
+                return { ok: false, reason: `检测到禁用关键字：${upper}` };
+            }
+            if (lower.startsWith('xp_')) {
+                return { ok: false, reason: `检测到扩展存储过程：${t.value}（xp_* 系列不允许）` };
+            }
+            if (lower.startsWith('sp_') && DANGEROUS_SP_PROCS.has(lower)) {
+                return { ok: false, reason: `检测到高危系统过程：${t.value}` };
+            }
+        } else if (dialect === 'mysql') {
+            if (DANGEROUS_MYSQL_KEYWORDS.has(upper)) {
+                return { ok: false, reason: `检测到 MySQL 禁用关键字：${upper}（涉及文件 I/O / 时间盲注 / 资源消耗 / 系统库）` };
+            }
         }
     }
 
@@ -397,10 +495,12 @@ function layer0_lexerScan(sql) {
  *   1. 把 SQL 转成 AST（供层 2 walker 用）
  *   2. 兜底拦截层 0 漏过的语法问题
  */
-function layer1_parse(sql) {
+function layer1_parse(sql, dialect) {
+    dialect = dialect || 'sqlserver';
+    const parserDb = DIALECT_TO_PARSER[dialect];
     let ast;
     try {
-        ast = parser.astify(sql, { database: 'transactsql' });
+        ast = parser.astify(sql, { database: parserDb });
     } catch (e) {
         return {
             ok: false,
@@ -523,10 +623,14 @@ function collectTableRefs(selectNode) {
     return refs;
 }
 
-function layer2_astCheck(ast) {
+function layer2_astCheck(ast, dialect, allowedDb) {
+    dialect = dialect || 'sqlserver';
+    allowedDb = allowedDb || ALLOWED_DATABASE;
+    const allowedNorm = allowedDb.toUpperCase();
+
     let realIntoFound = null;
-    let crossDbRef = null;        // 三段名 + db ≠ business_db
-    let ambiguousTwoPart = null;  // 两段名歧义（db 非空 + schema 为空）
+    let crossDbRef = null;        // 跨库引用（db ≠ allowedDb）
+    let ambiguousTwoPart = null;  // T-SQL 两段名歧义（仅 sqlserver 用）
 
     walkSelectNodes(ast, (selectNode) => {
         // INTO 检测：递归所有 select 节点（codex M5 — INTO 也可能在 CTE 内部）
@@ -536,33 +640,42 @@ function layer2_astCheck(ast) {
             }
         }
 
-        // 表引用检测
-        // ⚠️ T-SQL 两段名（如 sys.tables / dbo.crm_bid / master.syslogins）在语法上有歧义：
+        // 表引用检测（v1.68.0 按方言分支）
+        // T-SQL 两段名（如 sys.tables / dbo.crm_bid / master.syslogins）在语法上有歧义：
         //    可能是 schema.table（省 db），也可能是 db.table（省 schema）。
-        //    node-sql-parser 统一解析成 db=X, schema=null, table=Y，自身无法区分。
-        //    我们的策略：**一刀切拒绝两段名**，要求用户写单段名（推荐）或完整三段名 business_db.dbo.xxx。
-        //    这样既避免误杀 sys.tables 类合法形态，也防止 master.syslogins 类绕过攻击。
+        //    我们的策略：sqlserver **一刀切拒绝两段名**，要求单段名或完整三段名 business_db.dbo.xxx。
+        // MySQL 两段名（如 newhrd.staff）语义明确 = db.table（无歧义），允许通过但 db 必须 = allowedDb。
         const refs = collectTableRefs(selectNode);
         for (const r of refs) {
             const dbNorm = normalizeIdent(r.db);
             const schemaNorm = normalizeIdent(r.schema);
-            const allowedNorm = ALLOWED_DATABASE.toUpperCase();
 
             if (dbNorm === null) {
                 // 单段名（schema 也应为 null）— 通过
                 continue;
             }
-            if (schemaNorm === null) {
-                // 两段名歧义 db=X / schema=null — 拒绝
-                if (!ambiguousTwoPart) {
-                    ambiguousTwoPart = { db: r.db, table: r.table };
+
+            if (dialect === 'sqlserver') {
+                if (schemaNorm === null) {
+                    // 两段名歧义 db=X / schema=null — 拒绝
+                    if (!ambiguousTwoPart) {
+                        ambiguousTwoPart = { db: r.db, table: r.table };
+                    }
+                    continue;
                 }
-                continue;
-            }
-            // 三段名 db=X / schema=Y — 检查 db 必须是 business_db
-            if (dbNorm !== allowedNorm) {
-                if (!crossDbRef) {
-                    crossDbRef = { db: r.db, schema: r.schema, table: r.table };
+                // 三段名 db=X / schema=Y — 检查 db 必须是 allowedDb
+                if (dbNorm !== allowedNorm) {
+                    if (!crossDbRef) {
+                        crossDbRef = { db: r.db, schema: r.schema, table: r.table };
+                    }
+                }
+            } else if (dialect === 'mysql') {
+                // MySQL：node-sql-parser 把 `db.table` 解析为 db=X, schema=null, table=Y
+                // 两段名直接 = db.table，无歧义；db 必须 = allowedDb
+                if (dbNorm !== allowedNorm) {
+                    if (!crossDbRef) {
+                        crossDbRef = { db: r.db, schema: r.schema, table: r.table };
+                    }
                 }
             }
         }
@@ -579,7 +692,7 @@ function layer2_astCheck(ast) {
     if (ambiguousTwoPart) {
         return {
             ok: false,
-            reason: `检测到两段表引用 ${ambiguousTwoPart.db}.${ambiguousTwoPart.table}，存在歧义（无法区分 schema.table 与 db.table）。请改写为单段表名（如 ${ambiguousTwoPart.table}）或完整三段名（如 ${ALLOWED_DATABASE}.dbo.${ambiguousTwoPart.table}）`,
+            reason: `检测到两段表引用 ${ambiguousTwoPart.db}.${ambiguousTwoPart.table}，存在歧义（无法区分 schema.table 与 db.table）。请改写为单段表名（如 ${ambiguousTwoPart.table}）或完整三段名（如 ${allowedDb}.dbo.${ambiguousTwoPart.table}）`,
             detail: `ambiguous two-part name: ${ambiguousTwoPart.db}.${ambiguousTwoPart.table}`,
         };
     }
@@ -587,8 +700,8 @@ function layer2_astCheck(ast) {
     if (crossDbRef) {
         return {
             ok: false,
-            reason: `跨库引用不允许，仅允许 ${ALLOWED_DATABASE} 库内的表`,
-            detail: `检测到 ${crossDbRef.db}.${crossDbRef.schema}.${crossDbRef.table}`,
+            reason: `跨库引用不允许，仅允许 ${allowedDb} 库内的表`,
+            detail: `检测到 ${crossDbRef.db}${crossDbRef.schema ? '.' + crossDbRef.schema : ''}.${crossDbRef.table}`,
         };
     }
 
@@ -612,9 +725,11 @@ function layer2_astCheck(ast) {
  * @param {object} ast 经过层 1/2 校验的 AST（顶层 type === 'select'）
  * @returns {{ ok: true, smokeSql: string } | { ok: false, reason: string, detail?: string }}
  */
-function layer3_injectTop(ast) {
+function layer3_injectTop(ast, dialect) {
+    dialect = dialect || 'sqlserver';
+
     // UNION 检测：顶层 select 含 _next 链（探针 case 6 确认）
-    // sqlify 时 TOP 只作用第一个分支，无法限制 UNION 总行数 → 直接拒绝
+    // sqlify 时 TOP/LIMIT 只作用第一个分支，无法限制 UNION 总行数 → 直接拒绝
     if (ast._next) {
         return {
             ok: false,
@@ -622,15 +737,27 @@ function layer3_injectTop(ast) {
         };
     }
 
-    // 注入 TOP（覆盖式：仅当用户没写 TOP 时才设 100）
-    if (ast.top == null) {
-        ast.top = { value: TOP_LIMIT, percent: null };
+    if (dialect === 'sqlserver') {
+        // SQL Server: 注入 TOP（覆盖式：仅当用户没写 TOP 时才设 100）
+        if (ast.top == null) {
+            ast.top = { value: TOP_LIMIT, percent: null };
+        }
+        // 若用户已写 TOP N，沿用其 N（哪怕 N > 100；理由：用户主动控制行数，是合法意图）
+    } else if (dialect === 'mysql') {
+        // MySQL: 注入 LIMIT 100（覆盖式：仅当用户没写 LIMIT 时才设）
+        // node-sql-parser MySQL AST limit 结构：{ seperator: '', value: [{ type: 'number', value: 100 }] }
+        // 若用户已写 LIMIT N，沿用其 N
+        if (ast.limit == null || !ast.limit.value || ast.limit.value.length === 0) {
+            ast.limit = {
+                seperator: '',
+                value: [{ type: 'number', value: TOP_LIMIT }],
+            };
+        }
     }
-    // 若用户已写 TOP N，沿用其 N（哪怕 N > 100；理由：用户主动控制行数，是合法意图）
 
     let smokeSql;
     try {
-        smokeSql = parser.sqlify(ast, { database: 'transactsql' });
+        smokeSql = parser.sqlify(ast, { database: DIALECT_TO_PARSER[dialect] });
     } catch (e) {
         return {
             ok: false,
@@ -655,6 +782,8 @@ module.exports = {
     // 常量暴露（调用方/测试用）
     ALLOWED_DATABASE,
     TOP_LIMIT,
+    SUPPORTED_DIALECTS,
+    DIALECT_TO_PARSER,
     // 内部 helper 暴露（仅测试用）
     _internal: {
         layer0_lexerScan,
@@ -663,5 +792,6 @@ module.exports = {
         layer3_injectTop,
         DANGEROUS_KEYWORDS,
         DANGEROUS_SP_PROCS,
+        DANGEROUS_MYSQL_KEYWORDS,
     },
 };

@@ -1533,9 +1533,59 @@ async function closeMssqlPools() {
     mssqlPools.clear();
 }
 
+// ============================================================================
+// MySQL 连接池（v1.68.0 路由式多方言）
+// ============================================================================
+
+const mysql = require('mysql2/promise');
+const mysqlPools = new Map();
+
+/**
+ * 获取 MySQL 连接池（mysql2/promise）
+ * @param {Object} connConfig - 连接配置 { host, port, database, username, password }
+ * @returns {Promise<mysql.Pool>}
+ */
+async function getMysqlPool(connConfig) {
+    const poolKey = `${connConfig.host}:${connConfig.port}:${connConfig.database}`;
+    if (mysqlPools.has(poolKey)) {
+        return mysqlPools.get(poolKey);
+    }
+    const pool = mysql.createPool({
+        host: connConfig.host,
+        port: connConfig.port,
+        database: connConfig.database,
+        user: connConfig.username,
+        password: connConfig.password,
+        connectionLimit: 10,
+        connectTimeout: 10000,
+        // smoke test 单查询不依赖事务，但保持 utf8mb4 避免中文乱码
+        charset: 'utf8mb4',
+    });
+    // 探活一次确保配置正确
+    const conn = await pool.getConnection();
+    await conn.ping();
+    conn.release();
+    mysqlPools.set(poolKey, pool);
+    logger.info(`MySQL connection pool created for ${poolKey}`);
+    return pool;
+}
+
+async function closeMysqlPools() {
+    for (const [key, pool] of mysqlPools) {
+        try {
+            await pool.end();
+            logger.info(`MySQL connection pool closed for ${key}`);
+        } catch (err) {
+            logger.error(`Error closing MySQL pool ${key}:`, err.message);
+        }
+    }
+    mysqlPools.clear();
+}
+
 // 进程退出时关闭连接池
 process.on('SIGINT', async () => {
     await closeMssqlPools();
+    await closeMysqlPools();
     process.exit(0);
 });
 
@@ -9945,10 +9995,10 @@ async function validateCollabRequestFields(body, isCreate = true) {
 // 0. 获取 source 类型的 db_connections 列表（v2.0 录入弹窗目标业务库下拉用）
 // 方案 §8.2：admin 专属，过滤 connection_type='source'
 app.get('/api/collab/db-connections/source', authenticateToken, requireAdmin, (req, res) => {
-    // Deploy 3 单方言决策（方案 §6.1-A）：仅 SQL Server source 出现在下拉
-    // MySQL 等其他方言留到 v2.1 扩展 smoke test 引擎后再放开
+    // v1.68.0 路由式多方言（2026-05-20）：放开 sqlserver / mysql 双方言
+    // Deploy 3 单方言决策已升级 — sql-validator 与 runRealSmokeTest 按 connection.type 分派
     db.all(
-        "SELECT id, name, type, host, port, database, source_system_code FROM db_connections WHERE connection_type = 'source' AND type = 'sqlserver' ORDER BY name ASC, id ASC",
+        "SELECT id, name, type, host, port, database, source_system_code FROM db_connections WHERE connection_type = 'source' AND type IN ('sqlserver', 'mysql') ORDER BY name ASC, id ASC",
         [],
         (err, rows) => {
             if (err) {
@@ -11035,15 +11085,16 @@ app.post('/api/collab/requests/:id/submit',
                 cleanupPending();
                 return res.status(409).json({ error: '协作单缺少目标业务库配置（target_db_connection_id 为空）' });
             }
+            // v1.68.0 路由式多方言：放开 sqlserver / mysql，按 type 分派 smoke test
             const targetConn = await dbGetAsync(
                 `SELECT id, name, type, host, port, database, username, password
                    FROM db_connections
-                  WHERE id = ? AND connection_type = 'source' AND type = 'sqlserver'`,
+                  WHERE id = ? AND connection_type = 'source' AND type IN ('sqlserver', 'mysql')`,
                 [collab.target_db_connection_id]
             );
             if (!targetConn) {
                 cleanupPending();
-                return res.status(500).json({ error: '目标业务库配置缺失或非 SQL Server 方言（v2.0 仅支持 SQL Server）' });
+                return res.status(500).json({ error: '目标业务库配置缺失或方言不支持（仅支持 SQL Server / MySQL）' });
             }
 
             const oldVer = collab.submission_version || 0;
@@ -11149,19 +11200,21 @@ app.post('/api/collab/requests/:id/submit',
                 return res.status(500).json({ error: '目标库配置异常，请联系管理员' });
             }
 
-            // === 拿 mssql 连接池 ===
+            // === 拿连接池（v1.68.0 路由式多方言按 type 分派） ===
+            const dialect = targetConn.type;  // 'sqlserver' / 'mysql'
             let pool;
             try {
-                pool = await getMssqlPool({
+                const poolConfig = {
                     host: targetConn.host,
                     port: targetConn.port,
                     database: targetConn.database,
                     username: targetConn.username,
                     password: dbPassword,
-                });
+                };
+                pool = dialect === 'mysql' ? await getMysqlPool(poolConfig) : await getMssqlPool(poolConfig);
             } catch (e) {
                 cleanupPending();
-                logger.error(`[collab-submit] 目标库连接失败: ${e.message}`);
+                logger.error(`[collab-submit] 目标库连接失败 (dialect=${dialect}): ${e.message}`);
                 // codex 十审 #7：连接失败 = 业务验证失败，停留 SUBMITTED（不回滚 status）
                 await dbRunAsync(
                     `UPDATE collab_requests
@@ -11177,12 +11230,15 @@ app.post('/api/collab/requests/:id/submit',
             // === 调 activateNewVersion ===
             // runSmokeTest 闭包注入 runRealSmokeTest，传 pool + ctx（含 dbAsync 用于拿锁后写 running）
             // codex 十一审 #2：runRealSmokeTest 拿到 Mutex 锁后才把 sql_validation_status 从 'queued' 升级为 'running'
+            // v1.68.0：dialect + allowedDb（业务库名）随 ctx 传入，runRealSmokeTest 用于 sql-validator 路由
             const runSmokeTestClosure = (scriptPath) =>
                 collabSubmitHelpers.runRealSmokeTest(scriptPath, pool, {
                     requestId: id,
                     oldVer,
                     dbAsync: { runAsync: dbRunAsync },
                     logger,
+                    dialect,
+                    allowedDb: targetConn.database,
                 });
 
             const uploadedFiles = [

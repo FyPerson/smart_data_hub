@@ -1,6 +1,6 @@
 {
   "name": "wbs-tracker-server",
-  "version": "1.67.1",
+  "version": "1.68.0",
   "description": "Simple WBS Tracker Server",
   "main": "server.js",
   "scripts": {
@@ -19,6 +19,7 @@
     "jsonwebtoken": "^9.0.2",
     "mssql": "^12.2.0",
     "multer": "^2.0.2",
+    "mysql2": "^3.22.3",
     "node-sql-parser": "^5.4.0",
     "sqlite3": "^5.1.7",
     "xlsx": "^0.18.5"

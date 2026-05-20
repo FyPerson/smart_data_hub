@@ -180,27 +180,20 @@ function sanitizeSqlError(message) {
  * 设计对接 D3-2 collab-attachment-versioning.js 的 runSmokeTest 参数签名：
  *   async (scriptFinalPath) => { ok, validatedAt?, error? }
  *
+ * v1.68.0 路由式多方言改造（2026-05-20）：
+ *   ctx 加 dialect ('sqlserver' / 'mysql') + allowedDb（业务库名）；执行时按 dialect 分派 mssql / mysql2 API
+ *
  * 本函数职责（codex 十一审 #1/#2/#3 联动落地）：
  *   1. 读 scriptFinalPath 文件内容（utf-8）
- *   2. validateAndTransform（静态校验，不消耗互斥锁）
+ *   2. validateAndTransform({dialect, allowedDb})（静态校验，不消耗互斥锁）
  *   3. 取 Mutex.acquire（5s 等不到 throw SMOKE_MUTEX_WAIT_TIMEOUT，由 endpoint 转 409）
- *   4. 拿锁后 UPDATE sql_validation_status='running' + validation_started_at=NOW（codex #2 后置 running，**不变量**：running 必伴随 validation_started_at IS NOT NULL）
- *   5. pool.request().query(smokeSql)，20s 超时
+ *   4. 拿锁后 UPDATE sql_validation_status='running' + validation_started_at=NOW（不变量：running 必伴随 validation_started_at IS NOT NULL）
+ *   5. 按 dialect 真连业务库执行（mssql 20s 超时 / mysql2 connection-level timeout）
  *   6. 释放锁（finally 保证）
- *   7. 成功返回 { ok: true, validatedAt, rowCount }
- *   8. 失败返回 { ok: false, error, sqlServerCode? }
- *
- * 异常分类：
- *   - 文件读取失败 → throw SCRIPT_READ_FAILED（系统错，endpoint 走 500）
- *   - validator 失败 → 返回 ok:false（业务错，不消耗锁）
- *   - Mutex 等待超时 → throw SMOKE_MUTEX_WAIT_TIMEOUT（业务错，endpoint 转 409 不写 failed）
- *   - mssql 报错（含超时） → 返回 ok:false（业务错）
  *
  * @param {string} scriptFilePath  result_script 的物理路径
- * @param {object} pool            mssql ConnectionPool（已 connected）
- * @param {object} ctx             **必填** { requestId, oldVer, dbAsync: {runAsync}, logger }
- *                                 codex 十二审 #5：去掉 (scriptPath, pool, logger) 旧签名兼容，
- *                                 ctx 必填确保拿锁后能正确写 running 字段
+ * @param {object} pool            mssql ConnectionPool 或 mysql2 Pool（按 dialect）
+ * @param {object} ctx             **必填** { requestId, oldVer, dbAsync: {runAsync}, logger, dialect, allowedDb }
  * @returns {Promise<{ok: true, validatedAt: Date, rowCount: number} | {ok: false, error: string, layer?: number}>}
  */
 async function runRealSmokeTest(scriptFilePath, pool, ctx) {
@@ -209,6 +202,8 @@ async function runRealSmokeTest(scriptFilePath, pool, ctx) {
         throw new Error('runRealSmokeTest: ctx 必填且需含 requestId + dbAsync.runAsync（codex 十二审 #5）');
     }
     const { requestId, oldVer, dbAsync, logger } = ctx;
+    const dialect = ctx.dialect || 'sqlserver';
+    const allowedDb = ctx.allowedDb;
     const log = logger || console;
 
     // 1. 读文件
@@ -224,8 +219,8 @@ async function runRealSmokeTest(scriptFilePath, pool, ctx) {
         return { ok: false, error: 'result_script 文件为空', layer: 0 };
     }
 
-    // 2. validator（静态校验，不消耗锁）
-    const v = sqlValidator.validateAndTransform(sqlText);
+    // 2. validator（静态校验，不消耗锁）—— 路由式多方言：dialect + allowedDb 必传
+    const v = sqlValidator.validateAndTransform(sqlText, { dialect, allowedDb });
     if (!v.ok) {
         if (v.layer === 0 && v.reason && /lexer 内部错误/.test(v.reason)) {
             return { ok: false, error: 'SQL 形态不被支持，请改写', layer: 0 };
@@ -238,14 +233,7 @@ async function runRealSmokeTest(scriptFilePath, pool, ctx) {
     const release = await globalSmokeTestMutex.acquire(5000);
 
     try {
-        // 4. 拿锁后写 running + validation_started_at（codex 十一审 #2 + 十二审 #2 #3）
-        //    带乐观锁 + 状态守卫：仅当 SUBMITTED + queued 时才升级到 running
-        //    不变量：running 必伴随 validation_started_at IS NOT NULL
-        //
-        //    ⚠️ codex 十二审 #2 #3：DB 失败或 0 行影响必须阻断 smoke test
-        //    - 写 running 失败 → 数据库状态 ≠ 实际执行 → 启动恢复扫不到，silent failure
-        //    - changes=0 → 状态已被改（取消/版本漂移），不该再跑 smoke test
-        //    抛 RUNNING_UPDATE_FAILED 让 endpoint catch 走系统错误分支
+        // 4. 拿锁后写 running + validation_started_at
         let upd;
         try {
             upd = await dbAsync.runAsync(
@@ -271,27 +259,50 @@ async function runRealSmokeTest(scriptFilePath, pool, ctx) {
             throw e;
         }
 
-        // 5. 真连业务库
-        const request = pool.request();
-        request.timeout = 20000;  // 20s（方案 §6.3.4）
-        try {
-            const result = await request.query(v.smokeSql);
-            return {
-                ok: true,
-                validatedAt: new Date(),
-                rowCount: result.recordset ? result.recordset.length : 0,
-            };
-        } catch (e) {
-            const sanitized = sanitizeSqlError(e.message);
-            log.info(`[collab-submit] smoke test SQL Server 报错: ${sanitized}`);
-            return {
-                ok: false,
-                error: `SQL Server: ${sanitized}`,
-                sqlServerCode: e.code || null,
-            };
+        // 5. 按 dialect 分派真连业务库（v1.68.0）
+        if (dialect === 'sqlserver') {
+            const request = pool.request();
+            request.timeout = 20000;
+            try {
+                const result = await request.query(v.smokeSql);
+                return {
+                    ok: true,
+                    validatedAt: new Date(),
+                    rowCount: result.recordset ? result.recordset.length : 0,
+                };
+            } catch (e) {
+                const sanitized = sanitizeSqlError(e.message);
+                log.info(`[collab-submit] smoke test SQL Server 报错: ${sanitized}`);
+                return {
+                    ok: false,
+                    error: `SQL Server: ${sanitized}`,
+                    sqlServerCode: e.code || null,
+                };
+            }
+        } else if (dialect === 'mysql') {
+            // mysql2/promise pool：用 query + timeout 选项实现 20s 限制
+            // 注：mysql2 timeout 是 connection 级别的，超时会抛 PROTOCOL_SEQUENCE_TIMEOUT
+            try {
+                const [rows] = await pool.query({ sql: v.smokeSql, timeout: 20000 });
+                return {
+                    ok: true,
+                    validatedAt: new Date(),
+                    rowCount: Array.isArray(rows) ? rows.length : 0,
+                };
+            } catch (e) {
+                const sanitized = sanitizeSqlError(e.message);
+                log.info(`[collab-submit] smoke test MySQL 报错: ${sanitized}`);
+                return {
+                    ok: false,
+                    error: `MySQL: ${sanitized}`,
+                    mysqlCode: e.code || null,
+                };
+            }
+        } else {
+            return { ok: false, error: `不支持的方言：${dialect}` };
         }
     } finally {
-        // 6. 一定释放锁（即使 mssql 抛错）
+        // 6. 一定释放锁（即使报错）
         try { release(); } catch (e) { log.warn(`[collab-submit] release mutex error: ${e.message}`); }
     }
 }
