@@ -150,6 +150,19 @@ function escapeHtmlAdmin(s) {
     return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
+// 角色徽章 class + label 映射（4 个角色：admin/publisher/user/viewer）
+const ROLE_BADGE = {
+    admin: { cls: 'badge-admin', label: '管理员' },
+    publisher: { cls: 'badge-publisher', label: '发布者' },
+    user: { cls: 'badge-user', label: '数据开发' },
+    viewer: { cls: 'badge-viewer', label: '查看者' }
+};
+
+// 操作按钮里的小图标（不依赖外部图标库，单独 inline SVG）
+const ICON_EDIT = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>';
+const ICON_BAN = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>';
+const ICON_CHECK = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+
 function renderUsers(users) {
     _adminUsersCache = users || [];
     const tbody = document.getElementById('userList');
@@ -160,27 +173,30 @@ function renderUsers(users) {
 
     tbody.innerHTML = users.map(user => {
         const phoneCell = user.phone
-            ? `<span style="font-family:monospace;color:#475569;">${user.phone}</span>${user.dingtalk_user_id ? '<span title="已缓存钉钉 userId" style="margin-left:4px;color:#16a34a;">●</span>' : ''}`
-            : '<span style="color:#cbd5e1;">未填</span>';
+            ? `<span class="phone-value">${escapeHtmlAdmin(user.phone)}</span>${user.dingtalk_user_id ? '<span class="phone-dot" title="已缓存钉钉 userId"></span>' : ''}`
+            : '<span class="empty-value">—</span>';
         const remarkCell = user.remark
-            ? `<span style="color:#475569;">${escapeHtmlAdmin(user.remark)}</span>`
-            : '<span style="color:#cbd5e1;">—</span>';
+            ? `<span class="cell-muted">${escapeHtmlAdmin(user.remark)}</span>`
+            : '<span class="empty-value">—</span>';
+        const roleInfo = ROLE_BADGE[user.role] || { cls: 'badge-user', label: user.role || '—' };
+        const isActive = user.status === 'active';
+        const statusBadge = `<span class="badge ${isActive ? 'badge-active' : 'badge-disabled'}">${isActive ? '启用' : '禁用'}</span>`;
+        const toggleBtn = isActive
+            ? `<button class="btn btn-danger" onclick="disableUser(${user.id})" title="禁用此用户">${ICON_BAN}禁用</button>`
+            : `<button class="btn btn-success" onclick="enableUserById(${user.id})" title="启用此用户">${ICON_CHECK}启用</button>`;
         return `
                 <tr>
-                    <td>${user.id}</td>
-                    <td>${escapeHtmlAdmin(user.username)}</td>
-                    <td>${escapeHtmlAdmin(user.display_name) || '-'}</td>
-                    <td><span class="badge ${user.role === 'admin' ? 'badge-admin' : (user.role === 'publisher' ? 'badge-publisher' : (user.role === 'viewer' ? 'badge-viewer' : 'badge-user'))}">${user.role === 'admin' ? '管理员' : (user.role === 'publisher' ? '发布者' : (user.role === 'viewer' ? '查看者' : '数据开发'))}</span></td>
+                    <td class="cell-muted">${user.id}</td>
+                    <td class="cell-username" title="${escapeHtmlAdmin(user.username)}">${escapeHtmlAdmin(user.username)}</td>
+                    <td class="cell-muted">${escapeHtmlAdmin(user.display_name) || '<span class="empty-value">—</span>'}</td>
+                    <td><span class="badge ${roleInfo.cls}">${roleInfo.label}</span></td>
                     <td>${phoneCell}</td>
                     <td>${remarkCell}</td>
-                    <td><span class="badge ${user.status === 'active' ? 'badge-active' : 'badge-disabled'}">${user.status === 'active' ? '启用' : '禁用'}</span></td>
-                    <td>${formatDateTimeUnified(user.created_at)}</td>
+                    <td>${statusBadge}</td>
+                    <td><span class="cell-date">${formatDateTimeUnified(user.created_at)}</span></td>
                     <td class="action-btns">
-                        <button class="btn btn-success" onclick="openEditModalById(${user.id})">编辑</button>
-                        ${user.status === 'active' ?
-            `<button class="btn btn-danger" onclick="disableUser(${user.id})">禁用</button>` :
-            `<button class="btn" style="background:#38a169;color:white;" onclick="enableUserById(${user.id})">启用</button>`
-        }
+                        <button class="btn btn-primary" onclick="openEditModalById(${user.id})" title="编辑此用户">${ICON_EDIT}编辑</button>
+                        ${toggleBtn}
                     </td>
                 </tr>
             `;
@@ -393,7 +409,8 @@ function renderDbConnections(connections) {
 function toggleSourceSystemCode() {
     const connType = document.getElementById('dbConnType').value;
     const sourceGroup = document.getElementById('sourceSystemCodeGroup');
-    sourceGroup.style.display = connType === 'source' ? 'block' : 'none';
+    // v1.66.3：空串恢复 .form-group 默认 display:flex（不能硬写 block，否则 label 间距与同行其他字段错位）
+    sourceGroup.style.display = connType === 'source' ? '' : 'none';
 }
 
 async function testNewDbConnection() {
