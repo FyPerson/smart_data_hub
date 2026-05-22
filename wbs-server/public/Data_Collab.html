@@ -1548,27 +1548,45 @@
                     ? `<button class="btn" style="background:#fef3c7;color:#92400e;border:1px solid #fbbf24;" onclick="openAdminFixDialog()">🔧 管理员修正</button>`
                     : '';
 
+                // v1.70.3 业务需求变更：admin 任何非 ARCHIVED 终态、非已作废都可见"作废"按钮
+                //   - 编辑按钮仍只在 isUnsubmitted 显示（业务上编辑已提交协作单不合适）
+                //   - admin-fix 按钮仍按 canAdminFix 三态白名单（PENDING_ASSIGN / PENDING / SUBMITTED）
+                //   - 归档按钮仍只在 isDone 显示（DONE → ARCHIVED 入库存档）
+                //   - 作废按钮：admin && !isArchived && !isArchivedFinal（即非两种终态）
+                const canArchive = isAdminUser && !isArchived && !isArchivedFinal;
+                const archiveBtn = canArchive
+                    ? `<button class="btn" style="background:#fef2f2;color:#dc2626;border:1px solid #fca5a5;" onclick="openArchiveModal()">作废</button>`
+                    : '';
+
                 if (isArchived) {
                     // 软删除作废优先展示
                     footerLeft.innerHTML = `<span style="color:#dc2626;font-size:13px;">⚠️ 已作废${d.archived_reason ? ` · ${escapeHtml(d.archived_reason)}` : ''}</span>`;
                 } else if (isArchivedFinal) {
-                    // v1.67.1 归档锁定展示
+                    // v1.67.1 归档锁定展示（终态保护，连作废也拒）
                     footerLeft.innerHTML = `<span style="color:#166534;font-size:13px;">📁 已归档${d.archived_final_reason ? ` · ${escapeHtml(d.archived_final_reason)}` : ''}</span>`;
                 } else if (isAdminUser && isUnsubmitted) {
-                    // 编辑/作废（v1.66.2）+ admin-fix（v1.70.0 Step 3）
+                    // PENDING_ASSIGN / PENDING+v0：编辑 + 作废 + admin-fix
                     footerLeft.innerHTML = `
                         <button class="btn" style="background:#3b82f6;color:white;" onclick="openEditModal()">编辑</button>
-                        <button class="btn" style="background:#fef2f2;color:#dc2626;border:1px solid #fca5a5;" onclick="openArchiveModal()">作废</button>
+                        ${archiveBtn}
                         ${adminFixBtn}
                     `;
                 } else if (isAdminUser && isDone) {
                     // v1.67.1：DONE 状态 admin 可见"归档"按钮（DONE 不可 admin-fix，终态保护）
+                    // v1.70.3 加作废按钮（业务可在 DONE 后撤销）
                     footerLeft.innerHTML = `
                         <button class="btn" style="background:#16a34a;color:white;" onclick="openArchiveFinalModal()">📁 归档</button>
+                        ${archiveBtn}
                     `;
                 } else if (canAdminFix) {
-                    // SUBMITTED + failed / 已提交后录错目标库等场景：只挂 admin-fix 按钮
-                    footerLeft.innerHTML = adminFixBtn;
+                    // SUBMITTED + failed / 已提交后录错目标库等场景：admin-fix + 作废
+                    footerLeft.innerHTML = adminFixBtn + archiveBtn;
+                } else if (canArchive) {
+                    // 其他 admin 可作废但不可 admin-fix 的边缘状态（如 v1.71.0 EXPORTING 未来扩展）
+                    // codex 29 审 #4 拍板：保留兜底分支；未来新增状态加专属主按钮时，需检查 footer 按钮矩阵
+                    //   优先级（防作废按钮被新主按钮挤到兜底位置导致交互优先级混乱）
+                    // 当前覆盖：SUBMITTED 以外、DONE 以外、非未提交、非 admin-fix 白名单的所有非 ARCHIVED 非已作废状态
+                    footerLeft.innerHTML = archiveBtn;
                 } else {
                     footerLeft.innerHTML = '';
                 }

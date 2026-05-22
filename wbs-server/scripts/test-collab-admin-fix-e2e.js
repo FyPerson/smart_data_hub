@@ -31,6 +31,11 @@ async function getAllowedFields(token, status) {
     return fx.apiCall('GET', `/api/collab/admin-fix/allowed-fields?status=${encodeURIComponent(status)}`, token);
 }
 
+// v1.70.3 archive endpoint helper（业务需求变更：admin 任何非 ARCHIVED 都可作废）
+async function archive(token, id, body) {
+    return fx.apiCall('POST', `/api/collab/requests/${id}/archive`, token, body || {});
+}
+
 const tests = [];
 
 function test(name, fn) {
@@ -280,6 +285,119 @@ test('T8 GET allowed-fields 按状态返字段集', async () => {
     const r3 = await getAllowedFields(adminToken, 'DONE');
     if (r3.status !== 200) throw new Error(`DONE HTTP ${r3.status}`);
     if (r3.body.allowed_fields.length !== 0) throw new Error(`DONE 期望 0 字段实际 ${r3.body.allowed_fields.length}`);
+});
+
+// ============================================================================
+// T11 v1.70.3 业务需求变更：admin 在 DONE 状态作废 → 200 + archived_at set + 完成字段保留
+// ============================================================================
+test('T11 v1.70.3 admin 在 DONE 状态作废 → 200 + archived_at set + sql_validated_at/done_at 等保留', async () => {
+    const ctx = await fx.createPendingFixture();
+    createdFixtureIds.push(ctx.id);
+
+    // 模拟协作单已完成（DONE + 已通过 smoke）
+    await fx.setCollabState(ctx.id, {
+        status: 'DONE',
+        sql_validation_status: 'passed',
+        sql_validated_at: '2026-05-22 15:45:47',
+        done_at: '2026-05-22 15:45:47',
+        submission_version: 1,
+    });
+
+    // admin 作废
+    const r = await archive(ctx.adminToken, ctx.id, { archived_reason: 'v1.70.3 测试 DONE 后作废' });
+    if (r.status !== 200) throw new Error(`期望 200 实际 ${r.status}: ${JSON.stringify(r.body)}`);
+
+    // 验证 DB：archived_at 已 set + 完成字段保留（status/sql_validated_at/done_at/submission_version 不动）
+    const row = await new Promise((resolve, reject) => {
+        const sqlite3 = require('sqlite3');
+        const path = require('path');
+        const db = new sqlite3.Database(path.join(__dirname, '..', 'task_pool.db'), sqlite3.OPEN_READONLY);
+        db.get(
+            `SELECT status, sql_validation_status, sql_validated_at, done_at, submission_version, archived_at, archived_reason, archived_by
+               FROM collab_requests WHERE id = ?`,
+            [ctx.id],
+            (e, r) => { db.close(); e ? reject(e) : resolve(r); }
+        );
+    });
+    if (!row.archived_at) throw new Error('archived_at 未 set');
+    if (row.archived_reason !== 'v1.70.3 测试 DONE 后作废') throw new Error(`archived_reason 不匹配：${row.archived_reason}`);
+    if (row.status !== 'DONE') throw new Error(`status 应保持 DONE，实际 ${row.status}（v1.70.3 拍板：作废只标 archived_at 不动完成字段）`);
+    if (row.sql_validation_status !== 'passed') throw new Error(`sql_validation_status 应保持 passed，实际 ${row.sql_validation_status}`);
+    if (row.sql_validated_at !== '2026-05-22 15:45:47') throw new Error(`sql_validated_at 应保留历史值`);
+    if (row.done_at !== '2026-05-22 15:45:47') throw new Error(`done_at 应保留历史值`);
+    if (row.submission_version !== 1) throw new Error(`submission_version 应保留 1`);
+});
+
+// ============================================================================
+// T12 v1.70.3：admin 在 ARCHIVED 终态作废 → 409 ARCHIVED_PROTECTED
+// ============================================================================
+test('T12 v1.70.3 admin 在 ARCHIVED 终态作废 → 409 ARCHIVED_PROTECTED（终态保护）', async () => {
+    const ctx = await fx.createPendingFixture();
+    createdFixtureIds.push(ctx.id);
+
+    await fx.setCollabState(ctx.id, {
+        status: 'ARCHIVED',
+        sql_validation_status: 'passed',
+        done_at: '2026-05-22 15:45:47',
+        submission_version: 1,
+    });
+
+    const r = await archive(ctx.adminToken, ctx.id, { archived_reason: '尝试作废已归档单' });
+    if (r.status !== 409) throw new Error(`期望 409 实际 ${r.status}: ${JSON.stringify(r.body)}`);
+    if (r.body.code !== 'ARCHIVED_PROTECTED') throw new Error(`期望 code=ARCHIVED_PROTECTED 实际 ${r.body.code}`);
+});
+
+// ============================================================================
+// T13 v1.70.3：非 admin 在 DONE 状态调 archive → 403
+// ============================================================================
+test('T13 v1.70.3 dev1（非 admin）在 DONE 状态调 archive → 403', async () => {
+    const ctx = await fx.createPendingFixture();
+    createdFixtureIds.push(ctx.id);
+
+    await fx.setCollabState(ctx.id, {
+        status: 'DONE',
+        sql_validation_status: 'passed',
+        submission_version: 1,
+    });
+
+    const r = await archive(ctx.dev1Token, ctx.id, { archived_reason: 'dev 尝试作废' });
+    if (r.status !== 403) throw new Error(`期望 403 实际 ${r.status}: ${JSON.stringify(r.body)}`);
+});
+
+// ============================================================================
+// T14 v1.70.3 codex 29 审 #2：admin 在 SUBMITTED+v1 状态作废 → 200（验证删 submission_version=0 守卫后中间态也可作废）
+// ============================================================================
+test('T14 v1.70.3 admin 在 SUBMITTED+v1 状态作废 → 200（验证删 submission_version=0 守卫）', async () => {
+    const ctx = await fx.createPendingFixture();
+    createdFixtureIds.push(ctx.id);
+
+    await fx.setCollabState(ctx.id, {
+        status: 'SUBMITTED',
+        sql_validation_status: 'failed',
+        sql_validation_error: 'mock smoke 失败',
+        submitted_at: '2026-05-22 14:00:00',
+        submission_version: 1,
+    });
+
+    const r = await archive(ctx.adminToken, ctx.id, { archived_reason: 'v1.70.3 验证 SUBMITTED+v1 可作废' });
+    if (r.status !== 200) throw new Error(`期望 200 实际 ${r.status}: ${JSON.stringify(r.body)}`);
+});
+
+// ============================================================================
+// T15 v1.70.3 codex 29 审 #2：admin 在 PENDING+v1 状态作废 → 200（原 submission_version=0 守卫会拒绝此用例）
+// ============================================================================
+test('T15 v1.70.3 admin 在 PENDING+v1 状态作废 → 200（原 submission_version=0 守卫直接相关回归点）', async () => {
+    const ctx = await fx.createPendingFixture();
+    createdFixtureIds.push(ctx.id);
+
+    // PENDING+submission_version>0 = 开发提过又被 admin-fix 推回 PENDING 的中间态
+    await fx.setCollabState(ctx.id, {
+        status: 'PENDING',
+        submission_version: 1,
+    });
+
+    const r = await archive(ctx.adminToken, ctx.id, { archived_reason: 'v1.70.3 验证 PENDING+v1 可作废（删 submission_version=0 守卫后）' });
+    if (r.status !== 200) throw new Error(`期望 200 实际 ${r.status}: ${JSON.stringify(r.body)}（原 submission_version=0 守卫会拒此用例，本次应放行）`);
 });
 
 // ============================================================================

@@ -10546,17 +10546,23 @@ app.post('/api/collab/requests/:id/archive', authenticateToken, requireAdmin, as
             });
         }
 
-        const isPendingAssign = collab.status === 'PENDING_ASSIGN';
-        const isPendingUnsubmitted = collab.status === 'PENDING' && (collab.submission_version || 0) === 0;
-        if (!isPendingAssign && !isPendingUnsubmitted) {
+        // v1.70.3 业务需求变更：admin 任何非 ARCHIVED 终态都可作废（不再限 PENDING_ASSIGN / PENDING+v0）
+        //   - 作废 = 软删除 archived_at 标记，不动 sql_validated_at / done_at / status 等已完成字段（保留历史事实）
+        //   - 拒绝 ARCHIVED 终态作废（与 admin-fix 终态保护一致；ARCHIVED 是 admin 主动推到的只读终态）
+        //   - archived_at IS NOT NULL（已作废）由上方 ALREADY_ARCHIVED 分支拦截
+        if (collab.status === 'ARCHIVED') {
             return res.status(409).json({
-                error: `当前状态 ${collab.status} 不可作废（仅 PENDING_ASSIGN 或 PENDING+未提交可作废）`,
-                code: 'INVALID_STATE',
+                error: '协作单已归档锁定（ARCHIVED 终态），不可作废',
+                code: 'ARCHIVED_PROTECTED',
                 current_status: collab.status
             });
         }
 
         // 条件 UPDATE：兜底并发漂移
+        //   - status = ? 守卫防 SELECT 后状态变化（如另一 admin 同时把单推到 ARCHIVED；SELECT 已拒 ARCHIVED，
+        //     若 SELECT 后被推到 ARCHIVED，status=? 拦截即足够，无需重复 status!='ARCHIVED'，codex 29 审 #3 删冗余）
+        //   - archived_at IS NULL 守卫防双作废
+        //   - 移除原 submission_version=0 守卫（DONE/SUBMITTED 等有 v>0 的状态也允许作废）
         const result = await dbRunAsync(
             `UPDATE collab_requests
                 SET archived_at = datetime('now','localtime'),
@@ -10564,8 +10570,7 @@ app.post('/api/collab/requests/:id/archive', authenticateToken, requireAdmin, as
                     archived_by = ?
               WHERE id = ?
                 AND status = ?
-                AND archived_at IS NULL
-                AND (submission_version IS NULL OR submission_version = 0)`,
+                AND archived_at IS NULL`,
             [reason, userId, id, collab.status]
         );
 
@@ -12009,14 +12014,22 @@ app.post('/api/collab/requests/:id/bypass', authenticateToken, requireAdmin, asy
     }
 
     try {
-        // === 前置 SELECT：协作单存在 + 双重状态守卫（友好错误信息）===
+        // === 前置 SELECT：协作单存在 + 三重状态守卫（友好错误信息）===
+        // v1.70.3 codex 29 审 #1：加 archived_at 字段查询 + 守卫（业务需求 admin 现可在任何状态作废，
+        //   理论上 SUBMITTED+作废后再 bypass 流程几乎不会触发，但加守卫防御）
         const collab = await dbGetAsync(
-            `SELECT id, status, sql_validation_status
+            `SELECT id, status, sql_validation_status, archived_at
                FROM collab_requests WHERE id = ?`,
             [id]
         );
         if (!collab) {
             return res.status(404).json({ error: '协作单不存在' });
+        }
+        if (collab.archived_at) {
+            return res.status(409).json({
+                error: '协作单已作废，不允许旁路',
+                code: 'SOFT_ARCHIVED_PROTECTED',
+            });
         }
         if (collab.status !== 'SUBMITTED' || collab.sql_validation_status !== 'failed') {
             return res.status(409).json({
@@ -12040,7 +12053,8 @@ app.post('/api/collab/requests/:id/bypass', authenticateToken, requireAdmin, asy
                 done_at = datetime('now','localtime')
               WHERE id = ?
                 AND status = 'SUBMITTED'
-                AND sql_validation_status = 'failed'`,
+                AND sql_validation_status = 'failed'
+                AND archived_at IS NULL`,
             [reason, userId, userName, id]
         );
 
@@ -12408,12 +12422,19 @@ app.post('/api/collab/requests/:id/friction-record', authenticateToken, requireA
 
     try {
         // 前置 SELECT：状态守卫 + 取旧值供日志摘要
+        // v1.70.3 codex 29 审 #1：加 archived_at 字段查询 + 守卫（DONE 后作废仍允许 admin-fix 之外其他操作是隐性 BUG）
         const collab = await dbGetAsync(
-            `SELECT id, status, friction_cause_category, friction_note FROM collab_requests WHERE id = ?`,
+            `SELECT id, status, friction_cause_category, friction_note, archived_at FROM collab_requests WHERE id = ?`,
             [id]
         );
         if (!collab) {
             return res.status(404).json({ error: '协作单不存在' });
+        }
+        if (collab.archived_at) {
+            return res.status(409).json({
+                error: '协作单已作废，不允许记录协作摩擦',
+                code: 'SOFT_ARCHIVED_PROTECTED',
+            });
         }
         if (collab.status !== 'DONE') {
             return res.status(409).json({
@@ -12423,14 +12444,14 @@ app.post('/api/collab/requests/:id/friction-record', authenticateToken, requireA
             });
         }
 
-        // 条件 UPDATE 兜底并发（防 SELECT 后状态被改）
+        // 条件 UPDATE 兜底并发（防 SELECT 后状态被改 / 被并发作废）
         const result = await dbRunAsync(
             `UPDATE collab_requests SET
                 friction_occurred = 1,
                 friction_recorded_at = datetime('now','localtime'),
                 friction_cause_category = ?,
                 friction_note = ?
-              WHERE id = ? AND status = 'DONE'`,
+              WHERE id = ? AND status = 'DONE' AND archived_at IS NULL`,
             [rawCategory, note, id]
         );
         if (!result || result.changes === 0) {
