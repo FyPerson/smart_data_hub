@@ -560,6 +560,12 @@ const db = new sqlite3.Database(DB_FILE, (err) => {
         logger.error('Error opening database', err.message);
     } else {
         logger.info('Connected to Task Pool database.');
+        // v1.70.0 codex 24 审 #4：BEGIN IMMEDIATE 遇 SQLITE_BUSY 等待 5s 再放弃
+        // 防 v1.70.0 insertFailedAttachments 在少量并发写入时把业务失败误升级为 500 持久化异常
+        db.run('PRAGMA busy_timeout = 5000', (e) => {
+            if (e) logger.warn(`PRAGMA busy_timeout 设置失败: ${e.message}`);
+            else logger.info('PRAGMA busy_timeout = 5000ms 已设置');
+        });
         initTable();
     }
 });
@@ -1380,6 +1386,22 @@ function initTable() {
         db.run(`CREATE INDEX IF NOT EXISTS idx_collab_contact_person ON collab_requests(contact_person_id)`);
         db.run(`CREATE INDEX IF NOT EXISTS idx_collab_contact_status ON collab_requests(contact_person_id, status)`);
 
+        // ===== v1.70.0 容错闭环改造（2026-05-23）=====
+        // 方案 §1.2 撞墙附件永久保留（方案 2'）
+        //   - SMOKE_TEST_FAILED 时附件留在正式目录 collab/{rid}_xxx/，status='failed'
+        //   - failed_attempt_seq 同 (rid, attachment_type) 内递增（result_data / result_script 各自独立计数）
+        //   - status='active' / 'superseded' / 'failed' 三态并存；详情页失败提交历史区块从 status='failed' 拉
+        safeAlterAddColumn('collab_attachments', 'failed_at', 'DATETIME');
+        safeAlterAddColumn('collab_attachments', 'failed_reason', 'TEXT');
+        safeAlterAddColumn('collab_attachments', 'failed_attempt_seq', 'INTEGER');
+        // UNIQUE 部分索引（codex 三审 critical 1 修订）：
+        //   - 列含 attachment_type：两附件（result_data + result_script）同次提交 attempt_seq=N 不冲突
+        //   - WHERE status='failed'：不影响 active/superseded 行
+        //   - 双重防御：BEGIN IMMEDIATE 事务串行化是主防线，UNIQUE 索引是事务失效兜底
+        db.run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_collab_att_failed_seq_unique
+                  ON collab_attachments(collab_request_id, failed_attempt_seq, attachment_type)
+                  WHERE status='failed'`);
+
         // 健康检查放在 serialize 末尾，确保所有 ALTER/INDEX 都已串行执行完
         verifyV2CollabSchema();
     });
@@ -1425,7 +1447,9 @@ function verifyV2CollabSchema() {
     db.all("PRAGMA table_info(collab_attachments)", [], (err, rows) => {
         if (err) return;
         const actualCols = rows.map(r => r.name);
-        const missing = ['submission_version', 'status', 'superseded_at'].filter(c => !actualCols.includes(c));
+        // v1.70.0 加 3 字段：failed_at / failed_reason / failed_attempt_seq（方案 §1.2 撞墙附件保留）
+        const missing = ['submission_version', 'status', 'superseded_at',
+                         'failed_at', 'failed_reason', 'failed_attempt_seq'].filter(c => !actualCols.includes(c));
         if (missing.length > 0) {
             logger.error(`v2.0 schema 迁移不完整，collab_attachments 缺失字段: ${missing.join(', ')}`);
         }
@@ -11606,6 +11630,9 @@ app.post('/api/collab/requests/:id/submit',
                 // 分支处理（codex C1 + 对照表）
                 if (e.code === 'SMOKE_TEST_FAILED') {
                     // smoke test 失败：业务错，HTTP 200 + business_error
+                    // v1.70.0 方案 §1.2：附件不再删除，保留在正式目录 status='failed'
+                    // activateNewVersion 内部已 INSERT failed 行（BEGIN IMMEDIATE 事务）
+                    // e.failedAttachments 含本次 failed 行明细 [{ id, attachment_type, failed_attempt_seq, file_name }]
                     const sqlErr = collabSubmitHelpers.sanitizeSqlError(e.smokeError || e.message);
                     await dbRunAsync(
                         `UPDATE collab_requests
@@ -11615,13 +11642,30 @@ app.post('/api/collab/requests/:id/submit',
                           WHERE id = ? AND submission_version = ?`,
                         [sqlErr, id, oldVer]
                     ).catch(err => logger.warn(`[collab-submit] 写 failed 状态失败: ${err.message}`));
-                    insertCollabLog(id, 'SUBMIT_VALIDATION_FAILED', userId, userName, sqlErr);
+                    const failedCount = Array.isArray(e.failedAttachments) ? e.failedAttachments.length : 0;
+                    const attemptSeq = failedCount > 0 ? e.failedAttachments[0].failed_attempt_seq : null;
+                    insertCollabLog(id, 'SUBMIT_VALIDATION_FAILED', userId, userName,
+                        `${sqlErr} (attempt_seq=${attemptSeq}, 撞墙附件保留 ${failedCount} 个)`);
                     return res.status(200).json({
                         business_error: true,
-                        message: 'smoke test 验证失败，请检查 SQL',
+                        message: 'smoke test 验证失败，请检查 SQL；撞墙的附件已保留在失败提交历史中',
                         sql_validation_status: 'failed',
                         sql_validation_error: sqlErr,
                         current_status: 'SUBMITTED',
+                        failed_attempt_seq: attemptSeq,
+                        failed_attachments: e.failedAttachments || [],
+                    });
+                }
+                if (e.code === 'SMOKE_TEST_FAILED_INSERT_FAILED') {
+                    // v1.70.0：smoke 失败 + INSERT failed 行自身失败（DB 故障）
+                    // activateNewVersion 内部已 moveToOrphanedSubdir('failed_insert_failed') 把文件挪隔离区
+                    // 不写 sql_validation_status（避免假象通过），返 500 让前端友好提示
+                    logger.error(`[collab-submit] 协作单 #${id} SMOKE_TEST_FAILED 但 INSERT failed 行失败: ${e.message}`);
+                    insertCollabLog(id, 'SUBMIT_VALIDATION_FAILED', userId, userName,
+                        `smoke 失败附件持久化异常：${e.message}`);
+                    return res.status(500).json({
+                        error: '提交验证失败且失败记录持久化异常，请联系管理员',
+                        code: 'SMOKE_TEST_FAILED_INSERT_FAILED',
                     });
                 }
                 if (e.code === 'INCOMPLETE_SNAPSHOT') {
@@ -12343,8 +12387,8 @@ app.delete('/api/collab/attachments/:attId', authenticateToken, requireNonViewer
         );
         if (!parent) return res.status(404).json({ error: '协作单不存在' });
 
-        // 软删除（v1.66.2）：任何人不可改附件
-        if (parent.archived_at) {
+        // 软删除（v1.66.2）：任何人不可改附件（含 failed 历史）
+        if (collabSubmitHelpers.isSoftArchived(parent)) {
             return res.status(409).json({
                 error: '协作单已作废，不可改动附件',
                 code: 'PARENT_SOFT_ARCHIVED'
@@ -12352,12 +12396,30 @@ app.delete('/api/collab/attachments/:attId', authenticateToken, requireNonViewer
         }
 
         // ARCHIVED 归档锁定（v1.67.1）：仅 admin 可改
-        if (parent.status === 'ARCHIVED') {
+        if (collabSubmitHelpers.isFinalArchived(parent)) {
             if (!isAdmin) {
                 return res.status(403).json({
                     error: '协作单已归档锁定，仅管理员可改附件',
                     code: 'PARENT_ARCHIVED_LOCKED'
                 });
+            }
+        } else if (att.status === 'failed') {
+            // v1.70.0 方案 §1.2：failed 附件跨状态分支（codex 24 审 #1 改正向白名单）
+            //   - admin 任何状态都可删（含 failed 历史清理）
+            //   - 非管理员仅 PENDING/PENDING_ASSIGN/SUBMITTED 三态可删（未来新增状态默认拒绝）
+            //   - 三态内还需 uploaded_by 本人或 publisher
+            //   - DONE / ARCHIVED 等其他状态下 failed 仅 admin 可清（保留作为审计证据）
+            if (!isAdmin) {
+                const FAILED_DELETE_ALLOWED_STATES = ['PENDING', 'PENDING_ASSIGN', 'SUBMITTED'];
+                if (!FAILED_DELETE_ALLOWED_STATES.includes(parent.status)) {
+                    return res.status(403).json({
+                        error: `当前状态（${parent.status}）下 failed 附件仅管理员可清理（保留作为审计证据）`,
+                        code: 'FAILED_KEEP_FOR_AUDIT'
+                    });
+                }
+                if (att.uploaded_by !== userId && !isPrivileged) {
+                    return res.status(403).json({ error: '只能删除自己上传的失败附件' });
+                }
             }
         } else if (parent.status === 'DONE') {
             // DONE 状态：开发本人可改自己单的 result_* 交付物（用于修改后重走 smoke test）
@@ -12389,15 +12451,17 @@ app.delete('/api/collab/attachments/:attId', authenticateToken, requireNonViewer
         // 删数据库记录
         await dbRunAsync('DELETE FROM collab_attachments WHERE id = ?', [attId]);
 
-        // 删物理文件
+        // 删物理文件（v1.70.0：走 resolveAttachmentPath 防越界）
         try {
-            const fullPath = path.join(UPLOAD_DIR, att.file_name);
+            const fullPath = collabSubmitHelpers.resolveAttachmentPath(att.file_name);
             if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath);
         } catch (e) {
             logger.error('删除附件物理文件失败:', e.message);
         }
 
-        insertCollabLog(att.collab_request_id, 'ATTACH_DELETE', userId, userName, `删除附件 ${att.original_name}`);
+        const logSuffix = att.status === 'failed' ? `（failed seq=${att.failed_attempt_seq}）` : '';
+        insertCollabLog(att.collab_request_id, 'ATTACH_DELETE', userId, userName,
+            `删除附件 ${att.original_name}${logSuffix}`);
         res.json({ message: '附件已删除' });
     } catch (err) {
         logger.error('删除协作单附件失败:', err);

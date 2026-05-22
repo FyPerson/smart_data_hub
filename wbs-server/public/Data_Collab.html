@@ -969,6 +969,26 @@
             return s.substring(0, 16).replace('T', ' ');
         }
 
+        // v1.70.0 codex 24 审 #7：附件下载 URL 构造 + 越界 sanitize
+        // 拒绝：空 / 含 .. 段 / 绝对路径（盘符 / 开头斜杠）/ 非 collab/ 前缀
+        // 返回 { ok: true, url } 或 { ok: false, reason }
+        function buildAttachmentDownloadUrl(file_name) {
+            const s = String(file_name || '');
+            if (!s) return { ok: false, reason: 'empty' };
+            // 拒绝 Windows 盘符 C:\... 和 POSIX 绝对路径 /foo
+            if (/^[A-Za-z]:[\\/]/.test(s) || s.startsWith('/') || s.startsWith('\\')) {
+                return { ok: false, reason: 'absolute_path' };
+            }
+            // 统一正斜杠后按段校验
+            const segs = s.replace(/\\/g, '/').split('/');
+            for (const seg of segs) {
+                if (seg === '' || seg === '.' || seg === '..') return { ok: false, reason: 'invalid_segment' };
+            }
+            // 业务约束：file_name 必须以 collab/ 起头（attachment 都落在 uploads/collab/{rid}_xxx/ 下）
+            if (segs[0] !== 'collab') return { ok: false, reason: 'not_collab_prefix' };
+            return { ok: true, url: `/uploads/${segs.map(encodeURIComponent).join('/')}` };
+        }
+
         // 部门下拉填充（含 group）
         function fillDeptSelect(selectEl, includeAllOption = false) {
             const groups = {};
@@ -1208,10 +1228,14 @@
                 a => a.attachment_type === 'example_xlsx' && (a.status === 'active' || !a.status)
             )[0];
             const templateHtml = templateFile ? (() => {
-                const dlUrl = `/uploads/${String(templateFile.file_name || '').split('/').map(encodeURIComponent).join('/')}`;
-                const displayName = templateFile.original_name || (templateFile.file_name ? templateFile.file_name.split('/').pop() : '数据模板');
+                // codex 24 审 #7：用 buildAttachmentDownloadUrl 过滤 .. / 空段 / 绝对路径
+                const built = buildAttachmentDownloadUrl(templateFile.file_name);
+                const displayName = templateFile.original_name || (templateFile.file_name ? String(templateFile.file_name).split('/').pop() : '数据模板');
+                if (!built.ok) {
+                    return `<span style="color:#dc2626" title="附件路径非法（${built.reason}），请联系管理员">⚠️ ${escapeHtml(displayName)}</span>`;
+                }
                 // codex 十七审 #3：download 属性值用单引号包裹更稳（escapeHtml 已转 `&quot;`/`&#39;` 但属性边界双保险）
-                return `<a href='${dlUrl}' target='_blank' rel='noopener' download='${escapeHtml(displayName)}' style='color:#166534;text-decoration:none;'>📊 ${escapeHtml(displayName)}</a>`;
+                return `<a href='${built.url}' target='_blank' rel='noopener' download='${escapeHtml(displayName)}' style='color:#166534;text-decoration:none;'>📊 ${escapeHtml(displayName)}</a>`;
             })() : '<span style="color:#9ca3af">—</span>';
 
             const taskInfoHtml = `
@@ -1280,14 +1304,15 @@
                     </div>
                 </div>`;
 
-            // 3. 交付内容 / 4. 验收结果 / 5. 沟通管理（v1.69.0）/ 6. 协作摩擦（D3 模块 7）
+            // 3. 交付内容 / 4. 验收结果 / 5. 失败提交历史（v1.70.0）/ 6. 沟通管理（v1.69.0）/ 7. 协作摩擦（D3 模块 7）
             const deliveryHtml = renderDeliverySection(d);
             const validationHtml = renderValidationSection(d, isAdminUser);
+            const failedHistoryHtml = renderFailedHistorySection(d, isAdminUser);
             const chatHtml = renderChatSection(d, isAdminUser);
             const frictionHtml = renderFrictionSection(d, isAdminUser);
 
             document.getElementById('detailBody').innerHTML =
-                taskInfoHtml + notifyHtml + deliveryHtml + validationHtml + chatHtml + frictionHtml;
+                taskInfoHtml + notifyHtml + deliveryHtml + validationHtml + failedHistoryHtml + chatHtml + frictionHtml;
 
             // v1.66.2 footer 按钮（编辑 / 作废 / 归档）：按状态和 admin 身份分支
             const footerLeft = document.getElementById('detailFooterLeft');
@@ -1421,17 +1446,19 @@
 
             const items = deliveryFiles.map(f => {
                 const typeLabel = f.attachment_type === 'result_data' ? '📊 结果数据' : '📜 SQL 脚本';
-                // 下载走 /uploads/<file_name> 静态路径（file_name 已是 collab/xxx/yyy.ext 相对路径）
-                // codex 16 审 #4：按路径段编码,encodeURI 会保留 ?/# 等 URL 语义字符,极端文件名会被截断
-                const dlUrl = `/uploads/${String(f.file_name || '').split('/').map(encodeURIComponent).join('/')}`;
-                const displayName = f.original_name || (f.file_name ? f.file_name.split('/').pop() : '附件');
+                // codex 24 审 #7：用 buildAttachmentDownloadUrl 过滤 .. / 空段 / 绝对路径
+                const built = buildAttachmentDownloadUrl(f.file_name);
+                const displayName = f.original_name || (f.file_name ? String(f.file_name).split('/').pop() : '附件');
                 const deleteBtn = canModifyDelivery
                     ? `<button class="btn" style="background:#fef2f2;color:#dc2626;border:1px solid #fca5a5;padding:2px 8px;font-size:12px;margin-left:8px;" onclick="deleteDeliveryAttachment(${f.id}, ${d.id})">删除</button>`
                     : '';
+                const linkHtml = built.ok
+                    ? `<a class="delivery-link" href="${built.url}" target="_blank" rel="noopener" download="${escapeHtml(displayName)}">${escapeHtml(displayName)}</a>`
+                    : `<span style="color:#dc2626" title="附件路径非法（${built.reason}），请联系管理员">⚠️ ${escapeHtml(displayName)}</span>`;
                 return `
                     <div class="delivery-item">
                         <span class="delivery-type">${typeLabel}</span>
-                        <a class="delivery-link" href="${dlUrl}" target="_blank" rel="noopener" download="${escapeHtml(displayName)}">${escapeHtml(displayName)}</a>
+                        ${linkHtml}
                         <span class="delivery-meta">${escapeHtml(f.uploaded_by_name || '—')} · ${fmtDate(f.created_at)}</span>
                         ${deleteBtn}
                     </div>`;
@@ -1448,6 +1475,101 @@
                     <div class="detail-section-title">交付内容</div>
                     <div class="detail-section-body">${items}${reuploadBtn}</div>
                 </div>`;
+        }
+
+        // v1.70.0 方案 §1.2.6 失败提交历史区块
+        // 展示 status='failed' 的撞墙附件（按 failed_attempt_seq 倒序）
+        // 可见性策略（codex 24 审 #6 拍板）：
+        //   - admin：任何状态都可看
+        //   - developer 本人：任何状态都可看（含 DONE 后复盘 / 备查历史 / 对照成功 vs 失败差异）
+        //   - 其他人：不可看
+        // 删除按钮另由后端 DELETE /:attId failed 分支按状态严格白名单控制（PENDING/PENDING_ASSIGN/SUBMITTED）
+        // 即"展示宽 + 删除窄"，让 developer 复盘可见但不可销毁审计证据
+        function renderFailedHistorySection(d, isAdminUser) {
+            const failedFiles = (d.attachments || []).filter(a => a.status === 'failed');
+            if (failedFiles.length === 0) return '';
+
+            const myId = Number(getCurrentUserId());
+            const isCurrentDeveloper = d.developer_id && Number(d.developer_id) === myId && Number(d.developer_id) !== 0;
+            if (!isAdminUser && !isCurrentDeveloper) return '';
+
+            // 按 attempt_seq 倒序（最新失败在最上面），同 seq 内 result_data 排前面
+            const sorted = failedFiles.slice().sort((a, b) => {
+                const sa = Number(a.failed_attempt_seq || 0);
+                const sb = Number(b.failed_attempt_seq || 0);
+                if (sb !== sa) return sb - sa;
+                if (a.attachment_type === 'result_data') return -1;
+                if (b.attachment_type === 'result_data') return 1;
+                return 0;
+            });
+
+            // 按 attempt_seq 分组
+            const groups = new Map();
+            for (const f of sorted) {
+                const key = String(f.failed_attempt_seq || 0);
+                if (!groups.has(key)) groups.set(key, []);
+                groups.get(key).push(f);
+            }
+
+            const canDeleteFailed = isAdminUser
+                || (isCurrentDeveloper && ['PENDING_ASSIGN', 'PENDING', 'SUBMITTED'].includes(d.status));
+
+            const groupHtml = [...groups.entries()].map(([seq, files]) => {
+                const failedAt = files[0].failed_at;
+                const reason = files[0].failed_reason || '（无错误详情）';
+                const items = files.map(f => {
+                    const typeLabel = f.attachment_type === 'result_data' ? '📊 结果数据' : '📜 SQL 脚本';
+                    // codex 24 审 #7：用 buildAttachmentDownloadUrl 过滤 .. / 空段 / 绝对路径
+                    const built = buildAttachmentDownloadUrl(f.file_name);
+                    const displayName = f.original_name || (f.file_name ? String(f.file_name).split('/').pop() : '附件');
+                    const deleteBtn = canDeleteFailed
+                        ? `<button class="btn" style="background:#fef2f2;color:#dc2626;border:1px solid #fca5a5;padding:2px 8px;font-size:12px;margin-left:8px;" onclick="deleteFailedAttachment(${f.id}, ${d.id})">删除</button>`
+                        : '';
+                    const linkHtml = built.ok
+                        ? `<a class="delivery-link" href="${built.url}" target="_blank" rel="noopener" download="${escapeHtml(displayName)}">${escapeHtml(displayName)}</a>`
+                        : `<span style="color:#dc2626" title="附件路径非法（${built.reason}），请联系管理员">⚠️ ${escapeHtml(displayName)}</span>`;
+                    return `
+                        <div class="delivery-item">
+                            <span class="delivery-type">${typeLabel}</span>
+                            ${linkHtml}
+                            <span class="delivery-meta">${escapeHtml(f.uploaded_by_name || '—')}</span>
+                            ${deleteBtn}
+                        </div>`;
+                }).join('');
+                return `
+                    <div style="margin-bottom:14px;padding:10px;background:#fff7ed;border:1px solid #fed7aa;border-radius:6px;">
+                        <div style="font-size:13px;color:#9a3412;font-weight:600;margin-bottom:6px;">
+                            ❌ 第 ${seq} 次失败 · ${fmtDate(failedAt)}
+                        </div>
+                        <div style="font-size:12px;color:#7c2d12;margin-bottom:8px;font-family:monospace;background:#fff;padding:6px 8px;border-radius:4px;border:1px solid #fed7aa;white-space:pre-wrap;word-break:break-word;">
+                            ${escapeHtml(reason)}
+                        </div>
+                        ${items}
+                    </div>`;
+            }).join('');
+
+            return `
+                <div class="detail-section">
+                    <div class="detail-section-title">失败提交历史 (${failedFiles.length} 个附件 · ${groups.size} 次失败)</div>
+                    <div class="detail-section-body">${groupHtml}</div>
+                </div>`;
+        }
+
+        // v1.70.0：删除单个 failed 附件（admin 或本单 developer + PENDING/PENDING_ASSIGN/SUBMITTED）
+        async function deleteFailedAttachment(attId, collabId) {
+            if (!confirm('确定删除此失败附件？仅删除本附件，不影响其他失败提交记录。')) return;
+            try {
+                const resp = await authFetch(`/api/collab/attachments/${attId}`, { method: 'DELETE' });
+                if (!resp.ok) {
+                    const err = await resp.json().catch(() => ({}));
+                    showToast(err.error || '删除失败', 'error');
+                    return;
+                }
+                showToast('失败附件已删除', 'success');
+                openDetail(collabId);
+            } catch (e) {
+                showToast(`删除失败: ${e.message}`, 'error');
+            }
         }
 
         // v1.67.1：开发人员删除已交付的 result_* 附件（仅 DONE 状态、本单 developer）

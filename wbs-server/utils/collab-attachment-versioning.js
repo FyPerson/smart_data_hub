@@ -150,13 +150,22 @@ async function activateNewVersion(params) {
     const { db, dbAsync, requestId, oldVer, collabRoot, description, attachmentDir, uploadedFiles, runSmokeTest, logger } = params;
     const log = logger || console;
 
-    // §3.1 完整快照校验（M5）
-    const hasResultData = uploadedFiles.some(f => f.attachment_type === 'result_data');
-    const hasResultScript = uploadedFiles.some(f => f.attachment_type === 'result_script');
-    if (!hasResultData || !hasResultScript) {
-        const err = new Error('完整快照缺漏：每次提交必须同时包含 result_data 和 result_script');
+    // §3.1 完整快照校验（M5 + codex 24 审 #2 medium：每类恰好 1 个）
+    // 不仅 hasResultData / hasResultScript，还必须各自恰好 1 个；
+    // 否则 v1.70.0 §1.2 failed 路径下同 attachment_type 多文件会撞 UNIQUE(rid, seq, attachment_type)
+    const countByType = uploadedFiles.reduce((acc, f) => {
+        acc[f.attachment_type] = (acc[f.attachment_type] || 0) + 1;
+        return acc;
+    }, {});
+    const dataCount = countByType.result_data || 0;
+    const scriptCount = countByType.result_script || 0;
+    if (dataCount !== 1 || scriptCount !== 1) {
+        const err = new Error(
+            `完整快照不规范：每次提交必须恰好包含 1 个 result_data + 1 个 result_script，` +
+            `实际 result_data=${dataCount}, result_script=${scriptCount}`
+        );
         err.code = 'INCOMPLETE_SNAPSHOT';
-        err.detail = { hasResultData, hasResultScript };
+        err.detail = { dataCount, scriptCount, countByType };
         throw err;
     }
 
@@ -217,16 +226,41 @@ async function activateNewVersion(params) {
     try {
         smokeTestResult = await runSmokeTest(scriptFinalPath);
     } catch (e) {
-        // smoke test 抛错（含 placeholder 的 SMOKE_TEST_NOT_IMPLEMENTED）→ 删本次文件 + 透传错误
+        // smoke test 抛错（含 placeholder 的 SMOKE_TEST_NOT_IMPLEMENTED / SMOKE_MUTEX_WAIT_TIMEOUT / RUNNING_UPDATE_*）
+        // → 删本次文件 + 透传错误
+        // 注意：这类是"smoke test 引擎自己出问题"，不属于"业务 SQL 错"，仍走删除路径
         await cleanupMovedFiles(movedFiles, log);
         throw e;
     }
     if (!smokeTestResult || !smokeTestResult.ok) {
-        // smoke test 失败 → 删本次文件 + 抛 SMOKE_TEST_FAILED
-        await cleanupMovedFiles(movedFiles, log);
-        const err = new Error(`smoke test 验证失败：${smokeTestResult && smokeTestResult.error || '未知错误'}`);
+        // v1.70.0 方案 §1.2 撞墙附件保留改造：
+        //   ① smoke test 返回 ok=false（业务 SQL 错） → 不再删文件
+        //   ② 文件保留在正式目录 collab/{rid}_xxx/，DB INSERT 新行 status='failed'
+        //   ③ failed_attempt_seq 按 (rid, attachment_type) 分组取 MAX+1
+        //   ④ BEGIN IMMEDIATE 事务串行化 + UNIQUE 索引兜底
+        //   ⑤ failed INSERT 自身失败 → 文件挪 _orphaned/failed_insert_failed/{rid}_v{ver}_{ts}/
+        //   ⑥ 抛 SMOKE_TEST_FAILED 含 failedAttachments 反馈给前端
+        const smokeError = smokeTestResult && smokeTestResult.error || '未知错误';
+        let failedAttachments;
+        try {
+            failedAttachments = await insertFailedAttachments({
+                dbAsync, requestId, movedFiles, smokeError, collabRoot, logger: log
+            });
+        } catch (insertErr) {
+            // INSERT failed 自身失败 → 文件挪隔离区
+            log.error(`[collab-versioning] INSERT failed 行失败 (req=${requestId}): ${insertErr.message}`);
+            try {
+                await moveToOrphanedSubdir(movedFiles, requestId, oldVer, collabRoot, 'failed_insert_failed', log);
+            } catch (_) { /* ignore */ }
+            const err = new Error(`smoke 失败附件 INSERT DB 失败：${insertErr.message}`);
+            err.code = 'SMOKE_TEST_FAILED_INSERT_FAILED';
+            err.smokeError = smokeError;
+            throw err;
+        }
+        const err = new Error(`smoke test 验证失败：${smokeError}`);
         err.code = 'SMOKE_TEST_FAILED';
-        err.smokeError = smokeTestResult && smokeTestResult.error;
+        err.smokeError = smokeError;
+        err.failedAttachments = failedAttachments;  // [{ id, attachment_type, failed_attempt_seq, file_name }]
         throw err;
     }
 
@@ -305,6 +339,105 @@ async function cleanupMovedFiles(movedFiles, log) {
     }
 }
 
+/**
+ * v1.70.0 方案 §1.2 INSERT failed 行（BEGIN IMMEDIATE 事务）
+ *
+ * 流程：
+ *   1. BEGIN IMMEDIATE TRANSACTION（立即拿写锁，防并发 race）
+ *   2. 按 attachment_type 分组取 MAX(failed_attempt_seq) + 1
+ *   3. INSERT 一行 / 文件 status='failed' + failed_at + failed_reason + failed_attempt_seq
+ *   4. COMMIT
+ *   5. 任一步异常 ROLLBACK + 抛错
+ *
+ * 不变量：
+ *   - 同 (rid, attachment_type) 内 failed_attempt_seq 严格递增（BEGIN IMMEDIATE + UNIQUE 索引双重防御）
+ *   - file_name 保留首次 rename 的相对路径（不动磁盘文件）
+ *   - failed 行 superseded_at IS NULL（语义：failed 不是 active 也不是 superseded，是第三态）
+ *
+ * @returns {Promise<Array<{id, attachment_type, failed_attempt_seq, file_name}>>}
+ */
+async function insertFailedAttachments({ dbAsync, requestId, movedFiles, smokeError, collabRoot, logger }) {
+    const log = logger || console;
+    if (!collabRoot) {
+        throw new Error('insertFailedAttachments: collabRoot 必传');
+    }
+    // 与 activateNewVersion §3.6 INSERT active 行用完全一致的拼接逻辑：
+    //   relPath = path.relative(path.dirname(collabRoot), mf.final_path)
+    //   collabRoot = 'uploads/collab' → dirname = 'uploads' → relative = 'collab/{rid}_xxx/file'
+    const collabRootRel = (mf) => path.relative(path.dirname(collabRoot), mf.final_path).replace(/\\/g, '/');
+    const inserted = [];
+    try {
+        await dbAsync.runAsync('BEGIN IMMEDIATE TRANSACTION');
+        // 按 attachment_type 分组取 MAX+1
+        const seqByType = new Map();
+        for (const mf of movedFiles) {
+            if (!seqByType.has(mf.attachment_type)) {
+                const row = await dbAsync.getAsync(
+                    `SELECT COALESCE(MAX(failed_attempt_seq), 0) AS max_seq
+                       FROM collab_attachments
+                      WHERE collab_request_id = ?
+                        AND attachment_type = ?
+                        AND status = 'failed'`,
+                    [requestId, mf.attachment_type]
+                );
+                seqByType.set(mf.attachment_type, (row && row.max_seq || 0) + 1);
+            }
+        }
+        // INSERT 一行 / 文件
+        for (const mf of movedFiles) {
+            const relPath = collabRootRel(mf);
+            const seq = seqByType.get(mf.attachment_type);
+            const ins = await dbAsync.runAsync(
+                `INSERT INTO collab_attachments
+                    (collab_request_id, attachment_type, file_name, original_name,
+                     uploaded_by, uploaded_by_name, submission_version, status,
+                     failed_at, failed_reason, failed_attempt_seq, superseded_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, 'failed',
+                         datetime('now','localtime'), ?, ?, NULL)`,
+                [requestId, mf.attachment_type, relPath, mf.original_name,
+                 mf.uploaded_by, mf.uploaded_by_name, 0,  // submission_version=0 失败不晋升版本
+                 String(smokeError || '').slice(0, 2000), seq]
+            );
+            inserted.push({
+                id: ins && ins.lastID,
+                attachment_type: mf.attachment_type,
+                failed_attempt_seq: seq,
+                file_name: relPath
+            });
+        }
+        await dbAsync.runAsync('COMMIT');
+        log.info(`[collab-versioning] 协作单 #${requestId} 撞墙附件保留 ${inserted.length} 个 (seq=${[...seqByType.entries()].map(([t, s]) => `${t}:${s}`).join(', ')})`);
+        return inserted;
+    } catch (e) {
+        try { await dbAsync.runAsync('ROLLBACK'); } catch (_) { /* ignore */ }
+        throw e;
+    }
+}
+
+/**
+ * v1.70.0 文件挪到 _orphaned/{subdir}/ 子目录（区分场景）
+ * subdir 例如：'failed_insert_failed' / 'concurrent_submit' 等
+ */
+async function moveToOrphanedSubdir(movedFiles, requestId, ver, collabRoot, subdir, log) {
+    const ts = new Date().toISOString().replace(/[:.]/g, '').replace('T', '_').substring(0, 15);
+    const orphanDir = path.join(collabRoot, '_orphaned', subdir, `${requestId}_v${ver}_${ts}`);
+    try {
+        fs.mkdirSync(orphanDir, { recursive: true });
+        for (const mf of movedFiles) {
+            try {
+                const targetPath = path.join(orphanDir, mf.final_name);
+                fs.renameSync(mf.final_path, targetPath);
+            } catch (e) {
+                log.warn(`[collab-versioning] 挪到 _orphaned/${subdir} 失败 ${mf.final_path}: ${e.message}`);
+            }
+        }
+        log.warn(`[collab-versioning] 协作单 #${requestId} v${ver} 隔离到 ${orphanDir}`);
+    } catch (e) {
+        log.error(`[collab-versioning] 创建 _orphaned/${subdir} 目录失败: ${e.message}`);
+    }
+    return orphanDir;
+}
+
 async function moveToOrphaned(movedFiles, requestId, newVer, collabRoot, log) {
     const ts = new Date().toISOString().replace(/[:.]/g, '').replace('T', '_').substring(0, 15);
     const orphanDir = path.join(collabRoot, '_orphaned', `${requestId}_v${newVer}_${ts}`);
@@ -350,9 +483,15 @@ async function scanOrphansAndDanglingPointers({ db, dbAsync, collabRoot, logger,
     const result = {
         dangling_pointer: [],   // [{ requestId, file_name, original_name, attachment_id }]
         superseded_retain: 0,   // 仅统计数量，不堆细节
+        failed_retain: 0,       // v1.70.0：failed 附件磁盘文件正常存在的统计
         orphan_file: [],        // [{ path }]
+        invalid_pointer: [],    // v1.70.0：DB file_name 越界（含 ../）的统计
         errors: []
     };
+
+    // v1.70.0 lazy require 避免循环依赖（collab-submit-helpers 自己不依赖本模块）
+    let collabSubmitHelpers = null;
+    try { collabSubmitHelpers = require('./collab-submit-helpers'); } catch (_) { /* 单测桩可能 mock，容错 */ }
 
     try {
         // §4.1 DB 侧：拉全部 collab_attachments + collab_requests.attachment_dir
@@ -385,18 +524,38 @@ async function scanOrphansAndDanglingPointers({ db, dbAsync, collabRoot, logger,
             return result;
         }
 
-        // 把 DB attachment 按目录归类（file_name 相对 uploads 根，例如 "collab/3_xxx/123_456_a.xlsx"）
-        // active 文件集合 + superseded 文件集合
-        const activeFiles = new Map();      // basename → row
-        const supersededFiles = new Map();  // basename → row
+        // 把 DB attachment 按状态归类（codex 24 审 #3：Map key 改 relpath 与 DB file_name 形式一致）
+        // file_name 形如 'collab/{rid}_xxx/{ts}_{rand}_name.ext'，全局唯一不会撞同名
+        // active / superseded / failed 三态并存
+        const activeFiles = new Map();      // relpath -> row
+        const supersededFiles = new Map();  // relpath -> row
+        const failedFiles = new Map();      // relpath -> row（v1.70.0）
         for (const a of attachmentRows) {
-            const bn = path.basename(a.file_name || '');
-            if (!bn) continue;
-            if (a.status === 'active') activeFiles.set(bn, a);
-            else if (a.status === 'superseded') supersededFiles.set(bn, a);
+            // v1.70.0：越界检查（用 resolveAttachmentPath 拒绝 file_name 越界 / 空）
+            if (collabSubmitHelpers && collabSubmitHelpers.resolveAttachmentPath) {
+                try {
+                    collabSubmitHelpers.resolveAttachmentPath(a.file_name);
+                } catch (pathErr) {
+                    result.invalid_pointer.push({
+                        attachment_id: a.id,
+                        requestId: a.collab_request_id,
+                        file_name: a.file_name,
+                        reason: pathErr.message
+                    });
+                    continue;  // 越界的 file_name 跳过比对
+                }
+            }
+            // 规范化 relpath（统一正斜杠 + 去前导 ./）作为 Map key
+            const relKey = String(a.file_name || '').replace(/\\/g, '/').replace(/^\.\//, '');
+            if (!relKey) continue;
+            if (a.status === 'active') activeFiles.set(relKey, a);
+            else if (a.status === 'superseded') supersededFiles.set(relKey, a);
+            else if (a.status === 'failed') failedFiles.set(relKey, a);
         }
 
-        // 磁盘扫描
+        // 磁盘扫描（也用相对 uploads 根的 relpath 作为 key，与 DB file_name 形式对齐）
+        // diskRoot = path.dirname(collabRoot) = uploads 绝对路径；relpath 形如 'collab/{rid}_xxx/file'
+        const diskRoot = path.dirname(collabRoot);
         let entries;
         try {
             entries = fs.readdirSync(collabRoot, { withFileTypes: true });
@@ -406,7 +565,7 @@ async function scanOrphansAndDanglingPointers({ db, dbAsync, collabRoot, logger,
             return result;
         }
 
-        const diskFilesByName = new Map(); // basename → fullpath
+        const diskFilesByRelpath = new Map(); // relpath -> fullpath
         for (const e of entries) {
             if (!e.isDirectory()) continue;
             // 跳过 _pending（临时上传区）和 _orphaned（隔离区）
@@ -416,7 +575,9 @@ async function scanOrphansAndDanglingPointers({ db, dbAsync, collabRoot, logger,
                 const subEntries = fs.readdirSync(subDir, { withFileTypes: true });
                 for (const sf of subEntries) {
                     if (!sf.isFile()) continue;
-                    diskFilesByName.set(sf.name, path.join(subDir, sf.name));
+                    const fullpath = path.join(subDir, sf.name);
+                    const relKey = path.relative(diskRoot, fullpath).replace(/\\/g, '/');
+                    diskFilesByRelpath.set(relKey, fullpath);
                 }
             } catch (subErr) {
                 log.warn(`[collab-integrity] 读子目录 ${subDir} 失败: ${subErr.message}`);
@@ -424,10 +585,10 @@ async function scanOrphansAndDanglingPointers({ db, dbAsync, collabRoot, logger,
             }
         }
 
-        // §4.3 分类比对
-        // 1) dangling pointer: DB active 文件 → 磁盘没有
-        for (const [bn, row] of activeFiles.entries()) {
-            if (!diskFilesByName.has(bn)) {
+        // §4.3 分类比对（按 relpath key）
+        // 1) dangling pointer: DB active 文件 -> 磁盘没有
+        for (const [rel, row] of activeFiles.entries()) {
+            if (!diskFilesByRelpath.has(rel)) {
                 result.dangling_pointer.push({
                     requestId: row.collab_request_id,
                     attachment_id: row.id,
@@ -436,13 +597,28 @@ async function scanOrphansAndDanglingPointers({ db, dbAsync, collabRoot, logger,
                 });
             }
         }
-        // 2) superseded retain: DB superseded 文件 → 磁盘存在（合法）
-        for (const [bn] of supersededFiles.entries()) {
-            if (diskFilesByName.has(bn)) result.superseded_retain += 1;
+        // 2) superseded retain: DB superseded 文件 -> 磁盘存在（合法）
+        for (const [rel] of supersededFiles.entries()) {
+            if (diskFilesByRelpath.has(rel)) result.superseded_retain += 1;
         }
-        // 3) orphan: 磁盘文件 → DB 无任何记录
-        for (const [bn, fullpath] of diskFilesByName.entries()) {
-            if (!activeFiles.has(bn) && !supersededFiles.has(bn)) {
+        // v1.70.0 新增：failed retain: DB failed 文件 -> 磁盘存在（合法的撞墙保留物）
+        // failed 磁盘缺失也算 dangling_pointer（admin 后续可能想下载查询）
+        for (const [rel, row] of failedFiles.entries()) {
+            if (diskFilesByRelpath.has(rel)) {
+                result.failed_retain += 1;
+            } else {
+                result.dangling_pointer.push({
+                    requestId: row.collab_request_id,
+                    attachment_id: row.id,
+                    file_name: row.file_name,
+                    original_name: row.original_name,
+                    note: 'failed 附件磁盘文件缺失'
+                });
+            }
+        }
+        // 3) orphan: 磁盘文件 -> DB 无任何记录（含 active/superseded/failed 三态均无）
+        for (const [rel, fullpath] of diskFilesByRelpath.entries()) {
+            if (!activeFiles.has(rel) && !supersededFiles.has(rel) && !failedFiles.has(rel)) {
                 result.orphan_file.push({ path: fullpath });
             }
         }
@@ -451,10 +627,12 @@ async function scanOrphansAndDanglingPointers({ db, dbAsync, collabRoot, logger,
         const dCount = result.dangling_pointer.length;
         const oCount = result.orphan_file.length;
         const sCount = result.superseded_retain;
-        if (dCount === 0 && oCount === 0) {
-            log.info(`[collab-integrity] 巡检通过：active ${activeFiles.size} 条全在；superseded 保留 ${sCount} 份；无孤儿文件`);
+        const fCount = result.failed_retain;
+        const ipCount = result.invalid_pointer.length;
+        if (dCount === 0 && oCount === 0 && ipCount === 0) {
+            log.info(`[collab-integrity] 巡检通过：active ${activeFiles.size} 条全在；superseded 保留 ${sCount} 份；failed 保留 ${fCount} 份；无孤儿文件 / 无 invalid_pointer`);
         } else {
-            log.warn(`[collab-integrity] 巡检发现问题：dangling_pointer=${dCount}，orphan_file=${oCount}，superseded_retain=${sCount}`);
+            log.warn(`[collab-integrity] 巡检发现问题：dangling_pointer=${dCount}，orphan_file=${oCount}，invalid_pointer=${ipCount}，superseded_retain=${sCount}，failed_retain=${fCount}`);
             if (dCount > 0) {
                 const sample = result.dangling_pointer.slice(0, sampleLimit);
                 log.warn(`[collab-integrity] dangling_pointer 样例(前${sample.length}/${dCount})：${JSON.stringify(sample)}`);
@@ -462,6 +640,10 @@ async function scanOrphansAndDanglingPointers({ db, dbAsync, collabRoot, logger,
             if (oCount > 0) {
                 const sample = result.orphan_file.slice(0, sampleLimit);
                 log.warn(`[collab-integrity] orphan_file 样例(前${sample.length}/${oCount})：${JSON.stringify(sample)}`);
+            }
+            if (ipCount > 0) {
+                const sample = result.invalid_pointer.slice(0, sampleLimit);
+                log.warn(`[collab-integrity] invalid_pointer 样例(前${sample.length}/${ipCount})：${JSON.stringify(sample)}`);
             }
         }
 
@@ -483,6 +665,8 @@ module.exports = {
         ensureInsideRoot,
         computeAttachmentDirName,
         moveToOrphaned,
-        cleanupMovedFiles
+        moveToOrphanedSubdir,        // v1.70.0
+        cleanupMovedFiles,
+        insertFailedAttachments      // v1.70.0
     }
 };

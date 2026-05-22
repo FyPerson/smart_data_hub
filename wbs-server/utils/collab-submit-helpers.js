@@ -18,6 +18,77 @@ const path = require('path');
 const sqlValidator = require('./sql-validator');
 
 // ============================================================================
+// §-1 路径与终态 helper（v1.70.0 方案 §1.2 / §1.2.6 抽取）
+// ============================================================================
+//
+// 抽取动机（quality_first A1-A7）：
+//   - 现状：DELETE endpoint + activateNewVersion 各自散落"终态判断"和"路径拼接"
+//   - 问题：跨 endpoint 改动权限矩阵或目录结构时，多处手抄遗漏（v1.67.1 critical bug 源头）
+//   - 防范：统一一处定义，所有调用方走 helper
+//
+// ⚠️ v1.70.0 不抽 isActiveUserWhere（codex 三审 #2 误报）：
+//   - grep 全文 server.js 0 处 is_active=1 用法，全部已是 status='active'
+//   - 不存在替换工作；如未来 users 表新增软删字段再抽
+//
+// UPLOAD_DIR 计算与 server.js:22 必须保持等价（path.join(__dirname, 'uploads')）
+//   - server.js 的 __dirname = wbs-server/
+//   - 本文件 __dirname = wbs-server/utils/，所以取 path.dirname(__dirname)
+const UPLOAD_DIR_FOR_RESOLVE = path.join(path.dirname(__dirname), 'uploads');
+
+/**
+ * 拼接附件物理路径并做越界校验（防 file_name 含 ../ 之类）。
+ *
+ * DB 中 file_name 形如 `collab/{rid}_xxx/123_456_a.xlsx`（相对 uploads 根的 POSIX 路径）。
+ * 校验后返回的绝对路径，调用方可安全 fs.unlinkSync / fs.createReadStream。
+ *
+ * @param {string} file_name DB collab_attachments.file_name
+ * @returns {string} 绝对路径
+ * @throws {Error} INVALID_ATTACHMENT_PATH 越界 / 空
+ */
+function resolveAttachmentPath(file_name) {
+    if (!file_name || typeof file_name !== 'string') {
+        const e = new Error('INVALID_ATTACHMENT_PATH: file_name 为空');
+        e.code = 'INVALID_ATTACHMENT_PATH';
+        throw e;
+    }
+    const fullPath = path.resolve(UPLOAD_DIR_FOR_RESOLVE, file_name);
+    // codex 24 审 #5：Windows 文件系统大小写不敏感（NTFS 默认），盘符或路径段大小写差异
+    // 会让 startsWith 误判合法路径越界。Win32 下统一 toLowerCase 比较；POSIX 保持大小写敏感。
+    const baseResolved = path.resolve(UPLOAD_DIR_FOR_RESOLVE) + path.sep;
+    const isWin = process.platform === 'win32';
+    const cmpFull = isWin ? fullPath.toLowerCase() : fullPath;
+    const cmpBase = isWin ? baseResolved.toLowerCase() : baseResolved;
+    if (!cmpFull.startsWith(cmpBase)) {
+        const e = new Error(`INVALID_ATTACHMENT_PATH: 路径越界 ${file_name}`);
+        e.code = 'INVALID_ATTACHMENT_PATH';
+        throw e;
+    }
+    return fullPath;
+}
+
+/**
+ * 软删除（作废）判断：v1.66.2 引入 archived_at NOT NULL 视为已作废。
+ *
+ * @param {object} collab collab_requests 行（含 archived_at 字段）
+ * @returns {boolean}
+ */
+function isSoftArchived(collab) {
+    return !!(collab && collab.archived_at);
+}
+
+/**
+ * 终态归档判断：v1.67.1 引入 status='ARCHIVED' 视为完成归档锁定。
+ *
+ * 注意：与 isSoftArchived 完全独立 —— 软删除是"作废未上线"，归档是"完成后只读"。
+ *
+ * @param {object} collab collab_requests 行（含 status 字段）
+ * @returns {boolean}
+ */
+function isFinalArchived(collab) {
+    return !!(collab && collab.status === 'ARCHIVED');
+}
+
+// ============================================================================
 // §0 全局 smoke test 互斥锁（codex 十一审 #1 critical 修正版）
 // ============================================================================
 //
@@ -382,6 +453,10 @@ module.exports = {
     runRealSmokeTest,
     classifyUploadedFiles,
     safeDisplayName,
+    // v1.70.0 抽取（方案 §1.2.6）
+    resolveAttachmentPath,
+    isSoftArchived,
+    isFinalArchived,
     // 暴露给测试和监控（生产代码不应直接 acquire/release，统一走 runRealSmokeTest 包装）
     _globalSmokeTestMutex: globalSmokeTestMutex,
 };
