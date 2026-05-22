@@ -156,21 +156,26 @@ async function runTests() {
         if (!log.reason.includes('新[tech_misunderstanding|')) throw new Error(`新值缺失: ${log.reason}`);
     });
 
-    // T3: PENDING 状态
-    await check('T3 PENDING 状态 → 409 INVALID_STATE', async () => {
+    // T3: PENDING 状态（v1.70.4 codex 30 审 #3 反转：从 409 INVALID_STATE 改为 200 允许）
+    await check('T3 v1.70.4 PENDING 状态 → 200 允许（admin 协作过程中即可填）', async () => {
         await setCollabStatus(TEST_ID, 'PENDING');
-        const r = await postFriction(tokens.admin, TEST_ID, { friction_cause_category: 'other', friction_note: 'test note ok' });
-        if (r.status !== 409) throw new Error(`HTTP ${r.status}`);
-        if (r.body.code !== 'INVALID_STATE') throw new Error(`code=${r.body.code}`);
-        if (r.body.current_status !== 'PENDING') throw new Error(`current_status=${r.body.current_status}`);
+        const r = await postFriction(tokens.admin, TEST_ID, { friction_cause_category: 'other', friction_note: 'PENDING 阶段填摩擦 v1.70.4' });
+        if (r.status !== 200) throw new Error(`HTTP ${r.status} body=${JSON.stringify(r.body)}`);
     });
 
-    // T4: SUBMITTED 状态
-    await check('T4 SUBMITTED 状态 → 409 INVALID_STATE', async () => {
+    // T4: SUBMITTED 状态（v1.70.4 codex 30 审 #3 反转：从 409 INVALID_STATE 改为 200 允许）
+    await check('T4 v1.70.4 SUBMITTED 状态 → 200 允许', async () => {
         await setCollabStatus(TEST_ID, 'SUBMITTED');
-        const r = await postFriction(tokens.admin, TEST_ID, { friction_cause_category: 'other', friction_note: 'test note ok' });
+        const r = await postFriction(tokens.admin, TEST_ID, { friction_cause_category: 'other', friction_note: 'SUBMITTED 阶段填摩擦 v1.70.4' });
+        if (r.status !== 200) throw new Error(`HTTP ${r.status}`);
+    });
+
+    // T4b: ARCHIVED 状态仍拒（v1.70.4 新增）
+    await check('T4b v1.70.4 ARCHIVED 状态 → 409 ARCHIVED_PROTECTED', async () => {
+        await setCollabStatus(TEST_ID, 'ARCHIVED');
+        const r = await postFriction(tokens.admin, TEST_ID, { friction_cause_category: 'other', friction_note: 'ARCHIVED 应被拒' });
         if (r.status !== 409) throw new Error(`HTTP ${r.status}`);
-        if (r.body.code !== 'INVALID_STATE') throw new Error(`code=${r.body.code}`);
+        if (r.body.code !== 'ARCHIVED_PROTECTED') throw new Error(`code=${r.body.code}`);
     });
 
     // T5/T6: 权限拒绝

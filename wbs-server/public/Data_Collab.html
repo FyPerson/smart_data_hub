@@ -341,6 +341,7 @@
         .val-passed-bg   { background: #d1fae5; color: #065f46; }
         .val-failed-bg   { background: #fee2e2; color: #991b1b; }
         .val-bypassed-bg { background: #fef3c7; color: #78350f; }
+        .val-admin-closed-bg { background: #dbeafe; color: #1e40af; }  /* v1.70.4 ③ 行政闭环：蓝色，与 bypass 黄色区分 */
         .val-running-bg  { background: #e0e7ff; color: #3730a3; }
         .val-title { font-weight: 600; font-size: 14px; margin-bottom: 6px; }
         .val-meta  { color: #6b7280; font-size: 12px; margin-bottom: 4px; }
@@ -451,6 +452,64 @@
             font-weight: 500;
         }
         .form-row label .required { color: #dc2626; }
+        /* v1.70.4 ②：勾选框 + 文本同行的 inline label（解决 .form-row label{display:block} 撑高问题）*/
+        .form-row label.checkbox-inline {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin-bottom: 0;
+            cursor: pointer;
+        }
+        .form-row label.checkbox-inline input[type="checkbox"] {
+            margin: 0;
+            flex-shrink: 0;
+        }
+        .form-row label.checkbox-inline > span { font-weight: 400; }
+        /* v1.70.4 ①：管理员修正记录区块 */
+        .admin-fix-entry {
+            padding: 10px 12px;
+            margin-bottom: 8px;
+            background: #fef3c7;
+            border-left: 3px solid #f59e0b;
+            border-radius: 4px;
+            font-size: 13px;
+            line-height: 1.6;
+        }
+        .admin-fix-entry:last-child { margin-bottom: 0; }
+        .admin-fix-meta {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 6px;
+            color: #92400e;
+            font-size: 12px;
+        }
+        .admin-fix-operator { font-weight: 600; }
+        .admin-fix-time { color: #78350f; }
+        .admin-fix-cleared-tag {
+            background: #fde68a;
+            color: #78350f;
+            padding: 1px 6px;
+            border-radius: 3px;
+            font-size: 11px;
+        }
+        .admin-fix-change-row { color: #374151; }
+        .admin-fix-field { color: #6b7280; }
+        .admin-fix-old { color: #dc2626; text-decoration: line-through; }
+        .admin-fix-new { color: #059669; font-weight: 500; }
+        .admin-fix-reason {
+            margin-top: 6px;
+            padding-top: 6px;
+            border-top: 1px dashed #fcd34d;
+            color: #78350f;
+            font-style: italic;
+        }
+        .admin-fix-fallback {
+            color: #9ca3af;
+            font-family: monospace;
+            font-size: 12px;
+            word-break: break-all;
+        }
         .form-row input,
         .form-row select,
         .form-row textarea {
@@ -808,6 +867,11 @@
                     <input type="text" id="f_requester" placeholder="如 张三">
                 </div>
                 <div class="form-row">
+                    <label>业务方负责人手机号 <span class="hint">（选填，11 位，命中则拉真人进沟通群）</span></label>
+                    <input type="text" id="f_requester_phone" placeholder="如 13812345678" maxlength="11" inputmode="numeric">
+                    <div class="hint">钉钉企业内可按手机号匹配到真人时，拉群会把业务方加入；查不到则按既有 4 人组拉群，不阻塞建群。</div>
+                </div>
+                <div class="form-row">
                     <label>需求描述 <span class="required">*</span></label>
                     <textarea id="f_desc" placeholder="把和业务方对齐过的关键口径写清楚，作为书面证据"></textarea>
                 </div>
@@ -864,6 +928,31 @@
                     <!-- v1.66.2 编辑/作废按钮按状态动态显示 -->
                 </div>
                 <button class="btn btn-cancel" onclick="closeDetailModal()">关闭</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 行政闭环确认弹窗（v1.70.4 ③）-->
+    <div class="modal-overlay" id="adminSubmitModal">
+        <div class="modal-card">
+            <div class="modal-header">
+                <h3>行政闭环</h3>
+                <button class="modal-close" onclick="closeAdminSubmitModal()">×</button>
+            </div>
+            <div class="modal-body">
+                <div style="padding:12px;background:#dbeafe;border:1px solid #93c5fd;border-radius:6px;margin-bottom:14px;color:#1e3a8a;font-size:13px;line-height:1.7;">
+                    📋 适用于：admin 因创建协作单时录入错误（如选错业务库），导致开发交付物 smoke test 失败。<br/>
+                    通过 admin 修正字段后，<strong>不让开发再回来重传</strong>，admin 单方面将协作单从 SUBMITTED 闭环到 DONE。<br/>
+                    <span style="color:#991b1b;">⚠️ 行政闭环<strong>不跑 smoke test</strong>，仅作需求记账，不追溯结果数据；完成时间取最后一次有效提交时间，无则取要求完成时间。</span>
+                </div>
+                <div class="form-row">
+                    <label>行政闭环原因 <span class="required">*</span> <span class="hint">（必填，10..500 字符）</span></label>
+                    <textarea id="f_admin_submit_reason" placeholder="例如：创建时业务库选错为 BMS 应为 business_db，已通过修正字段更正，开发交付物本身无问题，无需重新验收" maxlength="500" style="min-height:80px;"></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-cancel" onclick="closeAdminSubmitModal()">取消</button>
+                <button class="btn" id="btnAdminSubmit" style="background:#2563eb;color:white;" onclick="submitAdminOnBehalf()">确认闭环</button>
             </div>
         </div>
     </div>
@@ -937,9 +1026,9 @@
                     <textarea id="f_admin_fix_reason" placeholder="例如：录错目标库 BMS 应为 business_db / OA 号写错 等" maxlength="500" style="min-height:80px;"></textarea>
                 </div>
                 <div class="form-row" style="margin-top:10px;">
-                    <label style="display:flex;align-items:center;cursor:pointer;">
-                        <input type="checkbox" id="f_admin_fix_clear_sql_error" checked style="margin-right:6px;">
-                        修改后清空 SQL 验收错误（让开发可重新提交）
+                    <label class="checkbox-inline">
+                        <input type="checkbox" id="f_admin_fix_clear_sql_error" checked>
+                        <span>修改后清空 SQL 验收错误（让开发可重新提交）</span>
                     </label>
                 </div>
             </div>
@@ -1509,15 +1598,16 @@
                     </div>
                 </div>`;
 
-            // 3. 交付内容 / 4. 验收结果 / 5. 失败提交历史（v1.70.0）/ 6. 沟通管理（v1.69.0）/ 7. 协作摩擦（D3 模块 7）
+            // 3. 交付内容 / 4. 验收结果 / 5. 失败提交历史（v1.70.0）/ 6. 沟通管理（v1.69.0）/ 7. 管理员修正记录（v1.70.4 ①）/ 8. 协作摩擦（D3 模块 7）
             const deliveryHtml = renderDeliverySection(d);
             const validationHtml = renderValidationSection(d, isAdminUser);
             const failedHistoryHtml = renderFailedHistorySection(d, isAdminUser);
             const chatHtml = renderChatSection(d, isAdminUser);
+            const adminFixHistoryHtml = renderAdminFixHistorySection(d, isAdminUser);
             const frictionHtml = renderFrictionSection(d, isAdminUser);
 
             document.getElementById('detailBody').innerHTML =
-                taskInfoHtml + notifyHtml + deliveryHtml + validationHtml + failedHistoryHtml + chatHtml + frictionHtml;
+                taskInfoHtml + notifyHtml + deliveryHtml + validationHtml + failedHistoryHtml + chatHtml + adminFixHistoryHtml + frictionHtml;
 
             // v1.70.2：详情页 innerHTML 重写后，绑定截图缩略图 click → openLightbox
             // 用 dataset 而非 inline onclick 避免文件名含 ' 撕碎字符串
@@ -1546,6 +1636,16 @@
                     && ['PENDING_ASSIGN', 'PENDING', 'SUBMITTED'].includes(d.status);
                 const adminFixBtn = canAdminFix
                     ? `<button class="btn" style="background:#fef3c7;color:#92400e;border:1px solid #fbbf24;" onclick="openAdminFixDialog()">🔧 管理员修正</button>`
+                    : '';
+
+                // v1.70.4 ③ 行政闭环按钮：admin && SUBMITTED && 非已作废/非已归档
+                //   触发场景：admin 录错业务库导致开发交付物 smoke test 失败，admin-fix 改完字段后，
+                //   不让开发再回来重传，admin 单方面把协作单从 SUBMITTED 强制推到 DONE
+                const canAdminSubmit = isAdminUser
+                    && !isArchived && !isArchivedFinal
+                    && d.status === 'SUBMITTED';
+                const adminSubmitBtn = canAdminSubmit
+                    ? `<button class="btn" style="background:#dbeafe;color:#1e40af;border:1px solid #93c5fd;" onclick="openAdminSubmitDialog()">📋 行政闭环</button>`
                     : '';
 
                 // v1.70.3 业务需求变更：admin 任何非 ARCHIVED 终态、非已作废都可见"作废"按钮
@@ -1579,8 +1679,8 @@
                         ${archiveBtn}
                     `;
                 } else if (canAdminFix) {
-                    // SUBMITTED + failed / 已提交后录错目标库等场景：admin-fix + 作废
-                    footerLeft.innerHTML = adminFixBtn + archiveBtn;
+                    // SUBMITTED + failed / 已提交后录错目标库等场景：admin-fix + 行政闭环（v1.70.4 ③）+ 作废
+                    footerLeft.innerHTML = adminFixBtn + adminSubmitBtn + archiveBtn;
                 } else if (canArchive) {
                     // 其他 admin 可作废但不可 admin-fix 的边缘状态（如 v1.71.0 EXPORTING 未来扩展）
                     // codex 29 审 #4 拍板：保留兜底分支；未来新增状态加专属主按钮时，需检查 footer 按钮矩阵
@@ -1931,6 +2031,27 @@
                         <div class="val-title">✅ 已通过 smoke test 验收</div>
                         <div class="val-meta">验收完成：${fmtDate(d.sql_validated_at)}</div>
                     </div>`;
+            } else if (vs === 'admin_closed') {
+                // v1.70.4 ③ + codex 30 审 #4：行政闭环展示分支（蓝色，与 bypass 黄色区分）
+                //   reason / 操作人从最近一条 ADMIN_SUBMIT_ON_BEHALF 日志取（详情 API 已返 d.logs）
+                let adminCloseReason = '—';
+                let adminCloseOperator = '—';
+                if (Array.isArray(d.logs)) {
+                    const log = d.logs.find(l => l.operation_type === 'ADMIN_SUBMIT_ON_BEHALF');
+                    if (log) {
+                        adminCloseOperator = log.operator || `user#${log.operator_id}`;
+                        try {
+                            const parsed = JSON.parse(log.reason || '{}');
+                            if (parsed && typeof parsed === 'object' && parsed.reason) adminCloseReason = parsed.reason;
+                        } catch (_) { /* keep default */ }
+                    }
+                }
+                bodyHtml = `
+                    <div class="val-box val-admin-closed-bg">
+                        <div class="val-title">📋 行政闭环（未执行 SQL 验收）</div>
+                        <div class="val-meta">操作人：${escapeHtml(adminCloseOperator)} · ${fmtDate(d.done_at)}</div>
+                        <div class="val-reason">${escapeHtml(adminCloseReason)}</div>
+                    </div>`;
             } else if (vs === 'failed') {
                 // v3：仅本单 developer 本人可见"重新上传"按钮（admin 不再代提交，与 §6 权限矩阵一致）
                 // admin 可见"旁路放行"按钮
@@ -2008,16 +2129,83 @@
                 </div>`;
         }
 
-        // 协作摩擦区块（D3 模块 7，方案 §6.6）：DONE 或 ARCHIVED 状态展示（v1.67.1 加 ARCHIVED）
+        // v1.70.4 ①：管理员修正历史区块
+        //   - 从 d.logs（详情 API 已返）筛选 operation_type='ADMIN_FIX' 的条目
+        //   - reason 字段是 JSON.stringify({changes, old_values, reason, cleared_sql_validation})
+        //   - 解析失败时降级展示原始字符串
+        //   - 显示策略：admin 在所有状态可见；非 admin 在 DONE/ARCHIVED 可见（与摩擦区块一致——协作进行中不公开内部纠错）
+        //   - 字段名走 ADMIN_FIX_FIELD_META 拿中文 label
+        function renderAdminFixHistorySection(d, isAdminUser) {
+            if (!Array.isArray(d.logs)) return '';
+            const fixLogs = d.logs.filter(l => l.operation_type === 'ADMIN_FIX');
+            if (fixLogs.length === 0) return '';
+            // 非 admin 在非终态隐藏（与摩擦区块一致）
+            if (!isAdminUser && d.status !== 'DONE' && d.status !== 'ARCHIVED') return '';
+
+            const rows = fixLogs.map(log => {
+                let parsed = null;
+                try { parsed = JSON.parse(log.reason || '{}'); } catch (_) { /* ignore */ }
+                const changes = (parsed && parsed.changes) || {};
+                const oldValues = (parsed && parsed.old_values) || {};
+                const reasonText = (parsed && parsed.reason) || '';
+                const clearedSql = !!(parsed && parsed.cleared_sql_validation);
+
+                const fieldRows = Object.keys(changes).map(field => {
+                    const meta = (typeof ADMIN_FIX_FIELD_META !== 'undefined') ? ADMIN_FIX_FIELD_META[field] : null;
+                    const label = (meta && meta.label) ? meta.label : field;
+                    const oldDisplay = (oldValues[field] == null || oldValues[field] === '') ? '—' : String(oldValues[field]);
+                    const newDisplay = (changes[field] == null || changes[field] === '') ? '—' : String(changes[field]);
+                    return `<div class="admin-fix-change-row"><span class="admin-fix-field">${escapeHtml(label)}</span>：<span class="admin-fix-old">${escapeHtml(oldDisplay)}</span> → <span class="admin-fix-new">${escapeHtml(newDisplay)}</span></div>`;
+                }).join('');
+
+                // 解析失败兜底（v1.70.4 codex 30 审 #7：严格结构校验，避免数组/数字 parsed 时降级不充分）
+                //   合法结构：parsed 是非 null 非数组的对象 且至少含 changes 或 reason 字段
+                //   否则走 fallback 展示原始 log.reason，避免显示空白记录
+                const isValidStruct = parsed
+                    && typeof parsed === 'object'
+                    && !Array.isArray(parsed)
+                    && (parsed.changes != null || parsed.reason != null);
+                const fallbackBody = !isValidStruct
+                    ? `<div class="admin-fix-fallback">${escapeHtml(log.reason || '(无明细)')}</div>`
+                    : '';
+
+                return `
+                    <div class="admin-fix-entry">
+                        <div class="admin-fix-meta">
+                            <span class="admin-fix-operator">${escapeHtml(log.operator || `user#${log.operator_id}`)}</span>
+                            <span class="admin-fix-time">${fmtDate(log.created_at)}</span>
+                            ${clearedSql ? '<span class="admin-fix-cleared-tag">已清空 SQL 验收错误</span>' : ''}
+                        </div>
+                        ${fieldRows}
+                        ${fallbackBody}
+                        ${reasonText ? `<div class="admin-fix-reason">原因：${escapeHtml(reasonText)}</div>` : ''}
+                    </div>`;
+            }).join('');
+
+            return `
+                <div class="detail-section">
+                    <div class="detail-section-title">管理员修正记录 (${fixLogs.length})</div>
+                    <div class="detail-section-body">${rows}</div>
+                </div>`;
+        }
+
+        // 协作摩擦区块（D3 模块 7，方案 §6.6）：v1.70.4 改为非终态即可填
+        //   - 触发条件：未软删除 + 未 ARCHIVED 锁定（archived_at IS NULL）
+        //   - 原 v1.67.1 仅 DONE/ARCHIVED 展示的设计推翻：业务诉求是"拉群后或沟通中即可记录摩擦"，
+        //     拉群发生在 PENDING/SUBMITTED 阶段，等到 DONE 才能填会漏记
+        //   - admin 在非 ARCHIVED 任何状态都可填/改；非 admin 仅在 DONE/ARCHIVED 看到只读展示
+        //     （PENDING/SUBMITTED 阶段非 admin 看不到摩擦区块，避免 dev/对接人在协作进行中被"盖章"压力）
         function renderFrictionSection(d, isAdminUser) {
-            if (d.status !== 'DONE' && d.status !== 'ARCHIVED') return '';
+            // ARCHIVED 锁定：所有人只读；DONE/SUBMITTED/PENDING/PENDING_ASSIGN：按角色分支
+            // 软删除作废（archived_at NOT NULL）：与 ARCHIVED 同理整体隐藏
+            if (d.archived_at) return '';
+            const isArchivedLocked = d.status === 'ARCHIVED';
+            // 非 admin 仅在 DONE/ARCHIVED 见区块（避免开发协作中被盖章压力）
+            if (!isAdminUser && d.status !== 'DONE' && d.status !== 'ARCHIVED') return '';
 
             const cat = d.friction_cause_category || '';
             const note = d.friction_note || '';
             const occurred = d.friction_occurred === 1;
-
-            // v1.67.1：ARCHIVED 归档锁定后所有人只读（admin 也走只读，需先解归档才能改 — 当前版本暂未实现解归档）
-            const isArchivedLocked = d.status === 'ARCHIVED';
 
             if (!isAdminUser || isArchivedLocked) {
                 // 非 admin 或已归档：只读展示
@@ -2713,8 +2901,8 @@
             document.getElementById('newModalTitle').textContent = '新建协作单';
             document.getElementById('btnSubmit').textContent = '提交';
 
-            // 重置表单
-            ['f_oa_no', 'f_requester', 'f_desc'].forEach(id => document.getElementById(id).value = '');
+            // 重置表单（v1.70.4 ④ 加 f_requester_phone）
+            ['f_oa_no', 'f_requester', 'f_requester_phone', 'f_desc'].forEach(id => document.getElementById(id).value = '');
             document.getElementById('f_dept').selectedIndex = 0;
             document.getElementById('f_contact').selectedIndex = 0;
             document.getElementById('f_target_db').selectedIndex = 0;
@@ -2759,6 +2947,7 @@
             document.getElementById('f_oa_no').value = d.oa_request_no || '';
             document.getElementById('f_dept').value = d.requester_dept || '';
             document.getElementById('f_requester').value = d.requester_name || '';
+            document.getElementById('f_requester_phone').value = d.requester_phone || '';  // v1.70.4 ④
             document.getElementById('f_desc').value = d.description || '';
             // deadline 后端存 'YYYY-MM-DD HH:mm:ss'，HTML datetime-local 要 'YYYY-MM-DDTHH:mm'
             if (d.deadline) {
@@ -2829,14 +3018,20 @@
 
         async function submitNew() {
             const isEdit = !!editingCollabId;
+            const requesterPhoneRaw = (document.getElementById('f_requester_phone').value || '').trim();
             const payload = {
                 oa_request_no: document.getElementById('f_oa_no').value.trim(),
                 requester_dept: document.getElementById('f_dept').value,
                 requester_name: document.getElementById('f_requester').value.trim(),
+                requester_phone: requesterPhoneRaw || null,  // v1.70.4 ④ 选填
                 description: document.getElementById('f_desc').value.trim(),
                 deadline: document.getElementById('f_deadline').value,
                 target_db_connection_id: parseInt(document.getElementById('f_target_db').value, 10) || null
             };
+            // v1.70.4 ④ 前端手机号格式校验（与后端 /^1\d{10}$/ 一致）
+            if (requesterPhoneRaw && !/^1\d{10}$/.test(requesterPhoneRaw)) {
+                return showToast('业务方手机号必须是 11 位以 1 开头的数字', 'error');
+            }
             // 对接人：新建场景必填；编辑场景仅 PENDING_ASSIGN 允许带（PENDING 禁用，传了后端也会拒）
             const contactId = parseInt(document.getElementById('f_contact').value, 10) || null;
             if (!isEdit) {
@@ -3018,6 +3213,64 @@
                 showToast('网络错误', 'error');
                 btn.disabled = false;
                 btn.textContent = '确认作废';
+            }
+        }
+
+        // v1.70.4 ③ 行政闭环 modal handlers
+        let _adminSubmitCollabId = null;
+        function openAdminSubmitDialog() {
+            if (!currentDetail) return showToast('协作单数据未加载', 'error');
+            _adminSubmitCollabId = currentDetail.id;
+            document.getElementById('f_admin_submit_reason').value = '';
+            const btn = document.getElementById('btnAdminSubmit');
+            btn.disabled = false;
+            btn.textContent = '确认闭环';
+            document.getElementById('adminSubmitModal').classList.add('show');
+            hideDetailModalOnly();
+        }
+
+        function closeAdminSubmitModal() {
+            document.getElementById('adminSubmitModal').classList.remove('show');
+            _adminSubmitCollabId = null;
+            restoreDetailIfHidden();
+        }
+
+        async function submitAdminOnBehalf() {
+            const id = _adminSubmitCollabId;
+            if (!id) return showToast('协作单 id 丢失', 'error');
+            const reason = document.getElementById('f_admin_submit_reason').value.trim();
+            if (reason.length < 10) { showToast('行政闭环原因至少 10 个字符', 'error'); return; }
+            if (reason.length > 500) { showToast('行政闭环原因不能超过 500 个字符', 'error'); return; }
+            const btn = document.getElementById('btnAdminSubmit');
+            btn.disabled = true;
+            btn.textContent = '处理中…';
+            try {
+                const res = await authFetch(`/api/collab/requests/${id}/admin-submit-on-behalf`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ reason })
+                });
+                if (!res) return;
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) {
+                    showToast(data.error || '行政闭环失败', 'error');
+                    btn.disabled = false;
+                    btn.textContent = '确认闭环';
+                    return;
+                }
+                const sourceLabel = ({
+                    dev_last_active_attachment: '取自开发最后一次有效提交时间',
+                    deadline: '取自要求完成时间',
+                    now: '取自当前时间'
+                })[data.done_at_source] || data.done_at_source;
+                showToast(`✅ 协作单 #${id} 行政闭环成功（完成时间 ${sourceLabel}）`, 'success');
+                closeAdminSubmitModal();
+                await openDetail(id);
+                if (typeof loadList === 'function') loadList();
+            } catch (e) {
+                showToast('网络错误', 'error');
+                btn.disabled = false;
+                btn.textContent = '确认闭环';
             }
         }
 

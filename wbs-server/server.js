@@ -1402,6 +1402,12 @@ function initTable() {
                   ON collab_attachments(collab_request_id, failed_attempt_seq, attachment_type)
                   WHERE status='failed'`);
 
+        // ===== v1.70.4 ④ 业务方负责人手机号（2026-05-23）=====
+        //   create-chat 拉群时若 requester_phone 非空 → getUserIdByMobile 反查 → 命中则把业务方真人加入群
+        //   未命中（钉钉返 60121 等）→ 静默降级走现有 4 人组逻辑
+        //   选填字段：业务方可能不在钉钉企业内（外协），强制必填会阻塞协作单创建
+        safeAlterAddColumn('collab_requests', 'requester_phone', 'TEXT');
+
         // 健康检查放在 serialize 末尾，确保所有 ALTER/INDEX 都已串行执行完
         verifyV2CollabSchema();
     });
@@ -1429,7 +1435,9 @@ function verifyV2CollabSchema() {
         'archived_final_at', 'archived_final_reason', 'archived_final_by',
         // v1.69.0 钉钉沟通群（2026-05-20）
         'dingtalk_chat_id', 'dingtalk_open_conversation_id',
-        'dingtalk_chat_created_at', 'dingtalk_chat_created_by', 'dingtalk_chat_name'
+        'dingtalk_chat_created_at', 'dingtalk_chat_created_by', 'dingtalk_chat_name',
+        // v1.70.4 ④ 业务方负责人手机号（2026-05-23）
+        'requester_phone'
     ];
     db.all("PRAGMA table_info(collab_requests)", [], (err, rows) => {
         if (err) {
@@ -9878,6 +9886,15 @@ const COLLAB_STATUSES = ['PENDING_ASSIGN', 'PENDING', 'SUBMITTED', 'DONE', 'ARCH
 const COLLAB_UNASSIGNED_DEVELOPER_ID = 0;
 const COLLAB_UNASSIGNED_DEVELOPER_NAME = '(待指派)';
 
+// v1.70.4 codex 30 审 #5：手机号脱敏 helper，用于日志输出避免明文进审计/服务日志
+//   规则：保留前 3 位 + 末 4 位，中间 4 位 ****；非 11 位输入返回 '[invalid_phone]' 不暴露原文
+function maskPhone(phone) {
+    if (phone == null || typeof phone !== 'string') return '[invalid_phone]';
+    const trimmed = phone.trim();
+    if (!/^1\d{10}$/.test(trimmed)) return '[invalid_phone]';
+    return `${trimmed.slice(0, 3)}****${trimmed.slice(7)}`;
+}
+
 // 协作单操作日志写入辅助
 function insertCollabLog(collabRequestId, operationType, operatorId, operator, reason = null) {
     db.run(
@@ -10267,7 +10284,8 @@ app.post('/api/collab/requests', authenticateToken, requireAdmin, async (req, re
         description,
         deadline,
         contact_person_id,
-        target_db_connection_id
+        target_db_connection_id,
+        requester_phone  // v1.70.4 ④ 业务方负责人手机号（选填）
     } = req.body;
 
     try {
@@ -10282,6 +10300,15 @@ app.post('/api/collab/requests', authenticateToken, requireAdmin, async (req, re
         const operatorName = req.user.display_name || req.user.username;
 
         const oaTrimmed = String(oa_request_no).trim();
+
+        // v1.70.4 ④ 业务方手机号校验（选填，11 位数字；空字符串/null/undefined 都视为未填）
+        let phoneTrimmed = null;
+        if (requester_phone != null && String(requester_phone).trim() !== '') {
+            phoneTrimmed = String(requester_phone).trim();
+            if (!/^1\d{10}$/.test(phoneTrimmed)) {
+                return res.status(400).json({ error: '业务方负责人手机号必须是 11 位以 1 开头的数字' });
+            }
+        }
 
         // OA 流程号唯一性预检（codex 六审 M-2）
         const oaExisting = await dbGetAsync(
@@ -10302,8 +10329,8 @@ app.post('/api/collab/requests', authenticateToken, requireAdmin, async (req, re
                      description, deadline, status, created_by, created_by_name,
                      developer_id, developer_name,
                      contact_person_id, contact_person_name,
-                     target_db_connection_id)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING_ASSIGN', ?, ?, ?, ?, ?, ?, ?)`,
+                     target_db_connection_id, requester_phone)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING_ASSIGN', ?, ?, ?, ?, ?, ?, ?, ?)`,
                 [
                     external_request_id || null,
                     oaTrimmed,
@@ -10318,7 +10345,8 @@ app.post('/api/collab/requests', authenticateToken, requireAdmin, async (req, re
                     COLLAB_UNASSIGNED_DEVELOPER_NAME,
                     contactPerson.id,
                     contactPersonName,
-                    target_db_connection_id
+                    target_db_connection_id,
+                    phoneTrimmed  // v1.70.4 ④
                 ]
             );
             const newId = result.lastID;
@@ -10449,6 +10477,18 @@ app.put('/api/collab/requests/:id', authenticateToken, requireAdmin, async (req,
                 updates.push(`${f} = ?`);
                 params.push(typeof req.body[f] === 'string' ? req.body[f].trim() : req.body[f]);
             }
+        }
+        // v1.70.4 ④ requester_phone（选填，11 位数字；空字符串/null 都视为清空）
+        if (req.body.requester_phone !== undefined) {
+            let phoneVal = null;
+            if (req.body.requester_phone !== null && String(req.body.requester_phone).trim() !== '') {
+                phoneVal = String(req.body.requester_phone).trim();
+                if (!/^1\d{10}$/.test(phoneVal)) {
+                    return res.status(400).json({ error: '业务方负责人手机号必须是 11 位以 1 开头的数字' });
+                }
+            }
+            updates.push('requester_phone = ?');
+            params.push(phoneVal);
         }
         // oa_request_no 独立字段（部分前端用 oa_request_no 命名传入）
         if (oaChanged) {
@@ -10728,7 +10768,7 @@ app.post('/api/collab/requests/:id/create-chat', authenticateToken, async (req, 
     try {
         const collab = await dbGetAsync(
             `SELECT id, status, archived_at, archived_final_at, oa_request_no,
-                    description, requester_name, contact_person_id, developer_id,
+                    description, requester_name, requester_phone, contact_person_id, developer_id,
                     dingtalk_chat_id, dingtalk_open_conversation_id, dingtalk_chat_name
                FROM collab_requests WHERE id = ?`,
             [id]
@@ -10804,6 +10844,33 @@ app.post('/api/collab/requests/:id/create-chat', authenticateToken, async (req, 
             return res.status(502).json({ error: cls.hint, errcode: cls.errcode, errmsg: cls.errmsg, reason: cls.reason, code: 'GETTOKEN_FAILED' });
         }
 
+        // v1.70.4 ④ 业务方负责人手机号反查（最佳努力）
+        //   - requester_phone 非空 → 正则防御（codex 30 审 #8 后台直写脏数据兜底）→ getUserIdByMobile 反查
+        //   - 命中则把业务方真人加入群；未命中/异常 → 静默降级走现有 4 人组逻辑
+        //   - 失败不阻塞群创建，仅写脱敏日志（codex 30 审 #5：手机号合规脱敏 138****5678）
+        //   - 注意：业务方真人可能不在 users 表里，所以独立拿一个 dingUserId 单独 push 到 dingUserIds，不进 memberRows
+        let requesterDingUid = null;
+        if (collab.requester_phone) {
+            // codex 30 审 #8 防御：反查前再走一次正则，非法值跳过避免传给钉钉
+            if (!/^1\d{10}$/.test(collab.requester_phone)) {
+                logger.warn(`[collab-create-chat] 协作单 #${id} requester_phone 格式非法（${maskPhone(collab.requester_phone)}），跳过反查降级走现有成员`);
+            } else {
+                try {
+                    const rawDingUid = await dingtalkNotify.getUserIdByMobile(token, collab.requester_phone);
+                    // codex 30 审 #6：钉钉 userId 规范化（防字符串/数字/空白脏数据漏匹配）
+                    requesterDingUid = rawDingUid != null ? String(rawDingUid).trim() : null;
+                    if (requesterDingUid) {
+                        logger.info(`[collab-create-chat] 协作单 #${id} 业务方手机号 ${maskPhone(collab.requester_phone)} 反查命中 dingtalk_user_id=${requesterDingUid}`);
+                    }
+                } catch (err) {
+                    const cls = dingtalkNotify.classifyError(err);
+                    logger.warn(`[collab-create-chat] 协作单 #${id} 业务方手机号 ${maskPhone(collab.requester_phone)} 反查失败：errcode=${cls.errcode} reason=${cls.reason}，降级走现有成员`);
+                    insertCollabLog(id, 'CREATE_CHAT_REQUESTER_LOOKUP_FAIL', userId, userName, `phone=${maskPhone(collab.requester_phone)} errcode=${cls.errcode}`);
+                    requesterDingUid = null;
+                }
+            }
+        }
+
         // 补齐 dingtalk_user_id（缺失的按手机号反查）
         const dingUserIds = [];
         for (const m of memberRows) {
@@ -10835,7 +10902,24 @@ app.post('/api/collab/requests/:id/create-chat', authenticateToken, async (req, 
                     });
                 }
             }
-            dingUserIds.push({ userId: m.id, dingtalk_user_id: dingUid, display_name: m.display_name });
+            // v1.70.4 codex 30 审 #6：dingtalk_user_id 归一化（防 users 表脏数据 - 数字/带空白字符）
+            const normalizedDingUid = dingUid != null ? String(dingUid).trim() : '';
+            dingUserIds.push({ userId: m.id, dingtalk_user_id: normalizedDingUid, display_name: m.display_name });
+        }
+
+        // v1.70.4 ④ 业务方真人加入群（最佳努力，反查命中才加）
+        //   - 不进 users 表，所以没有 userId（platform 内部用户 id）；用 0 占位但 dingtalk_user_id 是真实的
+        //   - 去重保护：钉钉接口本身对重复 userId 会忽略，但本地也做 set 防御
+        //   - codex 30 审 #6：两侧 dingtalk_user_id 已归一化为 trim 后字符串，严格相等可靠
+        if (requesterDingUid) {
+            const dupExisting = dingUserIds.some(u => u.dingtalk_user_id === requesterDingUid);
+            if (!dupExisting) {
+                dingUserIds.push({
+                    userId: 0,  // 平台无对应账号
+                    dingtalk_user_id: requesterDingUid,
+                    display_name: `${collab.requester_name || '业务方'}（业务方）`
+                });
+            }
         }
 
         // 找触发人的 dingtalk_user_id 当群主
@@ -12436,22 +12520,26 @@ app.post('/api/collab/requests/:id/friction-record', authenticateToken, requireA
                 code: 'SOFT_ARCHIVED_PROTECTED',
             });
         }
-        if (collab.status !== 'DONE') {
+        // v1.70.4 codex 30 审 #3：状态门禁同步前端 renderFrictionSection 放开
+        //   原仅 DONE 可记录 → 改为所有未归档状态可记录（admin 可在协作过程中即时记录摩擦）
+        //   前端 renderFrictionSection 已放开：admin 在 archived_at IS NULL && status !== 'ARCHIVED' 时可填
+        //   前后端语义对齐：admin 拉群后或沟通过程中即可填，无需等到 DONE 才"事后复盘"
+        if (collab.status === 'ARCHIVED') {
             return res.status(409).json({
-                error: `当前状态 ${collab.status} 不允许记录协作摩擦（仅 DONE 可记录）`,
-                code: 'INVALID_STATE',
+                error: '已归档协作单不允许记录协作摩擦',
+                code: 'ARCHIVED_PROTECTED',
                 current_status: collab.status,
             });
         }
 
-        // 条件 UPDATE 兜底并发（防 SELECT 后状态被改 / 被并发作废）
+        // 条件 UPDATE 兜底并发（防 SELECT 后被并发作废/归档；不卡 status 让所有非终态都通过）
         const result = await dbRunAsync(
             `UPDATE collab_requests SET
                 friction_occurred = 1,
                 friction_recorded_at = datetime('now','localtime'),
                 friction_cause_category = ?,
                 friction_note = ?
-              WHERE id = ? AND status = 'DONE' AND archived_at IS NULL`,
+              WHERE id = ? AND status <> 'ARCHIVED' AND archived_at IS NULL`,
             [rawCategory, note, id]
         );
         if (!result || result.changes === 0) {
@@ -12476,6 +12564,141 @@ app.post('/api/collab/requests/:id/friction-record', authenticateToken, requireA
     } catch (e) {
         logger.error(`[collab-friction] 协作单 #${id} 摩擦记录异常: ${e.message}`, e);
         return res.status(500).json({ error: '记录失败，请联系管理员', code: 'FRICTION_FAILED' });
+    }
+});
+
+// =============================================================================
+// 4c. POST /api/collab/requests/:id/admin-submit-on-behalf（v1.70.4 ③，行政闭环）
+// =============================================================================
+// 语义：admin 把协作单从 SUBMITTED 强制推进到 DONE，不走 smoke test、不要求传附件。
+// 触发场景：admin 在创建协作单时录错目标业务库等关键字段，导致开发交付物 smoke test 失败；
+//   admin 通过 admin-fix 修正字段后，发现"开发已完成本职工作（脚本本身没问题）+ 失败因 admin 之过"，
+//   不应让开发再来重传/关注。admin 单方面把协作单闭环，把工作量"记账"清掉。
+//
+// 业务规则：
+//   - 只 admin 可调
+//   - 状态机：SUBMITTED → DONE（仅 SUBMITTED 可走；PENDING 还没提交，不该跳过；DONE/ARCHIVED 已结束）
+//   - sql_validation_status='admin_closed'（新值，区别于 passed/failed/bypassed，表示"行政闭环未验证"）
+//   - sql_validation_error 强制清空（避免详情页继续展示旧错误污染语义）
+//   - done_at 取值（v1.70.4 codex 30 审 #2：合并到 UPDATE 子查询消除 SELECT/UPDATE 间附件集合变化竞态）：
+//       1. 优先取 collab_attachments 中 status='active' 的最新 created_at（dev 最后一次有效提交时间）
+//       2. 若无 active 附件，取 collab_requests.deadline（要求完成时间）
+//       3. 若 deadline 也异常（不应该，schema NOT NULL），最后兜底 datetime('now','localtime')
+//   - reason ≥10 字 ≤500 字（与 admin-fix / bypass / archive 一致）
+//   - 不发钉钉（只写日志，与 bypass 同节奏）
+//   - 不动 failed 历史附件、friction_*、submission_version（保留审计证据）
+//   - 不动 sql_validated_at（保留首次成功验收时间；若从未有过则也为 NULL）
+//
+// 与 bypass 的区别：
+//   - bypass 是 admin 主动覆盖 smoke test 失败结论（"我手工验过，放行"），sql_validation_status='bypassed'
+//   - admin-submit-on-behalf 是 admin 替开发画句号（"开发没责任，但需要 admin 错误造成的协作单闭环"），不假装做过验证
+//   - 两个 endpoint 独立：bypass 一般 SUBMITTED+failed 时用；admin-submit 是 SUBMITTED+任意 sql 状态都能用（即便 queued/passed 也可——业务上 admin 想强制行政闭环就允许）
+//
+// v1.70.4 codex 30 审 #1 声明：sql_validation_status 当前无 schema CHECK 约束 / 无应用层白名单
+// （已 grep 全 server.js 0 命中 + 9 smoke 烟雾测试证实 admin_closed UPDATE 成功）。
+// 未来若引入白名单需同步加入 admin_closed 枚举值；建表 SQL 若加 CHECK 需含 admin_closed。
+app.post('/api/collab/requests/:id/admin-submit-on-behalf', authenticateToken, requireAdmin, async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isSafeInteger(id) || id <= 0) {
+        return res.status(400).json({ error: 'id 必须是正整数', code: 'INVALID_ID' });
+    }
+
+    const reason = String(req.body.reason || '').trim();
+    if (reason.length < 10) {
+        return res.status(400).json({ error: '行政闭环原因必须不少于 10 个字符', code: 'REASON_TOO_SHORT' });
+    }
+    if (reason.length > 500) {
+        return res.status(400).json({ error: '行政闭环原因不能超过 500 个字符', code: 'REASON_TOO_LONG' });
+    }
+
+    const userId = req.user.id;
+    const userName = req.user.display_name || req.user.username;
+
+    try {
+        const collab = await dbGetAsync(
+            `SELECT id, status, deadline, archived_at, archived_final_at, sql_validation_status
+               FROM collab_requests WHERE id = ?`,
+            [id]
+        );
+        if (!collab) return res.status(404).json({ error: '协作单不存在' });
+
+        if (collab.archived_at) {
+            return res.status(409).json({ error: '已作废协作单不允许行政闭环', code: 'SOFT_ARCHIVED_PROTECTED' });
+        }
+        if (collab.status === 'ARCHIVED' || collab.archived_final_at) {
+            return res.status(409).json({ error: '已归档协作单不允许行政闭环', code: 'ARCHIVED_PROTECTED' });
+        }
+        if (collab.status !== 'SUBMITTED') {
+            return res.status(409).json({
+                error: `当前状态 ${collab.status} 不允许行政闭环（仅 SUBMITTED 可走）`,
+                code: 'STATE_NOT_SUBMITTED',
+                current_status: collab.status,
+            });
+        }
+
+        // 并发守卫 + done_at 合并子查询（v1.70.4 codex 30 审 #2：消除 SELECT/UPDATE 间附件集合变化竞态）
+        //   COALESCE 优先级：dev 最后一次 active 交付物 → 协作单 deadline → 当前时间兜底
+        //   single-statement UPDATE 让 SQLite 保证读附件集合 + 写状态在同一原子操作内
+        const result = await dbRunAsync(
+            `UPDATE collab_requests
+                SET status = 'DONE',
+                    done_at = COALESCE(
+                        (SELECT MAX(created_at) FROM collab_attachments
+                          WHERE collab_request_id = collab_requests.id
+                            AND status = 'active'
+                            AND attachment_type IN ('result_data','result_script','delivery')),
+                        deadline,
+                        datetime('now','localtime')
+                    ),
+                    sql_validation_status = 'admin_closed',
+                    sql_validation_error = NULL
+              WHERE id = ?
+                AND status = 'SUBMITTED'
+                AND archived_at IS NULL
+                AND archived_final_at IS NULL`,
+            [id]
+        );
+        if (!result || result.changes === 0) {
+            return res.status(409).json({ error: '协作单状态已变化或不存在，请刷新后重试', code: 'STATE_CHANGED' });
+        }
+
+        // UPDATE 后回查实际写入的 done_at 与推断来源（用于审计日志 + 前端展示）
+        const updated = await dbGetAsync(`SELECT * FROM collab_requests WHERE id = ?`, [id]);
+        // 推断 done_at_source：与 UPDATE COALESCE 顺序一致
+        let doneAtSource = 'now';
+        const finalDoneAt = updated && updated.done_at;
+        if (finalDoneAt) {
+            const lastActive = await dbGetAsync(
+                `SELECT MAX(created_at) AS last_at FROM collab_attachments
+                  WHERE collab_request_id = ?
+                    AND status = 'active'
+                    AND attachment_type IN ('result_data','result_script','delivery')`,
+                [id]
+            );
+            if (lastActive && lastActive.last_at === finalDoneAt) {
+                doneAtSource = 'dev_last_active_attachment';
+            } else if (collab.deadline === finalDoneAt) {
+                doneAtSource = 'deadline';
+            }
+        }
+
+        // 审计日志（reason JSON 含 source 推断依据，便于事后排查）
+        insertCollabLog(id, 'ADMIN_SUBMIT_ON_BEHALF', userId, userName, JSON.stringify({
+            reason,
+            done_at_source: doneAtSource,
+            done_at_value: finalDoneAt,
+            old_sql_validation_status: collab.sql_validation_status || null,
+        }));
+
+        return res.json({
+            success: true,
+            message: '行政闭环成功',
+            collab: updated,
+            done_at_source: doneAtSource,
+        });
+    } catch (e) {
+        logger.error(`[collab-admin-submit] 协作单 #${id} 行政闭环异常: ${e.message}`, e);
+        return res.status(500).json({ error: '行政闭环失败，请联系管理员', code: 'ADMIN_SUBMIT_FAILED' });
     }
 });
 
