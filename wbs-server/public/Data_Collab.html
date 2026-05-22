@@ -949,6 +949,17 @@
                     <label>行政闭环原因 <span class="required">*</span> <span class="hint">（必填，10..500 字符）</span></label>
                     <textarea id="f_admin_submit_reason" placeholder="例如：创建时业务库选错为 BMS 应为 business_db，已通过修正字段更正，开发交付物本身无问题，无需重新验收" maxlength="500" style="min-height:80px;"></textarea>
                 </div>
+                <!-- v1.70.5 admin 可选补传 SQL + Excel（不做内容校验，仅记录） -->
+                <div class="form-row">
+                    <label>补传 SQL 脚本 <span class="hint">（可选，.sql 文件 ≤ 100MB）</span></label>
+                    <input type="file" id="f_admin_submit_script" accept=".sql">
+                    <div class="hint">如开发未上传过 SQL / 需要 admin 替开发补全，可在此选传。不做内容校验、不跑 smoke test。</div>
+                </div>
+                <div class="form-row">
+                    <label>补传结果数据 <span class="hint">（可选，.xlsx / .xls 文件 ≤ 100MB）</span></label>
+                    <input type="file" id="f_admin_submit_data" accept=".xlsx,.xls">
+                    <div class="hint">如开发未上传过结果数据 / 需要 admin 替开发补全，可在此选传。同 attachment_type 旧版本会被自动归档。</div>
+                </div>
             </div>
             <div class="modal-footer">
                 <button class="btn btn-cancel" onclick="closeAdminSubmitModal()">取消</button>
@@ -2150,11 +2161,30 @@
                 const reasonText = (parsed && parsed.reason) || '';
                 const clearedSql = !!(parsed && parsed.cleared_sql_validation);
 
+                // v1.70.5 FK 字段 ID → 名字解析（复用首屏已加载的 lookup 表，未加载时 fallback 显示 ID）
+                //   target_db_connection_id → targetDbMap[id] (DB 连接名)
+                //   contact_person_id / developer_id → activeUsers 按 id 查 display_name
+                //   未命中（lookup 未加载 / id 已停用）→ 显示 `#${id}` 不报错
+                const resolveFkLabel = (field, value) => {
+                    if (value == null || value === '') return '—';
+                    const strVal = String(value);
+                    if (field === 'target_db_connection_id') {
+                        const name = (typeof targetDbMap !== 'undefined') ? targetDbMap[strVal] : null;
+                        return name ? `${name}（#${strVal}）` : `#${strVal}`;
+                    }
+                    if (field === 'contact_person_id' || field === 'developer_id') {
+                        if (typeof activeUsers === 'undefined' || !Array.isArray(activeUsers)) return `#${strVal}`;
+                        const user = activeUsers.find(u => String(u.id) === strVal);
+                        const name = user ? (user.display_name || user.username) : null;
+                        return name ? `${name}（#${strVal}）` : `#${strVal}`;
+                    }
+                    return strVal;
+                };
                 const fieldRows = Object.keys(changes).map(field => {
                     const meta = (typeof ADMIN_FIX_FIELD_META !== 'undefined') ? ADMIN_FIX_FIELD_META[field] : null;
                     const label = (meta && meta.label) ? meta.label : field;
-                    const oldDisplay = (oldValues[field] == null || oldValues[field] === '') ? '—' : String(oldValues[field]);
-                    const newDisplay = (changes[field] == null || changes[field] === '') ? '—' : String(changes[field]);
+                    const oldDisplay = resolveFkLabel(field, oldValues[field]);
+                    const newDisplay = resolveFkLabel(field, changes[field]);
                     return `<div class="admin-fix-change-row"><span class="admin-fix-field">${escapeHtml(label)}</span>：<span class="admin-fix-old">${escapeHtml(oldDisplay)}</span> → <span class="admin-fix-new">${escapeHtml(newDisplay)}</span></div>`;
                 }).join('');
 
@@ -3222,6 +3252,11 @@
             if (!currentDetail) return showToast('协作单数据未加载', 'error');
             _adminSubmitCollabId = currentDetail.id;
             document.getElementById('f_admin_submit_reason').value = '';
+            // v1.70.5 重置文件选择框（避免上次残留）
+            const scriptInput = document.getElementById('f_admin_submit_script');
+            const dataInput = document.getElementById('f_admin_submit_data');
+            if (scriptInput) scriptInput.value = '';
+            if (dataInput) dataInput.value = '';
             const btn = document.getElementById('btnAdminSubmit');
             btn.disabled = false;
             btn.textContent = '确认闭环';
@@ -3241,14 +3276,25 @@
             const reason = document.getElementById('f_admin_submit_reason').value.trim();
             if (reason.length < 10) { showToast('行政闭环原因至少 10 个字符', 'error'); return; }
             if (reason.length > 500) { showToast('行政闭环原因不能超过 500 个字符', 'error'); return; }
+
+            // v1.70.5 用 FormData 携带可选附件（multer.fields result_script / result_data，各最多 1）
+            const fd = new FormData();
+            fd.append('reason', reason);
+            const scriptInput = document.getElementById('f_admin_submit_script');
+            const dataInput = document.getElementById('f_admin_submit_data');
+            const scriptFile = scriptInput && scriptInput.files && scriptInput.files[0];
+            const dataFile = dataInput && dataInput.files && dataInput.files[0];
+            if (scriptFile) fd.append('result_script', scriptFile);
+            if (dataFile) fd.append('result_data', dataFile);
+
             const btn = document.getElementById('btnAdminSubmit');
             btn.disabled = true;
-            btn.textContent = '处理中…';
+            btn.textContent = (scriptFile || dataFile) ? '上传中…' : '处理中…';
             try {
                 const res = await authFetch(`/api/collab/requests/${id}/admin-submit-on-behalf`, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ reason })
+                    // 注意：FormData 提交时不要手动设 Content-Type（浏览器自动加 multipart boundary）
+                    body: fd
                 });
                 if (!res) return;
                 const data = await res.json().catch(() => ({}));
@@ -3259,11 +3305,14 @@
                     return;
                 }
                 const sourceLabel = ({
+                    admin_supplemental_attachment: '取自 admin 补传附件时间',
                     dev_last_active_attachment: '取自开发最后一次有效提交时间',
                     deadline: '取自要求完成时间',
                     now: '取自当前时间'
                 })[data.done_at_source] || data.done_at_source;
-                showToast(`✅ 协作单 #${id} 行政闭环成功（完成时间 ${sourceLabel}）`, 'success');
+                const uploadHint = data.admin_uploaded_count > 0
+                    ? `，admin 补传 ${data.admin_uploaded_count} 个附件` : '';
+                showToast(`✅ 协作单 #${id} 行政闭环成功（完成时间 ${sourceLabel}${uploadHint}）`, 'success');
                 closeAdminSubmitModal();
                 await openDetail(id);
                 if (typeof loadList === 'function') loadList();

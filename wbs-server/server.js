@@ -12597,110 +12597,307 @@ app.post('/api/collab/requests/:id/friction-record', authenticateToken, requireA
 // v1.70.4 codex 30 审 #1 声明：sql_validation_status 当前无 schema CHECK 约束 / 无应用层白名单
 // （已 grep 全 server.js 0 命中 + 9 smoke 烟雾测试证实 admin_closed UPDATE 成功）。
 // 未来若引入白名单需同步加入 admin_closed 枚举值；建表 SQL 若加 CHECK 需含 admin_closed。
-app.post('/api/collab/requests/:id/admin-submit-on-behalf', authenticateToken, requireAdmin, async (req, res) => {
-    const id = parseInt(req.params.id, 10);
-    if (!Number.isSafeInteger(id) || id <= 0) {
-        return res.status(400).json({ error: 'id 必须是正整数', code: 'INVALID_ID' });
-    }
-
-    const reason = String(req.body.reason || '').trim();
-    if (reason.length < 10) {
-        return res.status(400).json({ error: '行政闭环原因必须不少于 10 个字符', code: 'REASON_TOO_SHORT' });
-    }
-    if (reason.length > 500) {
-        return res.status(400).json({ error: '行政闭环原因不能超过 500 个字符', code: 'REASON_TOO_LONG' });
-    }
-
-    const userId = req.user.id;
-    const userName = req.user.display_name || req.user.username;
-
-    try {
-        const collab = await dbGetAsync(
-            `SELECT id, status, deadline, archived_at, archived_final_at, sql_validation_status
-               FROM collab_requests WHERE id = ?`,
-            [id]
-        );
-        if (!collab) return res.status(404).json({ error: '协作单不存在' });
-
-        if (collab.archived_at) {
-            return res.status(409).json({ error: '已作废协作单不允许行政闭环', code: 'SOFT_ARCHIVED_PROTECTED' });
-        }
-        if (collab.status === 'ARCHIVED' || collab.archived_final_at) {
-            return res.status(409).json({ error: '已归档协作单不允许行政闭环', code: 'ARCHIVED_PROTECTED' });
-        }
-        if (collab.status !== 'SUBMITTED') {
-            return res.status(409).json({
-                error: `当前状态 ${collab.status} 不允许行政闭环（仅 SUBMITTED 可走）`,
-                code: 'STATE_NOT_SUBMITTED',
-                current_status: collab.status,
+app.post('/api/collab/requests/:id/admin-submit-on-behalf',
+    authenticateToken,
+    requireAdmin,
+    // v1.70.5 新增：admin 可选上传 result_script(.sql) + result_data(.xlsx/.xls)
+    //   - multer.fields 接两个独立字段名，每个最多 1 个，全部可选
+    //   - 不做内容校验（业务方明确"不做校验"），multer 已做扩展名/大小白名单
+    //   - 上传错误统一 JSON 转义（sync 与 v1.70.0 submit endpoint 风格一致）
+    (req, res, next) => {
+        const handler = collabUpload.fields([
+            { name: 'result_script', maxCount: 1 },
+            { name: 'result_data', maxCount: 1 }
+        ]);
+        handler(req, res, (err) => {
+            if (!err) return next();
+            const isMulterErr = err && err.name === 'MulterError';
+            const code = isMulterErr ? err.code : 'UPLOAD_ERROR';
+            // 清理已落盘的部分文件
+            try {
+                const allFiles = [];
+                if (req.files) {
+                    Object.values(req.files).forEach(arr => { if (Array.isArray(arr)) allFiles.push(...arr); });
+                }
+                collabSubmitHelpers.cleanupPendingFiles(allFiles, logger);
+            } catch (_) { /* ignore */ }
+            logger.warn(`[collab-admin-submit] multer error: code=${code} msg=${err.message}`);
+            return res.status(400).json({
+                error: '附件上传失败',
+                code,
+                detail: isMulterErr ? err.message : err.message,
             });
+        });
+    },
+    async (req, res) => {
+        const id = parseInt(req.params.id, 10);
+
+        // 收尾 helper：清理本次 multer 已落盘但未入库的文件
+        const cleanupPending = () => {
+            try {
+                const allFiles = [];
+                if (req.files) {
+                    Object.values(req.files).forEach(arr => { if (Array.isArray(arr)) allFiles.push(...arr); });
+                }
+                collabSubmitHelpers.cleanupPendingFiles(allFiles, logger);
+            } catch (_) { /* ignore */ }
+        };
+
+        if (!Number.isSafeInteger(id) || id <= 0) {
+            cleanupPending();
+            return res.status(400).json({ error: 'id 必须是正整数', code: 'INVALID_ID' });
         }
 
-        // 并发守卫 + done_at 合并子查询（v1.70.4 codex 30 审 #2：消除 SELECT/UPDATE 间附件集合变化竞态）
-        //   COALESCE 优先级：dev 最后一次 active 交付物 → 协作单 deadline → 当前时间兜底
-        //   single-statement UPDATE 让 SQLite 保证读附件集合 + 写状态在同一原子操作内
-        const result = await dbRunAsync(
-            `UPDATE collab_requests
-                SET status = 'DONE',
-                    done_at = COALESCE(
-                        (SELECT MAX(created_at) FROM collab_attachments
-                          WHERE collab_request_id = collab_requests.id
-                            AND status = 'active'
-                            AND attachment_type IN ('result_data','result_script','delivery')),
-                        deadline,
-                        datetime('now','localtime')
-                    ),
-                    sql_validation_status = 'admin_closed',
-                    sql_validation_error = NULL
-              WHERE id = ?
-                AND status = 'SUBMITTED'
-                AND archived_at IS NULL
-                AND archived_final_at IS NULL`,
-            [id]
-        );
-        if (!result || result.changes === 0) {
-            return res.status(409).json({ error: '协作单状态已变化或不存在，请刷新后重试', code: 'STATE_CHANGED' });
+        const reason = String(req.body.reason || '').trim();
+        if (reason.length < 10) {
+            cleanupPending();
+            return res.status(400).json({ error: '行政闭环原因必须不少于 10 个字符', code: 'REASON_TOO_SHORT' });
+        }
+        if (reason.length > 500) {
+            cleanupPending();
+            return res.status(400).json({ error: '行政闭环原因不能超过 500 个字符', code: 'REASON_TOO_LONG' });
         }
 
-        // UPDATE 后回查实际写入的 done_at 与推断来源（用于审计日志 + 前端展示）
-        const updated = await dbGetAsync(`SELECT * FROM collab_requests WHERE id = ?`, [id]);
-        // 推断 done_at_source：与 UPDATE COALESCE 顺序一致
-        let doneAtSource = 'now';
-        const finalDoneAt = updated && updated.done_at;
-        if (finalDoneAt) {
-            const lastActive = await dbGetAsync(
-                `SELECT MAX(created_at) AS last_at FROM collab_attachments
-                  WHERE collab_request_id = ?
-                    AND status = 'active'
-                    AND attachment_type IN ('result_data','result_script','delivery')`,
-                [id]
-            );
-            if (lastActive && lastActive.last_at === finalDoneAt) {
-                doneAtSource = 'dev_last_active_attachment';
-            } else if (collab.deadline === finalDoneAt) {
-                doneAtSource = 'deadline';
+        const userId = req.user.id;
+        const userName = req.user.display_name || req.user.username;
+
+        // v1.70.5 收集本次 admin 上传的可选附件（0/1/2 个）
+        const adminUploadedFiles = [];
+        if (req.files) {
+            if (req.files.result_script && req.files.result_script.length > 0) {
+                adminUploadedFiles.push({ attachment_type: 'result_script', file: req.files.result_script[0] });
+            }
+            if (req.files.result_data && req.files.result_data.length > 0) {
+                adminUploadedFiles.push({ attachment_type: 'result_data', file: req.files.result_data[0] });
             }
         }
+        const hasAdminUpload = adminUploadedFiles.length > 0;
 
-        // 审计日志（reason JSON 含 source 推断依据，便于事后排查）
-        insertCollabLog(id, 'ADMIN_SUBMIT_ON_BEHALF', userId, userName, JSON.stringify({
-            reason,
-            done_at_source: doneAtSource,
-            done_at_value: finalDoneAt,
-            old_sql_validation_status: collab.sql_validation_status || null,
-        }));
+        try {
+            const collab = await dbGetAsync(
+                `SELECT id, status, deadline, description, attachment_dir, submission_version,
+                        archived_at, archived_final_at, sql_validation_status
+                   FROM collab_requests WHERE id = ?`,
+                [id]
+            );
+            if (!collab) {
+                cleanupPending();
+                return res.status(404).json({ error: '协作单不存在' });
+            }
 
-        return res.json({
-            success: true,
-            message: '行政闭环成功',
-            collab: updated,
-            done_at_source: doneAtSource,
-        });
-    } catch (e) {
-        logger.error(`[collab-admin-submit] 协作单 #${id} 行政闭环异常: ${e.message}`, e);
-        return res.status(500).json({ error: '行政闭环失败，请联系管理员', code: 'ADMIN_SUBMIT_FAILED' });
+            if (collab.archived_at) {
+                cleanupPending();
+                return res.status(409).json({ error: '已作废协作单不允许行政闭环', code: 'SOFT_ARCHIVED_PROTECTED' });
+            }
+            if (collab.status === 'ARCHIVED' || collab.archived_final_at) {
+                cleanupPending();
+                return res.status(409).json({ error: '已归档协作单不允许行政闭环', code: 'ARCHIVED_PROTECTED' });
+            }
+            if (collab.status !== 'SUBMITTED') {
+                cleanupPending();
+                return res.status(409).json({
+                    error: `当前状态 ${collab.status} 不允许行政闭环（仅 SUBMITTED 可走）`,
+                    code: 'STATE_NOT_SUBMITTED',
+                    current_status: collab.status,
+                });
+            }
+
+            // v1.70.5 admin 附件移动到正式目录（复用 D3 模块 2 路径校验逻辑，但不调 activateNewVersion）
+            //   理由：activateNewVersion 强制完整快照（result_data + result_script 各 1）+ 跑 smoke test，
+            //   行政闭环要求"可选上传 + 不做校验"，两条都不匹配 → 精简版本地实现
+            //   复用 collabVersioning._internal 的 ensureInsideRoot + computeAttachmentDirName + moveToOrphaned
+            //   流程：①路径校验 ②决定目标目录 ③rename 到正式目录 ④事务内 INSERT 新 active + UPDATE 旧 active 同 type → superseded
+            const versInternal = collabVersioning._internal;
+            const VERSIONED_TYPES = collabVersioning.VERSIONED_DELIVERY_ATTACHMENT_TYPES;
+            let movedAdminFiles = [];  // [{ attachment_type, final_path, original_name }]
+            let attachmentDirName = collab.attachment_dir;
+
+            if (hasAdminUpload) {
+                // ①路径校验：每个 multer 文件必须在 _pending/{id}/ 下
+                const pendingRoot = path.join(COLLAB_UPLOAD_BASE, '_pending', String(id));
+                for (const item of adminUploadedFiles) {
+                    const check = versInternal.ensureInsideRoot(item.file.path, pendingRoot);
+                    if (!check.ok) {
+                        cleanupPending();
+                        logger.warn(`[collab-admin-submit] 路径越界: ${check.error}`);
+                        return res.status(400).json({ error: '附件路径校验失败', code: 'PATH_VIOLATION' });
+                    }
+                }
+
+                // ②决定目标目录（首次激活才需算）
+                if (!attachmentDirName) {
+                    attachmentDirName = versInternal.computeAttachmentDirName(id, collab.description);
+                }
+                const targetDir = path.join(COLLAB_UPLOAD_BASE, attachmentDirName);
+                const targetCheck = versInternal.ensureInsideRoot(targetDir, COLLAB_UPLOAD_BASE);
+                if (!targetCheck.ok) {
+                    cleanupPending();
+                    return res.status(400).json({ error: '目标目录越界', code: 'PATH_VIOLATION' });
+                }
+                if (!fs.existsSync(targetDir)) {
+                    fs.mkdirSync(targetDir, { recursive: true });
+                }
+
+                // ③rename 文件到正式目录（失败立即回滚 + 清 pending）
+                try {
+                    for (const item of adminUploadedFiles) {
+                        const finalName = path.basename(item.file.path);  // multer 已生成 ts_rand_safeName
+                        const finalPath = path.join(targetDir, finalName);
+                        fs.renameSync(item.file.path, finalPath);
+                        movedAdminFiles.push({
+                            attachment_type: item.attachment_type,
+                            final_path: finalPath,
+                            original_name: item.file.originalname,
+                        });
+                    }
+                } catch (renameErr) {
+                    logger.error(`[collab-admin-submit] 文件移动失败: ${renameErr.message}`);
+                    // 已 rename 的挪 _orphaned；未 rename 的 cleanupPending 清掉
+                    try {
+                        await versInternal.moveToOrphaned(
+                            movedAdminFiles.map(f => ({ final_path: f.final_path })),
+                            id, (collab.submission_version || 0), COLLAB_UPLOAD_BASE, logger
+                        );
+                    } catch (_) { /* ignore */ }
+                    cleanupPending();
+                    return res.status(500).json({ error: '附件文件移动失败', code: 'FILE_MOVE_FAILED' });
+                }
+            }
+
+            // 单事务：INSERT 新 admin active 行（如有）+ UPDATE 旧 active 同 type → superseded + UPDATE collab_requests
+            //   submission_version 不变（admin 行政闭环不算正常 dev 提交，不递增版本号）
+            //   旧 active 同 attachment_type（result_data / result_script）→ superseded（选 1 覆盖语义）
+            const newSubmissionVersion = collab.submission_version || 0;
+
+            try {
+                await dbRunAsync('BEGIN IMMEDIATE TRANSACTION');
+
+                // ④ INSERT 新 admin active 行 + supersede 同 type 旧 active
+                for (const mf of movedAdminFiles) {
+                    // INSERT 前先 supersede 该 type 的所有旧 active 行（避免一对多 active）
+                    await dbRunAsync(
+                        `UPDATE collab_attachments
+                            SET status='superseded', superseded_at=datetime('now','localtime')
+                          WHERE collab_request_id=?
+                            AND attachment_type=?
+                            AND status='active'`,
+                        [id, mf.attachment_type]
+                    );
+                    // INSERT 新 admin active 行
+                    // file_name 路径计算与 versioning §3.6 完全一致：relative(dirname(collabRoot), final_path) replace \ → /
+                    const relPath = path.relative(path.dirname(COLLAB_UPLOAD_BASE), mf.final_path).replace(/\\/g, '/');
+                    await dbRunAsync(
+                        `INSERT INTO collab_attachments
+                            (collab_request_id, attachment_type, file_name, original_name,
+                             uploaded_by, uploaded_by_name, submission_version, status, superseded_at)
+                         VALUES (?, ?, ?, ?, ?, ?, ?, 'active', NULL)`,
+                        [id, mf.attachment_type, relPath, mf.original_name,
+                         userId, userName, newSubmissionVersion]
+                    );
+                }
+
+                // ⑤ 并发守卫 + done_at COALESCE 子查询（v1.70.4 codex 30 审 #2）
+                //   注意：因前面 INSERT 了 admin 自己的 active 附件，子查询会包含 admin 这一行
+                //         done_at 取的是"截至本次行政闭环时间点 admin 与 dev 累计的最新 active"
+                //         这正是预期：admin 补传后 done_at 取 admin 上传时间（如有），否则 dev 旧 active 时间，否则 deadline，否则 now
+                const updResult = await dbRunAsync(
+                    `UPDATE collab_requests
+                        SET status = 'DONE',
+                            done_at = COALESCE(
+                                (SELECT MAX(created_at) FROM collab_attachments
+                                  WHERE collab_request_id = collab_requests.id
+                                    AND status = 'active'
+                                    AND attachment_type IN ('result_data','result_script','delivery')),
+                                deadline,
+                                datetime('now','localtime')
+                            ),
+                            sql_validation_status = 'admin_closed',
+                            sql_validation_error = NULL,
+                            attachment_dir = COALESCE(attachment_dir, ?)
+                      WHERE id = ?
+                        AND status = 'SUBMITTED'
+                        AND archived_at IS NULL
+                        AND archived_final_at IS NULL`,
+                    [hasAdminUpload ? attachmentDirName : null, id]
+                );
+
+                if (!updResult || updResult.changes === 0) {
+                    await dbRunAsync('ROLLBACK');
+                    // 已移动的 admin 文件挪 _orphaned/{id}_v{ver}_{ts}/（CONCURRENT_SUBMIT 同等待遇）
+                    if (movedAdminFiles.length > 0) {
+                        try {
+                            await versInternal.moveToOrphaned(
+                                movedAdminFiles, id, newSubmissionVersion, COLLAB_UPLOAD_BASE, logger
+                            );
+                        } catch (_) { /* ignore */ }
+                    }
+                    return res.status(409).json({
+                        error: '协作单状态已变化或不存在，请刷新后重试',
+                        code: 'STATE_CHANGED'
+                    });
+                }
+
+                await dbRunAsync('COMMIT');
+            } catch (txErr) {
+                try { await dbRunAsync('ROLLBACK'); } catch (_) { /* ignore */ }
+                // 物理文件挪 _orphaned 避免污染正式目录
+                if (movedAdminFiles.length > 0) {
+                    try {
+                        await versInternal.moveToOrphaned(
+                            movedAdminFiles, id, newSubmissionVersion, COLLAB_UPLOAD_BASE, logger
+                        );
+                    } catch (_) { /* ignore */ }
+                }
+                throw txErr;
+            }
+
+            // UPDATE 后回查实际写入的 done_at 与推断来源
+            const updated = await dbGetAsync(`SELECT * FROM collab_requests WHERE id = ?`, [id]);
+            let doneAtSource = 'now';
+            const finalDoneAt = updated && updated.done_at;
+            if (finalDoneAt) {
+                const lastActive = await dbGetAsync(
+                    `SELECT MAX(created_at) AS last_at FROM collab_attachments
+                      WHERE collab_request_id = ?
+                        AND status = 'active'
+                        AND attachment_type IN ('result_data','result_script','delivery')`,
+                    [id]
+                );
+                if (lastActive && lastActive.last_at === finalDoneAt) {
+                    // 区分 admin 上传 vs dev 上传作为来源（仅用作日志/前端展示语义）
+                    doneAtSource = hasAdminUpload ? 'admin_supplemental_attachment' : 'dev_last_active_attachment';
+                } else if (collab.deadline === finalDoneAt) {
+                    doneAtSource = 'deadline';
+                }
+            }
+
+            // 审计日志（reason JSON 含 source 推断依据 + admin 上传文件清单）
+            insertCollabLog(id, 'ADMIN_SUBMIT_ON_BEHALF', userId, userName, JSON.stringify({
+                reason,
+                done_at_source: doneAtSource,
+                done_at_value: finalDoneAt,
+                old_sql_validation_status: collab.sql_validation_status || null,
+                admin_uploaded: movedAdminFiles.map(mf => ({
+                    type: mf.attachment_type,
+                    original_name: mf.original_name,
+                })),
+            }));
+
+            return res.json({
+                success: true,
+                message: '行政闭环成功',
+                collab: updated,
+                done_at_source: doneAtSource,
+                admin_uploaded_count: movedAdminFiles.length,
+            });
+        } catch (e) {
+            // 异常 cleanup：未移动的 _pending 文件清掉；已移动的（movedAdminFiles）走 moveToOrphaned 隔离
+            cleanupPending();
+            logger.error(`[collab-admin-submit] 协作单 #${id} 行政闭环异常: ${e.message}`, e);
+            return res.status(500).json({ error: '行政闭环失败，请联系管理员', code: 'ADMIN_SUBMIT_FAILED' });
+        }
     }
-});
+);
 
 // 5. 删除协作单（publisher+，级联 + 清理附件目录）
 app.delete('/api/collab/requests/:id', authenticateToken, requirePublisherOrAdmin, async (req, res) => {
