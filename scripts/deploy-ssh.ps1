@@ -2,10 +2,12 @@
 # Called by: /deploy skill (step 8)
 # Usage: powershell -ExecutionPolicy Bypass -File scripts/deploy-ssh.ps1
 #
-# 5 步：(1) push → (2) pull → (3) 备份 task_pool.db（v2.0 数据协作模块强制，失败中止）→ (4) PM2 restart → (5) scp 拉生产 db 备份到本地（v1.69.x+，失败只 warn 不阻塞）
+# 6 步：(1) push → (2) pull → (3) 备份 task_pool.db（v2.0 数据协作模块强制，失败中止）→ (4) PM2 restart → (5) scp 拉生产 db 备份到本地 → (6) scp 拉生产协作附件到本地（v1.70.1+，失败只 warn 不阻塞）
 # 备份策略：
 #   - 生产端：每次部署都备份；同目录 task_pool.db.backup_yyyyMMdd_HHmmss；不自动清理（季度初手动跑）
-#   - 本地端（v1.69.x+ 新增）：scp 拉本次新生成的 backup 到 E:\数据开发与治理规范手册\生产数据库备份\；保留最近 10 份，旧的自动删；失败只 warn 不阻塞主流程
+#   - 本地端 db 备份（v1.69.x+）：scp 拉本次新生成的 backup 到 E:\数据开发与治理规范手册\生产数据库备份\；保留最近 10 份，旧的自动删；失败只 warn 不阻塞主流程
+#   - 本地端 collab 附件备份（v1.70.1+，2026-05-22）：scp -r 拉整个 uploads/collab/ 到 E:\数据开发与治理规范手册\生产协作附件备份\collab_yyyyMMdd_HHmmss\；
+#     拉完后删 _pending / _orphaned 两个子目录（临时区 / 隔离区不入备份）；保留最近 5 份按时间倒序，旧的自动删；失败只 warn 不阻塞
 #
 # ⚠️ KNOWN ISSUES（已知结构性缺口，2026-05-14 / 05-15 踩过）：
 # 1. 不跑 npm install —— 仅做"代码 + db 备份 + 重启"，新增 npm 依赖需手工处理：
@@ -124,7 +126,7 @@ Write-Host ""
 # 5. Pull production db backup to local (v1.69.x+，失败只 warn 不阻塞)
 # 用本次步骤 3 生成的 $backupPath（如 E:\Task_Pool\wbs-server\task_pool.db.backup_20260520_153500）
 # scp 拉到本地 E:\数据开发与治理规范手册\生产数据库备份\，保留最近 10 份
-Write-Host "[5/5] Pull production db backup to local..." -ForegroundColor Yellow
+Write-Host "[5/6] Pull production db backup to local..." -ForegroundColor Yellow
 try {
     $localBackupDir = 'E:\数据开发与治理规范手册\生产数据库备份'
     if (-not (Test-Path $localBackupDir)) {
@@ -162,6 +164,85 @@ try {
 } catch {
     Write-Host "  [WARN] Local backup pull failed (deploy 主流程未受影响): $_" -ForegroundColor Yellow
     Write-Host "  [HINT] 手动补拉: scp ${ServerUser}@${ServerIP}:$scpSrcPath E:\数据开发与治理规范手册\生产数据库备份\" -ForegroundColor Gray
+}
+
+Write-Host ""
+
+# 6. Pull production collab attachments to local (v1.70.1+，失败只 warn 不阻塞)
+# 拉 uploads/collab/ 整个目录，本地按部署时间快照命名 collab_yyyyMMdd_HHmmss/
+# 拉完后删本地快照的 _pending / _orphaned 两个子目录（临时区 / 隔离区不入备份）
+# 保留最近 5 份按时间倒序，旧的自动删
+#
+# 为什么 scp -r 不直接排除子目录：
+#   scp 没有 --exclude 选项（rsync 才有）；用 robocopy 需要远端先临时拷贝再 scp
+#   两步法繁琐。当前 _pending/_orphaned 体积小（约几十 KB），拉完后本地删更简单
+Write-Host "[6/6] Pull production collab attachments to local..." -ForegroundColor Yellow
+try {
+    $localCollabBaseDir = 'E:\数据开发与治理规范手册\生产协作附件备份'
+    if (-not (Test-Path $localCollabBaseDir)) {
+        New-Item -ItemType Directory -Path $localCollabBaseDir -Force | Out-Null
+        Write-Host "  [INFO] Created local collab backup dir: $localCollabBaseDir" -ForegroundColor Gray
+    }
+
+    # 本次快照目录名（与 db 备份时间戳保持同步，便于交叉对照）
+    # 复用步骤 3 已生成的 $backupPath 中提取的时间戳（task_pool.db.backup_YYYYMMDD_HHmmss）
+    if ($backupPath -match 'backup_(\d{8}_\d{6})') {
+        $snapshotTs = $matches[1]
+    } else {
+        $snapshotTs = Get-Date -Format yyyyMMdd_HHmmss
+    }
+    $localSnapshotDir = Join-Path $localCollabBaseDir "collab_$snapshotTs"
+
+    # 远端 scp 源：/E:/Task_Pool/wbs-server/uploads/collab/
+    $remoteCollabPath = '/E:/Task_Pool/wbs-server/uploads/collab'
+    $scpSrc = "${ServerUser}@${ServerIP}:$remoteCollabPath"
+
+    # scp -r 拉整个 collab 目录到本地快照位置（即 localSnapshotDir/collab/）
+    # 注：scp -r 把源目录作为子目录拷到目标下，结果是 $localSnapshotDir/collab/...
+    # 简化：直接拉到 localSnapshotDir，让 scp 在 base dir 下创建 collab 子目录
+    if (-not (Test-Path $localSnapshotDir)) {
+        New-Item -ItemType Directory -Path $localSnapshotDir -Force | Out-Null
+    }
+    $scpResult = scp -r $scpSrc $localSnapshotDir 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "scp -r failed (exit $LASTEXITCODE): $scpResult"
+    }
+
+    # 拉完路径结构：$localSnapshotDir\collab\{rid}_xxx\, _pending\, _orphaned\
+    $pulledCollabDir = Join-Path $localSnapshotDir 'collab'
+    if (-not (Test-Path $pulledCollabDir)) {
+        throw "scp 成功但本地 collab 目录不存在: $pulledCollabDir"
+    }
+
+    # 删 _pending / _orphaned 两个子目录（临时区 / 隔离区不入备份）
+    $excludeSubdirs = @('_pending', '_orphaned')
+    foreach ($sub in $excludeSubdirs) {
+        $subPath = Join-Path $pulledCollabDir $sub
+        if (Test-Path $subPath) {
+            Remove-Item $subPath -Recurse -Force -ErrorAction SilentlyContinue
+            Write-Host "  [INFO] Removed temp/orphan subdir: $sub" -ForegroundColor Gray
+        }
+    }
+
+    # 统计快照体积 + 协作单目录数
+    $subdirCount = (Get-ChildItem -Path $pulledCollabDir -Directory -ErrorAction SilentlyContinue).Count
+    $totalBytes = (Get-ChildItem -Path $pulledCollabDir -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+    $totalMB = if ($totalBytes) { [math]::Round($totalBytes / 1MB, 1) } else { 0 }
+    Write-Host "  [OK] Saved: $localSnapshotDir ($subdirCount collab dirs, $totalMB MB)" -ForegroundColor Green
+
+    # 保留最近 5 份快照，按目录名时间戳倒序（collab_YYYYMMDD_HHmmss）
+    $allSnapshots = Get-ChildItem -Path $localCollabBaseDir -Directory -Filter 'collab_*' |
+        Sort-Object Name -Descending
+    if ($allSnapshots.Count -gt 5) {
+        $toDelete = $allSnapshots | Select-Object -Skip 5
+        foreach ($d in $toDelete) {
+            Remove-Item $d.FullName -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        Write-Host "  [INFO] Cleaned $($toDelete.Count) old snapshot(s), kept latest 5" -ForegroundColor Gray
+    }
+} catch {
+    Write-Host "  [WARN] Local collab attachments pull failed (deploy 主流程未受影响): $_" -ForegroundColor Yellow
+    Write-Host "  [HINT] 手动补拉: scp -r ${ServerUser}@${ServerIP}:/E:/Task_Pool/wbs-server/uploads/collab E:\数据开发与治理规范手册\生产协作附件备份\collab_$snapshotTs\" -ForegroundColor Gray
 }
 
 Write-Host ""

@@ -829,6 +829,42 @@
         </div>
     </div>
 
+    <!-- admin-fix 修正弹窗（v1.70.0 Step 3：方案 §3-A）
+         触发场景：5/21 OA-364265 类——admin 录错目标库导致 smoke test 失败，开发卡死无法重传
+         可改字段动态从 GET /admin-fix/allowed-fields?status= 拉，灰显当前状态不可改字段
+         字段：oa_request_no / description / target_db_connection_id（下拉）/ contact_person_id / developer_id（下拉，复用 activeUsers）
+    -->
+    <div class="modal-overlay" id="adminFixModal">
+        <div class="modal-card" style="max-width:640px;">
+            <div class="modal-header">
+                <h3 id="adminFixTitle">管理员修正</h3>
+                <button class="modal-close" onclick="closeAdminFixModal()">×</button>
+            </div>
+            <div class="modal-body">
+                <div style="padding:12px;background:#fef3c7;border:1px solid #fbbf24;border-radius:6px;margin-bottom:14px;color:#78350f;font-size:13px;">
+                    🔧 仅 admin 用于"录错字段救火"场景。修改后会清空 SQL 验收错误状态，让开发可重新提交。<strong>所有改动记入审计日志</strong>，DONE/ARCHIVED 状态不可修正。
+                </div>
+                <div id="adminFixFieldsContainer">
+                    <!-- 根据 allowed_fields 动态渲染 -->
+                </div>
+                <div class="form-row" style="margin-top:14px;">
+                    <label>修正原因 <span class="required">*</span> <span class="hint">（必填，10..500 字符）</span></label>
+                    <textarea id="f_admin_fix_reason" placeholder="例如：录错目标库 BMS 应为 business_db / OA 号写错 等" maxlength="500" style="min-height:80px;"></textarea>
+                </div>
+                <div class="form-row" style="margin-top:10px;">
+                    <label style="display:flex;align-items:center;cursor:pointer;">
+                        <input type="checkbox" id="f_admin_fix_clear_sql_error" checked style="margin-right:6px;">
+                        修改后清空 SQL 验收错误（让开发可重新提交）
+                    </label>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-cancel" onclick="closeAdminFixModal()">取消</button>
+                <button class="btn" id="btnAdminFix" style="background:#f59e0b;color:white;" onclick="submitAdminFix()">确认修正</button>
+            </div>
+        </div>
+    </div>
+
     <!-- 指派/改派开发弹窗（v1.66.0 二级转派：调 POST /:id/assign）-->
     <div class="modal-overlay" id="assignModal">
         <div class="modal-card">
@@ -1323,6 +1359,18 @@
                 const isDone = d.status === 'DONE';
                 const isArchivedFinal = d.status === 'ARCHIVED';
 
+                // v1.70.0 Step 3：admin-fix 按钮可见条件
+                //   - 仅 admin
+                //   - 状态在 admin-fix 允许列表（PENDING_ASSIGN / PENDING / SUBMITTED）
+                //   - 非已作废 / 非已归档
+                //   - 显示场景核心：SUBMITTED + failed（5/21 OA-364265 卡死场景）；其他状态作为正常修正入口
+                const canAdminFix = isAdminUser
+                    && !isArchived && !isArchivedFinal && !isDone
+                    && ['PENDING_ASSIGN', 'PENDING', 'SUBMITTED'].includes(d.status);
+                const adminFixBtn = canAdminFix
+                    ? `<button class="btn" style="background:#fef3c7;color:#92400e;border:1px solid #fbbf24;" onclick="openAdminFixDialog()">🔧 管理员修正</button>`
+                    : '';
+
                 if (isArchived) {
                     // 软删除作废优先展示
                     footerLeft.innerHTML = `<span style="color:#dc2626;font-size:13px;">⚠️ 已作废${d.archived_reason ? ` · ${escapeHtml(d.archived_reason)}` : ''}</span>`;
@@ -1330,16 +1378,20 @@
                     // v1.67.1 归档锁定展示
                     footerLeft.innerHTML = `<span style="color:#166534;font-size:13px;">📁 已归档${d.archived_final_reason ? ` · ${escapeHtml(d.archived_final_reason)}` : ''}</span>`;
                 } else if (isAdminUser && isUnsubmitted) {
-                    // 编辑/作废（v1.66.2）
+                    // 编辑/作废（v1.66.2）+ admin-fix（v1.70.0 Step 3）
                     footerLeft.innerHTML = `
                         <button class="btn" style="background:#3b82f6;color:white;" onclick="openEditModal()">编辑</button>
                         <button class="btn" style="background:#fef2f2;color:#dc2626;border:1px solid #fca5a5;" onclick="openArchiveModal()">作废</button>
+                        ${adminFixBtn}
                     `;
                 } else if (isAdminUser && isDone) {
-                    // v1.67.1：DONE 状态 admin 可见"归档"按钮
+                    // v1.67.1：DONE 状态 admin 可见"归档"按钮（DONE 不可 admin-fix，终态保护）
                     footerLeft.innerHTML = `
                         <button class="btn" style="background:#16a34a;color:white;" onclick="openArchiveFinalModal()">📁 归档</button>
                     `;
+                } else if (canAdminFix) {
+                    // SUBMITTED + failed / 已提交后录错目标库等场景：只挂 admin-fix 按钮
+                    footerLeft.innerHTML = adminFixBtn;
                 } else {
                     footerLeft.innerHTML = '';
                 }
@@ -1973,6 +2025,180 @@
                 showToast('网络错误', 'error');
                 btn.disabled = false;
                 btn.textContent = '提交';
+            }
+        }
+
+        // ====================================================================
+        // admin-fix 弹窗（v1.70.0 Step 3，方案 §3-A）
+        // ====================================================================
+
+        let _adminFixCollabId = null;
+        let _adminFixAllowedFields = [];
+
+        // 字段元数据（label / 类型 / 是否需要预填）
+        const ADMIN_FIX_FIELD_META = {
+            'oa_request_no': { label: 'OA 流程号', type: 'text', placeholder: '例如：OA-364265' },
+            'description': { label: '需求描述', type: 'textarea', placeholder: '业务方需求描述' },
+            'target_db_connection_id': { label: '目标业务库', type: 'db_select' },
+            'contact_person_id': { label: '对接人', type: 'user_select' },
+            'developer_id': { label: '开发人员', type: 'user_select' },
+        };
+
+        async function openAdminFixDialog() {
+            const d = currentDetail;
+            if (!d) { showToast('协作单详情未加载', 'error'); return; }
+            _adminFixCollabId = d.id;
+
+            // 拉允许字段
+            let allowed;
+            try {
+                const res = await authFetch(`/api/collab/admin-fix/allowed-fields?status=${encodeURIComponent(d.status)}`);
+                if (!res || !res.ok) { showToast('拉取允许字段失败', 'error'); return; }
+                const data = await res.json();
+                allowed = data.allowed_fields || [];
+            } catch (e) { showToast('网络错误', 'error'); return; }
+
+            if (allowed.length === 0) {
+                showToast(`当前状态 ${d.status} 下无可修正字段`, 'error');
+                return;
+            }
+            _adminFixAllowedFields = allowed;
+
+            document.getElementById('adminFixTitle').textContent = `管理员修正 · 协作单 #${d.id}（${d.status}）`;
+
+            // 渲染字段（只渲染 allowed 列表中的字段，预填当前值）
+            const container = document.getElementById('adminFixFieldsContainer');
+            const html = allowed.map(field => {
+                const meta = ADMIN_FIX_FIELD_META[field];
+                if (!meta) return '';
+                const currentVal = d[field];
+                let inputHtml = '';
+                if (meta.type === 'text') {
+                    inputHtml = `<input type="text" id="f_admin_fix_${field}" data-field="${field}" value="${escapeHtml(currentVal || '')}" placeholder="${meta.placeholder || ''}" maxlength="100">`;
+                } else if (meta.type === 'textarea') {
+                    inputHtml = `<textarea id="f_admin_fix_${field}" data-field="${field}" placeholder="${meta.placeholder || ''}" maxlength="2000" style="min-height:60px;">${escapeHtml(currentVal || '')}</textarea>`;
+                } else if (meta.type === 'db_select') {
+                    // codex 26 审 #5：currentVal 不在 targetDbMap 时插占位 option 标"当前/不可用"
+                    let opts = Object.entries(targetDbMap)
+                        .map(([id, name]) => `<option value="${id}">${escapeHtml(name)}</option>`)
+                        .join('');
+                    if (currentVal != null && !(String(currentVal) in targetDbMap)) {
+                        opts = `<option value="${currentVal}" disabled>#${currentVal}（当前/不可用）</option>` + opts;
+                    }
+                    inputHtml = `<select id="f_admin_fix_${field}" data-field="${field}" data-current="${currentVal != null ? currentVal : ''}"><option value="">不修改</option>${opts}</select>`;
+                } else if (meta.type === 'user_select') {
+                    let opts = (activeUsers || [])
+                        .map(u => optionLabelForUser(u))
+                        .join('');
+                    // codex 26 审 #2：activeUsers 中缺当前用户时插占位 option（如 admin 改了 user 状态）
+                    const hasCurrent = (activeUsers || []).some(u => String(u.id) === String(currentVal));
+                    if (currentVal != null && currentVal !== 0 && !hasCurrent) {
+                        opts = `<option value="${currentVal}" disabled>#${currentVal}（当前/已停用）</option>` + opts;
+                    }
+                    inputHtml = `<select id="f_admin_fix_${field}" data-field="${field}" data-current="${currentVal != null ? currentVal : ''}"><option value="">不修改</option>${opts}</select>`;
+                }
+                return `
+                    <div class="form-row">
+                        <label>${escapeHtml(meta.label)} <span class="hint">（当前：${escapeHtml(String(currentVal != null ? currentVal : '—'))}）</span></label>
+                        ${inputHtml}
+                    </div>`;
+            }).join('');
+            container.innerHTML = html;
+
+            // codex 26 审 #2 #5：innerHTML 后遍历 db_select / user_select 字段实际设 el.value 为当前值
+            // 让 admin 打开弹窗就看到"当前选中"状态而非"不修改"占位（submitAdminFix 仍按"与 currentDetail 相同则跳过"判断"不修改"语义）
+            container.querySelectorAll('select[data-current]').forEach(el => {
+                const cur = el.getAttribute('data-current');
+                if (cur && cur !== '') el.value = String(cur);
+            });
+
+            document.getElementById('f_admin_fix_reason').value = '';
+            document.getElementById('f_admin_fix_clear_sql_error').checked = true;
+
+            const btn = document.getElementById('btnAdminFix');
+            btn.disabled = false;
+            btn.textContent = '确认修正';
+            document.getElementById('adminFixModal').classList.add('show');
+        }
+
+        function closeAdminFixModal() {
+            document.getElementById('adminFixModal').classList.remove('show');
+            _adminFixCollabId = null;
+            _adminFixAllowedFields = [];
+        }
+
+        async function submitAdminFix() {
+            const id = _adminFixCollabId;
+            if (!id) { showToast('协作单 id 丢失', 'error'); return; }
+
+            // 收集 changes：只取用户实际输入的字段（非空 + 与当前值不同）
+            const d = currentDetail;
+            const changes = {};
+            for (const field of _adminFixAllowedFields) {
+                const el = document.getElementById(`f_admin_fix_${field}`);
+                if (!el) continue;
+                const raw = el.value;
+                if (raw === '' || raw == null) continue;  // 未输入跳过
+                const meta = ADMIN_FIX_FIELD_META[field];
+                let newVal;
+                if (meta.type === 'db_select' || meta.type === 'user_select') {
+                    newVal = parseInt(raw, 10);
+                    if (!Number.isInteger(newVal) || newVal <= 0) continue;
+                    if (newVal === Number(d[field])) continue;  // 与当前值相同跳过
+                } else {
+                    newVal = String(raw).trim();
+                    if (!newVal) continue;
+                    if (newVal === String(d[field] || '').trim()) continue;
+                }
+                changes[field] = newVal;
+            }
+
+            if (Object.keys(changes).length === 0) {
+                showToast('未填写任何修改字段（或与当前值相同）', 'error');
+                return;
+            }
+
+            const reason = document.getElementById('f_admin_fix_reason').value.trim();
+            if (reason.length < 10) {
+                showToast('修正原因至少 10 个字符', 'error');
+                return;
+            }
+            if (reason.length > 500) {
+                showToast('修正原因不能超过 500 个字符', 'error');
+                return;
+            }
+
+            const clearSqlError = document.getElementById('f_admin_fix_clear_sql_error').checked;
+
+            if (!confirm(`确认修正协作单 #${id} ${Object.keys(changes).length} 个字段?\n\n${Object.entries(changes).map(([f, v]) => `  ${f}: ${v}`).join('\n')}\n\n${clearSqlError ? '✓ 同时清空 SQL 验收错误' : '✗ 不清空 SQL 验收错误'}`)) {
+                return;
+            }
+
+            const btn = document.getElementById('btnAdminFix');
+            btn.disabled = true;
+            btn.textContent = '提交中…';
+            try {
+                const res = await authFetch(`/api/collab/requests/${id}/admin-fix`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ changes, reason, clear_sql_validation_error: clearSqlError }),
+                });
+                if (!res) return;
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) {
+                    showToast(data.error + (data.detail ? ` (${Array.isArray(data.detail) ? data.detail.join('; ') : data.detail})` : ''), 'error');
+                    btn.disabled = false;
+                    btn.textContent = '确认修正';
+                    return;
+                }
+                showToast(`✅ 修正成功（${data.changed_fields.length} 字段${data.cleared_sql_validation ? ' + 已清空 SQL 验收状态' : ''}）`, 'success');
+                closeAdminFixModal();
+                await openDetail(id);
+                if (typeof loadList === 'function') loadList();
+            } catch (e) {
+                showToast('网络错误', 'error');
+                btn.disabled = false;
+                btn.textContent = '确认修正';
             }
         }
 

@@ -12047,6 +12047,301 @@ app.post('/api/collab/requests/:id/bypass', authenticateToken, requireAdmin, asy
     }
 });
 
+// =============================================================================
+// 4b'. admin-fix endpoint（v1.70.0 Step 3，方案 §3-A）
+// =============================================================================
+//
+// 触发场景：v2.0 上线后业务 5/21 OA-364265 暴露的"admin 创建协作单时录错目标库
+// → 开发上传 SQL 被 smoke test 拦 → admin 无兜底通道改字段让开发重传"
+//
+// 设计要点（quality_first A1-A7 grep 真相事实）：
+//   - requireAdmin（不是 requireRole(['admin'])，项目实际中间件）
+//   - users WHERE status = 'active'（不抽 isActiveUserWhere helper，server.js 0 处 is_active 用法）
+//   - v1.70.0 范围剥离 v1.71.0：不含 exporter_id 字段 + EXPORTING 状态（5/22 拍板 γ 砍掉 v1.71.0 推后）
+//   - FIELD_STATUS_MATRIX 在 admin-fix + GET allowed-fields 两 endpoint 内分别定义（不抽顶层常量，符合方案 v1.2 + 不引入跨函数依赖）
+//
+// 字段级状态准入矩阵（v1.70.0 范围）：
+//   target_db_connection_id / description / oa_request_no / contact_person_id：PENDING_ASSIGN / PENDING / SUBMITTED 可改
+//   developer_id：PENDING / SUBMITTED 可改（PENDING_ASSIGN 还没指派开发，改 developer 走 assign endpoint）
+//
+// 终态保护：DONE / ARCHIVED / archived_at NOT NULL 全部拒
+//
+// 业务校验：
+//   - oa_request_no 唯一性（排除自身）
+//   - target_db_connection_id 在 db_connections 表中 connection_type='source' + type IN sqlserver/mysql
+//   - 人员字段 ID > 0 + users 表 status='active'
+//
+// 审计：insertCollabLog operation_type='ADMIN_FIX' + reason=JSON(changes / old / reason / cleared_sql_error)
+app.post('/api/collab/requests/:id/admin-fix', authenticateToken, requireAdmin, async (req, res) => {
+    const idStr = req.params.id;
+    const userId = req.user.id;
+    const userName = req.user.username || req.user.display_name || `user#${userId}`;
+
+    // === 前置校验：id 严格正则 + Number.isSafeInteger（沿用 bypass endpoint 风格）===
+    if (!/^[1-9]\d*$/.test(idStr)) {
+        return res.status(400).json({ error: 'id 必须是正整数', code: 'INVALID_ID' });
+    }
+    const id = parseInt(idStr, 10);
+    if (!Number.isSafeInteger(id)) {
+        return res.status(400).json({ error: 'id 超出安全整数范围', code: 'INVALID_ID' });
+    }
+
+    // === 入参解析 ===
+    const { changes = {}, reason: rawReason, clear_sql_validation_error: clearFlagRaw } = (req.body || {});
+
+    // codex 26 审 #4：reason 必填 + 类型早校验（防止无 reason 写操作），但长度校验推后到业务校验前
+    // 这样字段白名单 / 终态保护 / 状态准入等关键错误优先暴露，不被 REASON_TOO_SHORT 遮蔽
+    if (typeof rawReason !== 'string') {
+        return res.status(400).json({ error: '修正原因必填且必须是字符串', code: 'REASON_REQUIRED' });
+    }
+    const reason = rawReason.trim();
+
+    // codex 26 审 #7：clear_sql_validation_error 入参类型校验
+    // 只接受 undefined / boolean；其他类型如 'false' 字符串、数字会被拒
+    if (clearFlagRaw !== undefined && typeof clearFlagRaw !== 'boolean') {
+        return res.status(400).json({
+            error: 'clear_sql_validation_error 必须是布尔值（true/false）或省略',
+            code: 'FIELD_VALIDATION_FAILED',
+        });
+    }
+    const clear_sql_validation_error = clearFlagRaw !== false; // undefined / true → true；显式 false → false
+
+    if (!changes || typeof changes !== 'object' || Object.keys(changes).length === 0) {
+        return res.status(400).json({ error: '必须指定至少一个要修改的字段', code: 'NO_CHANGES' });
+    }
+
+    // === 字段约束（codex 二审 #7：人员字段 min:1，不允许 0）===
+    const FIELD_CONSTRAINTS = {
+        'target_db_connection_id': { type: 'integer', min: 1 },
+        'description': { type: 'string', maxLength: 2000, trim: true },
+        'oa_request_no': { type: 'string', maxLength: 100, trim: true, pattern: /^[A-Za-z0-9-]+$/ },
+        'contact_person_id': { type: 'integer', min: 1 },
+        'developer_id': { type: 'integer', min: 1 },
+    };
+    function validateField(field, value, constraint) {
+        if (constraint.type === 'integer') {
+            if (!Number.isInteger(value)) return `字段 ${field} 必须是整数`;
+            if (constraint.min !== undefined && value < constraint.min) {
+                return `字段 ${field} 不能小于 ${constraint.min}（人员字段不可清空）`;
+            }
+        }
+        if (constraint.type === 'string') {
+            if (typeof value !== 'string') return `字段 ${field} 必须是字符串`;
+            const v = constraint.trim ? value.trim() : value;
+            if (constraint.minLength !== undefined && v.length < constraint.minLength) {
+                return `字段 ${field} 长度不能少于 ${constraint.minLength}`;
+            }
+            if (constraint.maxLength !== undefined && v.length > constraint.maxLength) {
+                return `字段 ${field} 长度不能超过 ${constraint.maxLength}`;
+            }
+            if (constraint.pattern && !constraint.pattern.test(v)) {
+                return `字段 ${field} 格式不符合要求`;
+            }
+        }
+        return null;
+    }
+
+    // === 字段值类型校验 ===
+    const validationErrors = [];
+    for (const [field, newVal] of Object.entries(changes)) {
+        const constraint = FIELD_CONSTRAINTS[field];
+        if (constraint) {
+            const err = validateField(field, newVal, constraint);
+            if (err) validationErrors.push(err);
+        }
+    }
+    if (validationErrors.length > 0) {
+        return res.status(400).json({
+            error: '字段校验失败',
+            detail: validationErrors,
+            code: 'FIELD_VALIDATION_FAILED',
+        });
+    }
+
+    // === 白名单字段校验（拒绝未声明字段，防止改 status / submission_version 等）===
+    const ALLOWED_FIELDS = Object.keys(FIELD_CONSTRAINTS);
+    const invalidFields = Object.keys(changes).filter(f => !ALLOWED_FIELDS.includes(f));
+    if (invalidFields.length > 0) {
+        return res.status(400).json({
+            error: `字段不可改：${invalidFields.join(', ')}`,
+            code: 'FIELD_NOT_ALLOWED',
+            allowed_fields: ALLOWED_FIELDS,
+        });
+    }
+
+    try {
+        // === 查协作单 ===
+        const collab = await dbGetAsync(`SELECT * FROM collab_requests WHERE id = ?`, [id]);
+        if (!collab) {
+            return res.status(404).json({ error: '协作单不存在' });
+        }
+
+        // === 终态保护（v1.70.0 Step 1 helper 复用）===
+        if (collab.status === 'DONE') {
+            return res.status(409).json({ error: 'DONE 状态不允许 admin-fix（终态保护）', code: 'TERMINAL_STATE_PROTECTED' });
+        }
+        if (collabSubmitHelpers.isFinalArchived(collab)) {
+            return res.status(409).json({ error: '已归档协作单严格不允许修改', code: 'ARCHIVED_PROTECTED' });
+        }
+        if (collabSubmitHelpers.isSoftArchived(collab)) {
+            return res.status(409).json({ error: '已作废协作单不允许修改', code: 'SOFT_ARCHIVED_PROTECTED' });
+        }
+
+        // === 字段级状态准入矩阵（v1.70.0 范围 — 不含 v1.71.0 的 exporter_id / EXPORTING）===
+        const FIELD_STATUS_MATRIX = {
+            'target_db_connection_id': ['PENDING_ASSIGN', 'PENDING', 'SUBMITTED'],
+            'description':             ['PENDING_ASSIGN', 'PENDING', 'SUBMITTED'],
+            'oa_request_no':           ['PENDING_ASSIGN', 'PENDING', 'SUBMITTED'],
+            'contact_person_id':       ['PENDING_ASSIGN', 'PENDING', 'SUBMITTED'],
+            'developer_id':            ['PENDING', 'SUBMITTED'],
+        };
+        for (const field of Object.keys(changes)) {
+            const allowedStatuses = FIELD_STATUS_MATRIX[field];
+            if (!allowedStatuses.includes(collab.status)) {
+                return res.status(409).json({
+                    error: `字段 ${field} 在状态 ${collab.status} 下不可改（仅 ${allowedStatuses.join('/')} 可改）`,
+                    code: 'FIELD_STATUS_NOT_ALLOWED',
+                    field,
+                    current_status: collab.status,
+                    allowed_statuses: allowedStatuses,
+                });
+            }
+        }
+
+        // codex 26 审 #4：reason 长度校验推到这里（字段白名单 / 终态保护 / 状态准入之后，业务校验之前）
+        // 让 admin 救火时优先看到"这个字段/状态不能改"的关键错误，不被 reason 长度问题遮蔽
+        if (reason.length < 10) {
+            return res.status(400).json({ error: '修正原因必须不少于 10 个字符', code: 'REASON_TOO_SHORT' });
+        }
+        if (reason.length > 500) {
+            return res.status(400).json({ error: '修正原因不能超过 500 个字符', code: 'REASON_TOO_LONG' });
+        }
+
+        // === 业务层校验（oa_request_no 唯一性 / target_db 存在 / 人员存在且 active）===
+        // codex 26 审 #6：userLookup 缓存人员字段查询结果，避免拼 UPDATE 时二次查 users
+        const businessErrors = [];
+        const oldValues = {};
+        const newValues = {};
+        const userLookup = {}; // field → { id, display_name }
+        for (const [field, newVal] of Object.entries(changes)) {
+            oldValues[field] = collab[field];
+            newValues[field] = newVal;
+
+            if (field === 'oa_request_no') {
+                const exists = await dbGetAsync(
+                    `SELECT id FROM collab_requests WHERE oa_request_no = ? AND id <> ?`,
+                    [newVal, id]
+                );
+                if (exists) businessErrors.push(`OA 号 ${newVal} 已存在（协作单 #${exists.id}）`);
+            }
+            if (field === 'target_db_connection_id') {
+                const conn = await dbGetAsync(
+                    `SELECT id, type FROM db_connections WHERE id = ? AND connection_type='source' AND type IN ('sqlserver','mysql')`,
+                    [newVal]
+                );
+                if (!conn) businessErrors.push(`目标库 ID ${newVal} 不存在或不可用`);
+            }
+            if (field === 'contact_person_id' || field === 'developer_id') {
+                const user = await dbGetAsync(
+                    `SELECT id, display_name FROM users WHERE id = ? AND status = 'active'`,
+                    [newVal]
+                );
+                if (!user) businessErrors.push(`用户 ID ${newVal} 不存在或已停用（字段 ${field}）`);
+                else userLookup[field] = user;
+            }
+        }
+        if (businessErrors.length > 0) {
+            return res.status(400).json({
+                error: '字段业务校验失败',
+                detail: businessErrors,
+                code: 'BUSINESS_VALIDATION_FAILED',
+            });
+        }
+
+        // === 拼接 UPDATE 语句（联动 *_name 字段同步刷新，codex 26 审 #6 复用 userLookup）===
+        const setClauses = [];
+        const setParams = [];
+        for (const [field, newVal] of Object.entries(changes)) {
+            setClauses.push(`${field} = ?`);
+            setParams.push(newVal);
+
+            if (field === 'contact_person_id') {
+                setClauses.push(`contact_person_name = ?`);
+                setParams.push(userLookup[field] ? userLookup[field].display_name : null);
+            }
+            if (field === 'developer_id') {
+                setClauses.push(`developer_name = ?`);
+                setParams.push(userLookup[field] ? userLookup[field].display_name : null);
+            }
+        }
+
+        // codex 26 审 #1：清空 sql_validation_error / sql_validation_status（基于两个字段任一存在）
+        // 旧逻辑只看 sql_validation_error → 若历史数据 sql_validation_status='failed' 但 error 为空（或只需清状态的场景），
+        // admin-fix 返成功但 status 仍卡 → 开发不能重传
+        const clearedSqlValidation = clear_sql_validation_error
+            && (collab.sql_validation_error != null || collab.sql_validation_status != null);
+        if (clearedSqlValidation) {
+            setClauses.push(`sql_validation_error = NULL`);
+            setClauses.push(`sql_validation_status = NULL`);
+        }
+
+        // codex 26 审 #3：UPDATE WHERE 加状态守卫，防 SELECT 后协作单被改成 DONE / ARCHIVED 的并发竞态
+        // 复用 v1.69.0 钉钉建群 endpoint 已建立的"条件 UPDATE + result.changes 检查"模式
+        setParams.push(id, collab.status);
+        const result = await dbRunAsync(
+            `UPDATE collab_requests SET ${setClauses.join(', ')}
+              WHERE id = ?
+                AND status = ?
+                AND archived_at IS NULL
+                AND archived_final_at IS NULL`,
+            setParams
+        );
+        if (!result || result.changes === 0) {
+            return res.status(409).json({ error: '协作单状态已变化或不存在，请刷新后重试', code: 'STATE_CHANGED' });
+        }
+
+        // === 审计日志（reason 字段存 JSON 含 changes / old / reason / cleared_sql_validation）===
+        insertCollabLog(id, 'ADMIN_FIX', userId, userName, JSON.stringify({
+            changes: newValues,
+            old_values: oldValues,
+            reason,
+            cleared_sql_validation: clearedSqlValidation,
+        }));
+
+        const updated = await dbGetAsync(`SELECT * FROM collab_requests WHERE id = ?`, [id]);
+        return res.json({
+            success: true,
+            message: 'admin-fix 修正成功',
+            collab: updated,
+            changed_fields: Object.keys(changes),
+            cleared_sql_validation: clearedSqlValidation,
+        });
+    } catch (e) {
+        logger.error(`[collab-admin-fix] 协作单 #${id} admin-fix 异常: ${e.message}`, e);
+        return res.status(500).json({ error: 'admin-fix 失败，请联系管理员', code: 'ADMIN_FIX_FAILED' });
+    }
+});
+
+// =============================================================================
+// 4b''. GET admin-fix/allowed-fields（v1.70.0 Step 3，给前端查"当前状态可改字段"）
+// =============================================================================
+// 前端 adminFixModal 渲染时按 status 查询，灰显不可改字段
+app.get('/api/collab/admin-fix/allowed-fields', authenticateToken, requireAdmin, (req, res) => {
+    const status = String(req.query.status || '');
+    // 与 admin-fix endpoint 内 FIELD_STATUS_MATRIX 完全一致（v1.70.0 范围）
+    const FIELD_STATUS_MATRIX = {
+        'target_db_connection_id': ['PENDING_ASSIGN', 'PENDING', 'SUBMITTED'],
+        'description':             ['PENDING_ASSIGN', 'PENDING', 'SUBMITTED'],
+        'oa_request_no':           ['PENDING_ASSIGN', 'PENDING', 'SUBMITTED'],
+        'contact_person_id':       ['PENDING_ASSIGN', 'PENDING', 'SUBMITTED'],
+        'developer_id':            ['PENDING', 'SUBMITTED'],
+    };
+    const allowedFields = Object.entries(FIELD_STATUS_MATRIX)
+        .filter(([_, statuses]) => statuses.includes(status))
+        .map(([field, _]) => field);
+    return res.json({ status, allowed_fields: allowedFields });
+});
+
 // 4c. 协作摩擦归因记录（admin，方案 §6.6 + D3 模块 7）
 //   - 状态守卫：仅 DONE 状态可记录
 //   - friction_cause_category 三枚举之一；friction_note 必填 trim 后非空 ≤ 1000 字符

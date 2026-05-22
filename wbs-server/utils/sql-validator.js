@@ -172,6 +172,73 @@ const DANGEROUS_MYSQL_KEYWORDS = new Set([
  * 应用层 ALLOWED_DATABASE='newhrd'，任何其他库的引用都被层 2 拒绝。
  */
 
+/**
+ * v1.70.0 Step 2（方案 §1.4）：临时表静态拦截
+ *
+ * 动机：D3 smoke test 真跑业务库时只验证"SQL 能不能跑通"，不能创建临时表持久化数据。
+ *   - SQL Server：#tmp 是会话级临时表（tempdb），##tmp 是全局临时表 — 都会占 tempdb 资源
+ *   - MySQL：CREATE TEMPORARY TABLE 是会话级，连接断开自动 drop，但 smoke test 复用业务库连接池
+ *     可能引入持久副作用
+ *
+ * 设计：layer 0 词法层之后、layer 1 parser 之前做正则拦截（layer 0.5）
+ *   - 比 layer 1 parser 更快失败（无需建 AST）
+ *   - 比 layer 0 词法状态机简单（不需要区分字符串/注释，正则误判风险极低 — # 符号只在临时表名出现）
+ *   - SQL Server #/## 是非标准 token，node-sql-parser 的 transactsql 方言可能直接 parse 失败
+ *     提前拦截让用户看到清晰错误"smoke test 不支持临时表"而非"SQL parse 错误"
+ *
+ * 取舍（不静态拦截 CREATE TEMPORARY TABLE 的子句变体）：
+ *   - MySQL CREATE TEMPORARY 走 layer 0 首 token 白名单已被拒（SELECT/WITH only）
+ *   - 但 MySQL 允许嵌入 ... INTO ... 不带 TEMPORARY 但仍创建表的场景几乎不存在；
+ *     仅本 helper 兜底 `TEMPORARY TABLE` 关键字两边有空白的情况
+ */
+// codex 25 审 #1：补 SQL Server 方括号 quoted identifier 形式 [#tmp] / [##tmp]
+// 每个关键字后允许两种形式：裸名 #{1,2}\w+ 或方括号包裹 \[#{1,2}[^\]]+\]
+const SQLSERVER_TEMP_TABLE_PATTERNS = [
+    /\bINTO\s+(?:#{1,2}\w+|\[#{1,2}[^\]]+\])/i,    // SELECT ... INTO #tmp / [#tmp] / ##tmp / [##tmp]
+    /\bFROM\s+(?:#{1,2}\w+|\[#{1,2}[^\]]+\])/i,    // FROM #tmp / [#tmp]
+    /\bJOIN\s+(?:#{1,2}\w+|\[#{1,2}[^\]]+\])/i,    // JOIN #tmp / [#tmp]
+    /\bUPDATE\s+(?:#{1,2}\w+|\[#{1,2}[^\]]+\])/i,  // UPDATE #tmp / [#tmp]
+];
+const MYSQL_TEMP_TABLE_PATTERN = /\bTEMPORARY\s+TABLE\b/i;
+
+/**
+ * 检查 SQL 是否含临时表引用。
+ *
+ * @param {string} sql 原始 SQL（layer 0 通过后传入，仍保留注释/字符串原文）
+ * @param {string} dialect 'sqlserver' / 'mysql'
+ * @returns {{ ok: true } | { ok: false, reason: string, code: 'TEMP_TABLE_NOT_ALLOWED' }}
+ *
+ * ⚠️ 已知误判风险（codex 25 审 #2，知情接受）：
+ *   - 字符串内含 `FROM #tmp` / `INTO #tmp` 等会被误拒（如 `SELECT 'FROM #tmp' AS msg FROM t`）
+ *   - 行注释 / 块注释内含同样模式也会误拒
+ *   - 真要修：复用 layer 0 tokenize 结果重建去字符串/注释的扫描串（≥1h，影响所有 layer 0 行为）
+ *   - 当前取舍：保持正则简单 + 用户能立刻从错误消息定位到改 SQL（删引号 5 秒能过），
+ *     4-5 用户内网场景误判概率极低，留待未来需要时升级
+ *   - 测试用例 NEG-1/2/3 显式留痕这些误判（已知接受的限制）
+ */
+function checkTempTable(sql, dialect) {
+    if (dialect === 'sqlserver') {
+        for (const pattern of SQLSERVER_TEMP_TABLE_PATTERNS) {
+            if (pattern.test(sql)) {
+                return {
+                    ok: false,
+                    reason: 'smoke test 不支持临时表（#tmp / ##tmp），请改用 CTE 或子查询',
+                    code: 'TEMP_TABLE_NOT_ALLOWED',
+                };
+            }
+        }
+    } else if (dialect === 'mysql') {
+        if (MYSQL_TEMP_TABLE_PATTERN.test(sql)) {
+            return {
+                ok: false,
+                reason: 'smoke test 不支持 TEMPORARY TABLE，请改用 CTE 或子查询',
+                code: 'TEMP_TABLE_NOT_ALLOWED',
+            };
+        }
+    }
+    return { ok: true };
+}
+
 // ============================================================================
 // 主入口
 // ============================================================================
@@ -188,10 +255,11 @@ const DANGEROUS_MYSQL_KEYWORDS = new Set([
  * @param {object} [options] 路由参数（向后兼容，可省略）
  * @param {string} [options.dialect='sqlserver'] 方言：'sqlserver' / 'mysql'
  * @param {string} [options.allowedDb] 业务库白名单；省略时按 dialect 默认（sqlserver=business_db）
- * @returns {{ ok: true, smokeSql: string } | { ok: false, layer: number, reason: string, detail?: string }}
+ * @returns {{ ok: true, smokeSql: string } | { ok: false, layer: number, reason: string, detail?: string, code?: string }}
  *
  * 成功：ok=true，smokeSql 是注入 TOP/LIMIT 100 后的待执行 SQL
  * 失败：ok=false，layer 标记被哪一层拒绝，reason 是给用户看的简短描述
+ *       code 字段用于区分同 layer 内的不同拒绝来源（如临时表拦截走 layer 0 但带 code='TEMP_TABLE_NOT_ALLOWED'）
  */
 function validateAndTransform(originalSql, options) {
     if (typeof originalSql !== 'string' || originalSql.trim().length === 0) {
@@ -211,6 +279,12 @@ function validateAndTransform(originalSql, options) {
     // 层 0：词法状态机（按 dialect 选不同的危险关键字集 + 反引号标识符支持）
     const layer0 = layer0_lexerScan(originalSql, dialect);
     if (!layer0.ok) return { ok: false, layer: 0, ...layer0 };
+
+    // 层 0.5：临时表静态拦截（v1.70.0 Step 2 方案 §1.4）
+    //   - 比 layer 1 parser 更快失败，错误消息更友好（"smoke test 不支持临时表"而非"SQL parse 错误"）
+    //   - 复用 layer 0 的拒绝码（layer: 0），调用方按 layer 0 错误处理即可
+    const tempTableCheck = checkTempTable(originalSql, dialect);
+    if (!tempTableCheck.ok) return { ok: false, layer: 0, ...tempTableCheck };
 
     // 层 1：parser 解析（按 dialect 选 transactsql / mysql）
     const layer1 = layer1_parse(originalSql, dialect);
@@ -793,5 +867,9 @@ module.exports = {
         DANGEROUS_KEYWORDS,
         DANGEROUS_SP_PROCS,
         DANGEROUS_MYSQL_KEYWORDS,
+        // v1.70.0 Step 2 临时表静态拦截
+        checkTempTable,
+        SQLSERVER_TEMP_TABLE_PATTERNS,
+        MYSQL_TEMP_TABLE_PATTERN,
     },
 };

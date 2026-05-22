@@ -1,0 +1,321 @@
+/**
+ * admin-fix endpoint e2e（v1.70.0 Step 3，方案 §3-A）
+ *
+ * 用法：node scripts/test-collab-admin-fix-e2e.js
+ * 前置：本地 server 已启动（localhost:3000）
+ *
+ * 8 个用例：
+ *   T1 admin 改 target_db_connection_id + reason → 200 + 字段变更 + sql_validation_error 清空
+ *   T2 dev1（非 admin）调 admin-fix → 403
+ *   T3 reason 太短 (< 10) → 400 REASON_TOO_SHORT
+ *   T4 developer_id=0 → 400 FIELD_VALIDATION_FAILED（codex 二审 #7）
+ *   T5 DONE 状态调 admin-fix → 409 TERMINAL_STATE_PROTECTED
+ *   T6 改非白名单字段（status / submission_version）→ 400 FIELD_NOT_ALLOWED
+ *   T7 PENDING_ASSIGN 改 developer_id → 409 FIELD_STATUS_NOT_ALLOWED
+ *   T8 GET allowed-fields?status=SUBMITTED → 返 5 字段；?status=PENDING_ASSIGN → 返 4 字段（无 developer_id）
+ *
+ * 每个测试独立 fixture，避免状态串扰
+ */
+
+'use strict';
+
+const fx = require('./_test-fixture');
+
+const createdFixtureIds = [];
+
+async function adminFix(token, id, body) {
+    return fx.apiCall('POST', `/api/collab/requests/${id}/admin-fix`, token, body);
+}
+
+async function getAllowedFields(token, status) {
+    return fx.apiCall('GET', `/api/collab/admin-fix/allowed-fields?status=${encodeURIComponent(status)}`, token);
+}
+
+const tests = [];
+
+function test(name, fn) {
+    tests.push({ name, fn });
+}
+
+// ============================================================================
+// T1 admin 改 description + reason → 200 + 字段变更 + sql_error 清空
+//    模拟 5/21 OA-364265 场景（SUBMITTED + failed），但改 description 而非 target_db
+//    （生产环境 source 库通常只配 1 个 BMS，无法测改到另一个 id；改字段类型测试在 T1）
+// ============================================================================
+test('T1 admin 改 description → 200 + 字段变更 + sql_validation 清空', async () => {
+    const ctx = await fx.createPendingFixture();
+    createdFixtureIds.push(ctx.id);
+
+    // 推到 SUBMITTED + failed（模拟 5/21 OA-364265 场景）
+    await fx.setCollabState(ctx.id, {
+        status: 'SUBMITTED',
+        sql_validation_status: 'failed',
+        sql_validation_error: '业务库连接失败：目标库不存在',
+        submitted_at: '2026-05-22 14:00:00',
+        submission_version: 1,
+    });
+
+    // admin-fix 改 description（业务字段不依赖 source 库存在）
+    const newDesc = '管理员修正后的描述（含新业务范围说明）';
+    const r = await adminFix(ctx.adminToken, ctx.id, {
+        changes: { description: newDesc },
+        reason: '业务方追加了新的描述细节，请开发按新描述重传',
+    });
+    if (r.status !== 200) throw new Error(`HTTP ${r.status}: ${JSON.stringify(r.body)}`);
+    if (!r.body.success) throw new Error(`success != true`);
+    if (r.body.collab.description !== newDesc) throw new Error(`description 未变更：${r.body.collab.description}`);
+    if (r.body.collab.sql_validation_error !== null) throw new Error(`sql_validation_error 未清空：${r.body.collab.sql_validation_error}`);
+    if (r.body.collab.sql_validation_status !== null) throw new Error(`sql_validation_status 未清空：${r.body.collab.sql_validation_status}`);
+    if (!r.body.cleared_sql_validation) throw new Error(`cleared_sql_validation != true（codex 26 审 #1 字段重命名）`);
+});
+
+// ============================================================================
+// T1b admin 改 target_db_connection_id 到不存在的 ID → 400 BUSINESS_VALIDATION_FAILED
+//      生产环境通常只有 1-2 个 source 库，无法 happy-path 测真改值，
+//      改用 business 校验失败路径覆盖 target_db 字段的实际通路
+// ============================================================================
+test('T1b admin 改 target_db_connection_id 到 9999（不存在）→ 400 BUSINESS_VALIDATION_FAILED', async () => {
+    const ctx = await fx.createPendingFixture();
+    createdFixtureIds.push(ctx.id);
+
+    const r = await adminFix(ctx.adminToken, ctx.id, {
+        changes: { target_db_connection_id: 9999 },
+        reason: '测试业务校验：不存在的目标库 ID 应被拒',
+    });
+    if (r.status !== 400) throw new Error(`期望 400 实际 ${r.status}: ${JSON.stringify(r.body)}`);
+    if (r.body.code !== 'BUSINESS_VALIDATION_FAILED') throw new Error(`期望 code=BUSINESS_VALIDATION_FAILED 实际 ${r.body.code}`);
+    if (!Array.isArray(r.body.detail) || !r.body.detail.some(m => /9999/.test(m))) {
+        throw new Error(`detail 应含 9999，实际：${JSON.stringify(r.body.detail)}`);
+    }
+});
+
+// ============================================================================
+// T2 dev1（非 admin）调 → 403
+// ============================================================================
+test('T2 dev1（非 admin）调 admin-fix → 403', async () => {
+    const ctx = await fx.createPendingFixture();
+    createdFixtureIds.push(ctx.id);
+
+    const r = await adminFix(ctx.dev1Token, ctx.id, {
+        changes: { description: 'try to hack' },
+        reason: '测试非 admin 权限拦截',
+    });
+    if (r.status !== 403) throw new Error(`期望 403 实际 ${r.status}: ${JSON.stringify(r.body)}`);
+});
+
+// ============================================================================
+// T3 reason 太短 → 400 REASON_TOO_SHORT
+// ============================================================================
+test('T3 reason 太短 (< 10) → 400 REASON_TOO_SHORT', async () => {
+    const ctx = await fx.createPendingFixture();
+    createdFixtureIds.push(ctx.id);
+
+    const r = await adminFix(ctx.adminToken, ctx.id, {
+        changes: { description: 'new desc' },
+        reason: '短',
+    });
+    if (r.status !== 400) throw new Error(`期望 400 实际 ${r.status}`);
+    if (r.body.code !== 'REASON_TOO_SHORT') throw new Error(`期望 code=REASON_TOO_SHORT 实际 ${r.body.code}`);
+});
+
+// ============================================================================
+// T4 developer_id=0 → 400 FIELD_VALIDATION_FAILED（codex 二审 #7 min:1）
+// ============================================================================
+test('T4 developer_id=0 → 400 FIELD_VALIDATION_FAILED（人员字段 min:1）', async () => {
+    const ctx = await fx.createPendingFixture();
+    createdFixtureIds.push(ctx.id);
+
+    // PENDING 状态可改 developer_id
+    const r = await adminFix(ctx.adminToken, ctx.id, {
+        changes: { developer_id: 0 },
+        reason: '测试人员字段 min:1 校验（不允许清空到 0）',
+    });
+    if (r.status !== 400) throw new Error(`期望 400 实际 ${r.status}`);
+    if (r.body.code !== 'FIELD_VALIDATION_FAILED') throw new Error(`期望 code=FIELD_VALIDATION_FAILED 实际 ${r.body.code}`);
+    if (!Array.isArray(r.body.detail) || !r.body.detail.some(m => /min|不能小于 1/.test(m))) {
+        throw new Error(`detail 应含 min/不能小于 1 提示，实际：${JSON.stringify(r.body.detail)}`);
+    }
+});
+
+// ============================================================================
+// T5 DONE 状态 → 409 TERMINAL_STATE_PROTECTED
+// ============================================================================
+test('T5 DONE 状态调 admin-fix → 409 TERMINAL_STATE_PROTECTED', async () => {
+    const ctx = await fx.createPendingFixture();
+    createdFixtureIds.push(ctx.id);
+
+    await fx.setCollabState(ctx.id, {
+        status: 'DONE',
+        sql_validation_status: 'passed',
+        done_at: '2026-05-22 14:00:00',
+    });
+
+    // codex 26 审 #4 修订验证：reason 长度推后到业务校验前，先暴露 TERMINAL_STATE_PROTECTED 而非 REASON_TOO_SHORT
+    // 故意用短 reason "测试终态" (4 字符 < 10) — 现在应先返 409 终态保护，证明改造生效
+    const r = await adminFix(ctx.adminToken, ctx.id, {
+        changes: { description: 'try modify after done' },
+        reason: '测试终态',
+    });
+    if (r.status !== 409) throw new Error(`期望 409 实际 ${r.status}: ${JSON.stringify(r.body)}`);
+    if (r.body.code !== 'TERMINAL_STATE_PROTECTED') throw new Error(`期望 code=TERMINAL_STATE_PROTECTED 实际 ${r.body.code}（reason 长度校验推后应优先暴露 TERMINAL）`);
+});
+
+// ============================================================================
+// T6 改非白名单字段（status）→ 400 FIELD_NOT_ALLOWED
+// ============================================================================
+test('T6 改非白名单字段 status → 400 FIELD_NOT_ALLOWED', async () => {
+    const ctx = await fx.createPendingFixture();
+    createdFixtureIds.push(ctx.id);
+
+    // codex 26 审 #4 修订验证：reason 长度推后到业务校验前，先暴露 FIELD_NOT_ALLOWED
+    // 故意用短 reason "测试白名单" (5 字符 < 10) — 现在应先返 400 FIELD_NOT_ALLOWED，证明改造生效
+    const r = await adminFix(ctx.adminToken, ctx.id, {
+        changes: { status: 'DONE', submission_version: 99 },
+        reason: '测试白名单',
+    });
+    if (r.status !== 400) throw new Error(`期望 400 实际 ${r.status}: ${JSON.stringify(r.body)}`);
+    if (r.body.code !== 'FIELD_NOT_ALLOWED') throw new Error(`期望 code=FIELD_NOT_ALLOWED 实际 ${r.body.code}（reason 长度校验推后应优先暴露 FIELD_NOT_ALLOWED）`);
+    if (!Array.isArray(r.body.allowed_fields) || !r.body.allowed_fields.includes('target_db_connection_id')) {
+        throw new Error(`allowed_fields 应含 target_db_connection_id，实际：${JSON.stringify(r.body.allowed_fields)}`);
+    }
+});
+
+// ============================================================================
+// T7 PENDING_ASSIGN 改 developer_id → 409 FIELD_STATUS_NOT_ALLOWED
+//    PENDING_ASSIGN 还没指派开发，改 developer 应走 assign endpoint 而非 admin-fix
+// ============================================================================
+test('T7 PENDING_ASSIGN 改 developer_id → 409 FIELD_STATUS_NOT_ALLOWED', async () => {
+    // 不用 createPendingFixture（它已 assign 到 PENDING）；手工造 PENDING_ASSIGN
+    const adminToken = await fx.signAs(fx.ADMIN_ID);
+    const oaNo = `OA_FX_PA_${Date.now()}`;
+    const createRes = await fx.apiCall('POST', '/api/collab/requests', adminToken, {
+        oa_request_no: oaNo,
+        requester_dept: '市场营销部',
+        requester_name: 'fixture_pa',
+        description: 'e2e fixture PA',
+        deadline: '2026-12-31 18:00:00',
+        contact_person_id: fx.CONTACT_ID,
+        target_db_connection_id: fx.TARGET_DB_CONN_ID,
+    });
+    if (createRes.status !== 200) throw new Error(`PA fixture 创建失败 ${createRes.status}`);
+    const id = createRes.body.id;
+    createdFixtureIds.push(id);
+
+    // 不 assign，保持 PENDING_ASSIGN 状态
+    const r = await adminFix(adminToken, id, {
+        changes: { developer_id: fx.DEV1_ID },
+        reason: '测试 PENDING_ASSIGN 状态下 developer_id 字段拦截',
+    });
+    if (r.status !== 409) throw new Error(`期望 409 实际 ${r.status}: ${JSON.stringify(r.body)}`);
+    if (r.body.code !== 'FIELD_STATUS_NOT_ALLOWED') throw new Error(`期望 code=FIELD_STATUS_NOT_ALLOWED 实际 ${r.body.code}`);
+    if (r.body.field !== 'developer_id') throw new Error(`期望 field=developer_id 实际 ${r.body.field}`);
+});
+
+// ============================================================================
+// T9 codex 26 审 #1 验证：sql_validation_status 单独残留（error 为空）admin-fix 也清空
+// ============================================================================
+test('T9 sql_validation_status=failed 但 sql_error 为空 → admin-fix 仍清空 status（codex 26 审 #1）', async () => {
+    const ctx = await fx.createPendingFixture();
+    createdFixtureIds.push(ctx.id);
+
+    // 模拟历史数据异常：status=failed 但 error 为空
+    await fx.setCollabState(ctx.id, {
+        status: 'SUBMITTED',
+        sql_validation_status: 'failed',
+        sql_validation_error: null,  // 关键：故意置空，模拟历史异常
+        submitted_at: '2026-05-22 14:00:00',
+        submission_version: 1,
+    });
+
+    const r = await adminFix(ctx.adminToken, ctx.id, {
+        changes: { description: '验证 #1 修订：status 单独残留场景也应被清空' },
+        reason: '测试 codex 26 审 #1 改造：sql_validation_status 单独残留时也应清空',
+    });
+    if (r.status !== 200) throw new Error(`HTTP ${r.status}: ${JSON.stringify(r.body)}`);
+    if (r.body.collab.sql_validation_status !== null) {
+        throw new Error(`期望 sql_validation_status=null 实际 ${r.body.collab.sql_validation_status}（codex 26 审 #1 改造未生效）`);
+    }
+    if (!r.body.cleared_sql_validation) {
+        throw new Error(`期望 cleared_sql_validation=true 实际 ${r.body.cleared_sql_validation}`);
+    }
+});
+
+// ============================================================================
+// T10 codex 26 审 #7 验证：clear_sql_validation_error 非布尔类型 → 400
+// ============================================================================
+test('T10 clear_sql_validation_error="false" 字符串 → 400 FIELD_VALIDATION_FAILED（codex 26 审 #7）', async () => {
+    const ctx = await fx.createPendingFixture();
+    createdFixtureIds.push(ctx.id);
+
+    const r = await adminFix(ctx.adminToken, ctx.id, {
+        changes: { description: '测试 clear_sql_validation_error 类型校验' },
+        reason: '测试 codex 26 审 #7：字符串 false 应被类型校验拒绝',
+        clear_sql_validation_error: 'false',  // 字符串而非布尔
+    });
+    if (r.status !== 400) throw new Error(`期望 400 实际 ${r.status}`);
+    if (r.body.code !== 'FIELD_VALIDATION_FAILED') throw new Error(`期望 code=FIELD_VALIDATION_FAILED 实际 ${r.body.code}`);
+});
+
+// ============================================================================
+// T8 GET allowed-fields 不同状态返不同字段集
+// ============================================================================
+test('T8 GET allowed-fields 按状态返字段集', async () => {
+    const adminToken = await fx.signAs(fx.ADMIN_ID);
+
+    const r1 = await getAllowedFields(adminToken, 'SUBMITTED');
+    if (r1.status !== 200) throw new Error(`SUBMITTED HTTP ${r1.status}`);
+    const submittedFields = r1.body.allowed_fields;
+    const expectedSubmitted = ['target_db_connection_id', 'description', 'oa_request_no', 'contact_person_id', 'developer_id'];
+    if (submittedFields.length !== 5) throw new Error(`SUBMITTED 期望 5 字段实际 ${submittedFields.length}`);
+    for (const f of expectedSubmitted) {
+        if (!submittedFields.includes(f)) throw new Error(`SUBMITTED 缺字段 ${f}`);
+    }
+
+    const r2 = await getAllowedFields(adminToken, 'PENDING_ASSIGN');
+    if (r2.status !== 200) throw new Error(`PENDING_ASSIGN HTTP ${r2.status}`);
+    const paFields = r2.body.allowed_fields;
+    if (paFields.length !== 4) throw new Error(`PENDING_ASSIGN 期望 4 字段实际 ${paFields.length}: ${JSON.stringify(paFields)}`);
+    if (paFields.includes('developer_id')) throw new Error(`PENDING_ASSIGN 不应含 developer_id`);
+
+    const r3 = await getAllowedFields(adminToken, 'DONE');
+    if (r3.status !== 200) throw new Error(`DONE HTTP ${r3.status}`);
+    if (r3.body.allowed_fields.length !== 0) throw new Error(`DONE 期望 0 字段实际 ${r3.body.allowed_fields.length}`);
+});
+
+// ============================================================================
+// 跑测
+// ============================================================================
+(async () => {
+    let passed = 0, failed = 0;
+    const failures = [];
+
+    for (const t of tests) {
+        try {
+            await t.fn();
+            console.log(`✅ ${t.name}`);
+            passed++;
+        } catch (e) {
+            console.log(`❌ ${t.name}: ${e.message}`);
+            failed++;
+            failures.push({ name: t.name, error: e.message });
+        }
+    }
+
+    console.log(`\n=== v1.70.0 Step 3 admin-fix e2e ===`);
+    console.log(`总数: ${tests.length}, 通过: ${passed}, 失败: ${failed}`);
+
+    // cleanup
+    let cleaned = 0;
+    for (const id of createdFixtureIds) {
+        try { await fx.cleanup(id); cleaned++; }
+        catch (e) { console.log(`⚠️ cleanup fail id=${id}: ${e.message}`); }
+    }
+    console.log(`✅ fixtures cleaned up: ${cleaned}/${createdFixtureIds.length}`);
+
+    if (failures.length > 0) {
+        console.log('\n失败详情:');
+        for (const f of failures) console.log(`  ❌ ${f.name}: ${f.error}`);
+        process.exit(1);
+    }
+    console.log('\n全部通过 ✅');
+})();
