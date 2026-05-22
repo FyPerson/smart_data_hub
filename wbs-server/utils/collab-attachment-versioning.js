@@ -38,6 +38,23 @@ const fs = require('fs');
 const path = require('path');
 
 // ---------------------------------------------------------------------------
+// §0 可版本化开发交付物 attachment_type 白名单（v1.70.2 codex 28 审 #4）
+// ---------------------------------------------------------------------------
+//
+// 设计动机：
+//   activateNewVersion §3.6 步骤 b UPDATE supersede 时只能针对"可版本化的开发交付物"，
+//   不能误超 admin 创建时上传的 example_xlsx（数据模板）/ screenshot（原始单据截图）—
+//   这两类业务上无"新旧版本"语义，提交版本切换时应保持 active 不动。
+//
+// ⭐ 维护约束（未来新增 attachment_type 时必读）：
+//   - 新增的 attachment_type 若属于"开发交付物 + 每次提交可替换"语义 → 必须扩展此白名单
+//   - 新增的 attachment_type 若属于"admin/对接人初始上传 + 业务无替换语义"（如 v1.71.0 三级转发
+//     的导出结果若 admin 也参与）→ 不应入此白名单，由"创建时上传"路径单独管理
+//   - failed 路径目前不 supersede 旧 active（v1.70.0 Step 1 设计），如未来 failed 改造同样需
+//     调用此白名单守卫，防止误伤 admin 附件
+const VERSIONED_DELIVERY_ATTACHMENT_TYPES = ['result_data', 'result_script'];
+
+// ---------------------------------------------------------------------------
 // §1 placeholderSmokeTest（codex C2：fail-closed，比 codex 建议更严）
 // ---------------------------------------------------------------------------
 
@@ -284,25 +301,37 @@ async function activateNewVersion(params) {
         }
 
         // b. UPDATE 旧 active 行 → superseded（C3 同步写 superseded_at）
+        // v1.70.2 修：WHERE 加 attachment_type 白名单限定（codex 28 审 #4 抽常量）
+        // 根因：原 SQL 只按 submission_version=oldVer 匹配，会误把 admin 同期上传的
+        //   example_xlsx（数据模板）和 screenshot（原始单据截图）一锅端置 superseded
+        //   →  详情页 filter status='active' 拉不到 → DONE 状态下"数据模板"/"原始单据截图"区块空显
+        // 修法：用 VERSIONED_DELIVERY_ATTACHMENT_TYPES 常量限定只 supersede 可版本化开发交付物
+        const typePlaceholders = VERSIONED_DELIVERY_ATTACHMENT_TYPES.map(() => '?').join(',');
         await dbAsync.runAsync(
             `UPDATE collab_attachments
                 SET status='superseded', superseded_at=datetime('now','localtime')
-              WHERE collab_request_id=? AND status='active' AND submission_version=?`,
-            [requestId, oldVer]
+              WHERE collab_request_id=?
+                AND status='active'
+                AND submission_version=?
+                AND attachment_type IN (${typePlaceholders})`,
+            [requestId, oldVer, ...VERSIONED_DELIVERY_ATTACHMENT_TYPES]
         );
 
         // c. UPDATE collab_requests（乐观锁 + 写 attachment_dir）
+        // v1.70.2 修：sql_validated_at 改用 datetime('now','localtime') 与项目其他时间字段统一（done_at/failed_at/created_at 都用本地时间）
+        // 原 validatedAt.toISOString() 写 ISO 8601 UTC 导致前端 fmtDate 截前 16 字符显示比北京时间早 8 小时（codex 27 审 #5 修正方向）
+        // 例：OA-364265 实际北京时间 15:45 通过 smoke，DB 存 ISO UTC 07:45Z，前端截显 "2026-05-22 07:45"
+        // 入参 validatedAt 仍保留接收但不写库（向后兼容签名；当前无外部调用方依赖此入参传入后被持久化）
         const upd = await dbAsync.runAsync(
             `UPDATE collab_requests
                 SET submission_version=?,
                     sql_validation_status='passed',
-                    sql_validated_at=?,
+                    sql_validated_at=datetime('now','localtime'),
                     status='DONE',
                     done_at=datetime('now','localtime'),
                     attachment_dir=?
               WHERE id=? AND submission_version=?`,
-            [newVer, validatedAt.toISOString ? validatedAt.toISOString() : String(validatedAt),
-             dirName, requestId, oldVer]
+            [newVer, dirName, requestId, oldVer]
         );
 
         // d. 乐观锁失败检测
@@ -353,6 +382,12 @@ async function cleanupMovedFiles(movedFiles, log) {
  *   - 同 (rid, attachment_type) 内 failed_attempt_seq 严格递增（BEGIN IMMEDIATE + UNIQUE 索引双重防御）
  *   - file_name 保留首次 rename 的相对路径（不动磁盘文件）
  *   - failed 行 superseded_at IS NULL（语义：failed 不是 active 也不是 superseded，是第三态）
+ *
+ * ⭐ 维护约束（v1.70.2 codex 28 审 #6）：
+ *   - 当前 failed 路径**只 INSERT 新 failed 行**，**不 supersede 旧 active**（与 activateNewVersion 不同）
+ *   - 因此不需要 VERSIONED_DELIVERY_ATTACHMENT_TYPES 守卫
+ *   - 若未来 failed 改造需要 supersede 旧版本（如"撞墙重提时清旧 failed"），必须用
+ *     VERSIONED_DELIVERY_ATTACHMENT_TYPES 白名单守卫防误伤 admin 附件
  *
  * @returns {Promise<Array<{id, attachment_type, failed_attempt_seq, file_name}>>}
  */
@@ -660,6 +695,8 @@ module.exports = {
     placeholderSmokeTest,
     activateNewVersion,
     scanOrphansAndDanglingPointers,
+    // v1.70.2 codex 28 审 #4：暴露常量供测试 + 历史修复脚本未来扩展引用
+    VERSIONED_DELIVERY_ATTACHMENT_TYPES,
     // 内部 helper 暴露便于测试
     _internal: {
         ensureInsideRoot,

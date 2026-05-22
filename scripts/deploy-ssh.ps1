@@ -32,7 +32,7 @@ Write-Host "=============================================" -ForegroundColor Cyan
 Write-Host ""
 
 # 1. Push to production remote
-Write-Host "[1/4] Push to production..." -ForegroundColor Yellow
+Write-Host "[1/6] Push to production..." -ForegroundColor Yellow
 $pushResult = git push production main 2>&1
 if ($LASTEXITCODE -ne 0) {
     if ($pushResult -match "Everything up-to-date") {
@@ -48,7 +48,7 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host ""
 
 # 2. Reset on server (force overwrite to avoid CRLF/merge issues)
-Write-Host "[2/4] Pull on server..." -ForegroundColor Yellow
+Write-Host "[2/6] Pull on server..." -ForegroundColor Yellow
 try {
     # 远程 cmd 用 && 短路串联（任一步失败则停）—— 这里的 && 是给远端 cmd.exe 解释的
     # 用单引号字符串：① 阻止本地 PowerShell 5.1 把 && 当 statement separator 解析
@@ -76,7 +76,7 @@ Write-Host ""
 # 误当 hashtable 起始而剥掉，导致 `if (-not ...) { ... }` 解析失败（2026-05-15 踩坑）
 # 注：与 5/14 "UTF-8 无 BOM → GBK 误解析中文" 踩坑同源但不同症——前者是文件编码层，
 # 这里是 shell argv 转义层；EncodedCommand 用 UTF-16LE + base64 同时解决两类问题
-Write-Host "[3/4] Backup task_pool.db on server..." -ForegroundColor Yellow
+Write-Host "[3/6] Backup task_pool.db on server..." -ForegroundColor Yellow
 try {
     $backupScript = @'
 $ts = Get-Date -Format yyyyMMdd_HHmmss
@@ -106,7 +106,7 @@ Write-Output ('BACKUP_OK::' + $dst)
 Write-Host ""
 
 # 4. Restart PM2
-Write-Host "[4/4] Restart service..." -ForegroundColor Yellow
+Write-Host "[4/6] Restart service..." -ForegroundColor Yellow
 try {
     # 同 [2/4]：单引号规避 PowerShell 5.1 双引号内 && 解析 bug
     $remoteCmd4 = 'cd /d E:\Task_Pool\wbs-server && pm2 restart task-pool'

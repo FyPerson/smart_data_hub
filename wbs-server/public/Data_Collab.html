@@ -176,6 +176,91 @@
             z-index: 1000;
         }
         .modal-overlay.show { display: flex; }
+
+        /* v1.70.2 图片放大 lightbox（共用） */
+        .img-lightbox {
+            display: none;
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0, 0, 0, 0.85);
+            z-index: 2000;
+            cursor: zoom-out;
+            justify-content: center;
+            align-items: center;
+            flex-direction: column;
+            padding: 24px;
+            box-sizing: border-box;
+        }
+        .img-lightbox.show { display: flex; }
+        .img-lightbox img {
+            max-width: 92vw;
+            max-height: 82vh;
+            object-fit: contain;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+            border-radius: 4px;
+            cursor: default;
+        }
+        .img-lightbox-close {
+            position: absolute;
+            top: 16px; right: 24px;
+            color: #fff;
+            font-size: 40px;
+            line-height: 1;
+            cursor: pointer;
+            user-select: none;
+            text-shadow: 0 2px 8px rgba(0, 0, 0, 0.6);
+        }
+        .img-lightbox-close:hover { color: #fca5a5; }
+        .img-lightbox-caption {
+            margin-top: 12px;
+            color: #e5e7eb;
+            font-size: 13px;
+            text-align: center;
+            max-width: 92vw;
+            word-break: break-all;
+        }
+        /* 可点击缩略图样式（用于详情页 + 录入弹窗预览） */
+        .clickable-thumbnail {
+            cursor: zoom-in;
+            transition: transform 0.15s ease, box-shadow 0.15s ease;
+        }
+        .clickable-thumbnail:hover {
+            transform: scale(1.03);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.18);
+        }
+        /* 详情页原始单据截图缩略图网格 */
+        .screenshot-grid {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            padding: 4px 0;
+        }
+        .screenshot-grid .screenshot-item {
+            width: 120px;
+            height: 90px;
+            border: 1px solid #e5e7eb;
+            border-radius: 6px;
+            overflow: hidden;
+            background: #f9fafb;
+            position: relative;
+        }
+        .screenshot-grid .screenshot-item img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            display: block;
+        }
+        .screenshot-grid .screenshot-meta {
+            position: absolute;
+            bottom: 0; left: 0; right: 0;
+            background: linear-gradient(to top, rgba(0,0,0,0.65), transparent);
+            color: #fff;
+            font-size: 10px;
+            padding: 4px 6px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
         .modal-card {
             background: #fff;
             border-radius: 12px;
@@ -921,6 +1006,13 @@
     <!-- Toast -->
     <div id="toast" class="toast"></div>
 
+    <!-- v1.70.2 图片放大 lightbox（共用：创建弹窗缩略图 + 详情页截图区块）-->
+    <div id="imgLightbox" class="img-lightbox" onclick="closeLightbox(event)">
+        <span class="img-lightbox-close" onclick="closeLightbox(event)" title="关闭">×</span>
+        <img id="imgLightboxImg" alt="">
+        <div class="img-lightbox-caption" id="imgLightboxCaption"></div>
+    </div>
+
     <script src="assets/js/app.js"></script>
     <script>
         // 部门枚举（与后端 COLLAB_REQUESTER_DEPTS 同步）
@@ -1000,10 +1092,52 @@
             return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
         }
 
+        // v1.70.2 codex 27 审 #2：HTML 属性上下文专用转义
+        // 用于 src / href / data-* 等属性值场景；不依赖 buildAttachmentDownloadUrl 的 URL 编码作为 HTML 属性安全防线
+        // 关键转义：" → &quot;（防破坏 attr 边界）+ ' → &#39;（防破坏单引号 attr 边界）+ < > & → 对应实体
+        function escapeHtmlAttr(s) {
+            if (s === null || s === undefined) return '';
+            return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+        }
+
         function fmtDate(s) {
             if (!s) return '-';
             return s.substring(0, 16).replace('T', ' ');
         }
+
+        // v1.70.2 图片放大 lightbox 共用 helper
+        // 用法：openLightbox(url, captionText)  / 关闭：closeLightbox(event)
+        // 调用方：① 创建弹窗 renderFilePreview 缩略图 onclick ② 详情页原始单据截图缩略图 onclick
+        function openLightbox(url, caption) {
+            const lb = document.getElementById('imgLightbox');
+            const img = document.getElementById('imgLightboxImg');
+            const cap = document.getElementById('imgLightboxCaption');
+            if (!lb || !img) return;
+            img.src = url;
+            if (cap) cap.textContent = caption || '';
+            lb.classList.add('show');
+            // 阻止页面滚动
+            document.body.style.overflow = 'hidden';
+        }
+        function closeLightbox(event) {
+            // 仅当点击 overlay 自身或关闭按钮才关；点击 img 不关（让用户可以单击图本身查看）
+            if (event && event.target && event.target.tagName === 'IMG' && event.target.id === 'imgLightboxImg') return;
+            const lb = document.getElementById('imgLightbox');
+            const img = document.getElementById('imgLightboxImg');
+            if (!lb) return;
+            lb.classList.remove('show');
+            if (img) img.src = '';
+            document.body.style.overflow = '';
+        }
+        // ESC 关闭
+        // codex 27 审 #6 拍板：不采纳收敛（当前项目仅 lightbox 用 ESC，无 modal-stack 关闭顺序冲突；
+        // 未来若有其他 modal 需 ESC 关闭再统一改造为 stack-aware 关闭顺序）
+        document.addEventListener('keydown', function (e) {
+            if (e.key === 'Escape') {
+                const lb = document.getElementById('imgLightbox');
+                if (lb && lb.classList.contains('show')) closeLightbox(null);
+            }
+        });
 
         // v1.70.0 codex 24 审 #7：附件下载 URL 构造 + 越界 sanitize
         // 拒绝：空 / 含 .. 段 / 绝对路径（盘符 / 开头斜杠）/ 非 collab/ 前缀
@@ -1110,10 +1244,11 @@
         }
 
         // 目标业务库缓存（id → name）；列表渲染时按需查
+        // v1.70.2 修：改用 /lookup endpoint（所有登录用户可查），原 /source 仅 admin 可查导致开发账号 #2 fallback
         let targetDbMap = {};
         async function loadTargetDbMap() {
             try {
-                const res = await authFetch('/api/collab/db-connections/source');
+                const res = await authFetch('/api/collab/db-connections/lookup');
                 if (!res || !res.ok) return;
                 const list = await res.json();
                 targetDbMap = {};
@@ -1271,8 +1406,42 @@
                     return `<span style="color:#dc2626" title="附件路径非法（${built.reason}），请联系管理员">⚠️ ${escapeHtml(displayName)}</span>`;
                 }
                 // codex 十七审 #3：download 属性值用单引号包裹更稳（escapeHtml 已转 `&quot;`/`&#39;` 但属性边界双保险）
-                return `<a href='${built.url}' target='_blank' rel='noopener' download='${escapeHtml(displayName)}' style='color:#166534;text-decoration:none;'>📊 ${escapeHtml(displayName)}</a>`;
+                // codex 27 审 #2 一致性：URL 走 escapeHtmlAttr 防 attr 注入
+                return `<a href='${escapeHtmlAttr(built.url)}' target='_blank' rel='noopener' download='${escapeHtml(displayName)}' style='color:#166534;text-decoration:none;'>📊 ${escapeHtml(displayName)}</a>`;
             })() : '<span style="color:#9ca3af">—</span>';
+
+            // v1.70.2 原始单据截图区块（admin 创建协作单时上传，所有角色可见）
+            // 修复 BUG：之前前端 0 处渲染 screenshot 类型附件，admin 上传后任何角色看不到
+            // 可见性：任何登录用户（admin/contact/developer/viewer）都能看 — 截图是业务上下文不是敏感数据
+            // 路径校验：复用 buildAttachmentDownloadUrl helper（codex 24 审 #7 过滤 .. / 空段 / 非 collab/ 前缀）
+            // 点击行为：缩略图 click 触发 openLightbox 放大查看原图（共用 lightbox 基础设施）
+            const screenshotFiles = (d.attachments || []).filter(a => a.attachment_type === 'screenshot');
+            let screenshotsHtml = '';
+            if (screenshotFiles.length > 0) {
+                const items = screenshotFiles.map(f => {
+                    const built = buildAttachmentDownloadUrl(f.file_name);
+                    const displayName = f.original_name || (f.file_name ? String(f.file_name).split('/').pop() : '截图');
+                    const safeDisplay = escapeHtml(displayName);
+                    if (!built.ok) {
+                        return `<div class="screenshot-item" title="附件路径非法（${built.reason}）">
+                            <div style="display:flex;align-items:center;justify-content:center;height:100%;color:#dc2626;font-size:11px;text-align:center;padding:4px;">⚠️ ${safeDisplay}</div>
+                        </div>`;
+                    }
+                    // codex 27 审 #2：URL 走 escapeHtmlAttr 防 attr 注入（buildAttachmentDownloadUrl 已 encodeURIComponent 但作为 HTML 属性值仍需独立转义防线）
+                    const urlAttr = escapeHtmlAttr(built.url);
+                    return `<div class="screenshot-item">
+                        <img class="clickable-thumbnail" src="${urlAttr}" alt="${safeDisplay}" title="${safeDisplay}（点击放大）" data-lightbox-url="${urlAttr}" data-lightbox-caption="${safeDisplay}">
+                        <div class="screenshot-meta">${safeDisplay}</div>
+                    </div>`;
+                }).join('');
+                screenshotsHtml = `
+                <div class="detail-section">
+                    <div class="detail-section-title">原始单据截图 (${screenshotFiles.length})</div>
+                    <div class="detail-section-body">
+                        <div class="screenshot-grid" id="detail-screenshot-grid">${items}</div>
+                    </div>
+                </div>`;
+            }
 
             const taskInfoHtml = `
                 <div class="detail-section">
@@ -1303,7 +1472,7 @@
                             <div class="detail-kv-value"><span class="status-badge status-${d.status}">${STATUS_LABELS[d.status] || d.status}</span></div>
                         </div>
                     </div>
-                </div>`;
+                </div>${screenshotsHtml}`;
 
             // 2. 通知区块（v1.66.1 重构 → v1.66.1 修订：两组独立子区并存展示，互不覆盖）
             //
@@ -1349,6 +1518,14 @@
 
             document.getElementById('detailBody').innerHTML =
                 taskInfoHtml + notifyHtml + deliveryHtml + validationHtml + failedHistoryHtml + chatHtml + frictionHtml;
+
+            // v1.70.2：详情页 innerHTML 重写后，绑定截图缩略图 click → openLightbox
+            // 用 dataset 而非 inline onclick 避免文件名含 ' 撕碎字符串
+            document.querySelectorAll('#detailBody img.clickable-thumbnail[data-lightbox-url]').forEach(img => {
+                img.addEventListener('click', () => {
+                    openLightbox(img.getAttribute('data-lightbox-url'), img.getAttribute('data-lightbox-caption') || '');
+                });
+            });
 
             // v1.66.2 footer 按钮（编辑 / 作废 / 归档）：按状态和 admin 身份分支
             const footerLeft = document.getElementById('detailFooterLeft');
@@ -1505,7 +1682,7 @@
                     ? `<button class="btn" style="background:#fef2f2;color:#dc2626;border:1px solid #fca5a5;padding:2px 8px;font-size:12px;margin-left:8px;" onclick="deleteDeliveryAttachment(${f.id}, ${d.id})">删除</button>`
                     : '';
                 const linkHtml = built.ok
-                    ? `<a class="delivery-link" href="${built.url}" target="_blank" rel="noopener" download="${escapeHtml(displayName)}">${escapeHtml(displayName)}</a>`
+                    ? `<a class="delivery-link" href="${escapeHtmlAttr(built.url)}" target="_blank" rel="noopener" download="${escapeHtml(displayName)}">${escapeHtml(displayName)}</a>`
                     : `<span style="color:#dc2626" title="附件路径非法（${built.reason}），请联系管理员">⚠️ ${escapeHtml(displayName)}</span>`;
                 return `
                     <div class="delivery-item">
@@ -1578,7 +1755,7 @@
                         ? `<button class="btn" style="background:#fef2f2;color:#dc2626;border:1px solid #fca5a5;padding:2px 8px;font-size:12px;margin-left:8px;" onclick="deleteFailedAttachment(${f.id}, ${d.id})">删除</button>`
                         : '';
                     const linkHtml = built.ok
-                        ? `<a class="delivery-link" href="${built.url}" target="_blank" rel="noopener" download="${escapeHtml(displayName)}">${escapeHtml(displayName)}</a>`
+                        ? `<a class="delivery-link" href="${escapeHtmlAttr(built.url)}" target="_blank" rel="noopener" download="${escapeHtml(displayName)}">${escapeHtml(displayName)}</a>`
                         : `<span style="color:#dc2626" title="附件路径非法（${built.reason}），请联系管理员">⚠️ ${escapeHtml(displayName)}</span>`;
                     return `
                         <div class="delivery-item">
@@ -2430,13 +2607,27 @@
                 return;
             }
             // codex 十七审 #5：删除 pdf 分支（截图白名单已不含 pdf，避免维护者误判 pdf 也走 screenshot）
+            // v1.70.2：缩略图加 clickable-thumbnail + 点击放大查看原图
+            //   - 用 dataset 存 url + name 避免文件名含 ' 撕碎 onclick 字符串边界
+            //   - 事件委托：单击 img 触发 lightbox（remove-btn stopPropagation 避免误触）
+            // codex 27 审 #7 拍板：object URL 不 revoke 不采纳收敛（创建弹窗 ≤5 文件 × ≤10MB；
+            // 弹窗关闭整页刷新会自动 GC；codex 自承"内网小图数量少时影响有限"。未来若放开数量/体积上限再补 revoke）
             wrap.innerHTML = selectedFiles.map((f, idx) => {
                 const url = URL.createObjectURL(f);
+                const safeName = escapeHtml(f.name);
+                // codex 27 审 #2：URL 走 escapeHtmlAttr（blob: URL 当前无特殊字符但保持安全防线统一）
+                const urlAttr = escapeHtmlAttr(url);
                 return `<div class="file-item">
-                    <img src="${url}" alt="${escapeHtml(f.name)}" title="${escapeHtml(f.name)}">
-                    <button class="remove-btn" onclick="removeFile(${idx})" title="移除">×</button>
+                    <img class="clickable-thumbnail" src="${urlAttr}" alt="${safeName}" title="${safeName}（点击放大）" data-lightbox-url="${urlAttr}" data-lightbox-caption="${safeName}">
+                    <button class="remove-btn" onclick="event.stopPropagation();removeFile(${idx})" title="移除">×</button>
                 </div>`;
             }).join('');
+            // 重新绑定点击事件（每次 renderFilePreview 重写 innerHTML 后）
+            wrap.querySelectorAll('img.clickable-thumbnail[data-lightbox-url]').forEach(img => {
+                img.addEventListener('click', () => {
+                    openLightbox(img.getAttribute('data-lightbox-url'), img.getAttribute('data-lightbox-caption') || '');
+                });
+            });
         }
 
         // v1.67.0 数据模板：单文件 .xlsx/.xls 校验 + 预览

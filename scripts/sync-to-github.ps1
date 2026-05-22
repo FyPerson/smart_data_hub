@@ -62,7 +62,12 @@ $excludeDirs = @(
     "outputs", "ppt-comparison", "tmp",
     "uploads", "archive", ".claude",
     "docs\local", "docs\archive", "docs\review",
-    "work_todo", "访谈文档", "sql"
+    "work_todo", "访谈文档", "sql",
+    # 2026-05-22 紧急加入（v1.70.1 部署事故根因修复）：
+    # 生产数据库备份/（v1.69.x+ deploy-ssh.ps1 步骤 5 拉的 task_pool.db 副本）
+    # 生产协作附件备份/（v1.70.1+ deploy-ssh.ps1 步骤 6 拉的 collab 附件含客户名/SQL/截图）
+    # 这两个目录在源 repo 根下不能进公开镜像，否则泄漏业务真实客户名 + 数据导出 SQL
+    "生产数据库备份", "生产协作附件备份"
 )
 $excludeFiles = @(
     "task_pool.db", "task_pool.db-journal",
@@ -118,6 +123,19 @@ foreach ($p in $docsToRemove) {
     if (Test-Path $p) {
         Remove-Item $p -Recurse -Force
         Write-Host "  [OK] removed $($p.Replace($MirrorPath + '\', ''))" -ForegroundColor Green
+    }
+}
+
+# 2026-05-22 兜底清除：生产备份目录（与 $excludeDirs 双重防御）
+# 即使 robocopy /XD 漏了，这里也会兜底删，防 v1.70.1 类事故复发
+$prodBackupsToRemove = @(
+    "$MirrorPath\生产数据库备份",
+    "$MirrorPath\生产协作附件备份"
+)
+foreach ($p in $prodBackupsToRemove) {
+    if (Test-Path $p) {
+        Remove-Item $p -Recurse -Force
+        Write-Host "  [SECURITY] removed $($p.Replace($MirrorPath + '\', ''))（兜底防生产敏感数据泄漏）" -ForegroundColor Red
     }
 }
 

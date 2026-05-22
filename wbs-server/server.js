@@ -10075,6 +10075,29 @@ app.get('/api/collab/db-connections/source', authenticateToken, requireAdmin, (r
     );
 });
 
+// v1.70.2 新增：所有登录用户可查 source 连接 id → name 映射（仅显示用，不返 host/port/database/凭证）
+// 修复 BUG：开发账号打开协作单详情页"目标业务库"显示 #2 而非真实名（原 endpoint 加 requireAdmin 致开发 403）
+//
+// ⚠️ 边界声明（codex 27 审 #1 medium 拍板：不采纳收敛，加注释明确）：
+//   - 这是"全员可见的业务库元数据" — 任何登录用户（含 viewer）能枚举全部 source 连接 id/name/type
+//   - 安全前提：db_connections.name 由 admin 自起，约定使用系统标识（如 business_db / HRD-newhrd），
+//     **不应**含敏感业务信息（客户名 / 环境凭证暗示）
+//   - 当前 4-5 用户内网工具 + admin 自管 db 连接，此边界可接受
+//   - 未来扩展场景（外部审计 / viewer 角色增加 / 多租户）需要收敛为"按用户可见协作单 target_db_id 过滤"
+app.get('/api/collab/db-connections/lookup', authenticateToken, (req, res) => {
+    db.all(
+        "SELECT id, name, type FROM db_connections WHERE connection_type = 'source' AND type IN ('sqlserver', 'mysql') ORDER BY name ASC, id ASC",
+        [],
+        (err, rows) => {
+            if (err) {
+                logger.error('source 连接 lookup 查询失败:', err);
+                return res.status(500).json({ error: err.message });
+            }
+            res.json(rows || []);
+        }
+    );
+});
+
 // 1. 获取协作单列表（支持 status / developer / type / dept / my_role 筛选）
 // v3 二级转派改造（2026-05-18）+ codex 十六审 #2 high 权限收敛：
 //   - admin 默认可看全部

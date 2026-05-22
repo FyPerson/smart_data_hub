@@ -262,6 +262,111 @@ async function runTests() {
         }
     });
 
+    // T6: v1.70.2 ⑥ 修复验证 — 开发 smoke 通过后，admin 同期上传的 example_xlsx + screenshot 仍 active 不被误 superseded
+    await check('T6 ⑥ 开发首次 smoke 通过 → admin 同期 example_xlsx/screenshot 仍 active（v1.70.2 修 superseded WHERE）', async () => {
+        const ctx = await freshFixture();
+        // 模拟 admin 创建时上传 1 个 example_xlsx + 1 个 screenshot（直接 DB INSERT，跳过 multer 复杂度）
+        // 这两类附件 submission_version=0 status='active' 是真实业务场景
+        await new Promise((resolve, reject) => {
+            const db = new sqlite3.Database(path.join(__dirname, '..', 'task_pool.db'));
+            db.serialize(() => {
+                const stmt = db.prepare(`
+                    INSERT INTO collab_attachments
+                        (collab_request_id, attachment_type, file_name, original_name,
+                         uploaded_by, uploaded_by_name, submission_version, status, superseded_at)
+                    VALUES (?, ?, ?, ?, ?, ?, 0, 'active', NULL)
+                `);
+                stmt.run([ctx.id, 'example_xlsx', `collab/${ctx.id}_e2e/template.xlsx`, 'template.xlsx', 5, 'admin']);
+                stmt.run([ctx.id, 'screenshot', `collab/${ctx.id}_e2e/oa.png`, 'oa.png', 5, 'admin']);
+                stmt.finalize((e) => { db.close(); e ? reject(e) : resolve(); });
+            });
+        });
+
+        // 开发提交健康 SQL → smoke 通过 → activateNewVersion 走 supersede 路径
+        const r = await postSubmit(ctx.id, ctx.dev1Token, [
+            { name: 'result.xlsx', content: 'fake xlsx' },
+            { name: 'script.sql', content: GOOD_SQL },
+        ]);
+        if (r.status !== 200) throw new Error(`HTTP ${r.status}: ${JSON.stringify(r.body).slice(0, 200)}`);
+        if (r.body.business_error) throw new Error(`期望 smoke 通过，实际 business_error: ${JSON.stringify(r.body)}`);
+
+        // 核心断言：example_xlsx + screenshot 应仍 active（未被误 superseded）
+        const rows = await dbAll(
+            `SELECT attachment_type, status, superseded_at
+               FROM collab_attachments
+              WHERE collab_request_id = ?
+                AND attachment_type IN ('example_xlsx', 'screenshot')`,
+            [ctx.id]
+        );
+        if (rows.length !== 2) throw new Error(`期望 2 行（example_xlsx + screenshot），实际 ${rows.length}`);
+        for (const r2 of rows) {
+            if (r2.status !== 'active') {
+                throw new Error(`${r2.attachment_type} 应 status='active'，实际 '${r2.status}'（v1.70.2 superseded WHERE 修复未生效）`);
+            }
+            if (r2.superseded_at != null) {
+                throw new Error(`${r2.attachment_type} 应 superseded_at=NULL，实际 '${r2.superseded_at}'`);
+            }
+        }
+
+        // 第一次提交 oldVer=0 没有旧 result_* 行，supersede 路径无目标 — 反向断言留 T6b
+
+        // T6b: codex 28 审 #3 补 — 第 2 次成功提交时 supersede 路径仍正确（v1 result_* → superseded, v2 → active, admin 附件仍 active）
+        // 第 1 次提交后 collab 状态已 DONE，需推回 PENDING 才能第 2 次提交（v1.67.1 DONE→重新上传走 submitDeliveryModal）
+        // 直接 setCollabState 推回让开发能再次 submit
+        await fx.setCollabState(ctx.id, {
+            status: 'PENDING',
+            sql_validation_status: null,
+            sql_validation_error: null
+        });
+
+        // 第 2 次提交健康 SQL → smoke 通过 → activateNewVersion oldVer=1 → supersede v1 result_* + INSERT v2 active result_*
+        const r2 = await postSubmit(ctx.id, ctx.dev1Token, [
+            { name: 'result_v2.xlsx', content: 'fake xlsx v2' },
+            { name: 'script_v2.sql', content: GOOD_SQL },
+        ]);
+        if (r2.status !== 200) throw new Error(`v2 HTTP ${r2.status}: ${JSON.stringify(r2.body).slice(0, 200)}`);
+        if (r2.body.business_error) throw new Error(`期望 v2 smoke 通过，实际 business_error: ${JSON.stringify(r2.body)}`);
+
+        // 核心反向断言 — 4 个状态都要对：
+        //   v1 result_data + result_script: superseded（被正确 supersede）
+        //   v2 result_data + result_script: active（新版本上位）
+        //   admin example_xlsx + screenshot: 仍 active（不被误超）
+        const allRows = await dbAll(
+            `SELECT attachment_type, status, submission_version, superseded_at
+               FROM collab_attachments
+              WHERE collab_request_id = ?
+              ORDER BY submission_version, attachment_type`,
+            [ctx.id]
+        );
+
+        // 期望 6 行：v0 example_xlsx active / v0 screenshot active / v1 result_data superseded / v1 result_script superseded / v2 result_data active / v2 result_script active
+        if (allRows.length !== 6) throw new Error(`期望 6 行附件，实际 ${allRows.length}：${JSON.stringify(allRows)}`);
+
+        const summary = allRows.map(r => `v${r.submission_version} ${r.attachment_type}=${r.status}`).join(' | ');
+
+        // v0 admin 附件（example_xlsx + screenshot）必须 active
+        const adminAttachments = allRows.filter(r => r.submission_version === 0);
+        if (adminAttachments.length !== 2) throw new Error(`v0 admin 附件期望 2 行，实际 ${adminAttachments.length}（${summary}）`);
+        for (const r of adminAttachments) {
+            if (r.status !== 'active') throw new Error(`v0 ${r.attachment_type} 期望 active，实际 ${r.status}（${summary}）`);
+        }
+
+        // v1 result_* 必须 superseded
+        const v1Results = allRows.filter(r => r.submission_version === 1);
+        if (v1Results.length !== 2) throw new Error(`v1 result_* 期望 2 行，实际 ${v1Results.length}（${summary}）`);
+        for (const r of v1Results) {
+            if (r.status !== 'superseded') throw new Error(`v1 ${r.attachment_type} 期望 superseded（被新版本覆盖），实际 ${r.status}（${summary}）`);
+            if (r.superseded_at == null) throw new Error(`v1 ${r.attachment_type} superseded_at 不应为 NULL`);
+        }
+
+        // v2 result_* 必须 active
+        const v2Results = allRows.filter(r => r.submission_version === 2);
+        if (v2Results.length !== 2) throw new Error(`v2 result_* 期望 2 行，实际 ${v2Results.length}（${summary}）`);
+        for (const r of v2Results) {
+            if (r.status !== 'active') throw new Error(`v2 ${r.attachment_type} 期望 active，实际 ${r.status}（${summary}）`);
+        }
+    });
+
     console.log(`\n=== v1.70.0 撞墙附件保留 e2e ===`);
     console.log(`总数: ${passed + failed}, 通过: ${passed}, 失败: ${failed}`);
 
