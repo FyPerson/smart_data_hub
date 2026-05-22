@@ -10793,7 +10793,9 @@ app.post('/api/collab/requests/:id/create-chat', authenticateToken, async (req, 
         }
 
         // 群名：[OA-{oa_request_no}] {requester_name} {YYYY-MM-DD}（≤20 字符兜底截断）
-        const oa = collab.oa_request_no || `id${id}`;
+        // v1.69.3 修复 OA- 前缀重复（admin 录入的 oa_request_no 可能已带 OA-/TEST-OA- 前缀）
+        const rawOa = collab.oa_request_no || `id${id}`;
+        const oa = rawOa.replace(/^(test-)?oa-?/i, '');
         const today = new Date().toISOString().slice(0, 10);  // YYYY-MM-DD
         let chatName = `[OA-${oa}] ${collab.requester_name || ''} ${today}`;
         if (chatName.length > 20) chatName = chatName.slice(0, 20);
