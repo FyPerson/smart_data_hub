@@ -171,8 +171,12 @@ async function runTests() {
         assert(delRes.status === 200, `T7 status=200, got ${delRes.status} body=${JSON.stringify(delRes.body).slice(0, 200)}`);
     }
 
-    console.log('\n=== T8: DONE 状态 dev1 删 admin 创建的 screenshot → 403 NOT_ADMIN_FOR_TYPE ===');
+    console.log('\n=== T8: DONE 状态 dev1 删 admin 创建的 screenshot → 403 ATTACHMENT_OWNER_LOCKED（v1.71.0 闸门统一拒）===');
     {
+        // v1.71.0 前：返 NOT_ADMIN_FOR_TYPE（DONE 分支按类型拒）
+        // v1.71.0 后：前置闸门 checkAttachmentOwnerOrAdmin 先拦 — dev1（id=19）非 admin / 非上传人（uploaded_by=1 admin），
+        //             直接返 ATTACHMENT_OWNER_LOCKED，根本走不到 DONE 分支的按类型判断
+        // 行为合理：dev1 删 admin 上传的 screenshot 在 PENDING 状态也会返 ATTACHMENT_OWNER_LOCKED，DONE 统一码更一致
         const ctx = await makeDoneFixture();
         const insRes = await dbRun(
             `INSERT INTO collab_attachments (collab_request_id, attachment_type, file_name, original_name, uploaded_by, uploaded_by_name, status, submission_version)
@@ -182,7 +186,7 @@ async function runTests() {
         const attId = insRes.lastID;
         const delRes = await apiCall('DELETE', `/api/collab/attachments/${attId}`, ctx.dev1Token);
         assert(delRes.status === 403, `T8 status=403, got ${delRes.status}`);
-        assert(delRes.body && delRes.body.code === 'NOT_ADMIN_FOR_TYPE', `T8 code=NOT_ADMIN_FOR_TYPE, got ${delRes.body && delRes.body.code}`);
+        assert(delRes.body && delRes.body.code === 'ATTACHMENT_OWNER_LOCKED', `T8 code=ATTACHMENT_OWNER_LOCKED, got ${delRes.body && delRes.body.code}`);
     }
 
     console.log('\n=== T9: ARCHIVED 后 dev1 调 POST /:id/submit → 409（白名单拒）===');

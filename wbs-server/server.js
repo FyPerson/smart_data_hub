@@ -1408,6 +1408,19 @@ function initTable() {
         //   选填字段：业务方可能不在钉钉企业内（外协），强制必填会阻塞协作单创建
         safeAlterAddColumn('collab_requests', 'requester_phone', 'TEXT');
 
+        // ===== v1.71.0 三级转发数据导出人（2026-05-24）=====
+        //   方案 §6.1：collab_requests 增 5 列承载"开发 → 数据导出人"的三级转发链路
+        //   - exporter_user_id / exporter_name：当前数据导出人（PENDING 回流后字段保留作历史展示）
+        //   - exporter_assigned_at：首次指派时间戳
+        //   - forwarded_to_exporter_at：每次 forward 动作时间戳（含二次转发；与 assigned_at 区分用于回流场景）
+        //   - export_summary：导出人提交时的"操作概要"≤500 字（v0.1 补 2 操作概要落地，钉钉模板取前 80 字）
+        //   codex 31 审 #1 critical 验证：grep 全 wbs-server 5 列均不存在，方案 §6.1 准确
+        safeAlterAddColumn('collab_requests', 'exporter_user_id', 'INTEGER');
+        safeAlterAddColumn('collab_requests', 'exporter_name', 'TEXT');
+        safeAlterAddColumn('collab_requests', 'exporter_assigned_at', 'DATETIME');
+        safeAlterAddColumn('collab_requests', 'forwarded_to_exporter_at', 'DATETIME');
+        safeAlterAddColumn('collab_requests', 'export_summary', 'TEXT');
+
         // 健康检查放在 serialize 末尾，确保所有 ALTER/INDEX 都已串行执行完
         verifyV2CollabSchema();
     });
@@ -1437,7 +1450,11 @@ function verifyV2CollabSchema() {
         'dingtalk_chat_id', 'dingtalk_open_conversation_id',
         'dingtalk_chat_created_at', 'dingtalk_chat_created_by', 'dingtalk_chat_name',
         // v1.70.4 ④ 业务方负责人手机号（2026-05-23）
-        'requester_phone'
+        'requester_phone',
+        // v1.71.0 三级转发数据导出人（2026-05-24）
+        'exporter_user_id', 'exporter_name',
+        'exporter_assigned_at', 'forwarded_to_exporter_at',
+        'export_summary'
     ];
     db.all("PRAGMA table_info(collab_requests)", [], (err, rows) => {
         if (err) {
@@ -1449,7 +1466,7 @@ function verifyV2CollabSchema() {
         if (missing.length > 0) {
             logger.error(`v2.0 schema 迁移不完整，collab_requests 缺失字段: ${missing.join(', ')}`);
         } else {
-            logger.info(`v2.0 schema 健康检查通过：collab_requests ${expectedCollabRequest.length} 个新增字段齐全（含 D3 attachment_dir + v3 二级转派 5 字段 + v1.66.1 对接人钉钉已读跟踪 3 字段 + v1.66.2 软删除 3 字段 + v1.67.1 归档锁定 3 字段 + v1.69.0 钉钉沟通群 5 字段）`);
+            logger.info(`v2.0 schema 健康检查通过：collab_requests ${expectedCollabRequest.length} 个新增字段齐全（含 D3 attachment_dir + v3 二级转派 5 字段 + v1.66.1 对接人钉钉已读跟踪 3 字段 + v1.66.2 软删除 3 字段 + v1.67.1 归档锁定 3 字段 + v1.69.0 钉钉沟通群 5 字段 + v1.70.4 requester_phone + v1.71.0 三级转发 5 字段）`);
         }
     });
     db.all("PRAGMA table_info(collab_attachments)", [], (err, rows) => {
@@ -9879,7 +9896,8 @@ const COLLAB_REQUEST_TYPE_V2_DEFAULT = 'ONE_OFF_EXPORT';
 // 主表状态枚举
 // v3 二级转派状态机（2026-05-18 起）：PENDING_ASSIGN → PENDING → SUBMITTED → DONE → ARCHIVED
 // CONFIRMED/CLAIMED 保留以兼容潜在旧数据筛选
-const COLLAB_STATUSES = ['PENDING_ASSIGN', 'PENDING', 'SUBMITTED', 'DONE', 'ARCHIVED', 'CONFIRMED', 'CLAIMED'];
+// v1.71.0 三级转发：新增 EXPORTING 状态（PENDING → EXPORTING by forward-to-exporter；EXPORTING → PENDING by return-to-dev；EXPORTING → SUBMITTED by submit-export）
+const COLLAB_STATUSES = ['PENDING_ASSIGN', 'PENDING', 'EXPORTING', 'SUBMITTED', 'DONE', 'ARCHIVED', 'CONFIRMED', 'CLAIMED'];
 
 // 二级转派占位值（B1 方案）：未指派时 developer_id=0、developer_name='(待指派)'
 // 权威判断未指派：status === 'PENDING_ASSIGN'；developer_id=0 是冗余信号
@@ -10143,9 +10161,10 @@ app.get('/api/collab/requests', authenticateToken, (req, res) => {
     }
 
     // v3 my_role 筛选（优先于 developer_id，互斥）
+    // v1.71.0：加 'exporter'（数据导出人按 exporter_user_id 筛选）
     if (my_role) {
-        if (!['contact', 'developer', 'admin'].includes(my_role)) {
-            return res.status(400).json({ error: '无效的 my_role 值（合法值：contact/developer/admin）' });
+        if (!['contact', 'developer', 'exporter', 'admin'].includes(my_role)) {
+            return res.status(400).json({ error: '无效的 my_role 值（合法值：contact/developer/exporter/admin）' });
         }
         if (my_role === 'admin' && !isAdmin) {
             return res.status(403).json({ error: 'my_role=admin 仅 admin 角色可用' });
@@ -10157,12 +10176,20 @@ app.get('/api/collab/requests', authenticateToken, (req, res) => {
             // 排除占位值 0（PENDING_ASSIGN 状态的未指派单）
             sql += ' AND developer_id = ? AND developer_id != 0';
             params.push(currentUserId);
+        } else if (my_role === 'exporter') {
+            // v1.71.0：exporter_user_id 列表（v1.0 §4 列表筛选）
+            //   - 仅返回当前用户作为数据导出人的协作单
+            //   - 历史已退回的单（PENDING 状态 + exporter_user_id 残留）也会命中——
+            //     前端用 status 文案区分"当前导出中"vs"曾被指派已退回"，详情页用 §5.3.5 语义切换
+            sql += ' AND exporter_user_id = ?';
+            params.push(currentUserId);
         }
         // my_role=admin：不加筛选，返回全部
     } else if (!isAdmin) {
         // codex 十六审 #2：未传 my_role 的普通用户默认按本人可见范围过滤
-        sql += ' AND (contact_person_id = ? OR (developer_id = ? AND developer_id != 0))';
-        params.push(currentUserId, currentUserId);
+        // v1.71.0：增加 exporter_user_id 维度（数据导出人也是本单"我的"角色）
+        sql += ' AND (contact_person_id = ? OR (developer_id = ? AND developer_id != 0) OR exporter_user_id = ?)';
+        params.push(currentUserId, currentUserId, currentUserId);
     }
     // 注：admin 不传 my_role 时不加筛选，保留"看全部"语义
 
@@ -10197,14 +10224,16 @@ app.get('/api/collab/requests', authenticateToken, (req, res) => {
     }
 
     // 状态排序：v3 加 PENDING_ASSIGN 在最前（"待指派"优先级最高）
+    // v1.71.0：EXPORTING 插在 PENDING 之后、SUBMITTED 之前（导出中是 PENDING 的"承接态"，未提交所以排在 SUBMITTED 之前）
     sql += ` ORDER BY
         CASE status
             WHEN 'PENDING_ASSIGN' THEN 0
             WHEN 'PENDING' THEN 1
-            WHEN 'SUBMITTED' THEN 2
-            WHEN 'DONE' THEN 3
-            WHEN 'ARCHIVED' THEN 4
-            ELSE 5
+            WHEN 'EXPORTING' THEN 2
+            WHEN 'SUBMITTED' THEN 3
+            WHEN 'DONE' THEN 4
+            WHEN 'ARCHIVED' THEN 5
+            ELSE 6
         END,
         deadline ASC,
         id DESC`;
@@ -10223,6 +10252,8 @@ app.get('/api/collab/requests', authenticateToken, (req, res) => {
 //   - admin 全部可见
 //   - 本单 contact_person_id === req.user.id 可见
 //   - 本单 developer_id !== 0 且 developer_id === req.user.id 可见
+//   - v1.71.0：本单 exporter_user_id !== 0 且 exporter_user_id === req.user.id 可见
+//             （包括已退回单 PENDING + exporter_user_id 残留场景，让历史导出人能查看"曾经处理过"的单）
 //   - 其他 → 403
 app.get('/api/collab/requests/:id', authenticateToken, async (req, res) => {
     const { id } = req.params;
@@ -10236,7 +10267,11 @@ app.get('/api/collab/requests/:id', authenticateToken, async (req, res) => {
         const isContact = Number(request.contact_person_id) === currentUserId;
         const isDeveloper = Number(request.developer_id) !== 0
                          && Number(request.developer_id) === currentUserId;
-        if (!isAdmin && !isContact && !isDeveloper) {
+        // v1.71.0 三级转发：导出人可见性（排除 NULL/0 占位）
+        const isExporter = request.exporter_user_id != null
+                        && Number(request.exporter_user_id) !== 0
+                        && Number(request.exporter_user_id) === currentUserId;
+        if (!isAdmin && !isContact && !isDeveloper && !isExporter) {
             return res.status(403).json({ error: '无权查看此协作单', code: 'FORBIDDEN' });
         }
 
@@ -12061,6 +12096,1090 @@ app.post('/api/collab/requests/:id/assign', authenticateToken, requireNonViewer,
     }
 });
 
+// v1.71.0 三级转发：exporter 相关状态转移全局串行化锁
+//
+// 历史：Commit C codex 36 审 H-1 修复（原名 forwardToExporterMutex 仅保护 forward）
+// 改名：Commit D codex 37 取舍审 H-1 → collabExporterTransitionMutex
+//   - 改名理由：实际保护范围扩展到 forward + return + submit-export（Commit E）三类 exporter 状态转移
+//   - 旧名 forwardToExporterMutex 会让 Commit E 维护者误以为 submit-export 不需要复用该锁
+//   - 改名清晰边界：所有"涉及 exporter_user_id / EXPORTING 状态机"的转移都走此锁
+//
+// 问题背景：sqlite3 默认 parallel mode（未用 db.serialize 包裹）下，BEGIN IMMEDIATE/UPDATE/INSERT/COMMIT
+// 在并发场景可能交错，导致状态机不一致（Commit C e2e T18 已复现 forward 场景）。
+//
+// 设计：
+//   - 单全局锁（不分 collab_id），简化设计；保护"同一状态机并发"而非"同类请求并发"
+//   - 内网 ~10 人 + exporter 状态转移是低频操作 + 锁内主流程 < 100ms，串行化开销可忽略
+//   - 5s 超时（与 smoke test 锁一致）
+//
+// 不变量：
+//   - locked === true ⇒ 当前确实有一个 exporter 状态转移在跑
+//   - waiters 中所有元素 acquired === false（已 acquired 的就已经 shift 出来了）
+//
+// ⚠️ cluster 兼容性：仅 PM2 单实例下有效，多实例需改为 DB 级锁
+const collabExporterTransitionMutex = (() => {
+    let locked = false;
+    const waiters = [];
+
+    function acquire(timeoutMs = 5000) {
+        return new Promise((resolve, reject) => {
+            const node = { resolve, timer: null, acquired: false };
+            if (!locked) {
+                locked = true;
+                node.acquired = true;
+                return resolve(makeRelease(node));
+            }
+            waiters.push(node);
+            node.timer = setTimeout(() => {
+                if (node.acquired) return;
+                const idx = waiters.indexOf(node);
+                if (idx >= 0) waiters.splice(idx, 1);
+                const e = new Error('COLLAB_EXPORTER_MUTEX_WAIT_TIMEOUT');
+                e.code = 'COLLAB_EXPORTER_MUTEX_WAIT_TIMEOUT';
+                reject(e);
+            }, timeoutMs);
+        });
+    }
+
+    function makeRelease(node) {
+        let released = false;
+        return function release() {
+            if (released) return;
+            released = true;
+            while (waiters.length > 0) {
+                const next = waiters.shift();
+                if (next.acquired) {
+                    console.warn('[collab-exporter-mutex] invariant violated: waiter.acquired=true while still in queue');
+                    continue;
+                }
+                if (next.timer) clearTimeout(next.timer);
+                next.acquired = true;
+                return next.resolve(makeRelease(next));
+            }
+            locked = false;
+        };
+    }
+
+    return { acquire };
+})();
+
+// v1.71.0 三级转发：开发把任务转给数据导出人（方案 §3）
+//
+// 入参（body）：
+//   - exporter_id: number（必填，目标数据导出人 user.id）
+//   - contact_user_ids: number[]（必填 ≥1，沟通对象 user.id 数组，v0.1 决策 C-1 留痕）
+//
+// 原子事务：UPDATE collab_requests（PENDING→EXPORTING + exporter_* + forwarded_at）
+//           + INSERT operation_logs FORWARD_TO_EXPORTER reason=JSON
+//           ⚠️ 整个主流程包在 collabExporterTransitionMutex 内（codex 36 审 H-1 修复，37 审 H-1 改名）
+//
+// 钉钉副作用（commit 后执行，失败仅记日志不回滚 DB）：
+//   - 加 exporter 进群（群必须已存在；不自动建群，由用户提前点"拉起钉钉沟通群"）
+//   - 个人推送给 exporter（含附件数 + 协作单详情链接）
+//
+// 业务约束：群必须先建（CHAT_NOT_EXISTS 拒绝转发，引导用户先调 create-chat endpoint）
+//           平台对业务方不可见，业务方角色不在权限矩阵内
+app.post('/api/collab/requests/:id/forward-to-exporter', authenticateToken, requireNonViewer, async (req, res) => {
+    const idStr = req.params.id;
+    const userId = Number(req.user.id);
+    const userName = req.user.display_name || req.user.username || `user#${userId}`;
+    const userRole = req.user.role;
+
+    // === 前置：id 校验（沿用 assign / bypass 风格）===
+    if (!/^[1-9]\d*$/.test(idStr)) {
+        return res.status(400).json({ error: 'id 必须是正整数', code: 'INVALID_ID' });
+    }
+    const id = parseInt(idStr, 10);
+    if (!Number.isSafeInteger(id)) {
+        return res.status(400).json({ error: 'id 超出安全整数范围', code: 'INVALID_ID' });
+    }
+    if (!Number.isSafeInteger(userId) || userId <= 0) {
+        return res.status(400).json({ error: '当前用户 id 非法', code: 'INVALID_USER_ID' });
+    }
+
+    // === 前置：exporter_id body 校验（严格正则）===
+    const rawExporterId = req.body && req.body.exporter_id;
+    if (rawExporterId === undefined || rawExporterId === null) {
+        return res.status(400).json({ error: 'exporter_id 必填', code: 'MISSING_EXPORTER_ID' });
+    }
+    if (!/^[1-9]\d*$/.test(String(rawExporterId))) {
+        return res.status(400).json({ error: 'exporter_id 必须是正整数', code: 'INVALID_EXPORTER_ID' });
+    }
+    const exporterId = Number(rawExporterId);
+    if (!Number.isSafeInteger(exporterId)) {
+        return res.status(400).json({ error: 'exporter_id 超出安全整数范围', code: 'INVALID_EXPORTER_ID' });
+    }
+
+    // === 前置：contact_user_ids body 校验 ===
+    const rawContactIds = req.body && req.body.contact_user_ids;
+    if (!Array.isArray(rawContactIds) || rawContactIds.length === 0) {
+        return res.status(400).json({ error: 'contact_user_ids 必填且至少 1 人', code: 'INVALID_CONTACT_USER_IDS' });
+    }
+    if (!rawContactIds.every(uid => /^[1-9]\d*$/.test(String(uid)) && Number.isSafeInteger(Number(uid)))) {
+        return res.status(400).json({ error: 'contact_user_ids 元素必须是正整数', code: 'INVALID_CONTACT_USER_IDS_ELEM' });
+    }
+    const contactUserIds = rawContactIds.map(Number);
+
+    // codex 36 审 H-1：先 acquire exporter 状态转移 mutex 串行化主流程
+    // 业务影响：同一时刻全局只有 1 个 exporter 状态转移在跑（含 return / submit-export），串行化开销 < 100ms
+    let release;
+    try {
+        release = await collabExporterTransitionMutex.acquire(5000);
+    } catch (mutexErr) {
+        logger.warn(`[forward-to-exporter] 协作单 #${id} 等待 collabExporterTransitionMutex 超时: ${mutexErr.message}`);
+        return res.status(503).json({
+            error: '系统繁忙，请稍后重试',
+            code: 'COLLAB_EXPORTER_MUTEX_BUSY'
+        });
+    }
+
+    try {
+        // === 取协作单（含 dingtalk_chat_id 判断群是否存在）===
+        const collab = await dbGetAsync(
+            `SELECT id, status, archived_at, archived_final_at, oa_request_no,
+                    description, requester_name, contact_person_id, developer_id,
+                    dingtalk_chat_id, dingtalk_open_conversation_id
+               FROM collab_requests WHERE id = ?`,
+            [id]
+        );
+        if (!collab) {
+            return res.status(404).json({ error: '协作单不存在', code: 'NOT_FOUND' });
+        }
+
+        // === 软删除 / 归档守卫（按既有惯例）===
+        if (collabSubmitHelpers.isSoftArchived(collab)) {
+            return res.status(409).json({ error: '协作单已作废，不可转发', code: 'PARENT_SOFT_ARCHIVED' });
+        }
+        if (collabSubmitHelpers.isFinalArchived(collab)) {
+            return res.status(409).json({ error: '协作单已归档锁定，不可转发', code: 'PARENT_ARCHIVED_LOCKED' });
+        }
+
+        // === 状态守卫：仅 PENDING 可转发（不允许 PENDING_ASSIGN/SUBMITTED/DONE 等）===
+        if (collab.status !== 'PENDING') {
+            return res.status(409).json({
+                error: `仅 PENDING 状态可转发给数据导出人，当前状态：${collab.status}`,
+                code: 'INVALID_STATE_FOR_FORWARD',
+                current_status: collab.status
+            });
+        }
+
+        // === 权限守卫：仅 admin / 本单 developer / 本单 contact_person 可转发 ===
+        // 平台对业务方不可见，业务方角色不在权限矩阵内
+        const isAdmin = userRole === 'admin';
+        const isCurrentDeveloper = Number(collab.developer_id) > 0 && Number(collab.developer_id) === userId;
+        const isContactPerson = Number(collab.contact_person_id) > 0 && Number(collab.contact_person_id) === userId;
+        if (!isAdmin && !isCurrentDeveloper && !isContactPerson) {
+            return res.status(403).json({
+                error: '仅 admin / 当前开发 / 对接人可转发给数据导出人',
+                code: 'NOT_FORWARDER'
+            });
+        }
+
+        // === 业务约束：群必须先建（不自动建群，引导用户先调 create-chat 后重试）===
+        if (!collab.dingtalk_chat_id || !collab.dingtalk_open_conversation_id) {
+            return res.status(409).json({
+                error: '请先点击"拉起钉钉沟通群"建立群聊后再转发',
+                code: 'CHAT_NOT_EXISTS',
+                suggestion: '在详情页点【拉起钉钉沟通群】按钮，建群成功后重试本操作'
+            });
+        }
+
+        // === 同人空转校验：不能转给当前 developer 自己 ===
+        if (Number(collab.developer_id) === exporterId) {
+            return res.status(400).json({
+                error: '不能转发给自己（您是本单开发）',
+                code: 'CANNOT_FORWARD_TO_SELF'
+            });
+        }
+
+        // === 校验 exporter 用户 active + 绑定钉钉 ===
+        const exporterUser = await dbGetAsync(
+            `SELECT id, display_name, username, phone, dingtalk_user_id, status
+               FROM users WHERE id = ?`,
+            [exporterId]
+        );
+        if (!exporterUser) {
+            return res.status(400).json({ error: '数据导出人不存在', code: 'EXPORTER_NOT_FOUND' });
+        }
+        if (exporterUser.status !== 'active') {
+            return res.status(400).json({ error: `数据导出人 ${exporterUser.display_name} 已停用`, code: 'EXPORTER_INACTIVE' });
+        }
+        if (!exporterUser.dingtalk_user_id && !exporterUser.phone) {
+            return res.status(400).json({
+                error: '数据导出人未绑定钉钉/手机号，无法发起加群与通知',
+                code: 'EXPORTER_NO_DINGTALK',
+                target_user_id: exporterUser.id
+            });
+        }
+
+        // === 校验 contact 用户全部 active（去重防参数注水）===
+        const uniqContactIds = [...new Set(contactUserIds)];
+        const contactRows = await dbAllAsync(
+            `SELECT id, display_name, status FROM users
+              WHERE id IN (${uniqContactIds.map(() => '?').join(',')})`,
+            uniqContactIds
+        );
+        if (contactRows.length !== uniqContactIds.length) {
+            const foundIds = new Set(contactRows.map(r => r.id));
+            const missing = uniqContactIds.filter(uid => !foundIds.has(uid));
+            return res.status(400).json({
+                error: `沟通对象用户不存在：user.id=${missing.join(',')}`,
+                code: 'CONTACT_USERS_NOT_FOUND',
+                missing_ids: missing
+            });
+        }
+        const inactive = contactRows.filter(r => r.status !== 'active');
+        if (inactive.length > 0) {
+            return res.status(400).json({
+                error: `沟通对象用户已停用：${inactive.map(r => r.display_name).join(',')}`,
+                code: 'CONTACT_USERS_INACTIVE'
+            });
+        }
+
+        // === 查附件数（仅记日志用，前端弹框已展示）===
+        const attachmentCountRow = await dbGetAsync(
+            `SELECT COUNT(*) AS cnt FROM collab_attachments
+              WHERE collab_request_id = ? AND status = 'active'`,
+            [id]
+        );
+        const attachmentCount = attachmentCountRow.cnt;
+
+        // === 阶段 1：DB 原子事务（UPDATE + INSERT log）===
+        // 方案 §3.2：BEGIN IMMEDIATE 包 UPDATE collab_requests + INSERT log，commit 后再钉钉
+        let updateResult;
+        try {
+            await dbRunAsync('BEGIN IMMEDIATE TRANSACTION');
+
+            // UPDATE 双 WHERE 守卫：status=PENDING + archived_at IS NULL + archived_final_at IS NULL
+            // 防 SELECT 与 UPDATE 之间被并发改状态 / 被 admin 作废产生半复活状态（codex 31 审 #2 critical）
+            updateResult = await dbRunAsync(
+                `UPDATE collab_requests
+                    SET status = 'EXPORTING',
+                        exporter_user_id = ?,
+                        exporter_name = ?,
+                        exporter_assigned_at = datetime('now', 'localtime'),
+                        forwarded_to_exporter_at = datetime('now', 'localtime')
+                  WHERE id = ?
+                    AND status = 'PENDING'
+                    AND archived_at IS NULL
+                    AND archived_final_at IS NULL`,
+                [exporterId, exporterUser.display_name, id]
+            );
+
+            if (!updateResult || updateResult.changes === 0) {
+                await dbRunAsync('ROLLBACK');
+                return res.status(409).json({
+                    error: '协作单状态已变更，请刷新重试',
+                    code: 'CONCURRENT_STATE_CHANGE'
+                });
+            }
+
+            // INSERT operation_logs（reason 字段存 JSON 字符串，沿用 v1.70.4 ADMIN_FIX 模式）
+            await dbRunAsync(
+                `INSERT INTO collab_operation_logs (collab_request_id, operation_type, operator_id, operator, reason)
+                 VALUES (?, 'FORWARD_TO_EXPORTER', ?, ?, ?)`,
+                [id, userId, userName, JSON.stringify({
+                    exporter_id: exporterId,
+                    exporter_name: exporterUser.display_name,
+                    contact_user_ids: uniqContactIds,
+                    attachment_count: attachmentCount
+                })]
+            );
+
+            await dbRunAsync('COMMIT');
+        } catch (e) {
+            try { await dbRunAsync('ROLLBACK'); } catch { /* ignore rollback err */ }
+            logger.error(`[forward-to-exporter] 协作单 #${id} DB 事务失败: ${e.message}`, e);
+            return res.status(500).json({ error: '转发失败，请重试', code: 'DB_TRANSACTION_FAILED' });
+        }
+
+        logger.info(`[forward-to-exporter] 协作单 #${id} PENDING → EXPORTING by ${userName} exporter=${exporterId}(${exporterUser.display_name}) attachments=${attachmentCount}`);
+
+        // === 阶段 2：钉钉副作用（commit 后执行，失败仅记日志不回滚 DB）===
+        // 2.1 加 exporter 进群（群已确认存在，前置校验通过）
+        let addUserOutcome = { kind: 'skipped', detail: '' };
+        try {
+            const [appKey, appSecret] = await Promise.all(
+                ['dingtalk_app_key', 'dingtalk_app_secret'].map(readSystemConfig)
+            );
+            if (!appKey || !appSecret) {
+                addUserOutcome = { kind: 'skipped', detail: '钉钉配置未填写' };
+                insertCollabLog(id, 'FORWARD_ADD_USER_SKIP', userId, userName, '钉钉配置未填写');
+            } else {
+                const token = await dingtalkNotify.getAccessToken(appKey, appSecret);
+
+                // 如果 exporter 没有 dingtalk_user_id 但有 phone，先反查（按 sendCollabDingtalkRaw 模式）
+                let exporterDingUid = exporterUser.dingtalk_user_id;
+                if (!exporterDingUid && exporterUser.phone) {
+                    try {
+                        exporterDingUid = await dingtalkNotify.getUserIdByMobile(token, exporterUser.phone);
+                        // 回写缓存（仅在空时回写，对齐 create-chat M3 codex 修订）
+                        await dbRunAsync(
+                            `UPDATE users SET dingtalk_user_id = ?
+                              WHERE id = ? AND (dingtalk_user_id IS NULL OR dingtalk_user_id = '')`,
+                            [exporterDingUid, exporterUser.id]
+                        );
+                    } catch (lookupErr) {
+                        const lookupCls = dingtalkNotify.classifyError(lookupErr);
+                        addUserOutcome = { kind: 'lookup_fail', detail: `getUserIdByMobile:${lookupCls.reason}` };
+                        insertCollabLog(id, 'FORWARD_ADD_USER_FAIL', userId, userName,
+                            `getUserIdByMobile errcode=${lookupCls.errcode} reason=${lookupCls.reason}`);
+                    }
+                }
+
+                if (exporterDingUid && addUserOutcome.kind !== 'lookup_fail') {
+                    const normalized = String(exporterDingUid).trim();
+                    const addResult = await dingtalkNotify.addUserToChat(token, collab.dingtalk_chat_id, [normalized]);
+                    const cls = dingtalkNotify.classifyAddUserErrcode(addResult.errcode, addResult.errorUserIds);
+                    addUserOutcome = { kind: cls.kind, detail: `errcode=${addResult.errcode} action=${cls.action}` };
+                    if (cls.kind === 'soft_success') {
+                        insertCollabLog(id, 'FORWARD_ADD_USER_OK', userId, userName, addUserOutcome.detail);
+                    } else {
+                        insertCollabLog(id, 'FORWARD_ADD_USER_FAIL', userId, userName, addUserOutcome.detail);
+                    }
+                }
+            }
+        } catch (e) {
+            logger.warn(`[forward-to-exporter] 协作单 #${id} 钉钉加群异常（不阻塞主流程）: ${e.message}`);
+            insertCollabLog(id, 'FORWARD_ADD_USER_EXCEPTION', userId, userName, e.message);
+            addUserOutcome = { kind: 'exception', detail: e.message };
+        }
+
+        // 2.2 钉钉个人推送给 exporter（失败仅记日志）
+        let notifyOutcome = { ok: false, detail: '' };
+        try {
+            // codex 36 审 M-3：platform_base_url 配置注入硬化（避免误填 ) / 空格 / 换行破坏 Markdown 链接）
+            // 用 new URL(...) 构造 + 失败降级 fallback；提取 hostname 验证非空（防 javascript:/data: 等协议）
+            const FALLBACK_BASE = 'http://192.168.1.100:3000';
+            const platformUrlRaw = (await readSystemConfig('platform_base_url')) || FALLBACK_BASE;
+            let detailUrl;
+            try {
+                const url = new URL(`/Data_Collab.html?id=${id}`, platformUrlRaw);
+                if (!url.hostname || !['http:', 'https:'].includes(url.protocol)) {
+                    throw new Error(`platform_base_url 协议/host 非法: ${url.protocol}//${url.hostname}`);
+                }
+                detailUrl = url.toString();
+            } catch (urlErr) {
+                logger.warn(`[forward-to-exporter] platform_base_url 配置非法 (${platformUrlRaw})，降级用 fallback: ${urlErr.message}`);
+                detailUrl = new URL(`/Data_Collab.html?id=${id}`, FALLBACK_BASE).toString();
+            }
+
+            // codex 31 审 #7 high：所有 ${} 动态字段必须 escapeMarkdown 包裹防注入
+            const escape = dingtalkNotify.escapeMarkdown;
+            const safeOaNo = escape(collab.oa_request_no || `id${id}`);
+            const safeRequesterName = escape(collab.requester_name || '-');
+            const safeMatterDesc = escape(collab.description || '（未填写）');
+            const safeForwarderName = escape(userName || '-');
+            const forwarderRoleLabel = isAdmin ? 'admin' : (isCurrentDeveloper ? '开发' : '对接人');
+
+            const title = `[OA-${safeOaNo}] 协作单转发给您（数据导出人）`;
+            const markdown = [
+                `### 数据协作单 OA-${safeOaNo}`,
+                ``,
+                `**业务方**：${safeRequesterName}`,
+                `**事项概述**：${safeMatterDesc}`,
+                `**转发人**：${safeForwarderName}（${forwarderRoleLabel}）`,
+                attachmentCount > 0
+                    ? `**附件数**：${attachmentCount} 个，[点击下载查看](${detailUrl})`
+                    : `**附件数**：0`,
+                ``,
+                `请在群内与转发人协商执行细节。如确认不归您做，可在详情页点【退回开发】。`,
+                ``,
+                `[查看协作单详情](${detailUrl})`
+            ].join('\n');
+
+            const sendRes = await sendCollabDingtalkRaw(id, {
+                id: exporterUser.id,
+                display_name: exporterUser.display_name,
+                phone: exporterUser.phone,
+                dingtalk_user_id: exporterUser.dingtalk_user_id
+            }, title, markdown, { id: userId, name: userName });
+
+            notifyOutcome = { ok: sendRes.ok, detail: sendRes.ok ? '' : JSON.stringify(sendRes.body || {}) };
+            if (sendRes.ok) {
+                insertCollabLog(id, 'FORWARD_NOTIFY_OK', userId, userName, null);
+            } else {
+                insertCollabLog(id, 'FORWARD_NOTIFY_FAIL', userId, userName, notifyOutcome.detail);
+            }
+        } catch (e) {
+            logger.warn(`[forward-to-exporter] 协作单 #${id} 钉钉个人推送异常（不阻塞主流程）: ${e.message}`);
+            insertCollabLog(id, 'FORWARD_NOTIFY_EXCEPTION', userId, userName, e.message);
+            notifyOutcome = { ok: false, detail: e.message };
+        }
+
+        return res.json({
+            success: true,
+            current_status: 'EXPORTING',
+            exporter_id: exporterId,
+            exporter_name: exporterUser.display_name,
+            chat_id: collab.dingtalk_chat_id,
+            attachment_count: attachmentCount,
+            add_user_outcome: addUserOutcome,
+            notify_outcome: notifyOutcome
+        });
+    } catch (e) {
+        logger.error(`[forward-to-exporter] 协作单 #${id} 转发异常: ${e.message}`, e);
+        return res.status(500).json({ error: '转发失败，请联系管理员', code: 'FORWARD_FAILED' });
+    } finally {
+        // codex 36 审 H-1：无论成功/失败/异常都必须 release mutex（防永久 leak）
+        if (release) release();
+    }
+});
+
+// v1.71.0 三级转发：数据导出人退回任务给开发（方案 §5 + v0.1 决策 R-1~R-6）
+//
+// 入参（body）：
+//   - return_reason: enum string（必填，5 选 1，方案 §5.2 + codex 37 审 M-5 采纳新增 missing_info）
+//   - return_note: string（可选 ≤500 字，codex 37 审 L-1 采纳；选 other/missing_info 时建议填写但不强制）
+//
+// 业务规则（v0.1 决策 R-1 ~ R-6）：
+//   - 仅 EXPORTING 状态可调
+//   - 仅当前 exporter_user_id === req.user.id 可调（admin/dev/contact 都不行；admin 兜底走已有 admin-fix endpoint）
+//   - 状态机：EXPORTING → PENDING
+//   - exporter_user_id / exporter_name 字段保留（不清空，方案 §5.3.5 历史展示）
+//   - 旧附件保留只读展示（不动 status）
+//   - 不发钉钉通知（v0.1 决策依赖群内沟通；codex 37 M-7 关切已在群内沟通中覆盖）
+//
+// 事务：BEGIN IMMEDIATE → UPDATE（双 WHERE：status='EXPORTING' + exporter_user_id=? + archived 双轨守卫）
+//        → await INSERT operation_logs（显式事务内，不用 fire-and-forget insertCollabLog）→ COMMIT
+//        失败 ROLLBACK 返 500
+//
+// 并发：包在 collabExporterTransitionMutex 内（codex 37 审 H-1+H-2+H-3 全部 must-have）
+const VALID_RETURN_REASONS = ['business_permission', 'dev_permission', 'underlying_query', 'missing_info', 'other'];
+const RETURN_NOTE_MAX_LEN = 500;
+// v1.71.0 Commit E：数据导出人提交交付物 export_summary 上限（与 RETURN_NOTE 对齐）
+const EXPORT_SUMMARY_MAX_LEN = 500;
+
+app.post('/api/collab/requests/:id/return-to-dev', authenticateToken, requireNonViewer, async (req, res) => {
+    const idStr = req.params.id;
+    const userId = Number(req.user.id);
+    const userName = req.user.display_name || req.user.username || `user#${userId}`;
+
+    // === 前置：id 校验（沿用 forward/assign 风格）===
+    if (!/^[1-9]\d*$/.test(idStr)) {
+        return res.status(400).json({ error: 'id 必须是正整数', code: 'INVALID_ID' });
+    }
+    const id = parseInt(idStr, 10);
+    if (!Number.isSafeInteger(id)) {
+        return res.status(400).json({ error: 'id 超出安全整数范围', code: 'INVALID_ID' });
+    }
+    if (!Number.isSafeInteger(userId) || userId <= 0) {
+        return res.status(400).json({ error: '当前用户 id 非法', code: 'INVALID_USER_ID' });
+    }
+
+    // === 前置：return_reason 枚举校验 ===
+    const rawReason = req.body && req.body.return_reason;
+    if (!rawReason || typeof rawReason !== 'string') {
+        return res.status(400).json({
+            error: `return_reason 必填`,
+            code: 'MISSING_RETURN_REASON',
+            valid_values: VALID_RETURN_REASONS
+        });
+    }
+    if (!VALID_RETURN_REASONS.includes(rawReason)) {
+        return res.status(400).json({
+            error: `return_reason 必须是：${VALID_RETURN_REASONS.join(' / ')}`,
+            code: 'INVALID_RETURN_REASON',
+            valid_values: VALID_RETURN_REASONS
+        });
+    }
+    const returnReason = rawReason;
+
+    // === 前置：return_note 校验（可选，≤500 字）===
+    let returnNote = null;
+    if (req.body && req.body.return_note !== undefined && req.body.return_note !== null) {
+        if (typeof req.body.return_note !== 'string') {
+            return res.status(400).json({ error: 'return_note 必须是字符串', code: 'INVALID_RETURN_NOTE' });
+        }
+        const trimmed = req.body.return_note.trim();
+        if (trimmed.length > RETURN_NOTE_MAX_LEN) {
+            return res.status(400).json({
+                error: `return_note 不能超过 ${RETURN_NOTE_MAX_LEN} 字符`,
+                code: 'RETURN_NOTE_TOO_LONG',
+                max_length: RETURN_NOTE_MAX_LEN,
+                actual_length: trimmed.length
+            });
+        }
+        returnNote = trimmed || null;  // 空串视为未填
+    }
+
+    // === 在 collabExporterTransitionMutex 内执行主流程（codex 37 审 H-1+H-2+H-3 mutex 必须）===
+    let release;
+    try {
+        release = await collabExporterTransitionMutex.acquire(5000);
+    } catch (mutexErr) {
+        logger.warn(`[return-to-dev] 协作单 #${id} 等待 collabExporterTransitionMutex 超时: ${mutexErr.message}`);
+        return res.status(503).json({
+            error: '系统繁忙，请稍后重试',
+            code: 'COLLAB_EXPORTER_MUTEX_BUSY'
+        });
+    }
+
+    try {
+        // === 取协作单 ===
+        const collab = await dbGetAsync(
+            `SELECT id, status, archived_at, archived_final_at, exporter_user_id, exporter_name
+               FROM collab_requests WHERE id = ?`,
+            [id]
+        );
+        if (!collab) {
+            return res.status(404).json({ error: '协作单不存在', code: 'NOT_FOUND' });
+        }
+
+        // === 软删除 / 归档守卫 ===
+        if (collabSubmitHelpers.isSoftArchived(collab)) {
+            return res.status(409).json({ error: '协作单已作废，不可退回', code: 'PARENT_SOFT_ARCHIVED' });
+        }
+        if (collabSubmitHelpers.isFinalArchived(collab)) {
+            return res.status(409).json({ error: '协作单已归档锁定，不可退回', code: 'PARENT_ARCHIVED_LOCKED' });
+        }
+
+        // === 状态守卫：仅 EXPORTING 可退回 ===
+        if (collab.status !== 'EXPORTING') {
+            return res.status(409).json({
+                error: `仅 EXPORTING 状态可退回开发，当前状态：${collab.status}`,
+                code: 'INVALID_STATE_FOR_RETURN',
+                current_status: collab.status
+            });
+        }
+
+        // === 权限守卫：仅当前 exporter 可退回（v0.1 决策 R-3）===
+        // admin 兜底场景走已有 admin-fix endpoint（codex 37 审 M-6 部分采纳）
+        if (collab.exporter_user_id == null || Number(collab.exporter_user_id) !== userId) {
+            return res.status(403).json({
+                error: '仅当前数据导出人可退回（admin 兜底请走 admin-fix endpoint）',
+                code: 'ONLY_EXPORTER_CAN_RETURN'
+            });
+        }
+
+        // === 阶段 1：DB 原子事务（BEGIN IMMEDIATE + UPDATE + await INSERT log + COMMIT）===
+        // codex 37 审 M-2 采纳：log 必须 await 在事务内，不用 fire-and-forget insertCollabLog
+        try {
+            await dbRunAsync('BEGIN IMMEDIATE TRANSACTION');
+
+            // UPDATE 双 WHERE 守卫：status=EXPORTING + exporter_user_id=userId + archived 双轨
+            // 防 mutex 释放间隙状态被并发改 / 被 admin 作废
+            // exporter 字段保留（v0.1 R-2 决策：字段保留用于 §5.3.5 历史展示）
+            const updateResult = await dbRunAsync(
+                `UPDATE collab_requests
+                    SET status = 'PENDING'
+                  WHERE id = ?
+                    AND status = 'EXPORTING'
+                    AND exporter_user_id = ?
+                    AND archived_at IS NULL
+                    AND archived_final_at IS NULL`,
+                [id, userId]
+            );
+
+            if (!updateResult || updateResult.changes === 0) {
+                await dbRunAsync('ROLLBACK');
+                return res.status(409).json({
+                    error: '协作单状态已变更，请刷新重试',
+                    code: 'CONCURRENT_STATE_CHANGE'
+                });
+            }
+
+            // await INSERT operation_logs（reason 字段存 JSON 字符串，沿用 forward 模式）
+            await dbRunAsync(
+                `INSERT INTO collab_operation_logs (collab_request_id, operation_type, operator_id, operator, reason)
+                 VALUES (?, 'RETURN_TO_DEV', ?, ?, ?)`,
+                [id, userId, userName, JSON.stringify({
+                    return_reason: returnReason,
+                    return_note: returnNote,
+                    exporter_user_id: collab.exporter_user_id,
+                    exporter_name: collab.exporter_name
+                })]
+            );
+
+            await dbRunAsync('COMMIT');
+        } catch (e) {
+            try { await dbRunAsync('ROLLBACK'); } catch { /* ignore rollback err */ }
+            logger.error(`[return-to-dev] 协作单 #${id} DB 事务失败: ${e.message}`, e);
+            return res.status(500).json({ error: '退回失败，请重试', code: 'DB_TRANSACTION_FAILED' });
+        }
+
+        logger.info(`[return-to-dev] 协作单 #${id} EXPORTING → PENDING by ${userName}(exporter id=${userId}) reason=${returnReason}${returnNote ? ' note=' + returnNote.slice(0, 50) : ''}`);
+
+        return res.json({
+            success: true,
+            current_status: 'PENDING',
+            return_reason: returnReason,
+            return_note: returnNote,
+            // exporter 字段保留（前端用于展示"前导出人（已退回）"，详见方案 §5.3.5）
+            historic_exporter_user_id: collab.exporter_user_id,
+            historic_exporter_name: collab.exporter_name
+        });
+    } catch (e) {
+        logger.error(`[return-to-dev] 协作单 #${id} 退回异常: ${e.message}`, e);
+        return res.status(500).json({ error: '退回失败，请联系管理员', code: 'RETURN_FAILED' });
+    } finally {
+        if (release) release();
+    }
+});
+
+// v1.71.0 Commit E：数据导出人提交交付物（方案 §6 + codex 39 取舍审落地）
+//
+// 入参（multipart）：
+//   - result_data: 1 必填（.xlsx/.xls）
+//   - result_data_screenshot: 1 必填（.png/.jpg/.jpeg/.gif/.webp）
+//   - export_summary: 可选字符串 ≤500 字
+//
+// 业务规则：
+//   - 状态 EXPORTING → SUBMITTED（与 dev 走 POST /submit 后状态一致，admin 走 DONE 验收）
+//   - 仅当前 exporter_user_id === req.user.id 可调
+//   - 附件入库 attachment_type：result_data + screenshot（codex 39 H-3 采纳：不新增 result_data_screenshot 类型）
+//     · multer field 名仍叫 result_data_screenshot（前端字段名清晰），endpoint 内入库映射 attachment_type='screenshot'
+//     · 截图来源 = uploaded_by === collab.exporter_user_id（Commit F 渲染依据）
+//   - submission_version 不递增（codex 39 H-1 部分采纳：保现有"dev 提交次数"语义，用 uploaded_by + log 区分）
+//   - 双向 supersede（codex 39 H-2 采纳）：本次 supersede 同 type 旧 active，日志 reason JSON 记录被覆盖附件 id/type/original_name
+//   - UPDATE 清空 sql_validation_status + sql_validation_error（codex 39 M-5 采纳：不残留 dev submit 旧校验）
+//   - 钉钉个人推送 dev + admin（codex 39 M-3 采纳：best-effort + commit 后执行 + 失败仅记 NOTIFY_FAIL 不回滚）
+//
+// 并发：包在 collabExporterTransitionMutex 内（codex 39 M-6 采纳，沿用 Commit D T17 模式）
+//
+// 文件落盘：照搬 admin-submit-on-behalf 13369-13451 精简模式（codex 39 H-1 采纳：不调 activateNewVersion）
+//   理由：activateNewVersion 强制 result_data+result_script 完整快照 + 跑 smoke test，与 exporter 只交 result_data 冲突
+//
+// 响应字段（codex 39 L-3 采纳，供 Commit F 直接消费）：
+//   - current_status: 'SUBMITTED'
+//   - export_summary: string | null（回显）
+//   - superseded_attachments: [{ id, attachment_type, original_name, uploaded_by, uploaded_by_name }]
+//
+// XSS / Markdown 注入防护（codex 39 L-1 采纳，三输出点）：
+//   - 钉钉 markdown：所有用户输入用 dingtalkNotify.escapeMarkdown 包裹（本 endpoint 做）
+//   - 日志 reason JSON：原文存（不截断不 escape，操作日志原文便于复盘）（本 endpoint 做）
+//   - 前端详情页 HTML：escapeHtml 包裹（Commit F 做）
+app.post('/api/collab/requests/:id/submit-export',
+    authenticateToken,
+    requireNonViewer,
+    // multer 错误捕获（同 POST /submit 风格）
+    (req, res, next) => {
+        const handler = collabUpload.fields([
+            { name: 'result_data', maxCount: 1 },
+            { name: 'result_data_screenshot', maxCount: 1 }
+        ]);
+        handler(req, res, (err) => {
+            if (!err) return next();
+            const isMulterErr = err && err.name === 'MulterError';
+            const code = isMulterErr ? err.code : 'UPLOAD_ERROR';
+            try {
+                const allFiles = [];
+                if (req.files) {
+                    Object.values(req.files).forEach(arr => { if (Array.isArray(arr)) allFiles.push(...arr); });
+                }
+                collabSubmitHelpers.cleanupPendingFiles(allFiles, logger);
+            } catch (_) { /* ignore */ }
+            logger.warn(`[submit-export] multer error: code=${code} msg=${err.message}`);
+            return res.status(400).json({
+                error: '附件上传失败',
+                code,
+                detail: isMulterErr ? err.message : err.message,
+            });
+        });
+    },
+    async (req, res) => {
+        const idStr = req.params.id;
+        const userId = Number(req.user.id);
+        const userName = req.user.display_name || req.user.username || `user#${userId}`;
+
+        const cleanupPending = () => {
+            try {
+                const allFiles = [];
+                if (req.files) {
+                    Object.values(req.files).forEach(arr => { if (Array.isArray(arr)) allFiles.push(...arr); });
+                }
+                collabSubmitHelpers.cleanupPendingFiles(allFiles, logger);
+            } catch (_) { /* ignore */ }
+        };
+
+        // === 前置：id 校验（沿用 forward/return 风格）===
+        if (!/^[1-9]\d*$/.test(idStr)) {
+            cleanupPending();
+            return res.status(400).json({ error: 'id 必须是正整数', code: 'INVALID_ID' });
+        }
+        const id = parseInt(idStr, 10);
+        if (!Number.isSafeInteger(id)) {
+            cleanupPending();
+            return res.status(400).json({ error: 'id 超出安全整数范围', code: 'INVALID_ID' });
+        }
+        if (!Number.isSafeInteger(userId) || userId <= 0) {
+            cleanupPending();
+            return res.status(400).json({ error: '当前用户 id 非法', code: 'INVALID_USER_ID' });
+        }
+
+        // === 前置：附件必填校验 ===
+        const resultDataFile = req.files && req.files.result_data && req.files.result_data[0];
+        const screenshotFile = req.files && req.files.result_data_screenshot && req.files.result_data_screenshot[0];
+        if (!resultDataFile || !screenshotFile) {
+            cleanupPending();
+            return res.status(400).json({
+                error: 'result_data + result_data_screenshot 均必填',
+                code: 'MISSING_REQUIRED_FILES'
+            });
+        }
+
+        // === 前置：result_data 文件二次校验（按 result_data 规则：.xlsx/.xls + 100MB）===
+        const dataCheck = validateCollabAttachmentRule('result_data', resultDataFile.originalname, resultDataFile.size);
+        if (!dataCheck.ok) {
+            cleanupPending();
+            return res.status(400).json({ error: dataCheck.error, code: 'INVALID_RESULT_DATA' });
+        }
+        // === 前置：screenshot 文件二次校验（按 screenshot 规则：图片 + 10MB，codex 39 L-2 采纳）===
+        const shotCheck = validateCollabAttachmentRule('screenshot', screenshotFile.originalname, screenshotFile.size);
+        if (!shotCheck.ok) {
+            cleanupPending();
+            return res.status(400).json({ error: shotCheck.error, code: 'INVALID_SCREENSHOT' });
+        }
+
+        // === 前置：export_summary 校验（可选，≤500 字，codex 39 L-1 采纳）===
+        let exportSummary = null;
+        if (req.body && req.body.export_summary !== undefined && req.body.export_summary !== null) {
+            if (typeof req.body.export_summary !== 'string') {
+                cleanupPending();
+                return res.status(400).json({ error: 'export_summary 必须是字符串', code: 'INVALID_EXPORT_SUMMARY' });
+            }
+            const trimmed = req.body.export_summary.trim();
+            if (trimmed.length > EXPORT_SUMMARY_MAX_LEN) {
+                cleanupPending();
+                return res.status(400).json({
+                    error: `export_summary 不能超过 ${EXPORT_SUMMARY_MAX_LEN} 字符`,
+                    code: 'EXPORT_SUMMARY_TOO_LONG',
+                    max_length: EXPORT_SUMMARY_MAX_LEN,
+                    actual_length: trimmed.length
+                });
+            }
+            exportSummary = trimmed || null;  // 空串视为未填
+        }
+
+        // === 在 collabExporterTransitionMutex 内执行主流程（codex 39 M-6 采纳 mutex 必须）===
+        let release;
+        try {
+            release = await collabExporterTransitionMutex.acquire(5000);
+        } catch (mutexErr) {
+            cleanupPending();
+            logger.warn(`[submit-export] 协作单 #${id} 等待 collabExporterTransitionMutex 超时: ${mutexErr.message}`);
+            return res.status(503).json({
+                error: '系统繁忙，请稍后重试',
+                code: 'COLLAB_EXPORTER_MUTEX_BUSY'
+            });
+        }
+
+        let movedFiles = [];  // [{ attachment_type, final_path, original_name }]
+        let supersededAttachments = [];  // codex 39 H-2 采纳：日志 + 响应记录覆盖附件
+        let collabSnapshot = null;        // 用于钉钉副作用
+
+        try {
+            // === 取协作单 ===
+            const collab = await dbGetAsync(
+                `SELECT id, status, archived_at, archived_final_at, oa_request_no, description,
+                        developer_id, exporter_user_id, exporter_name, attachment_dir, submission_version,
+                        requester_dept, requester_name
+                   FROM collab_requests WHERE id = ?`,
+                [id]
+            );
+            if (!collab) {
+                cleanupPending();
+                return res.status(404).json({ error: '协作单不存在', code: 'NOT_FOUND' });
+            }
+
+            // === 软删除 / 归档守卫 ===
+            if (collabSubmitHelpers.isSoftArchived(collab)) {
+                cleanupPending();
+                return res.status(409).json({ error: '协作单已作废，不可提交', code: 'PARENT_SOFT_ARCHIVED' });
+            }
+            if (collabSubmitHelpers.isFinalArchived(collab)) {
+                cleanupPending();
+                return res.status(409).json({ error: '协作单已归档锁定，不可提交', code: 'PARENT_ARCHIVED_LOCKED' });
+            }
+
+            // === 状态守卫：仅 EXPORTING 可调 ===
+            if (collab.status !== 'EXPORTING') {
+                cleanupPending();
+                return res.status(409).json({
+                    error: `仅 EXPORTING 状态可提交，当前状态：${collab.status}`,
+                    code: 'INVALID_STATE_FOR_EXPORT_SUBMIT',
+                    current_status: collab.status
+                });
+            }
+
+            // === 权限守卫：仅当前 exporter 可提交 ===
+            if (collab.exporter_user_id == null || Number(collab.exporter_user_id) !== userId) {
+                cleanupPending();
+                return res.status(403).json({
+                    error: '仅当前数据导出人可提交（admin 兜底请走 admin-submit-on-behalf endpoint）',
+                    code: 'ONLY_EXPORTER_CAN_SUBMIT'
+                });
+            }
+
+            // === 文件落盘：照搬 admin-submit-on-behalf 路径（codex 39 H-1 采纳）===
+            const versInternal = collabVersioning._internal;
+
+            // ① 路径校验：每个 multer 文件必须在 _pending/{id}/ 下
+            const pendingRoot = path.join(COLLAB_UPLOAD_BASE, '_pending', String(id));
+            const uploadedFiles = [
+                { attachment_type: 'result_data', file: resultDataFile },
+                // codex 39 H-3 采纳：multer field 名 result_data_screenshot 但入库 attachment_type='screenshot'
+                { attachment_type: 'screenshot', file: screenshotFile }
+            ];
+            for (const item of uploadedFiles) {
+                const check = versInternal.ensureInsideRoot(item.file.path, pendingRoot);
+                if (!check.ok) {
+                    cleanupPending();
+                    logger.warn(`[submit-export] 路径越界: ${check.error}`);
+                    return res.status(400).json({ error: '附件路径校验失败', code: 'PATH_VIOLATION' });
+                }
+            }
+
+            // ② 决定目标目录（首次激活才需算）
+            let attachmentDirName = collab.attachment_dir;
+            if (!attachmentDirName) {
+                attachmentDirName = versInternal.computeAttachmentDirName(id, collab.description);
+            }
+            const targetDir = path.join(COLLAB_UPLOAD_BASE, attachmentDirName);
+            const targetCheck = versInternal.ensureInsideRoot(targetDir, COLLAB_UPLOAD_BASE);
+            if (!targetCheck.ok) {
+                cleanupPending();
+                return res.status(400).json({ error: '目标目录越界', code: 'PATH_VIOLATION' });
+            }
+            if (!fs.existsSync(targetDir)) {
+                fs.mkdirSync(targetDir, { recursive: true });
+            }
+
+            // ③ rename 文件到正式目录（失败立即回滚 + 清 pending）
+            try {
+                for (const item of uploadedFiles) {
+                    const finalName = path.basename(item.file.path);  // multer 已生成 ts_rand_safeName
+                    const finalPath = path.join(targetDir, finalName);
+                    fs.renameSync(item.file.path, finalPath);
+                    movedFiles.push({
+                        attachment_type: item.attachment_type,
+                        final_path: finalPath,
+                        original_name: item.file.originalname,
+                    });
+                }
+            } catch (renameErr) {
+                logger.error(`[submit-export] 文件移动失败: ${renameErr.message}`);
+                try {
+                    await versInternal.moveToOrphaned(
+                        movedFiles.map(f => ({ final_path: f.final_path })),
+                        id, (collab.submission_version || 0), COLLAB_UPLOAD_BASE, logger
+                    );
+                } catch (_) { /* ignore */ }
+                cleanupPending();
+                return res.status(500).json({ error: '附件文件移动失败', code: 'FILE_MOVE_FAILED' });
+            }
+
+            // === 阶段 1：BEGIN IMMEDIATE 事务（supersede 同 type 旧 active + INSERT 新 active + UPDATE collab_requests + INSERT log）===
+            const newSubmissionVersion = collab.submission_version || 0;  // codex 39 H-1：不递增
+
+            try {
+                await dbRunAsync('BEGIN IMMEDIATE TRANSACTION');
+
+                // 先查同 type 旧 active 用于日志（codex 39 H-2 + M-4 采纳）
+                // 注意：screenshot 类型也会同 type supersede，这是预期（避免一对多 active screenshot 混淆来源）
+                supersededAttachments = await dbAllAsync(
+                    `SELECT id, attachment_type, original_name, uploaded_by, uploaded_by_name
+                       FROM collab_attachments
+                      WHERE collab_request_id = ?
+                        AND attachment_type IN ('result_data', 'screenshot')
+                        AND status = 'active'`,
+                    [id]
+                );
+
+                // supersede 同 type 旧 active
+                for (const mf of movedFiles) {
+                    await dbRunAsync(
+                        `UPDATE collab_attachments
+                            SET status='superseded', superseded_at=datetime('now','localtime')
+                          WHERE collab_request_id=?
+                            AND attachment_type=?
+                            AND status='active'`,
+                        [id, mf.attachment_type]
+                    );
+                    // INSERT 新 active 行
+                    const relPath = path.relative(path.dirname(COLLAB_UPLOAD_BASE), mf.final_path).replace(/\\/g, '/');
+                    await dbRunAsync(
+                        `INSERT INTO collab_attachments
+                            (collab_request_id, attachment_type, file_name, original_name,
+                             uploaded_by, uploaded_by_name, submission_version, status, superseded_at)
+                         VALUES (?, ?, ?, ?, ?, ?, ?, 'active', NULL)`,
+                        [id, mf.attachment_type, relPath, mf.original_name,
+                         userId, userName, newSubmissionVersion]
+                    );
+                }
+
+                // UPDATE collab_requests：EXPORTING → SUBMITTED
+                // codex 39 M-5 采纳：清 sql_validation_status + sql_validation_error（不残留 dev submit 旧校验）
+                // 双轨守卫：status=EXPORTING + exporter_user_id=userId + archived 双轨
+                const updResult = await dbRunAsync(
+                    `UPDATE collab_requests
+                        SET status = 'SUBMITTED',
+                            export_summary = ?,
+                            submitted_at = COALESCE(submitted_at, datetime('now','localtime')),
+                            last_submitted_at = datetime('now','localtime'),
+                            sql_validation_status = NULL,
+                            sql_validation_error = NULL,
+                            validation_started_at = NULL,
+                            done_at = NULL,
+                            attachment_dir = COALESCE(attachment_dir, ?)
+                      WHERE id = ?
+                        AND status = 'EXPORTING'
+                        AND exporter_user_id = ?
+                        AND archived_at IS NULL
+                        AND archived_final_at IS NULL`,
+                    [exportSummary, attachmentDirName, id, userId]
+                );
+
+                if (!updResult || updResult.changes === 0) {
+                    await dbRunAsync('ROLLBACK');
+                    // 已移动的文件挪 _orphaned/{id}_v{ver}_{ts}/ 避免污染正式目录
+                    try {
+                        await versInternal.moveToOrphaned(
+                            movedFiles, id, newSubmissionVersion, COLLAB_UPLOAD_BASE, logger
+                        );
+                    } catch (_) { /* ignore */ }
+                    return res.status(409).json({
+                        error: '协作单状态已变更，请刷新后重试',
+                        code: 'CONCURRENT_STATE_CHANGE'
+                    });
+                }
+
+                // INSERT operation_logs SUBMIT_EXPORT（codex 39 H-2 + L-3 采纳：reason JSON 含完整审计信息）
+                await dbRunAsync(
+                    `INSERT INTO collab_operation_logs (collab_request_id, operation_type, operator_id, operator, reason)
+                     VALUES (?, 'SUBMIT_EXPORT', ?, ?, ?)`,
+                    [id, userId, userName, JSON.stringify({
+                        exporter_user_id: collab.exporter_user_id,
+                        exporter_name: collab.exporter_name,
+                        export_summary: exportSummary,
+                        has_summary: !!exportSummary,
+                        summary_length: exportSummary ? exportSummary.length : 0,
+                        // codex 39 H-2 采纳：记录被 supersede 的附件 id/type/original_name + uploaded_by
+                        // 用于复盘"谁的交付物被谁覆盖"（含跨人覆盖：dev 提交后 exporter 重交、或 exporter 重传）
+                        superseded_attachments: supersededAttachments.map(a => ({
+                            id: a.id,
+                            attachment_type: a.attachment_type,
+                            original_name: a.original_name,
+                            uploaded_by: a.uploaded_by,
+                            uploaded_by_name: a.uploaded_by_name
+                        })),
+                        newly_uploaded: movedFiles.map(mf => ({
+                            attachment_type: mf.attachment_type,
+                            original_name: mf.original_name
+                        }))
+                    })]
+                );
+
+                await dbRunAsync('COMMIT');
+            } catch (txErr) {
+                try { await dbRunAsync('ROLLBACK'); } catch { /* ignore */ }
+                if (movedFiles.length > 0) {
+                    try {
+                        await versInternal.moveToOrphaned(
+                            movedFiles, id, newSubmissionVersion, COLLAB_UPLOAD_BASE, logger
+                        );
+                    } catch (_) { /* ignore */ }
+                }
+                logger.error(`[submit-export] 协作单 #${id} DB 事务失败: ${txErr.message}`, txErr);
+                return res.status(500).json({ error: '提交失败，请重试', code: 'DB_TRANSACTION_FAILED' });
+            }
+
+            // 快照供钉钉副作用使用（commit 后即可读最新状态）
+            collabSnapshot = await getCollabWithDbName(id);
+
+            logger.info(`[submit-export] 协作单 #${id} EXPORTING → SUBMITTED by ${userName}(exporter id=${userId}) summary_len=${exportSummary ? exportSummary.length : 0} superseded=${supersededAttachments.length}`);
+
+            // === 响应（codex 39 L-3 采纳：固定结构供 Commit F 直接消费）===
+            res.json({
+                success: true,
+                current_status: 'SUBMITTED',
+                export_summary: exportSummary,
+                superseded_attachments: supersededAttachments.map(a => ({
+                    id: a.id,
+                    attachment_type: a.attachment_type,
+                    original_name: a.original_name,
+                    uploaded_by: a.uploaded_by,
+                    uploaded_by_name: a.uploaded_by_name
+                }))
+            });
+        } catch (e) {
+            cleanupPending();
+            logger.error(`[submit-export] 协作单 #${id} 提交异常: ${e.message}`, e);
+            return res.status(500).json({ error: '提交失败，请联系管理员', code: 'SUBMIT_EXPORT_FAILED' });
+        } finally {
+            if (release) release();
+        }
+
+        // === 钉钉副作用（commit 后执行，失败仅记日志不影响业务返回；codex 39 M-3 采纳：dev + admin best-effort）===
+        // 注意：response 已经返回给前端，此处异步执行不阻塞前端
+        if (!collabSnapshot) return;  // 防御：理论不会发生，已 commit 必有 snapshot
+        (async () => {
+            try {
+                const escape = dingtalkNotify.escapeMarkdown;
+                const safeOaNo = escape(collabSnapshot.oa_request_no || '-');
+                const safeUserName = escape(userName);
+                const rawPreview = exportSummary
+                    ? (exportSummary.length > 80 ? exportSummary.slice(0, 80) + '...' : exportSummary)
+                    : '（导出人未填写操作概要）';
+                const summaryPreview = escape(rawPreview);
+
+                const platformBaseUrl = await readSystemConfig('platform_base_url') || 'http://192.168.1.100:3000';
+                const detailUrl = `${platformBaseUrl}/Data_Collab.html?id=${id}`;
+
+                // codex 40 审 S-1 修复：title 也是 markdown 字段，所有动态值用 escape 过的 safeOaNo（沿用 codex 31 审 #7 high 原则）
+                const title = `[OA-${safeOaNo}] 数据导出人已提交`;
+                const markdown = [
+                    `### 数据协作单 OA-${safeOaNo}`,
+                    '',
+                    `- **导出人**:${safeUserName}`,
+                    `- **操作概要**:${summaryPreview}`,
+                    '',
+                    `[👉 查看详情](${detailUrl})`
+                ].join('\n');
+
+                // 推 developer（原 dev）
+                if (collabSnapshot.developer_id) {
+                    const devUser = await dbGetAsync(
+                        `SELECT id, display_name, phone, dingtalk_user_id
+                           FROM users WHERE id = ? AND status = 'active'`,
+                        [collabSnapshot.developer_id]
+                    );
+                    if (devUser) {
+                        const r = await sendCollabDingtalkRaw(id, devUser, title, markdown, { id: userId, name: userName });
+                        if (r.ok) {
+                            insertCollabLog(id, 'NOTIFY_DEV_EXPORT_SUBMIT', userId, userName, null);
+                        } else {
+                            logger.warn(`[submit-export-notify] 协作单 #${id} 通知 dev 失败：${r.body && r.body.error}（reason=${r.body && r.body.reason}）`);
+                        }
+                    } else {
+                        logger.info(`[submit-export-notify] 协作单 #${id} 无可通知的 dev（用户不存在或停用）`);
+                    }
+                }
+
+                // 推 admin（best-effort，复用 POST /submit 的"取最早 active admin"模式）
+                const adminUser = await dbGetAsync(
+                    `SELECT id, display_name, phone, dingtalk_user_id
+                       FROM users
+                      WHERE role = 'admin' AND status = 'active' AND phone IS NOT NULL AND phone != ''
+                      ORDER BY created_at ASC LIMIT 1`
+                );
+                if (adminUser) {
+                    const r = await sendCollabDingtalkRaw(id, adminUser, title, markdown, { id: userId, name: userName });
+                    if (r.ok) {
+                        insertCollabLog(id, 'NOTIFY_ADMIN_EXPORT_SUBMIT', userId, userName, null);
+                    } else {
+                        logger.warn(`[submit-export-notify] 协作单 #${id} 通知 admin 失败：${r.body && r.body.error}（reason=${r.body && r.body.reason}）`);
+                    }
+                } else {
+                    logger.info(`[submit-export-notify] 协作单 #${id} 无可通知的 admin（无手机号或全停用）`);
+                }
+            } catch (e) {
+                logger.warn(`[submit-export-notify] 协作单 #${id} 钉钉触发异常：${e.message}`);
+            }
+        })();
+    }
+);
+
 app.post('/api/collab/requests/:id/bypass', authenticateToken, requireAdmin, async (req, res) => {
     const idStr = req.params.id;
     const userId = req.user.id;
@@ -13123,18 +14242,31 @@ app.use((err, req, res, next) => {
 });
 
 // 8. 删除附件
-//    v1.67.1 权限矩阵改造（2026-05-20）：
-//    - ARCHIVED 协作单：仅 admin 可删（归档锁定，除 admin 外全员只读）
-//    - DONE 协作单 + result_* 类型：仅当前 developer 可删（用于修改交付物再重传走 smoke test）+ admin 兜底
-//    - DONE 协作单 + 非 result_* 类型（screenshot/example_xlsx）：仅 admin 可删（admin 创建附件，开发不应改）
-//    - 其他状态（PENDING_ASSIGN/PENDING/SUBMITTED）：上传人本人或 admin/publisher 可删
-//    - 软删除 archived_at：拒绝任何人删（数据保留审计）
+//    v1.71.0 权限矩阵（按"前置闸门 + 状态/类型二级限制"两阶段）：
+//
+//    ⏤ 阶段 0（最高优先级，硬阻断）：软删除守卫
+//      - archived_at 非空 → 409 PARENT_SOFT_ARCHIVED（任何人不可改，含 admin）
+//
+//    ⏤ 阶段 1（按人锁前置闸门，v1.71.0 引入，方案 §2.2 + v0.1 D5）：
+//      checkAttachmentOwnerOrAdmin(att, req.user)
+//      - admin 任何 attachment 都可越权 → 通过
+//      - 非 admin 仅 attachment.uploaded_by === req.user.id 通过；其余 403 ATTACHMENT_OWNER_LOCKED
+//      - publisher 不再越权（v1.66 前历史能力被 v0.1 D5 B1-锁 收回；其他 endpoint 的 isPrivileged 不动）
+//
+//    ⏤ 阶段 2（通过闸门后的状态/类型二级限制）：
+//      - ARCHIVED 协作单：仅 admin（owner 非 admin 已无法走到这里，admin 兜底）→ 403 PARENT_ARCHIVED_LOCKED
+//      - failed 附件：admin 任何状态可清；非 admin 仅 PENDING/PENDING_ASSIGN/SUBMITTED 可清（已由阶段 1 限定 = 上传人本人）
+//      - DONE 协作单 + result_* 类型：非 admin 当前 developer 仅可删自己上传的（owner 闸门已强制）；
+//                                       非 result_* 类型（screenshot/example_xlsx）：仅 admin
+//      - 其他状态（PENDING_ASSIGN/PENDING/SUBMITTED）：owner 闸门已强制，无额外限制
+//
+//    历史 mismatch 注意：v1.70.5 ADMIN_SUBMIT_ON_BEHALF 兜底产生的 result_* 由 admin 上传，
+//      原 developer 在 v1.71.0 后无法自助修改，需找 admin 重传（见 scripts/verify-result-attachment-owner-consistency.js）
 app.delete('/api/collab/attachments/:attId', authenticateToken, requireNonViewer, async (req, res) => {
     const { attId } = req.params;
     const userId = req.user.id;
     const userName = req.user.display_name || req.user.username;
     const isAdmin = req.user.role === 'admin';
-    const isPrivileged = ['admin', 'publisher'].includes(req.user.role);
 
     try {
         const att = await dbGetAsync('SELECT * FROM collab_attachments WHERE id = ?', [attId]);
@@ -13154,7 +14286,19 @@ app.delete('/api/collab/attachments/:attId', authenticateToken, requireNonViewer
             });
         }
 
+        // v1.71.0 方案 §2.2 + v0.1 D5：按人锁前置闸门
+        //   - 仅 admin 可越权操作他人附件；publisher 不再越权（v1.66 前历史能力被 v0.1 B1-锁 收回）
+        //   - 闸门后的业务分支按 attachment_type / status 做精细化拒绝（保留细分错误码）
+        //   - ARCHIVED 状态下 admin 兜底逻辑在闸门后继续生效（admin 走通闸门进入分支）
+        const ownerCheck = collabSubmitHelpers.checkAttachmentOwnerOrAdmin(att, req.user);
+        if (!ownerCheck.ok) {
+            return res.status(403).json({ error: ownerCheck.reason, code: ownerCheck.code });
+        }
+
         // ARCHIVED 归档锁定（v1.67.1）：仅 admin 可改
+        // 注：闸门已让"非 admin 他人"在 ATTACHMENT_OWNER_LOCKED 处被拦截；
+        //     此处 isFinalArchived 分支仅拦截"非 admin 上传人本人"——
+        //     归档后即使是上传人本人也不能改，仅 admin 兜底
         if (collabSubmitHelpers.isFinalArchived(parent)) {
             if (!isAdmin) {
                 return res.status(403).json({
@@ -13166,7 +14310,7 @@ app.delete('/api/collab/attachments/:attId', authenticateToken, requireNonViewer
             // v1.70.0 方案 §1.2：failed 附件跨状态分支（codex 24 审 #1 改正向白名单）
             //   - admin 任何状态都可删（含 failed 历史清理）
             //   - 非管理员仅 PENDING/PENDING_ASSIGN/SUBMITTED 三态可删（未来新增状态默认拒绝）
-            //   - 三态内还需 uploaded_by 本人或 publisher
+            //   - "uploaded_by 本人"约束已由前置闸门 checkAttachmentOwnerOrAdmin 强制（v1.71.0）
             //   - DONE / ARCHIVED 等其他状态下 failed 仅 admin 可清（保留作为审计证据）
             if (!isAdmin) {
                 const FAILED_DELETE_ALLOWED_STATES = ['PENDING', 'PENDING_ASSIGN', 'SUBMITTED'];
@@ -13176,9 +14320,7 @@ app.delete('/api/collab/attachments/:attId', authenticateToken, requireNonViewer
                         code: 'FAILED_KEEP_FOR_AUDIT'
                     });
                 }
-                if (att.uploaded_by !== userId && !isPrivileged) {
-                    return res.status(403).json({ error: '只能删除自己上传的失败附件' });
-                }
+                // owner 检查已在前置闸门完成，此处分支不再判（v1.71.0 publisher 越权收权）
             }
         } else if (parent.status === 'DONE') {
             // DONE 状态：开发本人可改自己单的 result_* 交付物（用于修改后重走 smoke test）
@@ -13200,12 +14342,11 @@ app.delete('/api/collab/attachments/:attId', authenticateToken, requireNonViewer
                     });
                 }
             }
-        } else {
-            // 其他状态（PENDING_ASSIGN / PENDING / SUBMITTED）：上传人本人或 admin/publisher 可删
-            if (att.uploaded_by !== userId && !isPrivileged) {
-                return res.status(403).json({ error: '只能删除自己上传的附件' });
-            }
         }
+        // 其他状态（PENDING_ASSIGN / PENDING / SUBMITTED）：
+        //   v1.71.0 前：上传人本人或 admin/publisher 可删
+        //   v1.71.0 后：owner 检查已由前置闸门 checkAttachmentOwnerOrAdmin 强制（publisher 越权收权）
+        //   本分支不再额外判，直接走删除流程
 
         // 删数据库记录
         await dbRunAsync('DELETE FROM collab_attachments WHERE id = ?', [attId]);

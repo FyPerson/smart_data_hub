@@ -16,6 +16,8 @@
  *   admin (id=1)
  *   示例用户A demo_user_a (id=3, user) 作为 contact_person
  *   示例用户B demo_user_b (id=19, user) 作为 developer
+ *   示例发布者 13857133559 (id=7, publisher) — v1.71.0 attachment 按人锁 e2e 用（验证 publisher 收权）
+ *   刘林航 15270240365 (id=8, user) — v1.71.0 三级转发 e2e 作 exporter（数据导出人）
  */
 'use strict';
 
@@ -32,6 +34,8 @@ const JWT_SECRET = process.env.JWT_SECRET || 'default_secret_key_change_me';
 const ADMIN_ID = 1;
 const CONTACT_ID = 3;
 const DEV1_ID = 19;
+const PUBLISHER_ID = 7;
+const EXPORTER_ID = 8;  // v1.71.0 三级转发 e2e 用（user 角色，与 dev1 不同人）
 const TARGET_DB_CONN_ID = 2;
 
 async function signAs(userId) {
@@ -158,6 +162,8 @@ module.exports = {
     ADMIN_ID,
     CONTACT_ID,
     DEV1_ID,
+    PUBLISHER_ID,
+    EXPORTER_ID,
     TARGET_DB_CONN_ID,
     signAs,
     apiCall,

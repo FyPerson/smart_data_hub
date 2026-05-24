@@ -594,6 +594,124 @@ function clearCachedToken() {
     cachedTokenExpiry = 0;
 }
 
+/**
+ * v1.71.0 三级转发：钉钉群加人。
+ *
+ * 钉钉接口:POST oapi.dingtalk.com/chat/update
+ *   - access_token 在 query string(与 createChatGroup 同模式)
+ *   - errcode=0 软成功(F1 真跑验证:加重复人 errcode=0,加无效 userid 也 errcode=0+errorUserIds 字段)
+ *   - errcode!=0 不抛错,放返回对象里,由调用方走 classifyAddUserErrcode
+ *
+ * @param {string} accessToken  access_token
+ * @param {string} chatid       钉钉群 chatid(不是 openConversationId)
+ * @param {string[]} useridList 钉钉 userid 数组(单元素或多元素)
+ * @returns {Promise<{ok: boolean, errcode: number, errmsg: string, errorUserIds: string[]|null}>}
+ * @throws {Error}  HTTP 5xx / 非 JSON / 网络错误
+ */
+async function addUserToChat(accessToken, chatid, useridList) {
+    // codex 34 审 M-2 部分采纳：基础形态校验对齐 createChatGroup line 182-187
+    if (!Array.isArray(useridList) || useridList.length === 0) {
+        throw new Error('addUserToChat: useridList 必须是非空数组');
+    }
+
+    const url = `https://oapi.dingtalk.com/chat/update?access_token=${encodeURIComponent(accessToken)}`;
+    const body = { chatid, add_useridlist: useridList };
+
+    const resp = await fetchWithTimeout(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+    });
+
+    if (resp.status >= 500) {
+        const err = new Error(`chat/update HTTP ${resp.status}`);
+        err.httpStatus = resp.status;
+        throw err;
+    }
+
+    let data;
+    try {
+        data = await resp.json();
+    } catch (parseErr) {
+        const err = new Error(`chat/update non-JSON response: ${parseErr.message}`);
+        err.httpStatus = resp.status;
+        throw err;
+    }
+
+    return {
+        ok: data.errcode === 0,
+        errcode: data.errcode,
+        errmsg: data.errmsg || '',
+        errorUserIds: data.errorUserIds ? safeParseUserIdList(data.errorUserIds) : null
+    };
+}
+
+/**
+ * v1.71.0 三级转发：兼容钉钉 errorUserIds 字段三种返回形态。
+ *
+ * F1 真跑实测：钉钉文档说返回数组，但生产环境曾观察到字符串形态(可能是 JSON 数组字符串
+ * 或单值字符串)。统一归一化为数组。
+ *
+ * @param {string[]|string|null|undefined} raw
+ * @returns {string[]|null}
+ */
+function safeParseUserIdList(raw) {
+    if (Array.isArray(raw)) return raw;
+    if (typeof raw === 'string') {
+        try {
+            const parsed = JSON.parse(raw);
+            return Array.isArray(parsed) ? parsed : [raw];
+        } catch {
+            return [raw];
+        }
+    }
+    return null;
+}
+
+/**
+ * v1.71.0 三级转发：F1 实测 errcode 分类（业务层据此决策落库/重试/告警）。
+ *
+ * kind 含义：
+ *   - soft_success：errcode=0 且 errorUserIds 空，正常成功 OR 已在群幂等
+ *   - hard_fail：终态失败，业务层记日志 + 告警 admin，不重试
+ *   - retry：可重试（refresh token 或 backoff），业务层重试 1 次
+ *   - other：未分类，记日志 + 告警
+ *
+ * errcode 来源标注（codex 34 审 rec 3）：
+ *   - F1 真跑实测：0（含 errorUserIds 软失败子集）/ 0（加重复人幂等）/ 49016
+ *   - 文档推断（未真跑，注意可信度）：60011 / 60020 / 88 / 40014 / 90002 / 400013 / 90100
+ *
+ * @param {number} errcode
+ * @param {string[]|null} errorUserIds  钉钉返出错的 userid（errcode=0 软失败 + errcode=49016 都有值）
+ * @returns {{kind: 'soft_success'|'hard_fail'|'retry'|'other', action: string, detail?: string}}
+ */
+function classifyAddUserErrcode(errcode, errorUserIds) {
+    // codex 34 审 H-1：F1 真跑事实——errcode=0 + errorUserIds 非空 = 部分失败子集
+    // 必须先于"errcode=0 → soft_success"判断，否则失败子集会被误标为已入群
+    if (errcode === 0 && Array.isArray(errorUserIds) && errorUserIds.length > 0) {
+        return {
+            kind: 'hard_fail',
+            action: 'mark_userid_invalid',
+            detail: `钉钉返回 errcode=0 但 errorUserIds 非空（部分失败子集）：${errorUserIds.join(',')}（检查 users.dingtalk_user_id 是否过期/离职）`
+        };
+    }
+    if (errcode === 0) return { kind: 'soft_success', action: 'added_to_chat' };
+    if (errcode === 49016) return {
+        kind: 'hard_fail',
+        action: 'mark_userid_invalid',
+        detail: `钉钉员工不存在：${(errorUserIds || []).join(',')}（检查 users.dingtalk_user_id 是否过期/离职）`
+    };
+    if (errcode === 60011) return { kind: 'hard_fail', action: 'alert_admin_permission_revoked' };
+    if (errcode === 60020) return { kind: 'retry', action: 'backoff_retry' };
+    // codex 34 审 M-1：对齐同文件 classifyError line 336-345（88 = user_invalid）
+    // 此前与 40014 一起归 refresh_token_retry 是抄方案骨架未核对，F1 未真跑过 chat/update 拿到 88
+    if (errcode === 88) return { kind: 'hard_fail', action: 'mark_userid_invalid', detail: '钉钉用户不存在（errcode=88，对齐 classifyError 语义）' };
+    if (errcode === 40014) return { kind: 'retry', action: 'refresh_token_retry' };
+    if (errcode === 90002) return { kind: 'hard_fail', action: 'alert_chat_full' };
+    if (errcode === 400013 || errcode === 90100) return { kind: 'hard_fail', action: 'mark_chatid_invalid' };
+    return { kind: 'other', action: 'log_and_alert', detail: `未分类 errcode=${errcode}` };
+}
+
 module.exports = {
     getAccessToken,
     getUserIdByMobile,
@@ -610,6 +728,10 @@ module.exports = {
     createChatGroup,
     sendGroupMessage,
     escapeMarkdown,
+    // v1.71.0 三级转发：钉钉群加人 + errcode 分类
+    addUserToChat,
+    safeParseUserIdList,
+    classifyAddUserErrcode,
     // 测试导出(下划线前缀,生产代码不要用)
     _resetCacheForTest,
     _getCacheStateForTest

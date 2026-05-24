@@ -6,7 +6,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>数据协作 - 智数协同平台</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="assets/css/style.css?v=1.2">
+    <link rel="stylesheet" href="assets/css/style.css?v=v1.71.0">
     <style>
         /* 筛选栏 */
         .filter-bar {
@@ -1103,6 +1103,110 @@
         </div>
     </div>
 
+    <!-- v1.71.0 三级转发：forwardToExporter 弹框（方案 §4 + codex 39 取舍审 + codex 41 M-5 预选 contact+dev）-->
+    <div class="modal-overlay" id="forwardToExporterModal">
+        <div class="modal-card">
+            <div class="modal-header">
+                <h3 id="forwardToExporterTitle">转发给数据导出人</h3>
+                <button class="modal-close" onclick="closeForwardToExporterModal()">×</button>
+            </div>
+            <div class="modal-body">
+                <div class="hint" style="background:#fef3c7;color:#92400e;padding:8px 10px;border-radius:6px;margin-bottom:12px;">
+                    ⚠️ 请先与相关人员沟通确认可以从系统端导出，然后再拉人进群
+                </div>
+                <div class="form-row">
+                    <label>数据导出人 <span class="required">*</span></label>
+                    <select id="f_forward_exporter">
+                        <option value="">加载中...</option>
+                    </select>
+                    <div class="hint">下拉显示全部活跃用户，凭备注辨识。</div>
+                </div>
+                <div class="form-row">
+                    <label>沟通对象（多选留痕） <span class="required">*</span></label>
+                    <select id="f_forward_contact_user_ids" multiple size="5" style="height:auto">
+                    </select>
+                    <div class="hint">选择您事先沟通过的相关人员；默认预选当前对接人、开发与您自己。本字段仅作留痕，无需输入文字。</div>
+                </div>
+                <div id="forwardAttachmentTip" class="hint" style="display:none;background:#dbeafe;color:#1e40af;padding:8px 10px;border-radius:6px;margin-top:8px;">
+                    📎 <span id="forwardAttachmentCount">0</span> 个附件，是否告知导出人下载查看？
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-cancel" onclick="closeForwardToExporterModal()">取消</button>
+                <button class="btn btn-primary" id="btnForwardToExporter" onclick="submitForwardToExporter()">确认转发并拉群</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- v1.71.0 三级转发：returnToDev 弹框（方案 §5.3 + codex 39 取舍审 + codex 41 C-2 missing_info+return_note）-->
+    <div class="modal-overlay" id="returnToDevModal">
+        <div class="modal-card">
+            <div class="modal-header">
+                <h3 id="returnToDevTitle" style="color:#b91c1c;">退回任务给开发</h3>
+                <button class="modal-close" onclick="closeReturnToDevModal()">×</button>
+            </div>
+            <div class="modal-body">
+                <div class="hint" style="background:#fef3c7;color:#92400e;padding:8px 10px;border-radius:6px;margin-bottom:12px;">
+                    ⚠️ 退回后任务回到开发手中，您仍在群内可继续协助讨论
+                </div>
+                <div class="form-row">
+                    <label>退回原因 <span class="required">*</span></label>
+                    <select id="f_return_reason">
+                        <option value="">请选择原因...</option>
+                        <option value="business_permission">业务权限不够</option>
+                        <option value="dev_permission">需开发权限</option>
+                        <option value="underlying_query">需底层查询</option>
+                        <option value="missing_info">信息不完整</option>
+                        <option value="other">其他</option>
+                    </select>
+                </div>
+                <div class="form-row">
+                    <label>补充说明（可选）</label>
+                    <textarea id="f_return_note" rows="3" maxlength="500" placeholder="可选：简述退回的具体上下文（如缺哪些字段、需要哪些权限等）"></textarea>
+                    <div class="hint">最多 500 字。该说明将写入操作日志，供开发与 admin 复盘。</div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-cancel" onclick="closeReturnToDevModal()">取消</button>
+                <button class="btn" id="btnReturnToDev" style="background:#dc2626;color:white;" onclick="submitReturnToDev()">确认退回</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- v1.71.0 三级转发：exportUpload 弹框（方案 §6.3 + codex 39 H-3：multer field 名 result_data_screenshot）-->
+    <div class="modal-overlay" id="exportUploadModal">
+        <div class="modal-card">
+            <div class="modal-header">
+                <h3 id="exportUploadTitle">提交导出物</h3>
+                <button class="modal-close" onclick="closeExportUploadModal()">×</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-row">
+                    <label>结果数据 <span class="required">*</span></label>
+                    <input type="file" id="f_export_result_data" accept=".xlsx,.xls">
+                    <div class="hint">扩展名 .xlsx / .xls，单文件 ≤ 100MB。从业务系统导出的数据交付物。</div>
+                </div>
+                <div class="form-row">
+                    <label>导出界面截图 <span class="required">*</span></label>
+                    <input type="file" id="f_export_screenshot" accept=".png,.jpg,.jpeg,.gif,.webp">
+                    <div class="hint">扩展名 .png / .jpg / .jpeg / .gif / .webp，单文件 ≤ 10MB。截图作为导出操作凭证。</div>
+                </div>
+                <div class="form-row">
+                    <label>操作概要（可选）</label>
+                    <textarea id="f_export_summary" rows="4" maxlength="500" placeholder="可选：简述本次导出的范围与操作要点（如时间段、过滤条件、是否脱敏等）"></textarea>
+                    <div class="hint">最多 500 字。该概要将展示在详情页并附带在钉钉通知前 80 字。</div>
+                </div>
+                <div class="hint" style="margin-top:8px;color:#6b7280;">
+                    提交后协作单进入「已提交」状态，由开发或 admin 走最终验收 / 行政闭环。
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-cancel" onclick="closeExportUploadModal()">取消</button>
+                <button class="btn btn-primary" id="btnExportUpload" onclick="submitExportUpload()">提交</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Toast -->
     <div id="toast" class="toast"></div>
 
@@ -1113,7 +1217,7 @@
         <div class="img-lightbox-caption" id="imgLightboxCaption"></div>
     </div>
 
-    <script src="assets/js/app.js"></script>
+    <script src="assets/js/app.js?v=v1.71.0"></script>
     <script>
         // 部门枚举（与后端 COLLAB_REQUESTER_DEPTS 同步）
         const REQUESTER_DEPTS = [
@@ -1257,6 +1361,85 @@
             // 业务约束：file_name 必须以 collab/ 起头（attachment 都落在 uploads/collab/{rid}_xxx/ 下）
             if (segs[0] !== 'collab') return { ok: false, reason: 'not_collab_prefix' };
             return { ok: true, url: `/uploads/${segs.map(encodeURIComponent).join('/')}` };
+        }
+
+        // v1.71.0 Commit F codex 41 C-1 采纳：screenshot 来源稳定分类（反向排除法）
+        //
+        // 业务约束：screenshot 类型 INSERT 入口仅 2 处（已 grep 确认）：
+        //   ① POST /attachments（admin/contact 上传原始单据截图）→ uploaded_by ∈ {created_by, contact_person_id}
+        //   ② POST /submit-export（exporter 上传导出截图）→ uploaded_by = 历史 exporter（可能不等于当前 exporter_user_id，
+        //      因 return-to-dev 后再次 forward 给新 exporter 时旧 exporter 字段被覆盖）
+        //
+        // 反向排除法：uploaded_by 不在协作单"创建团队 {created_by, contact_person_id, developer_id}" 内 → 'export'
+        //   关键：不依赖 d.exporter_user_id（codex 41 C-1 指出该字段失真），不依赖 operation_logs（当前 reason JSON 未存历史 exporter）
+        //
+        // 业务约束：exporter 角色业务上不会同时是协作单的 admin/contact/dev（角色分工固定）
+        //
+        // 返回：'original' | 'export' | 'unknown'（'unknown' 仅在 attachment_type 非 'screenshot' 时使用 — 调用方应自行 filter）
+        // v1.71.0 UI 重定位 codex 43 M-1 采纳：取最新 RETURN_TO_DEV log 的统一 helper
+        // 后端 collab_operation_logs 返回 ORDER BY created_at DESC, id DESC（server.js line 10298）
+        // codex 44 M-1 grep 真相：实际 2 处复用 — renderInsufficientEvidenceSection + renderExporterNotifySubsection
+        // 注：renderExporterFieldRow 不复用，由 codex 43 M-2 "信息分层"硬边界决定（任务信息区只放身份语义，不放行为/原因/时间）
+        function getLatestReturnToDevLog(d) {
+            // 真相事实：GET /api/collab/requests/:id 返回字段名是 d.logs（不是 d.operation_logs）
+            // Playwright Step 13 实测发现 helper 一直在读 undefined → 退回原因始终显示"原因未填写"
+            if (!d || !Array.isArray(d.logs)) return null;
+            const logs = d.logs.filter(log => log && log.operation_type === 'RETURN_TO_DEV');
+            return logs.length > 0 ? logs[0] : null;
+        }
+
+        // RETURN_TO_DEV reason JSON 解析的统一 helper（含 5 枚举 + return_note）
+        // 返回 { reasonLabel, note }；缺失时显示"原因未填写"
+        const _RETURN_REASON_LABEL_MAP = {
+            business_permission: '业务权限不够',
+            dev_permission: '需开发权限',
+            underlying_query: '需底层查询',
+            missing_info: '信息不完整',
+            other: '其他'
+        };
+        function parseReturnToDevReason(returnLog) {
+            if (!returnLog || !returnLog.reason) return { reasonLabel: '原因未填写', note: '' };
+            try {
+                const parsed = JSON.parse(returnLog.reason);
+                const reasonLabel = _RETURN_REASON_LABEL_MAP[parsed.return_reason] || escapeHtml(parsed.return_reason || '原因未填写');
+                const note = parsed.return_note ? String(parsed.return_note) : '';
+                return { reasonLabel, note };
+            } catch {
+                // codex 44 L-1 采纳：JSON.parse 失败兜底
+                // 防御性编程：v1.71.0 后所有 RETURN_TO_DEV log 都是 Commit D endpoint 写的标准 JSON，
+                // 理论不会进 catch；但若未来格式变化或外部脚本写入非 JSON reason，避免静默丢失原文
+                const rawReason = String(returnLog.reason).trim();
+                return rawReason
+                    ? { reasonLabel: `旧格式原因：${escapeHtml(rawReason).slice(0, 80)}`, note: '' }
+                    : { reasonLabel: '原因未填写', note: '' };
+            }
+        }
+
+        // v1.71.0 UI 重定位 codex 43 M-3 采纳：forward-to-exporter 权限闸门 helper（与后端 server.js line 12266-12276 一致）
+        // 业务规则：PENDING 状态 + (admin || current dev || contact_person)
+        // 复用：decideFooterButtons（删 forward 分支前已弃用）/ renderExporterNotifySubsection（新增主消费方）
+        function canForwardToExporter(d, currentUserId, isAdminUser) {
+            if (!d || d.status !== 'PENDING') return false;
+            if (isAdminUser) return true;
+            const uid = Number(currentUserId);
+            if (!Number.isSafeInteger(uid) || uid <= 0) return false;
+            const devId = Number(d.developer_id) || 0;
+            const contactId = Number(d.contact_person_id) || 0;
+            return uid === devId || uid === contactId;
+        }
+
+        function getAttachmentSource(att, collab) {
+            // codex 42 L-1 采纳：加空 collab 防御，避免 helper 被未来调用方误传时抛异常
+            if (!att || !collab || att.attachment_type !== 'screenshot') return 'unknown';
+            const uid = Number(att.uploaded_by);
+            if (!Number.isSafeInteger(uid) || uid <= 0) return 'unknown';
+            const creatorId = Number(collab.created_by) || 0;
+            const contactId = Number(collab.contact_person_id) || 0;
+            const devId = Number(collab.developer_id) || 0;
+            // 在创建团队集合内 → 原始单据截图（admin/contact/dev 上传场景）
+            if (uid === creatorId || uid === contactId || uid === devId) return 'original';
+            // 不在创建团队 → 导出截图（仅 exporter 可能符合此条件）
+            return 'export';
         }
 
         // 部门下拉填充（含 group）
@@ -1474,6 +1657,114 @@
             } catch (e) { /* ignore */ }
         }
 
+        // v1.71.0 Commit F codex 41 M-4 采纳：详情页"数据导出人"字段语义切换（任务信息区块内追加）
+        // 标签规则（避免"前导出人"口语，避免 PENDING 后状态责任混淆）：
+        //   EXPORTING / SUBMITTED → "当前导出人"（责任在 exporter）
+        //   PENDING + exporter_user_id 非空 → "上次导出人（已退回）"（责任已回到 dev）
+        //   DONE / ARCHIVED → "导出经办人"（终态归档信息）
+        //   exporter_user_id 为空 → 不展示该行
+        function renderExporterFieldRow(d) {
+            if (!d.exporter_user_id) return '';
+            const name = escapeHtml(d.exporter_name || `user#${d.exporter_user_id}`);
+            const status = d.status;
+            let label, valueHtml;
+            if (status === 'EXPORTING' || status === 'SUBMITTED') {
+                label = '当前导出人';
+                valueHtml = name;
+            } else if (status === 'PENDING') {
+                label = '上次导出人';
+                valueHtml = `${name}<span style="margin-left:8px;color:#dc2626;font-size:12px;">· 已退回</span>`;
+            } else if (status === 'DONE' || status === 'ARCHIVED') {
+                label = '导出经办人';
+                valueHtml = name;
+            } else {
+                // PENDING_ASSIGN / 其他状态：保留字段但语义弱化
+                label = '导出经办人';
+                valueHtml = `<span style="color:#64748b;">${name}</span>`;
+            }
+            return `
+                <div class="detail-kv-label">${label}</div>
+                <div class="detail-kv-value">${valueHtml}</div>`;
+        }
+
+        // v1.71.0 Commit F codex 41 H-3 采纳：§5.4 够不上证据区块（PENDING + exporter_user_id 非空 + 有 exporter active 截图）
+        //   照搬 line 1501-1511 buildAttachmentDownloadUrl 完整模式（ok=false 提示 + escapeHtmlAttr + fmtDate）
+        //   触发场景：exporter 走 return-to-dev 后，dev 需要看到 exporter 之前提交的"够不上证据"附件
+        //   附件来源：getAttachmentSource(att, d) === 'export'（反向排除法）
+        function renderInsufficientEvidenceSection(d, isAdminUser) {
+            if (d.status !== 'PENDING' || !d.exporter_user_id) return '';
+            const exportFiles = (d.attachments || []).filter(
+                a => (a.status === 'active' || !a.status) && getAttachmentSource(a, d) === 'export'
+            );
+            if (exportFiles.length === 0) return '';
+
+            // v1.71.0 UI 重定位 codex 43 M-1 采纳：复用 getLatestReturnToDevLog + parseReturnToDevReason helper
+            // 避免与 renderExporterNotifySubsection 的退回原因解析口径漂移
+            const returnLog = getLatestReturnToDevLog(d);
+            const { reasonLabel: returnReasonLabel, note: returnNote } = parseReturnToDevReason(returnLog);
+            const returnNoteHtml = returnNote
+                ? `<div style="margin-top:6px;color:#7c2d12;font-size:13px;">补充说明：${escapeHtml(returnNote)}</div>`
+                : '';
+
+            const exporterName = escapeHtml(d.exporter_name || `user#${d.exporter_user_id}`);
+            const items = exportFiles.map(a => {
+                const built = buildAttachmentDownloadUrl(a.file_name);
+                const displayName = a.original_name || (a.file_name ? String(a.file_name).split('/').pop() : '附件');
+                const safeDisplay = escapeHtml(displayName);
+                const safeType = escapeHtml(a.attachment_type);
+                const safeTime = fmtDate(a.created_at);
+                const delBtn = isAdminUser
+                    ? `<button class="btn" style="margin-left:8px;padding:2px 8px;font-size:12px;background:#fef2f2;color:#dc2626;border:1px solid #fca5a5;" onclick="deleteEvidenceAttachment(${Number(a.id)})">删除</button>`
+                    : '';
+                if (!built.ok) {
+                    return `<li>
+                        <span style="color:#888;font-size:12px;margin-right:8px;">[${safeType}]</span>
+                        <span style="color:#dc2626;" title="附件路径非法（${escapeHtmlAttr(built.reason)}）">⚠️ ${safeDisplay}</span>
+                        <span style="margin-left:8px;color:#888;font-size:12px;">${safeTime}</span>
+                        ${delBtn}
+                    </li>`;
+                }
+                const urlAttr = escapeHtmlAttr(built.url);
+                return `<li>
+                    <span style="color:#888;font-size:12px;margin-right:8px;">[${safeType}]</span>
+                    <a href="${urlAttr}" target="_blank" rel="noopener" download="${escapeHtmlAttr(displayName)}" style="color:#7c2d12;text-decoration:none;">${safeDisplay}</a>
+                    <span style="margin-left:8px;color:#888;font-size:12px;">${safeTime}</span>
+                    ${delBtn}
+                </li>`;
+            }).join('');
+
+            return `
+                <div class="detail-section" style="background:#fef9e7;border-left:4px solid #f1c40f;border-radius:6px;">
+                    <div class="detail-section-title" style="color:#7d6608;">够不上证据：${exporterName} 退回前上传的附件 (${exportFiles.length})</div>
+                    <div class="detail-section-body">
+                        <div style="color:#af831c;font-size:13px;margin-bottom:8px;">退回原因：${returnReasonLabel}</div>
+                        ${returnNoteHtml}
+                        <ul style="list-style:none;padding:0;margin:8px 0 0 0;">${items}</ul>
+                    </div>
+                </div>`;
+        }
+
+        // v1.71.0 Commit F codex 41 L-3 采纳：§6.4 操作概要区块（SUBMITTED / DONE / ARCHIVED + export_summary 非空）
+        //   首版平铺 white-space: pre-wrap + max-width；不做折叠（4-5 用户内网场景）
+        function renderExportSummarySection(d) {
+            if (!d.export_summary) return '';
+            // 仅在 exporter 提交后的状态展示（避免 PENDING_ASSIGN/PENDING 等异常残留值展示）
+            const visibleStatuses = ['SUBMITTED', 'DONE', 'ARCHIVED'];
+            if (!visibleStatuses.includes(d.status)) return '';
+            const safeSummary = escapeHtml(d.export_summary);
+            const exporterLine = d.exporter_name
+                ? `<div style="color:#475569;font-size:13px;margin-bottom:6px;">导出人：${escapeHtml(d.exporter_name)}</div>`
+                : '';
+            return `
+                <div class="detail-section" style="background:#eef9fb;border-left:4px solid #5dade2;border-radius:6px;">
+                    <div class="detail-section-title" style="color:#1d4f72;">操作概要（导出人填写）</div>
+                    <div class="detail-section-body">
+                        ${exporterLine}
+                        <pre style="white-space:pre-wrap;font-family:inherit;font-size:13px;color:#2c3e50;margin:0;max-width:760px;background:transparent;border:0;padding:0;">${safeSummary}</pre>
+                    </div>
+                </div>`;
+        }
+
         function renderDetail(d) {
             const isAdminUser = (typeof isAdmin === 'function') && isAdmin();
             // codex 16 审 #5：id 数字化护栏（防后端将来返回字符串 id 导致内联 onclick 属性脆弱）
@@ -1503,7 +1794,7 @@
                 const built = buildAttachmentDownloadUrl(templateFile.file_name);
                 const displayName = templateFile.original_name || (templateFile.file_name ? String(templateFile.file_name).split('/').pop() : '数据模板');
                 if (!built.ok) {
-                    return `<span style="color:#dc2626" title="附件路径非法（${built.reason}），请联系管理员">⚠️ ${escapeHtml(displayName)}</span>`;
+                    return `<span style="color:#dc2626" title="附件路径非法（${escapeHtmlAttr(built.reason)}），请联系管理员">⚠️ ${escapeHtml(displayName)}</span>`;
                 }
                 // codex 十七审 #3：download 属性值用单引号包裹更稳（escapeHtml 已转 `&quot;`/`&#39;` 但属性边界双保险）
                 // codex 27 审 #2 一致性：URL 走 escapeHtmlAttr 防 attr 注入
@@ -1511,37 +1802,51 @@
             })() : '<span style="color:#9ca3af">—</span>';
 
             // v1.70.2 原始单据截图区块（admin 创建协作单时上传，所有角色可见）
-            // 修复 BUG：之前前端 0 处渲染 screenshot 类型附件，admin 上传后任何角色看不到
-            // 可见性：任何登录用户（admin/contact/developer/viewer）都能看 — 截图是业务上下文不是敏感数据
-            // 路径校验：复用 buildAttachmentDownloadUrl helper（codex 24 审 #7 过滤 .. / 空段 / 非 collab/ 前缀）
-            // 点击行为：缩略图 click 触发 openLightbox 放大查看原图（共用 lightbox 基础设施）
-            const screenshotFiles = (d.attachments || []).filter(a => a.attachment_type === 'screenshot');
-            let screenshotsHtml = '';
-            if (screenshotFiles.length > 0) {
-                const items = screenshotFiles.map(f => {
-                    const built = buildAttachmentDownloadUrl(f.file_name);
-                    const displayName = f.original_name || (f.file_name ? String(f.file_name).split('/').pop() : '截图');
-                    const safeDisplay = escapeHtml(displayName);
-                    if (!built.ok) {
-                        return `<div class="screenshot-item" title="附件路径非法（${built.reason}）">
-                            <div style="display:flex;align-items:center;justify-content:center;height:100%;color:#dc2626;font-size:11px;text-align:center;padding:4px;">⚠️ ${safeDisplay}</div>
-                        </div>`;
-                    }
-                    // codex 27 审 #2：URL 走 escapeHtmlAttr 防 attr 注入（buildAttachmentDownloadUrl 已 encodeURIComponent 但作为 HTML 属性值仍需独立转义防线）
-                    const urlAttr = escapeHtmlAttr(built.url);
-                    return `<div class="screenshot-item">
-                        <img class="clickable-thumbnail" src="${urlAttr}" alt="${safeDisplay}" title="${safeDisplay}（点击放大）" data-lightbox-url="${urlAttr}" data-lightbox-caption="${safeDisplay}">
-                        <div class="screenshot-meta">${safeDisplay}</div>
+            // v1.71.0 Commit F codex 41 改造：
+            //   ① H-1 采纳：补 status='active' 过滤（Commit E supersede 引入历史截图渲染风险）
+            //   ② C-1 + M-1 采纳：用 getAttachmentSource 反向排除法拆"原始" + "导出"两个独立 detail-section
+            //   ③ M-6 采纳：原始截图区块紧跟任务信息；导出截图区块在 detailBody 渲染顺序里放交付内容附近（renderDeliverySection 后）
+            // 可见性：任何登录用户都能看
+            // 点击行为：缩略图 click 触发 openLightbox 放大查看原图
+            const allActiveScreenshots = (d.attachments || []).filter(
+                a => a.attachment_type === 'screenshot' && (a.status === 'active' || !a.status)
+            );
+            const originalScreenshots = allActiveScreenshots.filter(a => getAttachmentSource(a, d) === 'original');
+            const exportScreenshots = allActiveScreenshots.filter(a => getAttachmentSource(a, d) === 'export');
+
+            function _renderScreenshotItem(f) {
+                const built = buildAttachmentDownloadUrl(f.file_name);
+                const displayName = f.original_name || (f.file_name ? String(f.file_name).split('/').pop() : '截图');
+                const safeDisplay = escapeHtml(displayName);
+                if (!built.ok) {
+                    return `<div class="screenshot-item" title="附件路径非法（${escapeHtmlAttr(built.reason)}）">
+                        <div style="display:flex;align-items:center;justify-content:center;height:100%;color:#dc2626;font-size:11px;text-align:center;padding:4px;">⚠️ ${safeDisplay}</div>
                     </div>`;
-                }).join('');
-                screenshotsHtml = `
-                <div class="detail-section">
-                    <div class="detail-section-title">原始单据截图 (${screenshotFiles.length})</div>
-                    <div class="detail-section-body">
-                        <div class="screenshot-grid" id="detail-screenshot-grid">${items}</div>
-                    </div>
+                }
+                const urlAttr = escapeHtmlAttr(built.url);
+                return `<div class="screenshot-item">
+                    <img class="clickable-thumbnail" src="${urlAttr}" alt="${safeDisplay}" title="${safeDisplay}（点击放大）" data-lightbox-url="${urlAttr}" data-lightbox-caption="${safeDisplay}">
+                    <div class="screenshot-meta">${safeDisplay}</div>
                 </div>`;
             }
+
+            // 原始单据截图区块（紧跟任务信息）
+            const originalScreenshotsHtml = originalScreenshots.length > 0 ? `
+                <div class="detail-section">
+                    <div class="detail-section-title">原始单据截图 (${originalScreenshots.length})</div>
+                    <div class="detail-section-body">
+                        <div class="screenshot-grid">${originalScreenshots.map(_renderScreenshotItem).join('')}</div>
+                    </div>
+                </div>` : '';
+
+            // 导出截图区块（独立 detail-section，渲染顺序由 detailBody 控制，放交付内容附近）
+            const exportScreenshotsHtml = exportScreenshots.length > 0 ? `
+                <div class="detail-section">
+                    <div class="detail-section-title">导出截图 (${exportScreenshots.length})</div>
+                    <div class="detail-section-body">
+                        <div class="screenshot-grid">${exportScreenshots.map(_renderScreenshotItem).join('')}</div>
+                    </div>
+                </div>` : '';
 
             const taskInfoHtml = `
                 <div class="detail-section">
@@ -1570,9 +1875,10 @@
                             <div class="detail-kv-value">${escapeHtml(d.created_by_name)} · ${fmtDate(d.created_at)}</div>
                             <div class="detail-kv-label">当前状态</div>
                             <div class="detail-kv-value"><span class="status-badge status-${d.status}">${STATUS_LABELS[d.status] || d.status}</span></div>
+                            ${renderExporterFieldRow(d)}
                         </div>
                     </div>
-                </div>${screenshotsHtml}`;
+                </div>${originalScreenshotsHtml}`;
 
             // 2. 通知区块（v1.66.1 重构 → v1.66.1 修订：两组独立子区并存展示，互不覆盖）
             //
@@ -1600,12 +1906,17 @@
                 ? renderDeveloperNotifySubsection(d, status, isAdminUser, isContactPersonView)
                 : '';
 
+            // --- 子区 C：数据导出人通知（v1.71.0 UI 重定位 codex 43 审采纳）---
+            // 内部按状态分支决定显示与否（PENDING_ASSIGN / ARCHIVED / 软删除均返 ''）
+            const exporterBlock = renderExporterNotifySubsection(d, status, isAdminUser, myUid);
+
             const notifyHtml = `
                 <div class="detail-section">
                     <div class="detail-section-title">通知</div>
                     <div class="detail-section-body" id="notifyBody">
                         ${contactBlock}
                         ${developerBlock}
+                        ${exporterBlock}
                     </div>
                 </div>`;
 
@@ -1617,8 +1928,24 @@
             const adminFixHistoryHtml = renderAdminFixHistorySection(d, isAdminUser);
             const frictionHtml = renderFrictionSection(d, isAdminUser);
 
+            // v1.71.0 Commit F codex 41 M-6 采纳：详情页渲染顺序
+            //   任务信息(含 exporter 字段) → 原始截图 → 通知 → 够不上证据(PENDING+exporter) → 交付内容 → 导出截图 → 操作概要 → 验收/失败/admin修正/chat/friction
+            //   思路：上下文 → 通知 → 当前交付证据 → 历史/沟通
+            const insufficientEvidenceHtml = renderInsufficientEvidenceSection(d, isAdminUser);
+            const exportSummaryHtml = renderExportSummarySection(d);
+
             document.getElementById('detailBody').innerHTML =
-                taskInfoHtml + notifyHtml + deliveryHtml + validationHtml + failedHistoryHtml + chatHtml + adminFixHistoryHtml + frictionHtml;
+                taskInfoHtml
+                + notifyHtml
+                + insufficientEvidenceHtml
+                + deliveryHtml
+                + exportScreenshotsHtml
+                + exportSummaryHtml
+                + validationHtml
+                + failedHistoryHtml
+                + chatHtml
+                + adminFixHistoryHtml
+                + frictionHtml;
 
             // v1.70.2：详情页 innerHTML 重写后，绑定截图缩略图 click → openLightbox
             // 用 dataset 而非 inline onclick 避免文件名含 ' 撕碎字符串
@@ -1628,80 +1955,90 @@
                 });
             });
 
-            // v1.66.2 footer 按钮（编辑 / 作废 / 归档）：按状态和 admin 身份分支
+            // v1.71.0 Commit F codex 41 H-2 采纳：footer 按钮矩阵抽 helper（替代原 if-else 嵌套）
             const footerLeft = document.getElementById('detailFooterLeft');
             if (footerLeft) {
-                const isUnsubmitted = (d.status === 'PENDING_ASSIGN')
-                    || (d.status === 'PENDING' && Number(d.submission_version || 0) === 0);
-                const isArchived = !!d.archived_at;
-                const isDone = d.status === 'DONE';
-                const isArchivedFinal = d.status === 'ARCHIVED';
-
-                // v1.70.0 Step 3：admin-fix 按钮可见条件
-                //   - 仅 admin
-                //   - 状态在 admin-fix 允许列表（PENDING_ASSIGN / PENDING / SUBMITTED）
-                //   - 非已作废 / 非已归档
-                //   - 显示场景核心：SUBMITTED + failed（5/21 OA-364265 卡死场景）；其他状态作为正常修正入口
-                const canAdminFix = isAdminUser
-                    && !isArchived && !isArchivedFinal && !isDone
-                    && ['PENDING_ASSIGN', 'PENDING', 'SUBMITTED'].includes(d.status);
-                const adminFixBtn = canAdminFix
-                    ? `<button class="btn" style="background:#fef3c7;color:#92400e;border:1px solid #fbbf24;" onclick="openAdminFixDialog()">🔧 管理员修正</button>`
-                    : '';
-
-                // v1.70.4 ③ 行政闭环按钮：admin && SUBMITTED && 非已作废/非已归档
-                //   触发场景：admin 录错业务库导致开发交付物 smoke test 失败，admin-fix 改完字段后，
-                //   不让开发再回来重传，admin 单方面把协作单从 SUBMITTED 强制推到 DONE
-                const canAdminSubmit = isAdminUser
-                    && !isArchived && !isArchivedFinal
-                    && d.status === 'SUBMITTED';
-                const adminSubmitBtn = canAdminSubmit
-                    ? `<button class="btn" style="background:#dbeafe;color:#1e40af;border:1px solid #93c5fd;" onclick="openAdminSubmitDialog()">📋 行政闭环</button>`
-                    : '';
-
-                // v1.70.3 业务需求变更：admin 任何非 ARCHIVED 终态、非已作废都可见"作废"按钮
-                //   - 编辑按钮仍只在 isUnsubmitted 显示（业务上编辑已提交协作单不合适）
-                //   - admin-fix 按钮仍按 canAdminFix 三态白名单（PENDING_ASSIGN / PENDING / SUBMITTED）
-                //   - 归档按钮仍只在 isDone 显示（DONE → ARCHIVED 入库存档）
-                //   - 作废按钮：admin && !isArchived && !isArchivedFinal（即非两种终态）
-                const canArchive = isAdminUser && !isArchived && !isArchivedFinal;
-                const archiveBtn = canArchive
-                    ? `<button class="btn" style="background:#fef2f2;color:#dc2626;border:1px solid #fca5a5;" onclick="openArchiveModal()">作废</button>`
-                    : '';
-
-                if (isArchived) {
-                    // 软删除作废优先展示
-                    footerLeft.innerHTML = `<span style="color:#dc2626;font-size:13px;">⚠️ 已作废${d.archived_reason ? ` · ${escapeHtml(d.archived_reason)}` : ''}</span>`;
-                } else if (isArchivedFinal) {
-                    // v1.67.1 归档锁定展示（终态保护，连作废也拒）
-                    footerLeft.innerHTML = `<span style="color:#166534;font-size:13px;">📁 已归档${d.archived_final_reason ? ` · ${escapeHtml(d.archived_final_reason)}` : ''}</span>`;
-                } else if (isAdminUser && isUnsubmitted) {
-                    // PENDING_ASSIGN / PENDING+v0：编辑 + 作废 + admin-fix
-                    footerLeft.innerHTML = `
-                        <button class="btn" style="background:#3b82f6;color:white;" onclick="openEditModal()">编辑</button>
-                        ${archiveBtn}
-                        ${adminFixBtn}
-                    `;
-                } else if (isAdminUser && isDone) {
-                    // v1.67.1：DONE 状态 admin 可见"归档"按钮（DONE 不可 admin-fix，终态保护）
-                    // v1.70.3 加作废按钮（业务可在 DONE 后撤销）
-                    footerLeft.innerHTML = `
-                        <button class="btn" style="background:#16a34a;color:white;" onclick="openArchiveFinalModal()">📁 归档</button>
-                        ${archiveBtn}
-                    `;
-                } else if (canAdminFix) {
-                    // SUBMITTED + failed / 已提交后录错目标库等场景：admin-fix + 行政闭环（v1.70.4 ③）+ 作废
-                    footerLeft.innerHTML = adminFixBtn + adminSubmitBtn + archiveBtn;
-                } else if (canArchive) {
-                    // 其他 admin 可作废但不可 admin-fix 的边缘状态（如 v1.71.0 EXPORTING 未来扩展）
-                    // codex 29 审 #4 拍板：保留兜底分支；未来新增状态加专属主按钮时，需检查 footer 按钮矩阵
-                    //   优先级（防作废按钮被新主按钮挤到兜底位置导致交互优先级混乱）
-                    // 当前覆盖：SUBMITTED 以外、DONE 以外、非未提交、非 admin-fix 白名单的所有非 ARCHIVED 非已作废状态
-                    footerLeft.innerHTML = archiveBtn;
-                } else {
-                    footerLeft.innerHTML = '';
-                }
+                const currentUserId = Number(getCurrentUserId());
+                footerLeft.innerHTML = decideFooterButtons(d, currentUserId, isAdminUser).join('');
             }
+        }
+
+        // v1.71.0 Commit F codex 41 H-2 采纳：footer 按钮矩阵 helper（返回 string[] 固定顺序）
+        //
+        // 按钮顺序（codex 推荐 + 防顺序漂移）：
+        //   ① 主业务动作：编辑（unsubmitted）/ 转发给数据导出人（PENDING）/ 提交导出物（exporter+EXPORTING）/ 退回任务（exporter+EXPORTING）
+        //   ② 修正 / 闭环动作：管理员修正（admin+三态）/ 行政闭环（admin+SUBMITTED）/ 归档（admin+DONE）
+        //   ③ 危险动作：作废（admin+非终态）
+        //
+        // 优先终态短路：
+        //   isArchived（软删除）→ 仅展示"已作废"提示
+        //   isArchivedFinal（归档锁定）→ 仅展示"已归档"提示
+        //
+        // 角色判定：
+        //   isAdminUser：管理员
+        //   isExporter：当前 user.id === d.exporter_user_id（仅 EXPORTING/SUBMITTED 才用）
+        //
+        // 业务规则：
+        //   - 提交导出物 + 退回任务：EXPORTING + 仅当前 exporter
+        //   - 转发给数据导出人：已搬到通知区块（renderExporterNotifySubsection + canForwardToExporter helper）
+        function decideFooterButtons(d, currentUserId, isAdminUser) {
+            const isArchivedFinal = d.status === 'ARCHIVED';
+            // codex 42 M-2 采纳：软删除条件加 `&& !isArchivedFinal` 防御 admin 在已归档单上误调 archive 触发 archived_at 写入
+            // 终态短路顺序：先判 ARCHIVED 最终归档，再判软删除（避免一个单同时有 archived_at + status='ARCHIVED' 时被误显示为"已作废"）
+            const isArchived = !!d.archived_at && !isArchivedFinal;
+
+            if (isArchivedFinal) {
+                return [`<span style="color:#166534;font-size:13px;">📁 已归档${d.archived_final_reason ? ` · ${escapeHtml(d.archived_final_reason)}` : ''}</span>`];
+            }
+            if (isArchived) {
+                return [`<span style="color:#dc2626;font-size:13px;">⚠️ 已作废${d.archived_reason ? ` · ${escapeHtml(d.archived_reason)}` : ''}</span>`];
+            }
+
+            const status = d.status;
+            const isUnsubmitted = (status === 'PENDING_ASSIGN')
+                || (status === 'PENDING' && Number(d.submission_version || 0) === 0);
+            const isDone = status === 'DONE';
+
+            const isExporter = Number.isSafeInteger(currentUserId)
+                && currentUserId > 0
+                && Number(d.exporter_user_id) === currentUserId;
+
+            const buttons = [];
+
+            // ===== ① 主业务动作 =====
+            if (isAdminUser && isUnsubmitted) {
+                buttons.push(`<button class="btn" style="background:#3b82f6;color:white;" onclick="openEditModal()">编辑</button>`);
+            }
+            // v1.71.0 UI 重定位 codex 43 L-1 采纳：
+            //   "📤 转发给数据导出人" 按钮已从 footer 搬到通知区块 "数据导出人通知" 子区
+            //   触发入口：renderExporterNotifySubsection → openForwardToExporterDialog
+            //   权限 helper：canForwardToExporter(d, currentUserId, isAdminUser)
+            // 保留：EXPORTING + isExporter 的"提交导出物 + 退回任务"两个按钮在 footer（exporter 视角核心动作）
+            if (status === 'EXPORTING' && isExporter) {
+                buttons.push(`<button class="btn" style="background:#16a34a;color:white;" onclick="openExportUploadDialog(${Number(d.id)})">📦 提交导出物</button>`);
+                buttons.push(`<button class="btn" style="background:#dc2626;color:white;" onclick="openReturnToDevDialog(${Number(d.id)})">↩️ 退回任务</button>`);
+            }
+
+            // ===== ② 修正 / 闭环动作 =====
+            const canAdminFix = isAdminUser
+                && !isDone
+                && ['PENDING_ASSIGN', 'PENDING', 'SUBMITTED'].includes(status);
+            if (canAdminFix) {
+                buttons.push(`<button class="btn" style="background:#fef3c7;color:#92400e;border:1px solid #fbbf24;" onclick="openAdminFixDialog()">🔧 管理员修正</button>`);
+            }
+            if (isAdminUser && status === 'SUBMITTED') {
+                buttons.push(`<button class="btn" style="background:#dbeafe;color:#1e40af;border:1px solid #93c5fd;" onclick="openAdminSubmitDialog()">📋 行政闭环</button>`);
+            }
+            if (isAdminUser && isDone) {
+                buttons.push(`<button class="btn" style="background:#16a34a;color:white;" onclick="openArchiveFinalModal()">📁 归档</button>`);
+            }
+
+            // ===== ③ 危险动作（admin + 非两种终态） =====
+            if (isAdminUser) {
+                buttons.push(`<button class="btn" style="background:#fef2f2;color:#dc2626;border:1px solid #fca5a5;" onclick="openArchiveModal()">作废</button>`);
+            }
+
+            return buttons;
         }
 
         // 对接人通知子区（v1.66.1 修订）
@@ -1786,6 +2123,75 @@
                 </div>`;
         }
 
+        // v1.71.0 UI 重定位 codex 43 审采纳：数据导出人通知子区
+        //
+        // 状态分支（codex 43 H-1 + T1 重过修订）：
+        //   PENDING_ASSIGN → 不显示（dev 都没指派，无意义）
+        //   PENDING + exporter_user_id 为空 → "⏳ 尚未转发给数据导出人" + 按钮（有权限）/ 不显示（无权限，codex 43 M-4 重过改判）
+        //   PENDING + exporter_user_id 非空 → "⏪ 已退回（上次：X · 原因：Y）" + "再次转发"按钮（有权限）/ 不显示（无权限）
+        //   EXPORTING → "✅ 已于 X 时间转发给 Y · 待提交"（只读，使用 d.forwarded_to_exporter_at，codex 43 H-2 Claude 纠正）
+        //   SUBMITTED / DONE → "✅ 已转发给 Y · 已提交/已完成"（只读历史记录）
+        //   ARCHIVED → 不显示（codex 43 H-1 采纳：终态短路，与 footer 一致避免归档锁定页出现可操作感）
+        //   软删除 (archived_at 非空且非 ARCHIVED) → 不显示
+        //
+        // 信息分层（codex 43 M-2 采纳）：通知区负责行为状态/时间/按钮/退回原因；身份语义+姓名留在任务信息区 renderExporterFieldRow
+        //
+        // 权限闸门（codex 43 M-3 + M-4 采纳 + codex 44 L-4 补强）：仅有权限用户显示子区；无权限用户不显示（不像 contact/dev 子区那种"始终可见"语义）
+        //   forward 是角色专属动作（admin/current dev/contact_person 三个角色），其他角色（exporter/viewer/普通 user）不应看到这个入口
+        //
+        // ⚠️ 角色专属子区维护说明（codex 44 L-4 采纳）：
+        //   未来回归 / 维护时若发现"无权限用户在 PENDING 看到对接人/开发通知但看不到数据导出人通知"，**这是预期行为不是 bug**。
+        //   contact/dev 通知是"始终可见 + 按权限显隐按钮"语义；数据导出人通知是"按权限显隐整个子区"语义（M-4 重过改判的核心区别）
+        //   原因：forward 比"通知"更接近业务动作（转交任务）而非"提醒"，对无权限用户而言不存在期待入口
+        function renderExporterNotifySubsection(d, status, isAdminUser, currentUserId) {
+            // 终态短路：ARCHIVED / 软删除 一律不显示（与 footer decideFooterButtons 短路一致）
+            if (status === 'ARCHIVED') return '';
+            if (d.archived_at) return '';
+            // PENDING_ASSIGN 不显示（与开发子区一致）
+            if (status === 'PENDING_ASSIGN') return '';
+
+            const hasExporter = !!d.exporter_user_id;
+            const exporterName = d.exporter_name ? escapeHtml(d.exporter_name) : '';
+            const forwardedAt = d.forwarded_to_exporter_at;
+            const canForward = canForwardToExporter(d, currentUserId, isAdminUser);
+
+            let body;
+
+            if (status === 'PENDING' && !hasExporter) {
+                // 未转发：仅有权限用户看到（codex 43 M-4 重过改判：无权限不显示子区，避免对 viewer 啰嗦）
+                if (!canForward) return '';
+                body = `
+                    <span class="notify-status-text">⏳ 尚未转发给数据导出人</span>
+                    <button class="notify-btn" onclick="openForwardToExporterDialog(${Number(d.id)})">转发给数据导出人</button>`;
+            } else if (status === 'PENDING' && hasExporter) {
+                // 已退回：仅有权限用户看到 + 显示退回原因
+                if (!canForward) return '';
+                const returnLog = getLatestReturnToDevLog(d);
+                const { reasonLabel, note } = parseReturnToDevReason(returnLog);
+                const noteHtml = note ? `<span style="color:#7c2d12;font-size:12px;margin-left:6px;">· 补充：${escapeHtml(note)}</span>` : '';
+                body = `
+                    <span class="notify-status-text" style="color:#b91c1c;">⏪ 已退回（上次：${exporterName} · 原因：${reasonLabel}）${noteHtml}</span>
+                    <button class="notify-btn" onclick="openForwardToExporterDialog(${Number(d.id)})">再次转发</button>`;
+            } else if (status === 'EXPORTING') {
+                // 进行中：所有人只读
+                const timeText = forwardedAt ? `已于 ${fmtDate(forwardedAt)} 转发` : '已转发';
+                body = `<span class="notify-status-text">✅ ${timeText}给数据导出人 ${exporterName} · 待提交</span>`;
+            } else if (status === 'SUBMITTED' || status === 'DONE') {
+                // 历史记录：所有人只读；exporter_user_id 为空时（理论不会，dev 自己走 submit 不经 exporter）退化为不显示
+                if (!hasExporter) return '';
+                body = `<span class="notify-status-text" style="color:#475569;">✅ 已转发给数据导出人 ${exporterName}（${status === 'DONE' ? '已完成' : '已提交，待验收'}）</span>`;
+            } else {
+                // 其他兜底（理论无）
+                return '';
+            }
+
+            return `
+                <div style="padding:10px 0;border-top:1px solid #f1f5f9;">
+                    <div style="font-size:12px;color:#64748b;margin-bottom:6px;font-weight:600;">数据导出人通知</div>
+                    ${body}
+                </div>`;
+        }
+
         // 交付内容区块（D3 模块 7）：仅在 attachments 中存在 result_data / result_script 时展示
         // 过滤 status='active'（D3 模块 2 附件版本化引入,避免显示历史版本）
         // v1.67.1：DONE 状态下当前 developer 本人可删除单个交付物 + 区块底部可重传（重走 smoke test）
@@ -1812,7 +2218,7 @@
                     : '';
                 const linkHtml = built.ok
                     ? `<a class="delivery-link" href="${escapeHtmlAttr(built.url)}" target="_blank" rel="noopener" download="${escapeHtml(displayName)}">${escapeHtml(displayName)}</a>`
-                    : `<span style="color:#dc2626" title="附件路径非法（${built.reason}），请联系管理员">⚠️ ${escapeHtml(displayName)}</span>`;
+                    : `<span style="color:#dc2626" title="附件路径非法（${escapeHtmlAttr(built.reason)}），请联系管理员">⚠️ ${escapeHtml(displayName)}</span>`;
                 return `
                     <div class="delivery-item">
                         <span class="delivery-type">${typeLabel}</span>
@@ -1885,7 +2291,7 @@
                         : '';
                     const linkHtml = built.ok
                         ? `<a class="delivery-link" href="${escapeHtmlAttr(built.url)}" target="_blank" rel="noopener" download="${escapeHtml(displayName)}">${escapeHtml(displayName)}</a>`
-                        : `<span style="color:#dc2626" title="附件路径非法（${built.reason}），请联系管理员">⚠️ ${escapeHtml(displayName)}</span>`;
+                        : `<span style="color:#dc2626" title="附件路径非法（${escapeHtmlAttr(built.reason)}），请联系管理员">⚠️ ${escapeHtml(displayName)}</span>`;
                     return `
                         <div class="delivery-item">
                             <span class="delivery-type">${typeLabel}</span>
@@ -2680,6 +3086,333 @@
                 showToast('网络错误，请检查后端服务', 'error');
                 btn.disabled = false;
                 btn.textContent = '提交';
+            }
+        }
+
+        // ===== v1.71.0 Commit F: 三级转发前端 modal JS =====
+        // codex 41 L-1 采纳：inline onclick + 数字护栏 + 每次 open 覆盖 submit handler（实际 handler 通过 onclick 直接调函数，无 listener 残留）
+
+        let _forwardCollabId = null;
+        let _returnCollabId = null;
+        let _exportUploadCollabId = null;
+
+        // ---------- forwardToExporter modal ----------
+        // codex 41 M-5 采纳：默认预选当前 contact_person_id + developer_id + 操作者（如适用）
+        async function openForwardToExporterDialog(id) {
+            const safeId = Number(id);
+            if (!Number.isSafeInteger(safeId) || safeId <= 0) {
+                showToast('协作单 id 非法', 'error');
+                return;
+            }
+            _forwardCollabId = safeId;
+            document.getElementById('forwardToExporterTitle').textContent = `转发给数据导出人 · 协作单 #${safeId}`;
+
+            const exporterSelect = document.getElementById('f_forward_exporter');
+            const contactSelect = document.getElementById('f_forward_contact_user_ids');
+            exporterSelect.innerHTML = '<option value="">加载中...</option>';
+            contactSelect.innerHTML = '';
+
+            // codex 42 M-3 采纳：打开时立即禁用确认按钮，避免用户在半初始化状态下点提交
+            const btn = document.getElementById('btnForwardToExporter');
+            btn.disabled = true;
+            btn.textContent = '加载中…';
+
+            document.getElementById('forwardToExporterModal').classList.add('show');
+
+            // 失败 helper：select 改"加载失败"文案 + 按钮保持 disabled（不关弹框避免用户困惑）
+            function _markLoadFailed(msg) {
+                showToast(msg, 'error');
+                exporterSelect.innerHTML = '<option value="">加载失败，请关闭后重试</option>';
+                contactSelect.innerHTML = '';
+                btn.disabled = true;
+                btn.textContent = '加载失败';
+            }
+
+            try {
+                // 拉协作单详情（取 contact_person_id / developer_id 用于预选）
+                const detailRes = await fetch(`/api/collab/requests/${safeId}`, {
+                    headers: { Authorization: 'Bearer ' + localStorage.getItem('token') }
+                });
+                const detail = await detailRes.json().catch(() => ({}));
+                if (!detailRes.ok) {
+                    _markLoadFailed(`加载协作单失败：${detail.error || detailRes.status}`);
+                    return;
+                }
+
+                // 附件数提示
+                const attachmentCount = (detail.attachments || []).filter(a => (a.status === 'active' || !a.status)).length;
+                const tipEl = document.getElementById('forwardAttachmentTip');
+                document.getElementById('forwardAttachmentCount').textContent = attachmentCount;
+                tipEl.style.display = attachmentCount > 0 ? 'block' : 'none';
+
+                // 拉 active users 列表（沿用现有 /api/users/active 路径）
+                const usersRes = await fetch('/api/users/active', {
+                    headers: { Authorization: 'Bearer ' + localStorage.getItem('token') }
+                });
+                const users = await usersRes.json().catch(() => []);
+                if (!usersRes.ok || !Array.isArray(users)) {
+                    _markLoadFailed('加载用户列表失败');
+                    return;
+                }
+
+                // exporter 下拉
+                exporterSelect.innerHTML = '<option value="">请选择...</option>' + users.map(u => {
+                    const roleTag = u.role ? `（${escapeHtml(u.role)}）` : '';
+                    const remark = u.remark ? ` · ${escapeHtml(u.remark)}` : '';
+                    return `<option value="${Number(u.id)}">${escapeHtml(u.display_name || u.username)}${roleTag}${remark}</option>`;
+                }).join('');
+
+                // 沟通对象多选：M-5 预选 contact_person + developer + 当前操作者
+                const preselected = new Set();
+                if (Number(detail.contact_person_id) > 0) preselected.add(Number(detail.contact_person_id));
+                if (Number(detail.developer_id) > 0) preselected.add(Number(detail.developer_id));
+                const currentUid = Number(getCurrentUserId());
+                if (Number.isSafeInteger(currentUid) && currentUid > 0) preselected.add(currentUid);
+
+                contactSelect.innerHTML = users.map(u => {
+                    const uid = Number(u.id);
+                    const roleTag = u.role ? `（${escapeHtml(u.role)}）` : '';
+                    const remark = u.remark ? ` · ${escapeHtml(u.remark)}` : '';
+                    const selected = preselected.has(uid) ? ' selected' : '';
+                    return `<option value="${uid}"${selected}>${escapeHtml(u.display_name || u.username)}${roleTag}${remark}</option>`;
+                }).join('');
+
+                // 两个请求都成功 + 渲染完毕 → 启用按钮（codex 42 M-3 采纳）
+                btn.disabled = false;
+                btn.textContent = '确认转发并拉群';
+            } catch (e) {
+                _markLoadFailed(`加载弹框数据异常：${e.message}`);
+            }
+        }
+
+        function closeForwardToExporterModal() {
+            document.getElementById('forwardToExporterModal').classList.remove('show');
+            _forwardCollabId = null;
+        }
+
+        async function submitForwardToExporter() {
+            const id = _forwardCollabId;
+            if (!id) { showToast('协作单 id 丢失，请重新打开弹框', 'error'); return; }
+
+            const exporterId = Number(document.getElementById('f_forward_exporter').value);
+            if (!Number.isSafeInteger(exporterId) || exporterId <= 0) {
+                showToast('请选择数据导出人', 'error');
+                return;
+            }
+            const contactSel = document.getElementById('f_forward_contact_user_ids');
+            const contactUserIds = Array.from(contactSel.selectedOptions)
+                .map(opt => Number(opt.value))
+                .filter(v => Number.isSafeInteger(v) && v > 0);
+            if (contactUserIds.length === 0) {
+                showToast('请至少选择 1 位沟通对象（留痕用）', 'error');
+                return;
+            }
+
+            const btn = document.getElementById('btnForwardToExporter');
+            btn.disabled = true;
+            btn.textContent = '提交中…';
+
+            try {
+                const res = await fetch(`/api/collab/requests/${id}/forward-to-exporter`, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': 'Bearer ' + localStorage.getItem('token'),
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ exporter_id: exporterId, contact_user_ids: contactUserIds })
+                });
+                const data = await res.json().catch(() => ({}));
+                if (res.ok) {
+                    showToast('✅ 转发成功，已通知数据导出人', 'success');
+                    closeForwardToExporterModal();
+                    if (typeof openDetail === 'function') await openDetail(id);
+                    if (typeof loadList === 'function') loadList();
+                } else {
+                    showToast(`❌ ${data.error || '转发失败'}${data.code ? `（${data.code}）` : ''}`, 'error');
+                    btn.disabled = false;
+                    btn.textContent = '确认转发并拉群';
+                }
+            } catch (e) {
+                showToast('网络错误，请检查后端服务', 'error');
+                btn.disabled = false;
+                btn.textContent = '确认转发并拉群';
+            }
+        }
+
+        // ---------- returnToDev modal ----------
+        // codex 41 C-2 采纳：5 枚举（含 missing_info）+ return_note textarea maxlength=500
+        function openReturnToDevDialog(id) {
+            const safeId = Number(id);
+            if (!Number.isSafeInteger(safeId) || safeId <= 0) {
+                showToast('协作单 id 非法', 'error');
+                return;
+            }
+            _returnCollabId = safeId;
+            document.getElementById('returnToDevTitle').textContent = `退回任务给开发 · 协作单 #${safeId}`;
+            document.getElementById('f_return_reason').value = '';
+            document.getElementById('f_return_note').value = '';
+            const btn = document.getElementById('btnReturnToDev');
+            btn.disabled = false;
+            btn.textContent = '确认退回';
+            document.getElementById('returnToDevModal').classList.add('show');
+        }
+
+        function closeReturnToDevModal() {
+            document.getElementById('returnToDevModal').classList.remove('show');
+            _returnCollabId = null;
+        }
+
+        async function submitReturnToDev() {
+            const id = _returnCollabId;
+            if (!id) { showToast('协作单 id 丢失，请重新打开弹框', 'error'); return; }
+
+            const reason = document.getElementById('f_return_reason').value;
+            if (!reason) { showToast('请选择退回原因', 'error'); return; }
+            const note = (document.getElementById('f_return_note').value || '').trim();
+            if (note.length > 500) {
+                showToast('补充说明不能超过 500 字符', 'error');
+                return;
+            }
+            if (!confirm('确认退回？退回后任务回到开发手中。')) return;
+
+            const btn = document.getElementById('btnReturnToDev');
+            btn.disabled = true;
+            btn.textContent = '退回中…';
+
+            const body = { return_reason: reason };
+            if (note) body.return_note = note;
+
+            try {
+                const res = await fetch(`/api/collab/requests/${id}/return-to-dev`, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': 'Bearer ' + localStorage.getItem('token'),
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(body)
+                });
+                const data = await res.json().catch(() => ({}));
+                if (res.ok) {
+                    showToast('✅ 已退回开发', 'success');
+                    closeReturnToDevModal();
+                    if (typeof openDetail === 'function') await openDetail(id);
+                    if (typeof loadList === 'function') loadList();
+                } else {
+                    showToast(`❌ ${data.error || '退回失败'}${data.code ? `（${data.code}）` : ''}`, 'error');
+                    btn.disabled = false;
+                    btn.textContent = '确认退回';
+                }
+            } catch (e) {
+                showToast('网络错误，请检查后端服务', 'error');
+                btn.disabled = false;
+                btn.textContent = '确认退回';
+            }
+        }
+
+        // ---------- exportUpload modal ----------
+        // codex 41 H-3 采纳：multer field 名 result_data_screenshot
+        // codex 41 M-2 采纳：superseded_attachments.length > 0 时 toast 覆盖数量
+        function openExportUploadDialog(id) {
+            const safeId = Number(id);
+            if (!Number.isSafeInteger(safeId) || safeId <= 0) {
+                showToast('协作单 id 非法', 'error');
+                return;
+            }
+            _exportUploadCollabId = safeId;
+            document.getElementById('exportUploadTitle').textContent = `提交导出物 · 协作单 #${safeId}`;
+            document.getElementById('f_export_result_data').value = '';
+            document.getElementById('f_export_screenshot').value = '';
+            document.getElementById('f_export_summary').value = '';
+            const btn = document.getElementById('btnExportUpload');
+            btn.disabled = false;
+            btn.textContent = '提交';
+            document.getElementById('exportUploadModal').classList.add('show');
+        }
+
+        function closeExportUploadModal() {
+            document.getElementById('exportUploadModal').classList.remove('show');
+            _exportUploadCollabId = null;
+        }
+
+        async function submitExportUpload() {
+            const id = _exportUploadCollabId;
+            if (!id) { showToast('协作单 id 丢失，请重新打开弹框', 'error'); return; }
+
+            const dataFile = document.getElementById('f_export_result_data').files[0];
+            const shotFile = document.getElementById('f_export_screenshot').files[0];
+            if (!dataFile) { showToast('请选择结果数据文件', 'error'); return; }
+            if (!shotFile) { showToast('请选择导出界面截图', 'error'); return; }
+
+            const summary = (document.getElementById('f_export_summary').value || '').trim();
+            if (summary.length > 500) {
+                showToast('操作概要不能超过 500 字符', 'error');
+                return;
+            }
+
+            const fd = new FormData();
+            fd.append('result_data', dataFile);
+            fd.append('result_data_screenshot', shotFile);
+            if (summary) fd.append('export_summary', summary);
+
+            const btn = document.getElementById('btnExportUpload');
+            btn.disabled = true;
+            btn.textContent = '提交中…';
+
+            try {
+                const res = await fetch(`/api/collab/requests/${id}/submit-export`, {
+                    method: 'POST',
+                    headers: { 'Authorization': 'Bearer ' + localStorage.getItem('token') },
+                    body: fd
+                });
+                const data = await res.json().catch(() => ({}));
+                if (res.ok) {
+                    // M-2 采纳：N>0 时提示覆盖数量
+                    const sup = Array.isArray(data.superseded_attachments) ? data.superseded_attachments : [];
+                    const msg = sup.length > 0
+                        ? `✅ 提交成功，已覆盖 ${sup.length} 个旧导出附件`
+                        : '✅ 提交成功，等待验收';
+                    showToast(msg, 'success');
+                    closeExportUploadModal();
+                    if (typeof openDetail === 'function') await openDetail(id);
+                    if (typeof loadList === 'function') loadList();
+                } else {
+                    const detail = data.detail ? `（${data.detail}）` : '';
+                    showToast(`❌ ${data.error || '提交失败'}${data.code ? `（${data.code}）` : detail}`, 'error');
+                    btn.disabled = false;
+                    btn.textContent = '提交';
+                }
+            } catch (e) {
+                showToast('网络错误，请检查后端服务', 'error');
+                btn.disabled = false;
+                btn.textContent = '提交';
+            }
+        }
+
+        // ---------- 够不上证据 — 删除按钮（codex 41 L-2 采纳：admin 失败 toast error/code）----------
+        async function deleteEvidenceAttachment(attId) {
+            const safeAttId = Number(attId);
+            if (!Number.isSafeInteger(safeAttId) || safeAttId <= 0) {
+                showToast('附件 id 非法', 'error');
+                return;
+            }
+            if (!confirm('确认删除该附件？此操作不可恢复。')) return;
+            try {
+                const res = await fetch(`/api/collab/attachments/${safeAttId}`, {
+                    method: 'DELETE',
+                    headers: { 'Authorization': 'Bearer ' + localStorage.getItem('token') }
+                });
+                const data = await res.json().catch(() => ({}));
+                if (res.ok) {
+                    showToast('✅ 附件已删除', 'success');
+                    // 刷新当前详情页（沿用项目已有的 currentDetail 全局变量）
+                    if (typeof currentDetail !== 'undefined' && currentDetail && Number(currentDetail.id) > 0) {
+                        if (typeof openDetail === 'function') await openDetail(Number(currentDetail.id));
+                    }
+                } else {
+                    showToast(`❌ ${data.error || '删除失败'}${data.code ? `（${data.code}）` : ''}`, 'error');
+                }
+            } catch (e) {
+                showToast('网络错误，请检查后端服务', 'error');
             }
         }
 

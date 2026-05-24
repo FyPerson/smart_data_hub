@@ -447,6 +447,34 @@ function classifyUploadedFiles(files) {
 // 导出
 // ============================================================================
 
+/**
+ * v1.71.0 三级转发：附件按人锁前置闸门。
+ *
+ * 业务规则（v0.1 决策点 B1+B2+B3 拍板）：
+ *   - 按 uploaded_by 精确匹配（不按角色 / 不按 reqUser.role 与上传角色配对）
+ *   - admin 可越权操作（不区分上传 admin 个体）
+ *   - 非 admin 仅本人可操作自己上传的附件
+ *
+ * @param {object} attachment - { id, uploaded_by }，uploaded_by 必须为 number
+ * @param {object} reqUser    - { id, role }
+ * @returns {{ok: boolean, reason?: string, code?: string}}
+ */
+function checkAttachmentOwnerOrAdmin(attachment, reqUser) {
+    if (!attachment || typeof attachment.uploaded_by !== 'number') {
+        return { ok: false, reason: '附件信息缺失或 uploaded_by 异常', code: 'ATTACHMENT_INVALID' };
+    }
+    if (!reqUser || typeof reqUser.id !== 'number') {
+        return { ok: false, reason: '请求用户信息缺失', code: 'REQ_USER_INVALID' };
+    }
+    if (reqUser.role === 'admin') {
+        return { ok: true };
+    }
+    if (attachment.uploaded_by === reqUser.id) {
+        return { ok: true };
+    }
+    return { ok: false, reason: '只有上传人本人或 admin 可操作此附件', code: 'ATTACHMENT_OWNER_LOCKED' };
+}
+
 module.exports = {
     cleanupPendingFiles,
     sanitizeSqlError,
@@ -457,6 +485,8 @@ module.exports = {
     resolveAttachmentPath,
     isSoftArchived,
     isFinalArchived,
+    // v1.71.0 三级转发：附件按人锁前置闸门
+    checkAttachmentOwnerOrAdmin,
     // 暴露给测试和监控（生产代码不应直接 acquire/release，统一走 runRealSmokeTest 包装）
     _globalSmokeTestMutex: globalSmokeTestMutex,
 };
