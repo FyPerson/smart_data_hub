@@ -465,6 +465,41 @@
             flex-shrink: 0;
         }
         .form-row label.checkbox-inline > span { font-weight: 400; }
+        /* 5/25 v1.71.x forward 弹框沟通对象复选框列表（覆盖 .form-row input{width:100%; padding:8px 10px} 全局规则）*/
+        .forward-contact-checkbox-list input[type="checkbox"] {
+            width: auto;
+            padding: 0;
+            margin: 0 8px 0 0;
+            flex-shrink: 0;
+            accent-color: #2563eb;
+        }
+        .forward-contact-checkbox-list label.forward-contact-checkbox-item {
+            display: flex;
+            align-items: center;
+            width: 100%;
+            box-sizing: border-box;
+            cursor: pointer;
+            font-weight: 400;
+            margin-bottom: 0;
+        }
+        .forward-contact-checkbox-list label.forward-contact-checkbox-item > span {
+            flex: 1 1 auto;
+            min-width: 0;
+            font-size: 13px;
+            color: #374151;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        /* 锁定态：被选中的"信息技术部相关人员"在沟通对象列表中自动勾选 + disabled + 视觉强化
+         * codex 45 M-2 + L-2 + L-3 合并采纳：class 切换替代 inline style，解决 span 子元素 color 未生效 + cursor 不一致 */
+        .forward-contact-checkbox-list label.forward-contact-checkbox-item.is-locked {
+            background: #eff6ff;
+            cursor: not-allowed;
+        }
+        .forward-contact-checkbox-list label.forward-contact-checkbox-item.is-locked > span {
+            color: #1e40af;
+        }
         /* v1.70.4 ①：管理员修正记录区块 */
         .admin-fix-entry {
             padding: 10px 12px;
@@ -1107,7 +1142,7 @@
     <div class="modal-overlay" id="forwardToExporterModal">
         <div class="modal-card">
             <div class="modal-header">
-                <h3 id="forwardToExporterTitle">转发给数据导出人</h3>
+                <h3 id="forwardToExporterTitle">转发给信息技术部相关人员</h3>
                 <button class="modal-close" onclick="closeForwardToExporterModal()">×</button>
             </div>
             <div class="modal-body">
@@ -1115,7 +1150,7 @@
                     ⚠️ 请先与相关人员沟通确认可以从系统端导出，然后再拉人进群
                 </div>
                 <div class="form-row">
-                    <label>数据导出人 <span class="required">*</span></label>
+                    <label>请选择信息技术部相关人员 <span class="required">*</span></label>
                     <select id="f_forward_exporter">
                         <option value="">加载中...</option>
                     </select>
@@ -1123,9 +1158,9 @@
                 </div>
                 <div class="form-row">
                     <label>沟通对象（多选留痕） <span class="required">*</span></label>
-                    <select id="f_forward_contact_user_ids" multiple size="5" style="height:auto">
-                    </select>
-                    <div class="hint">选择您事先沟通过的相关人员；默认预选当前对接人、开发与您自己。本字段仅作留痕，无需输入文字。</div>
+                    <div id="f_forward_contact_user_ids" class="forward-contact-checkbox-list" style="max-height:180px;overflow-y:auto;border:1px solid #e2e8f0;border-radius:6px;padding:8px;background:#fff;">
+                    </div>
+                    <div class="hint">勾选您事先沟通过的相关人员；默认预选当前对接人、开发与您自己。<strong>所选信息技术部相关人员自动加入并锁定不可移除</strong>。本字段仅作留痕，无需输入文字。</div>
                 </div>
                 <div id="forwardAttachmentTip" class="hint" style="display:none;background:#dbeafe;color:#1e40af;padding:8px 10px;border-radius:6px;margin-top:8px;">
                     📎 <span id="forwardAttachmentCount">0</span> 个附件，是否告知导出人下载查看？
@@ -2161,8 +2196,8 @@
                 // 未转发：仅有权限用户看到（codex 43 M-4 重过改判：无权限不显示子区，避免对 viewer 啰嗦）
                 if (!canForward) return '';
                 body = `
-                    <span class="notify-status-text">⏳ 尚未转发给数据导出人</span>
-                    <button class="notify-btn" onclick="openForwardToExporterDialog(${Number(d.id)})">转发给数据导出人</button>`;
+                    <span class="notify-status-text">⏳ 尚未转发给信息技术部相关人员</span>
+                    <button class="notify-btn" onclick="openForwardToExporterDialog(${Number(d.id)})">转发给信息技术部相关人员</button>`;
             } else if (status === 'PENDING' && hasExporter) {
                 // 已退回：仅有权限用户看到 + 显示退回原因
                 if (!canForward) return '';
@@ -2170,16 +2205,16 @@
                 const { reasonLabel, note } = parseReturnToDevReason(returnLog);
                 const noteHtml = note ? `<span style="color:#7c2d12;font-size:12px;margin-left:6px;">· 补充：${escapeHtml(note)}</span>` : '';
                 body = `
-                    <span class="notify-status-text" style="color:#b91c1c;">⏪ 已退回（上次：${exporterName} · 原因：${reasonLabel}）${noteHtml}</span>
+                    <span class="notify-status-text" style="color:#b91c1c;">⏪ 已退回（上次：信息技术部 - ${exporterName} · 原因：${reasonLabel}）${noteHtml}</span>
                     <button class="notify-btn" onclick="openForwardToExporterDialog(${Number(d.id)})">再次转发</button>`;
             } else if (status === 'EXPORTING') {
                 // 进行中：所有人只读
                 const timeText = forwardedAt ? `已于 ${fmtDate(forwardedAt)} 转发` : '已转发';
-                body = `<span class="notify-status-text">✅ ${timeText}给数据导出人 ${exporterName} · 待提交</span>`;
+                body = `<span class="notify-status-text">✅ ${timeText}给信息技术部 - ${exporterName} · 待提交</span>`;
             } else if (status === 'SUBMITTED' || status === 'DONE') {
                 // 历史记录：所有人只读；exporter_user_id 为空时（理论不会，dev 自己走 submit 不经 exporter）退化为不显示
                 if (!hasExporter) return '';
-                body = `<span class="notify-status-text" style="color:#475569;">✅ 已转发给数据导出人 ${exporterName}（${status === 'DONE' ? '已完成' : '已提交，待验收'}）</span>`;
+                body = `<span class="notify-status-text" style="color:#475569;">✅ 已转发给信息技术部 - ${exporterName}（${status === 'DONE' ? '已完成' : '已提交，待验收'}）</span>`;
             } else {
                 // 其他兜底（理论无）
                 return '';
@@ -2187,7 +2222,7 @@
 
             return `
                 <div style="padding:10px 0;border-top:1px solid #f1f5f9;">
-                    <div style="font-size:12px;color:#64748b;margin-bottom:6px;font-weight:600;">数据导出人通知</div>
+                    <div style="font-size:12px;color:#64748b;margin-bottom:6px;font-weight:600;">该数据支持从业务系统前端导出，请转发给相关人员</div>
                     ${body}
                 </div>`;
         }
@@ -3097,6 +3132,33 @@
         let _exportUploadCollabId = null;
 
         // ---------- forwardToExporter modal ----------
+        // 5/25 UI 重构 helper：根据当前 exporter 下拉值，在沟通对象复选框列表中自动勾选+锁定该人
+        // 调用时机：① 弹框初始化后 ② exporter 下拉 change 事件
+        // 行为：被选 exporter 对应的 checkbox → checked + disabled（视觉锁定）+ label 加 .is-locked class（蓝底+蓝字+not-allowed）
+        // 切换 exporter 时：先解锁所有旧的 locked label（恢复可点 + 已勾选状态保留作留痕），再锁新的
+        // codex 45 M-2 + L-2 + L-3 合并采纳：用 class 切换替代 inline style，解决 CSS 特异性问题（父 inline color 无法覆盖 > span 子元素 color）
+        function syncExporterLockInContactList(contactSelectEl) {
+            if (!contactSelectEl) return;
+            const exporterSel = document.getElementById('f_forward_exporter');
+            const newExporterUid = Number(exporterSel ? exporterSel.value : 0);
+            const allCheckboxes = contactSelectEl.querySelectorAll('input[type="checkbox"][data-uid]');
+            allCheckboxes.forEach(cb => {
+                const uid = Number(cb.dataset.uid);
+                const label = cb.parentElement;
+                if (label.classList.contains('is-locked')) {
+                    // 旧 locked，先解锁（已勾选状态保留，按方案 §3.1 留痕语义"宁多勿少"）
+                    cb.disabled = false;
+                    label.classList.remove('is-locked');
+                }
+                if (Number.isSafeInteger(newExporterUid) && newExporterUid > 0 && uid === newExporterUid) {
+                    // 新 exporter，锁定
+                    cb.checked = true;
+                    cb.disabled = true;
+                    label.classList.add('is-locked');
+                }
+            });
+        }
+
         // codex 41 M-5 采纳：默认预选当前 contact_person_id + developer_id + 操作者（如适用）
         async function openForwardToExporterDialog(id) {
             const safeId = Number(id);
@@ -3105,7 +3167,7 @@
                 return;
             }
             _forwardCollabId = safeId;
-            document.getElementById('forwardToExporterTitle').textContent = `转发给数据导出人 · 协作单 #${safeId}`;
+            document.getElementById('forwardToExporterTitle').textContent = `转发给信息技术部相关人员 · 协作单 #${safeId}`;
 
             const exporterSelect = document.getElementById('f_forward_exporter');
             const contactSelect = document.getElementById('f_forward_contact_user_ids');
@@ -3162,7 +3224,8 @@
                     return `<option value="${Number(u.id)}">${escapeHtml(u.display_name || u.username)}${roleTag}${remark}</option>`;
                 }).join('');
 
-                // 沟通对象多选：M-5 预选 contact_person + developer + 当前操作者
+                // 沟通对象复选框列表：M-5 预选 contact_person + developer + 当前操作者
+                // UI 重构（5/25）：从 select multiple 改为 checkbox 列表 + 选 exporter 后自动勾选+锁定
                 const preselected = new Set();
                 if (Number(detail.contact_person_id) > 0) preselected.add(Number(detail.contact_person_id));
                 if (Number(detail.developer_id) > 0) preselected.add(Number(detail.developer_id));
@@ -3173,9 +3236,16 @@
                     const uid = Number(u.id);
                     const roleTag = u.role ? `（${escapeHtml(u.role)}）` : '';
                     const remark = u.remark ? ` · ${escapeHtml(u.remark)}` : '';
-                    const selected = preselected.has(uid) ? ' selected' : '';
-                    return `<option value="${uid}"${selected}>${escapeHtml(u.display_name || u.username)}${roleTag}${remark}</option>`;
+                    const checked = preselected.has(uid) ? ' checked' : '';
+                    return `<label class="forward-contact-checkbox-item" data-uid="${uid}" style="padding:6px 8px;border-radius:4px;">
+                        <input type="checkbox" data-uid="${uid}" value="${uid}"${checked}>
+                        <span>${escapeHtml(u.display_name || u.username)}${roleTag}${remark}</span>
+                    </label>`;
                 }).join('');
+
+                // 联动：exporter 选中后该人自动勾选+锁定
+                exporterSelect.onchange = () => syncExporterLockInContactList(contactSelect);
+                syncExporterLockInContactList(contactSelect);
 
                 // 两个请求都成功 + 渲染完毕 → 启用按钮（codex 42 M-3 采纳）
                 btn.disabled = false;
@@ -3196,13 +3266,19 @@
 
             const exporterId = Number(document.getElementById('f_forward_exporter').value);
             if (!Number.isSafeInteger(exporterId) || exporterId <= 0) {
-                showToast('请选择数据导出人', 'error');
+                showToast('请选择信息技术部相关人员', 'error');
                 return;
             }
             const contactSel = document.getElementById('f_forward_contact_user_ids');
-            const contactUserIds = Array.from(contactSel.selectedOptions)
-                .map(opt => Number(opt.value))
+            const contactUserIds = Array.from(contactSel.querySelectorAll('input[type="checkbox"]:checked'))
+                .map(cb => Number(cb.value))
                 .filter(v => Number.isSafeInteger(v) && v > 0);
+            // codex 45 M-3 采纳：业务语义兜底 — 锁定的 exporter 必须在 contact_user_ids 中
+            // 正常路径下 disabled checked checkbox 会被 :checked 选中，但若未来 DOM 异常重渲染 / 用户列表缺失该 exporter / 锁定失败，前端会提交不带 exporter 的留痕列表
+            // 用 Set 去重 + 补齐，让业务规则不依赖 UI 状态
+            if (!contactUserIds.includes(exporterId)) {
+                contactUserIds.push(exporterId);
+            }
             if (contactUserIds.length === 0) {
                 showToast('请至少选择 1 位沟通对象（留痕用）', 'error');
                 return;
@@ -3223,7 +3299,7 @@
                 });
                 const data = await res.json().catch(() => ({}));
                 if (res.ok) {
-                    showToast('✅ 转发成功，已通知数据导出人', 'success');
+                    showToast('✅ 转发成功，已通知信息技术部相关人员', 'success');
                     closeForwardToExporterModal();
                     if (typeof openDetail === 'function') await openDetail(id);
                     if (typeof loadList === 'function') loadList();
