@@ -10957,10 +10957,14 @@ app.post('/api/collab/requests/:id/create-chat', authenticateToken, async (req, 
             }
         }
 
-        // 找触发人的 dingtalk_user_id 当群主
-        const owner = dingUserIds.find(u => u.userId === userId);
+        // v1.71.2 (5/25)：群主始终固定为示例用户A（COLLAB_CHAT_ADMIN_ID），方便示例用户A有意识地解散群（钉钉无服务端 disband API）
+        // 原逻辑：找触发人当群主 → 谁拉群谁是 owner，群解散需联系当时拉群人，admin 不便统一收口
+        // 现逻辑：固定为 COLLAB_CHAT_ADMIN_ID；示例用户A本来就在 memberUserIds 中（line 10854），useridlist 必含示例用户A，满足钉钉硬约束
+        const owner = dingUserIds.find(u => u.userId === COLLAB_CHAT_ADMIN_ID);
         if (!owner) {
-            return res.status(500).json({ error: '触发人钉钉账号未找到', code: 'OWNER_NOT_FOUND' });
+            // 理论不触发：line 10854 已强制 add(COLLAB_CHAT_ADMIN_ID)，缺失会在 line 10864 提前 return MEMBER_NOT_FOUND
+            // 这里作为防御性兜底，避免示例用户A users 记录被 admin 误删后 endpoint 静默继续
+            return res.status(500).json({ error: '平台群主（示例用户A）钉钉账号未找到', code: 'OWNER_NOT_FOUND' });
         }
 
         // 群名：[OA-{oa_request_no}] {requester_name} {YYYY-MM-DD}（≤20 字符兜底截断）
