@@ -123,6 +123,170 @@ function computeAttachmentDirName(requestId, description) {
 }
 
 // ---------------------------------------------------------------------------
+// §2.5 v1.72.0 落盘文件名统一 OA 格式（codex 31 spec-critique 修订版 v1.4）
+// ---------------------------------------------------------------------------
+//
+// 格式：{oa_request_no}_{YYYYMMDD}_{nnn}_{rd|rs|sc|ex}[_failed]_{safeName}.{ext}
+// 注：生产 oa_request_no 字段值已含 OA- 前缀（如 'OA-364265' / 'TEST-OA123456'），
+//     helper 不再补 OA- 前缀，避免双前缀。生成示例：OA-364265_20260522_001_rd_示例用户A.xlsx
+//
+// 双轨制 seq 来源（codex 31 H-1 修订）：
+//   - rd/rs（result_data/result_script）：复用 submission_version 作为 seq
+//     → 与现有"版本号"语义一致；事务内已分配；零并发风险
+//   - sc/ex（screenshot/example_xlsx）：用新增列 attachment_seq，
+//     调用方 BEGIN IMMEDIATE 短事务内 SELECT MAX(attachment_seq)+1 预分配
+//
+// failed 路径（codex 31 H-3 + codex 47 M-4 修订）：
+//   - rd/rs failed：用 newVer（oldVer+1，即本次尝试版本号）作 seq + 加 _failed 后缀
+//     → 同 newVer 下 active 和 failed 区分仅靠 _failed 后缀；与 §3.4 active 名同 seq 但加后缀避免冲突
+//     注意：DB 行 submission_version 仍写 0（不晋升）+ failed_attempt_seq 由 insertFailedAttachments 计算
+//     文件名 seq 与 DB submission_version 在 failed 路径**有意分离**——文件名表达"尝试版本"语义
+//   - sc/ex 不进 failed 路径（仅 rd/rs 会过 smoke test）
+//
+// helper 不查 DB，纯函数；调用方负责传 seq + isFailed
+//
+// 字符净化（codex 31 M-1 实证轻量版）：
+//   - safeOa：替换 [\\/:*?"<>|] + 空格 + _ → -；trim
+//   - safeName：替换 [\\/:*?"<>|] → _；trim；空 fallback username；
+//     按 code point 截前 10 防 surrogate pair；
+//   - safeExt：path.extname 已小写化（调用方负责传扩展名）
+//
+// 类型缩写（codex 31 M-2 修订）：
+//   - result_data → rd
+//   - result_script → rs
+//   - screenshot → sc
+//   - example_xlsx → ex
+//   - pdf 类型 v1.72.0 一并清理（生产 0 行 + 无前端入口）
+
+const ATTACHMENT_TYPE_TO_ABBR = {
+    result_data: 'rd',
+    result_script: 'rs',
+    screenshot: 'sc',
+    example_xlsx: 'ex'
+};
+
+/**
+ * 净化 OA 号（codex 31 M-1）
+ * @param {string} oaRequestNo
+ * @returns {string} 净化后值；空时 throw
+ */
+function sanitizeOaRequestNo(oaRequestNo) {
+    const raw = String(oaRequestNo || '').trim();
+    if (!raw) {
+        const e = new Error('OA 流程号为空，无法生成文件名');
+        e.code = 'OA_REQUEST_NO_REQUIRED';
+        throw e;
+    }
+    return raw
+        .replace(/[\\/:*?"<>|]/g, '-')
+        .replace(/\s+/g, '-')
+        .replace(/_/g, '-');
+}
+
+/**
+ * 净化上传人姓名段（codex 31 M-1 + L-1 fallback 到 username）
+ * @param {string} displayName  users.display_name 优先
+ * @param {string} username     fallback
+ * @returns {string} 净化后值；按 code point 截前 10
+ */
+function sanitizeUploaderName(displayName, username) {
+    const base = String(displayName || '').replace(/[\\/:*?"<>|]/g, '_').trim()
+        || String(username || '').replace(/[\\/:*?"<>|]/g, '_').trim()
+        || 'unknown';
+    // 按 code point 截前 10（防 surrogate pair）
+    return Array.from(base).slice(0, 10).join('');
+}
+
+/**
+ * 把 collab_requests.created_at 转 YYYYMMDD（codex 31 M-3）
+ * 接受 'YYYY-MM-DD HH:mm:ss' 或 ISO 字符串；无法解析时 throw
+ * @param {string} createdAt
+ * @returns {string} 8 位 YYYYMMDD
+ */
+function formatCreatedAtToYmd(createdAt) {
+    const raw = String(createdAt || '').trim();
+    if (!raw) {
+        const e = new Error('created_at 为空，无法生成文件名日期段');
+        e.code = 'INVALID_CREATED_AT';
+        throw e;
+    }
+    // 优先匹配 'YYYY-MM-DD' 前缀（项目统一用 datetime('now','localtime')）
+    const m = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (!m) {
+        const e = new Error(`created_at 格式无法解析: ${raw}`);
+        e.code = 'INVALID_CREATED_AT';
+        throw e;
+    }
+    return `${m[1]}${m[2]}${m[3]}`;
+}
+
+/**
+ * 构造统一落盘文件名（v1.72.0 主入口）
+ *
+ * @param {object} params
+ * @param {string} params.oaRequestNo     collab_requests.oa_request_no（必传非空）
+ * @param {string} params.createdAt       collab_requests.created_at
+ * @param {number} params.seq             rd/rs=submission_version；sc/ex=新分配 attachment_seq
+ * @param {string} params.attachmentType  result_data|result_script|screenshot|example_xlsx
+ * @param {boolean} params.isFailed       smoke test 失败的 rd/rs
+ * @param {string} params.displayName     上传人 display_name
+ * @param {string} params.username        fallback username
+ * @param {string} params.ext             含 . 的扩展名（如 '.xlsx'）
+ * @returns {string} 落盘文件名
+ * @throws  OA_REQUEST_NO_REQUIRED / INVALID_CREATED_AT / UNKNOWN_ATTACHMENT_TYPE / INVALID_SEQ
+ */
+function buildFinalAttachmentName(params) {
+    const { oaRequestNo, createdAt, seq, attachmentType, isFailed, displayName, username, ext } = params;
+    const safeOa = sanitizeOaRequestNo(oaRequestNo);
+    const ymd = formatCreatedAtToYmd(createdAt);
+    const abbr = ATTACHMENT_TYPE_TO_ABBR[attachmentType];
+    if (!abbr) {
+        const e = new Error(`未知 attachment_type: ${attachmentType}`);
+        e.code = 'UNKNOWN_ATTACHMENT_TYPE';
+        throw e;
+    }
+    if (!Number.isInteger(seq) || seq <= 0) {
+        const e = new Error(`seq 必须为正整数: ${seq}`);
+        e.code = 'INVALID_SEQ';
+        throw e;
+    }
+    const seqStr = String(seq).padStart(3, '0');
+    const failedSuffix = isFailed ? '_failed' : '';
+    const safeName = sanitizeUploaderName(displayName, username);
+    const safeExt = String(ext || '').toLowerCase();
+    // safeOa 已包含 OA-xxx / TEST-OAxxx 自带前缀（生产实证），不再补 OA- 前缀
+    return `${safeOa}_${ymd}_${seqStr}_${abbr}${failedSuffix}_${safeName}${safeExt}`;
+}
+
+/**
+ * 为 sc/ex 类型预分配 attachment_seq（rd/rs 不走此函数 — 用 submission_version）
+ *
+ * 调用方须在 BEGIN IMMEDIATE 事务内执行：
+ *   SELECT MAX(attachment_seq) + 1 WHERE collab_request_id=? AND attachment_type=?
+ *
+ * @param {object} dbAsync   { getAsync }
+ * @param {number} requestId
+ * @param {string} attachmentType  'screenshot' 或 'example_xlsx'
+ * @returns {Promise<number>} 下一个可用 attachment_seq（从 1 开始）
+ */
+async function allocateAttachmentSeq(dbAsync, requestId, attachmentType) {
+    if (attachmentType !== 'screenshot' && attachmentType !== 'example_xlsx') {
+        // rd/rs 不应走此函数（用 submission_version）
+        const e = new Error(`allocateAttachmentSeq 仅支持 sc/ex 类型: ${attachmentType}`);
+        e.code = 'INVALID_ALLOC_TYPE';
+        throw e;
+    }
+    const row = await dbAsync.getAsync(
+        `SELECT COALESCE(MAX(attachment_seq), 0) AS max_seq
+           FROM collab_attachments
+          WHERE collab_request_id = ?
+            AND attachment_type = ?`,
+        [requestId, attachmentType]
+    );
+    return (row && row.max_seq || 0) + 1;
+}
+
+// ---------------------------------------------------------------------------
 // §3 activateNewVersion（codex C4/M2/M5/M6/L2）
 // ---------------------------------------------------------------------------
 
@@ -164,7 +328,9 @@ function computeAttachmentDirName(requestId, description) {
  *          路径校验失败 → { code:'PATH_VIOLATION', detail }
  */
 async function activateNewVersion(params) {
-    const { db, dbAsync, requestId, oldVer, collabRoot, description, attachmentDir, uploadedFiles, runSmokeTest, logger } = params;
+    const { db, dbAsync, requestId, oldVer, collabRoot, description, attachmentDir,
+            oaRequestNo, collabCreatedAt,
+            uploadedFiles, runSmokeTest, logger } = params;
     const log = logger || console;
 
     // §3.1 完整快照校验（M5 + codex 24 审 #2 medium：每类恰好 1 个）
@@ -212,11 +378,25 @@ async function activateNewVersion(params) {
     }
 
     // §3.4 rename 文件到正式目录（不删旧）
+    // v1.72.0：rd/rs 用 newVer (submission_version) 作 seq（codex 31 H-1 双轨制）
+    const newVer = oldVer + 1;
     const movedFiles = []; // 用于失败回滚
     let scriptFinalPath = null;
     try {
         for (const f of uploadedFiles) {
-            const finalName = path.basename(f.source_path); // 沿用 multer 已经生成的 ${ts}_${rand}_${safeOriginal}
+            // v1.72.0 落盘命名 OA-{oa}_{YYYYMMDD}_{nnn}_{rd|rs}_{姓名}.{ext}
+            // smoke 失败的 _failed 后缀走 insertFailedAttachments 路径不在此分支
+            const ext = path.extname(f.original_name || '');
+            const finalName = buildFinalAttachmentName({
+                oaRequestNo,
+                createdAt: collabCreatedAt,
+                seq: newVer,
+                attachmentType: f.attachment_type,
+                isFailed: false,
+                displayName: f.uploaded_by_name,
+                username: f.uploaded_by_name,  // POST /submit 上下文已用 display_name||username 合一
+                ext,
+            });
             const finalPath = path.join(targetDir, finalName);
             const finalCheck = ensureInsideRoot(finalPath, targetDir);
             if (!finalCheck.ok) {
@@ -258,6 +438,30 @@ async function activateNewVersion(params) {
         //   ⑤ failed INSERT 自身失败 → 文件挪 _orphaned/failed_insert_failed/{rid}_v{ver}_{ts}/
         //   ⑥ 抛 SMOKE_TEST_FAILED 含 failedAttachments 反馈给前端
         const smokeError = smokeTestResult && smokeTestResult.error || '未知错误';
+        // v1.72.0：smoke 失败 → 把 active 名 rename 为 failed 名（加 _failed 后缀）
+        // 同 newVer 序号下区分 active 和 failed 靠 _failed 后缀
+        for (const mf of movedFiles) {
+            const ext = path.extname(mf.original_name || '');
+            const failedName = buildFinalAttachmentName({
+                oaRequestNo,
+                createdAt: collabCreatedAt,
+                seq: newVer,
+                attachmentType: mf.attachment_type,
+                isFailed: true,
+                displayName: mf.uploaded_by_name,
+                username: mf.uploaded_by_name,
+                ext,
+            });
+            const failedPath = path.join(path.dirname(mf.final_path), failedName);
+            try {
+                fs.renameSync(mf.final_path, failedPath);
+                mf.final_path = failedPath;
+                mf.final_name = failedName;
+            } catch (renameErr) {
+                log.warn(`[collab-versioning] failed 重命名失败 ${mf.final_path} → ${failedPath}: ${renameErr.message}`);
+                // 保留原 active 名，DB 仍记录新路径（虽不一致但不影响业务）
+            }
+        }
         let failedAttachments;
         try {
             failedAttachments = await insertFailedAttachments({
@@ -282,7 +486,7 @@ async function activateNewVersion(params) {
     }
 
     // §3.6 DB 事务激活（H-4 乐观锁）
-    const newVer = oldVer + 1;
+    // newVer 已在 §3.4 顶部计算（v1.72.0 提前用于 rd/rs finalName 生成）
     const validatedAt = smokeTestResult.validatedAt || new Date();
     try {
         await dbAsync.runAsync('BEGIN TRANSACTION');
@@ -697,6 +901,13 @@ module.exports = {
     scanOrphansAndDanglingPointers,
     // v1.70.2 codex 28 审 #4：暴露常量供测试 + 历史修复脚本未来扩展引用
     VERSIONED_DELIVERY_ATTACHMENT_TYPES,
+    // v1.72.0 落盘文件名统一 OA 格式（endpoint 直接调用）
+    buildFinalAttachmentName,
+    allocateAttachmentSeq,
+    sanitizeOaRequestNo,             // 暴露便于测试 / e2e 断言
+    sanitizeUploaderName,
+    formatCreatedAtToYmd,
+    ATTACHMENT_TYPE_TO_ABBR,
     // 内部 helper 暴露便于测试
     _internal: {
         ensureInsideRoot,

@@ -1421,6 +1421,15 @@ function initTable() {
         safeAlterAddColumn('collab_requests', 'forwarded_to_exporter_at', 'DATETIME');
         safeAlterAddColumn('collab_requests', 'export_summary', 'TEXT');
 
+        // ===== v1.72.0 落盘文件名统一 OA 格式（2026-05-25）=====
+        //   方案：OA-{oa}_{YYYYMMDD}_{nnn}_{rd|rs|sc|ex}[_failed]_{姓名}.{ext}
+        //   双轨制 seq（codex 31 spec-critique H-1 修订）：
+        //     - rd/rs：复用 submission_version 不需此列
+        //     - sc/ex：用 attachment_seq 列，BEGIN IMMEDIATE 短事务 MAX+1 预分配
+        //   历史行 attachment_seq=NULL，COALESCE(NULL,0)+1=1 兼容
+        //   不加 UNIQUE 索引（避免 failed/superseded 同 seq 兼容性冲突，靠应用层 + verify 兜底）
+        safeAlterAddColumn('collab_attachments', 'attachment_seq', 'INTEGER');
+
         // 健康检查放在 serialize 末尾，确保所有 ALTER/INDEX 都已串行执行完
         verifyV2CollabSchema();
     });
@@ -9933,19 +9942,12 @@ if (!fs.existsSync(COLLAB_UPLOAD_BASE)) {
 
 // 各 attachment_type 的扩展名白名单 + 大小上限（字节）
 // 方案 §5.4：screenshot=10MB / example_xlsx 分级 / result_data=100MB / result_script=1MB / pdf=10MB
+// v1.72.0：pdf 类型一并清理（生产 0 行 + grep 0 真实业务调用 + 前端无入口）
 const COLLAB_ATTACHMENT_RULES = {
     screenshot:     { exts: ['.png','.jpg','.jpeg','.gif','.webp'],                                       sizeByExt: null,                              defaultSize: 10  * 1024 * 1024 },
     example_xlsx:   { exts: ['.xlsx','.xls','.pdf','.docx','.png','.jpg','.jpeg','.gif','.webp'],         sizeByExt: { '.xlsx': 100*1024*1024, '.xls': 100*1024*1024 }, defaultSize: 10  * 1024 * 1024 },
     result_data:    { exts: ['.xlsx','.xls'],                                                             sizeByExt: null,                              defaultSize: 100 * 1024 * 1024 },
-    result_script:  { exts: ['.sql','.txt'],                                                              sizeByExt: null,                              defaultSize: 1   * 1024 * 1024 },
-    pdf:            { exts: ['.pdf'],                                                                     sizeByExt: null,                              defaultSize: 10  * 1024 * 1024 }
-};
-
-// D1 兼容：旧 attachment_type 'original_ticket' / 'delivery' 映射到新规则
-// （D1 上线后 collab_attachments 为空，但 endpoint 历史接受这两个值）
-const COLLAB_LEGACY_TYPE_ALIAS = {
-    'original_ticket': 'screenshot',   // 老语义"原始单据截图" → 新 screenshot 规则
-    'delivery':        'result_data'   // 老语义"交付物" → 新 result_data 规则
+    result_script:  { exts: ['.sql','.txt'],                                                              sizeByExt: null,                              defaultSize: 1   * 1024 * 1024 }
 };
 
 // 全部允许的扩展名（联合白名单，multer fileFilter 用）
@@ -9964,8 +9966,7 @@ function normalizeAttachmentExt(filename) {
 // 判断给定文件 (扩展名 + size) 是否符合 attachment_type 规则
 // 返回 { ok: true } 或 { ok: false, error: '...' }
 function validateCollabAttachmentRule(attachmentType, originalname, size) {
-    const aliased = COLLAB_LEGACY_TYPE_ALIAS[attachmentType] || attachmentType;
-    const rule = COLLAB_ATTACHMENT_RULES[aliased];
+    const rule = COLLAB_ATTACHMENT_RULES[attachmentType];
     if (!rule) {
         return { ok: false, error: `不支持的 attachment_type: ${attachmentType}` };
     }
@@ -11535,7 +11536,8 @@ app.post('/api/collab/requests/:id/submit',
             // === 前置校验：协作单存在 ===
             const collab = await dbGetAsync(
                 `SELECT id, status, developer_id, target_db_connection_id, submission_version,
-                        description, attachment_dir, submitted_at
+                        description, attachment_dir, submitted_at,
+                        oa_request_no, created_at
                    FROM collab_requests WHERE id = ?`,
                 [id]
             );
@@ -11773,6 +11775,9 @@ app.post('/api/collab/requests/:id/submit',
                     collabRoot: COLLAB_UPLOAD_BASE,
                     description: collab.description,
                     attachmentDir: collab.attachment_dir,
+                    // v1.72.0 落盘命名所需字段
+                    oaRequestNo: collab.oa_request_no,
+                    collabCreatedAt: collab.created_at,
                     uploadedFiles,
                     runSmokeTest: runSmokeTestClosure,
                     logger,
@@ -12877,7 +12882,7 @@ app.post('/api/collab/requests/:id/submit-export',
             const collab = await dbGetAsync(
                 `SELECT id, status, archived_at, archived_final_at, oa_request_no, description,
                         developer_id, exporter_user_id, exporter_name, attachment_dir, submission_version,
-                        requester_dept, requester_name
+                        requester_dept, requester_name, created_at
                    FROM collab_requests WHERE id = ?`,
                 [id]
             );
@@ -12949,16 +12954,40 @@ app.post('/api/collab/requests/:id/submit-export',
                 fs.mkdirSync(targetDir, { recursive: true });
             }
 
-            // ③ rename 文件到正式目录（失败立即回滚 + 清 pending）
+            // ③ v1.72.0：预分配 attachment_seq（screenshot 走 sc/ex 通道），rd 复用 submission_version
+            //    submit-export 不递增 submission_version → rd 复用 collab.submission_version 作 seq
+            //    sc 用 allocateAttachmentSeq 预读 MAX+1
+            //    并发保护：依赖 collabExporterTransitionMutex 全局锁（v1.71.0 引入）— 同协作单同 exporter
+            //    submit-export/forward/return 串行化保证 → 不会有同 (rid, sc) 并发竞态（codex 47 H-1 修订）
+            //    seq 与 INSERT submission_version 统一：rd 用 collab.submission_version || 1，
+            //    INSERT 也写同值 → 文件名 seq 与 DB version 字段一致（codex 47 H-2 修订）
+            const rdSeq = collab.submission_version || 1;
+            const scSeq = await collabVersioning.allocateAttachmentSeq(
+                { getAsync: dbGetAsync }, id, 'screenshot'
+            );
+            const seqByType = { result_data: rdSeq, screenshot: scSeq };
+
+            // ④ rename 文件到正式目录（v1.72.0 新规则文件名）
             try {
                 for (const item of uploadedFiles) {
-                    const finalName = path.basename(item.file.path);  // multer 已生成 ts_rand_safeName
+                    const ext = path.extname(item.file.originalname || '');
+                    const finalName = collabVersioning.buildFinalAttachmentName({
+                        oaRequestNo: collab.oa_request_no,
+                        createdAt: collab.created_at,
+                        seq: seqByType[item.attachment_type],
+                        attachmentType: item.attachment_type,
+                        isFailed: false,
+                        displayName: userName,
+                        username: userName,
+                        ext,
+                    });
                     const finalPath = path.join(targetDir, finalName);
                     fs.renameSync(item.file.path, finalPath);
                     movedFiles.push({
                         attachment_type: item.attachment_type,
                         final_path: finalPath,
                         original_name: item.file.originalname,
+                        attachment_seq: seqByType[item.attachment_type],
                     });
                 }
             } catch (renameErr) {
@@ -12974,7 +13003,10 @@ app.post('/api/collab/requests/:id/submit-export',
             }
 
             // === 阶段 1：BEGIN IMMEDIATE 事务（supersede 同 type 旧 active + INSERT 新 active + UPDATE collab_requests + INSERT log）===
-            const newSubmissionVersion = collab.submission_version || 0;  // codex 39 H-1：不递增
+            //   codex 39 H-1 + codex 47 H-2：submit-export 不递增 submission_version
+            //   首次 submit-export 时 collab.submission_version 可能为 NULL/0，用 `|| 1` 统一 rdSeq 与 INSERT 值
+            //   → 文件名 seq 与 DB submission_version 字段始终一致
+            const newSubmissionVersion = collab.submission_version || 1;
 
             try {
                 await dbRunAsync('BEGIN IMMEDIATE TRANSACTION');
@@ -13000,15 +13032,16 @@ app.post('/api/collab/requests/:id/submit-export',
                             AND status='active'`,
                         [id, mf.attachment_type]
                     );
-                    // INSERT 新 active 行
+                    // INSERT 新 active 行（v1.72.0 写入 attachment_seq）
                     const relPath = path.relative(path.dirname(COLLAB_UPLOAD_BASE), mf.final_path).replace(/\\/g, '/');
                     await dbRunAsync(
                         `INSERT INTO collab_attachments
                             (collab_request_id, attachment_type, file_name, original_name,
-                             uploaded_by, uploaded_by_name, submission_version, status, superseded_at)
-                         VALUES (?, ?, ?, ?, ?, ?, ?, 'active', NULL)`,
+                             uploaded_by, uploaded_by_name, submission_version, status, superseded_at,
+                             attachment_seq)
+                         VALUES (?, ?, ?, ?, ?, ?, ?, 'active', NULL, ?)`,
                         [id, mf.attachment_type, relPath, mf.original_name,
-                         userId, userName, newSubmissionVersion]
+                         userId, userName, newSubmissionVersion, mf.attachment_seq]
                     );
                 }
 
@@ -13799,7 +13832,8 @@ app.post('/api/collab/requests/:id/admin-submit-on-behalf',
         try {
             const collab = await dbGetAsync(
                 `SELECT id, status, deadline, description, attachment_dir, submission_version,
-                        archived_at, archived_final_at, sql_validation_status
+                        archived_at, archived_final_at, sql_validation_status,
+                        oa_request_no, created_at
                    FROM collab_requests WHERE id = ?`,
                 [id]
             );
@@ -13861,16 +13895,29 @@ app.post('/api/collab/requests/:id/admin-submit-on-behalf',
                     fs.mkdirSync(targetDir, { recursive: true });
                 }
 
-                // ③rename 文件到正式目录（失败立即回滚 + 清 pending）
+                // ③rename 文件到正式目录（v1.72.0 新规则文件名，rd/rs 用 submission_version 作 seq）
+                //   admin-fix 不递增 submission_version → rd/rs 复用 collab.submission_version（默认 0 → 1）
+                const adminSeq = collab.submission_version || 1;
                 try {
                     for (const item of adminUploadedFiles) {
-                        const finalName = path.basename(item.file.path);  // multer 已生成 ts_rand_safeName
+                        const ext = path.extname(item.file.originalname || '');
+                        const finalName = collabVersioning.buildFinalAttachmentName({
+                            oaRequestNo: collab.oa_request_no,
+                            createdAt: collab.created_at,
+                            seq: adminSeq,
+                            attachmentType: item.attachment_type,
+                            isFailed: false,
+                            displayName: userName,
+                            username: userName,
+                            ext,
+                        });
                         const finalPath = path.join(targetDir, finalName);
                         fs.renameSync(item.file.path, finalPath);
                         movedAdminFiles.push({
                             attachment_type: item.attachment_type,
                             final_path: finalPath,
                             original_name: item.file.originalname,
+                            attachment_seq: adminSeq,
                         });
                     }
                 } catch (renameErr) {
@@ -13890,7 +13937,8 @@ app.post('/api/collab/requests/:id/admin-submit-on-behalf',
             // 单事务：INSERT 新 admin active 行（如有）+ UPDATE 旧 active 同 type → superseded + UPDATE collab_requests
             //   submission_version 不变（admin 行政闭环不算正常 dev 提交，不递增版本号）
             //   旧 active 同 attachment_type（result_data / result_script）→ superseded（选 1 覆盖语义）
-            const newSubmissionVersion = collab.submission_version || 0;
+            //   codex 47 M-1：与 adminSeq 统一用 `|| 1`，首次 admin 上传时 NULL/0 → 1 → 文件名 seq 与 DB 一致
+            const newSubmissionVersion = collab.submission_version || 1;
 
             try {
                 await dbRunAsync('BEGIN IMMEDIATE TRANSACTION');
@@ -13906,16 +13954,17 @@ app.post('/api/collab/requests/:id/admin-submit-on-behalf',
                             AND status='active'`,
                         [id, mf.attachment_type]
                     );
-                    // INSERT 新 admin active 行
+                    // INSERT 新 admin active 行（v1.72.0 写入 attachment_seq）
                     // file_name 路径计算与 versioning §3.6 完全一致：relative(dirname(collabRoot), final_path) replace \ → /
                     const relPath = path.relative(path.dirname(COLLAB_UPLOAD_BASE), mf.final_path).replace(/\\/g, '/');
                     await dbRunAsync(
                         `INSERT INTO collab_attachments
                             (collab_request_id, attachment_type, file_name, original_name,
-                             uploaded_by, uploaded_by_name, submission_version, status, superseded_at)
-                         VALUES (?, ?, ?, ?, ?, ?, ?, 'active', NULL)`,
+                             uploaded_by, uploaded_by_name, submission_version, status, superseded_at,
+                             attachment_seq)
+                         VALUES (?, ?, ?, ?, ?, ?, ?, 'active', NULL, ?)`,
                         [id, mf.attachment_type, relPath, mf.original_name,
-                         userId, userName, newSubmissionVersion]
+                         userId, userName, newSubmissionVersion, mf.attachment_seq]
                     );
                 }
 
@@ -13930,7 +13979,7 @@ app.post('/api/collab/requests/:id/admin-submit-on-behalf',
                                 (SELECT MAX(created_at) FROM collab_attachments
                                   WHERE collab_request_id = collab_requests.id
                                     AND status = 'active'
-                                    AND attachment_type IN ('result_data','result_script','delivery')),
+                                    AND attachment_type IN ('result_data','result_script')),
                                 deadline,
                                 datetime('now','localtime')
                             ),
@@ -13983,7 +14032,7 @@ app.post('/api/collab/requests/:id/admin-submit-on-behalf',
                     `SELECT MAX(created_at) AS last_at FROM collab_attachments
                       WHERE collab_request_id = ?
                         AND status = 'active'
-                        AND attachment_type IN ('result_data','result_script','delivery')`,
+                        AND attachment_type IN ('result_data','result_script')`,
                     [id]
                 );
                 if (lastActive && lastActive.last_at === finalDoneAt) {
@@ -14075,8 +14124,8 @@ app.get('/api/collab/requests/:id/attachments', authenticateToken, async (req, r
 });
 
 // 7. 上传附件（按 attachment_type 分权限）
-//    original_ticket：仅 publisher+
-//    delivery：本单 developer 或 publisher+
+//    screenshot / example_xlsx / pdf：admin+publisher
+//    result_data / result_script：本单 developer 或 admin+publisher
 //    支持单次上传多个文件（multer field 名 'files'，最多 5 个）
 app.post('/api/collab/requests/:id/attachments',
     authenticateToken,
@@ -14104,8 +14153,8 @@ app.post('/api/collab/requests/:id/attachments',
         };
 
         try {
-            // v2.0：5 类附件 + 兼容 D1 老 2 类
-            const validAttachmentTypes = Object.keys(COLLAB_ATTACHMENT_RULES).concat(Object.keys(COLLAB_LEGACY_TYPE_ALIAS));
+            // v2.0：5 类附件（v1.71.x D1 老类型 delivery/original_ticket 已清理 — 生产 0 行实证）
+            const validAttachmentTypes = Object.keys(COLLAB_ATTACHMENT_RULES);
             if (!attachment_type || !validAttachmentTypes.includes(attachment_type)) {
                 cleanupTempFiles();
                 return res.status(400).json({ error: `attachment_type 必须是 ${validAttachmentTypes.join('/')}` });
@@ -14118,9 +14167,9 @@ app.post('/api/collab/requests/:id/attachments',
             }
 
             // 权限校验（按"是否开发交付物"分组）
-            // 开发交付物：result_data / result_script / delivery（旧）→ 本单 developer 或 admin/publisher
+            // 开发交付物：result_data / result_script → 本单 developer 或 admin/publisher
             // 录入物 / 截图 / 示例 / PDF：admin/publisher
-            const isDeveloperUpload = ['result_data', 'result_script', 'delivery'].includes(attachment_type);
+            const isDeveloperUpload = ['result_data', 'result_script'].includes(attachment_type);
             if (isDeveloperUpload) {
                 const isOwnDev = request.developer_id === userId;
                 if (!isOwnDev && !isPrivileged) {
@@ -14140,11 +14189,6 @@ app.post('/api/collab/requests/:id/attachments',
             if (['result_data', 'result_script'].includes(attachment_type)) {
                 cleanupTempFiles();
                 return res.status(409).json({ error: '交付物（result_data/result_script）请通过 POST /:id/submit 提交（Deploy 3 上线）' });
-            }
-            // 兼容 D1 老 'delivery'：保持原有约束（CONFIRMED 不可上传）
-            if (attachment_type === 'delivery' && request.status === 'CONFIRMED') {
-                cleanupTempFiles();
-                return res.status(409).json({ error: '交付附件只能在 CLAIMED 及以后状态上传' });
             }
             // v1.67.1 改造：ARCHIVED 归档锁定后仅 admin 可上传（publisher 也拒绝）
             // 与 v1.66.2 archived_at 软删除独立：归档锁定是已交付的历史归档，软删除是未提交前的撤销
@@ -14186,23 +14230,54 @@ app.post('/api/collab/requests/:id/attachments',
                 fs.mkdirSync(targetDir, { recursive: true });
             }
 
+            // v1.72.0：预分配 attachment_seq（sc/ex 走 sc/ex 通道）
+            //   通用 upload 仅处理 screenshot / example_xlsx（rd/rs 已在 line 14181 拦截）
+            //   多文件批量上传：每个文件按提交顺序分配 +1 (从 MAX+1 开始)
+            const baseSeq = await collabVersioning.allocateAttachmentSeq(
+                { getAsync: dbGetAsync }, id, attachment_type
+            );
+
             const inserted = [];
-            for (const f of files) {
-                const finalPath = path.join(targetDir, f.filename);
+            for (let i = 0; i < files.length; i++) {
+                const f = files[i];
+                const fileSeq = baseSeq + i;
+                const ext = path.extname(f.originalname || '');
+                let finalName;
+                try {
+                    finalName = collabVersioning.buildFinalAttachmentName({
+                        oaRequestNo: request.oa_request_no,
+                        createdAt: request.created_at,
+                        seq: fileSeq,
+                        attachmentType: attachment_type,
+                        isFailed: false,
+                        displayName: userName,
+                        username: userName,
+                        ext,
+                    });
+                } catch (nameErr) {
+                    logger.error('附件命名失败:', nameErr.message);
+                    // codex 47 M-2：清理 multer 临时文件防垃圾残留
+                    try { fs.unlinkSync(f.path); } catch (_) { /* ignore */ }
+                    continue;
+                }
+                const finalPath = path.join(targetDir, finalName);
                 try {
                     fs.renameSync(f.path, finalPath);
                 } catch (e) {
                     logger.error('附件移动失败:', e.message);
+                    // codex 47 M-2：清理 multer 临时文件防垃圾残留
+                    try { fs.unlinkSync(f.path); } catch (_) { /* ignore */ }
                     continue;
                 }
 
-                // 入库（file_name 存相对路径，方便 GET 访问）
+                // 入库（file_name 存相对路径，方便 GET 访问；v1.72.0 写入 attachment_seq）
                 const relPath = path.relative(UPLOAD_DIR, finalPath).replace(/\\/g, '/');
                 const result = await dbRunAsync(
                     `INSERT INTO collab_attachments
-                        (collab_request_id, attachment_type, file_name, original_name, uploaded_by, uploaded_by_name)
-                     VALUES (?, ?, ?, ?, ?, ?)`,
-                    [id, attachment_type, relPath, f.originalname, userId, userName]
+                        (collab_request_id, attachment_type, file_name, original_name,
+                         uploaded_by, uploaded_by_name, attachment_seq)
+                     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+                    [id, attachment_type, relPath, f.originalname, userId, userName, fileSeq]
                 );
                 inserted.push({
                     id: result.lastID,
