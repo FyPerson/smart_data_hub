@@ -108,6 +108,30 @@
         .data-table .empty-row tr:hover {
             background: transparent;
         }
+        /* v1.72.1：可排序表头 + 排序图标 + 激活列高亮 */
+        .data-table th.sortable {
+            cursor: pointer;
+            user-select: none;
+            transition: background 0.12s;
+        }
+        .data-table th.sortable:hover {
+            background: #eef2f7;
+        }
+        .data-table th.sortable.active {
+            background: #e0e7ff;
+            color: #1e40af;
+        }
+        .data-table th.sortable .sort-icon {
+            display: inline-block;
+            margin-left: 4px;
+            color: #94a3b8;
+            font-size: 12px;
+            font-weight: normal;
+        }
+        .data-table th.sortable.active .sort-icon {
+            color: #1e40af;
+            font-weight: bold;
+        }
         .data-table .col-id {
             color: #6b7280;
             font-family: ui-monospace, monospace;
@@ -856,26 +880,27 @@
             </button>
         </div>
 
-        <!-- 列表 -->
-        <table class="data-table">
+        <!-- 列表（v1.72.1：13 列可排序表头 + 创建时间列） -->
+        <table class="data-table" id="collabListTable">
             <thead>
                 <tr>
-                    <th>ID</th>
-                    <th>OA 流程号</th>
-                    <th>部门</th>
-                    <th>业务方</th>
-                    <th>目标业务库</th>
-                    <th>需求描述</th>
-                    <th>截止时间</th>
-                    <th>对接人</th>
-                    <th>开发</th>
-                    <th>状态</th>
-                    <th>验收</th>
-                    <th>摩擦</th>
+                    <th class="sortable" data-sort-by="id">ID<span class="sort-icon">⇅</span></th>
+                    <th class="sortable" data-sort-by="oa_request_no">OA 流程号<span class="sort-icon">⇅</span></th>
+                    <th class="sortable" data-sort-by="requester_dept">部门<span class="sort-icon">⇅</span></th>
+                    <th class="sortable" data-sort-by="requester_name">业务方<span class="sort-icon">⇅</span></th>
+                    <th class="sortable" data-sort-by="target_db_connection_id">目标业务库<span class="sort-icon">⇅</span></th>
+                    <th class="sortable" data-sort-by="description">需求描述<span class="sort-icon">⇅</span></th>
+                    <th class="sortable" data-sort-by="created_at">创建时间<span class="sort-icon">⇅</span></th>
+                    <th class="sortable" data-sort-by="deadline">截止时间<span class="sort-icon">⇅</span></th>
+                    <th class="sortable" data-sort-by="contact_person_name">对接人<span class="sort-icon">⇅</span></th>
+                    <th class="sortable" data-sort-by="developer_name">开发<span class="sort-icon">⇅</span></th>
+                    <th class="sortable" data-sort-by="status">状态<span class="sort-icon">⇅</span></th>
+                    <th class="sortable" data-sort-by="sql_validation_status">验收<span class="sort-icon">⇅</span></th>
+                    <th class="sortable" data-sort-by="friction_occurred">摩擦<span class="sort-icon">⇅</span></th>
                 </tr>
             </thead>
             <tbody id="listBody">
-                <tr class="empty-row"><td colspan="12">加载中...</td></tr>
+                <tr class="empty-row"><td colspan="13">加载中...</td></tr>
             </tbody>
         </table>
     </main>
@@ -1574,13 +1599,30 @@
             } catch (e) { /* 静默 */ }
         }
 
+        // v1.72.1：列表客户端排序状态（null = 后端默认排序，第三次点同列恢复）
+        let currentSortBy = null;
+        let currentSortDir = 'desc';
+        // 缓存最近一次后端返回的原始顺序，用于"清排序"时还原（不需重新拉接口）
+        let lastListBackendOrder = [];
+
         function renderList(list) {
             const tbody = document.getElementById('listBody');
+            // 缓存原始（后端给的）顺序：仅在 list 来自 fetch 时调（renderList 重排时不缓存）
+            // 通过 currentSortBy 是否为 null 判断：null = 后端原始顺序进入
+            if (currentSortBy === null) {
+                lastListBackendOrder = list ? list.slice() : [];
+            }
+
             if (!list || list.length === 0) {
-                tbody.innerHTML = '<tr class="empty-row"><td colspan="12">暂无协作单。点击右上角"新建协作单"开始记录。</td></tr>';
+                tbody.innerHTML = '<tr class="empty-row"><td colspan="13">暂无协作单。点击右上角"新建协作单"开始记录。</td></tr>';
+                updateSortIcons();
                 return;
             }
-            tbody.innerHTML = list.map(r => {
+
+            // 应用客户端排序（若有）
+            const sorted = currentSortBy ? sortByField(list, currentSortBy, currentSortDir) : list;
+
+            tbody.innerHTML = sorted.map(r => {
                 const desc = r.description.length > 60 ? r.description.substring(0, 60) + '…' : r.description;
 
                 // 验收状态：bypass 优先，其次按 sql_validation_status
@@ -1614,6 +1656,7 @@
                     <td>${escapeHtml(r.requester_name)}</td>
                     <td>${targetDb}</td>
                     <td class="col-desc" title="${escapeHtml(r.description)}">${escapeHtml(desc)}</td>
+                    <td>${fmtDate(r.created_at)}</td>
                     <td>${fmtDate(r.deadline)}</td>
                     <td>${contactCell}</td>
                     <td>${devCell}</td>
@@ -1622,6 +1665,120 @@
                     <td>${frictionCell}</td>
                 </tr>`;
             }).join('');
+
+            // 同步表头排序图标 + active 高亮
+            updateSortIcons();
+        }
+
+        // ===== v1.72.1 列表客户端排序 =====
+        // 字段类型分派（数字 / 日期 / 字符串 / 状态自定义优先级）
+        const SORT_FIELD_TYPES = {
+            id: 'number',
+            oa_request_no: 'string',
+            requester_dept: 'string',
+            requester_name: 'string',
+            target_db_connection_id: 'targetDb',   // 解析 targetDbMap 后字典序
+            description: 'string',
+            created_at: 'date',
+            deadline: 'date',
+            contact_person_name: 'string',
+            developer_name: 'string',
+            status: 'statusOrder',                  // 业务优先级
+            sql_validation_status: 'string',
+            friction_occurred: 'number',
+        };
+
+        // 状态业务优先级（与后端 ORDER BY CASE 一致）
+        const STATUS_SORT_ORDER = {
+            PENDING_ASSIGN: 0,
+            PENDING: 1,
+            EXPORTING: 2,
+            SUBMITTED: 3,
+            DONE: 4,
+            ARCHIVED: 5,
+        };
+
+        /**
+         * 按 field + dir 对 list 排序（不修改原数组）
+         * null/undefined 一律排到末尾（无论 asc/desc）
+         */
+        function sortByField(list, field, dir) {
+            const type = SORT_FIELD_TYPES[field] || 'string';
+            const mult = dir === 'asc' ? 1 : -1;
+
+            return list.slice().sort((a, b) => {
+                const va = a[field];
+                const vb = b[field];
+
+                // null/undefined/空字符串统一排末尾
+                const aEmpty = va === null || va === undefined || va === '';
+                const bEmpty = vb === null || vb === undefined || vb === '';
+                if (aEmpty && bEmpty) return 0;
+                if (aEmpty) return 1;
+                if (bEmpty) return -1;
+
+                let cmp = 0;
+                if (type === 'number') {
+                    cmp = Number(va) - Number(vb);
+                } else if (type === 'date') {
+                    cmp = new Date(va).getTime() - new Date(vb).getTime();
+                } else if (type === 'targetDb') {
+                    const la = targetDbMap[va] || `#${va}`;
+                    const lb = targetDbMap[vb] || `#${vb}`;
+                    cmp = la.localeCompare(lb, 'zh-Hans-CN');
+                } else if (type === 'statusOrder') {
+                    const oa = STATUS_SORT_ORDER[va] !== undefined ? STATUS_SORT_ORDER[va] : 99;
+                    const ob = STATUS_SORT_ORDER[vb] !== undefined ? STATUS_SORT_ORDER[vb] : 99;
+                    cmp = oa - ob;
+                } else {
+                    // string：用中文 locale collator 支持中文/英文混排
+                    cmp = String(va).localeCompare(String(vb), 'zh-Hans-CN');
+                }
+                return cmp * mult;
+            });
+        }
+
+        /**
+         * 表头点击处理：第 1 次 desc → 第 2 次 asc → 第 3 次清排序（回后端默认）
+         */
+        function initListSorting() {
+            const ths = document.querySelectorAll('#collabListTable th.sortable');
+            ths.forEach(th => {
+                th.addEventListener('click', () => {
+                    const field = th.dataset.sortBy;
+                    if (currentSortBy !== field) {
+                        // 新列首次点击：默认 desc
+                        currentSortBy = field;
+                        currentSortDir = 'desc';
+                    } else if (currentSortDir === 'desc') {
+                        currentSortDir = 'asc';
+                    } else {
+                        // 第 3 次：清排序，恢复后端原始顺序
+                        currentSortBy = null;
+                        currentSortDir = 'desc';
+                    }
+                    // 用缓存的后端原始顺序重排，避免重新拉接口
+                    renderList(lastListBackendOrder);
+                });
+            });
+        }
+
+        /**
+         * 同步表头排序图标 + active class
+         */
+        function updateSortIcons() {
+            const ths = document.querySelectorAll('#collabListTable th.sortable');
+            ths.forEach(th => {
+                const field = th.dataset.sortBy;
+                const icon = th.querySelector('.sort-icon');
+                if (currentSortBy === field) {
+                    th.classList.add('active');
+                    if (icon) icon.textContent = currentSortDir === 'asc' ? '↑' : '↓';
+                } else {
+                    th.classList.remove('active');
+                    if (icon) icon.textContent = '⇅';
+                }
+            });
         }
 
         // ===== 详情弹窗（v2.0 Deploy 2 框架）=====
@@ -4246,6 +4403,9 @@
             await loadActiveUsers();
             await loadTargetDbMap();
             await loadList();
+
+            // v1.72.1：表头排序初始化（loadList 后绑定，targetDbMap 已加载用于 targetDb 列排序）
+            initListSorting();
 
             // 根据角色调整导航栏（viewer 隐藏工作台/任务池）
             if (typeof adjustNavbarForRole === 'function') {
