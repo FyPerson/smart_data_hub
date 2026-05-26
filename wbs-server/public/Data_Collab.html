@@ -109,6 +109,7 @@
             background: transparent;
         }
         /* v1.72.1：可排序表头 + 排序图标 + 激活列高亮 */
+        /* v1.72.2 视觉调优：默认 13 列图标隐藏，hover/active 才显示，避免表头视觉杂乱 */
         .data-table th.sortable {
             cursor: pointer;
             user-select: none;
@@ -127,8 +128,14 @@
             color: #94a3b8;
             font-size: 12px;
             font-weight: normal;
+            opacity: 0;                  /* v1.72.2: 默认隐藏 */
+            transition: opacity 0.15s;
+        }
+        .data-table th.sortable:hover .sort-icon {
+            opacity: 1;                  /* v1.72.2: hover 显示灰色 ⇅ */
         }
         .data-table th.sortable.active .sort-icon {
+            opacity: 1;                  /* v1.72.2: active 列固定显示 */
             color: #1e40af;
             font-weight: bold;
         }
