@@ -185,6 +185,83 @@
         .val-bypassed { background: #fde68a; color: #78350f; }
         .friction-mark { color: #b91c1c; font-size: 16px; }
 
+        /* v1.72.3 admin 直派模式 tag */
+        .admin-direct-tag {
+            display: inline-block;
+            padding: 2px 6px;
+            margin-left: 4px;
+            background: #e3f2fd;
+            color: #1976d2;
+            border-radius: 3px;
+            font-size: 0.8em;
+            font-weight: 600;
+            vertical-align: middle;
+            white-space: nowrap;
+        }
+
+        /* v1.72.3 admin 直派详情页操作区 */
+        .admin-direct-actions {
+            margin-top: 16px;
+            padding: 12px;
+            background: #f8f9fb;
+            border: 1px solid #e3e8ee;
+            border-radius: 6px;
+        }
+        .admin-direct-actions h4 {
+            margin: 0 0 8px 0;
+            color: #1976d2;
+            font-size: 14px;
+        }
+        .admin-direct-actions .action-buttons {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+        .admin-direct-actions button {
+            padding: 6px 12px;
+            border-radius: 4px;
+            font-size: 13px;
+            cursor: pointer;
+        }
+        .admin-direct-actions .btn-reassign {
+            background: #2563eb;
+            color: white;
+            border: 1px solid #2563eb;
+        }
+        .admin-direct-actions .btn-fallback {
+            background: #f59e0b;
+            color: white;
+            border: 1px solid #f59e0b;
+        }
+        .reassign-history {
+            margin-top: 10px;
+            font-size: 13px;
+        }
+        .reassign-history summary {
+            cursor: pointer;
+            color: #555;
+            padding: 4px 0;
+        }
+        .reassign-history-list {
+            margin: 6px 0;
+            padding-left: 20px;
+            color: #333;
+        }
+        .reassign-history-list li { margin: 4px 0; }
+        .reassign-history-list .time { color: #888; margin-right: 8px; }
+        .reassign-history-list .operator { color: #1976d2; margin-right: 8px; }
+        .reassign-history-list .reason { color: #333; }
+        .fallback-warning-box {
+            background: #fff3cd;
+            border: 1px solid #ffc107;
+            border-radius: 4px;
+            padding: 12px;
+            margin: 10px 0;
+            font-size: 13px;
+        }
+        .fallback-warning-box ul { margin: 4px 0 0 18px; padding: 0; }
+        .fallback-warning-box li { margin: 2px 0; }
+
         /* 类型徽章 */
         .type-badge {
             display: inline-block;
@@ -954,11 +1031,26 @@
                     <div class="hint">开发交付的 SQL 将在此库执行。下拉为空时联系管理员在「系统设置 → 数据库连接」配置 source 类型连接。</div>
                 </div>
                 <div class="form-row" id="formRow_contact">
-                    <label>对接人 <span class="required">*</span></label>
+                    <label>对接人 <span class="required" id="contactRequiredMark">*</span></label>
                     <select id="f_contact">
                         <option value="">加载中...</option>
                     </select>
                     <div class="hint" id="contactHint">外包负责人，由其在平台内将协作单指派给具体开发。下拉显示全部活跃用户（含 admin 兜底），凭备注辨识。</div>
+                </div>
+                <!-- v1.72.3 admin 直派模式（仅 admin 可见，新建时显示）-->
+                <div class="form-row" id="formRow_adminDirectToggle" style="display:none;">
+                    <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+                        <input type="checkbox" id="f_admin_direct_toggle" onchange="toggleAdminDirectMode()">
+                        <span>🎯 admin 直派模式</span>
+                    </label>
+                    <div class="hint">勾选后跳过 D1+D2，直接指定数据导出人。常用于"业务方已经知道找谁导数据"的场景。</div>
+                </div>
+                <div class="form-row" id="formRow_adminDirectExporter" style="display:none;">
+                    <label>🎯 数据导出人 <span class="required">*</span></label>
+                    <select id="f_admin_direct_exporter">
+                        <option value="">加载中...</option>
+                    </select>
+                    <div class="hint">下拉显示全部活跃用户，凭备注辨识。该用户将作为协作单的最终数据导出人，状态直接进入 EXPORTING。</div>
                 </div>
                 <div class="form-row" id="formRow_files">
                     <label>原始单据截图 <span class="hint">（选传）</span></label>
@@ -1642,7 +1734,12 @@
                 }
 
                 const frictionCell = r.friction_occurred === 1 ? '<span class="friction-mark" title="协作摩擦">💢</span>' : '';
-                const oa = r.oa_request_no ? escapeHtml(r.oa_request_no) : '<span style="color:#9ca3af">—</span>';
+                const adminDirectTag = r.assign_mode === 'admin_direct'
+                    ? ' <span class="admin-direct-tag" title="admin 直派模式，跳过 D1/D2">🎯 admin 直派</span>'
+                    : '';
+                const oa = r.oa_request_no
+                    ? escapeHtml(r.oa_request_no) + adminDirectTag
+                    : '<span style="color:#9ca3af">—</span>' + adminDirectTag;
                 const targetDb = r.target_db_connection_id
                     ? escapeHtml(targetDbMap[r.target_db_connection_id] || `#${r.target_db_connection_id}`)
                     : '<span style="color:#9ca3af">—</span>';
@@ -1964,6 +2061,260 @@
                 </div>`;
         }
 
+        // v1.72.3 admin 直派操作区（仅 admin + assign_mode='admin_direct' 显示）
+        //   - EXPORTING 状态：显示「改派接收人」+「切回流转模式」按钮 + 改派历史折叠
+        //   - PENDING_ASSIGN 状态（切回流转后）：显示历史信息 + 改派历史折叠（无操作按钮）
+        //   - 其他状态：不显示
+        function renderAdminDirectActionsSection(d, isAdminUser) {
+            if (!isAdminUser) return '';
+            if (d.assign_mode !== 'admin_direct') return '';
+            const visibleStatuses = ['EXPORTING', 'PENDING_ASSIGN'];
+            if (!visibleStatuses.includes(d.status)) return '';
+
+            const safeId = Number(d.id);
+            const exporterLine = d.exporter_name
+                ? `<div style="color:#1d4f72;margin-bottom:8px;font-size:13px;">当前数据导出人：<strong>${escapeHtml(d.exporter_name)}</strong></div>`
+                : (d.status === 'PENDING_ASSIGN'
+                    ? '<div style="color:#9ca3af;margin-bottom:8px;font-size:13px;">（已切回流转模式，等待 admin 指派一级负责人）</div>'
+                    : '');
+
+            const actionButtons = d.status === 'EXPORTING' ? `
+                <div class="action-buttons">
+                    <button class="btn-reassign" onclick="openAdminDirectReassignModal(${safeId})">🔄 改派接收人</button>
+                    <button class="btn-fallback" onclick="openAdminDirectFallbackModal(${safeId})">↩️ 切回流转模式</button>
+                </div>` : '';
+
+            return `
+                <div class="admin-direct-actions">
+                    <h4>🎯 admin 直派单操作</h4>
+                    ${exporterLine}
+                    ${actionButtons}
+                    <details class="reassign-history" id="reassignHistoryDetails">
+                        <summary onclick="loadReassignHistory(${safeId})">📜 改派历史（点击展开）</summary>
+                        <div id="reassignHistoryContent" style="margin-top:8px;color:#888;font-size:12px;">点击展开后加载</div>
+                    </details>
+                </div>`;
+        }
+
+        // v1.72.3 加载改派历史
+        async function loadReassignHistory(collabId) {
+            const contentEl = document.getElementById('reassignHistoryContent');
+            if (!contentEl) return;
+            // 防重复加载：若已加载则跳过
+            if (contentEl.dataset.loaded === '1') return;
+            contentEl.innerHTML = '<span style="color:#888;">加载中...</span>';
+            try {
+                const res = await authFetch(`/api/collab/requests/${collabId}/reassign-history`);
+                if (!res) return;
+                const data = await res.json();
+                if (!res.ok) {
+                    contentEl.innerHTML = `<span style="color:#dc2626;">加载失败：${escapeHtml(data.error || '未知错误')}</span>`;
+                    return;
+                }
+                if (!Array.isArray(data.logs) || data.logs.length === 0) {
+                    contentEl.innerHTML = '<span style="color:#888;">暂无改派历史</span>';
+                    contentEl.dataset.loaded = '1';
+                    return;
+                }
+                // 默认展示最近 5 条；超过 5 条「展开全部」按钮
+                const showAll = contentEl.dataset.showAll === '1';
+                const displayLogs = showAll ? data.logs : data.logs.slice(0, 5);
+                const items = displayLogs.map(log => `
+                    <li>
+                        <span class="time">${fmtDate(log.created_at)}</span>
+                        <span class="operator">${escapeHtml(log.operator)}</span>
+                        <span class="reason">${escapeHtml(log.reason || '')}</span>
+                    </li>
+                `).join('');
+                let html = `<ul class="reassign-history-list">${items}</ul>`;
+                if (!showAll && data.logs.length > 5) {
+                    html += `<button style="font-size:12px;padding:2px 8px;cursor:pointer;" onclick="event.stopPropagation(); expandAllReassigns(${collabId})">展开全部 ${data.logs.length} 次</button>`;
+                }
+                contentEl.innerHTML = html;
+                contentEl.dataset.loaded = '1';
+                contentEl.dataset.totalCount = String(data.logs.length);
+            } catch (e) {
+                contentEl.innerHTML = `<span style="color:#dc2626;">加载失败：${escapeHtml(e.message)}</span>`;
+            }
+        }
+
+        function expandAllReassigns(collabId) {
+            const contentEl = document.getElementById('reassignHistoryContent');
+            if (!contentEl) return;
+            contentEl.dataset.showAll = '1';
+            contentEl.dataset.loaded = '';  // 强制重载
+            loadReassignHistory(collabId);
+        }
+
+        // v1.72.3 改派接收人弹窗
+        function openAdminDirectReassignModal(collabId) {
+            if (!currentDetail || currentDetail.id !== collabId) {
+                return showToast('协作单数据未加载，请刷新', 'error');
+            }
+            // 简单 prompt 选择新接收人（凭借现有 activeUsers 列表）
+            const currentName = currentDetail.exporter_name || '(无)';
+            const options = (activeUsers || [])
+                .filter(u => ['user', 'publisher', 'admin'].includes(u.role))
+                .map(u => `<option value="${u.id}">${escapeHtml(u.display_name || u.username)}${u.remark ? ' · ' + escapeHtml(u.remark) : ''}</option>`)
+                .join('');
+
+            const modalHtml = `
+                <div class="modal-overlay show" id="reassignModal" style="z-index: 10000;">
+                    <div class="modal-card" style="max-width: 480px;">
+                        <div class="modal-header">
+                            <h3>🔄 改派接收人</h3>
+                            <button class="modal-close" onclick="closeReassignModal()">×</button>
+                        </div>
+                        <div class="modal-body">
+                            <p style="margin: 0 0 12px 0;">当前接收人：<strong>${escapeHtml(currentName)}</strong></p>
+                            <div class="form-row">
+                                <label>新接收人 <span class="required">*</span></label>
+                                <select id="reassign_new_exporter" style="width:100%;">
+                                    <option value="">请选择</option>
+                                    ${options}
+                                </select>
+                            </div>
+                        </div>
+                        <div class="modal-footer">
+                            <button class="btn btn-cancel" onclick="closeReassignModal()">取消</button>
+                            <button class="btn btn-primary" id="btnConfirmReassign" onclick="confirmAdminDirectReassign(${collabId})">确定改派</button>
+                        </div>
+                    </div>
+                </div>`;
+            const wrapper = document.createElement('div');
+            wrapper.id = 'reassignModalWrapper';
+            wrapper.innerHTML = modalHtml;
+            document.body.appendChild(wrapper);
+        }
+
+        function closeReassignModal() {
+            const w = document.getElementById('reassignModalWrapper');
+            if (w) w.remove();
+        }
+
+        async function confirmAdminDirectReassign(collabId) {
+            const sel = document.getElementById('reassign_new_exporter');
+            if (!sel) return;
+            const newExporterId = parseInt(sel.value, 10) || 0;
+            if (!newExporterId) return showToast('请选择新接收人', 'error');
+
+            const btn = document.getElementById('btnConfirmReassign');
+            if (btn) { btn.disabled = true; btn.textContent = '改派中...'; }
+            try {
+                const res = await authFetch(`/api/collab/requests/${collabId}/admin-direct-reassign`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ new_exporter_user_id: newExporterId })
+                });
+                if (!res) return;
+                const data = await res.json();
+                if (!res.ok) {
+                    showToast(data.error || '改派失败', 'error');
+                    if (btn) { btn.disabled = false; btn.textContent = '确定改派'; }
+                    return;
+                }
+                showToast(data.message || '已改派', 'success');
+                closeReassignModal();
+                // 刷新详情页
+                await openDetail(collabId);
+            } catch (e) {
+                showToast('网络错误', 'error');
+                if (btn) { btn.disabled = false; btn.textContent = '确定改派'; }
+            }
+        }
+
+        // v1.72.3 切回流转模式弹窗
+        function openAdminDirectFallbackModal(collabId) {
+            if (!currentDetail || currentDetail.id !== collabId) {
+                return showToast('协作单数据未加载，请刷新', 'error');
+            }
+            const currentName = currentDetail.exporter_name || '(无)';
+            const modalHtml = `
+                <div class="modal-overlay show" id="fallbackModal" style="z-index: 10000;">
+                    <div class="modal-card" style="max-width: 520px;">
+                        <div class="modal-header">
+                            <h3>↩️ 切回流转模式</h3>
+                            <button class="modal-close" onclick="closeFallbackModal()">×</button>
+                        </div>
+                        <div class="modal-body">
+                            <div class="fallback-warning-box">
+                                <p style="margin:0 0 4px 0;"><strong>切回流转将：</strong></p>
+                                <ul>
+                                    <li>状态从 <code>EXPORTING</code> 退回 <code>PENDING_ASSIGN</code></li>
+                                    <li>清空当前接收人 <strong>${escapeHtml(currentName)}</strong></li>
+                                    <li>历史附件标记为 <code>superseded</code>（保留可查）</li>
+                                    <li>请你切回后再指派一级负责人接管</li>
+                                </ul>
+                            </div>
+                            <div class="form-row">
+                                <label>切回原因（选填）</label>
+                                <textarea id="fallback_reason_input" rows="3" maxlength="500" style="width:100%;" placeholder="例：需要部门协调 / 接收人不熟悉技术栈 / 业务范围变化"></textarea>
+                            </div>
+                        </div>
+                        <div class="modal-footer">
+                            <button class="btn btn-cancel" onclick="closeFallbackModal()">取消</button>
+                            <button class="btn btn-primary" id="btnConfirmFallback" onclick="confirmAdminDirectFallback(${collabId})" style="background:#f59e0b; border-color:#f59e0b;">确定切回流转</button>
+                        </div>
+                    </div>
+                </div>`;
+            const wrapper = document.createElement('div');
+            wrapper.id = 'fallbackModalWrapper';
+            wrapper.innerHTML = modalHtml;
+            document.body.appendChild(wrapper);
+        }
+
+        function closeFallbackModal() {
+            const w = document.getElementById('fallbackModalWrapper');
+            if (w) w.remove();
+        }
+
+        async function confirmAdminDirectFallback(collabId) {
+            const reasonRaw = (document.getElementById('fallback_reason_input').value || '').trim();
+            const btn = document.getElementById('btnConfirmFallback');
+            if (btn) { btn.disabled = true; btn.textContent = '切回中...'; }
+            try {
+                const res = await authFetch(`/api/collab/requests/${collabId}/admin-direct-fallback`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ fallback_reason: reasonRaw || null })
+                });
+                if (!res) return;
+                const data = await res.json();
+                if (!res.ok) {
+                    showToast(data.error || '切回失败', 'error');
+                    if (btn) { btn.disabled = false; btn.textContent = '确定切回流转'; }
+                    return;
+                }
+                showToast(data.message || '已切回流转', 'success');
+                closeFallbackModal();
+                // codex 32 审 H-1 采纳：切回流转后强引导 admin 立即补齐一级负责人
+                //   切回后 collab.contact_person_id=0，状态 PENDING_ASSIGN 但缺 D1
+                //   若不强引导，admin 可能不知道下一步要点"编辑协作单"补 D1
+                //   方案：刷新详情页 → 等 300ms 让详情页渲染完 → 自动打开编辑模式
+                await openDetail(collabId);
+                setTimeout(() => {
+                    try {
+                        // 仅在 currentDetail 仍是 admin_direct 切回单时触发，避免误触
+                        if (currentDetail
+                            && Number(currentDetail.id) === Number(collabId)
+                            && currentDetail.status === 'PENDING_ASSIGN'
+                            && currentDetail.assign_mode === 'admin_direct'
+                            && Number(currentDetail.contact_person_id) === 0) {
+                            showToast('请指派一级负责人后通知对接人', 'info');
+                            if (typeof openEditModal === 'function') {
+                                openEditModal();
+                            }
+                        }
+                    } catch (e) {
+                        console.warn('[fallback-auto-edit] 引导编辑模式异常:', e);
+                    }
+                }, 300);
+            } catch (e) {
+                showToast('网络错误', 'error');
+                if (btn) { btn.disabled = false; btn.textContent = '确定切回流转'; }
+            }
+        }
+
         function renderDetail(d) {
             const isAdminUser = (typeof isAdmin === 'function') && isAdmin();
             // codex 16 审 #5：id 数字化护栏（防后端将来返回字符串 id 导致内联 onclick 属性脆弱）
@@ -2132,9 +2483,12 @@
             //   思路：上下文 → 通知 → 当前交付证据 → 历史/沟通
             const insufficientEvidenceHtml = renderInsufficientEvidenceSection(d, isAdminUser);
             const exportSummaryHtml = renderExportSummarySection(d);
+            // v1.72.3 admin 直派操作区（仅 admin + assign_mode='admin_direct'）
+            const adminDirectActionsHtml = renderAdminDirectActionsSection(d, isAdminUser);
 
             document.getElementById('detailBody').innerHTML =
                 taskInfoHtml
+                + adminDirectActionsHtml
                 + notifyHtml
                 + insufficientEvidenceHtml
                 + deliveryHtml
@@ -3931,10 +4285,72 @@
             document.getElementById('f_contact').disabled = false;
             document.getElementById('contactHint').textContent = '外包负责人，由其在平台内将协作单指派给具体开发。下拉显示全部活跃用户（含 admin 兜底），凭备注辨识。';
 
+            // v1.72.3 admin 直派模式：仅 admin 角色可见此 toggle，新建时显示
+            const isAdmin = currentUser && currentUser.role === 'admin';
+            const toggleRow = document.getElementById('formRow_adminDirectToggle');
+            const exporterRow = document.getElementById('formRow_adminDirectExporter');
+            if (toggleRow && exporterRow) {
+                toggleRow.style.display = isAdmin ? '' : 'none';
+                exporterRow.style.display = 'none';  // 默认收起
+                const toggleEl = document.getElementById('f_admin_direct_toggle');
+                if (toggleEl) toggleEl.checked = false;
+                const exporterSel = document.getElementById('f_admin_direct_exporter');
+                if (exporterSel) exporterSel.selectedIndex = 0;
+                // 同步对接人字段必填态
+                document.getElementById('contactRequiredMark').style.display = '';
+            }
+
             // 拉取 source 连接填充下拉
             await loadTargetDbOptions();
 
+            // 拉取数据导出人下拉（admin 直派模式用，与对接人下拉同列表，复用 activeUsers）
+            await loadAdminDirectExporterOptions();
+
             document.getElementById('newModal').classList.add('show');
+        }
+
+        // v1.72.3 admin 直派模式切换
+        function toggleAdminDirectMode() {
+            const isDirect = document.getElementById('f_admin_direct_toggle').checked;
+            const exporterRow = document.getElementById('formRow_adminDirectExporter');
+            const contactRow = document.getElementById('formRow_contact');
+            const requiredMark = document.getElementById('contactRequiredMark');
+
+            if (isDirect) {
+                exporterRow.style.display = '';
+                contactRow.style.display = 'none';
+                document.getElementById('f_contact').value = '';
+                if (requiredMark) requiredMark.style.display = 'none';
+            } else {
+                exporterRow.style.display = 'none';
+                contactRow.style.display = '';
+                document.getElementById('f_admin_direct_exporter').value = '';
+                if (requiredMark) requiredMark.style.display = '';
+            }
+        }
+
+        // v1.72.3 加载数据导出人下拉（与对接人下拉同列表，复用 activeUsers）
+        async function loadAdminDirectExporterOptions() {
+            const sel = document.getElementById('f_admin_direct_exporter');
+            if (!sel) return;
+            try {
+                if (!Array.isArray(activeUsers) || activeUsers.length === 0) {
+                    sel.innerHTML = '<option value="">无可选用户</option>';
+                    return;
+                }
+                const options = activeUsers
+                    .filter(u => ['user', 'publisher', 'admin'].includes(u.role))
+                    .map(u => {
+                        const label = u.remark
+                            ? `${escapeHtml(u.display_name || u.username)} · ${escapeHtml(u.remark)}`
+                            : escapeHtml(u.display_name || u.username);
+                        return `<option value="${u.id}">${label}</option>`;
+                    });
+                sel.innerHTML = '<option value="">请选择</option>' + options.join('');
+            } catch (e) {
+                sel.innerHTML = '<option value="">加载失败</option>';
+                console.error('[admin-direct-exporter] 加载失败:', e);
+            }
         }
 
         // v1.66.2 编辑弹窗：复用 newModal，用 currentDetail 预填
@@ -4035,12 +4451,23 @@
             if (requesterPhoneRaw && !/^1\d{10}$/.test(requesterPhoneRaw)) {
                 return showToast('业务方手机号必须是 11 位以 1 开头的数字', 'error');
             }
-            // 对接人：新建场景必填；编辑场景仅 PENDING_ASSIGN 允许带（PENDING 禁用，传了后端也会拒）
-            const contactId = parseInt(document.getElementById('f_contact').value, 10) || null;
-            if (!isEdit) {
-                payload.contact_person_id = contactId;
-            } else if (editingCollabStatus === 'PENDING_ASSIGN') {
-                payload.contact_person_id = contactId;
+            // v1.72.3 admin 直派模式判断（仅新建场景；编辑场景不允许切换 assign_mode）
+            const adminDirectToggleEl = document.getElementById('f_admin_direct_toggle');
+            const isAdminDirect = !isEdit && adminDirectToggleEl && adminDirectToggleEl.checked;
+
+            if (isAdminDirect) {
+                const exporterId = parseInt(document.getElementById('f_admin_direct_exporter').value, 10) || null;
+                if (!exporterId) return showToast('请选择数据导出人', 'error');
+                payload.exporter_user_id = exporterId;
+                // admin 直派模式不传 contact_person_id（后端会拒同时填）
+            } else {
+                // 对接人：新建场景必填；编辑场景仅 PENDING_ASSIGN 允许带（PENDING 禁用，传了后端也会拒）
+                const contactId = parseInt(document.getElementById('f_contact').value, 10) || null;
+                if (!isEdit) {
+                    payload.contact_person_id = contactId;
+                } else if (editingCollabStatus === 'PENDING_ASSIGN') {
+                    payload.contact_person_id = contactId;
+                }
             }
 
             // 前端基础校验
@@ -4050,9 +4477,11 @@
             if (!payload.description) return showToast('请填写需求描述', 'error');
             if (!payload.deadline) return showToast('请选择期望完成时间', 'error');
             if (!payload.target_db_connection_id) return showToast('请选择目标业务库', 'error');
-            if (!isEdit && !payload.contact_person_id) return showToast('请选择对接人', 'error');
-            if (isEdit && editingCollabStatus === 'PENDING_ASSIGN' && !payload.contact_person_id) {
-                return showToast('请选择对接人', 'error');
+            if (!isAdminDirect) {
+                if (!isEdit && !payload.contact_person_id) return showToast('请选择对接人', 'error');
+                if (isEdit && editingCollabStatus === 'PENDING_ASSIGN' && !payload.contact_person_id) {
+                    return showToast('请选择对接人', 'error');
+                }
             }
 
             // 时间格式：HTML5 datetime-local 是 "YYYY-MM-DDTHH:MM"，后端能处理

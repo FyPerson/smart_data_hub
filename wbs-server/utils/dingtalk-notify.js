@@ -564,6 +564,50 @@ function buildCollabSubmittedCard(collab, platformBaseUrl) {
 }
 
 /**
+ * 模板 4：通知数据导出人（EXPORTING 状态通用，含 v1.72.3 admin 直派 + v1.71.0 forward 后两种来源）
+ * 触发：admin/contact_person/developer 调 POST :id/notify，状态 EXPORTING
+ * 收件人：当前 exporter
+ * 期望 collab 多带：assign_mode / exporter_name / created_by_name / contact_person_name / developer_name
+ * v1.72.3 新增（codex 32 审 M-1 采纳：去掉 Direct 后缀，按 assign_mode 内部分支区分文案）
+ */
+function buildCollabExporterNotifyCard(collab, platformBaseUrl) {
+    const deepLink = _buildDeepLink(collab, platformBaseUrl);
+    const isDirect = collab.assign_mode === 'admin_direct';
+
+    const titleLine = isDirect
+        ? '#### 你被 admin 直派为数据导出人'
+        : '#### 你被转发为数据导出人';
+
+    const lines = [
+        titleLine,
+        '',
+        ..._buildCollabHeaderLines(collab),
+    ];
+
+    if (isDirect) {
+        // admin 直派模式下 contact_person_id=0 / developer_id=0 占位，不展示
+        lines.push(`- **直派 admin**:${escapeMarkdown(collab.created_by_name || '-')}`);
+    } else {
+        lines.push(`- **对接人**:${escapeMarkdown(collab.contact_person_name || '-')}`);
+        lines.push(`- **开发**:${escapeMarkdown(collab.developer_name || '-')}`);
+    }
+
+    lines.push(
+        '',
+        '**需求描述**',
+        '',
+        escapeMarkdown(collab.description || '(无描述)'),
+        ''
+    );
+
+    if (deepLink) {
+        lines.push(`[👉 查看详情并准备导出数据](${deepLink})`);
+    }
+
+    return lines.join('\n');
+}
+
+/**
  * 测试模式辅助:清空所有缓存(单测用)
  * 业务代码不要调用
  */
@@ -724,6 +768,8 @@ module.exports = {
     buildCollabCreatedCard,
     buildCollabAssignedCard,
     buildCollabSubmittedCard,
+    // v1.72.3 通知数据导出人（EXPORTING 状态通用，含 admin 直派 + forward 后两种来源）
+    buildCollabExporterNotifyCard,
     // v1.69.0 拉起钉钉沟通群
     createChatGroup,
     sendGroupMessage,

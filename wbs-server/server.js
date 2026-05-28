@@ -1430,6 +1430,25 @@ function initTable() {
         //   不加 UNIQUE 索引（避免 failed/superseded 同 seq 兼容性冲突，靠应用层 + verify 兜底）
         safeAlterAddColumn('collab_attachments', 'attachment_seq', 'INTEGER');
 
+        // ===== v1.72.3 admin 直派模式（2026-05-28）=====
+        //   方案 §3：仅 1 个 assign_mode 字段，枚举值 ['normal', 'admin_direct']
+        //   - 历史行（v1.72.2 前）自动填默认值 'normal' 兼容
+        //   - 应用层守卫枚举值（SQLite ALTER 不支持 CHECK 约束）
+        //   - verify-assign-mode-history.js 巡检：SELECT COUNT(*) FROM collab_requests WHERE assign_mode IS NULL = 0
+        //
+        //   ⚠️ 重要语义（codex 32 审 M-2 采纳）：
+        //   assign_mode 是「来源/历史标识」而非「当前流程模式」。一旦创建为 admin_direct，
+        //   永远是 admin_direct（即使 admin-direct-fallback 切回流转后状态变 PENDING_ASSIGN，
+        //   assign_mode 仍保留 admin_direct）。
+        //
+        //   后续维护者注意：
+        //   - 判断"当前是否处于 admin 直派 EXPORTING"必须联合 status + exporter_user_id：
+        //     assign_mode='admin_direct' && status='EXPORTING' && exporter_user_id != null
+        //   - PENDING_ASSIGN/PENDING 状态下 assign_mode='admin_direct' 仅代表「这单曾走过直派路径」，
+        //     不要在这些状态对 admin_direct 应用直派专属规则（如 admin-direct-reassign/fallback）
+        safeAlterAddColumn('collab_requests', 'assign_mode', "TEXT NOT NULL DEFAULT 'normal'");
+        db.run(`CREATE INDEX IF NOT EXISTS idx_collab_assign_mode ON collab_requests(assign_mode)`);
+
         // 健康检查放在 serialize 末尾，确保所有 ALTER/INDEX 都已串行执行完
         verifyV2CollabSchema();
     });
@@ -1463,7 +1482,9 @@ function verifyV2CollabSchema() {
         // v1.71.0 三级转发数据导出人（2026-05-24）
         'exporter_user_id', 'exporter_name',
         'exporter_assigned_at', 'forwarded_to_exporter_at',
-        'export_summary'
+        'export_summary',
+        // v1.72.3 admin 直派模式（2026-05-28）
+        'assign_mode'
     ];
     db.all("PRAGMA table_info(collab_requests)", [], (err, rows) => {
         if (err) {
@@ -1475,9 +1496,28 @@ function verifyV2CollabSchema() {
         if (missing.length > 0) {
             logger.error(`v2.0 schema 迁移不完整，collab_requests 缺失字段: ${missing.join(', ')}`);
         } else {
-            logger.info(`v2.0 schema 健康检查通过：collab_requests ${expectedCollabRequest.length} 个新增字段齐全（含 D3 attachment_dir + v3 二级转派 5 字段 + v1.66.1 对接人钉钉已读跟踪 3 字段 + v1.66.2 软删除 3 字段 + v1.67.1 归档锁定 3 字段 + v1.69.0 钉钉沟通群 5 字段 + v1.70.4 requester_phone + v1.71.0 三级转发 5 字段）`);
+            logger.info(`v2.0 schema 健康检查通过：collab_requests ${expectedCollabRequest.length} 个新增字段齐全（含 D3 attachment_dir + v3 二级转派 5 字段 + v1.66.1 对接人钉钉已读跟踪 3 字段 + v1.66.2 软删除 3 字段 + v1.67.1 归档锁定 3 字段 + v1.69.0 钉钉沟通群 5 字段 + v1.70.4 requester_phone + v1.71.0 三级转发 5 字段 + v1.72.3 assign_mode）`);
         }
     });
+
+    // v1.72.3 codex 32 审 M-3 采纳：assign_mode 枚举值启动期巡检
+    //   SQLite ALTER 不支持 CHECK 约束，靠应用层守卫枚举值
+    //   启动期巡检发现异常值（数据库被人工 SQL 改坏 / 老 schema 残留）即告警
+    db.all(
+        "SELECT id, oa_request_no, assign_mode FROM collab_requests WHERE assign_mode NOT IN ('normal', 'admin_direct') OR assign_mode IS NULL LIMIT 5",
+        [],
+        (err, rows) => {
+            if (err) {
+                logger.warn(`v1.72.3 assign_mode 巡检查询失败: ${err.message}`);
+                return;
+            }
+            if (rows && rows.length > 0) {
+                logger.error(`v1.72.3 assign_mode 异常巡检：发现 ${rows.length}+ 行非法 assign_mode（前 5 个 id=${rows.map(r => r.id).join(',')}）。需要人工修复为 normal 或 admin_direct。`);
+            } else {
+                logger.info('v1.72.3 assign_mode 巡检通过：所有协作单 assign_mode 合法（normal / admin_direct）');
+            }
+        }
+    );
     db.all("PRAGMA table_info(collab_attachments)", [], (err, rows) => {
         if (err) return;
         const actualCols = rows.map(r => r.name);
@@ -10320,17 +10360,98 @@ app.post('/api/collab/requests', authenticateToken, requireAdmin, async (req, re
         description,
         deadline,
         contact_person_id,
+        exporter_user_id,  // v1.72.3 admin 直派模式（与 contact_person_id 二选一）
         target_db_connection_id,
         requester_phone  // v1.70.4 ④ 业务方负责人手机号（选填）
     } = req.body;
 
     try {
-        const validation = await validateCollabRequestFields(req.body, true);
-        if (typeof validation === 'string') {
-            return res.status(400).json({ error: validation });
+        // === v1.72.3 admin 直派模式：二选一校验 ===
+        const hasContactPerson = contact_person_id !== undefined
+                                 && contact_person_id !== null
+                                 && contact_person_id !== ''
+                                 && Number(contact_person_id) > 0;
+        const hasExporter = exporter_user_id !== undefined
+                            && exporter_user_id !== null
+                            && exporter_user_id !== ''
+                            && Number(exporter_user_id) > 0;
+
+        if (hasContactPerson && hasExporter) {
+            return res.status(400).json({
+                error: 'contact_person_id 与 exporter_user_id 不可同时填写（二选一）',
+                code: 'CONFLICTING_ASSIGN_MODE'
+            });
         }
-        const contactPerson = validation.contactPerson;
-        const contactPersonName = contactPerson.display_name || contactPerson.username;
+        if (!hasContactPerson && !hasExporter) {
+            return res.status(400).json({
+                error: 'contact_person_id 与 exporter_user_id 必须二选一填写',
+                code: 'MISSING_ASSIGN_MODE'
+            });
+        }
+
+        const assignMode = hasExporter ? 'admin_direct' : 'normal';
+        const initialStatus = hasExporter ? 'EXPORTING' : 'PENDING_ASSIGN';
+
+        // === admin_direct 模式：校验 exporter 用户 + 必填字段（绕过 validateCollabRequestFields 的 contact_person_id 必填）===
+        let exporterUser = null;
+        let contactPerson = null;
+        let contactPersonName = '';
+        let validatedExporterId = 0;
+        let validatedExporterName = '';
+
+        if (assignMode === 'admin_direct') {
+            // codex 32 审 L-1 采纳：即使未来 requireAdmin 中间件放宽（如允许 publisher 创建 normal 模式协作单），
+            // admin_direct 分支仍必须 admin-only —— 直派权限的核心是 admin 凭业务判断绕过流转链路，
+            // 不能授予 publisher/contact/developer。此处守卫不可删除。
+            if (req.user.role !== 'admin') {
+                return res.status(403).json({
+                    error: '仅 admin 可直派给数据导出人',
+                    code: 'NOT_ADMIN_FOR_DIRECT_ASSIGN'
+                });
+            }
+            // 必填字段（不走 validateCollabRequestFields 的 contact_person_id 校验）
+            if (!oa_request_no || !String(oa_request_no).trim()) return res.status(400).json({ error: 'OA 流程号必填' });
+            if (!requester_dept) return res.status(400).json({ error: '需求部门必填' });
+            if (!requester_name || !String(requester_name).trim()) return res.status(400).json({ error: '业务方负责人必填' });
+            if (!description || !String(description).trim()) return res.status(400).json({ error: '需求描述必填' });
+            if (!deadline) return res.status(400).json({ error: '期望完成时间必填' });
+            if (!target_db_connection_id) return res.status(400).json({ error: '目标业务库必填' });
+            if (!COLLAB_REQUESTER_DEPTS.includes(requester_dept)) {
+                return res.status(400).json({ error: '无效的需求部门，合法值见前端常量' });
+            }
+            // 校验 target_db_connection
+            const conn = await dbGetAsync(
+                "SELECT id, connection_type FROM db_connections WHERE id = ?",
+                [target_db_connection_id]
+            );
+            if (!conn) return res.status(400).json({ error: '指定的目标业务库不存在' });
+            if (conn.connection_type !== 'source') return res.status(400).json({ error: '目标业务库必须是 source 类型连接' });
+
+            // 校验 exporter 用户
+            exporterUser = await dbGetAsync(
+                "SELECT id, display_name, username, role, status FROM users WHERE id = ?",
+                [Number(exporter_user_id)]
+            );
+            if (!exporterUser) {
+                return res.status(400).json({ error: '数据导出人不存在', code: 'EXPORTER_NOT_FOUND' });
+            }
+            if (exporterUser.status !== 'active') {
+                return res.status(400).json({ error: '数据导出人已停用', code: 'EXPORTER_INACTIVE' });
+            }
+            if (!['user', 'publisher', 'admin'].includes(exporterUser.role)) {
+                return res.status(400).json({ error: '数据导出人角色无效（仅 user/publisher/admin）' });
+            }
+            validatedExporterId = exporterUser.id;
+            validatedExporterName = exporterUser.display_name || exporterUser.username;
+        } else {
+            // normal 模式走原有 validateCollabRequestFields
+            const validation = await validateCollabRequestFields(req.body, true);
+            if (typeof validation === 'string') {
+                return res.status(400).json({ error: validation });
+            }
+            contactPerson = validation.contactPerson;
+            contactPersonName = contactPerson.display_name || contactPerson.username;
+        }
 
         const operatorId = req.user.id;
         const operatorName = req.user.display_name || req.user.username;
@@ -10365,8 +10486,10 @@ app.post('/api/collab/requests', authenticateToken, requireAdmin, async (req, re
                      description, deadline, status, created_by, created_by_name,
                      developer_id, developer_name,
                      contact_person_id, contact_person_name,
-                     target_db_connection_id, requester_phone)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING_ASSIGN', ?, ?, ?, ?, ?, ?, ?, ?)`,
+                     target_db_connection_id, requester_phone,
+                     assign_mode,
+                     exporter_user_id, exporter_name, exporter_assigned_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                 [
                     external_request_id || null,
                     oaTrimmed,
@@ -10375,20 +10498,38 @@ app.post('/api/collab/requests', authenticateToken, requireAdmin, async (req, re
                     COLLAB_REQUEST_TYPE_V2_DEFAULT,
                     String(description).trim(),
                     deadline,
+                    initialStatus,  // v1.72.3: normal → PENDING_ASSIGN / admin_direct → EXPORTING
                     operatorId,
                     operatorName,
                     COLLAB_UNASSIGNED_DEVELOPER_ID,
                     COLLAB_UNASSIGNED_DEVELOPER_NAME,
-                    contactPerson.id,
-                    contactPersonName,
+                    assignMode === 'admin_direct' ? 0 : contactPerson.id,
+                    assignMode === 'admin_direct' ? '' : contactPersonName,
                     target_db_connection_id,
-                    phoneTrimmed  // v1.70.4 ④
+                    phoneTrimmed,  // v1.70.4 ④
+                    assignMode,  // v1.72.3
+                    assignMode === 'admin_direct' ? validatedExporterId : null,
+                    assignMode === 'admin_direct' ? validatedExporterName : null,
+                    assignMode === 'admin_direct' ? new Date().toISOString().slice(0, 19).replace('T', ' ') : null
                 ]
             );
             const newId = result.lastID;
-            insertCollabLog(newId, 'CREATE', operatorId, operatorName, null);
-            logger.info(`用户 ${req.user.username} 创建协作单 #${newId}（OA: ${oaTrimmed}）`);
-            res.json({ id: newId, message: '协作单已创建' });
+            const opLogType = assignMode === 'admin_direct' ? 'ADMIN_DIRECT_CREATE' : 'CREATE';
+            const opLogReason = assignMode === 'admin_direct'
+                ? `直派给: ${validatedExporterName} (id=${validatedExporterId})`
+                : null;
+            insertCollabLog(newId, opLogType, operatorId, operatorName, opLogReason);
+            logger.info(`用户 ${req.user.username} 创建协作单 #${newId}（OA: ${oaTrimmed}，模式: ${assignMode}${assignMode === 'admin_direct' ? `，直派给: ${validatedExporterName}` : ''}）`);
+            res.json({
+                id: newId,
+                message: assignMode === 'admin_direct'
+                    ? `✅ 协作单已创建（admin 直派给 ${validatedExporterName}）`
+                    : '协作单已创建',
+                assign_mode: assignMode,
+                initial_status: initialStatus,
+                exporter_name: assignMode === 'admin_direct' ? validatedExporterName : undefined,
+                contact_person_name: assignMode === 'normal' ? contactPersonName : undefined
+            });
         } catch (insertErr) {
             // UNIQUE 冲突兜底（与预检并发竞态）
             if (insertErr.message && insertErr.message.includes('UNIQUE constraint failed')) {
@@ -11248,8 +11389,11 @@ app.post('/api/collab/requests/:id/notify', authenticateToken, requireNonViewer,
     try {
         const collab = await getCollabWithDbName(id);
         if (!collab) return res.status(404).json({ error: '协作单不存在' });
-        if (collab.status !== 'PENDING_ASSIGN' && collab.status !== 'PENDING') {
-            return res.status(409).json({ error: `当前状态 ${collab.status} 不可发送通知（仅 PENDING_ASSIGN / PENDING 可触发）` });
+        // v1.72.3：扩展 EXPORTING 状态支持通知 exporter
+        if (collab.status !== 'PENDING_ASSIGN'
+            && collab.status !== 'PENDING'
+            && collab.status !== 'EXPORTING') {
+            return res.status(409).json({ error: `当前状态 ${collab.status} 不可发送通知（仅 PENDING_ASSIGN / PENDING / EXPORTING 可触发）` });
         }
 
         // codex 十六审 #3：按状态分支权限
@@ -11264,6 +11408,28 @@ app.post('/api/collab/requests/:id/notify', authenticateToken, requireNonViewer,
                 return res.status(403).json({ error: '仅 admin 或本单对接人可发送通知', code: 'NOT_NOTIFIER' });
             }
         }
+        // v1.72.3：EXPORTING 状态权限分支
+        //   - admin_direct 模式：仅 admin 可通知（与 admin 直派权限对齐）
+        //   - normal 模式：admin / 对接人 / 开发 都可通知（forward 后想"重发"通知 exporter 用）
+        if (collab.status === 'EXPORTING') {
+            if (collab.assign_mode === 'admin_direct') {
+                if (!isAdmin) {
+                    return res.status(403).json({
+                        error: 'admin 直派模式 EXPORTING 状态仅 admin 可通知',
+                        code: 'NOT_NOTIFIER'
+                    });
+                }
+            } else {
+                const isContactPerson = Number(collab.contact_person_id) === currentUserId;
+                const isDeveloper = Number(collab.developer_id) === currentUserId;
+                if (!isAdmin && !isContactPerson && !isDeveloper) {
+                    return res.status(403).json({
+                        error: '仅 admin / 对接人 / 开发可发送通知',
+                        code: 'NOT_NOTIFIER'
+                    });
+                }
+            }
+        }
 
         const platformBaseUrl = await readSystemConfig('platform_base_url');
 
@@ -11274,16 +11440,35 @@ app.post('/api/collab/requests/:id/notify', authenticateToken, requireNonViewer,
             title = `待指派协作单 · ${collab.requester_dept}`;
             markdown = dingtalkNotify.buildCollabCreatedCard(collab, platformBaseUrl);
             opLogType = 'NOTIFY_CONTACT';
-        } else {
-            // PENDING
+        } else if (collab.status === 'PENDING') {
             targetUserId = collab.developer_id;
             title = `新临时取数任务 · ${collab.requester_dept}`;
             markdown = dingtalkNotify.buildCollabAssignedCard(collab, platformBaseUrl);
             opLogType = 'NOTIFY';
+        } else {
+            // v1.72.3：EXPORTING 状态通知 exporter
+            targetUserId = collab.exporter_user_id;
+            const isDirect = collab.assign_mode === 'admin_direct';
+            title = isDirect
+                ? `数据导出任务 · admin 直派 · ${collab.requester_dept}`
+                : `数据导出任务 · ${collab.requester_dept}`;
+            markdown = dingtalkNotify.buildCollabExporterNotifyCard(collab, platformBaseUrl);
+            opLogType = isDirect ? 'NOTIFY_EXPORTER_DIRECT' : 'NOTIFY_EXPORTER';
         }
 
         if (!targetUserId || Number(targetUserId) === 0) {
-            return res.status(400).json({ error: '收件人未定（PENDING_ASSIGN 需有对接人，PENDING 需已指派开发）' });
+            // v1.72.3 codex 32 审 H-1 采纳：admin 直派切回流转的特殊错误细化
+            //   切回流转后 status=PENDING_ASSIGN + assign_mode='admin_direct' + contact_person_id=0
+            //   admin 需要先点"编辑协作单"补齐 D1 才能通知
+            if (collab.status === 'PENDING_ASSIGN'
+                && collab.assign_mode === 'admin_direct'
+                && (!collab.contact_person_id || Number(collab.contact_person_id) === 0)) {
+                return res.status(400).json({
+                    error: '该单是 admin 直派切回流转单，请先点"编辑协作单"补齐对接人后再通知',
+                    code: 'CONTACT_PERSON_NOT_ASSIGNED_AFTER_FALLBACK'
+                });
+            }
+            return res.status(400).json({ error: '收件人未定（PENDING_ASSIGN 需有对接人，PENDING 需已指派开发，EXPORTING 需已指派数据导出人）' });
         }
 
         const targetUser = await dbGetAsync(
@@ -12532,6 +12717,384 @@ app.post('/api/collab/requests/:id/forward-to-exporter', authenticateToken, requ
     } finally {
         // codex 36 审 H-1：无论成功/失败/异常都必须 release mutex（防永久 leak）
         if (release) release();
+    }
+});
+
+// ============================================================
+// v1.72.3 admin 直派模式 endpoint 集（2026-05-28）
+//   方案：admin直派模式_方案_20260528_v1.0.md §4.2-4.3
+//   1. POST /:id/admin-direct-reassign — admin 改派直派接收人（换人）
+//   2. POST /:id/admin-direct-fallback — admin 切回流转模式（EXPORTING → PENDING_ASSIGN）
+//   3. GET  /:id/reassign-history     — 查询改派历史（详情页展示用）
+//
+// 共同约束：
+//   - 仅 admin 可调（requireAdmin 中间件）
+//   - 仅 assign_mode='admin_direct' 可调（normal 模式协作单不可调）
+//   - 仅 status='EXPORTING' 可调（其他状态拒绝）
+//   - acquire collabExporterTransitionMutex 与 forward/return/submit-export 串行化（v1.72.3 mutex 范围扩展）
+//   - 钉钉静默：endpoint 本身不发钉钉，admin 后续自主点详情页通知按钮
+// ============================================================
+const FALLBACK_REASON_MAX_LEN = 500;
+
+// v1.72.3 改派 endpoint
+app.post('/api/collab/requests/:id/admin-direct-reassign', authenticateToken, requireAdmin, async (req, res) => {
+    const idStr = req.params.id;
+    const userId = Number(req.user.id);
+    const userName = req.user.display_name || req.user.username || `user#${userId}`;
+
+    // === 前置：id 校验（沿用 forward-to-exporter 风格）===
+    if (!/^[1-9]\d*$/.test(idStr)) {
+        return res.status(400).json({ error: 'id 必须是正整数', code: 'INVALID_ID' });
+    }
+    const id = parseInt(idStr, 10);
+    if (!Number.isSafeInteger(id)) {
+        return res.status(400).json({ error: 'id 超出安全整数范围', code: 'INVALID_ID' });
+    }
+
+    // === 前置：new_exporter_user_id 校验 ===
+    const rawNewExporterId = req.body && req.body.new_exporter_user_id;
+    if (rawNewExporterId === undefined || rawNewExporterId === null) {
+        return res.status(400).json({ error: 'new_exporter_user_id 必填', code: 'MISSING_NEW_EXPORTER_ID' });
+    }
+    if (!/^[1-9]\d*$/.test(String(rawNewExporterId))) {
+        return res.status(400).json({ error: 'new_exporter_user_id 必须是正整数', code: 'INVALID_NEW_EXPORTER_ID' });
+    }
+    const newExporterId = Number(rawNewExporterId);
+    if (!Number.isSafeInteger(newExporterId)) {
+        return res.status(400).json({ error: 'new_exporter_user_id 超出安全整数范围', code: 'INVALID_NEW_EXPORTER_ID' });
+    }
+
+    // === mutex acquire（5s 超时返 503）===
+    let release;
+    try {
+        release = await collabExporterTransitionMutex.acquire(5000);
+    } catch (mutexErr) {
+        logger.warn(`[admin-direct-reassign] 协作单 #${id} 等待 mutex 超时: ${mutexErr.message}`);
+        return res.status(503).json({
+            error: '系统繁忙，请稍后重试',
+            code: 'COLLAB_EXPORTER_MUTEX_BUSY'
+        });
+    }
+
+    try {
+        // === 取协作单 ===
+        const collab = await dbGetAsync(
+            `SELECT id, status, assign_mode, exporter_user_id, exporter_name,
+                    archived_at, archived_final_at, oa_request_no
+               FROM collab_requests WHERE id = ?`,
+            [id]
+        );
+        if (!collab) {
+            return res.status(404).json({ error: '协作单不存在', code: 'NOT_FOUND' });
+        }
+
+        // === 守卫：assign_mode = admin_direct ===
+        if (collab.assign_mode !== 'admin_direct') {
+            return res.status(409).json({
+                error: '仅 admin 直派模式协作单可改派',
+                code: 'NOT_ADMIN_DIRECT_MODE',
+                current_assign_mode: collab.assign_mode
+            });
+        }
+
+        // === 守卫：软删 / 归档 ===
+        if (collab.archived_at) {
+            return res.status(409).json({
+                error: '协作单已作废，不可改派',
+                code: 'PARENT_SOFT_ARCHIVED'
+            });
+        }
+        if (collab.archived_final_at) {
+            return res.status(409).json({
+                error: '协作单已归档锁定，不可改派',
+                code: 'PARENT_ARCHIVED_LOCKED'
+            });
+        }
+
+        // === 守卫：status = EXPORTING ===
+        if (collab.status !== 'EXPORTING') {
+            return res.status(409).json({
+                error: `仅 EXPORTING 状态可改派，当前状态：${collab.status}`,
+                code: 'INVALID_STATE_FOR_REASSIGN',
+                current_status: collab.status
+            });
+        }
+
+        // === 校验新接收人存在 + active ===
+        const newExporter = await dbGetAsync(
+            'SELECT id, display_name, username, role, status FROM users WHERE id = ?',
+            [newExporterId]
+        );
+        if (!newExporter) {
+            return res.status(400).json({
+                error: '新接收人不存在',
+                code: 'NEW_EXPORTER_NOT_FOUND'
+            });
+        }
+        if (newExporter.status !== 'active') {
+            return res.status(400).json({
+                error: `新接收人 ${newExporter.display_name || newExporter.username} 已停用`,
+                code: 'NEW_EXPORTER_INACTIVE'
+            });
+        }
+        if (!['user', 'publisher', 'admin'].includes(newExporter.role)) {
+            return res.status(400).json({
+                error: '新接收人角色无效（仅 user/publisher/admin）',
+                code: 'NEW_EXPORTER_INVALID_ROLE'
+            });
+        }
+
+        const originalExporterName = collab.exporter_name;
+        const newExporterName = newExporter.display_name || newExporter.username;
+
+        // === 事务：UPDATE + 操作日志（沿用 v1.71.0 显式 BEGIN IMMEDIATE 模式）===
+        await dbRunAsync('BEGIN IMMEDIATE');
+        try {
+            const result = await dbRunAsync(
+                `UPDATE collab_requests
+                    SET exporter_user_id = ?,
+                        exporter_name = ?,
+                        exporter_assigned_at = datetime('now','localtime')
+                  WHERE id = ?
+                    AND status = 'EXPORTING'
+                    AND assign_mode = 'admin_direct'
+                    AND archived_at IS NULL
+                    AND archived_final_at IS NULL`,
+                [newExporterId, newExporterName, id]
+            );
+
+            if (!result || result.changes === 0) {
+                await dbRunAsync('ROLLBACK');
+                return res.status(409).json({
+                    error: '协作单状态已变化（可能已被切回流转/作废），请刷新后重试',
+                    code: 'STATE_CHANGED'
+                });
+            }
+
+            // 操作日志（事务内显式 INSERT，不用 fire-and-forget insertCollabLog）
+            const reasonText = `原接收人: ${originalExporterName} → 新接收人: ${newExporterName}`;
+            await dbRunAsync(
+                `INSERT INTO collab_operation_logs
+                    (collab_request_id, operation_type, operator_id, operator, reason)
+                 VALUES (?, 'ADMIN_DIRECT_REASSIGN', ?, ?, ?)`,
+                [id, userId, userName, reasonText]
+            );
+
+            await dbRunAsync('COMMIT');
+        } catch (txErr) {
+            try { await dbRunAsync('ROLLBACK'); } catch (_) {}
+            logger.error(`[admin-direct-reassign] 协作单 #${id} 事务失败: ${txErr.message}`, txErr);
+            return res.status(500).json({
+                error: '改派失败，请联系管理员',
+                code: 'REASSIGN_TX_FAILED'
+            });
+        }
+
+        logger.info(`[admin-direct-reassign] 协作单 #${id} ${originalExporterName} → ${newExporterName} by ${userName}`);
+
+        return res.json({
+            success: true,
+            message: `✅ 已改派给${newExporterName}`,
+            current_status: 'EXPORTING',
+            exporter_id: newExporterId,
+            exporter_name: newExporterName,
+            previous_exporter_name: originalExporterName
+        });
+    } catch (e) {
+        logger.error(`[admin-direct-reassign] 协作单 #${id} 异常: ${e.message}`, e);
+        return res.status(500).json({
+            error: '改派失败，请联系管理员',
+            code: 'REASSIGN_FAILED'
+        });
+    } finally {
+        if (release) release();
+    }
+});
+
+// v1.72.3 切回流转 endpoint
+app.post('/api/collab/requests/:id/admin-direct-fallback', authenticateToken, requireAdmin, async (req, res) => {
+    const idStr = req.params.id;
+    const userId = Number(req.user.id);
+    const userName = req.user.display_name || req.user.username || `user#${userId}`;
+
+    // === 前置：id 校验 ===
+    if (!/^[1-9]\d*$/.test(idStr)) {
+        return res.status(400).json({ error: 'id 必须是正整数', code: 'INVALID_ID' });
+    }
+    const id = parseInt(idStr, 10);
+    if (!Number.isSafeInteger(id)) {
+        return res.status(400).json({ error: 'id 超出安全整数范围', code: 'INVALID_ID' });
+    }
+
+    // === 前置：fallback_reason 校验 ===
+    let fallbackReason = null;
+    if (req.body && req.body.fallback_reason !== undefined && req.body.fallback_reason !== null) {
+        if (typeof req.body.fallback_reason !== 'string') {
+            return res.status(400).json({
+                error: 'fallback_reason 必须是字符串',
+                code: 'INVALID_FALLBACK_REASON'
+            });
+        }
+        const trimmed = req.body.fallback_reason.trim();
+        if (trimmed.length > FALLBACK_REASON_MAX_LEN) {
+            return res.status(400).json({
+                error: `fallback_reason 不能超过 ${FALLBACK_REASON_MAX_LEN} 字符`,
+                code: 'FALLBACK_REASON_TOO_LONG'
+            });
+        }
+        fallbackReason = trimmed || null;
+    }
+
+    // === mutex acquire ===
+    let release;
+    try {
+        release = await collabExporterTransitionMutex.acquire(5000);
+    } catch (mutexErr) {
+        logger.warn(`[admin-direct-fallback] 协作单 #${id} 等待 mutex 超时: ${mutexErr.message}`);
+        return res.status(503).json({
+            error: '系统繁忙，请稍后重试',
+            code: 'COLLAB_EXPORTER_MUTEX_BUSY'
+        });
+    }
+
+    try {
+        // === 取协作单 ===
+        const collab = await dbGetAsync(
+            `SELECT id, status, assign_mode, exporter_user_id, exporter_name,
+                    archived_at, archived_final_at, oa_request_no
+               FROM collab_requests WHERE id = ?`,
+            [id]
+        );
+        if (!collab) {
+            return res.status(404).json({ error: '协作单不存在', code: 'NOT_FOUND' });
+        }
+
+        // === 守卫：assign_mode + status + 软删 / 归档 ===
+        if (collab.assign_mode !== 'admin_direct') {
+            return res.status(409).json({
+                error: '仅 admin 直派模式协作单可切回流转',
+                code: 'NOT_ADMIN_DIRECT_MODE',
+                current_assign_mode: collab.assign_mode
+            });
+        }
+        if (collab.archived_at) {
+            return res.status(409).json({ error: '协作单已作废，不可切回流转', code: 'PARENT_SOFT_ARCHIVED' });
+        }
+        if (collab.archived_final_at) {
+            return res.status(409).json({ error: '协作单已归档锁定，不可切回流转', code: 'PARENT_ARCHIVED_LOCKED' });
+        }
+        if (collab.status !== 'EXPORTING') {
+            return res.status(409).json({
+                error: `仅 EXPORTING 状态可切回流转，当前状态：${collab.status}`,
+                code: 'INVALID_STATE_FOR_FALLBACK',
+                current_status: collab.status
+            });
+        }
+
+        const originalExporterName = collab.exporter_name;
+
+        // === 事务：UPDATE 状态 + 字段清空 + 附件 superseded + 操作日志 ===
+        await dbRunAsync('BEGIN IMMEDIATE');
+        try {
+            // 1. UPDATE collab_requests
+            const collabResult = await dbRunAsync(
+                `UPDATE collab_requests
+                    SET status = 'PENDING_ASSIGN',
+                        exporter_user_id = NULL,
+                        exporter_name = NULL,
+                        exporter_assigned_at = NULL,
+                        forwarded_to_exporter_at = NULL
+                  WHERE id = ?
+                    AND status = 'EXPORTING'
+                    AND assign_mode = 'admin_direct'
+                    AND archived_at IS NULL
+                    AND archived_final_at IS NULL`,
+                [id]
+            );
+
+            if (!collabResult || collabResult.changes === 0) {
+                await dbRunAsync('ROLLBACK');
+                return res.status(409).json({
+                    error: '协作单状态已变化，请刷新后重试',
+                    code: 'STATE_CHANGED'
+                });
+            }
+
+            // 2. 历史附件标 superseded（仅 result_data / result_script 主交付物，沿用 v1.71.0 撞墙附件保留模式）
+            await dbRunAsync(
+                `UPDATE collab_attachments
+                    SET status = 'superseded',
+                        superseded_at = datetime('now','localtime')
+                  WHERE collab_request_id = ?
+                    AND status = 'active'
+                    AND attachment_type IN ('result_data', 'result_script')`,
+                [id]
+            );
+
+            // 3. 操作日志
+            const reasonText = fallbackReason
+                ? `原 exporter: ${originalExporterName} / 原因: ${fallbackReason}`
+                : `原 exporter: ${originalExporterName}`;
+            await dbRunAsync(
+                `INSERT INTO collab_operation_logs
+                    (collab_request_id, operation_type, operator_id, operator, reason)
+                 VALUES (?, 'ADMIN_DIRECT_FALLBACK', ?, ?, ?)`,
+                [id, userId, userName, reasonText]
+            );
+
+            await dbRunAsync('COMMIT');
+        } catch (txErr) {
+            try { await dbRunAsync('ROLLBACK'); } catch (_) {}
+            logger.error(`[admin-direct-fallback] 协作单 #${id} 事务失败: ${txErr.message}`, txErr);
+            return res.status(500).json({
+                error: '切回流转失败，请联系管理员',
+                code: 'FALLBACK_TX_FAILED'
+            });
+        }
+
+        logger.info(`[admin-direct-fallback] 协作单 #${id} EXPORTING → PENDING_ASSIGN by ${userName}, prev exporter=${originalExporterName}${fallbackReason ? ` reason=${fallbackReason.slice(0, 50)}` : ''}`);
+
+        return res.json({
+            success: true,
+            message: '✅ 已切回流转模式，请指派一级负责人',
+            current_status: 'PENDING_ASSIGN',
+            assign_mode: 'admin_direct',  // 保留作历史标识（assign_mode 单调）
+            previous_exporter_name: originalExporterName
+        });
+    } catch (e) {
+        logger.error(`[admin-direct-fallback] 协作单 #${id} 异常: ${e.message}`, e);
+        return res.status(500).json({
+            error: '切回流转失败，请联系管理员',
+            code: 'FALLBACK_FAILED'
+        });
+    } finally {
+        if (release) release();
+    }
+});
+
+// v1.72.3 改派历史查询（详情页改派历史区块展示用，admin 专属）
+app.get('/api/collab/requests/:id/reassign-history', authenticateToken, requireAdmin, async (req, res) => {
+    const idStr = req.params.id;
+    if (!/^[1-9]\d*$/.test(idStr)) {
+        return res.status(400).json({ error: 'id 必须是正整数', code: 'INVALID_ID' });
+    }
+    const id = parseInt(idStr, 10);
+    if (!Number.isSafeInteger(id)) {
+        return res.status(400).json({ error: 'id 超出安全整数范围', code: 'INVALID_ID' });
+    }
+    try {
+        const logs = await dbAllAsync(
+            `SELECT id, created_at, operator, operator_id, reason
+               FROM collab_operation_logs
+              WHERE collab_request_id = ?
+                AND operation_type = 'ADMIN_DIRECT_REASSIGN'
+              ORDER BY created_at DESC, id DESC`,
+            [id]
+        );
+        return res.json({ success: true, logs });
+    } catch (e) {
+        logger.error(`[reassign-history] 协作单 #${id} 查询异常: ${e.message}`, e);
+        return res.status(500).json({ error: '查询改派历史失败', code: 'HISTORY_QUERY_FAILED' });
     }
 });
 
