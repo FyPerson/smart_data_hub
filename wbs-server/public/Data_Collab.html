@@ -4331,17 +4331,26 @@
             }
         }
 
-        // v1.72.3 加载数据导出人下拉（与对接人下拉同列表，复用 activeUsers）
+        // v1.72.5 加载数据导出人下拉（独立拉 /api/users/active，含 viewer 角色，与对接人下拉不同列表）
+        // 不复用全局 activeUsers（已过滤 viewer），允许 admin 直派给客服性质 viewer（如沈倩静/甄妮/方丽倩）
         async function loadAdminDirectExporterOptions() {
             const sel = document.getElementById('f_admin_direct_exporter');
             if (!sel) return;
             try {
-                if (!Array.isArray(activeUsers) || activeUsers.length === 0) {
+                const res = await authFetch('/api/users/active');
+                if (!res || !res.ok) {
+                    sel.innerHTML = '<option value="">加载失败</option>';
+                    return;
+                }
+                const users = await res.json();
+                if (!Array.isArray(users) || users.length === 0) {
                     sel.innerHTML = '<option value="">无可选用户</option>';
                     return;
                 }
-                const options = activeUsers
-                    .filter(u => ['user', 'publisher', 'admin'].includes(u.role))
+                // v1.72.5：4 角色全放（含 viewer），仅排除未知角色
+                const options = users
+                    .filter(u => ['user', 'publisher', 'admin', 'viewer'].includes(u.role))
+                    .sort((a, b) => (a.display_name || a.username).localeCompare(b.display_name || b.username, 'zh-CN'))
                     .map(u => {
                         const label = u.remark
                             ? `${escapeHtml(u.display_name || u.username)} · ${escapeHtml(u.remark)}`

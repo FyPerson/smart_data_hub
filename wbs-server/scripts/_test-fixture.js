@@ -36,6 +36,8 @@ const CONTACT_ID = 3;
 const DEV1_ID = 19;
 const PUBLISHER_ID = 7;
 const EXPORTER_ID = 8;  // v1.71.0 三级转发 e2e 用（user 角色，与 dev1 不同人）
+const VIEWER_ID = 2;    // v1.72.5 admin 直派给 viewer e2e 用（沈倩静）
+const VIEWER2_ID = 4;   // v1.72.5 跨单越权测试用（甄妮，另一个 viewer）
 const TARGET_DB_CONN_ID = 2;
 
 async function signAs(userId) {
@@ -164,6 +166,8 @@ module.exports = {
     DEV1_ID,
     PUBLISHER_ID,
     EXPORTER_ID,
+    VIEWER_ID,
+    VIEWER2_ID,
     TARGET_DB_CONN_ID,
     signAs,
     apiCall,

@@ -2878,6 +2878,56 @@ function requireNonViewer(req, res, next) {
     next();
 }
 
+// v1.72.5 协作单 exporter-or-非viewer 中间件：在 requireNonViewer 基础上为 viewer 角色开一道窗
+// 仅用于 admin 直派场景下 viewer 收单后能完成 submit-export / return-to-dev
+// 规则：
+//   - admin / publisher / user → 直接放行（同 requireNonViewer）
+//   - viewer → 查 collab_requests.exporter_user_id，若 === userId 则放行（业务层 endpoint 内部还有一次判断，双重保险）
+//   - 其他未知角色 → 拒
+// 注意：仅放开"提交导出结果（submit-export）"+"回退到开发（return-to-dev）"两个动作；
+//       通用附件上传 / notify / 转派等其他写接口仍走 requireNonViewer，viewer 一律拒
+async function requireExporterOrNonViewer(req, res, next) {
+    if (!req.user) {
+        return res.status(401).json({ error: '未登录' });
+    }
+    if (WRITE_ALLOWED_ROLES.includes(req.user.role)) {
+        return next();
+    }
+    if (req.user.role !== 'viewer') {
+        return res.status(403).json({ error: '未知角色无权执行此操作' });
+    }
+    // viewer 分支：查协作单看是否本单 exporter
+    const idStr = req.params && req.params.id;
+    if (!idStr || !/^[1-9]\d*$/.test(String(idStr))) {
+        return res.status(400).json({ error: 'id 必须是正整数', code: 'INVALID_ID' });
+    }
+    const id = Number(idStr);
+    // codex 49 M-1：与 endpoint 内层保持防御对称
+    if (!Number.isSafeInteger(id)) {
+        return res.status(400).json({ error: 'id 超出安全整数范围', code: 'INVALID_ID' });
+    }
+    try {
+        const collab = await dbGetAsync(
+            'SELECT exporter_user_id FROM collab_requests WHERE id = ?',
+            [id]
+        );
+        if (!collab) {
+            return res.status(404).json({ error: '协作单不存在' });
+        }
+        if (collab.exporter_user_id == null || Number(collab.exporter_user_id) !== Number(req.user.id)) {
+            return res.status(403).json({
+                error: '查看者仅可操作本人被指派的协作单',
+                code: 'VIEWER_NOT_EXPORTER'
+            });
+        }
+        return next();
+    } catch (e) {
+        // codex 49 L-1：结构化错误码与项目约定对齐
+        logger.error(`[requireExporterOrNonViewer] DB 查询失败 id=${idStr}: ${e.message}`);
+        return res.status(500).json({ error: '权限校验失败', code: 'EXPORTER_PERMISSION_CHECK_FAILED' });
+    }
+}
+
 // 模型业务权限：可编辑该模型（与前端 canEditThisModel 对齐）
 // 规则：admin OR 该模型的 tech_owner OR 该模型的创建者
 function canEditModel(user, model) {
@@ -10438,8 +10488,9 @@ app.post('/api/collab/requests', authenticateToken, requireAdmin, async (req, re
             if (exporterUser.status !== 'active') {
                 return res.status(400).json({ error: '数据导出人已停用', code: 'EXPORTER_INACTIVE' });
             }
-            if (!['user', 'publisher', 'admin'].includes(exporterUser.role)) {
-                return res.status(400).json({ error: '数据导出人角色无效（仅 user/publisher/admin）' });
+            // v1.72.5：admin 直派支持 viewer 角色（客服性质运营，配合 requireExporterOrNonViewer 中间件）
+            if (!['user', 'publisher', 'admin', 'viewer'].includes(exporterUser.role)) {
+                return res.status(400).json({ error: '数据导出人角色无效（仅 user/publisher/admin/viewer）' });
             }
             validatedExporterId = exporterUser.id;
             validatedExporterName = exporterUser.display_name || exporterUser.username;
@@ -12837,9 +12888,10 @@ app.post('/api/collab/requests/:id/admin-direct-reassign', authenticateToken, re
                 code: 'NEW_EXPORTER_INACTIVE'
             });
         }
-        if (!['user', 'publisher', 'admin'].includes(newExporter.role)) {
+        // v1.72.5：admin 直派改派支持 viewer 角色（与创建时白名单对齐）
+        if (!['user', 'publisher', 'admin', 'viewer'].includes(newExporter.role)) {
             return res.status(400).json({
-                error: '新接收人角色无效（仅 user/publisher/admin）',
+                error: '新接收人角色无效（仅 user/publisher/admin/viewer）',
                 code: 'NEW_EXPORTER_INVALID_ROLE'
             });
         }
@@ -13122,7 +13174,7 @@ const RETURN_NOTE_MAX_LEN = 500;
 // v1.71.0 Commit E：数据导出人提交交付物 export_summary 上限（与 RETURN_NOTE 对齐）
 const EXPORT_SUMMARY_MAX_LEN = 500;
 
-app.post('/api/collab/requests/:id/return-to-dev', authenticateToken, requireNonViewer, async (req, res) => {
+app.post('/api/collab/requests/:id/return-to-dev', authenticateToken, requireExporterOrNonViewer, async (req, res) => {
     const idStr = req.params.id;
     const userId = Number(req.user.id);
     const userName = req.user.display_name || req.user.username || `user#${userId}`;
@@ -13323,7 +13375,7 @@ app.post('/api/collab/requests/:id/return-to-dev', authenticateToken, requireNon
 //   - 前端详情页 HTML：escapeHtml 包裹（Commit F 做）
 app.post('/api/collab/requests/:id/submit-export',
     authenticateToken,
-    requireNonViewer,
+    requireExporterOrNonViewer,
     // multer 错误捕获（同 POST /submit 风格）
     (req, res, next) => {
         const handler = collabUpload.fields([
