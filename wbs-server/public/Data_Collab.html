@@ -169,6 +169,7 @@
         }
         .status-PENDING_ASSIGN { background: #ffedd5; color: #9a3412; }
         .status-PENDING { background: #dbeafe; color: #1e40af; }
+        .status-EXPORTING { background: #ccfbf1; color: #115e59; }  /* v1.72.6 修复：v1.71.0 引入 EXPORTING 状态时漏加 CSS 导致白底白字 */
         .status-SUBMITTED { background: #fef3c7; color: #92400e; }
         .status-DONE { background: #ddd6fe; color: #5b21b6; }
         .status-ARCHIVED { background: #d1fae5; color: #065f46; }
@@ -232,6 +233,11 @@
             background: #f59e0b;
             color: white;
             border: 1px solid #f59e0b;
+        }
+        .admin-direct-actions .btn-notify-direct {  /* v1.72.6 新增 */
+            background: #10b981;
+            color: white;
+            border: 1px solid #10b981;
         }
         .reassign-history {
             margin-top: 10px;
@@ -2082,6 +2088,7 @@
 
             const actionButtons = d.status === 'EXPORTING' ? `
                 <div class="action-buttons">
+                    <button class="btn-notify-direct" onclick="triggerNotify(${safeId})">📨 通知数据导出人</button>
                     <button class="btn-reassign" onclick="openAdminDirectReassignModal(${safeId})">🔄 改派接收人</button>
                     <button class="btn-fallback" onclick="openAdminDirectFallbackModal(${safeId})">↩️ 切回流转模式</button>
                 </div>` : '';
