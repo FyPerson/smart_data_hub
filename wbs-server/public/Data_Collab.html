@@ -1058,7 +1058,7 @@
                     <select id="f_admin_direct_exporter">
                         <option value="">加载中...</option>
                     </select>
-                    <div class="hint">下拉显示全部活跃用户，凭备注辨识。该用户将作为协作单的最终数据导出人，状态直接进入 EXPORTING。</div>
+                    <div class="hint">下拉显示全部活跃用户，凭备注辨识。该用户将作为协作单的最终数据导出人，状态直接进入「导出中」。</div>
                 </div>
                 <div class="form-row" id="formRow_files">
                     <label>原始单据截图 <span class="hint">（选传）</span></label>
@@ -1426,6 +1426,7 @@
         const STATUS_LABELS = {
             'PENDING_ASSIGN': '待指派',
             'PENDING': '待开发',
+            'EXPORTING': '导出中',  // v1.72.7 修复：v1.71.0 引入 EXPORTING 状态时漏加文案映射，导致 UI 显示英文
             'SUBMITTED': '待验收',
             'DONE': '已完成',
             'ARCHIVED': '已归档',
