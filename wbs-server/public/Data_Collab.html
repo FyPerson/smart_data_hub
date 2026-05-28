@@ -985,7 +985,7 @@
                     <th class="sortable" data-sort-by="created_at">创建时间<span class="sort-icon">⇅</span></th>
                     <th class="sortable" data-sort-by="deadline">截止时间<span class="sort-icon">⇅</span></th>
                     <th class="sortable" data-sort-by="contact_person_name">对接人<span class="sort-icon">⇅</span></th>
-                    <th class="sortable" data-sort-by="developer_name">开发<span class="sort-icon">⇅</span></th>
+                    <th class="sortable" data-sort-by="developer_name">处理人<span class="sort-icon">⇅</span></th>
                     <th class="sortable" data-sort-by="status">状态<span class="sort-icon">⇅</span></th>
                     <th class="sortable" data-sort-by="sql_validation_status">验收<span class="sort-icon">⇅</span></th>
                     <th class="sortable" data-sort-by="friction_occurred">摩擦<span class="sort-icon">⇅</span></th>
@@ -1753,11 +1753,18 @@
                     ? escapeHtml(targetDbMap[r.target_db_connection_id] || `#${r.target_db_connection_id}`)
                     : '<span style="color:#9ca3af">—</span>';
 
-                // v3：未指派开发用灰色显示占位文本
-                const isUnassigned = r.status === 'PENDING_ASSIGN' || Number(r.developer_id) === 0;
-                const devCell = isUnassigned
-                    ? `<span style="color:#9ca3af;">${escapeHtml(r.developer_name || '(待指派)')}</span>`
-                    : escapeHtml(r.developer_name || '—');
+                // v3 处理人列：优先级 exporter > developer > 待指派
+                // v1.72.9：admin 直派单（无 developer 占位）+ 三级转发后段（exporter 已接派）均显示 exporter_name
+                const hasExporter = r.exporter_user_id != null && Number(r.exporter_user_id) !== 0;
+                const isUnassigned = r.status === 'PENDING_ASSIGN' || (Number(r.developer_id) === 0 && !hasExporter);
+                let devCell;
+                if (hasExporter) {
+                    devCell = escapeHtml(r.exporter_name || '—');
+                } else if (isUnassigned) {
+                    devCell = `<span style="color:#9ca3af;">${escapeHtml(r.developer_name || '(待指派)')}</span>`;
+                } else {
+                    devCell = escapeHtml(r.developer_name || '—');
+                }
                 const contactCell = r.contact_person_name
                     ? escapeHtml(r.contact_person_name)
                     : '<span style="color:#9ca3af">—</span>';
