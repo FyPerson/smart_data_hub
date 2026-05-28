@@ -569,6 +569,8 @@
             cursor: pointer;
         }
         .form-row label.checkbox-inline input[type="checkbox"] {
+            width: auto;
+            padding: 0;
             margin: 0;
             flex-shrink: 0;
         }
@@ -1039,7 +1041,7 @@
                 </div>
                 <!-- v1.72.3 admin 直派模式（仅 admin 可见，新建时显示）-->
                 <div class="form-row" id="formRow_adminDirectToggle" style="display:none;">
-                    <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+                    <label class="checkbox-inline">
                         <input type="checkbox" id="f_admin_direct_toggle" onchange="toggleAdminDirectMode()">
                         <span>🎯 admin 直派模式</span>
                     </label>
