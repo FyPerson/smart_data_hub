@@ -2576,11 +2576,10 @@
             //   "📤 转发给数据导出人" 按钮已从 footer 搬到通知区块 "数据导出人通知" 子区
             //   触发入口：renderExporterNotifySubsection → openForwardToExporterDialog
             //   权限 helper：canForwardToExporter(d, currentUserId, isAdminUser)
-            // 保留：EXPORTING + isExporter 的"提交导出物 + 退回任务"两个按钮在 footer（exporter 视角核心动作）
-            if (status === 'EXPORTING' && isExporter) {
-                buttons.push(`<button class="btn" style="background:#16a34a;color:white;" onclick="openExportUploadDialog(${Number(d.id)})">📦 提交导出物</button>`);
-                buttons.push(`<button class="btn" style="background:#dc2626;color:white;" onclick="openReturnToDevDialog(${Number(d.id)})">↩️ 退回任务</button>`);
-            }
+            // v1.72.8 UI 重定位（接续 v1.71.0 同模式）：
+            //   EXPORTING + isExporter 的「📦 提交导出物 + ↩️ 退回任务」也搬到通知区块 "数据导出人通知" 子区
+            //   触发入口：renderExporterNotifySubsection 的 EXPORTING 分支末尾追加按钮（status === 'EXPORTING' && isCurrentExporter）
+            //   理由：exporter 的主业务动作与 forward 按钮位置统一，所有角色"主业务动作"都在通知子区，footer 仅留 admin 修正/危险动作
 
             // ===== ② 修正 / 闭环动作 =====
             const canAdminFix = isAdminUser
@@ -2736,9 +2735,16 @@
                     <span class="notify-status-text" style="color:#b91c1c;">⏪ 已退回（上次：信息技术部 - ${exporterName} · 原因：${reasonLabel}）${noteHtml}</span>
                     <button class="notify-btn" onclick="openForwardToExporterDialog(${Number(d.id)})">再次转发</button>`;
             } else if (status === 'EXPORTING') {
-                // 进行中：所有人只读
+                // 进行中：所有人只读 + 当前 exporter 看到 2 个核心动作按钮（v1.72.8 UI 重定位：从 footer 搬到通知区，与 forward 按钮位置统一）
                 const timeText = forwardedAt ? `已于 ${fmtDate(forwardedAt)} 转发` : '已转发';
-                body = `<span class="notify-status-text">✅ ${timeText}给信息技术部 - ${exporterName} · 待提交</span>`;
+                const isCurrentExporter = currentUserId
+                    && d.exporter_user_id != null
+                    && Number(d.exporter_user_id) === Number(currentUserId);
+                const exporterActions = isCurrentExporter
+                    ? ` <button class="notify-btn" style="background:#16a34a;color:white;" onclick="openExportUploadDialog(${Number(d.id)})">📦 提交导出物</button>`
+                    + ` <button class="notify-btn" style="background:#dc2626;color:white;margin-left:6px;" onclick="openReturnToDevDialog(${Number(d.id)})">↩️ 退回任务</button>`
+                    : '';
+                body = `<span class="notify-status-text">✅ ${timeText}给信息技术部 - ${exporterName} · 待提交</span>${exporterActions}`;
             } else if (status === 'SUBMITTED' || status === 'DONE') {
                 // 历史记录：所有人只读；exporter_user_id 为空时（理论不会，dev 自己走 submit 不经 exporter）退化为不显示
                 if (!hasExporter) return '';
