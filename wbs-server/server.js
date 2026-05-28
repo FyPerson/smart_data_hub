@@ -13660,19 +13660,23 @@ app.post('/api/collab/requests/:id/submit-export',
                     );
                 }
 
-                // UPDATE collab_requests：EXPORTING → SUBMITTED
-                // codex 39 M-5 采纳：清 sql_validation_status + sql_validation_error（不残留 dev submit 旧校验）
+                // UPDATE collab_requests：EXPORTING → DONE（v1.72.10：exporter 上传即终态，不走 SUBMITTED 验收链路）
+                //   业务理由：exporter 角色是"导业务数据"，与 developer 写 SQL 不同，导出结果不需要 admin 二次验收
+                //   smoke test：submit-export 本身不触发 smoke（仅 submit endpoint 走 smoke），状态机改造不影响验收流程
+                //   sql_validation_status='admin_closed'：与 admin-submit-on-behalf 一致语义（"未走 smoke 验证"）
+                //   admin 兜底：若 exporter 上传错误，admin 走 admin-submit-on-behalf 走 DONE→DONE 路径替换文件
+                // codex 39 M-5 采纳保留：清 sql_validation_error + validation_started_at（不残留 dev submit 旧校验）
                 // 双轨守卫：status=EXPORTING + exporter_user_id=userId + archived 双轨
                 const updResult = await dbRunAsync(
                     `UPDATE collab_requests
-                        SET status = 'SUBMITTED',
+                        SET status = 'DONE',
                             export_summary = ?,
                             submitted_at = COALESCE(submitted_at, datetime('now','localtime')),
                             last_submitted_at = datetime('now','localtime'),
-                            sql_validation_status = NULL,
+                            done_at = datetime('now','localtime'),
+                            sql_validation_status = 'admin_closed',
                             sql_validation_error = NULL,
                             validation_started_at = NULL,
-                            done_at = NULL,
                             attachment_dir = COALESCE(attachment_dir, ?)
                       WHERE id = ?
                         AND status = 'EXPORTING'
@@ -13697,10 +13701,13 @@ app.post('/api/collab/requests/:id/submit-export',
                 }
 
                 // INSERT operation_logs SUBMIT_EXPORT（codex 39 H-2 + L-3 采纳：reason JSON 含完整审计信息）
+                // codex 50 M-3 采纳：加 flow='exporter_direct_done' 字段区分 exporter 直闭环 vs admin 兑底，
+                //   未来 grep 审计/统计可按 flow 字段精确分流（与 admin-submit-on-behalf flow 字段对应）
                 await dbRunAsync(
                     `INSERT INTO collab_operation_logs (collab_request_id, operation_type, operator_id, operator, reason)
                      VALUES (?, 'SUBMIT_EXPORT', ?, ?, ?)`,
                     [id, userId, userName, JSON.stringify({
+                        flow: 'exporter_direct_done',
                         exporter_user_id: collab.exporter_user_id,
                         exporter_name: collab.exporter_name,
                         export_summary: exportSummary,
@@ -13739,12 +13746,12 @@ app.post('/api/collab/requests/:id/submit-export',
             // 快照供钉钉副作用使用（commit 后即可读最新状态）
             collabSnapshot = await getCollabWithDbName(id);
 
-            logger.info(`[submit-export] 协作单 #${id} EXPORTING → SUBMITTED by ${userName}(exporter id=${userId}) summary_len=${exportSummary ? exportSummary.length : 0} superseded=${supersededAttachments.length}`);
+            logger.info(`[submit-export] 协作单 #${id} EXPORTING → DONE by ${userName}(exporter id=${userId}) summary_len=${exportSummary ? exportSummary.length : 0} superseded=${supersededAttachments.length} (v1.72.10: skip SUBMITTED for exporter direct closure)`);
 
             // === 响应（codex 39 L-3 采纳：固定结构供 Commit F 直接消费）===
             res.json({
                 success: true,
-                current_status: 'SUBMITTED',
+                current_status: 'DONE',
                 export_summary: exportSummary,
                 superseded_attachments: supersededAttachments.map(a => ({
                     id: a.id,
@@ -13779,7 +13786,8 @@ app.post('/api/collab/requests/:id/submit-export',
                 const detailUrl = `${platformBaseUrl}/Data_Collab.html?id=${id}`;
 
                 // codex 40 审 S-1 修复：title 也是 markdown 字段，所有动态值用 escape 过的 safeOaNo（沿用 codex 31 审 #7 high 原则）
-                const title = `[OA-${safeOaNo}] 数据导出人已提交`;
+                // v1.72.10：状态机改 EXPORTING → DONE，文案同步「已提交」→「已完成」
+                const title = `[OA-${safeOaNo}] 数据导出人已完成`;
                 const markdown = [
                     `### 数据协作单 OA-${safeOaNo}`,
                     '',
@@ -14339,16 +14347,21 @@ app.post('/api/collab/requests/:id/friction-record', authenticateToken, requireA
 });
 
 // =============================================================================
-// 4c. POST /api/collab/requests/:id/admin-submit-on-behalf（v1.70.4 ③，行政闭环）
+// 4c. POST /api/collab/requests/:id/admin-submit-on-behalf（v1.70.4 ③，行政闭环；v1.72.10 扩展 DONE→DONE）
 // =============================================================================
-// 语义：admin 把协作单从 SUBMITTED 强制推进到 DONE，不走 smoke test、不要求传附件。
-// 触发场景：admin 在创建协作单时录错目标业务库等关键字段，导致开发交付物 smoke test 失败；
-//   admin 通过 admin-fix 修正字段后，发现"开发已完成本职工作（脚本本身没问题）+ 失败因 admin 之过"，
-//   不应让开发再来重传/关注。admin 单方面把协作单闭环，把工作量"记账"清掉。
+// 语义：admin 把协作单强制推进到 DONE，不走 smoke test、不要求传附件。
+//   - SUBMITTED → DONE（v1.70.4 原语义）：admin 替 developer 画句号
+//   - DONE → DONE（v1.72.10 扩展）：admin 修正已 exporter 闭环单的交付物文件（替换 result_data）
+// 触发场景：
+//   1) D1→D2 链路（v1.70.4 原场景）：admin 录错关键字段 → 开发上传 smoke 失败 → admin-fix
+//      修字段后，开发已完成本职工作，admin 走本 endpoint 单方面闭环。
+//   2) EXPORTING 直 DONE 链路（v1.72.10 新场景）：exporter（含 viewer 客服）上传后直接 DONE，
+//      如果发现 exporter 上传的文件错了（错单/错列/错版本），admin 走本 endpoint 重传 result_data
+//      替换交付物（旧 active superseded + 新 active INSERT），保持 DONE 终态。
 //
 // 业务规则：
 //   - 只 admin 可调
-//   - 状态机：SUBMITTED → DONE（仅 SUBMITTED 可走；PENDING 还没提交，不该跳过；DONE/ARCHIVED 已结束）
+//   - 状态机：SUBMITTED → DONE 或 DONE → DONE（v1.72.10 扩展；PENDING 还没提交不该跳过；ARCHIVED 已严格归档）
 //   - sql_validation_status='admin_closed'（新值，区别于 passed/failed/bypassed，表示"行政闭环未验证"）
 //   - sql_validation_error 强制清空（避免详情页继续展示旧错误污染语义）
 //   - done_at 取值（v1.70.4 codex 30 审 #2：合并到 UPDATE 子查询消除 SELECT/UPDATE 间附件集合变化竞态）：
@@ -14465,12 +14478,23 @@ app.post('/api/collab/requests/:id/admin-submit-on-behalf',
                 cleanupPending();
                 return res.status(409).json({ error: '已归档协作单不允许行政闭环', code: 'ARCHIVED_PROTECTED' });
             }
-            if (collab.status !== 'SUBMITTED') {
+            // v1.72.10：扩展支持 DONE→DONE（admin 修正已 exporter 闭环单的交付物）
+            if (!['SUBMITTED', 'DONE'].includes(collab.status)) {
                 cleanupPending();
                 return res.status(409).json({
-                    error: `当前状态 ${collab.status} 不允许行政闭环（仅 SUBMITTED 可走）`,
-                    code: 'STATE_NOT_SUBMITTED',
+                    error: `当前状态 ${collab.status} 不允许行政闭环（仅 SUBMITTED / DONE 可走）`,
+                    code: 'STATE_NOT_ALLOWED_FOR_ADMIN_SUBMIT',
                     current_status: collab.status,
+                });
+            }
+            // codex 50 H-2 采纳：DONE→DONE 强制 hasAdminUpload（D3 语义"admin 替换 result_data 文件"
+            //   要求实际上传新文件；无附件的 no-op 调用没业务意义且产生无用日志 + 改写 done_at）
+            //   SUBMITTED→DONE 保留原 v1.70.4 灵活性（可不上传，admin 替开发画句号）
+            if (collab.status === 'DONE' && !hasAdminUpload) {
+                cleanupPending();
+                return res.status(400).json({
+                    error: 'DONE 状态行政修正必须上传 result_data 替换交付物',
+                    code: 'MISSING_ATTACHMENT_FOR_DONE_FIX',
                 });
             }
 
@@ -14587,22 +14611,38 @@ app.post('/api/collab/requests/:id/admin-submit-on-behalf',
                 //   注意：因前面 INSERT 了 admin 自己的 active 附件，子查询会包含 admin 这一行
                 //         done_at 取的是"截至本次行政闭环时间点 admin 与 dev 累计的最新 active"
                 //         这正是预期：admin 补传后 done_at 取 admin 上传时间（如有），否则 dev 旧 active 时间，否则 deadline，否则 now
+                // v1.72.10：扩展 WHERE status IN ('SUBMITTED','DONE') 支持 admin 修正已 exporter 闭环单
+                //
+                // codex 50 H-1 采纳（sql_validation_status 分流防降级）：
+                //   - SUBMITTED→DONE 路径：原 v1.70.4 行为不变，写 'admin_closed'（admin 替开发画句号未走 smoke）
+                //   - DONE→DONE 路径：保留原 sql_validation_status（passed/admin_closed/bypassed 等）
+                //     避免把原 smoke passed 的 DONE 单降级为 admin_closed
+                //
+                // codex 50 M-1 采纳（done_at 保留不重写）：
+                //   - SUBMITTED→DONE 路径：done_at 走原 COALESCE 子查询（首次完成需要写时间）
+                //   - DONE→DONE 路径：COALESCE(done_at, ...) 已有 done_at 保留，不被新上传附件 max(created_at) 改写
+                //     业务上 admin 兜底修文件不应改写"首次完成时间"
+                const isDoneFix = (collab.status === 'DONE');
                 const updResult = await dbRunAsync(
                     `UPDATE collab_requests
                         SET status = 'DONE',
-                            done_at = COALESCE(
-                                (SELECT MAX(created_at) FROM collab_attachments
-                                  WHERE collab_request_id = collab_requests.id
-                                    AND status = 'active'
-                                    AND attachment_type IN ('result_data','result_script')),
-                                deadline,
-                                datetime('now','localtime')
-                            ),
-                            sql_validation_status = 'admin_closed',
+                            done_at = ${isDoneFix
+                                ? `COALESCE(done_at, datetime('now','localtime'))`
+                                : `COALESCE(
+                                    (SELECT MAX(created_at) FROM collab_attachments
+                                      WHERE collab_request_id = collab_requests.id
+                                        AND status = 'active'
+                                        AND attachment_type IN ('result_data','result_script')),
+                                    deadline,
+                                    datetime('now','localtime')
+                                )`},
+                            sql_validation_status = ${isDoneFix
+                                ? `sql_validation_status`
+                                : `'admin_closed'`},
                             sql_validation_error = NULL,
                             attachment_dir = COALESCE(attachment_dir, ?)
                       WHERE id = ?
-                        AND status = 'SUBMITTED'
+                        AND status IN ('SUBMITTED', 'DONE')
                         AND archived_at IS NULL
                         AND archived_final_at IS NULL`,
                     [hasAdminUpload ? attachmentDirName : null, id]
@@ -14659,8 +14699,12 @@ app.post('/api/collab/requests/:id/admin-submit-on-behalf',
             }
 
             // 审计日志（reason JSON 含 source 推断依据 + admin 上传文件清单）
+            // codex 50 M-3 采纳：加 flow 字段区分流程来源（SUBMITTED→DONE = 'submitted_to_done_admin_closure' /
+            //   DONE→DONE = 'done_to_done_admin_fix'），未来 grep 审计/统计可按 flow 字段精确分流，
+            //   不依赖 sql_validation_status + ADMIN_SUBMIT_ON_BEHALF 双条件推断
             insertCollabLog(id, 'ADMIN_SUBMIT_ON_BEHALF', userId, userName, JSON.stringify({
                 reason,
+                flow: collab.status === 'DONE' ? 'done_to_done_admin_fix' : 'submitted_to_done_admin_closure',
                 done_at_source: doneAtSource,
                 done_at_value: finalDoneAt,
                 old_sql_validation_status: collab.sql_validation_status || null,

@@ -119,7 +119,9 @@ async function setCollabState(id, patch) {
         'attachment_dir', 'validation_started_at',
         'friction_occurred', 'friction_cause_category', 'friction_note', 'friction_recorded_at',
         'bypass_validation', 'bypass_reason', 'bypass_by', 'bypass_by_name',
-        'submission_version'
+        'submission_version',
+        // v1.72.10 codex 50 L-1：V9c 测 EXPORTING 状态需要造 exporter 字段
+        'exporter_user_id', 'exporter_name'
     ];
     const sets = [];
     const params = [];

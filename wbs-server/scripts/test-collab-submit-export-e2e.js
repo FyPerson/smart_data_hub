@@ -2,7 +2,7 @@
  * v1.71.0 Commit E submit-export endpoint e2e（方案 §6 + codex 39 取舍审落地）
  *
  * 覆盖（25 例，含 S03 钉钉 80 字截断不影响主流程）：
- *   T1: 当前 exporter 提交 EXPORTING → SUBMITTED + export_summary 落库 + supersede 旧 active
+ *   T1: 当前 exporter 提交 EXPORTING → DONE + export_summary 落库 + supersede 旧 active (v1.72.10)
  *   T2: 不传 export_summary 走 null 路径（可选）
  *   T3: export_summary 空白串 trim 后 null
  *   T4: export_summary 正常字符串落库 + 响应回显
@@ -178,15 +178,17 @@ async function runTests() {
     const publisherToken = await fx.signAs(fx.PUBLISHER_ID);
     const exporterToken = await fx.signAs(fx.EXPORTER_ID);
 
-    console.log('\n=== T1: 当前 exporter 提交 EXPORTING → SUBMITTED ===');
+    console.log('\n=== T1: 当前 exporter 提交 EXPORTING → DONE (v1.72.10) ===');
     {
         const ctx = await makeExportingFixture();
         const res = await postSubmitExport(ctx.id, exporterToken, { exportSummary: '测试提交概要' });
         assert(res.status === 200, `T1 status=200, got ${res.status} body=${JSON.stringify(res.body).slice(0, 200)}`);
-        assert(res.body && res.body.current_status === 'SUBMITTED', `T1 current_status=SUBMITTED`);
-        const row = await dbGet(`SELECT status, export_summary FROM collab_requests WHERE id=?`, [ctx.id]);
-        assert(row.status === 'SUBMITTED', `T1 db status=SUBMITTED`);
+        assert(res.body && res.body.current_status === 'DONE', `T1 current_status=DONE`);
+        const row = await dbGet(`SELECT status, export_summary, done_at, sql_validation_status FROM collab_requests WHERE id=?`, [ctx.id]);
+        assert(row.status === 'DONE', `T1 db status=DONE`);
         assert(row.export_summary === '测试提交概要', `T1 db export_summary 落库`);
+        assert(row.done_at !== null && row.done_at !== '', `T1 db done_at 已写`);
+        assert(row.sql_validation_status === 'admin_closed', `T1 db sql_validation_status='admin_closed' (与 admin-submit-on-behalf 一致)`);
     }
 
     console.log('\n=== T2: 不传 export_summary 走 null 路径 ===');
@@ -293,7 +295,7 @@ async function runTests() {
         }
     }
 
-    console.log('\n=== T9: sql_validation_status + sql_validation_error 清空（codex 39 M-5）===');
+    console.log('\n=== T9: sql_validation_status 重写为 admin_closed + error 清空（codex 39 M-5；v1.72.10 status 从 NULL 改 admin_closed）===');
     {
         const ctx = await makeExportingFixture();
         // 模拟"之前 dev 走 POST /submit 留下了校验失败"
@@ -303,7 +305,9 @@ async function runTests() {
         );
         await postSubmitExport(ctx.id, exporterToken);
         const row = await dbGet(`SELECT sql_validation_status, sql_validation_error FROM collab_requests WHERE id=?`, [ctx.id]);
-        assert(row.sql_validation_status === null, `T9 sql_validation_status 清空为 NULL, got ${row.sql_validation_status}`);
+        // v1.72.10：submit-export 写 sql_validation_status='admin_closed'（与 admin-submit-on-behalf 一致）
+        // 核心语义不变：旧 failed 不残留，error 清空
+        assert(row.sql_validation_status === 'admin_closed', `T9 sql_validation_status 重写为 admin_closed (v1.72.10), got ${row.sql_validation_status}`);
         assert(row.sql_validation_error === null, `T9 sql_validation_error 清空为 NULL, got ${row.sql_validation_error}`);
     }
 
@@ -432,7 +436,7 @@ async function runTests() {
         );
         assert(logs.length === 1, `T21 log 恰好 1 条 SUBMIT_EXPORT，got ${logs.length}`);
         const finalRow = await dbGet(`SELECT status FROM collab_requests WHERE id=?`, [ctx.id]);
-        assert(finalRow.status === 'SUBMITTED', `T21 最终 status=SUBMITTED`);
+        assert(finalRow.status === 'DONE', `T21 最终 status=DONE (v1.72.10)`);
     }
 
     console.log('\n=== T22: 跨 endpoint 互斥 — submit-export 与 return 并发（mutex 跨 endpoint）===');
@@ -444,7 +448,7 @@ async function runTests() {
         ]);
         console.log(`     debug T22 submit=${submitRes.status}/${submitRes.body && submitRes.body.code || ''}, return=${returnRes.status}/${returnRes.body && returnRes.body.code || ''}`);
         // 两种合法结果：
-        //   (a) submit 先 → submit 200 + return 409（status=SUBMITTED 已不能 return）
+        //   (a) submit 先 → submit 200 + return 409（status=DONE 已不能 return，v1.72.10）
         //   (b) return 先 → return 200 + submit 409（status=PENDING 已不能 submit）
         const submitOk = submitRes.status === 200;
         const returnOk = returnRes.status === 200;

@@ -2595,8 +2595,13 @@
             if (canAdminFix) {
                 buttons.push(`<button class="btn" style="background:#fef3c7;color:#92400e;border:1px solid #fbbf24;" onclick="openAdminFixDialog()">🔧 管理员修正</button>`);
             }
-            if (isAdminUser && status === 'SUBMITTED') {
-                buttons.push(`<button class="btn" style="background:#dbeafe;color:#1e40af;border:1px solid #93c5fd;" onclick="openAdminSubmitDialog()">📋 行政闭环</button>`);
+            // v1.72.10：行政闭环按钮状态扩展 SUBMITTED + DONE
+            //   SUBMITTED：D1→D2 链路 admin 替开发画句号（v1.70.4 原场景）
+            //   DONE：兑底修正已 exporter 完成单的交付物（v1.72.10 新增；admin 单方面替换 result_data 保持 DONE 终态）
+            // codex 50 M-4 采纳：按状态区分按钮文案降低 admin 认知摩擦（SUBMITTED 显示"行政闭环" / DONE 显示"修正交付物"）
+            if (isAdminUser && (status === 'SUBMITTED' || status === 'DONE')) {
+                const adminSubmitLabel = status === 'DONE' ? '🔧 修正交付物' : '📋 行政闭环';
+                buttons.push(`<button class="btn" style="background:#dbeafe;color:#1e40af;border:1px solid #93c5fd;" onclick="openAdminSubmitDialog()">${adminSubmitLabel}</button>`);
             }
             if (isAdminUser && isDone) {
                 buttons.push(`<button class="btn" style="background:#16a34a;color:white;" onclick="openArchiveFinalModal()">📁 归档</button>`);

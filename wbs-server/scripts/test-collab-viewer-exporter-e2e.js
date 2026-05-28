@@ -88,6 +88,24 @@ async function postGenericAttachment(reqId, token) {
     return { status: r.status, body: j };
 }
 
+// v1.72.10 codex 50 H-2 采纳：admin-submit-on-behalf multipart helper（DONE→DONE 必须上传 result_data）
+async function postAdminSubmitOnBehalf(reqId, token, options = {}) {
+    const fd = new FormData();
+    fd.append('reason', options.reason || 'admin e2e 兑底修正');
+    if (options.uploadResultData !== false) {
+        const buf = Buffer.from('admin e2e replacement result_data ' + Date.now());
+        fd.append('result_data', new Blob([buf]), 'admin-fix.xlsx');
+    }
+    const r = await fetch(`${BASE}/api/collab/requests/${reqId}/admin-submit-on-behalf`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: fd
+    });
+    let j = null;
+    try { j = await r.json(); } catch (_) { }
+    return { status: r.status, body: j };
+}
+
 async function getCollab(id) {
     return new Promise((resolve, reject) => {
         const db = new sqlite3.Database(DB_PATH);
@@ -104,7 +122,7 @@ function defTest(name, fn) { tests.push({ name, fn }); }
 // ============================================================
 // V1: admin 直派给 viewer → viewer submit-export 成功
 // ============================================================
-defTest('V1: admin 直派给 viewer(沈倩静) → viewer submit-export 200 + SUBMITTED', async () => {
+defTest('V1: admin 直派给 viewer(沈倩静) → viewer submit-export 200 + DONE (v1.72.10 跳过 SUBMITTED 直接终态)', async () => {
     const adminToken = await fx.signAs(fx.ADMIN_ID);
     const viewerToken = await fx.signAs(fx.VIEWER_ID);
     const cr = await createAdminDirect(adminToken, fx.VIEWER_ID, `OA_VW_V1_${Date.now()}`);
@@ -113,10 +131,17 @@ defTest('V1: admin 直派给 viewer(沈倩静) → viewer submit-export 200 + SU
 
     const res = await postSubmitExport(cr.body.id, viewerToken);
     if (res.status !== 200) throw new Error(`expected 200, got ${res.status} ${JSON.stringify(res.body)}`);
+    if (res.body && res.body.current_status !== 'DONE') {
+        throw new Error(`response current_status expected DONE, got ${res.body.current_status}`);
+    }
 
     const collab = await getCollab(cr.body.id);
-    if (collab.status !== 'SUBMITTED') throw new Error(`status expected SUBMITTED, got ${collab.status}`);
+    if (collab.status !== 'DONE') throw new Error(`status expected DONE, got ${collab.status}`);
     if (Number(collab.exporter_user_id) !== fx.VIEWER_ID) throw new Error(`exporter_user_id mismatch: ${collab.exporter_user_id}`);
+    if (!collab.done_at) throw new Error(`done_at expected non-null, got ${collab.done_at}`);
+    if (collab.sql_validation_status !== 'admin_closed') {
+        throw new Error(`sql_validation_status expected 'admin_closed', got ${collab.sql_validation_status}`);
+    }
 });
 
 // ============================================================
@@ -211,6 +236,7 @@ defTest('V6: viewer 调 admin-direct-reassign / admin-direct-fallback → 403（
 // ============================================================
 // V7: viewer return-to-dev 后 PENDING 状态再次 submit-export → 状态冲突（409 INVALID_STATE_FOR_EXPORT_SUBMIT）
 // codex 49 Rec 4 采纳新增：确认中间件放行后 endpoint 状态守卫仍生效，不存在权限绕过
+// 注：v1.72.10 改造后 V7 路径不变——return-to-dev 仍是 EXPORTING→PENDING，再次 submit 不会因状态机改造受影响
 // ============================================================
 defTest('V7: viewer return-to-dev 后 PENDING 状态再次 submit-export → 409 状态冲突而非绕过', async () => {
     const adminToken = await fx.signAs(fx.ADMIN_ID);
@@ -232,6 +258,160 @@ defTest('V7: viewer return-to-dev 后 PENDING 状态再次 submit-export → 409
     }
     if (res.body && res.body.code !== 'INVALID_STATE_FOR_EXPORT_SUBMIT') {
         throw new Error(`expected code INVALID_STATE_FOR_EXPORT_SUBMIT, got ${res.body && res.body.code}`);
+    }
+});
+
+// ============================================================
+// V8: v1.72.10 codex 50 H-2 修订 — viewer 上传 DONE 后 admin 走 admin-submit-on-behalf 上传新 result_data 替换交付物
+// 验证 D3=C 决策 + codex 50 H-2 强制 hasAdminUpload（DONE→DONE 不允许 no-op）+ codex 50 H-1 保留 sql_validation_status
+// ============================================================
+defTest('V8: viewer DONE → admin 上传 result_data 替换 → 仍 DONE + sql_validation_status 保留 admin_closed + done_at 不重写', async () => {
+    const adminToken = await fx.signAs(fx.ADMIN_ID);
+    const viewerToken = await fx.signAs(fx.VIEWER_ID);
+    const cr = await createAdminDirect(adminToken, fx.VIEWER_ID, `OA_VW_V8_${Date.now()}`);
+    if (cr.status !== 200) throw new Error(`create failed ${cr.status}`);
+    createdFixtureIds.push(cr.body.id);
+
+    // 1. viewer 上传 → EXPORTING → DONE（写 done_at + sql_validation_status='admin_closed'）
+    const sub = await postSubmitExport(cr.body.id, viewerToken);
+    if (sub.status !== 200) throw new Error(`viewer submit failed: ${sub.status}`);
+    const before = await getCollab(cr.body.id);
+    if (before.status !== 'DONE') throw new Error(`after viewer submit expected DONE, got ${before.status}`);
+    if (!before.done_at) throw new Error(`done_at expected set after viewer submit`);
+    const originalDoneAt = before.done_at;
+
+    // 2. admin 走 admin-submit-on-behalf 上传新 result_data（codex 50 H-2 修订：必须 multipart 上传）
+    const res = await postAdminSubmitOnBehalf(cr.body.id, adminToken, {
+        reason: 'admin 兑底修正 viewer 上传错误（v1.72.10 e2e V8 验证 DONE→DONE multipart 上传替换）'
+    });
+    if (res.status !== 200) {
+        throw new Error(`admin-submit-on-behalf DONE→DONE expected 200, got ${res.status} ${JSON.stringify(res.body)}`);
+    }
+
+    // 3. 验证仍 DONE + sql_validation_status 保留（H-1 不降级）+ done_at 不重写（M-1 保留首次完成时间）
+    const after = await getCollab(cr.body.id);
+    if (after.status !== 'DONE') throw new Error(`after admin-submit expected DONE, got ${after.status}`);
+    if (after.sql_validation_status !== 'admin_closed') {
+        throw new Error(`sql_validation_status expected 'admin_closed' (保留不降级), got ${after.sql_validation_status}`);
+    }
+    if (after.done_at !== originalDoneAt) {
+        throw new Error(`done_at expected unchanged (M-1 保留首次完成时间), original=${originalDoneAt} after=${after.done_at}`);
+    }
+});
+
+// ============================================================
+// V8b: v1.72.10 codex 50 H-2 修订 — DONE→DONE 无附件 → 400 MISSING_ATTACHMENT_FOR_DONE_FIX
+// ============================================================
+defTest('V8b: viewer DONE → admin 调 admin-submit-on-behalf 不传附件 → 400 MISSING_ATTACHMENT_FOR_DONE_FIX', async () => {
+    const adminToken = await fx.signAs(fx.ADMIN_ID);
+    const viewerToken = await fx.signAs(fx.VIEWER_ID);
+    const cr = await createAdminDirect(adminToken, fx.VIEWER_ID, `OA_VW_V8b_${Date.now()}`);
+    if (cr.status !== 200) throw new Error(`create failed ${cr.status}`);
+    createdFixtureIds.push(cr.body.id);
+
+    // 1. viewer 上传 → DONE
+    const sub = await postSubmitExport(cr.body.id, viewerToken);
+    if (sub.status !== 200) throw new Error(`viewer submit failed: ${sub.status}`);
+
+    // 2. admin 调 admin-submit-on-behalf 不传 result_data → 400
+    const res = await postAdminSubmitOnBehalf(cr.body.id, adminToken, {
+        reason: 'DONE 状态无附件应拒（v1.72.10 codex 50 H-2 验证）',
+        uploadResultData: false  // helper 跳过上传
+    });
+    if (res.status !== 400) {
+        throw new Error(`expected 400, got ${res.status} ${JSON.stringify(res.body)}`);
+    }
+    if (res.body && res.body.code !== 'MISSING_ATTACHMENT_FOR_DONE_FIX') {
+        throw new Error(`expected code MISSING_ATTACHMENT_FOR_DONE_FIX, got ${res.body && res.body.code}`);
+    }
+});
+
+// ============================================================
+// V8c: v1.72.10 codex 50 H-1 修订 — DONE smoke passed 单调 admin-submit-on-behalf → 保留 passed 不降级
+// 模拟 D1→D2 链路 developer submit + smoke passed 后的 DONE 单，admin 走 DONE→DONE 兑底
+// 关键断言：sql_validation_status='passed' 不被改写成 'admin_closed'
+// ============================================================
+defTest('V8c: DONE smoke passed 单 admin 调 admin-submit-on-behalf → sql_validation_status 保留 passed 不降级', async () => {
+    const adminToken = await fx.signAs(fx.ADMIN_ID);
+    const ctx = await fx.createPendingFixture();
+    createdFixtureIds.push(ctx.id);
+
+    // 模拟 developer submit + smoke passed 后的 DONE 状态
+    await fx.setCollabState(ctx.id, {
+        status: 'DONE',
+        sql_validation_status: 'passed',
+        done_at: '2026-05-01 10:00:00'
+    });
+
+    const res = await postAdminSubmitOnBehalf(ctx.id, adminToken, {
+        reason: 'admin 替换 smoke passed 单的交付物（v1.72.10 codex 50 H-1 验证不降级）'
+    });
+    if (res.status !== 200) {
+        throw new Error(`expected 200, got ${res.status} ${JSON.stringify(res.body)}`);
+    }
+
+    const after = await getCollab(ctx.id);
+    if (after.sql_validation_status !== 'passed') {
+        throw new Error(`sql_validation_status expected 'passed' (保留不降级), got ${after.sql_validation_status}`);
+    }
+    if (after.done_at !== '2026-05-01 10:00:00') {
+        throw new Error(`done_at expected unchanged '2026-05-01 10:00:00' (M-1 首次完成时间保留), got ${after.done_at}`);
+    }
+});
+
+// ============================================================
+// V9: v1.72.10 codex 50 L-1 修订 — admin-submit-on-behalf 状态准入边界全覆盖（参数化）
+// 仅 SUBMITTED/DONE 放行，PENDING_ASSIGN/PENDING/EXPORTING/ARCHIVED/archived_final 全拒
+// ============================================================
+defTest('V9: admin-submit-on-behalf 状态边界 4 种非法状态全部 409', async () => {
+    const adminToken = await fx.signAs(fx.ADMIN_ID);
+
+    // V9a: PENDING_ASSIGN → STATE_NOT_ALLOWED_FOR_ADMIN_SUBMIT
+    {
+        const ctx = await fx.createPendingFixture();
+        createdFixtureIds.push(ctx.id);
+        await fx.setCollabState(ctx.id, { status: 'PENDING_ASSIGN' });
+        const res = await postAdminSubmitOnBehalf(ctx.id, adminToken, { reason: 'V9a PENDING_ASSIGN 不应允许' });
+        if (res.status !== 409) throw new Error(`V9a expected 409, got ${res.status}`);
+        if (res.body && res.body.code !== 'STATE_NOT_ALLOWED_FOR_ADMIN_SUBMIT') {
+            throw new Error(`V9a expected STATE_NOT_ALLOWED_FOR_ADMIN_SUBMIT, got ${res.body && res.body.code}`);
+        }
+    }
+
+    // V9b: PENDING → STATE_NOT_ALLOWED_FOR_ADMIN_SUBMIT
+    {
+        const ctx = await fx.createPendingFixture();
+        createdFixtureIds.push(ctx.id);
+        // createPendingFixture 已是 PENDING
+        const res = await postAdminSubmitOnBehalf(ctx.id, adminToken, { reason: 'V9b PENDING 不应允许' });
+        if (res.status !== 409) throw new Error(`V9b expected 409, got ${res.status}`);
+        if (res.body && res.body.code !== 'STATE_NOT_ALLOWED_FOR_ADMIN_SUBMIT') {
+            throw new Error(`V9b expected STATE_NOT_ALLOWED_FOR_ADMIN_SUBMIT, got ${res.body && res.body.code}`);
+        }
+    }
+
+    // V9c: EXPORTING → STATE_NOT_ALLOWED_FOR_ADMIN_SUBMIT
+    {
+        const ctx = await fx.createPendingFixture();
+        createdFixtureIds.push(ctx.id);
+        await fx.setCollabState(ctx.id, { status: 'EXPORTING', exporter_user_id: fx.EXPORTER_ID, exporter_name: '刘林航' });
+        const res = await postAdminSubmitOnBehalf(ctx.id, adminToken, { reason: 'V9c EXPORTING 不应允许' });
+        if (res.status !== 409) throw new Error(`V9c expected 409, got ${res.status}`);
+        if (res.body && res.body.code !== 'STATE_NOT_ALLOWED_FOR_ADMIN_SUBMIT') {
+            throw new Error(`V9c expected STATE_NOT_ALLOWED_FOR_ADMIN_SUBMIT, got ${res.body && res.body.code}`);
+        }
+    }
+
+    // V9d: ARCHIVED → ARCHIVED_PROTECTED（终态保护优先于状态准入）
+    {
+        const ctx = await fx.createPendingFixture();
+        createdFixtureIds.push(ctx.id);
+        await fx.setCollabState(ctx.id, { status: 'ARCHIVED' });
+        const res = await postAdminSubmitOnBehalf(ctx.id, adminToken, { reason: 'V9d ARCHIVED 不应允许' });
+        if (res.status !== 409) throw new Error(`V9d expected 409, got ${res.status}`);
+        if (res.body && res.body.code !== 'ARCHIVED_PROTECTED') {
+            throw new Error(`V9d expected ARCHIVED_PROTECTED (终态保护优先), got ${res.body && res.body.code}`);
+        }
     }
 });
 

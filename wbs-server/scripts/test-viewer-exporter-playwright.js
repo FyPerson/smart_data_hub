@@ -294,14 +294,14 @@ function expect(condition, message) {
         await viewerPage.waitForTimeout(2500);  // 等服务器响应 + 状态更新
 
         // ============================================================
-        // 步骤 7：验证 DB 状态 SUBMITTED
+        // 步骤 7：验证 DB 状态 DONE（v1.72.10：exporter 上传后直接 DONE，跳过 SUBMITTED）
         // ============================================================
-        console.log('\n7. 验证 DB 状态切换到 SUBMITTED...');
+        console.log('\n7. 验证 DB 状态切换到 DONE（v1.72.10 改造）...');
         const submitted = await getCollabByOA(testOA);
         expect(submitted !== null, '协作单仍存在');
-        expect(submitted.status === 'SUBMITTED', `提交后 status = SUBMITTED（实际：${submitted.status}）`);
-        expect(submitted.result_data !== null, 'result_data 字段已落盘');
-        expect(submitted.result_data_screenshot !== null, 'result_data_screenshot 字段已落盘');
+        expect(submitted.status === 'DONE', `提交后 status = DONE，跳过 SUBMITTED（实际：${submitted.status}）`);
+        expect(submitted.done_at !== null && submitted.done_at !== '', 'done_at 字段已写');
+        expect(submitted.sql_validation_status === 'admin_closed', `sql_validation_status = 'admin_closed' (与 admin-submit-on-behalf 一致)`);
 
         await viewerContext.close();
 
