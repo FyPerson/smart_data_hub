@@ -2113,6 +2113,47 @@
                 </div>`;
         }
 
+        // 导出人通知业务方·发数据区块（2026-05-29，方案 v1.1）
+        //   可见性（codex 52 H-2 + 53 L-2 同条件）：assign_mode='admin_direct' && status='DONE' && exporter_user_id 有效
+        //     且当前用户是 admin 或本单 exporter；developer SQL 路径不显示此按钮
+        //   已通知过（done_notified_at 非空）→ 显示已通知态 + 已读查询入口；可重发（D6）
+        function renderRequesterDoneNotifySection(d, isAdminUser, currentUserId) {
+            if (d.assign_mode !== 'admin_direct') return '';
+            if (d.status !== 'DONE') return '';
+            // L-1：id 必须有效正整数，异常数据不渲染（避免 notifyRequesterDone(NaN) / 请求 /NaN/...）
+            const safeId = Number(d.id);
+            if (!Number.isSafeInteger(safeId) || safeId <= 0) return '';
+            const exporterId = Number(d.exporter_user_id);
+            const hasValidExporter = Number.isSafeInteger(exporterId) && exporterId > 0;
+            if (!hasValidExporter) return '';
+            // 仅 admin 或本单 exporter 可见（与后端 NOT_OWN_EXPORTER 守卫同条件）
+            // L-2：currentUserId 显式 Number 转换 + 校验，与 exporterId 判断风格统一
+            const uid = Number(currentUserId);
+            const isOwnExporter = Number.isSafeInteger(uid) && uid > 0 && exporterId === uid;
+            if (!isAdminUser && !isOwnExporter) return '';
+
+            const contactName = d.contact_person_name ? escapeHtml(d.contact_person_name) : '业务方';
+            const alreadyNotified = !!d.done_notified_at;
+            const readPart = d.done_read_at
+                ? `<span style="color:#16a34a">📖 ${contactName} 已读 · 于 ${fmtDate(d.done_read_at)}</span>`
+                : `<span id="readStatusBox_requester_done" style="color:#94a3b8"></span>
+                   <button class="notify-btn" style="margin-left:8px" onclick="checkReadStatus(${safeId}, 'requester_done')">查询已读</button>`;
+
+            const notifiedLine = alreadyNotified
+                ? `<div style="color:#1d4f72;margin-bottom:8px;font-size:13px;">已于 ${fmtDate(d.done_notified_at)} 通知 ${contactName} 并发送数据 ${readPart}</div>`
+                : `<div style="color:#9ca3af;margin-bottom:8px;font-size:13px;">尚未通知业务方</div>`;
+
+            const btnLabel = alreadyNotified ? '📨 重新通知并发送数据' : '📨 通知业务方并发送数据';
+
+            return `
+                <div class="requester-done-notify" style="border-top:1px dashed #d1d5db;margin-top:12px;padding-top:12px;">
+                    <h4 style="margin:0 0 8px;font-size:14px;color:#374151;">📤 通知业务方 · 发送数据</h4>
+                    ${notifiedLine}
+                    <button class="requester-done-notify-btn" data-collab-id="${safeId}" onclick="notifyRequesterDone(${safeId})">${btnLabel}</button>
+                    <div style="margin-top:6px;font-size:12px;color:#9ca3af;">将把数据文件（xlsx）作为钉钉文件直接发给对接人 + 一条「已完成」通知</div>
+                </div>`;
+        }
+
         // v1.72.3 加载改派历史
         async function loadReassignHistory(collabId) {
             const contentEl = document.getElementById('reassignHistoryContent');
@@ -2351,6 +2392,15 @@
             const devValueHtml = isUnassigned
                 ? `<span style="color:#d97706;">${escapeHtml(d.developer_name || '(待指派)')}</span>`
                 : `${escapeHtml(d.developer_name)}${d.assigned_at ? `<span style="margin-left:8px;color:#64748b;font-size:12px;">· 指派于 ${fmtDate(d.assigned_at)}</span>` : ''}`;
+            // admin 直派单（无对接人、无开发角色）：隐藏"对接人"+"指派开发"两行，避免显示"—"/"(待指派)"误导；
+            //   数据导出人靠下方 renderExporterFieldRow（"导出经办人"行）展示。普通单保持原样。
+            const isAdminDirect = d.assign_mode === 'admin_direct';
+            const contactRowHtml = isAdminDirect ? '' : `
+                            <div class="detail-kv-label">对接人</div>
+                            <div class="detail-kv-value">${escapeHtml(d.contact_person_name || '—')}</div>`;
+            const devRowHtml = isAdminDirect ? '' : `
+                            <div class="detail-kv-label">指派开发</div>
+                            <div class="detail-kv-value">${devValueHtml}</div>`;
             // v1.67.0 数据模板：从 attachments 拿 attachment_type='example_xlsx' 的活跃文件
             // 取首个 active example_xlsx（admin 创建时前端仅允许单文件上传；理论上 API 直传多文件场景按 db 默认顺序取，不引入显式排序避免复杂度）
             const templateFile = (d.attachments || []).filter(
@@ -2433,11 +2483,7 @@
                             <div class="detail-kv-label">数据模板</div>
                             <div class="detail-kv-value">${templateHtml}</div>
                             <div class="detail-kv-label">期望完成</div>
-                            <div class="detail-kv-value">${fmtDate(d.deadline)}</div>
-                            <div class="detail-kv-label">对接人</div>
-                            <div class="detail-kv-value">${escapeHtml(d.contact_person_name || '—')}</div>
-                            <div class="detail-kv-label">指派开发</div>
-                            <div class="detail-kv-value">${devValueHtml}</div>
+                            <div class="detail-kv-value">${fmtDate(d.deadline)}</div>${contactRowHtml}${devRowHtml}
                             <div class="detail-kv-label">录入人</div>
                             <div class="detail-kv-value">${escapeHtml(d.created_by_name)} · ${fmtDate(d.created_at)}</div>
                             <div class="detail-kv-label">当前状态</div>
@@ -2476,6 +2522,8 @@
             // --- 子区 C：数据导出人通知（v1.71.0 UI 重定位 codex 43 审采纳）---
             // 内部按状态分支决定显示与否（PENDING_ASSIGN / ARCHIVED / 软删除均返 ''）
             const exporterBlock = renderExporterNotifySubsection(d, status, isAdminUser, myUid);
+            // 导出人通知业务方·发数据（DONE 后，admin 或本单 exporter 可见）
+            const requesterDoneBlock = renderRequesterDoneNotifySection(d, isAdminUser, myUid);
 
             const notifyHtml = `
                 <div class="detail-section">
@@ -2484,6 +2532,7 @@
                         ${contactBlock}
                         ${developerBlock}
                         ${exporterBlock}
+                        ${requesterDoneBlock}
                     </div>
                 </div>`;
 
@@ -4112,6 +4161,47 @@
             }
         }
 
+        // 导出人通知业务方 + 发数据（2026-05-29，方案 v1.1）
+        //   M-3 防双击：提交中禁用按钮；codex 53 M-3 强约束：按 json.success 判断（非 res.ok），
+        //     因部分失败返 HTTP 200 + success:false，绝不能只看 HTTP 状态（防交付假阳性）
+        async function notifyRequesterDone(id) {
+            const btn = document.querySelector(`.requester-done-notify-btn[data-collab-id="${id}"]`);
+            const originalText = btn ? btn.textContent : '';
+            if (btn) { btn.disabled = true; btn.textContent = '发送中…'; }
+            try {
+                const res = await fetch(`/api/collab/requests/${id}/notify-requester-done`, {
+                    method: 'POST',
+                    headers: { 'Authorization': 'Bearer ' + localStorage.getItem('token') }
+                });
+                // M-1：安全解析 JSON——非 JSON 响应（401 鉴权页 / 5xx HTML）按 status 给准确提示，不误报"网络错误"
+                let data = null;
+                try { data = await res.json(); } catch (_) { data = null; }
+                if (data === null) {
+                    if (res.status === 401 || res.status === 403) showToast('❌ 登录已过期或无权限，请刷新页面重新登录', 'error');
+                    else showToast(`❌ 服务端异常（HTTP ${res.status}），请稍后重试或联系管理员`, 'error');
+                    return;
+                }
+                // 强约束：以 json.success === true 为唯一成功条件（codex 53 M-3）
+                if (data && data.success === true) {
+                    showToast('✅ 已通知业务方并发送数据', 'success');
+                    if (typeof openDetail === 'function') await openDetail(id);
+                    if (typeof loadList === 'function') loadList();
+                } else if (data && data.code === 'NOTIFY_SENT_BUT_DB_UPDATE_FAILED') {
+                    // 钉钉已发出但状态未保存：明确告知勿重发（codex 55 M-2）
+                    showToast('⚠️ 数据已发送，但完成状态保存失败，请勿重发，已记录待管理员补录', 'error');
+                } else {
+                    // 部分失败 / 发送失败：如实提示哪步失败，可重试（D6 可重发）
+                    const stepLabel = { media_upload: '文件上传', file_send: '文件发送', markdown_send: '通知发送' }[data && data.failed_step] || '';
+                    const msg = (data && data.message) || '通知/发送失败';
+                    showToast(`❌ ${msg}${stepLabel ? `（${stepLabel}环节）` : ''}`, 'error');
+                }
+            } catch (e) {
+                showToast('网络错误,请检查后端服务', 'error');
+            } finally {
+                if (btn) { btn.disabled = false; btn.textContent = originalText; }
+            }
+        }
+
         // 查询钉钉已读状态(Day 3 方案 1)
         // v1.66.1 加 recipient 参数：contact（对接人） / developer（开发，默认）
         // v1.66.1 修订：
@@ -4121,7 +4211,9 @@
             const boxId = `readStatusBox_${recipient}`;
             const box = document.getElementById(boxId);
             if (box) box.innerHTML = '<span style="color:#94a3b8">查询中…</span>';
-            const label = recipient === 'contact' ? '对接人' : '开发';
+            const label = recipient === 'contact' ? '对接人'
+                : recipient === 'requester_done' ? '业务方'
+                : '开发';
             try {
                 const res = await fetch(`/api/collab/requests/${id}/notify-read-status?recipient=${recipient}`, {
                     headers: { 'Authorization': 'Bearer ' + localStorage.getItem('token') }
@@ -4131,13 +4223,16 @@
                 if (res.ok) {
                     const recipientName = data.recipient_name || data.developer_name || label;
                     if (data.read) {
-                        // 查到已读 → 后端已写 contact_read_at / read_at；前端刷新详情让 currentDetail 同步
+                        // 查到已读 → 后端已写 contact_read_at / read_at / done_read_at；前端刷新详情让 currentDetail 同步
                         const timePart = data.read_at ? ` · 于 ${fmtDate(data.read_at)}` : '';
                         box.innerHTML = `<span style="color:#16a34a">📖 ${escapeHtml(recipientName)} 已读${timePart}</span>`;
                         // 重新加载详情，让通知区块直接渲染"📖 已读 于 XX:XX"形态
                         if (typeof openDetail === 'function') {
                             await openDetail(id);
                         }
+                    } else if (data.read_status === 'unread_expired') {
+                        // 24h 窗口已过，钉钉不再可查（codex 53 M-2）
+                        box.innerHTML = `<span style="color:#9ca3af">⏰ ${escapeHtml(recipientName)} 未读（已超过钉钉可查询时间）</span>`;
                     } else {
                         box.innerHTML = `<span style="color:#d97706">👀 ${escapeHtml(recipientName)} 尚未读取</span>`;
                     }

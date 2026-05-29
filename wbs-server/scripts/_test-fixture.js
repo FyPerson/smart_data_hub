@@ -121,7 +121,13 @@ async function setCollabState(id, patch) {
         'bypass_validation', 'bypass_reason', 'bypass_by', 'bypass_by_name',
         'submission_version',
         // v1.72.10 codex 50 L-1：V9c 测 EXPORTING 状态需要造 exporter 字段
-        'exporter_user_id', 'exporter_name'
+        'exporter_user_id', 'exporter_name',
+        // v1.72.3 admin 直派模式
+        'assign_mode',
+        // 导出通知业务方（2026-05-29）：造 DONE 直派单 + 测 done_* 已读跟踪
+        'done_notified_at', 'done_notify_message_key', 'done_read_at',
+        // 通知/对接人字段（造测试单时直接设）
+        'contact_person_id', 'contact_person_name'
     ];
     const sets = [];
     const params = [];

@@ -32,6 +32,8 @@ const READ_STATUS_URL = 'https://api.dingtalk.com/v1.0/robot/oToMessages/readSta
 // 2026-05-20 探针验证：qyapi_chat_manage 权限已开通；钉钉无 disband 服务端 API
 const CHAT_CREATE_URL = 'https://oapi.dingtalk.com/chat/create';
 const GROUP_SEND_URL = 'https://api.dingtalk.com/v1.0/robot/groupMessages/send';
+// 导出人通知业务方·发数据：媒体上传（F1 探针 2026-05-29 实测 type 放 FormData 字段可拿 media_id）
+const MEDIA_UPLOAD_URL = 'https://oapi.dingtalk.com/media/upload';
 
 const TOKEN_EARLY_EXPIRE_MS = 200 * 1000;  // 提前 200s 重取,避开钉钉端实际过期边界
 
@@ -462,6 +464,119 @@ function escapeMarkdown(str) {
 }
 
 /**
+ * 上传媒体文件到钉钉，拿 media_id。
+ *
+ * 用于"导出人通知业务方·发数据"：把 xlsx 作为 sampleFile 文件消息发送前，先上传换 media_id。
+ * F1 探针（scripts/probe-dingtalk-file-send.js）2026-05-29 实测：type 放 FormData 字段即可，
+ *   不需放 query string（codex 53 H-2 误报，本地实测真相为准）。
+ * media_id 时效短（钉钉端约定数天），调用方应"现上传现发"，不预存。
+ *
+ * @param {string} token     access_token
+ * @param {string} fileName  文件名（展示名，含扩展名）
+ * @param {Buffer} buffer    文件内容
+ * @returns {Promise<string>}  media_id
+ * @throws {Error}  HTTP 5xx / 非 JSON / errcode!=0（带 dingtalkResp 供 classifyError）
+ */
+async function uploadMedia(token, fileName, buffer) {
+    const form = new FormData();
+    form.append('type', 'file');                          // 探针实测放字段可用
+    form.append('media', new Blob([buffer]), fileName);
+    // 不手设 Content-Type，让 fetch 自动带 multipart boundary；token encode（codex 53）
+    const resp = await fetchWithTimeout(`${MEDIA_UPLOAD_URL}?access_token=${encodeURIComponent(token)}`,
+        { method: 'POST', body: form });
+    if (resp.status >= 500) {
+        const err = new Error(`media/upload HTTP ${resp.status}`);
+        err.httpStatus = resp.status;
+        throw err;
+    }
+    let obj;
+    try {
+        obj = await resp.json();
+    } catch (parseErr) {
+        const err = new Error(`media/upload non-JSON response: ${parseErr.message}`);
+        err.httpStatus = resp.status;
+        throw err;
+    }
+    if (obj.errcode !== 0 || !obj.media_id) {
+        const err = new Error(`media/upload errcode`);
+        err.dingtalkResp = obj;  // 交给 classifyError
+        throw err;
+    }
+    return obj.media_id;
+}
+
+/**
+ * 发文件消息给个人（sampleFile）。
+ *
+ * F1 探针实测：个人单聊可收 sampleFile（HTTP 200 + invalidStaffIdList=[] + 真机收到）。
+ * 探针实测请求形态 = query 与 header 同时带 x-acs-dingtalk-access-token（codex commitA-H1：
+ *   忠实复制探针双带写法，不省略 header——实测跑通的是双带版本，省略 header 是未验证差异）。
+ * 本函数只负责发送 + 返回钉钉原始响应；**成功判断必须由调用方做**（errcode OK 且
+ *   invalidStaffIdList 空，必要时 processQueryKey 非空）——与 sendMarkdownToUser 同设计，
+ *   helper 保持纯粹，业务判断在 endpoint（v1.1 §3.2 dingtalkSendOk + T14）。
+ *
+ * @param {string}   token     access_token
+ * @param {string}   robotCode 机器人 code
+ * @param {string[]} userIds   钉钉 userid 数组
+ * @param {string}   mediaId   uploadMedia 返回的 media_id
+ * @param {string}   fileName  文件名（展示用）
+ * @returns {Promise<object>}  钉钉原始响应（含 processQueryKey / invalidStaffIdList）
+ * @throws {Error}  HTTP 5xx / 非 JSON
+ */
+async function sendFileToUser(token, robotCode, userIds, mediaId, fileName) {
+    const url = `${BATCH_SEND_URL}?x-acs-dingtalk-access-token=${encodeURIComponent(token)}`;
+    const payload = {
+        robotCode,
+        userIds,
+        msgKey: 'sampleFile',
+        msgParam: JSON.stringify({ mediaId, fileName, fileType: 'xlsx' })
+    };
+    const resp = await fetchWithTimeout(url, {
+        method: 'POST',
+        // 探针实测双带 token（query + header），忠实复制（codex commitA-H1）
+        headers: { 'Content-Type': 'application/json', 'x-acs-dingtalk-access-token': token },
+        body: JSON.stringify(payload)
+    });
+    if (resp.status >= 500) {
+        const err = new Error(`sampleFile batchSend HTTP ${resp.status}`);
+        err.httpStatus = resp.status;
+        throw err;
+    }
+    try {
+        return await resp.json();
+    } catch (parseErr) {
+        const err = new Error(`sampleFile batchSend non-JSON response: ${parseErr.message}`);
+        err.httpStatus = resp.status;
+        throw err;
+    }
+}
+
+/**
+ * 拼装"数据需求已完成"通知卡片（sampleMarkdown），发给业务方（对接人）。
+ *
+ * 注意：done_read_at 语义是"已读此通知"，不代表下载/打开了 xlsx，文案不暗示"已确认数据"。
+ * 入参全部走 escapeMarkdown（防用户输入破坏 markdown 排版，codex 53 H-3）。
+ *
+ * @param {object} p  { oaRequestNo, description, exporterName }（requesterName 暂未用于正文，保留参数位）
+ * @returns {{title:string, text:string}}
+ */
+function buildRequesterDoneCard({ oaRequestNo, description, exporterName } = {}) {
+    const title = '您的数据需求已完成';
+    // L-1：exporterName 空时不留"请联系数据导出人 。"末尾空白，改"请联系平台管理员。"
+    const contactLine = exporterName
+        ? `如未收到文件或有疑问，请联系数据导出人 ${escapeMarkdown(exporterName)}。`
+        : `如未收到文件或有疑问，请联系平台管理员。`;
+    const text = [
+        `### 您的数据需求已完成`,
+        `**对接单**：${escapeMarkdown(oaRequestNo || '-')}`,
+        description ? `**需求**：${escapeMarkdown(description)}` : '',
+        `数据文件已通过钉钉发送（见上一条文件消息），请查收。`,
+        contactLine
+    ].filter(Boolean).join('\n\n');
+    return { title, text };
+}
+
+/**
  * 拼装协作单通知卡片的 markdown 正文。
  *
  * @param {object} collab  协作单对象,至少需要这些字段:
@@ -774,6 +889,10 @@ module.exports = {
     createChatGroup,
     sendGroupMessage,
     escapeMarkdown,
+    // 导出人通知业务方·发数据：媒体上传 + 文件消息 + 完成通知卡片
+    uploadMedia,
+    sendFileToUser,
+    buildRequesterDoneCard,
     // v1.71.0 三级转发：钉钉群加人 + errcode 分类
     addUserToChat,
     safeParseUserIdList,

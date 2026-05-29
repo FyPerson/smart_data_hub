@@ -1449,6 +1449,13 @@ function initTable() {
         safeAlterAddColumn('collab_requests', 'assign_mode', "TEXT NOT NULL DEFAULT 'normal'");
         db.run(`CREATE INDEX IF NOT EXISTS idx_collab_assign_mode ON collab_requests(assign_mode)`);
 
+        // 导出人通知业务方·发数据（2026-05-29）：完成通知 + 业务方已读跟踪 3 字段
+        //   同构 contact_*（发对接人）/ notify_*（发开发）的钉钉已读跟踪模式
+        //   done_read_at 语义 = 业务方已读"完成通知"，不代表下载/打开 xlsx（v1.1 §4 / codex 53 M-1）
+        safeAlterAddColumn('collab_requests', 'done_notified_at', 'TEXT');          // 完成通知发送时间（三步全成才落）
+        safeAlterAddColumn('collab_requests', 'done_notify_message_key', 'TEXT');   // markdown 通知的 processQueryKey
+        safeAlterAddColumn('collab_requests', 'done_read_at', 'TEXT');              // 业务方已读完成通知时间
+
         // 健康检查放在 serialize 末尾，确保所有 ALTER/INDEX 都已串行执行完
         verifyV2CollabSchema();
     });
@@ -1484,7 +1491,9 @@ function verifyV2CollabSchema() {
         'exporter_assigned_at', 'forwarded_to_exporter_at',
         'export_summary',
         // v1.72.3 admin 直派模式（2026-05-28）
-        'assign_mode'
+        'assign_mode',
+        // 导出人通知业务方·发数据（2026-05-29）
+        'done_notified_at', 'done_notify_message_key', 'done_read_at'
     ];
     db.all("PRAGMA table_info(collab_requests)", [], (err, rows) => {
         if (err) {
@@ -1496,7 +1505,7 @@ function verifyV2CollabSchema() {
         if (missing.length > 0) {
             logger.error(`v2.0 schema 迁移不完整，collab_requests 缺失字段: ${missing.join(', ')}`);
         } else {
-            logger.info(`v2.0 schema 健康检查通过：collab_requests ${expectedCollabRequest.length} 个新增字段齐全（含 D3 attachment_dir + v3 二级转派 5 字段 + v1.66.1 对接人钉钉已读跟踪 3 字段 + v1.66.2 软删除 3 字段 + v1.67.1 归档锁定 3 字段 + v1.69.0 钉钉沟通群 5 字段 + v1.70.4 requester_phone + v1.71.0 三级转发 5 字段 + v1.72.3 assign_mode）`);
+            logger.info(`v2.0 schema 健康检查通过：collab_requests ${expectedCollabRequest.length} 个新增字段齐全（含 D3 attachment_dir + v3 二级转派 5 字段 + v1.66.1 对接人钉钉已读跟踪 3 字段 + v1.66.2 软删除 3 字段 + v1.67.1 归档锁定 3 字段 + v1.69.0 钉钉沟通群 5 字段 + v1.70.4 requester_phone + v1.71.0 三级转发 5 字段 + v1.72.3 assign_mode + 导出通知业务方 done_* 3 字段）`);
         }
     });
 
@@ -11568,15 +11577,27 @@ app.post('/api/collab/requests/:id/notify', authenticateToken, requireNonViewer,
 // v1.66.1 加 ?recipient=contact|developer 参数：
 //   - recipient=developer（默认，向后兼容）：查 notify_message_key + 落 read_at（PENDING/SUBMITTED+ 用）
 //   - recipient=contact：查 contact_notify_message_key + 落 contact_read_at（PENDING_ASSIGN 用）
+//   - recipient=requester_done（2026-05-29 导出通知业务方）：查 done_notify_message_key + 落 done_read_at（DONE 后通知业务方用）
+//     done_read_at 语义 = 业务方已读"完成通知"，不代表下载/打开 xlsx（codex 53 M-1）
 app.get('/api/collab/requests/:id/notify-read-status', authenticateToken, async (req, res) => {
     const { id } = req.params;
     const recipient = (req.query.recipient || 'developer').toLowerCase();
-    if (recipient !== 'contact' && recipient !== 'developer') {
-        return res.status(400).json({ error: '无效的 recipient 值（合法值：contact/developer）' });
+    if (recipient !== 'contact' && recipient !== 'developer' && recipient !== 'requester_done') {
+        return res.status(400).json({ error: '无效的 recipient 值（合法值：contact/developer/requester_done）' });
     }
 
     // 字段名映射：选不同字段组
-    const fieldMap = recipient === 'contact'
+    const fieldMap = recipient === 'requester_done'
+        ? {
+            notified_at: 'done_notified_at',
+            message_key: 'done_notify_message_key',
+            read_at: 'done_read_at',
+            // L-2：user_id 来自 contact_person_id（业务方/对接人），非 developer/contact 路径的收件人语义；
+            //      完成通知的查询者即业务方本人，alias 复用 recipient_user_id 字段不影响判读逻辑
+            user_id: 'contact_person_id',
+            label: '业务方（完成通知）',
+        }
+        : recipient === 'contact'
         ? {
             notified_at: 'contact_notified_at',
             message_key: 'contact_notify_message_key',
@@ -11620,8 +11641,31 @@ app.get('/api/collab/requests/:id/notify-read-status', authenticateToken, async 
             });
         }
 
+        // codex 56-D M-1：message_key 缺失校验放在 24h 判断【之前】——
+        //   老协作单/钉钉未返消息号时仍返原 400（不改变 contact/developer 既有语义，避免回归）
         if (!collab.message_key) {
             return res.status(400).json({ error: `该${fieldMap.label}通知缺少消息标识,无法查询已读状态(老协作单或钉钉端未返回消息号)` });
+        }
+
+        // codex 53 M-2：24h 查询窗口（钉钉端约定消息发出后 24h 内可查）——三路一致顺手补齐
+        //   未固化 read_at 且 notified_at 超 24h → 停查钉钉，返 unread_expired（避免前端长期空查钉钉）
+        //   注：24h 判断在 message_key 校验之后，只作用于"真发过通知"的单（codex 56-D M-1）
+        //   L-1：notified_at 为 SQLite datetime('now','localtime') 格式，Date.parse 按 Node 进程本地时区解析，
+        //        隐式依赖"Node TZ == SQLite localtime TZ"（当前生产单机一致）。24h 是软边界，时区偏移几小时无实质影响。
+        const notifiedMs = Date.parse(String(collab.notified_at).replace(' ', 'T'));
+        if (Number.isFinite(notifiedMs) && (Date.now() - notifiedMs) > 24 * 60 * 60 * 1000) {
+            const uExp = await dbGetAsync('SELECT display_name FROM users WHERE id = ?', [collab.recipient_user_id]);
+            return res.json({
+                recipient,
+                notified_at: collab.notified_at,
+                developer_name: uExp && uExp.display_name,
+                recipient_name: uExp && uExp.display_name,
+                read: false,
+                read_at: null,                  // M-2：与现有 read:false 分支字段对齐
+                read_status: 'unread_expired',  // 未读且已超钉钉可查询窗口
+                read_user_count: 0,             // M-2：与现有分支字段对齐
+                queried_at: new Date().toISOString()
+            });
         }
 
         // 取钉钉凭证(readStatus 需要 robotCode)
@@ -13839,6 +13883,218 @@ app.post('/api/collab/requests/:id/submit-export',
         })();
     }
 );
+
+// 导出人通知业务方 + 发数据（2026-05-29，方案 v1.1）
+//   exporter 直派 DONE 后，手动点按钮 → 钉钉发 xlsx 文件 + 完成通知 + 跟踪业务方已读
+//   三步：① media/upload 拿 media_id ② sampleFile 发文件 ③ sampleMarkdown 发完成通知（先文件后文字）
+//   全三步成功才落 done_*；任一步失败返 success:false（codex 52 H-1/M-6：失败不伪装成功，"不阻断"只指不回滚 DONE）
+//   仅 exporter 直派路径（assign_mode='admin_direct' + status='DONE' + exporter_user_id 非空，codex 52 H-2 + 53 L-2）
+app.post('/api/collab/requests/:id/notify-requester-done', authenticateToken, async (req, res) => {
+    const idStr = req.params.id;
+    const userId = Number(req.user.id);
+    const userName = req.user.display_name || req.user.username || `user#${userId}`;
+    const isAdmin = req.user.role === 'admin';
+
+    // === 前置：id 校验 ===
+    if (!/^[1-9]\d*$/.test(idStr)) {
+        return res.status(400).json({ error: 'id 必须是正整数', code: 'INVALID_ID' });
+    }
+    const id = parseInt(idStr, 10);
+    if (!Number.isSafeInteger(id)) {
+        return res.status(400).json({ error: 'id 超出安全整数范围', code: 'INVALID_ID' });
+    }
+
+    try {
+        // === 取协作单 ===
+        const collab = await dbGetAsync(
+            `SELECT id, status, assign_mode, exporter_user_id, exporter_name,
+                    contact_person_id, contact_person_name, oa_request_no, description,
+                    done_notify_message_key, done_notified_at
+               FROM collab_requests WHERE id = ?`,
+            [id]
+        );
+        if (!collab) return res.status(404).json({ error: '协作单不存在', code: 'NOT_FOUND' });
+
+        // === codex 55 M-1：exporter_user_id 用正整数语义（0 是占位无效值，对齐现有可见性判断 L10371）===
+        const exporterId = Number(collab.exporter_user_id);
+        const hasValidExporter = Number.isSafeInteger(exporterId) && exporterId > 0;
+
+        // === H-2 权限守卫（可执行条件）：admin 放行；非 admin 必须是本单 exporter ===
+        if (!isAdmin) {
+            const isOwnExporter = hasValidExporter && exporterId === userId;
+            if (!isOwnExporter) {
+                return res.status(403).json({ error: '仅本单数据导出人或管理员可通知', code: 'NOT_OWN_EXPORTER' });
+            }
+        }
+
+        // === 范围守卫：仅 exporter 直派 DONE 路径（排除 developer SQL 路径）===
+        if (collab.status !== 'DONE') {
+            return res.status(409).json({ error: `仅 DONE 状态可通知，当前：${collab.status}`, code: 'INVALID_STATE_FOR_NOTIFY' });
+        }
+        if (collab.assign_mode !== 'admin_direct' || !hasValidExporter) {
+            return res.status(409).json({ error: '仅数据导出人直派路径支持通知发送数据', code: 'NOT_EXPORTER_PATH' });
+        }
+
+        // === D9：contact_person 无钉钉（点击时报错，不预查）===
+        const contactUser = await dbGetAsync(
+            'SELECT id, display_name, dingtalk_user_id FROM users WHERE id = ?',
+            [collab.contact_person_id]
+        );
+        if (!contactUser || !contactUser.dingtalk_user_id) {
+            return res.status(400).json({ error: '对接人未绑定钉钉，无法通知', code: 'REQUESTER_NO_DINGTALK' });
+        }
+
+        // === ① M-4：取 result_data active 唯一附件（0/多个明确报错，不随机取）===
+        const atts = await dbAllAsync(
+            `SELECT id, file_name, original_name FROM collab_attachments
+              WHERE collab_request_id = ? AND attachment_type = 'result_data' AND status = 'active'`,
+            [id]
+        );
+        if (atts.length === 0) return res.status(409).json({ error: '无有效数据文件', code: 'RESULT_DATA_MISSING' });
+        if (atts.length > 1) return res.status(409).json({ error: '存在多个有效数据文件，请联系管理员修复', code: 'RESULT_DATA_AMBIGUOUS' });
+        const att = atts[0];
+
+        // === M-2（codex 54）：本需求只发 xlsx，断言扩展名（submit-export 已限定 .xlsx/.xls，此处兜底）===
+        const lowerName = String(att.original_name || att.file_name || '').toLowerCase();
+        if (!lowerName.endsWith('.xlsx') && !lowerName.endsWith('.xls')) {
+            return res.status(409).json({ error: '数据文件不是 .xlsx/.xls，无法作为文件消息发送', code: 'RESULT_DATA_NOT_XLSX' });
+        }
+
+        // === ② M-5：拼物理路径 + ensureInsideRoot 校验（root 与 submit-export 落库一致）===
+        //   submit-export 落库：file_name = path.relative(path.dirname(COLLAB_UPLOAD_BASE), finalPath)
+        //   故 storageRoot = path.dirname(COLLAB_UPLOAD_BASE)，拼接 root 与校验 root 统一
+        const versInternal = collabVersioning._internal;
+        const storageRoot = path.dirname(COLLAB_UPLOAD_BASE);
+        const physicalPath = path.join(storageRoot, att.file_name);
+        const rootCheck = versInternal.ensureInsideRoot(physicalPath, storageRoot);
+        if (!rootCheck.ok) return res.status(400).json({ error: '附件路径校验失败', code: 'PATH_VIOLATION' });
+        if (!fs.existsSync(physicalPath)) return res.status(409).json({ error: '数据文件物理缺失', code: 'RESULT_DATA_FILE_MISSING' });
+
+        // === 取凭证 + token ===
+        const [appKey, appSecret, robotCode] = await Promise.all(
+            ['dingtalk_app_key', 'dingtalk_app_secret', 'dingtalk_robot_code'].map(readSystemConfig)
+        );
+        if (!appKey || !appSecret || !robotCode) {
+            return res.status(500).json({ error: '钉钉配置未填写', code: 'DINGTALK_NOT_CONFIGURED' });
+        }
+        let token;
+        try {
+            token = await dingtalkNotify.getAccessToken(appKey, appSecret);
+        } catch (err) {
+            const cls = dingtalkNotify.classifyError(err);
+            return res.status(502).json({ success: false, error: cls.hint, code: 'DINGTALK_TOKEN_FAILED', reason: cls.reason });
+        }
+
+        const userIds = [contactUser.dingtalk_user_id];
+        const sendFileName = att.original_name || path.basename(att.file_name);
+
+        // === H-1 三步：先文件后文字，逐步记结果（M-6：token 过期不自动重试，失败返 partial_failure 用户重点）===
+        //   M-2/M-4：成功判断 = errcode OK 且 invalidStaffIdList 空（markdown 额外要 processQueryKey 非空）
+        const steps = { media_upload: false, file_send: false, markdown_send: false };
+        let mediaId = null, mdResp = null, failedStep = null, errDetail = null;
+
+        // codex 55 L-1：先校验 resp 对象形态，避免非对象响应抛 TypeError 被归为泛网络错误
+        const dingtalkSendOk = (resp) =>
+            resp && typeof resp === 'object'
+            && (!resp.errcode || resp.errcode === 0)
+            && (!Array.isArray(resp.invalidStaffIdList) || resp.invalidStaffIdList.length === 0);
+
+        try {
+            const buffer = fs.readFileSync(physicalPath);
+            // ① upload
+            mediaId = await dingtalkNotify.uploadMedia(token, sendFileName, buffer);
+            steps.media_upload = true;
+            // ② 发文件（M-2：errcode + invalidStaffIdList 双判）
+            const fileResp = await dingtalkNotify.sendFileToUser(token, robotCode, userIds, mediaId, sendFileName);
+            if (!dingtalkSendOk(fileResp)) {
+                throw Object.assign(new Error('sampleFile 发送未成功'), { dingtalkResp: fileResp, step: 'file_send' });
+            }
+            steps.file_send = true;
+            // ③ 发完成通知文字（收尾确认）
+            const card = dingtalkNotify.buildRequesterDoneCard({
+                oaRequestNo: collab.oa_request_no,
+                description: collab.description,
+                exporterName: collab.exporter_name
+            });
+            mdResp = await dingtalkNotify.sendMarkdownToUser(token, robotCode, userIds, card.title, card.text);
+            // M-4：markdown 成功条件加 processQueryKey 非空（否则已读永远查不到 → 视为失败不落 done_*）
+            if (!dingtalkSendOk(mdResp) || !mdResp.processQueryKey) {
+                throw Object.assign(new Error('markdown 未成功或缺 processQueryKey'), { dingtalkResp: mdResp, step: 'markdown_send' });
+            }
+            steps.markdown_send = true;
+        } catch (e) {
+            failedStep = e.step || (!steps.media_upload ? 'media_upload' : !steps.file_send ? 'file_send' : 'markdown_send');
+            errDetail = dingtalkNotify.classifyError(e.dingtalkResp || e);
+        }
+
+        const allOk = steps.media_upload && steps.file_send && steps.markdown_send;
+
+        // === H-1 全成才落 done_*（M-1 存 markdown 的 processQueryKey）+ 清 done_read_at（重发清）===
+        //   codex 55 M-2：三步全发成功但 UPDATE 失败是"已发送但未落库"的反向不一致——
+        //   此时钉钉已真发出，绝不能让用户以为失败去重发（会重复发文件）。独立 catch + 专门错误码告知。
+        let dbUpdateFailed = false;
+        if (allOk) {
+            try {
+                await dbRunAsync(
+                    `UPDATE collab_requests
+                        SET done_notified_at = datetime('now','localtime'),
+                            done_notify_message_key = ?,
+                            done_read_at = NULL
+                      WHERE id = ?`,
+                    [mdResp.processQueryKey, id]   // markdown_send=true 已保证 processQueryKey 非空
+                );
+            } catch (dbErr) {
+                dbUpdateFailed = true;
+                logger.error(`[notify-requester-done] 协作单 #${id} 钉钉已全发成功但 done_* 落库失败: ${dbErr.message}（key=${mdResp.processQueryKey}）`, dbErr);
+            }
+        }
+
+        // === 留痕（复用 insertCollabLog，rec 4 结构化 detail；失败不阻断 = insertCollabLog fire-and-forget）===
+        //   codex 55 M-3：记 previous_done_notify_message_key，重发覆盖时可追溯
+        insertCollabLog(id, 'NOTIFY_REQUESTER_DONE', userId, userName, JSON.stringify({
+            all_ok: allOk,
+            db_update_failed: dbUpdateFailed,
+            failed_step: failedStep,
+            steps,
+            media_id: mediaId,
+            attachment_id: att.id,
+            contact_person_id: collab.contact_person_id,
+            markdown_key: allOk ? mdResp.processQueryKey : null,
+            previous_done_notify_message_key: collab.done_notify_message_key || null,
+            previous_done_notified_at: collab.done_notified_at || null,
+            dingtalk_errcode: errDetail ? errDetail.errcode : null,
+            dingtalk_errmsg: errDetail ? errDetail.errmsg : null
+        }));
+
+        // === M-2：三步全成但落库失败 → 钉钉已发出，告知"已发送但状态未保存，勿重发"===
+        if (allOk && dbUpdateFailed) {
+            return res.status(200).json({
+                success: false,
+                code: 'NOTIFY_SENT_BUT_DB_UPDATE_FAILED',
+                message: '通知与数据已发送给业务方，但完成状态保存失败，请勿重发，已记录待管理员补录',
+                steps
+            });
+        }
+
+        // === M-6：发送失败如实返 success:false（不伪装成功；DONE 状态不回滚）===
+        if (!allOk) {
+            logger.warn(`[notify-requester-done] 协作单 #${id} 通知部分失败 failed_step=${failedStep} by ${userName}`);
+            return res.status(200).json({
+                success: false,
+                code: 'NOTIFY_PARTIAL_FAILURE',
+                failed_step: failedStep,
+                message: '通知/发送未完成，请重试或线下联系业务方',
+                steps
+            });
+        }
+
+        logger.info(`[notify-requester-done] 协作单 #${id} 已通知业务方(contact_id=${collab.contact_person_id}) + 发数据 by ${userName}`);
+        return res.json({ success: true, done_notified_at_set: true, steps });
+    } catch (e) {
+        logger.error(`[notify-requester-done] 协作单 #${idStr} 异常: ${e.message}`, e);
+        return res.status(500).json({ success: false, error: '通知失败，请联系管理员', code: 'NOTIFY_REQUESTER_DONE_FAILED' });
+    }
+});
 
 app.post('/api/collab/requests/:id/bypass', authenticateToken, requireAdmin, async (req, res) => {
     const idStr = req.params.id;
