@@ -764,7 +764,7 @@ async function scanOrphansAndDanglingPointers({ db, dbAsync, collabRoot, logger,
         }
 
         // 把 DB attachment 按状态归类（codex 24 审 #3：Map key 改 relpath 与 DB file_name 形式一致）
-        // file_name 形如 'collab/{rid}_xxx/{ts}_{rand}_name.ext'，全局唯一不会撞同名
+        // file_name 形如 'collab/{rid}_xxx/OA-{oa}_{YYYYMMDD}_{nnn}_{rd|rs|sc|ex}[_failed]_{姓名}.{ext}'（v1.72.0 起；旧单据为 {ts}_{rand}_name.ext），全局唯一不会撞同名
         // active / superseded / failed 三态并存
         const activeFiles = new Map();      // relpath -> row
         const supersededFiles = new Map();  // relpath -> row

@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>问题跟踪 - 智数协同平台</title>
+    <title>需求跟踪 - 智数协同平台</title>
     <link rel="icon" href="data:,">
     <link rel="stylesheet" href="assets/css/style.css?v=1.2">
     <style>
@@ -164,14 +164,16 @@
             font-size: 11px;
             font-weight: 500;
         }
-        .type-tag.t-需求 { background: #dbeafe; color: #1d4ed8; }
-        .type-tag.t-缺陷 { background: #fee2e2; color: #dc2626; }
+        /* 7 类类型色块（类名规范化：/ 和空格 → -，对齐 typeClass() JS helper） */
+        .type-tag.t-看板-报表需求 { background: #dbeafe; color: #1d4ed8; }
+        .type-tag.t-数据治理需求 { background: #e0e7ff; color: #4338ca; }
+        .type-tag.t-数据应用需求 { background: #ede9fe; color: #6d28d9; }
+        .type-tag.t-平台-bug { background: #fee2e2; color: #dc2626; }
         .type-tag.t-数据质量 { background: #fef3c7; color: #92400e; }
-        .type-tag.t-变更请求 { background: #e0e7ff; color: #4338ca; }
         .type-tag.t-源系统变更 { background: #fce7f3; color: #9d174d; }
         .type-tag.t-调度异常 { background: #fecaca; color: #991b1b; }
 
-        /* 状态徽章 */
+        /* 状态徽章（6 态） */
         .status-badge {
             display: inline-block;
             padding: 3px 10px;
@@ -183,29 +185,19 @@
         .status-badge.s-处理中 { background: #dbeafe; color: #1d4ed8; }
         .status-badge.s-待验证 { background: #fef3c7; color: #92400e; }
         .status-badge.s-已关闭 { background: #d1fae5; color: #065f46; }
+        .status-badge.s-已暂缓 { background: #fef9c3; color: #854d0e; }
+        .status-badge.s-已拒绝 { background: #f3f4f6; color: #991b1b; }
 
-        /* 进度条 */
-        .progress-bar-wrap {
-            width: 80px;
-            height: 6px;
-            background: #e5e7eb;
-            border-radius: 3px;
-            overflow: hidden;
-            display: inline-block;
-            vertical-align: middle;
-            margin-right: 6px;
-        }
-        .progress-bar-fill {
-            height: 100%;
-            border-radius: 3px;
-            background: linear-gradient(90deg, #d97706, #f59e0b);
-            transition: width 0.3s;
-        }
-        .progress-text {
-            font-size: 11px;
-            color: #6b7280;
-            vertical-align: middle;
-        }
+        /* 通知状态徽章（C6c：notify_status 配色 H-4） */
+        .notify-badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 500; }
+        .notify-badge.notify-sent { background: #ecfdf5; color: #059669; }
+        .notify-badge.notify-failed { background: #fef2f2; color: #dc2626; cursor: help; }
+        .notify-badge.notify-not_sent { background: #f3f4f6; color: #6b7280; }
+
+        /* C6c M-4：12 列表格横向滚动容器 + 单元格省略 */
+        .issue-table-wrap { overflow-x: auto; border-radius: 10px; border: 1px solid #e2e8f0; }
+        .issue-table-wrap .issue-table { min-width: 1200px; border: none; border-radius: 0; }
+        .issue-table td.ellip { max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
         /* ===== 详情抽屉 ===== */
         .drawer-overlay {
@@ -299,28 +291,6 @@
             font-size: 13px;
         }
         .preview-link:hover { text-decoration: underline; }
-
-        /* 进度编辑 */
-        .progress-edit-row {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            margin-bottom: 20px;
-            padding: 12px 14px;
-            background: #f9fafb;
-            border-radius: 8px;
-        }
-        .progress-edit-row input[type="range"] {
-            flex: 1;
-            accent-color: #d97706;
-        }
-        .progress-edit-row .progress-val {
-            font-size: 14px;
-            font-weight: 700;
-            color: #d97706;
-            min-width: 40px;
-            text-align: center;
-        }
 
         /* 操作栏 */
         .action-bar {
@@ -511,7 +481,7 @@
                     <line x1="12" y1="8" x2="12" y2="12"/>
                     <line x1="12" y1="16" x2="12.01" y2="16"/>
                 </svg>
-                问题跟踪
+                需求跟踪
             </a>
             <a href="/My_Workspace.html" class="nav-item">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -645,10 +615,11 @@
             <span class="filter-label">类型</span>
             <select id="filterType" onchange="loadIssues()">
                 <option value="">全部类型</option>
-                <option value="需求">需求</option>
-                <option value="缺陷">缺陷</option>
+                <option value="看板/报表需求">看板/报表需求</option>
+                <option value="数据治理需求">数据治理需求</option>
+                <option value="数据应用需求">数据应用需求</option>
+                <option value="平台 bug">平台 bug</option>
                 <option value="数据质量">数据质量</option>
-                <option value="变更请求">变更请求</option>
                 <option value="源系统变更">源系统变更</option>
                 <option value="调度异常">调度异常</option>
             </select>
@@ -664,32 +635,45 @@
             <select id="filterAssigned" onchange="loadIssues()">
                 <option value="">全部人员</option>
             </select>
+            <span class="filter-label">部门</span>
+            <select id="filterDept" onchange="loadIssues()">
+                <option value="">全部部门</option>
+            </select>
+            <span class="filter-label">数据域</span>
+            <select id="filterDomain" onchange="loadIssues()">
+                <option value="">全部数据域</option>
+            </select>
             <input type="text" id="filterSearch" placeholder="搜索标题/描述/表名..." onkeyup="debounceSearch()">
             <div style="flex:1;"></div>
             <button class="btn-primary" onclick="openCreateModal()">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-                新建问题
+                新建需求
             </button>
         </div>
 
-        <!-- 问题列表 -->
+        <!-- 需求列表（C6c：12 列 + 横向滚动容器 M-4） -->
+        <div class="issue-table-wrap">
         <table class="issue-table">
             <thead>
                 <tr>
-                    <th style="width:50px;">#</th>
-                    <th style="width:65px;">优先级</th>
-                    <th style="width:80px;">类型</th>
-                    <th>标题</th>
-                    <th style="width:80px;">状态</th>
-                    <th style="width:100px;">进度</th>
+                    <th style="width:46px;">#</th>
+                    <th style="width:60px;">优先级</th>
+                    <th style="width:110px;">类型</th>
+                    <th style="width:80px;">通知</th>
+                    <th style="width:75px;">状态</th>
+                    <th style="min-width:240px;">标题</th>
                     <th style="width:80px;">指派人</th>
                     <th style="width:80px;">创建人</th>
+                    <th style="width:100px;">业务方部门</th>
+                    <th style="width:90px;">数据域</th>
+                    <th style="width:90px;">OA 单号</th>
                     <th style="width:110px;">更新时间</th>
                 </tr>
             </thead>
             <tbody id="issueTableBody">
             </tbody>
         </table>
+        </div>
 
         <!-- 空状态 -->
         <div class="empty-state" id="emptyState" style="display:none;">
@@ -698,7 +682,7 @@
                 <line x1="12" y1="8" x2="12" y2="12"/>
                 <line x1="12" y1="16" x2="12.01" y2="16"/>
             </svg>
-            <p>暂无问题记录</p>
+            <p>暂无需求记录</p>
         </div>
     </main>
 
@@ -706,7 +690,7 @@
     <div class="drawer-overlay" id="drawerOverlay" onclick="closeDrawer()"></div>
     <div class="drawer" id="drawer">
         <div class="drawer-header">
-            <h2 id="drawerTitle">问题详情</h2>
+            <h2 id="drawerTitle">需求详情</h2>
             <button class="drawer-close" onclick="closeDrawer()">&times;</button>
         </div>
         <div class="drawer-body" id="drawerBody">
@@ -718,23 +702,45 @@
     <div class="modal-overlay" id="createModal">
         <div class="modal-box">
             <div class="modal-header">
-                <h2 id="modalTitle">新建问题</h2>
+                <h2 id="modalTitle">新建需求</h2>
                 <button class="drawer-close" onclick="closeCreateModal()">&times;</button>
             </div>
             <div class="modal-body">
                 <input type="hidden" id="editIssueId">
                 <div class="form-group">
                     <label>标题 *</label>
-                    <input type="text" id="formTitle" placeholder="简要描述问题">
+                    <input type="text" id="formTitle" placeholder="简要描述需求">
+                </div>
+                <!-- 业务方信息（部门/姓名必填） -->
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>业务方部门 *</label>
+                        <select id="formRequesterDept"></select>
+                    </div>
+                    <div class="form-group">
+                        <label>业务方姓名 *</label>
+                        <input type="text" id="formRequesterName" placeholder="提出需求的业务方姓名">
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>业务方手机号</label>
+                        <input type="text" id="formRequesterPhone" placeholder="可选，用于完成后钉钉通知">
+                    </div>
+                    <div class="form-group">
+                        <label>OA 单号</label>
+                        <input type="text" id="formOaNumber" placeholder="可选，走 OA 流程才填">
+                    </div>
                 </div>
                 <div class="form-row">
                     <div class="form-group">
                         <label>类型</label>
                         <select id="formType">
-                            <option value="需求">需求</option>
-                            <option value="缺陷">缺陷</option>
+                            <option value="看板/报表需求">看板/报表需求</option>
+                            <option value="数据治理需求">数据治理需求</option>
+                            <option value="数据应用需求">数据应用需求</option>
+                            <option value="平台 bug">平台 bug</option>
                             <option value="数据质量">数据质量</option>
-                            <option value="变更请求">变更请求</option>
                             <option value="源系统变更">源系统变更</option>
                             <option value="调度异常">调度异常</option>
                         </select>
@@ -742,9 +748,10 @@
                     <div class="form-group">
                         <label>来源</label>
                         <select id="formSource">
-                            <option value="内部发现">内部发现</option>
                             <option value="业务方">业务方</option>
+                            <option value="内部发现">内部发现</option>
                             <option value="外包反馈">外包反馈</option>
+                            <option value="FDL自动">FDL自动</option>
                         </select>
                     </div>
                 </div>
@@ -759,22 +766,83 @@
                         </select>
                     </div>
                     <div class="form-group">
-                        <label>关联表名</label>
-                        <input type="text" id="formRelatedTable" placeholder="如 dim_org（可选）">
+                        <label>截止日</label>
+                        <input type="date" id="formDeadline">
                     </div>
+                </div>
+                <!-- 指派给（H-1：viewer 不显示；admin/publisher 可选） -->
+                <div class="form-group" id="assignedToGroup">
+                    <label>指派给</label>
+                    <select id="formAssignedTo"><option value="">（暂不指派，后续在详情页指派）</option></select>
                 </div>
                 <div class="form-group" id="errorTimeGroup" style="display:none;">
                     <label>异常发生时间</label>
                     <input type="datetime-local" id="formErrorTime">
                 </div>
+                <!-- 原始诉求（M-4：viewer 自录隐藏；admin/publisher 代录显示=业务方原话） -->
+                <div class="form-group" id="rawRequirementGroup">
+                    <label>原始诉求（业务方原话）</label>
+                    <textarea id="formRawRequirement" rows="2" placeholder="业务方的原始表述，与梳理后的描述分开记录"></textarea>
+                </div>
                 <div class="form-group">
-                    <label>描述</label>
-                    <textarea id="formDescription" rows="4" placeholder="详细描述问题、影响范围、复现步骤等"></textarea>
+                    <label id="descriptionLabel">需求描述</label>
+                    <textarea id="formDescription" rows="4" placeholder="梳理后的需求范围 / 口径 / 输出形态"></textarea>
+                </div>
+                <div class="form-group">
+                    <label>预览/验收地址</label>
+                    <input type="text" id="formAcceptanceUrl" placeholder="可选，http/https 链接">
+                </div>
+                <!-- 录入附件（先行后传：先建需求再逐个传） -->
+                <div class="form-group">
+                    <label>录入附件</label>
+                    <input type="file" id="formAttachments" multiple>
+                    <div id="attachmentPreview" style="margin-top:6px; font-size:12px; color:#6b7280;"></div>
+                    <div style="font-size:11px; color:#9ca3af; margin-top:2px;">支持 Excel/图片/PDF/Word 等；需求创建后逐个上传</div>
+                </div>
+                <!-- 开发态信息（受理后完善）：data_domain/related_table 是开发分析后才能确定的字段，
+                     录入态可留空，下沉到此区并标注，避免业务方/录入人困惑（2026-06-01 用户质疑落地） -->
+                <div style="margin-top:14px; padding-top:12px; border-top:1px dashed #e5e7eb;">
+                    <div style="font-size:12px; font-weight:600; color:#6b7280; margin-bottom:8px;">开发态信息（可留空，开发受理后完善）</div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>数据域</label>
+                            <select id="formDataDomain"><option value="">（不指定）</option></select>
+                            <div style="font-size:11px; color:#9ca3af; margin-top:2px;">拿不准可留空，开发受理后按实际模型确定</div>
+                        </div>
+                        <div class="form-group">
+                            <label>关联表名</label>
+                            <input type="text" id="formRelatedTable" placeholder="如 dwd_cont_header_df（可留空）">
+                            <div style="font-size:11px; color:#9ca3af; margin-top:2px;">开发分析后确定关联的数仓表</div>
+                        </div>
+                    </div>
                 </div>
             </div>
             <div class="modal-footer">
                 <button class="btn-secondary" onclick="closeCreateModal()">取消</button>
                 <button class="btn-primary" onclick="submitIssue()">提交</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 状态流转原因弹窗（N-25：已关闭/已暂缓/已拒绝/退回 必填 reason） -->
+    <!-- codex C6b 复审 M-2：reasonModal 所有关闭入口必须走 confirmReasonModal/cancelReasonModal（二者清 _reasonResolve）。
+         当前 3 入口（✕/取消/确定）已全覆盖；勿给本 modal 加遮罩点击/Esc 关闭等绕过 cancelReasonModal 的路径，
+         否则 _reasonResolve 残留会永久挡住后续 reason 弹窗。 -->
+    <div class="modal-overlay" id="reasonModal">
+        <div class="modal-box" style="max-width:480px;">
+            <div class="modal-header">
+                <h2 id="reasonModalTitle">变更原因</h2>
+                <button class="drawer-close" onclick="cancelReasonModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label id="reasonModalLabel">变更原因 *</label>
+                    <textarea id="reasonModalInput" rows="4" maxlength="500" placeholder="请填写原因（1-500 字）"></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-secondary" onclick="cancelReasonModal()">取消</button>
+                <button class="btn-primary" id="reasonModalConfirm" onclick="confirmReasonModal()">确定</button>
             </div>
         </div>
     </div>
@@ -792,6 +860,7 @@
                 if (!ok) return;
             }
             await loadUsers();
+            await loadFilterDropdowns(); // C6c：填充部门/数据域筛选下拉
             await loadIssues();
 
             // 调度异常显示异常时间字段
@@ -799,6 +868,19 @@
                 document.getElementById('errorTimeGroup').style.display = this.value === '调度异常' ? 'block' : 'none';
             });
         });
+
+        // C6c：填充筛选栏部门 + 数据域下拉
+        //   部门筛选侧保留"系统自动"（FDL 工单可按它筛，§4.1）；数据域复用 loadDataDomains 缓存
+        async function loadFilterDropdowns() {
+            const deptSel = document.getElementById('filterDept');
+            const deptList = ISSUE_REQUESTER_DEPTS.concat(['系统自动']);
+            deptSel.innerHTML = '<option value="">全部部门</option>' +
+                deptList.map(d => `<option value="${escapeHtml(d)}">${escapeHtml(d)}</option>`).join('');
+            const domSel = document.getElementById('filterDomain');
+            const domains = await loadDataDomains();
+            domSel.innerHTML = '<option value="">全部数据域</option>' +
+                domains.map(d => `<option value="${escapeHtml(d)}">${escapeHtml(d)}</option>`).join('');
+        }
 
         // ===== 数据加载 =====
 
@@ -819,24 +901,13 @@
 
         async function loadIssues() {
             try {
-                const params = new URLSearchParams();
-                const type = document.getElementById('filterType').value;
-                const priority = document.getElementById('filterPriority').value;
-                const assigned = document.getElementById('filterAssigned').value;
-                const search = document.getElementById('filterSearch').value.trim();
-
-                if (currentStatusFilter) params.set('status', currentStatusFilter);
-                if (type) params.set('type', type);
-                if (priority) params.set('priority', priority);
-                if (assigned) params.set('assigned_to', assigned);
-                if (search) params.set('search', search);
-
+                const params = buildIssueFilterParams(true); // 含 status 筛选
                 const res = await authFetch(`/api/issues?${params.toString()}`);
                 if (!res || !res.ok) return;
                 allIssues = await res.json();
                 renderTable();
                 updateStats();
-            } catch (e) { console.error('加载问题列表失败', e); }
+            } catch (e) { console.error('加载需求列表失败', e); }
         }
 
         function debounceSearch() {
@@ -866,40 +937,52 @@
             }
             empty.style.display = 'none';
 
+            // C6c：12 列（#/优先级/类型/通知/状态/标题/指派人/创建人/业务方部门/数据域/OA/更新时间）
+            //   H-1：所有后端文本字段走 escapeHtml；窄列加 .ellip + title 单行省略
             tbody.innerHTML = allIssues.map(issue => `
                 <tr onclick="openDrawer(${issue.id})">
                     <td style="color:#9ca3af; font-size:12px;">${issue.id}</td>
-                    <td><span class="priority-dot ${issue.priority}"></span>${issue.priority}</td>
-                    <td><span class="type-tag t-${issue.type}">${issue.type}</span></td>
-                    <td style="font-weight:500; max-width:300px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">
+                    <td><span class="priority-dot ${issue.priority}"></span>${escapeHtml(issue.priority)}</td>
+                    <td><span class="type-tag ${typeClass(issue.type)}">${escapeHtml(issue.type)}</span></td>
+                    <td>${notifyBadge(issue)}</td>
+                    <td><span class="status-badge s-${issue.status}">${escapeHtml(issue.status)}</span></td>
+                    <td style="font-weight:500; max-width:320px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">
                         ${escapeHtml(issue.title)}
-                        ${issue.preview_url ? '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#2563eb" stroke-width="2" style="margin-left:4px;vertical-align:middle;"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>' : ''}
+                        ${issue.acceptance_url ? '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#2563eb" stroke-width="2" style="margin-left:4px;vertical-align:middle;"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>' : ''}
                     </td>
-                    <td><span class="status-badge s-${issue.status}">${issue.status}</span></td>
-                    <td>
-                        <div class="progress-bar-wrap"><div class="progress-bar-fill" style="width:${issue.progress}%"></div></div>
-                        <span class="progress-text">${issue.progress}%</span>
-                    </td>
-                    <td>${issue.assigned_to_name || '<span style="color:#d1d5db;">未指派</span>'}</td>
-                    <td>${issue.created_by_name || ''}</td>
+                    <td>${issue.assigned_to_name ? escapeHtml(issue.assigned_to_name) : '<span style="color:#d1d5db;">未指派</span>'}</td>
+                    <td>${escapeHtml(issue.created_by_name || '')}</td>
+                    <td class="ellip" title="${escapeHtml(issue.requester_dept || '')}">${escapeHtml(issue.requester_dept || '')}</td>
+                    <td class="ellip">${domainText(issue.data_domain)}</td>
+                    <td class="ellip" title="${escapeHtml(issue.oa_number || '')}">${issue.oa_number ? escapeHtml(issue.oa_number) : '<span style="color:#d1d5db;">-</span>'}</td>
                     <td class="time-relative">${formatTime(issue.updated_at)}</td>
                 </tr>
             `).join('');
         }
 
-        async function updateStats() {
-            // 不带 status 筛选，获取全量统计
-            try {
-                const params = new URLSearchParams();
-                const type = document.getElementById('filterType').value;
-                const priority = document.getElementById('filterPriority').value;
-                const assigned = document.getElementById('filterAssigned').value;
-                const search = document.getElementById('filterSearch').value.trim();
-                if (type) params.set('type', type);
-                if (priority) params.set('priority', priority);
-                if (assigned) params.set('assigned_to', assigned);
-                if (search) params.set('search', search);
+        // C6c（codex C-5/C-6）：列表与统计共用筛选参数构造，保证统计尊重 type/priority/assigned/dept/domain/search
+        //   withStatus=true 含 currentStatusFilter（列表用）；false 不含（统计卡片要算各状态全量）
+        function buildIssueFilterParams(withStatus) {
+            const params = new URLSearchParams();
+            const type = document.getElementById('filterType').value;
+            const priority = document.getElementById('filterPriority').value;
+            const assigned = document.getElementById('filterAssigned').value;
+            const dept = document.getElementById('filterDept').value;
+            const domain = document.getElementById('filterDomain').value;
+            const search = document.getElementById('filterSearch').value.trim();
+            if (withStatus && currentStatusFilter) params.set('status', currentStatusFilter);
+            if (type) params.set('type', type);
+            if (priority) params.set('priority', priority);
+            if (assigned) params.set('assigned_to', assigned);
+            if (dept) params.set('requester_dept', dept);
+            if (domain) params.set('data_domain', domain);
+            if (search) params.set('search', search);
+            return params;
+        }
 
+        async function updateStats() {
+            try {
+                const params = buildIssueFilterParams(false); // 不含 status，算各状态全量
                 const res = await authFetch(`/api/issues?${params.toString()}`);
                 if (!res || !res.ok) return;
                 const all = await res.json();
@@ -922,7 +1005,7 @@
                 renderDrawer(issue);
                 document.getElementById('drawerOverlay').classList.add('open');
                 document.getElementById('drawer').classList.add('open');
-            } catch (e) { console.error('加载问题详情失败', e); }
+            } catch (e) { console.error('加载需求详情失败', e); }
         }
 
         function closeDrawer() {
@@ -933,77 +1016,121 @@
         function renderDrawer(issue) {
             document.getElementById('drawerTitle').textContent = `#${issue.id} ${issue.title}`;
             const isManager = currentUser && (currentUser.role === 'admin' || currentUser.role === 'publisher');
+            const isAdmin = currentUser && currentUser.role === 'admin';
+            // H-1（C8 合并审）：被指派本人——后端 PUT /status 允许被指派人推进到「处理中/待验证」
+            //   （server.js:10159-10172 ASSIGNEE_ALLOWED_TARGETS），故状态按钮可见性须对齐后端，
+            //   不能整块包在 isManager 下（否则被指派 user 看不到推进按钮 + publisher 看到终态按钮点了必 403）。
+            const isAssignee = currentUser && issue.assigned_to != null && Number(issue.assigned_to) === Number(currentUser.id);
+            // 6 态状态机（逐字对齐后端 ISSUE_STATUS_TRANSITIONS，server.js:85-92）
             const statusTransitions = {
-                '待处理': ['处理中'],
-                '处理中': ['待验证'],
+                '待处理': ['处理中', '已暂缓', '已拒绝'],
+                '处理中': ['待验证', '已暂缓'],
                 '待验证': ['已关闭', '处理中'],
-                '已关闭': ['处理中']
+                '已关闭': ['处理中'],
+                '已暂缓': ['待处理'],
+                '已拒绝': []
             };
             const nextStatuses = statusTransitions[issue.status] || [];
 
+            // H-1：每个目标态按后端真实放行集计算可见性——
+            //   admin 全部可见；被指派人（user/publisher 本人）仅「处理中/待验证」可见（对齐 ASSIGNEE_ALLOWED_TARGETS）。
+            //   终态（已关闭/已暂缓/已拒绝）+ 激活（已暂缓→待处理）仅 admin（server.js:10163-10167）。
+            //   ⚠️ 前端可见性仅为体验对齐，后端 line 10159-10172 才是真闸门，前端永不作权限来源（changeStatus 失败兜底展后端 message）。
+            const ASSIGNEE_STATUS_TARGETS = ['处理中', '待验证'];
+            const canDoStatus = (s) => isAdmin || (isAssignee && ASSIGNEE_STATUS_TARGETS.includes(s));
+            const visibleStatuses = nextStatuses.filter(canDoStatus);
+
             let html = '';
 
-            // 操作栏（管理员/发布者可见）
-            if (isManager) {
+            // 操作栏：isManager（指派/编辑/删除/通知）或 有可见状态按钮（被指派 user 推进）时渲染容器
+            if (isManager || visibleStatuses.length > 0) {
                 html += `<div class="action-bar">`;
-                // 状态流转
-                nextStatuses.forEach(s => {
+                // 状态流转（按 H-1 过滤后的 visibleStatuses）
+                visibleStatuses.forEach(s => {
                     const btnClass = s === '已关闭' ? 'btn-secondary' : 'btn-primary';
-                    html += `<button class="${btnClass}" onclick="changeStatus(${issue.id}, '${s}')" style="font-size:12px; padding:5px 12px;">${s === '处理中' && issue.status === '待验证' ? '打回处理' : '转为' + s}</button>`;
+                    html += `<button class="${btnClass}" onclick="changeStatus(${issue.id}, '${s}', '${issue.status}')" style="font-size:12px; padding:5px 12px;">${s === '处理中' && issue.status === '待验证' ? '打回处理' : '转为' + s}</button>`;
                 });
-                // 指派
-                html += `<select onchange="assignIssue(${issue.id}, this)" style="font-size:12px;">
-                    <option value="">指派给...</option>`;
-                allUsers.forEach(u => {
-                    const sel = issue.assigned_to === u.id ? 'selected' : '';
-                    html += `<option value="${u.id}" data-name="${escapeHtml(u.display_name || u.username)}" ${sel}>${u.display_name || u.username}</option>`;
-                });
-                html += `</select>`;
-                // 编辑
-                html += `<button class="btn-secondary" onclick="openEditModal(${issue.id})" style="font-size:12px; padding:5px 12px;">编辑</button>`;
-                // 删除（仅admin）
-                if (currentUser.role === 'admin') {
-                    html += `<button class="btn-danger" onclick="deleteIssue(${issue.id})" style="font-size:12px; padding:5px 12px;">删除</button>`;
+                // 以下管理动作（指派/编辑/删除/通知）仍仅 isManager 可见
+                if (isManager) {
+                    // 指派
+                    html += `<select onchange="assignIssue(${issue.id}, this)" style="font-size:12px;">
+                        <option value="">指派给...</option>`;
+                    allUsers.forEach(u => {
+                        const sel = issue.assigned_to === u.id ? 'selected' : '';
+                        // H-2：option 文本 + value 都 escapeHtml（display_name 是用户可改字段，防 XSS/属性注入）
+                        html += `<option value="${escapeHtml(String(u.id))}" data-name="${escapeHtml(u.display_name || u.username)}" ${sel}>${escapeHtml(u.display_name || u.username)}</option>`;
+                    });
+                    html += `</select>`;
+                    // 编辑
+                    html += `<button class="btn-secondary" onclick="openEditModal(${issue.id})" style="font-size:12px; padding:5px 12px;">编辑</button>`;
+                    // 删除（仅admin）
+                    if (currentUser.role === 'admin') {
+                        html += `<button class="btn-danger" onclick="deleteIssue(${issue.id})" style="font-size:12px; padding:5px 12px;">删除</button>`;
+                    }
+                    // C6c：3 个通知按钮（H-2 可见条件=乐观提示，对齐后端闸门；点击失败展后端 message）
+                    if (canNotifyDeveloper(issue)) {
+                        html += `<button class="btn-secondary" onclick="notifyAction(${issue.id}, 'notify-developer')" style="font-size:12px; padding:5px 12px;">📨 通知开发</button>`;
+                    }
+                    if (canNotifyReassign(issue)) {
+                        html += `<button class="btn-secondary" onclick="notifyAction(${issue.id}, 'notify-reassign')" style="font-size:12px; padding:5px 12px;">📨 通知改派</button>`;
+                    }
+                    if (canNotifyRequesterDone(issue)) {
+                        html += `<button class="btn-secondary" onclick="notifyRequesterDone(${issue.id})" style="font-size:12px; padding:5px 12px;">📨 通知业务方完成</button>`;
+                    }
                 }
                 html += `</div>`;
             }
 
-            // 详情网格
+            // 详情网格（C6c：加业务方信息/OA/数据域；H-1 所有后端文本走 escapeHtml）
             html += `<div class="detail-grid">
-                <div class="detail-item"><label>类型</label><div class="detail-value"><span class="type-tag t-${issue.type}">${issue.type}</span></div></div>
-                <div class="detail-item"><label>优先级</label><div class="detail-value"><span class="priority-dot ${issue.priority}"></span>${issue.priority}</div></div>
-                <div class="detail-item"><label>状态</label><div class="detail-value"><span class="status-badge s-${issue.status}">${issue.status}</span></div></div>
-                <div class="detail-item"><label>来源</label><div class="detail-value">${issue.source}</div></div>
-                <div class="detail-item"><label>指派人</label><div class="detail-value">${issue.assigned_to_name || '未指派'}</div></div>
-                <div class="detail-item"><label>创建人</label><div class="detail-value">${issue.created_by_name}</div></div>
-                <div class="detail-item"><label>创建时间</label><div class="detail-value">${issue.created_at || '-'}</div></div>
-                <div class="detail-item"><label>更新时间</label><div class="detail-value">${issue.updated_at || '-'}</div></div>`;
+                <div class="detail-item"><label>类型</label><div class="detail-value"><span class="type-tag ${typeClass(issue.type)}">${escapeHtml(issue.type)}</span></div></div>
+                <div class="detail-item"><label>优先级</label><div class="detail-value"><span class="priority-dot ${issue.priority}"></span>${escapeHtml(issue.priority)}</div></div>
+                <div class="detail-item"><label>状态</label><div class="detail-value"><span class="status-badge s-${issue.status}">${escapeHtml(issue.status)}</span></div></div>
+                <div class="detail-item"><label>来源</label><div class="detail-value">${escapeHtml(issue.source || '')}</div></div>
+                <div class="detail-item"><label>通知状态</label><div class="detail-value">${notifyBadge(issue)}</div></div>
+                <div class="detail-item"><label>业务方部门</label><div class="detail-value">${escapeHtml(issue.requester_dept || '-')}</div></div>
+                <div class="detail-item"><label>业务方姓名</label><div class="detail-value">${escapeHtml(issue.requester_name || '-')}</div></div>
+                <div class="detail-item"><label>业务方手机</label><div class="detail-value">${escapeHtml(issue.requester_phone || '-')}</div></div>
+                <div class="detail-item"><label>数据域</label><div class="detail-value">${domainText(issue.data_domain)}</div></div>
+                <div class="detail-item"><label>指派人</label><div class="detail-value">${escapeHtml(issue.assigned_to_name || '未指派')}</div></div>
+                <div class="detail-item"><label>创建人</label><div class="detail-value">${escapeHtml(issue.created_by_name || '')}</div></div>
+                <div class="detail-item"><label>创建时间</label><div class="detail-value">${escapeHtml(issue.created_at || '-')}</div></div>
+                <div class="detail-item"><label>更新时间</label><div class="detail-value">${escapeHtml(issue.updated_at || '-')}</div></div>`;
+            if (issue.oa_number) {
+                html += `<div class="detail-item"><label>OA 单号</label><div class="detail-value">${escapeHtml(issue.oa_number)}</div></div>`;
+            }
+            if (issue.deadline) {
+                html += `<div class="detail-item"><label>截止日</label><div class="detail-value">${escapeHtml(issue.deadline)}</div></div>`;
+            }
             if (issue.related_table) {
                 html += `<div class="detail-item"><label>关联表名</label><div class="detail-value" style="font-family:monospace; color:#b45309;">${escapeHtml(issue.related_table)}</div></div>`;
             }
             if (issue.error_time) {
-                html += `<div class="detail-item"><label>异常时间</label><div class="detail-value">${issue.error_time}</div></div>`;
+                html += `<div class="detail-item"><label>异常时间</label><div class="detail-value">${escapeHtml(issue.error_time)}</div></div>`;
             }
             if (issue.closed_at) {
-                html += `<div class="detail-item"><label>关闭时间</label><div class="detail-value">${issue.closed_at}</div></div>`;
+                html += `<div class="detail-item"><label>关闭时间</label><div class="detail-value">${escapeHtml(issue.closed_at)}</div></div>`;
             }
             html += `</div>`;
 
-            // 预览地址
-            if (issue.preview_url) {
-                html += `<div style="margin-bottom:16px;"><label style="font-size:11px;color:#6b7280;display:block;margin-bottom:4px;font-weight:500;">预览地址</label>
-                    <a href="${escapeHtml(issue.preview_url)}" target="_blank" class="preview-link">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
-                        ${escapeHtml(issue.preview_url)}
-                    </a></div>`;
+            // 原始诉求区（与描述分区；无值不显示）
+            if (issue.raw_requirement) {
+                html += `<div style="margin-bottom:16px;">
+                    <label style="font-size:11px;color:#6b7280;display:block;margin-bottom:4px;font-weight:500;">原始诉求（业务方原话）</label>
+                    <div class="detail-desc">${escapeHtml(issue.raw_requirement)}</div>
+                </div>`;
             }
 
-            // 进度条（可编辑）
-            html += `<div class="progress-edit-row">
-                <label style="font-size:12px; font-weight:600; color:#374151; white-space:nowrap;">开发进度</label>
-                <input type="range" min="0" max="100" step="5" value="${issue.progress}" oninput="this.nextElementSibling.textContent=this.value+'%'" onchange="updateProgress(${issue.id}, this.value)">
-                <span class="progress-val">${issue.progress}%</span>
-            </div>`;
+            // 预览地址（M-4：scheme 白名单——仅 http/https 渲染链接，否则纯文本展示，前端双重防御）
+            if (issue.acceptance_url) {
+                const safeUrl = safeHttpUrl(issue.acceptance_url);
+                const urlText = escapeHtml(issue.acceptance_url);
+                html += `<div style="margin-bottom:16px;"><label style="font-size:11px;color:#6b7280;display:block;margin-bottom:4px;font-weight:500;">预览地址</label>
+                    ${safeUrl
+                        ? `<a href="${escapeHtml(safeUrl)}" target="_blank" class="preview-link"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg> ${urlText}</a>`
+                        : `<span style="font-size:12px; color:#6b7280;">${urlText}</span>`}
+                    </div>`;
+            }
 
             // 描述
             html += `<div style="margin-bottom:20px;">
@@ -1011,13 +1138,41 @@
                 <div class="detail-desc">${issue.description ? escapeHtml(issue.description) : '<span style="color:#d1d5db;">无描述</span>'}</div>
             </div>`;
 
-            // 预览地址编辑（所有用户可填写）
-            html += `<div style="margin-bottom:20px; padding:12px 14px; background:#f9fafb; border-radius:8px;">
-                <label style="font-size:12px; font-weight:600; color:#374151; display:block; margin-bottom:6px;">预览/验收地址</label>
-                <div style="display:flex; gap:8px;">
-                    <input type="text" id="previewUrlInput" value="${escapeHtml(issue.preview_url || '')}" placeholder="输入页面预览地址" style="flex:1; padding:6px 10px; border:1px solid #d1d5db; border-radius:6px; font-size:12px; outline:none;">
-                    <button class="btn-secondary" onclick="updatePreviewUrl(${issue.id})" style="font-size:12px; padding:5px 12px;">保存</button>
-                </div>
+            // 预览/验收地址编辑（M-5：仅管理侧可编辑，viewer 只读已在上方"预览地址"展示）
+            if (isManager) {
+                html += `<div style="margin-bottom:20px; padding:12px 14px; background:#f9fafb; border-radius:8px;">
+                    <label style="font-size:12px; font-weight:600; color:#374151; display:block; margin-bottom:6px;">预览/验收地址</label>
+                    <div style="display:flex; gap:8px;">
+                        <input type="text" id="acceptanceUrlInput" value="${escapeHtml(issue.acceptance_url || '')}" placeholder="输入页面预览地址" style="flex:1; padding:6px 10px; border:1px solid #d1d5db; border-radius:6px; font-size:12px; outline:none;">
+                        <button class="btn-secondary" onclick="updateAcceptanceUrl(${issue.id})" style="font-size:12px; padding:5px 12px;">保存</button>
+                    </div>
+                </div>`;
+            }
+
+            // 状态时间线（C6c：issue.status_history 后端已内联倒序；L-7 展示 from→to；L-3 空 reason 不显示 reason 行）
+            html += `<div style="margin-bottom:20px;">
+                <label style="font-size:12px; font-weight:600; color:#374151; display:block; margin-bottom:8px;">状态时间线</label>`;
+            const hist = issue.status_history || [];
+            if (hist.length) {
+                html += `<div style="border-left:2px solid #e5e7eb; padding-left:12px;">`;
+                hist.forEach(h => {
+                    const flow = h.from_status ? `${escapeHtml(h.from_status)} → ${escapeHtml(h.to_status)}` : `创建 → ${escapeHtml(h.to_status)}`;
+                    html += `<div style="margin-bottom:10px;">
+                        <div style="font-size:12px; color:#374151;"><span class="status-badge s-${h.to_status}" style="font-size:10px;">${escapeHtml(h.to_status)}</span> <span style="color:#6b7280;">${flow}</span></div>
+                        <div style="font-size:11px; color:#9ca3af; margin-top:2px;">${escapeHtml(h.operator_name || '系统')} · ${escapeHtml(h.created_at || '')}</div>
+                        ${h.reason ? `<div style="font-size:12px; color:#4b5563; margin-top:2px;">原因：${escapeHtml(h.reason)}</div>` : ''}
+                    </div>`;
+                });
+                html += `</div>`;
+            } else {
+                html += `<p style="color:#d1d5db; font-size:13px;">暂无状态记录</p>`;
+            }
+            html += `</div>`;
+
+            // 附件区（C6c：M-3 异步加载占位，回填前校验 issue.id 一致防快速切单错位）
+            html += `<div style="margin-bottom:20px;">
+                <label style="font-size:12px; font-weight:600; color:#374151; display:block; margin-bottom:8px;">录入附件</label>
+                <div id="attachmentArea" data-issue-id="${issue.id}" style="font-size:12px; color:#9ca3af;">加载中…</div>
             </div>`;
 
             // 评论区
@@ -1036,29 +1191,161 @@
             } else {
                 html += `<p style="color:#d1d5db; font-size:13px;">暂无评论</p>`;
             }
-            html += `<div class="comment-input-area">
-                <textarea id="commentInput" placeholder="添加评论..."></textarea>
-                <button class="btn-primary" onclick="addComment(${issue.id})" style="padding:8px 14px; font-size:12px;">发送</button>
-            </div></div>`;
+            // M-5：viewer 隐藏评论输入区（后端 POST comments 是 requireNonViewer），只读看评论 + 轻提示
+            const isViewer = currentUser && currentUser.role === 'viewer';
+            if (isViewer) {
+                html += `<p style="color:#9ca3af; font-size:12px; margin-top:8px;">只读账号不可评论</p>`;
+            } else {
+                html += `<div class="comment-input-area">
+                    <textarea id="commentInput" placeholder="添加评论..."></textarea>
+                    <button class="btn-primary" onclick="addComment(${issue.id})" style="padding:8px 14px; font-size:12px;">发送</button>
+                </div>`;
+            }
+            html += `</div>`;
 
             document.getElementById('drawerBody').innerHTML = html;
+            loadAttachments(issue.id); // M-3：异步填充附件区
         }
 
         // ===== 操作 =====
 
-        async function changeStatus(id, status) {
+        // C6c H-2：通知按钮可见条件=乐观提示（对齐后端闸门，非权限来源；点击仍处理后端 4xx）
+        //   notify-developer：assigned_to 非空 + status∈{待处理,处理中,待验证}（server.js 闸门）
+        function canNotifyDeveloper(issue) {
+            return !!issue.assigned_to && ['待处理', '处理中', '待验证'].includes(issue.status);
+        }
+        //   notify-reassign：pending_reassign_to_id 非空（改派后未通知）
+        function canNotifyReassign(issue) {
+            return !!issue.pending_reassign_to_id;
+        }
+        //   notify-requester-done：status='已关闭'（requester_phone 空时后端拒，前端点击时软二次确认）
+        function canNotifyRequesterDone(issue) {
+            return issue.status === '已关闭';
+        }
+
+        // 通知动作（notify-developer / notify-reassign）：H-2 点击处理 400/403/409 展后端 message
+        async function notifyAction(id, action) {
             try {
+                const res = await authFetch(`/api/issues/${id}/${action}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+                const body = await res.json().catch(() => ({}));
+                if (!res || !res.ok) { showToast(body.error || '通知失败', 'error'); return; }
+                showToast('通知已发送', 'success');
+                await loadIssues();
+                openDrawer(id);
+            } catch (e) { showToast('通知失败', 'error'); }
+        }
+
+        // 通知业务方完成：requester_phone 空时后端返 REQUESTER_PHONE_EMPTY；无 acceptance_url 软二次确认 confirm_no_link
+        async function notifyRequesterDone(id) {
+            try {
+                let res = await authFetch(`/api/issues/${id}/notify-requester-done`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+                let body = await res.json().catch(() => ({}));
+                // 软二次确认：后端 code=NO_ACCEPTANCE_URL（未填验收地址，need_confirm）→ confirm 后带 confirm_no_link 重发
+                if (!res.ok && body.code === 'NO_ACCEPTANCE_URL') {
+                    if (!confirm('该需求未填验收/预览地址，仍要通知业务方完成吗？')) return;
+                    res = await authFetch(`/api/issues/${id}/notify-requester-done`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ confirm_no_link: true }) });
+                    body = await res.json().catch(() => ({}));
+                }
+                if (!res || !res.ok) { showToast(body.error || '通知失败', 'error'); return; }
+                showToast('已通知业务方完成', 'success');
+                await loadIssues();
+                openDrawer(id);
+            } catch (e) { showToast('通知失败', 'error'); }
+        }
+
+        // 附件区异步加载（M-3：loading 占位 + 回填前校验当前 drawer issue.id 一致防快速切单错位）
+        async function loadAttachments(issueId) {
+            const area = document.getElementById('attachmentArea');
+            if (!area) return;
+            try {
+                const res = await authFetch(`/api/issues/${issueId}/attachments`);
+                // 防错位（M-3）：回填前确认 attachmentArea 仍属当前 issue（用户可能已切到别的单）
+                let cur = document.getElementById('attachmentArea');
+                if (!cur || String(cur.dataset.issueId) !== String(issueId)) return;
+                if (!res || !res.ok) { cur.innerHTML = '<span style="color:#dc2626;">附件加载失败</span>'; return; }
+                const atts = await res.json();
+                // M-5（codex C6c）：JSON 解析也是异步窗口，解析后再二次校验 issueId 一致才回填
+                cur = document.getElementById('attachmentArea');
+                if (!cur || String(cur.dataset.issueId) !== String(issueId)) return;
+                if (!atts.length) { cur.innerHTML = '<span style="color:#d1d5db;">暂无附件</span>'; return; }
+                // H-1：下载链接 encodeURIComponent(file_name)；file_name 存相对路径 issues/<名>，逐段编码
+                cur.innerHTML = atts.map(a => {
+                    const href = '/uploads/' + String(a.file_name || '').split('/').map(encodeURIComponent).join('/');
+                    const sizeKb = a.file_size ? ` (${Math.round(a.file_size / 1024)}KB)` : '';
+                    return `<div style="margin-bottom:4px;"><a href="${escapeHtml(href)}" target="_blank" class="preview-link">${escapeHtml(a.original_name || a.file_name)}</a><span style="color:#9ca3af;">${escapeHtml(sizeKb)} · ${escapeHtml(a.uploaded_by_name || '')}</span></div>`;
+                }).join('');
+            } catch (e) {
+                const cur = document.getElementById('attachmentArea');
+                if (cur && String(cur.dataset.issueId) === String(issueId)) cur.innerHTML = '<span style="color:#dc2626;">附件加载失败</span>';
+            }
+        }
+
+        // reason modal Promise 封装（M-4：让 changeStatus 保持线性 async/await，避免回调地狱/重复提交）
+        let _reasonResolve = null;
+        function requestTransitionReason(meta) {
+            // meta = { toStatus, label }
+            // codex C6b M-1：pending 防护——前一个 reason modal 未确认/取消时再次触发，直接返回 null
+            //   （避免覆盖旧 resolver 致第一个 Promise 永不 resolve 调用链悬挂）
+            if (_reasonResolve !== null) {
+                showToast('请先完成当前原因填写', 'warning');
+                return Promise.resolve(null);
+            }
+            return new Promise(resolve => {
+                _reasonResolve = resolve;
+                document.getElementById('reasonModalTitle').textContent = meta.label;
+                document.getElementById('reasonModalLabel').textContent = meta.label + ' *';
+                document.getElementById('reasonModalInput').value = '';
+                document.getElementById('reasonModalConfirm').disabled = false;
+                document.getElementById('reasonModal').classList.add('open');
+                setTimeout(() => document.getElementById('reasonModalInput').focus(), 50);
+            });
+        }
+        function confirmReasonModal() {
+            const val = (document.getElementById('reasonModalInput').value || '').trim();
+            if (!val) { showToast('原因不能为空', 'error'); return; }
+            if (val.length > 500) { showToast('原因不超过 500 字', 'error'); return; }
+            document.getElementById('reasonModal').classList.remove('open');
+            const r = _reasonResolve; _reasonResolve = null;
+            if (r) r(val);
+        }
+        function cancelReasonModal() {
+            document.getElementById('reasonModal').classList.remove('open');
+            const r = _reasonResolve; _reasonResolve = null;
+            if (r) r(null); // 取消 → resolve(null)，changeStatus 据此中止
+        }
+
+        // 判断目标态/退回是否必填 reason（对齐后端 C4：已关闭/已暂缓/已拒绝 必填 + 待验证→处理中 退回必填）
+        function reasonRequired(fromStatus, toStatus) {
+            if (['已关闭', '已暂缓', '已拒绝'].includes(toStatus)) return true;
+            if (fromStatus === '待验证' && toStatus === '处理中') return true; // 退回
+            return false;
+        }
+        function reasonLabel(toStatus) {
+            if (toStatus === '已关闭') return '完成说明';   // v1.0.5 方案 A：关闭场景文案=完成说明
+            if (toStatus === '处理中') return '退回原因';
+            return '变更原因';
+        }
+
+        async function changeStatus(id, toStatus, fromStatus) {
+            let reason = null;
+            if (reasonRequired(fromStatus, toStatus)) {
+                reason = await requestTransitionReason({ toStatus, label: reasonLabel(toStatus) });
+                if (reason === null) return; // 用户取消（resolve(null)；reason 只会是 null 或 string）
+            }
+            try {
+                const payload = { status: toStatus };
+                if (reason !== null) payload.last_transition_reason = reason;
                 const res = await authFetch(`/api/issues/${id}/status`, {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ status })
+                    body: JSON.stringify(payload)
                 });
                 if (!res || !res.ok) {
                     const err = await res.json().catch(() => ({}));
                     showToast(err.error || '操作失败', 'error');
                     return;
                 }
-                showToast(`状态已更新为「${status}」`, 'success');
+                showToast(`状态已更新为「${toStatus}」`, 'success');
                 await loadIssues();
                 openDrawer(id);
             } catch (e) { showToast('操作失败', 'error'); }
@@ -1080,25 +1367,14 @@
             } catch (e) { showToast('指派失败', 'error'); }
         }
 
-        async function updateProgress(id, progress) {
-            try {
-                const res = await authFetch(`/api/issues/${id}/progress`, {
-                    method: 'PUT',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ progress: parseInt(progress) })
-                });
-                if (!res || !res.ok) { showToast('更新进度失败', 'error'); return; }
-                await loadIssues();
-            } catch (e) { showToast('更新进度失败', 'error'); }
-        }
 
-        async function updatePreviewUrl(id) {
-            const url = document.getElementById('previewUrlInput').value.trim();
+        async function updateAcceptanceUrl(id) {
+            const url = document.getElementById('acceptanceUrlInput').value.trim();
             try {
                 const res = await authFetch(`/api/issues/${id}`, {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ preview_url: url })
+                    body: JSON.stringify({ acceptance_url: url })
                 });
                 if (!res || !res.ok) { showToast('保存失败', 'error'); return; }
                 showToast('预览地址已保存', 'success');
@@ -1125,11 +1401,11 @@
         }
 
         async function deleteIssue(id) {
-            if (!confirm('确定要删除这个问题吗？此操作不可恢复。')) return;
+            if (!confirm('确定要删除这个需求吗？此操作不可恢复。')) return;
             try {
                 const res = await authFetch(`/api/issues/${id}`, { method: 'DELETE' });
                 if (!res || !res.ok) { showToast('删除失败', 'error'); return; }
-                showToast('问题已删除', 'success');
+                showToast('需求已删除', 'success');
                 closeDrawer();
                 await loadIssues();
             } catch (e) { showToast('删除失败', 'error'); }
@@ -1137,17 +1413,96 @@
 
         // ===== 新建/编辑弹窗 =====
 
-        function openCreateModal() {
-            document.getElementById('modalTitle').textContent = '新建问题';
-            document.getElementById('editIssueId').value = '';
-            document.getElementById('formTitle').value = '';
-            document.getElementById('formDescription').value = '';
-            document.getElementById('formType').value = '需求';
-            document.getElementById('formSource').value = '内部发现';
+        // 业务方部门枚举（与后端 COLLAB_REQUESTER_DEPTS 同步；对齐 Data_Collab.html 既有范式）。
+        //   "系统自动"是 FDL webhook 专用，业务侧录入下拉过滤掉（仅筛选栏 C6c 会保留）。
+        const ISSUE_REQUESTER_DEPTS = [
+            '市场营销部', '交付运营部', '财务管理部', '人事行政部',
+            '审计风控部', '信息技术部', '安全保卫部', '其他归口部门',
+            '董事会', '公司高管',
+            '华北分公司', '华东分公司', '华南分公司', '华西分公司',
+            '华中分公司', '西南分公司', '西北分公司',
+            '杭州区域', '浙北区域', '浙南区域',
+            '示例关联方B', '示例关联方C', '示例集团关联方A', '示例关联方D', '示例海外子公司',
+            '其他'
+        ];
+        const ISSUE_TYPES_FE = ['看板/报表需求', '数据治理需求', '数据应用需求', '平台 bug', '数据质量', '源系统变更', '调度异常'];
+
+        // data_domain 下拉源缓存（OP-2：GET /api/models 提 domain；M-7：一次性缓存 + 失败降级）
+        let dataDomainCache = null;
+        async function loadDataDomains() {
+            if (dataDomainCache !== null) return dataDomainCache;
+            try {
+                const res = await authFetch('/api/models');
+                if (!res || !res.ok) { dataDomainCache = []; return dataDomainCache; }
+                const models = await res.json();
+                const set = new Set();
+                (models || []).forEach(m => { const d = (m.domain || '').trim(); if (d) set.add(d); });
+                dataDomainCache = Array.from(set).sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'));
+            } catch (e) { dataDomainCache = []; }
+            return dataDomainCache;
+        }
+
+        // 填充业务方部门下拉
+        function fillDeptSelect() {
+            const sel = document.getElementById('formRequesterDept');
+            sel.innerHTML = '<option value="">请选择部门</option>' +
+                ISSUE_REQUESTER_DEPTS.map(d => `<option value="${escapeHtml(d)}">${escapeHtml(d)}</option>`).join('');
+        }
+        // 填充数据域下拉（M-7：历史值不在列表时临时插入，避免编辑保存被清空）
+        async function fillDomainSelect(currentVal) {
+            const sel = document.getElementById('formDataDomain');
+            const domains = await loadDataDomains();
+            const list = domains.slice();
+            const cur = (currentVal || '').trim();
+            if (cur && !list.includes(cur)) list.unshift(cur); // 历史值兜底
+            sel.innerHTML = '<option value="">（不指定）</option>' +
+                list.map(d => `<option value="${escapeHtml(d)}">${escapeHtml(d)}</option>`).join('');
+            if (cur) sel.value = cur;
+        }
+        // 填充指派人下拉（复用 allUsers）
+        function fillAssignSelect(currentVal) {
+            const sel = document.getElementById('formAssignedTo');
+            sel.innerHTML = '<option value="">（暂不指派，后续在详情页指派）</option>' +
+                allUsers.map(u => `<option value="${u.id}">${escapeHtml(u.display_name || u.username)}</option>`).join('');
+            if (currentVal) sel.value = currentVal;
+        }
+
+        // M-4 双框 + H-1 指派 + 角色显隐（true=viewer 自录界面）
+        function applyRoleVisibility(isEdit) {
+            const isViewer = currentUser && currentUser.role === 'viewer';
+            // M-4：viewer 自录隐藏"原始诉求"双框（单框只填 description）
+            document.getElementById('rawRequirementGroup').style.display = isViewer ? 'none' : 'block';
+            document.getElementById('descriptionLabel').textContent = isViewer ? '需求描述' : '需求描述（梳理后）';
+            // H-1：viewer 隐藏"指派给"；
+            // codex C6b M-3：编辑模式也隐藏——PUT /api/issues/:id 不处理 assigned_to（指派走详情页专用 assign endpoint），
+            //   编辑弹窗显示指派下拉会误导（改了静默无效）。新建模式仅 viewer 隐藏。
+            const hideAssign = isViewer || isEdit;
+            document.getElementById('assignedToGroup').style.display = hideAssign ? 'none' : 'block';
+        }
+
+        // 重置表单（resetIssueForm，L-8）
+        function resetIssueForm() {
+            ['formTitle', 'formRequesterName', 'formRequesterPhone', 'formOaNumber', 'formRelatedTable',
+             'formErrorTime', 'formRawRequirement', 'formDescription', 'formAcceptanceUrl', 'formDeadline'].forEach(id => {
+                document.getElementById(id).value = '';
+            });
+            document.getElementById('formType').value = '看板/报表需求'; // M-6：默认改 7 类之一（旧 '需求' 已不存在）
+            document.getElementById('formSource').value = '业务方';
             document.getElementById('formPriority').value = 'P2';
-            document.getElementById('formRelatedTable').value = '';
-            document.getElementById('formErrorTime').value = '';
+            document.getElementById('formRequesterDept').value = '';
+            document.getElementById('formAttachments').value = '';
+            document.getElementById('attachmentPreview').textContent = '';
             document.getElementById('errorTimeGroup').style.display = 'none';
+        }
+
+        async function openCreateModal() {
+            document.getElementById('modalTitle').textContent = '新建需求';
+            document.getElementById('editIssueId').value = '';
+            fillDeptSelect();
+            fillAssignSelect('');
+            resetIssueForm();
+            applyRoleVisibility(false);
+            await fillDomainSelect(''); // L-5：先填充数据域再开弹窗，避免弹窗已显示但下拉还空时秒选
             document.getElementById('createModal').classList.add('open');
         }
 
@@ -1156,56 +1511,136 @@
                 const res = await authFetch(`/api/issues/${id}`);
                 if (!res || !res.ok) return;
                 const issue = await res.json();
-                document.getElementById('modalTitle').textContent = '编辑问题';
+                document.getElementById('modalTitle').textContent = '编辑需求';
                 document.getElementById('editIssueId').value = id;
-                document.getElementById('formTitle').value = issue.title;
+                fillDeptSelect();
+                fillAssignSelect(issue.assigned_to || '');
+                // populateIssueForm（L-8）
+                document.getElementById('formTitle').value = issue.title || '';
+                document.getElementById('formRequesterName').value = issue.requester_name || '';
+                document.getElementById('formRequesterPhone').value = issue.requester_phone || '';
+                document.getElementById('formOaNumber').value = issue.oa_number || '';
+                document.getElementById('formRequesterDept').value = issue.requester_dept || '';
+                document.getElementById('formRawRequirement').value = issue.raw_requirement || '';
                 document.getElementById('formDescription').value = issue.description || '';
-                document.getElementById('formType').value = issue.type;
-                document.getElementById('formSource').value = issue.source;
-                document.getElementById('formPriority').value = issue.priority;
+                document.getElementById('formAcceptanceUrl').value = issue.acceptance_url || '';
+                document.getElementById('formDeadline').value = issue.deadline || '';
+                document.getElementById('formType').value = ISSUE_TYPES_FE.includes(issue.type) ? issue.type : '看板/报表需求';
+                document.getElementById('formSource').value = issue.source || '业务方';
+                document.getElementById('formPriority').value = issue.priority || 'P2';
                 document.getElementById('formRelatedTable').value = issue.related_table || '';
                 document.getElementById('formErrorTime').value = issue.error_time || '';
+                document.getElementById('formAttachments').value = ''; // H-2：编辑模式 file input 只代表本次新增，不回填历史附件
+                document.getElementById('attachmentPreview').textContent = '';
                 document.getElementById('errorTimeGroup').style.display = issue.type === '调度异常' ? 'block' : 'none';
+                applyRoleVisibility(true); // M-3：编辑模式隐藏指派下拉
+                await fillDomainSelect(issue.data_domain || ''); // L-5：先填充再开弹窗
                 document.getElementById('createModal').classList.add('open');
-            } catch (e) { showToast('加载问题失败', 'error'); }
+            } catch (e) { showToast('加载需求失败', 'error'); }
         }
 
         function closeCreateModal() {
             document.getElementById('createModal').classList.remove('open');
         }
 
-        async function submitIssue() {
-            const editId = document.getElementById('editIssueId').value;
+        // 收集表单数据（collectIssueFormData，L-8）；H-1：按角色条件构造 payload，不可编辑字段不进 payload
+        function collectIssueFormData() {
+            const isViewer = currentUser && currentUser.role === 'viewer';
+            const v = id => document.getElementById(id).value;
             const data = {
-                title: document.getElementById('formTitle').value.trim(),
-                description: document.getElementById('formDescription').value,
-                type: document.getElementById('formType').value,
-                source: document.getElementById('formSource').value,
-                priority: document.getElementById('formPriority').value,
-                related_table: document.getElementById('formRelatedTable').value.trim() || null,
-                error_time: document.getElementById('formErrorTime').value || null
+                title: v('formTitle').trim(),
+                description: v('formDescription'),
+                type: v('formType'),
+                source: v('formSource'),
+                priority: v('formPriority'),
+                requester_dept: v('formRequesterDept'),
+                requester_name: v('formRequesterName').trim(),
+                requester_phone: v('formRequesterPhone').trim() || null,
+                oa_number: v('formOaNumber').trim() || null,
+                data_domain: v('formDataDomain') || null,
+                deadline: v('formDeadline') || null,
+                acceptance_url: v('formAcceptanceUrl').trim() || null,
+                related_table: v('formRelatedTable').trim() || null,
+                error_time: v('formErrorTime') || null
             };
+            // M-4 + H-1：viewer 不提交 raw_requirement / assigned_to（隐藏字段不发，防覆盖已有值）
+            if (!isViewer) {
+                data.raw_requirement = v('formRawRequirement') || null;
+                const at = v('formAssignedTo');
+                if (at) data.assigned_to = parseInt(at, 10);
+            }
+            return data;
+        }
 
-            if (!data.title) { showToast('请填写标题', 'error'); return; }
+        // 表单校验（validateIssueForm，L-8）
+        function validateIssueForm(data) {
+            if (!data.title) return '请填写标题';
+            if (!ISSUE_TYPES_FE.includes(data.type)) return '请选择有效的需求类型';
+            if (!data.requester_dept) return '请选择业务方部门';
+            if (!data.requester_name) return '请填写业务方姓名';
+            return null;
+        }
 
+        // 上传附件（uploadAttachments，L-8 + M-3 失败明细）；逐个传，返回 {ok:[], fail:[]}
+        async function uploadAttachments(issueId, files) {
+            const ok = [], fail = [];
+            for (const f of files) {
+                try {
+                    const fd = new FormData();
+                    fd.append('files', f);
+                    const res = await authFetch(`/api/issues/${issueId}/attachments`, { method: 'POST', body: fd });
+                    if (res && res.ok) ok.push(f.name); else fail.push(f.name);
+                } catch (e) { fail.push(f.name); }
+            }
+            return { ok, fail };
+        }
+
+        let _issueSubmitting = false; // codex C6b M-2：提交锁，防重复点击重复建/改 issue
+        async function submitIssue() {
+            if (_issueSubmitting) return; // M-2：in-flight 期间忽略重复点击
+            const editId = document.getElementById('editIssueId').value;
+            const data = collectIssueFormData();
+            const errMsg = validateIssueForm(data);
+            if (errMsg) { showToast(errMsg, 'error'); return; }
+
+            const files = Array.from(document.getElementById('formAttachments').files || []);
+            const submitBtn = document.querySelector('#createModal .modal-footer .btn-primary');
+
+            _issueSubmitting = true;
+            if (submitBtn) submitBtn.disabled = true;
             try {
                 const url = editId ? `/api/issues/${editId}` : '/api/issues';
                 const method = editId ? 'PUT' : 'POST';
                 const res = await authFetch(url, {
-                    method,
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(data)
+                    method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data)
                 });
                 if (!res || !res.ok) {
                     const err = await res.json().catch(() => ({}));
                     showToast(err.error || '提交失败', 'error');
                     return;
                 }
-                showToast(editId ? '问题已更新' : '问题已创建', 'success');
+                const body = await res.json().catch(() => ({}));
+                const issueId = editId ? parseInt(editId, 10) : body.id;
+
+                // 附件两阶段：issue 已建/已改成功后逐个传新文件（H-2：file input 只代表本次新增）
+                let attachMsg = '';
+                let hasAttachmentFailure = false; // L-6：布尔判 toast 类型，不靠文案含"失败"
+                if (files.length && issueId) {
+                    const { ok, fail } = await uploadAttachments(issueId, files);
+                    // M-3：失败明细，不回滚 issue（附件是选填描述材料）
+                    if (fail.length) { hasAttachmentFailure = true; attachMsg = `；附件 ${ok.length} 成功，${fail.length} 失败（${fail.join('、')}），可进详情页补传`; }
+                    else if (ok.length) attachMsg = `；附件 ${ok.length} 个已上传`;
+                }
+                showToast((editId ? '需求已更新' : '需求已创建') + attachMsg, hasAttachmentFailure ? 'warning' : 'success');
                 closeCreateModal();
                 await loadIssues();
-                if (editId) openDrawer(parseInt(editId));
-            } catch (e) { showToast('提交失败', 'error'); }
+                if (issueId) openDrawer(issueId);
+            } catch (e) {
+                showToast('提交失败', 'error');
+            } finally {
+                _issueSubmitting = false;
+                if (submitBtn) submitBtn.disabled = false;
+            }
         }
 
         // ===== 工具函数 =====
@@ -1213,6 +1648,30 @@
         function escapeHtml(str) {
             if (!str) return '';
             return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        }
+
+        // 类型 → CSS 类名规范化（/ 和空格 → -，对齐 .type-tag.t-* 类名）；
+        //   '看板/报表需求'→'t-看板-报表需求'、'平台 bug'→'t-平台-bug'，否则含 / 空格的类名 CSS 匹配不上
+        function typeClass(type) {
+            return 't-' + String(type || '').replace(/[\/\s]/g, '-');
+        }
+
+        // 通知状态徽章（C6c：notify_status 配色 + failed 时 hover notify_error）
+        //   notify_status 取值 not_sent/sent/failed；H-1：notify_error 入 title 属性前转义
+        function notifyBadge(issue) {
+            const st = issue.notify_status || 'not_sent';
+            const label = st === 'sent' ? '已通知' : (st === 'failed' ? '失败' : '未通知');
+            const titleAttr = (st === 'failed' && issue.notify_error) ? ` title="${escapeHtml(issue.notify_error)}"` : '';
+            return `<span class="notify-badge notify-${escapeHtml(st)}"${titleAttr}>${label}</span>`;
+        }
+        // 数据域展示（COALESCE 空→未分类）
+        function domainText(d) { return (d && String(d).trim()) ? escapeHtml(d) : '<span style="color:#d1d5db;">未分类</span>'; }
+
+        // C6c M-4：URL scheme 白名单（前端双重防御；后端 POST/PUT 已过 sanitizeUrl 拒非 http/https，
+        //   此处再校验仅渲染 http/https 链接，非法值返回 null 由调用方降级为纯文本）
+        function safeHttpUrl(u) {
+            const s = String(u || '').trim();
+            return /^https?:\/\//i.test(s) ? s : null;
         }
 
         function formatTime(dateStr) {

@@ -13,6 +13,7 @@ const sql = require('mssql');
 const compression = require('compression');
 const packageJson = require('./package.json');
 const dingtalkNotify = require('./utils/dingtalk-notify');
+const issueNotify = require('./utils/issue-notify');  // v1.74.0 C2：需求跟踪钉钉通知 helper（纯封装）
 const collabVersioning = require('./utils/collab-attachment-versioning');
 const collabSubmitHelpers = require('./utils/collab-submit-helpers');
 
@@ -66,17 +67,51 @@ const MODEL_STATUS = {
 // 用户角色
 const USER_ROLES = ['admin', 'publisher', 'user', 'viewer'];
 
-// 问题跟踪常量
-const ISSUE_TYPES = ['需求', '缺陷', '数据质量', '变更请求', '源系统变更', '调度异常'];
+// 需求跟踪常量（v1.74.0 升级：问题跟踪 → 需求跟踪，方案见 docs/local/需求跟踪升级_方案_20260531_v1.1.md §1.4-§1.8）
+// 类型 7 类（§1.4）：原"需求"过笼统被新 3 类覆盖、"变更请求"并入"数据治理需求"已砍
+const ISSUE_TYPES = [
+    '看板/报表需求',    // 业务方要"一个能持续看的东西"（PBI/帆软）；v1.1 唯一受模型硬闸门约束的类型
+    '数据治理需求',     // 标准化、清洗、口径统一、字段对齐
+    '数据应用需求',     // 专题分析、数据服务、模型支持
+    '平台 bug',         // 原"缺陷"改名
+    '数据质量',         // 数仓/源系统数据问题
+    '源系统变更',       // BMS/HRD/CRM 上游变更通知
+    '调度异常'          // FDL Webhook 自动入表
+];
 const ISSUE_SOURCES = ['业务方', '内部发现', '外包反馈', 'FDL自动'];
 const ISSUE_PRIORITIES = ['P0', 'P1', 'P2', 'P3'];
-const ISSUE_STATUSES = ['待处理', '处理中', '待验证', '已关闭'];
+// 状态机 6 态（§1.5）：加"已暂缓"（可激活）、"已拒绝"（终态不可激活）
+const ISSUE_STATUSES = ['待处理', '处理中', '待验证', '已关闭', '已暂缓', '已拒绝'];
 const ISSUE_STATUS_TRANSITIONS = {
-    '待处理': ['处理中'],
-    '处理中': ['待验证'],
-    '待验证': ['已关闭', '处理中'],
-    '已关闭': ['处理中']
+    '待处理': ['处理中', '已暂缓', '已拒绝'],
+    '处理中': ['待验证', '已暂缓'],
+    '待验证': ['已关闭', '处理中'],         // 验证不通过回退处理中
+    '已关闭': ['处理中'],                    // 已关闭可重开（如发现遗漏）
+    '已暂缓': ['待处理'],                    // 激活回到待处理
+    '已拒绝': []                              // 终态，不可激活
 };
+// 需求跟踪 schema 就绪标记（v1.74.0 C1 codex 06 H-2 + 07 复审 M-1：扩 ready/error 双态）：
+//   - 初始 ready=false（schema 重建是 async，启动到重建完成有时间窗，期间须拦截避免打到未建完的表）
+//   - 重建成功回调 → ready=true；硬门槛命中（有数据/计数未知错误）/ DDL 失败 → error=字符串 + ready 保持 false
+//   需求跟踪写 endpoint 入口挂 requireIssueSchemaReady：error → 503 NOT_READY；!ready → 503 INITIALIZING。
+//   "模块级降级"——只让需求跟踪接口不可用，collab/指标/数仓等其他模块照常服务。
+const ISSUE_SCHEMA_STATE = { ready: false, error: null };
+function requireIssueSchemaReady(req, res, next) {
+    if (ISSUE_SCHEMA_STATE.error) {
+        return res.status(503).json({
+            error: '需求跟踪模块暂不可用：schema 未就绪',
+            detail: ISSUE_SCHEMA_STATE.error,
+            code: 'ISSUE_SCHEMA_NOT_READY'
+        });
+    }
+    if (!ISSUE_SCHEMA_STATE.ready) {
+        return res.status(503).json({
+            error: '需求跟踪模块正在初始化，请稍后重试',
+            code: 'ISSUE_SCHEMA_INITIALIZING'
+        });
+    }
+    next();
+}
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || 'issue_tracker_webhook_key';
 
 // Ensure directories exist
@@ -1164,40 +1199,199 @@ function initTable() {
         updated_at DATETIME DEFAULT (datetime('now','localtime'))
     )`);
 
-    // 问题跟踪
-    db.run(`CREATE TABLE IF NOT EXISTS issues (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        title TEXT NOT NULL,
-        description TEXT DEFAULT '',
-        type TEXT NOT NULL DEFAULT '需求',
-        source TEXT NOT NULL DEFAULT '内部发现',
-        priority TEXT NOT NULL DEFAULT 'P2',
-        status TEXT NOT NULL DEFAULT '待处理',
-        related_table TEXT,
-        error_time DATETIME,
-        progress INTEGER DEFAULT 0,
-        preview_url TEXT,
-        assigned_to INTEGER,
-        assigned_to_name TEXT,
-        created_by INTEGER NOT NULL,
-        created_by_name TEXT NOT NULL,
-        closed_at DATETIME,
-        created_at DATETIME DEFAULT (datetime('now','localtime')),
-        updated_at DATETIME DEFAULT (datetime('now','localtime'))
-    )`);
-    db.run(`CREATE INDEX IF NOT EXISTS idx_issues_status ON issues(status)`);
-    db.run(`CREATE INDEX IF NOT EXISTS idx_issues_assigned ON issues(assigned_to)`);
+    // ==================== 需求跟踪模块（v1.74.0 升级：问题跟踪 → 需求跟踪）====================
+    // 方案见 docs/local/需求跟踪升级_方案_20260531_v1.1.md
+    // C1 schema 重建（决策 9：DROP + CREATE 重建，决策 10：生产 0 行无迁移）
+    // ⚠️ 硬门槛防护（方案 §8.1 M-4 + codex 06 审 H-1/H-2/M-4）：DROP 前逐表 COUNT，任一目标表有数据立即中止重建，
+    //    并设 ISSUE_SCHEMA_STATE.error 标记 → 需求跟踪 endpoint 入口（C3 重写时挂 requireIssueSchemaReady 中间件）返 503，
+    //    不依赖人工记忆，也不为单模块 schema 异常把整个平台 process.exit（collab/指标/数仓共用本进程）。
+    //    codex 06 H-1：逐表 sqlite_master 判断存在性 + 分表 COUNT，只对"表不存在"按 0 处理，其他错误（锁/损坏/权限）一律中止。
+    // ⚠️ FK CASCADE 说明（M-9 偏离，codex 06 M-3 确认合理）：本项目从未开 PRAGMA foreign_keys=ON（仅 busy_timeout），
+    //    collab 模块靠 DELETE endpoint 显式删子表兜底（见 server.js DELETE /api/collab/requests/:id）。
+    //    需求跟踪对齐此既有范式——子表保留 ON DELETE CASCADE 子句（无害 + 自文档 + 未来全局开 PRAGMA 即生效），
+    //    实际级联由 DELETE /api/issues/:id 显式删子表实现（C3/C4a 硬验收项），不为本模块单独翻转全局 FK 行为。
+    // 目标表清单（codex 06 H-1：硬门槛须覆盖全部子表，不只 issues/issue_comments；issue_models 属第二段 C9 不在此）
+    const ISSUE_TABLES = ['issues', 'issue_comments', 'issue_attachments', 'issue_status_history'];
+    // 逐表安全计数：表不存在→0；查询出错（非"表不存在"）→ 返回 -1 表示"未知错误，不可放行"
+    const countIssueTable = (table) => new Promise((resolve) => {
+        db.get(`SELECT COUNT(*) AS c FROM "${table}"`, (err, row) => {
+            if (err) {
+                if (/no such table/i.test(err.message)) return resolve(0); // 表不存在=0 行，安全
+                logger.error(`[需求跟踪 C1] 表 ${table} 计数失败（非"表不存在"错误，按未知风险处理）：${err.message}`);
+                return resolve(-1); // 锁/损坏/权限等未知错误 → 不可误判为安全
+            }
+            resolve(row ? row.c : 0);
+        });
+    });
+    // ⚠️ 时序关键（MEMORY feedback：sqlite3 parallel mode 乱序坑）：计数用 await 在 serialize **外**做完，
+    //    拿到结论后再开独立 db.serialize 同步发 DROP+CREATE——await 会打破 serialize 串行窗口，
+    //    绝不能把 await 横在 DROP/CREATE 之间，否则 CREATE 可能先于 DROP 执行（"table already exists"）。
+    (async () => {
+        const counts = await Promise.all(ISSUE_TABLES.map(countIssueTable));
+        const unknownErr = counts.some(c => c < 0);
+        const hasData = counts.some(c => c > 0);
 
-    db.run(`CREATE TABLE IF NOT EXISTS issue_comments (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        issue_id INTEGER NOT NULL,
-        user_id INTEGER NOT NULL,
-        user_name TEXT NOT NULL,
-        content TEXT NOT NULL,
-        created_at DATETIME DEFAULT (datetime('now','localtime')),
-        FOREIGN KEY (issue_id) REFERENCES issues(id) ON DELETE CASCADE
-    )`);
-    db.run(`CREATE INDEX IF NOT EXISTS idx_issue_comments_issue ON issue_comments(issue_id)`);
+        if (unknownErr || hasData) {
+            // 命中硬门槛：有数据 或 计数遇未知错误 → 不重建 + 设错误标记（H-2：endpoint 入口据此返 503）
+            const detail = ISSUE_TABLES.map((t, i) => `${t}=${counts[i] < 0 ? 'ERR' : counts[i]}`).join(' / ');
+            ISSUE_SCHEMA_STATE.error = unknownErr
+                ? `需求跟踪 schema 计数遇未知错误，拒绝重建（${detail}）`
+                : `需求跟踪目标表非空，拒绝 DROP 重建（${detail}）`;
+            logger.error(`[需求跟踪 C1] 🚫 schema 重建中止：${detail}。` +
+                `${unknownErr ? '计数遇未知错误（锁/损坏/权限）' : '目标表有数据'} → 旧表保留，需求跟踪接口将返 503。` +
+                `请人工核查并导出数据后手动放行（清空表或临时关闭本防护）。其他模块不受影响。`);
+            return; // 不执行 DROP/CREATE，保护现有数据
+        }
+
+        // 全部 0 行（或表不存在）→ 安全重建。独立 serialize 保证 DROP→CREATE→INDEX 严格串行
+        db.serialize(() => {
+            // codex 07 复审 M-2：收集首个 DDL 错误。db.run 不传 callback 时前序失败不中止队列，
+            //   "末条成功 ≠ 前面没失败"——故给每个 CREATE TABLE 挂 recordDdlError，末条回调据 firstDdlError 判定。
+            let firstDdlError = null;
+            const recordDdlError = (label) => (err) => {
+                if (err && !firstDdlError) {
+                    firstDdlError = `${label}: ${err.message}`;
+                    logger.error(`[需求跟踪 C1] DDL 失败 @${label}：${err.message}`);
+                }
+            };
+
+            db.run(`DROP TABLE IF EXISTS issue_status_history`);
+            db.run(`DROP TABLE IF EXISTS issue_attachments`);
+            db.run(`DROP TABLE IF EXISTS issue_comments`);
+            db.run(`DROP TABLE IF EXISTS issues`);
+
+            // issues 主表（§1.2）
+            db.run(`CREATE TABLE issues (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+                -- 核心业务字段
+                title TEXT NOT NULL,
+                raw_requirement TEXT DEFAULT '',              -- 原始诉求（业务方原话，选填；v1.0.5，与梳理后 description 分开记）
+                description TEXT DEFAULT '',                  -- 详细描述（梳理后的需求定义）
+                type TEXT NOT NULL,                           -- 类型（7 类，应用层校验 ISSUE_TYPES）
+                source TEXT NOT NULL DEFAULT '业务方',         -- 来源（4 类，应用层校验）
+                data_domain TEXT,                             -- 数据域（v1.1·选填：对齐 data_models.domain；空值落 NULL，展示 COALESCE 归"未分类"）
+                priority TEXT NOT NULL DEFAULT 'P2' CHECK (priority IN ('P0','P1','P2','P3')),
+                priority_reviewed_at DATETIME,                -- admin 首次调整优先级时间（v1.1 codex 05 M-4：区分未调度·默认P2 vs 已调度）
+                status TEXT NOT NULL DEFAULT '待处理'
+                    CHECK (status IN ('待处理','处理中','待验证','已关闭','已暂缓','已拒绝')),
+
+                -- 业务方信息
+                requester_dept TEXT NOT NULL,                 -- 业务方部门（复用 COLLAB_REQUESTER_DEPTS + "系统自动"）
+                requester_name TEXT NOT NULL,                 -- 业务方姓名（纯文本，不挂 user_id）
+                requester_phone TEXT,                         -- 业务方手机号（不做格式校验，人工录入）
+
+                -- OA 关联（v1.0.5）
+                oa_number TEXT,                               -- OA 单号（选填；仅复用业务概念，不复用 collab 必填/唯一校验，不参与跨模块主键）
+
+                -- 时间承诺
+                deadline DATE,                                -- 期望完成日期（业务承诺）
+
+                -- 交付成果地址（v1.74.0 C1 fix：方案 §0.5.5 保留"预览/验收地址"；旧表 preview_url 重命名为更准确的 acceptance_url）
+                -- 看板/报表类需求做完留 PBI/帆软预览或验收链接，是"过程管理·验收"载体（业务方完成通知 #3 复用此字段发链接）
+                acceptance_url TEXT,                          -- 预览/验收地址（选填，看板/报表类做完填）
+
+                -- 指派信息
+                assigned_to INTEGER,                          -- 被指派人 user_id（H-1：可空，viewer 自录不指派）
+                assigned_to_name TEXT,                        -- 冗余姓名（防 users 表变更）
+
+                -- 录入信息
+                created_by INTEGER NOT NULL,                  -- 录入人 user_id
+                created_by_name TEXT NOT NULL,
+
+                -- 关闭信息
+                closed_at DATETIME,                           -- 关闭时间（仅 已关闭/已拒绝 触发；激活/重开时清空）
+                last_transition_reason TEXT,                  -- 最近一次状态变更原因（覆盖暂缓/拒绝/关闭/退回/激活）
+
+                -- 钉钉通知字段·开发侧（codex 06 M-2：加 NOT NULL 堵 SQLite CHECK 对 NULL 不失败的枚举空洞）
+                notify_status TEXT NOT NULL DEFAULT 'not_sent' CHECK (notify_status IN ('not_sent','sent','failed')),
+                notified_at DATETIME,                         -- 最近一次推送尝试时间（成功失败都写）
+                notify_message_key TEXT,                      -- 钉钉 message_key（仅 sent 时非空）
+                notify_error TEXT,                            -- 失败时记 classifyError 分类
+                read_at DATETIME,                             -- 被指派开发已读时间
+
+                -- 钉钉通知字段·业务方侧（与开发侧物理隔离，避免互相覆盖；codex 06 M-2：加 NOT NULL）
+                requester_notify_status TEXT NOT NULL DEFAULT 'not_sent' CHECK (requester_notify_status IN ('not_sent','sent','failed')),
+                requester_notified_at DATETIME,
+                requester_notify_message_key TEXT,
+                requester_notify_error TEXT,
+                requester_read_at DATETIME,
+
+                -- 改派通知数据来源（v1.0.4 H-3：改派改手动后，原负责人跨请求需持久化）
+                pending_reassign_from_id INTEGER,
+                pending_reassign_from_name TEXT,
+                pending_reassign_to_id INTEGER,
+                pending_reassign_to_name TEXT,
+                reassigned_at DATETIME,
+
+                -- FDL Webhook 兼容字段（保留）
+                related_table TEXT,                           -- 关联数仓表名（调度异常用）
+                error_time DATETIME,                          -- 错误发生时间（调度异常用）
+
+                -- 时间戳
+                created_at DATETIME DEFAULT (datetime('now','localtime')),
+                updated_at DATETIME DEFAULT (datetime('now','localtime'))
+            )`, recordDdlError('CREATE issues'));
+            db.run(`CREATE INDEX idx_issues_status ON issues(status)`, recordDdlError('IDX issues_status'));
+            db.run(`CREATE INDEX idx_issues_assigned ON issues(assigned_to)`, recordDdlError('IDX issues_assigned'));
+            db.run(`CREATE INDEX idx_issues_type ON issues(type)`, recordDdlError('IDX issues_type'));
+            db.run(`CREATE INDEX idx_issues_deadline ON issues(deadline)`, recordDdlError('IDX issues_deadline'));
+
+            // issue_comments（保留，schema 不变；决策 8：前端不主推）
+            db.run(`CREATE TABLE issue_comments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                issue_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                user_name TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at DATETIME DEFAULT (datetime('now','localtime')),
+                FOREIGN KEY (issue_id) REFERENCES issues(id) ON DELETE CASCADE
+            )`, recordDdlError('CREATE issue_comments'));
+            db.run(`CREATE INDEX idx_issue_comments_issue ON issue_comments(issue_id)`, recordDdlError('IDX issue_comments'));
+
+            // issue_attachments（v1.0.5：录入附件，复用 collab multer/UPLOAD_DIR/ALLOWED_FILE_DIRS；各建表不共表）
+            db.run(`CREATE TABLE issue_attachments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                issue_id INTEGER NOT NULL,
+                file_name TEXT NOT NULL,                      -- 落盘文件名（multer 生成，防重名）
+                original_name TEXT NOT NULL,                  -- 上传时原始文件名（展示用）
+                file_size INTEGER,                            -- 文件字节数（M-1：multer file.size 当场即有）
+                mime_type TEXT,                               -- MIME 类型（M-1：multer file.mimetype 当场即有）
+                uploaded_by INTEGER NOT NULL,
+                uploaded_by_name TEXT NOT NULL,
+                created_at DATETIME DEFAULT (datetime('now','localtime')),
+                FOREIGN KEY (issue_id) REFERENCES issues(id) ON DELETE CASCADE
+            )`, recordDdlError('CREATE issue_attachments'));
+            db.run(`CREATE INDEX idx_issue_attachments_issue ON issue_attachments(issue_id)`, recordDdlError('IDX issue_attachments'));
+
+            // issue_status_history（v1.0.5：状态变更历史 append-only，零手填，未来质量/效率评价数据底座）
+            db.run(`CREATE TABLE issue_status_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                issue_id INTEGER NOT NULL,
+                from_status TEXT,                             -- 变更前状态（首次创建为 NULL）
+                to_status TEXT NOT NULL,                      -- 变更后状态
+                reason TEXT,                                  -- 本次变更原因/说明（同步自 last_transition_reason，可空）
+                operator_id INTEGER NOT NULL,
+                operator_name TEXT NOT NULL,
+                created_at DATETIME DEFAULT (datetime('now','localtime')),
+                FOREIGN KEY (issue_id) REFERENCES issues(id) ON DELETE CASCADE
+            )`, recordDdlError('CREATE issue_status_history'));
+            // 末条 DDL 回调确认重建结果（codex 06 M-4 + 07 复审 M-2：综合 firstDdlError（前序 CREATE TABLE 失败）
+            //   + 本条 ddlErr（末条 index 失败）判定——任一失败都不置 ready，endpoint 返 503）
+            db.run(`CREATE INDEX idx_issue_status_history_issue ON issue_status_history(issue_id, created_at)`, (ddlErr) => {
+                const failMsg = firstDdlError || (ddlErr ? `CREATE INDEX status_history: ${ddlErr.message}` : null);
+                if (failMsg) {
+                    ISSUE_SCHEMA_STATE.error = `需求跟踪 schema 重建失败：${failMsg}`;
+                    ISSUE_SCHEMA_STATE.ready = false;
+                    logger.error(`[需求跟踪 C1] 🚫 schema 重建失败（可能半重建）：${failMsg} → 需求跟踪接口将返 503`);
+                } else {
+                    ISSUE_SCHEMA_STATE.error = null;
+                    ISSUE_SCHEMA_STATE.ready = true;
+                    logger.info('[需求跟踪 C1] issues / issue_comments / issue_attachments / issue_status_history 表重建完成');
+                }
+            });
+        }); // 闭合重建 db.serialize
+    })(); // 闭合计数 async IIFE
 
     // ==================== 数据协作模块（v1.0.1 一阶段）====================
     // 详细方案见 docs/local/数据协作模块_一阶段方案.md
@@ -9755,11 +9949,13 @@ app.get('/api/comments/pending-count', authenticateToken, (req, res) => {
     });
 });
 
-// ==================== 问题跟踪 API ====================
+// ==================== 需求跟踪 API（v1.74.0 升级：问题跟踪 → 需求跟踪）====================
 
-// 获取问题列表（支持筛选）
-app.get('/api/issues', authenticateToken, (req, res) => {
-    const { status, type, source, priority, assigned_to, search, sort = 'updated_at', order = 'DESC' } = req.query;
+// 获取需求列表（支持筛选）
+app.get('/api/issues', authenticateToken, requireIssueSchemaReady, (req, res) => {
+    // C5（方案 T5 + v1.1 §4.5）：筛选含 requester_dept（"系统自动"单独分组）+ data_domain（报表按域预过滤）；
+    //   M-6 不采纳 keyword 改名，保留 search 命名。
+    const { status, type, source, priority, assigned_to, requester_dept, data_domain, search, sort = 'updated_at', order = 'DESC' } = req.query;
     let sql = 'SELECT * FROM issues WHERE 1=1';
     const params = [];
 
@@ -9768,9 +9964,13 @@ app.get('/api/issues', authenticateToken, (req, res) => {
     if (source) { sql += ' AND source = ?'; params.push(source); }
     if (priority) { sql += ' AND priority = ?'; params.push(priority); }
     if (assigned_to) { sql += ' AND assigned_to = ?'; params.push(assigned_to); }
+    if (requester_dept) { sql += ' AND requester_dept = ?'; params.push(requester_dept); }
+    if (data_domain) { sql += ' AND data_domain = ?'; params.push(data_domain); }
     if (search) { sql += ' AND (title LIKE ? OR description LIKE ? OR related_table LIKE ?)'; params.push(`%${search}%`, `%${search}%`, `%${search}%`); }
 
-    const allowedSort = ['id', 'priority', 'status', 'type', 'updated_at', 'created_at', 'progress'];
+    // C5 bug 修复：删死引用 'progress'——C1 重建 issues 表已移除 progress 列，留在白名单会让
+    //   sort=progress 生成 `ORDER BY progress` 触发 SQLite no such column 报 500。
+    const allowedSort = ['id', 'priority', 'status', 'type', 'updated_at', 'created_at'];
     const sortCol = allowedSort.includes(sort) ? sort : 'updated_at';
     const sortOrder = order.toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 
@@ -9788,63 +9988,140 @@ app.get('/api/issues', authenticateToken, (req, res) => {
     });
 });
 
-// 创建问题
-app.post('/api/issues', authenticateToken, (req, res) => {
-    const { title, description, type, source, priority, related_table, error_time, assigned_to, assigned_to_name } = req.body;
-    if (!title || !title.trim()) return res.status(400).json({ error: '标题不能为空' });
-    if (type && !ISSUE_TYPES.includes(type)) return res.status(400).json({ error: '无效的问题类型' });
-    if (source && !ISSUE_SOURCES.includes(source)) return res.status(400).json({ error: '无效的问题来源' });
-    if (priority && !ISSUE_PRIORITIES.includes(priority)) return res.status(400).json({ error: '无效的优先级' });
+// 创建需求（C3：viewer 自录 assigned_to 可空 + 选填字段 + 落 history 首行 + 不内嵌通知）
+//   H-1：任意登录用户可录（viewer 自录），assigned_to 可空；05 L-1：viewer 创建后端强制 P2
+//   M-8：assigned_to_name 后端查 users 表填（不信任入参）；H-1：POST 不发钉钉（通知走 §2.8 notify endpoint）
+app.post('/api/issues', authenticateToken, requireIssueSchemaReady, async (req, res) => {
+    try {
+        const {
+            title, raw_requirement, description, type, source, priority,
+            requester_dept, requester_name, requester_phone, oa_number, deadline,
+            data_domain, acceptance_url, assigned_to, related_table, error_time
+        } = req.body;
 
-    const sql = `INSERT INTO issues (title, description, type, source, priority, related_table, error_time, assigned_to, assigned_to_name, created_by, created_by_name)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
-    db.run(sql, [
-        title.trim(),
-        description || '',
-        type || '需求',
-        source || '内部发现',
-        priority || 'P2',
-        related_table || null,
-        error_time || null,
-        assigned_to || null,
-        assigned_to_name || null,
-        req.user.id,
-        req.user.display_name || req.user.username
-    ], function(err) {
-        if (err) return res.status(500).json({ error: err.message });
-        logger.info(`用户 ${req.user.username} 创建问题 #${this.lastID}: ${title.trim()}`);
-        res.json({ id: this.lastID });
-    });
+        if (!title || !title.trim()) return res.status(400).json({ error: '标题不能为空' });
+        if (!type || !ISSUE_TYPES.includes(type)) return res.status(400).json({ error: '无效或缺失的需求类型' });
+        if (source && !ISSUE_SOURCES.includes(source)) return res.status(400).json({ error: '无效的需求来源' });
+        if (priority && !ISSUE_PRIORITIES.includes(priority)) return res.status(400).json({ error: '无效的优先级' });
+        if (!requester_dept || !COLLAB_REQUESTER_DEPTS.includes(requester_dept)) return res.status(400).json({ error: '无效或缺失的业务方部门' });
+        if (!requester_name || !requester_name.trim()) return res.status(400).json({ error: '业务方姓名不能为空' });
+        // acceptance_url 选填：非空则须通过 sanitizeUrl（H-1 录入侧防线，与 builder 双层）。
+        //   codex 10 L-1：落库用 sanitize 后的值（trim 后），不存原始值，避免两端空格致展示/比较不一致。
+        let safeAcceptanceUrl = null;
+        if (acceptance_url) {
+            safeAcceptanceUrl = issueNotify.sanitizeUrl(acceptance_url);
+            if (!safeAcceptanceUrl) {
+                return res.status(400).json({ error: '预览/验收地址非法：仅支持 http/https 且不含特殊字符', code: 'INVALID_ACCEPTANCE_URL' });
+            }
+        }
+        // data_domain 选填：空值落 NULL（05 M-1，展示侧 COALESCE 归"未分类"）
+        const domainVal = (data_domain && String(data_domain).trim()) ? String(data_domain).trim() : null;
+        // 05 L-1：viewer 创建后端强制 P2（防业务方自抬优先级）；非 viewer 用传入值，默认 P2
+        const isViewer = req.user.role === 'viewer';
+        const priorityVal = isViewer ? 'P2' : (priority || 'P2');
+
+        // M-8：assigned_to 非空时后端查 users 表填 assigned_to_name（不信任前端入参）
+        let assignedToId = null, assignedToName = null;
+        if (assigned_to !== undefined && assigned_to !== null && assigned_to !== '') {
+            if (isViewer) return res.status(403).json({ error: 'viewer 不能在录入时指派', code: 'VIEWER_CANNOT_ASSIGN' });
+            const u = await dbGetAsync('SELECT id, display_name FROM users WHERE id = ?', [Number(assigned_to)]);
+            if (!u) return res.status(400).json({ error: '指派目标用户不存在' });
+            assignedToId = u.id; assignedToName = u.display_name;
+        }
+
+        const sql = `INSERT INTO issues
+            (title, raw_requirement, description, type, source, data_domain, priority,
+             requester_dept, requester_name, requester_phone, oa_number, deadline, acceptance_url,
+             assigned_to, assigned_to_name, related_table, error_time, created_by, created_by_name)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`;
+        // codex 10 M-1：INSERT issue + history 首行包事务（对齐 collab BEGIN IMMEDIATE 范式，无 mutex——
+        //   POST 是新增行无"同行状态机并发"，仅需原子性）；history 失败回滚，避免无首行历史的孤儿 issue。
+        let issueId;
+        await dbRunAsync('BEGIN IMMEDIATE');
+        try {
+            const result = await dbRunAsync(sql, [
+                title.trim(), raw_requirement || '', description || '', type, source || '业务方', domainVal, priorityVal,
+                requester_dept, requester_name.trim(), requester_phone || null, oa_number || null, deadline || null, safeAcceptanceUrl,
+                assignedToId, assignedToName, related_table || null, error_time || null,
+                req.user.id, req.user.display_name || req.user.username
+            ]);
+            issueId = result.lastID;
+            // 落 issue_status_history 首行（from=NULL, to=待处理），开发过程时间线起点
+            await dbRunAsync(
+                `INSERT INTO issue_status_history (issue_id, from_status, to_status, reason, operator_id, operator_name)
+                 VALUES (?, NULL, '待处理', NULL, ?, ?)`,
+                [issueId, req.user.id, req.user.display_name || req.user.username]
+            );
+            await dbRunAsync('COMMIT');
+        } catch (txErr) {
+            try { await dbRunAsync('ROLLBACK'); } catch (_) {}
+            throw txErr;
+        }
+
+        logger.info(`用户 ${req.user.username} 创建需求 #${issueId}: ${title.trim()}`);
+        res.json({ id: issueId });
+    } catch (err) {
+        logger.error('创建需求失败:', err.message);
+        res.status(500).json({ error: err.message });
+    }
 });
 
-// 获取问题详情（含评论）
-app.get('/api/issues/:id', authenticateToken, (req, res) => {
+// 获取需求详情（含评论）
+app.get('/api/issues/:id', authenticateToken, requireIssueSchemaReady, (req, res) => {
     db.get('SELECT * FROM issues WHERE id = ?', [req.params.id], (err, issue) => {
         if (err) return res.status(500).json({ error: err.message });
-        if (!issue) return res.status(404).json({ error: '问题不存在' });
+        if (!issue) return res.status(404).json({ error: '需求不存在' });
 
         db.all('SELECT * FROM issue_comments WHERE issue_id = ? ORDER BY created_at ASC', [req.params.id], (err2, comments) => {
             if (err2) return res.status(500).json({ error: err2.message });
             issue.comments = comments || [];
-            res.json(issue);
+            // C6c（OP-1）：内联状态变更历史（倒序），供详情页"状态时间线"渲染——
+            //   现 GET 只返 issue+comments 不含 history，详情页时间线无数据源；内联避免前端多一次请求。
+            db.all(
+                'SELECT id, from_status, to_status, reason, operator_id, operator_name, created_at FROM issue_status_history WHERE issue_id = ? ORDER BY id DESC',
+                [req.params.id],
+                (err3, history) => {
+                    if (err3) return res.status(500).json({ error: err3.message });
+                    issue.status_history = history || [];
+                    res.json(issue);
+                }
+            );
         });
     });
 });
 
-// 编辑问题
-app.put('/api/issues/:id', authenticateToken, requirePublisherOrAdmin, (req, res) => {
-    const { title, description, type, source, priority, related_table, error_time, preview_url } = req.body;
+// 编辑需求（C3：字段白名单更新 + preview_url→acceptance_url 过 sanitizeUrl；status/assign 走专用 endpoint）
+app.put('/api/issues/:id', authenticateToken, requireIssueSchemaReady, requirePublisherOrAdmin, (req, res) => {
+    const {
+        title, raw_requirement, description, type, source, priority,
+        requester_dept, requester_name, requester_phone, oa_number, deadline,
+        data_domain, acceptance_url, related_table, error_time
+    } = req.body;
     const fields = [];
     const values = [];
 
     if (title !== undefined) { if (!title.trim()) return res.status(400).json({ error: '标题不能为空' }); fields.push('title = ?'); values.push(title.trim()); }
+    if (raw_requirement !== undefined) { fields.push('raw_requirement = ?'); values.push(raw_requirement || ''); }
     if (description !== undefined) { fields.push('description = ?'); values.push(description); }
-    if (type !== undefined) { if (!ISSUE_TYPES.includes(type)) return res.status(400).json({ error: '无效的问题类型' }); fields.push('type = ?'); values.push(type); }
-    if (source !== undefined) { if (!ISSUE_SOURCES.includes(source)) return res.status(400).json({ error: '无效的问题来源' }); fields.push('source = ?'); values.push(source); }
+    if (type !== undefined) { if (!ISSUE_TYPES.includes(type)) return res.status(400).json({ error: '无效的需求类型' }); fields.push('type = ?'); values.push(type); }
+    if (source !== undefined) { if (!ISSUE_SOURCES.includes(source)) return res.status(400).json({ error: '无效的需求来源' }); fields.push('source = ?'); values.push(source); }
     if (priority !== undefined) { if (!ISSUE_PRIORITIES.includes(priority)) return res.status(400).json({ error: '无效的优先级' }); fields.push('priority = ?'); values.push(priority); }
+    if (requester_dept !== undefined) { if (!COLLAB_REQUESTER_DEPTS.includes(requester_dept)) return res.status(400).json({ error: '无效的业务方部门' }); fields.push('requester_dept = ?'); values.push(requester_dept); }
+    if (requester_name !== undefined) { if (!requester_name.trim()) return res.status(400).json({ error: '业务方姓名不能为空' }); fields.push('requester_name = ?'); values.push(requester_name.trim()); }
+    if (requester_phone !== undefined) { fields.push('requester_phone = ?'); values.push(requester_phone || null); }
+    if (oa_number !== undefined) { fields.push('oa_number = ?'); values.push(oa_number || null); }
+    if (deadline !== undefined) { fields.push('deadline = ?'); values.push(deadline || null); }
+    if (data_domain !== undefined) { fields.push('data_domain = ?'); values.push((data_domain && String(data_domain).trim()) ? String(data_domain).trim() : null); }
+    if (acceptance_url !== undefined) {
+        let safeUrl = null;
+        if (acceptance_url) {
+            safeUrl = issueNotify.sanitizeUrl(acceptance_url);  // codex 10 L-1：落 sanitize 后的值
+            if (!safeUrl) return res.status(400).json({ error: '预览/验收地址非法：仅支持 http/https 且不含特殊字符', code: 'INVALID_ACCEPTANCE_URL' });
+        }
+        fields.push('acceptance_url = ?'); values.push(safeUrl);
+    }
     if (related_table !== undefined) { fields.push('related_table = ?'); values.push(related_table || null); }
     if (error_time !== undefined) { fields.push('error_time = ?'); values.push(error_time || null); }
-    if (preview_url !== undefined) { fields.push('preview_url = ?'); values.push(preview_url || null); }
 
     if (fields.length === 0) return res.status(400).json({ error: '无更新字段' });
     fields.push("updated_at = datetime('now','localtime')");
@@ -9852,80 +10129,372 @@ app.put('/api/issues/:id', authenticateToken, requirePublisherOrAdmin, (req, res
 
     db.run(`UPDATE issues SET ${fields.join(', ')} WHERE id = ?`, values, function(err) {
         if (err) return res.status(500).json({ error: err.message });
-        if (this.changes === 0) return res.status(404).json({ error: '问题不存在' });
+        if (this.changes === 0) return res.status(404).json({ error: '需求不存在' });
         res.json({ updated: this.changes });
     });
 });
 
 // 状态流转
-app.put('/api/issues/:id/status', authenticateToken, requirePublisherOrAdmin, (req, res) => {
-    const { status } = req.body;
-    if (!status || !ISSUE_STATUSES.includes(status)) return res.status(400).json({ error: '无效的状态' });
+// 状态流转（C4：6 态状态机 + 双层权限 + reason 条件必填 + closed_at 处理 + UPDATE/history 同事务）
+//   权限（§1.6）：被指派人(user)只能 待处理↔处理中↔待验证 三态间流转（接手/完成/验证退回）；
+//                 终态决策（已关闭/已暂缓/已拒绝）和激活（已暂缓→待处理）仅 admin。
+//   中间件 requireNonViewer 挡 viewer，admin/publisher/user 细分在 handler 内做。
+app.put('/api/issues/:id/status', authenticateToken, requireIssueSchemaReady, requireNonViewer, async (req, res) => {
+    const id = req.params.id;
+    try {
+        const { status, last_transition_reason } = req.body;
+        if (!status || !ISSUE_STATUSES.includes(status)) return res.status(400).json({ error: '无效的状态' });
 
-    db.get('SELECT status FROM issues WHERE id = ?', [req.params.id], (err, issue) => {
-        if (err) return res.status(500).json({ error: err.message });
-        if (!issue) return res.status(404).json({ error: '问题不存在' });
+        const issue = await dbGetAsync('SELECT id, status, assigned_to, type FROM issues WHERE id = ?', [id]);
+        if (!issue) return res.status(404).json({ error: '需求不存在' });
+        const fromStatus = issue.status;
 
-        const allowed = ISSUE_STATUS_TRANSITIONS[issue.status];
+        // ① 状态机转换合法性（放行闸门）
+        const allowed = ISSUE_STATUS_TRANSITIONS[fromStatus];
         if (!allowed || !allowed.includes(status)) {
-            return res.status(400).json({ error: `不能从"${issue.status}"转为"${status}"` });
+            return res.status(400).json({ error: `不能从「${fromStatus}」转为「${status}」`, code: 'INVALID_TRANSITION' });
         }
 
-        const closedAt = status === '已关闭' ? "datetime('now','localtime')" : 'NULL';
-        db.run(`UPDATE issues SET status = ?, closed_at = ${closedAt}, updated_at = datetime('now','localtime') WHERE id = ?`,
-            [status, req.params.id], function(err2) {
-                if (err2) return res.status(500).json({ error: err2.message });
-                logger.info(`用户 ${req.user.username} 将问题 #${req.params.id} 状态改为 ${status}`);
-                res.json({ updated: this.changes });
-            });
-    });
+        // ② 操作主体权限（§1.6）
+        const isAdmin = req.user.role === 'admin';
+        const isAssignee = issue.assigned_to && Number(issue.assigned_to) === Number(req.user.id);
+        // 被指派人可做的转换：仅 待处理/待验证/已关闭→处理中（接手/退回回退）、处理中→待验证（完成）
+        const ASSIGNEE_ALLOWED_TARGETS = ['处理中', '待验证'];
+        if (!isAdmin) {
+            // 终态决策 + 激活仅 admin
+            if (['已关闭', '已暂缓', '已拒绝', '待处理'].includes(status)) {
+                return res.status(403).json({ error: `「${status}」仅管理员可操作`, code: 'ADMIN_ONLY_TRANSITION' });
+            }
+            // 非 admin 走"被指派人"路径：必须是本人 + 目标在被指派人可做集合
+            if (!isAssignee || !ASSIGNEE_ALLOWED_TARGETS.includes(status)) {
+                return res.status(403).json({ error: '只有被指派人或管理员可推进此状态', code: 'NOT_ASSIGNEE' });
+            }
+        }
+
+        // ③ reason 条件必填（§2.3）：进入 已关闭/已暂缓/已拒绝 必填；待验证→处理中（退回）必填；
+        //    正常推进（待处理/已关闭→处理中=接手/重开、处理中→待验证）不强制（§0.8 L-3 空 reason 不当异常）。
+        // codex 12 M-2：先类型归一（非字符串当空，防 .trim 报错 500）+ 长度校验提到分支外（非必填超长也拦）。
+        const reason = (typeof last_transition_reason === 'string' ? last_transition_reason.trim() : '');
+        if (reason.length > 500) return res.status(400).json({ error: '原因/说明不超过 500 字', code: 'REASON_TOO_LONG' });
+        const isReturnToProcessing = (status === '处理中' && fromStatus === '待验证');  // 退回（靠 from 区分，非首次接手/重开）
+        const reasonRequired = ['已关闭', '已暂缓', '已拒绝'].includes(status) || isReturnToProcessing;
+        if (reasonRequired && !reason) {
+            const label = status === '已关闭' ? '完成说明（实际交付了什么/验收依据）' : '变更原因';
+            return res.status(400).json({ error: `转为「${status}」必须填写${label}`, code: 'REASON_REQUIRED' });
+        }
+        const reasonVal = reason || null;
+
+        // ④ closed_at 处理（§2.3 总表，已拒绝也落=用户拍板对齐方案）：
+        //    进入 已关闭/已拒绝 → now；进入 处理中（含重开/退回/接手）/ 待处理（激活）→ 清 NULL；进入 已暂缓 → 不动（保持 NULL）
+        let closedAtSql;
+        if (status === '已关闭' || status === '已拒绝') closedAtSql = "datetime('now','localtime')";
+        else if (status === '处理中' || status === '待处理') closedAtSql = 'NULL';
+        else closedAtSql = 'closed_at';  // 已暂缓：保持原值（本就 NULL）
+
+        // ⑤ 重开重置业务方完成通知字段（§0.6 M-2）：已关闭→处理中（重开）时清 requester_notify_*
+        const isReopen = (status === '处理中' && fromStatus === '已关闭');
+        const reopenResetSql = isReopen
+            ? `, requester_notify_status='not_sent', requester_notified_at=NULL, requester_notify_message_key=NULL, requester_notify_error=NULL, requester_read_at=NULL`
+            : '';
+
+        // ⑥ 模型硬闸门占位（v1.1 §2.3）：type='看板/报表需求' 且进入处理中时校验关联模型——
+        //    ensureReportModelGate + issue_models 表属第二段 C9，第一段 v1.74.0 不实现，C9 在此事务内补调用。
+
+        // ⑦ UPDATE + history INSERT 同事务（对齐 collab 裸 BEGIN IMMEDIATE 范式，server.js:13393；不套 exporter mutex——
+        //    issue 单行状态转移，双条件 UPDATE 守卫 + changes 检查已足够防并发重复推进，无跨行副作用）
+        // codex 12 H-1：非 admin 的 UPDATE 额外守卫 assigned_to=req.user.id——堵"读到自己是负责人后被 admin 改派、
+        //   原负责人仍能推进"的竞态（权限校验在事务外，守卫把 assigned_to 纳入并发不变量）。
+        const assigneeGuardSql = isAdmin ? '' : ' AND assigned_to = ?';
+        const updParams = isAdmin
+            ? [status, reasonVal, id, fromStatus]
+            : [status, reasonVal, id, fromStatus, req.user.id];
+        await dbRunAsync('BEGIN IMMEDIATE');
+        try {
+            // 双条件 UPDATE 守卫（MEMORY 状态机三件套）：WHERE id + status=旧状态（+非admin时 assigned_to），防 SELECT 与 UPDATE 间被并发改
+            const upd = await dbRunAsync(
+                `UPDATE issues SET status = ?, last_transition_reason = ?,
+                        closed_at = ${closedAtSql}${reopenResetSql},
+                        updated_at = datetime('now','localtime')
+                  WHERE id = ? AND status = ?${assigneeGuardSql}`,
+                updParams
+            );
+            if (!upd || upd.changes !== 1) {
+                await dbRunAsync('ROLLBACK');
+                return res.status(409).json({ error: '需求状态或负责人已变更，请刷新重试', code: 'CONCURRENT_STATE_CHANGE' });
+            }
+            // history INSERT（append-only，from→to + 本次 reason + operator=req.user）
+            await dbRunAsync(
+                `INSERT INTO issue_status_history (issue_id, from_status, to_status, reason, operator_id, operator_name)
+                 VALUES (?, ?, ?, ?, ?, ?)`,
+                [id, fromStatus, status, reasonVal, req.user.id, req.user.display_name || req.user.username]
+            );
+            await dbRunAsync('COMMIT');
+        } catch (txErr) {
+            try { await dbRunAsync('ROLLBACK'); } catch (_) {}
+            throw txErr;
+        }
+
+        logger.info(`用户 ${req.user.username} 将需求 #${id} 状态 ${fromStatus}→${status}`);
+        res.json({ message: '状态已更新', status });
+    } catch (err) {
+        logger.error('状态流转失败:', err.message);
+        res.status(500).json({ error: err.message });
+    }
 });
 
-// 指派
-app.put('/api/issues/:id/assign', authenticateToken, requirePublisherOrAdmin, (req, res) => {
-    const { assigned_to, assigned_to_name } = req.body;
-    db.run(`UPDATE issues SET assigned_to = ?, assigned_to_name = ?, updated_at = datetime('now','localtime') WHERE id = ?`,
-        [assigned_to || null, assigned_to_name || null, req.params.id], function(err) {
-            if (err) return res.status(500).json({ error: err.message });
-            if (this.changes === 0) return res.status(404).json({ error: '问题不存在' });
-            logger.info(`用户 ${req.user.username} 指派问题 #${req.params.id} 给 ${assigned_to_name || '无'}`);
-            res.json({ updated: this.changes });
-        });
+// 指派 / 改派（C3 H-1+H-3：只更新负责人 + 写 pending_reassign_*，不内嵌通知；通知走 §2.8 notify-reassign）
+//   M-8：assigned_to_name 后端查 users 表填，不信任入参；改派时记录"原→新"供 notify-reassign 读取
+app.put('/api/issues/:id/assign', authenticateToken, requireIssueSchemaReady, requirePublisherOrAdmin, async (req, res) => {
+    try {
+        const { assigned_to } = req.body;
+        // 不支持取消指派（传 null 拒绝）——取消指派无业务场景，且会让 pending_reassign 语义混乱
+        if (assigned_to === undefined || assigned_to === null || assigned_to === '') {
+            return res.status(400).json({ error: '必须指定被指派人', code: 'ASSIGN_TARGET_REQUIRED' });
+        }
+        const issue = await dbGetAsync('SELECT id, assigned_to, assigned_to_name FROM issues WHERE id = ?', [req.params.id]);
+        if (!issue) return res.status(404).json({ error: '需求不存在' });
+
+        const u = await dbGetAsync('SELECT id, display_name FROM users WHERE id = ?', [Number(assigned_to)]);
+        if (!u) return res.status(400).json({ error: '指派目标用户不存在' });
+
+        // 跨人改派未变化不重复写
+        if (issue.assigned_to && Number(issue.assigned_to) === u.id) {
+            return res.json({ updated: 0, message: '负责人未变化' });
+        }
+
+        // 改派（原负责人非空）→ 记 pending_reassign_*，供 notify-reassign 生成"原→新"通知；首次指派则 from 为空
+        // ⚠️ 语义（codex 10 M-3）：pending_reassign_* 是**单字段覆盖式**，记录"最近一次改派的原→新"。
+        //   若 admin 未点 notify-reassign 就连续改派（A→B→C），from 会被覆盖为 B、to=C，通知时只通知 B→C，
+        //   A 不会收到"已转交"。这是**有意取舍**——未通知前的连续改派视为中间跳未生效，只通知最后有效负责人。
+        //   内网 ≤10 人手动场景下合理（admin 通常指派后即通知）；前端文案需明确此行为（C6 待办）。
+        //   若未来需通知所有曾被移出者，应改 append-only reassign log（C5/C6 扩展，本期不做）。
+        await dbRunAsync(
+            `UPDATE issues SET assigned_to = ?, assigned_to_name = ?,
+                    pending_reassign_from_id = ?, pending_reassign_from_name = ?,
+                    pending_reassign_to_id = ?, pending_reassign_to_name = ?,
+                    reassigned_at = datetime('now','localtime'),
+                    updated_at = datetime('now','localtime')
+             WHERE id = ?`,
+            [u.id, u.display_name,
+             issue.assigned_to || null, issue.assigned_to_name || null,
+             u.id, u.display_name,
+             req.params.id]
+        );
+        logger.info(`用户 ${req.user.username} 指派需求 #${req.params.id} 给 ${u.display_name}（原 ${issue.assigned_to_name || '无'}）`);
+        res.json({ updated: 1, assigned_to: u.id, assigned_to_name: u.display_name });
+    } catch (err) {
+        logger.error('指派需求失败:', err.message);
+        res.status(500).json({ error: err.message });
+    }
 });
 
-// 更新进度
-app.put('/api/issues/:id/progress', authenticateToken, requireNonViewer, (req, res) => {
-    const { progress } = req.body;
-    if (progress === undefined || progress < 0 || progress > 100) return res.status(400).json({ error: '进度必须在0-100之间' });
+// progress endpoint 已删除（C3：进度条管理被移除，方案 §0.5.5 删进度条；不再用 progress 字段）
 
-    db.run(`UPDATE issues SET progress = ?, updated_at = datetime('now','localtime') WHERE id = ?`,
-        [progress, req.params.id], function(err) {
-            if (err) return res.status(500).json({ error: err.message });
-            if (this.changes === 0) return res.status(404).json({ error: '问题不存在' });
-            res.json({ updated: this.changes });
-        });
-});
+// 删除需求（C3：显式删子表——对齐 collab DELETE 范式，M-9 偏离落地。
+//   本项目未开 PRAGMA foreign_keys=ON，ON DELETE CASCADE 不自动生效，故按 collab 既有做法逐表删，
+//   覆盖 issue_comments / issue_attachments / issue_status_history 三张子表 + 物理附件清理。）
+app.delete('/api/issues/:id', authenticateToken, requireIssueSchemaReady, requireAdmin, async (req, res) => {
+    const id = req.params.id;
+    try {
+        const issue = await dbGetAsync('SELECT id FROM issues WHERE id = ?', [id]);
+        if (!issue) return res.status(404).json({ error: '需求不存在' });
 
-// 删除问题
-app.delete('/api/issues/:id', authenticateToken, requireAdmin, (req, res) => {
-    db.run('DELETE FROM issues WHERE id = ?', [req.params.id], function(err) {
-        if (err) return res.status(500).json({ error: err.message });
-        if (this.changes === 0) return res.status(404).json({ error: '问题不存在' });
-        logger.info(`管理员 ${req.user.username} 删除问题 #${req.params.id}`);
-        res.json({ deleted: this.changes });
-    });
+        // codex 10 M-2：4 表删除包事务，避免半删状态（先子表后主表，对齐 collab FK CASCADE 未生效手动删范式）
+        // codex 11 复审 L-1：SELECT file_name 移入事务内（删子表前），使附件清单与实际删除行处同一写事务窗口，
+        //   闭合"读清单后、获写锁前并发新增附件→孤儿物理文件"的极端边界。
+        let result, atts = [];
+        await dbRunAsync('BEGIN IMMEDIATE');
+        try {
+            atts = await dbAllAsync('SELECT file_name FROM issue_attachments WHERE issue_id = ?', [id]);
+            await dbRunAsync('DELETE FROM issue_status_history WHERE issue_id = ?', [id]);
+            await dbRunAsync('DELETE FROM issue_attachments WHERE issue_id = ?', [id]);
+            await dbRunAsync('DELETE FROM issue_comments WHERE issue_id = ?', [id]);
+            result = await dbRunAsync('DELETE FROM issues WHERE id = ?', [id]);
+            if (!result || result.changes === 0) {
+                await dbRunAsync('ROLLBACK');
+                return res.status(404).json({ error: '需求不存在' });
+            }
+            await dbRunAsync('COMMIT');
+        } catch (txErr) {
+            try { await dbRunAsync('ROLLBACK'); } catch (_) {}
+            throw txErr;
+        }
+
+        // 物理附件清理（事务提交后做，最佳努力——失败只 warn 不阻断 DB 一致性；走 ALLOWED_FILE_DIRS 白名单）
+        for (const a of atts) {
+            try { safeDeleteFileSync(a.file_name, UPLOAD_DIR); }
+            catch (e) { logger.warn(`[issue-delete] 需求 #${id} 附件物理删除失败 ${a.file_name}：${e.message}`); }
+        }
+
+        logger.info(`管理员 ${req.user.username} 删除需求 #${id}（含 ${atts.length} 个附件）`);
+        res.json({ deleted: result.changes });
+    } catch (err) {
+        logger.error('删除需求失败:', err.message);
+        res.status(500).json({ error: err.message });
+    }
 });
 
 // 获取评论列表
-app.get('/api/issues/:id/comments', authenticateToken, (req, res) => {
+app.get('/api/issues/:id/comments', authenticateToken, requireIssueSchemaReady, (req, res) => {
     db.all('SELECT * FROM issue_comments WHERE issue_id = ? ORDER BY created_at ASC', [req.params.id], (err, rows) => {
         if (err) return res.status(500).json({ error: err.message });
         res.json(rows || []);
     });
 });
 
+// ── C4a：录入附件 endpoint（v1.0.5 方案 §1.3a / §4.1）──────────────────────────
+// 先行后传：POST /api/issues 先建 issue（纯 JSON），再调本子接口补传附件（无"创建前上传"）。
+// 权限（用户拍板 viewer 例外）：不挂 requireNonViewer——viewer 可给「自己创建」的 issue 传录入附件
+//   （对齐方案 §4 viewer 权限矩阵"可上传自己录入时附件"）；非 viewer 角色对任意 issue 放行。
+// 复用 collab 范式：issueUpload(multer 实例) + multer-error→JSON 包装(对齐 server.js multer 错误中间件)
+//   + cleanupPendingFiles(collabSubmitHelpers) + isPathSafe/safeDeleteFileSync(白名单)。
+// GET 列表 / 上传 / 详情页下载（走静态服务 /uploads/issues/<名>）三件套。
+// 可见性（codex C4a M-1 自核降级）：附件列表继承 issue 模块「内部透明」既定口径——
+//   GET /api/issues/:id（详情含 comments）+ GET /api/issues（列表）均无 viewer 归属 ACL，
+//   任意登录用户可见（内部工具，需求对团队透明）。附件读跟齐此口径，不单独加读 ACL，
+//   避免「详情/评论能看、附件看不了」的割裂；viewer 归属仅约束写（上传，见 POST），读透明。
+app.get('/api/issues/:id/attachments', authenticateToken, requireIssueSchemaReady, (req, res) => {
+    // id 正整数校验（codex C4a L-2：与 POST 一致，区分"参数错误"vs"空列表"）
+    if (!/^[1-9]\d*$/.test(req.params.id)) {
+        return res.status(400).json({ error: 'id 必须是正整数' });
+    }
+    db.all(
+        'SELECT id, issue_id, file_name, original_name, file_size, mime_type, uploaded_by, uploaded_by_name, created_at FROM issue_attachments WHERE issue_id = ? ORDER BY created_at ASC',
+        [req.params.id],
+        (err, rows) => {
+            if (err) return res.status(500).json({ error: err.message });
+            res.json(rows || []);
+        }
+    );
+});
+
+// 上传录入附件：multipart/form-data，field 名 'files'（单文件，前端逐个传）
+app.post('/api/issues/:id/attachments', authenticateToken, requireIssueSchemaReady,
+    // id 严格正整数校验（codex C4a H-1）——必须在 multer **之前**：multer 是前置中间件，destination
+    //   用 req.params.id 拼 _pending 路径，若不先拦非法 id（含 ../分隔符/超长），文件会在落盘阶段
+    //   写入非预期路径，等进 handler 校验时已落盘。前置拦截把路径约束放到落盘之前（纵深防御）。
+    (req, res, next) => {
+        if (!/^[1-9]\d*$/.test(req.params.id)) {
+            return res.status(400).json({ error: 'id 必须是正整数' });
+        }
+        next();
+    },
+    // multer 错误捕获（对齐 collab submit 范式）——multer 前置中间件抛的 MulterError 走 Express
+    //   error flow，handler 内 try/catch 接不到，故手动 invoke 并清理已落盘 pending 文件。
+    (req, res, next) => {
+        issueUpload.array('files', 1)(req, res, (err) => {
+            if (!err) return next();
+            const isMulterErr = err && err.name === 'MulterError';
+            const code = isMulterErr ? err.code : 'UPLOAD_ERROR';
+            try { collabSubmitHelpers.cleanupPendingFiles(req.files, logger); } catch (_) { /* ignore */ }
+            logger.warn(`[issue-attach] multer error: code=${code} msg=${err.message}`);
+            return res.status(400).json({
+                error: '上传文件失败',
+                code,
+                detail: isMulterErr ? err.message : (err.message || '上传过程异常'),
+            });
+        });
+    },
+    async (req, res) => {
+        const idStr = req.params.id;
+        // best-effort 删空 _pending/{id}/ 子目录（codex C4a L-1：避免空目录长期积累污染人工排查）。
+        //   rmdir 仅删空目录，非空/不存在/失败一律忽略——不影响主流程。失败/成功路径都调一次。
+        const rmPendingDirIfEmpty = () => {
+            if (!/^[1-9]\d*$/.test(String(idStr))) return;
+            try { fs.rmdirSync(path.join(ISSUE_PENDING_BASE, String(idStr))); } catch (_) { /* 非空或不存在，忽略 */ }
+        };
+        const cleanupPending = () => {
+            try { collabSubmitHelpers.cleanupPendingFiles(req.files, logger); } catch (_) { /* ignore */ }
+            rmPendingDirIfEmpty();
+        };
+
+        // id 严格正则（对齐 collab submit M1；防 req.params.id 裸入 SQL 的类型错配盲区；
+        //   与前置 multer id 校验中间件双保险——本层兜底，理论上不会命中）
+        if (!/^[1-9]\d*$/.test(idStr)) {
+            cleanupPending();
+            return res.status(400).json({ error: 'id 必须是正整数' });
+        }
+        const id = parseInt(idStr, 10);
+
+        // multer 单文件：req.files 为数组（field 'files'），取第一个；无文件 → 400
+        const file = Array.isArray(req.files) && req.files.length > 0 ? req.files[0] : null;
+        if (!file) {
+            cleanupPending();
+            return res.status(400).json({ error: '未收到上传文件（field 名应为 files）', code: 'NO_FILE' });
+        }
+
+        try {
+            // 先行后传 + viewer 例外：查 issue 存在 + created_by（viewer 仅能传自己创建的 issue）
+            const issue = await dbGetAsync('SELECT id, created_by FROM issues WHERE id = ?', [id]);
+            if (!issue) {
+                cleanupPending();
+                return res.status(404).json({ error: '需求不存在' });
+            }
+            const uploaderId = Number(req.user.id);
+            if (!Number.isSafeInteger(uploaderId)) {
+                cleanupPending();
+                return res.status(400).json({ error: '上传人身份异常', code: 'INVALID_UPLOADER' });
+            }
+            if (req.user.role === 'viewer' && Number(issue.created_by) !== uploaderId) {
+                cleanupPending();
+                return res.status(403).json({ error: '只能为自己创建的需求上传附件', code: 'VIEWER_NOT_OWNER' });
+            }
+
+            // 物理落盘：_pending/{id}/<multer名> → uploads/issues/<multer名>（平铺 issues/ 子目录，不照搬 collab 版本化命名）
+            //   file.filename 已含 ts+rand 防重名（issueStorage filename callback），直接复用作正式名。
+            // M-2 固有窗口（codex C4a，最佳努力边界）：rename 成功后、INSERT 完成前若进程崩溃，DB 无记录
+            //   但正式目录留孤儿文件。文件系统 rename 与 SQLite INSERT 无法组成真正原子事务，内网低并发
+            //   下概率极低，不引入复杂事务化文件管理；靠 [collab-integrity] 巡检扩展覆盖 uploads/issues/
+            //   做兜底（见 TODO：扩展启动期 integrity 巡检 orphan_file 扫描范围到 issues 目录）。
+            const finalName = file.filename;
+            const finalPath = path.join(ISSUE_UPLOAD_BASE, finalName);
+            const relPath = path.join('issues', finalName).replace(/\\/g, '/'); // 入库相对路径，统一 / 分隔
+            try {
+                fs.renameSync(file.path, finalPath);
+                rmPendingDirIfEmpty(); // L-1：rename 后 _pending/{id}/ 已空，顺手清空目录
+            } catch (renameErr) {
+                logger.error(`[issue-attach] 需求 #${id} 文件移动失败: ${renameErr.message}`);
+                cleanupPending();
+                return res.status(500).json({ error: '附件文件移动失败', code: 'FILE_MOVE_FAILED' });
+            }
+
+            // INSERT issue_attachments；uploaded_by 用 Number 归一化（不抄 comments 裸落库），
+            //   uploaded_by_name 取 display_name||username；file_size/mime_type 防 undefined → ?? null。
+            const uploaderName = req.user.display_name || req.user.username || `user#${uploaderId}`;
+            const fileSize = (typeof file.size === 'number') ? file.size : null;
+            const mimeType = (typeof file.mimetype === 'string' && file.mimetype.trim()) ? file.mimetype : null;
+            try {
+                const result = await dbRunAsync(
+                    `INSERT INTO issue_attachments
+                        (issue_id, file_name, original_name, file_size, mime_type, uploaded_by, uploaded_by_name)
+                     VALUES (?,?,?,?,?,?,?)`,
+                    [id, relPath, file.originalname, fileSize, mimeType, uploaderId, uploaderName]
+                );
+                logger.info(`用户 ${req.user.username} 为需求 #${id} 上传附件 ${file.originalname}（${relPath}）`);
+                return res.json({
+                    id: result.lastID,
+                    issue_id: id,
+                    file_name: relPath,
+                    original_name: file.originalname,
+                    file_size: fileSize,
+                    mime_type: mimeType,
+                });
+            } catch (insertErr) {
+                // INSERT 失败 → 已 rename 的正式文件成孤儿，回滚物理文件（防孤儿盲区）
+                try { safeDeleteFileSync(relPath, UPLOAD_DIR); } catch (_) { /* best effort */ }
+                logger.error(`[issue-attach] 需求 #${id} 附件入库失败，已回滚物理文件: ${insertErr.message}`);
+                return res.status(500).json({ error: insertErr.message });
+            }
+        } catch (err) {
+            cleanupPending();
+            logger.error('上传录入附件失败:', err.message);
+            return res.status(500).json({ error: err.message });
+        }
+    }
+);
+
 // 添加评论
-app.post('/api/issues/:id/comments', authenticateToken, requireNonViewer, (req, res) => {
+app.post('/api/issues/:id/comments', authenticateToken, requireIssueSchemaReady, requireNonViewer, (req, res) => {
     const { content } = req.body;
     if (!content || !content.trim()) return res.status(400).json({ error: '评论内容不能为空' });
 
@@ -9943,39 +10512,449 @@ app.post('/api/issues/:id/comments', authenticateToken, requireNonViewer, (req, 
     });
 });
 
-// Webhook: FDL调度异常自动接入（预留）
-app.post('/api/issues/webhook/schedule', (req, res) => {
-    const secret = req.headers['x-webhook-secret'];
-    if (secret !== WEBHOOK_SECRET) return res.status(401).json({ error: '无效的 Webhook 密钥' });
-
-    const { node_name, table_name, error_message, error_time, run_id } = req.body;
-    if (!table_name && !node_name) return res.status(400).json({ error: '至少需要 node_name 或 table_name' });
-
-    // run_id 去重
-    if (run_id) {
-        db.get('SELECT id FROM issues WHERE description LIKE ? AND type = ?', [`%run_id: ${run_id}%`, '调度异常'], (err, existing) => {
-            if (err) return res.status(500).json({ error: err.message });
-            if (existing) return res.json({ id: existing.id, message: '已存在相同记录，跳过' });
-            createScheduleIssue();
-        });
-    } else {
-        createScheduleIssue();
+// ==================== §2.8 需求跟踪钉钉通知 endpoint（C3：全手动触发）====================
+// 复用 collab sendCollabDingtalkRaw 范式（取 config → getAccessToken → 反查 dingUserId → 发送 + token_expired 重试），
+// 但发送层调 C2 的 issueNotify.sendIssueMarkdown（薄封装）。落库 notify_* 在 endpoint 内（与 collab 同构）。
+//
+// issue 版钉钉发送：targetUser={id,display_name,phone,dingtalk_user_id}；返回 {ok, message_key, status, body}
+async function sendIssueDingtalkRaw(targetUser, title, markdown) {
+    const [appKey, appSecret, robotCode] = await Promise.all(
+        ['dingtalk_app_key', 'dingtalk_app_secret', 'dingtalk_robot_code'].map(readSystemConfig)
+    );
+    if (!appKey || !appSecret || !robotCode) {
+        return { ok: false, reason: 'no_config', body: { error: '钉钉配置未填写，请管理员先到系统配置填写凭证' } };
     }
+    if (!targetUser.phone) {
+        return { ok: false, reason: 'no_phone', body: { error: `${targetUser.display_name || 'user#' + targetUser.id} 未绑定手机号，无法推送钉钉` } };
+    }
+    let token;
+    try {
+        token = await dingtalkNotify.getAccessToken(appKey, appSecret);
+    } catch (err) {
+        const cls = dingtalkNotify.classifyError(err);
+        return { ok: false, reason: cls.reason, body: { error: cls.hint } };
+    }
+    // 反查 dingtalk_user_id（缺失则按手机号查 + 回写 users，对齐 collab）
+    let dingUserId = targetUser.dingtalk_user_id;
+    if (!dingUserId) {
+        try {
+            dingUserId = await dingtalkNotify.getUserIdByMobile(token, targetUser.phone);
+            await dbRunAsync('UPDATE users SET dingtalk_user_id = ? WHERE id = ? AND (dingtalk_user_id IS NULL OR dingtalk_user_id = \'\')', [dingUserId, targetUser.id]);
+        } catch (err) {
+            const cls = dingtalkNotify.classifyError(err);
+            return { ok: false, reason: cls.reason, body: { error: '钉钉用户查询失败：' + cls.hint } };
+        }
+    }
+    // 发送（调 C2 helper）；token_expired 伪重试一次
+    let r = await issueNotify.sendIssueMarkdown({ token, robotCode, dingUserId: String(dingUserId).trim(), title, markdown });
+    if (!r.success && r.reason === 'token_expired') {
+        dingtalkNotify.clearCachedToken();
+        try {
+            const freshToken = await dingtalkNotify.getAccessToken(appKey, appSecret);
+            r = await issueNotify.sendIssueMarkdown({ token: freshToken, robotCode, dingUserId: String(dingUserId).trim(), title, markdown });
+        } catch (retryErr) {
+            const cls = dingtalkNotify.classifyError(retryErr);
+            return { ok: false, reason: cls.reason, body: { error: '重试取 token 失败：' + cls.hint } };
+        }
+    }
+    if (!r.success) {
+        // userId 失效 → 清缓存（下次重新反查）
+        if (r.clearUserId) await dbRunAsync('UPDATE users SET dingtalk_user_id = NULL WHERE id = ?', [targetUser.id]);
+        // codex 10 M-4：二次仍 token_expired → 清坏 token 缓存，避免后续 notify 持续失败到 token 自然过期
+        if (r.reason === 'token_expired') dingtalkNotify.clearCachedToken();
+        return { ok: false, reason: r.reason, body: { error: '钉钉推送失败', reason: r.reason } };
+    }
+    // codex 12 H-2：发送成功但 message_key 缺失 → 视为"发了但无法跟踪已读"，按失败处理（消费 C2 message_key_missing 标记）
+    //   避免落 sent 后 notify-read-status 因缺 message_key 返 NO_MESSAGE_KEY 形成"已发送但永远查不到已读"不一致。
+    if (!r.message_key) {
+        return { ok: false, reason: 'message_key_missing', body: { error: '钉钉已发送但未返回消息标识，无法跟踪已读，请重试', reason: 'message_key_missing' } };
+    }
+    return { ok: true, message_key: r.message_key };
+}
 
-    function createScheduleIssue() {
-        const title = `[调度异常] ${table_name || node_name} 执行失败`;
+// 读 platform_base_url 并校验（09 复审 L-2：baseUrl 是 admin 配置，但仍过 sanitizeUrl 防脏配置破坏 markdown 深链）
+async function getSafePlatformBaseUrl() {
+    const raw = await readSystemConfig('platform_base_url');
+    if (!raw) return '';
+    return issueNotify.sanitizeUrl(raw) || '';  // 不合法返空 → buildIssueDeepLink 据空 baseUrl 省略深链
+}
+
+// §2.8 ① 通知开发（#1 指派）：前置 assigned_to 非空 + status ∈ {待处理,处理中,待验证}（M-5）
+app.post('/api/issues/:id/notify-developer', authenticateToken, requireIssueSchemaReady, requirePublisherOrAdmin, async (req, res) => {
+    const id = req.params.id;
+    const attemptAt = new Date().toISOString();
+    try {
+        const issue = await dbGetAsync('SELECT * FROM issues WHERE id = ?', [id]);
+        if (!issue) return res.status(404).json({ error: '需求不存在' });
+        if (!issue.assigned_to) return res.status(400).json({ error: '尚未指派开发，无法通知', code: 'NOT_ASSIGNED' });
+        if (!['待处理', '处理中', '待验证'].includes(issue.status)) {
+            return res.status(400).json({ error: `当前状态「${issue.status}」不可通知开发`, code: 'STATUS_NOT_NOTIFIABLE' });
+        }
+        const dev = await dbGetAsync('SELECT id, display_name, phone, dingtalk_user_id FROM users WHERE id = ?', [issue.assigned_to]);
+        if (!dev) return res.status(400).json({ error: '被指派开发账号不存在' });
+
+        const baseUrl = await getSafePlatformBaseUrl();
+        const md = issueNotify.buildIssueAssignedMarkdown(issue, baseUrl);
+        const result = await sendIssueDingtalkRaw(dev, `📋 新需求指派：${issue.title}`, md);
+
+        if (result.ok) {
+            await dbRunAsync(
+                `UPDATE issues SET notify_status='sent', notified_at=?, notify_message_key=?, notify_error=NULL WHERE id=?`,
+                [attemptAt, result.message_key, id]);
+            return res.json({ success: true, message_key: result.message_key });
+        }
+        // H-4：失败必落库
+        await dbRunAsync(
+            `UPDATE issues SET notify_status='failed', notified_at=?, notify_message_key=NULL, notify_error=? WHERE id=?`,
+            [attemptAt, result.reason || 'other', id]);
+        logger.warn(`[issue-notify] 需求 #${id} 通知开发失败：${result.reason}`);
+        return res.status(502).json({ success: false, ...result.body });
+    } catch (err) {
+        logger.error('通知开发失败:', err.message);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// §2.8 ② 通知改派（#2）：读 pending_reassign_* 推新负责人 + 原负责人，发完留痕
+//   仅新负责人通知落 issues.notify_*（updateIssueStatus=true）；原负责人通知失败仅 warn（M-1）
+app.post('/api/issues/:id/notify-reassign', authenticateToken, requireIssueSchemaReady, requirePublisherOrAdmin, async (req, res) => {
+    const id = req.params.id;
+    const attemptAt = new Date().toISOString();
+    try {
+        const issue = await dbGetAsync('SELECT * FROM issues WHERE id = ?', [id]);
+        if (!issue) return res.status(404).json({ error: '需求不存在' });
+        if (!issue.pending_reassign_to_id) return res.status(400).json({ error: '无改派记录可通知', code: 'NO_REASSIGN' });
+
+        const baseUrl = await getSafePlatformBaseUrl();
+        const newDev = await dbGetAsync('SELECT id, display_name, phone, dingtalk_user_id FROM users WHERE id = ?', [issue.pending_reassign_to_id]);
+        // codex 11 复审 M-1：新负责人账号不存在也走"失败可重试"语义（与 rNew 发送失败一致）——
+        //   落 notify_status='failed' + 保留 pending（账号修复后可重试）+ 不通知原负责人，admin 端能看到失败态。
+        if (!newDev) {
+            await dbRunAsync(`UPDATE issues SET notify_status='failed', notified_at=?, notify_message_key=NULL, notify_error='new_dev_not_found' WHERE id=?`,
+                [attemptAt, id]);
+            logger.warn(`[issue-notify] 需求 #${id} 改派通知失败：新负责人账号(id=${issue.pending_reassign_to_id})不存在，保留 pending 待重试`);
+            return res.status(400).json({ success: false, retriable: true, code: 'NEW_DEV_NOT_FOUND', error: '新负责人账号不存在，请核查后重试' });
+        }
+
+        // 新负责人通知（落 notify_*）
+        const mdNew = issueNotify.buildIssueReassignedMarkdownForNew(issue, issue.pending_reassign_from_name, baseUrl);
+        const rNew = await sendIssueDingtalkRaw(newDev, `🔄 需求转派给你：${issue.title}`, mdNew);
+
+        // codex 10 H-2：新负责人通知失败 → 落 failed + **保留 pending_reassign_***（不清空、不通知原负责人）
+        //   让 admin 修复钉钉配置/手机号后可再点 notify-reassign 重试（对齐 collab"失败可重试"范式）。
+        if (!rNew.ok) {
+            await dbRunAsync(`UPDATE issues SET notify_status='failed', notified_at=?, notify_message_key=NULL, notify_error=? WHERE id=?`,
+                [attemptAt, rNew.reason || 'other', id]);
+            logger.warn(`[issue-notify] 需求 #${id} 改派通知（新负责人）失败：${rNew.reason}，保留 pending 待重试`);
+            return res.status(502).json({ success: false, new_notified: false, retriable: true, ...rNew.body });
+        }
+
+        // 新负责人通知成功 → 落 sent
+        await dbRunAsync(`UPDATE issues SET notify_status='sent', notified_at=?, notify_message_key=?, notify_error=NULL WHERE id=?`,
+            [attemptAt, rNew.message_key, id]);
+
+        // 原负责人通知（仅在新负责人成功后做；最佳努力，不落 issues.notify_*——M-1：仅当前负责人维度落库）
+        let oldNotified = false;
+        if (issue.pending_reassign_from_id) {
+            const oldDev = await dbGetAsync('SELECT id, display_name, phone, dingtalk_user_id FROM users WHERE id = ?', [issue.pending_reassign_from_id]);
+            if (oldDev) {
+                const mdOld = issueNotify.buildIssueReassignedMarkdownForOld(issue, newDev.display_name);
+                const rOld = await sendIssueDingtalkRaw(oldDev, `🔄 需求已转交：${issue.title}`, mdOld);
+                oldNotified = rOld.ok;
+                if (!rOld.ok) logger.warn(`[issue-notify] 需求 #${id} 原负责人通知失败：${rOld.reason}（不影响主流程）`);
+            }
+        }
+
+        // 仅新负责人通知成功后才清 pending_reassign_*（避免成功通知后重复通知；失败已在上方早返回保留 pending）
+        await dbRunAsync(
+            `UPDATE issues SET pending_reassign_from_id=NULL, pending_reassign_from_name=NULL,
+                    pending_reassign_to_id=NULL, pending_reassign_to_name=NULL WHERE id=?`, [id]);
+
+        return res.json({ success: true, new_notified: true, old_notified: oldNotified, message_key: rNew.message_key });
+    } catch (err) {
+        logger.error('通知改派失败:', err.message);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// 业务方完成通知发送（C4）：业务方无平台账号，靠 requester_phone 反查钉钉号（区别于 sendIssueDingtalkRaw 走 users.id→phone）
+//   对齐 create-chat 的 getUserIdByMobile(requester_phone) 反查链路（server.js:11575），非 collab notify-done 的 contact_person_id 路径。
+//   返回 { ok, message_key, reason, body }；reason='requester_invalid' = 手机号查不到钉钉号（非企业成员/未绑定/离职）。
+async function sendIssueDingtalkToRequester(requesterPhone, title, markdown) {
+    if (!requesterPhone) return { ok: false, reason: 'requester_phone_empty', body: { error: '业务方手机号为空，无法发送完成通知' } };
+    const [appKey, appSecret, robotCode] = await Promise.all(
+        ['dingtalk_app_key', 'dingtalk_app_secret', 'dingtalk_robot_code'].map(readSystemConfig)
+    );
+    if (!appKey || !appSecret || !robotCode) {
+        return { ok: false, reason: 'no_config', body: { error: '钉钉配置未填写，请管理员先到系统配置填写凭证' } };
+    }
+    let token;
+    try {
+        token = await dingtalkNotify.getAccessToken(appKey, appSecret);
+    } catch (err) {
+        const cls = dingtalkNotify.classifyError(err);
+        return { ok: false, reason: cls.reason, body: { error: cls.hint } };
+    }
+    // requester_phone 反查钉钉 user_id（业务方可能非企业成员/未绑定 → 查不到）
+    let dingUserId;
+    try {
+        const raw = await dingtalkNotify.getUserIdByMobile(token, requesterPhone);
+        dingUserId = raw != null ? String(raw).trim() : '';
+    } catch (err) {
+        const cls = dingtalkNotify.classifyError(err);
+        return { ok: false, reason: cls.reason === 'user_invalid' ? 'requester_invalid' : cls.reason, body: { error: '业务方钉钉号查询失败：' + cls.hint } };
+    }
+    if (!dingUserId) {
+        return { ok: false, reason: 'requester_invalid', body: { error: '业务方手机号查不到钉钉号（非企业成员/未绑定/离职），请线下转达' } };
+    }
+    // 发送（调 C2 helper）；token_expired 伪重试一次
+    let r = await issueNotify.sendIssueMarkdown({ token, robotCode, dingUserId, title, markdown });
+    if (!r.success && r.reason === 'token_expired') {
+        dingtalkNotify.clearCachedToken();
+        try {
+            const freshToken = await dingtalkNotify.getAccessToken(appKey, appSecret);
+            r = await issueNotify.sendIssueMarkdown({ token: freshToken, robotCode, dingUserId, title, markdown });
+        } catch (retryErr) {
+            const cls = dingtalkNotify.classifyError(retryErr);
+            return { ok: false, reason: cls.reason, body: { error: '重试取 token 失败：' + cls.hint } };
+        }
+    }
+    if (!r.success) {
+        if (r.reason === 'token_expired') dingtalkNotify.clearCachedToken();
+        return { ok: false, reason: r.reason, body: { error: '钉钉推送失败', reason: r.reason } };
+    }
+    // codex 12 H-2：发送成功但 message_key 缺失 → 视为"发了但无法跟踪已读"，按失败处理（消费 C2 message_key_missing 标记）
+    //   避免落 sent 后 notify-read-status 因缺 message_key 返 NO_MESSAGE_KEY 形成"已发送但永远查不到已读"不一致。
+    if (!r.message_key) {
+        return { ok: false, reason: 'message_key_missing', body: { error: '钉钉已发送但未返回消息标识，无法跟踪已读，请重试', reason: 'message_key_missing' } };
+    }
+    return { ok: true, message_key: r.message_key };
+}
+
+// §2.8 ③ 通知业务方完成（#3，C4）：前置 status='已关闭' + requester_phone 非空；落 requester_notify_*（与开发侧隔离）
+//   M-4：notify_error 固定短枚举（requester_phone_empty/requester_invalid/token_expired/network/other...）
+//   M-3（codex 02）：acceptance_url 为空时软二次确认——前端 body 传 { confirm_no_link:true } 才放行无链接发送
+app.post('/api/issues/:id/notify-requester-done', authenticateToken, requireIssueSchemaReady, requireAdmin, async (req, res) => {
+    const id = req.params.id;
+    const attemptAt = new Date().toISOString();
+    try {
+        const issue = await dbGetAsync('SELECT * FROM issues WHERE id = ?', [id]);
+        if (!issue) return res.status(404).json({ error: '需求不存在' });
+        if (issue.status !== '已关闭') return res.status(409).json({ error: '仅「已关闭」需求可通知业务方完成', code: 'INVALID_STATE_FOR_NOTIFY' });
+        if (!issue.requester_phone) return res.status(400).json({ error: '业务方手机号为空，无法通知（请先补填手机号）', code: 'REQUESTER_PHONE_EMPTY' });
+
+        // codex 12 M-4 幂等：已成功通知（sent + 有 message_key）默认不重发（防手抖双击/前端重试重复打扰业务方）；
+        //   需重发要显式 force_resend===true（如业务方反馈没收到）。
+        const forceResend = req.body?.force_resend === true;
+        if (!forceResend && issue.requester_notify_status === 'sent' && issue.requester_notify_message_key) {
+            return res.json({ success: true, already_sent: true, message_key: issue.requester_notify_message_key,
+                message: '已通知过业务方，未重复发送（如需重发传 force_resend）' });
+        }
+
+        // codex 12 M-3 软二次确认 + L-2 严格 ===true：acceptance_url 为空 → 通知无链接，需前端 confirm_no_link===true 才发（不硬阻断）
+        const link = issueNotify.sanitizeUrl(issue.acceptance_url);
+        if (!link && req.body?.confirm_no_link !== true) {
+            return res.status(409).json({
+                error: '未填预览/验收地址，业务方将收到无链接的完成通知',
+                code: 'NO_ACCEPTANCE_URL', link_included: false, need_confirm: true
+            });
+        }
+
+        const md = issueNotify.buildIssueCompletedMarkdownForRequester(issue);
+        const result = await sendIssueDingtalkToRequester(issue.requester_phone, `✅ 需求已完成：${issue.title}`, md);
+
+        if (result.ok) {
+            await dbRunAsync(
+                `UPDATE issues SET requester_notify_status='sent', requester_notified_at=?, requester_notify_message_key=?, requester_notify_error=NULL WHERE id=?`,
+                [attemptAt, result.message_key, id]);
+            return res.json({ success: true, message_key: result.message_key, link_included: !!link });
+        }
+        // H-4：失败必落库（requester_notify_error 存短枚举 reason）
+        await dbRunAsync(
+            `UPDATE issues SET requester_notify_status='failed', requester_notified_at=?, requester_notify_message_key=NULL, requester_notify_error=? WHERE id=?`,
+            [attemptAt, result.reason || 'other', id]);
+        logger.warn(`[issue-notify] 需求 #${id} 业务方完成通知失败：${result.reason}`);
+        return res.status(502).json({ success: false, ...result.body });
+    } catch (err) {
+        logger.error('通知业务方完成失败:', err.message);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// 已读状态查询（C4，§3.5 ISSUE_FIELD_MAP）：单 endpoint 两路 recipient
+//   issue_developer 走 assigned_to→users.dingtalk_user_id（对齐 collab developer 路）；
+//   issue_requester 走 requester_phone 反查（M-1：无 user_id 不读 users 表，与 collab 三路最大偏差）。
+// codex 12 M-1：钉钉调用 token_expired 自动清缓存+重取+重试一次（read-status 链路对齐发送链路的重试能力）
+//   fn 接收 token 执行钉钉调用；若抛 token_expired，clearCachedToken + 重新 getAccessToken 后重跑 fn 一次。
+async function callDingtalkWithTokenRetry(appKey, appSecret, token, fn) {
+    try {
+        return await fn(token);
+    } catch (err) {
+        const cls = dingtalkNotify.classifyError(err);
+        if (cls.reason !== 'token_expired') throw err;
+        dingtalkNotify.clearCachedToken();
+        const freshToken = await dingtalkNotify.getAccessToken(appKey, appSecret);
+        return await fn(freshToken);  // 重试一次；再失败由调用方 catch
+    }
+}
+
+const ISSUE_READ_FIELD_MAP = {
+    issue_developer: { user_id_col: 'assigned_to', notified_at: 'notified_at', message_key: 'notify_message_key', read_at: 'read_at', status_col: 'notify_status', label: '被指派开发', byPhone: false },
+    issue_requester: { user_id_col: null, notified_at: 'requester_notified_at', message_key: 'requester_notify_message_key', read_at: 'requester_read_at', status_col: 'requester_notify_status', label: '业务方', byPhone: true },
+};
+app.get('/api/issues/:id/notify-read-status', authenticateToken, requireIssueSchemaReady, async (req, res) => {
+    const id = req.params.id;
+    try {
+        const recipient = req.query.recipient || 'issue_developer';
+        const fm = ISSUE_READ_FIELD_MAP[recipient];
+        if (!fm) return res.status(400).json({ error: '无效的 recipient', code: 'INVALID_RECIPIENT' });
+
+        // 字段名是写死的列名常量（非用户输入），插值进 SELECT 无注入风险
+        const issue = await dbGetAsync(
+            `SELECT id, requester_phone, ${fm.user_id_col || 'NULL'} AS recipient_user_id,
+                    ${fm.notified_at} AS notified_at, ${fm.message_key} AS message_key,
+                    ${fm.read_at} AS read_at, ${fm.status_col} AS notify_status
+               FROM issues WHERE id = ?`, [id]);
+        if (!issue) return res.status(404).json({ error: '需求不存在' });
+
+        if (!issue.notified_at || issue.notify_status !== 'sent') {
+            return res.status(400).json({ error: `尚未成功通知${fm.label}`, code: 'NOT_NOTIFIED', read: false });
+        }
+        // 已固化 → 直接返（钉钉无取消已读语义，不再查）
+        if (issue.read_at) return res.json({ recipient, read: true, read_at: issue.read_at, cached: true });
+        if (!issue.message_key) return res.status(400).json({ error: '缺少消息标识', code: 'NO_MESSAGE_KEY', read: false });
+
+        // 取凭证 + token
+        const [appKey, appSecret, robotCode] = await Promise.all(
+            ['dingtalk_app_key', 'dingtalk_app_secret', 'dingtalk_robot_code'].map(readSystemConfig));
+        if (!appKey || !appSecret || !robotCode) return res.status(500).json({ error: '钉钉配置未填写', code: 'NO_DINGTALK_CONFIG' });
+        let token;
+        try { token = await dingtalkNotify.getAccessToken(appKey, appSecret); }
+        catch (err) { const cls = dingtalkNotify.classifyError(err); return res.status(502).json({ error: cls.hint, reason: cls.reason }); }
+
+        // 解析收件人钉钉 user_id：developer 走 users 表；requester 走 phone 反查（M-1 偏差）
+        let recipientDingUid = '';
+        if (fm.byPhone) {
+            if (!issue.requester_phone) return res.status(400).json({ error: '业务方手机号为空，无法查已读', code: 'REQUESTER_PHONE_EMPTY', read: false });
+            try { const raw = await callDingtalkWithTokenRetry(appKey, appSecret, token, (t) => dingtalkNotify.getUserIdByMobile(t, issue.requester_phone)); recipientDingUid = raw != null ? String(raw).trim() : ''; }
+            catch (err) { const cls = dingtalkNotify.classifyError(err); return res.status(502).json({ error: '业务方钉钉号查询失败：' + cls.hint, reason: cls.reason }); }
+        } else {
+            const u = await dbGetAsync('SELECT dingtalk_user_id FROM users WHERE id = ?', [issue.recipient_user_id]);
+            recipientDingUid = u && u.dingtalk_user_id ? String(u.dingtalk_user_id).trim() : '';
+        }
+        if (!recipientDingUid) return res.json({ recipient, read: false, read_at: null, read_status: 'recipient_unresolved' });
+
+        // 查钉钉已读（token_expired 自动重试一次）
+        let readResult;
+        try { readResult = await callDingtalkWithTokenRetry(appKey, appSecret, token, (t) => dingtalkNotify.getReadStatus(t, robotCode, issue.message_key)); }
+        catch (err) { const cls = dingtalkNotify.classifyError(err); return res.status(502).json({ error: cls.hint, reason: cls.reason }); }
+
+        const myEntry = (readResult.readDetails || []).find(d => String(d.userId).trim() === recipientDingUid && d.readStatus === 'READ');
+        const isRead = !!myEntry;
+        let readAt = null;
+        if (isRead) {
+            // codex 12 M-3：readTimestamp 单位兼容归一（不凭印象 *1000）——>1e12 视为毫秒、>1e9 视为秒
+            const ts = Number(myEntry.readTimestamp) || 0;
+            const ms = ts > 1e12 ? ts : (ts > 1e9 ? ts * 1000 : Date.now());
+            readAt = new Date(ms).toLocaleString('zh-CN');
+            // 首次查到 READ 固化（动态写回对应 read_at 列）
+            await dbRunAsync(`UPDATE issues SET ${fm.read_at} = ? WHERE id = ?`, [readAt, id]);
+        }
+        res.json({ recipient, read: isRead, read_at: readAt, read_user_count: (readResult.readUserIds || []).length });
+    } catch (err) {
+        logger.error('查已读状态失败:', err.message);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// codex C5 M-3：webhook secret 校验抽独立中间件，挂在 requireIssueSchemaReady **之前**——
+//   未授权请求始终先被 401 拦截，不暴露 schema 初始化状态（503+detail），保持 401 鉴权语义优先于 503。
+function requireWebhookSecret(req, res, next) {
+    if (req.headers['x-webhook-secret'] !== WEBHOOK_SECRET) {
+        return res.status(401).json({ error: '无效的 Webhook 密钥' });
+    }
+    next();
+}
+
+// codex C5 M-1：LIKE 通配符转义——run_id 拼入 LIKE 前转义 \ % _，配合 ESCAPE '\'，
+//   避免含 %/_ 的 run_id 被当通配符误判"已存在"而漏建工单。
+function escapeLike(s) {
+    return String(s).replace(/[\\%_]/g, '\\$&');
+}
+
+// codex C5 M-2：webhook body 字段归一——FDL 是外部输入边界，String(v).trim() 收口，
+//   防对象/数组进模板字符串变 [object Object]/逗号拼接污染标题/description；空白按空处理。
+function normalizeWebhookField(v) {
+    if (v === undefined || v === null) return '';
+    if (typeof v !== 'string' && typeof v !== 'number') return ''; // 对象/数组/布尔等一律视为空
+    return String(v).trim();
+}
+
+// Webhook: FDL调度异常自动接入（预留）
+//   C5 改造：① M-7 补 requester_dept='系统自动'/requester_name='FDL系统'（修 C1 重建后 NOT NULL 适配 bug
+//   + 避免污染部门统计）② 落 issue_status_history 首行（对齐 C3 POST，使 FDL 工单详情页时间线不缺起点）
+//   ③ M-1 run_id LIKE 转义 ④ M-2 body 字段类型归一 ⑤ L-1 run_id 去重移进事务内（写锁串行化防并发重复）。
+//   run_id 去重沿用 description LIKE（L-3：不依赖任何被删字段，schema 重建不影响）。
+// 中间件顺序（M-3）：requireWebhookSecret（401 优先）→ requireIssueSchemaReady（codex 09 H-1，503）→ handler。
+app.post('/api/issues/webhook/schedule', requireWebhookSecret, requireIssueSchemaReady, async (req, res) => {
+    // M-2：body 字段统一归一（拒对象/数组，空白→空）
+    const tableName = normalizeWebhookField(req.body.table_name);
+    const nodeName = normalizeWebhookField(req.body.node_name);
+    const errorMessage = normalizeWebhookField(req.body.error_message);
+    const errorTime = normalizeWebhookField(req.body.error_time);
+    const runId = normalizeWebhookField(req.body.run_id);
+    if (!tableName && !nodeName) return res.status(400).json({ error: '至少需要 node_name 或 table_name' });
+
+    try {
+        const title = `[调度异常] ${tableName || nodeName} 执行失败`;
         const desc = [
-            error_message || '无错误详情',
-            run_id ? `\nrun_id: ${run_id}` : ''
+            errorMessage || '无错误详情',
+            runId ? `\nrun_id: ${runId}` : ''
         ].join('');
 
-        db.run(`INSERT INTO issues (title, description, type, source, priority, related_table, error_time, created_by, created_by_name)
-                VALUES (?, ?, '调度异常', 'FDL自动', 'P1', ?, ?, 0, 'FDL系统')`,
-            [title, desc, table_name || null, error_time || null], function(err) {
-                if (err) return res.status(500).json({ error: err.message });
-                logger.info(`Webhook 自动创建调度异常 #${this.lastID}: ${title}`);
-                res.json({ id: this.lastID });
-            });
+        // INSERT issue + history 首行包事务（对齐 C3 POST BEGIN IMMEDIATE 范式，无 mutex——新增行无同行状态机并发；
+        //   history 失败回滚，避免无首行历史的孤儿调度工单）。operator_id=0/operator_name='FDL系统' 表示系统侧。
+        // L-1：run_id 去重移进事务内（BEGIN 后查重+插入，写锁串行化，闭合"并发同 run_id 都查不到各自插入"窗口）。
+        let issueId, dupId = null;
+        await dbRunAsync('BEGIN IMMEDIATE');
+        try {
+            if (runId) {
+                // M-1：LIKE 特殊字符转义 + ESCAPE '\'，防 %/_ 通配符误判
+                const existing = await dbGetAsync(
+                    "SELECT id FROM issues WHERE description LIKE ? ESCAPE '\\' AND type = ?",
+                    [`%run_id: ${escapeLike(runId)}%`, '调度异常']
+                );
+                if (existing) {
+                    await dbRunAsync('COMMIT');  // 无写操作，提交释放写锁
+                    dupId = existing.id;
+                }
+            }
+            if (dupId === null) {
+                const result = await dbRunAsync(
+                    `INSERT INTO issues (title, description, type, source, priority, requester_dept, requester_name, related_table, error_time, created_by, created_by_name)
+                     VALUES (?, ?, '调度异常', 'FDL自动', 'P1', '系统自动', 'FDL系统', ?, ?, 0, 'FDL系统')`,
+                    [title, desc, tableName || null, errorTime || null]
+                );
+                issueId = result.lastID;
+                await dbRunAsync(
+                    `INSERT INTO issue_status_history (issue_id, from_status, to_status, reason, operator_id, operator_name)
+                     VALUES (?, NULL, '待处理', NULL, 0, 'FDL系统')`,
+                    [issueId]
+                );
+                await dbRunAsync('COMMIT');
+            }
+        } catch (txErr) {
+            try { await dbRunAsync('ROLLBACK'); } catch (_) {}
+            throw txErr;
+        }
+
+        if (dupId !== null) return res.json({ id: dupId, message: '已存在相同记录，跳过' });
+
+        logger.info(`Webhook 自动创建调度异常 #${issueId}: ${title}`);
+        res.json({ id: issueId });
+    } catch (err) {
+        logger.error('Webhook 创建调度异常失败:', err.message);
+        res.status(500).json({ error: err.message });
     }
 });
 
@@ -9993,7 +10972,8 @@ const COLLAB_REQUESTER_DEPTS = [
     '华中分公司', '西南分公司', '西北分公司',
     '杭州区域', '浙北区域', '浙南区域',
     '示例关联方B', '示例关联方C', '示例集团关联方A', '示例关联方D', '示例海外子公司',
-    '其他'
+    '其他',
+    '系统自动'  // v1.74.0 需求跟踪 M-7：FDL Webhook 等系统侧来源专用，前端按部门统计时单独分组（collab 业务侧不会主动选，共享常量无破坏性影响）
 ];
 
 // 需求类型枚举
@@ -10112,6 +11092,67 @@ const collabUpload = multer({
         files: 5
     },
     fileFilter: function (req, file, cb) {
+        const ext = normalizeAttachmentExt(file.originalname);
+        if (!ext) {
+            return cb(new Error('文件名为空或包含非法字符'));
+        }
+        if (!COLLAB_ALLOWED_EXTS_UNION.includes(ext)) {
+            return cb(new Error(`不支持的扩展名 ${ext}，仅允许 ${COLLAB_ALLOWED_EXTS_UNION.join('/')}`));
+        }
+        cb(null, true);
+    }
+});
+
+// ── 需求跟踪录入附件 multer 配置（C4a / v1.0.5 方案 §1.3a）────────────────────
+// 「机制复用、各建一张表/各落一个目录」：复用 collab 的 filename 防重名（ts_rand_safeOriginal +
+//   latin1→utf8）与扩展名联合白名单逻辑，但**独立 destination**——落 uploads/issues/_pending/{id}/，
+//   与 collab 的 _pending/{id}/ 物理隔离，避免 issue #5 与 collab #5 撞同一 pending 目录。
+// 落盘位置（用户拍板，偏离方案 §1.3a 字面"平铺 UPLOAD_DIR 根"）：正式目录 uploads/issues/ 子目录，
+//   与 collab/ 同级，避免根目录文件随 task/collab 混杂膨胀；file_name 入库存相对路径 'issues/<名>'，
+//   DELETE 时 safeDeleteFileSync('issues/<名>', UPLOAD_DIR) 经 path.join + isPathSafe 仍兼容。
+// 录入附件是纯描述性材料（OA 截图/示例表/需求文档），不照搬 collab 的版本化/按人锁/seq 复杂度（方案 §1.3a）。
+const ISSUE_UPLOAD_BASE = path.join(UPLOAD_DIR, 'issues');
+const ISSUE_PENDING_BASE = path.join(ISSUE_UPLOAD_BASE, '_pending');
+
+if (!fs.existsSync(ISSUE_UPLOAD_BASE)) {
+    fs.mkdirSync(ISSUE_UPLOAD_BASE, { recursive: true });
+}
+
+const issueStorage = multer.diskStorage({
+    destination: function (req, file, cb) {
+        // 暂存到 issues/_pending/{id}/，先行后传：POST /api/issues/:id/attachments 必带 :id（已存在 issue）
+        // 纵深防御（codex C4a H-1 第二层）：endpoint 已挂前置 id 校验中间件拦非法 id，但 destination
+        //   自身也不信任原始 req.params.id——非正整数直接 cb(error)，杜绝任何落盘到非预期路径的可能。
+        const reqId = req.params.id;
+        if (!/^[1-9]\d*$/.test(String(reqId))) {
+            return cb(new Error('非法 issue id'));
+        }
+        const targetDir = path.join(ISSUE_PENDING_BASE, String(reqId));
+        try {
+            fs.mkdirSync(targetDir, { recursive: true });
+            cb(null, targetDir);
+        } catch (e) {
+            cb(e);
+        }
+    },
+    filename: function (req, file, cb) {
+        // Latin1 → UTF-8 修复中文文件名乱码（同 collab 10858 范式，原地 mutate 供 handler 读取）
+        file.originalname = Buffer.from(file.originalname, 'latin1').toString('utf8');
+        const ts = Date.now();
+        const rand = Math.round(Math.random() * 1e9);
+        const safeOriginal = file.originalname.replace(/[\\/:*?"<>|]/g, '_');
+        cb(null, `${ts}_${rand}_${safeOriginal}`);
+    }
+});
+
+const issueUpload = multer({
+    storage: issueStorage,
+    limits: {
+        fileSize: 100 * 1024 * 1024,  // 顶上限 100MB（对齐 collab，防 DoS）
+        files: 1                       // 录入附件低频小量，单次 1 个（前端逐个传，规避多文件部分失败回滚）
+    },
+    fileFilter: function (req, file, cb) {
+        // 复用 collab 联合白名单（11 种：图片/xlsx/xls/pdf/docx/sql/txt），覆盖 OA 截图/示例表/文档场景
         const ext = normalizeAttachmentExt(file.originalname);
         if (!ext) {
             return cb(new Error('文件名为空或包含非法字符'));
