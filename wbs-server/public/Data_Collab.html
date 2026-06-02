@@ -1907,9 +1907,20 @@
         let currentDetail = null;
 
         async function openDetail(id, fromDeepLink = false) {
+            const detailModalEl = document.getElementById('detailModal');
+            // v1.74.2 抖动修复：区分"同一单原地刷新" vs "首次打开 / 切到另一单"。
+            //   同一单原地刷新（通知/转发/提交等 ~20 处操作成功后回刷当前单）→ 不把 detailBody 清空成"加载中…"
+            //   （那会让整块高度先坍缩再恢复 = 抖动 + 滚动复位）；保留旧内容直到新数据到达由 renderDetail 整块替换 = 无闪烁。
+            //   首次打开（列表点行 / 深链，弹窗未开）/ 切到另一单 → 显示"加载中…"占位 + 不恢复滚动（从顶部看新单）。
+            //   codex 25(v1742) M-1/M-2：判定收窄为"同一单"（currentDetail.id===id），而非只看弹窗是否开着——
+            //   弹窗开着 ≠ 同一单；当前 UI 全屏模态遮罩无 A→B 切换入口此场景不可达，但收窄让逻辑命中真实意图 + 防未来加跳转入口埋雷。
+            const isSameDetailRefresh = detailModalEl.classList.contains('show')
+                && currentDetail && String(currentDetail.id) === String(id);
             document.getElementById('detailTitle').textContent = `协作单 #${id}`;
-            document.getElementById('detailBody').innerHTML = '<div style="text-align:center;color:#9ca3af;padding:24px;">加载中...</div>';
-            document.getElementById('detailModal').classList.add('show');
+            if (!isSameDetailRefresh) {
+                document.getElementById('detailBody').innerHTML = '<div style="text-align:center;color:#9ca3af;padding:24px;">加载中...</div>';
+            }
+            detailModalEl.classList.add('show');
 
             // 深链：把 ?id=123 同步到 URL（用户主动点列表行打开也同步，便于复制链接）
             try {
@@ -1935,7 +1946,7 @@
                     return;
                 }
                 currentDetail = await res.json();
-                renderDetail(currentDetail);
+                renderDetail(currentDetail, isSameDetailRefresh);
             } catch (e) {
                 document.getElementById('detailBody').innerHTML = '<div style="color:#dc2626;padding:24px;text-align:center;">网络错误</div>';
                 console.error(e);
@@ -2373,7 +2384,7 @@
             }
         }
 
-        function renderDetail(d) {
+        function renderDetail(d, preserveScroll = false) {
             const isAdminUser = (typeof isAdmin === 'function') && isAdmin();
             // codex 16 审 #5：id 数字化护栏（防后端将来返回字符串 id 导致内联 onclick 属性脆弱）
             const safeId = Number(d.id);
@@ -2552,6 +2563,13 @@
             // v1.72.3 admin 直派操作区（仅 admin + assign_mode='admin_direct'）
             const adminDirectActionsHtml = renderAdminDirectActionsSection(d, isAdminUser);
 
+            // v1.74.2 抖动修复：整块 innerHTML 替换会把滚动容器 scrollTop 复位到 0——
+            //   用户滚到中段点"重新通知"等操作回刷时会跳回顶部。滚动容器是 .modal-card（max-height:88vh+overflow-y:auto，
+            //   非 detailBody 本身）。仅"同一单原地刷新"(preserveScroll)才存/恢复 scrollTop 保持视觉位置不动；
+            //   codex 25(v1742) M-2：首次打开 / 切到另一单（preserveScroll=false）保持顶部，让用户从任务信息看起。
+            //   缩略图在 .screenshot-item 固定 120x90 容器(object-fit:cover)，图片异步加载不改高度 → 同步恢复可靠(L-3 验证)。
+            const scrollCard = document.getElementById('detailModal').querySelector('.modal-card');
+            const prevScrollTop = (preserveScroll && scrollCard) ? scrollCard.scrollTop : 0;
             document.getElementById('detailBody').innerHTML =
                 taskInfoHtml
                 + adminDirectActionsHtml
@@ -2565,6 +2583,7 @@
                 + chatHtml
                 + adminFixHistoryHtml
                 + frictionHtml;
+            if (scrollCard && prevScrollTop) scrollCard.scrollTop = prevScrollTop;
 
             // v1.70.2：详情页 innerHTML 重写后，绑定截图缩略图 click → openLightbox
             // 用 dataset 而非 inline onclick 避免文件名含 ' 撕碎字符串
