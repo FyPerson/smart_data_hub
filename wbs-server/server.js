@@ -10760,6 +10760,19 @@ app.post('/api/issues/:id/notify-requester-done', authenticateToken, requireIssu
             });
         }
 
+        // v1.74.1 L-1：完成通知"完成确认人"显示真正的关闭操作人，非录入人（created_by_name）。
+        //   issues 表无 closed_by 列，builder fallback 链是 closed_by_name||created_by_name||'管理员'，
+        //   故 closed_by_name 恒 undefined → 永远落到录入人（死分支永不到管理员）。
+        //   修法：查 issue_status_history 最后一条 to_status='已关闭' 的 operator_name 注入 issue.closed_by_name，
+        //   builder 一行不改（拿到值即用）。history 缺失（如旧数据 / 直接 SQL 改状态）时为 null → builder 自然 fallback 录入人。
+        const closeRow = await dbGetAsync(
+            `SELECT operator_name FROM issue_status_history
+              WHERE issue_id = ? AND to_status = '已关闭'
+              ORDER BY id DESC LIMIT 1`, [id]);
+        // codex 25 L-2：trim 收口——null / 空串 / 纯空白都回退 builder fallback（录入人），不显示「完成确认：␣␣␣」
+        const closedBy = String((closeRow && closeRow.operator_name) || '').trim();
+        if (closedBy) issue.closed_by_name = closedBy;
+
         const md = issueNotify.buildIssueCompletedMarkdownForRequester(issue);
         const result = await sendIssueDingtalkToRequester(issue.requester_phone, `✅ 需求已完成：${issue.title}`, md);
 

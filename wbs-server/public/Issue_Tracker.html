@@ -867,6 +867,18 @@
             document.getElementById('formType').addEventListener('change', function() {
                 document.getElementById('errorTimeGroup').style.display = this.value === '调度异常' ? 'block' : 'none';
             });
+
+            // v1.74.1 M-3：钉钉完成通知深链 ?id=N 直达详情（对齐 collab Data_Collab.html:4983 既有深链范式）。
+            //   /^\d+$/ 严格匹配纯数字串（挡 abc/12abc/-1 脏值，比 parseInt 更严，避免拼脏值进 fetch）；
+            //   codex 25 L-4：再加 Number.isSafeInteger && >0 收紧——挡 0 / 超大整数（parseInt 精度丢失），
+            //   与 buildIssueDeepLink「只发正整数 id」约束一致。脏 id 漏过校验也无碍——openDrawer 后端返非 2xx 静默 return。
+            try {
+                const deepId = new URLSearchParams(window.location.search).get('id');
+                if (deepId && /^\d+$/.test(deepId)) {
+                    const idNum = parseInt(deepId, 10);
+                    if (Number.isSafeInteger(idNum) && idNum > 0) openDrawer(idNum);
+                }
+            } catch (e) { /* ignore */ }
         });
 
         // C6c：填充筛选栏部门 + 数据域下拉
