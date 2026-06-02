@@ -1386,6 +1386,11 @@
 
     <script src="assets/js/app.js?v=v1.71.0"></script>
     <script>
+        // v1.74.3 纯只读领导账号 id 名单（与后端 server.js READONLY_LEADER_IDS 同步！改动需两处一起改）
+        //   金华琴(id=11) / 陈宏亮(id=6) 为纯只读领导，不参与偏技术类工作，不可被设为协作单数据导出人(exporter)。
+        //   下面 admin 直派下拉 / 三级转发下拉都过滤掉这两个账号；后端三个写入口另有兜底拦截（防绕过前端）。
+        const READONLY_LEADER_IDS = [6, 11];
+
         // 部门枚举（与后端 COLLAB_REQUESTER_DEPTS 同步）
         const REQUESTER_DEPTS = [
             { group: '总部职能', value: '市场营销部' },
@@ -3831,12 +3836,14 @@
                     return;
                 }
 
-                // exporter 下拉
-                exporterSelect.innerHTML = '<option value="">请选择...</option>' + users.map(u => {
-                    const roleTag = u.role ? `（${escapeHtml(u.role)}）` : '';
-                    const remark = u.remark ? ` · ${escapeHtml(u.remark)}` : '';
-                    return `<option value="${Number(u.id)}">${escapeHtml(u.display_name || u.username)}${roleTag}${remark}</option>`;
-                }).join('');
+                // exporter 下拉（v1.74.3：过滤掉纯只读领导账号，不可被转发为 exporter）
+                exporterSelect.innerHTML = '<option value="">请选择...</option>' + users
+                    .filter(u => !READONLY_LEADER_IDS.includes(Number(u.id)))
+                    .map(u => {
+                        const roleTag = u.role ? `（${escapeHtml(u.role)}）` : '';
+                        const remark = u.remark ? ` · ${escapeHtml(u.remark)}` : '';
+                        return `<option value="${Number(u.id)}">${escapeHtml(u.display_name || u.username)}${roleTag}${remark}</option>`;
+                    }).join('');
 
                 // 沟通对象复选框列表：M-5 预选 contact_person + developer + 当前操作者
                 // UI 重构（5/25）：从 select multiple 改为 checkbox 列表 + 选 exporter 后自动勾选+锁定
@@ -4488,8 +4495,10 @@
                     return;
                 }
                 // v1.72.5：4 角色全放（含 viewer），仅排除未知角色
+                // v1.74.3：再排除纯只读领导账号（金华琴/陈宏亮，不可被直派为 exporter）
                 const options = users
                     .filter(u => ['user', 'publisher', 'admin', 'viewer'].includes(u.role))
+                    .filter(u => !READONLY_LEADER_IDS.includes(Number(u.id)))
                     .sort((a, b) => (a.display_name || a.username).localeCompare(b.display_name || b.username, 'zh-CN'))
                     .map(u => {
                         const label = u.remark

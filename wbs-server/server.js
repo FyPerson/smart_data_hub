@@ -67,6 +67,20 @@ const MODEL_STATUS = {
 // 用户角色
 const USER_ROLES = ['admin', 'publisher', 'user', 'viewer'];
 
+// v1.74.3 纯只读领导账号名单（不参与偏技术类实际工作，纯查看）
+//   背景：viewer 角色分两类——① 客服性质运营（沈倩静/甄妮/方丽倩）会日常导数据，需保留在 admin 直派下拉里；
+//        ② 领导账号（金华琴 id=11 / 陈宏亮 id=6）纯只读，不应被指派为任何协作单的数据导出人(exporter)。
+//   v1.72.5 的 requireExporterOrNonViewer 是「动态按是否本单 exporter」放权，没有用户级黑名单——
+//        只要 admin 在直派/转发下拉里手滑选中领导账号，它就会成为该单 exporter 从而获得操作权（误操作缺口）。
+//   本常量给 admin-direct-create / forward-to-exporter / admin-direct-reassign 三个写入口 + 前端两个下拉
+//        加一道「领导账号不可被设为 exporter」的硬约束（沿用 COLLAB_CHAT_ADMIN_ID 写死 id 的范式）。
+//   维护：将来新增/移除纯只读领导，改这一处 + 前端 READONLY_LEADER_IDS 同步（见 Data_Collab.html）。
+const READONLY_LEADER_IDS = [6, 11];
+// 判定某 user id 是否为纯只读领导（codex 60·v1743 L-1：三个写入口共用，单一真相点）
+function isReadonlyLeaderId(id) {
+    return READONLY_LEADER_IDS.includes(Number(id));
+}
+
 // 需求跟踪常量（v1.74.0 升级：问题跟踪 → 需求跟踪，方案见 docs/local/需求跟踪升级_方案_20260531_v1.1.md §1.4-§1.8）
 // 类型 7 类（§1.4）：原"需求"过笼统被新 3 类覆盖、"变更请求"并入"数据治理需求"已砍
 const ISSUE_TYPES = [
@@ -11555,6 +11569,10 @@ app.post('/api/collab/requests', authenticateToken, requireAdmin, async (req, re
             if (!['user', 'publisher', 'admin', 'viewer'].includes(exporterUser.role)) {
                 return res.status(400).json({ error: '数据导出人角色无效（仅 user/publisher/admin/viewer）' });
             }
+            // v1.74.3：纯只读领导账号不可被设为数据导出人（防 admin 直派下拉手滑选中，前端已过滤+后端兜底）
+            if (isReadonlyLeaderId(exporterUser.id)) {
+                return res.status(400).json({ error: '该账号为纯只读领导账号，不可指派为数据导出人', code: 'EXPORTER_IS_READONLY_LEADER' });
+            }
             validatedExporterId = exporterUser.id;
             validatedExporterName = exporterUser.display_name || exporterUser.username;
         } else {
@@ -13647,6 +13665,10 @@ app.post('/api/collab/requests/:id/forward-to-exporter', authenticateToken, requ
         if (exporterUser.status !== 'active') {
             return res.status(400).json({ error: `数据导出人 ${exporterUser.display_name} 已停用`, code: 'EXPORTER_INACTIVE' });
         }
+        // v1.74.3：纯只读领导账号不可被转发为数据导出人（前端已过滤+后端兜底；领导拦截优先于钉钉绑定校验，错因更清晰）
+        if (isReadonlyLeaderId(exporterUser.id)) {
+            return res.status(400).json({ error: '该账号为纯只读领导账号，不可转发为数据导出人', code: 'EXPORTER_IS_READONLY_LEADER' });
+        }
         if (!exporterUser.dingtalk_user_id && !exporterUser.phone) {
             return res.status(400).json({
                 error: '数据导出人未绑定钉钉/手机号，无法发起加群与通知',
@@ -13991,6 +14013,13 @@ app.post('/api/collab/requests/:id/admin-direct-reassign', authenticateToken, re
             return res.status(400).json({
                 error: '新接收人角色无效（仅 user/publisher/admin/viewer）',
                 code: 'NEW_EXPORTER_INVALID_ROLE'
+            });
+        }
+        // v1.74.3：纯只读领导账号不可被改派为数据导出人（前端已过滤+后端兜底，与 admin-direct-create 对称）
+        if (isReadonlyLeaderId(newExporter.id)) {
+            return res.status(400).json({
+                error: '该账号为纯只读领导账号，不可改派为数据导出人',
+                code: 'NEW_EXPORTER_IS_READONLY_LEADER'
             });
         }
 
@@ -16848,6 +16877,10 @@ app.listen(PORT, '0.0.0.0', () => {
     logger.info(`Task Pool Server running at http://localhost:${PORT}`);
     logger.info(`Local access: http://localhost:${PORT}/Task_Pool.html`);
     logger.info(`Remote access: http://192.168.1.100:${PORT}/Task_Pool.html`);
+
+    // v1.74.3 codex 60 审 M-3 部分采纳：启动期打印纯只读领导名单（前后端双常量漂移时日志可查；
+    //   前端 Data_Collab.html 须保持 READONLY_LEADER_IDS 与此一致，verify-readonly-leader-exporter-block.js 卡同源）
+    logger.info(`v1.74.3 纯只读领导账号名单（不可被设为 exporter）: READONLY_LEADER_IDS = [${READONLY_LEADER_IDS.join(', ')}]`);
 
     // Deploy 3 数据协作模块附件巡检（codex 七审 L1 异步启动 + M3 异常非阻塞）
     // 不阻塞服务 ready，巡检结果只走 logger.warn/info，不抛错
