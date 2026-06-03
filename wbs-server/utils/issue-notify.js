@@ -179,22 +179,45 @@ async function sendIssueMarkdown(opts) {
         const cls = dingtalkNotify.classifyError(err);
         return { success: false, errcode: cls.errcode, reason: cls.reason, errmsg: cls.errmsg };
     }
-    // codex 08 M-1 + 09 复审 M-1 残口：严格成功白名单——只有 errcode 严格 ===0 或 ==='0' 才成功，其余一律失败。
-    //   ⚠️ 不用 Number(resp.errcode)！Number(null)/Number('')/Number(false) 都 ===0，会把 {errcode:null} 等畸形响应误判成功。
-    //   覆盖失败：errcode≠0（token失效/用户不存在）/ 畸形 JSON（{}/缺 errcode/null/''/false）/ errmsg-only。
-    //   避免畸形响应被误判 success:true + message_key:null（C3 会落 notify_status='sent' 但永远查不到已读）。
-    const isSuccess = resp && (resp.errcode === 0 || resp.errcode === '0');
-    if (!isSuccess) {
-        // errcode 是合法业务码（数字/数字字符串非 0）→ classifyError 走分类；否则（缺失/null/''/false 等畸形）兜成 invalid_response
-        const ec = resp ? resp.errcode : undefined;
-        const isClassifiable = typeof ec === 'number' || (typeof ec === 'string' && /^\d+$/.test(ec));
-        const cls = isClassifiable
-            ? dingtalkNotify.classifyError({ errcode: Number(ec), errmsg: resp.errmsg })
-            : { reason: 'invalid_response', errmsg: '钉钉响应缺少 errcode 或非预期结构', clearUserId: false };
+    // 成功判定：对齐项目既有正确范式 dingtalkSendOk（server.js:15080）——钉钉新版机器人 batchSend API
+    //   (api.dingtalk.com/v1.0/robot/oToMessages/batchSend) 成功时**不返回 errcode**，只返回 processQueryKey；
+    //   仅失败（token 失效/用户不存在等）才返回 errcode≠0。原"errcode===0 才成功"是套用了老版 oapi 的预期，
+    //   导致正常成功响应（无 errcode）被误判失败 → invalid_response → 前端报"钉钉推送失败"（生产实证 2026-06-03）。
+    //   实证成功响应：{flowControlledStaffIdList:[],invalidStaffIdList:[],filteredStaffIdList:[],processQueryKey:"..."}
+    //
+    // 判定分层（codex 复审加固：errcode 收紧 + 失败用户列表检查 + message_key 软失败三层防御）：
+    //   ① errcode 存在且 trim 后非空、非 '0' → 一律失败（codex #1：避免 '-1'/' 88'/'abc' 等非纯数字码被吞成软成功）；
+    //      纯数字码走 classifyError 精确分类（token/user 失效等），非数字码兜 invalid_response。
+    //   ② invalidStaffIdList 含目标 dingUserId（或非空）→ 失败 user_invalid + clearUserId（codex #2 high：对齐
+    //      dingtalkSendOk，"有 processQueryKey 但该用户在无效列表" = 钉钉没真送达，必须当失败，否则重蹈本次 bug 对称覆辙）。
+    //   ③ flowControlled/filtered 列表含目标用户 → 失败（限流/被过滤，未送达）。
+    //   ④ 以上都过 → 看 processQueryKey：有 → success；无 → success:true+message_key_missing:true
+    //      （"发了但无法跟踪已读"，C3 endpoint 据此返 502 提示重试；保留 codex 12 H-2 契约）。
+    const ec = resp ? resp.errcode : undefined;
+    const ecStr = (ec === null || ec === undefined || ec === false) ? '' : String(ec).trim();
+    if (ecStr !== '' && ecStr !== '0') {
+        // 纯数字业务码 → classifyError 精确分类；非纯数字（'abc' 等异常码）→ 兜 invalid_response
+        const cls = /^\d+$/.test(ecStr)
+            ? dingtalkNotify.classifyError({ errcode: Number(ecStr), errmsg: resp.errmsg })
+            : { reason: 'invalid_response', errcode: ec, errmsg: resp.errmsg || '钉钉返回非预期 errcode', clearUserId: false };
         return { success: false, errcode: cls.errcode, reason: cls.reason, errmsg: cls.errmsg, clearUserId: !!cls.clearUserId };
     }
-    // 成功：processQueryKey 即 message_key（已读跟踪用）；缺失则标记让 C3 决策
-    const messageKey = resp.processQueryKey || null;
+    // 失败用户列表检查（codex #2 high）：单聊只发一个 dingUserId，任一列表命中该用户即未送达。
+    //   钉钉对 uid 失效/离职放 invalidStaffIdList；限流放 flowControlledStaffIdList；被规则过滤放 filteredStaffIdList。
+    const target = String(dingUserId).trim();
+    // codex 复审 low：列表元素也 trim 归一化，防钉钉回显带空白漏判（与 errcode trim 同源）
+    const inList = (arr) => Array.isArray(arr) && arr.map(v => String(v).trim()).includes(target);
+    if (inList(resp && resp.invalidStaffIdList)) {
+        return { success: false, reason: 'user_invalid', errmsg: `目标用户在 invalidStaffIdList（uid 失效/离职）`, clearUserId: true };
+    }
+    if (inList(resp && resp.flowControlledStaffIdList)) {
+        return { success: false, reason: 'rate_limit', errmsg: `目标用户被限流（flowControlledStaffIdList）`, clearUserId: false };
+    }
+    if (inList(resp && resp.filteredStaffIdList)) {
+        return { success: false, reason: 'invalid_response', errmsg: `目标用户被过滤（filteredStaffIdList）`, clearUserId: false };
+    }
+    // 全部通过：processQueryKey 即 message_key（已读跟踪用）；缺失则标记让 C3 决策（保留 codex 12 H-2 语义）
+    const messageKey = resp && resp.processQueryKey ? resp.processQueryKey : null;
     return { success: true, message_key: messageKey, message_key_missing: !messageKey };
 }
 

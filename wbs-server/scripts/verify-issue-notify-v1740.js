@@ -166,11 +166,13 @@ await check('检查6d sendIssueMarkdown token_expired reason 透传（不在 hel
     assert.strictEqual(r.success, false);
     assert.strictEqual(r.reason, 'token_expired', 'token_expired 透传给 C3 决定重试');
 });
-await check('检查6e sendIssueMarkdown 畸形响应默认失败（codex 08 M-1 + 09 残口：严格白名单）', async () => {
+await check('检查6e sendIssueMarkdown 无 errcode 无 processQueryKey 的响应 → 软失败 message_key_missing（v1.74.4：不再硬判 invalid_response）', async () => {
+    // v1.74.4 修复：钉钉新版 batchSend 成功不返 errcode，原"无 errcode 一律 invalid_response 硬失败"会误判正常成功响应。
+    //   新契约：无 errcode 时以 processQueryKey 为成功凭据；无 processQueryKey 的畸形响应走 message_key_missing 软失败
+    //   （server.js C3 据此返 502 提示重试，对用户行为与原硬失败一致——都不会落 sent）。
     const cases = [
         [{}, '{} 缺 errcode'],
         [{ errmsg: 'x' }, 'errmsg-only'],
-        [null, 'null 响应'],
         [{ errcode: null }, '{errcode:null}（Number(null)===0 陷阱）'],
         [{ errcode: '' }, "{errcode:''}（Number('')===0 陷阱）"],
         [{ errcode: false }, '{errcode:false}（Number(false)===0 陷阱）'],
@@ -179,11 +181,63 @@ await check('检查6e sendIssueMarkdown 畸形响应默认失败（codex 08 M-1 
     for (const [resp, desc] of cases) {
         dingtalkNotify.sendMarkdownToUser = async () => resp;
         const r = await issueNotify.sendIssueMarkdown({ token: 't', robotCode: 'r', dingUserId: 'u', title: 'T', markdown: 'M' });
-        assert.strictEqual(r.success, false, desc + ' 应判失败');
-        assert.strictEqual(r.reason, 'invalid_response', desc + ' 应归 invalid_response');
+        assert.strictEqual(r.success, true, desc + ' 无 errcode → 不再硬失败');
+        assert.strictEqual(r.message_key, null, desc + ' 无 processQueryKey → message_key 为 null');
+        assert.strictEqual(r.message_key_missing, true, desc + ' 应标 message_key_missing 软失败（C3 返 502 重试）');
     }
 });
-await check('检查6e2 sendIssueMarkdown errcode===0 / "0" 字符串均判成功（严格白名单边界）', async () => {
+await check('检查6e3 sendIssueMarkdown 钉钉新版成功响应（无 errcode + processQueryKey）→ success（v1.74.4 修复核心：原 bug 在此被误判失败）', async () => {
+    // 生产实证响应：{flowControlledStaffIdList:[],invalidStaffIdList:[],filteredStaffIdList:[],processQueryKey:"..."}
+    dingtalkNotify.sendMarkdownToUser = async () => ({
+        flowControlledStaffIdList: [], invalidStaffIdList: [], filteredStaffIdList: [], processQueryKey: 'pqk_real'
+    });
+    const r = await issueNotify.sendIssueMarkdown({ token: 't', robotCode: 'r', dingUserId: 'u', title: 'T', markdown: 'M' });
+    assert.strictEqual(r.success, true, '无 errcode + 有 processQueryKey 必须判成功（这正是被误判的 bug）');
+    assert.strictEqual(r.message_key, 'pqk_real', 'processQueryKey 作 message_key');
+    assert.strictEqual(r.message_key_missing, false, '有 processQueryKey 不标 missing');
+});
+await check('检查6e4 非纯数字/非零 errcode 字符串 → 一律失败（codex #1：避免被吞成软成功）', async () => {
+    // codex 复审 #1：'-1' / ' 88' / '42001 ' / 'abc' 等非纯数字或带空格的 errcode 不能被当成"无业务码"软成功
+    const cases = [
+        ['-1', '负数字符串'],
+        [' 88', '前导空格数字'],
+        ['42001 ', '尾随空格 token 过期码'],
+        ['abc', '非数字异常码'],
+        [88, '纯数字非0（user_invalid）'],
+    ];
+    for (const [ecVal, desc] of cases) {
+        dingtalkNotify.sendMarkdownToUser = async () => ({ errcode: ecVal, errmsg: 'x' });
+        const r = await issueNotify.sendIssueMarkdown({ token: 't', robotCode: 'r', dingUserId: 'u', title: 'T', markdown: 'M' });
+        assert.strictEqual(r.success, false, desc + '(' + JSON.stringify(ecVal) + ') 应判失败，不得软成功');
+    }
+    // 边界：纯空格 errcode 视同空（无业务码）→ 不因它判失败（应走 processQueryKey 判定）
+    dingtalkNotify.sendMarkdownToUser = async () => ({ errcode: '  ', processQueryKey: 'k' });
+    const r2 = await issueNotify.sendIssueMarkdown({ token: 't', robotCode: 'r', dingUserId: 'u', title: 'T', markdown: 'M' });
+    assert.strictEqual(r2.success, true, "'  ' 纯空格 errcode 视同无业务码 → 有 processQueryKey 仍成功");
+});
+await check('检查6e5 有 processQueryKey 但目标用户在失败列表 → 失败（codex #2 high：未送达不得误判成功）', async () => {
+    // codex 复审 #2 high：对齐 dingtalkSendOk（server.js:15080）——单聊目标用户落入任一失败列表 = 钉钉没真送达
+    dingtalkNotify.sendMarkdownToUser = async () => ({ processQueryKey: 'pqk', invalidStaffIdList: ['u'] });
+    let r = await issueNotify.sendIssueMarkdown({ token: 't', robotCode: 'r', dingUserId: 'u', title: 'T', markdown: 'M' });
+    assert.strictEqual(r.success, false, 'invalidStaffIdList 含目标 → 失败');
+    assert.strictEqual(r.reason, 'user_invalid', 'reason=user_invalid');
+    assert.strictEqual(r.clearUserId, true, 'uid 失效应清缓存重查');
+
+    dingtalkNotify.sendMarkdownToUser = async () => ({ processQueryKey: 'pqk', flowControlledStaffIdList: ['u'] });
+    r = await issueNotify.sendIssueMarkdown({ token: 't', robotCode: 'r', dingUserId: 'u', title: 'T', markdown: 'M' });
+    assert.strictEqual(r.success, false, 'flowControlled 含目标 → 失败');
+    assert.strictEqual(r.reason, 'rate_limit', 'reason=rate_limit');
+
+    dingtalkNotify.sendMarkdownToUser = async () => ({ processQueryKey: 'pqk', filteredStaffIdList: ['u'] });
+    r = await issueNotify.sendIssueMarkdown({ token: 't', robotCode: 'r', dingUserId: 'u', title: 'T', markdown: 'M' });
+    assert.strictEqual(r.success, false, 'filtered 含目标 → 失败');
+
+    // 边界：失败列表存在但不含目标用户（如多人发送中别人失败）→ 目标仍成功
+    dingtalkNotify.sendMarkdownToUser = async () => ({ processQueryKey: 'pqk', invalidStaffIdList: ['other'] });
+    r = await issueNotify.sendIssueMarkdown({ token: 't', robotCode: 'r', dingUserId: 'u', title: 'T', markdown: 'M' });
+    assert.strictEqual(r.success, true, '失败列表不含目标用户 → 目标仍成功');
+});
+await check('检查6e2 sendIssueMarkdown errcode===0 / "0" 字符串 + processQueryKey 判成功（兼容老版 oapi 成功响应）', async () => {
     dingtalkNotify.sendMarkdownToUser = async () => ({ errcode: 0, processQueryKey: 'k1' });
     let r = await issueNotify.sendIssueMarkdown({ token: 't', robotCode: 'r', dingUserId: 'u', title: 'T', markdown: 'M' });
     assert.strictEqual(r.success, true, 'errcode=0 成功');
