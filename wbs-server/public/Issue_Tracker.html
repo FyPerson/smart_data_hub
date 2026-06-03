@@ -667,6 +667,7 @@
                     <th style="width:100px;">业务方部门</th>
                     <th style="width:90px;">数据域</th>
                     <th style="width:90px;">OA 单号</th>
+                    <th style="width:110px;">创建时间</th>
                     <th style="width:110px;">更新时间</th>
                 </tr>
             </thead>
@@ -949,7 +950,8 @@
             }
             empty.style.display = 'none';
 
-            // C6c：12 列（#/优先级/类型/通知/状态/标题/指派人/创建人/业务方部门/数据域/OA/更新时间）
+            // C6c：13 列（#/优先级/类型/通知/状态/标题/指派人/创建人/业务方部门/数据域/OA/创建时间/更新时间）
+            //   v1.75.0 C5：加创建时间列（决策 4 创建+更新都显示），紧邻更新时间前
             //   H-1：所有后端文本字段走 escapeHtml；窄列加 .ellip + title 单行省略
             tbody.innerHTML = allIssues.map(issue => `
                 <tr onclick="openDrawer(${issue.id})">
@@ -967,6 +969,7 @@
                     <td class="ellip" title="${escapeHtml(issue.requester_dept || '')}">${escapeHtml(issue.requester_dept || '')}</td>
                     <td class="ellip">${domainText(issue.data_domain)}</td>
                     <td class="ellip" title="${escapeHtml(issue.oa_number || '')}">${issue.oa_number ? escapeHtml(issue.oa_number) : '<span style="color:#d1d5db;">-</span>'}</td>
+                    <td class="time-relative">${formatTime(issue.created_at)}</td>
                     <td class="time-relative">${formatTime(issue.updated_at)}</td>
                 </tr>
             `).join('');
@@ -1091,6 +1094,34 @@
                     }
                 }
                 html += `</div>`;
+            }
+
+            // v1.75.0 C1：已读跟踪展示（对齐数据协作 Data_Collab checkReadStatus 范式）
+            //   两路独立：开发侧仅 notify_status='sent' 显示；业务方侧仅 requester_notify_status='sent' 显示
+            //   不自动查（决策 1：按钮触发）；已读固化后后端返 cached=true，前端展 📖 已读
+            //   所有能看详情者（含 viewer）可见已读痕迹（只读存档语义），查询按钮触发后端 API（后端 authenticateToken 守门）
+            //   codex M-1：box id 含 issue.id（readStatusBox_<id>_<recipient>），快速切单时旧请求回包
+            //     在新抽屉里 getElementById(旧 boxId)=null 自然失效，不污染新抽屉（对齐附件区 dataset.issueId 防错位思路）
+            {
+                let readHtml = '';
+                if (issue.notify_status === 'sent') {
+                    const devName = escapeHtml(issue.assigned_to_name || '开发');
+                    readHtml += issue.read_at
+                        ? `<div style="font-size:13px; color:#16a34a;">📖 ${devName} 已读 · 于 ${escapeHtml(issue.read_at)}</div>`
+                        : `<div id="readStatusBox_${issue.id}_issue_developer" style="font-size:13px;"><button class="btn-secondary" style="font-size:12px; padding:4px 10px;" onclick="checkIssueReadStatus(${issue.id}, 'issue_developer')">查询开发已读</button></div>`;
+                }
+                if (issue.requester_notify_status === 'sent') {
+                    const reqName = escapeHtml(issue.requester_name || '业务方');
+                    readHtml += issue.requester_read_at
+                        ? `<div style="font-size:13px; color:#16a34a; margin-top:4px;">📖 ${reqName} 已读 · 于 ${escapeHtml(issue.requester_read_at)}</div>`
+                        : `<div id="readStatusBox_${issue.id}_issue_requester" style="font-size:13px; margin-top:4px;"><button class="btn-secondary" style="font-size:12px; padding:4px 10px;" onclick="checkIssueReadStatus(${issue.id}, 'issue_requester')">查询业务方已读</button></div>`;
+                }
+                if (readHtml) {
+                    html += `<div style="margin-bottom:16px; padding:10px 14px; background:#f9fafb; border-radius:8px;">
+                        <label style="font-size:11px; color:#6b7280; display:block; margin-bottom:6px; font-weight:500;">通知已读状态</label>
+                        ${readHtml}
+                    </div>`;
+                }
             }
 
             // 详情网格（C6c：加业务方信息/OA/数据域；H-1 所有后端文本走 escapeHtml）
@@ -1263,6 +1294,48 @@
                 await loadIssues();
                 openDrawer(id);
             } catch (e) { showToast('通知失败', 'error'); }
+        }
+
+        // v1.75.0 C1：查询钉钉已读状态（移植自数据协作 checkReadStatus，适配 issues recipient）
+        //   recipient='issue_developer'（开发侧，走 assigned_to）或 'issue_requester'（业务方侧，走 phone 反查）
+        //   后端返 {read, read_at, cached} 或错误 {error, code}；查到已读后刷新 drawer 让区块直接渲染 📖 形态
+        //   codex M-1 防错位：boxId 含 id，回包后用 getElementById(boxId) 重新取——
+        //     若用户已切到别的单（旧 box 不在 DOM），返回 null → 直接 return，不污染新抽屉、不 openDrawer 跳回旧单
+        async function checkIssueReadStatus(id, recipient) {
+            const boxId = `readStatusBox_${id}_${recipient}`;
+            const startBox = document.getElementById(boxId);
+            if (startBox) startBox.innerHTML = '<span style="color:#94a3b8;">查询中…</span>';
+            const label = recipient === 'issue_requester' ? '业务方' : '开发';
+            try {
+                const res = await authFetch(`/api/issues/${id}/notify-read-status?recipient=${recipient}`);
+                const data = await res.json().catch(() => ({}));
+                // 回包后重新取 box（异步窗口内可能已切单）：不在 DOM → 当前抽屉已非本单，静默放弃
+                const box = document.getElementById(boxId);
+                if (!box) return;
+                if (res && res.ok) {
+                    if (data.read) {
+                        const timePart = data.read_at ? ` · 于 ${escapeHtml(data.read_at)}` : '';
+                        box.innerHTML = `<span style="color:#16a34a;">📖 ${label}已读${timePart}</span>`;
+                        // box 仍在 = 当前抽屉确为本单，才刷新 drawer 渲染固化的"📖 已读"形态（后端已写 read_at）
+                        openDrawer(id);
+                    } else {
+                        box.innerHTML = `<span style="color:#d97706;">👀 ${label}尚未读取</span>`
+                            + ` <button class="btn-secondary" style="font-size:12px; padding:4px 10px; margin-left:6px;" onclick="checkIssueReadStatus(${id}, '${recipient}')">重查</button>`;
+                    }
+                } else {
+                    // codex L-1：NO_MESSAGE_KEY 转明确文案（极端历史脏数据：sent 但缺消息标识）
+                    let detail;
+                    if (data.code === 'NO_MESSAGE_KEY') {
+                        detail = '通知消息标识缺失，无法查询已读';
+                    } else {
+                        detail = [data.error, data.errcode && `errcode=${data.errcode}`].filter(Boolean).join(' · ');
+                    }
+                    box.innerHTML = `<span style="color:#b91c1c;">❌ ${escapeHtml(detail || '查询失败')}</span>`;
+                }
+            } catch (e) {
+                const box = document.getElementById(boxId);
+                if (box) box.innerHTML = '<span style="color:#b91c1c;">网络错误，请检查后端</span>';
+            }
         }
 
         // 附件区异步加载（M-3：loading 占位 + 回填前校验当前 drawer issue.id 一致防快速切单错位）
