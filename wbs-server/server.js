@@ -1240,21 +1240,52 @@ function initTable() {
     // ⚠️ 时序关键（MEMORY feedback：sqlite3 parallel mode 乱序坑）：计数用 await 在 serialize **外**做完，
     //    拿到结论后再开独立 db.serialize 同步发 DROP+CREATE——await 会打破 serialize 串行窗口，
     //    绝不能把 await 横在 DROP/CREATE 之间，否则 CREATE 可能先于 DROP 执行（"table already exists"）。
+    // v1.74.5 修复：issues 主表关键列白名单——"表已建好且有数据"时校验主表结构完整性，齐则放行（不重建），
+    //   缺则视为旧 schema 拒放行。选 v1.74.x 各阶段标志性列：raw_requirement/data_domain（v1.0.5/v1.1）、
+    //   priority_reviewed_at（v1.1 codex 05 M-4）、acceptance_url（C1 fix 改名）、notify_status（C2 通知态）。
+    //   ⚠️ 范围说明（codex 审 #1）：仅校验 issues 主表，不校验 3 个子表——4 表是同一次 C1 serialize 块一起
+    //   DROP+CREATE 的（要么全新要么全旧，不存在"主表新子表旧"），故主表结构正确即代表本次建表整体到位；
+    //   子表字段兼容性由 C3/C4/C4a 接口的 e2e + verify 脚本覆盖，不在启动闸门重复校验。
+    const ISSUE_REQUIRED_COLS = ['raw_requirement', 'data_domain', 'priority_reviewed_at', 'acceptance_url', 'notify_status'];
+    const getIssueColumns = () => new Promise((resolve) => {
+        db.all(`PRAGMA table_info("issues")`, (err, rows) => {
+            if (err) return resolve(null);               // 读列出错 → null（按"无法确认结构"处理）
+            resolve(rows ? rows.map(r => r.name) : []);
+        });
+    });
+
     (async () => {
         const counts = await Promise.all(ISSUE_TABLES.map(countIssueTable));
         const unknownErr = counts.some(c => c < 0);
         const hasData = counts.some(c => c > 0);
+        const detail = ISSUE_TABLES.map((t, i) => `${t}=${counts[i] < 0 ? 'ERR' : counts[i]}`).join(' / ');
 
-        if (unknownErr || hasData) {
-            // 命中硬门槛：有数据 或 计数遇未知错误 → 不重建 + 设错误标记（H-2：endpoint 入口据此返 503）
-            const detail = ISSUE_TABLES.map((t, i) => `${t}=${counts[i] < 0 ? 'ERR' : counts[i]}`).join(' / ');
-            ISSUE_SCHEMA_STATE.error = unknownErr
-                ? `需求跟踪 schema 计数遇未知错误，拒绝重建（${detail}）`
-                : `需求跟踪目标表非空，拒绝 DROP 重建（${detail}）`;
-            logger.error(`[需求跟踪 C1] 🚫 schema 重建中止：${detail}。` +
-                `${unknownErr ? '计数遇未知错误（锁/损坏/权限）' : '目标表有数据'} → 旧表保留，需求跟踪接口将返 503。` +
-                `请人工核查并导出数据后手动放行（清空表或临时关闭本防护）。其他模块不受影响。`);
-            return; // 不执行 DROP/CREATE，保护现有数据
+        if (unknownErr) {
+            // 计数遇未知错误（锁/损坏/权限）→ 不重建 + 503（真异常，绝不放行也绝不 DROP）
+            ISSUE_SCHEMA_STATE.error = `需求跟踪 schema 计数遇未知错误，拒绝重建（${detail}）`;
+            logger.error(`[需求跟踪 C1] 🚫 schema 计数遇未知错误（锁/损坏/权限）：${detail} → 旧表保留，需求跟踪接口将返 503。其他模块不受影响。`);
+            return;
+        }
+
+        if (hasData) {
+            // v1.74.5 核心修复：表已建好且有数据 → 校验关键列齐全后【放行】（绝不 DROP，数据照常用）。
+            //   这是原逻辑缺失的正常路径——模块正常使用后首次重启不应再触发"有数据→503"。
+            const cols = await getIssueColumns();
+            const missing = cols === null ? ['<读列失败>'] : ISSUE_REQUIRED_COLS.filter(c => !cols.includes(c));
+            if (missing.length) {
+                // 有数据但 issues 主表是旧 schema（或读列失败）→ 拒放行 + 503，提示需迁移（防缺列接口运行期报错）。
+                //   codex 审 #2：文案措辞为"issues 结构不可确认/不完整"——hasData 是四表任一非空，
+                //   不暗示一定是 issues 主表有数据（可能 issues 空但子表残留），附 detail 各表计数供排障。
+                ISSUE_SCHEMA_STATE.error = `需求跟踪表已有数据但 issues 主表结构不完整/不可确认（缺列：${missing.join(',')}；各表计数：${detail}），需人工迁移后放行`;
+                ISSUE_SCHEMA_STATE.ready = false;
+                logger.error(`[需求跟踪 C1] 🚫 需求跟踪表有数据但 issues 主表缺关键列 [${missing.join(',')}]（各表计数：${detail}）→ 疑似旧 schema，拒绝放行，需求跟踪接口将返 503。请人工迁移补列后重启。其他模块不受影响。`);
+                return;
+            }
+            // 结构完整 → 正常放行，不重建
+            ISSUE_SCHEMA_STATE.error = null;
+            ISSUE_SCHEMA_STATE.ready = true;
+            logger.info(`[需求跟踪 C1] ✅ issues 表已存在且结构完整（${detail}），跳过重建直接放行。`);
+            return;
         }
 
         // 全部 0 行（或表不存在）→ 安全重建。独立 serialize 保证 DROP→CREATE→INDEX 严格串行
