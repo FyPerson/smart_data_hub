@@ -1062,7 +1062,7 @@
                 // 状态流转（按 H-1 过滤后的 visibleStatuses）
                 visibleStatuses.forEach(s => {
                     const btnClass = s === '已关闭' ? 'btn-secondary' : 'btn-primary';
-                    html += `<button class="${btnClass}" onclick="changeStatus(${issue.id}, '${s}', '${issue.status}')" style="font-size:12px; padding:5px 12px;">${s === '处理中' && issue.status === '待验证' ? '打回处理' : '转为' + statusDisplayLabel(s)}</button>`;
+                    html += `<button class="${btnClass}" onclick="changeStatus(${issue.id}, '${s}', '${issue.status}')" style="font-size:12px; padding:5px 12px;">${transitionBtnLabel(issue.status, s)}</button>`;
                 });
                 // 以下管理动作（指派/编辑/删除/通知）仍仅 isManager 可见
                 if (isManager) {
@@ -1894,6 +1894,16 @@
         //   仅"给人看的文字"映射为「已完成」。徽章必须 class 用原 status、文字用本函数，两者分离。
         function statusDisplayLabel(status) {
             return status === '已关闭' ? '已完成' : status;
+        }
+
+        // 状态推进按钮文案（v1.75.3）：把"状态机内部术语"翻译成开发/管理员能直觉理解的动作文案。
+        //   特例：处理中→待验证 = 开发"做完交验收"，用「完成并提交验收」（比"转为待验证"直观，所有角色统一）；
+        //         待验证→处理中 = 验收不通过打回，用「打回处理」。其余流转沿用「转为+展示名」。
+        //   ⚠️ 仅改按钮文字，changeStatus 仍传原始目标状态 s（'待验证'/'处理中'…），不影响状态机逻辑。
+        function transitionBtnLabel(fromStatus, toStatus) {
+            if (fromStatus === '处理中' && toStatus === '待验证') return '完成并提交验收';
+            if (fromStatus === '待验证' && toStatus === '处理中') return '打回处理';
+            return '转为' + statusDisplayLabel(toStatus);
         }
     </script>
 
