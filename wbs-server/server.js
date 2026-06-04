@@ -126,6 +126,34 @@ function requireIssueSchemaReady(req, res, next) {
     }
     next();
 }
+
+// ── v1.75.0 优化 schema readiness（方案 §3.0）─────────────────────────────────
+//   v1.75.0 给 issues 加 5 列（C4 拉群：dingtalk_chat_*）+ issue_comments 加 is_system（C2 系统评论）。
+//   与 v1.74.5 ISSUE_REQUIRED_COLS（C1 必填列，缺失→全模块 503）**分层**：v1.75.0 新列缺失只走
+//   本软降级标志，仅挡 C2 改人守卫 / C4 拉群两个**新**入口（返 503），不连累 C1-C5 已上线功能。
+//   设计哲学与 v1.74.5 一致：模块级/入口级降级，不 process.exit（同进程 collab/指标/数仓不受牵连）。
+const ISSUE_V1750_SCHEMA_STATE = { ready: false, error: null };
+// v1.75.0 新列清单（migration 后 PRAGMA 复查这些列全部到位才置 ready）
+const ISSUE_V1750_ISSUES_COLS = ['dingtalk_chat_id', 'dingtalk_open_conversation_id', 'dingtalk_chat_created_at', 'dingtalk_chat_created_by', 'dingtalk_chat_name'];
+const ISSUE_V1750_COMMENTS_COLS = ['is_system'];
+// 守门中间件：挂在依赖 v1.75.0 新列**写**路径的入口（C2 assign 守卫 / C4 create-chat）。
+//   readiness=false → 503，避免 ALTER 失败被吞后入口运行期 SQL 崩（方案 §3.0 codex 30#1）。
+function requireIssueV1750SchemaReady(req, res, next) {
+    if (ISSUE_V1750_SCHEMA_STATE.error) {
+        return res.status(503).json({
+            error: '需求跟踪 v1.75.0 优化功能暂不可用：新增字段未就绪',
+            detail: ISSUE_V1750_SCHEMA_STATE.error,
+            code: 'ISSUE_V1750_SCHEMA_NOT_READY'
+        });
+    }
+    if (!ISSUE_V1750_SCHEMA_STATE.ready) {
+        return res.status(503).json({
+            error: '需求跟踪 v1.75.0 优化功能正在初始化，请稍后重试',
+            code: 'ISSUE_V1750_SCHEMA_INITIALIZING'
+        });
+    }
+    next();
+}
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || 'issue_tracker_webhook_key';
 
 // Ensure directories exist
@@ -1254,6 +1282,56 @@ function initTable() {
         });
     });
 
+    // ── v1.75.0 优化 migration 段（方案 §3.0）──────────────────────────────────
+    //   仅在 C1 守门"放行/重建成功"后调用（保证 issues / issue_comments 表确定存在才 ALTER）。
+    //   两表各加新列 → ALTER 后 PRAGMA 复查全部到位才置 ISSUE_V1750_SCHEMA_STATE.ready=true。
+    //   幂等：列已存在（duplicate column name）忽略；任何 ALTER/复查异常 → error + ready 保持 false（入口软降级 503）。
+    const getTableColumns = (table) => new Promise((resolve) => {
+        db.all(`PRAGMA table_info("${table}")`, (err, rows) => {
+            if (err) return resolve(null);
+            resolve(rows ? rows.map(r => r.name) : []);
+        });
+    });
+    const alterAddColumnAsync = (table, column, type) => new Promise((resolve) => {
+        db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`, (err) => {
+            if (!err) { logger.info(`[需求跟踪 v1.75.0] ALTER ${table}: 列 ${column} 已添加`); return resolve(true); }
+            if (err.message && err.message.includes('duplicate column name')) return resolve(true); // 幂等：列已存在
+            logger.error(`[需求跟踪 v1.75.0] ALTER ${table} ADD COLUMN ${column} 失败：${err.message}`);
+            resolve(false);
+        });
+    });
+    const runIssueV1750Migration = async () => {
+        try {
+            // issues：5 列（C4 拉群）；issue_comments：is_system（C2 系统评论）
+            const okIssues = await Promise.all([
+                alterAddColumnAsync('issues', 'dingtalk_chat_id', 'TEXT'),
+                alterAddColumnAsync('issues', 'dingtalk_open_conversation_id', 'TEXT'),
+                alterAddColumnAsync('issues', 'dingtalk_chat_created_at', 'DATETIME'),
+                alterAddColumnAsync('issues', 'dingtalk_chat_created_by', 'INTEGER'),
+                alterAddColumnAsync('issues', 'dingtalk_chat_name', 'TEXT'),
+            ]);
+            const okComments = await alterAddColumnAsync('issue_comments', 'is_system', 'INTEGER NOT NULL DEFAULT 0');
+            // ALTER 后 PRAGMA 复查（不信 ALTER 返回值，以实际列为准——防 ALTER 静默失败 / 并发）
+            const issuesCols = await getTableColumns('issues');
+            const commentsCols = await getTableColumns('issue_comments');
+            const missIssues = issuesCols === null ? ['<读列失败>'] : ISSUE_V1750_ISSUES_COLS.filter(c => !issuesCols.includes(c));
+            const missComments = commentsCols === null ? ['<读列失败>'] : ISSUE_V1750_COMMENTS_COLS.filter(c => !commentsCols.includes(c));
+            if (!okIssues.every(Boolean) || !okComments || missIssues.length || missComments.length) {
+                ISSUE_V1750_SCHEMA_STATE.error = `v1.75.0 字段迁移未完成（issues 缺：${missIssues.join(',') || '无'}；issue_comments 缺：${missComments.join(',') || '无'}）`;
+                ISSUE_V1750_SCHEMA_STATE.ready = false;
+                logger.error(`[需求跟踪 v1.75.0] 🚫 ${ISSUE_V1750_SCHEMA_STATE.error} → C2 改人守卫 / C4 拉群入口将返 503，其余功能不受影响`);
+                return;
+            }
+            ISSUE_V1750_SCHEMA_STATE.error = null;
+            ISSUE_V1750_SCHEMA_STATE.ready = true;
+            logger.info('[需求跟踪 v1.75.0] ✅ issues +5 列 / issue_comments +is_system 迁移到位，C2/C4 入口放行');
+        } catch (e) {
+            ISSUE_V1750_SCHEMA_STATE.error = `v1.75.0 字段迁移异常：${e.message}`;
+            ISSUE_V1750_SCHEMA_STATE.ready = false;
+            logger.error(`[需求跟踪 v1.75.0] 🚫 迁移异常：${e.message}`);
+        }
+    };
+
     (async () => {
         const counts = await Promise.all(ISSUE_TABLES.map(countIssueTable));
         const unknownErr = counts.some(c => c < 0);
@@ -1285,6 +1363,8 @@ function initTable() {
             ISSUE_SCHEMA_STATE.error = null;
             ISSUE_SCHEMA_STATE.ready = true;
             logger.info(`[需求跟踪 C1] ✅ issues 表已存在且结构完整（${detail}），跳过重建直接放行。`);
+            // v1.75.0：表已存在放行后跑 migration（补 5 列 + is_system；幂等，已有列忽略）
+            await runIssueV1750Migration();
             return;
         }
 
@@ -1433,6 +1513,9 @@ function initTable() {
                     ISSUE_SCHEMA_STATE.error = null;
                     ISSUE_SCHEMA_STATE.ready = true;
                     logger.info('[需求跟踪 C1] issues / issue_comments / issue_attachments / issue_status_history 表重建完成');
+                    // v1.75.0：重建出的是全新空表（CREATE 语句不含 v1.75.0 列——新旧表统一走 migration ALTER，
+                    //   避免"新表有列旧表没列"两套真相）；重建成功后跑 migration 补 5 列 + is_system。
+                    runIssueV1750Migration().catch((e) => logger.error(`[需求跟踪 v1.75.0] migration 调用异常：${e.message}`));
                 }
             });
         }); // 闭合重建 db.serialize
@@ -10289,25 +10372,91 @@ app.put('/api/issues/:id/status', authenticateToken, requireIssueSchemaReady, re
 
 // 指派 / 改派（C3 H-1+H-3：只更新负责人 + 写 pending_reassign_*，不内嵌通知；通知走 §2.8 notify-reassign）
 //   M-8：assigned_to_name 后端查 users 表填，不信任入参；改派时记录"原→新"供 notify-reassign 读取
+// v1.75.0 C2 改人守卫（方案 §4 C2 + 编码前真相核实修正 + codex 39 审 H-1/M-1/L-1）：
+//   现有 endpoint 不支持取消指派（传 null→400）+ 首派前 notify 必 not_sent，故四象限只 3 个分支可达——
+//   ① 首派（null→非空，notify 必 not_sent）/ ② 改派（非空→非空）/ ③ 未变（相同 id，下方已拦）。
+//   守卫边界（用户拍板）：仅当 notify_status='sent'（已成功通知开发后又改人）才走"重置链路"——
+//   重置开发侧 notify_* + 清 pending_reassign + 写 is_system 系统评论（这是 notify-reassign 覆盖不到的
+//   "通知后反悔改人"缺口）；notify_status 非 sent（not_sent/failed，还没成功通知就改人）→ 维持现有写
+//   pending_reassign 逻辑不动（pending 锚点照常给 notify-reassign 用）。两路按 notify_status 分流，不冲突。
+// codex 39 审修订（用户全按）：
+//   H-1：requireIssueV1750SchemaReady **不挂路由级**（否则迁移失败时首派/未通知改派/未变这些不写 is_system
+//        的既有路径也被挡 503，扩大故障面）——下沉到 reset 分支内判定，只有真要写 is_system 才检查 readiness。
+//   M-1/L-1：脏状态归一化——hasRealAssignee 用 Number(assigned_to)>0（排除 NULL/0 占位，对齐 collab
+//        developer_id>0 范式）；脏状态"无真实负责人却 notify=sent"（!hasRealAssignee && wasNotified）也纳入
+//        重置链路顺手清理（方案 §8 约束②显式兜底，不交给实现自行猜测）。
 app.put('/api/issues/:id/assign', authenticateToken, requireIssueSchemaReady, requirePublisherOrAdmin, async (req, res) => {
+    const id = req.params.id;
     try {
         const { assigned_to } = req.body;
         // 不支持取消指派（传 null 拒绝）——取消指派无业务场景，且会让 pending_reassign 语义混乱
+        // （方案四象限"非空→null 取消指派""null→null 空转"在此被 400 拦截，endpoint 层不可达，不实现这两分支）
         if (assigned_to === undefined || assigned_to === null || assigned_to === '') {
             return res.status(400).json({ error: '必须指定被指派人', code: 'ASSIGN_TARGET_REQUIRED' });
         }
-        const issue = await dbGetAsync('SELECT id, assigned_to, assigned_to_name FROM issues WHERE id = ?', [req.params.id]);
+        // v1.75.0 C2：多读 notify_status（判"已通知后改人"）；read_at/notified_at 等随重置一起清
+        const issue = await dbGetAsync('SELECT id, assigned_to, assigned_to_name, notify_status FROM issues WHERE id = ?', [id]);
         if (!issue) return res.status(404).json({ error: '需求不存在' });
 
         const u = await dbGetAsync('SELECT id, display_name FROM users WHERE id = ?', [Number(assigned_to)]);
         if (!u) return res.status(400).json({ error: '指派目标用户不存在' });
 
-        // 跨人改派未变化不重复写
-        if (issue.assigned_to && Number(issue.assigned_to) === u.id) {
+        // ③ 未变（相同 id）→ 幂等不重复写（可达分支之一）。注意用 hasRealAssignee 口径避免 0 占位误判。
+        const hasRealAssignee = Number(issue.assigned_to) > 0;        // L-1：排除 NULL/0 占位，0 非合法 user_id
+        if (hasRealAssignee && Number(issue.assigned_to) === u.id) {
             return res.json({ updated: 0, message: '负责人未变化' });
         }
 
-        // 改派（原负责人非空）→ 记 pending_reassign_*，供 notify-reassign 生成"原→新"通知；首次指派则 from 为空
+        // v1.75.0 C2 分流（codex 39 M-1/L-1 修订）：reset 链路触发条件 = 已成功通知过（notify_status='sent'）
+        //   且（正常改派 hasRealAssignee=true，或脏状态：无真实负责人却 notify=sent）。即只要"已通知 + 负责人将变"
+        //   就重置——hasRealAssignee 时是正常"通知后改人"，!hasRealAssignee 时是脏状态（assigned_to 空/0 但已 sent，
+        //   §8 约束②显式兜底纳入重置清理，使其回到干净态）。两种都需重置 notify_*，统一走 reset 链路。
+        const wasNotified = issue.notify_status === 'sent';           // 已成功通知开发过
+        const needResetGuard = wasNotified;                           // 已通知 + 负责人将变（未变已在上方拦截）→ 必重置
+
+        if (needResetGuard) {
+            // ── 重置链路：重置开发侧 notify_* + 清 pending_reassign + 写系统评论（同一事务）──
+            //   字段隔离：只清开发侧 notify_*（notify_status/notified_at/notify_message_key/read_at/notify_error）；
+            //   业务方 requester_notify_* 绝不碰（物理隔离）。重置后新负责人回到"未通知"态，admin 需重新点通知。
+            // H-1：reset 链路要写 issue_comments.is_system，此处才检查 v1.75.0 readiness（下沉，不挡其他分支）。
+            if (ISSUE_V1750_SCHEMA_STATE.error || !ISSUE_V1750_SCHEMA_STATE.ready) {
+                return res.status(503).json({
+                    error: '需求跟踪 v1.75.0 优化功能（改人留痕）暂不可用：新增字段未就绪，请稍后重试或联系管理员',
+                    detail: ISSUE_V1750_SCHEMA_STATE.error || 'initializing',
+                    code: 'ISSUE_V1750_SCHEMA_NOT_READY'
+                });
+            }
+            const fromLabel = hasRealAssignee ? (issue.assigned_to_name || '未知') : '未指派';
+            const sysComment = `🔄【系统】负责人由「${fromLabel}」改为「${u.display_name}」，原通知已失效，请重新通知新负责人。`;
+            await dbRunAsync('BEGIN IMMEDIATE');
+            try {
+                await dbRunAsync(
+                    `UPDATE issues SET assigned_to = ?, assigned_to_name = ?,
+                            notify_status = 'not_sent', notified_at = NULL, notify_message_key = NULL,
+                            read_at = NULL, notify_error = NULL,
+                            pending_reassign_from_id = NULL, pending_reassign_from_name = NULL,
+                            pending_reassign_to_id = NULL, pending_reassign_to_name = NULL,
+                            reassigned_at = datetime('now','localtime'),
+                            updated_at = datetime('now','localtime')
+                     WHERE id = ?`,
+                    [u.id, u.display_name, id]
+                );
+                // 系统评论固定 user_name='系统'（前端展示用），user_id 记操作者便于追溯；is_system=1 是判别字段（复审 low-1 注释补充）
+                await dbRunAsync(
+                    `INSERT INTO issue_comments (issue_id, user_id, user_name, content, is_system)
+                     VALUES (?, ?, '系统', ?, 1)`,
+                    [id, Number(req.user.id), sysComment]
+                );
+                await dbRunAsync('COMMIT');
+            } catch (txErr) {
+                try { await dbRunAsync('ROLLBACK'); } catch (_) {}
+                throw txErr;
+            }
+            logger.info(`用户 ${req.user.username} 改派需求 #${id} 给 ${u.display_name}（原 ${fromLabel}，已通知→重置通知态 + 系统评论留痕${hasRealAssignee ? '' : '；⚠️脏状态兜底：原无真实负责人却 notify=sent'}）`);
+            return res.json({ updated: 1, assigned_to: u.id, assigned_to_name: u.display_name, notify_reset: true });
+        }
+
+        // ① 首派（null→非空，notify 必 not_sent）/ ② 改派但未通知（not_sent/failed）→ 维持现有 pending_reassign 写入逻辑
         // ⚠️ 语义（codex 10 M-3）：pending_reassign_* 是**单字段覆盖式**，记录"最近一次改派的原→新"。
         //   若 admin 未点 notify-reassign 就连续改派（A→B→C），from 会被覆盖为 B、to=C，通知时只通知 B→C，
         //   A 不会收到"已转交"。这是**有意取舍**——未通知前的连续改派视为中间跳未生效，只通知最后有效负责人。
@@ -10321,11 +10470,12 @@ app.put('/api/issues/:id/assign', authenticateToken, requireIssueSchemaReady, re
                     updated_at = datetime('now','localtime')
              WHERE id = ?`,
             [u.id, u.display_name,
-             issue.assigned_to || null, issue.assigned_to_name || null,
+             // L-1：hasRealAssignee 归一化——0 占位/NULL 都写 null，from_id 不落 0 脏值（首派 from 为空亦走此）
+             hasRealAssignee ? issue.assigned_to : null, hasRealAssignee ? (issue.assigned_to_name || null) : null,
              u.id, u.display_name,
-             req.params.id]
+             id]
         );
-        logger.info(`用户 ${req.user.username} 指派需求 #${req.params.id} 给 ${u.display_name}（原 ${issue.assigned_to_name || '无'}）`);
+        logger.info(`用户 ${req.user.username} 指派需求 #${id} 给 ${u.display_name}（原 ${issue.assigned_to_name || '无'}）`);
         res.json({ updated: 1, assigned_to: u.id, assigned_to_name: u.display_name });
     } catch (err) {
         logger.error('指派需求失败:', err.message);
@@ -10921,6 +11071,429 @@ app.get('/api/issues/:id/notify-read-status', authenticateToken, requireIssueSch
         res.json({ recipient, read: isRead, read_at: readAt, read_user_count: (readResult.readUserIds || []).length });
     } catch (err) {
         logger.error('查已读状态失败:', err.message);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ── C4：需求拉群讨论（方案 §4 C4，对齐 collab create-chat server.js:12090 朴素幂等范式）──────────
+//   POST /api/issues/:id/create-chat：把需求相关方拉进钉钉群讨论。
+//   与 collab 差异：① 权限 admin/publisher/本单 assigned_to/本单 created_by，viewer 禁止
+//                   ② 群成员 示例用户A(3)+assigned_to+requester_phone 反查业务方+触发人
+//                   ③ 群名 [需求]{title}-讨论（复用 collab Unicode 裁剪逻辑，与协作群命名区分）
+//                   ④ issue 无操作日志表，补偿/降级走 logger.error/warn 结构化日志（可检索）
+//   挂 requireIssueV1750SchemaReady：写 issues.dingtalk_chat_*（v1.75.0 新列），缺列软降级 503。
+//   挂 requireNonViewer：先挡 viewer（admin/publisher/user 放行）；handler 内再判 user 必须是本单关系人。
+//   幂等（对齐 collab 12138，不加 mutex）：先查 dingtalk_open_conversation_id 非空则返"已有群"——
+//     生产单进程 fork_mode，collab 同范式跑一月无重复群（codex 31 持久化锁判过度设计驳回）。
+app.post('/api/issues/:id/create-chat', authenticateToken, requireIssueSchemaReady, requireIssueV1750SchemaReady, requireNonViewer, async (req, res) => {
+    const idStr = req.params.id;
+    const userId = Number(req.user.id);
+    const userName = req.user.display_name || req.user.username || `user#${userId}`;
+    const userRole = req.user.role;
+
+    if (!/^[1-9]\d*$/.test(idStr)) {
+        return res.status(400).json({ error: 'id 必须是正整数', code: 'INVALID_ID' });
+    }
+    const id = parseInt(idStr, 10);
+    if (!Number.isSafeInteger(id)) {
+        return res.status(400).json({ error: 'id 超出安全整数范围', code: 'INVALID_ID' });
+    }
+    // 当前用户 id 正整数守卫（对齐 collab create-chat M2）
+    if (!Number.isSafeInteger(userId) || userId <= 0) {
+        return res.status(400).json({ error: '当前用户 id 非法', code: 'INVALID_USER_ID' });
+    }
+
+    try {
+        const issue = await dbGetAsync(
+            `SELECT id, title, status, requester_name, requester_phone,
+                    assigned_to, assigned_to_name, created_by, oa_number,
+                    dingtalk_chat_id, dingtalk_open_conversation_id, dingtalk_chat_name
+               FROM issues WHERE id = ?`,
+            [id]
+        );
+        if (!issue) return res.status(404).json({ error: '需求不存在' });
+
+        // 权限校验：admin/publisher 任意单；user 必须是本单 assigned_to 或 created_by；viewer 已被 requireNonViewer 挡
+        //   （hasRealAssignee 口径对齐 C2：Number()>0 排除 0/NULL 占位）
+        const isAdminOrPublisher = userRole === 'admin' || userRole === 'publisher';
+        const isAssignee = Number(issue.assigned_to) > 0 && Number(issue.assigned_to) === userId;
+        const isCreator = Number(issue.created_by) > 0 && Number(issue.created_by) === userId;
+        if (!isAdminOrPublisher && !isAssignee && !isCreator) {
+            return res.status(403).json({
+                error: '仅管理员/发布者，或本需求的负责人/创建人可拉起讨论群',
+                code: 'NOT_ALLOWED'
+            });
+        }
+
+        // 幂等：已建群直接返回旧值（朴素读时检查，对齐 collab 12138，不加 mutex）
+        // codex 35 审 H-1：空串/NULL 口径统一（trim 后非空才算已建群，与落库 UPDATE 守卫一致防孤儿群）
+        // codex 35 审 M-2 残余风险：单进程同进程异步并发（同 issue 两请求 await 钉钉期间交错）DB 一致性可守住，
+        //   但仍可能建出"另一个孤儿钉钉群"——落库失败补偿已有 CHAT_LINK_FAILED 告警 + 群主钉钉客户端手动解散；
+        //   collab 同范式跑一月无报告（内部 ≤10 人手动场景双击概率极低），不加进程内 in-flight 锁；
+        //   Commit D 前端按钮提交态防抖辅助。
+        const existingOpenConvId = String(issue.dingtalk_open_conversation_id || '').trim();
+        if (existingOpenConvId) {
+            // codex 36 复审 L-3：返回体口径与判断一致（trim 后透出，防历史脏值继续向外）
+            return res.json({
+                message: '该需求已有讨论群（请到钉钉客户端查看）',
+                id,
+                chat_id: String(issue.dingtalk_chat_id || '').trim(),
+                open_conversation_id: existingOpenConvId,
+                chat_name: String(issue.dingtalk_chat_name || '').trim(),
+                idempotent: true
+            });
+        }
+
+        // 取凭证
+        const [appKey, appSecret, robotCode] = await Promise.all(
+            ['dingtalk_app_key', 'dingtalk_app_secret', 'dingtalk_robot_code'].map(readSystemConfig)
+        );
+        if (!appKey || !appSecret || !robotCode) {
+            return res.status(500).json({ error: '钉钉配置未填写，请管理员先到系统配置 → 钉钉配置填写凭证', code: 'NO_DINGTALK_CONFIG' });
+        }
+
+        // 构造群成员：示例用户A（固定 admin 群主）+ assigned_to（非空才加）+ 触发人；业务方走 phone 反查单独加
+        const memberUserIds = new Set();
+        memberUserIds.add(COLLAB_CHAT_ADMIN_ID);
+        if (Number(issue.assigned_to) > 0) memberUserIds.add(Number(issue.assigned_to));
+        memberUserIds.add(userId);
+
+        // 拉取所有平台成员的 dingtalk_user_id
+        const memberRows = await dbAllAsync(
+            `SELECT id, display_name, phone, dingtalk_user_id FROM users WHERE id IN (${[...memberUserIds].map(() => '?').join(',')})`,
+            [...memberUserIds]
+        );
+        if (memberRows.length !== memberUserIds.size) {
+            const foundIds = new Set(memberRows.map(r => r.id));
+            const missing = [...memberUserIds].filter(uid => !foundIds.has(uid));
+            return res.status(400).json({
+                error: `群成员账号查询不全，缺失 user.id=${missing.join(',')}`,
+                code: 'MEMBER_NOT_FOUND'
+            });
+        }
+
+        // 取 access_token
+        let token;
+        try {
+            token = await dingtalkNotify.getAccessToken(appKey, appSecret);
+        } catch (err) {
+            const cls = dingtalkNotify.classifyError(err);
+            return res.status(502).json({ error: cls.hint, errcode: cls.errcode, errmsg: cls.errmsg, reason: cls.reason, code: 'GETTOKEN_FAILED' });
+        }
+
+        // 业务方负责人手机号反查（最佳努力，对齐 collab 12193）：
+        //   requester_phone 非空 → 正则防御 → getUserIdByMobile 反查；命中加入群；未命中/异常 → 静默降级带 warning
+        let requesterDingUid = null;
+        let requesterDegraded = false;
+        // codex 35 L-1：手机号 trim 归一化（防前后空格导致正则误判非法或传带空白手机号给钉钉）
+        const requesterPhoneNormalized = String(issue.requester_phone || '').trim();
+        if (requesterPhoneNormalized) {
+            if (!/^1\d{10}$/.test(requesterPhoneNormalized)) {
+                logger.warn(`[issue-create-chat] 需求 #${id} requester_phone 格式非法（${maskPhone(requesterPhoneNormalized)}），跳过反查降级`);
+                requesterDegraded = true;
+            } else {
+                try {
+                    const rawDingUid = await dingtalkNotify.getUserIdByMobile(token, requesterPhoneNormalized);
+                    requesterDingUid = rawDingUid != null ? String(rawDingUid).trim() : null;
+                    if (requesterDingUid) {
+                        logger.info(`[issue-create-chat] 需求 #${id} 业务方手机号 ${maskPhone(requesterPhoneNormalized)} 反查命中 dingtalk_user_id=${requesterDingUid}`);
+                    } else {
+                        requesterDegraded = true;
+                    }
+                } catch (err) {
+                    const cls = dingtalkNotify.classifyError(err);
+                    logger.warn(`[issue-create-chat] 需求 #${id} 业务方手机号 ${maskPhone(requesterPhoneNormalized)} 反查失败：errcode=${cls.errcode} reason=${cls.reason}，降级走现有成员`);
+                    requesterDingUid = null;
+                    requesterDegraded = true;
+                }
+            }
+        } else {
+            requesterDegraded = true;  // 无手机号，业务方无法加入
+        }
+
+        // 补齐平台成员 dingtalk_user_id（缺失的按手机号反查 + 回写）
+        const dingUserIds = [];
+        for (const m of memberRows) {
+            // codex 35 M-1：标准化读取，空白串不算有效（防 trim 空串混入成员误判 NOT_ENOUGH_MEMBERS）
+            let dingUid = String(m.dingtalk_user_id || '').trim();
+            // codex 35 L-1：m.phone trim 归一化（防带空格反查失败）
+            const memberPhoneNormalized = String(m.phone || '').trim();
+            if (!dingUid) {
+                if (!memberPhoneNormalized) {
+                    return res.status(400).json({
+                        error: `${m.display_name || 'user#' + m.id} 未绑定手机号，无法拉入钉钉群`,
+                        suggestion: '请到 admin → 用户管理 → 编辑该用户 → 填写手机号后重试',
+                        code: 'NO_PHONE',
+                        target_user_id: m.id
+                    });
+                }
+                try {
+                    // codex 35 M-1：反查返回值 trim 归一化；空值显式失败（不回写空到 users 也不混入成员）
+                    const rawDingUid = await dingtalkNotify.getUserIdByMobile(token, memberPhoneNormalized);
+                    dingUid = rawDingUid != null ? String(rawDingUid).trim() : '';
+                    if (!dingUid) {
+                        return res.status(502).json({
+                            error: `${m.display_name} 钉钉账号反查为空，无法拉入群`,
+                            target_user_id: m.id,
+                            code: 'DINGTALK_USER_LOOKUP_EMPTY'
+                        });
+                    }
+                    await dbRunAsync(
+                        `UPDATE users SET dingtalk_user_id = ?
+                         WHERE id = ? AND (dingtalk_user_id IS NULL OR TRIM(dingtalk_user_id) = '')`,
+                        [dingUid, m.id]
+                    );
+                } catch (err) {
+                    const cls = dingtalkNotify.classifyError(err);
+                    return res.status(502).json({
+                        error: `${m.display_name} 钉钉账号查询失败：${cls.hint}`,
+                        errcode: cls.errcode, errmsg: cls.errmsg,
+                        target_user_id: m.id,
+                        code: 'DINGTALK_USER_LOOKUP_FAILED'
+                    });
+                }
+            }
+            const normalizedDingUid = dingUid != null ? String(dingUid).trim() : '';
+            dingUserIds.push({ userId: m.id, dingtalk_user_id: normalizedDingUid, display_name: m.display_name });
+        }
+
+        // 业务方真人加入群（最佳努力，反查命中才加；不进 users 表用 0 占位 userId + 真实 dingtalk_user_id）
+        if (requesterDingUid) {
+            const dupExisting = dingUserIds.some(u => u.dingtalk_user_id === requesterDingUid);
+            if (!dupExisting) {
+                dingUserIds.push({
+                    userId: 0,
+                    dingtalk_user_id: requesterDingUid,
+                    display_name: `${issue.requester_name || '业务方'}（业务方）`
+                });
+            }
+        }
+
+        // 最小成群下限（方案 §C4）：去重后真实钉钉号 < 2 人 → 无法建群
+        const uniqueDingUids = new Set(dingUserIds.map(u => u.dingtalk_user_id).filter(Boolean));
+        if (uniqueDingUids.size < 2) {
+            return res.status(400).json({
+                error: '缺少开发或业务方钉钉账号，群成员不足 2 人无法建群（请确认负责人/业务方已绑定钉钉手机号）',
+                code: 'NOT_ENOUGH_MEMBERS'
+            });
+        }
+
+        // 群主固定示例用户A（COLLAB_CHAT_ADMIN_ID）——对齐 collab v1.71.2，便于统一收口解散
+        const owner = dingUserIds.find(u => u.userId === COLLAB_CHAT_ADMIN_ID);
+        if (!owner) {
+            return res.status(500).json({ error: '平台群主（示例用户A）钉钉账号未找到', code: 'OWNER_NOT_FOUND' });
+        }
+
+        // 群名：[需求]{title}-讨论（方案决策点 6，与协作群 [OA-xxx] 命名区分；复用 collab ≤20 字符 Unicode 裁剪）
+        //   裁剪用 Array.from 按 Unicode 码点切（防中文/emoji 截半），整体超 20 时截 title 保前后缀
+        const rawTitle = String(issue.title || `需求${id}`);
+        const PREFIX = '[需求]', SUFFIX = '-讨论';
+        let chatName = `${PREFIX}${rawTitle}${SUFFIX}`;
+        if (Array.from(chatName).length > 20) {
+            const budget = 20 - Array.from(PREFIX).length - Array.from(SUFFIX).length;  // 留给 title 的码点预算
+            const clippedTitle = Array.from(rawTitle).slice(0, Math.max(budget, 0)).join('');
+            chatName = `${PREFIX}${clippedTitle}${SUFFIX}`;
+        }
+
+        // codex 39 末次合并审 #1 HIGH：建群前轻量复查 assigned_to 防"成员快照过期"竞态
+        //   场景：本 endpoint 读 issue 拿 assigned_to 后，C2 PUT /assign 改派到新负责人 →
+        //         本端用旧 assigned_to 建钉钉群 → 落库 → 前端永久显示"已建群"但新负责人不在群里
+        //   修法：钉钉调用前再 SELECT 一次 assigned_to + dingtalk_open_conversation_id，
+        //         若 dingtalk_open_conversation_id 已被并发请求填上 → 走幂等返回（防"另一个孤儿群"）；
+        //         若 assigned_to 与初始快照不同 → 409 让用户刷新页面后重拉（不发钉钉避免 admin 手动救场）
+        //   说明：仍保留方案 §C4 朴素幂等（不加进程内锁），仅在 dingtalk 外部调用前做一次乐观复查；
+        //         此复查窗口外（钉钉调用期间 → 落库前）仍可能有竞态，但已大幅缩窄；
+        //         落库 UPDATE WHERE 守 dingtalk_open_conversation_id IS NULL **+ assigned_to IS ?**（codex 40 #1）双保险
+        //   codex 40 #1 治本：UPDATE 加 assigned_to 乐观锁守 → 钉钉调用期间（可能秒级）改派也能拦住；
+        //                      affectedRows=0 后 SELECT 判 ① open_conv_id 已被填 → 幂等 ② assigned_to 已变 → 409 + CRITICAL 日志钉钉孤儿群
+        //   codex 40 #2：recheck 返空 → 404 ISSUE_DELETED_BEFORE_CHAT 避免无主孤儿群
+        const recheck = await dbGetAsync(
+            `SELECT assigned_to, dingtalk_chat_id, dingtalk_open_conversation_id, dingtalk_chat_name
+               FROM issues WHERE id = ?`,
+            [id]
+        );
+        if (!recheck) {
+            logger.warn(`[issue-create-chat] 需求 #${id} 建群前复查未找到 issue（已被并发删除），拒绝建钉钉孤儿群`);
+            return res.status(404).json({
+                error: '需求在拉群准备过程中已被删除，请刷新页面',
+                code: 'ISSUE_DELETED_BEFORE_CHAT'
+            });
+        }
+        if (String(recheck.dingtalk_open_conversation_id || '').trim()) {
+            // 并发请求已先建群 → 走幂等返回（口径与 11135 一致）
+            return res.json({
+                message: '该需求已有讨论群（并发请求已先建群，请到钉钉客户端查看）',
+                id,
+                chat_id: String(recheck.dingtalk_chat_id || '').trim(),
+                open_conversation_id: String(recheck.dingtalk_open_conversation_id || '').trim(),
+                chat_name: String(recheck.dingtalk_chat_name || '').trim(),
+                idempotent: true
+            });
+        }
+        // codex 41 #1：nullable-aware 比较口径与下游 UPDATE 乐观锁一致，防 Number(null)=0 误判
+        const recheckAssignedTo = recheck.assigned_to == null ? null : Number(recheck.assigned_to);
+        const issueAssignedTo = issue.assigned_to == null ? null : Number(issue.assigned_to);
+        if (recheckAssignedTo !== issueAssignedTo) {
+            logger.warn(`[issue-create-chat] 需求 #${id} 建群前复查发现 assigned_to 变化：${issueAssignedTo} → ${recheckAssignedTo}（C2 改派并发），拒绝按旧成员建群`);
+            return res.status(409).json({
+                error: '负责人在拉群准备过程中已被改派，请刷新页面后重新拉群',
+                code: 'ASSIGNEE_CHANGED_BEFORE_CHAT'
+            });
+        }
+        // codex 40 #1：保存初始 assigned_to 快照供落库 UPDATE 乐观锁使用
+        //   （建群前复查 + 落库乐观锁形成双保险，闭环复查到 UPDATE 之间的窗口）
+        //   codex 41 #1 HIGH：nullable-aware 快照——Number(null)=0 但 SQLite 'assigned_to IS 0' 不匹配 IS NULL；
+        //                     必须保留 null 让 sqlite3 驱动绑定到 SQL NULL，'IS ?'(null) 才等价于 IS NULL（首派前 NULL 可达）
+        const initialAssignedTo = issue.assigned_to == null ? null : Number(issue.assigned_to);
+
+        // 调钉钉建群
+        let chatCreateResult;
+        try {
+            chatCreateResult = await dingtalkNotify.createChatGroup(
+                token,
+                chatName,
+                owner.dingtalk_user_id,
+                dingUserIds.map(u => u.dingtalk_user_id)
+            );
+        } catch (err) {
+            const cls = dingtalkNotify.classifyError(err);
+            logger.warn(`[issue-create-chat] 需求 #${id} chat/create 调用失败 by ${userName}：${cls.reason}`);
+            return res.status(502).json({ error: cls.hint, errcode: cls.errcode, errmsg: cls.errmsg, reason: cls.reason, code: 'CHAT_CREATE_FAILED' });
+        }
+        if (chatCreateResult.errcode !== 0) {
+            const cls = dingtalkNotify.classifyError(chatCreateResult);
+            logger.warn(`[issue-create-chat] 需求 #${id} chat/create 被拒 errcode=${chatCreateResult.errcode} by ${userName}`);
+            return res.status(502).json({
+                error: cls.hint, errcode: chatCreateResult.errcode, errmsg: chatCreateResult.errmsg,
+                reason: cls.reason, code: 'CHAT_CREATE_REJECTED'
+            });
+        }
+
+        const newChatId = chatCreateResult.chatid;
+        const newOpenConvId = chatCreateResult.openConversationId;
+
+        // 条件 UPDATE 落库（对齐 collab H1+H2）：dingtalk_open_conversation_id IS NULL 守卫并发后写者落不进库
+        let updateResult;
+        try {
+            // codex 40 #1：UPDATE 加初始快照守卫双保险（SQLite IS 运算符兼容 null = null 首派可达）；
+            //   钉钉调用期间改派会让乐观锁失败 → changes=0 → 走下面分支重新 SELECT 判幂等/409。
+            //   codex 42 #1：本注释刻意不在同段内同时含完整 SQL 三段关键词，避免 T10d 正则误命中
+            updateResult = await dbRunAsync(
+                `UPDATE issues
+                    SET dingtalk_chat_id = ?,
+                        dingtalk_open_conversation_id = ?,
+                        dingtalk_chat_created_at = datetime('now','localtime'),
+                        dingtalk_chat_created_by = ?,
+                        dingtalk_chat_name = ?
+                  WHERE id = ?
+                    AND (dingtalk_open_conversation_id IS NULL OR TRIM(dingtalk_open_conversation_id) = '')
+                    AND assigned_to IS ?`,
+                [newChatId, newOpenConvId, userId, chatName, id, initialAssignedTo]
+            );
+        } catch (dbErr) {
+            // 落库失败补偿（方案 §C4，对齐 collab CREATE_CHAT_DB_FAILED）：钉钉群已建但平台落库失败 →
+            //   结构化 logger.error 记完整 chat_id/open_conversation_id（可检索）+ 返明确错误供管理员手工补录
+            logger.error(`[issue-create-chat] CRITICAL 钉钉群已建但落库异常 issue_id=${id} chatid=${newChatId} open_conversation_id=${newOpenConvId} chat_name=${chatName} created_by=${userId}(${userName}) error=${dbErr.message}`);
+            return res.status(500).json({
+                error: '钉钉群已创建但平台落库失败，请联系管理员手工补录（详见后端日志 issue-create-chat CRITICAL）',
+                code: 'CHAT_CREATED_DB_UPDATE_FAILED',
+                chat_id: newChatId,
+                open_conversation_id: newOpenConvId,
+                chat_name: chatName
+            });
+        }
+        if (!updateResult || updateResult.changes === 0) {
+            // 守卫未通过 → 并发竞态。codex 40 #1 扩展三分支：
+            //   ① open_conv_id 已被填 → 别人先落库（幂等返回，本次新建群孤儿日志）
+            //   ② assigned_to 已变 → 钉钉调用期间 C2 改派 → 409 + CRITICAL 日志（钉钉孤儿群需手工解散）
+            //   ③ 未知原因（理论不触发）→ CHAT_LINK_FAILED + 群主手工解散
+            const refreshed = await dbGetAsync(
+                'SELECT assigned_to, dingtalk_chat_id, dingtalk_open_conversation_id, dingtalk_chat_name FROM issues WHERE id = ?',
+                [id]
+            );
+            // codex 36 复审 L-4：竞态分支判断和响应统一用 trim 后变量（与 H-1 口径一致）
+            const refreshedOpenConvId = refreshed ? String(refreshed.dingtalk_open_conversation_id || '').trim() : '';
+            // codex 41 #1：nullable-aware 比较，防 Number(null)=0 跳过 ② 分支错误进 ③ 致孤儿群
+            const refreshedAssignedTo = refreshed && refreshed.assigned_to != null ? Number(refreshed.assigned_to) : null;
+            if (refreshedOpenConvId) {
+                // 分支 ① 别人先落库（已关联群不应被覆盖，但群成员可能基于旧 assigned_to 快照）
+                // codex 41 #2：极端三方并发场景下分支 ① 优先返回幂等可能漏报"成员快照过期"——
+                //              加 WARN 日志记 assigned_to 是否同时变化，便于运维事后排查（不动主逻辑）
+                if (refreshedAssignedTo !== initialAssignedTo) {
+                    logger.error(`[issue-create-chat] CRITICAL 并发竞态叠加改派：需求 #${id} 别人先落库（${refreshed.dingtalk_chat_id}）且 assigned_to 变化（初始=${initialAssignedTo} → 当前=${refreshedAssignedTo}），群成员可能基于旧负责人快照，请运维核查群成员与当前负责人一致性`);
+                } else {
+                    logger.warn(`[issue-create-chat] 并发竞态：需求 #${id} 另一请求已先落库（${refreshed.dingtalk_chat_id}），本次新建群丢弃 chatid=${newChatId} open_conv_id=${newOpenConvId}`);
+                }
+                return res.json({
+                    message: '该需求已有讨论群（您本次新建的群因并发竞态被舍弃，请群主在钉钉客户端解散）',
+                    id,
+                    chat_id: String(refreshed.dingtalk_chat_id || '').trim(),
+                    open_conversation_id: refreshedOpenConvId,
+                    chat_name: String(refreshed.dingtalk_chat_name || '').trim(),
+                    idempotent: true,
+                    race_dropped_chat_id: newChatId
+                });
+            }
+            if (refreshed && refreshedAssignedTo !== initialAssignedTo) {
+                // 分支 ② 钉钉调用期间 C2 改派 → 钉钉群已建但成员快照过期 → 不落库
+                logger.error(`[issue-create-chat] CRITICAL 钉钉调用期间 assigned_to 变化导致落库乐观锁失败 issue_id=${id} 初始=${initialAssignedTo} 当前=${refreshedAssignedTo} chatid=${newChatId} open_conversation_id=${newOpenConvId}（钉钉孤儿群需手工解散）`);
+                return res.status(409).json({
+                    error: '负责人在拉群过程中已被改派，钉钉群已建但未关联到需求，请群主在钉钉客户端手动解散并刷新页面后重拉',
+                    code: 'ASSIGNEE_CHANGED_BEFORE_CHAT',
+                    chat_id: newChatId,
+                    open_conversation_id: newOpenConvId
+                });
+            }
+            // 分支 ③ 未知原因 changes=0（理论不触发，issue 无作废/归档守卫）→ 记日志返回
+            logger.error(`[issue-create-chat] 需求 #${id} UPDATE changes=0 但未查到已落库群（异常）chatid=${newChatId} open_conv_id=${newOpenConvId}`);
+            return res.status(500).json({
+                error: '群已建出但未关联到需求，请群主在钉钉客户端手动解散并联系管理员',
+                code: 'CHAT_LINK_FAILED',
+                chat_id: newChatId,
+                open_conversation_id: newOpenConvId
+            });
+        }
+
+        logger.info(`[issue-create-chat] 需求 #${id} 拉群成功 by ${userName} chatid=${newChatId}${requesterDegraded ? '（业务方未加入，已降级）' : ''}`);
+
+        // 发欢迎卡片（best-effort，失败不影响主流程；所有动态字段 escapeMarkdown 防注入）
+        try {
+            const escape = dingtalkNotify.escapeMarkdown;
+            const oaText = issue.oa_number ? `OA-${escape(String(issue.oa_number).replace(/^(test-)?oa-?/i, ''))}` : '（无 OA）';
+            // codex 35 L-2：按 Unicode 码点截断，与群名 Array.from 同口径，避免截半 emoji
+            const titleClipped = Array.from(String(issue.title || '')).slice(0, 30).join('');
+            const cardTitle = `关于「${escape(titleClipped)}」需求讨论群`;
+            const cardMarkdown = [
+                `## 需求讨论群已创建`,
+                ``,
+                `**需求**：${escape(String(issue.title || '-').slice(0, 60))}`,
+                `**OA 单号**：${oaText}`,
+                `**业务方**：${escape(issue.requester_name || '-')}`,
+                `**负责人**：${escape(issue.assigned_to_name || '未指派')}`,
+                `**拉群人**：${escape(userName)}`,
+                ``,
+                `> 请相关方在群内同步上下文，推进需求处理。`
+            ].join('\n');
+            const cardResp = await dingtalkNotify.sendGroupMessage(token, robotCode, newOpenConvId, 'sampleMarkdown', { title: cardTitle, text: cardMarkdown });
+            if (cardResp && cardResp.code) {
+                logger.warn(`[issue-create-chat] #${id} 群卡片发送失败 code=${cardResp.code} msg=${cardResp.message || ''}`);
+            }
+        } catch (cardErr) {
+            logger.warn(`[issue-create-chat] 需求 #${id} 欢迎卡片发送异常（不影响建群）：${cardErr.message}`);
+        }
+
+        return res.json({
+            message: requesterDegraded
+                ? '讨论群已创建（业务方因无钉钉账号/手机号未加入，请线下转达或补填手机号后重新整理）'
+                : '讨论群已创建',
+            id,
+            chat_id: newChatId,
+            open_conversation_id: newOpenConvId,
+            chat_name: chatName,
+            requester_degraded: requesterDegraded
+        });
+    } catch (err) {
+        logger.error('需求拉群失败:', err.message);
         res.status(500).json({ error: err.message });
     }
 });

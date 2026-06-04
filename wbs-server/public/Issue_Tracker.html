@@ -1124,6 +1124,35 @@
                 }
             }
 
+            // v1.75.0 C4：钉钉拉群讨论（对齐数据协作 Data_Collab create-chat 朴素幂等范式）
+            //   权限：admin/publisher/本单 assigned_to/本单 created_by（viewer 后端硬挡，前端再保险隐藏）
+            //   已建群（dingtalk_open_conversation_id 非空且 trim 后有值）→ 灰显展示群名 + 提示去钉钉客户端
+            //   未建群 → 蓝色按钮"💬 拉群讨论"；点击 confirm + 防抖（busy 锁）
+            //   错误码：NOT_ENOUGH_MEMBERS / CHAT_LINK_FAILED / CHAT_CREATED_DB_UPDATE_FAILED /
+            //          DINGTALK_USER_LOOKUP_EMPTY / NO_DINGTALK_CONFIG → 展后端 error 文案
+            //   warning：requester_degraded=true → 拉群成功 toast 后追加 warning toast 提示业务方未加入
+            {
+                const isIssueCreator = currentUser && issue.created_by != null && Number(issue.created_by) === Number(currentUser.id);
+                const canCreateChat = currentUser && currentUser.role !== 'viewer' && (isManager || isAssignee || isIssueCreator);
+                if (canCreateChat) {
+                    // trim 后判断（口径与后端 11134 一致，防历史空白脏值误判已建群）
+                    const existingChatName = String(issue.dingtalk_chat_name || '').trim();
+                    const existingOpenConvId = String(issue.dingtalk_open_conversation_id || '').trim();
+                    const chatHasGroup = existingOpenConvId.length > 0;
+                    let chatHtml = '';
+                    if (chatHasGroup) {
+                        const chatNameDisplay = existingChatName || '（群名缺失）';
+                        chatHtml = `<button class="btn-secondary" disabled style="font-size:12px; padding:5px 12px; opacity:0.7; cursor:not-allowed;" title="点击钉钉客户端查看群消息">💬 ${escapeHtml(chatNameDisplay)}（请到钉钉查看）</button>`;
+                    } else {
+                        chatHtml = `<button class="btn-primary" id="btnCreateChat_${issue.id}" onclick="createIssueChat(${issue.id}, this)" style="font-size:12px; padding:5px 12px;">💬 拉群讨论</button>`;
+                    }
+                    html += `<div style="margin-bottom:16px; padding:10px 14px; background:#f9fafb; border-radius:8px;">
+                        <label style="font-size:11px; color:#6b7280; display:block; margin-bottom:6px; font-weight:500;">钉钉沟通群</label>
+                        ${chatHtml}
+                    </div>`;
+                }
+            }
+
             // 详情网格（C6c：加业务方信息/OA/数据域；H-1 所有后端文本走 escapeHtml）
             html += `<div class="detail-grid">
                 <div class="detail-item"><label>类型</label><div class="detail-value"><span class="type-tag ${typeClass(issue.type)}">${escapeHtml(issue.type)}</span></div></div>
@@ -1294,6 +1323,68 @@
                 await loadIssues();
                 openDrawer(id);
             } catch (e) { showToast('通知失败', 'error'); }
+        }
+
+        // v1.75.0 C4：拉群讨论（对齐数据协作 Data_Collab create-chat 范式）
+        //   防抖：btn.disabled + busy 文案，请求期间禁止重复点击（codex 35 M-2 残余风险兜底）
+        //   错误码（5 个，对齐后端契约 server.js:11078+）：
+        //          NOT_ENOUGH_MEMBERS / CHAT_LINK_FAILED / CHAT_CREATED_DB_UPDATE_FAILED /
+        //          DINGTALK_USER_LOOKUP_EMPTY / NO_DINGTALK_CONFIG → 展后端 error 文案
+        //   warning：requester_degraded=true → 拉群成功后追加 warning toast（业务方未加入）
+        //   幂等（idempotent=true）：当用户两次点击之间已被别人拉群 → 后端直接返已有群，
+        //          前端 toast 用 success（结果一致都是"群可用"，国内 UI 习惯 info 蓝色易让用户误判"什么都没发生"）
+        //   confirm 文案（codex 37 #3 + codex 38 #4）："群管理员（示例用户A）" 保留人名让用户知道会拉谁 + 补稳定角色名提示
+        //   注意：本处人名是硬编码，将来 COLLAB_CHAT_ADMIN_ID 改人时**需同步修改本处**（不会自动跟随后端常量）；
+        //   治本方案 = 后端 GET /api/system/chat-admin 返管理员展示名供前端动态渲染（P3 backlog）
+        async function createIssueChat(id, btn) {
+            if (!confirm('确认为该需求拉钉钉讨论群？\n群成员：群管理员（示例用户A）+ 负责人 + 业务方（按手机号反查命中时加入）+ 当前操作人，系统自动去重')) return;
+            // 防抖：禁用按钮 + 改文案；finally 恢复（重新 openDrawer 会重新渲染整段，此处仅兜底）
+            let originalText = '';
+            if (btn) {
+                originalText = btn.textContent;
+                btn.disabled = true;
+                btn.textContent = '建群中…';
+            }
+            try {
+                const res = await authFetch(`/api/issues/${id}/create-chat`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: '{}'
+                });
+                if (!res) return;
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) {
+                    // codex 39 #3：识别 schema readiness 503 → warning toast 区分"初始化/未就绪"vs 真错误
+                    //   v1.74.x ISSUE_SCHEMA_* + v1.75.0 ISSUE_V1750_SCHEMA_* 两套都识别
+                    if (data.code === 'ISSUE_V1750_SCHEMA_INITIALIZING' || data.code === 'ISSUE_V1750_SCHEMA_NOT_READY' ||
+                        data.code === 'ISSUE_SCHEMA_INITIALIZING' || data.code === 'ISSUE_SCHEMA_NOT_READY') {
+                        showToast(data.error || '功能初始化中或字段未就绪，请稍后刷新重试或联系管理员', 'warning');
+                    } else {
+                        showToast(data.error || '拉群失败', 'error');
+                    }
+                    return;
+                }
+                // 成功 / 幂等已建群 / 降级 三种情况都进这里
+                if (data.idempotent) {
+                    showToast(data.message || '该需求已有讨论群，请到钉钉客户端查看', 'success');
+                } else {
+                    showToast(data.message || '讨论群已创建，请到钉钉客户端查看', 'success');
+                    if (data.requester_degraded) {
+                        // 业务方未加入：成功 toast 后追加 warning（让用户知道需线下转达）
+                        setTimeout(() => showToast('业务方未加入（手机号反查未命中），请线下转达或补填手机号', 'warning'), 1200);
+                    }
+                }
+                // 刷新列表 + 重开 drawer 让按钮变成"已建群"灰显形态
+                await loadIssues();
+                openDrawer(id);
+            } catch (e) {
+                showToast('网络错误', 'error');
+            } finally {
+                if (btn && btn.isConnected) {
+                    btn.disabled = false;
+                    btn.textContent = originalText;
+                }
+            }
         }
 
         // v1.75.0 C1：查询钉钉已读状态（移植自数据协作 checkReadStatus，适配 issues recipient）
