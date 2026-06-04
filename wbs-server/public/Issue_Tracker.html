@@ -438,6 +438,7 @@
 
         /* 时间显示 */
         .time-relative { color: #6b7280; font-size: 12px; }
+        .time-absolute { color: #6b7280; font-size: 11.5px; white-space: nowrap; font-variant-numeric: tabular-nums; }
     </style>
 </head>
 
@@ -605,7 +606,7 @@
                 </div>
                 <div class="stat-info">
                     <div class="stat-num" id="statClosed">0</div>
-                    <div class="stat-label">已关闭</div>
+                    <div class="stat-label">已完成</div>
                 </div>
             </div>
         </div>
@@ -667,8 +668,7 @@
                     <th style="width:100px;">业务方部门</th>
                     <th style="width:90px;">数据域</th>
                     <th style="width:90px;">OA 单号</th>
-                    <th style="width:110px;">创建时间</th>
-                    <th style="width:110px;">更新时间</th>
+                    <th style="width:150px;">创建时间</th>
                 </tr>
             </thead>
             <tbody id="issueTableBody">
@@ -950,8 +950,8 @@
             }
             empty.style.display = 'none';
 
-            // C6c：13 列（#/优先级/类型/通知/状态/标题/指派人/创建人/业务方部门/数据域/OA/创建时间/更新时间）
-            //   v1.75.0 C5：加创建时间列（决策 4 创建+更新都显示），紧邻更新时间前
+            // 12 列（#/优先级/类型/通知/状态/标题/指派人/创建人/业务方部门/数据域/OA/创建时间）
+            //   v1.75.2：删更新时间列（用户诉求列表只看创建时间）；创建时间改 formatFullTime 完整 YYYY-MM-DD HH:mm:ss 绝对时间
             //   H-1：所有后端文本字段走 escapeHtml；窄列加 .ellip + title 单行省略
             tbody.innerHTML = allIssues.map(issue => `
                 <tr onclick="openDrawer(${issue.id})">
@@ -959,7 +959,7 @@
                     <td><span class="priority-dot ${issue.priority}"></span>${escapeHtml(issue.priority)}</td>
                     <td><span class="type-tag ${typeClass(issue.type)}">${escapeHtml(issue.type)}</span></td>
                     <td>${notifyBadge(issue)}</td>
-                    <td><span class="status-badge s-${issue.status}">${escapeHtml(issue.status)}</span></td>
+                    <td><span class="status-badge s-${issue.status}">${escapeHtml(statusDisplayLabel(issue.status))}</span></td>
                     <td style="font-weight:500; max-width:320px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">
                         ${escapeHtml(issue.title)}
                         ${issue.acceptance_url ? '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#2563eb" stroke-width="2" style="margin-left:4px;vertical-align:middle;"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>' : ''}
@@ -969,8 +969,7 @@
                     <td class="ellip" title="${escapeHtml(issue.requester_dept || '')}">${escapeHtml(issue.requester_dept || '')}</td>
                     <td class="ellip">${domainText(issue.data_domain)}</td>
                     <td class="ellip" title="${escapeHtml(issue.oa_number || '')}">${issue.oa_number ? escapeHtml(issue.oa_number) : '<span style="color:#d1d5db;">-</span>'}</td>
-                    <td class="time-relative">${formatTime(issue.created_at)}</td>
-                    <td class="time-relative">${formatTime(issue.updated_at)}</td>
+                    <td class="time-absolute">${escapeHtml(formatFullTime(issue.created_at))}</td>
                 </tr>
             `).join('');
         }
@@ -1063,7 +1062,7 @@
                 // 状态流转（按 H-1 过滤后的 visibleStatuses）
                 visibleStatuses.forEach(s => {
                     const btnClass = s === '已关闭' ? 'btn-secondary' : 'btn-primary';
-                    html += `<button class="${btnClass}" onclick="changeStatus(${issue.id}, '${s}', '${issue.status}')" style="font-size:12px; padding:5px 12px;">${s === '处理中' && issue.status === '待验证' ? '打回处理' : '转为' + s}</button>`;
+                    html += `<button class="${btnClass}" onclick="changeStatus(${issue.id}, '${s}', '${issue.status}')" style="font-size:12px; padding:5px 12px;">${s === '处理中' && issue.status === '待验证' ? '打回处理' : '转为' + statusDisplayLabel(s)}</button>`;
                 });
                 // 以下管理动作（指派/编辑/删除/通知）仍仅 isManager 可见
                 if (isManager) {
@@ -1099,10 +1098,13 @@
             // v1.75.0 C1：已读跟踪展示（对齐数据协作 Data_Collab checkReadStatus 范式）
             //   两路独立：开发侧仅 notify_status='sent' 显示；业务方侧仅 requester_notify_status='sent' 显示
             //   不自动查（决策 1：按钮触发）；已读固化后后端返 cached=true，前端展 📖 已读
-            //   所有能看详情者（含 viewer）可见已读痕迹（只读存档语义），查询按钮触发后端 API（后端 authenticateToken 守门）
+            //   v1.75.2：仅 isManager（admin/publisher）可见——已读是"发通知方确认对方收到没"，被通知方/viewer 无意义。
+            //     查询按钮触发后端 API（后端 authenticateToken 守门）；区块整体隐藏后 checkIssueReadStatus 不会被触发（无按钮）。
             //   codex M-1：box id 含 issue.id（readStatusBox_<id>_<recipient>），快速切单时旧请求回包
             //     在新抽屉里 getElementById(旧 boxId)=null 自然失效，不污染新抽屉（对齐附件区 dataset.issueId 防错位思路）
-            {
+            //   v1.75.2：已读状态只对管理侧（admin/publisher）有意义——是"发通知的人确认对方收到没"。
+            //     被通知方（指派开发本人）/viewer 看自己的单不需要此信息，整块按 isManager 隐藏。
+            if (isManager) {
                 let readHtml = '';
                 if (issue.notify_status === 'sent') {
                     const devName = escapeHtml(issue.assigned_to_name || '开发');
@@ -1157,7 +1159,7 @@
             html += `<div class="detail-grid">
                 <div class="detail-item"><label>类型</label><div class="detail-value"><span class="type-tag ${typeClass(issue.type)}">${escapeHtml(issue.type)}</span></div></div>
                 <div class="detail-item"><label>优先级</label><div class="detail-value"><span class="priority-dot ${issue.priority}"></span>${escapeHtml(issue.priority)}</div></div>
-                <div class="detail-item"><label>状态</label><div class="detail-value"><span class="status-badge s-${issue.status}">${escapeHtml(issue.status)}</span></div></div>
+                <div class="detail-item"><label>状态</label><div class="detail-value"><span class="status-badge s-${issue.status}">${escapeHtml(statusDisplayLabel(issue.status))}</span></div></div>
                 <div class="detail-item"><label>来源</label><div class="detail-value">${escapeHtml(issue.source || '')}</div></div>
                 <div class="detail-item"><label>通知状态</label><div class="detail-value">${notifyBadge(issue)}</div></div>
                 <div class="detail-item"><label>业务方部门</label><div class="detail-value">${escapeHtml(issue.requester_dept || '-')}</div></div>
@@ -1228,9 +1230,9 @@
             if (hist.length) {
                 html += `<div style="border-left:2px solid #e5e7eb; padding-left:12px;">`;
                 hist.forEach(h => {
-                    const flow = h.from_status ? `${escapeHtml(h.from_status)} → ${escapeHtml(h.to_status)}` : `创建 → ${escapeHtml(h.to_status)}`;
+                    const flow = h.from_status ? `${escapeHtml(statusDisplayLabel(h.from_status))} → ${escapeHtml(statusDisplayLabel(h.to_status))}` : `创建 → ${escapeHtml(statusDisplayLabel(h.to_status))}`;
                     html += `<div style="margin-bottom:10px;">
-                        <div style="font-size:12px; color:#374151;"><span class="status-badge s-${h.to_status}" style="font-size:10px;">${escapeHtml(h.to_status)}</span> <span style="color:#6b7280;">${flow}</span></div>
+                        <div style="font-size:12px; color:#374151;"><span class="status-badge s-${h.to_status}" style="font-size:10px;">${escapeHtml(statusDisplayLabel(h.to_status))}</span> <span style="color:#6b7280;">${flow}</span></div>
                         <div style="font-size:11px; color:#9ca3af; margin-top:2px;">${escapeHtml(h.operator_name || '系统')} · ${escapeHtml(h.created_at || '')}</div>
                         ${h.reason ? `<div style="font-size:12px; color:#4b5563; margin-top:2px;">原因：${escapeHtml(h.reason)}</div>` : ''}
                     </div>`;
@@ -1503,6 +1505,11 @@
         }
 
         async function changeStatus(id, toStatus, fromStatus) {
+            // v1.75.2：提交验收（处理中→待验证）加二次确认，防开发误点把未完成的需求提交给 admin 验收
+            //   （此流转不必填 reason，故走轻量 confirm；其余流转维持原有 reason/无确认逻辑）
+            if (fromStatus === '处理中' && toStatus === '待验证') {
+                if (!confirm('确认已完成开发、提交给管理员验收？\n提交后状态将变为「待验证」，由管理员验收归档。')) return;
+            }
             let reason = null;
             if (reasonRequired(fromStatus, toStatus)) {
                 reason = await requestTransitionReason({ toStatus, label: reasonLabel(toStatus) });
@@ -1521,7 +1528,7 @@
                     showToast(err.error || '操作失败', 'error');
                     return;
                 }
-                showToast(`状态已更新为「${toStatus}」`, 'success');
+                showToast(`状态已更新为「${statusDisplayLabel(toStatus)}」`, 'success');
                 await loadIssues();
                 openDrawer(id);
             } catch (e) { showToast('操作失败', 'error'); }
@@ -1860,6 +1867,33 @@
             if (diff < 86400000) return Math.floor(diff / 3600000) + '小时前';
             if (diff < 604800000) return Math.floor(diff / 86400000) + '天前';
             return dateStr.slice(0, 16).replace('T', ' ');
+        }
+
+        // 列表创建时间列：完整绝对时间 YYYY-MM-DD HH:mm:ss（用户诉求：不要相对时间）
+        //   created_at 生产有两种形态并存（同表 notified_at 是 ISO Z），故显式区分避免隐式时区转换歧义（codex 38 #1）：
+        //     ① '2026-06-02 17:21:19'（含秒空格分隔，存的是本地业务时间）→ 直接取字段不经 Date 转换，原样展示（避免被当本地/UTC 二义）
+        //     ② ISO 'xxxTxxxZ'（带时区）→ new Date 解析后转浏览器本地时区展示
+        //   解析失败（脏值）返回纯字符串（不在此处转义，统一由调用点 escapeHtml 处理，避免双重转义 codex 38 #3）。
+        function formatFullTime(dateStr) {
+            if (!dateStr) return '-';
+            const s = String(dateStr).trim();
+            // ① 空格分隔的本地时间字符串 'YYYY-MM-DD HH:mm:ss'（可不含秒）→ 原样规范化，不做时区转换
+            const localMatch = s.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?$/);
+            if (localMatch && !/[zZ]|[+\-]\d{2}:?\d{2}$/.test(s)) {
+                const [, Y, M, D, h, m, sec] = localMatch;
+                return `${Y}-${M}-${D} ${h}:${m}:${sec || '00'}`;
+            }
+            // ② 带时区的 ISO 串 → 解析后转浏览器本地时区
+            const d = new Date(s);
+            if (isNaN(d.getTime())) return s; // 脏值原样返回（纯字符串，调用点负责 escape）
+            const p = n => String(n).padStart(2, '0');
+            return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+        }
+
+        // 状态展示文案映射（v1.75.2）：底层存储/状态机 key/CSS class 全部保持原值「已关闭」，
+        //   仅"给人看的文字"映射为「已完成」。徽章必须 class 用原 status、文字用本函数，两者分离。
+        function statusDisplayLabel(status) {
+            return status === '已关闭' ? '已完成' : status;
         }
     </script>
 
