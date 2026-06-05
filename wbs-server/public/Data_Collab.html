@@ -972,7 +972,7 @@
             </button>
         </div>
 
-        <!-- 列表（v1.72.1：13 列可排序表头 + 创建时间列） -->
+        <!-- 列表（v1.75.4：14 列可排序表头 + 最后提交列） -->
         <table class="data-table" id="collabListTable">
             <thead>
                 <tr>
@@ -984,6 +984,7 @@
                     <th class="sortable" data-sort-by="description">需求描述<span class="sort-icon">⇅</span></th>
                     <th class="sortable" data-sort-by="created_at">创建时间<span class="sort-icon">⇅</span></th>
                     <th class="sortable" data-sort-by="deadline">截止时间<span class="sort-icon">⇅</span></th>
+                    <th class="sortable" data-sort-by="last_submitted_at">最后提交<span class="sort-icon">⇅</span></th>
                     <th class="sortable" data-sort-by="contact_person_name">对接人<span class="sort-icon">⇅</span></th>
                     <th class="sortable" data-sort-by="developer_name">处理人<span class="sort-icon">⇅</span></th>
                     <th class="sortable" data-sort-by="status">状态<span class="sort-icon">⇅</span></th>
@@ -992,7 +993,7 @@
                 </tr>
             </thead>
             <tbody id="listBody">
-                <tr class="empty-row"><td colspan="13">加载中...</td></tr>
+                <tr class="empty-row"><td colspan="14">加载中...</td></tr>
             </tbody>
         </table>
     </main>
@@ -1672,7 +1673,7 @@
 
         async function loadList() {
             const tbody = document.getElementById('listBody');
-            tbody.innerHTML = '<tr class="empty-row"><td colspan="12">加载中...</td></tr>';
+            tbody.innerHTML = '<tr class="empty-row"><td colspan="14">加载中...</td></tr>';
 
             const params = new URLSearchParams();
             const status = document.getElementById('filterStatus').value;
@@ -1688,14 +1689,14 @@
             try {
                 const res = await authFetch('/api/collab/requests?' + params.toString());
                 if (!res || !res.ok) {
-                    tbody.innerHTML = '<tr class="empty-row"><td colspan="12">加载失败</td></tr>';
+                    tbody.innerHTML = '<tr class="empty-row"><td colspan="14">加载失败</td></tr>';
                     return;
                 }
                 const list = await res.json();
                 renderList(list);
             } catch (e) {
                 console.error('加载协作单失败', e);
-                tbody.innerHTML = '<tr class="empty-row"><td colspan="12">加载失败</td></tr>';
+                tbody.innerHTML = '<tr class="empty-row"><td colspan="14">加载失败</td></tr>';
             }
         }
 
@@ -1727,7 +1728,7 @@
             }
 
             if (!list || list.length === 0) {
-                tbody.innerHTML = '<tr class="empty-row"><td colspan="13">暂无协作单。点击右上角"新建协作单"开始记录。</td></tr>';
+                tbody.innerHTML = '<tr class="empty-row"><td colspan="14">暂无协作单。点击右上角"新建协作单"开始记录。</td></tr>';
                 updateSortIcons();
                 return;
             }
@@ -1783,6 +1784,7 @@
                     <td class="col-desc" title="${escapeHtml(r.description)}">${escapeHtml(desc)}</td>
                     <td>${fmtDate(r.created_at)}</td>
                     <td>${fmtDate(r.deadline)}</td>
+                    <td>${fmtDate(r.last_submitted_at || r.submitted_at)}</td>
                     <td>${contactCell}</td>
                     <td>${devCell}</td>
                     <td><span class="status-badge status-${r.status}">${STATUS_LABELS[r.status] || r.status}</span></td>
@@ -1806,6 +1808,7 @@
             description: 'string',
             created_at: 'date',
             deadline: 'date',
+            last_submitted_at: 'date',
             contact_person_name: 'string',
             developer_name: 'string',
             status: 'statusOrder',                  // 业务优先级
