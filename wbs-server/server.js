@@ -1778,6 +1778,69 @@ function initTable() {
         safeAlterAddColumn('collab_requests', 'done_notify_message_key', 'TEXT');   // markdown 通知的 processQueryKey
         safeAlterAddColumn('collab_requests', 'done_read_at', 'TEXT');              // 业务方已读完成通知时间
 
+        // ===== 取数交付质量记录 v3.0（2026-06-05，Commit A）=====
+        //   方案 docs/local/数据协作模块_v3.0/取数交付质量记录_方案_20260605_v3.0.md §3
+        //   定位：取数交付质量记录仪（"管事不管人"）。产出级记录 + 兼容多产出（collab_sub_item_id 预留可空）。
+        //   旁路设计：写失败仅 warn 不阻断 submit-export 主流程；时间/状态复用现有字段不双真相源。
+        //
+        //   质量记录表（产出级，append-only）：每次开发提交追加一行，不 UPDATE 不删。
+        //   - collab_sub_item_id 可空：单产出 NULL（隐含产出），多产出上线填子项 id → 零返工。
+        //   - submission_seq：开发第几次主动提交（复用 submission_version 语义，每次提交 +1，不覆盖）。
+        //   - 列对齐结果（新信号）：missing_columns + is_columns_complete + 模板/结果列快照（L-3/L-4 可复现）。
+        db.run(`CREATE TABLE IF NOT EXISTS collab_quality_record (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            collab_request_id INTEGER NOT NULL,
+            collab_sub_item_id INTEGER,
+            submitter_id INTEGER NOT NULL,
+            submitter_name TEXT NOT NULL,
+            submission_seq INTEGER NOT NULL DEFAULT 1 CHECK (submission_seq >= 1),
+            submitted_at TEXT NOT NULL,
+            missing_columns TEXT,
+            -- is_columns_complete 三态（codex 69 M-4）：1=列齐全 / 0=缺列 / NULL=未比对
+            --   NULL 是异常兜底态：模板该有却读取/解析失败时写 NULL（业务保证模板必有表头，故 NULL 罕见）。
+            --   不伪装成"齐全"——真出读取异常如实留痕"没法比对"，避免污染"列齐全率"统计口径。
+            is_columns_complete INTEGER DEFAULT 1 CHECK (is_columns_complete IS NULL OR is_columns_complete IN (0, 1)),
+            expected_columns_snapshot TEXT,
+            actual_columns_snapshot TEXT,
+            sql_attachment_id INTEGER,
+            created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+            FOREIGN KEY (collab_request_id) REFERENCES collab_requests(id) ON DELETE CASCADE
+        )`);
+        db.run(`CREATE INDEX IF NOT EXISTS idx_qr_request ON collab_quality_record(collab_request_id)`);
+        db.run(`CREATE INDEX IF NOT EXISTS idx_qr_subitem ON collab_quality_record(collab_sub_item_id)`);
+        // 唯一约束（M-1）：同一产出同次提交不重复记录。
+        //   - 拆两个部分索引处理 sub_item NULL：SQLite 唯一索引把多个 NULL 视为互异（不冲突），
+        //     单产出（sub_item IS NULL）若只建一个含 sub_item 的联合唯一索引会失效 → 单产出永远不去重。
+        //   - 故：sub_item IS NULL 走 (request_id, submission_seq) 唯一；sub_item NOT NULL 走三列联合唯一。
+        //   - 双重防御：应用层幂等（C2 写前查重）是主防线，唯一索引是兜底。
+        db.run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_qr_unique_single
+                  ON collab_quality_record(collab_request_id, submission_seq)
+                  WHERE collab_sub_item_id IS NULL`);
+        db.run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_qr_unique_multi
+                  ON collab_quality_record(collab_request_id, collab_sub_item_id, submission_seq)
+                  WHERE collab_sub_item_id IS NOT NULL`);
+
+        //   打回记录表：甲方/对接人主动打回，带原因分类。
+        //   - reason_type CHECK 枚举：仅 DEV_QUALITY 计入"开发质量返工"，其余记录但不计质量（M-5）。
+        //   - 关联被打回的提交版本（submission_seq）+ 打回前后状态快照（status_before/after，M-4）。
+        //   - 不强依赖 quality_record_id：无质量记录时也允许打回（L-1），靠 request+seq 关联。
+        db.run(`CREATE TABLE IF NOT EXISTS collab_return_record (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            collab_request_id INTEGER NOT NULL,
+            collab_sub_item_id INTEGER,
+            submission_seq INTEGER,
+            returned_by INTEGER NOT NULL,
+            returned_by_name TEXT NOT NULL,
+            reason_type TEXT NOT NULL
+                CHECK (reason_type IN ('DEV_QUALITY','REQ_CHANGE','ENV_ISSUE','BIZ_ADJUST')),
+            reason_note TEXT,
+            status_before TEXT,
+            status_after TEXT,
+            returned_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+            FOREIGN KEY (collab_request_id) REFERENCES collab_requests(id) ON DELETE CASCADE
+        )`);
+        db.run(`CREATE INDEX IF NOT EXISTS idx_rr_request ON collab_return_record(collab_request_id)`);
+
         // 健康检查放在 serialize 末尾，确保所有 ALTER/INDEX 都已串行执行完
         verifyV2CollabSchema();
     });
@@ -1873,6 +1936,38 @@ function verifyV2CollabSchema() {
             logger.error('v2.0 schema 迁移不完整，system_configs 表未创建');
         }
     });
+
+    // ===== 取数交付质量记录 v3.0 健康检查（2026-06-05，Commit A）=====
+    //   两张新表存在性校验（沿用 system_configs 的 sqlite_master 范式）
+    // codex 76 L-1：两表存在性合并一次检查——都存在才输出"就绪"，避免第一张表查到就喊就绪、
+    //   第二张表缺失时日志同时出现"就绪"和错误的误导。
+    db.get(
+        "SELECT (SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='collab_quality_record') AS q, " +
+        "(SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='collab_return_record') AS r",
+        [],
+        (err, row) => {
+            if (err) return;
+            const missing = [];
+            if (!row || !row.q) missing.push('collab_quality_record');
+            if (!row || !row.r) missing.push('collab_return_record');
+            if (missing.length > 0) {
+                logger.error(`取数质量 v3.0 schema 迁移不完整，未创建：${missing.join(' + ')}`);
+            } else {
+                logger.info('取数质量 v3.0 schema 健康检查通过：collab_quality_record + collab_return_record 就绪');
+            }
+        }
+    );
+    // reason_type 异常巡检（CHECK 约束已挡新写入，巡检防老数据/人工 SQL 改坏；沿用 assign_mode 巡检范式）
+    db.all(
+        "SELECT id, collab_request_id, reason_type FROM collab_return_record WHERE reason_type NOT IN ('DEV_QUALITY','REQ_CHANGE','ENV_ISSUE','BIZ_ADJUST') LIMIT 5",
+        [],
+        (err, rows) => {
+            if (err) return;  // 表尚未建好时静默（建表 db.run 在同 serialize 块更早执行，正常不会触发）
+            if (rows && rows.length > 0) {
+                logger.error(`取数质量 v3.0 reason_type 异常巡检：发现 ${rows.length}+ 行非法 reason_type（前 5 个 id=${rows.map(r => r.id).join(',')}）`);
+            }
+        }
+    );
 }
 
 // v2.0 ALTER TABLE 辅助函数（codex 六审 M-6：D1 的 () => {} 空回调会吞错）
@@ -11641,6 +11736,8 @@ function insertCollabLog(collabRequestId, operationType, operatorId, operator, r
     );
 }
 
+// 取数交付质量记录 v3.0 Commit E：详情页质量汇总已抽到 collabSubmitHelpers.buildQualitySummary（纯函数，可单测）
+
 // 协作单附件 multer 配置（v2.0 方案 §5.4）
 // 5 类 attachment_type 复用一个 multer 实例：扩展名联合白名单 + 100MB 顶上限；
 // MIME 校验取消（codex 六审 B7）；扩展名 + 大小的分级在 endpoint 内按 attachment_type 二次校验。
@@ -12071,7 +12168,26 @@ app.get('/api/collab/requests/:id', authenticateToken, async (req, res) => {
             [id]
         );
 
-        res.json({ ...request, items, attachments, logs });
+        // 取数交付质量记录 v3.0 Commit E：附带质量数据（同 items/attachments/logs 一次拉全范式，用户拍板）
+        //   - quality_records：每次提交一行（C2 旁路写），按提交序升序
+        //   - return_records：每次打回一行（D 写），按打回时间升序
+        //   - quality_summary：后端算好的汇总（交付时长 M-7 / 提交次数 / 打回次数 / 返工次数），口径集中后端一处
+        const qualityRecords = await dbAllAsync(
+            'SELECT * FROM collab_quality_record WHERE collab_request_id = ? ORDER BY submission_seq ASC, id ASC',
+            [id]
+        );
+        const returnRecords = await dbAllAsync(
+            'SELECT * FROM collab_return_record WHERE collab_request_id = ? ORDER BY returned_at ASC, id ASC',
+            [id]
+        );
+        const qualitySummary = collabSubmitHelpers.buildQualitySummary(request, qualityRecords, returnRecords);
+
+        res.json({
+            ...request, items, attachments, logs,
+            quality_records: qualityRecords,
+            return_records: returnRecords,
+            quality_summary: qualitySummary,
+        });
     } catch (err) {
         logger.error('协作单详情查询失败:', err);
         res.status(500).json({ error: err.message });
@@ -13880,6 +13996,32 @@ app.post('/api/collab/requests/:id/submit',
             insertCollabLog(id, 'SUBMIT_SUCCESS', userId, userName,
                 `newVer=${activateResult.newVer}, dir=${activateResult.attachmentDir}`);
 
+            // === 取数交付质量记录 v3.0 Commit C2：主事务成功后旁路写列对齐（codex 72 全落地）===
+            //   - recordQualityOnSubmit 自包 try/catch 永不抛（H-2），任何失败仅 warn + operation_log，绝不阻断本次已 DONE 的提交。
+            //   - submitted_at 在 helper 内 SQL 内联 datetime('now','localtime')（H-1，不用 collab.submitted_at 首次时间）。
+            //   - submission_seq = activateResult.newVer（每次提交 +1，幂等键）。
+            //   - smokeColumns 从 C1 透传链 activateResult.smokeTestResult.columns 取（可能 undefined/[]，helper 内防御）。
+            //   - 结果映进 quality_check 嵌套字段（M-4，不污染既有顶层字段，护现有 e2e）。
+            let qualityCheck = { recorded: false, is_columns_complete: null, missing_columns: [], reason: 'C2_FAILED' };
+            try {
+                const qr = await collabSubmitHelpers.recordQualityOnSubmit({
+                    dbAsync: { runAsync: dbRunAsync, getAsync: dbGetAsync },
+                    requestId: id,
+                    submitterId: userId,
+                    submitterName: userName,
+                    submissionSeq: activateResult.newVer,
+                    smokeColumns: activateResult.smokeTestResult && activateResult.smokeTestResult.columns,
+                    insertLog: insertCollabLog,
+                    logger,
+                });
+                if (qr) qualityCheck = qr;
+            } catch (qe) {
+                // 双重保险：helper 设计上永不抛，这里再兜一层确保主流程绝不因质量记录失败而返 500
+                logger.warn(`[collab-submit] 质量记录旁路异常（已隔离，不影响提交）: ${qe.message}`);
+                // codex 73 L-3：兜底分支几乎不触发（helper 永不抛），但真触发=设计外异常，最需协作单内留痕
+                insertCollabLog(id, 'QUALITY_RECORD', userId, userName, `C2_FAILED(endpoint兜底):${qe.message}`);
+            }
+
             return res.json({
                 message: '提交成功',
                 new_version: activateResult.newVer,
@@ -13888,6 +14030,8 @@ app.post('/api/collab/requests/:id/submit',
                 smoke_test_validated_at: activateResult.smokeTestResult.validatedAt,
                 smoke_test_row_count: activateResult.smokeTestResult.rowCount,
                 current_status: 'DONE',
+                // 取数质量列对齐结果（方案乙：前端据此弹非阻塞缺列提醒）
+                quality_check: qualityCheck,
             });
         } catch (e) {
             // 顶层兜底（含 multer 后业务校验前抛错的小概率路径）
@@ -15069,6 +15213,210 @@ app.post('/api/collab/requests/:id/return-to-dev', authenticateToken, requireExp
         return res.status(500).json({ error: '退回失败，请联系管理员', code: 'RETURN_FAILED' });
     } finally {
         if (release) release();
+    }
+});
+
+// ==========================================================
+// 取数交付质量记录 v3.0 Commit D：打回开发 return-quality（2026-06-08）
+//
+//   定位：对接人/admin 把"已成功交付（DONE）的取数结果"打回开发重做，带原因分类。
+//     与 return-to-dev（三级转发 EXPORTING→PENDING by exporter）是**两条独立退回链路**——
+//     状态/权限/字段全不同，故走新抽的 transitionToDevPending 骨架（H-3：抽共性不套旧 endpoint），
+//     **不碰 exporter 字段 / 不接受 EXPORTING 源状态**。
+//
+//   ⚠️ 状态机（codex 76 末次合并审 H-1 修正）：DONE → PENDING（带 submission_version 乐观锁防重复打回）。
+//     **源状态是 DONE 不是 SUBMITTED**——dev /submit 走 smoke 通过后 activateNewVersion 写 DONE
+//     （collab-attachment-versioning:534 + server:14028 current_status:'DONE'），SUBMITTED 只是 smoke
+//     失败的中间态（13878）。打回 = 对接人对"已成功交付的结果"不满意让开发重做（DONE→PENDING，
+//     开发走 /submit 重传 version+1 重走 smoke）。原误用 SUBMITTED 致打回对正常交付单完全失效。
+//   权限（M-6）：admin 或本单 contact_person（后端校验，前端隐藏不替代）
+//   body：{ reason_type（4 枚举校验）, reason_note（可选 ≤500）}
+//   同事务（M-4）：UPDATE status=PENDING + INSERT collab_return_record + INSERT operation_log（transitionToDevPending 内）
+//   返工计数（M-5）：所有 reason_type 都写 return_record；聚合时仅 DEV_QUALITY 计返工（E 阶段渲染区分）
+//   submission_seq（用户拍板）：= 被打回时的 collab_requests.submission_version（与 C2 quality_record 同源对齐）
+//   无质量记录也允许打回（L-1）：return_record 关联 request+submission_seq，不强依赖 quality_record_id
+//   钉钉：本期不发（与 return-to-dev 一致依赖群内沟通；后续按需加）
+// ==========================================================
+const VALID_RETURN_QUALITY_REASON_TYPES = ['DEV_QUALITY', 'REQ_CHANGE', 'ENV_ISSUE', 'BIZ_ADJUST'];
+// codex 74 M-3：reason_note 限长在此 endpoint 层做（collab_return_record schema 无 CHECK，记 backlog 等 migration 搭车）。
+//   ⚠️ 约定：未来若新增 collab_return_record 写入路径（如多产出子项打回），**必须复用此限长校验**，
+//   不要绕过——schema 层暂无 length CHECK 兜底，旁路写入超长会污染展示/统计端。
+const RETURN_QUALITY_NOTE_MAX_LEN = 500;
+
+app.post('/api/collab/requests/:id/return-quality', authenticateToken, requireNonViewer, async (req, res) => {
+    const idStr = req.params.id;
+    const userId = Number(req.user.id);
+    const userName = req.user.display_name || req.user.username || `user#${userId}`;
+    const isAdmin = req.user.role === 'admin';
+
+    // === 前置：id 校验 ===
+    if (!/^[1-9]\d*$/.test(idStr)) {
+        return res.status(400).json({ error: 'id 必须是正整数', code: 'INVALID_ID' });
+    }
+    const id = parseInt(idStr, 10);
+    if (!Number.isSafeInteger(id)) {
+        return res.status(400).json({ error: 'id 超出安全整数范围', code: 'INVALID_ID' });
+    }
+    if (!Number.isSafeInteger(userId) || userId <= 0) {
+        return res.status(400).json({ error: '当前用户 id 非法', code: 'INVALID_USER_ID' });
+    }
+
+    // === 前置：reason_type 枚举校验（4 枚举，与 collab_return_record CHECK 对齐）===
+    const rawType = req.body && req.body.reason_type;
+    if (!rawType || typeof rawType !== 'string' || !VALID_RETURN_QUALITY_REASON_TYPES.includes(rawType)) {
+        return res.status(400).json({
+            error: `reason_type 必须是：${VALID_RETURN_QUALITY_REASON_TYPES.join(' / ')}`,
+            code: 'INVALID_REASON_TYPE',
+            valid_values: VALID_RETURN_QUALITY_REASON_TYPES
+        });
+    }
+    const reasonType = rawType;
+
+    // === 前置：reason_note 校验（可选，≤500 字）===
+    let reasonNote = null;
+    if (req.body && req.body.reason_note !== undefined && req.body.reason_note !== null) {
+        if (typeof req.body.reason_note !== 'string') {
+            return res.status(400).json({ error: 'reason_note 必须是字符串', code: 'INVALID_REASON_NOTE' });
+        }
+        const trimmed = req.body.reason_note.trim();
+        if (trimmed.length > RETURN_QUALITY_NOTE_MAX_LEN) {
+            return res.status(400).json({
+                error: `reason_note 不能超过 ${RETURN_QUALITY_NOTE_MAX_LEN} 字符`,
+                code: 'REASON_NOTE_TOO_LONG',
+                max_length: RETURN_QUALITY_NOTE_MAX_LEN,
+                actual_length: trimmed.length
+            });
+        }
+        reasonNote = trimmed || null;
+    }
+
+    try {
+        // === 取协作单（含权限/状态/版本所需字段）===
+        const collab = await dbGetAsync(
+            `SELECT id, status, archived_at, archived_final_at,
+                    contact_person_id, contact_person_name, submission_version
+               FROM collab_requests WHERE id = ?`,
+            [id]
+        );
+        if (!collab) {
+            return res.status(404).json({ error: '协作单不存在', code: 'NOT_FOUND' });
+        }
+
+        // === 软删除 / 归档守卫 ===
+        if (collabSubmitHelpers.isSoftArchived(collab)) {
+            return res.status(409).json({ error: '协作单已作废，不可打回', code: 'PARENT_SOFT_ARCHIVED' });
+        }
+        if (collabSubmitHelpers.isFinalArchived(collab)) {
+            return res.status(409).json({ error: '协作单已归档锁定，不可打回', code: 'PARENT_ARCHIVED_LOCKED' });
+        }
+
+        // === 权限守卫：admin 或本单 contact_person（M-6 后端校验）===
+        const isContactPerson = collab.contact_person_id != null && Number(collab.contact_person_id) === userId;
+        if (!isAdmin && !isContactPerson) {
+            return res.status(403).json({
+                error: '仅本单对接人或管理员可打回',
+                code: 'ONLY_CONTACT_OR_ADMIN'
+            });
+        }
+
+        // === 状态守卫：仅 DONE 可打回（codex 76 H-1）===
+        //   dev /submit smoke 通过后是 DONE（正常交付）；SUBMITTED 是 smoke 失败中间态不该打回；
+        //   EXPORTING 是三级转发链路（走 return-to-dev）。打回 = 对已成功交付的结果不满意让开发重做。
+        if (collab.status !== 'DONE') {
+            return res.status(409).json({
+                error: `仅已完成（DONE）的取数结果可打回开发，当前状态：${collab.status}`,
+                code: 'INVALID_STATE_FOR_RETURN_QUALITY',
+                current_status: collab.status
+            });
+        }
+
+        // 被打回的提交版本（与 C2 quality_record 同源对齐）
+        //   codex 74 M-1：显式校验 >=1，不用 || 0 兜底。DONE 必经成功 /submit →
+        //   activateNewVersion 写 version=newVer=oldVer+1 必 >=1；version<1 的 DONE 是异常数据，
+        //   拒绝而非写 seq=0 污染与 quality_record 的 request+seq 关联。
+        const seq = Number(collab.submission_version);
+        if (!Number.isSafeInteger(seq) || seq < 1) {
+            logger.error(`[return-quality] 协作单 #${id} DONE 但 submission_version 异常(${collab.submission_version})，拒绝打回`);
+            return res.status(409).json({
+                error: '协作单提交版本异常，无法打回，请联系管理员',
+                code: 'INVALID_SUBMISSION_VERSION'
+            });
+        }
+
+        // === 同事务转换：DONE → PENDING（乐观锁 submission_version）+ return_record + log ===
+        //   transitionToDevPending 管事务骨架；extraWrites 在同事务内插 return_record + operation_log（M-4 原子）。
+        let result;
+        try {
+            result = await collabSubmitHelpers.transitionToDevPending(
+                { runAsync: dbRunAsync },
+                {
+                    requestId: id,
+                    fromStatus: 'DONE',
+                    // 乐观锁：submission_version 防重复打回（第二次打回时状态已 PENDING，changes=0 拒）
+                    //   + archived 双轨守卫（无占位符，骨架按 sql 是否含 '?' 决定是否入参）
+                    extraGuards: [
+                        { sql: 'submission_version = ?', value: seq },
+                        { sql: 'archived_at IS NULL' },
+                        { sql: 'archived_final_at IS NULL' },
+                    ],
+                    // codex 76 H-1 衍生：DONE→PENDING 清已完成痕迹，避免详情页"PENDING 却残留旧完成时间/验收通过"矛盾。
+                    //   与 /submit 前置 UPDATE（DONE 重传时也清 done_at/sql_validation_error）口径一致。
+                    //   codex 77 复审 L-1：已覆盖 DONE 独有的完成态标量字段；旧产出附件（result_data 等）是历史留痕，
+                    //   UI 按 status/submission_version 区分展示（开发重传时 supersede），非需清的状态字段。
+                    clearFields: ['done_at', 'sql_validated_at', 'sql_validation_status', 'sql_validation_error'],
+                    extraWrites: async (dbA) => {
+                        // 打回记录（reason_type 全记，聚合时仅 DEV_QUALITY 计返工 M-5）
+                        await dbA.runAsync(
+                            `INSERT INTO collab_return_record
+                                (collab_request_id, collab_sub_item_id, submission_seq,
+                                 returned_by, returned_by_name, reason_type, reason_note,
+                                 status_before, status_after)
+                             VALUES (?, NULL, ?, ?, ?, ?, ?, 'DONE', 'PENDING')`,
+                            [id, seq, userId, userName, reasonType, reasonNote]
+                        );
+                        // operation_log（同事务 await，不用 fire-and-forget，与 return-to-dev 模式一致）
+                        await dbA.runAsync(
+                            `INSERT INTO collab_operation_logs (collab_request_id, operation_type, operator_id, operator, reason)
+                             VALUES (?, 'RETURN_QUALITY', ?, ?, ?)`,
+                            [id, userId, userName, JSON.stringify({
+                                reason_type: reasonType,
+                                reason_note: reasonNote,
+                                submission_seq: seq,
+                                is_rework: reasonType === 'DEV_QUALITY',
+                                // codex 74 L-2：补状态快照，与 return_record 对齐，只看 operation_logs 也能读全状态变化
+                                status_before: 'DONE',
+                                status_after: 'PENDING'
+                            })]
+                        );
+                    },
+                }
+            );
+        } catch (e) {
+            logger.error(`[return-quality] 协作单 #${id} 事务失败: ${e.message}`, e);
+            return res.status(500).json({ error: '打回失败，请重试', code: 'DB_TRANSACTION_FAILED' });
+        }
+
+        if (!result.ok) {
+            // changes=0：状态已变 / 并发 / 重复打回（已是 PENDING）
+            return res.status(409).json({
+                error: '协作单状态已变更（可能已被打回或提交版本已变），请刷新重试',
+                code: 'CONCURRENT_STATE_CHANGE'
+            });
+        }
+
+        logger.info(`[return-quality] 协作单 #${id} DONE → PENDING by ${userName}(id=${userId}) reason_type=${reasonType} seq=${seq} rework=${reasonType === 'DEV_QUALITY'}${reasonNote ? ' note=' + reasonNote.slice(0, 50) : ''}`);
+
+        return res.json({
+            success: true,
+            current_status: 'PENDING',
+            reason_type: reasonType,
+            reason_note: reasonNote,
+            submission_seq: seq,
+            is_rework: reasonType === 'DEV_QUALITY'  // 前端可据此提示"计入返工"
+        });
+    } catch (e) {
+        logger.error(`[return-quality] 协作单 #${id} 打回异常: ${e.message}`, e);
+        return res.status(500).json({ error: '打回失败，请联系管理员', code: 'RETURN_QUALITY_FAILED' });
     }
 });
 
@@ -16900,7 +17248,26 @@ app.post('/api/collab/requests/:id/attachments',
                 }
             } catch (e) { /* ignore */ }
 
-            res.json({ message: `已上传 ${inserted.length} 个附件`, attachments: inserted });
+            // 取数交付质量记录 v3.0 Commit E：example_xlsx 模板上传时列对齐可读性预检（源头防线，用户拍板）
+            //   - 只提示不拦断（贴"列对齐不是闸门"）：坏模板/非 xlsx 仍上传成功，仅带 template_warning 供前端弹非阻塞提示。
+            //   - 与 C2 旁路三态留痕互补：源头让 admin 当场知道 + C2 兜底留痕。
+            //   - 多文件批量时取本次上传的第一个 example_xlsx 预检（取数模板通常单个）。
+            let templateWarning = null;
+            if (attachment_type === 'example_xlsx') {
+                const tpl = inserted.find(a => a.attachment_type === 'example_xlsx');
+                if (tpl) {
+                    const chk = collabSubmitHelpers.checkTemplateReadable(tpl.file_name, tpl.original_name);
+                    if (!chk.ok) {
+                        templateWarning = { ok: false, reason: chk.reason, original_name: tpl.original_name };
+                    }
+                }
+            }
+
+            res.json({
+                message: `已上传 ${inserted.length} 个附件`,
+                attachments: inserted,
+                template_warning: templateWarning,  // null=无警告；非 null=前端弹非阻塞提示（reason: NON_XLSX/EMPTY_HEADER/READ_FAILED）
+            });
         } catch (err) {
             logger.error('上传协作单附件失败:', err);
             cleanupTempFiles();

@@ -1341,6 +1341,40 @@
         </div>
     </div>
 
+    <!-- 取数交付质量记录 v3.0 Commit E：打回开发弹窗（return-quality，4 reason_type 仅 DEV_QUALITY 算返工）-->
+    <div class="modal-overlay" id="returnQualityModal">
+        <div class="modal-card">
+            <div class="modal-header">
+                <h3 id="returnQualityTitle" style="color:#b45309;">打回开发重做</h3>
+                <button class="modal-close" onclick="closeReturnQualityModal()">×</button>
+            </div>
+            <div class="modal-body">
+                <div class="hint" style="background:#fef3c7;color:#92400e;padding:8px 10px;border-radius:6px;margin-bottom:12px;">
+                    ⚠️ 打回后任务回到开发手中（状态 → 待处理），仅"开发质量"类打回计入返工统计
+                </div>
+                <div class="form-row">
+                    <label>打回原因 <span class="required">*</span></label>
+                    <select id="f_rq_reason_type">
+                        <option value="">请选择原因...</option>
+                        <option value="DEV_QUALITY">开发质量（计返工）</option>
+                        <option value="REQ_CHANGE">需求变更</option>
+                        <option value="ENV_ISSUE">环境问题</option>
+                        <option value="BIZ_ADJUST">业务调整</option>
+                    </select>
+                </div>
+                <div class="form-row">
+                    <label>补充说明（可选）</label>
+                    <textarea id="f_rq_reason_note" rows="3" maxlength="500" placeholder="可选：简述打回的具体原因（如哪些字段算错、缺哪列等），供开发复盘"></textarea>
+                    <div class="hint">最多 500 字。该说明将写入打回记录与操作日志。</div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-cancel" onclick="closeReturnQualityModal()">取消</button>
+                <button class="btn" id="btnReturnQuality" style="background:#b45309;color:white;" onclick="submitReturnQuality()">确认打回</button>
+            </div>
+        </div>
+    </div>
+
     <!-- v1.71.0 三级转发：exportUpload 弹框（方案 §6.3 + codex 39 H-3：multer field 名 result_data_screenshot）-->
     <div class="modal-overlay" id="exportUploadModal">
         <div class="modal-card">
@@ -2558,6 +2592,7 @@
             // 3. 交付内容 / 4. 验收结果 / 5. 失败提交历史（v1.70.0）/ 6. 沟通管理（v1.69.0）/ 7. 管理员修正记录（v1.70.4 ①）/ 8. 协作摩擦（D3 模块 7）
             const deliveryHtml = renderDeliverySection(d);
             const validationHtml = renderValidationSection(d, isAdminUser);
+            const qualityHtml = renderQualitySection(d, isAdminUser);  // 取数质量 v3.0 Commit E
             const failedHistoryHtml = renderFailedHistorySection(d, isAdminUser);
             const chatHtml = renderChatSection(d, isAdminUser);
             const adminFixHistoryHtml = renderAdminFixHistorySection(d, isAdminUser);
@@ -2587,6 +2622,7 @@
                 + exportScreenshotsHtml
                 + exportSummaryHtml
                 + validationHtml
+                + qualityHtml
                 + failedHistoryHtml
                 + chatHtml
                 + adminFixHistoryHtml
@@ -3009,6 +3045,98 @@
             } catch (e) {
                 showToast('网络错误', 'error');
             }
+        }
+
+        // 取数交付质量记录 v3.0 Commit E：质量记录区块（"管事不管人" — 记产出质量，不评开发个人）
+        //   展示：交付时长(M-7) / 提交次数 / 列对齐(最新) / 打回次数(按 reason_type，仅 DEV_QUALITY 标返工) + 打回历史
+        //   打回按钮：admin 或本单 contact_person + 状态 DONE 可见（调 return-quality；codex 76 H-1 SUBMITTED→DONE）
+        //   ⚠️ codex 77 复审 M-2：质量记录是**该单历次交付的留痕**（每次提交一行 quality_record），非"当前轮次实时指标"。
+        //     打回后单变 PENDING 时质量区块仍展示上一轮交付质量（历史留痕），这是"管事不管人/记每次产出"的预期行为，非 bug。
+        //   数据来源：后端详情 GET 附带的 quality_summary / quality_records / return_records（口径集中后端）
+        const RETURN_REASON_LABELS = {
+            DEV_QUALITY: '开发质量（返工）',
+            REQ_CHANGE: '需求变更',
+            ENV_ISSUE: '环境问题',
+            BIZ_ADJUST: '业务调整',
+        };
+        function renderQualitySection(d, isAdminUser) {
+            // 软删除作废单整体隐藏（与其他区块一致）
+            if (d.archived_at) return '';
+            const summary = d.quality_summary || {};
+            const returns = Array.isArray(d.return_records) ? d.return_records : [];
+            const qrecs = Array.isArray(d.quality_records) ? d.quality_records : [];
+
+            const myId = Number(getCurrentUserId());
+            const isContactPerson = Number(d.contact_person_id) === myId;
+            // codex 76 H-1：打回已成功交付（DONE）的结果，非 SUBMITTED（SUBMITTED 是 smoke 失败中间态）
+            const canReturn = (isAdminUser || isContactPerson) && d.status === 'DONE';
+
+            // 无任何质量数据 + 不可打回 → 不渲染区块（避免空区块噪音）
+            if (qrecs.length === 0 && returns.length === 0 && !canReturn) return '';
+
+            // 交付时长展示（分钟 → 人类可读）
+            const durMin = summary.delivery_duration_minutes;
+            let durText = '—';
+            if (Number.isFinite(durMin)) {
+                if (durMin < 60) durText = `${durMin} 分钟`;
+                else if (durMin < 60 * 24) durText = `${(durMin / 60).toFixed(1)} 小时`;
+                else durText = `${(durMin / 60 / 24).toFixed(1)} 天`;
+            }
+
+            // 列对齐状态（最新一次提交）
+            const colComplete = summary.latest_is_columns_complete;  // 1/0/null/undefined
+            let colText, colColor;
+            if (colComplete === 1) { colText = '列齐全'; colColor = '#065f46'; }
+            else if (colComplete === 0) {
+                let miss = [];
+                try { miss = JSON.parse(summary.latest_missing_columns || '[]'); } catch (e) { miss = []; }
+                if (!Array.isArray(miss)) miss = [];
+                // codex 75 L-2：缺列项 String() 兜底——防 DB 异常数据（非字符串）让 escapeHtml 报错崩详情页；限展示 10 项
+                const missStr = miss.slice(0, 10).map(x => escapeHtml(String(x)));
+                colText = `缺列：${missStr.length ? missStr.join('、') + (miss.length > 10 ? ' 等' : '') : '有缺列'}`;
+                colColor = '#991b1b';
+            }
+            else { colText = '未比对'; colColor = '#9ca3af'; }
+
+            const reworkBadge = summary.rework_count > 0
+                ? `<span style="color:#991b1b;font-weight:600;">${summary.rework_count} 次返工</span>`
+                : '0 次返工';
+
+            // 打回历史列表（按时间）
+            let returnsHtml = '';
+            if (returns.length > 0) {
+                returnsHtml = `<div style="margin-top:10px;">
+                    <div style="font-size:12px;color:#6b7280;margin-bottom:4px;">打回历史</div>
+                    ${returns.map(r => {
+                        const isRework = r.reason_type === 'DEV_QUALITY';
+                        const label = RETURN_REASON_LABELS[r.reason_type] || escapeHtml(r.reason_type);
+                        return `<div style="padding:6px 8px;background:#f9fafb;border-radius:4px;margin-bottom:4px;font-size:13px;">
+                            <span style="color:${isRework ? '#991b1b' : '#6b7280'};font-weight:${isRework ? 600 : 400};">${label}</span>
+                            <span style="color:#9ca3af;"> · ${escapeHtml(r.returned_by_name || '—')} · ${fmtDate(r.returned_at)} · 第 ${r.submission_seq || '?'} 次提交</span>
+                            ${r.reason_note ? `<div style="color:#4b5563;margin-top:2px;">${escapeHtml(r.reason_note)}</div>` : ''}
+                        </div>`;
+                    }).join('')}
+                </div>`;
+            }
+
+            const returnBtnHtml = canReturn
+                ? `<div style="margin-top:10px;">
+                       <button class="val-btn" style="background:#fef3c7;color:#92400e;border:1px solid #fde68a;" onclick="openReturnQualityDialog(${d.id})">打回开发重做</button>
+                   </div>`
+                : '';
+
+            return `
+                <div class="detail-section">
+                    <div class="detail-section-title">取数交付质量</div>
+                    <div class="detail-section-body">
+                        <div class="detail-kv"><div class="detail-kv-label">交付时长</div><div class="detail-kv-value">${durText}</div></div>
+                        <div class="detail-kv"><div class="detail-kv-label">提交次数</div><div class="detail-kv-value">${summary.submit_count || 0} 次</div></div>
+                        <div class="detail-kv"><div class="detail-kv-label">列对齐</div><div class="detail-kv-value" style="color:${colColor};">${colText}</div></div>
+                        <div class="detail-kv"><div class="detail-kv-label">打回</div><div class="detail-kv-value">${summary.return_count || 0} 次 · ${reworkBadge}</div></div>
+                        ${returnsHtml}
+                        ${returnBtnHtml}
+                    </div>
+                </div>`;
         }
 
         // 验收结果区块（D3 模块 7）：按 sql_validation_status 三色分支
@@ -3731,6 +3859,9 @@
                 if (res.ok) {
                     showToast('✅ 提交成功，系统正在跑 smoke test', 'success');
                     closeSubmitDeliveryModal();
+                    // 取数交付质量记录 v3.0 Commit E 方案乙：列对齐缺列非阻塞提醒（不影响提交成功，开发可当场自纠重传）
+                    //   响应 quality_check.is_columns_complete===0 表示缺列（=== null 是未比对不提醒）；missing_columns 始终数组
+                    maybeWarnMissingColumns(data.quality_check);
                     if (typeof openDetail === 'function') await openDetail(id);
                     if (typeof loadList === 'function') loadList();
                 } else {
@@ -3744,6 +3875,34 @@
                 btn.disabled = false;
                 btn.textContent = '提交';
             }
+        }
+
+        // 取数交付质量记录 v3.0 Commit E 方案乙：检测列对齐缺列，弹非阻塞提醒（不拦提交，开发当场自纠）
+        //   ⚠️ 判"缺列"只看 is_columns_complete===0（=== null 是未比对，不提醒；===1 齐全，不提醒）——
+        //   不能只看 missing_columns.length（响应未比对态 missing_columns 也是 []，会漏判，见后端 JSDoc 契约）
+        function maybeWarnMissingColumns(qc) {
+            if (!qc || qc.is_columns_complete !== 0) return;
+            const miss = Array.isArray(qc.missing_columns) ? qc.missing_columns : [];
+            const cols = miss.length ? miss.join('、') : '部分需求列';
+            // 非阻塞 info toast（与 success 提示错开，2.4s 后自动消失；列对齐不是闸门，提交已成功）
+            setTimeout(() => {
+                showToast(`⚠️ 检测到缺列：${cols}，如需可补充后重新提交`, 'info');
+            }, 600);
+        }
+
+        // 取数交付质量记录 v3.0 Commit E：模板上传列对齐可读性提醒（源头防线，只提示不拦断）
+        //   reason: NON_XLSX（非 xlsx，admin 有意传不弹）/ EMPTY_HEADER（xlsx 无表头）/ READ_FAILED（损坏/解析失败）
+        const TEMPLATE_WARN_MSG = {
+            EMPTY_HEADER: '数据模板第一行未读到表头，将无法用于列对齐校验，如需校验请换规范 xlsx',
+            READ_FAILED: '数据模板无法解析（可能损坏或格式异常），将无法用于列对齐校验',
+        };
+        function maybeWarnTemplate(tw) {
+            if (!tw || tw.ok) return;
+            // NON_XLSX：admin 有意传 pdf/png 等说明性模板，不打扰（列对齐本就不是闸门）
+            if (tw.reason === 'NON_XLSX') return;
+            const msg = TEMPLATE_WARN_MSG[tw.reason];
+            if (!msg) return;
+            setTimeout(() => { showToast(`⚠️ ${msg}`, 'info'); }, 900);
         }
 
         // ===== v1.71.0 Commit F: 三级转发前端 modal JS =====
@@ -4006,6 +4165,73 @@
                 showToast('网络错误，请检查后端服务', 'error');
                 btn.disabled = false;
                 btn.textContent = '确认退回';
+            }
+        }
+
+        // ---------- 取数交付质量记录 v3.0 Commit E：打回开发 return-quality 弹窗 ----------
+        let _returnQualityCollabId = null;
+        function openReturnQualityDialog(id) {
+            const safeId = Number(id);
+            if (!Number.isSafeInteger(safeId) || safeId <= 0) {
+                showToast('协作单 id 非法', 'error');
+                return;
+            }
+            _returnQualityCollabId = safeId;
+            document.getElementById('returnQualityTitle').textContent = `打回开发重做 · 协作单 #${safeId}`;
+            document.getElementById('f_rq_reason_type').value = '';
+            document.getElementById('f_rq_reason_note').value = '';
+            // codex 75 M-1：每次打开重置按钮状态（对齐 openReturnToDevDialog 范式）——
+            //   否则上次打回成功后按钮停在 disabled+"打回中…"，再次打开无法提交
+            const rqBtn = document.getElementById('btnReturnQuality');
+            rqBtn.disabled = false;
+            rqBtn.textContent = '确认打回';
+            document.getElementById('returnQualityModal').classList.add('show');
+        }
+        function closeReturnQualityModal() {
+            document.getElementById('returnQualityModal').classList.remove('show');
+            _returnQualityCollabId = null;
+        }
+        async function submitReturnQuality() {
+            const id = _returnQualityCollabId;
+            if (!id) { showToast('协作单 id 丢失，请重新打开弹框', 'error'); return; }
+
+            const reasonType = document.getElementById('f_rq_reason_type').value;
+            if (!reasonType) { showToast('请选择打回原因', 'error'); return; }
+            const note = (document.getElementById('f_rq_reason_note').value || '').trim();
+            if (note.length > 500) { showToast('补充说明不能超过 500 字符', 'error'); return; }
+            if (!confirm('确认打回？任务将回到开发手中重做。')) return;
+
+            const btn = document.getElementById('btnReturnQuality');
+            btn.disabled = true;
+            btn.textContent = '打回中…';
+
+            const body = { reason_type: reasonType };
+            if (note) body.reason_note = note;
+
+            try {
+                const res = await fetch(`/api/collab/requests/${id}/return-quality`, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': 'Bearer ' + localStorage.getItem('token'),
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(body)
+                });
+                const data = await res.json().catch(() => ({}));
+                if (res.ok) {
+                    showToast(`✅ 已打回开发${data.is_rework ? '（计入返工）' : ''}`, 'success');
+                    closeReturnQualityModal();
+                    if (typeof openDetail === 'function') await openDetail(id);
+                    if (typeof loadList === 'function') loadList();
+                } else {
+                    showToast(`❌ ${data.error || '打回失败'}${data.code ? `（${data.code}）` : ''}`, 'error');
+                    btn.disabled = false;
+                    btn.textContent = '确认打回';
+                }
+            } catch (e) {
+                showToast('网络错误，请检查后端服务', 'error');
+                btn.disabled = false;
+                btn.textContent = '确认打回';
             }
         }
 
@@ -4731,6 +4957,8 @@
                         uploadResults.errors.push(`数据模板上传失败：${tplData.error || '请稍后重试'}`);
                     } else {
                         uploadResults.template = true;
+                        // 取数交付质量记录 v3.0 Commit E：模板列对齐可读性预检（源头防线，只提示不拦断）
+                        uploadResults.templateWarning = tplData.template_warning || null;
                     }
                 }
 
@@ -4744,6 +4972,8 @@
                 } else {
                     showToast(`协作单 #${newId} 已创建${summary}`, 'success');
                 }
+                // 取数交付质量记录 v3.0 Commit E：模板列对齐可读性提醒（非阻塞，与主 toast 错开；只提示不拦断）
+                maybeWarnTemplate(uploadResults.templateWarning);
                 closeNewModal();
                 loadList();
             } catch (e) {

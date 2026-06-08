@@ -16,6 +16,9 @@ const fs = require('fs');
 const fsp = fs.promises;
 const path = require('path');
 const sqlValidator = require('./sql-validator');
+// 取数交付质量记录 v3.0 Commit C2：列对齐写入依赖 B 的两个纯 helper
+const { readXlsxHeader } = require('./xlsx-header-reader');
+const { compareColumns } = require('./column-alignment-checker');
 
 // ============================================================================
 // §-1 路径与终态 helper（v1.70.0 方案 §1.2 / §1.2.6 抽取）
@@ -265,8 +268,74 @@ function sanitizeSqlError(message) {
  * @param {string} scriptFilePath  result_script 的物理路径
  * @param {object} pool            mssql ConnectionPool 或 mysql2 Pool（按 dialect）
  * @param {object} ctx             **必填** { requestId, oldVer, dbAsync: {runAsync}, logger, dialect, allowedDb }
- * @returns {Promise<{ok: true, validatedAt: Date, rowCount: number} | {ok: false, error: string, layer?: number}>}
+ * @returns {Promise<{ok: true, validatedAt: Date, rowCount: number, columns: string[]} | {ok: false, error: string, layer?: number}>}
+ *   columns（取数质量 v3.0 Commit C1）：SQL 结果列名数组（列对齐用）。
+ *     - **向后兼容**：只新增 columns 字段，不改 ok/rowCount/error/validatedAt 现有字段语义。
+ *     - 来自结果集元数据（非首行数据）→ 零行查询也有列名（探针实证 TDS COLMETADATA 先于 ROW token）。
+ *     - 列名提取失败（理论不会，防御性）→ columns=[]，不影响 smoke 成功。
  */
+
+/**
+ * 从 SQL 查询结果提取列名（取数质量 v3.0 Commit C1，列对齐用）。
+ *   - SQL Server（mssql）：result.recordset.columns 是对象 { 列名: {index,name,...} }，来自 COLMETADATA 元数据，零行也有。
+ *   - MySQL（mysql2）：pool.query 返回 [rows, fields]，fields[].name 是列名，零行也有。
+ *
+ *   ⚠️ 列顺序（codex 70 H-1，真实业务库实证）：mssql columns 是对象，Object.keys 对**整数样式列名**
+ *      （如别名 [0]/[1]/[2024]）会被 JS 强制升序排序，丢失 SELECT 顺序。故**必须按 meta.index 排序**
+ *      还原 SELECT 列顺序，不能直接用 Object.keys 顺序。
+ *   ⚠️ 重复列名（codex 70 H-2，真实业务库实证）：mssql columns 以列名为 key，**天然无法保留重复列名**
+ *      （SELECT 'x' AS dup,'y' AS dup → columns 只剩 1 个 dup）。本函数**不支持重复列名**，重复会丢。
+ *      对列对齐口径无害：compareColumns 用 Set 比对（T⊆S）本就去重，重复列不影响"模板列是否都在"判定。
+ *   单结果集前提（codex 70 M-1，已核实）：sql-validator 只放行单 SELECT/WITH（首关键字白名单
+ *     + 多分号拒绝 + 返回 array 多语句拒绝，见 sql-validator.js:507/514），故只有一个结果集，
+ *     columns 对应唯一结果集，不存在"多结果集 columns 只对应第一组"的歧义。
+ *   - 防御性：任何异常 → 返回 []（列名提取不该影响 smoke 成功判定，codex 67 硬约束 #9）。
+ *     mysql2 在 CALL/非 SELECT/多结果集场景 fields 可能 undefined/嵌套 → 返回 []（旁路降级，
+ *     C2 消费侧区分 []=无列/降级，不判 smoke 失败，codex 70 L-1）。validator 已禁这些场景，纯防御。
+ *
+ * @param {string} dialect 'sqlserver' / 'mysql'
+ * @param {object} mssqlResult mssql request.query 的返回（含 recordset）
+ * @param {Array} mysqlFields  mysql2 query 返回的 fields 数组
+ * @returns {string[]} 列名数组（按 SELECT 顺序；提取失败返回 []）
+ */
+function extractResultColumns(dialect, mssqlResult, mysqlFields) {
+    try {
+        if (dialect === 'sqlserver') {
+            const cols = mssqlResult && mssqlResult.recordset && mssqlResult.recordset.columns;
+            if (!cols || typeof cols !== 'object') return [];
+            // H-1（codex 70）+ 稳定降级（codex 71 M-1）：按 meta.index 排序还原 SELECT 顺序
+            //   （Object.keys 对整数样式列名会强制升序乱序）。**真正的稳定降级**：
+            //   - 有效 index（Number.isInteger && >=0）→ 按 index 排
+            //   - 个别列缺/非法 index → 该列用原始枚举位置兜底（不整体回退，避免部分缺失就退回 Object.keys 乱序）
+            //   - tie-breaker：index 相同/都缺时按原始枚举序，保证稳定（Array.sort 在 V8 是稳定的，
+            //     但显式用 origPos 兜底不依赖引擎稳定性，更稳）。
+            const keys = Object.keys(cols);
+            const origPos = new Map(keys.map((k, i) => [k, i]));
+            const sortKey = (k) => {
+                const idx = cols[k] && cols[k].index;
+                return Number.isInteger(idx) && idx >= 0 ? idx : Number.MAX_SAFE_INTEGER;
+            };
+            const ordered = keys.slice().sort((a, b) => {
+                const d = sortKey(a) - sortKey(b);
+                return d !== 0 ? d : origPos.get(a) - origPos.get(b);  // tie-breaker：原始枚举序
+            });
+            return ordered.map(key => {
+                const meta = cols[key];
+                return (meta && typeof meta.name === 'string' && meta.name.length > 0) ? meta.name : key;
+            });
+        }
+        if (dialect === 'mysql') {
+            if (!Array.isArray(mysqlFields)) return [];
+            return mysqlFields
+                .map(f => (f && typeof f.name === 'string') ? f.name : null)
+                .filter(name => name != null);
+        }
+        return [];
+    } catch (e) {
+        return [];  // 列名提取失败不影响 smoke 成功
+    }
+}
+
 async function runRealSmokeTest(scriptFilePath, pool, ctx) {
     if (!ctx || typeof ctx !== 'object' || ctx.requestId == null
         || !ctx.dbAsync || typeof ctx.dbAsync.runAsync !== 'function') {
@@ -340,6 +409,8 @@ async function runRealSmokeTest(scriptFilePath, pool, ctx) {
                     ok: true,
                     validatedAt: new Date(),
                     rowCount: result.recordset ? result.recordset.length : 0,
+                    // C1：列名来自 recordset.columns 元数据（零行也有），列对齐用；提取失败不影响 smoke
+                    columns: extractResultColumns('sqlserver', result, null),
                 };
             } catch (e) {
                 const sanitized = sanitizeSqlError(e.message);
@@ -354,11 +425,13 @@ async function runRealSmokeTest(scriptFilePath, pool, ctx) {
             // mysql2/promise pool：用 query + timeout 选项实现 20s 限制
             // 注：mysql2 timeout 是 connection 级别的，超时会抛 PROTOCOL_SEQUENCE_TIMEOUT
             try {
-                const [rows] = await pool.query({ sql: v.smokeSql, timeout: 20000 });
+                // C1：解构 fields（列元数据，零行也有），列对齐用。原代码只取 rows 丢了 fields。
+                const [rows, fields] = await pool.query({ sql: v.smokeSql, timeout: 20000 });
                 return {
                     ok: true,
                     validatedAt: new Date(),
                     rowCount: Array.isArray(rows) ? rows.length : 0,
+                    columns: extractResultColumns('mysql', null, fields),
                 };
             } catch (e) {
                 const sanitized = sanitizeSqlError(e.message);
@@ -475,10 +548,461 @@ function checkAttachmentOwnerOrAdmin(attachment, reqUser) {
     return { ok: false, reason: '只有上传人本人或 admin 可操作此附件', code: 'ATTACHMENT_OWNER_LOCKED' };
 }
 
+// ============================================================================
+// §5 取数交付质量记录 v3.0 — Commit C2：submit-export 后列对齐写入（旁路）
+// ============================================================================
+//
+// 设计来源：docs/local/数据协作模块_v3.0/取数交付质量记录_方案_20260605_v3.0.md
+//           + 开发计划 v0.2 C2 硬约束 7 条 + codex 72 取舍审（spec-critique）9 issue 全落地。
+//
+// 定位（"管事不管人" + "列对齐不是闸门"）：
+//   smoke test 是唯一放行闸门；列对齐只做"当场提示 + 背后留痕"，**绝不阻断/回滚 submit-export 主流程**。
+//   本函数在 submit-export 主事务（activateNewVersion 内部事务）commit 成功后被旁路调用。
+//
+// 异常铁律（codex 72 H-2）：整个函数自包 try/catch，**永远返回结构完整的结果对象**（含失败态），
+//   调用方（endpoint）无脑取字段映射进响应，从根上杜绝"未保护变量参与 res.json 致主流程已 DONE 却 HTTP 500"。
+//   任何内部异常只 warn + 写 operation_log（best-effort），不向上抛。
+//
+// 字段口径：
+//   - submitted_at（codex 72 H-1）：用"本次提交时间"——INSERT 时 SQL 内联 datetime('now','localtime')，
+//     与表内其他时间字段（created_at 等）同源（避免 JS 时区与 SQLite 不一致）。
+//     不用 collab.submitted_at（首次提交时间，DONE 重传会让多条记录共享同一时间致时序失真）。
+//   - submission_seq：= activateResult.newVer（每次提交版本 +1，幂等键也用它）。
+//   - is_columns_complete 三态（codex 69 M-4）：1=列齐全 / 0=缺列 / NULL=未比对（无模板/非xlsx模板/读取失败）。
+//   - missing_columns（codex 72 L-1）：永远是 JSON 数组（齐全 [] / 缺列 [...]）；未比对存 NULL。
+//   - expected/actual_columns_snapshot（L-1）：JSON 数组；无法获取存 NULL（非字符串 '[]'）。
+//
+// 未比对原因区分（codex 72 M-1）：reason ∈ OK / MISSING_COLUMNS / NO_TEMPLATE / NON_XLSX_TEMPLATE /
+//   XLSX_READ_FAILED / SKIPPED_EXISTING / C2_FAILED，写 operation_log + 回响应供前端提醒（方案乙）。
+//   （注：源头另有 E 阶段"模板上传时校验弹窗"防线，本函数是兜底留痕。）
+//
+// 幂等（codex 72 M-3）：INSERT OR IGNORE + changes 检查，唯一索引冲突时 changes=0 → reason=SKIPPED_EXISTING，
+//   不刷错误日志（比 SELECT 查重 + 普通 INSERT 更短更稳，不依赖错误消息文本匹配）。
+//
+// 不做（codex 72 M-6）：单/多产出一致性检查本期不做（sub_item 恒 NULL 时该检查永真是空跑死代码），
+//   多产出上线再加（开发计划 v0.2 硬约束 4 已记在案）。
+
+// 可读出表头的模板扩展名（example_xlsx 字段允许 pdf/docx/png 等，仅这两类能列对齐）
+//   codex 76 L-2：含 .xls 是有意的——SheetJS（XLSX.readFile）原生支持旧 .xls 格式（多格式库），
+//   readXlsxHeader 函数名是历史命名（B 选 SheetJS 不引 exceljs），实际 .xls/.xlsx 都能读表头。
+const COLUMN_ALIGN_READABLE_EXTS = new Set(['.xlsx', '.xls']);
+
+/**
+ * submit-export 主事务成功后，旁路记录取数交付质量（列对齐）。
+ *
+ * @param {object} ctx
+ *   @param {object}  ctx.dbAsync        { runAsync, getAsync }（sqlite 异步封装）
+ *   @param {number}  ctx.requestId      协作单 id
+ *   @param {number}  ctx.submitterId    本次提交开发的 user id（endpoint 的 req.user.id，非 exporter）
+ *   @param {string}  ctx.submitterName  本次提交开发名
+ *   @param {number}  ctx.submissionSeq  本次提交序号（= activateResult.newVer）
+ *   @param {string[]} ctx.smokeColumns  SQL 结果列名（activateResult.smokeTestResult.columns；可能 [] 或 undefined）
+ *   @param {function} [ctx.insertLog]   写 operation_log 的函数 (requestId, opType, operatorId, operator, reason)；可选。
+ *       ⚠️ 契约（codex 73 M-1）：**必须同步触发、不返回 Promise、自身不抛**（如 server 的 insertCollabLog =
+ *       db.run + 回调吞错）。tryInsertQualityLog 只捕同步异常；若未来改成 async/返回 Promise，
+ *       其 rejection 不会被兜住，会破坏本函数"永不影响主流程"的 H-2 铁律——改造时必须同步改 tryInsertQualityLog。
+ *   @param {object}  [ctx.logger]       日志器，默认 console
+ * @returns {Promise<{recorded:boolean, is_columns_complete:(1|0|null), missing_columns:string[], reason:string}>}
+ *   **永不抛**。recorded=是否成功写入一行 quality_record；reason 见上枚举。
+ *   ⚠️ 响应字段口径（codex 73 M-2）：**missing_columns 始终是数组**（齐全 [] / 缺列 [...] / 未比对 []）——
+ *      与 DB 字段不同（DB 未比对存 NULL，便于统计区分；响应保持数组便于前端 .map 渲染不判空）。
+ *      **前端判"未比对"必须看 is_columns_complete===null 或 reason（NO_TEMPLATE/NON_XLSX_TEMPLATE/
+ *      XLSX_READ_FAILED/C2_FAILED），不能只看 missing_columns.length===0**（那会把"未比对"误判成"列齐全"）。
+ */
+async function recordQualityOnSubmit(ctx) {
+    const log = (ctx && ctx.logger) || console;
+    // 兜底默认返回（任何早退/异常都给结构完整对象，H-2）
+    const fail = (reason, isComplete = null, missing = []) => ({
+        recorded: false,
+        is_columns_complete: isComplete,
+        missing_columns: missing,
+        reason,
+    });
+
+    try {
+        const { dbAsync, requestId, submitterId, submitterName, submissionSeq } = ctx;
+        if (!dbAsync || typeof dbAsync.runAsync !== 'function' || typeof dbAsync.getAsync !== 'function') {
+            log.warn('[collab-quality] recordQualityOnSubmit: dbAsync 缺失，跳过质量记录');
+            return fail('C2_FAILED');
+        }
+
+        // smokeColumns 防御：C1 透传可能 undefined / 非数组 → 视为 [] 空列（columns 多义，codex 71 M-2）
+        const sqlCols = Array.isArray(ctx.smokeColumns) ? ctx.smokeColumns : [];
+
+        // 1. 查最新 active example_xlsx 模板（codex 72 M-2：稳定排序取最新）
+        const tpl = await dbAsync.getAsync(
+            `SELECT id, file_name, original_name FROM collab_attachments
+              WHERE collab_request_id = ?
+                AND attachment_type = 'example_xlsx'
+                AND (status = 'active' OR status IS NULL)
+              ORDER BY created_at DESC, id DESC
+              LIMIT 1`,
+            [requestId]
+        );
+
+        // 2. 据模板形态决定 T（需求列）与 is_columns_complete 三态
+        let isComplete;        // 1 / 0 / null
+        let missing = [];      // 纯数组（L-1）
+        let expectedSnapshot = null;  // JSON 数组或 null（L-1）
+        let reason;
+
+        if (!tpl) {
+            // 无模板：未比对（codex 72 M-1 区分来源）
+            isComplete = null;
+            reason = 'NO_TEMPLATE';
+        } else {
+            const ext = path.extname(tpl.original_name || tpl.file_name || '').toLowerCase();
+            if (!COLUMN_ALIGN_READABLE_EXTS.has(ext)) {
+                // 非 xlsx 模板（admin 有意传 pdf/png 等）：未比对
+                isComplete = null;
+                reason = 'NON_XLSX_TEMPLATE';
+            } else {
+                // xlsx/xls 模板：试读表头
+                let templateCols;
+                try {
+                    const abs = resolveAttachmentPath(tpl.file_name);
+                    const { header } = readXlsxHeader(abs);  // 抛 XLSX_READ_FAILED
+                    templateCols = header;
+                } catch (e) {
+                    // 读取/解析失败：未比对（codex 69 M-4 不当齐全）
+                    //   归类取舍（codex 73 L-1）：resolveAttachmentPath 抛 INVALID_ATTACHMENT_PATH（路径越界，
+                    //   内网几乎不发生——file_name 由系统生成非用户输入）也统一归 XLSX_READ_FAILED，
+                    //   不为极罕见 case 扩第八态枚举；但 log.warn 保留 e.code 让排查时能区分路径越界 vs xlsx 解析失败。
+                    isComplete = null;
+                    reason = 'XLSX_READ_FAILED';
+                    log.warn(`[collab-quality] req=${requestId} 模板读取失败(${e.code || 'ERR'})，写未比对：${e.message}`);
+                    templateCols = undefined;
+                }
+                if (templateCols !== undefined) {
+                    // 正常比对（T ⊆ S）
+                    const cmp = compareColumns(templateCols, sqlCols);
+                    isComplete = cmp.complete ? 1 : 0;
+                    missing = cmp.missing;  // 纯数组
+                    expectedSnapshot = JSON.stringify(templateCols);
+                    reason = cmp.complete ? 'OK' : 'MISSING_COLUMNS';
+                }
+            }
+        }
+
+        // 3. snapshot（L-1）：actual 始终可取（sqlCols 数组）；expected 仅正常比对时有
+        const actualSnapshot = JSON.stringify(sqlCols);
+        const missingJson = isComplete === null ? null : JSON.stringify(missing);
+
+        // 4. INSERT OR IGNORE 幂等（codex 72 M-3）：唯一索引冲突 changes=0 → SKIPPED_EXISTING
+        //    单产出 collab_sub_item_id 恒 NULL → 命中 idx_qr_unique_single(request_id, submission_seq)
+        let insres;
+        try {
+            insres = await dbAsync.runAsync(
+                `INSERT OR IGNORE INTO collab_quality_record
+                    (collab_request_id, collab_sub_item_id, submitter_id, submitter_name,
+                     submission_seq, submitted_at, missing_columns, is_columns_complete,
+                     expected_columns_snapshot, actual_columns_snapshot, sql_attachment_id)
+                 VALUES (?, NULL, ?, ?, ?, datetime('now','localtime'), ?, ?, ?, ?, NULL)`,
+                [requestId, submitterId, submitterName, submissionSeq,
+                 missingJson, isComplete, expectedSnapshot, actualSnapshot]
+            );
+        } catch (e) {
+            log.warn(`[collab-quality] req=${requestId} INSERT 异常（不阻断主流程）：${e.message}`);
+            // 写一笔 operation_log 便于追溯（best-effort）
+            tryInsertQualityLog(ctx, requestId, submitterId, submitterName, `C2_FAILED:${e.message}`, log);
+            return fail('C2_FAILED', isComplete, missing);
+        }
+
+        const recorded = !!(insres && insres.changes > 0);
+        if (!recorded) {
+            // 幂等命中（同 request+seq 已有记录，重复提交/重复点击）
+            //   语义固化（codex 73 L-2）：SKIPPED_EXISTING 时返回的 is_columns_complete/missing_columns
+            //   是**本次重算结果**，非 DB 已留痕记录的结果。本平台同一次提交的重试间隔是毫秒级、模板不可变，
+            //   故两者必然一致；且 recorded=false 时前端本就忽略列对齐结果（无新增留痕）。不为此加一次
+            //   SELECT 读已有记录（内网过度设计）——recorded=false 已充分表达"未新增"。
+            reason = 'SKIPPED_EXISTING';
+            log.info(`[collab-quality] req=${requestId} seq=${submissionSeq} 已存在质量记录，幂等跳过`);
+        }
+
+        // 5. operation_log 留痕（codex 72 M-1：区分未比对来源 + 记结果）
+        tryInsertQualityLog(ctx, requestId, submitterId, submitterName,
+            `quality:${reason}/complete=${isComplete === null ? 'NULL' : isComplete}/missing=${missing.length}`, log);
+
+        return {
+            recorded,
+            is_columns_complete: isComplete,
+            missing_columns: missing,
+            reason,
+        };
+    } catch (e) {
+        // 顶层兜底（H-2）：任何漏网异常都不阻断主流程
+        log.warn(`[collab-quality] recordQualityOnSubmit 顶层异常（已隔离，不阻断 submit）：${e.message}`);
+        return fail('C2_FAILED');
+    }
+}
+
+/**
+ * best-effort 写质量相关 operation_log（不阻断、不抛）。
+ * 用 ctx.insertLog（若提供）；没有则静默跳过（operation_log 是辅助留痕，缺它不影响列对齐主功能）。
+ *
+ * ⚠️ H-2 契约（codex 73 M-1）：本函数只用 try/catch 兜**同步**异常。ctx.insertLog 必须是同步
+ *   fire-and-forget（不返回 Promise、自身不抛）——server 的 insertCollabLog 即 db.run+回调吞错，符合契约。
+ *   若未来把 insertCollabLog 改成 async/返回 Promise，其 rejection 不会被这里兜住，会破坏
+ *   recordQualityOnSubmit"永不影响主流程"的 H-2 铁律。改造方必须同步把本函数改 async + await + .catch()。
+ */
+function tryInsertQualityLog(ctx, requestId, operatorId, operator, reason, log) {
+    try {
+        if (ctx && typeof ctx.insertLog === 'function') {
+            ctx.insertLog(requestId, 'QUALITY_RECORD', operatorId, operator, reason);
+        }
+    } catch (e) {
+        (log || console).warn(`[collab-quality] 写 operation_log 失败（忽略）：${e.message}`);
+    }
+}
+
+// ============================================================================
+// §6 取数交付质量记录 v3.0 — Commit D：退回开发最小状态转换骨架（公共函数）
+// ============================================================================
+//
+// 设计来源：开发计划 v0.2 Commit D（H-3 铁律 + codex 72 取舍审延续）+ 用户拍板"只抽事务骨架"。
+//
+// 抽取动机（H-3）：现有 return-to-dev（三级转发 EXPORTING→PENDING by exporter）与新 return-quality
+//   （打回 SUBMITTED→PENDING by contact_person）共享"改 status→PENDING + 条件 UPDATE 乐观锁 + 同事务"
+//   这一最小骨架；但**权限 / 源状态 / 是否碰 exporter 字段 / 是否写 return_record 全不同**。
+//   故只抽事务骨架，**不套整个 endpoint**（H-3 铁律：复用旧逻辑前抽公共函数，不套用旧 endpoint）。
+//   return-to-dev 暂不重构（避免动已上线代码）；本函数仅给 return-quality 用，未来可渐进收敛。
+//
+// 边界（用户拍板"只抽事务骨架"）：
+//   - 本函数只管：BEGIN IMMEDIATE → 条件 UPDATE status=PENDING（WHERE 带源状态 + 调用方 extraGuards 乐观锁）
+//     → changes 检查（0 则 ROLLBACK 返 stale）→ extraWrites 回调（同事务内插 return_record + log）→ COMMIT。
+//   - 不管：权限校验 / reason 枚举校验 / 钉钉通知（都在调用方 endpoint 做，事务外）。
+//   - extraWrites 在 UPDATE 成功（changes>0）后、COMMIT 前调用，让调用方在**同一事务**内插自己的差异化记录；
+//     extraWrites 抛错 → 整个事务 ROLLBACK（状态更新 + return_record 原子，M-4）。
+
+/**
+ * 退回开发最小状态转换骨架（X → PENDING，同事务 + 乐观锁）。
+ *
+ * @param {object} dbAsync         { runAsync }（runAsync(sql, params) → this 含 changes）
+ * @param {object} opts
+ *   @param {number}   opts.requestId      协作单 id
+ *   @param {string}   opts.fromStatus     允许的源状态（如 'SUBMITTED'）——UPDATE WHERE 收紧到该状态
+ *   @param {Array}    [opts.extraGuards]  额外 WHERE 守卫，按顺序 AND 拼接。两种形态：
+ *                                          - 带占位符：{ sql: 'submission_version = ?', value: 3 }（value 入参）
+ *                                          - 无占位符：{ sql: 'archived_at IS NULL' }（value 省略/undefined，不入参）
+ *                                          ⚠️ sql 含 '?' 的必须给 value；不含 '?' 的必须不给 value（防参数错位）
+ *   @param {function} [opts.extraWrites]  async (dbAsync) => {}：UPDATE 成功后、COMMIT 前在同事务内执行
+ *                                          （插 return_record + operation_log）；抛错则整事务 ROLLBACK
+ *   @param {string[]} [opts.clearFields]  额外随 status 一起置 NULL 的字段（codex 76 H-1 衍生）。
+ *                                          DONE→PENDING 场景需清 done_at/sql_validated_at 等已完成痕迹，避免详情页
+ *                                          "PENDING 状态却残留旧完成时间"的矛盾。**字段名白名单校验防注入**（仅允许
+ *                                          已知列名），调用方传 ['done_at','sql_validated_at']。
+ * @returns {Promise<{ok:boolean, code?:string, changes?:number}>}
+ *   ok=true 转换成功；ok=false + code='STALE_STATE'（changes=0，状态已变/并发）；
+ *   抛错仅在 BEGIN/COMMIT/extraWrites 异常时（调用方 catch 返 500）——此时已 ROLLBACK。
+ */
+// clearFields 白名单（防 SQL 注入：字段名不参数化，只能用受控白名单）
+const TRANSITION_CLEARABLE_FIELDS = new Set([
+    'done_at', 'sql_validated_at', 'sql_validation_status', 'sql_validation_error',
+]);
+async function transitionToDevPending(dbAsync, opts) {
+    const { requestId, fromStatus, extraGuards = [], extraWrites, clearFields = [] } = opts;
+    if (!dbAsync || typeof dbAsync.runAsync !== 'function') {
+        const e = new Error('transitionToDevPending: dbAsync.runAsync 必填');
+        e.code = 'INVALID_DB';
+        throw e;
+    }
+    // 入参 fail-fast（codex 74 L-1：函数已导出，未来复用时尽早暴露开发错误，不拼出无效 WHERE）
+    if (!Number.isSafeInteger(requestId) || requestId <= 0) {
+        const e = new Error('transitionToDevPending: requestId 必须是安全正整数');
+        e.code = 'INVALID_REQUEST_ID';
+        throw e;
+    }
+    if (!fromStatus || typeof fromStatus !== 'string') {
+        const e = new Error('transitionToDevPending: fromStatus 必须是非空字符串');
+        e.code = 'INVALID_FROM_STATUS';
+        throw e;
+    }
+
+    // 拼 WHERE：固定 id + 源状态，再 AND 上调用方守卫（乐观锁 / archived 双轨等）
+    //   守卫两形态：带占位符（sql 含 '?' → push value）/ 无占位符（sql 如 'archived_at IS NULL' → 不 push）。
+    //   按 sql 是否含 '?' 决定是否入参，防 IS NULL 类守卫 push undefined 造成参数错位（自检 bug 修复）。
+    let where = 'id = ? AND status = ?';
+    const params = [requestId, fromStatus];
+    for (const g of extraGuards) {
+        // 守卫结构 fail-fast（codex 74 L-1/M-2）
+        if (!g || !g.sql || typeof g.sql !== 'string') {
+            const e = new Error('transitionToDevPending: extraGuard.sql 必须是非空字符串');
+            e.code = 'INVALID_GUARD';
+            throw e;
+        }
+        const hasPlaceholder = g.sql.includes('?');
+        const hasValue = Object.prototype.hasOwnProperty.call(g, 'value') && g.value !== undefined;
+        // 参数形态 fail-fast（codex 74 M-2）：含 ? 必给 value / 不含 ? 不应给 value
+        //   防未来复用漏传 value → SQLite 按 NULL 绑定 → 伪装成 changes=0 并发冲突（实为开发错误）
+        if (hasPlaceholder && !hasValue) {
+            const e = new Error(`transitionToDevPending: 守卫 "${g.sql}" 含占位符但未提供 value`);
+            e.code = 'INVALID_GUARD_PARAM';
+            throw e;
+        }
+        if (!hasPlaceholder && hasValue) {
+            const e = new Error(`transitionToDevPending: 守卫 "${g.sql}" 不含占位符却提供了 value（会被静默忽略）`);
+            e.code = 'INVALID_GUARD_PARAM';
+            throw e;
+        }
+        where += ` AND ${g.sql}`;
+        if (hasPlaceholder) {
+            params.push(g.value);
+        }
+    }
+
+    // 额外清空字段（codex 76 H-1 衍生）：白名单校验防注入，拼进 SET
+    let clearSql = '';
+    for (const f of clearFields) {
+        if (!TRANSITION_CLEARABLE_FIELDS.has(f)) {
+            const e = new Error(`transitionToDevPending: clearField "${f}" 不在白名单`);
+            e.code = 'INVALID_CLEAR_FIELD';
+            throw e;
+        }
+        clearSql += `, ${f} = NULL`;
+    }
+
+    await dbAsync.runAsync('BEGIN IMMEDIATE TRANSACTION');
+    try {
+        const upd = await dbAsync.runAsync(
+            `UPDATE collab_requests SET status = 'PENDING'${clearSql} WHERE ${where}`,
+            params
+        );
+        if (!upd || upd.changes === 0) {
+            await dbAsync.runAsync('ROLLBACK');
+            return { ok: false, code: 'STALE_STATE', changes: 0 };
+        }
+        // 同事务内插差异化记录（return_record + log），抛错则下方 catch ROLLBACK
+        if (typeof extraWrites === 'function') {
+            await extraWrites(dbAsync);
+        }
+        await dbAsync.runAsync('COMMIT');
+        return { ok: true, changes: upd.changes };
+    } catch (e) {
+        try { await dbAsync.runAsync('ROLLBACK'); } catch { /* ignore rollback err */ }
+        throw e;  // 调用方 catch 返 500（事务已回滚，状态/记录原子一致）
+    }
+}
+
+// ============================================================================
+// §7 取数交付质量记录 v3.0 — Commit E：模板上传时列对齐可读性预检（源头防线）
+// ============================================================================
+//
+// 设计来源：开发计划 v0.2 Commit E（2026-06-08 用户拍板新增）+ C2 取舍审 M-1 延伸。
+//   admin 上传 example_xlsx 时预检"该模板能否用于列对齐"，坏模板**当场提示不拦断**
+//   （贴"列对齐不是闸门"——admin 可有意传 pdf/说明性模板）。与 C2 旁路三态留痕互补两道防线。
+//
+// 无抛出的 best-effort 只读 helper（codex 75 L-3：非纯函数——会解析路径 + 读 xlsx 文件，
+//   有只读 I/O 副作用但不写入/不阻断）：永不抛，返回 warning 对象供 endpoint 带进响应。
+
+/**
+ * 预检 example_xlsx 模板能否用于列对齐（读出表头）。**永不抛**（best-effort，不阻断上传）。
+ *
+ * @param {string} fileName      DB collab_attachments.file_name（相对 uploads 的 POSIX 路径）
+ * @param {string} originalName  原始文件名（取扩展名判断）
+ * @returns {{ ok:boolean, reason:string, header_preview:string[] }}
+ *   ok=true  → 模板可用于列对齐（reason='OK'，header_preview 给前几列表头预览）
+ *   ok=false → 不可用：reason ∈ NON_XLSX（非 xlsx 扩展名，admin 有意传，前端可弱提示或不提示）
+ *                       / EMPTY_HEADER（xlsx 但第一行无表头）/ READ_FAILED（解析失败/文件损坏）
+ */
+function checkTemplateReadable(fileName, originalName) {
+    try {
+        const ext = path.extname(originalName || fileName || '').toLowerCase();
+        if (!COLUMN_ALIGN_READABLE_EXTS.has(ext)) {
+            return { ok: false, reason: 'NON_XLSX', header_preview: [] };
+        }
+        let abs;
+        try {
+            abs = resolveAttachmentPath(fileName);
+        } catch (e) {
+            return { ok: false, reason: 'READ_FAILED', header_preview: [] };
+        }
+        let header;
+        try {
+            const r = readXlsxHeader(abs);  // 抛 XLSX_READ_FAILED
+            header = r.header;
+        } catch (e) {
+            return { ok: false, reason: 'READ_FAILED', header_preview: [] };
+        }
+        // 过滤空列名后判断是否有有效表头
+        const nonEmpty = Array.isArray(header)
+            ? header.filter(h => h != null && String(h).trim() !== '')
+            : [];
+        if (nonEmpty.length === 0) {
+            return { ok: false, reason: 'EMPTY_HEADER', header_preview: [] };
+        }
+        return { ok: true, reason: 'OK', header_preview: nonEmpty.slice(0, 8).map(h => String(h)) };
+    } catch (e) {
+        // 顶层兜底：预检失败不影响上传，按"读取失败"返回（不阻断）
+        return { ok: false, reason: 'READ_FAILED', header_preview: [] };
+    }
+}
+
+/**
+ * 详情页质量汇总（Commit E，口径集中后端一处，用户拍板）。纯函数。
+ *   - 交付时长（M-7）：起点 contact_read_at；终点三级 fallback = archived_final_at（完成归档）> done_at（验收完成）> submitted_at（提交兜底）。
+ *     ⚠️ codex 76 M-1：用 archived_final_at（完成归档）不是 archived_at（archived_at 是软删除/作废，作废≠完成）。
+ *     ⚠️ codex 77 复审 M-1：done_at（smoke 通过验收完成，activateNewVersion 写）优先于 submitted_at（开发提交时间，前置 UPDATE 写）——
+ *        "交付完成耗时"应算到验收完成而非提交那一刻；submitted_at 仅 done_at 缺失时兜底。
+ *     contact_read_at 为空 → null（前端"—"）；终点早于起点/解析失败 → null。
+ *   - 提交次数 = quality_records 行数（每次提交一行）；打回次数 = return_records 行数；返工 = 仅 DEV_QUALITY（M-5）。
+ *   - 列对齐：取最新一次提交（submission_seq 升序末尾）的 is_columns_complete / missing_columns。
+ *
+ * ⚠️ 当前单产出口径（codex 75 L-4）：submit_count = 质量记录行数 = 提交轮次（单产出 sub_item 恒 NULL，一轮一行）。
+ *   多产出上线后一轮提交可能产生多行（每子项一行），届时 submit_count 需改按 distinct submission_seq 统计 +
+ *   列对齐按子项展示/主单汇总（renderQualitySection 整体重做，记 backlog 与多产出成套改）。
+ *
+ * @param {object} request        collab_requests 行（用 contact_read_at / archived_at / submitted_at）
+ * @param {Array}  qualityRecords collab_quality_record 行（按 submission_seq 升序）
+ * @param {Array}  returnRecords  collab_return_record 行
+ * @returns {{delivery_duration_minutes:(number|null), submit_count:number, return_count:number,
+ *            rework_count:number, latest_is_columns_complete:(1|0|null), latest_missing_columns:(string|null)}}
+ */
+function buildQualitySummary(request, qualityRecords, returnRecords) {
+    const qrs = Array.isArray(qualityRecords) ? qualityRecords : [];
+    const rrs = Array.isArray(returnRecords) ? returnRecords : [];
+    const req = request || {};
+
+    // 交付时长（分钟）：datetime('now','localtime') 格式 'YYYY-MM-DD HH:MM:SS'，按本地时间解析
+    let deliveryDurationMinutes = null;
+    const start = req.contact_read_at;
+    // 终点三级 fallback（codex 76 M-1 + 77 复审 M-1）：完成归档 > 验收完成(done_at) > 提交(兜底)
+    //   非 archived_at（作废≠完成）；done_at 优先 submitted_at（验收完成才是交付完成，非开发提交那一刻）
+    const end = req.archived_final_at || req.done_at || req.submitted_at;
+    if (start && end) {
+        const t0 = Date.parse(String(start).replace(' ', 'T'));
+        const t1 = Date.parse(String(end).replace(' ', 'T'));
+        if (Number.isFinite(t0) && Number.isFinite(t1) && t1 >= t0) {
+            deliveryDurationMinutes = Math.round((t1 - t0) / 60000);
+        }
+        // t1 < t0（异常时序）或解析失败 → 保持 null（前端展示"—"，不展示负数/NaN）
+    }
+
+    // 最新一次提交（codex 75 L-1：内部复制排序，不赖调用方——导出函数自洽，未来其他调用方传未排序也对）
+    let latest = null;
+    if (qrs.length > 0) {
+        const sorted = [...qrs].sort((a, b) => {
+            const d = (a.submission_seq || 0) - (b.submission_seq || 0);
+            return d !== 0 ? d : (a.id || 0) - (b.id || 0);
+        });
+        latest = sorted[sorted.length - 1];
+    }
+    const reworkCount = rrs.filter(r => r.reason_type === 'DEV_QUALITY').length;
+
+    return {
+        delivery_duration_minutes: deliveryDurationMinutes,
+        submit_count: qrs.length,
+        return_count: rrs.length,
+        rework_count: reworkCount,
+        latest_is_columns_complete: latest ? latest.is_columns_complete : null,
+        latest_missing_columns: latest && latest.missing_columns ? latest.missing_columns : null,
+    };
+}
+
 module.exports = {
     cleanupPendingFiles,
     sanitizeSqlError,
     runRealSmokeTest,
+    extractResultColumns,   // 取数质量 v3.0 C1：列名提取（暴露给单测）
     classifyUploadedFiles,
     safeDisplayName,
     // v1.70.0 抽取（方案 §1.2.6）
@@ -487,6 +1011,14 @@ module.exports = {
     isFinalArchived,
     // v1.71.0 三级转发：附件按人锁前置闸门
     checkAttachmentOwnerOrAdmin,
+    // 取数交付质量记录 v3.0 Commit C2：submit-export 后列对齐旁路写入
+    recordQualityOnSubmit,
+    // 取数交付质量记录 v3.0 Commit D：退回开发最小状态转换骨架（公共函数）
+    transitionToDevPending,
+    // 取数交付质量记录 v3.0 Commit E：模板上传列对齐可读性预检（源头防线）
+    checkTemplateReadable,
+    // 取数交付质量记录 v3.0 Commit E：详情页质量汇总（交付时长 M-7 + 提交/打回/返工计数）
+    buildQualitySummary,
     // 暴露给测试和监控（生产代码不应直接 acquire/release，统一走 runRealSmokeTest 包装）
     _globalSmokeTestMutex: globalSmokeTestMutex,
 };
