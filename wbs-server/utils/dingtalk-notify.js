@@ -552,7 +552,59 @@ async function sendFileToUser(token, robotCode, userIds, mediaId, fileName) {
 }
 
 /**
- * 拼装"数据需求已完成"通知卡片（sampleMarkdown），发给业务方（对接人）。
+ * 业务方负责人手机号 → 钉钉 userid 反查（2026-06-09 通知业务方收件人修复，codex 78 审）。
+ *
+ * 背景：collab "通知业务方并发送数据" 的收件人 = 创建协作单时填的「业务方负责人」
+ *   （requester_name + requester_phone），业务方通常无平台账号，靠手机号反查企业钉钉。
+ *   对齐 Issue_Tracker 的 sendIssueDingtalkToRequester 反查链路（server.js）。
+ *
+ * 边界清晰的 async helper（非纯函数，调钉钉 API；codex 78 M-3）：
+ *   - deps 注入 getUserIdByMobile/classifyError，verify 脚本可 mock 覆盖分支
+ *   - 隐私（codex 78 M-2 + 79 M-1）：返回值只含 reason/errcode/userid，**不返回 hint**——
+ *     钉钉 errmsg 可能回显手机号，hint 透传到 HTTP 响应会泄漏到前端；
+ *     排障靠 reason+errcode，钉钉原始错误看服务端日志
+ *   - reason 语义：requester_phone_empty（没填手机号）/ requester_invalid（查不到人，
+ *     含钉钉 errcode 88/88002 user_invalid 的翻译）/ 其余透传 classifyError 的 reason
+ *     （token_expired/network/server_5xx 等，由调用方按"服务异常"处理）
+ *   - token_expired 不在本函数重试（对齐 collab notify 链路"token 过期不自动重试"
+ *     的既有策略，codex 78 M-4）
+ *
+ * @param {string} token           access_token
+ * @param {string} requesterPhone  业务方负责人手机号（创建协作单时录入，可能为空）
+ * @param {object} [deps]          测试注入 { getUserIdByMobile, classifyError }
+ * @returns {Promise<{ok:boolean, userid?:string, reason?:string, errcode?:number}>}
+ */
+async function resolveRequesterDingUserId(token, requesterPhone, deps = {}) {
+    const lookup = deps.getUserIdByMobile || getUserIdByMobile;
+    const classify = deps.classifyError || classifyError;
+
+    const phone = String(requesterPhone || '').trim();
+    if (!phone) {
+        return { ok: false, reason: 'requester_phone_empty' };
+    }
+
+    let raw;
+    try {
+        raw = await lookup(token, phone);
+    } catch (err) {
+        const cls = classify(err);
+        // codex 79 M-1：不透传 cls.hint（钉钉 errmsg 可能回显手机号），只回 reason/errcode
+        return {
+            ok: false,
+            reason: cls.reason === 'user_invalid' ? 'requester_invalid' : cls.reason,
+            errcode: cls.errcode
+        };
+    }
+
+    const userid = raw != null ? String(raw).trim() : '';
+    if (!userid) {
+        return { ok: false, reason: 'requester_invalid' };
+    }
+    return { ok: true, userid };
+}
+
+/**
+ * 拼装"数据需求已完成"通知卡片（sampleMarkdown），发给业务方负责人。
  *
  * 注意：done_read_at 语义是"已读此通知"，不代表下载/打开了 xlsx，文案不暗示"已确认数据"。
  * 入参全部走 escapeMarkdown（防用户输入破坏 markdown 排版，codex 53 H-3）。
@@ -893,6 +945,8 @@ module.exports = {
     uploadMedia,
     sendFileToUser,
     buildRequesterDoneCard,
+    // 2026-06-09 通知业务方收件人修复：requester_phone → 钉钉 userid 反查（deps 可注入 mock）
+    resolveRequesterDingUserId,
     // v1.71.0 三级转发：钉钉群加人 + errcode 分类
     addUserToChat,
     safeParseUserIdList,

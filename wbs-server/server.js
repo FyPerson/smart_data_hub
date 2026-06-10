@@ -13379,14 +13379,17 @@ app.get('/api/collab/requests/:id/notify-read-status', authenticateToken, async 
     }
 
     // 字段名映射：选不同字段组
-    const fieldMap = recipient === 'requester_done'
+    // ⚠️ fieldMap 各值仅内部常量（拼进 SELECT），禁止接入任何用户输入（codex 79 L-2）
+    // 2026-06-09 codex 78 H-3：requester_done 收件人 = 业务方负责人（requester_phone 反查钉钉，
+    //   无平台账号不走 users 表）——原 user_id:'contact_person_id' 在 admin 直派单 =0 查不到用户，
+    //   且发送端已改 requester_phone 反查，已读比对必须用同一收件人 userid 否则永远 false
+    const isRequesterDone = recipient === 'requester_done';
+    const fieldMap = isRequesterDone
         ? {
             notified_at: 'done_notified_at',
             message_key: 'done_notify_message_key',
             read_at: 'done_read_at',
-            // L-2：user_id 来自 contact_person_id（业务方/对接人），非 developer/contact 路径的收件人语义；
-            //      完成通知的查询者即业务方本人，alias 复用 recipient_user_id 字段不影响判读逻辑
-            user_id: 'contact_person_id',
+            user_id: 'NULL',  // 业务方负责人不在 users 表，收件人 userid 由 requester_phone 反查
             label: '业务方（完成通知）',
         }
         : recipient === 'contact'
@@ -13408,6 +13411,7 @@ app.get('/api/collab/requests/:id/notify-read-status', authenticateToken, async 
     try {
         const collab = await dbGetAsync(
             `SELECT id, ${fieldMap.user_id} AS recipient_user_id,
+                    requester_name, requester_phone,
                     ${fieldMap.notified_at} AS notified_at,
                     ${fieldMap.message_key} AS message_key,
                     ${fieldMap.read_at} AS read_at
@@ -13417,15 +13421,22 @@ app.get('/api/collab/requests/:id/notify-read-status', authenticateToken, async 
         if (!collab) return res.status(404).json({ error: '协作单不存在' });
         if (!collab.notified_at) return res.status(400).json({ error: `尚未通知${fieldMap.label},无法查询已读状态` });
 
+        // requester_done 收件人显示名 = 业务方负责人姓名（非 users 表用户，2026-06-09 codex 78 H-3）
+        const resolveDisplayName = async () => {
+            if (isRequesterDone) return collab.requester_name || '业务方负责人';
+            const u = await dbGetAsync('SELECT display_name FROM users WHERE id = ?', [collab.recipient_user_id]);
+            return u && u.display_name;
+        };
+
         // 已固化 read_at → 直接返回,不再调钉钉(钉钉无"取消已读"语义,固化值即终态)
         if (collab.read_at) {
-            const u0 = await dbGetAsync('SELECT display_name FROM users WHERE id = ?', [collab.recipient_user_id]);
+            const name0 = await resolveDisplayName();
             return res.json({
                 recipient,
                 notified_at: collab.notified_at,
                 // 兼容旧前端字段名（recipient=developer 时返 developer_name；recipient=contact 时返 contact_person_name 风格）
-                developer_name: u0 && u0.display_name,
-                recipient_name: u0 && u0.display_name,
+                developer_name: name0,
+                recipient_name: name0,
                 read: true,
                 read_at: collab.read_at,
                 cached: true,
@@ -13446,12 +13457,12 @@ app.get('/api/collab/requests/:id/notify-read-status', authenticateToken, async 
         //        隐式依赖"Node TZ == SQLite localtime TZ"（当前生产单机一致）。24h 是软边界，时区偏移几小时无实质影响。
         const notifiedMs = Date.parse(String(collab.notified_at).replace(' ', 'T'));
         if (Number.isFinite(notifiedMs) && (Date.now() - notifiedMs) > 24 * 60 * 60 * 1000) {
-            const uExp = await dbGetAsync('SELECT display_name FROM users WHERE id = ?', [collab.recipient_user_id]);
+            const nameExp = await resolveDisplayName();
             return res.json({
                 recipient,
                 notified_at: collab.notified_at,
-                developer_name: uExp && uExp.display_name,
-                recipient_name: uExp && uExp.display_name,
+                developer_name: nameExp,
+                recipient_name: nameExp,
                 read: false,
                 read_at: null,                  // M-2：与现有 read:false 分支字段对齐
                 read_status: 'unread_expired',  // 未读且已超钉钉可查询窗口
@@ -13476,11 +13487,34 @@ app.get('/api/collab/requests/:id/notify-read-status', authenticateToken, async 
             return res.status(502).json({ error: cls.hint, errcode: cls.errcode, reason: cls.reason });
         }
 
-        // 取收件人的 dingtalk_user_id 做对照
-        const recipientUser = await dbGetAsync(
-            'SELECT id, display_name, dingtalk_user_id FROM users WHERE id = ?',
-            [collab.recipient_user_id]
-        );
+        // 取收件人的 dingtalk userid 做对照
+        //   2026-06-09 codex 78 H-3：requester_done 走 requester_phone 反查（与发送端同一收件人，
+        //   业务方负责人不在 users 表）；contact/developer 两路维持 users 表查询不变
+        let recipientDingUserId = null;
+        let recipientDisplayName = null;
+        if (isRequesterDone) {
+            // codex 79 M-2：错误码与发送端分层一致（phone 空 / 查不到人分开）；
+            // codex 79 M-1：502 固定文案，不拼 hint（钉钉 errmsg 可能回显手机号）
+            const resolved = await dingtalkNotify.resolveRequesterDingUserId(token, collab.requester_phone);
+            if (!resolved.ok) {
+                if (resolved.reason === 'requester_phone_empty') {
+                    return res.status(400).json({ error: '业务方负责人手机号为空，无法比对已读', code: 'REQUESTER_PHONE_EMPTY', reason: resolved.reason });
+                }
+                if (resolved.reason === 'requester_invalid') {
+                    return res.status(400).json({ error: '业务方手机号查不到企业钉钉号，无法比对已读', code: 'REQUESTER_INVALID', reason: resolved.reason });
+                }
+                return res.status(502).json({ error: '业务方钉钉号查询失败，请稍后重试', code: 'REQUESTER_LOOKUP_FAILED', reason: resolved.reason });
+            }
+            recipientDingUserId = resolved.userid;
+            recipientDisplayName = collab.requester_name || '业务方负责人';
+        } else {
+            const recipientUser = await dbGetAsync(
+                'SELECT id, display_name, dingtalk_user_id FROM users WHERE id = ?',
+                [collab.recipient_user_id]
+            );
+            recipientDingUserId = recipientUser && recipientUser.dingtalk_user_id;
+            recipientDisplayName = recipientUser && recipientUser.display_name;
+        }
 
         // 调钉钉已读 API
         let readResult;
@@ -13503,7 +13537,6 @@ app.get('/api/collab/requests/:id/notify-read-status', authenticateToken, async 
         }
 
         // 成功:判断收件人 userId 是否在已读列表里
-        const recipientDingUserId = recipientUser && recipientUser.dingtalk_user_id;
         const isRead = recipientDingUserId && readResult.readUserIds.includes(recipientDingUserId);
 
         // 提取 readTimestamp 转本地时间字符串
@@ -13525,8 +13558,8 @@ app.get('/api/collab/requests/:id/notify-read-status', authenticateToken, async 
         res.json({
             recipient,
             notified_at: collab.notified_at,
-            developer_name: recipientUser && recipientUser.display_name,  // 兼容旧前端
-            recipient_name: recipientUser && recipientUser.display_name,
+            developer_name: recipientDisplayName,  // 兼容旧前端
+            recipient_name: recipientDisplayName,
             read: !!isRead,
             read_at: readAt,
             read_user_count: readResult.readUserIds.length,
@@ -15919,11 +15952,14 @@ app.post('/api/collab/requests/:id/submit-export',
     }
 );
 
-// 导出人通知业务方 + 发数据（2026-05-29，方案 v1.1）
-//   exporter 直派 DONE 后，手动点按钮 → 钉钉发 xlsx 文件 + 完成通知 + 跟踪业务方已读
+// 导出人通知业务方 + 发数据（2026-05-29 方案 v1.1；2026-06-09 收件人修复 codex 78）
+//   exporter 交付 DONE 后，手动点按钮 → 钉钉发 Excel 文件 + 完成通知 + 跟踪业务方已读
 //   三步：① media/upload 拿 media_id ② sampleFile 发文件 ③ sampleMarkdown 发完成通知（先文件后文字）
 //   全三步成功才落 done_*；任一步失败返 success:false（codex 52 H-1/M-6：失败不伪装成功，"不阻断"只指不回滚 DONE）
-//   仅 exporter 直派路径（assign_mode='admin_direct' + status='DONE' + exporter_user_id 非空，codex 52 H-2 + 53 L-2）
+//   收件人 = 业务方负责人（requester_phone 反查钉钉 userid，对齐 Issue 范式；原 contact_person_id 路径
+//     在 admin 直派单 =0 必失败，且对接人本就不是数据接收方——生产 #9 触发修复）
+//   范围 = DONE + 有效 exporter + 唯一 active result_data（normal forward / admin_direct 都支持，
+//     不再限定 assign_mode；纯 developer SQL 路径无 exporter 无 result_data 天然进不来）
 app.post('/api/collab/requests/:id/notify-requester-done', authenticateToken, async (req, res) => {
     const idStr = req.params.id;
     const userId = Number(req.user.id);
@@ -15940,10 +15976,11 @@ app.post('/api/collab/requests/:id/notify-requester-done', authenticateToken, as
     }
 
     try {
-        // === 取协作单 ===
+        // === 取协作单（2026-06-09 收件人修复 codex 78：收件人=业务方负责人 requester_name/requester_phone，
+        //     不再是 contact_person——对接人只是内部流转角色，业务方负责人才是数据要发给的人）===
         const collab = await dbGetAsync(
             `SELECT id, status, assign_mode, exporter_user_id, exporter_name,
-                    contact_person_id, contact_person_name, oa_request_no, description,
+                    requester_name, requester_phone, oa_request_no, description,
                     done_notify_message_key, done_notified_at
                FROM collab_requests WHERE id = ?`,
             [id]
@@ -15962,21 +15999,25 @@ app.post('/api/collab/requests/:id/notify-requester-done', authenticateToken, as
             }
         }
 
-        // === 范围守卫：仅 exporter 直派 DONE 路径（排除 developer SQL 路径）===
+        // === 范围守卫（2026-06-09 codex 78 M-1 范围定义）：DONE + 有效 exporter + 唯一 active result_data 才可发。
+        //   状态机保证：result_data 只由 submit-export（EXPORTING→DONE，exporter 交付）产生，
+        //   normal forward 单与 admin_direct 直派单到 DONE 都必有 exporter；
+        //   纯 developer SQL 路径的 DONE 无 exporter 无 result_data（前端 hasValidExporter 不渲染按钮 +
+        //   后端 RESULT_DATA_MISSING 双层兜底）。不再限定 assign_mode='admin_direct'（codex 78 放开）。
         if (collab.status !== 'DONE') {
             return res.status(409).json({ error: `仅 DONE 状态可通知，当前：${collab.status}`, code: 'INVALID_STATE_FOR_NOTIFY' });
         }
-        if (collab.assign_mode !== 'admin_direct' || !hasValidExporter) {
-            return res.status(409).json({ error: '仅数据导出人直派路径支持通知发送数据', code: 'NOT_EXPORTER_PATH' });
+        // codex 79 H-1：范围硬守卫——"有效 exporter"必须 enforce（admin 路径也拦），
+        //   不能只靠权限守卫（非 admin 才查）+ RESULT_DATA_MISSING 下游兜底；
+        //   exporter=0/null 的 DONE 单（纯 developer SQL 路径 / 脏数据）不支持发送
+        if (!hasValidExporter) {
+            return res.status(409).json({ error: '本单无有效数据导出人，不支持通知发送数据', code: 'NOT_EXPORTER_PATH' });
         }
 
-        // === D9：contact_person 无钉钉（点击时报错，不预查）===
-        const contactUser = await dbGetAsync(
-            'SELECT id, display_name, dingtalk_user_id FROM users WHERE id = ?',
-            [collab.contact_person_id]
-        );
-        if (!contactUser || !contactUser.dingtalk_user_id) {
-            return res.status(400).json({ error: '对接人未绑定钉钉，无法通知', code: 'REQUESTER_NO_DINGTALK' });
+        // === 收件人前置校验（codex 78 H-1 fail-fast）：业务方负责人手机号为空 → 400，不必走附件/钉钉 ===
+        const requesterPhone = String(collab.requester_phone || '').trim();
+        if (!requesterPhone) {
+            return res.status(400).json({ error: '业务方负责人手机号为空，无法发送（请先在协作单补填手机号）', code: 'REQUESTER_PHONE_EMPTY' });
         }
 
         // === ① M-4：取 result_data active 唯一附件（0/多个明确报错，不随机取）===
@@ -16020,7 +16061,21 @@ app.post('/api/collab/requests/:id/notify-requester-done', authenticateToken, as
             return res.status(502).json({ success: false, error: cls.hint, code: 'DINGTALK_TOKEN_FAILED', reason: cls.reason });
         }
 
-        const userIds = [contactUser.dingtalk_user_id];
+        // === 收件人反查（2026-06-09 codex 78）：requester_phone → 企业钉钉 userid，对齐 Issue 范式 ===
+        //   HTTP 分层（codex 78 H-1）：查不到人（业务输入问题）→ 400；token/network/钉钉服务异常 → 502 + reason。
+        //   token_expired 不重试（对齐本 endpoint M-6 既有策略，codex 78 M-4）。
+        //   codex 79 M-1：502 固定文案 + reason，不拼上游 hint（钉钉 errmsg 可能回显手机号）。
+        const resolved = await dingtalkNotify.resolveRequesterDingUserId(token, requesterPhone);
+        if (!resolved.ok) {
+            if (resolved.reason === 'requester_invalid') {
+                return res.status(400).json({ error: '业务方手机号查不到企业钉钉号（非企业成员/未绑定/离职），请线下转达数据', code: 'REQUESTER_INVALID', reason: resolved.reason });
+            }
+            // requester_phone_empty 已前置判过，到这里只剩服务类异常（token_expired/network/server_5xx/...）
+            return res.status(502).json({ success: false, error: '业务方钉钉号查询失败，请稍后重试或联系管理员', code: 'REQUESTER_LOOKUP_FAILED', reason: resolved.reason });
+        }
+        const requesterDingUserId = resolved.userid;
+
+        const userIds = [requesterDingUserId];
         const sendFileName = att.original_name || path.basename(att.file_name);
 
         // === H-1 三步：先文件后文字，逐步记结果（M-6：token 过期不自动重试，失败返 partial_failure 用户重点）===
@@ -16086,6 +16141,7 @@ app.post('/api/collab/requests/:id/notify-requester-done', authenticateToken, as
 
         // === 留痕（复用 insertCollabLog，rec 4 结构化 detail；失败不阻断 = insertCollabLog fire-and-forget）===
         //   codex 55 M-3：记 previous_done_notify_message_key，重发覆盖时可追溯
+        //   2026-06-09 codex 78：收件人改业务方负责人——记反查到的 userid，不落明文手机号（M-2 隐私）
         insertCollabLog(id, 'NOTIFY_REQUESTER_DONE', userId, userName, JSON.stringify({
             all_ok: allOk,
             db_update_failed: dbUpdateFailed,
@@ -16093,7 +16149,10 @@ app.post('/api/collab/requests/:id/notify-requester-done', authenticateToken, as
             steps,
             media_id: mediaId,
             attachment_id: att.id,
-            contact_person_id: collab.contact_person_id,
+            recipient_source: 'requester_phone',
+            requester_userid: requesterDingUserId,
+            requester_name: collab.requester_name || null,
+            assign_mode: collab.assign_mode,
             markdown_key: allOk ? mdResp.processQueryKey : null,
             previous_done_notify_message_key: collab.done_notify_message_key || null,
             previous_done_notified_at: collab.done_notified_at || null,
@@ -16123,7 +16182,7 @@ app.post('/api/collab/requests/:id/notify-requester-done', authenticateToken, as
             });
         }
 
-        logger.info(`[notify-requester-done] 协作单 #${id} 已通知业务方(contact_id=${collab.contact_person_id}) + 发数据 by ${userName}`);
+        logger.info(`[notify-requester-done] 协作单 #${id} 已通知业务方负责人(requester_userid=${requesterDingUserId}) + 发数据 by ${userName}`);
         return res.json({ success: true, done_notified_at_set: true, steps });
     } catch (e) {
         logger.error(`[notify-requester-done] 协作单 #${idStr} 异常: ${e.message}`, e);

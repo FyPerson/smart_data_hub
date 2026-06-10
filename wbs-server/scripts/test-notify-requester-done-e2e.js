@@ -19,13 +19,16 @@ const fx = require('./_test-fixture');
 
 const createdFixtureIds = [];
 
-async function createAdminDirect(token, exporterId, oaNo) {
+async function createAdminDirect(token, exporterId, oaNo, { requesterPhone = '13800001111' } = {}) {
     // admin 直派模式：只传 exporter_user_id（与 contact_person_id 二选一，v1.72.3 CONFLICTING_ASSIGN_MODE）
-    // contact_person_id 在 makeDoneDirectFixture 里用 setCollabState 补（测通知发给业务方需要）
+    // 2026-06-09 codex 78 收件人修复：收件人=业务方负责人（requester_phone 反查钉钉），
+    //   fixture 默认带假手机号让用例走过 phone 空判（fail-fast 在附件检查之前）；
+    //   测 REQUESTER_PHONE_EMPTY 分支时显式传 requesterPhone: null
     return fx.apiCall('POST', '/api/collab/requests', token, {
         oa_request_no: oaNo,
         requester_dept: '市场营销部',
         requester_name: 'notify-requester-test',
+        requester_phone: requesterPhone,
         description: '导出通知业务方 e2e 测试单',
         deadline: '2026-12-31 18:00:00',
         exporter_user_id: exporterId,
@@ -51,8 +54,9 @@ async function getCollab(id) {
 }
 
 // 造一条 admin_direct + DONE + 有效 exporter + result_data active 附件的测试单
-async function makeDoneDirectFixture(adminToken, oaNo, { withActiveResultData = true, contactId = fx.CONTACT_ID } = {}) {
-    const cr = await createAdminDirect(adminToken, fx.EXPORTER_ID, oaNo);
+async function makeDoneDirectFixture(adminToken, oaNo, { withActiveResultData = true, contactId = fx.CONTACT_ID, requesterPhone } = {}) {
+    const cr = await createAdminDirect(adminToken, fx.EXPORTER_ID, oaNo,
+        requesterPhone === undefined ? {} : { requesterPhone });
     if (cr.status !== 200) throw new Error(`create 失败 ${cr.status} ${JSON.stringify(cr.body)}`);
     const id = cr.body.id;
     createdFixtureIds.push(id);
@@ -123,55 +127,62 @@ defTest('T4: 非 DONE 状态通知 → 409 INVALID_STATE_FOR_NOTIFY', async () =
 });
 
 // ============================================================
-// T5：范围——非 admin_direct 路径 → 409 NOT_EXPORTER_PATH
+// T5：范围——normal 路径放行（2026-06-09 codex 78：不再限定 admin_direct，
+//   normal forward 单 DONE + 有效 exporter + 有 phone → 走到附件物理检查）
 // ============================================================
-defTest('T5: 非 admin_direct 路径通知 → 409 NOT_EXPORTER_PATH', async () => {
+defTest('T5: normal 路径通知放行 → 走过范围守卫到 409 RESULT_DATA_FILE_MISSING', async () => {
     const adminToken = await fx.signAs(fx.ADMIN_ID);
     const id = await makeDoneDirectFixture(adminToken, `OA_NRD_T5_${Date.now()}`);
-    // 改成 normal 路径（模拟 developer SQL 路径的 DONE 单）
+    // 改成 normal 路径（模拟 forward 产生 exporter 的 normal 单 DONE）
     await fx.setCollabState(id, { assign_mode: 'normal' });
     const res = await notifyRequesterDone(adminToken, id);
-    if (res.status !== 409 || res.body.code !== 'NOT_EXPORTER_PATH') {
-        throw new Error(`expected 409 NOT_EXPORTER_PATH, got ${res.status} ${JSON.stringify(res.body)}`);
+    // 白名单断言（同 T3 模式）：放行后因 fixture 假路径必停在物理检查——证明范围已放开
+    if (res.status !== 409 || res.body.code !== 'RESULT_DATA_FILE_MISSING') {
+        throw new Error(`expected 409 RESULT_DATA_FILE_MISSING (normal 放行+假路径), got ${res.status} ${JSON.stringify(res.body)}`);
     }
 });
 
 // ============================================================
-// T5b：范围——exporter_user_id=0 占位（codex 55 M-1）→ 409 NOT_EXPORTER_PATH
+// T5b：权限——exporter_user_id=0 占位 + 非 admin → 403 NOT_OWN_EXPORTER
+//   （范围守卫已删，hasValidExporter 仍在权限守卫起作用：占位单非 admin 无人可发）
 // ============================================================
-defTest('T5b: exporter_user_id=0 占位 → 409 NOT_EXPORTER_PATH', async () => {
+defTest('T5b: exporter_user_id=0 占位 + 非 admin → 403 NOT_OWN_EXPORTER', async () => {
     const adminToken = await fx.signAs(fx.ADMIN_ID);
     const id = await makeDoneDirectFixture(adminToken, `OA_NRD_T5b_${Date.now()}`);
     await fx.setCollabState(id, { exporter_user_id: 0 });
-    const res = await notifyRequesterDone(adminToken, id);
-    if (res.status !== 409 || res.body.code !== 'NOT_EXPORTER_PATH') {
-        throw new Error(`expected 409 NOT_EXPORTER_PATH (占位值), got ${res.status} ${JSON.stringify(res.body)}`);
+    // 用原 exporter 用户调（exporter_user_id 已被清 0，hasValidExporter=false → 403）
+    const exporterToken = await fx.signAs(fx.EXPORTER_ID);
+    const res = await notifyRequesterDone(exporterToken, id);
+    if (res.status !== 403 || res.body.code !== 'NOT_OWN_EXPORTER') {
+        throw new Error(`expected 403 NOT_OWN_EXPORTER (占位值非 admin), got ${res.status} ${JSON.stringify(res.body)}`);
     }
 });
 
 // ============================================================
-// T6：contact_person 无钉钉 → 400 REQUESTER_NO_DINGTALK
-// （CONTACT_ID=3 示例用户A有 dingtalk_user_id，故造一个无钉钉的 contact）
+// T5c：范围——exporter_user_id=0 占位 + admin → 409 NOT_EXPORTER_PATH
+//   （codex 79 H-1：范围硬守卫，admin 也不能对无有效 exporter 的 DONE 单发送）
 // ============================================================
-defTest('T6: contact_person 无钉钉 → 400 REQUESTER_NO_DINGTALK', async () => {
+defTest('T5c: exporter_user_id=0 占位 + admin → 409 NOT_EXPORTER_PATH', async () => {
     const adminToken = await fx.signAs(fx.ADMIN_ID);
-    // H-1：确定性找一个无 dingtalk_user_id 的 active 用户当 contact，真测此分支（不静默跳过）
-    const noDingUser = await new Promise((resolve) => {
-        const db = new sqlite3.Database(fx.DB_PATH);
-        db.get(
-            `SELECT id FROM users
-              WHERE status='active' AND (dingtalk_user_id IS NULL OR dingtalk_user_id='')
-              ORDER BY id ASC LIMIT 1`,
-            [], (e, r) => { db.close(); resolve(r); });
-    });
-    if (!noDingUser) {
-        // 全库用户都有钉钉号 → 无法构造此分支，明确 fail（不混进 passed）
-        throw new Error('找不到无 dingtalk_user_id 的 active 用户，无法测 REQUESTER_NO_DINGTALK 分支');
-    }
-    const id = await makeDoneDirectFixture(adminToken, `OA_NRD_T6_${Date.now()}`, { contactId: noDingUser.id });
+    const id = await makeDoneDirectFixture(adminToken, `OA_NRD_T5c_${Date.now()}`);
+    await fx.setCollabState(id, { exporter_user_id: 0 });
     const res = await notifyRequesterDone(adminToken, id);
-    if (res.status !== 400 || res.body.code !== 'REQUESTER_NO_DINGTALK') {
-        throw new Error(`expected 400 REQUESTER_NO_DINGTALK (contact id=${noDingUser.id}), got ${res.status} ${JSON.stringify(res.body)}`);
+    if (res.status !== 409 || res.body.code !== 'NOT_EXPORTER_PATH') {
+        throw new Error(`expected 409 NOT_EXPORTER_PATH (admin+占位值被范围守卫拦), got ${res.status} ${JSON.stringify(res.body)}`);
+    }
+});
+
+// ============================================================
+// T6：业务方负责人手机号空 → 400 REQUESTER_PHONE_EMPTY
+//   （2026-06-09 codex 78：收件人=requester_phone 反查；原 contact_person 无钉钉
+//    REQUESTER_NO_DINGTALK 分支已删除——不再读 contact_person）
+// ============================================================
+defTest('T6: requester_phone 空 → 400 REQUESTER_PHONE_EMPTY', async () => {
+    const adminToken = await fx.signAs(fx.ADMIN_ID);
+    const id = await makeDoneDirectFixture(adminToken, `OA_NRD_T6_${Date.now()}`, { requesterPhone: null });
+    const res = await notifyRequesterDone(adminToken, id);
+    if (res.status !== 400 || res.body.code !== 'REQUESTER_PHONE_EMPTY') {
+        throw new Error(`expected 400 REQUESTER_PHONE_EMPTY, got ${res.status} ${JSON.stringify(res.body)}`);
     }
 });
 
