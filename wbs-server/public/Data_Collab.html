@@ -4472,6 +4472,30 @@
         // v1.66.1 修订：
         //   - readStatusBox id 按 recipient 分（_contact / _developer），与两组通知子区独立 id 对齐
         //   - 查到已读 → 主动 await openDetail(id) 刷新 currentDetail，避免用户必须关弹窗重开才看到已读时间
+        function formatReadStatusError(data, status, label) {
+            const code = data && data.code;
+            if (code === 'REQUESTER_PHONE_EMPTY') {
+                return '业务方负责人未填写手机号，无法查询已读';
+            }
+            if (code === 'REQUESTER_INVALID') {
+                return '业务方手机号未匹配到企业钉钉成员，无法查询已读';
+            }
+            if (code === 'REQUESTER_LOOKUP_FAILED') {
+                return '业务方钉钉账号查询失败，请稍后重试';
+            }
+            const errorText = String(data && data.error || '');
+            if (/消息标识|message_key|processQueryKey/i.test(errorText)) {
+                return `${label}通知缺少消息标识，无法查询已读`;
+            }
+            if (status === 401 || status === 403) {
+                return '登录已过期或无权限查询已读，请刷新页面重新登录';
+            }
+            if (status >= 500) {
+                return '已读状态查询服务异常，请稍后重试或联系管理员';
+            }
+            return errorText || `查询${label}已读状态失败`;
+        }
+
         async function checkReadStatus(id, recipient = 'developer') {
             const boxId = `readStatusBox_${recipient}`;
             const box = document.getElementById(boxId);
@@ -4502,7 +4526,7 @@
                         box.innerHTML = `<span style="color:#d97706">👀 ${escapeHtml(recipientName)} 尚未读取</span>`;
                     }
                 } else {
-                    const detail = [data.error, data.errcode && `errcode=${data.errcode}`, data.errmsg].filter(Boolean).join(' · ');
+                    const detail = formatReadStatusError(data, res.status, label);
                     box.innerHTML = `<span style="color:#b91c1c">❌ ${escapeHtml(detail)}</span>`;
                 }
             } catch (e) {

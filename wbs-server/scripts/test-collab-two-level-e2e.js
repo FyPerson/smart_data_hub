@@ -137,8 +137,9 @@ async function main() {
     // T03 admin 创建时缺 contact_person_id → 400
     console.log('T03 admin 创建时缺 contact_person_id → 400');
     const { contact_person_id, ...noContact } = createBody;
-    const r3 = await apiCall('POST', '/api/collab/requests', tokens.admin, { ...noContact, oa_request_no: oaNo + '-T03' });
-    record('T03 缺 contact_person_id 被拒', r3.status === 400 && r3.body && r3.body.error.includes('对接人'), `status=${r3.status} err=${r3.body && r3.body.error}`);
+    const r3 = await apiCall('POST', '/api/collab/requests', tokens.admin, { ...noContact, assign_mode: 'normal', oa_request_no: oaNo + '-T03' });
+    const r3Error = String(r3.body && r3.body.error || '');
+    record('T03 normal 缺 contact_person_id 被拒', r3.status === 400 && /contact_person_id|对接人/.test(r3Error), `status=${r3.status} err=${r3Error}`);
 
     // T04 PUT 编辑 PENDING_ASSIGN 状态（admin）→ 200
     console.log('T04 PUT 编辑 PENDING_ASSIGN（admin）→ 200');
