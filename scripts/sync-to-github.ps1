@@ -161,6 +161,9 @@ $replacements = @(
     @{ From = 'business_db\.dbo\.crm_bid'; To = 'business_db.dbo.bid_table' },
     @{ From = 'business_db\.dbo\.bms_xxx'; To = 'business_db.dbo.demo_table' },
     @{ From = 'business_db'; To = 'business_db' },
+    @{ From = 'legacy_db'; To = 'legacy_db' },
+    @{ From = 'legacy_db'; To = 'legacy_db' },
+    @{ From = 'legacy_system'; To = 'legacy_system' },
     @{ From = 'readonly_user'; To = 'readonly_user' },
     @{ From = 'demo_user_a'; To = 'demo_user_a' },
     @{ From = 'demo_user_b'; To = 'demo_user_b' },
@@ -204,7 +207,7 @@ $sensitivePatterns = @(
     "change_me_on_first_login", "change_me_on_first_login",
     "change_me_with_random_32bytes",
     "change_me_with_random_32bytes_!!",
-    "business_db", "readonly_user",
+    "business_db", "legacy_db", "legacy_system", "readonly_user",
     "示例用户A", "示例用户B", "示例发布者", "示例集团关联方A", "示例关联方B", "示例关联方C", "示例关联方D", "示例海外子公司",
     "ztwb[0-9]+"
 )
