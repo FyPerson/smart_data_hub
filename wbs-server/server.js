@@ -1916,12 +1916,19 @@ function initTable() {
 
         // 健康检查放在 serialize 末尾，确保所有 ALTER/INDEX 都已串行执行完
         verifyV2CollabSchema();
-    });
-    // 取数质量双校验增强：旧库索引收窄（异步），独立于 serialize 块（要 await 探测）
-    runCollabQualityDualCheckMigration().catch((e) => {
-        COLLAB_QUALITY_DUALCHECK_SCHEMA_STATE.ready = false;
-        COLLAB_QUALITY_DUALCHECK_SCHEMA_STATE.error = `取数质量双校验迁移异常：${e && e.message}`;
-        logger.error(`[取数质量双校验] 🚫 迁移异常：${e && e.message}`);
+        // ⭐ v1.80.1 hotfix：取数质量双校验迁移必须在 serialize 队列消耗完之后触发，
+        //   否则 runCollabQualityDualCheckMigration 的第一步 PRAGMA 会与队列里的 ALTER 竞态
+        //   （PRAGMA 立即返回老 schema → 7 列缺失 → readiness=false → submit endpoint 永久 503）。
+        //   把触发放进 serialize 块内最后一个 db.run 的 callback——保证它一定在 7 个 ALTER 排队消耗完之后执行。
+        //   v1.75.0 runIssueV1750Migration 是同步 await 在 IIFE 内调，本范式是 serialize 队列内 callback 触发，
+        //   两套范式都解时序竞态，但路径不同：v1.75.0 因为 PRAGMA 检查表存在性后才跑 migration（不与 serialize 并发）。
+        db.run('SELECT 1', () => {
+            runCollabQualityDualCheckMigration().catch((e) => {
+                COLLAB_QUALITY_DUALCHECK_SCHEMA_STATE.ready = false;
+                COLLAB_QUALITY_DUALCHECK_SCHEMA_STATE.error = `取数质量双校验迁移异常：${e && e.message}`;
+                logger.error(`[取数质量双校验] 🚫 迁移异常：${e && e.message}`);
+            });
+        });
     });
 }
 

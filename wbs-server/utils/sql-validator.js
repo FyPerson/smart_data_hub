@@ -919,6 +919,16 @@ function layer3_injectTop(ast, dialect) {
         return { ok: false, reason: 'SQL 改写返回空字符串' };
     }
 
+    // ⭐ v1.80.2 hotfix：修复 node-sql-parser transactsql sqlify bug —— `<type>(MAX)` 被错误输出成 `<type>max`
+    //   生产 #12 饶高成报错根因：SQL Server 收到 `VARCHARmax` 报 "Type VARCHARmax is not a defined system type"
+    //   AST 里 length='max'（字符串而非数字），sqlify 直接拼到 dataType 后面丢括号
+    //   影响范围：VARCHAR/NVARCHAR/VARBINARY 三种 (MAX) 类型，CHAR(MAX)/NCHAR(MAX) 在 SQL Server 也不合法
+    //   修复：sqlify 后字符串还原。\b 词边界天然挡掉字符串字面量内部（'someVARCHARmax' 不会被误伤）
+    //   仅 sqlserver dialect 生效（MySQL 没有 MAX 类型）
+    if (dialect === 'sqlserver') {
+        smokeSql = smokeSql.replace(/\b(VARCHAR|NVARCHAR|VARBINARY)max\b/gi, '$1(MAX)');
+    }
+
     return { ok: true, smokeSql };
 }
 
