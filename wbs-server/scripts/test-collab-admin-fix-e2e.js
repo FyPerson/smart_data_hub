@@ -267,11 +267,12 @@ test('T10 clear_sql_validation_error="false" 字符串 → 400 FIELD_VALIDATION_
 test('T8 GET allowed-fields 按状态返字段集', async () => {
     const adminToken = await fx.signAs(fx.ADMIN_ID);
 
+    // v1.78.0：新增 deadline 后 SUBMITTED 6 字段 / PENDING_ASSIGN 5 字段（均含 deadline）
     const r1 = await getAllowedFields(adminToken, 'SUBMITTED');
     if (r1.status !== 200) throw new Error(`SUBMITTED HTTP ${r1.status}`);
     const submittedFields = r1.body.allowed_fields;
-    const expectedSubmitted = ['target_db_connection_id', 'description', 'oa_request_no', 'contact_person_id', 'developer_id'];
-    if (submittedFields.length !== 5) throw new Error(`SUBMITTED 期望 5 字段实际 ${submittedFields.length}`);
+    const expectedSubmitted = ['target_db_connection_id', 'description', 'oa_request_no', 'contact_person_id', 'developer_id', 'deadline'];
+    if (submittedFields.length !== 6) throw new Error(`SUBMITTED 期望 6 字段实际 ${submittedFields.length}: ${JSON.stringify(submittedFields)}`);
     for (const f of expectedSubmitted) {
         if (!submittedFields.includes(f)) throw new Error(`SUBMITTED 缺字段 ${f}`);
     }
@@ -279,8 +280,9 @@ test('T8 GET allowed-fields 按状态返字段集', async () => {
     const r2 = await getAllowedFields(adminToken, 'PENDING_ASSIGN');
     if (r2.status !== 200) throw new Error(`PENDING_ASSIGN HTTP ${r2.status}`);
     const paFields = r2.body.allowed_fields;
-    if (paFields.length !== 4) throw new Error(`PENDING_ASSIGN 期望 4 字段实际 ${paFields.length}: ${JSON.stringify(paFields)}`);
+    if (paFields.length !== 5) throw new Error(`PENDING_ASSIGN 期望 5 字段实际 ${paFields.length}: ${JSON.stringify(paFields)}`);
     if (paFields.includes('developer_id')) throw new Error(`PENDING_ASSIGN 不应含 developer_id`);
+    if (!paFields.includes('deadline')) throw new Error(`PENDING_ASSIGN 应含 deadline`);
 
     const r3 = await getAllowedFields(adminToken, 'DONE');
     if (r3.status !== 200) throw new Error(`DONE HTTP ${r3.status}`);
@@ -398,6 +400,128 @@ test('T15 v1.70.3 admin 在 PENDING+v1 状态作废 → 200（原 submission_ver
 
     const r = await archive(ctx.adminToken, ctx.id, { archived_reason: 'v1.70.3 验证 PENDING+v1 可作废（删 submission_version=0 守卫后）' });
     if (r.status !== 200) throw new Error(`期望 200 实际 ${r.status}: ${JSON.stringify(r.body)}（原 submission_version=0 守卫会拒此用例，本次应放行）`);
+});
+
+// ============================================================================
+// T16 v1.78.0：admin 改 deadline → 200 + DB 写入归一化为 'YYYY-MM-DD HH:mm:ss'
+// ============================================================================
+test('T16 v1.78.0 admin 改 deadline（T 分隔无秒）→ 200 + DB 归一化空格分隔补秒', async () => {
+    const ctx = await fx.createPendingFixture();
+    createdFixtureIds.push(ctx.id);
+
+    await fx.setCollabState(ctx.id, {
+        status: 'SUBMITTED',
+        submitted_at: '2026-06-11 14:00:00',
+        submission_version: 1,
+    });
+
+    // 前端控件传 datetime-local 格式（T 分隔、分钟精度）
+    const r = await adminFix(ctx.adminToken, ctx.id, {
+        changes: { deadline: '2026-06-20T17:00' },
+        reason: '业务方延期，截止时间顺延到 6-20 下午',
+    });
+    if (r.status !== 200) throw new Error(`HTTP ${r.status}: ${JSON.stringify(r.body)}`);
+    if (!r.body.success) throw new Error(`success != true`);
+
+    // 核验 DB：deadline 归一化为空格分隔 + 补秒
+    const row = await new Promise((resolve, reject) => {
+        const sqlite3 = require('sqlite3');
+        const path = require('path');
+        const db = new sqlite3.Database(path.join(__dirname, '..', 'task_pool.db'), sqlite3.OPEN_READONLY);
+        db.get(`SELECT deadline FROM collab_requests WHERE id = ?`, [ctx.id],
+            (e, r) => { db.close(); e ? reject(e) : resolve(r); });
+    });
+    if (row.deadline !== '2026-06-20 17:00:00') {
+        throw new Error(`deadline 应归一化为 '2026-06-20 17:00:00'，实际：'${row.deadline}'`);
+    }
+});
+
+// ============================================================================
+// T16b v1.78.0 codex 审 low-2：审计日志 changes.deadline 记归一化后落库值（与 DB 同源）
+// ============================================================================
+test('T16b v1.78.0 admin 改 deadline → 审计日志 changes.deadline 为归一化值（非原始 T 分隔入参）', async () => {
+    const ctx = await fx.createPendingFixture();
+    createdFixtureIds.push(ctx.id);
+    await fx.setCollabState(ctx.id, { status: 'SUBMITTED', submission_version: 1 });
+
+    const r = await adminFix(ctx.adminToken, ctx.id, {
+        changes: { deadline: '2026-06-22T09:30' },  // T 分隔、无秒
+        reason: '验证审计日志归一化与 DB 落库值同源',
+    });
+    if (r.status !== 200) throw new Error(`HTTP ${r.status}: ${JSON.stringify(r.body)}`);
+
+    // insertCollabLog 是 fire-and-forget，稍等异步写入
+    await new Promise(res => setTimeout(res, 300));
+    const log = await new Promise((resolve, reject) => {
+        const sqlite3 = require('sqlite3');
+        const path = require('path');
+        const db = new sqlite3.Database(path.join(__dirname, '..', 'task_pool.db'), sqlite3.OPEN_READONLY);
+        db.get(
+            `SELECT reason FROM collab_operation_logs
+              WHERE collab_request_id = ? AND operation_type = 'ADMIN_FIX'
+              ORDER BY id DESC LIMIT 1`,
+            [ctx.id],
+            (e, row) => { db.close(); e ? reject(e) : resolve(row); }
+        );
+    });
+    if (!log) throw new Error('未找到 ADMIN_FIX 审计日志');
+    const parsed = JSON.parse(log.reason);
+    if (!parsed.changes || parsed.changes.deadline !== '2026-06-22 09:30:00') {
+        throw new Error(`审计日志 changes.deadline 应为归一化值 '2026-06-22 09:30:00'，实际：'${parsed.changes && parsed.changes.deadline}'`);
+    }
+});
+
+// ============================================================================
+// T17 v1.78.0：deadline 非法格式 → 400 FIELD_VALIDATION_FAILED
+// ============================================================================
+test('T17 v1.78.0 deadline 非法格式（2026-13-45）→ 400 FIELD_VALIDATION_FAILED', async () => {
+    const ctx = await fx.createPendingFixture();
+    createdFixtureIds.push(ctx.id);
+    await fx.setCollabState(ctx.id, { status: 'SUBMITTED', submission_version: 1 });
+
+    const r = await adminFix(ctx.adminToken, ctx.id, {
+        changes: { deadline: '2026-13-45T17:00' },  // 月/日非法
+        reason: '故意传非法日期测试校验拦截',
+    });
+    if (r.status !== 400) throw new Error(`期望 400 实际 ${r.status}: ${JSON.stringify(r.body)}`);
+    if (r.body.code !== 'FIELD_VALIDATION_FAILED') throw new Error(`期望 code=FIELD_VALIDATION_FAILED 实际 ${r.body.code}`);
+});
+
+// ============================================================================
+// T18 v1.78.0：deadline 空字符串 → 400（DATETIME NOT NULL 不允许清空）
+// ============================================================================
+test('T18 v1.78.0 deadline 空字符串 → 400 FIELD_VALIDATION_FAILED（不可清空）', async () => {
+    const ctx = await fx.createPendingFixture();
+    createdFixtureIds.push(ctx.id);
+    await fx.setCollabState(ctx.id, { status: 'SUBMITTED', submission_version: 1 });
+
+    const r = await adminFix(ctx.adminToken, ctx.id, {
+        changes: { deadline: '   ' },  // 纯空白
+        reason: '尝试清空截止时间应被拒绝',
+    });
+    if (r.status !== 400) throw new Error(`期望 400 实际 ${r.status}: ${JSON.stringify(r.body)}`);
+    if (r.body.code !== 'FIELD_VALIDATION_FAILED') throw new Error(`期望 code=FIELD_VALIDATION_FAILED 实际 ${r.body.code}`);
+});
+
+// ============================================================================
+// T19 v1.78.0：DONE 终态改 deadline → 409 TERMINAL_STATE_PROTECTED（终态保护对 deadline 同样生效）
+// ============================================================================
+test('T19 v1.78.0 DONE 状态改 deadline → 409 TERMINAL_STATE_PROTECTED', async () => {
+    const ctx = await fx.createPendingFixture();
+    createdFixtureIds.push(ctx.id);
+    await fx.setCollabState(ctx.id, {
+        status: 'DONE',
+        sql_validation_status: 'passed',
+        done_at: '2026-06-11 15:00:00',
+        submission_version: 1,
+    });
+
+    const r = await adminFix(ctx.adminToken, ctx.id, {
+        changes: { deadline: '2026-06-25T12:00' },
+        reason: 'DONE 单不应允许改截止时间',
+    });
+    if (r.status !== 409) throw new Error(`期望 409 实际 ${r.status}: ${JSON.stringify(r.body)}`);
+    if (r.body.code !== 'TERMINAL_STATE_PROTECTED') throw new Error(`期望 code=TERMINAL_STATE_PROTECTED 实际 ${r.body.code}`);
 });
 
 // ============================================================================

@@ -11750,9 +11750,14 @@ if (!fs.existsSync(COLLAB_UPLOAD_BASE)) {
 // 各 attachment_type 的扩展名白名单 + 大小上限（字节）
 // 方案 §5.4：screenshot=10MB / example_xlsx 分级 / result_data=100MB / result_script=1MB / pdf=10MB
 // v1.72.0：pdf 类型一并清理（生产 0 行 + grep 0 真实业务调用 + 前端无入口）
+// v1.77.0：screenshot 放开 .pdf（原始单据常为 OA 导出 PDF）——⚠️ 导出截图（submit-export 的
+//   result_data_screenshot）共享本规则但业务语义=屏幕截图，已在该入口单独排除 .pdf，改本规则时同步审视
+// v1.77.0：新增 data_scope（数据范围说明，如"A部门,B部门…"）——独立类型，
+//   不复用 example_xlsx：质量校验列对齐按 attachment_type='example_xlsx' 取模板，data_scope 天然不参与比对
 const COLLAB_ATTACHMENT_RULES = {
-    screenshot:     { exts: ['.png','.jpg','.jpeg','.gif','.webp'],                                       sizeByExt: null,                              defaultSize: 10  * 1024 * 1024 },
+    screenshot:     { exts: ['.png','.jpg','.jpeg','.gif','.webp','.pdf'],                                sizeByExt: null,                              defaultSize: 10  * 1024 * 1024 },
     example_xlsx:   { exts: ['.xlsx','.xls','.pdf','.docx','.png','.jpg','.jpeg','.gif','.webp'],         sizeByExt: { '.xlsx': 100*1024*1024, '.xls': 100*1024*1024 }, defaultSize: 10  * 1024 * 1024 },
+    data_scope:     { exts: ['.xlsx','.xls','.txt'],                                                      sizeByExt: null,                              defaultSize: 10  * 1024 * 1024 },
     result_data:    { exts: ['.xlsx','.xls'],                                                             sizeByExt: null,                              defaultSize: 100 * 1024 * 1024 },
     result_script:  { exts: ['.sql','.txt'],                                                              sizeByExt: null,                              defaultSize: 1   * 1024 * 1024 }
 };
@@ -15561,6 +15566,13 @@ app.post('/api/collab/requests/:id/submit-export',
             return res.status(400).json({ error: dataCheck.error, code: 'INVALID_RESULT_DATA' });
         }
         // === 前置：screenshot 文件二次校验（按 screenshot 规则：图片 + 10MB，codex 39 L-2 采纳）===
+        // v1.77.0 收紧：screenshot 规则为「原始单据截图」放开了 .pdf，但导出截图业务语义=屏幕截图，
+        //   本入口单独排除 PDF（共享规则的两个入口语义不同，防连带放宽）
+        const shotExt = normalizeAttachmentExt(screenshotFile.originalname);
+        if (shotExt === '.pdf') {
+            cleanupPending();
+            return res.status(400).json({ error: '导出数据截图仅支持图片格式（PNG/JPG/GIF/WEBP），不支持 PDF', code: 'INVALID_SCREENSHOT' });
+        }
         const shotCheck = validateCollabAttachmentRule('screenshot', screenshotFile.originalname, screenshotFile.size);
         if (!shotCheck.ok) {
             cleanupPending();
@@ -15980,6 +15992,7 @@ app.post('/api/collab/requests/:id/notify-requester-done', authenticateToken, as
         //     不再是 contact_person——对接人只是内部流转角色，业务方负责人才是数据要发给的人）===
         const collab = await dbGetAsync(
             `SELECT id, status, assign_mode, exporter_user_id, exporter_name,
+                    created_by, created_by_name,
                     requester_name, requester_phone, oa_request_no, description,
                     done_notify_message_key, done_notified_at
                FROM collab_requests WHERE id = ?`,
@@ -15991,28 +16004,28 @@ app.post('/api/collab/requests/:id/notify-requester-done', authenticateToken, as
         const exporterId = Number(collab.exporter_user_id);
         const hasValidExporter = Number.isSafeInteger(exporterId) && exporterId > 0;
 
-        // === H-2 权限守卫（可执行条件）：admin 放行；非 admin 必须是本单 exporter ===
+        // === H-2 权限守卫（可执行条件）：admin / 本单 exporter / 本单创建人（v1.77.0 统一放行）===
+        //   v1.77.0：创建人是协作单 owner，对"数据是否送达业务方"负责——两条交付路径（exporter 交付 /
+        //   developer 提交）都放行创建人，不按路径切权限
         if (!isAdmin) {
             const isOwnExporter = hasValidExporter && exporterId === userId;
-            if (!isOwnExporter) {
-                return res.status(403).json({ error: '仅本单数据导出人或管理员可通知', code: 'NOT_OWN_EXPORTER' });
+            const isCreator = Number(collab.created_by) === userId;
+            if (!isOwnExporter && !isCreator) {
+                return res.status(403).json({ error: '仅本单数据导出人、创建人或管理员可通知', code: 'NOT_AUTHORIZED_TO_NOTIFY' });
             }
         }
 
-        // === 范围守卫（2026-06-09 codex 78 M-1 范围定义）：DONE + 有效 exporter + 唯一 active result_data 才可发。
-        //   状态机保证：result_data 只由 submit-export（EXPORTING→DONE，exporter 交付）产生，
-        //   normal forward 单与 admin_direct 直派单到 DONE 都必有 exporter；
-        //   纯 developer SQL 路径的 DONE 无 exporter 无 result_data（前端 hasValidExporter 不渲染按钮 +
-        //   后端 RESULT_DATA_MISSING 双层兜底）。不再限定 assign_mode='admin_direct'（codex 78 放开）。
+        // === 范围守卫（v1.77.0 路径分流）：DONE + 唯一 active result_data 才可发（下游 ①M-4 兜底）。
+        //   两条交付路径统一支持：
+        //   - exporter 交付路径：normal forward / admin_direct 单 submit-export 产生 result_data（v1.76.1 原范围）
+        //   - developer 交付路径（v1.77.0 新增）：开发 /submit 同样产生 1 active result_data（classifyUploadedFiles
+        //     1rd+1rs），smoke 过 → DONE。⚠️ 修正 v1.76.1 注释错误："纯 developer 路径无 result_data"不成立，
+        //     当时真正拦住它的只是下面已删除的 hasValidExporter 409（codex 79 H-1，本版业务驱动放开）
+        //   delivery_path 仅用于留痕审计；卡片署名 = 发送人（与路径无关）
         if (collab.status !== 'DONE') {
             return res.status(409).json({ error: `仅 DONE 状态可通知，当前：${collab.status}`, code: 'INVALID_STATE_FOR_NOTIFY' });
         }
-        // codex 79 H-1：范围硬守卫——"有效 exporter"必须 enforce（admin 路径也拦），
-        //   不能只靠权限守卫（非 admin 才查）+ RESULT_DATA_MISSING 下游兜底；
-        //   exporter=0/null 的 DONE 单（纯 developer SQL 路径 / 脏数据）不支持发送
-        if (!hasValidExporter) {
-            return res.status(409).json({ error: '本单无有效数据导出人，不支持通知发送数据', code: 'NOT_EXPORTER_PATH' });
-        }
+        const deliveryPath = hasValidExporter ? 'exporter' : 'developer';
 
         // === 收件人前置校验（codex 78 H-1 fail-fast）：业务方负责人手机号为空 → 400，不必走附件/钉钉 ===
         const requesterPhone = String(collab.requester_phone || '').trim();
@@ -16021,9 +16034,13 @@ app.post('/api/collab/requests/:id/notify-requester-done', authenticateToken, as
         }
 
         // === ① M-4：取 result_data active 唯一附件（0/多个明确报错，不随机取）===
+        //   codex 84 M-1：status 列是 ALTER 后加可空无 DEFAULT——D1/D2 时代老附件 status=NULL 实为可用，
+        //   NULL 兼容与前端渲染（a.status==='active' || !a.status）及 recordQuality 模板查询同源；
+        //   唯一性 AMBIGUOUS 守卫兜底混合场景
         const atts = await dbAllAsync(
             `SELECT id, file_name, original_name FROM collab_attachments
-              WHERE collab_request_id = ? AND attachment_type = 'result_data' AND status = 'active'`,
+              WHERE collab_request_id = ? AND attachment_type = 'result_data'
+                AND (status = 'active' OR status IS NULL)`,
             [id]
         );
         if (atts.length === 0) return res.status(409).json({ error: '无有效数据文件', code: 'RESULT_DATA_MISSING' });
@@ -16101,10 +16118,11 @@ app.post('/api/collab/requests/:id/notify-requester-done', authenticateToken, as
             }
             steps.file_send = true;
             // ③ 发完成通知文字（收尾确认）
+            //   v1.77.0：卡片联系人 = 单据发送人（本次操作人），非 exporter_name——业务方有疑问找发数据的人
             const card = dingtalkNotify.buildRequesterDoneCard({
                 oaRequestNo: collab.oa_request_no,
                 description: collab.description,
-                exporterName: collab.exporter_name
+                senderName: userName
             });
             mdResp = await dingtalkNotify.sendMarkdownToUser(token, robotCode, userIds, card.title, card.text);
             // M-4：markdown 成功条件加 processQueryKey 非空（否则已读永远查不到 → 视为失败不落 done_*）
@@ -16153,6 +16171,7 @@ app.post('/api/collab/requests/:id/notify-requester-done', authenticateToken, as
             requester_userid: requesterDingUserId,
             requester_name: collab.requester_name || null,
             assign_mode: collab.assign_mode,
+            delivery_path: deliveryPath,   // v1.77.0：按 exporter_user_id>0 推断的交付归类（exporter=导出人交付 / developer=开发提交交付），非精确提交来源（codex 84 L-1）
             markdown_key: allOk ? mdResp.processQueryKey : null,
             previous_done_notify_message_key: collab.done_notify_message_key || null,
             previous_done_notified_at: collab.done_notified_at || null,
@@ -16367,12 +16386,32 @@ app.post('/api/collab/requests/:id/admin-fix', authenticateToken, requireAdmin, 
         'oa_request_no': { type: 'string', maxLength: 100, trim: true, pattern: /^[A-Za-z0-9-]+$/ },
         'contact_person_id': { type: 'integer', min: 1 },
         'developer_id': { type: 'integer', min: 1 },
+        // v1.78.0：截止时间可改（deadline 是 DATETIME NOT NULL，不允许清空）
+        'deadline': { type: 'datetime' },
     };
     function validateField(field, value, constraint) {
         if (constraint.type === 'integer') {
             if (!Number.isInteger(value)) return `字段 ${field} 必须是整数`;
             if (constraint.min !== undefined && value < constraint.min) {
                 return `字段 ${field} 不能小于 ${constraint.min}（人员字段不可清空）`;
+            }
+        }
+        if (constraint.type === 'datetime') {
+            // v1.78.0：deadline 是 DATETIME NOT NULL，必须非空字符串
+            if (typeof value !== 'string') return `字段 ${field} 必须是字符串（日期时间）`;
+            const v = value.trim();
+            if (v.length === 0) return `字段 ${field} 不能为空（截止时间必填）`;
+            // 接受 'YYYY-MM-DD HH:mm' 或 'YYYY-MM-DDTHH:mm'，秒可选
+            if (!/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2})?$/.test(v)) {
+                return `字段 ${field} 格式必须是 YYYY-MM-DD HH:mm（或带秒）`;
+            }
+            // 格式对但日期非法（如 2026-13-45）也要拦：用各分量逐一核对避免时区/兜底解析放行
+            const m = v.match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?$/);
+            const [Y, Mo, D, H, Mi, S] = [m[1], m[2], m[3], m[4], m[5], m[6] || '00'].map(Number);
+            const dt = new Date(Y, Mo - 1, D, H, Mi, S);
+            if (dt.getFullYear() !== Y || dt.getMonth() !== Mo - 1 || dt.getDate() !== D
+                || dt.getHours() !== H || dt.getMinutes() !== Mi || dt.getSeconds() !== S) {
+                return `字段 ${field} 不是合法的日期时间`;
             }
         }
         if (constraint.type === 'string') {
@@ -16389,6 +16428,13 @@ app.post('/api/collab/requests/:id/admin-fix', authenticateToken, requireAdmin, 
             }
         }
         return null;
+    }
+    // v1.78.0 codex 审 low-2：deadline 归一化为 DB 格式 'YYYY-MM-DD HH:mm:ss'
+    // UPDATE 拼接与审计日志 newValues 共用此函数，避免"日志记 T 分隔/无秒、DB 存空格/带秒"的不一致
+    function normalizeDeadlineForDb(raw) {
+        let dv = String(raw).trim().replace('T', ' ');
+        if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(dv)) dv += ':00'; // 补秒
+        return dv;
     }
 
     // === 字段值类型校验 ===
@@ -16444,6 +16490,7 @@ app.post('/api/collab/requests/:id/admin-fix', authenticateToken, requireAdmin, 
             'oa_request_no':           ['PENDING_ASSIGN', 'PENDING', 'SUBMITTED'],
             'contact_person_id':       ['PENDING_ASSIGN', 'PENDING', 'SUBMITTED'],
             'developer_id':            ['PENDING', 'SUBMITTED'],
+            'deadline':                ['PENDING_ASSIGN', 'PENDING', 'SUBMITTED'], // v1.78.0：截止时间，同 description 档（最宽组）
         };
         for (const field of Object.keys(changes)) {
             const allowedStatuses = FIELD_STATUS_MATRIX[field];
@@ -16475,7 +16522,8 @@ app.post('/api/collab/requests/:id/admin-fix', authenticateToken, requireAdmin, 
         const userLookup = {}; // field → { id, display_name }
         for (const [field, newVal] of Object.entries(changes)) {
             oldValues[field] = collab[field];
-            newValues[field] = newVal;
+            // v1.78.0 codex 审 low-2：审计日志 newValues 记实际落库值（deadline 归一化后），与 DB 一致
+            newValues[field] = (field === 'deadline') ? normalizeDeadlineForDb(newVal) : newVal;
 
             if (field === 'oa_request_no') {
                 const exists = await dbGetAsync(
@@ -16513,7 +16561,8 @@ app.post('/api/collab/requests/:id/admin-fix', authenticateToken, requireAdmin, 
         const setParams = [];
         for (const [field, newVal] of Object.entries(changes)) {
             setClauses.push(`${field} = ?`);
-            setParams.push(newVal);
+            // v1.78.0：deadline 归一化为 DB 格式（codex 审 low-2 抽 normalizeDeadlineForDb，与审计日志同源）
+            setParams.push(field === 'deadline' ? normalizeDeadlineForDb(newVal) : newVal);
 
             if (field === 'contact_person_id') {
                 setClauses.push(`contact_person_name = ?`);
@@ -16578,13 +16627,14 @@ app.post('/api/collab/requests/:id/admin-fix', authenticateToken, requireAdmin, 
 // 前端 adminFixModal 渲染时按 status 查询，灰显不可改字段
 app.get('/api/collab/admin-fix/allowed-fields', authenticateToken, requireAdmin, (req, res) => {
     const status = String(req.query.status || '');
-    // 与 admin-fix endpoint 内 FIELD_STATUS_MATRIX 完全一致（v1.70.0 范围）
+    // 与 admin-fix endpoint 内 FIELD_STATUS_MATRIX 完全一致（v1.70.0 范围 + v1.78.0 deadline）
     const FIELD_STATUS_MATRIX = {
         'target_db_connection_id': ['PENDING_ASSIGN', 'PENDING', 'SUBMITTED'],
         'description':             ['PENDING_ASSIGN', 'PENDING', 'SUBMITTED'],
         'oa_request_no':           ['PENDING_ASSIGN', 'PENDING', 'SUBMITTED'],
         'contact_person_id':       ['PENDING_ASSIGN', 'PENDING', 'SUBMITTED'],
         'developer_id':            ['PENDING', 'SUBMITTED'],
+        'deadline':                ['PENDING_ASSIGN', 'PENDING', 'SUBMITTED'], // v1.78.0：截止时间，同 description 档（最宽组）
     };
     const allowedFields = Object.entries(FIELD_STATUS_MATRIX)
         .filter(([_, statuses]) => statuses.includes(status))
@@ -17224,6 +17274,13 @@ app.post('/api/collab/requests/:id/attachments',
                 return res.status(400).json({ error: '请至少上传一个文件' });
             }
 
+            // v1.77.0 codex 83 M-1：data_scope 单文件语义后端强制（前端单文件 input 仅 UI 层，API 直调可绕过；
+            //   example_xlsx 历史同为前端单文件后端不限，既有行为不动，仅新类型收紧）
+            if (attachment_type === 'data_scope' && files.length > 1) {
+                cleanupTempFiles();
+                return res.status(400).json({ error: '数据范围说明仅支持单个文件', code: 'DATA_SCOPE_SINGLE_FILE_ONLY' });
+            }
+
             // 按 attachment_type 规则二次校验（扩展名分级 + 大小分级）
             for (const f of files) {
                 const check = validateCollabAttachmentRule(attachment_type, f.originalname, f.size);
@@ -17239,8 +17296,8 @@ app.post('/api/collab/requests/:id/attachments',
                 fs.mkdirSync(targetDir, { recursive: true });
             }
 
-            // v1.72.0：预分配 attachment_seq（sc/ex 走 sc/ex 通道）
-            //   通用 upload 仅处理 screenshot / example_xlsx（rd/rs 已在 line 14181 拦截）
+            // v1.72.0：预分配 attachment_seq（sc/ex/ds 走 attachment_seq 通道）
+            //   通用 upload 仅处理 screenshot / example_xlsx / data_scope（rd/rs 已在前面拦截）
             //   多文件批量上传：每个文件按提交顺序分配 +1 (从 MAX+1 开始)
             const baseSeq = await collabVersioning.allocateAttachmentSeq(
                 { getAsync: dbGetAsync }, id, attachment_type
@@ -17295,6 +17352,13 @@ app.post('/api/collab/requests/:id/attachments',
                     original_name: f.originalname,
                     size: f.size
                 });
+            }
+
+            // v1.77.0 codex 83 M-3：全部文件落盘/入库失败时不能返回成功（原行为"已上传 0 个附件"+200，
+            //   前端会误报成功提示；files.length>0 但 inserted=0 必为异常路径，所有类型统一收紧）
+            if (inserted.length === 0) {
+                cleanupTempFiles();
+                return res.status(500).json({ error: '附件上传失败（文件落盘或入库异常），请重试', code: 'ATTACHMENT_PERSIST_FAILED' });
             }
 
             insertCollabLog(id, 'ATTACH_UPLOAD', userId, userName, `上传 ${inserted.length} 个 ${attachment_type} 附件`);

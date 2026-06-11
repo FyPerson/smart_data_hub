@@ -1063,15 +1063,21 @@
                 </div>
                 <div class="form-row" id="formRow_files">
                     <label>原始单据截图 <span class="hint">（选传）</span></label>
-                    <input type="file" id="f_files" accept=".png,.jpg,.jpeg,.gif,.webp,image/*" multiple>
-                    <div class="hint">最多 5 个文件 / 单文件 ≤ 10MB / 支持 PNG·JPG·GIF·WEBP。OA 截图、对话截图、邮件截图等均可（选传）。</div>
+                    <input type="file" id="f_files" accept=".png,.jpg,.jpeg,.gif,.webp,.pdf,image/*" multiple>
+                    <div class="hint">最多 5 个文件 / 单文件 ≤ 10MB / 支持 PNG·JPG·GIF·WEBP·PDF。OA 截图、对话截图、邮件截图、OA 导出 PDF 单据均可（选传）。</div>
                     <div id="filePreview" class="file-preview"></div>
                 </div>
                 <div class="form-row" id="formRow_template">
                     <label>数据模板 <span class="hint">（选传）</span></label>
                     <input type="file" id="f_template" accept=".xlsx,.xls">
-                    <div class="hint">单个 Excel 文件（.xlsx / .xls），≤ 10MB。用于需求方以具体表格形式描述列名/示例数据，便于开发理解需求。</div>
+                    <div class="hint">单个 Excel 文件（.xlsx / .xls），≤ 10MB。用于需求方以具体表格形式描述列名/示例数据，便于开发理解需求。质量校验的列对齐只比对此文件。</div>
                     <div id="templatePreview" class="file-preview"></div>
+                </div>
+                <div class="form-row" id="formRow_dataScope">
+                    <label>数据范围说明 <span class="hint">（选传）</span></label>
+                    <input type="file" id="f_data_scope" accept=".xlsx,.xls,.txt">
+                    <div class="hint">单个文件（.xlsx / .xls / .txt），≤ 10MB。需求方圈定取数范围（如"A部门、B部门…"），供开发按范围取数；不参与列对齐校验。</div>
+                    <div id="dataScopePreview" class="file-preview"></div>
                 </div>
             </div>
             <div class="modal-footer">
@@ -2166,26 +2172,33 @@
                 </div>`;
         }
 
-        // 导出人通知业务方·发数据区块（2026-05-29 方案 v1.1；2026-06-09 收件人修复 codex 78）
+        // 导出人/创建人通知业务方·发数据区块（2026-05-29 方案 v1.1；2026-06-09 收件人修复 codex 78；
+        //   v1.77.0 路径分流：开发提交路径（无 exporter）也支持，创建人可发）
         //   收件人 = 业务方负责人（创建协作单时填的 requester_name/requester_phone，后端按手机号反查钉钉），
         //     不是对接人——对接人只是内部流转角色（codex 78 L-1：变量改名 requesterName 防再混淆）
-        //   可见性：status='DONE' && exporter_user_id 有效 且当前用户是 admin 或本单 exporter；
-        //     不再限定 assign_mode='admin_direct'（normal forward 单也支持）；
-        //     纯 developer SQL 路径无 exporter 无 result_data，hasValidExporter 兜住不渲染
+        //   可见性（与后端 NOT_AUTHORIZED_TO_NOTIFY 守卫同条件）：
+        //     status='DONE' && 存在唯一渲染前提 active result_data（开发 /submit 与 submit-export 都产生）
+        //     且当前用户是 admin / 本单 exporter / 本单创建人（v1.77.0 创建人统一放行，两路径不切权限）
         //   已通知过（done_notified_at 非空）→ 显示已通知态 + 已读查询入口；可重发（D6）
         function renderRequesterDoneNotifySection(d, isAdminUser, currentUserId) {
             if (d.status !== 'DONE') return '';
             // L-1：id 必须有效正整数，异常数据不渲染（避免 notifyRequesterDone(NaN) / 请求 /NaN/...）
             const safeId = Number(d.id);
             if (!Number.isSafeInteger(safeId) || safeId <= 0) return '';
+            // v1.77.0：渲染前提从 hasValidExporter 改"有 active result_data"（按钮的本质=有数可发）；
+            //   开发提交路径（exporter=0）DONE 单同样有 1 active result_data，唯一性由后端 M-4 兜底
+            const hasActiveResultData = (d.attachments || []).some(
+                a => a.attachment_type === 'result_data' && (a.status === 'active' || !a.status)
+            );
+            if (!hasActiveResultData) return '';
             const exporterId = Number(d.exporter_user_id);
             const hasValidExporter = Number.isSafeInteger(exporterId) && exporterId > 0;
-            if (!hasValidExporter) return '';
-            // 仅 admin 或本单 exporter 可见（与后端 NOT_OWN_EXPORTER 守卫同条件）
+            // 权限显隐：admin / 本单 exporter / 本单创建人（与后端守卫同条件；真闸门在后端）
             // L-2：currentUserId 显式 Number 转换 + 校验，与 exporterId 判断风格统一
             const uid = Number(currentUserId);
-            const isOwnExporter = Number.isSafeInteger(uid) && uid > 0 && exporterId === uid;
-            if (!isAdminUser && !isOwnExporter) return '';
+            const isOwnExporter = hasValidExporter && Number.isSafeInteger(uid) && uid > 0 && exporterId === uid;
+            const isCreator = Number.isSafeInteger(uid) && uid > 0 && Number(d.created_by) === uid;
+            if (!isAdminUser && !isOwnExporter && !isCreator) return '';
 
             const requesterName = d.requester_name ? escapeHtml(d.requester_name) : '业务方负责人';
             const alreadyNotified = !!d.done_notified_at;
@@ -2473,6 +2486,20 @@
                 return `<a href='${escapeHtmlAttr(built.url)}' target='_blank' rel='noopener' download='${escapeHtml(displayName)}' style='color:#166534;text-decoration:none;'>📊 ${escapeHtml(displayName)}</a>`;
             })() : '<span style="color:#9ca3af">—</span>';
 
+            // v1.77.0 数据范围说明：attachment_type='data_scope'（需求方圈定数据范围，如"A部门,B部门…"）
+            // 渲染逻辑与数据模板同款；质量校验列对齐只取 example_xlsx，data_scope 不参与
+            const dataScopeFile = (d.attachments || []).filter(
+                a => a.attachment_type === 'data_scope' && (a.status === 'active' || !a.status)
+            )[0];
+            const dataScopeHtml = dataScopeFile ? (() => {
+                const built = buildAttachmentDownloadUrl(dataScopeFile.file_name);
+                const displayName = dataScopeFile.original_name || (dataScopeFile.file_name ? String(dataScopeFile.file_name).split('/').pop() : '数据范围说明');
+                if (!built.ok) {
+                    return `<span style="color:#dc2626" title="附件路径非法（${escapeHtmlAttr(built.reason)}），请联系管理员">⚠️ ${escapeHtml(displayName)}</span>`;
+                }
+                return `<a href='${escapeHtmlAttr(built.url)}' target='_blank' rel='noopener' download='${escapeHtml(displayName)}' style='color:#166534;text-decoration:none;'>📋 ${escapeHtml(displayName)}</a>`;
+            })() : '<span style="color:#9ca3af">—</span>';
+
             // v1.70.2 原始单据截图区块（admin 创建协作单时上传，所有角色可见）
             // v1.71.0 Commit F codex 41 改造：
             //   ① H-1 采纳：补 status='active' 过滤（Commit E supersede 引入历史截图渲染风险）
@@ -2496,6 +2523,18 @@
                     </div>`;
                 }
                 const urlAttr = escapeHtmlAttr(built.url);
+                // v1.77.0：PDF 原始单据无法 <img> 预览 → 文件占位 + 点击新开 tab（浏览器原生 PDF 预览）
+                const isPdf = /\.pdf$/i.test(displayName) || /\.pdf$/i.test(String(f.file_name || ''));
+                if (isPdf) {
+                    return `<div class="screenshot-item">
+                        <a href="${urlAttr}" target="_blank" rel="noopener" title="${safeDisplay}（点击新窗口预览）"
+                           style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;text-decoration:none;color:#92400e;background:#fef3c7;">
+                            <span style="font-size:28px;line-height:1;">📄</span>
+                            <span style="font-size:10px;margin-top:4px;">PDF</span>
+                        </a>
+                        <div class="screenshot-meta">${safeDisplay}</div>
+                    </div>`;
+                }
                 return `<div class="screenshot-item">
                     <img class="clickable-thumbnail" src="${urlAttr}" alt="${safeDisplay}" title="${safeDisplay}（点击放大）" data-lightbox-url="${urlAttr}" data-lightbox-caption="${safeDisplay}">
                     <div class="screenshot-meta">${safeDisplay}</div>
@@ -2537,6 +2576,8 @@
                             <div class="detail-kv-value">${escapeHtml(d.description)}</div>
                             <div class="detail-kv-label">数据模板</div>
                             <div class="detail-kv-value">${templateHtml}</div>
+                            <div class="detail-kv-label">数据范围说明</div>
+                            <div class="detail-kv-value">${dataScopeHtml}</div>
                             <div class="detail-kv-label">期望完成</div>
                             <div class="detail-kv-value">${fmtDate(d.deadline)}</div>${contactRowHtml}${devRowHtml}
                             <div class="detail-kv-label">录入人</div>
@@ -3648,6 +3689,7 @@
             'target_db_connection_id': { label: '目标业务库', type: 'db_select' },
             'contact_person_id': { label: '对接人', type: 'user_select' },
             'developer_id': { label: '开发人员', type: 'user_select' },
+            'deadline': { label: '截止时间', type: 'datetime' }, // v1.78.0
         };
 
         async function openAdminFixDialog() {
@@ -3702,6 +3744,10 @@
                         opts = `<option value="${currentVal}" disabled>#${currentVal}（当前/已停用）</option>` + opts;
                     }
                     inputHtml = `<select id="f_admin_fix_${field}" data-field="${field}" data-current="${currentVal != null ? currentVal : ''}"><option value="">不修改</option>${opts}</select>`;
+                } else if (meta.type === 'datetime') {
+                    // v1.78.0：截止时间 datetime-local，预填当前值（DB 空格分隔 → 控件 T 分隔，slice 到分钟）
+                    const dtVal = currentVal ? String(currentVal).replace(' ', 'T').slice(0, 16) : '';
+                    inputHtml = `<input type="datetime-local" id="f_admin_fix_${field}" data-field="${field}" data-current="${dtVal}" value="${dtVal}">`;
                 }
                 return `
                     <div class="form-row">
@@ -3751,6 +3797,14 @@
                     newVal = parseInt(raw, 10);
                     if (!Number.isInteger(newVal) || newVal <= 0) continue;
                     if (newVal === Number(d[field])) continue;  // 与当前值相同跳过
+                } else if (meta.type === 'datetime') {
+                    // v1.78.0：deadline 归一化到分钟精度比对，防 'T'/空格 + 秒 格式差导致"假修改"
+                    // codex 审 low-1：deadline 全程分钟精度（控件不带秒 + 后端补 :00），admin UI 不负责秒级修正；
+                    // 若 DB 存在历史秒级脏数据（本项目无产生路径），UI 无法把秒归一为 :00 属已知不支持，非 bug
+                    newVal = String(raw).trim();
+                    if (!newVal) continue;
+                    const curNorm = String(d[field] || '').trim().replace(' ', 'T').slice(0, 16);
+                    if (newVal.slice(0, 16) === curNorm) continue;  // 与当前值（分钟）相同跳过
                 } else {
                     newVal = String(raw).trim();
                     if (!newVal) continue;
@@ -3797,7 +3851,9 @@
                     btn.textContent = '确认修正';
                     return;
                 }
-                showToast(`✅ 修正成功（${data.changed_fields.length} 字段${data.cleared_sql_validation ? ' + 已清空 SQL 验收状态' : ''}）`, 'success');
+                // v1.78.0 codex 审 low-3：改了 deadline 时软提醒 admin 手动同步（不发自动通知，沿用 admin-fix 不通知铁律）
+                const _changedDeadline = Array.isArray(data.changed_fields) && data.changed_fields.includes('deadline');
+                showToast(`✅ 修正成功（${data.changed_fields.length} 字段${data.cleared_sql_validation ? ' + 已清空 SQL 验收状态' : ''}）${_changedDeadline ? '；截止时间已修改，如需同步相关人员请用详情页「通知」按钮' : ''}`, 'success');
                 closeAdminFixModal();
                 await openDetail(id);
                 if (typeof loadList === 'function') loadList();
@@ -4538,14 +4594,21 @@
         let selectedFiles = [];
         const MAX_FILES = 5;
         const MAX_FILE_SIZE = 10 * 1024 * 1024;
-        // 录入弹窗 attachment_type=screenshot：仅图片，不含 PDF（PDF 走 example_xlsx / 'pdf' 类型走单独入口）
-        const ALLOWED_EXTS = ['png', 'jpg', 'jpeg', 'gif', 'webp'];
+        // 录入弹窗 attachment_type=screenshot：图片 + PDF（v1.77.0 放开 PDF——原始单据常为 OA 导出 PDF；
+        // 导出截图入口 result_data_screenshot 仍仅图片，后端单独排除）
+        const ALLOWED_EXTS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'pdf'];
 
         // v1.67.0 数据模板：单文件 .xlsx/.xls，attachment_type=example_xlsx（后端 D2 已预留，本次接通前端入口）
         // 前端限定仅 .xlsx/.xls，后端 example_xlsx 允许范围更宽（含 pdf/docx/img），UI 层拦截避免 admin 误用
         let selectedTemplate = null;
         const TEMPLATE_MAX_SIZE = 10 * 1024 * 1024;
         const TEMPLATE_ALLOWED_EXTS = ['xlsx', 'xls'];
+
+        // v1.77.0 数据范围说明：单文件 .xlsx/.xls/.txt，attachment_type=data_scope
+        // 质量校验列对齐只取 example_xlsx，data_scope 不参与比对（独立类型隔离）
+        let selectedDataScope = null;
+        const DATA_SCOPE_MAX_SIZE = 10 * 1024 * 1024;
+        const DATA_SCOPE_ALLOWED_EXTS = ['xlsx', 'xls', 'txt'];
 
         function onFilesChange(e) {
             const newFiles = Array.from(e.target.files || []);
@@ -4581,15 +4644,26 @@
                 wrap.innerHTML = '';
                 return;
             }
-            // codex 十七审 #5：删除 pdf 分支（截图白名单已不含 pdf，避免维护者误判 pdf 也走 screenshot）
+            // v1.77.0：恢复 PDF 分支（截图白名单重新放开 .pdf，原始单据常为 OA 导出 PDF）——
+            //   PDF 无法 <img> 预览，渲染文件占位（不参与 lightbox）
             // v1.70.2：缩略图加 clickable-thumbnail + 点击放大查看原图
             //   - 用 dataset 存 url + name 避免文件名含 ' 撕碎 onclick 字符串边界
             //   - 事件委托：单击 img 触发 lightbox（remove-btn stopPropagation 避免误触）
             // codex 27 审 #7 拍板：object URL 不 revoke 不采纳收敛（创建弹窗 ≤5 文件 × ≤10MB；
             // 弹窗关闭整页刷新会自动 GC；codex 自承"内网小图数量少时影响有限"。未来若放开数量/体积上限再补 revoke）
             wrap.innerHTML = selectedFiles.map((f, idx) => {
-                const url = URL.createObjectURL(f);
                 const safeName = escapeHtml(f.name);
+                const isPdf = /\.pdf$/i.test(f.name);
+                if (isPdf) {
+                    return `<div class="file-item" title="${safeName}">
+                        <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;width:120px;height:90px;background:#fef3c7;color:#92400e;border-radius:4px;">
+                            <span style="font-size:26px;line-height:1;">📄</span>
+                            <span style="font-size:10px;margin-top:3px;max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${safeName}</span>
+                        </div>
+                        <button class="remove-btn" onclick="event.stopPropagation();removeFile(${idx})" title="移除">×</button>
+                    </div>`;
+                }
+                const url = URL.createObjectURL(f);
                 // codex 27 审 #2：URL 走 escapeHtmlAttr（blob: URL 当前无特殊字符但保持安全防线统一）
                 const urlAttr = escapeHtmlAttr(url);
                 return `<div class="file-item">
@@ -4657,6 +4731,57 @@
             </div>`;
         }
 
+        // v1.77.0 数据范围说明：单文件 .xlsx/.xls/.txt 校验 + 预览（对齐数据模板模式，
+        //   含 codex 十七审 #1 同款防线：非法/超大分支必须清 selectedDataScope + 刷新预览）
+        function onDataScopeChange(e) {
+            const f = (e.target.files || [])[0];
+            if (!f) {
+                selectedDataScope = null;
+                renderDataScopePreview();
+                return;
+            }
+            const ext = f.name.split('.').pop().toLowerCase();
+            if (!DATA_SCOPE_ALLOWED_EXTS.includes(ext)) {
+                showToast(`仅支持 .xlsx / .xls / .txt 格式：${f.name}`, 'error');
+                e.target.value = '';
+                selectedDataScope = null;
+                renderDataScopePreview();
+                return;
+            }
+            if (f.size > DATA_SCOPE_MAX_SIZE) {
+                showToast(`${f.name} 超过 10MB`, 'error');
+                e.target.value = '';
+                selectedDataScope = null;
+                renderDataScopePreview();
+                return;
+            }
+            selectedDataScope = f;
+            renderDataScopePreview();
+        }
+
+        function removeDataScope() {
+            selectedDataScope = null;
+            const input = document.getElementById('f_data_scope');
+            if (input) input.value = '';
+            renderDataScopePreview();
+        }
+
+        function renderDataScopePreview() {
+            const wrap = document.getElementById('dataScopePreview');
+            if (!wrap) return;
+            if (!selectedDataScope) {
+                wrap.innerHTML = '';
+                return;
+            }
+            const f = selectedDataScope;
+            const sizeKB = (f.size / 1024).toFixed(1);
+            wrap.innerHTML = `<div class="file-item" style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:6px;">
+                <span style="font-size:1.4em;">📋</span>
+                <span class="file-name" title="${escapeHtml(f.name)}" style="flex:1;font-size:0.9em;color:#166534;">${escapeHtml(f.name)} <span style="color:#9ca3af;">(${sizeKB} KB)</span></span>
+                <button class="remove-btn" onclick="removeDataScope()" title="移除" style="background:transparent;border:0;color:#dc2626;cursor:pointer;font-size:1.1em;">×</button>
+            </div>`;
+        }
+
         // v1.66.2 新建/编辑共享 modal 状态
         //   - editingCollabId=null：新建模式（POST /api/collab/requests）
         //   - editingCollabId=N：编辑模式（PUT /api/collab/requests/N）
@@ -4683,16 +4808,31 @@
             if (tplInput) tplInput.value = '';
             selectedTemplate = null;
             renderTemplatePreview();
-            // deadline 默认 +7 天
+            // v1.77.0 数据范围说明重置
+            const dsInput = document.getElementById('f_data_scope');
+            if (dsInput) dsInput.value = '';
+            selectedDataScope = null;
+            renderDataScopePreview();
+            // deadline 智能默认（v1.78.0）：< 15:00 当天 17:00，>= 15:00 次日 12:00
+            // 注意：datetime-local 用本地时间，不能用 toISOString()（会转 UTC 偏 8 小时——旧 +7天默认即踩此坑）
             const d = new Date();
-            d.setDate(d.getDate() + 7);
-            d.setHours(18, 0, 0, 0);
-            document.getElementById('f_deadline').value = d.toISOString().substring(0, 16);
+            if (d.getHours() < 15) {
+                d.setHours(17, 0, 0, 0);            // 当天 17:00
+            } else {
+                d.setDate(d.getDate() + 1);
+                d.setHours(12, 0, 0, 0);            // 次日 12:00
+            }
+            const _pad = n => String(n).padStart(2, '0');
+            document.getElementById('f_deadline').value =
+                d.getFullYear() + '-' + _pad(d.getMonth() + 1) + '-' + _pad(d.getDate()) +
+                'T' + _pad(d.getHours()) + ':' + _pad(d.getMinutes());
 
-            // 截图区 + 数据模板区 + 对接人区都显示且可用（新建场景）
+            // 截图区 + 数据模板区 + 数据范围区 + 对接人区都显示且可用（新建场景）
             document.getElementById('formRow_files').style.display = '';
             const tplRow = document.getElementById('formRow_template');
             if (tplRow) tplRow.style.display = '';
+            const dsRow = document.getElementById('formRow_dataScope');
+            if (dsRow) dsRow.style.display = '';
             document.getElementById('formRow_contact').style.display = '';
             document.getElementById('f_contact').disabled = false;
             document.getElementById('contactHint').textContent = '外包负责人，由其在平台内将协作单指派给具体开发。下拉显示全部活跃用户（含 admin 兜底），凭备注辨识。';
@@ -4807,6 +4947,11 @@
             if (tplRow) tplRow.style.display = 'none';
             selectedTemplate = null;
             renderTemplatePreview();
+            // v1.77.0 数据范围说明区编辑时隐藏（与截图/模板一致）
+            const dsRow = document.getElementById('formRow_dataScope');
+            if (dsRow) dsRow.style.display = 'none';
+            selectedDataScope = null;
+            renderDataScopePreview();
 
             // 对接人下拉：PENDING_ASSIGN 可改；PENDING 禁用
             await loadTargetDbOptions();
@@ -4955,8 +5100,9 @@
 
                 // Step 2: 上传截图（attachment_type=screenshot）
                 // Step 3: 上传数据模板（attachment_type=example_xlsx，v1.67.0 新增）
-                // 两步独立上传：任一失败不阻塞另一个；记录上传结果用于结尾 toast
-                const uploadResults = { screenshots: 0, template: false, errors: [] };
+                // Step 4: 上传数据范围说明（attachment_type=data_scope，v1.77.0 新增）
+                // 各步独立上传：任一失败不阻塞其他；记录上传结果用于结尾 toast
+                const uploadResults = { screenshots: 0, template: false, dataScope: false, errors: [] };
 
                 if (selectedFiles.length > 0) {
                     btn.textContent = '上传截图...';
@@ -4996,10 +5142,29 @@
                     }
                 }
 
+                if (selectedDataScope) {
+                    btn.textContent = '上传数据范围说明...';
+                    const dsFormData = new FormData();
+                    dsFormData.append('attachment_type', 'data_scope');
+                    dsFormData.append('files', selectedDataScope);
+                    const dsRes = await authFetch(`/api/collab/requests/${newId}/attachments`, {
+                        method: 'POST',
+                        body: dsFormData
+                    });
+                    if (!dsRes) return;
+                    const dsData = await dsRes.json();
+                    if (!dsRes.ok) {
+                        uploadResults.errors.push(`数据范围说明上传失败：${dsData.error || '请稍后重试'}`);
+                    } else {
+                        uploadResults.dataScope = true;
+                    }
+                }
+
                 // 结尾 toast：拼装上传摘要
                 const summaryParts = [];
                 if (uploadResults.screenshots > 0) summaryParts.push(`${uploadResults.screenshots} 张截图`);
                 if (uploadResults.template) summaryParts.push('数据模板');
+                if (uploadResults.dataScope) summaryParts.push('数据范围说明');
                 const summary = summaryParts.length > 0 ? `（含 ${summaryParts.join(' + ')}）` : '';
                 if (uploadResults.errors.length > 0) {
                     showToast(`协作单 #${newId} 已创建${summary}，但有上传失败：${uploadResults.errors.join('；')}`, 'error');
@@ -5261,6 +5426,9 @@
             // v1.67.0 数据模板 input change 绑定
             const tplInput = document.getElementById('f_template');
             if (tplInput) tplInput.addEventListener('change', onTemplateChange);
+            // v1.77.0 数据范围说明 input change 绑定
+            const dsInput = document.getElementById('f_data_scope');
+            if (dsInput) dsInput.addEventListener('change', onDataScopeChange);
 
             // 等 app.js 把用户信息加载好后再加载列表
             await loadActiveUsers();
