@@ -9109,6 +9109,19 @@ function readSystemConfig(key) {
     });
 }
 
+// v1.78.1：开发/导出人提交后是否给 admin 发钉钉通知的总开关
+// 默认关（配置缺失/非 'on' 一律视为关）——admin 主动到平台查看提交，现阶段不被动推送
+// 恢复被动通知：把 system_configs.collab_notify_admin_on_submit 写成 'on'
+async function isNotifyAdminOnSubmitEnabled() {
+    try {
+        const v = await readSystemConfig('collab_notify_admin_on_submit');
+        return String(v || '').trim().toLowerCase() === 'on';
+    } catch (e) {
+        logger.warn(`[notify-switch] 读 collab_notify_admin_on_submit 失败，按"关"处理：${e.message}`);
+        return false;
+    }
+}
+
 function writeSystemConfig(key, value, user) {
     return new Promise((resolve, reject) => {
         const encrypted = value ? encryptPassword(value) : null;
@@ -11248,10 +11261,12 @@ app.post('/api/issues/:id/create-chat', authenticateToken, requireIssueSchemaRea
         }
 
         // 构造群成员：示例用户A（固定 admin 群主）+ assigned_to（非空才加）+ 触发人；业务方走 phone 反查单独加
+        // v1.79.x codex 审 medium-1：所有成员来源统一走 addRealChatMember，排除内置 admin(id=1) + 无效/占位 id
+        //   （含触发人本是 id=1，或 id=1 被指派为 assigned_to 的情况）。示例用户A(3) 正整数 ≠1 照常加入。
         const memberUserIds = new Set();
-        memberUserIds.add(COLLAB_CHAT_ADMIN_ID);
-        if (Number(issue.assigned_to) > 0) memberUserIds.add(Number(issue.assigned_to));
-        memberUserIds.add(userId);
+        addRealChatMember(memberUserIds, COLLAB_CHAT_ADMIN_ID);
+        addRealChatMember(memberUserIds, issue.assigned_to);
+        addRealChatMember(memberUserIds, userId);
 
         // 拉取所有平台成员的 dingtalk_user_id
         const memberRows = await dbAllAsync(
@@ -12780,6 +12795,19 @@ app.post('/api/collab/requests/:id/archive-final', authenticateToken, requireAdm
 //   钉钉无 disband 服务端 API，群留作历史沟通记录
 // ============================================================
 const COLLAB_CHAT_ADMIN_ID = 3;  // 示例用户A（user.id=3），数据协作模块固定 admin 群成员
+// v1.79.x：内置 admin 占位账号（user.id=1，username=admin）——无真人、无手机号/钉钉号。
+//   它不能作为群成员入"拉起讨论群"（拉群会因无钉钉号失败）；平台方角色已由固定群成员示例用户A代表。
+const BUILTIN_ADMIN_USER_ID = 1;
+// v1.79.x codex 审 medium-1：群成员加入统一走此 helper，排除"内置 admin 占位账号 + 无效/占位 id"。
+//   覆盖所有成员来源（触发人 / 对接人 / 开发 / assigned_to），不止触发人那一路——
+//   防 id=1 经业务字段（被指派为对接人/开发）进群仍导致拉群失败。Set 自动去重。
+//   注意：示例用户A(COLLAB_CHAT_ADMIN_ID=3) 是正整数且 ≠1，走本 helper 照常加入。
+function addRealChatMember(memberSet, rawId) {
+    const uid = Number(rawId);
+    if (Number.isSafeInteger(uid) && uid > 0 && uid !== BUILTIN_ADMIN_USER_ID) {
+        memberSet.add(uid);
+    }
+}
 
 app.post('/api/collab/requests/:id/create-chat', authenticateToken, async (req, res) => {
     const idStr = req.params.id;
@@ -12849,11 +12877,13 @@ app.post('/api/collab/requests/:id/create-chat', authenticateToken, async (req, 
         }
 
         // 构造群成员：示例用户A（固定 admin）+ 对接人 + 当前 developer(若已指派) + 触发人
+        // v1.79.x codex 审 medium-1：所有成员来源统一走 addRealChatMember，排除内置 admin(id=1) + 无效/占位 id
+        //   （含触发人本是 id=1，或 id=1 被指派为对接人/开发的情况）。示例用户A(3) 正整数 ≠1 照常加入。
         const memberUserIds = new Set();
-        memberUserIds.add(COLLAB_CHAT_ADMIN_ID);
-        if (collab.contact_person_id) memberUserIds.add(Number(collab.contact_person_id));
-        if (collab.developer_id && Number(collab.developer_id) !== 0) memberUserIds.add(Number(collab.developer_id));
-        memberUserIds.add(userId);
+        addRealChatMember(memberUserIds, COLLAB_CHAT_ADMIN_ID);
+        addRealChatMember(memberUserIds, collab.contact_person_id);
+        addRealChatMember(memberUserIds, collab.developer_id);
+        addRealChatMember(memberUserIds, userId);
 
         // 拉取所有成员的 dingtalk_user_id
         const memberRows = await dbAllAsync(
@@ -13769,6 +13799,11 @@ app.post('/api/collab/requests/:id/submit',
             // 失败仅记日志（NOTIFY_FAIL），不向调用方返回错误
             (async () => {
                 try {
+                    // v1.78.1：总开关默认关——开发提交后不再被动通知 admin（admin 主动到平台查看）
+                    if (!(await isNotifyAdminOnSubmitEnabled())) {
+                        logger.info(`[collab-submit-notify] 协作单 #${id} 提交后 admin 通知已被开关关闭（collab_notify_admin_on_submit≠on），跳过钉钉`);
+                        return;
+                    }
                     const adminUser = await dbGetAsync(
                         `SELECT id, display_name, phone, dingtalk_user_id
                          FROM users
@@ -15941,21 +15976,26 @@ app.post('/api/collab/requests/:id/submit-export',
                 }
 
                 // 推 admin（best-effort，复用 POST /submit 的"取最早 active admin"模式）
-                const adminUser = await dbGetAsync(
-                    `SELECT id, display_name, phone, dingtalk_user_id
-                       FROM users
-                      WHERE role = 'admin' AND status = 'active' AND phone IS NOT NULL AND phone != ''
-                      ORDER BY created_at ASC LIMIT 1`
-                );
-                if (adminUser) {
-                    const r = await sendCollabDingtalkRaw(id, adminUser, title, markdown, { id: userId, name: userName });
-                    if (r.ok) {
-                        insertCollabLog(id, 'NOTIFY_ADMIN_EXPORT_SUBMIT', userId, userName, null);
-                    } else {
-                        logger.warn(`[submit-export-notify] 协作单 #${id} 通知 admin 失败：${r.body && r.body.error}（reason=${r.body && r.body.reason}）`);
-                    }
+                // v1.78.1：总开关默认关——导出人提交后不再被动通知 admin（dev 通知不受影响，上方照常发）
+                if (!(await isNotifyAdminOnSubmitEnabled())) {
+                    logger.info(`[submit-export-notify] 协作单 #${id} admin 通知已被开关关闭（collab_notify_admin_on_submit≠on），跳过（dev 通知不受影响）`);
                 } else {
-                    logger.info(`[submit-export-notify] 协作单 #${id} 无可通知的 admin（无手机号或全停用）`);
+                    const adminUser = await dbGetAsync(
+                        `SELECT id, display_name, phone, dingtalk_user_id
+                           FROM users
+                          WHERE role = 'admin' AND status = 'active' AND phone IS NOT NULL AND phone != ''
+                          ORDER BY created_at ASC LIMIT 1`
+                    );
+                    if (adminUser) {
+                        const r = await sendCollabDingtalkRaw(id, adminUser, title, markdown, { id: userId, name: userName });
+                        if (r.ok) {
+                            insertCollabLog(id, 'NOTIFY_ADMIN_EXPORT_SUBMIT', userId, userName, null);
+                        } else {
+                            logger.warn(`[submit-export-notify] 协作单 #${id} 通知 admin 失败：${r.body && r.body.error}（reason=${r.body && r.body.reason}）`);
+                        }
+                    } else {
+                        logger.info(`[submit-export-notify] 协作单 #${id} 无可通知的 admin（无手机号或全停用）`);
+                    }
                 }
             } catch (e) {
                 logger.warn(`[submit-export-notify] 协作单 #${id} 钉钉触发异常：${e.message}`);

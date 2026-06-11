@@ -88,6 +88,26 @@ const parser = new Parser();
  */
 const ALLOWED_DATABASE = 'business_db';
 
+/**
+ * 跨库只读白名单（v1.77.0，生产 #10 OA-372051 驱动）
+ *
+ * 业务背景：legacy_system→business_db 系统迁移后，2022 年及以前的历史结算数据留在 legacy_db 库，
+ *   跨库查历史是真实且反复出现的取数需求。
+ *
+ * 安全前提（2026-06-10 F1 探针实证，生产 readonly_user 账号）：
+ *   - 对 legacy_db 库级权限仅 CONNECT + SELECT（无 INSERT/UPDATE/DELETE）
+ *   - 负向：跨库 UPDATE 被拒（"The UPDATE permission was denied"）
+ *   → 放开白名单不需要 DBA 改权限，账号侧本就只读安全
+ *
+ * 映射语义：key=主业务库（调用方传入的 allowedDb），value=该主库下额外允许 SELECT 的只读库集合。
+ *   layer2 校验时把"主库 + 附加只读库"合成允许集合，集合内的三段名跨库引用放行，集合外仍拒。
+ *   常量方案（②）：内网仅此一个跨库场景，避免过度设计为 admin UI 可配；
+ *   未来再加历史库 → 改本常量即可（带 codex 审）。库名大写归一后比较。
+ */
+const CROSS_DB_ALLOWLIST = {
+    'business_db': ['legacy_db'],
+};
+
 /** TOP N / LIMIT N 注入值（方案 §6.1）*/
 const TOP_LIMIT = 100;
 
@@ -280,14 +300,26 @@ function validateAndTransform(originalSql, options) {
     const layer0 = layer0_lexerScan(originalSql, dialect);
     if (!layer0.ok) return { ok: false, layer: 0, ...layer0 };
 
+    // v1.79.0：layer0 通过后剥掉合法的单个前导分号，再喂给 parser
+    //   动机：node-sql-parser 不认前导分号（`;WITH...` 会 parse error），但 `;WITH` 是 T-SQL 标准写法。
+    //   安全性：layer0 已保证"要么无前导分号，要么单个前导分号 + 紧跟 SELECT/WITH"
+    //     （;;SELECT / ;DROP / ;SELECT;DROP 都已在 layer0 被拒），故此处只会删掉那个合法的保护性分号。
+    //   codex 审 medium-1：按 layer0 透出的 token 位置删字符（非独立正则），与 layer0 校验同一判断——
+    //     正则 `^\s*;` 遇前导注释 `/* x */ ;WITH` 不匹配会漏剥致 parser 仍失败；位置法消除此不一致。
+    //   后续 layer0.5/1/2/3 全部基于 parseSql。
+    const pos = layer0.leadingSemicolonStart;
+    const parseSql = (pos != null)
+        ? (originalSql.slice(0, pos) + originalSql.slice(pos + 1))
+        : originalSql;
+
     // 层 0.5：临时表静态拦截（v1.70.0 Step 2 方案 §1.4）
     //   - 比 layer 1 parser 更快失败，错误消息更友好（"smoke test 不支持临时表"而非"SQL parse 错误"）
     //   - 复用 layer 0 的拒绝码（layer: 0），调用方按 layer 0 错误处理即可
-    const tempTableCheck = checkTempTable(originalSql, dialect);
+    const tempTableCheck = checkTempTable(parseSql, dialect);
     if (!tempTableCheck.ok) return { ok: false, layer: 0, ...tempTableCheck };
 
     // 层 1：parser 解析（按 dialect 选 transactsql / mysql）
-    const layer1 = layer1_parse(originalSql, dialect);
+    const layer1 = layer1_parse(parseSql, dialect);
     if (!layer1.ok) return { ok: false, layer: 1, ...layer1 };
 
     // 层 2：AST walker 递归检查（按 dialect + allowedDb 检查跨库引用）
@@ -503,7 +535,26 @@ function layer0_lexerScan(sql, dialect) {
     if (effective.length === 0) {
         return { ok: false, reason: 'SQL 仅含注释或空白' };
     }
-    const first = effective[0];
+    // v1.79.0：放行单个前导分号——`;WITH` / `;SELECT` 是 T-SQL 标准防御性写法
+    //   （WITH/CTE 前加 ; 防上一句漏分号导致 WITH 歧义，微软官方推荐；生产 #11 OA-372151 误伤）
+    //   只剥"一个"前导分号：`;;SELECT`（剥一个后仍是 SEMICOLON→下方拒）/ `;DROP`（剥后非 SELECT/WITH→下方拒）。
+    //   剥掉的前导分号不计入第 4 步分号统计，故 `;SELECT 1; DROP` 的中间分号仍触发多语句拒绝。
+    //
+    //   codex 审 medium-2：**仅 sqlserver 放行**——;WITH 是 T-SQL 特有惯例，MySQL CTE 无此写法，
+    //     非 sqlserver 方言前导分号无正当理由，继续拒绝（最小放行面）。
+    //   codex 审 medium-1/low-2：剥离时把被剥分号在原始 SQL 的字符位置（token.start）透出为
+    //     leadingSemicolonStart，让 validateAndTransform 按"同一位置"删字符喂 parser——
+    //     消除 token 级剥离 vs 主函数正则的两套判断不一致（前导注释场景 `/* x */ ;WITH` 也能一致放行）。
+    let scan = effective;
+    let leadingSemicolonStart = null;
+    if (dialect === 'sqlserver' && scan[0].type === 'SEMICOLON') {
+        leadingSemicolonStart = scan[0].start;
+        scan = scan.slice(1);
+        if (scan.length === 0) {
+            return { ok: false, reason: 'SQL 仅含分号（无有效语句）' };
+        }
+    }
+    const first = scan[0];
     if (first.type !== 'WORD' || (first.valueUpper !== 'SELECT' && first.valueUpper !== 'WITH')) {
         return {
             ok: false,
@@ -512,13 +563,15 @@ function layer0_lexerScan(sql, dialect) {
     }
 
     // 4. 分号统计：除最后一个 token 是 ; 外，不允许任何其他分号
-    //    （SELECT 1; OK；SELECT 1;; 拒；SELECT 1; DROP TABLE foo; 拒；; SELECT 1 拒）
-    const semicolons = effective.filter(t => t.type === 'SEMICOLON');
+    //    （SELECT 1; OK；SELECT 1;; 拒；SELECT 1; DROP TABLE foo; 拒）
+    //    v1.79.0：前导分号已在第 3 步剥离（用 scan），此处只统计剥离后的剩余 token——
+    //    保证 `;SELECT 1; DROP` 的中间分号仍被识别为多语句而拒绝。
+    const semicolons = scan.filter(t => t.type === 'SEMICOLON');
     if (semicolons.length > 1) {
         return { ok: false, reason: '检测到多个分号（疑似多语句）' };
     }
     if (semicolons.length === 1) {
-        const last = effective[effective.length - 1];
+        const last = scan[scan.length - 1];
         if (last.type !== 'SEMICOLON') {
             return { ok: false, reason: '分号位置非法（仅允许作为单语句的尾部分号）' };
         }
@@ -550,7 +603,9 @@ function layer0_lexerScan(sql, dialect) {
         }
     }
 
-    return { ok: true };
+    // v1.79.0 codex 审 medium-1/low-2：透出被剥前导分号的原始字符位置（null=无前导分号）
+    // 让 validateAndTransform 按同一位置删字符喂 parser，避免与正则两套判断不一致
+    return { ok: true, leadingSemicolonStart };
 }
 
 // ============================================================================
@@ -702,8 +757,18 @@ function layer2_astCheck(ast, dialect, allowedDb) {
     allowedDb = allowedDb || ALLOWED_DATABASE;
     const allowedNorm = allowedDb.toUpperCase();
 
+    // v1.77.0：允许库集合 = 主业务库 + 该主库映射的跨库只读白名单（CROSS_DB_ALLOWLIST）
+    //   仅 sqlserver 走跨库白名单（legacy_system 历史库场景）；mysql 无此需求，集合恒只含主库自身
+    //   集合内库名全大写归一，与 dbNorm 比较一致
+    const allowedDbSet = new Set([allowedNorm]);
+    if (dialect === 'sqlserver') {
+        const extra = CROSS_DB_ALLOWLIST[allowedDb] || CROSS_DB_ALLOWLIST[allowedNorm] || [];
+        for (const db of extra) allowedDbSet.add(String(db).toUpperCase());
+    }
+    const isAllowedDb = (dbNorm) => allowedDbSet.has(dbNorm);
+
     let realIntoFound = null;
-    let crossDbRef = null;        // 跨库引用（db ≠ allowedDb）
+    let crossDbRef = null;        // 跨库引用（db 不在允许集合内）
     let ambiguousTwoPart = null;  // T-SQL 两段名歧义（仅 sqlserver 用）
 
     walkSelectNodes(ast, (selectNode) => {
@@ -731,22 +796,30 @@ function layer2_astCheck(ast, dialect, allowedDb) {
 
             if (dialect === 'sqlserver') {
                 if (schemaNorm === null) {
-                    // 两段名歧义 db=X / schema=null — 拒绝
+                    // v1.77.0（生产 #10 误伤修复）：dbo.table 放行——dbo 是 T-SQL 默认 schema 保留名，
+                    //   SQL Server 语义两段名恒为 schema.table（跨库必须三段），且即便按 db 解释也不存在
+                    //   名为 dbo 的业务库，零歧义零跨库面；dbo.xxx 是 SSMS 开发最常见标准写法，
+                    //   一刀切拒绝会误伤合法主流脚本（2026-06-10 #10 OA-372051 饶高成踩中）
+                    if (dbNorm === 'DBO') {
+                        continue;
+                    }
+                    // 其余两段名歧义 db=X / schema=null — 维持拒绝（防 master.xxx / 别库名.xxx
+                    //   被 parser 解析歧义绕过跨库检测）
                     if (!ambiguousTwoPart) {
                         ambiguousTwoPart = { db: r.db, table: r.table };
                     }
                     continue;
                 }
-                // 三段名 db=X / schema=Y — 检查 db 必须是 allowedDb
-                if (dbNorm !== allowedNorm) {
+                // 三段名 db=X / schema=Y — 检查 db 必须在允许集合内（主库 + 跨库只读白名单 v1.77.0）
+                if (!isAllowedDb(dbNorm)) {
                     if (!crossDbRef) {
                         crossDbRef = { db: r.db, schema: r.schema, table: r.table };
                     }
                 }
             } else if (dialect === 'mysql') {
                 // MySQL：node-sql-parser 把 `db.table` 解析为 db=X, schema=null, table=Y
-                // 两段名直接 = db.table，无歧义；db 必须 = allowedDb
-                if (dbNorm !== allowedNorm) {
+                // 两段名直接 = db.table，无歧义；db 必须在允许集合内（mysql 集合恒只含主库自身）
+                if (!isAllowedDb(dbNorm)) {
                     if (!crossDbRef) {
                         crossDbRef = { db: r.db, schema: r.schema, table: r.table };
                     }
@@ -772,9 +845,11 @@ function layer2_astCheck(ast, dialect, allowedDb) {
     }
 
     if (crossDbRef) {
+        // v1.77.0：允许库不止主库时，文案列出全部允许库（主库 + 跨库只读白名单）
+        const allowedList = Array.from(allowedDbSet).join(' / ');
         return {
             ok: false,
-            reason: `跨库引用不允许，仅允许 ${allowedDb} 库内的表`,
+            reason: `跨库引用不允许，仅允许以下库内的表：${allowedList}`,
             detail: `检测到 ${crossDbRef.db}${crossDbRef.schema ? '.' + crossDbRef.schema : ''}.${crossDbRef.table}`,
         };
     }
@@ -855,6 +930,7 @@ module.exports = {
     validateAndTransform,
     // 常量暴露（调用方/测试用）
     ALLOWED_DATABASE,
+    CROSS_DB_ALLOWLIST,
     TOP_LIMIT,
     SUPPORTED_DIALECTS,
     DIALECT_TO_PARSER,

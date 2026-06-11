@@ -44,7 +44,23 @@ const CASES = [
     // ===== 多语句（应拒绝）=====
     ['M1 中间分号', 'SELECT 1; DROP TABLE foo;', false],
     ['M2 双分号', 'SELECT 1;;', false],
-    ['M3 开头分号', '; SELECT 1', false],
+
+    // ===== v1.79.0 前导分号（;WITH/;SELECT 是 T-SQL 标准写法，放行单个前导分号）=====
+    ['LS1 前导分号 + SELECT（放行）', '; SELECT 1', true],
+    ['LS2 前导分号 + WITH CTE（放行，生产 #11 真实场景）', ';WITH cte AS (SELECT 1 AS a) SELECT * FROM cte', true],
+    ['LS3 前导分号 + SELECT + 尾分号（放行）', '; SELECT 1;', true],
+    ['LS4 前导分号无空格紧贴 SELECT（放行）', ';SELECT 1', true],
+    // —— 攻击面：以下前导分号变体仍须拒绝 ——
+    ['LS5 双前导分号（拒，剥一个后仍是 SEMICOLON）', ';; SELECT 1', false],
+    ['LS6 前导分号 + DROP（拒，剥后非 SELECT/WITH）', '; DROP TABLE foo', false],
+    ['LS7 前导分号 + SELECT + 中间分号注入（拒，中间分号触发多语句）', '; SELECT 1; DROP TABLE foo', false],
+    ['LS8 仅一个分号（拒，无有效语句）', ';', false],
+    ['LS9 前导分号 + INSERT（拒）', ';INSERT INTO t VALUES(1)', false],
+    // —— codex 审 low-1：前导注释 + 前导空白种类一致性（layer0 去注释后第一个有效 token 是 SEMICOLON）——
+    ['LS10 前导块注释 + ;WITH（放行）', '/* 取数说明 */ ;WITH c AS (SELECT 1 AS a) SELECT * FROM c', true],
+    ['LS11 前导行注释 + ;SELECT（放行）', '-- 头注释\n;SELECT 1', true],
+    ['LS12 前导 Tab/换行 + ;WITH（放行）', '\t\n ;WITH c AS (SELECT 1 AS a) SELECT * FROM c', true],
+    ['LS13 前导注释 + 双分号（拒）', '/* x */ ;; SELECT 1', false],
 
     // ===== 非 SELECT/WITH 首关键字（应拒绝）=====
     ['F1 INSERT', 'INSERT INTO t VALUES(1)', false],
@@ -79,8 +95,31 @@ for (const [name, sql, expectOk] of CASES) {
     }
 }
 
+// ===== v1.79.0 codex 复审 rec：位置法精确性断言 =====
+//   leadingSemicolonStart 必须精确指向"前导分号"的字符位置（非注释内分号、非别的字符），
+//   按位置删字符后注释内容完整保留——把 medium-1 的契约钉死，防 tokenizer 改动引入偏移。
+const POS_CASES = [
+    ['PL1 前导块注释 + ;WITH', '/* 取数说明 */ ;WITH c AS (SELECT 1 AS a) SELECT * FROM c'],
+    ['PL2 前导行注释 + ;SELECT', '-- 头注释\n;SELECT 1'],
+    ['PL3 无注释 ;WITH', ';WITH c AS (SELECT 1 AS a) SELECT * FROM c'],
+    ['PL4 注释内含分号（应跳过注释内分号定位真前导分号）', '/* ; 注释里有分号 */ ;WITH c AS (SELECT 1 AS a) SELECT * FROM c'],
+];
+for (const [name, sql] of POS_CASES) {
+    const r = layer0(sql, 'sqlserver');
+    const pos = r.leadingSemicolonStart;
+    const charOk = pos != null && sql[pos] === ';';
+    const parseSql = pos != null ? sql.slice(0, pos) + sql.slice(pos + 1) : sql;
+    const lenOk = pos != null && parseSql.length === sql.length - 1;
+    // 注释内容保留（若有块注释）
+    const commentMatch = sql.match(/\/\*[\s\S]*?\*\//);
+    const commentOk = commentMatch ? parseSql.includes(commentMatch[0]) : true;
+    const ok = charOk && lenOk && commentOk;
+    if (ok) passed++;
+    else { failed++; failures.push({ name, sql, expectOk: 'pos 精确', actual: { pos, char: pos != null ? sql[pos] : null, commentOk } }); }
+}
+
 console.log(`\n=== 层 0 词法状态机单测 ===`);
-console.log(`总数: ${CASES.length}, 通过: ${passed}, 失败: ${failed}`);
+console.log(`总数: ${CASES.length + POS_CASES.length}（CASES ${CASES.length} + 位置法 ${POS_CASES.length}）, 通过: ${passed}, 失败: ${failed}`);
 if (failures.length > 0) {
     console.log('\n失败用例:');
     for (const f of failures) {

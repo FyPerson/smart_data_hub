@@ -42,7 +42,16 @@ const CASES = [
     // ===== 层 0 拦截（多语句）=====
     ['M1 中间分号', 'SELECT 1; DROP TABLE foo;', { ok: false, layer: 0 }],
     ['M2 双分号', 'SELECT 1;;', { ok: false, layer: 0 }],
-    ['M3 开头分号', '; SELECT 1', { ok: false, layer: 0 }],
+
+    // ===== v1.79.0 前导分号（;WITH/;SELECT 是 T-SQL 标准写法，完整链路放行；生产 #11 OA-372151）=====
+    ['LS1 前导分号 + SELECT（放行）', '; SELECT 1', { ok: true }],
+    ['LS2 前导分号 + WITH CTE（放行，#11 真实场景）', ';WITH cte AS (SELECT 1 AS a) SELECT * FROM cte', { ok: true }],
+    ['LS3 攻击:前导分号 + DROP（拒）', '; DROP TABLE foo', { ok: false, layer: 0 }],
+    ['LS4 攻击:前导分号 + 中间分号注入（拒）', '; SELECT 1; DROP TABLE foo', { ok: false, layer: 0 }],
+    ['LS5 攻击:双前导分号（拒）', ';; SELECT 1', { ok: false, layer: 0 }],
+    // codex 审 medium-1：前导注释 + ;WITH 完整链路一致放行（位置法删字符，非正则；正则会漏剥前导注释场景）
+    ['LS6 前导块注释 + ;WITH（完整链路放行）', '/* 取数说明 */ ;WITH cte AS (SELECT 1 AS a) SELECT * FROM cte', { ok: true }],
+    ['LS7 前导行注释 + ;SELECT（完整链路放行）', '-- 头注释\n;SELECT 1', { ok: true }],
 
     // ===== 层 0 拦截（危险关键字）=====
     ['K1 EXEC', "EXEC xp_dirtree 'C:\\'", { ok: false, layer: 0 }],
@@ -86,11 +95,22 @@ const CASES = [
 
     // ===== 2026-05-13 新增：两段名歧义拒绝（用户实测发现） =====
     ['B1 sys.tables 系统视图（合法但拒）', 'SELECT TOP 1 name FROM sys.tables', { ok: false, layer: 2 }],
-    ['B2 dbo.crm_bid 显式 schema', 'SELECT * FROM dbo.crm_bid', { ok: false, layer: 2 }],
+    // B2 翻案（v1.77.0 生产 #10 OA-372051 误伤修复）：dbo 是 T-SQL 默认 schema 保留名，
+    //   SQL Server 两段名恒为 schema.table 且不存在名为 dbo 的库——dbo.table 零歧义放行
+    ['B2 dbo.crm_bid 显式 schema 放行（v1.77.0 翻案）', 'SELECT TOP 1 * FROM dbo.crm_bid', { ok: true, mustContain: 'crm_bid' }],
+    ['B2b DBO 大写放行（大小写不敏感）', 'SELECT TOP 1 * FROM DBO.crm_bid', { ok: true, mustContain: 'crm_bid' }],
+    ['B2c dbo 在 JOIN 中放行', 'SELECT TOP 1 a.col1 FROM crm_bid a LEFT JOIN dbo.base_org b ON a.id=b.id', { ok: true, mustContain: 'base_org' }],
     ['B3 master.syslogins 两段名跨库', 'SELECT * FROM master.syslogins', { ok: false, layer: 2 }],
     ['B4 information_schema 两段名', 'SELECT * FROM information_schema.tables', { ok: false, layer: 2 }],
+    ['B4b 别库名两段名仍拒（非 dbo 不放行）', 'SELECT * FROM legacy_db.biz_clearing', { ok: false, layer: 2 }],
     ['B5 单段名 crm_bid 通过', 'SELECT TOP 1 * FROM crm_bid', { ok: true, mustContain: 'crm_bid' }],
     ['B6 完整三段名 business_db.dbo.bid_table 通过', 'SELECT TOP 1 * FROM business_db.dbo.bid_table', { ok: true, mustContain: 'business_db' }],
+    // B7 翻案（v1.77.0 跨库白名单立项，生产 #10 驱动）：legacy_db 是 business_db 的跨库只读历史库，三段名放行
+    ['B7 legacy_db.dbo.t 三段名放行（跨库白名单 v1.77.0）', 'SELECT TOP 1 * FROM legacy_db.dbo.biz_clearing', { ok: true, mustContain: 'legacy_db' }],
+    ['B7b legacy_db.dbo 大小写不敏感放行', 'SELECT TOP 1 * FROM legacy_db.DBO.biz_payment', { ok: true, mustContain: 'biz_payment' }],
+    ['B7c business_db 与 legacy_db 跨库 JOIN 放行', 'SELECT TOP 1 a.ClearingID FROM biz_clearing a LEFT JOIN legacy_db.dbo.biz_payment b ON a.ClearingID=b.FlowID', { ok: true, mustContain: 'legacy_db' }],
+    ['B7d 白名单外的库三段名仍拒（master）', 'SELECT * FROM master.dbo.syslogins', { ok: false, layer: 2 }],
+    ['B7e 白名单外的别库三段名仍拒（BMS40）', 'SELECT * FROM BMS40.dbo.biz_clearing', { ok: false, layer: 2 }],
 ];
 
 let passed = 0, failed = 0;
