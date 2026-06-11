@@ -3126,20 +3126,76 @@
                 else durText = `${(durMin / 60 / 24).toFixed(1)} 天`;
             }
 
-            // 列对齐状态（最新一次提交）
-            const colComplete = summary.latest_is_columns_complete;  // 1/0/null/undefined
-            let colText, colColor;
-            if (colComplete === 1) { colText = '列齐全'; colColor = '#065f46'; }
-            else if (colComplete === 0) {
-                let miss = [];
-                try { miss = JSON.parse(summary.latest_missing_columns || '[]'); } catch (e) { miss = []; }
-                if (!Array.isArray(miss)) miss = [];
-                // codex 75 L-2：缺列项 String() 兜底——防 DB 异常数据（非字符串）让 escapeHtml 报错崩详情页；限展示 10 项
-                const missStr = miss.slice(0, 10).map(x => escapeHtml(String(x)));
-                colText = `缺列：${missStr.length ? missStr.join('、') + (miss.length > 10 ? ' 等' : '') : '有缺列'}`;
-                colColor = '#991b1b';
+            // 取数质量双校验 Commit D：列对齐分 SQL 侧 + Excel 侧两行展示（方案 §6.3）
+            //   - 当 record_kind='passed' 且 SQL passed/excel passed：sql 显示齐全/缺列、excel 显示齐全/缺列
+            //   - SQL 侧 sql_unchecked_reason='SMOKE_FAILED'：SQL 行展示"smoke test 未通过..."
+            //     codex Commit D 审 low-4：Excel 行可见时引导"请看 excel 校验结果"；
+            //     Excel 行不可见时降级文案，防指向不存在内容（罕见但可能，异常组合防御）
+            //   - excel 侧字段可能在历史 v3.0 单中为 null（buildQualitySummary 透传 null）→ 走"未比对"分支
+            // codex 75 L-2：缺列项 String() 兜底——防 DB 异常数据非字符串让 escapeHtml 报错崩详情页；限展示 10 项
+            // codex Commit D 审 low-6：reasonMap 与 Commit B helper 写入枚举对表（SMOKE_FAILED 在另一分支独立处理）
+            function buildColTextDetail(complete, missingJson, reason, hasExcelView) {
+                if (complete === 1) return { text: '列齐全', color: '#065f46' };
+                if (complete === 0) {
+                    let miss = [];
+                    try { miss = JSON.parse(missingJson || '[]'); } catch (e) { miss = []; }
+                    if (!Array.isArray(miss)) miss = [];
+                    const missStr = miss.slice(0, 10).map(x => escapeHtml(String(x)));
+                    return { text: `缺列：${missStr.length ? missStr.join('、') + (miss.length > 10 ? ' 等' : '') : '有缺列'}`, color: '#991b1b' };
+                }
+                // 未比对（complete=null）：根据 reason 展示具体原因
+                if (reason === 'SMOKE_FAILED') {
+                    // ⚠️ 末次合并审（codex 末次审 medium-1）：理论上 SMOKE_FAILED 仅写入 record_kind='failed' 行，
+                    //   而详情 GET §8b.1 过滤只查 record_kind='passed' → 该路径主路径不会触达。
+                    //   保留作防御性触发：① v3.0 老脏数据（passed 行 sql_unchecked_reason='SMOKE_FAILED'）
+                    //   ② 未来若加 failed 留痕展示需求时直接复用。删除此分支会降低代码鲁棒性。
+                    return {
+                        text: hasExcelView
+                            ? 'smoke test 未通过，SQL 列校验未验证（请看 excel 校验结果）'
+                            : 'smoke test 未通过，SQL 列校验未验证',
+                        color: '#92400e'
+                    };
+                }
+                // Commit B helper 实际写入的所有 reason 枚举（含模板侧共用 + sql/excel 侧独立 + builder 异常 + v3.0 兼容）
+                const reasonMap = {
+                    NO_TEMPLATE: '未上传模板，未比对',
+                    NON_XLSX_TEMPLATE: '模板非 xlsx，未比对',
+                    TEMPLATE_READ_FAILED: '模板读取失败，未比对',
+                    NO_RESULT_DATA: '未上传数据文件',
+                    NON_EXCEL_RESULT: '数据文件非 xlsx，未比对',
+                    RESULT_READ_FAILED: '数据文件读取失败，未比对',
+                    QUALITY_CHECK_FAILED: '校验计算失败',
+                    // v3.0 兼容
+                    C2_FAILED: '校验异常（v3.0 老路径）',
+                    XLSX_READ_FAILED: '读取失败（v3.0 旧枚举）',
+                };
+                return { text: reasonMap[reason] || '未比对', color: '#9ca3af' };
             }
-            else { colText = '未比对'; colColor = '#9ca3af'; }
+            // Excel 行可见性判定（codex Commit D 审 medium-3 重构）：
+            //   依赖 latest_record_kind 作为权威信号 + 任一 excel 字段非空——
+            //   - latest_record_kind='passed' 且任一 excel 字段非空 → 新双校验单 → 展示 Excel 行
+            //   - latest_record_kind 缺失 / excel 字段全空 → v3.0 老单 → 不展示 Excel 行
+            //   修正了之前依赖 missing_columns 等 truthy 字符串判定的不稳定问题
+            const isNewDualCheck = summary.latest_record_kind === 'passed'
+                && (summary.latest_excel_is_columns_complete !== null
+                    || summary.latest_excel_unchecked_reason
+                    || summary.latest_excel_missing_columns);
+            // SQL 侧（兼容 v3.0：latest_is_columns_complete + latest_missing_columns；SMOKE_FAILED 文案联动 Excel 行可见性）
+            const sqlCol = buildColTextDetail(
+                summary.latest_is_columns_complete,
+                summary.latest_missing_columns,
+                summary.latest_sql_unchecked_reason,
+                isNewDualCheck  // hasExcelView 参数：决定 SMOKE_FAILED 文案是否引导"看 excel"
+            );
+            // Excel 侧（仅新双校验单展示；v3.0 老单 isNewDualCheck=false → 不展示）
+            const excelCol = isNewDualCheck
+                ? buildColTextDetail(
+                    summary.latest_excel_is_columns_complete,
+                    summary.latest_excel_missing_columns,
+                    summary.latest_excel_unchecked_reason,
+                    false  // Excel 行本身的 SMOKE_FAILED 不会出现（SMOKE_FAILED 是 SQL 侧专属）
+                )
+                : null;
 
             const reworkBadge = summary.rework_count > 0
                 ? `<span style="color:#991b1b;font-weight:600;">${summary.rework_count} 次返工</span>`
@@ -3168,13 +3224,20 @@
                    </div>`
                 : '';
 
+            // 双校验 Commit D：双侧 KV 行——SQL 列校验 + Excel 列校验（excel 行仅在有数据时展示）
+            const sqlColRowHtml = `<div class="detail-kv"><div class="detail-kv-label">SQL 列校验</div><div class="detail-kv-value" style="color:${sqlCol.color};">${sqlCol.text}</div></div>`;
+            const excelColRowHtml = excelCol
+                ? `<div class="detail-kv"><div class="detail-kv-label">Excel 列校验</div><div class="detail-kv-value" style="color:${excelCol.color};">${excelCol.text}</div></div>`
+                : '';
+
             return `
                 <div class="detail-section">
                     <div class="detail-section-title">取数交付质量</div>
                     <div class="detail-section-body">
                         <div class="detail-kv"><div class="detail-kv-label">交付时长</div><div class="detail-kv-value">${durText}</div></div>
                         <div class="detail-kv"><div class="detail-kv-label">提交次数</div><div class="detail-kv-value">${summary.submit_count || 0} 次</div></div>
-                        <div class="detail-kv"><div class="detail-kv-label">列对齐</div><div class="detail-kv-value" style="color:${colColor};">${colText}</div></div>
+                        ${sqlColRowHtml}
+                        ${excelColRowHtml}
                         <div class="detail-kv"><div class="detail-kv-label">打回</div><div class="detail-kv-value">${summary.return_count || 0} 次 · ${reworkBadge}</div></div>
                         ${returnsHtml}
                         ${returnBtnHtml}
@@ -3935,16 +3998,74 @@
             }
         }
 
-        // 取数交付质量记录 v3.0 Commit E 方案乙：检测列对齐缺列，弹非阻塞提醒（不拦提交，开发当场自纠）
-        //   ⚠️ 判"缺列"只看 is_columns_complete===0（=== null 是未比对，不提醒；===1 齐全，不提醒）——
-        //   不能只看 missing_columns.length（响应未比对态 missing_columns 也是 []，会漏判，见后端 JSDoc 契约）
+        // 取数质量双校验 Commit D：normalizeQualityCheck —— 统一新旧 quality_check schema 解析（codex Commit C 审 medium-6 落地）
+        //   生命周期（codex Commit C 审 low-8）：
+        //     - submit endpoint（本文件 _doSubmitDelivery）：Commit C 起返新双校验 schema
+        //     - submit-export endpoint（v3.0 recordQualityOnSubmit 保留）：仍返 v3.0 扁平 schema
+        //     → 故"兼容"长期保留（不仅是过渡），用于 submit-export 路径
+        //   - 旧 v3.0：{ is_columns_complete, missing_columns, reason }（扁平）
+        //   - 新双校验：{ sql:{is_complete,missing,reason}, excel:{is_complete,missing,reason}, check_status, persistence_status }
+        //
+        //   返回标准化对象：
+        //     { sql: {is_complete, missing, reason}, excel: {is_complete, missing, reason} | null,
+        //       check_status, persistence_status, isNew }
+        //   - excel=null 表示是 v3.0 旧 schema（无 excel 侧）；isNew=true 表示新双校验 schema
+        //   - missing 始终是数组（缺列时含字段名；齐全/未比对时为空数组）
+        //   - is_complete=1=齐全 / 0=缺列 / null=未比对（reason 字段告知未比对原因）
+        function normalizeQualityCheck(qc) {
+            if (!qc) return null;
+            if (qc.sql && qc.excel) {
+                // 新双校验 schema
+                const pickSide = (s) => ({
+                    is_complete: (typeof s.is_complete !== 'undefined') ? s.is_complete : null,
+                    missing: Array.isArray(s.missing) ? s.missing : [],
+                    reason: s.reason || null,
+                });
+                return {
+                    sql: pickSide(qc.sql),
+                    excel: pickSide(qc.excel),
+                    check_status: qc.check_status || null,
+                    persistence_status: qc.persistence_status || null,
+                    isNew: true,
+                };
+            }
+            // v3.0 旧扁平 schema：当作 sql 侧；无 excel 侧
+            // codex Commit D 审 low-5：旧 schema persistence_status 明确三态保留调试语义
+            //   - qc.recorded === true → 'recorded'
+            //   - qc.recorded === false → 'failed'（v3.0 helper 默认值，表"尝试记录但失败"）
+            //   - 字段不存在 → null
+            let oldPersistence = null;
+            if (qc.recorded === true) oldPersistence = 'recorded';
+            else if (qc.recorded === false) oldPersistence = 'failed';
+            return {
+                sql: {
+                    is_complete: (typeof qc.is_columns_complete !== 'undefined') ? qc.is_columns_complete : null,
+                    missing: Array.isArray(qc.missing_columns) ? qc.missing_columns : [],
+                    reason: qc.reason || null,
+                },
+                excel: null,
+                check_status: null,
+                persistence_status: oldPersistence,
+                isNew: false,
+            };
+        }
+
+        // 取数质量双校验 Commit D：检测列对齐缺列，弹非阻塞提醒（不拦提交，开发当场自纠）
+        //   ⚠️ 判"缺列"只看 is_complete===0（=== null 是未比对，不提醒；===1 齐全，不提醒）
         function maybeWarnMissingColumns(qc) {
-            if (!qc || qc.is_columns_complete !== 0) return;
-            const miss = Array.isArray(qc.missing_columns) ? qc.missing_columns : [];
-            const cols = miss.length ? miss.join('、') : '部分需求列';
+            const n = normalizeQualityCheck(qc);
+            if (!n) return;
+            const buckets = [];
+            if (n.sql && n.sql.is_complete === 0) {
+                buckets.push(`SQL 缺列：${n.sql.missing.length ? n.sql.missing.join('、') : '部分需求列'}`);
+            }
+            if (n.excel && n.excel.is_complete === 0) {
+                buckets.push(`数据文件缺列：${n.excel.missing.length ? n.excel.missing.join('、') : '部分需求列'}`);
+            }
+            if (!buckets.length) return;
             // 非阻塞 info toast（与 success 提示错开，2.4s 后自动消失；列对齐不是闸门，提交已成功）
             setTimeout(() => {
-                showToast(`⚠️ 检测到缺列：${cols}，如需可补充后重新提交`, 'info');
+                showToast(`⚠️ 检测到 ${buckets.join('，')}，如需可补充后重新提交`, 'info');
             }, 600);
         }
 

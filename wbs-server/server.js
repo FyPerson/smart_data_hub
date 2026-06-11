@@ -154,6 +154,39 @@ function requireIssueV1750SchemaReady(req, res, next) {
     }
     next();
 }
+
+// ── 取数质量双校验增强 schema readiness（方案 §3-§4.4 / §8b.2）────────────
+//   v2 给 collab_quality_record 加 7 列（excel 5 + sql_unchecked_reason + record_kind）+ 唯一索引收窄
+//   到 record_kind='passed'（让 failed 行纯 append 不进唯一索引，方案 §4.4 第十人视角简化）。
+//   与 v3.0 Commit A 的 collab_quality_record 建表分层：v3.0 已上线两表存在性兜底；本 v2 仅约束新增
+//   字段+新索引就绪，未就绪只挡"开发提交 /submit 写质量记录"主入口（503），其他模块正常。
+//   迁移失败的运行期保护：H-2 自包 try/catch 已让质量记录写失败不阻断主提交（业务防线），
+//   readiness 闸门是冗余防线 + 启动期快速发现（运维可见）。
+const COLLAB_QUALITY_DUALCHECK_SCHEMA_STATE = { ready: false, error: null };
+// v2 新列清单（migration 后 PRAGMA 复查这些列全部到位才置 ready）
+const COLLAB_QUALITY_DUALCHECK_COLS = [
+    'excel_actual_columns_snapshot', 'excel_missing_columns', 'excel_is_columns_complete',
+    'excel_unchecked_reason', 'result_attachment_id', 'sql_unchecked_reason', 'record_kind'
+];
+// 守门中间件：Commit C 接入 submit 双路径时挂在写质量记录前。
+//   readiness=false → 503，避免 ALTER/索引迁移失败被吞后入口运行期 SQL 崩。
+function requireCollabQualityDualCheckSchemaReady(req, res, next) {
+    if (COLLAB_QUALITY_DUALCHECK_SCHEMA_STATE.error) {
+        return res.status(503).json({
+            error: '取数质量双校验功能暂不可用：新增字段或索引未就绪',
+            detail: COLLAB_QUALITY_DUALCHECK_SCHEMA_STATE.error,
+            code: 'COLLAB_QUALITY_DUALCHECK_SCHEMA_NOT_READY'
+        });
+    }
+    if (!COLLAB_QUALITY_DUALCHECK_SCHEMA_STATE.ready) {
+        return res.status(503).json({
+            error: '取数质量双校验功能正在初始化，请稍后重试',
+            code: 'COLLAB_QUALITY_DUALCHECK_SCHEMA_INITIALIZING'
+        });
+    }
+    next();
+}
+
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || 'issue_tracker_webhook_key';
 
 // Ensure directories exist
@@ -1803,6 +1836,23 @@ function initTable() {
             expected_columns_snapshot TEXT,
             actual_columns_snapshot TEXT,
             sql_attachment_id INTEGER,
+            -- ↓↓↓ 双校验增强（取数质量双校验增强_方案_v1.2）：excel 侧 5 列 + sql_unchecked_reason + record_kind ↓↓↓
+            -- 上方 is_columns_complete / missing_columns / *_snapshot / sql_attachment_id 保持「SQL smoke 列校验」语义不变。
+            -- excel 侧：result_data 表头 vs 模板，独立于 SQL 成败都跑（SQL failed 时也校验 excel，#11 核心）。
+            excel_actual_columns_snapshot TEXT,
+            excel_missing_columns TEXT,
+            -- excel 侧三态（同 is_columns_complete 语义）：1=齐全 / 0=缺列 / NULL=未比对（模板/result_data 读失败兜底）
+            excel_is_columns_complete INTEGER DEFAULT NULL CHECK (excel_is_columns_complete IS NULL OR excel_is_columns_complete IN (0, 1)),
+            -- 两侧"未比对原因"枚举（仅对应 is_complete=NULL 时有值；模板侧 reason 两侧写同值）：
+            --   模板侧（共用）NO_TEMPLATE / NON_XLSX_TEMPLATE / TEMPLATE_READ_FAILED
+            --   sql 侧 SMOKE_FAILED；excel 侧 NO_RESULT_DATA / NON_EXCEL_RESULT / RESULT_READ_FAILED；builder 异常 QUALITY_CHECK_FAILED
+            excel_unchecked_reason TEXT,
+            sql_unchecked_reason TEXT,
+            result_attachment_id INTEGER,
+            -- record_kind（第十人视角简化，方案 §4.4）：质量记录是 append-only 过程留痕（非终态）。
+            --   passed=正式交付（smoke 通过 DONE，走唯一索引幂等）；failed=过程留痕（smoke 失败 SUBMITTED，纯 append 多次留痕）。
+            --   历史 v3.0 行都是 DONE 后写的 → DEFAULT 'passed' 自动兼容，无需数据迁移。
+            record_kind TEXT NOT NULL DEFAULT 'passed' CHECK (record_kind IN ('passed', 'failed')),
             created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
             FOREIGN KEY (collab_request_id) REFERENCES collab_requests(id) ON DELETE CASCADE
         )`);
@@ -1813,12 +1863,35 @@ function initTable() {
         //     单产出（sub_item IS NULL）若只建一个含 sub_item 的联合唯一索引会失效 → 单产出永远不去重。
         //   - 故：sub_item IS NULL 走 (request_id, submission_seq) 唯一；sub_item NOT NULL 走三列联合唯一。
         //   - 双重防御：应用层幂等（C2 写前查重）是主防线，唯一索引是兜底。
+        // 双校验 v2（方案 §4.4）：唯一索引仅约束 record_kind='passed'（正式交付幂等）；
+        //   failed 行 record_kind='failed' 不进唯一索引 → 纯 append 多次留痕，看得出重试几次。
+        //   注：CREATE...IF NOT EXISTS 对已有库的旧索引（无 record_kind 条件）不会改写，旧库的索引收窄由
+        //   runCollabQualityDualCheckMigration 走 DROP+重建完成；这里只让新库一次到位。
         db.run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_qr_unique_single
                   ON collab_quality_record(collab_request_id, submission_seq)
-                  WHERE collab_sub_item_id IS NULL`);
+                  WHERE collab_sub_item_id IS NULL AND record_kind = 'passed'`);
         db.run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_qr_unique_multi
                   ON collab_quality_record(collab_request_id, collab_sub_item_id, submission_seq)
-                  WHERE collab_sub_item_id IS NOT NULL`);
+                  WHERE collab_sub_item_id IS NOT NULL AND record_kind = 'passed'`);
+
+        // ===== 取数质量双校验增强（2026-06-12，方案 §3-§4.4 / §8b）=====
+        //   旧库（v3.0 collab_quality_record 已存在）走 ALTER 补 7 列：excel 5 + sql_unchecked_reason + record_kind。
+        //   新库 CREATE TABLE 已含 7 列（上方），ALTER 幂等失败回 duplicate column 被 safeAlterAddColumn 吞掉。
+        //   ⚠️ 索引收窄到 record_kind='passed' 不能靠 CREATE...IF NOT EXISTS——旧库的旧索引已存在且无 record_kind 条件，
+        //     IF NOT EXISTS 会跳过；旧索引的 DROP+重建走 serialize 块**外**的 runCollabQualityDualCheckMigration（异步段，
+        //     需先 await 探测 passed 行 (request_id, submission_seq) 无重复，与 1268-1270 范式同源——await 不能横在
+        //     serialize 串行窗口内，否则 CREATE 可能先于 DROP 执行）。
+        //   excel 侧列：result_data 表头 vs 模板，独立于 SQL 成败都跑（SQL failed 时也校验，#11 核心）。
+        safeAlterAddColumn('collab_quality_record', 'excel_actual_columns_snapshot', 'TEXT');
+        safeAlterAddColumn('collab_quality_record', 'excel_missing_columns', 'TEXT');
+        safeAlterAddColumn('collab_quality_record', 'excel_is_columns_complete', 'INTEGER DEFAULT NULL');
+        safeAlterAddColumn('collab_quality_record', 'excel_unchecked_reason', 'TEXT');
+        safeAlterAddColumn('collab_quality_record', 'result_attachment_id', 'INTEGER');
+        safeAlterAddColumn('collab_quality_record', 'sql_unchecked_reason', 'TEXT');
+        // record_kind 默认 'passed' 自动兼容历史行（v3.0 行都是 DONE 后写的 = passed 语义）
+        safeAlterAddColumn('collab_quality_record', 'record_kind', "TEXT NOT NULL DEFAULT 'passed'");
+        // 注：CHECK 约束（excel_is_columns_complete IN(0,1)/record_kind IN('passed','failed'））仅新库 CREATE TABLE 带，
+        //   旧库 ALTER ADD COLUMN 不能加 CHECK——业务层 recordQualityForDeveloperSubmit 集中归一化兜底（方案 §3.2）。
 
         //   打回记录表：甲方/对接人主动打回，带原因分类。
         //   - reason_type CHECK 枚举：仅 DEV_QUALITY 计入"开发质量返工"，其余记录但不计质量（M-5）。
@@ -1844,6 +1917,202 @@ function initTable() {
         // 健康检查放在 serialize 末尾，确保所有 ALTER/INDEX 都已串行执行完
         verifyV2CollabSchema();
     });
+    // 取数质量双校验增强：旧库索引收窄（异步），独立于 serialize 块（要 await 探测）
+    runCollabQualityDualCheckMigration().catch((e) => {
+        COLLAB_QUALITY_DUALCHECK_SCHEMA_STATE.ready = false;
+        COLLAB_QUALITY_DUALCHECK_SCHEMA_STATE.error = `取数质量双校验迁移异常：${e && e.message}`;
+        logger.error(`[取数质量双校验] 🚫 迁移异常：${e && e.message}`);
+    });
+}
+
+// ── 取数质量双校验抽样验证非法值（codex Commit A 审 medium-2 兜底）─────────
+//   旧库 ALTER ADD COLUMN 不能补 CHECK 约束，CHECK 仅新库 CREATE TABLE 走到位（"新库强约束、旧库弱约束"分层）。
+//   未来若有手写 SQL/旧代码误写非法值（如 record_kind='passed_v2' 笔误 / excel_is_columns_complete=2），
+//   旧库不会拒绝。本抽样在启动迁移末尾跑：发现非法值即 ready=false + 503 + 运维告警。
+//   返回 null = 抽样通过；返回字符串 = 错误信息（直接进 COLLAB_QUALITY_DUALCHECK_SCHEMA_STATE.error）。
+async function detectIllegalDualCheckValues() {
+    try {
+        // [1] record_kind 非法（非 'passed'/'failed'）—— 包括 NULL，因为 NOT NULL 仅新库 CREATE TABLE 生效
+        const illegalKind = await new Promise((resolve) => {
+            db.all(
+                "SELECT id, record_kind FROM collab_quality_record WHERE record_kind IS NULL OR record_kind NOT IN ('passed','failed') LIMIT 5",
+                (err, rows) => resolve(err ? null : (rows || []))
+            );
+        });
+        if (illegalKind === null) {
+            return '抽样查询 record_kind 非法值失败（DB 错误）';
+        }
+        if (illegalKind.length > 0) {
+            const sample = illegalKind.map(r => `id=${r.id}/kind=${r.record_kind === null ? 'NULL' : `'${r.record_kind}'`}`).join(', ');
+            return `抽样发现 record_kind 非法值（${illegalKind.length}+ 行）：${sample}，需人工修复为 'passed'/'failed'`;
+        }
+        // [2] excel_is_columns_complete 非法（非 NULL/0/1）
+        const illegalExcel = await new Promise((resolve) => {
+            db.all(
+                "SELECT id, excel_is_columns_complete FROM collab_quality_record WHERE excel_is_columns_complete IS NOT NULL AND excel_is_columns_complete NOT IN (0, 1) LIMIT 5",
+                (err, rows) => resolve(err ? null : (rows || []))
+            );
+        });
+        if (illegalExcel === null) {
+            return '抽样查询 excel_is_columns_complete 非法值失败（DB 错误）';
+        }
+        if (illegalExcel.length > 0) {
+            const sample = illegalExcel.map(r => `id=${r.id}/val=${r.excel_is_columns_complete}`).join(', ');
+            return `抽样发现 excel_is_columns_complete 非法值（${illegalExcel.length}+ 行）：${sample}，需人工修复为 NULL/0/1`;
+        }
+        return null;
+    } catch (e) {
+        return `抽样验证异常：${e && e.message}`;
+    }
+}
+
+// ── 取数质量双校验增强 迁移（方案 §8b.2）─────────────────────────────────
+//   两件事必须满足才置 ready=true：
+//     ① collab_quality_record 含全部 7 列（ALTER 已在 initTable serialize 里发，本函数只 PRAGMA 复查）
+//     ② 唯一索引收窄到 record_kind='passed'：旧索引若无此条件需 DROP + CREATE 新索引
+//     ③ （codex 审 medium-2 兜底）抽样验证 record_kind / excel_is_columns_complete 无非法值
+//        —— 旧库 ALTER ADD COLUMN 不能加 CHECK，靠业务层（Commit B builder）归一化兜底 + 启动期抽样防误写脏数据。
+//   ⚠️ 时序铁律（与 v1.74.5 1601-1603 范式同源）：
+//     - 探测重复（passed 行 (collab_request_id, submission_seq) 无重复）必须 await，先于任何动作
+//     - DROP+CREATE 必须在独立 db.serialize 同步发，await 绝不能横在中间（serialize 串行窗口会被破坏）
+async function runCollabQualityDualCheckMigration() {
+    try {
+        // ① PRAGMA 复查 7 列到位
+        const cols = await new Promise((resolve) => {
+            db.all('PRAGMA table_info(collab_quality_record)', (err, rows) => {
+                if (err) return resolve(null);
+                resolve(rows ? rows.map(r => r.name) : []);
+            });
+        });
+        if (cols === null) {
+            COLLAB_QUALITY_DUALCHECK_SCHEMA_STATE.error = '无法读取 collab_quality_record 表结构（PRAGMA 失败）';
+            logger.error(`[取数质量双校验] 🚫 ${COLLAB_QUALITY_DUALCHECK_SCHEMA_STATE.error}`);
+            return;
+        }
+        const missingCols = COLLAB_QUALITY_DUALCHECK_COLS.filter(c => !cols.includes(c));
+        if (missingCols.length) {
+            COLLAB_QUALITY_DUALCHECK_SCHEMA_STATE.error = `字段迁移未完成，缺：${missingCols.join(',')}`;
+            logger.error(`[取数质量双校验] 🚫 ${COLLAB_QUALITY_DUALCHECK_SCHEMA_STATE.error} → /submit 写质量记录入口将返 503`);
+            return;
+        }
+
+        // ② 检查现有唯一索引的 WHERE 条件是否含 record_kind='passed'
+        //    sqlite_master 的 sql 列存原始 DDL 文本，新建索引含 record_kind 字串、旧索引没有
+        const idxRows = await new Promise((resolve) => {
+            db.all(
+                "SELECT name, sql FROM sqlite_master WHERE type='index' AND tbl_name='collab_quality_record' AND name IN ('idx_qr_unique_single','idx_qr_unique_multi')",
+                (err, rows) => resolve(err ? null : (rows || []))
+            );
+        });
+        if (idxRows === null) {
+            COLLAB_QUALITY_DUALCHECK_SCHEMA_STATE.error = '无法读取 collab_quality_record 索引定义（sqlite_master 失败）';
+            logger.error(`[取数质量双校验] 🚫 ${COLLAB_QUALITY_DUALCHECK_SCHEMA_STATE.error}`);
+            return;
+        }
+        const allHaveRecordKind = idxRows.length === 2 && idxRows.every(r => r.sql && /record_kind\s*=\s*'passed'/i.test(r.sql));
+        if (allHaveRecordKind) {
+            // 新库 CREATE 一次到位 或 旧库已经迁移过 → 跑抽样验证再 ready
+            //   旧库 ALTER ADD COLUMN 不能补 CHECK，CHECK 仅新库生效（分层兼容）；
+            //   抽样验证兜底未来手写 SQL/旧代码误写非法值（codex Commit A 审 medium-2）。
+            const illegal = await detectIllegalDualCheckValues();
+            if (illegal) {
+                COLLAB_QUALITY_DUALCHECK_SCHEMA_STATE.error = illegal;
+                logger.error(`[取数质量双校验] 🚫 ${illegal} → /submit 写质量记录入口将返 503`);
+                return;
+            }
+            COLLAB_QUALITY_DUALCHECK_SCHEMA_STATE.error = null;
+            COLLAB_QUALITY_DUALCHECK_SCHEMA_STATE.ready = true;
+            logger.info(`[取数质量双校验] ✅ 7 列 + 两个唯一索引已含 record_kind='passed' 条件 + 抽样无非法值，schema 就绪`);
+            return;
+        }
+
+        // 旧索引存在且无 record_kind 条件 → 走 DROP+CREATE
+        // 探测：passed 行（含历史隐含 passed=DEFAULT、本次新加 record_kind 默认 'passed'）在 (request_id, submission_seq) 下无重复
+        const dupSingle = await new Promise((resolve) => {
+            db.all(
+                "SELECT collab_request_id, submission_seq, COUNT(*) AS c FROM collab_quality_record " +
+                "WHERE collab_sub_item_id IS NULL AND record_kind = 'passed' " +
+                "GROUP BY collab_request_id, submission_seq HAVING c > 1",
+                (err, rows) => resolve(err ? null : (rows || []))
+            );
+        });
+        const dupMulti = await new Promise((resolve) => {
+            db.all(
+                "SELECT collab_request_id, collab_sub_item_id, submission_seq, COUNT(*) AS c FROM collab_quality_record " +
+                "WHERE collab_sub_item_id IS NOT NULL AND record_kind = 'passed' " +
+                "GROUP BY collab_request_id, collab_sub_item_id, submission_seq HAVING c > 1",
+                (err, rows) => resolve(err ? null : (rows || []))
+            );
+        });
+        if (dupSingle === null || dupMulti === null) {
+            COLLAB_QUALITY_DUALCHECK_SCHEMA_STATE.error = '迁移前重复探测查询失败';
+            logger.error(`[取数质量双校验] 🚫 ${COLLAB_QUALITY_DUALCHECK_SCHEMA_STATE.error}`);
+            return;
+        }
+        if (dupSingle.length || dupMulti.length) {
+            COLLAB_QUALITY_DUALCHECK_SCHEMA_STATE.error = `迁移前重复探测发现 passed 行重复（单产出 ${dupSingle.length} 组 / 多产出 ${dupMulti.length} 组），需人工处理后再启动`;
+            logger.error(`[取数质量双校验] 🚫 ${COLLAB_QUALITY_DUALCHECK_SCHEMA_STATE.error}`);
+            return;
+        }
+
+        // 探测通过 → 独立 serialize 同步发 DROP+CREATE（绝不在中间夹 await）
+        await new Promise((resolve) => {
+            db.serialize(() => {
+                let firstErr = null;
+                const handle = (label) => (err) => { if (err && !firstErr) firstErr = `${label}: ${err.message}`; };
+                db.run('DROP INDEX IF EXISTS idx_qr_unique_single', handle('DROP single'));
+                db.run('DROP INDEX IF EXISTS idx_qr_unique_multi', handle('DROP multi'));
+                db.run(
+                    `CREATE UNIQUE INDEX idx_qr_unique_single
+                       ON collab_quality_record(collab_request_id, submission_seq)
+                       WHERE collab_sub_item_id IS NULL AND record_kind = 'passed'`,
+                    handle('CREATE single')
+                );
+                db.run(
+                    `CREATE UNIQUE INDEX idx_qr_unique_multi
+                       ON collab_quality_record(collab_request_id, collab_sub_item_id, submission_seq)
+                       WHERE collab_sub_item_id IS NOT NULL AND record_kind = 'passed'`,
+                    (err) => {
+                        handle('CREATE multi')(err);
+                        if (firstErr) {
+                            COLLAB_QUALITY_DUALCHECK_SCHEMA_STATE.error = `索引重建失败：${firstErr}`;
+                            logger.error(`[取数质量双校验] 🚫 ${COLLAB_QUALITY_DUALCHECK_SCHEMA_STATE.error}`);
+                        }
+                        resolve();
+                    }
+                );
+            });
+        });
+        if (COLLAB_QUALITY_DUALCHECK_SCHEMA_STATE.error) return;
+
+        // 重建后再次 PRAGMA 复查 sqlite_master 确认两个新索引都含 record_kind 条件
+        const idxRowsAfter = await new Promise((resolve) => {
+            db.all(
+                "SELECT name, sql FROM sqlite_master WHERE type='index' AND tbl_name='collab_quality_record' AND name IN ('idx_qr_unique_single','idx_qr_unique_multi')",
+                (err, rows) => resolve(err ? null : (rows || []))
+            );
+        });
+        const afterOk = idxRowsAfter && idxRowsAfter.length === 2 && idxRowsAfter.every(r => r.sql && /record_kind\s*=\s*'passed'/i.test(r.sql));
+        if (!afterOk) {
+            COLLAB_QUALITY_DUALCHECK_SCHEMA_STATE.error = `重建后索引复查未通过（WHERE 条件未含 record_kind='passed'）`;
+            logger.error(`[取数质量双校验] 🚫 ${COLLAB_QUALITY_DUALCHECK_SCHEMA_STATE.error}`);
+            return;
+        }
+        // 旧库迁移后抽样验证（codex Commit A 审 medium-2 分层兼容兜底）
+        const illegal = await detectIllegalDualCheckValues();
+        if (illegal) {
+            COLLAB_QUALITY_DUALCHECK_SCHEMA_STATE.error = illegal;
+            logger.error(`[取数质量双校验] 🚫 ${illegal} → /submit 写质量记录入口将返 503`);
+            return;
+        }
+
+        COLLAB_QUALITY_DUALCHECK_SCHEMA_STATE.error = null;
+        COLLAB_QUALITY_DUALCHECK_SCHEMA_STATE.ready = true;
+        logger.info(`[取数质量双校验] ✅ 旧索引已 DROP+重建带 record_kind='passed' 条件，7 列就绪 + 抽样无非法值，schema 迁移完成`);
+    } catch (e) {
+        COLLAB_QUALITY_DUALCHECK_SCHEMA_STATE.error = `迁移异常：${e && e.message}`;
+        logger.error(`[取数质量双校验] 🚫 ${COLLAB_QUALITY_DUALCHECK_SCHEMA_STATE.error}`);
+    }
 }
 
 // v2.0 schema 启动后健康检查（codex 六审 M-6 配套）
@@ -1957,6 +2226,22 @@ function verifyV2CollabSchema() {
             }
         }
     );
+    // ===== 取数质量双校验增强 列清单巡检（2026-06-12，方案 §8b.2 / codex 审 medium-2）=====
+    //   存在性已被 v3.0 段覆盖；这里补列清单 PRAGMA + 分层兼容提示——
+    //     新 7 列必须全到位（与 runCollabQualityDualCheckMigration 的 readiness 校验互为冗余）；
+    //   ⚠️ 分层兼容警告（codex Commit A 审 medium-2）：旧库 ALTER ADD COLUMN 不能加 CHECK 约束 →
+    //     excel_is_columns_complete IN(0,1) / record_kind IN('passed','failed') CHECK 仅在新库 CREATE TABLE 生效。
+    //     旧库依赖业务层 Commit B builder（recordQualityForDeveloperSubmit）归一化兜底 + 迁移函数抽样验证 detectIllegalDualCheckValues 防误写脏数据。
+    db.all('PRAGMA table_info(collab_quality_record)', [], (err, rows) => {
+        if (err) return;
+        const actualCols = rows.map(r => r.name);
+        const missing = COLLAB_QUALITY_DUALCHECK_COLS.filter(c => !actualCols.includes(c));
+        if (missing.length > 0) {
+            logger.error(`取数质量双校验 schema 迁移不完整，collab_quality_record 缺 7 列中的：${missing.join(', ')}`);
+        } else {
+            logger.info(`取数质量双校验 schema 列巡检通过：collab_quality_record 新增 ${COLLAB_QUALITY_DUALCHECK_COLS.length} 列齐全（excel 5 + sql_unchecked_reason + record_kind）；⚠️ 分层兼容：旧库 ALTER 不补 CHECK，靠 builder 归一化 + 迁移期抽样兜底（详见 detectIllegalDualCheckValues）`);
+        }
+    });
     // reason_type 异常巡检（CHECK 约束已挡新写入，巡检防老数据/人工 SQL 改坏；沿用 assign_mode 巡检范式）
     db.all(
         "SELECT id, collab_request_id, reason_type FROM collab_return_record WHERE reason_type NOT IN ('DEV_QUALITY','REQ_CHANGE','ENV_ISSUE','BIZ_ADJUST') LIMIT 5",
@@ -12192,8 +12477,12 @@ app.get('/api/collab/requests/:id', authenticateToken, async (req, res) => {
         //   - quality_records：每次提交一行（C2 旁路写），按提交序升序
         //   - return_records：每次打回一行（D 写），按打回时间升序
         //   - quality_summary：后端算好的汇总（交付时长 M-7 / 提交次数 / 打回次数 / 返工次数），口径集中后端一处
+        //
+        // ⭐ 双校验 Commit D §8b.1 关键过滤（方案明确"最易漏"）：只展示正式交付质量 record_kind='passed'，
+        //   不展示 failed 过程留痕（failed 是 append-only 调试用途，业务用户看到会混淆"已交付"判断）。
+        //   buildQualitySummary 接收过滤后的数组自动生效（不改 helper）；未来若需 debug 接口看 failed，另起 endpoint。
         const qualityRecords = await dbAllAsync(
-            'SELECT * FROM collab_quality_record WHERE collab_request_id = ? ORDER BY submission_seq ASC, id ASC',
+            "SELECT * FROM collab_quality_record WHERE collab_request_id = ? AND record_kind = 'passed' ORDER BY submission_seq ASC, id ASC",
             [id]
         );
         const returnRecords = await dbAllAsync(
@@ -13637,6 +13926,9 @@ app.get('/api/collab/requests/:id/notify-read-status', authenticateToken, async 
 app.post('/api/collab/requests/:id/submit',
     authenticateToken,
     requireNonViewer,
+    // 取数质量双校验 schema 守门（Commit C 接入点）——双校验列/索引迁移未就绪时本入口 503，
+    // 防止 ALTER 失败被吞后 recordQualityForDeveloperSubmit 运行期 SQL 崩（方案 §3.0 codex 30#1 范式）
+    requireCollabQualityDualCheckSchemaReady,
     // multer 错误捕获（codex 十审 #1）— multer 是前置中间件，
     // 它抛的 MulterError（超数量/大小/类型）会走 Express error flow，
     // endpoint 内 try/catch 接不到，所以这里手动调 upload(req, res, cb)
@@ -13947,6 +14239,49 @@ app.post('/api/collab/requests/:id/submit',
                     const attemptSeq = failedCount > 0 ? e.failedAttachments[0].failed_attempt_seq : null;
                     insertCollabLog(id, 'SUBMIT_VALIDATION_FAILED', userId, userName,
                         `${sqlErr} (attempt_seq=${attemptSeq}, 撞墙附件保留 ${failedCount} 个)`);
+
+                    // === 取数质量双校验增强 Commit C：failed 路径质量记录（方案 §5.3 failed→SUBMITTED + #11 核心）===
+                    //   - 状态已持久化（UPDATE failed）+ operation_log 已写，在 return 前调用双校验
+                    //   - codex Commit C 审 medium-5 说明：14223 UPDATE 即使被 .catch 吞错，前置 UPDATE（14072）
+                    //     已把状态推进到 SUBMITTED/queued——质量记录写 failed 与主表 SUBMITTED 语义自洽
+                    //     （SUBMITTED + failed 质量留痕 = "提交了但 smoke 没过"）
+                    //   - recordKind='failed' → 纯 INSERT，不带 OR IGNORE，纯 append（不进唯一索引，方案 §4.4）
+                    //   - submissionSeq=oldVer（failed 不自增 submission_version）
+                    //   - excel 侧照常跑（#11 核心可信度——SQL 误伤时 excel 校验仍能反映真实交付质量）
+                    //   - 自包 try/catch 永不抛（H-2，方案 §6.1）；不影响 failed 主 return 既有结构
+                    //   - codex Commit C 审 high-2 解答：e.failedAttachments[].file_name 由 collab-attachment-versioning.js
+                    //     的 finalName 拼接保证含原扩展名（.xlsx/.xls/.sql/.txt），_evaluateExcelSide 走
+                    //     `original_name || file_name` fallback 正确识别为 excel（虽然 failedAttachments 没 original_name）
+                    let qualityCheckFailed = {
+                        sql:   { is_complete: null, missing: [], reason: 'QUALITY_CHECK_FAILED' },
+                        excel: { is_complete: null, missing: [], reason: 'QUALITY_CHECK_FAILED' },
+                        check_status: 'compute_failed', persistence_status: 'failed'
+                    };
+                    try {
+                        // 从 e.failedAttachments 拿本次 failed 附件（含物理文件，已落盘 status='failed'）
+                        // 字段：{id, attachment_type, failed_attempt_seq, file_name}（无 original_name，但 file_name 含原扩展名）
+                        const failedAttArr = Array.isArray(e.failedAttachments) ? e.failedAttachments : [];
+                        const failedResultData = failedAttArr.find(a => a.attachment_type === 'result_data') || null;
+                        const failedResultScript = failedAttArr.find(a => a.attachment_type === 'result_script') || null;
+                        const qr = await collabSubmitHelpers.recordQualityForDeveloperSubmit({
+                            dbAsync: { runAsync: dbRunAsync, getAsync: dbGetAsync },
+                            requestId: id,
+                            submitterId: userId,
+                            submitterName: userName,
+                            submissionSeq: oldVer,  // failed 不自增 submission_version
+                            recordKind: 'failed',
+                            sqlSmokeResult: null,   // → sql_unchecked_reason='SMOKE_FAILED'
+                            sqlAttachmentId: failedResultScript ? failedResultScript.id : null,
+                            resultDataAttachment: failedResultData,
+                            insertLog: insertCollabLog,
+                            logger,
+                        });
+                        if (qr) qualityCheckFailed = qr;
+                    } catch (qe) {
+                        logger.warn(`[collab-submit] failed 路径双校验旁路异常（已隔离，不影响 failed 主流程）: ${qe.message}`);
+                        insertCollabLog(id, 'QUALITY_RECORD', userId, userName, `dualcheck_failed_endpoint_fallback:${qe.message}`);
+                    }
+
                     return res.status(200).json({
                         business_error: true,
                         message: 'smoke test 验证失败，请检查 SQL；撞墙的附件已保留在失败提交历史中',
@@ -13955,6 +14290,8 @@ app.post('/api/collab/requests/:id/submit',
                         current_status: 'SUBMITTED',
                         failed_attempt_seq: attemptSeq,
                         failed_attachments: e.failedAttachments || [],
+                        // 取数质量双校验结果（方案 §5.3 #11 核心：SQL failed 时仍校验 excel 反映真实交付质量）
+                        quality_check: qualityCheckFailed,
                     });
                 }
                 if (e.code === 'SMOKE_TEST_FAILED_INSERT_FAILED') {
@@ -14069,41 +14406,75 @@ app.post('/api/collab/requests/:id/submit',
             insertCollabLog(id, 'SUBMIT_SUCCESS', userId, userName,
                 `newVer=${activateResult.newVer}, dir=${activateResult.attachmentDir}`);
 
-            // === 取数交付质量记录 v3.0 Commit C2：主事务成功后旁路写列对齐（codex 72 全落地）===
-            //   - recordQualityOnSubmit 自包 try/catch 永不抛（H-2），任何失败仅 warn + operation_log，绝不阻断本次已 DONE 的提交。
-            //   - submitted_at 在 helper 内 SQL 内联 datetime('now','localtime')（H-1，不用 collab.submitted_at 首次时间）。
-            //   - submission_seq = activateResult.newVer（每次提交 +1，幂等键）。
-            //   - smokeColumns 从 C1 透传链 activateResult.smokeTestResult.columns 取（可能 undefined/[]，helper 内防御）。
-            //   - 结果映进 quality_check 嵌套字段（M-4，不污染既有顶层字段，护现有 e2e）。
-            let qualityCheck = { recorded: false, is_columns_complete: null, missing_columns: [], reason: 'C2_FAILED' };
+            // === 取数质量双校验增强 Commit C：主事务成功后旁路写双校验记录（方案 §5.3 passed→DONE 路径）===
+            //   - 切换 v3.0 recordQualityOnSubmit → recordQualityForDeveloperSubmit（双校验：SQL+excel；record_kind='passed'；INSERT OR IGNORE）
+            //   - recordKind='passed'：走唯一索引幂等（changes=0 → ignored_due_to_duplicate；changes>0 → recorded）
+            //   - 自包 try/catch 永不抛（H-2，方案 §6.1）；calc/落库分离 schema 永远返回（compute_failed 兜底）
+            //   - 附件 id 从主事务后查（activateNewVersion 不返结构、不侵入老函数）：result_data（excel 侧）+ result_script（SQL 侧）
+            //   - codex Commit B 审 high-2 硬约束：passed 路径必须显式查 sqlAttachmentId 传入，避免脱链
+            //   - codex Commit C 审 high-1/medium-3 落地：查询缺失时显式 compute_failed + operation_log，
+            //     不让"系统异常（附件被 supersede / DB 时序异常）"伪装成"用户未传 result_data"（NO_RESULT_DATA）
+            const newVer = activateResult.newVer;
+            // 兜底常量（codex Commit C 审 low-7：避免 passed/failed 两处 schema 漂移）
+            const qualityCheckFallback = () => ({
+                sql:   { is_complete: null, missing: [], reason: 'QUALITY_CHECK_FAILED' },
+                excel: { is_complete: null, missing: [], reason: 'QUALITY_CHECK_FAILED' },
+                check_status: 'compute_failed', persistence_status: 'failed'
+            });
+            let qualityCheck = qualityCheckFallback();
             try {
-                const qr = await collabSubmitHelpers.recordQualityOnSubmit({
-                    dbAsync: { runAsync: dbRunAsync, getAsync: dbGetAsync },
-                    requestId: id,
-                    submitterId: userId,
-                    submitterName: userName,
-                    submissionSeq: activateResult.newVer,
-                    smokeColumns: activateResult.smokeTestResult && activateResult.smokeTestResult.columns,
-                    insertLog: insertCollabLog,
-                    logger,
-                });
-                if (qr) qualityCheck = qr;
+                // 查本次提交的 active 附件（result_data / result_script，submission_version=newVer + status='active'）
+                const attachRows = await dbAllAsync(
+                    `SELECT id, attachment_type, file_name, original_name FROM collab_attachments
+                      WHERE collab_request_id = ? AND submission_version = ?
+                        AND attachment_type IN ('result_data','result_script')
+                        AND (status = 'active' OR status IS NULL)`,
+                    [id, newVer]
+                );
+                const resultDataAttach = attachRows.find(r => r.attachment_type === 'result_data') || null;
+                const resultScriptAttach = attachRows.find(r => r.attachment_type === 'result_script') || null;
+                // codex Commit C 审 high-1/medium-3：passed 路径 activateNewVersion 已成功 = result_data+result_script 必到位（classifyUploadedFiles 强制）
+                //   查不到 = 系统异常（附件被 supersede / 极端时序）→ 不能伪装成 NO_RESULT_DATA 用户问题，落 compute_failed + log
+                if (!resultDataAttach || !resultScriptAttach) {
+                    logger.error(`[collab-submit] passed 路径附件查询缺失（系统异常，非用户问题）: req=${id} newVer=${newVer} found=${attachRows.length} types=${attachRows.map(a => a.attachment_type).join(',')}`);
+                    insertCollabLog(id, 'QUALITY_RECORD', userId, userName,
+                        `dualcheck_passed_attachment_missing: newVer=${newVer} found=${attachRows.length}`);
+                    // qualityCheck 保留 compute_failed/failed 默认，不调 helper
+                } else {
+                    const qr = await collabSubmitHelpers.recordQualityForDeveloperSubmit({
+                        dbAsync: { runAsync: dbRunAsync, getAsync: dbGetAsync },
+                        requestId: id,
+                        submitterId: userId,
+                        submitterName: userName,
+                        submissionSeq: newVer,
+                        recordKind: 'passed',
+                        sqlSmokeResult: activateResult.smokeTestResult,  // {columns, validatedAt, rowCount}
+                        sqlAttachmentId: resultScriptAttach.id,
+                        resultDataAttachment: resultDataAttach,
+                        insertLog: insertCollabLog,
+                        logger,
+                    });
+                    if (qr) qualityCheck = qr;
+                    // codex Commit C 审 high-1：附件查询结果落 operation_log，便于排查"本次质量记录用了哪个附件"
+                    insertCollabLog(id, 'QUALITY_RECORD', userId, userName,
+                        `dualcheck_passed_attach: data_id=${resultDataAttach.id} script_id=${resultScriptAttach.id} persist=${qr && qr.persistence_status}`);
+                }
             } catch (qe) {
-                // 双重保险：helper 设计上永不抛，这里再兜一层确保主流程绝不因质量记录失败而返 500
-                logger.warn(`[collab-submit] 质量记录旁路异常（已隔离，不影响提交）: ${qe.message}`);
-                // codex 73 L-3：兜底分支几乎不触发（helper 永不抛），但真触发=设计外异常，最需协作单内留痕
-                insertCollabLog(id, 'QUALITY_RECORD', userId, userName, `C2_FAILED(endpoint兜底):${qe.message}`);
+                // 双重保险：helper 设计上永不抛（H-2），这里再兜一层确保主流程绝不因质量记录失败而返 500
+                logger.warn(`[collab-submit] 双校验质量记录旁路异常（已隔离，不影响提交）: ${qe.message}`);
+                insertCollabLog(id, 'QUALITY_RECORD', userId, userName, `dualcheck_passed_endpoint_fallback:${qe.message}`);
             }
 
             return res.json({
                 message: '提交成功',
-                new_version: activateResult.newVer,
+                new_version: newVer,
                 attachment_dir: activateResult.attachmentDir,
                 sql_validation_status: 'passed',
                 smoke_test_validated_at: activateResult.smokeTestResult.validatedAt,
                 smoke_test_row_count: activateResult.smokeTestResult.rowCount,
                 current_status: 'DONE',
-                // 取数质量列对齐结果（方案乙：前端据此弹非阻塞缺列提醒）
+                // 取数质量双校验结果（方案 §6.1 稳定 schema：sql/excel/check_status/persistence_status）
+                //   前端 Commit D 据此弹双侧缺列提醒（不阻塞）+ persistence_status 用于排查
                 quality_check: qualityCheck,
             });
         } catch (e) {

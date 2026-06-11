@@ -958,7 +958,12 @@ function checkTemplateReadable(fileName, originalName) {
  *            rework_count:number, latest_is_columns_complete:(1|0|null), latest_missing_columns:(string|null)}}
  */
 function buildQualitySummary(request, qualityRecords, returnRecords) {
-    const qrs = Array.isArray(qualityRecords) ? qualityRecords : [];
+    // 双校验 Commit D codex 审 medium-1：把 §8b.1"读路径过滤"契约固化到汇总层防御
+    //   即使调用方传入了未过滤的 collab_quality_record 行（如未来新增统计 endpoint 忘加 WHERE），
+    //   汇总层兜底只消费 record_kind='passed' 或缺失（v3.0 老单虚拟默认值场景）的记录。
+    //   过滤后 submit_count / latest_* 都只反映正式交付质量，failed 留痕不污染前端展示。
+    const qrsAll = Array.isArray(qualityRecords) ? qualityRecords : [];
+    const qrs = qrsAll.filter(r => !r || !r.record_kind || r.record_kind === 'passed');
     const rrs = Array.isArray(returnRecords) ? returnRecords : [];
     const req = request || {};
 
@@ -993,9 +998,269 @@ function buildQualitySummary(request, qualityRecords, returnRecords) {
         submit_count: qrs.length,
         return_count: rrs.length,
         rework_count: reworkCount,
+        // SQL 侧（v3.0 字段保持向后兼容）
         latest_is_columns_complete: latest ? latest.is_columns_complete : null,
         latest_missing_columns: latest && latest.missing_columns ? latest.missing_columns : null,
+        // 双校验 Commit D：excel 侧 + SQL 侧 reason（详情页双侧并列展示用，方案 §6.3）
+        //   - excel_is_columns_complete 三态同 SQL 侧（1=齐全/0=缺列/NULL=未比对）
+        //   - sql_unchecked_reason / excel_unchecked_reason：is_complete=NULL 时的原因枚举（SMOKE_FAILED / NO_TEMPLATE / ...）
+        //   - record_kind 透传供前端识别（虽然读路径已过滤 record_kind='passed'，但暴露字段不增加成本）
+        // codex Commit D 审 medium-2：用 nullish 归一替代 `in latest` —— 防御未来非 SELECT * 调用方
+        //   row 对象未包含某列时（部分列查询），不应被当成"老单兼容"语义
+        latest_excel_is_columns_complete: (latest && latest.excel_is_columns_complete != null) ? latest.excel_is_columns_complete : null,
+        latest_excel_missing_columns: (latest && latest.excel_missing_columns) ? latest.excel_missing_columns : null,
+        latest_sql_unchecked_reason: (latest && latest.sql_unchecked_reason) ? latest.sql_unchecked_reason : null,
+        latest_excel_unchecked_reason: (latest && latest.excel_unchecked_reason) ? latest.excel_unchecked_reason : null,
+        // record_kind 归一：缺失时归 'passed'（v3.0 老单 ALTER 加列后 DEFAULT 落 passed；新单总有值）
+        latest_record_kind: (latest && latest.record_kind) ? latest.record_kind : (latest ? 'passed' : null),
     };
+}
+
+// ============================================================================
+// §7 取数质量双校验增强 — Commit B：recordQualityForDeveloperSubmit
+// ============================================================================
+//
+// 设计来源：docs/local/数据协作模块_v3.0/取数质量双校验增强_方案_20260611_v1.2.md
+//   §3-§4.4 双校验定位 + §5 触发时机入口契约 + §6.1 quality_check 返回稳定 schema + §8b 编码前置约束
+//
+// 替代 / 共存：与 v3.0 recordQualityOnSubmit 并存。Commit C 切换 submit passed 路径到本函数，
+//   v3.0 老函数保留作为旧 submit-export 路径的调用点（未来渐进收敛）。
+//
+// 核心差异（vs v3.0 recordQualityOnSubmit）：
+//   1. 双校验：新增 excel 侧（result_data 表头 vs 模板），独立于 SQL 成败都跑（SQL failed 时也校验 excel，#11 核心）
+//   2. record_kind 分流：passed 走 OR IGNORE 幂等（沿用 v3.0 唯一索引）；failed 纯 INSERT append-only（不进唯一索引）
+//      —— 方案 §4.4 第十人视角简化（放弃 failed 严格幂等）
+//   3. 稳定返回 schema：check_status（计算）与 persistence_status（落库）分离（§6.1）
+//   4. 模板异常两侧 reason 同值：sql_unchecked_reason 与 excel_unchecked_reason 写同一个模板 reason（§3.2 不变量）
+//   5. 区分 ignored_due_to_duplicate vs insert_failed（§8b.5 codex v1.2 复审 low-1）
+//
+// H-2 自包：任何漏网异常都不阻断主流程；所有出口返回稳定 schema 对象。
+//
+// 入参 ctx：
+//   - dbAsync                  { runAsync, getAsync }（必填，缺失 → compute_failed）
+//   - requestId                协作单 id
+//   - submitterId / submitterName  提交人（v1.2 §1.74 codex 79 范式：req.user 快照防 developer/exporter 语义切换）
+//   - submissionSeq            passed 路径 = activateNewVersion 后 newVer；failed 路径 = oldVer（当前版本，不自增）
+//   - recordKind               'passed' | 'failed'（必填，非法 → compute_failed）
+//   - sqlSmokeResult           passed: { columns: string[] } | failed: null（→ sql_unchecked_reason='SMOKE_FAILED'）
+//   - sqlAttachmentId          result_script 附件 id（passed/failed 都写）
+//                              ⚠️ Commit C 接入硬约束（codex Commit B 审 high-2）：passed 路径必须显式传入，缺失走
+//                              `?? null` 归一化为 NULL 但质量记录与 SQL 附件脱链；接入前 grep ctx.sqlAttachmentId
+//                              确保 13945/14063 两个调用点都传入对应 attachment id。
+//   - resultDataAttachment     { id, file_name } | null（result_data 缺失时 excel 侧 reason='NO_RESULT_DATA'）
+//   - insertLog                operation_log 写入函数（best-effort，抛错被 tryInsertQualityLog 自吞）
+//   - logger                   日志对象（warn/info/error）
+//
+// 返回（quality_check 稳定 schema）：
+//   {
+//     sql:   { is_complete, missing, reason },
+//     excel: { is_complete, missing, reason },
+//     check_status:       'ok' | 'compute_failed',
+//     persistence_status: 'recorded' | 'ignored_due_to_duplicate' | 'failed'
+//   }
+
+// 内部：模板查询 + 试读，返回 { templateCols, templateUncheckedReason }
+//   - templateCols 非 null → 正常比对（两侧都用这个列集合）
+//   - templateUncheckedReason 非 null → 模板侧前置不可比对，两侧 reason 同值（§3.2）
+async function _evaluateTemplateForDualCheck(dbAsync, requestId, logger) {
+    const tpl = await dbAsync.getAsync(
+        `SELECT id, file_name, original_name FROM collab_attachments
+          WHERE collab_request_id = ?
+            AND attachment_type = 'example_xlsx'
+            AND (status = 'active' OR status IS NULL)
+          ORDER BY created_at DESC, id DESC
+          LIMIT 1`,
+        [requestId]
+    );
+    if (!tpl) return { templateCols: null, templateUncheckedReason: 'NO_TEMPLATE' };
+    const ext = path.extname(tpl.original_name || tpl.file_name || '').toLowerCase();
+    if (!COLUMN_ALIGN_READABLE_EXTS.has(ext)) {
+        return { templateCols: null, templateUncheckedReason: 'NON_XLSX_TEMPLATE' };
+    }
+    try {
+        const abs = resolveAttachmentPath(tpl.file_name);
+        const { header } = readXlsxHeader(abs);
+        return { templateCols: header, templateUncheckedReason: null };
+    } catch (e) {
+        (logger || console).warn(`[collab-dualcheck] req=${requestId} 模板读取失败(${e.code || 'ERR'})：${e.message}`);
+        return { templateCols: null, templateUncheckedReason: 'TEMPLATE_READ_FAILED' };
+    }
+}
+
+// 内部：跑 excel 侧比对（result_data 表头 vs 模板列）
+//   - resultDataAttachment 缺失 → reason='NO_RESULT_DATA'
+//   - 扩展名非 xlsx/xls → reason='NON_EXCEL_RESULT'
+//   - 读取失败 → reason='RESULT_READ_FAILED'
+//   - 成功 → 与 templateCols 跑 compareColumns
+function _evaluateExcelSide(resultDataAttachment, templateCols, requestId, logger) {
+    if (!resultDataAttachment || !resultDataAttachment.file_name) {
+        return { is_complete: null, missing: [], reason: 'NO_RESULT_DATA', snapshot: null };
+    }
+    const ext = path.extname(resultDataAttachment.original_name || resultDataAttachment.file_name || '').toLowerCase();
+    if (!COLUMN_ALIGN_READABLE_EXTS.has(ext)) {
+        return { is_complete: null, missing: [], reason: 'NON_EXCEL_RESULT', snapshot: null };
+    }
+    let excelCols;
+    try {
+        const abs = resolveAttachmentPath(resultDataAttachment.file_name);
+        const { header } = readXlsxHeader(abs);
+        excelCols = header;
+    } catch (e) {
+        (logger || console).warn(`[collab-dualcheck] req=${requestId} result_data 读取失败(${e.code || 'ERR'})：${e.message}`);
+        return { is_complete: null, missing: [], reason: 'RESULT_READ_FAILED', snapshot: null };
+    }
+    // 模板已成功（templateCols 非 null 才进这里），正常比对
+    const cmp = compareColumns(templateCols, excelCols);
+    return {
+        is_complete: cmp.complete ? 1 : 0,
+        missing: cmp.missing,
+        reason: null,
+        snapshot: excelCols,
+    };
+}
+
+async function recordQualityForDeveloperSubmit(ctx) {
+    const log = (ctx && ctx.logger) || console;
+    // H-2 兜底：所有返回都过这个 builder，保证稳定 schema
+    //   compute_failed 契约（方案 §8b.4）：builder 级异常 → 两侧 is_complete=null/missing=[]/reason='QUALITY_CHECK_FAILED'
+    const computeFailedReturn = (persistence = 'failed') => ({
+        sql:   { is_complete: null, missing: [], reason: 'QUALITY_CHECK_FAILED' },
+        excel: { is_complete: null, missing: [], reason: 'QUALITY_CHECK_FAILED' },
+        check_status: 'compute_failed',
+        persistence_status: persistence,
+    });
+
+    try {
+        const { dbAsync, requestId, submitterId, submitterName, submissionSeq, recordKind } = ctx;
+        if (!dbAsync || typeof dbAsync.runAsync !== 'function' || typeof dbAsync.getAsync !== 'function') {
+            log.warn('[collab-dualcheck] recordQualityForDeveloperSubmit: dbAsync 缺失');
+            return computeFailedReturn('failed');
+        }
+        if (recordKind !== 'passed' && recordKind !== 'failed') {
+            log.warn(`[collab-dualcheck] req=${requestId} recordKind 非法='${recordKind}'，应为 'passed'|'failed'`);
+            return computeFailedReturn('failed');
+        }
+
+        // [1] 模板侧（双校验共用，§3.2 两侧 reason 同值）
+        const { templateCols, templateUncheckedReason } = await _evaluateTemplateForDualCheck(dbAsync, requestId, log);
+
+        // [2] SQL 侧
+        //   passed 路径有 sqlSmokeResult.columns；failed 路径 → SMOKE_FAILED
+        //   模板前置不可比对时（templateUncheckedReason !== null）→ SQL 侧用模板 reason（同 excel 侧）
+        let sqlSide;
+        if (recordKind === 'failed') {
+            sqlSide = { is_complete: null, missing: [], reason: 'SMOKE_FAILED', snapshot: [] };
+        } else if (templateUncheckedReason) {
+            sqlSide = { is_complete: null, missing: [], reason: templateUncheckedReason, snapshot: null };
+        } else {
+            const sqlCols = (ctx.sqlSmokeResult && Array.isArray(ctx.sqlSmokeResult.columns)) ? ctx.sqlSmokeResult.columns : [];
+            const cmp = compareColumns(templateCols, sqlCols);
+            sqlSide = {
+                is_complete: cmp.complete ? 1 : 0,
+                missing: cmp.missing,
+                reason: null,
+                snapshot: sqlCols,
+            };
+        }
+
+        // [3] excel 侧
+        //   模板前置不可比对时 → excel 侧用同一个模板 reason（§3.2 两侧同值）
+        //   模板可比对时 → 跑 _evaluateExcelSide（result_data 缺失/非 excel/读失败 各自独立 reason）
+        let excelSide;
+        if (templateUncheckedReason) {
+            excelSide = { is_complete: null, missing: [], reason: templateUncheckedReason, snapshot: null };
+        } else {
+            excelSide = _evaluateExcelSide(ctx.resultDataAttachment, templateCols, requestId, log);
+        }
+
+        // [4] 归一化（§3.2 不变量）+ snapshot 序列化
+        //   未比对（is_complete=null）：snapshot=null + missing=[]（不写非空）；已比对：snapshot=JSON 数组
+        const normalizeSide = (side) => ({
+            is_complete: side.is_complete,
+            missing: side.is_complete === null ? [] : (Array.isArray(side.missing) ? side.missing : []),
+            reason: side.reason,
+            snapshot: side.is_complete === null ? null : (Array.isArray(side.snapshot) ? side.snapshot : null),
+        });
+        const sqlN = normalizeSide(sqlSide);
+        const excelN = normalizeSide(excelSide);
+
+        // [5] 构造写入参数
+        const sqlActualSnapshot = sqlN.snapshot === null ? null : JSON.stringify(sqlN.snapshot);
+        const sqlMissingJson = sqlN.is_complete === null ? null : JSON.stringify(sqlN.missing);
+        const excelActualSnapshot = excelN.snapshot === null ? null : JSON.stringify(excelN.snapshot);
+        const excelMissingJson = excelN.is_complete === null ? null : JSON.stringify(excelN.missing);
+        const sqlAttachmentId = (ctx.sqlAttachmentId === undefined || ctx.sqlAttachmentId === null) ? null : ctx.sqlAttachmentId;
+        const resultAttachmentId = (ctx.resultDataAttachment && ctx.resultDataAttachment.id) || null;
+        // 模板 expected snapshot：能成功读到模板列才有
+        const expectedSnapshot = templateCols ? JSON.stringify(templateCols) : null;
+
+        // [6] INSERT 分流
+        //   passed：INSERT OR IGNORE，唯一索引兜底幂等 → changes>0=recorded / changes=0=ignored_due_to_duplicate
+        //   failed：纯 INSERT（不带 OR IGNORE）→ 不进唯一索引，每次都 append；约束错误（CHECK/NOT NULL）走 catch
+        const insertSql = recordKind === 'passed'
+            ? `INSERT OR IGNORE INTO collab_quality_record
+                (collab_request_id, collab_sub_item_id, submitter_id, submitter_name,
+                 submission_seq, submitted_at,
+                 missing_columns, is_columns_complete, expected_columns_snapshot, actual_columns_snapshot, sql_attachment_id, sql_unchecked_reason,
+                 excel_missing_columns, excel_is_columns_complete, excel_actual_columns_snapshot, excel_unchecked_reason, result_attachment_id,
+                 record_kind)
+               VALUES (?, NULL, ?, ?, ?, datetime('now','localtime'),
+                 ?, ?, ?, ?, ?, ?,
+                 ?, ?, ?, ?, ?,
+                 'passed')`
+            : `INSERT INTO collab_quality_record
+                (collab_request_id, collab_sub_item_id, submitter_id, submitter_name,
+                 submission_seq, submitted_at,
+                 missing_columns, is_columns_complete, expected_columns_snapshot, actual_columns_snapshot, sql_attachment_id, sql_unchecked_reason,
+                 excel_missing_columns, excel_is_columns_complete, excel_actual_columns_snapshot, excel_unchecked_reason, result_attachment_id,
+                 record_kind)
+               VALUES (?, NULL, ?, ?, ?, datetime('now','localtime'),
+                 ?, ?, ?, ?, ?, ?,
+                 ?, ?, ?, ?, ?,
+                 'failed')`;
+        const insertParams = [
+            requestId, submitterId, submitterName, submissionSeq,
+            sqlMissingJson, sqlN.is_complete, expectedSnapshot, sqlActualSnapshot, sqlAttachmentId, sqlN.reason,
+            excelMissingJson, excelN.is_complete, excelActualSnapshot, excelN.reason, resultAttachmentId,
+        ];
+
+        let persistenceStatus;
+        try {
+            const insres = await dbAsync.runAsync(insertSql, insertParams);
+            // §8b.5：区分幂等 vs 约束错误
+            if (recordKind === 'passed') {
+                persistenceStatus = (insres && insres.changes > 0) ? 'recorded' : 'ignored_due_to_duplicate';
+                if (persistenceStatus === 'ignored_due_to_duplicate') {
+                    log.info(`[collab-dualcheck] req=${requestId} seq=${submissionSeq} passed 路径幂等命中（同 seq 已有 passed 记录）`);
+                }
+            } else {
+                // failed 路径不带 OR IGNORE，正常都 changes=1
+                persistenceStatus = 'recorded';
+            }
+        } catch (e) {
+            // CHECK/NOT NULL 等约束错误（§8b.5 不静默吞）
+            log.warn(`[collab-dualcheck] req=${requestId} seq=${submissionSeq} INSERT 异常（${recordKind}，不阻断主流程）：${e.message}`);
+            tryInsertQualityLog(ctx, requestId, submitterId, submitterName,
+                `dualcheck_insert_failed/${recordKind}:${e.message}`, log);
+            persistenceStatus = 'failed';
+        }
+
+        // [7] operation_log 留痕
+        tryInsertQualityLog(ctx, requestId, submitterId, submitterName,
+            `dualcheck:${recordKind}/sql=${sqlN.is_complete === null ? `NULL(${sqlN.reason})` : sqlN.is_complete}/excel=${excelN.is_complete === null ? `NULL(${excelN.reason})` : excelN.is_complete}/persist=${persistenceStatus}`, log);
+
+        // [8] 稳定返回（§6.1）
+        return {
+            sql:   { is_complete: sqlN.is_complete,   missing: sqlN.missing,   reason: sqlN.reason },
+            excel: { is_complete: excelN.is_complete, missing: excelN.missing, reason: excelN.reason },
+            check_status: 'ok',
+            persistence_status: persistenceStatus,
+        };
+    } catch (e) {
+        // 顶层兜底：任何漏网异常都返回 compute_failed（H-2 + §8b.4）
+        log.warn(`[collab-dualcheck] recordQualityForDeveloperSubmit 顶层异常（已隔离，不阻断 submit）：${e.message}`);
+        return computeFailedReturn('failed');
+    }
 }
 
 module.exports = {
@@ -1013,6 +1278,8 @@ module.exports = {
     checkAttachmentOwnerOrAdmin,
     // 取数交付质量记录 v3.0 Commit C2：submit-export 后列对齐旁路写入
     recordQualityOnSubmit,
+    // 取数质量双校验增强 Commit B：双校验（SQL + excel）+ record_kind 分流（passed/failed）+ 稳定 schema
+    recordQualityForDeveloperSubmit,
     // 取数交付质量记录 v3.0 Commit D：退回开发最小状态转换骨架（公共函数）
     transitionToDevPending,
     // 取数交付质量记录 v3.0 Commit E：模板上传列对齐可读性预检（源头防线）
