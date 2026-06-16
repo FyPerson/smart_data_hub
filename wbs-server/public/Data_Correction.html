@@ -1,0 +1,1328 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>数据修正 - 智数协同平台</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="assets/css/style.css?v=1.2">
+    <style>
+        /* ===== 筛选栏（对齐 Issue_Tracker 范式）===== */
+        .filter-bar {
+            display: flex; align-items: center; gap: 10px;
+            padding: 16px 20px; background: #fff; border-radius: 10px;
+            border: 1px solid #e2e8f0; margin-bottom: 16px; flex-wrap: wrap;
+        }
+        .filter-bar select, .filter-bar input {
+            padding: 7px 12px; border: 1px solid #d1d5db; border-radius: 6px;
+            font-size: 13px; background: #fff; color: #374151; outline: none; transition: border-color 0.2s;
+        }
+        .filter-bar select:focus, .filter-bar input:focus { border-color: #d97706; }
+        .filter-bar input[type="text"] { width: 200px; }
+        .filter-bar .filter-label { font-size: 12px; color: #6b7280; margin-right: -4px; }
+        .btn-primary {
+            padding: 8px 18px; background: linear-gradient(135deg, #d97706, #b45309);
+            color: #fff; border: none; border-radius: 6px; font-size: 13px; font-weight: 600;
+            cursor: pointer; display: inline-flex; align-items: center; gap: 5px; transition: opacity 0.2s; white-space: nowrap;
+        }
+        .btn-primary:hover { opacity: 0.9; }
+        .req { color: #dc2626; font-weight: 700; }
+        .hint { font-size: 11px; color: #9ca3af; margin-top: 4px; line-height: 1.5; }
+        .btn-primary:disabled { opacity: 0.55; cursor: not-allowed; }
+        .btn-secondary {
+            padding: 6px 14px; background: #f3f4f6; color: #374151; border: 1px solid #d1d5db;
+            border-radius: 6px; font-size: 13px; cursor: pointer; transition: background 0.2s;
+        }
+        .btn-secondary:hover { background: #e5e7eb; }
+        .btn-danger {
+            padding: 6px 14px; background: #fee2e2; color: #dc2626; border: 1px solid #fca5a5;
+            border-radius: 6px; font-size: 13px; cursor: pointer;
+        }
+        .btn-danger:hover { background: #fecaca; }
+
+        /* ===== 统计卡片 ===== */
+        .stats-row { display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
+        .stat-card {
+            flex: 1; min-width: 130px; background: #fff; border-radius: 10px; border: 1px solid #e2e8f0;
+            padding: 14px 18px; display: flex; align-items: center; gap: 12px; cursor: pointer;
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+        .stat-card:hover { border-color: #d97706; box-shadow: 0 2px 8px rgba(217,119,6,0.08); }
+        .stat-card.active { border-color: #d97706; background: #fffbeb; }
+        .stat-icon { width: 36px; height: 36px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 16px; }
+        .stat-info .stat-num { font-size: 22px; font-weight: 700; color: #111827; }
+        .stat-info .stat-label { font-size: 12px; color: #6b7280; margin-top: 2px; }
+
+        /* ===== 表格 ===== */
+        .corr-table-wrap { overflow-x: auto; border-radius: 10px; border: 1px solid #e2e8f0; }
+        .corr-table { width: 100%; min-width: 1100px; border-collapse: separate; border-spacing: 0; background: #fff; }
+        .corr-table th {
+            background: #f8fafc; padding: 10px 14px; font-size: 12px; font-weight: 600; color: #64748b;
+            text-align: left; border-bottom: 1px solid #e2e8f0; white-space: nowrap;
+        }
+        .corr-table td { padding: 12px 14px; font-size: 13px; color: #374151; border-bottom: 1px solid #f1f5f9; vertical-align: middle; }
+        .corr-table tr:last-child td { border-bottom: none; }
+        .corr-table tbody tr { cursor: pointer; transition: background 0.15s; }
+        .corr-table tbody tr:hover { background: #fffbeb; }
+        .corr-table td.ellip { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+        /* 类型标签（单/批量） */
+        .type-tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 500; }
+        .type-tag.t-single { background: #dbeafe; color: #1d4ed8; }
+        .type-tag.t-batch { background: #fef3c7; color: #92400e; }
+
+        /* 状态徽章（8 态，class 用原 status key） */
+        .status-badge { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: 600; white-space: nowrap; }
+        .status-badge.s-PENDING_ASSIGN { background: #f3f4f6; color: #6b7280; }
+        .status-badge.s-ASSIGNED_PENDING_ESTIMATE { background: #e0e7ff; color: #4338ca; }
+        .status-badge.s-IN_PROGRESS { background: #dbeafe; color: #1d4ed8; }
+        .status-badge.s-FIXED { background: #fef3c7; color: #92400e; }
+        .status-badge.s-REFIXED { background: #ccfbf1; color: #0f766e; }
+        .status-badge.s-ARCHIVED { background: #d1fae5; color: #065f46; }
+        .status-badge.s-REJECTED { background: #f3f4f6; color: #991b1b; }
+        .status-badge.s-VOIDED { background: #e5e7eb; color: #9ca3af; }
+
+        /* 超期/积压高亮标记 */
+        .flag-overdue { display: inline-block; margin-left: 6px; font-size: 11px; color: #dc2626; font-weight: 600; }
+        .flag-backlog { display: inline-block; margin-left: 6px; font-size: 11px; color: #d97706; font-weight: 600; }
+
+        /* 详情区块 */
+        .detail-section { margin-bottom: 18px; }
+        .detail-section h3 { font-size: 13px; font-weight: 600; color: #374151; margin: 0 0 8px; padding-bottom: 6px; border-bottom: 1px solid #f1f5f9; }
+        .kv-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 16px; }
+        .kv-item { font-size: 13px; }
+        .kv-item label { display: block; font-size: 11px; color: #9ca3af; margin-bottom: 2px; }
+        .kv-item .v { color: #374151; word-break: break-word; }
+        .kv-item.full { grid-column: 1 / -1; }
+        .history-item { font-size: 12px; padding: 6px 0; border-bottom: 1px dashed #f1f5f9; }
+        .history-item:last-child { border-bottom: none; }
+        .att-item { font-size: 12px; padding: 4px 0; }
+        .att-item a { color: #2563eb; text-decoration: none; }
+        .att-item a:hover { text-decoration: underline; }
+        .notify-badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 500; }
+        .notify-badge.n-sent { background: #ecfdf5; color: #059669; }
+        .notify-badge.n-failed { background: #fef2f2; color: #dc2626; }
+        .notify-badge.n-not_sent { background: #f3f4f6; color: #6b7280; }
+        .notify-badge.n-no_phone { background: #fffbeb; color: #b45309; }
+        /* ===== 通知区四态行（§2.4，每类通知一行：标签 + 状态文案 + 操作按钮）===== */
+        .notify-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 0; border-bottom: 1px dashed #f1f5f9; flex-wrap: wrap; }
+        .notify-row:last-child { border-bottom: none; }
+        .notify-row .nr-label { font-size: 12px; color: #6b7280; font-weight: 600; min-width: 110px; }
+        .notify-row .nr-body { flex: 1; font-size: 12px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+        .notify-row .nb-btn { font-size: 11px; padding: 3px 10px; }
+        .action-bar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+        .action-bar select { font-size: 12px; padding: 5px 8px; border: 1px solid #d1d5db; border-radius: 6px; }
+        .action-bar .btn-primary, .action-bar .btn-secondary, .action-bar .btn-danger { font-size: 12px; padding: 5px 12px; }
+
+        /* 拉群成员勾选弹窗 */
+        .member-base-list { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 10px 12px; font-size: 13px; color: #374151; margin-bottom: 12px; }
+        .member-base-list .mb-item { padding: 2px 0; }
+        .member-extra-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px; max-height: 220px; overflow-y: auto; border: 1px solid #e2e8f0; border-radius: 6px; padding: 10px 12px; }
+        .member-extra-grid label { font-size: 13px; color: #374151; display: flex; align-items: center; gap: 6px; cursor: pointer; }
+        .radio-row { display: flex; gap: 18px; align-items: center; margin: 4px 0 10px; font-size: 13px; flex-wrap: wrap; }
+        .radio-row label { display: flex; align-items: center; gap: 5px; cursor: pointer; }
+
+        /* ===== 详情抽屉（自定义，覆盖 style.css 的常显 .drawer-overlay 旧样式；带 .open 门控）===== */
+        .drawer-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.3); z-index: 900; }
+        .drawer-overlay.open { display: block; }
+        .drawer { position: fixed; top: 0; right: -620px; bottom: 0; width: 600px; max-width: 92vw; background: #fff; box-shadow: -4px 0 20px rgba(0,0,0,0.12); z-index: 901; transition: right 0.3s ease; display: flex; flex-direction: column; }
+        .drawer.open { right: 0; }
+        .drawer-header { padding: 20px 24px 16px; border-bottom: 1px solid #e2e8f0; display: flex; justify-content: space-between; align-items: flex-start; }
+        .drawer-header h2 { font-size: 16px; font-weight: 700; color: #111827; margin: 0; flex: 1; line-height: 1.5; }
+        .drawer-close { background: none; border: none; font-size: 20px; cursor: pointer; color: #6b7280; padding: 4px; line-height: 1; }
+        .drawer-close:hover { color: #111827; }
+        .drawer-body { flex: 1; overflow-y: auto; padding: 20px 24px; }
+
+        /* ===== 弹窗 ===== */
+        .modal-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.4); z-index: 1000; justify-content: center; align-items: center; }
+        .modal-overlay.open { display: flex; }
+        .modal-box { background: #fff; border-radius: 14px; width: 560px; max-width: 92vw; max-height: 90vh; overflow-y: auto; box-shadow: 0 20px 60px rgba(0,0,0,0.15); }
+        .modal-header { padding: 20px 24px 0; display: flex; justify-content: space-between; align-items: center; }
+        .modal-header h2 { font-size: 16px; font-weight: 700; color: #111827; margin: 0; }
+        .modal-body { padding: 20px 24px; }
+        .modal-footer { padding: 0 24px 20px; display: flex; justify-content: flex-end; gap: 10px; }
+        .form-group { margin-bottom: 14px; }
+        .form-group label { display: block; font-size: 12px; font-weight: 600; color: #374151; margin-bottom: 5px; }
+        .form-group input, .form-group select, .form-group textarea { width: 100%; padding: 8px 12px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 13px; font-family: inherit; outline: none; box-sizing: border-box; }
+        .form-group input:focus, .form-group select:focus, .form-group textarea:focus { border-color: #d97706; }
+        .form-group textarea { resize: vertical; min-height: 70px; }
+        .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+
+        /* 空状态 */
+        .empty-state { text-align: center; padding: 60px 20px; color: #9ca3af; }
+        .empty-state svg { margin-bottom: 12px; }
+    </style>
+</head>
+
+<body>
+    <nav class="navbar fixed-header">
+        <div class="nav-left">
+            <div class="nav-logo">
+                <svg viewBox="0 0 24 24" fill="none" stroke="url(#logo-gradient)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <defs><linearGradient id="logo-gradient" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" style="stop-color:#d97706"/><stop offset="100%" style="stop-color:#b45309"/></linearGradient></defs>
+                    <circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>
+                </svg>
+            </div>
+            <div class="nav-title">智数协同平台</div>
+        </div>
+        <div class="nav-right">
+            <a href="/Task_Pool.html" class="nav-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+                任务池
+            </a>
+            <a href="/Data_Collab.html" class="nav-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+                数据协作
+            </a>
+            <a href="/Issue_Tracker.html" class="nav-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                需求跟踪
+            </a>
+            <a href="/Data_Correction.html" class="nav-item" style="color:#d97706; font-weight:600;">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                数据修正
+            </a>
+            <a href="/My_Workspace.html" class="nav-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+                我的工作台
+            </a>
+            <div class="nav-dropdown">
+                <button class="nav-dropdown-trigger">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
+                    数据中心
+                    <svg class="arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+                </button>
+                <div class="nav-dropdown-menu">
+                    <a href="/Dashboard.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>建设总览</a>
+                    <a href="/Asset_Center.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>资产中心</a>
+                    <a href="/Model_Center.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>模型中心</a>
+                    <a href="/Metrics.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>指标中心</a>
+                </div>
+            </div>
+            <a href="/Statistics.html" class="nav-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="20" x2="12" y2="10"/><line x1="18" y1="20" x2="18" y2="4"/><line x1="6" y1="20" x2="6" y2="16"/></svg>
+                统计中心
+            </a>
+            <a href="/Doc_Viewer.html" target="_blank" class="nav-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+                文档中心
+            </a>
+            <div class="nav-divider"></div>
+            <div id="userProfileArea"></div>
+        </div>
+    </nav>
+
+    <main class="workbench-container">
+        <!-- 统计卡片（按状态分组） -->
+        <div class="stats-row" id="statsRow">
+            <div class="stat-card active" onclick="filterByGroup('')" data-group="">
+                <div class="stat-icon" style="background:#f3f4f6;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#6b7280" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/></svg></div>
+                <div class="stat-info"><div class="stat-num" id="statAll">0</div><div class="stat-label">全部</div></div>
+            </div>
+            <div class="stat-card" onclick="filterByGroup('pending')" data-group="pending">
+                <div class="stat-icon" style="background:#f3f4f6;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#6b7280" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></div>
+                <div class="stat-info"><div class="stat-num" id="statPending">0</div><div class="stat-label">待指派/待回复</div></div>
+            </div>
+            <div class="stat-card" onclick="filterByGroup('progress')" data-group="progress">
+                <div class="stat-icon" style="background:#dbeafe;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#1d4ed8" stroke-width="2"><path d="M12 2v4"/><path d="M12 18v4"/><path d="M4.93 4.93l2.83 2.83"/><path d="M16.24 16.24l2.83 2.83"/></svg></div>
+                <div class="stat-info"><div class="stat-num" id="statProgress">0</div><div class="stat-label">修正中</div></div>
+            </div>
+            <div class="stat-card" onclick="filterByGroup('fixed')" data-group="fixed">
+                <div class="stat-icon" style="background:#fef3c7;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#92400e" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg></div>
+                <div class="stat-info"><div class="stat-num" id="statFixed">0</div><div class="stat-label">已完成待归档</div></div>
+            </div>
+            <div class="stat-card" onclick="filterByGroup('archived')" data-group="archived">
+                <div class="stat-icon" style="background:#d1fae5;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#065f46" stroke-width="2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg></div>
+                <div class="stat-info"><div class="stat-num" id="statArchived">0</div><div class="stat-label">已归档</div></div>
+            </div>
+        </div>
+
+        <!-- 筛选栏 -->
+        <div class="filter-bar">
+            <span class="filter-label">所属系统</span>
+            <select id="filterSystem" onchange="renderTable()">
+                <option value="">全部系统</option>
+            </select>
+            <span class="filter-label">类型</span>
+            <select id="filterType" onchange="renderTable()">
+                <option value="">全部类型</option>
+                <option value="single">单数据修正</option>
+                <option value="batch">批量数据修正</option>
+            </select>
+            <label style="font-size:12px; color:#6b7280; display:flex; align-items:center; gap:5px; cursor:pointer;">
+                <input type="checkbox" id="filterBacklog" onchange="exclusiveBacklog('filterBacklog')"> 仅看积压(对接人已通知超3天未指派)
+            </label>
+            <label style="font-size:12px; color:#6b7280; display:flex; align-items:center; gap:5px; cursor:pointer;">
+                <input type="checkbox" id="filterUnarchived" onchange="exclusiveBacklog('filterUnarchived')"> 仅看完成超7天未归档
+            </label>
+            <label id="includeVoidedWrap" style="font-size:12px; color:#6b7280; display:none; align-items:center; gap:5px; cursor:pointer;">
+                <input type="checkbox" id="filterIncludeVoided" onchange="loadList()"> 含已作废
+            </label>
+            <input type="text" id="filterSearch" placeholder="搜索修正方式/业务方/OA..." onkeyup="debounceSearch()">
+            <div style="flex:1;"></div>
+            <button class="btn-primary" id="btnNewCorrection" onclick="openCreateModal()" style="display:none;">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                新建修正单
+            </button>
+        </div>
+
+        <!-- 列表 -->
+        <div class="corr-table-wrap">
+            <table class="corr-table">
+                <thead>
+                    <tr>
+                        <th style="width:46px;">#</th>
+                        <th style="width:90px;">状态</th>
+                        <th style="width:64px;">类型</th>
+                        <th style="width:110px;">所属系统</th>
+                        <th style="min-width:220px;">修正方式</th>
+                        <th style="width:110px;">业务方</th>
+                        <th style="width:100px;">指派开发</th>
+                        <th style="width:90px;">创建人</th>
+                        <th style="width:64px;">提交次数</th>
+                        <th style="width:160px;">创建时间</th>
+                    </tr>
+                </thead>
+                <tbody id="corrTableBody"></tbody>
+            </table>
+        </div>
+        <div class="empty-state" id="emptyState" style="display:none;">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#d1d5db" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+            <p>暂无数据修正单</p>
+        </div>
+    </main>
+
+    <!-- 详情抽屉 -->
+    <div class="drawer-overlay" id="drawerOverlay" onclick="closeDrawer()"></div>
+    <div class="drawer" id="drawer">
+        <div class="drawer-header">
+            <h2 id="drawerTitle">修正单详情</h2>
+            <button class="drawer-close" onclick="closeDrawer()">&times;</button>
+        </div>
+        <div class="drawer-body" id="drawerBody"></div>
+    </div>
+
+    <!-- 新建修正单弹窗（仅 admin） -->
+    <div class="modal-overlay" id="createModal">
+        <div class="modal-box">
+            <div class="modal-header"><h2>新建修正单</h2><button class="drawer-close" onclick="closeCreateModal()">&times;</button></div>
+            <div class="modal-body">
+                <div class="form-group"><label>OA 单号</label><input type="text" id="formOaNumber" placeholder="可选，业务方走 OA 流程的单号"></div>
+                <div class="form-group">
+                    <label>修正类型 <span class="req">*</span></label>
+                    <div class="radio-row">
+                        <label><input type="radio" name="corrType" value="single" checked> 单数据修正（标完成需传结果证明截图）</label>
+                        <label><input type="radio" name="corrType" value="batch"> 批量数据修正（标完成填文字说明）</label>
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>所属系统 <span class="req">*</span></label>
+                        <select id="formSourceSystem" onchange="toggleSourceOther()"></select>
+                    </div>
+                    <div class="form-group" id="sourceOtherGroup" style="display:none;">
+                        <label>其他系统说明 <span class="req">*</span></label>
+                        <input type="text" id="formSourceSystemOther" placeholder="选「其他」时必填">
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>修正方式 <span class="req">*</span></label>
+                    <textarea id="formLocationInfo" rows="3" placeholder="一句话写清：哪里的什么数据错了，要改成什么。如：合同表 C2024-001 的金额字段当前显示 100，应改为 120"></textarea>
+                    <div class="hint">合并原"错误描述 + 期望值"——把"错在哪 + 要改成什么"写在一起。</div>
+                </div>
+                <div class="form-group">
+                    <label>修正条数</label>
+                    <input type="number" id="formCorrectionCount" min="1" step="1" placeholder="可选，本次修正涉及的记录条数">
+                    <div class="hint">纯记账字段，可不填；填则须为正整数（单修正通常 1，批量填 N）。</div>
+                </div>
+                <div class="form-group"><label>原因/背景</label><textarea id="formReason" rows="2" placeholder="可选，错误产生原因或修正背景"></textarea></div>
+                <div class="form-row">
+                    <div class="form-group"><label>业务方部门</label><select id="formRequesterDept"></select></div>
+                    <div class="form-group"><label>业务方姓名 <span class="req">*</span></label><input type="text" id="formRequesterName" placeholder="提出修正的业务方"></div>
+                </div>
+                <div class="form-group"><label>业务方手机号</label><input type="text" id="formRequesterPhone" placeholder="可选，用于完成后钉钉通知业务方"></div>
+                <!-- 指派路径 A/B/none（二选一，G-16；§1.5 三选一字段联动：A 必填开发 / B 必填对接人 / none 都不填） -->
+                <div class="form-group">
+                    <label>指派方式</label>
+                    <div class="radio-row">
+                        <label><input type="radio" name="assignMode" value="A" checked onchange="toggleAssignMode()"> 直接指派开发</label>
+                        <label><input type="radio" name="assignMode" value="B" onchange="toggleAssignMode()"> 先通知对接人协助指派</label>
+                        <label><input type="radio" name="assignMode" value="none" onchange="toggleAssignMode()"> 暂不指派</label>
+                    </div>
+                </div>
+                <div class="form-group" id="assignAGroup">
+                    <label>指派给（开发/处理人）</label>
+                    <select id="formAssignedTo"><option value="">请选择开发/处理人</option></select>
+                    <div class="hint">下拉为全部非查看者用户，凭备注辨识；选定后建单即指派，需在详情页手动点「通知开发」发送钉钉。</div>
+                </div>
+                <div class="form-group" id="assignBGroup" style="display:none;">
+                    <label>对接人（仅管理员/发布者）</label>
+                    <select id="formRelayUser"><option value="">请选择对接人</option></select>
+                    <div class="hint">建单后记录对接人，需在详情页手动点「通知对接人」发送钉钉；对接人收到后在平台指派。</div>
+                </div>
+                <!-- 注：建单态 error_proof 上传端点 A-E 未实现（建单为 JSON 接口无 multer，/attachments 仅 FIXED/REFIXED 可用）。
+                     本期建单不提供错误证明上传入口，避免空壳。错误描述靠文字（location_info）承载；
+                     如需 error_proof 上传，需后续补"建单态附件上传端点"（已记 backlog）。 -->
+            </div>
+            <div class="modal-footer">
+                <button class="btn-secondary" onclick="closeCreateModal()">取消</button>
+                <button class="btn-primary" id="btnSubmitCreate" onclick="submitCorrection()">提交</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 回复预计完成时间弹窗 -->
+    <div class="modal-overlay" id="estimateModal">
+        <div class="modal-box" style="max-width:440px;">
+            <div class="modal-header"><h2>回复预计完成时间</h2><button class="drawer-close" onclick="closeModal('estimateModal')">&times;</button></div>
+            <div class="modal-body">
+                <input type="hidden" id="estimateCorrId">
+                <div class="form-group"><label>预计完成时间 <span class="req">*</span></label><input type="datetime-local" id="formEstimateAt"></div>
+                <div style="font-size:12px; color:#6b7280;">回复后单进入「修正中」；钉钉通知业务方需在详情页手动点「通知业务方·预计」发送。</div>
+            </div>
+            <div class="modal-footer"><button class="btn-secondary" onclick="closeModal('estimateModal')">取消</button><button class="btn-primary" id="btnSubmitEstimate" onclick="submitEstimate()">提交</button></div>
+        </div>
+    </div>
+
+    <!-- 标完成弹窗 -->
+    <div class="modal-overlay" id="completeModal">
+        <div class="modal-box" style="max-width:480px;">
+            <div class="modal-header"><h2>标完成</h2><button class="drawer-close" onclick="closeModal('completeModal')">&times;</button></div>
+            <div class="modal-body">
+                <input type="hidden" id="completeCorrId">
+                <div class="form-group" id="completeSingleGroup">
+                    <label>结果证明截图 <span class="req">*</span>（单数据修正必传）</label>
+                    <input type="file" id="formCompleteFiles" multiple accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.pdf,.xlsx,.xls">
+                </div>
+                <div class="form-group" id="completeBatchGroup" style="display:none;">
+                    <label>完成说明 <span class="req">*</span>（批量数据修正必填）</label>
+                    <textarea id="formBatchNote" rows="3" placeholder="如：批量更新 30 条客户编号映射"></textarea>
+                    <div style="font-size:11px; color:#9ca3af; margin-top:2px;">批量可选附结果证明（可不传）</div>
+                    <input type="file" id="formCompleteBatchFiles" multiple accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.pdf,.xlsx,.xls" style="margin-top:6px;">
+                </div>
+            </div>
+            <div class="modal-footer"><button class="btn-secondary" onclick="closeModal('completeModal')">取消</button><button class="btn-primary" id="btnSubmitComplete" onclick="submitComplete()">提交</button></div>
+        </div>
+    </div>
+
+    <!-- 重修提交弹窗 -->
+    <div class="modal-overlay" id="resubmitModal">
+        <div class="modal-box" style="max-width:480px;">
+            <div class="modal-header"><h2>重修提交</h2><button class="drawer-close" onclick="closeModal('resubmitModal')">&times;</button></div>
+            <div class="modal-body">
+                <input type="hidden" id="resubmitCorrId">
+                <div style="font-size:12px; color:#6b7280; margin-bottom:8px;">业务方异议/拉群讨论后重新修正，提交本次新的结果证明。</div>
+                <div class="form-group" id="resubmitSingleGroup">
+                    <label>本次新增结果证明 <span class="req">*</span>（单数据修正必传）</label>
+                    <input type="file" id="formResubmitFiles" multiple accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.pdf,.xlsx,.xls">
+                </div>
+                <div class="form-group" id="resubmitBatchGroup" style="display:none;">
+                    <label>本次重修说明 <span class="req">*</span>（批量数据修正必填）</label>
+                    <textarea id="formResubmitNote" rows="3" placeholder="本次重修做了什么"></textarea>
+                    <input type="file" id="formResubmitBatchFiles" multiple accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.pdf,.xlsx,.xls" style="margin-top:6px;">
+                </div>
+            </div>
+            <div class="modal-footer"><button class="btn-secondary" onclick="closeModal('resubmitModal')">取消</button><button class="btn-primary" id="btnSubmitResubmit" onclick="submitResubmit()">提交</button></div>
+        </div>
+    </div>
+
+    <!-- 补充附件弹窗 -->
+    <div class="modal-overlay" id="attachModal">
+        <div class="modal-box" style="max-width:440px;">
+            <div class="modal-header"><h2>补充附件</h2><button class="drawer-close" onclick="closeModal('attachModal')">&times;</button></div>
+            <div class="modal-body">
+                <input type="hidden" id="attachCorrId">
+                <div style="font-size:12px; color:#6b7280; margin-bottom:8px;">仅补充证据留存，不改变状态、不计入提交次数。</div>
+                <div class="form-group"><label>补充附件 <span class="req">*</span></label><input type="file" id="formAttachFiles" multiple accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.pdf,.xlsx,.xls"></div>
+            </div>
+            <div class="modal-footer"><button class="btn-secondary" onclick="closeModal('attachModal')">取消</button><button class="btn-primary" id="btnSubmitAttach" onclick="submitAttachments()">提交</button></div>
+        </div>
+    </div>
+
+    <!-- 归档弹窗 -->
+    <div class="modal-overlay" id="archiveModal">
+        <div class="modal-box" style="max-width:460px;">
+            <div class="modal-header"><h2>归档修正单</h2><button class="drawer-close" onclick="closeModal('archiveModal')">&times;</button></div>
+            <div class="modal-body">
+                <input type="hidden" id="archiveCorrId">
+                <div id="archiveFrictionHint" style="font-size:12px; color:#b45309; background:#fffbeb; border:1px solid #fde68a; border-radius:6px; padding:8px 10px; margin-bottom:10px; display:none;">
+                    本单发起过拉群讨论（有摩擦），归档须填写摩擦原因。
+                </div>
+                <div class="form-group" id="archiveFrictionGroup" style="display:none;">
+                    <label>摩擦原因 <span class="req">*</span></label>
+                    <textarea id="formFrictionReason" rows="3" placeholder="如：业务方对首次修正有异议，拉群澄清口径后重新修正确认"></textarea>
+                </div>
+                <div id="archiveNoNotifyHint" style="font-size:12px; color:#6b7280; display:none;">提示：尚未发送完成通知给业务方，确认要直接归档吗？</div>
+            </div>
+            <div class="modal-footer"><button class="btn-secondary" onclick="closeModal('archiveModal')">取消</button><button class="btn-primary" id="btnSubmitArchive" onclick="submitArchive()">确认归档</button></div>
+        </div>
+    </div>
+
+    <!-- 行政闭环弹窗（I2/I3 §3，仅 admin，未完成态记账式收口 → ARCHIVED + closure_type=admin_closure） -->
+    <div class="modal-overlay" id="adminCloseModal">
+        <div class="modal-box" style="max-width:480px;">
+            <div class="modal-header"><h2>行政闭环</h2><button class="drawer-close" onclick="closeModal('adminCloseModal')">&times;</button></div>
+            <div class="modal-body">
+                <input type="hidden" id="adminCloseCorrId">
+                <div style="font-size:12px; color:#b45309; background:#fffbeb; border:1px solid #fde68a; border-radius:6px; padding:8px 10px; margin-bottom:10px;">
+                    行政闭环用于「开发迟迟未处理 / 线下已处理 / 需强制收口」的未完成单，记账式归档，不要求走「完成→归档」。归档方式标记为「行政闭环」，与正常完成单区分。
+                </div>
+                <div class="form-group">
+                    <label>行政闭环原因 <span class="req">*</span>（10-500 字）</label>
+                    <textarea id="formClosureReason" rows="4" maxlength="500" placeholder="如：业务方已线下确认处理，OA 流程关闭，平台记账收口"></textarea>
+                </div>
+            </div>
+            <div class="modal-footer"><button class="btn-secondary" onclick="closeModal('adminCloseModal')">取消</button><button class="btn-primary" id="btnSubmitAdminClose" onclick="submitAdminClose()">确认行政闭环</button></div>
+        </div>
+    </div>
+
+    <!-- 拒绝弹窗 -->
+    <div class="modal-overlay" id="rejectModal">
+        <div class="modal-box" style="max-width:440px;">
+            <div class="modal-header"><h2>拒绝修正单</h2><button class="drawer-close" onclick="closeModal('rejectModal')">&times;</button></div>
+            <div class="modal-body">
+                <input type="hidden" id="rejectCorrId">
+                <div class="form-group"><label>拒绝原因 <span class="req">*</span></label><textarea id="formRejectReason" rows="3" maxlength="500" placeholder="为什么拒绝这个修正需求"></textarea></div>
+            </div>
+            <div class="modal-footer"><button class="btn-secondary" onclick="closeModal('rejectModal')">取消</button><button class="btn-primary" id="btnSubmitReject" onclick="submitReject()">确认拒绝</button></div>
+        </div>
+    </div>
+
+    <!-- 拉群勾选弹窗 -->
+    <div class="modal-overlay" id="chatModal">
+        <div class="modal-box" style="max-width:520px;">
+            <div class="modal-header"><h2>拉群讨论</h2><button class="drawer-close" onclick="closeModal('chatModal')">&times;</button></div>
+            <div class="modal-body">
+                <input type="hidden" id="chatCorrId">
+                <div style="font-size:13px; font-weight:600; color:#374151; margin-bottom:6px;">固定成员（自动加入）</div>
+                <div class="member-base-list" id="chatBaseList"></div>
+                <div style="font-size:13px; font-weight:600; color:#374151; margin:10px 0 6px;">额外成员（可选，多选）</div>
+                <div class="member-extra-grid" id="chatExtraGrid"></div>
+                <div style="font-size:11px; color:#9ca3af; margin-top:6px;">钉钉建群后拉人/移除/解散均在钉钉客户端操作，平台不再管理。</div>
+            </div>
+            <div class="modal-footer"><button class="btn-secondary" onclick="closeModal('chatModal')">取消</button><button class="btn-primary" id="btnSubmitChat" onclick="submitCreateChat()">建群</button></div>
+        </div>
+    </div>
+
+    <script src="assets/js/app.js"></script>
+    <script>
+        // ================= 常量（与后端同源）=================
+        // 拉群可选成员排除名单（§5.4，与后端 CORRECTION_CHAT_EXCLUDE_IDS 同源；只排金华琴 11）
+        const CORRECTION_CHAT_EXCLUDE_IDS = [11];
+        // 群主固定示例用户A（与后端 COLLAB_CHAT_ADMIN_ID 同源）；将来改人需前后端同步
+        const CORRECTION_CHAT_ADMIN_ID = 3;
+        // 所属系统白名单（与后端 CORRECTION_SOURCE_SYSTEMS 同源）
+        const CORRECTION_SOURCE_SYSTEMS = ['BMS', 'CRM', 'HRD', '财务系统', 'OA 系统', 'FineDataLink数仓', '其他'];
+        const CORRECTION_REQUESTER_DEPTS = [
+            '市场营销部', '交付运营部', '财务管理部', '人事行政部', '审计风控部', '信息技术部', '安全保卫部', '其他归口部门',
+            '董事会', '公司高管', '华北分公司', '华东分公司', '华南分公司', '华西分公司', '华中分公司', '西南分公司', '西北分公司',
+            '杭州区域', '浙北区域', '浙南区域', '示例关联方B', '示例关联方C', '示例集团关联方A', '示例关联方D', '示例海外子公司', '其他'
+        ];
+        const STATUS_LABELS = {
+            PENDING_ASSIGN: '待指派', ASSIGNED_PENDING_ESTIMATE: '待回复预计', IN_PROGRESS: '修正中',
+            FIXED: '已完成', REFIXED: '已重修', ARCHIVED: '已归档', REJECTED: '已拒绝', VOIDED: '已作废'
+        };
+        const CHAT_ALLOWED_STATUSES = ['ASSIGNED_PENDING_ESTIMATE', 'IN_PROGRESS', 'FIXED', 'REFIXED'];
+        const REJECTABLE_STATUSES = ['PENDING_ASSIGN', 'ASSIGNED_PENDING_ESTIMATE', 'IN_PROGRESS'];
+
+        let allItems = [];
+        let allUsers = [];
+        let currentGroup = '';
+        let searchTimer = null;
+        let currentDetail = null;   // M-3：当前详情 request 缓存（归档/拉群读它而非滞后的列表缓存）
+
+        // ================= 初始化 =================
+        document.addEventListener('DOMContentLoaded', async () => {
+            if (typeof checkAuth === 'function') { const ok = await checkAuth(); if (!ok) return; }
+            applyRoleVisibility();
+            fillSystemFilter();
+            await loadUsers();
+            await loadList();
+            const deepId = new URLSearchParams(window.location.search).get('id');
+            if (deepId && /^\d+$/.test(deepId)) { const n = parseInt(deepId, 10); if (Number.isSafeInteger(n) && n > 0) openDrawer(n); }
+        });
+
+        function applyRoleVisibility() {
+            const isAdmin = currentUser && currentUser.role === 'admin';
+            const canViewVoided = currentUser && (currentUser.role === 'admin' || currentUser.role === 'publisher');
+            document.getElementById('btnNewCorrection').style.display = isAdmin ? 'inline-flex' : 'none';
+            document.getElementById('includeVoidedWrap').style.display = canViewVoided ? 'flex' : 'none';
+        }
+
+        function fillSystemFilter() {
+            const sel = document.getElementById('filterSystem');
+            CORRECTION_SOURCE_SYSTEMS.forEach(s => { const o = document.createElement('option'); o.value = s; o.textContent = s; sel.appendChild(o); });
+        }
+
+        async function loadUsers() {
+            try {
+                const res = await authFetch('/api/users/active');
+                if (!res || !res.ok) return;
+                allUsers = await res.json();
+            } catch (e) { console.error('加载用户失败', e); }
+        }
+
+        async function loadList() {
+            try {
+                const params = new URLSearchParams();
+                const includeVoided = document.getElementById('filterIncludeVoided');
+                if (includeVoided && includeVoided.checked) params.set('include_voided', '1');
+                const res = await authFetch(`/api/corrections?${params.toString()}`);
+                if (!res || !res.ok) return;
+                const data = await res.json();
+                allItems = (data && data.items) || [];
+                renderTable();
+                updateStats();
+            } catch (e) { console.error('加载修正单列表失败', e); }
+        }
+
+        function debounceSearch() { clearTimeout(searchTimer); searchTimer = setTimeout(renderTable, 300); }
+
+        // L-1'（codex 19）：两类积压状态集互斥（对接人积压 PENDING_ASSIGN vs 完成未归档 FIXED/REFIXED），
+        //   勾一个自动取消另一个，避免同勾 AND 组合必空列表的困惑。
+        function exclusiveBacklog(which) {
+            if (which === 'filterBacklog' && document.getElementById('filterBacklog').checked) document.getElementById('filterUnarchived').checked = false;
+            if (which === 'filterUnarchived' && document.getElementById('filterUnarchived').checked) document.getElementById('filterBacklog').checked = false;
+            renderTable();
+        }
+
+        function filterByGroup(group) {
+            currentGroup = group;
+            document.querySelectorAll('.stat-card').forEach(c => c.classList.toggle('active', c.dataset.group === group));
+            renderTable();
+        }
+
+        // 状态分组（用于统计卡 + 筛选）
+        function statusGroup(s) {
+            if (s === 'PENDING_ASSIGN' || s === 'ASSIGNED_PENDING_ESTIMATE') return 'pending';
+            if (s === 'IN_PROGRESS') return 'progress';
+            if (s === 'FIXED' || s === 'REFIXED') return 'fixed';
+            if (s === 'ARCHIVED') return 'archived';
+            return 'other'; // REJECTED / VOIDED
+        }
+
+        // 超期（§9.10/§6.2）：以**开发承诺 dev_estimated_at**为准（非业务方软期望 expected_deadline），
+        //   仅「修正中」(IN_PROGRESS) 且已过开发承诺时间才算——超期以开发承诺为准，温和提醒。
+        function isOverdue(item) {
+            if (item.status !== 'IN_PROGRESS' || !item.dev_estimated_at) return false;
+            const dl = parseLocalTime(item.dev_estimated_at);
+            return dl && dl.getTime() < Date.now();
+        }
+        // 对接人积压（§4.2 HIGH-1 + §2.3 口径调整）：PENDING_ASSIGN + 对接人通知成功(relay_notify_status='sent') + 超 3 天未指派
+        //   手动化后 relay_notified_at 重定为"最近一次发送时间"（含 failed），故积压口径从"relay_notified_at 非空"
+        //   收紧为"relay_notify_status='sent'"——只有成功通知却迟迟未指派才算积压（failed 不算"已通知"）。
+        function isBacklog(item) {
+            if (item.status !== 'PENDING_ASSIGN' || item.relay_notify_status !== 'sent' || !item.relay_notified_at) return false;
+            const t = parseLocalTime(item.relay_notified_at);
+            return t && (Date.now() - t.getTime()) > 3 * 86400000;
+        }
+        // 完成未归档积压（§9.32/§807，N=7）：FIXED/REFIXED 且超 7 天未归档（起点 COALESCE(refixed_at, fixed_at)）
+        function isUnarchivedBacklog(item, days = 7) {
+            if (item.status !== 'FIXED' && item.status !== 'REFIXED') return false;
+            const base = parseLocalTime(item.refixed_at || item.fixed_at);
+            return base && (Date.now() - base.getTime()) > days * 86400000;
+        }
+        // 状态 class 白名单归一（L-2）：非 8 态 → UNKNOWN，防脏数据 DOM 注入
+        function statusClass(s) { return STATUS_LABELS[s] ? s : 'UNKNOWN'; }
+        function parseLocalTime(s) {
+            if (!s) return null;
+            const m = String(s).trim().match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/);
+            if (m) return new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +(m[6] || 0));
+            const d = new Date(s); return isNaN(d.getTime()) ? null : d;
+        }
+
+        function getFilteredItems() {
+            const sys = document.getElementById('filterSystem').value;
+            const type = document.getElementById('filterType').value;
+            const onlyBacklog = document.getElementById('filterBacklog').checked;
+            const onlyUnarchived = document.getElementById('filterUnarchived').checked;
+            const kw = document.getElementById('filterSearch').value.trim().toLowerCase();
+            return allItems.filter(it => {
+                if (currentGroup && statusGroup(it.status) !== currentGroup) return false;
+                if (sys && it.source_system !== sys) return false;
+                if (type && it.correction_type !== type) return false;
+                if (onlyBacklog && !isBacklog(it)) return false;
+                if (onlyUnarchived && !isUnarchivedBacklog(it)) return false;
+                if (kw) {
+                    const hay = [it.location_info, it.requester_name, it.oa_number].map(x => (x || '').toLowerCase()).join(' ');
+                    if (!hay.includes(kw)) return false;
+                }
+                return true;
+            });
+        }
+
+        function renderTable() {
+            const tbody = document.getElementById('corrTableBody');
+            const empty = document.getElementById('emptyState');
+            const items = getFilteredItems();
+            if (!items.length) { tbody.innerHTML = ''; empty.style.display = 'block'; return; }
+            empty.style.display = 'none';
+            tbody.innerHTML = items.map(it => `
+                <tr onclick="openDrawer(${Number(it.id)})">
+                    <td style="color:#9ca3af; font-size:12px;">${Number(it.id)}</td>
+                    <td><span class="status-badge s-${statusClass(it.status)}">${escapeHtml(STATUS_LABELS[it.status] || it.status)}</span>${isOverdue(it) ? '<span class="flag-overdue">已超预计</span>' : ''}${isBacklog(it) ? '<span class="flag-backlog">积压</span>' : ''}${isUnarchivedBacklog(it) ? '<span class="flag-backlog">超7天未归档</span>' : ''}${it.status === 'ARCHIVED' && it.closure_type === 'admin_closure' ? '<span class="flag-backlog" style="color:#1d4ed8;">行政闭环</span>' : ''}</td>
+                    <td><span class="type-tag t-${it.correction_type === 'batch' ? 'batch' : 'single'}">${it.correction_type === 'batch' ? '批量' : '单'}</span></td>
+                    <td>${escapeHtml(sysLabel(it))}</td>
+                    <td class="ellip" title="${escapeHtml(it.location_info || '')}">${escapeHtml(it.location_info || '')}</td>
+                    <td>${escapeHtml(it.requester_name || '-')}</td>
+                    <td>${it.assigned_to_name ? escapeHtml(it.assigned_to_name) : '<span style="color:#d1d5db;">未指派</span>'}</td>
+                    <td>${escapeHtml(it.created_by_name || '')}</td>
+                    <td style="text-align:center;">${it.submission_count || 0}</td>
+                    <td class="time-absolute">${escapeHtml(formatFullTime(it.created_at))}</td>
+                </tr>
+            `).join('');
+        }
+
+        function sysLabel(it) {
+            if (it.source_system === '其他' && it.source_system_other) return '其他：' + it.source_system_other;
+            return it.source_system || '-';
+        }
+
+        function updateStats() {
+            const cnt = g => allItems.filter(i => statusGroup(i.status) === g).length;
+            document.getElementById('statAll').textContent = allItems.length;
+            document.getElementById('statPending').textContent = cnt('pending');
+            document.getElementById('statProgress').textContent = cnt('progress');
+            document.getElementById('statFixed').textContent = cnt('fixed');
+            document.getElementById('statArchived').textContent = cnt('archived');
+        }
+
+        // ================= 详情抽屉 =================
+        async function openDrawer(id) {
+            try {
+                const res = await authFetch(`/api/corrections/${id}`);
+                if (!res || !res.ok) {
+                    const e = await res.json().catch(() => ({}));
+                    showToast(e.error || '加载详情失败', 'error');
+                    return;
+                }
+                const data = await res.json();
+                renderDrawer(data);
+                document.getElementById('drawerOverlay').classList.add('open');
+                document.getElementById('drawer').classList.add('open');
+            } catch (e) { console.error('加载详情失败', e); }
+        }
+        function closeDrawer() {
+            document.getElementById('drawerOverlay').classList.remove('open');
+            document.getElementById('drawer').classList.remove('open');
+        }
+
+        function renderDrawer(data) {
+            const r = data.request;
+            currentDetail = r;   // M-3：缓存当前详情，供 openArchive/openCreateChat 读权威数据（非列表缓存）
+            const history = data.history || [];
+            const attachments = data.attachments || [];
+            document.getElementById('drawerTitle').textContent = `#${r.id} 数据修正`;
+            const me = currentUser || {};
+            const isAdmin = me.role === 'admin';
+            const isPublisher = me.role === 'publisher';
+            const isCreator = Number(r.created_by) === Number(me.id) && Number(me.id) > 0;
+            const isAssignee = Number(r.assigned_to) === Number(me.id) && Number(me.id) > 0;
+            const s = r.status;
+            const hasChat = !!r.dingtalk_open_conversation_id;
+
+            // ===== 操作栏 =====
+            let actions = '';
+            if ((isAdmin || isPublisher) && s === 'PENDING_ASSIGN') {
+                actions += `<select id="assignSelectInline" onchange="assignCorrection(${Number(r.id)}, this)"><option value="">指派给（开发/处理人）…</option>` +
+                    allUsers.filter(u => u.role !== 'viewer').map(u => `<option value="${escapeHtml(String(u.id))}">${escapeHtml(u.display_name || u.username)}</option>`).join('') + `</select>`;
+            }
+            if ((isAdmin || isAssignee) && s === 'ASSIGNED_PENDING_ESTIMATE') {
+                actions += `<button class="btn-primary" onclick="openEstimate(${r.id})">回复预计完成</button>`;
+            }
+            if ((isAdmin || isAssignee) && s === 'IN_PROGRESS') {
+                actions += `<button class="btn-primary" onclick="openComplete(${r.id}, '${r.correction_type}')">标完成</button>`;
+            }
+            if ((isAdmin || isAssignee) && (s === 'FIXED' || s === 'REFIXED')) {
+                actions += `<button class="btn-secondary" onclick="openResubmit(${r.id}, '${r.correction_type}')">重修提交</button>`;
+            }
+            if ((isAdmin || isCreator || isAssignee) && (s === 'FIXED' || s === 'REFIXED')) {
+                actions += `<button class="btn-secondary" onclick="openAttach(${r.id})">补充附件</button>`;
+            }
+            if ((isAdmin || isCreator) && (s === 'FIXED' || s === 'REFIXED')) {
+                // 完成通知业务方已移到「通知状态」区（done 类手动发送/查已读/重发，§2.4）
+                actions += `<button class="btn-secondary" onclick="openArchive(${r.id})">归档</button>`;
+            }
+            // 拒绝：admin/publisher 在非终态；assignee 在已指派/进行中
+            if (REJECTABLE_STATUSES.includes(s)) {
+                if (isAdmin || isPublisher || (isAssignee && s !== 'PENDING_ASSIGN')) {
+                    actions += `<button class="btn-danger" onclick="openReject(${r.id})">拒绝</button>`;
+                }
+            }
+            // 拉群：admin/assignee，已指派后非终态可新建；已建群任何人可见入口（幂等）
+            if (isAdmin || isAssignee) {
+                if (hasChat) {
+                    actions += `<button class="btn-secondary" onclick="showToast('本单已有讨论群，请到钉钉客户端查看', 'success')">已建讨论群</button>`;
+                } else if (CHAT_ALLOWED_STATUSES.includes(s)) {
+                    actions += `<button class="btn-secondary" id="btnChat_${r.id}" onclick="openCreateChat(${r.id})">拉群讨论</button>`;
+                }
+            }
+            // 行政闭环（I2/I3 §3.3）：仅 admin，在未完成态（PENDING_ASSIGN/ASSIGNED_PENDING_ESTIMATE/IN_PROGRESS）记账式收口 → ARCHIVED + admin_closure
+            if (isAdmin && ['PENDING_ASSIGN', 'ASSIGNED_PENDING_ESTIMATE', 'IN_PROGRESS'].includes(s)) {
+                actions += `<button class="btn-primary" style="background:linear-gradient(135deg,#2563eb,#1d4ed8);" onclick="openAdminClose(${r.id})">行政闭环</button>`;
+            }
+            // 作废：admin/creator，任意非作废
+            if ((isAdmin || isCreator) && s !== 'VOIDED') {
+                actions += `<button class="btn-danger" onclick="doVoid(${r.id})">作废</button>`;
+            }
+            // §3.5（codex 31 H-1）：行政闭环（admin_closure）单隐藏流程推进动作（complete/resubmit/归档/拉群/行政闭环），
+            //   但**保留作废入口**——作废是 admin/creator 纠错逃生口，与 normal 归档一致，且后端流转表 ARCHIVED→VOIDED（G-14）本就允许；
+            //   前端藏作废会造成"UI 说不可作废但 API 仍可作废"的前后端矛盾，故对齐为"可作废"。
+            if (r.closure_type === 'admin_closure') {
+                actions = (isAdmin || isCreator) && s !== 'VOIDED' ? `<button class="btn-danger" onclick="doVoid(${r.id})">作废</button>` : '';   // codex 32 M-1'：补回 s!=='VOIDED'，已作废单不再显示作废
+            }
+
+            // ===== 基本信息 =====
+            const kv = (label, val) => `<div class="kv-item"><label>${label}</label><div class="v">${val}</div></div>`;
+            const kvFull = (label, val) => `<div class="kv-item full"><label>${label}</label><div class="v">${val}</div></div>`;
+            let info = `<div class="kv-grid">`;
+            info += kv('状态', `<span class="status-badge s-${statusClass(s)}">${escapeHtml(STATUS_LABELS[s] || s)}</span>`);
+            info += kv('类型', r.correction_type === 'batch' ? '批量数据修正' : '单数据修正');
+            info += kv('所属系统', escapeHtml(sysLabel(r)));
+            info += kvFull('修正方式', escapeHtml(r.location_info || '-'));
+            info += kv('修正条数', r.correction_count != null ? String(r.correction_count) : '-');
+            if (r.reason) info += kvFull('原因/背景', escapeHtml(r.reason));
+            info += kv('业务方', escapeHtml((r.requester_name || '-') + (r.requester_dept ? ` / ${r.requester_dept}` : '')));
+            info += kv('业务方手机', escapeHtml(r.requester_phone || '-'));
+            info += kv('OA 单号', escapeHtml(r.oa_number || '-'));
+            info += kv('提交次数', String(r.submission_count || 0));
+            info += kv('指派开发', escapeHtml(r.assigned_to_name || '未指派'));
+            info += kv('创建人', escapeHtml(r.created_by_name || '-'));
+            info += kv('期望完成（业务方参考）', escapeHtml(formatFullTime(r.expected_deadline)));
+            info += kv('开发预计完成', escapeHtml(formatFullTime(r.dev_estimated_at)) + (isOverdue(r) ? ' <span class="flag-overdue">已超预计</span>' : ''));
+            info += kv('创建时间', escapeHtml(formatFullTime(r.created_at)));
+            if (r.fixed_at) info += kv('首次完成', escapeHtml(formatFullTime(r.fixed_at)));
+            if (r.refixed_at) info += kv('最近重修', escapeHtml(formatFullTime(r.refixed_at)));
+            if (s === 'ARCHIVED') info += kv('归档方式', closureTypeLabel(r.closure_type));   // §3.5：normal=正常归档 / admin_closure=行政闭环
+            if (r.closure_type === 'admin_closure' && r.closure_reason) info += kvFull('行政闭环原因', escapeHtml(r.closure_reason));
+            if (r.batch_completion_note) info += kvFull('批量完成说明', escapeHtml(r.batch_completion_note));
+            if (r.reject_reason) info += kvFull('拒绝原因', escapeHtml(r.reject_reason));
+            if (r.friction_reason) info += kvFull('摩擦原因', escapeHtml(r.friction_reason));
+            if (r.void_reason) info += kvFull('作废原因', escapeHtml(r.void_reason));
+            info += `</div>`;
+
+            // ===== 通知区（4 类通知 × 多态 + 手动发送/查已读/重发，§2.4 对齐 collab 详情级）=====
+            //   收件人名：dev=assigned_to_name（列已反规范化）/ relay=allUsers 查 relay_notified_user_id / estimate·done=requester_name
+            const relayName = r.relay_notified_user_id ? (() => { const u = allUsers.find(x => Number(x.id) === Number(r.relay_notified_user_id)); return u ? (u.display_name || u.username) : `用户#${r.relay_notified_user_id}`; })() : '';
+            const noPhone = !String(r.requester_phone || '').trim();
+            const notifyTypes = [
+                { key: 'dev', cid: Number(r.id), label: '通知开发', recipient: r.assigned_to_name || '开发', applicable: !!r.assigned_to,
+                  status: r.notify_status, notifiedAt: r.notified_at, readAt: r.read_at, error: r.notify_error,
+                  sendable: ['ASSIGNED_PENDING_ESTIMATE', 'IN_PROGRESS'], canSend: isAdmin || isPublisher, byPhone: false, noPhone: false },
+                { key: 'relay', cid: Number(r.id), label: '通知对接人', recipient: relayName || '对接人', applicable: !!r.relay_notified_user_id,
+                  status: r.relay_notify_status, notifiedAt: r.relay_notified_at, readAt: r.relay_read_at, error: r.relay_notify_error,
+                  sendable: ['PENDING_ASSIGN'], canSend: isAdmin, byPhone: false, noPhone: false },
+                { key: 'estimate', cid: Number(r.id), label: '通知业务方·预计', recipient: r.requester_name || '业务方', applicable: true,
+                  status: r.requester_notify_status, notifiedAt: r.requester_notified_at, readAt: r.requester_read_at, error: r.requester_notify_error,
+                  sendable: ['IN_PROGRESS'], canSend: isAdmin || isAssignee, byPhone: true, noPhone },
+                { key: 'done', cid: Number(r.id), label: '通知业务方·完成', recipient: r.requester_name || '业务方', applicable: true,
+                  status: r.completion_notify_status, notifiedAt: r.completion_notified_at, readAt: r.completion_read_at, error: r.completion_notify_error,
+                  sendable: ['FIXED', 'REFIXED'], canSend: isAdmin || isCreator, byPhone: true, noPhone },
+            ];
+            const notify = notifyTypes.filter(t => t.applicable).map(t => buildNotifyRow(t, s)).join('');
+
+            // ===== 状态历史 =====
+            let hist = history.length ? history.map(h => `
+                <div class="history-item">
+                    <span class="status-badge s-${statusClass(h.to_status)}" style="font-size:10px;">${escapeHtml(STATUS_LABELS[h.to_status] || h.to_status)}</span>
+                    <span style="color:#9ca3af;"> ← ${h.from_status ? escapeHtml(STATUS_LABELS[h.from_status] || h.from_status) : '建单'}</span>
+                    <span style="color:#6b7280;"> · ${escapeHtml(h.operator_name || '-')} · ${escapeHtml(formatFullTime(h.created_at))}</span>
+                    ${h.reason ? `<div style="color:#6b7280; margin-top:2px;">${escapeHtml(h.reason)}</div>` : ''}
+                </div>`).join('') : '<div style="color:#9ca3af; font-size:12px;">暂无状态历史</div>';
+
+            // ===== 附件 =====
+            const attLink = a => `/uploads/${String(a.file_name || '').split('/').map(encodeURIComponent).join('/')}`;
+            const errProofs = attachments.filter(a => a.attachment_type === 'error_proof');
+            const fixProofs = attachments.filter(a => a.attachment_type === 'fix_proof');
+            const renderAtts = (list, emptyText) => list.length ? list.map(a => `
+                <div class="att-item">📎 <a href="${attLink(a)}" target="_blank">${escapeHtml(a.original_name || a.file_name)}</a>
+                <span style="color:#9ca3af;"> · ${escapeHtml(a.uploaded_by_name || '-')} · ${escapeHtml(formatFullTime(a.created_at))}</span></div>`).join('') : `<div style="color:#9ca3af; font-size:12px;">${emptyText}</div>`;
+
+            // ===== 群信息 =====
+            let chatBlock = '';
+            if (hasChat) {
+                chatBlock = `<div class="detail-section"><h3>讨论群</h3><div style="font-size:12px; color:#374151;">
+                    群名：${escapeHtml(r.dingtalk_chat_name || '-')}<br>
+                    拉群时间：${escapeHtml(formatFullTime(r.dingtalk_chat_created_at))}<br>
+                    <span style="color:#9ca3af;">（请到钉钉客户端查看群聊）</span></div></div>`;
+            }
+
+            document.getElementById('drawerBody').innerHTML = `
+                ${actions ? `<div class="action-bar">${actions}</div>` : ''}
+                <div class="detail-section"><h3>基本信息</h3>${info}</div>
+                <div class="detail-section"><h3>通知状态</h3>${notify}</div>
+                <div class="detail-section"><h3>错误证明（error_proof）</h3>${renderAtts(errProofs, '无')}</div>
+                <div class="detail-section"><h3>结果证明（fix_proof）</h3>${renderAtts(fixProofs, '无')}</div>
+                ${chatBlock}
+                <div class="detail-section"><h3>状态历史</h3>${hist}</div>
+            `;
+        }
+
+        // 归档方式标签（§3.5）：normal=正常归档（绿）/ admin_closure=行政闭环（蓝）
+        function closureTypeLabel(ct) {
+            if (ct === 'admin_closure') return '<span class="type-tag" style="background:#dbeafe;color:#1d4ed8;">行政闭环</span>';
+            return '<span class="type-tag" style="background:#d1fae5;color:#065f46;">正常归档</span>';
+        }
+
+        // ================= 建单 =================
+        function openCreateModal() {
+            // 填所属系统
+            const sysSel = document.getElementById('formSourceSystem');
+            sysSel.innerHTML = '<option value="">请选择</option>' + CORRECTION_SOURCE_SYSTEMS.map(s => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join('');
+            // 填业务方部门
+            const deptSel = document.getElementById('formRequesterDept');
+            deptSel.innerHTML = '<option value="">（不指定）</option>' + CORRECTION_REQUESTER_DEPTS.map(d => `<option value="${escapeHtml(d)}">${escapeHtml(d)}</option>`).join('');
+            // 填指派开发（非 viewer） + 对接人（admin/publisher）
+            const assignSel = document.getElementById('formAssignedTo');
+            assignSel.innerHTML = '<option value="">请选择开发/处理人</option>' + allUsers.filter(u => u.role !== 'viewer').map(u => `<option value="${escapeHtml(String(u.id))}">${escapeHtml(u.display_name || u.username)}</option>`).join('');
+            const relaySel = document.getElementById('formRelayUser');
+            relaySel.innerHTML = '<option value="">请选择对接人</option>' + allUsers.filter(u => u.role === 'admin' || u.role === 'publisher').map(u => `<option value="${escapeHtml(String(u.id))}">${escapeHtml(u.display_name || u.username)}（${u.role === 'admin' ? '管理员' : '发布者'}）</option>`).join('');
+            // 重置
+            document.querySelector('input[name="corrType"][value="single"]').checked = true;
+            document.querySelector('input[name="assignMode"][value="A"]').checked = true;
+            ['formSourceSystemOther', 'formLocationInfo', 'formCorrectionCount', 'formOaNumber', 'formReason', 'formRequesterName', 'formRequesterPhone'].forEach(id => document.getElementById(id).value = '');
+            toggleSourceOther(); toggleAssignMode();
+            document.getElementById('createModal').classList.add('open');
+        }
+        function closeCreateModal() { document.getElementById('createModal').classList.remove('open'); }
+        function toggleSourceOther() {
+            const isOther = document.getElementById('formSourceSystem').value === '其他';
+            document.getElementById('sourceOtherGroup').style.display = isOther ? 'block' : 'none';
+        }
+        function toggleAssignMode() {
+            const mode = document.querySelector('input[name="assignMode"]:checked').value;
+            document.getElementById('assignAGroup').style.display = mode === 'A' ? 'block' : 'none';
+            document.getElementById('assignBGroup').style.display = mode === 'B' ? 'block' : 'none';
+        }
+
+        async function submitCorrection() {
+            const v = id => document.getElementById(id).value.trim();
+            const sourceSystem = document.getElementById('formSourceSystem').value;
+            const correctionType = document.querySelector('input[name="corrType"]:checked').value;
+            const assignMode = document.querySelector('input[name="assignMode"]:checked').value;
+            // 前端基础校验（后端为准）
+            if (!sourceSystem) return showToast('请选择所属系统', 'error');
+            if (sourceSystem === '其他' && !v('formSourceSystemOther')) return showToast('选「其他」时须填写系统说明', 'error');
+            if (!v('formLocationInfo')) return showToast('请填写修正方式', 'error');
+            if (!v('formRequesterName')) return showToast('请填写业务方姓名', 'error');
+            const correctionCountRaw = v('formCorrectionCount');
+            if (correctionCountRaw && !/^[1-9]\d{0,8}$/.test(correctionCountRaw)) return showToast('修正条数须为正整数（1-999999999）', 'error');
+            const payload = {
+                source_system: sourceSystem,
+                source_system_other: sourceSystem === '其他' ? v('formSourceSystemOther') : undefined,
+                correction_type: correctionType,
+                location_info: v('formLocationInfo'),
+                correction_count: correctionCountRaw || undefined,
+                oa_number: v('formOaNumber') || undefined,
+                reason: v('formReason') || undefined,
+                requester_dept: document.getElementById('formRequesterDept').value || undefined,
+                requester_name: v('formRequesterName'),
+                requester_phone: v('formRequesterPhone') || undefined
+            };
+            if (assignMode === 'A') {
+                const dev = document.getElementById('formAssignedTo').value;
+                if (!dev) return showToast('「直接指派开发」需选择开发/处理人，或改选「暂不指派」', 'error');
+                payload.assigned_to = dev;
+            } else if (assignMode === 'B') {
+                const relay = document.getElementById('formRelayUser').value;
+                if (!relay) return showToast('请选择对接人', 'error');
+                payload.relay_notified_user_id = relay;
+            }
+            const btn = document.getElementById('btnSubmitCreate');
+            btn.disabled = true;
+            try {
+                const res = await authFetch('/api/corrections', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) { showToast(data.error || '建单失败', 'error'); return; }
+                showToast('修正单已创建', 'success');
+                // I1（codex 26 L-1 + 27 RC-L1）：建单不再自动发钉钉（旧 relay_notify_sent 即时提示已移除）；提示去详情页手动发送
+                if (assignMode === 'A' || assignMode === 'B') {
+                    setTimeout(() => showToast('请在详情页点「通知开发/对接人」发送钉钉通知', 'success', 4500), 900);
+                }
+                closeCreateModal();
+                await loadList();
+                openDrawer(data.id);
+            } catch (e) { showToast('建单失败', 'error'); }
+            finally { btn.disabled = false; }
+        }
+
+        // ================= 指派（详情内联） =================
+        async function assignCorrection(id, sel) {
+            const devId = sel.value;
+            if (!devId) return;
+            try {
+                const res = await authFetch(`/api/corrections/${id}/assign`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ assigned_to: devId }) });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) { showToast(data.error || '指派失败', 'error'); return; }
+                showToast('已指派，请在详情页点「通知开发」发送钉钉通知', 'success');
+                await loadList(); openDrawer(id);
+            } catch (e) { showToast('指派失败', 'error'); }
+        }
+
+        // ================= 回复预计 =================
+        function openEstimate(id) {
+            document.getElementById('estimateCorrId').value = id;
+            document.getElementById('formEstimateAt').value = '';
+            document.getElementById('estimateModal').classList.add('open');
+        }
+        async function submitEstimate() {
+            const id = document.getElementById('estimateCorrId').value;
+            const at = document.getElementById('formEstimateAt').value;
+            if (!at) return showToast('请选择预计完成时间', 'error');
+            const btn = document.getElementById('btnSubmitEstimate'); btn.disabled = true;
+            try {
+                const res = await authFetch(`/api/corrections/${id}/reply-estimate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dev_estimated_at: at }) });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) { showToast(data.error || '回复失败', 'error'); return; }
+                showToast('已回复预计完成时间，单进入「修正中」', 'success');
+                setTimeout(() => showToast('请在详情页点「通知业务方·预计」发送钉钉通知', 'success', 4000), 800);
+                closeModal('estimateModal'); await loadList(); openDrawer(id);
+            } catch (e) { showToast('回复失败', 'error'); } finally { btn.disabled = false; }
+        }
+
+        // ================= 标完成 =================
+        function openComplete(id, type) {
+            document.getElementById('completeCorrId').value = id;
+            const single = type !== 'batch';
+            document.getElementById('completeSingleGroup').style.display = single ? 'block' : 'none';
+            document.getElementById('completeBatchGroup').style.display = single ? 'none' : 'block';
+            document.getElementById('formCompleteFiles').value = '';
+            document.getElementById('formBatchNote').value = '';
+            document.getElementById('formCompleteBatchFiles').value = '';
+            document.getElementById('completeModal').dataset.type = type;
+            document.getElementById('completeModal').classList.add('open');
+        }
+        async function submitComplete() {
+            const id = document.getElementById('completeCorrId').value;
+            const type = document.getElementById('completeModal').dataset.type;
+            const fd = new FormData();
+            if (type === 'batch') {
+                const note = document.getElementById('formBatchNote').value.trim();
+                if (!note) return showToast('批量修正须填写完成说明', 'error');
+                fd.append('batch_completion_note', note);
+                const bf = document.getElementById('formCompleteBatchFiles').files;
+                for (const f of bf) fd.append('files', f);
+            } else {
+                const files = document.getElementById('formCompleteFiles').files;
+                if (!files.length) return showToast('单数据修正须上传结果证明截图', 'error');
+                for (const f of files) fd.append('files', f);
+            }
+            const btn = document.getElementById('btnSubmitComplete'); btn.disabled = true;
+            try {
+                const res = await authFetch(`/api/corrections/${id}/complete`, { method: 'POST', body: fd });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) { showToast(data.error || '标完成失败', 'error'); return; }
+                showToast('已标完成', 'success');
+                closeModal('completeModal'); await loadList(); openDrawer(id);
+            } catch (e) { showToast('标完成失败', 'error'); } finally { btn.disabled = false; }
+        }
+
+        // ================= 重修提交 =================
+        function openResubmit(id, type) {
+            document.getElementById('resubmitCorrId').value = id;
+            const single = type !== 'batch';
+            document.getElementById('resubmitSingleGroup').style.display = single ? 'block' : 'none';
+            document.getElementById('resubmitBatchGroup').style.display = single ? 'none' : 'block';
+            document.getElementById('formResubmitFiles').value = '';
+            document.getElementById('formResubmitNote').value = '';
+            document.getElementById('formResubmitBatchFiles').value = '';
+            document.getElementById('resubmitModal').dataset.type = type;
+            document.getElementById('resubmitModal').classList.add('open');
+        }
+        async function submitResubmit() {
+            const id = document.getElementById('resubmitCorrId').value;
+            const type = document.getElementById('resubmitModal').dataset.type;
+            const fd = new FormData();
+            if (type === 'batch') {
+                const note = document.getElementById('formResubmitNote').value.trim();
+                if (!note) return showToast('批量重修须填写本次重修说明', 'error');
+                fd.append('resubmit_note', note);
+                const bf = document.getElementById('formResubmitBatchFiles').files;
+                for (const f of bf) fd.append('files', f);
+            } else {
+                const files = document.getElementById('formResubmitFiles').files;
+                if (!files.length) return showToast('单数据修正重修须上传本次新增结果证明', 'error');
+                for (const f of files) fd.append('files', f);
+            }
+            const btn = document.getElementById('btnSubmitResubmit'); btn.disabled = true;
+            try {
+                const res = await authFetch(`/api/corrections/${id}/resubmit`, { method: 'POST', body: fd });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) { showToast(data.error || '重修提交失败', 'error'); return; }
+                showToast('已重修提交', 'success');
+                closeModal('resubmitModal'); await loadList(); openDrawer(id);
+            } catch (e) { showToast('重修提交失败', 'error'); } finally { btn.disabled = false; }
+        }
+
+        // ================= 补充附件 =================
+        function openAttach(id) {
+            document.getElementById('attachCorrId').value = id;
+            document.getElementById('formAttachFiles').value = '';
+            document.getElementById('attachModal').classList.add('open');
+        }
+        async function submitAttachments() {
+            const id = document.getElementById('attachCorrId').value;
+            const files = document.getElementById('formAttachFiles').files;
+            if (!files.length) return showToast('请选择文件', 'error');
+            const fd = new FormData();
+            for (const f of files) fd.append('files', f);
+            const btn = document.getElementById('btnSubmitAttach'); btn.disabled = true;
+            try {
+                const res = await authFetch(`/api/corrections/${id}/attachments`, { method: 'POST', body: fd });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) { showToast(data.error || '补充失败', 'error'); return; }
+                showToast('附件已补充', 'success');
+                closeModal('attachModal'); await loadList(); openDrawer(id);
+            } catch (e) { showToast('补充失败', 'error'); } finally { btn.disabled = false; }
+        }
+
+        // ================= 通知发送 / 查已读（4 类统一，§2.4/§2.5/§2.6）=================
+        const CORRECTION_NOTIFY_ENDPOINTS = { dev: 'notify-developer', relay: 'notify-relay', estimate: 'notify-estimate', done: 'notify-done' };
+        const CORRECTION_NOTIFY_NAMES = { dev: '开发', relay: '对接人', estimate: '业务方（预计完成）', done: '业务方（完成）' };
+
+        // 通知失败 reason → 友好文案（§2.4 failed 态展示）
+        function notifyReasonText(reason) {
+            const map = {
+                not_found: '收件人不存在或未绑定钉钉', exception: '发送异常', no_phone: '业务方未填手机号',
+                lookup_failed: '钉钉号查询失败', requester_invalid: '手机号查不到企业钉钉号', recipient_unresolved: '收件人未解析',
+                media_upload: '附件上传失败', file_send: '文件发送失败', markdown_send: '消息发送失败', other: '未知原因'
+            };
+            return map[reason] || reason || '未知原因';
+        }
+
+        // 单类通知行渲染（§2.4）。curStatus = 单当前 8 态机状态，决定该类是否处于可发态（canSendNow）。
+        //   分支：无手机号 / 未发可发(⏳+发送) / 未发不可发(—) / 已发未读(✅+查已读+重发) / 已读(📖+重发) / 失败(⚠️+重发)。
+        //   发送/重发按钮须 canSend（有发送权）+ canSendNow（当前可发态，终态自动不可发）；查已读仅须 canSend（任何态可查）。
+        function buildNotifyRow(t, curStatus) {
+            const esc = escapeHtml;
+            const rname = esc(t.recipient);
+            const canSendNow = t.sendable.includes(curStatus);
+            const sendBtn = (force, text) => (t.canSend && canSendNow) ? `<button class="btn-secondary nb-btn" onclick="notifySend(${t.cid}, '${t.key}', ${force})">${text}</button>` : '';
+            const readBtn = t.canSend ? `<button class="btn-secondary nb-btn" onclick="queryReadStatus(${t.cid}, '${t.key}')">查询已读</button>` : '';
+            let line = '', btns = '';
+            if (t.byPhone && t.noPhone) {
+                line = `<span style="color:#b45309;">— 业务方未填手机号，无法通知</span>`;
+            } else if (t.status === 'sent') {
+                if (t.readAt) {
+                    line = `<span style="color:#059669;">📖 ${rname} 最近一次已读 · 于 ${esc(formatFullTime(t.readAt))}</span>`;
+                    btns = sendBtn(true, '重新通知');
+                } else {
+                    line = `<span style="color:#059669;">✅ 已于 ${esc(formatFullTime(t.notifiedAt))} 通知 ${rname}</span>`;
+                    btns = readBtn + sendBtn(true, '重新通知');
+                }
+            } else if (t.status === 'failed') {
+                line = `<span style="color:#dc2626;">⚠️ 通知失败（${esc(notifyReasonText(t.error))}），可重试</span>`;
+                btns = sendBtn(true, '重新通知');
+            } else {
+                // 未发（not_sent / null / no_phone 但手机号已补填）
+                if (canSendNow) {
+                    line = `<span style="color:#6b7280;">⏳ 尚未通知 ${rname}</span>`;
+                    btns = sendBtn(false, '发送通知');
+                } else {
+                    line = `<span style="color:#9ca3af;">— 未发送钉钉通知</span>`;
+                }
+            }
+            return `<div class="notify-row"><span class="nr-label">${esc(t.label)}</span><span class="nr-body">${line}${btns}</span></div>`;
+        }
+
+        // 发送 / 重发某类钉钉通知（force=true 走重发契约 force_resend，后端清对应 read_at）
+        async function notifySend(id, recipient, force) {
+            const ep = CORRECTION_NOTIFY_ENDPOINTS[recipient];
+            if (!ep) return;
+            if (force && !confirm(`确认重新通知${CORRECTION_NOTIFY_NAMES[recipient] || ''}？\n将以本次为最新一次通知，旧已读记录清除。`)) return;
+            try {
+                const res = await authFetch(`/api/corrections/${id}/${ep}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ force_resend: !!force }) });
+                const data = await res.json().catch(() => ({}));
+                if (res.ok && (data.success || data.ok)) {
+                    if (data.already_sent) showToast(data.message || '已通知过，未重复发送', 'success');
+                    else showToast(data.has_attachment ? '已发送通知（含结果证明）' : '已发送通知', 'success');
+                } else if (data.code === 'REQUESTER_PHONE_EMPTY') {
+                    showToast('业务方未填手机号，请用其他方式交付', 'warning');
+                } else if (data.code === 'REQUESTER_INVALID') {
+                    showToast('业务方手机号查不到企业钉钉号，请线下转达', 'warning');
+                } else {
+                    showToast(data.error || data.message || '发送失败', 'error');
+                }
+                await loadList(); openDrawer(id);
+            } catch (e) { showToast('发送失败', 'error'); }
+        }
+
+        // 查询某类通知的钉钉已读状态（§2.5；查到已读会固化 read_at，刷新详情显示 📖）
+        async function queryReadStatus(id, recipient) {
+            try {
+                const res = await authFetch(`/api/corrections/${id}/notify-read-status?recipient=${encodeURIComponent(recipient)}`);
+                const data = await res.json().catch(() => ({}));
+                if (res.ok) {
+                    if (data.read) { showToast(`对方已于 ${data.read_at || '—'} 阅读`, 'success'); openDrawer(id); }
+                    else if (data.read_status === 'recipient_unresolved') showToast('收件人钉钉号未解析，暂无法确认已读', 'warning');
+                    else showToast('对方尚未阅读', 'success');
+                } else {
+                    showToast(data.error || '查询已读失败', 'error');
+                }
+            } catch (e) { showToast('查询已读失败', 'error'); }
+        }
+
+        // ================= 归档 =================
+        function openArchive(id) {
+            // M-3：优先读详情缓存（深链/列表滞后时更准），回退 allItems
+            const item = (currentDetail && Number(currentDetail.id) === Number(id)) ? currentDetail : (allItems.find(i => i.id === id) || {});
+            document.getElementById('archiveCorrId').value = id;
+            // L-1：摩擦判定用 dingtalk_chat_id（与后端 ARCHIVED 闸门 row.dingtalk_chat_id 完全一致；
+            //   注意与详情 hasChat 用 open_conversation_id 是刻意区分——幂等锚点 vs 摩擦判定）
+            const hasChat = !!item.dingtalk_chat_id;
+            document.getElementById('archiveFrictionHint').style.display = hasChat ? 'block' : 'none';
+            document.getElementById('archiveFrictionGroup').style.display = hasChat ? 'block' : 'none';
+            document.getElementById('formFrictionReason').value = '';
+            // 弱提示：未发完成通知就归档
+            const noNotify = item.completion_notify_status !== 'sent';
+            document.getElementById('archiveNoNotifyHint').style.display = noNotify ? 'block' : 'none';
+            document.getElementById('archiveModal').dataset.hasChat = hasChat ? '1' : '0';
+            document.getElementById('archiveModal').classList.add('open');
+        }
+        async function submitArchive() {
+            const id = document.getElementById('archiveCorrId').value;
+            const hasChat = document.getElementById('archiveModal').dataset.hasChat === '1';
+            const friction = document.getElementById('formFrictionReason').value.trim();
+            if (hasChat && !friction) return showToast('本单有摩擦，归档须填写摩擦原因', 'error');
+            const btn = document.getElementById('btnSubmitArchive'); btn.disabled = true;
+            try {
+                const res = await authFetch(`/api/corrections/${id}/archive`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ friction_reason: friction || undefined }) });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) { showToast(data.error || '归档失败', 'error'); return; }
+                showToast('已归档', 'success');
+                closeModal('archiveModal'); await loadList(); openDrawer(id);
+            } catch (e) { showToast('归档失败', 'error'); } finally { btn.disabled = false; }
+        }
+
+        // ================= 行政闭环（admin 记账式收口 → ARCHIVED + admin_closure，§3.3/§3.6）=================
+        function openAdminClose(id) {
+            document.getElementById('adminCloseCorrId').value = id;
+            document.getElementById('formClosureReason').value = '';
+            document.getElementById('adminCloseModal').classList.add('open');
+        }
+        async function submitAdminClose() {
+            const id = document.getElementById('adminCloseCorrId').value;
+            const reason = document.getElementById('formClosureReason').value.trim();
+            if (reason.length < 10 || reason.length > 500) return showToast('行政闭环原因须 10-500 字', 'error');
+            const btn = document.getElementById('btnSubmitAdminClose'); btn.disabled = true;
+            try {
+                const res = await authFetch(`/api/corrections/${id}/admin-close`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ closure_reason: reason }) });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) { showToast(data.error || '行政闭环失败', 'error'); return; }
+                showToast('已行政闭环', 'success');
+                closeModal('adminCloseModal'); await loadList(); openDrawer(id);
+            } catch (e) { showToast('行政闭环失败', 'error'); } finally { btn.disabled = false; }
+        }
+
+        // ================= 拒绝 =================
+        function openReject(id) {
+            document.getElementById('rejectCorrId').value = id;
+            document.getElementById('formRejectReason').value = '';
+            document.getElementById('rejectModal').classList.add('open');
+        }
+        async function submitReject() {
+            const id = document.getElementById('rejectCorrId').value;
+            const reason = document.getElementById('formRejectReason').value.trim();
+            if (!reason) return showToast('请填写拒绝原因', 'error');
+            const btn = document.getElementById('btnSubmitReject'); btn.disabled = true;
+            try {
+                const res = await authFetch(`/api/corrections/${id}/reject`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reject_reason: reason }) });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) { showToast(data.error || '拒绝失败', 'error'); return; }
+                showToast('已拒绝', 'success');
+                closeModal('rejectModal'); await loadList(); openDrawer(id);
+            } catch (e) { showToast('拒绝失败', 'error'); } finally { btn.disabled = false; }
+        }
+
+        // ================= 作废 =================
+        async function doVoid(id) {
+            if (!confirm('确认作废该修正单？\n作废后列表默认不再显示，且不可在平台恢复。')) return;
+            try {
+                const res = await authFetch(`/api/corrections/${id}/void`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) { showToast(data.error || '作废失败', 'error'); return; }
+                showToast('已作废', 'success');
+                closeDrawer(); await loadList();
+            } catch (e) { showToast('作废失败', 'error'); }
+        }
+
+        // ================= 拉群 =================
+        function openCreateChat(id) {
+            // M-3：优先读详情缓存（含 created_by/assigned_to/requester_name 权威数据），回退 allItems
+            const item = (currentDetail && Number(currentDetail.id) === Number(id)) ? currentDetail : (allItems.find(i => i.id === id) || {});
+            document.getElementById('chatCorrId').value = id;
+            // 固定底座展示：群管理员（示例用户A）+ 建单人 + 指派开发 + 当前操作人（去重 + 排金华琴）
+            const baseIds = new Set();
+            [CORRECTION_CHAT_ADMIN_ID, item.created_by, item.assigned_to, currentUser && currentUser.id].forEach(x => { const n = Number(x); if (Number.isSafeInteger(n) && n > 0 && !CORRECTION_CHAT_EXCLUDE_IDS.includes(n)) baseIds.add(n); });
+            const nameOf = uid => { const u = allUsers.find(x => Number(x.id) === Number(uid)); return u ? (u.display_name || u.username) : `用户#${uid}`; };
+            let baseHtml = '';
+            baseIds.forEach(uid => {
+                let tag = [];
+                if (Number(uid) === CORRECTION_CHAT_ADMIN_ID) tag.push('群管理员');
+                if (Number(uid) === Number(item.created_by)) tag.push('建单人');
+                if (Number(uid) === Number(item.assigned_to)) tag.push('指派开发');
+                if (currentUser && Number(uid) === Number(currentUser.id)) tag.push('当前操作人');
+                baseHtml += `<div class="mb-item">• ${escapeHtml(nameOf(uid))}${tag.length ? ` <span style="color:#9ca3af;">(${tag.join('/')})</span>` : ''}</div>`;
+            });
+            if (item.requester_name) baseHtml += `<div class="mb-item">• ${escapeHtml(item.requester_name)} <span style="color:#9ca3af;">(业务方，按手机号反查命中才加入)</span></div>`;
+            document.getElementById('chatBaseList').innerHTML = baseHtml || '<div style="color:#9ca3af;">无</div>';
+            // 额外成员多选：所有活跃用户，排金华琴 + 排已在固定底座
+            const extra = allUsers.filter(u => !CORRECTION_CHAT_EXCLUDE_IDS.includes(Number(u.id)) && !baseIds.has(Number(u.id)));
+            document.getElementById('chatExtraGrid').innerHTML = extra.length ? extra.map(u =>
+                `<label><input type="checkbox" class="chat-extra-cb" value="${escapeHtml(String(u.id))}"> ${escapeHtml(u.display_name || u.username)}</label>`).join('') : '<div style="color:#9ca3af; font-size:12px;">无可选额外成员</div>';
+            document.getElementById('chatModal').classList.add('open');
+        }
+        async function submitCreateChat() {
+            const id = document.getElementById('chatCorrId').value;
+            const extraIds = Array.from(document.querySelectorAll('.chat-extra-cb:checked')).map(cb => Number(cb.value));
+            const btn = document.getElementById('btnSubmitChat'); btn.disabled = true; btn.textContent = '建群中…';
+            try {
+                const res = await authFetch(`/api/corrections/${id}/create-chat`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ extra_member_ids: extraIds }) });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) { showToast(data.error || '拉群失败', 'error'); return; }
+                if (data.idempotent) {
+                    showToast(data.message || '本单已有讨论群，请到钉钉客户端查看', 'success');
+                } else {
+                    showToast(data.message || '讨论群已创建，请到钉钉客户端查看', 'success');
+                    // 核心成员缺钉钉号（strong warning）
+                    if (data.missing_required_member_ids && data.missing_required_member_ids.length) {
+                        const names = data.missing_required_member_ids.map(m => m.display_name).join('、');
+                        setTimeout(() => showToast(`以下核心成员未加入群（未绑定钉钉）：${names}，请手动处理`, 'warning', 5000), 800);
+                    }
+                    // 额外成员被跳过
+                    if (data.skipped_extra_member_ids && data.skipped_extra_member_ids.length) {
+                        const skipped = (data.warnings || []).filter(w => w.code === 'EXTRA_MEMBER_SKIPPED_NO_DINGTALK').map(w => w.display_name).join('、');
+                        if (data.included_extra_member_ids && data.included_extra_member_ids.length === 0) {
+                            setTimeout(() => showToast('已建群，但所选额外成员均未加入（无钉钉号）', 'warning', 4500), 1200);
+                        } else if (skipped) {
+                            setTimeout(() => showToast(`部分额外成员未加入（无钉钉号）：${skipped}`, 'warning', 4500), 1200);
+                        }
+                    }
+                    // 业务方未加入
+                    if (data.requester_included === false && data.requester_skip_reason && data.requester_skip_reason !== 'none') {
+                        const reasonMap = { no_phone: '未填手机号', not_found: '手机号查不到企业钉钉号', lookup_failed: '钉钉号查询失败' };
+                        setTimeout(() => showToast(`业务方未加入群（${reasonMap[data.requester_skip_reason] || data.requester_skip_reason}），可线下转达`, 'warning', 4500), 1600);
+                    }
+                }
+                closeModal('chatModal'); await loadList(); openDrawer(Number(id));
+            } catch (e) { showToast('拉群失败', 'error'); }
+            finally { btn.disabled = false; btn.textContent = '建群'; }
+        }
+
+        // ================= 通用 =================
+        function closeModal(modalId) { document.getElementById(modalId).classList.remove('open'); }
+
+        function formatFullTime(dateStr) {
+            if (!dateStr) return '-';
+            const s = String(dateStr).trim();
+            const m = s.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?$/);
+            if (m && !/[zZ]|[+\-]\d{2}:?\d{2}$/.test(s)) { const [, Y, M, D, h, mi, sec] = m; return `${Y}-${M}-${D} ${h}:${mi}:${sec || '00'}`; }
+            const d = new Date(s);
+            if (isNaN(d.getTime())) return s;
+            const p = n => String(n).padStart(2, '0');
+            return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+        }
+    </script>
+</body>
+</html>
