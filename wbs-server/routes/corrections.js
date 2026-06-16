@@ -395,6 +395,25 @@ const CORRECTION_STATUS_TRANSITIONS = {
 };
 const CORRECTION_TYPES = ['single', 'batch'];
 
+// ── 对接人白名单（路线 B：对接人 = 固定白名单，非角色口径）──────────────────────────────
+//   示例发布者(id=7,publisher) / 示例对接人(id=13,user)。授权高于 role——白名单成员即可当对接人（看 / 派其经手 relay 单），
+//   即便 user 角色（correctionTransition 指派分支对白名单 relay 权威放行，见 §权限校验）。
+//   ⚠️ 改名单需三处同步：本常量 + 前端 public/Data_Correction.html 同名常量 + scripts/verify-correction-relay-whitelist.js，
+//      verify 卡三处字面量一致防漂移（运行：node scripts/verify-correction-relay-whitelist.js）。
+//   ⚠️ 白名单 > role：若把 viewer 加入名单，viewer 也会获得 relay 指派能力，维护注意（verify 加"成员非 viewer"防御断言）。
+const CORRECTION_RELAY_USER_IDS = [7, 13];
+//   单一真相点（对齐 server.js isReadonlyLeaderId 范式）：uid 是否在对接人白名单。
+function isCorrectionRelayWhitelisted(uid) {
+    return Number(uid) > 0 && CORRECTION_RELAY_USER_IDS.includes(Number(uid));
+}
+//   /assign 粗筛中间件：放行 admin/publisher 或白名单对接人；进 handler 后由 transition 权威校验"是否本单经手 relay"。
+function requireRelayOrPublisherOrAdmin(req, res, next) {
+    const role = req.user && req.user.role;
+    if (role === 'admin' || role === 'publisher') return next();
+    if (req.user && isCorrectionRelayWhitelisted(req.user.id)) return next();
+    return res.status(403).json({ error: '无权指派（仅管理员 / 发布者或指定对接人）', code: 'NOT_AUTHORIZED_TO_ASSIGN' });
+}
+
 // ── deadline 工具（方案 §4.1 / §8 复用 normalizeDeadlineForDb 逻辑）──────────────
 //   normalizeDeadlineForDb 是 17173 行某 endpoint 内的局部函数（非模块级），逻辑仅几行，此处复刻同语义。
 //   归一化：'YYYY-MM-DDTHH:MM' → 'YYYY-MM-DD HH:MM:SS'（SQLite localtime 存储格式）；空/非法返 null。
@@ -459,7 +478,7 @@ async function correctionTransition(requestId, expectedFromStatus, toStatus, act
         // R-6：事务内读 DB 真实状态作为 fromStatus；闸门/权限用 correction_type/assigned_to/created_by/dingtalk_chat_id/
         //   fixed_at/refixed_at（H-1 新增性兜底基线）一并读。
         const row = await dbGetAsync(
-            'SELECT id, status, correction_type, assigned_to, created_by, dingtalk_chat_id, fixed_at, refixed_at FROM correction_requests WHERE id = ?',
+            'SELECT id, status, correction_type, assigned_to, created_by, relay_notified_user_id, dingtalk_chat_id, fixed_at, refixed_at FROM correction_requests WHERE id = ?',
             [requestId]
         );
         if (!row) throw new CorrectionTransitionError(404, 'CORRECTION_NOT_FOUND', '修正单不存在');
@@ -489,9 +508,12 @@ async function correctionTransition(requestId, expectedFromStatus, toStatus, act
             const isPublisher = role === 'publisher';
             const isAssignee = Number(row.assigned_to) === Number(actor.id) && Number(actor.id) > 0;
             const isCreator = Number(row.created_by) === Number(actor.id) && Number(actor.id) > 0;
+            // 路线 B：白名单对接人对「其本人经手的 relay 单」有指派权（仅此一个动作）；只在指派 case 放行，
+            //   其他写动作分支不含本判定 → relay 不获泛化写权限（H-2 隔离）。含白名单判定 → 移出白名单即失效。
+            const isWhitelistRelay = isCorrectionRelayWhitelisted(actor.id) && Number(row.relay_notified_user_id) === Number(actor.id);
             let permitted = false;
             switch (toStatus) {
-                case 'ASSIGNED_PENDING_ESTIMATE': permitted = isAdmin || isPublisher; break;                    // 指派（§7.1）
+                case 'ASSIGNED_PENDING_ESTIMATE': permitted = isAdmin || isPublisher || isWhitelistRelay; break;  // 指派（§7.1 + 路线 B 白名单 relay）
                 case 'IN_PROGRESS': case 'FIXED': case 'REFIXED': permitted = isAdmin || isAssignee; break;     // 回复预计/标完成/重修=开发本人或 admin
                 case 'REJECTED':
                     permitted = (fromStatus === 'PENDING_ASSIGN')
@@ -795,15 +817,20 @@ router.post('/', authenticateToken, requireCorrectionSchemaReady, requireAdmin, 
         // deadline：客户端传了合法值归一化用之，否则后端智能默认（§4.1，仅参考可空）
         const expectedDeadline = normalizeCorrectionDatetime(b.expected_deadline) || correctionDefaultDeadline();
 
-        // 路径 B（G-16/HIGH-1）：对接人只能选 admin/publisher（否则收钉钉后无指派权→单卡死）。钉钉发送延到 Commit D。
+        // 路径 B（路线 B）：对接人 = 固定白名单 CORRECTION_RELAY_USER_IDS（非角色口径）；transition 指派分支对白名单
+        //   relay 权威放行，故 user 角色也能指派。仍校验「在白名单 + 用户存在 + 有手机号」——手机号是钉钉通知对接人的
+        //   必要条件（sendIssueDingtalkRaw 按手机号反查钉钉），缺则将来换人会令单卡死，建单时即拒（M-3 / RC-M2 trim 非空）。
         let relayUserId = null;
         if (hasRelay) {
             const relayId = parsePositiveCorrectionId(b.relay_notified_user_id);
             if (!relayId) return res.status(400).json({ error: '对接人 ID 非法', code: 'INVALID_RELAY_USER_ID' });   // RC-L3
-            const relayU = await dbGetAsync('SELECT id, role FROM users WHERE id = ?', [relayId]);
+            if (!isCorrectionRelayWhitelisted(relayId)) {
+                return res.status(400).json({ error: '对接人不在指定名单内', code: 'RELAY_USER_NOT_IN_WHITELIST' });
+            }
+            const relayU = await dbGetAsync('SELECT id, phone FROM users WHERE id = ?', [relayId]);
             if (!relayU) return res.status(400).json({ error: '对接人不存在', code: 'RELAY_USER_NOT_FOUND' });
-            if (relayU.role !== 'admin' && relayU.role !== 'publisher') {
-                return res.status(400).json({ error: '对接人只能是管理员或发布者（否则无指派权，单会卡死）', code: 'RELAY_USER_NOT_ASSIGNABLE' });
+            if (!String(relayU.phone || '').trim()) {
+                return res.status(400).json({ error: '对接人未绑定手机号，无法接收钉钉通知', code: 'RELAY_USER_NO_PHONE' });
             }
             relayUserId = relayU.id;
         }
@@ -878,8 +905,9 @@ router.post('/', authenticateToken, requireCorrectionSchemaReady, requireAdmin, 
 });
 
 // ── POST /api/corrections/:id/assign 指派（§4.2 / R-4 / 路径 A·B 共用同一 transition）──────────
-//   权限 requirePublisherOrAdmin（§7.1：admin/publisher 可指派；路径 B 对接人登平台后走此接口）。
-router.post('/:id/assign', authenticateToken, requireCorrectionSchemaReady, requirePublisherOrAdmin, async (req, res) => {
+//   权限 requireRelayOrPublisherOrAdmin（粗筛：admin/publisher 或白名单对接人）；handler 校验被指派开发，
+//   correctionTransition 指派分支再权威校验「白名单 relay 仅能派其本人经手的 PENDING_ASSIGN 单」（路线 B）。
+router.post('/:id/assign', authenticateToken, requireCorrectionSchemaReady, requireRelayOrPublisherOrAdmin, async (req, res) => {
     const id = Number(req.params.id);
     if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: '无效的修正单 ID', code: 'INVALID_CORRECTION_ID' });   // codex 09 L-6
     try {
@@ -923,8 +951,14 @@ router.get('/', authenticateToken, requireCorrectionSchemaReady, async (req, res
         if (!includeVoided) where.push('voided_at IS NULL');
         // 可见性最小版（§7.1）：admin/publisher 全部；其余（user/viewer）仅 assigned_to=self。F/G 再细化 viewer 只读惯例。
         if (role !== 'admin' && role !== 'publisher') {
-            where.push('assigned_to = ?');
-            params.push(uid);
+            // 路线 B：白名单对接人额外可见其经手的 relay 单（全生命周期非作废）；移出白名单即失去此特权（含白名单判定）。
+            if (isCorrectionRelayWhitelisted(uid)) {
+                where.push('(assigned_to = ? OR relay_notified_user_id = ?)');
+                params.push(uid, uid);
+            } else {
+                where.push('assigned_to = ?');
+                params.push(uid);
+            }
         }
         const rows = await dbAllAsync(
             `SELECT id, source_system, source_system_other, location_info, correction_type, status,
@@ -956,7 +990,9 @@ router.get('/:id', authenticateToken, requireCorrectionSchemaReady, async (req, 
         const isAdmin = role === 'admin', isPublisher = role === 'publisher';
         const isCreator = Number(row.created_by) === uid && uid > 0;
         const isAssignee = Number(row.assigned_to) === uid && uid > 0;
-        if (!isAdmin && !isPublisher && !isCreator && !isAssignee) {
+        // 路线 B：白名单对接人可见其经手 relay 单详情（含白名单判定 → 移出即失效）。全量可见不裁剪（内网内部人，附件=修正证明截图）。
+        const isRelay = isCorrectionRelayWhitelisted(uid) && Number(row.relay_notified_user_id) === uid;
+        if (!isAdmin && !isPublisher && !isCreator && !isAssignee && !isRelay) {
             return res.status(403).json({ error: '无权查看此修正单', code: 'NOT_AUTHORIZED_TO_VIEW' });
         }
         if (row.voided_at && !isAdmin && !isPublisher) {
@@ -1881,6 +1917,6 @@ router.post('/:id/create-chat', authenticateToken, requireCorrectionSchemaReady,
   return {
     initSchema,
     router,
-    _internals: { CORRECTION_STATUSES, CORRECTION_STATUS_TRANSITIONS, CORRECTION_TYPES, CORRECTION_SOURCE_SYSTEMS, CORRECTION_NOTIFY_SENDABLE, CORRECTION_READ_FIELD_MAP, CORRECTION_ALLOWED_EXTS, CORRECTION_CHAT_EXCLUDE_IDS, CORRECTION_CHAT_ALLOWED_STATUSES, CORRECTION_REQUESTS_KEY_COLS, CORRECTION_ATTACHMENTS_KEY_COLS, CORRECTION_HISTORY_KEY_COLS, normalizeCorrectionDatetime, correctionDefaultDeadline, parsePositiveCorrectionId, correctionTransition, correctionActor, isCorrectionChatExcludedId, requireCorrectionSchemaReady, CORRECTION_SCHEMA_STATE },
+    _internals: { CORRECTION_STATUSES, CORRECTION_STATUS_TRANSITIONS, CORRECTION_TYPES, CORRECTION_SOURCE_SYSTEMS, CORRECTION_NOTIFY_SENDABLE, CORRECTION_READ_FIELD_MAP, CORRECTION_ALLOWED_EXTS, CORRECTION_CHAT_EXCLUDE_IDS, CORRECTION_CHAT_ALLOWED_STATUSES, CORRECTION_REQUESTS_KEY_COLS, CORRECTION_ATTACHMENTS_KEY_COLS, CORRECTION_HISTORY_KEY_COLS, normalizeCorrectionDatetime, correctionDefaultDeadline, parsePositiveCorrectionId, correctionTransition, correctionActor, isCorrectionChatExcludedId, requireCorrectionSchemaReady, CORRECTION_SCHEMA_STATE, CORRECTION_RELAY_USER_IDS, isCorrectionRelayWhitelisted },
   };
 };

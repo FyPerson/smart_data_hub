@@ -357,7 +357,7 @@
                     <div class="hint">下拉为全部非查看者用户，凭备注辨识；选定后建单即指派，需在详情页手动点「通知开发」发送钉钉。</div>
                 </div>
                 <div class="form-group" id="assignBGroup" style="display:none;">
-                    <label>对接人（仅管理员/发布者）</label>
+                    <label>对接人</label>
                     <select id="formRelayUser"><option value="">请选择对接人</option></select>
                     <div class="hint">建单后记录对接人，需在详情页手动点「通知对接人」发送钉钉；对接人收到后在平台指派。</div>
                 </div>
@@ -514,6 +514,9 @@
         const CORRECTION_CHAT_ADMIN_ID = 3;
         // 所属系统白名单（与后端 CORRECTION_SOURCE_SYSTEMS 同源）
         const CORRECTION_SOURCE_SYSTEMS = ['BMS', 'CRM', 'HRD', '财务系统', 'OA 系统', 'FineDataLink数仓', '其他'];
+        // 对接人白名单（路线 B）——与后端 routes/corrections.js 的 CORRECTION_RELAY_USER_IDS 同源！
+        //   改名单需三处同步：后端常量 + 本处 + scripts/verify-correction-relay-whitelist.js（verify 卡字面量一致）。
+        const CORRECTION_RELAY_USER_IDS = [7, 13];
         const CORRECTION_REQUESTER_DEPTS = [
             '市场营销部', '交付运营部', '财务管理部', '人事行政部', '审计风控部', '信息技术部', '安全保卫部', '其他归口部门',
             '董事会', '公司高管', '华北分公司', '华东分公司', '华南分公司', '华西分公司', '华中分公司', '西南分公司', '西北分公司',
@@ -877,7 +880,7 @@
             const assignSel = document.getElementById('formAssignedTo');
             assignSel.innerHTML = '<option value="">请选择开发/处理人</option>' + allUsers.filter(u => u.role !== 'viewer').map(u => `<option value="${escapeHtml(String(u.id))}">${escapeHtml(u.display_name || u.username)}</option>`).join('');
             const relaySel = document.getElementById('formRelayUser');
-            relaySel.innerHTML = '<option value="">请选择对接人</option>' + allUsers.filter(u => u.role === 'admin' || u.role === 'publisher').map(u => `<option value="${escapeHtml(String(u.id))}">${escapeHtml(u.display_name || u.username)}（${u.role === 'admin' ? '管理员' : '发布者'}）</option>`).join('');
+            relaySel.innerHTML = '<option value="">请选择对接人</option>' + allUsers.filter(u => CORRECTION_RELAY_USER_IDS.includes(Number(u.id))).map(u => `<option value="${escapeHtml(String(u.id))}">${escapeHtml(u.display_name || u.username)}</option>`).join('');
             // 重置
             document.querySelector('input[name="corrType"][value="single"]').checked = true;
             document.querySelector('input[name="assignMode"][value="A"]').checked = true;
