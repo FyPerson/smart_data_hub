@@ -4,13 +4,19 @@
 // 模式：临时内存 sqlite，忠实复刻 server.js 落库逻辑（send 结果注入 mock）。
 //   钉钉真发无法 e2e——真机实测留部署后；本脚本验①落库状态映射 ②失败不阻断业务状态 ③重发清对应 read_at
 //   ④可发状态枚举（§2.2）⑤read-status 字段映射（§2.5）⑥relay 投递审计四件套（I1：替代旧 relay_notified_at 单字段，§2.3）。
-// ⚠️ 移植双份局限（RC-L2）：复刻落库逻辑 + 复刻可发状态/字段映射常量（须与 server.js CORRECTION_NOTIFY_SENDABLE /
-//   CORRECTION_READ_FIELD_MAP 同步），未覆盖真实 Express 端点 HTTP 集成（留浏览器实测 I3）；高价值=状态映射 + 重发契约 + 字段映射契约。
+// J3（RC-L2 部分根治）：可发状态枚举/字段映射**常量已改 require 真实 _internals**（CORRECTION_NOTIFY_SENDABLE /
+//   CORRECTION_READ_FIELD_MAP，漂移即暴露）；**落库 UPDATE 逻辑（applyDevNotify 等）仍是 handler 内联复刻**（未抽函数导出，
+//   务实收尾保留）——改 corrections.js 各 notify endpoint 的落库 SQL（status/read_at CASE 清理）时须同步本文件。未覆盖真实 HTTP 集成（留浏览器实测）。
 const assert = require('assert');
 const sqlite3 = require('sqlite3');
 const db = new sqlite3.Database(':memory:');
 const run = (sql, p = []) => new Promise((res, rej) => db.run(sql, p, function (e) { e ? rej(e) : res(this); }));
 const get = (sql, p = []) => new Promise((res, rej) => db.get(sql, p, (e, r) => e ? rej(e) : res(r)));
+const all = (sql, p = []) => new Promise((res, rej) => db.all(sql, p, (e, r) => e ? rej(e) : res(r)));
+// J3：require 真实 corrections 模块拿 _internals 常量（CORRECTION_NOTIFY_SENDABLE / CORRECTION_READ_FIELD_MAP）替代复刻
+const _noop = () => {}; const _mw = (q, s, n) => (n ? n() : undefined); const _an = async () => ({});
+const _mod = require('../routes/corrections')({ logger: { info: _noop, warn: _noop, error: _noop, debug: _noop }, db, dbRunAsync: run, dbGetAsync: get, dbAllAsync: all, authenticateToken: _mw, requireAdmin: _mw, requirePublisherOrAdmin: _mw, sendIssueDingtalkRaw: _an, UPLOAD_DIR: require('path').join(require('os').tmpdir(), 'corr-notify-verify'), readSystemConfig: _an, COLLAB_CHAT_ADMIN_ID: 3, callDingtalkWithTokenRetry: _an, normalizeAttachmentExt: x => x, safeDeleteFileSync: _noop, maskPhone: x => x });
+const I = _mod._internals;
 
 // === 复刻 server.js 三个回填点的落库逻辑（send 结果注入；与端点内 UPDATE 同源）===
 // notifyCorrectionAssignedDev 落库段：ok→sent+key / fail→failed+error（dev 无 no_phone 单列态，失败统归 failed）
@@ -142,13 +148,8 @@ async function main() {
     assert.strictEqual(ri.completion_notify_status, 'failed'); assert.strictEqual(ri.completion_notify_error, 'file_send', '部分失败落 failed + failed_step');
     ok('D2b notify-done：三分支决策（no_phone/有附件/无附件）+ 三态落库（no_phone 旁路 / sent 全成清 read / failed 落 step）');
 
-    // [6] 可发状态枚举（§2.2 H-3/M-6，复刻 server.js CORRECTION_NOTIFY_SENDABLE，须同步）：基于真实 8 态机
-    const SENDABLE = {
-        dev: ['ASSIGNED_PENDING_ESTIMATE', 'IN_PROGRESS'],
-        relay: ['PENDING_ASSIGN'],
-        estimate: ['IN_PROGRESS'],
-        done: ['FIXED', 'REFIXED'],
-    };
+    // [6] 可发状态枚举（§2.2 H-3/M-6）：J3 require 真实 _internals.CORRECTION_NOTIFY_SENDABLE（非复刻，漂移即暴露）
+    const SENDABLE = I.CORRECTION_NOTIFY_SENDABLE;
     assert.ok(SENDABLE.dev.includes('ASSIGNED_PENDING_ESTIMATE') && SENDABLE.dev.includes('IN_PROGRESS'), 'dev 可发 ASSIGNED_PENDING_ESTIMATE/IN_PROGRESS');
     assert.ok(!SENDABLE.dev.includes('FIXED') && !SENDABLE.dev.includes('PENDING_ASSIGN'), 'dev 不可发 FIXED/PENDING_ASSIGN');
     assert.deepStrictEqual(SENDABLE.relay, ['PENDING_ASSIGN'], 'relay 仅 PENDING_ASSIGN');
@@ -157,13 +158,8 @@ async function main() {
     ['VOIDED', 'REJECTED', 'ARCHIVED'].forEach(s => Object.keys(SENDABLE).forEach(k => assert.ok(!SENDABLE[k].includes(s), `${k} 不可发于终态 ${s}`)));
     ok('可发状态枚举（§2.2 H-3/M-6）：dev/relay/estimate/done 各自精确枚举；VOIDED/REJECTED/ARCHIVED 四类全禁发');
 
-    // [7] read-status 字段映射（§2.5 M-5，复刻 server.js CORRECTION_READ_FIELD_MAP，须同步）：4 recipient × 字段 + byPhone + 列真实存在
-    const READ_MAP = {
-        dev:      { status_col: 'notify_status',           read_at: 'read_at',           byPhone: false },
-        relay:    { status_col: 'relay_notify_status',     read_at: 'relay_read_at',     byPhone: false },
-        estimate: { status_col: 'requester_notify_status', read_at: 'requester_read_at', byPhone: true },
-        done:     { status_col: 'completion_notify_status',read_at: 'completion_read_at',byPhone: true },
-    };
+    // [7] read-status 字段映射（§2.5 M-5）：J3 require 真实 _internals.CORRECTION_READ_FIELD_MAP（非复刻，漂移即暴露）
+    const READ_MAP = I.CORRECTION_READ_FIELD_MAP;
     assert.strictEqual(READ_MAP.dev.byPhone, false, 'dev 走 users（assigned_to）');
     assert.strictEqual(READ_MAP.relay.byPhone, false, 'relay 走 users（relay_notified_user_id）');
     assert.strictEqual(READ_MAP.estimate.byPhone, true, 'estimate 走 phone 反查');

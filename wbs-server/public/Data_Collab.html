@@ -1436,7 +1436,7 @@
     <script src="assets/js/app.js?v=v1.71.0"></script>
     <script>
         // v1.74.3 纯只读领导账号 id 名单（与后端 server.js READONLY_LEADER_IDS 同步！改动需两处一起改）
-        //   金华琴(id=11) / 陈宏亮(id=6) 为纯只读领导，不参与偏技术类工作，不可被设为协作单数据导出人(exporter)。
+        //   示例只读领导A(id=11) / 示例只读领导B(id=6) 为纯只读领导，不参与偏技术类工作，不可被设为协作单数据导出人(exporter)。
         //   下面 admin 直派下拉 / 三级转发下拉都过滤掉这两个账号；后端三个写入口另有兜底拦截（防绕过前端）。
         const READONLY_LEADER_IDS = [6, 11];
 
@@ -5027,7 +5027,7 @@
                     return;
                 }
                 // v1.72.5：4 角色全放（含 viewer），仅排除未知角色
-                // v1.74.3：再排除纯只读领导账号（金华琴/陈宏亮，不可被直派为 exporter）
+                // v1.74.3：再排除纯只读领导账号（示例只读领导A/示例只读领导B，不可被直派为 exporter）
                 const options = users
                     .filter(u => ['user', 'publisher', 'admin', 'viewer'].includes(u.role))
                     .filter(u => !READONLY_LEADER_IDS.includes(Number(u.id)))

@@ -1,203 +1,37 @@
-// 验证脚本：数据修正模块 Commit B — correctionTransition 单一状态流转入口 + 建单 + 指派
+// 验证脚本：数据修正模块 correctionTransition 单一状态流转入口 + 建单 + 指派
 // 方案：docs/local/数据修正/数据修正模块_方案_20260612_v1.3.md（§3 状态机 / §4 流程 / §7 权限 / §9 闸门）
 // 用法：node scripts/verify-correction-transition.js
-// 模式：临时内存 sqlite + 最小 users 表，忠实移植 server.js 的 CORRECTION_STATUS_TRANSITIONS + correctionTransition
-//   逻辑，端到端验证 8 态闸门 / 双条件 WHERE 守卫 / VOIDED 旁路 / fix_proof join users 契约 / 建单+指派。
-//   不碰生产 db。范式对齐 verify-correction-schema.js（Commit A）。
 //
-// ⚠️ 移植双份局限（同 verify-correction-schema.js codex 08 M-2）：本脚本**复刻**了 server.js 的流转表 +
-//   correctionTransition 分支逻辑（而非 require server.js——后者顶层 app.listen 会起服务占端口）。因此验的是
-//   "脚本自己移植的理想逻辑"。缓解：① 改 server.js correction 流转/闸门时必须同步本文件；② 高价值的 SQL 契约
-//   （fix_proof join users 闸门、new_fix_proof_attachment_ids IN 校验、双 WHERE 守卫）在真实 sqlite 上执行，
-//   这部分是可信的；纯 JS 分支编排（哪个分支抛哪个 code）属移植复刻，靠人工同步。彻底同源（抽 correction 模块
-//   成独立 require）留待全模块完成后评估，不在 Commit B 范围。
+// J3（RC-L2 根治）：本脚本原**复刻** server.js/routes 的 correctionTransition + 流转表 + normalizeCorrectionDatetime，
+//   存在复刻漂移风险（如 v1.82.0 对接人白名单化给 transition 加 relay 放行，复刻版不会跟着变 → verify 测旧逻辑给假绿）。
+//   现改为 **require routes/corrections.js 的 _internals 真实逻辑**：注入 db helper 指向本脚本 :memory: db + mod.initSchema()
+//   建真实三表，断言不变但测的是真实代码（范式同 verify-correction-routes-smoke / relay-whitelist）。
 const assert = require('assert');
 const sqlite3 = require('sqlite3');
+const path = require('path');
 
 const db = new sqlite3.Database(':memory:');
 const run = (sql, params = []) => new Promise((res, rej) => db.run(sql, params, function (e) { e ? rej(e) : res(this); }));
 const all = (sql, params = []) => new Promise((res, rej) => db.all(sql, params, (e, rows) => e ? rej(e) : res(rows)));
 const get = (sql, params = []) => new Promise((res, rej) => db.get(sql, params, (e, row) => e ? rej(e) : res(row)));
 
-// === 与 server.js 同步的枚举/流转表（§3.1 / §3.2）===
-const CORRECTION_STATUSES = ['PENDING_ASSIGN', 'ASSIGNED_PENDING_ESTIMATE', 'IN_PROGRESS', 'FIXED', 'REFIXED', 'ARCHIVED', 'REJECTED', 'VOIDED'];
-const CORRECTION_STATUS_TRANSITIONS = {
-    'PENDING_ASSIGN': ['ASSIGNED_PENDING_ESTIMATE', 'ARCHIVED', 'REJECTED', 'VOIDED'],   // I2：ARCHIVED 仅行政闭环
-    'ASSIGNED_PENDING_ESTIMATE': ['IN_PROGRESS', 'ARCHIVED', 'REJECTED', 'VOIDED'],
-    'IN_PROGRESS': ['FIXED', 'ARCHIVED', 'REJECTED', 'VOIDED'],
-    'FIXED': ['REFIXED', 'ARCHIVED', 'VOIDED'],
-    'REFIXED': ['REFIXED', 'ARCHIVED', 'VOIDED'],
-    'ARCHIVED': ['VOIDED'],
-    'REJECTED': ['VOIDED'],
+// 注入 deps + require 真实 corrections 模块（db helper 指向本脚本 :memory: db，故 correctionTransition 操作同一库）
+const noop = () => {};
+const mwPass = (req, res, next) => (next ? next() : undefined);
+const asyncNoop = async () => ({});
+const deps = {
+    logger: { info: noop, warn: noop, error: noop, debug: noop },
+    db, dbRunAsync: run, dbGetAsync: get, dbAllAsync: all,
+    authenticateToken: mwPass, requireAdmin: mwPass, requirePublisherOrAdmin: mwPass,
+    sendIssueDingtalkRaw: asyncNoop, UPLOAD_DIR: path.join(require('os').tmpdir(), 'correction-transition-verify'),
+    readSystemConfig: asyncNoop, COLLAB_CHAT_ADMIN_ID: 3, callDingtalkWithTokenRetry: asyncNoop,
+    normalizeAttachmentExt: (x) => x, safeDeleteFileSync: noop, maskPhone: (x) => x,
 };
-
-function normalizeCorrectionDatetime(raw) {
-    if (raw === undefined || raw === null) return null;
-    let dv = String(raw).trim().replace('T', ' ');
-    if (!dv) return null;
-    if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(dv)) dv += ':00';
-    // codex 09 M-2：严格格式 + 真实日期校验（越界返 null）
-    const m = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/.exec(dv);
-    if (!m) return null;
-    const y = +m[1], mo = +m[2], d = +m[3], h = +m[4], mi = +m[5], s = +m[6];
-    const dt = new Date(y, mo - 1, d, h, mi, s);
-    if (dt.getFullYear() !== y || dt.getMonth() !== mo - 1 || dt.getDate() !== d ||
-        dt.getHours() !== h || dt.getMinutes() !== mi || dt.getSeconds() !== s) return null;
-    return dv;
-}
-
-class CorrectionTransitionError extends Error {
-    constructor(httpStatus, code, message) { super(message); this.httpStatus = httpStatus; this.code = code; }
-}
-
-// === 忠实移植 server.js correctionTransition（db helper 换成本脚本的 run/get）===
-async function correctionTransition(requestId, expectedFromStatus, toStatus, actor, payload = {}) {
-    if (!CORRECTION_STATUSES.includes(toStatus)) throw new CorrectionTransitionError(400, 'INVALID_TARGET_STATUS', `非法目标状态：${toStatus}`);
-    await run('BEGIN IMMEDIATE');
-    try {
-        const row = await get('SELECT id, status, correction_type, assigned_to, created_by, dingtalk_chat_id, fixed_at, refixed_at FROM correction_requests WHERE id = ?', [requestId]);
-        if (!row) throw new CorrectionTransitionError(404, 'CORRECTION_NOT_FOUND', '修正单不存在');
-        const fromStatus = row.status;
-
-        if (toStatus === 'VOIDED') {
-            if (fromStatus === 'VOIDED') throw new CorrectionTransitionError(409, 'ALREADY_VOIDED', '修正单已作废');
-        } else {
-            const allowed = CORRECTION_STATUS_TRANSITIONS[fromStatus] || [];
-            if (!allowed.includes(toStatus)) throw new CorrectionTransitionError(400, 'INVALID_TRANSITION', `不能从「${fromStatus}」转为「${toStatus}」`);
-            if (expectedFromStatus && fromStatus !== expectedFromStatus) throw new CorrectionTransitionError(409, 'CONCURRENT_STATE_CHANGE', '修正单状态已变更，请刷新重试');
-        }
-
-        // codex 09 M-3：权限校验（移植 server.js，按 actor.role + toStatus/fromStatus 分流）
-        {
-            const role = actor.role;
-            const isAdmin = role === 'admin';
-            const isPublisher = role === 'publisher';
-            const isAssignee = Number(row.assigned_to) === Number(actor.id) && Number(actor.id) > 0;
-            const isCreator = Number(row.created_by) === Number(actor.id) && Number(actor.id) > 0;
-            let permitted = false;
-            switch (toStatus) {
-                case 'ASSIGNED_PENDING_ESTIMATE': permitted = isAdmin || isPublisher; break;
-                case 'IN_PROGRESS': case 'FIXED': case 'REFIXED': permitted = isAdmin || isAssignee; break;
-                case 'REJECTED':
-                    permitted = (fromStatus === 'PENDING_ASSIGN') ? (isAdmin || isPublisher) : (isAdmin || isPublisher || isAssignee);
-                    break;
-                case 'ARCHIVED': {   // I2 §3.4 + codex 28 M-2 归一化前置（复刻 server.js）
-                    const ct = (payload.closure_type === undefined || payload.closure_type === null || payload.closure_type === '') ? 'normal' : payload.closure_type;
-                    if (ct !== 'normal' && ct !== 'admin_closure') throw new CorrectionTransitionError(400, 'INVALID_CLOSURE_TYPE', 'closure_type 仅 normal | admin_closure');
-                    permitted = (ct === 'admin_closure') ? isAdmin : (isAdmin || isCreator); break;
-                }
-                case 'VOIDED': permitted = isAdmin || isCreator; break;
-                default: permitted = isAdmin;
-            }
-            if (!permitted) throw new CorrectionTransitionError(403, 'NOT_AUTHORIZED_FOR_TRANSITION', '无权执行此状态流转');
-        }
-
-        const setFrags = [];
-        const setParams = [];
-        let historyReason = null;
-
-        switch (toStatus) {
-            case 'ASSIGNED_PENDING_ESTIMATE':
-                setFrags.push('assigned_to = ?', 'assigned_to_name = ?', 'assigned_by = ?', "assigned_at = datetime('now','localtime')");
-                setParams.push(Number(payload.assigned_to), payload.assigned_to_name || null, Number(payload.assigned_by) || null);
-                historyReason = payload.assigned_to_name ? `指派给 ${payload.assigned_to_name}` : null;
-                break;
-            case 'IN_PROGRESS': {
-                const est = normalizeCorrectionDatetime(payload.dev_estimated_at);
-                if (!est) throw new CorrectionTransitionError(400, 'ESTIMATE_REQUIRED', '请先回复预计完成时间');
-                setFrags.push('dev_estimated_at = ?', "estimated_replied_at = datetime('now','localtime')");
-                setParams.push(est);
-                break;
-            }
-            case 'FIXED':
-                if (row.correction_type === 'batch') {
-                    const note = (typeof payload.batch_completion_note === 'string' ? payload.batch_completion_note.trim() : '');
-                    if (!note) throw new CorrectionTransitionError(400, 'BATCH_NOTE_REQUIRED', '批量修正标完成必须填写完成说明');
-                    setFrags.push('batch_completion_note = ?');
-                    setParams.push(note);
-                } else {
-                    const cnt = await get(
-                        `SELECT COUNT(*) AS c FROM correction_attachments a LEFT JOIN users u ON u.id = a.uploaded_by
-                          WHERE a.correction_request_id = ? AND a.attachment_type = 'fix_proof' AND a.uploaded_by IS NOT NULL
-                            AND (a.uploaded_by = ? OR u.role = 'admin')`, [requestId, Number(row.assigned_to) || -1]);
-                    if (!cnt || cnt.c < 1) throw new CorrectionTransitionError(400, 'FIX_PROOF_REQUIRED', '单数据修正标完成必须上传结果证明截图');
-                }
-                setFrags.push("fixed_at = datetime('now','localtime')", 'submission_count = 1');
-                break;
-            case 'REFIXED':
-                if (row.correction_type === 'batch') {
-                    const rnote = (typeof payload.resubmit_note === 'string' ? payload.resubmit_note.trim() : '');
-                    if (!rnote) throw new CorrectionTransitionError(400, 'BATCH_RESUBMIT_NOTE_REQUIRED', '批量重修提交必须填写本次重修说明');
-                    historyReason = rnote;
-                } else {
-                    const ids = Array.isArray(payload.new_fix_proof_attachment_ids)
-                        ? payload.new_fix_proof_attachment_ids.map(Number).filter((n) => Number.isInteger(n) && n > 0) : [];
-                    if (ids.length === 0) throw new CorrectionTransitionError(400, 'FIX_PROOF_REQUIRED', '单数据修正重修提交必须上传本次新增结果证明');
-                    // codex 09 H-1：新增性兜底——附件须晚于上次完成时间 COALESCE(refixed_at, fixed_at)
-                    const newnessBaseline = row.refixed_at || row.fixed_at || null;
-                    const placeholders = ids.map(() => '?').join(',');
-                    const cnt = await get(
-                        `SELECT COUNT(*) AS c FROM correction_attachments a LEFT JOIN users u ON u.id = a.uploaded_by
-                          WHERE a.correction_request_id = ? AND a.attachment_type = 'fix_proof' AND a.uploaded_by IS NOT NULL
-                            AND a.id IN (${placeholders}) AND (a.uploaded_by = ? OR u.role = 'admin')
-                            AND a.created_at > ?`, [requestId, ...ids, Number(row.assigned_to) || -1, newnessBaseline]);
-                    if (!cnt || cnt.c !== ids.length) throw new CorrectionTransitionError(400, 'FIX_PROOF_REQUIRED', '本次新增结果证明无效');
-                    historyReason = `重修提交（新增 ${ids.length} 张结果证明）`;
-                }
-                setFrags.push("refixed_at = datetime('now','localtime')", 'submission_count = submission_count + 1');
-                break;
-            case 'ARCHIVED': {
-                // I2 §3.4 双分支闸门（复刻 server.js correctionTransition，须同步）
-                const closureType = (payload.closure_type === undefined || payload.closure_type === null || payload.closure_type === '') ? 'normal' : payload.closure_type;
-                if (closureType !== 'normal' && closureType !== 'admin_closure') throw new CorrectionTransitionError(400, 'INVALID_CLOSURE_TYPE', 'closure_type 仅 normal | admin_closure');
-                if (closureType === 'admin_closure') {
-                    if (!['PENDING_ASSIGN', 'ASSIGNED_PENDING_ESTIMATE', 'IN_PROGRESS'].includes(fromStatus)) throw new CorrectionTransitionError(400, 'INVALID_CLOSURE_SOURCE', '行政闭环只能从未完成态发起');
-                    const cr = (typeof payload.closure_reason === 'string' ? payload.closure_reason.trim() : '');
-                    if (cr.length < 10 || cr.length > 500) throw new CorrectionTransitionError(400, 'CLOSURE_REASON_REQUIRED', '行政闭环必须填写闭环原因（10-500 字）');
-                    setFrags.push("archived_at = datetime('now','localtime')", 'archived_by = ?', 'archived_by_name = ?', "closure_type = 'admin_closure'", 'closure_reason = ?', 'friction_reason = NULL');   // L-1 互斥
-                    setParams.push(Number(actor.id) || null, actor.name || null, cr);
-                    historyReason = `行政闭环：${cr}`;
-                } else {
-                    if (fromStatus !== 'FIXED' && fromStatus !== 'REFIXED') throw new CorrectionTransitionError(400, 'INVALID_TRANSITION', '正常归档只能从已完成态（FIXED/REFIXED）发起');
-                    const fr = (typeof payload.friction_reason === 'string' ? payload.friction_reason.trim() : '');
-                    if (row.dingtalk_chat_id && !fr) throw new CorrectionTransitionError(400, 'FRICTION_REASON_REQUIRED', '本单发起过拉群讨论，归档必须填写摩擦原因');
-                    setFrags.push("archived_at = datetime('now','localtime')", 'archived_by = ?', 'archived_by_name = ?', "closure_type = 'normal'", 'friction_reason = ?', 'closure_reason = NULL');   // L-1 互斥
-                    setParams.push(Number(actor.id) || null, actor.name || null, fr || null);
-                    historyReason = fr || null;
-                }
-                break;
-            }
-            case 'REJECTED': {
-                const rr = (typeof payload.reject_reason === 'string' ? payload.reject_reason.trim() : '');
-                if (!rr) throw new CorrectionTransitionError(400, 'REJECT_REASON_REQUIRED', '拒绝必须填写原因');
-                setFrags.push("rejected_at = datetime('now','localtime')", 'rejected_by = ?', 'rejected_by_name = ?', 'reject_reason = ?');
-                setParams.push(Number(actor.id) || null, actor.name || null, rr);
-                historyReason = rr;
-                break;
-            }
-            case 'VOIDED': {
-                const vr = (typeof payload.void_reason === 'string' ? payload.void_reason.trim() : '');
-                setFrags.push("voided_at = datetime('now','localtime')", 'voided_by = ?', 'voided_by_name = ?', 'void_reason = ?');
-                setParams.push(Number(actor.id) || null, actor.name || null, vr || null);
-                historyReason = vr || null;
-                break;
-            }
-            default:
-                throw new CorrectionTransitionError(400, 'UNSUPPORTED_TRANSITION', `暂不支持转为 ${toStatus}`);
-        }
-
-        const setClause = ['status = ?', ...setFrags].join(', ');
-        const upd = await run(`UPDATE correction_requests SET ${setClause} WHERE id = ? AND status = ?`, [toStatus, ...setParams, requestId, fromStatus]);
-        if (!upd || upd.changes !== 1) throw new CorrectionTransitionError(409, 'CONCURRENT_STATE_CHANGE', '修正单状态已变更，请刷新重试');
-        await run(`INSERT INTO correction_status_history (correction_request_id, from_status, to_status, reason, operator_id, operator_name)
-                   VALUES (?, ?, ?, ?, ?, ?)`, [requestId, fromStatus, toStatus, historyReason, Number(actor.id) || null, actor.name || null]);
-        await run('COMMIT');
-        return { ok: true, fromStatus, toStatus };
-    } catch (e) {
-        try { await run('ROLLBACK'); } catch (_) {}
-        throw e;
-    }
-}
+const mod = require('../routes/corrections')(deps);
+const I = mod._internals;
+// 真实导出（替代复刻）：correctionTransition / 枚举 / 流转表 / 日期归一化
+const { correctionTransition, CORRECTION_STATUSES, CORRECTION_STATUS_TRANSITIONS, normalizeCorrectionDatetime } = I;
+function waitReady() { return new Promise((res) => { const t = setInterval(() => { if (I.CORRECTION_SCHEMA_STATE.ready) { clearInterval(t); res(); } }, 10); }); }
 
 // 建单 helper（移植 POST /api/corrections 的 INSERT + history 首行；省略 HTTP 层字段校验，专注流转事实）
 async function createCorrection({ correction_type = 'single', created_by = 1, created_by_name = '管理员', dingtalk_chat_id = null } = {}) {
@@ -213,49 +47,30 @@ async function createCorrection({ correction_type = 'single', created_by = 1, cr
 const actor = { id: 1, name: '管理员', role: 'admin' };
 const ACTOR_DEV = { id: 5, name: '开发王', role: 'user' };
 const ACTOR_PUB = { id: 7, name: '示例发布者', role: 'publisher' };
-const ACTOR_STRANGER = { id: 99, name: '路人', role: 'user' };   // 非 assignee 非 creator
+const ACTOR_STRANGER = { id: 99, name: '路人', role: 'user' };   // 非 assignee 非 creator 非白名单
 
 let passed = 0;
 const ok = (msg) => { passed++; console.log(`  ✓ ${msg}`); };
-// 断言 transition 抛指定 code
+// 断言 transition 抛指定 code（真实 CorrectionTransitionError 带 .code/.httpStatus）
 async function expectErr(promise, code, label) {
     try { await promise; assert.fail(`${label}：应抛 ${code} 却成功`); }
     catch (e) {
-        if (!(e instanceof CorrectionTransitionError)) throw e;
+        if (!e || !e.code) throw e;
         assert.strictEqual(e.code, code, `${label}：应抛 ${code}，实际 ${e.code}`);
     }
 }
 
+// schema：users 表本脚本建（routes 不含）；correction 三表用真实 mod.initSchema()（同源，不再复刻 DDL）
 async function setupSchema() {
     await run(`CREATE TABLE users (id INTEGER PRIMARY KEY, display_name TEXT, role TEXT)`);
-    await run(`INSERT INTO users (id, display_name, role) VALUES (1,'管理员','admin'),(4,'甄妮','admin'),(5,'开发王','user'),(7,'示例发布者','publisher'),(11,'金华琴','viewer')`);
-    await run(`CREATE TABLE correction_requests (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, source_system TEXT NOT NULL, source_system_other TEXT,
-        location_info TEXT NOT NULL, reason TEXT, oa_number TEXT,
-        correction_type TEXT NOT NULL DEFAULT 'single', requester_dept TEXT, requester_name TEXT NOT NULL, requester_phone TEXT,
-        status TEXT NOT NULL DEFAULT 'PENDING_ASSIGN', expected_deadline DATETIME, dev_estimated_at DATETIME,
-        assigned_to INTEGER, assigned_to_name TEXT, assigned_by INTEGER, assigned_at DATETIME,
-        batch_completion_note TEXT, submission_count INTEGER DEFAULT 0, created_at DATETIME DEFAULT (datetime('now','localtime')),
-        estimated_replied_at DATETIME, fixed_at DATETIME, refixed_at DATETIME,
-        completion_notified_at DATETIME, completion_notify_status TEXT DEFAULT 'not_sent', completion_notify_message_key TEXT,
-        completion_notify_error TEXT, completion_read_at DATETIME, relay_notified_user_id INTEGER, relay_notified_at DATETIME,
-        archived_at DATETIME, archived_by INTEGER, archived_by_name TEXT, friction_reason TEXT, closure_type TEXT DEFAULT 'normal', closure_reason TEXT,
-        voided_at DATETIME, voided_by INTEGER, voided_by_name TEXT, void_reason TEXT,
-        created_by INTEGER NOT NULL, created_by_name TEXT, rejected_at DATETIME, rejected_by INTEGER, rejected_by_name TEXT, reject_reason TEXT,
-        notify_status TEXT DEFAULT 'not_sent', notified_at DATETIME, notify_message_key TEXT, notify_error TEXT, read_at DATETIME,
-        requester_notify_status TEXT DEFAULT 'not_sent', requester_notified_at DATETIME, requester_notify_message_key TEXT,
-        requester_notify_error TEXT, requester_read_at DATETIME,
-        dingtalk_chat_id TEXT, dingtalk_open_conversation_id TEXT, dingtalk_chat_created_at DATETIME, dingtalk_chat_created_by INTEGER, dingtalk_chat_name TEXT)`);
-    await run(`CREATE TABLE correction_attachments (id INTEGER PRIMARY KEY AUTOINCREMENT, correction_request_id INTEGER NOT NULL,
-        attachment_type TEXT NOT NULL, file_name TEXT NOT NULL, original_name TEXT, file_size INTEGER, mime_type TEXT,
-        uploaded_by INTEGER NOT NULL, uploaded_by_name TEXT, created_at DATETIME DEFAULT (datetime('now','localtime')))`);
-    await run(`CREATE TABLE correction_status_history (id INTEGER PRIMARY KEY AUTOINCREMENT, correction_request_id INTEGER NOT NULL,
-        from_status TEXT, to_status TEXT NOT NULL, reason TEXT, operator_id INTEGER, operator_name TEXT, created_at DATETIME DEFAULT (datetime('now','localtime')))`);
+    await run(`INSERT INTO users (id, display_name, role) VALUES (1,'管理员','admin'),(4,'甄妮','admin'),(5,'开发王','user'),(7,'示例发布者','publisher'),(11,'示例只读领导A','viewer')`);
+    mod.initSchema();
+    await waitReady();
 }
 
 async function main() {
     await setupSchema();
-    ok('schema + users 表就绪（admin 1/4 / user 5 / publisher 7 / viewer 11）');
+    ok('schema + users 表就绪（真实 initSchema 建三表 + users：admin 1/4 / user 5 / publisher 7 / viewer 11）');
 
     // [1] 流转表结构（8 态 + R-1 完成态不可拒）
     assert.strictEqual(CORRECTION_STATUSES.length, 8, '应 8 态');
@@ -263,7 +78,7 @@ async function main() {
     assert.ok(!CORRECTION_STATUS_TRANSITIONS['FIXED'].includes('REJECTED'), 'R-1：FIXED 不可→REJECTED');
     assert.ok(!CORRECTION_STATUS_TRANSITIONS['REFIXED'].includes('REJECTED'), 'R-1：REFIXED 不可→REJECTED');
     assert.strictEqual(CORRECTION_STATUS_TRANSITIONS['VOIDED'], undefined, 'VOIDED 无后续转移');
-    ok('流转表：8 态 + R-1 完成态不可拒 + VOIDED 无后续');
+    ok('流转表（真实导出）：8 态 + R-1 完成态不可拒 + VOIDED 无后续');
 
     // [2] 建单：INSERT + history 首行 NULL→PENDING_ASSIGN
     const c1 = await createCorrection({ correction_type: 'single' });
@@ -298,8 +113,8 @@ async function main() {
 
     // [6] →FIXED single 闸门：无合规 fix_proof 拒
     await expectErr(correctionTransition(c1, 'IN_PROGRESS', 'FIXED', ACTOR_DEV, {}), 'FIX_PROOF_REQUIRED', '单修正无 fix_proof');
-    // 6a 上传者非 assignee 非 admin（甄妮是 admin → 用 viewer 11 模拟越权上传者）→ 仍不放行
-    await run(`INSERT INTO correction_attachments (correction_request_id, attachment_type, file_name, uploaded_by, uploaded_by_name) VALUES (?, 'fix_proof', 'bad.png', 11, '金华琴')`, [c1]);
+    // 6a 上传者非 assignee 非 admin（viewer 11 模拟越权上传者）→ 仍不放行
+    await run(`INSERT INTO correction_attachments (correction_request_id, attachment_type, file_name, uploaded_by, uploaded_by_name) VALUES (?, 'fix_proof', 'bad.png', 11, '示例只读领导A')`, [c1]);
     await expectErr(correctionTransition(c1, 'IN_PROGRESS', 'FIXED', ACTOR_DEV, {}), 'FIX_PROOF_REQUIRED', '越权上传者 fix_proof 不算合规');
     // 6b error_proof 类型不算 fix_proof
     await run(`INSERT INTO correction_attachments (correction_request_id, attachment_type, file_name, uploaded_by, uploaded_by_name) VALUES (?, 'error_proof', 'err.png', 5, '开发王')`, [c1]);
@@ -313,15 +128,15 @@ async function main() {
     assert.ok(r6.fixed_at, 'fixed_at 写入');
     ok('→FIXED single 闸门（H-2 join users）：越权上传者/error_proof 不放行，开发本人 fix_proof 放行 + count=1');
 
-    // [7] →REFIXED single：必须本次新增 fix_proof（HIGH-1 06 轮，不能 COUNT 历史）+ codex 09 H-1 新增性兜底
+    // [7] →REFIXED single：必须本次新增 fix_proof（HIGH-1）+ codex 09 H-1 新增性兜底
     await expectErr(correctionTransition(c1, 'FIXED', 'REFIXED', ACTOR_DEV, {}), 'FIX_PROOF_REQUIRED', '重修无新增附件');
     // 7a 传"他单"附件 id → 不命中本单 → 拒
     const otherC = await createCorrection({ correction_type: 'single' });
     const otherAtt = await run(`INSERT INTO correction_attachments (correction_request_id, attachment_type, file_name, uploaded_by, uploaded_by_name) VALUES (?, 'fix_proof', 'other.png', 5, '开发王')`, [otherC]);
     await expectErr(correctionTransition(c1, 'FIXED', 'REFIXED', ACTOR_DEV, { new_fix_proof_attachment_ids: [otherAtt.lastID] }), 'FIX_PROOF_REQUIRED', '夹带他单附件');
-    // 7b ⭐codex 09 H-1：传"本单旧附件"（首次 FIXED 用的 fixAtt1，created_at ≤ fixed_at）→ 新增性兜底拒（防复用旧图绕过留证）
+    // 7b ⭐codex 09 H-1：传"本单旧附件"（fixAtt1，created_at ≤ fixed_at）→ 新增性兜底拒
     await expectErr(correctionTransition(c1, 'FIXED', 'REFIXED', ACTOR_DEV, { new_fix_proof_attachment_ids: [fixAtt1.lastID] }), 'FIX_PROOF_REQUIRED', 'H-1 复用本单旧 fix_proof');
-    // 7c 传本单"本次新增"fix_proof（显式 created_at 晚于 fixed_at，模拟 C 端 /resubmit 当下上传）→ 放行 + count+1
+    // 7c 传本单"本次新增"fix_proof（显式 created_at 晚于 fixed_at）→ 放行 + count+1
     const fixAtt2 = await run(`INSERT INTO correction_attachments (correction_request_id, attachment_type, file_name, uploaded_by, uploaded_by_name, created_at) VALUES (?, 'fix_proof', 'fix2.png', 5, '开发王', '2099-01-01 00:00:00')`, [c1]);
     await correctionTransition(c1, 'FIXED', 'REFIXED', ACTOR_DEV, { new_fix_proof_attachment_ids: [fixAtt2.lastID] });
     const r7 = await get('SELECT status, refixed_at, submission_count FROM correction_requests WHERE id=?', [c1]);
@@ -386,7 +201,6 @@ async function main() {
     await expectErr(correctionTransition(c3, 'PENDING_ASSIGN', 'REJECTED', actor, {}), 'REJECT_REASON_REQUIRED', '拒绝无原因');
     await correctionTransition(c3, 'PENDING_ASSIGN', 'REJECTED', actor, { reject_reason: '该数据业务上无需修正' });
     assert.strictEqual((await get('SELECT status, reject_reason FROM correction_requests WHERE id=?', [c3])).status, 'REJECTED', '进 REJECTED');
-    // FIXED→REJECTED 非法（R-1）：c2 已 ARCHIVED，另造一个 FIXED 单验
     const c4 = await createCorrection({ correction_type: 'batch' });
     await correctionTransition(c4, 'PENDING_ASSIGN', 'ASSIGNED_PENDING_ESTIMATE', actor, { assigned_to: 5, assigned_to_name: '开发王', assigned_by: 1 });
     await correctionTransition(c4, 'ASSIGNED_PENDING_ESTIMATE', 'IN_PROGRESS', ACTOR_DEV, { dev_estimated_at: '2026-06-20 12:00' });
@@ -408,14 +222,12 @@ async function main() {
     const r12 = await get('SELECT status, voided_at, void_reason FROM correction_requests WHERE id=?', [c3]);
     assert.strictEqual(r12.status, 'VOIDED', 'REJECTED→VOIDED 旁路成功');
     assert.ok(r12.voided_at, 'voided_at 写入（软删标记）');
-    // 已作废再作废 → ALREADY_VOIDED；VOIDED→任意 → INVALID_TRANSITION
     await expectErr(correctionTransition(c3, null, 'VOIDED', actor, {}), 'ALREADY_VOIDED', '重复作废');
     await expectErr(correctionTransition(c3, 'VOIDED', 'ARCHIVED', actor, {}), 'INVALID_TRANSITION', 'VOIDED 无后续');
     ok('VOIDED 旁路（G-14）：任意非 VOIDED 态可作废（不比 expectedFrom）；重复作废 409；VOIDED 无后续转移');
 
     // [13] 双条件 WHERE 守卫 SQL 契约：status 被并发改后，按旧 status UPDATE → changes=0
     const c5 = await createCorrection({ correction_type: 'single' });
-    // 模拟"读到 PENDING_ASSIGN 后、UPDATE 前被并发改成 VOIDED"
     await run(`UPDATE correction_requests SET status='VOIDED' WHERE id=?`, [c5]);
     const staleUpd = await run(`UPDATE correction_requests SET status='ASSIGNED_PENDING_ESTIMATE' WHERE id=? AND status='PENDING_ASSIGN'`, [c5]);
     assert.strictEqual(staleUpd.changes, 0, '双 WHERE：status 已变，按旧状态 UPDATE 命中 0 行');
@@ -437,28 +249,25 @@ async function main() {
     await expectErr(correctionTransition(c7, 'ASSIGNED_PENDING_ESTIMATE', 'IN_PROGRESS', ACTOR_DEV, { dev_estimated_at: 'abc' }), 'ESTIMATE_REQUIRED', '非法日期被当空 → 拒进 IN_PROGRESS');
     ok("M-2：normalizeCorrectionDatetime 严格校验（'abc'/13月/31日→null），非法 dev_estimated_at 拒进 IN_PROGRESS");
 
-    // [16] codex 09 M-3：transition 权限分流（移植 §7.2）——非授权 actor 被 403 拦
+    // [16] codex 09 M-3：transition 权限分流（§7.2）——非授权 actor 被 403 拦
     const c8 = await createCorrection({ correction_type: 'single', created_by: 1 });
     await correctionTransition(c8, 'PENDING_ASSIGN', 'ASSIGNED_PENDING_ESTIMATE', actor, { assigned_to: 5, assigned_to_name: '开发王', assigned_by: 1 });
-    // 非本单开发（路人 99）标完成 → 403（权限先于闸门，无需 fix_proof 就拦）
     await expectErr(correctionTransition(c8, 'ASSIGNED_PENDING_ESTIMATE', 'IN_PROGRESS', ACTOR_STRANGER, { dev_estimated_at: '2026-06-20 12:00' }), 'NOT_AUTHORIZED_FOR_TRANSITION', '非本单开发不可推进');
-    // publisher 指派 OK（admin||publisher），但 publisher 不可作废（admin||creator）
     const c9 = await createCorrection({ correction_type: 'single', created_by: 1 });
     await correctionTransition(c9, 'PENDING_ASSIGN', 'ASSIGNED_PENDING_ESTIMATE', ACTOR_PUB, { assigned_to: 5, assigned_to_name: '开发王', assigned_by: 7 });
     await expectErr(correctionTransition(c9, null, 'VOIDED', ACTOR_PUB, { void_reason: 'x' }), 'NOT_AUTHORIZED_FOR_TRANSITION', 'publisher 非建单人不可作废');
-    // 开发不可拒绝未指派单（拒绝 from PENDING_ASSIGN = admin||publisher）—— 用另一单验
     const c10 = await createCorrection({ correction_type: 'single', created_by: 1 });
     await expectErr(correctionTransition(c10, 'PENDING_ASSIGN', 'REJECTED', ACTOR_DEV, { reject_reason: 'x' }), 'NOT_AUTHORIZED_FOR_TRANSITION', '开发不可拒未指派单');
     ok('M-3：transition 权限分流——非本单开发不可标完成 / publisher 不可作废 / 开发不可拒未指派单（均 403）');
 
-    // [17] codex 09 M-4：建单路径 A/B 互斥（endpoint 级规则镜像；完整 endpoint 覆盖在 Commit G flow verify）
+    // [17] codex 09 M-4：建单路径 A/B 互斥（endpoint 级规则镜像；完整 endpoint 覆盖在 flow verify）
     const conflictRule = (hasAssign, hasRelay) => (hasAssign && hasRelay);
     assert.strictEqual(conflictRule(true, true), true, '同传 assigned_to+relay → 冲突');
     assert.strictEqual(conflictRule(true, false), false, '仅指派 → 不冲突');
     assert.strictEqual(conflictRule(false, true), false, '仅对接人 → 不冲突');
-    ok('M-4：建单路径 A/B 互斥规则镜像（同传判冲突 ASSIGN_AND_RELAY_CONFLICT；完整 endpoint 断言在 Commit G flow verify）');
+    ok('M-4：建单路径 A/B 互斥规则镜像（同传判冲突 ASSIGN_AND_RELAY_CONFLICT；完整 endpoint 断言在 flow verify）');
 
-    console.log(`\n[全部通过] ${passed}/${passed} ✓ Commit B correctionTransition + 建单 + 指派验证通过（8 态闸门 + 双 WHERE 守卫 + VOIDED 旁路 + fix_proof join users 契约 + R-6 + R-1 + codex 09 全 6 项：H-1 新增性 / M-2 日期 / M-3 权限 / M-4 冲突 / L-6）`);
+    console.log(`\n[全部通过] ${passed}/${passed} ✓ correctionTransition 验证通过【J3 require 真实 _internals，非复刻】（8 态闸门 + 双 WHERE 守卫 + VOIDED 旁路 + fix_proof join users 契约 + R-6 + R-1 + codex 09 全 6 项）`);
     db.close();
 }
 

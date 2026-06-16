@@ -1617,15 +1617,15 @@ router.get('/:id/notify-read-status', authenticateToken, requireCorrectionSchema
 //   = 一次成型 chat/create + 双 WHERE 守卫 + CRITICAL 落库失败处理 + requester_phone 反查降级。
 //   correction 增量：
 //     ① 额外勾选 extra_member_ids[]（M-3/M-4：不按 role 过滤；①存在②未禁用③不在排除名单 直接剔除，④无钉钉号跳过+warning）
-//     ② CORRECTION_CHAT_EXCLUDE_IDS=[11] 排金华琴（G-5/§5.4；不复用 READONLY_LEADER_IDS=[6,11]）
+//     ② CORRECTION_CHAT_EXCLUDE_IDS=[11] 排示例只读领导A（G-5/§5.4；不复用 READONLY_LEADER_IDS=[6,11]）
 //     ③ 固定底座成员入口 addCorrectionChatMember **不排 id=1**（M-2：correction 的 id=1 是真实 admin，非占位）
 //     ④ 固定底座缺钉钉号 → missing_required_member_ids strong warning，不阻断建群（M-5：有群比没群强）
 //     ⑤ 校验顺序：先可见性鉴权 → 拉群权限 → 幂等 → 状态门槛（M-6，幂等/门槛前必先鉴权防泄露历史群）
 //     ⑥ 群字段旁路 UPDATE，不走 correctionTransition、不动 status、不写 correction_status_history（G-6/L-2）
 // ============================================================
 
-// G-5 / §5.4：拉群可选成员排除名单——独立常量，只排金华琴 11（陈宏亮 6 可进群，口径区别于 READONLY_LEADER_IDS）
-const CORRECTION_CHAT_EXCLUDE_IDS = [11];   // 金华琴
+// G-5 / §5.4：拉群可选成员排除名单——独立常量，只排示例只读领导A 11（示例只读领导B 6 可进群，口径区别于 READONLY_LEADER_IDS）
+const CORRECTION_CHAT_EXCLUDE_IDS = [11];   // 示例只读领导A
 function isCorrectionChatExcludedId(id) { return CORRECTION_CHAT_EXCLUDE_IDS.includes(Number(id)); }
 // M-2：correction 专用成员入口——只排无效/占位 id（≤0、NaN、非安全整数），**不排 id=1**
 //   （区别于 collab 的 addRealChatMember 硬排 BUILTIN_ADMIN_USER_ID=1；correction id=1 是真实管理员账号应正常入群）
@@ -1707,7 +1707,7 @@ router.post('/:id/create-chat', authenticateToken, requireCorrectionSchemaReady,
         addCorrectionChatMember(baseIdSet, c.created_by);
         addCorrectionChatMember(baseIdSet, c.assigned_to);
         addCorrectionChatMember(baseIdSet, userId);
-        // 固定底座过排除名单（M-5）：命中金华琴 11 → 移出 + warning（纵深防御兜底脏数据，不阻断；示例用户A/发起人本不会是金华琴）
+        // 固定底座过排除名单（M-5）：命中示例只读领导A 11 → 移出 + warning（纵深防御兜底脏数据，不阻断；示例用户A/发起人本不会是示例只读领导A）
         const baseExcludedIds = [];
         for (const bid of [...baseIdSet]) { if (isCorrectionChatExcludedId(bid)) { baseIdSet.delete(bid); baseExcludedIds.push(bid); } }
 
@@ -1718,7 +1718,7 @@ router.post('/:id/create-chat', authenticateToken, requireCorrectionSchemaReady,
         for (const bid of baseIdSet) extraIdSet.delete(bid);          // 去重：已在固定底座的额外 id 不重复处理
         for (const bid of baseExcludedIds) extraIdSet.delete(bid);    // 已被底座排除的也不再作额外处理
         const extraExcludedIds = [];
-        for (const eid of [...extraIdSet]) { if (isCorrectionChatExcludedId(eid)) { extraIdSet.delete(eid); extraExcludedIds.push(eid); } }   // ③ 直接剔除（前端列表已滤金华琴，此为后端兜底）
+        for (const eid of [...extraIdSet]) { if (isCorrectionChatExcludedId(eid)) { extraIdSet.delete(eid); extraExcludedIds.push(eid); } }   // ③ 直接剔除（前端列表已滤示例只读领导A，此为后端兜底）
 
         // 一次性查所有引用到的 user（底座 + 额外 + 被排除的，便于 warning 带 display_name）
         const allRefIds = [...new Set([...baseIdSet, ...extraIdSet, ...baseExcludedIds, ...extraExcludedIds])];
@@ -1750,7 +1750,7 @@ router.post('/:id/create-chat', authenticateToken, requireCorrectionSchemaReady,
         const warnings = [];
         const missingRequiredMemberIds = [];       // 固定底座缺钉钉号（strong warning，不阻断）
 
-        // 固定底座金华琴排除的 warning（M-5）
+        // 固定底座示例只读领导A排除的 warning（M-5）
         for (const bid of baseExcludedIds) warnings.push({ code: 'REQUIRED_MEMBER_EXCLUDED', user_id: bid, display_name: nameOf(bid) });
 
         // 处理固定底座成员（缺钉钉号 → missing_required，不阻断）

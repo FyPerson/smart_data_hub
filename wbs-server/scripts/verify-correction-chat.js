@@ -11,22 +11,25 @@
 const assert = require('assert');
 const sqlite3 = require('sqlite3');
 
-// ===== 与 server.js 同步的常量 / helper（忠实复刻）=====
-const COLLAB_CHAT_ADMIN_ID = 3;   // 示例用户A（server.js:13414）
-const CORRECTION_CHAT_EXCLUDE_IDS = [11];   // 金华琴
-function isCorrectionChatExcludedId(id) { return CORRECTION_CHAT_EXCLUDE_IDS.includes(Number(id)); }
-// M-2：不排 id=1（只排 ≤0 / NaN / 非安全整数）
-function addCorrectionChatMember(memberSet, rawId) {
-    const uid = Number(rawId);
-    if (Number.isSafeInteger(uid) && uid > 0) memberSet.add(uid);
-}
-// 对照组：collab addRealChatMember（硬排 BUILTIN_ADMIN_USER_ID=1）—— 用于反衬 M-2 差异
+// ===== J3：底层排除名单 / 可拉群状态 require 真实 _internals（非复刻，防漂移）=====
+//   ⚠️ 高层成员规划/校验顺序（checkChatGate/planMembers/planRequester，下方）在 corrections.js create-chat handler
+//   内联、未抽函数导出，务实收尾保留复刻 + 标注：改 handler 的成员规划/校验顺序/业务方反查时须同步本文件。
+const _db0 = new sqlite3.Database(':memory:');
+const _noop = () => {}; const _mw = (q, s, n) => (n ? n() : undefined); const _an = async () => ({});
+const _r0 = (s, p = []) => new Promise((res, rej) => _db0.run(s, p, function (e) { e ? rej(e) : res(this); }));
+const _g0 = (s, p = []) => new Promise((res, rej) => _db0.get(s, p, (e, r) => e ? rej(e) : res(r)));
+const _a0 = (s, p = []) => new Promise((res, rej) => _db0.all(s, p, (e, r) => e ? rej(e) : res(r)));
+const _mod = require('../routes/corrections')({ logger: { info: _noop, warn: _noop, error: _noop, debug: _noop }, db: _db0, dbRunAsync: _r0, dbGetAsync: _g0, dbAllAsync: _a0, authenticateToken: _mw, requireAdmin: _mw, requirePublisherOrAdmin: _mw, sendIssueDingtalkRaw: _an, UPLOAD_DIR: require('path').join(require('os').tmpdir(), 'corr-chat-verify'), readSystemConfig: _an, COLLAB_CHAT_ADMIN_ID: 3, callDingtalkWithTokenRetry: _an, normalizeAttachmentExt: x => x, safeDeleteFileSync: _noop, maskPhone: x => x });
+const I = _mod._internals;
+const COLLAB_CHAT_ADMIN_ID = 3;   // 示例用户A（deps 常量）
+const CORRECTION_CHAT_EXCLUDE_IDS = I.CORRECTION_CHAT_EXCLUDE_IDS;             // ⭐ require 真实（排除名单：示例只读领导A 11）
+const isCorrectionChatExcludedId = I.isCorrectionChatExcludedId;               // ⭐ require 真实
+const CORRECTION_CHAT_ALLOWED_STATUSES = I.CORRECTION_CHAT_ALLOWED_STATUSES;   // ⭐ require 真实
+// addCorrectionChatMember：corrections.js 有同名模块函数但未导出 _internals，保留复刻（M-2：不排 id=1）
+function addCorrectionChatMember(memberSet, rawId) { const uid = Number(rawId); if (Number.isSafeInteger(uid) && uid > 0) memberSet.add(uid); }
+// 对照组：collab addRealChatMember（硬排 BUILTIN_ADMIN_USER_ID=1）反衬 M-2 差异
 const BUILTIN_ADMIN_USER_ID = 1;
-function addRealChatMember(memberSet, rawId) {
-    const uid = Number(rawId);
-    if (Number.isSafeInteger(uid) && uid > 0 && uid !== BUILTIN_ADMIN_USER_ID) memberSet.add(uid);
-}
-const CORRECTION_CHAT_ALLOWED_STATUSES = ['ASSIGNED_PENDING_ESTIMATE', 'IN_PROGRESS', 'FIXED', 'REFIXED'];
+function addRealChatMember(memberSet, rawId) { const uid = Number(rawId); if (Number.isSafeInteger(uid) && uid > 0 && uid !== BUILTIN_ADMIN_USER_ID) memberSet.add(uid); }
 
 // 校验顺序复刻（M-6）：可见性 → 拉群权限 → 幂等 → 状态门槛。返回 {http, code}；null=放行到建群。
 function checkChatGate(c, actor) {
@@ -128,9 +131,9 @@ async function main() {
     ok('M-2 成员入口：addCorrectionChatMember 保留 id=1 / 排 ≤0·NaN；对照 collab 排 id=1（差异成立）');
 
     // [2] 排除名单
-    assert.ok(isCorrectionChatExcludedId(11) && isCorrectionChatExcludedId('11'), '金华琴 11 命中排除');
-    assert.ok(!isCorrectionChatExcludedId(6) && !isCorrectionChatExcludedId(3), '陈宏亮 6 / 示例用户A 3 不排（口径区别于 READONLY_LEADER_IDS）');
-    ok('G-5 排除名单：金华琴 11 排 / 陈宏亮 6 不排（独立常量，非 READONLY_LEADER_IDS=[6,11]）');
+    assert.ok(isCorrectionChatExcludedId(11) && isCorrectionChatExcludedId('11'), '示例只读领导A 11 命中排除');
+    assert.ok(!isCorrectionChatExcludedId(6) && !isCorrectionChatExcludedId(3), '示例只读领导B 6 / 示例用户A 3 不排（口径区别于 READONLY_LEADER_IDS）');
+    ok('G-5 排除名单：示例只读领导A 11 排 / 示例只读领导B 6 不排（独立常量，非 READONLY_LEADER_IDS=[6,11]）');
 
     // [3] 校验顺序 M-6：可见性 → 拉群权限 → 幂等 → 门槛
     const base = { created_by: 1, assigned_to: 5, status: 'IN_PROGRESS', dingtalk_open_conversation_id: null };
@@ -163,13 +166,13 @@ async function main() {
     assert.strictEqual(p1b.memberDingList.filter(m => m.ding === 'd5').length, 1, '相同 ding 只出现一次（业务方与开发同号去重）');
     ok('ding 去重：业务方 ding 撞已有成员 → 只保留一份');
 
-    // [7] 金华琴排除：底座命中 → REQUIRED_MEMBER_EXCLUDED warning + 不入群；额外命中 → 直接剔除
+    // [7] 示例只读领导A排除：底座命中 → REQUIRED_MEMBER_EXCLUDED warning + 不入群；额外命中 → 直接剔除
     const um2 = new Map([[3, { ding: 'd3' }], [11, { ding: 'd11' }], [5, { ding: 'd5' }]]);
     const p2 = planMembers({ createdBy: 11, assignedTo: 5, triggerId: 3, requester: null, extraIds: [11], userMap: um2 });
-    assert.ok(!p2.memberDingList.some(m => m.userId === 11), '金华琴不入群（底座+额外均被排）');
-    assert.ok(p2.warnings.some(w => w.code === 'REQUIRED_MEMBER_EXCLUDED' && w.user_id === 11), '底座金华琴 → REQUIRED_MEMBER_EXCLUDED warning');
-    assert.ok(!p2.includedExtra.includes(11) && !p2.skippedExtra.includes(11), '额外金华琴直接剔除（不计 included/skipped）');
-    ok('金华琴排除（M-5）：底座命中→warning+不入群 / 额外命中→静默剔除');
+    assert.ok(!p2.memberDingList.some(m => m.userId === 11), '示例只读领导A不入群（底座+额外均被排）');
+    assert.ok(p2.warnings.some(w => w.code === 'REQUIRED_MEMBER_EXCLUDED' && w.user_id === 11), '底座示例只读领导A → REQUIRED_MEMBER_EXCLUDED warning');
+    assert.ok(!p2.includedExtra.includes(11) && !p2.skippedExtra.includes(11), '额外示例只读领导A直接剔除（不计 included/skipped）');
+    ok('示例只读领导A排除（M-5）：底座命中→warning+不入群 / 额外命中→静默剔除');
 
     // [8] 额外成员校验①②③④：不存在/禁用静默剔除 / 无钉钉号跳过+warning / 有号纳入
     const um3 = new Map([[3, { ding: 'd3' }], [1, { ding: 'd1' }], [5, { ding: 'd5' }],
@@ -244,7 +247,7 @@ async function main() {
     assert.strictEqual(row4.dingtalk_chat_id, 'cid_pre', '并发场景旧群信息不被覆盖（退化幂等读旧值）');
     ok('旁路守卫[并发]：已建群 → changes=0 + 旧群信息保留（退化幂等返回旧值）');
 
-    console.log(`\n[全部通过] ${passed}/${passed} ✓ Commit E 拉群验证通过（M-2 成员入口 / 排除名单 / M-6 校验顺序+防泄露 / 成员规划底座·额外·业务方·去重 / 金华琴排除 / 额外①②③④ / 缺号 missing_required / 群名码点截断 / 旁路 UPDATE 双 WHERE 守卫 正常·状态变化·并发）`);
+    console.log(`\n[全部通过] ${passed}/${passed} ✓ Commit E 拉群验证通过（M-2 成员入口 / 排除名单 / M-6 校验顺序+防泄露 / 成员规划底座·额外·业务方·去重 / 示例只读领导A排除 / 额外①②③④ / 缺号 missing_required / 群名码点截断 / 旁路 UPDATE 双 WHERE 守卫 正常·状态变化·并发）`);
     db.close();
 }
 main().catch((e) => { console.error('\n[失败]', e && e.message, e && e.stack); db.close(); process.exit(1); });

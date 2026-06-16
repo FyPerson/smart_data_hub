@@ -69,7 +69,7 @@ const USER_ROLES = ['admin', 'publisher', 'user', 'viewer'];
 
 // v1.74.3 纯只读领导账号名单（不参与偏技术类实际工作，纯查看）
 //   背景：viewer 角色分两类——① 客服性质运营（沈倩静/甄妮/方丽倩）会日常导数据，需保留在 admin 直派下拉里；
-//        ② 领导账号（金华琴 id=11 / 陈宏亮 id=6）纯只读，不应被指派为任何协作单的数据导出人(exporter)。
+//        ② 领导账号（示例只读领导A id=11 / 示例只读领导B id=6）纯只读，不应被指派为任何协作单的数据导出人(exporter)。
 //   v1.72.5 的 requireExporterOrNonViewer 是「动态按是否本单 exporter」放权，没有用户级黑名单——
 //        只要 admin 在直派/转发下拉里手滑选中领导账号，它就会成为该单 exporter 从而获得操作权（误操作缺口）。
 //   本常量给 admin-direct-create / forward-to-exporter / admin-direct-reassign 三个写入口 + 前端两个下拉

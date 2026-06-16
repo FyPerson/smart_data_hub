@@ -508,7 +508,7 @@
     <script src="assets/js/app.js"></script>
     <script>
         // ================= 常量（与后端同源）=================
-        // 拉群可选成员排除名单（§5.4，与后端 CORRECTION_CHAT_EXCLUDE_IDS 同源；只排金华琴 11）
+        // 拉群可选成员排除名单（§5.4，与后端 CORRECTION_CHAT_EXCLUDE_IDS 同源；只排示例只读领导A 11）
         const CORRECTION_CHAT_EXCLUDE_IDS = [11];
         // 群主固定示例用户A（与后端 COLLAB_CHAT_ADMIN_ID 同源）；将来改人需前后端同步
         const CORRECTION_CHAT_ADMIN_ID = 3;
@@ -1255,7 +1255,7 @@
             // M-3：优先读详情缓存（含 created_by/assigned_to/requester_name 权威数据），回退 allItems
             const item = (currentDetail && Number(currentDetail.id) === Number(id)) ? currentDetail : (allItems.find(i => i.id === id) || {});
             document.getElementById('chatCorrId').value = id;
-            // 固定底座展示：群管理员（示例用户A）+ 建单人 + 指派开发 + 当前操作人（去重 + 排金华琴）
+            // 固定底座展示：群管理员（示例用户A）+ 建单人 + 指派开发 + 当前操作人（去重 + 排示例只读领导A）
             const baseIds = new Set();
             [CORRECTION_CHAT_ADMIN_ID, item.created_by, item.assigned_to, currentUser && currentUser.id].forEach(x => { const n = Number(x); if (Number.isSafeInteger(n) && n > 0 && !CORRECTION_CHAT_EXCLUDE_IDS.includes(n)) baseIds.add(n); });
             const nameOf = uid => { const u = allUsers.find(x => Number(x.id) === Number(uid)); return u ? (u.display_name || u.username) : `用户#${uid}`; };
@@ -1270,7 +1270,7 @@
             });
             if (item.requester_name) baseHtml += `<div class="mb-item">• ${escapeHtml(item.requester_name)} <span style="color:#9ca3af;">(业务方，按手机号反查命中才加入)</span></div>`;
             document.getElementById('chatBaseList').innerHTML = baseHtml || '<div style="color:#9ca3af;">无</div>';
-            // 额外成员多选：所有活跃用户，排金华琴 + 排已在固定底座
+            // 额外成员多选：所有活跃用户，排示例只读领导A + 排已在固定底座
             const extra = allUsers.filter(u => !CORRECTION_CHAT_EXCLUDE_IDS.includes(Number(u.id)) && !baseIds.has(Number(u.id)));
             document.getElementById('chatExtraGrid').innerHTML = extra.length ? extra.map(u =>
                 `<label><input type="checkbox" class="chat-extra-cb" value="${escapeHtml(String(u.id))}"> ${escapeHtml(u.display_name || u.username)}</label>`).join('') : '<div style="color:#9ca3af; font-size:12px;">无可选额外成员</div>';

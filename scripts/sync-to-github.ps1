@@ -171,6 +171,8 @@ $replacements = @(
     @{ From = '示例用户B'; To = '示例用户B' },
     @{ From = '示例发布者'; To = '示例发布者' },
     @{ From = '示例对接人'; To = '示例对接人' },
+    @{ From = '示例只读领导A'; To = '示例只读领导A' },
+    @{ From = '示例只读领导B'; To = '示例只读领导B' },
     @{ From = '示例集团关联方A'; To = '示例集团关联方A' },
     @{ From = '示例关联方B'; To = '示例关联方B' },
     @{ From = '示例关联方C'; To = '示例关联方C' },
@@ -209,7 +211,7 @@ $sensitivePatterns = @(
     "change_me_with_random_32bytes",
     "change_me_with_random_32bytes_!!",
     "business_db", "legacy_db", "legacy_system", "readonly_user",
-    "示例用户A", "示例用户B", "示例发布者", "示例对接人", "示例集团关联方A", "示例关联方B", "示例关联方C", "示例关联方D", "示例海外子公司",
+    "示例用户A", "示例用户B", "示例发布者", "示例对接人", "示例只读领导A", "示例只读领导B", "示例集团关联方A", "示例关联方B", "示例关联方C", "示例关联方D", "示例海外子公司",
     "ztwb[0-9]+"
 )
 $leaked = $false

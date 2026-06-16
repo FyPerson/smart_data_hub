@@ -4,7 +4,7 @@
  * 项目无单测框架 → 独立验证脚本（Node assert）。验证 3 件事：
  *   1. 前后端 READONLY_LEADER_IDS 常量字面量一致（同源，防只改一处）
  *   2. 拦截判定纯函数 isReadonlyLeader 对真实用户分类正确：
- *        领导（金华琴 id=11 / 陈宏亮 id=6）→ 拦截 true
+ *        领导（示例只读领导A id=11 / 示例只读领导B id=6）→ 拦截 true
  *        客服 viewer（沈倩静/甄妮/方丽倩）→ 放行 false（仍可被直派）
  *        普通 user → 放行 false
  *   3. 三个写入口（create/forward/reassign）共用同一判定 → 模拟各入口对领导/客服的处理一致
