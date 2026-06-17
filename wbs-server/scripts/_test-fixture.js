@@ -16,8 +16,8 @@
  *   admin (id=1)
  *   示例用户A demo_user_a (id=3, user) 作为 contact_person
  *   示例用户B demo_user_b (id=19, user) 作为 developer
- *   示例发布者 13857133559 (id=7, publisher) — v1.71.0 attachment 按人锁 e2e 用（验证 publisher 收权）
- *   刘林航 15270240365 (id=8, user) — v1.71.0 三级转发 e2e 作 exporter（数据导出人）
+ *   示例发布者 19900000003 (id=7, publisher) — v1.71.0 attachment 按人锁 e2e 用（验证 publisher 收权）
+ *   示例开发A 19900000005 (id=8, user) — v1.71.0 三级转发 e2e 作 exporter（数据导出人）
  */
 'use strict';
 
@@ -36,8 +36,8 @@ const CONTACT_ID = 3;
 const DEV1_ID = 19;
 const PUBLISHER_ID = 7;
 const EXPORTER_ID = 8;  // v1.71.0 三级转发 e2e 用（user 角色，与 dev1 不同人）
-const VIEWER_ID = 2;    // v1.72.5 admin 直派给 viewer e2e 用（沈倩静）
-const VIEWER2_ID = 4;   // v1.72.5 跨单越权测试用（甄妮，另一个 viewer）
+const VIEWER_ID = 2;    // v1.72.5 admin 直派给 viewer e2e 用（示例客服A）
+const VIEWER2_ID = 4;   // v1.72.5 跨单越权测试用（示例客服B，另一个 viewer）
 const TARGET_DB_CONN_ID = 2;
 
 async function signAs(userId) {

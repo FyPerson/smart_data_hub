@@ -2,13 +2,13 @@
  * v1.72.5 viewer 角色 admin 直派收单 Playwright UI 测试
  *
  * 用法：node scripts/test-viewer-exporter-playwright.js
- * 前置：本地 server 已启动（localhost:3000）+ 本地 DB 有 viewer 用户（id=2 沈倩静）
+ * 前置：本地 server 已启动（localhost:3000）+ 本地 DB 有 viewer 用户（id=2 示例客服A）
  *
  * 测试链路：
- *   1. admin JWT 注入 → 创建直派单选沈倩静（viewer）
+ *   1. admin JWT 注入 → 创建直派单选示例客服A（viewer）
  *   2. 验证 admin 直派下拉里能选到 viewer（v1.72.5 核心修复）
  *   3. 列表见 [🎯 admin 直派] tag
- *   4. 切到沈倩静 JWT → 列表能看到自己的协作单
+ *   4. 切到示例客服A JWT → 列表能看到自己的协作单
  *   5. 进详情页 → 见「提交导出结果」按钮
  *   6. 点提交导出 → 弹窗 → 上传 result_data + screenshot → 提交
  *   7. 验证 status = SUBMITTED + result_data 已落盘
@@ -29,7 +29,7 @@ const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
 const JWT_SECRET = process.env.JWT_SECRET || 'default_secret_key_change_me';
 
 const ADMIN_ID = 1;
-const VIEWER_ID = 2;     // 沈倩静（viewer）
+const VIEWER_ID = 2;     // 示例客服A（viewer）
 const TARGET_DB_CONN_ID = 2;
 
 async function signAs(userId) {
@@ -90,7 +90,7 @@ function expect(condition, message) {
 
     try {
         // ============================================================
-        // 步骤 1：admin 登录 + 打开新建弹窗，验证下拉里有沈倩静（viewer）
+        // 步骤 1：admin 登录 + 打开新建弹窗，验证下拉里有示例客服A（viewer）
         // ============================================================
         console.log('1. admin 登录 + 打开新建协作单弹窗...');
         const adminContext = await browser.newContext();
@@ -112,7 +112,7 @@ function expect(condition, message) {
         // ============================================================
         // 步骤 2：勾选 admin 直派 + 验证下拉里有 viewer（v1.72.5 核心修复点）
         // ============================================================
-        console.log('\n2. 勾选 admin 直派 + 验证下拉包含 viewer 沈倩静...');
+        console.log('\n2. 勾选 admin 直派 + 验证下拉包含 viewer 示例客服A...');
         await adminPage.check('#f_admin_direct_toggle');
         await adminPage.waitForTimeout(500);
 
@@ -122,17 +122,17 @@ function expect(condition, message) {
             return sel && sel.options.length > 1;
         }, { timeout: 3000 });
 
-        // 检查下拉里是否有 viewer 用户（VIEWER_ID=2 沈倩静）
+        // 检查下拉里是否有 viewer 用户（VIEWER_ID=2 示例客服A）
         const viewerInDropdown = await adminPage.evaluate((vid) => {
             const sel = document.querySelector('#f_admin_direct_exporter');
             return Array.from(sel.options).some(o => Number(o.value) === vid);
         }, VIEWER_ID);
-        expect(viewerInDropdown, `admin 直派下拉里能选到 viewer 沈倩静（id=${VIEWER_ID}）— v1.72.5 核心修复`);
+        expect(viewerInDropdown, `admin 直派下拉里能选到 viewer 示例客服A（id=${VIEWER_ID}）— v1.72.5 核心修复`);
 
         // ============================================================
-        // 步骤 3：填表 + 选沈倩静 + 提交
+        // 步骤 3：填表 + 选示例客服A + 提交
         // ============================================================
-        console.log('\n3. 填表（admin 直派给沈倩静 viewer）...');
+        console.log('\n3. 填表（admin 直派给示例客服A viewer）...');
         const testOA = `OA_PW_VW_${Date.now()}`;
         await adminPage.fill('#f_oa_no', testOA);
         await adminPage.selectOption('#f_dept', { index: 1 });
@@ -153,15 +153,15 @@ function expect(condition, message) {
         expect(created !== null, `协作单已创建（OA=${testOA}）`);
         expect(created.assign_mode === 'admin_direct', 'assign_mode = admin_direct');
         expect(created.status === 'EXPORTING', 'status = EXPORTING（跳过 PENDING_ASSIGN）');
-        expect(Number(created.exporter_user_id) === VIEWER_ID, `exporter_user_id = ${VIEWER_ID}（viewer 沈倩静）`);
+        expect(Number(created.exporter_user_id) === VIEWER_ID, `exporter_user_id = ${VIEWER_ID}（viewer 示例客服A）`);
         testCollabId = created.id;
 
         await adminContext.close();
 
         // ============================================================
-        // 步骤 4：切到 viewer 沈倩静 → 列表能看到自己的协作单
+        // 步骤 4：切到 viewer 示例客服A → 列表能看到自己的协作单
         // ============================================================
-        console.log('\n4. 切到 viewer 沈倩静 → 验证列表可见...');
+        console.log('\n4. 切到 viewer 示例客服A → 验证列表可见...');
         const viewerContext = await browser.newContext();
         const viewerPage = await viewerContext.newPage();
         viewerPage.on('console', msg => {
@@ -194,7 +194,7 @@ function expect(condition, message) {
             console.log(`  [debug] tbody first 500: ${debug.tbodyHTML}`);
             console.log(`  [debug] hasError: ${debug.bodyHasError}`);
         }
-        expect(!!listVisibleToViewer, `viewer 沈倩静在列表中能看到自己被指派的协作单（${listVisibleToViewer || 'NOT FOUND'}）`);
+        expect(!!listVisibleToViewer, `viewer 示例客服A在列表中能看到自己被指派的协作单（${listVisibleToViewer || 'NOT FOUND'}）`);
 
         // ============================================================
         // 步骤 5：viewer 进详情页 → 见「提交导出结果」按钮

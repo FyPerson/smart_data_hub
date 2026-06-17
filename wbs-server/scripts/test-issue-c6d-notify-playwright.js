@@ -8,7 +8,7 @@
  *
  * 测法（不骚扰真人钉钉）：
  *   D1 成功态：page.route 拦截 notify-developer 返 mock 成功 → 验 toast「通知已发送」（前端乐观反馈链路）
- *   D2 失败态：指派给**无 phone** 用户(id=8 刘林航)，点击走**真 endpoint** → no_phone 在发送前短路
+ *   D2 失败态：指派给**无 phone** 用户(id=8 示例开发A)，点击走**真 endpoint** → no_phone 在发送前短路
  *             → 落 notify_status='failed'+notify_error='no_phone'（零真发）→ loadIssues 重读 db
  *             → 详情页徽章真变「失败」+ hover title=no_phone（验真实 db→UI 渲染链路）
  *   D3 异步弹窗踩坑预防：notify-developer **不弹 confirm**（notifyAction 无 confirm），但仍挂 dialog

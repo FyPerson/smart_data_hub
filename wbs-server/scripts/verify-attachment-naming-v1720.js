@@ -70,8 +70,8 @@ check('T6 OA 含 / 空格 _',
     'TEST-OA-123-456_20260522_001_rd_示例用户A.xlsx');
 
 check('T7 姓名截前 10 字符',
-    v.buildFinalAttachmentName({oaRequestNo: 'OA-364265', createdAt: '2026-05-22 10:30:00', seq: 1, attachmentType: 'result_data', isFailed: false, displayName: '甄妮你你你你你你你你你长', username: 'fy', ext: '.xlsx'}),
-    'OA-364265_20260522_001_rd_甄妮你你你你你你你你.xlsx');
+    v.buildFinalAttachmentName({oaRequestNo: 'OA-364265', createdAt: '2026-05-22 10:30:00', seq: 1, attachmentType: 'result_data', isFailed: false, displayName: '示例客服B你你你你你你你你你长', username: 'fy', ext: '.xlsx'}),
+    'OA-364265_20260522_001_rd_示例客服B你你你你你你你你.xlsx');
 
 check('T8 扩展名 toLowerCase',
     v.buildFinalAttachmentName({oaRequestNo: 'OA-364265', createdAt: '2026-05-22 10:30:00', seq: 1, attachmentType: 'screenshot', isFailed: false, displayName: '示例用户A', username: 'fy', ext: '.PNG'}),

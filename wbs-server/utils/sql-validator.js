@@ -799,7 +799,7 @@ function layer2_astCheck(ast, dialect, allowedDb) {
                     // v1.77.0（生产 #10 误伤修复）：dbo.table 放行——dbo 是 T-SQL 默认 schema 保留名，
                     //   SQL Server 语义两段名恒为 schema.table（跨库必须三段），且即便按 db 解释也不存在
                     //   名为 dbo 的业务库，零歧义零跨库面；dbo.xxx 是 SSMS 开发最常见标准写法，
-                    //   一刀切拒绝会误伤合法主流脚本（2026-06-10 #10 OA-372051 饶高成踩中）
+                    //   一刀切拒绝会误伤合法主流脚本（2026-06-10 #10 OA-372051 示例开发E踩中）
                     if (dbNorm === 'DBO') {
                         continue;
                     }
@@ -920,7 +920,7 @@ function layer3_injectTop(ast, dialect) {
     }
 
     // ⭐ v1.80.2 hotfix：修复 node-sql-parser transactsql sqlify bug —— `<type>(MAX)` 被错误输出成 `<type>max`
-    //   生产 #12 饶高成报错根因：SQL Server 收到 `VARCHARmax` 报 "Type VARCHARmax is not a defined system type"
+    //   生产 #12 示例开发E报错根因：SQL Server 收到 `VARCHARmax` 报 "Type VARCHARmax is not a defined system type"
     //   AST 里 length='max'（字符串而非数字），sqlify 直接拼到 dataType 后面丢括号
     //   影响范围：VARCHAR/NVARCHAR/VARBINARY 三种 (MAX) 类型，CHAR(MAX)/NCHAR(MAX) 在 SQL Server 也不合法
     //   修复：sqlify 后字符串还原。\b 词边界天然挡掉字符串字面量内部（'someVARCHARmax' 不会被误伤）

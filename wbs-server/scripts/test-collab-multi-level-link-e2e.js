@@ -169,7 +169,7 @@ async function runTests() {
         assert(row.developer_id === devBId, `① 退回后 developer_id=devB=${devBId}（不是 devA=${devAId}），got ${row.developer_id}`);
         assert(row.developer_id !== devAId, `① developer_id !== devA（防回退污染）`);
         assert(row.exporter_user_id === fx.EXPORTER_ID, `① exporter_user_id 保留 = EXPORTER_ID（§5.3.5 历史展示）`);
-        assert(row.exporter_name === '刘林航', `① exporter_name 保留 = 刘林航, got ${row.exporter_name}`);
+        assert(row.exporter_name === '示例开发A', `① exporter_name 保留 = 示例开发A, got ${row.exporter_name}`);
     }
 
     // ===== 不变量 ② ：跨人附件按人锁 — dev A 时期附件，uploaded_by=devA =====

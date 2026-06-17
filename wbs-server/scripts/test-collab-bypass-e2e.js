@@ -5,7 +5,7 @@
  *
  * 前置：
  *   - 本地 server 已启动（localhost:3000）
- *   - 用户表里有 admin / 13857133559 / demo_user_a / demo_user_b（角色 admin / publisher / user / user）
+ *   - 用户表里有 admin / 19900000003 / demo_user_a / demo_user_b（角色 admin / publisher / user / user）
  *   - target_db_connection_id=2（business_db source 连接）
  *   - fixture 由 _test-fixture.js 动态创建（v3 协议：PENDING_ASSIGN → assign → PENDING → 直接 UPDATE 到 SUBMITTED+failed）
  *
@@ -102,7 +102,7 @@ async function postBypass(token, id, body) {
 
 async function runTests() {
     tokens.admin = await loginAs('admin');
-    tokens.publisher = await loginAs('13857133559');
+    tokens.publisher = await loginAs('19900000003');
     tokens.user = await loginAs('demo_user_a');
     console.log('✅ tokens prepared (admin/publisher/user)');
 

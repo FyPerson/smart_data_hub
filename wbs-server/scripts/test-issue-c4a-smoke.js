@@ -2,7 +2,7 @@
  * v1.74.0 C4a — 录入附件 endpoint 冒烟 e2e（方案 §1.3a / §4.1 / §6.2 T9）
  *
  * 用法：本地 server 已启动后 node scripts/test-issue-c4a-smoke.js
- * 复用 _test-fixture signAs（admin=1 / viewer=2 沈倩静 / dev1=19）+ apiCall（建/删 issue 走 JSON）。
+ * 复用 _test-fixture signAs（admin=1 / viewer=2 示例客服A / dev1=19）+ apiCall（建/删 issue 走 JSON）。
  * 上传走 multipart/form-data（Node 18+ 原生 FormData/Blob），单独 uploadFile helper。
  *
  * 用例：
@@ -84,7 +84,7 @@ async function uploadFile(token, id, fileName, content, mime, opts = {}) {
 const created = [];
 async function main() {
     const adminToken = await fx.signAs(fx.ADMIN_ID);     // 1
-    const viewerToken = await fx.signAs(fx.VIEWER_ID);   // 2 沈倩静（viewer）
+    const viewerToken = await fx.signAs(fx.VIEWER_ID);   // 2 示例客服A（viewer）
     console.log('\n══════ v1.74.0 C4a 录入附件冒烟 ══════');
 
     let firstAttFileName = null;

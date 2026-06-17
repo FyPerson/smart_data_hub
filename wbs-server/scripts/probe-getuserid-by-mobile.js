@@ -1,11 +1,11 @@
 /**
  * F1 真跑辅助：通过手机号反查钉钉 userid（一次性临时脚本，跑完可删）
  *
- * 用途：v1.71.0 F1 加人探针需要沈倩静的钉钉 userid（DB 里没存）
+ * 用途：v1.71.0 F1 加人探针需要示例客服A的钉钉 userid（DB 里没存）
  *      通过钉钉 topapi/v2/user/getbymobile 接口反查
  *
  * 用法：
- *   MOBILE=15088670435 node e:/tmp/probe-getuserid-by-mobile.js
+ *   MOBILE=19900000004 node e:/tmp/probe-getuserid-by-mobile.js
  *
  * 输出：钉钉 userid（或失败原因）
  */

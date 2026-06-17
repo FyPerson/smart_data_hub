@@ -1,7 +1,7 @@
 // 验证脚本：v1.80.2 hotfix — SQL Validator 修复 node-sql-parser transactsql sqlify 把 VARCHAR(MAX) 输出成 VARCHARmax 的 bug
 // 用法：node scripts/verify-sql-validator-varchar-max.js
 //
-// 生产 #12 饶高成报错根因（v1.80.1 部署后 14:50 左右）：
+// 生产 #12 示例开发E报错根因（v1.80.1 部署后 14:50 左右）：
 //   提交脚本含 `CAST(col AS VARCHAR(MAX))` → smoke test 跑到 SQL Server 报
 //   "Type VARCHARmax is not a defined system type"
 //

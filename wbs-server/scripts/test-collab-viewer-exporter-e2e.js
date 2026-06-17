@@ -2,10 +2,10 @@
  * v1.72.5 viewer 角色 admin 直派收单 e2e 烟雾测试
  *
  * 用法：node scripts/test-collab-viewer-exporter-e2e.js
- * 前置：本地 server 已启动（localhost:3000）+ 本地 DB 至少 2 个 viewer 用户（沈倩静 id=2 / 甄妮 id=4）
+ * 前置：本地 server 已启动（localhost:3000）+ 本地 DB 至少 2 个 viewer 用户（示例客服A id=2 / 示例客服B id=4）
  *
  * 覆盖用例（5 个）：
- *   V1  admin 直派给 viewer（沈倩静） → submit-export 成功 200 + 状态 SUBMITTED
+ *   V1  admin 直派给 viewer（示例客服A） → submit-export 成功 200 + 状态 SUBMITTED
  *   V2  viewer A 试图 submit-export viewer B 的协作单 → 403 VIEWER_NOT_EXPORTER
  *   V3  admin 直派给 viewer → return-to-dev 成功 200 + 状态 PENDING_ASSIGN
  *   V4  viewer 试图调 /notify → 403（保持 requireNonViewer）
@@ -122,7 +122,7 @@ function defTest(name, fn) { tests.push({ name, fn }); }
 // ============================================================
 // V1: admin 直派给 viewer → viewer submit-export 成功
 // ============================================================
-defTest('V1: admin 直派给 viewer(沈倩静) → viewer submit-export 200 + DONE (v1.72.10 跳过 SUBMITTED 直接终态)', async () => {
+defTest('V1: admin 直派给 viewer(示例客服A) → viewer submit-export 200 + DONE (v1.72.10 跳过 SUBMITTED 直接终态)', async () => {
     const adminToken = await fx.signAs(fx.ADMIN_ID);
     const viewerToken = await fx.signAs(fx.VIEWER_ID);
     const cr = await createAdminDirect(adminToken, fx.VIEWER_ID, `OA_VW_V1_${Date.now()}`);
@@ -149,8 +149,8 @@ defTest('V1: admin 直派给 viewer(沈倩静) → viewer submit-export 200 + DO
 // ============================================================
 defTest('V2: viewer A 试图 submit-export viewer B 的单 → 403 VIEWER_NOT_EXPORTER', async () => {
     const adminToken = await fx.signAs(fx.ADMIN_ID);
-    const viewerA = await fx.signAs(fx.VIEWER_ID);   // 沈倩静
-    // 直派给 viewer B（甄妮）
+    const viewerA = await fx.signAs(fx.VIEWER_ID);   // 示例客服A
+    // 直派给 viewer B（示例客服B）
     const cr = await createAdminDirect(adminToken, fx.VIEWER2_ID, `OA_VW_V2_${Date.now()}`);
     if (cr.status !== 200) throw new Error(`create failed ${cr.status}`);
     createdFixtureIds.push(cr.body.id);
@@ -394,7 +394,7 @@ defTest('V9: admin-submit-on-behalf 状态边界 4 种非法状态全部 409', a
     {
         const ctx = await fx.createPendingFixture();
         createdFixtureIds.push(ctx.id);
-        await fx.setCollabState(ctx.id, { status: 'EXPORTING', exporter_user_id: fx.EXPORTER_ID, exporter_name: '刘林航' });
+        await fx.setCollabState(ctx.id, { status: 'EXPORTING', exporter_user_id: fx.EXPORTER_ID, exporter_name: '示例开发A' });
         const res = await postAdminSubmitOnBehalf(ctx.id, adminToken, { reason: 'V9c EXPORTING 不应允许' });
         if (res.status !== 409) throw new Error(`V9c expected 409, got ${res.status}`);
         if (res.body && res.body.code !== 'STATE_NOT_ALLOWED_FOR_ADMIN_SUBMIT') {

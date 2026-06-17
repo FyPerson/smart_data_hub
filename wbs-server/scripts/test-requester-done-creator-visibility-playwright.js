@@ -30,7 +30,7 @@ const fx = require('./_test-fixture');
 
 let pass = 0, fail = 0;
 const must = (c, m, d) => { if (c) { pass++; console.log('  PASS ' + m); } else { fail++; console.log('  FAIL ' + m + (d ? ' :: ' + d : '')); } };
-const OTHER_USER_ID = 12;  // 饶璐 user（非创建人非 exporter 非 admin）
+const OTHER_USER_ID = 12;  // 示例开发D user（非创建人非 exporter 非 admin）
 
 function dbRun(sql, params = []) {
     return new Promise((res, rej) => { const db = new sqlite3.Database(fx.DB_PATH); db.run(sql, params, function (e) { db.close(); e ? rej(e) : res(this); }); });

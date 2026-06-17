@@ -8,8 +8,8 @@
  *   T2 publisher（权限）           → 看见「💬 拉群讨论」按钮
  *   T3 被指派开发（assignee 权限） → 看见「💬 拉群讨论」按钮
  *   T4 创建人（creator 权限）      → 看见「💬 拉群讨论」按钮
- *   T5 viewer 沈倩静               → 不渲染钉钉沟通群区块（前端再保险隐藏）
- *   T6 路人 user 张琦              → 不渲染钉钉沟通群区块（非 admin/publisher/assigned/creator）
+ *   T5 viewer 示例客服A               → 不渲染钉钉沟通群区块（前端再保险隐藏）
+ *   T6 路人 user 示例开发B              → 不渲染钉钉沟通群区块（非 admin/publisher/assigned/creator）
  *   T7 已建群（dingtalk_open_conversation_id 非空）→ 灰色按钮 + 群名展示 + disabled
  *   T8 已建群但 chat_name 为空     → 灰显 + 兜底文案「（群名缺失）」
  *   T9 已建群 dingtalk_open_conversation_id 全空白  → 仍按未建群处理（trim 口径与后端一致）

@@ -18,11 +18,11 @@
  *   network        getAccessToken 抛 AbortError → notify_status='failed'+notify_error='network'，HTTP 502
  *   user_invalid   sendMarkdownToUser 返 {errcode:88} → notify_status='failed'+notify_error='user_invalid'，HTTP 502
  *   message_key_missing  sendMarkdownToUser 返 {errcode:0} 无 processQueryKey → failed+'message_key_missing'，HTTP 502
- *   no_phone       目标用户无 phone（id=8 刘林航）→ sendIssueDingtalkRaw 短路 → failed+'no_phone'，**零 mock 兜底**
+ *   no_phone       目标用户无 phone（id=8 示例开发A）→ sendIssueDingtalkRaw 短路 → failed+'no_phone'，**零 mock 兜底**
  *
  * 前提（已核实 2026-06-01）：
  *   - 生产 dingtalk config（app_key/secret/robot_code）已填 → 不会 no_config 早退，能走到 no_phone/发送
- *   - users: id=19 示例用户B 有 phone（走完整 mock 路径）/ id=8 刘林航 无 phone（走 no_phone 短路）
+ *   - users: id=19 示例用户B 有 phone（走完整 mock 路径）/ id=8 示例开发A 无 phone（走 no_phone 短路）
  *
  * 安全：造的测试 issue 用后即删；不触发 C1 硬门槛（require 时 issue 4 表 0 行放行重建空表，无损）。
  */
@@ -42,7 +42,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'default_secret_key_change_me';
 
 const ADMIN_ID = 1;
 const DEV_WITH_PHONE = 19;   // 示例用户B（有 phone）
-const DEV_NO_PHONE = 8;      // 刘林航（无 phone → no_phone 短路）
+const DEV_NO_PHONE = 8;      // 示例开发A（无 phone → no_phone 短路）
 
 // ---- mock 钉钉传输层（在 require server 之前替换单例方法，确保 sendIssueDingtalkRaw 用 mock）----
 const dingtalkNotify = require(path.join(__dirname, '..', 'utils', 'dingtalk-notify'));

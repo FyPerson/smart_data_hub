@@ -63,7 +63,7 @@ async function expectErr(promise, code, label) {
 // schema：users 表本脚本建（routes 不含）；correction 三表用真实 mod.initSchema()（同源，不再复刻 DDL）
 async function setupSchema() {
     await run(`CREATE TABLE users (id INTEGER PRIMARY KEY, display_name TEXT, role TEXT)`);
-    await run(`INSERT INTO users (id, display_name, role) VALUES (1,'管理员','admin'),(4,'甄妮','admin'),(5,'开发王','user'),(7,'示例发布者','publisher'),(11,'示例只读领导A','viewer')`);
+    await run(`INSERT INTO users (id, display_name, role) VALUES (1,'管理员','admin'),(4,'示例客服B','admin'),(5,'开发王','user'),(7,'示例发布者','publisher'),(11,'示例只读领导A','viewer')`);
     mod.initSchema();
     await waitReady();
 }

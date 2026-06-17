@@ -3,7 +3,7 @@
 //
 // 背景：v1.80.0 生产 hotfix 根因——server.js 1920 行的 runCollabQualityDualCheckMigration() 在
 // serialize 块**外**立即触发，PRAGMA 比 ALTER 队列先消耗，导致 readiness 永久 false。
-// 表现：饶高成 14:18 重新上传被 503 拒；PM2 日志显示 ALTER 全部成功 + 列巡检通过，但 readiness=false。
+// 表现：示例开发E 14:18 重新上传被 503 拒；PM2 日志显示 ALTER 全部成功 + 列巡检通过，但 readiness=false。
 //
 // 修复（v1.80.1）：把迁移触发放进 serialize 块内最后一个 db.run 的 callback，保证它在 7 个 ALTER 排队消耗完后才跑。
 //
@@ -85,7 +85,7 @@ async function main() {
         const missingCount = missingMatch ? missingMatch[1].split(',').length : 0;
         assert.ok(missingCount >= 5,
             `[1] 应有 ≥5 列缺失证明竞态，实际 ${missingCount} 列：${state.error}`);
-        ok(`[1] BUG 路径复现：serialize 外立即 PRAGMA → ${missingCount} 列缺 readiness=false（饶高成 14:18 报错根因，生产是 7 列全缺）`);
+        ok(`[1] BUG 路径复现：serialize 外立即 PRAGMA → ${missingCount} 列缺 readiness=false（示例开发E 14:18 报错根因，生产是 7 列全缺）`);
         db.close();
     }
 

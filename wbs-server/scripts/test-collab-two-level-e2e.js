@@ -6,7 +6,7 @@
  * 前置：
  *   - 本地 server 已启动（localhost:3000）
  *   - 本地 task_pool.db schema 已含 v3 五字段
- *   - 用户：admin(id=1) / 示例用户A demo_user_a(id=3, user) / 示例用户B demo_user_b(id=19, user) / 示例发布者 13857133559(id=7, publisher)
+ *   - 用户：admin(id=1) / 示例用户A demo_user_a(id=3, user) / 示例用户B demo_user_b(id=19, user) / 示例发布者 19900000003(id=7, publisher)
  *   - source db_connection: id=2 业务系统BMS
  *
  * 测试场景：
@@ -43,8 +43,8 @@ const JWT_SECRET = process.env.JWT_SECRET || 'default_secret_key_change_me';
 const ADMIN_ID = 1;
 const CONTACT_ID = 3;        // 示例用户A user
 const DEV1_ID = 19;          // 示例用户B user
-const DEV2_ID = 8;           // 刘林航 user
-const OTHER_USER_ID = 12;    // 饶璐 user（不是 contact 也不是 admin）
+const DEV2_ID = 8;           // 示例开发A user
+const OTHER_USER_ID = 12;    // 示例开发D user（不是 contact 也不是 admin）
 const TARGET_DB_CONN_ID = 2; // 业务系统BMS
 
 const tokens = {};

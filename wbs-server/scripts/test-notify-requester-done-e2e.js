@@ -87,7 +87,7 @@ function defTest(name, fn) { tests.push({ name, fn }); }
 defTest('T2: 非本单 exporter 通知 → 403 NOT_OWN_EXPORTER', async () => {
     const adminToken = await fx.signAs(fx.ADMIN_ID);
     const id = await makeDoneDirectFixture(adminToken, `OA_NRD_T2_${Date.now()}`);
-    // VIEWER2（甄妮，非本单 exporter，也非 admin）
+    // VIEWER2（示例客服B，非本单 exporter，也非 admin）
     const otherToken = await fx.signAs(fx.VIEWER2_ID);
     const res = await notifyRequesterDone(otherToken, id);
     if (res.status !== 403 || res.body.code !== 'NOT_OWN_EXPORTER') {

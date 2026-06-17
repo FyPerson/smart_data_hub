@@ -4532,7 +4532,7 @@
         // 取当前登录用户 id（从 JWT 解码,沿用项目已有 currentUserId 全局变量或 fallback）
         // v1.66.4 修复（2026-05-20）：JWT 第二段是 URL-safe base64（- 替 + / _ 替 /），
         // 原生 atob 不支持，需先 replace；同时按 UTF-8 解码 payload 字节流（修中文名 display_name 显示乱码）
-        // 历史 bug：刘林航 display_name UTF-8 编码后 base64 含 `-`，原生 atob 报 InvalidCharacterError
+        // 历史 bug：示例开发A display_name UTF-8 编码后 base64 含 `-`，原生 atob 报 InvalidCharacterError
         // → getCurrentUserId() catch 返回 null → isDeveloper 永远 false → PENDING 状态看不到"上传交付物"按钮
         function getCurrentUserId() {
             if (typeof currentUserId !== 'undefined' && currentUserId) return currentUserId;
@@ -5011,7 +5011,7 @@
         }
 
         // v1.72.5 加载数据导出人下拉（独立拉 /api/users/active，含 viewer 角色，与对接人下拉不同列表）
-        // 不复用全局 activeUsers（已过滤 viewer），允许 admin 直派给客服性质 viewer（如沈倩静/甄妮/方丽倩）
+        // 不复用全局 activeUsers（已过滤 viewer），允许 admin 直派给客服性质 viewer（如示例客服A/示例客服B/示例客服C）
         async function loadAdminDirectExporterOptions() {
             const sel = document.getElementById('f_admin_direct_exporter');
             if (!sel) return;

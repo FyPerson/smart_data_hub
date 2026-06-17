@@ -63,7 +63,7 @@ check('内置 admin(1) 触发 → 无 1、有示例用户A 3', buildCollabChatMe
 // 示例用户A本人(id=3) 触发：含 3（与固定成员去重）
 check('示例用户A本人(3) 触发 → 有 3', buildCollabChatMembers({ contactPersonId: 10, developerId: 11, triggerUserId: 3 }),
     { mustHave: [3, 10, 11] });
-// 其他 admin(如沈倩静 id=2) 触发：本人照常入群
+// 其他 admin(如示例客服A id=2) 触发：本人照常入群
 check('其他 admin(2) 触发 → 含本人 2 + 示例用户A 3', buildCollabChatMembers({ contactPersonId: 10, developerId: 11, triggerUserId: 2 }),
     { mustHave: [2, 3, 10, 11], mustNotHave: [1] });
 // 对接人(id=10) 触发：本人照常

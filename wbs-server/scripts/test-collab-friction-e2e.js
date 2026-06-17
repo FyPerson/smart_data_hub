@@ -96,7 +96,7 @@ async function postFriction(token, id, body) {
 
 async function runTests() {
     tokens.admin = await loginAs('admin');
-    tokens.publisher = await loginAs('13857133559');
+    tokens.publisher = await loginAs('19900000003');
     tokens.user = await loginAs('demo_user_a');
     console.log('✅ tokens prepared');
 
