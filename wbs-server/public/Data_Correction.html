@@ -395,10 +395,12 @@
                 <div class="form-group" id="completeSingleGroup">
                     <label>结果证明截图 <span class="req">*</span>（单数据修正必传）</label>
                     <input type="file" id="formCompleteFiles" multiple accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.pdf,.xlsx,.xls">
+                    <label style="margin-top:8px;">完成说明（可补充对截图的解释，选填）</label>
+                    <textarea id="formCompleteSingleNote" rows="3" maxlength="500" placeholder="如：原值因业务方口径调整改为 X，已同步知会财务"></textarea>
                 </div>
                 <div class="form-group" id="completeBatchGroup" style="display:none;">
                     <label>完成说明 <span class="req">*</span>（批量数据修正必填）</label>
-                    <textarea id="formBatchNote" rows="3" placeholder="如：批量更新 30 条客户编号映射"></textarea>
+                    <textarea id="formBatchNote" rows="3" maxlength="500" placeholder="如：批量更新 30 条客户编号映射"></textarea>
                     <div style="font-size:11px; color:#9ca3af; margin-top:2px;">批量可选附结果证明（可不传）</div>
                     <input type="file" id="formCompleteBatchFiles" multiple accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.pdf,.xlsx,.xls" style="margin-top:6px;">
                 </div>
@@ -417,10 +419,12 @@
                 <div class="form-group" id="resubmitSingleGroup">
                     <label>本次新增结果证明 <span class="req">*</span>（单数据修正必传）</label>
                     <input type="file" id="formResubmitFiles" multiple accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.pdf,.xlsx,.xls">
+                    <label style="margin-top:8px;">本次重修说明（选填）</label>
+                    <textarea id="formResubmitSingleNote" rows="3" maxlength="500" placeholder="本次重修做了什么、上次为何没过"></textarea>
                 </div>
                 <div class="form-group" id="resubmitBatchGroup" style="display:none;">
                     <label>本次重修说明 <span class="req">*</span>（批量数据修正必填）</label>
-                    <textarea id="formResubmitNote" rows="3" placeholder="本次重修做了什么"></textarea>
+                    <textarea id="formResubmitNote" rows="3" maxlength="500" placeholder="本次重修做了什么"></textarea>
                     <input type="file" id="formResubmitBatchFiles" multiple accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.pdf,.xlsx,.xls" style="margin-top:6px;">
                 </div>
             </div>
@@ -801,7 +805,7 @@
             if (r.refixed_at) info += kv('最近重修', escapeHtml(formatFullTime(r.refixed_at)));
             if (s === 'ARCHIVED') info += kv('归档方式', closureTypeLabel(r.closure_type));   // §3.5：normal=正常归档 / admin_closure=行政闭环
             if (r.closure_type === 'admin_closure' && r.closure_reason) info += kvFull('行政闭环原因', escapeHtml(r.closure_reason));
-            if (r.batch_completion_note) info += kvFull('批量完成说明', escapeHtml(r.batch_completion_note));
+            if (r.batch_completion_note) info += kvFull(r.correction_type === 'batch' ? '批量完成说明' : '完成说明（首次）', escapeHtml(r.batch_completion_note));
             if (r.reject_reason) info += kvFull('拒绝原因', escapeHtml(r.reject_reason));
             if (r.friction_reason) info += kvFull('摩擦原因', escapeHtml(r.friction_reason));
             if (r.void_reason) info += kvFull('作废原因', escapeHtml(r.void_reason));
@@ -1000,6 +1004,7 @@
             document.getElementById('completeSingleGroup').style.display = single ? 'block' : 'none';
             document.getElementById('completeBatchGroup').style.display = single ? 'none' : 'block';
             document.getElementById('formCompleteFiles').value = '';
+            document.getElementById('formCompleteSingleNote').value = '';
             document.getElementById('formBatchNote').value = '';
             document.getElementById('formCompleteBatchFiles').value = '';
             document.getElementById('completeModal').dataset.type = type;
@@ -1019,6 +1024,8 @@
                 const files = document.getElementById('formCompleteFiles').files;
                 if (!files.length) return showToast('单数据修正须上传结果证明截图', 'error');
                 for (const f of files) fd.append('files', f);
+                const note = document.getElementById('formCompleteSingleNote').value.trim();
+                if (note) fd.append('batch_completion_note', note);   // 完成说明选填（复用 batch_completion_note）
             }
             const btn = document.getElementById('btnSubmitComplete'); btn.disabled = true;
             try {
@@ -1051,6 +1058,7 @@
             document.getElementById('resubmitSingleGroup').style.display = single ? 'block' : 'none';
             document.getElementById('resubmitBatchGroup').style.display = single ? 'none' : 'block';
             document.getElementById('formResubmitFiles').value = '';
+            document.getElementById('formResubmitSingleNote').value = '';
             document.getElementById('formResubmitNote').value = '';
             document.getElementById('formResubmitBatchFiles').value = '';
             document.getElementById('resubmitModal').dataset.type = type;
@@ -1070,6 +1078,8 @@
                 const files = document.getElementById('formResubmitFiles').files;
                 if (!files.length) return showToast('单数据修正重修须上传本次新增结果证明', 'error');
                 for (const f of files) fd.append('files', f);
+                const note = document.getElementById('formResubmitSingleNote').value.trim();
+                if (note) fd.append('resubmit_note', note);   // 本次重修说明选填（对称 batch）
             }
             const btn = document.getElementById('btnSubmitResubmit'); btn.disabled = true;
             try {

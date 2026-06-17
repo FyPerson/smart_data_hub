@@ -143,6 +143,7 @@ function initSchema() {
             assigned_at DATETIME,
 
             -- 开发完成（G-8 批量必填描述 / G-12 提交次数）
+            -- batch_completion_note 双语义复用（2026-06-18）：batch=批量完成说明（必填）/ single=首次完成补充说明（选填）；backlog 可迁移为通用 completion_note
             batch_completion_note TEXT,
             submission_count INTEGER DEFAULT 0,
 
@@ -598,6 +599,7 @@ async function correctionTransition(requestId, expectedFromStatus, toStatus, act
                 if (row.correction_type === 'batch') {
                     const note = (typeof payload.batch_completion_note === 'string' ? payload.batch_completion_note.trim() : '');
                     if (!note) throw new CorrectionTransitionError(400, 'BATCH_NOTE_REQUIRED', '批量修正标完成必须填写完成说明');
+                    if (note.length > 500) throw new CorrectionTransitionError(400, 'COMPLETION_NOTE_TOO_LONG', '完成说明不超过 500 字');   // L-3：对齐 closure_reason 上限
                     setFrags.push('batch_completion_note = ?');
                     setParams.push(note);
                 } else {
@@ -609,6 +611,10 @@ async function correctionTransition(requestId, expectedFromStatus, toStatus, act
                         [requestId, Number(row.assigned_to) || -1]
                     );
                     if (!cnt || cnt.c < 1) throw new CorrectionTransitionError(400, 'FIX_PROOF_REQUIRED', '单数据修正标完成必须上传结果证明截图');
+                    // 完成说明（选填，single 复用 batch_completion_note 字段）：single 已强制 fix_proof 截图留证，文字仅补充上下文，非空才写；空则保持 NULL
+                    const snote = (typeof payload.batch_completion_note === 'string' ? payload.batch_completion_note.trim() : '');
+                    if (snote.length > 500) throw new CorrectionTransitionError(400, 'COMPLETION_NOTE_TOO_LONG', '完成说明不超过 500 字');   // L-3：对齐 closure_reason 上限
+                    if (snote) { setFrags.push('batch_completion_note = ?'); setParams.push(snote); }
                 }
                 setFrags.push("fixed_at = datetime('now','localtime')", 'submission_count = 1');
                 break;
@@ -618,6 +624,7 @@ async function correctionTransition(requestId, expectedFromStatus, toStatus, act
                 if (row.correction_type === 'batch') {
                     const rnote = (typeof payload.resubmit_note === 'string' ? payload.resubmit_note.trim() : '');
                     if (!rnote) throw new CorrectionTransitionError(400, 'BATCH_RESUBMIT_NOTE_REQUIRED', '批量重修提交必须填写本次重修说明');
+                    if (rnote.length > 500) throw new CorrectionTransitionError(400, 'RESUBMIT_NOTE_TOO_LONG', '重修说明不超过 500 字');   // L-3：对齐 closure_reason 上限
                     historyReason = rnote;   // §9 约束 33：resubmit_note 写 history.reason，不加主表字段
                 } else {
                     // single：必须校验本次新增 fix_proof（HIGH-1 06 轮，§3.4——不能 COUNT 历史附件，否则可复用旧图绕过留证）
@@ -639,7 +646,12 @@ async function correctionTransition(requestId, expectedFromStatus, toStatus, act
                     );
                     // 全部传入 id 必须命中合规（防夹带他单/error_proof/越权上传者/复用旧图）
                     if (!cnt || cnt.c !== ids.length) throw new CorrectionTransitionError(400, 'FIX_PROOF_REQUIRED', '本次新增结果证明无效（须属本单 fix_proof、上传者为开发本人或 admin、且为本次完成后新增）');
-                    historyReason = `重修提交（新增 ${ids.length} 张结果证明）`;
+                    // 重修说明（选填，对称 batch resubmit_note）：非空则拼入 history.reason（§9 约束 33：不加主表字段，逐次留痕在历史）
+                    const srnote = (typeof payload.resubmit_note === 'string' ? payload.resubmit_note.trim() : '');
+                    if (srnote.length > 500) throw new CorrectionTransitionError(400, 'RESUBMIT_NOTE_TOO_LONG', '重修说明不超过 500 字');   // L-3：对齐 closure_reason 上限
+                    historyReason = srnote
+                        ? `重修提交（新增 ${ids.length} 张结果证明）：${srnote}`
+                        : `重修提交（新增 ${ids.length} 张结果证明）`;
                 }
                 setFrags.push("refixed_at = datetime('now','localtime')", 'submission_count = submission_count + 1');
                 break;
@@ -1219,7 +1231,7 @@ router.post('/:id/complete', authenticateToken, requireCorrectionSchemaReady, co
         if (row.correction_type === 'single') {
             if (files.length === 0) { correctionCleanupPending(req, id); return res.status(400).json({ error: '单数据修正标完成必须上传结果证明截图', code: 'FIX_PROOF_REQUIRED' }); }
             persisted = await correctionPersistAttachments(id, files, 'fix_proof', actor);
-            const r = await correctionTransition(id, 'IN_PROGRESS', 'FIXED', actor, {});
+            const r = await correctionTransition(id, 'IN_PROGRESS', 'FIXED', actor, { batch_completion_note: (req.body && req.body.batch_completion_note) || '' });   // 完成说明选填（single 复用 batch_completion_note 字段）
             return res.json({ ok: true, id, status: r.toStatus, attachments: persisted });
         } else {
             if (files.length > 0) persisted = await correctionPersistAttachments(id, files, 'fix_proof', actor);
@@ -1251,7 +1263,7 @@ router.post('/:id/resubmit', authenticateToken, requireCorrectionSchemaReady, co
             if (files.length === 0) { correctionCleanupPending(req, id); return res.status(400).json({ error: '单数据修正重修提交必须上传本次新增结果证明', code: 'FIX_PROOF_REQUIRED' }); }
             persisted = await correctionPersistAttachments(id, files, 'fix_proof', actor);
             const newIds = persisted.map(a => a.id);   // ⭐RC-M1：只传本次上传 id（保证本次新增 + created_at>baseline）
-            const r = await correctionTransition(id, row.status, 'REFIXED', actor, { new_fix_proof_attachment_ids: newIds });
+            const r = await correctionTransition(id, row.status, 'REFIXED', actor, { new_fix_proof_attachment_ids: newIds, resubmit_note: (req.body && req.body.resubmit_note) || '' });   // 重修说明选填（对称 batch，进 history.reason）
             return res.json({ ok: true, id, status: r.toStatus, attachments: persisted });
         } else {
             if (files.length > 0) persisted = await correctionPersistAttachments(id, files, 'fix_proof', actor);
