@@ -112,6 +112,31 @@ const CROSS_DB_ALLOWLIST = {
 const TOP_LIMIT = 100;
 
 /**
+ * 首关键字非 SELECT/WITH 时的改写引导文案（layer 0 首 token 白名单拒绝时使用）
+ *
+ * 动机（2026-06-17）：业务取数场景下，开发常用 UPDATE 回填临时表（sheet2）再导出，
+ *   提交时被首 token 白名单拒绝，仅看到「实际：UPDATE」不知为何被拒、如何改。
+ *   本平台只接收只读查询脚本（取数/导出用途），写操作 / DDL 不该走此口子。
+ *   按关键字补一句明确引导，把回填 / 建表思路转成 SELECT 输出结果列。
+ *
+ * 行为不变：这些关键字本就被首 token 白名单拒绝，本映射只增强 reason 文案，不放行。
+ *   - DML（UPDATE/INSERT/...）逐条定制：含「怎么改成 SELECT」的具体例子（开发真正卡住的点）。
+ *   - DDL / 权限类（CREATE/DROP/...）共用一条泛化引导（见 DDL_KEYWORD_HINT），不逐条定制。
+ *   - 仍未命中（拼写错误 / EXEC / CALL 等罕见词）走通用引导。
+ */
+const NON_QUERY_KEYWORD_HINTS = {
+    UPDATE: '若原意是回填/修改某张表的列，请改写为 SELECT，把要写入的值作为结果列直接查出（如 SET t.col = x → SELECT x AS col），导出结果即可。',
+    INSERT: '若原意是把查询结果写入某张表，请直接提交对应的 SELECT 查询，导出结果即可。',
+    DELETE: '若只是想筛掉部分行，请在 SELECT 的 WHERE 中表达过滤条件。',
+    MERGE: '若原意是按条件回填/合并数据，请改写为 SELECT，用 JOIN / CASE 把目标值作为结果列查出。',
+    REPLACE: '若原意是覆盖写入，请改写为 SELECT，把要写入的值作为结果列查出，导出结果即可。',
+};
+
+/** DDL / 权限类关键字共用引导（不逐条定制，命中即给此句；句首不重复“不执行”，承接前缀“不执行写操作”）*/
+const DDL_KEYWORD_HINT = '建表/删表/改结构/授权等变更操作均不支持，请直接提交最终的 SELECT 查询，导出结果即可。';
+const DDL_KEYWORDS = new Set(['CREATE', 'DROP', 'ALTER', 'TRUNCATE', 'GRANT', 'REVOKE']);
+
+/**
  * 支持的方言枚举（路由式多方言，v1.68.0 引入）
  *   - sqlserver：T-SQL（node-sql-parser dialect 'transactsql'，含 [ ] 标识符 / TOP N / xp_*）
  *   - mysql：MySQL 8.x（node-sql-parser dialect 'mysql'，含反引号标识符 / LIMIT / LOAD_FILE）
@@ -556,9 +581,21 @@ function layer0_lexerScan(sql, dialect) {
     }
     const first = scan[0];
     if (first.type !== 'WORD' || (first.valueUpper !== 'SELECT' && first.valueUpper !== 'WITH')) {
+        const actual = first.type === 'WORD' ? first.valueUpper : first.type;
+        // 本平台只接收只读查询脚本（取数/导出用途）。首关键字为写操作 / DDL 时补一句改写引导，
+        // 帮提交者把回填 / 建表思路转成 SELECT 输出；其余情况（拼写错误 / 乱码等）走通用引导。
+        //   DML（NON_QUERY_KEYWORD_HINTS）→ 逐条定制例子；DDL/权限（DDL_KEYWORDS）→ 共用一句泛化引导。
+        let hint = null;
+        if (first.type === 'WORD') {
+            hint = NON_QUERY_KEYWORD_HINTS[first.valueUpper]
+                || (DDL_KEYWORDS.has(first.valueUpper) ? DDL_KEYWORD_HINT : null);
+        }
+        const guide = hint
+            ? `本平台只接收只读查询脚本，不执行写操作。${hint}`
+            : '本平台只接收以 SELECT 或 WITH 开头的只读查询脚本。';
         return {
             ok: false,
-            reason: `首关键字必须是 SELECT 或 WITH，实际：${first.type === 'WORD' ? first.valueUpper : first.type}`,
+            reason: `首关键字必须是 SELECT 或 WITH，实际：${actual}。${guide}`,
         };
     }
 
