@@ -66,6 +66,7 @@ async function setup() {
         notify_status TEXT DEFAULT 'not_sent', notified_at DATETIME, notify_message_key TEXT, notify_error TEXT, read_at DATETIME,
         requester_notify_status TEXT DEFAULT 'not_sent', requester_notified_at DATETIME, requester_notify_message_key TEXT, requester_notify_error TEXT, requester_read_at DATETIME,
         completion_notify_status TEXT DEFAULT 'not_sent', completion_notified_at DATETIME, completion_notify_message_key TEXT, completion_notify_error TEXT, completion_read_at DATETIME,
+        creator_notify_status TEXT DEFAULT 'not_sent', creator_notified_at DATETIME, creator_notify_message_key TEXT, creator_notify_error TEXT, creator_read_at DATETIME,
         correction_type TEXT DEFAULT 'single',
         created_by INTEGER)`);
 }

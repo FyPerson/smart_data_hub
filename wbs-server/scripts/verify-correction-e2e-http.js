@@ -12,12 +12,12 @@ require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 const JWT_SECRET = process.env.JWT_SECRET || 'default_secret_key_change_me';
 const token = jwt.sign({ id: 1, username: 'admin', role: 'admin' }, JWT_SECRET, { expiresIn: '1h' });
 
-function req(method, p, body) {
+function req(method, p, body, tokenOverride) {
   return new Promise((resolve) => {
     const data = body ? JSON.stringify(body) : null;
     const r = http.request({
       host: 'localhost', port: 3000, method, path: p,
-      headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json',
+      headers: { Authorization: 'Bearer ' + (tokenOverride || token), 'Content-Type': 'application/json',
         ...(data ? { 'Content-Length': Buffer.byteLength(data) } : {}) },
     }, (res) => { let d = ''; res.on('data', c => d += c); res.on('end', () => resolve({ status: res.statusCode, body: d })); });
     r.on('error', e => resolve({ status: 0, error: e.message }));
@@ -62,6 +62,7 @@ const check = (cond, label, detail) => { if (cond) { console.log('  ✓ ' + labe
     check(detail.status === 200, `[读] GET 详情 #${firstId} 200`, `status=${detail.status}`);
     const rs = await req('GET', '/api/corrections/' + firstId + '/notify-read-status');
     check(rs.status !== 500, `[读] GET notify-read-status 非 500（CORRECTION_READ_FIELD_MAP 依赖没漏）`, `status=${rs.status} ${(rs.body || '').slice(0, 100)}`);
+    // 注：对接人(白名单13)查 dev read-status 非 403（K2-M1 写读同源）放 verify-correction-relay-e2e（那里 seed id=13；e2e-http 不 seed 用户）
   } else {
     console.log('  （库中无现有 correction 单，跳过详情/已读查询读测）');
   }
@@ -76,6 +77,10 @@ const check = (cond, label, detail) => { if (cond) { console.log('  ✓ ' + labe
   try { const j = JSON.parse(create.body || '{}'); newId = j.id || (j.data && j.data.id); } catch (_) {}
   if (newId) {
     check(create.status === 200 || create.status === 201, `[写] 建单成功 #${newId}`, `status=${create.status}`);
+    // [写] 细优② notify-creator：PENDING_ASSIGN 不可发 → 409（验证端点挂载 + correctionActor/isCorrectionRelayWhitelisted/sendable 依赖完整，非 500）
+    const nc = await req('POST', '/api/corrections/' + newId + '/notify-creator', {});
+    check(nc.status !== 500, `[写] POST notify-creator #${newId} 非 500（细优② 端点依赖没漏）`, `status=${nc.status} ${(nc.body || '').slice(0, 120)}`);
+    check(nc.status === 409, `[写] notify-creator PENDING_ASSIGN → 409 状态闸门（仅 FIXED/REFIXED 可发）`, `status=${nc.status}`);
     const voidRes = await req('POST', '/api/corrections/' + newId + '/void', { void_reason: 'E2E 冒烟测试清理' });
     check(voidRes.status !== 500, `[写] POST void 作废清理 #${newId} 非 500（流转端点依赖没漏）`, `status=${voidRes.status} ${(voidRes.body || '').slice(0, 100)}`);
   }

@@ -93,6 +93,14 @@ async function cleanup() {
     const asg = await req(T_R13, 'POST', '/api/corrections/' + id13 + '/assign', { assigned_to: 8 });
     check(asg.status === 200 && jparse(asg.body).status === 'ASSIGNED_PENDING_ESTIMATE', `RC-M3：user 角色白名单 relay(13) 派单 → 200 + 状态 ASSIGNED_PENDING_ESTIMATE`, `status=${asg.status} ${(asg.body || '').slice(0, 140)}`);
 
+    // 4b. 细优④A：白名单 relay(13) 能通知开发（notify-developer 放开对接人）→ 非 403/非 500（无钉钉配置 failed 落库，但权限/依赖通过）
+    const ndev = await req(T_R13, 'POST', '/api/corrections/' + id13 + '/notify-developer', {});
+    check(ndev.status !== 403 && ndev.status !== 500, `细优④A：白名单 relay(13) notify-developer 非 403/500（能指派也能通知开发，补断层）`, `status=${ndev.status} ${(ndev.body || '').slice(0, 120)}`);
+
+    // 4c. 细优 K2-M1 写读同源：白名单 relay(13) 查 dev read-status → 非 403（read-status 与 notify-developer 放开同步）
+    const rsDev = await req(T_R13, 'GET', '/api/corrections/' + id13 + '/notify-read-status?recipient=dev');
+    check(rsDev.status !== 403, `K2-M1：白名单 relay(13) 查 dev read-status 非 403（与 notify-developer 同权）`, `status=${rsDev.status} ${(rsDev.body || '').slice(0, 120)}`);
+
     // 5. 越权：非白名单 user(99) 详情该单 → 403
     const d99 = await req(T_NONWL, 'GET', '/api/corrections/' + id13);
     check(d99.status === 403, `非白名单 user(9) 详情 #${id13} → 403（可见性越权防护）`, `status=${d99.status}`);

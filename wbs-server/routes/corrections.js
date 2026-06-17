@@ -47,7 +47,10 @@ const CORRECTION_REQUESTS_KEY_COLS = [
     'dingtalk_chat_created_by', 'dingtalk_chat_name',
     // v1.81.0 复审优化 H 新增列（codex 24 H-1）：纳入 readiness 抽样，旧库缺列→503 拦截
     //   （防删 expected_value 后旧表残留 NOT NULL 导致建单 500；对齐 issue requireIssueV1750SchemaReady 范式）
-    'correction_count', 'relay_notify_status', 'closure_type'
+    'correction_count', 'relay_notify_status', 'closure_type',
+    // 本次细优②（2026-06-17）：创建人通知（开发/对接人告知建单人）四件套锚点——已上线表 ALTER 后须复查它就位才 ready
+    //   （C-1 codex 36/37：ALTER 必须在下方 missingCols 复查【之前】完成，见 runCorrectionMigration [2a]/[2b]）。
+    'creator_notify_status'
 ];
 // codex 08 H-1：CORRECTION_SCHEMA_STATE 是"三表"就绪闸门，readiness 须对称复查三表关键列，
 //   不能只验主表（否则附件/历史表 DDL 引入 bug 时仍放行）。两表只需验各自的 NOT NULL 锚点列：
@@ -202,6 +205,13 @@ function initSchema() {
             requester_notify_error TEXT,
             requester_read_at DATETIME,
 
+            -- 钉钉通知·创建人侧（本次细优②：开发/对接人告知建单人工作完成；creator_notify_status 必带 DEFAULT 对齐四件套，H-1）
+            creator_notify_status TEXT DEFAULT 'not_sent',
+            creator_notified_at DATETIME,
+            creator_notify_message_key TEXT,
+            creator_notify_error TEXT,
+            creator_read_at DATETIME,
+
             -- 升级讨论拉群（v1.3，旁路字段：不走 correctionTransition、不动 status，G-6）
             dingtalk_chat_id TEXT,
             dingtalk_open_conversation_id TEXT,
@@ -295,8 +305,8 @@ async function runCorrectionMigration(ddlError) {
             return;
         }
 
-        // [2] correction_requests 关键列 PRAGMA 复查（8 态 / 5 群 / 通知 / 责任链锚点列）
-        const cols = await new Promise((resolve, reject) => {
+        // [2] correction_requests 列 PRAGMA（先取现有列，供 [2a] 判断是否需 ALTER；C-1 codex 36/37 硬性顺序）
+        let cols = await new Promise((resolve, reject) => {
             db.all('PRAGMA table_info(correction_requests)', (err, rows) => err ? reject(err) : resolve(rows));
         });
         if (!cols || cols.length === 0) {
@@ -305,7 +315,36 @@ async function runCorrectionMigration(ddlError) {
             logger.error(`[数据修正 A] 🚫 ${CORRECTION_SCHEMA_STATE.error}`);
             return;
         }
-        const colNames = cols.map(c => c.name);
+        let colNames = cols.map(c => c.name);
+
+        // [2a] ⭐ 本次细优②（2026-06-17）：已上线表演进——creator 通知 5 列（四件套 status/notified_at/message_key/error + read_at）幂等 ALTER ADD COLUMN。
+        //   生产 correction_requests 已有数据，不能 DROP 重建；CREATE TABLE IF NOT EXISTS 对已存在表 no-op（新列不加），故此处补。
+        //   ⚠️ C-1（codex 36/37）硬性顺序铁律：ALTER 必须在下方 missingCols 复查【之前】完成——否则 KEY_COLS 含
+        //     creator_notify_status 会判缺列 → ready=false → 整个 correction 写入口 503（生产熔断）。
+        //   幂等：PRAGMA 查列不存在才 ALTER（重启多次：首次 ALTER、后续跳过）；ALTER reject → 外层 catch 置 error
+        //     （可观测，不用 server.js 老范式 B 的空回调吞错）。col/type 为硬编码常量非用户输入，插值无注入风险。
+        //   DEFAULT 'not_sent'：ALTER ADD COLUMN 带默认值给生产存量行回填 'not_sent'（H-1，对齐四件套初值）。
+        const CREATOR_NOTIFY_COLS = [
+            ['creator_notify_status', "TEXT DEFAULT 'not_sent'"],
+            ['creator_notified_at', 'DATETIME'],
+            ['creator_notify_message_key', 'TEXT'],
+            ['creator_notify_error', 'TEXT'],
+            ['creator_read_at', 'DATETIME'],
+        ];
+        for (const [col, type] of CREATOR_NOTIFY_COLS) {
+            if (!colNames.includes(col)) {
+                await new Promise((resolve, reject) => {
+                    db.run(`ALTER TABLE correction_requests ADD COLUMN ${col} ${type}`, (err) => err ? reject(err) : resolve());
+                });
+                logger.info(`[数据修正迁移] correction_requests ADD COLUMN ${col} ${type}（细优② creator 通知）`);
+            }
+        }
+        // [2b] ⭐ ALTER 后【重新】PRAGMA：下方 missingCols 必须用最新列集（C-1：不能复用 [2] 的旧 colNames 复查）
+        cols = await new Promise((resolve, reject) => {
+            db.all('PRAGMA table_info(correction_requests)', (err, rows) => err ? reject(err) : resolve(rows));
+        });
+        colNames = cols.map(c => c.name);
+
         const missingCols = CORRECTION_REQUESTS_KEY_COLS.filter(c => !colNames.includes(c));
         if (missingCols.length > 0) {
             CORRECTION_SCHEMA_STATE.ready = false;
@@ -314,7 +353,7 @@ async function runCorrectionMigration(ddlError) {
             return;
         }
 
-        // [2b] codex 08 H-1：附件表 + 历史表关键列 + NOT NULL 锚点复查（三表闸门须对称，不能只验主表）。
+        // [2c] codex 08 H-1：附件表 + 历史表关键列 + NOT NULL 锚点复查（三表闸门须对称，不能只验主表）。
         //   旧表/半成品表缺 uploaded_by(R-3) 或 to_status 时，CREATE TABLE IF NOT EXISTS 不修复 →
         //   readiness 须在此拦截，否则后续 Commit B/C/D 写附件/历史时运行期报错。
         const checkTableCols = async (tableName, keyCols, notnullCols) => {
@@ -722,6 +761,22 @@ async function sendCorrectionDingtalkToRequester(requesterPhone, title, markdown
 
 // 指派通知开发（共享 helper：assign endpoint + 建单 path A 都调）。读 correction + dev → 发 → 落 notify_*。
 //   旁路不抛错：内部捕获，落 sent/failed（对齐 issue H-4 失败必落库），返回结果供 endpoint 决定是否提示。
+// 细优③/④C（2026-06-17，codex 36 M-3）：通知钉钉消息「查看详情」登录地址。对齐 collab 硬化范式
+//   （server.js forward-to-exporter）：platform_base_url 配置 + new URL 协议/host 校验 + 失败降级 fallback。
+//   假设平台根路径部署（192.168.1.100:3000 根）；URL 经 new URL 保证合法无换行，不额外 escapeMarkdown（沿用 collab 只 escape 文本字段）。
+async function buildCorrectionDetailUrl(correctionId) {
+    const FALLBACK_BASE = 'http://192.168.1.100:3000';
+    const raw = (await readSystemConfig('platform_base_url')) || FALLBACK_BASE;
+    try {
+        const url = new URL(`/Data_Correction.html?id=${correctionId}`, raw);
+        if (!url.hostname || !['http:', 'https:'].includes(url.protocol)) throw new Error(`platform_base_url 协议/host 非法: ${url.protocol}//${url.hostname}`);
+        return url.toString();
+    } catch (e) {
+        logger.warn(`[correction-detail-url] platform_base_url 配置非法 (${String(raw).replace(/[\r\n\t]/g, ' ').slice(0, 200)})，降级 fallback: ${e.message}`);
+        return new URL(`/Data_Correction.html?id=${correctionId}`, FALLBACK_BASE).toString();
+    }
+}
+
 async function notifyCorrectionAssignedDev(correctionId, devId) {
     // codex 13 M-1/M-2：把"算发送结果"与"落库"拆两阶段——dev 不存在 / 发送抛异常都规范为 r={ok:false}，
     //   再统一 UPDATE notify_*（异常/not_found 也落 failed，闭合"失败必落库" issue H-4）；仅 UPDATE 本身抛错才无法落库。
@@ -739,12 +794,13 @@ async function notifyCorrectionAssignedDev(correctionId, devId) {
         r = { ok: false, reason: 'not_found' };
     } else {
         const esc = dingtalkNotify.escapeMarkdown;
+        const detailUrl = await buildCorrectionDetailUrl(correctionId);   // 细优③：通知开发带登录地址
         const md = [
             '您被指派一条**数据修正需求**，请登平台回复预计完成时间：', '',
             `- 所属系统：${esc(c.source_system)}`,
             `- 修正方式：${esc(c.location_info)}`,
             c.expected_deadline ? `- 期望完成：${esc(String(c.expected_deadline))}` : ''
-        ].filter(Boolean).join('\n');
+        ].filter(Boolean).join('\n') + `\n\n[查看修正单详情](${detailUrl})`;
         try { r = await sendIssueDingtalkRaw(dev, '📋 数据修正·新指派', md); }
         catch (e) { r = { ok: false, reason: 'exception' }; logger.warn(`[correction-notify] 修正单 #${correctionId} 指派发送异常：${e.message}`); }
     }
@@ -946,8 +1002,8 @@ router.get('/', authenticateToken, requireCorrectionSchemaReady, async (req, res
         const uid = Number(req.user.id);
         const where = [];
         const params = [];
-        // 默认过滤作废（G-14）；include_voided=1 仅 admin/publisher 可查作废
-        const includeVoided = req.query.include_voided === '1' && (role === 'admin' || role === 'publisher');
+        // 默认过滤作废（G-14）；include_voided=1 仅 admin 可查作废（细优①收紧去 publisher，MS-L1）
+        const includeVoided = req.query.include_voided === '1' && role === 'admin';   // 细优①：含已作废仅 admin（收紧去 publisher；前端 canViewVoided 同步，写读同源）
         if (!includeVoided) where.push('voided_at IS NULL');
         // 可见性最小版（§7.1）：admin/publisher 全部；其余（user/viewer）仅 assigned_to=self。F/G 再细化 viewer 只读惯例。
         if (role !== 'admin' && role !== 'publisher') {
@@ -985,7 +1041,7 @@ router.get('/:id', authenticateToken, requireCorrectionSchemaReady, async (req, 
     try {
         const row = await dbGetAsync('SELECT * FROM correction_requests WHERE id = ?', [id]);
         if (!row) return res.status(404).json({ error: '修正单不存在' });
-        // 作废单详情：仅 admin/publisher 可见（与列表软删过滤一致，避免泄露给 creator/assignee）
+        // 作废单详情：细优①收紧——仅 admin 可见（与列表 include_voided 同步去 publisher，L-2 写读同源；避免泄露给 publisher/creator/assignee）
         const role = req.user.role, uid = Number(req.user.id);
         const isAdmin = role === 'admin', isPublisher = role === 'publisher';
         const isCreator = Number(row.created_by) === uid && uid > 0;
@@ -995,7 +1051,7 @@ router.get('/:id', authenticateToken, requireCorrectionSchemaReady, async (req, 
         if (!isAdmin && !isPublisher && !isCreator && !isAssignee && !isRelay) {
             return res.status(403).json({ error: '无权查看此修正单', code: 'NOT_AUTHORIZED_TO_VIEW' });
         }
-        if (row.voided_at && !isAdmin && !isPublisher) {
+        if (row.voided_at && !isAdmin) {
             return res.status(403).json({ error: '该修正单已作废', code: 'CORRECTION_VOIDED' });
         }
         const history = await dbAllAsync(
@@ -1429,10 +1485,13 @@ const CORRECTION_NOTIFY_SENDABLE = {
     relay:    ['PENDING_ASSIGN'],                              // 对接人协助指派阶段
     estimate: ['IN_PROGRESS'],                                // 已回复预计（进 IN_PROGRESS≡dev_estimated_at 非空）
     done:     ['FIXED', 'REFIXED'],                            // 已修完待确认
+    creator:  ['FIXED', 'REFIXED'],                            // 本次细优②：开发/对接人告知建单人工作完成（仅完成态）
 };
 
-// POST /:id/notify-developer（通知开发，权限 admin/publisher，可发 ASSIGNED_PENDING_ESTIMATE/IN_PROGRESS）
-router.post('/:id/notify-developer', authenticateToken, requireCorrectionSchemaReady, correctionIdGuard, requirePublisherOrAdmin, async (req, res) => {
+// POST /:id/notify-developer（通知开发，细优④A 权限放开：admin/publisher/白名单对接人，可发 ASSIGNED_PENDING_ESTIMATE/IN_PROGRESS）
+//   ④A（codex 36 H-2）：修"对接人能 assign 却不能通知开发"断层，requireRelayOrPublisherOrAdmin 与 assign 同权限域（有意决策：白名单对接人[7,13]全局可操作）。
+//   R-M2（codex 37）：UI 可见性 ≠ API 权限——前端 M-2 后 publisher/对接人通知区只看 creator 行，此端点后端权限保留作管理兜底/兼容。
+router.post('/:id/notify-developer', authenticateToken, requireCorrectionSchemaReady, correctionIdGuard, requireRelayOrPublisherOrAdmin, async (req, res) => {
     const id = parseInt(req.params.id, 10);
     try {
         const c = await dbGetAsync('SELECT id, status, assigned_to, notify_status, notify_message_key FROM correction_requests WHERE id = ?', [id]);
@@ -1471,12 +1530,13 @@ router.post('/:id/notify-relay', authenticateToken, requireCorrectionSchemaReady
             r = { ok: false, reason: 'not_found' };
         } else {
             const esc = dingtalkNotify.escapeMarkdown;
+            const detailUrl = await buildCorrectionDetailUrl(id);   // 细优③：通知对接人带登录地址
             const md = [
                 '请协助为以下**数据修正需求**指定开发人员：', '',
                 `- 所属系统：${esc(c.source_system)}`,
                 `- 修正方式：${esc(c.location_info)}`, '',
                 '请登平台在该单上指派开发。'
-            ].join('\n');
+            ].join('\n') + `\n\n[查看修正单详情](${detailUrl})`;
             try { r = await sendIssueDingtalkRaw(relayU, '📋 数据修正·请协助指派', md); }
             catch (e) { r = { ok: false, reason: 'exception' }; logger.warn(`[correction-notify-relay] #${id} 发送异常：${e.message}`); }
         }
@@ -1491,6 +1551,62 @@ router.post('/:id/notify-relay', authenticateToken, requireCorrectionSchemaReady
     } catch (e) {
         logger.error(`[correction-notify-relay] #${id} 异常：${e.message}`);
         return res.status(500).json({ error: '通知对接人失败' });
+    }
+});
+
+// POST /:id/notify-creator（细优②：开发/对接人告知建单人「工作已完成」，可发 FIXED/REFIXED）
+//   权限 handler 细判（开发可能任意 user 角色，中间件层拦不住）：本单开发 isAssignee / 白名单对接人 isRelay / admin。
+//   收件人 created_by（平台用户，admin 建单）走 sendIssueDingtalkRaw；兜底对齐 dev/relay（查不到/发送失败统一落 failed，error 记 reason，前端 failed 分支统一展示，MS-M1）；失败必落库（issue H-4 / H-3·R-M4 codex 36-37/41）。
+router.post('/:id/notify-creator', authenticateToken, requireCorrectionSchemaReady, correctionIdGuard, async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    try {
+        const c = await dbGetAsync('SELECT id, status, created_by, assigned_to, source_system, location_info, creator_notify_status, creator_notify_message_key FROM correction_requests WHERE id = ?', [id]);
+        if (!c) return res.status(404).json({ error: '修正单不存在' });
+        const actor = correctionActor(req);
+        const isAdmin = actor.role === 'admin';
+        const isAssignee = Number(c.assigned_to) === Number(actor.id) && Number(actor.id) > 0;
+        const isRelay = isCorrectionRelayWhitelisted(actor.id);
+        if (!isAdmin && !isAssignee && !isRelay) return res.status(403).json({ error: '无权通知创建人（仅本单开发/对接人/admin）', code: 'NOT_AUTHORIZED_TO_NOTIFY' });
+        if (!CORRECTION_NOTIFY_SENDABLE.creator.includes(c.status)) return res.status(409).json({ error: `当前状态「${c.status}」不可通知创建人`, code: 'STATUS_NOT_NOTIFIABLE' });
+        // R-M4（codex 37）：created_by 防脏数据——非有效正整数按 not_found 落库（schema 虽 NOT NULL，仍防御历史脏数据）
+        const creatorId = Number(c.created_by);
+        if (!Number.isInteger(creatorId) || creatorId <= 0) {
+            try { await dbRunAsync(`UPDATE correction_requests SET creator_notify_status='failed', creator_notified_at=datetime('now','localtime'), creator_notify_message_key=NULL, creator_notify_error='created_by 无效' WHERE id=?`, [id]); }
+            catch (dbErr) { logger.error(`[correction-notify-creator] #${id} created_by 无效落库失败：${dbErr.message}`); }
+            return res.status(400).json({ success: false, status: 'failed', code: 'CREATOR_INVALID' });   // MS-M1：落 failed 对齐 dev/relay，前端 failed 分支统一展示
+        }
+        // 重发契约（RC-M3）：已 sent 且有 key、未传 force_resend → ALREADY_SENT（NULL/not_sent 走发送，R-M1 NULL 安全）
+        if (!(req.body && req.body.force_resend === true) && c.creator_notify_status === 'sent' && c.creator_notify_message_key) {
+            return res.json({ success: true, already_sent: true, status: 'sent', message: '已通知过创建人，未重复发送（如需重发传 force_resend）' });
+        }
+        // 发送 + 落 creator 四件套（兜底对齐 dev：查不到 user→not_found / 发送失败→failed / 失败必落库）
+        let creatorU = null;
+        try { creatorU = await dbGetAsync('SELECT id, display_name, phone, dingtalk_user_id FROM users WHERE id = ?', [creatorId]); } catch (_) {}
+        let r;
+        if (!creatorU) {
+            r = { ok: false, reason: 'not_found' };
+        } else {
+            const esc = dingtalkNotify.escapeMarkdown;
+            const detailUrl = await buildCorrectionDetailUrl(id);   // 细优③：带登录地址
+            const md = [
+                '您建的**数据修正单已完成**，请知悉：', '',
+                `- 所属系统：${esc(c.source_system)}`,
+                `- 修正方式：${esc(c.location_info)}`
+            ].join('\n') + `\n\n[查看修正单详情](${detailUrl})`;
+            try { r = await sendIssueDingtalkRaw(creatorU, '📋 数据修正·已完成', md); }
+            catch (e) { r = { ok: false, reason: 'exception' }; logger.warn(`[correction-notify-creator] #${id} 发送异常：${e.message}`); }
+        }
+        const status = r.ok ? 'sent' : 'failed';   // MS-M1（codex 41）：对齐 dev/relay 范式——not_found/exception 统一落 failed（error 记 reason），前端 failed 分支统一展示
+        try {
+            await dbRunAsync(
+                `UPDATE correction_requests SET creator_notify_status=?, creator_notified_at=datetime('now','localtime'), creator_notify_message_key=?, creator_notify_error=?, creator_read_at=CASE WHEN ?='sent' THEN NULL ELSE creator_read_at END WHERE id=?`,
+                [status, r.ok ? r.message_key : null, r.ok ? null : (r.reason || 'other'), status, id]);
+        } catch (dbErr) { logger.error(`[correction-notify-creator] #${id} 落库失败：${dbErr.message}`); }
+        if (r.ok) return res.json({ success: true, status: 'sent', message_key: r.message_key });
+        return res.status(502).json({ success: false, status, reason: r.reason });
+    } catch (e) {
+        logger.error(`[correction-notify-creator] #${id} 异常：${e.message}`);
+        return res.status(500).json({ error: '通知创建人失败' });
     }
 });
 
@@ -1545,8 +1661,9 @@ const CORRECTION_READ_FIELD_MAP = {
     relay:    { user_id_col: 'relay_notified_user_id', notified_at: 'relay_notified_at',      message_key: 'relay_notify_message_key',     read_at: 'relay_read_at',     status_col: 'relay_notify_status',     label: '对接人',     byPhone: false },
     estimate: { user_id_col: null,                     notified_at: 'requester_notified_at',  message_key: 'requester_notify_message_key', read_at: 'requester_read_at', status_col: 'requester_notify_status', label: '业务方·预计', byPhone: true },
     done:     { user_id_col: null,                     notified_at: 'completion_notified_at', message_key: 'completion_notify_message_key',read_at: 'completion_read_at',status_col: 'completion_notify_status',label: '业务方·完成', byPhone: true },
+    creator:  { user_id_col: 'created_by',             notified_at: 'creator_notified_at',    message_key: 'creator_notify_message_key',   read_at: 'creator_read_at',   status_col: 'creator_notify_status',   label: '创建人',     byPhone: false },
 };
-// GET /:id/notify-read-status?recipient=dev|relay|estimate|done（复用 issue notify-read-status 11732 范式）
+// GET /:id/notify-read-status?recipient=dev|relay|estimate|done|creator（复用 issue notify-read-status 11732 范式；权限=与对应通知发送同权：dev→admin/publisher/对接人 · relay→admin · estimate→admin/assignee · done→admin/creator · creator→admin/assignee/对接人）
 router.get('/:id/notify-read-status', authenticateToken, requireCorrectionSchemaReady, correctionIdGuard, async (req, res) => {
     const id = parseInt(req.params.id, 10);
     try {
@@ -1565,9 +1682,10 @@ router.get('/:id/notify-read-status', authenticateToken, requireCorrectionSchema
         const isAssignee = Number(c.assigned_to) === Number(actor.id) && Number(actor.id) > 0;
         const isCreator = Number(c.created_by) === Number(actor.id) && Number(actor.id) > 0;
         let canQuery;
-        if (recipient === 'dev') canQuery = isAdmin || isPublisher;
+        if (recipient === 'dev') canQuery = isAdmin || isPublisher || isCorrectionRelayWhitelisted(actor.id);   // 细优④A（K2-M1）：notify-developer 放开对接人 → dev read-status 同步放开（写读同源）
         else if (recipient === 'relay') canQuery = isAdmin;
         else if (recipient === 'estimate') canQuery = isAdmin || isAssignee;
+        else if (recipient === 'creator') canQuery = isAdmin || isAssignee || isCorrectionRelayWhitelisted(actor.id);   // 细优②：创建人通知发送方=开发/对接人/admin
         else canQuery = isAdmin || isCreator;   // done
         if (!canQuery) return res.status(403).json({ error: '无权查询该通知已读状态', code: 'NOT_AUTHORIZED' });
         if (!c.notified_at || c.notify_status !== 'sent') return res.status(400).json({ error: `尚未成功通知${fm.label}`, code: 'NOT_NOTIFIED', read: false });

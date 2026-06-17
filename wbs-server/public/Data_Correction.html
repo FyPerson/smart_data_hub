@@ -342,6 +342,7 @@
                     <div class="form-group"><label>业务方姓名 <span class="req">*</span></label><input type="text" id="formRequesterName" placeholder="提出修正的业务方"></div>
                 </div>
                 <div class="form-group"><label>业务方手机号</label><input type="text" id="formRequesterPhone" placeholder="可选，用于完成后钉钉通知业务方"></div>
+                <div class="form-group"><label>期望完成时间</label><input type="datetime-local" id="formExpectedDeadline"><div class="hint">可选，业务方期望完成时间（建单人代填）；不填则系统按默认规则生成。</div></div>
                 <!-- 指派路径 A/B/none（二选一，G-16；§1.5 三选一字段联动：A 必填开发 / B 必填对接人 / none 都不填） -->
                 <div class="form-group">
                     <label>指派方式</label>
@@ -548,7 +549,7 @@
 
         function applyRoleVisibility() {
             const isAdmin = currentUser && currentUser.role === 'admin';
-            const canViewVoided = currentUser && (currentUser.role === 'admin' || currentUser.role === 'publisher');
+            const canViewVoided = currentUser && currentUser.role === 'admin';   // 细优①：含已作废仅 admin（与后端 950 同步收紧，写读同源）
             document.getElementById('btnNewCorrection').style.display = isAdmin ? 'inline-flex' : 'none';
             document.getElementById('includeVoidedWrap').style.display = canViewVoided ? 'flex' : 'none';
         }
@@ -722,6 +723,7 @@
             const isPublisher = me.role === 'publisher';
             const isCreator = Number(r.created_by) === Number(me.id) && Number(me.id) > 0;
             const isAssignee = Number(r.assigned_to) === Number(me.id) && Number(me.id) > 0;
+            const isRelay = me.id && CORRECTION_RELAY_USER_IDS.includes(Number(me.id));   // 细优②：白名单对接人（通知区裁剪 + creator 可发判断）
             const s = r.status;
             const hasChat = !!r.dingtalk_open_conversation_id;
 
@@ -805,7 +807,7 @@
             if (r.void_reason) info += kvFull('作废原因', escapeHtml(r.void_reason));
             info += `</div>`;
 
-            // ===== 通知区（4 类通知 × 多态 + 手动发送/查已读/重发，§2.4 对齐 collab 详情级）=====
+            // ===== 通知区（5 类通知 dev/relay/estimate/done/creator × 多态 + 手动发送/查已读/重发，§2.4 对齐 collab；细优② creator + 裁剪）=====
             //   收件人名：dev=assigned_to_name（列已反规范化）/ relay=allUsers 查 relay_notified_user_id / estimate·done=requester_name
             const relayName = r.relay_notified_user_id ? (() => { const u = allUsers.find(x => Number(x.id) === Number(r.relay_notified_user_id)); return u ? (u.display_name || u.username) : `用户#${r.relay_notified_user_id}`; })() : '';
             const noPhone = !String(r.requester_phone || '').trim();
@@ -822,8 +824,14 @@
                 { key: 'done', cid: Number(r.id), label: '通知业务方·完成', recipient: r.requester_name || '业务方', applicable: true,
                   status: r.completion_notify_status, notifiedAt: r.completion_notified_at, readAt: r.completion_read_at, error: r.completion_notify_error,
                   sendable: ['FIXED', 'REFIXED'], canSend: isAdmin || isCreator, byPhone: true, noPhone },
+                // 细优②：通知创建人（开发/对接人告知建单人工作完成；详情 label="创建人"，弹框文案"信息技术部"另见 §3.6）
+                { key: 'creator', cid: Number(r.id), label: '通知创建人', recipient: r.created_by_name || '创建人', applicable: !!r.created_by,
+                  status: r.creator_notify_status, notifiedAt: r.creator_notified_at, readAt: r.creator_read_at, error: r.creator_notify_error,
+                  sendable: ['FIXED', 'REFIXED'], canSend: isAdmin || isAssignee || isRelay, byPhone: false, noPhone: false },
             ];
-            const notify = notifyTypes.filter(t => t.applicable).map(t => buildNotifyRow(t, s)).join('');
+            // 细优②（M-1/M-2）：严格只 admin 看全部 5 类；非 admin（含 publisher/开发/对接人/其他 user）只看 creator 行（后端端点权限为真闸门）
+            const visibleTypes = isAdmin ? notifyTypes : notifyTypes.filter(t => t.key === 'creator');
+            const notify = visibleTypes.filter(t => t.applicable).map(t => buildNotifyRow(t, s)).join('');
 
             // ===== 状态历史 =====
             let hist = history.length ? history.map(h => `
@@ -921,7 +929,8 @@
                 reason: v('formReason') || undefined,
                 requester_dept: document.getElementById('formRequesterDept').value || undefined,
                 requester_name: v('formRequesterName'),
-                requester_phone: v('formRequesterPhone') || undefined
+                requester_phone: v('formRequesterPhone') || undefined,
+                expected_deadline: (() => { const ed = v('formExpectedDeadline'); if (!ed) return undefined; return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(ed) ? ed.replace('T', ' ') + ':00' : ed.replace('T', ' '); })()   // 细优 E（M-4/K3-L2）：分钟精度→本地 YYYY-MM-DD HH:mm:ss；含秒只 replace T；空不传走后端默认（R-L3）
             };
             if (assignMode === 'A') {
                 const dev = document.getElementById('formAssignedTo').value;
@@ -1017,8 +1026,22 @@
                 const data = await res.json().catch(() => ({}));
                 if (!res.ok) { showToast(data.error || '标完成失败', 'error'); return; }
                 showToast('已标完成', 'success');
-                closeModal('completeModal'); await loadList(); openDrawer(id);
+                closeModal('completeModal'); if (!(await promptNotifyCreatorAfterComplete(id))) { await loadList(); openDrawer(id); }   // K3-L1：发送了则 notifySend 已刷，不再重复
             } catch (e) { showToast('标完成失败', 'error'); } finally { btn.disabled = false; }
+        }
+
+        // 细优⑥：标完成/重修完成后快捷通知信息技术部（创建人）。操作人≠创建人才弹；选是→复用 notifySend('creator')。
+        // 返回 true=已尝试通知（notifySend 已发请求+处理刷新，不论成败，调用方不必再刷，K3-L1 防重复）；false=未尝试（自通知防护/选否，调用方刷新）。MS-L2：语义是"已尝试"非"已发送成功"。
+        async function promptNotifyCreatorAfterComplete(id) {
+            // K3-M2：优先取 currentDetail（标完成前详情，created_by 稳定）；不依赖 loadList 后可能被筛选过滤的 allItems
+            const item = (currentDetail && Number(currentDetail.id) === Number(id) ? currentDetail : null)
+                || allItems.find(i => Number(i.id) === Number(id)) || {};
+            const me = currentUser || {};
+            // 自通知防护：操作人就是创建人则不弹（admin 标自己建的单，自己通知自己无意义；详情页仍可手动发）
+            if (Number(item.created_by) === Number(me.id) && Number(me.id) > 0) return false;
+            if (!confirm('该修正单已完成，是否通知信息技术部（单据创建人）？')) return false;
+            await notifySend(Number(id), 'creator', false);   // 复用详情发送逻辑（POST notify-creator + toast + 内部刷新详情）
+            return true;
         }
 
         // ================= 重修提交 =================
@@ -1054,7 +1077,7 @@
                 const data = await res.json().catch(() => ({}));
                 if (!res.ok) { showToast(data.error || '重修提交失败', 'error'); return; }
                 showToast('已重修提交', 'success');
-                closeModal('resubmitModal'); await loadList(); openDrawer(id);
+                closeModal('resubmitModal'); if (!(await promptNotifyCreatorAfterComplete(id))) { await loadList(); openDrawer(id); }   // K3-L1：发送了则 notifySend 已刷，不再重复
             } catch (e) { showToast('重修提交失败', 'error'); } finally { btn.disabled = false; }
         }
 
@@ -1080,9 +1103,9 @@
             } catch (e) { showToast('补充失败', 'error'); } finally { btn.disabled = false; }
         }
 
-        // ================= 通知发送 / 查已读（4 类统一，§2.4/§2.5/§2.6）=================
-        const CORRECTION_NOTIFY_ENDPOINTS = { dev: 'notify-developer', relay: 'notify-relay', estimate: 'notify-estimate', done: 'notify-done' };
-        const CORRECTION_NOTIFY_NAMES = { dev: '开发', relay: '对接人', estimate: '业务方（预计完成）', done: '业务方（完成）' };
+        // ================= 通知发送 / 查已读（5 类统一 dev/relay/estimate/done/creator，§2.4/§2.5/§2.6）=================
+        const CORRECTION_NOTIFY_ENDPOINTS = { dev: 'notify-developer', relay: 'notify-relay', estimate: 'notify-estimate', done: 'notify-done', creator: 'notify-creator' };
+        const CORRECTION_NOTIFY_NAMES = { dev: '开发', relay: '对接人', estimate: '业务方（预计完成）', done: '业务方（完成）', creator: '创建人' };
 
         // 通知失败 reason → 友好文案（§2.4 failed 态展示）
         function notifyReasonText(reason) {
