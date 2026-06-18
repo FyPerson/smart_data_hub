@@ -336,6 +336,34 @@
                     <input type="number" id="formCorrectionCount" min="1" step="1" placeholder="可选，本次修正涉及的记录条数">
                     <div class="hint">纯记账字段，可不填；填则须为正整数（单修正通常 1，批量填 N）。</div>
                 </div>
+                <!-- L5 跨系统关联（§7.1 / 契约 B）：勾上展开系统2 字段（不含开发2、不含独立业务方——业务方共享主单）；勾上隐藏指派方式区（禁建单时直派） -->
+                <div class="form-group" style="margin-bottom:8px;">
+                    <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+                        <input type="checkbox" id="formCrossSystem" onchange="toggleCrossSystem()" style="width:auto; margin:0;"> 跨系统关联（同一诉求需在两个系统分别修正）
+                    </label>
+                    <div class="hint">勾选后一次建两单（系统1=主单 + 系统2=关联单）：业务方/类型/原因/期望时间共享，两单均待指派——建后在各自详情页指派开发（建单时不直派）。</div>
+                </div>
+                <div id="system2Group" style="display:none; border:1px dashed #d1d5db; border-radius:8px; padding:12px; margin-bottom:14px; background:#fafafa;">
+                    <div style="font-size:13px; font-weight:600; color:#374151; margin-bottom:10px;">系统2（关联单）</div>
+                    <div class="form-row">
+                        <div class="form-group" style="margin-bottom:12px;">
+                            <label>所属系统 <span class="req">*</span></label>
+                            <select id="formSourceSystem2" onchange="toggleSourceOther2()"></select>
+                        </div>
+                        <div class="form-group" id="sourceOtherGroup2" style="display:none; margin-bottom:12px;">
+                            <label>其他系统说明 <span class="req">*</span></label>
+                            <input type="text" id="formSourceSystemOther2" placeholder="选「其他」时必填">
+                        </div>
+                    </div>
+                    <div class="form-group" style="margin-bottom:12px;">
+                        <label>修正方式 <span class="req">*</span></label>
+                        <textarea id="formLocationInfo2" rows="3" placeholder="系统2 的：哪里的什么数据错了，要改成什么"></textarea>
+                    </div>
+                    <div class="form-group" style="margin-bottom:0;">
+                        <label>修正条数</label>
+                        <input type="number" id="formCorrectionCount2" min="1" step="1" placeholder="可选，正整数">
+                    </div>
+                </div>
                 <div class="form-group"><label>原因/背景</label><textarea id="formReason" rows="2" placeholder="可选，错误产生原因或修正背景"></textarea></div>
                 <div class="form-group"><label>业务方部门</label><select id="formRequesterDept"></select></div>
                 <div class="form-group">
@@ -345,8 +373,8 @@
                     <div class="hint">主业务方姓名必填；同一修正诉求可能涉及多个业务方，完成后逐个发钉钉通知（需手机号）。</div>
                 </div>
                 <div class="form-group"><label>期望完成时间</label><input type="datetime-local" id="formExpectedDeadline"><div class="hint">可选，业务方期望完成时间（建单人代填）；不填则系统按默认规则生成。</div></div>
-                <!-- 指派路径 A/B/none（二选一，G-16；§1.5 三选一字段联动：A 必填开发 / B 必填对接人 / none 都不填） -->
-                <div class="form-group">
+                <!-- 指派路径 A/B/none（二选一，G-16；§1.5 三选一字段联动：A 必填开发 / B 必填对接人 / none 都不填）；L5 跨系统勾选时整块隐藏（契约 B 禁直派） -->
+                <div class="form-group" id="assignModeGroup">
                     <label>指派方式</label>
                     <div class="radio-row">
                         <label><input type="radio" name="assignMode" value="A" checked onchange="toggleAssignMode()"> 直接指派开发</label>
@@ -389,6 +417,36 @@
                 <div style="font-size:12px; color:#6b7280;">回复后单进入「修正中」；钉钉通知业务方需在详情页手动点「通知业务方·预计」发送。</div>
             </div>
             <div class="modal-footer"><button class="btn-secondary" onclick="closeModal('estimateModal')">取消</button><button class="btn-primary" id="btnSubmitEstimate" onclick="submitEstimate()">提交</button></div>
+        </div>
+    </div>
+
+    <!-- L5 追加关联单弹窗（§6.2 / D-9；admin，在主单详情触发）：晚发现同一诉求还需在第三系统改时追加 -->
+    <div class="modal-overlay" id="linkNewModal">
+        <div class="modal-box" style="max-width:480px;">
+            <div class="modal-header"><h2>追加关联单</h2><button class="drawer-close" onclick="closeModal('linkNewModal')">&times;</button></div>
+            <div class="modal-body">
+                <input type="hidden" id="linkNewMasterId">
+                <div style="font-size:12px; color:#6b7280; margin-bottom:12px;">在本单（主单）上追加一张其他系统的关联单——同一诉求需在多个系统分别修正时使用。业务方、原因、类型、期望完成时间继承主单；新单待指派，追加后在其详情页指派开发。</div>
+                <div class="form-row">
+                    <div class="form-group" style="margin-bottom:12px;">
+                        <label>所属系统 <span class="req">*</span></label>
+                        <select id="formLinkSourceSystem" onchange="toggleLinkSourceOther()"></select>
+                    </div>
+                    <div class="form-group" id="linkSourceOtherGroup" style="display:none; margin-bottom:12px;">
+                        <label>其他系统说明 <span class="req">*</span></label>
+                        <input type="text" id="formLinkSourceSystemOther" placeholder="选「其他」时必填">
+                    </div>
+                </div>
+                <div class="form-group" style="margin-bottom:12px;">
+                    <label>修正方式 <span class="req">*</span></label>
+                    <textarea id="formLinkLocationInfo" rows="3" placeholder="关联单的：哪里的什么数据错了，要改成什么"></textarea>
+                </div>
+                <div class="form-group" style="margin-bottom:0;">
+                    <label>修正条数</label>
+                    <input type="number" id="formLinkCorrectionCount" min="1" step="1" placeholder="可选，正整数">
+                </div>
+            </div>
+            <div class="modal-footer"><button class="btn-secondary" onclick="closeModal('linkNewModal')">取消</button><button class="btn-primary" id="btnSubmitLinkNew" onclick="submitLinkNew()">追加</button></div>
         </div>
     </div>
 
@@ -727,7 +785,13 @@
             currentDetail = r;   // M-3：缓存当前详情，供 openArchive/openCreateChat 读权威数据（非列表缓存）
             const history = data.history || [];
             const attachments = data.attachments || [];
-            const requesters = data.requesters || [];   // L3a 业务方子表 N 行（完成通知区按行渲染）；data.group 留 L5 关联组区
+            const requesters = data.requesters || [];   // L3a 业务方子表 N 行（完成通知区按行渲染）
+            // L5 关联组（§7.2）：group={master_id,is_master,members}。标准单 members=[自身]、is_master=true；跨系统子单 is_master=false。
+            //   isChild=子单 → 隐藏完成通知/error_proof（归主单）+ 顶部 banner 跳主单；关联组区仅 members>1 时显示。
+            const group = data.group || null;
+            const isChild = !!(group && group.is_master === false);
+            const groupMasterId = group ? Number(group.master_id) : Number(r.id);
+            const groupMembers = (group && Array.isArray(group.members)) ? group.members : [];
             document.getElementById('drawerTitle').textContent = `#${r.id} 数据修正`;
             const me = currentUser || {};
             const isAdmin = me.role === 'admin';
@@ -780,6 +844,11 @@
                 } else if (CHAT_ALLOWED_STATUSES.includes(s)) {
                     actions += `<button class="btn-secondary" id="btnChat_${r.id}" onclick="openCreateChat(${r.id})">拉群讨论</button>`;
                 }
+            }
+            // L5 追加关联单（§6.2 / D-9）：admin，标准单/主单（非子单）+ 非终态可追加其他系统关联单（子单不显示，后端 LINK_ON_MASTER_ONLY 兜底）。
+            //   状态收窄"组内已有 sent 完成通知则禁追加"靠后端校验（前端不复算子表 sent），点击后 409 引导作废重建。
+            if (isAdmin && !isChild && !['VOIDED', 'REJECTED', 'ARCHIVED'].includes(s)) {
+                actions += `<button class="btn-secondary" onclick="openLinkNew(${Number(r.id)})">追加关联单</button>`;
             }
             // 行政闭环（I2/I3 §3.3）：仅 admin，在未完成态（PENDING_ASSIGN/ASSIGNED_PENDING_ESTIMATE/IN_PROGRESS）记账式收口 → ARCHIVED + admin_closure
             if (isAdmin && ['PENDING_ASSIGN', 'ASSIGNED_PENDING_ESTIMATE', 'IN_PROGRESS'].includes(s)) {
@@ -858,10 +927,13 @@
             //   ⚠️ codex 51 L-4：通知行分两段控制——基础类型 notifyTypes（dev/relay/estimate/creator）+ done 子表 N 行 doneRows，
             //     改通知权限时【两处都要动】（visibleTypes 和 visibleDone），勿只改一处。
             const visibleTypes = isAdmin ? notifyTypes : notifyTypes.filter(t => t.key === 'creator');
-            const visibleDone = isAdmin ? doneRows : [];   // done N 行仅 admin 看（与原 done 同口径）
+            // L5（codex 56 M-2 已核实）：子单完成通知归主单（后端 NOTIFY_DONE_ON_MASTER_ONLY）→ 子单不渲染 done N 行；
+            //   而 notify-developer/notify-estimate/notify-creator 三端点均不调 resolveCorrectionGroupAnchor、无子单限制
+            //   → 子单可独立发（各有自己开发/ETA/建单人，方案 §6.5 每系统单发自己 ETA 含 source_system）→ 仅 done 归主单、这三类保留。
+            const visibleDone = (isAdmin && !isChild) ? doneRows : [];   // done N 行仅 admin 看（与原 done 同口径）
             // codex 51 M-2：requesters 空时（旧单未回填/异常数据）done 行会消失——admin 显示防御警告 surface 异常，
             //   不造假主表 done 行（L2b length===0 → REQUESTER_ROWS_MISSING，假按钮点了必失败）。正常数据 L1 回填+readiness 保证非空。
-            const doneWarn = (isAdmin && requesters.length === 0)
+            const doneWarn = (isAdmin && !isChild && requesters.length === 0)
                 ? `<div class="notify-row"><span class="nr-label">通知业务方·完成</span><span class="nr-body"><span style="color:#dc2626;">⚠️ 本单无业务方记录（数据异常，请联系管理员）</span></span></div>`
                 : '';
             const notify = [...visibleTypes.filter(t => t.applicable), ...visibleDone].map(t => buildNotifyRow(t, s)).join('') + doneWarn;
@@ -891,11 +963,15 @@
                 <span style="color:#9ca3af;"> · ${escapeHtml(a.uploaded_by_name || '-')} · ${escapeHtml(formatFullTime(a.created_at))}</span></div>`).join('') : `<div style="color:#9ca3af; font-size:12px;">${emptyText}</div>`;
             // L3b 错误证明区：文字说明 error_proof_note + 补传入口（§6.7：建单人/admin，早期态 PENDING_ASSIGN~REFIXED，非作废）
             const ERR_PROOF_STATES = ['PENDING_ASSIGN', 'ASSIGNED_PENDING_ESTIMATE', 'IN_PROGRESS', 'FIXED', 'REFIXED'];
-            const canAddErrProof = (isAdmin || isCreator) && ERR_PROOF_STATES.includes(s) && !r.voided_at;
+            const canAddErrProof = (isAdmin || isCreator) && !isChild && ERR_PROOF_STATES.includes(s) && !r.voided_at;   // L5 子单 error_proof 归主单（后端 ERROR_PROOF_ON_MASTER_ONLY）
             const errProofNoteHtml = r.error_proof_note ? `<div style="font-size:13px; color:#374151; margin-bottom:6px; white-space:pre-wrap;">📝 ${escapeHtml(r.error_proof_note)}</div>` : '';
             const errProofAddHtml = canAddErrProof
                 ? `<div style="margin-top:8px;"><input type="file" id="errProofFiles_${Number(r.id)}" multiple accept="image/*,.pdf,.xlsx,.xls" style="font-size:12px;"><button class="btn-secondary nb-btn" onclick="uploadErrorProof(${Number(r.id)})">上传错误证明</button></div>`
                 : '';
+            // codex 56 M-1：子单错误证明归主单（与隐藏 done 行对称）——子单整块不渲染错误证明 section（否则显示空"错误证明（无）"误导子单有独立错误证明）；banner 已引导去主单看。
+            const errProofSection = isChild
+                ? ''
+                : `<div class="detail-section"><h3>错误证明（error_proof）</h3>${errProofNoteHtml}${renderAtts(errProofs, errProofNoteHtml ? '（暂无附件）' : '无')}${errProofAddHtml}</div>`;
 
             // ===== 群信息 =====
             let chatBlock = '';
@@ -906,11 +982,40 @@
                     <span style="color:#9ca3af;">（请到钉钉客户端查看群聊）</span></div></div>`;
             }
 
+            // ===== L5 关联组区（§7.2）+ 子单 banner =====
+            //   关联组区：组内多成员时显示"系统N · #id · 系统名 · 状态 · 开发"，当前单高亮、其他单可点跳转（后端 group_members 已主单优先排序）。
+            let groupBlock = '';
+            if (groupMembers.length > 1) {
+                const memberRows = groupMembers.map((m, i) => {
+                    const isCur = Number(m.id) === Number(r.id);
+                    const sysName = (m.source_system === '其他') ? (m.source_system_other || '其他') : (m.source_system || '-');   // L-1 codex 57："其他"显示补充说明以区分
+                    const devName = m.assigned_to_name || '未指派';
+                    const stBadge = `<span class="status-badge s-${statusClass(m.status)}" style="font-size:10px;">${escapeHtml(STATUS_LABELS[m.status] || m.status)}</span>`;
+                    const tail = isCur
+                        ? `<span style="color:#9ca3af; margin-left:6px;">（当前单）</span>`
+                        : `<a href="javascript:void(0)" onclick="openDrawer(${Number(m.id)})" style="margin-left:6px;">查看 →</a>`;
+                    return `<div class="notify-row"${isCur ? ' style="background:#fffbeb;"' : ''}>
+                        <span class="nr-label">系统${i + 1}${Number(m.id) === groupMasterId ? '（主）' : ''}</span>
+                        <span class="nr-body">#${Number(m.id)} · ${escapeHtml(sysName)} · ${stBadge} · 开发：${escapeHtml(devName)}${tail}</span>
+                    </div>`;
+                }).join('');
+                groupBlock = `<div class="detail-section"><h3>关联单（跨系统组）</h3>${memberRows}</div>`;
+            }
+            //   子单 banner：完成通知/错误证明/业务方录入归主单，顶部提示 + 跳转。
+            const childBanner = isChild
+                ? `<div class="detail-section" style="background:#fef3c7; border-radius:8px; padding:10px 12px; margin-bottom:14px;">
+                     <span style="font-size:13px; color:#92400e;">🔗 本单属关联组（主单 #${groupMasterId}）——业务方名单、完成通知、错误证明统一在主单管理；预计完成通知按本系统单独发送。</span>
+                     <a href="javascript:void(0)" onclick="openDrawer(${groupMasterId})" style="margin-left:6px;">前往主单 →</a>
+                   </div>`
+                : '';
+
             document.getElementById('drawerBody').innerHTML = `
+                ${childBanner}
                 ${actions ? `<div class="action-bar">${actions}</div>` : ''}
                 <div class="detail-section"><h3>基本信息</h3>${info}</div>
+                ${groupBlock}
                 <div class="detail-section"><h3>通知状态</h3>${notify}</div>
-                <div class="detail-section"><h3>错误证明（error_proof）</h3>${errProofNoteHtml}${renderAtts(errProofs, errProofNoteHtml ? '（暂无附件）' : '无')}${errProofAddHtml}</div>
+                ${errProofSection}
                 <div class="detail-section"><h3>结果证明（fix_proof）</h3>${renderAtts(fixProofs, '无')}</div>
                 ${chatBlock}
                 <div class="detail-section"><h3>状态历史</h3>${hist}</div>
@@ -925,9 +1030,10 @@
 
         // ================= 建单 =================
         function openCreateModal() {
-            // 填所属系统
-            const sysSel = document.getElementById('formSourceSystem');
-            sysSel.innerHTML = '<option value="">请选择</option>' + CORRECTION_SOURCE_SYSTEMS.map(s => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join('');
+            // 填所属系统（系统1 + L5 系统2 同源选项）
+            const sysOpts = '<option value="">请选择</option>' + CORRECTION_SOURCE_SYSTEMS.map(s => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join('');
+            document.getElementById('formSourceSystem').innerHTML = sysOpts;
+            document.getElementById('formSourceSystem2').innerHTML = sysOpts;
             // 填业务方部门
             const deptSel = document.getElementById('formRequesterDept');
             deptSel.innerHTML = '<option value="">（不指定）</option>' + CORRECTION_REQUESTER_DEPTS.map(d => `<option value="${escapeHtml(d)}">${escapeHtml(d)}</option>`).join('');
@@ -939,10 +1045,13 @@
             // 重置
             document.querySelector('input[name="corrType"][value="single"]').checked = true;
             document.querySelector('input[name="assignMode"][value="A"]').checked = true;
-            ['formSourceSystemOther', 'formLocationInfo', 'formCorrectionCount', 'formOaNumber', 'formReason', 'formErrorProofNote'].forEach(id => document.getElementById(id).value = '');
+            ['formSourceSystemOther', 'formLocationInfo', 'formCorrectionCount', 'formOaNumber', 'formReason', 'formErrorProofNote',
+             'formSourceSystemOther2', 'formLocationInfo2', 'formCorrectionCount2', 'formExpectedDeadline'].forEach(id => document.getElementById(id).value = '');   // L5 含系统2 字段；L-2 codex 57 补 formExpectedDeadline 防连续建单残留
             document.getElementById('formErrorProofFiles').value = '';   // L3b 清错误证明附件选择
+            document.getElementById('formCrossSystem').checked = false;   // L5 重置跨系统开关
+            document.getElementById('formSourceSystem2').value = '';
             resetRequesterList();
-            toggleSourceOther(); toggleAssignMode();
+            toggleSourceOther(); toggleAssignMode(); toggleCrossSystem(); toggleSourceOther2();   // L5 跨系统/系统2 联动复位
             document.getElementById('createModal').classList.add('open');
         }
         function closeCreateModal() { document.getElementById('createModal').classList.remove('open'); }
@@ -989,10 +1098,26 @@
             const isOther = document.getElementById('formSourceSystem').value === '其他';
             document.getElementById('sourceOtherGroup').style.display = isOther ? 'block' : 'none';
         }
+        function toggleSourceOther2() {   // L5 系统2「其他」说明联动
+            const isOther = document.getElementById('formSourceSystem2').value === '其他';
+            document.getElementById('sourceOtherGroup2').style.display = isOther ? 'block' : 'none';
+        }
         function toggleAssignMode() {
             const mode = document.querySelector('input[name="assignMode"]:checked').value;
             document.getElementById('assignAGroup').style.display = mode === 'A' ? 'block' : 'none';
             document.getElementById('assignBGroup').style.display = mode === 'B' ? 'block' : 'none';
+        }
+        // L5 跨系统开关（§7.1 / 契约 B）：勾上展开系统2 区 + 隐藏指派方式区（禁建单直派，两单建后各自详情页指派）
+        function toggleCrossSystem() {
+            const on = document.getElementById('formCrossSystem').checked;
+            document.getElementById('system2Group').style.display = on ? 'block' : 'none';
+            document.getElementById('assignModeGroup').style.display = on ? 'none' : 'block';
+            if (on) {
+                document.getElementById('assignAGroup').style.display = 'none';
+                document.getElementById('assignBGroup').style.display = 'none';
+            } else {
+                toggleAssignMode();   // 取消跨系统时按当前 assignMode 恢复显示 A/B 子区
+            }
         }
 
         async function submitCorrection() {
@@ -1024,7 +1149,27 @@
                 error_proof_note: v('formErrorProofNote') || undefined,   // L3b 错误证明说明（后端 ≤1000）
                 expected_deadline: (() => { const ed = v('formExpectedDeadline'); if (!ed) return undefined; return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(ed) ? ed.replace('T', ' ') + ':00' : ed.replace('T', ' '); })()   // 细优 E（M-4/K3-L2）：分钟精度→本地 YYYY-MM-DD HH:mm:ss；含秒只 replace T；空不传走后端默认（R-L3）
             };
-            if (assignMode === 'A') {
+            const crossSystem = document.getElementById('formCrossSystem').checked;
+            if (crossSystem) {
+                // L5 契约 B：系统2 字段校验（镜像系统1 内联校验）+ payload；禁直派——不带 assigned_to/relay（两单建好后各自详情页指派）
+                const ss2 = document.getElementById('formSourceSystem2').value;
+                if (!ss2) return showToast('跨系统：请选择系统2 所属系统', 'error');
+                if (ss2 === '其他' && !v('formSourceSystemOther2')) return showToast('系统2 选「其他」时须填写系统说明', 'error');
+                if (!v('formLocationInfo2')) return showToast('请填写系统2 的修正方式', 'error');
+                const cc2 = v('formCorrectionCount2');
+                if (cc2 && !/^[1-9]\d{0,8}$/.test(cc2)) return showToast('系统2 修正条数须为正整数（1-999999999）', 'error');
+                // M-2 codex 57：系统2 不能与系统1 相同（"其他"按补充说明细分）；后端为真闸门(CROSS_SYSTEM_SAME_SYSTEM)，前端早提示
+                if (ss2 === sourceSystem && (sourceSystem !== '其他' || v('formSourceSystemOther2') === v('formSourceSystemOther'))) {
+                    return showToast('系统2 不能与系统1 相同，请选择不同系统', 'error');
+                }
+                payload.cross_system = true;
+                payload.system2 = {
+                    source_system: ss2,
+                    source_system_other: ss2 === '其他' ? v('formSourceSystemOther2') : undefined,
+                    location_info: v('formLocationInfo2'),
+                    correction_count: cc2 || undefined
+                };
+            } else if (assignMode === 'A') {
                 const dev = document.getElementById('formAssignedTo').value;
                 if (!dev) return showToast('「直接指派开发」需选择开发/处理人，或改选「暂不指派」', 'error');
                 payload.assigned_to = dev;
@@ -1065,7 +1210,17 @@
                     }
                 }
                 // I1（codex 26 L-1 + 27 RC-L1）：建单不再自动发钉钉（旧 relay_notify_sent 即时提示已移除）；提示去详情页手动发送
-                if (assignMode === 'A' || assignMode === 'B') {
+                if (crossSystem) {
+                    // codex 56 L-4：child_ids 缺失/空 = 后端契约破坏 → warning surface 而非假成功（对齐 L3b 防漂移；下方 loadList 已刷新列表）
+                    const childIds = (data.child_ids || []).filter(Boolean);
+                    if (!data.master_id && !data.id) {
+                        setTimeout(() => showToast('建单成功但关联单响应异常（缺主单 id），请刷新列表确认', 'warning', 5500), 900);
+                    } else if (childIds.length === 0) {
+                        setTimeout(() => showToast('建单成功但关联单响应异常（未返回关联单 id），请刷新列表确认', 'warning', 5500), 900);
+                    } else {
+                        setTimeout(() => showToast(`已建跨系统关联组（主单 #${data.master_id || data.id} + 关联单 ${childIds.map(x => '#' + x).join(',')}），请在各自详情页指派开发`, 'success', 5500), 900);
+                    }
+                } else if (assignMode === 'A' || assignMode === 'B') {
                     setTimeout(() => showToast('请在详情页点「通知开发/对接人」发送钉钉通知', 'success', 4500), 900);
                 }
                 closeCreateModal();
@@ -1257,6 +1412,51 @@
                 showToast('错误证明已上传', 'success');
                 await loadList(); openDrawer(id);   // codex 52 M-1：与 submitAttachments 范式一致（openDrawer 本就 re-fetch 详情，附件必刷新）
             } catch (e) { showToast('上传失败', 'error'); }
+        }
+
+        // ================= L5 追加关联单（§6.2 / D-9，admin 主单详情触发）=================
+        function openLinkNew(masterId) {
+            document.getElementById('linkNewMasterId').value = masterId;
+            document.getElementById('formLinkSourceSystem').innerHTML = '<option value="">请选择</option>' + CORRECTION_SOURCE_SYSTEMS.map(s => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join('');
+            ['formLinkSourceSystemOther', 'formLinkLocationInfo', 'formLinkCorrectionCount'].forEach(id => document.getElementById(id).value = '');
+            toggleLinkSourceOther();
+            document.getElementById('linkNewModal').classList.add('open');
+        }
+        function toggleLinkSourceOther() {
+            const isOther = document.getElementById('formLinkSourceSystem').value === '其他';
+            document.getElementById('linkSourceOtherGroup').style.display = isOther ? 'block' : 'none';
+        }
+        async function submitLinkNew() {
+            const masterId = document.getElementById('linkNewMasterId').value;
+            const v = id => document.getElementById(id).value.trim();
+            const ss = document.getElementById('formLinkSourceSystem').value;
+            if (!ss) return showToast('请选择关联单所属系统', 'error');
+            if (ss === '其他' && !v('formLinkSourceSystemOther')) return showToast('选「其他」时须填写系统说明', 'error');
+            if (!v('formLinkLocationInfo')) return showToast('请填写修正方式', 'error');
+            const cc = v('formLinkCorrectionCount');
+            if (cc && !/^[1-9]\d{0,8}$/.test(cc)) return showToast('修正条数须为正整数（1-999999999）', 'error');
+            const payload = {
+                source_system: ss,
+                source_system_other: ss === '其他' ? v('formLinkSourceSystemOther') : undefined,
+                location_info: v('formLinkLocationInfo'),
+                correction_count: cc || undefined
+            };
+            const btn = document.getElementById('btnSubmitLinkNew'); btn.disabled = true;
+            try {
+                const res = await authFetch(`/api/corrections/${masterId}/link-new`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) {
+                    // 后端 409 引导：子单不能追加（LINK_ON_MASTER_ONLY）/ 终态或已通知须作废重建（LINK_NOT_ALLOWED_*）
+                    if (data.code === 'LINK_ON_MASTER_ONLY' && data.master_id) showToast(`关联单只能在主单 #${data.master_id} 上追加`, 'warning', 4500);
+                    else if (data.code === 'LINK_DUPLICATE_SOURCE_SYSTEM') showToast(data.error || '关联组内已有该系统的单，不可重复追加同系统', 'warning', 4500);   // M-2 codex 57
+                    else if (data.code === 'LINK_NOT_ALLOWED_TERMINAL' || data.code === 'LINK_NOT_ALLOWED_NOTIFIED') showToast(data.error || '不可追加关联单，请作废重建', 'warning', 4500);   // codex 56 L-3：业务正常分支用 warning + 透传后端"请作废重建"文案（不前端硬编码）
+                    else showToast(data.error || '追加失败', 'error', 4500);
+                    return;
+                }
+                showToast(`已追加关联单 #${data.id}，请在其详情页指派开发`, 'success', 4500);
+                closeModal('linkNewModal');
+                await loadList(); openDrawer(masterId);
+            } catch (e) { showToast('追加失败', 'error'); } finally { btn.disabled = false; }
         }
 
         // ================= 通知发送 / 查已读（5 类统一 dev/relay/estimate/done/creator，§2.4/§2.5/§2.6）=================

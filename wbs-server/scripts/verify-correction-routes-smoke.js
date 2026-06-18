@@ -95,12 +95,13 @@ async function expectReject(fn, code, label) {
   // ④ router stack 断言（codex rec：18 端点精确注册 + 路径/method 正确，验证 app.use 挂载等价）
   const reg = mod.router.stack.filter(l => l.route)
     .map(l => l.route.path + '[' + Object.keys(l.route.methods).filter(m => l.route.methods[m]).join(',') + ']');
-  ok(reg.length === 20, '④ router 注册 20 端点（实际 ' + reg.length + '）（细优② notify-creator + L-R reassign）');
+  ok(reg.length === 21, '④ router 注册 21 端点（实际 ' + reg.length + '）（notify-creator + L-R reassign + L4 link-new）');
   ok(reg.includes('/[post]') && reg.includes('/[get]'), '④ 建单 POST / + 列表 GET / 注册');
   ok(reg.includes('/:id/assign[post]') && reg.includes('/:id/create-chat[post]') && reg.includes('/:id/notify-read-status[get]'),
     '④ 关键端点（assign/create-chat/notify-read-status）路径+method 精确');
   ok(reg.includes('/:id/notify-creator[post]'), '④ 细优② notify-creator 端点注册（POST）');
   ok(reg.includes('/:id/reassign[post]'), '④ L-R 改派 reassign 端点注册（POST）');
+  ok(reg.includes('/:id/link-new[post]'), '④ L4 追加关联单 link-new 端点注册（POST）');
 
   console.log('\n✅ J1 自验通过：' + pass + ' 项断言全绿 —— 真实导出可 require + 注入测试 db，RC-L2 根治可行');
   db.close();

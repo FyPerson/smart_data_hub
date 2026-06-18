@@ -1012,6 +1012,28 @@ router.post('/', authenticateToken, requireCorrectionSchemaReady, requireAdmin, 
             return res.status(400).json({ error: '不能同时直接指派开发和指定对接人（路径 A/B 二选一）', code: 'ASSIGN_AND_RELAY_CONFLICT' });
         }
 
+        // L4（§6.1 契约 B / D-3）：跨系统建单 cross_system=true + system2{...} —— 一次建两单（系统1主单 + 系统2子单），
+        //   **禁建单时直接指派/对接人**（两单 PENDING_ASSIGN，admin 之后在详情页各自指派，避嵌套事务/嵌套 BEGIN IMMEDIATE）。
+        //   契约 A（单系统，cross_system 非 true）完全不受影响——下方 Path A/B 与 INSERT 路径零改动。
+        const crossSystem = b.cross_system === true;
+        let system2 = null;
+        if (crossSystem) {
+            if (hasAssign || hasRelay) {
+                return res.status(400).json({ error: '跨系统建单不支持建单时直接指派/指定对接人（两单建好后在详情页各自指派）', code: 'CROSS_SYSTEM_NO_DIRECT_ASSIGN' });
+            }
+            const s2 = normalizeLinkedSystem(b.system2);
+            if (!s2.ok) return res.status(400).json({ error: s2.error, code: s2.code });
+            // M-2（codex 57）：跨系统组内系统须互异——system2 与系统1 相同则"系统1/系统2"展示失义、违背"一诉求跨两系统"语义。
+            //   "其他"按 source_system_other 细分比较（避免误拒两个不同的"其他"子系统）。
+            if (isSameCorrectionSystem(s2.sourceSystem, s2.sourceSystemOther, sourceSystem, sourceSystemOther)) {
+                return res.status(400).json({ error: '跨系统的系统2 不能与系统1 相同，请选择不同系统', code: 'CROSS_SYSTEM_SAME_SYSTEM' });
+            }
+            system2 = s2;
+        } else if (b.system2 !== undefined && b.system2 !== null) {
+            // L-3（codex 55）：传了 system2 却没开启 cross_system（flag 畸形/字符串 'true'/1）→ 显式拒，避免静默建成单系统单忽略 system2。
+            return res.status(400).json({ error: '提供了 system2 但未开启跨系统建单（cross_system 须为 true）', code: 'CROSS_SYSTEM_FLAG_REQUIRED' });
+        }
+
         // 选填（2026-06-15 复审：删除 source_table——表名只有开发知道且可能涉及多表，不在受理建单环节录）
         const reasonText = (typeof b.reason === 'string' && b.reason.trim()) ? b.reason.trim() : null;
         const oaNumber = (typeof b.oa_number === 'string' && b.oa_number.trim()) ? b.oa_number.trim() : null;
@@ -1067,6 +1089,7 @@ router.post('/', authenticateToken, requireCorrectionSchemaReady, requireAdmin, 
 
         // INSERT 主表（PENDING_ASSIGN）+ history 首行（NULL→PENDING_ASSIGN）同事务（对齐 issue C3 POST 范式）
         let newId;
+        let childIds = [];   // L4：跨系统建单产生的系统2子单 id（契约 A 时恒空）
         await dbRunAsync('BEGIN IMMEDIATE');
         try {
             const result = await dbRunAsync(
@@ -1087,6 +1110,14 @@ router.post('/', authenticateToken, requireCorrectionSchemaReady, requireAdmin, 
             );
             // L2（§5.2 / §6.1 契约 A）：业务方写子表（完成通知真相源）；主表 requester_name/phone 已写主业务方兼容冗余。
             await writeCorrectionRequesters(newId, cleanedRequesters);
+            // L4（§6.1 契约 B）：跨系统 → 同事务回填主单 group_id=id（不变量：主单 group_id=自身）+ 建系统2子单（组键=主单 id）。
+            //   子单复制主业务方到兼容列、不写子表（见 insertLinkedChildCorrection）；继承主单公共字段（reason/oa/类型/截止）。
+            if (crossSystem) {
+                await dbRunAsync('UPDATE correction_requests SET correction_group_id = ? WHERE id = ?', [newId, newId]);
+                const common = { reason: reasonText, oaNumber, correctionType, requesterDept, expectedDeadline, createdBy, createdByName };
+                const childId = await insertLinkedChildCorrection(system2, common, primaryRequester, newId, '信息技术部建单·跨系统关联单（系统2）');
+                childIds.push(childId);
+            }
             await dbRunAsync('COMMIT');
         } catch (txErr) {
             try { await dbRunAsync('ROLLBACK'); } catch (_) {}
@@ -1107,17 +1138,88 @@ router.post('/', authenticateToken, requireCorrectionSchemaReady, requireAdmin, 
         //   relay_notify_status 保持 not_sent，admin 在详情页手动点「通知对接人」按钮触发 POST /:id/notify-relay。
 
         logger.info(`用户 ${req.user.username} 建数据修正单 #${newId}（${correctionType}/${sourceSystem}）` +
-            `${assigned ? ' + 直接指派' : ''}${relayUserId ? ' + 路径B对接人(待手动通知)' : ''}`);
+            `${assigned ? ' + 直接指派' : ''}${relayUserId ? ' + 路径B对接人(待手动通知)' : ''}` +
+            `${crossSystem ? ` + 跨系统关联单 #${childIds.join(',')}（${system2.sourceSystem}）` : ''}`);
         // I1：建单不再自动发通知，relay_notify_sent 字段移除；通知开发/对接人改详情页手动按钮 + 查已读
         res.json({
             id: newId,
-            status: assigned ? 'ASSIGNED_PENDING_ESTIMATE' : 'PENDING_ASSIGN'
+            status: assigned ? 'ASSIGNED_PENDING_ESTIMATE' : 'PENDING_ASSIGN',
+            ...(crossSystem ? { cross_system: true, master_id: newId, child_ids: childIds } : {})   // L4：跨系统返主单+子单 id，供前端把 error_proof 只传锚点单
         });
     } catch (err) {
         if (err instanceof CorrectionTransitionError) {
             return res.status(err.httpStatus).json({ error: err.message, code: err.code });
         }
         logger.error('建数据修正单失败:', err.message);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ── POST /api/corrections/:id/link-new 追加关联单（§6.2 / D-9；admin）────────────────────────────
+//   晚发现同一诉求还需在第三系统改时，在主单上追加一张关联单（避免作废重建）。
+//   先 resolveCorrectionGroupAnchor：子单 → 409 LINK_ON_MASTER_ONLY（必须在主单上追加）；无组 → 源单升主单（group_id=id 满足不变量）；已主单 → 向组追加。
+//   状态收窄（§6.2）：主单非 VOIDED/REJECTED/ARCHIVED 且组内无任一业务方已 sent 完成通知（否则 409 引导作废重建——需求已部分达成不应再扩组）。
+//   新单 PENDING_ASSIGN + 组键=主单 + 复制主业务方到兼容列 + 不写子表（同契约 B 子单，复用 insertLinkedChildCorrection）。
+router.post('/:id/link-new', authenticateToken, requireCorrectionSchemaReady, correctionIdGuard, requireAdmin, async (req, res) => {
+    const id = Number(req.params.id);
+    try {
+        // 结构性守卫优先（子单 409 先于字段校验，否则非法 system 字段会抢先报 400 掩盖"不能在子单上追加"）。
+        const anchor = await resolveCorrectionGroupAnchor(id);
+        if (!anchor) return res.status(404).json({ error: '修正单不存在' });
+        if (!anchor.is_master) {
+            return res.status(409).json({ error: '关联单只能在主单上追加', code: 'LINK_ON_MASTER_ONLY', master_id: anchor.master_id });
+        }
+        const s = normalizeLinkedSystem(req.body || {});   // 追加单系统字段直接取 body（source_system/source_system_other/location_info/correction_count）
+        if (!s.ok) return res.status(400).json({ error: s.error, code: s.code });
+        // 主业务方（复制到新子单兼容列；锚点 requesters 已 is_primary 优先排序）
+        const primary = (anchor.requesters || []).find(r => Number(r.is_primary) === 1) || (anchor.requesters || [])[0];
+        if (!primary) return res.status(409).json({ error: '主单无业务方记录，无法追加关联单', code: 'MASTER_NO_REQUESTER' });
+
+        const actor = correctionActor(req);
+        const masterId = anchor.master_id;
+        let newId;
+        await dbRunAsync('BEGIN IMMEDIATE');
+        try {
+            // 事务内重读主单真实 status + group_id + 继承公共字段（含 created_by，不信缓存/客户端）
+            const master = await dbGetAsync('SELECT id, status, correction_group_id, reason, oa_number, correction_type, requester_dept, expected_deadline, created_by, created_by_name FROM correction_requests WHERE id = ?', [masterId]);
+            if (!master) { await dbRunAsync('ROLLBACK'); return res.status(404).json({ error: '主单不存在' }); }
+            // 状态收窄（§6.2）：**终态限制仅针对主单**——子单 VOIDED/REJECTED 的终态语义归 notify-done 组闸门处理（阻塞完成通知），link-new 不重复查组成员（L-1 codex 55）。
+            if (['VOIDED', 'REJECTED', 'ARCHIVED'].includes(master.status)) {
+                await dbRunAsync('ROLLBACK');
+                return res.status(409).json({ error: `主单当前状态「${master.status}」不可追加关联单，请作废重建`, code: 'LINK_NOT_ALLOWED_TERMINAL' });
+            }
+            // 组内任一业务方已 sent 完成通知 → 不可追加（需求已部分达成，追加会打乱组闸门语义，引导作废重建）
+            const sentRow = await dbGetAsync("SELECT COUNT(*) c FROM correction_requesters WHERE correction_request_id = ? AND completion_notify_status = 'sent'", [masterId]);
+            if (sentRow && sentRow.c > 0) {
+                await dbRunAsync('ROLLBACK');
+                return res.status(409).json({ error: '已有业务方收到完成通知，不可再追加关联单，请作废重建', code: 'LINK_NOT_ALLOWED_NOTIFIED' });
+            }
+            // M-2（codex 57）：组内系统须互异——追加系统已存在于组内（含"其他"细分相同）则拒，引导改在已有单上修，避免"系统1/系统2"展示失义。
+            //   组成员 = correction_group_id=masterId（已建组）或 id=masterId（无组单自身，升主单前查到自己）。
+            const groupSys = await dbAllAsync('SELECT source_system, source_system_other FROM correction_requests WHERE correction_group_id = ? OR id = ?', [masterId, masterId]);
+            if (groupSys.some(g => isSameCorrectionSystem(g.source_system, g.source_system_other, s.sourceSystem, s.sourceSystemOther))) {
+                await dbRunAsync('ROLLBACK');
+                // codex 58 L：文案 displayName 与前端组区显示口径一致（"其他"显补充说明，否则只显"其他"无法区分）
+                const dupName = s.sourceSystem === '其他' ? (s.sourceSystemOther || '其他') : s.sourceSystem;
+                return res.status(409).json({ error: `关联组内已有「${dupName}」系统的单，不可重复追加同系统`, code: 'LINK_DUPLICATE_SOURCE_SYSTEM' });
+            }
+            // 无组 → 源单升主单（group_id=id，满足锚点不变量：组内必有一条 group_id=id 的主单）
+            if (master.correction_group_id == null) {
+                await dbRunAsync('UPDATE correction_requests SET correction_group_id = ? WHERE id = ?', [masterId, masterId]);
+            }
+            // M-2（codex 55）：追加子单 created_by 继承主单建单人（组成员同主、原诉求视角可见一致）；实际追加操作人记 history operator。
+            const common = { reason: master.reason, oaNumber: master.oa_number, correctionType: master.correction_type, requesterDept: master.requester_dept, expectedDeadline: master.expected_deadline, createdBy: master.created_by, createdByName: master.created_by_name };
+            newId = await insertLinkedChildCorrection(s, common, { name: primary.requester_name, phone: primary.requester_phone }, masterId, '信息技术部追加关联单', { id: actor.id, name: actor.name });
+            await dbRunAsync('COMMIT');
+        } catch (txErr) {
+            try { await dbRunAsync('ROLLBACK'); } catch (_) {}
+            throw txErr;
+        }
+        logger.info(`用户 ${actor.name} 在主单 #${masterId} 追加关联单 #${newId}（${s.sourceSystem}）`);
+        const after = await resolveCorrectionGroupAnchor(masterId);
+        res.json({ id: newId, master_id: masterId, group_members: after ? after.group_members : [] });
+    } catch (err) {
+        logger.error('追加关联单失败:', err.message);
         res.status(500).json({ error: err.message });
     }
 });
@@ -1499,6 +1601,61 @@ async function writeCorrectionRequesters(rid, cleaned) {
         );
     }
 }
+// M-2（codex 57）：判定两个"系统"是否相同——source_system 相同 且（非"其他" 或 source_system_other 相同）。
+//   用于跨系统组内系统互异校验（建单 system2≠系统1 / link-new 组内不重复）；"其他"按补充说明细分，避免误拒两个不同的"其他"子系统。
+function isSameCorrectionSystem(sysA, otherA, sysB, otherB) {
+    if (sysA !== sysB) return false;
+    if (sysA !== '其他') return true;
+    return (otherA || '').trim() === (otherB || '').trim();
+}
+// L4（§6.1 契约 B / §6.2 link-new 复用）：规范化「关联单的系统字段」（跨系统 system2 / 追加单 body）——
+//   镜像建单 system1 内联校验：source_system 白名单 + 「其他」必填补充 + location_info 必填 + correction_count 可空正整数。
+//   ⚠️ 与建单 system1 校验（端点 966）+ 前端 submitCorrection 同步；correction_count 正则同口径 /^[1-9]\d{0,8}$/。
+function normalizeLinkedSystem(raw) {
+    const r = (raw && typeof raw === 'object') ? raw : {};
+    const sourceSystem = (typeof r.source_system === 'string' ? r.source_system.trim() : '');
+    if (!CORRECTION_SOURCE_SYSTEMS.includes(sourceSystem)) {
+        return { ok: false, error: '关联单所属系统非法', code: 'INVALID_LINKED_SOURCE_SYSTEM' };
+    }
+    const sourceSystemOther = (typeof r.source_system_other === 'string' ? r.source_system_other.trim() : '');
+    if (sourceSystem === '其他' && !sourceSystemOther) {
+        return { ok: false, error: '关联单所属系统选「其他」时必须填写补充说明', code: 'LINKED_SOURCE_SYSTEM_OTHER_REQUIRED' };
+    }
+    const locationInfo = (typeof r.location_info === 'string' ? r.location_info.trim() : '');
+    if (!locationInfo) return { ok: false, error: '关联单缺少必填字段：location_info（修正方式）', code: 'LINKED_MISSING_LOCATION_INFO' };
+    let correctionCount = null;
+    if (r.correction_count !== undefined && r.correction_count !== null && String(r.correction_count).trim() !== '') {
+        const cc = String(r.correction_count).trim();
+        if (!/^[1-9]\d{0,8}$/.test(cc)) return { ok: false, error: '关联单修正条数须为正整数（1-999999999）', code: 'INVALID_LINKED_CORRECTION_COUNT' };
+        correctionCount = Number(cc);
+    }
+    return { ok: true, sourceSystem, sourceSystemOther, locationInfo, correctionCount };
+}
+// L4：在 BEGIN IMMEDIATE 事务内插入「关联子单」（跨系统 system2 / link-new 追加单）——PENDING_ASSIGN + 组键=masterId +
+//   复制主业务方 name/phone 到主表兼容列（requester_name NOT NULL 由主业务方名必填保证；phone NULLABLE，空照旧 NULL，M-3 codex 55）
+//   + history；**子单不写 correction_requesters**（完成通知/已读只读主单子表，子单 notify-done/error_proof 走 409 引导主单）
+//   + 不带 assigned_to/relay/error_proof_note。调用方负责：事务边界 + 主单 group_id=id 回填 + writeCorrectionRequesters(master)。
+//   单 created_by 取 common（继承诉求建单人，组成员同主，M-2 codex 55）；history operator 取 operator（实际操作人，缺省=common）。返回 childId。
+async function insertLinkedChildCorrection(sys, common, primaryReq, masterId, historyReason, operator) {
+    const op = operator || { id: common.createdBy, name: common.createdByName };
+    const result = await dbRunAsync(
+        `INSERT INTO correction_requests
+           (source_system, source_system_other, location_info, correction_count,
+            reason, oa_number, correction_type, requester_dept, requester_name, requester_phone,
+            status, expected_deadline, correction_group_id, created_by, created_by_name)
+         VALUES (?,?,?,?,?,?,?,?,?,?, 'PENDING_ASSIGN', ?, ?, ?, ?)`,
+        [sys.sourceSystem, sys.sourceSystem === '其他' ? sys.sourceSystemOther : null, sys.locationInfo, sys.correctionCount,
+         common.reason, common.oaNumber, common.correctionType, common.requesterDept, primaryReq.name, primaryReq.phone,
+         common.expectedDeadline, masterId, common.createdBy, common.createdByName]
+    );
+    const childId = result.lastID;
+    await dbRunAsync(
+        `INSERT INTO correction_status_history (correction_request_id, from_status, to_status, reason, operator_id, operator_name)
+         VALUES (?, NULL, 'PENDING_ASSIGN', ?, ?, ?)`,
+        [childId, historyReason, op.id, op.name]
+    );
+    return childId;
+}
 // 业务方锚点解析（§6.0）：统一主子判断。无组单 master=自身；有组单 master=correction_group_id。
 //   返回 group_members（含状态，供组闸门）+ requesters（只在 master 上的子表行，is_primary 优先排序）。
 //   详情 / notify-done / read-status(done) / 追加 / error_proof 上传统一先调此 helper 再做主子/归属判断。
@@ -1511,9 +1668,11 @@ async function resolveCorrectionGroupAnchor(correctionId) {
     if (!row) return null;
     const masterId = (row.correction_group_id == null) ? Number(row.id) : Number(row.correction_group_id);
     const isMaster = (masterId === Number(row.id));
+    // L5（§7.2）：group_members 加 assigned_to_name（已反规范化列）+ source_system_other（L-1 codex 57，"其他"系统组区可辨），
+    //   供前端关联组区显示各系统单的开发 / 系统名；notify-done 组闸门等复用处只多读无害列、逻辑零影响（组闸门只看 status/closure_type）。
     const groupMembers = (row.correction_group_id == null)
-        ? await dbAllAsync('SELECT id, status, closure_type, source_system FROM correction_requests WHERE id = ?', [masterId])
-        : await dbAllAsync('SELECT id, status, closure_type, source_system FROM correction_requests WHERE correction_group_id = ?', [masterId]);
+        ? await dbAllAsync('SELECT id, status, closure_type, source_system, source_system_other, assigned_to_name FROM correction_requests WHERE id = ?', [masterId])
+        : await dbAllAsync('SELECT id, status, closure_type, source_system, source_system_other, assigned_to_name FROM correction_requests WHERE correction_group_id = ? ORDER BY (id = ?) DESC, id', [masterId, masterId]);
     const requesters = await dbAllAsync(
         'SELECT * FROM correction_requesters WHERE correction_request_id = ? ORDER BY is_primary DESC, seq', [masterId]);
     return { this_id: Number(row.id), master_id: masterId, is_master: isMaster, group_members: groupMembers, requesters };
