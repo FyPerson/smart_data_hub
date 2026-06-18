@@ -731,6 +731,7 @@ async function correctionTransition(requestId, expectedFromStatus, toStatus, act
                 if (row.correction_type === 'batch') {
                     const note = (typeof payload.batch_completion_note === 'string' ? payload.batch_completion_note.trim() : '');
                     if (!note) throw new CorrectionTransitionError(400, 'BATCH_NOTE_REQUIRED', '批量修正标完成必须填写完成说明');
+                    if (Array.from(note).length < 5) throw new CorrectionTransitionError(400, 'BATCH_NOTE_TOO_SHORT', '批量修正完成说明至少 5 字，请说明实际修正内容（避免「1」「完成」等敷衍）');   // 挡敷衍占位（trim 后按字符数 <5 拒；Array.from 计 code point，emoji/扩展汉字算 1，codex 59 L-1；与前端 submitComplete 同步 5 字口径）
                     if (note.length > 500) throw new CorrectionTransitionError(400, 'COMPLETION_NOTE_TOO_LONG', '完成说明不超过 500 字');   // L-3：对齐 closure_reason 上限
                     setFrags.push('batch_completion_note = ?');
                     setParams.push(note);
@@ -1021,7 +1022,7 @@ router.post('/', authenticateToken, requireCorrectionSchemaReady, requireAdmin, 
             if (hasAssign || hasRelay) {
                 return res.status(400).json({ error: '跨系统建单不支持建单时直接指派/指定对接人（两单建好后在详情页各自指派）', code: 'CROSS_SYSTEM_NO_DIRECT_ASSIGN' });
             }
-            const s2 = normalizeLinkedSystem(b.system2);
+            const s2 = normalizeLinkedSystem(b.system2, correctionType === 'batch');   // 子单继承主单类型：batch 主单 → system2 也 ≥2 必填；single → 恒 1
             if (!s2.ok) return res.status(400).json({ error: s2.error, code: s2.code });
             // M-2（codex 57）：跨系统组内系统须互异——system2 与系统1 相同则"系统1/系统2"展示失义、违背"一诉求跨两系统"语义。
             //   "其他"按 source_system_other 细分比较（避免误拒两个不同的"其他"子系统）。
@@ -1042,13 +1043,17 @@ router.post('/', authenticateToken, requireCorrectionSchemaReady, requireAdmin, 
         //   注（codex 25 RC-L1）：正则拦的是"字符串输入形态"（前端 number input 传的是字符串）；若 API 直传 JSON
         //   数字 5.0/1e3，body parser 已归一为整数 5/1000（JSON 中 5.0≡5），属合法整数值，放行无害。
         //   ⚠️ 此正则须与前端 Data_Correction.html submitCorrection 同步。
-        let correctionCount = null;
-        if (b.correction_count !== undefined && b.correction_count !== null && String(b.correction_count).trim() !== '') {
-            const raw = String(b.correction_count).trim();
-            if (!/^[1-9]\d{0,8}$/.test(raw)) {
-                return res.status(400).json({ error: '修正条数须为正整数（1-999999999）', code: 'INVALID_CORRECTION_COUNT' });
-            }
+        // 修正条数按类型分流（用户优化 2026-06-18）：single=单数据修正语义恒 1 → 强制 correctionCount=1（忽略前端传值，
+        //   后端真闸门防直接调 API 传 correction_type=single + correction_count=99 绕过）；batch=批量 → 必填 + ≥2（仅 1 条应改用 single）。
+        let correctionCount;
+        if (correctionType === 'single') {
+            correctionCount = 1;
+        } else {
+            const raw = (b.correction_count !== undefined && b.correction_count !== null) ? String(b.correction_count).trim() : '';
+            if (!raw) return res.status(400).json({ error: '批量数据修正必须填写修正条数', code: 'CORRECTION_COUNT_REQUIRED' });
+            if (!/^[1-9]\d{0,8}$/.test(raw)) return res.status(400).json({ error: '修正条数须为正整数（1-999999999）', code: 'INVALID_CORRECTION_COUNT' });
             correctionCount = Number(raw);
+            if (correctionCount < 2) return res.status(400).json({ error: '批量数据修正的修正条数须 ≥2（仅 1 条请改用单数据修正）', code: 'BATCH_COUNT_MIN' });
         }
         const requesterDept = (typeof b.requester_dept === 'string' && b.requester_dept.trim()) ? b.requester_dept.trim() : null;
         const requesterPhone = primaryRequester.phone;   // 主业务方手机号 → 主表兼容冗余（L2：取自 cleanedRequesters[0]，不再单读 b.requester_phone）
@@ -1169,7 +1174,10 @@ router.post('/:id/link-new', authenticateToken, requireCorrectionSchemaReady, co
         if (!anchor.is_master) {
             return res.status(409).json({ error: '关联单只能在主单上追加', code: 'LINK_ON_MASTER_ONLY', master_id: anchor.master_id });
         }
-        const s = normalizeLinkedSystem(req.body || {});   // 追加单系统字段直接取 body（source_system/source_system_other/location_info/correction_count）
+        // 追加单 correction_type 继承主单。correction_type 建单后不可变（全代码无 UPDATE correction_type 路径），
+        //   故事务前读仅用于 correction_count 校验口径（batch→≥2 必填 / single→恒 1），与事务内重读 master（取 common 字段）无竞态（L-1 codex 60）。
+        const masterTypeRow = await dbGetAsync('SELECT correction_type FROM correction_requests WHERE id = ?', [anchor.master_id]);
+        const s = normalizeLinkedSystem(req.body || {}, masterTypeRow && masterTypeRow.correction_type === 'batch');   // 追加单系统字段直接取 body
         if (!s.ok) return res.status(400).json({ error: s.error, code: s.code });
         // 主业务方（复制到新子单兼容列；锚点 requesters 已 is_primary 优先排序）
         const primary = (anchor.requesters || []).find(r => Number(r.is_primary) === 1) || (anchor.requesters || [])[0];
@@ -1609,9 +1617,10 @@ function isSameCorrectionSystem(sysA, otherA, sysB, otherB) {
     return (otherA || '').trim() === (otherB || '').trim();
 }
 // L4（§6.1 契约 B / §6.2 link-new 复用）：规范化「关联单的系统字段」（跨系统 system2 / 追加单 body）——
-//   镜像建单 system1 内联校验：source_system 白名单 + 「其他」必填补充 + location_info 必填 + correction_count 可空正整数。
+//   镜像建单 system1 内联校验：source_system 白名单 + 「其他」必填补充 + location_info 必填 + correction_count 按主单类型分流。
 //   ⚠️ 与建单 system1 校验（端点 966）+ 前端 submitCorrection 同步；correction_count 正则同口径 /^[1-9]\d{0,8}$/。
-function normalizeLinkedSystem(raw) {
+//   isBatch（用户优化 2026-06-18）：子单 correction_type 继承主单——single 主单→子单恒 1；batch 主单→子单必填 ≥2（与建单 system1 同口径）。
+function normalizeLinkedSystem(raw, isBatch) {
     const r = (raw && typeof raw === 'object') ? raw : {};
     const sourceSystem = (typeof r.source_system === 'string' ? r.source_system.trim() : '');
     if (!CORRECTION_SOURCE_SYSTEMS.includes(sourceSystem)) {
@@ -1623,11 +1632,15 @@ function normalizeLinkedSystem(raw) {
     }
     const locationInfo = (typeof r.location_info === 'string' ? r.location_info.trim() : '');
     if (!locationInfo) return { ok: false, error: '关联单缺少必填字段：location_info（修正方式）', code: 'LINKED_MISSING_LOCATION_INFO' };
-    let correctionCount = null;
-    if (r.correction_count !== undefined && r.correction_count !== null && String(r.correction_count).trim() !== '') {
-        const cc = String(r.correction_count).trim();
+    let correctionCount;
+    if (!isBatch) {
+        correctionCount = 1;   // single 主单的关联子单恒 1（忽略传值，与主单 single 同口径）
+    } else {
+        const cc = (r.correction_count !== undefined && r.correction_count !== null) ? String(r.correction_count).trim() : '';
+        if (!cc) return { ok: false, error: '批量关联单必须填写修正条数', code: 'LINKED_CORRECTION_COUNT_REQUIRED' };
         if (!/^[1-9]\d{0,8}$/.test(cc)) return { ok: false, error: '关联单修正条数须为正整数（1-999999999）', code: 'INVALID_LINKED_CORRECTION_COUNT' };
         correctionCount = Number(cc);
+        if (correctionCount < 2) return { ok: false, error: '批量关联单修正条数须 ≥2', code: 'LINKED_BATCH_COUNT_MIN' };
     }
     return { ok: true, sourceSystem, sourceSystemOther, locationInfo, correctionCount };
 }

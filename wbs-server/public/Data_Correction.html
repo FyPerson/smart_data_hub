@@ -312,8 +312,8 @@
                 <div class="form-group">
                     <label>修正类型 <span class="req">*</span></label>
                     <div class="radio-row">
-                        <label><input type="radio" name="corrType" value="single" checked> 单数据修正（标完成需传结果证明截图）</label>
-                        <label><input type="radio" name="corrType" value="batch"> 批量数据修正（标完成填文字说明）</label>
+                        <label><input type="radio" name="corrType" value="single" checked onchange="toggleCorrectionCountByType()"> 单数据修正（标完成需传结果证明截图）</label>
+                        <label><input type="radio" name="corrType" value="batch" onchange="toggleCorrectionCountByType()"> 批量数据修正（标完成填文字说明）</label>
                     </div>
                 </div>
                 <div class="form-row">
@@ -331,10 +331,11 @@
                     <textarea id="formLocationInfo" rows="3" placeholder="一句话写清：哪里的什么数据错了，要改成什么。如：合同表 C2024-001 的金额字段当前显示 100，应改为 120"></textarea>
                     <div class="hint">合并原"错误描述 + 期望值"——把"错在哪 + 要改成什么"写在一起。</div>
                 </div>
-                <div class="form-group">
-                    <label>修正条数</label>
-                    <input type="number" id="formCorrectionCount" min="1" step="1" placeholder="可选，本次修正涉及的记录条数">
-                    <div class="hint">纯记账字段，可不填；填则须为正整数（单修正通常 1，批量填 N）。</div>
+                <!-- 修正条数按类型分流（用户优化）：single 隐藏（系统固定 1）/ batch 显示+必填 ≥2 -->
+                <div class="form-group" id="formCorrectionCountGroup" style="display:none;">
+                    <label>修正条数 <span class="req">*</span></label>
+                    <input type="number" id="formCorrectionCount" min="2" step="1" placeholder="批量数据修正必填，且须 ≥2">
+                    <div class="hint">批量数据修正必填，须 ≥2（仅 1 条请改用单数据修正）；单数据修正系统固定为 1，无需填写。</div>
                 </div>
                 <!-- L5 跨系统关联（§7.1 / 契约 B）：勾上展开系统2 字段（不含开发2、不含独立业务方——业务方共享主单）；勾上隐藏指派方式区（禁建单时直派） -->
                 <div class="form-group" style="margin-bottom:8px;">
@@ -359,9 +360,9 @@
                         <label>修正方式 <span class="req">*</span></label>
                         <textarea id="formLocationInfo2" rows="3" placeholder="系统2 的：哪里的什么数据错了，要改成什么"></textarea>
                     </div>
-                    <div class="form-group" style="margin-bottom:0;">
-                        <label>修正条数</label>
-                        <input type="number" id="formCorrectionCount2" min="1" step="1" placeholder="可选，正整数">
+                    <div class="form-group" id="formCorrectionCount2Group" style="margin-bottom:0; display:none;">
+                        <label>修正条数 <span class="req">*</span></label>
+                        <input type="number" id="formCorrectionCount2" min="2" step="1" placeholder="批量必填，≥2">
                     </div>
                 </div>
                 <div class="form-group"><label>原因/背景</label><textarea id="formReason" rows="2" placeholder="可选，错误产生原因或修正背景"></textarea></div>
@@ -441,9 +442,9 @@
                     <label>修正方式 <span class="req">*</span></label>
                     <textarea id="formLinkLocationInfo" rows="3" placeholder="关联单的：哪里的什么数据错了，要改成什么"></textarea>
                 </div>
-                <div class="form-group" style="margin-bottom:0;">
-                    <label>修正条数</label>
-                    <input type="number" id="formLinkCorrectionCount" min="1" step="1" placeholder="可选，正整数">
+                <div class="form-group" id="formLinkCorrectionCountGroup" style="margin-bottom:0; display:none;">
+                    <label>修正条数 <span class="req">*</span></label>
+                    <input type="number" id="formLinkCorrectionCount" min="2" step="1" placeholder="批量必填，≥2（继承主单类型；single 主单无需填）">
                 </div>
             </div>
             <div class="modal-footer"><button class="btn-secondary" onclick="closeModal('linkNewModal')">取消</button><button class="btn-primary" id="btnSubmitLinkNew" onclick="submitLinkNew()">追加</button></div>
@@ -463,8 +464,8 @@
                     <textarea id="formCompleteSingleNote" rows="3" maxlength="500" placeholder="如：原值因业务方口径调整改为 X，已同步知会财务"></textarea>
                 </div>
                 <div class="form-group" id="completeBatchGroup" style="display:none;">
-                    <label>完成说明 <span class="req">*</span>（批量数据修正必填）</label>
-                    <textarea id="formBatchNote" rows="3" maxlength="500" placeholder="如：批量更新 30 条客户编号映射"></textarea>
+                    <label>完成说明 <span class="req">*</span>（批量数据修正必填，至少 5 字）</label>
+                    <textarea id="formBatchNote" rows="3" maxlength="500" placeholder="请说明实际修正了什么，如：已批量更新 183 人社保基数 / 修正 30 条客户编号映射"></textarea>
                     <div style="font-size:11px; color:#9ca3af; margin-top:2px;">批量可选附结果证明（可不传）</div>
                     <input type="file" id="formCompleteBatchFiles" multiple accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.pdf,.xlsx,.xls" style="margin-top:6px;">
                 </div>
@@ -1051,7 +1052,7 @@
             document.getElementById('formCrossSystem').checked = false;   // L5 重置跨系统开关
             document.getElementById('formSourceSystem2').value = '';
             resetRequesterList();
-            toggleSourceOther(); toggleAssignMode(); toggleCrossSystem(); toggleSourceOther2();   // L5 跨系统/系统2 联动复位
+            toggleSourceOther(); toggleAssignMode(); toggleCrossSystem(); toggleSourceOther2(); toggleCorrectionCountByType();   // L5 跨系统/系统2 联动复位 + 修正条数按类型显隐
             document.getElementById('createModal').classList.add('open');
         }
         function closeCreateModal() { document.getElementById('createModal').classList.remove('open'); }
@@ -1119,6 +1120,13 @@
                 toggleAssignMode();   // 取消跨系统时按当前 assignMode 恢复显示 A/B 子区
             }
         }
+        // 修正条数按类型联动（用户优化）：single 隐藏修正条数（系统固定 1）/ batch 显示+必填 ≥2；系统2 同随（父级跨系统开关另控显隐）
+        function toggleCorrectionCountByType() {
+            const isBatch = document.querySelector('input[name="corrType"]:checked').value === 'batch';
+            document.getElementById('formCorrectionCountGroup').style.display = isBatch ? 'block' : 'none';
+            document.getElementById('formCorrectionCount2Group').style.display = isBatch ? 'block' : 'none';
+            if (!isBatch) { document.getElementById('formCorrectionCount').value = ''; document.getElementById('formCorrectionCount2').value = ''; }   // L-2 codex 60：切 single 清空隐藏修正条数字段，避免残留
+        }
 
         async function submitCorrection() {
             const v = id => document.getElementById(id).value.trim();
@@ -1134,14 +1142,21 @@
             if (!reqRows[0] || !reqRows[0].querySelector('.rq-name').value.trim()) return showToast('请填写主业务方姓名（第一行）', 'error');
             const requesters = collectRequesters();
             if (requesters.length === 0) return showToast('请至少填写一个业务方姓名（主业务方）', 'error');
-            const correctionCountRaw = v('formCorrectionCount');
-            if (correctionCountRaw && !/^[1-9]\d{0,8}$/.test(correctionCountRaw)) return showToast('修正条数须为正整数（1-999999999）', 'error');
+            // 修正条数分流（用户优化）：single 不传（后端强制 1）/ batch 必填 ≥2
+            let correctionCountVal;
+            if (correctionType === 'batch') {
+                const raw = v('formCorrectionCount');
+                if (!raw) return showToast('批量数据修正必须填写修正条数', 'error');
+                if (!/^[1-9]\d{0,8}$/.test(raw)) return showToast('修正条数须为正整数（1-999999999）', 'error');
+                if (Number(raw) < 2) return showToast('批量数据修正的修正条数须 ≥2（仅 1 条请改用单数据修正）', 'error');
+                correctionCountVal = raw;
+            }
             const payload = {
                 source_system: sourceSystem,
                 source_system_other: sourceSystem === '其他' ? v('formSourceSystemOther') : undefined,
                 correction_type: correctionType,
                 location_info: v('formLocationInfo'),
-                correction_count: correctionCountRaw || undefined,
+                correction_count: correctionCountVal,   // single=undefined（后端强制 1）/ batch=raw（≥2）
                 oa_number: v('formOaNumber') || undefined,
                 reason: v('formReason') || undefined,
                 requester_dept: document.getElementById('formRequesterDept').value || undefined,
@@ -1156,8 +1171,15 @@
                 if (!ss2) return showToast('跨系统：请选择系统2 所属系统', 'error');
                 if (ss2 === '其他' && !v('formSourceSystemOther2')) return showToast('系统2 选「其他」时须填写系统说明', 'error');
                 if (!v('formLocationInfo2')) return showToast('请填写系统2 的修正方式', 'error');
-                const cc2 = v('formCorrectionCount2');
-                if (cc2 && !/^[1-9]\d{0,8}$/.test(cc2)) return showToast('系统2 修正条数须为正整数（1-999999999）', 'error');
+                // 系统2 修正条数分流（用户优化）：跨系统继承主单类型——batch 必填 ≥2 / single 不传（后端强制 1）
+                let cc2Val;
+                if (correctionType === 'batch') {
+                    const cc2 = v('formCorrectionCount2');
+                    if (!cc2) return showToast('批量数据修正：系统2 必须填写修正条数', 'error');
+                    if (!/^[1-9]\d{0,8}$/.test(cc2)) return showToast('系统2 修正条数须为正整数（1-999999999）', 'error');
+                    if (Number(cc2) < 2) return showToast('批量数据修正：系统2 修正条数须 ≥2', 'error');
+                    cc2Val = cc2;
+                }
                 // M-2 codex 57：系统2 不能与系统1 相同（"其他"按补充说明细分）；后端为真闸门(CROSS_SYSTEM_SAME_SYSTEM)，前端早提示
                 if (ss2 === sourceSystem && (sourceSystem !== '其他' || v('formSourceSystemOther2') === v('formSourceSystemOther'))) {
                     return showToast('系统2 不能与系统1 相同，请选择不同系统', 'error');
@@ -1167,7 +1189,7 @@
                     source_system: ss2,
                     source_system_other: ss2 === '其他' ? v('formSourceSystemOther2') : undefined,
                     location_info: v('formLocationInfo2'),
-                    correction_count: cc2 || undefined
+                    correction_count: cc2Val   // single=undefined（后端强制 1）/ batch=cc2（≥2）
                 };
             } else if (assignMode === 'A') {
                 const dev = document.getElementById('formAssignedTo').value;
@@ -1299,6 +1321,7 @@
             if (type === 'batch') {
                 const note = document.getElementById('formBatchNote').value.trim();
                 if (!note) return showToast('批量修正须填写完成说明', 'error');
+                if (Array.from(note).length < 5) return showToast('批量修正完成说明至少 5 字，请说明实际修正内容', 'error');   // 与后端 FIXED 闸门同步 5 字口径（Array.from 按字符数，codex 59 L-1），挡「1」等敷衍
                 fd.append('batch_completion_note', note);
                 const bf = document.getElementById('formCompleteBatchFiles').files;
                 for (const f of bf) fd.append('files', f);
@@ -1419,6 +1442,10 @@
             document.getElementById('linkNewMasterId').value = masterId;
             document.getElementById('formLinkSourceSystem').innerHTML = '<option value="">请选择</option>' + CORRECTION_SOURCE_SYSTEMS.map(s => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join('');
             ['formLinkSourceSystemOther', 'formLinkLocationInfo', 'formLinkCorrectionCount'].forEach(id => document.getElementById(id).value = '');
+            // 追加单继承主单类型（currentDetail=当前主单详情）：batch 显示修正条数+必填 ≥2 / single 隐藏（后端恒 1）
+            const isBatch = !!(currentDetail && Number(currentDetail.id) === Number(masterId) && currentDetail.correction_type === 'batch');
+            document.getElementById('formLinkCorrectionCountGroup').style.display = isBatch ? 'block' : 'none';
+            document.getElementById('linkNewModal').dataset.batch = isBatch ? '1' : '';
             toggleLinkSourceOther();
             document.getElementById('linkNewModal').classList.add('open');
         }
@@ -1433,13 +1460,20 @@
             if (!ss) return showToast('请选择关联单所属系统', 'error');
             if (ss === '其他' && !v('formLinkSourceSystemOther')) return showToast('选「其他」时须填写系统说明', 'error');
             if (!v('formLinkLocationInfo')) return showToast('请填写修正方式', 'error');
-            const cc = v('formLinkCorrectionCount');
-            if (cc && !/^[1-9]\d{0,8}$/.test(cc)) return showToast('修正条数须为正整数（1-999999999）', 'error');
+            // 修正条数分流（用户优化）：继承主单类型——batch 必填 ≥2 / single 不传（后端强制 1）
+            let ccVal;
+            if (document.getElementById('linkNewModal').dataset.batch === '1') {
+                const cc = v('formLinkCorrectionCount');
+                if (!cc) return showToast('批量数据修正：关联单必须填写修正条数', 'error');
+                if (!/^[1-9]\d{0,8}$/.test(cc)) return showToast('修正条数须为正整数（1-999999999）', 'error');
+                if (Number(cc) < 2) return showToast('批量数据修正：关联单修正条数须 ≥2', 'error');
+                ccVal = cc;
+            }
             const payload = {
                 source_system: ss,
                 source_system_other: ss === '其他' ? v('formLinkSourceSystemOther') : undefined,
                 location_info: v('formLinkLocationInfo'),
-                correction_count: cc || undefined
+                correction_count: ccVal   // single=undefined（后端强制 1）/ batch=cc（≥2）
             };
             const btn = document.getElementById('btnSubmitLinkNew'); btn.disabled = true;
             try {
@@ -1449,6 +1483,12 @@
                     // 后端 409 引导：子单不能追加（LINK_ON_MASTER_ONLY）/ 终态或已通知须作废重建（LINK_NOT_ALLOWED_*）
                     if (data.code === 'LINK_ON_MASTER_ONLY' && data.master_id) showToast(`关联单只能在主单 #${data.master_id} 上追加`, 'warning', 4500);
                     else if (data.code === 'LINK_DUPLICATE_SOURCE_SYSTEM') showToast(data.error || '关联组内已有该系统的单，不可重复追加同系统', 'warning', 4500);   // M-2 codex 57
+                    else if (data.code === 'LINKED_CORRECTION_COUNT_REQUIRED' || data.code === 'LINKED_BATCH_COUNT_MIN') {
+                        // M-1 codex 60：前端误判主单类型（currentDetail 缺失/过期 → 漏判 batch）时后端兜底拒，补显修正条数 + 提示补填 ≥2（防字段隐藏却被拒的体验断裂）
+                        document.getElementById('formLinkCorrectionCountGroup').style.display = 'block';
+                        document.getElementById('linkNewModal').dataset.batch = '1';
+                        showToast(data.error || '批量关联单需填写修正条数（≥2），请补填后重试', 'warning', 4500);
+                    }
                     else if (data.code === 'LINK_NOT_ALLOWED_TERMINAL' || data.code === 'LINK_NOT_ALLOWED_NOTIFIED') showToast(data.error || '不可追加关联单，请作废重建', 'warning', 4500);   // codex 56 L-3：业务正常分支用 warning + 透传后端"请作废重建"文案（不前端硬编码）
                     else showToast(data.error || '追加失败', 'error', 4500);
                     return;

@@ -120,7 +120,7 @@ const setStatus = (id, status, ct) => dbRunAsync(`UPDATE correction_requests SET
   ok(Number(mRow.correction_group_id) === masterId, '① 主单 group_id=id（不变量：组内有 group_id=id 的主单）');
   ok(Number(cRow.correction_group_id) === masterId, '① 子单 group_id=master_id');
   ok(mRow.status === 'PENDING_ASSIGN' && cRow.status === 'PENDING_ASSIGN', '① 两单 PENDING_ASSIGN（不带初始指派）');
-  ok(cRow.source_system === 'CRM' && cRow.location_info === '系统2：同字段错' && cRow.correction_count === 3, '① 子单系统字段=system2（CRM/修正方式/条数）');
+  ok(cRow.source_system === 'CRM' && cRow.location_info === '系统2：同字段错' && cRow.correction_count === 1, '① 子单系统字段=system2（CRM/修正方式）+ single 主单→子单 cc 强制 1（传入 3 被忽略，用户优化条数分流）');
   ok(cRow.correction_type === 'single' && cRow.reason === mRow.reason, '① 子单继承主单 correction_type/reason 公共字段');
   ok(cRow.requester_name === '主业务方' && cRow.requester_phone === '13800000001', '② 子单主表 requester_name/phone 复制主业务方（NOT NULL 兼容冗余）');
   ok(cRow.error_proof_note === null, '② 子单不带 error_proof_note（只主单填）');
@@ -245,6 +245,36 @@ const setStatus = (id, status, ct) => dbRunAsync(`UPDATE correction_requests SET
   const okLn = await reqJson('POST', `/api/corrections/${s3.body.id}/link-new`, { source_system: 'CRM', location_info: 'z' }, ADMIN);
   ok(okLn.status === 200 && okLn.body.id, '⑧ M-2：link-new 追加不同系统(CRM) → 放行');
 
-  console.log(`\n=== L4+L5+末次审 跨系统 e2e 通过：${pass} 断言 ===`);
+  // ⑨ 修正条数分流（用户优化 2026-06-18）：single 强制 1 / batch 必填 ≥2（主单 + 跨系统 system2 + link-new）
+  const cc_s = await reqJson('POST', '/api/corrections', { source_system: 'BMS', location_info: 'x', correction_type: 'single', correction_count: 99, requesters: [{ name: '甲', phone: '13700000020' }] }, ADMIN);
+  const cc_sRow = await dbGetAsync('SELECT correction_count FROM correction_requests WHERE id=?', [cc_s.body.id]);
+  ok(cc_s.status === 200 && cc_sRow.correction_count === 1, '⑨ single 传 cc=99 → 后端强制 1（忽略传值，防 API 绕过）');
+  const cc_b0 = await reqJson('POST', '/api/corrections', { source_system: 'BMS', location_info: 'x', correction_type: 'batch', requesters: [{ name: '甲' }] }, ADMIN);
+  ok(cc_b0.status === 400 && cc_b0.body.code === 'CORRECTION_COUNT_REQUIRED', '⑨ batch 不填 cc → 400 CORRECTION_COUNT_REQUIRED');
+  const cc_b1 = await reqJson('POST', '/api/corrections', { source_system: 'BMS', location_info: 'x', correction_type: 'batch', correction_count: 1, requesters: [{ name: '甲' }] }, ADMIN);
+  ok(cc_b1.status === 400 && cc_b1.body.code === 'BATCH_COUNT_MIN', '⑨ batch cc=1 → 400 BATCH_COUNT_MIN（仅 1 条应改 single）');
+  const cc_b2 = await reqJson('POST', '/api/corrections', { source_system: 'BMS', location_info: 'x', correction_type: 'batch', correction_count: 2, requesters: [{ name: '甲' }] }, ADMIN);
+  const cc_b2Row = await dbGetAsync('SELECT correction_count FROM correction_requests WHERE id=?', [cc_b2.body.id]);
+  ok(cc_b2.status === 200 && cc_b2Row.correction_count === 2, '⑨ batch cc=2 → 放行边界 + db=2');
+  // 跨系统 batch：system2 也按 batch ≥2 必填
+  const cc_xs0 = await reqJson('POST', '/api/corrections', { source_system: 'BMS', location_info: 'x', correction_type: 'batch', correction_count: 5, requesters: [{ name: '甲' }], cross_system: true, system2: { source_system: 'CRM', location_info: 'y' } }, ADMIN);
+  ok(cc_xs0.status === 400 && cc_xs0.body.code === 'LINKED_CORRECTION_COUNT_REQUIRED', '⑨ 跨系统 batch system2 不填 cc → 400 LINKED_CORRECTION_COUNT_REQUIRED');
+  const cc_xs1 = await reqJson('POST', '/api/corrections', { source_system: 'BMS', location_info: 'x', correction_type: 'batch', correction_count: 5, requesters: [{ name: '甲' }], cross_system: true, system2: { source_system: 'CRM', location_info: 'y', correction_count: 1 } }, ADMIN);
+  ok(cc_xs1.status === 400 && cc_xs1.body.code === 'LINKED_BATCH_COUNT_MIN', '⑨ 跨系统 batch system2 cc=1 → 400 LINKED_BATCH_COUNT_MIN');
+  const cc_xs = await reqJson('POST', '/api/corrections', { source_system: 'BMS', location_info: 'x', correction_type: 'batch', correction_count: 5, requesters: [{ name: '甲', phone: '13700000021' }], cross_system: true, system2: { source_system: 'CRM', location_info: 'y', correction_count: 3 } }, ADMIN);
+  const cc_xsM = await dbGetAsync('SELECT correction_count FROM correction_requests WHERE id=?', [cc_xs.body.master_id]);
+  const cc_xsC = await dbGetAsync('SELECT correction_count FROM correction_requests WHERE id=?', [cc_xs.body.child_ids[0]]);
+  ok(cc_xs.status === 200 && cc_xsM.correction_count === 5 && cc_xsC.correction_count === 3, '⑨ 跨系统 batch：主单 cc=5 + 子单 cc=3 各自写入');
+  // link-new：继承主单类型
+  const ln_bFail = await reqJson('POST', `/api/corrections/${cc_b2.body.id}/link-new`, { source_system: 'HRD', location_info: 'z' }, ADMIN);   // cc_b2=batch 主单
+  ok(ln_bFail.status === 400 && ln_bFail.body.code === 'LINKED_CORRECTION_COUNT_REQUIRED', '⑨ link-new batch 主单追加不填 cc → 400 LINKED_CORRECTION_COUNT_REQUIRED');
+  const ln_bOk = await reqJson('POST', `/api/corrections/${cc_b2.body.id}/link-new`, { source_system: 'HRD', location_info: 'z', correction_count: 4 }, ADMIN);
+  const ln_bRow = await dbGetAsync('SELECT correction_count FROM correction_requests WHERE id=?', [ln_bOk.body.id]);
+  ok(ln_bOk.status === 200 && ln_bRow.correction_count === 4, '⑨ link-new batch 主单追加 cc=4 → 子单 cc=4');
+  const ln_s = await reqJson('POST', `/api/corrections/${cc_s.body.id}/link-new`, { source_system: 'HRD', location_info: 'z', correction_count: 99 }, ADMIN);   // cc_s=single 主单
+  const ln_sRow = await dbGetAsync('SELECT correction_count FROM correction_requests WHERE id=?', [ln_s.body.id]);
+  ok(ln_s.status === 200 && ln_sRow.correction_count === 1, '⑨ link-new single 主单追加传 cc=99 → 子单恒 1（忽略传值）');
+
+  console.log(`\n=== L4+L5+末次审+条数分流 跨系统 e2e 通过：${pass} 断言 ===`);
   srv.close(); db.close();
 })().catch(e => { console.error('✗ FAIL:', e.message, e.stack); try { srv && srv.close(); } catch (_) {} db.close(); process.exit(1); });

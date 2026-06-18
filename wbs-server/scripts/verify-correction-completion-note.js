@@ -126,10 +126,12 @@ async function main() {
     const b1 = await createCorrection({ correction_type: 'batch' });
     await toInProgress(b1);
     await expectErr(correctionTransition(b1, 'IN_PROGRESS', 'FIXED', ACTOR_DEV, {}), 'BATCH_NOTE_REQUIRED', 'batch 仍必填完成说明');
-    await correctionTransition(b1, 'IN_PROGRESS', 'FIXED', ACTOR_DEV, { batch_completion_note: '批量更新 30 条客户编号映射' });
+    await expectErr(correctionTransition(b1, 'IN_PROGRESS', 'FIXED', ACTOR_DEV, { batch_completion_note: '1' }), 'BATCH_NOTE_TOO_SHORT', 'batch note「1」<5字 → BATCH_NOTE_TOO_SHORT（挡敷衍占位）');
+    await expectErr(correctionTransition(b1, 'IN_PROGRESS', 'FIXED', ACTOR_DEV, { batch_completion_note: '完成' }), 'BATCH_NOTE_TOO_SHORT', 'batch note「完成」2字 → BATCH_NOTE_TOO_SHORT');
+    await correctionTransition(b1, 'IN_PROGRESS', 'FIXED', ACTOR_DEV, { batch_completion_note: '已批量修正' });   // 恰好 5 字（Array.from length===5）→ 边界放行，锁 `<5` 不被误改为 `<=5`（codex 59 L-3）
     const rb1 = await get('SELECT batch_completion_note FROM correction_requests WHERE id=?', [b1]);
-    assert.strictEqual(rb1.batch_completion_note, '批量更新 30 条客户编号映射', 'batch note 写入不变');
-    ok('回归：batch complete 仍必填 batch_completion_note（single 改动不破坏 batch）');
+    assert.strictEqual(rb1.batch_completion_note, '已批量修正', 'batch note 恰好 5 字边界放行 + 写入不变');
+    ok('回归：batch complete 必填且 ≥5 字（空/「1」/「完成」拒，恰好 5 字「已批量修正」放行）');
 
     // [7] 回归：batch resubmit_note 仍写 history.reason（§9 约束 33，single 改动不破坏 batch）
     await correctionTransition(b1, 'FIXED', 'REFIXED', ACTOR_DEV, { resubmit_note: '本次重新核对客户编号映射' });
