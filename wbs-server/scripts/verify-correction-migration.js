@@ -57,14 +57,17 @@ const CREATOR_COLS = ['creator_notify_status', 'creator_notified_at', 'creator_n
   console.log('=== 细优② K1 迁移时序 verify：旧表 ALTER 补 creator 5 列（C-1/M-5）===\n');
 
   // [前置] 造"旧版"correction_requests（不含 creator 5 列，含其余 KEY_COLS）+ 样例数据，模拟生产已上线表
+  // 旧表须忠实生产 schema：含 requester_phone + 完整 completion_notify_*（Commit A 起就有）——
+  //   否则 L1 跨系统迁移的子表回填 SELECT cr.requester_phone/completion_notify_* 会因列缺失报错（非 L1 bug，stub 不忠实）。
   await dbRunAsync(`CREATE TABLE correction_requests (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    source_system TEXT, source_system_other TEXT, location_info TEXT, requester_name TEXT, status TEXT,
+    source_system TEXT, source_system_other TEXT, location_info TEXT, requester_name TEXT, requester_phone TEXT, status TEXT,
     correction_type TEXT, batch_completion_note TEXT, submission_count INTEGER,
     expected_deadline DATETIME, dev_estimated_at DATETIME,
     assigned_to INTEGER, assigned_to_name TEXT,
     fixed_at DATETIME, refixed_at DATETIME,
-    completion_notify_status TEXT, archived_at DATETIME, friction_reason TEXT, voided_at DATETIME,
+    completion_notified_at DATETIME, completion_notify_status TEXT, completion_notify_message_key TEXT, completion_notify_error TEXT, completion_read_at DATETIME,
+    archived_at DATETIME, friction_reason TEXT, voided_at DATETIME,
     created_by INTEGER, relay_notified_user_id INTEGER,
     dingtalk_chat_id TEXT, dingtalk_open_conversation_id TEXT, dingtalk_chat_created_at DATETIME,
     dingtalk_chat_created_by INTEGER, dingtalk_chat_name TEXT,
@@ -128,11 +131,12 @@ const CREATOR_COLS = ['creator_notify_status', 'creator_notified_at', 'creator_n
   const fRun = (sql, p = []) => new Promise((res, rej) => failDb.run(sql, p, function (e) { e ? rej(e) : res(this); }));
   // 旧表（不含 creator 列）——注意经包装的 failDb.run，但本 CREATE 不匹配拦截正则，正常执行
   await fRun(`CREATE TABLE correction_requests (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, source_system TEXT, source_system_other TEXT, location_info TEXT, requester_name TEXT, status TEXT,
+    id INTEGER PRIMARY KEY AUTOINCREMENT, source_system TEXT, source_system_other TEXT, location_info TEXT, requester_name TEXT, requester_phone TEXT, status TEXT,
     correction_type TEXT, batch_completion_note TEXT, submission_count INTEGER,
     expected_deadline DATETIME, dev_estimated_at DATETIME, assigned_to INTEGER, assigned_to_name TEXT,
     fixed_at DATETIME, refixed_at DATETIME,
-    completion_notify_status TEXT, archived_at DATETIME, friction_reason TEXT, voided_at DATETIME,
+    completion_notified_at DATETIME, completion_notify_status TEXT, completion_notify_message_key TEXT, completion_notify_error TEXT, completion_read_at DATETIME,
+    archived_at DATETIME, friction_reason TEXT, voided_at DATETIME,
     created_by INTEGER, relay_notified_user_id INTEGER,
     dingtalk_chat_id TEXT, dingtalk_open_conversation_id TEXT, dingtalk_chat_created_at DATETIME,
     dingtalk_chat_created_by INTEGER, dingtalk_chat_name TEXT,

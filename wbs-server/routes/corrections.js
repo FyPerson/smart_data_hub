@@ -33,7 +33,7 @@ module.exports = (deps) => {
 //   readiness 闸门 = 冗余防线 + 首启短暂窗口保护（方案 §7：migration 完成前 ready=false，避免首启报错）。
 const CORRECTION_SCHEMA_STATE = { ready: false, error: null };
 // migration 后 PRAGMA 复查这三表各自的关键列全部到位才置 ready（不穷举全字段，挑 8 态/群/通知锚点列）
-const CORRECTION_REQUIRED_TABLES = ['correction_requests', 'correction_attachments', 'correction_status_history'];
+const CORRECTION_REQUIRED_TABLES = ['correction_requests', 'correction_attachments', 'correction_status_history', 'correction_requesters'];
 // readiness 复查是"启动期就绪抽样"——挑代表性关键不变量（8 态锚点/群字段/责任链），
 //   不做全字段全量校验（那是 verify-correction-schema.js 的职责）。全新模块无 ALTER，
 //   CREATE 要么整表成功要么 firstCorrDdlError 兜底，单个可空辅助列不会"缺失"，无需逐列复查。
@@ -50,7 +50,11 @@ const CORRECTION_REQUESTS_KEY_COLS = [
     'correction_count', 'relay_notify_status', 'closure_type',
     // 本次细优②（2026-06-17）：创建人通知（开发/对接人告知建单人）四件套锚点——已上线表 ALTER 后须复查它就位才 ready
     //   （C-1 codex 36/37：ALTER 必须在下方 missingCols 复查【之前】完成，见 runCorrectionMigration [2a]/[2b]）。
-    'creator_notify_status'
+    'creator_notify_status',
+    // 跨系统关联方案（L1，2026-06-18）：组键入 readiness 抽样——已上线表 ALTER 后须复查就位才 ready
+    //   （C-1 硬性顺序：ALTER 在 missingCols 复查【之前】完成，见 runCorrectionMigration [2a-x]）。
+    //   error_proof_note 不入（可空辅助列，缺失不影响核心写入口，方案 §5.1）。
+    'correction_group_id'
 ];
 // codex 08 H-1：CORRECTION_SCHEMA_STATE 是"三表"就绪闸门，readiness 须对称复查三表关键列，
 //   不能只验主表（否则附件/历史表 DDL 引入 bug 时仍放行）。两表只需验各自的 NOT NULL 锚点列：
@@ -60,6 +64,13 @@ const CORRECTION_HISTORY_KEY_COLS = ['correction_request_id', 'to_status', 'crea
 // 两表 NOT NULL 锚点列（PRAGMA table_info 的 notnull=1 必须命中，防旧表/半成品表缺约束）
 const CORRECTION_ATTACHMENTS_NOTNULL_COLS = ['correction_request_id', 'attachment_type', 'file_name', 'uploaded_by'];
 const CORRECTION_HISTORY_NOTNULL_COLS = ['correction_request_id', 'to_status'];
+// ── 跨系统关联方案 §5.2 / §6.6（L1）：业务方子表 readiness 锚点 + 完成通知状态枚举 ──────────
+//   correction_requesters 是多业务方完成通知真相源（普适）。readiness 对称复查其关键列 + NOT NULL 锚点
+//   （缺列/缺约束时拦截，否则 L2 notify-done 写子表运行期报错）。
+//   完成通知状态唯一枚举：writeCorrectionRequesters（L2）写入校验 + 迁移回填 COALESCE 兜底共用。
+const CORRECTION_REQUESTERS_KEY_COLS = ['correction_request_id', 'requester_name', 'is_primary', 'seq', 'completion_notify_status'];
+const CORRECTION_REQUESTERS_NOTNULL_COLS = ['correction_request_id', 'requester_name', 'is_primary', 'seq'];
+const CORRECTION_REQUESTER_NOTIFY_STATUSES = ['not_sent', 'sent', 'failed', 'no_phone'];
 // 守门中间件：Commit B 起所有 correction 写入口（建单/指派/流转/拉群/通知）挂在路由前。
 //   readiness=false → 503，避免建表/迁移失败被吞后入口运行期 SQL 崩。
 function requireCorrectionSchemaReady(req, res, next) {
@@ -213,6 +224,12 @@ function initSchema() {
             creator_notify_error TEXT,
             creator_read_at DATETIME,
 
+            -- ── 跨系统关联 + 错误证明（跨系统关联方案 §5.1，L1）──────────
+            -- correction_group_id：跨系统关联组键（NULL=无组；非 NULL=主单 id；主单判定 id===correction_group_id）。入 KEY_COLS + 建索引。
+            -- error_proof_note：建单错误证明说明（可选，配 error_proof 附件；不承载"要改什么"，需求本体仍是 location_info）。不入 KEY_COLS。
+            correction_group_id INTEGER,
+            error_proof_note TEXT,
+
             -- 升级讨论拉群（v1.3，旁路字段：不走 correctionTransition、不动 status，G-6）
             dingtalk_chat_id TEXT,
             dingtalk_open_conversation_id TEXT,
@@ -258,6 +275,34 @@ function initSchema() {
         )`, recordCorrErr('correction_status_history'));
         db.run(`CREATE INDEX IF NOT EXISTS idx_corr_hist_rid ON correction_status_history(correction_request_id)`, recordCorrErr('idx_corr_hist_rid'));
 
+        // ── 2.4 correction_requesters 业务方子表（跨系统关联方案 §5.2，L1）──────────────
+        //   多业务方完成通知真相源（普适）：每个"标准单/主单"≥1 行、is_primary=1 唯一；跨系统子单不在此建行
+        //   （只读主单子表，§6.1 契约 B）。完成通知/已读按行独立。全新表 CREATE IF NOT EXISTS——旧库不存在即建、
+        //   新库一次建全，对两条部署路径都安全（区别于主表加列须走 migration ALTER）。
+        db.run(`CREATE TABLE IF NOT EXISTS correction_requesters (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            correction_request_id INTEGER NOT NULL,        -- 归属单（跨系统时=主单 id；子单不在此建行）
+            requester_name TEXT NOT NULL,
+            requester_phone TEXT,
+            -- is_primary/seq 数据类型 guard CHECK（codex 48 L-3）：全新表零迁移成本，对齐既有 correction_count CHECK 先例
+            --   （数据类型/range guard 可进 CHECK，区别于 status 枚举——枚举按项目惯例靠后端写入口集中校验，不进 CHECK）。
+            is_primary INTEGER NOT NULL DEFAULT 0 CHECK (is_primary IN (0, 1)),
+            seq INTEGER NOT NULL DEFAULT 1 CHECK (seq >= 1),
+            completion_notify_status TEXT DEFAULT 'not_sent',   -- 枚举 §6.6（not_sent/sent/failed/no_phone）；惯例靠写入口校验+迁移回填清洗，不进 DB CHECK
+            completion_notified_at DATETIME,
+            completion_notify_message_key TEXT,
+            completion_notify_error TEXT,
+            completion_read_at DATETIME,
+            created_at DATETIME DEFAULT (datetime('now','localtime')),
+            FOREIGN KEY (correction_request_id) REFERENCES correction_requests(id)
+        )`, recordCorrErr('correction_requesters'));
+        // 主业务方"至多一条"硬约束（partial unique index，§5.3 H-1 不变量）
+        db.run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_correction_requester_primary
+            ON correction_requesters(correction_request_id) WHERE is_primary = 1`, recordCorrErr('idx_correction_requester_primary'));
+        // 按单 + seq 查询索引（L-1：当前规模非性能必需，为多业务方未来）
+        db.run(`CREATE INDEX IF NOT EXISTS idx_correction_requester_req
+            ON correction_requesters(correction_request_id, seq)`, recordCorrErr('idx_correction_requester_req'));
+
         // ⭐ v1.80.1 hotfix 范式：migration 触发挪进 serialize 块内最后一个 db.run 的 callback，
         //   保证它一定在上面所有 CREATE TABLE/INDEX 排队消耗完之后才跑——否则 runCorrectionMigration
         //   第一步 PRAGMA 会与队列里的 CREATE 竞态（PRAGMA 立即返回空 schema → 列缺失 → readiness 永久 false）。
@@ -294,7 +339,7 @@ async function runCorrectionMigration(ddlError) {
         // [1] 三表存在性（sqlite_master 查表名）
         const tables = await new Promise((resolve, reject) => {
             db.all(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('correction_requests','correction_attachments','correction_status_history')",
+                "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('correction_requests','correction_attachments','correction_status_history','correction_requesters')",
                 (err, rows) => err ? reject(err) : resolve((rows || []).map(r => r.name))
             );
         });
@@ -340,6 +385,29 @@ async function runCorrectionMigration(ddlError) {
                 logger.info(`[数据修正迁移] correction_requests ADD COLUMN ${col} ${type}（细优② creator 通知）`);
             }
         }
+        // [2a-x] ⭐ 跨系统关联方案（L1，2026-06-18）：已上线表演进——加 correction_group_id（组键，入 KEY_COLS）
+        //   + error_proof_note（建单错误证明说明，不入 KEY_COLS）幂等 ALTER ADD COLUMN（同 [2a] creator 范式）。
+        //   生产已有数据不能 DROP 重建，CREATE TABLE IF NOT EXISTS 对已存在表 no-op（新列不加），故此处补。
+        //   ⚠️ C-1 硬性顺序：group_id 已入 KEY_COLS，ALTER 必须在下方 missingCols 复查【之前】完成（否则判缺列 503）。
+        //   col/type 为硬编码常量非用户输入，插值无注入风险；ALTER reject → 外层 catch 置 error（可观测，不静默吞）。
+        const CROSS_SYSTEM_COLS = [
+            ['correction_group_id', 'INTEGER'],   // NULL=无组；非 NULL=主单 id（主单判定 id===correction_group_id）
+            ['error_proof_note', 'TEXT'],          // 建单错误证明说明（可选，配 error_proof 附件；需求本体仍是 location_info）
+        ];
+        for (const [col, type] of CROSS_SYSTEM_COLS) {
+            if (!colNames.includes(col)) {
+                await new Promise((resolve, reject) => {
+                    db.run(`ALTER TABLE correction_requests ADD COLUMN ${col} ${type}`, (err) => err ? reject(err) : resolve());
+                });
+                logger.info(`[数据修正迁移] correction_requests ADD COLUMN ${col} ${type}（L1 跨系统关联）`);
+            }
+        }
+        // [2a-x2] correction_group_id 索引：⚠️ 必须在 ALTER 之后建——若放 initSchema serialize 块，旧库该列尚未
+        //   ALTER → CREATE INDEX 报 "no such column: correction_group_id" → recordCorrErr 收集为 DDL 失败 → 熔断 503。
+        //   置此（ALTER 后、幂等 IF NOT EXISTS）：新库 CREATE TABLE 已含列→ALTER 跳过→建索引；旧库 ALTER 后→建索引。两路径都安全。
+        await new Promise((resolve, reject) => {
+            db.run('CREATE INDEX IF NOT EXISTS idx_corr_group ON correction_requests(correction_group_id)', (err) => err ? reject(err) : resolve());
+        });
         // [2b] ⭐ ALTER 后【重新】PRAGMA：下方 missingCols 必须用最新列集（C-1：不能复用 [2] 的旧 colNames 复查）
         cols = await new Promise((resolve, reject) => {
             db.all('PRAGMA table_info(correction_requests)', (err, rows) => err ? reject(err) : resolve(rows));
@@ -388,10 +456,74 @@ async function runCorrectionMigration(ddlError) {
             return;
         }
 
+        // [2d] ⭐ 跨系统关联方案 §5.2（L1）：correction_requesters 业务方子表关键列 + NOT NULL 锚点复查
+        //   （对齐三表对称校验：完成通知真相源缺列/缺约束 → L2 写子表运行期报错，故 readiness 在此拦截）。
+        const reqErr = await checkTableCols('correction_requesters', CORRECTION_REQUESTERS_KEY_COLS, CORRECTION_REQUESTERS_NOTNULL_COLS);
+        if (reqErr) {
+            CORRECTION_SCHEMA_STATE.ready = false;
+            CORRECTION_SCHEMA_STATE.error = reqErr;
+            logger.error(`[数据修正 A] 🚫 ${reqErr} → correction 写入口将返 503`);
+            return;
+        }
+
+        // [2e] ⭐ 跨系统关联方案 §5.4（L1）：业务方子表幂等回填——每个"标准单/主单"（非子单）回填一条
+        //   is_primary=1（搬主表 requester_name/phone + 已有 completion_notify_* 兼容列，作完成通知真相源初值）。
+        //   幂等：NOT EXISTS(同单 primary 行) 防重复（migration 每次启动都跑，已回填则跳过）。
+        //   ⚠️ 子单豁免（group_id != id）：跨系统子单不写子表（§6.1 契约 B）——若不豁免，段二落地后子单（兼容列复制了
+        //     主业务方非空 name、无子表行）会被每次重启的回填误造 primary 行。L1 存量单 group_id 均 NULL → 全部回填，
+        //     此条件同时为段二 L4 前向兼容。空 requester_name 历史单跳过（§5.4）；VOIDED 有名单（生产 id=1）正常回填。
+        await new Promise((resolve, reject) => {
+            db.run(
+                `INSERT INTO correction_requesters
+                    (correction_request_id, requester_name, requester_phone, is_primary, seq,
+                     completion_notify_status, completion_notified_at, completion_notify_message_key,
+                     completion_notify_error, completion_read_at)
+                 SELECT cr.id, cr.requester_name, cr.requester_phone, 1, 1,
+                        -- status 枚举清洗（codex 48 M-1 / 方案 §5.3 RC-L2"迁移共用 write helper 清洗，status 只取 §6.6 常量"）：
+                        --   非法/NULL 旧状态统一归 'not_sent'，不把脏值原样搬进子表（否则 L2 按枚举处理遇未知值）。
+                        CASE WHEN cr.completion_notify_status IN ('not_sent','sent','failed','no_phone')
+                             THEN cr.completion_notify_status ELSE 'not_sent' END,
+                        cr.completion_notified_at,
+                        cr.completion_notify_message_key, cr.completion_notify_error, cr.completion_read_at
+                 FROM correction_requests cr
+                 WHERE cr.requester_name IS NOT NULL AND TRIM(cr.requester_name) != ''
+                   AND (cr.correction_group_id IS NULL OR cr.correction_group_id = cr.id)
+                   AND NOT EXISTS (
+                       SELECT 1 FROM correction_requesters x
+                       WHERE x.correction_request_id = cr.id AND x.is_primary = 1
+                   )`,
+                (err) => err ? reject(err) : resolve()
+            );
+        });
+
+        // [2f] ⭐ readiness 数据不变量断言（RC3-L1，方案 §5.4）：非 VOIDED 的"标准单/主单"（非子单）
+        //   有且仅有一条 is_primary=1；VOIDED 单豁免（允许无 primary——历史无名作废单不提供业务方通知入口）。
+        //   违反 → 503 fail-fast（回填异常/数据脏时阻断写入口）；生产仅 2 单均正常回填，real_sample 部署前已端到端验。
+        const primaryViolations = await new Promise((resolve, reject) => {
+            db.all(
+                `SELECT cr.id AS id, COUNT(rq.id) AS primary_count
+                 FROM correction_requests cr
+                 LEFT JOIN correction_requesters rq
+                   ON rq.correction_request_id = cr.id AND rq.is_primary = 1
+                 WHERE cr.status != 'VOIDED'
+                   AND (cr.correction_group_id IS NULL OR cr.correction_group_id = cr.id)
+                 GROUP BY cr.id
+                 HAVING COUNT(rq.id) != 1`,
+                (err, rows) => err ? reject(err) : resolve(rows || [])
+            );
+        });
+        if (primaryViolations.length > 0) {
+            const sample = primaryViolations.slice(0, 5).map(r => `#${r.id}(${r.primary_count})`).join(',');
+            CORRECTION_SCHEMA_STATE.ready = false;
+            CORRECTION_SCHEMA_STATE.error = `correction_requesters 主业务方不变量破坏（非 VOIDED 单须恰一条 primary）：${sample}`;
+            logger.error(`[数据修正 A] 🚫 ${CORRECTION_SCHEMA_STATE.error} → correction 写入口将返 503`);
+            return;
+        }
+
         // [3] 全部就位 → 置 ready
         CORRECTION_SCHEMA_STATE.error = null;
         CORRECTION_SCHEMA_STATE.ready = true;
-        logger.info(`[数据修正 A] ✅ correction 三表就绪（${tables.length}/3 表 + 主表关键列 + 附件/历史表 NOT NULL 锚点齐全），写入口放行。`);
+        logger.info(`[数据修正 A] ✅ correction 四表就绪（${tables.length}/4 表 + 主表关键列 + 附件/历史/业务方表 NOT NULL 锚点齐全 + 主业务方不变量校验通过），写入口放行。`);
     } catch (e) {
         CORRECTION_SCHEMA_STATE.ready = false;
         CORRECTION_SCHEMA_STATE.error = `迁移异常：${e && e.message}`;
@@ -850,11 +982,27 @@ router.post('/', authenticateToken, requireCorrectionSchemaReady, requireAdmin, 
             return res.status(400).json({ error: 'correction_type 非法（仅 single | batch）', code: 'INVALID_CORRECTION_TYPE' });
         }
         const locationInfo = (typeof b.location_info === 'string' ? b.location_info.trim() : '');   // 修正方式（合并错误描述+期望值，删 expected_value §1.2）
-        const requesterName = (typeof b.requester_name === 'string' ? b.requester_name.trim() : '');
-        const missingReq = [];
-        if (!locationInfo) missingReq.push('location_info');
-        if (!requesterName) missingReq.push('requester_name');
-        if (missingReq.length) return res.status(400).json({ error: `缺少必填字段：${missingReq.join('、')}`, code: 'MISSING_REQUIRED_FIELDS' });
+        if (!locationInfo) return res.status(400).json({ error: '缺少必填字段：location_info', code: 'MISSING_REQUIRED_FIELDS' });
+        // L2 多业务方（方案 §6.1 契约 A 入参兼容）：requesters[] 优先，缺失从旧字段 requester_name/phone 生成单业务方。
+        //   规范化后第一条=主业务方，写主表 requester_name/phone 作兼容冗余 + 列表显示（§5.1）；全部写子表（§5.2 真相源）。
+        const fallbackPrimary = {
+            name: (typeof b.requester_name === 'string' ? b.requester_name.trim() : ''),
+            phone: (typeof b.requester_phone === 'string' && b.requester_phone.trim()) ? b.requester_phone.trim() : null,
+        };
+        const normRes = normalizeCorrectionRequesters(b.requesters, fallbackPrimary);
+        if (!normRes.ok) return res.status(400).json({ error: normRes.error, code: normRes.code });   // 上限超标（codex 49 M-1）
+        const cleanedRequesters = normRes.cleaned;
+        if (cleanedRequesters.length === 0) {
+            return res.status(400).json({ error: '缺少必填字段：业务方（requester_name 或 requesters[] 至少一个非空姓名）', code: 'MISSING_REQUIRED_FIELDS' });
+        }
+        const primaryRequester = cleanedRequesters[0];
+        const requesterName = primaryRequester.name;       // 主业务方 → 主表兼容冗余
+        // error_proof_note（§6.1 / D-10）：建单错误证明说明，可选；≤1000 防御性上限（方案未规定，对齐 note 类字段做有界，防无界 TEXT）
+        let errorProofNote = null;
+        if (typeof b.error_proof_note === 'string' && b.error_proof_note.trim()) {
+            errorProofNote = b.error_proof_note.trim();
+            if (errorProofNote.length > 1000) return res.status(400).json({ error: '错误证明说明过长（≤1000 字）', code: 'ERROR_PROOF_NOTE_TOO_LONG' });
+        }
 
         // codex 09 M-4：路径 A（assigned_to 直接指派）与路径 B（relay_notified_user_id 先通知对接人）互斥（§4.2 二选一）。
         //   同传会让单进 ASSIGNED 却又留对接人意图，C/D 误发对接人通知。
@@ -881,7 +1029,7 @@ router.post('/', authenticateToken, requireCorrectionSchemaReady, requireAdmin, 
             correctionCount = Number(raw);
         }
         const requesterDept = (typeof b.requester_dept === 'string' && b.requester_dept.trim()) ? b.requester_dept.trim() : null;
-        const requesterPhone = (typeof b.requester_phone === 'string' && b.requester_phone.trim()) ? b.requester_phone.trim() : null;
+        const requesterPhone = primaryRequester.phone;   // 主业务方手机号 → 主表兼容冗余（L2：取自 cleanedRequesters[0]，不再单读 b.requester_phone）
         // deadline：客户端传了合法值归一化用之，否则后端智能默认（§4.1，仅参考可空）
         const expectedDeadline = normalizeCorrectionDatetime(b.expected_deadline) || correctionDefaultDeadline();
 
@@ -925,11 +1073,11 @@ router.post('/', authenticateToken, requireCorrectionSchemaReady, requireAdmin, 
                 `INSERT INTO correction_requests
                    (source_system, source_system_other, location_info, correction_count,
                     reason, oa_number, correction_type, requester_dept, requester_name, requester_phone,
-                    status, expected_deadline, relay_notified_user_id, created_by, created_by_name)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING_ASSIGN', ?, ?, ?, ?)`,
+                    status, expected_deadline, relay_notified_user_id, created_by, created_by_name, error_proof_note)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING_ASSIGN', ?, ?, ?, ?, ?)`,
                 [sourceSystem, sourceSystem === '其他' ? sourceSystemOther : null, locationInfo, correctionCount,
                  reasonText, oaNumber, correctionType, requesterDept, requesterName, requesterPhone,
-                 expectedDeadline, relayUserId, createdBy, createdByName]
+                 expectedDeadline, relayUserId, createdBy, createdByName, errorProofNote]
             );
             newId = result.lastID;
             await dbRunAsync(
@@ -937,6 +1085,8 @@ router.post('/', authenticateToken, requireCorrectionSchemaReady, requireAdmin, 
                  VALUES (?, NULL, 'PENDING_ASSIGN', ?, ?, ?)`,
                 [newId, '信息技术部建单', createdBy, createdByName]
             );
+            // L2（§5.2 / §6.1 契约 A）：业务方写子表（完成通知真相源）；主表 requester_name/phone 已写主业务方兼容冗余。
+            await writeCorrectionRequesters(newId, cleanedRequesters);
             await dbRunAsync('COMMIT');
         } catch (txErr) {
             try { await dbRunAsync('ROLLBACK'); } catch (_) {}
@@ -1003,6 +1153,103 @@ router.post('/:id/assign', authenticateToken, requireCorrectionSchemaReady, requ
             return res.status(err.httpStatus).json({ error: err.message, code: err.code });
         }
         logger.error('指派数据修正单失败:', err.message);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ── POST /api/corrections/:id/reassign 改派（D-13 §6.8；镜像 issue v1.75.0 C2 改人范式；codex 46 收口）──
+//   仅 ASSIGNED_PENDING_ESTIMATE 态可改派（开发尚未回复 ETA）；IN_PROGRESS（已回复/开工）→ 走作废重建。
+//   ⭐ reassign **不走 correctionTransition**（状态不变，是带守卫的字段 UPDATE，类比 issue C2），故权限精校验 / 状态守卫 /
+//      乐观锁都在 handler 事务内自做（对齐本模块 correctionTransition 的「事务内读真实 row + 双条件 WHERE + changes 检查」范式）。
+//   中间件 requireRelayOrPublisherOrAdmin 仅粗筛；handler 内复刻 /assign 指派分支精校验（白名单对接人仅限本人经手 relay 单，RC4-M1）。
+router.post('/:id/reassign', authenticateToken, requireCorrectionSchemaReady, correctionIdGuard, requireRelayOrPublisherOrAdmin, async (req, res) => {
+    const id = Number(req.params.id);
+    try {
+        // 新开发校验（RC4-L1）：完全复用 /assign 当前口径（存在 + 非 viewer，不额外限 role=developer，避免与首派不一致）。
+        const assignedTo = (req.body || {}).assigned_to;
+        if (assignedTo === undefined || assignedTo === null || assignedTo === '') {
+            return res.status(400).json({ error: '必须指定新的被指派开发', code: 'REASSIGN_TARGET_REQUIRED' });
+        }
+        const newDevId = parsePositiveCorrectionId(assignedTo);
+        if (!newDevId) return res.status(400).json({ error: '改派目标 ID 非法', code: 'INVALID_REASSIGN_TARGET_ID' });
+        const dev = await dbGetAsync('SELECT id, display_name, username, role FROM users WHERE id = ?', [newDevId]);
+        if (!dev) return res.status(400).json({ error: '改派目标用户不存在', code: 'REASSIGN_TARGET_NOT_FOUND' });
+        if (dev.role === 'viewer') return res.status(400).json({ error: '不能改派给查看者（viewer）', code: 'REASSIGN_TARGET_VIEWER' });
+        // L-2（codex 53）：开发名兜底——display_name 空时回退 username/id，对齐前端下拉口径 display_name||username，避免 history/assigned_to_name 出现空名。
+        const devName = dev.display_name || dev.username || String(dev.id);
+
+        const actor = correctionActor(req);
+        await dbRunAsync('BEGIN IMMEDIATE');
+        try {
+            // 事务内读真实 row（权限精校验 + 状态守卫 + 乐观锁基线，不信客户端）。
+            //   reassign 权限 = admin/publisher/本单对接人（不含 creator，与首派 /assign 同口径）。
+            const row = await dbGetAsync(
+                'SELECT id, relay_notified_user_id, assigned_to, assigned_to_name, status FROM correction_requests WHERE id = ?',
+                [id]
+            );
+            if (!row) { await dbRunAsync('ROLLBACK'); return res.status(404).json({ error: '修正单不存在' }); }
+
+            // 权限精校验（RC4-M1，复刻 /assign 指派分支）：admin/publisher 放行；白名单对接人仅当
+            //   isCorrectionRelayWhitelisted(actor.id) && relay_notified_user_id===actor.id 才放行（否则 403）——
+            //   不能只靠粗筛中间件，否则对接人能改派非本人经手的 relay 单。
+            const isAdminOrPub = actor.role === 'admin' || actor.role === 'publisher';
+            const isOwnRelay = isCorrectionRelayWhitelisted(actor.id) && Number(row.relay_notified_user_id) === Number(actor.id);
+            if (!isAdminOrPub && !isOwnRelay) {
+                await dbRunAsync('ROLLBACK');
+                return res.status(403).json({ error: '无权改派此修正单（仅管理员/发布者或本单对接人）', code: 'NOT_AUTHORIZED_TO_REASSIGN' });
+            }
+
+            // 状态守卫（RC4-L3）：仅 ASSIGNED_PENDING_ESTIMATE 可改派；IN_PROGRESS 专属错误码引导作废重建。
+            if (row.status === 'IN_PROGRESS') {
+                await dbRunAsync('ROLLBACK');
+                return res.status(409).json({ error: '开发已回复预计完成/开工，不支持改派，请走作废重建', code: 'REASSIGN_NOT_ALLOWED_AFTER_ESTIMATE' });
+            }
+            if (row.status !== 'ASSIGNED_PENDING_ESTIMATE') {
+                await dbRunAsync('ROLLBACK');
+                return res.status(409).json({ error: `当前状态「${row.status}」不可改派（仅「待回复预计」态可改派）`, code: 'REASSIGN_STATUS_INVALID' });
+            }
+
+            const oldAssignedTo = Number(row.assigned_to);
+            if (!(oldAssignedTo > 0)) {
+                await dbRunAsync('ROLLBACK');
+                return res.status(409).json({ error: '本单尚无被指派开发，无法改派', code: 'REASSIGN_NO_ASSIGNEE' });
+            }
+            if (oldAssignedTo === dev.id) {
+                await dbRunAsync('ROLLBACK');
+                return res.status(400).json({ error: '新开发与当前开发相同，无需改派', code: 'REASSIGN_NO_CHANGE' });
+            }
+
+            // 乐观锁 + 更新（RC4-M3 / RC4-M2）：双条件 WHERE 绑 status + oldAssignedTo（该态 assigned_to 非空，用 =? 不用 IS ?）；
+            //   重置开发通知态完整清单（含 notify_error，否则前端仍显示旧开发的发送错误）。
+            const upd = await dbRunAsync(
+                `UPDATE correction_requests
+                    SET assigned_to = ?, assigned_to_name = ?, assigned_by = ?, assigned_at = datetime('now','localtime'),
+                        notify_status = 'not_sent', notified_at = NULL, notify_message_key = NULL, notify_error = NULL, read_at = NULL
+                  WHERE id = ? AND status = 'ASSIGNED_PENDING_ESTIMATE' AND assigned_to = ?`,
+                [dev.id, devName, actor.id, id, oldAssignedTo]
+            );
+            if (!upd || upd.changes !== 1) {
+                await dbRunAsync('ROLLBACK');
+                return res.status(409).json({ error: '修正单状态或负责人已变更，请刷新重试', code: 'CONCURRENT_REASSIGN' });
+            }
+            // history 同态留痕（RC4-M4）：from=to=ASSIGNED_PENDING_ESTIMATE（状态不变，非状态机转移）；reason 记"改派 旧#X→新#Y"。
+            await dbRunAsync(
+                `INSERT INTO correction_status_history (correction_request_id, from_status, to_status, reason, operator_id, operator_name)
+                 VALUES (?, 'ASSIGNED_PENDING_ESTIMATE', 'ASSIGNED_PENDING_ESTIMATE', ?, ?, ?)`,
+                [id, `改派 旧#${oldAssignedTo}→新#${dev.id}（${row.assigned_to_name || '原开发'}→${devName}）`, actor.id, actor.name]
+            );
+            await dbRunAsync('COMMIT');
+        } catch (txErr) {
+            try { await dbRunAsync('ROLLBACK'); } catch (_) {}
+            throw txErr;
+        }
+        // RC4-L2：reassign 是单据级开发负责人字段更新，**不调 resolveCorrectionGroupAnchor、不跳主单**——
+        //   跨系统子单按自身 id/status/assigned_to 独立改派，互不影响组闸门（组闸门只看完成态）。
+        //   改派后由 admin/对接人重新手动点「通知开发」通知新开发（对齐现有手动模型，不自动发）。
+        logger.info(`用户 ${actor.name} 改派数据修正单 #${id} → ${devName}（开发通知态已重置，待手动通知）`);
+        res.json({ id, assigned_to: dev.id, assigned_to_name: devName, status: 'ASSIGNED_PENDING_ESTIMATE', reassigned: true });
+    } catch (err) {
+        logger.error('改派数据修正单失败:', err.message);
         res.status(500).json({ error: err.message });
     }
 });
@@ -1076,7 +1323,16 @@ router.get('/:id', authenticateToken, requireCorrectionSchemaReady, async (req, 
                FROM correction_attachments WHERE correction_request_id = ? ORDER BY id`,
             [id]
         );
-        res.json({ request: row, history, attachments });
+        // L3（§6.0/§7.2）：业务方子表 N 行（前端完成通知区按行渲染）+ 组信息（is_master/master_id/members，前端关联组区 + 子单跳主单）。
+        //   锚点解析：标准单/主单 requesters=自身子表行；跨系统子单 requesters=主单子表行（is_master=false 时前端隐藏录入、显示"属关联组主单 #N"）。
+        const anchor = await resolveCorrectionGroupAnchor(id);
+        const requesters = anchor ? anchor.requesters.map(rq => ({
+            id: rq.id, requester_name: rq.requester_name, requester_phone: rq.requester_phone, is_primary: rq.is_primary, seq: rq.seq,
+            completion_notify_status: rq.completion_notify_status, completion_notified_at: rq.completion_notified_at,
+            completion_notify_error: rq.completion_notify_error, completion_read_at: rq.completion_read_at,
+        })) : [];
+        const group = anchor ? { master_id: anchor.master_id, is_master: anchor.is_master, members: anchor.group_members } : null;
+        res.json({ request: row, history, attachments, requesters, group });
     } catch (err) {
         logger.error('查询数据修正单详情失败:', err.message);
         res.status(500).json({ error: err.message });
@@ -1200,6 +1456,77 @@ function sendCorrectionTransitionError(res, e) {
     return res.status(500).json({ error: (e && e.message) || '状态流转失败' });
 }
 
+// ============================================================
+// L2 业务方子表 helper（跨系统关联方案 §5.3 / §6.0 / §6.3）——多业务方真相源 correction_requesters。
+// ============================================================
+// requesters[] 规范化 + 上限校验（RC-L2 §5.3）：集中业务方入参规则（建单/追加共用）。
+//   返回 { ok, cleaned, error, code }——ok=false 时调用方据 code 返 400。
+//   清洗：name trim 必填、phone trim 空串归 NULL、跳过空名条目；**仅取 string 标量**（codex 49 L-3：
+//     非字符串如 {name:123}/{phone:{}} 不取值，避免 "[object Object]" 静默落库）。
+//   上限（codex 49 M-1，防御性，内网低并发场景宽松值）：requesters ≤20 / name ≤100 / phone ≤50。
+//   rawList（建单 requesters[]）优先；缺失回退 fallbackPrimary（旧字段单业务方，契约 A 兼容）。
+function normalizeCorrectionRequesters(rawList, fallbackPrimary) {
+    const MAX_REQUESTERS = 20, MAX_NAME = 100, MAX_PHONE = 50;
+    if (Array.isArray(rawList) && rawList.length > MAX_REQUESTERS) {
+        return { ok: false, cleaned: [], error: `业务方过多（最多 ${MAX_REQUESTERS} 个）`, code: 'TOO_MANY_REQUESTERS' };
+    }
+    let list = Array.isArray(rawList) ? rawList : null;
+    if (!list || list.length === 0) {
+        list = (fallbackPrimary && typeof fallbackPrimary.name === 'string' && fallbackPrimary.name.trim()) ? [fallbackPrimary] : [];
+    }
+    const cleaned = [];
+    for (const r of list) {
+        if (!r || typeof r !== 'object') continue;
+        const name = (typeof r.name === 'string') ? r.name.trim() : ((typeof r.requester_name === 'string') ? r.requester_name.trim() : '');
+        if (!name) continue;   // 空名条目跳过（§5.3：调用方据 cleaned.length>=1 判 400）
+        if (name.length > MAX_NAME) return { ok: false, cleaned: [], error: `业务方姓名过长（≤${MAX_NAME} 字）`, code: 'REQUESTER_NAME_TOO_LONG' };
+        const phoneStr = (typeof r.phone === 'string') ? r.phone.trim() : ((typeof r.requester_phone === 'string') ? r.requester_phone.trim() : '');
+        if (phoneStr.length > MAX_PHONE) return { ok: false, cleaned: [], error: `业务方手机号过长（≤${MAX_PHONE} 字）`, code: 'REQUESTER_PHONE_TOO_LONG' };
+        cleaned.push({ name, phone: phoneStr || null });
+    }
+    return { ok: true, cleaned };
+}
+// 写业务方子表（建单/追加事务内调，用同连接 dbRunAsync）：第一条=主业务方 is_primary=1 seq=1，其余 seq 递增。
+//   status 初值 'not_sent'（§6.6 枚举）。调用方须先 normalizeCorrectionRequesters 且保证 cleaned.length>=1（§5.3 H-1 至少一条）。
+async function writeCorrectionRequesters(rid, cleaned) {
+    for (let i = 0; i < cleaned.length; i++) {
+        const r = cleaned[i];
+        await dbRunAsync(
+            `INSERT INTO correction_requesters
+                (correction_request_id, requester_name, requester_phone, is_primary, seq, completion_notify_status)
+             VALUES (?,?,?,?,?,'not_sent')`,
+            [rid, r.name, r.phone, i === 0 ? 1 : 0, i + 1]
+        );
+    }
+}
+// 业务方锚点解析（§6.0）：统一主子判断。无组单 master=自身；有组单 master=correction_group_id。
+//   返回 group_members（含状态，供组闸门）+ requesters（只在 master 上的子表行，is_primary 优先排序）。
+//   详情 / notify-done / read-status(done) / 追加 / error_proof 上传统一先调此 helper 再做主子/归属判断。
+//   ⚠️ 依赖不变量（codex 49 M-2，L4/§6.2 写时强制 + verify 钉死）：标准单 group_id=NULL；主单 group_id=id（自身）；
+//     子单 group_id=master_id(≠自身)。即"任何组都有一条 group_id=id 的主单"。L4 跨系统建单/§6.2 源单升主单
+//     必须同事务回填主单 group_id=id，否则从主单入口 resolve 会漏算组成员。此处不做"group_id NULL 时额外查子单"
+//     的运行时兜底（会让每个独立单常态多一次必空查询，且掩盖不变量违反）——改用 verify 守不变量（早失败优于兜底）。
+async function resolveCorrectionGroupAnchor(correctionId) {
+    const row = await dbGetAsync('SELECT id, correction_group_id FROM correction_requests WHERE id = ?', [correctionId]);
+    if (!row) return null;
+    const masterId = (row.correction_group_id == null) ? Number(row.id) : Number(row.correction_group_id);
+    const isMaster = (masterId === Number(row.id));
+    const groupMembers = (row.correction_group_id == null)
+        ? await dbAllAsync('SELECT id, status, closure_type, source_system FROM correction_requests WHERE id = ?', [masterId])
+        : await dbAllAsync('SELECT id, status, closure_type, source_system FROM correction_requests WHERE correction_group_id = ?', [masterId]);
+    const requesters = await dbAllAsync(
+        'SELECT * FROM correction_requesters WHERE correction_request_id = ? ORDER BY is_primary DESC, seq', [masterId]);
+    return { this_id: Number(row.id), master_id: masterId, is_master: isMaster, group_members: groupMembers, requesters };
+}
+// 组完成判定（§6.3）：仅 FIXED/REFIXED 或 ARCHIVED+normal 视为"该成员已完成"；VOIDED/REJECTED/admin_closure/未完成 阻塞。
+//   仅用于"组内其他成员是否完成"的读判定（RC-L1）；端点可发态闸门另限主单当前 FIXED/REFIXED（不靠本函数）。
+function isGroupMemberDoneForBusinessNotify(member) {
+    if (!member) return false;
+    if (member.status === 'FIXED' || member.status === 'REFIXED') return true;
+    if (member.status === 'ARCHIVED' && member.closure_type === 'normal') return true;
+    return false;
+}
+
 // ── POST /:id/reply-estimate 回复预计完成时间（→IN_PROGRESS，§4.3 / ESTIMATE_REQUIRED 闸门）─────
 //   权限在 transition 内校（admin/assignee）。钉钉通知业务方延 Commit D（对齐 B scope 决策：钉钉统一 D）。
 router.post('/:id/reply-estimate', authenticateToken, requireCorrectionSchemaReady, correctionIdGuard, async (req, res) => {
@@ -1285,15 +1612,50 @@ router.post('/:id/attachments', authenticateToken, requireCorrectionSchemaReady,
     const id = parseInt(req.params.id, 10);
     let persisted = [];   // M-1（codex 20 末次审）：提升到 handler 作用域，catch 才能回滚（对齐 /complete·/resubmit；防 recheck dbGet 抛错时 orphan 附件）
     try {
-        const row = await dbGetAsync('SELECT id, status, assigned_to, created_by FROM correction_requests WHERE id = ?', [id]);
+        // L2 type 分流（§6.7）：规范化 attachment_type，枚举仅 error_proof/fix_proof，缺省 fix_proof，枚举外 400。
+        //   ⚠️ 所有拒绝分支（400/403/409）都先 correctionCleanupPending 清 multer 已落的 _pending，防孤儿文件。
+        const rawType = (req.body && typeof req.body.attachment_type === 'string') ? req.body.attachment_type.trim() : '';
+        const attachmentType = rawType || 'fix_proof';
+        if (attachmentType !== 'fix_proof' && attachmentType !== 'error_proof') {
+            correctionCleanupPending(req, id);
+            return res.status(400).json({ error: 'attachment_type 非法（仅 fix_proof | error_proof）', code: 'INVALID_ATTACHMENT_TYPE' });
+        }
+        const row = await dbGetAsync('SELECT id, status, assigned_to, created_by, correction_group_id FROM correction_requests WHERE id = ?', [id]);
         if (!row) { correctionCleanupPending(req, id); return res.status(404).json({ error: '修正单不存在', code: 'CORRECTION_NOT_FOUND' }); }
         const actor = correctionActor(req);
         const isAdmin = actor.role === 'admin';
         const isAssignee = Number(row.assigned_to) === actor.id && actor.id > 0;
         const isCreator = Number(row.created_by) === actor.id && actor.id > 0;
+        const files = Array.isArray(req.files) ? req.files : [];
+
+        if (attachmentType === 'error_proof') {
+            // ── error_proof（§6.7 / RC2-M4 / H-3）：先解析锚点，子单 → 409 引导主单（后端约束不靠前端隐藏）──
+            const anchor = await resolveCorrectionGroupAnchor(id);
+            if (!anchor) { correctionCleanupPending(req, id); return res.status(404).json({ error: '修正单不存在', code: 'CORRECTION_NOT_FOUND' }); }   // codex 49 L-4：显式处理空 anchor（与 row 存在性校验语义一致，防数据竞争）
+            if (anchor.is_master === false) {
+                correctionCleanupPending(req, id);
+                return res.status(409).json({ error: '错误证明只能传到主单', code: 'ERROR_PROOF_ON_MASTER_ONLY', master_id: anchor.master_id });
+            }
+            // 权限限 admin/建单人（建单错误证明是建单侧职责，非开发侧）
+            if (!isAdmin && !isCreator) { correctionCleanupPending(req, id); return res.status(403).json({ error: '无权补充错误证明（仅建单人 / admin）', code: 'NOT_AUTHORIZED_FOR_ATTACHMENT' }); }
+            // 早期态可补传：PENDING_ASSIGN/ASSIGNED_PENDING_ESTIMATE/IN_PROGRESS/FIXED/REFIXED（排除 VOIDED/REJECTED/ARCHIVED）
+            const ERROR_PROOF_STATES = ['PENDING_ASSIGN', 'ASSIGNED_PENDING_ESTIMATE', 'IN_PROGRESS', 'FIXED', 'REFIXED'];
+            if (!ERROR_PROOF_STATES.includes(row.status)) { correctionCleanupPending(req, id); return res.status(409).json({ error: `当前状态「${row.status}」不可补充错误证明`, code: 'INVALID_STATE_FOR_ATTACHMENT' }); }
+            if (files.length === 0) { correctionCleanupPending(req, id); return res.status(400).json({ error: '未收到上传文件（field 名应为 files）', code: 'NO_FILE' }); }
+            persisted = await correctionPersistAttachments(id, files, 'error_proof', actor);
+            // 旁路双 WHERE 守卫：persist 后重读状态仍属可补传态（闭 TOCTOU：校验→INSERT 间被作废/拒绝/归档则回滚）
+            const recheckE = await dbGetAsync('SELECT status FROM correction_requests WHERE id = ?', [id]);
+            if (!recheckE || !ERROR_PROOF_STATES.includes(recheckE.status)) {
+                await correctionRollbackPersisted(persisted); persisted = [];
+                return res.status(409).json({ error: '修正单状态已变更，补充错误证明已撤销，请刷新重试', code: 'INVALID_STATE_FOR_ATTACHMENT' });
+            }
+            logger.info(`用户 ${req.user.username} 为修正单 #${id} 补充错误证明 ${persisted.length} 个（旁路 append）`);
+            return res.json({ ok: true, id, attachment_type: 'error_proof', attachments: persisted });
+        }
+
+        // ── fix_proof（现状，行为不变）：仅 FIXED/REFIXED + admin/被指派开发/建单人 ──
         if (!isAdmin && !isAssignee && !isCreator) { correctionCleanupPending(req, id); return res.status(403).json({ error: '无权补充附件（仅建单人 / 被指派开发 / admin）', code: 'NOT_AUTHORIZED_FOR_ATTACHMENT' }); }
         if (row.status !== 'FIXED' && row.status !== 'REFIXED') { correctionCleanupPending(req, id); return res.status(409).json({ error: '仅已完成（FIXED/REFIXED）的修正单可补充附件', code: 'INVALID_STATE_FOR_ATTACHMENT' }); }
-        const files = Array.isArray(req.files) ? req.files : [];
         if (files.length === 0) { correctionCleanupPending(req, id); return res.status(400).json({ error: '未收到上传文件（field 名应为 files）', code: 'NO_FILE' }); }
         persisted = await correctionPersistAttachments(id, files, 'fix_proof', actor);
         // M-1（codex 11）：旁路无 transition 的双 WHERE 守卫——persist 后重读状态闭合 TOCTOU 窗口
@@ -1305,7 +1667,7 @@ router.post('/:id/attachments', authenticateToken, requireCorrectionSchemaReady,
             return res.status(409).json({ error: '修正单状态已变更，补充附件已撤销，请刷新重试', code: 'INVALID_STATE_FOR_ATTACHMENT' });
         }
         logger.info(`用户 ${req.user.username} 为修正单 #${id} 补充附件 ${persisted.length} 个（旁路 append，不改状态）`);
-        return res.json({ ok: true, id, attachments: persisted });   // 旁路：不调 transition、不改 status、不增 submission_count
+        return res.json({ ok: true, id, attachment_type: 'fix_proof', attachments: persisted });   // 旁路：不调 transition、不改 status、不增 submission_count
     } catch (e) {
         // M-1（codex 20 末次审）：异常分支也回滚本次已落库附件（如 recheck dbGet 抛错），防 orphan；再清 _pending（对齐 /complete·/resubmit）
         await correctionRollbackPersisted(persisted);
@@ -1375,64 +1737,87 @@ router.post('/:id/notify-done', authenticateToken, requireCorrectionSchemaReady,
     const userName = req.user.display_name || req.user.username || `user#${userId}`;
     const isAdmin = req.user.role === 'admin';
     try {
-        const c = await dbGetAsync(
-            `SELECT id, status, correction_type, created_by, requester_name, requester_phone, source_system, location_info,
-                    completion_notify_status, completion_notify_message_key
-               FROM correction_requests WHERE id = ?`, [id]);
+        // ── L2b 多业务方（§6.3）：先解析锚点，子单 → 409 引导主单 ──
+        const anchor = await resolveCorrectionGroupAnchor(id);
+        if (!anchor) return res.status(404).json({ error: '修正单不存在', code: 'CORRECTION_NOT_FOUND' });
+        if (anchor.is_master === false) return res.status(409).json({ error: '完成通知只能在主单发送', code: 'NOTIFY_DONE_ON_MASTER_ONLY', master_id: anchor.master_id });
+        // 主单行（状态/建单人/卡片字段）；完成通知真相源在子表 anchor.requesters
+        const c = await dbGetAsync(`SELECT id, status, created_by, source_system, location_info FROM correction_requests WHERE id = ?`, [id]);
         if (!c) return res.status(404).json({ error: '修正单不存在', code: 'CORRECTION_NOT_FOUND' });
         // 权限（G-11）：建单人或 admin（开发无发送权——信息技术部建单人对业务方交付负责）
         if (!isAdmin && Number(c.created_by) !== userId) {
             return res.status(403).json({ error: '仅建单人或管理员可发送完成通知', code: 'NOT_AUTHORIZED_TO_NOTIFY' });
         }
-        // 范围（§4.5）：仅 FIXED/REFIXED 可发完成通知
+        // 端点可发态（RC-L1）：主单当前仅 FIXED/REFIXED（归档后不补发）
         if (c.status !== 'FIXED' && c.status !== 'REFIXED') {
             return res.status(409).json({ error: `仅已完成（FIXED/REFIXED）的修正单可发完成通知，当前：${c.status}`, code: 'INVALID_STATE_FOR_NOTIFY' });
         }
-        // RC-M3 统一重发契约（I3 codex 30 M-3）：未传 force_resend 且已 sent 且有 message_key → already_sent
-        //   （防双击重复打扰业务方，对齐 dev/relay/estimate 三端点；前端「重新通知」走 force_resend=true）
-        if (!(req.body && req.body.force_resend === true) && c.completion_notify_status === 'sent' && c.completion_notify_message_key) {
-            return res.json({ success: true, already_sent: true, status: 'sent', message: '已通知过业务方完成，未重复发送（如需重发传 force_resend）' });
+        // requester_id 解析（§6.3 RC3-M2）：必填；兼容旧前端=仅一条 requester 且未传时自动取主业务方
+        let requesterId = (req.body && req.body.requester_id != null) ? parsePositiveCorrectionId(req.body.requester_id) : null;
+        if (req.body && req.body.requester_id != null && !requesterId) return res.status(400).json({ error: '业务方 ID 非法', code: 'INVALID_REQUESTER_ID' });
+        // codex 50 L-5：主单无子表行（历史/异常数据）单独报，避免误导为"没传 requester_id"（L1 已保证新数据有子表行）
+        if (anchor.requesters.length === 0) return res.status(409).json({ error: '主单无业务方记录（历史/异常数据，需修复后再通知）', code: 'REQUESTER_ROWS_MISSING' });
+        if (!requesterId) {
+            if (anchor.requesters.length === 1) requesterId = Number(anchor.requesters[0].id);
+            else return res.status(400).json({ error: '请指定业务方（requester_id）', code: 'REQUESTER_ID_REQUIRED' });
+        }
+        // 归属校验（RC2-M3 堵串单/越权）：requester_id 必须属于本主单子表
+        const target = anchor.requesters.find(r => Number(r.id) === Number(requesterId));
+        if (!target) return res.status(404).json({ error: '业务方不存在或不属于本单', code: 'REQUESTER_NOT_IN_GROUP' });
+        // 组闸门（§6.3）：有组 → 组内全部成员完成才放行（无组退化为单成员，等价现状）
+        if (anchor.group_members.length > 1 && !anchor.group_members.every(m => isGroupMemberDoneForBusinessNotify(m))) {
+            return res.status(409).json({ error: '关联组内还有系统未完成，暂不能通知业务方', code: 'GROUP_NOT_ALL_DONE' });
+        }
+        // 落库 helper（仅用于 no_phone/failed 非 sent 终态）：更新该业务方子表行 completion_notify_*；
+        //   主业务方(is_primary=1) 同步回写主表兼容列（RC2-M2，best-effort 不阻断）。
+        //   **一并清 completion_read_at**（codex 50 M-2）：这些态都把 message_key 置 NULL，旧 read_at 成孤儿
+        //   （指向已失效消息），failed/no_phone 行带 read_at 自相矛盾，列表/人工排查会误判已读 → 一律清。
+        const persistNotify = async (status, messageKey, errorVal) => {
+            await dbRunAsync(`UPDATE correction_requesters SET completion_notify_status=?, completion_notified_at=datetime('now','localtime'), completion_notify_message_key=?, completion_notify_error=?, completion_read_at=NULL WHERE id=?`, [status, messageKey, errorVal, target.id]);
+            if (Number(target.is_primary) === 1) {
+                try { await dbRunAsync(`UPDATE correction_requests SET completion_notify_status=?, completion_notified_at=datetime('now','localtime'), completion_notify_message_key=?, completion_notify_error=?, completion_read_at=NULL WHERE id=?`, [status, messageKey, errorVal, id]); }
+                catch (e) { logger.warn(`[correction-notify-done] #${id} 主表兼容列回写失败（子表已更新，真相源正确）：${e.message}`); }
+            }
+        };
+        // RC-M3 统一重发契约：未传 force_resend 且该业务方已 sent 且有 message_key → already_sent
+        if (!(req.body && req.body.force_resend === true) && target.completion_notify_status === 'sent' && target.completion_notify_message_key) {
+            return res.json({ success: true, already_sent: true, status: 'sent', requester_id: requesterId, message: '已通知过该业务方完成，未重复发送（如需重发传 force_resend）' });
         }
         // ① 无手机号分支（G-11）：不调钉钉，落 no_phone，前端提示线下交付
-        const requesterPhone = String(c.requester_phone || '').trim();
+        const requesterPhone = String(target.requester_phone || '').trim();
         if (!requesterPhone) {
-            await dbRunAsync(`UPDATE correction_requests SET completion_notify_status='no_phone', completion_notified_at=datetime('now','localtime'), completion_notify_message_key=NULL, completion_notify_error='no_phone' WHERE id=?`, [id]);
-            return res.status(400).json({ success: false, code: 'REQUESTER_PHONE_EMPTY', message: '业务方建单时未填写手机号，请用其他方式交付', status: 'no_phone' });
+            await persistNotify('no_phone', null, 'no_phone');
+            return res.status(400).json({ success: false, code: 'REQUESTER_PHONE_EMPTY', message: '该业务方未填写手机号，请用其他方式交付', status: 'no_phone', requester_id: requesterId });
         }
-        // 取最新 fix_proof（有→有附件分支发文件；无→无附件分支只发文字）。最新=最终结果证明（append 历史保留，发最近一张）。
-        //   codex 14 L-2：correction_attachments 是 append-only 无软删字段（只 REQUEST 有 voided_at），故无需 status 过滤；
-        //   若未来给附件加软删 status，此处需补 (status='active' OR status IS NULL)。
+        // 取最新 fix_proof（在主单上）。最新=最终结果证明（append 历史保留，发最近一张）。
         const att = await dbGetAsync(
             `SELECT id, file_name, original_name FROM correction_attachments
               WHERE correction_request_id = ? AND attachment_type = 'fix_proof' ORDER BY id DESC LIMIT 1`, [id]);
         let physicalPath = null, sendFileName = null;
         if (att) {
-            // 扩展名断言（§4.5：图片/PDF/xlsx，对齐上传白名单 CORRECTION_ALLOWED_EXTS）
             const ext = normalizeAttachmentExt(att.original_name || att.file_name || '');
             if (!CORRECTION_ALLOWED_EXTS.includes(ext)) {
                 return res.status(409).json({ error: `结果证明扩展名 ${ext} 非法，无法作为文件发送`, code: 'FIX_PROOF_NOT_SENDABLE' });
             }
-            physicalPath = path.join(UPLOAD_DIR, att.file_name);   // file_name 是 correction/{rid}/{name} 相对路径
-            const rootCheck = collabVersioning._internal.ensureInsideRoot(physicalPath, UPLOAD_DIR);   // 路径越界防护（对齐 notify-requester-done）
+            physicalPath = path.join(UPLOAD_DIR, att.file_name);
+            const rootCheck = collabVersioning._internal.ensureInsideRoot(physicalPath, UPLOAD_DIR);
             if (!rootCheck.ok) return res.status(400).json({ error: '附件路径校验失败', code: 'PATH_VIOLATION' });
             if (!fs.existsSync(physicalPath)) return res.status(409).json({ error: '结果证明文件物理缺失', code: 'FIX_PROOF_FILE_MISSING' });
             sendFileName = att.original_name || path.basename(att.file_name);
         }
-        // 取凭证 + token。codex 14 M-2：配置缺失/token 失败 = **前置不可尝试**（钉钉根本没发起），直接返错不落
-        //   completion_notify_*（对齐母范式 notify-requester-done：config→500/token→502 均不落库；前端看本次 HTTP 错误码，
-        //   不把"未配置"与"发起后失败"混为一态）。真正"发起后失败"（反查/发送）才落 completion_notify_status='failed'（见下）。
+        // 取凭证 + token（config→500/token→502 均不落库；真正"发起后失败"才落 failed）
         const [appKey, appSecret, robotCode] = await Promise.all(
             ['dingtalk_app_key', 'dingtalk_app_secret', 'dingtalk_robot_code'].map(readSystemConfig));
         if (!appKey || !appSecret || !robotCode) return res.status(500).json({ error: '钉钉配置未填写', code: 'DINGTALK_NOT_CONFIGURED' });
         let token;
         try { token = await dingtalkNotify.getAccessToken(appKey, appSecret); }
         catch (err) { const cls = dingtalkNotify.classifyError(err); return res.status(502).json({ success: false, error: cls.hint, code: 'DINGTALK_TOKEN_FAILED', reason: cls.reason }); }
-        // 反查业务方钉钉号（HTTP 分层：查不到=400 业务输入 / 服务异常=502，对齐 notify-requester-done codex 78）
+        // 反查该业务方钉钉号（HTTP 分层：查不到=400 / 服务异常=502）
         const resolved = await dingtalkNotify.resolveRequesterDingUserId(token, requesterPhone);
         if (!resolved.ok) {
-            await dbRunAsync(`UPDATE correction_requests SET completion_notify_status='failed', completion_notified_at=datetime('now','localtime'), completion_notify_message_key=NULL, completion_notify_error=? WHERE id=?`, [resolved.reason || 'lookup_failed', id]);
-            if (resolved.reason === 'requester_invalid') return res.status(400).json({ success: false, code: 'REQUESTER_INVALID', message: '业务方手机号查不到企业钉钉号（非企业成员/未绑定/离职），请线下转达', status: 'failed' });
-            return res.status(502).json({ success: false, code: 'REQUESTER_LOOKUP_FAILED', message: '业务方钉钉号查询失败，请稍后重试', status: 'failed', reason: resolved.reason });
+            await persistNotify('failed', null, resolved.reason || 'lookup_failed');
+            if (resolved.reason === 'requester_invalid') return res.status(400).json({ success: false, code: 'REQUESTER_INVALID', message: '业务方手机号查不到企业钉钉号（非企业成员/未绑定/离职），请线下转达', status: 'failed', requester_id: requesterId });
+            return res.status(502).json({ success: false, code: 'REQUESTER_LOOKUP_FAILED', message: '业务方钉钉号查询失败，请稍后重试', status: 'failed', reason: resolved.reason, requester_id: requesterId });
         }
         const userIds = [resolved.userid];
         const sendOk = (r) => r && typeof r === 'object' && (!r.errcode || r.errcode === 0) && (!Array.isArray(r.invalidStaffIdList) || r.invalidStaffIdList.length === 0);
@@ -1443,14 +1828,13 @@ router.post('/:id/notify-done', authenticateToken, requireCorrectionSchemaReady,
             `- 修正方式：${esc(c.location_info)}`,
             att ? '- 结果证明见随附文件。' : '- 已完成，请自主查看。'
         ].join('\n');
-        // 步骤（有附件：upload→file→markdown 三步各记状态；无附件：仅 markdown，upload/file 预置 N/A=true）。
-        const steps = { media_upload: !att, file_send: !att, markdown_send: false };   // codex 14 M-1：补 media_upload 步防 failed_step 误报
+        const steps = { media_upload: !att, file_send: !att, markdown_send: false };
         let mdResp = null, failedStep = null;
         try {
             if (att) {
                 const buffer = fs.readFileSync(physicalPath);
                 const mediaId = await dingtalkNotify.uploadMedia(token, sendFileName, buffer);
-                if (!mediaId) throw Object.assign(new Error('media 上传未返回 mediaId'), { step: 'media_upload' });   // codex 15 M-1'：显式校验，无效凭证归因 media_upload 非 file_send
+                if (!mediaId) throw Object.assign(new Error('media 上传未返回 mediaId'), { step: 'media_upload' });
                 steps.media_upload = true;
                 const fileResp = await dingtalkNotify.sendFileToUser(token, robotCode, userIds, mediaId, sendFileName);
                 if (!sendOk(fileResp)) throw Object.assign(new Error('文件发送未成功'), { step: 'file_send' });
@@ -1460,25 +1844,31 @@ router.post('/:id/notify-done', authenticateToken, requireCorrectionSchemaReady,
             if (!sendOk(mdResp) || !mdResp.processQueryKey) throw Object.assign(new Error('markdown 未成功或缺 processQueryKey'), { step: 'markdown_send' });
             steps.markdown_send = true;
         } catch (e) {
-            // codex 14 M-1：失败步推断（readFileSync/uploadMedia 抛错→media_upload，对齐母范式三步推断）
             failedStep = e.step || (!steps.media_upload ? 'media_upload' : !steps.file_send ? 'file_send' : 'markdown_send');
         }
         const allOk = steps.media_upload && steps.file_send && steps.markdown_send;
-        // 全成才落 sent（清 completion_read_at 供重发已读跟踪，§4.5 L-2 以最近一次为准）；失败落 failed
         if (allOk) {
+            // 子表是真相源——子表落库失败才报 NOTIFY_SENT_BUT_DB_UPDATE_FAILED；主表回写在 persistNotify 内 best-effort
             try {
-                await dbRunAsync(`UPDATE correction_requests SET completion_notify_status='sent', completion_notified_at=datetime('now','localtime'), completion_notify_message_key=?, completion_notify_error=NULL, completion_read_at=NULL WHERE id=?`, [mdResp.processQueryKey, id]);
+                await dbRunAsync(`UPDATE correction_requesters SET completion_notify_status='sent', completion_notified_at=datetime('now','localtime'), completion_notify_message_key=?, completion_notify_error=NULL, completion_read_at=NULL WHERE id=?`, [mdResp.processQueryKey, target.id]);
             } catch (dbErr) {
-                logger.error(`[correction-notify-done] 修正单 #${id} 钉钉已发但落库失败：${dbErr.message}（key=${mdResp.processQueryKey}）`);
-                // codex 14 L-1：拆 delivery_status/persist_status，不用笼统 status:'sent'（避免前端误认 DB 已存 sent）
-                return res.status(200).json({ success: false, code: 'NOTIFY_SENT_BUT_DB_UPDATE_FAILED', message: '通知已发送但状态保存失败，请勿重发', delivery_status: 'sent', persist_status: 'failed' });
+                // codex 50 M-1：这是**继承自原主表 notify-done 的已接受边界**（非 L2b 新增）——钉钉已发但落库失败时，
+                //   子表未更新 → 后续 already_sent 不命中，重试会重复发送；"请勿重发"是软提示、系统不强阻。
+                //   恢复路径：日志已含 requester_id + processQueryKey（key=），运维可据此手工补写该子表行 completion_*。
+                //   极罕见竞态（生产 2 单），不引独立审计表 / 不暴露 key 给前端（内部钉钉标识无业务价值 + 扩攻击面）。
+                logger.error(`[correction-notify-done] #${id} 业务方#${requesterId} 钉钉已发但子表落库失败：${dbErr.message}（key=${mdResp.processQueryKey}）`);
+                return res.status(200).json({ success: false, code: 'NOTIFY_SENT_BUT_DB_UPDATE_FAILED', message: '通知已发送但状态保存失败，请勿重发', delivery_status: 'sent', persist_status: 'failed', requester_id: requesterId });
             }
-            logger.info(`[correction-notify-done] 修正单 #${id} 完成通知已发业务方(${resolved.userid}) by ${userName}（${att ? '含附件' : '无附件'}）`);
-            return res.json({ success: true, status: 'sent', has_attachment: !!att });
+            if (Number(target.is_primary) === 1) {
+                try { await dbRunAsync(`UPDATE correction_requests SET completion_notify_status='sent', completion_notified_at=datetime('now','localtime'), completion_notify_message_key=?, completion_notify_error=NULL, completion_read_at=NULL WHERE id=?`, [mdResp.processQueryKey, id]); }
+                catch (e) { logger.warn(`[correction-notify-done] #${id} 主表兼容列回写失败（子表已更新，真相源正确）：${e.message}`); }
+            }
+            logger.info(`[correction-notify-done] #${id} 完成通知已发业务方#${requesterId}(${resolved.userid}) by ${userName}（${att ? '含附件' : '无附件'}）`);
+            return res.json({ success: true, status: 'sent', requester_id: requesterId, has_attachment: !!att });
         }
-        await dbRunAsync(`UPDATE correction_requests SET completion_notify_status='failed', completion_notified_at=datetime('now','localtime'), completion_notify_message_key=NULL, completion_notify_error=? WHERE id=?`, [failedStep || 'failed', id]);
-        logger.warn(`[correction-notify-done] 修正单 #${id} 完成通知部分失败 failed_step=${failedStep} by ${userName}`);
-        return res.status(200).json({ success: false, code: 'NOTIFY_PARTIAL_FAILURE', failed_step: failedStep, message: '通知发送未完成，请重试或线下联系业务方', status: 'failed' });
+        await persistNotify('failed', null, failedStep || 'failed');
+        logger.warn(`[correction-notify-done] #${id} 业务方#${requesterId} 完成通知部分失败 failed_step=${failedStep} by ${userName}`);
+        return res.status(200).json({ success: false, code: 'NOTIFY_PARTIAL_FAILURE', failed_step: failedStep, message: '通知发送未完成，请重试或线下联系业务方', status: 'failed', requester_id: requesterId });
     } catch (e) {
         logger.error(`[correction-notify-done] 修正单 #${id} 异常：${e.message}`, e);
         return res.status(500).json({ success: false, error: '发送完成通知失败', code: 'NOTIFY_DONE_FAILED' });
@@ -1629,8 +2019,8 @@ router.post('/:id/notify-estimate', authenticateToken, requireCorrectionSchemaRe
         const c = await dbGetAsync('SELECT id, status, assigned_to, requester_phone, source_system, location_info, dev_estimated_at, requester_notify_status, requester_notify_message_key FROM correction_requests WHERE id = ?', [id]);
         if (!c) return res.status(404).json({ error: '修正单不存在' });
         const actor = correctionActor(req);
-        const isAssignee = Number(c.assigned_to) === Number(actor.id) && Number(actor.id) > 0;
-        if (actor.role !== 'admin' && !isAssignee) return res.status(403).json({ error: '无权通知业务方（仅 admin 或本单开发）', code: 'NOT_AUTHORIZED_TO_NOTIFY' });
+        // §6.5（L2）：notify-estimate 权限收紧仅 admin（去 isAssignee）——建单人/admin 把关业务方沟通，开发不再直发业务方绕过建单人。
+        if (actor.role !== 'admin') return res.status(403).json({ error: '无权通知业务方预计完成（仅 admin）', code: 'NOT_AUTHORIZED_TO_NOTIFY' });
         if (!CORRECTION_NOTIFY_SENDABLE.estimate.includes(c.status)) return res.status(409).json({ error: `当前状态「${c.status}」不可通知预计完成`, code: 'STATUS_NOT_NOTIFIABLE' });
         if (!c.dev_estimated_at) return res.status(400).json({ error: '尚未回复预计完成时间', code: 'ESTIMATE_REQUIRED' });   // RC-L1 不变量二次校验
         if (!String(c.requester_phone || '').trim()) {
@@ -1682,6 +2072,61 @@ router.get('/:id/notify-read-status', authenticateToken, requireCorrectionSchema
         const recipient = req.query.recipient || 'dev';
         const fm = CORRECTION_READ_FIELD_MAP[recipient];
         if (!fm) return res.status(400).json({ error: '无效的 recipient', code: 'INVALID_RECIPIENT' });
+
+        // ── L2b 多业务方完成通知已读（§6.4）：done 走业务方子表行（非主表），先锚点 + requester_id 归属校验 ──
+        //   （独立分支，自包含早返回；不动下方 dev/relay/estimate/creator 统一路径——风险隔离）
+        //   ⚠️ 本分支在上方 fm 校验【之后】，仍依赖 CORRECTION_READ_FIELD_MAP.done 作合法 recipient 白名单项
+        //     （codex 50 L-4：勿因"done 已迁子表"误删 map.done，否则 done 请求会先被 INVALID_RECIPIENT 拦截）。
+        if (recipient === 'done') {
+            const anchor = await resolveCorrectionGroupAnchor(id);
+            if (!anchor) return res.status(404).json({ error: '修正单不存在' });
+            if (anchor.is_master === false) return res.status(409).json({ error: '完成通知已读查询只在主单', code: 'NOTIFY_DONE_ON_MASTER_ONLY', master_id: anchor.master_id });
+            const mrow = await dbGetAsync('SELECT created_by FROM correction_requests WHERE id = ?', [id]);
+            const actorD = correctionActor(req);
+            const isCreatorD = mrow && Number(mrow.created_by) === Number(actorD.id) && Number(actorD.id) > 0;
+            if (actorD.role !== 'admin' && !isCreatorD) return res.status(403).json({ error: '无权查询该通知已读状态', code: 'NOT_AUTHORIZED' });   // 与 notify-done 同权（admin/建单人）
+            // requester_id 解析（RC3-M2 兼容旧前端：单业务方未传自动取主业务方）+ 归属校验（RC2-M3/RC3-M3）
+            let rid = (req.query.requester_id != null) ? parsePositiveCorrectionId(req.query.requester_id) : null;
+            if (req.query.requester_id != null && !rid) return res.status(400).json({ error: '业务方 ID 非法', code: 'INVALID_REQUESTER_ID', read: false });
+            if (anchor.requesters.length === 0) return res.status(409).json({ error: '主单无业务方记录（历史/异常数据，需修复）', code: 'REQUESTER_ROWS_MISSING', read: false });   // codex 50 L-5
+            if (!rid) {
+                if (anchor.requesters.length === 1) rid = Number(anchor.requesters[0].id);
+                else return res.status(400).json({ error: '请指定业务方（requester_id）', code: 'REQUESTER_ID_REQUIRED', read: false });
+            }
+            const tgt = anchor.requesters.find(r => Number(r.id) === Number(rid));
+            if (!tgt) return res.status(404).json({ error: '业务方不存在或不属于本单', code: 'REQUESTER_NOT_IN_GROUP', read: false });
+            // 口径（RC3-M3）：从子表行读 status/message_key；仅 sent+message_key 才反查钉钉，否则返**当前行状态**（codex 50 L-3，前端区分 not_sent/failed/no_phone）
+            if (tgt.completion_notify_status !== 'sent' || !tgt.completion_notify_message_key) {
+                return res.status(400).json({ error: '该业务方尚未成功通知完成', code: 'REQUESTER_NOTIFY_NOT_SENT', read: false, requester_id: rid, status: tgt.completion_notify_status, notify_error: tgt.completion_notify_error || null });
+            }
+            if (tgt.completion_read_at) return res.json({ recipient, requester_id: rid, read: true, read_at: tgt.completion_read_at, cached: true });
+            const tgtPhone = String(tgt.requester_phone || '').trim();
+            if (!tgtPhone) return res.status(400).json({ error: '业务方手机号为空，无法查已读', code: 'REQUESTER_PHONE_EMPTY', read: false });
+            const [aK, aS, rC] = await Promise.all(['dingtalk_app_key', 'dingtalk_app_secret', 'dingtalk_robot_code'].map(readSystemConfig));
+            if (!aK || !aS || !rC) return res.status(500).json({ error: '钉钉配置未填写', code: 'DINGTALK_NOT_CONFIGURED' });
+            let tk;
+            try { tk = await dingtalkNotify.getAccessToken(aK, aS); }
+            catch (err) { const cls = dingtalkNotify.classifyError(err); return res.status(502).json({ error: cls.hint, reason: cls.reason }); }
+            let uidD = '';
+            try { const rr = await callDingtalkWithTokenRetry(aK, aS, tk, (t) => dingtalkNotify.resolveRequesterDingUserId(t, tgtPhone)); uidD = rr && rr.ok ? String(rr.userid).trim() : ''; }
+            catch (err) { const cls = dingtalkNotify.classifyError(err); return res.status(502).json({ error: '业务方钉钉号查询失败：' + cls.hint, reason: cls.reason }); }
+            if (!uidD) return res.json({ recipient, requester_id: rid, read: false, read_at: null, read_status: 'recipient_unresolved' });
+            let rr2;
+            try { rr2 = await callDingtalkWithTokenRetry(aK, aS, tk, (t) => dingtalkNotify.getReadStatus(t, rC, tgt.completion_notify_message_key)); }
+            catch (err) { const cls = dingtalkNotify.classifyError(err); return res.status(502).json({ error: cls.hint, reason: cls.reason }); }
+            const e2 = (rr2.readDetails || []).find(d => String(d.userId).trim() === uidD && d.readStatus === 'READ');
+            let readAtD = null;
+            if (e2) {
+                const ts = Number(e2.readTimestamp) || 0;
+                const ms = ts > 1e12 ? ts : (ts > 1e9 ? ts * 1000 : Date.now());
+                const rd = new Date(ms); const p2 = (n) => String(n).padStart(2, '0');
+                readAtD = `${rd.getFullYear()}-${p2(rd.getMonth() + 1)}-${p2(rd.getDate())} ${p2(rd.getHours())}:${p2(rd.getMinutes())}:${p2(rd.getSeconds())}`;
+                try { await dbRunAsync(`UPDATE correction_requesters SET completion_read_at = ? WHERE id = ?`, [readAtD, tgt.id]); } catch (_) {}   // 首查到 READ 固化子表
+                if (Number(tgt.is_primary) === 1) { try { await dbRunAsync(`UPDATE correction_requests SET completion_read_at = ? WHERE id = ?`, [readAtD, id]); } catch (_) {} }   // 主业务方回写主表兼容列
+            }
+            return res.json({ recipient, requester_id: rid, read: !!e2, read_at: readAtD });
+        }
+
         // 字段名是写死的列名常量（非用户输入），插值进 SELECT 无注入风险
         const c = await dbGetAsync(
             `SELECT id, status, assigned_to, created_by, requester_phone, ${fm.user_id_col || 'NULL'} AS recipient_user_id,
@@ -1696,7 +2141,7 @@ router.get('/:id/notify-read-status', authenticateToken, requireCorrectionSchema
         let canQuery;
         if (recipient === 'dev') canQuery = isAdmin || isPublisher || isCorrectionRelayWhitelisted(actor.id);   // 细优④A（K2-M1）：notify-developer 放开对接人 → dev read-status 同步放开（写读同源）
         else if (recipient === 'relay') canQuery = isAdmin;
-        else if (recipient === 'estimate') canQuery = isAdmin || isAssignee;
+        else if (recipient === 'estimate') canQuery = isAdmin;   // §6.5 写读同源：notify-estimate 收紧仅 admin → estimate 已读查询同步收紧（去 isAssignee）
         else if (recipient === 'creator') canQuery = isAdmin || isAssignee || isCorrectionRelayWhitelisted(actor.id);   // 细优②：创建人通知发送方=开发/对接人/admin
         else canQuery = isAdmin || isCreator;   // done
         if (!canQuery) return res.status(403).json({ error: '无权查询该通知已读状态', code: 'NOT_AUTHORIZED' });
@@ -2047,6 +2492,6 @@ router.post('/:id/create-chat', authenticateToken, requireCorrectionSchemaReady,
   return {
     initSchema,
     router,
-    _internals: { CORRECTION_STATUSES, CORRECTION_STATUS_TRANSITIONS, CORRECTION_TYPES, CORRECTION_SOURCE_SYSTEMS, CORRECTION_NOTIFY_SENDABLE, CORRECTION_READ_FIELD_MAP, CORRECTION_ALLOWED_EXTS, CORRECTION_CHAT_EXCLUDE_IDS, CORRECTION_CHAT_ALLOWED_STATUSES, CORRECTION_REQUESTS_KEY_COLS, CORRECTION_ATTACHMENTS_KEY_COLS, CORRECTION_HISTORY_KEY_COLS, normalizeCorrectionDatetime, correctionDefaultDeadline, parsePositiveCorrectionId, correctionTransition, correctionActor, isCorrectionChatExcludedId, requireCorrectionSchemaReady, CORRECTION_SCHEMA_STATE, CORRECTION_RELAY_USER_IDS, isCorrectionRelayWhitelisted },
+    _internals: { CORRECTION_STATUSES, CORRECTION_STATUS_TRANSITIONS, CORRECTION_TYPES, CORRECTION_SOURCE_SYSTEMS, CORRECTION_NOTIFY_SENDABLE, CORRECTION_READ_FIELD_MAP, CORRECTION_ALLOWED_EXTS, CORRECTION_CHAT_EXCLUDE_IDS, CORRECTION_CHAT_ALLOWED_STATUSES, CORRECTION_REQUESTS_KEY_COLS, CORRECTION_ATTACHMENTS_KEY_COLS, CORRECTION_HISTORY_KEY_COLS, CORRECTION_REQUESTERS_KEY_COLS, CORRECTION_REQUESTERS_NOTNULL_COLS, CORRECTION_REQUESTER_NOTIFY_STATUSES, normalizeCorrectionDatetime, correctionDefaultDeadline, parsePositiveCorrectionId, correctionTransition, correctionActor, isCorrectionChatExcludedId, requireCorrectionSchemaReady, CORRECTION_SCHEMA_STATE, CORRECTION_RELAY_USER_IDS, isCorrectionRelayWhitelisted, normalizeCorrectionRequesters, writeCorrectionRequesters, resolveCorrectionGroupAnchor, isGroupMemberDoneForBusinessNotify },
   };
 };

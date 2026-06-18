@@ -337,11 +337,13 @@
                     <div class="hint">纯记账字段，可不填；填则须为正整数（单修正通常 1，批量填 N）。</div>
                 </div>
                 <div class="form-group"><label>原因/背景</label><textarea id="formReason" rows="2" placeholder="可选，错误产生原因或修正背景"></textarea></div>
-                <div class="form-row">
-                    <div class="form-group"><label>业务方部门</label><select id="formRequesterDept"></select></div>
-                    <div class="form-group"><label>业务方姓名 <span class="req">*</span></label><input type="text" id="formRequesterName" placeholder="提出修正的业务方"></div>
+                <div class="form-group"><label>业务方部门</label><select id="formRequesterDept"></select></div>
+                <div class="form-group">
+                    <label>业务方 <span class="req">*</span>（第一行为主业务方，可加多个）</label>
+                    <div id="requesterList"></div>
+                    <button type="button" class="btn-secondary" onclick="addRequesterRow()" style="margin-top:6px; padding:4px 10px; font-size:12px;">+ 添加业务方</button>
+                    <div class="hint">主业务方姓名必填；同一修正诉求可能涉及多个业务方，完成后逐个发钉钉通知（需手机号）。</div>
                 </div>
-                <div class="form-group"><label>业务方手机号</label><input type="text" id="formRequesterPhone" placeholder="可选，用于完成后钉钉通知业务方"></div>
                 <div class="form-group"><label>期望完成时间</label><input type="datetime-local" id="formExpectedDeadline"><div class="hint">可选，业务方期望完成时间（建单人代填）；不填则系统按默认规则生成。</div></div>
                 <!-- 指派路径 A/B/none（二选一，G-16；§1.5 三选一字段联动：A 必填开发 / B 必填对接人 / none 都不填） -->
                 <div class="form-group">
@@ -362,9 +364,13 @@
                     <select id="formRelayUser"><option value="">请选择对接人</option></select>
                     <div class="hint">建单后记录对接人，需在详情页手动点「通知对接人」发送钉钉；对接人收到后在平台指派。</div>
                 </div>
-                <!-- 注：建单态 error_proof 上传端点 A-E 未实现（建单为 JSON 接口无 multer，/attachments 仅 FIXED/REFIXED 可用）。
-                     本期建单不提供错误证明上传入口，避免空壳。错误描述靠文字（location_info）承载；
-                     如需 error_proof 上传，需后续补"建单态附件上传端点"（已记 backlog）。 -->
+                <!-- L3b 错误证明（§6.7：L2a 后端已支持 error_proof 早期态上传；建单 JSON → 拿 id → 两步上传锚点单） -->
+                <div class="form-group">
+                    <label>错误证明（可选）</label>
+                    <textarea id="formErrorProofNote" rows="2" maxlength="1000" placeholder="可选，文字说明错误证明（如：BMS 金额字段显示异常，截图见附件）"></textarea>
+                    <input type="file" id="formErrorProofFiles" multiple accept="image/*,.pdf,.xlsx,.xls" style="margin-top:6px;">
+                    <div class="hint">可选，错误证明文字 + 附件（图片/PDF/xlsx，≤5 个文件）；建单后两步上传到本单（上传失败不影响建单，详情页可补传）。</div>
+                </div>
             </div>
             <div class="modal-footer">
                 <button class="btn-secondary" onclick="closeCreateModal()">取消</button>
@@ -721,6 +727,7 @@
             currentDetail = r;   // M-3：缓存当前详情，供 openArchive/openCreateChat 读权威数据（非列表缓存）
             const history = data.history || [];
             const attachments = data.attachments || [];
+            const requesters = data.requesters || [];   // L3a 业务方子表 N 行（完成通知区按行渲染）；data.group 留 L5 关联组区
             document.getElementById('drawerTitle').textContent = `#${r.id} 数据修正`;
             const me = currentUser || {};
             const isAdmin = me.role === 'admin';
@@ -739,6 +746,13 @@
             }
             if ((isAdmin || isAssignee) && s === 'ASSIGNED_PENDING_ESTIMATE') {
                 actions += `<button class="btn-primary" onclick="openEstimate(${r.id})">回复预计完成</button>`;
+            }
+            // 改派（D-13 §7.2）：仅「待回复预计」态（开发未回复 ETA）可换开发；admin/publisher/本单对接人可见。
+            //   下拉已排除当前开发（避免选同人）；IN_PROGRESS 及之后不显示（如需换人走作废重建）。后端权限/状态为真闸门。
+            const isOwnRelay = isRelay && Number(r.relay_notified_user_id) === Number(me.id);
+            if ((isAdmin || isPublisher || isOwnRelay) && s === 'ASSIGNED_PENDING_ESTIMATE') {
+                actions += `<select onchange="reassignCorrection(${Number(r.id)}, this)"><option value="">改派给（换开发）…</option>` +
+                    allUsers.filter(u => u.role !== 'viewer' && Number(u.id) !== Number(r.assigned_to)).map(u => `<option value="${escapeHtml(String(u.id))}">${escapeHtml(u.display_name || u.username)}</option>`).join('') + `</select>`;
             }
             if ((isAdmin || isAssignee) && s === 'IN_PROGRESS') {
                 actions += `<button class="btn-primary" onclick="openComplete(${r.id}, '${r.correction_type}')">标完成</button>`;
@@ -822,29 +836,51 @@
                 { key: 'relay', cid: Number(r.id), label: '通知对接人', recipient: relayName || '对接人', applicable: !!r.relay_notified_user_id,
                   status: r.relay_notify_status, notifiedAt: r.relay_notified_at, readAt: r.relay_read_at, error: r.relay_notify_error,
                   sendable: ['PENDING_ASSIGN'], canSend: isAdmin, byPhone: false, noPhone: false },
+                // 预计完成（业务方·预计）仍发主业务方（ETA 旁路主表，§6.5 仅 admin）——estimate 不多业务方化
                 { key: 'estimate', cid: Number(r.id), label: '通知业务方·预计', recipient: r.requester_name || '业务方', applicable: true,
                   status: r.requester_notify_status, notifiedAt: r.requester_notified_at, readAt: r.requester_read_at, error: r.requester_notify_error,
-                  sendable: ['IN_PROGRESS'], canSend: isAdmin || isAssignee, byPhone: true, noPhone },
-                { key: 'done', cid: Number(r.id), label: '通知业务方·完成', recipient: r.requester_name || '业务方', applicable: true,
-                  status: r.completion_notify_status, notifiedAt: r.completion_notified_at, readAt: r.completion_read_at, error: r.completion_notify_error,
-                  sendable: ['FIXED', 'REFIXED'], canSend: isAdmin || isCreator, byPhone: true, noPhone },
+                  sendable: ['IN_PROGRESS'], canSend: isAdmin, byPhone: true, noPhone },
                 // 细优②：通知创建人（开发/对接人告知建单人工作完成；详情 label="创建人"，弹框文案"信息技术部"另见 §3.6）
                 { key: 'creator', cid: Number(r.id), label: '通知创建人', recipient: r.created_by_name || '创建人', applicable: !!r.created_by,
                   status: r.creator_notify_status, notifiedAt: r.creator_notified_at, readAt: r.creator_read_at, error: r.creator_notify_error,
                   sendable: ['FIXED', 'REFIXED'], canSend: isAdmin || isAssignee || isRelay, byPhone: false, noPhone: false },
             ];
-            // 细优②（M-1/M-2）：严格只 admin 看全部 5 类；非 admin（含 publisher/开发/对接人/其他 user）只看 creator 行（后端端点权限为真闸门）
+            // L3a 完成通知（done）：按业务方子表 N 行渲染（§7.2），每行带 requesterId；多业务方时标注姓名 +（主）
+            const multiReq = requesters.length > 1;
+            const doneRows = requesters.map(req => ({
+                key: 'done', cid: Number(r.id), requesterId: Number(req.id),
+                label: multiReq ? `通知业务方·完成 · ${req.requester_name || '业务方'}${Number(req.is_primary) === 1 ? '（主）' : ''}` : '通知业务方·完成',
+                recipient: req.requester_name || '业务方', applicable: true,
+                status: req.completion_notify_status, notifiedAt: req.completion_notified_at, readAt: req.completion_read_at, error: req.completion_notify_error,
+                sendable: ['FIXED', 'REFIXED'], canSend: isAdmin || isCreator, byPhone: true, noPhone: !String(req.requester_phone || '').trim(),
+            }));
+            // 权限可见性（细优② M-1/M-2 + L3a）：严格只 admin 看全部；非 admin 只看 creator 行（后端端点权限为真闸门）。
+            //   ⚠️ codex 51 L-4：通知行分两段控制——基础类型 notifyTypes（dev/relay/estimate/creator）+ done 子表 N 行 doneRows，
+            //     改通知权限时【两处都要动】（visibleTypes 和 visibleDone），勿只改一处。
             const visibleTypes = isAdmin ? notifyTypes : notifyTypes.filter(t => t.key === 'creator');
-            const notify = visibleTypes.filter(t => t.applicable).map(t => buildNotifyRow(t, s)).join('');
+            const visibleDone = isAdmin ? doneRows : [];   // done N 行仅 admin 看（与原 done 同口径）
+            // codex 51 M-2：requesters 空时（旧单未回填/异常数据）done 行会消失——admin 显示防御警告 surface 异常，
+            //   不造假主表 done 行（L2b length===0 → REQUESTER_ROWS_MISSING，假按钮点了必失败）。正常数据 L1 回填+readiness 保证非空。
+            const doneWarn = (isAdmin && requesters.length === 0)
+                ? `<div class="notify-row"><span class="nr-label">通知业务方·完成</span><span class="nr-body"><span style="color:#dc2626;">⚠️ 本单无业务方记录（数据异常，请联系管理员）</span></span></div>`
+                : '';
+            const notify = [...visibleTypes.filter(t => t.applicable), ...visibleDone].map(t => buildNotifyRow(t, s)).join('') + doneWarn;
 
             // ===== 状态历史 =====
-            let hist = history.length ? history.map(h => `
+            //   RC4-M4（改派 D-13）：同态记录（from===to，如「改派」from=to=ASSIGNED_PENDING_ESTIMATE）不渲染"状态A ← 状态A"
+            //     （读着像没动），改为「操作」徽章 + 当前态 + 突出 reason（"改派 旧#X→新#Y"）。常规流转记录维持原"目标态 ← 来源态"。
+            let hist = history.length ? history.map(h => {
+                const sameStatus = h.from_status && h.to_status && h.from_status === h.to_status;
+                const head = sameStatus
+                    ? `<span class="status-badge" style="font-size:10px; background:#ede9fe; color:#6d28d9;">操作</span><span style="color:#9ca3af;"> · ${escapeHtml(STATUS_LABELS[h.to_status] || h.to_status)}</span>`
+                    : `<span class="status-badge s-${statusClass(h.to_status)}" style="font-size:10px;">${escapeHtml(STATUS_LABELS[h.to_status] || h.to_status)}</span><span style="color:#9ca3af;"> ← ${h.from_status ? escapeHtml(STATUS_LABELS[h.from_status] || h.from_status) : '建单'}</span>`;
+                return `
                 <div class="history-item">
-                    <span class="status-badge s-${statusClass(h.to_status)}" style="font-size:10px;">${escapeHtml(STATUS_LABELS[h.to_status] || h.to_status)}</span>
-                    <span style="color:#9ca3af;"> ← ${h.from_status ? escapeHtml(STATUS_LABELS[h.from_status] || h.from_status) : '建单'}</span>
+                    ${head}
                     <span style="color:#6b7280;"> · ${escapeHtml(h.operator_name || '-')} · ${escapeHtml(formatFullTime(h.created_at))}</span>
-                    ${h.reason ? `<div style="color:#6b7280; margin-top:2px;">${escapeHtml(h.reason)}</div>` : ''}
-                </div>`).join('') : '<div style="color:#9ca3af; font-size:12px;">暂无状态历史</div>';
+                    ${h.reason ? `<div style="color:${sameStatus ? '#4b5563' : '#6b7280'}; margin-top:2px;${sameStatus ? ' font-weight:500;' : ''}">${escapeHtml(h.reason)}</div>` : ''}
+                </div>`;
+            }).join('') : '<div style="color:#9ca3af; font-size:12px;">暂无状态历史</div>';
 
             // ===== 附件 =====
             const attLink = a => `/uploads/${String(a.file_name || '').split('/').map(encodeURIComponent).join('/')}`;
@@ -853,6 +889,13 @@
             const renderAtts = (list, emptyText) => list.length ? list.map(a => `
                 <div class="att-item">📎 <a href="${attLink(a)}" target="_blank">${escapeHtml(a.original_name || a.file_name)}</a>
                 <span style="color:#9ca3af;"> · ${escapeHtml(a.uploaded_by_name || '-')} · ${escapeHtml(formatFullTime(a.created_at))}</span></div>`).join('') : `<div style="color:#9ca3af; font-size:12px;">${emptyText}</div>`;
+            // L3b 错误证明区：文字说明 error_proof_note + 补传入口（§6.7：建单人/admin，早期态 PENDING_ASSIGN~REFIXED，非作废）
+            const ERR_PROOF_STATES = ['PENDING_ASSIGN', 'ASSIGNED_PENDING_ESTIMATE', 'IN_PROGRESS', 'FIXED', 'REFIXED'];
+            const canAddErrProof = (isAdmin || isCreator) && ERR_PROOF_STATES.includes(s) && !r.voided_at;
+            const errProofNoteHtml = r.error_proof_note ? `<div style="font-size:13px; color:#374151; margin-bottom:6px; white-space:pre-wrap;">📝 ${escapeHtml(r.error_proof_note)}</div>` : '';
+            const errProofAddHtml = canAddErrProof
+                ? `<div style="margin-top:8px;"><input type="file" id="errProofFiles_${Number(r.id)}" multiple accept="image/*,.pdf,.xlsx,.xls" style="font-size:12px;"><button class="btn-secondary nb-btn" onclick="uploadErrorProof(${Number(r.id)})">上传错误证明</button></div>`
+                : '';
 
             // ===== 群信息 =====
             let chatBlock = '';
@@ -867,7 +910,7 @@
                 ${actions ? `<div class="action-bar">${actions}</div>` : ''}
                 <div class="detail-section"><h3>基本信息</h3>${info}</div>
                 <div class="detail-section"><h3>通知状态</h3>${notify}</div>
-                <div class="detail-section"><h3>错误证明（error_proof）</h3>${renderAtts(errProofs, '无')}</div>
+                <div class="detail-section"><h3>错误证明（error_proof）</h3>${errProofNoteHtml}${renderAtts(errProofs, errProofNoteHtml ? '（暂无附件）' : '无')}${errProofAddHtml}</div>
                 <div class="detail-section"><h3>结果证明（fix_proof）</h3>${renderAtts(fixProofs, '无')}</div>
                 ${chatBlock}
                 <div class="detail-section"><h3>状态历史</h3>${hist}</div>
@@ -896,11 +939,52 @@
             // 重置
             document.querySelector('input[name="corrType"][value="single"]').checked = true;
             document.querySelector('input[name="assignMode"][value="A"]').checked = true;
-            ['formSourceSystemOther', 'formLocationInfo', 'formCorrectionCount', 'formOaNumber', 'formReason', 'formRequesterName', 'formRequesterPhone'].forEach(id => document.getElementById(id).value = '');
+            ['formSourceSystemOther', 'formLocationInfo', 'formCorrectionCount', 'formOaNumber', 'formReason', 'formErrorProofNote'].forEach(id => document.getElementById(id).value = '');
+            document.getElementById('formErrorProofFiles').value = '';   // L3b 清错误证明附件选择
+            resetRequesterList();
             toggleSourceOther(); toggleAssignMode();
             document.getElementById('createModal').classList.add('open');
         }
         function closeCreateModal() { document.getElementById('createModal').classList.remove('open'); }
+        // ── L3a 多业务方录入（§7.1：第一行=主业务方，可增删）─────────────────────────
+        function addRequesterRow(name, phone) {
+            const list = document.getElementById('requesterList');
+            const idx = list.children.length;   // 0=主业务方
+            const row = document.createElement('div');
+            row.className = 'form-row requester-row';
+            row.style.cssText = 'gap:6px; align-items:center; margin-bottom:6px;';
+            // codex 51 L-3：createElement + input.value 设值（无属性上下文，不依赖 escapeHtml 转引号；去"编辑回填漏 escape"footgun）
+            const nameInput = document.createElement('input');
+            nameInput.type = 'text'; nameInput.className = 'rq-name'; nameInput.style.flex = '1';
+            nameInput.placeholder = idx === 0 ? '主业务方姓名（必填）' : '业务方姓名';
+            nameInput.value = name || '';
+            const phoneInput = document.createElement('input');
+            phoneInput.type = 'text'; phoneInput.className = 'rq-phone'; phoneInput.style.flex = '1';
+            phoneInput.placeholder = '手机号（可选，发钉钉用）';
+            phoneInput.value = phone || '';
+            row.appendChild(nameInput); row.appendChild(phoneInput);
+            if (idx === 0) {
+                const tag = document.createElement('span');
+                tag.style.cssText = 'width:54px; font-size:12px; color:#9ca3af; text-align:center;';
+                tag.textContent = '主';
+                row.appendChild(tag);
+            } else {
+                const del = document.createElement('button');
+                del.type = 'button'; del.className = 'btn-secondary';
+                del.style.cssText = 'width:54px; padding:4px 6px; font-size:12px;';
+                del.textContent = '删除';
+                del.onclick = () => row.remove();
+                row.appendChild(del);
+            }
+            list.appendChild(row);
+        }
+        function resetRequesterList() { document.getElementById('requesterList').innerHTML = ''; addRequesterRow(); }   // 至少一行主业务方
+        function collectRequesters() {
+            return Array.from(document.querySelectorAll('#requesterList .requester-row')).map(row => ({
+                name: row.querySelector('.rq-name').value.trim(),
+                phone: row.querySelector('.rq-phone').value.trim(),
+            })).filter(r => r.name);   // 空名行丢弃（与后端 normalize 同口径）
+        }
         function toggleSourceOther() {
             const isOther = document.getElementById('formSourceSystem').value === '其他';
             document.getElementById('sourceOtherGroup').style.display = isOther ? 'block' : 'none';
@@ -920,7 +1004,11 @@
             if (!sourceSystem) return showToast('请选择所属系统', 'error');
             if (sourceSystem === '其他' && !v('formSourceSystemOther')) return showToast('选「其他」时须填写系统说明', 'error');
             if (!v('formLocationInfo')) return showToast('请填写修正方式', 'error');
-            if (!v('formRequesterName')) return showToast('请填写业务方姓名', 'error');
+            // codex 51 M-1：第一行=主业务方，须单独校验其姓名非空（否则空名第一行被 filter 丢弃后第二行上位成主，与 UI 语义不符）
+            const reqRows = document.querySelectorAll('#requesterList .requester-row');
+            if (!reqRows[0] || !reqRows[0].querySelector('.rq-name').value.trim()) return showToast('请填写主业务方姓名（第一行）', 'error');
+            const requesters = collectRequesters();
+            if (requesters.length === 0) return showToast('请至少填写一个业务方姓名（主业务方）', 'error');
             const correctionCountRaw = v('formCorrectionCount');
             if (correctionCountRaw && !/^[1-9]\d{0,8}$/.test(correctionCountRaw)) return showToast('修正条数须为正整数（1-999999999）', 'error');
             const payload = {
@@ -932,8 +1020,8 @@
                 oa_number: v('formOaNumber') || undefined,
                 reason: v('formReason') || undefined,
                 requester_dept: document.getElementById('formRequesterDept').value || undefined,
-                requester_name: v('formRequesterName'),
-                requester_phone: v('formRequesterPhone') || undefined,
+                requesters: requesters,   // L3a 多业务方（第一行=主业务方；后端 normalize 兼容旧 requester_name 字段）
+                error_proof_note: v('formErrorProofNote') || undefined,   // L3b 错误证明说明（后端 ≤1000）
                 expected_deadline: (() => { const ed = v('formExpectedDeadline'); if (!ed) return undefined; return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(ed) ? ed.replace('T', ' ') + ':00' : ed.replace('T', ' '); })()   // 细优 E（M-4/K3-L2）：分钟精度→本地 YYYY-MM-DD HH:mm:ss；含秒只 replace T；空不传走后端默认（R-L3）
             };
             if (assignMode === 'A') {
@@ -945,6 +1033,12 @@
                 if (!relay) return showToast('请选择对接人', 'error');
                 payload.relay_notified_user_id = relay;
             }
+            // L-2（codex 54）：error_proof 文件数建单前预校验——超 5 个直接阻止建单，
+            //   避免"单已建、附件未传"半完成态（建单后的 >5 分支保留为防御兜底，正常流走不到）。
+            const epFilesPre = document.getElementById('formErrorProofFiles').files;
+            if (epFilesPre && epFilesPre.length > 5) {
+                return showToast('错误证明附件最多 5 个，请减少后再建单', 'error');
+            }
             const btn = document.getElementById('btnSubmitCreate');
             btn.disabled = true;
             try {
@@ -952,6 +1046,24 @@
                 const data = await res.json().catch(() => ({}));
                 if (!res.ok) { showToast(data.error || '建单失败', 'error'); return; }
                 showToast('修正单已创建', 'success');
+                // L3b 两步上传 error_proof 附件（§6.7：建单 JSON 成功后传锚点单；上传失败不回滚建单，提示详情页可补传）
+                const epFiles = document.getElementById('formErrorProofFiles').files;
+                if (epFiles && epFiles.length > 0) {
+                    const correctionId = Number(data.id);
+                    if (!correctionId) {
+                        showToast('建单成功，错误证明需在详情页补传', 'warning', 5000);   // codex 52 L-4：有文件但响应无有效 id（防契约漂移）
+                    } else if (epFiles.length > 5) {
+                        showToast('错误证明附件最多 5 个，已建单未上传，请在详情页补传不超过 5 个', 'warning', 5000);   // codex 52 M-2：前端早拦超限
+                    } else {
+                        const fd = new FormData(); fd.append('attachment_type', 'error_proof');
+                        for (const f of epFiles) fd.append('files', f);
+                        try {
+                            const upRes = await authFetch(`/api/corrections/${correctionId}/attachments`, { method: 'POST', body: fd });
+                            if (upRes.ok) showToast('错误证明附件已上传', 'success');   // codex 52 L-3：上传成功明确提示
+                            else { const ud = await upRes.json().catch(() => ({})); showToast('建单成功，错误证明上传失败（' + (ud.error || '可在详情页补传') + '）', 'warning', 5000); }
+                        } catch (e) { showToast('建单成功，错误证明上传失败，可在详情页补传', 'warning', 5000); }
+                    }
+                }
                 // I1（codex 26 L-1 + 27 RC-L1）：建单不再自动发钉钉（旧 relay_notify_sent 即时提示已移除）；提示去详情页手动发送
                 if (assignMode === 'A' || assignMode === 'B') {
                     setTimeout(() => showToast('请在详情页点「通知开发/对接人」发送钉钉通知', 'success', 4500), 900);
@@ -974,6 +1086,21 @@
                 showToast('已指派，请在详情页点「通知开发」发送钉钉通知', 'success');
                 await loadList(); openDrawer(id);
             } catch (e) { showToast('指派失败', 'error'); }
+        }
+
+        // ================= 改派（详情内联，D-13 §6.8）=================
+        //   仅「待回复预计」态可改派；原开发指派通知作废（后端重置 notify_*），改派后需重新点「通知开发」。
+        async function reassignCorrection(id, sel) {
+            const devId = sel.value;
+            if (!devId) return;
+            if (!confirm('确认改派给该开发？原开发的指派通知将作废，改派后需重新点「通知开发」。')) { sel.value = ''; return; }
+            try {
+                const res = await authFetch(`/api/corrections/${id}/reassign`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ assigned_to: devId }) });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) { showToast(data.error || '改派失败', 'error'); sel.value = ''; return; }
+                showToast('已改派，请重新点「通知开发」发送钉钉通知', 'success');
+                await loadList(); openDrawer(id);
+            } catch (e) { showToast('改派失败', 'error'); sel.value = ''; }   // M-1（codex 53）：异常路径也复位下拉，避免停在已选新开发误判"已改派"
         }
 
         // ================= 回复预计 =================
@@ -1112,6 +1239,25 @@
                 closeModal('attachModal'); await loadList(); openDrawer(id);
             } catch (e) { showToast('补充失败', 'error'); } finally { btn.disabled = false; }
         }
+        // L3b 详情页补传错误证明（§6.7：建单人/admin，早期态；attachment_type=error_proof，子单后端 409 引导主单）
+        async function uploadErrorProof(id) {
+            const input = document.getElementById('errProofFiles_' + id);
+            if (!input || !input.files.length) return showToast('请选择错误证明文件', 'error');
+            if (input.files.length > 5) return showToast('错误证明附件最多 5 个文件', 'error');   // codex 52 M-2：前端早拦超限
+            const fd = new FormData(); fd.append('attachment_type', 'error_proof');
+            for (const f of input.files) fd.append('files', f);
+            try {
+                const res = await authFetch(`/api/corrections/${id}/attachments`, { method: 'POST', body: fd });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) {
+                    if (data.code === 'ERROR_PROOF_ON_MASTER_ONLY' && data.master_id) showToast(`错误证明只能传到主单 #${data.master_id}`, 'warning', 4500);
+                    else showToast(data.error || '上传失败', 'error');
+                    return;
+                }
+                showToast('错误证明已上传', 'success');
+                await loadList(); openDrawer(id);   // codex 52 M-1：与 submitAttachments 范式一致（openDrawer 本就 re-fetch 详情，附件必刷新）
+            } catch (e) { showToast('上传失败', 'error'); }
+        }
 
         // ================= 通知发送 / 查已读（5 类统一 dev/relay/estimate/done/creator，§2.4/§2.5/§2.6）=================
         const CORRECTION_NOTIFY_ENDPOINTS = { dev: 'notify-developer', relay: 'notify-relay', estimate: 'notify-estimate', done: 'notify-done', creator: 'notify-creator' };
@@ -1134,8 +1280,9 @@
             const esc = escapeHtml;
             const rname = esc(t.recipient);
             const canSendNow = t.sendable.includes(curStatus);
-            const sendBtn = (force, text) => (t.canSend && canSendNow) ? `<button class="btn-secondary nb-btn" onclick="notifySend(${t.cid}, '${t.key}', ${force})">${text}</button>` : '';
-            const readBtn = t.canSend ? `<button class="btn-secondary nb-btn" onclick="queryReadStatus(${t.cid}, '${t.key}')">查询已读</button>` : '';
+            const ridArg = (t.key === 'done' && t.requesterId) ? `, ${t.requesterId}` : '';   // L3a：done 携带 requester_id（多业务方逐个发/查）
+            const sendBtn = (force, text) => (t.canSend && canSendNow) ? `<button class="btn-secondary nb-btn" onclick="notifySend(${t.cid}, '${t.key}', ${force}${ridArg})">${text}</button>` : '';
+            const readBtn = t.canSend ? `<button class="btn-secondary nb-btn" onclick="queryReadStatus(${t.cid}, '${t.key}'${ridArg})">查询已读</button>` : '';
             let line = '', btns = '';
             if (t.byPhone && t.noPhone) {
                 line = `<span style="color:#b45309;">— 业务方未填手机号，无法通知</span>`;
@@ -1163,12 +1310,14 @@
         }
 
         // 发送 / 重发某类钉钉通知（force=true 走重发契约 force_resend，后端清对应 read_at）
-        async function notifySend(id, recipient, force) {
+        async function notifySend(id, recipient, force, requesterId) {
             const ep = CORRECTION_NOTIFY_ENDPOINTS[recipient];
             if (!ep) return;
             if (force && !confirm(`确认重新通知${CORRECTION_NOTIFY_NAMES[recipient] || ''}？\n将以本次为最新一次通知，旧已读记录清除。`)) return;
             try {
-                const res = await authFetch(`/api/corrections/${id}/${ep}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ force_resend: !!force }) });
+                const body = { force_resend: !!force };
+                if (recipient === 'done' && requesterId) body.requester_id = requesterId;   // L3a 多业务方逐个发
+                const res = await authFetch(`/api/corrections/${id}/${ep}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
                 const data = await res.json().catch(() => ({}));
                 if (res.ok && (data.success || data.ok)) {
                     if (data.already_sent) showToast(data.message || '已通知过，未重复发送', 'success');
@@ -1185,9 +1334,11 @@
         }
 
         // 查询某类通知的钉钉已读状态（§2.5；查到已读会固化 read_at，刷新详情显示 📖）
-        async function queryReadStatus(id, recipient) {
+        async function queryReadStatus(id, recipient, requesterId) {
             try {
-                const res = await authFetch(`/api/corrections/${id}/notify-read-status?recipient=${encodeURIComponent(recipient)}`);
+                let url = `/api/corrections/${id}/notify-read-status?recipient=${encodeURIComponent(recipient)}`;
+                if (recipient === 'done' && requesterId) url += `&requester_id=${requesterId}`;   // L3a 多业务方按人查已读
+                const res = await authFetch(url);
                 const data = await res.json().catch(() => ({}));
                 if (res.ok) {
                     if (data.read) { showToast(`对方已于 ${data.read_at || '—'} 阅读`, 'success'); openDrawer(id); }

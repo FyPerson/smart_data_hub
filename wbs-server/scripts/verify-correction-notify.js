@@ -128,6 +128,10 @@ async function main() {
     ok('codex 13 闭合：异常/not_found 路径统一落 failed（"失败必落库"不被异常绕过；dev exception/not_found + requester exception 均验）');
 
     // [5] D2b notify-done：三分支决策 + 三态落库
+    // ⚠️ L2b（跨系统关联）后：notify-done 存储已迁业务方子表 correction_requesters（+ 主业务方回写主表兼容列），
+    //   本段为**三态决策逻辑复刻**（no_phone/has_attachment/no_attachment 分支选择 + 落库列形态，均未变）；
+    //   多业务方按 requester_id / 归属校验 / 组闸门 / 仅主业务方回写主表 / read-status done 的**真实端到端**
+    //   覆盖见 verify-correction-notify-done-e2e.js（require-cache mock 钉钉 + router-mount 真实跑端点）。
     // 三分支决策
     assert.strictEqual(completionBranch('', true), 'no_phone', '无手机号→no_phone（即便有附件）');
     assert.strictEqual(completionBranch('13800000000', true), 'has_attachment', '有手机号+有 fix_proof→有附件分支（single）');
