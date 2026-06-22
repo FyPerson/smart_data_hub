@@ -1822,6 +1822,18 @@ function initTable() {
         safeAlterAddColumn('collab_requests', 'done_notify_message_key', 'TEXT');   // markdown 通知的 processQueryKey
         safeAlterAddColumn('collab_requests', 'done_read_at', 'TEXT');              // 业务方已读完成通知时间
 
+        // 开发回填预计完成时间 + 建单人通知需求方（2026-06-22，v1.90.0）：6 字段
+        //   方案 docs/local/数据协作模块_v3.0/数据协作模块_开发回填预计完成时间_方案_20260622_v1.3.md
+        //   dev_estimated_at：开发回填的预计完成时间（PENDING 本人可改；改派/有效改预估时清空/重置 expected 通知态）
+        //   expected_notify_*：建单人通知需求方·预计完成 的钉钉已读跟踪，同构 done_notify_*（发 requester_phone）
+        //   四态 not_sent/sent/failed/no_phone 由 §4.4 四个互斥 helper 落地（防加字段漏分支，CHECK 只兜底枚举值）
+        safeAlterAddColumn('collab_requests', 'dev_estimated_at', 'DATETIME');
+        safeAlterAddColumn('collab_requests', 'expected_notify_status', "TEXT NOT NULL DEFAULT 'not_sent' CHECK(expected_notify_status IN ('not_sent','sent','failed','no_phone'))");
+        safeAlterAddColumn('collab_requests', 'expected_notified_at', 'DATETIME');
+        safeAlterAddColumn('collab_requests', 'expected_notify_message_key', 'TEXT');
+        safeAlterAddColumn('collab_requests', 'expected_notify_error', 'TEXT');
+        safeAlterAddColumn('collab_requests', 'expected_read_at', 'DATETIME');
+
         // ===== 取数交付质量记录 v3.0（2026-06-05，Commit A）=====
         //   方案 docs/local/数据协作模块_v3.0/取数交付质量记录_方案_20260605_v3.0.md §3
         //   定位：取数交付质量记录仪（"管事不管人"）。产出级记录 + 兼容多产出（collab_sub_item_id 预留可空）。
@@ -2167,7 +2179,10 @@ function verifyV2CollabSchema() {
         // v1.72.3 admin 直派模式（2026-05-28）
         'assign_mode',
         // 导出人通知业务方·发数据（2026-05-29）
-        'done_notified_at', 'done_notify_message_key', 'done_read_at'
+        'done_notified_at', 'done_notify_message_key', 'done_read_at',
+        // 开发回填预计完成时间 + 通知需求方（2026-06-22）
+        'dev_estimated_at', 'expected_notify_status', 'expected_notified_at',
+        'expected_notify_message_key', 'expected_notify_error', 'expected_read_at'
     ];
     db.all("PRAGMA table_info(collab_requests)", [], (err, rows) => {
         if (err) {
@@ -12143,6 +12158,9 @@ const COLLAB_STATUSES = ['PENDING_ASSIGN', 'PENDING', 'EXPORTING', 'SUBMITTED', 
 const COLLAB_UNASSIGNED_DEVELOPER_ID = 0;
 const COLLAB_UNASSIGNED_DEVELOPER_NAME = '(待指派)';
 
+// 开发回填预计完成时间：允许早于当前不超过 N 分钟（防刚选当前分钟被判过去；后端为准、前端仅提示，方案 v1.3 L-2）
+const ALLOW_PAST_MINUTES = 2;
+
 // v1.70.4 codex 30 审 #5：手机号脱敏 helper，用于日志输出避免明文进审计/服务日志
 //   规则：保留前 3 位 + 末 4 位，中间 4 位 ****；非 11 位输入返回 '[invalid_phone]' 不暴露原文
 function maskPhone(phone) {
@@ -12159,6 +12177,60 @@ function insertCollabLog(collabRequestId, operationType, operatorId, operator, r
         [collabRequestId, operationType, operatorId, operator, reason],
         (err) => { if (err) logger.error('Insert collab log failed:', err.message); }
     );
+}
+
+// 开发预计完成时间归一化：前端 YYYY-MM-DDTHH:mm → 落库 'YYYY-MM-DD HH:mm:00'（秒位强制归零，方案 v1.2 M-2）
+//   含真实日期校验（防 02-30 之类越界字面量）；非法/空 → 返 null。复刻 corrections.js normalizeCorrectionDatetime 范式。
+function normalizeCollabDatetime(raw) {
+    if (raw === undefined || raw === null) return null;
+    let dv = String(raw).trim().replace('T', ' ');
+    if (!dv) return null;
+    const m = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})(?::\d{2})?$/.exec(dv);
+    if (!m) return null;
+    const y = +m[1], mo = +m[2], d = +m[3], h = +m[4], mi = +m[5];
+    const dt = new Date(y, mo - 1, d, h, mi, 0);
+    if (dt.getFullYear() !== y || dt.getMonth() !== mo - 1 || dt.getDate() !== d || dt.getHours() !== h || dt.getMinutes() !== mi) return null;
+    const p = n => String(n).padStart(2, '0');
+    return `${y}-${p(mo)}-${p(d)} ${p(h)}:${p(mi)}:00`;  // 秒位恒 :00
+}
+
+// ===== expected 通知态写入 helper 体系（方案 §4.4，4 个互斥清单）=====
+//   建单人通知需求方·预计完成 的通知态四值（not_sent/sent/failed/no_phone）。
+//   调用方只选 helper、不手写 SET 分支——从源头杜绝"加字段漏分支 / 误置 status 违反 §三.1 不变量"。
+//   不变量（§三.1）：not_sent/failed/no_phone 三态 notified_at/message_key/read_at 必全 NULL，区别只在 status 与 error；
+//                   sent 态 notified_at+message_key 必有、error 必 NULL、read_at 反查命中才回写。
+//   ⚠️ 三个"清干净"语义不复用同一个带 targetStatus 参数的通用 helper（防误传制造违反不变量，v1.3 L-3）。
+async function resetExpectedNotifyNotSent(id) {
+    await dbRunAsync(
+        `UPDATE collab_requests SET expected_notify_status='not_sent', expected_notified_at=NULL, expected_notify_message_key=NULL, expected_read_at=NULL, expected_notify_error=NULL WHERE id=?`,
+        [id]
+    );
+}
+async function setExpectedNotifyNoPhone(id) {
+    await dbRunAsync(
+        `UPDATE collab_requests SET expected_notify_status='no_phone', expected_notified_at=NULL, expected_notify_message_key=NULL, expected_read_at=NULL, expected_notify_error='REQUESTER_PHONE_EMPTY' WHERE id=?`,
+        [id]
+    );
+}
+// setExpectedNotifyFailed / setExpectedNotifySent 带 H-1 并发守卫（codex 102）：
+//   notify-expected 是"读 collab → 钉钉发送（秒级外部 IO 窗口）→ 落库"，期间开发改预估 / 改派可能已 reset 通知态为 not_sent。
+//   故落库绑发送快照 guardDevAt + status='PENDING'：changes≠1 表示发送窗口内单据已变，不写入（防旧结果覆盖新 not_sent / 指向过期预估），返 bool 供调用方判断。
+//   ⚠️ guard 范围（codex 103 RC-L2）：只比 status='PENDING' + dev_estimated_at 快照，目标=防"旧预估的发送结果覆盖改预估/改派后的 reset"；
+//      不处理 requester_phone 在发送窗口被改的情形——那继承 done 通知"按当前 phone 反查"既有口径（codex 102 M-3），统一待 done+expected 落 userid 快照时再收。
+async function setExpectedNotifyFailed(id, error, guardDevAt) {
+    const r = await dbRunAsync(
+        `UPDATE collab_requests SET expected_notify_status='failed', expected_notified_at=NULL, expected_notify_message_key=NULL, expected_read_at=NULL, expected_notify_error=? WHERE id=? AND status='PENDING' AND dev_estimated_at=?`,
+        [String(error || 'other'), id, guardDevAt]
+    );
+    return !!(r && r.changes === 1);
+}
+async function setExpectedNotifySent(id, messageKey, guardDevAt) {
+    // 发送成功专用清单（§4.4）：notified_at=now + key 非空 + read_at 清 NULL（force_resend 覆盖旧 key/notified_at）+ error 清 NULL；带 H-1 并发守卫
+    const r = await dbRunAsync(
+        `UPDATE collab_requests SET expected_notify_status='sent', expected_notified_at=datetime('now','localtime'), expected_notify_message_key=?, expected_read_at=NULL, expected_notify_error=NULL WHERE id=? AND status='PENDING' AND dev_estimated_at=?`,
+        [messageKey, id, guardDevAt]
+    );
+    return !!(r && r.changes === 1);
 }
 
 // 取数交付质量记录 v3.0 Commit E：详情页质量汇总已抽到 collabSubmitHelpers.buildQualitySummary（纯函数，可单测）
@@ -13823,8 +13895,8 @@ app.post('/api/collab/requests/:id/notify', authenticateToken, requireNonViewer,
 app.get('/api/collab/requests/:id/notify-read-status', authenticateToken, async (req, res) => {
     const { id } = req.params;
     const recipient = (req.query.recipient || 'developer').toLowerCase();
-    if (recipient !== 'contact' && recipient !== 'developer' && recipient !== 'requester_done') {
-        return res.status(400).json({ error: '无效的 recipient 值（合法值：contact/developer/requester_done）' });
+    if (recipient !== 'contact' && recipient !== 'developer' && recipient !== 'requester_done' && recipient !== 'expected') {
+        return res.status(400).json({ error: '无效的 recipient 值（合法值：contact/developer/requester_done/expected）' });
     }
 
     // 字段名映射：选不同字段组
@@ -13833,7 +13905,17 @@ app.get('/api/collab/requests/:id/notify-read-status', authenticateToken, async 
     //   无平台账号不走 users 表）——原 user_id:'contact_person_id' 在 admin 直派单 =0 查不到用户，
     //   且发送端已改 requester_phone 反查，已读比对必须用同一收件人 userid 否则永远 false
     const isRequesterDone = recipient === 'requester_done';
-    const fieldMap = isRequesterDone
+    const isRequesterExpected = recipient === 'expected';
+    const fieldMap = isRequesterExpected
+        ? {
+            notified_at: 'expected_notified_at',
+            message_key: 'expected_notify_message_key',
+            read_at: 'expected_read_at',
+            user_id: 'NULL',  // 需求方不在 users 表，收件人 userid 由 requester_phone 反查（同 requester_done）
+            //   codex 102 M-3 已知口径约束：requester_phone 若在通知后被改，已读反查按"当前 phone"而非原收件人——与 done 通知同源（codex 78 H-3 确立），待 done+expected 统一落 userid 快照时一并优化，本功能不单开此一致性缺口。
+            label: '需求方（预计完成）',
+        }
+        : isRequesterDone
         ? {
             notified_at: 'done_notified_at',
             message_key: 'done_notify_message_key',
@@ -13859,7 +13941,7 @@ app.get('/api/collab/requests/:id/notify-read-status', authenticateToken, async 
 
     try {
         const collab = await dbGetAsync(
-            `SELECT id, ${fieldMap.user_id} AS recipient_user_id,
+            `SELECT id, created_by, ${fieldMap.user_id} AS recipient_user_id,
                     requester_name, requester_phone,
                     ${fieldMap.notified_at} AS notified_at,
                     ${fieldMap.message_key} AS message_key,
@@ -13868,11 +13950,15 @@ app.get('/api/collab/requests/:id/notify-read-status', authenticateToken, async 
             [id]
         );
         if (!collab) return res.status(404).json({ error: '协作单不存在' });
+        // expected（需求方·预计完成）已读查询显式权限：仅建单人/admin（方案 §4.3 M-4，守"开发不碰需求方沟通"边界，不复用 done/developer/contact 通用路径）
+        if (isRequesterExpected && req.user.role !== 'admin' && Number(collab.created_by) !== Number(req.user.id)) {
+            return res.status(403).json({ error: '仅建单人或 admin 可查需求方·预计完成 已读状态', code: 'NOT_AUTHORIZED_EXPECTED_READ' });
+        }
         if (!collab.notified_at) return res.status(400).json({ error: `尚未通知${fieldMap.label},无法查询已读状态` });
 
         // requester_done 收件人显示名 = 业务方负责人姓名（非 users 表用户，2026-06-09 codex 78 H-3）
         const resolveDisplayName = async () => {
-            if (isRequesterDone) return collab.requester_name || '业务方负责人';
+            if (isRequesterDone || isRequesterExpected) return collab.requester_name || '业务方负责人';
             const u = await dbGetAsync('SELECT display_name FROM users WHERE id = ?', [collab.recipient_user_id]);
             return u && u.display_name;
         };
@@ -13941,7 +14027,7 @@ app.get('/api/collab/requests/:id/notify-read-status', authenticateToken, async 
         //   业务方负责人不在 users 表）；contact/developer 两路维持 users 表查询不变
         let recipientDingUserId = null;
         let recipientDisplayName = null;
-        if (isRequesterDone) {
+        if (isRequesterDone || isRequesterExpected) {
             // codex 79 M-2：错误码与发送端分层一致（phone 空 / 查不到人分开）；
             // codex 79 M-1：502 固定文案，不拼 hint（钉钉 errmsg 可能回显手机号）
             const resolved = await dingtalkNotify.resolveRequesterDingUserId(token, collab.requester_phone);
@@ -14659,7 +14745,7 @@ app.post('/api/collab/requests/:id/assign', authenticateToken, requireNonViewer,
     try {
         // === 取协作单 + 双重状态守卫 ===
         const collab = await dbGetAsync(
-            `SELECT id, status, contact_person_id, developer_id, oa_request_no
+            `SELECT id, status, contact_person_id, developer_id, oa_request_no, dev_estimated_at
                FROM collab_requests WHERE id = ?`,
             [id]
         );
@@ -14728,6 +14814,9 @@ app.post('/api/collab/requests/:id/assign', authenticateToken, requireNonViewer,
         // codex 十六审 #4 high：首次指派 / 改派时清空旧 developer 的通知跟踪字段
         //   - notified_at / notify_message_key / read_at 三件套清空，避免前任已读时间沾染新开发
         //   - 首次指派时这三字段本就应该是 NULL（PENDING_ASSIGN 阶段不会发开发钉钉），冗余清空也无害
+        // 改派联动（方案 §4.1b）：换人时旧开发预估对新开发无效 → 清 dev_estimated_at + 重置 expected 通知态（等价 resetExpectedNotifyNotSent 字段清单）。
+        //   首次指派（PENDING_ASSIGN→PENDING）这些字段本就 NULL/默认 not_sent，无条件清空幂等无害；联动留痕仅"换人且旧预估非空"时记（见下方）。
+        //   codex 102 M-1：重复指派同人已被上方"status==='PENDING' && developer_id===developerId → no_change return"拦在本 UPDATE 之前，不会误清有效预估（故无条件清空只作用于首次指派[幂等]/换人[真清]两路）。
         const result = await dbRunAsync(
             `UPDATE collab_requests SET
                 developer_id = ?,
@@ -14738,7 +14827,13 @@ app.post('/api/collab/requests/:id/assign', authenticateToken, requireNonViewer,
                 previous_developer_id = ?,
                 notified_at = NULL,
                 notify_message_key = NULL,
-                read_at = NULL
+                read_at = NULL,
+                dev_estimated_at = NULL,
+                expected_notify_status = 'not_sent',
+                expected_notified_at = NULL,
+                expected_notify_message_key = NULL,
+                expected_read_at = NULL,
+                expected_notify_error = NULL
               WHERE id = ?
                 AND status = ?
                 AND contact_person_id = ?`,
@@ -14758,6 +14853,10 @@ app.post('/api/collab/requests/:id/assign', authenticateToken, requireNonViewer,
             ? `改派开发：${previousDeveloperId} → ${developerId}(${developerName})`
             : `指派开发：${developerId}(${developerName})`;
         insertCollabLog(id, opType, userId, userName, logReason);
+        // 改派联动留痕（方案 §4.1b）：仅"换人且旧开发已回填预估"时记，体现旧预估被清；首次指派/旧值空不记
+        if (isReassign && collab.dev_estimated_at) {
+            insertCollabLog(id, 'dev_estimate_reply', userId, userName, `改派清预计完成：${collab.dev_estimated_at}→(空)`);
+        }
         logger.info(`[collab-assign] 协作单 #${id} ${opType} by ${userName}: dev=${developerId}(${developerName})${isReassign ? `, prev=${previousDeveloperId}` : ''}`);
 
         return res.json({
@@ -14771,6 +14870,233 @@ app.post('/api/collab/requests/:id/assign', authenticateToken, requireNonViewer,
     } catch (e) {
         logger.error(`[collab-assign] 协作单 #${id} 指派异常: ${e.message}`, e);
         return res.status(500).json({ error: '指派失败，请联系管理员', code: 'ASSIGN_FAILED' });
+    }
+});
+
+// 开发回填预计完成时间（方案 §4.1，2026-06-22 v1.90.0）
+//   仅开发本人 + PENDING；可改；同分钟（归一化相等）→ 不写入返 code='unchanged'；有效变更 → UPDATE + 无条件重置 expected 通知态 + 记 log。
+//   不改状态机（纯字段 UPDATE + 乐观锁守卫，类比数据修正 reassign）。
+app.post('/api/collab/requests/:id/reply-estimate', authenticateToken, requireNonViewer, async (req, res) => {
+    const idStr = req.params.id;
+    if (!/^[1-9]\d*$/.test(idStr)) return res.status(400).json({ error: 'id 必须是正整数', code: 'INVALID_ID' });
+    const id = parseInt(idStr, 10);
+    if (!Number.isSafeInteger(id)) return res.status(400).json({ error: 'id 超出安全整数范围', code: 'INVALID_ID' });
+
+    const actorId = Number(req.user.id);
+    const actorName = req.user.display_name || req.user.username || `user#${actorId}`;
+
+    // 入参归一化 + 时间校验（纯输入，BEGIN 前）
+    const normalized = normalizeCollabDatetime(req.body && req.body.dev_estimated_at);
+    if (!normalized) return res.status(400).json({ error: '预计完成时间格式非法（需 YYYY-MM-DD HH:mm）', code: 'INVALID_ESTIMATE' });
+    // 未来时间校验：允许早于当前不超过 ALLOW_PAST_MINUTES 分钟（防刚选当前分钟被判过去；后端为准、前端仅提示）
+    const estMs = new Date(normalized.replace(' ', 'T')).getTime();
+    if (!Number.isFinite(estMs)) return res.status(400).json({ error: '预计完成时间非法', code: 'INVALID_ESTIMATE' });
+    if (estMs < Date.now() - ALLOW_PAST_MINUTES * 60 * 1000) {
+        return res.status(400).json({ error: '预计完成时间不能早于当前时间', code: 'ESTIMATE_IN_PAST' });
+    }
+
+    try {
+        await dbRunAsync('BEGIN IMMEDIATE');
+        try {
+            const row = await dbGetAsync(
+                'SELECT id, status, developer_id, dev_estimated_at FROM collab_requests WHERE id = ?',
+                [id]
+            );
+            if (!row) { await dbRunAsync('ROLLBACK'); return res.status(404).json({ error: '协作单不存在' }); }
+            // 权限：仅开发本人（去 admin 兜底，方案 v1.1 H-1，乐观锁单一化）
+            if (Number(row.developer_id) !== actorId) {
+                await dbRunAsync('ROLLBACK');
+                return res.status(403).json({ error: '仅被指派的开发本人可回填预计完成时间', code: 'NOT_DEVELOPER' });
+            }
+            // 状态：仅 PENDING
+            if (row.status !== 'PENDING') {
+                await dbRunAsync('ROLLBACK');
+                return res.status(409).json({ error: `当前状态 ${row.status} 不可回填预计完成时间（仅 PENDING）`, code: 'INVALID_STATE', current_status: row.status });
+            }
+            // 变更判定（v1.2 M-2 / v1.3 L-1）：归一化新值 vs DB 旧值字符串比较
+            const oldVal = row.dev_estimated_at || null;
+            if (oldVal === normalized) {
+                // 同分钟重复提交 → 不执行任何持久化写入（不 UPDATE/不重置/不 log，避免 updated_at 副作用），幂等返回
+                await dbRunAsync('ROLLBACK');
+                return res.json({ ok: true, id, dev_estimated_at: normalized, code: 'unchanged' });
+            }
+            // 有效变更：乐观锁 UPDATE（绑 status=PENDING + developer_id，闭合改派/并发竞态）
+            const upd = await dbRunAsync(
+                `UPDATE collab_requests SET dev_estimated_at = ? WHERE id = ? AND status = 'PENDING' AND developer_id = ?`,
+                [normalized, id, actorId]
+            );
+            if (!upd || upd.changes !== 1) {
+                await dbRunAsync('ROLLBACK');
+                return res.status(409).json({ error: '协作单状态或负责人已变更，请刷新重试', code: 'CONCURRENT_UPDATE' });
+            }
+            // 无条件重置 expected 通知态（方案 H-1：覆盖 sent/failed/no_phone 全部已发态，消旧失败码/已读残留，防需求方收到过期预估）
+            await resetExpectedNotifyNotSent(id);
+            // 修改历史（codex 102 M-2：事务内 await 确保时序确定、写在 COMMIT 前；日志失败仅 warn 不回滚——辅助留痕不牺牲主回填）
+            try {
+                await dbRunAsync(
+                    'INSERT INTO collab_operation_logs (collab_request_id, operation_type, operator_id, operator, reason) VALUES (?, ?, ?, ?, ?)',
+                    [id, 'dev_estimate_reply', actorId, actorName, `预计完成：${oldVal || '(空)'}→${normalized}`]
+                );
+            } catch (logErr) {
+                logger.warn(`[collab-reply-estimate] #${id} 操作日志写入失败（不影响回填）: ${logErr.message}`);
+            }
+            await dbRunAsync('COMMIT');
+            return res.json({ ok: true, id, dev_estimated_at: normalized, code: 'updated' });
+        } catch (txErr) {
+            try { await dbRunAsync('ROLLBACK'); } catch (_) {}
+            throw txErr;
+        }
+    } catch (err) {
+        logger.error(`[collab-reply-estimate] #${id} 失败:`, err.message);
+        return res.status(500).json({ error: '回填预计完成时间失败' });
+    }
+});
+
+// 建单人通知需求方·预计完成时间（方案 §4.2，2026-06-22 v1.90.0）
+//   顺序化流程（v1.3 M-1）：权限(建单人/admin，开发403) → dev_estimated_at 非空 → PENDING → already_sent 幂等
+//   → requester_phone 空(先 setExpectedNotifyNoPhone 落库再 400) → 发送 → 成功 setExpectedNotifySent / 失败 setExpectedNotifyFailed。
+//   不复用 sendCollabDingtalkRaw（业务方不在 users 表，走 requester_phone → resolveRequesterDingUserId 专链）。
+//   read_at 清理由最终 sent/failed helper 统一落地（两态均置 NULL），故无需 force_resend 发送前的局部清。
+app.post('/api/collab/requests/:id/notify-expected', authenticateToken, requireNonViewer, async (req, res) => {
+    const idStr = req.params.id;
+    if (!/^[1-9]\d*$/.test(idStr)) return res.status(400).json({ error: 'id 必须是正整数', code: 'INVALID_ID' });
+    const id = parseInt(idStr, 10);
+    if (!Number.isSafeInteger(id)) return res.status(400).json({ error: 'id 超出安全整数范围', code: 'INVALID_ID' });
+
+    const actorId = Number(req.user.id);
+    const actorName = req.user.display_name || req.user.username || `user#${actorId}`;
+    const isAdmin = req.user.role === 'admin';
+    const forceResend = !!(req.body && req.body.force_resend === true);
+
+    try {
+        const collab = await dbGetAsync(
+            `SELECT id, status, created_by, developer_id, requester_name, requester_phone, description,
+                    dev_estimated_at, expected_notify_status, expected_notify_message_key
+               FROM collab_requests WHERE id = ?`,
+            [id]
+        );
+        if (!collab) return res.status(404).json({ error: '协作单不存在' });
+
+        // 1. 权限：建单人(created_by) + admin；开发不能直发需求方（后端真闸门，不靠前端隐藏）
+        if (!isAdmin && Number(collab.created_by) !== actorId) {
+            return res.status(403).json({ error: '仅建单人或 admin 可通知需求方（开发不直发）', code: 'NOT_NOTIFIER' });
+        }
+        // 2. 前置·已回填：dev_estimated_at 非空
+        if (!collab.dev_estimated_at) {
+            return res.status(400).json({ error: '开发尚未回填预计完成时间，无法通知', code: 'ESTIMATE_REQUIRED' });
+        }
+        // 3. 前置·状态：仅 PENDING（EXPORTING 与导出人回填一起后续）
+        if (collab.status !== 'PENDING') {
+            return res.status(409).json({ error: `当前状态 ${collab.status} 不可通知预计完成（仅 PENDING）`, code: 'INVALID_STATE', current_status: collab.status });
+        }
+        // 4. 幂等（v1.2 L-2）：已 sent + message_key + 未传 force_resend → already_sent（不重复发、不改字段）
+        if (!forceResend && collab.expected_notify_status === 'sent' && collab.expected_notify_message_key) {
+            return res.json({ success: true, already_sent: true, status: 'sent', message: '已通知过需求方，未重复发送（如需重发传 force_resend）' });
+        }
+        // 5. requester_phone 检查（v1.3 M-1：空也要先落库 no_phone 再返 400，不可直接 return）
+        //   RC-L1（codex 103）+ 末次审 M-1（codex 104）复核：no_phone 不绑 H-1 guard，理由三层——
+        //   ① 无竞态窗口：此处在外部 IO（钉钉发送）窗口【之前】，从读 collab（上方 await dbGetAsync）到此处落库
+        //      之间【无任何 await】（全是同步校验），Node 单线程下不会被其它请求回调插队，读到的值=写时的值；
+        //   ② 守卫语义不匹配：H-1 guard 比的是 dev_estimated_at，而 no_phone 取决于 requester_phone、与预估无关，
+        //      给 no_phone 套预估守卫既是死分支（永不触发）又语义错位；
+        //   ③ 即便构造"reset 先于读、no_phone 后于读"的顺序，写 no_phone 也是"本次通知尝试发现无手机号"的
+        //      正确【新结果】（no_phone 可重算，下次通知重新评估），不是旧发送结果的 stale 覆盖。
+        //   该取舍由 verify-collab-expected-notify.js 的 no_phone 用例覆盖，不只依赖本注释（codex 104 M-1 fallback）。
+        if (!String(collab.requester_phone || '').trim()) {
+            await setExpectedNotifyNoPhone(id);
+            return res.status(400).json({ success: false, error: '需求方未填手机号，无法通知', code: 'REQUESTER_PHONE_EMPTY', status: 'no_phone' });
+        }
+
+        // RC-M1（codex 103）：failed 落库同样绑 H-1 guard，changes=0 表示发送窗口内单据已变（预估改/改派 reset）、failed 没写进 DB（仍 not_sent）。
+        //   此时若仍回 status:'failed' 会与 DB 不一致 → 统一返 409 CONCURRENT_UPDATE_DURING_NOTIFY 与 sent 路径对齐。
+        //   返 true=failed 已落库，调用方继续返各自 failed 响应；返 false=本 helper 已代发 409，调用方直接 return。
+        //   失败日志口径（codex 104 L-2 复核·不采纳统一日志）：send_exception/send_failed 是"本单特定的发送失败"，
+        //     额外写一条 insertCollabLog 便于按单排障；token_failed/requester_invalid/lookup_failed 属系统级/反查级
+        //     （钉钉配置/网络/手机号无效·非本单问题、重试与本单无关）故不写单据日志。所有失败原因均已落 expected_notify_error，排障不缺信息。
+        const failedPersistedOr409 = async (reason) => {
+            const ok = await setExpectedNotifyFailed(id, reason, collab.dev_estimated_at);
+            if (!ok) {
+                insertCollabLog(id, 'notify_expected', actorId, actorName, JSON.stringify({ ok: false, but: 'concurrent_changed_failed_not_persisted', reason, sent_guard: collab.dev_estimated_at }));
+                res.status(409).json({ success: false, error: '通知处理期间单据已变化（预估被修改/改派），状态未记录，请刷新后按新预估重试', code: 'CONCURRENT_UPDATE_DURING_NOTIFY' });
+            }
+            return ok;
+        };
+
+        // 6. 发送：取凭证 + token
+        const [appKey, appSecret, robotCode] = await Promise.all(
+            ['dingtalk_app_key', 'dingtalk_app_secret', 'dingtalk_robot_code'].map(readSystemConfig)
+        );
+        if (!appKey || !appSecret || !robotCode) {
+            // 系统级（配置未填）不落单据 failed：返 500 提示联系管理员（重试无用，非本单问题）
+            return res.status(500).json({ success: false, error: '钉钉配置未填写，请联系管理员', code: 'DINGTALK_NOT_CONFIGURED' });
+        }
+        let token;
+        try {
+            token = await dingtalkNotify.getAccessToken(appKey, appSecret);
+        } catch (err) {
+            const cls = dingtalkNotify.classifyError(err);
+            if (!await failedPersistedOr409(cls.reason || 'token_failed')) return;
+            return res.status(502).json({ success: false, error: '钉钉令牌获取失败，请稍后重试', code: 'DINGTALK_TOKEN_FAILED', reason: cls.reason, status: 'failed' });
+        }
+        // 反查业务方 userid（业务方不在 users 表，走 requester_phone 专链；HTTP 分层对齐 done 通知 codex 78）
+        const resolved = await dingtalkNotify.resolveRequesterDingUserId(token, collab.requester_phone);
+        if (!resolved.ok) {
+            if (resolved.reason === 'requester_invalid') {
+                if (!await failedPersistedOr409('requester_invalid')) return;
+                return res.status(400).json({ success: false, error: '需求方手机号查不到企业钉钉号（非企业成员/未绑定/离职），请线下转达', code: 'REQUESTER_INVALID', status: 'failed' });
+            }
+            if (!await failedPersistedOr409(resolved.reason || 'lookup_failed')) return;
+            return res.status(502).json({ success: false, error: '需求方钉钉号查询失败，请稍后重试', code: 'REQUESTER_LOOKUP_FAILED', reason: resolved.reason, status: 'failed' });
+        }
+
+        // 拼 markdown（所有动态字段 escapeMarkdown 防注入；需求描述截断防刷屏）
+        const esc = dingtalkNotify.escapeMarkdown;
+        const title = '📋 数据协作·预计完成时间';
+        const descShort = String(collab.description || '-').slice(0, 200);
+        const md = [
+            `${esc(collab.requester_name || '业务方')}，您提交的**数据协作需求**，开发已回复预计完成时间：`, '',
+            `- 需求：${esc(descShort)}`,
+            `- 预计完成：${esc(String(collab.dev_estimated_at || ''))}`
+        ].join('\n');
+
+        // 成功判断：errcode OK 且 invalidStaffIdList 空（对齐 done 通知 codex 55 L-1）；processQueryKey 非空由调用处的 if 另行校验（codex 102 L-2）
+        const dingtalkSendOk = (resp) =>
+            resp && typeof resp === 'object'
+            && (!resp.errcode || resp.errcode === 0)
+            && (!Array.isArray(resp.invalidStaffIdList) || resp.invalidStaffIdList.length === 0);
+
+        let mdResp;
+        try {
+            mdResp = await dingtalkNotify.sendMarkdownToUser(token, robotCode, [resolved.userid], title, md);
+        } catch (e) {
+            const cls = dingtalkNotify.classifyError(e.dingtalkResp || e);
+            if (!await failedPersistedOr409((cls && cls.reason) || 'send_exception')) return;
+            insertCollabLog(id, 'notify_expected', actorId, actorName, JSON.stringify({ ok: false, reason: 'send_exception', requester_userid: resolved.userid, force_resend: forceResend }));
+            return res.status(502).json({ success: false, error: '通知发送失败，请重试或线下联系需求方', code: 'NOTIFY_SEND_FAILED', status: 'failed' });
+        }
+        if (!dingtalkSendOk(mdResp) || !mdResp.processQueryKey) {
+            const cls = dingtalkNotify.classifyError(mdResp);
+            if (!await failedPersistedOr409((cls && cls.reason) || 'send_failed')) return;
+            insertCollabLog(id, 'notify_expected', actorId, actorName, JSON.stringify({ ok: false, reason: 'send_failed', errcode: mdResp && mdResp.errcode, requester_userid: resolved.userid, force_resend: forceResend }));
+            return res.status(502).json({ success: false, error: '通知未送达，请重试或线下联系需求方', code: 'NOTIFY_SEND_FAILED', status: 'failed' });
+        }
+
+        // 7. 成功落库（发送成功专用清单 + H-1 并发守卫绑发送快照）：发送窗口内若预估被改/改派 reset，guard changes=0 → 不落 sent，返 409
+        //   （钉钉消息已发出无法撤回；DB 保持 reset 后的 not_sent，建单人按新预估重发，需求方至多多收一条——属外部 IO 不可回滚的固有取舍）
+        const sentOk = await setExpectedNotifySent(id, mdResp.processQueryKey, collab.dev_estimated_at);
+        if (!sentOk) {
+            insertCollabLog(id, 'notify_expected', actorId, actorName, JSON.stringify({ ok: true, but: 'concurrent_changed_not_persisted', requester_userid: resolved.userid, message_key: mdResp.processQueryKey, sent_guard: collab.dev_estimated_at }));
+            return res.status(409).json({ success: false, error: '通知已发出，但单据在发送期间已变化（预估被修改/改派），通知状态未记录，请刷新后按新预估重发', code: 'CONCURRENT_UPDATE_DURING_NOTIFY' });
+        }
+        insertCollabLog(id, 'notify_expected', actorId, actorName, JSON.stringify({
+            ok: true, requester_userid: resolved.userid, requester_name: collab.requester_name || null,
+            message_key: mdResp.processQueryKey, force_resend: forceResend, dev_estimated_at: collab.dev_estimated_at,
+            previous_expected_message_key: collab.expected_notify_message_key || null
+        }));
+        return res.json({ success: true, status: 'sent', message_key: mdResp.processQueryKey });
+    } catch (e) {
+        logger.error(`[collab-notify-expected] #${id} 异常: ${e.message}`, e);
+        return res.status(500).json({ success: false, error: '通知需求方失败', code: 'NOTIFY_EXPECTED_FAILED' });
     }
 });
 

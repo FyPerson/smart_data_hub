@@ -1285,6 +1285,28 @@
         </div>
     </div>
 
+    <!-- v1.90.0 开发回填预计完成时间弹框（方案 §4.1）：仅开发本人 + PENDING，后端为真闸门 -->
+    <div class="modal-overlay" id="estimateModal">
+        <div class="modal-card" style="max-width:440px;">
+            <div class="modal-header">
+                <h3 id="estimateTitle">回填预计完成时间</h3>
+                <button class="modal-close" onclick="closeEstimateModal()">×</button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="f_estimate_collab_id">
+                <div class="form-row">
+                    <label>预计完成时间 <span class="required">*</span></label>
+                    <input type="datetime-local" id="f_estimate_at">
+                    <div class="hint">精确到分钟。回填或修改后，需在详情页点「通知需求方」发送钉钉提醒；修改预估或改派开发会重置已发的通知状态。</div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-cancel" onclick="closeEstimateModal()">取消</button>
+                <button class="btn btn-primary" id="btnSubmitEstimate" onclick="submitEstimate()">提交</button>
+            </div>
+        </div>
+    </div>
+
     <!-- v1.71.0 三级转发：forwardToExporter 弹框（方案 §4 + codex 39 取舍审 + codex 41 M-5 预选 contact+dev）-->
     <div class="modal-overlay" id="forwardToExporterModal">
         <div class="modal-card">
@@ -2230,6 +2252,87 @@
                 </div>`;
         }
 
+        // v1.90.0 预计完成时间·通知需求方（方案 §4）
+        //   开发本人(PENDING)回填/修改 dev_estimated_at；建单人/admin(PENDING)据此通知需求方·预计完成（4 态 not_sent/sent/failed/no_phone）。
+        //   值的只读展示在任务信息区"开发预计完成"行（所有可见者）；本区只承载"动作"——无可用动作的角色整区不渲染。
+        //   边界对齐后端：仅 PENDING 可回填/通知（后端为真闸门）；开发只回填不碰需求方沟通，通知仅建单人/admin。
+        function renderExpectedEstimateSection(d, isAdminUser, currentUserId) {
+            if (d.status !== 'PENDING') return '';
+            const safeId = Number(d.id);
+            if (!Number.isSafeInteger(safeId) || safeId <= 0) return '';
+            const uid = Number(currentUserId);
+            const isDev = d.developer_id && Number(d.developer_id) === uid && Number(d.developer_id) !== 0;
+            const isCreator = Number.isSafeInteger(uid) && uid > 0 && Number(d.created_by) === uid;
+            const canNotify = isAdminUser || isCreator;
+            if (!isDev && !canNotify) return '';  // 与本功能无关的角色不显示动作区（值仍在任务信息区可见）
+
+            const hasEstimate = !!d.dev_estimated_at;
+            const requesterName = d.requester_name ? escapeHtml(d.requester_name) : '需求方';
+
+            // --- 开发回填动作（仅开发本人）---
+            let devPart = '';
+            if (isDev) {
+                const valLine = hasEstimate
+                    ? `<span class="notify-status-text">已回填预计完成：${fmtDate(d.dev_estimated_at)}</span>`
+                    : `<span class="notify-status-text" style="color:#d97706;">⏳ 尚未回填预计完成时间</span>`;
+                devPart = `
+                    <div style="padding:10px 0;${canNotify ? 'border-bottom:1px solid #f1f5f9;' : ''}">
+                        <div style="font-size:12px;color:#64748b;margin-bottom:6px;font-weight:600;">开发回填</div>
+                        ${valLine}
+                        <button class="notify-btn" style="margin-left:8px;" onclick="openEstimateModal(${safeId})">${hasEstimate ? '修改预计完成时间' : '回填预计完成时间'}</button>
+                        <div style="margin-top:6px;font-size:12px;color:#9ca3af;">回填后由建单人/管理员通知需求方；修改或改派会重置已发的通知状态。</div>
+                    </div>`;
+            }
+
+            // --- 建单人/admin 通知需求方·预计完成 ---
+            let notifyPart = '';
+            if (canNotify) {
+                let body;
+                if (!hasEstimate) {
+                    body = `<span style="color:#9ca3af;font-size:13px;">— 开发回填预计完成时间后可通知 ${requesterName}</span>`;
+                } else {
+                    const st = d.expected_notify_status || 'not_sent';
+                    if (st === 'no_phone') {
+                        body = `<span style="color:#b45309;font-size:13px;">— 需求方未填手机号，无法通知 ${requesterName}（请补填手机号或线下转达）</span>`;
+                    } else if (st === 'sent') {
+                        const readPart = d.expected_read_at
+                            ? `<div style="margin-top:8px;font-size:13px;color:#16a34a;">📖 ${requesterName} 已读 · 于 ${fmtDate(d.expected_read_at)}</div>`
+                            : `<button class="notify-btn" style="background:#f1f5f9;color:#475569;" onclick="checkReadStatus(${safeId}, 'expected')">查询已读状态</button>
+                               <div id="readStatusBox_expected" style="margin-top:8px;font-size:13px;color:#64748b;"></div>`;
+                        body = `
+                            <span class="notify-status-text">✅ 已于 ${fmtDate(d.expected_notified_at)} 通知 ${requesterName}·预计完成</span>
+                            <button class="notify-btn" onclick="notifyExpected(${safeId}, true)">重新通知</button>
+                            ${readPart}`;
+                    } else if (st === 'failed') {
+                        body = `
+                            <span class="notify-status-text" style="color:#dc2626;">⚠️ 上次通知 ${requesterName} 失败，可重试</span>
+                            <button class="notify-btn" onclick="notifyExpected(${safeId}, false)">重新通知</button>`;
+                    } else if (st === 'not_sent') {
+                        body = `
+                            <span class="notify-status-text">⏳ 尚未通知 ${requesterName}·预计完成</span>
+                            <button class="notify-btn" onclick="notifyExpected(${safeId}, false)">通知需求方</button>`;
+                    } else {
+                        // L-3（codex 104）：未知枚举值显式提示，不静默降级为"尚未通知"（后端 CHECK 理论挡住，此处兜旧库迁移/脏数据）
+                        body = `<span style="color:#dc2626;font-size:13px;">⚠️ 通知状态异常（${escapeHtml(String(st))}），请刷新或联系管理员</span>`;
+                    }
+                }
+                notifyPart = `
+                    <div style="padding:10px 0;">
+                        <div style="font-size:12px;color:#64748b;margin-bottom:6px;font-weight:600;">通知需求方·预计完成</div>
+                        ${body}
+                    </div>`;
+            }
+
+            return `
+                <div class="detail-section">
+                    <div class="detail-section-title">预计完成时间</div>
+                    <div class="detail-section-body">
+                        ${devPart}
+                        ${notifyPart}
+                    </div>
+                </div>`;
+        }
+
         // v1.72.3 加载改派历史
         async function loadReassignHistory(collabId) {
             const contentEl = document.getElementById('reassignHistoryContent');
@@ -2587,7 +2690,9 @@
                             <div class="detail-kv-label">数据范围说明</div>
                             <div class="detail-kv-value">${dataScopeHtml}</div>
                             <div class="detail-kv-label">期望完成</div>
-                            <div class="detail-kv-value">${fmtDate(d.deadline)}</div>${contactRowHtml}${devRowHtml}
+                            <div class="detail-kv-value">${fmtDate(d.deadline)}</div>
+                            <div class="detail-kv-label">开发预计完成</div>
+                            <div class="detail-kv-value">${d.dev_estimated_at ? fmtDate(d.dev_estimated_at) : '<span style="color:#9ca3af">开发尚未回填</span>'}</div>${contactRowHtml}${devRowHtml}
                             <div class="detail-kv-label">录入人</div>
                             <div class="detail-kv-value">${escapeHtml(d.created_by_name)} · ${fmtDate(d.created_at)}</div>
                             <div class="detail-kv-label">当前状态</div>
@@ -2628,6 +2733,8 @@
             const exporterBlock = renderExporterNotifySubsection(d, status, isAdminUser, myUid);
             // 导出人通知业务方·发数据（DONE 后，admin 或本单 exporter 可见）
             const requesterDoneBlock = renderRequesterDoneNotifySection(d, isAdminUser, myUid);
+            // v1.90.0 预计完成时间·通知需求方（开发回填 + 建单人/admin 通知；仅 PENDING 有动作）
+            const expectedHtml = renderExpectedEstimateSection(d, isAdminUser, myUid);
 
             const notifyHtml = `
                 <div class="detail-section">
@@ -2668,6 +2775,7 @@
                 taskInfoHtml
                 + adminDirectActionsHtml
                 + notifyHtml
+                + expectedHtml
                 + insufficientEvidenceHtml
                 + deliveryHtml
                 + exportScreenshotsHtml
@@ -4687,6 +4795,7 @@
             if (box) box.innerHTML = '<span style="color:#94a3b8">查询中…</span>';
             const label = recipient === 'contact' ? '对接人'
                 : recipient === 'requester_done' ? '业务方负责人'
+                : recipient === 'expected' ? '需求方'
                 : '开发';
             try {
                 const res = await fetch(`/api/collab/requests/${id}/notify-read-status?recipient=${recipient}`, {
@@ -4716,6 +4825,114 @@
                 }
             } catch (e) {
                 if (box) box.innerHTML = '<span style="color:#b91c1c">网络错误,请检查后端</span>';
+            }
+        }
+
+        // ===== v1.90.0 开发回填预计完成时间 + 建单人/admin 通知需求方（方案 §4）=====
+        //   入口在详情页 renderExpectedEstimateSection 已做角色/状态闸门；后端为真闸门（仅开发本人+PENDING 可回填，仅建单人/admin 可通知）。
+        function openEstimateModal(id) {
+            document.getElementById('f_estimate_collab_id').value = id;
+            // 修改场景预填当前值：dev_estimated_at 'YYYY-MM-DD HH:mm:ss' → datetime-local 'YYYY-MM-DDTHH:mm'
+            const cur = (currentDetail && Number(currentDetail.id) === Number(id)) ? currentDetail.dev_estimated_at : null;
+            document.getElementById('f_estimate_at').value = cur ? String(cur).substring(0, 16).replace(' ', 'T') : '';
+            document.getElementById('estimateTitle').textContent = `回填预计完成时间 · 协作单 #${id}`;
+            const btn = document.getElementById('btnSubmitEstimate');
+            btn.disabled = false; btn.textContent = '提交';
+            document.getElementById('estimateModal').classList.add('show');
+        }
+
+        function closeEstimateModal() {
+            document.getElementById('estimateModal').classList.remove('show');
+        }
+
+        async function submitEstimate() {
+            const id = document.getElementById('f_estimate_collab_id').value;
+            if (!id) { showToast('协作单 id 丢失，请重新打开弹窗', 'error'); return; }
+            const at = document.getElementById('f_estimate_at').value;  // 'YYYY-MM-DDTHH:mm' 或 ''
+            if (!at) { showToast('请选择预计完成时间', 'error'); return; }
+            const btn = document.getElementById('btnSubmitEstimate');
+            btn.disabled = true; btn.textContent = '提交中…';
+            try {
+                const res = await fetch(`/api/collab/requests/${id}/reply-estimate`, {
+                    method: 'POST',
+                    headers: { 'Authorization': 'Bearer ' + localStorage.getItem('token'), 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ dev_estimated_at: at })
+                });
+                const data = await res.json().catch(() => ({}));
+                if (res.ok && data.ok) {
+                    if (data.code === 'unchanged') showToast('预计完成时间未变化', 'success');
+                    else showToast('✅ 已回填预计完成时间，请在详情页点「通知需求方」发送提醒', 'success');
+                    closeEstimateModal();
+                    if (typeof openDetail === 'function') await openDetail(id);
+                    if (typeof loadList === 'function') loadList();
+                    return;
+                }
+                // 失败分支：状态/并发类关弹窗并刷新详情（让用户看到最新态），输入类保留弹窗供改
+                if (data.code === 'ESTIMATE_IN_PAST') {
+                    showToast('❌ 预计完成时间不能早于当前时间', 'error');
+                } else if (data.code === 'INVALID_ESTIMATE') {
+                    showToast('❌ 预计完成时间格式非法（需精确到分钟）', 'error');
+                } else if (data.code === 'NOT_DEVELOPER') {
+                    showToast('❌ 仅被指派的开发本人可回填预计完成时间', 'error');
+                } else if (data.code === 'CONCURRENT_UPDATE' || data.code === 'INVALID_STATE') {
+                    showToast('❌ 协作单状态或负责人已变更，请刷新重试', 'error');
+                    closeEstimateModal();
+                    if (typeof openDetail === 'function') await openDetail(id);
+                    return;
+                } else {
+                    showToast(`❌ ${data.error || '回填失败'}`, 'error');
+                }
+                btn.disabled = false; btn.textContent = '提交';
+            } catch (e) {
+                showToast('网络错误,请检查后端服务', 'error');
+                btn.disabled = false; btn.textContent = '提交';
+            }
+        }
+
+        // 建单人/admin 通知需求方·预计完成（方案 §4.2）。forceResend=true 走重发（清旧已读）。
+        //   强约束：以 json.success===true 为唯一成功条件（部分失败可能 HTTP 200/4xx + success:false）。
+        async function notifyExpected(id, forceResend) {
+            if (forceResend && !confirm('确认重新通知需求方（预计完成时间）？将以本次为最新一次通知，旧已读记录清除。')) return;
+            const btns = document.querySelectorAll(`.notify-btn[onclick*="notifyExpected(${id},"]`);
+            btns.forEach(b => { b.disabled = true; });
+            try {
+                const res = await fetch(`/api/collab/requests/${id}/notify-expected`, {
+                    method: 'POST',
+                    headers: { 'Authorization': 'Bearer ' + localStorage.getItem('token'), 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ force_resend: !!forceResend })
+                });
+                let data = null;
+                try { data = await res.json(); } catch (_) { data = null; }
+                if (data === null) {
+                    if (res.status === 401 || res.status === 403) showToast('❌ 登录已过期或无权限，请刷新页面重新登录', 'error');
+                    else showToast(`❌ 服务端异常（HTTP ${res.status}），请稍后重试`, 'error');
+                    return;
+                }
+                if (res.ok && data.success === true) {
+                    if (data.already_sent) showToast('已通知过需求方，未重复发送', 'success');
+                    else showToast('✅ 已通知需求方·预计完成', 'success');
+                } else if (data.code === 'REQUESTER_PHONE_EMPTY') {
+                    showToast('❌ 需求方未填手机号，请补填后再通知或线下转达', 'error');
+                } else if (data.code === 'REQUESTER_INVALID') {
+                    showToast('❌ 需求方手机号查不到企业钉钉号（非企业成员/未绑定/离职），请线下转达', 'error');
+                } else if (data.code === 'CONCURRENT_UPDATE_DURING_NOTIFY') {
+                    showToast('⚠️ 通知期间预计完成时间已变化（被修改/改派），请刷新后按新预估重发', 'error');
+                } else if (data.code === 'ESTIMATE_REQUIRED') {
+                    showToast('❌ 开发尚未回填预计完成时间，无法通知', 'error');
+                } else if (data.code === 'INVALID_STATE') {
+                    showToast('❌ 当前状态不可通知需求方·预计完成（仅待处理中可通知）', 'error');
+                } else if (data.code === 'DINGTALK_NOT_CONFIGURED') {
+                    showToast('❌ 钉钉未配置，请联系管理员', 'error');
+                } else {
+                    showToast(`❌ ${data.error || '通知失败'}`, 'error');
+                }
+                // 无论成功/失败都刷新详情：成功→sent；no_phone/failed/并发→对应态在区块如实呈现
+                if (typeof openDetail === 'function') await openDetail(id);
+                if (typeof loadList === 'function') loadList();
+            } catch (e) {
+                showToast('网络错误,请检查后端服务', 'error');
+            } finally {
+                btns.forEach(b => { b.disabled = false; });
             }
         }
 
