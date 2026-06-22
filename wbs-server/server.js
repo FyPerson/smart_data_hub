@@ -17,6 +17,7 @@ const issueNotify = require('./utils/issue-notify');  // v1.74.0 C2：需求跟�
 const collabVersioning = require('./utils/collab-attachment-versioning');
 const collabSubmitHelpers = require('./utils/collab-submit-helpers');
 const { mapMysqlColumnToSqlServer } = require('./utils/mysql-type-mapper'); // v1.88.0：MySQL 源(HRD) → SQL Server 目标 类型映射
+const { buildMysqlSourceCount, buildMysqlSourcePk, splitMysqlTable } = require('./utils/mysql-source-introspect'); // ODS 验收·MySQL 源行数对比 / 反查源主键
 
 const app = express();
 const PORT = parseInt(process.env.PORT || '3000');
@@ -2556,29 +2557,37 @@ async function executeOdsValidation(params) {
         } else {
             // ODS 表未定义主键，检查源表是否有主键
             let sourcePrimaryKeys = [];
-            if (params.sourcePool && params.sourceSchema && params.sourceTable) {
+            // M-1：SQL Server 仍要求 sourceSchema（恢复旧保护，避免 undefined.table 漂移）；MySQL 用 sourceDatabase 兜底不依赖 schema
+            if (params.sourcePool && params.sourceTable && (params.sourceDialect === 'mysql' || params.sourceSchema)) {
                 try {
-                    // 解析源表名（可能包含 schema）
-                    let sourceSchema = params.sourceSchema;
-                    let sourceTableName = params.sourceTable;
-                    if (params.sourceTable.includes('.')) {
-                        const parts = params.sourceTable.split('.');
-                        sourceSchema = parts[0];
-                        sourceTableName = parts[1];
-                    }
-                    const sourceFullTableName = `${sourceSchema}.${sourceTableName}`;
+                    if (params.sourceDialect === 'mysql') {
+                        // MySQL 源：information_schema.STATISTICS 反查主键（主键索引名恒为 PRIMARY）
+                        const { sql: pkSql, params: pkParams } = buildMysqlSourcePk(params.sourceTable, params.sourceDatabase);
+                        const [pkRows] = await params.sourcePool.query(pkSql, pkParams);
+                        sourcePrimaryKeys = pkRows.map(r => r.pk_column);
+                    } else {
+                        // 解析源表名（可能包含 schema）
+                        let sourceSchema = params.sourceSchema;
+                        let sourceTableName = params.sourceTable;
+                        if (params.sourceTable.includes('.')) {
+                            const parts = params.sourceTable.split('.');
+                            sourceSchema = parts[0];
+                            sourceTableName = parts[1];
+                        }
+                        const sourceFullTableName = `${sourceSchema}.${sourceTableName}`;
 
-                    // 查询源表主键
-                    const sourcePkResult = await params.sourcePool.request().query(`
-                        SELECT col.name AS pk_column
-                        FROM sys.indexes idx
-                        JOIN sys.index_columns ic ON idx.object_id = ic.object_id AND idx.index_id = ic.index_id
-                        JOIN sys.columns col ON ic.object_id = col.object_id AND ic.column_id = col.column_id
-                        WHERE idx.is_primary_key = 1
-                          AND idx.object_id = OBJECT_ID('${sourceFullTableName}')
-                        ORDER BY ic.key_ordinal
-                    `);
-                    sourcePrimaryKeys = sourcePkResult.recordset.map(r => r.pk_column);
+                        // 查询源表主键
+                        const sourcePkResult = await params.sourcePool.request().query(`
+                            SELECT col.name AS pk_column
+                            FROM sys.indexes idx
+                            JOIN sys.index_columns ic ON idx.object_id = ic.object_id AND idx.index_id = ic.index_id
+                            JOIN sys.columns col ON ic.object_id = col.object_id AND ic.column_id = col.column_id
+                            WHERE idx.is_primary_key = 1
+                              AND idx.object_id = OBJECT_ID('${sourceFullTableName}')
+                            ORDER BY ic.key_ordinal
+                        `);
+                        sourcePrimaryKeys = sourcePkResult.recordset.map(r => r.pk_column);
+                    }
                 } catch (sourceErr) {
                     logger.warn('获取源表主键失败:', sourceErr.message);
                 }
@@ -2740,11 +2749,26 @@ async function executeOdsValidation(params) {
 
         // 7. 源表数据量对比（如果提供了源系统连接信息）
         if (params.sourcePool && params.sourceTable) {
+            const isMysqlSrc = params.sourceDialect === 'mysql';
+            // 展示用源表名（catch 也要用）：MySQL 走 splitMysqlTable 规范化避免 db.table 输入时重复库名（M-2）；SQL Server 沿用现状
+            let sourceFullTable;
+            if (isMysqlSrc) {
+                const { db: srcDb, table: srcTbl } = splitMysqlTable(params.sourceTable, params.sourceDatabase);
+                sourceFullTable = srcDb ? `${srcDb}.${srcTbl}` : srcTbl;
+            } else {
+                sourceFullTable = `${params.sourceSchema || 'dbo'}.${params.sourceTable}`;
+            }
             try {
-                const sourceSchema = params.sourceSchema || 'dbo';
-                const sourceFullTable = `${sourceSchema}.${params.sourceTable}`;
-                const sourceCountResult = await params.sourcePool.request().query(`SELECT COUNT(*) as cnt FROM ${sourceFullTable}`);
-                const sourceRowCount = sourceCountResult.recordset[0].cnt;
+                let sourceRowCount;
+                if (isMysqlSrc) {
+                    // MySQL 源：mysql2 .query() 返回 [rows]；表名反引号包裹（库.表）
+                    const { sql: cntSql, params: cntParams } = buildMysqlSourceCount(params.sourceTable, params.sourceDatabase);
+                    const [cntRows] = await params.sourcePool.query(cntSql, cntParams);
+                    sourceRowCount = cntRows[0].cnt;
+                } else {
+                    const sourceCountResult = await params.sourcePool.request().query(`SELECT COUNT(*) as cnt FROM ${sourceFullTable}`);
+                    sourceRowCount = sourceCountResult.recordset[0].cnt;
+                }
 
                 const diff = rowCount - sourceRowCount;
                 const diffRate = sourceRowCount > 0 ? ((diff / sourceRowCount) * 100).toFixed(2) : (rowCount > 0 ? 100 : 0);
@@ -2768,7 +2792,7 @@ async function executeOdsValidation(params) {
                 logger.warn('Source table count error:', sourceErr.message);
                 result.details.source_compare = {
                     name: '源表数据量对比',
-                    source_table: `${params.sourceSchema || 'dbo'}.${params.sourceTable}`,
+                    source_table: sourceFullTable,
                     status: 'error',
                     message: '无法查询源表: ' + sourceErr.message
                 };
@@ -8682,20 +8706,30 @@ app.post('/api/models/:id/validate', authenticateToken, requireNonViewer, async 
                 if (sourceConn) {
                     try {
                         const sourcePassword = decryptPassword(sourceConn.password);
-                        const sourcePool = await getMssqlPool({
-                            host: sourceConn.host,
-                            port: sourceConn.port,
-                            database: sourceConn.database,
-                            username: sourceConn.username,
-                            password: sourcePassword
-                        });
+                        const sourceDialect = (sourceConn.type === 'mysql') ? 'mysql' : 'sqlserver'; // v1.69.1 多方言范式：源恒按 type 分流
+                        const sourcePool = (sourceDialect === 'mysql')
+                            ? await getMysqlPool({
+                                host: sourceConn.host,
+                                port: sourceConn.port,
+                                database: sourceConn.database,
+                                username: sourceConn.username,
+                                password: sourcePassword
+                            })
+                            : await getMssqlPool({
+                                host: sourceConn.host,
+                                port: sourceConn.port,
+                                database: sourceConn.database,
+                                username: sourceConn.username,
+                                password: sourcePassword
+                            });
 
                         validationParams.sourcePool = sourcePool;
+                        validationParams.sourceDialect = sourceDialect;
                         validationParams.sourceSchema = sourceConn.default_schema;
                         validationParams.sourceTable = model.source_table;
                         validationParams.sourceDatabase = sourceConn.database;
 
-                        logger.info(`Source system connection found for ${model.source_system}, will compare with source table ${model.source_table}`);
+                        logger.info(`Source system connection found for ${model.source_system} (${sourceDialect}), will compare with source table ${model.source_table}`);
                     } catch (sourceConnErr) {
                         logger.warn(`Failed to connect to source system ${model.source_system}:`, sourceConnErr.message);
                     }
