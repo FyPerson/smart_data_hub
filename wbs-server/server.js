@@ -16,6 +16,7 @@ const dingtalkNotify = require('./utils/dingtalk-notify');
 const issueNotify = require('./utils/issue-notify');  // v1.74.0 C2：需求跟踪钉钉通知 helper（纯封装）
 const collabVersioning = require('./utils/collab-attachment-versioning');
 const collabSubmitHelpers = require('./utils/collab-submit-helpers');
+const { mapMysqlColumnToSqlServer } = require('./utils/mysql-type-mapper'); // v1.88.0：MySQL 源(HRD) → SQL Server 目标 类型映射
 
 const app = express();
 const PORT = parseInt(process.env.PORT || '3000');
@@ -941,6 +942,10 @@ function initTable() {
             });
             // 更新已有的BMS记录名称
             db.run("UPDATE sys_source_systems SET name = '业务管理系统', description = 'Business Management System - 业务管理核心系统' WHERE code = 'BMS'");
+            // HRD 源系统注册（v1.88.0 多方言接入，2026-06-22）：INSERT OR IGNORE 幂等
+            // —— BMS 那段 seed 只在空库（count===0）跑、补不进存量生产库，故 HRD 用幂等写法确保存量库也生效，
+            //    使前端"源系统"下拉（GET /api/source-systems 读本表）可选 HRD。短期源系统仅 BMS + HRD。
+            db.run("INSERT OR IGNORE INTO sys_source_systems (code, name, description) VALUES ('HRD', '人力资源系统', 'HRD 人力资源系统 - MySQL 源')");
         }
     });
 
@@ -7876,6 +7881,78 @@ app.get('/api/db-connections/table-columns', authenticateToken, async (req, res)
         }
 
         const password = decryptPassword(conn.password);
+        const dialect = (conn.type === 'mysql') ? 'mysql' : 'sqlserver'; // v1.69.1 路由式多方言范式
+
+        if (dialect === 'mysql') {
+            // ===== MySQL 源（如 HRD）：读 INFORMATION_SCHEMA + 映射为 SQL Server 目标类型 =====
+            const mysqlPool = await getMysqlPool({
+                host: conn.host,
+                port: conn.port,
+                database: conn.database,
+                username: conn.username,
+                password: password
+            });
+            // MySQL 无 dbo schema 层：schema = database；table_name 可能为 db.table
+            let mysqlDb = conn.database;
+            let mysqlTable = table_name.trim(); // L-2′：单段也 trim
+            if (mysqlTable.includes('.')) {
+                // M-1：只接受 table 或 database.table，段数非 2 或有空段 → 400（避免查错表/误导性 404）
+                const parts = mysqlTable.split('.');
+                if (parts.length !== 2 || !parts[0].trim() || !parts[1].trim()) {
+                    return res.status(400).json({ error: `源表名格式不支持: ${table_name}（仅接受 table 或 database.table）` });
+                }
+                mysqlDb = parts[0].trim();   // L-2′
+                mysqlTable = parts[1].trim();
+            }
+            const [colRows] = await mysqlPool.query(
+                `SELECT COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, CHARACTER_MAXIMUM_LENGTH,
+                        NUMERIC_PRECISION, NUMERIC_SCALE, IS_NULLABLE, COLUMN_DEFAULT,
+                        COLUMN_COMMENT, COLUMN_KEY, EXTRA
+                 FROM INFORMATION_SCHEMA.COLUMNS
+                 WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
+                 ORDER BY ORDINAL_POSITION`,
+                [mysqlDb, mysqlTable]
+            );
+            if (colRows.length === 0) {
+                return res.status(404).json({
+                    error: `表 ${mysqlDb}.${mysqlTable} 不存在或无法访问`,
+                    hint: '请检查表名是否正确，或确认数据库连接账号有读取权限'
+                });
+            }
+            const columns = colRows.map(r => {
+                const mapped = mapMysqlColumnToSqlServer(r);
+                if (mapped._warn) {
+                    logger.warn(`MySQL 类型映射需留意: ${r.COLUMN_NAME} (${r.COLUMN_TYPE}) → ${mapped.data_type} [${mapped._warn}]`);
+                }
+                return {
+                    column_name: r.COLUMN_NAME,
+                    data_type: mapped.data_type,
+                    max_length: mapped.max_length,
+                    precision: mapped.precision,
+                    scale: mapped.scale,
+                    is_nullable: r.IS_NULLABLE,            // MySQL 返回 'YES'/'NO'，与 SQL Server 分支一致
+                    column_default: r.COLUMN_DEFAULT,
+                    column_comment: r.COLUMN_COMMENT || '',
+                    is_identity: /auto_increment/i.test(r.EXTRA || '') ? 1 : 0,
+                    is_primary_key: r.COLUMN_KEY === 'PRI' ? 1 : 0,
+                    source_data_type: r.COLUMN_TYPE       // 保留 MySQL 原始类型供排错/类型探查
+                };
+            });
+            const [tblRows] = await mysqlPool.query(
+                `SELECT TABLE_COMMENT FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?`,
+                [mysqlDb, mysqlTable]
+            );
+            const mysqlTableComment = tblRows.length > 0 ? (tblRows[0].TABLE_COMMENT || '') : '';
+            return res.json({
+                schema: mysqlDb,
+                table_name: mysqlTable,
+                table_comment: mysqlTableComment,
+                columns,
+                dialect: 'mysql'
+            });
+        }
+
+        // ===== SQL Server 源（如 BMS）：原有逻辑 =====
         const pool = await getMssqlPool({
             host: conn.host,
             port: conn.port,

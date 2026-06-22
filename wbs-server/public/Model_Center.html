@@ -14700,6 +14700,11 @@ GO`;
             const tableComment = sourceTableComment || model.table_comment || '表描述';
             const sourceSystem = model.source_system || 'UNKNOWN';
             const sourceTable = model.source_table || '';
+            // M-1′：SQL 字符串字面量单引号转义（注释 SQL 里的列名来自源系统，可能含 '）。
+            // 注：tableName 是平台生成的受控 ods_ 名（标识符位置，L-3′ 约束名同源受控），故不在每处 escape。
+            const sqlStr = (v) => String(v == null ? '' : v).replace(/'/g, "''");
+            // M-1″：SQL 行注释（-- ...）清洗——删 CR/LF（防换行后内容脱离行注释）+ 去控制字符（源列注释为自由文本可能含换行）。
+            const sqlLineComment = (v) => String(v == null ? '' : v).replace(/[\r\n]+/g, ' ').replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '');
 
             // 找出主键字段
             const primaryKeyColumns = columns.filter(col => col.is_primary_key);
@@ -14726,10 +14731,11 @@ GO`;
                 if (col.is_identity) {
                     comment = comment ? `${comment} [源表IDENTITY]` : '[源表IDENTITY]';
                 }
-                const commentStr = comment ? `  -- ${comment}` : '';
+                const commentStr = comment ? `  -- ${sqlLineComment(comment)}` : '';
 
-                // 格式化对齐（确保字段名和类型之间至少有一个空格）
-                const colName = col.column_name.padEnd(24) + (col.column_name.length >= 24 ? ' ' : '');
+                // 格式化对齐（M-4：列名统一方括号转义 ]→]]，防保留字/特殊字符/中文列名生成非法 DDL）
+                const safeColName = `[${String(col.column_name).replace(/]/g, ']]')}]`;
+                const colName = safeColName.padEnd(26) + (safeColName.length >= 26 ? ' ' : '');
                 const colType = dataType.padEnd(20);
 
                 return `        ${colName}${colType}${nullable},${commentStr}`;
@@ -14738,8 +14744,9 @@ GO`;
             // 生成主键约束（使用ODS规范命名）
             let primaryKeyConstraint = '';
             if (hasPrimaryKey) {
-                const pkColumns = primaryKeyColumns.map(col => `[${col.column_name}]`).join(', ');
-                primaryKeyConstraint = `
+                const pkColumns = primaryKeyColumns.map(col => `[${String(col.column_name).replace(/]/g, ']]')}]`).join(', ');
+                // H-1：约束串以逗号起头，使前一行 dw_batch_id 与表级约束之间有分隔（无主键时为空串、不留逗号）
+                primaryKeyConstraint = `,
         -- ========== 主键约束 ==========
         CONSTRAINT [PK_${tableName}] PRIMARY KEY CLUSTERED (${pkColumns})`;
             }
@@ -14758,11 +14765,11 @@ GO`;
                 .filter(col => col.column_comment)
                 .map(col => {
                     const escapedComment = col.column_comment.replace(/'/g, "''");
-                    return `-- ${col.column_name}
-IF NOT EXISTS (SELECT 1 FROM sys.extended_properties WHERE major_id = OBJECT_ID(N'dbo.${tableName}') AND minor_id = (SELECT column_id FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.${tableName}') AND name = N'${col.column_name}') AND name = N'MS_Description')
-    EXEC sp_addextendedproperty @name=N'MS_Description', @value=N'${escapedComment}', @level0type=N'SCHEMA', @level0name=N'dbo', @level1type=N'TABLE', @level1name=N'${tableName}', @level2type=N'COLUMN', @level2name=N'${col.column_name}';
+                    return `-- ${sqlLineComment(col.column_name)}
+IF NOT EXISTS (SELECT 1 FROM sys.extended_properties WHERE major_id = OBJECT_ID(N'dbo.${tableName}') AND minor_id = (SELECT column_id FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.${tableName}') AND name = N'${sqlStr(col.column_name)}') AND name = N'MS_Description')
+    EXEC sp_addextendedproperty @name=N'MS_Description', @value=N'${escapedComment}', @level0type=N'SCHEMA', @level0name=N'dbo', @level1type=N'TABLE', @level1name=N'${tableName}', @level2type=N'COLUMN', @level2name=N'${sqlStr(col.column_name)}';
 ELSE
-    EXEC sp_updateextendedproperty @name=N'MS_Description', @value=N'${escapedComment}', @level0type=N'SCHEMA', @level0name=N'dbo', @level1type=N'TABLE', @level1name=N'${tableName}', @level2type=N'COLUMN', @level2name=N'${col.column_name}';
+    EXEC sp_updateextendedproperty @name=N'MS_Description', @value=N'${escapedComment}', @level0type=N'SCHEMA', @level0name=N'dbo', @level1type=N'TABLE', @level1name=N'${tableName}', @level2type=N'COLUMN', @level2name=N'${sqlStr(col.column_name)}';
 GO`;
                 }).join('\n\n');
 
@@ -14789,7 +14796,7 @@ GO`;
 -- ODS 层 DDL 脚本 (SQL Server) - 先删后建，可重复执行
 -- ============================================================
 -- 表名: ${tableName}
--- 描述: ${tableComment}
+-- 描述: ${sqlLineComment(tableComment)}
 -- 源系统: ${sourceSystem}
 -- 源表: ${sourceTable || '(未指定)'}
 -- 生成时间: ${formatDateTimeUnified(new Date())}
@@ -14819,7 +14826,7 @@ ${columnDefs}
 
     -- ========== 标准审计字段 ==========
     dw_load_ts          DATETIME            NOT NULL DEFAULT GETDATE(),
-    dw_src_sys          VARCHAR(50)         NOT NULL DEFAULT '${sourceSystem}',
+    dw_src_sys          VARCHAR(50)         NOT NULL DEFAULT '${sqlStr(sourceSystem)}',
     dw_batch_id         VARCHAR(50)         NULL${primaryKeyConstraint}
 );
 PRINT '表 [dbo.${tableName}] 创建成功';
