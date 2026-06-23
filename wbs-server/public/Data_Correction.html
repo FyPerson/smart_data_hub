@@ -275,6 +275,7 @@
                         <th style="width:46px;">#</th>
                         <th style="width:90px;">状态</th>
                         <th style="width:64px;">类型</th>
+                        <th style="width:72px;">修正条数</th>
                         <th style="width:110px;">所属系统</th>
                         <th style="min-width:220px;">修正方式</th>
                         <th style="width:110px;">业务方</th>
@@ -736,6 +737,7 @@
                     <td style="color:#9ca3af; font-size:12px;">${Number(it.id)}</td>
                     <td><span class="status-badge s-${statusClass(it.status)}">${escapeHtml(STATUS_LABELS[it.status] || it.status)}</span>${isOverdue(it) ? '<span class="flag-overdue">已超预计</span>' : ''}${isBacklog(it) ? '<span class="flag-backlog">积压</span>' : ''}${isUnarchivedBacklog(it) ? '<span class="flag-backlog">超7天未归档</span>' : ''}${it.status === 'ARCHIVED' && it.closure_type === 'admin_closure' ? '<span class="flag-backlog" style="color:#1d4ed8;">行政闭环</span>' : ''}</td>
                     <td><span class="type-tag t-${it.correction_type === 'batch' ? 'batch' : 'single'}">${it.correction_type === 'batch' ? '批量' : '单'}</span></td>
+                    <td style="text-align:center;">${it.correction_count != null ? it.correction_count : (it.correction_type === 'single' ? 1 : '-')}</td>
                     <td>${escapeHtml(sysLabel(it))}</td>
                     <td class="ellip" title="${escapeHtml(it.location_info || '')}">${escapeHtml(it.location_info || '')}</td>
                     <td>${escapeHtml(it.requester_name || '-')}</td>

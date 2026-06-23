@@ -1386,7 +1386,7 @@ router.get('/', authenticateToken, requireCorrectionSchemaReady, async (req, res
             }
         }
         const rows = await dbAllAsync(
-            `SELECT id, source_system, source_system_other, location_info, correction_type, status,
+            `SELECT id, source_system, source_system_other, location_info, correction_type, correction_count, status,
                     requester_name, requester_dept, requester_phone, assigned_to, assigned_to_name,
                     expected_deadline, dev_estimated_at, created_at, fixed_at, refixed_at, archived_at,
                     submission_count, created_by, created_by_name, dingtalk_chat_id,
