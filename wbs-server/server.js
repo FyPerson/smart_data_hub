@@ -13727,6 +13727,37 @@ async function sendCollabDingtalkRaw(collabId, targetUser, title, markdown, oper
         }
     }
 
+    // ── 软成功拦截（对齐项目既有 dingtalkSendOk 范式：server.js notify-expected / utils/issue-notify.js 分层判定）──
+    //   钉钉 oToMessages/batchSend 成功时**可能不返 errcode**，仅凭 errcode 判成功会把"软成功"误当真成功：
+    //     uid 失效/离职 → invalidStaffIdList；限流 → flowControlledStaffIdList；被规则过滤 → filteredStaffIdList；
+    //     三者都过但无 processQueryKey = 钉钉未确认送达。任一命中都=未真送达，必须当失败——
+    //     否则照写 notified_at + message_key=null → 静默漏发 + 后续查已读报"缺少消息标识"（2026-06-23 #2972 实证）。
+    //   collab 单聊只发 dingUserId 一人，列表命中该 userid 即未送达（同 issue-notify codex #2 high）。
+    //   ⚠️ 本函数恒单收件人；若未来扩展为多人发送，hitList「只判当前 uid」语义不再适配，
+    //      需改返回结构（区分各 uid 成败）+ 调用方落库策略（codex 105 L-1）。
+    //   失败日志 detail 带命中 uid（sendTarget），便于排查同一账号反复失败；uid 非敏感 token（codex 105 L-3）。
+    const sendTarget = String(dingUserId).trim();
+    const hitList = (arr) => Array.isArray(arr) && arr.map(v => String(v).trim()).includes(sendTarget);
+    if (hitList(sendResult.invalidStaffIdList)) {
+        // uid 失效/离职：清缓存，下次发送的 dingtalk_user_id 缓存分支会重新 getUserIdByMobile 反查最新 userid（自愈换号）
+        await dbRunAsync('UPDATE users SET dingtalk_user_id = NULL WHERE id = ?', [targetUser.id]);
+        insertCollabLog(collabId, 'NOTIFY_FAIL', operatorInfo.id, operatorInfo.name, `send:user_invalid:${sendTarget}`);
+        return { ok: false, status: 502, body: { error: `收件人 ${targetUser.display_name} 的钉钉账号失效或已离职，消息未送达，请核对其手机号是否仍在企业钉钉`, reason: 'user_invalid' } };
+    }
+    if (hitList(sendResult.flowControlledStaffIdList)) {
+        insertCollabLog(collabId, 'NOTIFY_FAIL', operatorInfo.id, operatorInfo.name, `send:rate_limit:${sendTarget}`);
+        return { ok: false, status: 502, body: { error: '钉钉发送被限流，消息未送达，请稍后重试', reason: 'rate_limit' } };
+    }
+    if (hitList(sendResult.filteredStaffIdList)) {
+        insertCollabLog(collabId, 'NOTIFY_FAIL', operatorInfo.id, operatorInfo.name, `send:filtered:${sendTarget}`);
+        return { ok: false, status: 502, body: { error: '消息被钉钉规则过滤，未送达', reason: 'filtered' } };
+    }
+    if (!sendResult.processQueryKey) {
+        // 列表都过但无消息标识：钉钉未确认送达（罕见），硬失败不写 notified_at（对齐同模块 notify-expected / notify-requester-done）
+        insertCollabLog(collabId, 'NOTIFY_FAIL', operatorInfo.id, operatorInfo.name, `send:no_query_key:${sendTarget}`);
+        return { ok: false, status: 502, body: { error: '钉钉未返回消息标识，发送状态未确认，请重试', reason: 'no_query_key' } };
+    }
+
     return {
         ok: true, status: 200,
         body: {

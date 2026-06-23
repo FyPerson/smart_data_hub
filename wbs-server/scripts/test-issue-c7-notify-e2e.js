@@ -68,6 +68,31 @@ require(path.join(__dirname, '..', 'server'));
 function dbGet(sql, params) {
     return new Promise((resolve, reject) => { const db = new sqlite3.Database(DB_PATH); db.get(sql, params, (e, r) => { db.close(); e ? reject(e) : resolve(r); }); });
 }
+function dbAll(sql, params) {
+    return new Promise((resolve, reject) => { const db = new sqlite3.Database(DB_PATH); db.all(sql, params, (e, r) => { db.close(); e ? reject(e) : resolve(r); }); });
+}
+function dbRun(sql, params) {
+    return new Promise((resolve, reject) => { const db = new sqlite3.Database(DB_PATH); db.run(sql, params, function (e) { db.close(); e ? reject(e) : resolve(this); }); });
+}
+
+// ── 防真 db 污染（2026-06-23 示例用户B事故复盘）──
+//   本脚本连真 db 且 mock getUserIdByMobile→'mock_ding_user_id'；给 DEV_WITH_PHONE 发通知会触发
+//   server.js 发送逻辑把该假 uid 回写进真 users.dingtalk_user_id（缓存），测试结束若不还原，
+//   脏值残留 → 之后所有真实通知该用户（collab + issue）都拿假 uid 发 → 静默失败。
+//   对策：测试前快照、finally 无条件还原（成功/异常都还原）。
+const TOUCHED_USER_IDS = [ADMIN_ID, DEV_WITH_PHONE, DEV_NO_PHONE];
+let dingUidSnapshot = [];
+async function snapshotDingUids() {
+    dingUidSnapshot = await dbAll(
+        `SELECT id, dingtalk_user_id FROM users WHERE id IN (${TOUCHED_USER_IDS.map(() => '?').join(',')})`,
+        TOUCHED_USER_IDS
+    );
+}
+async function restoreDingUids() {
+    for (const u of dingUidSnapshot) {
+        await dbRun('UPDATE users SET dingtalk_user_id = ? WHERE id = ?', [u.dingtalk_user_id, u.id]);
+    }
+}
 function signAs(id, role, name) {
     return jwt.sign({ id, username: 'u' + id, display_name: name || ('user' + id), role }, JWT_SECRET, { expiresIn: '1h' });
 }
@@ -108,7 +133,9 @@ async function main() {
     const adminToken = signAs(ADMIN_ID, 'admin', '管理员');
     console.log(`\n══════ v1.74.0 C7 T6 通知 endpoint 落库 e2e（进程内 :${TEST_PORT}）══════`);
     await waitReady(adminToken);
+    await snapshotDingUids();   // 测试前快照 dingtalk_user_id（finally 还原，防 mock 回写污染真 db）
 
+    try {
     // ---- sent：成功落库 ----
     await check('N1 sent：notify-developer 成功 → notify_status=sent + message_key 落库 + error=NULL（200）', async () => {
         scenario = 'sent';
@@ -194,8 +221,11 @@ async function main() {
         must(row.notify_message_key, 'message_key 应落');
     });
 
-    // 清理：删测试 issue
-    for (const id of created) await apiCall('DELETE', `/api/issues/${id}`, adminToken);
+    } finally {
+        // 清理：删测试 issue + 还原 dingtalk_user_id（防 mock 反查回写污染真 db，2026-06-23 示例用户B事故）
+        for (const id of created) await apiCall('DELETE', `/api/issues/${id}`, adminToken);
+        await restoreDingUids();
+    }
 
     console.log(`\n  合计 ${pass} PASS / ${fail} FAIL`);
     console.log(fail === 0 ? '  🎉 C7 T6 通知 endpoint 落库 e2e 全部通过\n' : '  🚫 存在失败项\n');
