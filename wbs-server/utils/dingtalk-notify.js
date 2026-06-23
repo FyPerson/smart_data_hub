@@ -609,14 +609,16 @@ async function resolveRequesterDingUserId(token, requesterPhone, deps = {}) {
  * 注意：done_read_at 语义是"已读此通知"，不代表下载/打开了 xlsx，文案不暗示"已确认数据"。
  * 入参全部走 escapeMarkdown（防用户输入破坏 markdown 排版，codex 53 H-3）。
  *
- * @param {object} p  { oaRequestNo, description, exporterName }（requesterName 暂未用于正文，保留参数位）
+ * @param {object} p  { oaRequestNo, description, senderName }（requesterName 暂未用于正文，保留参数位）
  * @returns {{title:string, text:string}}
  */
-function buildRequesterDoneCard({ oaRequestNo, description, exporterName } = {}) {
+function buildRequesterDoneCard({ oaRequestNo, description, senderName } = {}) {
     const title = '您的数据需求已完成';
-    // L-1：exporterName 空时不留"请联系数据导出人 。"末尾空白，改"请联系平台管理员。"
-    const contactLine = exporterName
-        ? `如未收到文件或有疑问，请联系数据导出人 ${escapeMarkdown(exporterName)}。`
+    // v1.77.0：联系人 = 单据发送人（点按钮触发发送的操作人）——业务方有疑问找发数据的人；
+    //   原 exporterName（数据导出人）口径在开发交付路径下不成立（开发不直接对业务方），两路径统一发送人
+    // L-1：senderName 空时不留末尾空白，改"请联系平台管理员。"（发送人=req.user 恒有值，兜底保留）
+    const contactLine = senderName
+        ? `如未收到文件或有疑问，请联系单据发送人 ${escapeMarkdown(senderName)}。`
         : `如未收到文件或有疑问，请联系平台管理员。`;
     const text = [
         `### 您的数据需求已完成`,
@@ -698,10 +700,12 @@ function buildCollabAssignedCard(collab, platformBaseUrl) {
         '**需求描述**',
         '',
         escapeMarkdown(collab.description || '(无描述)'),
+        '',
+        '请先登平台回填预计完成时间，再着手开发交付。',
         ''
     ];
     if (deepLink) {
-        lines.push(`[👉 查看详情并上传交付物](${deepLink})`);
+        lines.push(`[👉 查看详情并回填预计完成时间](${deepLink})`);
     }
     return lines.join('\n');
 }

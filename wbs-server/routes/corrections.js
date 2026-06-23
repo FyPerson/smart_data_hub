@@ -944,7 +944,8 @@ async function notifyCorrectionAssignedDev(correctionId, devId) {
             '您被指派一条**数据修正需求**，请登平台回复预计完成时间：', '',
             `- 所属系统：${esc(c.source_system)}`,
             `- 修正方式：${esc(c.location_info)}`,
-            c.expected_deadline ? `- 期望完成：${esc(String(c.expected_deadline))}` : ''
+            c.expected_deadline ? `- 期望完成：${esc(String(c.expected_deadline))}` : '',
+            '', '请先回填预计完成时间，便于业务方知晓进度。'
         ].filter(Boolean).join('\n') + `\n\n[查看修正单详情](${detailUrl})`;
         try { r = await sendIssueDingtalkRaw(dev, '📋 数据修正·新指派', md); }
         catch (e) { r = { ok: false, reason: 'exception' }; logger.warn(`[correction-notify] 修正单 #${correctionId} 指派发送异常：${e.message}`); }
