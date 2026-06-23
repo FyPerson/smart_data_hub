@@ -185,6 +185,10 @@
         .val-running  { background: #fef3c7; color: #92400e; }
         .val-bypassed { background: #fde68a; color: #78350f; }
         .friction-mark { color: #b91c1c; font-size: 16px; }
+        /* 阶段2 盯效率：超时未回填标记（橙=刚超 / 红=严重超） */
+        .unreplied-timeout-mark { font-size: 12px; margin-left: 6px; padding: 1px 6px; border-radius: 4px; white-space: nowrap; }
+        .unreplied-timeout-mark.ut-orange { color: #b45309; background: #fff7ed; border: 1px solid #fed7aa; }
+        .unreplied-timeout-mark.ut-red { color: #b91c1c; background: #fef2f2; border: 1px solid #fecaca; }
 
         /* v1.72.3 admin 直派模式 tag */
         .admin-direct-tag {
@@ -969,6 +973,10 @@
                 <option value="">全部</option>
             </select>
 
+            <label class="filter-timeout-toggle" style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;font-size:13px;color:#475569;" title="只看对接人指派后超时未回填预计完成时间的协作单（admin 直派不计）">
+                <input type="checkbox" id="filterUnrepliedTimeout" onchange="toggleUnrepliedTimeoutFilter()"> 只看超时未回填
+            </label>
+
             <input type="text" id="filterSearch" placeholder="搜索描述/业务方/OA 流程号..." onkeyup="debounceSearch()">
 
             <button class="btn-new" onclick="openNewModal()">
@@ -1553,6 +1561,39 @@
             return s.substring(0, 16).replace('T', ' ');
         }
 
+        // === 阶段2 盯效率：对接人指派开发后「超时未回填预计完成时间」判定（A1）===
+        // 安全解析 'YYYY-MM-DD HH:mm(:ss)' 本地时间为 Date（对齐数据修正 parseLocalTime 范式；fmtDate 只截字符串不解析 Date）
+        function parseCollabLocalTime(s) {
+            if (!s) return null;
+            const m = String(s).trim().match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/);
+            if (m) {
+                const y = +m[1], mo = +m[2], da = +m[3], h = +m[4], mi = +m[5], se = +(m[6] || 0);
+                const dt = new Date(y, mo - 1, da, h, mi, se);
+                // 反查校验防非法日期（如 02-31）被 Date 自动进位误判（codex M-2）；不一致即返 null 不参与超时计算
+                return (dt.getFullYear() === y && dt.getMonth() === mo - 1 && dt.getDate() === da && dt.getHours() === h && dt.getMinutes() === mi) ? dt : null;
+            }
+            const d = new Date(s); return isNaN(d.getTime()) ? null : d;
+        }
+        // 超时分级（null=不标 / 'orange' / 'red'）：
+        //   范围=assign_mode='normal'（对接人指派，排除 admin 直派）+ PENDING + 未回填 dev_estimated_at；
+        //   指派时刻 H<16 → 相对计时 now-assigned_at（>30 分橙 / >60 分红）；
+        //   H>=16（临下班指派）→ 次日绝对点（>=次日10:00 橙 / >=次日12:00 红，日历次日不排节假日）。
+        //   注：用 assigned_at 锚点而非 read_at 已读——read_at 按需固化+24h停查+列表不批量查，强行用会大面积漏标。
+        function unrepliedTimeoutLevel(r, nowMs) {
+            if (!r || r.assign_mode !== 'normal' || r.status !== 'PENDING' || r.dev_estimated_at) return null;
+            const assigned = parseCollabLocalTime(r.assigned_at);
+            if (!assigned) return null;
+            const now = (typeof nowMs === 'number') ? nowMs : Date.now();
+            if (assigned.getHours() < 16) {
+                const mins = (now - assigned.getTime()) / 60000;
+                return mins > 60 ? 'red' : mins > 30 ? 'orange' : null;
+            }
+            const y = assigned.getFullYear(), mo = assigned.getMonth(), da = assigned.getDate();
+            const next10 = new Date(y, mo, da + 1, 10, 0, 0).getTime();
+            const next12 = new Date(y, mo, da + 1, 12, 0, 0).getTime();
+            return now >= next12 ? 'red' : now >= next10 ? 'orange' : null;
+        }
+
         // v1.70.2 图片放大 lightbox 共用 helper
         // 用法：openLightbox(url, captionText)  / 关闭：closeLightbox(event)
         // 调用方：① 创建弹窗 renderFilePreview 缩略图 onclick ② 详情页原始单据截图缩略图 onclick
@@ -1788,6 +1829,12 @@
         let currentSortDir = 'desc';
         // 缓存最近一次后端返回的原始顺序，用于"清排序"时还原（不需重新拉接口）
         let lastListBackendOrder = [];
+        // 阶段2 盯效率：是否只看「超时未回填」（客户端筛选，独立于后端筛选/排序；用未筛选的 lastListBackendOrder 重渲染）
+        let onlyUnrepliedTimeout = false;
+        function toggleUnrepliedTimeoutFilter() {
+            onlyUnrepliedTimeout = !!document.getElementById('filterUnrepliedTimeout').checked;
+            renderList(lastListBackendOrder);
+        }
 
         function renderList(list) {
             const tbody = document.getElementById('listBody');
@@ -1797,14 +1844,19 @@
                 lastListBackendOrder = list ? list.slice() : [];
             }
 
-            if (!list || list.length === 0) {
-                tbody.innerHTML = '<tr class="empty-row"><td colspan="14">暂无协作单。点击右上角"新建协作单"开始记录。</td></tr>';
+            // 阶段2 盯效率筛选：只看超时未回填（橙+红都算）；lastListBackendOrder 缓存未筛选原始，切换开关时 renderList(lastListBackendOrder) 重过滤
+            // 固定一个 nowTs 供筛选 + 渲染共用，避免两次 Date.now() 极端边界跨阈值不一致（codex L-2）
+            const nowTs = Date.now();
+            const working = onlyUnrepliedTimeout ? (list || []).filter(r => unrepliedTimeoutLevel(r, nowTs)) : (list || []);
+
+            if (!working.length) {
+                tbody.innerHTML = `<tr class="empty-row"><td colspan="14">${onlyUnrepliedTimeout ? '当前无超时未回填的协作单。' : '暂无协作单。点击右上角"新建协作单"开始记录。'}</td></tr>`;
                 updateSortIcons();
                 return;
             }
 
             // 应用客户端排序（若有）
-            const sorted = currentSortBy ? sortByField(list, currentSortBy, currentSortDir) : list;
+            const sorted = currentSortBy ? sortByField(working, currentSortBy, currentSortDir) : working;
 
             tbody.innerHTML = sorted.map(r => {
                 const desc = r.description.length > 60 ? r.description.substring(0, 60) + '…' : r.description;
@@ -1819,6 +1871,11 @@
                 }
 
                 const frictionCell = r.friction_occurred === 1 ? '<span class="friction-mark" title="协作摩擦">💢</span>' : '';
+                // 阶段2 盯效率：对接人指派开发超时未回填预计完成时间标记（共用 renderList 顶部 nowTs）
+                const utLevel = unrepliedTimeoutLevel(r, nowTs);
+                const timeoutMark = utLevel
+                    ? `<span class="unreplied-timeout-mark ut-${utLevel}" title="对接人指派后超时未回填预计完成时间">${utLevel === 'red' ? '🔴' : '🟠'}超时未回填</span>`
+                    : '';
                 const adminDirectTag = r.assign_mode === 'admin_direct'
                     ? ' <span class="admin-direct-tag" title="admin 直派模式，跳过 D1/D2">🎯 admin 直派</span>'
                     : '';
@@ -1857,7 +1914,7 @@
                     <td>${fmtDate(r.last_submitted_at || r.submitted_at)}</td>
                     <td>${contactCell}</td>
                     <td>${devCell}</td>
-                    <td><span class="status-badge status-${r.status}">${STATUS_LABELS[r.status] || r.status}</span></td>
+                    <td><span class="status-badge status-${r.status}">${STATUS_LABELS[r.status] || r.status}</span>${timeoutMark}</td>
                     <td>${valCell}</td>
                     <td>${frictionCell}</td>
                 </tr>`;
@@ -2580,6 +2637,12 @@
             const devRowHtml = isAdminDirect ? '' : `
                             <div class="detail-kv-label">指派开发</div>
                             <div class="detail-kv-value">${devValueHtml}</div>`;
+            // 阶段2 盯效率 B：开发回填预计完成「动作时刻」——从 d.logs 找最新 dev_estimate_reply.created_at
+            //   （详情接口已返 d.logs 且 ORDER BY created_at DESC, id DESC，find 第一个即最新；对齐 ADMIN_SUBMIT_ON_BEHALF 取日志范式）
+            const devEstimateReplyLog = Array.isArray(d.logs) ? d.logs.find(l => l && l.operation_type === 'dev_estimate_reply') : null;
+            const devEstimateRepliedHtml = (d.dev_estimated_at && devEstimateReplyLog && devEstimateReplyLog.created_at)
+                ? `<span style="margin-left:8px;color:#64748b;font-size:12px;">· 开发于 ${fmtDate(devEstimateReplyLog.created_at)} 回填</span>`
+                : '';
             // v1.67.0 数据模板：从 attachments 拿 attachment_type='example_xlsx' 的活跃文件
             // 取首个 active example_xlsx（admin 创建时前端仅允许单文件上传；理论上 API 直传多文件场景按 db 默认顺序取，不引入显式排序避免复杂度）
             const templateFile = (d.attachments || []).filter(
@@ -2692,7 +2755,7 @@
                             <div class="detail-kv-label">期望完成</div>
                             <div class="detail-kv-value">${fmtDate(d.deadline)}</div>
                             <div class="detail-kv-label">开发预计完成</div>
-                            <div class="detail-kv-value">${d.dev_estimated_at ? fmtDate(d.dev_estimated_at) : '<span style="color:#9ca3af">开发尚未回填</span>'}</div>${contactRowHtml}${devRowHtml}
+                            <div class="detail-kv-value">${d.dev_estimated_at ? fmtDate(d.dev_estimated_at) + devEstimateRepliedHtml : '<span style="color:#9ca3af">开发尚未回填</span>'}</div>${contactRowHtml}${devRowHtml}
                             <div class="detail-kv-label">录入人</div>
                             <div class="detail-kv-value">${escapeHtml(d.created_by_name)} · ${fmtDate(d.created_at)}</div>
                             <div class="detail-kv-label">当前状态</div>
