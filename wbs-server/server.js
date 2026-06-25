@@ -684,6 +684,9 @@ const db = new sqlite3.Database(DB_FILE, (err) => {
         //   保持原 correction 建表时序零变更。correctionModule 在文件后部实例化（deps 齐），
         //   本 db 回调异步晚于顶层执行、此时已就绪。
         correctionModule.initSchema();
+        // 系统迭代模块 C1：紧跟 correction 之后建 sys 四表（同位置同时序，§1.4）。
+        //   readiness 未就绪期间 sys-* 端点 503（首启短暂窗口）。sysIterModule 在文件后部实例化。
+        sysIterModule.initSchema();
     }
 });
 
@@ -18448,6 +18451,19 @@ const correctionModule = require('./routes/corrections')({
 });
 // initSchema() 调用见 db 连接回调（busy_timeout + initTable 之后）；此处仅实例化 + 挂载路由。
 app.use('/api/corrections', correctionModule.router);
+
+// ============================================================
+// 系统迭代模块（业务系统软件迭代跟踪，C1 schema + readiness + 空 router）
+//   业务 SSOT = docs/local/系统迭代/系统迭代_方案_20260624_v1.6.md
+//   实施 SSOT = docs/local/系统迭代/系统迭代_编码实施方案_20260624_v1.3.md
+//   C1 deps 最小档（logger/db/dbXxxAsync/authenticateToken/requireAdmin）；附件/通知 deps 见 C3/C5。
+//   initSchema() 调用见 db 连接回调（correction initSchema 之后，§1.4）；此处仅实例化 + 挂载。
+//   ⚠️ 挂载到 /api（§1.3）：router 内只注册 /sys-* 路径，未匹配自动 next() fall-through，不拦截其他 /api/*。
+// ============================================================
+const sysIterModule = require('./routes/sys-iteration')({
+  logger, db, dbRunAsync, dbGetAsync, dbAllAsync, authenticateToken, requireAdmin,
+});
+app.use('/api', sysIterModule.router);
 
 // ============================================================
 // MCP Demo - 数仓对话查询

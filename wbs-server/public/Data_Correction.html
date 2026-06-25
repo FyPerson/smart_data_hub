@@ -966,15 +966,21 @@
                 <span style="color:#9ca3af;"> · ${escapeHtml(a.uploaded_by_name || '-')} · ${escapeHtml(formatFullTime(a.created_at))}</span></div>`).join('') : `<div style="color:#9ca3af; font-size:12px;">${emptyText}</div>`;
             // L3b 错误证明区：文字说明 error_proof_note + 补传入口（§6.7：建单人/admin，早期态 PENDING_ASSIGN~REFIXED，非作废）
             const ERR_PROOF_STATES = ['PENDING_ASSIGN', 'ASSIGNED_PENDING_ESTIMATE', 'IN_PROGRESS', 'FIXED', 'REFIXED'];
-            const canAddErrProof = (isAdmin || isCreator) && !isChild && ERR_PROOF_STATES.includes(s) && !r.voided_at;   // L5 子单 error_proof 归主单（后端 ERROR_PROOF_ON_MASTER_ONLY）
-            const errProofNoteHtml = r.error_proof_note ? `<div style="font-size:13px; color:#374151; margin-bottom:6px; white-space:pre-wrap;">📝 ${escapeHtml(r.error_proof_note)}</div>` : '';
+            const canAddErrProof = (isAdmin || isCreator) && !isChild && ERR_PROOF_STATES.includes(s) && !r.voided_at;   // L5 子单 error_proof 归主单（后端 ERROR_PROOF_ON_MASTER_ONLY），子单只读展示不带补传入口
+            // codex 61 M-4：错误证明文字说明读统一字段 effective_error_proof_note（主单/无组取自身、子单取主单，后端已算好，前端无分支）。
+            const errProofNoteHtml = r.effective_error_proof_note ? `<div style="font-size:13px; color:#374151; margin-bottom:6px; white-space:pre-wrap;">📝 ${escapeHtml(r.effective_error_proof_note)}</div>` : '';
             const errProofAddHtml = canAddErrProof
                 ? `<div style="margin-top:8px;"><input type="file" id="errProofFiles_${Number(r.id)}" multiple accept="image/*,.pdf,.xlsx,.xls" style="font-size:12px;"><button class="btn-secondary nb-btn" onclick="uploadErrorProof(${Number(r.id)})">上传错误证明</button></div>`
                 : '';
-            // codex 56 M-1：子单错误证明归主单（与隐藏 done 行对称）——子单整块不渲染错误证明 section（否则显示空"错误证明（无）"误导子单有独立错误证明）；banner 已引导去主单看。
-            const errProofSection = isChild
-                ? ''
-                : `<div class="detail-section"><h3>错误证明（error_proof）</h3>${errProofNoteHtml}${renderAtts(errProofs, errProofNoteHtml ? '（暂无附件）' : '无')}${errProofAddHtml}</div>`;
+            // codex 61·方案 A：错误证明 = 诉求级材料（组内共享一份、物理存主单）。子单从"整块隐藏"改为"只读展示主单 error_proof"——
+            //   解决系统2 开发看不到错误证明（后端详情已合并返回主单 error_proof 附件 + effective_error_proof_note）。
+            //   子单标来源「来自关联组主单 #N」、不带补传入口（canAddErrProof 对子单恒 false，上传仍归主单后端 409 防线不变）。
+            //   空态区分（codex 61 M-5）：子单有 note 无附件→「暂无附件」、无 note 无附件→「主单暂无错误证明附件」；防开发误判主单也没证明。
+            const errProofTitle = isChild ? `错误证明（来自关联组主单 #${groupMasterId}）` : '错误证明（error_proof）';
+            const errProofEmpty = isChild
+                ? (errProofNoteHtml ? '（暂无附件）' : '主单暂无错误证明附件')
+                : (errProofNoteHtml ? '（暂无附件）' : '无');
+            const errProofSection = `<div class="detail-section"><h3>${errProofTitle}</h3>${errProofNoteHtml}${renderAtts(errProofs, errProofEmpty)}${errProofAddHtml}</div>`;
 
             // ===== 群信息 =====
             let chatBlock = '';

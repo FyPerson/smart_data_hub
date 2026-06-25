@@ -1429,21 +1429,45 @@ router.get('/:id', authenticateToken, requireCorrectionSchemaReady, async (req, 
                FROM correction_status_history WHERE correction_request_id = ? ORDER BY id`,
             [id]
         );
-        const attachments = await dbAllAsync(
-            `SELECT id, attachment_type, file_name, original_name, file_size, mime_type, uploaded_by, uploaded_by_name, created_at
-               FROM correction_attachments WHERE correction_request_id = ? ORDER BY id`,
-            [id]
-        );
         // L3（§6.0/§7.2）：业务方子表 N 行（前端完成通知区按行渲染）+ 组信息（is_master/master_id/members，前端关联组区 + 子单跳主单）。
         //   锚点解析：标准单/主单 requesters=自身子表行；跨系统子单 requesters=主单子表行（is_master=false 时前端隐藏录入、显示"属关联组主单 #N"）。
+        //   ⚠️ anchor 必须在取附件【之前】解析——跨系统 error_proof 附件归主单（codex 61 方案 A：附件读时合并主单 error_proof）。
         const anchor = await resolveCorrectionGroupAnchor(id);
+        // 错误证明附件跨单可见（codex 61·方案 A）：error_proof = 诉求级（组内共享一份、物理存主单 anchor.master_id）；
+        //   fix_proof = 单级（各单各交各看本单）。子单详情合并主单 error_proof 解决"系统2 开发看不到错误证明"。
+        //   接口级不变量（codex 61 M-1）：子单仅额外获得主单 error_proof 附件 + 主单 error_proof_note，绝不返回主单 fix_proof/history/完整 request。
+        //   SQL（M-3 数组占位符 / L-2 统一形状 source_correction_request_id / L-3 CASE 稳序 error_proof 在前）：
+        //     单系统单/主单 master===id → error_proof 仍查自身，行为完全不变（关键回归保障）。
+        //   ⚠️ anchor 恒非空：row 已在上方 404 校验存在，resolveCorrectionGroupAnchor 仅当单不存在才返 null（此处不可达）；
+        //     `anchor ? anchor.master_id : id` 的 `: id` 是防御性兜底（异常竞态下 anchor 失败则降级为只读本单，不崩接口），非常态路径（codex 61 代码审 L-3）。
+        const attRows = await dbAllAsync(
+            `SELECT id, attachment_type, file_name, original_name, file_size, mime_type, uploaded_by, uploaded_by_name, created_at,
+                    correction_request_id AS source_correction_request_id
+               FROM correction_attachments
+              WHERE (attachment_type = ? AND correction_request_id = ?)
+                 OR (attachment_type = ? AND correction_request_id = ?)
+              ORDER BY CASE WHEN attachment_type = 'error_proof' THEN 0 ELSE 1 END, id`,
+            ['error_proof', anchor ? anchor.master_id : id, 'fix_proof', id]
+        );
+        // L-2：所有附件行统一带 from_master 布尔 + source_correction_request_id，前端只读展示来源、不依赖 correction_request_id 语义。
+        const attachments = attRows.map(a => ({
+            ...a,
+            from_master: a.attachment_type === 'error_proof' && Number(a.source_correction_request_id) !== id,
+        }));
         const requesters = anchor ? anchor.requesters.map(rq => ({
             id: rq.id, requester_name: rq.requester_name, requester_phone: rq.requester_phone, is_primary: rq.is_primary, seq: rq.seq,
             completion_notify_status: rq.completion_notify_status, completion_notified_at: rq.completion_notified_at,
             completion_notify_error: rq.completion_notify_error, completion_read_at: rq.completion_read_at,
         })) : [];
         const group = anchor ? { master_id: anchor.master_id, is_master: anchor.is_master, members: anchor.group_members } : null;
-        res.json({ request: row, history, attachments, requesters, group });
+        // effective_error_proof_note（codex 61 M-4）：错误证明文字说明统一字段——主单/无组单取自身、子单取主单。
+        //   前端所有单读这一个字段无分支。子单时单独取主单 note（L-1：只在子单触发一次轻量 SELECT，主单/无组单零额外查询）。
+        let effectiveErrorProofNote = row.error_proof_note || null;
+        if (anchor && anchor.is_master === false) {
+            const masterRow = await dbGetAsync('SELECT error_proof_note FROM correction_requests WHERE id = ?', [anchor.master_id]);
+            effectiveErrorProofNote = (masterRow && masterRow.error_proof_note) || null;
+        }
+        res.json({ request: { ...row, effective_error_proof_note: effectiveErrorProofNote }, history, attachments, requesters, group });
     } catch (err) {
         logger.error('查询数据修正单详情失败:', err.message);
         res.status(500).json({ error: err.message });
