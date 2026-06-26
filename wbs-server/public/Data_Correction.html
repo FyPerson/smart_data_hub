@@ -130,6 +130,7 @@
         .drawer.open { right: 0; }
         .drawer-header { padding: 20px 24px 16px; border-bottom: 1px solid #e2e8f0; display: flex; justify-content: space-between; align-items: flex-start; }
         .drawer-header h2 { font-size: 16px; font-weight: 700; color: #111827; margin: 0; flex: 1; line-height: 1.5; }
+        .drawer-title-reason { font-size: 13px; font-weight: 400; color: #6b7280; cursor: help; }
         .drawer-close { background: none; border: none; font-size: 20px; cursor: pointer; color: #6b7280; padding: 4px; line-height: 1; }
         .drawer-close:hover { color: #111827; }
         .drawer-body { flex: 1; overflow-y: auto; padding: 20px 24px; }
@@ -366,7 +367,7 @@
                         <input type="number" id="formCorrectionCount2" min="2" step="1" placeholder="批量必填，≥2">
                     </div>
                 </div>
-                <div class="form-group"><label>原因/背景</label><textarea id="formReason" rows="2" placeholder="可选，错误产生原因或修正背景"></textarea></div>
+                <div class="form-group"><label>原因/背景 <span class="req">*</span></label><textarea id="formReason" rows="2" placeholder="必填，至少 5 字：错误产生原因或修正背景"></textarea></div>
                 <div class="form-group"><label>业务方部门</label><select id="formRequesterDept"></select></div>
                 <div class="form-group">
                     <label>业务方 <span class="req">*</span>（第一行为主业务方，可加多个）</label>
@@ -795,7 +796,12 @@
             const isChild = !!(group && group.is_master === false);
             const groupMasterId = group ? Number(group.master_id) : Number(r.id);
             const groupMembers = (group && Array.isArray(group.members)) ? group.members : [];
-            document.getElementById('drawerTitle').textContent = `#${r.id} 数据修正`;
+            // 抽屉标题（P2 视觉优化）：#ID 数据修正 + 原因/背景摘要（截断 20 字，省略号，悬浮 title 看全文）。
+            //   reason 可能为空（旧单或历史数据）→ 仅显 "#ID 数据修正"，不显摘要/省略号。innerHTML 故必须 escapeHtml 防 XSS。
+            const reasonRaw = String(r.reason || '').trim();
+            const reasonBrief = reasonRaw.length > 20 ? reasonRaw.slice(0, 20) + '…' : reasonRaw;
+            document.getElementById('drawerTitle').innerHTML = `#${r.id} 数据修正`
+                + (reasonBrief ? ` <span class="drawer-title-reason" title="${escapeHtml(reasonRaw)}">${escapeHtml(reasonBrief)}</span>` : '');
             const me = currentUser || {};
             const isAdmin = me.role === 'admin';
             const isPublisher = me.role === 'publisher';
@@ -918,22 +924,32 @@
                   sendable: ['FIXED', 'REFIXED'], canSend: isAdmin || isAssignee || isRelay, byPhone: false, noPhone: false },
             ];
             // L3a 完成通知（done）：按业务方子表 N 行渲染（§7.2），每行带 requesterId；多业务方时标注姓名 +（主）
+            //   ⭐ 子单承接显示主单 done 状态（P2 2026-06-26，对齐 error_proof 跨单可见方案 A）：
+            //     done 通知归主单发送（后端 NOTIFY_DONE_ON_MASTER_ONLY，子单发/查均 409），但子单应「只读承接」展示主单状态而非隐藏。
+            //     子单（isChild）的 done 行：doneReadonly=true → buildNotifyRow 不渲染任何按钮（不能发/不能查）+ 标来源主单 #N。
+            //     未发送态文案按【主单是否终态】分流：主单未归档→「等待主单发送」（还有机会发）；主单终态→与主单一致（已盖棺）。
+            //   requesters 已是主单子表行（resolveCorrectionGroupAnchor 恒查 masterId），故子单 done 状态数据=主单真相，零额外查询。
             const multiReq = requesters.length > 1;
+            const masterMember = groupMembers.find(m => Number(m.id) === groupMasterId) || null;
+            const masterTerminal = !!(masterMember && ['ARCHIVED', 'REJECTED', 'VOIDED'].includes(masterMember.status));
             const doneRows = requesters.map(req => ({
                 key: 'done', cid: Number(r.id), requesterId: Number(req.id),
                 label: multiReq ? `通知业务方·完成 · ${req.requester_name || '业务方'}${Number(req.is_primary) === 1 ? '（主）' : ''}` : '通知业务方·完成',
                 recipient: req.requester_name || '业务方', applicable: true,
                 status: req.completion_notify_status, notifiedAt: req.completion_notified_at, readAt: req.completion_read_at, error: req.completion_notify_error,
                 sendable: ['FIXED', 'REFIXED'], canSend: isAdmin || isCreator, byPhone: true, noPhone: !String(req.requester_phone || '').trim(),
+                doneReadonly: isChild, doneMasterId: groupMasterId, doneMasterTerminal: masterTerminal,
             }));
             // 权限可见性（细优② M-1/M-2 + L3a）：严格只 admin 看全部；非 admin 只看 creator 行（后端端点权限为真闸门）。
             //   ⚠️ codex 51 L-4：通知行分两段控制——基础类型 notifyTypes（dev/relay/estimate/creator）+ done 子表 N 行 doneRows，
             //     改通知权限时【两处都要动】（visibleTypes 和 visibleDone），勿只改一处。
             const visibleTypes = isAdmin ? notifyTypes : notifyTypes.filter(t => t.key === 'creator');
-            // L5（codex 56 M-2 已核实）：子单完成通知归主单（后端 NOTIFY_DONE_ON_MASTER_ONLY）→ 子单不渲染 done N 行；
-            //   而 notify-developer/notify-estimate/notify-creator 三端点均不调 resolveCorrectionGroupAnchor、无子单限制
-            //   → 子单可独立发（各有自己开发/ETA/建单人，方案 §6.5 每系统单发自己 ETA 含 source_system）→ 仅 done 归主单、这三类保留。
-            const visibleDone = (isAdmin && !isChild) ? doneRows : [];   // done N 行仅 admin 看（与原 done 同口径）
+            // L5 口径（codex 56 M-2 + P2 2026-06-26 改动点4 更新）：done【操作】归主单——主单可按权限发/查，子单发/查 done 后端均 409。
+            //   但子单【展示】承接主单状态：done N 行子单也渲染（doneReadonly 只读、无按钮、标来源主单 #N），不再隐藏。
+            //   对比：notify-developer/notify-estimate/notify-creator 三端点不调 resolveCorrectionGroupAnchor、无子单限制
+            //   → 子单可独立发这三类（各有自己开发/ETA/建单人，方案 §6.5）；仅 done 归主单（子单只读承接）。
+            // done N 行仅 admin 看；子单（isChild）也渲染——走 doneReadonly 只读承接主单状态（codex 改动点4 审 M-3 注释统一）
+            const visibleDone = isAdmin ? doneRows : [];
             // codex 51 M-2：requesters 空时（旧单未回填/异常数据）done 行会消失——admin 显示防御警告 surface 异常，
             //   不造假主表 done 行（L2b length===0 → REQUESTER_ROWS_MISSING，假按钮点了必失败）。正常数据 L1 回填+readiness 保证非空。
             const doneWarn = (isAdmin && !isChild && requesters.length === 0)
@@ -1145,6 +1161,9 @@
             if (!sourceSystem) return showToast('请选择所属系统', 'error');
             if (sourceSystem === '其他' && !v('formSourceSystemOther')) return showToast('选「其他」时须填写系统说明', 'error');
             if (!v('formLocationInfo')) return showToast('请填写修正方式', 'error');
+            // P2 必填：原因/背景 ≥5 字（与「完成说明」≥5 字口径对齐；后端为真闸门 REASON_REQUIRED）
+            const reasonInput = (v('formReason') || '').trim();
+            if (reasonInput.length < 5) return showToast('请填写原因/背景（至少 5 字）', 'error');
             // codex 51 M-1：第一行=主业务方，须单独校验其姓名非空（否则空名第一行被 filter 丢弃后第二行上位成主，与 UI 语义不符）
             const reqRows = document.querySelectorAll('#requesterList .requester-row');
             if (!reqRows[0] || !reqRows[0].querySelector('.rq-name').value.trim()) return showToast('请填写主业务方姓名（第一行）', 'error');
@@ -1166,7 +1185,7 @@
                 location_info: v('formLocationInfo'),
                 correction_count: correctionCountVal,   // single=undefined（后端强制 1）/ batch=raw（≥2）
                 oa_number: v('formOaNumber') || undefined,
-                reason: v('formReason') || undefined,
+                reason: reasonInput,   // P2 必填 ≥5 字（已 trim 校验）
                 requester_dept: document.getElementById('formRequesterDept').value || undefined,
                 requesters: requesters,   // L3a 多业务方（第一行=主业务方；后端 normalize 兼容旧 requester_name 字段）
                 error_proof_note: v('formErrorProofNote') || undefined,   // L3b 错误证明说明（后端 ≤1000）
@@ -1527,6 +1546,33 @@
         function buildNotifyRow(t, curStatus) {
             const esc = escapeHtml;
             const rname = esc(t.recipient);
+            // ⭐ 子单只读 done 行（P2 2026-06-26）：子单承接显示主单完成通知状态，但不能发/不能查（后端 409）→ 纯展示无按钮。
+            //   已发送/已读 → 与主单同口径承接（通知/已读时间）；未发送 → 按主单是否终态分流（非终态=等待主单发送 / 终态=与主单一致）。
+            //   ⚠️ 判断顺序（codex 改动点4 审 M-1）：sent/failed【优先】于 noPhone——"承接展示"语义下已发/已读是既成事实，
+            //     须忠实反映；noPhone 只对"还没发"的未发送态有意义（避免主单已发后手机号被清空时遮蔽真实 done 状态）。
+            if (t.key === 'done' && t.doneReadonly) {
+                const fromMaster = `<span style="color:#9ca3af; font-size:11px;">（来自关联组主单 #${esc(String(t.doneMasterId))}）</span>`;
+                let l;
+                if (t.status === 'sent') {
+                    l = t.readAt
+                        ? (t.notifiedAt
+                            ? `<span style="color:#059669;">📖 ${rname} 已读 · 通知于 ${esc(formatFullTime(t.notifiedAt))} · 已读于 ${esc(formatFullTime(t.readAt))}</span>`
+                            : `<span style="color:#059669;">📖 ${rname} 最近一次已读 · 于 ${esc(formatFullTime(t.readAt))}</span>`)
+                        : `<span style="color:#059669;">✅ 已于 ${esc(formatFullTime(t.notifiedAt))} 通知 ${rname}</span>`;
+                } else if (t.status === 'failed') {
+                    l = `<span style="color:#dc2626;">⚠️ 主单通知失败（${esc(notifyReasonText(t.error))}）</span>`;
+                } else if (t.byPhone && t.noPhone) {
+                    // 未发送且业务方无手机号 → 主单本就无法发（noPhone 只对未发送态有意义，故排在 sent/failed 之后）
+                    l = `<span style="color:#b45309;">— 业务方未填手机号，主单无法通知</span>`;
+                } else if (t.doneMasterTerminal) {
+                    // 主单已终态（归档/拒绝/作废）且从未发 → 与主单一致（已无机会发）
+                    l = `<span style="color:#9ca3af;">— 未发送钉钉通知</span>`;
+                } else {
+                    // 主单未终态、尚未发 → 子单干等主单发
+                    l = `<span style="color:#6b7280;">⏳ 等待主单发送</span>`;
+                }
+                return `<div class="notify-row"><span class="nr-label">${esc(t.label)}</span><span class="nr-body">${l} ${fromMaster}</span></div>`;
+            }
             const canSendNow = t.sendable.includes(curStatus);
             const ridArg = (t.key === 'done' && t.requesterId) ? `, ${t.requesterId}` : '';   // L3a：done 携带 requester_id（多业务方逐个发/查）
             const sendBtn = (force, text) => (t.canSend && canSendNow) ? `<button class="btn-secondary nb-btn" onclick="notifySend(${t.cid}, '${t.key}', ${force}${ridArg})">${text}</button>` : '';
@@ -1536,7 +1582,10 @@
                 line = `<span style="color:#b45309;">— 业务方未填手机号，无法通知</span>`;
             } else if (t.status === 'sent') {
                 if (t.readAt) {
-                    line = `<span style="color:#059669;">📖 ${rname} 最近一次已读 · 于 ${esc(formatFullTime(t.readAt))}</span>`;
+                    // 已读：同时展示「通知时间 + 已读时间」（P2 2026-06-26，原仅显已读时间丢了通知时刻）。notifiedAt 异常缺失时回退只显已读。
+                    line = t.notifiedAt
+                        ? `<span style="color:#059669;">📖 ${rname} 已读 · 通知于 ${esc(formatFullTime(t.notifiedAt))} · 已读于 ${esc(formatFullTime(t.readAt))}</span>`
+                        : `<span style="color:#059669;">📖 ${rname} 最近一次已读 · 于 ${esc(formatFullTime(t.readAt))}</span>`;
                     btns = sendBtn(true, '重新通知');
                 } else {
                     line = `<span style="color:#059669;">✅ 已于 ${esc(formatFullTime(t.notifiedAt))} 通知 ${rname}</span>`;

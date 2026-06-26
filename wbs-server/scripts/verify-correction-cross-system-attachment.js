@@ -125,7 +125,7 @@ const assignDev = (id, devId) => dbRunAsync(`UPDATE correction_requests SET assi
 
   // ── 建跨系统两单（主单系统1 + 子单系统2）──
   const cb = await reqJson('POST', '/api/corrections', {
-    source_system: 'BMS', location_info: '系统1：客户X字段错', correction_type: 'single',
+    source_system: 'BMS', location_info: '系统1：客户X字段错', correction_type: 'single', reason: '跨系统主单错误证明测试原因',
     requesters: [{ name: '主业务方', phone: '13800000001' }],
     error_proof_note: '错误证明：客户名称在两系统都显示乱码', cross_system: true,
     system2: { source_system: 'CRM', location_info: '系统2：同字段错' },
@@ -184,7 +184,7 @@ const assignDev = (id, devId) => dbRunAsync(`UPDATE correction_requests SET assi
 
   // ⑤ 单系统单回归（行为完全不变，master===id）
   const solo = await reqJson('POST', '/api/corrections', {
-    source_system: 'BMS', location_info: '独立单字段错', correction_type: 'single',
+    source_system: 'BMS', location_info: '独立单字段错', correction_type: 'single', reason: '独立单回归测试原因背景',
     requesters: [{ name: '独立业务方', phone: '13800000009' }], error_proof_note: '独立单错误说明',
   }, ADMIN);
   const soloId = solo.body.id;

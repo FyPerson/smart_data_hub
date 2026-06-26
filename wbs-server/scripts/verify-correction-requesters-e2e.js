@@ -113,7 +113,7 @@ async function waitReady(timeoutMs = 3000) {
 
   // ① 建单 requesters[] 多业务方
   const c1 = await reqJson('POST', '/api/corrections', {
-    source_system: 'BMS', location_info: '多业务方测试', correction_type: 'single',
+    source_system: 'BMS', location_info: '多业务方测试', correction_type: 'single', reason: '多业务方测试原因背景',
     requesters: [{ name: ' 主业务方 ', phone: ' 13800000001 ' }, { name: '业务方乙', phone: '' }, { name: '' }],
   }, ADMIN);
   ok(c1.status === 200 && c1.body.id, `建单 requesters[] → 200（#${c1.body.id}）`);
@@ -129,7 +129,7 @@ async function waitReady(timeoutMs = 3000) {
 
   // ② 建单 fallback 旧字段（契约 A 兼容，无 requesters[]）
   const c2 = await reqJson('POST', '/api/corrections', {
-    source_system: 'CRM', location_info: '旧字段兼容', correction_type: 'single', requester_name: '老张', requester_phone: '13700000002',
+    source_system: 'CRM', location_info: '旧字段兼容', correction_type: 'single', reason: '旧字段兼容测试原因', requester_name: '老张', requester_phone: '13700000002',
   }, ADMIN);
   ok(c2.status === 200 && c2.body.id, `建单 fallback 旧字段 → 200（#${c2.body.id}）`);
   const rq2 = await dbAllAsync('SELECT * FROM correction_requesters WHERE correction_request_id=?', [c2.body.id]);
@@ -137,7 +137,7 @@ async function waitReady(timeoutMs = 3000) {
 
   // ③ 建单 error_proof_note + Path A 直接指派
   const c3 = await reqJson('POST', '/api/corrections', {
-    source_system: 'BMS', location_info: 'Path A 直派', correction_type: 'single', requester_name: '业务方丙',
+    source_system: 'BMS', location_info: 'Path A 直派', correction_type: 'single', reason: 'Path A 直派测试原因', requester_name: '业务方丙',
     error_proof_note: '错误证明：金额字段错误', assigned_to: 99,
   }, ADMIN);
   ok(c3.status === 200 && c3.body.status === 'ASSIGNED_PENDING_ESTIMATE', `建单 Path A 直派 → ASSIGNED_PENDING_ESTIMATE（契约 A 兼容，#${c3.body.id}）`);
@@ -186,7 +186,7 @@ async function waitReady(timeoutMs = 3000) {
   const cLongPhone = await reqJson('POST', '/api/corrections', { source_system: 'BMS', location_info: '超长号', correction_type: 'single', requesters: [{ name: '有效名', phone: '1'.repeat(51) }] }, ADMIN);
   ok(cLongPhone.status === 400 && cLongPhone.body.code === 'REQUESTER_PHONE_TOO_LONG', 'M-1：phone>50 → 400 REQUESTER_PHONE_TOO_LONG');
   // L-3：非字符串 name/phone 不静默落库（{name:123} 跳过 / {phone:{}} → NULL，无 "[object Object]"）
-  const cNonStr = await reqJson('POST', '/api/corrections', { source_system: 'BMS', location_info: '非字符串', correction_type: 'single', requesters: [{ name: 123, phone: {} }, { name: '真名', phone: {} }] }, ADMIN);
+  const cNonStr = await reqJson('POST', '/api/corrections', { source_system: 'BMS', location_info: '非字符串', correction_type: 'single', reason: '非字符串归一化测试原因', requesters: [{ name: 123, phone: {} }, { name: '真名', phone: {} }] }, ADMIN);
   ok(cNonStr.status === 200, 'L-3：非字符串 name(123) 跳过 + 有效名通过 → 200');
   const rqNonStr = await dbAllAsync('SELECT * FROM correction_requesters WHERE correction_request_id=?', [cNonStr.body.id]);
   ok(rqNonStr.length === 1 && rqNonStr[0].requester_name === '真名' && rqNonStr[0].requester_phone === null, 'L-3：{name:123} 跳过、{phone:{}}→NULL（无 "[object Object]" 落库）');

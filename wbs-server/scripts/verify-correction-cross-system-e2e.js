@@ -108,7 +108,7 @@ const setStatus = (id, status, ct) => dbRunAsync(`UPDATE correction_requests SET
 
   // ① 契约 B 建两单
   const cb = await reqJson('POST', '/api/corrections', {
-    source_system: 'BMS', location_info: '系统1：客户X字段错', correction_type: 'single',
+    source_system: 'BMS', location_info: '系统1：客户X字段错', correction_type: 'single', reason: '跨系统契约B建两单测试原因',
     requesters: [{ name: '主业务方', phone: '13800000001' }, { name: '业务方乙', phone: '13800000002' }],
     error_proof_note: '错误截图见附件', cross_system: true, system2: { source_system: 'CRM', location_info: '系统2：同字段错', correction_count: 3 },
   }, ADMIN);
@@ -184,7 +184,7 @@ const setStatus = (id, status, ct) => dbRunAsync(`UPDATE correction_requests SET
   ok(g6.status === 409 && g6.body.code !== 'GROUP_NOT_ALL_DONE', `⑤ RC3-L3：主单 ARCHIVED 调 notify-done → 端点态闸门 409（code=${g6.body.code}，非组闸门）`);
 
   // ⑥ link-new 追加：单系统单升主单 + 追加 → 组内 2 单
-  const s1 = await reqJson('POST', '/api/corrections', { source_system: 'BMS', location_info: '独立单', correction_type: 'single', requesters: [{ name: '独立主', phone: '13700000007' }] }, ADMIN);
+  const s1 = await reqJson('POST', '/api/corrections', { source_system: 'BMS', location_info: '独立单', correction_type: 'single', reason: 'link-new独立单测试原因', requesters: [{ name: '独立主', phone: '13700000007' }] }, ADMIN);
   const soloId = s1.body.id;
   const ln = await reqJson('POST', `/api/corrections/${soloId}/link-new`, { source_system: 'CRM', location_info: '追加系统', correction_count: 5 }, ADMIN2);   // soloId 由 ADMIN(1) 建，link-new 由 ADMIN2(2) 做
   ok(ln.status === 200 && ln.body.master_id === soloId && ln.body.id && Array.isArray(ln.body.group_members) && ln.body.group_members.length === 2,
@@ -207,14 +207,14 @@ const setStatus = (id, status, ct) => dbRunAsync(`UPDATE correction_requests SET
   const lnT = await reqJson('POST', `/api/corrections/${soloId}/link-new`, { source_system: 'OA 系统', location_info: 'z' }, ADMIN);
   ok(lnT.status === 409 && lnT.body.code === 'LINK_NOT_ALLOWED_TERMINAL', '⑥b 主单 ARCHIVED 终态 → link-new 409 LINK_NOT_ALLOWED_TERMINAL');
   // 已 sent 阻塞：用一张新单标主业务方 sent
-  const s2 = await reqJson('POST', '/api/corrections', { source_system: 'BMS', location_info: '已通知单', correction_type: 'single', requesters: [{ name: '甲', phone: '13700000008' }] }, ADMIN);
+  const s2 = await reqJson('POST', '/api/corrections', { source_system: 'BMS', location_info: '已通知单', correction_type: 'single', reason: '已通知单阻塞测试原因', requesters: [{ name: '甲', phone: '13700000008' }] }, ADMIN);
   await dbRunAsync(`UPDATE correction_requesters SET completion_notify_status='sent' WHERE correction_request_id=? AND is_primary=1`, [s2.body.id]);
   const lnN = await reqJson('POST', `/api/corrections/${s2.body.id}/link-new`, { source_system: 'OA 系统', location_info: 'z' }, ADMIN);
   ok(lnN.status === 409 && lnN.body.code === 'LINK_NOT_ALLOWED_NOTIFIED', '⑥b 主单业务方已 sent → link-new 409 LINK_NOT_ALLOWED_NOTIFIED');
 
   // ⑦ L5：GET 详情 group.members 含 assigned_to_name（前端关联组区"开发"列）+ 主单优先排序 + 子单 is_master/master_id（banner/隐藏依据）
   const cb7 = await reqJson('POST', '/api/corrections', {
-    source_system: 'BMS', location_info: 'L5系统1', correction_type: 'single',
+    source_system: 'BMS', location_info: 'L5系统1', correction_type: 'single', reason: 'L5关联组详情测试原因',
     requesters: [{ name: '主', phone: '13800000010' }],
     cross_system: true, system2: { source_system: 'HRD', location_info: 'L5系统2' },
   }, ADMIN);
@@ -237,31 +237,31 @@ const setStatus = (id, status, ct) => dbRunAsync(`UPDATE correction_requests SET
   ok(sameSys.status === 400 && sameSys.body.code === 'CROSS_SYSTEM_SAME_SYSTEM', '⑧ M-2：建单 system2==系统1(BMS) → 400 CROSS_SYSTEM_SAME_SYSTEM');
   const otherSame = await reqJson('POST', '/api/corrections', { source_system: '其他', source_system_other: 'A系统', location_info: 'x', correction_type: 'single', requesters: [{ name: '甲' }], cross_system: true, system2: { source_system: '其他', source_system_other: 'A系统', location_info: 'y' } }, ADMIN);
   ok(otherSame.status === 400 && otherSame.body.code === 'CROSS_SYSTEM_SAME_SYSTEM', '⑧ M-2：「其他」同补充说明(A=A) → 400（细分判同系统）');
-  const otherDiff = await reqJson('POST', '/api/corrections', { source_system: '其他', source_system_other: 'A系统', location_info: 'x', correction_type: 'single', requesters: [{ name: '甲', phone: '13700000010' }], cross_system: true, system2: { source_system: '其他', source_system_other: 'B系统', location_info: 'y' } }, ADMIN);
+  const otherDiff = await reqJson('POST', '/api/corrections', { source_system: '其他', source_system_other: 'A系统', location_info: 'x', correction_type: 'single', reason: '其他子系统差异测试原因', requesters: [{ name: '甲', phone: '13700000010' }], cross_system: true, system2: { source_system: '其他', source_system_other: 'B系统', location_info: 'y' } }, ADMIN);
   ok(otherDiff.status === 200 && otherDiff.body.cross_system === true, '⑧ M-2：「其他」不同补充说明(A≠B) → 放行（不误拒不同的「其他」子系统）');
-  const s3 = await reqJson('POST', '/api/corrections', { source_system: 'BMS', location_info: '独立', correction_type: 'single', requesters: [{ name: '主', phone: '13700000011' }] }, ADMIN);
+  const s3 = await reqJson('POST', '/api/corrections', { source_system: 'BMS', location_info: '独立', correction_type: 'single', reason: 'link-new去重独立单测试原因', requesters: [{ name: '主', phone: '13700000011' }] }, ADMIN);
   const dupLn = await reqJson('POST', `/api/corrections/${s3.body.id}/link-new`, { source_system: 'BMS', location_info: 'z' }, ADMIN);
   ok(dupLn.status === 409 && dupLn.body.code === 'LINK_DUPLICATE_SOURCE_SYSTEM', '⑧ M-2：link-new 追加组内已有系统(BMS) → 409 LINK_DUPLICATE_SOURCE_SYSTEM');
   const okLn = await reqJson('POST', `/api/corrections/${s3.body.id}/link-new`, { source_system: 'CRM', location_info: 'z' }, ADMIN);
   ok(okLn.status === 200 && okLn.body.id, '⑧ M-2：link-new 追加不同系统(CRM) → 放行');
 
   // ⑨ 修正条数分流（用户优化 2026-06-18）：single 强制 1 / batch 必填 ≥2（主单 + 跨系统 system2 + link-new）
-  const cc_s = await reqJson('POST', '/api/corrections', { source_system: 'BMS', location_info: 'x', correction_type: 'single', correction_count: 99, requesters: [{ name: '甲', phone: '13700000020' }] }, ADMIN);
+  const cc_s = await reqJson('POST', '/api/corrections', { source_system: 'BMS', location_info: 'x', correction_type: 'single', correction_count: 99, reason: 'single条数强制1测试原因', requesters: [{ name: '甲', phone: '13700000020' }] }, ADMIN);
   const cc_sRow = await dbGetAsync('SELECT correction_count FROM correction_requests WHERE id=?', [cc_s.body.id]);
   ok(cc_s.status === 200 && cc_sRow.correction_count === 1, '⑨ single 传 cc=99 → 后端强制 1（忽略传值，防 API 绕过）');
-  const cc_b0 = await reqJson('POST', '/api/corrections', { source_system: 'BMS', location_info: 'x', correction_type: 'batch', requesters: [{ name: '甲' }] }, ADMIN);
+  const cc_b0 = await reqJson('POST', '/api/corrections', { source_system: 'BMS', location_info: 'x', correction_type: 'batch', reason: 'batch缺条数测试原因', requesters: [{ name: '甲' }] }, ADMIN);
   ok(cc_b0.status === 400 && cc_b0.body.code === 'CORRECTION_COUNT_REQUIRED', '⑨ batch 不填 cc → 400 CORRECTION_COUNT_REQUIRED');
-  const cc_b1 = await reqJson('POST', '/api/corrections', { source_system: 'BMS', location_info: 'x', correction_type: 'batch', correction_count: 1, requesters: [{ name: '甲' }] }, ADMIN);
+  const cc_b1 = await reqJson('POST', '/api/corrections', { source_system: 'BMS', location_info: 'x', correction_type: 'batch', correction_count: 1, reason: 'batch条数1测试原因', requesters: [{ name: '甲' }] }, ADMIN);
   ok(cc_b1.status === 400 && cc_b1.body.code === 'BATCH_COUNT_MIN', '⑨ batch cc=1 → 400 BATCH_COUNT_MIN（仅 1 条应改 single）');
-  const cc_b2 = await reqJson('POST', '/api/corrections', { source_system: 'BMS', location_info: 'x', correction_type: 'batch', correction_count: 2, requesters: [{ name: '甲' }] }, ADMIN);
+  const cc_b2 = await reqJson('POST', '/api/corrections', { source_system: 'BMS', location_info: 'x', correction_type: 'batch', correction_count: 2, reason: 'batch条数边界2测试原因', requesters: [{ name: '甲' }] }, ADMIN);
   const cc_b2Row = await dbGetAsync('SELECT correction_count FROM correction_requests WHERE id=?', [cc_b2.body.id]);
   ok(cc_b2.status === 200 && cc_b2Row.correction_count === 2, '⑨ batch cc=2 → 放行边界 + db=2');
   // 跨系统 batch：system2 也按 batch ≥2 必填
-  const cc_xs0 = await reqJson('POST', '/api/corrections', { source_system: 'BMS', location_info: 'x', correction_type: 'batch', correction_count: 5, requesters: [{ name: '甲' }], cross_system: true, system2: { source_system: 'CRM', location_info: 'y' } }, ADMIN);
+  const cc_xs0 = await reqJson('POST', '/api/corrections', { source_system: 'BMS', location_info: 'x', correction_type: 'batch', correction_count: 5, reason: '跨系统batch缺子条数测试原因', requesters: [{ name: '甲' }], cross_system: true, system2: { source_system: 'CRM', location_info: 'y' } }, ADMIN);
   ok(cc_xs0.status === 400 && cc_xs0.body.code === 'LINKED_CORRECTION_COUNT_REQUIRED', '⑨ 跨系统 batch system2 不填 cc → 400 LINKED_CORRECTION_COUNT_REQUIRED');
-  const cc_xs1 = await reqJson('POST', '/api/corrections', { source_system: 'BMS', location_info: 'x', correction_type: 'batch', correction_count: 5, requesters: [{ name: '甲' }], cross_system: true, system2: { source_system: 'CRM', location_info: 'y', correction_count: 1 } }, ADMIN);
+  const cc_xs1 = await reqJson('POST', '/api/corrections', { source_system: 'BMS', location_info: 'x', correction_type: 'batch', correction_count: 5, reason: '跨系统batch子条数1测试原因', requesters: [{ name: '甲' }], cross_system: true, system2: { source_system: 'CRM', location_info: 'y', correction_count: 1 } }, ADMIN);
   ok(cc_xs1.status === 400 && cc_xs1.body.code === 'LINKED_BATCH_COUNT_MIN', '⑨ 跨系统 batch system2 cc=1 → 400 LINKED_BATCH_COUNT_MIN');
-  const cc_xs = await reqJson('POST', '/api/corrections', { source_system: 'BMS', location_info: 'x', correction_type: 'batch', correction_count: 5, requesters: [{ name: '甲', phone: '13700000021' }], cross_system: true, system2: { source_system: 'CRM', location_info: 'y', correction_count: 3 } }, ADMIN);
+  const cc_xs = await reqJson('POST', '/api/corrections', { source_system: 'BMS', location_info: 'x', correction_type: 'batch', correction_count: 5, reason: '跨系统batch条数分流测试原因', requesters: [{ name: '甲', phone: '13700000021' }], cross_system: true, system2: { source_system: 'CRM', location_info: 'y', correction_count: 3 } }, ADMIN);
   const cc_xsM = await dbGetAsync('SELECT correction_count FROM correction_requests WHERE id=?', [cc_xs.body.master_id]);
   const cc_xsC = await dbGetAsync('SELECT correction_count FROM correction_requests WHERE id=?', [cc_xs.body.child_ids[0]]);
   ok(cc_xs.status === 200 && cc_xsM.correction_count === 5 && cc_xsC.correction_count === 3, '⑨ 跨系统 batch：主单 cc=5 + 子单 cc=3 各自写入');

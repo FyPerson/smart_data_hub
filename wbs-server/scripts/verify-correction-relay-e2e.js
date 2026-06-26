@@ -77,7 +77,7 @@ async function cleanup() {
   const created = [];
   try {
     // 1. 建单 path B：admin 建 relay=13 单 → 白名单+phone 通过
-    const c13 = await req(T_ADMIN, 'POST', '/api/corrections', { source_system: 'BMS', location_info: 'E2E relay13 单', requester_name: 'E2E', correction_type: 'single', relay_notified_user_id: 13 });
+    const c13 = await req(T_ADMIN, 'POST', '/api/corrections', { source_system: 'BMS', location_info: 'E2E relay13 单', requester_name: 'E2E', correction_type: 'single', reason: 'relay13 对接人测试原因', relay_notified_user_id: 13 });
     const id13 = jparse(c13.body).id; if (id13) created.push(id13);
     check(c13.status === 200 && !!id13, `建单 path B relay=13（白名单+phone 通过）→ 200 #${id13}`, `status=${c13.status} ${(c13.body || '').slice(0, 140)}`);
 
@@ -106,7 +106,7 @@ async function cleanup() {
     check(d99.status === 403, `非白名单 user(9) 详情 #${id13} → 403（可见性越权防护）`, `status=${d99.status}`);
 
     // 6. 越权：白名单 relay(13) 看不到/不能派 非本人经手单（relay=7 单）
-    const c7 = await req(T_ADMIN, 'POST', '/api/corrections', { source_system: 'CRM', location_info: 'E2E relay7 单', requester_name: 'E2E', correction_type: 'single', relay_notified_user_id: 7 });
+    const c7 = await req(T_ADMIN, 'POST', '/api/corrections', { source_system: 'CRM', location_info: 'E2E relay7 单', requester_name: 'E2E', correction_type: 'single', reason: 'relay7 对接人测试原因', relay_notified_user_id: 7 });
     const id7 = jparse(c7.body).id; if (id7) created.push(id7);
     const d13on7 = await req(T_R13, 'GET', '/api/corrections/' + id7);
     check(d13on7.status === 403, `白名单 relay(13) 详情非本人经手单(relay=7) #${id7} → 403`, `status=${d13on7.status}`);
@@ -114,7 +114,7 @@ async function cleanup() {
     check(a13on7.status === 403, `白名单 relay(13) 派非本人经手单(relay=7) → 403（transition 权威闸门）`, `status=${a13on7.status} ${(a13on7.body || '').slice(0, 120)}`);
 
     // 7. path B 非白名单 → 400
-    const cNon = await req(T_ADMIN, 'POST', '/api/corrections', { source_system: 'BMS', location_info: 'E2E 非白名单', requester_name: 'E2E', correction_type: 'single', relay_notified_user_id: 1 });
+    const cNon = await req(T_ADMIN, 'POST', '/api/corrections', { source_system: 'BMS', location_info: 'E2E 非白名单', requester_name: 'E2E', correction_type: 'single', reason: '非白名单对接人测试原因', relay_notified_user_id: 1 });
     check(cNon.status === 400 && jparse(cNon.body).code === 'RELAY_USER_NOT_IN_WHITELIST', `建单 path B 非白名单 relay=1 → 400 RELAY_USER_NOT_IN_WHITELIST`, `status=${cNon.status} ${(cNon.body || '').slice(0, 120)}`);
 
     const crashed = /ReferenceError|is not defined|is not a function|TypeError/.test(log);

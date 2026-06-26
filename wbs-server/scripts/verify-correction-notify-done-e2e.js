@@ -86,7 +86,7 @@ async function waitReady() {
 }
 // 建单 + 直接置 FIXED（绕状态机，本测聚焦 notify-done）
 async function createFixed(requesters) {
-  const c = await reqJson('POST', '/api/corrections', { source_system: 'BMS', location_info: 'L2b 测试', correction_type: 'single', requesters }, ADMIN);
+  const c = await reqJson('POST', '/api/corrections', { source_system: 'BMS', location_info: 'L2b 测试', correction_type: 'single', reason: 'L2b 完成通知测试原因', requesters }, ADMIN);
   await dbRunAsync(`UPDATE correction_requests SET status='FIXED' WHERE id=?`, [c.body.id]);
   return c.body.id;
 }
@@ -143,7 +143,7 @@ async function createFixed(requesters) {
   ok(n6b.status === 200 && n6b.body.status === 'sent' && keyAfter !== keyBefore, '重发契约：force_resend → 重发新 message_key');
 
   // ⑦ 非 FIXED/REFIXED → 409
-  const cP = await reqJson('POST', '/api/corrections', { source_system: 'BMS', location_info: 'PENDING', correction_type: 'single', requesters: [{ name: 'P', phone: '13800000005' }] }, ADMIN);
+  const cP = await reqJson('POST', '/api/corrections', { source_system: 'BMS', location_info: 'PENDING', correction_type: 'single', reason: 'PENDING 态拒测试原因', requesters: [{ name: 'P', phone: '13800000005' }] }, ADMIN);
   const n7 = await reqJson('POST', `/api/corrections/${cP.body.id}/notify-done`, {}, ADMIN);
   ok(n7.status === 409 && n7.body.code === 'INVALID_STATE_FOR_NOTIFY', '非 FIXED/REFIXED → 409 INVALID_STATE_FOR_NOTIFY');
 

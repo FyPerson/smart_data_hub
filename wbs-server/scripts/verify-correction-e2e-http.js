@@ -70,7 +70,7 @@ const check = (cond, label, detail) => { if (cond) { console.log('  ✓ ' + labe
   // [写] 建单 → 作废清理（correctionStorage/校验/transition/history 依赖）
   const create = await req('POST', '/api/corrections', {
     source_system: 'BMS', location_info: 'E2E 端点冒烟测试单（M-2，测后作废）', requester_name: 'E2E 测试',
-    correction_type: 'single', correction_count: 1,
+    correction_type: 'single', correction_count: 1, reason: 'E2E 端点冒烟测试原因背景',
   });
   check(create.status !== 500, '[写] POST 建单 非 500（建单端点依赖没漏）', `status=${create.status} ${(create.body || '').slice(0, 150)}`);
   let newId = null;
