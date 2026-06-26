@@ -88,12 +88,14 @@
         .flag-backlog { display: inline-block; margin-left: 6px; font-size: 11px; color: #d97706; font-weight: 600; }
 
         /* 主子单分组标记（P2 2026-06-26）：ID 列下挂角色+组号徽章（组号=主单 id），对齐 type-tag 范式 */
-        .corr-group-badge { display: inline-block; margin-top: 4px; padding: 1px 7px; border-radius: 4px; font-size: 11px; font-weight: 600; line-height: 1.6; white-space: nowrap; }
+        .corr-group-badge { display: inline-block; margin-top: 3px; padding: 1px 5px; border-radius: 4px; font-size: 10px; font-weight: 600; line-height: 1.6; white-space: nowrap; }
         .corr-group-badge.g-primary { background: #e0edff; color: #1d4ed8; border: 1px solid #c3dafe; }   /* 主单：蓝 */
         .corr-group-badge.g-child { background: #f0e9fb; color: #6d28d9; border: 1px solid #ddd0f5; }      /* 子单：紫 */
         .corr-group-badge .grp-num { font-variant-numeric: tabular-nums; }
         /* 同组悬浮联动高亮：浅红底 + 左深红条（强于普通 hover #fffbeb，故 !important 盖过 hover） */
         .corr-table tbody tr.corr-group-hl { background: #fff1f2 !important; box-shadow: inset 3px 0 0 #dc2626; }
+        /* ID 列（第一列）收窄：徽章瘦身后两侧 padding 也收紧（14→8px），避免组号徽章把 # 列撑太宽 */
+        .corr-table th:first-child, .corr-table td:first-child { padding-left: 8px; padding-right: 8px; }
 
         /* 详情区块 */
         .detail-section { margin-bottom: 18px; }
@@ -282,7 +284,7 @@
             <table class="corr-table">
                 <thead>
                     <tr>
-                        <th style="min-width:78px;">#</th>
+                        <th style="width:1%; white-space:nowrap;">#</th>
                         <th style="width:90px;">状态</th>
                         <th style="width:64px;">类型</th>
                         <th style="width:72px;">修正条数</th>
