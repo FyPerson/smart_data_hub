@@ -1401,7 +1401,8 @@ router.get('/', authenticateToken, requireCorrectionSchemaReady, async (req, res
                     requester_name, requester_dept, requester_phone, assigned_to, assigned_to_name,
                     expected_deadline, dev_estimated_at, created_at, fixed_at, refixed_at, archived_at,
                     submission_count, created_by, created_by_name, dingtalk_chat_id,
-                    relay_notified_at, relay_notify_status, notify_status, requester_notify_status, completion_notify_status, closure_type
+                    relay_notified_at, relay_notify_status, notify_status, requester_notify_status, completion_notify_status, closure_type,
+                    correction_group_id
                FROM correction_requests
               ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
               ORDER BY id DESC`,

@@ -87,6 +87,14 @@
         .flag-overdue { display: inline-block; margin-left: 6px; font-size: 11px; color: #dc2626; font-weight: 600; }
         .flag-backlog { display: inline-block; margin-left: 6px; font-size: 11px; color: #d97706; font-weight: 600; }
 
+        /* 主子单分组标记（P2 2026-06-26）：ID 列下挂角色+组号徽章（组号=主单 id），对齐 type-tag 范式 */
+        .corr-group-badge { display: inline-block; margin-top: 4px; padding: 1px 7px; border-radius: 4px; font-size: 11px; font-weight: 600; line-height: 1.6; white-space: nowrap; }
+        .corr-group-badge.g-primary { background: #e0edff; color: #1d4ed8; border: 1px solid #c3dafe; }   /* 主单：蓝 */
+        .corr-group-badge.g-child { background: #f0e9fb; color: #6d28d9; border: 1px solid #ddd0f5; }      /* 子单：紫 */
+        .corr-group-badge .grp-num { font-variant-numeric: tabular-nums; }
+        /* 同组悬浮联动高亮：浅红底 + 左深红条（强于普通 hover #fffbeb，故 !important 盖过 hover） */
+        .corr-table tbody tr.corr-group-hl { background: #fff1f2 !important; box-shadow: inset 3px 0 0 #dc2626; }
+
         /* 详情区块 */
         .detail-section { margin-bottom: 18px; }
         .detail-section h3 { font-size: 13px; font-weight: 600; color: #374151; margin: 0 0 8px; padding-bottom: 6px; border-bottom: 1px solid #f1f5f9; }
@@ -274,7 +282,7 @@
             <table class="corr-table">
                 <thead>
                     <tr>
-                        <th style="width:46px;">#</th>
+                        <th style="min-width:78px;">#</th>
                         <th style="width:90px;">状态</th>
                         <th style="width:64px;">类型</th>
                         <th style="width:72px;">修正条数</th>
@@ -734,9 +742,20 @@
             const items = getFilteredItems();
             if (!items.length) { tbody.innerHTML = ''; empty.style.display = 'block'; return; }
             empty.style.display = 'none';
-            tbody.innerHTML = items.map(it => `
-                <tr onclick="openDrawer(${Number(it.id)})">
-                    <td style="color:#9ca3af; font-size:12px;">${Number(it.id)}</td>
+            tbody.innerHTML = items.map(it => {
+                // 主子单角色判定（P2 §分组标记）：group_id==null→标准单；==id→主单；其余→子单（组号=group_id=主单 id）
+                //   groupId/rowId 提取统一用（codex 审 L-3）+ Number.isFinite 防脏数据渲染"组NaN"/data-group="NaN"（L-2，当前 SQLite 整数列不触发，纯防御）
+                const groupId = Number(it.correction_group_id), rowId = Number(it.id);
+                let groupBadge = '', dataGroup = '';
+                if (it.correction_group_id != null && Number.isFinite(groupId)) {
+                    dataGroup = ` data-group="${groupId}"`;
+                    groupBadge = (groupId === rowId)
+                        ? `<div class="corr-group-badge g-primary">主单·组<span class="grp-num">${groupId}</span></div>`
+                        : `<div class="corr-group-badge g-child">子单·组<span class="grp-num">${groupId}</span></div>`;
+                }
+                return `
+                <tr onclick="openDrawer(${rowId})"${dataGroup}>
+                    <td style="color:#9ca3af; font-size:12px;">${rowId}${groupBadge}</td>
                     <td><span class="status-badge s-${statusClass(it.status)}">${escapeHtml(STATUS_LABELS[it.status] || it.status)}</span>${isOverdue(it) ? '<span class="flag-overdue">已超预计</span>' : ''}${isBacklog(it) ? '<span class="flag-backlog">积压</span>' : ''}${isUnarchivedBacklog(it) ? '<span class="flag-backlog">超7天未归档</span>' : ''}${it.status === 'ARCHIVED' && it.closure_type === 'admin_closure' ? '<span class="flag-backlog" style="color:#1d4ed8;">行政闭环</span>' : ''}</td>
                     <td><span class="type-tag t-${it.correction_type === 'batch' ? 'batch' : 'single'}">${it.correction_type === 'batch' ? '批量' : '单'}</span></td>
                     <td style="text-align:center;">${it.correction_count != null ? it.correction_count : (it.correction_type === 'single' ? 1 : '-')}</td>
@@ -748,7 +767,29 @@
                     <td style="text-align:center;">${it.submission_count || 0}</td>
                     <td class="time-absolute">${escapeHtml(formatFullTime(it.created_at))}</td>
                 </tr>
-            `).join('');
+            `;
+            }).join('');
+            bindCorrGroupHover();
+        }
+
+        // 同组悬浮联动高亮（P2 §分组标记）：悬浮某行时，同 data-group 的所有行整体高亮（#fff1f2 底+左深红条）。
+        //   事件委托绑 tbody（绑定标志挂 tbody.dataset 而非全局变量——若未来整体替换 corrTableBody，新元素无标志会自动重绑，codex 审 L-1）。
+        //   relatedTarget 过滤（codex 审 M-1）：mouseover/mouseout 冒泡，鼠标在同一行内子元素间移动会触发——
+        //   若来去仍在同一 tr 内则跳过 toggle，避免高亮"移除再加回"的闪烁。
+        function bindCorrGroupHover() {
+            const tbody = document.getElementById('corrTableBody');
+            if (!tbody || tbody.dataset.groupHoverBound === '1') return;
+            tbody.dataset.groupHoverBound = '1';
+            const toggle = (e, on) => {
+                const tr = e.target.closest('tr');
+                if (!tr || !tr.dataset.group) return;
+                // 跨同一行内部移动（relatedTarget 仍在本 tr 内）→ 不切换，防闪烁
+                const rel = e.relatedTarget && e.relatedTarget.closest && e.relatedTarget.closest('tr');
+                if (rel === tr) return;
+                tbody.querySelectorAll(`tr[data-group="${tr.dataset.group}"]`).forEach(row => row.classList.toggle('corr-group-hl', on));
+            };
+            tbody.addEventListener('mouseover', e => toggle(e, true));
+            tbody.addEventListener('mouseout', e => toggle(e, false));
         }
 
         function sysLabel(it) {
