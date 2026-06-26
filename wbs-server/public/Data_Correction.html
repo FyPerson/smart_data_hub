@@ -126,7 +126,8 @@
         /* ===== 详情抽屉（自定义，覆盖 style.css 的常显 .drawer-overlay 旧样式；带 .open 门控）===== */
         .drawer-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.3); z-index: 900; }
         .drawer-overlay.open { display: block; }
-        .drawer { position: fixed; top: 0; right: -620px; bottom: 0; width: 600px; max-width: 92vw; background: #fff; box-shadow: -4px 0 20px rgba(0,0,0,0.12); z-index: 901; transition: right 0.3s ease; display: flex; flex-direction: column; }
+        /* top:64px 避开固定导航栏（.navbar z-index:1000 > drawer 901，否则抽屉头部标题被导航栏遮挡，2026-06-26 修复） */
+        .drawer { position: fixed; top: 64px; right: -620px; bottom: 0; width: 600px; max-width: 92vw; background: #fff; box-shadow: -4px 0 20px rgba(0,0,0,0.12); z-index: 901; transition: right 0.3s ease; display: flex; flex-direction: column; }
         .drawer.open { right: 0; }
         .drawer-header { padding: 20px 24px 16px; border-bottom: 1px solid #e2e8f0; display: flex; justify-content: space-between; align-items: flex-start; }
         .drawer-header h2 { font-size: 16px; font-weight: 700; color: #111827; margin: 0; flex: 1; line-height: 1.5; }
