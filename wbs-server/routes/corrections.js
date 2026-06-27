@@ -235,7 +235,17 @@ function initSchema() {
             dingtalk_open_conversation_id TEXT,
             dingtalk_chat_created_at DATETIME,
             dingtalk_chat_created_by INTEGER,
-            dingtalk_chat_name TEXT
+            dingtalk_chat_name TEXT,
+
+            -- ── 归档单事后返工（v1.2 方案，Commit A）─────────────────────────────
+            -- 返工子单=ARCHIVED 原单事后发现没改对→新建一张挂原单下（原单状态零污染）。5 列均 NULLABLE（历史/非返工单为 NULL）；其中 rework_child_count 新库 DEFAULT 0、既有库 ALTER 旧行落 NULL（UPDATE 用 COALESCE(...,0)+1 兜底，见 [2a-x3]）。不入 KEY_COLS（可空辅助列，缺失不阻断写入口，与 error_proof_note 同级）。
+            -- rework_parent_id：血缘直接父=被返工的那张具体单（=reopen 端点 :id，固定）；rework_root_id：链根=最初被返工原始单（O(1) 聚合算 seq/查全部返工/详情回溯）；rework_seq：该 root 下第 N 次返工（驱动颜色 1黄/2橙/3+红，非单内 submission_count）。
+            -- ⭐ 不变量：rework_parent_id 非空 ⇒ correction_group_id 非空且≠自身 id（返工子单恒为合法子单，group_id=被返工单所属组 master_id）。新库下方 CHECK 守"parent 非空必有组键"半边；"≠自身"靠 insertReworkChildCorrection 硬断言 + readiness/verify。
+            rework_parent_id INTEGER CHECK (rework_parent_id IS NULL OR correction_group_id IS NOT NULL),
+            rework_root_id INTEGER,
+            rework_seq INTEGER,
+            reopen_reason TEXT,
+            rework_child_count INTEGER DEFAULT 0
         )`, recordCorrErr('correction_requests'));
         db.run(`CREATE INDEX IF NOT EXISTS idx_corr_status ON correction_requests(status)`, recordCorrErr('idx_corr_status'));
         db.run(`CREATE INDEX IF NOT EXISTS idx_corr_assigned ON correction_requests(assigned_to)`, recordCorrErr('idx_corr_assigned'));
@@ -408,6 +418,53 @@ async function runCorrectionMigration(ddlError) {
         await new Promise((resolve, reject) => {
             db.run('CREATE INDEX IF NOT EXISTS idx_corr_group ON correction_requests(correction_group_id)', (err) => err ? reject(err) : resolve());
         });
+        // [2a-x3] ⭐ 归档单返工方案（v1.2，Commit A）：已上线表演进——加 5 个 rework 列幂等 ALTER（同 [2a-x] 范式）。
+        //   ⚠️ CHECK 两层（codex 68）：SQLite ALTER ADD COLUMN 无法给既有表补跨列 CHECK（rework_parent_id 引用 correction_group_id），
+        //     故既有库 ALTER 时【不带 CHECK】，"parent 非空⇒group_id 非空且≠自身"不变量靠 insertReworkChildCorrection 硬断言 + readiness/verify 阻断兜底；
+        //     新库 CREATE TABLE 已含半边 CHECK（见上方建表 DDL）。两路径不变量等效保证。
+        //   全 5 列【不入 KEY_COLS】（可空辅助列，与 error_proof_note 同级），故无 C-1 顺序硬约束；但仍置 PRAGMA 复查之前以保列集最新。
+        const REWORK_COLS = [
+            ['rework_parent_id', 'INTEGER'],   // 血缘直接父=被返工具体单（=reopen :id）
+            ['rework_root_id', 'INTEGER'],     // 链根=最初被返工原始单
+            ['rework_seq', 'INTEGER'],         // 该 root 下第 N 次返工
+            ['reopen_reason', 'TEXT'],         // 重开返工原因（入参必填，DDL NULLABLE 兼容历史单）
+            ['rework_child_count', 'INTEGER'], // 原单累计返工子单数（既有库 ALTER 旧行落 NULL，UPDATE 用 COALESCE(...,0)+1）
+        ];
+        for (const [col, type] of REWORK_COLS) {
+            if (!colNames.includes(col)) {
+                await new Promise((resolve, reject) => {
+                    db.run(`ALTER TABLE correction_requests ADD COLUMN ${col} ${type}`, (err) => err ? reject(err) : resolve());
+                });
+                logger.info(`[数据修正迁移] correction_requests ADD COLUMN ${col} ${type}（归档单返工 v1.2）`);
+            }
+        }
+        // [2a-x4] rework_seq 唯一索引（H-3）：同一 rework_root_id 下 rework_seq 不重（DB 兜底，非仅靠 BEGIN IMMEDIATE）。
+        //   ⚠️ 必须 ALTER 之后建（同 [2a-x2]）。建前重复探针：若既有库存在 (root,seq) 重复脏数据，建唯一索引会失败熔断 → 先查出来阻断+输出冲突 id。
+        const reworkDupRows = await new Promise((resolve, reject) => {
+            db.all(`SELECT rework_root_id, rework_seq, COUNT(*) c FROM correction_requests
+                    WHERE rework_root_id IS NOT NULL AND rework_seq IS NOT NULL
+                    GROUP BY rework_root_id, rework_seq HAVING c > 1`, (err, rows) => err ? reject(err) : resolve(rows || []));
+        });
+        if (reworkDupRows.length > 0) {
+            CORRECTION_SCHEMA_STATE.ready = false;
+            CORRECTION_SCHEMA_STATE.error = `归档单返工迁移：检测到 (rework_root_id, rework_seq) 重复脏数据 ${reworkDupRows.length} 组（${reworkDupRows.map(r => `root=${r.rework_root_id} seq=${r.rework_seq}`).join('; ')}），无法建唯一索引，请先清理`;
+            logger.error(`[数据修正迁移] ${CORRECTION_SCHEMA_STATE.error}`);
+            return; // ⭐ codex 69 H-1：脏数据存在须【立即 return】（对齐 [2b]/[2c]/[2d]/[2f]/[2g] 所有失败分支范式）。
+            //   否则唯一索引未建 + 流程穿透到 [3] 把 error=null/ready=true 覆盖本熔断 → 熔断形同虚设 + H-3 DB 兜底静默丢失。
+        }
+        // 无 (root,seq) 重复脏数据 → 建唯一索引 + 血缘索引（return 后无需 else，与上方所有失败分支同范式）
+        await new Promise((resolve, reject) => {
+            db.run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_correction_rework_root_seq
+                    ON correction_requests(rework_root_id, rework_seq)
+                    WHERE rework_root_id IS NOT NULL AND rework_seq IS NOT NULL`, (err) => err ? reject(err) : resolve());
+        });
+        // 血缘查询索引：按 rework_parent_id / rework_root_id 反查返工链（详情回溯/列表挂载/void 守卫）
+        await new Promise((resolve, reject) => {
+            db.run('CREATE INDEX IF NOT EXISTS idx_corr_rework_parent ON correction_requests(rework_parent_id)', (err) => err ? reject(err) : resolve());
+        });
+        await new Promise((resolve, reject) => {
+            db.run('CREATE INDEX IF NOT EXISTS idx_corr_rework_root ON correction_requests(rework_root_id)', (err) => err ? reject(err) : resolve());
+        });
         // [2b] ⭐ ALTER 后【重新】PRAGMA：下方 missingCols 必须用最新列集（C-1：不能复用 [2] 的旧 colNames 复查）
         cols = await new Promise((resolve, reject) => {
             db.all('PRAGMA table_info(correction_requests)', (err, rows) => err ? reject(err) : resolve(rows));
@@ -516,6 +573,26 @@ async function runCorrectionMigration(ddlError) {
             const sample = primaryViolations.slice(0, 5).map(r => `#${r.id}(${r.primary_count})`).join(',');
             CORRECTION_SCHEMA_STATE.ready = false;
             CORRECTION_SCHEMA_STATE.error = `correction_requesters 主业务方不变量破坏（非 VOIDED 单须恰一条 primary）：${sample}`;
+            logger.error(`[数据修正 A] 🚫 ${CORRECTION_SCHEMA_STATE.error} → correction 写入口将返 503`);
+            return;
+        }
+
+        // [2g] ⭐ 归档单返工不变量断言（v1.2 方案 §3 / codex 68 M-2 既有库兜底）：返工子单 rework_parent_id 非空
+        //   ⇒ correction_group_id 非空 且 ≠ 自身 id（恒为合法子单，group_id=被返工单所属组 master_id）。
+        //   新库靠建表 CHECK 守"parent 非空⇒group_id 非空"半边；"≠自身"CHECK 无法可靠表达，故此处 readiness 补全两半边，
+        //   既有库（ALTER 不带 CHECK）则完全靠此 + insertReworkChildCorrection 硬断言。违反 → 503 fail-fast（脏写阻断）。
+        const reworkInvViolations = await new Promise((resolve, reject) => {
+            db.all(
+                `SELECT id, correction_group_id FROM correction_requests
+                 WHERE rework_parent_id IS NOT NULL
+                   AND (correction_group_id IS NULL OR correction_group_id = id)`,
+                (err, rows) => err ? reject(err) : resolve(rows || [])
+            );
+        });
+        if (reworkInvViolations.length > 0) {
+            const sample = reworkInvViolations.slice(0, 5).map(r => `#${r.id}(group_id=${r.correction_group_id == null ? 'NULL' : r.correction_group_id})`).join(',');
+            CORRECTION_SCHEMA_STATE.ready = false;
+            CORRECTION_SCHEMA_STATE.error = `归档单返工不变量破坏（返工子单 rework_parent_id 非空须 group_id 非空且≠自身）：${sample}`;
             logger.error(`[数据修正 A] 🚫 ${CORRECTION_SCHEMA_STATE.error} → correction 写入口将返 503`);
             return;
         }
@@ -639,6 +716,34 @@ class CorrectionTransitionError extends Error {
         this.code = code;
     }
 }
+
+// ── fix_proof 合规校验 helper（归档单返工 Commit C §5.1 抽出，single 与返工 batch 共用同口径，消除重复 SQL）──
+//   correctionHasCompliantFixProof：本单是否「历史存在」合规 fix_proof（uploaded_by=被指派开发本人 OR admin）。
+//     用于标完成（→FIXED）：single 历史留证（行为不变）+ 返工 batch 新增的截图必传。
+async function correctionHasCompliantFixProof(requestId, assignedTo) {
+    const cnt = await dbGetAsync(
+        `SELECT COUNT(*) AS c FROM correction_attachments a LEFT JOIN users u ON u.id = a.uploaded_by
+          WHERE a.correction_request_id = ? AND a.attachment_type = 'fix_proof' AND a.uploaded_by IS NOT NULL
+            AND (a.uploaded_by = ? OR u.role = 'admin')`,
+        [requestId, Number(assignedTo) || -1]
+    );
+    return !!(cnt && cnt.c >= 1);
+}
+//   correctionNewFixProofValid：传入 id 是否「全部」属本单 fix_proof、上传者=开发本人 OR admin、且 created_at>baseline
+//     （本次完成后新增，防复用旧图绕过留证，codex 09 H-1）。用于重修（→REFIXED）：single（行为不变）+ 返工 batch 新增的截图必传。
+async function correctionNewFixProofValid(requestId, ids, newnessBaseline, assignedTo) {
+    const uniqIds = Array.isArray(ids) ? [...new Set(ids)] : [];   // NIT-4：helper 自身去重，避免重复 id（IN 集合去重后 COUNT<len）安全方向误拒，不依赖调用方契约
+    if (uniqIds.length === 0) return false;
+    const placeholders = uniqIds.map(() => '?').join(',');
+    const cnt = await dbGetAsync(
+        `SELECT COUNT(*) AS c FROM correction_attachments a LEFT JOIN users u ON u.id = a.uploaded_by
+          WHERE a.correction_request_id = ? AND a.attachment_type = 'fix_proof' AND a.uploaded_by IS NOT NULL
+            AND a.id IN (${placeholders}) AND (a.uploaded_by = ? OR u.role = 'admin') AND a.created_at > ?`,
+        [requestId, ...uniqIds, Number(assignedTo) || -1, newnessBaseline]
+    );
+    return !!(cnt && cnt.c === uniqIds.length);
+}
+
 //   actor = { id, name }；payload 按 toStatus 携带闸门输入（见各 case 注释）。
 //   成功返 { ok:true, fromStatus, toStatus }；业务/并发错误抛 CorrectionTransitionError（endpoint 捕获转 HTTP）。
 async function correctionTransition(requestId, expectedFromStatus, toStatus, actor, payload = {}) {
@@ -650,7 +755,7 @@ async function correctionTransition(requestId, expectedFromStatus, toStatus, act
         // R-6：事务内读 DB 真实状态作为 fromStatus；闸门/权限用 correction_type/assigned_to/created_by/dingtalk_chat_id/
         //   fixed_at/refixed_at（H-1 新增性兜底基线）一并读。
         const row = await dbGetAsync(
-            'SELECT id, status, correction_type, assigned_to, created_by, relay_notified_user_id, dingtalk_chat_id, fixed_at, refixed_at FROM correction_requests WHERE id = ?',
+            'SELECT id, status, correction_type, assigned_to, created_by, relay_notified_user_id, dingtalk_chat_id, fixed_at, refixed_at, rework_parent_id FROM correction_requests WHERE id = ?',
             [requestId]
         );
         if (!row) throw new CorrectionTransitionError(404, 'CORRECTION_NOT_FOUND', '修正单不存在');
@@ -728,24 +833,32 @@ async function correctionTransition(requestId, expectedFromStatus, toStatus, act
             }
             case 'FIXED': {
                 // 标完成闸门按 correction_type 分流（§4.4 / G-8）
+                // ⭐ 归档单返工 Commit C（§5.1 / M-3）：返工子单（rework_parent_id 非空，事务内 DB 预读不信客户端）双必填——
+                //   截图必传 + 文字必填；维度判定仅加在返工分支，普通单分支零改动（绝不外溢既有 single/batch 口径）。
+                const isRework = row.rework_parent_id != null;
                 if (row.correction_type === 'batch') {
                     const note = (typeof payload.batch_completion_note === 'string' ? payload.batch_completion_note.trim() : '');
                     if (!note) throw new CorrectionTransitionError(400, 'BATCH_NOTE_REQUIRED', '批量修正标完成必须填写完成说明');
                     if (Array.from(note).length < 5) throw new CorrectionTransitionError(400, 'BATCH_NOTE_TOO_SHORT', '批量修正完成说明至少 5 字，请说明实际修正内容（避免「1」「完成」等敷衍）');   // 挡敷衍占位（trim 后按字符数 <5 拒；Array.from 计 code point，emoji/扩展汉字算 1，codex 59 L-1；与前端 submitComplete 同步 5 字口径）
                     if (note.length > 500) throw new CorrectionTransitionError(400, 'COMPLETION_NOTE_TOO_LONG', '完成说明不超过 500 字');   // L-3：对齐 closure_reason 上限
+                    // 返工 batch：现有 batch 本就文字必填，额外加 fix_proof 截图必传（历史存在合规，与 single 同口径 helper）
+                    if (isRework && !(await correctionHasCompliantFixProof(requestId, row.assigned_to))) {
+                        throw new CorrectionTransitionError(400, 'FIX_PROOF_REQUIRED', '返工批量修正标完成必须上传结果证明截图');
+                    }
                     setFrags.push('batch_completion_note = ?');
                     setParams.push(note);
                 } else {
-                    // single：历史存在合规 fix_proof（H-2，join users 查角色；uploaded_by=assigned_to OR role='admin'）
-                    const cnt = await dbGetAsync(
-                        `SELECT COUNT(*) AS c FROM correction_attachments a LEFT JOIN users u ON u.id = a.uploaded_by
-                          WHERE a.correction_request_id = ? AND a.attachment_type = 'fix_proof' AND a.uploaded_by IS NOT NULL
-                            AND (a.uploaded_by = ? OR u.role = 'admin')`,
-                        [requestId, Number(row.assigned_to) || -1]
-                    );
-                    if (!cnt || cnt.c < 1) throw new CorrectionTransitionError(400, 'FIX_PROOF_REQUIRED', '单数据修正标完成必须上传结果证明截图');
-                    // 完成说明（选填，single 复用 batch_completion_note 字段）：single 已强制 fix_proof 截图留证，文字仅补充上下文，非空才写；空则保持 NULL
+                    // single：历史存在合规 fix_proof（H-2，uploaded_by=assigned_to OR admin；helper 与返工 batch 共用同口径）
+                    if (!(await correctionHasCompliantFixProof(requestId, row.assigned_to))) {
+                        throw new CorrectionTransitionError(400, 'FIX_PROOF_REQUIRED', '单数据修正标完成必须上传结果证明截图');
+                    }
                     const snote = (typeof payload.batch_completion_note === 'string' ? payload.batch_completion_note.trim() : '');
+                    // 返工 single：文字必填（≥5 字，对齐 batch 防敷衍口径）；普通 single 保持选填（行为不变）
+                    if (isRework) {
+                        if (!snote) throw new CorrectionTransitionError(400, 'REWORK_COMPLETION_NOTE_REQUIRED', '返工单标完成必须填写本次修正说明');
+                        if (Array.from(snote).length < 5) throw new CorrectionTransitionError(400, 'REWORK_COMPLETION_NOTE_TOO_SHORT', '返工修正说明至少 5 字，请说明本次实际修正内容（避免「1」「完成」等敷衍）');
+                    }
+                    // 完成说明（普通 single 选填 / 返工 single 上面已强制非空≥5）：non-empty 才写，空则保持 NULL
                     if (snote.length > 500) throw new CorrectionTransitionError(400, 'COMPLETION_NOTE_TOO_LONG', '完成说明不超过 500 字');   // L-3：对齐 closure_reason 上限
                     if (snote) { setFrags.push('batch_completion_note = ?'); setParams.push(snote); }
                 }
@@ -754,10 +867,25 @@ async function correctionTransition(requestId, expectedFromStatus, toStatus, act
             }
             case 'REFIXED': {
                 // 重修提交（§4.4a 类型一 / G-9/G-10/G-12）：FIXED/REFIXED 直接到 REFIXED + submission_count+1
+                // ⭐ 归档单返工 Commit C（§5.1 / M-3）：返工子单双必填——本次新增 fix_proof 截图必传 + resubmit_note 文字必填≥5；普通单分支零改动。
+                const isRework = row.rework_parent_id != null;
                 if (row.correction_type === 'batch') {
                     const rnote = (typeof payload.resubmit_note === 'string' ? payload.resubmit_note.trim() : '');
                     if (!rnote) throw new CorrectionTransitionError(400, 'BATCH_RESUBMIT_NOTE_REQUIRED', '批量重修提交必须填写本次重修说明');
+                    // 返工 batch 重修说明 ≥5 防敷衍（对抗审 L-1：补四组合文字闸门裂缝，对齐返工 single 重修 :902 / 返工·普通 batch 标完成 :841 的 ≥5 口径）；普通 batch 重修沿用仅非空（历史口径不收紧）
+                    if (isRework && Array.from(rnote).length < 5) throw new CorrectionTransitionError(400, 'REWORK_RESUBMIT_NOTE_TOO_SHORT', '返工修正说明至少 5 字，请说明本次实际修正内容（避免「1」「完成」等敷衍）');
                     if (rnote.length > 500) throw new CorrectionTransitionError(400, 'RESUBMIT_NOTE_TOO_LONG', '重修说明不超过 500 字');   // L-3：对齐 closure_reason 上限
+                    // 返工 batch：现有 batch 本就文字必填，额外加本次新增 fix_proof 截图必传（新增性与 single 同口径 helper）
+                    if (isRework) {
+                        const ids = Array.isArray(payload.new_fix_proof_attachment_ids)
+                            ? payload.new_fix_proof_attachment_ids.map(Number).filter((n) => Number.isInteger(n) && n > 0)
+                            : [];
+                        if (ids.length === 0) throw new CorrectionTransitionError(400, 'FIX_PROOF_REQUIRED', '返工批量重修提交必须上传本次新增结果证明');
+                        const newnessBaseline = row.refixed_at || row.fixed_at || null;
+                        if (!(await correctionNewFixProofValid(requestId, ids, newnessBaseline, row.assigned_to))) {
+                            throw new CorrectionTransitionError(400, 'FIX_PROOF_REQUIRED', '本次新增结果证明无效（须属本单 fix_proof、上传者为开发本人或 admin、且为本次完成后新增）');
+                        }
+                    }
                     historyReason = rnote;   // §9 约束 33：resubmit_note 写 history.reason，不加主表字段
                 } else {
                     // single：必须校验本次新增 fix_proof（HIGH-1 06 轮，§3.4——不能 COUNT 历史附件，否则可复用旧图绕过留证）
@@ -765,22 +893,17 @@ async function correctionTransition(requestId, expectedFromStatus, toStatus, act
                         ? payload.new_fix_proof_attachment_ids.map(Number).filter((n) => Number.isInteger(n) && n > 0)
                         : [];
                     if (ids.length === 0) throw new CorrectionTransitionError(400, 'FIX_PROOF_REQUIRED', '单数据修正重修提交必须上传本次新增结果证明');
-                    // codex 09 H-1：新增性兜底——附件须晚于上次完成时间 COALESCE(refixed_at, fixed_at)（与积压筛选同范式），
-                    //   防复用旧 fix_proof id 绕过重修留证（§3.4/§9.37）。主保证仍是 Commit C /resubmit 只传本次上传 id；
-                    //   此为纵深防御第二道。基线 NULL 时 `created_at > NULL`=NULL → 0 行 → 安全拒（REFIXED 时 fixed_at 必非空）。
+                    // codex 09 H-1：新增性兜底——附件须晚于上次完成时间 COALESCE(refixed_at, fixed_at)（与积压筛选同范式），防复用旧 fix_proof id 绕过留证
+                    //   （§3.4/§9.37）。基线 NULL 时 `created_at > NULL`=NULL → 0 行 → 安全拒（REFIXED 时 fixed_at 必非空）。helper 与返工 batch 共用同口径。
                     const newnessBaseline = row.refixed_at || row.fixed_at || null;
-                    const placeholders = ids.map(() => '?').join(',');
-                    const cnt = await dbGetAsync(
-                        `SELECT COUNT(*) AS c FROM correction_attachments a LEFT JOIN users u ON u.id = a.uploaded_by
-                          WHERE a.correction_request_id = ? AND a.attachment_type = 'fix_proof' AND a.uploaded_by IS NOT NULL
-                            AND a.id IN (${placeholders}) AND (a.uploaded_by = ? OR u.role = 'admin')
-                            AND a.created_at > ?`,
-                        [requestId, ...ids, Number(row.assigned_to) || -1, newnessBaseline]
-                    );
                     // 全部传入 id 必须命中合规（防夹带他单/error_proof/越权上传者/复用旧图）
-                    if (!cnt || cnt.c !== ids.length) throw new CorrectionTransitionError(400, 'FIX_PROOF_REQUIRED', '本次新增结果证明无效（须属本单 fix_proof、上传者为开发本人或 admin、且为本次完成后新增）');
-                    // 重修说明（选填，对称 batch resubmit_note）：非空则拼入 history.reason（§9 约束 33：不加主表字段，逐次留痕在历史）
+                    if (!(await correctionNewFixProofValid(requestId, ids, newnessBaseline, row.assigned_to))) throw new CorrectionTransitionError(400, 'FIX_PROOF_REQUIRED', '本次新增结果证明无效（须属本单 fix_proof、上传者为开发本人或 admin、且为本次完成后新增）');
+                    // 重修说明（普通 single 选填 / 返工 single 必填≥5）：非空则拼入 history.reason（§9 约束 33：不加主表字段，逐次留痕在历史）
                     const srnote = (typeof payload.resubmit_note === 'string' ? payload.resubmit_note.trim() : '');
+                    if (isRework) {
+                        if (!srnote) throw new CorrectionTransitionError(400, 'REWORK_RESUBMIT_NOTE_REQUIRED', '返工单重修提交必须填写本次修正说明');
+                        if (Array.from(srnote).length < 5) throw new CorrectionTransitionError(400, 'REWORK_RESUBMIT_NOTE_TOO_SHORT', '返工修正说明至少 5 字，请说明本次实际修正内容（避免「1」「完成」等敷衍）');
+                    }
                     if (srnote.length > 500) throw new CorrectionTransitionError(400, 'RESUBMIT_NOTE_TOO_LONG', '重修说明不超过 500 字');   // L-3：对齐 closure_reason 上限
                     historyReason = srnote
                         ? `重修提交（新增 ${ids.length} 张结果证明）：${srnote}`
@@ -902,6 +1025,33 @@ async function sendCorrectionDingtalkToRequester(requesterPhone, title, markdown
     catch (err) { return { ok: false, reason: dingtalkNotify.classifyError(err).reason }; }
     if (!sendOk(mdResp) || !mdResp.processQueryKey) return { ok: false, reason: 'send_failed' };
     return { ok: true, message_key: mdResp.processQueryKey, userid: resolved.userid };
+}
+
+// done 完成卡片钉钉发送序列（media→file→markdown）——普通主单 done 与归档单返工 done（Commit E）两路共用，纯发送无 DB/state。
+//   att（physicalPath/sendFileName）的扩展名/路径越界/物理存在校验由调用方先做，此处只发。返回 { allOk, mdResp, failedStep }。
+async function sendDoneDingtalkCard(token, robotCode, userIds, title, cardText, physicalPath, sendFileName) {
+    const hasAtt = !!physicalPath;
+    const steps = { media_upload: !hasAtt, file_send: !hasAtt, markdown_send: false };
+    const sendOk = (r) => r && typeof r === 'object' && (!r.errcode || r.errcode === 0) && (!Array.isArray(r.invalidStaffIdList) || r.invalidStaffIdList.length === 0);
+    let mdResp = null, failedStep = null, failedError = null;
+    try {
+        if (hasAtt) {
+            const buffer = fs.readFileSync(physicalPath);
+            const mediaId = await dingtalkNotify.uploadMedia(token, sendFileName, buffer);
+            if (!mediaId) throw Object.assign(new Error('media 上传未返回 mediaId'), { step: 'media_upload' });
+            steps.media_upload = true;
+            const fileResp = await dingtalkNotify.sendFileToUser(token, robotCode, userIds, mediaId, sendFileName);
+            if (!sendOk(fileResp)) throw Object.assign(new Error('文件发送未成功'), { step: 'file_send' });
+            steps.file_send = true;
+        }
+        mdResp = await dingtalkNotify.sendMarkdownToUser(token, robotCode, userIds, title, cardText);
+        if (!sendOk(mdResp) || !mdResp.processQueryKey) throw Object.assign(new Error('markdown 未成功或缺 processQueryKey'), { step: 'markdown_send' });
+        steps.markdown_send = true;
+    } catch (e) {
+        failedStep = e.step || (!steps.media_upload ? 'media_upload' : !steps.file_send ? 'file_send' : 'markdown_send');
+        failedError = e && e.message;   // codex LOW-4：保留原始错因摘要供内网人工排障（仅日志用，不外暴露）
+    }
+    return { allOk: steps.media_upload && steps.file_send && steps.markdown_send, mdResp, failedStep, failedError };
 }
 
 // 指派通知开发（共享 helper：assign endpoint + 建单 path A 都调）。读 correction + dev → 发 → 落 notify_*。
@@ -1375,6 +1525,134 @@ router.post('/:id/reassign', authenticateToken, requireCorrectionSchemaReady, co
     }
 });
 
+// ── POST /:id/reopen-rework 归档单事后返工（Commit B，方案 §四）────────────────────────────────
+//   ARCHIVED 终态单事后发现没改对 → 新建一张「返工子单」挂原单下（原单状态零污染），自动指派回原开发。
+//   ⛔ 自管事务【绝不调 correctionTransition】（它无条件 BEGIN IMMEDIATE，嵌套会触发 sqlite 'cannot start a transaction within a transaction'）；
+//      照 link-new 范式自开单一 BEGIN IMMEDIATE，内部全 dbRunAsync 序列、失败统一 ROLLBACK。
+//   ⛔ 中间件不挂 requireAdmin（权限=admin 或建单人，建单人可能 publisher/user，挂 requireAdmin 会误挡）；权限在 handler 内做（§4.1）。
+router.post('/:id/reopen-rework', authenticateToken, requireCorrectionSchemaReady, correctionIdGuard, async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    const actor = correctionActor(req);
+    const reopenReason = (req.body && typeof req.body.reopen_reason === 'string') ? req.body.reopen_reason.trim() : '';
+    const confirmedExcessive = !!(req.body && req.body.confirmed_excessive === true);   // 严格 ===true（对齐 force_resend 范式）
+    try {
+        // ── BEGIN 前入参校验（§4.2.3 reopen_reason 非空 + 10-500）──
+        if (reopenReason.length < 10 || reopenReason.length > 500) {
+            return res.status(400).json({ error: '返工原因须 10-500 字', code: 'REOPEN_REASON_REQUIRED' });
+        }
+        let childId, masterId, rootId, reworkSeq, assignedTo = null, assignedToName = null;
+        await dbRunAsync('BEGIN IMMEDIATE');
+        try {
+            // 1. 事务内重读被返工单真实行（不信客户端 + TOCTOU 兜底，对齐 link-new :1280）
+            const target = await dbGetAsync(
+                `SELECT id, status, correction_group_id, rework_root_id, assigned_to,
+                        source_system, source_system_other, location_info, correction_count,
+                        reason, oa_number, correction_type, requester_dept, requester_name, requester_phone,
+                        expected_deadline, created_by, created_by_name
+                   FROM correction_requests WHERE id = ?`, [id]);
+            if (!target) { await dbRunAsync('ROLLBACK'); return res.status(404).json({ error: '修正单不存在' }); }
+            // 2. 权限（§4.1）：admin 或被返工单建单人（created_by 事务内从真实行读）。actor.id>0 半边与 void 守卫对齐（防 actor.id 异常 0/NaN 误判建单人，末次合并审 NIT-11）
+            if (actor.role !== 'admin' && !(Number(target.created_by) === actor.id && actor.id > 0)) {
+                await dbRunAsync('ROLLBACK');
+                return res.status(403).json({ error: '仅建单人或管理员可发起返工', code: 'NOT_AUTHORIZED_TO_REOPEN' });
+            }
+            // 3. 被返工单必须 ARCHIVED（§4.2.1，TOCTOU 兜底）。归档=已完成态，任意 closure_type（normal/admin_closure）均可返工。
+            if (target.status !== 'ARCHIVED') {
+                await dbRunAsync('ROLLBACK');
+                return res.status(409).json({ error: `仅已归档（ARCHIVED）的修正单可返工，当前：${target.status}`, code: 'INVALID_STATE_FOR_REWORK' });
+            }
+            // 4. 算链根 rootId（§4.2.2）：被返工单本身是返工子单→继承其 root；否则=被返工单 id
+            rootId = (target.rework_root_id != null) ? Number(target.rework_root_id) : Number(target.id);
+            // 5. H-5 链级去重防并发（§4.2.2）：该 root 链下已有未结返工子单 → 409（BEGIN IMMEDIATE 串行化下二次 reopen 会读到首次已提交的子单）
+            const openChild = await dbGetAsync(
+                `SELECT id FROM correction_requests
+                  WHERE rework_root_id = ? AND rework_parent_id IS NOT NULL
+                    AND status NOT IN ('ARCHIVED','VOIDED','REJECTED') LIMIT 1`, [rootId]);
+            if (openChild) {
+                await dbRunAsync('ROLLBACK');
+                return res.status(409).json({ error: `该返工链下已有未完成的返工子单 #${openChild.id}，请先处理`, code: 'REWORK_ALREADY_OPEN', open_child_id: openChild.id });
+            }
+            // 6. 算 rework_seq（§3.1）：MAX+1（非 COUNT+1——作废过的返工子单仍占 seq，避免与唯一索引冲突）
+            const seqRow = await dbGetAsync('SELECT MAX(rework_seq) m FROM correction_requests WHERE rework_root_id = ?', [rootId]);
+            reworkSeq = (seqRow && seqRow.m != null ? Number(seqRow.m) : 0) + 1;
+            // 7. ≥5 次软阈值（§4.2.4）：需 confirmed_excessive=true，否则 409（仍允许继续，非 403 硬拒）
+            if (reworkSeq >= 5 && !confirmedExcessive) {
+                await dbRunAsync('ROLLBACK');
+                return res.status(409).json({ error: `这是第 ${reworkSeq} 次返工，返工次数偏多，请确认后继续（建议先线下核对）`, code: 'REWORK_EXCESSIVE_NEEDS_CONFIRM', rework_seq: reworkSeq });
+            }
+            // 8. 解析锚点 master_id（§4.3.2 / 象限④）+ 组主单有效性校验。
+            if (target.correction_group_id == null) {
+                // 象限④：被返工单无组 → 先升主单（group_id=自身 id，照 link-new 范式），master_id=被返工单 id。
+                //   双条件 WHERE（对齐模块「状态机字段 UPDATE 三件套」范式：WHERE 含期望前置态 + changes 检查 + 失败阻断）+ changes!==1 ROLLBACK：
+                //   BEGIN IMMEDIATE 锁期内本必命中，加守卫为防御纵深一致（与下方 step10/11 对齐）。
+                const upMaster = await dbRunAsync(
+                    `UPDATE correction_requests SET correction_group_id = ? WHERE id = ? AND status = 'ARCHIVED' AND correction_group_id IS NULL`, [id, id]);
+                if (!upMaster || upMaster.changes !== 1) { await dbRunAsync('ROLLBACK'); return res.status(409).json({ error: '被返工单状态已变更，请刷新重试', code: 'CONCURRENT_STATE_CHANGE' }); }
+                masterId = id;
+            } else {
+                masterId = Number(target.correction_group_id);
+                // 组主单有效性（对抗审 LOW + codex M-1）：被返工单是子单（group_id≠自身）时，其所属组主单不能处于"组已死"终态——
+                //   VOIDED（已作废）/ REJECTED（已否决）均代表整组终止；reopen 挂上去会让 resolveCorrectionGroupAnchor 把 detail/通知解析到已死组，语义错位。
+                //   （ARCHIVED 主单是"组已完成"非"已死"——象限②正常返工场景，不挡。）
+                if (masterId !== id) {
+                    const masterRow = await dbGetAsync('SELECT status FROM correction_requests WHERE id = ?', [masterId]);
+                    if (!masterRow) { await dbRunAsync('ROLLBACK'); return res.status(409).json({ error: '所属关联组主单不存在，无法返工', code: 'REWORK_MASTER_MISSING' }); }
+                    if (masterRow.status === 'VOIDED' || masterRow.status === 'REJECTED') {
+                        await dbRunAsync('ROLLBACK');
+                        return res.status(409).json({ error: `所属关联组已${masterRow.status === 'VOIDED' ? '作废' : '否决'}（终态），不可返工（请在有效单据上处理）`, code: 'REWORK_GROUP_TERMINAL' });
+                    }
+                }
+            }
+            // 9. INSERT 返工子单（PENDING_ASSIGN + 5 rework 列 + group_id=master_id；继承被返工单系统/诉求/建单人）
+            childId = await insertReworkChildCorrection(target, masterId, { parentId: id, rootId, seq: reworkSeq, reopenReason }, actor);
+            // 10. M-7 同事务自动指派回原开发（决策 #6，⛔ 不调 correctionTransition，直接 dbRunAsync——受控例外：本是"唯一改 status 入口"约定的破例，理由=嵌套事务约束）
+            const dev = await resolveReworkOriginalDeveloper(target.assigned_to);
+            if (dev) {
+                const updAssign = await dbRunAsync(
+                    `UPDATE correction_requests
+                        SET status = 'ASSIGNED_PENDING_ESTIMATE', assigned_to = ?, assigned_to_name = ?, assigned_by = ?, assigned_at = datetime('now','localtime')
+                      WHERE id = ? AND status = 'PENDING_ASSIGN'`,
+                    [dev.id, dev.name, actor.id, childId]);
+                if (!updAssign || updAssign.changes !== 1) { await dbRunAsync('ROLLBACK'); return res.status(409).json({ error: '返工子单状态异常，请重试', code: 'REWORK_ASSIGN_CONFLICT' }); }
+                await dbRunAsync(
+                    `INSERT INTO correction_status_history (correction_request_id, from_status, to_status, reason, operator_id, operator_name)
+                     VALUES (?, 'PENDING_ASSIGN', 'ASSIGNED_PENDING_ESTIMATE', ?, ?, ?)`,
+                    [childId, `返工自动指派回原开发 ${dev.name}(id=${dev.id})`, actor.id, actor.name]);
+                assignedTo = dev.id; assignedToName = dev.name;
+            } else {
+                // priority3：原开发无效 → 停 PENDING_ASSIGN + history 留痕，由 admin 改派
+                await dbRunAsync(
+                    `INSERT INTO correction_status_history (correction_request_id, from_status, to_status, reason, operator_id, operator_name)
+                     VALUES (?, 'PENDING_ASSIGN', 'PENDING_ASSIGN', ?, ?, ?)`,
+                    [childId, `返工自动指派失败：原开发(id=${target.assigned_to == null ? '无' : target.assigned_to})无效/已禁用，待管理员改派`, actor.id, actor.name]);
+            }
+            // 11. 原单 rework_child_count++ + history（原单状态零污染——只加字段+留痕，不动 status；双条件 WHERE 守 ARCHIVED 防并发）
+            const updParent = await dbRunAsync(
+                `UPDATE correction_requests SET rework_child_count = COALESCE(rework_child_count, 0) + 1 WHERE id = ? AND status = 'ARCHIVED'`, [id]);
+            if (!updParent || updParent.changes !== 1) { await dbRunAsync('ROLLBACK'); return res.status(409).json({ error: '被返工单状态已变更，请刷新重试', code: 'CONCURRENT_STATE_CHANGE' }); }
+            await dbRunAsync(
+                `INSERT INTO correction_status_history (correction_request_id, from_status, to_status, reason, operator_id, operator_name)
+                 VALUES (?, 'ARCHIVED', 'ARCHIVED', ?, ?, ?)`,
+                [id, `已派生返工子单 #${childId}（第 ${reworkSeq} 次返工）：${reopenReason}`.slice(0, 500), actor.id, actor.name]);
+            await dbRunAsync('COMMIT');
+        } catch (txErr) {
+            try { await dbRunAsync('ROLLBACK'); } catch (_) {}
+            // 唯一索引 (rework_root_id, rework_seq) 冲突（并发兜底，链级去重已挡绝大多数）→ 可重试 409。
+            // ⚠️ 此分支仅【真并发】两次 reopen 同 root 同时算出同一 seq 可达，单线程 verify 不覆盖；正则文案已用真实 sqlite3 报文离线核验（对抗审 LOW）。
+            if (/UNIQUE constraint failed: correction_requests\.rework_root_id/.test(txErr && txErr.message || '')) {
+                return res.status(409).json({ error: '返工序号冲突（并发重开），请刷新后重试', code: 'REWORK_SEQ_CONFLICT' });
+            }
+            throw txErr;
+        }
+        logger.info(`用户 ${actor.name} 对归档单 #${id} 发起返工 → 子单 #${childId}（第 ${reworkSeq} 次，root=${rootId}，${assignedTo ? '已自动指派 #' + assignedTo : '原开发无效·停 PENDING_ASSIGN'}）`);
+        res.json({ ok: true, id: childId, master_id: masterId, rework_root_id: rootId, rework_seq: reworkSeq,
+                   status: assignedTo ? 'ASSIGNED_PENDING_ESTIMATE' : 'PENDING_ASSIGN', assigned_to: assignedTo, assigned_to_name: assignedToName });
+    } catch (err) {
+        logger.error('归档单返工失败:', err.message);
+        res.status(500).json({ error: err.message });
+    }
+});
+
 // ── GET /api/corrections 列表（最小版，§7.1 可见性 + G-14 软删过滤；时长/积压筛选留 F）────────
 router.get('/', authenticateToken, requireCorrectionSchemaReady, async (req, res) => {
     try {
@@ -1402,7 +1680,13 @@ router.get('/', authenticateToken, requireCorrectionSchemaReady, async (req, res
                     expected_deadline, dev_estimated_at, created_at, fixed_at, refixed_at, archived_at,
                     submission_count, created_by, created_by_name, dingtalk_chat_id,
                     relay_notified_at, relay_notify_status, notify_status, requester_notify_status, completion_notify_status, closure_type,
-                    correction_group_id
+                    correction_group_id,
+                    rework_parent_id, rework_root_id, rework_seq, rework_child_count,
+                    -- group_nonrework_count 仅主单行（group_id=自身）的 M-1 徽章消费——CASE 短路：非主单行（独立单 group_id NULL / 子单 group_id≠自身）不跑子查询（末次合并审 NIT×3 perf）
+                    CASE WHEN correction_group_id = id
+                         THEN (SELECT COUNT(*) FROM correction_requests g
+                                WHERE g.correction_group_id = correction_requests.id AND g.rework_parent_id IS NULL)
+                         ELSE NULL END AS group_nonrework_count
                FROM correction_requests
               ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
               ORDER BY id DESC`,
@@ -1478,7 +1762,45 @@ router.get('/:id', authenticateToken, requireCorrectionSchemaReady, async (req, 
             const masterRow = await dbGetAsync('SELECT error_proof_note FROM correction_requests WHERE id = ?', [anchor.master_id]);
             effectiveErrorProofNote = (masterRow && masterRow.error_proof_note) || null;
         }
-        res.json({ request: { ...row, effective_error_proof_note: effectiveErrorProofNote }, history, attachments, requesters, group });
+        // ── 归档单返工链（Commit D §5.3）：仅当本单属返工链才拉——自身是返工子单（rework_root_id 非空）
+        //   或自身是已派生返工的原单（rework_child_count>0）。一次按 root 拉整条链（原单 + 全部返工子单）+
+        //   各成员 fix_proof 摘要（L-1 防 N+1：两条 SQL，普通单零额外查询）。前端据此渲染「上次错因/上次 fix_proof/返工序号」+ 原单血缘。
+        let reworkChain = null;
+        const isInReworkChain = (row.rework_root_id != null) || (row.rework_child_count != null && Number(row.rework_child_count) > 0);
+        if (isInReworkChain) {
+            const rootId = (row.rework_root_id != null) ? Number(row.rework_root_id) : id;   // 自身是子单→继承链根；自身是原单→自身 id
+            // 链成员 = 原单(root, 无 rework_seq) + 全部返工子单（rework_root_id=root），原单恒排首、其余按 seq 升序
+            const chainRows = await dbAllAsync(
+                `SELECT id, status, correction_type, rework_parent_id, rework_root_id, rework_seq, reopen_reason,
+                        fixed_at, refixed_at, archived_at, created_at, assigned_to_name
+                   FROM correction_requests
+                  WHERE id = ? OR rework_root_id = ?
+                  ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END, COALESCE(rework_seq, 999999), id`,
+                [rootId, rootId, rootId]
+            );
+            const chainIds = chainRows.map(c => Number(c.id));
+            const fixByReq = {};
+            if (chainIds.length) {
+                const ph = chainIds.map(() => '?').join(',');
+                const fpRows = await dbAllAsync(
+                    `SELECT correction_request_id, file_name, original_name, file_size, mime_type, uploaded_by_name, created_at
+                       FROM correction_attachments
+                      WHERE attachment_type = 'fix_proof' AND correction_request_id IN (${ph})
+                      ORDER BY id`,
+                    chainIds
+                );
+                for (const f of fpRows) { (fixByReq[f.correction_request_id] = fixByReq[f.correction_request_id] || []).push(f); }
+            }
+            reworkChain = chainRows.map(c => ({
+                id: c.id, status: c.status, correction_type: c.correction_type,
+                rework_parent_id: c.rework_parent_id, rework_root_id: c.rework_root_id, rework_seq: c.rework_seq,
+                reopen_reason: c.reopen_reason, assigned_to_name: c.assigned_to_name,
+                fixed_at: c.fixed_at, refixed_at: c.refixed_at, archived_at: c.archived_at, created_at: c.created_at,
+                is_root: Number(c.id) === rootId,
+                fix_proofs: fixByReq[c.id] || [],
+            }));
+        }
+        res.json({ request: { ...row, effective_error_proof_note: effectiveErrorProofNote }, history, attachments, requesters, group, rework_chain: reworkChain });
     } catch (err) {
         logger.error('查询数据修正单详情失败:', err.message);
         res.status(500).json({ error: err.message });
@@ -1719,9 +2041,14 @@ async function resolveCorrectionGroupAnchor(correctionId) {
     const isMaster = (masterId === Number(row.id));
     // L5（§7.2）：group_members 加 assigned_to_name（已反规范化列）+ source_system_other（L-1 codex 57，"其他"系统组区可辨），
     //   供前端关联组区显示各系统单的开发 / 系统名；notify-done 组闸门等复用处只多读无害列、逻辑零影响（组闸门只看 status/closure_type）。
+    // ⭐ 归档单返工 Commit B（§9.3 决策 #9）：group_members 加 `AND rework_parent_id IS NULL` 过滤掉返工子单——
+    //   组闸门（notify-done :2053）/ 关联组区展示只认【原跨系统组成员】，返工子单不参与组完成判定（决策 #9）。
+    //   只改非空分支：返工子单恒有 group_id 非空（=master_id≠自身，Commit A [2g] 钉死），永不进 null 分支，故 null 分支不改（加了是 no-op）。
+    //   ⚠️ M 职责拆清：过滤后 group_members 只服务"原组成员展示 + 组闸门"，返工链展示一律走 rework_root_id 单独查询（§5.3/§8），前端不得复用本结果作返工子单来源（否则返工子单从组视图消失）。
+    //   末次合并审：补 rework_child_count——关联组区成员行可标「⟳有返工」消除「跨系统主单视角看不到组内子单返工」审计盲点（codex MED-1 / ultracode seam LOW-1）；组闸门只读 status 不受影响（加列 no-op）。
     const groupMembers = (row.correction_group_id == null)
-        ? await dbAllAsync('SELECT id, status, closure_type, source_system, source_system_other, assigned_to_name FROM correction_requests WHERE id = ?', [masterId])
-        : await dbAllAsync('SELECT id, status, closure_type, source_system, source_system_other, assigned_to_name FROM correction_requests WHERE correction_group_id = ? ORDER BY (id = ?) DESC, id', [masterId, masterId]);
+        ? await dbAllAsync('SELECT id, status, closure_type, source_system, source_system_other, assigned_to_name, rework_child_count FROM correction_requests WHERE id = ?', [masterId])
+        : await dbAllAsync('SELECT id, status, closure_type, source_system, source_system_other, assigned_to_name, rework_child_count FROM correction_requests WHERE correction_group_id = ? AND rework_parent_id IS NULL ORDER BY (id = ?) DESC, id', [masterId, masterId]);
     const requesters = await dbAllAsync(
         'SELECT * FROM correction_requesters WHERE correction_request_id = ? ORDER BY is_primary DESC, seq', [masterId]);
     return { this_id: Number(row.id), master_id: masterId, is_master: isMaster, group_members: groupMembers, requesters };
@@ -1733,6 +2060,63 @@ function isGroupMemberDoneForBusinessNotify(member) {
     if (member.status === 'FIXED' || member.status === 'REFIXED') return true;
     if (member.status === 'ARCHIVED' && member.closure_type === 'normal') return true;
     return false;
+}
+
+// ── 归档单返工 Commit B helper（方案 §4.3）──────────────────────────────────────────────
+// M-7 解析"原开发"（决策 #6 / §4.3.5，信 id 不信 name）：
+//   priority1：被返工单 assigned_to 有效（存在 + role≠viewer + status≠disabled）→ 返回 { id, name }。
+//   priority3：无效 → 返回 null（调用方停 PENDING_ASSIGN + history 留痕，由 admin 改派）。
+//   ⚠️ 方案 §4.3.5 的 priority2「倒序 history 找最近有效 assigned_to id」在当前 schema 不可行：
+//     correction_status_history 无 assigned_to 列，被指派 id 仅在 reassign 的 reason 文本「新#id」出现、
+//     首派行 reason='指派给 NAME' 不含 id，正则解析既脆弱又覆盖不全；而被返工单自身 assigned_to 恒为最近一次
+//     有效开发（单子历经完整生命周期到 ARCHIVED），priority1 已覆盖常态 → 去掉 priority2，两级即足（codex 69 后补审同源：能力以真相源为准）。
+async function resolveReworkOriginalDeveloper(assignedTo) {
+    const devId = Number(assignedTo);
+    if (!(devId > 0)) return null;
+    const dev = await dbGetAsync('SELECT id, display_name, username, role, status FROM users WHERE id = ?', [devId]);
+    if (!dev) return null;
+    // 正向白名单：仅 status='active' 且非 viewer 才算有效开发（对齐 server.js 取活跃用户口径；未来若新增 locked/pending 等状态默认 fail-closed 落 priority3，比黑名单 !=='disabled' 更健壮）。
+    //   ⚠️ 末次合并审登记：本判据【刻意】比手动 /assign(R-4 仅校 role!=='viewer') 与 [2e]/[2f](status='active' OR status IS NULL) 更严——
+    //   返工自动指派是无人值守动作，fail-closed 更稳（status=NULL/异常历史开发宁可停 PENDING_ASSIGN 待 admin 改派，不静默误派）。部署前探针确认 assigned_to 均 active。
+    if (dev.role === 'viewer' || dev.status !== 'active') return null;
+    return { id: Number(dev.id), name: dev.display_name || dev.username || String(dev.id) };
+}
+
+// 在调用方已开的 BEGIN IMMEDIATE 事务内 INSERT 一张「返工子单」（镜像 insertLinkedChildCorrection + 5 rework 列）。
+//   ⛔ 内部禁 BEGIN/COMMIT/ROLLBACK——事务边界由调用方持有（本库 dbRunAsync 是注入的单一共享连接 wrapper，无 per-tx 连接对象）。
+//   契约：①status='PENDING_ASSIGN' ②correction_group_id=masterId（合法子单，[2g] 不变量 group_id 非空且≠自身）
+//   ③复制主业务方 name/phone 到主表兼容列、**绝不写 correction_requesters 子表**（子单只读组主单子表，契约 B）
+//   ④5 rework 列：rework_parent_id=被返工单 :id（血缘直接父，固定）/ rework_root_id / rework_seq / reopen_reason（rework_child_count 留默认）
+//   ⑤产 history NULL→PENDING_ASSIGN ⑥继承被返工单 source_system/location_info/correction_count/correction_type 等（方案 §4.3 继承清单）。
+//   ⚠️ expected_deadline【不继承】被返工单旧值（归档单截止多已过去，照搬会令返工子单出生即逾期）——给 correctionDefaultDeadline() 新鲜近期截止（对齐建单缺省 deadline 范式；方案 §4.3 继承清单本就不含 deadline）。
+//   ⑦硬断言 group_id 非空且 ≠ 新子单 id（既有库无跨列 CHECK 的「≠自身」半边防线，对齐 readiness [2g]）。
+async function insertReworkChildCorrection(parentRow, masterId, rework, operator) {
+    if (masterId == null || !(Number(masterId) > 0)) {
+        throw new Error(`返工子单不变量破坏：correction_group_id=${masterId} 非法（须非空正整数=被返工单所属组 master_id）`);
+    }
+    const result = await dbRunAsync(
+        `INSERT INTO correction_requests
+           (source_system, source_system_other, location_info, correction_count,
+            reason, oa_number, correction_type, requester_dept, requester_name, requester_phone,
+            status, expected_deadline, correction_group_id, created_by, created_by_name,
+            rework_parent_id, rework_root_id, rework_seq, reopen_reason)
+         VALUES (?,?,?,?,?,?,?,?,?,?, 'PENDING_ASSIGN', ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [parentRow.source_system, parentRow.source_system_other, parentRow.location_info, parentRow.correction_count,
+         parentRow.reason, parentRow.oa_number, parentRow.correction_type, parentRow.requester_dept, parentRow.requester_name, parentRow.requester_phone,
+         correctionDefaultDeadline(), Number(masterId), parentRow.created_by, parentRow.created_by_name,
+         Number(rework.parentId), Number(rework.rootId), Number(rework.seq), rework.reopenReason]
+    );
+    const childId = result.lastID;
+    // 硬断言「≠自身」半边（SQLite 跨列 CHECK 无法表达，既有库完全靠此 + readiness [2g] 兜底）：
+    if (Number(masterId) === Number(childId)) {
+        throw new Error(`返工子单不变量破坏：correction_group_id(${masterId}) = 子单自身 id(${childId})，违反"合法子单 group_id≠自身"`);
+    }
+    await dbRunAsync(
+        `INSERT INTO correction_status_history (correction_request_id, from_status, to_status, reason, operator_id, operator_name)
+         VALUES (?, NULL, 'PENDING_ASSIGN', ?, ?, ?)`,
+        [childId, `归档单返工重开（第 ${rework.seq} 次）`, operator.id, operator.name]
+    );
+    return childId;
 }
 
 // ── POST /:id/reply-estimate 回复预计完成时间（→IN_PROGRESS，§4.3 / ESTIMATE_REQUIRED 闸门）─────
@@ -1755,7 +2139,7 @@ router.post('/:id/complete', authenticateToken, requireCorrectionSchemaReady, co
     const id = parseInt(req.params.id, 10);
     let persisted = [];
     try {
-        const row = await dbGetAsync('SELECT id, status, correction_type, assigned_to FROM correction_requests WHERE id = ?', [id]);
+        const row = await dbGetAsync('SELECT id, status, correction_type, assigned_to, rework_parent_id FROM correction_requests WHERE id = ?', [id]);
         if (!row) { correctionCleanupPending(req, id); return res.status(404).json({ error: '修正单不存在', code: 'CORRECTION_NOT_FOUND' }); }
         // 预校验权限（避免上传落库后才被 transition 拒造成 orphan）：admin 或被指派开发本人。transition 内会再权威校一次。
         const actor = correctionActor(req);
@@ -1769,6 +2153,10 @@ router.post('/:id/complete', authenticateToken, requireCorrectionSchemaReady, co
             const r = await correctionTransition(id, 'IN_PROGRESS', 'FIXED', actor, { batch_completion_note: (req.body && req.body.batch_completion_note) || '' });   // 完成说明选填（single 复用 batch_completion_note 字段）
             return res.json({ ok: true, id, status: r.toStatus, attachments: persisted });
         } else {
+            // ⭐ 对抗审 M-1：返工 batch 标完成须本次上传 fix_proof（与 single 端点 files>0 对齐）——FIXED 闸门用「历史 COUNT」，
+            //   若放行无文件 complete，并发下无文件胜者可借用另一在途请求尚未回滚的 fix_proof 绕过 → 零留证。端点强制 files>0 后，
+            //   胜者必持有自身刚上传的 fix_proof（败者回滚不影响），借用前提被堵。普通 batch 不要求截图，分支零改动。
+            if (row.rework_parent_id != null && files.length === 0) { correctionCleanupPending(req, id); return res.status(400).json({ error: '返工批量修正标完成必须上传结果证明截图', code: 'FIX_PROOF_REQUIRED' }); }
             if (files.length > 0) persisted = await correctionPersistAttachments(id, files, 'fix_proof', actor);
             const r = await correctionTransition(id, 'IN_PROGRESS', 'FIXED', actor, { batch_completion_note: (req.body && req.body.batch_completion_note) || '' });
             return res.json({ ok: true, id, status: r.toStatus, attachments: persisted });
@@ -1802,7 +2190,8 @@ router.post('/:id/resubmit', authenticateToken, requireCorrectionSchemaReady, co
             return res.json({ ok: true, id, status: r.toStatus, attachments: persisted });
         } else {
             if (files.length > 0) persisted = await correctionPersistAttachments(id, files, 'fix_proof', actor);
-            const r = await correctionTransition(id, row.status, 'REFIXED', actor, { resubmit_note: (req.body && req.body.resubmit_note) || '' });
+            const newIds = persisted.map(a => a.id);   // 返工 batch 重修新增性校验需本次上传 id；普通 batch 分支不读，零行为变化
+            const r = await correctionTransition(id, row.status, 'REFIXED', actor, { new_fix_proof_attachment_ids: newIds, resubmit_note: (req.body && req.body.resubmit_note) || '' });
             return res.json({ ok: true, id, status: r.toStatus, attachments: persisted });
         }
     } catch (e) {
@@ -1929,7 +2318,48 @@ router.post('/:id/admin-close', authenticateToken, requireCorrectionSchemaReady,
 router.post('/:id/void', authenticateToken, requireCorrectionSchemaReady, correctionIdGuard, async (req, res) => {
     try {
         const id = parseInt(req.params.id, 10);
-        const r = await correctionTransition(id, null, 'VOIDED', correctionActor(req), { void_reason: req.body && req.body.void_reason });
+        const actor = correctionActor(req);
+        // ── 归档单返工 Commit B 链级守卫（§4.4 M，组级语义）：被作废单的返工链下有未结返工子单 → 阻断作废 ──
+        //   守卫【叠加】在现有"任意非终态可作废（含 ARCHIVED→VOIDED, G-14）"旁路之上，不收窄原有可作废范围。
+        //   ⚠️ best-effort 非原子（对抗审 LOW）：守卫扫描在 correctionTransition 自开事务【之外】（两者独立 BEGIN IMMEDIATE 不可嵌套），
+        //     与 reopen-rework 间理论存在 TOCTOU 窗口（扫描通过→并发 reopen 建出未结子单→本单置 VOIDED）。内网低并发 + 单连接串行
+        //     重度缓解（更可能撞 'transaction within a transaction' 响亮失败而非静默绕过）+ 结果可恢复（子单仍可独立走完）→ 不做事务内复核。
+        //   先做轻量权限预检（与 transition VOIDED 权限 isAdmin||isCreator 同构，含 actor.id>0 半边）：否则无权用户先收到 VOID_BLOCKED，泄露返工链存在性 + 错误顺序不一致。
+        const vrow = await dbGetAsync('SELECT id, status, correction_group_id, rework_root_id, created_by FROM correction_requests WHERE id = ?', [id]);
+        if (!vrow) return res.status(404).json({ error: '修正单不存在' });
+        if (actor.role !== 'admin' && !(Number(vrow.created_by) === actor.id && actor.id > 0)) {
+            return res.status(403).json({ error: '仅建单人或管理员可作废', code: 'NOT_AUTHORIZED_TO_VOID' });
+        }
+        const isMaster = (vrow.correction_group_id == null) || (Number(vrow.correction_group_id) === Number(vrow.id));
+        let reworkBlockers = [];
+        if (isMaster) {
+            // 分支①作废组主单（含跨系统主单 group_id=self / 象限④升主单后单系统单 / 从未建组 group_id=NULL 单）：
+            //   先取组成员集合（必带 `OR id=?` 兜底 self——group_id=NULL 独立单用 group_id=id 查不到自己），
+            //   再扫这些成员【各自作为 rework_root_id】的未结返工子单（防"组主单作废但组内成员返工仍在跑"）。
+            const members = await dbAllAsync('SELECT id FROM correction_requests WHERE correction_group_id = ? OR id = ?', [id, id]);
+            const memberIds = members.map(m => Number(m.id));
+            const ph = memberIds.map(() => '?').join(',');
+            // `id != ?` 排除被作废单自身：作废返工子单本身=放弃该次返工，不应被"自己在未结链里"自我阻断（组主单自身 rework_parent_id 为 NULL 本就不入此集，排除无副作用）。
+            reworkBlockers = await dbAllAsync(
+                `SELECT id, rework_seq FROM correction_requests
+                  WHERE rework_root_id IN (${ph}) AND rework_parent_id IS NOT NULL
+                    AND status NOT IN ('ARCHIVED','VOIDED','REJECTED') AND id != ?`, [...memberIds, id]);
+        } else {
+            // 分支②作废具体子单（group_id 非空且≠自身——跨系统子单或返工子单）：只查该单 root 链，不做组级级联。
+            //   root = COALESCE(自身 rework_root_id, 自身 id)（该单若本身是返工子单→rework_root_id 非空=链根；若是被返工过的原始单→自身 id 即根）。
+            const root = (vrow.rework_root_id != null) ? Number(vrow.rework_root_id) : Number(vrow.id);
+            // `id != ?` 排除自身：作废一张未结返工子单本身应放行（否则它在自己的 root 链里被自己阻断），仍会被其下游递归返工子单阻断。
+            reworkBlockers = await dbAllAsync(
+                `SELECT id, rework_seq FROM correction_requests
+                  WHERE rework_root_id = ? AND rework_parent_id IS NOT NULL
+                    AND status NOT IN ('ARCHIVED','VOIDED','REJECTED') AND id != ?`, [root, id]);
+        }
+        if (reworkBlockers.length > 0) {
+            return res.status(409).json({
+                error: `存在未完成的返工子单（${reworkBlockers.map(b => `#${b.id}`).join('、')}），请先处理后再作废`,
+                code: 'VOID_BLOCKED_REWORK_IN_PROGRESS', blockers: reworkBlockers.map(b => Number(b.id)) });
+        }
+        const r = await correctionTransition(id, null, 'VOIDED', actor, { void_reason: req.body && req.body.void_reason });
         return res.json({ ok: true, id, status: r.toStatus });
     } catch (e) { return sendCorrectionTransitionError(res, e); }
 });
@@ -1945,13 +2375,78 @@ router.post('/:id/notify-done', authenticateToken, requireCorrectionSchemaReady,
     const userName = req.user.display_name || req.user.username || `user#${userId}`;
     const isAdmin = req.user.role === 'admin';
     try {
-        // ── L2b 多业务方（§6.3）：先解析锚点，子单 → 409 引导主单 ──
+        // 先读单自身判定是否归档单返工子单（Commit E option A：返工子单自带 done·单值）——自包含早返回，不动下方主单/组路径（风险隔离）。
+        const selfRow = await dbGetAsync(`SELECT id, status, created_by, source_system, location_info, correction_group_id, rework_parent_id, rework_seq, completion_notify_status, completion_notify_message_key FROM correction_requests WHERE id = ?`, [id]);
+        if (!selfRow) return res.status(404).json({ error: '修正单不存在', code: 'CORRECTION_NOT_FOUND' });
+        if (selfRow.rework_parent_id != null) {
+            // ── 归档单返工 done（§七 + codex 68）：返工子单不重定向主单（主单=ARCHIVED 原单无可发态），发给【组主单主业务方】，
+            //   状态记返工子单【自身行】completion_notify_*（幂等键按子单 id，不复用原单维度），文案标「二次修复·第N次返工」。──
+            if (!isAdmin && Number(selfRow.created_by) !== userId) return res.status(403).json({ error: '仅建单人或管理员可发送完成通知', code: 'NOT_AUTHORIZED_TO_NOTIFY' });
+            if (selfRow.status !== 'FIXED' && selfRow.status !== 'REFIXED') return res.status(409).json({ error: `仅已完成（FIXED/REFIXED）的返工子单可发完成通知，当前：${selfRow.status}`, code: 'INVALID_STATE_FOR_NOTIFY' });
+            // codex MED-1/LOW-5：返工子单不变量硬校验（[2g]：group_id 正整数且≠自身；rework_seq 正整数）——历史脏数据 fail-fast 精确定位，
+            //   不退化成误导性 REQUESTER_ROWS_MISSING / 不输出「第 NaN 次返工」。正常数据由 insertReworkChildCorrection 硬断言+readiness+CHECK 保证。
+            const masterId = Number(selfRow.correction_group_id);
+            const seqN = Number(selfRow.rework_seq);
+            if (!(masterId > 0) || masterId === id || !(seqN > 0)) {
+                logger.error(`[correction-notify-done-rework] 返工子单 #${id} 不变量破坏：group_id=${selfRow.correction_group_id} rework_seq=${selfRow.rework_seq}（应 group_id 正整数≠自身 + seq 正整数）`);
+                return res.status(409).json({ error: '返工单据数据异常（组键/返工序号不合法），请联系管理员', code: 'REWORK_GROUP_INVARIANT_BROKEN' });
+            }
+            const primary = await dbGetAsync(`SELECT id, requester_name, requester_phone FROM correction_requesters WHERE correction_request_id = ? AND is_primary = 1 ORDER BY seq LIMIT 1`, [masterId]);
+            if (!primary) return res.status(409).json({ error: '组主单无主业务方记录（历史/异常数据，需修复后再通知）', code: 'REQUESTER_ROWS_MISSING' });
+            const persistRework = (st, key, errv) => dbRunAsync(`UPDATE correction_requests SET completion_notify_status=?, completion_notified_at=datetime('now','localtime'), completion_notify_message_key=?, completion_notify_error=?, completion_read_at=NULL WHERE id=?`, [st, key, errv, id]);
+            // 幂等（codex 68 幂等键按返工子单自身行）：已 sent + key 且未 force → already_sent
+            if (!(req.body && req.body.force_resend === true) && selfRow.completion_notify_status === 'sent' && selfRow.completion_notify_message_key) {
+                return res.json({ success: true, already_sent: true, status: 'sent', message: '已通知过业务方二次修复完成，未重复发送（如需重发传 force_resend）' });
+            }
+            const phone = String(primary.requester_phone || '').trim();
+            if (!phone) { await persistRework('no_phone', null, 'no_phone'); return res.status(400).json({ success: false, code: 'REQUESTER_PHONE_EMPTY', message: '主业务方未填手机号，请用其他方式交付', status: 'no_phone' }); }
+            // fix_proof：返工子单【自身】最新结果证明（att 查询用 id=返工子单，天然取自身二次修复证明）
+            const att = await dbGetAsync(`SELECT id, file_name, original_name FROM correction_attachments WHERE correction_request_id = ? AND attachment_type = 'fix_proof' ORDER BY id DESC LIMIT 1`, [id]);
+            let physicalPath = null, sendFileName = null;
+            if (att) {
+                const ext = normalizeAttachmentExt(att.original_name || att.file_name || '');
+                if (!CORRECTION_ALLOWED_EXTS.includes(ext)) return res.status(409).json({ error: `结果证明扩展名 ${ext} 非法，无法作为文件发送`, code: 'FIX_PROOF_NOT_SENDABLE' });
+                physicalPath = path.join(UPLOAD_DIR, att.file_name);
+                const rootCheck = collabVersioning._internal.ensureInsideRoot(physicalPath, UPLOAD_DIR);
+                if (!rootCheck.ok) return res.status(400).json({ error: '附件路径校验失败', code: 'PATH_VIOLATION' });
+                if (!fs.existsSync(physicalPath)) return res.status(409).json({ error: '结果证明文件物理缺失', code: 'FIX_PROOF_FILE_MISSING' });
+                sendFileName = att.original_name || path.basename(att.file_name);
+            }
+            const [appKey, appSecret, robotCode] = await Promise.all(['dingtalk_app_key', 'dingtalk_app_secret', 'dingtalk_robot_code'].map(readSystemConfig));
+            if (!appKey || !appSecret || !robotCode) return res.status(500).json({ error: '钉钉配置未填写', code: 'DINGTALK_NOT_CONFIGURED' });
+            let tokenR;
+            try { tokenR = await dingtalkNotify.getAccessToken(appKey, appSecret); }
+            catch (err) { const cls = dingtalkNotify.classifyError(err); return res.status(502).json({ success: false, error: cls.hint, code: 'DINGTALK_TOKEN_FAILED', reason: cls.reason }); }
+            const resolvedR = await dingtalkNotify.resolveRequesterDingUserId(tokenR, phone);
+            if (!resolvedR.ok) {
+                await persistRework('failed', null, resolvedR.reason || 'lookup_failed');
+                if (resolvedR.reason === 'requester_invalid') return res.status(400).json({ success: false, code: 'REQUESTER_INVALID', message: '业务方手机号查不到企业钉钉号（非企业成员/未绑定/离职），请线下转达', status: 'failed' });
+                return res.status(502).json({ success: false, code: 'REQUESTER_LOOKUP_FAILED', message: '业务方钉钉号查询失败，请稍后重试', status: 'failed', reason: resolvedR.reason });
+            }
+            const escR = dingtalkNotify.escapeMarkdown;
+            const cardTextR = [
+                `您反馈的**数据修正已二次修复完成**（第 ${seqN} 次返工）：`, '',
+                `- 所属系统：${escR(selfRow.source_system)}`,
+                `- 修正方式：${escR(selfRow.location_info)}`,
+                att ? '- 二次修复结果证明见随附文件。' : '- 已二次修复，请自主查看。'
+            ].join('\n');
+            const r1 = await sendDoneDingtalkCard(tokenR, robotCode, [resolvedR.userid], '📋 数据修正·二次修复完成', cardTextR, physicalPath, sendFileName);
+            if (r1.allOk) {
+                try { await dbRunAsync(`UPDATE correction_requests SET completion_notify_status='sent', completion_notified_at=datetime('now','localtime'), completion_notify_message_key=?, completion_notify_error=NULL, completion_read_at=NULL WHERE id=?`, [r1.mdResp.processQueryKey, id]); }
+                catch (dbErr) { logger.error(`[correction-notify-done-rework] 返工子单 #${id} 钉钉已发但落库失败：${dbErr.message}（key=${r1.mdResp.processQueryKey}）`); return res.status(200).json({ success: false, code: 'NOTIFY_SENT_BUT_DB_UPDATE_FAILED', message: '通知已发送但状态保存失败，请勿重发', delivery_status: 'sent', persist_status: 'failed' }); }
+                logger.info(`[correction-notify-done-rework] 返工子单 #${id}（第 ${seqN} 次）二次修复完成通知已发主业务方 ${primary.requester_name}(${resolvedR.userid}) by ${userName}（${att ? '含附件' : '无附件'}）`);
+                return res.json({ success: true, status: 'sent', has_attachment: !!att, rework_seq: seqN });
+            }
+            await persistRework('failed', null, r1.failedStep || 'failed');
+            logger.warn(`[correction-notify-done-rework] 返工子单 #${id} 二次修复完成通知部分失败 failed_step=${r1.failedStep} err=${r1.failedError || '-'} by ${userName}`);
+            return res.status(200).json({ success: false, code: 'NOTIFY_PARTIAL_FAILURE', failed_step: r1.failedStep, message: '通知发送未完成，请重试或线下联系业务方', status: 'failed' });
+        }
+        // ── L2b 多业务方（§6.3）：先解析锚点，（非返工）子单 → 409 引导主单 ──
         const anchor = await resolveCorrectionGroupAnchor(id);
         if (!anchor) return res.status(404).json({ error: '修正单不存在', code: 'CORRECTION_NOT_FOUND' });
         if (anchor.is_master === false) return res.status(409).json({ error: '完成通知只能在主单发送', code: 'NOTIFY_DONE_ON_MASTER_ONLY', master_id: anchor.master_id });
-        // 主单行（状态/建单人/卡片字段）；完成通知真相源在子表 anchor.requesters
-        const c = await dbGetAsync(`SELECT id, status, created_by, source_system, location_info FROM correction_requests WHERE id = ?`, [id]);
-        if (!c) return res.status(404).json({ error: '修正单不存在', code: 'CORRECTION_NOT_FOUND' });
+        // 主单行（状态/建单人/卡片字段）；完成通知真相源在子表 anchor.requesters。复用上方 selfRow（普通主单 id===master，selfRow 即主单行）
+        const c = selfRow;
         // 权限（G-11）：建单人或 admin（开发无发送权——信息技术部建单人对业务方交付负责）
         if (!isAdmin && Number(c.created_by) !== userId) {
             return res.status(403).json({ error: '仅建单人或管理员可发送完成通知', code: 'NOT_AUTHORIZED_TO_NOTIFY' });
@@ -2028,7 +2523,6 @@ router.post('/:id/notify-done', authenticateToken, requireCorrectionSchemaReady,
             return res.status(502).json({ success: false, code: 'REQUESTER_LOOKUP_FAILED', message: '业务方钉钉号查询失败，请稍后重试', status: 'failed', reason: resolved.reason, requester_id: requesterId });
         }
         const userIds = [resolved.userid];
-        const sendOk = (r) => r && typeof r === 'object' && (!r.errcode || r.errcode === 0) && (!Array.isArray(r.invalidStaffIdList) || r.invalidStaffIdList.length === 0);
         const esc = dingtalkNotify.escapeMarkdown;
         const cardText = [
             '您反馈的**数据修正需求已完成**：', '',
@@ -2036,25 +2530,8 @@ router.post('/:id/notify-done', authenticateToken, requireCorrectionSchemaReady,
             `- 修正方式：${esc(c.location_info)}`,
             att ? '- 结果证明见随附文件。' : '- 已完成，请自主查看。'
         ].join('\n');
-        const steps = { media_upload: !att, file_send: !att, markdown_send: false };
-        let mdResp = null, failedStep = null;
-        try {
-            if (att) {
-                const buffer = fs.readFileSync(physicalPath);
-                const mediaId = await dingtalkNotify.uploadMedia(token, sendFileName, buffer);
-                if (!mediaId) throw Object.assign(new Error('media 上传未返回 mediaId'), { step: 'media_upload' });
-                steps.media_upload = true;
-                const fileResp = await dingtalkNotify.sendFileToUser(token, robotCode, userIds, mediaId, sendFileName);
-                if (!sendOk(fileResp)) throw Object.assign(new Error('文件发送未成功'), { step: 'file_send' });
-                steps.file_send = true;
-            }
-            mdResp = await dingtalkNotify.sendMarkdownToUser(token, robotCode, userIds, '📋 数据修正·已完成', cardText);
-            if (!sendOk(mdResp) || !mdResp.processQueryKey) throw Object.assign(new Error('markdown 未成功或缺 processQueryKey'), { step: 'markdown_send' });
-            steps.markdown_send = true;
-        } catch (e) {
-            failedStep = e.step || (!steps.media_upload ? 'media_upload' : !steps.file_send ? 'file_send' : 'markdown_send');
-        }
-        const allOk = steps.media_upload && steps.file_send && steps.markdown_send;
+        // 发送序列抽到 sendDoneDingtalkCard helper（normal/rework done 两路共用，Commit E）
+        const { allOk, mdResp, failedStep, failedError } = await sendDoneDingtalkCard(token, robotCode, userIds, '📋 数据修正·已完成', cardText, physicalPath, sendFileName);
         if (allOk) {
             // 子表是真相源——子表落库失败才报 NOTIFY_SENT_BUT_DB_UPDATE_FAILED；主表回写在 persistNotify 内 best-effort
             try {
@@ -2075,7 +2552,7 @@ router.post('/:id/notify-done', authenticateToken, requireCorrectionSchemaReady,
             return res.json({ success: true, status: 'sent', requester_id: requesterId, has_attachment: !!att });
         }
         await persistNotify('failed', null, failedStep || 'failed');
-        logger.warn(`[correction-notify-done] #${id} 业务方#${requesterId} 完成通知部分失败 failed_step=${failedStep} by ${userName}`);
+        logger.warn(`[correction-notify-done] #${id} 业务方#${requesterId} 完成通知部分失败 failed_step=${failedStep} err=${failedError || '-'} by ${userName}`);
         return res.status(200).json({ success: false, code: 'NOTIFY_PARTIAL_FAILURE', failed_step: failedStep, message: '通知发送未完成，请重试或线下联系业务方', status: 'failed', requester_id: requesterId });
     } catch (e) {
         logger.error(`[correction-notify-done] 修正单 #${id} 异常：${e.message}`, e);
@@ -2286,12 +2763,52 @@ router.get('/:id/notify-read-status', authenticateToken, requireCorrectionSchema
         //   ⚠️ 本分支在上方 fm 校验【之后】，仍依赖 CORRECTION_READ_FIELD_MAP.done 作合法 recipient 白名单项
         //     （codex 50 L-4：勿因"done 已迁子表"误删 map.done，否则 done 请求会先被 INVALID_RECIPIENT 拦截）。
         if (recipient === 'done') {
+            // ── 归档单返工 done 已读（Commit E）：返工子单读【自身行】completion_notify_message_key 查已读，收件人=组主单主业务方，
+            //   写自身行 completion_read_at（不走主单 requester 子表）。自包含早返回，不动下方主单/组子表路径。──
+            const selfD = await dbGetAsync('SELECT id, created_by, correction_group_id, rework_parent_id, completion_notify_status, completion_notify_message_key, completion_notify_error, completion_read_at FROM correction_requests WHERE id = ?', [id]);
+            if (!selfD) return res.status(404).json({ error: '修正单不存在' });
+            if (selfD.rework_parent_id != null) {
+                const actorR = correctionActor(req);
+                const isCreatorR = Number(selfD.created_by) === Number(actorR.id) && Number(actorR.id) > 0;
+                if (actorR.role !== 'admin' && !isCreatorR) return res.status(403).json({ error: '无权查询该通知已读状态', code: 'NOT_AUTHORIZED' });
+                if (selfD.completion_notify_status !== 'sent' || !selfD.completion_notify_message_key) {
+                    return res.status(400).json({ error: '尚未成功通知业务方二次修复完成', code: 'REQUESTER_NOTIFY_NOT_SENT', read: false, status: selfD.completion_notify_status, notify_error: selfD.completion_notify_error || null });   // 对抗审 NIT-1：回传真实失败原因，与普通 done 路径口径对齐
+                }
+                if (selfD.completion_read_at) return res.json({ recipient, read: true, read_at: selfD.completion_read_at, cached: true });
+                const masterIdR = Number(selfD.correction_group_id);
+                if (!(masterIdR > 0) || masterIdR === id) return res.status(409).json({ error: '返工单据数据异常（组键不合法），请联系管理员', code: 'REWORK_GROUP_INVARIANT_BROKEN', read: false });   // codex MED-1 同口径
+                const primaryR = await dbGetAsync(`SELECT requester_phone FROM correction_requesters WHERE correction_request_id = ? AND is_primary = 1 ORDER BY seq LIMIT 1`, [masterIdR]);
+                if (!primaryR) return res.status(409).json({ error: '组主单无主业务方记录（历史/异常数据，需修复）', code: 'REQUESTER_ROWS_MISSING', read: false });   // codex MED-2：与 notify-done 同口径，区分「无记录」vs「无手机号」
+                const phoneR = String(primaryR.requester_phone || '').trim();
+                if (!phoneR) return res.status(400).json({ error: '业务方手机号为空，无法查已读', code: 'REQUESTER_PHONE_EMPTY', read: false });
+                const [aK2, aS2, rC2] = await Promise.all(['dingtalk_app_key', 'dingtalk_app_secret', 'dingtalk_robot_code'].map(readSystemConfig));
+                if (!aK2 || !aS2 || !rC2) return res.status(500).json({ error: '钉钉配置未填写', code: 'DINGTALK_NOT_CONFIGURED' });
+                let tk2;
+                try { tk2 = await dingtalkNotify.getAccessToken(aK2, aS2); }
+                catch (err) { const cls = dingtalkNotify.classifyError(err); return res.status(502).json({ error: cls.hint, reason: cls.reason }); }
+                let uidR = '';
+                try { const rr = await callDingtalkWithTokenRetry(aK2, aS2, tk2, (t) => dingtalkNotify.resolveRequesterDingUserId(t, phoneR)); uidR = rr && rr.ok ? String(rr.userid).trim() : ''; }
+                catch (err) { const cls = dingtalkNotify.classifyError(err); return res.status(502).json({ error: '业务方钉钉号查询失败：' + cls.hint, reason: cls.reason }); }
+                if (!uidR) return res.json({ recipient, read: false, read_at: null, read_status: 'recipient_unresolved' });
+                let rr3;
+                try { rr3 = await callDingtalkWithTokenRetry(aK2, aS2, tk2, (t) => dingtalkNotify.getReadStatus(t, rC2, selfD.completion_notify_message_key)); }
+                catch (err) { const cls = dingtalkNotify.classifyError(err); return res.status(502).json({ error: cls.hint, reason: cls.reason }); }
+                const e3 = (rr3.readDetails || []).find(d => String(d.userId).trim() === uidR && d.readStatus === 'READ');
+                let readAtR = null;
+                if (e3) {
+                    const ts = Number(e3.readTimestamp) || 0;
+                    const ms = ts > 1e12 ? ts : (ts > 1e9 ? ts * 1000 : Date.now());
+                    const rd = new Date(ms); const p3 = (n) => String(n).padStart(2, '0');
+                    readAtR = `${rd.getFullYear()}-${p3(rd.getMonth() + 1)}-${p3(rd.getDate())} ${p3(rd.getHours())}:${p3(rd.getMinutes())}:${p3(rd.getSeconds())}`;
+                    try { await dbRunAsync(`UPDATE correction_requests SET completion_read_at = ? WHERE id = ?`, [readAtR, id]); } catch (_) {}   // 首查到 READ 固化自身行
+                }
+                return res.json({ recipient, read: !!e3, read_at: readAtR });
+            }
             const anchor = await resolveCorrectionGroupAnchor(id);
             if (!anchor) return res.status(404).json({ error: '修正单不存在' });
             if (anchor.is_master === false) return res.status(409).json({ error: '完成通知已读查询只在主单', code: 'NOTIFY_DONE_ON_MASTER_ONLY', master_id: anchor.master_id });
-            const mrow = await dbGetAsync('SELECT created_by FROM correction_requests WHERE id = ?', [id]);
             const actorD = correctionActor(req);
-            const isCreatorD = mrow && Number(mrow.created_by) === Number(actorD.id) && Number(actorD.id) > 0;
+            const isCreatorD = Number(selfD.created_by) === Number(actorD.id) && Number(actorD.id) > 0;   // 对抗审 NIT-4：复用上方 selfD.created_by，省一次重复 SELECT
             if (actorD.role !== 'admin' && !isCreatorD) return res.status(403).json({ error: '无权查询该通知已读状态', code: 'NOT_AUTHORIZED' });   // 与 notify-done 同权（admin/建单人）
             // requester_id 解析（RC3-M2 兼容旧前端：单业务方未传自动取主业务方）+ 归属校验（RC2-M3/RC3-M3）
             let rid = (req.query.requester_id != null) ? parsePositiveCorrectionId(req.query.requester_id) : null;
@@ -2700,6 +3217,6 @@ router.post('/:id/create-chat', authenticateToken, requireCorrectionSchemaReady,
   return {
     initSchema,
     router,
-    _internals: { CORRECTION_STATUSES, CORRECTION_STATUS_TRANSITIONS, CORRECTION_TYPES, CORRECTION_SOURCE_SYSTEMS, CORRECTION_NOTIFY_SENDABLE, CORRECTION_READ_FIELD_MAP, CORRECTION_ALLOWED_EXTS, CORRECTION_CHAT_EXCLUDE_IDS, CORRECTION_CHAT_ALLOWED_STATUSES, CORRECTION_REQUESTS_KEY_COLS, CORRECTION_ATTACHMENTS_KEY_COLS, CORRECTION_HISTORY_KEY_COLS, CORRECTION_REQUESTERS_KEY_COLS, CORRECTION_REQUESTERS_NOTNULL_COLS, CORRECTION_REQUESTER_NOTIFY_STATUSES, normalizeCorrectionDatetime, correctionDefaultDeadline, parsePositiveCorrectionId, correctionTransition, correctionActor, isCorrectionChatExcludedId, requireCorrectionSchemaReady, CORRECTION_SCHEMA_STATE, CORRECTION_RELAY_USER_IDS, isCorrectionRelayWhitelisted, normalizeCorrectionRequesters, writeCorrectionRequesters, resolveCorrectionGroupAnchor, isGroupMemberDoneForBusinessNotify },
+    _internals: { CORRECTION_STATUSES, CORRECTION_STATUS_TRANSITIONS, CORRECTION_TYPES, CORRECTION_SOURCE_SYSTEMS, CORRECTION_NOTIFY_SENDABLE, CORRECTION_READ_FIELD_MAP, CORRECTION_ALLOWED_EXTS, CORRECTION_CHAT_EXCLUDE_IDS, CORRECTION_CHAT_ALLOWED_STATUSES, CORRECTION_REQUESTS_KEY_COLS, CORRECTION_ATTACHMENTS_KEY_COLS, CORRECTION_HISTORY_KEY_COLS, CORRECTION_REQUESTERS_KEY_COLS, CORRECTION_REQUESTERS_NOTNULL_COLS, CORRECTION_REQUESTER_NOTIFY_STATUSES, normalizeCorrectionDatetime, correctionDefaultDeadline, parsePositiveCorrectionId, correctionTransition, correctionActor, isCorrectionChatExcludedId, requireCorrectionSchemaReady, CORRECTION_SCHEMA_STATE, CORRECTION_RELAY_USER_IDS, isCorrectionRelayWhitelisted, normalizeCorrectionRequesters, writeCorrectionRequesters, resolveCorrectionGroupAnchor, isGroupMemberDoneForBusinessNotify, runCorrectionMigration, resolveReworkOriginalDeveloper, insertReworkChildCorrection },
   };
 };

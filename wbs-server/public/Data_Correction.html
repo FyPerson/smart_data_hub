@@ -92,6 +92,13 @@
         .corr-group-badge.g-primary { background: #e0edff; color: #1d4ed8; border: 1px solid #c3dafe; }   /* 主单：蓝 */
         .corr-group-badge.g-child { background: #f0e9fb; color: #6d28d9; border: 1px solid #ddd0f5; }      /* 子单：紫 */
         .corr-group-badge .grp-num { font-variant-numeric: tabular-nums; }
+        .corr-group-badge.g-origin { background: #fef9e7; color: #92400e; border: 1px solid #fde68a; }   /* 原单（纯返工组，M-1 区分跨系统组）：暖黄 */
+        /* 归档单返工徽章（Commit D §六）：返工子单「返工·第N次」颜色梯度（1黄/2橙/3+红，软上限非硬卡），与组徽章同号同号位 */
+        .rework-badge { display: inline-block; margin-top: 3px; padding: 1px 5px; border-radius: 4px; font-size: 10px; font-weight: 600; line-height: 1.6; white-space: nowrap; }
+        .rework-badge.rw-1 { background: #fef9c3; color: #854d0e; border: 1px solid #fde68a; }   /* 第1次：黄 */
+        .rework-badge.rw-2 { background: #ffedd5; color: #9a3412; border: 1px solid #fdba74; }   /* 第2次：橙 */
+        .rework-badge.rw-3 { background: #fee2e2; color: #b91c1c; border: 1px solid #fca5a5; }   /* 第3次起：红 */
+        .rework-flag { display: inline-block; margin-left: 6px; font-size: 11px; color: #7c3aed; font-weight: 600; }   /* 原单「⟳ 有返工」标记：紫 */
         /* 同组悬浮联动高亮：浅红底 + 左深红条（强于普通 hover #fffbeb，故 !important 盖过 hover） */
         .corr-table tbody tr.corr-group-hl { background: #fff1f2 !important; box-shadow: inset 3px 0 0 #dc2626; }
         /* ID 列（第一列）收窄：徽章瘦身后两侧 padding 也收紧（14→8px），避免组号徽章把 # 列撑太宽 */
@@ -470,6 +477,7 @@
             <div class="modal-header"><h2>标完成</h2><button class="drawer-close" onclick="closeModal('completeModal')">&times;</button></div>
             <div class="modal-body">
                 <input type="hidden" id="completeCorrId">
+                <div id="completeReworkHint" style="display:none; font-size:12px; color:#6d28d9; background:#f3e8ff; border:1px solid #ddd0f5; border-radius:6px; padding:8px 10px; margin-bottom:10px;">🔄 返工子单：结果证明截图 + 文字说明（≥5 字）均必填，请补充本次实际改了什么。</div>
                 <div class="form-group" id="completeSingleGroup">
                     <label>结果证明截图 <span class="req">*</span>（单数据修正必传）</label>
                     <input type="file" id="formCompleteFiles" multiple accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.pdf,.xlsx,.xls">
@@ -494,6 +502,7 @@
             <div class="modal-body">
                 <input type="hidden" id="resubmitCorrId">
                 <div style="font-size:12px; color:#6b7280; margin-bottom:8px;">业务方异议/拉群讨论后重新修正，提交本次新的结果证明。</div>
+                <div id="resubmitReworkHint" style="display:none; font-size:12px; color:#6d28d9; background:#f3e8ff; border:1px solid #ddd0f5; border-radius:6px; padding:8px 10px; margin-bottom:10px;">🔄 返工子单：结果证明截图 + 本次说明（≥5 字）均必填。</div>
                 <div class="form-group" id="resubmitSingleGroup">
                     <label>本次新增结果证明 <span class="req">*</span>（单数据修正必传）</label>
                     <input type="file" id="formResubmitFiles" multiple accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.pdf,.xlsx,.xls">
@@ -588,6 +597,26 @@
         </div>
     </div>
 
+    <!-- 归档单返工·重新打开弹窗（Commit D §八）：ARCHIVED 单 admin/建单人发起，新建返工子单挂原单下，原单零污染 -->
+    <div class="modal-overlay" id="reopenReworkModal">
+        <div class="modal-box" style="max-width:480px;">
+            <div class="modal-header"><h2>重新打开返工</h2><button class="drawer-close" onclick="closeModal('reopenReworkModal')">&times;</button></div>
+            <div class="modal-body">
+                <input type="hidden" id="reopenCorrId">
+                <div id="reopenSummary" style="font-size:12px; color:#6b7280; background:#f9fafb; border:1px solid #f1f5f9; border-radius:6px; padding:8px 10px; margin-bottom:10px;"></div>
+                <div id="reopenSeqHint" style="font-size:12px; border-radius:6px; padding:8px 10px; margin-bottom:10px;"></div>
+                <div class="form-group">
+                    <label>返工原因 <span class="req">*</span>（10-500 字，说明原单哪里没改对）</label>
+                    <textarea id="formReopenReason" rows="4" maxlength="500" placeholder="如：客户编号映射仍有 12 条错位，业务方复核后要求重新修正"></textarea>
+                </div>
+                <label id="reopenExcessiveWrap" style="display:none; font-size:12px; color:#b91c1c; align-items:center; gap:6px;">
+                    <input type="checkbox" id="formReopenConfirmExcessive"> 我已确认确需本次返工（返工次数偏多，建议先线下核对）
+                </label>
+            </div>
+            <div class="modal-footer"><button class="btn-secondary" onclick="closeModal('reopenReworkModal')">取消</button><button class="btn-primary" id="btnSubmitReopen" onclick="submitReopenRework()">确认发起返工</button></div>
+        </div>
+    </div>
+
     <script src="assets/js/app.js"></script>
     <script>
         // ================= 常量（与后端同源）=================
@@ -617,6 +646,7 @@
         let currentGroup = '';
         let searchTimer = null;
         let currentDetail = null;   // M-3：当前详情 request 缓存（归档/拉群读它而非滞后的列表缓存）
+        let currentReworkChain = null;   // 归档单返工：当前详情的返工链缓存（供重开弹框算下次返工序号/≥5 强提示）
 
         // ================= 初始化 =================
         document.addEventListener('DOMContentLoaded', async () => {
@@ -748,17 +778,33 @@
                 // 主子单角色判定（P2 §分组标记）：group_id==null→标准单；==id→主单；其余→子单（组号=group_id=主单 id）
                 //   groupId/rowId 提取统一用（codex 审 L-3）+ Number.isFinite 防脏数据渲染"组NaN"/data-group="NaN"（L-2，当前 SQLite 整数列不触发，纯防御）
                 const groupId = Number(it.correction_group_id), rowId = Number(it.id);
-                let groupBadge = '', dataGroup = '';
+                const isReworkChild = it.rework_parent_id != null;   // 归档单返工子单（Commit D）
+                const reworkSeq = Number(it.rework_seq);
+                let groupBadge = '', dataGroup = '', reworkFlag = '';
                 if (it.correction_group_id != null && Number.isFinite(groupId)) {
                     dataGroup = ` data-group="${groupId}"`;
-                    groupBadge = (groupId === rowId)
-                        ? `<div class="corr-group-badge g-primary">主单·组<span class="grp-num">${groupId}</span></div>`
-                        : `<div class="corr-group-badge g-child">子单·组<span class="grp-num">${groupId}</span></div>`;
+                    if (isReworkChild && Number.isFinite(reworkSeq)) {
+                        // 返工子单：彩色「返工·第N次」徽章（替代「子单·组N」）；root 扁平挂载靠 data-group=组主单 联动（与跨系统组同机制，悬浮整组高亮）
+                        const rwClass = reworkSeq >= 3 ? 'rw-3' : (reworkSeq === 2 ? 'rw-2' : 'rw-1');
+                        groupBadge = `<div class="rework-badge ${rwClass}">返工·第<span class="grp-num">${reworkSeq}</span>次</div>`;
+                    } else if (groupId === rowId) {
+                        // 主单/原单：M-1 区分——纯返工组（组内非返工成员仅 1=本单自身 且 已派生返工）→「原单·组」；否则跨系统组→「主单·组」。
+                        //   group_nonrework_count 来自后端子查询（COUNT 同组 rework_parent_id IS NULL），不受列表可见性/作废过滤 → admin 与受限视角恒一致（修对抗审 M-1 误判：旧版用 allItems 计数在非 admin 跨系统视角会把已返工主单误标原单）。
+                        groupBadge = (Number(it.group_nonrework_count) <= 1 && Number(it.rework_child_count) > 0)
+                            ? `<div class="corr-group-badge g-origin">原单·组<span class="grp-num">${groupId}</span></div>`
+                            : `<div class="corr-group-badge g-primary">主单·组<span class="grp-num">${groupId}</span></div>`;
+                    } else {
+                        groupBadge = `<div class="corr-group-badge g-child">子单·组<span class="grp-num">${groupId}</span></div>`;
+                    }
+                }
+                // 「⟳ 有返工」标记：任意 rework_child_count>0 的单都标（含象限③被再次返工的返工子单——它对下游也是"被返工的原单"），对齐 §八字面「(rework_child_count||0)>0 → ⟳」；与 ID 列返工徽章不同列不冲突
+                if (Number(it.rework_child_count) > 0) {
+                    reworkFlag = `<span class="rework-flag" title="本单直接派生 ${Number(it.rework_child_count)} 张返工子单（递归链级总数见详情返工链）">⟳ 有返工</span>`;
                 }
                 return `
                 <tr onclick="openDrawer(${rowId})"${dataGroup}>
                     <td style="color:#9ca3af; font-size:12px;">${rowId}${groupBadge}</td>
-                    <td><span class="status-badge s-${statusClass(it.status)}">${escapeHtml(STATUS_LABELS[it.status] || it.status)}</span>${isOverdue(it) ? '<span class="flag-overdue">已超预计</span>' : ''}${isBacklog(it) ? '<span class="flag-backlog">积压</span>' : ''}${isUnarchivedBacklog(it) ? '<span class="flag-backlog">超7天未归档</span>' : ''}${it.status === 'ARCHIVED' && it.closure_type === 'admin_closure' ? '<span class="flag-backlog" style="color:#1d4ed8;">行政闭环</span>' : ''}</td>
+                    <td><span class="status-badge s-${statusClass(it.status)}">${escapeHtml(STATUS_LABELS[it.status] || it.status)}</span>${isOverdue(it) ? '<span class="flag-overdue">已超预计</span>' : ''}${isBacklog(it) ? '<span class="flag-backlog">积压</span>' : ''}${isUnarchivedBacklog(it) ? '<span class="flag-backlog">超7天未归档</span>' : ''}${it.status === 'ARCHIVED' && it.closure_type === 'admin_closure' ? '<span class="flag-backlog" style="color:#1d4ed8;">行政闭环</span>' : ''}${reworkFlag}</td>
                     <td><span class="type-tag t-${it.correction_type === 'batch' ? 'batch' : 'single'}">${it.correction_type === 'batch' ? '批量' : '单'}</span></td>
                     <td style="text-align:center;">${it.correction_count != null ? it.correction_count : (it.correction_type === 'single' ? 1 : '-')}</td>
                     <td>${escapeHtml(sysLabel(it))}</td>
@@ -840,6 +886,11 @@
             const isChild = !!(group && group.is_master === false);
             const groupMasterId = group ? Number(group.master_id) : Number(r.id);
             const groupMembers = (group && Array.isArray(group.members)) ? group.members : [];
+            // 归档单返工（Commit D §八）：本单是返工子单（rework_parent_id 非空）/ 或原单已派生返工（rework_child_count>0）；
+            //   rework_chain 后端按 root 一次拉回整条链（原单+全部返工子单 + 各 fix_proof 摘要），子单侧看「上次错因+上次结果证明」、原单侧看血缘。
+            const isReworkChild = r.rework_parent_id != null;
+            const reworkChain = Array.isArray(data.rework_chain) ? data.rework_chain : null;
+            currentReworkChain = reworkChain;   // 缓存供重开弹框算下次序号
             // 抽屉标题（P2 视觉优化）：#ID 数据修正 + 原因/背景摘要（截断 20 字，省略号，悬浮 title 看全文）。
             //   reason 可能为空（旧单或历史数据）→ 仅显 "#ID 数据修正"，不显摘要/省略号。innerHTML 故必须 escapeHtml 防 XSS。
             const reasonRaw = String(r.reason || '').trim();
@@ -872,10 +923,10 @@
                     allUsers.filter(u => u.role !== 'viewer' && Number(u.id) !== Number(r.assigned_to)).map(u => `<option value="${escapeHtml(String(u.id))}">${escapeHtml(u.display_name || u.username)}</option>`).join('') + `</select>`;
             }
             if ((isAdmin || isAssignee) && s === 'IN_PROGRESS') {
-                actions += `<button class="btn-primary" onclick="openComplete(${r.id}, '${r.correction_type}')">标完成</button>`;
+                actions += `<button class="btn-primary" onclick="openComplete(${r.id}, '${r.correction_type}', ${isReworkChild})">标完成</button>`;
             }
             if ((isAdmin || isAssignee) && (s === 'FIXED' || s === 'REFIXED')) {
-                actions += `<button class="btn-secondary" onclick="openResubmit(${r.id}, '${r.correction_type}')">重修提交</button>`;
+                actions += `<button class="btn-secondary" onclick="openResubmit(${r.id}, '${r.correction_type}', ${isReworkChild})">重修提交</button>`;
             }
             if ((isAdmin || isCreator || isAssignee) && (s === 'FIXED' || s === 'REFIXED')) {
                 actions += `<button class="btn-secondary" onclick="openAttach(${r.id})">补充附件</button>`;
@@ -916,6 +967,20 @@
             //   前端藏作废会造成"UI 说不可作废但 API 仍可作废"的前后端矛盾，故对齐为"可作废"。
             if (r.closure_type === 'admin_closure') {
                 actions = (isAdmin || isCreator) && s !== 'VOIDED' ? `<button class="btn-danger" onclick="doVoid(${r.id})">作废</button>` : '';   // codex 32 M-1'：补回 s!=='VOIDED'，已作废单不再显示作废
+            }
+            // 归档单返工（Commit D §八）：ARCHIVED 单（admin 或建单人）可「重新打开返工」——新建返工子单挂原单下，原单零污染。
+            //   ⚠️ 必须放在 admin_closure 重置【之后】append——admin_closure 归档单（§1.3）同样允许返工，放重置前会被抹掉。
+            //   链级去重靠后端（REWORK_ALREADY_OPEN 409 为真闸门）；前端按 rework_chain 预判已有未结返工则禁用按钮 + 提示，减少无效点击。
+            if (s === 'ARCHIVED' && (isAdmin || isCreator)) {
+                const openChild = reworkChain ? reworkChain.find(m => m.rework_parent_id != null && !['ARCHIVED', 'VOIDED', 'REJECTED'].includes(m.status)) : null;
+                // codex 复审 LOW-2 防御：原单已派生返工（rework_child_count>0）但链数据缺失（接口异常/旧缓存）→ 禁用并提示刷新，
+                //   避免 openReopenRework 误按"首次返工"把 parent POST 回原单（正常 GET 成功时 child_count>0 必返非空链，此为兜底）。
+                const chainMissing = Number(r.rework_child_count) > 0 && (!reworkChain || !reworkChain.length);
+                actions += chainMissing
+                    ? `<button class="btn-secondary" disabled title="返工链数据未加载，请刷新详情后重试" style="opacity:.5; cursor:not-allowed;">重开（请刷新）</button>`
+                    : openChild
+                        ? `<button class="btn-secondary" disabled title="返工链下已有未完成的返工子单 #${Number(openChild.id)}，请先处理" style="opacity:.5; cursor:not-allowed;">返工进行中</button>`
+                        : `<button class="btn-secondary" style="border-color:#c4b5fd; color:#6d28d9;" onclick="openReopenRework(${Number(r.id)})">重新打开返工</button>`;
             }
 
             // ===== 基本信息 =====
@@ -976,14 +1041,37 @@
             const multiReq = requesters.length > 1;
             const masterMember = groupMembers.find(m => Number(m.id) === groupMasterId) || null;
             const masterTerminal = !!(masterMember && ['ARCHIVED', 'REJECTED', 'VOIDED'].includes(masterMember.status));
-            const doneRows = requesters.map(req => ({
-                key: 'done', cid: Number(r.id), requesterId: Number(req.id),
-                label: multiReq ? `通知业务方·完成 · ${req.requester_name || '业务方'}${Number(req.is_primary) === 1 ? '（主）' : ''}` : '通知业务方·完成',
-                recipient: req.requester_name || '业务方', applicable: true,
-                status: req.completion_notify_status, notifiedAt: req.completion_notified_at, readAt: req.completion_read_at, error: req.completion_notify_error,
-                sendable: ['FIXED', 'REFIXED'], canSend: isAdmin || isCreator, byPhone: true, noPhone: !String(req.requester_phone || '').trim(),
-                doneReadonly: isChild, doneMasterId: groupMasterId, doneMasterTerminal: masterTerminal,
-            }));
+            // 归档单返工 done（Commit E option A·单值）：返工子单不承接主单只读 done，而是【自带】一条可发 done 行——
+            //   状态读返工子单【自身行】completion_notify_*（后端 SELECT * 已返回），发组主单主业务方（无 requester_id），文案「二次修复」。
+            //   后端 notify-done/read-status 对返工子单走自身行分支（不重定向主单）。
+            let doneRows, reworkDoneMissing = false;
+            if (isReworkChild) {
+                // 严格 is_primary=1（对抗审 NIT-3：与后端 WHERE is_primary=1 同源，不回退 requesters[0]，避免损坏数据下发错收件人显示）
+                const primaryReq = requesters.find(rq => Number(rq.is_primary) === 1) || null;
+                if (!primaryReq) {
+                    // 对抗审 LOW-3：组主单无主业务方（后端 REQUESTER_ROWS_MISSING 409）→ 标数据异常警告（见 doneWarn），不渲染误导性「未填手机号」可发行
+                    doneRows = []; reworkDoneMissing = true;
+                } else {
+                    doneRows = [{
+                        key: 'done', cid: Number(r.id), requesterId: null,   // 单值无 requester_id（后端发组主单主业务方）
+                        label: '通知业务方·二次修复',
+                        recipient: primaryReq.requester_name || '业务方', applicable: true,
+                        status: r.completion_notify_status, notifiedAt: r.completion_notified_at, readAt: r.completion_read_at, error: r.completion_notify_error,
+                        sendable: ['FIXED', 'REFIXED'], canSend: isAdmin || isCreator, byPhone: true,
+                        noPhone: !String(primaryReq.requester_phone || '').trim(),
+                        doneReadonly: false,
+                    }];
+                }
+            } else {
+                doneRows = requesters.map(req => ({
+                    key: 'done', cid: Number(r.id), requesterId: Number(req.id),
+                    label: multiReq ? `通知业务方·完成 · ${req.requester_name || '业务方'}${Number(req.is_primary) === 1 ? '（主）' : ''}` : '通知业务方·完成',
+                    recipient: req.requester_name || '业务方', applicable: true,
+                    status: req.completion_notify_status, notifiedAt: req.completion_notified_at, readAt: req.completion_read_at, error: req.completion_notify_error,
+                    sendable: ['FIXED', 'REFIXED'], canSend: isAdmin || isCreator, byPhone: true, noPhone: !String(req.requester_phone || '').trim(),
+                    doneReadonly: isChild, doneMasterId: groupMasterId, doneMasterTerminal: masterTerminal,
+                }));
+            }
             // 权限可见性（细优② M-1/M-2 + L3a）：严格只 admin 看全部；非 admin 只看 creator 行（后端端点权限为真闸门）。
             //   ⚠️ codex 51 L-4：通知行分两段控制——基础类型 notifyTypes（dev/relay/estimate/creator）+ done 子表 N 行 doneRows，
             //     改通知权限时【两处都要动】（visibleTypes 和 visibleDone），勿只改一处。
@@ -993,11 +1081,13 @@
             //   对比：notify-developer/notify-estimate/notify-creator 三端点不调 resolveCorrectionGroupAnchor、无子单限制
             //   → 子单可独立发这三类（各有自己开发/ETA/建单人，方案 §6.5）；仅 done 归主单（子单只读承接）。
             // done N 行仅 admin 看；子单（isChild）也渲染——走 doneReadonly 只读承接主单状态（codex 改动点4 审 M-3 注释统一）
+            // 对抗审 LOW-1：返工 done 行 canSend 含 isCreator 但此处仅 admin 可见——非缺口：建单端点 requireAdmin（POST /），created_by 恒 admin，不存在「非 admin 建单人发不出返工 done」场景（与普通 done 同口径）。
             const visibleDone = isAdmin ? doneRows : [];
             // codex 51 M-2：requesters 空时（旧单未回填/异常数据）done 行会消失——admin 显示防御警告 surface 异常，
             //   不造假主表 done 行（L2b length===0 → REQUESTER_ROWS_MISSING，假按钮点了必失败）。正常数据 L1 回填+readiness 保证非空。
-            const doneWarn = (isAdmin && !isChild && requesters.length === 0)
-                ? `<div class="notify-row"><span class="nr-label">通知业务方·完成</span><span class="nr-body"><span style="color:#dc2626;">⚠️ 本单无业务方记录（数据异常，请联系管理员）</span></span></div>`
+            //   对抗审 LOW-3：返工子单组主单无主业务方（reworkDoneMissing）也要 surface 异常警告——否则返工 isChild=true 被 !isChild 闸住，误显「未填手机号」。
+            const doneWarn = (isAdmin && ((!isChild && requesters.length === 0) || reworkDoneMissing))
+                ? `<div class="notify-row"><span class="nr-label">${isReworkChild ? '通知业务方·二次修复' : '通知业务方·完成'}</span><span class="nr-body"><span style="color:#dc2626;">⚠️ ${isReworkChild ? '组主单无主业务方记录' : '本单无业务方记录'}（数据异常，请联系管理员）</span></span></div>`
                 : '';
             const notify = [...visibleTypes.filter(t => t.applicable), ...visibleDone].map(t => buildNotifyRow(t, s)).join('') + doneWarn;
 
@@ -1036,7 +1126,8 @@
             //   解决系统2 开发看不到错误证明（后端详情已合并返回主单 error_proof 附件 + effective_error_proof_note）。
             //   子单标来源「来自关联组主单 #N」、不带补传入口（canAddErrProof 对子单恒 false，上传仍归主单后端 409 防线不变）。
             //   空态区分（codex 61 M-5）：子单有 note 无附件→「暂无附件」、无 note 无附件→「主单暂无错误证明附件」；防开发误判主单也没证明。
-            const errProofTitle = isChild ? `错误证明（来自关联组主单 #${groupMasterId}）` : '错误证明（error_proof）';
+            // 末次合并审 NIT-3：返工子单（象限④升主单后 isChild=true 但无跨系统组）用「来自原单 #N」对齐 reworkBanner，不误用「关联组主单」措辞；真跨系统子单才用「关联组主单」
+            const errProofTitle = isReworkChild ? `错误证明（来自原单 #${groupMasterId}）` : (isChild ? `错误证明（来自关联组主单 #${groupMasterId}）` : '错误证明（error_proof）');
             const errProofEmpty = isChild
                 ? (errProofNoteHtml ? '（暂无附件）' : '主单暂无错误证明附件')
                 : (errProofNoteHtml ? '（暂无附件）' : '无');
@@ -1063,15 +1154,27 @@
                     const tail = isCur
                         ? `<span style="color:#9ca3af; margin-left:6px;">（当前单）</span>`
                         : `<a href="javascript:void(0)" onclick="openDrawer(${Number(m.id)})" style="margin-left:6px;">查看 →</a>`;
+                    // 末次合并审：成员有返工子单时标 ⟳——消除「跨系统主单视角看不到组内成员返工」审计盲点（点该成员可看返工链）
+                    const memReworkFlag = Number(m.rework_child_count) > 0 ? `<span class="rework-flag" title="该成员有返工子单，点「查看」看返工链">⟳</span>` : '';
                     return `<div class="notify-row"${isCur ? ' style="background:#fffbeb;"' : ''}>
                         <span class="nr-label">系统${i + 1}${Number(m.id) === groupMasterId ? '（主）' : ''}</span>
-                        <span class="nr-body">#${Number(m.id)} · ${escapeHtml(sysName)} · ${stBadge} · 开发：${escapeHtml(devName)}${tail}</span>
+                        <span class="nr-body">#${Number(m.id)} · ${escapeHtml(sysName)} · ${stBadge}${memReworkFlag} · 开发：${escapeHtml(devName)}${tail}</span>
                     </div>`;
                 }).join('');
                 groupBlock = `<div class="detail-section"><h3>关联单（跨系统组）</h3>${memberRows}</div>`;
             }
             //   子单 banner：完成通知/错误证明/业务方录入归主单，顶部提示 + 跳转。
-            const childBanner = isChild
+            // 返工子单 banner（§八 / M-1）：标返工身份 + 链根原单。象限④纯返工组（groupMembers≤1）下方不再显跨系统「关联组」banner，避免误读成多系统诉求。
+            const bannerRwClass = Number(r.rework_seq) >= 3 ? 'rw-3' : (Number(r.rework_seq) === 2 ? 'rw-2' : 'rw-1');   // 详情徽章颜色梯度与列表/弹框三处同源（§六）
+            const reworkBanner = isReworkChild
+                ? `<div class="detail-section" style="background:#f3e8ff; border-radius:8px; padding:10px 12px; margin-bottom:14px;">
+                     <span style="font-size:13px; color:#6d28d9;">🔄 返工子单 <span class="rework-badge ${bannerRwClass}">第 ${Number(r.rework_seq) || '?'} 次</span> —— 对归档原单 #${Number(r.rework_root_id) || '?'} 的二次修复，原单状态零污染。</span>
+                     ${Number(r.rework_root_id) > 0 ? `<a href="javascript:void(0)" onclick="openDrawer(${Number(r.rework_root_id)})" style="margin-left:6px;">查看原单 →</a>` : ''}
+                   </div>`
+                : '';
+            //   对抗审 LOW-4：返工子单【不显】此 banner——它的完成通知是自带·自身行发送（option A），banner「完成通知统一在主单」会与下方「通知业务方·二次修复」自发行自相矛盾、误导去原单找入口。
+            //   返工子单的组归属/错误证明来源已由 reworkBanner + 错误证明区「来自关联组主单 #N」表达。
+            const childBanner = (isChild && !isReworkChild && groupMembers.length > 1)
                 ? `<div class="detail-section" style="background:#fef3c7; border-radius:8px; padding:10px 12px; margin-bottom:14px;">
                      <span style="font-size:13px; color:#92400e;">🔗 本单属关联组（主单 #${groupMasterId}）——业务方名单、完成通知、错误证明统一在主单管理；预计完成通知按本系统单独发送。</span>
                      <a href="javascript:void(0)" onclick="openDrawer(${groupMasterId})" style="margin-left:6px;">前往主单 →</a>
@@ -1079,16 +1182,58 @@
                 : '';
 
             document.getElementById('drawerBody').innerHTML = `
-                ${childBanner}
+                ${reworkBanner}${childBanner}
                 ${actions ? `<div class="action-bar">${actions}</div>` : ''}
                 <div class="detail-section"><h3>基本信息</h3>${info}</div>
                 ${groupBlock}
+                ${buildReworkChainHtml(reworkChain, r.id, r.rework_parent_id)}
                 <div class="detail-section"><h3>通知状态</h3>${notify}</div>
                 ${errProofSection}
                 <div class="detail-section"><h3>结果证明（fix_proof）</h3>${renderAtts(fixProofs, '无')}</div>
                 ${chatBlock}
                 <div class="detail-section"><h3>状态历史</h3>${hist}</div>
             `;
+        }
+
+        // 归档单返工链区（Commit D §五/§六/§八）：原单 + 全部返工子单按 seq 平铺时间线（不递归嵌套）。
+        //   子单侧看「上次错因（reopen_reason）+ 上次结果证明（parent fix_proof 只读）+ 返工序号」；原单侧看「已派生 N 张返工子单」血缘。
+        //   数据=后端 rework_chain（含 is_root / rework_seq / reopen_reason / fix_proofs 摘要），当前单高亮、其余可点跳转。
+        function buildReworkChainHtml(chain, currentId, currentParentId) {
+            if (!Array.isArray(chain) || chain.length === 0) return '';
+            const reworkCount = chain.filter(m => m.rework_parent_id != null).length;
+            if (reworkCount === 0) return '';   // 防御：链里无返工子单（理论不可达，chain 非空即至少 1 子单）→ 不渲染
+            const attLink = a => `/uploads/${String(a.file_name || '').split('/').map(encodeURIComponent).join('/')}`;
+            const rows = chain.map(m => {
+                const isCur = Number(m.id) === Number(currentId);
+                const isLastOfCur = currentParentId != null && Number(m.id) === Number(currentParentId);   // M-2：当前返工子单的"上次单"（其 fix_proof=本单上次结果证明）
+                // 颜色梯度（§六，与列表/banner 三处同源）：原单紫、返工子单 1黄/2橙/3+红 pill
+                const rwClass = Number(m.rework_seq) >= 3 ? 'rw-3' : (Number(m.rework_seq) === 2 ? 'rw-2' : 'rw-1');
+                // 末次合并审 NIT-6：链根原单若已被作废/否决，文案据真实 status 派生（不写死「原单」）
+                const rootStateSuffix = m.is_root ? (m.status === 'VOIDED' ? '（已作废）' : (m.status === 'REJECTED' ? '（已否决）' : '')) : '';
+                const seqLabel = m.is_root
+                    ? `<span style="font-weight:600; color:#6d28d9;">原单${rootStateSuffix}</span>`
+                    : `<span class="rework-badge ${rwClass}">返工·第 ${Number(m.rework_seq)} 次</span>`;
+                const stBadge = `<span class="status-badge s-${statusClass(m.status)}" style="font-size:10px;">${escapeHtml(STATUS_LABELS[m.status] || m.status)}</span>`;
+                const proofs = (Array.isArray(m.fix_proofs) && m.fix_proofs.length)
+                    ? m.fix_proofs.map(a => `<a href="${attLink(a)}" target="_blank">📎 ${escapeHtml(a.original_name || a.file_name)}</a>`).join('　')
+                    : '<span style="color:#9ca3af;">无</span>';
+                const tail = isCur
+                    ? '<span style="color:#9ca3af; margin-left:6px;">（当前单）</span>'
+                    : `<a href="javascript:void(0)" onclick="openDrawer(${Number(m.id)})" style="margin-left:6px;">查看 →</a>`;
+                // M-2：标出当前返工子单的"上次结果证明"所在行（=其 parent），递归链下一眼定位本单要修正的对象
+                const lastProofTag = isLastOfCur ? '<span style="color:#b45309; font-weight:600; margin-left:6px;">← 本单上次结果证明</span>' : '';
+                const reasonHtml = (!m.is_root && m.reopen_reason)
+                    ? `<div style="color:#92400e; margin-top:3px; font-size:12px;">↳ 返工原因（上次哪里改错）：${escapeHtml(m.reopen_reason)}</div>` : '';
+                return `<div style="padding:7px 0; border-bottom:1px dashed #f1f5f9;${isCur ? ' background:#faf5ff;' : ''}">
+                    <div style="font-size:12px;">
+                        ${seqLabel}
+                        <span style="color:#9ca3af;"> #${Number(m.id)} · </span>${stBadge}
+                        <span style="color:#9ca3af;"> · 结果证明：</span>${proofs}${tail}${lastProofTag}
+                    </div>
+                    ${reasonHtml}
+                </div>`;
+            }).join('');
+            return `<div class="detail-section"><h3>返工链（共 ${reworkCount} 次返工）</h3>${rows}</div>`;
         }
 
         // 归档方式标签（§3.5）：normal=正常归档（绿）/ admin_closure=行政闭环（蓝）
@@ -1373,7 +1518,7 @@
         }
 
         // ================= 标完成 =================
-        function openComplete(id, type) {
+        function openComplete(id, type, isRework) {
             document.getElementById('completeCorrId').value = id;
             const single = type !== 'batch';
             document.getElementById('completeSingleGroup').style.display = single ? 'block' : 'none';
@@ -1382,12 +1527,15 @@
             document.getElementById('formCompleteSingleNote').value = '';
             document.getElementById('formBatchNote').value = '';
             document.getElementById('formCompleteBatchFiles').value = '';
+            document.getElementById('completeReworkHint').style.display = isRework ? 'block' : 'none';   // 返工双必填提示（Commit D §六）
             document.getElementById('completeModal').dataset.type = type;
+            document.getElementById('completeModal').dataset.rework = isRework ? '1' : '';
             document.getElementById('completeModal').classList.add('open');
         }
         async function submitComplete() {
             const id = document.getElementById('completeCorrId').value;
             const type = document.getElementById('completeModal').dataset.type;
+            const isRework = document.getElementById('completeModal').dataset.rework === '1';   // 返工子单双必填（Commit D §六，前置校验防后端闸门 persist→rollback 丢上传图）
             const fd = new FormData();
             if (type === 'batch') {
                 const note = document.getElementById('formBatchNote').value.trim();
@@ -1395,13 +1543,15 @@
                 if (Array.from(note).length < 5) return showToast('批量修正完成说明至少 5 字，请说明实际修正内容', 'error');   // 与后端 FIXED 闸门同步 5 字口径（Array.from 按字符数，codex 59 L-1），挡「1」等敷衍
                 fd.append('batch_completion_note', note);
                 const bf = document.getElementById('formCompleteBatchFiles').files;
+                if (isRework && !bf.length) return showToast('返工子单完成须上传结果证明截图（返工双必填）', 'error');   // 返工 batch 额外要截图（普通 batch 截图可选）
                 for (const f of bf) fd.append('files', f);
             } else {
                 const files = document.getElementById('formCompleteFiles').files;
                 if (!files.length) return showToast('单数据修正须上传结果证明截图', 'error');
                 for (const f of files) fd.append('files', f);
                 const note = document.getElementById('formCompleteSingleNote').value.trim();
-                if (note) fd.append('batch_completion_note', note);   // 完成说明选填（复用 batch_completion_note）
+                if (isRework && Array.from(note).length < 5) return showToast('返工子单完成说明至少 5 字（返工双必填）', 'error');   // 返工 single 文字必填≥5（普通 single 选填）
+                if (note) fd.append('batch_completion_note', note);   // 完成说明选填（复用 batch_completion_note）；返工时上面已强制非空
             }
             const btn = document.getElementById('btnSubmitComplete'); btn.disabled = true;
             try {
@@ -1428,7 +1578,7 @@
         }
 
         // ================= 重修提交 =================
-        function openResubmit(id, type) {
+        function openResubmit(id, type, isRework) {
             document.getElementById('resubmitCorrId').value = id;
             const single = type !== 'batch';
             document.getElementById('resubmitSingleGroup').style.display = single ? 'block' : 'none';
@@ -1437,25 +1587,31 @@
             document.getElementById('formResubmitSingleNote').value = '';
             document.getElementById('formResubmitNote').value = '';
             document.getElementById('formResubmitBatchFiles').value = '';
+            document.getElementById('resubmitReworkHint').style.display = isRework ? 'block' : 'none';   // 返工双必填提示（Commit D §六）
             document.getElementById('resubmitModal').dataset.type = type;
+            document.getElementById('resubmitModal').dataset.rework = isRework ? '1' : '';
             document.getElementById('resubmitModal').classList.add('open');
         }
         async function submitResubmit() {
             const id = document.getElementById('resubmitCorrId').value;
             const type = document.getElementById('resubmitModal').dataset.type;
+            const isRework = document.getElementById('resubmitModal').dataset.rework === '1';   // 返工子单双必填（Commit D §六，前置防 persist→rollback 丢图）
             const fd = new FormData();
             if (type === 'batch') {
                 const note = document.getElementById('formResubmitNote').value.trim();
                 if (!note) return showToast('批量重修须填写本次重修说明', 'error');
+                if (isRework && Array.from(note).length < 5) return showToast('返工子单重修说明至少 5 字（返工双必填）', 'error');
                 fd.append('resubmit_note', note);
                 const bf = document.getElementById('formResubmitBatchFiles').files;
+                if (isRework && !bf.length) return showToast('返工子单重修须上传本次结果证明截图（返工双必填）', 'error');
                 for (const f of bf) fd.append('files', f);
             } else {
                 const files = document.getElementById('formResubmitFiles').files;
                 if (!files.length) return showToast('单数据修正重修须上传本次新增结果证明', 'error');
                 for (const f of files) fd.append('files', f);
                 const note = document.getElementById('formResubmitSingleNote').value.trim();
-                if (note) fd.append('resubmit_note', note);   // 本次重修说明选填（对称 batch）
+                if (isRework && Array.from(note).length < 5) return showToast('返工子单重修说明至少 5 字（返工双必填）', 'error');
+                if (note) fd.append('resubmit_note', note);   // 本次重修说明选填（对称 batch）；返工时上面已强制非空
             }
             const btn = document.getElementById('btnSubmitResubmit'); btn.disabled = true;
             try {
@@ -1465,6 +1621,93 @@
                 showToast('已重修提交', 'success');
                 closeModal('resubmitModal'); if (!(await promptNotifyCreatorAfterComplete(id))) { await loadList(); openDrawer(id); }   // K3-L1：发送了则 notifySend 已刷，不再重复
             } catch (e) { showToast('重修提交失败', 'error'); } finally { btn.disabled = false; }
+        }
+
+        // ================= 归档单返工·重新打开（Commit D §八）=================
+        //   ARCHIVED 单 admin/建单人发起，新建返工子单挂原单下。下次返工序号据 currentReworkChain 算（无链=首次=第1次）。
+        function openReopenRework(id) {
+            const chain = Array.isArray(currentReworkChain) ? currentReworkChain : [];
+            // ── H-1（codex / §4.2 递归 parent 固定）：返工沿链 tip 继续——实际返工目标 = 链内 status=ARCHIVED 且 rework_seq 最大
+            //   的成员（最新已归档返工子单）；无链/首次返工 = 被点击的原单自身。这样从原单侧点"重新打开返工"也挂到最新归档子单下
+            //   （parent=tip），不会 fork 回原单导致"上次 fix_proof/上次错因"错指原单。后端 reopen-rework 用路径 :id 作 parent，故前端必须 POST 到 tip。
+            //   ⚠️ codex 复审 MED：只在 status==='ARCHIVED' 的成员里取 tip——VOIDED/REJECTED 的返工子单【刻意跳过】：后端 §4.2.1
+            //   强制 reopen 目标必须 ARCHIVED，故被作废/驳回的尝试不可重开；tip 回退到最近一次【已完成（归档）】的工作继续，语义正确（非"误回退"）。
+            //   nextSeq 仍按全链 MAX(rework_seq)+1（被作废子单占用的 seq 不复用，与唯一索引一致）。
+            let targetId = Number(id), tipSeq = -1;
+            for (const m of chain) {
+                if (m.status === 'ARCHIVED') {
+                    const sq = Number(m.rework_seq) || 0;   // 原单 is_root seq=null → 0
+                    if (sq > tipSeq) { tipSeq = sq; targetId = Number(m.id); }
+                }
+            }
+            // 目标单详情：优先 currentDetail（正看 tip）→ 链成员摘要（含 correction_type/archived_at/rework_*）→ allItems
+            const tgt = (currentDetail && Number(currentDetail.id) === targetId) ? currentDetail
+                      : (chain.find(m => Number(m.id) === targetId))
+                      || (allItems.find(i => Number(i.id) === targetId)) || {};
+            // 下次返工序号 = 链内已有 rework_seq 最大值 + 1（与后端 MAX+1 同口径；首次 chain 空 → 第 1 次）
+            const maxSeq = chain.reduce((mx, m) => Math.max(mx, Number(m.rework_seq) || 0), 0);
+            const nextSeq = maxSeq + 1;
+            document.getElementById('reopenCorrId').value = targetId;   // POST 到实际 tip 目标（非被点击单，H-1）
+            document.getElementById('formReopenReason').value = '';
+            document.getElementById('formReopenConfirmExcessive').checked = false;
+            // 上次结果简述（只读模板，L-4：按目标是原单/返工子单分流文案）
+            //   ⚠️ M-3：此处所有动态字段必须 escapeHtml（typeLabel/doneAt 已 escape）；不要直接拼 r.reason/source_system 等用户自由文本进 innerHTML。
+            const typeLabel = tgt.correction_type === 'batch' ? '批量数据修正' : '单数据修正';
+            const doneAt = formatFullTime(tgt.archived_at || tgt.refixed_at || tgt.fixed_at);
+            const tgtIsRework = tgt.rework_parent_id != null;
+            const tgtRoot = Number(tgt.rework_root_id) || targetId;
+            const head = tgtIsRework
+                ? `重新打开 <b>返工子单 #${targetId}</b>（第 ${Number(tgt.rework_seq) || tipSeq} 次 · 链根原单 #${tgtRoot}）`
+                : `重新打开 <b>原单 #${targetId}</b>`;
+            document.getElementById('reopenSummary').innerHTML =
+                `${head}（${escapeHtml(typeLabel)}${doneAt && doneAt !== '-' ? ' · 归档于 ' + escapeHtml(doneAt) : ''}）<br>将在最新归档单下新建返工子单（原单/上一单状态不变）；子单自动指派回原开发，须重新提交结果证明截图+文字说明。`;
+            // 第 N 次提示 + 颜色梯度（1黄/2橙/3+红）+ ≥5 强提示（confirmed_excessive checkbox）
+            const hint = document.getElementById('reopenSeqHint');
+            const excessive = nextSeq >= 5;
+            let bg = '#fef9c3', fg = '#854d0e';                          // 第1次：黄（与列表徽章 1黄/2橙/3+红 梯度同源）
+            if (nextSeq >= 3) { bg = '#fee2e2'; fg = '#b91c1c'; }        // 3+ 次：红
+            else if (nextSeq === 2) { bg = '#ffedd5'; fg = '#9a3412'; }  // 第2次：橙
+            hint.style.background = bg; hint.style.color = fg;
+            hint.innerHTML = `这将是该单的<b>第 ${nextSeq} 次返工</b>。`
+                + (nextSeq >= 3 ? ' 返工次数偏多，建议先线下核对再发起。' : '')
+                + (excessive ? ' 已达 5 次，须勾选下方确认框方可发起。' : '');
+            const wrap = document.getElementById('reopenExcessiveWrap');
+            wrap.style.display = excessive ? 'flex' : 'none';
+            document.getElementById('reopenReworkModal').classList.add('open');
+        }
+        async function submitReopenRework() {
+            const id = document.getElementById('reopenCorrId').value;
+            const reason = document.getElementById('formReopenReason').value.trim();
+            // 客户端前置校验（与后端 REOPEN_REASON_REQUIRED 10-500 同口径，Array.from 按字符数）
+            if (Array.from(reason).length < 10) return showToast('返工原因至少 10 字，请说明原单哪里没改对', 'error');
+            if (Array.from(reason).length > 500) return showToast('返工原因不超过 500 字', 'error');
+            const wrap = document.getElementById('reopenExcessiveWrap');
+            const needConfirm = wrap.style.display !== 'none';
+            const confirmedExcessive = document.getElementById('formReopenConfirmExcessive').checked;
+            if (needConfirm && !confirmedExcessive) return showToast('返工次数已达 5 次，请勾选确认框', 'error');
+            const btn = document.getElementById('btnSubmitReopen'); btn.disabled = true;
+            try {
+                const res = await authFetch(`/api/corrections/${id}/reopen-rework`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ reopen_reason: reason, confirmed_excessive: confirmedExcessive }),
+                });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) {
+                    // ≥5 次软阈值后端回弹：自动展开确认框引导（REWORK_EXCESSIVE_NEEDS_CONFIRM）
+                    if (data.code === 'REWORK_EXCESSIVE_NEEDS_CONFIRM') {
+                        wrap.style.display = 'flex';
+                        document.getElementById('reopenSeqHint').innerHTML = `${escapeHtml(data.error || '返工次数偏多')}<br>请勾选下方确认框后重试。`;
+                        document.getElementById('reopenSeqHint').style.background = '#fee2e2';
+                        document.getElementById('reopenSeqHint').style.color = '#b91c1c';
+                    }
+                    showToast(data.error || '发起返工失败', 'error');
+                    return;
+                }
+                showToast(`已发起返工，新建子单 #${data.id}（第 ${data.rework_seq} 次）`, 'success');
+                closeModal('reopenReworkModal');
+                await loadList();
+                openDrawer(Number(data.id));   // 跳到新建的返工子单
+            } catch (e) { showToast('发起返工失败', 'error'); } finally { btn.disabled = false; }
         }
 
         // ================= 补充附件 =================
