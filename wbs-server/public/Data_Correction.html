@@ -102,14 +102,13 @@
         .corr-rework-num { color: #b91c1c; font-weight: 600; font-variant-numeric: tabular-nums; }
         /* ── 分组层级树（P2 v2 2026-06-27，去 hover 改常驻树）──
            前端聚类排序后：原单/主单置顶，子单/返工缩进挂下方；跨系统=琥珀 / 返工=红（底+左色条）。
-           原单（返工组根）= 中性底 + 红左条；返工子单 = 红底 + 红左条；跨系统主单 = 中性底 + 琥珀左条，子单 = 琥珀底 + 琥珀左条。 */
+           原单（返工组根）= 中性底 + 红左条；返工子单 = 红底 + 红左条；跨系统主单+子单 = 中性底 + 琥珀左条（v1.98.1：与非跨系统单据同底色，仅左条区分，不再用琥珀底）。 */
         .corr-table tbody tr.corr-row-child td:first-child { padding-left: 30px; position: relative; }
         .corr-table tbody tr.corr-row-child td:first-child::before { content: '\251c'; position: absolute; left: 12px; top: 11px; color: #cbd5e1; font-size: 12px; line-height: 1; }   /* ├ */
         .corr-table tbody tr.corr-row-child.corr-row-last td:first-child::before { content: '\2514'; }   /* └ */
         .corr-table tbody tr.corr-bar-amber { box-shadow: inset 3px 0 0 #d97706; }   /* 跨系统：琥珀左条 */
         .corr-table tbody tr.corr-bar-red { box-shadow: inset 3px 0 0 #dc2626; }      /* 返工：红左条 */
-        .corr-table tbody tr.corr-bg-amber { background: #fef8ec; }                   /* 跨系统子单：琥珀底 */
-        .corr-table tbody tr.corr-bg-amber:hover { background: #fdeed0; }
+        /* （v1.98.1 移除 .corr-bg-amber：跨系统子单不再用琥珀底，与普通单据同底色，仅靠 corr-bar-amber 左条区分） */
         .corr-table tbody tr.corr-bg-red { background: #fef2f2; }                     /* 返工子单：红底 */
         .corr-table tbody tr.corr-bg-red:hover { background: #fde4e4; }
         /* 补显的上下文父行（被筛选滤掉但为保树补回）：灰显斜体，仍可点开详情 */
@@ -850,10 +849,10 @@
                 let groupBadge = '', reworkFlag = '', idCell = Number.isFinite(rowId) ? `${rowId}` : '?';
                 const trClass = [];
                 if (role === 'xsys') {
-                    // 跨系统子单：紫「子单·组N」角色徽章（表身份）+ 琥珀底/条（表分组类型）；rooted 时缩进成树枝（M-4：无根则平铺不画孤儿枝）
+                    // 跨系统子单：紫「子单·组N」角色徽章（表身份）+ 琥珀左条（表分组类型，v1.98.1 去底色与普通单据一致、仅左条区分）；rooted 时缩进成树枝（M-4：无根则平铺不画孤儿枝）
                     groupBadge = `<div class="corr-group-badge g-child">子单·组<span class="grp-num">${Number.isFinite(groupId) ? groupId : '?'}</span></div>`;
                     if (rooted) trClass.push('corr-row-child');
-                    trClass.push('corr-bg-amber', 'corr-bar-amber');
+                    trClass.push('corr-bar-amber');
                 } else if (role === 'rework') {
                     // 返工子单：红色「原单号_序号」编号（如 99_1）取代真实 #id（点击仍用真实 id）；M-2 title 提示真实父单/链根（深层返工挂在跨系统子单上时可辨）；红底/条；rooted 时缩进成树枝
                     const pid = Number(it.rework_parent_id), rid = Number(it.rework_root_id);
