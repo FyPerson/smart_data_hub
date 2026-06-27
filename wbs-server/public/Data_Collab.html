@@ -1024,8 +1024,8 @@
             <div class="modal-body">
                 <div class="form-row">
                     <label>OA 流程号 <span class="required">*</span></label>
-                    <input type="text" id="f_oa_no" placeholder="如 OA20260511001">
-                    <div class="hint">业务方在集团 OA 提交的取数申请流程号。一个 OA 流程对应一个协作单（系统强制唯一）。</div>
+                    <input type="text" id="f_oa_no" placeholder="如 364265（只填数字部分）">
+                    <div class="hint">业务方在集团 OA 提交的取数申请流程号，只填数字部分，系统展示自动加 OA- 前缀。一个 OA 流程对应一个协作单（系统强制唯一）。</div>
                 </div>
                 <div class="form-row">
                     <label>需求部门 <span class="required">*</span></label>
@@ -1548,6 +1548,16 @@
             return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
         }
 
+        // OA 流程号归一展示（v1.99.0 三模块统一）：去掉用户/历史可能带的 OA-/TEST-OA- 前缀取核心，再拼 OA-；空→空白（不显示裸 OA-）
+        function oaCore(raw) {
+            if (raw === null || raw === undefined) return '';
+            return String(raw).trim().replace(/^(test-)?oa-?/i, '').trim();
+        }
+        function formatOaNo(raw) {
+            const core = oaCore(raw);
+            return core ? 'OA-' + core : '';
+        }
+
         // v1.70.2 codex 27 审 #2：HTML 属性上下文专用转义
         // 用于 src / href / data-* 等属性值场景；不依赖 buildAttachmentDownloadUrl 的 URL 编码作为 HTML 属性安全防线
         // 关键转义：" → &quot;（防破坏 attr 边界）+ ' → &#39;（防破坏单引号 attr 边界）+ < > & → 对应实体
@@ -1879,8 +1889,9 @@
                 const adminDirectTag = r.assign_mode === 'admin_direct'
                     ? ' <span class="admin-direct-tag" title="admin 直派模式，跳过 D1/D2">🎯 admin 直派</span>'
                     : '';
-                const oa = r.oa_request_no
-                    ? escapeHtml(r.oa_request_no) + adminDirectTag
+                const oaFmt = formatOaNo(r.oa_request_no);
+                const oa = oaFmt
+                    ? escapeHtml(oaFmt) + adminDirectTag
                     : '<span style="color:#9ca3af">—</span>' + adminDirectTag;
                 const targetDb = r.target_db_connection_id
                     ? escapeHtml(targetDbMap[r.target_db_connection_id] || `#${r.target_db_connection_id}`)
@@ -2739,7 +2750,7 @@
                     <div class="detail-section-body">
                         <div class="detail-kv">
                             <div class="detail-kv-label">OA 流程号</div>
-                            <div class="detail-kv-value">${d.oa_request_no ? escapeHtml(d.oa_request_no) : '<span style="color:#9ca3af">—</span>'}</div>
+                            <div class="detail-kv-value">${formatOaNo(d.oa_request_no) ? escapeHtml(formatOaNo(d.oa_request_no)) : '<span style="color:#9ca3af">—</span>'}</div>
                             <div class="detail-kv-label">目标业务库</div>
                             <div class="detail-kv-value">${escapeHtml(targetDbName)}</div>
                             <div class="detail-kv-label">需求部门</div>
@@ -3926,7 +3937,7 @@
 
         // 字段元数据（label / 类型 / 是否需要预填）
         const ADMIN_FIX_FIELD_META = {
-            'oa_request_no': { label: 'OA 流程号', type: 'text', placeholder: '例如：OA-364265' },
+            'oa_request_no': { label: 'OA 流程号', type: 'text', placeholder: '例如：364265（只填数字部分）' },
             'description': { label: '需求描述', type: 'textarea', placeholder: '业务方需求描述' },
             'target_db_connection_id': { label: '目标业务库', type: 'db_select' },
             'contact_person_id': { label: '对接人', type: 'user_select' },
@@ -5335,7 +5346,7 @@
             document.getElementById('btnSubmit').textContent = '保存';
 
             // 预填字段
-            document.getElementById('f_oa_no').value = d.oa_request_no || '';
+            document.getElementById('f_oa_no').value = oaCore(d.oa_request_no);
             document.getElementById('f_dept').value = d.requester_dept || '';
             document.getElementById('f_requester').value = d.requester_name || '';
             document.getElementById('f_requester_phone').value = d.requester_phone || '';  // v1.70.4 ④
@@ -5786,7 +5797,7 @@
         async function openCreateChatDialog() {
             if (!currentDetail) return showToast('协作单数据未加载', 'error');
             const id = currentDetail.id;
-            const oa = currentDetail.oa_request_no || `id${id}`;
+            const oa = oaCore(currentDetail.oa_request_no) || `id${id}`;
             hideDetailModalOnly();  // 让 confirm 独占焦点
             const ok = confirm(
                 `将为协作单【OA-${oa}】拉起钉钉沟通群。\n\n` +

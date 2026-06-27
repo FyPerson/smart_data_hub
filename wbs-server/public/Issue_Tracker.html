@@ -664,7 +664,7 @@
         <table class="issue-table">
             <thead>
                 <tr>
-                    <th style="width:46px;">#</th>
+                    <th style="width:46px;">ID</th>
                     <th style="width:60px;">优先级</th>
                     <th style="width:110px;">类型</th>
                     <th style="width:80px;">通知</th>
@@ -674,7 +674,7 @@
                     <th style="width:80px;">创建人</th>
                     <th style="width:100px;">业务方部门</th>
                     <th style="width:90px;">数据域</th>
-                    <th style="width:90px;">OA 单号</th>
+                    <th style="width:90px;">OA 流程号</th>
                     <th style="width:150px;">创建时间</th>
                 </tr>
             </thead>
@@ -736,8 +736,8 @@
                         <input type="text" id="formRequesterPhone" placeholder="可选，用于完成后钉钉通知">
                     </div>
                     <div class="form-group">
-                        <label>OA 单号</label>
-                        <input type="text" id="formOaNumber" placeholder="可选，走 OA 流程才填">
+                        <label>OA 流程号</label>
+                        <input type="text" id="formOaNumber" placeholder="可选，只填数字部分（如 364265）">
                     </div>
                 </div>
                 <div class="form-row">
@@ -962,7 +962,7 @@
             //   H-1：所有后端文本字段走 escapeHtml；窄列加 .ellip + title 单行省略
             tbody.innerHTML = allIssues.map(issue => `
                 <tr onclick="openDrawer(${issue.id})">
-                    <td style="color:#9ca3af; font-size:12px;">${issue.id}</td>
+                    <td style="color:#9ca3af; font-size:12px;">#${issue.id}</td>
                     <td><span class="priority-dot ${issue.priority}"></span>${escapeHtml(issue.priority)}</td>
                     <td><span class="type-tag ${typeClass(issue.type)}">${escapeHtml(issue.type)}</span></td>
                     <td>${notifyBadge(issue)}</td>
@@ -975,7 +975,7 @@
                     <td>${escapeHtml(issue.created_by_name || '')}</td>
                     <td class="ellip" title="${escapeHtml(issue.requester_dept || '')}">${escapeHtml(issue.requester_dept || '')}</td>
                     <td class="ellip">${domainText(issue.data_domain)}</td>
-                    <td class="ellip" title="${escapeHtml(issue.oa_number || '')}">${issue.oa_number ? escapeHtml(issue.oa_number) : '<span style="color:#d1d5db;">-</span>'}</td>
+                    <td class="ellip" title="${escapeHtml(formatOaNo(issue.oa_number))}">${formatOaNo(issue.oa_number) ? escapeHtml(formatOaNo(issue.oa_number)) : '<span style="color:#d1d5db;">-</span>'}</td>
                     <td class="time-absolute">${escapeHtml(formatFullTime(issue.created_at))}</td>
                 </tr>
             `).join('');
@@ -1178,7 +1178,7 @@
                 <div class="detail-item"><label>创建时间</label><div class="detail-value">${escapeHtml(issue.created_at || '-')}</div></div>
                 <div class="detail-item"><label>更新时间</label><div class="detail-value">${escapeHtml(issue.updated_at || '-')}</div></div>`;
             if (issue.oa_number) {
-                html += `<div class="detail-item"><label>OA 单号</label><div class="detail-value">${escapeHtml(issue.oa_number)}</div></div>`;
+                html += `<div class="detail-item"><label>OA 流程号</label><div class="detail-value">${escapeHtml(formatOaNo(issue.oa_number))}</div></div>`;
             }
             if (issue.deadline) {
                 html += `<div class="detail-item"><label>截止日</label><div class="detail-value">${escapeHtml(issue.deadline)}</div></div>`;
@@ -1709,7 +1709,7 @@
                 document.getElementById('formTitle').value = issue.title || '';
                 document.getElementById('formRequesterName').value = issue.requester_name || '';
                 document.getElementById('formRequesterPhone').value = issue.requester_phone || '';
-                document.getElementById('formOaNumber').value = issue.oa_number || '';
+                document.getElementById('formOaNumber').value = oaCore(issue.oa_number);
                 document.getElementById('formRequesterDept').value = issue.requester_dept || '';
                 document.getElementById('formRawRequirement').value = issue.raw_requirement || '';
                 document.getElementById('formDescription').value = issue.description || '';
@@ -1838,6 +1838,16 @@
         function escapeHtml(str) {
             if (!str) return '';
             return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        }
+
+        // OA 流程号归一展示（v1.99.0 三模块统一）：去 OA-/TEST-OA- 前缀取核心，再拼 OA-；空→空白（不显示裸 OA-）
+        function oaCore(raw) {
+            if (raw === null || raw === undefined) return '';
+            return String(raw).trim().replace(/^(test-)?oa-?/i, '').trim();
+        }
+        function formatOaNo(raw) {
+            const core = oaCore(raw);
+            return core ? 'OA-' + core : '';
         }
 
         // 类型 → CSS 类名规范化（/ 和空格 → -，对齐 .type-tag.t-* 类名）；

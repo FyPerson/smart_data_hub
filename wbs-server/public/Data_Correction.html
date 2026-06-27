@@ -305,13 +305,14 @@
             <table class="corr-table">
                 <thead>
                     <tr>
-                        <th style="width:1%; white-space:nowrap;">#</th>
+                        <th style="width:1%; white-space:nowrap;">ID</th>
                         <th style="width:90px;">状态</th>
                         <th style="width:64px;">类型</th>
                         <th style="width:72px;">修正条数</th>
                         <th style="width:110px;">所属系统</th>
                         <th style="min-width:220px;">修正方式</th>
                         <th style="width:110px;">业务方</th>
+                        <th style="width:110px;">OA 流程号</th>
                         <th style="width:100px;">指派开发</th>
                         <th style="width:90px;">创建人</th>
                         <th style="width:64px;">提交次数</th>
@@ -342,7 +343,7 @@
         <div class="modal-box">
             <div class="modal-header"><h2>新建修正单</h2><button class="drawer-close" onclick="closeCreateModal()">&times;</button></div>
             <div class="modal-body">
-                <div class="form-group"><label>OA 单号</label><input type="text" id="formOaNumber" placeholder="可选，业务方走 OA 流程的单号"></div>
+                <div class="form-group"><label>OA 流程号</label><input type="text" id="formOaNumber" placeholder="可选，只填数字部分（如 364265）"></div>
                 <div class="form-group">
                     <label>修正类型 <span class="req">*</span></label>
                     <div class="radio-row">
@@ -775,7 +776,7 @@
                 if (onlyBacklog && !isBacklog(it)) return false;
                 if (onlyUnarchived && !isUnarchivedBacklog(it)) return false;
                 if (kw) {
-                    const hay = [it.location_info, it.requester_name, it.oa_number].map(x => (x || '').toLowerCase()).join(' ');
+                    const hay = [it.location_info, it.requester_name, it.oa_number, formatOaNo(it.oa_number)].map(x => (x || '').toLowerCase()).join(' ');
                     if (!hay.includes(kw)) return false;
                 }
                 return true;
@@ -836,6 +837,16 @@
             return flat;
         }
 
+        // OA 流程号归一展示（v1.99.0 三模块统一）：去 OA-/TEST-OA- 前缀取核心，再拼 OA-；空→空白（不显示裸 OA-）
+        function oaCore(raw) {
+            if (raw === null || raw === undefined) return '';
+            return String(raw).trim().replace(/^(test-)?oa-?/i, '').trim();
+        }
+        function formatOaNo(raw) {
+            const core = oaCore(raw);
+            return core ? 'OA-' + core : '';
+        }
+
         function renderTable() {
             const tbody = document.getElementById('corrTableBody');
             const empty = document.getElementById('emptyState');
@@ -846,7 +857,7 @@
                 const groupId = Number(it.correction_group_id), rowId = Number(it.id);
                 const reworkSeq = Number(it.rework_seq);
                 // L-2：脏 id 兜底——非有限 id 显示 '?' 且不挂 openDrawer（见下方 onclickAttr），避免 openDrawer(NaN)
-                let groupBadge = '', reworkFlag = '', idCell = Number.isFinite(rowId) ? `${rowId}` : '?';
+                let groupBadge = '', reworkFlag = '', idCell = Number.isFinite(rowId) ? `#${rowId}` : '?';
                 const trClass = [];
                 if (role === 'xsys') {
                     // 跨系统子单：紫「子单·组N」角色徽章（表身份）+ 琥珀左条（表分组类型，v1.98.1 去底色与普通单据一致、仅左条区分）；rooted 时缩进成树枝（M-4：无根则平铺不画孤儿枝）
@@ -858,8 +869,8 @@
                     const pid = Number(it.rework_parent_id), rid = Number(it.rework_root_id);
                     const rwTitle = (Number.isFinite(pid) && Number.isFinite(rid)) ? ` title="返工自 #${pid} · 链根 #${rid}"` : '';
                     idCell = (Number.isFinite(rid) && Number.isFinite(reworkSeq))
-                        ? `<span class="corr-rework-num"${rwTitle}>${rid}_${reworkSeq}</span>`
-                        : `<span class="corr-rework-num"${rwTitle}>${Number.isFinite(rowId) ? rowId : '?'}</span>`;
+                        ? `<span class="corr-rework-num"${rwTitle}>#${rid}_${reworkSeq}</span>`
+                        : `<span class="corr-rework-num"${rwTitle}>${Number.isFinite(rowId) ? '#' + rowId : '?'}</span>`;
                     if (rooted) trClass.push('corr-row-child');
                     trClass.push('corr-bg-red', 'corr-bar-red');
                 } else if (role === 'root') {
@@ -889,6 +900,7 @@
                     <td>${escapeHtml(sysLabel(it))}</td>
                     <td class="ellip" title="${escapeHtml(it.location_info || '')}">${escapeHtml(it.location_info || '')}</td>
                     <td>${escapeHtml(it.requester_name || '-')}</td>
+                    <td class="ellip" title="${escapeHtml(formatOaNo(it.oa_number))}">${formatOaNo(it.oa_number) ? escapeHtml(formatOaNo(it.oa_number)) : '<span style="color:#d1d5db;">-</span>'}</td>
                     <td>${it.assigned_to_name ? escapeHtml(it.assigned_to_name) : '<span style="color:#d1d5db;">未指派</span>'}</td>
                     <td>${escapeHtml(it.created_by_name || '')}</td>
                     <td style="text-align:center;">${it.submission_count || 0}</td>
@@ -1053,7 +1065,7 @@
             if (r.reason) info += kvFull('原因/背景', escapeHtml(r.reason));
             info += kv('业务方', escapeHtml((r.requester_name || '-') + (r.requester_dept ? ` / ${r.requester_dept}` : '')));
             info += kv('业务方手机', escapeHtml(r.requester_phone || '-'));
-            info += kv('OA 单号', escapeHtml(r.oa_number || '-'));
+            info += kv('OA 流程号', formatOaNo(r.oa_number) ? escapeHtml(formatOaNo(r.oa_number)) : '-');
             info += kv('提交次数', String(r.submission_count || 0));
             info += kv('指派开发', escapeHtml(r.assigned_to_name || '未指派'));
             info += kv('创建人', escapeHtml(r.created_by_name || '-'));

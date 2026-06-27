@@ -1454,7 +1454,7 @@ function initTable() {
                 requester_phone TEXT,                         -- 业务方手机号（不做格式校验，人工录入）
 
                 -- OA 关联（v1.0.5）
-                oa_number TEXT,                               -- OA 单号（选填；仅复用业务概念，不复用 collab 必填/唯一校验，不参与跨模块主键）
+                oa_number TEXT,                               -- OA 流程号（选填；仅复用业务概念，不复用 collab 必填/唯一校验，不参与跨模块主键）
 
                 -- 时间承诺
                 deadline DATE,                                -- 期望完成日期（业务承诺）
@@ -10630,7 +10630,7 @@ app.get('/api/issues', authenticateToken, requireIssueSchemaReady, (req, res) =>
     if (assigned_to) { sql += ' AND assigned_to = ?'; params.push(assigned_to); }
     if (requester_dept) { sql += ' AND requester_dept = ?'; params.push(requester_dept); }
     if (data_domain) { sql += ' AND data_domain = ?'; params.push(data_domain); }
-    if (search) { sql += ' AND (title LIKE ? OR description LIKE ? OR related_table LIKE ?)'; params.push(`%${search}%`, `%${search}%`, `%${search}%`); }
+    if (search) { sql += ' AND (title LIKE ? OR description LIKE ? OR related_table LIKE ? OR oa_number LIKE ?)'; params.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`); }
 
     // C5 bug 修复：删死引用 'progress'——C1 重建 issues 表已移除 progress 列，留在白名单会让
     //   sort=progress 生成 `ORDER BY progress` 触发 SQLite no such column 报 500。
@@ -12005,7 +12005,7 @@ app.post('/api/issues/:id/create-chat', authenticateToken, requireIssueSchemaRea
                 `## 需求讨论群已创建`,
                 ``,
                 `**需求**：${escape(String(issue.title || '-').slice(0, 60))}`,
-                `**OA 单号**：${oaText}`,
+                `**OA 流程号**：${oaText}`,
                 `**业务方**：${escape(issue.requester_name || '-')}`,
                 `**负责人**：${escape(issue.assigned_to_name || '未指派')}`,
                 `**拉群人**：${escape(userName)}`,
@@ -12401,6 +12401,17 @@ const issueUpload = multer({
 function getCollabAttachmentDir(requestId, description) {
     const safeDesc = String(description || '').replace(/[\\/:*?"<>|\s]/g, '_').substring(0, 20);
     return path.join(COLLAB_UPLOAD_BASE, `${requestId}_${safeDesc}`);
+}
+
+// OA 流程号规范化（v1.99.0 三模块统一）：去掉用户/历史可能输入的 OA-/TEST-OA- 前缀取核心。
+//   oaCore→核心值；canonicalizeCollabOa→collab 存储统一回带前缀 OA-核心（保持与文件命名/钉钉/群名/唯一索引既有消费一致，零迁移）。
+function oaCore(raw) {
+    if (raw === null || raw === undefined) return '';
+    return String(raw).trim().replace(/^(test-)?oa-?/i, '').trim();
+}
+function canonicalizeCollabOa(raw) {
+    const core = oaCore(raw);
+    return core ? 'OA-' + core : '';
 }
 
 // 协作单字段校验 helper（新建 + 编辑共用）
@@ -12817,7 +12828,9 @@ app.post('/api/collab/requests', authenticateToken, requireAdmin, async (req, re
         const operatorId = req.user.id;
         const operatorName = req.user.display_name || req.user.username;
 
-        const oaTrimmed = String(oa_request_no).trim();
+        // v1.99.0：建单只填数字也兼容；存储统一规范化回带前缀 OA-xxx（= 现状格式，文件命名/钉钉/群名/唯一索引零改动）
+        const oaTrimmed = canonicalizeCollabOa(oa_request_no);
+        if (!oaTrimmed) return res.status(400).json({ error: 'OA 流程号必填' });
 
         // v1.70.4 ④ 业务方手机号校验（选填，11 位数字；空字符串/null/undefined 都视为未填）
         let phoneTrimmed = null;
@@ -12982,9 +12995,9 @@ app.put('/api/collab/requests/:id', authenticateToken, requireAdmin, async (req,
         // v3 创建 endpoint 用的是 oa_request_no 字段，但实际 INSERT 时取了 external_request_id 字段（命名不一致）
         // PUT 允许两个字段名传入，但实际编辑 oa_request_no 字段
         const oaChanged = req.body.oa_request_no !== undefined
-            && String(req.body.oa_request_no).trim() !== (existing.oa_request_no || '');
+            && canonicalizeCollabOa(req.body.oa_request_no) !== (existing.oa_request_no || '');
         if (oaChanged) {
-            const newOa = String(req.body.oa_request_no).trim();
+            const newOa = canonicalizeCollabOa(req.body.oa_request_no);
             if (!newOa) {
                 return res.status(400).json({ error: 'OA 流程号不能为空', code: 'OA_REQUIRED' });
             }
@@ -13031,7 +13044,7 @@ app.put('/api/collab/requests/:id', authenticateToken, requireAdmin, async (req,
         // oa_request_no 独立字段（部分前端用 oa_request_no 命名传入）
         if (oaChanged) {
             updates.push('oa_request_no = ?');
-            params.push(String(req.body.oa_request_no).trim());
+            params.push(canonicalizeCollabOa(req.body.oa_request_no));
         }
         // contact_person_id 可改（仅 PENDING_ASSIGN）
         if (isPendingAssign
@@ -17422,11 +17435,15 @@ app.post('/api/collab/requests/:id/admin-fix', authenticateToken, requireAdmin, 
             newValues[field] = (field === 'deadline') ? normalizeDeadlineForDb(newVal) : newVal;
 
             if (field === 'oa_request_no') {
+                // v1.99.0：OA 规范化回带前缀 OA-xxx（与建单/PUT 一致）；唯一性按规范化值比对，落库也用规范化值
+                const canonicalOa = canonicalizeCollabOa(newVal);
+                if (!canonicalOa) businessErrors.push('OA 流程号不能为空');
+                newValues[field] = canonicalOa;
                 const exists = await dbGetAsync(
                     `SELECT id FROM collab_requests WHERE oa_request_no = ? AND id <> ?`,
-                    [newVal, id]
+                    [canonicalOa, id]
                 );
-                if (exists) businessErrors.push(`OA 号 ${newVal} 已存在（协作单 #${exists.id}）`);
+                if (exists) businessErrors.push(`OA 号 ${canonicalOa} 已存在（协作单 #${exists.id}）`);
             }
             if (field === 'target_db_connection_id') {
                 const conn = await dbGetAsync(
@@ -17458,7 +17475,7 @@ app.post('/api/collab/requests/:id/admin-fix', authenticateToken, requireAdmin, 
         for (const [field, newVal] of Object.entries(changes)) {
             setClauses.push(`${field} = ?`);
             // v1.78.0：deadline 归一化为 DB 格式（codex 审 low-2 抽 normalizeDeadlineForDb，与审计日志同源）
-            setParams.push(field === 'deadline' ? normalizeDeadlineForDb(newVal) : newVal);
+            setParams.push(field === 'deadline' ? normalizeDeadlineForDb(newVal) : (field === 'oa_request_no' ? newValues[field] : newVal));
 
             if (field === 'contact_person_id') {
                 setClauses.push(`contact_person_name = ?`);
