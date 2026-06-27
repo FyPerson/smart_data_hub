@@ -87,20 +87,33 @@
         .flag-overdue { display: inline-block; margin-left: 6px; font-size: 11px; color: #dc2626; font-weight: 600; }
         .flag-backlog { display: inline-block; margin-left: 6px; font-size: 11px; color: #d97706; font-weight: 600; }
 
-        /* 主子单分组标记（P2 2026-06-26）：ID 列下挂角色+组号徽章（组号=主单 id），对齐 type-tag 范式 */
+        /* 主子单分组标记（P2 2026-06-26 / v2 2026-06-27 层级树重构）：ID 列下挂角色徽章 */
         .corr-group-badge { display: inline-block; margin-top: 3px; padding: 1px 5px; border-radius: 4px; font-size: 10px; font-weight: 600; line-height: 1.6; white-space: nowrap; }
         .corr-group-badge.g-primary { background: #e0edff; color: #1d4ed8; border: 1px solid #c3dafe; }   /* 主单：蓝 */
         .corr-group-badge.g-child { background: #f0e9fb; color: #6d28d9; border: 1px solid #ddd0f5; }      /* 子单：紫 */
         .corr-group-badge .grp-num { font-variant-numeric: tabular-nums; }
-        .corr-group-badge.g-origin { background: #fef9e7; color: #92400e; border: 1px solid #fde68a; }   /* 原单（纯返工组，M-1 区分跨系统组）：暖黄 */
-        /* 归档单返工徽章（Commit D §六）：返工子单「返工·第N次」颜色梯度（1黄/2橙/3+红，软上限非硬卡），与组徽章同号同号位 */
+        /* 返工子单徽章：详情抽屉返工链/banner 仍用颜色梯度（1黄/2橙/3+红）；列表 v2 改红色 99_1 编号，不再用此徽章 */
         .rework-badge { display: inline-block; margin-top: 3px; padding: 1px 5px; border-radius: 4px; font-size: 10px; font-weight: 600; line-height: 1.6; white-space: nowrap; }
         .rework-badge.rw-1 { background: #fef9c3; color: #854d0e; border: 1px solid #fde68a; }   /* 第1次：黄 */
         .rework-badge.rw-2 { background: #ffedd5; color: #9a3412; border: 1px solid #fdba74; }   /* 第2次：橙 */
         .rework-badge.rw-3 { background: #fee2e2; color: #b91c1c; border: 1px solid #fca5a5; }   /* 第3次起：红 */
         .rework-flag { display: inline-block; margin-left: 6px; font-size: 11px; color: #7c3aed; font-weight: 600; }   /* 原单「⟳ 有返工」标记：紫 */
-        /* 同组悬浮联动高亮：浅红底 + 左深红条（强于普通 hover #fffbeb，故 !important 盖过 hover） */
-        .corr-table tbody tr.corr-group-hl { background: #fff1f2 !important; box-shadow: inset 3px 0 0 #dc2626; }
+        /* 列表 v2 返工编号：红色「原单号_序号」（如 99_1），取代「返工·第N次」彩徽 */
+        .corr-rework-num { color: #b91c1c; font-weight: 600; font-variant-numeric: tabular-nums; }
+        /* ── 分组层级树（P2 v2 2026-06-27，去 hover 改常驻树）──
+           前端聚类排序后：原单/主单置顶，子单/返工缩进挂下方；跨系统=琥珀 / 返工=红（底+左色条）。
+           原单（返工组根）= 中性底 + 红左条；返工子单 = 红底 + 红左条；跨系统主单 = 中性底 + 琥珀左条，子单 = 琥珀底 + 琥珀左条。 */
+        .corr-table tbody tr.corr-row-child td:first-child { padding-left: 30px; position: relative; }
+        .corr-table tbody tr.corr-row-child td:first-child::before { content: '\251c'; position: absolute; left: 12px; top: 11px; color: #cbd5e1; font-size: 12px; line-height: 1; }   /* ├ */
+        .corr-table tbody tr.corr-row-child.corr-row-last td:first-child::before { content: '\2514'; }   /* └ */
+        .corr-table tbody tr.corr-bar-amber { box-shadow: inset 3px 0 0 #d97706; }   /* 跨系统：琥珀左条 */
+        .corr-table tbody tr.corr-bar-red { box-shadow: inset 3px 0 0 #dc2626; }      /* 返工：红左条 */
+        .corr-table tbody tr.corr-bg-amber { background: #fef8ec; }                   /* 跨系统子单：琥珀底 */
+        .corr-table tbody tr.corr-bg-amber:hover { background: #fdeed0; }
+        .corr-table tbody tr.corr-bg-red { background: #fef2f2; }                     /* 返工子单：红底 */
+        .corr-table tbody tr.corr-bg-red:hover { background: #fde4e4; }
+        /* 补显的上下文父行（被筛选滤掉但为保树补回）：灰显斜体，仍可点开详情 */
+        .corr-table tbody tr.corr-row-context td { color: #9ca3af; font-style: italic; }
         /* ID 列（第一列）收窄：徽章瘦身后两侧 padding 也收紧（14→8px），避免组号徽章把 # 列撑太宽 */
         .corr-table th:first-child, .corr-table td:first-child { padding-left: 8px; padding-right: 8px; }
 
@@ -768,42 +781,107 @@
             });
         }
 
+        // 分组聚类排序（P2 v2 2026-06-27 层级树重构）：列表后端 ORDER BY id DESC，组成员不相邻——前端在「筛选之后」聚类，
+        //   把同 correction_group_id 的成员聚到一起（原单/主单置顶，跨系统子单 + 返工子单 缩进 flat 挂下方），
+        //   组块之间按「组内最新 id」降序（保留"新在上"直觉，刚返工的组浮上来）。
+        //   筛选把组根滤掉时，从全量 allItems 补显根行（灰显上下文行）保树完整（用户拍板 A）。
+        //   返回扁平数组，每项含 { it, role, isContext, isLast, hasXsys, hasRework }；role: standalone|root|xsys|rework。
+        function clusterItems(items) {
+            // L-3：建 id→行 索引，补显根用 O(1) 查找（取代 allItems.find 的 O(组数×全量)）
+            const allById = new Map(allItems.map(x => [Number(x.id), x]));
+            const standalone = [];           // 独立单（无组）
+            const groups = new Map();        // gid -> 该组可见成员数组
+            items.forEach(it => {
+                const gid = Number(it.correction_group_id);
+                if (it.correction_group_id == null || !Number.isFinite(gid)) { standalone.push(it); return; }
+                if (!groups.has(gid)) groups.set(gid, []);
+                groups.get(gid).push(it);
+            });
+            const blocks = [];   // { rows:[...], maxId }
+            // M-1：maxId 用有限数字兜底（脏 id 不污染 blocks.sort）
+            standalone.forEach(it => blocks.push({ rows: [{ it, role: 'standalone' }], maxId: Number.isFinite(Number(it.id)) ? Number(it.id) : -Infinity }));
+            groups.forEach((members, gid) => {
+                let root = members.find(m => Number(m.id) === gid);
+                let rootIsContext = false;
+                if (!root) {
+                    const fromAll = allById.get(gid);   // 筛选滤掉根但仍在 allItems → 补显（灰显上下文行）
+                    if (fromAll) { root = fromAll; rootIsContext = true; }
+                }
+                const rooted = !!root;   // M-4：解析不到根（如 voided 根 + 关「含已作废」，allItems 里根本没根）→ 子行降级平铺，不画孤儿枝
+                // 跨系统子单（非返工、非根）按 id 升序；返工子单按 (root, seq, id) 升序 flat 同级（用户拍板：多次返工并列不再分层）
+                const xsys = members.filter(m => m.rework_parent_id == null && Number(m.id) !== gid)
+                                    .sort((a, b) => Number(a.id) - Number(b.id));
+                const reworks = members.filter(m => m.rework_parent_id != null)
+                                    .sort((a, b) => (Number(a.rework_root_id) - Number(b.rework_root_id)) || (Number(a.rework_seq) - Number(b.rework_seq)) || (Number(a.id) - Number(b.id)));
+                // 左色条/底色判定走「数据字段」（即使子单被筛掉，根也保留分组性质提示）：
+                //   group_nonrework_count>1 = 有跨系统兄弟（琥珀）；rework_child_count>0 = 有返工（红）。兜底叠加可见成员。
+                const hasXsys = (root && Number(root.group_nonrework_count) > 1) || xsys.length > 0;
+                const hasRework = (root && Number(root.rework_child_count) > 0) || reworks.length > 0;
+                const rows = [];
+                if (root) rows.push({ it: root, role: 'root', isContext: rootIsContext, hasXsys, hasRework });
+                xsys.forEach(m => rows.push({ it: m, role: 'xsys', rooted }));
+                reworks.forEach(m => rows.push({ it: m, role: 'rework', rooted }));
+                const memberIds = members.map(m => Number(m.id)).filter(Number.isFinite);   // M-1：过滤非有限 id
+                blocks.push({ rows, maxId: memberIds.length ? Math.max.apply(null, memberIds) : -Infinity });
+            });
+            blocks.sort((a, b) => b.maxId - a.maxId);
+            // 标记每组最后一个「子行」（└ 连接线），并扁平化
+            const flat = [];
+            blocks.forEach(block => {
+                let lastChildIdx = -1;
+                block.rows.forEach((r, i) => { if (r.role === 'xsys' || r.role === 'rework') lastChildIdx = i; });
+                block.rows.forEach((r, i) => { r.isLast = (i === lastChildIdx); flat.push(r); });
+            });
+            return flat;
+        }
+
         function renderTable() {
             const tbody = document.getElementById('corrTableBody');
             const empty = document.getElementById('emptyState');
             const items = getFilteredItems();
             if (!items.length) { tbody.innerHTML = ''; empty.style.display = 'block'; return; }
             empty.style.display = 'none';
-            tbody.innerHTML = items.map(it => {
-                // 主子单角色判定（P2 §分组标记）：group_id==null→标准单；==id→主单；其余→子单（组号=group_id=主单 id）
-                //   groupId/rowId 提取统一用（codex 审 L-3）+ Number.isFinite 防脏数据渲染"组NaN"/data-group="NaN"（L-2，当前 SQLite 整数列不触发，纯防御）
+            tbody.innerHTML = clusterItems(items).map(({ it, role, isContext, isLast, hasXsys, hasRework, rooted }) => {
                 const groupId = Number(it.correction_group_id), rowId = Number(it.id);
-                const isReworkChild = it.rework_parent_id != null;   // 归档单返工子单（Commit D）
                 const reworkSeq = Number(it.rework_seq);
-                let groupBadge = '', dataGroup = '', reworkFlag = '';
-                if (it.correction_group_id != null && Number.isFinite(groupId)) {
-                    dataGroup = ` data-group="${groupId}"`;
-                    if (isReworkChild && Number.isFinite(reworkSeq)) {
-                        // 返工子单：彩色「返工·第N次」徽章（替代「子单·组N」）；root 扁平挂载靠 data-group=组主单 联动（与跨系统组同机制，悬浮整组高亮）
-                        const rwClass = reworkSeq >= 3 ? 'rw-3' : (reworkSeq === 2 ? 'rw-2' : 'rw-1');
-                        groupBadge = `<div class="rework-badge ${rwClass}">返工·第<span class="grp-num">${reworkSeq}</span>次</div>`;
-                    } else if (groupId === rowId) {
-                        // 主单/原单：M-1 区分——纯返工组（组内非返工成员仅 1=本单自身 且 已派生返工）→「原单·组」；否则跨系统组→「主单·组」。
-                        //   group_nonrework_count 来自后端子查询（COUNT 同组 rework_parent_id IS NULL），不受列表可见性/作废过滤 → admin 与受限视角恒一致（修对抗审 M-1 误判：旧版用 allItems 计数在非 admin 跨系统视角会把已返工主单误标原单）。
-                        groupBadge = (Number(it.group_nonrework_count) <= 1 && Number(it.rework_child_count) > 0)
-                            ? `<div class="corr-group-badge g-origin">原单·组<span class="grp-num">${groupId}</span></div>`
-                            : `<div class="corr-group-badge g-primary">主单·组<span class="grp-num">${groupId}</span></div>`;
-                    } else {
-                        groupBadge = `<div class="corr-group-badge g-child">子单·组<span class="grp-num">${groupId}</span></div>`;
+                // L-2：脏 id 兜底——非有限 id 显示 '?' 且不挂 openDrawer（见下方 onclickAttr），避免 openDrawer(NaN)
+                let groupBadge = '', reworkFlag = '', idCell = Number.isFinite(rowId) ? `${rowId}` : '?';
+                const trClass = [];
+                if (role === 'xsys') {
+                    // 跨系统子单：紫「子单·组N」角色徽章（表身份）+ 琥珀底/条（表分组类型）；rooted 时缩进成树枝（M-4：无根则平铺不画孤儿枝）
+                    groupBadge = `<div class="corr-group-badge g-child">子单·组<span class="grp-num">${Number.isFinite(groupId) ? groupId : '?'}</span></div>`;
+                    if (rooted) trClass.push('corr-row-child');
+                    trClass.push('corr-bg-amber', 'corr-bar-amber');
+                } else if (role === 'rework') {
+                    // 返工子单：红色「原单号_序号」编号（如 99_1）取代真实 #id（点击仍用真实 id）；M-2 title 提示真实父单/链根（深层返工挂在跨系统子单上时可辨）；红底/条；rooted 时缩进成树枝
+                    const pid = Number(it.rework_parent_id), rid = Number(it.rework_root_id);
+                    const rwTitle = (Number.isFinite(pid) && Number.isFinite(rid)) ? ` title="返工自 #${pid} · 链根 #${rid}"` : '';
+                    idCell = (Number.isFinite(rid) && Number.isFinite(reworkSeq))
+                        ? `<span class="corr-rework-num"${rwTitle}>${rid}_${reworkSeq}</span>`
+                        : `<span class="corr-rework-num"${rwTitle}>${Number.isFinite(rowId) ? rowId : '?'}</span>`;
+                    if (rooted) trClass.push('corr-row-child');
+                    trClass.push('corr-bg-red', 'corr-bar-red');
+                } else if (role === 'root') {
+                    // 配色正交（L-1）：角色徽章沿用蓝(主单)/紫(子单)表「身份」，树左色条/底色才是琥珀(跨系统)/红(返工)表「分组类型」——配色对调只动色条/底色，不动徽章色。
+                    //   有跨系统兄弟 → 蓝「主单·组N」+ 琥珀左条；纯返工组 → 无徽章 + 红左条（中性底，用户拍板 B）；
+                    //   混合组（既跨系统又有返工）→ 蓝徽 + 琥珀左条，返工的红体现在下方枝行（用户拍板 C：按关系各自上色）。
+                    if (hasXsys) {
+                        groupBadge = `<div class="corr-group-badge g-primary">主单·组<span class="grp-num">${Number.isFinite(groupId) ? groupId : '?'}</span></div>`;
+                        trClass.push('corr-bar-amber');
+                    } else if (hasRework) {
+                        trClass.push('corr-bar-red');
                     }
+                    if (isContext) trClass.push('corr-row-context');   // 被筛选滤掉补显的根：灰显
                 }
-                // 「⟳ 有返工」标记：任意 rework_child_count>0 的单都标（含象限③被再次返工的返工子单——它对下游也是"被返工的原单"），对齐 §八字面「(rework_child_count||0)>0 → ⟳」；与 ID 列返工徽章不同列不冲突
+                if (isLast && rooted) trClass.push('corr-row-last');   // └ 连接线仅在成树枝(rooted)时有意义
+                // 「⟳ 有返工」标记：任意 rework_child_count>0 的单都标（含被再次返工的返工子单——对下游也是"被返工的原单"）
                 if (Number(it.rework_child_count) > 0) {
                     reworkFlag = `<span class="rework-flag" title="本单直接派生 ${Number(it.rework_child_count)} 张返工子单（递归链级总数见详情返工链）">⟳ 有返工</span>`;
                 }
+                const onclickAttr = Number.isFinite(rowId) ? ` onclick="openDrawer(${rowId})"` : '';   // L-2：脏 id 不挂点击
                 return `
-                <tr onclick="openDrawer(${rowId})"${dataGroup}>
-                    <td style="color:#9ca3af; font-size:12px;">${rowId}${groupBadge}</td>
+                <tr${onclickAttr}${trClass.length ? ` class="${trClass.join(' ')}"` : ''}>
+                    <td style="color:#9ca3af; font-size:12px;">${idCell}${groupBadge}</td>
                     <td><span class="status-badge s-${statusClass(it.status)}">${escapeHtml(STATUS_LABELS[it.status] || it.status)}</span>${isOverdue(it) ? '<span class="flag-overdue">已超预计</span>' : ''}${isBacklog(it) ? '<span class="flag-backlog">积压</span>' : ''}${isUnarchivedBacklog(it) ? '<span class="flag-backlog">超7天未归档</span>' : ''}${it.status === 'ARCHIVED' && it.closure_type === 'admin_closure' ? '<span class="flag-backlog" style="color:#1d4ed8;">行政闭环</span>' : ''}${reworkFlag}</td>
                     <td><span class="type-tag t-${it.correction_type === 'batch' ? 'batch' : 'single'}">${it.correction_type === 'batch' ? '批量' : '单'}</span></td>
                     <td style="text-align:center;">${it.correction_count != null ? it.correction_count : (it.correction_type === 'single' ? 1 : '-')}</td>
@@ -817,27 +895,6 @@
                 </tr>
             `;
             }).join('');
-            bindCorrGroupHover();
-        }
-
-        // 同组悬浮联动高亮（P2 §分组标记）：悬浮某行时，同 data-group 的所有行整体高亮（#fff1f2 底+左深红条）。
-        //   事件委托绑 tbody（绑定标志挂 tbody.dataset 而非全局变量——若未来整体替换 corrTableBody，新元素无标志会自动重绑，codex 审 L-1）。
-        //   relatedTarget 过滤（codex 审 M-1）：mouseover/mouseout 冒泡，鼠标在同一行内子元素间移动会触发——
-        //   若来去仍在同一 tr 内则跳过 toggle，避免高亮"移除再加回"的闪烁。
-        function bindCorrGroupHover() {
-            const tbody = document.getElementById('corrTableBody');
-            if (!tbody || tbody.dataset.groupHoverBound === '1') return;
-            tbody.dataset.groupHoverBound = '1';
-            const toggle = (e, on) => {
-                const tr = e.target.closest('tr');
-                if (!tr || !tr.dataset.group) return;
-                // 跨同一行内部移动（relatedTarget 仍在本 tr 内）→ 不切换，防闪烁
-                const rel = e.relatedTarget && e.relatedTarget.closest && e.relatedTarget.closest('tr');
-                if (rel === tr) return;
-                tbody.querySelectorAll(`tr[data-group="${tr.dataset.group}"]`).forEach(row => row.classList.toggle('corr-group-hl', on));
-            };
-            tbody.addEventListener('mouseover', e => toggle(e, true));
-            tbody.addEventListener('mouseout', e => toggle(e, false));
         }
 
         function sysLabel(it) {
