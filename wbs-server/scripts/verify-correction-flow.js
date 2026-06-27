@@ -59,14 +59,9 @@ async function epComplete(id, actor, { fileCount = 0, batchNote = null } = {}) {
     if (!isAdmin && !isAssignee) throw new EndpointError(403, 'NOT_AUTHORIZED_FOR_TRANSITION', '无权标完成');
     let persisted = [];
     try {
-        if (row.correction_type === 'single') {
-            if (fileCount === 0) throw new EndpointError(400, 'FIX_PROOF_REQUIRED', '单数据修正标完成必须上传结果证明截图');
-            persisted = await persistAttachments(id, actor, fileCount);
-            return await correctionTransition(id, 'IN_PROGRESS', 'FIXED', actor, {});
-        } else {
-            if (fileCount > 0) persisted = await persistAttachments(id, actor, fileCount);
-            return await correctionTransition(id, 'IN_PROGRESS', 'FIXED', actor, { batch_completion_note: batchNote || '' });
-        }
+        // v1.97.1：普通 single/batch 同口径——截图可选（仅返工须上传，flow 不测返工）、文字必填在 transition 校验
+        if (fileCount > 0) persisted = await persistAttachments(id, actor, fileCount);
+        return await correctionTransition(id, 'IN_PROGRESS', 'FIXED', actor, { batch_completion_note: batchNote || '' });
     } catch (e) { await rollbackPersisted(persisted); throw e; }
 }
 async function epResubmit(id, actor, { fileCount = 0, resubmitNote = null, uploadCreatedAt = null } = {}) {
@@ -76,14 +71,9 @@ async function epResubmit(id, actor, { fileCount = 0, resubmitNote = null, uploa
     if (!isAdmin && !isAssignee) throw new EndpointError(403, 'NOT_AUTHORIZED_FOR_TRANSITION', '无权重修提交');
     let persisted = [];
     try {
-        if (row.correction_type === 'single') {
-            if (fileCount === 0) throw new EndpointError(400, 'FIX_PROOF_REQUIRED', '单数据修正重修提交必须上传本次新增结果证明');
-            persisted = await persistAttachments(id, actor, fileCount, uploadCreatedAt);   // ⭐RC-M1：只传本次 id
-            return await correctionTransition(id, row.status, 'REFIXED', actor, { new_fix_proof_attachment_ids: persisted });
-        } else {
-            if (fileCount > 0) persisted = await persistAttachments(id, actor, fileCount, uploadCreatedAt);
-            return await correctionTransition(id, row.status, 'REFIXED', actor, { resubmit_note: resubmitNote || '' });
-        }
+        // v1.97.1：普通 single/batch 同口径——截图可选（传了走新增性校验）、文字必填在 transition 校验
+        if (fileCount > 0) persisted = await persistAttachments(id, actor, fileCount, uploadCreatedAt);   // ⭐RC-M1：只传本次 id
+        return await correctionTransition(id, row.status, 'REFIXED', actor, { new_fix_proof_attachment_ids: persisted, resubmit_note: resubmitNote || '' });
     } catch (e) { await rollbackPersisted(persisted); throw e; }
 }
 async function epAddAttachments(id, actor, { fileCount = 1 } = {}) {
@@ -142,15 +132,14 @@ async function main() {
     assert.strictEqual(ra.dev_estimated_at, '2026-06-20 12:00:00', 'dev_estimated_at 归一化');
     ok('reply-estimate：非法日期拒 / 非本单开发拒 / 合法→IN_PROGRESS + 归一化（真实 transition）');
 
-    // [2] complete single：无文件拒 / 非本单开发拒 / 开发本人上传 fix_proof→FIXED + count=1
-    await expectErr(epComplete(a, DEV, { fileCount: 0 }), 'FIX_PROOF_REQUIRED', 'complete single 无文件');
-    await expectErr(epComplete(a, STRANGER, { fileCount: 1 }), 'NOT_AUTHORIZED_FOR_TRANSITION', '非本单开发标完成');
-    await epComplete(a, DEV, { fileCount: 1 });
+    // [2] complete 普通 single（v1.97.1 留证放开）：文字必填 / 非本单开发拒 / 文字+无截图→FIXED + count=1（截图可选）
+    await expectErr(epComplete(a, DEV, { fileCount: 0 }), 'SINGLE_NOTE_REQUIRED', 'complete single 无完成说明');
+    await expectErr(epComplete(a, STRANGER, { fileCount: 0, batchNote: '已修正完成口径' }), 'NOT_AUTHORIZED_FOR_TRANSITION', '非本单开发标完成');
+    await epComplete(a, DEV, { fileCount: 0, batchNote: '已修正合同金额为 100' });   // 截图可选：不传也放行
     const r2 = await get('SELECT status, submission_count FROM correction_requests WHERE id=?', [a]);
     assert.strictEqual(r2.status, 'FIXED', 'complete→FIXED');
     assert.strictEqual(r2.submission_count, 1, 'count=1');
-    assert.strictEqual((await get(`SELECT COUNT(*) c FROM correction_attachments WHERE correction_request_id=? AND attachment_type='fix_proof'`, [a])).c, 1, '1 个 fix_proof 落库');
-    ok('complete single：无文件拒 / 非本单开发拒 / 开发上传 fix_proof→FIXED + count=1 + 附件落库');
+    ok('complete 普通 single（v1.97.1）：无文字拒 SINGLE_NOTE_REQUIRED / 非本单开发拒 / 文字+无截图→FIXED + count=1');
 
     // [3] complete batch：无 note 拒 / 有 note→FIXED（无附件要求）
     const b = await createCorrection({ correction_type: 'batch' });
@@ -160,17 +149,20 @@ async function main() {
     assert.strictEqual((await get('SELECT status FROM correction_requests WHERE id=?', [b])).status, 'FIXED', 'batch→FIXED 无附件');
     ok('complete batch：无 note 拒 / 有 note→FIXED（无附件要求）');
 
-    // [4] ⭐RC-M1 resubmit single：无文件拒 / 只传本次上传 id→REFIXED + count+1（新增性用未来时间戳隔离同秒）
-    await expectErr(epResubmit(a, DEV, { fileCount: 0 }), 'FIX_PROOF_REQUIRED', 'resubmit single 无文件');
-    await epResubmit(a, DEV, { fileCount: 1, uploadCreatedAt: '2099-01-01 00:00:00' });
+    // [4] resubmit 普通 single（v1.97.1 留证放开）：重修说明必填 / 文字+无截图→REFIXED + count+1（截图可选，新增性仅在传截图时校验）
+    await expectErr(epResubmit(a, DEV, { fileCount: 0 }), 'SINGLE_RESUBMIT_NOTE_REQUIRED', 'resubmit single 无说明');
+    await epResubmit(a, DEV, { fileCount: 0, resubmitNote: '本次按业务方口径重新核对' });   // 截图可选：不传也放行
     const r4 = await get('SELECT status, submission_count FROM correction_requests WHERE id=?', [a]);
     assert.strictEqual(r4.status, 'REFIXED', 'resubmit→REFIXED');
     assert.strictEqual(r4.submission_count, 2, 'count+1=2');
-    ok('⭐RC-M1 resubmit single：无文件拒 / 只传本次上传 id→REFIXED + count+1（本次 id 必属本单+新增性满足）');
+    ok('resubmit 普通 single（v1.97.1）：无说明拒 SINGLE_RESUBMIT_NOTE_REQUIRED / 文字+无截图→REFIXED + count+1');
 
-    // [5] RC-M1 反证：历史旧 fix_proof（created_at≤fixed_at）若被传会被新增性拒
-    const oldFix = await get(`SELECT id FROM correction_attachments WHERE correction_request_id=? AND attachment_type='fix_proof' ORDER BY id LIMIT 1`, [a]);
-    await expectErr(correctionTransition(a, 'REFIXED', 'REFIXED', DEV, { new_fix_proof_attachment_ids: [oldFix.id] }), 'FIX_PROOF_REQUIRED', '误传历史旧附件 id');
+    // [5] 新增性兜底仍守：可选传截图时若传历史旧 fix_proof（created_at≤baseline）→ FIX_PROOF_REQUIRED（含 resubmit_note 越过文字闸门后命中新增性）
+    const c5fix = await createCorrection({ correction_type: 'single' });
+    await toInProgress(c5fix);
+    await epComplete(c5fix, DEV, { fileCount: 1, batchNote: '首次已修正完成' });   // 首次带截图，建立 baseline=fixed_at
+    const oldFix = await get(`SELECT id FROM correction_attachments WHERE correction_request_id=? AND attachment_type='fix_proof' ORDER BY id LIMIT 1`, [c5fix]);
+    await expectErr(correctionTransition(c5fix, 'FIXED', 'REFIXED', DEV, { new_fix_proof_attachment_ids: [oldFix.id], resubmit_note: '本次重新核对' }), 'FIX_PROOF_REQUIRED', '误传历史旧附件 id（越过文字闸门命中新增性）');
     ok('RC-M1 反证：误传历史旧 fix_proof id（created_at≤baseline）被新增性闸门拒 → 证明"只传本次上传 id"是必要前置');
 
     // [6] resubmit batch：无 note 拒 / 有附件但 note 空→拒+附件回滚（L-3）/ 有 note→REFIXED + 写 history.reason
@@ -188,7 +180,7 @@ async function main() {
     const c = await createCorrection({ correction_type: 'single' });
     await toInProgress(c);
     await run(`INSERT INTO correction_attachments (correction_request_id, attachment_type, file_name, uploaded_by, uploaded_by_name) VALUES (?, 'fix_proof', 'pre.png', 5, '开发王')`, [c]);
-    await correctionTransition(c, 'IN_PROGRESS', 'FIXED', DEV, {});
+    await correctionTransition(c, 'IN_PROGRESS', 'FIXED', DEV, { batch_completion_note: '已修正完成口径说明' });   // v1.97.1：普通 single 文字必填
     const before = (await get('SELECT COUNT(*) c FROM correction_attachments WHERE correction_request_id=?', [c])).c;
     await expectErr(epComplete(c, DEV, { fileCount: 2 }), 'INVALID_TRANSITION', 'FIXED 单再 complete（FIXED→FIXED 非法流转）');
     const after = (await get('SELECT COUNT(*) c FROM correction_attachments WHERE correction_request_id=?', [c])).c;
@@ -200,7 +192,7 @@ async function main() {
     await toInProgress(d);
     await expectErr(epAddAttachments(d, DEV, { fileCount: 1 }), 'INVALID_STATE_FOR_ATTACHMENT', 'IN_PROGRESS 补充附件（防完成前伪造留证）');
     await run(`INSERT INTO correction_attachments (correction_request_id, attachment_type, file_name, uploaded_by, uploaded_by_name) VALUES (?, 'fix_proof', 'x.png', 5, '开发王')`, [d]);
-    await correctionTransition(d, 'IN_PROGRESS', 'FIXED', DEV, {});
+    await correctionTransition(d, 'IN_PROGRESS', 'FIXED', DEV, { batch_completion_note: '已修正完成口径说明' });   // v1.97.1：普通 single 文字必填
     const cntBefore = (await get('SELECT submission_count FROM correction_requests WHERE id=?', [d])).submission_count;
     await epAddAttachments(d, DEV, { fileCount: 2 });
     const rd = await get('SELECT status, submission_count FROM correction_requests WHERE id=?', [d]);
@@ -222,10 +214,10 @@ async function main() {
     const f = await createCorrection({ correction_type: 'single' });
     await toInProgress(f);
     await run(`INSERT INTO correction_attachments (correction_request_id, attachment_type, file_name, uploaded_by, uploaded_by_name) VALUES (?, 'fix_proof', 'f1.png', 5, '开发王')`, [f]);
-    await correctionTransition(f, 'IN_PROGRESS', 'FIXED', DEV, {});
+    await correctionTransition(f, 'IN_PROGRESS', 'FIXED', DEV, { batch_completion_note: '已修正完成口径说明' });   // v1.97.1：普通 single 文字必填
     const fFixedAt = (await get('SELECT fixed_at FROM correction_requests WHERE id=?', [f])).fixed_at;
     const sameSec = await run(`INSERT INTO correction_attachments (correction_request_id, attachment_type, file_name, uploaded_by, uploaded_by_name, created_at) VALUES (?, 'fix_proof', 'same.png', 5, '开发王', ?)`, [f, fFixedAt]);
-    await expectErr(correctionTransition(f, 'FIXED', 'REFIXED', DEV, { new_fix_proof_attachment_ids: [sameSec.lastID] }), 'FIX_PROOF_REQUIRED', '同秒 created_at==baseline 误拒');
+    await expectErr(correctionTransition(f, 'FIXED', 'REFIXED', DEV, { new_fix_proof_attachment_ids: [sameSec.lastID], resubmit_note: '本次重新核对口径' }), 'FIX_PROOF_REQUIRED', '同秒 created_at==baseline 误拒（含说明越过文字闸门命中新增性）');
     ok('M-2 已知限制（诚实记录非掩盖）：同秒 created_at==baseline 被新增性闸门拒；真实环境 resubmit 在 FIXED 后分钟级不触发');
 
     // [11] D1 reject 薄封装：多源态 + R-1
@@ -240,7 +232,7 @@ async function main() {
     const g3 = await createCorrection({ correction_type: 'single' });
     await toInProgress(g3);
     await run(`INSERT INTO correction_attachments (correction_request_id, attachment_type, file_name, uploaded_by, uploaded_by_name) VALUES (?, 'fix_proof', 'g.png', 5, '开发王')`, [g3]);
-    await correctionTransition(g3, 'IN_PROGRESS', 'FIXED', DEV, {});
+    await correctionTransition(g3, 'IN_PROGRESS', 'FIXED', DEV, { batch_completion_note: '已修正完成口径说明' });   // v1.97.1：普通 single 文字必填
     await expectErr(epReject(g3, ADMIN, 'x'), 'INVALID_TRANSITION', 'reject FIXED（R-1 完成态不可拒）');
     ok('D1 reject：无 reason 拒 / PENDING_ASSIGN+IN_PROGRESS 多源态→REJECTED / FIXED→INVALID_TRANSITION（R-1）');
 

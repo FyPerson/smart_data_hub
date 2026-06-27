@@ -68,7 +68,7 @@
         .corr-table td.ellip { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
         /* 类型标签（单/批量） */
-        .type-tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 500; }
+        .type-tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 500; white-space: nowrap; }
         .type-tag.t-single { background: #dbeafe; color: #1d4ed8; }
         .type-tag.t-batch { background: #fef3c7; color: #92400e; }
 
@@ -116,6 +116,8 @@
         .corr-table tbody tr.corr-row-context td { color: #9ca3af; font-style: italic; }
         /* ID 列（第一列）收窄：徽章瘦身后两侧 padding 也收紧（14→8px），避免组号徽章把 # 列撑太宽 */
         .corr-table th:first-child, .corr-table td:first-child { padding-left: 8px; padding-right: 8px; }
+        /* ID 列序号+徽章同行不换行（v1.97.1）：td 默认可换行，子单树缩进(padding-left:30px)+序号+徽章挤不下会断行；nowrap 让列按 table-auto 稍微加宽到恰好容纳，子单与主单一致同行 */
+        .corr-table td:first-child { white-space: nowrap; }
 
         /* 详情区块 */
         .detail-section { margin-bottom: 18px; }
@@ -345,8 +347,8 @@
                 <div class="form-group">
                     <label>修正类型 <span class="req">*</span></label>
                     <div class="radio-row">
-                        <label><input type="radio" name="corrType" value="single" checked onchange="toggleCorrectionCountByType()"> 单数据修正（标完成需传结果证明截图）</label>
-                        <label><input type="radio" name="corrType" value="batch" onchange="toggleCorrectionCountByType()"> 批量数据修正（标完成填文字说明）</label>
+                        <label><input type="radio" name="corrType" value="single" checked onchange="toggleCorrectionCountByType()"> 单数据修正</label>
+                        <label><input type="radio" name="corrType" value="batch" onchange="toggleCorrectionCountByType()"> 批量数据修正</label>
                     </div>
                 </div>
                 <div class="form-row">
@@ -492,10 +494,10 @@
                 <input type="hidden" id="completeCorrId">
                 <div id="completeReworkHint" style="display:none; font-size:12px; color:#6d28d9; background:#f3e8ff; border:1px solid #ddd0f5; border-radius:6px; padding:8px 10px; margin-bottom:10px;">🔄 返工子单：结果证明截图 + 文字说明（≥5 字）均必填，请补充本次实际改了什么。</div>
                 <div class="form-group" id="completeSingleGroup">
-                    <label>结果证明截图 <span class="req">*</span>（单数据修正必传）</label>
+                    <label id="completeSingleProofLabel">结果证明截图（选填）</label>
                     <input type="file" id="formCompleteFiles" multiple accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.pdf,.xlsx,.xls">
-                    <label style="margin-top:8px;">完成说明（可补充对截图的解释，选填）</label>
-                    <textarea id="formCompleteSingleNote" rows="3" maxlength="500" placeholder="如：原值因业务方口径调整改为 X，已同步知会财务"></textarea>
+                    <label style="margin-top:8px;">完成说明 <span class="req">*</span>（必填，至少 5 字）</label>
+                    <textarea id="formCompleteSingleNote" rows="3" maxlength="500" placeholder="请说明实际修正了什么（避免「1」「完成」等敷衍）"></textarea>
                 </div>
                 <div class="form-group" id="completeBatchGroup" style="display:none;">
                     <label>完成说明 <span class="req">*</span>（批量数据修正必填，至少 5 字）</label>
@@ -517,9 +519,9 @@
                 <div style="font-size:12px; color:#6b7280; margin-bottom:8px;">业务方异议/拉群讨论后重新修正，提交本次新的结果证明。</div>
                 <div id="resubmitReworkHint" style="display:none; font-size:12px; color:#6d28d9; background:#f3e8ff; border:1px solid #ddd0f5; border-radius:6px; padding:8px 10px; margin-bottom:10px;">🔄 返工子单：结果证明截图 + 本次说明（≥5 字）均必填。</div>
                 <div class="form-group" id="resubmitSingleGroup">
-                    <label>本次新增结果证明 <span class="req">*</span>（单数据修正必传）</label>
+                    <label id="resubmitSingleProofLabel">本次新增结果证明（选填）</label>
                     <input type="file" id="formResubmitFiles" multiple accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.pdf,.xlsx,.xls">
-                    <label style="margin-top:8px;">本次重修说明（选填）</label>
+                    <label style="margin-top:8px;">本次重修说明 <span class="req">*</span>（必填）</label>
                     <textarea id="formResubmitSingleNote" rows="3" maxlength="500" placeholder="本次重修做了什么、上次为何没过"></textarea>
                 </div>
                 <div class="form-group" id="resubmitBatchGroup" style="display:none;">
@@ -1585,6 +1587,10 @@
             document.getElementById('formBatchNote').value = '';
             document.getElementById('formCompleteBatchFiles').value = '';
             document.getElementById('completeReworkHint').style.display = isRework ? 'block' : 'none';   // 返工双必填提示（Commit D §六）
+            // 截图要求随返工动态标（v1.97.1）：返工 single 必传 / 普通 single 选填（文字始终必填，标签静态）
+            document.getElementById('completeSingleProofLabel').innerHTML = isRework
+                ? '结果证明截图 <span class="req">*</span>（返工子单必传）'
+                : '结果证明截图（选填）';
             document.getElementById('completeModal').dataset.type = type;
             document.getElementById('completeModal').dataset.rework = isRework ? '1' : '';
             document.getElementById('completeModal').classList.add('open');
@@ -1604,11 +1610,18 @@
                 for (const f of bf) fd.append('files', f);
             } else {
                 const files = document.getElementById('formCompleteFiles').files;
-                if (!files.length) return showToast('单数据修正须上传结果证明截图', 'error');
-                for (const f of files) fd.append('files', f);
                 const note = document.getElementById('formCompleteSingleNote').value.trim();
-                if (isRework && Array.from(note).length < 5) return showToast('返工子单完成说明至少 5 字（返工双必填）', 'error');   // 返工 single 文字必填≥5（普通 single 选填）
-                if (note) fd.append('batch_completion_note', note);   // 完成说明选填（复用 batch_completion_note）；返工时上面已强制非空
+                if (isRework) {
+                    // 返工 single：双必填（截图+文字≥5），前置校验防 persist→rollback 丢上传图
+                    if (!files.length) return showToast('返工子单完成须上传结果证明截图（返工双必填）', 'error');
+                    if (Array.from(note).length < 5) return showToast('返工子单完成说明至少 5 字（返工双必填）', 'error');
+                } else {
+                    // 普通 single（v1.97.1 放开留证）：文字必填≥5，截图可选
+                    if (!note) return showToast('单数据修正须填写完成说明', 'error');
+                    if (Array.from(note).length < 5) return showToast('单数据修正完成说明至少 5 字，请说明实际修正内容', 'error');
+                }
+                for (const f of files) fd.append('files', f);
+                if (note) fd.append('batch_completion_note', note);   // 复用 batch_completion_note 字段；single 上面已强制非空
             }
             const btn = document.getElementById('btnSubmitComplete'); btn.disabled = true;
             try {
@@ -1645,6 +1658,10 @@
             document.getElementById('formResubmitNote').value = '';
             document.getElementById('formResubmitBatchFiles').value = '';
             document.getElementById('resubmitReworkHint').style.display = isRework ? 'block' : 'none';   // 返工双必填提示（Commit D §六）
+            // 截图要求随返工动态标（v1.97.1）：返工 single 必传 / 普通 single 选填（重修说明始终必填，标签静态）
+            document.getElementById('resubmitSingleProofLabel').innerHTML = isRework
+                ? '本次新增结果证明 <span class="req">*</span>（返工子单必传）'
+                : '本次新增结果证明（选填）';
             document.getElementById('resubmitModal').dataset.type = type;
             document.getElementById('resubmitModal').dataset.rework = isRework ? '1' : '';
             document.getElementById('resubmitModal').classList.add('open');
@@ -1664,11 +1681,17 @@
                 for (const f of bf) fd.append('files', f);
             } else {
                 const files = document.getElementById('formResubmitFiles').files;
-                if (!files.length) return showToast('单数据修正重修须上传本次新增结果证明', 'error');
-                for (const f of files) fd.append('files', f);
                 const note = document.getElementById('formResubmitSingleNote').value.trim();
-                if (isRework && Array.from(note).length < 5) return showToast('返工子单重修说明至少 5 字（返工双必填）', 'error');
-                if (note) fd.append('resubmit_note', note);   // 本次重修说明选填（对称 batch）；返工时上面已强制非空
+                if (isRework) {
+                    // 返工 single：双必填（截图+文字≥5），前置防 persist→rollback 丢图
+                    if (!files.length) return showToast('返工子单重修须上传本次结果证明截图（返工双必填）', 'error');
+                    if (Array.from(note).length < 5) return showToast('返工子单重修说明至少 5 字（返工双必填）', 'error');
+                } else {
+                    // 普通 single（v1.97.1 放开留证）：重修说明必填(非空)，截图可选
+                    if (!note) return showToast('单数据修正重修须填写本次重修说明', 'error');
+                }
+                for (const f of files) fd.append('files', f);
+                if (note) fd.append('resubmit_note', note);   // single 上面据返工/普通已强制非空
             }
             const btn = document.getElementById('btnSubmitResubmit'); btn.disabled = true;
             try {

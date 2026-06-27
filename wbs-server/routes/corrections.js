@@ -848,17 +848,19 @@ async function correctionTransition(requestId, expectedFromStatus, toStatus, act
                     setFrags.push('batch_completion_note = ?');
                     setParams.push(note);
                 } else {
-                    // single：历史存在合规 fix_proof（H-2，uploaded_by=assigned_to OR admin；helper 与返工 batch 共用同口径）
-                    if (!(await correctionHasCompliantFixProof(requestId, row.assigned_to))) {
-                        throw new CorrectionTransitionError(400, 'FIX_PROOF_REQUIRED', '单数据修正标完成必须上传结果证明截图');
-                    }
                     const snote = (typeof payload.batch_completion_note === 'string' ? payload.batch_completion_note.trim() : '');
-                    // 返工 single：文字必填（≥5 字，对齐 batch 防敷衍口径）；普通 single 保持选填（行为不变）
                     if (isRework) {
+                        // 返工 single：双必填不变（§5.1 Commit C 留证闸门）——截图必传（H-2 合规 fix_proof）+ 文字必填≥5 防敷衍
+                        if (!(await correctionHasCompliantFixProof(requestId, row.assigned_to))) {
+                            throw new CorrectionTransitionError(400, 'FIX_PROOF_REQUIRED', '返工单标完成必须上传结果证明截图');
+                        }
                         if (!snote) throw new CorrectionTransitionError(400, 'REWORK_COMPLETION_NOTE_REQUIRED', '返工单标完成必须填写本次修正说明');
                         if (Array.from(snote).length < 5) throw new CorrectionTransitionError(400, 'REWORK_COMPLETION_NOTE_TOO_SHORT', '返工修正说明至少 5 字，请说明本次实际修正内容（避免「1」「完成」等敷衍）');
+                    } else {
+                        // 普通 single（v1.97.1 放开留证）：对齐普通 batch——截图改可选（不再强制 fix_proof）+ 文字必填≥5 防敷衍。返工 single 仍双必填（上分支不变，不外溢）。
+                        if (!snote) throw new CorrectionTransitionError(400, 'SINGLE_NOTE_REQUIRED', '单数据修正标完成必须填写完成说明');
+                        if (Array.from(snote).length < 5) throw new CorrectionTransitionError(400, 'SINGLE_NOTE_TOO_SHORT', '单数据修正完成说明至少 5 字，请说明实际修正内容（避免「1」「完成」等敷衍）');
                     }
-                    // 完成说明（普通 single 选填 / 返工 single 上面已强制非空≥5）：non-empty 才写，空则保持 NULL
                     if (snote.length > 500) throw new CorrectionTransitionError(400, 'COMPLETION_NOTE_TOO_LONG', '完成说明不超过 500 字');   // L-3：对齐 closure_reason 上限
                     if (snote) { setFrags.push('batch_completion_note = ?'); setParams.push(snote); }
                 }
@@ -888,26 +890,28 @@ async function correctionTransition(requestId, expectedFromStatus, toStatus, act
                     }
                     historyReason = rnote;   // §9 约束 33：resubmit_note 写 history.reason，不加主表字段
                 } else {
-                    // single：必须校验本次新增 fix_proof（HIGH-1 06 轮，§3.4——不能 COUNT 历史附件，否则可复用旧图绕过留证）
                     const ids = Array.isArray(payload.new_fix_proof_attachment_ids)
                         ? payload.new_fix_proof_attachment_ids.map(Number).filter((n) => Number.isInteger(n) && n > 0)
                         : [];
-                    if (ids.length === 0) throw new CorrectionTransitionError(400, 'FIX_PROOF_REQUIRED', '单数据修正重修提交必须上传本次新增结果证明');
-                    // codex 09 H-1：新增性兜底——附件须晚于上次完成时间 COALESCE(refixed_at, fixed_at)（与积压筛选同范式），防复用旧 fix_proof id 绕过留证
-                    //   （§3.4/§9.37）。基线 NULL 时 `created_at > NULL`=NULL → 0 行 → 安全拒（REFIXED 时 fixed_at 必非空）。helper 与返工 batch 共用同口径。
-                    const newnessBaseline = row.refixed_at || row.fixed_at || null;
-                    // 全部传入 id 必须命中合规（防夹带他单/error_proof/越权上传者/复用旧图）
-                    if (!(await correctionNewFixProofValid(requestId, ids, newnessBaseline, row.assigned_to))) throw new CorrectionTransitionError(400, 'FIX_PROOF_REQUIRED', '本次新增结果证明无效（须属本单 fix_proof、上传者为开发本人或 admin、且为本次完成后新增）');
-                    // 重修说明（普通 single 选填 / 返工 single 必填≥5）：非空则拼入 history.reason（§9 约束 33：不加主表字段，逐次留痕在历史）
                     const srnote = (typeof payload.resubmit_note === 'string' ? payload.resubmit_note.trim() : '');
+                    // codex 09 H-1：新增性基线——附件须晚于上次完成 COALESCE(refixed_at, fixed_at)（与积压筛选同范式），防复用旧 fix_proof id 绕过留证。
+                    const newnessBaseline = row.refixed_at || row.fixed_at || null;
                     if (isRework) {
+                        // 返工 single：双必填不变——本次新增 fix_proof 必传 + 新增性校验 + 文字必填≥5
+                        if (ids.length === 0) throw new CorrectionTransitionError(400, 'FIX_PROOF_REQUIRED', '返工单重修提交必须上传本次新增结果证明');
+                        if (!(await correctionNewFixProofValid(requestId, ids, newnessBaseline, row.assigned_to))) throw new CorrectionTransitionError(400, 'FIX_PROOF_REQUIRED', '本次新增结果证明无效（须属本单 fix_proof、上传者为开发本人或 admin、且为本次完成后新增）');
                         if (!srnote) throw new CorrectionTransitionError(400, 'REWORK_RESUBMIT_NOTE_REQUIRED', '返工单重修提交必须填写本次修正说明');
                         if (Array.from(srnote).length < 5) throw new CorrectionTransitionError(400, 'REWORK_RESUBMIT_NOTE_TOO_SHORT', '返工修正说明至少 5 字，请说明本次实际修正内容（避免「1」「完成」等敷衍）');
+                    } else {
+                        // 普通 single（v1.97.1 放开留证）：对齐普通 batch——截图改可选 + 重修说明必填(非空)。返工 single 仍双必填（上分支不变，不外溢）。
+                        // ⚠️ 有意差异（codex 78 M-1）：REFIXED 仅非空、不要求 ≥5，是【刻意镜像普通 batch REFIXED 口径】（batch FIXED≥5 / REFIXED 非空），对齐"和批量一样"用户拍板；非漏校验。若将来防敷衍要 ≥5，应连 batch 一起改（另立项）。
+                        if (!srnote) throw new CorrectionTransitionError(400, 'SINGLE_RESUBMIT_NOTE_REQUIRED', '单数据修正重修提交必须填写本次重修说明');
+                        // 截图可选；若传了仍校验新增性防复用旧图（留证质量不松——可不传，但传就得是本次真新增）
+                        if (ids.length > 0 && !(await correctionNewFixProofValid(requestId, ids, newnessBaseline, row.assigned_to))) throw new CorrectionTransitionError(400, 'FIX_PROOF_REQUIRED', '本次新增结果证明无效（须属本单 fix_proof、上传者为开发本人或 admin、且为本次完成后新增）');
                     }
                     if (srnote.length > 500) throw new CorrectionTransitionError(400, 'RESUBMIT_NOTE_TOO_LONG', '重修说明不超过 500 字');   // L-3：对齐 closure_reason 上限
-                    historyReason = srnote
-                        ? `重修提交（新增 ${ids.length} 张结果证明）：${srnote}`
-                        : `重修提交（新增 ${ids.length} 张结果证明）`;
+                    const proofPart = ids.length > 0 ? `（新增 ${ids.length} 张结果证明）` : '';
+                    historyReason = srnote ? `重修提交${proofPart}：${srnote}` : `重修提交${proofPart}`;
                 }
                 setFrags.push("refixed_at = datetime('now','localtime')", 'submission_count = submission_count + 1');
                 break;
@@ -2147,20 +2151,16 @@ router.post('/:id/complete', authenticateToken, requireCorrectionSchemaReady, co
         const isAssignee = Number(row.assigned_to) === actor.id && actor.id > 0;
         if (!isAdmin && !isAssignee) { correctionCleanupPending(req, id); return res.status(403).json({ error: '无权标完成（仅被指派开发本人或 admin）', code: 'NOT_AUTHORIZED_FOR_TRANSITION' }); }
         const files = Array.isArray(req.files) ? req.files : [];
-        if (row.correction_type === 'single') {
-            if (files.length === 0) { correctionCleanupPending(req, id); return res.status(400).json({ error: '单数据修正标完成必须上传结果证明截图', code: 'FIX_PROOF_REQUIRED' }); }
-            persisted = await correctionPersistAttachments(id, files, 'fix_proof', actor);
-            const r = await correctionTransition(id, 'IN_PROGRESS', 'FIXED', actor, { batch_completion_note: (req.body && req.body.batch_completion_note) || '' });   // 完成说明选填（single 复用 batch_completion_note 字段）
-            return res.json({ ok: true, id, status: r.toStatus, attachments: persisted });
-        } else {
-            // ⭐ 对抗审 M-1：返工 batch 标完成须本次上传 fix_proof（与 single 端点 files>0 对齐）——FIXED 闸门用「历史 COUNT」，
-            //   若放行无文件 complete，并发下无文件胜者可借用另一在途请求尚未回滚的 fix_proof 绕过 → 零留证。端点强制 files>0 后，
-            //   胜者必持有自身刚上传的 fix_proof（败者回滚不影响），借用前提被堵。普通 batch 不要求截图，分支零改动。
-            if (row.rework_parent_id != null && files.length === 0) { correctionCleanupPending(req, id); return res.status(400).json({ error: '返工批量修正标完成必须上传结果证明截图', code: 'FIX_PROOF_REQUIRED' }); }
-            if (files.length > 0) persisted = await correctionPersistAttachments(id, files, 'fix_proof', actor);
-            const r = await correctionTransition(id, 'IN_PROGRESS', 'FIXED', actor, { batch_completion_note: (req.body && req.body.batch_completion_note) || '' });
-            return res.json({ ok: true, id, status: r.toStatus, attachments: persisted });
+        // 留证闸门（v1.97.1 放开普通单留证）：仅返工单（rework_parent_id≠null）须本次上传 fix_proof——单/批量同口径，截图均可选。
+        //   ⭐ 对抗审 M-1：返工端点强制 files>0——FIXED 闸门用「历史 COUNT」，放行无文件 complete 会让并发无文件胜者借用另一在途未回滚 fix_proof 绕过零留证；
+        //   强制 files>0 后胜者必持自身刚上传图（败者回滚不影响），借用前提被堵。普通 single 改文字必填（见 transition FIXED 分支），普通 batch 截图本就可选。
+        if (row.rework_parent_id != null && files.length === 0) {
+            correctionCleanupPending(req, id);
+            return res.status(400).json({ error: '返工单标完成必须上传结果证明截图', code: 'FIX_PROOF_REQUIRED' });
         }
+        if (files.length > 0) persisted = await correctionPersistAttachments(id, files, 'fix_proof', actor);
+        const r = await correctionTransition(id, 'IN_PROGRESS', 'FIXED', actor, { batch_completion_note: (req.body && req.body.batch_completion_note) || '' });   // 文字要求由 transition 按 correction_type + rework_parent_id 校验（端点只负责返工截图本次上传前置）；single 复用 batch_completion_note 字段
+        return res.json({ ok: true, id, status: r.toStatus, attachments: persisted });
     } catch (e) {
         await correctionRollbackPersisted(persisted);   // transition 失败 → 回滚本次附件（失败的上传不留存）
         correctionCleanupPending(req, id);
@@ -2175,25 +2175,22 @@ router.post('/:id/resubmit', authenticateToken, requireCorrectionSchemaReady, co
     const id = parseInt(req.params.id, 10);
     let persisted = [];
     try {
-        const row = await dbGetAsync('SELECT id, status, correction_type, assigned_to FROM correction_requests WHERE id = ?', [id]);
+        const row = await dbGetAsync('SELECT id, status, correction_type, assigned_to, rework_parent_id FROM correction_requests WHERE id = ?', [id]);
         if (!row) { correctionCleanupPending(req, id); return res.status(404).json({ error: '修正单不存在', code: 'CORRECTION_NOT_FOUND' }); }
         const actor = correctionActor(req);
         const isAdmin = actor.role === 'admin';
         const isAssignee = Number(row.assigned_to) === actor.id && actor.id > 0;
         if (!isAdmin && !isAssignee) { correctionCleanupPending(req, id); return res.status(403).json({ error: '无权重修提交（仅被指派开发本人或 admin）', code: 'NOT_AUTHORIZED_FOR_TRANSITION' }); }
         const files = Array.isArray(req.files) ? req.files : [];
-        if (row.correction_type === 'single') {
-            if (files.length === 0) { correctionCleanupPending(req, id); return res.status(400).json({ error: '单数据修正重修提交必须上传本次新增结果证明', code: 'FIX_PROOF_REQUIRED' }); }
-            persisted = await correctionPersistAttachments(id, files, 'fix_proof', actor);
-            const newIds = persisted.map(a => a.id);   // ⭐RC-M1：只传本次上传 id（保证本次新增 + created_at>baseline）
-            const r = await correctionTransition(id, row.status, 'REFIXED', actor, { new_fix_proof_attachment_ids: newIds, resubmit_note: (req.body && req.body.resubmit_note) || '' });   // 重修说明选填（对称 batch，进 history.reason）
-            return res.json({ ok: true, id, status: r.toStatus, attachments: persisted });
-        } else {
-            if (files.length > 0) persisted = await correctionPersistAttachments(id, files, 'fix_proof', actor);
-            const newIds = persisted.map(a => a.id);   // 返工 batch 重修新增性校验需本次上传 id；普通 batch 分支不读，零行为变化
-            const r = await correctionTransition(id, row.status, 'REFIXED', actor, { new_fix_proof_attachment_ids: newIds, resubmit_note: (req.body && req.body.resubmit_note) || '' });
-            return res.json({ ok: true, id, status: r.toStatus, attachments: persisted });
+        // 留证闸门（v1.97.1）：仅返工单须本次上传新增 fix_proof；普通 single/batch 截图可选（普通 single 改重修说明必填，见 transition REFIXED 分支）。
+        if (row.rework_parent_id != null && files.length === 0) {
+            correctionCleanupPending(req, id);
+            return res.status(400).json({ error: '返工单重修提交必须上传本次新增结果证明', code: 'FIX_PROOF_REQUIRED' });
         }
+        if (files.length > 0) persisted = await correctionPersistAttachments(id, files, 'fix_proof', actor);
+        const newIds = persisted.map(a => a.id);   // ⭐RC-M1：只传本次上传 id（保证新增 + created_at>baseline）；空数组=无截图（普通单可选），transition 据 isRework 决定是否必校
+        const r = await correctionTransition(id, row.status, 'REFIXED', actor, { new_fix_proof_attachment_ids: newIds, resubmit_note: (req.body && req.body.resubmit_note) || '' });
+        return res.json({ ok: true, id, status: r.toStatus, attachments: persisted });
     } catch (e) {
         await correctionRollbackPersisted(persisted);
         correctionCleanupPending(req, id);

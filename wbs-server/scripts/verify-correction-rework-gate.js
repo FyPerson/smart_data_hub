@@ -2,7 +2,7 @@
 //   覆盖方案 §5.1（双必填不外溢 single）+ §5.2（error_proof 继承只读）+ §10.1 四组合 + M-4 探针。
 //   门逻辑全在 correctionTransition 的 FIXED/REFIXED case，故直接调 _internals.correctionTransition 测门
 //   （预插 correction_attachments 控制 uploaded_by/created_at），error_proof 继承走真实 GET /:id 端点。
-//   A 普通 single 不外溢（红线：文字仍选填）  B 普通 batch 不外溢（无需 fix_proof）
+//   A 普通 single 留证放开（v1.97.1：截图可选+文字必填，SINGLE_* 码与返工 REWORK_* 分支独立）  B 普通 batch 不外溢（无需 fix_proof）
 //   C 返工 single 双必填（截图必传 + 文字必填≥5）  D 返工 batch 双必填（重灾：新增 fix_proof 截图必传）
 //   E error_proof 继承（返工子单 detail 返组主单 error_proof）  F M-4 脏数据探针
 // 用法：node scripts/verify-correction-rework-gate.js
@@ -118,15 +118,18 @@ async function callGate(id, from, to, payload) {
   srv = app.listen(0); PORT = srv.address().port;
   const PAST = '2020-01-01 00:00:00';   // REFIXED 新增性基线（fixed_at），插的新 fix_proof created_at=now 必 > 此
 
-  // ════ A 普通 single 不外溢（红线：文字仍选填，行为不变）════
-  console.log('— A 普通 single 不外溢 —');
-  const a1 = await mkReq({ correction_type: 'single' }); await addFixProof(a1);
-  ok((await callGate(a1, 'IN_PROGRESS', 'FIXED', { batch_completion_note: '' })).ok, 'A1 普通 single 标完成 + fix_proof 存在 + 文字空 → 放行（完成说明仍选填，未被返工必填外溢）');
-  const a2 = await mkReq({ correction_type: 'single', status: 'FIXED', fixed_at: PAST });
-  const a2fp = await addFixProof(a2);
-  ok((await callGate(a2, 'FIXED', 'REFIXED', { new_fix_proof_attachment_ids: [a2fp], resubmit_note: '' })).ok, 'A2 普通 single 重修 + 新增 fix_proof + 重修说明空 → 放行（resubmit_note 仍选填，未被外溢）');
+  // ════ A 普通 single 留证放开（v1.97.1：截图可选 + 文字必填；用 SINGLE_* 码，与返工 REWORK_* 双必填分支独立不外溢）════
+  console.log('— A 普通 single 留证放开 —');
+  const a1 = await mkReq({ correction_type: 'single' });   // 无 fix_proof
+  ok((await callGate(a1, 'IN_PROGRESS', 'FIXED', { batch_completion_note: '已修正合同金额为 100' })).ok, 'A1 普通 single 标完成 + 无截图 + 文字≥5 → 放行（截图改可选，留证放开核心；对比返工 single 截图必传见 C4）');
+  const a2 = await mkReq({ correction_type: 'single' }); await addFixProof(a2);
+  ok((await callGate(a2, 'IN_PROGRESS', 'FIXED', { batch_completion_note: '' })).code === 'SINGLE_NOTE_REQUIRED', 'A2 普通 single 标完成 + 文字空 → 400 SINGLE_NOTE_REQUIRED（文字改必填，用 SINGLE_* 码非 REWORK_*，分支独立）');
   const a3 = await mkReq({ correction_type: 'single' }); await addFixProof(a3);
-  ok((await callGate(a3, 'IN_PROGRESS', 'FIXED', { batch_completion_note: '好' })).ok, 'A3 普通 single + fix_proof + 文字「好」(1 字) → 放行（返工 ≥5 防敷衍下限未外溢到普通 single，对抗审 NIT-1 钉死）');
+  ok((await callGate(a3, 'IN_PROGRESS', 'FIXED', { batch_completion_note: '好' })).code === 'SINGLE_NOTE_TOO_SHORT', 'A3 普通 single 文字「好」(1 字) → 400 SINGLE_NOTE_TOO_SHORT（与 batch ≥5 同口径防敷衍）');
+  const a4 = await mkReq({ correction_type: 'single', status: 'FIXED', fixed_at: PAST });
+  ok((await callGate(a4, 'FIXED', 'REFIXED', { resubmit_note: '本次按最新口径重新核对' })).ok, 'A4 普通 single 重修 + 无截图 + 文字 → 放行（截图可选）');
+  const a5 = await mkReq({ correction_type: 'single', status: 'FIXED', fixed_at: PAST });
+  ok((await callGate(a5, 'FIXED', 'REFIXED', { resubmit_note: '' })).code === 'SINGLE_RESUBMIT_NOTE_REQUIRED', 'A5 普通 single 重修 + 文字空 → 400 SINGLE_RESUBMIT_NOTE_REQUIRED（重修说明改必填）');
 
   // ════ B 普通 batch 不外溢（无需 fix_proof，行为不变）════
   console.log('— B 普通 batch 不外溢 —');
@@ -154,7 +157,7 @@ async function callGate(id, from, to, payload) {
   ok((await callGate(c3, 'IN_PROGRESS', 'FIXED', { batch_completion_note: '已重新修正明细完成' })).ok, 'C3 返工 single + fix_proof + 文字≥5 → 放行');
   const c4 = await mkRework({ correction_type: 'single' });   // 无 fix_proof
   const c4r = await callGate(c4, 'IN_PROGRESS', 'FIXED', { batch_completion_note: '已重新修正明细完成' });
-  ok(c4r.code === 'FIX_PROOF_REQUIRED', 'C4 返工 single 文字合规但无 fix_proof → 400 FIX_PROOF_REQUIRED（截图必传仍守，普通 single 同款门未削弱）');
+  ok(c4r.code === 'FIX_PROOF_REQUIRED', 'C4 返工 single 文字合规但无 fix_proof → 400 FIX_PROOF_REQUIRED（返工截图必传仍守；普通 single 已放开为可选，见 A1）');
   const c5 = await mkRework({ correction_type: 'single', status: 'FIXED', fixed_at: PAST }); const c5fp = await addFixProof(c5);
   const c5r = await callGate(c5, 'FIXED', 'REFIXED', { new_fix_proof_attachment_ids: [c5fp], resubmit_note: '' });
   ok(c5r.code === 'REWORK_RESUBMIT_NOTE_REQUIRED', 'C5 返工 single 重修 + 新增 fix_proof + 重修说明空 → 400 REWORK_RESUBMIT_NOTE_REQUIRED');
@@ -192,6 +195,13 @@ async function callGate(id, from, to, payload) {
   const g2 = await mkReq({ correction_type: 'batch' });   // 普通 batch IN_PROGRESS
   const g2r = await reqJson('POST', `/api/corrections/${g2}/complete`, { batch_completion_note: '已批量修正全部明细' }, ADMIN);
   ok(g2r.status === 200 && g2r.body.status === 'FIXED', 'G2 端点：普通 batch complete 无文件 → 200 FIXED（files>0 闸门未外溢普通 batch，且真实端点编排 happy-path）');
+  // G3/G4（codex 78 M-2）：端点层返工闸门依赖 rework_parent_id，补返工 single 端点缺文件拒 + 普通 single 端点无截图放行
+  const g3 = await mkRework({ correction_type: 'single' });   // IN_PROGRESS 返工 single（rework_parent_id 非空）
+  const g3r = await reqJson('POST', `/api/corrections/${g3}/complete`, { batch_completion_note: '返工已重新修正完成' }, ADMIN);   // 无 multipart → req.files=[]
+  ok(g3r.status === 400 && g3r.body.code === 'FIX_PROOF_REQUIRED', 'G3 端点：返工 single complete 无文件 → 400 FIX_PROOF_REQUIRED（返工截图必传端点前置守，依赖 rework_parent_id 唯一写入点 insertReworkChildCorrection + CHECK + 不变量）');
+  const g4 = await mkReq({ correction_type: 'single' });   // 普通 single IN_PROGRESS
+  const g4r = await reqJson('POST', `/api/corrections/${g4}/complete`, { batch_completion_note: '已修正完成口径说明' }, ADMIN);
+  ok(g4r.status === 200 && g4r.body.status === 'FIXED', 'G4 端点：普通 single complete 无文件 + 文字≥5 → 200 FIXED（v1.97.1 留证放开落到端点层，截图可选）');
 
   // ════ E error_proof 继承只读（§5.2）：返工子单 detail 返组主单 error_proof ════
   console.log('— E error_proof 继承（返工子单读组主单错误证明）—');

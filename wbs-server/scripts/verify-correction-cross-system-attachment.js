@@ -148,10 +148,10 @@ const assignDev = (id, devId) => dbRunAsync(`UPDATE correction_requests SET assi
   const upErr = await reqMultipart(`/api/corrections/${masterId}/attachments`, { attachment_type: 'error_proof' }, 'err.png', png, ADMIN);
   ok(upErr.status === 200 && upErr.body.attachment_type === 'error_proof', '前置：主单上传 error_proof 成功');
   // ── 主单系统1开发上传自己的 fix_proof（标完成）──
-  const upFixM = await reqMultipart(`/api/corrections/${masterId}/complete`, {}, 'fix_s1.png', png, DEV_S1);
+  const upFixM = await reqMultipart(`/api/corrections/${masterId}/complete`, { batch_completion_note: '系统1已修正完成口径' }, 'fix_s1.png', png, DEV_S1);
   ok(upFixM.status === 200 && upFixM.body.status === 'FIXED', '前置：主单系统1开发 complete 上传 fix_proof');
   // ── 子单系统2开发上传自己的 fix_proof（标完成）──
-  const upFixC = await reqMultipart(`/api/corrections/${childId}/complete`, {}, 'fix_s2.png', png, DEV_S2);
+  const upFixC = await reqMultipart(`/api/corrections/${childId}/complete`, { batch_completion_note: '系统2已修正完成口径' }, 'fix_s2.png', png, DEV_S2);
   ok(upFixC.status === 200 && upFixC.body.status === 'FIXED', '前置：子单系统2开发 complete 上传 fix_proof');
 
   // ① 核心：子单 GET 详情取到主单 error_proof（from_master=true）——本优化痛点
@@ -190,7 +190,7 @@ const assignDev = (id, devId) => dbRunAsync(`UPDATE correction_requests SET assi
   const soloId = solo.body.id;
   await reqMultipart(`/api/corrections/${soloId}/attachments`, { attachment_type: 'error_proof' }, 'solo_err.png', png, ADMIN);
   await assignDev(soloId, DEV_S1.id);
-  await reqMultipart(`/api/corrections/${soloId}/complete`, {}, 'solo_fix.png', png, DEV_S1);
+  await reqMultipart(`/api/corrections/${soloId}/complete`, { batch_completion_note: '独立单已修正完成' }, 'solo_fix.png', png, DEV_S1);
   const sD = await GET(soloId, ADMIN);
   const sErr = errOf(sD), sFix = fixOf(sD);
   ok(sErr.length === 1 && sErr[0].from_master === false && Number(sErr[0].source_correction_request_id) === soloId,
@@ -220,7 +220,7 @@ const assignDev = (id, devId) => dbRunAsync(`UPDATE correction_requests SET assi
   ok(ln.status === 200 && ln.body.master_id === masterId && ln.body.id, `⑨ link-new 追加第三系统单 #${ln.body.id}`);
   const child3Id = ln.body.id;
   await assignDev(child3Id, DEV_S3.id);
-  await reqMultipart(`/api/corrections/${child3Id}/complete`, {}, 'fix_s3.png', png, DEV_S3);
+  await reqMultipart(`/api/corrections/${child3Id}/complete`, { batch_completion_note: '系统3已修正完成口径' }, 'fix_s3.png', png, DEV_S3);
   const c3D = await GET(child3Id, DEV_S3);
   const c3Err = errOf(c3D), c3Fix = fixOf(c3D);
   ok(c3Err.length === 1 && c3Err[0].from_master === true && Number(c3Err[0].source_correction_request_id) === masterId && c3Err[0].original_name === 'err.png',

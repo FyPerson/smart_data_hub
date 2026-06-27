@@ -111,46 +111,34 @@ async function main() {
     assert.ok(r5.estimated_replied_at, 'estimated_replied_at 写入');
     ok('→IN_PROGRESS 闸门：无 dev_estimated_at 拒 ESTIMATE_REQUIRED；有则归一化写入');
 
-    // [6] →FIXED single 闸门：无合规 fix_proof 拒
-    await expectErr(correctionTransition(c1, 'IN_PROGRESS', 'FIXED', ACTOR_DEV, {}), 'FIX_PROOF_REQUIRED', '单修正无 fix_proof');
-    // 6a 上传者非 assignee 非 admin（viewer 11 模拟越权上传者）→ 仍不放行
-    await run(`INSERT INTO correction_attachments (correction_request_id, attachment_type, file_name, uploaded_by, uploaded_by_name) VALUES (?, 'fix_proof', 'bad.png', 11, '示例只读领导A')`, [c1]);
-    await expectErr(correctionTransition(c1, 'IN_PROGRESS', 'FIXED', ACTOR_DEV, {}), 'FIX_PROOF_REQUIRED', '越权上传者 fix_proof 不算合规');
-    // 6b error_proof 类型不算 fix_proof
-    await run(`INSERT INTO correction_attachments (correction_request_id, attachment_type, file_name, uploaded_by, uploaded_by_name) VALUES (?, 'error_proof', 'err.png', 5, '开发王')`, [c1]);
-    await expectErr(correctionTransition(c1, 'IN_PROGRESS', 'FIXED', ACTOR_DEV, {}), 'FIX_PROOF_REQUIRED', 'error_proof 不算 fix_proof');
-    // 6c 被指派开发本人(5)传 fix_proof → 合规放行
-    const fixAtt1 = await run(`INSERT INTO correction_attachments (correction_request_id, attachment_type, file_name, uploaded_by, uploaded_by_name) VALUES (?, 'fix_proof', 'fix1.png', 5, '开发王')`, [c1]);
-    await correctionTransition(c1, 'IN_PROGRESS', 'FIXED', ACTOR_DEV, {});
+    // [6] →FIXED 普通 single 闸门（v1.97.1 留证放开）：文字必填≥5，截图改可选（详细越权/error_proof 留证仍由 verify-correction-rework-gate C 段返工分支守）
+    await expectErr(correctionTransition(c1, 'IN_PROGRESS', 'FIXED', ACTOR_DEV, {}), 'SINGLE_NOTE_REQUIRED', '普通 single 无完成说明');
+    await expectErr(correctionTransition(c1, 'IN_PROGRESS', 'FIXED', ACTOR_DEV, { batch_completion_note: '改了' }), 'SINGLE_NOTE_TOO_SHORT', '普通 single 说明<5');
+    await correctionTransition(c1, 'IN_PROGRESS', 'FIXED', ACTOR_DEV, { batch_completion_note: '已修正合同金额为 100' });   // 截图可选：不传也放行
     const r6 = await get('SELECT status, fixed_at, submission_count FROM correction_requests WHERE id=?', [c1]);
     assert.strictEqual(r6.status, 'FIXED', '进 FIXED');
     assert.strictEqual(r6.submission_count, 1, '首次完成 submission_count=1');
     assert.ok(r6.fixed_at, 'fixed_at 写入');
-    ok('→FIXED single 闸门（H-2 join users）：越权上传者/error_proof 不放行，开发本人 fix_proof 放行 + count=1');
+    ok('→FIXED 普通 single 闸门（v1.97.1）：无文字 SINGLE_NOTE_REQUIRED / <5 SINGLE_NOTE_TOO_SHORT / 文字≥5 无截图也放行 + count=1');
 
-    // [7] →REFIXED single：必须本次新增 fix_proof（HIGH-1）+ codex 09 H-1 新增性兜底
-    await expectErr(correctionTransition(c1, 'FIXED', 'REFIXED', ACTOR_DEV, {}), 'FIX_PROOF_REQUIRED', '重修无新增附件');
-    // 7a 传"他单"附件 id → 不命中本单 → 拒
-    const otherC = await createCorrection({ correction_type: 'single' });
-    const otherAtt = await run(`INSERT INTO correction_attachments (correction_request_id, attachment_type, file_name, uploaded_by, uploaded_by_name) VALUES (?, 'fix_proof', 'other.png', 5, '开发王')`, [otherC]);
-    await expectErr(correctionTransition(c1, 'FIXED', 'REFIXED', ACTOR_DEV, { new_fix_proof_attachment_ids: [otherAtt.lastID] }), 'FIX_PROOF_REQUIRED', '夹带他单附件');
-    // 7b ⭐codex 09 H-1：传"本单旧附件"（fixAtt1，created_at ≤ fixed_at）→ 新增性兜底拒
-    await expectErr(correctionTransition(c1, 'FIXED', 'REFIXED', ACTOR_DEV, { new_fix_proof_attachment_ids: [fixAtt1.lastID] }), 'FIX_PROOF_REQUIRED', 'H-1 复用本单旧 fix_proof');
-    // 7c 传本单"本次新增"fix_proof（显式 created_at 晚于 fixed_at）→ 放行 + count+1
-    const fixAtt2 = await run(`INSERT INTO correction_attachments (correction_request_id, attachment_type, file_name, uploaded_by, uploaded_by_name, created_at) VALUES (?, 'fix_proof', 'fix2.png', 5, '开发王', '2099-01-01 00:00:00')`, [c1]);
-    await correctionTransition(c1, 'FIXED', 'REFIXED', ACTOR_DEV, { new_fix_proof_attachment_ids: [fixAtt2.lastID] });
+    // [7] →REFIXED 普通 single（v1.97.1）：重修说明必填、截图可选；若可选传截图仍校验新增性（codex 09 H-1，防复用旧图）
+    await expectErr(correctionTransition(c1, 'FIXED', 'REFIXED', ACTOR_DEV, {}), 'SINGLE_RESUBMIT_NOTE_REQUIRED', '普通 single 重修无说明');
+    // 7a 可选传截图但复用本单旧图（created_at ≤ fixed_at）→ 新增性兜底拒（留证质量不松：可不传，传就得真新增）
+    const fixOld = await run(`INSERT INTO correction_attachments (correction_request_id, attachment_type, file_name, uploaded_by, uploaded_by_name, created_at) VALUES (?, 'fix_proof', 'old.png', 5, '开发王', '2000-01-01 00:00:00')`, [c1]);
+    await expectErr(correctionTransition(c1, 'FIXED', 'REFIXED', ACTOR_DEV, { resubmit_note: '本次重新核对', new_fix_proof_attachment_ids: [fixOld.lastID] }), 'FIX_PROOF_REQUIRED', 'H-1 可选传截图但复用旧图（非新增）');
+    // 7b 重修说明 + 无截图 → 放行 + count+1（截图可选）
+    await correctionTransition(c1, 'FIXED', 'REFIXED', ACTOR_DEV, { resubmit_note: '本次按业务方口径重新核对' });
     const r7 = await get('SELECT status, refixed_at, submission_count FROM correction_requests WHERE id=?', [c1]);
     assert.strictEqual(r7.status, 'REFIXED', '进 REFIXED');
     assert.strictEqual(r7.submission_count, 2, '重修 submission_count+1=2');
     assert.ok(r7.refixed_at, 'refixed_at 写入');
-    ok('→REFIXED single 闸门（HIGH-1 + codex 09 H-1）：无新增/夹带他单/复用本单旧附件均拒，本次新增放行 + count+1');
+    ok('→REFIXED 普通 single 闸门（v1.97.1）：无说明 SINGLE_RESUBMIT_NOTE_REQUIRED / 可选截图复用旧图仍拒 FIX_PROOF_REQUIRED / 说明+无截图放行 + count+1');
 
     // [8] →ARCHIVED 摩擦闸门：造一个有 chat_id（发起过拉群=有摩擦）的 FIXED 单
     const c2 = await createCorrection({ correction_type: 'single', dingtalk_chat_id: 'cidXYZ' });
     await correctionTransition(c2, 'PENDING_ASSIGN', 'ASSIGNED_PENDING_ESTIMATE', actor, { assigned_to: 5, assigned_to_name: '开发王', assigned_by: 1 });
     await correctionTransition(c2, 'ASSIGNED_PENDING_ESTIMATE', 'IN_PROGRESS', ACTOR_DEV, { dev_estimated_at: '2026-06-20 12:00' });
-    await run(`INSERT INTO correction_attachments (correction_request_id, attachment_type, file_name, uploaded_by, uploaded_by_name) VALUES (?, 'fix_proof', 'c2fix.png', 5, '开发王')`, [c2]);
-    await correctionTransition(c2, 'IN_PROGRESS', 'FIXED', ACTOR_DEV, {});
+    await correctionTransition(c2, 'IN_PROGRESS', 'FIXED', ACTOR_DEV, { batch_completion_note: '已修正口径完成' });   // v1.97.1：普通 single 文字必填、截图可选
     await expectErr(correctionTransition(c2, 'FIXED', 'ARCHIVED', actor, {}), 'FRICTION_REASON_REQUIRED', '有摩擦归档无原因');
     await correctionTransition(c2, 'FIXED', 'ARCHIVED', actor, { friction_reason: '业务方对口径有异议，拉群澄清后确认' });
     const r8 = await get('SELECT status, archived_at, archived_by, friction_reason FROM correction_requests WHERE id=?', [c2]);
@@ -181,8 +169,7 @@ async function main() {
     const ac2 = await createCorrection();
     await correctionTransition(ac2, 'PENDING_ASSIGN', 'ASSIGNED_PENDING_ESTIMATE', actor, { assigned_to: 5, assigned_to_name: '开发王', assigned_by: 1 });
     await correctionTransition(ac2, 'ASSIGNED_PENDING_ESTIMATE', 'IN_PROGRESS', ACTOR_DEV, { dev_estimated_at: '2099-01-01 10:00' });
-    await run(`INSERT INTO correction_attachments (correction_request_id, attachment_type, file_name, uploaded_by, uploaded_by_name) VALUES (?, 'fix_proof', 'ac2.png', 5, '开发王')`, [ac2]);
-    await correctionTransition(ac2, 'IN_PROGRESS', 'FIXED', ACTOR_DEV, {});
+    await correctionTransition(ac2, 'IN_PROGRESS', 'FIXED', ACTOR_DEV, { batch_completion_note: '已修正完成口径' });   // v1.97.1：普通 single 文字必填、截图可选
     await expectErr(correctionTransition(ac2, null, 'ARCHIVED', actor, { closure_type: 'admin_closure', closure_reason: '已完成单不应走行政闭环占位文字够长' }), 'INVALID_CLOSURE_SOURCE', 'admin_closure 不可从 FIXED');
     await correctionTransition(ac2, 'FIXED', 'ARCHIVED', actor, {});   // 缺 closure_type → 默认 normal
     const rac2 = await get('SELECT status, closure_type, closure_reason FROM correction_requests WHERE id=?', [ac2]);
