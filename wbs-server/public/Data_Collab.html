@@ -1091,8 +1091,8 @@
                 </div>
                 <div class="form-row" id="formRow_dataScope">
                     <label>数据范围说明 <span class="hint">（选传）</span></label>
-                    <input type="file" id="f_data_scope" accept=".xlsx,.xls,.txt">
-                    <div class="hint">单个文件（.xlsx / .xls / .txt），≤ 10MB。需求方圈定取数范围（如"A部门、B部门…"），供开发按范围取数；不参与列对齐校验。</div>
+                    <input type="file" id="f_data_scope" accept=".xlsx,.xls,.txt" multiple>
+                    <div class="hint">可多个文件（.xlsx / .xls / .txt），每个 ≤ 10MB，最多 5 个。需求方圈定取数范围（如"A部门、B部门…"），供开发按范围取数；不参与列对齐校验。</div>
                     <div id="dataScopePreview" class="file-preview"></div>
                 </div>
             </div>
@@ -1274,13 +1274,15 @@
             <div class="modal-body">
                 <div class="form-row">
                     <label>SQL 脚本 <span class="required">*</span></label>
-                    <input type="file" id="f_delivery_script" accept=".sql,.txt">
-                    <div class="hint">扩展名 .sql / .txt，单文件 ≤ 1MB。脚本将在目标业务库执行 smoke test。</div>
+                    <input type="file" id="f_delivery_script" accept=".sql,.txt" multiple>
+                    <div class="hint">扩展名 .sql / .txt，每个 ≤ 1MB，最多 5 个。第一份脚本将在目标业务库执行 smoke test，其余为附带交付物。</div>
+                    <div id="deliveryScriptPreview" class="file-preview"></div>
                 </div>
                 <div class="form-row">
                     <label>结果数据 <span class="required">*</span></label>
-                    <input type="file" id="f_delivery_data" accept=".xlsx,.xls">
-                    <div class="hint">扩展名 .xlsx / .xls，单文件 ≤ 100MB。在本地跑出来的取数结果，供业务方验收对照。</div>
+                    <input type="file" id="f_delivery_data" accept=".xlsx,.xls" multiple>
+                    <div class="hint">扩展名 .xlsx / .xls，每个 ≤ 100MB，最多 5 个。本地跑出的取数结果供业务方验收对照；第一份参与列对齐校验，其余为附带交付物。</div>
+                    <div id="deliveryDataPreview" class="file-preview"></div>
                 </div>
                 <div class="hint" style="margin-top:8px;color:#6b7280;">
                     提交后系统会对 SQL 脚本做 4 层防御 smoke test（语法解析 / 黑名单 / 只读校验 / 真连业务库试跑）。验收通过协作单进入 DONE，否则停留 SUBMITTED 状态并显示错误，可继续重提。
@@ -3132,7 +3134,7 @@
             const deliveryFiles = (d.attachments || []).filter(
                 a => (a.attachment_type === 'result_data' || a.attachment_type === 'result_script')
                   && (a.status === 'active' || !a.status)  // 兼容 status 字段未填的旧数据
-            );
+            ).sort((a, b) => (a.id ?? Number.MAX_SAFE_INTEGER) - (b.id ?? Number.MAX_SAFE_INTEGER));  // M3：按 id 升序=上传序，"第一份"视觉居首对齐取首语义（codex 缺失 id 排末）
             if (deliveryFiles.length === 0) {
                 return ''; // 未提交过交付物，不显示区块
             }
@@ -3167,10 +3169,16 @@
                        <span style="color:#92400e;font-size:12px;margin-left:10px;">归档前可修改：重传后会自动重走 smoke test 验收</span>
                    </div>`
                 : '';
+            // M3 透明度（§C）：同类型 active >1 时提示"仅首份参与校验，其余附带"
+            const dataCnt = deliveryFiles.filter(f => f.attachment_type === 'result_data').length;
+            const scriptCnt = deliveryFiles.filter(f => f.attachment_type === 'result_script').length;
+            const multiNote = (dataCnt > 1 || scriptCnt > 1)
+                ? `<div style="margin-top:8px;font-size:12px;color:#6b7280;">ℹ️ 多文件交付：仅<strong>第一份脚本</strong>参与 smoke test、<strong>第一份数据</strong>参与列对齐校验，其余为附带交付物。</div>`
+                : '';
             return `
                 <div class="detail-section">
                     <div class="detail-section-title">交付内容</div>
-                    <div class="detail-section-body">${items}${reuploadBtn}</div>
+                    <div class="detail-section-body">${items}${multiNote}${reuploadBtn}</div>
                 </div>`;
         }
 
@@ -4133,6 +4141,11 @@
             document.getElementById('submitDeliveryTitle').textContent = `上传交付物 · 协作单 #${id}`;
             document.getElementById('f_delivery_script').value = '';
             document.getElementById('f_delivery_data').value = '';
+            // M3 多文件：重置交付数组 + 预览
+            selectedDeliveryScript = [];
+            selectedDeliveryData = [];
+            renderDeliveryScriptPreview();
+            renderDeliveryDataPreview();
             const btn = document.getElementById('btnSubmitDelivery');
             btn.disabled = false;
             btn.textContent = '提交';
@@ -4153,15 +4166,18 @@
         async function submitDelivery() {
             const id = _submitDeliveryCollabId;
             if (!id) { showToast('协作单 id 丢失，请重新打开弹窗', 'error'); return; }
-            const scriptFile = document.getElementById('f_delivery_script').files[0];
-            const dataFile = document.getElementById('f_delivery_data').files[0];
-            if (!scriptFile) { showToast('请选择 SQL 脚本文件', 'error'); return; }
-            if (!dataFile) { showToast('请选择结果数据文件', 'error'); return; }
+            // M3 多文件：脚本/数据各 ≥1、≤5（后端 groupUploadedDeliveryFiles 兜底再校验）
+            if (!selectedDeliveryScript.length) { showToast('请至少选择 1 个 SQL 脚本文件', 'error'); return; }
+            if (!selectedDeliveryData.length) { showToast('请至少选择 1 个结果数据文件', 'error'); return; }
+            if (selectedDeliveryScript.length > MULTI_FILE_MAX || selectedDeliveryData.length > MULTI_FILE_MAX) {
+                showToast(`SQL 脚本与结果数据各最多 ${MULTI_FILE_MAX} 个`, 'error'); return;
+            }
 
             const fd = new FormData();
-            // 后端按扩展名自动分类（xlsx/xls=result_data，sql/txt=result_script），两个文件都用 files 字段
-            fd.append('files', scriptFile);
-            fd.append('files', dataFile);
+            // 后端按扩展名自动分类（xlsx/xls=result_data，sql/txt=result_script），全用 files 字段。
+            // 顺序：脚本在前→第一份脚本即上传序首个，对齐后端 smoke「取第一份脚本」（M-4）；数据在后第一份参与列校验。
+            selectedDeliveryScript.forEach(f => fd.append('files', f));
+            selectedDeliveryData.forEach(f => fd.append('files', f));
 
             const btn = document.getElementById('btnSubmitDelivery');
             btn.disabled = true;
@@ -5031,11 +5047,49 @@
         const TEMPLATE_MAX_SIZE = 10 * 1024 * 1024;
         const TEMPLATE_ALLOWED_EXTS = ['xlsx', 'xls'];
 
-        // v1.77.0 数据范围说明：单文件 .xlsx/.xls/.txt，attachment_type=data_scope
+        // v1.77.0 数据范围说明：attachment_type=data_scope（多文件上传 M3：单文件→数组，各≤5）
         // 质量校验列对齐只取 example_xlsx，data_scope 不参与比对（独立类型隔离）
-        let selectedDataScope = null;
+        let selectedDataScope = [];
         const DATA_SCOPE_MAX_SIZE = 10 * 1024 * 1024;
         const DATA_SCOPE_ALLOWED_EXTS = ['xlsx', 'xls', 'txt'];
+
+        // 多文件上传 M3：开发完成·交付结果（result_data + result_script）单文件→数组，各≤5
+        let selectedDeliveryScript = [];
+        let selectedDeliveryData = [];
+        const DELIVERY_SCRIPT_EXTS = ['sql', 'txt'];
+        const DELIVERY_SCRIPT_MAX = 1 * 1024 * 1024;
+        const DELIVERY_DATA_EXTS = ['xlsx', 'xls'];
+        const DELIVERY_DATA_MAX = 100 * 1024 * 1024;
+        const MULTI_FILE_MAX = 5;
+
+        // 多文件通用收集：去重(name+size+lastModified) + ≤5 + 扩展名/大小校验（RC2-L2）
+        function collectFilesInto(targetArr, fileList, allowedExts, maxSize, label) {
+            for (const f of Array.from(fileList || [])) {
+                if (targetArr.length >= MULTI_FILE_MAX) { showToast(`${label}最多 ${MULTI_FILE_MAX} 个文件`, 'error'); break; }
+                const ext = f.name.split('.').pop().toLowerCase();
+                if (!allowedExts.includes(ext)) { showToast(`${label}不支持的格式：${f.name}`, 'error'); continue; }
+                if (f.size > maxSize) { showToast(`${f.name} 超过 ${(maxSize / 1024 / 1024).toFixed(0)}MB`, 'error'); continue; }
+                if (targetArr.some(x => x.name === f.name && x.size === f.size && x.lastModified === f.lastModified)) {
+                    showToast(`该文件已选：${f.name}`, 'info'); continue;
+                }
+                targetArr.push(f);
+            }
+        }
+
+        // 多文件通用预览（非图片，简单文件项列表）
+        function renderSimpleFileList(arr, wrapId, removeFnName, icon) {
+            const wrap = document.getElementById(wrapId);
+            if (!wrap) return;
+            if (!arr.length) { wrap.innerHTML = ''; return; }
+            wrap.innerHTML = arr.map((f, idx) => {
+                const sizeKB = (f.size / 1024).toFixed(1);
+                return `<div class="file-item" style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:6px;margin-top:4px;">
+                    <span style="font-size:1.3em;">${icon}</span>
+                    <span class="file-name" title="${escapeHtml(f.name)}" style="flex:1;font-size:0.9em;color:#166534;">${escapeHtml(f.name)} <span style="color:#9ca3af;">(${sizeKB} KB)</span></span>
+                    <button class="remove-btn" onclick="${removeFnName}(${idx})" title="移除" style="background:transparent;border:0;color:#dc2626;cursor:pointer;font-size:1.1em;">×</button>
+                </div>`;
+            }).join('');
+        }
 
         function onFilesChange(e) {
             const newFiles = Array.from(e.target.files || []);
@@ -5158,55 +5212,44 @@
             </div>`;
         }
 
-        // v1.77.0 数据范围说明：单文件 .xlsx/.xls/.txt 校验 + 预览（对齐数据模板模式，
-        //   含 codex 十七审 #1 同款防线：非法/超大分支必须清 selectedDataScope + 刷新预览）
+        // 数据范围说明：多文件 .xlsx/.xls/.txt（M3：数组化 + 去重 + ≤5；清空 input.value 允许重选同名再触发）
         function onDataScopeChange(e) {
-            const f = (e.target.files || [])[0];
-            if (!f) {
-                selectedDataScope = null;
-                renderDataScopePreview();
-                return;
-            }
-            const ext = f.name.split('.').pop().toLowerCase();
-            if (!DATA_SCOPE_ALLOWED_EXTS.includes(ext)) {
-                showToast(`仅支持 .xlsx / .xls / .txt 格式：${f.name}`, 'error');
-                e.target.value = '';
-                selectedDataScope = null;
-                renderDataScopePreview();
-                return;
-            }
-            if (f.size > DATA_SCOPE_MAX_SIZE) {
-                showToast(`${f.name} 超过 10MB`, 'error');
-                e.target.value = '';
-                selectedDataScope = null;
-                renderDataScopePreview();
-                return;
-            }
-            selectedDataScope = f;
+            collectFilesInto(selectedDataScope, e.target.files, DATA_SCOPE_ALLOWED_EXTS, DATA_SCOPE_MAX_SIZE, '数据范围说明');
+            renderDataScopePreview();
+            e.target.value = '';
+        }
+        function removeDataScopeFile(idx) {
+            selectedDataScope.splice(idx, 1);
             renderDataScopePreview();
         }
-
-        function removeDataScope() {
-            selectedDataScope = null;
-            const input = document.getElementById('f_data_scope');
-            if (input) input.value = '';
-            renderDataScopePreview();
-        }
-
         function renderDataScopePreview() {
-            const wrap = document.getElementById('dataScopePreview');
-            if (!wrap) return;
-            if (!selectedDataScope) {
-                wrap.innerHTML = '';
-                return;
-            }
-            const f = selectedDataScope;
-            const sizeKB = (f.size / 1024).toFixed(1);
-            wrap.innerHTML = `<div class="file-item" style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:6px;">
-                <span style="font-size:1.4em;">📋</span>
-                <span class="file-name" title="${escapeHtml(f.name)}" style="flex:1;font-size:0.9em;color:#166534;">${escapeHtml(f.name)} <span style="color:#9ca3af;">(${sizeKB} KB)</span></span>
-                <button class="remove-btn" onclick="removeDataScope()" title="移除" style="background:transparent;border:0;color:#dc2626;cursor:pointer;font-size:1.1em;">×</button>
-            </div>`;
+            renderSimpleFileList(selectedDataScope, 'dataScopePreview', 'removeDataScopeFile', '📋');
+        }
+
+        // 交付结果·SQL 脚本/结果数据：多文件（M3：数组化 + 去重 + ≤5）
+        function onDeliveryScriptChange(e) {
+            collectFilesInto(selectedDeliveryScript, e.target.files, DELIVERY_SCRIPT_EXTS, DELIVERY_SCRIPT_MAX, 'SQL 脚本');
+            renderDeliveryScriptPreview();
+            e.target.value = '';
+        }
+        function removeDeliveryScript(idx) {
+            selectedDeliveryScript.splice(idx, 1);
+            renderDeliveryScriptPreview();
+        }
+        function renderDeliveryScriptPreview() {
+            renderSimpleFileList(selectedDeliveryScript, 'deliveryScriptPreview', 'removeDeliveryScript', '📜');
+        }
+        function onDeliveryDataChange(e) {
+            collectFilesInto(selectedDeliveryData, e.target.files, DELIVERY_DATA_EXTS, DELIVERY_DATA_MAX, '结果数据');
+            renderDeliveryDataPreview();
+            e.target.value = '';
+        }
+        function removeDeliveryData(idx) {
+            selectedDeliveryData.splice(idx, 1);
+            renderDeliveryDataPreview();
+        }
+        function renderDeliveryDataPreview() {
+            renderSimpleFileList(selectedDeliveryData, 'deliveryDataPreview', 'removeDeliveryData', '📊');
         }
 
         // v1.66.2 新建/编辑共享 modal 状态
@@ -5238,7 +5281,7 @@
             // v1.77.0 数据范围说明重置
             const dsInput = document.getElementById('f_data_scope');
             if (dsInput) dsInput.value = '';
-            selectedDataScope = null;
+            selectedDataScope = [];
             renderDataScopePreview();
             // deadline 智能默认（v1.78.0）：< 15:00 当天 17:00，>= 15:00 次日 12:00
             // 注意：datetime-local 用本地时间，不能用 toISOString()（会转 UTC 偏 8 小时——旧 +7天默认即踩此坑）
@@ -5377,7 +5420,7 @@
             // v1.77.0 数据范围说明区编辑时隐藏（与截图/模板一致）
             const dsRow = document.getElementById('formRow_dataScope');
             if (dsRow) dsRow.style.display = 'none';
-            selectedDataScope = null;
+            selectedDataScope = [];
             renderDataScopePreview();
 
             // 对接人下拉：PENDING_ASSIGN 可改；PENDING 禁用
@@ -5569,11 +5612,12 @@
                     }
                 }
 
-                if (selectedDataScope) {
+                if (selectedDataScope.length) {
                     btn.textContent = '上传数据范围说明...';
                     const dsFormData = new FormData();
                     dsFormData.append('attachment_type', 'data_scope');
-                    dsFormData.append('files', selectedDataScope);
+                    // M3 多文件：循环 append 全部（后端 array('files',5) + 入库循环已支持 N 个）
+                    selectedDataScope.forEach(f => dsFormData.append('files', f));
                     const dsRes = await authFetch(`/api/collab/requests/${newId}/attachments`, {
                         method: 'POST',
                         body: dsFormData
@@ -5856,6 +5900,11 @@
             // v1.77.0 数据范围说明 input change 绑定
             const dsInput = document.getElementById('f_data_scope');
             if (dsInput) dsInput.addEventListener('change', onDataScopeChange);
+            // M3 多文件：交付结果脚本/数据 input change 绑定
+            const dlScript = document.getElementById('f_delivery_script');
+            if (dlScript) dlScript.addEventListener('change', onDeliveryScriptChange);
+            const dlData = document.getElementById('f_delivery_data');
+            if (dlData) dlData.addEventListener('change', onDeliveryDataChange);
 
             // 等 app.js 把用户信息加载好后再加载列表
             await loadActiveUsers();

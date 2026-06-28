@@ -162,7 +162,8 @@ const ATTACHMENT_TYPE_TO_ABBR = {
     result_data: 'rd',
     result_script: 'rs',
     screenshot: 'sc',
-    example_xlsx: 'ex'
+    example_xlsx: 'ex',
+    data_scope: 'ds'        // v1.77.0 数据范围说明（如"A部门,B部门…"），走 sc/ex 同款 attachment_seq 通道
 };
 
 /**
@@ -227,7 +228,7 @@ function formatCreatedAtToYmd(createdAt) {
  * @param {string} params.oaRequestNo     collab_requests.oa_request_no（必传非空）
  * @param {string} params.createdAt       collab_requests.created_at
  * @param {number} params.seq             rd/rs=submission_version；sc/ex=新分配 attachment_seq
- * @param {string} params.attachmentType  result_data|result_script|screenshot|example_xlsx
+ * @param {string} params.attachmentType  result_data|result_script|screenshot|example_xlsx|data_scope
  * @param {boolean} params.isFailed       smoke test 失败的 rd/rs
  * @param {string} params.displayName     上传人 display_name
  * @param {string} params.username        fallback username
@@ -236,7 +237,7 @@ function formatCreatedAtToYmd(createdAt) {
  * @throws  OA_REQUEST_NO_REQUIRED / INVALID_CREATED_AT / UNKNOWN_ATTACHMENT_TYPE / INVALID_SEQ
  */
 function buildFinalAttachmentName(params) {
-    const { oaRequestNo, createdAt, seq, attachmentType, isFailed, displayName, username, ext } = params;
+    const { oaRequestNo, createdAt, seq, attachmentType, isFailed, displayName, username, ext, typeOrdinal } = params;
     const safeOa = sanitizeOaRequestNo(oaRequestNo);
     const ymd = formatCreatedAtToYmd(createdAt);
     const abbr = ATTACHMENT_TYPE_TO_ABBR[attachmentType];
@@ -251,11 +252,18 @@ function buildFinalAttachmentName(params) {
         throw e;
     }
     const seqStr = String(seq).padStart(3, '0');
+    // 多文件上传 M2（RC-H1/RC2-M1）：同次提交多个同类型文件用 newVer 作 seq 会撞名互相覆盖（active rename 在 smoke 前）。
+    //   typeOrdinal（该类型第几个，从 1 起；不入 DB，仅文件名）拼进名字保唯一：rd_01 / rd_02。
+    //   active 与 failed rename 传同一个 typeOrdinal（_failed 后缀再区分 active/failed）。仅同类型 ≥2 个才编号。
+    //   ⚠️ 可选参数，下列两种都不传 typeOrdinal → 产出与改前**逐字节相同**的旧名（零回归）：
+    //      ① sc/ex/ds（attachment_seq 通道，每文件 seq 已不同）；② rd/rs 单文件提交（grouping 对单文件清 typeOrdinal）。
+    const ordinalSuffix = (Number.isInteger(typeOrdinal) && typeOrdinal > 0)
+        ? `_${String(typeOrdinal).padStart(2, '0')}` : '';
     const failedSuffix = isFailed ? '_failed' : '';
     const safeName = sanitizeUploaderName(displayName, username);
     const safeExt = String(ext || '').toLowerCase();
     // safeOa 已包含 OA-xxx / TEST-OAxxx 自带前缀（生产实证），不再补 OA- 前缀
-    return `${safeOa}_${ymd}_${seqStr}_${abbr}${failedSuffix}_${safeName}${safeExt}`;
+    return `${safeOa}_${ymd}_${seqStr}_${abbr}${ordinalSuffix}${failedSuffix}_${safeName}${safeExt}`;
 }
 
 /**
@@ -266,13 +274,14 @@ function buildFinalAttachmentName(params) {
  *
  * @param {object} dbAsync   { getAsync }
  * @param {number} requestId
- * @param {string} attachmentType  'screenshot' 或 'example_xlsx'
+ * @param {string} attachmentType  'screenshot' / 'example_xlsx' / 'data_scope'（v1.77.0）
  * @returns {Promise<number>} 下一个可用 attachment_seq（从 1 开始）
  */
+const SEQ_CHANNEL_TYPES = new Set(['screenshot', 'example_xlsx', 'data_scope']);
 async function allocateAttachmentSeq(dbAsync, requestId, attachmentType) {
-    if (attachmentType !== 'screenshot' && attachmentType !== 'example_xlsx') {
+    if (!SEQ_CHANNEL_TYPES.has(attachmentType)) {
         // rd/rs 不应走此函数（用 submission_version）
-        const e = new Error(`allocateAttachmentSeq 仅支持 sc/ex 类型: ${attachmentType}`);
+        const e = new Error(`allocateAttachmentSeq 仅支持 sc/ex/ds 类型: ${attachmentType}`);
         e.code = 'INVALID_ALLOC_TYPE';
         throw e;
     }
@@ -333,19 +342,25 @@ async function activateNewVersion(params) {
             uploadedFiles, runSmokeTest, logger } = params;
     const log = logger || console;
 
-    // §3.1 完整快照校验（M5 + codex 24 审 #2 medium：每类恰好 1 个）
-    // 不仅 hasResultData / hasResultScript，还必须各自恰好 1 个；
-    // 否则 v1.70.0 §1.2 failed 路径下同 attachment_type 多文件会撞 UNIQUE(rid, seq, attachment_type)
+    // §3.1 完整快照校验
+    //   多文件上传 M2（H-1，方案 §B）：原"每类恰好 1 个"放宽为「各 1..5 个」（D2/D3）。
+    //   多文件不撞（限"同一次提交内"）：active 行 idx_collab_att_version 为普通索引（非 UNIQUE），靠文件名 typeOrdinal 防同次磁盘覆盖；
+    //   failed 行靠 insertFailedAttachments 逐文件 failed_attempt_seq 自增防撞 DB 唯一索引 idx_collab_att_failed_seq_unique。
+    //   跨重试 failed 防覆盖（M-C，codex/ultracode 审）：smoke 连续失败重试时 submission_version 不晋升 → newVer/typeOrdinal 重复，
+    //      failed rename 已加 existence _rN 去重（见 §3.5 failed 分支），保住每一轮 failed 物理留证不被覆盖。
+    //   仅允许 result_data / result_script 两类（防上游误传第三类绕过计数）。
     const countByType = uploadedFiles.reduce((acc, f) => {
         acc[f.attachment_type] = (acc[f.attachment_type] || 0) + 1;
         return acc;
     }, {});
     const dataCount = countByType.result_data || 0;
     const scriptCount = countByType.result_script || 0;
-    if (dataCount !== 1 || scriptCount !== 1) {
+    const otherTypes = Object.keys(countByType).filter(t => t !== 'result_data' && t !== 'result_script');
+    if (dataCount < 1 || dataCount > 5 || scriptCount < 1 || scriptCount > 5 || otherTypes.length > 0) {
         const err = new Error(
-            `完整快照不规范：每次提交必须恰好包含 1 个 result_data + 1 个 result_script，` +
-            `实际 result_data=${dataCount}, result_script=${scriptCount}`
+            `完整快照不规范：每次提交必须包含 1..5 个 result_data + 1..5 个 result_script（仅此两类），` +
+            `实际 result_data=${dataCount}, result_script=${scriptCount}` +
+            (otherTypes.length ? `, 非法类型=${otherTypes.join(',')}` : '')
         );
         err.code = 'INCOMPLETE_SNAPSHOT';
         err.detail = { dataCount, scriptCount, countByType };
@@ -385,7 +400,8 @@ async function activateNewVersion(params) {
     try {
         for (const f of uploadedFiles) {
             // v1.72.0 落盘命名 OA-{oa}_{YYYYMMDD}_{nnn}_{rd|rs}_{姓名}.{ext}
-            // smoke 失败的 _failed 后缀走 insertFailedAttachments 路径不在此分支
+            // 多文件上传 M2（RC-H1/RC2-M1）：同次提交多个同类型文件用 newVer 作 seq 会撞名，靠 typeOrdinal 区分（rd_01/rd_02）。
+            // smoke 失败的 _failed 后缀走下方 failed rename 分支（传同一个 typeOrdinal）
             const ext = path.extname(f.original_name || '');
             const finalName = buildFinalAttachmentName({
                 oaRequestNo,
@@ -396,6 +412,7 @@ async function activateNewVersion(params) {
                 displayName: f.uploaded_by_name,
                 username: f.uploaded_by_name,  // POST /submit 上下文已用 display_name||username 合一
                 ext,
+                typeOrdinal: f.typeOrdinal,   // RC-H1：来自 orderedFiles，多文件防同名覆盖
             });
             const finalPath = path.join(targetDir, finalName);
             const finalCheck = ensureInsideRoot(finalPath, targetDir);
@@ -406,7 +423,8 @@ async function activateNewVersion(params) {
             }
             fs.renameSync(f.source_path, finalPath);
             movedFiles.push({ ...f, final_path: finalPath, final_name: finalName });
-            if (f.attachment_type === 'result_script') {
+            // M-4/RC-M2：smoke 跑「第一份」上传脚本（orderedFiles 保序 = 上传序），取首个 result_script 后不再覆盖（原逻辑取最后一个）
+            if (f.attachment_type === 'result_script' && scriptFinalPath === null) {
                 scriptFinalPath = finalPath;
             }
         }
@@ -442,7 +460,7 @@ async function activateNewVersion(params) {
         // 同 newVer 序号下区分 active 和 failed 靠 _failed 后缀
         for (const mf of movedFiles) {
             const ext = path.extname(mf.original_name || '');
-            const failedName = buildFinalAttachmentName({
+            let failedName = buildFinalAttachmentName({
                 oaRequestNo,
                 createdAt: collabCreatedAt,
                 seq: newVer,
@@ -451,8 +469,20 @@ async function activateNewVersion(params) {
                 displayName: mf.uploaded_by_name,
                 username: mf.uploaded_by_name,
                 ext,
+                typeOrdinal: mf.typeOrdinal,   // RC-H1：active+failed rename 全路径传同一个，多文件 failed 防同名覆盖
             });
-            const failedPath = path.join(path.dirname(mf.final_path), failedName);
+            const failedDir = path.dirname(mf.final_path);
+            let failedPath = path.join(failedDir, failedName);
+            // M-C（codex/ultracode 审）：smoke 失败不晋升 submission_version → newVer 恒定、typeOrdinal 重算，
+            //   同单连续失败重试时 failedName 会与上一轮相同 → fs.renameSync 静默覆盖、丢历次失败留证。
+            //   存在即加 _rN 后缀去重（保住每一轮 failed 物理文件；DB file_name 写去重后实际名，与磁盘一致）。
+            if (fs.existsSync(failedPath)) {
+                const p = path.parse(failedName);
+                let n = 2;
+                while (fs.existsSync(path.join(failedDir, `${p.name}_r${n}${p.ext}`))) n++;
+                failedName = `${p.name}_r${n}${p.ext}`;
+                failedPath = path.join(failedDir, failedName);
+            }
             try {
                 fs.renameSync(mf.final_path, failedPath);
                 mf.final_path = failedPath;
@@ -492,6 +522,9 @@ async function activateNewVersion(params) {
         await dbAsync.runAsync('BEGIN TRANSACTION');
 
         // a. INSERT 新版本
+        // ⚠️ 取首契约护栏（M-B，codex 审）：严格按 movedFiles 顺序（= orderedFiles = 上传序）逐条 INSERT，
+        //   使自增 id 序 = 上传序——passed/failed 双校验取首（SELECT ORDER BY id ASC + find）依赖此不变量。
+        //   禁改为「按 attachment_type 分组 / 批量 / 并发」插入，否则取首会从"首份上传"退化为"首个插入"。
         for (const mf of movedFiles) {
             const relPath = path.relative(path.dirname(collabRoot), mf.final_path).replace(/\\/g, '/');
             await dbAsync.runAsync(
@@ -607,10 +640,12 @@ async function insertFailedAttachments({ dbAsync, requestId, movedFiles, smokeEr
     const inserted = [];
     try {
         await dbAsync.runAsync('BEGIN IMMEDIATE TRANSACTION');
-        // 按 attachment_type 分组取 MAX+1
-        const seqByType = new Map();
+        // 多文件上传 M2（H-2）：同次提交同类型可多文件，failed_attempt_seq 须**逐文件** MAX+1 自增
+        //   （原逻辑每类型只算一次 seq、全类型文件复用同值 → 多 failed 同类型撞 idx_collab_att_failed_seq_unique）。
+        //   seqCursor 记每类型「下一个待分配 seq」，首文件取 MAX+1，之后每文件用当前值再自增。
+        const seqCursor = new Map();  // attachment_type → 下一个待分配 failed_attempt_seq
         for (const mf of movedFiles) {
-            if (!seqByType.has(mf.attachment_type)) {
+            if (!seqCursor.has(mf.attachment_type)) {
                 const row = await dbAsync.getAsync(
                     `SELECT COALESCE(MAX(failed_attempt_seq), 0) AS max_seq
                        FROM collab_attachments
@@ -619,13 +654,11 @@ async function insertFailedAttachments({ dbAsync, requestId, movedFiles, smokeEr
                         AND status = 'failed'`,
                     [requestId, mf.attachment_type]
                 );
-                seqByType.set(mf.attachment_type, (row && row.max_seq || 0) + 1);
+                seqCursor.set(mf.attachment_type, (row && row.max_seq || 0) + 1);
             }
-        }
-        // INSERT 一行 / 文件
-        for (const mf of movedFiles) {
             const relPath = collabRootRel(mf);
-            const seq = seqByType.get(mf.attachment_type);
+            const seq = seqCursor.get(mf.attachment_type);
+            seqCursor.set(mf.attachment_type, seq + 1);  // H-2：自增供同类型下一个文件，逐文件唯一
             const ins = await dbAsync.runAsync(
                 `INSERT INTO collab_attachments
                     (collab_request_id, attachment_type, file_name, original_name,
@@ -641,11 +674,12 @@ async function insertFailedAttachments({ dbAsync, requestId, movedFiles, smokeEr
                 id: ins && ins.lastID,
                 attachment_type: mf.attachment_type,
                 failed_attempt_seq: seq,
-                file_name: relPath
+                file_name: relPath,
+                original_name: mf.original_name,   // RC-M2/M-2：failed 路径双校验取首需 original_name 识别 excel 扩展名
             });
         }
         await dbAsync.runAsync('COMMIT');
-        log.info(`[collab-versioning] 协作单 #${requestId} 撞墙附件保留 ${inserted.length} 个 (seq=${[...seqByType.entries()].map(([t, s]) => `${t}:${s}`).join(', ')})`);
+        log.info(`[collab-versioning] 协作单 #${requestId} 撞墙附件保留 ${inserted.length} 个 (${inserted.map(a => `${a.attachment_type}#${a.failed_attempt_seq}`).join(', ')})`);
         return inserted;
     } catch (e) {
         try { await dbAsync.runAsync('ROLLBACK'); } catch (_) { /* ignore */ }

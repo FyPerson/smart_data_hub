@@ -486,34 +486,54 @@ function safeDisplayName(originalname) {
  * @param {Array<{originalname, path, size}>} files multer req.files
  * @returns {{ ok: true, result_data, result_script } | { ok: false, reason: string }}
  */
-function classifyUploadedFiles(files) {
+// 数据协作·开发完成交付结果多文件分组（多文件上传 M2，方案 §B/§五.4）
+//   v1.x 前身 classifyUploadedFiles（恰好 2 个）→ 放开为「≥1 result_data + ≥1 result_script，各 ≤5」（D2/D3）。
+//   单遍历同时固化四职责（RC2-M2）：分类 + 上传序（D1）+ orderedFiles + typeOrdinal（文件名序号）。
+//
+// @param {Array} files          req.files（multer 原序，禁重排）
+// @param {Function} [validateRule]  可选 per-type 校验器 (type, originalname, size) => {ok, error}
+//        server 传入 validateCollabAttachmentRule（RC-M3：脚本 ≤1MB 不被 submitUpload 100MB 单文件粗上限绕过）。
+// @returns {ok:true, result_data:[], result_script:[], orderedFiles:[{file, attachment_type, typeOrdinal}]} 或
+//          {ok:false, reason, code}
+//   orderedFiles 顺序严格 = req.files 原序；typeOrdinal = 该类型在 orderedFiles 中第几个（从 1 起，不入 DB，仅文件名/内存）。
+function groupUploadedDeliveryFiles(files, validateRule) {
     if (!Array.isArray(files) || files.length === 0) {
-        return { ok: false, reason: '未上传任何文件' };
+        return { ok: false, reason: '未上传任何文件', code: 'NO_FILES' };
     }
-    if (files.length !== 2) {
-        return { ok: false, reason: `必须恰好上传 2 个文件（result_data + result_script），实际 ${files.length} 个` };
-    }
-    let result_data = null;
-    let result_script = null;
+    const result_data = [];
+    const result_script = [];
+    const orderedFiles = [];
+    // 单遍历（RC2-M2 唯一遍历源）：分类 + 空文件 + 扩展名 + per-type 大小 + typeOrdinal 固化，严格保序
     for (const f of files) {
         const safeName = safeDisplayName(f.originalname);
         if (!f.size || f.size === 0) {
-            return { ok: false, reason: `文件 ${safeName} 为空（大小 0 字节）` };
+            return { ok: false, reason: `文件 ${safeName} 为空（大小 0 字节）`, code: 'EMPTY_FILE' };
         }
         const ext = path.extname(f.originalname || '').toLowerCase();
-        if (RESULT_DATA_EXTS.has(ext)) {
-            if (result_data) return { ok: false, reason: '检测到多个 result_data 类型文件（xlsx/xls），仅允许 1 个' };
-            result_data = f;
-        } else if (RESULT_SCRIPT_EXTS.has(ext)) {
-            if (result_script) return { ok: false, reason: '检测到多个 result_script 类型文件（sql/txt），仅允许 1 个' };
-            result_script = f;
-        } else {
-            return { ok: false, reason: `文件 ${safeName} 扩展名 ${ext} 不在允许列表（xlsx/xls/sql/txt）` };
+        let attachmentType;
+        if (RESULT_DATA_EXTS.has(ext)) attachmentType = 'result_data';
+        else if (RESULT_SCRIPT_EXTS.has(ext)) attachmentType = 'result_script';
+        else return { ok: false, reason: `文件 ${safeName} 扩展名 ${ext} 不在允许列表（xlsx/xls/sql/txt）`, code: 'RESULT_INVALID_TYPE' };
+        // RC-M3：逐文件 per-type 大小校验（脚本 1MB / 数据 100MB），防 100MB 单文件粗上限绕过 result_script per-type 规则
+        if (typeof validateRule === 'function') {
+            const chk = validateRule(attachmentType, f.originalname, f.size);
+            if (!chk || !chk.ok) {
+                return { ok: false, reason: (chk && chk.error) || `文件 ${safeName} 校验失败`, code: 'RESULT_FILE_INVALID' };
+            }
         }
+        const bucket = attachmentType === 'result_data' ? result_data : result_script;
+        bucket.push(f);
+        orderedFiles.push({ file: f, attachment_type: attachmentType, typeOrdinal: bucket.length });
     }
-    if (!result_data) return { ok: false, reason: '缺少 result_data 文件（需要 xlsx 或 xls）' };
-    if (!result_script) return { ok: false, reason: '缺少 result_script 文件（需要 sql 或 txt）' };
-    return { ok: true, result_data, result_script };
+    if (result_data.length < 1) return { ok: false, reason: '缺少 result_data 文件（需要 xlsx 或 xls，至少 1 个）', code: 'RESULT_DATA_REQUIRED' };
+    if (result_script.length < 1) return { ok: false, reason: '缺少 result_script 文件（需要 sql 或 txt，至少 1 个）', code: 'RESULT_SCRIPT_REQUIRED' };
+    if (result_data.length > 5) return { ok: false, reason: `result_data 最多 5 个，实际 ${result_data.length} 个`, code: 'RESULT_DATA_TOO_MANY' };
+    if (result_script.length > 5) return { ok: false, reason: `result_script 最多 5 个，实际 ${result_script.length} 个`, code: 'RESULT_SCRIPT_TOO_MANY' };
+    // typeOrdinal 只在同类型 ≥2 个需消歧时编号；单文件场景清为 undefined，使 buildFinalAttachmentName
+    //   产出与改前**逐字节相同**的旧名（_rd_姓名 而非 _rd_01_姓名），单文件 /submit 真零回归（ultracode 视角③/④ nit）。
+    if (result_data.length === 1) { const o = orderedFiles.find(x => x.attachment_type === 'result_data'); if (o) o.typeOrdinal = undefined; }
+    if (result_script.length === 1) { const o = orderedFiles.find(x => x.attachment_type === 'result_script'); if (o) o.typeOrdinal = undefined; }
+    return { ok: true, result_data, result_script, orderedFiles };
 }
 
 // ============================================================================
@@ -1268,7 +1288,7 @@ module.exports = {
     sanitizeSqlError,
     runRealSmokeTest,
     extractResultColumns,   // 取数质量 v3.0 C1：列名提取（暴露给单测）
-    classifyUploadedFiles,
+    groupUploadedDeliveryFiles,
     safeDisplayName,
     // v1.70.0 抽取（方案 §1.2.6）
     resolveAttachmentPath,

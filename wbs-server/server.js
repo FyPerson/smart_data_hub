@@ -12318,22 +12318,38 @@ const collabStorage = multer.diskStorage({
     }
 });
 
+// 扩展名联合白名单 fileFilter（collabUpload 与 submitUpload 共用同一规则，单一来源）
+function collabFileFilter(req, file, cb) {
+    const ext = normalizeAttachmentExt(file.originalname);
+    if (!ext) {
+        return cb(new Error('文件名为空或包含非法字符'));
+    }
+    if (!COLLAB_ALLOWED_EXTS_UNION.includes(ext)) {
+        return cb(new Error(`不支持的扩展名 ${ext}，仅允许 ${COLLAB_ALLOWED_EXTS_UNION.join('/')}`));
+    }
+    cb(null, true);
+}
+
 const collabUpload = multer({
     storage: collabStorage,
     limits: {
         fileSize: 100 * 1024 * 1024,  // 上限 100MB（最大规则）；endpoint 内按 attachment_type 二次卡分级
         files: 5
     },
-    fileFilter: function (req, file, cb) {
-        const ext = normalizeAttachmentExt(file.originalname);
-        if (!ext) {
-            return cb(new Error('文件名为空或包含非法字符'));
-        }
-        if (!COLLAB_ALLOWED_EXTS_UNION.includes(ext)) {
-            return cb(new Error(`不支持的扩展名 ${ext}，仅允许 ${COLLAB_ALLOWED_EXTS_UNION.join('/')}`));
-        }
-        cb(null, true);
-    }
+    fileFilter: collabFileFilter
+});
+
+// 数据协作·开发完成交付提交专用 multer（多文件上传 M2，方案 §B/§五.1）
+//   独立实例与全局 collabUpload（files:5）物理隔离，避免改一处影响其余 3 个 collabUpload 入口（M-3/M-5）。
+//   files:10 = result_data ≤5 + result_script ≤5（D3 上限合计）；per-type ≤5 与 1MB/100MB 在 groupUploadedDeliveryFiles
+//   内逐文件二次卡（RC-M3）。storage/fileSize/fileFilter 复用 collab 既有规则。
+const submitUpload = multer({
+    storage: collabStorage,
+    limits: {
+        fileSize: 100 * 1024 * 1024,
+        files: 10
+    },
+    fileFilter: collabFileFilter
 });
 
 // ── 需求跟踪录入附件 multer 配置（C4a / v1.0.5 方案 §1.3a）────────────────────
@@ -14191,7 +14207,8 @@ app.post('/api/collab/requests/:id/submit',
     // 它抛的 MulterError（超数量/大小/类型）会走 Express error flow，
     // endpoint 内 try/catch 接不到，所以这里手动调 upload(req, res, cb)
     (req, res, next) => {
-        collabUpload.array('files', 2)(req, res, (err) => {
+        // 多文件上传 M2（方案 §B）：交付提交走独立 submitUpload（files:10 = rd≤5 + rs≤5），与 collabUpload(files:5) 隔离
+        submitUpload.array('files', 10)(req, res, (err) => {
             if (!err) return next();
             // multer 错误统一转 JSON（codex L1 决策落地）
             const isMulterErr = err && err.name === 'MulterError';
@@ -14221,6 +14238,12 @@ app.post('/api/collab/requests/:id/submit',
             return res.status(400).json({ error: 'id 必须是正整数' });
         }
         const id = parseInt(idStr, 10);
+
+        // 多文件上传 M2 透明度（H-3/RC2-M3）：双校验「取首」唯一封装，passed/failed 共用一条可 grep 的 operation_log，
+        //   替换原"取首透明度"散日志（dualcheck_passed_attach 等）；质量结果日志 dualcheck:{kind}/sql=/excel= 仍由 helper 内部写（职责不同：取首 vs 结果）。
+        const logDualcheckChecked = (dataId, scriptId, dataTotal, scriptTotal, kind) =>
+            insertCollabLog(id, 'QUALITY_RECORD', userId, userName,
+                `dualcheck_checked_attachments:data_id=${dataId} script_id=${scriptId} data_total=${dataTotal} script_total=${scriptTotal} record_kind=${kind}`);
 
         try {
             // === 前置校验：协作单存在 ===
@@ -14270,11 +14293,12 @@ app.post('/api/collab/requests/:id/submit',
                 });
             }
 
-            // === 前置校验：文件分类（必须恰好 result_data + result_script，codex M2 简化版）===
-            const classify = collabSubmitHelpers.classifyUploadedFiles(req.files);
-            if (!classify.ok) {
+            // === 前置校验：文件分组（多文件上传 M2：≥1 result_data + ≥1 result_script，各 ≤5；per-type 大小卡）===
+            //   validateCollabAttachmentRule 注入做 per-type 大小校验（RC-M3：脚本 ≤1MB 不被 100MB 粗上限绕过）
+            const grouped = collabSubmitHelpers.groupUploadedDeliveryFiles(req.files, validateCollabAttachmentRule);
+            if (!grouped.ok) {
                 cleanupPending();
-                return res.status(400).json({ error: classify.reason });
+                return res.status(400).json({ error: grouped.reason, code: grouped.code });
             }
 
             // === 前置校验：目标库配置（codex M5）===
@@ -14298,10 +14322,10 @@ app.post('/api/collab/requests/:id/submit',
 
             // === 写 SUBMIT_ATTEMPT 日志（codex M7）===
             // codex 十审 #11：日志回显文件名走 safeDisplayName（basename + 控制字符过滤 + 截断）
-            const dataName = collabSubmitHelpers.safeDisplayName(classify.result_data.originalname);
-            const scriptName = collabSubmitHelpers.safeDisplayName(classify.result_script.originalname);
+            const dataNames = grouped.result_data.map(f => collabSubmitHelpers.safeDisplayName(f.originalname)).join(',');
+            const scriptNames = grouped.result_script.map(f => collabSubmitHelpers.safeDisplayName(f.originalname)).join(',');
             insertCollabLog(id, 'SUBMIT_ATTEMPT', userId, userName,
-                `oldVer=${oldVer}, files=${dataName}+${scriptName}`);
+                `oldVer=${oldVer}, data(${grouped.result_data.length})=[${dataNames}] script(${grouped.result_script.length})=[${scriptNames}]`);
 
             // === 前置 UPDATE：→ SUBMITTED + last_submitted_at（codex C1 + C3）===
             // submitted_at 首次设置时写，后续重提保留原值
@@ -14443,22 +14467,16 @@ app.post('/api/collab/requests/:id/submit',
                     allowedDb: targetConn.database,
                 });
 
-            const uploadedFiles = [
-                {
-                    attachment_type: 'result_data',
-                    source_path: classify.result_data.path,
-                    original_name: classify.result_data.originalname,
-                    uploaded_by: userId,
-                    uploaded_by_name: userName,
-                },
-                {
-                    attachment_type: 'result_script',
-                    source_path: classify.result_script.path,
-                    original_name: classify.result_script.originalname,
-                    uploaded_by: userId,
-                    uploaded_by_name: userName,
-                },
-            ];
+            // 多文件上传 M2（RC-M1/RC2-M2）：uploadedFiles 严格来自 grouped.orderedFiles（唯一遍历源，禁 concat/重排）。
+            //   保序 = 上传序（D1）；typeOrdinal 透传给 activateNewVersion 用于文件名唯一（RC-H1，active+failed 全路径）。
+            const uploadedFiles = grouped.orderedFiles.map(o => ({
+                attachment_type: o.attachment_type,
+                source_path: o.file.path,
+                original_name: o.file.originalname,
+                uploaded_by: userId,
+                uploaded_by_name: userName,
+                typeOrdinal: o.typeOrdinal,
+            }));
 
             let activateResult;
             try {
@@ -14517,10 +14535,14 @@ app.post('/api/collab/requests/:id/submit',
                     };
                     try {
                         // 从 e.failedAttachments 拿本次 failed 附件（含物理文件，已落盘 status='failed'）
-                        // 字段：{id, attachment_type, failed_attempt_seq, file_name}（无 original_name，但 file_name 含原扩展名）
-                        const failedAttArr = Array.isArray(e.failedAttachments) ? e.failedAttachments : [];
+                        // 字段：{id, attachment_type, failed_attempt_seq, file_name, original_name}（M2 起补 original_name）
+                        // RC-M2/M-2：显式按 id 升序取「第一份」（INSERT 序 = orderedFiles 序 = 上传序），多文件不靠 DB 偶然序
+                        const failedAttArr = Array.isArray(e.failedAttachments)
+                            ? [...e.failedAttachments].sort((a, b) => (a.id || 0) - (b.id || 0)) : [];
                         const failedResultData = failedAttArr.find(a => a.attachment_type === 'result_data') || null;
                         const failedResultScript = failedAttArr.find(a => a.attachment_type === 'result_script') || null;
+                        const failedDataTotal = failedAttArr.filter(a => a.attachment_type === 'result_data').length;
+                        const failedScriptTotal = failedAttArr.filter(a => a.attachment_type === 'result_script').length;
                         const qr = await collabSubmitHelpers.recordQualityForDeveloperSubmit({
                             dbAsync: { runAsync: dbRunAsync, getAsync: dbGetAsync },
                             requestId: id,
@@ -14535,6 +14557,11 @@ app.post('/api/collab/requests/:id/submit',
                             logger,
                         });
                         if (qr) qualityCheckFailed = qr;
+                        // 透明度统一日志（H-3/RC2-M3）：failed 路径取首 id + 各类型总数
+                        logDualcheckChecked(
+                            failedResultData ? failedResultData.id : 'NA',
+                            failedResultScript ? failedResultScript.id : 'NA',
+                            failedDataTotal, failedScriptTotal, 'failed');
                     } catch (qe) {
                         logger.warn(`[collab-submit] failed 路径双校验旁路异常（已隔离，不影响 failed 主流程）: ${qe.message}`);
                         insertCollabLog(id, 'QUALITY_RECORD', userId, userName, `dualcheck_failed_endpoint_fallback:${qe.message}`);
@@ -14682,16 +14709,21 @@ app.post('/api/collab/requests/:id/submit',
             let qualityCheck = qualityCheckFallback();
             try {
                 // 查本次提交的 active 附件（result_data / result_script，submission_version=newVer + status='active'）
+                // 多文件上传 M2（M-4/RC-M2）：显式 ORDER BY id ASC，取「第一份」result_data + 第一份 result_script
+                //   （INSERT 序 = orderedFiles 序 = 上传序，id 自增；.find 在 id 升序数组上即取首份）
                 const attachRows = await dbAllAsync(
                     `SELECT id, attachment_type, file_name, original_name FROM collab_attachments
                       WHERE collab_request_id = ? AND submission_version = ?
                         AND attachment_type IN ('result_data','result_script')
-                        AND (status = 'active' OR status IS NULL)`,
+                        AND (status = 'active' OR status IS NULL)
+                      ORDER BY id ASC`,
                     [id, newVer]
                 );
                 const resultDataAttach = attachRows.find(r => r.attachment_type === 'result_data') || null;
                 const resultScriptAttach = attachRows.find(r => r.attachment_type === 'result_script') || null;
-                // codex Commit C 审 high-1/medium-3：passed 路径 activateNewVersion 已成功 = result_data+result_script 必到位（classifyUploadedFiles 强制）
+                const passedDataTotal = attachRows.filter(r => r.attachment_type === 'result_data').length;
+                const passedScriptTotal = attachRows.filter(r => r.attachment_type === 'result_script').length;
+                // codex Commit C 审 high-1/medium-3：passed 路径 activateNewVersion 已成功 = result_data+result_script 必到位（groupUploadedDeliveryFiles 强制 ≥1+≥1）
                 //   查不到 = 系统异常（附件被 supersede / 极端时序）→ 不能伪装成 NO_RESULT_DATA 用户问题，落 compute_failed + log
                 if (!resultDataAttach || !resultScriptAttach) {
                     logger.error(`[collab-submit] passed 路径附件查询缺失（系统异常，非用户问题）: req=${id} newVer=${newVer} found=${attachRows.length} types=${attachRows.map(a => a.attachment_type).join(',')}`);
@@ -14713,9 +14745,9 @@ app.post('/api/collab/requests/:id/submit',
                         logger,
                     });
                     if (qr) qualityCheck = qr;
-                    // codex Commit C 审 high-1：附件查询结果落 operation_log，便于排查"本次质量记录用了哪个附件"
-                    insertCollabLog(id, 'QUALITY_RECORD', userId, userName,
-                        `dualcheck_passed_attach: data_id=${resultDataAttach.id} script_id=${resultScriptAttach.id} persist=${qr && qr.persistence_status}`);
+                    // 透明度统一日志（H-3/RC2-M3）：passed 路径取首 id + 各类型总数（替换原 dualcheck_passed_attach）
+                    logDualcheckChecked(resultDataAttach.id, resultScriptAttach.id,
+                        passedDataTotal, passedScriptTotal, 'passed');
                 }
             } catch (qe) {
                 // 双重保险：helper 设计上永不抛（H-2），这里再兜一层确保主流程绝不因质量记录失败而返 500
@@ -16927,8 +16959,8 @@ app.post('/api/collab/requests/:id/notify-requester-done', authenticateToken, as
         // === 范围守卫（v1.77.0 路径分流）：DONE + 唯一 active result_data 才可发（下游 ①M-4 兜底）。
         //   两条交付路径统一支持：
         //   - exporter 交付路径：normal forward / admin_direct 单 submit-export 产生 result_data（v1.76.1 原范围）
-        //   - developer 交付路径（v1.77.0 新增）：开发 /submit 同样产生 1 active result_data（classifyUploadedFiles
-        //     1rd+1rs），smoke 过 → DONE。⚠️ 修正 v1.76.1 注释错误："纯 developer 路径无 result_data"不成立，
+        //   - developer 交付路径（v1.77.0 新增）：开发 /submit 同样产生 active result_data（groupUploadedDeliveryFiles
+        //     ≥1rd+≥1rs，M2 起支持各 ≤5），smoke 过 → DONE。⚠️ 修正 v1.76.1 注释错误："纯 developer 路径无 result_data"不成立，
         //     当时真正拦住它的只是下面已删除的 hasValidExporter 409（codex 79 H-1，本版业务驱动放开）
         //   delivery_path 仅用于留痕审计；卡片署名 = 发送人（与路径无关）
         if (collab.status !== 'DONE') {
@@ -16945,7 +16977,10 @@ app.post('/api/collab/requests/:id/notify-requester-done', authenticateToken, as
         // === ① M-4：取 result_data active 唯一附件（0/多个明确报错，不随机取）===
         //   codex 84 M-1：status 列是 ALTER 后加可空无 DEFAULT——D1/D2 时代老附件 status=NULL 实为可用，
         //   NULL 兼容与前端渲染（a.status==='active' || !a.status）及 recordQuality 模板查询同源；
-        //   唯一性 AMBIGUOUS 守卫兜底混合场景
+        //   ⚠️ M2 多文件（2026-06-28）：开发 /submit 起 result_data 可合法 ≤5 个 → 此处会命中 >1。
+        //   现状刻意**保持拦截**（不静默取首避免给业务方发不完整数据；钉钉文件消息单次仅 1 个）；
+        //   多数据文件"通知业务方"的产品口径（发全部/发首份/拆单）待示例用户A拍板，记 backlog。
+        //   仅订正了 >1 的对外文案（原"请联系管理员修复"误把 M2 合法状态报成数据损坏）；code 保持兼容既有 e2e。
         const atts = await dbAllAsync(
             `SELECT id, file_name, original_name FROM collab_attachments
               WHERE collab_request_id = ? AND attachment_type = 'result_data'
@@ -16953,7 +16988,7 @@ app.post('/api/collab/requests/:id/notify-requester-done', authenticateToken, as
             [id]
         );
         if (atts.length === 0) return res.status(409).json({ error: '无有效数据文件', code: 'RESULT_DATA_MISSING' });
-        if (atts.length > 1) return res.status(409).json({ error: '存在多个有效数据文件，请联系管理员修复', code: 'RESULT_DATA_AMBIGUOUS' });
+        if (atts.length > 1) return res.status(409).json({ error: '本单含多个数据文件，钉钉文件消息单次仅支持发送 1 个，请线下转达或拆分单据后再发', code: 'RESULT_DATA_AMBIGUOUS' });
         const att = atts[0];
 
         // === M-2（codex 54）：本需求只发 xlsx，断言扩展名（submit-export 已限定 .xlsx/.xls，此处兜底）===
@@ -18187,11 +18222,16 @@ app.post('/api/collab/requests/:id/attachments',
                 return res.status(400).json({ error: '请至少上传一个文件' });
             }
 
-            // v1.77.0 codex 83 M-1：data_scope 单文件语义后端强制（前端单文件 input 仅 UI 层，API 直调可绕过；
-            //   example_xlsx 历史同为前端单文件后端不限，既有行为不动，仅新类型收紧）
-            if (attachment_type === 'data_scope' && files.length > 1) {
+            // v1.77.0 codex 83 M-1：data_scope 原为单文件语义后端强制。
+            // 多文件上传 M1（方案 §A）：放开至 ≤5——前端 multiple input（M3 落地）+ 后端入库循环（下方）已支持 N 个。
+            //   data_scope 不参与列校验（纯存储，方案 §五.7），多文件无下游"取首"逻辑。
+            //   ⚠️ 本 >5 分支为防御性兜底：实际超量由 collabUpload.array('files', 5) 在 multer 层前置拦截
+            //   （实测 6 个同名 'files' 字段文件走 LIMIT_FILE_COUNT → 下方中间件返"单次最多上传 5 个文件"）。
+            //   验收口径 RC-M4：超量对外文案以 multer 友好文案为准，不绑定具体错误码；此分支仅在
+            //   multer 上限被改大/绕过时才会被独立触发。
+            if (attachment_type === 'data_scope' && files.length > 5) {
                 cleanupTempFiles();
-                return res.status(400).json({ error: '数据范围说明仅支持单个文件', code: 'DATA_SCOPE_SINGLE_FILE_ONLY' });
+                return res.status(400).json({ error: '数据范围说明最多上传 5 个文件', code: 'DATA_SCOPE_TOO_MANY' });
             }
 
             // 按 attachment_type 规则二次校验（扩展名分级 + 大小分级）
