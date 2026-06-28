@@ -88,7 +88,7 @@
         .flag-backlog { display: inline-block; margin-left: 6px; font-size: 11px; color: #d97706; font-weight: 600; }
 
         /* 主子单分组标记（P2 2026-06-26 / v2 2026-06-27 层级树重构）：ID 列下挂角色徽章 */
-        .corr-group-badge { display: inline-block; margin-top: 3px; padding: 1px 5px; border-radius: 4px; font-size: 10px; font-weight: 600; line-height: 1.6; white-space: nowrap; }
+        .corr-group-badge { display: inline-block; margin-top: 3px; margin-left: 5px; padding: 1px 5px; border-radius: 4px; font-size: 10px; font-weight: 600; line-height: 1.6; white-space: nowrap; }   /* margin-left：序号 #id 与组徽章之间留一点点横向空隙（原紧贴，视觉不佳） */
         .corr-group-badge.g-primary { background: #e0edff; color: #1d4ed8; border: 1px solid #c3dafe; }   /* 主单：蓝 */
         .corr-group-badge.g-child { background: #f0e9fb; color: #6d28d9; border: 1px solid #ddd0f5; }      /* 子单：紫 */
         .corr-group-badge .grp-num { font-variant-numeric: tabular-nums; }
@@ -306,13 +306,13 @@
                 <thead>
                     <tr>
                         <th style="width:1%; white-space:nowrap;">ID</th>
+                        <th style="width:110px;">OA 流程号</th>
                         <th style="width:90px;">状态</th>
                         <th style="width:64px;">类型</th>
                         <th style="width:72px;">修正条数</th>
                         <th style="width:110px;">所属系统</th>
                         <th style="min-width:220px;">修正方式</th>
                         <th style="width:110px;">业务方</th>
-                        <th style="width:110px;">OA 流程号</th>
                         <th style="width:100px;">指派开发</th>
                         <th style="width:90px;">创建人</th>
                         <th style="width:64px;">提交次数</th>
@@ -858,6 +858,7 @@
                 const reworkSeq = Number(it.rework_seq);
                 // L-2：脏 id 兜底——非有限 id 显示 '?' 且不挂 openDrawer（见下方 onclickAttr），避免 openDrawer(NaN)
                 let groupBadge = '', reworkFlag = '', idCell = Number.isFinite(rowId) ? `#${rowId}` : '?';
+                const oaNo = formatOaNo(it.oa_number);   // 缓存一次，OA 列 title/内容复用（避免三次调用易改漏）
                 const trClass = [];
                 if (role === 'xsys') {
                     // 跨系统子单：紫「子单·组N」角色徽章（表身份）+ 琥珀左条（表分组类型，v1.98.1 去底色与普通单据一致、仅左条区分）；rooted 时缩进成树枝（M-4：无根则平铺不画孤儿枝）
@@ -894,13 +895,13 @@
                 return `
                 <tr${onclickAttr}${trClass.length ? ` class="${trClass.join(' ')}"` : ''}>
                     <td style="color:#9ca3af; font-size:12px;">${idCell}${groupBadge}</td>
+                    <td class="ellip" title="${escapeHtml(oaNo)}">${oaNo ? escapeHtml(oaNo) : '<span style="color:#d1d5db;">-</span>'}</td>
                     <td><span class="status-badge s-${statusClass(it.status)}">${escapeHtml(STATUS_LABELS[it.status] || it.status)}</span>${isOverdue(it) ? '<span class="flag-overdue">已超预计</span>' : ''}${isBacklog(it) ? '<span class="flag-backlog">积压</span>' : ''}${isUnarchivedBacklog(it) ? '<span class="flag-backlog">超7天未归档</span>' : ''}${it.status === 'ARCHIVED' && it.closure_type === 'admin_closure' ? '<span class="flag-backlog" style="color:#1d4ed8;">行政闭环</span>' : ''}${reworkFlag}</td>
                     <td><span class="type-tag t-${it.correction_type === 'batch' ? 'batch' : 'single'}">${it.correction_type === 'batch' ? '批量' : '单'}</span></td>
                     <td style="text-align:center;">${it.correction_count != null ? it.correction_count : (it.correction_type === 'single' ? 1 : '-')}</td>
                     <td>${escapeHtml(sysLabel(it))}</td>
                     <td class="ellip" title="${escapeHtml(it.location_info || '')}">${escapeHtml(it.location_info || '')}</td>
                     <td>${escapeHtml(it.requester_name || '-')}</td>
-                    <td class="ellip" title="${escapeHtml(formatOaNo(it.oa_number))}">${formatOaNo(it.oa_number) ? escapeHtml(formatOaNo(it.oa_number)) : '<span style="color:#d1d5db;">-</span>'}</td>
                     <td>${it.assigned_to_name ? escapeHtml(it.assigned_to_name) : '<span style="color:#d1d5db;">未指派</span>'}</td>
                     <td>${escapeHtml(it.created_by_name || '')}</td>
                     <td style="text-align:center;">${it.submission_count || 0}</td>

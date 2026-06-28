@@ -1865,8 +1865,11 @@
                 return;
             }
 
-            // 应用客户端排序（若有）
-            const sorted = currentSortBy ? sortByField(working, currentSortBy, currentSortDir) : working;
+            // 应用客户端排序：用户点过表头则按其选择，否则默认 ID 倒序（最新建单在前）。
+            // 后期各模块列表页默认排序统一按此逻辑（ID desc）。lastListBackendOrder 仍缓存后端原始顺序（上方 currentSortBy===null 分支），此处仅改默认渲染序、不动缓存语义。
+            // ⚠️ 默认 ID 倒序刻意覆盖了后端的「status 优先级→deadline ASC→id DESC」三级业务排序（server.js GET /api/collab/requests）——用户拍板统一 ID 倒序，知情接受"待指派/紧急单不再默认置顶"。
+            // 前提：id 为数值主键（恒为 number），sortByField 的 number 分支走数值降序，无字典序/NaN 风险。
+            const sorted = currentSortBy ? sortByField(working, currentSortBy, currentSortDir) : sortByField(working, 'id', 'desc');
 
             tbody.innerHTML = sorted.map(r => {
                 const desc = r.description.length > 60 ? r.description.substring(0, 60) + '…' : r.description;
@@ -2005,7 +2008,7 @@
         }
 
         /**
-         * 表头点击处理：第 1 次 desc → 第 2 次 asc → 第 3 次清排序（回后端默认）
+         * 表头点击处理：第 1 次 desc → 第 2 次 asc → 第 3 次清排序（回默认 ID 倒序，见 renderList）
          */
         function initListSorting() {
             const ths = document.querySelectorAll('#collabListTable th.sortable');
@@ -2019,7 +2022,7 @@
                     } else if (currentSortDir === 'desc') {
                         currentSortDir = 'asc';
                     } else {
-                        // 第 3 次：清排序，恢复后端原始顺序
+                        // 第 3 次：清排序，回默认 ID 倒序（见 renderList，已非后端原始顺序）
                         currentSortBy = null;
                         currentSortDir = 'desc';
                     }
@@ -2040,6 +2043,10 @@
                 if (currentSortBy === field) {
                     th.classList.add('active');
                     if (icon) icon.textContent = currentSortDir === 'asc' ? '↑' : '↓';
+                } else if (currentSortBy === null && field === 'id') {
+                    // 默认态：列表实际按 id 倒序渲染（renderList），ID 列显示 ↓ 弱默认指示；不加 active 高亮以区别于用户主动点击
+                    th.classList.remove('active');
+                    if (icon) icon.textContent = '↓';
                 } else {
                     th.classList.remove('active');
                     if (icon) icon.textContent = '⇅';
