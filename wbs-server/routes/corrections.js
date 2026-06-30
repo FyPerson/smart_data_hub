@@ -131,6 +131,7 @@ function initSchema() {
             correction_count INTEGER CHECK (correction_count IS NULL OR (typeof(correction_count) = 'integer' AND correction_count >= 1)),  -- 修正条数（H/#6：可空记账字段，非空正整数；RC-L2 + codex24 M-2 DB 兜底 typeof 防 REAL 1.5）
             reason TEXT,
             oa_number TEXT,
+            process_type TEXT,               -- 流程类型（建单录入，自由文本可选；便于后期统计，列表显示+搜索；可空辅助列，不入 KEY_COLS，同 error_proof_note 级）
 
             -- 单/批量数据修正区分（G-8，决定交付闸门）
             correction_type TEXT NOT NULL DEFAULT 'single',
@@ -465,6 +466,21 @@ async function runCorrectionMigration(ddlError) {
         await new Promise((resolve, reject) => {
             db.run('CREATE INDEX IF NOT EXISTS idx_corr_rework_root ON correction_requests(rework_root_id)', (err) => err ? reject(err) : resolve());
         });
+        // [2a-pt] 流程类型字段（2026-06-30）：已上线表演进——加 process_type（建单录入自由文本，列表显示+搜索，供后期统计）
+        //   幂等 ALTER ADD COLUMN（同 [2a-x] error_proof_note 范式）。生产已有数据不能 DROP 重建，CREATE TABLE IF NOT EXISTS 对已存在表 no-op（新列不加），故此处补。
+        //   【不入 KEY_COLS】（可空辅助列，缺失不阻断写入口，与 error_proof_note 同级）→ 无 C-1 顺序硬约束；仍置 [2b] 复查之前以保列集最新。
+        //   col/type 为硬编码常量非用户输入，插值无注入风险；ALTER reject → 外层 catch 置 error（可观测，不静默吞）。
+        const PROCESS_TYPE_COLS = [
+            ['process_type', 'TEXT'],   // 流程类型（建单录入，可选自由文本，≤100 后端校验）
+        ];
+        for (const [col, type] of PROCESS_TYPE_COLS) {
+            if (!colNames.includes(col)) {
+                await new Promise((resolve, reject) => {
+                    db.run(`ALTER TABLE correction_requests ADD COLUMN ${col} ${type}`, (err) => err ? reject(err) : resolve());
+                });
+                logger.info(`[数据修正迁移] correction_requests ADD COLUMN ${col} ${type}（流程类型字段）`);
+            }
+        }
         // [2b] ⭐ ALTER 后【重新】PRAGMA：下方 missingCols 必须用最新列集（C-1：不能复用 [2] 的旧 colNames 复查）
         cols = await new Promise((resolve, reject) => {
             db.all('PRAGMA table_info(correction_requests)', (err, rows) => err ? reject(err) : resolve(rows));
@@ -1196,6 +1212,12 @@ router.post('/', authenticateToken, requireCorrectionSchemaReady, requireAdmin, 
         //   跨系统子单不走本路径——子单 reason 继承主单（见 createLinkedChild common.reason），主单已强校验故子单天然满足。
         const reasonText = (typeof b.reason === 'string' ? b.reason.trim() : '');
         const oaNumber = (typeof b.oa_number === 'string' && b.oa_number.trim()) ? b.oa_number.trim() : null;
+        // 流程类型（2026-06-30）：建单录入，可选自由文本；≤100 防御性上限（对齐 note 类有界 TEXT 防无界——流程类型是分类标签非长描述）。供列表显示+搜索+后期统计。
+        let processType = null;
+        if (typeof b.process_type === 'string' && b.process_type.trim()) {
+            processType = b.process_type.trim();
+            if (processType.length > 100) return res.status(400).json({ error: '流程类型过长（≤100 字）', code: 'PROCESS_TYPE_TOO_LONG' });
+        }
         // 修正条数（H/#6 codex 22 M-3 + codex 24 M-1 严格正则）：可空；非空须为十进制正整数 1-999999999。
         //   用正则而非 Number.isInteger——后者放行字符串 "5.0"/"1e3"/"0x10"/超大数，与前端 /^[1-9]\d{0,8}$/ 口径分裂。
         //   注（codex 25 RC-L1）：正则拦的是"字符串输入形态"（前端 number input 传的是字符串）；若 API 直传 JSON
@@ -1265,11 +1287,11 @@ router.post('/', authenticateToken, requireCorrectionSchemaReady, requireAdmin, 
             const result = await dbRunAsync(
                 `INSERT INTO correction_requests
                    (source_system, source_system_other, location_info, correction_count,
-                    reason, oa_number, correction_type, requester_dept, requester_name, requester_phone,
+                    reason, oa_number, process_type, correction_type, requester_dept, requester_name, requester_phone,
                     status, expected_deadline, relay_notified_user_id, created_by, created_by_name, error_proof_note)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING_ASSIGN', ?, ?, ?, ?, ?)`,
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING_ASSIGN', ?, ?, ?, ?, ?)`,
                 [sourceSystem, sourceSystem === '其他' ? sourceSystemOther : null, locationInfo, correctionCount,
-                 reasonText, oaNumber, correctionType, requesterDept, requesterName, requesterPhone,
+                 reasonText, oaNumber, processType, correctionType, requesterDept, requesterName, requesterPhone,
                  expectedDeadline, relayUserId, createdBy, createdByName, errorProofNote]
             );
             newId = result.lastID;
@@ -1284,7 +1306,7 @@ router.post('/', authenticateToken, requireCorrectionSchemaReady, requireAdmin, 
             //   子单复制主业务方到兼容列、不写子表（见 insertLinkedChildCorrection）；继承主单公共字段（reason/oa/类型/截止）。
             if (crossSystem) {
                 await dbRunAsync('UPDATE correction_requests SET correction_group_id = ? WHERE id = ?', [newId, newId]);
-                const common = { reason: reasonText, oaNumber, correctionType, requesterDept, expectedDeadline, createdBy, createdByName };
+                const common = { reason: reasonText, oaNumber, processType, correctionType, requesterDept, expectedDeadline, createdBy, createdByName };
                 const childId = await insertLinkedChildCorrection(system2, common, primaryRequester, newId, '信息技术部建单·跨系统关联单（系统2）');
                 childIds.push(childId);
             }
@@ -1354,7 +1376,7 @@ router.post('/:id/link-new', authenticateToken, requireCorrectionSchemaReady, co
         await dbRunAsync('BEGIN IMMEDIATE');
         try {
             // 事务内重读主单真实 status + group_id + 继承公共字段（含 created_by，不信缓存/客户端）
-            const master = await dbGetAsync('SELECT id, status, correction_group_id, reason, oa_number, correction_type, requester_dept, expected_deadline, created_by, created_by_name FROM correction_requests WHERE id = ?', [masterId]);
+            const master = await dbGetAsync('SELECT id, status, correction_group_id, reason, oa_number, process_type, correction_type, requester_dept, expected_deadline, created_by, created_by_name FROM correction_requests WHERE id = ?', [masterId]);
             if (!master) { await dbRunAsync('ROLLBACK'); return res.status(404).json({ error: '主单不存在' }); }
             // 状态收窄（§6.2）：**终态限制仅针对主单**——子单 VOIDED/REJECTED 的终态语义归 notify-done 组闸门处理（阻塞完成通知），link-new 不重复查组成员（L-1 codex 55）。
             if (['VOIDED', 'REJECTED', 'ARCHIVED'].includes(master.status)) {
@@ -1381,7 +1403,7 @@ router.post('/:id/link-new', authenticateToken, requireCorrectionSchemaReady, co
                 await dbRunAsync('UPDATE correction_requests SET correction_group_id = ? WHERE id = ?', [masterId, masterId]);
             }
             // M-2（codex 55）：追加子单 created_by 继承主单建单人（组成员同主、原诉求视角可见一致）；实际追加操作人记 history operator。
-            const common = { reason: master.reason, oaNumber: master.oa_number, correctionType: master.correction_type, requesterDept: master.requester_dept, expectedDeadline: master.expected_deadline, createdBy: master.created_by, createdByName: master.created_by_name };
+            const common = { reason: master.reason, oaNumber: master.oa_number, processType: master.process_type, correctionType: master.correction_type, requesterDept: master.requester_dept, expectedDeadline: master.expected_deadline, createdBy: master.created_by, createdByName: master.created_by_name };
             newId = await insertLinkedChildCorrection(s, common, { name: primary.requester_name, phone: primary.requester_phone }, masterId, '信息技术部追加关联单', { id: actor.id, name: actor.name });
             await dbRunAsync('COMMIT');
         } catch (txErr) {
@@ -1551,7 +1573,7 @@ router.post('/:id/reopen-rework', authenticateToken, requireCorrectionSchemaRead
             const target = await dbGetAsync(
                 `SELECT id, status, correction_group_id, rework_root_id, assigned_to,
                         source_system, source_system_other, location_info, correction_count,
-                        reason, oa_number, correction_type, requester_dept, requester_name, requester_phone,
+                        reason, oa_number, process_type, correction_type, requester_dept, requester_name, requester_phone,
                         expected_deadline, created_by, created_by_name
                    FROM correction_requests WHERE id = ?`, [id]);
             if (!target) { await dbRunAsync('ROLLBACK'); return res.status(404).json({ error: '修正单不存在' }); }
@@ -1680,7 +1702,7 @@ router.get('/', authenticateToken, requireCorrectionSchemaReady, async (req, res
         }
         const rows = await dbAllAsync(
             `SELECT id, source_system, source_system_other, location_info, correction_type, correction_count, status,
-                    requester_name, requester_dept, requester_phone, oa_number, assigned_to, assigned_to_name,
+                    requester_name, requester_dept, requester_phone, oa_number, process_type, assigned_to, assigned_to_name,
                     expected_deadline, dev_estimated_at, created_at, fixed_at, refixed_at, archived_at,
                     submission_count, created_by, created_by_name, dingtalk_chat_id,
                     relay_notified_at, relay_notify_status, notify_status, requester_notify_status, completion_notify_status, closure_type,
@@ -2016,11 +2038,11 @@ async function insertLinkedChildCorrection(sys, common, primaryReq, masterId, hi
     const result = await dbRunAsync(
         `INSERT INTO correction_requests
            (source_system, source_system_other, location_info, correction_count,
-            reason, oa_number, correction_type, requester_dept, requester_name, requester_phone,
+            reason, oa_number, process_type, correction_type, requester_dept, requester_name, requester_phone,
             status, expected_deadline, correction_group_id, created_by, created_by_name)
-         VALUES (?,?,?,?,?,?,?,?,?,?, 'PENDING_ASSIGN', ?, ?, ?, ?)`,
+         VALUES (?,?,?,?,?,?,?,?,?,?,?, 'PENDING_ASSIGN', ?, ?, ?, ?)`,
         [sys.sourceSystem, sys.sourceSystem === '其他' ? sys.sourceSystemOther : null, sys.locationInfo, sys.correctionCount,
-         common.reason, common.oaNumber, common.correctionType, common.requesterDept, primaryReq.name, primaryReq.phone,
+         common.reason, common.oaNumber, common.processType, common.correctionType, common.requesterDept, primaryReq.name, primaryReq.phone,
          common.expectedDeadline, masterId, common.createdBy, common.createdByName]
     );
     const childId = result.lastID;
@@ -2101,12 +2123,12 @@ async function insertReworkChildCorrection(parentRow, masterId, rework, operator
     const result = await dbRunAsync(
         `INSERT INTO correction_requests
            (source_system, source_system_other, location_info, correction_count,
-            reason, oa_number, correction_type, requester_dept, requester_name, requester_phone,
+            reason, oa_number, process_type, correction_type, requester_dept, requester_name, requester_phone,
             status, expected_deadline, correction_group_id, created_by, created_by_name,
             rework_parent_id, rework_root_id, rework_seq, reopen_reason)
-         VALUES (?,?,?,?,?,?,?,?,?,?, 'PENDING_ASSIGN', ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?,?,?,?,?,?,?,?,?,?,?, 'PENDING_ASSIGN', ?, ?, ?, ?, ?, ?, ?, ?)`,
         [parentRow.source_system, parentRow.source_system_other, parentRow.location_info, parentRow.correction_count,
-         parentRow.reason, parentRow.oa_number, parentRow.correction_type, parentRow.requester_dept, parentRow.requester_name, parentRow.requester_phone,
+         parentRow.reason, parentRow.oa_number, parentRow.process_type, parentRow.correction_type, parentRow.requester_dept, parentRow.requester_name, parentRow.requester_phone,
          correctionDefaultDeadline(), Number(masterId), parentRow.created_by, parentRow.created_by_name,
          Number(rework.parentId), Number(rework.rootId), Number(rework.seq), rework.reopenReason]
     );

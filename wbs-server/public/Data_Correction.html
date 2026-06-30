@@ -292,7 +292,7 @@
             <label id="includeVoidedWrap" style="font-size:12px; color:#6b7280; display:none; align-items:center; gap:5px; cursor:pointer;">
                 <input type="checkbox" id="filterIncludeVoided" onchange="loadList()"> 含已作废
             </label>
-            <input type="text" id="filterSearch" placeholder="搜索修正方式/业务方/OA..." onkeyup="debounceSearch()">
+            <input type="text" id="filterSearch" placeholder="搜索修正方式/业务方/OA/流程类型..." onkeyup="debounceSearch()">
             <div style="flex:1;"></div>
             <button class="btn-primary" id="btnNewCorrection" onclick="openCreateModal()" style="display:none;">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
@@ -307,6 +307,7 @@
                     <tr>
                         <th style="width:1%; white-space:nowrap;">ID</th>
                         <th style="width:110px;">OA 流程号</th>
+                        <th style="width:90px;">流程类型</th>
                         <th style="width:90px;">状态</th>
                         <th style="width:64px;">类型</th>
                         <th style="width:72px;">修正条数</th>
@@ -343,7 +344,10 @@
         <div class="modal-box">
             <div class="modal-header"><h2>新建修正单</h2><button class="drawer-close" onclick="closeCreateModal()">&times;</button></div>
             <div class="modal-body">
-                <div class="form-group"><label>OA 流程号</label><input type="text" id="formOaNumber" placeholder="可选，只填数字部分（如 364265）"></div>
+                <div class="form-row">
+                    <div class="form-group"><label>OA 流程号</label><input type="text" id="formOaNumber" placeholder="可选，只填数字部分（如 364265）"></div>
+                    <div class="form-group"><label>流程类型</label><input type="text" id="formProcessType" placeholder="可选"></div>
+                </div>
                 <div class="form-group">
                     <label>修正类型 <span class="req">*</span></label>
                     <div class="radio-row">
@@ -776,7 +780,7 @@
                 if (onlyBacklog && !isBacklog(it)) return false;
                 if (onlyUnarchived && !isUnarchivedBacklog(it)) return false;
                 if (kw) {
-                    const hay = [it.location_info, it.requester_name, it.oa_number, formatOaNo(it.oa_number)].map(x => (x || '').toLowerCase()).join(' ');
+                    const hay = [it.location_info, it.requester_name, it.oa_number, formatOaNo(it.oa_number), it.process_type].map(x => (x || '').toLowerCase()).join(' ');
                     if (!hay.includes(kw)) return false;
                 }
                 return true;
@@ -896,6 +900,7 @@
                 <tr${onclickAttr}${trClass.length ? ` class="${trClass.join(' ')}"` : ''}>
                     <td style="color:#9ca3af; font-size:12px;">${idCell}${groupBadge}</td>
                     <td class="ellip" title="${escapeHtml(oaNo)}">${oaNo ? escapeHtml(oaNo) : '<span style="color:#d1d5db;">-</span>'}</td>
+                    <td class="ellip" title="${escapeHtml(it.process_type || '')}">${it.process_type ? escapeHtml(it.process_type) : '<span style="color:#d1d5db;">-</span>'}</td>
                     <td><span class="status-badge s-${statusClass(it.status)}">${escapeHtml(STATUS_LABELS[it.status] || it.status)}</span>${isOverdue(it) ? '<span class="flag-overdue">已超预计</span>' : ''}${isBacklog(it) ? '<span class="flag-backlog">积压</span>' : ''}${isUnarchivedBacklog(it) ? '<span class="flag-backlog">超7天未归档</span>' : ''}${it.status === 'ARCHIVED' && it.closure_type === 'admin_closure' ? '<span class="flag-backlog" style="color:#1d4ed8;">行政闭环</span>' : ''}${reworkFlag}</td>
                     <td><span class="type-tag t-${it.correction_type === 'batch' ? 'batch' : 'single'}">${it.correction_type === 'batch' ? '批量' : '单'}</span></td>
                     <td style="text-align:center;">${it.correction_count != null ? it.correction_count : (it.correction_type === 'single' ? 1 : '-')}</td>
@@ -1064,9 +1069,11 @@
             info += kvFull('修正方式', escapeHtml(r.location_info || '-'));
             info += kv('修正条数', r.correction_count != null ? String(r.correction_count) : '-');
             if (r.reason) info += kvFull('原因/背景', escapeHtml(r.reason));
-            info += kv('业务方', escapeHtml((r.requester_name || '-') + (r.requester_dept ? ` / ${r.requester_dept}` : '')));
+            info += kv('业务方', escapeHtml(r.requester_name || '-'));
+            info += kv('业务方部门', escapeHtml(r.requester_dept || '-'));
             info += kv('业务方手机', escapeHtml(r.requester_phone || '-'));
             info += kv('OA 流程号', formatOaNo(r.oa_number) ? escapeHtml(formatOaNo(r.oa_number)) : '-');
+            info += kv('流程类型', r.process_type ? escapeHtml(r.process_type) : '-');
             info += kv('提交次数', String(r.submission_count || 0));
             info += kv('指派开发', escapeHtml(r.assigned_to_name || '未指派'));
             info += kv('创建人', escapeHtml(r.created_by_name || '-'));
@@ -1330,7 +1337,7 @@
             // 重置
             document.querySelector('input[name="corrType"][value="single"]').checked = true;
             document.querySelector('input[name="assignMode"][value="A"]').checked = true;
-            ['formSourceSystemOther', 'formLocationInfo', 'formCorrectionCount', 'formOaNumber', 'formReason', 'formErrorProofNote',
+            ['formSourceSystemOther', 'formLocationInfo', 'formCorrectionCount', 'formOaNumber', 'formProcessType', 'formReason', 'formErrorProofNote',
              'formSourceSystemOther2', 'formLocationInfo2', 'formCorrectionCount2', 'formExpectedDeadline'].forEach(id => document.getElementById(id).value = '');   // L5 含系统2 字段；L-2 codex 57 补 formExpectedDeadline 防连续建单残留
             document.getElementById('formErrorProofFiles').value = '';   // L3b 清错误证明附件选择
             document.getElementById('formCrossSystem').checked = false;   // L5 重置跨系统开关
@@ -1445,6 +1452,7 @@
                 location_info: v('formLocationInfo'),
                 correction_count: correctionCountVal,   // single=undefined（后端强制 1）/ batch=raw（≥2）
                 oa_number: v('formOaNumber') || undefined,
+                process_type: v('formProcessType') || undefined,
                 reason: reasonInput,   // P2 必填 ≥5 字（已 trim 校验）
                 requester_dept: document.getElementById('formRequesterDept').value || undefined,
                 requesters: requesters,   // L3a 多业务方（第一行=主业务方；后端 normalize 兼容旧 requester_name 字段）
