@@ -6,7 +6,7 @@
 //   2. submit/accept/return/close 全流程
 //   3. hold/resume（resume 从 timeline 解析暂缓前态，RC-M2）
 //   4. reopen（reopen_count++ + 清时间戳）/ reactivate / issue_reject / void
-//   5. scope_change（不改 status + scope_changed=1 + deadline 留痕）
+//   5. scope_change（F2a 起 feature/improvement 全禁 → 409 SCOPE_CHANGE_DISABLED）
 //   6. derive（派生新单 + 防环 M-1 + T-L3 先 created 再 derive）
 //   7. normalizeSysDatetime 用例表（核实#8 / §6.2 L-2）
 const assert = require('assert');
@@ -36,6 +36,7 @@ const mod = require('../routes/sys-iteration')({
   logger: { info: noop, warn: noop, error: noop, debug: noop },
   db, dbRunAsync: run, dbGetAsync: get, dbAllAsync: all,
   authenticateToken, requireAdmin,
+  ...require('./_sys-attach-test-deps'),   // C3b：附件 deps stub（过工厂期 REQUIRED_DEPS 校验）
 });
 const I = mod._internals;
 function waitReady() {
@@ -199,27 +200,17 @@ async function main() {
     assert.strictEqual(r.body.status, '已作废', 'void → 已作废');
     ok('void：→ 已作废（软删除）');
 
-    // ── [8] scope_change（不改 status + scope_changed=1 + deadline 留痕）──
+    // ── [8] scope_change：F2a 起 feature/improvement 全禁（评估环节"禁开发态调需求"，v1.7 §十九 ⑦）──
+    //   ⚠️ 连锁改写：原 C3a「scope_change 改 status/scope_changed=1/deadline 留痕」断言已不适用——
+    //   端点内逻辑保留（config 流追加时用），但 feature/improvement 被 type 守卫前置拦 409；summary 校验/deadline 留痕/M-3 等留 config 流测。
     const id6 = await seedToDevInProgress(5);   // 开发中
     r = await call('POST', `/api/sys-issues/${id6}/scope-change`, adminTok, { summary: '加一个导出功能', deadline: '2026-09-01' });
-    assert.strictEqual(r.status, 200, 'scope-change 200');
-    const d6 = await get('SELECT status, scope_changed, deadline FROM sys_issues WHERE id=?', [id6]);
-    assert.strictEqual(d6.status, '开发中', 'scope_change 不改 status');
-    assert.strictEqual(d6.scope_changed, 1, 'scope_changed=1');
-    assert.strictEqual(d6.deadline, '2026-09-01', 'deadline 改动');
-    const scEv = await get("SELECT summary FROM sys_issue_timeline WHERE issue_id=? AND event_type='scope_change' ORDER BY id DESC LIMIT 1", [id6]);
-    assert.ok(/deadline/.test(scEv.summary), 'scope_change summary 含 deadline 留痕');
-    ok('scope_change：不改 status + scope_changed=1 + deadline 改动留痕到 summary');
-    // scope_change 缺 summary → 400
-    r = await call('POST', `/api/sys-issues/${id6}/scope-change`, adminTok, { summary: '  ' });
-    assert.strictEqual(r.status, 400, 'scope-change 缺 summary 400');
-    ok('scope_change：缺 summary → 400 SCOPE_SUMMARY_REQUIRED');
-    // codex 15 M-3：空白 deadline 不清空原 deadline（id6 此时 deadline='2026-09-01'）
-    r = await call('POST', `/api/sys-issues/${id6}/scope-change`, adminTok, { summary: '再扩展', deadline: '   ' });
-    assert.strictEqual(r.status, 200, 'scope-change 空白 deadline 200');
-    const d6b = await get('SELECT deadline FROM sys_issues WHERE id=?', [id6]);
-    assert.strictEqual(d6b.deadline, '2026-09-01', '空白 deadline 不清空原值（保持 2026-09-01）');
-    ok('M-3：scope_change 空白 deadline「   」→ 不清空原 deadline（防误清空）');
+    assert.strictEqual(r.status, 409, 'scope-change feature 全禁 409, got ' + r.status);
+    assert.strictEqual(r.body.code, 'SCOPE_CHANGE_DISABLED', 'feature scope-change 应 SCOPE_CHANGE_DISABLED, got ' + (r.body && r.body.code));
+    const d6 = await get('SELECT status, scope_changed FROM sys_issues WHERE id=?', [id6]);
+    assert.strictEqual(d6.status, '开发中', 'scope-change 被拒，status 不变（仍开发中）');
+    assert.strictEqual(d6.scope_changed, 0, 'scope-change 被拒，scope_changed 不变（仍 0）');
+    ok('⭐ scope_change：F2a 起 feature/improvement 全禁 → 409 SCOPE_CHANGE_DISABLED（需求变化走 derive/作废重开）');
 
     // ── [9] derive（派生新单 + 防环 + T-L3）──
     const id7 = await seedToDevInProgress(5);
@@ -259,7 +250,7 @@ async function main() {
     ok('normalizeSysDatetime 分钟级（M-2）：标准/T分隔/trim/空/非法月日时/乱码/带秒判非法 + truncToMinute 截秒');
 
     console.log(`\n[全部通过] ${passed}/${passed} ✓ 系统迭代 C3a 开发动作 + 旁路态端点全流程验证通过`);
-    console.log('  覆盖：estimate(本人/格式/>=assigned_at) + submit/accept/return(计数) + hold/resume(RC-M2 暂缓前态) + reopen(计数/清时间戳) + reactivate(RC-M1) + void + scope_change(不改status/留痕) + derive(防环 M-1/T-L3) + normalizeSysDatetime');
+    console.log('  覆盖：estimate(本人/格式/>=assigned_at) + submit/accept/return(计数) + hold/resume(RC-M2 暂缓前态) + reopen(计数/清时间戳) + reactivate(RC-M1) + void + scope_change(F2a 全禁 409) + derive(防环 M-1/T-L3) + normalizeSysDatetime');
   } finally {
     server.close();
     db.close();

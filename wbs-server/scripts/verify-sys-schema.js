@@ -27,6 +27,7 @@ const deps = {
   logger: { info: noop, warn: noop, error: noop, debug: noop },
   db, dbRunAsync: run, dbGetAsync: get, dbAllAsync: all,
   authenticateToken: mwPass, requireAdmin: mwPass,
+  ...require('./_sys-attach-test-deps'),   // C3b：附件 deps stub（过工厂期 REQUIRED_DEPS 校验）
 };
 const mod = require('../routes/sys-iteration')(deps);
 const I = mod._internals;
@@ -236,6 +237,7 @@ async function verifyMissingColLib() {
     logger: { info: noop, warn: noop, error: noop, debug: noop },
     db: db2, dbRunAsync: run2, dbGetAsync: get2, dbAllAsync: all2,
     authenticateToken: mwPass, requireAdmin: mwPass,
+    ...require('./_sys-attach-test-deps'),   // C3b：附件 deps stub（过工厂期 REQUIRED_DEPS 校验）
   });
   // 手工建残缺四表（sys_issues 故意缺 effected_at + creator_notify_status；F1 后该残缺表同时缺评估 3 锚点
   //   needs_feasibility/feasibility_conclusion/blocked + 4 辅助列，模拟旧库/半成品——下方对全部缺失锚点逐个断言）

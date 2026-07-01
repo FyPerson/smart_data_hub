@@ -194,13 +194,40 @@ const CHANGE_FLOW_TRANSITIONS = [
     timelineEvent: 'reopen', actionCode: null,
     notifyAfterCommit: 'notifyAssignedDeveloper',  // C5
   },
+  // ── scope_change（范围变更）：feature/improvement 全禁（F2a §3.2 / 评估编码方案 v0.3 开放①）──────────
+  //   评估环节确立"绝对禁止开发态调需求"（v1.7 §十九 ⑦）→ feature/improvement 彻底移除 scope_change 动作
+  //   （非 from=[]，是不展示该动作；buildMeta typeFlows 自然不含，前端无范围变更按钮）；
+  //   需求变化统一走 derive 派生新单 / 作废重开。
+  //   ⚠️ config 流 scope_change 不受影响（§18.9 config 支持范围变更）——追加 config 流时在 CONFIG_FLOW_TRANSITIONS 自带。
+  //   端点层 POST /scope-change 另加 type 守卫（409 SCOPE_CHANGE_DISABLED）双保险，防直接调 API。
+  // ── 可行性评估旁路动作（F2b §3.1 / v1.7 §十九，feature/improvement，to=null 不改 status）──────────
+  //   三动作端点独立事务实现（不走 sysIssueTransition，照 estimate 范式），常量在表里供 meta/findTransition 一致性。
+  //   buildMeta 据 to===null 标 kind='side_effect'，前端路由专用端点（/feasibility /blocked /unblock）不误走通用 transition。
   {
-    action: 'scope_change',                 // 范围变更：处理中/开发中/待验证（不改 status，写事件 + scope_changed=1，§5.2）
-    from: ['开发中', '待验证'], to: null,   // to=null 不改 status
+    action: 'feasibility',                  // 填可行性评估（开发本人，不改 status，旁路）—— 端点 F2b
+    from: ['开发中'], to: null,
+    roleGuard: null, ownerGuard: 'assignee',
+    requiredPayload: ['conclusion', 'requirement_confirm', 'dev_estimated_at'],  // 有条件可行/不可行时 risk 必填见端点
+    sideEffects: ['写评估字段 + dev_estimated_at', 'feasibility timeline 快照（冻结）'],
+    timelineEvent: 'feasibility', actionCode: null,
+    notifyAfterCommit: null,
+  },
+  {
+    action: 'blocked',                      // 受阻（开发本人，不改 status，标 blocked=1）—— 端点 F2b
+    from: ['开发中'], to: null,
+    roleGuard: null, ownerGuard: 'assignee',
+    requiredPayload: ['reason'],
+    sideEffects: ['blocked=1 + blocked_reason + blocked_at', 'blocked timeline'],
+    timelineEvent: 'blocked', actionCode: null,
+    notifyAfterCommit: 'notifyBlockedToAdmin',  // C5 落地（F2b 端点先不发，C5 补）
+  },
+  {
+    action: 'unblock',                      // 解除受阻（admin，不改 status，blocked=0）—— 端点 F2b
+    from: ['开发中'], to: null,
     roleGuard: 'admin', ownerGuard: null,
-    requiredPayload: ['summary'],           // 变更摘要 trim 非空
-    sideEffects: ['scope_changed=1', '可改 deadline（旧值写入事件 summary 留痕）'],
-    timelineEvent: 'scope_change', actionCode: null,
+    requiredPayload: ['reason'],
+    sideEffects: ['blocked=0', 'unblock timeline'],
+    timelineEvent: 'unblock', actionCode: null,
     notifyAfterCommit: null,
   },
   {
@@ -252,6 +279,10 @@ function resolveToStatus(transition, fromStatus) {
   return undefined;
 }
 
+// 旁路动作白名单（不改 status 的就地副作用动作，前端路由专用端点 /feasibility /blocked /unblock /estimate /scope-change /derive）——
+//   codex 20 L-1：显式白名单替「to===null 推断」，新增动作默认 transition（安全侧），避免 resume 类「to=null 但动态解析 status」误标。
+const SIDE_EFFECT_ACTIONS = new Set(['estimate', 'feasibility', 'blocked', 'unblock', 'derive', 'scope_change']);
+
 // ── meta（决策②，buildMeta：从 TRANSITIONS 派生前端只读视图）──────────
 //   M-4：只返前端必需，**不暴露** roleGuard/ownerGuard/sideEffects/notifyAfterCommit。
 function buildMeta() {
@@ -263,6 +294,9 @@ function buildMeta() {
     estimate: '回填预计完成', submit: '提交', accept: '验收通过', return: '验收打回',
     publish: '批次发布', close: '关闭', hold: '暂缓', resume: '恢复',
     reactivate: '重新激活', issue_reject: '拒绝', void: '作废', reopen: '重开',
+    feasibility: '可行性评估', blocked: '标记受阻', unblock: '解除受阻',
+    // scope_change label 为 config 流预留（feature/improvement 已移除该动作，typeFlows 不含）——
+    //   meta.actions 是全动作 label 超集，前端按 typeFlows 显隐按钮，故残留此 label 无害（ultracode 对抗审确认）。
     scope_change: '范围变更', derive: '派生迭代',
   };
 
@@ -273,6 +307,7 @@ function buildMeta() {
       from: t.from,                              // 数组 / '*'
       to: t.to,                                  // 字符串 / 映射 / null（前端据此判断是否旁路动作）
       requiredPayload: t.requiredPayload || [],
+      kind: SIDE_EFFECT_ACTIONS.has(t.action) ? 'side_effect' : 'transition',   // codex 17 M-1 + codex 20 L-1：显式白名单判定旁路动作（路由专用端点），新增动作默认 transition；resume 虽 to=null（动态解析 status）但不在白名单 → 正确标 transition
       // 仅暴露"是否需弹窗收集 payload"，不暴露内部 guard/sideEffects（M-4）
     }));
   }

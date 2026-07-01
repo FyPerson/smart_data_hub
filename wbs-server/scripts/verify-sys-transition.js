@@ -22,6 +22,7 @@ const mod = require('../routes/sys-iteration')({
   logger: { info: noop, warn: noop, error: noop, debug: noop },
   db, dbRunAsync: run, dbGetAsync: get, dbAllAsync: all,
   authenticateToken: mwPass, requireAdmin: mwPass,
+  ...require('./_sys-attach-test-deps'),   // C3b：附件 deps stub（过工厂期 REQUIRED_DEPS 校验）
 });
 const I = mod._internals;
 function waitReady() {

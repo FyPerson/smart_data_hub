@@ -24,6 +24,7 @@ const mod = require('../routes/sys-iteration')({
   logger: { info: noop, warn: noop, error: noop, debug: noop },
   db, dbRunAsync: run, dbGetAsync: get, dbAllAsync: all,
   authenticateToken: mwPass, requireAdmin: mwPass,
+  ...require('./_sys-attach-test-deps'),   // C3b：附件 deps stub（过工厂期 REQUIRED_DEPS 校验）
 });
 function waitReady() {
   return new Promise((res, rej) => {
@@ -66,9 +67,9 @@ async function main() {
       for (const leak of ['roleGuard', 'ownerGuard', 'sideEffects', 'notifyAfterCommit', 'timelineEvent', 'actionCode']) {
         assert.ok(!(leak in tf), `typeFlows[${type}] 泄露内部字段 ${leak}`);
       }
-      // 只暴露 action/from/to/requiredPayload
+      // 只暴露 action/from/to/requiredPayload/kind（kind = F2b codex 17 M-1 旁路标记）
       for (const k of Object.keys(tf)) {
-        assert.ok(['action', 'from', 'to', 'requiredPayload'].includes(k), `typeFlows[${type}] 含非预期字段 ${k}`);
+        assert.ok(['action', 'from', 'to', 'requiredPayload', 'kind'].includes(k), `typeFlows[${type}] 含非预期字段 ${k}`);
       }
     }
   }
@@ -107,6 +108,52 @@ async function main() {
     assert.ok(featureActions.includes(a), `变更流缺动作 ${a}`);
   }
   ok(`变更流类型流完整（feature/improvement 共用，含 create/schedule/assign/reassign/estimate/submit/accept/return/publish/close ${featureActions.length} 动作）`);
+
+  // [4b] F2a §3.2：feature/improvement 全禁 scope_change（评估环节"禁开发态调需求"）——typeFlows 彻底移除该动作
+  assert.ok(!featureActions.includes('scope_change'), 'feature typeFlows 不应含 scope_change（F2a 已移除）');
+  const imprActions = meta.typeFlows.improvement.map(t => t.action);
+  assert.ok(!imprActions.includes('scope_change'), 'improvement typeFlows 不应含 scope_change（F2a 已移除）');
+  // 移除后 findTransition 对 feature/improvement 的 scope_change 一律返 null（端点层另有 SCOPE_CHANGE_DISABLED 守卫）
+  assert.strictEqual(T.findTransition('feature', 'scope_change', '开发中'), null, 'feature scope_change 已无 transition（findTransition 返 null）');
+  assert.strictEqual(T.findTransition('improvement', 'scope_change', '待验证'), null, 'improvement scope_change 已无 transition');
+  // derive 仍在：需求变化统一走派生新单 / 作废重开（替代 scope_change 的出口）
+  assert.ok(featureActions.includes('derive'), 'feature 仍含 derive（scope_change 移除后需求变化的出口）');
+  ok('[F2a §3.2] feature/improvement typeFlows 移除 scope_change（findTransition 返 null）+ 保留 derive 作需求变化出口');
+
+  // [4c] M-2（codex 19）：reactivate 不清评估字段依赖「无 开发后态 → 已拒绝 回路」不变量——固化为转移图断言
+  //   遍历所有 transition，断言 to='已拒绝' 的 from 不含开发后态（'*' 通配也算含，因它包含开发后态）；
+  //   未来 bug/config 流若新增「开发中→已拒绝」类路径，本断言立即报警（提示须给 reactivate/issue_reject 加清字段）。
+  const DEV_POST_STATES = ['开发中', '待验证', '待上线', '已上线', '已关闭'];
+  for (const type of Object.keys(T.TRANSITIONS)) {
+    for (const tr of T.transitionsForType(type)) {
+      const toStates = (typeof tr.to === 'string') ? [tr.to]
+        : (tr.to && typeof tr.to === 'object') ? Object.values(tr.to) : [];
+      if (!toStates.includes('已拒绝')) continue;
+      const froms = tr.from === '*' ? ['*'] : (Array.isArray(tr.from) ? tr.from : []);
+      const leak = froms.includes('*') ? ['*'] : froms.filter(f => DEV_POST_STATES.includes(f));
+      assert.strictEqual(leak.length, 0, `[${type}] transition「${tr.action}」to=已拒绝 的 from 含开发后态(${leak.join(',')})——破坏 reactivate 不清评估前提（残留跨轮带入），须给 reactivate/issue_reject 加 SYS_CLEAR_FEASIBILITY_FIELDS_SQL`);
+    }
+  }
+  ok('[4c] 转移图不变量：无「开发后态→已拒绝」transition（固化 reactivate 不清评估前提，codex 19 M-2）');
+
+  // [4d] F2b codex 17 M-1 + ultracode 对抗审：kind 全集断言（防 resume 类「to=null 但实改 status」误标）
+  //   side_effect = 真正不改 status 的旁路动作（路由专用端点）；transition = 改 status（含 resume：to=null 但动态解析目标态）。
+  const KIND_EXPECT = {
+    estimate: 'side_effect', feasibility: 'side_effect', blocked: 'side_effect', unblock: 'side_effect', derive: 'side_effect', scope_change: 'side_effect',
+    create: 'transition', schedule: 'transition', assign: 'transition', reassign: 'transition',
+    submit: 'transition', accept: 'transition', return: 'transition', publish: 'transition',
+    close: 'transition', hold: 'transition', resume: 'transition', reactivate: 'transition',
+    issue_reject: 'transition', void: 'transition', reopen: 'transition',
+  };
+  for (const type of Object.keys(meta.typeFlows)) {   // codex 20 L-2：遍历所有 type（非仅 feature），防 config/bug 流动作差异漏检
+    for (const tf of meta.typeFlows[type]) {
+      assert.ok(KIND_EXPECT[tf.action] !== undefined, `[4d] ${type} 动作 ${tf.action} 未在 kind 期望表（新增动作须补 KIND_EXPECT + 核对 to 语义）`);
+      assert.strictEqual(tf.kind, KIND_EXPECT[tf.action], `[4d] ${type} 动作 ${tf.action} kind 应为 ${KIND_EXPECT[tf.action]}（实 ${tf.kind}）`);
+    }
+  }
+  // ⭐ resume 专项（ultracode 对抗审）：to=null 但实改 status（动态解析），必须 transition 不能 side_effect（白名单 SIDE_EFFECT_ACTIONS 不含 resume）
+  assert.strictEqual(meta.typeFlows.feature.find(t => t.action === 'resume').kind, 'transition', 'resume 必须 kind=transition（to=null 是动态解析 status 非旁路，防误标 side_effect）');
+  ok('[4d] kind 全集断言：5 旁路 side_effect + 其余 transition（含 resume 专项=transition 防 to=null 误标，codex 17 M-1 + ultracode 对抗审）');
 
   // [5] findTransition / resolveToStatus 行为
   // 5a. assign：已排期 → 开发中

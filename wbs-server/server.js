@@ -18513,12 +18513,15 @@ app.use('/api/corrections', correctionModule.router);
 // 系统迭代模块（业务系统软件迭代跟踪，C1 schema + readiness + 空 router）
 //   业务 SSOT = docs/local/系统迭代/系统迭代_方案_20260624_v1.6.md
 //   实施 SSOT = docs/local/系统迭代/系统迭代_编码实施方案_20260624_v1.3.md
-//   C1 deps 最小档（logger/db/dbXxxAsync/authenticateToken/requireAdmin）；附件/通知 deps 见 C3/C5。
+//   C1 deps 最小档（logger/db/dbXxxAsync/authenticateToken/requireAdmin）；C3b 附件加 UPLOAD_DIR/normalizeAttachmentExt/safeDeleteFileSync/ALLOWED_FILE_DIRS；C5 通知加 sendIssueDingtalkRaw/sendIssueDingtalkToRequester/getSafePlatformBaseUrl。
 //   initSchema() 调用见 db 连接回调（correction initSchema 之后，§1.4）；此处仅实例化 + 挂载。
 //   ⚠️ 挂载到 /api（§1.3）：router 内只注册 /sys-* 路径，未匹配自动 next() fall-through，不拦截其他 /api/*。
 // ============================================================
 const sysIterModule = require('./routes/sys-iteration')({
   logger, db, dbRunAsync, dbGetAsync, dbAllAsync, authenticateToken, requireAdmin,
+  UPLOAD_DIR, normalizeAttachmentExt, safeDeleteFileSync, ALLOWED_FILE_DIRS,   // C3b 附件
+  // C5 通知（复用 issue-tracker 既有发送链路：dev/creator 走 users.id→phone；需求方走 requester_phone 反查；深链 baseUrl）
+  sendIssueDingtalkRaw, sendIssueDingtalkToRequester, getSafePlatformBaseUrl,
 });
 app.use('/api', sysIterModule.router);
 

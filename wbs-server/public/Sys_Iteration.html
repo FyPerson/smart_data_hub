@@ -1,0 +1,1358 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>系统迭代 - 智数协同平台</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="assets/css/style.css?v=1.2">
+    <style>
+        /* ============================================================
+           系统迭代页 · 页面私有样式（全部 si- 前缀，避免与 style.css 碰撞）
+           设计语言对齐 docs/local/系统迭代/系统迭代_交互原型_demo_20260623.html
+           ============================================================ */
+        .si-wrap { max-width: 1280px; margin: 0 auto; }
+
+        /* 页头 */
+        .si-page-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; flex-wrap: wrap; gap: 10px; }
+        .si-page-head h1 { font-size: 18px; font-weight: 700; color: #1e293b; display: flex; align-items: center; gap: 8px; }
+        .si-page-head .si-head-actions { display: flex; gap: 8px; }
+
+        /* 通用按钮 */
+        .si-btn { padding: 8px 16px; border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer; border: none; display: inline-flex; align-items: center; gap: 5px; transition: .2s; white-space: nowrap; }
+        .si-btn-primary { background: linear-gradient(135deg, #d97706, #b45309); color: #fff; }
+        .si-btn-primary:hover { opacity: .9; }
+        .si-btn-sec { background: #f3f4f6; color: #374151; border: 1px solid #d1d5db; }
+        .si-btn-sec:hover { background: #e5e7eb; }
+        .si-btn-danger { background: #fee2e2; color: #dc2626; border: 1px solid #fca5a5; }
+        .si-btn-danger:hover { background: #fecaca; }
+        .si-btn-sm { padding: 5px 11px; font-size: 12px; }
+        .si-btn:disabled { opacity: .5; cursor: not-allowed; }
+
+        /* 类型 tab */
+        .si-type-tabs { display: flex; gap: 6px; margin-bottom: 14px; flex-wrap: wrap; }
+        .si-type-tab { padding: 8px 18px; background: #fff; border: 1px solid #e2e8f0; border-radius: 8px; font-size: 13px; cursor: pointer; transition: .15s; font-weight: 500; color: #475569; }
+        .si-type-tab:hover { border-color: #d97706; }
+        .si-type-tab.active { background: #d97706; color: #fff; border-color: #d97706; }
+        .si-type-tab .si-cnt { font-size: 11px; opacity: .8; margin-left: 4px; }
+
+        /* 统计卡 */
+        .si-stats-row { display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
+        .si-stat-card { flex: 1; min-width: 120px; background: #fff; border-radius: 10px; border: 1px solid #e2e8f0; padding: 13px 16px; }
+        .si-stat-card .si-stat-num { font-size: 22px; font-weight: 700; color: #111827; }
+        .si-stat-card .si-stat-label { font-size: 12px; color: #6b7280; margin-top: 2px; }
+
+        /* 工具条 */
+        .si-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+        .si-toolbar select, .si-toolbar label.si-chk { padding: 7px 12px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 13px; background: #fff; color: #374151; }
+        .si-toolbar label.si-chk { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
+        .si-spacer { flex: 1; }
+
+        /* 表格 */
+        .si-table-wrap { overflow-x: auto; border-radius: 10px; border: 1px solid #e2e8f0; background: #fff; }
+        .si-table { width: 100%; min-width: 980px; border-collapse: separate; border-spacing: 0; }
+        .si-table th { background: #f8fafc; padding: 11px 14px; font-size: 12px; font-weight: 600; color: #64748b; text-align: left; border-bottom: 1px solid #e2e8f0; white-space: nowrap; }
+        .si-table td { padding: 12px 14px; font-size: 13px; color: #374151; border-bottom: 1px solid #f1f5f9; vertical-align: middle; }
+        .si-table tbody tr { cursor: pointer; transition: background .15s; }
+        .si-table tbody tr:hover { background: #fffbeb; }
+        .si-table tr:last-child td { border-bottom: none; }
+
+        /* 类型标签 */
+        .si-type-tag { display: inline-block; padding: 2px 9px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+        .si-type-tag.bug { background: #fee2e2; color: #b91c1c; }
+        .si-type-tag.feature { background: #dbeafe; color: #1d4ed8; }
+        .si-type-tag.improvement { background: #d1fae5; color: #047857; }
+        .si-type-tag.config { background: #ede9fe; color: #6d28d9; }
+        .si-prio { display: inline-block; padding: 1px 7px; border-radius: 4px; font-size: 11px; font-weight: 700; }
+        .si-prio.P0 { background: #dc2626; color: #fff; }
+        .si-prio.P1 { background: #f59e0b; color: #fff; }
+        .si-prio.P2 { background: #e0e7ff; color: #4338ca; }
+        .si-prio.P3 { background: #f1f5f9; color: #94a3b8; }
+
+        /* 状态徽章（按语义英文 key 上色，避免中文类名） */
+        .si-sbadge { display: inline-block; padding: 3px 11px; border-radius: 12px; font-size: 11px; font-weight: 600; white-space: nowrap; }
+        .si-s-pending { background: #f3f4f6; color: #6b7280; }
+        .si-s-scheduled { background: #e0e7ff; color: #4338ca; }
+        .si-s-dev { background: #dbeafe; color: #1d4ed8; }
+        .si-s-review { background: #fef3c7; color: #92400e; }
+        .si-s-prerelease { background: #ccfbf1; color: #0f766e; }
+        .si-s-released { background: #d1fae5; color: #065f46; }
+        .si-s-closed { background: #e2e8f0; color: #475569; }
+        .si-s-hold { background: #fef9c3; color: #a16207; }
+        .si-s-rejected { background: #fae8e8; color: #991b1b; }
+        .si-s-void { background: #e5e7eb; color: #9ca3af; text-decoration: line-through; }
+
+        .si-flag { font-size: 11px; font-weight: 700; margin-left: 6px; white-space: nowrap; }
+        .si-flag.scope { color: #d97706; }
+        .si-flag.reopen { color: #dc2626; }
+        .si-flag.blocked { color: #b91c1c; }
+        .si-flag.lineage { color: #9ca3af; font-weight: 500; }
+        .si-muted { color: #9ca3af; }
+
+        /* 抽屉 */
+        .si-overlay { position: fixed; inset: 0; background: rgba(15,23,42,.45); display: none; z-index: 900; }
+        .si-overlay.open { display: block; }
+        /* top:64px 避开固定导航栏（navbar height 64 / z-index 1000），否则抽屉头部被遮挡不可点（对齐 Data_Correction v1.94.1 修复） */
+        .si-drawer { position: fixed; top: 64px; right: 0; height: calc(100% - 64px); width: 660px; max-width: 96vw; background: #fff; box-shadow: -4px 0 24px rgba(0,0,0,.15); transform: translateX(100%); transition: transform .25s; z-index: 901; display: flex; flex-direction: column; }
+        .si-drawer.open { transform: translateX(0); }
+        .si-drawer-head { padding: 16px 22px; border-bottom: 1px solid #eef2f7; display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+        .si-drawer-head .si-dh-title { font-size: 16px; font-weight: 700; line-height: 1.4; }
+        .si-drawer-head .si-dh-meta { font-size: 12px; color: #94a3b8; margin-top: 6px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+        .si-drawer-head .si-close { cursor: pointer; font-size: 24px; color: #94a3b8; line-height: 1; background: none; border: none; }
+        .si-drawer-body { padding: 18px 22px; overflow-y: auto; flex: 1; }
+        .si-drawer-foot { border-top: 1px solid #eef2f7; padding: 14px 22px; background: #fafbfc; }
+
+        .si-lineage { background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px; padding: 9px 13px; font-size: 12px; color: #92400e; margin-bottom: 14px; }
+        .si-lineage a { color: #b45309; font-weight: 600; cursor: pointer; text-decoration: underline; }
+
+        .si-section { margin-bottom: 18px; }
+        .si-section h3 { font-size: 13px; font-weight: 700; color: #334155; margin-bottom: 9px; padding-bottom: 6px; border-bottom: 1px solid #f1f5f9; display: flex; justify-content: space-between; align-items: center; }
+        .si-kv-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px 18px; }
+        .si-kv { font-size: 13px; }
+        .si-kv label { display: block; font-size: 11px; color: #9ca3af; margin-bottom: 2px; }
+        .si-kv .v { color: #334155; word-break: break-word; }
+        .si-kv.full { grid-column: 1 / -1; }
+
+        /* 时间线 */
+        .si-timeline { position: relative; }
+        .si-tl-item { display: flex; gap: 12px; padding: 7px 0; }
+        .si-tl-time { font-size: 11px; color: #94a3b8; white-space: nowrap; width: 118px; flex-shrink: 0; padding-top: 2px; }
+        .si-tl-dot { width: 9px; height: 9px; border-radius: 50%; background: #d97706; margin-top: 6px; flex-shrink: 0; }
+        .si-tl-body { font-size: 12.5px; line-height: 1.55; flex: 1; }
+        .si-tl-evt { display: inline-block; font-weight: 700; padding: 1px 7px; border-radius: 4px; font-size: 11px; margin-right: 6px; background: #f1f5f9; color: #475569; }
+        .si-tl-evt.si-tl-amber { background: #fef3c7; color: #92400e; }
+        .si-tl-evt.si-tl-indigo { background: #e0e7ff; color: #4338ca; }
+        .si-tl-evt.si-tl-blue { background: #dbeafe; color: #1d4ed8; }
+        .si-tl-evt.si-tl-red { background: #fee2e2; color: #b91c1c; }
+        .si-tl-evt.si-tl-green { background: #d1fae5; color: #047857; }
+        .si-tl-evt.si-tl-orange { background: #fed7aa; color: #c2410c; }
+        .si-tl-evt.si-tl-gray { background: #f1f5f9; color: #475569; }
+        .si-tl-to { color: #94a3b8; font-size: 11px; }
+        .si-tl-op { color: #94a3b8; font-size: 11px; }
+        .si-tl-att { display: block; margin-top: 3px; }
+        .si-tl-att a { font-size: 11px; color: #2563eb; cursor: pointer; margin-right: 8px; }
+
+        /* 通知行 */
+        .si-notify-row { display: flex; align-items: center; justify-content: space-between; padding: 7px 0; border-bottom: 1px dashed #f1f5f9; font-size: 12px; gap: 8px; }
+        .si-notify-row:last-child { border-bottom: none; }
+        .si-nbadge { padding: 2px 9px; border-radius: 10px; font-size: 11px; font-weight: 600; white-space: nowrap; }
+        .si-nb-sent { background: #ecfdf5; color: #059669; }
+        .si-nb-not_sent { background: #f3f4f6; color: #6b7280; }
+        .si-nb-failed { background: #fef2f2; color: #dc2626; }
+        .si-nb-no_phone { background: #fffbeb; color: #b45309; }
+        .si-nread { font-size: 11px; color: #94a3b8; margin-left: 6px; }
+
+        /* 附件 */
+        .si-att-item { display: flex; align-items: center; gap: 8px; padding: 6px 0; font-size: 12.5px; border-bottom: 1px dashed #f1f5f9; }
+        .si-att-item:last-child { border-bottom: none; }
+        .si-att-item a.si-att-name { color: #2563eb; cursor: pointer; }
+        .si-att-item .si-att-del { color: #dc2626; cursor: pointer; font-size: 11px; margin-left: auto; }
+        .si-att-meta { color: #9ca3af; font-size: 11px; }
+        .si-upload-box { margin-top: 8px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+
+        /* 操作区 */
+        .si-action-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+        .si-gate-hint { font-size: 11px; color: #b45309; background: #fffbeb; border: 1px solid #fde68a; border-radius: 6px; padding: 4px 9px; width: 100%; }
+
+        /* 弹框 */
+        /* 弹框 z-index 1200 > navbar 1000：弹框期间遮住导航栏，防误导航；批次面板 #siBatchOverlay 单独降到 1100（见下），使从批次里打开的通用弹框仍在最上层 */
+        .si-modal-overlay { position: fixed; inset: 0; background: rgba(15,23,42,.5); display: none; align-items: center; justify-content: center; z-index: 1200; }
+        .si-modal-overlay.open { display: flex; }
+        #siBatchOverlay { z-index: 1100; }
+        .si-modal { background: #fff; border-radius: 12px; width: 500px; max-width: 94vw; max-height: 90vh; overflow-y: auto; box-shadow: 0 20px 50px rgba(0,0,0,.25); }
+        .si-modal.wide { width: 720px; }
+        .si-modal-head { padding: 16px 22px; border-bottom: 1px solid #eef2f7; font-size: 15px; font-weight: 700; display: flex; justify-content: space-between; align-items: center; }
+        .si-modal-head .si-close { cursor: pointer; font-size: 22px; color: #94a3b8; line-height: 1; background: none; border: none; }
+        .si-modal-body { padding: 18px 22px; }
+        .si-modal-foot { padding: 14px 22px; border-top: 1px solid #eef2f7; display: flex; justify-content: flex-end; gap: 9px; }
+        .si-field { margin-bottom: 14px; }
+        .si-field label { display: block; font-size: 12px; color: #475569; font-weight: 600; margin-bottom: 5px; }
+        .si-field .req { color: #dc2626; }
+        .si-field input[type=text], .si-field input[type=date], .si-field input[type=datetime-local], .si-field select, .si-field textarea { width: 100%; padding: 8px 11px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 13px; font-family: inherit; color: #334155; box-sizing: border-box; }
+        .si-field input:focus, .si-field select:focus, .si-field textarea:focus { outline: none; border-color: #d97706; }
+        .si-field textarea { resize: vertical; min-height: 70px; }
+        .si-field .si-hint { font-size: 11px; color: #9ca3af; margin-top: 4px; }
+        .si-field.inline-chk { display: flex; align-items: center; gap: 7px; }
+        .si-field.inline-chk label { margin-bottom: 0; }
+        .si-note-box { background: #fffbeb; border: 1px solid #fde68a; border-radius: 6px; padding: 8px 11px; color: #92400e; font-size: 12px; line-height: 1.5; margin-bottom: 14px; }
+
+        /* 批次管理 */
+        .si-batch-item { border: 1px solid #e2e8f0; border-radius: 8px; padding: 11px 14px; margin-bottom: 10px; cursor: pointer; transition: .15s; }
+        .si-batch-item:hover { border-color: #d97706; background: #fffbeb; }
+        .si-batch-item .si-batch-no { font-weight: 700; color: #1e293b; }
+        .si-batch-item .si-batch-meta { font-size: 12px; color: #6b7280; margin-top: 4px; }
+        .si-release-badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+        .si-release-badge.plan { background: #e0e7ff; color: #4338ca; }
+        .si-release-badge.done { background: #d1fae5; color: #065f46; }
+        .si-empty { text-align: center; padding: 40px; color: #94a3b8; font-size: 13px; }
+
+        .si-info-banner { background: #eff6ff; border: 1px solid #bfdbfe; color: #1e40af; font-size: 12px; padding: 8px 13px; border-radius: 8px; margin-bottom: 14px; line-height: 1.5; }
+    </style>
+</head>
+
+<body>
+
+    <!-- 顶部导航栏（复用全站 navbar，系统迭代高亮） -->
+    <nav class="navbar fixed-header">
+        <div class="nav-left">
+            <div class="nav-logo">
+                <svg viewBox="0 0 24 24" fill="none" stroke="url(#logo-gradient)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <defs>
+                        <linearGradient id="logo-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                            <stop offset="0%" style="stop-color:#d97706"/>
+                            <stop offset="100%" style="stop-color:#b45309"/>
+                        </linearGradient>
+                    </defs>
+                    <circle cx="12" cy="12" r="10"/>
+                    <path d="M12 6v6l4 2"/>
+                </svg>
+            </div>
+            <div class="nav-title">智数协同平台</div>
+        </div>
+        <div class="nav-right">
+            <a href="/Task_Pool.html" class="nav-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M9 11l3 3L22 4"/>
+                    <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
+                </svg>
+                任务池
+            </a>
+            <a href="/Data_Collab.html" class="nav-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+                    <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+                </svg>
+                数据协作
+            </a>
+            <a href="/Issue_Tracker.html" class="nav-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="10"/>
+                    <line x1="12" y1="8" x2="12" y2="12"/>
+                    <line x1="12" y1="16" x2="12.01" y2="16"/>
+                </svg>
+                需求跟踪
+            </a>
+            <a href="/Data_Correction.html" class="nav-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+                    <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+                </svg>
+                数据修正
+            </a>
+            <a href="/Sys_Iteration.html" class="nav-item" style="color:#d97706; font-weight:600;">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="3"/>
+                    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+                </svg>
+                系统迭代
+            </a>
+            <a href="/My_Workspace.html" class="nav-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+                    <circle cx="12" cy="7" r="4"/>
+                </svg>
+                我的工作台
+            </a>
+            <div class="nav-dropdown">
+                <button class="nav-dropdown-trigger">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <ellipse cx="12" cy="5" rx="9" ry="3"/>
+                        <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/>
+                        <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>
+                    </svg>
+                    数据中心
+                    <svg class="arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="6 9 12 15 18 9"/>
+                    </svg>
+                </button>
+                <div class="nav-dropdown-menu">
+                    <a href="/Dashboard.html">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+                            <line x1="3" y1="9" x2="21" y2="9"/>
+                            <line x1="9" y1="21" x2="9" y2="9"/>
+                        </svg>
+                        建设总览
+                    </a>
+                    <a href="/Asset_Center.html">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+                            <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
+                            <line x1="12" y1="22.08" x2="12" y2="12"/>
+                        </svg>
+                        资产中心
+                    </a>
+                    <a href="/Model_Center.html">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="3" y="3" width="7" height="7"/>
+                            <rect x="14" y="3" width="7" height="7"/>
+                            <rect x="14" y="14" width="7" height="7"/>
+                            <rect x="3" y="14" width="7" height="7"/>
+                        </svg>
+                        模型中心
+                    </a>
+                    <a href="/Metrics.html">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <line x1="18" y1="20" x2="18" y2="10"/>
+                            <line x1="12" y1="20" x2="12" y2="4"/>
+                            <line x1="6" y1="20" x2="6" y2="14"/>
+                        </svg>
+                        指标中心
+                    </a>
+                </div>
+            </div>
+            <a href="/Statistics.html" class="nav-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <line x1="12" y1="20" x2="12" y2="10"/>
+                    <line x1="18" y1="20" x2="18" y2="4"/>
+                    <line x1="6" y1="20" x2="6" y2="16"/>
+                </svg>
+                统计中心
+            </a>
+            <a href="/Doc_Viewer.html" target="_blank" class="nav-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+                    <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+                </svg>
+                文档中心
+            </a>
+            <div class="nav-divider"></div>
+            <div id="userProfileArea"></div>
+        </div>
+    </nav>
+
+    <!-- 主工作区 -->
+    <main class="workbench-container">
+        <div class="si-wrap">
+            <div class="si-page-head">
+                <h1>⚙️ 系统迭代</h1>
+                <div class="si-head-actions" id="siHeadActions"></div>
+            </div>
+
+            <div class="si-info-banner" id="siReadyBanner" style="display:none;"></div>
+
+            <!-- 类型 tab -->
+            <div class="si-type-tabs" id="siTypeTabs"></div>
+
+            <!-- 统计卡 -->
+            <div class="si-stats-row" id="siStatsRow"></div>
+
+            <!-- 工具条 -->
+            <div class="si-toolbar">
+                <select id="siFStatus" onchange="siLoadList()"><option value="">全部状态</option></select>
+                <select id="siFSystem" onchange="siLoadList()"><option value="">全部系统</option></select>
+                <select id="siFPriority" onchange="siLoadList()">
+                    <option value="">全部优先级</option>
+                    <option value="P0">P0</option><option value="P1">P1</option>
+                    <option value="P2">P2</option><option value="P3">P3</option>
+                </select>
+                <select id="siFAssigned" style="display:none;" onchange="siLoadList()"><option value="">全部开发</option></select>
+                <label class="si-chk" id="siVoidedWrap" style="display:none;">
+                    <input type="checkbox" id="siFVoided" onchange="siLoadList()"> 含已作废
+                </label>
+                <span class="si-spacer"></span>
+            </div>
+
+            <!-- 表格 -->
+            <div class="si-table-wrap">
+                <table class="si-table">
+                    <thead>
+                        <tr>
+                            <th>编号</th><th>类型</th><th>标题</th><th>系统 · 模块</th>
+                            <th>优先级</th><th>状态</th><th>开发</th><th>预计完成</th><th>建单时间</th>
+                        </tr>
+                    </thead>
+                    <tbody id="siTbody"></tbody>
+                </table>
+            </div>
+        </div>
+    </main>
+
+    <!-- 详情抽屉 -->
+    <div class="si-overlay" id="siOverlay" onclick="siCloseDrawer()"></div>
+    <div class="si-drawer" id="siDrawer">
+        <div class="si-drawer-head">
+            <div>
+                <div class="si-dh-title" id="siDTitle"></div>
+                <div class="si-dh-meta" id="siDMeta"></div>
+            </div>
+            <button class="si-close" onclick="siCloseDrawer()" aria-label="关闭">&times;</button>
+        </div>
+        <div class="si-drawer-body" id="siDBody"></div>
+        <div class="si-drawer-foot">
+            <div class="si-action-bar" id="siDActions"></div>
+        </div>
+    </div>
+
+    <!-- 通用弹框 -->
+    <div class="si-modal-overlay" id="siModalOverlay">
+        <div class="si-modal" id="siModalBox">
+            <div class="si-modal-head"><span id="siMHead"></span><button class="si-close" onclick="siCloseModal()">&times;</button></div>
+            <div class="si-modal-body" id="siMBody"></div>
+            <div class="si-modal-foot">
+                <button class="si-btn si-btn-sec" onclick="siCloseModal()">取消</button>
+                <button class="si-btn si-btn-primary" id="siMConfirm">确定</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 批次管理弹框（独立容器） -->
+    <div class="si-modal-overlay" id="siBatchOverlay">
+        <div class="si-modal wide" id="siBatchBox">
+            <div class="si-modal-head"><span id="siBatchHead">批次管理</span><button class="si-close" onclick="siCloseBatch()">&times;</button></div>
+            <div class="si-modal-body" id="siBatchBody"></div>
+            <div class="si-modal-foot" id="siBatchFoot"></div>
+        </div>
+    </div>
+
+    <script src="assets/js/app.js"></script>
+    <script>
+    /* ============================================================
+       系统迭代前端 · 纯 meta 驱动（状态机常量来自 GET /api/sys-issues/meta）
+       后端契约见 routes/sys-iteration/index.js + transitions.js
+       ============================================================ */
+
+    // ---- 全局状态 ----
+    let META = null;                 // buildMeta() 结果，启动 fetch 一次缓存
+    let META_OK = false;             // meta 是否加载成功（失败降级只读）
+    let siUsers = [];                // 可指派用户
+    let siList = [];                 // 当前列表
+    let siActiveType = 'all';        // 当前类型 tab
+    let siOpenId = null;             // 当前打开的详情单 id
+    let siDetail = null;             // 当前详情对象
+    let siModalConfirm = null;       // 当前弹框确认回调
+
+    // 类型中文 label（meta 不返 type label，前端映射；仅展示 meta.typeFlows 里存在的类型）
+    const SI_TYPE_LABEL = { bug: 'BUG', feature: '新功能', improvement: '优化', config: '配置变更' };
+
+    // 状态 → CSS 语义 key（避免中文类名；含 config 未来态前向兼容）
+    const SI_STATUS_CLASS = {
+        '待评估': 'pending', '待处理': 'pending',
+        '已排期': 'scheduled',
+        '开发中': 'dev', '处理中': 'dev',
+        '待验证': 'review', '待验收': 'review',
+        '待上线': 'prerelease',
+        '已上线': 'released', '已生效': 'released',
+        '已关闭': 'closed',
+        '已暂缓': 'hold',
+        '已拒绝': 'rejected',
+        '已作废': 'void'
+    };
+    function siStatusClass(s) { return SI_STATUS_CLASS[s] || 'pending'; }
+
+    // 开发本人（owner）动作集；其余动作归 admin。meta 不暴露 roleGuard，前端做最小 UX 分类，后端仍强制。
+    // 注意：unblock（解除受阻）后端是 admin 专属（roleGuard:'admin'），不能归入开发集，否则 admin 看不到、开发点了必 403。
+    const SI_DEV_ACTIONS = new Set(['estimate', 'submit', 'feasibility', 'blocked']);
+    // 危险按钮样式
+    const SI_DANGER_ACTIONS = new Set(['return', 'issue_reject', 'void', 'reopen', 'hold', 'blocked']);
+    const SI_SEC_ACTIONS = new Set(['reassign', 'unblock', 'derive', 'close', 'schedule']);
+
+    // ---- 通用 API helper ----
+    async function siApi(path, { method = 'GET', body = null, isForm = false } = {}) {
+        const opt = { method };
+        if (body != null) {
+            if (isForm) { opt.body = body; }
+            else { opt.headers = { 'Content-Type': 'application/json' }; opt.body = JSON.stringify(body); }
+        }
+        const res = await authFetch('/api' + path, opt);
+        if (!res) return { ok: false, aborted: true };       // 401 已在 authFetch 内 logout
+        let data = null;
+        try { data = await res.json(); } catch (e) { data = null; }
+        if (!res.ok) return { ok: false, status: res.status, data };
+        return { ok: true, data };
+    }
+    function siApiErr(r, fallback) {
+        if (r && r.aborted) return null;                     // 已登出，不再提示
+        const msg = (r && r.data && (r.data.error || r.data.code)) || fallback || '操作失败';
+        showToast(msg, 'error');
+        return null;
+    }
+
+    // 本页自带的完整转义（转 & < > " '）。刻意不复用 app.js 全局 escapeHtml——它有两处同名声明，
+    // 运行时生效的 textContent 版（app.js L5079）只转 & < >、不转引号，用于属性上下文(value="..." / title="...")会被引号闭合击穿。
+    function esc(s) {
+        return String(s == null ? '' : s)
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
+    // ---- 启动 ----
+    document.addEventListener('DOMContentLoaded', async () => {
+        if (typeof checkAuth === 'function') { const ok = await checkAuth(); if (!ok) return; }
+        await siLoadMeta();
+        await siLoadUsers();
+        siRenderHeadActions();
+        siRenderTypeTabs();
+        siBuildFilters();
+        await siLoadList();
+        // 深链 ?issue=<id> 直接打开详情
+        const q = new URLSearchParams(location.search);
+        const deepId = parseInt(q.get('issue'), 10);
+        if (deepId > 0) siOpenDrawer(deepId);
+    });
+
+    // ---- meta 加载（失败 → 只读降级，M-5） ----
+    async function siLoadMeta() {
+        const r = await siApi('/sys-issues/meta');
+        const banner = document.getElementById('siReadyBanner');
+        if (r.ok && r.data && r.data.typeFlows) {
+            META = r.data; META_OK = true;
+            banner.style.display = 'none';
+        } else {
+            META = null; META_OK = false;
+            banner.style.display = '';
+            banner.className = 'si-info-banner';
+            banner.style.background = '#fef2f2'; banner.style.borderColor = '#fecaca'; banner.style.color = '#991b1b';
+            banner.textContent = '⚠️ 状态机配置加载失败，页面进入只读模式：可查看单据与时间线，但所有状态动作按钮不可用。请稍后刷新重试。';
+        }
+    }
+
+    async function siLoadUsers() {
+        const r = await siApi('/users/active');
+        siUsers = (r.ok && Array.isArray(r.data)) ? r.data : [];
+    }
+
+    function siTypeKeys() {
+        // 仅展示 meta 暴露的类型（当前后端只启用 feature/improvement）
+        if (!META || !META.typeFlows) return [];
+        return Object.keys(META.typeFlows);
+    }
+    function siTypeLabel(t) { return SI_TYPE_LABEL[t] || t; }
+
+    // ---- 页头动作按钮 ----
+    function siRenderHeadActions() {
+        const box = document.getElementById('siHeadActions');
+        let html = '';
+        if (META_OK && isAdmin()) {
+            html += `<button class="si-btn si-btn-sec" onclick="siOpenBatch()">📦 批次管理</button>`;
+            if (siTypeKeys().length) html += `<button class="si-btn si-btn-primary" onclick="siOpenCreate()">+ 建单</button>`;
+        }
+        box.innerHTML = html;
+    }
+
+    // ---- 类型 tab ----
+    function siRenderTypeTabs() {
+        const tabs = [['all', '全部']].concat(siTypeKeys().map(t => [t, siTypeLabel(t)]));
+        document.getElementById('siTypeTabs').innerHTML = tabs.map(([k, l]) => {
+            const cnt = k === 'all' ? siList.length : siList.filter(i => i.type === k).length;
+            return `<div class="si-type-tab ${siActiveType === k ? 'active' : ''}" onclick="siSetType('${k}')">${esc(l)}<span class="si-cnt">${cnt}</span></div>`;
+        }).join('');
+    }
+    function siSetType(k) {
+        // I：type 改客户端过滤——切 tab 只重渲染（siList 已含全类型），不重拉，其余筛选保持不变
+        siActiveType = k;
+        siRenderTypeTabs();
+        siRenderStats();
+        siRenderTable();
+    }
+    // 当前类型 tab 下可见的单（type 客户端过滤；tab 计数取全量 siList 故各 tab 计数准确）
+    function siVisibleList() { return siActiveType === 'all' ? siList : siList.filter(i => i.type === siActiveType); }
+
+    // ---- 筛选器 ----
+    function siBuildFilters() {
+        // 系统下拉
+        const sysSel = document.getElementById('siFSystem');
+        const systems = (META && META.bizSystems) ? META.bizSystems : [];
+        sysSel.innerHTML = '<option value="">全部系统</option>' + systems.map(s => `<option value="${esc(s)}">${esc(s)}</option>`).join('');
+        siBuildStatusOptions();
+        // admin 才显示"指派开发"筛选 + 含已作废
+        if (isAdmin()) {
+            const aSel = document.getElementById('siFAssigned');
+            aSel.style.display = '';
+            aSel.innerHTML = '<option value="">全部开发</option>' + siUsers.filter(u => u.role !== 'viewer').map(u => `<option value="${u.id}">${esc(u.display_name || u.username)}</option>`).join('');
+            document.getElementById('siVoidedWrap').style.display = '';
+        }
+    }
+    function siBuildStatusOptions() {
+        // 状态筛选是服务端过滤、type 是客户端过滤，故状态下拉用全类型并集（feature/improvement 状态集相同），切 tab 无需重建
+        const sel = document.getElementById('siFStatus');
+        let statuses = [];
+        if (META && META.statusLabels) {
+            const set = new Set(); Object.values(META.statusLabels).forEach(arr => arr.forEach(s => set.add(s))); statuses = [...set];
+        }
+        const cur = sel.value;
+        sel.innerHTML = '<option value="">全部状态</option>' + statuses.map(s => `<option value="${esc(s)}" ${cur === s ? 'selected' : ''}>${esc(s)}</option>`).join('');
+    }
+
+    // ---- 列表加载 ----
+    let siListSeq = 0;
+    async function siLoadList() {
+        const seq = ++siListSeq;                                 // J：请求序号，回来时若非最新则丢弃（防并发筛选乱序覆盖）
+        const params = new URLSearchParams();
+        // I：不带 type 过滤——siList 含全类型，type 在客户端过滤，保证各 tab 计数准确
+        const st = document.getElementById('siFStatus').value; if (st) params.set('status', st);
+        const sys = document.getElementById('siFSystem').value; if (sys) params.set('system', sys);
+        const prio = document.getElementById('siFPriority').value; if (prio) params.set('priority', prio);
+        if (isAdmin()) {
+            const asg = document.getElementById('siFAssigned').value; if (asg) params.set('assigned', asg);
+            if (document.getElementById('siFVoided').checked) params.set('include_voided', '1');
+        }
+        const r = await siApi('/sys-issues?' + params.toString());
+        if (seq !== siListSeq) return;                           // J：已有更新的请求发出，丢弃过时结果
+        if (!r.ok) { siApiErr(r, '加载列表失败'); return; }
+        siList = (r.data && r.data.items) || [];
+        siRenderTypeTabs();
+        siRenderStats();
+        siRenderTable();
+    }
+
+    function siRenderStats() {
+        const vis = siVisibleList().filter(i => i.status !== '已作废');
+        const stats = [
+            ['进行中', vis.filter(i => ['已排期', '开发中', '处理中', '待评估', '待处理'].includes(i.status)).length],
+            ['待验收', vis.filter(i => ['待验证', '待验收'].includes(i.status)).length],
+            ['待上线', vis.filter(i => i.status === '待上线').length],
+            ['已完成', vis.filter(i => ['已上线', '已关闭', '已生效'].includes(i.status)).length],
+            ['返工累计', vis.reduce((a, i) => a + (i.reopen_count || 0), 0)]
+        ];
+        document.getElementById('siStatsRow').innerHTML = stats.map(([l, n]) =>
+            `<div class="si-stat-card"><div class="si-stat-num">${n}</div><div class="si-stat-label">${l}</div></div>`).join('');
+    }
+
+    function siRenderTable() {
+        const tb = document.getElementById('siTbody');
+        const list = siVisibleList();
+        if (!list.length) {
+            tb.innerHTML = `<tr><td colspan="9" class="si-empty">${isAdmin() ? '暂无数据' : '暂无指派给你的单据'}</td></tr>`;
+            return;
+        }
+        tb.innerHTML = list.map(i => {
+            const flags =
+                (i.scope_changed ? `<span class="si-flag scope">范围变更</span>` : '') +
+                (i.reopen_count ? `<span class="si-flag reopen">返工×${i.reopen_count}</span>` : '') +
+                (i.blocked ? `<span class="si-flag blocked">受阻</span>` : '');
+            const lineage = i.origin_issue_id ? `<span class="si-flag lineage">🔁基于#${i.origin_issue_id}</span>` : '';
+            return `<tr onclick="siOpenDrawer(${i.id})">
+                <td>#${i.id}</td>
+                <td><span class="si-type-tag ${esc(i.type)}">${esc(siTypeLabel(i.type))}</span></td>
+                <td>${esc(i.title)}${lineage}${flags}</td>
+                <td>${esc(i.system_name)}<span class="si-muted"> · ${esc(i.module_name || '—')}</span></td>
+                <td><span class="si-prio ${esc(i.priority)}">${esc(i.priority)}</span></td>
+                <td><span class="si-sbadge si-s-${siStatusClass(i.status)}">${esc(i.status)}</span></td>
+                <td>${i.assigned_to_name ? esc(i.assigned_to_name) : '<span class="si-muted">—</span>'}</td>
+                <td>${i.dev_estimated_at ? esc(siFmtDT(i.dev_estimated_at)) : '<span class="si-muted">—</span>'}</td>
+                <td class="si-muted">${esc(siFmtDT(i.created_at))}</td>
+            </tr>`;
+        }).join('');
+    }
+
+    function siFmtDT(v) {
+        if (!v) return '—';
+        // 复用 app.js 统一日期格式化（本地时间），失败原样返回
+        try { const s = formatDateTimeUnified(v, 'full'); return s === '无效时间' ? v : s; } catch (e) { return v; }
+    }
+
+    // ============================================================
+    // 详情抽屉
+    // ============================================================
+    async function siOpenDrawer(id) {
+        siOpenId = id;
+        document.getElementById('siOverlay').classList.add('open');
+        document.getElementById('siDrawer').classList.add('open');
+        document.getElementById('siDBody').innerHTML = '<div class="si-empty">加载中…</div>';
+        document.getElementById('siDActions').innerHTML = '';
+        await siRenderDrawer(id);
+    }
+    function siCloseDrawer() {
+        siOpenId = null; siDetail = null;
+        document.getElementById('siOverlay').classList.remove('open');
+        document.getElementById('siDrawer').classList.remove('open');
+    }
+
+    async function siRenderDrawer(id) {
+        const r = await siApi('/sys-issues/' + id);
+        if (!r.ok) { siApiErr(r, '加载详情失败'); if (r.status === 404 || r.status === 403) siCloseDrawer(); return; }
+        if (siOpenId !== id) return;                          // 快速切单防错位
+        siDetail = r.data;
+        const iss = r.data.issue;
+
+        document.getElementById('siDTitle').innerHTML = `#${iss.id} ${esc(iss.title)}`;
+        document.getElementById('siDMeta').innerHTML =
+            `<span class="si-type-tag ${esc(iss.type)}">${esc(siTypeLabel(iss.type))}</span>` +
+            `<span class="si-sbadge si-s-${siStatusClass(iss.status)}">${esc(iss.status)}</span>` +
+            `<span class="si-prio ${esc(iss.priority)}">${esc(iss.priority)}</span>` +
+            (iss.scope_changed ? `<span class="si-flag scope">· 经历范围变更</span>` : '') +
+            (iss.reopen_count ? `<span class="si-flag reopen">· 返工×${iss.reopen_count}</span>` : '') +
+            (iss.blocked ? `<span class="si-flag blocked">· 受阻中</span>` : '');
+
+        // 血缘
+        let lineageHtml = '';
+        if (r.data.origin_issue) {
+            const o = r.data.origin_issue;
+            lineageHtml += `<div class="si-lineage">📌 基于 <a onclick="siOpenDrawer(${o.id})">#${o.id}《${esc(o.title)}》</a> 迭代而来</div>`;
+        }
+        if (r.data.derived_issues && r.data.derived_issues.length) {
+            const links = r.data.derived_issues.map(d => `<a onclick="siOpenDrawer(${d.id})">#${d.id}</a>`).join('、');
+            lineageHtml += `<div class="si-lineage">🔁 已衍生 ${r.data.derived_issues.length} 个迭代需求（${links}）</div>`;
+        }
+
+        // 基本信息
+        let feas = '';
+        if (iss.needs_feasibility) {
+            feas =
+                `<div class="si-kv"><label>可行性结论</label><div class="v">${iss.feasibility_conclusion ? esc(iss.feasibility_conclusion) : '<span class="si-muted">待评估</span>'}</div></div>` +
+                `<div class="si-kv"><label>受阻</label><div class="v">${iss.blocked ? '<span style="color:#b91c1c;font-weight:600">是</span>' : '否'}</div></div>` +
+                (iss.feasibility_requirement_confirm ? `<div class="si-kv full"><label>需求确认</label><div class="v">${esc(iss.feasibility_requirement_confirm)}</div></div>` : '') +
+                (iss.feasibility_risk ? `<div class="si-kv full"><label>风险/条件</label><div class="v">${esc(iss.feasibility_risk)}</div></div>` : '') +
+                (iss.blocked && iss.blocked_reason ? `<div class="si-kv full"><label>受阻原因</label><div class="v">${esc(iss.blocked_reason)}</div></div>` : '');
+        }
+        const info = `<div class="si-section"><h3>基本信息</h3><div class="si-kv-grid">
+            <div class="si-kv"><label>所属系统</label><div class="v">${esc(iss.system_name)}</div></div>
+            <div class="si-kv"><label>模块</label><div class="v">${esc(iss.module_name || '—')}</div></div>
+            <div class="si-kv"><label>来源</label><div class="v">${esc(iss.source || '—')}</div></div>
+            <div class="si-kv"><label>建单人</label><div class="v">${esc(iss.created_by_name || '—')}</div></div>
+            <div class="si-kv"><label>开发负责人</label><div class="v">${iss.assigned_to_name ? esc(iss.assigned_to_name) : '<span class="si-muted">未指派</span>'}</div></div>
+            <div class="si-kv"><label>预计完成</label><div class="v">${iss.dev_estimated_at ? esc(siFmtDT(iss.dev_estimated_at)) : '<span class="si-muted">未回填</span>'}</div></div>
+            <div class="si-kv"><label>期望完成(deadline)</label><div class="v">${iss.deadline ? esc(iss.deadline) : '<span class="si-muted">—</span>'}</div></div>
+            <div class="si-kv"><label>需求方</label><div class="v">${siRequesterText(iss)}</div></div>
+            <div class="si-kv"><label>上线批次</label><div class="v">${iss.release_id ? ('#' + iss.release_id) : '<span class="si-muted">—</span>'}</div></div>
+            <div class="si-kv"><label>建单时间</label><div class="v">${esc(siFmtDT(iss.created_at))}</div></div>
+            ${feas}
+            <div class="si-kv full"><label>描述</label><div class="v">${iss.description ? esc(iss.description) : '—'}</div></div>
+        </div></div>`;
+
+        // 演进时间线
+        const tl = `<div class="si-section"><h3>演进时间线</h3>${siRenderTimeline(r.data.timeline || [], r.data.attachments || [])}</div>`;
+
+        // 附件区
+        const att = siRenderAttachments(r.data);
+
+        // 通知区（仅 admin 只读展示三侧）
+        const notify = isAdmin() ? siRenderNotify(iss) : '';
+
+        document.getElementById('siDBody').innerHTML = lineageHtml + info + tl + att + notify;
+
+        // 操作区
+        siRenderActions(iss);
+    }
+
+    function siRequesterText(iss) {
+        const parts = [];
+        if (iss.requester_dept) parts.push(esc(iss.requester_dept));
+        if (iss.requester_name) parts.push(esc(iss.requester_name));
+        let s = parts.join(' · ');
+        if (iss.requester_phone) s += ' ' + esc(iss.requester_phone);
+        return s || '<span class="si-muted">—</span>';
+    }
+
+    // ---- 时间线渲染（event_type + action_code → label/color；submit 挂本轮交付附件） ----
+    const SI_TL_LABEL = {
+        created: '建单', assign: '指派', reassign: '改派', estimate: '回填预计',
+        submit: '交付', return: '打回', release: '上线', reopen: '重开', derive: '派生',
+        scope_change: '范围变更', feasibility: '可行性评估', blocked: '标记受阻', unblock: '解除受阻', note: '备注',
+        schedule: '排期', accept: '验收通过', close: '关闭', hold: '暂缓', resume: '恢复',
+        reactivate: '重新激活', issue_reject: '拒绝', void: '作废', effected: '已生效'
+    };
+    const SI_TL_CLS = {
+        created: 'si-tl-amber', derive: 'si-tl-amber',
+        schedule: 'si-tl-indigo', assign: 'si-tl-indigo', reassign: 'si-tl-indigo', estimate: 'si-tl-indigo', feasibility: 'si-tl-indigo',
+        submit: 'si-tl-blue',
+        return: 'si-tl-red', reopen: 'si-tl-red', issue_reject: 'si-tl-red', blocked: 'si-tl-red',
+        accept: 'si-tl-green', release: 'si-tl-green', effected: 'si-tl-green', close: 'si-tl-green', unblock: 'si-tl-green',
+        scope_change: 'si-tl-orange',
+        hold: 'si-tl-gray', resume: 'si-tl-gray', void: 'si-tl-gray', reactivate: 'si-tl-gray', note: 'si-tl-gray'
+    };
+    function siRenderTimeline(list, atts) {
+        if (!list.length) return '<div class="si-muted">暂无演进记录</div>';
+        return '<div class="si-timeline">' + list.map(e => {
+            const key = e.event_type === 'status_change' ? (e.action_code || 'status_change') : e.event_type;
+            const label = SI_TL_LABEL[key] || key;
+            const cls = SI_TL_CLS[key] || 'si-tl-gray';
+            const roundTxt = (e.event_type === 'submit' && e.round_no) ? ('·第' + e.round_no + '轮') : '';
+            // submit 挂本轮 delivery 附件
+            let attHtml = '';
+            if (e.event_type === 'submit' && e.round_no != null) {
+                const files = (atts || []).filter(a => a.attachment_type === 'delivery' && a.round_no === e.round_no);
+                if (files.length) {
+                    attHtml = '<span class="si-tl-att">' + files.map(a =>
+                        `<a onclick="siDownloadAtt(${siOpenId},${a.id})">📎${esc(a.original_name || a.file_name)}</a>`).join('') + '</span>';
+                }
+            }
+            const flow = (e.from_status && e.to_status && e.from_status !== e.to_status)
+                ? `<span class="si-tl-to"> →${esc(e.to_status)}</span>` : '';
+            return `<div class="si-tl-item">
+                <div class="si-tl-time">${esc(siFmtDT(e.created_at))}</div>
+                <div class="si-tl-dot"></div>
+                <div class="si-tl-body">
+                    <span class="si-tl-evt ${cls}">${esc(label)}${roundTxt}</span>${e.summary ? esc(e.summary) : ''}${flow}
+                    <span class="si-tl-op"> · ${esc(e.operator_name || '-')}</span>
+                    ${attHtml}
+                </div>
+            </div>`;
+        }).join('') + '</div>';
+    }
+
+    // ---- 附件区 ----
+    function siRenderAttachments(data) {
+        const iss = data.issue;
+        const all = data.attachments || [];
+        const spec = all.filter(a => a.attachment_type === 'spec');
+        const delivery = all.filter(a => a.attachment_type === 'delivery' && a.round_no != null);
+        const screenshots = all.filter(a => a.attachment_type === 'screenshot');
+        const isOwnerDev = currentUser && iss.assigned_to === currentUser.id;
+
+        function attList(arr, delType) {
+            if (!arr.length) return '<div class="si-muted" style="font-size:12px">无</div>';
+            return arr.map(a => {
+                const canDel = siCanDeleteAtt(iss, a, isOwnerDev);
+                return `<div class="si-att-item">
+                    <a class="si-att-name" onclick="siDownloadAtt(${iss.id},${a.id})">📎 ${esc(a.original_name || a.file_name)}</a>
+                    <span class="si-att-meta">${a.round_no != null ? '第' + a.round_no + '轮 · ' : ''}${a.uploaded_by_name ? esc(a.uploaded_by_name) : ''}</span>
+                    ${canDel ? `<span class="si-att-del" onclick="siDeleteAtt(${iss.id},${a.id})">删除</span>` : ''}
+                </div>`;
+            }).join('');
+        }
+
+        let html = '<div class="si-section"><h3>附件</h3>';
+        // 需求材料 spec（admin 上传）
+        html += `<div style="margin-bottom:10px"><div style="font-size:12px;color:#6b7280;margin-bottom:4px;font-weight:600">需求材料（spec）</div>${attList(spec)}`;
+        if (META_OK && isAdmin() && iss.status !== '已作废') {
+            html += `<div class="si-upload-box"><input type="file" id="siSpecFile" multiple>
+                <button class="si-btn si-btn-sec si-btn-sm" onclick="siUploadAtt(${iss.id},'spec','siSpecFile')">上传需求材料</button></div>`;
+        }
+        html += '</div>';
+        // 交付物 delivery（提交时绑定，只读展示）
+        html += `<div style="margin-bottom:10px"><div style="font-size:12px;color:#6b7280;margin-bottom:4px;font-weight:600">交付物（delivery，随各轮提交）</div>${attList(delivery)}</div>`;
+        // 截图 screenshot（开发本人开发中可传）
+        html += `<div><div style="font-size:12px;color:#6b7280;margin-bottom:4px;font-weight:600">补充截图（screenshot）</div>${attList(screenshots)}`;
+        if (META_OK && isOwnerDev && iss.status === '开发中') {
+            html += `<div class="si-upload-box"><input type="file" id="siShotFile" multiple>
+                <button class="si-btn si-btn-sec si-btn-sm" onclick="siUploadAtt(${iss.id},'screenshot','siShotFile')">上传截图</button></div>`;
+        }
+        html += '</div>';
+        html += '</div>';
+        return html;
+    }
+    function siCanDeleteAtt(iss, a, isOwnerDev) {
+        if (!META_OK) return false;
+        if (a.attachment_type === 'spec') return isAdmin();
+        // delivery/screenshot：仅未绑定(round_no NULL) 且 admin 或上传本人
+        if (a.round_no != null) return false;               // 已绑定不可删
+        if (isAdmin()) return true;
+        return isOwnerDev && currentUser && a.uploaded_by === currentUser.id;
+    }
+
+    // ---- 通知区（只读三侧，仅 admin） ----
+    function siNb(status) {
+        const map = { sent: '已送达', not_sent: '未发送', failed: '发送失败', no_phone: '无手机号' };
+        const cls = status === 'sent' ? 'sent' : (status === 'failed' ? 'failed' : (status === 'no_phone' ? 'no_phone' : 'not_sent'));
+        return `<span class="si-nbadge si-nb-${cls}">${map[status] || status || '未发送'}</span>`;
+    }
+    function siReadTxt(readAt) { return readAt ? `<span class="si-nread">已读 ${esc(siFmtDT(readAt))}</span>` : ''; }
+    function siRenderNotify(iss) {
+        return `<div class="si-section"><h3>钉钉通知（三侧独立）</h3>
+            <div class="si-notify-row"><span>开发侧（指派/改派/打回/重开）</span><span>${siNb(iss.notify_status)}${siReadTxt(iss.read_at)}</span></div>
+            <div class="si-notify-row"><span>需求方侧（回填预计/已上线）</span><span>${siNb(iss.requester_notify_status)}${siReadTxt(iss.requester_read_at)}</span></div>
+            <div class="si-notify-row"><span>建单人侧</span><span>${siNb(iss.creator_notify_status)}${siReadTxt(iss.creator_read_at)}</span></div>
+            <div style="font-size:11px;color:#9ca3af;margin-top:6px">通知在各动作完成后自动派发；本页只读展示送达状态（手动补发能力待后端端点，暂未开放）。</div>
+        </div>`;
+    }
+
+    // ============================================================
+    // 操作区（meta 驱动 + 角色 + 单据标志精化）
+    // ============================================================
+    function siRenderActions(iss) {
+        const box = document.getElementById('siDActions');
+        if (!META_OK) { box.innerHTML = '<span class="si-muted">只读模式：状态动作暂不可用</span>'; return; }
+        if (iss.status === '已作废') { box.innerHTML = '<span class="si-muted">单据已作废，只读。</span>'; return; }  // G：作废单只读，不出 void/derive（后端对已作废再 void 会重复写 timeline）
+        const flows = (META.typeFlows && META.typeFlows[iss.type]) || [];
+        const isAdminUser = isAdmin();
+        const isOwnerDev = currentUser && iss.assigned_to === currentUser.id;
+
+        const acts = [];
+        for (const f of flows) {
+            const a = f.action;
+            if (a === 'create') continue;
+            const hit = (f.from === '*') || (Array.isArray(f.from) && f.from.includes(iss.status));
+            if (!hit) continue;
+            const devAction = SI_DEV_ACTIONS.has(a);
+            if (devAction ? !isOwnerDev : !isAdminUser) continue;
+
+            // 开发态 / 批次精化（needs_feasibility / blocked / dev_estimated_at / release_id）
+            if (a === 'estimate' && iss.needs_feasibility) continue;             // 需评估的走 feasibility
+            if (a === 'feasibility' && (!iss.needs_feasibility || iss.blocked)) continue;  // F：受阻时不出评估（后端 409 ISSUE_BLOCKED）
+            if (a === 'blocked' && (!iss.needs_feasibility || iss.blocked)) continue;
+            if (a === 'unblock' && !iss.blocked) continue;
+            if (a === 'publish' && iss.release_id) continue;                      // C：已挂批次(release_id)的单只能经批次面板发布（hotfix 后端 409 ISSUE_NOT_HOTFIXABLE）
+            if (a === 'submit') {
+                if (iss.blocked) continue;
+                if (!iss.dev_estimated_at) continue;                            // 闸门①
+                // B：需评估单，结论未出或为"不可行"都不能提交（后端 400 FEASIBILITY_NOT_FEASIBLE）
+                if (iss.needs_feasibility && (!iss.feasibility_conclusion || iss.feasibility_conclusion === '不可行')) continue;
+            }
+            acts.push(a);
+        }
+
+        // 闸门 / 引导提示
+        let gate = '';
+        if (isOwnerDev && iss.status === '开发中') {
+            if (iss.blocked) gate = `<div class="si-gate-hint">⛔ 当前受阻中，请联系管理员「解除受阻」后再继续。</div>`;   // A：解除受阻是 admin 权限，开发无权
+            else if (iss.needs_feasibility && iss.feasibility_conclusion === '不可行') gate = `<div class="si-gate-hint">⛔ 评估结论「不可行」，请联系建单人处置（作废 / 派生），暂不能提交交付。</div>`;  // B
+            else if (iss.needs_feasibility && !iss.feasibility_conclusion) gate = `<div class="si-gate-hint">⚠️ 闸门：本单需先完成「可行性评估」（含预计完成时间），才能提交交付。</div>`;
+            else if (!iss.dev_estimated_at) gate = `<div class="si-gate-hint">⚠️ 闸门①：请先「回填预计完成时间」，才能提交交付。</div>`;
+        } else if (isAdminUser && iss.status === '待上线' && iss.release_id) {
+            gate = `<div class="si-gate-hint">📦 已加入批次 #${iss.release_id}，请在「批次管理」中发布。</div>`;   // C
+        }
+
+        const btns = acts.map(a => {
+            const label = (META.actions && META.actions[a]) || a;
+            let lbl = label;
+            if (a === 'estimate' && iss.dev_estimated_at) lbl = '修改预计完成';   // estimate 已回填改文案
+            else if (a === 'publish') lbl = '单条上线';                          // C：publish 映射 hotfix-publish，纠正 meta label"批次发布"的误导
+            const cls = SI_DANGER_ACTIONS.has(a) ? 'si-btn-danger' : (SI_SEC_ACTIONS.has(a) ? 'si-btn-sec' : 'si-btn-primary');
+            return `<button class="si-btn ${cls} si-btn-sm" onclick="siDoAction('${a}')">${esc(lbl)}</button>`;
+        }).join('');
+
+        box.innerHTML = gate + (btns || '<span class="si-muted">当前状态/身份下无可执行动作</span>');
+    }
+
+    // ============================================================
+    // 动作分发 → 弹框收集字段 → 调端点
+    // ============================================================
+    function siDoAction(action) {
+        const iss = siDetail && siDetail.issue;
+        if (!iss) return;
+        switch (action) {
+            case 'schedule': return siModalSchedule(iss);
+            case 'assign': return siModalAssign(iss);
+            case 'reassign': return siModalReassign(iss);
+            case 'estimate': return siModalEstimate(iss);
+            case 'feasibility': return siModalFeasibility(iss);
+            case 'blocked': return siModalReason(iss, 'blocked', '标记受阻', '受阻原因', '/blocked');
+            case 'unblock': return siModalReason(iss, 'unblock', '解除受阻', '解除说明', '/unblock');
+            case 'submit': return siModalSubmit(iss);
+            case 'accept': return siConfirmSimple(iss, 'accept', '确认验收通过？', '/accept');
+            case 'return': return siModalReason(iss, 'return', '验收打回', '打回原因', '/return');
+            case 'close': return siConfirmSimple(iss, 'close', '确认关闭（观察期结束）？', '/close');
+            case 'hold': return siModalReason(iss, 'hold', '暂缓', '暂缓原因', '/hold');
+            case 'resume': return siConfirmSimple(iss, 'resume', '确认恢复到暂缓前的状态？', '/resume');
+            case 'reactivate': return siModalReason(iss, 'reactivate', '重新激活', '重新激活原因', '/reactivate');
+            case 'issue_reject': return siModalReason(iss, 'issue_reject', '拒绝', '拒绝原因', '/issue-reject');
+            case 'void': return siModalReason(iss, 'void', '作废', '作废原因', '/void');
+            case 'reopen': return siModalReason(iss, 'reopen', '重开（返工）', '重开原因', '/reopen');
+            case 'publish': return siModalHotfix(iss);            // 单条上线走 hotfix-publish
+            case 'derive': return siModalDerive(iss);
+            default: showToast('未知动作：' + action, 'error');
+        }
+    }
+
+    // 刷新详情 + 列表
+    async function siAfterAction() { await siLoadList(); if (siOpenId) await siRenderDrawer(siOpenId); }
+
+    // ---- 通用「原因」弹框 ----
+    function siModalReason(iss, action, title, label, path) {
+        siModal(title, [
+            fTextarea('reason', label, '', true, '必填，trim 后非空')
+        ], async v => {
+            if (!v.reason.trim()) { showToast(label + '必填', 'error'); return false; }
+            const r = await siApi('/sys-issues/' + iss.id + path, { method: 'POST', body: { reason: v.reason.trim() } });
+            if (!r.ok) { siApiErr(r); return false; }
+            showToast(title + '完成', 'success'); return true;
+        });
+    }
+    function siConfirmSimple(iss, action, prompt, path) {
+        siModal(prompt, [note(prompt)], async () => {
+            const r = await siApi('/sys-issues/' + iss.id + path, { method: 'POST', body: {} });
+            if (!r.ok) { siApiErr(r); return false; }
+            showToast('操作完成', 'success'); return true;
+        }, '确定');
+    }
+
+    function siModalSchedule(iss) {
+        siModal('排期', [
+            fSelect('priority', '优先级', ['P0', 'P1', 'P2', 'P3'], iss.priority || 'P2'),
+            fDate('deadline', '期望完成时间（选填）', iss.deadline || '')
+        ], async v => {
+            const body = { priority: v.priority };
+            if (v.deadline) body.deadline = v.deadline;
+            const r = await siApi('/sys-issues/' + iss.id + '/schedule', { method: 'POST', body });
+            if (!r.ok) { siApiErr(r); return false; }
+            showToast('已排期', 'success'); return true;
+        });
+    }
+
+    function siModalAssign(iss) {
+        siModal('指派开发', [
+            fUserSelect('assigned_to', '开发人员', null),
+            note('指派后转「开发中」，钉钉通知开发。请先由开发回填预计完成时间。')
+        ], async v => {
+            if (!v.assigned_to) { showToast('请选择开发人员', 'error'); return false; }
+            const r = await siApi('/sys-issues/' + iss.id + '/assign', { method: 'POST', body: { assigned_to: parseInt(v.assigned_to, 10) } });
+            if (!r.ok) { siApiErr(r); return false; }
+            showToast('已指派，钉钉已通知开发', 'success'); return true;
+        });
+    }
+
+    function siModalReassign(iss) {
+        siModal('改派', [
+            fUserSelect('newAssignedTo', '新开发人员', iss.assigned_to),
+            fTextarea('reason', '改派原因', '', true, '必填：旧开发 → 新开发 + 换人原因'),
+            note('改派会重置开发侧通知并清空已回填的预计完成时间。')
+        ], async v => {
+            if (!v.newAssignedTo) { showToast('请选择新开发人员', 'error'); return false; }
+            if (!v.reason.trim()) { showToast('改派原因必填', 'error'); return false; }
+            const r = await siApi('/sys-issues/' + iss.id + '/reassign', {
+                method: 'POST', body: { newAssignedTo: parseInt(v.newAssignedTo, 10), oldAssignedTo: iss.assigned_to, reason: v.reason.trim() }
+            });
+            if (!r.ok) { siApiErr(r); return false; }
+            showToast('已改派，钉钉已通知新开发', 'success'); return true;
+        });
+    }
+
+    function siModalEstimate(iss) {
+        siModal(iss.dev_estimated_at ? '修改预计完成' : '回填预计完成', [
+            fDateTime('dev_estimated_at', '预计完成时间', siToLocalInput(iss.dev_estimated_at)),
+            note('⚠️ 闸门①：必须先回填预计完成时间才能提交交付；时间不能早于指派时刻。')
+        ], async v => {
+            if (!v.dev_estimated_at) { showToast('请填写预计完成时间', 'error'); return false; }
+            const r = await siApi('/sys-issues/' + iss.id + '/estimate', { method: 'POST', body: { dev_estimated_at: siFromLocalInput(v.dev_estimated_at) } });
+            if (!r.ok) { siApiErr(r); return false; }
+            showToast(r.data && r.data.unchanged ? '时间未变（同分钟归一化）' : '已回填，钉钉已通知需求方', 'success'); return true;
+        });
+    }
+
+    function siModalFeasibility(iss) {
+        siModal('可行性评估', [
+            fSelect('conclusion', '评估结论', ['可行', '有条件可行', '不可行'], '可行'),
+            fTextarea('requirement_confirm', '需求确认', '', true, '必填：对需求的理解与确认，≤500'),
+            fDateTime('dev_estimated_at', '预计完成时间', siToLocalInput(iss.dev_estimated_at)),
+            fTextarea('risk', '风险/前置条件', '', false, '「有条件可行 / 不可行」时必填，≤1000'),
+            note('⚠️ 本单需可行性评估：评估通过（可行/有条件可行）后方可继续提交交付。')
+        ], async v => {
+            if (!v.conclusion) { showToast('请选择评估结论', 'error'); return false; }
+            if (!v.requirement_confirm.trim()) { showToast('需求确认必填', 'error'); return false; }
+            if (!v.dev_estimated_at) { showToast('预计完成时间必填', 'error'); return false; }
+            if ((v.conclusion === '有条件可行' || v.conclusion === '不可行') && !v.risk.trim()) { showToast('该结论下风险/前置条件必填', 'error'); return false; }
+            const body = { conclusion: v.conclusion, requirement_confirm: v.requirement_confirm.trim(), dev_estimated_at: siFromLocalInput(v.dev_estimated_at) };
+            if (v.risk.trim()) body.risk = v.risk.trim();
+            const r = await siApi('/sys-issues/' + iss.id + '/feasibility', { method: 'POST', body });
+            if (!r.ok) { siApiErr(r); return false; }
+            showToast('已提交可行性评估', 'success'); return true;
+        });
+    }
+
+    function siModalSubmit(iss) {
+        siModal('提交交付', [
+            fTextarea('summary', '交付说明', '', true, '必填，trim 后非空'),
+            fFile('files', '交付物附件（可多选，可选）', true),
+            note('⚠️ 闸门②：交付说明必填。附件将作为本轮交付物随提交绑定；提交后转「待验证」等验收。')
+        ], async v => {
+            if (!v.summary.trim()) { showToast('交付说明必填', 'error'); return false; }
+            // 两阶段：先传交付物(delivery, round_no=NULL 暂存) → 拿 id → submit 绑本轮
+            let attachmentIds = [];
+            const fileEl = document.getElementById('f_files');
+            if (fileEl && fileEl.files && fileEl.files.length) {
+                const fd = new FormData();
+                fd.append('attachment_type', 'delivery');
+                for (const f of fileEl.files) fd.append('files', f);
+                const up = await siApi('/sys-issues/' + iss.id + '/attachments', { method: 'POST', body: fd, isForm: true });
+                if (!up.ok) { siApiErr(up, '交付物上传失败'); return false; }
+                attachmentIds = (up.data && up.data.attachments || []).map(a => a.id);
+            }
+            const body = { summary: v.summary.trim() };
+            if (attachmentIds.length) body.attachment_ids = attachmentIds;
+            const r = await siApi('/sys-issues/' + iss.id + '/submit', { method: 'POST', body });
+            if (!r.ok) {
+                // H：submit 失败时 best-effort 清理刚上传的暂存 delivery 孤儿（round_no=NULL 在附件区不展示、否则永久滞留）
+                for (const aid of attachmentIds) {
+                    try { await siApi('/sys-issues/' + iss.id + '/attachments/' + aid, { method: 'DELETE' }); } catch (e) { /* 清理尽力而为，不阻断错误提示 */ }
+                }
+                siApiErr(r); return false;
+            }
+            showToast('已提交，转「待验证」', 'success'); return true;
+        });
+    }
+
+    function siModalHotfix(iss) {
+        siModal('单条上线（hotfix）', [
+            fTextarea('release_note', '上线说明', '', true, '必填，≤1000'),
+            fText('version_tag', '版本号', '', true, '必填，≤100'),
+            note('⚠️ 闸门③：单条上线需填说明+版本号。发布后转「已上线」并通知需求方。批量上线请用「批次管理」。')
+        ], async v => {
+            if (!v.release_note.trim()) { showToast('上线说明必填', 'error'); return false; }
+            if (!v.version_tag.trim()) { showToast('版本号必填', 'error'); return false; }
+            const r = await siApi('/sys-issues/' + iss.id + '/hotfix-publish', { method: 'POST', body: { release_note: v.release_note.trim(), version_tag: v.version_tag.trim() } });
+            if (!r.ok) { siApiErr(r); return false; }
+            showToast('已上线，钉钉已通知需求方', 'success'); return true;
+        });
+    }
+
+    function siModalDerive(iss) {
+        const typeOpts = siTypeKeys();
+        siModal('派生迭代（基于本单新建）', [
+            fSelectMap('type', '新单类型', typeOpts, typeOpts[0] || 'feature', SI_TYPE_LABEL),
+            fText('title', '新单标题', iss.title + '（迭代）', true),
+            fSelectMap('system_name', '所属系统', (META && META.bizSystems) || [], iss.system_name, null),
+            fSelect('source', '来源', ['业务方', '内部', '生产故障'], iss.source || '业务方'),
+            fText('module_name', '模块（选填）', iss.module_name || ''),
+            fTextarea('derive_note', '派生说明', '', false, '选填：为什么在原单基础上迭代')
+        ], async v => {
+            if (!v.title.trim()) { showToast('标题必填', 'error'); return false; }
+            const body = { type: v.type, title: v.title.trim(), system_name: v.system_name, source: v.source };
+            if (v.module_name.trim()) body.module_name = v.module_name.trim();
+            if (v.derive_note.trim()) body.derive_note = v.derive_note.trim();
+            const r = await siApi('/sys-issues/' + iss.id + '/derive', { method: 'POST', body });
+            if (!r.ok) { siApiErr(r); return false; }
+            showToast('已派生新单 #' + (r.data && r.data.id), 'success');
+            if (r.data && r.data.id) { siCloseModal(); await siLoadList(); siOpenDrawer(r.data.id); return false; }
+            return true;
+        });
+    }
+
+    // ---- 建单 ----
+    function siOpenCreate() {
+        const typeOpts = siTypeKeys();
+        if (!typeOpts.length) { showToast('暂无可建类型', 'error'); return; }
+        siModal('建单', [
+            fSelectMap('type', '类型', typeOpts, typeOpts[0], SI_TYPE_LABEL),
+            fText('title', '标题', '', true),
+            fSelectMap('system_name', '所属系统', (META && META.bizSystems) || [], (META && META.bizSystems && META.bizSystems[0]) || '', null),
+            fText('module_name', '模块（选填）', ''),
+            fSelect('priority', '优先级', ['P0', 'P1', 'P2', 'P3'], 'P2'),
+            fSelect('source', '来源', ['业务方', '内部', '生产故障'], '业务方'),
+            fText('requester_dept', '需求方部门（选填）', ''),
+            fText('requester_name', '需求方姓名（选填）', ''),
+            fText('requester_phone', '需求方手机（选填，通知用）', ''),
+            fDate('deadline', '期望完成时间（选填）', ''),
+            fTextarea('description', '描述（选填）', '', false),
+            fCheckbox('needs_feasibility', '需要可行性评估（开发先评估再排期）', false),
+            note('建单仅 admin 可操作。新功能/优化进「待评估」，排期后指派开发。')
+        ], async v => {
+            if (!v.title.trim()) { showToast('标题必填', 'error'); return false; }
+            if (!v.system_name) { showToast('所属系统必填', 'error'); return false; }
+            const body = { type: v.type, title: v.title.trim(), system_name: v.system_name, source: v.source, priority: v.priority };
+            if (v.module_name.trim()) body.module_name = v.module_name.trim();
+            if (v.requester_dept.trim()) body.requester_dept = v.requester_dept.trim();
+            if (v.requester_name.trim()) body.requester_name = v.requester_name.trim();
+            if (v.requester_phone.trim()) body.requester_phone = v.requester_phone.trim();
+            if (v.deadline) body.deadline = v.deadline;
+            if (v.description.trim()) body.description = v.description.trim();
+            if (v.needs_feasibility) body.needs_feasibility = 1;
+            const r = await siApi('/sys-issues', { method: 'POST', body });
+            if (!r.ok) { siApiErr(r); return false; }
+            showToast('已建单 #' + (r.data && r.data.id), 'success');
+            if (r.data && r.data.id) { siCloseModal(); await siLoadList(); siOpenDrawer(r.data.id); return false; }
+            return true;
+        });
+    }
+
+    // ============================================================
+    // 附件上传 / 下载 / 删除
+    // ============================================================
+    async function siUploadAtt(issueId, type, inputId) {
+        const el = document.getElementById(inputId);
+        if (!el || !el.files || !el.files.length) { showToast('请先选择文件', 'error'); return; }
+        const fd = new FormData();
+        fd.append('attachment_type', type);
+        for (const f of el.files) fd.append('files', f);
+        const r = await siApi('/sys-issues/' + issueId + '/attachments', { method: 'POST', body: fd, isForm: true });
+        if (!r.ok) { siApiErr(r, '上传失败'); return; }
+        showToast('上传成功', 'success');
+        if (siOpenId === issueId) await siRenderDrawer(issueId);
+    }
+    async function siDownloadAtt(issueId, attId) {
+        // 走鉴权下载端点（携带 Bearer），拿 blob 触发下载
+        const res = await authFetch('/api/sys-issues/' + issueId + '/attachments/' + attId + '/download');
+        if (!res) return;
+        if (!res.ok) { showToast('下载失败', 'error'); return; }
+        // E：文件名优先取已加载详情里的 original_name（权威、无需解析 Content-Disposition，中文名不丢）
+        let name = '';
+        if (siDetail && Array.isArray(siDetail.attachments)) {
+            const att = siDetail.attachments.find(a => String(a.id) === String(attId));   // ML-1：id 类型强制，数字/字符串都命中权威文件名
+            if (att) name = att.original_name || att.file_name || '';
+        }
+        if (!name) {
+            // 兜底：优先解析 RFC5987 的 filename*=UTF-8''（中文名走这条），再回退 filename="..."
+            const dispo = res.headers.get('Content-Disposition') || '';
+            let m = /filename\*=(?:UTF-8'')?([^;\r\n]+)/i.exec(dispo);
+            if (m) { try { name = decodeURIComponent(m[1].trim().replace(/^["']|["']$/g, '')); } catch (e) { name = m[1]; } }
+            else { m = /filename="?([^";\r\n]+)"?/i.exec(dispo); if (m) name = m[1]; }
+        }
+        if (!name) name = 'attachment';
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = name;
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1500);
+    }
+    async function siDeleteAtt(issueId, attId) {
+        if (!confirm('确认删除该附件？')) return;
+        const r = await siApi('/sys-issues/' + issueId + '/attachments/' + attId, { method: 'DELETE' });
+        if (!r.ok) { siApiErr(r, '删除失败'); return; }
+        showToast('已删除', 'success');
+        if (siOpenId === issueId) await siRenderDrawer(issueId);
+    }
+
+    // ============================================================
+    // 批次管理（admin）
+    // ============================================================
+    function siOpenBatch() {
+        document.getElementById('siBatchOverlay').classList.add('open');
+        siRenderBatchList();
+    }
+    function siCloseBatch() { document.getElementById('siBatchOverlay').classList.remove('open'); }
+
+    async function siRenderBatchList() {
+        document.getElementById('siBatchHead').textContent = '批次管理';
+        document.getElementById('siBatchBody').innerHTML = '<div class="si-empty">加载中…</div>';
+        document.getElementById('siBatchFoot').innerHTML = `<button class="si-btn si-btn-sec" onclick="siCloseBatch()">关闭</button><button class="si-btn si-btn-primary" onclick="siModalCreateBatch()">+ 新建批次</button>`;
+        const r = await siApi('/sys-releases');
+        if (!r.ok) { document.getElementById('siBatchBody').innerHTML = '<div class="si-empty">加载失败</div>'; siApiErr(r); return; }
+        const items = (r.data && r.data.items) || [];
+        if (!items.length) { document.getElementById('siBatchBody').innerHTML = '<div class="si-empty">暂无批次，点右下角「新建批次」</div>'; return; }
+        document.getElementById('siBatchBody').innerHTML = items.map(b => {
+            const badge = b.status === '已发布' ? '<span class="si-release-badge done">已发布</span>' : '<span class="si-release-badge plan">计划中</span>';
+            const hot = b.is_hotfix ? ' · <span style="color:#b45309">hotfix</span>' : '';
+            return `<div class="si-batch-item" onclick="siOpenBatchDetail(${b.id})">
+                <div><span class="si-batch-no">${esc(b.release_no)}</span> ${badge}${hot}</div>
+                <div class="si-batch-meta">${esc(b.title || '（无标题）')}${b.version_tag ? ' · ' + esc(b.version_tag) : ''} · 含 ${b.issue_count || 0} 单${b.released_at ? ' · 发布于 ' + esc(siFmtDT(b.released_at)) : ''}</div>
+            </div>`;
+        }).join('');
+    }
+
+    function siModalCreateBatch() {
+        siModal('新建上线批次', [
+            fText('title', '批次标题（选填）', ''),
+            fText('release_no', '批次号（选填，留空自动生成 R-日期-序号）', ''),
+            fText('version_tag', '版本号（选填）', ''),
+            fTextarea('release_note', '上线说明（选填）', '', false),
+            fDate('planned_date', '计划发布日期（选填）', '')
+        ], async v => {
+            const body = {};
+            if (v.title.trim()) body.title = v.title.trim();
+            if (v.release_no.trim()) body.release_no = v.release_no.trim();
+            if (v.version_tag.trim()) body.version_tag = v.version_tag.trim();
+            if (v.release_note.trim()) body.release_note = v.release_note.trim();
+            if (v.planned_date) body.planned_date = v.planned_date;
+            const r = await siApi('/sys-releases', { method: 'POST', body });
+            if (!r.ok) { siApiErr(r); return false; }
+            showToast('批次已创建 ' + (r.data && r.data.release_no), 'success');
+            siCloseModal(); siRenderBatchList(); return false;
+        });
+    }
+
+    async function siOpenBatchDetail(id) {
+        document.getElementById('siBatchBody').innerHTML = '<div class="si-empty">加载中…</div>';
+        const r = await siApi('/sys-releases/' + id);
+        if (!r.ok) { siApiErr(r); siRenderBatchList(); return; }
+        const rel = r.data.release; const issues = r.data.issues || [];
+        document.getElementById('siBatchHead').textContent = '批次 ' + rel.release_no;
+        const planning = rel.status === '计划中';
+        const rows = issues.length ? issues.map(i => `<div class="si-att-item">
+            <span class="si-type-tag ${esc(i.type)}">${esc(siTypeLabel(i.type))}</span>
+            <a class="si-att-name" onclick="siCloseBatch();siOpenDrawer(${i.id})">#${i.id} ${esc(i.title)}</a>
+            <span class="si-sbadge si-s-${siStatusClass(i.status)}" style="margin-left:auto">${esc(i.status)}</span>
+            ${planning ? `<span class="si-att-del" onclick="siRemoveFromBatch(${id},${i.id})">移除</span>` : ''}
+        </div>`).join('') : '<div class="si-muted" style="font-size:12px">批次内暂无单据</div>';
+
+        document.getElementById('siBatchBody').innerHTML =
+            `<div class="si-kv-grid" style="margin-bottom:14px">
+                <div class="si-kv"><label>状态</label><div class="v">${planning ? '<span class="si-release-badge plan">计划中</span>' : '<span class="si-release-badge done">已发布</span>'}</div></div>
+                <div class="si-kv"><label>版本号</label><div class="v">${rel.version_tag ? esc(rel.version_tag) : '—'}</div></div>
+                <div class="si-kv full"><label>上线说明</label><div class="v">${rel.release_note ? esc(rel.release_note) : '—'}</div></div>
+            </div>
+            <div class="si-section"><h3>批次成员（${issues.length}）</h3>${rows}</div>`;
+
+        let foot = `<button class="si-btn si-btn-sec" onclick="siRenderBatchList()">← 返回</button>`;
+        if (planning) {
+            foot += `<button class="si-btn si-btn-sec" onclick="siModalAddToBatch(${id})">+ 加单</button>`;
+            foot += `<button class="si-btn si-btn-primary" onclick="siModalPublishBatch(${id})">发布批次</button>`;
+        }
+        document.getElementById('siBatchFoot').innerHTML = foot;
+    }
+
+    async function siModalAddToBatch(releaseId) {
+        // 候选 = 待上线 + 未挂批次（列表接口按 status 拉，release 为空）
+        const r = await siApi('/sys-issues?' + new URLSearchParams({ status: '待上线' }).toString());
+        if (!r.ok) { siApiErr(r); return; }
+        const cands = ((r.data && r.data.items) || []).filter(i => !i.release_id && i.type !== 'config');
+        if (!cands.length) { showToast('没有可加入的「待上线」单据', 'warning'); return; }
+        const opts = cands.map(i => `<label style="display:flex;gap:7px;align-items:center;padding:5px 0"><input type="checkbox" class="si-add-chk" value="${i.id}"> #${i.id} <span class="si-type-tag ${esc(i.type)}">${esc(siTypeLabel(i.type))}</span> ${esc(i.title)}</label>`).join('');
+        siModal('加入批次', [{ k: null, html: `<div class="si-field"><label>选择待上线单据</label><div style="max-height:320px;overflow-y:auto">${opts}</div></div>` }], async () => {
+            const ids = [...document.querySelectorAll('.si-add-chk:checked')].map(c => parseInt(c.value, 10));
+            if (!ids.length) { showToast('请至少选择一个单据', 'error'); return false; }
+            const rr = await siApi('/sys-releases/' + releaseId + '/add-issues', { method: 'POST', body: { issue_ids: ids } });
+            if (!rr.ok) { siApiErr(rr); return false; }
+            showToast('已加入 ' + (rr.data && rr.data.count) + ' 单', 'success');
+            siCloseModal(); siOpenBatchDetail(releaseId); return false;
+        }, '加入');
+    }
+
+    async function siRemoveFromBatch(releaseId, issueId) {
+        const r = await siApi('/sys-releases/' + releaseId + '/remove-issues', { method: 'POST', body: { issue_ids: [issueId] } });
+        if (!r.ok) { siApiErr(r); return; }
+        showToast('已移除', 'success');
+        siOpenBatchDetail(releaseId);
+    }
+
+    function siModalPublishBatch(releaseId) {
+        siModal('发布批次', [
+            fTextarea('release_note', '上线说明（选填，覆盖批次已填）', '', false),
+            fText('version_tag', '版本号（选填，覆盖批次已填）', ''),
+            note('⚠️ 闸门③：发布需上线说明+版本号（此处留空则用批次已填值，最终不得为空）。发布后批次内单据全部转「已上线」并通知需求方。')
+        ], async v => {
+            const body = {};
+            if (v.release_note.trim()) body.release_note = v.release_note.trim();
+            if (v.version_tag.trim()) body.version_tag = v.version_tag.trim();
+            const r = await siApi('/sys-releases/' + releaseId + '/publish', { method: 'POST', body });
+            if (!r.ok) { siApiErr(r); return false; }
+            showToast('批次已发布，' + (r.data && r.data.count) + ' 单上线', 'success');
+            siCloseModal(); await siLoadList(); siOpenBatchDetail(releaseId); return false;
+        });
+    }
+
+    // ============================================================
+    // 通用弹框系统 + 字段构造器
+    // ============================================================
+    function siModal(title, fields, onConfirm, confirmLabel) {
+        document.getElementById('siMHead').textContent = title;
+        document.getElementById('siMBody').innerHTML = fields.map(f => f.html).join('');
+        const btn = document.getElementById('siMConfirm');
+        btn.textContent = confirmLabel || '确定';
+        btn.disabled = false;
+        siModalConfirm = async () => {
+            const v = {};
+            fields.forEach(f => { if (f.k) { const el = document.getElementById('f_' + f.k); if (el) v[f.k] = (el.type === 'checkbox') ? el.checked : el.value; } });
+            btn.disabled = true;
+            let keep = false;
+            try { keep = await onConfirm(v); } catch (e) { console.error(e); showToast('操作异常：' + (e && e.message || e), 'error'); }
+            btn.disabled = false;
+            if (keep) { siCloseModal(); await siAfterAction(); }
+        };
+        btn.onclick = siModalConfirm;
+        document.getElementById('siModalOverlay').classList.add('open');
+    }
+    function siCloseModal() { document.getElementById('siModalOverlay').classList.remove('open'); siModalConfirm = null; }
+
+    // 字段构造器（值均经 escapeHtml；label/hint 为静态文案）
+    function fText(k, l, v, req, hint) { return { k, html: `<div class="si-field"><label>${l}${req ? ' <span class="req">*</span>' : ''}</label><input type="text" id="f_${k}" value="${esc(v || '')}">${hint ? `<div class="si-hint">${hint}</div>` : ''}</div>` }; }
+    function fTextarea(k, l, v, req, hint) { return { k, html: `<div class="si-field"><label>${l}${req ? ' <span class="req">*</span>' : ''}</label><textarea id="f_${k}">${esc(v || '')}</textarea>${hint ? `<div class="si-hint">${hint}</div>` : ''}</div>` }; }
+    function fDate(k, l, v) { return { k, html: `<div class="si-field"><label>${l}</label><input type="date" id="f_${k}" value="${esc(v || '')}"></div>` }; }
+    function fDateTime(k, l, v) { return { k, html: `<div class="si-field"><label>${l} <span class="req">*</span></label><input type="datetime-local" id="f_${k}" value="${esc(v || '')}"></div>` }; }
+    function fSelect(k, l, opts, cur) { return { k, html: `<div class="si-field"><label>${l}</label><select id="f_${k}">${opts.map(o => `<option value="${esc(o)}" ${cur === o ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select></div>` }; }
+    function fSelectMap(k, l, opts, cur, labelMap) { return { k, html: `<div class="si-field"><label>${l} <span class="req">*</span></label><select id="f_${k}">${opts.map(o => `<option value="${esc(o)}" ${cur === o ? 'selected' : ''}>${esc(labelMap && labelMap[o] || o)}</option>`).join('')}</select></div>` }; }
+    function fUserSelect(k, l, exclude) {
+        const opts = siUsers.filter(u => u.role !== 'viewer').map(u => `<option value="${u.id}">${esc(u.display_name || u.username)}${u.id === exclude ? '（当前）' : ''}</option>`).join('');
+        return { k, html: `<div class="si-field"><label>${l} <span class="req">*</span></label><select id="f_${k}"><option value="">请选择</option>${opts}</select></div>` };
+    }
+    function fFile(k, l, multi) { return { k: null, html: `<div class="si-field"><label>${l}</label><input type="file" id="f_${k}" ${multi ? 'multiple' : ''}></div>` }; }
+    function fCheckbox(k, l, checked) { return { k, html: `<div class="si-field inline-chk"><input type="checkbox" id="f_${k}" ${checked ? 'checked' : ''}><label for="f_${k}">${l}</label></div>` }; }
+    function note(txt) { return { k: null, html: `<div class="si-note-box">${txt}</div>` }; }
+
+    // ---- datetime-local ↔ 后端 'YYYY-MM-DD HH:MM' ----
+    function siToLocalInput(v) {
+        if (!v) return '';
+        // 后端存 'YYYY-MM-DD HH:MM' 或 'YYYY-MM-DD HH:MM:SS' → datetime-local 需 'YYYY-MM-DDTHH:MM'
+        const m = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})/.exec(String(v));
+        return m ? (m[1] + 'T' + m[2]) : '';
+    }
+    function siFromLocalInput(v) {
+        if (!v) return '';
+        return String(v).replace('T', ' ');   // 'YYYY-MM-DDTHH:MM' → 'YYYY-MM-DD HH:MM'
+    }
+    </script>
+</body>
+
+</html>
