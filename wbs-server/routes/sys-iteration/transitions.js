@@ -3,12 +3,12 @@
 //   本文件 = §3.7「机器可读常量」的落地：ALLOWED_STATUSES / TRANSITIONS（每条 10 维度）/ BIZ_SYSTEMS +
 //     buildMeta（决策②，前端 fetch 消费同一份，杜绝双状态机漂移）+ findTransition（sysIssueTransition 查表用）。
 //
-// ⚠️ C2 切片（本轮先打通变更流 feature+improvement）：
-//   - 变更流（feature/improvement 共用一条流）的 ALLOWED_STATUSES + TRANSITIONS **本轮全定义**
-//     （状态机常量是单一来源，一次定全更干净；前端 meta 也需完整状态图）。
-//   - bug 流 / config 流的常量 **本轮留空位 + TODO 标注**，追加 bug/config 时增量填（不动变更流）。
-//   - 端点实现分 commit：C2 实现到 建单/排期/指派/reassign + 列表/详情/meta；estimate/submit/accept/return/
-//     批次/暂缓/恢复/拒绝/作废/重开/范围变更/派生 的常量已在表里，端点 C3+ 补。
+// ⚠️ C2 切片（变更流 feature+improvement 已全上线 v1.102.0）：
+//   - 变更流（feature/improvement 共用一条流）的 ALLOWED_STATUSES + TRANSITIONS 全定义。
+//   - **bug 流已追加（bug流_方案_20260702_v1.2）**：BUG_FLOW_TRANSITIONS 见下方——
+//     Commit ① 前段（建单→…→待上线）+ Commit ② 两条确认上线路径（填发版信息/发版 hotfix/不发版专用 transition，死端解除）；
+//     真钉钉建群=③；手动链式通知+对接人白名单=④；派生双描述=⑤。
+//   - config 流的常量 **留空位 + TODO 标注**，追加 config 时增量填（不动既有流）。
 'use strict';
 
 // ── 被迭代的业务系统白名单（决策①，§12 GET /sys-systems 下拉源）──────────
@@ -21,7 +21,7 @@ const BIZ_SYSTEMS = ['BMS', 'HRD', 'OA', '智数协同', '其他'];
 const INITIAL_STATUS_BY_TYPE = {
   feature: '待评估',
   improvement: '待评估',
-  // bug: '待处理',        // TODO 追加 bug 流时填
+  bug: '待处理',           // bug 前段最短（无评估/排期，建单直落 待处理，bug 方案 §2.1）
   // config: '待处理',     // TODO 追加 config 流时填
 };
 
@@ -30,10 +30,16 @@ const CHANGE_FLOW_STATUSES = [
   '待评估', '已排期', '开发中', '待验证', '待上线', '已上线', '已关闭',  // 主流程
   '已暂缓', '已拒绝', '已作废',                                          // 旁路态（§3.4）
 ];
+// bug 流状态集（bug 方案 §2.2）：无 已排期/待评估（前段裁剪）、无 已暂缓（暂缓有意省略）、
+//   无 已关闭（已上线即终态，上线后再出问题一律派生新单）。
+const BUG_FLOW_STATUSES = [
+  '待处理', '处理中', '待验证', '待上线', '已上线',   // 主流程（已上线=终态）
+  '已拒绝', '已作废',                                  // 旁路态
+];
 const ALLOWED_STATUSES = {
   feature: CHANGE_FLOW_STATUSES,
   improvement: CHANGE_FLOW_STATUSES,
-  // bug: [...],        // TODO 追加 bug 流时填（待处理→处理中→待验证→...，§3.2）
+  bug: BUG_FLOW_STATUSES,
   // config: [...],     // TODO 追加 config 流时填（待处理→处理中→待验收→已生效，§18.2）
 };
 
@@ -160,7 +166,7 @@ const CHANGE_FLOW_TRANSITIONS = [
   },
   {
     action: 'reactivate',                   // 重新激活：已拒绝 → 初始态（admin，不计返工，RC-M1）
-    from: ['已拒绝'], to: '待评估',         // 变更流回 待评估（bug 回 待处理，追加 bug 时分流）
+    from: ['已拒绝'], to: '待评估',         // 变更流回 待评估（bug 流有独立条目回 待处理，见 BUG_FLOW_TRANSITIONS）
     roleGuard: 'admin', ownerGuard: null,
     requiredPayload: ['reason'],
     sideEffects: ['回初始态重走指派流程（reopen_count 不变）'],
@@ -241,11 +247,167 @@ const CHANGE_FLOW_TRANSITIONS = [
   },
 ];
 
-// 全部 transitions（按 type 组织；本轮只有变更流，bug/config 追加时 concat）。
+// ── bug 流 transitions（bug流_方案_20260702_v1.2 §2/§2.3，Commit ①）──────────
+//   与变更流的刻意差异（不是漏配）：
+//   · 前段最短：无 schedule（建单直落 待处理，指派直达 处理中）。
+//   · 无 hold/resume：暂缓有意省略（§2.2）。
+//   · 无 close：已上线=终态。
+//   · 无 reopen：上线后再出问题一律派生新单（§4；[覆盖]主方案 reopen）。
+//   · 无 derive 条目（Commit ⑤ 随双描述 derive_reason/fix_gap_note + 反向约束一并放开——
+//     ① 先不进 meta/typeFlows，端点层另有 SYS_BUG_DERIVE_PENDING 临时闸，fail-closed）。
+//   · confirm-online-norelease 与变更流的 'accept'/'return' 一样走 sysIssueTransition 通用引擎，但需要
+//     额外的 release_id/needs_release 双 WHERE 守卫（§8.2 [审:H1]）——由 index.js switch 分支追加 whereFrags，
+//     常量层仅声明 from/to/roleGuard，实际闸门在端点实现（Commit ②）。
+//   · 无 feasibility/blocked/unblock/scope_change：评估环节与范围变更均不适用 bug（建单守卫已拒 needs_feasibility）。
+//   ⚠️ 权限口径（Commit ① 暂全 admin，安全侧收紧）：§3 对接人白名单（requireAdminOrBugLiaison 粗筛 +
+//     handler 内 type='bug' 精判）= Commit ④，届时 assign/reassign 放开白名单；ownerGuard='assignee' 口径同变更流（严格本人）。
+const BUG_FLOW_TRANSITIONS = [
+  {
+    action: 'create',                       // 建单（端点 POST /sys-issues，不走 transition；此条供 meta 完整性）
+    from: [], to: '待处理',
+    roleGuard: 'admin', ownerGuard: null,
+    requiredPayload: ['type', 'title', 'system_name', 'source'],
+    sideEffects: ['INSERT 主表 + 写 created timeline', '可选报障人 requester_*（§3 复用，不新增 reporter_*）'],
+    timelineEvent: 'created', actionCode: null,
+    notifyAfterCommit: null,                // 建单后路由（先通知对接人/直通开发）= Commit ④ 手动链
+  },
+  {
+    action: 'assign',                       // 指派：待处理 → 处理中（前段直达，无排期）
+    from: ['待处理'], to: '处理中',
+    roleGuard: 'admin_or_bug_liaison', ownerGuard: null,   // ④ 对接人白名单放开（示例发布者/示例对接人）——仅挂 bug transition，不全局化（变更流 assign 仍 roleGuard='admin'），sysIssueTransition [3] 精判 type 隐含
+    requiredPayload: ['assigned_to'],
+    sideEffects: ['assigned_to/_name/assigned_at 写入'],
+    timelineEvent: 'assign', actionCode: null,
+    notifyAfterCommit: 'notifyAssignedDeveloper',
+  },
+  {
+    action: 'reassign',                     // 换人：处理中/待验证 → 处理中（同变更流范式；群成员同步=③）
+    from: ['处理中', '待验证'], to: { '处理中': '处理中', '待验证': '处理中' },
+    roleGuard: 'admin_or_bug_liaison', ownerGuard: null,   // ④ 对接人白名单放开——reassign 走独立事务（不经 sysIssueTransition [3]），故此 roleGuard 仅作 SSOT 记录，实际由端点中间件 requireAdminOrBugLiaison + handler type='bug' 精判 enforced
+    requiredPayload: ['newAssignedTo', 'oldAssignedTo', 'reason'],
+    sideEffects: ['assigned_to/_name/assigned_at 更新', 'dev_estimated_at 清空', '仅重置开发侧 notify_*', 'return_count 不变'],
+    timelineEvent: 'reassign', actionCode: null,
+    notifyAfterCommit: 'notifyAssignedDeveloper',
+  },
+  {
+    action: 'estimate',                     // 回填预计完成：处理中（态内，不改 status）
+    from: ['处理中'], to: null,
+    roleGuard: null, ownerGuard: 'assignee',
+    requiredPayload: ['dev_estimated_at'],
+    sideEffects: ['dev_estimated_at 写入（>=assigned_at，同分钟归一化 unchanged 零写入）'],
+    timelineEvent: 'estimate', actionCode: null,
+    notifyAfterCommit: 'notifyEstimateToCreatorAndRequester',   // 报障人侧复用 requester_*（无报障人保持 not_sent）
+  },
+  {
+    action: 'submit',                       // 提交修复：处理中 → 待验证（闸门：交付说明 + dev_estimated_at 非空）
+    from: ['处理中'], to: '待验证',
+    roleGuard: null, ownerGuard: 'assignee',
+    requiredPayload: ['summary'],
+    sideEffects: ['first_submitted_at（首次永不变）', 'round_no 递增 + submit timeline',
+      '（⑤ 追加）派生单首次提交 fix_gap_note 闸门（谓词 [审:H3]）'],
+    timelineEvent: 'submit', actionCode: null,
+    notifyAfterCommit: 'notifySubmittedToAdmin',   // dispatch 早返回不发（admin 自身）；完成通知手动链=④
+  },
+  {
+    action: 'accept',                       // 验收通过：待验证 → 待上线（建单人；native 建单人恒 admin，T-M1 口径 roleGuard='admin'）
+    from: ['待验证'], to: '待上线',
+    roleGuard: 'admin', ownerGuard: null,
+    requiredPayload: [],
+    sideEffects: ['accepted_at=now'],
+    timelineEvent: 'status_change', actionCode: 'accept',
+    notifyAfterCommit: null,
+  },
+  {
+    action: 'return',                       // 验收打回：待验证 → 处理中（原因必填，return_count++）
+    from: ['待验证'], to: '处理中',
+    roleGuard: 'admin', ownerGuard: null,
+    requiredPayload: ['reason'],
+    sideEffects: ['return_count++', 'dev_estimated_at 清空',
+      '（共享 switch 分支连带清评估+blocked 字段——bug 恒 NULL/0，零副作用）'],
+    timelineEvent: 'return', actionCode: null,
+    notifyAfterCommit: 'notifyReturnedToDeveloper',
+  },
+  {
+    action: 'issue_reject',                 // 拒绝：待处理 → 已拒绝（admin，原因必填；bug 仅前段可拒）
+    from: ['待处理'], to: '已拒绝',
+    roleGuard: 'admin', ownerGuard: null,
+    requiredPayload: ['reason'],
+    sideEffects: [],
+    timelineEvent: 'status_change', actionCode: 'issue_reject',
+    notifyAfterCommit: null,
+  },
+  {
+    action: 'reactivate',                   // 重新激活：已拒绝 → 待处理（回 bug 初始态，不计返工）
+    from: ['已拒绝'], to: '待处理',
+    roleGuard: 'admin', ownerGuard: null,
+    requiredPayload: ['reason'],
+    sideEffects: ['回初始态重走指派流程（reopen_count 不变）'],
+    timelineEvent: 'status_change', actionCode: 'reactivate',
+    notifyAfterCommit: null,
+  },
+  {
+    action: 'void',                         // 作废：任意态 → 已作废（admin，软删除 + 死锁逃生口，§2.2）
+    from: '*', to: '已作废',
+    roleGuard: 'admin', ownerGuard: null,
+    requiredPayload: ['reason'],
+    sideEffects: ['软删除，前端隐藏', '（共享 switch 分支连带清 blocked 三件套——bug 恒 0，零副作用）'],
+    timelineEvent: 'status_change', actionCode: 'void',
+    notifyAfterCommit: null,
+  },
+  // ── Commit ② 追加：两条确认上线路径 + 填发版信息（bug流_方案_20260702_v1.2 §8）──────────
+  //   ① 的死端就此解除；needs_release 唯一写点=set_release_flag（K1/K2）。
+  {
+    action: 'set_release_flag',             // 填发版信息：待上线态内开发本人填 needs_release（旁路，不改 status，§2.3）
+    from: ['待上线'], to: null,
+    roleGuard: null, ownerGuard: 'assignee',
+    requiredPayload: ['needs_release'],
+    sideEffects: ['needs_release 写入（唯一写点，0/1 枚举校验，K1/K2；release_id 已挂批次后禁改）'],
+    timelineEvent: 'status_change', actionCode: 'set_release_flag',
+    notifyAfterCommit: null,
+  },
+  {
+    action: 'publish',                      // 确认上线·发版：待上线 → 已上线（仅 needs_release=1，单条走 hotfix-publish，端点 C4 复用）
+    from: ['待上线'], to: '已上线',
+    roleGuard: 'admin', ownerGuard: null,   // 建单人 native 恒 admin（T-M1 口径）
+    requiredPayload: [],                    // hotfix-publish 端点内校 release_note/version_tag
+    sideEffects: ['released_at=now', 'release_id 绑 hotfix 批次（is_hotfix=1）', 'release timeline'],
+    timelineEvent: 'release', actionCode: null,
+    notifyAfterCommit: 'notifyReleasedToRequester',
+  },
+  {
+    action: 'confirm-online-norelease',     // 确认上线·不发版 [审:H1]：待上线 → 已上线（仅 needs_release=0，专用 transition 非散落 UPDATE）
+    from: ['待上线'], to: '已上线',
+    roleGuard: 'admin', ownerGuard: null,   // 建单人 native 恒 admin；admin 兜底（开发失联卡待上线）
+    requiredPayload: [],
+    sideEffects: ['released_at=now', 'release_id 保持 NULL（不建批次）', '双 WHERE 守卫 release_id IS NULL AND needs_release=0'],
+    timelineEvent: 'release', actionCode: 'confirm_online_norelease',
+    notifyAfterCommit: 'notifyReleasedToRequester',
+  },
+  // ── Commit ⑤ 追加：派生（bug流_方案_20260702_v1.2 §4）──────────
+  //   ① 起端点层 SYS_BUG_DERIVE_PENDING 临时闸 + 本 meta 无 derive 条目双重 fail-closed；⑤ 一并放开。
+  //   与变更流 derive 的差异：from=['已上线']（§4「仅从已上线单发起」，非 '*'）——bug 上线后再出问题才派生新单。
+  //   非状态 transition（不改本单 status，to=null）：走独立端点 POST /derive（非 sysIssueTransition 引擎），
+  //   此条仅供 META.typeFlows 前端长按钮；derive_reason 必填/M5 反向约束/防环均在端点精判（origin.type 依赖运行时）。
+  {
+    action: 'derive',                       // 派生迭代：已上线 → 新建一单（admin，防环，§4/§5.1）
+    from: ['已上线'], to: null,             // 新建单，不改原单 status
+    roleGuard: 'admin', ownerGuard: null,
+    // 新单建单字段。[codex L-1 部分采纳] requiredPayload 仅通用 transition 引擎消费，derive 走独立端点
+    //   POST /derive 不校此表 = 纯文档；且 origin.type='bug' 时 type 可省略、端点默认 'bug'（M5）——
+    //   故 'type' 语义是"常规必填 / bug 派生可省"，保留以示常态契约（删除反而误导读者以为 type 从不需要）。
+    requiredPayload: ['type', 'title', 'system_name', 'source'],
+    sideEffects: ['新建单 origin_issue_id=原单 id', '先写 created 再写 derive（T-L3）', '防环 M-1',
+      '（⑤）origin=bug 须已上线 + derive_reason 必填 + 新单默认 bug（M5）'],
+    timelineEvent: 'derive', actionCode: null,
+    notifyAfterCommit: null,
+  },
+];
+
+// 全部 transitions（按 type 组织；config 追加时 concat）。
 const TRANSITIONS = {
   feature: CHANGE_FLOW_TRANSITIONS,
   improvement: CHANGE_FLOW_TRANSITIONS,    // 变更流两类型共用同一份（共享尾段 + 共享前段，§3.3）
-  // bug: BUG_FLOW_TRANSITIONS,            // TODO 追加 bug 流
+  bug: BUG_FLOW_TRANSITIONS,               // bug 流（bug流_方案_20260702_v1.2，Commit ① 起）
   // config: CONFIG_FLOW_TRANSITIONS,      // TODO 追加 config 流
 };
 
@@ -281,7 +443,27 @@ function resolveToStatus(transition, fromStatus) {
 
 // 旁路动作白名单（不改 status 的就地副作用动作，前端路由专用端点 /feasibility /blocked /unblock /estimate /scope-change /derive）——
 //   codex 20 L-1：显式白名单替「to===null 推断」，新增动作默认 transition（安全侧），避免 resume 类「to=null 但动态解析 status」误标。
-const SIDE_EFFECT_ACTIONS = new Set(['estimate', 'feasibility', 'blocked', 'unblock', 'derive', 'scope_change']);
+const SIDE_EFFECT_ACTIONS = new Set(['estimate', 'feasibility', 'blocked', 'unblock', 'derive', 'scope_change', 'set_release_flag']);
+
+// ── 开发工作态统一判定（bug 方案 [审:M4] isDevWorkState，Commit ①）──────────
+//   「开发正在干活」的态名按类型不同（变更流=开发中 / bug=处理中 / config 追加时=处理中），
+//   附件上传守卫、TOCTOU 复查等**散落 status 判断**一律走本 helper，杜绝「开发中」硬编码漏掉 bug 处理中。
+//   ⚠️ estimate/submit 等 transition 类动作不需要它——findTransition 的 from 白名单已按 type 收窄；
+//     feasibility/blocked/unblock 端点是评估环节专属（feature/improvement-only，type 守卫前置），
+//     其「开发中」硬编码是类型限定下的有意写法，不在本 helper 替换范围。
+const DEV_WORK_STATUS_BY_TYPE = {
+  feature: '开发中',
+  improvement: '开发中',
+  bug: '处理中',
+  // config: '处理中',   // TODO 追加 config 流时填（§18.2）
+};
+function isDevWorkState(type, status) {
+  return !!status && DEV_WORK_STATUS_BY_TYPE[type] === status;
+}
+
+// RC-M5 状态级不变量的目标态全集（跨类型 union）：进入这些态必须有 assigned_to（开发负责人）。
+//   状态名跨类型无歧义冲突：待处理/待评估/已排期=未指派前段不在内；处理中(bug)/开发中(变更流) 起必有开发。
+const REQUIRES_ASSIGNEE_STATUSES = ['开发中', '处理中', '待验证', '待上线', '已上线', '已关闭'];
 
 // ── meta（决策②，buildMeta：从 TRANSITIONS 派生前端只读视图）──────────
 //   M-4：只返前端必需，**不暴露** roleGuard/ownerGuard/sideEffects/notifyAfterCommit。
@@ -298,6 +480,8 @@ function buildMeta() {
     // scope_change label 为 config 流预留（feature/improvement 已移除该动作，typeFlows 不含）——
     //   meta.actions 是全动作 label 超集，前端按 typeFlows 显隐按钮，故残留此 label 无害（ultracode 对抗审确认）。
     scope_change: '范围变更', derive: '派生迭代',
+    // bug 流 Commit ②：确认上线两路径 + 填发版信息
+    set_release_flag: '填发版信息', 'confirm-online-norelease': '确认上线（不发版）',
   };
 
   for (const type of Object.keys(TRANSITIONS)) {
@@ -325,4 +509,8 @@ module.exports = {
   findTransition,
   resolveToStatus,
   buildMeta,
+  // bug 流 Commit ①（[审:M4] 开发工作态统一判定 + RC-M5 目标态全集）
+  DEV_WORK_STATUS_BY_TYPE,
+  isDevWorkState,
+  REQUIRES_ASSIGNEE_STATUSES,
 };

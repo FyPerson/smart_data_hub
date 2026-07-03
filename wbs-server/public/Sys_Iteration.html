@@ -443,10 +443,20 @@
 
     // 开发本人（owner）动作集；其余动作归 admin。meta 不暴露 roleGuard，前端做最小 UX 分类，后端仍强制。
     // 注意：unblock（解除受阻）后端是 admin 专属（roleGuard:'admin'），不能归入开发集，否则 admin 看不到、开发点了必 403。
-    const SI_DEV_ACTIONS = new Set(['estimate', 'submit', 'feasibility', 'blocked']);
+    const SI_DEV_ACTIONS = new Set(['estimate', 'submit', 'feasibility', 'blocked', 'set_release_flag']);
     // 危险按钮样式
     const SI_DANGER_ACTIONS = new Set(['return', 'issue_reject', 'void', 'reopen', 'hold', 'blocked']);
     const SI_SEC_ACTIONS = new Set(['reassign', 'unblock', 'derive', 'close', 'schedule']);
+    // [codex29 L-3] 拉群可发起态——⚠️ 须与后端 SYS_CHAT_ALLOWED_STATUSES（index.js）同源：改一端必须改另一端。
+    //   （sys 模块动作可见性一贯是前端硬编码镜像后端，未上 capability 字段以保模块一致性；后端有真门槛兜底）。
+    const SI_CHAT_STATUSES = ['处理中', '待验证', '待上线'];
+    // ── bug 流对接人白名单（Commit ④a，示例发布者 id=7 / 示例对接人 id=13）——⚠️ 三处同步：后端 index.js SYS_BUG_LIAISON_USER_IDS
+    //   + 本常量 + scripts/verify-sys-liaison.js（verify 卡三处字面量一致防漂移）。前端仅控 assign/reassign 按钮显隐，
+    //   真权限后端 requireAdminOrBugLiaison + type='bug' 精判兜底（前端镜像非授权源）。
+    const SI_BUG_LIAISON_USER_IDS = [7, 13];
+    function isSiBugLiaison(uid) { return Number(uid) > 0 && SI_BUG_LIAISON_USER_IDS.includes(Number(uid)); }
+    // ④b-1 手动通知状态窗口（**前端镜像**后端 SYS_NOTIFY_REQUESTER_STATUSES 真闸——后端权威、前端仅控按钮显隐，改一侧须同步另一侧；通知开发仅「处理中」硬编码在按钮门控处）
+    const SI_NOTIFY_REQUESTER_STATUSES = ['处理中', '待验证', '待上线', '已上线'];
 
     // ---- 通用 API helper ----
     async function siApi(path, { method = 'GET', body = null, isForm = false } = {}) {
@@ -519,6 +529,8 @@
         return Object.keys(META.typeFlows);
     }
     function siTypeLabel(t) { return SI_TYPE_LABEL[t] || t; }
+    // D-A：批次族别（bug vs 非bug）——与后端 releaseFamilyOf 同源，供加单候选过滤（config 不进批次返 null）
+    function siReleaseFamily(t) { return t === 'bug' ? 'bug' : (t === 'feature' || t === 'improvement') ? 'change' : null; }
 
     // ---- 页头动作按钮 ----
     function siRenderHeadActions() {
@@ -686,6 +698,9 @@
             const links = r.data.derived_issues.map(d => `<a onclick="siOpenDrawer(${d.id})">#${d.id}</a>`).join('、');
             lineageHtml += `<div class="si-lineage">🔁 已衍生 ${r.data.derived_issues.length} 个迭代需求（${links}）</div>`;
         }
+        // ⑤ 双描述展示（写读同源）：派生原因（建单人派生时填）+ 修复缺口说明（开发首提填）——仅有值时显示，纯复盘素材
+        if (iss.derive_reason) lineageHtml += `<div class="si-lineage">📝 派生原因：${esc(iss.derive_reason)}</div>`;
+        if (iss.fix_gap_note) lineageHtml += `<div class="si-lineage">🔧 修复缺口说明：${esc(iss.fix_gap_note)}</div>`;
 
         // 基本信息
         let feas = '';
@@ -696,6 +711,18 @@
                 (iss.feasibility_requirement_confirm ? `<div class="si-kv full"><label>需求确认</label><div class="v">${esc(iss.feasibility_requirement_confirm)}</div></div>` : '') +
                 (iss.feasibility_risk ? `<div class="si-kv full"><label>风险/条件</label><div class="v">${esc(iss.feasibility_risk)}</div></div>` : '') +
                 (iss.blocked && iss.blocked_reason ? `<div class="si-kv full"><label>受阻原因</label><div class="v">${esc(iss.blocked_reason)}</div></div>` : '');
+        }
+        // ④a §7 关联修正单号软展示（不跳转；后端 best-effort 软查回 related_correction 状态）
+        let relCorrRow = '';
+        if (iss.related_correction_no) {
+            const rc = r.data.related_correction;
+            // codex 30 M-2 消歧：显式展示匹配方式（纯数字优先按修正单 ID / 否则按 OA 号），避免全数字 OA 号撞 id 时误读
+            const byTxt = rc && rc.matched_by === 'oa_number' ? '按 OA 号匹配' : (rc && rc.matched_by === 'id' ? '按修正单 ID 匹配' : '');
+            let hint = '';
+            if (rc && rc.status === 'voided') hint = ` <span style="color:#b91c1c">（对应修正单已作废${byTxt ? '·' + byTxt : ''}）</span>`;
+            else if (rc && rc.status === 'not_found') hint = ' <span style="color:#b45309">（未找到对应修正单，可能已删除或为外部单号）</span>';
+            else if (rc && rc.status === 'active') hint = ` <span class="si-muted">（修正单 #${rc.id} 有效${byTxt ? '·' + byTxt : ''}）</span>`;
+            relCorrRow = `<div class="si-kv full"><label>关联修正单号</label><div class="v">${esc(iss.related_correction_no)}${hint}<span class="si-muted" style="margin-left:6px;font-size:11px">软引用·不跳转</span></div></div>`;
         }
         const info = `<div class="si-section"><h3>基本信息</h3><div class="si-kv-grid">
             <div class="si-kv"><label>所属系统</label><div class="v">${esc(iss.system_name)}</div></div>
@@ -709,6 +736,7 @@
             <div class="si-kv"><label>上线批次</label><div class="v">${iss.release_id ? ('#' + iss.release_id) : '<span class="si-muted">—</span>'}</div></div>
             <div class="si-kv"><label>建单时间</label><div class="v">${esc(siFmtDT(iss.created_at))}</div></div>
             ${feas}
+            ${relCorrRow}
             <div class="si-kv full"><label>描述</label><div class="v">${iss.description ? esc(iss.description) : '—'}</div></div>
         </div></div>`;
 
@@ -718,10 +746,20 @@
         // 附件区
         const att = siRenderAttachments(r.data);
 
-        // 通知区（仅 admin 只读展示三侧）
-        const notify = isAdmin() ? siRenderNotify(iss) : '';
+        // 通知区（只读展示三侧）——④b-1 ultracode：能点通知的 bug 对接人也应看到送达状态（能操作也能复核）
+        const notify = (isAdmin() || (iss.type === 'bug' && currentUser && isSiBugLiaison(currentUser.id))) ? siRenderNotify(iss) : '';
 
-        document.getElementById('siDBody').innerHTML = lineageHtml + info + tl + att + notify;
+        // 讨论群（§5 bug 流拉群；已建才展示，留痕：议题 + 拉群时间）
+        let chat = '';
+        if (iss.dingtalk_open_conversation_id) {
+            chat = `<div class="si-section"><h3>讨论群</h3><div class="si-kv-grid">
+                <div class="si-kv full"><label>群名称</label><div class="v">${esc(iss.dingtalk_chat_name || '—')}</div></div>
+                <div class="si-kv full"><label>拉群议题</label><div class="v">${iss.dingtalk_chat_desc ? esc(iss.dingtalk_chat_desc) : '—'}</div></div>
+                <div class="si-kv"><label>拉群时间</label><div class="v">${iss.dingtalk_chat_created_at ? esc(siFmtDT(iss.dingtalk_chat_created_at)) : '—'}</div></div>
+            </div><div class="si-note-box">钉钉群已建，请到钉钉客户端查看。钉钉无解散接口，用完由群主（示例用户A）在客户端手动解散。</div></div>`;
+        }
+
+        document.getElementById('siDBody').innerHTML = lineageHtml + info + chat + tl + att + notify;
 
         // 操作区
         siRenderActions(iss);
@@ -742,21 +780,25 @@
         submit: '交付', return: '打回', release: '上线', reopen: '重开', derive: '派生',
         scope_change: '范围变更', feasibility: '可行性评估', blocked: '标记受阻', unblock: '解除受阻', note: '备注',
         schedule: '排期', accept: '验收通过', close: '关闭', hold: '暂缓', resume: '恢复',
-        reactivate: '重新激活', issue_reject: '拒绝', void: '作废', effected: '已生效'
+        reactivate: '重新激活', issue_reject: '拒绝', void: '作废', effected: '已生效',
+        set_release_flag: '填发版信息',   // F-3：set-release-flag 写 status_change+action_code，补前端标签防裸英文
+        confirm_online_norelease: '确认上线（不发版）'   // L-1：release 事件带此 action_code 时区分「不发版直接上线」（批次/hotfix 发版仍显「上线」）
     };
     const SI_TL_CLS = {
         created: 'si-tl-amber', derive: 'si-tl-amber',
-        schedule: 'si-tl-indigo', assign: 'si-tl-indigo', reassign: 'si-tl-indigo', estimate: 'si-tl-indigo', feasibility: 'si-tl-indigo',
+        schedule: 'si-tl-indigo', assign: 'si-tl-indigo', reassign: 'si-tl-indigo', estimate: 'si-tl-indigo', feasibility: 'si-tl-indigo', set_release_flag: 'si-tl-indigo',
         submit: 'si-tl-blue',
         return: 'si-tl-red', reopen: 'si-tl-red', issue_reject: 'si-tl-red', blocked: 'si-tl-red',
-        accept: 'si-tl-green', release: 'si-tl-green', effected: 'si-tl-green', close: 'si-tl-green', unblock: 'si-tl-green',
+        accept: 'si-tl-green', release: 'si-tl-green', effected: 'si-tl-green', close: 'si-tl-green', unblock: 'si-tl-green', confirm_online_norelease: 'si-tl-green',
         scope_change: 'si-tl-orange',
         hold: 'si-tl-gray', resume: 'si-tl-gray', void: 'si-tl-gray', reactivate: 'si-tl-gray', note: 'si-tl-gray'
     };
     function siRenderTimeline(list, atts) {
         if (!list.length) return '<div class="si-muted">暂无演进记录</div>';
         return '<div class="si-timeline">' + list.map(e => {
-            const key = e.event_type === 'status_change' ? (e.action_code || 'status_change') : e.event_type;
+            // L-1（codex 复审）：release 事件也优先识别 action_code——「确认上线·不发版」(confirm_online_norelease)
+            //   与批次/hotfix 发版都写 event_type='release'，只有前者带 action_code，需区分标签保留审计可见性。
+            const key = (e.event_type === 'status_change' || e.event_type === 'release') ? (e.action_code || e.event_type) : e.event_type;
             const label = SI_TL_LABEL[key] || key;
             const cls = SI_TL_CLS[key] || 'si-tl-gray';
             const roundTxt = (e.event_type === 'submit' && e.round_no) ? ('·第' + e.round_no + '轮') : '';
@@ -841,11 +883,18 @@
     }
     function siReadTxt(readAt) { return readAt ? `<span class="si-nread">已读 ${esc(siFmtDT(readAt))}</span>` : ''; }
     function siRenderNotify(iss) {
+        // ④b-1：bug 通知手动触发（操作区按钮）；变更流仍自动派发。文案 + 侧标签按 type 区分。
+        const isBug = iss.type === 'bug';
+        const devLabel = isBug ? '开发侧（手动·通知开发）' : '开发侧（指派/改派/打回/重开）';
+        const reqLabel = isBug ? '报障人侧（手动·通知报障人）' : '需求方侧（回填预计/已上线）';
+        const footer = isBug
+            ? '本页只读展示送达状态；bug 通知为<b>手动触发</b>——在操作区点「通知开发 / 通知报障人」发送（建单人侧=本人，不通知）。'
+            : '通知在各动作完成后自动派发；本页只读展示送达状态（手动补发能力待后端端点，暂未开放）。';
         return `<div class="si-section"><h3>钉钉通知（三侧独立）</h3>
-            <div class="si-notify-row"><span>开发侧（指派/改派/打回/重开）</span><span>${siNb(iss.notify_status)}${siReadTxt(iss.read_at)}</span></div>
-            <div class="si-notify-row"><span>需求方侧（回填预计/已上线）</span><span>${siNb(iss.requester_notify_status)}${siReadTxt(iss.requester_read_at)}</span></div>
+            <div class="si-notify-row"><span>${devLabel}</span><span>${siNb(iss.notify_status)}${siReadTxt(iss.read_at)}</span></div>
+            <div class="si-notify-row"><span>${reqLabel}</span><span>${siNb(iss.requester_notify_status)}${siReadTxt(iss.requester_read_at)}</span></div>
             <div class="si-notify-row"><span>建单人侧</span><span>${siNb(iss.creator_notify_status)}${siReadTxt(iss.creator_read_at)}</span></div>
-            <div style="font-size:11px;color:#9ca3af;margin-top:6px">通知在各动作完成后自动派发；本页只读展示送达状态（手动补发能力待后端端点，暂未开放）。</div>
+            <div style="font-size:11px;color:#9ca3af;margin-top:6px">${footer}</div>
         </div>`;
     }
 
@@ -859,6 +908,9 @@
         const flows = (META.typeFlows && META.typeFlows[iss.type]) || [];
         const isAdminUser = isAdmin();
         const isOwnerDev = currentUser && iss.assigned_to === currentUser.id;
+        // ④a bug 对接人白名单：bug 单的 assign/reassign 对白名单对接人（示例发布者/示例对接人）放行——与后端
+        //   requireAdminOrBugLiaison + roleGuard='admin_or_bug_liaison' 同源；前端只放这两个动作，其余 admin 动作仍仅 admin。
+        const isBugLiaison = currentUser && iss.type === 'bug' && isSiBugLiaison(currentUser.id);
 
         const acts = [];
         for (const f of flows) {
@@ -867,7 +919,14 @@
             const hit = (f.from === '*') || (Array.isArray(f.from) && f.from.includes(iss.status));
             if (!hit) continue;
             const devAction = SI_DEV_ACTIONS.has(a);
-            if (devAction ? !isOwnerDev : !isAdminUser) continue;
+            // ④a 对接人放行契约（codex 30 M-1 显式化）：对接人可见动作 = type='bug'(isBugLiaison) ∧ action∈{assign,reassign}
+            //   （**动作名硬编码在此处，不依赖 flows 配置**——将来给 bug 流加新动作/改 flows 也不会扩大对接人放行范围）
+            //   ∧ 状态由共享 hit(from 命中，见上方) 收窄（assign 仅待处理 / reassign 仅处理中·待验证）。
+            //   ⚠️ 前端是 UI 镜像**非授权源**：真闸在后端 requireAdminOrBugLiaison + roleGuard + reassign handler type 精判；
+            //     即便前端误显，点击也会被后端 403，故此处硬编码 action 白名单已足，不再复制后端 from 集合（避免第二处真相源漂移）。
+            const liaisonAction = isBugLiaison && (a === 'assign' || a === 'reassign');
+            if (devAction) { if (!isOwnerDev) continue; }
+            else if (!isAdminUser && !liaisonAction) continue;
 
             // 开发态 / 批次精化（needs_feasibility / blocked / dev_estimated_at / release_id）
             if (a === 'estimate' && iss.needs_feasibility) continue;             // 需评估的走 feasibility
@@ -875,6 +934,9 @@
             if (a === 'blocked' && (!iss.needs_feasibility || iss.blocked)) continue;
             if (a === 'unblock' && !iss.blocked) continue;
             if (a === 'publish' && iss.release_id) continue;                      // C：已挂批次(release_id)的单只能经批次面板发布（hotfix 后端 409 ISSUE_NOT_HOTFIXABLE）
+            if (a === 'publish' && iss.type === 'bug' && iss.needs_release !== 1) continue;   // bug 流 Commit②：需先在「填发版信息」选「发版」
+            if (a === 'confirm-online-norelease' && iss.needs_release !== 0) continue;         // bug 流 Commit②：仅「不发版」可走此路径
+            if (a === 'set_release_flag' && iss.release_id) continue;                          // bug 流 Commit②：已挂批次锁定，needs_release 不可再改
             if (a === 'submit') {
                 if (iss.blocked) continue;
                 if (!iss.dev_estimated_at) continue;                            // 闸门①
@@ -893,6 +955,10 @@
             else if (!iss.dev_estimated_at) gate = `<div class="si-gate-hint">⚠️ 闸门①：请先「回填预计完成时间」，才能提交交付。</div>`;
         } else if (isAdminUser && iss.status === '待上线' && iss.release_id) {
             gate = `<div class="si-gate-hint">📦 已加入批次 #${iss.release_id}，请在「批次管理」中发布。</div>`;   // C
+        } else if (isOwnerDev && iss.type === 'bug' && iss.status === '待上线' && iss.needs_release === null) {
+            gate = `<div class="si-gate-hint">⚠️ 请先「填发版信息」（是否发版），建单人才能确认上线。</div>`;   // bug 流 Commit②
+        } else if (isAdminUser && iss.type === 'bug' && iss.status === '待上线' && iss.needs_release === null) {
+            gate = `<div class="si-gate-hint">⏳ 等待开发「填发版信息」（是否发版）后才能确认上线。</div>`;   // bug 流 Commit②
         }
 
         const btns = acts.map(a => {
@@ -904,7 +970,22 @@
             return `<button class="si-btn ${cls} si-btn-sm" onclick="siDoAction('${a}')">${esc(lbl)}</button>`;
         }).join('');
 
-        box.innerHTML = gate + (btns || '<span class="si-muted">当前状态/身份下无可执行动作</span>');
+        // 拉群讨论（§5 bug 流旁路动作，非 meta transition；type=bug + 指派后非终态 + 未建群 + admin||owner-dev）
+        let chatBtn = '';
+        if (iss.type === 'bug' && (isAdminUser || isOwnerDev) && SI_CHAT_STATUSES.includes(iss.status) && !iss.dingtalk_open_conversation_id) {
+            chatBtn = `<button class="si-btn si-btn-sec si-btn-sm" onclick="siDoAction('create-chat')">拉群讨论</button>`;
+        }
+        // ④b-1 bug 流手动通知按钮（bug + admin||对接人；变更流仍自动派发、无手动按钮）——与后端 notify-developer/notify-requester 同源
+        let notifyBtns = '';
+        if (iss.type === 'bug' && (isAdminUser || isBugLiaison)) {
+            if (iss.assigned_to && iss.status === '处理中') {   // codex31/ultracode：通知开发仅「处理中」（前端镜像后端真闸 SYS_NOTIFY_DEV_STATUSES；待验证/待上线非开发回合）
+                notifyBtns += `<button class="si-btn si-btn-sec si-btn-sm" onclick="siDoAction('notify-developer')">通知开发</button>`;
+            }
+            if (iss.requester_phone && SI_NOTIFY_REQUESTER_STATUSES.includes(iss.status)) {   // 通知报障人：受理后含已上线（前端镜像后端真闸；排终态矛盾卡片）
+                notifyBtns += `<button class="si-btn si-btn-sec si-btn-sm" onclick="siDoAction('notify-requester')">通知报障人</button>`;
+            }
+        }
+        box.innerHTML = gate + ((btns + chatBtn + notifyBtns) || '<span class="si-muted">当前状态/身份下无可执行动作</span>');
     }
 
     // ============================================================
@@ -917,6 +998,9 @@
             case 'schedule': return siModalSchedule(iss);
             case 'assign': return siModalAssign(iss);
             case 'reassign': return siModalReassign(iss);
+            case 'create-chat': return siModalCreateChat(iss);
+            case 'notify-developer': return siNotifyManual(iss, 'notify-developer', '通知开发', 'notify_status', 'notify_error');   // ④b-1 手动通知
+            case 'notify-requester': return siNotifyManual(iss, 'notify-requester', '通知报障人', 'requester_notify_status', 'requester_notify_error');
             case 'estimate': return siModalEstimate(iss);
             case 'feasibility': return siModalFeasibility(iss);
             case 'blocked': return siModalReason(iss, 'blocked', '标记受阻', '受阻原因', '/blocked');
@@ -932,6 +1016,8 @@
             case 'void': return siModalReason(iss, 'void', '作废', '作废原因', '/void');
             case 'reopen': return siModalReason(iss, 'reopen', '重开（返工）', '重开原因', '/reopen');
             case 'publish': return siModalHotfix(iss);            // 单条上线走 hotfix-publish
+            case 'set_release_flag': return siModalSetReleaseFlag(iss);   // bug 流 Commit②：填发版信息
+            case 'confirm-online-norelease': return siConfirmSimple(iss, 'confirm-online-norelease', '确认上线（不发版）？该单将直接标记为已上线，不建上线批次。', '/confirm-online-norelease');
             case 'derive': return siModalDerive(iss);
             default: showToast('未知动作：' + action, 'error');
         }
@@ -939,6 +1025,22 @@
 
     // 刷新详情 + 列表
     async function siAfterAction() { await siLoadList(); if (siOpenId) await siRenderDrawer(siOpenId); }
+
+    // ④b-1 bug 流手动通知（POST notify-developer/notify-requester；按后端回的落库状态 toast + 刷新详情看通知区）
+    let siNotifyInflight = false;   // codex31 M-3/ultracode txn：inflight 守卫防双击/重复点导致重复钉钉推送 + read_at 重复重置
+    async function siNotifyManual(iss, endpoint, label, statusKey, errKey) {
+        if (siNotifyInflight) return;
+        siNotifyInflight = true;
+        try {
+            const r = await siApi('/sys-issues/' + iss.id + '/' + endpoint, { method: 'POST' });
+            if (!r.ok) { siApiErr(r); return; }
+            const st = r.data && r.data[statusKey];
+            if (st === 'sent') showToast(label + '：钉钉已发送', 'success');
+            else if (st === 'failed') showToast(label + '：发送失败（' + ((r.data && r.data[errKey]) || '未知') + '）', 'error');
+            else showToast(label + '：已触发', 'success');
+            await siAfterAction();
+        } finally { siNotifyInflight = false; }
+    }
 
     // ---- 通用「原因」弹框 ----
     function siModalReason(iss, action, title, label, path) {
@@ -988,7 +1090,7 @@
         siModal('改派', [
             fUserSelect('newAssignedTo', '新开发人员', iss.assigned_to),
             fTextarea('reason', '改派原因', '', true, '必填：旧开发 → 新开发 + 换人原因'),
-            note('改派会重置开发侧通知并清空已回填的预计完成时间。')
+            note('改派会重置开发侧通知并清空已回填的预计完成时间。若已建讨论群，新开发会自动加入；旧开发不会被移出（钉钉限制），如需移除请群主在钉钉手动操作。')
         ], async v => {
             if (!v.newAssignedTo) { showToast('请选择新开发人员', 'error'); return false; }
             if (!v.reason.trim()) { showToast('改派原因必填', 'error'); return false; }
@@ -997,6 +1099,50 @@
             });
             if (!r.ok) { siApiErr(r); return false; }
             showToast('已改派，钉钉已通知新开发', 'success'); return true;
+        });
+    }
+
+    async function siModalCreateChat(iss) {
+        // ④b-2：拉群前拉候选（有手机号的系统用户 ∪ 报障人），做成多选下拉，发起人手动挑谁入群
+        const cr = await siApi('/sys-issues/' + iss.id + '/chat-candidates');
+        if (!cr.ok) { siApiErr(cr, '获取候选成员失败'); return; }
+        const cand = (cr.data && cr.data.candidates) || [];
+        const baseM = (cr.data && cr.data.base_members) || [];
+        const reqInfo = (cr.data && cr.data.requester) || { eligible: false, name: '' };
+        const baseNames = baseM.map(b => esc(b.display_name)).join('、') || '群主/建单人/开发/你';
+        const pickerHtml = `<div class="si-field"><label>可选拉入成员（有手机号的系统用户，手动勾选）</label>
+            <div style="max-height:150px;overflow:auto;border:1px solid #e5e7eb;border-radius:6px;padding:6px">
+              ${cand.length ? cand.map(u => `<label style="display:flex;align-items:center;gap:6px;padding:3px 0;cursor:pointer"><input type="checkbox" class="si-mp-chk" value="${u.id}"><span>${esc(u.display_name)}</span></label>`).join('') : '<span class="si-muted">无其他可选成员（无绑手机号的系统用户）</span>'}
+            </div>
+            <div class="si-hint">固定入群（无需勾选）：${baseNames}</div>
+          </div>
+          ${reqInfo.eligible
+            ? `<div class="si-field inline-chk"><input type="checkbox" id="si-mp-requester"><label for="si-mp-requester">拉入报障人（${esc(reqInfo.name)}，已填手机号）</label></div>`
+            : (reqInfo.name ? `<div class="si-hint">报障人（${esc(reqInfo.name)}）未填合法手机号，不可拉入</div>` : '')}`;
+        siModal('拉群讨论', [
+            fTextarea('chat_desc', '拉群议题', '', true, '必填：本次拉群要讨论什么（记入迭代单留痕 + 群欢迎卡片），≤500 字'),
+            { k: null, html: pickerHtml },
+            note('钉钉无解散接口，用完请群主（示例用户A）在钉钉客户端手动解散。')
+        ], async v => {
+            const desc = (v.chat_desc || '').trim();
+            if (!desc) { showToast('拉群议题必填', 'error'); return false; }
+            // [codex32 M-1] 勾选读取收敛到当前弹框容器 #siMBody（siModal 每次替换其 innerHTML），不用全局 document 防残留 DOM 读错
+            const mbody = document.getElementById('siMBody');
+            const memberIds = [...mbody.querySelectorAll('.si-mp-chk:checked')].map(x => parseInt(x.value, 10)).filter(Boolean);
+            const reqEl = mbody.querySelector('#si-mp-requester');
+            const includeReq = !!(reqEl && reqEl.checked);
+            const r = await siApi('/sys-issues/' + iss.id + '/create-chat', { method: 'POST', body: { chat_desc: desc, member_user_ids: memberIds, include_requester: includeReq } });
+            if (!r.ok) { siApiErr(r); return false; }
+            const d = r.data || {};
+            if (d.idempotent) { showToast('该单已有讨论群，请到钉钉查看', 'info'); return true; }
+            let msg = '讨论群已创建';
+            const miss = Array.isArray(d.missing_required_member_ids) ? d.missing_required_member_ids.length : 0;
+            if (miss) msg += `（${miss} 名固定成员无钉钉号未拉入）`;
+            const selSkip = Array.isArray(d.selected_skipped) ? d.selected_skipped.length : 0;
+            if (selSkip) msg += `，${selSkip} 名选中成员无钉钉号未拉入`;
+            if (includeReq && d.requester_included === false && d.requester_skip_reason && d.requester_skip_reason !== 'none' && d.requester_skip_reason !== 'not_selected') msg += '，报障人未加入（请线下补拉）';
+            showToast(msg, 'success');
+            return true;
         });
     }
 
@@ -1033,12 +1179,19 @@
     }
 
     function siModalSubmit(iss) {
-        siModal('提交交付', [
-            fTextarea('summary', '交付说明', '', true, '必填，trim 后非空'),
-            fFile('files', '交付物附件（可多选，可选）', true),
-            note('⚠️ 闸门②：交付说明必填。附件将作为本轮交付物随提交绑定；提交后转「待验证」等验收。')
-        ], async v => {
+        // ⑤ 双描述·fix_gap_note：派生自 bug（origin.type=bug）+ 新单也是 bug + 首次提交 → 需填「修复缺口说明」
+        //   （前端镜像后端谓词；origin.type 取自详情 origin_issue。后端 FIX_GAP_NOTE_REQUIRED 为真闸兜底）
+        const originIsBug = siDetail && siDetail.origin_issue && siDetail.origin_issue.type === 'bug';
+        const needGap = originIsBug && iss.type === 'bug' && iss.origin_issue_id && !iss.first_submitted_at;
+        const fields = [fTextarea('summary', '交付说明', '', true, '必填，trim 后非空')];
+        if (needGap) fields.push(fTextarea('fix_gap_note', '修复缺口说明', '', true, '必填：上一版修复缺口在哪（复盘素材，不作考核）'));
+        fields.push(fFile('files', '交付物附件（可多选，可选）', true));
+        fields.push(note(needGap
+            ? '⚠️ 闸门②：交付说明 + 修复缺口说明必填。附件将作为本轮交付物随提交绑定；提交后转「待验证」等验收。'
+            : '⚠️ 闸门②：交付说明必填。附件将作为本轮交付物随提交绑定；提交后转「待验证」等验收。'));
+        siModal('提交交付', fields, async v => {
             if (!v.summary.trim()) { showToast('交付说明必填', 'error'); return false; }
+            if (needGap && !v.fix_gap_note.trim()) { showToast('修复缺口说明必填', 'error'); return false; }
             // 两阶段：先传交付物(delivery, round_no=NULL 暂存) → 拿 id → submit 绑本轮
             let attachmentIds = [];
             const fileEl = document.getElementById('f_files');
@@ -1051,6 +1204,7 @@
                 attachmentIds = (up.data && up.data.attachments || []).map(a => a.id);
             }
             const body = { summary: v.summary.trim() };
+            if (needGap && v.fix_gap_note.trim()) body.fix_gap_note = v.fix_gap_note.trim();   // ⑤ 双描述·修复缺口说明
             if (attachmentIds.length) body.attachment_ids = attachmentIds;
             const r = await siApi('/sys-issues/' + iss.id + '/submit', { method: 'POST', body });
             if (!r.ok) {
@@ -1061,6 +1215,24 @@
                 siApiErr(r); return false;
             }
             showToast('已提交，转「待验证」', 'success'); return true;
+        });
+    }
+
+    function siModalSetReleaseFlag(iss) {
+        // 补审 C2-DA-2：默认改「显式选」——从未填(null)时不预选发版，强制开发主动选一次（避免无脑确认把 bug 推上更重的 hotfix 路径）；已填则回显。
+        const cur = (iss.needs_release === 1) ? '1' : (iss.needs_release === 0 ? '0' : '');
+        siModal('填发版信息', [
+            fSelectMap('needs_release', '是否发版', ['', '1', '0'], cur, {
+                '': '请选择…',
+                '1': '发版（需要版本号，走「单条上线」/批次）',
+                '0': '不发版（热修/改配置，走「确认上线」直接生效）'
+            }),
+            note('⚠️ 一旦加入上线批次即锁定，不能再改；请与建单人/对接人确认好再提交。')
+        ], async v => {
+            if (v.needs_release !== '0' && v.needs_release !== '1') { showToast('请选择是否发版', 'error'); return false; }
+            const r = await siApi('/sys-issues/' + iss.id + '/set-release-flag', { method: 'POST', body: { needs_release: parseInt(v.needs_release, 10) } });
+            if (!r.ok) { siApiErr(r); return false; }
+            showToast('已填写发版信息', 'success'); return true;
         });
     }
 
@@ -1080,18 +1252,25 @@
 
     function siModalDerive(iss) {
         const typeOpts = siTypeKeys();
+        // ⑤ §4/M5：从 bug 单派生时新单默认 bug（前端预选，后端 origin=bug 时亦兜底默认）；派生原因仅 bug 语境必填（Q1）
+        const originIsBug = iss.type === 'bug';
+        const defType = (originIsBug && typeOpts.includes('bug')) ? 'bug' : (typeOpts[0] || 'feature');
+        const reasonRequired = originIsBug;
         siModal('派生迭代（基于本单新建）', [
-            fSelectMap('type', '新单类型', typeOpts, typeOpts[0] || 'feature', SI_TYPE_LABEL),
+            fSelectMap('type', '新单类型', typeOpts, defType, SI_TYPE_LABEL),
             fText('title', '新单标题', iss.title + '（迭代）', true),
             fSelectMap('system_name', '所属系统', (META && META.bizSystems) || [], iss.system_name, null),
             fSelect('source', '来源', ['业务方', '内部', '生产故障'], iss.source || '业务方'),
             fText('module_name', '模块（选填）', iss.module_name || ''),
-            fTextarea('derive_note', '派生说明', '', false, '选填：为什么在原单基础上迭代')
+            // ⑤ Q2：derive_reason 取代旧 derive_note（既落新单 derive_reason 列、又作 derive 时间线说明）
+            fTextarea('derive_reason', reasonRequired ? '派生原因' : '派生原因（选填）', '', reasonRequired,
+                reasonRequired ? '必填：为什么上线后又派生（复盘素材，不作考核）' : '选填：为什么在原单基础上迭代')
         ], async v => {
             if (!v.title.trim()) { showToast('标题必填', 'error'); return false; }
+            if (reasonRequired && !v.derive_reason.trim()) { showToast('派生自 bug 的单需填写派生原因', 'error'); return false; }
             const body = { type: v.type, title: v.title.trim(), system_name: v.system_name, source: v.source };
             if (v.module_name.trim()) body.module_name = v.module_name.trim();
-            if (v.derive_note.trim()) body.derive_note = v.derive_note.trim();
+            if (v.derive_reason.trim()) body.derive_reason = v.derive_reason.trim();
             const r = await siApi('/sys-issues/' + iss.id + '/derive', { method: 'POST', body });
             if (!r.ok) { siApiErr(r); return false; }
             showToast('已派生新单 #' + (r.data && r.data.id), 'success');
@@ -1116,6 +1295,7 @@
             fText('requester_phone', '需求方手机（选填，通知用）', ''),
             fDate('deadline', '期望完成时间（选填）', ''),
             fTextarea('description', '描述（选填）', '', false),
+            fText('related_correction_no', '关联修正单号（选填，BUG 类用）', '', false, '软引用触发本次迭代的数据修正单（OA号/修正单ID），不联动不跳转，仅留痕'),
             fCheckbox('needs_feasibility', '需要可行性评估（开发先评估再排期）', false),
             note('建单仅 admin 可操作。新功能/优化进「待评估」，排期后指派开发。')
         ], async v => {
@@ -1128,6 +1308,7 @@
             if (v.requester_phone.trim()) body.requester_phone = v.requester_phone.trim();
             if (v.deadline) body.deadline = v.deadline;
             if (v.description.trim()) body.description = v.description.trim();
+            if (v.related_correction_no && v.related_correction_no.trim()) body.related_correction_no = v.related_correction_no.trim();   // ④a §7 软关联
             if (v.needs_feasibility) body.needs_feasibility = 1;
             const r = await siApi('/sys-issues', { method: 'POST', body });
             if (!r.ok) { siApiErr(r); return false; }
@@ -1257,18 +1438,24 @@
 
         let foot = `<button class="si-btn si-btn-sec" onclick="siRenderBatchList()">← 返回</button>`;
         if (planning) {
-            foot += `<button class="si-btn si-btn-sec" onclick="siModalAddToBatch(${id})">+ 加单</button>`;
+            foot += `<button class="si-btn si-btn-sec" onclick="siModalAddToBatch(${id}, '${esc(rel.release_type || '')}')">+ 加单</button>`;
             foot += `<button class="si-btn si-btn-primary" onclick="siModalPublishBatch(${id})">发布批次</button>`;
         }
         document.getElementById('siBatchFoot').innerHTML = foot;
     }
 
-    async function siModalAddToBatch(releaseId) {
+    async function siModalAddToBatch(releaseId, batchFamily) {
         // 候选 = 待上线 + 未挂批次（列表接口按 status 拉，release 为空）
         const r = await siApi('/sys-issues?' + new URLSearchParams({ status: '待上线' }).toString());
         if (!r.ok) { siApiErr(r); return; }
-        const cands = ((r.data && r.data.items) || []).filter(i => !i.release_id && i.type !== 'config');
-        if (!cands.length) { showToast('没有可加入的「待上线」单据', 'warning'); return; }
+        // F-1（写读同源）：候选口径与后端 add-issues 闸门对齐——排除 config、bug 须已标记发版(needs_release=1)、
+        //   批次族别已定时只留同族（bug 批次只收 bug / change 批次只收 feature·improvement），免得勾了后端 409。
+        const bf = batchFamily || '';
+        const cands = ((r.data && r.data.items) || []).filter(i =>
+            !i.release_id && i.type !== 'config'
+            && (i.type !== 'bug' || i.needs_release === 1)
+            && (!bf || siReleaseFamily(i.type) === bf));
+        if (!cands.length) { showToast(bf ? `没有可加入本批次（${bf === 'bug' ? 'bug·已标发版' : '功能/优化'}）的「待上线」单据` : '没有可加入的「待上线」单据', 'warning'); return; }
         const opts = cands.map(i => `<label style="display:flex;gap:7px;align-items:center;padding:5px 0"><input type="checkbox" class="si-add-chk" value="${i.id}"> #${i.id} <span class="si-type-tag ${esc(i.type)}">${esc(siTypeLabel(i.type))}</span> ${esc(i.title)}</label>`).join('');
         siModal('加入批次', [{ k: null, html: `<div class="si-field"><label>选择待上线单据</label><div style="max-height:320px;overflow-y:auto">${opts}</div></div>` }], async () => {
             const ids = [...document.querySelectorAll('.si-add-chk:checked')].map(c => parseInt(c.value, 10));

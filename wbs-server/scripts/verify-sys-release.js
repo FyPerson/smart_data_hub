@@ -333,6 +333,42 @@ async function main() {
   assert.strictEqual(r.status, 400); assert.strictEqual(r.body.code, 'TOO_MANY_ISSUES');
   ok('E：remove-issues 超 200 → 400 TOO_MANY_ISSUES');
 
+  // ── 12. release_id 三段断言（bug 流 Commit② §8.2 [codex复审:H2]，类型边界写死）──────────
+  //   feature/improvement 已上线 ⟹ release_id NOT NULL（原样，本文件 1-9 节大量用例已隐含验证，此处显式断言收口）；
+  //   bug + needs_release=1 + 已上线 ⟹ release_id NOT NULL；bug + needs_release=0 + 已上线 ⟹ release_id NULL。
+  {
+    const seg1 = await get("SELECT COUNT(*) AS n FROM sys_issues WHERE type IN ('feature','improvement') AND status='已上线' AND release_id IS NULL");
+    assert.strictEqual(seg1.n, 0, '三段断言①：feature/improvement 已上线 ⟹ release_id 全部非空');
+    ok('release_id 三段断言①：type∈(feature,improvement) AND status=已上线 ⟹ release_id IS NOT NULL（全库扫描零违例）');
+
+    // bug 段：走真实 HTTP 端点各建一条，分别验证发版/不发版两路径的 release_id 归宿
+    let r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: 'seg-bug-a', system_name: 'BMS', source: '内部' });
+    const bugA = r.body.id;
+    await call('POST', `/api/sys-issues/${bugA}/assign`, adminTok, { assigned_to: 5 });
+    await call('POST', `/api/sys-issues/${bugA}/estimate`, devTok, { dev_estimated_at: '2026-08-01 10:00' });
+    await call('POST', `/api/sys-issues/${bugA}/submit`, devTok, { summary: '修复' });
+    await call('POST', `/api/sys-issues/${bugA}/accept`, adminTok, {});
+    await call('POST', `/api/sys-issues/${bugA}/set-release-flag`, devTok, { needs_release: 1 });
+    r = await call('POST', `/api/sys-issues/${bugA}/hotfix-publish`, adminTok, { release_note: 'seg-a', version_tag: 'vseg-a' });
+    assert.strictEqual(r.status, 201, `bug 发版路径 hotfix 应 201, got ${r.status} ${JSON.stringify(r.body)}`);
+    const rowA = await issueRow(bugA);
+    assert.strictEqual(rowA.status, '已上线'); assert.ok(rowA.release_id, '三段断言②：bug needs_release=1 已上线 ⟹ release_id 非空');
+    ok('release_id 三段断言②：type=bug AND needs_release=1 AND status=已上线 ⟹ release_id IS NOT NULL');
+
+    r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: 'seg-bug-b', system_name: 'BMS', source: '内部' });
+    const bugB = r.body.id;
+    await call('POST', `/api/sys-issues/${bugB}/assign`, adminTok, { assigned_to: 5 });
+    await call('POST', `/api/sys-issues/${bugB}/estimate`, devTok, { dev_estimated_at: '2026-08-01 10:00' });
+    await call('POST', `/api/sys-issues/${bugB}/submit`, devTok, { summary: '修复' });
+    await call('POST', `/api/sys-issues/${bugB}/accept`, adminTok, {});
+    await call('POST', `/api/sys-issues/${bugB}/set-release-flag`, devTok, { needs_release: 0 });
+    r = await call('POST', `/api/sys-issues/${bugB}/confirm-online-norelease`, adminTok, {});
+    assert.strictEqual(r.status, 200, `bug 不发版路径确认上线应 200, got ${r.status} ${JSON.stringify(r.body)}`);
+    const rowB = await issueRow(bugB);
+    assert.strictEqual(rowB.status, '已上线'); assert.strictEqual(rowB.release_id, null, '三段断言③：bug needs_release=0 已上线 ⟹ release_id 为空');
+    ok('release_id 三段断言③：type=bug AND needs_release=0 AND status=已上线 ⟹ release_id IS NULL');
+  }
+
   console.log(`\n✅ verify-sys-release 全部通过（${passed} 项断言）`);
   server.close();
 }

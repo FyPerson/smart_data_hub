@@ -18522,6 +18522,8 @@ const sysIterModule = require('./routes/sys-iteration')({
   UPLOAD_DIR, normalizeAttachmentExt, safeDeleteFileSync, ALLOWED_FILE_DIRS,   // C3b 附件
   // C5 通知（复用 issue-tracker 既有发送链路：dev/creator 走 users.id→phone；需求方走 requester_phone 反查；深链 baseUrl）
   sendIssueDingtalkRaw, sendIssueDingtalkToRequester, getSafePlatformBaseUrl,
+  // bug 流 Commit ③ 真钉钉建群（复刻 correction create-chat 范式，§5 [审:#7]）；4 项均已在实例化点作用域内（对齐 18506 correction 注入）
+  readSystemConfig, COLLAB_CHAT_ADMIN_ID, callDingtalkWithTokenRetry, maskPhone,
 });
 app.use('/api', sysIterModule.router);
 

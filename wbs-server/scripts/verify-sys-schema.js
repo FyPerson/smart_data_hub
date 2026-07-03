@@ -182,6 +182,29 @@ async function main() {
   assert.strictEqual(feasDef.feasibility_conclusion, null, 'feasibility_conclusion 默认 NULL');
   ok('可行性评估 CHECK + NOT NULL + 默认 + 显式边界：needs_feasibility/blocked CHECK(0,1) 拒 2/-1 + 显式 NULL 被 NOT NULL 拒 + 显式 0 合法 + feasibility_conclusion 枚举拒非法 + 显式 NULL 合法 + 默认 needs_feasibility=0/blocked=0/conclusion=NULL');
 
+  // [9c] ⭐ bug 流 Commit ① 新列（bug流_方案_20260702_v1.2 §9）——新库 CREATE 路径全量断言
+  //   （readiness 只抽 4+1 锚点；此处验全 9+1 列 + needs_release CHECK + 默认 NULL；旧库 ALTER 路径见 verify-sys-bug-migration.js）
+  const BUGFLOW_COLS = ['needs_release', 'related_correction_no', 'derive_reason', 'fix_gap_note',
+    'dingtalk_chat_id', 'dingtalk_open_conversation_id', 'dingtalk_chat_created_at', 'dingtalk_chat_created_by', 'dingtalk_chat_name'];
+  {
+    const nowCols = (await all('PRAGMA table_info(sys_issues)')).map(r => r.name);
+    const missBug = BUGFLOW_COLS.filter(c => !nowCols.includes(c));
+    assert.strictEqual(missBug.length, 0, `bug 流新列缺失: ${missBug.join(',')}`);
+    const relCols2 = (await all('PRAGMA table_info(sys_releases)')).map(r => r.name);
+    assert.ok(relCols2.includes('release_type'), 'sys_releases.release_type 缺失');
+  }
+  //   needs_release CHECK（新库路径）：NULL/0/1 合法，2 拒
+  await assert.doesNotReject(run(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name, needs_release) VALUES ('bug', '待上线', 't', 'BMS', 1, 'admin', 1)`), 'needs_release=1 应合法');
+  await assert.doesNotReject(run(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name, needs_release) VALUES ('bug', '待上线', 't', 'BMS', 1, 'admin', 0)`), 'needs_release=0 应合法');
+  await assert.rejects(run(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name, needs_release) VALUES ('bug', '待上线', 't', 'BMS', 1, 'admin', 2)`), /CHECK|constraint/i, 'needs_release=2 应被 CHECK 拒（新库路径）');
+  //   默认值：全 NULL（无 DEFAULT 回填面，BUGFLOW_DEFAULTS 标记单）
+  await run(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name) VALUES ('bug', '待处理', 'BUGFLOW_DEFAULTS', 'BMS', 1, 'admin')`);
+  const bugDef = await get(`SELECT needs_release, related_correction_no, derive_reason, fix_gap_note, dingtalk_chat_id FROM sys_issues WHERE title='BUGFLOW_DEFAULTS'`);
+  for (const [k, v] of Object.entries(bugDef)) assert.strictEqual(v, null, `${k} 默认应 NULL`);
+  const relTypeDef = await get(`SELECT release_type FROM sys_releases WHERE release_no='R-20260625-1'`);
+  assert.strictEqual(relTypeDef.release_type, null, 'release_type 默认 NULL（值域非空由 ② 服务端守卫强制）');
+  ok('⭐ bug 流 Commit ① 新列（新库路径）：9+1 列齐全 + needs_release CHECK（NULL/0/1 合法·2 拒）+ 默认全 NULL + release_type 默认 NULL');
+
   // [10] sys_issues NOT NULL：缺 system_name / created_by / title 被拒
   await assert.rejects(run(`INSERT INTO sys_issues (type, status, title, created_by, created_by_name) VALUES ('feature', '待评估', 't', 1, 'admin')`), /NOT NULL|constraint/i, 'system_name NOT NULL 未生效');
   await assert.rejects(run(`INSERT INTO sys_issues (type, status, system_name, created_by, created_by_name) VALUES ('feature', '待评估', 'BMS', 1, 'admin')`), /NOT NULL|constraint/i, 'title NOT NULL 未生效');
@@ -253,7 +276,12 @@ async function verifyMissingColLib() {
   for (const c of ['effected_at', 'creator_notify_status', 'needs_feasibility', 'feasibility_conclusion', 'blocked']) {
     assert.ok(new RegExp(c).test(st.error || ''), `缺列错误信息应含锚点 ${c}，实际：${st.error}`);
   }
-  ok(`readiness 缺列库：sys_issues 缺 effected_at/creator_notify_status/评估3锚点(needs_feasibility/feasibility_conclusion/blocked) → ready=false（逐锚点校验，错误：${st.error}）`);
+  // bug 流 Commit ①：残缺表缺的 bug 流列（在 [1a] ALTER 清单内）会被 migration 自动补上——
+  //   缺列错误里**不应**出现 needs_release 等（它们已被 ALTER 修复，未修复的才是真锚点缺失）。
+  assert.ok(!/needs_release|dingtalk_chat_id|release_type/.test(st.error || ''), `bug 流列应已被 [1a] 自动 ALTER，不应出现在缺列错误：${st.error}`);
+  const issueCols2 = (await all2('PRAGMA table_info(sys_issues)')).map(r => r.name);
+  assert.ok(issueCols2.includes('needs_release') && issueCols2.includes('dingtalk_chat_id'), '[1a] 应在残缺表上自动补 bug 流列');
+  ok(`readiness 缺列库：sys_issues 缺 effected_at/creator_notify_status/评估3锚点 → ready=false（逐锚点校验）+ bug 流列被 [1a] 自动 ALTER 修复不误报（错误：${st.error}）`);
   db2.close();
 }
 

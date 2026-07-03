@@ -140,10 +140,12 @@ async function main() {
   //   side_effect = 真正不改 status 的旁路动作（路由专用端点）；transition = 改 status（含 resume：to=null 但动态解析目标态）。
   const KIND_EXPECT = {
     estimate: 'side_effect', feasibility: 'side_effect', blocked: 'side_effect', unblock: 'side_effect', derive: 'side_effect', scope_change: 'side_effect',
+    set_release_flag: 'side_effect',   // bug 流 Commit②：填发版信息（待上线态内不改 status，旁路独立事务）
     create: 'transition', schedule: 'transition', assign: 'transition', reassign: 'transition',
     submit: 'transition', accept: 'transition', return: 'transition', publish: 'transition',
     close: 'transition', hold: 'transition', resume: 'transition', reactivate: 'transition',
     issue_reject: 'transition', void: 'transition', reopen: 'transition',
+    'confirm-online-norelease': 'transition',   // bug 流 Commit②：确认上线·不发版（待上线→已上线，走 sysIssueTransition）
   };
   for (const type of Object.keys(meta.typeFlows)) {   // codex 20 L-2：遍历所有 type（非仅 feature），防 config/bug 流动作差异漏检
     for (const tf of meta.typeFlows[type]) {
@@ -153,7 +155,7 @@ async function main() {
   }
   // ⭐ resume 专项（ultracode 对抗审）：to=null 但实改 status（动态解析），必须 transition 不能 side_effect（白名单 SIDE_EFFECT_ACTIONS 不含 resume）
   assert.strictEqual(meta.typeFlows.feature.find(t => t.action === 'resume').kind, 'transition', 'resume 必须 kind=transition（to=null 是动态解析 status 非旁路，防误标 side_effect）');
-  ok('[4d] kind 全集断言：5 旁路 side_effect + 其余 transition（含 resume 专项=transition 防 to=null 误标，codex 17 M-1 + ultracode 对抗审）');
+  ok('[4d] kind 全集断言：6 旁路 side_effect + 其余 transition（含 resume 专项=transition 防 to=null 误标，codex 17 M-1 + ultracode 对抗审）');
 
   // [5] findTransition / resolveToStatus 行为
   // 5a. assign：已排期 → 开发中
