@@ -905,6 +905,11 @@ function layer2_astCheck(ast, dialect, allowedDb) {
  *   - 若顶层 select.top 为 null → 设 top = { value: 100, percent: null }
  *   - 若是 UNION（顶层 select 含 _next 链）→ 拒绝，因为 sqlify 只能把 TOP 注入到第一个分支
  *     UNION 总行数不被限制，存在 DoS 风险（codex C4 直接拒绝原则）
+ *   - ⭐ v1.103.1：注入 TOP/LIMIT 的同时，剥掉最外层 ORDER BY（顶层 ast.orderby）
+ *     smoke test 只需"连库跑通 + 拿到结果列结构"，前 100 行是哪 100 行、排不排序毫无意义。
+ *     `TOP 100 + 全局 ORDER BY` 逼数据库先物化算完全集再全局排序取前 100 → 大结果集超时
+ *     （生产 #21 根因：CTE 包 UNION ALL，全集大，60s 排不完）。剥掉后引擎可边扫边吐凑够 100 即停。
+ *     只剥顶层 orderby，不碰 CTE/子查询内部（内层 orderby 挂各自 AST 节点，配合 TOP/OFFSET/FOR XML 有语义）。
  *
  * sqlify 失败 → 拒绝（codex C4：不字符串包外层 fallback）
  *
@@ -921,6 +926,32 @@ function layer3_injectTop(ast, dialect) {
             ok: false,
             reason: 'UNION 查询 smoke test 暂不支持（无法精确限制总行数），请改写为单 SELECT',
         };
+    }
+
+    // ⭐ v1.103.1（codex 115 H-1）：SQL Server OFFSET/FETCH 分页显式拒绝
+    //   - OFFSET/FETCH 语法强制依赖 ORDER BY，且与 TOP 互斥；注入 TOP 100 + 剥 ORDER BY 后必生成非法 SQL。
+    //   - 与上方 UNION 拒绝一致：显式拒绝 + 清晰文案，不生成明知非法的 SQL 交由数据库报天书错误。
+    //   - 探针实证（node-sql-parser 5.4.0）：OFFSET/FETCH 挂 ast.limit.offset/.fetch（独立于 orderby），
+    //     T-SQL 无 OFFSET/FETCH 时 ast.limit 恒为 null；`TOP … WITH TIES` 则 astify 直接失败在层 1 被拒（到不了此处）。
+    //   - 仅对 sqlserver 判：mysql 的 ast.limit 是 LIMIT 结构（{seperator,value}）不含 offset/fetch 键，不误伤。
+    //   - 本就非新回归（改动前 TOP+OFFSET/FETCH 亦互斥非法必 smoke 失败），此守卫是把"已坏"从隐性转显性契约。
+    //   - 判等用 `!= null` 显式非空（非真值判断）：探针实测 5.4.0 里 offset 恒为对象节点（OFFSET 0 亦然），
+    //     `||` 不会漏；但 `!= null` 更稳健——防未来 parser 若把 OFFSET 0 归一成数值 0（假值）时真值判断漏拦（codex 115 复审 low-1）。
+    if (dialect === 'sqlserver' && ast.limit && (ast.limit.offset != null || ast.limit.fetch != null)) {
+        return {
+            ok: false,
+            reason: 'OFFSET/FETCH 分页语法 smoke test 暂不支持（与行数注入冲突），请改写为不含分页的 SELECT',
+        };
+    }
+
+    // ⭐ v1.103.1：剥掉最外层 ORDER BY，避免"注入 TOP 100 却仍全量排序"拖至超时（生产 #21 根因）
+    //   - smoke 从不消费排序结果，剥掉零验证价值损失；引擎凑够 100 行即停，无需算全集
+    //   - 只置顶层 ast.orderby=null：node-sql-parser 把 CTE/子查询内部的 orderby 挂在各自节点，
+    //     顶层 ast.orderby 天然只含最外层，故不误伤内部语义（探针 case 4/4b 实证内层 ORDER BY 保留）
+    //   - sqlserver 与 mysql 顶层结构一致（均为 ast.orderby），统一处理，不分 dialect
+    //   - 裸 UNION 的外层 ORDER BY 挂在 _next 链末端不在此处，但裸 UNION 已在上方直接拒绝，不涉及
+    if (ast.orderby != null) {
+        ast.orderby = null;
     }
 
     if (dialect === 'sqlserver') {

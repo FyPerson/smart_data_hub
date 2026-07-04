@@ -23,7 +23,9 @@ const CASES = [
     // ===== 合法 SQL 形态 =====
     ['G1 简单 SELECT', 'SELECT * FROM bms_xxx WHERE id=1', { ok: true, mustContain: 'TOP 100' }],
     ['G2 已有 TOP 5（不覆盖）', 'SELECT TOP 5 * FROM bms_xxx', { ok: true, mustContain: 'TOP 5' }],
-    ['G3 ORDER BY', 'SELECT col1 FROM bms_xxx ORDER BY id DESC', { ok: true, mustContain: 'ORDER BY' }],
+    // G3 翻案（v1.103.1）：TOP 注入时剥最外层 ORDER BY（生产 #21 根因，避免"取前100却全量排序"超时）
+    //   旧断言 mustContain:'ORDER BY' 已失效——外层 ORDER BY 现被剥掉。详见下方 OD 用例组
+    ['G3 外层 ORDER BY 被剥（v1.103.1）', 'SELECT col1 FROM bms_xxx ORDER BY id DESC', { ok: true, mustContain: 'TOP 100', mustNotContain: 'ORDER BY' }],
     ['G4 单 CTE', 'WITH cte AS (SELECT * FROM t1) SELECT * FROM cte JOIN t2 ON cte.id=t2.id', { ok: true, mustContain: 'TOP 100' }],
     ['G5 多 CTE', 'WITH a AS (SELECT * FROM t1), b AS (SELECT * FROM t2) SELECT * FROM a JOIN b ON a.id=b.id', { ok: true, mustContain: 'TOP 100' }],
     ['G6 business_db 三段名', 'SELECT * FROM business_db.dbo.demo_table', { ok: true, mustContain: 'TOP 100' }],
@@ -93,6 +95,27 @@ const CASES = [
     // ===== 层 3 拦截（UNION 拒绝，codex C4 派生）=====
     ['T1 UNION 拒绝', 'SELECT col1 FROM t1 UNION SELECT col1 FROM t2', { ok: false, layer: 3 }],
 
+    // ===== v1.103.1 新增：层 3 注入 TOP 时剥最外层 ORDER BY（生产 #21 根因）=====
+    //   机制：TOP 100 + 全局 ORDER BY 逼数据库全量物化排序再取前 100 → 大结果集超时。
+    //   剥掉外层 ORDER BY（smoke 从不消费排序结果）后引擎凑够 100 即停。只剥顶层，不碰 CTE/子查询内层。
+    ['OD1 单 SELECT 外层 ORDER BY 剥掉', 'SELECT * FROM bms_xxx WHERE a>1 ORDER BY b, c', { ok: true, mustContain: 'TOP 100', mustNotContain: 'ORDER BY' }],
+    ['OD2 CTE 包 UNION ALL + 外层 ORDER BY 剥掉（#21 真实形态）', 'WITH t AS (SELECT id, 1 AS Type FROM a UNION ALL SELECT id, 2 AS Type FROM b) SELECT * FROM t ORDER BY Type, id', { ok: true, mustContain: 'UNION ALL', mustNotContain: 'ORDER BY' }],
+    ['OD3 无 ORDER BY 不受影响', 'SELECT * FROM bms_xxx WHERE a>1', { ok: true, mustContain: 'TOP 100' }],
+    ['OD4 ORDER BY 只在 CTE 内部（保留不误剥）', 'WITH t AS (SELECT TOP 5 id FROM a ORDER BY id DESC) SELECT * FROM t', { ok: true, mustContain: 'ORDER BY [id] DESC' }],
+    // OD4b 双断言：mustContain 内层 `ORDER BY [id] DESC`（内层保留）+ mustNotMatch 外层 `ORDER BY [k]`（外层被剥）
+    //   用 mustNotMatch（正则）而非 mustNotContain（字面量）——需精确区分 `ORDER BY [k]` 与 `ORDER BY [id]`，靠正则转义元字符
+    ['OD4b 内外都有 ORDER BY（只剥外层、保内层）', 'WITH t AS (SELECT TOP 5 id, k FROM a ORDER BY id DESC) SELECT k FROM t ORDER BY k', { ok: true, mustContain: 'ORDER BY [id] DESC', mustNotMatch: 'ORDER BY \\[k\\]' }],
+    ['OD5 用户 TOP 10 + ORDER BY（沿用 TOP 10、剥外层）', 'SELECT TOP 10 * FROM bms_xxx ORDER BY b', { ok: true, mustContain: 'TOP 10', mustNotContain: 'ORDER BY' }],
+    ['OD6 mysql: ORDER BY + 注入 LIMIT（剥外层）', 'SELECT * FROM hrd_xxx WHERE a>1 ORDER BY b', { ok: true, mustContain: 'LIMIT 100', mustNotContain: 'ORDER BY' }, { dialect: 'mysql', allowedDb: 'newhrd' }],
+    // OD7/OD8（codex 115 H-1/M-1）：锁 SQL Server "ORDER BY 是语法前提"两形态的 AST 处置——
+    //   OD7 OFFSET/FETCH：探针证 offset/fetch 挂 ast.limit，layer3 显式拒绝（TOP 与 OFFSET/FETCH 互斥、剥 orderby 后必非法）
+    //   OD8 TOP WITH TIES：node-sql-parser 5.4.0 不支持该语法，astify 失败 → 层 1 即拒（到不了 layer3 剥 orderby）
+    ['OD7 SQL Server OFFSET/FETCH 分页显式拒绝', 'SELECT col1 FROM bms_xxx ORDER BY id OFFSET 10 ROWS FETCH NEXT 5 ROWS ONLY', { ok: false, layer: 3, reasonIncludes: 'OFFSET/FETCH' }],
+    ['OD8 TOP WITH TIES 层 1 parser 拒（parser 不支持）', 'SELECT TOP 5 WITH TIES col1 FROM bms_xxx ORDER BY id', { ok: false, layer: 1 }],
+    // OD9（codex 115 复审）：OFFSET 0 也被守卫拦——探针证 5.4.0 里 offset 恒为对象节点（含 OFFSET 0），
+    //   `!= null` 显式非空判断锁死"OFFSET 0 不因假值漏拦"（bare `OFFSET 0 ROWS` 无 FETCH 则 parser 层1即拒，不入此例）
+    ['OD9 OFFSET 0 + FETCH 仍被守卫拦（防真值漏判）', 'SELECT col1 FROM bms_xxx ORDER BY id OFFSET 0 ROWS FETCH NEXT 5 ROWS ONLY', { ok: false, layer: 3, reasonIncludes: 'OFFSET/FETCH' }],
+
     // ===== 2026-05-13 新增：两段名歧义拒绝（用户实测发现） =====
     ['B1 sys.tables 系统视图（合法但拒）', 'SELECT TOP 1 name FROM sys.tables', { ok: false, layer: 2 }],
     // B2 翻案（v1.77.0 生产 #10 OA-372051 误伤修复）：dbo 是 T-SQL 默认 schema 保留名，
@@ -116,16 +139,30 @@ const CASES = [
 let passed = 0, failed = 0;
 const failures = [];
 
-for (const [name, sql, expect] of CASES) {
-    const r = validateAndTransform(sql);
+for (const [name, sql, expect, options] of CASES) {
+    const r = validateAndTransform(sql, options);
     let ok = false;
     if (expect.ok) {
         ok = r.ok === true;
         if (ok && expect.mustContain) {
             ok = typeof r.smokeSql === 'string' && r.smokeSql.includes(expect.mustContain);
         }
+        // v1.103.1（codex 115 L-1）：断言语义对称——
+        //   mustNotContain = 字面量子串（与 mustContain 同走 includes，无需转义元字符）
+        //   mustNotMatch   = 正则（仅当需精确区分含元字符的片段时用，如 `ORDER BY \[k\]` vs `ORDER BY \[id\]`）
+        if (ok && expect.mustNotContain) {
+            ok = typeof r.smokeSql === 'string' && !r.smokeSql.includes(expect.mustNotContain);
+        }
+        if (ok && expect.mustNotMatch) {
+            ok = typeof r.smokeSql === 'string' && !new RegExp(expect.mustNotMatch, 'i').test(r.smokeSql);
+        }
     } else {
         ok = r.ok === false && r.layer === expect.layer;
+        // v1.103.1（codex 115 复审 R1）：拒绝类用例可选断言 reason 关键词——
+        //   防同一 layer 有多个拒绝分支时"命中别的分支也误绿"（如 OD7 须确认是 OFFSET/FETCH 分支而非其他 layer3 拒绝）
+        if (ok && expect.reasonIncludes) {
+            ok = typeof r.reason === 'string' && r.reason.includes(expect.reasonIncludes);
+        }
     }
 
     if (ok) {
