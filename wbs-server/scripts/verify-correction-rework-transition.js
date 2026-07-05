@@ -77,6 +77,28 @@ function reqJson(method, p, body, user) {
     if (data) r.write(data); r.end();
   });
 }
+// B2（OA 截图强制·建单同步上传，H-3）：真OA模式建单须走 multipart 且带 ≥1 张 oa_proof_files
+function reqMultipartCreate(fields, user) {
+  return new Promise((resolve) => {
+    const boundary = '----ReworkCreateBoundary' + Math.floor(1e8 + Math.random() * 1e8);
+    const chunks = [];
+    for (const [k, val] of Object.entries(fields || {})) {
+      if (val === undefined || val === null) continue;
+      const strVal = (typeof val === 'object') ? JSON.stringify(val) : String(val);
+      chunks.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${k}"\r\n\r\n${strVal}\r\n`));
+    }
+    const png = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex');
+    chunks.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="oa_proof_files"; filename="oa_proof.png"\r\nContent-Type: image/png\r\n\r\n`));
+    chunks.push(png);
+    chunks.push(Buffer.from(`\r\n--${boundary}--\r\n`));
+    const bodyBuf = Buffer.concat(chunks);
+    const r = http.request({ host: 'localhost', port: PORT, method: 'POST', path: '/api/corrections',
+      headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}`, 'Content-Length': bodyBuf.length, 'x-test-user': Buffer.from(JSON.stringify(user || ADMIN)).toString('base64') } },
+      (res) => { let d = ''; res.on('data', c => d += c); res.on('end', () => { let j = {}; try { j = JSON.parse(d || '{}'); } catch (_) {} resolve({ status: res.statusCode, body: j }); }); });
+    r.on('error', e => resolve({ status: 0, error: e.message }));
+    r.write(bodyBuf); r.end();
+  });
+}
 async function waitReady() {
   const t0 = Date.now();
   while (!I.CORRECTION_SCHEMA_STATE.ready) { if (I.CORRECTION_SCHEMA_STATE.error) throw new Error(I.CORRECTION_SCHEMA_STATE.error); if (Date.now() - t0 > 3000) throw new Error('timeout'); await new Promise(r => setTimeout(r, 30)); }
@@ -198,7 +220,9 @@ async function mkArchived(o = {}) {
 
   // ── G group_members 过滤职责拆清（§9.3 / §10.2）──
   console.log('— G group_members 过滤职责拆清 —');
-  const gcb = await reqJson('POST', '/api/corrections', { source_system: 'BMS', location_info: '系统1字段错', correction_type: 'single',
+  // B1（OA 格式闸 + 自发现自动业务方，方案 v1.5 §2.3 H-2/M-7）：留空 OA 会被后端静默覆盖为"业务方=建单人"，
+  //   下方 3 处跨系统建单用例依赖自定义 requesters[] 姓名/手机号（notify-done 反查用），须带真实 OA 号。
+  const gcb = await reqMultipartCreate( { source_system: 'BMS', location_info: '系统1字段错', correction_type: 'single', oa_number: '900301',
     reason: 'group过滤测试跨系统建单原因文本', requesters: [{ name: '主业务方G', phone: '13800000009' }],
     error_proof_note: 'err', cross_system: true, system2: { source_system: 'CRM', location_info: '系统2字段错', correction_count: 2 } }, ADMIN);
   const gMaster = gcb.body.master_id, gChild = gcb.body.child_ids[0];
@@ -237,7 +261,7 @@ async function mkArchived(o = {}) {
 
   // ── I 象限②：reopen 跨系统子单（group_id 非空 + root 落自身，方案 §9.1 象限② / 对抗审 MEDIUM 补盲）──
   console.log('— I 象限② reopen 跨系统子单 —');
-  const icb = await reqJson('POST', '/api/corrections', { source_system: 'BMS', location_info: '系统1象限2字段错', correction_type: 'single',
+  const icb = await reqMultipartCreate( { source_system: 'BMS', location_info: '系统1象限2字段错', correction_type: 'single', oa_number: '900302',
     reason: '象限2跨系统子单返工测试原因文本', requesters: [{ name: '主业务方I', phone: '13800000019' }],
     error_proof_note: 'err', cross_system: true, system2: { source_system: 'CRM', location_info: '系统2象限2字段错', correction_count: 2 } }, ADMIN);
   const iMaster = icb.body.master_id, iChild = icb.body.child_ids[0];
@@ -249,7 +273,7 @@ async function mkArchived(o = {}) {
   ok(Number(ic.rework_parent_id) === iChild && Number(ic.rework_root_id) === iChild, 'I3 象限②：parent=被返工子单 id + root【落自身 iChild】（区别象限③ root=最初原始单）');
   ok(iMaster !== iChild && Number(ic.correction_group_id) !== Number(ic.id), 'I4 象限②：[2g] 成立（group_id=master≠子单≠返工子单自身）');
   // I5 组主单终态（VOIDED/REJECTED）→ 不可对其子单返工（codex M-1）
-  const itcb = await reqJson('POST', '/api/corrections', { source_system: 'BMS', location_info: '系统1终态组', correction_type: 'single',
+  const itcb = await reqMultipartCreate( { source_system: 'BMS', location_info: '系统1终态组', correction_type: 'single', oa_number: '900303',
     reason: '终态组主单返工拦截测试原因文本', requesters: [{ name: '主I2', phone: '13800000020' }],
     error_proof_note: 'err', cross_system: true, system2: { source_system: 'CRM', location_info: '系统2终态组', correction_count: 2 } }, ADMIN);
   const itMaster = itcb.body.master_id, itChild = itcb.body.child_ids[0];

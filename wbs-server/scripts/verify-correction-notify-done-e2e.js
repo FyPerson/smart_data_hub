@@ -80,13 +80,40 @@ function reqJson(method, p, body, user) {
     if (data) r.write(data); r.end();
   });
 }
+// B2（OA 截图强制·建单同步上传，H-3）：真OA模式建单须走 multipart 且带 ≥1 张 oa_proof_files
+function reqMultipartCreate(fields, user) {
+  return new Promise((resolve) => {
+    const boundary = '----NotifyDoneCreateBoundary' + Math.floor(1e8 + Math.random() * 1e8);
+    const chunks = [];
+    for (const [k, val] of Object.entries(fields || {})) {
+      if (val === undefined || val === null) continue;
+      const strVal = (typeof val === 'object') ? JSON.stringify(val) : String(val);
+      chunks.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${k}"\r\n\r\n${strVal}\r\n`));
+    }
+    const png = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex');
+    chunks.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="oa_proof_files"; filename="oa_proof.png"\r\nContent-Type: image/png\r\n\r\n`));
+    chunks.push(png);
+    chunks.push(Buffer.from(`\r\n--${boundary}--\r\n`));
+    const bodyBuf = Buffer.concat(chunks);
+    const r = http.request({ host: 'localhost', port: PORT, method: 'POST', path: '/api/corrections',
+      headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}`, 'Content-Length': bodyBuf.length, 'x-test-user': Buffer.from(JSON.stringify(user || ADMIN)).toString('base64') } },
+      (res) => { let d = ''; res.on('data', c => d += c); res.on('end', () => { let j = {}; try { j = JSON.parse(d || '{}'); } catch (_) {} resolve({ status: res.statusCode, body: j }); }); });
+    r.on('error', e => resolve({ status: 0, error: e.message }));
+    r.write(bodyBuf); r.end();
+  });
+}
 async function waitReady() {
   const t0 = Date.now();
   while (!I.CORRECTION_SCHEMA_STATE.ready) { if (I.CORRECTION_SCHEMA_STATE.error) throw new Error(I.CORRECTION_SCHEMA_STATE.error); if (Date.now() - t0 > 3000) throw new Error('timeout'); await new Promise(r => setTimeout(r, 30)); }
 }
 // 建单 + 直接置 FIXED（绕状态机，本测聚焦 notify-done）
+// B1（OA 格式闸 + 自发现自动业务方，方案 v1.5 §2.3 H-2/M-7）：留空 OA 会被后端静默覆盖为"业务方=建单人"，
+//   本文件通篇依赖自定义 requesters[] 的姓名/手机号（notify-done 按手机号反查钉钉），须带真实 OA 号
+//   走"真OA模式"保留既有 requesters[] 路径，否则全部业务方会被强改成建单人、手机号变 null。
+let _oaSeq = 900200;
+const oa = () => String(_oaSeq++);
 async function createFixed(requesters) {
-  const c = await reqJson('POST', '/api/corrections', { source_system: 'BMS', location_info: 'L2b 测试', correction_type: 'single', reason: 'L2b 完成通知测试原因', requesters }, ADMIN);
+  const c = await reqMultipartCreate({ source_system: 'BMS', location_info: 'L2b 测试', correction_type: 'single', oa_number: oa(), reason: 'L2b 完成通知测试原因', requesters }, ADMIN);
   await dbRunAsync(`UPDATE correction_requests SET status='FIXED' WHERE id=?`, [c.body.id]);
   return c.body.id;
 }
@@ -143,7 +170,7 @@ async function createFixed(requesters) {
   ok(n6b.status === 200 && n6b.body.status === 'sent' && keyAfter !== keyBefore, '重发契约：force_resend → 重发新 message_key');
 
   // ⑦ 非 FIXED/REFIXED → 409
-  const cP = await reqJson('POST', '/api/corrections', { source_system: 'BMS', location_info: 'PENDING', correction_type: 'single', reason: 'PENDING 态拒测试原因', requesters: [{ name: 'P', phone: '13800000005' }] }, ADMIN);
+  const cP = await reqMultipartCreate({ source_system: 'BMS', location_info: 'PENDING', correction_type: 'single', oa_number: oa(), reason: 'PENDING 态拒测试原因', requesters: [{ name: 'P', phone: '13800000005' }] }, ADMIN);
   const n7 = await reqJson('POST', `/api/corrections/${cP.body.id}/notify-done`, {}, ADMIN);
   ok(n7.status === 409 && n7.body.code === 'INVALID_STATE_FOR_NOTIFY', '非 FIXED/REFIXED → 409 INVALID_STATE_FOR_NOTIFY');
 

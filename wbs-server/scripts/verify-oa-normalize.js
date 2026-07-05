@@ -7,9 +7,13 @@
  *   canonicalizeCollabOa(raw) → collab 存储用：核心非空则规范化回 'OA-' + 核心（= 现状存储格式，零迁移）
  *
  * 这是纯逻辑单测，不需要起服务。运行：node scripts/verify-oa-normalize.js
+ *
+ * ⚠️ 数据修正建单字段体系优化 A 块（2026-07-05）后，Data_Correction.html 的 formatOaNo 在此基础上
+ *    多加了一条 datafix- 占位号原样直显分支（详见该文件 oaCore/formatOaNo 注释），三模块不再字节一致，
+ *    是有意的超集分叉，非漂移。datafix 分支的独立单测见 verify-correction-datafix-e2e.js。
  */
 
-// —— 与三处实现保持字节一致（Data_Collab/Issue_Tracker/Data_Correction.html + server.js）——
+// —— 与两处实现保持字节一致（Data_Collab/Issue_Tracker.html + server.js；Data_Correction.html 另加 datafix 分支）——
 function oaCore(raw) {
     if (raw === null || raw === undefined) return '';
     return String(raw).trim().replace(/^(test-)?oa-?/i, '').trim();

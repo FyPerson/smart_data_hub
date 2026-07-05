@@ -63,6 +63,11 @@ let pass = 0;
 const ok = (cond, label) => { assert(cond, label); console.log('  ✓ ' + label); pass++; };
 const ADMIN = { id: 1, username: 'admin', display_name: '管理员', role: 'admin' };
 const ADMIN2 = { id: 2, username: 'admin2', display_name: '管理员2', role: 'admin' };
+// B1（OA 格式闸 + 自发现自动业务方，方案 v1.5 §2.3 H-2/M-7）：留空 OA 会被后端静默覆盖为"业务方=建单人"，
+//   本文件全部用例的诉求是验证跨系统关联/link-new/组闸门等结构性行为、且大量断言了自定义 requesters[] 姓名，
+//   故全部创建调用统一带一个真实数字 OA 号（走"真OA模式"），避免被 H-2 短路改写业务方。oa() 每次返回递增新号。
+let _oaSeq = 900100;
+const oa = () => String(_oaSeq++);
 
 let PORT, srv;
 function reqJson(method, p, body, user) {
@@ -74,6 +79,28 @@ function reqJson(method, p, body, user) {
       (res) => { let d = ''; res.on('data', c => d += c); res.on('end', () => { let j = {}; try { j = JSON.parse(d || '{}'); } catch (_) {} resolve({ status: res.statusCode, body: j }); }); });
     r.on('error', e => resolve({ status: 0, error: e.message }));
     if (data) r.write(data); r.end();
+  });
+}
+// B2（OA 截图强制·建单同步上传，H-3）：真OA模式建单须走 multipart 且带 ≥1 张 oa_proof_files
+function reqMultipartCreate(fields, user) {
+  return new Promise((resolve) => {
+    const boundary = '----L4CreateBoundary' + Math.floor(1e8 + Math.random() * 1e8);
+    const chunks = [];
+    for (const [k, val] of Object.entries(fields || {})) {
+      if (val === undefined || val === null) continue;
+      const strVal = (typeof val === 'object') ? JSON.stringify(val) : String(val);
+      chunks.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${k}"\r\n\r\n${strVal}\r\n`));
+    }
+    const png = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex');
+    chunks.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="oa_proof_files"; filename="oa_proof.png"\r\nContent-Type: image/png\r\n\r\n`));
+    chunks.push(png);
+    chunks.push(Buffer.from(`\r\n--${boundary}--\r\n`));
+    const bodyBuf = Buffer.concat(chunks);
+    const r = http.request({ host: 'localhost', port: PORT, method: 'POST', path: '/api/corrections',
+      headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}`, 'Content-Length': bodyBuf.length, 'x-test-user': Buffer.from(JSON.stringify(user || ADMIN)).toString('base64') } },
+      (res) => { let d = ''; res.on('data', c => d += c); res.on('end', () => { let j = {}; try { j = JSON.parse(d || '{}'); } catch (_) {} resolve({ status: res.statusCode, body: j }); }); });
+    r.on('error', e => resolve({ status: 0, error: e.message }));
+    r.write(bodyBuf); r.end();
   });
 }
 function reqMultipart(p, fields, fileName, fileBuf, user) {
@@ -107,8 +134,8 @@ const setStatus = (id, status, ct) => dbRunAsync(`UPDATE correction_requests SET
   srv = app.listen(0); PORT = srv.address().port;
 
   // ① 契约 B 建两单
-  const cb = await reqJson('POST', '/api/corrections', {
-    source_system: 'BMS', location_info: '系统1：客户X字段错', correction_type: 'single', reason: '跨系统契约B建两单测试原因',
+  const cb = await reqMultipartCreate( {
+    source_system: 'BMS', location_info: '系统1：客户X字段错', correction_type: 'single', oa_number: oa(), reason: '跨系统契约B建两单测试原因',
     requesters: [{ name: '主业务方', phone: '13800000001' }, { name: '业务方乙', phone: '13800000002' }],
     error_proof_note: '错误截图见附件', cross_system: true, system2: { source_system: 'CRM', location_info: '系统2：同字段错', correction_count: 3 },
   }, ADMIN);
@@ -134,15 +161,15 @@ const setStatus = (id, status, ct) => dbRunAsync(`UPDATE correction_requests SET
   ok(aC.is_master === false && aC.master_id === masterId && aC.group_members.length === 2 && aC.requesters.length === 2, '① 子单 resolve：非主 + master_id + 组成员 2 + requesters 取主单子表');
 
   // ② 禁直派 + system2 校验
-  const dA = await reqJson('POST', '/api/corrections', { source_system: 'BMS', location_info: 'x', correction_type: 'single', requesters: [{ name: '甲' }], cross_system: true, system2: { source_system: 'CRM', location_info: 'y' }, assigned_to: 99 }, ADMIN);
+  const dA = await reqMultipartCreate( { source_system: 'BMS', location_info: 'x', correction_type: 'single', oa_number: oa(), requesters: [{ name: '甲' }], cross_system: true, system2: { source_system: 'CRM', location_info: 'y' }, assigned_to: 99 }, ADMIN);
   ok(dA.status === 400 && dA.body.code === 'CROSS_SYSTEM_NO_DIRECT_ASSIGN', '② 跨系统 + assigned_to → 400 CROSS_SYSTEM_NO_DIRECT_ASSIGN');
-  const dR = await reqJson('POST', '/api/corrections', { source_system: 'BMS', location_info: 'x', correction_type: 'single', requesters: [{ name: '甲' }], cross_system: true, system2: { source_system: 'CRM', location_info: 'y' }, relay_notified_user_id: 7 }, ADMIN);
+  const dR = await reqMultipartCreate( { source_system: 'BMS', location_info: 'x', correction_type: 'single', oa_number: oa(), requesters: [{ name: '甲' }], cross_system: true, system2: { source_system: 'CRM', location_info: 'y' }, relay_notified_user_id: 7 }, ADMIN);
   ok(dR.status === 400 && dR.body.code === 'CROSS_SYSTEM_NO_DIRECT_ASSIGN', '② 跨系统 + relay → 400 CROSS_SYSTEM_NO_DIRECT_ASSIGN');
-  const dL = await reqJson('POST', '/api/corrections', { source_system: 'BMS', location_info: 'x', correction_type: 'single', requesters: [{ name: '甲' }], cross_system: true, system2: { source_system: 'CRM' } }, ADMIN);
+  const dL = await reqMultipartCreate( { source_system: 'BMS', location_info: 'x', correction_type: 'single', oa_number: oa(), requesters: [{ name: '甲' }], cross_system: true, system2: { source_system: 'CRM' } }, ADMIN);
   ok(dL.status === 400 && dL.body.code === 'LINKED_MISSING_LOCATION_INFO', '② system2 缺 location_info → 400 LINKED_MISSING_LOCATION_INFO');
-  const dS = await reqJson('POST', '/api/corrections', { source_system: 'BMS', location_info: 'x', correction_type: 'single', requesters: [{ name: '甲' }], cross_system: true, system2: { source_system: '不存在的系统', location_info: 'y' } }, ADMIN);
+  const dS = await reqMultipartCreate( { source_system: 'BMS', location_info: 'x', correction_type: 'single', oa_number: oa(), requesters: [{ name: '甲' }], cross_system: true, system2: { source_system: '不存在的系统', location_info: 'y' } }, ADMIN);
   ok(dS.status === 400 && dS.body.code === 'INVALID_LINKED_SOURCE_SYSTEM', '② system2 非法 source_system → 400 INVALID_LINKED_SOURCE_SYSTEM');
-  const dF = await reqJson('POST', '/api/corrections', { source_system: 'BMS', location_info: 'x', correction_type: 'single', requesters: [{ name: '甲' }], system2: { source_system: 'CRM', location_info: 'y' } }, ADMIN);   // 传 system2 但无 cross_system flag
+  const dF = await reqMultipartCreate( { source_system: 'BMS', location_info: 'x', correction_type: 'single', oa_number: oa(), requesters: [{ name: '甲' }], system2: { source_system: 'CRM', location_info: 'y' } }, ADMIN);   // 传 system2 但无 cross_system flag
   ok(dF.status === 400 && dF.body.code === 'CROSS_SYSTEM_FLAG_REQUIRED', '② L-3：传 system2 但未开 cross_system → 400 CROSS_SYSTEM_FLAG_REQUIRED（挡静默降级）');
 
   // ③ 子单 409（notify-done / error_proof / link-new 都 ON_MASTER_ONLY）
@@ -184,7 +211,7 @@ const setStatus = (id, status, ct) => dbRunAsync(`UPDATE correction_requests SET
   ok(g6.status === 409 && g6.body.code !== 'GROUP_NOT_ALL_DONE', `⑤ RC3-L3：主单 ARCHIVED 调 notify-done → 端点态闸门 409（code=${g6.body.code}，非组闸门）`);
 
   // ⑥ link-new 追加：单系统单升主单 + 追加 → 组内 2 单
-  const s1 = await reqJson('POST', '/api/corrections', { source_system: 'BMS', location_info: '独立单', correction_type: 'single', reason: 'link-new独立单测试原因', requesters: [{ name: '独立主', phone: '13700000007' }] }, ADMIN);
+  const s1 = await reqMultipartCreate( { source_system: 'BMS', location_info: '独立单', correction_type: 'single', oa_number: oa(), reason: 'link-new独立单测试原因', requesters: [{ name: '独立主', phone: '13700000007' }] }, ADMIN);
   const soloId = s1.body.id;
   const ln = await reqJson('POST', `/api/corrections/${soloId}/link-new`, { source_system: 'CRM', location_info: '追加系统', correction_count: 5 }, ADMIN2);   // soloId 由 ADMIN(1) 建，link-new 由 ADMIN2(2) 做
   ok(ln.status === 200 && ln.body.master_id === soloId && ln.body.id && Array.isArray(ln.body.group_members) && ln.body.group_members.length === 2,
@@ -207,14 +234,14 @@ const setStatus = (id, status, ct) => dbRunAsync(`UPDATE correction_requests SET
   const lnT = await reqJson('POST', `/api/corrections/${soloId}/link-new`, { source_system: 'OA 系统', location_info: 'z' }, ADMIN);
   ok(lnT.status === 409 && lnT.body.code === 'LINK_NOT_ALLOWED_TERMINAL', '⑥b 主单 ARCHIVED 终态 → link-new 409 LINK_NOT_ALLOWED_TERMINAL');
   // 已 sent 阻塞：用一张新单标主业务方 sent
-  const s2 = await reqJson('POST', '/api/corrections', { source_system: 'BMS', location_info: '已通知单', correction_type: 'single', reason: '已通知单阻塞测试原因', requesters: [{ name: '甲', phone: '13700000008' }] }, ADMIN);
+  const s2 = await reqMultipartCreate( { source_system: 'BMS', location_info: '已通知单', correction_type: 'single', oa_number: oa(), reason: '已通知单阻塞测试原因', requesters: [{ name: '甲', phone: '13700000008' }] }, ADMIN);
   await dbRunAsync(`UPDATE correction_requesters SET completion_notify_status='sent' WHERE correction_request_id=? AND is_primary=1`, [s2.body.id]);
   const lnN = await reqJson('POST', `/api/corrections/${s2.body.id}/link-new`, { source_system: 'OA 系统', location_info: 'z' }, ADMIN);
   ok(lnN.status === 409 && lnN.body.code === 'LINK_NOT_ALLOWED_NOTIFIED', '⑥b 主单业务方已 sent → link-new 409 LINK_NOT_ALLOWED_NOTIFIED');
 
   // ⑦ L5：GET 详情 group.members 含 assigned_to_name（前端关联组区"开发"列）+ 主单优先排序 + 子单 is_master/master_id（banner/隐藏依据）
-  const cb7 = await reqJson('POST', '/api/corrections', {
-    source_system: 'BMS', location_info: 'L5系统1', correction_type: 'single', reason: 'L5关联组详情测试原因',
+  const cb7 = await reqMultipartCreate( {
+    source_system: 'BMS', location_info: 'L5系统1', correction_type: 'single', oa_number: oa(), reason: 'L5关联组详情测试原因',
     requesters: [{ name: '主', phone: '13800000010' }],
     cross_system: true, system2: { source_system: 'HRD', location_info: 'L5系统2' },
   }, ADMIN);
@@ -233,35 +260,35 @@ const setStatus = (id, status, ct) => dbRunAsync(`UPDATE correction_requests SET
     '⑦ L5：子单详情 group.is_master=false + master_id=主单（前端 banner/隐藏 done/error_proof 依据）');
 
   // ⑧ M-2（codex 57）：跨系统组内系统互异——建单 system2≠系统1 / link-new 不重复系统 /「其他」按补充说明细分
-  const sameSys = await reqJson('POST', '/api/corrections', { source_system: 'BMS', location_info: 'x', correction_type: 'single', requesters: [{ name: '甲' }], cross_system: true, system2: { source_system: 'BMS', location_info: 'y' } }, ADMIN);
+  const sameSys = await reqMultipartCreate( { source_system: 'BMS', location_info: 'x', correction_type: 'single', oa_number: oa(), requesters: [{ name: '甲' }], cross_system: true, system2: { source_system: 'BMS', location_info: 'y' } }, ADMIN);
   ok(sameSys.status === 400 && sameSys.body.code === 'CROSS_SYSTEM_SAME_SYSTEM', '⑧ M-2：建单 system2==系统1(BMS) → 400 CROSS_SYSTEM_SAME_SYSTEM');
-  const otherSame = await reqJson('POST', '/api/corrections', { source_system: '其他', source_system_other: 'A系统', location_info: 'x', correction_type: 'single', requesters: [{ name: '甲' }], cross_system: true, system2: { source_system: '其他', source_system_other: 'A系统', location_info: 'y' } }, ADMIN);
+  const otherSame = await reqMultipartCreate( { source_system: '其他', source_system_other: 'A系统', location_info: 'x', correction_type: 'single', oa_number: oa(), requesters: [{ name: '甲' }], cross_system: true, system2: { source_system: '其他', source_system_other: 'A系统', location_info: 'y' } }, ADMIN);
   ok(otherSame.status === 400 && otherSame.body.code === 'CROSS_SYSTEM_SAME_SYSTEM', '⑧ M-2：「其他」同补充说明(A=A) → 400（细分判同系统）');
-  const otherDiff = await reqJson('POST', '/api/corrections', { source_system: '其他', source_system_other: 'A系统', location_info: 'x', correction_type: 'single', reason: '其他子系统差异测试原因', requesters: [{ name: '甲', phone: '13700000010' }], cross_system: true, system2: { source_system: '其他', source_system_other: 'B系统', location_info: 'y' } }, ADMIN);
+  const otherDiff = await reqMultipartCreate( { source_system: '其他', source_system_other: 'A系统', location_info: 'x', correction_type: 'single', oa_number: oa(), reason: '其他子系统差异测试原因', requesters: [{ name: '甲', phone: '13700000010' }], cross_system: true, system2: { source_system: '其他', source_system_other: 'B系统', location_info: 'y' } }, ADMIN);
   ok(otherDiff.status === 200 && otherDiff.body.cross_system === true, '⑧ M-2：「其他」不同补充说明(A≠B) → 放行（不误拒不同的「其他」子系统）');
-  const s3 = await reqJson('POST', '/api/corrections', { source_system: 'BMS', location_info: '独立', correction_type: 'single', reason: 'link-new去重独立单测试原因', requesters: [{ name: '主', phone: '13700000011' }] }, ADMIN);
+  const s3 = await reqMultipartCreate( { source_system: 'BMS', location_info: '独立', correction_type: 'single', oa_number: oa(), reason: 'link-new去重独立单测试原因', requesters: [{ name: '主', phone: '13700000011' }] }, ADMIN);
   const dupLn = await reqJson('POST', `/api/corrections/${s3.body.id}/link-new`, { source_system: 'BMS', location_info: 'z' }, ADMIN);
   ok(dupLn.status === 409 && dupLn.body.code === 'LINK_DUPLICATE_SOURCE_SYSTEM', '⑧ M-2：link-new 追加组内已有系统(BMS) → 409 LINK_DUPLICATE_SOURCE_SYSTEM');
   const okLn = await reqJson('POST', `/api/corrections/${s3.body.id}/link-new`, { source_system: 'CRM', location_info: 'z' }, ADMIN);
   ok(okLn.status === 200 && okLn.body.id, '⑧ M-2：link-new 追加不同系统(CRM) → 放行');
 
   // ⑨ 修正条数分流（用户优化 2026-06-18）：single 强制 1 / batch 必填 ≥2（主单 + 跨系统 system2 + link-new）
-  const cc_s = await reqJson('POST', '/api/corrections', { source_system: 'BMS', location_info: 'x', correction_type: 'single', correction_count: 99, reason: 'single条数强制1测试原因', requesters: [{ name: '甲', phone: '13700000020' }] }, ADMIN);
+  const cc_s = await reqMultipartCreate( { source_system: 'BMS', location_info: 'x', correction_type: 'single', oa_number: oa(), correction_count: 99, reason: 'single条数强制1测试原因', requesters: [{ name: '甲', phone: '13700000020' }] }, ADMIN);
   const cc_sRow = await dbGetAsync('SELECT correction_count FROM correction_requests WHERE id=?', [cc_s.body.id]);
   ok(cc_s.status === 200 && cc_sRow.correction_count === 1, '⑨ single 传 cc=99 → 后端强制 1（忽略传值，防 API 绕过）');
-  const cc_b0 = await reqJson('POST', '/api/corrections', { source_system: 'BMS', location_info: 'x', correction_type: 'batch', reason: 'batch缺条数测试原因', requesters: [{ name: '甲' }] }, ADMIN);
+  const cc_b0 = await reqMultipartCreate( { source_system: 'BMS', location_info: 'x', correction_type: 'batch', oa_number: oa(), reason: 'batch缺条数测试原因', requesters: [{ name: '甲' }] }, ADMIN);
   ok(cc_b0.status === 400 && cc_b0.body.code === 'CORRECTION_COUNT_REQUIRED', '⑨ batch 不填 cc → 400 CORRECTION_COUNT_REQUIRED');
-  const cc_b1 = await reqJson('POST', '/api/corrections', { source_system: 'BMS', location_info: 'x', correction_type: 'batch', correction_count: 1, reason: 'batch条数1测试原因', requesters: [{ name: '甲' }] }, ADMIN);
+  const cc_b1 = await reqMultipartCreate( { source_system: 'BMS', location_info: 'x', correction_type: 'batch', oa_number: oa(), correction_count: 1, reason: 'batch条数1测试原因', requesters: [{ name: '甲' }] }, ADMIN);
   ok(cc_b1.status === 400 && cc_b1.body.code === 'BATCH_COUNT_MIN', '⑨ batch cc=1 → 400 BATCH_COUNT_MIN（仅 1 条应改 single）');
-  const cc_b2 = await reqJson('POST', '/api/corrections', { source_system: 'BMS', location_info: 'x', correction_type: 'batch', correction_count: 2, reason: 'batch条数边界2测试原因', requesters: [{ name: '甲' }] }, ADMIN);
+  const cc_b2 = await reqMultipartCreate( { source_system: 'BMS', location_info: 'x', correction_type: 'batch', oa_number: oa(), correction_count: 2, reason: 'batch条数边界2测试原因', requesters: [{ name: '甲' }] }, ADMIN);
   const cc_b2Row = await dbGetAsync('SELECT correction_count FROM correction_requests WHERE id=?', [cc_b2.body.id]);
   ok(cc_b2.status === 200 && cc_b2Row.correction_count === 2, '⑨ batch cc=2 → 放行边界 + db=2');
   // 跨系统 batch：system2 也按 batch ≥2 必填
-  const cc_xs0 = await reqJson('POST', '/api/corrections', { source_system: 'BMS', location_info: 'x', correction_type: 'batch', correction_count: 5, reason: '跨系统batch缺子条数测试原因', requesters: [{ name: '甲' }], cross_system: true, system2: { source_system: 'CRM', location_info: 'y' } }, ADMIN);
+  const cc_xs0 = await reqMultipartCreate( { source_system: 'BMS', location_info: 'x', correction_type: 'batch', oa_number: oa(), correction_count: 5, reason: '跨系统batch缺子条数测试原因', requesters: [{ name: '甲' }], cross_system: true, system2: { source_system: 'CRM', location_info: 'y' } }, ADMIN);
   ok(cc_xs0.status === 400 && cc_xs0.body.code === 'LINKED_CORRECTION_COUNT_REQUIRED', '⑨ 跨系统 batch system2 不填 cc → 400 LINKED_CORRECTION_COUNT_REQUIRED');
-  const cc_xs1 = await reqJson('POST', '/api/corrections', { source_system: 'BMS', location_info: 'x', correction_type: 'batch', correction_count: 5, reason: '跨系统batch子条数1测试原因', requesters: [{ name: '甲' }], cross_system: true, system2: { source_system: 'CRM', location_info: 'y', correction_count: 1 } }, ADMIN);
+  const cc_xs1 = await reqMultipartCreate( { source_system: 'BMS', location_info: 'x', correction_type: 'batch', oa_number: oa(), correction_count: 5, reason: '跨系统batch子条数1测试原因', requesters: [{ name: '甲' }], cross_system: true, system2: { source_system: 'CRM', location_info: 'y', correction_count: 1 } }, ADMIN);
   ok(cc_xs1.status === 400 && cc_xs1.body.code === 'LINKED_BATCH_COUNT_MIN', '⑨ 跨系统 batch system2 cc=1 → 400 LINKED_BATCH_COUNT_MIN');
-  const cc_xs = await reqJson('POST', '/api/corrections', { source_system: 'BMS', location_info: 'x', correction_type: 'batch', correction_count: 5, reason: '跨系统batch条数分流测试原因', requesters: [{ name: '甲', phone: '13700000021' }], cross_system: true, system2: { source_system: 'CRM', location_info: 'y', correction_count: 3 } }, ADMIN);
+  const cc_xs = await reqMultipartCreate( { source_system: 'BMS', location_info: 'x', correction_type: 'batch', oa_number: oa(), correction_count: 5, reason: '跨系统batch条数分流测试原因', requesters: [{ name: '甲', phone: '13700000021' }], cross_system: true, system2: { source_system: 'CRM', location_info: 'y', correction_count: 3 } }, ADMIN);
   const cc_xsM = await dbGetAsync('SELECT correction_count FROM correction_requests WHERE id=?', [cc_xs.body.master_id]);
   const cc_xsC = await dbGetAsync('SELECT correction_count FROM correction_requests WHERE id=?', [cc_xs.body.child_ids[0]]);
   ok(cc_xs.status === 200 && cc_xsM.correction_count === 5 && cc_xsC.correction_count === 3, '⑨ 跨系统 batch：主单 cc=5 + 子单 cc=3 各自写入');

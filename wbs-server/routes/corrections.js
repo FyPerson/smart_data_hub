@@ -1134,46 +1134,121 @@ async function notifyCorrectionAssignedDev(correctionId, devId) {
     return r;
 }
 
+// B 块（方案 v1.5 §2.2）：OA 号入参校验——只吃 req.body.oa_number 原始值，判定"真OA模式"/"留空(自发现)模式"。
+//   ⚠️ M-6 职责隔离：绝不能拿 finalOaNumber（含 A 块补的 datafix-{id} 占位号）来过本函数——
+//   datafix-{id} 非纯数字会被误判 400，本函数只吃前端原始输入，落库后的展示值走 formatOaNo（互不干扰）。
+//   返回 { ok:true, mode:'empty'|'real', value } / { ok:false, error, code }。
+function validateInputOaNumber(raw) {
+    if (raw === undefined || raw === null) return { ok: true, mode: 'empty', value: null };
+    if (typeof raw !== 'string') {
+        // L-9：不接受 number（防前导 0 丢失 / 科学计数法等静默失真），非空非字符串一律拒。
+        return { ok: false, error: 'OA 流程号格式非法（须为字符串）', code: 'INVALID_OA_NUMBER' };
+    }
+    const trimmed = raw.trim();
+    if (trimmed === '') return { ok: true, mode: 'empty', value: null };
+    // 1-20 位纯数字（M-4：不硬编码 6 位，防滥用设上限）；datafix-xx/全角/中文数字/1e3/123abc 均在此拒。
+    if (/^[0-9]{1,20}$/.test(trimmed)) return { ok: true, mode: 'real', value: trimmed };
+    return { ok: false, error: 'OA 流程号格式非法（须为 1-20 位纯数字，留空则视为信息技术部自发现）', code: 'INVALID_OA_NUMBER' };
+}
+
+// B2（方案 §2.4 H-3）：multipart 下 requesters[]/system2{} 等嵌套结构无法原生传递，前端 JSON.stringify
+//   后放进同名字段，这里尝试 JSON.parse 复原；JSON 模式（Content-Type: application/json）下该字段
+//   已是数组/对象，非字符串直接原样返回（幂等，两种 Content-Type 共用同一套后续处理逻辑）。
+function parseMaybeJsonField(v) {
+    if (typeof v !== 'string') return v;
+    const t = v.trim();
+    if (!t) return v;
+    try { return JSON.parse(t); } catch (_) { return v; }
+}
+
 // ── POST /api/corrections 建单（§4.1 / G-1 requireAdmin / G-8 单批量 / R-5 白名单 / L-1 带指派走 transition）──
-router.post('/', authenticateToken, requireCorrectionSchemaReady, requireAdmin, async (req, res) => {
+//   B2（H-3）：始终挂 correctionUploadMw('oa_proof_files', 5)——multer 对非 multipart 请求是纯 no-op
+//   （node_modules/multer 内部 `if (!is(req,['multipart'])) return next()`），故既有 JSON 建单调用方
+//   零影响；真 OA 模式下前端改用 multipart 同步带 oa_proof_files 才会真正触发文件解析。
+router.post('/', authenticateToken, requireCorrectionSchemaReady, requireAdmin, correctionUploadMw('oa_proof_files', 5), async (req, res) => {
+    let persistedOaProof = [];   // B2：本次建单同步持久化的 oa_proof 附件；须在最外层声明，供末尾 catch 回滚物理文件（作用域覆盖 try/catch 两侧）
     try {
         const b = req.body || {};
+        const requestersInput = parseMaybeJsonField(b.requesters);
+        const system2Input = parseMaybeJsonField(b.system2);
 
-        // 必填：source_system（白名单）+ correction_type + location_info（修正方式）+ requester_name
+        // B 块（方案 v1.5 §2.6 H-1）：OA 号校验 + 业务方判定【最先】，先于 source_system 等结构校验——
+        //   自发现（留空 OA）单要跳过前端 requesters[] 字段（静默替换为建单人自己），必须先判完 OA 模式
+        //   才能决定是否还要跑 normalizeCorrectionRequesters；照搬现状顺序会让自发现单被"缺业务方"误拦。
+        const inputOaResult = validateInputOaNumber(b.oa_number);
+        if (!inputOaResult.ok) {
+            correctionCleanupPending(req, null);   // B2：格式非法时也需清 multer 已落的 _new/{buildKey}/ 暂存文件
+            return res.status(400).json({ error: inputOaResult.error, code: inputOaResult.code });
+        }
+        const isSelfDiscovered = inputOaResult.mode === 'empty';
+        const oaNumber = inputOaResult.value;   // 真OA模式=trim后的纯数字串；留空=null（供 A 块 datafix 补号判空复用）
+
+        // §2.3（H-2/M-7）：业务方判定——留空 OA → 后端静默忽略前端所有业务方字段，强制业务方=建单人自己
+        //   （子表只写一条、主表兼容列同步）；真 OA → 走既有 requesters[]/requester_name 规范化（不变）。
+        //   ⚠️ 静默覆盖非校验：前端隐藏业务方录入区只是体验，本处后端强制覆盖才是真闸门（防直接调 API 绕过）。
+        let cleanedRequesters;
+        let oaProofFiles = [];   // B2：真OA模式下建单同步带的 OA 截图（req.files，非 multipart 请求恒为空数组）
+        if (isSelfDiscovered) {
+            const selfName = (typeof req.user.display_name === 'string' && req.user.display_name.trim())
+                || (typeof req.user.name === 'string' && req.user.name.trim())
+                || (typeof req.user.username === 'string' && req.user.username.trim())
+                || '';
+            if (!selfName) {
+                correctionCleanupPending(req, null);
+                return res.status(400).json({ error: '当前用户无可用姓名（display_name/username 均为空），无法建单', code: 'SELF_REQUESTER_NAME_MISSING' });
+            }
+            cleanedRequesters = [{ name: selfName, phone: null }];
+        } else {
+            // B2（H-3）：真OA模式必须随建单同步带 ≥1 张 OA 截图（multipart 字段 oa_proof_files）——
+            //   校验位置在 normalizeCorrectionRequesters 之前（方案 §2.6 步骤 2 pseudocode 顺序），
+            //   缺图先拦，不必等业务方校验跑完才发现要重填文件。
+            oaProofFiles = Array.isArray(req.files) ? req.files : [];
+            if (oaProofFiles.length === 0) {
+                correctionCleanupPending(req, null);
+                return res.status(400).json({ error: '填写真实 OA 流程号后须同步上传 OA 截图', code: 'OA_PROOF_REQUIRED' });
+            }
+            // L2 多业务方（方案 §6.1 契约 A 入参兼容）：requesters[] 优先，缺失从旧字段 requester_name/phone 生成单业务方。
+            //   规范化后第一条=主业务方，写主表 requester_name/phone 作兼容冗余 + 列表显示（§5.1）；全部写子表（§5.2 真相源）。
+            const fallbackPrimary = {
+                name: (typeof b.requester_name === 'string' ? b.requester_name.trim() : ''),
+                phone: (typeof b.requester_phone === 'string' && b.requester_phone.trim()) ? b.requester_phone.trim() : null,
+            };
+            const normRes = normalizeCorrectionRequesters(requestersInput, fallbackPrimary);
+            if (!normRes.ok) { correctionCleanupPending(req, null); return res.status(400).json({ error: normRes.error, code: normRes.code }); }   // 上限超标（codex 49 M-1）
+            cleanedRequesters = normRes.cleaned;
+            if (cleanedRequesters.length === 0) {
+                correctionCleanupPending(req, null);
+                return res.status(400).json({ error: '缺少必填字段：业务方（requester_name 或 requesters[] 至少一个非空姓名）', code: 'MISSING_REQUIRED_FIELDS' });
+            }
+        }
+        const primaryRequester = cleanedRequesters[0];
+        const requesterName = primaryRequester.name;       // 主业务方 → 主表兼容冗余
+        const requesterPhone = primaryRequester.phone;      // 主业务方手机号 → 主表兼容冗余（留空模式恒 null）
+
+        // 必填：source_system（白名单）+ correction_type + location_info（修正方式）
         //   （v1.81.0 复审优化 H：错误描述+期望值 合并为 location_info 一个"修正方式"，删 expected_value §1.2；error_current/source_table 已 6-15 复审删）
         const sourceSystem = (typeof b.source_system === 'string' ? b.source_system.trim() : '');
         if (!CORRECTION_SOURCE_SYSTEMS.includes(sourceSystem)) {
+            correctionCleanupPending(req, null);
             return res.status(400).json({ error: '所属系统非法', code: 'INVALID_SOURCE_SYSTEM', allowed: CORRECTION_SOURCE_SYSTEMS });
         }
         const sourceSystemOther = (typeof b.source_system_other === 'string' ? b.source_system_other.trim() : '');
         if (sourceSystem === '其他' && !sourceSystemOther) {
+            correctionCleanupPending(req, null);
             return res.status(400).json({ error: '所属系统选「其他」时必须填写补充说明', code: 'SOURCE_SYSTEM_OTHER_REQUIRED' });
         }
         const correctionType = (typeof b.correction_type === 'string' ? b.correction_type.trim() : 'single');
         if (!CORRECTION_TYPES.includes(correctionType)) {
+            correctionCleanupPending(req, null);
             return res.status(400).json({ error: 'correction_type 非法（仅 single | batch）', code: 'INVALID_CORRECTION_TYPE' });
         }
         const locationInfo = (typeof b.location_info === 'string' ? b.location_info.trim() : '');   // 修正方式（合并错误描述+期望值，删 expected_value §1.2）
-        if (!locationInfo) return res.status(400).json({ error: '缺少必填字段：location_info', code: 'MISSING_REQUIRED_FIELDS' });
-        // L2 多业务方（方案 §6.1 契约 A 入参兼容）：requesters[] 优先，缺失从旧字段 requester_name/phone 生成单业务方。
-        //   规范化后第一条=主业务方，写主表 requester_name/phone 作兼容冗余 + 列表显示（§5.1）；全部写子表（§5.2 真相源）。
-        const fallbackPrimary = {
-            name: (typeof b.requester_name === 'string' ? b.requester_name.trim() : ''),
-            phone: (typeof b.requester_phone === 'string' && b.requester_phone.trim()) ? b.requester_phone.trim() : null,
-        };
-        const normRes = normalizeCorrectionRequesters(b.requesters, fallbackPrimary);
-        if (!normRes.ok) return res.status(400).json({ error: normRes.error, code: normRes.code });   // 上限超标（codex 49 M-1）
-        const cleanedRequesters = normRes.cleaned;
-        if (cleanedRequesters.length === 0) {
-            return res.status(400).json({ error: '缺少必填字段：业务方（requester_name 或 requesters[] 至少一个非空姓名）', code: 'MISSING_REQUIRED_FIELDS' });
-        }
-        const primaryRequester = cleanedRequesters[0];
-        const requesterName = primaryRequester.name;       // 主业务方 → 主表兼容冗余
+        if (!locationInfo) { correctionCleanupPending(req, null); return res.status(400).json({ error: '缺少必填字段：location_info', code: 'MISSING_REQUIRED_FIELDS' }); }
         // error_proof_note（§6.1 / D-10）：建单错误证明说明，可选；≤1000 防御性上限（方案未规定，对齐 note 类字段做有界，防无界 TEXT）
         let errorProofNote = null;
         if (typeof b.error_proof_note === 'string' && b.error_proof_note.trim()) {
             errorProofNote = b.error_proof_note.trim();
-            if (errorProofNote.length > 1000) return res.status(400).json({ error: '错误证明说明过长（≤1000 字）', code: 'ERROR_PROOF_NOTE_TOO_LONG' });
+            if (errorProofNote.length > 1000) { correctionCleanupPending(req, null); return res.status(400).json({ error: '错误证明说明过长（≤1000 字）', code: 'ERROR_PROOF_NOTE_TOO_LONG' }); }
         }
 
         // codex 09 M-4：路径 A（assigned_to 直接指派）与路径 B（relay_notified_user_id 先通知对接人）互斥（§4.2 二选一）。
@@ -1181,28 +1256,33 @@ router.post('/', authenticateToken, requireCorrectionSchemaReady, requireAdmin, 
         const hasAssign = b.assigned_to !== undefined && b.assigned_to !== null && b.assigned_to !== '';
         const hasRelay = b.relay_notified_user_id !== undefined && b.relay_notified_user_id !== null && b.relay_notified_user_id !== '';
         if (hasAssign && hasRelay) {
+            correctionCleanupPending(req, null);
             return res.status(400).json({ error: '不能同时直接指派开发和指定对接人（路径 A/B 二选一）', code: 'ASSIGN_AND_RELAY_CONFLICT' });
         }
 
         // L4（§6.1 契约 B / D-3）：跨系统建单 cross_system=true + system2{...} —— 一次建两单（系统1主单 + 系统2子单），
         //   **禁建单时直接指派/对接人**（两单 PENDING_ASSIGN，admin 之后在详情页各自指派，避嵌套事务/嵌套 BEGIN IMMEDIATE）。
         //   契约 A（单系统，cross_system 非 true）完全不受影响——下方 Path A/B 与 INSERT 路径零改动。
-        const crossSystem = b.cross_system === true;
+        //   B2：multipart 下布尔值以字符串 'true' 到达（原生表单字段无布尔类型），JSON 模式仍是真布尔 true。
+        const crossSystem = b.cross_system === true || b.cross_system === 'true';
         let system2 = null;
         if (crossSystem) {
             if (hasAssign || hasRelay) {
+                correctionCleanupPending(req, null);
                 return res.status(400).json({ error: '跨系统建单不支持建单时直接指派/指定对接人（两单建好后在详情页各自指派）', code: 'CROSS_SYSTEM_NO_DIRECT_ASSIGN' });
             }
-            const s2 = normalizeLinkedSystem(b.system2, correctionType === 'batch');   // 子单继承主单类型：batch 主单 → system2 也 ≥2 必填；single → 恒 1
-            if (!s2.ok) return res.status(400).json({ error: s2.error, code: s2.code });
+            const s2 = normalizeLinkedSystem(system2Input, correctionType === 'batch');   // 子单继承主单类型：batch 主单 → system2 也 ≥2 必填；single → 恒 1
+            if (!s2.ok) { correctionCleanupPending(req, null); return res.status(400).json({ error: s2.error, code: s2.code }); }
             // M-2（codex 57）：跨系统组内系统须互异——system2 与系统1 相同则"系统1/系统2"展示失义、违背"一诉求跨两系统"语义。
             //   "其他"按 source_system_other 细分比较（避免误拒两个不同的"其他"子系统）。
             if (isSameCorrectionSystem(s2.sourceSystem, s2.sourceSystemOther, sourceSystem, sourceSystemOther)) {
+                correctionCleanupPending(req, null);
                 return res.status(400).json({ error: '跨系统的系统2 不能与系统1 相同，请选择不同系统', code: 'CROSS_SYSTEM_SAME_SYSTEM' });
             }
             system2 = s2;
-        } else if (b.system2 !== undefined && b.system2 !== null) {
+        } else if (system2Input !== undefined && system2Input !== null) {
             // L-3（codex 55）：传了 system2 却没开启 cross_system（flag 畸形/字符串 'true'/1）→ 显式拒，避免静默建成单系统单忽略 system2。
+            correctionCleanupPending(req, null);
             return res.status(400).json({ error: '提供了 system2 但未开启跨系统建单（cross_system 须为 true）', code: 'CROSS_SYSTEM_FLAG_REQUIRED' });
         }
 
@@ -1211,12 +1291,12 @@ router.post('/', authenticateToken, requireCorrectionSchemaReady, requireAdmin, 
         //   故 reason 缺失不会抢在那些 400 之前误报（既有 e2e 大量"故意测某 400 但未传 reason"的用例靠此不被 REASON_REQUIRED 抢先拦）。
         //   跨系统子单不走本路径——子单 reason 继承主单（见 createLinkedChild common.reason），主单已强校验故子单天然满足。
         const reasonText = (typeof b.reason === 'string' ? b.reason.trim() : '');
-        const oaNumber = (typeof b.oa_number === 'string' && b.oa_number.trim()) ? b.oa_number.trim() : null;
+        // oa_number 已在顶部 validateInputOaNumber 校验并赋值给 oaNumber（B 块 §2.6 提前），此处不再重复提取。
         // 流程类型（2026-06-30）：建单录入，可选自由文本；≤100 防御性上限（对齐 note 类有界 TEXT 防无界——流程类型是分类标签非长描述）。供列表显示+搜索+后期统计。
         let processType = null;
         if (typeof b.process_type === 'string' && b.process_type.trim()) {
             processType = b.process_type.trim();
-            if (processType.length > 100) return res.status(400).json({ error: '流程类型过长（≤100 字）', code: 'PROCESS_TYPE_TOO_LONG' });
+            if (processType.length > 100) { correctionCleanupPending(req, null); return res.status(400).json({ error: '流程类型过长（≤100 字）', code: 'PROCESS_TYPE_TOO_LONG' }); }
         }
         // 修正条数（H/#6 codex 22 M-3 + codex 24 M-1 严格正则）：可空；非空须为十进制正整数 1-999999999。
         //   用正则而非 Number.isInteger——后者放行字符串 "5.0"/"1e3"/"0x10"/超大数，与前端 /^[1-9]\d{0,8}$/ 口径分裂。
@@ -1230,13 +1310,14 @@ router.post('/', authenticateToken, requireCorrectionSchemaReady, requireAdmin, 
             correctionCount = 1;
         } else {
             const raw = (b.correction_count !== undefined && b.correction_count !== null) ? String(b.correction_count).trim() : '';
-            if (!raw) return res.status(400).json({ error: '批量数据修正必须填写修正条数', code: 'CORRECTION_COUNT_REQUIRED' });
-            if (!/^[1-9]\d{0,8}$/.test(raw)) return res.status(400).json({ error: '修正条数须为正整数（1-999999999）', code: 'INVALID_CORRECTION_COUNT' });
+            if (!raw) { correctionCleanupPending(req, null); return res.status(400).json({ error: '批量数据修正必须填写修正条数', code: 'CORRECTION_COUNT_REQUIRED' }); }
+            if (!/^[1-9]\d{0,8}$/.test(raw)) { correctionCleanupPending(req, null); return res.status(400).json({ error: '修正条数须为正整数（1-999999999）', code: 'INVALID_CORRECTION_COUNT' }); }
             correctionCount = Number(raw);
-            if (correctionCount < 2) return res.status(400).json({ error: '批量数据修正的修正条数须 ≥2（仅 1 条请改用单数据修正）', code: 'BATCH_COUNT_MIN' });
+            if (correctionCount < 2) { correctionCleanupPending(req, null); return res.status(400).json({ error: '批量数据修正的修正条数须 ≥2（仅 1 条请改用单数据修正）', code: 'BATCH_COUNT_MIN' }); }
         }
-        const requesterDept = (typeof b.requester_dept === 'string' && b.requester_dept.trim()) ? b.requester_dept.trim() : null;
-        const requesterPhone = primaryRequester.phone;   // 主业务方手机号 → 主表兼容冗余（L2：取自 cleanedRequesters[0]，不再单读 b.requester_phone）
+        // §2.1/§2.3：留空 OA（自发现）强制业务方部门=null（后端静默覆盖，不采信前端传值）；真 OA 按前端自由填。
+        const requesterDept = isSelfDiscovered ? null : ((typeof b.requester_dept === 'string' && b.requester_dept.trim()) ? b.requester_dept.trim() : null);
+        // requesterPhone 已在顶部随 primaryRequester 一并算出（B 块 §2.6 提前），此处不再重复声明。
         // deadline：客户端传了合法值归一化用之，否则后端智能默认（§4.1，仅参考可空）
         const expectedDeadline = normalizeCorrectionDatetime(b.expected_deadline) || correctionDefaultDeadline();
 
@@ -1246,13 +1327,15 @@ router.post('/', authenticateToken, requireCorrectionSchemaReady, requireAdmin, 
         let relayUserId = null;
         if (hasRelay) {
             const relayId = parsePositiveCorrectionId(b.relay_notified_user_id);
-            if (!relayId) return res.status(400).json({ error: '对接人 ID 非法', code: 'INVALID_RELAY_USER_ID' });   // RC-L3
+            if (!relayId) { correctionCleanupPending(req, null); return res.status(400).json({ error: '对接人 ID 非法', code: 'INVALID_RELAY_USER_ID' }); }   // RC-L3
             if (!isCorrectionRelayWhitelisted(relayId)) {
+                correctionCleanupPending(req, null);
                 return res.status(400).json({ error: '对接人不在指定名单内', code: 'RELAY_USER_NOT_IN_WHITELIST' });
             }
             const relayU = await dbGetAsync('SELECT id, phone FROM users WHERE id = ?', [relayId]);
-            if (!relayU) return res.status(400).json({ error: '对接人不存在', code: 'RELAY_USER_NOT_FOUND' });
+            if (!relayU) { correctionCleanupPending(req, null); return res.status(400).json({ error: '对接人不存在', code: 'RELAY_USER_NOT_FOUND' }); }
             if (!String(relayU.phone || '').trim()) {
+                correctionCleanupPending(req, null);
                 return res.status(400).json({ error: '对接人未绑定手机号，无法接收钉钉通知', code: 'RELAY_USER_NO_PHONE' });
             }
             relayUserId = relayU.id;
@@ -1262,10 +1345,10 @@ router.post('/', authenticateToken, requireCorrectionSchemaReady, requireAdmin, 
         let assignTarget = null;
         if (hasAssign) {
             const devId = parsePositiveCorrectionId(b.assigned_to);
-            if (!devId) return res.status(400).json({ error: '指派目标 ID 非法', code: 'INVALID_ASSIGN_TARGET_ID' });   // RC-L3
+            if (!devId) { correctionCleanupPending(req, null); return res.status(400).json({ error: '指派目标 ID 非法', code: 'INVALID_ASSIGN_TARGET_ID' }); }   // RC-L3
             const dev = await dbGetAsync('SELECT id, display_name, role FROM users WHERE id = ?', [devId]);
-            if (!dev) return res.status(400).json({ error: '指派目标用户不存在', code: 'ASSIGN_TARGET_NOT_FOUND' });
-            if (dev.role === 'viewer') return res.status(400).json({ error: '不能指派给查看者（viewer）', code: 'ASSIGN_TARGET_VIEWER' });
+            if (!dev) { correctionCleanupPending(req, null); return res.status(400).json({ error: '指派目标用户不存在', code: 'ASSIGN_TARGET_NOT_FOUND' }); }
+            if (dev.role === 'viewer') { correctionCleanupPending(req, null); return res.status(400).json({ error: '不能指派给查看者（viewer）', code: 'ASSIGN_TARGET_VIEWER' }); }
             assignTarget = dev;
         }
 
@@ -1274,7 +1357,7 @@ router.post('/', authenticateToken, requireCorrectionSchemaReady, requireAdmin, 
         //   "缺 reason + 指派/对接人/条数非法"会先返回那些结构错误码，再补 reason 后才报 REASON_REQUIRED。
         //   这是为保留既有 e2e"故意测某 400 但不传 reason"用例的错误码顺序（前端表单已对 reason 做早提示，用户实际先被前端拦）。
         //   ⚠️ 后续若调整校验顺序，勿误判此处"靠后"是遗漏。
-        if (reasonText.length < 5) return res.status(400).json({ error: '原因/背景必填，至少 5 字', code: 'REASON_REQUIRED' });
+        if (reasonText.length < 5) { correctionCleanupPending(req, null); return res.status(400).json({ error: '原因/背景必填，至少 5 字', code: 'REASON_REQUIRED' }); }
 
         const createdBy = Number(req.user.id);
         const createdByName = req.user.display_name || req.user.username;
@@ -1282,6 +1365,7 @@ router.post('/', authenticateToken, requireCorrectionSchemaReady, requireAdmin, 
         // INSERT 主表（PENDING_ASSIGN）+ history 首行（NULL→PENDING_ASSIGN）同事务（对齐 issue C3 POST 范式）
         let newId;
         let childIds = [];   // L4：跨系统建单产生的系统2子单 id（契约 A 时恒空）
+        let finalOaNumber = oaNumber;   // A 块 H-2：贯穿 try 块与响应体，须在 try 外声明（响应在 try 块之外）
         await dbRunAsync('BEGIN IMMEDIATE');
         try {
             const result = await dbRunAsync(
@@ -1295,6 +1379,19 @@ router.post('/', authenticateToken, requireCorrectionSchemaReady, requireAdmin, 
                  expectedDeadline, relayUserId, createdBy, createdByName, errorProofNote]
             );
             newId = result.lastID;
+            // A 块（datafix 占位号，方案 v1.1 §4 H-2）：建单空 OA → 自动补 'datafix-{id}'（id=本单自身 id，零心智）。
+            //   ⚠️ 用原始 oaNumber（非落库后的列值）判空——INSERT 时已按 oaNumber 写入，此处只是回填占位号；
+            //   finalOaNumber 贯穿本请求剩余生命周期（history 无需但响应/日志改用它，M-6：不得反向拿 finalOaNumber 去过 validateInputOaNumber）。
+            //   UPDATE 用 await + WHERE 双条件（id + IS NULL）+ changes===1 硬校验（状态机同款不变量，[[feedback_state_machine_update_invariant]]）。
+            if (!oaNumber) {
+                finalOaNumber = `datafix-${newId}`;
+                const oaUpd = await dbRunAsync('UPDATE correction_requests SET oa_number = ? WHERE id = ? AND oa_number IS NULL', [finalOaNumber, newId]);
+                if (oaUpd.changes !== 1) throw new Error(`datafix 占位号补全失败（#${newId}，changes=${oaUpd.changes}）`);
+            } else {
+                // B2（H-3）：真OA模式——事务内同步持久化本次建单同步上传的 OA 截图。缺图已在上方 OA_PROOF_REQUIRED
+                //   拦截，此处 oaProofFiles 恒非空；persist 失败会抛出，被下方 catch 捕获 ROLLBACK 整个建单事务。
+                persistedOaProof = await correctionPersistAttachments(newId, oaProofFiles, 'oa_proof', { id: createdBy, name: createdByName });
+            }
             await dbRunAsync(
                 `INSERT INTO correction_status_history (correction_request_id, from_status, to_status, reason, operator_id, operator_name)
                  VALUES (?, NULL, 'PENDING_ASSIGN', ?, ?, ?)`,
@@ -1306,8 +1403,14 @@ router.post('/', authenticateToken, requireCorrectionSchemaReady, requireAdmin, 
             //   子单复制主业务方到兼容列、不写子表（见 insertLinkedChildCorrection）；继承主单公共字段（reason/oa/类型/截止）。
             if (crossSystem) {
                 await dbRunAsync('UPDATE correction_requests SET correction_group_id = ? WHERE id = ?', [newId, newId]);
+                // H-1（方案 v1.1 §4）：子单空 OA 独立生成自身 'datafix-{子单id}'，不继承主单 finalOaNumber——
+                //   故 common.oaNumber 传【原始】oaNumber（未补全值），子单 INSERT 后按自身 childId 单独补号。
                 const common = { reason: reasonText, oaNumber, processType, correctionType, requesterDept, expectedDeadline, createdBy, createdByName };
                 const childId = await insertLinkedChildCorrection(system2, common, primaryRequester, newId, '信息技术部建单·跨系统关联单（系统2）');
+                if (!oaNumber) {
+                    const childOaUpd = await dbRunAsync('UPDATE correction_requests SET oa_number = ? WHERE id = ? AND oa_number IS NULL', [`datafix-${childId}`, childId]);
+                    if (childOaUpd.changes !== 1) throw new Error(`子单 datafix 占位号补全失败（#${childId}，changes=${childOaUpd.changes}）`);
+                }
                 childIds.push(childId);
             }
             await dbRunAsync('COMMIT');
@@ -1315,6 +1418,16 @@ router.post('/', authenticateToken, requireCorrectionSchemaReady, requireAdmin, 
             try { await dbRunAsync('ROLLBACK'); } catch (_) {}
             throw txErr;
         }
+        // ⚠️ B2 关键修复：COMMIT 成功后清空 persistedOaProof——它已随事务永久落库+落盘，不再是"待回滚"状态。
+        //   若不清空，下方 assignTarget 的 correctionTransition 一旦失败（如指派目标并发状态变化），
+        //   会落入最外层 catch 误调 correctionRollbackPersisted 把已提交成功的 oa_proof 记录/文件删掉——
+        //   而 correction_requests 行本身此时已提交、不会被撤销，造成"单已建但截图凭空消失"的数据不一致。
+        //   清空后最外层 catch 仍可安全无条件调用该函数（空数组 no-op），无需再按"事务内/事务外"分支判断。
+        persistedOaProof = [];
+        // B2 防御性收尾：留空 OA（自发现）分支不读取 req.files——若调用方绕开前端隐藏区强行携带 oa_proof_files
+        //   （直接调 API），文件会残留在 _pending/_new/{buildKey}/ 从未被移动/清理。此处成功路径统一兜底清理一次；
+        //   对真OA模式是无害 no-op（文件已被 correctionPersistAttachments rename 走，原路径已不存在，cleanupPendingFiles 内部 existsSync 判空跳过）。
+        correctionCleanupPending(req, null);
 
         // 路径 A：建单带 assigned_to → 立即走 correctionTransition（L-1：产生 history，不直接 INSERT 已指派态）
         let assigned = false;
@@ -1336,9 +1449,14 @@ router.post('/', authenticateToken, requireCorrectionSchemaReady, requireAdmin, 
         res.json({
             id: newId,
             status: assigned ? 'ASSIGNED_PENDING_ESTIMATE' : 'PENDING_ASSIGN',
+            oa_number: finalOaNumber,   // H-2：响应带 datafix 补全后的最终值（前端 openDrawer 会重拉详情，此为即时展示兜底）
             ...(crossSystem ? { cross_system: true, master_id: newId, child_ids: childIds } : {})   // L4：跨系统返主单+子单 id，供前端把 error_proof 只传锚点单
         });
     } catch (err) {
+        // B2：事务失败（含 oa_proof persist 失败）→ SQL 侧已被内层 catch ROLLBACK，但文件搬移不在事务内，
+        //   须显式回滚已落盘的 oa_proof 物理文件 + 清理本次 multer 暂存目录（对齐 /complete·/resubmit 范式）。
+        await correctionRollbackPersisted(persistedOaProof);
+        correctionCleanupPending(req, null);
         if (err instanceof CorrectionTransitionError) {
             return res.status(err.httpStatus).json({ error: err.message, code: err.code });
         }
@@ -1761,14 +1879,17 @@ router.get('/:id', authenticateToken, requireCorrectionSchemaReady, async (req, 
         //     单系统单/主单 master===id → error_proof 仍查自身，行为完全不变（关键回归保障）。
         //   ⚠️ anchor 恒非空：row 已在上方 404 校验存在，resolveCorrectionGroupAnchor 仅当单不存在才返 null（此处不可达）；
         //     `anchor ? anchor.master_id : id` 的 `: id` 是防御性兜底（异常竞态下 anchor 失败则降级为只读本单，不崩接口），非常态路径（codex 61 代码审 L-3）。
+        // B2（方案 §2.4 L-10）：oa_proof 单级永不合并——只查本单自身（第三个 OR 分支用 id 非 anchor.master_id），
+        //   与 error_proof（组内共享、查主单）语义物理隔离；跨系统真 OA 建单时 oa_proof 只挂主单，子单详情查自身应为空。
         const attRows = await dbAllAsync(
             `SELECT id, attachment_type, file_name, original_name, file_size, mime_type, uploaded_by, uploaded_by_name, created_at,
                     correction_request_id AS source_correction_request_id
                FROM correction_attachments
               WHERE (attachment_type = ? AND correction_request_id = ?)
                  OR (attachment_type = ? AND correction_request_id = ?)
-              ORDER BY CASE WHEN attachment_type = 'error_proof' THEN 0 ELSE 1 END, id`,
-            ['error_proof', anchor ? anchor.master_id : id, 'fix_proof', id]
+                 OR (attachment_type = ? AND correction_request_id = ?)
+              ORDER BY CASE WHEN attachment_type = 'error_proof' THEN 0 WHEN attachment_type = 'oa_proof' THEN 1 ELSE 2 END, id`,
+            ['error_proof', anchor ? anchor.master_id : id, 'oa_proof', id, 'fix_proof', id]
         );
         // L-2：所有附件行统一带 from_master 布尔 + source_correction_request_id，前端只读展示来源、不依赖 correction_request_id 语义。
         const attachments = attRows.map(a => ({
@@ -1855,8 +1976,20 @@ const correctionStorage = multer.diskStorage({
         // 暂存 _pending/{rid}/：multer 是前置中间件，先落 _pending，handler 校验权限/状态通过后再 rename 正式目录。
         //   纵深防御（对齐 issue C4a H-1）：destination 自身也不信任 req.params.id，非正整数直接 cb(error)。
         const reqId = req.params.id;
-        if (!/^[1-9]\d*$/.test(String(reqId))) return cb(new Error('非法修正单 id'));
-        const targetDir = path.join(CORRECTION_PENDING_BASE, String(reqId));
+        if (reqId !== undefined) {
+            if (!/^[1-9]\d*$/.test(String(reqId))) return cb(new Error('非法修正单 id'));
+            const targetDir = path.join(CORRECTION_PENDING_BASE, String(reqId));
+            try { fs.mkdirSync(targetDir, { recursive: true }); cb(null, targetDir); } catch (e) { cb(e); }
+            return;
+        }
+        // B2（建单同步上传 oa_proof，方案 §2.4 H-3）：POST / 建单 endpoint 无 :id 路由参数——资源尚未 INSERT，
+        //   无 rid 可用。用请求级随机 key（ts_rand，同 filename 范式）代替 rid，暂存 _pending/_new/{buildKey}/；
+        //   建单事务内 INSERT 成功拿到 newId 后，直接复用 correctionPersistAttachments(newId, req.files, 'oa_proof', actor)
+        //   按【真实来源路径 f.path】搬到正式目录（该函数不依赖暂存目录命名，只信 f.path，故可安全跨来源复用）。
+        if (!req._correctionBuildPendingKey) {
+            req._correctionBuildPendingKey = `${Date.now()}_${Math.round(Math.random() * 1e9)}`;
+        }
+        const targetDir = path.join(CORRECTION_PENDING_BASE, '_new', req._correctionBuildPendingKey);
         try { fs.mkdirSync(targetDir, { recursive: true }); cb(null, targetDir); } catch (e) { cb(e); }
     },
     filename: function (req, file, cb) {
@@ -1922,22 +2055,27 @@ async function correctionPersistAttachments(rid, files, attachmentType, uploader
         }
         return inserted;
     } catch (e) {
-        for (const ins of inserted) { try { await dbRunAsync('DELETE FROM correction_attachments WHERE id = ?', [ins.id]); } catch (_) {} }
-        for (const p of movedPaths) { try { fs.unlinkSync(p); } catch (_) {} }
+        // codex 84 L-3：清理保持 best-effort（不因清理失败掩盖原始错误），但失败必须留日志——静默吞掉会让孤儿记录/文件无从排障
+        for (const ins of inserted) { try { await dbRunAsync('DELETE FROM correction_attachments WHERE id = ?', [ins.id]); } catch (ce) { logger.warn(`correctionPersistAttachments 自回滚删记录失败（attachment#${ins.id}）: ${ce && ce.message}`); } }
+        for (const p of movedPaths) { try { fs.unlinkSync(p); } catch (ce) { logger.warn(`correctionPersistAttachments 自回滚删文件失败（${p}）: ${ce && ce.message}`); } }
         throw e;
     }
 }
 // transition 失败时回滚本次已落库附件（RC-M1：失败的上传不应留存为历史 fix_proof）
 async function correctionRollbackPersisted(persisted) {
     for (const a of (persisted || [])) {
-        try { await dbRunAsync('DELETE FROM correction_attachments WHERE id = ?', [a.id]); } catch (_) {}
-        try { safeDeleteFileSync(a.file_name, UPLOAD_DIR); } catch (_) {}
+        try { await dbRunAsync('DELETE FROM correction_attachments WHERE id = ?', [a.id]); } catch (ce) { logger.warn(`correctionRollbackPersisted 删记录失败（attachment#${a.id}）: ${ce && ce.message}`); }   // codex 84 L-3
+        try { safeDeleteFileSync(a.file_name, UPLOAD_DIR); } catch (ce) { logger.warn(`correctionRollbackPersisted 删文件失败（${a.file_name}）: ${ce && ce.message}`); }
     }
 }
 // 清理本次 _pending 残留（handler 校验失败、未移动时调）
 function correctionCleanupPending(req, rid) {
     try { collabSubmitHelpers.cleanupPendingFiles(req.files, logger); } catch (_) {}
     if (rid && /^[1-9]\d*$/.test(String(rid))) { try { fs.rmdirSync(path.join(CORRECTION_PENDING_BASE, String(rid))); } catch (_) {} }
+    // B2：建单同步上传场景（无 rid，资源尚未 INSERT）——清理请求级 buildKey 暂存目录 _pending/_new/{buildKey}/
+    if (!rid && req && req._correctionBuildPendingKey) {
+        try { fs.rmdirSync(path.join(CORRECTION_PENDING_BASE, '_new', req._correctionBuildPendingKey)); } catch (_) {}
+    }
 }
 // actor（transition 权限校验 + history operator 留痕）
 function correctionActor(req) {
@@ -3236,6 +3374,6 @@ router.post('/:id/create-chat', authenticateToken, requireCorrectionSchemaReady,
   return {
     initSchema,
     router,
-    _internals: { CORRECTION_STATUSES, CORRECTION_STATUS_TRANSITIONS, CORRECTION_TYPES, CORRECTION_SOURCE_SYSTEMS, CORRECTION_NOTIFY_SENDABLE, CORRECTION_READ_FIELD_MAP, CORRECTION_ALLOWED_EXTS, CORRECTION_CHAT_EXCLUDE_IDS, CORRECTION_CHAT_ALLOWED_STATUSES, CORRECTION_REQUESTS_KEY_COLS, CORRECTION_ATTACHMENTS_KEY_COLS, CORRECTION_HISTORY_KEY_COLS, CORRECTION_REQUESTERS_KEY_COLS, CORRECTION_REQUESTERS_NOTNULL_COLS, CORRECTION_REQUESTER_NOTIFY_STATUSES, normalizeCorrectionDatetime, correctionDefaultDeadline, parsePositiveCorrectionId, correctionTransition, correctionActor, isCorrectionChatExcludedId, requireCorrectionSchemaReady, CORRECTION_SCHEMA_STATE, CORRECTION_RELAY_USER_IDS, isCorrectionRelayWhitelisted, normalizeCorrectionRequesters, writeCorrectionRequesters, resolveCorrectionGroupAnchor, isGroupMemberDoneForBusinessNotify, runCorrectionMigration, resolveReworkOriginalDeveloper, insertReworkChildCorrection },
+    _internals: { CORRECTION_STATUSES, CORRECTION_STATUS_TRANSITIONS, CORRECTION_TYPES, CORRECTION_SOURCE_SYSTEMS, CORRECTION_NOTIFY_SENDABLE, CORRECTION_READ_FIELD_MAP, CORRECTION_ALLOWED_EXTS, CORRECTION_CHAT_EXCLUDE_IDS, CORRECTION_CHAT_ALLOWED_STATUSES, CORRECTION_REQUESTS_KEY_COLS, CORRECTION_ATTACHMENTS_KEY_COLS, CORRECTION_HISTORY_KEY_COLS, CORRECTION_REQUESTERS_KEY_COLS, CORRECTION_REQUESTERS_NOTNULL_COLS, CORRECTION_REQUESTER_NOTIFY_STATUSES, normalizeCorrectionDatetime, correctionDefaultDeadline, parsePositiveCorrectionId, correctionTransition, correctionActor, isCorrectionChatExcludedId, requireCorrectionSchemaReady, CORRECTION_SCHEMA_STATE, CORRECTION_RELAY_USER_IDS, isCorrectionRelayWhitelisted, normalizeCorrectionRequesters, writeCorrectionRequesters, resolveCorrectionGroupAnchor, isGroupMemberDoneForBusinessNotify, runCorrectionMigration, resolveReworkOriginalDeveloper, insertReworkChildCorrection, validateInputOaNumber },
   };
 };

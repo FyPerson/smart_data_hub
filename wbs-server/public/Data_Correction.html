@@ -352,8 +352,17 @@
             <div class="modal-header"><h2>新建修正单</h2><button class="drawer-close" onclick="closeCreateModal()">&times;</button></div>
             <div class="modal-body">
                 <div class="form-row">
-                    <div class="form-group"><label>OA 流程号</label><input type="text" id="formOaNumber" placeholder="可选，只填数字部分（如 364265）"></div>
+                    <div class="form-group"><label>OA 流程号</label><input type="text" id="formOaNumber" placeholder="可选，只填数字部分（如 364265）；留空=信息技术部自发现" oninput="toggleOaMode()">
+                        <!-- codex 84 L-1：非法格式即时提示（前端镜像后端 validateInputOaNumber 口径，防"引导传截图后才被 400"的摩擦） -->
+                        <div class="hint" id="oaFormatHint" style="display:none;color:#d93025;">OA 流程号须为 1-20 位纯数字（如 364265）；留空则视为信息技术部自发现。</div>
+                    </div>
                     <div class="form-group"><label>流程类型</label><input type="text" id="formProcessType" placeholder="可选"></div>
+                </div>
+                <!-- B2（建单字段体系优化，OA 截图强制）：填写真实 OA 流程号后必须同步上传截图；留空（信息技术部自发现）免此项，见 toggleOaMode() -->
+                <div class="form-group" id="oaProofGroup" style="display:none;">
+                    <label>OA 流程截图 <span class="req">*</span></label>
+                    <input type="file" id="formOaProofFiles" multiple accept="image/*,.pdf,.xlsx,.xls">
+                    <div class="hint">填写了真实 OA 流程号，须随建单同步上传截图留档（建单后不可补传，事后如需变更请联系信息技术部）。</div>
                 </div>
                 <div class="form-group">
                     <label>修正类型 <span class="req">*</span></label>
@@ -412,12 +421,16 @@
                     </div>
                 </div>
                 <div class="form-group"><label>原因/背景 <span class="req">*</span></label><textarea id="formReason" rows="2" placeholder="必填，至少 5 字：错误产生原因或修正背景"></textarea></div>
-                <div class="form-group"><label>业务方部门</label><select id="formRequesterDept"></select></div>
-                <div class="form-group">
-                    <label>业务方 <span class="req">*</span>（第一行为主业务方，可加多个）</label>
-                    <div id="requesterList"></div>
-                    <button type="button" class="btn-secondary" onclick="addRequesterRow()" style="margin-top:6px; padding:4px 10px; font-size:12px;">+ 添加业务方</button>
-                    <div class="hint">主业务方姓名必填；同一修正诉求可能涉及多个业务方，完成后逐个发钉钉通知（需手机号）。</div>
+                <!-- B2（建单字段体系优化，自发现自动业务方）：留空 OA 时后端静默以建单人作为业务方，本区隐藏；
+                     填写真实 OA 流程号后展开，业务方部门/姓名按前端自由填，见 toggleOaMode() -->
+                <div id="requesterSectionGroup">
+                    <div class="form-group"><label>业务方部门</label><select id="formRequesterDept"></select></div>
+                    <div class="form-group">
+                        <label>业务方 <span class="req">*</span>（第一行为主业务方，可加多个）</label>
+                        <div id="requesterList"></div>
+                        <button type="button" class="btn-secondary" onclick="addRequesterRow()" style="margin-top:6px; padding:4px 10px; font-size:12px;">+ 添加业务方</button>
+                        <div class="hint">主业务方姓名必填；同一修正诉求可能涉及多个业务方，完成后逐个发钉钉通知（需手机号）。</div>
+                    </div>
                 </div>
                 <div class="form-group"><label>期望完成时间</label><input type="datetime-local" id="formExpectedDeadline"><div class="hint">可选，业务方期望完成时间（建单人代填）；不填则系统按默认规则生成。</div></div>
                 <!-- 指派路径 A/B/none（二选一，G-16；§1.5 三选一字段联动：A 必填开发 / B 必填对接人 / none 都不填）；L5 跨系统勾选时整块隐藏（契约 B 禁直派） -->
@@ -439,12 +452,13 @@
                     <select id="formRelayUser"><option value="">请选择对接人</option></select>
                     <div class="hint">建单后记录对接人，需在详情页手动点「通知对接人」发送钉钉；对接人收到后在平台指派。</div>
                 </div>
-                <!-- L3b 错误证明（§6.7：L2a 后端已支持 error_proof 早期态上传；建单 JSON → 拿 id → 两步上传锚点单） -->
+                <!-- D 块（错误证明→待修复数据正名，v1.3 §2）：改显示文案，底层 error_proof 标识符/字段名/变量名一律不动。
+                     L3b 待修复数据（§6.7：L2a 后端已支持 error_proof 早期态上传；建单 JSON → 拿 id → 两步上传锚点单） -->
                 <div class="form-group">
-                    <label>错误证明（可选）</label>
-                    <textarea id="formErrorProofNote" rows="2" maxlength="1000" placeholder="可选，文字说明错误证明（如：BMS 金额字段显示异常，截图见附件）"></textarea>
+                    <label>待修复数据（可选）</label>
+                    <textarea id="formErrorProofNote" rows="2" maxlength="1000" placeholder="可补充说明（如：表格第几列是待改字段），选填"></textarea>
                     <input type="file" id="formErrorProofFiles" multiple accept="image/*,.pdf,.xlsx,.xls" style="margin-top:6px;">
-                    <div class="hint">可选，错误证明文字 + 附件（图片/PDF/xlsx，≤5 个文件）；建单后两步上传到本单（上传失败不影响建单，详情页可补传）。</div>
+                    <div class="hint">待修复数据附件（表格清单为主，图片/PDF/xlsx，≤5 个文件）+ 选填文字备注；建单后两步上传到本单（上传失败不影响建单，详情页可补传）。</div>
                 </div>
             </div>
             <div class="modal-footer">
@@ -853,7 +867,13 @@
             if (raw === null || raw === undefined) return '';
             return String(raw).trim().replace(/^(test-)?oa-?/i, '').trim();
         }
+        // 建单字段体系优化 A 块（datafix 占位号，仅本页 oa_number 语境，不动 Data_Collab/Issue_Tracker 的同名函数）：
+        //   'datafix-{id}' 是系统自动补的占位号（自发现单，无真实 OA），原样显示，不进入 OA- 归一规则（否则显示成
+        //   "OA-datafix-22" 无意义）。⚠️ formatOaNo 是本页 OA 展示【唯一入口】，其余渲染点一律调用它，
+        //   不新增 isDatafixOaNo 等旁路判断函数（v1.1 §4 L-7）。
         function formatOaNo(raw) {
+            const s = (raw === null || raw === undefined) ? '' : String(raw).trim();
+            if (/^datafix-/i.test(s)) return s;
             const core = oaCore(raw);
             return core ? 'OA-' + core : '';
         }
@@ -1196,25 +1216,33 @@
             const attLink = a => `/uploads/${String(a.file_name || '').split('/').map(encodeURIComponent).join('/')}`;
             const errProofs = attachments.filter(a => a.attachment_type === 'error_proof');
             const fixProofs = attachments.filter(a => a.attachment_type === 'fix_proof');
+            const oaProofs = attachments.filter(a => a.attachment_type === 'oa_proof');
             const renderAtts = (list, emptyText) => list.length ? list.map(a => `
                 <div class="att-item">📎 <a href="${attLink(a)}" target="_blank">${escapeHtml(a.original_name || a.file_name)}</a>
                 <span style="color:#9ca3af;"> · ${escapeHtml(a.uploaded_by_name || '-')} · ${escapeHtml(formatFullTime(a.created_at))}</span></div>`).join('') : `<div style="color:#9ca3af; font-size:12px;">${emptyText}</div>`;
-            // L3b 错误证明区：文字说明 error_proof_note + 补传入口（§6.7：建单人/admin，早期态 PENDING_ASSIGN~REFIXED，非作废）
+            // B2（方案 §2.4 L-10）：oa_proof 单级展示，仅本单自身（后端 SQL 已不合并 anchor），复用 renderAtts 但不复用 error_proof 的 anchor 逻辑；
+            //   仅真实 OA 号（非 datafix- 占位号）才展示本区——自发现单本就免 OA 截图，不该出现空白区块造成"是不是漏传"的误解。
+            const hasRealOa = r.oa_number && !/^datafix-/i.test(String(r.oa_number));
+            const oaProofSection = hasRealOa
+                ? `<div class="detail-section"><h3>OA 流程截图（oa_proof）</h3>${renderAtts(oaProofs, '无（历史存量单未强制留档）')}</div>`
+                : '';
+            // D 块：错误证明→待修复数据（v1.3 §2 正名，改显示不改底层）——error_proof 标识符/变量名/字段名全部不动。
+            // L3b 待修复数据区：文字说明 error_proof_note + 补传入口（§6.7：建单人/admin，早期态 PENDING_ASSIGN~REFIXED，非作废）
             const ERR_PROOF_STATES = ['PENDING_ASSIGN', 'ASSIGNED_PENDING_ESTIMATE', 'IN_PROGRESS', 'FIXED', 'REFIXED'];
             const canAddErrProof = (isAdmin || isCreator) && !isChild && ERR_PROOF_STATES.includes(s) && !r.voided_at;   // L5 子单 error_proof 归主单（后端 ERROR_PROOF_ON_MASTER_ONLY），子单只读展示不带补传入口
-            // codex 61 M-4：错误证明文字说明读统一字段 effective_error_proof_note（主单/无组取自身、子单取主单，后端已算好，前端无分支）。
+            // codex 61 M-4：待修复数据文字说明读统一字段 effective_error_proof_note（主单/无组取自身、子单取主单，后端已算好，前端无分支）。
             const errProofNoteHtml = r.effective_error_proof_note ? `<div style="font-size:13px; color:#374151; margin-bottom:6px; white-space:pre-wrap;">📝 ${escapeHtml(r.effective_error_proof_note)}</div>` : '';
             const errProofAddHtml = canAddErrProof
-                ? `<div style="margin-top:8px;"><input type="file" id="errProofFiles_${Number(r.id)}" multiple accept="image/*,.pdf,.xlsx,.xls" style="font-size:12px;"><button class="btn-secondary nb-btn" onclick="uploadErrorProof(${Number(r.id)})">上传错误证明</button></div>`
+                ? `<div style="margin-top:8px;"><input type="file" id="errProofFiles_${Number(r.id)}" multiple accept="image/*,.pdf,.xlsx,.xls" style="font-size:12px;"><button class="btn-secondary nb-btn" onclick="uploadErrorProof(${Number(r.id)})">上传待修复数据</button></div>`
                 : '';
-            // codex 61·方案 A：错误证明 = 诉求级材料（组内共享一份、物理存主单）。子单从"整块隐藏"改为"只读展示主单 error_proof"——
-            //   解决系统2 开发看不到错误证明（后端详情已合并返回主单 error_proof 附件 + effective_error_proof_note）。
+            // codex 61·方案 A：待修复数据 = 诉求级材料（组内共享一份、物理存主单）。子单从"整块隐藏"改为"只读展示主单 error_proof"——
+            //   解决系统2 开发看不到待修复数据（后端详情已合并返回主单 error_proof 附件 + effective_error_proof_note）。
             //   子单标来源「来自关联组主单 #N」、不带补传入口（canAddErrProof 对子单恒 false，上传仍归主单后端 409 防线不变）。
-            //   空态区分（codex 61 M-5）：子单有 note 无附件→「暂无附件」、无 note 无附件→「主单暂无错误证明附件」；防开发误判主单也没证明。
+            //   空态区分（codex 61 M-5）：子单有 note 无附件→「暂无附件」、无 note 无附件→「主单暂无待修复数据附件」；防开发误判主单也没证明。
             // 末次合并审 NIT-3：返工子单（象限④升主单后 isChild=true 但无跨系统组）用「来自原单 #N」对齐 reworkBanner，不误用「关联组主单」措辞；真跨系统子单才用「关联组主单」
-            const errProofTitle = isReworkChild ? `错误证明（来自原单 #${groupMasterId}）` : (isChild ? `错误证明（来自关联组主单 #${groupMasterId}）` : '错误证明（error_proof）');
+            const errProofTitle = isReworkChild ? `待修复数据（来自原单 #${groupMasterId}）` : (isChild ? `待修复数据（来自关联组主单 #${groupMasterId}）` : '待修复数据（error_proof）');
             const errProofEmpty = isChild
-                ? (errProofNoteHtml ? '（暂无附件）' : '主单暂无错误证明附件')
+                ? (errProofNoteHtml ? '（暂无附件）' : '主单暂无待修复数据附件')
                 : (errProofNoteHtml ? '（暂无附件）' : '无');
             const errProofSection = `<div class="detail-section"><h3>${errProofTitle}</h3>${errProofNoteHtml}${renderAtts(errProofs, errProofEmpty)}${errProofAddHtml}</div>`;
 
@@ -1248,7 +1276,7 @@
                 }).join('');
                 groupBlock = `<div class="detail-section"><h3>关联单（跨系统组）</h3>${memberRows}</div>`;
             }
-            //   子单 banner：完成通知/错误证明/业务方录入归主单，顶部提示 + 跳转。
+            //   子单 banner：完成通知/待修复数据/业务方录入归主单，顶部提示 + 跳转。
             // 返工子单 banner（§八 / M-1）：标返工身份 + 链根原单。象限④纯返工组（groupMembers≤1）下方不再显跨系统「关联组」banner，避免误读成多系统诉求。
             const bannerRwClass = Number(r.rework_seq) >= 3 ? 'rw-3' : (Number(r.rework_seq) === 2 ? 'rw-2' : 'rw-1');   // 详情徽章颜色梯度与列表/弹框三处同源（§六）
             const reworkBanner = isReworkChild
@@ -1258,10 +1286,10 @@
                    </div>`
                 : '';
             //   对抗审 LOW-4：返工子单【不显】此 banner——它的完成通知是自带·自身行发送（option A），banner「完成通知统一在主单」会与下方「通知业务方·二次修复」自发行自相矛盾、误导去原单找入口。
-            //   返工子单的组归属/错误证明来源已由 reworkBanner + 错误证明区「来自关联组主单 #N」表达。
+            //   返工子单的组归属/待修复数据来源已由 reworkBanner + 待修复数据区「来自关联组主单 #N」表达。
             const childBanner = (isChild && !isReworkChild && groupMembers.length > 1)
                 ? `<div class="detail-section" style="background:#fef3c7; border-radius:8px; padding:10px 12px; margin-bottom:14px;">
-                     <span style="font-size:13px; color:#92400e;">🔗 本单属关联组（主单 #${groupMasterId}）——业务方名单、完成通知、错误证明统一在主单管理；预计完成通知按本系统单独发送。</span>
+                     <span style="font-size:13px; color:#92400e;">🔗 本单属关联组（主单 #${groupMasterId}）——业务方名单、完成通知、待修复数据统一在主单管理；预计完成通知按本系统单独发送。</span>
                      <a href="javascript:void(0)" onclick="openDrawer(${groupMasterId})" style="margin-left:6px;">前往主单 →</a>
                    </div>`
                 : '';
@@ -1270,6 +1298,7 @@
                 ${reworkBanner}${childBanner}
                 ${actions ? `<div class="action-bar">${actions}</div>` : ''}
                 <div class="detail-section"><h3>基本信息</h3>${info}</div>
+                ${oaProofSection}
                 ${groupBlock}
                 ${buildReworkChainHtml(reworkChain, r.id, r.rework_parent_id)}
                 <div class="detail-section"><h3>通知状态</h3>${notify}</div>
@@ -1346,14 +1375,28 @@
             document.querySelector('input[name="assignMode"][value="A"]').checked = true;
             ['formSourceSystemOther', 'formLocationInfo', 'formCorrectionCount', 'formOaNumber', 'formProcessType', 'formReason', 'formErrorProofNote',
              'formSourceSystemOther2', 'formLocationInfo2', 'formCorrectionCount2', 'formExpectedDeadline'].forEach(id => document.getElementById(id).value = '');   // L5 含系统2 字段；L-2 codex 57 补 formExpectedDeadline 防连续建单残留
-            document.getElementById('formErrorProofFiles').value = '';   // L3b 清错误证明附件选择
+            document.getElementById('formErrorProofFiles').value = '';   // L3b 清待修复数据附件选择
+            document.getElementById('formOaProofFiles').value = '';   // B2 清 OA 截图附件选择
             document.getElementById('formCrossSystem').checked = false;   // L5 重置跨系统开关
             document.getElementById('formSourceSystem2').value = '';
             resetRequesterList();
-            toggleSourceOther(); toggleAssignMode(); toggleCrossSystem(); toggleSourceOther2(); toggleCorrectionCountByType();   // L5 跨系统/系统2 联动复位 + 修正条数按类型显隐
+            toggleSourceOther(); toggleAssignMode(); toggleCrossSystem(); toggleSourceOther2(); toggleCorrectionCountByType(); toggleOaMode();   // L5 跨系统/系统2 联动复位 + 修正条数按类型显隐 + B2 OA 号驱动业务方/截图区显隐复位（留空 OA 默认态）
             document.getElementById('createModal').classList.add('open');
         }
         function closeCreateModal() { document.getElementById('createModal').classList.remove('open'); }
+        // B2（建单字段体系优化 §2.1/§2.3/§2.4）：OA 流程号输入驱动业务方录入区 + OA 截图上传区显隐——
+        //   填了真实数字 → 展开两区（真OA模式：业务方自由填 + 截图强制）；留空 → 收起（自发现模式：后端静默以建单人为业务方，免截图）。
+        //   纯 UX 便利，后端仍是真闸门（静默覆盖业务方 / OA_PROOF_REQUIRED），隐藏区域的残留值不影响后端判定。
+        // codex 84 L-1：前端 OA 模式判定镜像后端 validateInputOaNumber 的 1-20 位纯数字口径（routes/corrections.js:1141），
+        //   非空但格式非法 → 不进真OA模式（不展开业务方/截图区误导用户），只亮红字提示；后端仍是真闸门（INVALID_OA_NUMBER）。
+        const OA_NUMBER_RE = /^[0-9]{1,20}$/;
+        function toggleOaMode() {
+            const raw = document.getElementById('formOaNumber').value.trim();
+            const hasOa = OA_NUMBER_RE.test(raw);
+            document.getElementById('oaFormatHint').style.display = (raw && !hasOa) ? 'block' : 'none';
+            document.getElementById('requesterSectionGroup').style.display = hasOa ? 'block' : 'none';
+            document.getElementById('oaProofGroup').style.display = hasOa ? 'block' : 'none';
+        }
         // ── L3a 多业务方录入（§7.1：第一行=主业务方，可增删）─────────────────────────
         function addRequesterRow(name, phone) {
             const list = document.getElementById('requesterList');
@@ -1426,11 +1469,25 @@
             if (!isBatch) { document.getElementById('formCorrectionCount').value = ''; document.getElementById('formCorrectionCount2').value = ''; }   // L-2 codex 60：切 single 清空隐藏修正条数字段，避免残留
         }
 
+        // B2：hasOa=true（真OA模式）时 requesters[]/system2{} 等嵌套结构走 multipart 无法原生带，
+        //   JSON.stringify 后作为普通字段传，后端 parseMaybeJsonField 复原（对称实现，见 corrections.js）。
+        function buildCorrectionFormData(fields) {
+            const fd = new FormData();
+            for (const [k, val] of Object.entries(fields)) {
+                if (val === undefined || val === null) continue;
+                fd.append(k, (typeof val === 'object') ? JSON.stringify(val) : String(val));
+            }
+            return fd;
+        }
         async function submitCorrection() {
             const v = id => document.getElementById(id).value.trim();
             const sourceSystem = document.getElementById('formSourceSystem').value;
             const correctionType = document.querySelector('input[name="corrType"]:checked').value;
             const assignMode = document.querySelector('input[name="assignMode"]:checked').value;
+            // codex 84 L-1：提交前先拦非法 OA 格式（镜像后端口径，免用户填完业务方+传完截图才收 400）
+            const oaRaw = (v('formOaNumber') || '').trim();
+            if (oaRaw && !OA_NUMBER_RE.test(oaRaw)) return showToast('OA 流程号须为 1-20 位纯数字（如 364265）；留空则视为信息技术部自发现', 'error');
+            const hasOa = !!oaRaw;   // B2：真OA模式 vs 留空自发现模式，驱动下方业务方校验/截图必传/传输格式（经上方正则拦截，非空即合法）
             // 前端基础校验（后端为准）
             if (!sourceSystem) return showToast('请选择所属系统', 'error');
             if (sourceSystem === '其他' && !v('formSourceSystemOther')) return showToast('选「其他」时须填写系统说明', 'error');
@@ -1438,11 +1495,16 @@
             // P2 必填：原因/背景 ≥5 字（与「完成说明」≥5 字口径对齐；后端为真闸门 REASON_REQUIRED）
             const reasonInput = (v('formReason') || '').trim();
             if (reasonInput.length < 5) return showToast('请填写原因/背景（至少 5 字）', 'error');
-            // codex 51 M-1：第一行=主业务方，须单独校验其姓名非空（否则空名第一行被 filter 丢弃后第二行上位成主，与 UI 语义不符）
-            const reqRows = document.querySelectorAll('#requesterList .requester-row');
-            if (!reqRows[0] || !reqRows[0].querySelector('.rq-name').value.trim()) return showToast('请填写主业务方姓名（第一行）', 'error');
-            const requesters = collectRequesters();
-            if (requesters.length === 0) return showToast('请至少填写一个业务方姓名（主业务方）', 'error');
+            // B2：留空 OA（自发现）时业务方录入区已隐藏、后端会静默以建单人覆盖，前端不再校验/收集该区——
+            //   避免"区已隐藏却仍报错要求填写"的矛盾体验；真 OA 模式行为不变（既有必填校验保留）。
+            let requesters = [];
+            if (hasOa) {
+                // codex 51 M-1：第一行=主业务方，须单独校验其姓名非空（否则空名第一行被 filter 丢弃后第二行上位成主，与 UI 语义不符）
+                const reqRows = document.querySelectorAll('#requesterList .requester-row');
+                if (!reqRows[0] || !reqRows[0].querySelector('.rq-name').value.trim()) return showToast('请填写主业务方姓名（第一行）', 'error');
+                requesters = collectRequesters();
+                if (requesters.length === 0) return showToast('请至少填写一个业务方姓名（主业务方）', 'error');
+            }
             // 修正条数分流（用户优化）：single 不传（后端强制 1）/ batch 必填 ≥2
             let correctionCountVal;
             if (correctionType === 'batch') {
@@ -1461,9 +1523,9 @@
                 oa_number: v('formOaNumber') || undefined,
                 process_type: v('formProcessType') || undefined,
                 reason: reasonInput,   // P2 必填 ≥5 字（已 trim 校验）
-                requester_dept: document.getElementById('formRequesterDept').value || undefined,
-                requesters: requesters,   // L3a 多业务方（第一行=主业务方；后端 normalize 兼容旧 requester_name 字段）
-                error_proof_note: v('formErrorProofNote') || undefined,   // L3b 错误证明说明（后端 ≤1000）
+                requester_dept: hasOa ? (document.getElementById('formRequesterDept').value || undefined) : undefined,   // B2：留空 OA 不传（后端也会强制忽略，前端顺手不传更干净）
+                requesters: hasOa ? requesters : undefined,   // L3a 多业务方（第一行=主业务方；后端 normalize 兼容旧 requester_name 字段）
+                error_proof_note: v('formErrorProofNote') || undefined,   // L3b 待修复数据说明（后端 ≤1000）
                 expected_deadline: (() => { const ed = v('formExpectedDeadline'); if (!ed) return undefined; return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(ed) ? ed.replace('T', ' ') + ':00' : ed.replace('T', ' '); })()   // 细优 E（M-4/K3-L2）：分钟精度→本地 YYYY-MM-DD HH:mm:ss；含秒只 replace T；空不传走后端默认（R-L3）
             };
             const crossSystem = document.getElementById('formCrossSystem').checked;
@@ -1506,12 +1568,24 @@
             //   避免"单已建、附件未传"半完成态（建单后的 >5 分支保留为防御兜底，正常流走不到）。
             const epFilesPre = document.getElementById('formErrorProofFiles').files;
             if (epFilesPre && epFilesPre.length > 5) {
-                return showToast('错误证明附件最多 5 个，请减少后再建单', 'error');
+                return showToast('待修复数据附件最多 5 个，请减少后再建单', 'error');
+            }
+            // B2（H-3）：真OA模式必须随建单同步带 ≥1 张 OA 截图；前端早拦，避免"填了真实 OA 号却忘传截图"到后端才 400。
+            const oaProofFiles = document.getElementById('formOaProofFiles').files;
+            if (hasOa && (!oaProofFiles || oaProofFiles.length === 0)) {
+                return showToast('填写了真实 OA 流程号，请上传 OA 流程截图', 'error');
+            }
+            if (hasOa && oaProofFiles.length > 5) {
+                return showToast('OA 流程截图最多 5 个，请减少后再建单', 'error');
             }
             const btn = document.getElementById('btnSubmitCreate');
             btn.disabled = true;
             try {
-                const res = await authFetch('/api/corrections', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                // B2：真OA模式改用 multipart 同步带 oa_proof_files（建单 endpoint 已挂 multer，对 JSON 请求
+                //   完全 no-op，故留空 OA 分支继续走原 JSON 路径，零行为变化）。
+                const res = hasOa
+                    ? await authFetch('/api/corrections', { method: 'POST', body: (() => { const fd = buildCorrectionFormData(payload); for (const f of oaProofFiles) fd.append('oa_proof_files', f); return fd; })() })
+                    : await authFetch('/api/corrections', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
                 const data = await res.json().catch(() => ({}));
                 if (!res.ok) { showToast(data.error || '建单失败', 'error'); return; }
                 showToast('修正单已创建', 'success');
@@ -1520,17 +1594,17 @@
                 if (epFiles && epFiles.length > 0) {
                     const correctionId = Number(data.id);
                     if (!correctionId) {
-                        showToast('建单成功，错误证明需在详情页补传', 'warning', 5000);   // codex 52 L-4：有文件但响应无有效 id（防契约漂移）
+                        showToast('建单成功，待修复数据需在详情页补传', 'warning', 5000);   // codex 52 L-4：有文件但响应无有效 id（防契约漂移）
                     } else if (epFiles.length > 5) {
-                        showToast('错误证明附件最多 5 个，已建单未上传，请在详情页补传不超过 5 个', 'warning', 5000);   // codex 52 M-2：前端早拦超限
+                        showToast('待修复数据附件最多 5 个，已建单未上传，请在详情页补传不超过 5 个', 'warning', 5000);   // codex 52 M-2：前端早拦超限
                     } else {
                         const fd = new FormData(); fd.append('attachment_type', 'error_proof');
                         for (const f of epFiles) fd.append('files', f);
                         try {
                             const upRes = await authFetch(`/api/corrections/${correctionId}/attachments`, { method: 'POST', body: fd });
-                            if (upRes.ok) showToast('错误证明附件已上传', 'success');   // codex 52 L-3：上传成功明确提示
-                            else { const ud = await upRes.json().catch(() => ({})); showToast('建单成功，错误证明上传失败（' + (ud.error || '可在详情页补传') + '）', 'warning', 5000); }
-                        } catch (e) { showToast('建单成功，错误证明上传失败，可在详情页补传', 'warning', 5000); }
+                            if (upRes.ok) showToast('待修复数据附件已上传', 'success');   // codex 52 L-3：上传成功明确提示
+                            else { const ud = await upRes.json().catch(() => ({})); showToast('建单成功，待修复数据上传失败（' + (ud.error || '可在详情页补传') + '）', 'warning', 5000); }
+                        } catch (e) { showToast('建单成功，待修复数据上传失败，可在详情页补传', 'warning', 5000); }
                     }
                 }
                 // I1（codex 26 L-1 + 27 RC-L1）：建单不再自动发钉钉（旧 relay_notify_sent 即时提示已移除）；提示去详情页手动发送
@@ -1838,22 +1912,22 @@
                 closeModal('attachModal'); await loadList(); openDrawer(id);
             } catch (e) { showToast('补充失败', 'error'); } finally { btn.disabled = false; }
         }
-        // L3b 详情页补传错误证明（§6.7：建单人/admin，早期态；attachment_type=error_proof，子单后端 409 引导主单）
+        // L3b 详情页补传待修复数据（§6.7：建单人/admin，早期态；attachment_type=error_proof，子单后端 409 引导主单）
         async function uploadErrorProof(id) {
             const input = document.getElementById('errProofFiles_' + id);
-            if (!input || !input.files.length) return showToast('请选择错误证明文件', 'error');
-            if (input.files.length > 5) return showToast('错误证明附件最多 5 个文件', 'error');   // codex 52 M-2：前端早拦超限
+            if (!input || !input.files.length) return showToast('请选择待修复数据文件', 'error');
+            if (input.files.length > 5) return showToast('待修复数据附件最多 5 个文件', 'error');   // codex 52 M-2：前端早拦超限
             const fd = new FormData(); fd.append('attachment_type', 'error_proof');
             for (const f of input.files) fd.append('files', f);
             try {
                 const res = await authFetch(`/api/corrections/${id}/attachments`, { method: 'POST', body: fd });
                 const data = await res.json().catch(() => ({}));
                 if (!res.ok) {
-                    if (data.code === 'ERROR_PROOF_ON_MASTER_ONLY' && data.master_id) showToast(`错误证明只能传到主单 #${data.master_id}`, 'warning', 4500);
+                    if (data.code === 'ERROR_PROOF_ON_MASTER_ONLY' && data.master_id) showToast(`待修复数据只能传到主单 #${data.master_id}`, 'warning', 4500);
                     else showToast(data.error || '上传失败', 'error');
                     return;
                 }
-                showToast('错误证明已上传', 'success');
+                showToast('待修复数据已上传', 'success');
                 await loadList(); openDrawer(id);   // codex 52 M-1：与 submitAttachments 范式一致（openDrawer 本就 re-fetch 详情，附件必刷新）
             } catch (e) { showToast('上传失败', 'error'); }
         }
