@@ -2254,6 +2254,9 @@ async function resolveReworkOriginalDeveloper(assignedTo) {
 //   ⑤产 history NULL→PENDING_ASSIGN ⑥继承被返工单 source_system/location_info/correction_count/correction_type 等（方案 §4.3 继承清单）。
 //   ⚠️ expected_deadline【不继承】被返工单旧值（归档单截止多已过去，照搬会令返工子单出生即逾期）——给 correctionDefaultDeadline() 新鲜近期截止（对齐建单缺省 deadline 范式；方案 §4.3 继承清单本就不含 deadline）。
 //   ⑦硬断言 group_id 非空且 ≠ 新子单 id（既有库无跨列 CHECK 的「≠自身」半边防线，对齐 readiness [2g]）。
+// ⚠️ 事务契约（codex L-2 审 M-1）：本函数含「INSERT 子单 → datafix 自洽补号 UPDATE → 初始 history」三段写，
+//   **必须在外层 BEGIN IMMEDIATE 事务内调用**（当前唯一调用点 = reopen-rework 端点，已包事务），任一段失败靠外层 catch ROLLBACK。
+//   ⛔ 禁止无事务复用——否则补号/history 失败会留下半成品子单（oa_number 不自洽或缺 history）。新增调用点须自证已包事务。
 async function insertReworkChildCorrection(parentRow, masterId, rework, operator) {
     if (masterId == null || !(Number(masterId) > 0)) {
         throw new Error(`返工子单不变量破坏：correction_group_id=${masterId} 非法（须非空正整数=被返工单所属组 master_id）`);
@@ -2274,6 +2277,19 @@ async function insertReworkChildCorrection(parentRow, masterId, rework, operator
     // 硬断言「≠自身」半边（SQLite 跨列 CHECK 无法表达，既有库完全靠此 + readiness [2g] 兜底）：
     if (Number(masterId) === Number(childId)) {
         throw new Error(`返工子单不变量破坏：correction_group_id(${masterId}) = 子单自身 id(${childId})，违反"合法子单 group_id≠自身"`);
+    }
+    // codex 84 L-2（2026-07-05 拍板自洽方向）：父单为 datafix 占位号时，子单不继承父单号，改补自身 datafix-{childId}。
+    //   datafix 号不变式 = 号恒等于自己 id；父子追溯靠 rework_parent_id/root_id/seq + 列表「原单号_序号」徽章，不靠 oa_number，故改自洽零丢线索。
+    //   父单为真实 OA 号则照常继承（返工单确属同一 OA 流程）。本函数在外层 reopen 的 BEGIN IMMEDIATE 事务内运行，UPDATE 同事务生效。
+    //   镜像 A 块建单补号（POST / 路由 INSERT 后 UPDATE datafix-newId）。WHERE 双条件 + changes===1 非防常规并发（同事务刚 INSERT 必命中），
+    //   而是对齐项目补号/「状态机字段 UPDATE 三件套」范式：遇意外触发器/副作用更新/未来逻辑漂移时强制失败而非静默通过（codex L-2 审 L-1）。
+    if (parentRow.oa_number && /^datafix-\d+$/.test(parentRow.oa_number)) {
+        const oaUpd = await dbRunAsync(
+            `UPDATE correction_requests SET oa_number = ? WHERE id = ? AND oa_number = ?`,
+            [`datafix-${childId}`, childId, parentRow.oa_number]);
+        if (!oaUpd || oaUpd.changes !== 1) {
+            throw new Error(`返工子单 datafix 自洽补号失败（#${childId}，changes=${oaUpd ? oaUpd.changes : 'null'}）`);
+        }
     }
     await dbRunAsync(
         `INSERT INTO correction_status_history (correction_request_id, from_status, to_status, reason, operator_id, operator_name)
