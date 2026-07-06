@@ -1286,7 +1286,7 @@ router.post('/', authenticateToken, requireCorrectionSchemaReady, requireAdmin, 
             return res.status(400).json({ error: '提供了 system2 但未开启跨系统建单（cross_system 须为 true）', code: 'CROSS_SYSTEM_FLAG_REQUIRED' });
         }
 
-        // 原因/背景（P2 必填，2026-06-26）：≥5 字（与「完成说明」≥5 字口径对齐）。
+        // 原因/背景（P2 必填，2026-06-26；**2026-07-06 取消 ≥5 字下限**，仅非空必填——用户反馈短原因如「笔误」被误拦）。
         //   ⚠️ 校验位置在所有"业务结构校验"（source_system/location_info/业务方/跨系统冲突/count/relay/assign）之后、INSERT 之前——
         //   故 reason 缺失不会抢在那些 400 之前误报（既有 e2e 大量"故意测某 400 但未传 reason"的用例靠此不被 REASON_REQUIRED 抢先拦）。
         //   跨系统子单不走本路径——子单 reason 继承主单（见 createLinkedChild common.reason），主单已强校验故子单天然满足。
@@ -1357,7 +1357,7 @@ router.post('/', authenticateToken, requireCorrectionSchemaReady, requireAdmin, 
         //   "缺 reason + 指派/对接人/条数非法"会先返回那些结构错误码，再补 reason 后才报 REASON_REQUIRED。
         //   这是为保留既有 e2e"故意测某 400 但不传 reason"用例的错误码顺序（前端表单已对 reason 做早提示，用户实际先被前端拦）。
         //   ⚠️ 后续若调整校验顺序，勿误判此处"靠后"是遗漏。
-        if (reasonText.length < 5) { correctionCleanupPending(req, null); return res.status(400).json({ error: '原因/背景必填，至少 5 字', code: 'REASON_REQUIRED' }); }
+        if (!reasonText) { correctionCleanupPending(req, null); return res.status(400).json({ error: '原因/背景必填', code: 'REASON_REQUIRED' }); }  // 2026-07-06 取消 ≥5 字下限（用户拍板），仅非空必填
 
         const createdBy = Number(req.user.id);
         const createdByName = req.user.display_name || req.user.username;

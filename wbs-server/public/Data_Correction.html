@@ -420,7 +420,7 @@
                         <input type="number" id="formCorrectionCount2" min="2" step="1" placeholder="批量必填，≥2">
                     </div>
                 </div>
-                <div class="form-group"><label>原因/背景 <span class="req">*</span></label><textarea id="formReason" rows="2" placeholder="必填，至少 5 字：错误产生原因或修正背景"></textarea></div>
+                <div class="form-group"><label>原因/背景 <span class="req">*</span></label><textarea id="formReason" rows="2" placeholder="必填：错误产生原因或修正背景"></textarea></div>
                 <!-- B2（建单字段体系优化，自发现自动业务方）：留空 OA 时后端静默以建单人作为业务方，本区隐藏；
                      填写真实 OA 流程号后展开，业务方部门/姓名按前端自由填，见 toggleOaMode() -->
                 <div id="requesterSectionGroup">
@@ -1492,9 +1492,9 @@
             if (!sourceSystem) return showToast('请选择所属系统', 'error');
             if (sourceSystem === '其他' && !v('formSourceSystemOther')) return showToast('选「其他」时须填写系统说明', 'error');
             if (!v('formLocationInfo')) return showToast('请填写修正方式', 'error');
-            // P2 必填：原因/背景 ≥5 字（与「完成说明」≥5 字口径对齐；后端为真闸门 REASON_REQUIRED）
+            // P2 必填：原因/背景仅非空必填（2026-07-06 取消 ≥5 字下限，用户拍板；后端为真闸门 REASON_REQUIRED）
             const reasonInput = (v('formReason') || '').trim();
-            if (reasonInput.length < 5) return showToast('请填写原因/背景（至少 5 字）', 'error');
+            if (!reasonInput) return showToast('请填写原因/背景', 'error');
             // B2：留空 OA（自发现）时业务方录入区已隐藏、后端会静默以建单人覆盖，前端不再校验/收集该区——
             //   避免"区已隐藏却仍报错要求填写"的矛盾体验；真 OA 模式行为不变（既有必填校验保留）。
             let requesters = [];
