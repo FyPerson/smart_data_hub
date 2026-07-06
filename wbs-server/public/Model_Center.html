@@ -111,6 +111,37 @@
         /* 模型列表行交互样式 */
         #modelListBody tr:hover { background: #f9fafb; }
         #modelListBody tr.selected-row { background: #ebf5ff !important; }
+
+        /* v1.105.x：模型列表可排序表头 + 排序图标 + 激活列高亮（移植自 Data_Collab.html v1.72.1 客户端排序范式） */
+        #modelListTable th.sortable {
+            cursor: pointer;
+            user-select: none;
+            transition: background 0.12s;
+        }
+        #modelListTable th.sortable:hover {
+            background: #eef2f7;
+        }
+        #modelListTable th.sortable.active {
+            background: #e0e7ff;
+            color: #1e40af;
+        }
+        #modelListTable th.sortable .sort-icon {
+            display: inline-block;
+            margin-left: 4px;
+            color: #94a3b8;
+            font-size: 12px;
+            font-weight: normal;
+            opacity: 0;
+            transition: opacity 0.15s;
+        }
+        #modelListTable th.sortable:hover .sort-icon {
+            opacity: 1;
+        }
+        #modelListTable th.sortable.active .sort-icon {
+            opacity: 1;
+            color: #1e40af;
+            font-weight: bold;
+        }
     </style>
 </head>
 
@@ -1190,7 +1221,7 @@ OUTER APPLY (
             </div>
 
             <div style="overflow-x:auto;">
-                <table
+                <table id="modelListTable"
                     style="width:100%; table-layout:fixed; border-collapse:collapse; background:white; border-radius:8px; overflow:hidden; box-shadow:0 2px 10px rgba(0,0,0,0.05);">
                     <colgroup>
                         <col style="width:5%;">   <!-- 分层 -->
@@ -1206,15 +1237,15 @@ OUTER APPLY (
                     </colgroup>
                     <thead>
                         <tr style="background:#f7fafc; color:#4a5568; text-align:left; font-size:0.9em;">
-                            <th style="padding:12px 10px; white-space:nowrap;">分层</th>
-                            <th style="padding:12px 10px; white-space:nowrap;">表名 (Table Name)</th>
-                            <th style="padding:12px 10px; white-space:nowrap;">中文描述</th>
-                            <th style="padding:12px 10px; white-space:nowrap;">技术负责人</th>
-                            <th style="padding:12px 10px; white-space:nowrap;">业务负责人</th>
-                            <th style="padding:12px 10px; white-space:nowrap;">周期</th>
-                            <th style="padding:12px 10px; white-space:nowrap;">状态</th>
-                            <th style="padding:12px 10px; white-space:nowrap;">迭代</th>
-                            <th style="padding:12px 10px; white-space:nowrap;">最后更新</th>
+                            <th class="sortable" data-sort-by="layer" style="padding:12px 10px; white-space:nowrap;">分层<span class="sort-icon">⇅</span></th>
+                            <th class="sortable" data-sort-by="table_name" style="padding:12px 10px; white-space:nowrap;">表名 (Table Name)<span class="sort-icon">⇅</span></th>
+                            <th class="sortable" data-sort-by="table_comment" style="padding:12px 10px; white-space:nowrap;">中文描述<span class="sort-icon">⇅</span></th>
+                            <th class="sortable" data-sort-by="tech_owner" style="padding:12px 10px; white-space:nowrap;">技术负责人<span class="sort-icon">⇅</span></th>
+                            <th class="sortable" data-sort-by="biz_owner" style="padding:12px 10px; white-space:nowrap;">业务负责人<span class="sort-icon">⇅</span></th>
+                            <th class="sortable" data-sort-by="update_cycle" style="padding:12px 10px; white-space:nowrap;">周期<span class="sort-icon">⇅</span></th>
+                            <th class="sortable" data-sort-by="status" style="padding:12px 10px; white-space:nowrap;">状态<span class="sort-icon">⇅</span></th>
+                            <th class="sortable" data-sort-by="archived_task_count" style="padding:12px 10px; white-space:nowrap;">迭代<span class="sort-icon">⇅</span></th>
+                            <th class="sortable" data-sort-by="updated_at" style="padding:12px 10px; white-space:nowrap;">最后更新<span class="sort-icon">⇅</span></th>
                             <th style="padding:12px 10px; white-space:nowrap;">操作</th>
                         </tr>
                     </thead>
@@ -1894,6 +1925,9 @@ OUTER APPLY (
 
             // 初始化层级相关的UI状态
             onLayerChange();
+
+            // v1.105.x：初始化模型列表可排序表头点击事件（表头为静态 DOM，无需等 loadModels 完成）
+            initListSorting();
 
             // 处理 URL 参数 - 支持从任务详情页跳转过来时自动搜索
             const urlParams = new URLSearchParams(window.location.search);
@@ -12290,6 +12324,135 @@ ${window.generatedScripts.incremental}`;
         let currentPage = 1;
         const pageSize = 20; // 每页显示条数
 
+        // ==================== v1.105.x 列表客户端排序（移植自 Data_Collab.html v1.72.1 范式）====================
+        // currentSortBy = null 表示未排序，保持 allModelsData 原始顺序（不改变现有默认行为）；第三次点同列清排序回默认
+        let currentSortBy = null;
+        let currentSortDir = 'desc';
+
+        // 字段类型分派（数字 / 日期 / 字符串 / 状态自定义优先级）
+        const SORT_FIELD_TYPES = {
+            layer: 'string',
+            table_name: 'string',
+            table_comment: 'string',
+            tech_owner: 'string',
+            biz_owner: 'string',
+            update_cycle: 'string',
+            status: 'statusOrder',
+            archived_task_count: 'number',
+            updated_at: 'date',
+        };
+
+        // 状态业务优先级（按模型生命周期先后排：规划中→开发中→待验收→已上线→已下线）
+        const STATUS_SORT_ORDER = {
+            CREATED: 0,
+            DEVELOPING: 1,
+            REVIEWING: 2,
+            ONLINE: 3,
+            OFFLINE: 4,
+        };
+
+        /**
+         * 按 field + dir 对 list 排序（不修改原数组）
+         * null/undefined/空字符串一律排到末尾（无论 asc/desc）
+         */
+        // codex 审 LOW 修：显式解析 SQLite datetime('now','localtime') 的 'YYYY-MM-DD HH:mm:ss' 格式——
+        //   避免 new Date('2026-07-06 10:00:00')（非 ISO 带空格串）在部分浏览器/WebView 返回 Invalid Date 致日期排序失效
+        function parseSqliteTs(s) {
+            const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/.exec(String(s));
+            if (m) return new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]).getTime();
+            const t = new Date(s).getTime();
+            return isNaN(t) ? 0 : t;
+        }
+
+        function sortByField(list, field, dir) {
+            const type = SORT_FIELD_TYPES[field] || 'string';
+            const mult = dir === 'asc' ? 1 : -1;
+
+            return list.slice().sort((a, b) => {
+                const va = a[field];
+                const vb = b[field];
+
+                // null/undefined/空字符串统一排末尾
+                const aEmpty = va === null || va === undefined || va === '';
+                const bEmpty = vb === null || vb === undefined || vb === '';
+                if (aEmpty && bEmpty) return 0;
+                if (aEmpty) return 1;
+                if (bEmpty) return -1;
+
+                let cmp = 0;
+                if (type === 'number') {
+                    cmp = Number(va) - Number(vb);
+                } else if (type === 'date') {
+                    cmp = parseSqliteTs(va) - parseSqliteTs(vb);
+                } else if (type === 'statusOrder') {
+                    // codex 审 MEDIUM 修：未知/非标准状态恒排末尾（不随 asc/desc 翻转）——
+                    //   原 fallback=99 + 末尾 cmp*mult 会让未知态在 desc 首击时翻到最前（潜在 bug；
+                    //   现 data_models.status 全为 5 个英文码、NULL 已被上方空值检查兜末尾，故不触发，防御性修）
+                    const ka = STATUS_SORT_ORDER[va];
+                    const kb = STATUS_SORT_ORDER[vb];
+                    if (ka === undefined && kb === undefined) return 0;
+                    if (ka === undefined) return 1;
+                    if (kb === undefined) return -1;
+                    cmp = ka - kb;
+                } else {
+                    // string：用中文 locale collator 支持中文/英文混排
+                    cmp = String(va).localeCompare(String(vb), 'zh-Hans-CN');
+                }
+                return cmp * mult;
+            });
+        }
+
+        /**
+         * 返回当前应渲染的模型列表：用户点过表头则按其选择排序，否则保持 allModelsData 原始顺序
+         */
+        function getSortedModels() {
+            return currentSortBy ? sortByField(allModelsData, currentSortBy, currentSortDir) : allModelsData;
+        }
+
+        /**
+         * 表头点击处理：第 1 次点 desc → 第 2 次 asc → 第 3 次清排序（回默认原始顺序）
+         * 排序切换后重置到第 1 页，避免停在超出新排序范围的旧页码
+         */
+        function initListSorting() {
+            const ths = document.querySelectorAll('#modelListTable th.sortable');
+            ths.forEach(th => {
+                th.addEventListener('click', () => {
+                    const field = th.dataset.sortBy;
+                    if (currentSortBy !== field) {
+                        // 新列首次点击：默认 desc
+                        currentSortBy = field;
+                        currentSortDir = 'desc';
+                    } else if (currentSortDir === 'desc') {
+                        currentSortDir = 'asc';
+                    } else {
+                        // 第 3 次：清排序，回默认原始顺序
+                        currentSortBy = null;
+                        currentSortDir = 'desc';
+                    }
+                    currentPage = 1;
+                    renderModelsPage();
+                });
+            });
+        }
+
+        /**
+         * 同步表头排序图标 + active class
+         */
+        function updateSortIcons() {
+            const ths = document.querySelectorAll('#modelListTable th.sortable');
+            ths.forEach(th => {
+                const field = th.dataset.sortBy;
+                const icon = th.querySelector('.sort-icon');
+                if (currentSortBy === field) {
+                    th.classList.add('active');
+                    if (icon) icon.textContent = currentSortDir === 'asc' ? '↑' : '↓';
+                } else {
+                    th.classList.remove('active');
+                    if (icon) icon.textContent = '⇅';
+                }
+            });
+        }
+
         async function loadModels() {
             const keyword = document.getElementById('searchKeyword').value;
             const res = await authFetch(`/api/models?keyword=${encodeURIComponent(keyword)}`);
@@ -12301,8 +12464,9 @@ ${window.generatedScripts.incremental}`;
 
         // 高亮并滚动到指定模型
         function highlightModel(modelId) {
-            // 找到模型在列表中的位置
-            const index = allModelsData.findIndex(m => m.id == modelId);
+            // 找到模型在列表中的位置（用当前排序后的顺序算页码，与 renderModelsPage 的渲染顺序保持一致）
+            const sortedList = getSortedModels();
+            const index = sortedList.findIndex(m => m.id == modelId);
             if (index === -1) return;
 
             // 计算该模型所在的页码
@@ -12328,7 +12492,7 @@ ${window.generatedScripts.incremental}`;
 
         // 渲染当前页的模型列表
         function renderModelsPage() {
-            const models = allModelsData;
+            const models = getSortedModels();
 
             // Check permission
             // 角色说明：viewer=只读, user=数据开发, publisher=发布者, admin=管理员
@@ -12560,6 +12724,9 @@ ${window.generatedScripts.incremental}`;
                 const colspan = isViewer ? 9 : 10;
                 tbody.innerHTML = `<tr><td colspan="${colspan}" style="text-align:center; padding:30px; color:#a0aec0;">暂无模型数据</td></tr>`;
             }
+
+            // 同步表头排序图标 + active 高亮
+            updateSortIcons();
 
             // 渲染分页控件
             renderPagination(totalCount, totalPages);
