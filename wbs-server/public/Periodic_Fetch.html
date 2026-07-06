@@ -1,0 +1,985 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>周期取数推送 - 智数协同平台</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="assets/css/style.css?v=v1.104.1_pf">
+    <style>
+        /* ============================================================
+           周期取数推送页 · 页面私有样式（全部 pf- 前缀，避免与 style.css 碰撞）
+           视觉语言对齐 docs/local/周期取数推送/周期取数推送_建单_demo_20260703.html（teal 卡片风）
+           ============================================================ */
+        .pf-wrap { max-width: 1180px; margin: 0 auto; }
+
+        /* 页头 */
+        .pf-page-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; flex-wrap: wrap; gap: 10px; }
+        .pf-page-head h1 { font-size: 18px; font-weight: 700; color: #0f172a; display: flex; align-items: center; gap: 8px; }
+        .pf-page-head .pf-count { font-size: 13px; font-weight: 500; color: #94a3b8; margin-left: 6px; }
+
+        /* 只读提示 banner */
+        .pf-info-banner { background: #f0fdfa; border: 1px solid #99f6e4; color: #0f766e; font-size: 12px; padding: 8px 13px; border-radius: 8px; margin-bottom: 14px; line-height: 1.6; }
+        .pf-warn-banner { background: #fffbeb; border: 1px solid #fde68a; color: #92400e; font-size: 12px; padding: 8px 13px; border-radius: 8px; margin-bottom: 14px; line-height: 1.6; }
+
+        /* 工具条 */
+        .pf-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
+        .pf-toolbar select { padding: 7px 12px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 13px; background: #fff; color: #374151; }
+        .pf-spacer { flex: 1; }
+
+        /* 按钮 */
+        .pf-btn { padding: 9px 18px; border-radius: 7px; font-size: 13px; cursor: pointer; border: none; font-weight: 600; font-family: inherit; transition: .15s; display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+        .pf-btn-primary { background: linear-gradient(135deg, #0f766e, #115e59); color: #fff; }
+        .pf-btn-primary:hover { filter: brightness(1.08); }
+        .pf-btn-sec { background: #f3f4f6; color: #374151; border: 1px solid #d1d5db; }
+        .pf-btn-sec:hover { background: #e5e7eb; }
+        .pf-btn-ghost { background: transparent; color: #0f766e; border: 1px solid #99f6e4; }
+        .pf-btn-ghost:hover { background: #f0fdfa; }
+        .pf-btn-danger { background: #fee2e2; color: #dc2626; border: 1px solid #fca5a5; }
+        .pf-btn-danger:hover { background: #fecaca; }
+        .pf-btn-sm { padding: 6px 13px; font-size: 12px; }
+        .pf-btn:disabled { opacity: .5; cursor: not-allowed; }
+        .pf-btn-row { display: flex; gap: 10px; margin-top: 18px; flex-wrap: wrap; }
+
+        /* 任务卡片 */
+        .pf-card { background: #fff; border: 1px solid #e2e8f0; border-radius: 12px; margin-bottom: 14px; box-shadow: 0 1px 3px rgba(0,0,0,.04); overflow: hidden; transition: box-shadow .15s, border-color .15s; }
+        .pf-card.open { box-shadow: 0 4px 16px rgba(15,118,110,.10); border-color: #99f6e4; }
+        .pf-card.new-card { border-color: #99f6e4; }
+
+        .pf-head { display: flex; align-items: center; gap: 16px; padding: 16px 20px; cursor: pointer; user-select: none; }
+        .pf-head:hover { background: #f8fafc; }
+        .pf-card.open .pf-head { background: #f0fdfa; border-bottom: 1px solid #ccfbf1; }
+        .pf-caret { color: #0f766e; font-size: 13px; transition: transform .2s; flex-shrink: 0; width: 14px; }
+        .pf-card.open .pf-caret { transform: rotate(90deg); }
+        .pf-main { flex: 1; min-width: 0; }
+        .pf-name { font-size: 15px; font-weight: 700; color: #0f172a; margin-bottom: 3px; }
+        .pf-meta { font-size: 12px; color: #94a3b8; display: flex; gap: 14px; flex-wrap: wrap; }
+        .pf-meta .pf-db { color: #0f766e; font-weight: 600; }
+        .pf-lastrun { text-align: right; flex-shrink: 0; font-size: 12px; color: #94a3b8; }
+        .pf-lastrun .pf-rt { color: #64748b; margin-top: 3px; }
+
+        .pf-badge { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; white-space: nowrap; }
+        .pf-badge.success { background: #d1fae5; color: #047857; }
+        .pf-badge.failed { background: #fee2e2; color: #b91c1c; }
+        .pf-badge.empty_result { background: #fef3c7; color: #b45309; }
+        .pf-badge.running, .pf-badge.queued { background: #dbeafe; color: #1d4ed8; }
+        .pf-badge.disabled { background: #f1f5f9; color: #94a3b8; }
+        .pf-badge.active { background: #d1fae5; color: #047857; }
+
+        .pf-body { display: none; padding: 4px 20px 22px; }
+        .pf-card.open .pf-body { display: block; }
+
+        /* 卡内小 tab */
+        .pf-subtabs { display: flex; gap: 6px; margin: 14px 0 18px; border-bottom: 1px solid #e2e8f0; }
+        .pf-subtab { padding: 9px 16px; font-size: 13px; cursor: pointer; color: #64748b; font-weight: 500; border-bottom: 2px solid transparent; margin-bottom: -1px; transition: .15s; }
+        .pf-subtab:hover { color: #0f766e; }
+        .pf-subtab.active { color: #0f766e; font-weight: 700; border-bottom-color: #0f766e; }
+        .pf-subpanel { display: none; }
+        .pf-subpanel.active { display: block; }
+
+        /* 表单字段 */
+        .pf-field { margin-bottom: 16px; }
+        .pf-field label { display: block; font-size: 13px; font-weight: 600; color: #334155; margin-bottom: 7px; }
+        .pf-field label .req { color: #dc2626; margin-left: 3px; }
+        .pf-field label .hint { font-weight: 400; color: #94a3b8; font-size: 12px; margin-left: 8px; }
+        .pf-field input[type=text], .pf-field select, .pf-field textarea { width: 100%; padding: 9px 12px; border: 1px solid #d1d5db; border-radius: 7px; font-size: 13px; color: #374151; font-family: inherit; box-sizing: border-box; }
+        .pf-field input:focus, .pf-field select:focus, .pf-field textarea:focus { outline: none; border-color: #0f766e; box-shadow: 0 0 0 3px rgba(15,118,110,.1); }
+        .pf-field textarea { min-height: 60px; font-family: inherit; resize: vertical; }
+        textarea.pf-sql { width: 100% !important; box-sizing: border-box; height: 280px !important; min-height: 200px !important; max-height: 60vh; overflow: auto !important; white-space: pre; font-family: "Consolas", "Courier New", monospace; font-size: 12.5px; line-height: 1.6; background: #fafafa; resize: vertical; }
+
+        .pf-placeholder-bar { background: #f0fdfa; border: 1px solid #99f6e4; border-radius: 8px; padding: 11px 14px; font-size: 12px; color: #0f766e; margin-bottom: 12px; line-height: 1.7; }
+        .pf-placeholder-bar b { color: #115e59; }
+        .pf-chip { display: inline-block; background: #0f766e; color: #fff; padding: 2px 9px; border-radius: 5px; font-family: monospace; font-size: 12px; margin: 0 2px; cursor: pointer; border: none; }
+        .pf-chip:hover { background: #115e59; }
+
+        .pf-note { font-size: 12px; color: #94a3b8; margin-top: 14px; line-height: 1.7; padding: 12px 15px; background: #f8fafc; border-radius: 8px; border-left: 3px solid #cbd5e1; }
+        .pf-note b { color: #64748b; }
+        .pf-note .kw { color: #0f766e; font-weight: 600; }
+
+        /* run 历史表 */
+        .pf-run-toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
+        .pf-table-wrap { overflow-x: auto; border-radius: 10px; border: 1px solid #e2e8f0; }
+        .pf-table { width: 100%; border-collapse: collapse; }
+        .pf-table th { background: #f8fafc; padding: 10px 13px; font-size: 12px; font-weight: 600; color: #64748b; text-align: left; border-bottom: 1px solid #e2e8f0; white-space: nowrap; }
+        .pf-table td { padding: 11px 13px; font-size: 13px; color: #374151; border-bottom: 1px solid #f1f5f9; vertical-align: middle; }
+        .pf-table tbody tr:last-child td { border-bottom: none; }
+        .pf-link { color: #0f766e; cursor: pointer; text-decoration: none; background: none; border: none; font-size: 13px; padding: 0; font-family: inherit; }
+        .pf-link:hover { text-decoration: underline; }
+        .pf-empty { text-align: center; padding: 30px; color: #94a3b8; font-size: 13px; }
+
+        /* 收件人核对 */
+        .pf-recip-input { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
+        .pf-recip-input input { flex: 1; min-width: 220px; padding: 9px 12px; border: 1px solid #d1d5db; border-radius: 7px; font-size: 13px; }
+        .pf-recip-list { border: 1px solid #e2e8f0; border-radius: 8px; overflow: hidden; margin-bottom: 14px; }
+        .pf-recip-row { display: flex; align-items: center; gap: 12px; padding: 12px 15px; border-bottom: 1px solid #f1f5f9; }
+        .pf-recip-row:last-child { border-bottom: none; }
+        .pf-recip-row input[type=checkbox] { width: 17px; height: 17px; accent-color: #0f766e; flex-shrink: 0; }
+        .pf-recip-phone { font-family: monospace; font-size: 13px; color: #334155; min-width: 110px; flex-shrink: 0; }
+        .pf-recip-info { flex: 1; font-size: 13px; }
+        .pf-recip-info .name { font-weight: 600; color: #0f172a; }
+        .pf-recip-info .dept { color: #94a3b8; font-size: 12px; margin-left: 6px; }
+        .pf-recip-status { font-size: 12px; padding: 3px 10px; border-radius: 12px; font-weight: 600; white-space: nowrap; }
+        .pf-recip-status.matched { background: #d1fae5; color: #047857; }
+        .pf-recip-status.blocked { background: #fee2e2; color: #b91c1c; }
+        .pf-recip-status.pushed_success { background: #d1fae5; color: #047857; }
+        .pf-recip-status.pushed_failed { background: #fee2e2; color: #b91c1c; }
+        .pf-recip-status.pushed_skipped { background: #f1f5f9; color: #94a3b8; }
+        .pf-recip-status.pushed_pending { background: #dbeafe; color: #1d4ed8; }
+        /* superseded=人为强制重发替代的技术终态，中性灰蓝，非红色"失败"（避免误读为真实发送失败） */
+        .pf-recip-status.pushed_superseded { background: #e2e8f0; color: #475569; }
+        .pf-drift { color: #b45309; font-size: 11px; margin-left: 6px; }
+
+        .pf-push-target { font-size: 12.5px; color: #475569; background: #f0fdfa; border: 1px solid #ccfbf1; border-radius: 8px; padding: 10px 14px; margin-bottom: 16px; }
+        .pf-push-target b { color: #0f766e; }
+        .pf-empty-confirm { display: flex; align-items: center; gap: 8px; background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px; padding: 10px 14px; margin-bottom: 14px; font-size: 13px; color: #92400e; }
+
+        /* 通用弹框（用于查看 run 完整脚本） */
+        .pf-modal-overlay { position: fixed; inset: 0; background: rgba(15,23,42,.5); display: none; align-items: center; justify-content: center; z-index: 1200; }
+        .pf-modal-overlay.open { display: flex; }
+        .pf-modal { background: #fff; border-radius: 12px; width: 720px; max-width: 94vw; max-height: 86vh; overflow-y: auto; box-shadow: 0 20px 50px rgba(0,0,0,.25); }
+        .pf-modal-head { padding: 16px 22px; border-bottom: 1px solid #eef2f7; font-size: 15px; font-weight: 700; display: flex; justify-content: space-between; align-items: center; }
+        .pf-modal-head .pf-close { cursor: pointer; font-size: 22px; color: #94a3b8; line-height: 1; background: none; border: none; }
+        .pf-modal-body { padding: 18px 22px; }
+        .pf-modal-body pre { white-space: pre-wrap; word-break: break-word; font-family: "Consolas", "Courier New", monospace; font-size: 12.5px; line-height: 1.6; background: #fafafa; border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px 14px; }
+        .pf-kv-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 18px; font-size: 12.5px; margin-bottom: 14px; }
+        .pf-kv-grid label { display: block; font-size: 11px; color: #9ca3af; margin-bottom: 2px; }
+        .pf-kv-grid .v { color: #334155; }
+    </style>
+</head>
+
+<body>
+
+    <!-- 顶部导航栏（复用全站 navbar 标记，本页仅 admin 可访问——checkAuth+isAdmin 未通过会被重定向） -->
+    <nav class="navbar fixed-header">
+        <div class="nav-left">
+            <div class="nav-logo">
+                <svg viewBox="0 0 24 24" fill="none" stroke="url(#logo-gradient-pf)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <defs>
+                        <linearGradient id="logo-gradient-pf" x1="0%" y1="0%" x2="100%" y2="100%">
+                            <stop offset="0%" style="stop-color:#0f766e"/>
+                            <stop offset="100%" style="stop-color:#115e59"/>
+                        </linearGradient>
+                    </defs>
+                    <circle cx="12" cy="12" r="10"/>
+                    <path d="M12 6v6l4 2"/>
+                </svg>
+            </div>
+            <div class="nav-title">智数协同平台</div>
+        </div>
+        <div class="nav-right">
+            <a href="/Task_Pool.html" class="nav-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M9 11l3 3L22 4"/>
+                    <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
+                </svg>
+                任务池
+            </a>
+            <a href="/Data_Collab.html" class="nav-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+                    <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+                </svg>
+                数据协作
+            </a>
+            <a href="/Issue_Tracker.html" class="nav-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="10"/>
+                    <line x1="12" y1="8" x2="12" y2="12"/>
+                    <line x1="12" y1="16" x2="12.01" y2="16"/>
+                </svg>
+                需求跟踪
+            </a>
+            <a href="/Data_Correction.html" class="nav-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+                    <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+                </svg>
+                数据修正
+            </a>
+            <a href="/Sys_Iteration.html" class="nav-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="3"/>
+                    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+                </svg>
+                系统迭代
+            </a>
+            <a href="/Periodic_Fetch.html" class="nav-item" style="color:#0f766e; font-weight:600;">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/>
+                    <line x1="16" y1="2" x2="16" y2="6"/>
+                    <line x1="8" y1="2" x2="8" y2="6"/>
+                    <line x1="3" y1="10" x2="21" y2="10"/>
+                </svg>
+                周期取数推送
+            </a>
+            <a href="/My_Workspace.html" class="nav-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+                    <circle cx="12" cy="7" r="4"/>
+                </svg>
+                我的工作台
+            </a>
+            <div class="nav-dropdown">
+                <button class="nav-dropdown-trigger">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <ellipse cx="12" cy="5" rx="9" ry="3"/>
+                        <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/>
+                        <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>
+                    </svg>
+                    数据中心
+                    <svg class="arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="6 9 12 15 18 9"/>
+                    </svg>
+                </button>
+                <div class="nav-dropdown-menu">
+                    <a href="/Dashboard.html">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+                            <line x1="3" y1="9" x2="21" y2="9"/>
+                            <line x1="9" y1="21" x2="9" y2="9"/>
+                        </svg>
+                        建设总览
+                    </a>
+                    <a href="/Asset_Center.html">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+                            <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
+                            <line x1="12" y1="22.08" x2="12" y2="12"/>
+                        </svg>
+                        资产中心
+                    </a>
+                    <a href="/Model_Center.html">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="3" y="3" width="7" height="7"/>
+                            <rect x="14" y="3" width="7" height="7"/>
+                            <rect x="14" y="14" width="7" height="7"/>
+                            <rect x="3" y="14" width="7" height="7"/>
+                        </svg>
+                        模型中心
+                    </a>
+                    <a href="/Metrics.html">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <line x1="18" y1="20" x2="18" y2="10"/>
+                            <line x1="12" y1="20" x2="12" y2="4"/>
+                            <line x1="6" y1="20" x2="6" y2="14"/>
+                        </svg>
+                        指标中心
+                    </a>
+                </div>
+            </div>
+            <a href="/Statistics.html" class="nav-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <line x1="12" y1="20" x2="12" y2="10"/>
+                    <line x1="18" y1="20" x2="18" y2="4"/>
+                    <line x1="6" y1="20" x2="6" y2="16"/>
+                </svg>
+                统计中心
+            </a>
+            <a href="/Doc_Viewer.html" target="_blank" class="nav-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+                    <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+                </svg>
+                文档中心
+            </a>
+            <div class="nav-divider"></div>
+            <div id="userProfileArea"></div>
+        </div>
+    </nav>
+
+    <!-- 主工作区 -->
+    <main class="workbench-container">
+        <div class="pf-wrap">
+            <div class="pf-page-head">
+                <h1>📅 周期取数推送 <span class="pf-count" id="pfCount"></span></h1>
+                <button class="pf-btn pf-btn-primary" onclick="pfToggleNewCard()">＋ 登记新任务</button>
+            </div>
+
+            <div class="pf-info-banner" id="pfReadyBanner" style="display:none;"></div>
+
+            <div class="pf-toolbar">
+                <select id="pfFStatus" onchange="pfLoadTasks()">
+                    <option value="">全部状态</option>
+                    <option value="active">仅启用</option>
+                    <option value="disabled">仅禁用</option>
+                </select>
+                <span class="pf-spacer"></span>
+            </div>
+
+            <!-- 登记新任务卡（默认隐藏） -->
+            <div class="pf-card new-card" id="pfNewCard" style="display:none;">
+                <div class="pf-head" style="background:#f0fdfa; border-bottom:1px solid #ccfbf1; cursor:default;">
+                    <span class="pf-caret" style="transform:rotate(90deg);">▶</span>
+                    <div class="pf-main">
+                        <div class="pf-name">＋ 登记新周期任务</div>
+                        <div class="pf-meta">把每月固定取数的脚本登记为模板，日期改成占位符</div>
+                    </div>
+                </div>
+                <div class="pf-body" style="display:block;">
+                    <div class="pf-field">
+                        <label>任务名称 <span class="req">*</span></label>
+                        <input type="text" id="pfNewName" placeholder="如：某某部门月度结算核实">
+                    </div>
+                    <div class="pf-field">
+                        <label>说明 <span class="hint">可选</span></label>
+                        <input type="text" id="pfNewDesc" placeholder="备注说明（可选）">
+                    </div>
+                    <div class="pf-field">
+                        <label>目标业务库（source 只读连接） <span class="req">*</span></label>
+                        <select id="pfNewConn"><option value="">加载中…</option></select>
+                    </div>
+                    <div class="pf-field">
+                        <label>模板脚本 <span class="req">*</span></label>
+                        <div class="pf-placeholder-bar">
+                            <b>把脚本里的日期改成占位符</b>，跑数时平台自动算"上月"起止填入 —— 点击插入：
+                            <button type="button" class="pf-chip" onclick="pfInsertPlaceholder('pfNewSql', &quot;'{{MONTH_START}}'&quot;)">'{{MONTH_START}}'</button>
+                            <button type="button" class="pf-chip" onclick="pfInsertPlaceholder('pfNewSql', &quot;'{{MONTH_END}}'&quot;)">'{{MONTH_END}}'</button>
+                            &nbsp;（上月首日含 / 本月首日不含，左闭右开；时区 Asia/Shanghai）
+                        </div>
+                        <textarea class="pf-sql" id="pfNewSql" placeholder="-- 在这里粘贴脚本，把日期条件改成 '{{MONTH_START}}' / '{{MONTH_END}}'"></textarea>
+                    </div>
+                    <div class="pf-note"><b>为什么保存时要校验 SQL</b>：模板虽是 admin 可信登记，但仍做"最小形态校验"防手滑（粘错脚本带了多语句/EXEC/增删改）——校验失败会在下方以报错提示，按提示改正后重新保存。</div>
+                    <div class="pf-btn-row">
+                        <button class="pf-btn pf-btn-primary" id="pfNewSaveBtn" onclick="pfCreateTask()">校验并保存</button>
+                        <button class="pf-btn pf-btn-sec" onclick="pfToggleNewCard()">取消</button>
+                    </div>
+                </div>
+            </div>
+
+            <div id="pfTaskList"></div>
+        </div>
+    </main>
+
+    <!-- 通用弹框：查看 run 完整脚本/快照 -->
+    <div class="pf-modal-overlay" id="pfModalOverlay" onclick="if(event.target===this) pfCloseModal()">
+        <div class="pf-modal">
+            <div class="pf-modal-head"><span id="pfMHead">run 详情</span><button class="pf-close" onclick="pfCloseModal()">&times;</button></div>
+            <div class="pf-modal-body" id="pfMBody"></div>
+        </div>
+    </div>
+
+    <script src="assets/js/app.js?v=v1.105.0_pf"></script>
+    <script>
+    /* ============================================================
+       周期取数推送前端 · 仅 admin 可用
+       后端契约见 routes/periodic-fetch/index.js（14 端点）
+       ============================================================ */
+
+    // ---- 全局状态 ----
+    let pfReady = false;
+    let pfTasks = [];
+    let pfSourceConns = [];
+    let pfOpenTaskId = null;              // 当前展开的任务卡 id（单卡展开，简化状态管理）
+    let pfDetailCache = {};                // taskId -> 任务详情（含完整 script_template）
+    let pfEditBuf = {};                    // taskId -> 编辑中的表单值缓存（避免重渲染丢输入）
+    let pfActiveSub = {};                  // taskId -> 'script' | 'runs' | 'push'
+    let pfRunsCache = {};                  // taskId -> runs 数组
+    let pfPushSelectedRun = {};            // taskId -> 选中的 run_id（推送必须显式选具体 run，不默认最新）
+    let pfPreviewItems = {};               // taskId -> preview 反查结果数组
+    let pfPushHistory = {};                // runId -> pushes 数组
+
+    // ---- 收件人/推送错误码 → 中文文案（覆盖 recipients.js reason 枚举 + confirm 阶段专属码）----
+    const PF_REASON_TEXT = {
+        INVALID_PHONE_FORMAT: '手机号格式不正确',
+        NOT_FOUND: '查不到对应钉钉用户（未登记/已离职）',
+        MULTIPLE_MATCHES: '该手机号匹配多个钉钉账号，需人工处理',
+        INACTIVE_USER: '该员工已离职',
+        UNKNOWN_ACTIVE_STATUS: '在职状态未知，出于安全默认禁发',
+        DETAIL_NOT_FOUND: '查不到用户详情（无法核对身份）',
+        RECIPIENT_MISMATCH: '收件人身份与核对时不一致，已拒绝发送',
+        DUPLICATE_USERID: '重复收件人（不同手机号对应同一人），已自动去重',
+        invalid_staff: '钉钉判定为无效员工，发送失败',
+        send_failed: '钉钉发送失败',
+        token_expired: '钉钉凭证已过期',
+        network: '钉钉网络异常',
+    };
+    function pfReasonText(code) {
+        if (!code) return '';
+        if (PF_REASON_TEXT[code]) return PF_REASON_TEXT[code];
+        if (String(code).indexOf('DETAIL_LOOKUP_FAILED') === 0) return '查询用户详情失败（钉钉接口异常）';
+        return code;
+    }
+
+    // ============================================================
+    // 通用 fetch 封装（镜像 Sys_Iteration.html 的 siApi/siApiErr）
+    // ============================================================
+    async function pfApi(path, { method = 'GET', body = null } = {}) {
+        const opt = { method };
+        if (body != null) { opt.headers = { 'Content-Type': 'application/json' }; opt.body = JSON.stringify(body); }
+        const res = await authFetch('/api' + path, opt);
+        if (!res) return { ok: false, aborted: true };
+        let data = null;
+        try { data = await res.json(); } catch (e) { data = null; }
+        if (!res.ok) return { ok: false, status: res.status, data };
+        return { ok: true, data };
+    }
+    function pfApiErr(r, fallback) {
+        if (r && r.aborted) return null;
+        const msg = (r && r.data && (r.data.error || r.data.code)) || fallback || '操作失败';
+        showToast(msg, 'error');
+        return null;
+    }
+    function esc(s) {
+        return String(s == null ? '' : s)
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+    function pfFmtDate(v) { return v ? String(v) : '—'; }
+
+    // ============================================================
+    // 启动
+    // ============================================================
+    document.addEventListener('DOMContentLoaded', async () => {
+        if (typeof checkAuth === 'function') {
+            const ok = await checkAuth();
+            if (!ok) return;
+        }
+        // 本页仅 admin 可用（后端 14 端点均 requireAdmin，前端同步拒绝非 admin 访问，纵深防御，
+        // 镜像 admin.html/admin.js 的 checkAuth 角色重定向范式）。
+        if (typeof isAdmin !== 'function' || !isAdmin()) {
+            alert('需要管理员权限');
+            window.location.href = '/Task_Pool.html';
+            return;
+        }
+        await pfLoadReadiness();
+        await pfLoadSourceConnections();
+        await pfLoadTasks();
+    });
+
+    async function pfLoadReadiness() {
+        const r = await pfApi('/periodic-tasks/_readiness');
+        const banner = document.getElementById('pfReadyBanner');
+        if (!r.ok) { banner.style.display = 'none'; return; }
+        pfReady = !!(r.data && r.data.ready);
+        if (!pfReady) {
+            banner.className = 'pf-warn-banner';
+            banner.style.display = 'block';
+            banner.textContent = '周期取数推送功能正在初始化或表结构未就绪：' + (r.data.error || '请稍后重试') + '。此期间登记/跑数/推送均不可用。';
+        } else {
+            banner.style.display = 'none';
+        }
+    }
+
+    async function pfLoadSourceConnections() {
+        // 复用数据协作模块既有只读列表端点（GET，requireAdmin），不在本模块重复造一个"列 source 连接"端点。
+        const r = await pfApi('/collab/db-connections/source');
+        if (!r.ok) { pfSourceConns = []; return; }
+        pfSourceConns = (r.data && r.data.items) || (Array.isArray(r.data) ? r.data : []) || [];
+        const opts = ['<option value="">请选择目标库</option>']
+            .concat(pfSourceConns.map(c => `<option value="${c.id}">${esc(c.name)}（${esc(c.type)}）</option>`));
+        const sel = document.getElementById('pfNewConn');
+        if (sel) sel.innerHTML = opts.join('');
+    }
+
+    // ============================================================
+    // 任务列表
+    // ============================================================
+    async function pfLoadTasks() {
+        const status = document.getElementById('pfFStatus').value;
+        const r = await pfApi('/periodic-tasks' + (status ? ('?status=' + encodeURIComponent(status)) : ''));
+        if (!r.ok) { pfApiErr(r, '任务列表加载失败'); return; }
+        pfTasks = (r.data && r.data.items) || [];
+        pfRenderTaskList();
+    }
+
+    function pfRenderTaskList() {
+        const activeCount = pfTasks.filter(t => t.status === 'active').length;
+        document.getElementById('pfCount').textContent = pfTasks.length ? `共 ${pfTasks.length} 个 · ${activeCount} 启用` : '';
+        const box = document.getElementById('pfTaskList');
+        if (!pfTasks.length) {
+            box.innerHTML = '<div class="pf-card"><div class="pf-empty">暂无周期任务，点右上角「登记新任务」开始</div></div>';
+            return;
+        }
+        box.innerHTML = pfTasks.map(pfRenderTaskCard).join('');
+    }
+
+    function pfRenderTaskCard(task) {
+        const isOpen = pfOpenTaskId === task.id;
+        const runs = pfRunsCache[task.id];
+        let lastRunHtml = '<span style="color:#94a3b8;">点击展开查看</span>';
+        if (Array.isArray(runs) && runs.length) {
+            const last = runs[0];
+            const label = last.status === 'success' ? '上次成功' : (last.status === 'empty_result' ? '上次空结果' : (last.status === 'failed' ? '上次失败' : '进行中'));
+            lastRunHtml = `<span class="pf-badge ${esc(last.status)}">${label}</span><div class="pf-rt">${esc(last.started_at || '')}${last.row_count != null ? ' · ' + last.row_count + ' 行' : ''}</div>`;
+        } else if (Array.isArray(runs)) {
+            lastRunHtml = '<span style="color:#94a3b8;">尚未跑过</span>';
+        }
+        const disabledTag = task.status === 'disabled' ? ' <span class="pf-badge disabled">已禁用</span>' : '';
+        const body = isOpen ? pfRenderCardBody(task) : '';
+        return `
+        <div class="pf-card ${isOpen ? 'open' : ''}" id="pfCard_${task.id}">
+            <div class="pf-head" onclick="pfToggleCard(${task.id})">
+                <span class="pf-caret">▶</span>
+                <div class="pf-main">
+                    <div class="pf-name">${esc(task.task_name)}${disabledTag}</div>
+                    <div class="pf-meta">
+                        <span class="pf-db">${esc(task.source_connection_name || ('#' + task.source_connection_id))}</span>
+                        <span>模板 v${task.template_version}</span>
+                        ${task.description ? `<span>${esc(task.description)}</span>` : ''}
+                    </div>
+                </div>
+                <div class="pf-lastrun">${lastRunHtml}</div>
+            </div>
+            <div class="pf-body">${body}</div>
+        </div>`;
+    }
+
+    async function pfToggleCard(taskId) {
+        if (pfOpenTaskId === taskId) {
+            pfOpenTaskId = null;
+            pfRenderTaskList();
+            return;
+        }
+        pfOpenTaskId = taskId;
+        if (!pfActiveSub[taskId]) pfActiveSub[taskId] = 'script';
+        pfRenderTaskList(); // 先渲染展开骨架（含"加载中"占位），再异步补详情，避免点击无反馈
+        await pfOpenTaskDetail(taskId);
+        await pfLoadRuns(taskId, /*silent*/ true);
+        pfRenderTaskList();
+    }
+
+    async function pfOpenTaskDetail(taskId) {
+        const r = await pfApi('/periodic-tasks/' + taskId);
+        if (!r.ok) { pfApiErr(r, '任务详情加载失败'); return; }
+        pfDetailCache[taskId] = r.data;
+        if (!pfEditBuf[taskId]) {
+            pfEditBuf[taskId] = {
+                task_name: r.data.task_name, description: r.data.description || '',
+                source_connection_id: r.data.source_connection_id, script_template: r.data.script_template,
+            };
+        }
+    }
+
+    function pfRenderCardBody(task) {
+        const detail = pfDetailCache[task.id];
+        if (!detail) return '<div class="pf-empty">加载中…</div>';
+        const sub = pfActiveSub[task.id] || 'script';
+        return `
+        <div class="pf-subtabs">
+            <div class="pf-subtab ${sub === 'script' ? 'active' : ''}" onclick="pfShowSub(${task.id},'script')">脚本模板</div>
+            <div class="pf-subtab ${sub === 'runs' ? 'active' : ''}" onclick="pfShowSub(${task.id},'runs')">跑数 · 历史</div>
+            <div class="pf-subtab ${sub === 'push' ? 'active' : ''}" onclick="pfShowSub(${task.id},'push')">推送</div>
+        </div>
+        <div class="pf-subpanel ${sub === 'script' ? 'active' : ''}">${pfRenderScriptPanel(task, detail)}</div>
+        <div class="pf-subpanel ${sub === 'runs' ? 'active' : ''}">${pfRenderRunsPanel(task)}</div>
+        <div class="pf-subpanel ${sub === 'push' ? 'active' : ''}">${pfRenderPushPanel(task)}</div>`;
+    }
+
+    function pfShowSub(taskId, sub) {
+        pfActiveSub[taskId] = sub;
+        // 首次切到"跑数·历史"或"推送"时按需懒加载 runs（避免展开脚本 tab 时就多打一次请求）
+        if ((sub === 'runs' || sub === 'push') && !pfRunsCache[taskId]) {
+            pfLoadRuns(taskId).then(() => pfRenderTaskList());
+            return;
+        }
+        pfRenderTaskList();
+    }
+
+    function pfInsertPlaceholder(taId, txt) {
+        const ta = document.getElementById(taId);
+        if (!ta) return;
+        const s = ta.selectionStart, e = ta.selectionEnd;
+        ta.value = ta.value.slice(0, s) + txt + ta.value.slice(e);
+        ta.focus(); ta.selectionStart = ta.selectionEnd = s + txt.length;
+    }
+
+    // ============================================================
+    // 子面板 1：脚本模板（编辑 + 保存 + 禁用）
+    // ============================================================
+    function pfRenderScriptPanel(task, detail) {
+        const buf = pfEditBuf[task.id] || {};
+        const connOpts = pfSourceConns.map(c => `<option value="${c.id}" ${Number(buf.source_connection_id) === c.id ? 'selected' : ''}>${esc(c.name)}（${esc(c.type)}）</option>`).join('');
+        const disabledNote = task.status === 'disabled'
+            ? '<div class="pf-note"><b>该任务已禁用</b>：不可跑数。修改后保存不会自动重新启用，如需继续使用请重新登记新任务。</div>' : '';
+        return `
+        <div class="pf-field">
+            <label>任务名称 <span class="req">*</span></label>
+            <input type="text" id="pfEditName_${task.id}" value="${esc(buf.task_name)}" oninput="pfEditBuf[${task.id}].task_name=this.value">
+        </div>
+        <div class="pf-field">
+            <label>说明</label>
+            <input type="text" id="pfEditDesc_${task.id}" value="${esc(buf.description)}" oninput="pfEditBuf[${task.id}].description=this.value">
+        </div>
+        <div class="pf-field">
+            <label>目标业务库</label>
+            <select id="pfEditConn_${task.id}" onchange="pfEditBuf[${task.id}].source_connection_id=Number(this.value)">${connOpts}</select>
+        </div>
+        <div class="pf-placeholder-bar">
+            日期已改占位符，跑数时自动填上月 —— 点击插入：
+            <button type="button" class="pf-chip" onclick="pfInsertPlaceholder('pfEditSql_${task.id}', &quot;'{{MONTH_START}}'&quot;)">'{{MONTH_START}}'</button>
+            <button type="button" class="pf-chip" onclick="pfInsertPlaceholder('pfEditSql_${task.id}', &quot;'{{MONTH_END}}'&quot;)">'{{MONTH_END}}'</button>
+        </div>
+        <textarea class="pf-sql" id="pfEditSql_${task.id}" oninput="pfEditBuf[${task.id}].script_template=this.value">${esc(buf.script_template)}</textarea>
+        ${disabledNote}
+        <div class="pf-btn-row">
+            <button class="pf-btn pf-btn-primary pf-btn-sm" onclick="pfSaveTask(${task.id})">保存修改</button>
+            ${task.status === 'active' ? `<button class="pf-btn pf-btn-sec pf-btn-sm" onclick="pfDisableTask(${task.id})">禁用任务</button>` : ''}
+        </div>
+        <div class="pf-note"><b>为什么保存时要校验 SQL</b>：模板虽是 admin 可信登记，但仍做"最小形态校验"防手滑（粘错脚本带了多语句/EXEC/增删改/WAITFOR/OPENROWSET）——只允许单条 SELECT 或 CTE+SELECT。<br><b>模板改动会 +1 版本号</b>：run 快照记录当时的模板版本，方便追溯某次结果对应哪版脚本。</div>`;
+    }
+
+    async function pfSaveTask(taskId) {
+        const buf = pfEditBuf[taskId];
+        if (!buf) return;
+        if (!buf.task_name || !buf.task_name.trim()) { showToast('任务名不能为空', 'error'); return; }
+        if (!buf.source_connection_id) { showToast('请选择目标业务库', 'error'); return; }
+        const r = await pfApi('/periodic-tasks/' + taskId, {
+            method: 'PUT',
+            body: { task_name: buf.task_name.trim(), description: buf.description || '', source_connection_id: buf.source_connection_id, script_template: buf.script_template },
+        });
+        if (!r.ok) { pfApiErr(r, '保存失败'); return; }
+        showToast(r.data.script_changed ? `保存成功（模板已改，版本升至 v${r.data.template_version}）` : '保存成功', 'success');
+        delete pfDetailCache[taskId];
+        await pfOpenTaskDetail(taskId);
+        await pfLoadTasks();
+    }
+
+    async function pfDisableTask(taskId) {
+        if (!confirm('确认禁用该周期任务？禁用后不可跑数，任务名会释放（可另建同名新任务）。')) return;
+        const r = await pfApi('/periodic-tasks/' + taskId + '/disable', { method: 'POST' });
+        if (!r.ok) { pfApiErr(r, '禁用失败'); return; }
+        showToast('已禁用', 'success');
+        await pfLoadTasks();
+    }
+
+    // ============================================================
+    // 子面板 2：跑数 · 历史
+    // ============================================================
+    async function pfLoadRuns(taskId, silent) {
+        const r = await pfApi('/periodic-tasks/' + taskId + '/runs');
+        if (!r.ok) { if (!silent) pfApiErr(r, 'run 历史加载失败'); pfRunsCache[taskId] = pfRunsCache[taskId] || []; return; }
+        pfRunsCache[taskId] = (r.data && r.data.items) || [];
+    }
+
+    function pfRenderRunsPanel(task) {
+        const runs = pfRunsCache[task.id];
+        if (!Array.isArray(runs)) return '<div class="pf-empty">加载中…</div>';
+        const disabledHint = task.status === 'disabled' ? '<span style="font-size:12px;color:#94a3b8;">任务已禁用，不可跑数</span>' : '';
+        const rows = runs.length ? runs.map(run => pfRenderRunRow(task, run)).join('') : '<tr><td colspan="6" class="pf-empty">暂无执行历史</td></tr>';
+        return `
+        <div class="pf-run-toolbar">
+            <button class="pf-btn pf-btn-primary pf-btn-sm" ${task.status !== 'active' ? 'disabled' : ''} onclick="pfRunTask(${task.id}, this)">▶ 跑本月（按 Asia/Shanghai 算上月区间）</button>
+            ${disabledHint}
+        </div>
+        <div class="pf-table-wrap">
+            <table class="pf-table">
+                <thead><tr><th>执行时间</th><th>日期区间</th><th>行数</th><th>耗时</th><th>状态</th><th></th></tr></thead>
+                <tbody>${rows}</tbody>
+            </table>
+        </div>
+        <div class="pf-note"><b>硬约束</b>：全量跑但设<span class="kw">最大 10 万行 + 60s 超时</span>，超限直接失败不隐式截断。<br><b>可推送前置</b>：仅<span class="kw">成功+文件存在+校验通过</span>可推送；<span class="pf-badge empty_result" style="font-size:11px;">空结果</span>需显式确认；<span class="pf-badge failed" style="font-size:11px;">失败</span>不可推送、不复用旧文件。</div>`;
+    }
+
+    function pfRenderRunRow(task, run) {
+        const statusLabel = { success: '成功', failed: '失败', empty_result: '空结果', running: '进行中', queued: '排队中' }[run.status] || run.status;
+        const canDownload = (run.status === 'success' || run.status === 'empty_result') && run.file_status === 'present';
+        const canPush = (run.status === 'success' || run.status === 'empty_result') && run.file_status === 'present';
+        const durationText = run.duration_ms != null ? (run.duration_ms / 1000).toFixed(1) + 's' : '—';
+        let actionCell = '';
+        if (canDownload) actionCell += `<button class="pf-link" onclick="pfDownloadRun(${run.id},'${esc(run.task_name_snapshot || task.task_name)}')">下载</button> · `;
+        actionCell += `<button class="pf-link" onclick="pfViewRunDetail(${run.id})">详情</button>`;
+        if (canPush) actionCell += ` · <button class="pf-link" onclick="pfGoPush(${task.id},${run.id})">去推送→</button>`;
+        if (run.file_status === 'present' && (run.status === 'success' || run.status === 'empty_result' || run.status === 'failed')) {
+            actionCell += ` · <button class="pf-link" onclick="pfCleanFile(${task.id},${run.id})" style="color:#dc2626;">清理文件</button>`;
+        }
+        const errNote = run.error_msg ? `<div style="font-size:11px;color:#b91c1c;margin-top:2px;">${esc(run.error_msg)}</div>` : '';
+        return `<tr>
+            <td>${esc(run.started_at)}</td>
+            <td>${esc(run.date_range_start)} ~ ${esc(run.date_range_end)}</td>
+            <td>${run.row_count != null ? run.row_count : '—'}</td>
+            <td>${durationText}</td>
+            <td><span class="pf-badge ${esc(run.status)}">${statusLabel}</span>${errNote}</td>
+            <td>${actionCell}</td>
+        </tr>`;
+    }
+
+    async function pfRunTask(taskId, btnEl) {
+        if (btnEl) btnEl.disabled = true;
+        showToast('已提交，跑数中（全量、上限10万行/60s超时）…', 'info');
+        try {
+            const r = await pfApi('/periodic-tasks/' + taskId + '/run', { method: 'POST' });
+            if (!r.ok) { pfApiErr(r, '跑数失败'); return; }
+            const d = r.data;
+            if (d.status === 'success') showToast(`跑数成功：${d.row_count} 行，耗时 ${(d.duration_ms / 1000).toFixed(1)}s`, 'success');
+            else if (d.status === 'empty_result') showToast('跑数完成：本月结果为 0 行（空结果）', 'warning');
+            else showToast('跑数失败：' + (d.error || '未知错误'), 'error');
+        } finally {
+            await pfLoadRuns(taskId);
+            await pfLoadTasks();
+            if (pfOpenTaskId === taskId) pfRenderTaskList();
+        }
+    }
+
+    async function pfDownloadRun(runId, taskName) {
+        const res = await authFetch('/api/periodic-tasks/runs/' + runId + '/download');
+        if (!res) return;
+        if (!res.ok) { showToast('下载失败', 'error'); return; }
+        let name = `periodic-run-${runId}.xlsx`;
+        const dispo = res.headers.get('Content-Disposition') || '';
+        let m = /filename\*=(?:UTF-8'')?([^;\r\n]+)/i.exec(dispo);
+        if (m) { try { name = decodeURIComponent(m[1].trim().replace(/^["']|["']$/g, '')); } catch (e) { /* keep default */ } }
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = name;
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1500);
+    }
+
+    async function pfViewRunDetail(runId) {
+        const r = await pfApi('/periodic-tasks/runs/' + runId);
+        if (!r.ok) { pfApiErr(r, 'run 详情加载失败'); return; }
+        const d = r.data;
+        document.getElementById('pfMHead').textContent = `run #${d.id} 详情（${esc(d.task_name_snapshot)}）`;
+        document.getElementById('pfMBody').innerHTML = `
+            <div class="pf-kv-grid">
+                <div><label>连接快照</label><div class="v">${esc(d.source_connection_snapshot)}</div></div>
+                <div><label>模板版本快照</label><div class="v">v${d.template_version_snapshot}</div></div>
+                <div><label>日期区间</label><div class="v">${esc(d.date_range_start)} ~ ${esc(d.date_range_end)}</div></div>
+                <div><label>状态</label><div class="v">${esc(d.status)}</div></div>
+                <div><label>行数</label><div class="v">${d.row_count != null ? d.row_count : '—'}</div></div>
+                <div><label>耗时</label><div class="v">${d.duration_ms != null ? (d.duration_ms / 1000).toFixed(1) + 's' : '—'}</div></div>
+            </div>
+            <label style="display:block;font-size:12px;color:#9ca3af;margin-bottom:6px;">当次渲染后完整 SQL（占位符已替换，不可变审计快照）</label>
+            <pre>${esc(d.rendered_script)}</pre>
+            ${d.error_msg ? `<div class="pf-note" style="border-left-color:#dc2626;"><b>失败原因</b>：${esc(d.error_msg)}</div>` : ''}
+        `;
+        document.getElementById('pfModalOverlay').classList.add('open');
+    }
+    function pfCloseModal() { document.getElementById('pfModalOverlay').classList.remove('open'); }
+
+    async function pfCleanFile(taskId, runId) {
+        if (!confirm('确认清理该 run 的结果文件？清理后如需重发，需重新跑本月。')) return;
+        const r = await pfApi('/periodic-tasks/runs/' + runId + '/file/clean', { method: 'POST' });
+        if (!r.ok) { pfApiErr(r, '清理失败'); return; }
+        showToast('文件已清理', 'success');
+        await pfLoadRuns(taskId);
+        pfRenderTaskList();
+    }
+
+    // ============================================================
+    // 子面板 3：推送
+    // ============================================================
+    function pfGoPush(taskId, runId) {
+        pfPushSelectedRun[taskId] = runId;
+        pfActiveSub[taskId] = 'push';
+        pfPreviewItems[taskId] = null; // 切换 run 后清空上次核对结果，避免误用旧核对
+        pfRenderTaskList();
+    }
+
+    function pfRenderPushPanel(task) {
+        const runs = pfRunsCache[task.id];
+        if (!Array.isArray(runs)) return '<div class="pf-empty">加载中…</div>';
+        const pushableRuns = runs.filter(r => (r.status === 'success' || r.status === 'empty_result') && r.file_status === 'present');
+        if (!pushableRuns.length) {
+            return '<div class="pf-empty">暂无可推送的 run（需成功或空结果 且 文件存在）。请先在"跑数 · 历史"里跑一次。</div>';
+        }
+        let selectedRunId = pfPushSelectedRun[task.id];
+        if (selectedRunId && !pushableRuns.some(r => r.id === selectedRunId)) selectedRunId = null;
+        const runOpts = ['<option value="">请选择一个具体的 run（不默认最新）</option>']
+            .concat(pushableRuns.map(r => `<option value="${r.id}" ${r.id === selectedRunId ? 'selected' : ''}>${esc(r.started_at)} · ${esc(r.date_range_start)}~${esc(r.date_range_end)} · ${r.row_count}行 · ${r.status === 'empty_result' ? '空结果' : '成功'}</option>`));
+        const pickerHtml = `<div class="pf-field"><label>选择要推送的 run <span class="req">*</span> <span class="hint">推送必须绑定某个具体成功/空结果的 run，不默认推最新</span></label>
+            <select id="pfPushRunSel_${task.id}" onchange="pfSelectPushRun(${task.id}, this.value)">${runOpts.join('')}</select></div>`;
+
+        if (!selectedRunId) return pickerHtml;
+
+        const run = pushableRuns.find(r => r.id === selectedRunId);
+        const isEmpty = run.status === 'empty_result';
+        const emptyConfirmChecked = !!(pfEditBuf['_confirmEmpty_' + task.id]);
+        const emptyBlockHtml = isEmpty ? `
+            <div class="pf-empty-confirm">
+                <input type="checkbox" id="pfConfirmEmpty_${task.id}" ${emptyConfirmChecked ? 'checked' : ''} onchange="pfEditBuf['_confirmEmpty_' + ${task.id}] = this.checked; pfRenderTaskList();">
+                <label for="pfConfirmEmpty_${task.id}" style="margin:0;">本次结果为 0 行（空结果），确认仍要推送空结果给需求人</label>
+            </div>` : '';
+        const canProceed = !isEmpty || emptyConfirmChecked;
+
+        const items = pfPreviewItems[task.id];
+        let recipHtml = '';
+        if (Array.isArray(items) && items.length) {
+            recipHtml = `<label style="display:block;font-size:13px;font-weight:600;color:#334155;margin:14px 0 9px;">反查结果 —— 勾选确认要发的收件人：</label>
+            <div class="pf-recip-list">${items.map((it, idx) => pfRenderRecipRow(task.id, it, idx)).join('')}</div>
+            <div class="pf-btn-row">
+                <button class="pf-btn pf-btn-primary pf-btn-sm" onclick="pfConfirmPush(${task.id})">✓ 确认发送给已勾选的收件人</button>
+                <button class="pf-btn pf-btn-sec pf-btn-sm" onclick="pfPreviewItems[${task.id}]=null; pfRenderTaskList();">重新填号</button>
+            </div>`;
+        }
+
+        const pushHistory = pfPushHistory[selectedRunId];
+        const historyHtml = Array.isArray(pushHistory) && pushHistory.length ? `
+            <div style="margin-top:18px;">
+                <label style="display:block;font-size:12px;color:#9ca3af;margin-bottom:6px;">该 run 历史推送记录</label>
+                <div class="pf-table-wrap"><table class="pf-table">
+                    <thead><tr><th>手机号</th><th>姓名</th><th>状态</th><th>时间</th></tr></thead>
+                    <tbody>${pushHistory.map(p => pfRenderPushHistoryRow(p)).join('')}</tbody>
+                </table></div>
+            </div>` : '';
+
+        return `
+        ${pickerHtml}
+        <div class="pf-push-target">推送对象：<b>${esc(run.started_at)}</b> 那次${isEmpty ? '空结果' : '成功'} run（${run.row_count} 行）的结果 xlsx。<span style="color:#94a3b8;">（推送必须绑定某个具体 run，不默认推最新）</span></div>
+        ${emptyBlockHtml}
+        <div class="pf-field">
+            <label>填需求人手机号 <span class="hint">可填多个，逗号或空格分隔，批量发，单批最多 20 个</span></label>
+            <div class="pf-recip-input">
+                <input type="text" id="pfPhoneInput_${task.id}" placeholder="如 138xxxx0001，多个用逗号分隔" ${!canProceed ? 'disabled' : ''}>
+                <button class="pf-btn pf-btn-primary pf-btn-sm" ${!canProceed ? 'disabled' : ''} onclick="pfPreviewRecipients(${task.id})">反查核对</button>
+            </div>
+        </div>
+        ${recipHtml}
+        ${historyHtml}
+        <div class="pf-note"><b>发前核对</b>：发的是含<span class="kw">身份证号、银行账号</span>的敏感数据，手机号反查后<span class="kw">显示姓名+钉钉ID后四位</span>让你核对是谁，确认才发——防发错人。<br><b>批量失败</b>：查不到的号<span class="kw">跳过继续发其余</span>，最后报告哪几个跳过，不整批中止。</div>`;
+    }
+
+    function pfSelectPushRun(taskId, runIdStr) {
+        pfPushSelectedRun[taskId] = runIdStr ? Number(runIdStr) : null;
+        pfPreviewItems[taskId] = null;
+        pfEditBuf['_confirmEmpty_' + taskId] = false;
+        if (pfPushSelectedRun[taskId]) pfLoadPushHistory(pfPushSelectedRun[taskId]).then(() => pfRenderTaskList());
+        else pfRenderTaskList();
+    }
+
+    function pfRenderRecipRow(taskId, item, idx) {
+        if (item.ok) {
+            return `<div class="pf-recip-row">
+                <input type="checkbox" id="pfRecipChk_${taskId}_${idx}" checked>
+                <span class="pf-recip-phone">${esc(item.phone)}</span>
+                <span class="pf-recip-info"><span class="name">${esc(item.name)}</span> · 钉钉ID …${esc(item.last4)}</span>
+                <span class="pf-recip-status matched">✓ 匹配在职</span>
+            </div>`;
+        }
+        return `<div class="pf-recip-row" style="background:#fef2f2;">
+            <input type="checkbox" disabled>
+            <span class="pf-recip-phone">${esc(item.phone)}</span>
+            <span class="pf-recip-info" style="color:#b91c1c;">${esc(pfReasonText(item.reason))}</span>
+            <span class="pf-recip-status blocked">✕ 禁发</span>
+        </div>`;
+    }
+
+    async function pfPreviewRecipients(taskId) {
+        const input = document.getElementById('pfPhoneInput_' + taskId);
+        const raw = (input && input.value || '').split(/[,，\s]+/).map(s => s.trim()).filter(Boolean);
+        if (!raw.length) { showToast('请填写至少一个手机号', 'error'); return; }
+        if (raw.length > 20) { showToast('单批最多 20 个手机号', 'error'); return; }
+        const runId = pfPushSelectedRun[taskId];
+        if (!runId) { showToast('请先选择要推送的 run', 'error'); return; }
+        const confirmEmpty = !!pfEditBuf['_confirmEmpty_' + taskId];
+        const r = await pfApi('/periodic-tasks/runs/' + runId + '/push/preview', { method: 'POST', body: { phones: raw, confirm_empty: confirmEmpty } });
+        if (!r.ok) {
+            if (r.data && r.data.code === 'EMPTY_RESULT_CONFIRM_REQUIRED') { showToast('本次结果为 0 行，请先勾选上方"确认仍要推送空结果"', 'error'); return; }
+            pfApiErr(r, '收件人反查失败'); return;
+        }
+        pfPreviewItems[taskId] = r.data.items || [];
+        if (r.data.deduped && r.data.deduped.by_phone) showToast(`已自动去重 ${r.data.deduped.by_phone} 个重复手机号`, 'info');
+        pfRenderTaskList();
+    }
+
+    async function pfConfirmPush(taskId, force) {
+        const runId = pfPushSelectedRun[taskId];
+        const items = pfPreviewItems[taskId] || [];
+        if (!runId || !items.length) return;
+        const recipients = [];
+        items.forEach((it, idx) => {
+            if (!it.ok) return;
+            const chk = document.getElementById(`pfRecipChk_${taskId}_${idx}`);
+            if (chk && chk.checked) recipients.push({ phone: it.phone, userid: it.userid, name: it.name, last4: it.last4 });
+        });
+        if (!recipients.length) { showToast('请至少勾选一个收件人', 'error'); return; }
+        const confirmEmpty = !!pfEditBuf['_confirmEmpty_' + taskId];
+        const r = await pfApi('/periodic-tasks/runs/' + runId + '/push/confirm', {
+            method: 'POST', body: { recipients, confirm_empty: confirmEmpty, force: !!force },
+        });
+        if (!r.ok) {
+            const code = r.data && r.data.code;
+            if ((code === 'ALREADY_PUSHED' || code === 'NEEDS_RECONCILE') && !force) {
+                const msg = (r.data.error || '') + '\n\n是否强制重发？（会新增一条推送记录，此前的留痕保留供对账）';
+                if (confirm(msg)) { await pfConfirmPush(taskId, true); return; }
+                return;
+            }
+            pfApiErr(r, '推送失败'); return;
+        }
+        const s = r.data.summary || {};
+        let msg = `推送完成：成功 ${s.success || 0} · 失败 ${s.failed || 0} · 跳过 ${s.skipped || 0}`;
+        showToast(msg, (s.failed || s.skipped) ? 'warning' : 'success', 5000);
+        if (r.data.warning) showToast(r.data.warning, 'warning', 9000);
+        // L-1（⑤c）：后端已按 userid 硬 gate 放行、但收件人 name/last4 较 preview 有漂移的项，
+        //   前端单独 warning 透出（后端 results[].snapshot_warning 非空即漂移），让 admin 知晓身份变动。
+        const drifted = (r.data.results || []).filter(x => x.snapshot_warning);
+        if (drifted.length) {
+            // ⑤d L-1 兜底：phone 缺失的项过滤掉，避免拼出 undefined 文案；全缺则只报人数不列号。
+            const driftPhones = drifted.map(x => x.phone).filter(Boolean);
+            const tail = driftPhones.length ? ('：' + driftPhones.join('、')) : '';
+            showToast('⚠️ 共 ' + drifted.length + ' 人身份较核对时有漂移（姓名/ID后四位变化，已按钉钉ID放行）' + tail, 'warning', 8000);
+        }
+        pfPreviewItems[taskId] = null;
+        await pfLoadPushHistory(runId);
+        pfRenderTaskList();
+    }
+
+    async function pfLoadPushHistory(runId) {
+        const r = await pfApi('/periodic-tasks/runs/' + runId + '/pushes');
+        if (!r.ok) return;
+        pfPushHistory[runId] = (r.data && r.data.items) || [];
+    }
+
+    // 推送留痕状态 → 中文标签 + CSS 修饰键。M-2（⑤d）：push_status='failed' 且 push_error 含
+    //   SUPERSEDED_BY_FORCE 的行不是"钉钉发送失败"，而是"被强制重发替代退出阻断的技术终态"——
+    //   单独渲染成中性"已被强制重发替代"标签（灰蓝色，非红），避免 admin 误读为真实发送失败。
+    function pfPushStatusMeta(p) {
+        const isSuperseded = p && typeof p.push_error === 'string' && p.push_error.indexOf('SUPERSEDED_BY_FORCE') >= 0;
+        if (isSuperseded) return { key: 'superseded', label: '已被强制重发替代' };
+        const LABELS = { success: '成功', failed: '失败', skipped: '跳过', pending: '处理中' };
+        return { key: p.push_status, label: LABELS[p.push_status] || p.push_status };
+    }
+    function pfRenderPushHistoryRow(p) {
+        const meta = pfPushStatusMeta(p);
+        // L-2（⑤e，codex 09 收口）：① superseded 行隐藏内部哨兵串（SUPERSEDED_BY_FORCE），改固定中文说明；
+        //   ② 真实 failed 的错误详情恢复红色告警感知（⑤d 曾统一改灰导致失败感知下降）；③ 其余状态中性灰。
+        let errNote = '';
+        if (meta.key === 'superseded') {
+            errNote = `<div style="font-size:11px;color:#94a3b8;">该记录已被后续强制重发替代（原投递状态未落库，留痕备查）</div>`;
+        } else if (p.push_error) {
+            const errColor = meta.key === 'failed' ? '#b91c1c' : '#94a3b8';
+            errNote = `<div style="font-size:11px;color:${errColor};">${esc(p.push_error)}</div>`;
+        }
+        return `<tr><td>${esc(p.phone_snapshot)}</td><td>${esc(p.recipient_name_snapshot || '—')}</td>`
+            + `<td><span class="pf-recip-status pushed_${esc(meta.key)}">${esc(meta.label)}</span>${errNote}</td>`
+            + `<td>${esc(p.pushed_at)}</td></tr>`;
+    }
+
+    // ============================================================
+    // 登记新任务
+    // ============================================================
+    function pfToggleNewCard() {
+        const c = document.getElementById('pfNewCard');
+        const show = c.style.display === 'none';
+        c.style.display = show ? 'block' : 'none';
+        if (show) c.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
+    async function pfCreateTask() {
+        const name = (document.getElementById('pfNewName').value || '').trim();
+        const desc = (document.getElementById('pfNewDesc').value || '').trim();
+        const connId = Number(document.getElementById('pfNewConn').value || 0);
+        const sql = document.getElementById('pfNewSql').value || '';
+        if (!name) { showToast('任务名不能为空', 'error'); return; }
+        if (!connId) { showToast('请选择目标业务库', 'error'); return; }
+        if (!sql.trim()) { showToast('模板脚本不能为空', 'error'); return; }
+        const btn = document.getElementById('pfNewSaveBtn');
+        btn.disabled = true;
+        try {
+            const r = await pfApi('/periodic-tasks', { method: 'POST', body: { task_name: name, description: desc, source_connection_id: connId, script_template: sql } });
+            if (!r.ok) { pfApiErr(r, '保存失败'); return; }
+            showToast('登记成功', 'success');
+            document.getElementById('pfNewName').value = '';
+            document.getElementById('pfNewDesc').value = '';
+            document.getElementById('pfNewSql').value = '';
+            pfToggleNewCard();
+            await pfLoadTasks();
+        } finally {
+            btn.disabled = false;
+        }
+    }
+    </script>
+</body>
+</html>

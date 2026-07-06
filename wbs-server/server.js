@@ -687,6 +687,9 @@ const db = new sqlite3.Database(DB_FILE, (err) => {
         // 系统迭代模块 C1：紧跟 correction 之后建 sys 四表（同位置同时序，§1.4）。
         //   readiness 未就绪期间 sys-* 端点 503（首启短暂窗口）。sysIterModule 在文件后部实例化。
         sysIterModule.initSchema();
+        // 周期取数推送模块 集成点1：紧跟 sys-iteration 之后建 periodic 三表（同位置同时序）。
+        //   readiness 未就绪期间 periodic-* 端点 503（首启短暂窗口）。periodicFetchModule 在文件后部实例化。
+        periodicFetchModule.initSchema();
     }
 });
 
@@ -18526,6 +18529,27 @@ const sysIterModule = require('./routes/sys-iteration')({
   readSystemConfig, COLLAB_CHAT_ADMIN_ID, callDingtalkWithTokenRetry, maskPhone,
 });
 app.use('/api', sysIterModule.router);
+
+// ============================================================
+// 周期取数推送模块（手动触发·占位符日期·钉钉推送，仅 admin 独立新模块）
+//   业务 SSOT = docs/local/周期取数推送/周期取数推送模块_方案_20260703_v1.0.md
+//   任务书 SSOT = docs/local/周期取数推送/周期取数推送_Sonnet任务书_20260705_v1.0.md
+//   集成点1 deps 最小档（logger/db/dbXxxAsync/authenticateToken/requireAdmin）；
+//   集成点2（③跑数落盘/④钉钉推送）扩 getMssqlPool/getMysqlPool（source 全量执行）+ readSystemConfig
+//   （钉钉凭证）+ maskPhone（日志脱敏）+ decryptPassword（db_connections.password 解密，任务书附录 A.1
+//   未列出但功能必需——对齐 collab-submit 现成范式 server.js:14412-14415，自审已标注此为清单外补充项）。
+//   ⚠️ 结果 xlsx 落盘目录 periodic-results/ 由 periodic-fetch 模块自管（不注入 UPLOAD_DIR/
+//   ALLOWED_FILE_DIRS——避免把含身份证/银行账号的敏感结果目录混进存量公开目录白名单，见方案 §4.4）。
+//   钉钉发文件/手机号反查详情走模块内直接 require('../../utils/dingtalk-notify')（stateless，同 sys-iteration
+//   对 dingtalkNotify 的处理方式，不注入）。
+//   initSchema() 调用见 db 连接回调（sys-iteration initSchema 之后，同位置同时序）；此处仅实例化 + 挂载。
+//   ⚠️ 挂载到 /api：router 内只注册 /periodic-tasks* 路径，未匹配自动 next() fall-through，不拦截其他 /api/*。
+// ============================================================
+const periodicFetchModule = require('./routes/periodic-fetch')({
+  logger, db, dbRunAsync, dbGetAsync, dbAllAsync, authenticateToken, requireAdmin,
+  getMssqlPool, getMysqlPool, readSystemConfig, maskPhone, decryptPassword,
+});
+app.use('/api', periodicFetchModule.router);
 
 // ============================================================
 // MCP Demo - 数仓对话查询

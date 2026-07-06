@@ -536,6 +536,10 @@ function updateUserUI() {
         let menuItems = '';
         if (currentUser.role === 'admin') {
             menuItems += `<a href="/admin.html" style="text-decoration:none;">👥 用户管理</a>`;
+            // 周期取数推送（仅 admin 独立新模块，2026-07 集成点3）：镜像"用户管理"同款 admin-only
+            // 下拉入口——不进普通导航栏（会要求同步改 11 个既有页面的导航栏 HTML，超出该模块新增范围），
+            // 复用这个已存在于每一页的 profile 下拉菜单即可让 admin 全站可发现，无需改动任何既有页面。
+            menuItems += `<a href="/Periodic_Fetch.html" style="text-decoration:none;">📅 周期取数推送</a>`;
         }
         menuItems += `<a href="#" onclick="openChangePasswordModal()">🔑 修改密码</a>`;
         menuItems += `<a href="#" onclick="logout()" style="color:#e53e3e;">🚪 退出登录</a>`;
