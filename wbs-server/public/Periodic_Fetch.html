@@ -109,8 +109,9 @@
         .pf-empty { text-align: center; padding: 30px; color: #94a3b8; font-size: 13px; }
 
         /* 收件人核对 */
-        .pf-recip-input { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
-        .pf-recip-input input { flex: 1; min-width: 220px; padding: 9px 12px; border: 1px solid #d1d5db; border-radius: 7px; font-size: 13px; }
+        .pf-recip-input { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; align-items: flex-start; }
+        .pf-recip-input input, .pf-recip-input textarea { flex: 1; min-width: 220px; padding: 9px 12px; border: 1px solid #d1d5db; border-radius: 7px; font-size: 13px; }
+        .pf-recip-input textarea { resize: vertical; font-family: inherit; line-height: 1.6; }
         .pf-recip-list { border: 1px solid #e2e8f0; border-radius: 8px; overflow: hidden; margin-bottom: 14px; }
         .pf-recip-row { display: flex; align-items: center; gap: 12px; padding: 12px 15px; border-bottom: 1px solid #f1f5f9; }
         .pf-recip-row:last-child { border-bottom: none; }
@@ -380,14 +381,13 @@
     let pfPushHistory = {};                // runId -> pushes 数组
 
     // ---- 收件人/推送错误码 → 中文文案（覆盖 recipients.js reason 枚举 + confirm 阶段专属码）----
+    //   改造（2026-07-06）：钉钉详情接口无权限，删掉姓名/在职反查——仅保留 phone→userid 反查产生的 reason
+    //   （INACTIVE_USER/UNKNOWN_ACTIVE_STATUS/DETAIL_NOT_FOUND/DETAIL_LOOKUP_FAILED 已不再产生，一并移除）。
     const PF_REASON_TEXT = {
         INVALID_PHONE_FORMAT: '手机号格式不正确',
-        NOT_FOUND: '查不到对应钉钉用户（未登记/已离职）',
+        NOT_FOUND: '查不到对应钉钉用户（未登记/非企业成员/已离职）',
         MULTIPLE_MATCHES: '该手机号匹配多个钉钉账号，需人工处理',
-        INACTIVE_USER: '该员工已离职',
-        UNKNOWN_ACTIVE_STATUS: '在职状态未知，出于安全默认禁发',
-        DETAIL_NOT_FOUND: '查不到用户详情（无法核对身份）',
-        RECIPIENT_MISMATCH: '收件人身份与核对时不一致，已拒绝发送',
+        RECIPIENT_MISMATCH: '收件人钉钉身份与核对时不一致，已拒绝发送',
         DUPLICATE_USERID: '重复收件人（不同手机号对应同一人），已自动去重',
         invalid_staff: '钉钉判定为无效员工，发送失败',
         send_failed: '钉钉发送失败',
@@ -397,7 +397,6 @@
     function pfReasonText(code) {
         if (!code) return '';
         if (PF_REASON_TEXT[code]) return PF_REASON_TEXT[code];
-        if (String(code).indexOf('DETAIL_LOOKUP_FAILED') === 0) return '查询用户详情失败（钉钉接口异常）';
         return code;
     }
 
@@ -686,12 +685,27 @@
         const errNote = run.error_msg ? `<div style="font-size:11px;color:#b91c1c;margin-top:2px;">${esc(run.error_msg)}</div>` : '';
         return `<tr>
             <td>${esc(run.started_at)}</td>
-            <td>${esc(run.date_range_start)} ~ ${esc(run.date_range_end)}</td>
+            <td>${pfFmtDateRange(run.date_range_start, run.date_range_end)}</td>
             <td>${run.row_count != null ? run.row_count : '—'}</td>
             <td>${durationText}</td>
             <td><span class="pf-badge ${esc(run.status)}">${statusLabel}</span>${errNote}</td>
             <td>${actionCell}</td>
         </tr>`;
+    }
+
+    // 日期区间显示（2026-07-06）：SQL 用左闭右开 [start, end)（end=本月首日，#21 用 `< end` 精确取整月、
+    //   不漏月末带时间的记录），但直接显示 "6-01 ~ 7-01" 让人误以为多取了 7 月。展示层统一把上界减 1 天
+    //   显示成"上月最后一天"（6-01 ~ 6-30 = 上月整月），一眼看懂。⚠️ 仅显示层，SQL 替换值与审计留痕不变。
+    function pfPrevDay(dateStr) {
+        const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dateStr || ''));
+        if (!m) return dateStr;
+        let y = +m[1], mo = +m[2], d = +m[3] - 1;
+        if (d < 1) { mo -= 1; if (mo < 1) { mo = 12; y -= 1; } d = new Date(y, mo, 0).getDate(); }
+        return `${y}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+    }
+    function pfFmtDateRange(start, end) {
+        if (!start || !end) return `${esc(start || '')} ~ ${esc(end || '')}`;
+        return `${esc(start)} ~ ${esc(pfPrevDay(end))}`;
     }
 
     async function pfRunTask(taskId, btnEl) {
@@ -736,7 +750,7 @@
             <div class="pf-kv-grid">
                 <div><label>连接快照</label><div class="v">${esc(d.source_connection_snapshot)}</div></div>
                 <div><label>模板版本快照</label><div class="v">v${d.template_version_snapshot}</div></div>
-                <div><label>日期区间</label><div class="v">${esc(d.date_range_start)} ~ ${esc(d.date_range_end)}</div></div>
+                <div><label>日期区间（上月整月）</label><div class="v">${pfFmtDateRange(d.date_range_start, d.date_range_end)}</div></div>
                 <div><label>状态</label><div class="v">${esc(d.status)}</div></div>
                 <div><label>行数</label><div class="v">${d.row_count != null ? d.row_count : '—'}</div></div>
                 <div><label>耗时</label><div class="v">${d.duration_ms != null ? (d.duration_ms / 1000).toFixed(1) + 's' : '—'}</div></div>
@@ -778,7 +792,7 @@
         let selectedRunId = pfPushSelectedRun[task.id];
         if (selectedRunId && !pushableRuns.some(r => r.id === selectedRunId)) selectedRunId = null;
         const runOpts = ['<option value="">请选择一个具体的 run（不默认最新）</option>']
-            .concat(pushableRuns.map(r => `<option value="${r.id}" ${r.id === selectedRunId ? 'selected' : ''}>${esc(r.started_at)} · ${esc(r.date_range_start)}~${esc(r.date_range_end)} · ${r.row_count}行 · ${r.status === 'empty_result' ? '空结果' : '成功'}</option>`));
+            .concat(pushableRuns.map(r => `<option value="${r.id}" ${r.id === selectedRunId ? 'selected' : ''}>${esc(r.started_at)} · ${pfFmtDateRange(r.date_range_start, r.date_range_end)} · ${r.row_count}行 · ${r.status === 'empty_result' ? '空结果' : '成功'}</option>`));
         const pickerHtml = `<div class="pf-field"><label>选择要推送的 run <span class="req">*</span> <span class="hint">推送必须绑定某个具体成功/空结果的 run，不默认推最新</span></label>
             <select id="pfPushRunSel_${task.id}" onchange="pfSelectPushRun(${task.id}, this.value)">${runOpts.join('')}</select></div>`;
 
@@ -820,15 +834,15 @@
         <div class="pf-push-target">推送对象：<b>${esc(run.started_at)}</b> 那次${isEmpty ? '空结果' : '成功'} run（${run.row_count} 行）的结果 xlsx。<span style="color:#94a3b8;">（推送必须绑定某个具体 run，不默认推最新）</span></div>
         ${emptyBlockHtml}
         <div class="pf-field">
-            <label>填需求人手机号 <span class="hint">可填多个，逗号或空格分隔，批量发，单批最多 20 个</span></label>
+            <label>填需求人姓名 + 手机号 <span class="hint">每行一个收件人，姓名和手机号用逗号分隔（如 张三,138xxxx0001），单批最多 20 个</span></label>
             <div class="pf-recip-input">
-                <input type="text" id="pfPhoneInput_${task.id}" placeholder="如 138xxxx0001，多个用逗号分隔" ${!canProceed ? 'disabled' : ''}>
-                <button class="pf-btn pf-btn-primary pf-btn-sm" ${!canProceed ? 'disabled' : ''} onclick="pfPreviewRecipients(${task.id})">反查核对</button>
+                <textarea id="pfRecipInput_${task.id}" rows="4" placeholder="张三,13800000001&#10;李四,13900000002" ${!canProceed ? 'disabled' : ''}></textarea>
+                <button class="pf-btn pf-btn-primary pf-btn-sm" ${!canProceed ? 'disabled' : ''} onclick="pfPreviewRecipients(${task.id})">核对可送达</button>
             </div>
         </div>
         ${recipHtml}
         ${historyHtml}
-        <div class="pf-note"><b>发前核对</b>：发的是含<span class="kw">身份证号、银行账号</span>的敏感数据，手机号反查后<span class="kw">显示姓名+钉钉ID后四位</span>让你核对是谁，确认才发——防发错人。<br><b>批量失败</b>：查不到的号<span class="kw">跳过继续发其余</span>，最后报告哪几个跳过，不整批中止。</div>`;
+        <div class="pf-note"><b>发前核对</b>：发的是含<span class="kw">身份证号、银行账号</span>的敏感数据，<span class="kw">姓名由你自己录入</span>核对是谁、手机号反查<span class="kw">钉钉ID后四位</span>确认能送达，确认才发——防发错人。<br><b>批量失败</b>：查不到的号<span class="kw">跳过继续发其余</span>，最后报告哪几个跳过，不整批中止。</div>`;
     }
 
     function pfSelectPushRun(taskId, runIdStr) {
@@ -840,34 +854,42 @@
     }
 
     function pfRenderRecipRow(taskId, item, idx) {
+        // 改造（2026-07-06）：姓名一律显示 admin 录入值（item.name），钉钉侧只反查 userid 判能否送达。
         if (item.ok) {
             return `<div class="pf-recip-row">
                 <input type="checkbox" id="pfRecipChk_${taskId}_${idx}" checked>
                 <span class="pf-recip-phone">${esc(item.phone)}</span>
                 <span class="pf-recip-info"><span class="name">${esc(item.name)}</span> · 钉钉ID …${esc(item.last4)}</span>
-                <span class="pf-recip-status matched">✓ 匹配在职</span>
+                <span class="pf-recip-status matched">✓ 钉钉可送达</span>
             </div>`;
         }
         return `<div class="pf-recip-row" style="background:#fef2f2;">
             <input type="checkbox" disabled>
             <span class="pf-recip-phone">${esc(item.phone)}</span>
-            <span class="pf-recip-info" style="color:#b91c1c;">${esc(pfReasonText(item.reason))}</span>
+            <span class="pf-recip-info"><span class="name" style="color:#7f1d1d;">${esc(item.name || '')}</span> · <span style="color:#b91c1c;">${esc(pfReasonText(item.reason))}</span></span>
             <span class="pf-recip-status blocked">✕ 禁发</span>
         </div>`;
     }
 
     async function pfPreviewRecipients(taskId) {
-        const input = document.getElementById('pfPhoneInput_' + taskId);
-        const raw = (input && input.value || '').split(/[,，\s]+/).map(s => s.trim()).filter(Boolean);
-        if (!raw.length) { showToast('请填写至少一个手机号', 'error'); return; }
-        if (raw.length > 20) { showToast('单批最多 20 个手机号', 'error'); return; }
+        // 改造（2026-07-06）：成对录入"姓名,手机号"（每行一个），姓名由 admin 录入、后端只反查 userid 判可送达。
+        const input = document.getElementById('pfRecipInput_' + taskId);
+        const lines = (input && input.value || '').split(/\n/).map(s => s.trim()).filter(Boolean);
+        if (!lines.length) { showToast('请填写至少一个收件人（姓名,手机号）', 'error'); return; }
+        const recipientsInput = [];
+        for (const line of lines) {
+            const parts = line.split(/[,，]/).map(s => s.trim()).filter(Boolean);
+            if (parts.length < 2) { showToast(`格式有误：「${line}」需写成 姓名,手机号`, 'error'); return; }
+            recipientsInput.push({ name: parts[0], phone: parts[1] });
+        }
+        if (recipientsInput.length > 20) { showToast('单批最多 20 个收件人', 'error'); return; }
         const runId = pfPushSelectedRun[taskId];
         if (!runId) { showToast('请先选择要推送的 run', 'error'); return; }
         const confirmEmpty = !!pfEditBuf['_confirmEmpty_' + taskId];
-        const r = await pfApi('/periodic-tasks/runs/' + runId + '/push/preview', { method: 'POST', body: { phones: raw, confirm_empty: confirmEmpty } });
+        const r = await pfApi('/periodic-tasks/runs/' + runId + '/push/preview', { method: 'POST', body: { recipients: recipientsInput, confirm_empty: confirmEmpty } });
         if (!r.ok) {
             if (r.data && r.data.code === 'EMPTY_RESULT_CONFIRM_REQUIRED') { showToast('本次结果为 0 行，请先勾选上方"确认仍要推送空结果"', 'error'); return; }
-            pfApiErr(r, '收件人反查失败'); return;
+            pfApiErr(r, '收件人核对失败'); return;
         }
         pfPreviewItems[taskId] = r.data.items || [];
         if (r.data.deduped && r.data.deduped.by_phone) showToast(`已自动去重 ${r.data.deduped.by_phone} 个重复手机号`, 'info');
@@ -902,15 +924,7 @@
         let msg = `推送完成：成功 ${s.success || 0} · 失败 ${s.failed || 0} · 跳过 ${s.skipped || 0}`;
         showToast(msg, (s.failed || s.skipped) ? 'warning' : 'success', 5000);
         if (r.data.warning) showToast(r.data.warning, 'warning', 9000);
-        // L-1（⑤c）：后端已按 userid 硬 gate 放行、但收件人 name/last4 较 preview 有漂移的项，
-        //   前端单独 warning 透出（后端 results[].snapshot_warning 非空即漂移），让 admin 知晓身份变动。
-        const drifted = (r.data.results || []).filter(x => x.snapshot_warning);
-        if (drifted.length) {
-            // ⑤d L-1 兜底：phone 缺失的项过滤掉，避免拼出 undefined 文案；全缺则只报人数不列号。
-            const driftPhones = drifted.map(x => x.phone).filter(Boolean);
-            const tail = driftPhones.length ? ('：' + driftPhones.join('、')) : '';
-            showToast('⚠️ 共 ' + drifted.length + ' 人身份较核对时有漂移（姓名/ID后四位变化，已按钉钉ID放行）' + tail, 'warning', 8000);
-        }
+        // 改造（2026-07-06）：姓名由 admin 录入、不向钉钉查，无 name/last4 drift 概念，删除 snapshot_warning 提示。
         pfPreviewItems[taskId] = null;
         await pfLoadPushHistory(runId);
         pfRenderTaskList();

@@ -471,24 +471,6 @@ module.exports = (deps) => {
     return { blocked: false };
   }
 
-  // ── L-new 归一化字符串比对（NFC + trim，吸收前端 trim/Unicode 不可见字符差异）─────────────
-  function normalizeForCompare(s) {
-    return String(s == null ? '' : s).normalize('NFC').trim();
-  }
-
-  // ── H-1 + L-new 收件人核对：fresh 反查结果与 preview 期望快照比对 ─────────────
-  //   L-new：userid 作硬 gate（钉钉唯一身份，一致即达防错发目的）——userid 不一致才 RECIPIENT_MISMATCH 拒发；
-  //   name/last4 用归一化比对，不一致**不拒发**、只标 drift（供 admin 知晓 preview 后有非关键变动），
-  //   避免前端 trim/NFC 差异把合法收件人误判 MISMATCH。
-  //   返回 { match: bool（userid 硬 gate）, drift: bool（name/last4 归一化后仍不一致）}。
-  function compareRecipientSnapshot(fresh, expected) {
-    if (!fresh || !expected) return { match: false, drift: false };
-    if (String(fresh.userid) !== String(expected.userid)) return { match: false, drift: false };
-    const drift = normalizeForCompare(fresh.name) !== normalizeForCompare(expected.name)
-      || normalizeForCompare(fresh.dingUserIdLast4) !== normalizeForCompare(expected.last4);
-    return { match: true, drift };
-  }
-
   // ── M-1 手机号归一化去重（保序，返回去重后数组 + 被丢弃数）─────────────
   function dedupeByNormalizedPhone(rawList) {
     const seen = new Set();
@@ -501,6 +483,20 @@ module.exports = (deps) => {
       kept.push(item);
     }
     return { kept, dropped };
+  }
+
+  // ── M-3（codex v1.105.1）：同一手机号填了不同姓名 → 显式报错，不静默按 phone 去重留一个 ─────────────
+  //   姓名改人工录入后，"张三,138x" + "李四,138x" 属录入冲突；静默去重会把其中一个错误姓名带进核对/留痕，
+  //   削弱"防发错人"。检出返回冲突手机号（归一化后），无冲突返 null。
+  function findPhoneNameConflict(rawRecipients) {
+    const byPhone = new Map();
+    for (const rc of rawRecipients) {
+      const phone = recipients.normalizePhone(rc && rc.phone);
+      const name = String((rc && rc.name) || '').trim();
+      if (!byPhone.has(phone)) byPhone.set(phone, name);
+      else if (byPhone.get(phone) !== name) return phone;
+    }
+    return null;
   }
 
   // ============================================================
@@ -1112,16 +1108,33 @@ module.exports = (deps) => {
   // ============================================================
 
   // ── POST /periodic-tasks/runs/:runId/push/preview：收件人核对预览（admin，无副作用不落库）──────────
-  //   admin 填手机号(可多个) → 反查钉钉身份 → 返回姓名/在职状态/钉钉ID后四位供核对。
+  //   admin 成对录入 recipients:[{name, phone}]（姓名 admin 自己录、不向钉钉查）→ 对每个 phone 反查钉钉
+  //   userid 判"能否送达" → 返回 { 录入姓名 + 手机号 + userid后四位 } 供核对。
+  //   ⚠️ 改造（2026-07-06）：钉钉详情接口(topapi/v2/user/get)无权限，删掉姓名/在职反查——姓名一律用录入值。
   //   本端点不发送、不落 push 行——纯预览。前端据 ok 项拼出 confirm 的 recipients 快照
-  //   （{phone, userid, name, last4}），confirm 阶段后端会重新反查并逐项比对（H-1）。
+  //   （{phone, userid, name, last4}），confirm 阶段后端会重新反查 userid 并硬 gate 比对（H-1）。
   //   M-1：进逻辑前对归一化手机号去重（同号只查一次），响应带 deduped 提示。
   router.post('/periodic-tasks/runs/:runId/push/preview', authenticateToken, requirePeriodicSchemaReady, requireAdmin, async (req, res) => {
     const runId = parsePositiveId(req.params.runId);
     if (!runId) return res.status(400).json({ error: '无效的 run ID', code: 'INVALID_RUN_ID' });
-    const rawPhones = Array.isArray(req.body && req.body.phones) ? req.body.phones : null;
-    if (!rawPhones || rawPhones.length === 0) return res.status(400).json({ error: '请提供至少一个手机号', code: 'PHONES_REQUIRED' });
-    if (rawPhones.length > 20) return res.status(400).json({ error: '单批最多 20 个手机号', code: 'TOO_MANY_PHONES' });
+    const rawRecipients = Array.isArray(req.body && req.body.recipients) ? req.body.recipients : null;
+    if (!rawRecipients || rawRecipients.length === 0) return res.status(400).json({ error: '请提供至少一个收件人（姓名+手机号）', code: 'RECIPIENTS_REQUIRED' });
+    if (rawRecipients.length > 20) return res.status(400).json({ error: '单批最多 20 个收件人', code: 'TOO_MANY_PHONES' });
+    // 每项须含非空 name + phone（姓名 admin 录入，防发错人时人工核对靠的就是它）
+    for (const rc of rawRecipients) {
+      const nm = rc && typeof rc.name === 'string' ? rc.name.trim() : '';
+      const ph = rc && rc.phone != null ? String(rc.phone).trim() : '';
+      if (!nm || !ph) {
+        return res.status(400).json({ error: '每个收件人须填写姓名和手机号', code: 'INVALID_RECIPIENT_INPUT' });
+      }
+    }
+    // M-3（codex v1.105.1）：同一手机号填了不同姓名 → 拒（防错误姓名进核对/留痕），不静默按 phone 去重留一个
+    {
+      const conflictPhone = findPhoneNameConflict(rawRecipients);
+      if (conflictPhone) {
+        return res.status(400).json({ error: `手机号 ${maskPhone(conflictPhone)} 填了多个不同姓名，请核对后只保留正确的一个`, code: 'RECIPIENT_NAME_CONFLICT' });
+      }
+    }
     try {
       const run = await dbGetAsync(`SELECT * FROM periodic_task_runs WHERE id = ?`, [runId]);
       const confirmEmpty = !!(req.body && req.body.confirm_empty === true);
@@ -1132,18 +1145,19 @@ module.exports = (deps) => {
       if (!tokenResult.ok) {
         return res.status(502).json({ error: '钉钉凭证获取失败：' + tokenResult.reason, code: 'DINGTALK_TOKEN_FAILED', reason: tokenResult.reason });
       }
-      // M-1：手机号去重
-      const { kept, dropped } = dedupeByNormalizedPhone(rawPhones);
+      // M-1：按手机号去重（去重键仍是 phone，保留录入姓名）
+      const { kept, dropped } = dedupeByNormalizedPhone(rawRecipients);
       const items = [];
-      for (const raw of kept) {
-        const r = await recipients.resolvePushRecipient(tokenResult.token, raw, {
+      for (const rc of kept) {
+        const enteredName = String(rc.name).trim();
+        const r = await recipients.resolvePushRecipient(tokenResult.token, rc.phone, {
           getUserIdByMobile: dingtalkNotify.getUserIdByMobile,
           classifyError: dingtalkNotify.classifyError,
         });
-        // 只回给前端核对所需字段（含 last4 供 confirm 快照），不透传内部 deptIds 之外的东西
+        // 姓名一律回传录入值（不用钉钉的）；ok 项带 userid + last4 供 confirm 快照
         items.push(r.ok
-          ? { ok: true, phone: r.phone, userid: r.userid, name: r.name, last4: r.dingUserIdLast4, deptIds: r.deptIds }
-          : { ok: false, phone: r.phone, reason: r.reason });
+          ? { ok: true, phone: r.phone, name: enteredName, userid: r.userid, last4: r.dingUserIdLast4 }
+          : { ok: false, phone: r.phone, name: enteredName, reason: r.reason });
       }
       res.json({ run_id: runId, items, deduped: { by_phone: dropped } });
     } catch (err) {
@@ -1153,9 +1167,10 @@ module.exports = (deps) => {
   });
 
   // ── POST /periodic-tasks/runs/:runId/push/confirm：确认发送（admin）──────────
-  //   H-1：请求**必须**带回 preview 阶段每个收件人的期望快照 recipients:[{phone,userid,name,last4}]。
-  //     后端对每个手机号重新反查，逐项比对 userid/name/last4 一致才发（不一致→该号 RECIPIENT_MISMATCH
-  //     拒发、不中断其余）。无快照 → 400。杜绝"admin 跳过 preview 直发 / 前端漏核对后端仍发"。
+  //   H-1：请求**必须**带回 preview 阶段每个收件人的期望快照 recipients:[{phone,userid,name（录入）,last4}]。
+  //     后端对每个手机号重新反查 userid，**userid 硬 gate** 一致才发（不一致→该号 RECIPIENT_MISMATCH
+  //     拒发、不中断其余）。姓名是 admin 录入的静态值、不做 drift 校验（改造 2026-07-06：钉钉详情接口无
+  //     权限，不再向钉钉查姓名/在职）。无快照 → 400。杜绝"admin 跳过 preview 直发 / 前端漏核对后端仍发"。
   //   H-3①：两阶段留痕——先对通过核对的收件人 INSERT push_status='pending'（发送前先落库），再发送，
   //     再按回执 UPDATE 为 success/failed。避免"人已收到但无留痕"。
   //   H-3②：幂等守卫——该 run 已有 success 留痕则默认拒（ALREADY_PUSHED），除非 force=true（显式重发）。
@@ -1169,12 +1184,22 @@ module.exports = (deps) => {
     }
     if (rawRecipients.length > 20) return res.status(400).json({ error: '单批最多 20 个收件人', code: 'TOO_MANY_PHONES' });
     // H-1：每个 recipient 必须携带完整期望快照（phone+userid+name+last4），否则无法做核对比对 → 400
+    //   M-1（codex v1.105.1）：name/phone 做 **trim 后非空**校验（对齐 preview），防仅空白字符的姓名绕过前端
+    //     约束、后续 `String(name).trim()` 变空串继续发送并污染留痕。
     for (const rc of rawRecipients) {
       if (!rc || typeof rc !== 'object'
-        || !rc.phone || rc.userid === undefined || rc.userid === null || rc.userid === ''
-        || rc.name === undefined || rc.name === null || rc.name === ''
-        || rc.last4 === undefined || rc.last4 === null || rc.last4 === '') {
-        return res.status(400).json({ error: '收件人核对快照不完整（需含 phone/userid/name/last4），请重新走 preview 核对', code: 'INVALID_RECIPIENT_SNAPSHOT' });
+        || typeof rc.phone !== 'string' || !rc.phone.trim()
+        || rc.userid === undefined || rc.userid === null || String(rc.userid).trim() === ''
+        || typeof rc.name !== 'string' || !rc.name.trim()
+        || rc.last4 === undefined || rc.last4 === null || String(rc.last4).trim() === '') {
+        return res.status(400).json({ error: '收件人核对快照不完整（需含 phone/userid/name/last4，姓名/手机号不能为空白），请重新走 preview 核对', code: 'INVALID_RECIPIENT_SNAPSHOT' });
+      }
+    }
+    // M-3（codex v1.105.1）：同一手机号填了不同姓名 → 拒（防错误姓名进核对/留痕）
+    {
+      const conflictPhone = findPhoneNameConflict(rawRecipients);
+      if (conflictPhone) {
+        return res.status(400).json({ error: `手机号 ${maskPhone(conflictPhone)} 填了多个不同姓名，请核对后只保留正确的一个`, code: 'RECIPIENT_NAME_CONFLICT' });
       }
     }
     const confirmEmpty = !!(req.body && req.body.confirm_empty === true);
@@ -1204,35 +1229,37 @@ module.exports = (deps) => {
       // M-1：手机号去重（保留携带的期望快照）
       const { kept, dropped: phoneDropped } = dedupeByNormalizedPhone(rawRecipients);
 
-      // 分类：对每个 recipient 重新反查 + H-1/L-new 快照比对（钉钉网络调用放在事务外，不长持写锁）
+      // 分类：对每个 recipient 重新反查 userid + H-1 硬 gate 比对（钉钉网络调用放在事务外，不长持写锁）。
+      //   ⚠️ 改造（2026-07-06）：钉钉详情接口无权限，姓名由 admin 录入。H-1 简化为**userid 硬 gate**——
+      //     confirm 重新反查的 userid 与 preview 快照 userid 不一致才 RECIPIENT_MISMATCH 拒发；姓名是录入的
+      //     静态值、不做 drift 校验（无 snapshot_warning）。留痕存录入姓名。
       const seenUserids = new Set();
       let useridDropped = 0;
       const classified = [];
       for (const expected of kept) {
+        const enteredName = String(expected.name).trim();
         const fresh = await recipients.resolvePushRecipient(tokenResult.token, expected.phone, {
           getUserIdByMobile: dingtalkNotify.getUserIdByMobile,
           classifyError: dingtalkNotify.classifyError,
         });
         const phone = fresh.phone;
         if (!fresh.ok) {
-          classified.push({ phone, disposition: 'skipped', reason: fresh.reason, userid: null, name: null });
+          classified.push({ phone, disposition: 'skipped', reason: fresh.reason, userid: null, name: enteredName });
           continue;
         }
-        // L-new：userid 硬 gate；name/last4 归一化后不一致只标 drift 不拒发
-        const cmp = compareRecipientSnapshot(fresh, expected);
-        if (!cmp.match) {
-          classified.push({ phone, disposition: 'skipped', reason: 'RECIPIENT_MISMATCH', userid: null, name: null });
+        // H-1 userid 硬 gate：confirm 重解的 userid 与 preview 快照 userid 不一致 → 拒发（钉钉唯一身份，防错发）
+        if (String(fresh.userid) !== String(expected.userid)) {
+          classified.push({ phone, disposition: 'skipped', reason: 'RECIPIENT_MISMATCH', userid: null, name: enteredName });
           continue;
         }
         // M-1：发送前 userid 去重（不同手机号可能映射同一人）
         if (seenUserids.has(fresh.userid)) {
           useridDropped++;
-          classified.push({ phone, disposition: 'skipped', reason: 'DUPLICATE_USERID', userid: fresh.userid, name: fresh.name });
+          classified.push({ phone, disposition: 'skipped', reason: 'DUPLICATE_USERID', userid: fresh.userid, name: enteredName });
           continue;
         }
         seenUserids.add(fresh.userid);
-        classified.push({ phone, disposition: 'eligible', reason: null, userid: fresh.userid, name: fresh.name,
-          snapshotWarning: cmp.drift ? 'name_or_last4_drift' : null });
+        classified.push({ phone, disposition: 'eligible', reason: null, userid: fresh.userid, name: enteredName });
       }
 
       // H-new + H-3① 阶段一：BEGIN IMMEDIATE 事务内**先查幂等后插 pending**（同一事务原子，SQLite RESERVED
@@ -1271,7 +1298,9 @@ module.exports = (deps) => {
               `INSERT INTO periodic_task_pushes
                  (run_id, phone_snapshot, recipient_name_snapshot, dingtalk_user_id_snapshot, push_status, push_error, pushed_by, pushed_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))`,
-              [runId, c.phone, isEligible ? c.name : null, isEligible ? c.userid : null,
+              // M-2（codex v1.105.1）：recipient_name_snapshot 一律存录入姓名（含 skipped 行）——姓名 admin 录入、
+              //   不可从钉钉反查恢复，skipped 行也要留"admin 当时想发给谁"的审计上下文（c.name 各分支恒有录入名）。
+              [runId, c.phone, c.name, isEligible ? c.userid : null,
                 isEligible ? 'pending' : 'skipped', isEligible ? null : c.reason, actor.id]
             );
             c.pushId = ins.lastID;
@@ -1347,20 +1376,12 @@ module.exports = (deps) => {
         }
       }
 
-      // L（集成点3 决策）：snapshotWarning（drift，见 compareRecipientSnapshot）刻意**只在本响应体透出，
-      //   不落库**——periodic_task_pushes 是本模块（集成点2）新建、尚未部署上线的表，为它现在加一列会给
-      //   本地/未来环境引入一次本可避免的迁移；drift 已在 confirm 响应里给到 admin，前端会展示提醒，落库
-      //   属可选增强而非必需。若后续需要审计 drift 历史（而非仅当次响应可见），需专门评估加迁移，不应
-      //   在此顺手加列。若主会话认为应该落库，不要自行改 schema，留给用户拍板。
-      const results = classified.map((c) => {
-        const base = {
-          phone: c.phone,
-          status: c.disposition === 'eligible' ? c.finalStatus : 'skipped',
-          reason: c.disposition === 'eligible' ? c.finalError : c.reason,
-        };
-        if (c.disposition === 'eligible' && c.snapshotWarning) base.snapshot_warning = c.snapshotWarning;
-        return base;
-      });
+      // 改造（2026-07-06）：姓名由 admin 录入、不向钉钉查，故不再有 name/last4 drift（snapshot_warning）概念。
+      const results = classified.map((c) => ({
+        phone: c.phone,
+        status: c.disposition === 'eligible' ? c.finalStatus : 'skipped',
+        reason: c.disposition === 'eligible' ? c.finalError : c.reason,
+      }));
       const summary = results.reduce((acc, r) => { acc[r.status] = (acc[r.status] || 0) + 1; return acc; }, {});
       const skippedPhones = results.filter((r) => r.status === 'skipped').map((r) => r.phone);
       logger.info(`[周期取数推送] run #${runId} 推送完成：成功${summary.success || 0} 失败${summary.failed || 0} 跳过${summary.skipped || 0}`
@@ -1427,11 +1448,10 @@ module.exports = (deps) => {
     // 集成审 fix 新增导出：
     reapStaleRunningRuns,
     dedupeByNormalizedPhone,
+    findPhoneNameConflict,
     STALE_RUNNING_MINUTES,
     // 复审 fix 新增导出（verify require 真实逻辑）：
     evaluatePushIdempotency,
-    normalizeForCompare,
-    compareRecipientSnapshot,
     // ⑤c 集成审 follow-up 新增导出（verify require 真实逻辑）：
     //   ⚠️ reapStalePendingPushes 导出**仅供 verify 脚本 require 真实逻辑做启动复位断言**（STARTUP-ONLY 契约，
     //   见函数头 codex 08 H-1）；**禁任何运行期业务路径 / 管理脚本经 _internals 调用它**（会误标真在途 pending）。
