@@ -140,12 +140,15 @@ async function main() {
   //   side_effect = 真正不改 status 的旁路动作（路由专用端点）；transition = 改 status（含 resume：to=null 但动态解析目标态）。
   const KIND_EXPECT = {
     estimate: 'side_effect', feasibility: 'side_effect', blocked: 'side_effect', unblock: 'side_effect', derive: 'side_effect', scope_change: 'side_effect',
-    set_release_flag: 'side_effect',   // bug 流 Commit②：填发版信息（待上线态内不改 status，旁路独立事务）
     create: 'transition', schedule: 'transition', assign: 'transition', reassign: 'transition',
     submit: 'transition', accept: 'transition', return: 'transition', publish: 'transition',
     close: 'transition', hold: 'transition', resume: 'transition', reactivate: 'transition',
     issue_reject: 'transition', void: 'transition', reopen: 'transition',
-    'confirm-online-norelease': 'transition',   // bug 流 Commit②：确认上线·不发版（待上线→已上线，走 sysIssueTransition）
+    // [v1.6 退场，通知改造 C3b] set_release_flag / confirm-online-norelease 两条已随 BUG_FLOW_TRANSITIONS
+    //   移除（不再出现在任何 typeFlows 里，故本表也删对应条目——留着不影响正确性但会误导读者以为还在用）。
+    //   新增上线编排两动作：assign-release-dev 不改 status（真旁路，SIDE_EFFECT_ACTIONS 已收）/
+    //   execute-release 真改 status 为已上线（默认 transition 分类）。
+    'assign-release-dev': 'side_effect', 'execute-release': 'transition',
   };
   for (const type of Object.keys(meta.typeFlows)) {   // codex 20 L-2：遍历所有 type（非仅 feature），防 config/bug 流动作差异漏检
     for (const tf of meta.typeFlows[type]) {

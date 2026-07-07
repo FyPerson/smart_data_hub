@@ -1,15 +1,18 @@
-// 验证脚本：系统迭代 bug 流状态机 + 端点（bug流_方案_20260702_v1.2 §2/§3/§8，Commit ①+②）
+// 验证脚本：系统迭代 bug 流状态机 + 端点（bug流_方案_20260702_v1.2 §2/§3/§8，Commit ①+② + 通知改造 v1.6 §2.3 C3b 退场）
 //   用法：node scripts/verify-sys-bug-transitions.js
 //
 // 覆盖（真实 HTTP 端点 + 常量层双面）：
-//   [M] meta/常量：bug 状态集/初始态/动作集恰好（Commit② 起含 set_release_flag/publish/confirm-online-norelease，
-//       仍无 hold/close/reopen/derive/评估三动作/scope_change）+ isDevWorkState 单元 + REQUIRES_ASSIGNEE_STATUSES
-//       + RELEASABLE_TYPES ② 恢复含 bug 铁证
+//   [M] meta/常量：bug 状态集/初始态/动作集恰好 13 个（v1.6 §2.3 退场 set_release_flag/publish/
+//       confirm-online-norelease 三条 + 新增 assign-release-dev/execute-release 两条上线编排；
+//       仍无 hold/close/reopen/derive/评估三动作/scope_change）+ isDevWorkState 单元 +
+//       REQUIRES_ASSIGNEE_STATUSES + RELEASABLE_TYPES ② 恢复含 bug 铁证
 //   [E] 端点链路：建单落待处理 → schedule 拒（前段裁剪）→ assign 直达处理中 → submit 闸门（缺 est/空 summary）
 //       → estimate → submit → 待验证 → return（return_count++/清 est）→ 二轮 → accept → 待上线
-//   [R] 上线两路径（Commit② §8.2，死端解除）：填发版信息(set_release_flag) 唯一写点/枚举/ownerGuard/锁定 +
-//       确认上线·不发版(confirm-online-norelease，release_id 保持 NULL) + 确认上线·发版(hotfix-publish，
-//       release_type 回填) + add-issues 批次隔离（needs_release=1 闸门 + release_type 混批拒）
+//   [R] 上线两路径已退场（v1.6 §2.3 [C-1]）——LEGACY gate × bug/变更流双向矩阵：R1(set-release-flag)/
+//       R2(hotfix-publish)/R3(confirm-online-norelease) 对 bug 一律 409 LEGACY_RELEASE_FLOW_DISABLED；
+//       R4(legacy /sys-releases/:id/publish)/R5(add-issues/remove-issues) 对 bug(族别) 一律拒绝，
+//       变更流(feature/improvement) 全部既有场景（R5d 同批/R5e 追加/R5f 移空复用/R5g 历史 NULL fail-closed）
+//       零行为变化。新 G3-G6 上线编排完整覆盖 + 越权矩阵见 verify-sys-release-orchestration.js。
 //   [G] 旁路：issue_reject 仅前段 / reactivate 回待处理 / void 任意态 / reassign 两前置态
 //   [A] 附件：bug 处理中 delivery 可传（isDevWorkState 放行）/ 待处理拒 409
 //   [T→⑤放开] derive ① 临时闸已拆：feature→bug 派生 201（SYS_BUG_DERIVE_PENDING 不再触发）；bug 语境完整覆盖见 verify-sys-bug-derive.js。feasibility·blocked 端点对 bug 仍 409
@@ -147,21 +150,30 @@ async function main() {
     assert.deepStrictEqual(meta.statusLabels.bug, ['待处理', '处理中', '待验证', '待上线', '已上线', '已拒绝', '已作废'], 'bug 状态集 7 态');
     assert.strictEqual(meta.initialStatusByType.bug, '待处理', 'bug 初始态=待处理');
     const bugActions = meta.typeFlows.bug.map(t => t.action).sort();
+    // [v1.6 退场，通知改造 C3b]：set_release_flag/publish/confirm-online-norelease 三条随
+    //   BUG_FLOW_TRANSITIONS 移除（§2.3 [C-1 旧入口替换矩阵]），新增 assign-release-dev/execute-release
+    //   两条上线编排动作——净 14→13 个（移3 加2）。
     assert.deepStrictEqual(bugActions,
-      ['accept', 'assign', 'confirm-online-norelease', 'create', 'derive', 'estimate', 'issue_reject', 'publish',
-       'reactivate', 'reassign', 'return', 'set_release_flag', 'submit', 'void'].sort(),
-      `bug 动作集恰好 14 个（Commit② 追加 3 + Commit⑤ 追加 derive），实际 ${bugActions.join(',')}`);
-    for (const banned of ['hold', 'resume', 'close', 'reopen', 'feasibility', 'blocked', 'unblock', 'scope_change', 'schedule']) {
-      assert.ok(!bugActions.includes(banned), `bug typeFlows 不应含 ${banned}`);   // ⑤ 后 derive 移出 banned（reopen 仍禁：上线后一律派生非重开）
+      ['accept', 'assign', 'assign-release-dev', 'create', 'derive', 'estimate', 'execute-release', 'issue_reject',
+       'reactivate', 'reassign', 'return', 'submit', 'void'].sort(),
+      `bug 动作集恰好 13 个（v1.6 退场 3 + 新增 2 上线编排 + Commit⑤ derive），实际 ${bugActions.join(',')}`);
+    for (const banned of ['hold', 'resume', 'close', 'reopen', 'feasibility', 'blocked', 'unblock', 'scope_change', 'schedule',
+      'set_release_flag', 'publish', 'confirm-online-norelease']) {
+      assert.ok(!bugActions.includes(banned), `bug typeFlows 不应含 ${banned}`);   // v1.6 退场三动作 + ⑤ 后 derive 移出 banned（reopen 仍禁：上线后一律派生非重开）
     }
-    const setFlagEntry = meta.typeFlows.bug.find(t => t.action === 'set_release_flag');
-    assert.strictEqual(setFlagEntry.kind, 'side_effect', 'set_release_flag 应标 side_effect（SIDE_EFFECT_ACTIONS 白名单）');
-    const confirmEntry = meta.typeFlows.bug.find(t => t.action === 'confirm-online-norelease');
-    assert.strictEqual(confirmEntry.kind, 'transition', 'confirm-online-norelease 应标 transition（真实改 status）');
+    const assignReleaseDevEntry = meta.typeFlows.bug.find(t => t.action === 'assign-release-dev');
+    assert.strictEqual(assignReleaseDevEntry.kind, 'side_effect', 'assign-release-dev 应标 side_effect（不改 status，SIDE_EFFECT_ACTIONS 白名单）');
+    const executeReleaseEntry = meta.typeFlows.bug.find(t => t.action === 'execute-release');
+    assert.strictEqual(executeReleaseEntry.kind, 'transition', 'execute-release 应标 transition（真实改 status 为已上线）');
+    assert.strictEqual(executeReleaseEntry.to, '已上线', 'execute-release meta.to=已上线');
     const deriveEntry = meta.typeFlows.bug.find(t => t.action === 'derive');   // ⑤：bug derive 仅从已上线 + side_effect（路由专用端点，非通用引擎）
     assert.deepStrictEqual(deriveEntry.from, ['已上线'], 'bug derive from 应恰为 [已上线]（§4 仅从已上线单派生）');
     assert.strictEqual(deriveEntry.kind, 'side_effect', 'derive 应标 side_effect（走 POST /derive 专用端点，不误入通用 transition）');
-    ok('meta：bug 状态集 7 态 + 初始态待处理 + 动作集恰好 14（Commit② 追加 set_release_flag/publish/confirm-online-norelease + Commit⑤ 追加 derive[from=已上线/side_effect]，仍无 hold/close/reopen/评估三动作/scope_change/schedule）+ kind 标注正确');
+    // ACTION_LABELS 保留旧三动作标签（历史 timeline 行仍需渲染 action_code，v1.6 §2.3 明确要求不删标签）
+    assert.strictEqual(meta.actions.set_release_flag, '填发版信息', 'set_release_flag 标签保留（历史 timeline 渲染）');
+    assert.strictEqual(meta.actions['confirm-online-norelease'], '确认上线（不发版）', 'confirm-online-norelease 标签保留');
+    assert.ok(meta.actions['assign-release-dev'] && meta.actions['execute-release'], '新增两动作标签存在');
+    ok('meta：bug 状态集 7 态 + 初始态待处理 + 动作集恰好 13（v1.6 退场 set_release_flag/publish/confirm-online-norelease + 新增 assign-release-dev[side_effect]/execute-release[transition,to=已上线] + Commit⑤ derive[from=已上线/side_effect]，仍无 hold/close/reopen/评估三动作/scope_change/schedule）+ 旧标签保留供历史渲染');
   }
   {
     assert.strictEqual(T.isDevWorkState('bug', '处理中'), true, 'bug 处理中=开发工作态');
@@ -295,100 +307,57 @@ async function main() {
     ok('close/hold/reopen 对 bug 依旧无 transition（② 范围外，零回归）');
   }
 
-  // ═══ [R] 上线两路径（Commit② §8.2，死端解除）═══
+  // ═══ [R] 上线两路径已退场（v1.6 §2.3 [C-1]，通知改造 C3b）——LEGACY gate × bug/变更流双向矩阵 ═══
+  //   R1/R2/R3 三个旧直连端点 + R4/R5 批次编辑链路（add-issues/remove-issues/legacy publish）对 bug 一律
+  //   LEGACY_RELEASE_FLOW_DISABLED；**变更流(feature/improvement)零行为变化**——同一批 R5d/R5e/R5f/R5g 变更流
+  //   场景原样保留断言不变，只把"加入 bug 测混批/复用"的收尾换成"加入 bug 应被 LEGACY 挡"。
+  //   新 G3-G6 上线编排流程（assign-release-dev/reassign-release-dev/execute-release）+ 越权矩阵见
+  //   独立脚本 verify-sys-release-orchestration.js（聚焦编排流程本身，本文件聚焦"旧入口关严实"）。
   {
-    // R1：set_release_flag 基础校验——非本人 403 / 非法枚举 400 / 非待上线态 409 / 本人成功 + 可改值
+    // R1 退场：set-release-flag 对 bug 一律 409 LEGACY_RELEASE_FLOW_DISABLED（任意态、任意角色）
     const r1 = await seedBugToReady(5, devTok);
-    let r = await call('POST', `/api/sys-issues/${r1}/set-release-flag`, adminTok, { needs_release: 1 });
-    assert.strictEqual(r.status, 403, `admin 代填发版信息应 403, got ${r.status}`);
-    r = await call('POST', `/api/sys-issues/${r1}/set-release-flag`, dev2Tok, { needs_release: 1 });
-    assert.strictEqual(r.status, 403, `非本人填发版信息应 403, got ${r.status}`);
-    r = await call('POST', `/api/sys-issues/${r1}/set-release-flag`, devTok, { needs_release: 2 });
-    assert.strictEqual(r.status, 400); assert.strictEqual(r.body.code, 'INVALID_NEEDS_RELEASE');
-    r = await call('POST', `/api/sys-issues/${r1}/set-release-flag`, devTok, { needs_release: 'yes' });
-    assert.strictEqual(r.status, 400); assert.strictEqual(r.body.code, 'INVALID_NEEDS_RELEASE');
-    const midBug = await seedBugToDev(5);   // 处理中态（非待上线）
-    r = await call('POST', `/api/sys-issues/${midBug}/set-release-flag`, devTok, { needs_release: 1 });
-    assert.strictEqual(r.status, 409); assert.strictEqual(r.body.code, 'SET_RELEASE_FLAG_STATUS_INVALID');
-    r = await call('POST', `/api/sys-issues/${r1}/set-release-flag`, devTok, { needs_release: 0 });
-    assert.strictEqual(r.status, 200, `本人填发版信息应 200, got ${r.status} ${JSON.stringify(r.body)}`);
-    assert.strictEqual((await rowOf(r1)).needs_release, 0, 'needs_release=0 写入');
-    r = await call('POST', `/api/sys-issues/${r1}/set-release-flag`, devTok, { needs_release: 1 });
-    assert.strictEqual(r.status, 200, '待上线态内可改值（release_id 仍空）');
-    assert.strictEqual((await rowOf(r1)).needs_release, 1, 'needs_release 改为 1');
-    ok('R1：填发版信息——唯一写点 ownerGuard 严格本人（admin/他人 403）+ 枚举校验（非 0/1 → 400）+ 非待上线态 409 + 本人可改值');
+    let r = await call('POST', `/api/sys-issues/${r1}/set-release-flag`, devTok, { needs_release: 1 });
+    assert.strictEqual(r.status, 409, `[R1退场] bug set-release-flag 应 409, got ${r.status}`);
+    assert.strictEqual(r.body.code, 'LEGACY_RELEASE_FLOW_DISABLED', '[R1退场] code=LEGACY_RELEASE_FLOW_DISABLED');
+    assert.strictEqual((await rowOf(r1)).needs_release, null, '[R1退场] needs_release 未被写入（列转只读残留，F5）');
+    const midBug = await seedBugToDev(5);   // 处理中态（非待上线），同样应先被 LEGACY 挡（非因状态不对）
+    r = await call('POST', `/api/sys-issues/${midBug}/set-release-flag`, adminTok, { needs_release: 1 });
+    assert.strictEqual(r.status, 409); assert.strictEqual(r.body.code, 'LEGACY_RELEASE_FLOW_DISABLED', '[R1退场] 处理中态 bug 同样先被 LEGACY 挡（非 SET_RELEASE_FLAG_STATUS_INVALID）');
+    ok('[R1退场] set-release-flag：bug 一律 409 LEGACY_RELEASE_FLOW_DISABLED（任意态/角色），needs_release 不再被写入');
 
-    // R2：确认上线·不发版——未填闸门 409 / roleGuard admin / release_id 保持 NULL / release_id 三段断言之一
+    // R2 退场：confirm-online-norelease 对 bug 一律 409 LEGACY_RELEASE_FLOW_DISABLED
     const r2 = await seedBugToReady(5, devTok);
     r = await call('POST', `/api/sys-issues/${r2}/confirm-online-norelease`, adminTok, {});
-    assert.strictEqual(r.status, 409); assert.strictEqual(r.body.code, 'NEEDS_RELEASE_NOT_SET');
-    await call('POST', `/api/sys-issues/${r2}/set-release-flag`, devTok, { needs_release: 0 });
-    r = await call('POST', `/api/sys-issues/${r2}/confirm-online-norelease`, devTok, {});
-    assert.strictEqual(r.status, 403, '非 admin 确认上线应 403（roleGuard=admin）');
-    r = await call('POST', `/api/sys-issues/${r2}/confirm-online-norelease`, adminTok, {});
-    assert.strictEqual(r.status, 200, `确认上线·不发版应 200, got ${r.status} ${JSON.stringify(r.body)}`);
-    const row2 = await rowOf(r2);
-    assert.strictEqual(row2.status, '已上线', '确认上线后 status=已上线');
-    assert.strictEqual(row2.release_id, null, '⭐ release_id 三段断言：bug+needs_release=0+已上线 ⟹ release_id NULL');
-    assert.ok(row2.released_at, 'released_at 落');
-    const tl2 = await get(`SELECT event_type, action_code FROM sys_issue_timeline WHERE issue_id=? AND event_type='release'`, [r2]);
-    assert.ok(tl2 && tl2.action_code === 'confirm_online_norelease', 'timeline 记 release + action_code=confirm_online_norelease');
-    r = await call('POST', `/api/sys-issues/${r2}/confirm-online-norelease`, adminTok, {});
-    assert.strictEqual(r.status, 400, `已上线单再确认应 400 INVALID_TRANSITION, got ${r.status}`);
-    ok('R2：确认上线·不发版——未填 needs_release 409 NEEDS_RELEASE_NOT_SET + 非 admin 403 + 成功后 release_id 保持 NULL（三段断言）+ timeline 正确 + 终态不可重复');
+    assert.strictEqual(r.status, 409); assert.strictEqual(r.body.code, 'LEGACY_RELEASE_FLOW_DISABLED', '[R2退场] code');
+    assert.strictEqual(await statusOf(r2), '待上线', '[R2退场] 拒绝后单仍停在待上线（未被误翻已上线）');
+    ok('[R2退场] confirm-online-norelease：bug 一律 409 LEGACY_RELEASE_FLOW_DISABLED，单未被误翻已上线');
 
-    // R3：确认上线·发版（hotfix-publish）——未填闸门 409 / 成功后 release_id 非空 + release_type=bug（三段断言之二）
+    // R3 退场：hotfix-publish 对 bug 一律 409 LEGACY_RELEASE_FLOW_DISABLED（在 status 校验之前拦，先于 ISSUE_NOT_HOTFIXABLE）
     const r3 = await seedBugToReady(5, devTok);
     r = await call('POST', `/api/sys-issues/${r3}/hotfix-publish`, adminTok, { release_note: '修复上线', version_tag: 'v9.9' });
-    assert.strictEqual(r.status, 409); assert.strictEqual(r.body.code, 'BUG_NEEDS_RELEASE_NOT_SET');
-    await call('POST', `/api/sys-issues/${r3}/set-release-flag`, devTok, { needs_release: 1 });
-    r = await call('POST', `/api/sys-issues/${r3}/hotfix-publish`, adminTok, { release_note: '修复上线', version_tag: 'v9.9' });
-    assert.strictEqual(r.status, 201, `bug hotfix-publish 应 201, got ${r.status} ${JSON.stringify(r.body)}`);
-    const row3 = await rowOf(r3);
-    assert.strictEqual(row3.status, '已上线');
-    assert.ok(row3.release_id, '⭐ release_id 三段断言：bug+needs_release=1+已上线 ⟹ release_id NOT NULL');
-    const rel3 = await get('SELECT release_type, is_hotfix FROM sys_releases WHERE id=?', [row3.release_id]);
-    assert.strictEqual(rel3.release_type, 'bug', 'hotfix 批次 release_type=族别 bug（D-A：INSERT 写 releaseFamilyOf）');
-    assert.strictEqual(rel3.is_hotfix, 1);
-    ok('R3：确认上线·发版（hotfix-publish）——未标发版 409 BUG_NEEDS_RELEASE_NOT_SET + 成功后 release_id 非空（三段断言）+ 批次 release_type=族别 bug');
+    assert.strictEqual(r.status, 409); assert.strictEqual(r.body.code, 'LEGACY_RELEASE_FLOW_DISABLED', '[R3退场] code');
+    assert.strictEqual(await statusOf(r3), '待上线', '[R3退场] 拒绝后单未被误翻已上线');
+    ok('[R3退场] hotfix-publish：bug 一律 409 LEGACY_RELEASE_FLOW_DISABLED（放在 ISSUE_NOT_HOTFIXABLE 判断之前）');
 
-    // R4：填发版信息锁定——release_id 已挂批次后禁改（防绕过 add-issues 一致性）
-    const r4 = await seedBugToReady(5, devTok);
-    await call('POST', `/api/sys-issues/${r4}/set-release-flag`, devTok, { needs_release: 1 });
-    const relEmpty = (await call('POST', '/api/sys-releases', adminTok, {})).body.id;
-    r = await call('POST', `/api/sys-releases/${relEmpty}/add-issues`, adminTok, { issue_ids: [r4] });
-    assert.strictEqual(r.status, 200, `add-issues 加 bug(needs_release=1) 应 200, got ${r.status} ${JSON.stringify(r.body)}`);
-    assert.strictEqual((await get('SELECT release_type FROM sys_releases WHERE id=?', [relEmpty])).release_type, 'bug', '批次首次加单回填 release_type=族别 bug');
-    r = await call('POST', `/api/sys-issues/${r4}/set-release-flag`, devTok, { needs_release: 0 });
-    assert.strictEqual(r.status, 409); assert.strictEqual(r.body.code, 'ISSUE_ALREADY_IN_RELEASE');
-    ok('R4：填发版信息锁定——已挂批次（release_id 非空）后禁止再改 needs_release → 409 ISSUE_ALREADY_IN_RELEASE');
+    // R5①退场：add-issues 拒绝任意 bug 单（新批次首次加单即拒，无需族别推导）
+    const r5Bug = await seedBugToReady(5, devTok);
+    const relForBug = (await call('POST', '/api/sys-releases', adminTok, {})).body.id;
+    r = await call('POST', `/api/sys-releases/${relForBug}/add-issues`, adminTok, { issue_ids: [r5Bug] });
+    assert.strictEqual(r.status, 409); assert.strictEqual(r.body.code, 'LEGACY_RELEASE_FLOW_DISABLED', '[R5①退场] add-issues 单条 bug 应 409');
+    assert.strictEqual((await issueRowRelease(r5Bug)), null, '[R5①退场] 拒绝后 bug 未被误挂批次');
+    assert.strictEqual((await get('SELECT release_type FROM sys_releases WHERE id=?', [relForBug])).release_type, null, '[R5①退场] 批次族别未被误回填（拒绝早于族别推导逻辑）');
+    ok('[R5①退场] add-issues：任意 bug 单一律 409 LEGACY_RELEASE_FLOW_DISABLED（新批次首次加单即拒，早于族别推导/needs_release 检查）');
 
-    // R5：add-issues 批次隔离——needs_release≠1 拒 + 混批拒（新批次首次加单类型不一致）+ 已定类型批次拒异类
-    const r5NoFlag = await seedBugToReady(5, devTok);   // 未填 needs_release（NULL）
-    const relEmpty2 = (await call('POST', '/api/sys-releases', adminTok, {})).body.id;
-    r = await call('POST', `/api/sys-releases/${relEmpty2}/add-issues`, adminTok, { issue_ids: [r5NoFlag] });
-    assert.strictEqual(r.status, 409, `bug 未标发版加批次应 409, got ${r.status}`);
-    assert.strictEqual(r.body.code, 'ISSUE_NOT_ADDABLE');
-    ok('R5a：add-issues 拒绝 needs_release≠1 的 bug（SQL 条件 type<>bug OR needs_release=1）');
+    // R5①退场（混选）：一次加入 [bug, feature] → 同样 409 LEGACY（不再是 MIXED_TYPE_BATCH——bug 检测在族别推导之前）
+    const r5MixBug = await seedBugToReady(5, devTok);
+    const r5MixFeature = await seedFeatureToReady(5, devTok);
+    const relMix2 = (await call('POST', '/api/sys-releases', adminTok, {})).body.id;
+    r = await call('POST', `/api/sys-releases/${relMix2}/add-issues`, adminTok, { issue_ids: [r5MixBug, r5MixFeature] });
+    assert.strictEqual(r.status, 409); assert.strictEqual(r.body.code, 'LEGACY_RELEASE_FLOW_DISABLED', '[R5①退场] 混选 bug+feature 应 409 LEGACY（非 MIXED_TYPE_BATCH）');
+    assert.strictEqual((await issueRowRelease(r5MixFeature)), null, '[R5①退场] 拒绝整批回滚：feature 也未被误挂（原子性不因 bug 检测提前而破坏）');
+    ok('[R5①退场] add-issues 混选 [bug,feature]：整批 409 LEGACY_RELEASE_FLOW_DISABLED（bug 检测抢在族别推导前，原子性不变）');
 
-    const mixBug = await seedBugToReady(5, devTok);
-    await call('POST', `/api/sys-issues/${mixBug}/set-release-flag`, devTok, { needs_release: 1 });
-    const mixFeature = await seedFeatureToReady(5, devTok);
-    const relMix = (await call('POST', '/api/sys-releases', adminTok, {})).body.id;
-    r = await call('POST', `/api/sys-releases/${relMix}/add-issues`, adminTok, { issue_ids: [mixBug, mixFeature] });
-    assert.strictEqual(r.status, 409, `一次加入 bug+feature 应 409, got ${r.status}`);
-    assert.strictEqual(r.body.code, 'MIXED_TYPE_BATCH');
-    assert.strictEqual((await issueRowRelease(mixBug)), null, '混批拒绝后 mixBug 未被误挂');
-    ok('R5b：add-issues 拒绝一次混选 bug 与非 bug（跨族别）→ 409 MIXED_TYPE_BATCH');
-
-    // 已定族别批次（relEmpty 已是 bug）加入 feature（非 bug 族）→ 409 RELEASE_TYPE_MISMATCH
-    const otherFeature = await seedFeatureToReady(5, devTok);
-    r = await call('POST', `/api/sys-releases/${relEmpty}/add-issues`, adminTok, { issue_ids: [otherFeature] });
-    assert.strictEqual(r.status, 409, `bug 批次加 feature 应 409, got ${r.status}`);
-    assert.strictEqual(r.body.code, 'RELEASE_TYPE_MISMATCH');
-    ok('R5c：add-issues 拒绝向已定族别批次（bug）加入异族（feature/change）→ 409 RELEASE_TYPE_MISMATCH');
-
-    // ⭐ R5d（D-A 核心）：feature + improvement **同批应成功**（同族 'change'，保住「一个版本一个批次」）
+    // ⭐ R5d（D-A 核心，变更流零行为变化）：feature + improvement **同批仍应成功**（同族 'change'）
     const chFeat = await seedChangeToReady('feature', 5, devTok);
     const chImpr = await seedChangeToReady('improvement', 5, devTok);
     const relChange = (await call('POST', '/api/sys-releases', adminTok, {})).body.id;
@@ -398,54 +367,79 @@ async function main() {
     assert.strictEqual((await get('SELECT release_type FROM sys_releases WHERE id=?', [relChange])).release_type, 'change', '批次族别回填=change');
     assert.strictEqual((await issueRowRelease(chFeat)), relChange, 'feature 已挂 change 批次');
     assert.strictEqual((await issueRowRelease(chImpr)), relChange, 'improvement 已挂 change 批次');
-    ok('⭐ R5d：feature + improvement 同批成功（同族 change，release_type=change）——D-A 核心，保住一个版本一个批次');
+    ok('⭐ R5d：feature + improvement 同批成功（同族 change，release_type=change）——变更流零行为变化，D-A 核心未动');
 
-    // R5e：已定 change 族批次追加 improvement（同族）成功；再追加 bug（异族）拒
+    // R5e：已定 change 族批次追加 improvement（同族）成功；追加 bug 现应 409 LEGACY（非 RELEASE_TYPE_MISMATCH）
     const chImpr2 = await seedChangeToReady('improvement', 5, devTok);
     r = await call('POST', `/api/sys-releases/${relChange}/add-issues`, adminTok, { issue_ids: [chImpr2] });
     assert.strictEqual(r.status, 200, `change 批次追加 improvement 应 200, got ${r.status}`);
     const bugForChange = await seedBugToReady(5, devTok);
-    await call('POST', `/api/sys-issues/${bugForChange}/set-release-flag`, devTok, { needs_release: 1 });
     r = await call('POST', `/api/sys-releases/${relChange}/add-issues`, adminTok, { issue_ids: [bugForChange] });
     assert.strictEqual(r.status, 409, `change 批次加 bug 应 409, got ${r.status}`);
-    assert.strictEqual(r.body.code, 'RELEASE_TYPE_MISMATCH');
-    ok('R5e：change 族批次追加 improvement 成功 + 追加 bug（异族）拒 409 RELEASE_TYPE_MISMATCH');
+    assert.strictEqual(r.body.code, 'LEGACY_RELEASE_FLOW_DISABLED', '[R5e退场] change 批次加 bug → LEGACY（非 RELEASE_TYPE_MISMATCH，bug 检测更早介入）');
+    ok('R5e：change 族批次追加 improvement 成功（变更流零回归）+ 追加 bug 现 409 LEGACY_RELEASE_FLOW_DISABLED');
 
-    // R5f（F-4）：批次移空后 release_type 复位 NULL，可被异族重新占用
+    // R5f（F-4，变更流零行为变化）：批次移空后 release_type 复位 NULL，可被异族（另一变更流类型）重新占用
     const relReset = (await call('POST', '/api/sys-releases', adminTok, {})).body.id;
     const rf = await seedChangeToReady('feature', 5, devTok);
     await call('POST', `/api/sys-releases/${relReset}/add-issues`, adminTok, { issue_ids: [rf] });
     assert.strictEqual((await get('SELECT release_type FROM sys_releases WHERE id=?', [relReset])).release_type, 'change', '加 feature 后族别=change');
     r = await call('POST', `/api/sys-releases/${relReset}/remove-issues`, adminTok, { issue_ids: [rf] });
     assert.strictEqual(r.status, 200, 'remove 200');
-    assert.strictEqual((await get('SELECT release_type FROM sys_releases WHERE id=?', [relReset])).release_type, null, 'F-4：批次移空后 release_type 复位 NULL');
-    const bugReuse = await seedBugToReady(5, devTok);
-    await call('POST', `/api/sys-issues/${bugReuse}/set-release-flag`, devTok, { needs_release: 1 });
-    r = await call('POST', `/api/sys-releases/${relReset}/add-issues`, adminTok, { issue_ids: [bugReuse] });
-    assert.strictEqual(r.status, 200, `移空后的批次可被 bug 族重新占用应 200, got ${r.status} ${JSON.stringify(r.body)}`);
-    assert.strictEqual((await get('SELECT release_type FROM sys_releases WHERE id=?', [relReset])).release_type, 'bug', '复用后族别改判 bug');
-    ok('⭐ R5f（F-4）：批次移空 → release_type 复位 NULL → 可被异族（bug）重新占用（不再锁死）');
+    assert.strictEqual((await get('SELECT release_type FROM sys_releases WHERE id=?', [relReset])).release_type, null, 'F-4：批次移空后 release_type 复位 NULL（变更流零回归）');
+    const improvementReuse = await seedChangeToReady('improvement', 5, devTok);
+    r = await call('POST', `/api/sys-releases/${relReset}/add-issues`, adminTok, { issue_ids: [improvementReuse] });
+    assert.strictEqual(r.status, 200, `移空后的批次可被 improvement 重新占用应 200, got ${r.status} ${JSON.stringify(r.body)}`);
+    assert.strictEqual((await get('SELECT release_type FROM sys_releases WHERE id=?', [relReset])).release_type, 'change', '复用后族别改判 change（变更流零回归）');
+    // 同一移空批次再尝试被 bug 占用 → 409 LEGACY（bug 侧退场，非"不再锁死"的复用对象）
+    const bugTryReuse = await seedBugToReady(5, devTok);
+    r = await call('POST', `/api/sys-releases/${relReset}/add-issues`, adminTok, { issue_ids: [bugTryReuse] });
+    assert.strictEqual(r.status, 409); assert.strictEqual(r.body.code, 'LEGACY_RELEASE_FLOW_DISABLED', '[R5f退场] 移空批次仍不可被 bug 占用（bug 侧整体退场）');
+    ok('⭐ R5f（F-4）：批次移空 → release_type 复位 NULL → 可被异族变更流类型重新占用（变更流零回归）；bug 侧不再可占用（整体退场）');
 
-    // ⭐ R5g（F-2 / codex M-2）：历史 release_type=NULL 非空批次 fail-closed（模拟 Commit② 前遗留态）
+    // ⭐ R5g（F-2 / codex M-2，变更流零行为变化）：历史 release_type=NULL 非空批次 fail-closed（模拟 Commit② 前遗留态）
     const relHist = (await call('POST', '/api/sys-releases', adminTok, {})).body.id;
     const histFeat = await seedChangeToReady('feature', 5, devTok);
     await call('POST', `/api/sys-releases/${relHist}/add-issues`, adminTok, { issue_ids: [histFeat] });   // 回填 change
     await run('UPDATE sys_releases SET release_type=NULL WHERE id=?', [relHist]);   // DB 直改还原「有成员但 release_type=NULL」历史态
-    // (a) add-issues 读已有成员：向 NULL 批次加 bug，应因已有 feature 成员（change 族）被拒，非按本次入参回填成 bug
+    // (a) add-issues 对 bug 单一律 LEGACY（不再看族别推导——bug 检测抢在最前）
     const histBug = await seedBugToReady(5, devTok);
-    await call('POST', `/api/sys-issues/${histBug}/set-release-flag`, devTok, { needs_release: 1 });
     r = await call('POST', `/api/sys-releases/${relHist}/add-issues`, adminTok, { issue_ids: [histBug] });
-    assert.strictEqual(r.status, 409, `历史 NULL 批次加异族应 409, got ${r.status} ${JSON.stringify(r.body)}`);
-    assert.strictEqual(r.body.code, 'RELEASE_TYPE_MISMATCH');
-    assert.strictEqual((await get('SELECT release_type FROM sys_releases WHERE id=?', [relHist])).release_type, null, '被拒后 release_type 仍 NULL（未被误回填成 bug）');
-    ok('R5g-a：历史 NULL 批次 add-issues 读已有成员族别，异族加单被拒（F-2 add fail-closed，不按入参误回填）');
-    // (b) publish 从成员推导族别：DB 强塞 bug 进 relHist 造混族别成员 + release_type=NULL，publish 应 fail-closed 拒
+    assert.strictEqual(r.status, 409, `历史 NULL 批次加 bug 应 409, got ${r.status} ${JSON.stringify(r.body)}`);
+    assert.strictEqual(r.body.code, 'LEGACY_RELEASE_FLOW_DISABLED', '[R5g-a退场] 历史 NULL 批次加 bug → LEGACY（非 RELEASE_TYPE_MISMATCH）');
+    assert.strictEqual((await get('SELECT release_type FROM sys_releases WHERE id=?', [relHist])).release_type, null, '被拒后 release_type 仍 NULL（未被误回填）');
+    ok('R5g-a：历史 NULL 批次 add-issues 加 bug 单 → 409 LEGACY_RELEASE_FLOW_DISABLED（bug 检测早于族别推导，变更流场景仍走 codex H-2 fail-closed，见下 (b)）');
+    // (b) [H-1 收口·codex40] publish 对"成员含 bug 族别"的历史 NULL 批次 fail-closed（语义升级）：
+    //   DB 强塞 bug 进 relHist 造混族别成员 + release_type=NULL（模拟脏库/手工改，绕过 add-issues）。
+    //   ⚠️ H-1 收口前：release_type=NULL（非 'bug' 字面量）让 R4 端点的 release_type='bug' 早拦漏掉，落到
+    //   _publishReleaseCoreInTxn 内核 family 一致性检查 → RELEASE_MEMBER_TYPE_MISMATCH。
+    //   H-1 收口后：publishReleaseTransition（R4 唯一 wrapper）先按**成员实际族别**拦 bug → LEGACY_RELEASE_FLOW_DISABLED
+    //   （更强：bug 一律不得走 legacy publish，非"仅混族别才拒"；堵住"纯 bug 脏批次绕 release_assignee 执行权直发"）。
+    //   内核 family 检查逐字保留（不动核内），现被 H-1 外层闸遮蔽、成为更深一层纵深防线（execute-release 要求纯 bug，
+    //   亦不会触发核内混族别分支）——见 verify-sys-release-orchestration.js [H-1] 纯 bug NULL 批次同拒用例。
     await run('UPDATE sys_issues SET release_id=? WHERE id=?', [relHist, histBug]);   // 绕过 add-issues 强塞（模拟脏库/手工改）
-    r = await call('POST', `/api/sys-releases/${relHist}/publish`, adminTok, { release_note: '混族别测试', version_tag: 'vmix' });
-    assert.strictEqual(r.status, 409, `混族别 NULL 批次 publish 应 409, got ${r.status} ${JSON.stringify(r.body)}`);
-    assert.strictEqual(r.body.code, 'RELEASE_MEMBER_TYPE_MISMATCH');
+    r = await call('POST', `/api/sys-releases/${relHist}/publish`, adminTok, { release_note: '含 bug 测试', version_tag: 'vmix' });
+    assert.strictEqual(r.status, 409, `含 bug 的 NULL 批次 publish 应 409, got ${r.status} ${JSON.stringify(r.body)}`);
+    assert.strictEqual(r.body.code, 'LEGACY_RELEASE_FLOW_DISABLED', '[R5g-b·H-1收口] 成员含 bug 的历史 NULL 批次 publish → LEGACY（publishReleaseTransition 按成员族别拦，早于核内 mismatch）');
     assert.strictEqual(await statusOf(histFeat), '待上线', 'publish 拒后 histFeat 未被翻已上线（原子回滚）');
-    ok('R5g-b：历史 NULL 批次 publish 从成员推导族别，混 bug+非bug 拒发布（F-2 publish fail-closed，不依赖存的 release_type）');
+    ok('R5g-b（H-1 收口）：历史 NULL 批次含 bug 成员 publish → 409 LEGACY_RELEASE_FLOW_DISABLED（R4 wrapper 按成员实际族别 fail-closed，堵住脏 bug 批次绕执行权直发；核内 family 检查保留为更深纵深防线）');
+
+    // [R4 退场] legacy /sys-releases/:id/publish 对 release_type='bug' 批次一律 409（正常路径下批次不可能是 bug 族别，
+    //   因 add-issues 已堵死；此处直接 DB 强改 release_type 验证 R4 端点自身的防线，独立于 add-issues 防线）。
+    const relBugFamily = (await call('POST', '/api/sys-releases', adminTok, {})).body.id;
+    await run(`UPDATE sys_releases SET release_type='bug' WHERE id=?`, [relBugFamily]);   // 模拟 bug 族别批次（正常路径不可达，纯 R4 端点自身防线测试）
+    r = await call('POST', `/api/sys-releases/${relBugFamily}/publish`, adminTok, { release_note: 'x', version_tag: 'y' });
+    assert.strictEqual(r.status, 409); assert.strictEqual(r.body.code, 'LEGACY_RELEASE_FLOW_DISABLED', '[R4退场] release_type=bug 批次 publish → 409 LEGACY（端点自身前置闸）');
+    ok('[R4退场] legacy /sys-releases/:id/publish：release_type=\'bug\' 批次一律 409 LEGACY_RELEASE_FLOW_DISABLED（端点自身防线，独立于 add-issues）');
+
+    // [R5⑤退场] remove-issues 对 release_type='bug' 批次一律 409（同样端点自身防线，正常路径不可达）。
+    const relBugFamily2 = (await call('POST', '/api/sys-releases', adminTok, {})).body.id;
+    const issueForRemove = await seedChangeToReady('feature', 5, devTok);
+    await call('POST', `/api/sys-releases/${relBugFamily2}/add-issues`, adminTok, { issue_ids: [issueForRemove] });
+    await run(`UPDATE sys_releases SET release_type='bug' WHERE id=?`, [relBugFamily2]);   // 模拟 bug 族别批次（正常路径不可达）
+    r = await call('POST', `/api/sys-releases/${relBugFamily2}/remove-issues`, adminTok, { issue_ids: [issueForRemove] });
+    assert.strictEqual(r.status, 409); assert.strictEqual(r.body.code, 'LEGACY_RELEASE_FLOW_DISABLED', '[R5⑤退场] release_type=bug 批次 remove-issues → 409 LEGACY');
+    ok('[R5⑤退场] remove-issues：release_type=\'bug\' 批次一律 409 LEGACY_RELEASE_FLOW_DISABLED（fail-closed 防御闸，正常路径不可达）');
   }
 
   // ═══ [T→⑤ 放开] derive 双向临时闸已放开（完整派生/双描述/M5 覆盖见 verify-sys-bug-derive.js）═══

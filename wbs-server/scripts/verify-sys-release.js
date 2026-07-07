@@ -11,6 +11,11 @@
 //   7. hotfix-publish（单条自动建 is_hotfix=1 批次 + 一键发布原子 / 非待上线 409 / config 409 / 缺说明 400）
 //   8. 权限（非 admin 403）+ 列表/详情
 //   9. config DB CHECK（release_id 永空，直接 UPDATE 被拒）+ 重开清 release_id 脱离批次（§6.4 集成）
+//   10-11. 自动号碰撞规避（A）+ issue_ids 元素数上限（E）
+//   12. release_id 三段断言（v1.6 §2.3 H-2 改写）：feature/improvement 已上线⟹release_id 非空（原样）；
+//       bug 侧改走新 G3(assign-release-dev)+G5/G6(execute-release) 流程——mode=hotfix⟹release_id 为空（不建批次），
+//       mode=publish⟹release_id 非空（建批次）。bug 上线编排完整覆盖+越权矩阵见 verify-sys-release-orchestration.js；
+//       本文件 1-11 节纯 release CRUD（变更流为主）保持不变，仅第 12 节的 bug 分支随 C3b 改写。
 const assert = require('assert');
 const http = require('http');
 const express = require('express');
@@ -333,27 +338,36 @@ async function main() {
   assert.strictEqual(r.status, 400); assert.strictEqual(r.body.code, 'TOO_MANY_ISSUES');
   ok('E：remove-issues 超 200 → 400 TOO_MANY_ISSUES');
 
-  // ── 12. release_id 三段断言（bug 流 Commit② §8.2 [codex复审:H2]，类型边界写死）──────────
+  // ── 12. release_id 三段断言（v1.6 §2.3 H-2 收口，通知改造 C3b 改写——旧 bug needs_release 语义已退场）──────────
   //   feature/improvement 已上线 ⟹ release_id NOT NULL（原样，本文件 1-9 节大量用例已隐含验证，此处显式断言收口）；
-  //   bug + needs_release=1 + 已上线 ⟹ release_id NOT NULL；bug + needs_release=0 + 已上线 ⟹ release_id NULL。
+  //   ⚠️ bug 侧三段断言已随 v1.6 §2.3 改写：旧 needs_release 决定 release_id 归宿的语义整体退场（needs_release 转只读
+  //   残留，见 verify-sys-bug-transitions.js [R1退场]）；新语义改由 execute-release 的 mode 决定（H-2）：
+  //   mode=hotfix ⟹ release_id IS NULL 且 version_tag IS NULL（不建批次）；
+  //   mode=publish ⟹ release_id IS NOT NULL 且 version_tag IS NOT NULL（建/复用批次）。
+  //   两条新路径完整覆盖 + 越权矩阵见独立脚本 verify-sys-release-orchestration.js；本文件仅收口"release_id 是否为空"
+  //   这一最终不变量，与本文件既有 release CRUD 断言同源保持在一处。
   {
     const seg1 = await get("SELECT COUNT(*) AS n FROM sys_issues WHERE type IN ('feature','improvement') AND status='已上线' AND release_id IS NULL");
     assert.strictEqual(seg1.n, 0, '三段断言①：feature/improvement 已上线 ⟹ release_id 全部非空');
     ok('release_id 三段断言①：type∈(feature,improvement) AND status=已上线 ⟹ release_id IS NOT NULL（全库扫描零违例）');
 
-    // bug 段：走真实 HTTP 端点各建一条，分别验证发版/不发版两路径的 release_id 归宿
+    // bug 段：走新 G3+G5/G6 端点，各建一条分别验证 hotfix/publish 两模式的 release_id/version_tag 归宿（H-2）
     let r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: 'seg-bug-a', system_name: 'BMS', source: '内部' });
     const bugA = r.body.id;
     await call('POST', `/api/sys-issues/${bugA}/assign`, adminTok, { assigned_to: 5 });
     await call('POST', `/api/sys-issues/${bugA}/estimate`, devTok, { dev_estimated_at: '2026-08-01 10:00' });
     await call('POST', `/api/sys-issues/${bugA}/submit`, devTok, { summary: '修复' });
     await call('POST', `/api/sys-issues/${bugA}/accept`, adminTok, {});
-    await call('POST', `/api/sys-issues/${bugA}/set-release-flag`, devTok, { needs_release: 1 });
-    r = await call('POST', `/api/sys-issues/${bugA}/hotfix-publish`, adminTok, { release_note: 'seg-a', version_tag: 'vseg-a' });
-    assert.strictEqual(r.status, 201, `bug 发版路径 hotfix 应 201, got ${r.status} ${JSON.stringify(r.body)}`);
+    r = await call('POST', '/api/sys-issues/assign-release-dev', adminTok, { issue_ids: [bugA], release_assignee_id: 5 });
+    assert.strictEqual(r.status, 200, `assign-release-dev 200, got ${r.status} ${JSON.stringify(r.body)}`);
+    r = await call('POST', '/api/sys-issues/execute-release', devTok, { mode: 'hotfix', issue_ids: [bugA] });
+    assert.strictEqual(r.status, 200, `bug execute-release(hotfix) 应 200, got ${r.status} ${JSON.stringify(r.body)}`);
     const rowA = await issueRow(bugA);
-    assert.strictEqual(rowA.status, '已上线'); assert.ok(rowA.release_id, '三段断言②：bug needs_release=1 已上线 ⟹ release_id 非空');
-    ok('release_id 三段断言②：type=bug AND needs_release=1 AND status=已上线 ⟹ release_id IS NOT NULL');
+    assert.strictEqual(rowA.status, '已上线');
+    assert.strictEqual(rowA.release_id, null, '三段断言②（新 H-2 语义）：bug mode=hotfix 已上线 ⟹ release_id 为空（不建批次）');
+    // version_tag 只存在于 sys_releases（issue 侧无此列）；release_id=NULL 即代表"无关联批次"，
+    //   故 hotfix 模式下 version_tag 天然无处依附，不再单独查询断言（H-2 不变量由 release_id 一列即可完整表达）。
+    ok('release_id 三段断言②（H-2 新语义）：type=bug AND execute-release(mode=hotfix) AND status=已上线 ⟹ release_id 为 NULL（不建批次，version_tag 天然无处依附）');
 
     r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: 'seg-bug-b', system_name: 'BMS', source: '内部' });
     const bugB = r.body.id;
@@ -361,12 +375,17 @@ async function main() {
     await call('POST', `/api/sys-issues/${bugB}/estimate`, devTok, { dev_estimated_at: '2026-08-01 10:00' });
     await call('POST', `/api/sys-issues/${bugB}/submit`, devTok, { summary: '修复' });
     await call('POST', `/api/sys-issues/${bugB}/accept`, adminTok, {});
-    await call('POST', `/api/sys-issues/${bugB}/set-release-flag`, devTok, { needs_release: 0 });
-    r = await call('POST', `/api/sys-issues/${bugB}/confirm-online-norelease`, adminTok, {});
-    assert.strictEqual(r.status, 200, `bug 不发版路径确认上线应 200, got ${r.status} ${JSON.stringify(r.body)}`);
+    r = await call('POST', '/api/sys-issues/assign-release-dev', adminTok, { issue_ids: [bugB], release_assignee_id: 5 });
+    assert.strictEqual(r.status, 200, `assign-release-dev 200, got ${r.status} ${JSON.stringify(r.body)}`);
+    r = await call('POST', '/api/sys-issues/execute-release', devTok, { mode: 'publish', issue_ids: [bugB], release_note: 'seg-b', version_tag: 'vseg-b' });
+    assert.strictEqual(r.status, 201, `bug execute-release(publish) 应 201, got ${r.status} ${JSON.stringify(r.body)}`);
     const rowB = await issueRow(bugB);
-    assert.strictEqual(rowB.status, '已上线'); assert.strictEqual(rowB.release_id, null, '三段断言③：bug needs_release=0 已上线 ⟹ release_id 为空');
-    ok('release_id 三段断言③：type=bug AND needs_release=0 AND status=已上线 ⟹ release_id IS NULL');
+    assert.strictEqual(rowB.status, '已上线');
+    assert.ok(rowB.release_id, '三段断言③（新 H-2 语义）：bug mode=publish 已上线 ⟹ release_id 非空（建批次）');
+    const relB = await relRow(rowB.release_id);
+    assert.strictEqual(relB.version_tag, 'vseg-b', '三段断言③：bug mode=publish ⟹ 批次 version_tag 落库');
+    assert.strictEqual(relB.status, '已发布', 'bug mode=publish 批次已发布');
+    ok('release_id 三段断言③（H-2 新语义）：type=bug AND execute-release(mode=publish) AND status=已上线 ⟹ release_id/version_tag 均非空（建批次）');
   }
 
   console.log(`\n✅ verify-sys-release 全部通过（${passed} 项断言）`);

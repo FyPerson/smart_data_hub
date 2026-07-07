@@ -354,34 +354,35 @@ const BUG_FLOW_TRANSITIONS = [
     timelineEvent: 'status_change', actionCode: 'void',
     notifyAfterCommit: null,
   },
-  // ── Commit ② 追加：两条确认上线路径 + 填发版信息（bug流_方案_20260702_v1.2 §8）──────────
-  //   ① 的死端就此解除；needs_release 唯一写点=set_release_flag（K1/K2）。
+  // ── [v1.6 退场] Commit ② 曾追加的两条确认上线路径 + 填发版信息（bug流_方案_20260702_v1.2 §8）──────────
+  //   通知改造 v1.6 §2.3 [C-1 旧入口替换矩阵] 已把 待上线→已上线 的唯一入口收敛到
+  //   assign-release-dev + execute-release（见下方新增两条）。三条旧 meta 条目
+  //   set_release_flag / publish / confirm-online-norelease **整体移除**（非仅端点层拒绝）——
+  //   findTransition('bug', 这三个 action, 任意态) 从此恒返 null，端点侧另加 type='bug' 早期显式
+  //   LEGACY_RELEASE_FLOW_DISABLED 拒绝（更友好的错误信息，早于 findTransition 判断）。
+  //   ⚠️ ACTION_LABELS 里这三个动作的中文标签**保留不删**（见下方，历史 timeline 行仍需渲染 action_code）。
+  //   变更流（feature/improvement）从未定义这三个 action，本次移除零影响（CHANGE_FLOW_TRANSITIONS 独立数组）。
   {
-    action: 'set_release_flag',             // 填发版信息：待上线态内开发本人填 needs_release（旁路，不改 status，§2.3）
-    from: ['待上线'], to: null,
-    roleGuard: null, ownerGuard: 'assignee',
-    requiredPayload: ['needs_release'],
-    sideEffects: ['needs_release 写入（唯一写点，0/1 枚举校验，K1/K2；release_id 已挂批次后禁改）'],
-    timelineEvent: 'status_change', actionCode: 'set_release_flag',
+    action: 'assign-release-dev',           // 上线编排①：建单人批量指定上线开发（写 release_assignee_id，§2.3 C3b，G3）
+    from: ['待上线'], to: null,             // 不改 status；批量端点（POST /sys-issues/assign-release-dev）独立实现，
+                                             //   不走 sysIssueTransition/findTransition（本条目仅供 buildMeta 前端展示/文档一致性）
+    roleGuard: 'admin', ownerGuard: null,
+    requiredPayload: ['issue_ids', 'release_assignee_id'],
+    sideEffects: ['release_assignee_id/_name 写入（批量，先整批资格校验，任一失败整批不落库，H-4）',
+      '仅允许"未指定执行人"或"同人幂等重提"；改 A→B 须走 reassign-release-dev（M-1）'],
+    timelineEvent: 'note', actionCode: 'assign_release_dev',
     notifyAfterCommit: null,
   },
   {
-    action: 'publish',                      // 确认上线·发版：待上线 → 已上线（仅 needs_release=1，单条走 hotfix-publish，端点 C4 复用）
+    action: 'execute-release',              // 上线编排②：被指定开发执行上线（mode=hotfix|publish，§2.3 C3b，G5/G6）
     from: ['待上线'], to: '已上线',
-    roleGuard: 'admin', ownerGuard: null,   // 建单人 native 恒 admin（T-M1 口径）
-    requiredPayload: [],                    // hotfix-publish 端点内校 release_note/version_tag
-    sideEffects: ['released_at=now', 'release_id 绑 hotfix 批次（is_hotfix=1）', 'release timeline'],
+    roleGuard: null, ownerGuard: null,      // 权限=actor.id===release_assignee_id（H-1，独立端点内校验，非常规二元 guard 模型）
+    requiredPayload: ['mode'],
+    sideEffects: ['mode=hotfix：单 issue 不建批次，release_id/version_tag 保持 NULL（H-2/H-3）',
+      'mode=publish：单事务建/更 sys_releases 批次（复用 _publishReleaseCoreInTxn 内核）+ release_id/version_tag 写入',
+      'F2：不自动触发任何通知（建单人通知走手动 notify-creator，G8）'],
     timelineEvent: 'release', actionCode: null,
-    notifyAfterCommit: 'notifyReleasedToRequester',
-  },
-  {
-    action: 'confirm-online-norelease',     // 确认上线·不发版 [审:H1]：待上线 → 已上线（仅 needs_release=0，专用 transition 非散落 UPDATE）
-    from: ['待上线'], to: '已上线',
-    roleGuard: 'admin', ownerGuard: null,   // 建单人 native 恒 admin；admin 兜底（开发失联卡待上线）
-    requiredPayload: [],
-    sideEffects: ['released_at=now', 'release_id 保持 NULL（不建批次）', '双 WHERE 守卫 release_id IS NULL AND needs_release=0'],
-    timelineEvent: 'release', actionCode: 'confirm_online_norelease',
-    notifyAfterCommit: 'notifyReleasedToRequester',
+    notifyAfterCommit: null,
   },
   // ── Commit ⑤ 追加：派生（bug流_方案_20260702_v1.2 §4）──────────
   //   ① 起端点层 SYS_BUG_DERIVE_PENDING 临时闸 + 本 meta 无 derive 条目双重 fail-closed；⑤ 一并放开。
@@ -443,7 +444,11 @@ function resolveToStatus(transition, fromStatus) {
 
 // 旁路动作白名单（不改 status 的就地副作用动作，前端路由专用端点 /feasibility /blocked /unblock /estimate /scope-change /derive）——
 //   codex 20 L-1：显式白名单替「to===null 推断」，新增动作默认 transition（安全侧），避免 resume 类「to=null 但动态解析 status」误标。
-const SIDE_EFFECT_ACTIONS = new Set(['estimate', 'feasibility', 'blocked', 'unblock', 'derive', 'scope_change', 'set_release_flag']);
+// ⚠️ set_release_flag 已随 v1.6 退场从 BUG_FLOW_TRANSITIONS 移除（不再有该 action 的 typeFlows 条目），
+//   本白名单集不因此报废——保留字面量对 KIND_EXPECT 类测试无害（Set.has 对不存在的 action 从不命中，
+//   不影响 buildMeta 分类）；新增 assign-release-dev（不改 status，真旁路）入本白名单，execute-release
+//   （真改 status 为 已上线）不入，走默认 'transition' 分类。
+const SIDE_EFFECT_ACTIONS = new Set(['estimate', 'feasibility', 'blocked', 'unblock', 'derive', 'scope_change', 'set_release_flag', 'assign-release-dev']);
 
 // ── 开发工作态统一判定（bug 方案 [审:M4] isDevWorkState，Commit ①）──────────
 //   「开发正在干活」的态名按类型不同（变更流=开发中 / bug=处理中 / config 追加时=处理中），
@@ -480,8 +485,13 @@ function buildMeta() {
     // scope_change label 为 config 流预留（feature/improvement 已移除该动作，typeFlows 不含）——
     //   meta.actions 是全动作 label 超集，前端按 typeFlows 显隐按钮，故残留此 label 无害（ultracode 对抗审确认）。
     scope_change: '范围变更', derive: '派生迭代',
-    // bug 流 Commit ②：确认上线两路径 + 填发版信息
+    // bug 流 Commit ②：确认上线两路径 + 填发版信息 ——⚠️ 标签保留供历史 timeline 行渲染 action_code
+    //   （v1.6 §2.3 [C-1 回填]：三条 action 已从 BUG_FLOW_TRANSITIONS 移除退场，但历史单曾产生的
+    //   timeline 行 action_code 仍是这几个字面量，meta.actions 是全动作 label 超集，删标签会让
+    //   历史行渲染成空白/undefined，故仅删 TRANSITIONS 条目、不删本处标签）。
     set_release_flag: '填发版信息', 'confirm-online-norelease': '确认上线（不发版）',
+    // 通知改造 v1.6 §2.3 新增：上线编排两动作
+    'assign-release-dev': '指定上线开发', 'execute-release': '执行上线',
   };
 
   for (const type of Object.keys(TRANSITIONS)) {

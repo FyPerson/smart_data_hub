@@ -59,14 +59,18 @@ module.exports = (deps) => {
   // ============================================================
   // 一、schema readiness state + 关键列锚点常量 + 守门中间件
   // ============================================================
-  // 系统迭代四表（sys_releases/sys_issues/sys_issue_timeline/sys_issue_attachments）。
+  // 系统迭代五表（sys_releases/sys_issues/sys_issue_timeline/sys_issue_attachments/sys_issue_dev_assignees）。
   //   C1 首版 CREATE TABLE IF NOT EXISTS 一次建全（无 ALTER，方案 §3.1）；**bug 流 Commit ① 起已上线表演进**：
   //   新列走 runSysMigration [1a] 幂等 ALTER（生产 v1.102.0 有表，IF NOT EXISTS 对已存在表 no-op 不加列）。
-  //   migration PRAGMA 复查四表 + 关键列就位才置 ready；未就绪挡 sys-* 写入口（503），其他模块正常。
+  //   ⚠️ 通知改造 Commit C1a（bug流通知改造_方案_20260703_v1.5.md，内容 v1.6 定稿）新增第 5 张表
+  //   `sys_issue_dev_assignees`（多开发协作子表）——对生产已有 sys 四表库同样是**全新表**，CREATE TABLE
+  //   IF NOT EXISTS 直接建全（含 CHECK，无需 ALTER）；sys_issues 侧新增 11 列（relay 通知 7 + requester
+  //   byPhone 快照 2 + 上线编排 release_assignee 2）走既有 alterAddMissingCols 幂等 ALTER 范式补列。
+  //   migration PRAGMA 复查五表 + 关键列就位才置 ready；未就绪挡 sys-* 写入口（503），其他模块正常。
   //   readiness 闸门 = 冗余防线 + 首启短暂窗口保护（migration 完成前 ready=false，避免首启报错）。
   const SYS_SCHEMA_STATE = { ready: false, error: null };
 
-  const SYS_REQUIRED_TABLES = ['sys_releases', 'sys_issues', 'sys_issue_timeline', 'sys_issue_attachments'];
+  const SYS_REQUIRED_TABLES = ['sys_releases', 'sys_issues', 'sys_issue_timeline', 'sys_issue_attachments', 'sys_issue_dev_assignees'];
 
   // readiness 复查是"启动期就绪 status-only 抽样"——挑代表性关键不变量列（三侧通知 status 锚点/质量计数/
   //   来源/血缘批次/config 生效时刻），不做全字段全量校验（那是 verify-sys-schema.js 的职责，对齐 corrections
@@ -90,12 +94,26 @@ module.exports = (deps) => {
     'notify_status', 'requester_notify_status', 'creator_notify_status',  // ← 三侧锚点（L-6）
     'effected_at',                                                        // ← config 已生效时刻（11-M1），readiness 须含
     'needs_feasibility', 'feasibility_conclusion', 'blocked',            // ← 可行性评估闸门锚点（F1 §2.3，抽样非全列；其余 4 评估列由 verify 全量保障）
-    'needs_release', 'related_correction_no', 'fix_gap_note', 'dingtalk_chat_id'  // ← bug 流 Commit ① 锚点（[审:M1] 指定 4 锚；derive_reason + 其余 4 群字段由 verify 全量保障）
+    'needs_release', 'related_correction_no', 'fix_gap_note', 'dingtalk_chat_id',  // ← bug 流 Commit ① 锚点（[审:M1] 指定 4 锚；derive_reason + 其余 4 群字段由 verify 全量保障）
+    'relay_notify_status',  // ← 通知改造 C1a 锚点（bug流通知改造_方案_20260703_v1.5.md §4.1）：对接人通知侧状态，
+                             //   relay 其余 6 列由 verify-sys-schema 全量保障。
+    // ← 通知改造 C3b/C4 锚点：release_assignee_id/name 在 C1a 时确为纯数据列（不入锚点），但 C3b（execute-release/
+    //   assign-release-dev SELECT release_assignee_id 判执行权）+ C4（列表 GET SELECT release_assignee_id/name 供批量面板
+    //   + 详情可见性闸门读 release_assignee_id）后已成**被消费的热路径列**——须入锚点，否则 mid-migration 崩溃后
+    //   （key 列已补但这两列未补）readiness 误报 ready → 列表 SELECT「no such column」500（codex 末次合并审 MED 收口）。
+    'release_assignee_id', 'release_assignee_name',
   ];
   const SYS_RELEASES_KEY_COLS = ['release_no', 'status', 'is_hotfix', 'release_note', 'version_tag',
     'release_type'];   // ← bug 流 Commit ① 批次类型隔离锚点（[codex三审:L] 值域非空由 ② 服务端守卫强制，readiness 只查列在）
   const SYS_TIMELINE_KEY_COLS = ['event_type', 'from_status', 'to_status', 'action_code', 'ref_id', 'round_no'];
   const SYS_ATTACHMENTS_KEY_COLS = ['attachment_type', 'round_no', 'status'];
+  // ← 通知改造 C1a 新表锚点（bug流通知改造_方案_20260703_v1.5.md §4.1）。sys_issue_dev_assignees 是**一次性
+  //   CREATE TABLE（无 ALTER 路径）**——要么整表建全要么不存在，故 readiness 用"结构全列在"模型（非 sys_issues 那种
+  //   ALTER 演进表的抽样锚点）：缺任一结构列=建表未完整→[2] 判 ready=false。**列集 = [1c] 迁移依赖全列（SELECT+INSERT
+  //   触达列），并与 [1c] 的 devAssigneesSchemaReady guard 同源**（guard 直接 .every 引用本常量），杜绝 guard/锚点/INSERT
+  //   三处列集漂移（通知改造批1 集成审收口：codex MEDIUM + ultracode 五视角 #5/#6）。
+  const SYS_DEV_ASSIGNEES_KEY_COLS = ['issue_id', 'user_id', 'user_name', 'is_primary', 'notify_status',
+    'notified_at', 'read_at', 'notify_message_key', 'notify_error', 'removed_at'];
 
   // ── 受阻三件套清理（§⑥ admin 处置后清当前 blocked 字段）：hold/void 处置 + unblock 解除 + 换轮复用 ──────────
   //   F2b 修（ultracode 对抗审）：F2b 让 blocked=1 首次可达后，hold/void 处置 blocked 单必须清 blocked，
@@ -141,8 +159,13 @@ module.exports = (deps) => {
   //   路线：对接人 = 固定两用户白名单（**非角色口径**，可非 admin）——示例发布者(id=7,publisher) / 示例对接人(id=13,user)。
   //   ⭐ 与 correction relay 白名单（corrections.js CORRECTION_RELAY_USER_IDS）是**同两人**（生产已在用），刻意复用
   //     其已验证 id；bug 流镜像该范式。授权高于 role——白名单成员即可当对接人（看 bug / 指派 / 换人），即便 user 角色。
-  //   ⚠️ bug 流对接人是**全局**白名单（无每单 relay_notified_user_id 绑定，与 correction 不同）——两人对**任意 bug 单**
-  //     都可指派/换人；type 精判把权限**收窄到 type='bug'**（不波及 feature/improvement 变更流，§3「不全局化」）。
+  //   ⭐ [F4 修正，通知改造 Commit C1b，bug流通知改造_方案_20260703_v1.5.md §3.1 正交表]
+  //     四行正交（与 correction 的差异不再是"有无 per-单绑定"，而是"操作权 vs 通知目标"两条独立轴）：
+  //     ① 白名单 [7,13] = **谁能操作**（assign/reassign + 发/查已读 开发·建单人·业务方侧，全局、任意 bug 单）；
+  //     ② `relay_notified_user_id`（per-单）= **"通知对接人"这一动作的收件目标**（path B 建单写入，通知改造新增列，
+  //        与①同为白名单成员但语义不同——不是"谁能操作"而是"该单通知发给谁"，白名单成员不能发 notify-relay 给自己）；
+  //     ③ `assigned_to` = 主开发（DRI，状态机 owner）；④ `sys_issue_dev_assignees` 子表 = 开发集（主+协作）。
+  //     type 精判仍把①的操作权**收窄到 type='bug'**（不波及 feature/improvement 变更流，§3「不全局化」）。
   //   ⚠️ 改名单需三处同步：本常量 + 前端 public/Sys_Iteration.html 同名常量 + scripts/verify-sys-liaison.js
   //     （verify 卡三处字面量一致防漂移，对齐 correction relay 白名单三处同步纪律）。
   //   ⚠️ 部署前探针（deferred 到 5 片齐部署前，[[feedback_real_sample_before_deploy]]）：确认生产 users 表
@@ -309,6 +332,27 @@ module.exports = (deps) => {
         dingtalk_chat_name TEXT,
         dingtalk_chat_desc TEXT,
 
+        -- ── 通知改造 Commit C1a（bug流通知改造_方案_20260703_v1.5.md §4.1/§4.2/§2.3，内容 v1.6 定稿）──────────
+        --   置于表尾（与旧库 ALTER ADD COLUMN 追加序一致，两路径列序不漂移，同 bug 流 Commit ① 惯例）。
+        --   relay 通知（对接人侧，7 列，§4.1）：白名单成员通过 path B 建单写 relay_notified_user_id，
+        --   notify-relay 端点（C3）发送后填其余 6 列；relay_notify_status 对齐三侧 notify_status 处理
+        --   （NOT NULL DEFAULT 'not_sent' + CHECK；新库路径带 CHECK，ALTER 路径不补——见下方 [1a] 说明）。
+        relay_notified_user_id INTEGER,
+        relay_notified_at DATETIME,
+        relay_read_at DATETIME,
+        relay_notify_status TEXT NOT NULL DEFAULT 'not_sent' CHECK (relay_notify_status IN ('not_sent','sent','failed')),
+        relay_notify_message_key TEXT,
+        relay_notify_error TEXT,
+        relay_notified_user_name TEXT,       -- 反规范化收件人姓名（白名单成员可能改名，§4.1）
+        -- requester byPhone 收件人快照（§4.2 H-5）：notify-requester 发送时落快照，
+        --   重发/查已读走快照不走当前 requester_phone（防发后改号已读失真）。
+        requester_notify_phone_snapshot TEXT,
+        requester_notify_ding_uid TEXT,
+        -- 上线编排指定执行开发（§2.3，C3b assign-release-dev/execute-release 消费）：
+        --   C1a 仅建列——nullable inert，本 commit 不接入任何读/写/守卫逻辑（schema 一次到位免二次迁移）。
+        release_assignee_id INTEGER,
+        release_assignee_name TEXT,
+
         CHECK (type <> 'config' OR release_id IS NULL)
       )`, recordSysErr('sys_issues'));
       db.run(`CREATE INDEX IF NOT EXISTS idx_sys_issues_status   ON sys_issues(status)`, recordSysErr('idx_sys_issues_status'));
@@ -358,10 +402,35 @@ module.exports = (deps) => {
         created_at DATETIME DEFAULT (datetime('now','localtime')),
         FOREIGN KEY (issue_id) REFERENCES sys_issues(id) ON DELETE CASCADE
       )`, recordSysErr('sys_issue_attachments'));
-      // ⚠️ 最后一个 DDL 的 callback 触发 migration（时序铁律 corrections.js:322-323：
-      //   必须由 serialize 块内最后一个 db.run callback 触发，否则 PRAGMA 与队列里 CREATE TABLE 竞态 → 永久 false）。
-      db.run(`CREATE INDEX IF NOT EXISTS idx_sys_attach_issue ON sys_issue_attachments(issue_id)`, (err) => {
-        recordSysErr('idx_sys_attach_issue')(err);
+      db.run(`CREATE INDEX IF NOT EXISTS idx_sys_attach_issue ON sys_issue_attachments(issue_id)`, recordSysErr('idx_sys_attach_issue'));
+
+      // ── 2.5 sys_issue_dev_assignees（多开发协作子表，通知改造 Commit C1a，
+      //   bug流通知改造_方案_20260703_v1.5.md §4.1，内容 v1.6 定稿）──────────
+      //   主开发 assigned_to（DRI，写在 sys_issues）+ 协作开发（本表 is_primary=0）；
+      //   **全新表**——对生产已有 sys 四表库，CREATE TABLE IF NOT EXISTS 同样是首次真建（非 no-op），
+      //   直接带完整 CHECK 上线，不走 alterAddMissingCols（那是给「已存在表加列」用的，本表整表是新的）。
+      db.run(`CREATE TABLE IF NOT EXISTS sys_issue_dev_assignees (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        issue_id INTEGER NOT NULL,
+        user_id INTEGER NOT NULL,
+        user_name TEXT NOT NULL,                -- 服务端从 users.display_name 重算，不信客户端（§3.3）
+        is_primary INTEGER NOT NULL DEFAULT 0 CHECK (is_primary IN (0,1)),
+        notify_status TEXT NOT NULL DEFAULT 'not_sent' CHECK (notify_status IN ('not_sent','sent','failed')),
+        notified_at DATETIME,
+        read_at DATETIME,
+        notify_message_key TEXT,
+        notify_error TEXT,
+        removed_at DATETIME,                    -- 软删（改派移除保留审计通知行），NULL=在册（§3.3 五步差量 upsert）
+        FOREIGN KEY (issue_id) REFERENCES sys_issues(id) ON DELETE CASCADE
+      )`, recordSysErr('sys_issue_dev_assignees'));
+      db.run(`CREATE INDEX IF NOT EXISTS idx_sys_dev_assignees_issue ON sys_issue_dev_assignees(issue_id)`, recordSysErr('idx_sys_dev_assignees_issue'));
+      // [G12] 部分唯一索引——只约束在册行（removed_at IS NULL），禁整表 UNIQUE(issue_id,user_id)：
+      //   同一开发软删后再加回会撞整表约束，部分索引兼容「复活最近一条」改派算法（§3.3 步骤 2）。
+      // ⚠️ 最后一个 DDL 的 callback 触发 migration（时序铁律 corrections.js:322-323，同 idx_sys_attach_issue
+      //   原注释迁移至此——必须由 serialize 块内最后一个 db.run callback 触发，否则 PRAGMA 与队列里
+      //   CREATE TABLE 竞态 → 永久 false）。
+      db.run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_sys_dev_assignee_active ON sys_issue_dev_assignees(issue_id, user_id) WHERE removed_at IS NULL`, (err) => {
+        recordSysErr('idx_sys_dev_assignee_active')(err);
         runSysMigration(firstSysDdlError);
       });
     });
@@ -387,7 +456,7 @@ module.exports = (deps) => {
       // [1] 四表存在性
       const tables = await new Promise((resolve, reject) => {
         db.all(
-          "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('sys_releases','sys_issues','sys_issue_timeline','sys_issue_attachments')",
+          "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('sys_releases','sys_issues','sys_issue_timeline','sys_issue_attachments','sys_issue_dev_assignees')",
           (err, rows) => err ? reject(err) : resolve((rows || []).map(r => r.name))
         );
       });
@@ -438,6 +507,28 @@ module.exports = (deps) => {
       await alterAddMissingCols('sys_issues', BUG_FLOW_ISSUE_COLS, 'bug 流 Commit ①');
       await alterAddMissingCols('sys_releases', [['release_type', 'TEXT']], 'bug 流 Commit ①·批次类型隔离 [审:L1]');
 
+      // [1a-2] ⭐ 通知改造 Commit C1a（bug流通知改造_方案_20260703_v1.5.md §4.1/§4.2/§2.3，内容 v1.6 定稿）：
+      //   sys_issues 已上线表演进——补 11 列（relay 通知 7 + requester byPhone 快照 2 + 上线编排
+      //   release_assignee 2），照 [1a] 同一 alterAddMissingCols 幂等 ALTER 范式；相对新库 CREATE（本文件
+      //   §2.2）多出的 CHECK/NOT NULL 语义，ALTER 路径同 needs_release 先例不补 CHECK（SQLite ALTER 补约束
+      //   受限）——relay_notify_status 例外：NOT NULL DEFAULT 'not_sent' 可通过 ALTER 常量默认值回填旧行
+      //   （SQLite 支持 ADD COLUMN NOT NULL + 常量 DEFAULT，历史行自动回填，不同于 CHECK 的硬限制）。
+      //   顺序铁律同 [1a]：relay_notify_status 已入 SYS_ISSUES_KEY_COLS——本 ALTER 必须在下方 [2] 复查之前完成。
+      const NOTIFY_REWORK_ISSUE_COLS = [
+        ['relay_notified_user_id', 'INTEGER'],
+        ['relay_notified_at', 'DATETIME'],
+        ['relay_read_at', 'DATETIME'],
+        ['relay_notify_status', "TEXT NOT NULL DEFAULT 'not_sent'"],   // ALTER 不补 CHECK，新库 CREATE 带完整 CHECK（对照 verify-sys-schema）
+        ['relay_notify_message_key', 'TEXT'],
+        ['relay_notify_error', 'TEXT'],
+        ['relay_notified_user_name', 'TEXT'],
+        ['requester_notify_phone_snapshot', 'TEXT'],   // §4.2 H-5：byPhone 收件人快照
+        ['requester_notify_ding_uid', 'TEXT'],
+        ['release_assignee_id', 'INTEGER'],            // §2.3：C1a 仅建列，无任何读/写/守卫引用
+        ['release_assignee_name', 'TEXT'],
+      ];
+      await alterAddMissingCols('sys_issues', NOTIFY_REWORK_ISSUE_COLS, '通知改造 Commit C1a');
+
       // [1b] release_type **族别**回填（D-A：bug vs 非bug，用户 2026-07-03 拍板）：按成员族别回填非空批次——
       //   含 bug 成员 → 'bug'，否则（feature/improvement）→ 'change'；空批次留 NULL（② 建批次/加单时写值）。
       //   ⭐ 这消解了旧「按精确 type 唯一性回填」留下的 codex H-2 哑弹：历史批次（bug 流未上线前只可能含
@@ -452,12 +543,82 @@ module.exports = (deps) => {
           (err) => err ? reject(err) : resolve());
       });
 
-      // [2] 四表关键列 PRAGMA 复查（抽样锚点，非全字段；[1a] ALTER 后的最新列集）
+      // [1c] ⭐ 通知改造 Commit C1b（历史迁移，独立 commit，§4.3 H-2/H-3）：
+      //   补 primary 子表行 + 行内同时回填旧 dev notify_*（单条 INSERT…VALUES 一次写入 is_primary=1 与通知状态列，
+      //   非"先插行再 UPDATE 回填"两步——同一终态更简单、避免中间态）。⚠️ 逐行 INSERT、**非单事务整体原子**：单行
+      //   INSERT 原子，整迁移靠幂等重跑收敛（非单条语句回滚）——WHERE NOT EXISTS 已有在册 primary 行的 issue 跳过
+      //   （不因迁移重跑或 C2 上线后产生的新单而误覆盖；进程中途崩溃留部分补齐、下次启动重跑收敛）。
+      //   user_name 解析优先级：users.display_name → users.username → sys_issues.assigned_to_name（既有
+      //   建单/指派时留痕的反规范化名）→ 'user#'+id 兜底。⚠️ 不对 users 表做 LEFT JOIN（多数 verify-sys-*.js
+      //   测试库不建 users 表，JOIN 会因"no such table: users"让 runSysMigration 整体 catch 熔断、殃及全部
+      //   18 个回归脚本）——改为**先探测 users 表是否存在**（sqlite_master 查表名，不是 try/catch 吞异常：
+      //   区分"表不存在的预期分支"与"真实查询错误"，后者仍应 throw 到外层 catch 置 SYS_SCHEMA_STATE.error）。
+      //   ⚠️ 同理防御 sys_issue_dev_assignees 自身列不全（正常路径不可达——本表由 [2.5] CREATE TABLE IF NOT
+      //   EXISTS 一次建全，无 ALTER，不存在半成品态；此处仅为 readiness 缺列测试场景兜底）：查询前先 PRAGMA
+      //   探测 **SYS_DEV_ASSIGNEES_KEY_COLS（= 本步 SELECT+INSERT 触达的迁移依赖全列，与 [2] 锚点同源）** 是否都在，
+      //   不在则跳过本步、把诊断权交还 [2]——[2] 用同一列集判 ready=false，给干净的"关键列缺失"信息，而非本步因
+      //   SQL 编译期列名解析失败抛原始 SQLITE_ERROR 熔断整个 runSysMigration（guard 覆盖 SELECT 的 issue_id 与
+      //   INSERT 的全部目标列，故不会 guard 放行却在 INSERT 处撞缺列）。
+      const devAssigneesCols = (await new Promise((resolve, reject) => {
+        db.all(`PRAGMA table_info(sys_issue_dev_assignees)`, (err, rows) => err ? reject(err) : resolve(rows || []));
+      })).map(c => c.name);
+      const devAssigneesSchemaReady = SYS_DEV_ASSIGNEES_KEY_COLS.every(c => devAssigneesCols.includes(c));
+      let legacyAssignedRows = [];
+      if (devAssigneesSchemaReady) {
+        legacyAssignedRows = await new Promise((resolve, reject) => {
+          db.all(
+            `SELECT id, assigned_to, assigned_to_name, notify_status, notified_at, notify_message_key, notify_error, read_at
+               FROM sys_issues
+              WHERE assigned_to IS NOT NULL
+                AND NOT EXISTS (
+                  SELECT 1 FROM sys_issue_dev_assignees da
+                   WHERE da.issue_id = sys_issues.id AND da.is_primary = 1 AND da.removed_at IS NULL
+                )`,
+            (err, rows) => err ? reject(err) : resolve(rows || [])
+          );
+        });
+      } else {
+        logger.warn('[系统迭代迁移] 通知改造 C1b：sys_issue_dev_assignees 关键列不全，跳过历史迁移回填（[2] 复查用同一 SYS_DEV_ASSIGNEES_KEY_COLS 锚点集据此判 ready=false）');
+      }
+      if (legacyAssignedRows.length > 0) {
+        const usersTableExists = await new Promise((resolve, reject) => {
+          db.get(`SELECT name FROM sqlite_master WHERE type='table' AND name='users'`, (err, row) => err ? reject(err) : resolve(!!row));
+        });
+        let userNameById = new Map();
+        if (usersTableExists) {
+          const uniqueUids = [...new Set(legacyAssignedRows.map(r => r.assigned_to))];
+          const userRows = await new Promise((resolve, reject) => {
+            db.all(`SELECT id, display_name, username FROM users WHERE id IN (${uniqueUids.map(() => '?').join(',')})`, uniqueUids,
+              (err, rows) => err ? reject(err) : resolve(rows || []));
+          });
+          userNameById = new Map(userRows.map(u => [u.id, u.display_name || u.username || null]));
+        }
+        for (const row of legacyAssignedRows) {
+          const resolvedName = (usersTableExists ? userNameById.get(row.assigned_to) : null) || row.assigned_to_name || `user#${row.assigned_to}`;
+          await new Promise((resolve, reject) => {
+            db.run(
+              `INSERT INTO sys_issue_dev_assignees
+                 (issue_id, user_id, user_name, is_primary, notify_status, notified_at, notify_message_key, notify_error, read_at)
+               VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?)`,
+              [row.id, row.assigned_to, resolvedName, row.notify_status, row.notified_at, row.notify_message_key, row.notify_error, row.read_at],
+              (err) => err ? reject(err) : resolve()
+            );
+          });
+        }
+        logger.info(`[系统迭代迁移] 通知改造 C1b：补 primary 子表行 + 回填 dev notify ${legacyAssignedRows.length} 单（users 表${usersTableExists ? '存在，已按 id 重算姓名' : '不存在，回退 assigned_to_name'}）`);
+      }
+      // requester 历史快照降级（§4.3 H 收口）：**无需额外迁移动作**——requester_notify_phone_snapshot 是 C1a
+      //   新增列，旧行 ALTER 后天然为 NULL；'status=sent ∧ snapshot IS NULL' 这一判定组合在数据层已天然成立，
+      //   HISTORICAL_SNAPSHOT_MISSING 降级逻辑留给 C3 read-status 端点按此组合判读（不新增标记列，任务书 §批1 口径）。
+      //   生产 sys_issues=0 行，本缺口生产不可达；测试库验证见 verify-sys-bug-migration.js。
+
+      // [2] 五表关键列 PRAGMA 复查（抽样锚点，非全字段；[1a]/[1a-2] ALTER 后的最新列集）
       const checks = [
         ['sys_issues', SYS_ISSUES_KEY_COLS],
         ['sys_releases', SYS_RELEASES_KEY_COLS],
         ['sys_issue_timeline', SYS_TIMELINE_KEY_COLS],
         ['sys_issue_attachments', SYS_ATTACHMENTS_KEY_COLS],
+        ['sys_issue_dev_assignees', SYS_DEV_ASSIGNEES_KEY_COLS],   // 通知改造 C1a 新表
       ];
       for (const [tbl, keyCols] of checks) {
         const cols = await new Promise((resolve, reject) => {
@@ -480,7 +641,7 @@ module.exports = (deps) => {
       // [3] 全部就位 → 置 ready
       SYS_SCHEMA_STATE.error = null;
       SYS_SCHEMA_STATE.ready = true;
-      logger.info(`[系统迭代 C1] ✅ sys 四表就绪（${tables.length}/4 表 + 四表关键列锚点齐全），写入口放行。`);
+      logger.info(`[系统迭代 C1] ✅ sys 五表就绪（${tables.length}/5 表 + 五表关键列锚点齐全），写入口放行。`);
     } catch (e) {
       SYS_SCHEMA_STATE.ready = false;
       SYS_SCHEMA_STATE.error = `迁移异常：${e && e.message}`;
@@ -611,6 +772,119 @@ module.exports = (deps) => {
   // 取代 dbRunAsync('ROLLBACK')：best-effort 回滚后**必释放锁**（idempotent：releaseSysTxn 对 null 无操作）。
   async function sysRollback() { try { await dbRunAsync('ROLLBACK'); } catch (_) { /* best-effort */ } releaseSysTxn(); }
 
+  // ============================================================
+  // 二·六、通知改造 C2：多开发协作子表差量 upsert（§3.3 五步 + [C-1] 一致性协议）
+  //   两个 helper 供 sysIssueTransition 'assign' case + POST /:id/reassign 独立事务共用（同一算法，非各写一遍）。
+  //   ⚠️ 调用方必须已在事务内（sysBeginImmediate 已调用）——两个函数自身不开/提交事务。
+  // ============================================================
+
+  // 协作开发 id 数组 → [{id,name}] 校验+解析（存在性/非 viewer/服务端从 users 重算 name，不信客户端；
+  //   去重；防与主开发 id 重复）。抛 SysTransitionError（400）供调用方各自 catch 转 HTTP / 触发事务回滚。
+  //   ⚠️ 会查 users 表——仅在 rawIds 非空数组时才触达（verify-sys-transition.js 等无 users 表的直调场景，
+  //   因未传 collaborator_ids，rawIds 规范化为 []，循环不执行，不查 users，不受影响）。
+  async function resolveCollaboratorList(rawIds, primaryDevId) {
+    // 非空非数组（如误传字符串/对象）显式拒绝，不静默按"无协作"处理（fail-closed，防调用方拼错字段被吞）。
+    if (rawIds !== undefined && rawIds !== null && !Array.isArray(rawIds)) {
+      throw new SysTransitionError(400, 'INVALID_COLLABORATOR_IDS', '协作开发须为数组');
+    }
+    const list = Array.isArray(rawIds) ? rawIds : [];
+    const collaborators = [];
+    const seen = new Set();
+    for (const raw of list) {
+      const cid = parsePositiveId(raw);
+      if (!cid) throw new SysTransitionError(400, 'INVALID_COLLABORATOR_IDS', '协作开发 id 非法');
+      if (cid === primaryDevId) throw new SysTransitionError(400, 'ASSIGNEE_DUPLICATE', '协作开发不能与主开发相同');
+      if (seen.has(cid)) continue;   // 幂等去重（重复 id 不报错，静默合并）
+      seen.add(cid);
+      const cdev = await dbGetAsync('SELECT id, display_name, username, role FROM users WHERE id = ?', [cid]);
+      if (!cdev) throw new SysTransitionError(400, 'COLLABORATOR_NOT_FOUND', `协作开发用户不存在（id=${cid}）`);
+      if (cdev.role === 'viewer') throw new SysTransitionError(400, 'COLLABORATOR_VIEWER', `不能添加查看者为协作开发（id=${cid}）`);
+      collaborators.push({ id: cdev.id, name: cdev.display_name || cdev.username || `user#${cdev.id}` });
+    }
+    return collaborators;
+  }
+
+  // 差量 upsert 五步（§3.3/[C-1]，assign 与 reassign 共用同一算法）：
+  //   targetPrimary={id,name}（主开发，DRI）+ targetCollaborators=[{id,name}]（协作，完整目标集合——
+  //   声明式全量替换语义，非增量 PATCH：调用方每次必须传完整期望集合，省略协作视为"无协作"）。
+  //   1. 目标集已在册（removed_at IS NULL）→ UPDATE 仅 is_primary/user_name（保留 notify_status/notified_at/
+  //      read_at/notify_message_key/notify_error，改派不清零通知状态）
+  //   2. 目标集有软删历史行（同人曾被移除）→ 复活「最近一条」（按 id 降序取第一条——本表无并发写入者以外的
+  //      修改来源，id 单调递增等价于时间序，比 removed_at 更精确，避免同秒多次操作导致 removed_at 打平后取不准）：
+  //      UPDATE removed_at=NULL + is_primary/name，其余通知历史列保留；若脏数据有多条软删历史，仅复活最新
+  //      （其余仍软删，不代为清理，§3.3 L-1）
+  //   3. 目标集全新 → INSERT（notify_status 默认 'not_sent'）
+  //   4. 旧在册但不在目标集 → UPDATE removed_at=now 软删（保留审计通知行，不物理删除）
+  //   5. 断言：在册行恰好 1 条 is_primary=1 且 user_id==targetPrimary.id——不满足抛错（调用方 catch 触发整
+  //      事务回滚，防主表 assigned_to 与子表 active primary 分裂，[C-1] 核心不变量）
+  async function applyDevAssigneeDiff(issueId, targetPrimary, targetCollaborators) {
+    const targetList = [
+      { id: Number(targetPrimary.id), name: targetPrimary.name || `user#${targetPrimary.id}`, isPrimary: 1 },
+      ...(targetCollaborators || []).map(c => ({ id: Number(c.id), name: c.name || `user#${c.id}`, isPrimary: 0 })),
+    ];
+    const targetIds = new Set(targetList.map(t => t.id));
+    if (targetIds.size !== targetList.length) {
+      // 防御性兜底（正常路径不可达——resolveCollaboratorList 已拒绝主协作重复；此处防未来调用方绕过校验直传脏集合）
+      throw new SysTransitionError(400, 'ASSIGNEE_DUPLICATE', '开发集合存在重复用户');
+    }
+
+    const existingRows = await dbAllAsync(
+      `SELECT id, user_id, removed_at FROM sys_issue_dev_assignees WHERE issue_id = ? ORDER BY id`,
+      [issueId]
+    );
+    const activeByUser = new Map();       // user_id → row（在册，removed_at IS NULL，至多 1 条，由本算法维持的不变量）
+    const softDeletedByUser = new Map();  // user_id → [row,...]（软删历史，按 id 升序，可能多条脏数据）
+    for (const r of existingRows) {
+      if (r.removed_at === null) {
+        activeByUser.set(r.user_id, r);
+      } else {
+        if (!softDeletedByUser.has(r.user_id)) softDeletedByUser.set(r.user_id, []);
+        softDeletedByUser.get(r.user_id).push(r);
+      }
+    }
+
+    // 步骤 1/2/3：处理目标集合中的每个人
+    for (const t of targetList) {
+      if (activeByUser.has(t.id)) {
+        // 步骤1：已在册 → 仅更新 is_primary/user_name，不动通知状态列
+        await dbRunAsync(
+          `UPDATE sys_issue_dev_assignees SET is_primary = ?, user_name = ? WHERE id = ?`,
+          [t.isPrimary, t.name, activeByUser.get(t.id).id]
+        );
+      } else if (softDeletedByUser.has(t.id)) {
+        // 步骤2：有软删历史 → 复活「id 最大」的一条（= 最近一次被移除的那条）
+        const history = softDeletedByUser.get(t.id);
+        const mostRecent = history[history.length - 1];   // 查询已按 id ASC 排序，取末项 = id 最大
+        await dbRunAsync(
+          `UPDATE sys_issue_dev_assignees SET removed_at = NULL, is_primary = ?, user_name = ? WHERE id = ?`,
+          [t.isPrimary, t.name, mostRecent.id]
+        );
+      } else {
+        // 步骤3：全新 → INSERT（notify_status 用列默认值 'not_sent'，不显式传值贴合 schema DEFAULT）
+        await dbRunAsync(
+          `INSERT INTO sys_issue_dev_assignees (issue_id, user_id, user_name, is_primary) VALUES (?, ?, ?, ?)`,
+          [issueId, t.id, t.name, t.isPrimary]
+        );
+      }
+    }
+
+    // 步骤4：旧在册但不在目标集 → 软删（保留审计通知行）
+    for (const [uid, row] of activeByUser) {
+      if (!targetIds.has(uid)) {
+        await dbRunAsync(`UPDATE sys_issue_dev_assignees SET removed_at = datetime('now','localtime') WHERE id = ?`, [row.id]);
+      }
+    }
+
+    // 步骤5：断言恰好 1 条在册 primary == targetPrimary.id（[C-1] 核心不变量，[G12] verify 同款强断言）
+    const primaries = await dbAllAsync(
+      `SELECT user_id FROM sys_issue_dev_assignees WHERE issue_id = ? AND is_primary = 1 AND removed_at IS NULL`,
+      [issueId]
+    );
+    if (primaries.length !== 1 || Number(primaries[0].user_id) !== Number(targetPrimary.id)) {
+      throw new SysTransitionError(500, 'DEV_ASSIGNEE_INVARIANT_VIOLATION', '开发指派子表不满足"恰好一名主开发"的不变量');
+    }
+  }
+
   // 唯一允许写 sys_issues.status 的函数（H-2 铁律，照 correctionTransition）：
   //   事务内读真实 status + 流转合法性（查 transitions 常量）+ 双 WHERE（含 expectedFrom）守卫 changes≠1→409 +
   //   权限分流（roleGuard/ownerGuard）+ 闸门校验（requiredPayload）+ sideEffects 写入 + timeline 写入 + COMMIT。
@@ -723,12 +997,37 @@ module.exports = (deps) => {
           break;
         }
         case 'assign': {
-          // 指派：写 assigned_to/_name/assigned_at（被指派人合法性由端点前置校验；DDL 无 assigned_by，codex 14b L-1）
+          // 指派：写 assigned_to/_name/assigned_at + 子表差量 upsert（通知改造 C2，§2.2 [C-1] + §3.3）。
+          //   [修②收口] 主开发校验**不信任客户端传入名**——用 users 表存在性探测决定校验强度：
+          //     · users 表存在（生产恒此支）→ 强制查库校验存在性/非 viewer + 用 **db 权威名**（忽略 payload
+          //       .assigned_to_name，防伪造名/绕过 viewer 闸）。这与 [C-1]"存在性/非 viewer/重算 name 与
+          //       assigned_to/子表写入同一事务原子完成"一致：失败即抛错 → 外层 catch 走 sysRollback()，
+          //       建单 path A 的事务1（INSERT）已提交的单不受影响，停留原状态、无 assigned_*、无子表行。
+          //     · users 表不存在（仅 verify-sys-transition.js 等白盒直调场景，生产不可达）→ 回退信任
+          //       payload.assigned_to_name（这些测试无 users 表，靠传名跑状态机骨架）；连名都没传则拒。
+          //   协作开发一律走 resolveCollaboratorList 现查（不再有 payload.collaborators 预解析信任分支）；
+          //   其空数组时不触达 users 表，兼容无 users 表直调。
           const devId = parsePositiveId(payload.assigned_to);
           if (!devId) throw new SysTransitionError(400, 'INVALID_ASSIGN_TARGET', '指派目标 ID 非法');
+          const usersTbl = await dbGetAsync(`SELECT name FROM sqlite_master WHERE type='table' AND name='users'`);
+          let devName;
+          if (usersTbl) {
+            const dev = await dbGetAsync('SELECT id, display_name, username, role FROM users WHERE id = ?', [devId]);
+            if (!dev) throw new SysTransitionError(400, 'ASSIGN_TARGET_NOT_FOUND', '指派目标用户不存在');
+            if (dev.role === 'viewer') throw new SysTransitionError(400, 'ASSIGN_TARGET_VIEWER', '不能指派给查看者（viewer）');
+            devName = dev.display_name || dev.username || `user#${dev.id}`;
+          } else if (payload.assigned_to_name !== undefined) {
+            devName = payload.assigned_to_name;
+          } else {
+            throw new SysTransitionError(400, 'ASSIGN_TARGET_NOT_FOUND', '指派目标用户不存在');
+          }
+          const collaborators = await resolveCollaboratorList(payload.collaborator_ids, devId);
           setFrags.push('assigned_to = ?', 'assigned_to_name = ?', "assigned_at = datetime('now','localtime')");
-          setParams.push(devId, payload.assigned_to_name || null);
-          summary = payload.assigned_to_name ? `指派给 ${payload.assigned_to_name}` : null;
+          setParams.push(devId, devName || null);
+          summary = devName ? `指派给 ${devName}` : null;
+          // [C-1] 子表差量 upsert：与上方 setFrags 触发的主表 UPDATE 同一事务（[6] 统一 UPDATE），任一步失败
+          //   （含本函数抛出的 DEV_ASSIGNEE_INVARIANT_VIOLATION）都由外层 catch 走 sysRollback()，杜绝分裂态。
+          await applyDevAssigneeDiff(issueId, { id: devId, name: devName || `user#${devId}` }, collaborators);
           break;
         }
         case 'submit': {
@@ -885,20 +1184,11 @@ module.exports = (deps) => {
           setFrags.push(...SYS_CLEAR_BLOCKED_FIELDS_SQL);
           break;
         }
-        case 'confirm-online-norelease': {
-          // 确认上线·不发版（bug §8.2 [审:H1]）：needs_release 必须已在「填发版信息」填为 0（唯一写点=
-          //   set_release_flag），release_id 必须为空（未挂批次/未走 hotfix）——事务内先友好校验，再靠
-          //   whereFrags 追加双 WHERE 兜底并发漂移（防校验后、UPDATE 前被另一请求抢先挂批次/改 needs_release）。
-          if (row.release_id !== null && row.release_id !== undefined) {
-            throw new SysTransitionError(409, 'ISSUE_ALREADY_IN_RELEASE', '该单已挂上线批次，不能走「确认上线·不发版」');
-          }
-          if (row.needs_release !== 0) {
-            throw new SysTransitionError(409, 'NEEDS_RELEASE_NOT_SET', '请先在「填发版信息」中选择「不发版」');
-          }
-          setFrags.push("released_at = datetime('now','localtime')");
-          whereFrags.push('release_id IS NULL', 'needs_release = 0');
-          break;
-        }
+        // [v1.6 退场·C3b] 'confirm-online-norelease' switch 分支已删除——随 transitions.js 移除该 meta 条目，
+        //   findTransition 对任意 type 恒返 null，[1] 会在到达本 switch 前就以 INVALID_TRANSITION 抛出
+        //   （本函数入口处 findTransition 查表在 switch 之前，见上方 [1]），故本分支 100% 不可达死代码，
+        //   随退场一并删除（保留会误导读者以为仍有路径可达）。whereFrags/whereParams 通用脚手架继续保留
+        //   给未来 action 复用（当前恒为空数组，零成本）。
         default:
           // publish 走 hotfix-publish/publishReleaseTransition（C4），不经此函数；其余未列动作走通用（无闸门）。
           break;
@@ -1019,6 +1309,60 @@ module.exports = (deps) => {
         return res.status(400).json({ error: '关联修正单号不超过 100 字', code: 'RELATED_CORRECTION_NO_TOO_LONG' });
       }
 
+      // ── 通知改造 C2：建单三路径（assign_mode ∈ {A,B,none}，互斥，§2.1）──────────
+      //   省略 assign_mode（既有全部调用方，含 19 套既有 verify-sys-*.js）默认 'none'——零行为变化。
+      //   仅 type='bug' 可用 A/B：A 路径事务2（sysIssueTransition('assign')）要求前置态=该 type 的 assign
+      //   `from` 白名单，bug 恰为初始态「待处理」；变更流初始态「待评估」≠assign 前置态「已排期」，建单后立即
+      //   assign 必然 INVALID_TRANSITION——与其让调用方在"单已建但指派必然失败"的半成品态里猜原因，不如在此
+      //   前置拒绝更清晰（ASSIGN_MODE_BUG_ONLY，不创建任何行）。B 路径（对接人）本就是 bug 专属概念（§3.1）。
+      const rawAssignMode = (typeof b.assign_mode === 'string' && b.assign_mode.trim()) ? b.assign_mode.trim() : 'none';
+      if (!['A', 'B', 'none'].includes(rawAssignMode)) {
+        return res.status(400).json({ error: 'assign_mode 仅支持 A/B/none', code: 'INVALID_ASSIGN_MODE' });
+      }
+      const hasAssignInput = b.assigned_to !== undefined && b.assigned_to !== null && b.assigned_to !== '';
+      const hasCollabInput = b.collaborator_ids !== undefined && b.collaborator_ids !== null;
+      const hasRelayInput = b.relay_user_id !== undefined && b.relay_user_id !== null && b.relay_user_id !== '';
+      if (hasAssignInput && rawAssignMode !== 'A') {
+        return res.status(400).json({ error: 'assigned_to 仅在 assign_mode=A 时可传', code: 'ASSIGN_MODE_CONFLICT' });
+      }
+      if (hasCollabInput && rawAssignMode !== 'A') {
+        return res.status(400).json({ error: 'collaborator_ids 仅在 assign_mode=A 时可传', code: 'ASSIGN_MODE_CONFLICT' });
+      }
+      if (hasRelayInput && rawAssignMode !== 'B') {
+        return res.status(400).json({ error: 'relay_user_id 仅在 assign_mode=B 时可传', code: 'ASSIGN_MODE_CONFLICT' });
+      }
+      if (rawAssignMode === 'A' && !hasAssignInput) {
+        return res.status(400).json({ error: 'path A 需指定主开发', code: 'ASSIGN_TARGET_REQUIRED' });
+      }
+      if (rawAssignMode === 'B' && !hasRelayInput) {
+        return res.status(400).json({ error: 'path B 需指定通知对接人', code: 'RELAY_USER_REQUIRED' });
+      }
+      if (rawAssignMode !== 'none' && type !== 'bug') {
+        return res.status(400).json({ error: '仅 bug 建单支持指定主开发/对接人（assign_mode）', code: 'ASSIGN_MODE_BUG_ONLY' });
+      }
+
+      // path B：白名单校验 + 反规范化姓名（单事务内随 INSERT 一并写入，无第二事务）。
+      let relayUserId = null, relayUserName = null;
+      if (rawAssignMode === 'B') {
+        relayUserId = parsePositiveId(b.relay_user_id);
+        if (!relayUserId) return res.status(400).json({ error: '通知对接人 ID 非法', code: 'INVALID_RELAY_USER' });
+        if (!isSysBugLiaison(relayUserId)) return res.status(400).json({ error: '通知对接人须为白名单成员', code: 'RELAY_USER_NOT_WHITELISTED' });
+        const relayUser = await dbGetAsync('SELECT id, display_name, username FROM users WHERE id = ?', [relayUserId]);
+        if (!relayUser) return res.status(400).json({ error: '通知对接人不存在', code: 'RELAY_USER_NOT_FOUND' });
+        relayUserName = relayUser.display_name || relayUser.username || `user#${relayUser.id}`;
+      }
+      // path A：主开发 id 仅做格式校验（正整数），**存在性/非 viewer/协作开发校验推迟到事务2内**
+      //   （首事务字段边界，§2.2）——事务1 INSERT 不查 users、不落 assigned_*，主开发 id 只作为事务2 入参透传。
+      let primaryDevIdRaw = null, collaboratorIdsRaw = [];
+      if (rawAssignMode === 'A') {
+        primaryDevIdRaw = parsePositiveId(b.assigned_to);
+        if (!primaryDevIdRaw) return res.status(400).json({ error: '主开发 ID 非法', code: 'ASSIGN_TARGET_REQUIRED' });
+        if (hasCollabInput) {
+          if (!Array.isArray(b.collaborator_ids)) return res.status(400).json({ error: '协作开发须为数组', code: 'INVALID_COLLABORATOR_IDS' });
+          collaboratorIdsRaw = b.collaborator_ids;
+        }
+      }
+
       const actor = sysActor(req);
       let newId = null;
       await sysBeginImmediate();
@@ -1028,8 +1372,9 @@ module.exports = (deps) => {
              (type, status, priority, title, description, system_name, module_name, source,
               requester_dept, requester_name, requester_phone, deadline,
               needs_feasibility, related_correction_no,
-              created_by, created_by_name, record_source)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'native')`,
+              created_by, created_by_name, record_source,
+              relay_notified_user_id, relay_notified_user_name)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'native', ?, ?)`,
           [type, initialStatus, priority, title,
            (typeof b.description === 'string' ? b.description.trim() : null),
            systemName, (typeof b.module_name === 'string' ? b.module_name.trim() : null), source,
@@ -1038,7 +1383,8 @@ module.exports = (deps) => {
            (typeof b.requester_phone === 'string' ? b.requester_phone.trim() : null),
            dl.value,
            needsFeasibility, relatedCorrectionNo,
-           actor.id, actor.name]
+           actor.id, actor.name,
+           relayUserId, relayUserName]
         );
         newId = result.lastID;
         await dbRunAsync(
@@ -1051,7 +1397,47 @@ module.exports = (deps) => {
         try { await sysRollback(); } catch (_) { /* ignore */ }
         throw txErr;
       }
-      res.status(201).json({ id: newId, type, status: initialStatus });
+
+      // ── path A 事务2（独立事务，§2.2）：事务1 已提交——即便本步失败，单仍存在于 initialStatus 态，
+      //   无 assigned_*/无子表行（无 owner 漂移，"首事务字段边界"）。失败不当 500 处理（会掩盖"单其实已建成"
+      //   的事实），而是仍 201 返回 + assign_failed 标记，调用方可据此另行重试 /assign。──────────
+      let assignOk = null, assignError = null;
+      if (rawAssignMode === 'A') {
+        try {
+          const r2 = await sysIssueTransition(newId, 'assign', null, actor,
+            { assigned_to: primaryDevIdRaw, collaborator_ids: collaboratorIdsRaw });
+          await dispatchSysNotify(newId, r2.notifyAfterCommit);
+          assignOk = { status: r2.toStatus };
+        } catch (assignErr) {
+          const code = (assignErr instanceof SysTransitionError) ? assignErr.code : 'ASSIGN_FAILED';
+          const message = (assignErr && assignErr.message) || '建单后自动指派失败';
+          logger.error(`[系统迭代] 建单 path A 指派失败（单已建 #${newId} 停留「${initialStatus}」）：${message}`);
+          assignError = { code, message };
+        }
+      }
+
+      const respBody = { id: newId, type, status: assignOk ? assignOk.status : initialStatus };
+      if (rawAssignMode === 'B') {
+        respBody.relay_notified_user_id = relayUserId;
+        respBody.relay_notified_user_name = relayUserName;
+      }
+      if (assignOk) {
+        // [修④] mutation 响应 dev_assignees 与详情 GET 同款全列（前端拿 mutation 响应刷详情不丢通知状态）
+        const devAssignees = await dbAllAsync(
+          `SELECT id, user_id, user_name, is_primary, notify_status, notified_at, read_at, notify_message_key, notify_error
+             FROM sys_issue_dev_assignees WHERE issue_id = ? AND removed_at IS NULL ORDER BY is_primary DESC, id ASC`,
+          [newId]
+        );
+        respBody.dev_assignees = devAssignees;
+        const primaryRow = devAssignees.find(d => d.is_primary === 1) || {};
+        respBody.assigned_to = primaryRow.user_id;
+        respBody.assigned_to_name = primaryRow.user_name;
+      }
+      if (assignError) {
+        respBody.assign_failed = true;
+        respBody.assign_error = assignError;
+      }
+      res.status(201).json(respBody);
     } catch (err) {
       if (err instanceof SysTransitionError) return sendSysTransitionError(res, err);   // F2：SYS_BUSY 等保 503
       logger.error('[系统迭代] 建单失败:', err && err.message);
@@ -1082,15 +1468,21 @@ module.exports = (deps) => {
     try {
       const devId = parsePositiveId((req.body || {}).assigned_to);
       if (!devId) return res.status(400).json({ error: '必须指定被指派开发', code: 'ASSIGN_TARGET_REQUIRED' });
-      // 被指派人存在 + 非 viewer（§3.6 闸门）
-      const dev = await dbGetAsync('SELECT id, display_name, username, role FROM users WHERE id = ?', [devId]);
-      if (!dev) return res.status(400).json({ error: '指派目标用户不存在', code: 'ASSIGN_TARGET_NOT_FOUND' });
-      if (dev.role === 'viewer') return res.status(400).json({ error: '不能指派给查看者（viewer）', code: 'ASSIGN_TARGET_VIEWER' });
-      const devName = dev.display_name || dev.username || `user#${dev.id}`;
+      // [C2] 通知改造：主开发存在性/非 viewer/重算 name + 协作开发校验，全部下沉到 sysIssueTransition 事务内
+      //   完成（[C-1] 单一事务原子校验+写入，本端点不再二次查库；HTTP 可观测行为不变——同样的 400 + 相同 code/
+      //   message，只是校验发生的代码位置从"端点前置"改为"transition 内"，与建单 path A 事务2 共用同一校验分支，
+      //   避免同一逻辑写两遍）。协作开发数组字段名 collaborator_ids（与本端点其余 payload 同 snake_case 惯例）。
       const r = await sysIssueTransition(id, 'assign', null, sysActor(req),
-        { assigned_to: dev.id, assigned_to_name: devName });
+        { assigned_to: devId, collaborator_ids: (req.body || {}).collaborator_ids });
+      // [修④] mutation 响应 dev_assignees 与详情 GET 同款全列（前端拿 mutation 响应刷详情不丢通知状态）
+      const devAssignees = await dbAllAsync(
+        `SELECT id, user_id, user_name, is_primary, notify_status, notified_at, read_at, notify_message_key, notify_error
+           FROM sys_issue_dev_assignees WHERE issue_id = ? AND removed_at IS NULL ORDER BY is_primary DESC, id ASC`,
+        [id]
+      );
+      const primaryRow = devAssignees.find(d => d.is_primary === 1) || {};
       await dispatchSysNotify(id, r.notifyAfterCommit);   // notifyAssignedDeveloper → 通知新开发（dev 侧，best-effort）
-      res.json({ id, assigned_to: dev.id, assigned_to_name: devName, status: r.toStatus });
+      res.json({ id, assigned_to: primaryRow.user_id, assigned_to_name: primaryRow.user_name, dev_assignees: devAssignees, status: r.toStatus });
     } catch (err) { sendSysTransitionError(res, err); }
   });
 
@@ -1109,13 +1501,16 @@ module.exports = (deps) => {
       const reason = (typeof (req.body || {}).reason === 'string' ? req.body.reason.trim() : '');
       if (!reason) return res.status(400).json({ error: '改派原因必填', code: 'REASSIGN_REASON_REQUIRED' });
       if (reason.length > 500) return res.status(400).json({ error: '改派原因不超过 500 字', code: 'REASSIGN_REASON_TOO_LONG' });
-      // 新开发存在 + 非 viewer
-      const dev = await dbGetAsync('SELECT id, display_name, username, role FROM users WHERE id = ?', [newDevId]);
-      if (!dev) return res.status(400).json({ error: '改派目标用户不存在', code: 'REASSIGN_TARGET_NOT_FOUND' });
-      if (dev.role === 'viewer') return res.status(400).json({ error: '不能改派给查看者（viewer）', code: 'REASSIGN_TARGET_VIEWER' });
-      const devName = dev.display_name || dev.username || `user#${dev.id}`;
 
+      // [C2 收口·修①+修③] 改派语义扩为「换主」与「留主改协作」两分支（用户 2026-07 口径拍板）：
+      //   · 换主（mainChanged）= 新一轮，清进度（dev_estimated_at/评估字段/dev 通知）+ 流转 status；
+      //   · 留主改协作（!mainChanged）= 仅增删协作，**不清进度不流转**（保留开发已填的预计完成/评估）。
+      //   [修③] 校验全下沉进事务（对齐 assign 的 [C-1] 同事务校验，消除事务外 TOCTOU）：新主查库 + 协作
+      //   resolveCollaboratorList 都在 sysBeginImmediate() 之后、读 row 之后做。字段名 collaboratorIds
+      //   （camelCase）对齐本端点既有 newAssignedTo/oldAssignedTo 惯例（本端点内部一致，非全局 snake_case）。
       const actor = sysActor(req);
+      // post-commit 用得到的变量提到 try 外声明、try 内赋值（devName/mainChanged/newDevId）。
+      let devName = null, mainChanged = false;
       await sysBeginImmediate();
       try {
         const row = await dbGetAsync('SELECT id, type, status, assigned_to FROM sys_issues WHERE id = ?', [id]);
@@ -1130,31 +1525,110 @@ module.exports = (deps) => {
         const t = T.findTransition(row.type, 'reassign', row.status);
         if (!t) { await sysRollback(); return res.status(409).json({ error: `当前状态「${row.status}」不可改派`, code: 'REASSIGN_STATUS_INVALID' }); }
         const toStatus = T.resolveToStatus(t, row.status);   // 待验证→开发中 / 开发中→开发中
-        if (Number(row.assigned_to) === dev.id) { await sysRollback(); return res.status(400).json({ error: '新开发与当前开发相同，无需改派', code: 'REASSIGN_NO_CHANGE' }); }
-        // 乐观锁：绑 status + oldAssignedTo；清 dev_estimated_at + 仅重置开发侧通知（05-L3）；return_count 不变（05-M2）
-        const upd = await dbRunAsync(
-          `UPDATE sys_issues
-              SET status = ?, assigned_to = ?, assigned_to_name = ?, assigned_at = datetime('now','localtime'),
-                  dev_estimated_at = NULL, ${SYS_CLEAR_FEASIBILITY_FIELDS_SQL.join(', ')}, updated_at = datetime('now','localtime'),
-                  notify_status = 'not_sent', notified_at = NULL, notify_message_key = NULL, notify_error = NULL, read_at = NULL
-            WHERE id = ? AND status = ? AND assigned_to = ?`,
-          [toStatus, dev.id, devName, id, row.status, oldAssignedTo]
+        // [修③] 新主校验下沉事务内（存在/非 viewer/db 权威名，不信客户端）
+        const dev = await dbGetAsync('SELECT id, display_name, username, role FROM users WHERE id = ?', [newDevId]);
+        if (!dev) { await sysRollback(); return res.status(400).json({ error: '改派目标用户不存在', code: 'REASSIGN_TARGET_NOT_FOUND' }); }
+        if (dev.role === 'viewer') { await sysRollback(); return res.status(400).json({ error: '不能改派给查看者（viewer）', code: 'REASSIGN_TARGET_VIEWER' }); }
+        devName = dev.display_name || dev.username || `user#${dev.id}`;
+        // [修③] 协作校验下沉事务内（resolveCollaboratorList 抛 SysTransitionError 由外层 catch 走 sysRollback）
+        const collaborators = await resolveCollaboratorList((req.body || {}).collaboratorIds, newDevId);
+
+        // [修①] guard 比全集（主+协作都不变才拒 REASSIGN_NO_CHANGE）：
+        mainChanged = Number(row.assigned_to) !== dev.id;
+        const curColabRows = await dbAllAsync(
+          `SELECT user_id, is_primary FROM sys_issue_dev_assignees WHERE issue_id = ? AND removed_at IS NULL`,
+          [id]
         );
-        if (!upd || upd.changes !== 1) { await sysRollback(); return res.status(409).json({ error: '迭代单状态或负责人已变更，请刷新重试', code: 'CONCURRENT_REASSIGN' }); }
-        // reassign timeline（05-H1 独立 event_type；from/to/summary 必填）
+        const curColab = new Set(curColabRows.filter(r => r.is_primary !== 1).map(r => Number(r.user_id)));
+        const tgtColab = new Set(collaborators.map(c => Number(c.id)));
+        const colabUnchanged = curColab.size === tgtColab.size && [...curColab].every(uid => tgtColab.has(uid));
+        if (!mainChanged && colabUnchanged) {
+          await sysRollback();
+          return res.status(400).json({ error: '开发集合无变更（主开发与协作均未变），无需改派', code: 'REASSIGN_NO_CHANGE' });
+        }
+
+        // [修A·轮2 收口·留主改协作 collab 集乐观锁] 换主分支已由 oldAssignedTo 锁主 + 换主=新一轮 collab
+        //   权威，无需此锁；仅留主改协作分支（!mainChanged）会撞"声明式全集替换固有丢更新"——A 改协作
+        //   [6]→[6,8] 后，B 拿旧页面（仍见 [6]）提交 [6,10]，因 status/主未变 UPDATE 成功 → A 的 8 被静默
+        //   覆盖。故要求调用方传 expectedCollaboratorIds（其看到的当前协作集），与事务内已读的实际 curColab
+        //   集合判等，不等即 REASSIGN_STALE（对齐 oldAssignedTo 对主的乐观锁语义；curColab 复用 guard 段已读，不重复查库）。
+        if (!mainChanged) {
+          const rawExp = (req.body || {}).expectedCollaboratorIds;
+          if (rawExp === undefined || rawExp === null) {
+            await sysRollback();
+            return res.status(400).json({ error: '留主改协作须传 expectedCollaboratorIds 作协作集乐观锁', code: 'EXPECTED_COLLABORATORS_REQUIRED' });
+          }
+          // [轮3 收口·codex-LOW] 严格校验：非数组/含非法元素显式拒绝，不静默丢脏元素（防 [6,'bad']→丢 bad→误判匹配放行）
+          if (!Array.isArray(rawExp)) {
+            await sysRollback();
+            return res.status(400).json({ error: 'expectedCollaboratorIds 须为数组', code: 'INVALID_EXPECTED_COLLABORATORS' });
+          }
+          const expIds = rawExp.map(parsePositiveId);
+          if (expIds.some(x => !x)) {
+            await sysRollback();
+            return res.status(400).json({ error: 'expectedCollaboratorIds 含非法用户 id', code: 'INVALID_EXPECTED_COLLABORATORS' });
+          }
+          const expSet = new Set(expIds);
+          const expMatchesCur = expSet.size === curColab.size && [...expSet].every(uid => curColab.has(uid));
+          if (!expMatchesCur) {
+            await sysRollback();
+            return res.status(409).json({ error: '协作开发集已被他人变更，请刷新重试', code: 'REASSIGN_STALE' });
+          }
+        }
+
+        // [修①] 分支 UPDATE：
+        let upd;
+        if (mainChanged) {
+          // 换主=新一轮：流转 status + 换主 + 清进度（dev_estimated_at/评估）+ 重置 dev 通知 5 列；乐观锁绑 status+旧主
+          upd = await dbRunAsync(
+            `UPDATE sys_issues
+                SET status = ?, assigned_to = ?, assigned_to_name = ?, assigned_at = datetime('now','localtime'),
+                    dev_estimated_at = NULL, ${SYS_CLEAR_FEASIBILITY_FIELDS_SQL.join(', ')}, updated_at = datetime('now','localtime'),
+                    notify_status = 'not_sent', notified_at = NULL, notify_message_key = NULL, notify_error = NULL, read_at = NULL
+              WHERE id = ? AND status = ? AND assigned_to = ?`,
+            [toStatus, dev.id, devName, id, row.status, oldAssignedTo]
+          );
+        } else {
+          // 留主改协作·不清进度不流转：仅盖 updated_at；乐观锁仍绑 status+旧主（=当前主，防陈旧提交）
+          upd = await dbRunAsync(
+            `UPDATE sys_issues SET updated_at = datetime('now','localtime')
+              WHERE id = ? AND status = ? AND assigned_to = ?`,
+            [id, row.status, oldAssignedTo]
+          );
+        }
+        // [C2] 命名对齐方案 G2/任务书：本乐观锁（status+assigned_to 双条件）失败语义="旧主停留旧页面提交"，
+        //   错误码由既有 CONCURRENT_REASSIGN（照 corrections.js 同名范式）改为方案指定的 OWNER_GUARD_FAILED——
+        //   两者从未在 sys-iteration 的任何 verify 脚本里被断言过字面量（已 grep 确认，仅 corrections.js 自身
+        //   用 CONCURRENT_REASSIGN，是另一模块，互不影响），故此改名零回归，遵方案显式口径。
+        if (!upd || upd.changes !== 1) { await sysRollback(); return res.status(409).json({ error: '迭代单状态或负责人已变更，请刷新重试', code: 'OWNER_GUARD_FAILED' }); }
+        // [C-1] 子表差量 upsert（§3.3）：两分支都做——与上方主表 UPDATE 同一事务，任一步失败（含
+        //   DEV_ASSIGNEE_INVARIANT_VIOLATION）都会被下方 catch 走 sysRollback()，主表变更同样回滚不分裂。
+        await applyDevAssigneeDiff(id, { id: dev.id, name: devName }, collaborators);
+        // reassign timeline（05-H1 独立 event_type）：换主 to=toStatus / 留主改协作 to=row.status（不流转）
+        const summary = mainChanged
+          ? `改派 旧#${oldAssignedTo}→新#${dev.id}（${devName}）：${reason}`
+          : `编辑协作开发（主开发 #${dev.id} ${devName} 不变，协作 [${[...tgtColab].join(',') || '空'}]）：${reason}`;
         await dbRunAsync(
           `INSERT INTO sys_issue_timeline (issue_id, event_type, from_status, to_status, summary, operator_id, operator_name)
            VALUES (?, 'reassign', ?, ?, ?, ?, ?)`,
-          [id, row.status, toStatus, `改派 旧#${oldAssignedTo}→新#${dev.id}（${devName}）：${reason}`, actor.id, actor.name]
+          [id, row.status, (mainChanged ? toStatus : row.status), summary, actor.id, actor.name]
         );
         await sysCommit();
       } catch (txErr) {
         try { await sysRollback(); } catch (_) { /* ignore */ }
         throw txErr;
       }
-      await dispatchSysNotify(id, 'notifyAssignedDeveloper');   // 改派复用指派模板，发新开发（dev 侧，§8.1 06-M2；best-effort）
-      await syncSysChatAddDev(id, dev.id);                      // §5 [审:#16] 换人同步群成员（加新不移旧，best-effort 不抛；定义见下方拉群段，声明已提升）
-      res.json({ id, assigned_to: dev.id, assigned_to_name: devName });
+      // [修①] post-commit 通知/群仅换主时做——留主改协作不发主开发通知/不重复入群（新协作的通知/入群走 C3，本批不发）。
+      if (mainChanged) {
+        await dispatchSysNotify(id, 'notifyAssignedDeveloper');   // 改派复用指派模板，发新开发（dev 侧，§8.1 06-M2；best-effort）
+        await syncSysChatAddDev(id, newDevId);                    // §5 [审:#16] 换人同步群成员（加新不移旧，best-effort 不抛）
+      }
+      const devAssignees = await dbAllAsync(
+        `SELECT id, user_id, user_name, is_primary, notify_status, notified_at, read_at, notify_message_key, notify_error
+           FROM sys_issue_dev_assignees WHERE issue_id = ? AND removed_at IS NULL ORDER BY is_primary DESC, id ASC`,
+        [id]
+      );
+      res.json({ id, assigned_to: newDevId, assigned_to_name: devName, dev_assignees: devAssignees });
     } catch (err) {
       if (err instanceof SysTransitionError) return sendSysTransitionError(res, err);   // F2：SYS_BUSY 等保 503
       logger.error('[系统迭代] 改派失败:', err && err.message);
@@ -1541,9 +2015,12 @@ module.exports = (deps) => {
           where.push("(assigned_to = ? OR type = 'bug')");
           params.push(uid);
         } else {
-          // 非 admin 非对接人：仅自己被指派的单（开发）；其他角色 assigned_to 不会等于自己 → 自然空集
-          where.push('assigned_to = ?');
-          params.push(uid);
+          // 非 admin 非对接人：自己被指派的单（开发）∪ 被指定为上线执行开发的单（release_assignee_id，通知改造 C-orch）。
+          //   ⚠️ 写读同源（[[feedback_write_read_same_semantic]]）：execute-release 把上线终态写权授给 release_assignee_id，
+          //   读端必须镜像——否则被指定执行开发（既非 assigned_to 也非白名单对接人时）列表看不到该单、够不到「执行上线」。
+          //   release orchestration 是 bug 专属，故 release_assignee_id 仅对 bug 有值，无需再叠 type 条件；详情端点同步放行。
+          where.push('(assigned_to = ? OR release_assignee_id = ?)');
+          params.push(uid, uid);
         }
       }
       // 默认过滤作废（前端可传 include_voided=1，仅 admin 生效）
@@ -1563,6 +2040,7 @@ module.exports = (deps) => {
         `SELECT id, type, status, priority, title, system_name, module_name, source,
                 assigned_to, assigned_to_name, dev_estimated_at, deadline,
                 created_by, created_by_name, origin_issue_id, release_id, needs_release,
+                release_assignee_id, release_assignee_name,
                 reopen_count, return_count, scope_changed, created_at, updated_at
            FROM sys_issues
           ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
@@ -1594,7 +2072,10 @@ module.exports = (deps) => {
       // ④ bug 对接人白名单：与列表读端同源（[[feedback_write_read_same_semantic]]）——白名单对接人可见 bug 单详情
       //   （type='bug'）。移出白名单即失效；非 bug 单（变更流/config）对接人仍不可见（type 精判）。
       const isBugLiaison = isSysBugLiaison(uid) && row.type === 'bug';
-      if (!isAdmin && !isAssignee && !isBugLiaison) {
+      // C-orch 写读同源：被指定上线执行开发（release_assignee_id）可见 bug 单详情（否则够不到「执行上线」按钮）——
+      //   与列表读端同源；release orchestration 是 bug 专属，故叠 type='bug' 精判。
+      const isReleaseExecutor = Number(row.release_assignee_id) === uid && uid > 0 && row.type === 'bug';
+      if (!isAdmin && !isAssignee && !isBugLiaison && !isReleaseExecutor) {
         return res.status(403).json({ error: '无权查看此迭代单', code: 'NOT_AUTHORIZED_TO_VIEW' });
       }
       if (row.status === '已作废' && !isAdmin) {
@@ -1613,6 +2094,14 @@ module.exports = (deps) => {
         `SELECT id, attachment_type, round_no, file_name, original_name, file_size, mime_type,
                 status, uploaded_by, uploaded_by_name, created_at
            FROM sys_issue_attachments WHERE issue_id = ? AND status = 'active' ORDER BY id`,
+        [id]
+      );
+      // ── 通知改造 C2 §E（写读同源）：多开发协作子表 join，附录 A 读接口契约——
+      //   仅 removed_at IS NULL 在册行，主开发（is_primary=1）排前。通知能力派生（can_send 等）/发送/
+      //   read-status 属 C3、前端渲染属 C4/C5——本批只保证这里的数据结构正确，不做更多。
+      const devAssignees = await dbAllAsync(
+        `SELECT id, user_id, user_name, is_primary, notify_status, notified_at, read_at, notify_message_key, notify_error
+           FROM sys_issue_dev_assignees WHERE issue_id = ? AND removed_at IS NULL ORDER BY is_primary DESC, id ASC`,
         [id]
       );
       // 血缘：正向（本单来源 origin_issue_id）+ 反向（已衍生出哪些单，M-2 反查）
@@ -1651,7 +2140,7 @@ module.exports = (deps) => {
 
       // 12-M2（A7）：具名 spec 子集 + 布尔，使前端补传入口刷新不丢、不依赖临时前端状态
       const specAttachments = attachments.filter(a => a.attachment_type === 'spec');
-      res.json({ issue: row, timeline, attachments, specAttachments, hasSpecAttachment: specAttachments.length > 0, origin_issue: originIssue, derived_issues: derivedIssues, related_correction: relatedCorrection });
+      res.json({ issue: row, timeline, attachments, specAttachments, hasSpecAttachment: specAttachments.length > 0, origin_issue: originIssue, derived_issues: derivedIssues, related_correction: relatedCorrection, dev_assignees: devAssignees });
     } catch (err) {
       logger.error('[系统迭代] 详情查询失败:', err && err.message);
       res.status(500).json({ error: (err && err.message) || '详情查询失败' });
@@ -1691,8 +2180,25 @@ module.exports = (deps) => {
   router.post('/sys-issues/:id/issue-reject', authenticateToken, requireSysSchemaReady, requireAdmin, makeTransitionEndpoint('issue_reject'));
   router.post('/sys-issues/:id/void', authenticateToken, requireSysSchemaReady, requireAdmin, makeTransitionEndpoint('void'));
   router.post('/sys-issues/:id/reopen', authenticateToken, requireSysSchemaReady, requireAdmin, makeTransitionEndpoint('reopen'));
-  // bug 流 Commit ②：确认上线·不发版（建单人/admin，release_id 保持 NULL 不建批次，§8.2 [审:H1]）
-  router.post('/sys-issues/:id/confirm-online-norelease', authenticateToken, requireSysSchemaReady, requireAdmin, makeTransitionEndpoint('confirm-online-norelease'));
+  // ── [R3 退场，v1.6 §2.3 C-1] POST /sys-issues/:id/confirm-online-norelease（已下线，仅 bug 流曾用）──────────
+  //   findTransition('bug','confirm-online-norelease',...) 已随 transitions.js 移除该 meta 条目恒返 null——
+  //   若仍走 makeTransitionEndpoint 会退化成通用 400 INVALID_TRANSITION（可用但不够清晰）。改自定义 handler
+  //   显式先判 type='bug' 返 LEGACY_RELEASE_FLOW_DISABLED（409，友好文案指向新流程），非 bug 兜底走原
+  //   sysIssueTransition（该 action 从未在任何 type 定义过，防御性保留、正常不可达）。
+  router.post('/sys-issues/:id/confirm-online-norelease', authenticateToken, requireSysSchemaReady, requireAdmin, async (req, res) => {
+    const id = parsePositiveId(req.params.id);
+    if (!id) return res.status(400).json({ error: '无效的迭代单 ID', code: 'INVALID_SYS_ISSUE_ID' });
+    try {
+      const row = await dbGetAsync('SELECT id, type FROM sys_issues WHERE id = ?', [id]);
+      if (!row) return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' });
+      if (row.type === 'bug') {
+        return res.status(409).json({ error: '该功能已下线，bug 上线流程请改用「批量指定上线开发」+「执行上线」', code: 'LEGACY_RELEASE_FLOW_DISABLED' });
+      }
+      const r = await sysIssueTransition(id, 'confirm-online-norelease', null, sysActor(req), req.body || {});
+      await dispatchSysNotify(id, r.notifyAfterCommit);
+      res.json({ id, status: r.toStatus, action: 'confirm-online-norelease' });
+    } catch (err) { sendSysTransitionError(res, err); }
+  });
 
   // ── POST /sys-issues/:id/estimate：回填预计完成（开发本人，不改 status，旁路独立事务，§3.6/§7）──────────
   //   闸门：dev_estimated_at 格式合法 + >=assigned_at；ownerGuard 登录人=assigned_to（严格本人）。
@@ -1763,8 +2269,11 @@ module.exports = (deps) => {
     }
   });
 
-  // ── POST /sys-issues/:id/set-release-flag：填发版信息（开发本人，不改 status，旁路独立事务，bug §2.3/§8.1）──────────
-  //   needs_release 唯一写点（K1/K2）：仅本端点可写；枚举校验 0/1；release_id 已挂批次后禁改（防绕过 add-issues 一致性）。
+  // ── [R1 退场，v1.6 §2.3 C-1] POST /sys-issues/:id/set-release-flag：填发版信息（已下线）──────────
+  //   通知改造 v1.6 上线编排收敛后，bug 待执行意图不再由 needs_release 承担（改 execute-release 的
+  //   mode 参数，H-2）；本端点对 type='bug' 一律 LEGACY_RELEASE_FLOW_DISABLED（本端点历史上只服务 bug——
+  //   findTransition 对 feature/improvement 从未定义 set_release_flag，故本端点 100% 面向 bug 流量，
+  //   本次退场即整端点实质停用）。needs_release 列转只读残留（F5，历史 timeline 标签保留渲染）。
   router.post('/sys-issues/:id/set-release-flag', authenticateToken, requireSysSchemaReady, async (req, res) => {
     const id = parsePositiveId(req.params.id);
     if (!id) return res.status(400).json({ error: '无效的迭代单 ID', code: 'INVALID_SYS_ISSUE_ID' });
@@ -1776,7 +2285,11 @@ module.exports = (deps) => {
       try {
         const row = await dbGetAsync('SELECT id, type, status, assigned_to, release_id FROM sys_issues WHERE id = ?', [id]);
         if (!row) { await sysRollback(); return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' }); }
-        // set_release_flag 合法前置态（bug 流：待上线；findTransition 天然限定 type=bug，feature/improvement 无此常量条目）
+        if (row.type === 'bug') {
+          await sysRollback();
+          return res.status(409).json({ error: '该功能已下线，bug 上线流程请改用「批量指定上线开发」+「执行上线」', code: 'LEGACY_RELEASE_FLOW_DISABLED' });
+        }
+        // set_release_flag 合法前置态（历史仅 bug 流定义；feature/improvement 从未有此条目，findTransition 恒 null，防御性保留）
         const t = T.findTransition(row.type, 'set_release_flag', row.status);
         if (!t) { await sysRollback(); return res.status(409).json({ error: `当前状态「${row.status}」不可填发版信息`, code: 'SET_RELEASE_FLAG_STATUS_INVALID' }); }
         const isAssignee = Number(row.assigned_to) === actor.id && actor.id > 0;
@@ -2568,10 +3081,17 @@ module.exports = (deps) => {
     //   正常 schema 下 config 受 DB CHECK(type<>'config' OR release_id IS NULL) 永不可成为成员，此守卫为 schema 漂移兜底（对齐 submit 闸门"不全信单入口"哲学）。
     const badType = members.find(m => !RELEASABLE_TYPES.includes(m.type));
     if (badType) throw new SysTransitionError(409, 'RELEASE_MEMBER_NOT_RELEASABLE', `批次内 #${badType.id} 类型不可发布（${badType.type}），请先移除`);
-    // bug 流 Commit ②（K1 纵深防线，同 badType 哲学）：批次内 bug 必须 needs_release=1——不发版单走
-    //   confirm-online-norelease 专用 transition，理论上不该进批次（add-issues 已挡），此处防 schema 漂移/手工改库。
-    const badBugRelease = members.find(m => m.type === 'bug' && m.needs_release !== 1);
-    if (badBugRelease) throw new SysTransitionError(409, 'RELEASE_MEMBER_NOT_RELEASABLE', `批次内 #${badBugRelease.id} 未标记「发版」（needs_release≠1），不能进批次`);
+    // [v1.6 退场·C3b] 旧 needs_release=1 纵深闸（bug 流 Commit ② 引入）已移除——needs_release 唯一写点
+    //   set_release_flag 随 R1 一并退场（LEGACY_RELEASE_FLOW_DISABLED），此后 bug 的 needs_release 永远
+    //   停在建单时的初值（NULL，转只读残留，F5），若仍强校验 needs_release=1 会让新流程（execute-release
+    //   mode=publish）**恒 409**——新流程的守卫已换成更强的 release_assignee_id 体系（G6 请求级前置：
+    //   全部成员 release_assignee_id 非空且全等于 actor.id，见 execute-release 端点），完全覆盖本闸原意图。
+    //   ⚠️ 本函数其余校验（下方 badType/族别一致性/状态/原子 UPDATE/timeline/批次翻发布）逐字未动——
+    //   这是"不动 _publishReleaseCoreInTxn 内核"硬约束下唯一必要的外科手术式改动：该谓词只筛
+    //   m.type==='bug' 的成员，对变更流(feature/improvement)完全不可达，故不影响变更流零回归；
+    //   退场前唯二能带 bug 成员进本函数的旧入口（R2 hotfix-publish 单条 / R4 批次 publish）现均在各自
+    //   端点入口处对 type='bug'/release_type='bug' 提前拒绝（本 commit 同步落地），故本谓词移除前后，
+    //   legacy 路径实际上都已到不了这里——唯一新增的合法调用方是 execute-release(mode=publish)（G6）。
     // 族别一致性纵深防线（D-A：bug vs 非bug，codex H-2 fail-closed）：**从成员推导族别强制校验，不依赖存的 release_type**——
     //   ① 组内成员族别必须唯一（bug 与非 bug 不能混）——覆盖历史 release_type=NULL 混批批次（发布前也挡住）；
     //   ② release_type 已存且与成员实际族别不符（脏库/手工改）也拒。config 已被 badType 挡（releaseFamilyOf 返 null 亦不计入）。
@@ -2614,6 +3134,17 @@ module.exports = (deps) => {
   async function publishReleaseTransition(releaseId, actor, payload = {}) {
     await sysBeginImmediate();
     try {
+      // [H-1 收口·codex40] R4 legacy /publish 退场加固：不只看存量 release_type，从**成员实际族别** fail-closed——
+      //   纯 bug 成员但 release_type IS NULL 的脏/历史批次，若只在端点查 release_type='bug' 会漏，直发即绕过
+      //   release_assignee 执行权矩阵（复活旧 admin 发布入口）。本 wrapper **仅被 R4 调用**（execute-release /
+      //   hotfix-publish 均直连 _publishReleaseCoreInTxn，不经此），故在此按成员族别拦 bug 是唯一必要且**不触核内**的
+      //   外科加固；execute-release(mode=publish) 的合法 bug 发布不受影响。remove-issues 不连带扩展（只摘单不发布、
+      //   不绕执行权，且过度拦截会让脏批次更难清理，codex40 第十人视角）。
+      const famMembers = await dbAllAsync('SELECT type FROM sys_issues WHERE release_id = ?', [releaseId]);
+      const legacyFams = [...new Set(famMembers.map(m => releaseFamilyOf(m.type)).filter(Boolean))];
+      if (legacyFams.includes('bug')) {
+        throw new SysTransitionError(409, 'LEGACY_RELEASE_FLOW_DISABLED', 'bug 批次请改用「执行上线」流程');
+      }
       const r = await _publishReleaseCoreInTxn(releaseId, actor, payload);
       await sysCommit();
       return { ok: true, ...r, notifyAfterCommit: 'notifyReleasedToRequester' };   // 通知 C5 落地（先提交再发，失败不回滚已发布）
@@ -2727,6 +3258,15 @@ module.exports = (deps) => {
         //   不只看本次入参，防历史混批被本次入参回填成错误族别）。feature+improvement 同族 'change' 可共批。
         const idPh = issueIds.map(() => '?').join(',');
         const typeRows = await dbAllAsync(`SELECT id, type FROM sys_issues WHERE id IN (${idPh})`, issueIds);
+        // [R5①退场，v1.6 §2.3 C-1 回填] bug 单一律拒绝走 legacy 批次编辑链路——v1.6 后 bug 批次只能由
+        //   execute-release(mode=publish) 在事务内建/更（H-3 单一聚合根），admin 手动"建批次→add-issues(bug)→publish"
+        //   整链对 bug 停用，否则绕过 release_assignee 守卫复活双入口。同时天然覆盖 [R5②]（建批次拒 bug 族别）——
+        //   批次的 release_type='bug' 只能由本次判断阻止的这条入口产生，堵住这一条即无其他途径可达。
+        const bugIssueIds = typeRows.filter(r => r.type === 'bug').map(r => r.id);
+        if (bugIssueIds.length > 0) {
+          await sysRollback();
+          return res.status(409).json({ error: '该功能已下线，bug 上线流程请改用「批量指定上线开发」+「执行上线」', code: 'LEGACY_RELEASE_FLOW_DISABLED', issue_ids: bugIssueIds });
+        }
         const newFamilies = [...new Set(typeRows.map(r => releaseFamilyOf(r.type)).filter(Boolean))];
         if (newFamilies.length > 1) {
           await sysRollback();
@@ -2798,9 +3338,15 @@ module.exports = (deps) => {
     try {
       await sysBeginImmediate();
       try {
-        const rel = await dbGetAsync('SELECT id, status FROM sys_releases WHERE id = ?', [id]);
+        const rel = await dbGetAsync('SELECT id, status, release_type FROM sys_releases WHERE id = ?', [id]);
         if (!rel) { await sysRollback(); return res.status(404).json({ error: '上线批次不存在', code: 'RELEASE_NOT_FOUND' }); }
         if (rel.status !== '计划中') { await sysRollback(); return res.status(409).json({ error: '批次非「计划中」，不能移除', code: 'RELEASE_NOT_PLANNING' }); }
+        // [R5⑤退场，v1.6 §2.3 C-1 回填] bug 族别批次 fail-closed 同拒——v1.6 后 add-issues 已堵住 bug 进 legacy
+        //   批次的唯一入口，故本分支正常路径不可达（防御性闸，覆盖脏库/历史残留 release_type='bug' 批次场景）。
+        if (rel.release_type === 'bug') {
+          await sysRollback();
+          return res.status(409).json({ error: '该功能已下线，bug 批次请改用「执行上线」流程', code: 'LEGACY_RELEASE_FLOW_DISABLED' });
+        }
         for (const iid of issueIds) {
           const upd = await dbRunAsync(
             `UPDATE sys_issues SET release_id = NULL, updated_at = datetime('now','localtime')
@@ -2834,10 +3380,18 @@ module.exports = (deps) => {
 
   // ── POST /sys-releases/:id/publish：发布（admin，H-3 原子性，走 publishReleaseTransition）──────────
   //   body 可选 release_note/version_tag（"填说明+版本→发布"单步）；闸门③ 在 core 内校最终值非空。
+  //   [R4 退场，v1.6 §2.3 C-1] **release_type='bug' 批次一律拒发**（替代者=execute-release(mode=publish)，
+  //   其内部复用 _publishReleaseCoreInTxn 但入口守卫换成 release_assignee 体系）——**变更流（release_type='change'
+  //   或历史 NULL 批次）保留，唯一发布入口，行为逐字不变**。
   router.post('/sys-releases/:id/publish', authenticateToken, requireSysSchemaReady, requireAdmin, async (req, res) => {
     const id = parsePositiveId(req.params.id);
     if (!id) return res.status(400).json({ error: '无效的批次 ID', code: 'INVALID_RELEASE_ID' });
     try {
+      const rel = await dbGetAsync('SELECT release_type FROM sys_releases WHERE id = ?', [id]);
+      if (!rel) return res.status(404).json({ error: '上线批次不存在', code: 'RELEASE_NOT_FOUND' });
+      if (rel.release_type === 'bug') {
+        return res.status(409).json({ error: '该功能已下线，bug 批次请改用「执行上线」流程', code: 'LEGACY_RELEASE_FLOW_DISABLED' });
+      }
       const r = await publishReleaseTransition(id, sysActor(req), req.body || {});
       const releasedIds = r.releasedIssueIds || [];
       // 批次通知逐单发需求方·已上线（§6.2：状态先提交成功）。ultracode 审 #4：批次可达 200 单（C4 上限），
@@ -2851,8 +3405,11 @@ module.exports = (deps) => {
     } catch (err) { sendSysTransitionError(res, err); }
   });
 
-  // ── POST /sys-issues/:id/hotfix-publish：单条 hotfix 兜底（admin，自动建 is_hotfix=1 批次 + 一键发布，§6.1）──
-  //   单事务原子：校单「待上线」AND 未挂批次 AND 非 config → 建 hotfix 批次 → 绑单 → 复用 _publishReleaseCoreInTxn 发布。
+  // ── [R2 退场，v1.6 §2.3 C-1] POST /sys-issues/:id/hotfix-publish：单条 hotfix 兜底 ──────────
+  //   **变更流(feature/improvement)保留**（admin，自动建 is_hotfix=1 批次 + 一键发布，§6.1，行为逐字不变）；
+  //   **bug 一律 LEGACY_RELEASE_FLOW_DISABLED**（替代者=execute-release(mode=hotfix)，注意新 hotfix
+  //   **不建批次**，与本端点"hotfix 也建 is_hotfix=1 批次"语义不同，H-3）。
+  //   单事务原子：校单「待上线」AND 未挂批次 AND 非 config/非 bug → 建 hotfix 批次 → 绑单 → 复用 _publishReleaseCoreInTxn 发布。
   router.post('/sys-issues/:id/hotfix-publish', authenticateToken, requireSysSchemaReady, requireAdmin, async (req, res) => {
     const issueId = parsePositiveId(req.params.id);
     if (!issueId) return res.status(400).json({ error: '无效的迭代单 ID', code: 'INVALID_SYS_ISSUE_ID' });
@@ -2871,22 +3428,20 @@ module.exports = (deps) => {
         const issue = await dbGetAsync('SELECT id, status, release_id, type, needs_release FROM sys_issues WHERE id = ?', [issueId]);
         if (!issue) { await sysRollback(); return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' }); }
         // C（codex L-2）：类型判断用 RELEASABLE_TYPES 白名单（与 add-issues 同源，防未来加类型漂移）；config 保留特化错误码。
-        //   bug 自 Commit ② 起为 hotfix 发版主路径（RELEASABLE_TYPES 已恢复含 bug），但须 needs_release=1（K1，见下）。
         if (!RELEASABLE_TYPES.includes(issue.type)) {
           await sysRollback();
           return res.status(409).json(issue.type === 'config'
             ? { error: '配置类不进上线批次', code: 'CONFIG_NO_RELEASE' }
             : { error: `该类型暂不可进上线批次（当前仅 ${RELEASABLE_TYPES.join('/')}）`, code: 'TYPE_NOT_RELEASABLE' });
         }
+        // [R2 退场] bug 一律拒绝（放在 status/release_id 校验之前，防止"该单非待上线"这类通用错误掩盖"整条路已下线"的更根本事实）
+        if (issue.type === 'bug') {
+          await sysRollback();
+          return res.status(409).json({ error: '该功能已下线，bug 上线流程请改用「批量指定上线开发」+「执行上线」', code: 'LEGACY_RELEASE_FLOW_DISABLED' });
+        }
         if (issue.status !== '待上线' || issue.release_id !== null) {
           await sysRollback();
           return res.status(409).json({ error: '该单非「待上线」或已挂批次，不能 hotfix', code: 'ISSUE_NOT_HOTFIXABLE' });
-        }
-        // bug 流 Commit ②（K1）：bug 走 hotfix 前必须已在「填发版信息」标记 needs_release=1；
-        //   未填(NULL)/标了不发版(0) 应走 confirm-online-norelease，不能绕过发版闸门。
-        if (issue.type === 'bug' && issue.needs_release !== 1) {
-          await sysRollback();
-          return res.status(409).json({ error: '该 bug 未标记「发版」，不能走 hotfix 上线（请先在「填发版信息」选择「发版」，或走「确认上线·不发版」）', code: 'BUG_NEEDS_RELEASE_NOT_SET' });
         }
         releaseNo = await nextReleaseNo();
         const relIns = await dbRunAsync(
@@ -2910,6 +3465,245 @@ module.exports = (deps) => {
       res.status(201).json({ issue_id: issueId, release_id: releaseId, release_no: releaseNo, status: '已上线', count: result.count });
     } catch (err) {
       // A（codex M-1）：hotfix 自动号极端竞态撞 UNIQUE 时转 409（不退化为 500 + 原始 SQLite 错误外泄）
+      if (err && /UNIQUE/i.test(err.message || '')) return res.status(409).json({ error: '批次号生成冲突，请重试', code: 'RELEASE_NO_GENERATE_CONFLICT' });
+      sendSysTransitionError(res, err);
+    }
+  });
+
+  // ============================================================
+  // 三·四·五、通知改造 C3b 上线编排（§2.3，G3-G6）——批量指定上线开发 + 换人 + 指定开发本人执行上线
+  //   替代 v1.103.0 已上线 ②「建单人确认发布」为「建单人编排、指定开发执行」，改已上线执行权。
+  //   三端点均对 issue 批量操作（非 /sys-issues/:id/xxx 单条模式），因待执行阶段尚无 sys_releases 批次可挂。
+  // ============================================================
+
+  // ── POST /sys-issues/assign-release-dev：批量指定上线开发（建单人，G3，H-4 先整批资格校验）──────────
+  //   仅允许"未指定执行人"或"同人幂等重提"（M-1）；改 A→B 须走 reassign-release-dev。
+  router.post('/sys-issues/assign-release-dev', authenticateToken, requireSysSchemaReady, requireAdmin, async (req, res) => {
+    const b = req.body || {};
+    const raw = b.issue_ids;
+    if (!Array.isArray(raw) || raw.length === 0) return res.status(400).json({ error: '请选择要指定上线开发的迭代单', code: 'ISSUE_IDS_REQUIRED' });
+    if (raw.length > SYS_BATCH_ISSUE_MAX) return res.status(400).json({ error: `单次最多 ${SYS_BATCH_ISSUE_MAX} 条`, code: 'TOO_MANY_ISSUES' });
+    for (const x of raw) if (!parsePositiveId(x)) return res.status(400).json({ error: '迭代单 id 非法', code: 'INVALID_ISSUE_ID' });
+    const issueIds = [...new Set(raw.map(parsePositiveId))];
+    const devId = parsePositiveId(b.release_assignee_id);
+    if (!devId) return res.status(400).json({ error: '必须指定上线开发', code: 'RELEASE_ASSIGNEE_REQUIRED' });
+    const actor = sysActor(req);
+    try {
+      await sysBeginImmediate();
+      try {
+        const dev = await dbGetAsync('SELECT id, display_name, username, role FROM users WHERE id = ?', [devId]);
+        if (!dev) { await sysRollback(); return res.status(400).json({ error: '指定的上线开发不存在', code: 'RELEASE_ASSIGNEE_NOT_FOUND' }); }
+        if (dev.role === 'viewer') { await sysRollback(); return res.status(400).json({ error: '不能指定查看者为上线开发', code: 'RELEASE_ASSIGNEE_VIEWER' }); }
+        const devName = dev.display_name || dev.username || `user#${dev.id}`;
+
+        const idPh = issueIds.map(() => '?').join(',');
+        const rows = await dbAllAsync(`SELECT id, type, status, release_id, release_assignee_id FROM sys_issues WHERE id IN (${idPh})`, issueIds);
+        if (rows.length !== issueIds.length) { await sysRollback(); return res.status(404).json({ error: '部分迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' }); }
+        // H-4：先整批资格校验，任一失败整批不落库。
+        for (const r of rows) {
+          if (r.type !== 'bug') { await sysRollback(); return res.status(409).json({ error: `#${r.id} 非 bug 单，不支持上线编排`, code: 'RELEASE_ASSIGN_TYPE_INVALID', issue_id: r.id }); }
+          if (r.status !== '待上线') { await sysRollback(); return res.status(409).json({ error: `#${r.id} 非「待上线」，不能指定上线开发`, code: 'RELEASE_ASSIGN_STATUS_INVALID', issue_id: r.id }); }
+          if (r.release_id !== null) { await sysRollback(); return res.status(409).json({ error: `#${r.id} 已挂上线批次，不能重新指定`, code: 'ISSUE_ALREADY_IN_RELEASE', issue_id: r.id }); }
+          // M-1：仅"未指定"或"同人幂等重提"；已指定他人须走 reassign-release-dev。
+          if (r.release_assignee_id !== null && Number(r.release_assignee_id) !== devId) {
+            await sysRollback();
+            return res.status(409).json({ error: `#${r.id} 已指定其他上线开发，请改用「换人」（reassign-release-dev）`, code: 'RELEASE_ASSIGNEE_ALREADY_SET', issue_id: r.id });
+          }
+        }
+        for (const iid of issueIds) {
+          const upd = await dbRunAsync(
+            `UPDATE sys_issues SET release_assignee_id = ?, release_assignee_name = ?, updated_at = datetime('now','localtime')
+               WHERE id = ? AND type = 'bug' AND status = '待上线' AND release_id IS NULL
+                 AND (release_assignee_id IS NULL OR release_assignee_id = ?)`,
+            [devId, devName, iid, devId]
+          );
+          if (!upd || upd.changes !== 1) {
+            await sysRollback();
+            return res.status(409).json({ error: `#${iid} 状态已变更，请刷新重试`, code: 'CONCURRENT_STATE_CHANGE', issue_id: iid });
+          }
+          await dbRunAsync(
+            `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, operator_id, operator_name)
+             VALUES (?, 'note', ?, 'assign_release_dev', ?, ?)`,
+            [iid, `指定上线开发：${devName}`, actor.id, actor.name]
+          );
+        }
+        await sysCommit();
+      } catch (txErr) {
+        try { await sysRollback(); } catch (_) { /* ignore */ }
+        throw txErr;
+      }
+      res.json({ assigned: issueIds, release_assignee_id: devId, count: issueIds.length });
+    } catch (err) { sendSysTransitionError(res, err); }
+  });
+
+  // ── POST /sys-issues/reassign-release-dev：批量换人（建单人，G4，M-1 边界：仅已指定单可换）──────────
+  router.post('/sys-issues/reassign-release-dev', authenticateToken, requireSysSchemaReady, requireAdmin, async (req, res) => {
+    const b = req.body || {};
+    const raw = b.issue_ids;
+    if (!Array.isArray(raw) || raw.length === 0) return res.status(400).json({ error: '请选择要换人的迭代单', code: 'ISSUE_IDS_REQUIRED' });
+    if (raw.length > SYS_BATCH_ISSUE_MAX) return res.status(400).json({ error: `单次最多 ${SYS_BATCH_ISSUE_MAX} 条`, code: 'TOO_MANY_ISSUES' });
+    for (const x of raw) if (!parsePositiveId(x)) return res.status(400).json({ error: '迭代单 id 非法', code: 'INVALID_ISSUE_ID' });
+    const issueIds = [...new Set(raw.map(parsePositiveId))];
+    const devId = parsePositiveId(b.release_assignee_id);
+    if (!devId) return res.status(400).json({ error: '必须指定新的上线开发', code: 'RELEASE_ASSIGNEE_REQUIRED' });
+    const actor = sysActor(req);
+    try {
+      await sysBeginImmediate();
+      try {
+        const dev = await dbGetAsync('SELECT id, display_name, username, role FROM users WHERE id = ?', [devId]);
+        if (!dev) { await sysRollback(); return res.status(400).json({ error: '指定的上线开发不存在', code: 'RELEASE_ASSIGNEE_NOT_FOUND' }); }
+        if (dev.role === 'viewer') { await sysRollback(); return res.status(400).json({ error: '不能指定查看者为上线开发', code: 'RELEASE_ASSIGNEE_VIEWER' }); }
+        const devName = dev.display_name || dev.username || `user#${dev.id}`;
+
+        const idPh = issueIds.map(() => '?').join(',');
+        const rows = await dbAllAsync(`SELECT id, type, status, release_id, release_assignee_id, release_assignee_name FROM sys_issues WHERE id IN (${idPh})`, issueIds);
+        if (rows.length !== issueIds.length) { await sysRollback(); return res.status(404).json({ error: '部分迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' }); }
+        for (const r of rows) {
+          if (r.type !== 'bug') { await sysRollback(); return res.status(409).json({ error: `#${r.id} 非 bug 单，不支持上线编排`, code: 'RELEASE_ASSIGN_TYPE_INVALID', issue_id: r.id }); }
+          if (r.status !== '待上线') { await sysRollback(); return res.status(409).json({ error: `#${r.id} 非「待上线」，不能换人`, code: 'RELEASE_ASSIGN_STATUS_INVALID', issue_id: r.id }); }
+          if (r.release_id !== null) { await sysRollback(); return res.status(409).json({ error: `#${r.id} 已挂上线批次（已进入执行），不能换人`, code: 'ISSUE_ALREADY_IN_RELEASE', issue_id: r.id }); }
+          // 换人专用：必须已有指定人（未指定应走 assign-release-dev）。
+          if (r.release_assignee_id === null) { await sysRollback(); return res.status(409).json({ error: `#${r.id} 尚未指定上线开发，请改用「批量指定上线开发」（assign-release-dev）`, code: 'RELEASE_ASSIGNEE_NOT_SET', issue_id: r.id }); }
+        }
+        for (const r of rows) {
+          const oldName = r.release_assignee_name;
+          const upd = await dbRunAsync(
+            `UPDATE sys_issues SET release_assignee_id = ?, release_assignee_name = ?, updated_at = datetime('now','localtime')
+               WHERE id = ? AND type = 'bug' AND status = '待上线' AND release_id IS NULL AND release_assignee_id IS NOT NULL`,
+            [devId, devName, r.id]
+          );
+          if (!upd || upd.changes !== 1) {
+            await sysRollback();
+            return res.status(409).json({ error: `#${r.id} 状态已变更，请刷新重试`, code: 'CONCURRENT_STATE_CHANGE', issue_id: r.id });
+          }
+          await dbRunAsync(
+            `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, operator_id, operator_name)
+             VALUES (?, 'note', ?, 'reassign_release_dev', ?, ?)`,
+            [r.id, `改派上线开发：${oldName || '（原执行人）'} → ${devName}`, actor.id, actor.name]
+          );
+        }
+        await sysCommit();
+      } catch (txErr) {
+        try { await sysRollback(); } catch (_) { /* ignore */ }
+        throw txErr;
+      }
+      res.json({ reassigned: issueIds, release_assignee_id: devId, count: issueIds.length });
+    } catch (err) { sendSysTransitionError(res, err); }
+  });
+
+  // ── POST /sys-issues/execute-release：指定开发本人执行上线（G5 hotfix / G6 publish）──────────
+  //   权限=actor.id===release_assignee_id（H-1，admin 无隐式执行权，除非 admin 本人被显式指定）。
+  //   mode=hotfix：单 issue，不建批次，release_id/version_tag 保持 NULL（H-2/H-3）。
+  //   mode=publish：请求级前置（全选中 issue 状态=待上线∧release_assignee_id 非空∧全相同∧==actor.id，H-4）+
+  //     单事务建/更 sys_releases 批次（复用 _publishReleaseCoreInTxn 内核）+ 全部转已上线；任一失败整批回滚。
+  //   F2（2026-07-06 用户拍板）：不自动触发任何通知（建单人通知走手动 notify-creator，G8）。
+  router.post('/sys-issues/execute-release', authenticateToken, requireSysSchemaReady, async (req, res) => {
+    const b = req.body || {};
+    const mode = b.mode;
+    if (!['hotfix', 'publish'].includes(mode)) return res.status(400).json({ error: 'mode 仅支持 hotfix/publish', code: 'INVALID_RELEASE_MODE' });
+    const raw = b.issue_ids;
+    if (!Array.isArray(raw) || raw.length === 0) return res.status(400).json({ error: '请选择要执行上线的迭代单', code: 'ISSUE_IDS_REQUIRED' });
+    if (raw.length > SYS_BATCH_ISSUE_MAX) return res.status(400).json({ error: `单次最多 ${SYS_BATCH_ISSUE_MAX} 条`, code: 'TOO_MANY_ISSUES' });
+    for (const x of raw) if (!parsePositiveId(x)) return res.status(400).json({ error: '迭代单 id 非法', code: 'INVALID_ISSUE_ID' });
+    const issueIds = [...new Set(raw.map(parsePositiveId))];
+    if (mode === 'hotfix' && issueIds.length !== 1) return res.status(400).json({ error: 'hotfix 模式仅支持单条', code: 'HOTFIX_SINGLE_ONLY' });
+    const actor = sysActor(req);
+
+    try {
+      // [U-2 收口·ultracode] execute-release 角色下限：指定执行人若在 assign 后被降级为 viewer
+      //   （assign-release-dev 已校 viewer，但降级不清 release_assignee_id、authenticateToken 只回查 status 不回查 role，
+      //   server.js 亦不清该字段），执行时**回查当前 role** 守 viewer-never-write 不变量（本端点内闭合，不碰 server.js）。
+      //   status 不在此查——authenticateToken 已强制 status='active'（否则 403 账号已被禁用），此处再查冗余且会误伤未设
+      //   status 的测试夹具；本收口只补 authenticateToken 不覆盖的 role 维度。
+      const execUser = await dbGetAsync('SELECT role FROM users WHERE id = ?', [actor.id]);
+      if (!execUser || execUser.role === 'viewer') {
+        return res.status(403).json({ error: '当前账号无执行上线权限（已降级为查看者）', code: 'EXECUTOR_NOT_ELIGIBLE' });
+      }
+      if (mode === 'hotfix') {
+        const issueId = issueIds[0];
+        await sysBeginImmediate();
+        try {
+          const issue = await dbGetAsync('SELECT id, type, status, release_id, release_assignee_id FROM sys_issues WHERE id = ?', [issueId]);
+          if (!issue) { await sysRollback(); return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' }); }
+          if (issue.type !== 'bug') { await sysRollback(); return res.status(409).json({ error: '仅 bug 单支持上线编排', code: 'RELEASE_ASSIGN_TYPE_INVALID' }); }
+          // H-1：仅被指定执行人本人可执行；admin 无隐式执行权（除非 admin 恰被指定）。
+          if (!issue.release_assignee_id || Number(issue.release_assignee_id) !== actor.id) {
+            await sysRollback();
+            return res.status(403).json({ error: '仅被指定的上线开发本人可执行上线', code: 'RELEASE_ASSIGNEE_GUARD_FAILED' });
+          }
+          if (issue.status !== '待上线' || issue.release_id !== null) {
+            await sysRollback();
+            return res.status(409).json({ error: '该单非「待上线」或已挂批次，不能执行 hotfix', code: 'ISSUE_NOT_EXECUTABLE' });
+          }
+          const upd = await dbRunAsync(
+            `UPDATE sys_issues SET status = '已上线', released_at = datetime('now','localtime'), updated_at = datetime('now','localtime')
+               WHERE id = ? AND status = '待上线' AND release_id IS NULL AND release_assignee_id = ?`,
+            [issueId, actor.id]
+          );
+          if (!upd || upd.changes !== 1) { await sysRollback(); return res.status(409).json({ error: '迭代单状态已变更，请刷新重试', code: 'CONCURRENT_STATE_CHANGE' }); }
+          await dbRunAsync(
+            `INSERT INTO sys_issue_timeline (issue_id, event_type, from_status, to_status, summary, action_code, operator_id, operator_name)
+             VALUES (?, 'release', '待上线', '已上线', ?, 'execute_release_hotfix', ?, ?)`,
+            [issueId, 'hotfix 上线（不发版，不建批次）', actor.id, actor.name]
+          );
+          await sysCommit();
+        } catch (txErr) {
+          try { await sysRollback(); } catch (_) { /* ignore */ }
+          throw txErr;
+        }
+        // F2：不自动通知
+        return res.json({ mode: 'hotfix', issue_id: issueId, status: '已上线' });
+      }
+
+      // mode === 'publish'
+      const releaseNote = (typeof b.release_note === 'string' ? b.release_note.trim() : '');
+      const versionTag = (typeof b.version_tag === 'string' ? b.version_tag.trim() : '');
+      if (!releaseNote) return res.status(400).json({ error: '请填写上线说明', code: 'RELEASE_NOTE_REQUIRED' });
+      if (!versionTag) return res.status(400).json({ error: '请填写版本号', code: 'VERSION_TAG_REQUIRED' });
+      if (releaseNote.length > SYS_RELEASE_NOTE_MAX) return res.status(400).json({ error: `上线说明超长（≤${SYS_RELEASE_NOTE_MAX} 字）`, code: 'RELEASE_NOTE_TOO_LONG' });
+      if (versionTag.length > SYS_VERSION_TAG_MAX) return res.status(400).json({ error: `版本号超长（≤${SYS_VERSION_TAG_MAX} 字）`, code: 'VERSION_TAG_TOO_LONG' });
+
+      let releaseId = null, releaseNo = null, result = null;
+      await sysBeginImmediate();
+      try {
+        const idPh = issueIds.map(() => '?').join(',');
+        const rows = await dbAllAsync(`SELECT id, type, status, release_id, release_assignee_id FROM sys_issues WHERE id IN (${idPh})`, issueIds);
+        if (rows.length !== issueIds.length) { await sysRollback(); return res.status(404).json({ error: '部分迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' }); }
+        // H-4/G6 请求级前置：全部满足 type=bug ∧ 状态=待上线 ∧ release_id IS NULL ∧ release_assignee_id 非空
+        //   ∧ 全部相同 ∧ ==actor.id，否则整批拒绝（不指出具体哪条，防止批量场景下逐条泄露过多信息且语义本就是"整批"）。
+        const assigneeIdSet = new Set(rows.map(r => (r.release_assignee_id === null ? null : Number(r.release_assignee_id))));
+        const anyBad = rows.some(r => r.type !== 'bug' || r.status !== '待上线' || r.release_id !== null
+          || r.release_assignee_id === null || Number(r.release_assignee_id) !== actor.id);
+        if (anyBad || assigneeIdSet.size !== 1) {
+          await sysRollback();
+          return res.status(409).json({ error: '批次内所有单必须为 bug、「待上线」且指定同一上线开发（即当前登录人）', code: 'RELEASE_BATCH_ASSIGNEE_MISMATCH' });
+        }
+        // H-3：单一聚合根——建批次（release_type='bug'，created_by 复用为"批次持执行人"字段，即当前登录开发）。
+        releaseNo = await nextReleaseNo();
+        const relIns = await dbRunAsync(
+          `INSERT INTO sys_releases (release_no, title, status, is_hotfix, release_note, version_tag, created_by, created_by_name, release_type)
+           VALUES (?, ?, '计划中', 0, ?, ?, ?, ?, 'bug')`,
+          [releaseNo, `执行上线（${actor.name}）`, releaseNote, versionTag, actor.id, actor.name]
+        );
+        releaseId = relIns.lastID;
+        // 绑单：双 WHERE 守卫（待上线 + release_id IS NULL + release_assignee_id=actor.id），changes 须等于批次数（原子）。
+        const idPh2 = issueIds.map(() => '?').join(',');
+        const bind = await dbRunAsync(
+          `UPDATE sys_issues SET release_id = ?, updated_at = datetime('now','localtime')
+             WHERE id IN (${idPh2}) AND status = '待上线' AND release_id IS NULL AND release_assignee_id = ?`,
+          [releaseId, ...issueIds, actor.id]
+        );
+        if (!bind || bind.changes !== issueIds.length) { await sysRollback(); return res.status(409).json({ error: '批次内单状态已变更，请刷新重试', code: 'CONCURRENT_STATE_CHANGE' }); }
+        // 复用共享内核发布（H-3）：核心校验（成员≥1/全待上线/type 白名单/族别一致）+ 原子翻已上线 + release timeline + 批次已发布。
+        result = await _publishReleaseCoreInTxn(releaseId, actor, { release_note: releaseNote, version_tag: versionTag });
+        await sysCommit();
+      } catch (txErr) {
+        try { await sysRollback(); } catch (_) { /* ignore */ }
+        throw txErr;
+      }
+      // F2：不自动通知
+      res.status(201).json({ mode: 'publish', release_id: releaseId, release_no: releaseNo, status: '已上线', released: result.releasedIssueIds, count: result.count });
+    } catch (err) {
       if (err && /UNIQUE/i.test(err.message || '')) return res.status(409).json({ error: '批次号生成冲突，请重试', code: 'RELEASE_NO_GENERATE_CONFLICT' });
       sendSysTransitionError(res, err);
     }
@@ -3001,6 +3795,31 @@ module.exports = (deps) => {
     };
   }
 
+  // 对接人侧 markdown（通知改造 C3 G7，仅 bug 建单 path B 场景；"通知对接人协助指派"）。
+  function buildSysRelayMarkdown(issue, baseUrl) {
+    const title = issueNotify.issueSafeText(issue.title, 80);
+    const safeTitle = sysNotifyTitle(issue.title);
+    const system = issueNotify.issueSafeText(issue.system_name, 40);
+    const link = sysDeepLinkLine(baseUrl, issue.id);
+    return {
+      title: `📮 请协助指派开发：${safeTitle}`,
+      md: `### 📮 新 bug 待指派开发\n\n- **单号**：#${issue.id}\n- **系统**：${system}\n- **标题**：${title}\n\n请登录平台为该问题指派开发处理人。${link}`,
+    };
+  }
+
+  // 建单人侧 markdown（通知改造 C3 G8；开发/对接人向建单人汇报进展或完结）。
+  function buildSysCreatorMarkdown(issue, baseUrl) {
+    const title = issueNotify.issueSafeText(issue.title, 80);
+    const safeTitle = sysNotifyTitle(issue.title);
+    const system = issueNotify.issueSafeText(issue.system_name, 40);
+    const link = sysDeepLinkLine(baseUrl, issue.id);
+    const statusLine = issueNotify.issueSafeText(issue.status, 20);
+    return {
+      title: `📬 迭代单状态更新：${safeTitle}`,
+      md: `### 📬 迭代单状态更新\n\n- **单号**：#${issue.id}\n- **系统**：${system}\n- **标题**：${title}\n- **当前状态**：${statusLine}\n\n请登录平台查看详情。${link}`,
+    };
+  }
+
   // 通知落库写串行化进 sys mutex（ultracode 审 #1，C4.5 同类防线）：通知写跑在主事务提交后、mutex 已释放，
   //   若用裸 autocommit dbRunAsync，会落进另一并发请求已打开的 BEGIN IMMEDIATE 事务里，随其 ROLLBACK 一起丢失
   //   （钉钉已发但库回到 not_sent → 后续误判未发重复推送）。照附件写口径用 sysBeginImmediate/sysCommit 独立小事务串行化。
@@ -3017,14 +3836,45 @@ module.exports = (deps) => {
               notify_message_key=?, notify_error=?, read_at=NULL WHERE id=?`,
       [ok ? 'sent' : 'failed', ok ? messageKey : null, ok ? null : (error || 'other'), issueId]);
   }
-  async function recordSysRequesterNotify(issueId, ok, messageKey, error) {
+  // requester 落库 helper 扩展落 phone_snapshot（通知改造 C3 H-5/M-A）：每次实际尝试发送（无论成败）都把
+  //   本次使用的手机号固化进 requester_notify_phone_snapshot——首次发送=当前 requester_phone；此后任何
+  //   重发/自动再触发都读快照（sendSysRequesterNotify 内 phoneToUse 已按此口径解析），故这里"再写一次快照"
+  //   对已有快照是幂等 no-op、对首次发送是"落快照"动作，单一写点不分裂。
+  async function recordSysRequesterNotify(issueId, ok, messageKey, error, phoneSnapshot) {
     await sysNotifyWrite(
       `UPDATE sys_issues SET requester_notify_status=?, requester_notified_at=datetime('now','localtime'),
-              requester_notify_message_key=?, requester_notify_error=?, requester_read_at=NULL WHERE id=?`,
+              requester_notify_message_key=?, requester_notify_error=?, requester_read_at=NULL,
+              requester_notify_phone_snapshot=COALESCE(requester_notify_phone_snapshot, ?) WHERE id=?`,
+      [ok ? 'sent' : 'failed', ok ? messageKey : null, ok ? null : (error || 'other'), phoneSnapshot || null, issueId]);
+  }
+  // 对接人侧落库（通知改造 C3 G7，relay_* 5 列，与三侧 notify_status 处理同构）。
+  async function recordSysRelayNotify(issueId, ok, messageKey, error) {
+    await sysNotifyWrite(
+      `UPDATE sys_issues SET relay_notify_status=?, relay_notified_at=datetime('now','localtime'),
+              relay_notify_message_key=?, relay_notify_error=?, relay_read_at=NULL WHERE id=?`,
       [ok ? 'sent' : 'failed', ok ? messageKey : null, ok ? null : (error || 'other'), issueId]);
+  }
+  // 建单人侧落库（通知改造 C3 G8，creator_notify_* 5 列，C1a 已建列·本 commit 起首次接入写路径）。
+  async function recordSysCreatorNotify(issueId, ok, messageKey, error) {
+    await sysNotifyWrite(
+      `UPDATE sys_issues SET creator_notify_status=?, creator_notified_at=datetime('now','localtime'),
+              creator_notify_message_key=?, creator_notify_error=?, creator_read_at=NULL WHERE id=?`,
+      [ok ? 'sent' : 'failed', ok ? messageKey : null, ok ? null : (error || 'other'), issueId]);
+  }
+  // 开发协作子表逐 dev 落库（通知改造 C3 G9）：定位 = (issue_id, user_id, removed_at IS NULL) 活动行（§6.1 M-2），
+  //   软删历史行不参与——WHERE 天然排除，若并发中该行恰被软删，changes=0，本函数吞（best-effort 通知写，不抛）。
+  async function recordSysDevAssigneeNotify(issueId, userId, ok, messageKey, error) {
+    await sysNotifyWrite(
+      `UPDATE sys_issue_dev_assignees SET notify_status=?, notified_at=datetime('now','localtime'),
+              notify_message_key=?, notify_error=?, read_at=NULL
+        WHERE issue_id=? AND user_id=? AND removed_at IS NULL`,
+      [ok ? 'sent' : 'failed', ok ? messageKey : null, ok ? null : (error || 'other'), issueId, userId]);
   }
 
   // dev 侧发送（收件人 = assigned_to → users.id/phone/dingtalk_user_id；§8.2）。
+  //   ⚠️ 本函数只服务【自动派发】路径（dispatchSysNotify，对 bug 早返回不触达——现只有变更流 feature/improvement
+  //   会走到这里）——单开发 + 主表 notify_* 语义在通知改造后对变更流保持零回归。bug 的手动逐 dev 通知走
+  //   G9（notify-developer 端点）+ recordSysDevAssigneeNotify（子表），两条路径按 type 天然分流，互不覆盖。
   async function sendSysDevNotify(issue, marker, baseUrl) {
     if (!issue.assigned_to) { await recordSysDevNotify(issue.id, false, null, 'no_assignee'); return; }
     const dev = await dbGetAsync('SELECT id, display_name, phone, dingtalk_user_id FROM users WHERE id = ?', [issue.assigned_to]);
@@ -3035,20 +3885,31 @@ module.exports = (deps) => {
   }
 
   // 需求方侧发送（收件人 = requester_phone 反查钉钉号；业务方无平台账号；§8.2）。
+  //   通知改造 C3 H-5/M-A 收件人快照：phoneToUse 优先取已落的 requester_notify_phone_snapshot（"重发"场景——
+  //   一旦首次实际尝试过发送，后续一律认准同一快照，不受当前 requester_phone 被清空/改号影响）；
+  //   快照为空（真正首次发送，或历史 pre-C1a 无快照旧数据不适用——生产 0 行不可达）才退回当前 requester_phone。
   async function sendSysRequesterNotify(issue, kind, baseUrl) {
-    // ultracode 审 #2：无需求方（内部自发现单常见，requester 三字段皆空）→ 无人可通知，保持 not_sent（不算失败）。
+    const phoneToUse = issue.requester_notify_phone_snapshot || issue.requester_phone;
+    // ultracode 审 #2：无需求方（内部自发现单常见，requester 三字段+快照皆空）→ 无人可通知，保持 not_sent（不算失败）。
     //   否则每张内部单 estimate/已上线后都被打成 requester『failed』，C6 满屏假失败红标 + admin 无意义重试。
     //   区分『有需求方但缺手机号』(→failed) 与『根本无需求方』(→保持 not_sent)。
-    if (!issue.requester_phone && !issue.requester_name && !issue.requester_dept) return;
-    if (!issue.requester_phone) { await recordSysRequesterNotify(issue.id, false, null, 'requester_phone_empty'); return; }
+    if (!phoneToUse && !issue.requester_name && !issue.requester_dept) return;
+    if (!phoneToUse) { await recordSysRequesterNotify(issue.id, false, null, 'requester_phone_empty', null); return; }
     let extra = null;
     if (kind === 'released' && issue.release_id) {
       const rel = await dbGetAsync('SELECT version_tag, release_note FROM sys_releases WHERE id = ?', [issue.release_id]);
       if (rel) extra = { versionTag: rel.version_tag, releaseNote: rel.release_note };
     }
     const { title, md } = buildSysRequesterMarkdown(issue, kind, baseUrl, extra);
-    const result = await sendIssueDingtalkToRequester(issue.requester_phone, title, md);
-    await recordSysRequesterNotify(issue.id, !!result.ok, result.message_key, result.reason);
+    const result = await sendIssueDingtalkToRequester(phoneToUse, title, md);
+    // [U-1 收口·ultracode + codex42] 快照仅在**已投递**时固化，判据=`已送达该号`而非仅 result.ok：
+    //   ① 硬失败（requester_invalid 号查不到钉钉/no_config/token/网络 !r.success）=消息**未送达**→不固化（传 null，
+    //      COALESCE 保留原值：首发硬失败仍 NULL、admin 改正 requester_phone 后重发读新号，堵"错号永久锁死→业务方失联"）。
+    //   ② message_key_missing（r.success===true 但无 key，见 server.js sendIssueDingtalkToRequester 末段）=钉钉**已接受
+    //      投递**、只是无法跟踪已读→消息已到该人，必须固化（否则 admin 误以为没发去改号，重发到新号=违反 M-A"重发认同一人"）。
+    //   ③ 成功=固化。成功后再失败重发传 null→COALESCE 保留成功快照不被抹。
+    const requesterDispatched = result.ok || result.reason === 'message_key_missing';
+    await recordSysRequesterNotify(issue.id, !!result.ok, result.message_key, result.reason, requesterDispatched ? phoneToUse : null);
   }
 
   // 通知派发主入口（端点在事务提交后 await 调用；marker = transition.notifyAfterCommit）。
@@ -3088,41 +3949,116 @@ module.exports = (deps) => {
   }
 
   // ============================================================
-  // 三·六、④b-1 bug 流手动通知端点（复刻 correction notify-* 手动范式；§6 手动链式）
-  //   bug 流通知不自动派发（dispatchSysNotify 对 bug 早返回），改由 admin/对接人在详情页手动点按钮触发。
-  //   复用 C5 发送/落库原语（sendSysDevNotify / sendSysRequesterNotify → recordSys*Notify 三侧隔离落库）。
-  //   权限 requireAdminOrBugLiaison 粗筛（admin 或对接人白名单）+ handler type='bug' 精判（变更流无手动端点，仍自动）。
-  //   建单人侧（creator）不做手动端点：native 建单人=admin=示例用户A本人，self 不通知（feedback_no_self_notify）。
+  // 三·六、bug 流手动通知端点（④b-1 复刻 correction notify-* 手动范式 + 通知改造 C3 四方扩展，§6 手动链式）
+  //   bug 流通知不自动派发（dispatchSysNotify 对 bug 早返回），改由 admin/白名单/相关方在详情页手动点按钮触发。
+  //   4 类：开发（逐 dev，子表）/ 对接人（仅 admin）/ 建单人（self-guard）/ 业务方（byPhone 快照）。
+  //   权限：dev/relay/requester 走 requireAdminOrBugLiaison 粗筛（部分端点收紧至仅 admin）；
+  //         creator 权限矩阵较宽（admin/白名单/主开发本人），端点内自行判定（见 G8）。
+  //   handler 内一律 type='bug' 精判（变更流无手动端点，仍自动 dispatchSysNotify）。
   // ============================================================
 
-  // ── [codex31/ultracode ④b-1 复审] 手动通知状态闸门（**后端真闸=权威**；前端按钮硬编码镜像同一状态集=非授权源，改一侧须同步另一侧，对齐本模块 SI_CHAT_STATUSES/白名单前端镜像范式；复刻 issue-tracker STATUS_NOT_NOTIFIABLE 范式 server.js:11321）──
+  // ── [codex31/ultracode ④b-1 复审 + 通知改造 C3 §5.2] 手动通知状态闸门（**后端真闸=权威**；前端按钮硬编码镜像同一状态集=非授权源，改一侧须同步另一侧，对齐本模块 SI_CHAT_STATUSES/白名单前端镜像范式；复刻 issue-tracker STATUS_NOT_NOTIFIABLE 范式 server.js:11321）──
   //   ⚠️ 两审收敛核心：前端按钮受 SI_CHAT_STATUSES 收窄，但后端原缺状态闸门→直连 API/前端态过期可对终态 bug 发矛盾通知。
   //   通知开发仅「处理中」（开发在干活态；待验证/待上线非其回合，指派/返工模板不适用，避免陈旧误导，含 ultracode external-api nit）。
-  //   通知报障人：受理后活跃态 + 已上线（排 待处理[未受理无进展]/已拒绝/已作废[终态"正在跟进"矛盾卡片]）。
+  //   通知对接人仅「待处理」（G7，建单后未受理前的窗口，对接人协助指派）。
+  //   通知建单人：待验证/待上线/已上线（G8，开发完成→建单人验收/上线闭环）。
+  //   [F3 收窄，2026-07-06 用户拍板] 通知报障人：待验证/待上线/已上线——**去掉「处理中」**（方案 §5.2 sendable 表逐字；
+  //   与旧 ④b-1「受理后活跃态」口径不同，用户可感知变化，批3 报告单列确认）；排 待处理[未受理无进展]/已拒绝/已作废[终态"正在跟进"矛盾卡片]。
   const SYS_NOTIFY_DEV_STATUSES = ['处理中'];
-  const SYS_NOTIFY_REQUESTER_STATUSES = ['处理中', '待验证', '待上线', '已上线'];
+  const SYS_NOTIFY_RELAY_STATUSES = ['待处理'];
+  const SYS_NOTIFY_CREATOR_STATUSES = ['待验证', '待上线', '已上线'];
+  const SYS_NOTIFY_REQUESTER_STATUSES = ['待验证', '待上线', '已上线'];
 
-  //   通知开发（dev 侧 notify_*）：需已指派 + status='处理中'；模板按 return_count 选（返工 vs 首次指派，[ultracode devil MED]）。
+  //   通知开发（逐 dev，通知改造 C3 G9 改造）：带 body.dev_user_id，定位子表活动行 (issue_id,user_id,removed_at IS NULL)，
+  //   状态落子表行（notify_status 等 5 列）——主表 notify_*（dev 侧）自本端点起转只读回溯，只服务变更流自动派发（C1b 已回填）。
   router.post('/sys-issues/:id/notify-developer', authenticateToken, requireSysSchemaReady, requireAdminOrBugLiaison, async (req, res) => {
+    const id = parsePositiveId(req.params.id);
+    if (!id) return res.status(400).json({ error: '无效的迭代单 ID', code: 'INVALID_SYS_ISSUE_ID' });
+    const devUserId = parsePositiveId((req.body || {}).dev_user_id);
+    if (!devUserId) return res.status(400).json({ error: '缺少 dev_user_id', code: 'DEV_USER_ID_REQUIRED' });
+    try {
+      const issue = await dbGetAsync('SELECT * FROM sys_issues WHERE id = ?', [id]);
+      if (!issue) return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' });
+      if (issue.type !== 'bug') return res.status(400).json({ error: '手动通知仅用于 bug 单', code: 'MANUAL_NOTIFY_BUG_ONLY' });   // 变更流仍自动派发
+      if (!SYS_NOTIFY_DEV_STATUSES.includes(issue.status)) return res.status(409).json({ error: `当前状态（${issue.status}）不可通知开发（仅处理中）`, code: 'STATUS_NOT_NOTIFIABLE' });
+      const devRow = await dbGetAsync(
+        `SELECT id, user_id FROM sys_issue_dev_assignees WHERE issue_id = ? AND user_id = ? AND removed_at IS NULL`,
+        [id, devUserId]
+      );
+      if (!devRow) return res.status(409).json({ error: '该开发不在本单指派子表中（可能已被移除）', code: 'DEV_ASSIGNEE_NOT_FOUND' });
+      const dev = await dbGetAsync('SELECT id, display_name, phone, dingtalk_user_id FROM users WHERE id = ?', [devUserId]);
+      if (!dev) return res.status(409).json({ error: '开发用户不存在', code: 'DEV_ASSIGNEE_NOT_FOUND' });
+      // [ultracode devil MED] bug 打回返工后仍在「处理中」但 return_count>0 → 用返工模板（否则发陈旧「指派/请回填」误导；auto 路径原 return 的 notifyReturnedToDeveloper 被 bug 早返回吞掉，此处手动补偿）。
+      //   [codex 复审 M-1·有意接受] 若「打回后改派新开发」（return_count 保留），新开发点通知也走返工模板——内容「查看打回原因·返工后重新提交」对新接手者仍成立（bug 确需返工），不引「被打回者本人」精判字段（避免为边角加 schema）。verify [Rework2] 锁定此语义。
+      //   ⚠️ 逐 dev 后：主开发与协作开发共用同一 marker 判定（均基于 issue.return_count，非"谁被打回过"精判，同 Rework2 有意接受语义扩展到协作侧）。
+      const marker = (Number(issue.return_count) > 0) ? 'notifyReturnedToDeveloper' : 'notifyAssignedDeveloper';
+      const baseUrl = await getSafePlatformBaseUrl();
+      const { title, md } = buildSysDevMarkdown(issue, marker, baseUrl);
+      const result = await sendIssueDingtalkRaw(dev, title, md);
+      await recordSysDevAssigneeNotify(id, devUserId, !!result.ok, result.message_key, result.reason);
+      const fresh = await dbGetAsync('SELECT notify_status, notify_error FROM sys_issue_dev_assignees WHERE id = ?', [devRow.id]);
+      res.json({ id, dev_user_id: devUserId, notify_status: fresh.notify_status, notify_error: fresh.notify_error });
+    } catch (err) { logger.error('[系统迭代] 手动通知开发失败:', err && err.message); res.status(500).json({ error: (err && err.message) || '通知开发失败' }); }
+  });
+
+  //   通知对接人（新，通知改造 C3 G7）：仅 admin（白名单成员亦不可发，§3.1 正交——对接人是通知目标非操作者）；
+  //   收件人=relay_notified_user_id（path B 建单写入）；发送前复核仍在白名单（防常量表变更后的历史脏数据）。
+  router.post('/sys-issues/:id/notify-relay', authenticateToken, requireSysSchemaReady, requireAdmin, async (req, res) => {
     const id = parsePositiveId(req.params.id);
     if (!id) return res.status(400).json({ error: '无效的迭代单 ID', code: 'INVALID_SYS_ISSUE_ID' });
     try {
       const issue = await dbGetAsync('SELECT * FROM sys_issues WHERE id = ?', [id]);
       if (!issue) return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' });
-      if (issue.type !== 'bug') return res.status(400).json({ error: '手动通知仅用于 bug 单', code: 'MANUAL_NOTIFY_BUG_ONLY' });   // 变更流仍自动派发
-      if (!issue.assigned_to) return res.status(409).json({ error: '尚未指派开发，无法通知', code: 'NO_ASSIGNEE_TO_NOTIFY' });
-      if (!SYS_NOTIFY_DEV_STATUSES.includes(issue.status)) return res.status(409).json({ error: `当前状态（${issue.status}）不可通知开发（仅处理中）`, code: 'STATUS_NOT_NOTIFIABLE' });
-      // [ultracode devil MED] bug 打回返工后仍在「处理中」但 return_count>0 → 用返工模板（否则发陈旧「指派/请回填」误导；auto 路径原 return 的 notifyReturnedToDeveloper 被 bug 早返回吞掉，此处手动补偿）。
-      //   [codex 复审 M-1·有意接受] 若「打回后改派新开发」（return_count 保留），新开发点通知也走返工模板——内容「查看打回原因·返工后重新提交」对新接手者仍成立（bug 确需返工），不引「被打回者本人」精判字段（避免为边角加 schema）。verify [Rework2] 锁定此语义。
-      const marker = (Number(issue.return_count) > 0) ? 'notifyReturnedToDeveloper' : 'notifyAssignedDeveloper';
+      if (issue.type !== 'bug') return res.status(400).json({ error: '手动通知仅用于 bug 单', code: 'MANUAL_NOTIFY_BUG_ONLY' });
+      if (!issue.relay_notified_user_id) return res.status(409).json({ error: '该单未指定通知对接人', code: 'NO_RELAY_USER_TO_NOTIFY' });
+      if (!isSysBugLiaison(issue.relay_notified_user_id)) return res.status(409).json({ error: '通知对接人已不在白名单，无法发送', code: 'RELAY_USER_NOT_WHITELISTED' });
+      if (!SYS_NOTIFY_RELAY_STATUSES.includes(issue.status)) return res.status(409).json({ error: `当前状态（${issue.status}）不可通知对接人（仅待处理）`, code: 'STATUS_NOT_NOTIFIABLE' });
+      const relayUser = await dbGetAsync('SELECT id, display_name, phone, dingtalk_user_id FROM users WHERE id = ?', [issue.relay_notified_user_id]);
+      if (!relayUser) return res.status(409).json({ error: '通知对接人用户不存在', code: 'RELAY_USER_NOT_FOUND' });
       const baseUrl = await getSafePlatformBaseUrl();
-      await sendSysDevNotify(issue, marker, baseUrl);   // 落库 notify_*（sent/failed，best-effort 内部处理）
-      const fresh = await dbGetAsync('SELECT notify_status, notify_error FROM sys_issues WHERE id = ?', [id]);
-      res.json({ id, notify_status: fresh.notify_status, notify_error: fresh.notify_error });
-    } catch (err) { logger.error('[系统迭代] 手动通知开发失败:', err && err.message); res.status(500).json({ error: (err && err.message) || '通知开发失败' }); }
+      const { title, md } = buildSysRelayMarkdown(issue, baseUrl);
+      const result = await sendIssueDingtalkRaw(relayUser, title, md);
+      await recordSysRelayNotify(id, !!result.ok, result.message_key, result.reason);
+      const fresh = await dbGetAsync('SELECT relay_notify_status, relay_notify_error FROM sys_issues WHERE id = ?', [id]);
+      res.json({ id, relay_notify_status: fresh.relay_notify_status, relay_notify_error: fresh.relay_notify_error });
+    } catch (err) { logger.error('[系统迭代] 手动通知对接人失败:', err && err.message); res.status(500).json({ error: (err && err.message) || '通知对接人失败' }); }
+  });
+
+  //   通知建单人（新，通知改造 C3 G8）：权限=admin/白名单对接人/主开发本人；self-guard 横切例外（M-2）——
+  //   actor.id===created_by 一律不实际发送，返 200 {skipped:true, code:'SELF_NOTIFY_SKIPPED'}（非错误，前端淡提示）。
+  //   因 native 建单 created_by 恒=admin，故 admin 点此按钮总被跳过；真正发出的是非建单人的开发/白名单对接人。
+  router.post('/sys-issues/:id/notify-creator', authenticateToken, requireSysSchemaReady, async (req, res) => {
+    const id = parsePositiveId(req.params.id);
+    if (!id) return res.status(400).json({ error: '无效的迭代单 ID', code: 'INVALID_SYS_ISSUE_ID' });
+    try {
+      const issue = await dbGetAsync('SELECT * FROM sys_issues WHERE id = ?', [id]);
+      if (!issue) return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' });
+      if (issue.type !== 'bug') return res.status(400).json({ error: '手动通知仅用于 bug 单', code: 'MANUAL_NOTIFY_BUG_ONLY' });
+      const actor = sysActor(req);
+      const isAdmin = actor.role === 'admin';
+      const isWhitelist = isSysBugLiaison(actor.id);
+      const isPrimaryDev = Number(issue.assigned_to) === actor.id && actor.id > 0;
+      if (!isAdmin && !isWhitelist && !isPrimaryDev) {
+        return res.status(403).json({ error: '仅管理员/对接人/主开发本人可通知建单人', code: 'NOT_AUTHORIZED_FOR_NOTIFY' });
+      }
+      // self-guard 优先于状态闸门（M-2 横切例外：无论状态如何，本人恒不实际发送）
+      if (Number(actor.id) === Number(issue.created_by)) {
+        return res.json({ id, skipped: true, code: 'SELF_NOTIFY_SKIPPED' });
+      }
+      if (!SYS_NOTIFY_CREATOR_STATUSES.includes(issue.status)) return res.status(409).json({ error: `当前状态（${issue.status}）不可通知建单人`, code: 'STATUS_NOT_NOTIFIABLE' });
+      const creator = await dbGetAsync('SELECT id, display_name, phone, dingtalk_user_id FROM users WHERE id = ?', [issue.created_by]);
+      if (!creator) return res.status(409).json({ error: '建单人用户不存在', code: 'CREATOR_NOT_FOUND' });
+      const baseUrl = await getSafePlatformBaseUrl();
+      const { title, md } = buildSysCreatorMarkdown(issue, baseUrl);
+      const result = await sendIssueDingtalkRaw(creator, title, md);
+      await recordSysCreatorNotify(id, !!result.ok, result.message_key, result.reason);
+      const fresh = await dbGetAsync('SELECT creator_notify_status, creator_notify_error FROM sys_issues WHERE id = ?', [id]);
+      res.json({ id, creator_notify_status: fresh.creator_notify_status, creator_notify_error: fresh.creator_notify_error });
+    } catch (err) { logger.error('[系统迭代] 手动通知建单人失败:', err && err.message); res.status(500).json({ error: (err && err.message) || '通知建单人失败' }); }
   });
 
   //   通知报障人（requester 侧 requester_notify_*，进展/已上线卡片）：需有报障人手机号（sendSysRequesterNotify 内亦有"无报障人保持 not_sent"守卫）。
+  //   [M-A 两套规则] 首发依赖当前 requester_phone；已发送过（快照非空）后重发不受当前 requester_phone 是否为空限制。
   router.post('/sys-issues/:id/notify-requester', authenticateToken, requireSysSchemaReady, requireAdminOrBugLiaison, async (req, res) => {
     const id = parsePositiveId(req.params.id);
     if (!id) return res.status(400).json({ error: '无效的迭代单 ID', code: 'INVALID_SYS_ISSUE_ID' });
@@ -3130,14 +4066,122 @@ module.exports = (deps) => {
       const issue = await dbGetAsync('SELECT * FROM sys_issues WHERE id = ?', [id]);
       if (!issue) return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' });
       if (issue.type !== 'bug') return res.status(400).json({ error: '手动通知仅用于 bug 单', code: 'MANUAL_NOTIFY_BUG_ONLY' });
-      if (!SYS_NOTIFY_REQUESTER_STATUSES.includes(issue.status)) return res.status(409).json({ error: `当前状态（${issue.status}）不可通知报障人`, code: 'STATUS_NOT_NOTIFIABLE' });   // 排终态矛盾卡片（复审）
-      if (!issue.requester_phone) return res.status(409).json({ error: '无报障人手机号，无法通知', code: 'NO_REQUESTER_PHONE' });   // 显式前置拦（避免误落 failed）
+      if (!SYS_NOTIFY_REQUESTER_STATUSES.includes(issue.status)) return res.status(409).json({ error: `当前状态（${issue.status}）不可通知报障人`, code: 'STATUS_NOT_NOTIFIABLE' });   // 排终态矛盾卡片（复审）+ F3 收窄（去处理中）
+      // M-A：快照非空=已发送过，允许重发（不看当前 phone）；快照空=首发，须当前 phone 非空
+      if (!issue.requester_notify_phone_snapshot && !issue.requester_phone) {
+        return res.status(409).json({ error: '无报障人手机号，无法通知', code: 'NO_REQUESTER_PHONE' });   // 显式前置拦（避免误落 failed）
+      }
       const baseUrl = await getSafePlatformBaseUrl();
       const kind = issue.status === '已上线' ? 'released' : 'progress';   // 已上线走 released（带版本，release_id=NULL 时 sendSysRequesterNotify 优雅降级无版本行），否则 progress（当前状态）
-      await sendSysRequesterNotify(issue, kind, baseUrl);   // 落库 requester_notify_*
+      await sendSysRequesterNotify(issue, kind, baseUrl);   // 落库 requester_notify_*（含快照，H-5/M-A）
       const fresh = await dbGetAsync('SELECT requester_notify_status, requester_notify_error FROM sys_issues WHERE id = ?', [id]);
       res.json({ id, requester_notify_status: fresh.requester_notify_status, requester_notify_error: fresh.requester_notify_error });
     } catch (err) { logger.error('[系统迭代] 手动通知报障人失败:', err && err.message); res.status(500).json({ error: (err && err.message) || '通知报障人失败' }); }
+  });
+
+  // ── GET /sys-issues/:id/notify-read-status（新，通知改造 C3 G11）：byId(dev/relay/creator)+byPhone(requester) 双寻址 ──
+  //   复刻 issue-tracker /api/issues/:id/notify-read-status 范式（server.js:11552，token 重试+已读固化写回）。
+  //   dev 定位子表活动行（?dev_user_id=）；relay/creator 走 sys_issues 反规范化列；requester 走收件人快照反查。
+  // [M-1 收口·codex40] 权限闸：原仅 authenticateToken，任意登录用户可探任意 bug 单四侧通知触达/已读时间（越权泄露）。
+  //   **不用 requireAdminOrBugLiaison 中间件**——notify-creator 允许"主开发本人"发送（isPrimaryDev），中间件在
+  //   handler 前无 issue 上下文、无法表达"本单主开发"，会把"能发但非白名单主开发"挡在查已读外（写读不同源）。
+  //   改 in-handler 检查 admin/白名单/主开发本人（与发送侧权限并集对称，见下方 canQueryReadStatus）。
+  router.get('/sys-issues/:id/notify-read-status', authenticateToken, requireSysSchemaReady, async (req, res) => {
+    const id = parsePositiveId(req.params.id);
+    if (!id) return res.status(400).json({ error: '无效的迭代单 ID', code: 'INVALID_SYS_ISSUE_ID' });
+    const type = req.query.type;
+    if (!['dev', 'relay', 'creator', 'requester'].includes(type)) {
+      return res.status(400).json({ error: '无效的通知类型', code: 'INVALID_NOTIFY_TYPE' });
+    }
+    try {
+      const issue = await dbGetAsync('SELECT * FROM sys_issues WHERE id = ?', [id]);
+      if (!issue) return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' });
+      if (issue.type !== 'bug') return res.status(400).json({ error: '查已读仅用于 bug 单', code: 'MANUAL_NOTIFY_BUG_ONLY' });
+      // [M-1 收口·codex40] 权限：admin / 白名单对接人 / 主开发本人（发送侧权限并集，写读同源）——挡"任意登录用户探任意单"越权。
+      const rsActor = sysActor(req);
+      const rsCanQuery = rsActor.role === 'admin' || isSysBugLiaison(rsActor.id) || (Number(issue.assigned_to) === rsActor.id && rsActor.id > 0);
+      if (!rsCanQuery) return res.status(403).json({ error: '仅管理员/对接人/主开发本人可查看该单通知已读状态', code: 'NOT_AUTHORIZED_FOR_NOTIFY' });
+
+      let notifyStatus, messageKey, readAt, devRowId = null, devUserId = null;
+      if (type === 'dev') {
+        devUserId = parsePositiveId(req.query.dev_user_id);
+        if (!devUserId) return res.status(400).json({ error: '缺少 dev_user_id', code: 'DEV_USER_ID_REQUIRED' });
+        const row = await dbGetAsync(
+          `SELECT id, notify_status, notify_message_key, read_at FROM sys_issue_dev_assignees
+            WHERE issue_id = ? AND user_id = ? AND removed_at IS NULL`,
+          [id, devUserId]
+        );
+        if (!row) return res.status(404).json({ error: '该开发不在本单指派子表中', code: 'DEV_ASSIGNEE_NOT_FOUND' });
+        notifyStatus = row.notify_status; messageKey = row.notify_message_key; readAt = row.read_at; devRowId = row.id;
+      } else if (type === 'relay') {
+        notifyStatus = issue.relay_notify_status; messageKey = issue.relay_notify_message_key; readAt = issue.relay_read_at;
+      } else if (type === 'creator') {
+        notifyStatus = issue.creator_notify_status; messageKey = issue.creator_notify_message_key; readAt = issue.creator_read_at;
+      } else {
+        notifyStatus = issue.requester_notify_status; messageKey = issue.requester_notify_message_key; readAt = issue.requester_read_at;
+      }
+
+      if (notifyStatus !== 'sent' || !messageKey) {
+        return res.status(400).json({ error: '尚未成功发送该通知', code: 'NOTIFY_NOT_SENT', read: false });
+      }
+      // 已固化 → 直接返（钉钉无取消已读语义，不再查）
+      if (readAt) return res.json({ type, read: true, read_at: readAt, cached: true });
+
+      // requester 快照前置校验（先于钉钉配置获取——"根本没有收件人标识可查"比"钉钉配置缺失"更根本，
+      //   fail fast 不浪费一次配置/token 往返；H-5/§6.1：查已读用快照，非当前 requester_phone；
+      //   status='sent' 却快照空 = 历史迁移前旧数据，生产 0 行不可达，测试库可造样本验证）。
+      let requesterSnapshotPhone = null;
+      if (type === 'requester') {
+        requesterSnapshotPhone = issue.requester_notify_phone_snapshot;
+        if (!requesterSnapshotPhone) {
+          return res.status(400).json({ error: '业务方手机号快照缺失，无法查已读（历史记录无快照）', code: 'HISTORICAL_SNAPSHOT_MISSING', read: false });
+        }
+      }
+
+      const [appKey, appSecret, robotCode] = await Promise.all(
+        ['dingtalk_app_key', 'dingtalk_app_secret', 'dingtalk_robot_code'].map(readSystemConfig));
+      if (!appKey || !appSecret || !robotCode) return res.status(500).json({ error: '钉钉配置未填写', code: 'NO_DINGTALK_CONFIG' });
+      let token;
+      try { token = await dingtalkNotify.getAccessToken(appKey, appSecret); }
+      catch (err) { const cls = dingtalkNotify.classifyError(err); return res.status(502).json({ error: cls.hint, reason: cls.reason }); }
+
+      let recipientDingUid = '';
+      if (type === 'requester') {
+        try {
+          const raw = await callDingtalkWithTokenRetry(appKey, appSecret, token, (t) => dingtalkNotify.getUserIdByMobile(t, requesterSnapshotPhone));
+          recipientDingUid = raw != null ? String(raw).trim() : '';
+        } catch (err) { const cls = dingtalkNotify.classifyError(err); return res.status(502).json({ error: '业务方钉钉号查询失败：' + cls.hint, reason: cls.reason }); }
+      } else {
+        const uid = type === 'dev' ? devUserId : (type === 'relay' ? issue.relay_notified_user_id : issue.created_by);
+        const u = await dbGetAsync('SELECT dingtalk_user_id FROM users WHERE id = ?', [uid]);
+        recipientDingUid = u && u.dingtalk_user_id ? String(u.dingtalk_user_id).trim() : '';
+      }
+      if (!recipientDingUid) return res.json({ type, read: false, read_at: null, read_status: 'recipient_unresolved' });
+
+      let readResult;
+      try { readResult = await callDingtalkWithTokenRetry(appKey, appSecret, token, (t) => dingtalkNotify.getReadStatus(t, robotCode, messageKey)); }
+      catch (err) { const cls = dingtalkNotify.classifyError(err); return res.status(502).json({ error: cls.hint, reason: cls.reason }); }
+
+      const myEntry = (readResult.readDetails || []).find(d => String(d.userId).trim() === recipientDingUid && d.readStatus === 'READ');
+      const isRead = !!myEntry;
+      let readAtStr = null;
+      if (isRead) {
+        // codex 12 M-3：readTimestamp 单位兼容归一（不凭印象 *1000）——>1e12 视为毫秒、>1e9 视为秒
+        const ts = Number(myEntry.readTimestamp) || 0;
+        const ms = ts > 1e12 ? ts : (ts > 1e9 ? ts * 1000 : Date.now());
+        readAtStr = new Date(ms).toLocaleString('zh-CN');
+        if (type === 'dev') {
+          await sysNotifyWrite('UPDATE sys_issue_dev_assignees SET read_at = ? WHERE id = ?', [readAtStr, devRowId]);
+        } else {
+          const col = type === 'relay' ? 'relay_read_at' : (type === 'creator' ? 'creator_read_at' : 'requester_read_at');
+          await sysNotifyWrite(`UPDATE sys_issues SET ${col} = ? WHERE id = ?`, [readAtStr, id]);
+        }
+      }
+      res.json({ type, read: isRead, read_at: readAtStr, read_user_count: (readResult.readUserIds || []).length });
+    } catch (err) {
+      logger.error('[系统迭代] 查已读状态失败:', err && err.message);
+      res.status(500).json({ error: (err && err.message) || '查已读状态失败' });
+    }
   });
 
   // ============================================================
@@ -3150,6 +4194,7 @@ module.exports = (deps) => {
     SYS_RELEASES_KEY_COLS,
     SYS_TIMELINE_KEY_COLS,
     SYS_ATTACHMENTS_KEY_COLS,
+    SYS_DEV_ASSIGNEES_KEY_COLS,   // 通知改造 C1a 新表锚点
     requireSysSchemaReady,
     runSysMigration,
     // C2：状态机 + helper（verify require 真实逻辑）
@@ -3189,6 +4234,9 @@ module.exports = (deps) => {
     SYS_BUG_LIAISON_USER_IDS,
     isSysBugLiaison,
     requireAdminOrBugLiaison,
+    // 通知改造 C2：多开发协作子表差量 upsert（verify-sys-dev-assignee-transition require 真实逻辑）
+    applyDevAssigneeDiff,
+    resolveCollaboratorList,
   };
 
   return { initSchema, router, _internals };

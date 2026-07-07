@@ -90,13 +90,16 @@ async function seedBugToReady(devId = 5) {
   assert.strictEqual(r.status, 200, `bug accept 200, got ${r.status} ${JSON.stringify(r.body)}`);
   return id;
 }
-// bug 单 → 已上线（待上线 → 填不发版 → 确认上线·不发版）
+// bug 单 → 已上线（待上线 → assign-release-dev 指定 devId → execute-release(mode=hotfix) 由 devId 本人执行）
+//   ⚠️ 通知改造 v1.6 §2.3 C3b 退场后，旧 set-release-flag/confirm-online-norelease 对 bug 已
+//   LEGACY_RELEASE_FLOW_DISABLED，本 helper 改走新 G3+G5 编排流程（devTok 假定为 devId=5 的 token，
+//   本文件所有调用点均用默认 devId=5，与既有 devTok 常量一致）。
 async function seedBugToOnline(devId = 5) {
   const id = await seedBugToReady(devId);
-  let r = await call('POST', `/api/sys-issues/${id}/set-release-flag`, devTok, { needs_release: 0 });
-  assert.strictEqual(r.status, 200, `set-release-flag 200, got ${r.status} ${JSON.stringify(r.body)}`);
-  r = await call('POST', `/api/sys-issues/${id}/confirm-online-norelease`, adminTok, {});
-  assert.strictEqual(r.status, 200, `confirm-online-norelease 200, got ${r.status} ${JSON.stringify(r.body)}`);
+  let r = await call('POST', '/api/sys-issues/assign-release-dev', adminTok, { issue_ids: [id], release_assignee_id: devId });
+  assert.strictEqual(r.status, 200, `assign-release-dev 200, got ${r.status} ${JSON.stringify(r.body)}`);
+  r = await call('POST', '/api/sys-issues/execute-release', devTok, { mode: 'hotfix', issue_ids: [id] });
+  assert.strictEqual(r.status, 200, `execute-release(hotfix) 200, got ${r.status} ${JSON.stringify(r.body)}`);
   assert.strictEqual(await statusOf(id), '已上线', 'seedBugToOnline 应停在 已上线');
   return id;
 }
