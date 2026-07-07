@@ -84,6 +84,14 @@ async function main() {
     'release_assignee_id/name 必须在 SYS_ISSUES_KEY_COLS（被 C3b/C4 消费，readiness 须守）');
   ok('release_assignee_id/name 已入 readiness 锚点（末次合并审 MED：被消费列须守，防部分迁移误 ready→列表 500）');
 
+  // [2a2] 通知改造 follow-up（2026-07-07）第 5 类「通知上线开发」：release_assignee_notify_* 5 列**整组**入 readiness 锚点
+  //   （codex 43 HIGH 采纳·防御加固——本类采全列锚点范式，区别于 relay/creator 历史只锚 status）。
+  for (const c of ['release_assignee_notify_status', 'release_assignee_notified_at',
+    'release_assignee_notify_message_key', 'release_assignee_notify_error', 'release_assignee_read_at']) {
+    assert.ok(I.SYS_ISSUES_KEY_COLS.includes(c), `${c} 必须在 SYS_ISSUES_KEY_COLS（第 5 类通知 5 列整组入锚点，codex 43 HIGH）`);
+  }
+  ok('release_assignee_notify_* 5 列整组已入 readiness 锚点（codex 43 HIGH 采纳·防御加固，本类全列锚点范式）');
+
   // [2b] 三侧通知 5 列全量校验（07-M3：readiness 抽样只查 status，verify 查全 5 列 ×3）
   for (const prefix of ['', 'requester_', 'creator_']) {
     const five = [`${prefix}notify_status`, `${prefix}notified_at`, `${prefix}notify_message_key`, `${prefix}notify_error`, `${prefix}read_at`];
@@ -234,6 +242,24 @@ async function main() {
   await assert.rejects(run(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name, relay_notify_status) VALUES ('bug', '待处理', 't', 'BMS', 1, 'admin', NULL)`), /NOT NULL|constraint/i, 'relay_notify_status=NULL 应被 NOT NULL 拒');
   ok('⭐ 通知改造 C1a 新列（新库路径）：relay 7 + requester 快照 2 + release_assignee 2 = 11 列齐全 + relay_notify_status CHECK/NOT NULL/默认 not_sent + 其余列默认 NULL（release_assignee 等 C1a 纯建列不接入守卫）');
 
+  // [9e] ⭐ 通知改造 follow-up（2026-07-07）第 5 类「通知上线开发」——release_assignee_notify_* 5 列全量断言
+  //   （镜像 creator_notify_* 5 列：status CHECK/NOT NULL/默认 not_sent + notified_at/message_key/error/read_at 默认 NULL）。
+  const REL_EXEC_NOTIFY_COLS = ['release_assignee_notify_status', 'release_assignee_notified_at',
+    'release_assignee_notify_message_key', 'release_assignee_notify_error', 'release_assignee_read_at'];
+  {
+    const nowCols = (await all('PRAGMA table_info(sys_issues)')).map(r => r.name);
+    const missRelExec = REL_EXEC_NOTIFY_COLS.filter(c => !nowCols.includes(c));
+    assert.strictEqual(missRelExec.length, 0, `第 5 类通知列缺失: ${missRelExec.join(',')}`);
+  }
+  await assert.rejects(run(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name, release_assignee_notify_status) VALUES ('bug', '待处理', 't', 'BMS', 1, 'admin', 'pending')`), /CHECK|constraint/i, 'release_assignee_notify_status=pending 应被 CHECK 拒');
+  await assert.rejects(run(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name, release_assignee_notify_status) VALUES ('bug', '待处理', 't', 'BMS', 1, 'admin', NULL)`), /NOT NULL|constraint/i, 'release_assignee_notify_status=NULL 应被 NOT NULL 拒');
+  const relExecDef = await get(`SELECT release_assignee_notify_status, release_assignee_notified_at, release_assignee_notify_message_key, release_assignee_notify_error, release_assignee_read_at FROM sys_issues WHERE title='NOTIFY_DEFAULTS'`);
+  assert.strictEqual(relExecDef.release_assignee_notify_status, 'not_sent', 'release_assignee_notify_status 默认应 not_sent');
+  for (const k of ['release_assignee_notified_at', 'release_assignee_notify_message_key', 'release_assignee_notify_error', 'release_assignee_read_at']) {
+    assert.strictEqual(relExecDef[k], null, `${k} 默认应 NULL`);
+  }
+  ok('⭐ 通知改造 follow-up 第 5 类通知列（新库路径）：release_assignee_notify_* 5 列齐全 + status CHECK/NOT NULL/默认 not_sent + 其余 4 列默认 NULL（镜像 creator 范式）');
+
   // [10] sys_issues NOT NULL：缺 system_name / created_by / title 被拒
   await assert.rejects(run(`INSERT INTO sys_issues (type, status, title, created_by, created_by_name) VALUES ('feature', '待评估', 't', 1, 'admin')`), /NOT NULL|constraint/i, 'system_name NOT NULL 未生效');
   await assert.rejects(run(`INSERT INTO sys_issues (type, status, system_name, created_by, created_by_name) VALUES ('feature', '待评估', 'BMS', 1, 'admin')`), /NOT NULL|constraint/i, 'title NOT NULL 未生效');
@@ -347,6 +373,10 @@ async function verifyMissingColLib() {
   const issueCols2 = (await all2('PRAGMA table_info(sys_issues)')).map(r => r.name);
   assert.ok(issueCols2.includes('needs_release') && issueCols2.includes('dingtalk_chat_id'), '[1a] 应在残缺表上自动补 bug 流列');
   assert.ok(issueCols2.includes('relay_notify_status') && issueCols2.includes('release_assignee_id'), '[1a-2] 应在残缺表上自动补通知改造新列');
+  for (const c of ['release_assignee_notify_status', 'release_assignee_notified_at',
+    'release_assignee_notify_message_key', 'release_assignee_notify_error', 'release_assignee_read_at']) {
+    assert.ok(issueCols2.includes(c), `[1a-3] 应在残缺表上自动补第 5 类「通知上线开发」列 ${c}（5 列整组入锚点，热迁移须整组补齐否则 readiness 误报缺锚点）`);
+  }
   ok(`readiness 缺列库：sys_issues 缺 effected_at/creator_notify_status/评估3锚点 → ready=false（逐锚点校验）+ bug 流/通知改造列被 [1a]/[1a-2] 自动 ALTER 修复不误报（错误：${st.error}）`);
   db2.close();
 }

@@ -102,6 +102,12 @@ module.exports = (deps) => {
     //   + 详情可见性闸门读 release_assignee_id）后已成**被消费的热路径列**——须入锚点，否则 mid-migration 崩溃后
     //   （key 列已补但这两列未补）readiness 误报 ready → 列表 SELECT「no such column」500（codex 末次合并审 MED 收口）。
     'release_assignee_id', 'release_assignee_name',
+    // ← 通知改造 follow-up（2026-07-07）第 5 类「通知上线开发」：release_assignee_notify_* 5 列**整组**入 readiness 锚点
+    //   （codex 43 HIGH 采纳·防御性加固）。核实：runSysMigration 的 ready 是「alterAddMissingCols 全部 + [2] 复查全过」
+    //   原子终点（本文件下方 665 行），中途异常走 catch→ready=false，故「status 补了其余没补还 ready」在本架构不可达；
+    //   但整组入锚点更严格、为后续第 6 类通知立稳范式，区别于 relay/creator 历史「只锚 status」口径（本类采全列锚点）。
+    'release_assignee_notify_status', 'release_assignee_notified_at',
+    'release_assignee_notify_message_key', 'release_assignee_notify_error', 'release_assignee_read_at',
   ];
   const SYS_RELEASES_KEY_COLS = ['release_no', 'status', 'is_hotfix', 'release_note', 'version_tag',
     'release_type'];   // ← bug 流 Commit ① 批次类型隔离锚点（[codex三审:L] 值域非空由 ② 服务端守卫强制，readiness 只查列在）
@@ -352,6 +358,13 @@ module.exports = (deps) => {
         --   C1a 仅建列——nullable inert，本 commit 不接入任何读/写/守卫逻辑（schema 一次到位免二次迁移）。
         release_assignee_id INTEGER,
         release_assignee_name TEXT,
+        -- ── 通知改造 follow-up（2026-07-07）：第 5 类「通知上线开发」——admin 指定上线执行开发后手动通知其执行 hotfix/发版。
+        --   镜像 creator_notify_* 五列范式（byId 发送，无 phone 快照）；旧库 ALTER 路径见 runSysMigration [1a-3]。
+        release_assignee_notify_status TEXT NOT NULL DEFAULT 'not_sent' CHECK (release_assignee_notify_status IN ('not_sent','sent','failed')),
+        release_assignee_notified_at DATETIME,
+        release_assignee_notify_message_key TEXT,
+        release_assignee_notify_error TEXT,
+        release_assignee_read_at DATETIME,
 
         CHECK (type <> 'config' OR release_id IS NULL)
       )`, recordSysErr('sys_issues'));
@@ -528,6 +541,19 @@ module.exports = (deps) => {
         ['release_assignee_name', 'TEXT'],
       ];
       await alterAddMissingCols('sys_issues', NOTIFY_REWORK_ISSUE_COLS, '通知改造 Commit C1a');
+
+      // [1a-3] ⭐ 通知改造 follow-up（2026-07-07）：第 5 类「通知上线开发」——sys_issues 补 release_assignee 通知 5 列
+      //   （镜像 creator_notify_*/relay_notify_* 范式，byId 发送无 phone 快照）。release_assignee_notify_status 已入
+      //   SYS_ISSUES_KEY_COLS，本 ALTER 必须在下方 [2] 复查之前完成（顺序铁律同 [1a]）。NOT NULL DEFAULT 'not_sent'
+      //   常量可通过 ALTER 回填旧行；CHECK 不补（新库 CREATE 带完整 CHECK，对照 verify-sys-schema）——同 relay_notify_status 先例。
+      const RELEASE_EXECUTOR_NOTIFY_COLS = [
+        ['release_assignee_notify_status', "TEXT NOT NULL DEFAULT 'not_sent'"],
+        ['release_assignee_notified_at', 'DATETIME'],
+        ['release_assignee_notify_message_key', 'TEXT'],
+        ['release_assignee_notify_error', 'TEXT'],
+        ['release_assignee_read_at', 'DATETIME'],
+      ];
+      await alterAddMissingCols('sys_issues', RELEASE_EXECUTOR_NOTIFY_COLS, '通知改造 follow-up·通知上线开发');
 
       // [1b] release_type **族别**回填（D-A：bug vs 非bug，用户 2026-07-03 拍板）：按成员族别回填非空批次——
       //   含 bug 成员 → 'bug'，否则（feature/improvement）→ 'change'；空批次留 NULL（② 建批次/加单时写值）。
@@ -3820,6 +3846,18 @@ module.exports = (deps) => {
     };
   }
 
+  // 上线执行开发侧 markdown（通知改造 follow-up 2026-07-07；admin 通知被指定上线开发执行 hotfix/发版）。
+  function buildSysReleaseExecutorMarkdown(issue, baseUrl) {
+    const title = issueNotify.issueSafeText(issue.title, 80);
+    const safeTitle = sysNotifyTitle(issue.title);
+    const system = issueNotify.issueSafeText(issue.system_name, 40);
+    const link = sysDeepLinkLine(baseUrl, issue.id);
+    return {
+      title: `🚀 请执行上线：${safeTitle}`,
+      md: `### 🚀 你被指定为本单上线开发\n\n- **单号**：#${issue.id}\n- **系统**：${system}\n- **标题**：${title}\n\n该 bug 单已进入「待上线」，请登录平台执行 hotfix（不发版直接上线）或发版（建批次填版本号）。${link}`,
+    };
+  }
+
   // 通知落库写串行化进 sys mutex（ultracode 审 #1，C4.5 同类防线）：通知写跑在主事务提交后、mutex 已释放，
   //   若用裸 autocommit dbRunAsync，会落进另一并发请求已打开的 BEGIN IMMEDIATE 事务里，随其 ROLLBACK 一起丢失
   //   （钉钉已发但库回到 not_sent → 后续误判未发重复推送）。照附件写口径用 sysBeginImmediate/sysCommit 独立小事务串行化。
@@ -3859,6 +3897,13 @@ module.exports = (deps) => {
     await sysNotifyWrite(
       `UPDATE sys_issues SET creator_notify_status=?, creator_notified_at=datetime('now','localtime'),
               creator_notify_message_key=?, creator_notify_error=?, creator_read_at=NULL WHERE id=?`,
+      [ok ? 'sent' : 'failed', ok ? messageKey : null, ok ? null : (error || 'other'), issueId]);
+  }
+  // 上线执行开发侧落库（通知改造 follow-up 2026-07-07，release_assignee_notify_* 5 列，镜像 creator 范式）。
+  async function recordSysReleaseExecutorNotify(issueId, ok, messageKey, error) {
+    await sysNotifyWrite(
+      `UPDATE sys_issues SET release_assignee_notify_status=?, release_assignee_notified_at=datetime('now','localtime'),
+              release_assignee_notify_message_key=?, release_assignee_notify_error=?, release_assignee_read_at=NULL WHERE id=?`,
       [ok ? 'sent' : 'failed', ok ? messageKey : null, ok ? null : (error || 'other'), issueId]);
   }
   // 开发协作子表逐 dev 落库（通知改造 C3 G9）：定位 = (issue_id, user_id, removed_at IS NULL) 活动行（§6.1 M-2），
@@ -3968,6 +4013,7 @@ module.exports = (deps) => {
   const SYS_NOTIFY_RELAY_STATUSES = ['待处理'];
   const SYS_NOTIFY_CREATOR_STATUSES = ['待验证', '待上线', '已上线'];
   const SYS_NOTIFY_REQUESTER_STATUSES = ['待验证', '待上线', '已上线'];
+  const SYS_NOTIFY_RELEASE_EXECUTOR_STATUSES = ['待上线'];   // 通知改造 follow-up：仅待上线态（release_assignee 已指定）可通知上线开发
 
   //   通知开发（逐 dev，通知改造 C3 G9 改造）：带 body.dev_user_id，定位子表活动行 (issue_id,user_id,removed_at IS NULL)，
   //   状态落子表行（notify_status 等 5 列）——主表 notify_*（dev 侧）自本端点起转只读回溯，只服务变更流自动派发（C1b 已回填）。
@@ -4057,6 +4103,28 @@ module.exports = (deps) => {
     } catch (err) { logger.error('[系统迭代] 手动通知建单人失败:', err && err.message); res.status(500).json({ error: (err && err.message) || '通知建单人失败' }); }
   });
 
+  //   通知上线开发（release_assignee 侧，通知改造 follow-up 2026-07-07）：admin 指定上线执行开发后手动通知其执行 hotfix/发版。
+  //   权限=仅 admin（与 assign-release-dev 一致，谁指定谁通知）；须已指定 release_assignee_id + 状态=待上线。byId 发送（无 phone 快照）。
+  router.post('/sys-issues/:id/notify-release-executor', authenticateToken, requireSysSchemaReady, requireAdmin, async (req, res) => {
+    const id = parsePositiveId(req.params.id);
+    if (!id) return res.status(400).json({ error: '无效的迭代单 ID', code: 'INVALID_SYS_ISSUE_ID' });
+    try {
+      const issue = await dbGetAsync('SELECT * FROM sys_issues WHERE id = ?', [id]);
+      if (!issue) return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' });
+      if (issue.type !== 'bug') return res.status(400).json({ error: '手动通知仅用于 bug 单', code: 'MANUAL_NOTIFY_BUG_ONLY' });
+      if (!issue.release_assignee_id) return res.status(409).json({ error: '该单未指定上线开发，请先「指定上线开发」', code: 'NO_RELEASE_ASSIGNEE_TO_NOTIFY' });
+      if (!SYS_NOTIFY_RELEASE_EXECUTOR_STATUSES.includes(issue.status)) return res.status(409).json({ error: `当前状态（${issue.status}）不可通知上线开发（仅待上线）`, code: 'STATUS_NOT_NOTIFIABLE' });
+      const executor = await dbGetAsync('SELECT id, display_name, phone, dingtalk_user_id FROM users WHERE id = ?', [issue.release_assignee_id]);
+      if (!executor) return res.status(409).json({ error: '上线开发用户不存在', code: 'RELEASE_ASSIGNEE_NOT_FOUND' });
+      const baseUrl = await getSafePlatformBaseUrl();
+      const { title, md } = buildSysReleaseExecutorMarkdown(issue, baseUrl);
+      const result = await sendIssueDingtalkRaw(executor, title, md);
+      await recordSysReleaseExecutorNotify(id, !!result.ok, result.message_key, result.reason);
+      const fresh = await dbGetAsync('SELECT release_assignee_notify_status, release_assignee_notify_error FROM sys_issues WHERE id = ?', [id]);
+      res.json({ id, release_assignee_notify_status: fresh.release_assignee_notify_status, release_assignee_notify_error: fresh.release_assignee_notify_error });
+    } catch (err) { logger.error('[系统迭代] 手动通知上线开发失败:', err && err.message); res.status(500).json({ error: (err && err.message) || '通知上线开发失败' }); }
+  });
+
   //   通知报障人（requester 侧 requester_notify_*，进展/已上线卡片）：需有报障人手机号（sendSysRequesterNotify 内亦有"无报障人保持 not_sent"守卫）。
   //   [M-A 两套规则] 首发依赖当前 requester_phone；已发送过（快照非空）后重发不受当前 requester_phone 是否为空限制。
   router.post('/sys-issues/:id/notify-requester', authenticateToken, requireSysSchemaReady, requireAdminOrBugLiaison, async (req, res) => {
@@ -4090,7 +4158,7 @@ module.exports = (deps) => {
     const id = parsePositiveId(req.params.id);
     if (!id) return res.status(400).json({ error: '无效的迭代单 ID', code: 'INVALID_SYS_ISSUE_ID' });
     const type = req.query.type;
-    if (!['dev', 'relay', 'creator', 'requester'].includes(type)) {
+    if (!['dev', 'relay', 'creator', 'requester', 'release_executor'].includes(type)) {
       return res.status(400).json({ error: '无效的通知类型', code: 'INVALID_NOTIFY_TYPE' });
     }
     try {
@@ -4117,6 +4185,8 @@ module.exports = (deps) => {
         notifyStatus = issue.relay_notify_status; messageKey = issue.relay_notify_message_key; readAt = issue.relay_read_at;
       } else if (type === 'creator') {
         notifyStatus = issue.creator_notify_status; messageKey = issue.creator_notify_message_key; readAt = issue.creator_read_at;
+      } else if (type === 'release_executor') {
+        notifyStatus = issue.release_assignee_notify_status; messageKey = issue.release_assignee_notify_message_key; readAt = issue.release_assignee_read_at;
       } else {
         notifyStatus = issue.requester_notify_status; messageKey = issue.requester_notify_message_key; readAt = issue.requester_read_at;
       }
@@ -4152,7 +4222,7 @@ module.exports = (deps) => {
           recipientDingUid = raw != null ? String(raw).trim() : '';
         } catch (err) { const cls = dingtalkNotify.classifyError(err); return res.status(502).json({ error: '业务方钉钉号查询失败：' + cls.hint, reason: cls.reason }); }
       } else {
-        const uid = type === 'dev' ? devUserId : (type === 'relay' ? issue.relay_notified_user_id : issue.created_by);
+        const uid = type === 'dev' ? devUserId : (type === 'relay' ? issue.relay_notified_user_id : (type === 'release_executor' ? issue.release_assignee_id : issue.created_by));
         const u = await dbGetAsync('SELECT dingtalk_user_id FROM users WHERE id = ?', [uid]);
         recipientDingUid = u && u.dingtalk_user_id ? String(u.dingtalk_user_id).trim() : '';
       }
@@ -4173,7 +4243,7 @@ module.exports = (deps) => {
         if (type === 'dev') {
           await sysNotifyWrite('UPDATE sys_issue_dev_assignees SET read_at = ? WHERE id = ?', [readAtStr, devRowId]);
         } else {
-          const col = type === 'relay' ? 'relay_read_at' : (type === 'creator' ? 'creator_read_at' : 'requester_read_at');
+          const col = type === 'relay' ? 'relay_read_at' : (type === 'creator' ? 'creator_read_at' : (type === 'release_executor' ? 'release_assignee_read_at' : 'requester_read_at'));
           await sysNotifyWrite(`UPDATE sys_issues SET ${col} = ? WHERE id = ?`, [readAtStr, id]);
         }
       }

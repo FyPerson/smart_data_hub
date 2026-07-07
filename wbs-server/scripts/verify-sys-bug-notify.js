@@ -138,6 +138,14 @@ async function bugOnlineNoRelease(devId = 5, extra = {}) {
   await run(`UPDATE sys_issues SET status='已上线', released_at=datetime('now','localtime') WHERE id=?`, [id]);
   return id;
 }
+// bug 到待上线 + 指定上线执行开发（release_assignee，follow-up 2026-07-07）——直接 DB 指定 release_assignee
+//   （assign-release-dev 端点本身由 verify-sys-release-orchestration 覆盖，本文件聚焦「通知上线开发」侧行为）。
+async function bugToPrereleaseWithExecutor(devId = 5, execId = 6, extra = {}) {
+  const id = await bugToVerifying(devId, extra);
+  await call('POST', `/api/sys-issues/${id}/accept`, adminTok, {});   // 待上线
+  await run('UPDATE sys_issues SET release_assignee_id=?, release_assignee_name=? WHERE id=?', [execId, '开发李', id]);
+  return id;
+}
 
 async function main() {
   mod.initSchema();
@@ -387,6 +395,44 @@ async function main() {
     ok('[Creator] 通知建单人：admin(=created_by) self-guard 200 skipped + 主开发/白名单实发 sent + 未授权 403 + 状态门 409');
   }
 
+  // ═══ [RelExec] 通知上线开发（release_assignee 侧，follow-up 2026-07-07，仅 admin）═══
+  {
+    // 未指定上线开发（release_assignee_id 空）+ 待上线 → 409 NO_RELEASE_ASSIGNEE_TO_NOTIFY
+    const idNo = await bugToVerifying(5);
+    await call('POST', `/api/sys-issues/${idNo}/accept`, adminTok, {});   // 待上线，未指定 release_assignee
+    let r = await call('POST', `/api/sys-issues/${idNo}/notify-release-executor`, adminTok);
+    assert.strictEqual(r.status, 409, '[RelExec] 未指定上线开发 409 ' + JSON.stringify(r.body));
+    assert.strictEqual(r.body.code, 'NO_RELEASE_ASSIGNEE_TO_NOTIFY', '[RelExec] code=NO_RELEASE_ASSIGNEE_TO_NOTIFY');
+
+    // 指定 release_assignee(6) + 待上线 → admin 发送成功 sent
+    const id = await bugToPrereleaseWithExecutor(5, 6);
+    r = await call('POST', `/api/sys-issues/${id}/notify-release-executor`, adminTok);
+    assert.strictEqual(r.status, 200, '[RelExec] admin 发送 200 ' + JSON.stringify(r.body));
+    assert.strictEqual(r.body.release_assignee_notify_status, 'sent', '[RelExec] admin 发送 → sent');
+    assert.strictEqual((await get('SELECT release_assignee_notify_status FROM sys_issues WHERE id=?', [id])).release_assignee_notify_status, 'sent', '[RelExec] 落库 sent');
+
+    // 非 admin（主开发 / 白名单对接人）→ 403（requireAdmin，仅 admin 可发，区别于 dev/requester 的 admin_or_bug_liaison）
+    r = await call('POST', `/api/sys-issues/${id}/notify-release-executor`, devTok);
+    assert.strictEqual(r.status, 403, '[RelExec] 主开发 403（仅 admin）');
+    r = await call('POST', `/api/sys-issues/${id}/notify-release-executor`, liaisonTok);
+    assert.strictEqual(r.status, 403, '[RelExec] 白名单对接人 403（仅 admin）');
+
+    // 非待上线态（处理中，即便已指定 release_assignee）→ 409 STATUS_NOT_NOTIFIABLE
+    const idMid = await bugAssigned(5);
+    await run('UPDATE sys_issues SET release_assignee_id=6, release_assignee_name=? WHERE id=?', ['开发李', idMid]);
+    r = await call('POST', `/api/sys-issues/${idMid}/notify-release-executor`, adminTok);
+    assert.strictEqual(r.status, 409, '[RelExec] 处理中态 409');
+    assert.strictEqual(r.body.code, 'STATUS_NOT_NOTIFIABLE', '[RelExec] 非待上线 code=STATUS_NOT_NOTIFIABLE');
+
+    // feature 单（变更流）→ 400 MANUAL_NOTIFY_BUG_ONLY（第 5 类同其余 4 类，仅 bug）
+    const rf = await call('POST', '/api/sys-issues', adminTok, { type: 'feature', title: 'feat', system_name: 'BMS', source: '内部' });
+    r = await call('POST', `/api/sys-issues/${rf.body.id}/notify-release-executor`, adminTok);
+    assert.strictEqual(r.status, 400, '[RelExec] feature 单 400');
+    assert.strictEqual(r.body.code, 'MANUAL_NOTIFY_BUG_ONLY', '[RelExec] feature code=MANUAL_NOTIFY_BUG_ONLY');
+
+    ok('[RelExec] 通知上线开发（仅 admin）：admin 发 sent + 未指定 409 + 主开发/白名单 403 + 非待上线 409 + feature 400');
+  }
+
   // ═══ [RS] 查已读状态（新，G11）═══
   {
     // INVALID_NOTIFY_TYPE
@@ -400,7 +446,7 @@ async function main() {
     r = await call('GET', `/api/sys-issues/${id}/notify-read-status?type=dev&dev_user_id=99`, adminTok);
     assert.strictEqual(r.status, 404); assert.strictEqual(r.body.code, 'DEV_ASSIGNEE_NOT_FOUND');
     // 尚未发送 → NOTIFY_NOT_SENT（dev/relay/creator/requester 各测一遍，覆盖 4 类型分支）
-    for (const t of ['relay', 'creator', 'requester']) {
+    for (const t of ['relay', 'creator', 'requester', 'release_executor']) {
       r = await call('GET', `/api/sys-issues/${id}/notify-read-status?type=${t}`, adminTok);
       assert.strictEqual(r.status, 400, `[RS] type=${t} 未发送应 400`);
       assert.strictEqual(r.body.code, 'NOTIFY_NOT_SENT', `[RS] type=${t} code=NOTIFY_NOT_SENT`);

@@ -101,13 +101,14 @@
         .si-drawer-head .si-dh-meta { font-size: 12px; color: #94a3b8; margin-top: 6px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
         .si-drawer-head .si-close { cursor: pointer; font-size: 24px; color: #94a3b8; line-height: 1; background: none; border: none; }
         .si-drawer-body { padding: 18px 22px; overflow-y: auto; flex: 1; }
-        .si-drawer-foot { border-top: 1px solid #eef2f7; padding: 14px 22px; background: #fafbfc; }
+        /* 抽屉底部操作区(.si-drawer-foot)已移除——操作栏改置 body 顶部，对齐 Data_Correction 抽屉范式（2026-07-07 样式统一） */
 
         .si-lineage { background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px; padding: 9px 13px; font-size: 12px; color: #92400e; margin-bottom: 14px; }
         .si-lineage a { color: #b45309; font-weight: 600; cursor: pointer; text-decoration: underline; }
 
         .si-section { margin-bottom: 18px; }
-        .si-section h3 { font-size: 13px; font-weight: 700; color: #334155; margin-bottom: 9px; padding-bottom: 6px; border-bottom: 1px solid #f1f5f9; display: flex; justify-content: space-between; align-items: center; }
+        /* 区块标题对齐 Data_Correction .detail-section h3（font-weight 600 / #374151）——项目内抽屉区块标题统一；保留 flex 供通知区标题右侧元素 */
+        .si-section h3 { font-size: 13px; font-weight: 600; color: #374151; margin: 0 0 8px; padding-bottom: 6px; border-bottom: 1px solid #f1f5f9; display: flex; justify-content: space-between; align-items: center; }
         .si-kv-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px 18px; }
         .si-kv { font-size: 13px; }
         .si-kv label { display: block; font-size: 11px; color: #9ca3af; margin-bottom: 2px; }
@@ -133,15 +134,12 @@
         .si-tl-att { display: block; margin-top: 3px; }
         .si-tl-att a { font-size: 11px; color: #2563eb; cursor: pointer; margin-right: 8px; }
 
-        /* 通知行 */
-        .si-notify-row { display: flex; align-items: center; justify-content: space-between; padding: 7px 0; border-bottom: 1px dashed #f1f5f9; font-size: 12px; gap: 8px; }
+        /* 通知行（对齐 Data_Correction .notify-row：左标签 si-nr-label + 右内容 si-nr-body 分栏，状态文字化+行内按钮） */
+        .si-notify-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 0; border-bottom: 1px dashed #f1f5f9; flex-wrap: wrap; }
         .si-notify-row:last-child { border-bottom: none; }
-        .si-nbadge { padding: 2px 9px; border-radius: 10px; font-size: 11px; font-weight: 600; white-space: nowrap; }
-        .si-nb-sent { background: #ecfdf5; color: #059669; }
-        .si-nb-not_sent { background: #f3f4f6; color: #6b7280; }
-        .si-nb-failed { background: #fef2f2; color: #dc2626; }
-        .si-nb-no_phone { background: #fffbeb; color: #b45309; }
-        .si-nread { font-size: 11px; color: #94a3b8; margin-left: 6px; }
+        .si-notify-row .si-nr-label { font-size: 12px; color: #6b7280; font-weight: 600; min-width: 110px; }
+        .si-notify-row .si-nr-body { flex: 1; font-size: 12px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+        /* （原 si-nbadge 徽章体系 + si-nread 已随通知栏文字化对齐 Data_Correction 移除，2026-07-07 样式统一） */
         /* 通知改造 C4：通知区行内小按钮（发送/重发/查已读） */
         .si-nbtn { padding: 2px 9px; font-size: 11px; font-weight: 600; border-radius: 10px; border: 1px solid #d1d5db; background: #fff; color: #374151; cursor: pointer; white-space: nowrap; }
         .si-nbtn:hover { background: #f3f4f6; border-color: #d97706; }
@@ -154,8 +152,8 @@
         .si-att-meta { color: #9ca3af; font-size: 11px; }
         .si-upload-box { margin-top: 8px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 
-        /* 操作区 */
-        .si-action-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+        /* 操作区（对齐 Data_Correction .action-bar：置于抽屉 body 顶部，下方留 16px 间距） */
+        .si-action-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 16px; }
         .si-gate-hint { font-size: 11px; color: #b45309; background: #fffbeb; border: 1px solid #fde68a; border-radius: 6px; padding: 4px 9px; width: 100%; }
 
         /* 弹框 */
@@ -383,9 +381,6 @@
             <button class="si-close" onclick="siCloseDrawer()" aria-label="关闭">&times;</button>
         </div>
         <div class="si-drawer-body" id="siDBody"></div>
-        <div class="si-drawer-foot">
-            <div class="si-action-bar" id="siDActions"></div>
-        </div>
     </div>
 
     <!-- 通用弹框 -->
@@ -465,6 +460,7 @@
     const SI_NOTIFY_RELAY_STATUSES = ['待处理'];
     const SI_NOTIFY_CREATOR_STATUSES = ['待验证', '待上线', '已上线'];
     const SI_NOTIFY_REQUESTER_STATUSES = ['待验证', '待上线', '已上线'];
+    const SI_NOTIFY_RELEASE_EXECUTOR_STATUSES = ['待上线'];   // 通知改造 follow-up：镜像后端 SYS_NOTIFY_RELEASE_EXECUTOR_STATUSES
 
     // ---- 通用 API helper ----
     async function siApi(path, { method = 'GET', body = null, isForm = false } = {}) {
@@ -676,7 +672,8 @@
         document.getElementById('siOverlay').classList.add('open');
         document.getElementById('siDrawer').classList.add('open');
         document.getElementById('siDBody').innerHTML = '<div class="si-empty">加载中…</div>';
-        document.getElementById('siDActions').innerHTML = '';
+        // #siDActions 已随样式统一并入 siDBody 动态渲染（不再是 foot 里的固定 DOM）——上面把 siDBody 设为"加载中"
+        //   即已清空操作栏；loading 态不再单独 getElementById('siDActions')（此刻它尚未渲染=null→innerHTML 报错）。
         await siRenderDrawer(id);
     }
     function siCloseDrawer() {
@@ -775,10 +772,55 @@
             </div><div class="si-note-box">钉钉群已建，请到钉钉客户端查看。钉钉无解散接口，用完由群主（示例用户A）在客户端手动解散。</div></div>`;
         }
 
-        document.getElementById('siDBody').innerHTML = lineageHtml + info + chat + tl + att + notify;
+        // C-orch：上线编排独立区块（2026-07-07 样式统一：从底部操作区拆出，置于「基本信息」与「通知」之间）。
+        const orchBlock = siRenderReleaseOrchBlock(iss);
 
-        // 操作区
+        // 抽屉 body 顺序（对齐 Data_Correction 抽屉范式）：血缘 → 操作栏(顶) → 基本信息 → 上线编排 → 通知 → 讨论群 → 时间线 → 附件
+        document.getElementById('siDBody').innerHTML =
+            lineageHtml + '<div class="si-action-bar" id="siDActions"></div>' + info + orchBlock + notify + chat + tl + att;
+
+        // 操作区（填充 body 顶部的 #siDActions 占位）
         siRenderActions(iss);
+    }
+
+    // C-orch：上线编排区块「是否有内容」的单一判据（MED-2 codex 43：抽出供 siRenderActions 兜底 + 本区块共享，
+    //   杜绝两处条件分叉）——bug+待上线 ∧（admin 有指定/换按钮 ∨ 已指定上线开发→执行按钮或"等待 X"gate）。
+    //   ⭐ 契约（codex 43 复审 LOW）：本函数返回 true 时 siRenderReleaseOrchBlock 必产出非空内容——两者须维持
+    //     「hasContent ⟺ 区块非空」（与区块末尾 `!gate && !btns 返回空` 等价：非 admin 且未指定 release_assignee 时为空）；
+    //     日后在区块内加 gate/权限分支或临时 return 时须同步维持此不变量。
+    //   数据模型（codex 43 复审 MED-1）：release_assignee_id 是 INTEGER 外键、写入全走 parsePositiveId（恒 null 或正整数），
+    //     故 Number(...)>0 与区块内 `iss.release_assignee_id`(truthy)/isReleaseExecutor(Number 比较) 在该数据模型下等价，
+    //     无脏字符串（'7a'/'07' 等）风险；不在渲染层做额外归一化（YAGNI，字段类型放宽时再议）。
+    function siReleaseOrchHasContent(iss) {
+        return iss.type === 'bug' && iss.status === '待上线' && (isAdmin() || Number(iss.release_assignee_id) > 0);
+    }
+    // C-orch：上线编排独立区块（§2.3）——仅 bug + 待上线态出现；含 gate 引导 + 双角色按钮
+    //   （admin 指定/换执行开发 · 被指定执行开发本人执行上线）。2026-07-07 样式统一从 siRenderActions 底部操作区拆出。
+    function siRenderReleaseOrchBlock(iss) {
+        if (!siReleaseOrchHasContent(iss)) return '';
+        const isAdminUser = isAdmin();
+        const isReleaseExecutor = currentUser && Number(iss.release_assignee_id) === Number(currentUser.id) && currentUser.id > 0;
+        let gate = '';
+        if (isAdminUser && !iss.release_assignee_id) {
+            gate = `<div class="si-gate-hint">📌 请先「指定上线开发」，由其执行 hotfix/发版。</div>`;
+        } else if (iss.release_assignee_id && !isReleaseExecutor) {
+            gate = `<div class="si-gate-hint">⏳ 等待「${esc(iss.release_assignee_name || '')}」执行上线（hotfix/发版）。</div>`;
+        } else if (isReleaseExecutor) {
+            gate = `<div class="si-gate-hint">✅ 你已被指定为本单上线开发，可执行 hotfix（不发版直接上线）或发版（建批次填版本号）。</div>`;
+        }
+        let btns = '';
+        if (isAdminUser) {
+            btns += iss.release_assignee_id
+                ? `<button class="si-btn si-btn-sec si-btn-sm" onclick="siModalAssignReleaseDev(true)">换执行开发</button>`
+                : `<button class="si-btn si-btn-sec si-btn-sm" onclick="siModalAssignReleaseDev(false)">指定上线开发</button>`;
+        }
+        if (isReleaseExecutor) {
+            btns += `<button class="si-btn si-btn-primary si-btn-sm" onclick="siModalExecuteRelease()">执行上线</button>`;
+        }
+        if (!gate && !btns) return '';   // 兜底：非 admin 非 executor 且无引导时不渲染空区块
+        return `<div class="si-section"><h3>上线编排</h3>
+            <div class="si-action-bar" style="margin-bottom:0">${gate}${btns}</div>
+        </div>`;
     }
 
     function siRequesterText(iss) {
@@ -892,15 +934,21 @@
     }
 
     // ---- 通知区（通知改造 C4：bug 4 类手动通知+三能力；变更流仍只读三侧自动派发展示） ----
-    function siNb(status) {
-        const map = { sent: '已送达', not_sent: '未发送', failed: '发送失败', no_phone: '无手机号' };
-        const cls = status === 'sent' ? 'sent' : (status === 'failed' ? 'failed' : (status === 'no_phone' ? 'no_phone' : 'not_sent'));
-        return `<span class="si-nbadge si-nb-${cls}">${map[status] || status || '未发送'}</span>`;
+    // 通知状态文字化（对齐 Data_Correction 通知栏色彩语言：✅已通知 / 📖已读 / ⚠️失败 / —未发送）。
+    //   系统迭代通知行数据仅 status + read_at（无 notified_at），故不显通知时刻、只显已读时刻。
+    function siNotifyStatusText(status, readAt) {
+        if (status === 'sent') {
+            return readAt
+                ? `<span style="color:#059669;">📖 已读 · 于 ${esc(siFmtDT(readAt))}</span>`
+                : `<span style="color:#059669;">✅ 已通知</span>`;
+        }
+        if (status === 'failed') return `<span style="color:#dc2626;">⚠️ 通知失败，可重试</span>`;
+        if (status === 'no_phone') return `<span style="color:#b45309;">— 无手机号，无法通知</span>`;
+        return `<span style="color:#9ca3af;">— 未发送钉钉通知</span>`;   // not_sent / null
     }
-    function siReadTxt(readAt) { return readAt ? `<span class="si-nread">已读 ${esc(siFmtDT(readAt))}</span>` : ''; }
-    // 单行组装：label + 状态徽章 + 已读文案 + 操作按钮（右对齐）+ 可选提示行（如无手机号/无快照）
+    // 单行组装（对齐 Data_Correction .notify-row）：左标签 si-nr-label + 右内容 si-nr-body（文字状态 + 操作按钮）+ 可选提示行
     function siNotifyRowHtml(label, status, readAt, buttonsHtml, extraNote) {
-        return `<div class="si-notify-row"><span>${label}</span><span style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;justify-content:flex-end">${siNb(status)}${siReadTxt(readAt)}${buttonsHtml || ''}</span></div>` +
+        return `<div class="si-notify-row"><span class="si-nr-label">${label}</span><span class="si-nr-body">${siNotifyStatusText(status, readAt)}${buttonsHtml || ''}</span></div>` +
             (extraNote ? `<div class="si-hint" style="margin:-2px 0 6px">${extraNote}</div>` : '');
     }
 
@@ -955,6 +1003,22 @@
         return siNotifyRowHtml(label, iss.creator_notify_status, iss.creator_read_at, btns);
     }
 
+    // 上线执行开发侧（release_assignee，通知改造 follow-up 2026-07-07）：仅 admin 可发（notify-release-executor: requireAdmin）；
+    //   未指定上线开发（release_assignee_id 空）不渲染该行。sendable=待上线；byId 无快照，重发/查已读同 creator 范式。
+    function siRenderReleaseExecutorNotifyRow(iss, canOperateReleaseExecutor, canQueryRead) {
+        if (!iss.release_assignee_id) return '';
+        const label = `上线开发 ${esc(iss.release_assignee_name || ('#' + iss.release_assignee_id))}`;
+        const sendable = SI_NOTIFY_RELEASE_EXECUTOR_STATUSES.includes(iss.status);
+        let btns = '';
+        if (canOperateReleaseExecutor && sendable) {
+            btns += `<button class="si-nbtn" onclick="siNotifyReleaseExecutorClick()">${iss.release_assignee_notify_status === 'sent' ? '重发' : '发送'}</button>`;
+        }
+        if (canQueryRead && iss.release_assignee_notify_status === 'sent' && iss.release_assignee_notify_message_key) {
+            btns += `<button class="si-nbtn" onclick="siQueryReadStatus('release_executor')">查已读</button>`;
+        }
+        return siNotifyRowHtml(label, iss.release_assignee_notify_status, iss.release_assignee_read_at, btns);
+    }
+
     // 业务方侧（byPhone 两套规则，§4.2/§6.1）：首发依赖当前 requester_phone；已发送过后重发/查已读依赖快照
     //   requester_notify_phone_snapshot（发后改号仍可对旧快照操作）。历史无快照（status=sent 但快照空，迁移前旧数据）
     //   → 前端出提示文案，不出按钮（避免必然触发 HISTORICAL_SNAPSHOT_MISSING 400）。
@@ -989,9 +1053,9 @@
         if (iss.type !== 'bug') {
             // 变更流：只读三侧展示（自动派发，无手动按钮）——保留旧行为。
             return `<div class="si-section"><h3>钉钉通知（三侧独立）</h3>
-                <div class="si-notify-row"><span>开发侧（指派/改派/打回/重开）</span><span>${siNb(iss.notify_status)}${siReadTxt(iss.read_at)}</span></div>
-                <div class="si-notify-row"><span>需求方侧（回填预计/已上线）</span><span>${siNb(iss.requester_notify_status)}${siReadTxt(iss.requester_read_at)}</span></div>
-                <div class="si-notify-row"><span>建单人侧</span><span>${siNb(iss.creator_notify_status)}${siReadTxt(iss.creator_read_at)}</span></div>
+                ${siNotifyRowHtml('开发侧（指派/改派/打回/重开）', iss.notify_status, iss.read_at, '')}
+                ${siNotifyRowHtml('需求方侧（回填预计/已上线）', iss.requester_notify_status, iss.requester_read_at, '')}
+                ${siNotifyRowHtml('建单人侧', iss.creator_notify_status, iss.creator_read_at, '')}
                 <div style="font-size:11px;color:#9ca3af;margin-top:6px">通知在各动作完成后自动派发；本页只读展示送达状态。</div>
             </div>`;
         }
@@ -1004,13 +1068,15 @@
         const canOperateRelay = isAdminUser;                             // notify-relay: requireAdmin
         const canOperateCreator = isAdminUser || isBugLiaison || isPrimaryDev;   // notify-creator: handler 内判定
         const canOperateRequester = isAdminUser || isBugLiaison;        // notify-requester: requireAdminOrBugLiaison
-        const canQueryRead = isAdminUser || isBugLiaison || isPrimaryDev;   // read-status handler 内判定，四侧统一
+        const canOperateReleaseExecutor = isAdminUser;                   // notify-release-executor: requireAdmin（仅 admin）
+        const canQueryRead = isAdminUser || isBugLiaison || isPrimaryDev;   // read-status handler 内判定，五侧统一
 
-        return `<div class="si-section"><h3>钉钉通知（4 类独立·手动触发）</h3>
+        return `<div class="si-section"><h3>钉钉通知（5 类独立·手动触发）</h3>
             ${siRenderDevNotifyRows(iss, devAssignees || [], canOperateDev, canQueryRead)}
             ${siRenderRelayNotifyRow(iss, canOperateRelay, canQueryRead)}
             ${siRenderCreatorNotifyRow(iss, canOperateCreator, canQueryRead)}
             ${siRenderRequesterNotifyRow(iss, canOperateRequester, canQueryRead)}
+            ${siRenderReleaseExecutorNotifyRow(iss, canOperateReleaseExecutor, canQueryRead)}
             <div style="font-size:11px;color:#9ca3af;margin-top:6px">bug 通知均<b>手动触发</b>——点对应「发送/重发」按钮；「查已读」查询钉钉已读回执。</div>
         </div>`;
     }
@@ -1028,8 +1094,8 @@
         // ④a bug 对接人白名单：bug 单的 assign/reassign 对白名单对接人（示例发布者/示例对接人）放行——与后端
         //   requireAdminOrBugLiaison + roleGuard='admin_or_bug_liaison' 同源；前端只放这两个动作，其余 admin 动作仍仅 admin。
         const isBugLiaison = currentUser && iss.type === 'bug' && isSiBugLiaison(currentUser.id);
-        // C-orch：被指定上线执行开发（execute-release 权限=actor.id===release_assignee_id，非 admin；H-1）。
-        const isReleaseExecutor = currentUser && Number(iss.release_assignee_id) === Number(currentUser.id) && currentUser.id > 0;
+        // C-orch 上线编排（待上线态双角色按钮 + gate）已于 2026-07-07 样式统一拆到独立区块 siRenderReleaseOrchBlock，
+        //   本操作区不再涉及 release_assignee，故原 isReleaseExecutor 声明一并移除。
 
         const acts = [];
         for (const f of flows) {
@@ -1077,13 +1143,8 @@
             else if (!iss.dev_estimated_at) gate = `<div class="si-gate-hint">⚠️ 闸门①：请先「回填预计完成时间」，才能提交交付。</div>`;
         } else if (isAdminUser && iss.status === '待上线' && iss.release_id) {
             gate = `<div class="si-gate-hint">📦 已加入批次 #${iss.release_id}，请在「批次管理」中发布。</div>`;   // C（变更流；bug 走 release_assignee 体系不再挂此批次面板）
-        } else if (iss.type === 'bug' && iss.status === '待上线' && isAdminUser && !iss.release_assignee_id) {
-            gate = `<div class="si-gate-hint">📌 请先「指定上线开发」，由其执行 hotfix/发版。</div>`;   // C-orch
-        } else if (iss.type === 'bug' && iss.status === '待上线' && iss.release_assignee_id && !isReleaseExecutor) {
-            gate = `<div class="si-gate-hint">⏳ 等待「${esc(iss.release_assignee_name || '')}」执行上线（hotfix/发版）。</div>`;   // C-orch
-        } else if (iss.type === 'bug' && iss.status === '待上线' && isReleaseExecutor) {
-            gate = `<div class="si-gate-hint">✅ 你已被指定为本单上线开发，可执行 hotfix（不发版直接上线）或发版（建批次填版本号）。</div>`;   // C-orch
         }
+        // C-orch bug 待上线态的四个引导分支（指定/等待/可执行）已随上线编排一起移入 siRenderReleaseOrchBlock，本操作区不再重复。
 
         const btns = acts.map(a => {
             const label = (META.actions && META.actions[a]) || a;
@@ -1103,19 +1164,12 @@
         //   （旧 ④b-1 notifyBtns 已退场；bug 流手动通知见 siRenderNotify + siNotifyDevSend/siNotifyRelayClick/
         //   siNotifyCreatorClick/siNotifyRequesterClick）。
 
-        // C-orch：待上线态上线编排按钮（双角色自定义渲染，抑制通用 acts 循环渲出的坏按钮，见上方 continue）。
-        let orchBtns = '';
-        if (iss.type === 'bug' && iss.status === '待上线') {
-            if (isAdminUser) {
-                orchBtns += iss.release_assignee_id
-                    ? `<button class="si-btn si-btn-sec si-btn-sm" onclick="siModalAssignReleaseDev(true)">换执行开发</button>`
-                    : `<button class="si-btn si-btn-sec si-btn-sm" onclick="siModalAssignReleaseDev(false)">指定上线开发</button>`;
-            }
-            if (isReleaseExecutor) {
-                orchBtns += `<button class="si-btn si-btn-primary si-btn-sm" onclick="siModalExecuteRelease()">执行上线</button>`;
-            }
-        }
-        box.innerHTML = gate + ((btns + chatBtn + orchBtns) || '<span class="si-muted">当前状态/身份下无可执行动作</span>');
+        // C-orch 上线编排按钮（指定/换执行开发·执行上线）已拆到 siRenderReleaseOrchBlock 独立区块，本操作区不再渲染。
+        // MED-2（codex 43）：上线编排区块确有内容时（siReleaseOrchHasContent 同源判据），顶部操作栏即便无通用动作
+        //   也不出"无可执行动作"兜底（避免与下方区块按钮 UI 冲突）。用同一判据杜绝"顶部抑制兜底、下方区块却也空"的
+        //   分叉——主开发看未指定上线开发的待上线单时 orchBlock 空 → 此处判 false → 仍显示"无可执行动作"（准确）。
+        const fallback = siReleaseOrchHasContent(iss) ? '' : '<span class="si-muted">当前状态/身份下无可执行动作</span>';
+        box.innerHTML = gate + ((btns + chatBtn) || fallback);
     }
 
     // ============================================================
@@ -1180,6 +1234,7 @@
     function siNotifyRelayClick() { return siNotifyManual('notify-relay', '通知对接人', 'relay_notify_status', 'relay_notify_error'); }
     function siNotifyCreatorClick() { return siNotifyManual('notify-creator', '通知建单人', 'creator_notify_status', 'creator_notify_error'); }
     function siNotifyRequesterClick() { return siNotifyManual('notify-requester', '通知报障人', 'requester_notify_status', 'requester_notify_error'); }
+    function siNotifyReleaseExecutorClick() { return siNotifyManual('notify-release-executor', '通知上线开发', 'release_assignee_notify_status', 'release_assignee_notify_error'); }
 
     // 开发侧逐 dev 通知（notify-developer 带 dev_user_id，定位子表活动行；同一 inflight 守卫）
     async function siNotifyDevSend(devUserId) {
@@ -1198,7 +1253,7 @@
         } finally { siNotifyInflight = false; }
     }
 
-    // 查已读（GET notify-read-status?type=dev|relay|creator|requester[&dev_user_id=]）——四侧共用一个查询函数。
+    // 查已读（GET notify-read-status?type=dev|relay|creator|requester|release_executor[&dev_user_id=]）——五侧共用一个查询函数。
     //   历史无快照（HISTORICAL_SNAPSHOT_MISSING）按契约出提示非报错；其余错误走通用 siApiErr。
     async function siQueryReadStatus(type, devUserId) {
         const iss = siDetail && siDetail.issue;
