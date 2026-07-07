@@ -1170,7 +1170,11 @@
         //   也不出"无可执行动作"兜底（避免与下方区块按钮 UI 冲突）。用同一判据杜绝"顶部抑制兜底、下方区块却也空"的
         //   分叉——主开发看未指定上线开发的待上线单时 orchBlock 空 → 此处判 false → 仍显示"无可执行动作"（准确）。
         const fallback = siReleaseOrchHasContent(iss) ? '' : '<span class="si-muted">当前状态/身份下无可执行动作</span>';
-        box.innerHTML = gate + ((btns + chatBtn) || fallback);
+        // 删除任务（admin 专用·物理删除·不可逆·2026-07-07）：始终对 admin 可见（危险区）；守卫（有派生子单 /
+        //   已挂批次）由 siDeleteIssue 前置镜像 + 后端 DELETE 守卫双重兜底——前端非授权源，真闸在后端。
+        let adminDelBtn = '';
+        if (isAdminUser) adminDelBtn = `<button class="si-btn si-btn-danger si-btn-sm" onclick="siDeleteIssue()">删除任务</button>`;
+        box.innerHTML = gate + ((btns + chatBtn + adminDelBtn) || fallback);
     }
 
     // ============================================================
@@ -1290,6 +1294,29 @@
             if (!r.ok) { siApiErr(r); return false; }
             showToast('操作完成', 'success'); return true;
         }, '确定');
+    }
+
+    // 物理删除迭代单（admin·不可逆·2026-07-07）：二次确认后 DELETE /sys-issues/:id → 级联清主表+三子表+附件文件。
+    //   前置镜像后端守卫①（有派生子单则直接拦，省一次弹框往返）；守卫②（已挂批次）由后端 409 兜底、siApiErr 直出。
+    //   note() 不转义 → iss.title 必须 esc()；换行用 <br>（\n 在 div 内折叠）。成功后关抽屉 + 刷列表。
+    function siDeleteIssue() {
+        const iss = siDetail && siDetail.issue;
+        if (!iss) return;
+        const hasDerived = siDetail && siDetail.derived_issues && siDetail.derived_issues.length > 0;
+        if (hasDerived) { showToast('该单已派生出子单，不可删除（请先处理派生链）', 'error'); return; }
+        siModal(
+            '删除任务 #' + iss.id,
+            [note(`确认物理删除迭代单 #${iss.id}「${esc(iss.title || '')}」？<br><br>此操作<b>不可恢复</b>，将一并清除该单的：状态历史、附件（含文件）、协作开发、四方通知记录。`)],
+            async () => {
+                const r = await siApi('/sys-issues/' + iss.id, { method: 'DELETE' });
+                if (!r.ok) { siApiErr(r); return false; }
+                showToast('已删除', 'success');
+                siCloseDrawer();
+                siLoadList();
+                return true;
+            },
+            '确认删除'
+        );
     }
 
     function siModalSchedule(iss) {

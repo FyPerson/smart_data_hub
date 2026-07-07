@@ -2226,6 +2226,72 @@ module.exports = (deps) => {
     } catch (err) { sendSysTransitionError(res, err); }
   });
 
+  // ── DELETE /sys-issues/:id：物理删除迭代单（admin 专用·不可逆·2026-07-07）──────────
+  //   场景：admin 单人清理测试/脏单。物理删除（非 void 软删）——sys_issues 主表 + 三张子表全清 + 附件磁盘文件。
+  //   ⚠️ 级联必须手动做：本库从未开 PRAGMA foreign_keys=ON（子表 FK ON DELETE CASCADE 仅自文档、运行不生效，
+  //     见 sys_issue_timeline 建表注释），故显式 DELETE 每张子表，否则留孤儿（timeline / 附件行 / 协作开发通知行）。
+  //   守边界（方案 a）：拒删「被别的单派生引用（origin）」或「已挂上线批次（release_id）」的单——防悬空引用 / 破坏
+  //     批次成员一致性。真要删这类单说明有特殊情况，应单独处置，不让删除按钮默默替决策。
+  //   通知数据落点：creator/requester/release_assignee 三侧通知快照在 sys_issues 主表列（删主行即清）；
+  //     协作开发通知在 sys_issue_dev_assignees（删子表即清）——两处都在本级联范围内，零残留。
+  router.delete('/sys-issues/:id', authenticateToken, requireSysSchemaReady, requireAdmin, async (req, res) => {
+    const id = parsePositiveId(req.params.id);
+    if (!id) return res.status(400).json({ error: '无效的迭代单 ID', code: 'INVALID_SYS_ISSUE_ID' });
+    try {
+      // 【codex 44 审 H-1/H-2 采纳】守卫读 + 附件清单读全部下沉到 sysBeginImmediate 之后：
+      //   所有 sys 写路径（建单/派生/挂批次/传附件）都走同一模块级全局锁（见本文件 sysBeginImmediate 注释），
+      //   持锁期间无写路径能插入，把「读到无派生/无批次 + 附件清单」与「删除」收进同一持锁窗口 → TOCTOU 窗口归零
+      //   （否则读后删前可能被插入派生子单/挂 release_id → 悬空母单；或被传新附件 → 删库不删盘的孤儿文件）。
+      let atts = [];
+      let titleForLog = '';
+      await sysBeginImmediate();
+      try {
+        const row = await dbGetAsync('SELECT id, title, release_id FROM sys_issues WHERE id = ?', [id]);
+        if (!row) { await sysRollback(); return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' }); }
+        titleForLog = row.title || '';
+        // 守卫①：有派生子单（被引用为 origin）→ 删母单会让子单 origin_issue_id 悬空，拒删。
+        const derived = await dbGetAsync('SELECT id FROM sys_issues WHERE origin_issue_id = ? LIMIT 1', [id]);
+        if (derived) { await sysRollback(); return res.status(409).json({ error: '该单已派生出子单，不可删除（请先处理派生链）', code: 'SYS_ISSUE_HAS_DERIVED' }); }
+        // 守卫②：已挂上线批次（release_id 非空）→ 删除会破坏批次成员一致性，拒删。
+        if (row.release_id) { await sysRollback(); return res.status(409).json({ error: '该单已加入上线批次，不可删除', code: 'SYS_ISSUE_IN_RELEASE' }); }
+
+        // 附件磁盘文件清单：持锁后读，与下方 DELETE 处于同一持锁窗口（防读后删前被传新附件 → 只删库不删盘）。
+        atts = await dbAllAsync('SELECT file_name FROM sys_issue_attachments WHERE issue_id = ?', [id]);
+
+        // 先删三张 issue_id 子表，再删主表（PRAGMA OFF 下顺序不影响 FK，但逻辑自洽）。
+        await dbRunAsync('DELETE FROM sys_issue_dev_assignees WHERE issue_id = ?', [id]);
+        await dbRunAsync('DELETE FROM sys_issue_attachments WHERE issue_id = ?', [id]);
+        await dbRunAsync('DELETE FROM sys_issue_timeline WHERE issue_id = ?', [id]);
+        const del = await dbRunAsync('DELETE FROM sys_issues WHERE id = ?', [id]);
+        if (!del || del.changes !== 1) {
+          await sysRollback();
+          return res.status(409).json({ error: '迭代单状态已变更，请刷新重试', code: 'SYS_ISSUE_DELETE_CONFLICT' });
+        }
+        await sysCommit();
+      } catch (txErr) {
+        try { await sysRollback(); } catch (_) { /* ignore */ }
+        throw txErr;
+      }
+      // COMMIT 成功后才物理删附件文件（DB 为准；文件删失败留 orphan，不影响已提交的 DB 删除，无幽灵行）。
+      //   【codex 44 审 M-1 采纳·修法据实调整】safeDeleteFileSync 返回布尔且内部 try/catch 不抛异常（server.js:525），
+      //     故 codex 原议「在 catch 里记 warn」抓不到——改为按返回值判定：返回 false（含"文件本就不存在"这类既有脏态
+      //     与"删除受阻"）时记一条带 issue id 的 warn，给 admin 留人工核对线索（不改接口 200 语义）。
+      let fileDelFailed = 0;
+      for (const a of atts) {
+        if (!safeDeleteFileSync(a.file_name, UPLOAD_DIR)) {
+          fileDelFailed++;
+          logger.warn(`[系统迭代] 物理删除 #${id} 附件文件未删除（可能已不存在或删除受阻，留待人工核对）：${a.file_name}`);
+        }
+      }
+      logger.info(`用户 ${req.user.username} 物理删除迭代单 #${id}（${titleForLog}）+ ${atts.length} 个附件${fileDelFailed ? `（其中 ${fileDelFailed} 个文件未删除，见 warn）` : ''}`);
+      return res.json({ ok: true, id });
+    } catch (err) {
+      if (err instanceof SysTransitionError) return sendSysTransitionError(res, err);   // SYS_BUSY 等保 503
+      logger.error('[系统迭代] 物理删除失败:', err && err.message);
+      return res.status(500).json({ error: (err && err.message) || '删除失败' });
+    }
+  });
+
   // ── POST /sys-issues/:id/estimate：回填预计完成（开发本人，不改 status，旁路独立事务，§3.6/§7）──────────
   //   闸门：dev_estimated_at 格式合法 + >=assigned_at；ownerGuard 登录人=assigned_to（严格本人）。
   router.post('/sys-issues/:id/estimate', authenticateToken, requireSysSchemaReady, async (req, res) => {

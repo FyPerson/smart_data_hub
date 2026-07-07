@@ -1,0 +1,15 @@
+{
+  "sandbox": {
+    "server": "192.168.1.196",
+    "port": 1433,
+    "database": "Repo",
+    "user": "repo_sandbox",
+    "password": "Adminboy007@260707!",
+    "default_schema": "sandbox"
+  },
+  "options": {
+    "encrypt": false,
+    "trustServerCertificate": true,
+    "requestTimeout": 30000
+  }
+}
