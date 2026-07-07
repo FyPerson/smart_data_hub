@@ -141,8 +141,9 @@
         .si-notify-row .si-nr-body { flex: 1; font-size: 12px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
         /* （原 si-nbadge 徽章体系 + si-nread 已随通知栏文字化对齐 Data_Correction 移除，2026-07-07 样式统一） */
         /* 通知改造 C4：通知区行内小按钮（发送/重发/查已读） */
-        .si-nbtn { padding: 2px 9px; font-size: 11px; font-weight: 600; border-radius: 10px; border: 1px solid #d1d5db; background: #fff; color: #374151; cursor: pointer; white-space: nowrap; }
-        .si-nbtn:hover { background: #f3f4f6; border-color: #d97706; }
+        /* 通知区行内按钮（发送/重发/查已读）对齐 Data_Correction .btn-secondary+.nb-btn：灰底 #f3f4f6 / 圆角 6px / padding 3px 10px / font 11px / 无粗体 / hover #e5e7eb（2026-07-07 样式统一延续）。保留 white-space:nowrap 防「查已读」换行。 */
+        .si-nbtn { padding: 3px 10px; font-size: 11px; background: #f3f4f6; color: #374151; border: 1px solid #d1d5db; border-radius: 6px; cursor: pointer; white-space: nowrap; transition: background 0.2s; }
+        .si-nbtn:hover { background: #e5e7eb; }
 
         /* 附件 */
         .si-att-item { display: flex; align-items: center; gap: 8px; padding: 6px 0; font-size: 12.5px; border-bottom: 1px dashed #f1f5f9; }
