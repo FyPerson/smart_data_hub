@@ -966,10 +966,10 @@
             const label = `开发 ${esc(d.user_name || ('#' + d.user_id))}${tag}`;
             let btns = '';
             if (canOperateDev && sendable) {
-                btns += `<button class="si-nbtn" onclick="siNotifyDevSend(${d.user_id})">${d.notify_status === 'sent' ? '重发' : '发送'}</button>`;
+                btns += `<button class="si-nbtn" onclick="siNotifyDevSend(${d.user_id})">${d.notify_status === 'sent' ? '重新通知' : '发送通知'}</button>`;
             }
             if (canQueryRead && d.notify_status === 'sent' && d.notify_message_key) {
-                btns += `<button class="si-nbtn" onclick="siQueryReadStatus('dev', ${d.user_id})">查已读</button>`;
+                btns += `<button class="si-nbtn" onclick="siQueryReadStatus('dev', ${d.user_id})">查询已读</button>`;
             }
             return siNotifyRowHtml(label, d.notify_status, d.read_at, btns);
         }).join('');
@@ -982,10 +982,10 @@
         const sendable = SI_NOTIFY_RELAY_STATUSES.includes(iss.status);
         let btns = '';
         if (canOperateRelay && sendable) {
-            btns += `<button class="si-nbtn" onclick="siNotifyRelayClick()">${iss.relay_notify_status === 'sent' ? '重发' : '发送'}</button>`;
+            btns += `<button class="si-nbtn" onclick="siNotifyRelayClick()">${iss.relay_notify_status === 'sent' ? '重新通知' : '发送通知'}</button>`;
         }
         if (canQueryRead && iss.relay_notify_status === 'sent' && iss.relay_notify_message_key) {
-            btns += `<button class="si-nbtn" onclick="siQueryReadStatus('relay')">查已读</button>`;
+            btns += `<button class="si-nbtn" onclick="siQueryReadStatus('relay')">查询已读</button>`;
         }
         return siNotifyRowHtml(label, iss.relay_notify_status, iss.relay_read_at, btns);
     }
@@ -996,10 +996,10 @@
         const sendable = SI_NOTIFY_CREATOR_STATUSES.includes(iss.status);
         let btns = '';
         if (canOperateCreator && sendable) {
-            btns += `<button class="si-nbtn" onclick="siNotifyCreatorClick()">${iss.creator_notify_status === 'sent' ? '重发' : '发送'}</button>`;
+            btns += `<button class="si-nbtn" onclick="siNotifyCreatorClick()">${iss.creator_notify_status === 'sent' ? '重新通知' : '发送通知'}</button>`;
         }
         if (canQueryRead && iss.creator_notify_status === 'sent' && iss.creator_notify_message_key) {
-            btns += `<button class="si-nbtn" onclick="siQueryReadStatus('creator')">查已读</button>`;
+            btns += `<button class="si-nbtn" onclick="siQueryReadStatus('creator')">查询已读</button>`;
         }
         return siNotifyRowHtml(label, iss.creator_notify_status, iss.creator_read_at, btns);
     }
@@ -1012,10 +1012,10 @@
         const sendable = SI_NOTIFY_RELEASE_EXECUTOR_STATUSES.includes(iss.status);
         let btns = '';
         if (canOperateReleaseExecutor && sendable) {
-            btns += `<button class="si-nbtn" onclick="siNotifyReleaseExecutorClick()">${iss.release_assignee_notify_status === 'sent' ? '重发' : '发送'}</button>`;
+            btns += `<button class="si-nbtn" onclick="siNotifyReleaseExecutorClick()">${iss.release_assignee_notify_status === 'sent' ? '重新通知' : '发送通知'}</button>`;
         }
         if (canQueryRead && iss.release_assignee_notify_status === 'sent' && iss.release_assignee_notify_message_key) {
-            btns += `<button class="si-nbtn" onclick="siQueryReadStatus('release_executor')">查已读</button>`;
+            btns += `<button class="si-nbtn" onclick="siQueryReadStatus('release_executor')">查询已读</button>`;
         }
         return siNotifyRowHtml(label, iss.release_assignee_notify_status, iss.release_assignee_read_at, btns);
     }
@@ -1035,17 +1035,17 @@
         let btns = '', extraNote = '';
         if (canOperateRequester && sendableStatus) {
             if (hasSnapshot) {
-                btns += `<button class="si-nbtn" onclick="siNotifyRequesterClick()">重发</button>`;
+                btns += `<button class="si-nbtn" onclick="siNotifyRequesterClick()">重新通知</button>`;
             } else if (historicalNoSnapshot) {
                 extraNote = '<span class="si-muted">历史记录无快照，不支持重发/查已读</span>';
             } else if (hasCurrentPhone) {
-                btns += `<button class="si-nbtn" onclick="siNotifyRequesterClick()">发送</button>`;
+                btns += `<button class="si-nbtn" onclick="siNotifyRequesterClick()">发送通知</button>`;
             } else {
                 extraNote = '<span class="si-muted">无手机号，无法通知</span>';
             }
         }
         if (canQueryRead && iss.requester_notify_status === 'sent' && iss.requester_notify_message_key && hasSnapshot) {
-            btns += `<button class="si-nbtn" onclick="siQueryReadStatus('requester')">查已读</button>`;
+            btns += `<button class="si-nbtn" onclick="siQueryReadStatus('requester')">查询已读</button>`;
         }
         return siNotifyRowHtml(label, iss.requester_notify_status, iss.requester_read_at, btns, extraNote);
     }
