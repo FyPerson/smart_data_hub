@@ -208,9 +208,10 @@
             z-index: 900;
         }
         .drawer-overlay.open { display: block; }
+        /* top:64px 避开固定导航栏（.navbar z-index:1000 > drawer 901，否则抽屉头部标题被导航栏遮挡；对齐 Data_Correction v1.94.1 同源修复，2026-07-08） */
         .drawer {
             position: fixed;
-            top: 0; right: -560px; bottom: 0;
+            top: 64px; right: -560px; bottom: 0;
             width: 540px;
             max-width: 90vw;
             background: #fff;
