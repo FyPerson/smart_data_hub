@@ -2066,7 +2066,7 @@ module.exports = (deps) => {
         `SELECT id, type, status, priority, title, system_name, module_name, source,
                 assigned_to, assigned_to_name, dev_estimated_at, deadline,
                 created_by, created_by_name, origin_issue_id, release_id, needs_release,
-                release_assignee_id, release_assignee_name,
+                release_assignee_id, release_assignee_name, release_assignee_notify_status,
                 reopen_count, return_count, scope_changed, created_at, updated_at
            FROM sys_issues
           ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
@@ -3656,13 +3656,24 @@ module.exports = (deps) => {
           if (r.release_id !== null) { await sysRollback(); return res.status(409).json({ error: `#${r.id} 已挂上线批次（已进入执行），不能换人`, code: 'ISSUE_ALREADY_IN_RELEASE', issue_id: r.id }); }
           // 换人专用：必须已有指定人（未指定应走 assign-release-dev）。
           if (r.release_assignee_id === null) { await sysRollback(); return res.status(409).json({ error: `#${r.id} 尚未指定上线开发，请改用「批量指定上线开发」（assign-release-dev）`, code: 'RELEASE_ASSIGNEE_NOT_SET', issue_id: r.id }); }
+          // 【批量通知 Commit 0 · H-1 同人守卫】新人 == 现执行人 → 整批拒（不清零/不写 timeline）。
+          //   否则换人重置会把该单已有的 sent/failed 通知态无意义打回 not_sent、清已读、写"X→X"伪 timeline。
+          //   整批任一同人即 409（对齐本端点"任一失败整批不落库"范式）。
+          if (Number(r.release_assignee_id) === devId) { await sysRollback(); return res.status(409).json({ error: `#${r.id} 的上线开发已是该人，无需换人`, code: 'RELEASE_ASSIGNEE_UNCHANGED', issue_id: r.id }); }
         }
         for (const r of rows) {
           const oldName = r.release_assignee_name;
+          // 【批量通知 Commit 0 · C-1】换人时原子重置 release_assignee_notify_* 5 列——新执行人的通知态归零，
+          //   否则沿用旧人 sent/failed → 新人被判"已通知"、已读时刻失真、批量通知②态闸误拦。
+          //   末行 release_assignee_id <> devId 双保险（H-1 已在前置循环拒同人，此处再兜一层防并发插入同人）。
           const upd = await dbRunAsync(
-            `UPDATE sys_issues SET release_assignee_id = ?, release_assignee_name = ?, updated_at = datetime('now','localtime')
-               WHERE id = ? AND type = 'bug' AND status = '待上线' AND release_id IS NULL AND release_assignee_id IS NOT NULL`,
-            [devId, devName, r.id]
+            `UPDATE sys_issues SET release_assignee_id = ?, release_assignee_name = ?,
+               release_assignee_notify_status = 'not_sent', release_assignee_notified_at = NULL,
+               release_assignee_notify_message_key = NULL, release_assignee_notify_error = NULL,
+               release_assignee_read_at = NULL, updated_at = datetime('now','localtime')
+               WHERE id = ? AND type = 'bug' AND status = '待上线' AND release_id IS NULL
+                 AND release_assignee_id IS NOT NULL AND release_assignee_id <> ?`,
+            [devId, devName, r.id, devId]
           );
           if (!upd || upd.changes !== 1) {
             await sysRollback();
@@ -3924,6 +3935,23 @@ module.exports = (deps) => {
     };
   }
 
+  // 批量通知上线开发·合并 markdown（模型B 同执行人多单合并一条，镜像单条 buildSysReleaseExecutorMarkdown 转义范式）。
+  //   M-2（方案 §3）：正文最多列前 SYS_RELEASE_BATCH_MD_MAX 条，超出附「…其余 M 条请登录平台查看」——防同执行人
+  //   极端批量（理论至 SYS_BATCH_ISSUE_MAX=200）markdown 超钉钉消息长度上限致整组 failed。平台入口用无 issue 参数的
+  //   总入口链接（非逐单深链）。
+  const SYS_RELEASE_BATCH_MD_MAX = 20;
+  function buildSysReleaseExecutorBatchMarkdown(issueList, baseUrl) {
+    const n = issueList.length;
+    const shown = issueList.slice(0, SYS_RELEASE_BATCH_MD_MAX);
+    const lines = shown.map(it => `- #${it.id} ${issueNotify.issueSafeText(it.title, 60)}（${issueNotify.issueSafeText(it.system_name, 30)}）`);
+    const overflow = n > SYS_RELEASE_BATCH_MD_MAX ? `\n- …其余 ${n - SYS_RELEASE_BATCH_MD_MAX} 条请登录平台查看` : '';
+    const entry = baseUrl ? `\n\n[登录平台查看](${baseUrl}/Sys_Iteration.html)` : '';
+    return {
+      title: `🚀 你有 ${n} 个待上线单待执行`,
+      md: `### 🚀 你被指定为以下 ${n} 个待上线单的上线开发\n\n${lines.join('\n')}${overflow}\n\n请登录平台执行 hotfix（不发版直接上线）或发版（建批次填版本号）。${entry}`,
+    };
+  }
+
   // 通知落库写串行化进 sys mutex（ultracode 审 #1，C4.5 同类防线）：通知写跑在主事务提交后、mutex 已释放，
   //   若用裸 autocommit dbRunAsync，会落进另一并发请求已打开的 BEGIN IMMEDIATE 事务里，随其 ROLLBACK 一起丢失
   //   （钉钉已发但库回到 not_sent → 后续误判未发重复推送）。照附件写口径用 sysBeginImmediate/sysCommit 独立小事务串行化。
@@ -3931,6 +3959,12 @@ module.exports = (deps) => {
   async function sysNotifyWrite(sql, params) {
     await sysBeginImmediate();
     try { await dbRunAsync(sql, params); await sysCommit(); }
+    catch (e) { try { await sysRollback(); } catch (_) { /* ignore */ } throw e; }
+  }
+  // 同 sysNotifyWrite，但回传 run 结果（批量通知按组守卫 UPDATE 需 changes 判命中数，见 notify-release-executor-batch）。
+  async function sysNotifyWriteRun(sql, params) {
+    await sysBeginImmediate();
+    try { const r = await dbRunAsync(sql, params); await sysCommit(); return r; }
     catch (e) { try { await sysRollback(); } catch (_) { /* ignore */ } throw e; }
   }
   // 三侧落库 helper（read_at 在每次新发送时一并重置——新 message_key 后旧已读时刻失去意义；失败时同样清，failed=无可读消息）。
@@ -4189,6 +4223,105 @@ module.exports = (deps) => {
       const fresh = await dbGetAsync('SELECT release_assignee_notify_status, release_assignee_notify_error FROM sys_issues WHERE id = ?', [id]);
       res.json({ id, release_assignee_notify_status: fresh.release_assignee_notify_status, release_assignee_notify_error: fresh.release_assignee_notify_error });
     } catch (err) { logger.error('[系统迭代] 手动通知上线开发失败:', err && err.message); res.status(500).json({ error: (err && err.message) || '通知上线开发失败' }); }
+  });
+
+  // ── POST /sys-issues/notify-release-executor-batch：批量通知上线开发（admin，模型B 同执行人合并一条）──────────
+  //   两步流后端强制②态（H-2）：仅 type='bug' + status='待上线' + release_assignee_id 非空 +
+  //     COALESCE(notify_status,'not_sent') IN ('not_sent','failed') 可通知；已通知(sent)→ALREADY_NOTIFIED（不进发送分组）。
+  //   按 release_assignee_id 分组，跨执行人各发一条合并 markdown；发送(sendIssueDingtalkRaw)在锁外，仅按组守卫 UPDATE
+  //     进 sysNotifyWriteRun 短事务（②态闸 + release_assignee_id + status 三重 WHERE 防 TOCTOU）；未命中(changes<组内数)→
+  //     concurrent_changed（合并钉钉已尝试发送、落库前该行被并发改派/离态、本行未记结果，前端不无脑重发）。
+  //   L-1：单条端点 notify-release-executor 有意保持现状不加②态闸（sent 单详情重发保留）——仅本批量端点强制②态。
+  router.post('/sys-issues/notify-release-executor-batch', authenticateToken, requireSysSchemaReady, requireAdmin, async (req, res) => {
+    const b = req.body || {};
+    const raw = b.issue_ids;
+    if (!Array.isArray(raw) || raw.length === 0) return res.status(400).json({ error: '请选择要通知的迭代单', code: 'ISSUE_IDS_REQUIRED' });
+    if (raw.length > SYS_BATCH_ISSUE_MAX) return res.status(400).json({ error: `单次最多 ${SYS_BATCH_ISSUE_MAX} 条`, code: 'TOO_MANY_ISSUES' });
+    for (const x of raw) if (!parsePositiveId(x)) return res.status(400).json({ error: '迭代单 id 非法', code: 'INVALID_ISSUE_ID' });
+    const issueIds = [...new Set(raw.map(parsePositiveId))];
+    try {
+      const baseUrl = await getSafePlatformBaseUrl();
+      const idPh = issueIds.map(() => '?').join(',');
+      const rows = await dbAllAsync(
+        `SELECT id, type, status, title, system_name, release_assignee_id,
+                COALESCE(release_assignee_notify_status,'not_sent') AS notify_status
+           FROM sys_issues WHERE id IN (${idPh})`, issueIds);
+      const byId = new Map(rows.map(r => [r.id, r]));
+
+      // 逐单资格分类（H-2 后端强制②态）：skipped / ALREADY_NOTIFIED / 进入按执行人分组
+      const resultMap = new Map();
+      const eligibleByDev = new Map();   // release_assignee_id → [row...]
+      for (const iid of issueIds) {
+        const r = byId.get(iid);
+        if (!r || r.type !== 'bug' || r.status !== '待上线' || !r.release_assignee_id) { resultMap.set(iid, { id: iid, code: 'skipped' }); continue; }
+        if (r.notify_status === 'sent') { resultMap.set(iid, { id: iid, code: 'ALREADY_NOTIFIED' }); continue; }
+        if (r.notify_status !== 'not_sent' && r.notify_status !== 'failed') { resultMap.set(iid, { id: iid, code: 'skipped' }); continue; }   // 兜底（schema CHECK 保证不可达）
+        const devId = Number(r.release_assignee_id);
+        if (!eligibleByDev.has(devId)) eligibleByDev.set(devId, []);
+        eligibleByDev.get(devId).push(r);
+      }
+
+      // 按执行人分组：查执行人 → 建合并 markdown → 发一条 → 按组守卫 UPDATE → 据 changes(+回读) 生成每单结果
+      for (const [devId, groupRows] of eligibleByDev) {
+        const groupIds = groupRows.map(r => r.id);
+        const executor = await dbGetAsync('SELECT id, display_name, phone, dingtalk_user_id FROM users WHERE id = ?', [devId]);
+        let ok = false, messageKey = null, sendErr = null;
+        if (!executor) {
+          sendErr = 'executor_not_found';   // 执行人查不到 → 组内全 failed（守卫 UPDATE 落 failed）
+        } else {
+          const { title, md } = buildSysReleaseExecutorBatchMarkdown(groupRows, baseUrl);
+          const sendResult = await sendIssueDingtalkRaw(executor, title, md);   // 锁外网络调用
+          ok = !!sendResult.ok; messageKey = ok ? sendResult.message_key : null; sendErr = ok ? null : (sendResult.reason || 'other');
+        }
+        const gph = groupIds.map(() => '?').join(',');
+        // 守卫 UPDATE 的 WHERE 与分类读侧完全同源（type='bug' + status='待上线' + release_assignee_id + ②态）——
+        //   codex H-1 [[write_read_same_semantic]]：type 现不可变（无端点改 sys_issues.type）故写侧漏 type 当前不可达，
+        //   但读侧分类带了 type='bug'，写侧同源加固防未来加 type 编辑路径破防（零成本）。
+        const upd = await sysNotifyWriteRun(
+          `UPDATE sys_issues SET release_assignee_notify_status=?, release_assignee_notified_at=datetime('now','localtime'),
+             release_assignee_notify_message_key=?, release_assignee_notify_error=?, release_assignee_read_at=NULL
+           WHERE id IN (${gph}) AND type = 'bug' AND release_assignee_id=? AND status='待上线'
+             AND COALESCE(release_assignee_notify_status,'not_sent') IN ('not_sent','failed')`,
+          [ok ? 'sent' : 'failed', messageKey, sendErr, ...groupIds, devId]);
+        const targetStatus = ok ? 'sent' : 'failed';
+        if (upd && upd.changes === groupIds.length) {
+          // 全部命中（无并发）：直接标结果，免回读
+          for (const iid of groupIds) resultMap.set(iid, { id: iid, code: targetStatus, release_assignee_notify_status: targetStatus });
+        } else {
+          // 部分命中：回读按当前态判「命中(sent/failed)」vs「并发改动(concurrent_changed)」。
+          //   hit 判定条件与守卫 UPDATE 的 WHERE 完全同源（type/release_assignee_id/status/notify_status）+ sent 再比对
+          //   message_key（本次发送唯一标识）。failed 分支无 message_key 唯一标识（codex M-1）：单管理员低并发下，
+          //   守卫 UPDATE 经 sysBeginImmediate 全局锁串行、reread 紧随其后，未命中行必因 type/assignee/status/notify_status
+          //   某项在 UPDATE 时不匹配——该项若仍不匹配（如改派→id 变、离态→status 变）reread 即判 concurrent_changed；
+          //   要误判"命中"须该行状态在 UPDATE 与 reread 之间恰好翻回匹配态（多写者竞态），单 admin 场景不存在。
+          const fresh = await dbAllAsync(
+            `SELECT id, type, release_assignee_id, status, release_assignee_notify_status AS ns, release_assignee_notify_message_key AS mk
+               FROM sys_issues WHERE id IN (${gph})`, groupIds);
+          const freshById = new Map(fresh.map(f => [f.id, f]));
+          for (const iid of groupIds) {
+            const f = freshById.get(iid);
+            const hit = f && f.type === 'bug' && Number(f.release_assignee_id) === devId && f.status === '待上线' && f.ns === targetStatus
+              && (ok ? f.mk === messageKey : true);
+            if (hit) resultMap.set(iid, { id: iid, code: targetStatus, release_assignee_notify_status: f.ns });
+            else resultMap.set(iid, { id: iid, code: 'concurrent_changed', release_assignee_notify_status: f ? f.ns : null });
+          }
+        }
+      }
+
+      const results = issueIds.map(iid => resultMap.get(iid));
+      const agg = { sent: 0, failed: 0, skipped: 0, already_notified: 0, concurrent_changed: 0 };
+      for (const r of results) {
+        if (r.code === 'sent') agg.sent++;
+        else if (r.code === 'failed') agg.failed++;
+        else if (r.code === 'skipped') agg.skipped++;
+        else if (r.code === 'ALREADY_NOTIFIED') agg.already_notified++;
+        else if (r.code === 'concurrent_changed') agg.concurrent_changed++;
+      }
+      res.json({ results, ...agg });
+    } catch (err) {
+      logger.error('[系统迭代] 批量通知上线开发失败:', err && err.message);
+      res.status(500).json({ error: (err && err.message) || '批量通知上线开发失败' });
+    }
   });
 
   //   通知报障人（requester 侧 requester_notify_*，进展/已上线卡片）：需有报障人手机号（sendSysRequesterNotify 内亦有"无报障人保持 not_sent"守卫）。

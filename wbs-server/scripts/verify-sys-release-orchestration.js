@@ -268,6 +268,58 @@ async function main() {
     assert.strictEqual(r.status, 200, '[G4] 换人后新指定人（dev6）可执行');
     ok('[G4] 换人生效体现在 execute-release 授权判定（旧人失权/新人获权）');
 
+    // 【批量通知 Commit 0 · H-1 同人守卫 + 整批原子性】（codex Commit0 审 M-1 整批不落库 + L-1 拒绝不清零，合并覆盖）
+    //   混合批次：一条同人（release_assignee=5，换人目标也是 5）+ 一条非同人（release_assignee=6，本可成功换到 5），
+    //   两条均预置非默认通知态（sent+已读+message_key）。一次调用换人到 5 → 同人那条命中守卫 → 整批 409：
+    //   ① 非同人那条 assignee 不被改（整批不落库）② 两条 notify 5 列全保持 sent 态（拒绝路径不清零）③ 两条都不写 timeline。
+    {
+      const sameId = await seedBugToReady(5);
+      const otherId = await seedBugToReady(5);
+      await call('POST', '/api/sys-issues/assign-release-dev', adminTok, { issue_ids: [sameId], release_assignee_id: 5 });
+      await call('POST', '/api/sys-issues/assign-release-dev', adminTok, { issue_ids: [otherId], release_assignee_id: 6 });
+      for (const iid of [sameId, otherId]) {
+        await run(`UPDATE sys_issues SET release_assignee_notify_status='sent', release_assignee_notified_at='2026-08-01 08:00',
+                     release_assignee_notify_message_key='mk-keep', release_assignee_notify_error=NULL,
+                     release_assignee_read_at='2026-08-01 08:30' WHERE id=?`, [iid]);
+      }
+      const r2 = await call('POST', '/api/sys-issues/reassign-release-dev', adminTok, { issue_ids: [sameId, otherId], release_assignee_id: 5 });
+      assert.strictEqual(r2.status, 409, `[G4][C0·H-1] 混合批次含同人应整批 409, got ${r2.status} ${JSON.stringify(r2.body)}`);
+      assert.strictEqual(r2.body.code, 'RELEASE_ASSIGNEE_UNCHANGED', '[G4][C0·H-1] code=RELEASE_ASSIGNEE_UNCHANGED');
+      assert.strictEqual(r2.body.issue_id, sameId, '[G4][C0·H-1] 409 指向命中同人那条');
+      const other = await issueRow(otherId);
+      assert.strictEqual(other.release_assignee_id, 6, '[G4][C0·H-1·M-1] 整批 409：非同人那条 assignee 未被改（整批不落库）');
+      for (const iid of [sameId, otherId]) {
+        const row = await issueRow(iid);
+        assert.strictEqual(row.release_assignee_notify_status, 'sent', `[G4][C0·H-1·L-1] #${iid} notify_status 未被清零`);
+        assert.strictEqual(row.release_assignee_notified_at, '2026-08-01 08:00', `[G4][C0·H-1·L-1] #${iid} notified_at 未被清零`);
+        assert.strictEqual(row.release_assignee_notify_message_key, 'mk-keep', `[G4][C0·H-1·L-1] #${iid} message_key 未被清零`);
+        assert.strictEqual(row.release_assignee_read_at, '2026-08-01 08:30', `[G4][C0·H-1·L-1] #${iid} read_at 未被清零`);
+      }
+      const tlc = await get(`SELECT COUNT(*) c FROM sys_issue_timeline WHERE issue_id IN (?,?) AND action_code='reassign_release_dev'`, [sameId, otherId]);
+      assert.strictEqual(tlc.c, 0, '[G4][C0·H-1] 同人守卫整批拒绝后两条都不写 reassign timeline');
+      ok('[G4][C0·H-1+M-1+L-1] 混合批次含同人 → 整批 409 不落库 + 5 列不清零 + 不写 timeline（整批原子性）');
+    }
+
+    // 【批量通知 Commit 0 · C-1】换人原子重置 release_assignee_notify_* 5 列（防新人沿用旧人 sent/已读态）
+    {
+      const nid = await seedBugToReady(5);
+      await call('POST', '/api/sys-issues/assign-release-dev', adminTok, { issue_ids: [nid], release_assignee_id: 5 });
+      // 模拟旧执行人 dev5 已被通知（sent + message_key + 已读）
+      await run(`UPDATE sys_issues SET release_assignee_notify_status='sent', release_assignee_notified_at='2026-08-01 09:00',
+                   release_assignee_notify_message_key='mk-old', release_assignee_notify_error=NULL,
+                   release_assignee_read_at='2026-08-01 09:30' WHERE id=?`, [nid]);
+      const r3 = await call('POST', '/api/sys-issues/reassign-release-dev', adminTok, { issue_ids: [nid], release_assignee_id: 6 });
+      assert.strictEqual(r3.status, 200, `[G4][C0·C-1] 换人应 200, got ${r3.status} ${JSON.stringify(r3.body)}`);
+      const row2 = await issueRow(nid);
+      assert.strictEqual(row2.release_assignee_id, 6, '[G4][C0·C-1] 换成新人 dev6');
+      assert.strictEqual(row2.release_assignee_notify_status, 'not_sent', '[G4][C0·C-1] notify_status 重置 not_sent');
+      assert.strictEqual(row2.release_assignee_notified_at, null, '[G4][C0·C-1] notified_at 清空');
+      assert.strictEqual(row2.release_assignee_notify_message_key, null, '[G4][C0·C-1] message_key 清空');
+      assert.strictEqual(row2.release_assignee_notify_error, null, '[G4][C0·C-1] notify_error 清空');
+      assert.strictEqual(row2.release_assignee_read_at, null, '[G4][C0·C-1] read_at 清空');
+      ok('[G4][C0·C-1] 换人原子重置 release_assignee_notify_* 5 列（新人通知态归零）');
+    }
+
     // 未指定人（none）→ 须走 assign-release-dev，非 reassign
     const noneId = await seedBugToReady(5);
     r = await call('POST', '/api/sys-issues/reassign-release-dev', adminTok, { issue_ids: [noneId], release_assignee_id: 5 });

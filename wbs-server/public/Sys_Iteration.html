@@ -545,8 +545,8 @@
             html += `<button class="si-btn si-btn-sec" onclick="siOpenBatch()">📦 批次管理</button>`;
             if (siTypeKeys().length) html += `<button class="si-btn si-btn-primary" onclick="siOpenCreate()">+ 建单</button>`;
         }
-        // C-orch：上线编排批量面板入口——admin（批量指定/换人上线开发）与被指定执行开发（批量执行发版）共用入口，
-        //   面板内部按角色分别出对应操作；任意登录用户可开（无待办项时面板自身显示"暂无"，无害）。
+        // C-orch：上线编排批量面板入口——admin（批量指定 + 批量通知上线开发）与被指定执行开发（批量执行发版）共用入口，
+        //   面板内部按角色 + 三态分别出对应操作；任意登录用户可开（无待办项时面板自身显示"暂无"，无害）。
         if (META_OK && currentUser) {
             html += `<button class="si-btn si-btn-sec" onclick="siOpenReleaseOrch()">🚀 上线编排</button>`;
         }
@@ -1766,11 +1766,11 @@
 
     // ============================================================
     // C-orch §6.3：上线编排批量面板（复用批次管理同一套 overlay DOM，同一时刻只开一个面板）——
-    //   admin：批量指定/换人上线开发；被指定执行开发：批量执行上线（发版）。
-    //   ⚠️ 已知限制（批量做起来复杂度可控故未砍，但如实标注）：批量指定/换人内部按"是否已指定过"分两组
-    //   分别调 assign-release-dev / reassign-release-dev，**每组各自整批原子、跨组不原子**——若第一组成功
-    //   第二组失败，会出现"部分已指定、部分未处理"的中间态（前端会报错但不回滚已成功那组）。真正的强原子
-    //   需要后端加一个"整批混合模式"端点，本批次未做（超出前端范围）。
+    //   admin：批量指定上线开发（只作用①未指派）+ 批量通知上线开发（只作用②已指派未通知·模型B 合并一条）；
+    //   被指定执行开发：批量执行上线（发版）。三态守卫见 siReleaseOrchState / siRenderReleaseOrchPanel。
+    //   ⚠️ 换人（reassign）不在批量面板——Path A 挪到单据详情页单条入口 siModalAssignReleaseDev(true)（含 Commit 0
+    //     同人守卫）。批量指定只调 assign-release-dev 单组整批原子，不再混 assign/reassign 两组（旧的"跨组不原子"
+    //     中间态问题随 Path A 一并消除）。
     // ============================================================
     async function siOpenReleaseOrch() {
         document.getElementById('siBatchOverlay').classList.add('open');
@@ -1791,47 +1791,98 @@
             return;
         }
         const rows = items.map(i => {
+            const st = siReleaseOrchState(i);
             const isExecutor = Number(i.release_assignee_id) === Number(uid) && uid > 0;
-            const canCheck = isAdminUser || isExecutor;
+            // 三态守卫（M-1）：admin 可勾①(批量指定)/②(批量通知)；执行人可勾自己的单(批量执行·含③)；
+            //   ③已通知且非本人执行 → 置灰不可勾（已通知无剩余批量动作，重发/换人到详情页单条）。
+            const canCheck = (isAdminUser && (st === 1 || st === 2)) || isExecutor;
+            // ②态区分 failed vs not_sent（末次合并审 M-1）：failed=通知失败待重试（保留可观测性），not_sent=从未通知。
+            //   门禁不变（两者都可批量通知），仅展示文案区分，避免运维把"失败重发"误看成"未通知"。
+            const stLabel = st === 1 ? '<span class="si-muted">未指派</span>'
+                : st === 3 ? ('已通知 执行人：' + esc(i.release_assignee_name || ''))
+                : i.release_assignee_notify_status === 'failed'
+                    ? ('<span style="color:#b45309">通知失败待重试</span> · ' + esc(i.release_assignee_name || ''))
+                    : ('已指派未通知 · ' + esc(i.release_assignee_name || ''));
+            // 置灰原因按状态给准确文案（codex Commit2 L-1）：③态=已通知不可重复勾；①②态不可勾=当前角色无操作权限
+            //   （非 admin 非本单执行人），不能一律说"已通知"误导排障。
+            const disReason = st === 3 ? '已通知，不可重复勾选（重发到详情页）' : '当前角色无操作权限';
             return `<div class="si-att-item">
-                ${canCheck ? `<input type="checkbox" class="si-orch-chk" value="${i.id}" data-assignee="${i.release_assignee_id || ''}">` : '<span style="width:16px;display:inline-block"></span>'}
+                ${canCheck
+                    ? `<input type="checkbox" class="si-orch-chk" value="${i.id}" data-assignee="${i.release_assignee_id || ''}" data-state="${st}">`
+                    : `<span style="width:16px;display:inline-block" title="${disReason}"></span>`}
                 <a class="si-att-name" onclick="siCloseBatch();siOpenDrawer(${i.id})">#${i.id} ${esc(i.title)}</a>
-                <span class="si-muted" style="margin-left:auto;font-size:12px">${i.release_assignee_name ? '执行人：' + esc(i.release_assignee_name) : '未指定执行人'}</span>
+                <span class="si-muted" style="margin-left:auto;font-size:12px">${stLabel}</span>
             </div>`;
         }).join('');
         document.getElementById('siBatchBody').innerHTML = `<div class="si-section"><h3>待上线 BUG（${items.length}）</h3>${rows}</div>`;
         let foot = `<button class="si-btn si-btn-sec" onclick="siCloseBatch()">关闭</button>`;
-        if (isAdminUser) foot += `<button class="si-btn si-btn-sec" onclick="siModalBatchAssignReleaseDev()">批量指定/换人上线开发</button>`;
+        if (isAdminUser) {
+            foot += `<button class="si-btn si-btn-sec" onclick="siModalBatchAssignReleaseDev()">批量指定上线开发</button>`;
+            foot += `<button class="si-btn si-btn-sec" onclick="siBatchNotifyReleaseExecutor()">批量通知上线开发</button>`;
+        }
         const myExecutable = items.some(i => Number(i.release_assignee_id) === Number(uid) && uid > 0);
         if (myExecutable) foot += `<button class="si-btn si-btn-primary" onclick="siModalBatchExecuteRelease()">批量执行上线（发版）</button>`;
         document.getElementById('siBatchFoot').innerHTML = foot;
     }
+    // 上线编排三态（纯前端·显式白名单，M-1，与后端②态闸同源）：
+    //   ①未指派=无 release_assignee_id → 可批量指定；②已指派未通知=有执行人 + notify_status ∈ {NULL,'not_sent','failed'}
+    //   → 可批量通知；③已指派已通知='sent' → 置灰。schema CHECK+NOT NULL DEFAULT 保证 notify_status 只三值，无第四态分支。
+    function siReleaseOrchState(i) {
+        if (!i.release_assignee_id) return 1;
+        return i.release_assignee_notify_status === 'sent' ? 3 : 2;
+    }
+    // Path A（换人挪位）：批量面板「批量指定」只作用①未指派单；改人（reassign）改到单据详情页单条入口
+    //   （siModalAssignReleaseDev(true)，含 Commit 0 同人守卫）。批量面板不再混 assign/reassign 两组。
     function siModalBatchAssignReleaseDev() {
-        // 勾选态在打开弹框前一次性读出（闭包捕获），避免弹框打开后再读 DOM 造成的范围混淆——
-        //   #siBatchOverlay 与 #siModalOverlay 是两个独立 overlay（z-index 1100 vs 1200），弹框叠加在
-        //   批量面板之上时面板 DOM 仍在、勾选态不变，但一次性捕获更清晰、不依赖"两层都得存在"的假设。
         const checked = [...document.querySelectorAll('.si-orch-chk:checked')];
         if (!checked.length) { showToast('请至少勾选一个待上线单据', 'error'); return; }
-        const unassigned = checked.filter(c => !c.dataset.assignee).map(c => parseInt(c.value, 10));
-        const assigned = checked.filter(c => c.dataset.assignee).map(c => parseInt(c.value, 10));
-        siModal('批量指定/换人上线开发（' + checked.length + ' 单）', [
+        // 混选契约（M-1）：批量指定只取①未指派；②已指派、③已通知忽略（换人到详情页）。
+        const target = checked.filter(c => c.dataset.state === '1').map(c => parseInt(c.value, 10));
+        const ignored = checked.length - target.length;
+        if (!target.length) { showToast('勾选中无「未指派」单可指定；换人请到单据详情页操作', 'error'); return; }
+        siModal('批量指定上线开发（' + target.length + ' 单）', [
             fUserSelect('release_assignee_id', '上线开发', null),
-            note('未指定过的单走"批量指定"，已指定过的单走"换人"——后端按每单当前状态判定；两组分两次调用，各自整批原子，跨组不原子（如实标注）。')
+            note(ignored > 0
+                ? ('已选 ' + checked.length + ' 条，本次指定 ' + target.length + ' 条未指派单，忽略 ' + ignored + ' 条（已指派/已通知，换人请到详情页）。')
+                : ('将为 ' + target.length + ' 条未指派单指定上线开发。'))
         ], async v => {
             if (!v.release_assignee_id) { showToast('请选择上线开发', 'error'); return false; }
             const devId = parseInt(v.release_assignee_id, 10);
-            let okCount = 0;
-            if (unassigned.length) {
-                const r1 = await siApi('/sys-issues/assign-release-dev', { method: 'POST', body: { issue_ids: unassigned, release_assignee_id: devId } });
-                if (!r1.ok) { siApiErr(r1); return false; }
-                okCount += (r1.data && r1.data.count) || 0;
+            const r = await siApi('/sys-issues/assign-release-dev', { method: 'POST', body: { issue_ids: target, release_assignee_id: devId } });
+            if (!r.ok) { siApiErr(r); return false; }
+            showToast('已指定 ' + ((r.data && r.data.count) || target.length) + ' 单', 'success');
+            siCloseModal(); await siRenderReleaseOrchPanel(); return false;
+        });
+    }
+    // C-orch 批量通知上线开发（admin·模型B 同执行人合并一条）：只作用②已指派未通知单；混选按目标态过滤 + Toast 明示忽略；
+    //   结果 concurrent_changed 与 failed 分区展示，concurrent 不提供一键重发（提示刷新后按新态再定，方案 §Commit 2）。
+    function siBatchNotifyReleaseExecutor() {
+        const checked = [...document.querySelectorAll('.si-orch-chk:checked')];
+        if (!checked.length) { showToast('请勾选要通知的待上线单据', 'error'); return; }
+        // 混选契约（M-1）：批量通知只取②已指派未通知；①未指派、③已通知忽略。
+        const target = checked.filter(c => c.dataset.state === '2').map(c => parseInt(c.value, 10));
+        const unassigned = checked.filter(c => c.dataset.state === '1').length;
+        const already = checked.filter(c => c.dataset.state === '3').length;
+        const ignored = unassigned + already;
+        if (!target.length) { showToast('勾选中无「已指派未通知」单可通知（未指派需先指定 / 已通知无需重复；单条重发到详情页）', 'error'); return; }
+        const msg = ignored > 0
+            ? ('已选 ' + checked.length + ' 条，本次通知 ' + target.length + ' 条，忽略 ' + ignored + ' 条（未指派 ' + unassigned + ' / 已通知 ' + already + '）。同执行人多单合并一条钉钉。')
+            : ('将向 ' + target.length + ' 条待上线单的上线开发发送通知（同执行人多单合并一条钉钉）。');
+        siModal('批量通知上线开发（' + target.length + ' 单）', [note(msg)], async () => {
+            const r = await siApi('/sys-issues/notify-release-executor-batch', { method: 'POST', body: { issue_ids: target } });
+            if (!r.ok) { siApiErr(r); return false; }
+            const d = r.data || {};
+            let m = '通知完成：成功 ' + (d.sent || 0);
+            if (d.failed) m += ' / 失败 ' + d.failed;
+            if (d.concurrent_changed) m += ' / 已变更 ' + d.concurrent_changed;
+            const ign = (d.skipped || 0) + (d.already_notified || 0);
+            if (ign) m += ' / 忽略 ' + ign;
+            showToast(m, (d.failed || d.concurrent_changed) ? 'warning' : 'success');
+            // concurrent_changed 分区提示（不提供一键重发，方案 M-2）
+            if (d.concurrent_changed) {
+                const cids = (d.results || []).filter(x => x.code === 'concurrent_changed').map(x => '#' + x.id).join(' ');
+                showToast('以下单发送期间被改动，请刷新后按新状态再定（不自动重发）：' + cids, 'warning');
             }
-            if (assigned.length) {
-                const r2 = await siApi('/sys-issues/reassign-release-dev', { method: 'POST', body: { issue_ids: assigned, release_assignee_id: devId } });
-                if (!r2.ok) { siApiErr(r2); return false; }
-                okCount += (r2.data && r2.data.count) || 0;
-            }
-            showToast('已处理 ' + okCount + ' 单', 'success');
             siCloseModal(); await siRenderReleaseOrchPanel(); return false;
         });
     }

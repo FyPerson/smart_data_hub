@@ -240,6 +240,13 @@ foreach ($p in $docsToRemove) {
     }
 }
 
+# 2026-07-08 安全清除：mcp-bms 本地数仓 MCP 服务目录（.gitignore 忽略·git 未跟踪·含内网数仓 IP 等基础设施信息）——
+#   robocopy /MIR 按文件系统镜像不认 .gitignore 会连带复制进公开镜像，本就不该进公开仓库，兜底删除。
+if (Test-Path "$MirrorPath\mcp-bms") {
+    Remove-Item "$MirrorPath\mcp-bms" -Recurse -Force
+    Write-Host "  [SECURITY] removed mcp-bms/（.gitignore 本地数仓 MCP 目录·防内网 IP 泄漏）" -ForegroundColor Red
+}
+
 # 2026-05-22 兜底清除：生产备份目录（与 $excludeDirs 双重防御）
 # 即使 robocopy /XD 漏了，这里也会兜底删，防 v1.70.1 类事故复发
 $prodBackupsToRemove = @(
