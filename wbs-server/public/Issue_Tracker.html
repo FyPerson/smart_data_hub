@@ -7,144 +7,21 @@
     <title>需求跟踪 - 智数协同平台</title>
     <link rel="icon" href="data:,">
     <link rel="stylesheet" href="assets/css/style.css?v=v1.102.1_nav">
+    <link rel="stylesheet" href="assets/css/components.css?v=v1.110.0_unify">
     <style>
-        /* ===== 筛选栏 ===== */
-        .filter-bar {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            padding: 16px 20px;
-            background: #fff;
-            border-radius: 10px;
-            border: 1px solid #e2e8f0;
-            margin-bottom: 16px;
-            flex-wrap: wrap;
-        }
-        .filter-bar select,
-        .filter-bar input {
-            padding: 7px 12px;
-            border: 1px solid #d1d5db;
-            border-radius: 6px;
-            font-size: 13px;
-            background: #fff;
-            color: #374151;
-            outline: none;
-            transition: border-color 0.2s;
-        }
-        .filter-bar select:focus,
-        .filter-bar input:focus {
-            border-color: #d97706;
-        }
-        .filter-bar input[type="text"] {
-            width: 200px;
-        }
-        .filter-bar .filter-label {
-            font-size: 12px;
-            color: #6b7280;
-            margin-right: -4px;
-        }
-        .btn-primary {
-            padding: 8px 18px;
-            background: linear-gradient(135deg, #d97706, #b45309);
-            color: #fff;
-            border: none;
-            border-radius: 6px;
-            font-size: 13px;
-            font-weight: 600;
-            cursor: pointer;
-            display: flex;
-            align-items: center;
-            gap: 5px;
-            transition: opacity 0.2s;
-            white-space: nowrap;
-        }
-        .btn-primary:hover { opacity: 0.9; }
-        .btn-secondary {
-            padding: 6px 14px;
-            background: #f3f4f6;
-            color: #374151;
-            border: 1px solid #d1d5db;
-            border-radius: 6px;
-            font-size: 13px;
-            cursor: pointer;
-            transition: background 0.2s;
-        }
-        .btn-secondary:hover { background: #e5e7eb; }
-        .btn-danger {
-            padding: 6px 14px;
-            background: #fee2e2;
-            color: #dc2626;
-            border: 1px solid #fca5a5;
-            border-radius: 6px;
-            font-size: 13px;
-            cursor: pointer;
-        }
-        .btn-danger:hover { background: #fecaca; }
+        /* ============================================================
+           需求跟踪页 · 页面专属残留（共享组件层已迁移至 assets/css/components.css）
+           前端统一 C3（全对齐方案）：本页与数据修正基准页结构/配色高度一致，共享安全组件（筛选栏/按钮/
+           统计卡片/表格/徽章 base/抽屉/弹窗/表单/操作栏/空状态）全部并入共享层，采用共享 u- 全部取值
+           （含 amber 头/600 宽/焦点 ring），不 override 保留原值——唯一例外为下方表格 min-width（本页
+           12 列比共享层默认 1100 更宽，需 1200）。仅保留详情网格/评论区/优先级色点/时间显示等
+           页面专属结构（未并入共享层，class 名与 CSS 均不变）。
+           ============================================================ */
 
-        /* ===== 统计卡片 ===== */
-        .stats-row {
-            display: flex;
-            gap: 12px;
-            margin-bottom: 16px;
-        }
-        .stat-card {
-            flex: 1;
-            background: #fff;
-            border-radius: 10px;
-            border: 1px solid #e2e8f0;
-            padding: 14px 18px;
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            cursor: pointer;
-            transition: border-color 0.2s, box-shadow 0.2s;
-        }
-        .stat-card:hover { border-color: #d97706; box-shadow: 0 2px 8px rgba(217,119,6,0.08); }
-        .stat-card.active { border-color: #d97706; background: #fffbeb; }
-        .stat-icon {
-            width: 36px; height: 36px;
-            border-radius: 8px;
-            display: flex; align-items: center; justify-content: center;
-            font-size: 16px;
-        }
-        .stat-info .stat-num { font-size: 22px; font-weight: 700; color: #111827; }
-        .stat-info .stat-label { font-size: 12px; color: #6b7280; margin-top: 2px; }
+        /* 表格（页面专属覆盖）：共享 .u-corr-table 默认 min-width 1100，本页 12 列需 1200（C6c M-4） */
+        .unified-page .u-corr-table { min-width: 1200px; }
 
-        /* ===== 表格 ===== */
-        .issue-table {
-            width: 100%;
-            border-collapse: separate;
-            border-spacing: 0;
-            background: #fff;
-            border-radius: 10px;
-            border: 1px solid #e2e8f0;
-            overflow: hidden;
-        }
-        .issue-table th {
-            background: #f8fafc;
-            padding: 10px 14px;
-            font-size: 12px;
-            font-weight: 600;
-            color: #64748b;
-            text-align: left;
-            border-bottom: 1px solid #e2e8f0;
-            white-space: nowrap;
-        }
-        .issue-table td {
-            padding: 12px 14px;
-            font-size: 13px;
-            color: #374151;
-            border-bottom: 1px solid #f1f5f9;
-            vertical-align: middle;
-        }
-        .issue-table tr:last-child td { border-bottom: none; }
-        .issue-table tbody tr {
-            cursor: pointer;
-            transition: background 0.15s;
-        }
-        .issue-table tbody tr:hover { background: #fffbeb; }
-
-        /* 优先级色点 */
+        /* 优先级色点（页面专属，未并入共享层） */
         .priority-dot {
             display: inline-block;
             width: 8px; height: 8px;
@@ -156,102 +33,30 @@
         .priority-dot.P2 { background: #3b82f6; }
         .priority-dot.P3 { background: #9ca3af; }
 
-        /* 类型标签 */
-        .type-tag {
-            display: inline-block;
-            padding: 2px 8px;
-            border-radius: 4px;
-            font-size: 11px;
-            font-weight: 500;
-        }
-        /* 7 类类型色块（类名规范化：/ 和空格 → -，对齐 typeClass() JS helper） */
-        .type-tag.t-看板-报表需求 { background: #dbeafe; color: #1d4ed8; }
-        .type-tag.t-数据治理需求 { background: #e0e7ff; color: #4338ca; }
-        .type-tag.t-数据应用需求 { background: #ede9fe; color: #6d28d9; }
-        .type-tag.t-平台-bug { background: #fee2e2; color: #dc2626; }
-        .type-tag.t-数据质量 { background: #fef3c7; color: #92400e; }
-        .type-tag.t-源系统变更 { background: #fce7f3; color: #9d174d; }
-        .type-tag.t-调度异常 { background: #fecaca; color: #991b1b; }
+        /* 类型标签修饰色（base 已 harmonize → components.css .u-type-tag；7 类类型色块，
+           类名规范化：/ 和空格 → -，对齐 typeClass() JS helper） */
+        .u-type-tag.t-看板-报表需求 { background: #dbeafe; color: #1d4ed8; }
+        .u-type-tag.t-数据治理需求 { background: #e0e7ff; color: #4338ca; }
+        .u-type-tag.t-数据应用需求 { background: #ede9fe; color: #6d28d9; }
+        .u-type-tag.t-平台-bug { background: #fee2e2; color: #dc2626; }
+        .u-type-tag.t-数据质量 { background: #fef3c7; color: #92400e; }
+        .u-type-tag.t-源系统变更 { background: #fce7f3; color: #9d174d; }
+        .u-type-tag.t-调度异常 { background: #fecaca; color: #991b1b; }
 
-        /* 状态徽章（6 态） */
-        .status-badge {
-            display: inline-block;
-            padding: 3px 10px;
-            border-radius: 12px;
-            font-size: 11px;
-            font-weight: 600;
-        }
-        .status-badge.s-待处理 { background: #f3f4f6; color: #6b7280; }
-        .status-badge.s-处理中 { background: #dbeafe; color: #1d4ed8; }
-        .status-badge.s-待验证 { background: #fef3c7; color: #92400e; }
-        .status-badge.s-已关闭 { background: #d1fae5; color: #065f46; }
-        .status-badge.s-已暂缓 { background: #fef9c3; color: #854d0e; }
-        .status-badge.s-已拒绝 { background: #f3f4f6; color: #991b1b; }
+        /* 状态徽章修饰色（base 已 harmonize → components.css .u-status-badge；6 态） */
+        .u-status-badge.s-待处理 { background: #f3f4f6; color: #6b7280; }
+        .u-status-badge.s-处理中 { background: #dbeafe; color: #1d4ed8; }
+        .u-status-badge.s-待验证 { background: #fef3c7; color: #92400e; }
+        .u-status-badge.s-已关闭 { background: #d1fae5; color: #065f46; }
+        .u-status-badge.s-已暂缓 { background: #fef9c3; color: #854d0e; }
+        .u-status-badge.s-已拒绝 { background: #f3f4f6; color: #991b1b; }
 
-        /* 通知状态徽章（C6c：notify_status 配色 H-4） */
-        .notify-badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 500; }
-        .notify-badge.notify-sent { background: #ecfdf5; color: #059669; }
-        .notify-badge.notify-failed { background: #fef2f2; color: #dc2626; cursor: help; }
-        .notify-badge.notify-not_sent { background: #f3f4f6; color: #6b7280; }
+        /* 通知状态徽章修饰色（base 已 harmonize → components.css .u-notify-badge；C6c：notify_status 配色 H-4） */
+        .u-notify-badge.notify-sent { background: #ecfdf5; color: #059669; }
+        .u-notify-badge.notify-failed { background: #fef2f2; color: #dc2626; cursor: help; }
+        .u-notify-badge.notify-not_sent { background: #f3f4f6; color: #6b7280; }
 
-        /* C6c M-4：12 列表格横向滚动容器 + 单元格省略 */
-        .issue-table-wrap { overflow-x: auto; border-radius: 10px; border: 1px solid #e2e8f0; }
-        .issue-table-wrap .issue-table { min-width: 1200px; border: none; border-radius: 0; }
-        .issue-table td.ellip { max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-        /* ===== 详情抽屉 ===== */
-        .drawer-overlay {
-            display: none;
-            position: fixed;
-            top: 0; left: 0; right: 0; bottom: 0;
-            background: rgba(0,0,0,0.3);
-            z-index: 900;
-        }
-        .drawer-overlay.open { display: block; }
-        /* top:64px 避开固定导航栏（.navbar z-index:1000 > drawer 901，否则抽屉头部标题被导航栏遮挡；对齐 Data_Correction v1.94.1 同源修复，2026-07-08） */
-        .drawer {
-            position: fixed;
-            top: 64px; right: -560px; bottom: 0;
-            width: 540px;
-            max-width: 90vw;
-            background: #fff;
-            box-shadow: -4px 0 20px rgba(0,0,0,0.12);
-            z-index: 901;
-            transition: right 0.3s ease;
-            display: flex;
-            flex-direction: column;
-        }
-        .drawer.open { right: 0; }
-        .drawer-header {
-            padding: 20px 24px 16px;
-            border-bottom: 1px solid #e2e8f0;
-            display: flex;
-            justify-content: space-between;
-            align-items: flex-start;
-        }
-        .drawer-header h2 {
-            font-size: 16px;
-            font-weight: 700;
-            color: #111827;
-            margin: 0;
-            flex: 1;
-            line-height: 1.5;
-        }
-        .drawer-close {
-            background: none;
-            border: none;
-            font-size: 20px;
-            cursor: pointer;
-            color: #6b7280;
-            padding: 4px;
-            line-height: 1;
-        }
-        .drawer-close:hover { color: #111827; }
-        .drawer-body {
-            flex: 1;
-            overflow-y: auto;
-            padding: 20px 24px;
-        }
+        /* ===== 详情网格（页面专属，未并入共享层）===== */
         .detail-grid {
             display: grid;
             grid-template-columns: 1fr 1fr;
@@ -293,24 +98,7 @@
         }
         .preview-link:hover { text-decoration: underline; }
 
-        /* 操作栏 */
-        .action-bar {
-            display: flex;
-            gap: 8px;
-            flex-wrap: wrap;
-            margin-bottom: 20px;
-            padding-bottom: 16px;
-            border-bottom: 1px solid #e2e8f0;
-        }
-        .action-bar select {
-            padding: 6px 10px;
-            border: 1px solid #d1d5db;
-            border-radius: 6px;
-            font-size: 12px;
-            background: #fff;
-        }
-
-        /* 评论区 */
+        /* 评论区（页面专属，未并入共享层） */
         .comments-section h3 {
             font-size: 14px;
             font-weight: 600;
@@ -364,86 +152,13 @@
             align-self: flex-end;
         }
 
-        /* ===== 弹窗 ===== */
-        .modal-overlay {
-            display: none;
-            position: fixed;
-            top: 0; left: 0; right: 0; bottom: 0;
-            background: rgba(0,0,0,0.4);
-            z-index: 1000;
-            justify-content: center;
-            align-items: center;
-        }
-        .modal-overlay.open { display: flex; }
-        .modal-box {
-            background: #fff;
-            border-radius: 14px;
-            width: 560px;
-            max-width: 92vw;
-            max-height: 90vh;
-            overflow-y: auto;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.15);
-        }
-        .modal-header {
-            padding: 20px 24px 0;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-        .modal-header h2 { font-size: 16px; font-weight: 700; color: #111827; margin: 0; }
-        .modal-body { padding: 20px 24px; }
-        .modal-footer {
-            padding: 0 24px 20px;
-            display: flex;
-            justify-content: flex-end;
-            gap: 10px;
-        }
-        .form-group { margin-bottom: 14px; }
-        .form-group label {
-            display: block;
-            font-size: 12px;
-            font-weight: 600;
-            color: #374151;
-            margin-bottom: 5px;
-        }
-        .form-group input,
-        .form-group select,
-        .form-group textarea {
-            width: 100%;
-            padding: 8px 12px;
-            border: 1px solid #d1d5db;
-            border-radius: 6px;
-            font-size: 13px;
-            font-family: inherit;
-            outline: none;
-            box-sizing: border-box;
-        }
-        .form-group input:focus,
-        .form-group select:focus,
-        .form-group textarea:focus { border-color: #d97706; }
-        .form-group textarea { resize: vertical; min-height: 80px; }
-        .form-row {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 12px;
-        }
-
-        /* 空状态 */
-        .empty-state {
-            text-align: center;
-            padding: 60px 20px;
-            color: #9ca3af;
-        }
-        .empty-state svg { margin-bottom: 12px; }
-        .empty-state p { font-size: 14px; }
-
-        /* 时间显示 */
+        /* 时间显示（页面专属，未并入共享层） */
         .time-relative { color: #6b7280; font-size: 12px; }
         .time-absolute { color: #6b7280; font-size: 11.5px; white-space: nowrap; font-variant-numeric: tabular-nums; }
     </style>
 </head>
 
-<body>
+<body class="unified-page">
 
     <!-- 顶部导航栏 -->
     <nav class="navbar fixed-header">
@@ -578,57 +293,57 @@
     <main class="workbench-container">
 
         <!-- 统计卡片 -->
-        <div class="stats-row" id="statsRow">
-            <div class="stat-card" onclick="filterByStatus('')" data-status="">
-                <div class="stat-icon" style="background:#f3f4f6;">
+        <div class="u-stats-row" id="statsRow">
+            <div class="u-stat-card" onclick="filterByStatus('')" data-status="">
+                <div class="u-stat-icon" style="background:#f3f4f6;">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#6b7280" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/></svg>
                 </div>
-                <div class="stat-info">
-                    <div class="stat-num" id="statAll">0</div>
-                    <div class="stat-label">全部</div>
+                <div class="u-stat-info">
+                    <div class="u-stat-num" id="statAll">0</div>
+                    <div class="u-stat-label">全部</div>
                 </div>
             </div>
-            <div class="stat-card" onclick="filterByStatus('待处理')" data-status="待处理">
-                <div class="stat-icon" style="background:#f3f4f6;">
+            <div class="u-stat-card" onclick="filterByStatus('待处理')" data-status="待处理">
+                <div class="u-stat-icon" style="background:#f3f4f6;">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#6b7280" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
                 </div>
-                <div class="stat-info">
-                    <div class="stat-num" id="statPending">0</div>
-                    <div class="stat-label">待处理</div>
+                <div class="u-stat-info">
+                    <div class="u-stat-num" id="statPending">0</div>
+                    <div class="u-stat-label">待处理</div>
                 </div>
             </div>
-            <div class="stat-card" onclick="filterByStatus('处理中')" data-status="处理中">
-                <div class="stat-icon" style="background:#dbeafe;">
+            <div class="u-stat-card" onclick="filterByStatus('处理中')" data-status="处理中">
+                <div class="u-stat-icon" style="background:#dbeafe;">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#1d4ed8" stroke-width="2"><path d="M12 2v4"/><path d="M12 18v4"/><path d="M4.93 4.93l2.83 2.83"/><path d="M16.24 16.24l2.83 2.83"/><path d="M2 12h4"/><path d="M18 12h4"/></svg>
                 </div>
-                <div class="stat-info">
-                    <div class="stat-num" id="statInProgress">0</div>
-                    <div class="stat-label">处理中</div>
+                <div class="u-stat-info">
+                    <div class="u-stat-num" id="statInProgress">0</div>
+                    <div class="u-stat-label">处理中</div>
                 </div>
             </div>
-            <div class="stat-card" onclick="filterByStatus('待验证')" data-status="待验证">
-                <div class="stat-icon" style="background:#fef3c7;">
+            <div class="u-stat-card" onclick="filterByStatus('待验证')" data-status="待验证">
+                <div class="u-stat-icon" style="background:#fef3c7;">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#92400e" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
                 </div>
-                <div class="stat-info">
-                    <div class="stat-num" id="statVerify">0</div>
-                    <div class="stat-label">待验证</div>
+                <div class="u-stat-info">
+                    <div class="u-stat-num" id="statVerify">0</div>
+                    <div class="u-stat-label">待验证</div>
                 </div>
             </div>
-            <div class="stat-card" onclick="filterByStatus('已关闭')" data-status="已关闭">
-                <div class="stat-icon" style="background:#d1fae5;">
+            <div class="u-stat-card" onclick="filterByStatus('已关闭')" data-status="已关闭">
+                <div class="u-stat-icon" style="background:#d1fae5;">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#065f46" stroke-width="2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
                 </div>
-                <div class="stat-info">
-                    <div class="stat-num" id="statClosed">0</div>
-                    <div class="stat-label">已完成</div>
+                <div class="u-stat-info">
+                    <div class="u-stat-num" id="statClosed">0</div>
+                    <div class="u-stat-label">已完成</div>
                 </div>
             </div>
         </div>
 
         <!-- 筛选栏 -->
-        <div class="filter-bar">
-            <span class="filter-label">类型</span>
+        <div class="u-filter-bar">
+            <span class="u-filter-label">类型</span>
             <select id="filterType" onchange="loadIssues()">
                 <option value="">全部类型</option>
                 <option value="看板/报表需求">看板/报表需求</option>
@@ -639,7 +354,7 @@
                 <option value="源系统变更">源系统变更</option>
                 <option value="调度异常">调度异常</option>
             </select>
-            <span class="filter-label">优先级</span>
+            <span class="u-filter-label">优先级</span>
             <select id="filterPriority" onchange="loadIssues()">
                 <option value="">全部优先级</option>
                 <option value="P0">P0 紧急</option>
@@ -647,29 +362,29 @@
                 <option value="P2">P2 中</option>
                 <option value="P3">P3 低</option>
             </select>
-            <span class="filter-label">指派人</span>
+            <span class="u-filter-label">指派人</span>
             <select id="filterAssigned" onchange="loadIssues()">
                 <option value="">全部人员</option>
             </select>
-            <span class="filter-label">部门</span>
+            <span class="u-filter-label">部门</span>
             <select id="filterDept" onchange="loadIssues()">
                 <option value="">全部部门</option>
             </select>
-            <span class="filter-label">数据域</span>
+            <span class="u-filter-label">数据域</span>
             <select id="filterDomain" onchange="loadIssues()">
                 <option value="">全部数据域</option>
             </select>
             <input type="text" id="filterSearch" placeholder="搜索标题/描述/表名..." onkeyup="debounceSearch()">
             <div style="flex:1;"></div>
-            <button class="btn-primary" onclick="openCreateModal()">
+            <button class="u-btn-primary" onclick="openCreateModal()">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
                 新建需求
             </button>
         </div>
 
         <!-- 需求列表（C6c：12 列 + 横向滚动容器 M-4） -->
-        <div class="issue-table-wrap">
-        <table class="issue-table">
+        <div class="u-corr-table-wrap">
+        <table class="u-corr-table">
             <thead>
                 <tr>
                     <th style="width:46px;">ID</th>
@@ -692,7 +407,7 @@
         </div>
 
         <!-- 空状态 -->
-        <div class="empty-state" id="emptyState" style="display:none;">
+        <div class="u-empty-state" id="emptyState" style="display:none;">
             <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#d1d5db" stroke-width="1.5">
                 <circle cx="12" cy="12" r="10"/>
                 <line x1="12" y1="8" x2="12" y2="12"/>
@@ -703,53 +418,53 @@
     </main>
 
     <!-- 详情抽屉 -->
-    <div class="drawer-overlay" id="drawerOverlay" onclick="closeDrawer()"></div>
-    <div class="drawer" id="drawer">
-        <div class="drawer-header">
+    <div class="u-drawer-overlay" id="drawerOverlay" onclick="closeDrawer()"></div>
+    <div class="u-drawer" id="drawer">
+        <div class="u-drawer-header">
             <h2 id="drawerTitle">需求详情</h2>
-            <button class="drawer-close" onclick="closeDrawer()">&times;</button>
+            <button class="u-drawer-close" onclick="closeDrawer()">&times;</button>
         </div>
-        <div class="drawer-body" id="drawerBody">
+        <div class="u-drawer-body" id="drawerBody">
             <!-- 动态渲染 -->
         </div>
     </div>
 
     <!-- 新建/编辑弹窗 -->
-    <div class="modal-overlay" id="createModal">
-        <div class="modal-box">
-            <div class="modal-header">
+    <div class="u-modal-overlay" id="createModal">
+        <div class="u-modal-box">
+            <div class="u-modal-header">
                 <h2 id="modalTitle">新建需求</h2>
-                <button class="drawer-close" onclick="closeCreateModal()">&times;</button>
+                <button class="u-drawer-close" onclick="closeCreateModal()">&times;</button>
             </div>
-            <div class="modal-body">
+            <div class="u-modal-body">
                 <input type="hidden" id="editIssueId">
-                <div class="form-group">
+                <div class="u-form-group">
                     <label>标题 *</label>
                     <input type="text" id="formTitle" placeholder="简要描述需求">
                 </div>
                 <!-- 业务方信息（部门/姓名必填） -->
-                <div class="form-row">
-                    <div class="form-group">
+                <div class="u-form-row">
+                    <div class="u-form-group">
                         <label>业务方部门 *</label>
                         <select id="formRequesterDept"></select>
                     </div>
-                    <div class="form-group">
+                    <div class="u-form-group">
                         <label>业务方姓名 *</label>
                         <input type="text" id="formRequesterName" placeholder="提出需求的业务方姓名">
                     </div>
                 </div>
-                <div class="form-row">
-                    <div class="form-group">
+                <div class="u-form-row">
+                    <div class="u-form-group">
                         <label>业务方手机号</label>
                         <input type="text" id="formRequesterPhone" placeholder="可选，用于完成后钉钉通知">
                     </div>
-                    <div class="form-group">
+                    <div class="u-form-group">
                         <label>OA 流程号</label>
                         <input type="text" id="formOaNumber" placeholder="可选，只填数字部分（如 364265）">
                     </div>
                 </div>
-                <div class="form-row">
-                    <div class="form-group">
+                <div class="u-form-row">
+                    <div class="u-form-group">
                         <label>类型</label>
                         <select id="formType">
                             <option value="看板/报表需求">看板/报表需求</option>
@@ -761,7 +476,7 @@
                             <option value="调度异常">调度异常</option>
                         </select>
                     </div>
-                    <div class="form-group">
+                    <div class="u-form-group">
                         <label>来源</label>
                         <select id="formSource">
                             <option value="业务方">业务方</option>
@@ -771,8 +486,8 @@
                         </select>
                     </div>
                 </div>
-                <div class="form-row">
-                    <div class="form-group">
+                <div class="u-form-row">
+                    <div class="u-form-group">
                         <label>优先级</label>
                         <select id="formPriority">
                             <option value="P0">P0 紧急</option>
@@ -781,35 +496,35 @@
                             <option value="P3">P3 低</option>
                         </select>
                     </div>
-                    <div class="form-group">
+                    <div class="u-form-group">
                         <label>截止日</label>
                         <input type="date" id="formDeadline">
                     </div>
                 </div>
                 <!-- 指派给（H-1：viewer 不显示；admin/publisher 可选） -->
-                <div class="form-group" id="assignedToGroup">
+                <div class="u-form-group" id="assignedToGroup">
                     <label>指派给</label>
                     <select id="formAssignedTo"><option value="">（暂不指派，后续在详情页指派）</option></select>
                 </div>
-                <div class="form-group" id="errorTimeGroup" style="display:none;">
+                <div class="u-form-group" id="errorTimeGroup" style="display:none;">
                     <label>异常发生时间</label>
                     <input type="datetime-local" id="formErrorTime">
                 </div>
                 <!-- 原始诉求（M-4：viewer 自录隐藏；admin/publisher 代录显示=业务方原话） -->
-                <div class="form-group" id="rawRequirementGroup">
+                <div class="u-form-group" id="rawRequirementGroup">
                     <label>原始诉求（业务方原话）</label>
                     <textarea id="formRawRequirement" rows="2" placeholder="业务方的原始表述，与梳理后的描述分开记录"></textarea>
                 </div>
-                <div class="form-group">
+                <div class="u-form-group">
                     <label id="descriptionLabel">需求描述</label>
                     <textarea id="formDescription" rows="4" placeholder="梳理后的需求范围 / 口径 / 输出形态"></textarea>
                 </div>
-                <div class="form-group">
+                <div class="u-form-group">
                     <label>预览/验收地址</label>
                     <input type="text" id="formAcceptanceUrl" placeholder="可选，http/https 链接">
                 </div>
                 <!-- 录入附件（先行后传：先建需求再逐个传） -->
-                <div class="form-group">
+                <div class="u-form-group">
                     <label>录入附件</label>
                     <input type="file" id="formAttachments" multiple>
                     <div id="attachmentPreview" style="margin-top:6px; font-size:12px; color:#6b7280;"></div>
@@ -819,13 +534,13 @@
                      录入态可留空，下沉到此区并标注，避免业务方/录入人困惑（2026-06-01 用户质疑落地） -->
                 <div style="margin-top:14px; padding-top:12px; border-top:1px dashed #e5e7eb;">
                     <div style="font-size:12px; font-weight:600; color:#6b7280; margin-bottom:8px;">开发态信息（可留空，开发受理后完善）</div>
-                    <div class="form-row">
-                        <div class="form-group">
+                    <div class="u-form-row">
+                        <div class="u-form-group">
                             <label>数据域</label>
                             <select id="formDataDomain"><option value="">（不指定）</option></select>
                             <div style="font-size:11px; color:#9ca3af; margin-top:2px;">拿不准可留空，开发受理后按实际模型确定</div>
                         </div>
-                        <div class="form-group">
+                        <div class="u-form-group">
                             <label>关联表名</label>
                             <input type="text" id="formRelatedTable" placeholder="如 dwd_cont_header_df（可留空）">
                             <div style="font-size:11px; color:#9ca3af; margin-top:2px;">开发分析后确定关联的数仓表</div>
@@ -833,9 +548,9 @@
                     </div>
                 </div>
             </div>
-            <div class="modal-footer">
-                <button class="btn-secondary" onclick="closeCreateModal()">取消</button>
-                <button class="btn-primary" onclick="submitIssue()">提交</button>
+            <div class="u-modal-footer">
+                <button class="u-btn-secondary" onclick="closeCreateModal()">取消</button>
+                <button class="u-btn-primary" onclick="submitIssue()">提交</button>
             </div>
         </div>
     </div>
@@ -844,21 +559,21 @@
     <!-- codex C6b 复审 M-2：reasonModal 所有关闭入口必须走 confirmReasonModal/cancelReasonModal（二者清 _reasonResolve）。
          当前 3 入口（✕/取消/确定）已全覆盖；勿给本 modal 加遮罩点击/Esc 关闭等绕过 cancelReasonModal 的路径，
          否则 _reasonResolve 残留会永久挡住后续 reason 弹窗。 -->
-    <div class="modal-overlay" id="reasonModal">
-        <div class="modal-box" style="max-width:480px;">
-            <div class="modal-header">
+    <div class="u-modal-overlay" id="reasonModal">
+        <div class="u-modal-box" style="max-width:480px;">
+            <div class="u-modal-header">
                 <h2 id="reasonModalTitle">变更原因</h2>
-                <button class="drawer-close" onclick="cancelReasonModal()">&times;</button>
+                <button class="u-drawer-close" onclick="cancelReasonModal()">&times;</button>
             </div>
-            <div class="modal-body">
-                <div class="form-group">
+            <div class="u-modal-body">
+                <div class="u-form-group">
                     <label id="reasonModalLabel">变更原因 *</label>
                     <textarea id="reasonModalInput" rows="4" maxlength="500" placeholder="请填写原因（1-500 字）"></textarea>
                 </div>
             </div>
-            <div class="modal-footer">
-                <button class="btn-secondary" onclick="cancelReasonModal()">取消</button>
-                <button class="btn-primary" id="reasonModalConfirm" onclick="confirmReasonModal()">确定</button>
+            <div class="u-modal-footer">
+                <button class="u-btn-secondary" onclick="cancelReasonModal()">取消</button>
+                <button class="u-btn-primary" id="reasonModalConfirm" onclick="confirmReasonModal()">确定</button>
             </div>
         </div>
     </div>
@@ -946,7 +661,7 @@
         function filterByStatus(status) {
             currentStatusFilter = status;
             // 高亮卡片
-            document.querySelectorAll('.stat-card').forEach(card => {
+            document.querySelectorAll('.u-stat-card').forEach(card => {
                 card.classList.toggle('active', card.dataset.status === status);
             });
             loadIssues();
@@ -972,9 +687,9 @@
                 <tr onclick="openDrawer(${issue.id})">
                     <td style="color:#9ca3af; font-size:12px;">#${issue.id}</td>
                     <td><span class="priority-dot ${issue.priority}"></span>${escapeHtml(issue.priority)}</td>
-                    <td><span class="type-tag ${typeClass(issue.type)}">${escapeHtml(issue.type)}</span></td>
+                    <td><span class="u-type-tag ${typeClass(issue.type)}">${escapeHtml(issue.type)}</span></td>
                     <td>${notifyBadge(issue)}</td>
-                    <td><span class="status-badge s-${issue.status}">${escapeHtml(statusDisplayLabel(issue.status))}</span></td>
+                    <td><span class="u-status-badge s-${issue.status}">${escapeHtml(statusDisplayLabel(issue.status))}</span></td>
                     <td style="font-weight:500; max-width:320px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">
                         ${escapeHtml(issue.title)}
                         ${issue.acceptance_url ? '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#2563eb" stroke-width="2" style="margin-left:4px;vertical-align:middle;"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>' : ''}
@@ -1073,10 +788,10 @@
 
             // 操作栏：isManager（指派/编辑/删除/通知）或 有可见状态按钮（被指派 user 推进）时渲染容器
             if (isManager || visibleStatuses.length > 0) {
-                html += `<div class="action-bar">`;
+                html += `<div class="u-action-bar">`;
                 // 状态流转（按 H-1 过滤后的 visibleStatuses）
                 visibleStatuses.forEach(s => {
-                    const btnClass = s === '已关闭' ? 'btn-secondary' : 'btn-primary';
+                    const btnClass = s === '已关闭' ? 'u-btn-secondary' : 'u-btn-primary';
                     html += `<button class="${btnClass}" onclick="changeStatus(${issue.id}, '${s}', '${issue.status}')" style="font-size:12px; padding:5px 12px;">${transitionBtnLabel(issue.status, s)}</button>`;
                 });
                 // 以下管理动作（指派/编辑/删除/通知）仍仅 isManager 可见
@@ -1091,20 +806,20 @@
                     });
                     html += `</select>`;
                     // 编辑
-                    html += `<button class="btn-secondary" onclick="openEditModal(${issue.id})" style="font-size:12px; padding:5px 12px;">编辑</button>`;
+                    html += `<button class="u-btn-secondary" onclick="openEditModal(${issue.id})" style="font-size:12px; padding:5px 12px;">编辑</button>`;
                     // 删除（仅admin）
                     if (currentUser.role === 'admin') {
-                        html += `<button class="btn-danger" onclick="deleteIssue(${issue.id})" style="font-size:12px; padding:5px 12px;">删除</button>`;
+                        html += `<button class="u-btn-danger" onclick="deleteIssue(${issue.id})" style="font-size:12px; padding:5px 12px;">删除</button>`;
                     }
                     // C6c：3 个通知按钮（H-2 可见条件=乐观提示，对齐后端闸门；点击失败展后端 message）
                     if (canNotifyDeveloper(issue)) {
-                        html += `<button class="btn-secondary" onclick="notifyAction(${issue.id}, 'notify-developer')" style="font-size:12px; padding:5px 12px;">📨 通知开发</button>`;
+                        html += `<button class="u-btn-secondary" onclick="notifyAction(${issue.id}, 'notify-developer')" style="font-size:12px; padding:5px 12px;">📨 通知开发</button>`;
                     }
                     if (canNotifyReassign(issue)) {
-                        html += `<button class="btn-secondary" onclick="notifyAction(${issue.id}, 'notify-reassign')" style="font-size:12px; padding:5px 12px;">📨 通知改派</button>`;
+                        html += `<button class="u-btn-secondary" onclick="notifyAction(${issue.id}, 'notify-reassign')" style="font-size:12px; padding:5px 12px;">📨 通知改派</button>`;
                     }
                     if (canNotifyRequesterDone(issue)) {
-                        html += `<button class="btn-secondary" onclick="notifyRequesterDone(${issue.id})" style="font-size:12px; padding:5px 12px;">📨 通知业务方完成</button>`;
+                        html += `<button class="u-btn-secondary" onclick="notifyRequesterDone(${issue.id})" style="font-size:12px; padding:5px 12px;">📨 通知业务方完成</button>`;
                     }
                 }
                 html += `</div>`;
@@ -1125,13 +840,13 @@
                     const devName = escapeHtml(issue.assigned_to_name || '开发');
                     readHtml += issue.read_at
                         ? `<div style="font-size:13px; color:#16a34a;">📖 ${devName} 已读 · 于 ${escapeHtml(issue.read_at)}</div>`
-                        : `<div id="readStatusBox_${issue.id}_issue_developer" style="font-size:13px;"><button class="btn-secondary" style="font-size:12px; padding:4px 10px;" onclick="checkIssueReadStatus(${issue.id}, 'issue_developer')">查询开发已读</button></div>`;
+                        : `<div id="readStatusBox_${issue.id}_issue_developer" style="font-size:13px;"><button class="u-btn-secondary" style="font-size:12px; padding:4px 10px;" onclick="checkIssueReadStatus(${issue.id}, 'issue_developer')">查询开发已读</button></div>`;
                 }
                 if (issue.requester_notify_status === 'sent') {
                     const reqName = escapeHtml(issue.requester_name || '业务方');
                     readHtml += issue.requester_read_at
                         ? `<div style="font-size:13px; color:#16a34a; margin-top:4px;">📖 ${reqName} 已读 · 于 ${escapeHtml(issue.requester_read_at)}</div>`
-                        : `<div id="readStatusBox_${issue.id}_issue_requester" style="font-size:13px; margin-top:4px;"><button class="btn-secondary" style="font-size:12px; padding:4px 10px;" onclick="checkIssueReadStatus(${issue.id}, 'issue_requester')">查询业务方已读</button></div>`;
+                        : `<div id="readStatusBox_${issue.id}_issue_requester" style="font-size:13px; margin-top:4px;"><button class="u-btn-secondary" style="font-size:12px; padding:4px 10px;" onclick="checkIssueReadStatus(${issue.id}, 'issue_requester')">查询业务方已读</button></div>`;
                 }
                 if (readHtml) {
                     html += `<div style="margin-bottom:16px; padding:10px 14px; background:#f9fafb; border-radius:8px;">
@@ -1159,9 +874,9 @@
                     let chatHtml = '';
                     if (chatHasGroup) {
                         const chatNameDisplay = existingChatName || '（群名缺失）';
-                        chatHtml = `<button class="btn-secondary" disabled style="font-size:12px; padding:5px 12px; opacity:0.7; cursor:not-allowed;" title="点击钉钉客户端查看群消息">💬 ${escapeHtml(chatNameDisplay)}（请到钉钉查看）</button>`;
+                        chatHtml = `<button class="u-btn-secondary" disabled style="font-size:12px; padding:5px 12px; opacity:0.7; cursor:not-allowed;" title="点击钉钉客户端查看群消息">💬 ${escapeHtml(chatNameDisplay)}（请到钉钉查看）</button>`;
                     } else {
-                        chatHtml = `<button class="btn-primary" id="btnCreateChat_${issue.id}" onclick="createIssueChat(${issue.id}, this)" style="font-size:12px; padding:5px 12px;">💬 拉群讨论</button>`;
+                        chatHtml = `<button class="u-btn-primary" id="btnCreateChat_${issue.id}" onclick="createIssueChat(${issue.id}, this)" style="font-size:12px; padding:5px 12px;">💬 拉群讨论</button>`;
                     }
                     html += `<div style="margin-bottom:16px; padding:10px 14px; background:#f9fafb; border-radius:8px;">
                         <label style="font-size:11px; color:#6b7280; display:block; margin-bottom:6px; font-weight:500;">钉钉沟通群</label>
@@ -1172,9 +887,9 @@
 
             // 详情网格（C6c：加业务方信息/OA/数据域；H-1 所有后端文本走 escapeHtml）
             html += `<div class="detail-grid">
-                <div class="detail-item"><label>类型</label><div class="detail-value"><span class="type-tag ${typeClass(issue.type)}">${escapeHtml(issue.type)}</span></div></div>
+                <div class="detail-item"><label>类型</label><div class="detail-value"><span class="u-type-tag ${typeClass(issue.type)}">${escapeHtml(issue.type)}</span></div></div>
                 <div class="detail-item"><label>优先级</label><div class="detail-value"><span class="priority-dot ${issue.priority}"></span>${escapeHtml(issue.priority)}</div></div>
-                <div class="detail-item"><label>状态</label><div class="detail-value"><span class="status-badge s-${issue.status}">${escapeHtml(statusDisplayLabel(issue.status))}</span></div></div>
+                <div class="detail-item"><label>状态</label><div class="detail-value"><span class="u-status-badge s-${issue.status}">${escapeHtml(statusDisplayLabel(issue.status))}</span></div></div>
                 <div class="detail-item"><label>来源</label><div class="detail-value">${escapeHtml(issue.source || '')}</div></div>
                 <div class="detail-item"><label>通知状态</label><div class="detail-value">${notifyBadge(issue)}</div></div>
                 <div class="detail-item"><label>业务方部门</label><div class="detail-value">${escapeHtml(issue.requester_dept || '-')}</div></div>
@@ -1233,7 +948,7 @@
                     <label style="font-size:12px; font-weight:600; color:#374151; display:block; margin-bottom:6px;">预览/验收地址</label>
                     <div style="display:flex; gap:8px;">
                         <input type="text" id="acceptanceUrlInput" value="${escapeHtml(issue.acceptance_url || '')}" placeholder="输入页面预览地址" style="flex:1; padding:6px 10px; border:1px solid #d1d5db; border-radius:6px; font-size:12px; outline:none;">
-                        <button class="btn-secondary" onclick="updateAcceptanceUrl(${issue.id})" style="font-size:12px; padding:5px 12px;">保存</button>
+                        <button class="u-btn-secondary" onclick="updateAcceptanceUrl(${issue.id})" style="font-size:12px; padding:5px 12px;">保存</button>
                     </div>
                 </div>`;
             }
@@ -1247,7 +962,7 @@
                 hist.forEach(h => {
                     const flow = h.from_status ? `${escapeHtml(statusDisplayLabel(h.from_status))} → ${escapeHtml(statusDisplayLabel(h.to_status))}` : `创建 → ${escapeHtml(statusDisplayLabel(h.to_status))}`;
                     html += `<div style="margin-bottom:10px;">
-                        <div style="font-size:12px; color:#374151;"><span class="status-badge s-${h.to_status}" style="font-size:10px;">${escapeHtml(statusDisplayLabel(h.to_status))}</span> <span style="color:#6b7280;">${flow}</span></div>
+                        <div style="font-size:12px; color:#374151;"><span class="u-status-badge s-${h.to_status}" style="font-size:10px;">${escapeHtml(statusDisplayLabel(h.to_status))}</span> <span style="color:#6b7280;">${flow}</span></div>
                         <div style="font-size:11px; color:#9ca3af; margin-top:2px;">${escapeHtml(h.operator_name || '系统')} · ${escapeHtml(h.created_at || '')}</div>
                         ${h.reason ? `<div style="font-size:12px; color:#4b5563; margin-top:2px;">原因：${escapeHtml(h.reason)}</div>` : ''}
                     </div>`;
@@ -1287,7 +1002,7 @@
             } else {
                 html += `<div class="comment-input-area">
                     <textarea id="commentInput" placeholder="添加评论..."></textarea>
-                    <button class="btn-primary" onclick="addComment(${issue.id})" style="padding:8px 14px; font-size:12px;">发送</button>
+                    <button class="u-btn-primary" onclick="addComment(${issue.id})" style="padding:8px 14px; font-size:12px;">发送</button>
                 </div>`;
             }
             html += `</div>`;
@@ -1428,7 +1143,7 @@
                         openDrawer(id);
                     } else {
                         box.innerHTML = `<span style="color:#d97706;">👀 ${label}尚未读取</span>`
-                            + ` <button class="btn-secondary" style="font-size:12px; padding:4px 10px; margin-left:6px;" onclick="checkIssueReadStatus(${id}, '${recipient}')">重查</button>`;
+                            + ` <button class="u-btn-secondary" style="font-size:12px; padding:4px 10px; margin-left:6px;" onclick="checkIssueReadStatus(${id}, '${recipient}')">重查</button>`;
                     }
                 } else {
                     // codex L-1：NO_MESSAGE_KEY 转明确文案（极端历史脏数据：sent 但缺消息标识）
@@ -1802,7 +1517,7 @@
             if (errMsg) { showToast(errMsg, 'error'); return; }
 
             const files = Array.from(document.getElementById('formAttachments').files || []);
-            const submitBtn = document.querySelector('#createModal .modal-footer .btn-primary');
+            const submitBtn = document.querySelector('#createModal .u-modal-footer .u-btn-primary');
 
             _issueSubmitting = true;
             if (submitBtn) submitBtn.disabled = true;
@@ -1858,7 +1573,7 @@
             return core ? 'OA-' + core : '';
         }
 
-        // 类型 → CSS 类名规范化（/ 和空格 → -，对齐 .type-tag.t-* 类名）；
+        // 类型 → CSS 类名规范化（/ 和空格 → -，对齐 .u-type-tag.t-* 类名）；
         //   '看板/报表需求'→'t-看板-报表需求'、'平台 bug'→'t-平台-bug'，否则含 / 空格的类名 CSS 匹配不上
         function typeClass(type) {
             return 't-' + String(type || '').replace(/[\/\s]/g, '-');
@@ -1870,7 +1585,7 @@
             const st = issue.notify_status || 'not_sent';
             const label = st === 'sent' ? '已通知' : (st === 'failed' ? '失败' : '未通知');
             const titleAttr = (st === 'failed' && issue.notify_error) ? ` title="${escapeHtml(issue.notify_error)}"` : '';
-            return `<span class="notify-badge notify-${escapeHtml(st)}"${titleAttr}>${label}</span>`;
+            return `<span class="u-notify-badge notify-${escapeHtml(st)}"${titleAttr}>${label}</span>`;
         }
         // 数据域展示（COALESCE 空→未分类）
         function domainText(d) { return (d && String(d).trim()) ? escapeHtml(d) : '<span style="color:#d1d5db;">未分类</span>'; }

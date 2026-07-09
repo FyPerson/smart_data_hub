@@ -1,0 +1,166 @@
+/* components.css — 前端统一 C0 共享组件层
+   来源：以数据修正页（Data_Correction.html）内联 <style>（改造前 179 行）为源抽出的跨页可复用组件；
+   命名铁律（方案 §三 T1）：保持数据修正现有类名（.corr-table 等）照搬，不改名不做"通用化改名"。
+   —— 前端统一实施方案 20260708 v1.2 §三/§四；C0 任务书 20260708 v1.0 §3 ——
+
+   ⚠️ style.css 污染根治 · B 方案（20260709 v1.1）：以下所有组件根类均加 `u-` 前缀（如 `.btn-primary` →
+   `.u-btn-primary`），彻底避开 style.css 全站遗留同名类——因命名空间已唯一，规则不再需要 `:where(.unified-page)`
+   门控（旧版靠 :where() 把特异性钉死为 0 以防反超 style.css 的组合选择器，详见 v1.0 版本历史），改为裸类选择器
+   （特异性 0,1,0 起）。`body.unified-page` 仍保留作①迁移标记 ②覆盖钩子——页面如需覆盖某条共享规则，写
+   `.unified-page .u-X`（真实类前缀，特异性 0,2,0 稳压过共享层的 0,1,0）。
+   状态/变体/枚举修饰类（active、open、full、ellip、wide、s-*、t-*、n-*）保留原名不加 u-：style.css 无裸修饰类
+   定义，不撞；且 JS 用 classList.add/remove('open')、querySelector('.active') 操作这些类，不改名 = JS 零改动。
+*/
+
+/* ===== 筛选栏（对齐 Issue_Tracker 范式）===== */
+.u-filter-bar {
+    display: flex; align-items: center; gap: 10px;
+    padding: 16px 20px; background: #fff; border-radius: 10px;
+    border: 1px solid #e2e8f0; margin-bottom: 16px; flex-wrap: wrap;
+}
+.u-filter-bar select, .u-filter-bar input {
+    padding: 7px 12px; border: 1px solid #d1d5db; border-radius: 6px;
+    font-size: 13px; background: #fff; color: #374151; outline: none; transition: border-color 0.2s;
+}
+.u-filter-bar select:focus, .u-filter-bar input:focus { border-color: #d97706; }
+.u-filter-bar input[type="text"] { width: 200px; }
+.u-filter-bar .u-filter-label { font-size: 12px; color: #6b7280; margin-right: -4px; }
+
+/* ===== 按钮系 ===== */
+.u-btn-primary {
+    padding: 8px 18px; background: linear-gradient(135deg, #d97706, #b45309);
+    color: #fff; border: none; border-radius: 6px; font-size: 13px; font-weight: 600;
+    cursor: pointer; display: inline-flex; align-items: center; gap: 5px; transition: opacity 0.2s; white-space: nowrap;
+}
+.u-btn-primary:hover { opacity: 0.9; }
+.u-btn-primary:disabled { opacity: 0.55; cursor: not-allowed; }
+.u-btn-secondary {
+    padding: 6px 14px; background: #f3f4f6; color: #374151; border: 1px solid #d1d5db;
+    border-radius: 6px; font-size: 13px; cursor: pointer; transition: background 0.2s;
+}
+.u-btn-secondary:hover { background: #e5e7eb; }
+.u-btn-danger {
+    padding: 6px 14px; background: #fee2e2; color: #dc2626; border: 1px solid #fca5a5;
+    border-radius: 6px; font-size: 13px; cursor: pointer;
+}
+.u-btn-danger:hover { background: #fecaca; }
+
+/* ===== 表单辅助 ===== */
+.u-req { color: #dc2626; font-weight: 700; }
+.u-hint { font-size: 11px; color: #9ca3af; margin-top: 4px; line-height: 1.5; }
+
+/* ===== 统计卡片 ===== */
+.u-stats-row { display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
+.u-stat-card {
+    flex: 1; min-width: 130px; background: #fff; border-radius: 10px; border: 1px solid #e2e8f0;
+    padding: 14px 18px; display: flex; align-items: center; gap: 12px; cursor: pointer;
+    transition: border-color 0.2s, box-shadow 0.2s;
+}
+.u-stat-card:hover { border-color: #d97706; box-shadow: 0 2px 8px rgba(217,119,6,0.08); }
+.u-stat-card.active { border-color: #d97706; background: #fffbeb; }
+.u-stat-icon { width: 36px; height: 36px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 16px; }
+.u-stat-info .u-stat-num { font-size: 22px; font-weight: 700; color: #111827; }
+.u-stat-info .u-stat-label { font-size: 12px; color: #6b7280; margin-top: 2px; }
+
+/* ===== 表格 ===== */
+.u-corr-table-wrap { overflow-x: auto; border-radius: 10px; border: 1px solid #e2e8f0; }
+.u-corr-table { width: 100%; min-width: 1100px; border-collapse: separate; border-spacing: 0; background: #fff; }
+.u-corr-table th {
+    background: #f8fafc; padding: 10px 14px; font-size: 12px; font-weight: 600; color: #64748b;
+    text-align: left; border-bottom: 1px solid #e2e8f0; white-space: nowrap;
+}
+.u-corr-table td { padding: 12px 14px; font-size: 13px; color: #374151; border-bottom: 1px solid #f1f5f9; vertical-align: middle; }
+.u-corr-table tr:last-child td { border-bottom: none; }
+.u-corr-table tbody tr { cursor: pointer; transition: background 0.15s; }
+.u-corr-table tbody tr:hover { background: #fffbeb; }
+.u-corr-table td.ellip { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 类型标签 base（修饰色 .t-single/.t-batch 等各页专属枚举颜色留页面内联） */
+.u-type-tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 500; white-space: nowrap; }
+
+/* 状态徽章 base（修饰色 .s-* 各页状态枚举颜色留页面内联） */
+.u-status-badge { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: 600; white-space: nowrap; }
+
+/* 通知徽章 base（修饰色 .n-* 各页通知态枚举颜色留页面内联） */
+.u-notify-badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 500; }
+
+/* ===== 通知区四态行（每类通知一行：标签 + 状态文案 + 操作按钮）===== */
+.u-notify-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 0; border-bottom: 1px dashed #f1f5f9; flex-wrap: wrap; }
+.u-notify-row:last-child { border-bottom: none; }
+.u-notify-row .u-nr-label { font-size: 12px; color: #6b7280; font-weight: 600; min-width: 110px; }
+.u-notify-row .u-nr-body { flex: 1; font-size: 12px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.u-notify-row .u-nb-btn { font-size: 11px; padding: 3px 10px; }
+
+/* ===== 详情区块 ===== */
+.u-detail-section { margin-bottom: 18px; }
+.u-detail-section h3 { font-size: 13px; font-weight: 600; color: #374151; margin: 0 0 8px; padding-bottom: 6px; border-bottom: 1px solid #f1f5f9; }
+.u-kv-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 16px; }
+.u-kv-item { font-size: 13px; }
+.u-kv-item label { display: block; font-size: 11px; color: #9ca3af; margin-bottom: 2px; }
+.u-kv-item .v { color: #374151; word-break: break-word; }
+.u-kv-item.full { grid-column: 1 / -1; }
+.u-history-item { font-size: 12px; padding: 6px 0; border-bottom: 1px dashed #f1f5f9; }
+.u-history-item:last-child { border-bottom: none; }
+.u-att-item { font-size: 12px; padding: 4px 0; }
+.u-att-item a { color: #2563eb; text-decoration: none; }
+.u-att-item a:hover { text-decoration: underline; }
+
+/* ===== 操作栏 ===== */
+.u-action-bar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+.u-action-bar select { font-size: 12px; padding: 5px 8px; border: 1px solid #d1d5db; border-radius: 6px; }
+.u-action-bar .u-btn-primary, .u-action-bar .u-btn-secondary, .u-action-bar .u-btn-danger { font-size: 12px; padding: 5px 12px; }
+
+/* ===== 详情抽屉（自定义，覆盖 style.css 的常显 .drawer-overlay 旧样式；带 .open 门控）===== */
+.u-drawer-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.3); z-index: 900; }
+.u-drawer-overlay.open { display: block; }
+/* top:64px 避开固定导航栏（.navbar z-index:1000 > drawer 901，否则抽屉头部标题被导航栏遮挡，2026-06-26 修复） */
+.u-drawer { position: fixed; top: 64px; right: -620px; bottom: 0; width: 600px; max-width: 92vw; background: #fff; box-shadow: -4px 0 20px rgba(0,0,0,0.12); z-index: 901; transition: right 0.3s ease; display: flex; flex-direction: column; }
+.u-drawer.open { right: 0; }
+/* background/color：改名前由 style.css 裸 .drawer-header（L697，全站遗留旧抽屉样式）搭便车提供，
+   components.css 自身从未声明过——u- 改名后 style.css 不再匹配，为保零漂移在此显式补回原计算值
+   （非新设计，实测 getComputedStyle 逐值核对：#d97706 = --color-accent，与 .u-btn-primary 同色系）。 */
+.u-drawer-header { padding: 20px 24px 16px; border-bottom: 1px solid #e2e8f0; background: #d97706; color: #fff; display: flex; justify-content: space-between; align-items: flex-start; }
+.u-drawer-header h2 { font-size: 16px; font-weight: 700; color: #111827; margin: 0; flex: 1; line-height: 1.5; }
+.u-drawer-title-reason { font-size: 13px; font-weight: 400; color: #6b7280; cursor: help; }
+.u-drawer-close { background: none; border: none; font-size: 20px; cursor: pointer; color: #6b7280; padding: 4px; line-height: 1; }
+.u-drawer-close:hover { color: #111827; }
+.u-drawer-body { flex: 1; overflow-y: auto; padding: 20px 24px; }
+
+/* ===== 弹窗 ===== */
+.u-modal-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.4); z-index: 1000; justify-content: center; align-items: center; }
+.u-modal-overlay.open { display: flex; }
+.u-modal-box { background: #fff; border-radius: 14px; width: 560px; max-width: 92vw; max-height: 90vh; overflow-y: auto; box-shadow: 0 20px 60px rgba(0,0,0,0.15); }
+/* background：改名前由 style.css 裸 .modal-header（L1477，全站遗留旧弹窗样式）搭便车提供，components.css
+   自身从未声明过——u- 改名后不再匹配，为保零漂移在此显式补回（同上 .u-drawer-header 说明；h2/close 按钮
+   自身颜色 components.css 一直显式声明 #111827/#6b7280，不受影响，无需一并补白字）。 */
+.u-modal-header { padding: 20px 24px 0; background: #d97706; display: flex; justify-content: space-between; align-items: center; }
+.u-modal-header h2 { font-size: 16px; font-weight: 700; color: #111827; margin: 0; }
+/* overflow-y/max-height：改名前由 style.css 裸 .modal-body（L1493，全站遗留旧弹窗样式）搭便车提供，
+   components.css 自身从未声明——u- 改名后不再匹配，为保零漂移在此显式补回。效果：body 区自身限高
+   60vh 内部滚动，header/footer 常驻可见（"取消/提交"按钮不随内容滚出视口），非新设计。 */
+.u-modal-body { padding: 20px 24px; overflow-y: auto; max-height: 60vh; }
+/* border-top/background：改名前由 style.css 裸 .modal-footer（L1548）搭便车提供，components.css 自身
+   从未声明——u- 改名后不再匹配，为保零漂移在此显式补回（颜色取自实测 getComputedStyle：
+   rgb(231,229,228)/rgb(250,250,249) = style.css --color-border/--color-bg-page 当时取值）。 */
+.u-modal-footer { padding: 0 24px 20px; display: flex; justify-content: flex-end; gap: 10px; border-top: 2px solid #e7e5e4; background: #fafaf9; }
+/* padding/font-size/font-weight/border-radius：改名前由 style.css 裸 .modal-footer button（元素选择器，
+   L1558，不分按钮 variant 统一套用）搭便车提供，压过 .u-btn-primary/.u-btn-secondary 自身尺寸声明——
+   u- 改名后不再匹配，为保零漂移在此显式补回（同一元素选择器写法，两个按钮变体套用同一套值；
+   background/color 不受影响，一直由各自 .u-btn-primary/.u-btn-secondary 自身声明提供，不在此重复）。 */
+.u-modal-footer button { padding: 10px 24px; font-size: 15px; font-weight: 600; border-radius: 8px; }
+.u-form-group { margin-bottom: 14px; }
+.u-form-group label { display: block; font-size: 12px; font-weight: 600; color: #374151; margin-bottom: 5px; }
+.u-form-group input, .u-form-group select, .u-form-group textarea { width: 100%; padding: 8px 12px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 13px; font-family: inherit; outline: none; box-sizing: border-box; }
+.u-form-group input:focus, .u-form-group select:focus, .u-form-group textarea:focus { border-color: #d97706; }
+/* 共享正规 focus ring（v1.1 MED-3 拍板）：C0 高频录入页 focus 反馈不损失，用共享层自定义 ring 而非继承
+   style.css 泄漏（旧版泄漏来源已随 u- 改名彻底切断，这条是有意保留的视觉反馈，非收回项）。
+   select 与 input 一并给 ring（codex B 代码审 MED-1）：原 style.css 泄漏覆盖 .form-group input:focus + select:focus
+   两者，仅补 input 会让两页共 19 个下拉框丢失聚焦光晕；textarea 不放，对齐旧 style.css 口径。
+   outline:none 已由 L153 base 规则对 input/select/textarea 统一提供，focus 态不重复设（无原生框+光晕双框）。 */
+.u-form-group input:focus, .u-form-group select:focus { border-color: #d97706; box-shadow: 0 0 0 3px rgba(217,119,6,.12); }
+.u-form-group textarea { resize: vertical; min-height: 70px; }
+.u-form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+
+/* ===== 空状态 ===== */
+.u-empty-state { text-align: center; padding: 60px 20px; color: #9ca3af; }
+.u-empty-state svg { margin-bottom: 12px; }

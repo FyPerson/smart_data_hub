@@ -7,71 +7,84 @@
     <title>系统迭代 - 智数协同平台</title>
     <link rel="icon" href="data:,">
     <link rel="stylesheet" href="assets/css/style.css?v=v1.102.1_nav">
+    <link rel="stylesheet" href="assets/css/components.css?v=v1.110.0_unify">
     <style>
         /* ============================================================
-           系统迭代页 · 页面私有样式（全部 si- 前缀，避免与 style.css 碰撞）
+           系统迭代页 · 页面专属残留（共享组件层已迁移至 assets/css/components.css）
            设计语言对齐 docs/local/系统迭代/系统迭代_交互原型_demo_20260623.html
+           前端统一 C1（20260709 v1.0 任务书·保守 harmonize 方案 A）：安全组件（按钮/表格/徽章/表单/
+           通知行/详情区块/操作栏/统计行）已并入共享层；结构障碍件（stat-card/toolbar/att-item）与
+           结构风险件（抽屉/弹窗）+ Sys 专属件保留 residual，class 名与 CSS 均不变（si- 私有类不属于
+           style污染根治范围，不加 u- 前缀）。
+           style污染根治 B 方案（20260709 v1.1）：C1 首次落地时因共享类沿用旧裸名（如 .btn-secondary/
+           .form-group）与 style.css 全站遗留同名类相撞，本节曾靠 13 条真前缀"泄漏收回"补丁逐条对抗；
+           改造后共享根类统一加 u- 前缀（.u-btn-secondary/.u-form-group…），与 style.css 不再有同名碰撞，
+           13 条补丁已整体删除，仅保留真正的"共享层未提供 / Sys 需要覆盖"的页面专属扩展（下方逐条标注）。
            ============================================================ */
         .si-wrap { max-width: 1280px; margin: 0 auto; }
 
-        /* 页头 */
+        /* 页头（Sys 专属） */
         .si-page-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; flex-wrap: wrap; gap: 10px; }
         .si-page-head h1 { font-size: 18px; font-weight: 700; color: #1e293b; display: flex; align-items: center; gap: 8px; }
         .si-page-head .si-head-actions { display: flex; gap: 8px; }
 
-        /* 通用按钮 */
-        .si-btn { padding: 8px 16px; border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer; border: none; display: inline-flex; align-items: center; gap: 5px; transition: .2s; white-space: nowrap; }
-        .si-btn-primary { background: linear-gradient(135deg, #d97706, #b45309); color: #fff; }
-        .si-btn-primary:hover { opacity: .9; }
-        .si-btn-sec { background: #f3f4f6; color: #374151; border: 1px solid #d1d5db; }
-        .si-btn-sec:hover { background: #e5e7eb; }
-        .si-btn-danger { background: #fee2e2; color: #dc2626; border: 1px solid #fca5a5; }
-        .si-btn-danger:hover { background: #fecaca; }
-        .si-btn-sm { padding: 5px 11px; font-size: 12px; }
-        .si-btn:disabled { opacity: .5; cursor: not-allowed; }
+        /* 按钮 base+修饰 已 harmonize → u-btn-primary/u-btn-secondary/u-btn-danger/u-btn-sm（base 见 components.css）。
+           shared .u-btn-sm 无定义（仅 base 按钮系有 base，无 -sm 修饰），页面覆盖回原尺寸（真前缀，C1 任务书 §2.1）。
+           style污染根治 B 方案（20260709 v1.1，含 codex 复审修正）：本节原有 13 条"对抗 style.css 泄漏"补丁，
+           改名 u- 前缀后 12 条纯属"抵消 style.css 裸类透传"、无独立价值，已删除（btn-sm 各变体 background/
+           font-weight 收回=components.css .u-btn-primary 已原生提供同值、纯冗余；hover transform/opacity/
+           box-shadow 收回、下方 status-badge box-shadow 收回、form-group display/transition/focus ring 收回，
+           均随 u- 改名与 style.css 裸类脱钩，不再需要）。**唯 1 条例外**（复审发现）：下方
+           `.u-btn-secondary/.u-btn-danger` 的 display:inline-flex 等 5 条声明——原注释称其为"泄漏收回"，
+           但 components.css 共享层的 `.u-btn-secondary`/`.u-btn-danger` base 本就从未定义 display（只有
+           `.u-btn-primary` 原生带 inline-flex），这条实为"共享层未覆盖、Sys 图标+文字按钮真实需要"的页面
+           专属补充（并非仅抵消 style.css 的 `display:inline-block` 透传）——错误删除会导致 Sys 详情页操作栏
+           按钮丢失 flex 对齐/间距/不换行，故保留（改 u-）。仅保留 `.u-btn-sm` 尺寸 + 本条 display 声明两项
+           真实的"共享层未提供"页面专属扩展。 */
+        .unified-page .u-btn-sm { padding: 5px 11px; font-size: 12px; }
+        .unified-page .u-btn-secondary, .unified-page .u-btn-danger {
+            display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; line-height: normal;
+        }
 
-        /* 类型 tab */
+        /* 类型 tab（Sys 专属） */
         .si-type-tabs { display: flex; gap: 6px; margin-bottom: 14px; flex-wrap: wrap; }
         .si-type-tab { padding: 8px 18px; background: #fff; border: 1px solid #e2e8f0; border-radius: 8px; font-size: 13px; cursor: pointer; transition: .15s; font-weight: 500; color: #475569; }
         .si-type-tab:hover { border-color: #d97706; }
         .si-type-tab.active { background: #d97706; color: #fff; border-color: #d97706; }
         .si-type-tab .si-cnt { font-size: 11px; opacity: .8; margin-left: 4px; }
 
-        /* 统计卡 */
-        .si-stats-row { display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
+        /* 统计卡（②档保留：共享 .u-stat-card 是 icon+横排，本页 num+label 竖排结构不兼容；
+           容器 si-stats-row 本身已 harmonize → u-stats-row，值与共享完全一致） */
         .si-stat-card { flex: 1; min-width: 120px; background: #fff; border-radius: 10px; border: 1px solid #e2e8f0; padding: 13px 16px; }
         .si-stat-card .si-stat-num { font-size: 22px; font-weight: 700; color: #111827; }
         .si-stat-card .si-stat-label { font-size: 12px; color: #6b7280; margin-top: 2px; }
 
-        /* 工具条 */
+        /* 工具条（②档保留：共享 .u-filter-bar 是白卡片，本页裸 flex 行结构不兼容） */
         .si-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
         .si-toolbar select, .si-toolbar label.si-chk { padding: 7px 12px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 13px; background: #fff; color: #374151; }
         .si-toolbar label.si-chk { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
         .si-spacer { flex: 1; }
 
-        /* 表格 */
-        .si-table-wrap { overflow-x: auto; border-radius: 10px; border: 1px solid #e2e8f0; background: #fff; }
-        .si-table { width: 100%; min-width: 980px; border-collapse: separate; border-spacing: 0; }
-        .si-table th { background: #f8fafc; padding: 11px 14px; font-size: 12px; font-weight: 600; color: #64748b; text-align: left; border-bottom: 1px solid #e2e8f0; white-space: nowrap; }
-        .si-table td { padding: 12px 14px; font-size: 13px; color: #374151; border-bottom: 1px solid #f1f5f9; vertical-align: middle; }
-        .si-table tbody tr { cursor: pointer; transition: background .15s; }
-        .si-table tbody tr:hover { background: #fffbeb; }
-        .si-table tr:last-child td { border-bottom: none; }
+        /* 表格已 harmonize → u-corr-table-wrap/u-corr-table（base 见 components.css）；
+           列数少于数据修正页，min-width 覆盖回原 980（shared 默认 1100，真前缀）。 */
+        .unified-page .u-corr-table { min-width: 980px; }
 
-        /* 类型标签 */
-        .si-type-tag { display: inline-block; padding: 2px 9px; border-radius: 4px; font-size: 11px; font-weight: 600; }
-        .si-type-tag.bug { background: #fee2e2; color: #b91c1c; }
-        .si-type-tag.feature { background: #dbeafe; color: #1d4ed8; }
-        .si-type-tag.improvement { background: #d1fae5; color: #047857; }
-        .si-type-tag.config { background: #ede9fe; color: #6d28d9; }
+        /* 类型标签修饰色（base 已 harmonize → components.css .u-type-tag，本页保留四类颜色，选择器改名对齐 Data_Correction .type-tag.t-X 惯例） */
+        .u-type-tag.bug { background: #fee2e2; color: #b91c1c; }
+        .u-type-tag.feature { background: #dbeafe; color: #1d4ed8; }
+        .u-type-tag.improvement { background: #d1fae5; color: #047857; }
+        .u-type-tag.config { background: #ede9fe; color: #6d28d9; }
         .si-prio { display: inline-block; padding: 1px 7px; border-radius: 4px; font-size: 11px; font-weight: 700; }
         .si-prio.P0 { background: #dc2626; color: #fff; }
         .si-prio.P1 { background: #f59e0b; color: #fff; }
         .si-prio.P2 { background: #e0e7ff; color: #4338ca; }
         .si-prio.P3 { background: #f1f5f9; color: #94a3b8; }
 
-        /* 状态徽章（按语义英文 key 上色，避免中文类名） */
-        .si-sbadge { display: inline-block; padding: 3px 11px; border-radius: 12px; font-size: 11px; font-weight: 600; white-space: nowrap; }
+        /* style污染根治 B 方案（20260709 v1.1）：本条原为对抗 style.css 裸 `.status-badge`（L1166，早年遗留
+           全局徽章样式）透传 box-shadow/letter-spacing/text-transform/flex-shrink 四条的"泄漏收回"补丁
+           （13 条之一），改名 .u-status-badge 后不再与 style.css 碰撞，整体删除。 */
+
+        /* 状态徽章修饰色（十态，按语义英文 key 上色；base 已 harmonize → components.css .u-status-badge） */
         .si-s-pending { background: #f3f4f6; color: #6b7280; }
         .si-s-scheduled { background: #e0e7ff; color: #4338ca; }
         .si-s-dev { background: #dbeafe; color: #1d4ed8; }
@@ -90,7 +103,7 @@
         .si-flag.lineage { color: #9ca3af; font-weight: 500; }
         .si-muted { color: #9ca3af; }
 
-        /* 抽屉 */
+        /* 抽屉（结构风险件，禁改） */
         .si-overlay { position: fixed; inset: 0; background: rgba(15,23,42,.45); display: none; z-index: 900; }
         .si-overlay.open { display: block; }
         /* top:64px 避开固定导航栏（navbar height 64 / z-index 1000），否则抽屉头部被遮挡不可点（对齐 Data_Correction v1.94.1 修复） */
@@ -106,16 +119,11 @@
         .si-lineage { background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px; padding: 9px 13px; font-size: 12px; color: #92400e; margin-bottom: 14px; }
         .si-lineage a { color: #b45309; font-weight: 600; cursor: pointer; text-decoration: underline; }
 
-        .si-section { margin-bottom: 18px; }
-        /* 区块标题对齐 Data_Correction .detail-section h3（font-weight 600 / #374151）——项目内抽屉区块标题统一；保留 flex 供通知区标题右侧元素 */
-        .si-section h3 { font-size: 13px; font-weight: 600; color: #374151; margin: 0 0 8px; padding-bottom: 6px; border-bottom: 1px solid #f1f5f9; display: flex; justify-content: space-between; align-items: center; }
-        .si-kv-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px 18px; }
-        .si-kv { font-size: 13px; }
-        .si-kv label { display: block; font-size: 11px; color: #9ca3af; margin-bottom: 2px; }
-        .si-kv .v { color: #334155; word-break: break-word; }
-        .si-kv.full { grid-column: 1 / -1; }
+        /* 详情区块已 harmonize → u-detail-section/u-kv-grid/u-kv-item（base 见 components.css）；
+           通知区标题右侧元素需 flex，shared .u-detail-section h3 无此布局，页面覆盖（真前缀）。 */
+        .unified-page .u-detail-section h3 { display: flex; justify-content: space-between; align-items: center; }
 
-        /* 时间线 */
+        /* 时间线（Sys 专属） */
         .si-timeline { position: relative; }
         .si-tl-item { display: flex; gap: 12px; padding: 7px 0; }
         .si-tl-time { font-size: 11px; color: #94a3b8; white-space: nowrap; width: 118px; flex-shrink: 0; padding-top: 2px; }
@@ -134,18 +142,11 @@
         .si-tl-att { display: block; margin-top: 3px; }
         .si-tl-att a { font-size: 11px; color: #2563eb; cursor: pointer; margin-right: 8px; }
 
-        /* 通知行（对齐 Data_Correction .notify-row：左标签 si-nr-label + 右内容 si-nr-body 分栏，状态文字化+行内按钮） */
-        .si-notify-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 0; border-bottom: 1px dashed #f1f5f9; flex-wrap: wrap; }
-        .si-notify-row:last-child { border-bottom: none; }
-        .si-notify-row .si-nr-label { font-size: 12px; color: #6b7280; font-weight: 600; min-width: 110px; }
-        .si-notify-row .si-nr-body { flex: 1; font-size: 12px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
-        /* （原 si-nbadge 徽章体系 + si-nread 已随通知栏文字化对齐 Data_Correction 移除，2026-07-07 样式统一） */
-        /* 通知改造 C4：通知区行内小按钮（发送/重发/查已读） */
-        /* 通知区行内按钮（发送/重发/查已读）对齐 Data_Correction .btn-secondary+.nb-btn：灰底 #f3f4f6 / 圆角 6px / padding 3px 10px / font 11px / 无粗体 / hover #e5e7eb（2026-07-07 样式统一延续）。保留 white-space:nowrap 防「查已读」换行。 */
-        .si-nbtn { padding: 3px 10px; font-size: 11px; background: #f3f4f6; color: #374151; border: 1px solid #d1d5db; border-radius: 6px; cursor: pointer; white-space: nowrap; transition: background 0.2s; }
-        .si-nbtn:hover { background: #e5e7eb; }
+        /* 通知行族已 harmonize → u-notify-row/u-nr-label/u-nr-body（base 见 components.css）。
+           si-nbtn 拆为 u-btn-secondary + u-nb-btn 两类调用（底色/边框走 u-btn-secondary，u-nb-btn 仅覆盖
+           padding/font-size，对齐 Data_Correction .u-btn-secondary.u-nb-btn 范式，见 components.css）。 */
 
-        /* 附件 */
+        /* 附件（②档/专属保留：共享 .u-att-item 是简单行，本页带删除按钮/meta 的 flex 布局不兼容） */
         .si-att-item { display: flex; align-items: center; gap: 8px; padding: 6px 0; font-size: 12.5px; border-bottom: 1px dashed #f1f5f9; }
         .si-att-item:last-child { border-bottom: none; }
         .si-att-item a.si-att-name { color: #2563eb; cursor: pointer; }
@@ -153,11 +154,13 @@
         .si-att-meta { color: #9ca3af; font-size: 11px; }
         .si-upload-box { margin-top: 8px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 
-        /* 操作区（对齐 Data_Correction .action-bar：置于抽屉 body 顶部，下方留 16px 间距） */
-        .si-action-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 16px; }
+        /* 操作区已 harmonize → u-action-bar（base 见 components.css）；shared .u-action-bar 无 align-items，本页原
+           si-action-bar 有 align-items:center，自测 computed-style 探针实测出可感知差异（任务书 §2.1 已预判此项
+           为条件覆盖，探针证实需要），真前缀覆盖回。 */
+        .unified-page .u-action-bar { align-items: center; }
         .si-gate-hint { font-size: 11px; color: #b45309; background: #fffbeb; border: 1px solid #fde68a; border-radius: 6px; padding: 4px 9px; width: 100%; }
 
-        /* 弹框 */
+        /* 弹框（结构风险件，禁改） */
         /* 弹框 z-index 1200 > navbar 1000：弹框期间遮住导航栏，防误导航；批次面板 #siBatchOverlay 单独降到 1100（见下），使从批次里打开的通用弹框仍在最上层 */
         .si-modal-overlay { position: fixed; inset: 0; background: rgba(15,23,42,.5); display: none; align-items: center; justify-content: center; z-index: 1200; }
         .si-modal-overlay.open { display: flex; }
@@ -168,18 +171,20 @@
         .si-modal-head .si-close { cursor: pointer; font-size: 22px; color: #94a3b8; line-height: 1; background: none; border: none; }
         .si-modal-body { padding: 18px 22px; }
         .si-modal-foot { padding: 14px 22px; border-top: 1px solid #eef2f7; display: flex; justify-content: flex-end; gap: 9px; }
-        .si-field { margin-bottom: 14px; }
-        .si-field label { display: block; font-size: 12px; color: #475569; font-weight: 600; margin-bottom: 5px; }
-        .si-field .req { color: #dc2626; }
-        .si-field input[type=text], .si-field input[type=date], .si-field input[type=datetime-local], .si-field select, .si-field textarea { width: 100%; padding: 8px 11px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 13px; font-family: inherit; color: #334155; box-sizing: border-box; }
-        .si-field input:focus, .si-field select:focus, .si-field textarea:focus { outline: none; border-color: #d97706; }
-        .si-field textarea { resize: vertical; min-height: 70px; }
-        .si-field .si-hint { font-size: 11px; color: #9ca3af; margin-top: 4px; }
-        .si-field.inline-chk { display: flex; align-items: center; gap: 7px; }
-        .si-field.inline-chk label { margin-bottom: 0; }
+
+        /* 表单（弹窗内）已 harmonize → u-form-group（base 见 components.css）；.req 专属规则删除，交共享 .u-req 统一着色。
+           style污染根治 B 方案（20260709 v1.1）：本节原有两条"泄漏收回"补丁——① tie-flip：对抗 style.css 裸
+           `.form-group { display: flex; flex-direction: column; gap: 8px }`（L3293）导致的 label→input 间距漂移；
+           ② C1 二审 MED-2：对抗 style.css `.form-group input,select { transition: all .3s ease }`（L3305）+
+           `.form-group input:focus,select:focus { box-shadow: 0 0 0 3px var(--color-accent-soft) }`（L3314）
+           透传的过渡动画/焦点光晕——均随共享根类改名 `.u-form-group` 不再与 style.css 裸类碰撞，整体删除；
+           共享层新增的正规 focus ring（见 components.css `.u-form-group input:focus`）本页直接继承，无需再覆盖。
+           仅保留 `.u-form-group.inline-chk` 这条真实的"共享层未提供的复选框行内布局"页面专属扩展。 */
+        .unified-page .u-form-group.inline-chk { display: flex; align-items: center; gap: 7px; }
+        .unified-page .u-form-group.inline-chk label { margin-bottom: 0; }
         .si-note-box { background: #fffbeb; border: 1px solid #fde68a; border-radius: 6px; padding: 8px 11px; color: #92400e; font-size: 12px; line-height: 1.5; margin-bottom: 14px; }
 
-        /* 批次管理 */
+        /* 批次管理（Sys 专属） */
         .si-batch-item { border: 1px solid #e2e8f0; border-radius: 8px; padding: 11px 14px; margin-bottom: 10px; cursor: pointer; transition: .15s; }
         .si-batch-item:hover { border-color: #d97706; background: #fffbeb; }
         .si-batch-item .si-batch-no { font-weight: 700; color: #1e293b; }
@@ -193,7 +198,7 @@
     </style>
 </head>
 
-<body>
+<body class="unified-page">
 
     <!-- 顶部导航栏（复用全站 navbar，系统迭代高亮） -->
     <nav class="navbar fixed-header">
@@ -338,7 +343,7 @@
             <div class="si-type-tabs" id="siTypeTabs"></div>
 
             <!-- 统计卡 -->
-            <div class="si-stats-row" id="siStatsRow"></div>
+            <div class="u-stats-row" id="siStatsRow"></div>
 
             <!-- 工具条 -->
             <div class="si-toolbar">
@@ -357,8 +362,8 @@
             </div>
 
             <!-- 表格 -->
-            <div class="si-table-wrap">
-                <table class="si-table">
+            <div class="u-corr-table-wrap">
+                <table class="u-corr-table">
                     <thead>
                         <tr>
                             <th>编号</th><th>类型</th><th>标题</th><th>系统 · 模块</th>
@@ -390,8 +395,8 @@
             <div class="si-modal-head"><span id="siMHead"></span><button class="si-close" onclick="siCloseModal()">&times;</button></div>
             <div class="si-modal-body" id="siMBody"></div>
             <div class="si-modal-foot">
-                <button class="si-btn si-btn-sec" onclick="siCloseModal()">取消</button>
-                <button class="si-btn si-btn-primary" id="siMConfirm">确定</button>
+                <button class="u-btn-secondary" onclick="siCloseModal()">取消</button>
+                <button class="u-btn-primary" id="siMConfirm">确定</button>
             </div>
         </div>
     </div>
@@ -542,13 +547,13 @@
         const box = document.getElementById('siHeadActions');
         let html = '';
         if (META_OK && isAdmin()) {
-            html += `<button class="si-btn si-btn-sec" onclick="siOpenBatch()">📦 批次管理</button>`;
-            if (siTypeKeys().length) html += `<button class="si-btn si-btn-primary" onclick="siOpenCreate()">+ 建单</button>`;
+            html += `<button class="u-btn-secondary" onclick="siOpenBatch()">📦 批次管理</button>`;
+            if (siTypeKeys().length) html += `<button class="u-btn-primary" onclick="siOpenCreate()">+ 建单</button>`;
         }
         // C-orch：上线编排批量面板入口——admin（批量指定 + 批量通知上线开发）与被指定执行开发（批量执行发版）共用入口，
         //   面板内部按角色 + 三态分别出对应操作；任意登录用户可开（无待办项时面板自身显示"暂无"，无害）。
         if (META_OK && currentUser) {
-            html += `<button class="si-btn si-btn-sec" onclick="siOpenReleaseOrch()">🚀 上线编排</button>`;
+            html += `<button class="u-btn-secondary" onclick="siOpenReleaseOrch()">🚀 上线编排</button>`;
         }
         box.innerHTML = html;
     }
@@ -647,11 +652,11 @@
             const lineage = i.origin_issue_id ? `<span class="si-flag lineage">🔁基于#${i.origin_issue_id}</span>` : '';
             return `<tr onclick="siOpenDrawer(${i.id})">
                 <td>#${i.id}</td>
-                <td><span class="si-type-tag ${esc(i.type)}">${esc(siTypeLabel(i.type))}</span></td>
+                <td><span class="u-type-tag ${esc(i.type)}">${esc(siTypeLabel(i.type))}</span></td>
                 <td>${esc(i.title)}${lineage}${flags}</td>
                 <td>${esc(i.system_name)}<span class="si-muted"> · ${esc(i.module_name || '—')}</span></td>
                 <td><span class="si-prio ${esc(i.priority)}">${esc(i.priority)}</span></td>
-                <td><span class="si-sbadge si-s-${siStatusClass(i.status)}">${esc(i.status)}</span></td>
+                <td><span class="u-status-badge si-s-${siStatusClass(i.status)}">${esc(i.status)}</span></td>
                 <td>${i.assigned_to_name ? esc(i.assigned_to_name) : '<span class="si-muted">—</span>'}</td>
                 <td>${i.dev_estimated_at ? esc(siFmtDT(i.dev_estimated_at)) : '<span class="si-muted">—</span>'}</td>
                 <td class="si-muted">${esc(siFmtDT(i.created_at))}</td>
@@ -692,8 +697,8 @@
 
         document.getElementById('siDTitle').innerHTML = `#${iss.id} ${esc(iss.title)}`;
         document.getElementById('siDMeta').innerHTML =
-            `<span class="si-type-tag ${esc(iss.type)}">${esc(siTypeLabel(iss.type))}</span>` +
-            `<span class="si-sbadge si-s-${siStatusClass(iss.status)}">${esc(iss.status)}</span>` +
+            `<span class="u-type-tag ${esc(iss.type)}">${esc(siTypeLabel(iss.type))}</span>` +
+            `<span class="u-status-badge si-s-${siStatusClass(iss.status)}">${esc(iss.status)}</span>` +
             `<span class="si-prio ${esc(iss.priority)}">${esc(iss.priority)}</span>` +
             (iss.scope_changed ? `<span class="si-flag scope">· 经历范围变更</span>` : '') +
             (iss.reopen_count ? `<span class="si-flag reopen">· 返工×${iss.reopen_count}</span>` : '') +
@@ -717,11 +722,11 @@
         let feas = '';
         if (iss.needs_feasibility) {
             feas =
-                `<div class="si-kv"><label>可行性结论</label><div class="v">${iss.feasibility_conclusion ? esc(iss.feasibility_conclusion) : '<span class="si-muted">待评估</span>'}</div></div>` +
-                `<div class="si-kv"><label>受阻</label><div class="v">${iss.blocked ? '<span style="color:#b91c1c;font-weight:600">是</span>' : '否'}</div></div>` +
-                (iss.feasibility_requirement_confirm ? `<div class="si-kv full"><label>需求确认</label><div class="v">${esc(iss.feasibility_requirement_confirm)}</div></div>` : '') +
-                (iss.feasibility_risk ? `<div class="si-kv full"><label>风险/条件</label><div class="v">${esc(iss.feasibility_risk)}</div></div>` : '') +
-                (iss.blocked && iss.blocked_reason ? `<div class="si-kv full"><label>受阻原因</label><div class="v">${esc(iss.blocked_reason)}</div></div>` : '');
+                `<div class="u-kv-item"><label>可行性结论</label><div class="v">${iss.feasibility_conclusion ? esc(iss.feasibility_conclusion) : '<span class="si-muted">待评估</span>'}</div></div>` +
+                `<div class="u-kv-item"><label>受阻</label><div class="v">${iss.blocked ? '<span style="color:#b91c1c;font-weight:600">是</span>' : '否'}</div></div>` +
+                (iss.feasibility_requirement_confirm ? `<div class="u-kv-item full"><label>需求确认</label><div class="v">${esc(iss.feasibility_requirement_confirm)}</div></div>` : '') +
+                (iss.feasibility_risk ? `<div class="u-kv-item full"><label>风险/条件</label><div class="v">${esc(iss.feasibility_risk)}</div></div>` : '') +
+                (iss.blocked && iss.blocked_reason ? `<div class="u-kv-item full"><label>受阻原因</label><div class="v">${esc(iss.blocked_reason)}</div></div>` : '');
         }
         // ④a §7 关联修正单号软展示（不跳转；后端 best-effort 软查回 related_correction 状态）
         let relCorrRow = '';
@@ -733,27 +738,27 @@
             if (rc && rc.status === 'voided') hint = ` <span style="color:#b91c1c">（对应修正单已作废${byTxt ? '·' + byTxt : ''}）</span>`;
             else if (rc && rc.status === 'not_found') hint = ' <span style="color:#b45309">（未找到对应修正单，可能已删除或为外部单号）</span>';
             else if (rc && rc.status === 'active') hint = ` <span class="si-muted">（修正单 #${rc.id} 有效${byTxt ? '·' + byTxt : ''}）</span>`;
-            relCorrRow = `<div class="si-kv full"><label>关联修正单号</label><div class="v">${esc(iss.related_correction_no)}${hint}<span class="si-muted" style="margin-left:6px;font-size:11px">软引用·不跳转</span></div></div>`;
+            relCorrRow = `<div class="u-kv-item full"><label>关联修正单号</label><div class="v">${esc(iss.related_correction_no)}${hint}<span class="si-muted" style="margin-left:6px;font-size:11px">软引用·不跳转</span></div></div>`;
         }
-        const info = `<div class="si-section"><h3>基本信息</h3><div class="si-kv-grid">
-            <div class="si-kv"><label>所属系统</label><div class="v">${esc(iss.system_name)}</div></div>
-            <div class="si-kv"><label>模块</label><div class="v">${esc(iss.module_name || '—')}</div></div>
-            <div class="si-kv"><label>来源</label><div class="v">${esc(iss.source || '—')}</div></div>
-            <div class="si-kv"><label>建单人</label><div class="v">${esc(iss.created_by_name || '—')}</div></div>
-            <div class="si-kv"><label>开发负责人</label><div class="v">${iss.assigned_to_name ? esc(iss.assigned_to_name) : '<span class="si-muted">未指派</span>'}</div></div>
-            <div class="si-kv"><label>预计完成</label><div class="v">${iss.dev_estimated_at ? esc(siFmtDT(iss.dev_estimated_at)) : '<span class="si-muted">未回填</span>'}</div></div>
-            <div class="si-kv"><label>期望完成(deadline)</label><div class="v">${iss.deadline ? esc(iss.deadline) : '<span class="si-muted">—</span>'}</div></div>
-            <div class="si-kv"><label>需求方</label><div class="v">${siRequesterText(iss)}</div></div>
-            <div class="si-kv"><label>上线批次</label><div class="v">${iss.release_id ? ('#' + iss.release_id) : '<span class="si-muted">—</span>'}</div></div>
-            ${iss.type === 'bug' ? `<div class="si-kv"><label>上线执行人</label><div class="v">${iss.release_assignee_name ? esc(iss.release_assignee_name) : '<span class="si-muted">未指定</span>'}</div></div>` : ''}
-            <div class="si-kv"><label>建单时间</label><div class="v">${esc(siFmtDT(iss.created_at))}</div></div>
+        const info = `<div class="u-detail-section"><h3>基本信息</h3><div class="u-kv-grid">
+            <div class="u-kv-item"><label>所属系统</label><div class="v">${esc(iss.system_name)}</div></div>
+            <div class="u-kv-item"><label>模块</label><div class="v">${esc(iss.module_name || '—')}</div></div>
+            <div class="u-kv-item"><label>来源</label><div class="v">${esc(iss.source || '—')}</div></div>
+            <div class="u-kv-item"><label>建单人</label><div class="v">${esc(iss.created_by_name || '—')}</div></div>
+            <div class="u-kv-item"><label>开发负责人</label><div class="v">${iss.assigned_to_name ? esc(iss.assigned_to_name) : '<span class="si-muted">未指派</span>'}</div></div>
+            <div class="u-kv-item"><label>预计完成</label><div class="v">${iss.dev_estimated_at ? esc(siFmtDT(iss.dev_estimated_at)) : '<span class="si-muted">未回填</span>'}</div></div>
+            <div class="u-kv-item"><label>期望完成(deadline)</label><div class="v">${iss.deadline ? esc(iss.deadline) : '<span class="si-muted">—</span>'}</div></div>
+            <div class="u-kv-item"><label>需求方</label><div class="v">${siRequesterText(iss)}</div></div>
+            <div class="u-kv-item"><label>上线批次</label><div class="v">${iss.release_id ? ('#' + iss.release_id) : '<span class="si-muted">—</span>'}</div></div>
+            ${iss.type === 'bug' ? `<div class="u-kv-item"><label>上线执行人</label><div class="v">${iss.release_assignee_name ? esc(iss.release_assignee_name) : '<span class="si-muted">未指定</span>'}</div></div>` : ''}
+            <div class="u-kv-item"><label>建单时间</label><div class="v">${esc(siFmtDT(iss.created_at))}</div></div>
             ${feas}
             ${relCorrRow}
-            <div class="si-kv full"><label>描述</label><div class="v">${iss.description ? esc(iss.description) : '—'}</div></div>
+            <div class="u-kv-item full"><label>描述</label><div class="v">${iss.description ? esc(iss.description) : '—'}</div></div>
         </div></div>`;
 
         // 演进时间线
-        const tl = `<div class="si-section"><h3>演进时间线</h3>${siRenderTimeline(r.data.timeline || [], r.data.attachments || [])}</div>`;
+        const tl = `<div class="u-detail-section"><h3>演进时间线</h3>${siRenderTimeline(r.data.timeline || [], r.data.attachments || [])}</div>`;
 
         // 附件区
         const att = siRenderAttachments(r.data);
@@ -766,10 +771,10 @@
         // 讨论群（§5 bug 流拉群；已建才展示，留痕：议题 + 拉群时间）
         let chat = '';
         if (iss.dingtalk_open_conversation_id) {
-            chat = `<div class="si-section"><h3>讨论群</h3><div class="si-kv-grid">
-                <div class="si-kv full"><label>群名称</label><div class="v">${esc(iss.dingtalk_chat_name || '—')}</div></div>
-                <div class="si-kv full"><label>拉群议题</label><div class="v">${iss.dingtalk_chat_desc ? esc(iss.dingtalk_chat_desc) : '—'}</div></div>
-                <div class="si-kv"><label>拉群时间</label><div class="v">${iss.dingtalk_chat_created_at ? esc(siFmtDT(iss.dingtalk_chat_created_at)) : '—'}</div></div>
+            chat = `<div class="u-detail-section"><h3>讨论群</h3><div class="u-kv-grid">
+                <div class="u-kv-item full"><label>群名称</label><div class="v">${esc(iss.dingtalk_chat_name || '—')}</div></div>
+                <div class="u-kv-item full"><label>拉群议题</label><div class="v">${iss.dingtalk_chat_desc ? esc(iss.dingtalk_chat_desc) : '—'}</div></div>
+                <div class="u-kv-item"><label>拉群时间</label><div class="v">${iss.dingtalk_chat_created_at ? esc(siFmtDT(iss.dingtalk_chat_created_at)) : '—'}</div></div>
             </div><div class="si-note-box">钉钉群已建，请到钉钉客户端查看。钉钉无解散接口，用完由群主（示例用户A）在客户端手动解散。</div></div>`;
         }
 
@@ -778,7 +783,7 @@
 
         // 抽屉 body 顺序（对齐 Data_Correction 抽屉范式）：血缘 → 操作栏(顶) → 基本信息 → 上线编排 → 通知 → 讨论群 → 时间线 → 附件
         document.getElementById('siDBody').innerHTML =
-            lineageHtml + '<div class="si-action-bar" id="siDActions"></div>' + info + orchBlock + notify + chat + tl + att;
+            lineageHtml + '<div class="u-action-bar" id="siDActions"></div>' + info + orchBlock + notify + chat + tl + att;
 
         // 操作区（填充 body 顶部的 #siDActions 占位）
         siRenderActions(iss);
@@ -812,15 +817,15 @@
         let btns = '';
         if (isAdminUser) {
             btns += iss.release_assignee_id
-                ? `<button class="si-btn si-btn-sec si-btn-sm" onclick="siModalAssignReleaseDev(true)">换执行开发</button>`
-                : `<button class="si-btn si-btn-sec si-btn-sm" onclick="siModalAssignReleaseDev(false)">指定上线开发</button>`;
+                ? `<button class="u-btn-secondary u-btn-sm" onclick="siModalAssignReleaseDev(true)">换执行开发</button>`
+                : `<button class="u-btn-secondary u-btn-sm" onclick="siModalAssignReleaseDev(false)">指定上线开发</button>`;
         }
         if (isReleaseExecutor) {
-            btns += `<button class="si-btn si-btn-primary si-btn-sm" onclick="siModalExecuteRelease()">执行上线</button>`;
+            btns += `<button class="u-btn-primary u-btn-sm" onclick="siModalExecuteRelease()">执行上线</button>`;
         }
         if (!gate && !btns) return '';   // 兜底：非 admin 非 executor 且无引导时不渲染空区块
-        return `<div class="si-section"><h3>上线编排</h3>
-            <div class="si-action-bar" style="margin-bottom:0">${gate}${btns}</div>
+        return `<div class="u-detail-section"><h3>上线编排</h3>
+            <div class="u-action-bar" style="margin-bottom:0">${gate}${btns}</div>
         </div>`;
     }
 
@@ -905,12 +910,12 @@
             }).join('');
         }
 
-        let html = '<div class="si-section"><h3>附件</h3>';
+        let html = '<div class="u-detail-section"><h3>附件</h3>';
         // 需求材料 spec（admin 上传）
         html += `<div style="margin-bottom:10px"><div style="font-size:12px;color:#6b7280;margin-bottom:4px;font-weight:600">需求材料（spec）</div>${attList(spec)}`;
         if (META_OK && isAdmin() && iss.status !== '已作废') {
             html += `<div class="si-upload-box"><input type="file" id="siSpecFile" multiple>
-                <button class="si-btn si-btn-sec si-btn-sm" onclick="siUploadAtt(${iss.id},'spec','siSpecFile')">上传需求材料</button></div>`;
+                <button class="u-btn-secondary u-btn-sm" onclick="siUploadAtt(${iss.id},'spec','siSpecFile')">上传需求材料</button></div>`;
         }
         html += '</div>';
         // 交付物 delivery（提交时绑定，只读展示）
@@ -919,7 +924,7 @@
         html += `<div><div style="font-size:12px;color:#6b7280;margin-bottom:4px;font-weight:600">补充截图（screenshot）</div>${attList(screenshots)}`;
         if (META_OK && isOwnerDev && iss.status === '开发中') {
             html += `<div class="si-upload-box"><input type="file" id="siShotFile" multiple>
-                <button class="si-btn si-btn-sec si-btn-sm" onclick="siUploadAtt(${iss.id},'screenshot','siShotFile')">上传截图</button></div>`;
+                <button class="u-btn-secondary u-btn-sm" onclick="siUploadAtt(${iss.id},'screenshot','siShotFile')">上传截图</button></div>`;
         }
         html += '</div>';
         html += '</div>';
@@ -949,8 +954,8 @@
     }
     // 单行组装（对齐 Data_Correction .notify-row）：左标签 si-nr-label + 右内容 si-nr-body（文字状态 + 操作按钮）+ 可选提示行
     function siNotifyRowHtml(label, status, readAt, buttonsHtml, extraNote) {
-        return `<div class="si-notify-row"><span class="si-nr-label">${label}</span><span class="si-nr-body">${siNotifyStatusText(status, readAt)}${buttonsHtml || ''}</span></div>` +
-            (extraNote ? `<div class="si-hint" style="margin:-2px 0 6px">${extraNote}</div>` : '');
+        return `<div class="u-notify-row"><span class="u-nr-label">${label}</span><span class="u-nr-body">${siNotifyStatusText(status, readAt)}${buttonsHtml || ''}</span></div>` +
+            (extraNote ? `<div class="u-hint" style="margin:-2px 0 6px">${extraNote}</div>` : '');
     }
 
     // 开发侧（逐 dev，通知改造 C3 子表）：主开发/协作开发各自一行，各自独立 notify_status/read_at + 三能力。
@@ -958,7 +963,7 @@
     //   can_query_read=admin/白名单/主开发本人（read-status handler 内判定，四侧统一，不看工单状态）。
     function siRenderDevNotifyRows(iss, devAssignees, canOperateDev, canQueryRead) {
         if (!devAssignees || !devAssignees.length) {
-            return `<div class="si-notify-row"><span>开发</span><span class="si-muted">暂无指派开发</span></div>`;
+            return `<div class="u-notify-row"><span>开发</span><span class="si-muted">暂无指派开发</span></div>`;
         }
         const sendable = SI_NOTIFY_DEV_STATUSES.includes(iss.status);
         return devAssignees.map(d => {
@@ -966,10 +971,10 @@
             const label = `开发 ${esc(d.user_name || ('#' + d.user_id))}${tag}`;
             let btns = '';
             if (canOperateDev && sendable) {
-                btns += `<button class="si-nbtn" onclick="siNotifyDevSend(${d.user_id})">${d.notify_status === 'sent' ? '重新通知' : '发送通知'}</button>`;
+                btns += `<button class="u-btn-secondary u-nb-btn" onclick="siNotifyDevSend(${d.user_id})">${d.notify_status === 'sent' ? '重新通知' : '发送通知'}</button>`;
             }
             if (canQueryRead && d.notify_status === 'sent' && d.notify_message_key) {
-                btns += `<button class="si-nbtn" onclick="siQueryReadStatus('dev', ${d.user_id})">查询已读</button>`;
+                btns += `<button class="u-btn-secondary u-nb-btn" onclick="siQueryReadStatus('dev', ${d.user_id})">查询已读</button>`;
             }
             return siNotifyRowHtml(label, d.notify_status, d.read_at, btns);
         }).join('');
@@ -982,10 +987,10 @@
         const sendable = SI_NOTIFY_RELAY_STATUSES.includes(iss.status);
         let btns = '';
         if (canOperateRelay && sendable) {
-            btns += `<button class="si-nbtn" onclick="siNotifyRelayClick()">${iss.relay_notify_status === 'sent' ? '重新通知' : '发送通知'}</button>`;
+            btns += `<button class="u-btn-secondary u-nb-btn" onclick="siNotifyRelayClick()">${iss.relay_notify_status === 'sent' ? '重新通知' : '发送通知'}</button>`;
         }
         if (canQueryRead && iss.relay_notify_status === 'sent' && iss.relay_notify_message_key) {
-            btns += `<button class="si-nbtn" onclick="siQueryReadStatus('relay')">查询已读</button>`;
+            btns += `<button class="u-btn-secondary u-nb-btn" onclick="siQueryReadStatus('relay')">查询已读</button>`;
         }
         return siNotifyRowHtml(label, iss.relay_notify_status, iss.relay_read_at, btns);
     }
@@ -996,10 +1001,10 @@
         const sendable = SI_NOTIFY_CREATOR_STATUSES.includes(iss.status);
         let btns = '';
         if (canOperateCreator && sendable) {
-            btns += `<button class="si-nbtn" onclick="siNotifyCreatorClick()">${iss.creator_notify_status === 'sent' ? '重新通知' : '发送通知'}</button>`;
+            btns += `<button class="u-btn-secondary u-nb-btn" onclick="siNotifyCreatorClick()">${iss.creator_notify_status === 'sent' ? '重新通知' : '发送通知'}</button>`;
         }
         if (canQueryRead && iss.creator_notify_status === 'sent' && iss.creator_notify_message_key) {
-            btns += `<button class="si-nbtn" onclick="siQueryReadStatus('creator')">查询已读</button>`;
+            btns += `<button class="u-btn-secondary u-nb-btn" onclick="siQueryReadStatus('creator')">查询已读</button>`;
         }
         return siNotifyRowHtml(label, iss.creator_notify_status, iss.creator_read_at, btns);
     }
@@ -1012,10 +1017,10 @@
         const sendable = SI_NOTIFY_RELEASE_EXECUTOR_STATUSES.includes(iss.status);
         let btns = '';
         if (canOperateReleaseExecutor && sendable) {
-            btns += `<button class="si-nbtn" onclick="siNotifyReleaseExecutorClick()">${iss.release_assignee_notify_status === 'sent' ? '重新通知' : '发送通知'}</button>`;
+            btns += `<button class="u-btn-secondary u-nb-btn" onclick="siNotifyReleaseExecutorClick()">${iss.release_assignee_notify_status === 'sent' ? '重新通知' : '发送通知'}</button>`;
         }
         if (canQueryRead && iss.release_assignee_notify_status === 'sent' && iss.release_assignee_notify_message_key) {
-            btns += `<button class="si-nbtn" onclick="siQueryReadStatus('release_executor')">查询已读</button>`;
+            btns += `<button class="u-btn-secondary u-nb-btn" onclick="siQueryReadStatus('release_executor')">查询已读</button>`;
         }
         return siNotifyRowHtml(label, iss.release_assignee_notify_status, iss.release_assignee_read_at, btns);
     }
@@ -1035,17 +1040,17 @@
         let btns = '', extraNote = '';
         if (canOperateRequester && sendableStatus) {
             if (hasSnapshot) {
-                btns += `<button class="si-nbtn" onclick="siNotifyRequesterClick()">重新通知</button>`;
+                btns += `<button class="u-btn-secondary u-nb-btn" onclick="siNotifyRequesterClick()">重新通知</button>`;
             } else if (historicalNoSnapshot) {
                 extraNote = '<span class="si-muted">历史记录无快照，不支持重发/查已读</span>';
             } else if (hasCurrentPhone) {
-                btns += `<button class="si-nbtn" onclick="siNotifyRequesterClick()">发送通知</button>`;
+                btns += `<button class="u-btn-secondary u-nb-btn" onclick="siNotifyRequesterClick()">发送通知</button>`;
             } else {
                 extraNote = '<span class="si-muted">无手机号，无法通知</span>';
             }
         }
         if (canQueryRead && iss.requester_notify_status === 'sent' && iss.requester_notify_message_key && hasSnapshot) {
-            btns += `<button class="si-nbtn" onclick="siQueryReadStatus('requester')">查询已读</button>`;
+            btns += `<button class="u-btn-secondary u-nb-btn" onclick="siQueryReadStatus('requester')">查询已读</button>`;
         }
         return siNotifyRowHtml(label, iss.requester_notify_status, iss.requester_read_at, btns, extraNote);
     }
@@ -1053,7 +1058,7 @@
     function siRenderNotify(iss, devAssignees) {
         if (iss.type !== 'bug') {
             // 变更流：只读三侧展示（自动派发，无手动按钮）——保留旧行为。
-            return `<div class="si-section"><h3>钉钉通知（三侧独立）</h3>
+            return `<div class="u-detail-section"><h3>钉钉通知（三侧独立）</h3>
                 ${siNotifyRowHtml('开发侧（指派/改派/打回/重开）', iss.notify_status, iss.read_at, '')}
                 ${siNotifyRowHtml('需求方侧（回填预计/已上线）', iss.requester_notify_status, iss.requester_read_at, '')}
                 ${siNotifyRowHtml('建单人侧', iss.creator_notify_status, iss.creator_read_at, '')}
@@ -1072,7 +1077,7 @@
         const canOperateReleaseExecutor = isAdminUser;                   // notify-release-executor: requireAdmin（仅 admin）
         const canQueryRead = isAdminUser || isBugLiaison || isPrimaryDev;   // read-status handler 内判定，五侧统一
 
-        return `<div class="si-section"><h3>钉钉通知（5 类独立·手动触发）</h3>
+        return `<div class="u-detail-section"><h3>钉钉通知（5 类独立·手动触发）</h3>
             ${siRenderDevNotifyRows(iss, devAssignees || [], canOperateDev, canQueryRead)}
             ${siRenderRelayNotifyRow(iss, canOperateRelay, canQueryRead)}
             ${siRenderCreatorNotifyRow(iss, canOperateCreator, canQueryRead)}
@@ -1152,14 +1157,14 @@
             let lbl = label;
             if (a === 'estimate' && iss.dev_estimated_at) lbl = '修改预计完成';   // estimate 已回填改文案
             else if (a === 'publish') lbl = '单条上线';                          // C：publish 映射 hotfix-publish，纠正 meta label"批次发布"的误导
-            const cls = SI_DANGER_ACTIONS.has(a) ? 'si-btn-danger' : (SI_SEC_ACTIONS.has(a) ? 'si-btn-sec' : 'si-btn-primary');
-            return `<button class="si-btn ${cls} si-btn-sm" onclick="siDoAction('${a}')">${esc(lbl)}</button>`;
+            const cls = SI_DANGER_ACTIONS.has(a) ? 'u-btn-danger' : (SI_SEC_ACTIONS.has(a) ? 'u-btn-secondary' : 'u-btn-primary');
+            return `<button class="${cls} u-btn-sm" onclick="siDoAction('${a}')">${esc(lbl)}</button>`;
         }).join('');
 
         // 拉群讨论（§5 bug 流旁路动作，非 meta transition；type=bug + 指派后非终态 + 未建群 + admin||owner-dev）
         let chatBtn = '';
         if (iss.type === 'bug' && (isAdminUser || isOwnerDev) && SI_CHAT_STATUSES.includes(iss.status) && !iss.dingtalk_open_conversation_id) {
-            chatBtn = `<button class="si-btn si-btn-sec si-btn-sm" onclick="siDoAction('create-chat')">拉群讨论</button>`;
+            chatBtn = `<button class="u-btn-secondary u-btn-sm" onclick="siDoAction('create-chat')">拉群讨论</button>`;
         }
         // C4：通知按钮全部搬进详情页「通知」区（siRenderNotify，逐类三能力），本操作区不再放通知按钮
         //   （旧 ④b-1 notifyBtns 已退场；bug 流手动通知见 siRenderNotify + siNotifyDevSend/siNotifyRelayClick/
@@ -1173,7 +1178,7 @@
         // 删除任务（admin 专用·物理删除·不可逆·2026-07-07）：始终对 admin 可见（危险区）；守卫（有派生子单 /
         //   已挂批次）由 siDeleteIssue 前置镜像 + 后端 DELETE 守卫双重兜底——前端非授权源，真闸在后端。
         let adminDelBtn = '';
-        if (isAdminUser) adminDelBtn = `<button class="si-btn si-btn-danger si-btn-sm" onclick="siDeleteIssue()">删除任务</button>`;
+        if (isAdminUser) adminDelBtn = `<button class="u-btn-danger u-btn-sm" onclick="siDeleteIssue()">删除任务</button>`;
         box.innerHTML = gate + ((btns + chatBtn + adminDelBtn) || fallback);
     }
 
@@ -1340,7 +1345,7 @@
         const opts = siUsers.filter(u => u.role !== 'viewer').map(u =>
             `<label style="display:flex;align-items:center;gap:6px;padding:3px 0;cursor:pointer"><input type="checkbox" class="si-collab-chk" value="${u.id}" ${pre.has(Number(u.id)) ? 'checked' : ''}><span>${esc(u.display_name || u.username)}</span></label>`
         ).join('');
-        return `<div class="si-field"><label>协作开发（可多选，仅收通知不参与状态机）</label>
+        return `<div class="u-form-group"><label>协作开发（可多选，仅收通知不参与状态机）</label>
             <div style="max-height:150px;overflow:auto;border:1px solid #e5e7eb;border-radius:6px;padding:6px">${opts || '<span class="si-muted">无可选用户</span>'}</div>
         </div>`;
     }
@@ -1404,15 +1409,15 @@
         const baseM = (cr.data && cr.data.base_members) || [];
         const reqInfo = (cr.data && cr.data.requester) || { eligible: false, name: '' };
         const baseNames = baseM.map(b => esc(b.display_name)).join('、') || '群主/建单人/开发/你';
-        const pickerHtml = `<div class="si-field"><label>可选拉入成员（有手机号的系统用户，手动勾选）</label>
+        const pickerHtml = `<div class="u-form-group"><label>可选拉入成员（有手机号的系统用户，手动勾选）</label>
             <div style="max-height:150px;overflow:auto;border:1px solid #e5e7eb;border-radius:6px;padding:6px">
               ${cand.length ? cand.map(u => `<label style="display:flex;align-items:center;gap:6px;padding:3px 0;cursor:pointer"><input type="checkbox" class="si-mp-chk" value="${u.id}"><span>${esc(u.display_name)}</span></label>`).join('') : '<span class="si-muted">无其他可选成员（无绑手机号的系统用户）</span>'}
             </div>
-            <div class="si-hint">固定入群（无需勾选）：${baseNames}</div>
+            <div class="u-hint">固定入群（无需勾选）：${baseNames}</div>
           </div>
           ${reqInfo.eligible
-            ? `<div class="si-field inline-chk"><input type="checkbox" id="si-mp-requester"><label for="si-mp-requester">拉入报障人（${esc(reqInfo.name)}，已填手机号）</label></div>`
-            : (reqInfo.name ? `<div class="si-hint">报障人（${esc(reqInfo.name)}）未填合法手机号，不可拉入</div>` : '')}`;
+            ? `<div class="u-form-group inline-chk"><input type="checkbox" id="si-mp-requester"><label for="si-mp-requester">拉入报障人（${esc(reqInfo.name)}，已填手机号）</label></div>`
+            : (reqInfo.name ? `<div class="u-hint">报障人（${esc(reqInfo.name)}）未填合法手机号，不可拉入</div>` : '')}`;
         siModal('拉群讨论', [
             fTextarea('chat_desc', '拉群议题', '', true, '必填：本次拉群要讨论什么（记入迭代单留痕 + 群欢迎卡片），≤500 字'),
             { k: null, html: pickerHtml },
@@ -1611,7 +1616,7 @@
     function siRelayUserSelectHtml() {
         const cands = siUsers.filter(u => SI_BUG_LIAISON_USER_IDS.includes(Number(u.id)));
         const opts = cands.map(u => `<option value="${u.id}">${esc(u.display_name || u.username)}</option>`).join('');
-        return `<div class="si-field"><label>通知对接人 <span class="req">*</span></label><select id="f_relay_user_id"><option value="">请选择</option>${opts}</select>${!cands.length ? '<div class="si-hint">白名单用户不在可选列表中（可能未激活）</div>' : ''}</div>`;
+        return `<div class="u-form-group"><label>通知对接人 <span class="u-req">*</span></label><select id="f_relay_user_id"><option value="">请选择</option>${opts}</select>${!cands.length ? '<div class="u-hint">白名单用户不在可选列表中（可能未激活）</div>' : ''}</div>`;
     }
     // type/assign_mode 联动显隐（无框架响应式绑定，手动挂 onchange + 首次渲染后立即校正一次）。
     function siToggleCreateAssignMode() {
@@ -1631,7 +1636,7 @@
         const typeOpts = siTypeKeys();
         if (!typeOpts.length) { showToast('暂无可建类型', 'error'); return; }
         const assignModeHtml = `
-          <div class="si-field" id="siCreateAssignModeWrap" style="display:none">
+          <div class="u-form-group" id="siCreateAssignModeWrap" style="display:none">
             <label>建单指派（仅 BUG 类可用）</label>
             <select id="f_assign_mode" onchange="siToggleCreateAssignMode()">
               <option value="none">暂不指派</option>
@@ -1779,7 +1784,7 @@
     async function siRenderReleaseOrchPanel() {
         document.getElementById('siBatchHead').textContent = '上线编排（待上线 BUG 批量）';
         document.getElementById('siBatchBody').innerHTML = '<div class="si-empty">加载中…</div>';
-        document.getElementById('siBatchFoot').innerHTML = `<button class="si-btn si-btn-sec" onclick="siCloseBatch()">关闭</button>`;
+        document.getElementById('siBatchFoot').innerHTML = `<button class="u-btn-secondary" onclick="siCloseBatch()">关闭</button>`;
         const r = await siApi('/sys-issues?' + new URLSearchParams({ status: '待上线' }).toString());
         if (!r.ok) { document.getElementById('siBatchBody').innerHTML = '<div class="si-empty">加载失败</div>'; siApiErr(r); return; }
         const items = ((r.data && r.data.items) || []).filter(i => i.type === 'bug');
@@ -1787,7 +1792,7 @@
         const uid = currentUser && currentUser.id;
         if (!items.length) {
             document.getElementById('siBatchBody').innerHTML = '<div class="si-empty">暂无「待上线」BUG 单</div>';
-            document.getElementById('siBatchFoot').innerHTML = `<button class="si-btn si-btn-sec" onclick="siCloseBatch()">关闭</button>`;
+            document.getElementById('siBatchFoot').innerHTML = `<button class="u-btn-secondary" onclick="siCloseBatch()">关闭</button>`;
             return;
         }
         const rows = items.map(i => {
@@ -1814,14 +1819,14 @@
                 <span class="si-muted" style="margin-left:auto;font-size:12px">${stLabel}</span>
             </div>`;
         }).join('');
-        document.getElementById('siBatchBody').innerHTML = `<div class="si-section"><h3>待上线 BUG（${items.length}）</h3>${rows}</div>`;
-        let foot = `<button class="si-btn si-btn-sec" onclick="siCloseBatch()">关闭</button>`;
+        document.getElementById('siBatchBody').innerHTML = `<div class="u-detail-section"><h3>待上线 BUG（${items.length}）</h3>${rows}</div>`;
+        let foot = `<button class="u-btn-secondary" onclick="siCloseBatch()">关闭</button>`;
         if (isAdminUser) {
-            foot += `<button class="si-btn si-btn-sec" onclick="siModalBatchAssignReleaseDev()">批量指定上线开发</button>`;
-            foot += `<button class="si-btn si-btn-sec" onclick="siBatchNotifyReleaseExecutor()">批量通知上线开发</button>`;
+            foot += `<button class="u-btn-secondary" onclick="siModalBatchAssignReleaseDev()">批量指定上线开发</button>`;
+            foot += `<button class="u-btn-secondary" onclick="siBatchNotifyReleaseExecutor()">批量通知上线开发</button>`;
         }
         const myExecutable = items.some(i => Number(i.release_assignee_id) === Number(uid) && uid > 0);
-        if (myExecutable) foot += `<button class="si-btn si-btn-primary" onclick="siModalBatchExecuteRelease()">批量执行上线（发版）</button>`;
+        if (myExecutable) foot += `<button class="u-btn-primary" onclick="siModalBatchExecuteRelease()">批量执行上线（发版）</button>`;
         document.getElementById('siBatchFoot').innerHTML = foot;
     }
     // 上线编排三态（纯前端·显式白名单，M-1，与后端②态闸同源）：
@@ -1912,7 +1917,7 @@
     async function siRenderBatchList() {
         document.getElementById('siBatchHead').textContent = '批次管理';
         document.getElementById('siBatchBody').innerHTML = '<div class="si-empty">加载中…</div>';
-        document.getElementById('siBatchFoot').innerHTML = `<button class="si-btn si-btn-sec" onclick="siCloseBatch()">关闭</button><button class="si-btn si-btn-primary" onclick="siModalCreateBatch()">+ 新建批次</button>`;
+        document.getElementById('siBatchFoot').innerHTML = `<button class="u-btn-secondary" onclick="siCloseBatch()">关闭</button><button class="u-btn-primary" onclick="siModalCreateBatch()">+ 新建批次</button>`;
         const r = await siApi('/sys-releases');
         if (!r.ok) { document.getElementById('siBatchBody').innerHTML = '<div class="si-empty">加载失败</div>'; siApiErr(r); return; }
         const items = (r.data && r.data.items) || [];
@@ -1956,24 +1961,24 @@
         document.getElementById('siBatchHead').textContent = '批次 ' + rel.release_no;
         const planning = rel.status === '计划中';
         const rows = issues.length ? issues.map(i => `<div class="si-att-item">
-            <span class="si-type-tag ${esc(i.type)}">${esc(siTypeLabel(i.type))}</span>
+            <span class="u-type-tag ${esc(i.type)}">${esc(siTypeLabel(i.type))}</span>
             <a class="si-att-name" onclick="siCloseBatch();siOpenDrawer(${i.id})">#${i.id} ${esc(i.title)}</a>
-            <span class="si-sbadge si-s-${siStatusClass(i.status)}" style="margin-left:auto">${esc(i.status)}</span>
+            <span class="u-status-badge si-s-${siStatusClass(i.status)}" style="margin-left:auto">${esc(i.status)}</span>
             ${planning ? `<span class="si-att-del" onclick="siRemoveFromBatch(${id},${i.id})">移除</span>` : ''}
         </div>`).join('') : '<div class="si-muted" style="font-size:12px">批次内暂无单据</div>';
 
         document.getElementById('siBatchBody').innerHTML =
-            `<div class="si-kv-grid" style="margin-bottom:14px">
-                <div class="si-kv"><label>状态</label><div class="v">${planning ? '<span class="si-release-badge plan">计划中</span>' : '<span class="si-release-badge done">已发布</span>'}</div></div>
-                <div class="si-kv"><label>版本号</label><div class="v">${rel.version_tag ? esc(rel.version_tag) : '—'}</div></div>
-                <div class="si-kv full"><label>上线说明</label><div class="v">${rel.release_note ? esc(rel.release_note) : '—'}</div></div>
+            `<div class="u-kv-grid" style="margin-bottom:14px">
+                <div class="u-kv-item"><label>状态</label><div class="v">${planning ? '<span class="si-release-badge plan">计划中</span>' : '<span class="si-release-badge done">已发布</span>'}</div></div>
+                <div class="u-kv-item"><label>版本号</label><div class="v">${rel.version_tag ? esc(rel.version_tag) : '—'}</div></div>
+                <div class="u-kv-item full"><label>上线说明</label><div class="v">${rel.release_note ? esc(rel.release_note) : '—'}</div></div>
             </div>
-            <div class="si-section"><h3>批次成员（${issues.length}）</h3>${rows}</div>`;
+            <div class="u-detail-section"><h3>批次成员（${issues.length}）</h3>${rows}</div>`;
 
-        let foot = `<button class="si-btn si-btn-sec" onclick="siRenderBatchList()">← 返回</button>`;
+        let foot = `<button class="u-btn-secondary" onclick="siRenderBatchList()">← 返回</button>`;
         if (planning) {
-            foot += `<button class="si-btn si-btn-sec" onclick="siModalAddToBatch(${id}, '${esc(rel.release_type || '')}')">+ 加单</button>`;
-            foot += `<button class="si-btn si-btn-primary" onclick="siModalPublishBatch(${id})">发布批次</button>`;
+            foot += `<button class="u-btn-secondary" onclick="siModalAddToBatch(${id}, '${esc(rel.release_type || '')}')">+ 加单</button>`;
+            foot += `<button class="u-btn-primary" onclick="siModalPublishBatch(${id})">发布批次</button>`;
         }
         document.getElementById('siBatchFoot').innerHTML = foot;
     }
@@ -1990,8 +1995,8 @@
             && (i.type !== 'bug' || i.needs_release === 1)
             && (!bf || siReleaseFamily(i.type) === bf));
         if (!cands.length) { showToast(bf ? `没有可加入本批次（${bf === 'bug' ? 'bug·已标发版' : '功能/优化'}）的「待上线」单据` : '没有可加入的「待上线」单据', 'warning'); return; }
-        const opts = cands.map(i => `<label style="display:flex;gap:7px;align-items:center;padding:5px 0"><input type="checkbox" class="si-add-chk" value="${i.id}"> #${i.id} <span class="si-type-tag ${esc(i.type)}">${esc(siTypeLabel(i.type))}</span> ${esc(i.title)}</label>`).join('');
-        siModal('加入批次', [{ k: null, html: `<div class="si-field"><label>选择待上线单据</label><div style="max-height:320px;overflow-y:auto">${opts}</div></div>` }], async () => {
+        const opts = cands.map(i => `<label style="display:flex;gap:7px;align-items:center;padding:5px 0"><input type="checkbox" class="si-add-chk" value="${i.id}"> #${i.id} <span class="u-type-tag ${esc(i.type)}">${esc(siTypeLabel(i.type))}</span> ${esc(i.title)}</label>`).join('');
+        siModal('加入批次', [{ k: null, html: `<div class="u-form-group"><label>选择待上线单据</label><div style="max-height:320px;overflow-y:auto">${opts}</div></div>` }], async () => {
             const ids = [...document.querySelectorAll('.si-add-chk:checked')].map(c => parseInt(c.value, 10));
             if (!ids.length) { showToast('请至少选择一个单据', 'error'); return false; }
             const rr = await siApi('/sys-releases/' + releaseId + '/add-issues', { method: 'POST', body: { issue_ids: ids } });
@@ -2048,18 +2053,18 @@
     function siCloseModal() { document.getElementById('siModalOverlay').classList.remove('open'); siModalConfirm = null; }
 
     // 字段构造器（值均经 escapeHtml；label/hint 为静态文案）
-    function fText(k, l, v, req, hint) { return { k, html: `<div class="si-field"><label>${l}${req ? ' <span class="req">*</span>' : ''}</label><input type="text" id="f_${k}" value="${esc(v || '')}">${hint ? `<div class="si-hint">${hint}</div>` : ''}</div>` }; }
-    function fTextarea(k, l, v, req, hint) { return { k, html: `<div class="si-field"><label>${l}${req ? ' <span class="req">*</span>' : ''}</label><textarea id="f_${k}">${esc(v || '')}</textarea>${hint ? `<div class="si-hint">${hint}</div>` : ''}</div>` }; }
-    function fDate(k, l, v) { return { k, html: `<div class="si-field"><label>${l}</label><input type="date" id="f_${k}" value="${esc(v || '')}"></div>` }; }
-    function fDateTime(k, l, v) { return { k, html: `<div class="si-field"><label>${l} <span class="req">*</span></label><input type="datetime-local" id="f_${k}" value="${esc(v || '')}"></div>` }; }
-    function fSelect(k, l, opts, cur) { return { k, html: `<div class="si-field"><label>${l}</label><select id="f_${k}">${opts.map(o => `<option value="${esc(o)}" ${cur === o ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select></div>` }; }
-    function fSelectMap(k, l, opts, cur, labelMap) { return { k, html: `<div class="si-field"><label>${l} <span class="req">*</span></label><select id="f_${k}">${opts.map(o => `<option value="${esc(o)}" ${cur === o ? 'selected' : ''}>${esc(labelMap && labelMap[o] || o)}</option>`).join('')}</select></div>` }; }
+    function fText(k, l, v, req, hint) { return { k, html: `<div class="u-form-group"><label>${l}${req ? ' <span class="u-req">*</span>' : ''}</label><input type="text" id="f_${k}" value="${esc(v || '')}">${hint ? `<div class="u-hint">${hint}</div>` : ''}</div>` }; }
+    function fTextarea(k, l, v, req, hint) { return { k, html: `<div class="u-form-group"><label>${l}${req ? ' <span class="u-req">*</span>' : ''}</label><textarea id="f_${k}">${esc(v || '')}</textarea>${hint ? `<div class="u-hint">${hint}</div>` : ''}</div>` }; }
+    function fDate(k, l, v) { return { k, html: `<div class="u-form-group"><label>${l}</label><input type="date" id="f_${k}" value="${esc(v || '')}"></div>` }; }
+    function fDateTime(k, l, v) { return { k, html: `<div class="u-form-group"><label>${l} <span class="u-req">*</span></label><input type="datetime-local" id="f_${k}" value="${esc(v || '')}"></div>` }; }
+    function fSelect(k, l, opts, cur) { return { k, html: `<div class="u-form-group"><label>${l}</label><select id="f_${k}">${opts.map(o => `<option value="${esc(o)}" ${cur === o ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select></div>` }; }
+    function fSelectMap(k, l, opts, cur, labelMap) { return { k, html: `<div class="u-form-group"><label>${l} <span class="u-req">*</span></label><select id="f_${k}">${opts.map(o => `<option value="${esc(o)}" ${cur === o ? 'selected' : ''}>${esc(labelMap && labelMap[o] || o)}</option>`).join('')}</select></div>` }; }
     function fUserSelect(k, l, exclude) {
         const opts = siUsers.filter(u => u.role !== 'viewer').map(u => `<option value="${u.id}">${esc(u.display_name || u.username)}${u.id === exclude ? '（当前）' : ''}</option>`).join('');
-        return { k, html: `<div class="si-field"><label>${l} <span class="req">*</span></label><select id="f_${k}"><option value="">请选择</option>${opts}</select></div>` };
+        return { k, html: `<div class="u-form-group"><label>${l} <span class="u-req">*</span></label><select id="f_${k}"><option value="">请选择</option>${opts}</select></div>` };
     }
-    function fFile(k, l, multi) { return { k: null, html: `<div class="si-field"><label>${l}</label><input type="file" id="f_${k}" ${multi ? 'multiple' : ''}></div>` }; }
-    function fCheckbox(k, l, checked) { return { k, html: `<div class="si-field inline-chk"><input type="checkbox" id="f_${k}" ${checked ? 'checked' : ''}><label for="f_${k}">${l}</label></div>` }; }
+    function fFile(k, l, multi) { return { k: null, html: `<div class="u-form-group"><label>${l}</label><input type="file" id="f_${k}" ${multi ? 'multiple' : ''}></div>` }; }
+    function fCheckbox(k, l, checked) { return { k, html: `<div class="u-form-group inline-chk"><input type="checkbox" id="f_${k}" ${checked ? 'checked' : ''}><label for="f_${k}">${l}</label></div>` }; }
     function note(txt) { return { k: null, html: `<div class="si-note-box">${txt}</div>` }; }
 
     // ---- datetime-local ↔ 后端 'YYYY-MM-DD HH:MM' ----

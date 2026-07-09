@@ -7,81 +7,24 @@
     <title>数据修正 - 智数协同平台</title>
     <link rel="icon" href="data:,">
     <link rel="stylesheet" href="assets/css/style.css?v=v1.102.1_nav">
+    <link rel="stylesheet" href="assets/css/components.css?v=v1.110.0_unify">
     <style>
-        /* ===== 筛选栏（对齐 Issue_Tracker 范式）===== */
-        .filter-bar {
-            display: flex; align-items: center; gap: 10px;
-            padding: 16px 20px; background: #fff; border-radius: 10px;
-            border: 1px solid #e2e8f0; margin-bottom: 16px; flex-wrap: wrap;
-        }
-        .filter-bar select, .filter-bar input {
-            padding: 7px 12px; border: 1px solid #d1d5db; border-radius: 6px;
-            font-size: 13px; background: #fff; color: #374151; outline: none; transition: border-color 0.2s;
-        }
-        .filter-bar select:focus, .filter-bar input:focus { border-color: #d97706; }
-        .filter-bar input[type="text"] { width: 200px; }
-        .filter-bar .filter-label { font-size: 12px; color: #6b7280; margin-right: -4px; }
-        .btn-primary {
-            padding: 8px 18px; background: linear-gradient(135deg, #d97706, #b45309);
-            color: #fff; border: none; border-radius: 6px; font-size: 13px; font-weight: 600;
-            cursor: pointer; display: inline-flex; align-items: center; gap: 5px; transition: opacity 0.2s; white-space: nowrap;
-        }
-        .btn-primary:hover { opacity: 0.9; }
-        .req { color: #dc2626; font-weight: 700; }
-        .hint { font-size: 11px; color: #9ca3af; margin-top: 4px; line-height: 1.5; }
-        .btn-primary:disabled { opacity: 0.55; cursor: not-allowed; }
-        .btn-secondary {
-            padding: 6px 14px; background: #f3f4f6; color: #374151; border: 1px solid #d1d5db;
-            border-radius: 6px; font-size: 13px; cursor: pointer; transition: background 0.2s;
-        }
-        .btn-secondary:hover { background: #e5e7eb; }
-        .btn-danger {
-            padding: 6px 14px; background: #fee2e2; color: #dc2626; border: 1px solid #fca5a5;
-            border-radius: 6px; font-size: 13px; cursor: pointer;
-        }
-        .btn-danger:hover { background: #fecaca; }
+        /* ===== 页面专属残留（共享组件层已迁移至 assets/css/components.css；style污染根治 B 方案
+           20260709 v1.1 后共享根类均带 u- 前缀，不再依赖 .unified-page 作用域门控，仅作迁移标记/覆盖钩子）===== */
 
-        /* ===== 统计卡片 ===== */
-        .stats-row { display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
-        .stat-card {
-            flex: 1; min-width: 130px; background: #fff; border-radius: 10px; border: 1px solid #e2e8f0;
-            padding: 14px 18px; display: flex; align-items: center; gap: 12px; cursor: pointer;
-            transition: border-color 0.2s, box-shadow 0.2s;
-        }
-        .stat-card:hover { border-color: #d97706; box-shadow: 0 2px 8px rgba(217,119,6,0.08); }
-        .stat-card.active { border-color: #d97706; background: #fffbeb; }
-        .stat-icon { width: 36px; height: 36px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 16px; }
-        .stat-info .stat-num { font-size: 22px; font-weight: 700; color: #111827; }
-        .stat-info .stat-label { font-size: 12px; color: #6b7280; margin-top: 2px; }
+        /* 类型标签修饰色（base 见 components.css .u-type-tag） */
+        .u-type-tag.t-single { background: #dbeafe; color: #1d4ed8; }
+        .u-type-tag.t-batch { background: #fef3c7; color: #92400e; }
 
-        /* ===== 表格 ===== */
-        .corr-table-wrap { overflow-x: auto; border-radius: 10px; border: 1px solid #e2e8f0; }
-        .corr-table { width: 100%; min-width: 1100px; border-collapse: separate; border-spacing: 0; background: #fff; }
-        .corr-table th {
-            background: #f8fafc; padding: 10px 14px; font-size: 12px; font-weight: 600; color: #64748b;
-            text-align: left; border-bottom: 1px solid #e2e8f0; white-space: nowrap;
-        }
-        .corr-table td { padding: 12px 14px; font-size: 13px; color: #374151; border-bottom: 1px solid #f1f5f9; vertical-align: middle; }
-        .corr-table tr:last-child td { border-bottom: none; }
-        .corr-table tbody tr { cursor: pointer; transition: background 0.15s; }
-        .corr-table tbody tr:hover { background: #fffbeb; }
-        .corr-table td.ellip { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-        /* 类型标签（单/批量） */
-        .type-tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 500; white-space: nowrap; }
-        .type-tag.t-single { background: #dbeafe; color: #1d4ed8; }
-        .type-tag.t-batch { background: #fef3c7; color: #92400e; }
-
-        /* 状态徽章（8 态，class 用原 status key） */
-        .status-badge { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: 600; white-space: nowrap; }
-        .status-badge.s-PENDING_ASSIGN { background: #f3f4f6; color: #6b7280; }
-        .status-badge.s-ASSIGNED_PENDING_ESTIMATE { background: #e0e7ff; color: #4338ca; }
-        .status-badge.s-IN_PROGRESS { background: #dbeafe; color: #1d4ed8; }
-        .status-badge.s-FIXED { background: #fef3c7; color: #92400e; }
-        .status-badge.s-REFIXED { background: #ccfbf1; color: #0f766e; }
-        .status-badge.s-ARCHIVED { background: #d1fae5; color: #065f46; }
-        .status-badge.s-REJECTED { background: #f3f4f6; color: #991b1b; }
-        .status-badge.s-VOIDED { background: #e5e7eb; color: #9ca3af; }
+        /* 状态徽章修饰色（8 态，class 用原 status key；base 见 components.css .u-status-badge） */
+        .u-status-badge.s-PENDING_ASSIGN { background: #f3f4f6; color: #6b7280; }
+        .u-status-badge.s-ASSIGNED_PENDING_ESTIMATE { background: #e0e7ff; color: #4338ca; }
+        .u-status-badge.s-IN_PROGRESS { background: #dbeafe; color: #1d4ed8; }
+        .u-status-badge.s-FIXED { background: #fef3c7; color: #92400e; }
+        .u-status-badge.s-REFIXED { background: #ccfbf1; color: #0f766e; }
+        .u-status-badge.s-ARCHIVED { background: #d1fae5; color: #065f46; }
+        .u-status-badge.s-REJECTED { background: #f3f4f6; color: #991b1b; }
+        .u-status-badge.s-VOIDED { background: #e5e7eb; color: #9ca3af; }
 
         /* 超期/积压高亮标记 */
         .flag-overdue { display: inline-block; margin-left: 6px; font-size: 11px; color: #dc2626; font-weight: 600; }
@@ -103,48 +46,48 @@
         /* ── 分组层级树（P2 v2 2026-06-27，去 hover 改常驻树）──
            前端聚类排序后：原单/主单置顶，子单/返工缩进挂下方；跨系统=琥珀 / 返工=红（底+左色条）。
            原单（返工组根）= 中性底 + 红左条；返工子单 = 红底 + 红左条；跨系统主单+子单 = 中性底 + 琥珀左条（v1.98.1：与非跨系统单据同底色，仅左条区分，不再用琥珀底）。 */
-        .corr-table tbody tr.corr-row-child td:first-child { padding-left: 30px; position: relative; }
-        .corr-table tbody tr.corr-row-child td:first-child::before { content: '\251c'; position: absolute; left: 12px; top: 11px; color: #cbd5e1; font-size: 12px; line-height: 1; }   /* ├ */
-        .corr-table tbody tr.corr-row-child.corr-row-last td:first-child::before { content: '\2514'; }   /* └ */
-        .corr-table tbody tr.corr-bar-amber { box-shadow: inset 3px 0 0 #d97706; }   /* 跨系统：琥珀左条 */
-        .corr-table tbody tr.corr-bar-red { box-shadow: inset 3px 0 0 #dc2626; }      /* 返工：红左条 */
+        .u-corr-table tbody tr.corr-row-child td:first-child { padding-left: 30px; position: relative; }
+        .u-corr-table tbody tr.corr-row-child td:first-child::before { content: '\251c'; position: absolute; left: 12px; top: 11px; color: #cbd5e1; font-size: 12px; line-height: 1; }   /* ├ */
+        .u-corr-table tbody tr.corr-row-child.corr-row-last td:first-child::before { content: '\2514'; }   /* └ */
+        .u-corr-table tbody tr.corr-bar-amber { box-shadow: inset 3px 0 0 #d97706; }   /* 跨系统：琥珀左条 */
+        .u-corr-table tbody tr.corr-bar-red { box-shadow: inset 3px 0 0 #dc2626; }      /* 返工：红左条 */
         /* （v1.98.1 移除 .corr-bg-amber：跨系统子单不再用琥珀底，与普通单据同底色，仅靠 corr-bar-amber 左条区分） */
-        .corr-table tbody tr.corr-bg-red { background: #fef2f2; }                     /* 返工子单：红底 */
-        .corr-table tbody tr.corr-bg-red:hover { background: #fde4e4; }
+        .u-corr-table tbody tr.corr-bg-red { background: #fef2f2; }                     /* 返工子单：红底 */
+        .u-corr-table tbody tr.corr-bg-red:hover { background: #fde4e4; }
         /* 补显的上下文父行（被筛选滤掉但为保树补回）：灰显斜体，仍可点开详情 */
-        .corr-table tbody tr.corr-row-context td { color: #9ca3af; font-style: italic; }
-        /* ID 列（第一列）收窄：徽章瘦身后两侧 padding 也收紧（14→8px），避免组号徽章把 # 列撑太宽 */
-        .corr-table th:first-child, .corr-table td:first-child { padding-left: 8px; padding-right: 8px; }
+        .u-corr-table tbody tr.corr-row-context td { color: #9ca3af; font-style: italic; }
+        /* ID 列（第一列）收窄：徽章瘦身后两侧 padding 也收紧（14→8px），避免组号徽章把 # 列撑太宽
+           ⚠️ 对 components.css 共享 .u-corr-table td 的有意覆盖（前端统一 C0）：写真实 .unified-page 前缀，
+           作为"被批准覆盖"的显式标记（同时被 verify-unify-static.js 断言② 白名单放行）。
+           注：本条 :first-child 本身已把特异性抬到 (0,2,1)，无条件高于共享层 .u-corr-table td 的 (0,1,1)，
+           覆盖不依赖前缀、更不靠源序——此处无真实 tie；前缀是防御性标记（style污染根治 B 方案后共享层
+           已去 :where() 门控，改用裸 .u-corr-table 选择器，本条特异性结论不变，仅类名加 u- 前缀）。 */
+        .unified-page .u-corr-table th:first-child, .unified-page .u-corr-table td:first-child { padding-left: 8px; padding-right: 8px; }
         /* ID 列序号+徽章同行不换行（v1.97.1）：td 默认可换行，子单树缩进(padding-left:30px)+序号+徽章挤不下会断行；nowrap 让列按 table-auto 稍微加宽到恰好容纳，子单与主单一致同行 */
-        .corr-table td:first-child { white-space: nowrap; }
+        .unified-page .u-corr-table td:first-child { white-space: nowrap; }
 
-        /* 详情区块 */
-        .detail-section { margin-bottom: 18px; }
-        .detail-section h3 { font-size: 13px; font-weight: 600; color: #374151; margin: 0 0 8px; padding-bottom: 6px; border-bottom: 1px solid #f1f5f9; }
-        .kv-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 16px; }
-        .kv-item { font-size: 13px; }
-        .kv-item label { display: block; font-size: 11px; color: #9ca3af; margin-bottom: 2px; }
-        .kv-item .v { color: #374151; word-break: break-word; }
-        .kv-item.full { grid-column: 1 / -1; }
-        .history-item { font-size: 12px; padding: 6px 0; border-bottom: 1px dashed #f1f5f9; }
-        .history-item:last-child { border-bottom: none; }
-        .att-item { font-size: 12px; padding: 4px 0; }
-        .att-item a { color: #2563eb; text-decoration: none; }
-        .att-item a:hover { text-decoration: underline; }
-        .notify-badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 500; }
-        .notify-badge.n-sent { background: #ecfdf5; color: #059669; }
-        .notify-badge.n-failed { background: #fef2f2; color: #dc2626; }
-        .notify-badge.n-not_sent { background: #f3f4f6; color: #6b7280; }
-        .notify-badge.n-no_phone { background: #fffbeb; color: #b45309; }
-        /* ===== 通知区四态行（§2.4，每类通知一行：标签 + 状态文案 + 操作按钮）===== */
-        .notify-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 0; border-bottom: 1px dashed #f1f5f9; flex-wrap: wrap; }
-        .notify-row:last-child { border-bottom: none; }
-        .notify-row .nr-label { font-size: 12px; color: #6b7280; font-weight: 600; min-width: 110px; }
-        .notify-row .nr-body { flex: 1; font-size: 12px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
-        .notify-row .nb-btn { font-size: 11px; padding: 3px 10px; }
-        .action-bar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
-        .action-bar select { font-size: 12px; padding: 5px 8px; border: 1px solid #d1d5db; border-radius: 6px; }
-        .action-bar .btn-primary, .action-bar .btn-secondary, .action-bar .btn-danger { font-size: 12px; padding: 5px 12px; }
+        /* 通知徽章修饰色（base 见 components.css .u-notify-badge） */
+        .u-notify-badge.n-sent { background: #ecfdf5; color: #059669; }
+        .u-notify-badge.n-failed { background: #fef2f2; color: #dc2626; }
+        .u-notify-badge.n-not_sent { background: #f3f4f6; color: #6b7280; }
+        .u-notify-badge.n-no_phone { background: #fffbeb; color: #b45309; }
+
+        /* style污染根治 B 方案（20260709 v1.1，复审新发现）：本页所有表单字段纵向间距（label→input/
+           hint 间的视觉留白）改名前一直由 style.css 裸 `.form-group { display:flex; flex-direction:column;
+           gap:8px }`（L3293，早年为本页而写、后来沉淀成全站遗留样式）搭便车提供——components.css 的共享
+           `.u-form-group` 自身从未声明 display/gap（只有 margin-bottom:14px 管字段间距，不管字段内部
+           label→input 间距），本页字段内部间距因此全靠这条 style.css 裸规则撑住，此前从未被察觉/记录为
+           "依赖"。u- 改名后 style.css 不再匹配，为保零漂移在此显式补回（Sys_Iteration 与本页需求相反——
+           si-field 原设计是 display:block 无 gap，Sys 曾靠真前缀 `.form-group{display:block}` 主动收回过
+           这条泄漏；两页对同一共享类需要不同 display，故只能各自页面覆盖，不能收编进共享层）。 */
+        .unified-page .u-form-group { display: flex; flex-direction: column; gap: 8px; }
+
+        /* 同上机制（复审新发现）：状态徽章的柔和投影+字距改名前由 style.css 裸 `.status-badge { box-shadow:
+           0 2px 8px rgba(0,0,0,.15); letter-spacing:0.5px; text-transform:uppercase; color:white }`
+           （L1166）搭便车提供——color 因各 .s-* 修饰色更高特异性不受影响，text-transform 对中文字符无
+           可见效果故不补；box-shadow/letter-spacing 无人认领，u- 改名后丢失。Sys_Iteration 相反：si-sbadge
+           原设计无投影/常规字距，Sys 曾靠真前缀主动收回过这条泄漏，故同样不能收编进共享层。 */
+        .unified-page .u-status-badge { box-shadow: 0 2px 8px rgba(0,0,0,.15); letter-spacing: 0.5px; }
 
         /* 拉群成员勾选弹窗 */
         .member-base-list { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 10px 12px; font-size: 13px; color: #374151; margin-bottom: 12px; }
@@ -152,43 +95,16 @@
         .member-extra-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px; max-height: 220px; overflow-y: auto; border: 1px solid #e2e8f0; border-radius: 6px; padding: 10px 12px; }
         .member-extra-grid label { font-size: 13px; color: #374151; display: flex; align-items: center; gap: 6px; cursor: pointer; }
         .radio-row { display: flex; gap: 18px; align-items: center; margin: 4px 0 10px; font-size: 13px; flex-wrap: wrap; }
-        .radio-row label { display: flex; align-items: center; gap: 5px; cursor: pointer; }
-
-        /* ===== 详情抽屉（自定义，覆盖 style.css 的常显 .drawer-overlay 旧样式；带 .open 门控）===== */
-        .drawer-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.3); z-index: 900; }
-        .drawer-overlay.open { display: block; }
-        /* top:64px 避开固定导航栏（.navbar z-index:1000 > drawer 901，否则抽屉头部标题被导航栏遮挡，2026-06-26 修复） */
-        .drawer { position: fixed; top: 64px; right: -620px; bottom: 0; width: 600px; max-width: 92vw; background: #fff; box-shadow: -4px 0 20px rgba(0,0,0,0.12); z-index: 901; transition: right 0.3s ease; display: flex; flex-direction: column; }
-        .drawer.open { right: 0; }
-        .drawer-header { padding: 20px 24px 16px; border-bottom: 1px solid #e2e8f0; display: flex; justify-content: space-between; align-items: flex-start; }
-        .drawer-header h2 { font-size: 16px; font-weight: 700; color: #111827; margin: 0; flex: 1; line-height: 1.5; }
-        .drawer-title-reason { font-size: 13px; font-weight: 400; color: #6b7280; cursor: help; }
-        .drawer-close { background: none; border: none; font-size: 20px; cursor: pointer; color: #6b7280; padding: 4px; line-height: 1; }
-        .drawer-close:hover { color: #111827; }
-        .drawer-body { flex: 1; overflow-y: auto; padding: 20px 24px; }
-
-        /* ===== 弹窗 ===== */
-        .modal-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.4); z-index: 1000; justify-content: center; align-items: center; }
-        .modal-overlay.open { display: flex; }
-        .modal-box { background: #fff; border-radius: 14px; width: 560px; max-width: 92vw; max-height: 90vh; overflow-y: auto; box-shadow: 0 20px 60px rgba(0,0,0,0.15); }
-        .modal-header { padding: 20px 24px 0; display: flex; justify-content: space-between; align-items: center; }
-        .modal-header h2 { font-size: 16px; font-weight: 700; color: #111827; margin: 0; }
-        .modal-body { padding: 20px 24px; }
-        .modal-footer { padding: 0 24px 20px; display: flex; justify-content: flex-end; gap: 10px; }
-        .form-group { margin-bottom: 14px; }
-        .form-group label { display: block; font-size: 12px; font-weight: 600; color: #374151; margin-bottom: 5px; }
-        .form-group input, .form-group select, .form-group textarea { width: 100%; padding: 8px 12px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 13px; font-family: inherit; outline: none; box-sizing: border-box; }
-        .form-group input:focus, .form-group select:focus, .form-group textarea:focus { border-color: #d97706; }
-        .form-group textarea { resize: vertical; min-height: 70px; }
-        .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-
-        /* 空状态 */
-        .empty-state { text-align: center; padding: 60px 20px; color: #9ca3af; }
-        .empty-state svg { margin-bottom: 12px; }
+        /* C0 发现：本页两处 .radio-row（修正类型/指派方式）均嵌在 .u-form-group 内，与共享层 .u-form-group label
+           （display:block，同 0,1,1 特异性）打平；原内联单文件里 .form-group label 源序更后天然获胜（这条
+           display:flex 从未真正生效）。拆分后共享层先加载、残留内联后加载，若保留 display:flex 反而会因
+           源序反转意外胜出（C0 自测测出的真实回归）。故删除这条从未生效的 display:flex；align-items/gap
+           同样一直是死代码，为最小改动保留不动，行为与迁移前逐属性一致。 */
+        .radio-row label { align-items: center; gap: 5px; cursor: pointer; }
     </style>
 </head>
 
-<body>
+<body class="unified-page">
     <nav class="navbar fixed-header">
         <div class="nav-left">
             <div class="nav-logo">
@@ -255,36 +171,36 @@
 
     <main class="workbench-container">
         <!-- 统计卡片（按状态分组） -->
-        <div class="stats-row" id="statsRow">
-            <div class="stat-card active" onclick="filterByGroup('')" data-group="">
-                <div class="stat-icon" style="background:#f3f4f6;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#6b7280" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/></svg></div>
-                <div class="stat-info"><div class="stat-num" id="statAll">0</div><div class="stat-label">全部</div></div>
+        <div class="u-stats-row" id="statsRow">
+            <div class="u-stat-card active" onclick="filterByGroup('')" data-group="">
+                <div class="u-stat-icon" style="background:#f3f4f6;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#6b7280" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/></svg></div>
+                <div class="u-stat-info"><div class="u-stat-num" id="statAll">0</div><div class="u-stat-label">全部</div></div>
             </div>
-            <div class="stat-card" onclick="filterByGroup('pending')" data-group="pending">
-                <div class="stat-icon" style="background:#f3f4f6;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#6b7280" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></div>
-                <div class="stat-info"><div class="stat-num" id="statPending">0</div><div class="stat-label">待指派/待回复</div></div>
+            <div class="u-stat-card" onclick="filterByGroup('pending')" data-group="pending">
+                <div class="u-stat-icon" style="background:#f3f4f6;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#6b7280" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></div>
+                <div class="u-stat-info"><div class="u-stat-num" id="statPending">0</div><div class="u-stat-label">待指派/待回复</div></div>
             </div>
-            <div class="stat-card" onclick="filterByGroup('progress')" data-group="progress">
-                <div class="stat-icon" style="background:#dbeafe;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#1d4ed8" stroke-width="2"><path d="M12 2v4"/><path d="M12 18v4"/><path d="M4.93 4.93l2.83 2.83"/><path d="M16.24 16.24l2.83 2.83"/></svg></div>
-                <div class="stat-info"><div class="stat-num" id="statProgress">0</div><div class="stat-label">修正中</div></div>
+            <div class="u-stat-card" onclick="filterByGroup('progress')" data-group="progress">
+                <div class="u-stat-icon" style="background:#dbeafe;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#1d4ed8" stroke-width="2"><path d="M12 2v4"/><path d="M12 18v4"/><path d="M4.93 4.93l2.83 2.83"/><path d="M16.24 16.24l2.83 2.83"/></svg></div>
+                <div class="u-stat-info"><div class="u-stat-num" id="statProgress">0</div><div class="u-stat-label">修正中</div></div>
             </div>
-            <div class="stat-card" onclick="filterByGroup('fixed')" data-group="fixed">
-                <div class="stat-icon" style="background:#fef3c7;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#92400e" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg></div>
-                <div class="stat-info"><div class="stat-num" id="statFixed">0</div><div class="stat-label">已完成待归档</div></div>
+            <div class="u-stat-card" onclick="filterByGroup('fixed')" data-group="fixed">
+                <div class="u-stat-icon" style="background:#fef3c7;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#92400e" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg></div>
+                <div class="u-stat-info"><div class="u-stat-num" id="statFixed">0</div><div class="u-stat-label">已完成待归档</div></div>
             </div>
-            <div class="stat-card" onclick="filterByGroup('archived')" data-group="archived">
-                <div class="stat-icon" style="background:#d1fae5;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#065f46" stroke-width="2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg></div>
-                <div class="stat-info"><div class="stat-num" id="statArchived">0</div><div class="stat-label">已归档</div></div>
+            <div class="u-stat-card" onclick="filterByGroup('archived')" data-group="archived">
+                <div class="u-stat-icon" style="background:#d1fae5;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#065f46" stroke-width="2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg></div>
+                <div class="u-stat-info"><div class="u-stat-num" id="statArchived">0</div><div class="u-stat-label">已归档</div></div>
             </div>
         </div>
 
         <!-- 筛选栏 -->
-        <div class="filter-bar">
-            <span class="filter-label">所属系统</span>
+        <div class="u-filter-bar">
+            <span class="u-filter-label">所属系统</span>
             <select id="filterSystem" onchange="renderTable()">
                 <option value="">全部系统</option>
             </select>
-            <span class="filter-label">类型</span>
+            <span class="u-filter-label">类型</span>
             <select id="filterType" onchange="renderTable()">
                 <option value="">全部类型</option>
                 <option value="single">单数据修正</option>
@@ -301,15 +217,15 @@
             </label>
             <input type="text" id="filterSearch" placeholder="搜索修正方式/业务方/OA/流程类型..." onkeyup="debounceSearch()">
             <div style="flex:1;"></div>
-            <button class="btn-primary" id="btnNewCorrection" onclick="openCreateModal()" style="display:none;">
+            <button class="u-btn-primary" id="btnNewCorrection" onclick="openCreateModal()" style="display:none;">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
                 新建修正单
             </button>
         </div>
 
         <!-- 列表 -->
-        <div class="corr-table-wrap">
-            <table class="corr-table">
+        <div class="u-corr-table-wrap">
+            <table class="u-corr-table">
                 <thead>
                     <tr>
                         <th style="width:1%; white-space:nowrap;">ID</th>
@@ -330,111 +246,111 @@
                 <tbody id="corrTableBody"></tbody>
             </table>
         </div>
-        <div class="empty-state" id="emptyState" style="display:none;">
+        <div class="u-empty-state" id="emptyState" style="display:none;">
             <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#d1d5db" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
             <p>暂无数据修正单</p>
         </div>
     </main>
 
     <!-- 详情抽屉 -->
-    <div class="drawer-overlay" id="drawerOverlay" onclick="closeDrawer()"></div>
-    <div class="drawer" id="drawer">
-        <div class="drawer-header">
+    <div class="u-drawer-overlay" id="drawerOverlay" onclick="closeDrawer()"></div>
+    <div class="u-drawer" id="drawer">
+        <div class="u-drawer-header">
             <h2 id="drawerTitle">修正单详情</h2>
-            <button class="drawer-close" onclick="closeDrawer()">&times;</button>
+            <button class="u-drawer-close" onclick="closeDrawer()">&times;</button>
         </div>
-        <div class="drawer-body" id="drawerBody"></div>
+        <div class="u-drawer-body" id="drawerBody"></div>
     </div>
 
     <!-- 新建修正单弹窗（仅 admin） -->
-    <div class="modal-overlay" id="createModal">
-        <div class="modal-box">
-            <div class="modal-header"><h2>新建修正单</h2><button class="drawer-close" onclick="closeCreateModal()">&times;</button></div>
-            <div class="modal-body">
-                <div class="form-row">
-                    <div class="form-group"><label>OA 流程号</label><input type="text" id="formOaNumber" placeholder="可选，只填数字部分（如 364265）；留空=信息技术部自发现" oninput="toggleOaMode()">
+    <div class="u-modal-overlay" id="createModal">
+        <div class="u-modal-box">
+            <div class="u-modal-header"><h2>新建修正单</h2><button class="u-drawer-close" onclick="closeCreateModal()">&times;</button></div>
+            <div class="u-modal-body">
+                <div class="u-form-row">
+                    <div class="u-form-group"><label>OA 流程号</label><input type="text" id="formOaNumber" placeholder="可选，只填数字部分（如 364265）；留空=信息技术部自发现" oninput="toggleOaMode()">
                         <!-- codex 84 L-1：非法格式即时提示（前端镜像后端 validateInputOaNumber 口径，防"引导传截图后才被 400"的摩擦） -->
-                        <div class="hint" id="oaFormatHint" style="display:none;color:#d93025;">OA 流程号须为 1-20 位纯数字（如 364265）；留空则视为信息技术部自发现。</div>
+                        <div class="u-hint" id="oaFormatHint" style="display:none;color:#d93025;">OA 流程号须为 1-20 位纯数字（如 364265）；留空则视为信息技术部自发现。</div>
                     </div>
-                    <div class="form-group"><label>流程类型</label><input type="text" id="formProcessType" placeholder="可选"></div>
+                    <div class="u-form-group"><label>流程类型</label><input type="text" id="formProcessType" placeholder="可选"></div>
                 </div>
                 <!-- B2（建单字段体系优化，OA 截图强制）：填写真实 OA 流程号后必须同步上传截图；留空（信息技术部自发现）免此项，见 toggleOaMode() -->
-                <div class="form-group" id="oaProofGroup" style="display:none;">
-                    <label>OA 流程截图 <span class="req">*</span></label>
+                <div class="u-form-group" id="oaProofGroup" style="display:none;">
+                    <label>OA 流程截图 <span class="u-req">*</span></label>
                     <input type="file" id="formOaProofFiles" multiple accept="image/*,.pdf,.xlsx,.xls">
-                    <div class="hint">填写了真实 OA 流程号，须随建单同步上传截图留档（建单后不可补传，事后如需变更请联系信息技术部）。</div>
+                    <div class="u-hint">填写了真实 OA 流程号，须随建单同步上传截图留档（建单后不可补传，事后如需变更请联系信息技术部）。</div>
                 </div>
-                <div class="form-group">
-                    <label>修正类型 <span class="req">*</span></label>
+                <div class="u-form-group">
+                    <label>修正类型 <span class="u-req">*</span></label>
                     <div class="radio-row">
                         <label><input type="radio" name="corrType" value="single" checked onchange="toggleCorrectionCountByType()"> 单数据修正</label>
                         <label><input type="radio" name="corrType" value="batch" onchange="toggleCorrectionCountByType()"> 批量数据修正</label>
                     </div>
                 </div>
-                <div class="form-row">
-                    <div class="form-group">
-                        <label>所属系统 <span class="req">*</span></label>
+                <div class="u-form-row">
+                    <div class="u-form-group">
+                        <label>所属系统 <span class="u-req">*</span></label>
                         <select id="formSourceSystem" onchange="toggleSourceOther()"></select>
                     </div>
-                    <div class="form-group" id="sourceOtherGroup" style="display:none;">
-                        <label>其他系统说明 <span class="req">*</span></label>
+                    <div class="u-form-group" id="sourceOtherGroup" style="display:none;">
+                        <label>其他系统说明 <span class="u-req">*</span></label>
                         <input type="text" id="formSourceSystemOther" placeholder="选「其他」时必填">
                     </div>
                 </div>
-                <div class="form-group">
-                    <label>修正方式 <span class="req">*</span></label>
+                <div class="u-form-group">
+                    <label>修正方式 <span class="u-req">*</span></label>
                     <textarea id="formLocationInfo" rows="3" placeholder="一句话写清：哪里的什么数据错了，要改成什么。如：合同表 C2024-001 的金额字段当前显示 100，应改为 120"></textarea>
-                    <div class="hint">合并原"错误描述 + 期望值"——把"错在哪 + 要改成什么"写在一起。</div>
+                    <div class="u-hint">合并原"错误描述 + 期望值"——把"错在哪 + 要改成什么"写在一起。</div>
                 </div>
                 <!-- 修正条数按类型分流（用户优化）：single 隐藏（系统固定 1）/ batch 显示+必填 ≥2 -->
-                <div class="form-group" id="formCorrectionCountGroup" style="display:none;">
-                    <label>修正条数 <span class="req">*</span></label>
+                <div class="u-form-group" id="formCorrectionCountGroup" style="display:none;">
+                    <label>修正条数 <span class="u-req">*</span></label>
                     <input type="number" id="formCorrectionCount" min="2" step="1" placeholder="批量数据修正必填，且须 ≥2">
-                    <div class="hint">批量数据修正必填，须 ≥2（仅 1 条请改用单数据修正）；单数据修正系统固定为 1，无需填写。</div>
+                    <div class="u-hint">批量数据修正必填，须 ≥2（仅 1 条请改用单数据修正）；单数据修正系统固定为 1，无需填写。</div>
                 </div>
                 <!-- L5 跨系统关联（§7.1 / 契约 B）：勾上展开系统2 字段（不含开发2、不含独立业务方——业务方共享主单）；勾上隐藏指派方式区（禁建单时直派） -->
-                <div class="form-group" style="margin-bottom:8px;">
+                <div class="u-form-group" style="margin-bottom:8px;">
                     <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
                         <input type="checkbox" id="formCrossSystem" onchange="toggleCrossSystem()" style="width:auto; margin:0;"> 跨系统关联（同一诉求需在两个系统分别修正）
                     </label>
-                    <div class="hint">勾选后一次建两单（系统1=主单 + 系统2=关联单）：业务方/类型/原因/期望时间共享，两单均待指派——建后在各自详情页指派开发（建单时不直派）。</div>
+                    <div class="u-hint">勾选后一次建两单（系统1=主单 + 系统2=关联单）：业务方/类型/原因/期望时间共享，两单均待指派——建后在各自详情页指派开发（建单时不直派）。</div>
                 </div>
                 <div id="system2Group" style="display:none; border:1px dashed #d1d5db; border-radius:8px; padding:12px; margin-bottom:14px; background:#fafafa;">
                     <div style="font-size:13px; font-weight:600; color:#374151; margin-bottom:10px;">系统2（关联单）</div>
-                    <div class="form-row">
-                        <div class="form-group" style="margin-bottom:12px;">
-                            <label>所属系统 <span class="req">*</span></label>
+                    <div class="u-form-row">
+                        <div class="u-form-group" style="margin-bottom:12px;">
+                            <label>所属系统 <span class="u-req">*</span></label>
                             <select id="formSourceSystem2" onchange="toggleSourceOther2()"></select>
                         </div>
-                        <div class="form-group" id="sourceOtherGroup2" style="display:none; margin-bottom:12px;">
-                            <label>其他系统说明 <span class="req">*</span></label>
+                        <div class="u-form-group" id="sourceOtherGroup2" style="display:none; margin-bottom:12px;">
+                            <label>其他系统说明 <span class="u-req">*</span></label>
                             <input type="text" id="formSourceSystemOther2" placeholder="选「其他」时必填">
                         </div>
                     </div>
-                    <div class="form-group" style="margin-bottom:12px;">
-                        <label>修正方式 <span class="req">*</span></label>
+                    <div class="u-form-group" style="margin-bottom:12px;">
+                        <label>修正方式 <span class="u-req">*</span></label>
                         <textarea id="formLocationInfo2" rows="3" placeholder="系统2 的：哪里的什么数据错了，要改成什么"></textarea>
                     </div>
-                    <div class="form-group" id="formCorrectionCount2Group" style="margin-bottom:0; display:none;">
-                        <label>修正条数 <span class="req">*</span></label>
+                    <div class="u-form-group" id="formCorrectionCount2Group" style="margin-bottom:0; display:none;">
+                        <label>修正条数 <span class="u-req">*</span></label>
                         <input type="number" id="formCorrectionCount2" min="2" step="1" placeholder="批量必填，≥2">
                     </div>
                 </div>
-                <div class="form-group"><label>原因/背景 <span class="req">*</span></label><textarea id="formReason" rows="2" placeholder="必填：错误产生原因或修正背景"></textarea></div>
+                <div class="u-form-group"><label>原因/背景 <span class="u-req">*</span></label><textarea id="formReason" rows="2" placeholder="必填：错误产生原因或修正背景"></textarea></div>
                 <!-- B2（建单字段体系优化，自发现自动业务方）：留空 OA 时后端静默以建单人作为业务方，本区隐藏；
                      填写真实 OA 流程号后展开，业务方部门/姓名按前端自由填，见 toggleOaMode() -->
                 <div id="requesterSectionGroup">
-                    <div class="form-group"><label>业务方部门</label><select id="formRequesterDept"></select></div>
-                    <div class="form-group">
-                        <label>业务方 <span class="req">*</span>（第一行为主业务方，可加多个）</label>
+                    <div class="u-form-group"><label>业务方部门</label><select id="formRequesterDept"></select></div>
+                    <div class="u-form-group">
+                        <label>业务方 <span class="u-req">*</span>（第一行为主业务方，可加多个）</label>
                         <div id="requesterList"></div>
-                        <button type="button" class="btn-secondary" onclick="addRequesterRow()" style="margin-top:6px; padding:4px 10px; font-size:12px;">+ 添加业务方</button>
-                        <div class="hint">主业务方姓名必填；同一修正诉求可能涉及多个业务方，完成后逐个发钉钉通知（需手机号）。</div>
+                        <button type="button" class="u-btn-secondary" onclick="addRequesterRow()" style="margin-top:6px; padding:4px 10px; font-size:12px;">+ 添加业务方</button>
+                        <div class="u-hint">主业务方姓名必填；同一修正诉求可能涉及多个业务方，完成后逐个发钉钉通知（需手机号）。</div>
                     </div>
                 </div>
-                <div class="form-group"><label>期望完成时间</label><input type="datetime-local" id="formExpectedDeadline"><div class="hint">可选，业务方期望完成时间（建单人代填）；不填则系统按默认规则生成。</div></div>
+                <div class="u-form-group"><label>期望完成时间</label><input type="datetime-local" id="formExpectedDeadline"><div class="u-hint">可选，业务方期望完成时间（建单人代填）；不填则系统按默认规则生成。</div></div>
                 <!-- 指派路径 A/B/none（二选一，G-16；§1.5 三选一字段联动：A 必填开发 / B 必填对接人 / none 都不填）；L5 跨系统勾选时整块隐藏（契约 B 禁直派） -->
-                <div class="form-group" id="assignModeGroup">
+                <div class="u-form-group" id="assignModeGroup">
                     <label>指派方式</label>
                     <div class="radio-row">
                         <label><input type="radio" name="assignMode" value="A" checked onchange="toggleAssignMode()"> 直接指派开发</label>
@@ -442,190 +358,190 @@
                         <label><input type="radio" name="assignMode" value="none" onchange="toggleAssignMode()"> 暂不指派</label>
                     </div>
                 </div>
-                <div class="form-group" id="assignAGroup">
+                <div class="u-form-group" id="assignAGroup">
                     <label>指派给（开发/处理人）</label>
                     <select id="formAssignedTo"><option value="">请选择开发/处理人</option></select>
-                    <div class="hint">下拉为全部非查看者用户，凭备注辨识；选定后建单即指派，需在详情页手动点「通知开发」发送钉钉。</div>
+                    <div class="u-hint">下拉为全部非查看者用户，凭备注辨识；选定后建单即指派，需在详情页手动点「通知开发」发送钉钉。</div>
                 </div>
-                <div class="form-group" id="assignBGroup" style="display:none;">
+                <div class="u-form-group" id="assignBGroup" style="display:none;">
                     <label>对接人</label>
                     <select id="formRelayUser"><option value="">请选择对接人</option></select>
-                    <div class="hint">建单后记录对接人，需在详情页手动点「通知对接人」发送钉钉；对接人收到后在平台指派。</div>
+                    <div class="u-hint">建单后记录对接人，需在详情页手动点「通知对接人」发送钉钉；对接人收到后在平台指派。</div>
                 </div>
                 <!-- D 块（错误证明→待修复数据正名，v1.3 §2）：改显示文案，底层 error_proof 标识符/字段名/变量名一律不动。
                      L3b 待修复数据（§6.7：L2a 后端已支持 error_proof 早期态上传；建单 JSON → 拿 id → 两步上传锚点单） -->
-                <div class="form-group">
+                <div class="u-form-group">
                     <label>待修复数据（可选）</label>
                     <textarea id="formErrorProofNote" rows="2" maxlength="1000" placeholder="可补充说明（如：表格第几列是待改字段），选填"></textarea>
                     <input type="file" id="formErrorProofFiles" multiple accept="image/*,.pdf,.xlsx,.xls" style="margin-top:6px;">
-                    <div class="hint">待修复数据附件（表格清单为主，图片/PDF/xlsx，≤5 个文件）+ 选填文字备注；建单后两步上传到本单（上传失败不影响建单，详情页可补传）。</div>
+                    <div class="u-hint">待修复数据附件（表格清单为主，图片/PDF/xlsx，≤5 个文件）+ 选填文字备注；建单后两步上传到本单（上传失败不影响建单，详情页可补传）。</div>
                 </div>
             </div>
-            <div class="modal-footer">
-                <button class="btn-secondary" onclick="closeCreateModal()">取消</button>
-                <button class="btn-primary" id="btnSubmitCreate" onclick="submitCorrection()">提交</button>
+            <div class="u-modal-footer">
+                <button class="u-btn-secondary" onclick="closeCreateModal()">取消</button>
+                <button class="u-btn-primary" id="btnSubmitCreate" onclick="submitCorrection()">提交</button>
             </div>
         </div>
     </div>
 
     <!-- 回复预计完成时间弹窗 -->
-    <div class="modal-overlay" id="estimateModal">
-        <div class="modal-box" style="max-width:440px;">
-            <div class="modal-header"><h2>回复预计完成时间</h2><button class="drawer-close" onclick="closeModal('estimateModal')">&times;</button></div>
-            <div class="modal-body">
+    <div class="u-modal-overlay" id="estimateModal">
+        <div class="u-modal-box" style="max-width:440px;">
+            <div class="u-modal-header"><h2>回复预计完成时间</h2><button class="u-drawer-close" onclick="closeModal('estimateModal')">&times;</button></div>
+            <div class="u-modal-body">
                 <input type="hidden" id="estimateCorrId">
-                <div class="form-group"><label>预计完成时间 <span class="req">*</span></label><input type="datetime-local" id="formEstimateAt"></div>
+                <div class="u-form-group"><label>预计完成时间 <span class="u-req">*</span></label><input type="datetime-local" id="formEstimateAt"></div>
                 <div style="font-size:12px; color:#6b7280;">回复后单进入「修正中」；钉钉通知业务方需在详情页手动点「通知业务方·预计」发送。</div>
             </div>
-            <div class="modal-footer"><button class="btn-secondary" onclick="closeModal('estimateModal')">取消</button><button class="btn-primary" id="btnSubmitEstimate" onclick="submitEstimate()">提交</button></div>
+            <div class="u-modal-footer"><button class="u-btn-secondary" onclick="closeModal('estimateModal')">取消</button><button class="u-btn-primary" id="btnSubmitEstimate" onclick="submitEstimate()">提交</button></div>
         </div>
     </div>
 
     <!-- L5 追加关联单弹窗（§6.2 / D-9；admin，在主单详情触发）：晚发现同一诉求还需在第三系统改时追加 -->
-    <div class="modal-overlay" id="linkNewModal">
-        <div class="modal-box" style="max-width:480px;">
-            <div class="modal-header"><h2>追加关联单</h2><button class="drawer-close" onclick="closeModal('linkNewModal')">&times;</button></div>
-            <div class="modal-body">
+    <div class="u-modal-overlay" id="linkNewModal">
+        <div class="u-modal-box" style="max-width:480px;">
+            <div class="u-modal-header"><h2>追加关联单</h2><button class="u-drawer-close" onclick="closeModal('linkNewModal')">&times;</button></div>
+            <div class="u-modal-body">
                 <input type="hidden" id="linkNewMasterId">
                 <div style="font-size:12px; color:#6b7280; margin-bottom:12px;">在本单（主单）上追加一张其他系统的关联单——同一诉求需在多个系统分别修正时使用。业务方、原因、类型、期望完成时间继承主单；新单待指派，追加后在其详情页指派开发。</div>
-                <div class="form-row">
-                    <div class="form-group" style="margin-bottom:12px;">
-                        <label>所属系统 <span class="req">*</span></label>
+                <div class="u-form-row">
+                    <div class="u-form-group" style="margin-bottom:12px;">
+                        <label>所属系统 <span class="u-req">*</span></label>
                         <select id="formLinkSourceSystem" onchange="toggleLinkSourceOther()"></select>
                     </div>
-                    <div class="form-group" id="linkSourceOtherGroup" style="display:none; margin-bottom:12px;">
-                        <label>其他系统说明 <span class="req">*</span></label>
+                    <div class="u-form-group" id="linkSourceOtherGroup" style="display:none; margin-bottom:12px;">
+                        <label>其他系统说明 <span class="u-req">*</span></label>
                         <input type="text" id="formLinkSourceSystemOther" placeholder="选「其他」时必填">
                     </div>
                 </div>
-                <div class="form-group" style="margin-bottom:12px;">
-                    <label>修正方式 <span class="req">*</span></label>
+                <div class="u-form-group" style="margin-bottom:12px;">
+                    <label>修正方式 <span class="u-req">*</span></label>
                     <textarea id="formLinkLocationInfo" rows="3" placeholder="关联单的：哪里的什么数据错了，要改成什么"></textarea>
                 </div>
-                <div class="form-group" id="formLinkCorrectionCountGroup" style="margin-bottom:0; display:none;">
-                    <label>修正条数 <span class="req">*</span></label>
+                <div class="u-form-group" id="formLinkCorrectionCountGroup" style="margin-bottom:0; display:none;">
+                    <label>修正条数 <span class="u-req">*</span></label>
                     <input type="number" id="formLinkCorrectionCount" min="2" step="1" placeholder="批量必填，≥2（继承主单类型；single 主单无需填）">
                 </div>
             </div>
-            <div class="modal-footer"><button class="btn-secondary" onclick="closeModal('linkNewModal')">取消</button><button class="btn-primary" id="btnSubmitLinkNew" onclick="submitLinkNew()">追加</button></div>
+            <div class="u-modal-footer"><button class="u-btn-secondary" onclick="closeModal('linkNewModal')">取消</button><button class="u-btn-primary" id="btnSubmitLinkNew" onclick="submitLinkNew()">追加</button></div>
         </div>
     </div>
 
     <!-- 标完成弹窗 -->
-    <div class="modal-overlay" id="completeModal">
-        <div class="modal-box" style="max-width:480px;">
-            <div class="modal-header"><h2>标完成</h2><button class="drawer-close" onclick="closeModal('completeModal')">&times;</button></div>
-            <div class="modal-body">
+    <div class="u-modal-overlay" id="completeModal">
+        <div class="u-modal-box" style="max-width:480px;">
+            <div class="u-modal-header"><h2>标完成</h2><button class="u-drawer-close" onclick="closeModal('completeModal')">&times;</button></div>
+            <div class="u-modal-body">
                 <input type="hidden" id="completeCorrId">
                 <div id="completeReworkHint" style="display:none; font-size:12px; color:#6d28d9; background:#f3e8ff; border:1px solid #ddd0f5; border-radius:6px; padding:8px 10px; margin-bottom:10px;">🔄 返工子单：结果证明截图 + 文字说明（≥5 字）均必填，请补充本次实际改了什么。</div>
-                <div class="form-group" id="completeSingleGroup">
+                <div class="u-form-group" id="completeSingleGroup">
                     <label id="completeSingleProofLabel">结果证明截图（选填）</label>
                     <input type="file" id="formCompleteFiles" multiple accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.pdf,.xlsx,.xls">
-                    <label style="margin-top:8px;">完成说明 <span class="req">*</span>（必填，至少 5 字）</label>
+                    <label style="margin-top:8px;">完成说明 <span class="u-req">*</span>（必填，至少 5 字）</label>
                     <textarea id="formCompleteSingleNote" rows="3" maxlength="500" placeholder="请说明实际修正了什么（避免「1」「完成」等敷衍）"></textarea>
                 </div>
-                <div class="form-group" id="completeBatchGroup" style="display:none;">
-                    <label>完成说明 <span class="req">*</span>（批量数据修正必填，至少 5 字）</label>
+                <div class="u-form-group" id="completeBatchGroup" style="display:none;">
+                    <label>完成说明 <span class="u-req">*</span>（批量数据修正必填，至少 5 字）</label>
                     <textarea id="formBatchNote" rows="3" maxlength="500" placeholder="请说明实际修正了什么，如：已批量更新 183 人社保基数 / 修正 30 条客户编号映射"></textarea>
                     <div style="font-size:11px; color:#9ca3af; margin-top:2px;">批量可选附结果证明（可不传）</div>
                     <input type="file" id="formCompleteBatchFiles" multiple accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.pdf,.xlsx,.xls" style="margin-top:6px;">
                 </div>
             </div>
-            <div class="modal-footer"><button class="btn-secondary" onclick="closeModal('completeModal')">取消</button><button class="btn-primary" id="btnSubmitComplete" onclick="submitComplete()">提交</button></div>
+            <div class="u-modal-footer"><button class="u-btn-secondary" onclick="closeModal('completeModal')">取消</button><button class="u-btn-primary" id="btnSubmitComplete" onclick="submitComplete()">提交</button></div>
         </div>
     </div>
 
     <!-- 重修提交弹窗 -->
-    <div class="modal-overlay" id="resubmitModal">
-        <div class="modal-box" style="max-width:480px;">
-            <div class="modal-header"><h2>重修提交</h2><button class="drawer-close" onclick="closeModal('resubmitModal')">&times;</button></div>
-            <div class="modal-body">
+    <div class="u-modal-overlay" id="resubmitModal">
+        <div class="u-modal-box" style="max-width:480px;">
+            <div class="u-modal-header"><h2>重修提交</h2><button class="u-drawer-close" onclick="closeModal('resubmitModal')">&times;</button></div>
+            <div class="u-modal-body">
                 <input type="hidden" id="resubmitCorrId">
                 <div style="font-size:12px; color:#6b7280; margin-bottom:8px;">业务方异议/拉群讨论后重新修正，提交本次新的结果证明。</div>
                 <div id="resubmitReworkHint" style="display:none; font-size:12px; color:#6d28d9; background:#f3e8ff; border:1px solid #ddd0f5; border-radius:6px; padding:8px 10px; margin-bottom:10px;">🔄 返工子单：结果证明截图 + 本次说明（≥5 字）均必填。</div>
-                <div class="form-group" id="resubmitSingleGroup">
+                <div class="u-form-group" id="resubmitSingleGroup">
                     <label id="resubmitSingleProofLabel">本次新增结果证明（选填）</label>
                     <input type="file" id="formResubmitFiles" multiple accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.pdf,.xlsx,.xls">
-                    <label style="margin-top:8px;">本次重修说明 <span class="req">*</span>（必填）</label>
+                    <label style="margin-top:8px;">本次重修说明 <span class="u-req">*</span>（必填）</label>
                     <textarea id="formResubmitSingleNote" rows="3" maxlength="500" placeholder="本次重修做了什么、上次为何没过"></textarea>
                 </div>
-                <div class="form-group" id="resubmitBatchGroup" style="display:none;">
-                    <label>本次重修说明 <span class="req">*</span>（批量数据修正必填）</label>
+                <div class="u-form-group" id="resubmitBatchGroup" style="display:none;">
+                    <label>本次重修说明 <span class="u-req">*</span>（批量数据修正必填）</label>
                     <textarea id="formResubmitNote" rows="3" maxlength="500" placeholder="本次重修做了什么"></textarea>
                     <input type="file" id="formResubmitBatchFiles" multiple accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.pdf,.xlsx,.xls" style="margin-top:6px;">
                 </div>
             </div>
-            <div class="modal-footer"><button class="btn-secondary" onclick="closeModal('resubmitModal')">取消</button><button class="btn-primary" id="btnSubmitResubmit" onclick="submitResubmit()">提交</button></div>
+            <div class="u-modal-footer"><button class="u-btn-secondary" onclick="closeModal('resubmitModal')">取消</button><button class="u-btn-primary" id="btnSubmitResubmit" onclick="submitResubmit()">提交</button></div>
         </div>
     </div>
 
     <!-- 补充附件弹窗 -->
-    <div class="modal-overlay" id="attachModal">
-        <div class="modal-box" style="max-width:440px;">
-            <div class="modal-header"><h2>补充附件</h2><button class="drawer-close" onclick="closeModal('attachModal')">&times;</button></div>
-            <div class="modal-body">
+    <div class="u-modal-overlay" id="attachModal">
+        <div class="u-modal-box" style="max-width:440px;">
+            <div class="u-modal-header"><h2>补充附件</h2><button class="u-drawer-close" onclick="closeModal('attachModal')">&times;</button></div>
+            <div class="u-modal-body">
                 <input type="hidden" id="attachCorrId">
                 <div style="font-size:12px; color:#6b7280; margin-bottom:8px;">仅补充证据留存，不改变状态、不计入提交次数。</div>
-                <div class="form-group"><label>补充附件 <span class="req">*</span></label><input type="file" id="formAttachFiles" multiple accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.pdf,.xlsx,.xls"></div>
+                <div class="u-form-group"><label>补充附件 <span class="u-req">*</span></label><input type="file" id="formAttachFiles" multiple accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.pdf,.xlsx,.xls"></div>
             </div>
-            <div class="modal-footer"><button class="btn-secondary" onclick="closeModal('attachModal')">取消</button><button class="btn-primary" id="btnSubmitAttach" onclick="submitAttachments()">提交</button></div>
+            <div class="u-modal-footer"><button class="u-btn-secondary" onclick="closeModal('attachModal')">取消</button><button class="u-btn-primary" id="btnSubmitAttach" onclick="submitAttachments()">提交</button></div>
         </div>
     </div>
 
     <!-- 归档弹窗 -->
-    <div class="modal-overlay" id="archiveModal">
-        <div class="modal-box" style="max-width:460px;">
-            <div class="modal-header"><h2>归档修正单</h2><button class="drawer-close" onclick="closeModal('archiveModal')">&times;</button></div>
-            <div class="modal-body">
+    <div class="u-modal-overlay" id="archiveModal">
+        <div class="u-modal-box" style="max-width:460px;">
+            <div class="u-modal-header"><h2>归档修正单</h2><button class="u-drawer-close" onclick="closeModal('archiveModal')">&times;</button></div>
+            <div class="u-modal-body">
                 <input type="hidden" id="archiveCorrId">
                 <div id="archiveFrictionHint" style="font-size:12px; color:#b45309; background:#fffbeb; border:1px solid #fde68a; border-radius:6px; padding:8px 10px; margin-bottom:10px; display:none;">
                     本单发起过拉群讨论（有摩擦），归档须填写摩擦原因。
                 </div>
-                <div class="form-group" id="archiveFrictionGroup" style="display:none;">
-                    <label>摩擦原因 <span class="req">*</span></label>
+                <div class="u-form-group" id="archiveFrictionGroup" style="display:none;">
+                    <label>摩擦原因 <span class="u-req">*</span></label>
                     <textarea id="formFrictionReason" rows="3" placeholder="如：业务方对首次修正有异议，拉群澄清口径后重新修正确认"></textarea>
                 </div>
                 <div id="archiveNoNotifyHint" style="font-size:12px; color:#6b7280; display:none;">提示：尚未发送完成通知给业务方，确认要直接归档吗？</div>
             </div>
-            <div class="modal-footer"><button class="btn-secondary" onclick="closeModal('archiveModal')">取消</button><button class="btn-primary" id="btnSubmitArchive" onclick="submitArchive()">确认归档</button></div>
+            <div class="u-modal-footer"><button class="u-btn-secondary" onclick="closeModal('archiveModal')">取消</button><button class="u-btn-primary" id="btnSubmitArchive" onclick="submitArchive()">确认归档</button></div>
         </div>
     </div>
 
     <!-- 行政闭环弹窗（I2/I3 §3，仅 admin，未完成态记账式收口 → ARCHIVED + closure_type=admin_closure） -->
-    <div class="modal-overlay" id="adminCloseModal">
-        <div class="modal-box" style="max-width:480px;">
-            <div class="modal-header"><h2>行政闭环</h2><button class="drawer-close" onclick="closeModal('adminCloseModal')">&times;</button></div>
-            <div class="modal-body">
+    <div class="u-modal-overlay" id="adminCloseModal">
+        <div class="u-modal-box" style="max-width:480px;">
+            <div class="u-modal-header"><h2>行政闭环</h2><button class="u-drawer-close" onclick="closeModal('adminCloseModal')">&times;</button></div>
+            <div class="u-modal-body">
                 <input type="hidden" id="adminCloseCorrId">
                 <div style="font-size:12px; color:#b45309; background:#fffbeb; border:1px solid #fde68a; border-radius:6px; padding:8px 10px; margin-bottom:10px;">
                     行政闭环用于「开发迟迟未处理 / 线下已处理 / 需强制收口」的未完成单，记账式归档，不要求走「完成→归档」。归档方式标记为「行政闭环」，与正常完成单区分。
                 </div>
-                <div class="form-group">
-                    <label>行政闭环原因 <span class="req">*</span>（10-500 字）</label>
+                <div class="u-form-group">
+                    <label>行政闭环原因 <span class="u-req">*</span>（10-500 字）</label>
                     <textarea id="formClosureReason" rows="4" maxlength="500" placeholder="如：业务方已线下确认处理，OA 流程关闭，平台记账收口"></textarea>
                 </div>
             </div>
-            <div class="modal-footer"><button class="btn-secondary" onclick="closeModal('adminCloseModal')">取消</button><button class="btn-primary" id="btnSubmitAdminClose" onclick="submitAdminClose()">确认行政闭环</button></div>
+            <div class="u-modal-footer"><button class="u-btn-secondary" onclick="closeModal('adminCloseModal')">取消</button><button class="u-btn-primary" id="btnSubmitAdminClose" onclick="submitAdminClose()">确认行政闭环</button></div>
         </div>
     </div>
 
     <!-- 拒绝弹窗 -->
-    <div class="modal-overlay" id="rejectModal">
-        <div class="modal-box" style="max-width:440px;">
-            <div class="modal-header"><h2>拒绝修正单</h2><button class="drawer-close" onclick="closeModal('rejectModal')">&times;</button></div>
-            <div class="modal-body">
+    <div class="u-modal-overlay" id="rejectModal">
+        <div class="u-modal-box" style="max-width:440px;">
+            <div class="u-modal-header"><h2>拒绝修正单</h2><button class="u-drawer-close" onclick="closeModal('rejectModal')">&times;</button></div>
+            <div class="u-modal-body">
                 <input type="hidden" id="rejectCorrId">
-                <div class="form-group"><label>拒绝原因 <span class="req">*</span></label><textarea id="formRejectReason" rows="3" maxlength="500" placeholder="为什么拒绝这个修正需求"></textarea></div>
+                <div class="u-form-group"><label>拒绝原因 <span class="u-req">*</span></label><textarea id="formRejectReason" rows="3" maxlength="500" placeholder="为什么拒绝这个修正需求"></textarea></div>
             </div>
-            <div class="modal-footer"><button class="btn-secondary" onclick="closeModal('rejectModal')">取消</button><button class="btn-primary" id="btnSubmitReject" onclick="submitReject()">确认拒绝</button></div>
+            <div class="u-modal-footer"><button class="u-btn-secondary" onclick="closeModal('rejectModal')">取消</button><button class="u-btn-primary" id="btnSubmitReject" onclick="submitReject()">确认拒绝</button></div>
         </div>
     </div>
 
     <!-- 拉群勾选弹窗 -->
-    <div class="modal-overlay" id="chatModal">
-        <div class="modal-box" style="max-width:520px;">
-            <div class="modal-header"><h2>拉群讨论</h2><button class="drawer-close" onclick="closeModal('chatModal')">&times;</button></div>
-            <div class="modal-body">
+    <div class="u-modal-overlay" id="chatModal">
+        <div class="u-modal-box" style="max-width:520px;">
+            <div class="u-modal-header"><h2>拉群讨论</h2><button class="u-drawer-close" onclick="closeModal('chatModal')">&times;</button></div>
+            <div class="u-modal-body">
                 <input type="hidden" id="chatCorrId">
                 <div style="font-size:13px; font-weight:600; color:#374151; margin-bottom:6px;">固定成员（自动加入）</div>
                 <div class="member-base-list" id="chatBaseList"></div>
@@ -633,31 +549,32 @@
                 <div class="member-extra-grid" id="chatExtraGrid"></div>
                 <div style="font-size:11px; color:#9ca3af; margin-top:6px;">钉钉建群后拉人/移除/解散均在钉钉客户端操作，平台不再管理。</div>
             </div>
-            <div class="modal-footer"><button class="btn-secondary" onclick="closeModal('chatModal')">取消</button><button class="btn-primary" id="btnSubmitChat" onclick="submitCreateChat()">建群</button></div>
+            <div class="u-modal-footer"><button class="u-btn-secondary" onclick="closeModal('chatModal')">取消</button><button class="u-btn-primary" id="btnSubmitChat" onclick="submitCreateChat()">建群</button></div>
         </div>
     </div>
 
     <!-- 归档单返工·重新打开弹窗（Commit D §八）：ARCHIVED 单 admin/建单人发起，新建返工子单挂原单下，原单零污染 -->
-    <div class="modal-overlay" id="reopenReworkModal">
-        <div class="modal-box" style="max-width:480px;">
-            <div class="modal-header"><h2>重新打开返工</h2><button class="drawer-close" onclick="closeModal('reopenReworkModal')">&times;</button></div>
-            <div class="modal-body">
+    <div class="u-modal-overlay" id="reopenReworkModal">
+        <div class="u-modal-box" style="max-width:480px;">
+            <div class="u-modal-header"><h2>重新打开返工</h2><button class="u-drawer-close" onclick="closeModal('reopenReworkModal')">&times;</button></div>
+            <div class="u-modal-body">
                 <input type="hidden" id="reopenCorrId">
                 <div id="reopenSummary" style="font-size:12px; color:#6b7280; background:#f9fafb; border:1px solid #f1f5f9; border-radius:6px; padding:8px 10px; margin-bottom:10px;"></div>
                 <div id="reopenSeqHint" style="font-size:12px; border-radius:6px; padding:8px 10px; margin-bottom:10px;"></div>
-                <div class="form-group">
-                    <label>返工原因 <span class="req">*</span>（10-500 字，说明原单哪里没改对）</label>
+                <div class="u-form-group">
+                    <label>返工原因 <span class="u-req">*</span>（10-500 字，说明原单哪里没改对）</label>
                     <textarea id="formReopenReason" rows="4" maxlength="500" placeholder="如：客户编号映射仍有 12 条错位，业务方复核后要求重新修正"></textarea>
                 </div>
                 <label id="reopenExcessiveWrap" style="display:none; font-size:12px; color:#b91c1c; align-items:center; gap:6px;">
                     <input type="checkbox" id="formReopenConfirmExcessive"> 我已确认确需本次返工（返工次数偏多，建议先线下核对）
                 </label>
             </div>
-            <div class="modal-footer"><button class="btn-secondary" onclick="closeModal('reopenReworkModal')">取消</button><button class="btn-primary" id="btnSubmitReopen" onclick="submitReopenRework()">确认发起返工</button></div>
+            <div class="u-modal-footer"><button class="u-btn-secondary" onclick="closeModal('reopenReworkModal')">取消</button><button class="u-btn-primary" id="btnSubmitReopen" onclick="submitReopenRework()">确认发起返工</button></div>
         </div>
     </div>
 
     <script src="assets/js/app.js?v=v1.105.0_pf"></script>
+    <script src="assets/js/unify-helpers.js?v=v1.110.0_unify"></script>
     <script>
         // ================= 常量（与后端同源）=================
         // 拉群可选成员排除名单（§5.4，与后端 CORRECTION_CHAT_EXCLUDE_IDS 同源；只排示例只读领导A 11）
@@ -745,7 +662,7 @@
 
         function filterByGroup(group) {
             currentGroup = group;
-            document.querySelectorAll('.stat-card').forEach(c => c.classList.toggle('active', c.dataset.group === group));
+            document.querySelectorAll('.u-stat-card').forEach(c => c.classList.toggle('active', c.dataset.group === group));
             renderTable();
         }
 
@@ -928,8 +845,8 @@
                     <td style="color:#9ca3af; font-size:12px;">${idCell}${groupBadge}</td>
                     <td class="ellip" title="${escapeHtml(oaNo)}">${oaNo ? escapeHtml(oaNo) : '<span style="color:#d1d5db;">-</span>'}</td>
                     <td class="ellip" title="${escapeHtml(it.process_type || '')}">${it.process_type ? escapeHtml(it.process_type) : '<span style="color:#d1d5db;">-</span>'}</td>
-                    <td><span class="status-badge s-${statusClass(it.status)}">${escapeHtml(STATUS_LABELS[it.status] || it.status)}</span>${isOverdue(it) ? '<span class="flag-overdue">已超预计</span>' : ''}${isBacklog(it) ? '<span class="flag-backlog">积压</span>' : ''}${isUnarchivedBacklog(it) ? '<span class="flag-backlog">超7天未归档</span>' : ''}${it.status === 'ARCHIVED' && it.closure_type === 'admin_closure' ? '<span class="flag-backlog" style="color:#1d4ed8;">行政闭环</span>' : ''}${reworkFlag}</td>
-                    <td><span class="type-tag t-${it.correction_type === 'batch' ? 'batch' : 'single'}">${it.correction_type === 'batch' ? '批量' : '单'}</span></td>
+                    <td>${UnifyHelpers.statusBadge(statusClass(it.status), STATUS_LABELS[it.status] || it.status)}${isOverdue(it) ? '<span class="flag-overdue">已超预计</span>' : ''}${isBacklog(it) ? '<span class="flag-backlog">积压</span>' : ''}${isUnarchivedBacklog(it) ? '<span class="flag-backlog">超7天未归档</span>' : ''}${it.status === 'ARCHIVED' && it.closure_type === 'admin_closure' ? '<span class="flag-backlog" style="color:#1d4ed8;">行政闭环</span>' : ''}${reworkFlag}</td>
+                    <td>${UnifyHelpers.typeTag(it.correction_type === 'batch' ? 'batch' : 'single', it.correction_type === 'batch' ? '批量' : '单')}</td>
                     <td style="text-align:center;">${it.correction_count != null ? it.correction_count : (it.correction_type === 'single' ? 1 : '-')}</td>
                     <td>${escapeHtml(sysLabel(it))}</td>
                     <td class="ellip" title="${escapeHtml(it.location_info || '')}">${escapeHtml(it.location_info || '')}</td>
@@ -999,7 +916,7 @@
             const reasonRaw = String(r.reason || '').trim();
             const reasonBrief = reasonRaw.length > 20 ? reasonRaw.slice(0, 20) + '…' : reasonRaw;
             document.getElementById('drawerTitle').innerHTML = `#${r.id} 数据修正`
-                + (reasonBrief ? ` <span class="drawer-title-reason" title="${escapeHtml(reasonRaw)}">${escapeHtml(reasonBrief)}</span>` : '');
+                + (reasonBrief ? ` <span class="u-drawer-title-reason" title="${escapeHtml(reasonRaw)}">${escapeHtml(reasonBrief)}</span>` : '');
             const me = currentUser || {};
             const isAdmin = me.role === 'admin';
             const isPublisher = me.role === 'publisher';
@@ -1016,7 +933,7 @@
                     allUsers.filter(u => u.role !== 'viewer').map(u => `<option value="${escapeHtml(String(u.id))}">${escapeHtml(u.display_name || u.username)}</option>`).join('') + `</select>`;
             }
             if ((isAdmin || isAssignee) && s === 'ASSIGNED_PENDING_ESTIMATE') {
-                actions += `<button class="btn-primary" onclick="openEstimate(${r.id})">回复预计完成</button>`;
+                actions += `<button class="u-btn-primary" onclick="openEstimate(${r.id})">回复预计完成</button>`;
             }
             // 改派（D-13 §7.2）：仅「待回复预计」态（开发未回复 ETA）可换开发；admin/publisher/本单对接人可见。
             //   下拉已排除当前开发（避免选同人）；IN_PROGRESS 及之后不显示（如需换人走作废重建）。后端权限/状态为真闸门。
@@ -1026,50 +943,50 @@
                     allUsers.filter(u => u.role !== 'viewer' && Number(u.id) !== Number(r.assigned_to)).map(u => `<option value="${escapeHtml(String(u.id))}">${escapeHtml(u.display_name || u.username)}</option>`).join('') + `</select>`;
             }
             if ((isAdmin || isAssignee) && s === 'IN_PROGRESS') {
-                actions += `<button class="btn-primary" onclick="openComplete(${r.id}, '${r.correction_type}', ${isReworkChild})">标完成</button>`;
+                actions += `<button class="u-btn-primary" onclick="openComplete(${r.id}, '${r.correction_type}', ${isReworkChild})">标完成</button>`;
             }
             if ((isAdmin || isAssignee) && (s === 'FIXED' || s === 'REFIXED')) {
-                actions += `<button class="btn-secondary" onclick="openResubmit(${r.id}, '${r.correction_type}', ${isReworkChild})">重修提交</button>`;
+                actions += `<button class="u-btn-secondary" onclick="openResubmit(${r.id}, '${r.correction_type}', ${isReworkChild})">重修提交</button>`;
             }
             if ((isAdmin || isCreator || isAssignee) && (s === 'FIXED' || s === 'REFIXED')) {
-                actions += `<button class="btn-secondary" onclick="openAttach(${r.id})">补充附件</button>`;
+                actions += `<button class="u-btn-secondary" onclick="openAttach(${r.id})">补充附件</button>`;
             }
             if ((isAdmin || isCreator) && (s === 'FIXED' || s === 'REFIXED')) {
                 // 完成通知业务方已移到「通知状态」区（done 类手动发送/查已读/重发，§2.4）
-                actions += `<button class="btn-secondary" onclick="openArchive(${r.id})">归档</button>`;
+                actions += `<button class="u-btn-secondary" onclick="openArchive(${r.id})">归档</button>`;
             }
             // 拒绝：admin/publisher 在非终态；assignee 在已指派/进行中
             if (REJECTABLE_STATUSES.includes(s)) {
                 if (isAdmin || isPublisher || (isAssignee && s !== 'PENDING_ASSIGN')) {
-                    actions += `<button class="btn-danger" onclick="openReject(${r.id})">拒绝</button>`;
+                    actions += `<button class="u-btn-danger" onclick="openReject(${r.id})">拒绝</button>`;
                 }
             }
             // 拉群：admin/assignee，已指派后非终态可新建；已建群任何人可见入口（幂等）
             if (isAdmin || isAssignee) {
                 if (hasChat) {
-                    actions += `<button class="btn-secondary" onclick="showToast('本单已有讨论群，请到钉钉客户端查看', 'success')">已建讨论群</button>`;
+                    actions += `<button class="u-btn-secondary" onclick="showToast('本单已有讨论群，请到钉钉客户端查看', 'success')">已建讨论群</button>`;
                 } else if (CHAT_ALLOWED_STATUSES.includes(s)) {
-                    actions += `<button class="btn-secondary" id="btnChat_${r.id}" onclick="openCreateChat(${r.id})">拉群讨论</button>`;
+                    actions += `<button class="u-btn-secondary" id="btnChat_${r.id}" onclick="openCreateChat(${r.id})">拉群讨论</button>`;
                 }
             }
             // L5 追加关联单（§6.2 / D-9）：admin，标准单/主单（非子单）+ 非终态可追加其他系统关联单（子单不显示，后端 LINK_ON_MASTER_ONLY 兜底）。
             //   状态收窄"组内已有 sent 完成通知则禁追加"靠后端校验（前端不复算子表 sent），点击后 409 引导作废重建。
             if (isAdmin && !isChild && !['VOIDED', 'REJECTED', 'ARCHIVED'].includes(s)) {
-                actions += `<button class="btn-secondary" onclick="openLinkNew(${Number(r.id)})">追加关联单</button>`;
+                actions += `<button class="u-btn-secondary" onclick="openLinkNew(${Number(r.id)})">追加关联单</button>`;
             }
             // 行政闭环（I2/I3 §3.3）：仅 admin，在未完成态（PENDING_ASSIGN/ASSIGNED_PENDING_ESTIMATE/IN_PROGRESS）记账式收口 → ARCHIVED + admin_closure
             if (isAdmin && ['PENDING_ASSIGN', 'ASSIGNED_PENDING_ESTIMATE', 'IN_PROGRESS'].includes(s)) {
-                actions += `<button class="btn-primary" style="background:linear-gradient(135deg,#2563eb,#1d4ed8);" onclick="openAdminClose(${r.id})">行政闭环</button>`;
+                actions += `<button class="u-btn-primary" style="background:linear-gradient(135deg,#2563eb,#1d4ed8);" onclick="openAdminClose(${r.id})">行政闭环</button>`;
             }
             // 作废：admin/creator，任意非作废
             if ((isAdmin || isCreator) && s !== 'VOIDED') {
-                actions += `<button class="btn-danger" onclick="doVoid(${r.id})">作废</button>`;
+                actions += `<button class="u-btn-danger" onclick="doVoid(${r.id})">作废</button>`;
             }
             // §3.5（codex 31 H-1）：行政闭环（admin_closure）单隐藏流程推进动作（complete/resubmit/归档/拉群/行政闭环），
             //   但**保留作废入口**——作废是 admin/creator 纠错逃生口，与 normal 归档一致，且后端流转表 ARCHIVED→VOIDED（G-14）本就允许；
             //   前端藏作废会造成"UI 说不可作废但 API 仍可作废"的前后端矛盾，故对齐为"可作废"。
             if (r.closure_type === 'admin_closure') {
-                actions = (isAdmin || isCreator) && s !== 'VOIDED' ? `<button class="btn-danger" onclick="doVoid(${r.id})">作废</button>` : '';   // codex 32 M-1'：补回 s!=='VOIDED'，已作废单不再显示作废
+                actions = (isAdmin || isCreator) && s !== 'VOIDED' ? `<button class="u-btn-danger" onclick="doVoid(${r.id})">作废</button>` : '';   // codex 32 M-1'：补回 s!=='VOIDED'，已作废单不再显示作废
             }
             // 归档单返工（Commit D §八）：ARCHIVED 单（admin 或建单人）可「重新打开返工」——新建返工子单挂原单下，原单零污染。
             //   ⚠️ 必须放在 admin_closure 重置【之后】append——admin_closure 归档单（§1.3）同样允许返工，放重置前会被抹掉。
@@ -1080,17 +997,17 @@
                 //   避免 openReopenRework 误按"首次返工"把 parent POST 回原单（正常 GET 成功时 child_count>0 必返非空链，此为兜底）。
                 const chainMissing = Number(r.rework_child_count) > 0 && (!reworkChain || !reworkChain.length);
                 actions += chainMissing
-                    ? `<button class="btn-secondary" disabled title="返工链数据未加载，请刷新详情后重试" style="opacity:.5; cursor:not-allowed;">重开（请刷新）</button>`
+                    ? `<button class="u-btn-secondary" disabled title="返工链数据未加载，请刷新详情后重试" style="opacity:.5; cursor:not-allowed;">重开（请刷新）</button>`
                     : openChild
-                        ? `<button class="btn-secondary" disabled title="返工链下已有未完成的返工子单 #${Number(openChild.id)}，请先处理" style="opacity:.5; cursor:not-allowed;">返工进行中</button>`
-                        : `<button class="btn-secondary" style="border-color:#c4b5fd; color:#6d28d9;" onclick="openReopenRework(${Number(r.id)})">重新打开返工</button>`;
+                        ? `<button class="u-btn-secondary" disabled title="返工链下已有未完成的返工子单 #${Number(openChild.id)}，请先处理" style="opacity:.5; cursor:not-allowed;">返工进行中</button>`
+                        : `<button class="u-btn-secondary" style="border-color:#c4b5fd; color:#6d28d9;" onclick="openReopenRework(${Number(r.id)})">重新打开返工</button>`;
             }
 
             // ===== 基本信息 =====
-            const kv = (label, val) => `<div class="kv-item"><label>${label}</label><div class="v">${val}</div></div>`;
-            const kvFull = (label, val) => `<div class="kv-item full"><label>${label}</label><div class="v">${val}</div></div>`;
-            let info = `<div class="kv-grid">`;
-            info += kv('状态', `<span class="status-badge s-${statusClass(s)}">${escapeHtml(STATUS_LABELS[s] || s)}</span>`);
+            const kv = (label, val) => `<div class="u-kv-item"><label>${label}</label><div class="v">${val}</div></div>`;
+            const kvFull = (label, val) => `<div class="u-kv-item full"><label>${label}</label><div class="v">${val}</div></div>`;
+            let info = `<div class="u-kv-grid">`;
+            info += kv('状态', UnifyHelpers.statusBadge(statusClass(s), STATUS_LABELS[s] || s));
             info += kv('类型', r.correction_type === 'batch' ? '批量数据修正' : '单数据修正');
             info += kv('所属系统', escapeHtml(sysLabel(r)));
             info += kvFull('修正方式', escapeHtml(r.location_info || '-'));
@@ -1192,7 +1109,7 @@
             //   不造假主表 done 行（L2b length===0 → REQUESTER_ROWS_MISSING，假按钮点了必失败）。正常数据 L1 回填+readiness 保证非空。
             //   对抗审 LOW-3：返工子单组主单无主业务方（reworkDoneMissing）也要 surface 异常警告——否则返工 isChild=true 被 !isChild 闸住，误显「未填手机号」。
             const doneWarn = (isAdmin && ((!isChild && requesters.length === 0) || reworkDoneMissing))
-                ? `<div class="notify-row"><span class="nr-label">${isReworkChild ? '通知业务方·二次修复' : '通知业务方·完成'}</span><span class="nr-body"><span style="color:#dc2626;">⚠️ ${isReworkChild ? '组主单无主业务方记录' : '本单无业务方记录'}（数据异常，请联系管理员）</span></span></div>`
+                ? `<div class="u-notify-row"><span class="u-nr-label">${isReworkChild ? '通知业务方·二次修复' : '通知业务方·完成'}</span><span class="u-nr-body"><span style="color:#dc2626;">⚠️ ${isReworkChild ? '组主单无主业务方记录' : '本单无业务方记录'}（数据异常，请联系管理员）</span></span></div>`
                 : '';
             const notify = [...visibleTypes.filter(t => t.applicable), ...visibleDone].map(t => buildNotifyRow(t, s)).join('') + doneWarn;
 
@@ -1202,10 +1119,10 @@
             let hist = history.length ? history.map(h => {
                 const sameStatus = h.from_status && h.to_status && h.from_status === h.to_status;
                 const head = sameStatus
-                    ? `<span class="status-badge" style="font-size:10px; background:#ede9fe; color:#6d28d9;">操作</span><span style="color:#9ca3af;"> · ${escapeHtml(STATUS_LABELS[h.to_status] || h.to_status)}</span>`
-                    : `<span class="status-badge s-${statusClass(h.to_status)}" style="font-size:10px;">${escapeHtml(STATUS_LABELS[h.to_status] || h.to_status)}</span><span style="color:#9ca3af;"> ← ${h.from_status ? escapeHtml(STATUS_LABELS[h.from_status] || h.from_status) : '建单'}</span>`;
+                    ? `<span class="u-status-badge" style="font-size:10px; background:#ede9fe; color:#6d28d9;">操作</span><span style="color:#9ca3af;"> · ${escapeHtml(STATUS_LABELS[h.to_status] || h.to_status)}</span>`
+                    : `<span class="u-status-badge s-${statusClass(h.to_status)}" style="font-size:10px;">${escapeHtml(STATUS_LABELS[h.to_status] || h.to_status)}</span><span style="color:#9ca3af;"> ← ${h.from_status ? escapeHtml(STATUS_LABELS[h.from_status] || h.from_status) : '建单'}</span>`;
                 return `
-                <div class="history-item">
+                <div class="u-history-item">
                     ${head}
                     <span style="color:#6b7280;"> · ${escapeHtml(h.operator_name || '-')} · ${escapeHtml(formatFullTime(h.created_at))}</span>
                     ${h.reason ? `<div style="color:${sameStatus ? '#4b5563' : '#6b7280'}; margin-top:2px;${sameStatus ? ' font-weight:500;' : ''}">${escapeHtml(h.reason)}</div>` : ''}
@@ -1218,13 +1135,13 @@
             const fixProofs = attachments.filter(a => a.attachment_type === 'fix_proof');
             const oaProofs = attachments.filter(a => a.attachment_type === 'oa_proof');
             const renderAtts = (list, emptyText) => list.length ? list.map(a => `
-                <div class="att-item">📎 <a href="${attLink(a)}" target="_blank">${escapeHtml(a.original_name || a.file_name)}</a>
+                <div class="u-att-item">📎 <a href="${attLink(a)}" target="_blank">${escapeHtml(a.original_name || a.file_name)}</a>
                 <span style="color:#9ca3af;"> · ${escapeHtml(a.uploaded_by_name || '-')} · ${escapeHtml(formatFullTime(a.created_at))}</span></div>`).join('') : `<div style="color:#9ca3af; font-size:12px;">${emptyText}</div>`;
             // B2（方案 §2.4 L-10）：oa_proof 单级展示，仅本单自身（后端 SQL 已不合并 anchor），复用 renderAtts 但不复用 error_proof 的 anchor 逻辑；
             //   仅真实 OA 号（非 datafix- 占位号）才展示本区——自发现单本就免 OA 截图，不该出现空白区块造成"是不是漏传"的误解。
             const hasRealOa = r.oa_number && !/^datafix-/i.test(String(r.oa_number));
             const oaProofSection = hasRealOa
-                ? `<div class="detail-section"><h3>OA 流程截图（oa_proof）</h3>${renderAtts(oaProofs, '无（历史存量单未强制留档）')}</div>`
+                ? `<div class="u-detail-section"><h3>OA 流程截图（oa_proof）</h3>${renderAtts(oaProofs, '无（历史存量单未强制留档）')}</div>`
                 : '';
             // D 块：错误证明→待修复数据（v1.3 §2 正名，改显示不改底层）——error_proof 标识符/变量名/字段名全部不动。
             // L3b 待修复数据区：文字说明 error_proof_note + 补传入口（§6.7：建单人/admin，早期态 PENDING_ASSIGN~REFIXED，非作废）
@@ -1233,7 +1150,7 @@
             // codex 61 M-4：待修复数据文字说明读统一字段 effective_error_proof_note（主单/无组取自身、子单取主单，后端已算好，前端无分支）。
             const errProofNoteHtml = r.effective_error_proof_note ? `<div style="font-size:13px; color:#374151; margin-bottom:6px; white-space:pre-wrap;">📝 ${escapeHtml(r.effective_error_proof_note)}</div>` : '';
             const errProofAddHtml = canAddErrProof
-                ? `<div style="margin-top:8px;"><input type="file" id="errProofFiles_${Number(r.id)}" multiple accept="image/*,.pdf,.xlsx,.xls" style="font-size:12px;"><button class="btn-secondary nb-btn" onclick="uploadErrorProof(${Number(r.id)})">上传待修复数据</button></div>`
+                ? `<div style="margin-top:8px;"><input type="file" id="errProofFiles_${Number(r.id)}" multiple accept="image/*,.pdf,.xlsx,.xls" style="font-size:12px;"><button class="u-btn-secondary u-nb-btn" onclick="uploadErrorProof(${Number(r.id)})">上传待修复数据</button></div>`
                 : '';
             // codex 61·方案 A：待修复数据 = 诉求级材料（组内共享一份、物理存主单）。子单从"整块隐藏"改为"只读展示主单 error_proof"——
             //   解决系统2 开发看不到待修复数据（后端详情已合并返回主单 error_proof 附件 + effective_error_proof_note）。
@@ -1244,12 +1161,12 @@
             const errProofEmpty = isChild
                 ? (errProofNoteHtml ? '（暂无附件）' : '主单暂无待修复数据附件')
                 : (errProofNoteHtml ? '（暂无附件）' : '无');
-            const errProofSection = `<div class="detail-section"><h3>${errProofTitle}</h3>${errProofNoteHtml}${renderAtts(errProofs, errProofEmpty)}${errProofAddHtml}</div>`;
+            const errProofSection = `<div class="u-detail-section"><h3>${errProofTitle}</h3>${errProofNoteHtml}${renderAtts(errProofs, errProofEmpty)}${errProofAddHtml}</div>`;
 
             // ===== 群信息 =====
             let chatBlock = '';
             if (hasChat) {
-                chatBlock = `<div class="detail-section"><h3>讨论群</h3><div style="font-size:12px; color:#374151;">
+                chatBlock = `<div class="u-detail-section"><h3>讨论群</h3><div style="font-size:12px; color:#374151;">
                     群名：${escapeHtml(r.dingtalk_chat_name || '-')}<br>
                     拉群时间：${escapeHtml(formatFullTime(r.dingtalk_chat_created_at))}<br>
                     <span style="color:#9ca3af;">（请到钉钉客户端查看群聊）</span></div></div>`;
@@ -1263,24 +1180,24 @@
                     const isCur = Number(m.id) === Number(r.id);
                     const sysName = (m.source_system === '其他') ? (m.source_system_other || '其他') : (m.source_system || '-');   // L-1 codex 57："其他"显示补充说明以区分
                     const devName = m.assigned_to_name || '未指派';
-                    const stBadge = `<span class="status-badge s-${statusClass(m.status)}" style="font-size:10px;">${escapeHtml(STATUS_LABELS[m.status] || m.status)}</span>`;
+                    const stBadge = `<span class="u-status-badge s-${statusClass(m.status)}" style="font-size:10px;">${escapeHtml(STATUS_LABELS[m.status] || m.status)}</span>`;
                     const tail = isCur
                         ? `<span style="color:#9ca3af; margin-left:6px;">（当前单）</span>`
                         : `<a href="javascript:void(0)" onclick="openDrawer(${Number(m.id)})" style="margin-left:6px;">查看 →</a>`;
                     // 末次合并审：成员有返工子单时标 ⟳——消除「跨系统主单视角看不到组内成员返工」审计盲点（点该成员可看返工链）
                     const memReworkFlag = Number(m.rework_child_count) > 0 ? `<span class="rework-flag" title="该成员有返工子单，点「查看」看返工链">⟳</span>` : '';
-                    return `<div class="notify-row"${isCur ? ' style="background:#fffbeb;"' : ''}>
-                        <span class="nr-label">系统${i + 1}${Number(m.id) === groupMasterId ? '（主）' : ''}</span>
-                        <span class="nr-body">#${Number(m.id)} · ${escapeHtml(sysName)} · ${stBadge}${memReworkFlag} · 开发：${escapeHtml(devName)}${tail}</span>
+                    return `<div class="u-notify-row"${isCur ? ' style="background:#fffbeb;"' : ''}>
+                        <span class="u-nr-label">系统${i + 1}${Number(m.id) === groupMasterId ? '（主）' : ''}</span>
+                        <span class="u-nr-body">#${Number(m.id)} · ${escapeHtml(sysName)} · ${stBadge}${memReworkFlag} · 开发：${escapeHtml(devName)}${tail}</span>
                     </div>`;
                 }).join('');
-                groupBlock = `<div class="detail-section"><h3>关联单（跨系统组）</h3>${memberRows}</div>`;
+                groupBlock = `<div class="u-detail-section"><h3>关联单（跨系统组）</h3>${memberRows}</div>`;
             }
             //   子单 banner：完成通知/待修复数据/业务方录入归主单，顶部提示 + 跳转。
             // 返工子单 banner（§八 / M-1）：标返工身份 + 链根原单。象限④纯返工组（groupMembers≤1）下方不再显跨系统「关联组」banner，避免误读成多系统诉求。
             const bannerRwClass = Number(r.rework_seq) >= 3 ? 'rw-3' : (Number(r.rework_seq) === 2 ? 'rw-2' : 'rw-1');   // 详情徽章颜色梯度与列表/弹框三处同源（§六）
             const reworkBanner = isReworkChild
-                ? `<div class="detail-section" style="background:#f3e8ff; border-radius:8px; padding:10px 12px; margin-bottom:14px;">
+                ? `<div class="u-detail-section" style="background:#f3e8ff; border-radius:8px; padding:10px 12px; margin-bottom:14px;">
                      <span style="font-size:13px; color:#6d28d9;">🔄 返工子单 <span class="rework-badge ${bannerRwClass}">第 ${Number(r.rework_seq) || '?'} 次</span> —— 对归档原单 #${Number(r.rework_root_id) || '?'} 的二次修复，原单状态零污染。</span>
                      ${Number(r.rework_root_id) > 0 ? `<a href="javascript:void(0)" onclick="openDrawer(${Number(r.rework_root_id)})" style="margin-left:6px;">查看原单 →</a>` : ''}
                    </div>`
@@ -1288,7 +1205,7 @@
             //   对抗审 LOW-4：返工子单【不显】此 banner——它的完成通知是自带·自身行发送（option A），banner「完成通知统一在主单」会与下方「通知业务方·二次修复」自发行自相矛盾、误导去原单找入口。
             //   返工子单的组归属/待修复数据来源已由 reworkBanner + 待修复数据区「来自关联组主单 #N」表达。
             const childBanner = (isChild && !isReworkChild && groupMembers.length > 1)
-                ? `<div class="detail-section" style="background:#fef3c7; border-radius:8px; padding:10px 12px; margin-bottom:14px;">
+                ? `<div class="u-detail-section" style="background:#fef3c7; border-radius:8px; padding:10px 12px; margin-bottom:14px;">
                      <span style="font-size:13px; color:#92400e;">🔗 本单属关联组（主单 #${groupMasterId}）——业务方名单、完成通知、待修复数据统一在主单管理；预计完成通知按本系统单独发送。</span>
                      <a href="javascript:void(0)" onclick="openDrawer(${groupMasterId})" style="margin-left:6px;">前往主单 →</a>
                    </div>`
@@ -1296,16 +1213,16 @@
 
             document.getElementById('drawerBody').innerHTML = `
                 ${reworkBanner}${childBanner}
-                ${actions ? `<div class="action-bar">${actions}</div>` : ''}
-                <div class="detail-section"><h3>基本信息</h3>${info}</div>
+                ${actions ? `<div class="u-action-bar">${actions}</div>` : ''}
+                <div class="u-detail-section"><h3>基本信息</h3>${info}</div>
                 ${oaProofSection}
                 ${groupBlock}
                 ${buildReworkChainHtml(reworkChain, r.id, r.rework_parent_id)}
-                <div class="detail-section"><h3>通知状态</h3>${notify}</div>
+                <div class="u-detail-section"><h3>通知状态</h3>${notify}</div>
                 ${errProofSection}
-                <div class="detail-section"><h3>结果证明（fix_proof）</h3>${renderAtts(fixProofs, '无')}</div>
+                <div class="u-detail-section"><h3>结果证明（fix_proof）</h3>${renderAtts(fixProofs, '无')}</div>
                 ${chatBlock}
-                <div class="detail-section"><h3>状态历史</h3>${hist}</div>
+                <div class="u-detail-section"><h3>状态历史</h3>${hist}</div>
             `;
         }
 
@@ -1327,7 +1244,7 @@
                 const seqLabel = m.is_root
                     ? `<span style="font-weight:600; color:#6d28d9;">原单${rootStateSuffix}</span>`
                     : `<span class="rework-badge ${rwClass}">返工·第 ${Number(m.rework_seq)} 次</span>`;
-                const stBadge = `<span class="status-badge s-${statusClass(m.status)}" style="font-size:10px;">${escapeHtml(STATUS_LABELS[m.status] || m.status)}</span>`;
+                const stBadge = `<span class="u-status-badge s-${statusClass(m.status)}" style="font-size:10px;">${escapeHtml(STATUS_LABELS[m.status] || m.status)}</span>`;
                 const proofs = (Array.isArray(m.fix_proofs) && m.fix_proofs.length)
                     ? m.fix_proofs.map(a => `<a href="${attLink(a)}" target="_blank">📎 ${escapeHtml(a.original_name || a.file_name)}</a>`).join('　')
                     : '<span style="color:#9ca3af;">无</span>';
@@ -1347,13 +1264,13 @@
                     ${reasonHtml}
                 </div>`;
             }).join('');
-            return `<div class="detail-section"><h3>返工链（共 ${reworkCount} 次返工）</h3>${rows}</div>`;
+            return `<div class="u-detail-section"><h3>返工链（共 ${reworkCount} 次返工）</h3>${rows}</div>`;
         }
 
         // 归档方式标签（§3.5）：normal=正常归档（绿）/ admin_closure=行政闭环（蓝）
         function closureTypeLabel(ct) {
-            if (ct === 'admin_closure') return '<span class="type-tag" style="background:#dbeafe;color:#1d4ed8;">行政闭环</span>';
-            return '<span class="type-tag" style="background:#d1fae5;color:#065f46;">正常归档</span>';
+            if (ct === 'admin_closure') return '<span class="u-type-tag" style="background:#dbeafe;color:#1d4ed8;">行政闭环</span>';
+            return '<span class="u-type-tag" style="background:#d1fae5;color:#065f46;">正常归档</span>';
         }
 
         // ================= 建单 =================
@@ -1402,7 +1319,7 @@
             const list = document.getElementById('requesterList');
             const idx = list.children.length;   // 0=主业务方
             const row = document.createElement('div');
-            row.className = 'form-row requester-row';
+            row.className = 'u-form-row requester-row';
             row.style.cssText = 'gap:6px; align-items:center; margin-bottom:6px;';
             // codex 51 L-3：createElement + input.value 设值（无属性上下文，不依赖 escapeHtml 转引号；去"编辑回填漏 escape"footgun）
             const nameInput = document.createElement('input');
@@ -1421,7 +1338,7 @@
                 row.appendChild(tag);
             } else {
                 const del = document.createElement('button');
-                del.type = 'button'; del.className = 'btn-secondary';
+                del.type = 'button'; del.className = 'u-btn-secondary';
                 del.style.cssText = 'width:54px; padding:4px 6px; font-size:12px;';
                 del.textContent = '删除';
                 del.onclick = () => row.remove();
@@ -1690,7 +1607,7 @@
             document.getElementById('completeReworkHint').style.display = isRework ? 'block' : 'none';   // 返工双必填提示（Commit D §六）
             // 截图要求随返工动态标（v1.97.1）：返工 single 必传 / 普通 single 选填（文字始终必填，标签静态）
             document.getElementById('completeSingleProofLabel').innerHTML = isRework
-                ? '结果证明截图 <span class="req">*</span>（返工子单必传）'
+                ? '结果证明截图 <span class="u-req">*</span>（返工子单必传）'
                 : '结果证明截图（选填）';
             document.getElementById('completeModal').dataset.type = type;
             document.getElementById('completeModal').dataset.rework = isRework ? '1' : '';
@@ -1761,7 +1678,7 @@
             document.getElementById('resubmitReworkHint').style.display = isRework ? 'block' : 'none';   // 返工双必填提示（Commit D §六）
             // 截图要求随返工动态标（v1.97.1）：返工 single 必传 / 普通 single 选填（重修说明始终必填，标签静态）
             document.getElementById('resubmitSingleProofLabel').innerHTML = isRework
-                ? '本次新增结果证明 <span class="req">*</span>（返工子单必传）'
+                ? '本次新增结果证明 <span class="u-req">*</span>（返工子单必传）'
                 : '本次新增结果证明（选填）';
             document.getElementById('resubmitModal').dataset.type = type;
             document.getElementById('resubmitModal').dataset.rework = isRework ? '1' : '';
@@ -2039,12 +1956,12 @@
                     // 主单未终态、尚未发 → 子单干等主单发
                     l = `<span style="color:#6b7280;">⏳ 等待主单发送</span>`;
                 }
-                return `<div class="notify-row"><span class="nr-label">${esc(t.label)}</span><span class="nr-body">${l} ${fromMaster}</span></div>`;
+                return `<div class="u-notify-row"><span class="u-nr-label">${esc(t.label)}</span><span class="u-nr-body">${l} ${fromMaster}</span></div>`;
             }
             const canSendNow = t.sendable.includes(curStatus);
             const ridArg = (t.key === 'done' && t.requesterId) ? `, ${t.requesterId}` : '';   // L3a：done 携带 requester_id（多业务方逐个发/查）
-            const sendBtn = (force, text) => (t.canSend && canSendNow) ? `<button class="btn-secondary nb-btn" onclick="notifySend(${t.cid}, '${t.key}', ${force}${ridArg})">${text}</button>` : '';
-            const readBtn = t.canSend ? `<button class="btn-secondary nb-btn" onclick="queryReadStatus(${t.cid}, '${t.key}'${ridArg})">查询已读</button>` : '';
+            const sendBtn = (force, text) => (t.canSend && canSendNow) ? `<button class="u-btn-secondary u-nb-btn" onclick="notifySend(${t.cid}, '${t.key}', ${force}${ridArg})">${text}</button>` : '';
+            const readBtn = t.canSend ? `<button class="u-btn-secondary u-nb-btn" onclick="queryReadStatus(${t.cid}, '${t.key}'${ridArg})">查询已读</button>` : '';
             let line = '', btns = '';
             if (t.byPhone && t.noPhone) {
                 line = `<span style="color:#b45309;">— 业务方未填手机号，无法通知</span>`;
@@ -2071,7 +1988,7 @@
                     line = `<span style="color:#9ca3af;">— 未发送钉钉通知</span>`;
                 }
             }
-            return `<div class="notify-row"><span class="nr-label">${esc(t.label)}</span><span class="nr-body">${line}${btns}</span></div>`;
+            return `<div class="u-notify-row"><span class="u-nr-label">${esc(t.label)}</span><span class="u-nr-body">${line}${btns}</span></div>`;
         }
 
         // 发送 / 重发某类钉钉通知（force=true 走重发契约 force_resend，后端清对应 read_at）

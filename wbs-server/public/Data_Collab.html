@@ -7,42 +7,12 @@
     <title>数据协作 - 智数协同平台</title>
     <link rel="icon" href="data:,">
     <link rel="stylesheet" href="assets/css/style.css?v=v1.102.1_nav">
+    <link rel="stylesheet" href="assets/css/components.css?v=v1.110.0_unify">
     <style>
-        /* 筛选栏 */
-        .filter-bar {
-            background: #fff;
-            border: 1px solid #e2e8f0;
-            border-radius: 10px;
-            padding: 14px 18px;
-            margin-bottom: 16px;
-            display: flex;
-            flex-wrap: wrap;
-            gap: 12px;
-            align-items: center;
-        }
-        .filter-bar select,
-        .filter-bar input {
-            padding: 6px 10px;
-            border: 1px solid #d1d5db;
-            border-radius: 6px;
-            font-size: 13px;
-            outline: none;
-            transition: border-color 0.15s;
-        }
-        .filter-bar select:focus,
-        .filter-bar input:focus {
-            border-color: #d97706;
-        }
-        .filter-bar input[type="text"] {
-            min-width: 200px;
-            flex: 1;
-        }
-        .filter-bar .filter-label {
-            font-size: 12px;
-            color: #6b7280;
-            margin-right: -4px;
-        }
-        .filter-bar .btn-new {
+        /* 筛选栏 base/select/input/label 已并入共享层 components.css .u-filter-bar（前端统一 C4 Commit 3
+           harmonize；本页 filter-bar 无自由文本搜索框，共享层 input[type=text] 宽度差异对本页无影响）。
+           仅"新建"按钮 .btn-new 为本页专属（filter-bar 右侧强调按钮，非黑名单），选择器改名 .u-filter-bar 作用域保留。 */
+        .u-filter-bar .btn-new {
             margin-left: auto;
             padding: 7px 16px;
             background: linear-gradient(135deg, #d97706, #b45309);
@@ -56,10 +26,10 @@
             align-items: center;
             gap: 6px;
         }
-        .filter-bar .btn-new:hover {
+        .u-filter-bar .btn-new:hover {
             box-shadow: 0 2px 8px rgba(217, 119, 6, 0.35);
         }
-        .filter-bar .btn-new svg {
+        .u-filter-bar .btn-new svg {
             width: 14px;
             height: 14px;
         }
@@ -158,15 +128,9 @@
             font-weight: 600;
         }
 
-        /* 状态徽章 */
-        .status-badge {
-            display: inline-block;
-            padding: 3px 10px;
-            border-radius: 12px;
-            font-size: 11px;
-            font-weight: 600;
-            white-space: nowrap;
-        }
+        /* 状态徽章 base 已并入共享层 components.css .u-status-badge（前端统一 C4 Commit 3；
+           两边值逐字相同 padding:3px 10px/radius:12px/11px/600/nowrap = 零漂移）。
+           下方 .status-* 为本页状态枚举配色，residual 保留不动。 */
         .status-PENDING_ASSIGN { background: #ffedd5; color: #9a3412; }
         .status-PENDING { background: #dbeafe; color: #1e40af; }
         .status-EXPORTING { background: #ccfbf1; color: #115e59; }  /* v1.72.6 修复：v1.71.0 引入 EXPORTING 状态时漏加 CSS 导致白底白字 */
@@ -283,17 +247,8 @@
             white-space: nowrap;
         }
 
-        /* 模态框 */
-        .modal-overlay {
-            position: fixed;
-            top: 0; left: 0; right: 0; bottom: 0;
-            background: rgba(0, 0, 0, 0.45);
-            display: none;
-            justify-content: center;
-            align-items: center;
-            z-index: 1000;
-        }
-        .modal-overlay.show { display: flex; }
+        /* 模态框 overlay 已并入共享层 components.css .u-modal-overlay（.open 显隐、z-index:1000、居中）
+           （前端统一 C4 Commit 3 harmonize；显隐类 show→open 同步改 14 弹窗开合 JS）。 */
 
         /* v1.70.2 图片放大 lightbox（共用） */
         .img-lightbox {
@@ -379,22 +334,25 @@
             overflow: hidden;
             text-overflow: ellipsis;
         }
-        .modal-card {
+        /* 弹窗卡片 .modal-card → 共享层 .u-modal-box（前端统一 C4 Commit 3；14 弹窗改用共享盒，
+           本地 .modal-card 规则删除；共享 u-modal-box width:560px/radius:14px 与旧 520px/12px 为 harmonize 值差）。 */
+        /* 前端统一 C4 Commit 2：detailModal 改右侧抽屉后，共享层 .u-drawer 没有 footer 段
+           （components.css 只定义 overlay/drawer/header/body/close）；抽屉决策 A=固定 footer
+           承载 detailFooterLeft 动态按钮 + 关闭按钮，局部覆盖不进共享层（避免动刚冻结的 components.css）。 */
+        .unified-page .u-drawer-footer {
+            padding: 16px 24px;
+            border-top: 1px solid #e2e8f0;
             background: #fff;
-            border-radius: 12px;
-            width: 520px;
-            max-width: 92%;
-            max-height: 88vh;
-            overflow-y: auto;
-            box-shadow: 0 24px 64px rgba(0, 0, 0, 0.18);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 8px;
         }
-        .modal-card.detail-card { width: 720px; }
-        .detail-section {
-            margin-bottom: 18px;
-            border: 1px solid #e5e7eb;
-            border-radius: 8px;
-            overflow: hidden;
-        }
+        /* .detail-section base → 共享层 .u-detail-section（前端统一 C4 Commit 3；harmonize=无边框化，
+           用户已认可：区块从"框卡（border+radius+overflow:hidden）"变"无框 + margin-bottom:18px"；
+           区块视觉分隔由下方 .detail-section-title 自带 bg + border-bottom 提供，不会糊在一起。
+           detail-section-title/body 非黑名单，residual 保留原名不动）。 */
         .detail-section-title {
             padding: 10px 14px;
             background: #f9fafb;
@@ -527,18 +485,10 @@
         .friction-submit-btn:hover { background: #1d4ed8; }
         .friction-submit-btn:disabled { background: #9ca3af; cursor: not-allowed; }
 
-        .modal-header {
-            padding: 18px 22px;
-            border-bottom: 1px solid #e5e7eb;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-        .modal-header h3 {
-            margin: 0;
-            font-size: 17px;
-            color: #111827;
-        }
+        /* 弹窗 header/body/footer base 已并入共享层 components.css .u-modal-header/.u-modal-body/.u-modal-footer
+           （前端统一 C4 Commit 3 harmonize：header 由旧"白底+底边框"变共享"amber 底"、标题 h3→h2 走共享
+           .u-modal-header h2 着色；body 限高 60vh 内滚；footer 右对齐 + 上边框）。
+           .modal-close 非黑名单，residual 保留（灰色 × 关闭按钮，各弹窗头右上角）。 */
         .modal-close {
             background: none;
             border: none;
@@ -549,43 +499,27 @@
             line-height: 1;
         }
         .modal-close:hover { color: #4b5563; }
-        .modal-body { padding: 18px 22px; }
-        .modal-footer {
-            padding: 14px 22px;
-            border-top: 1px solid #e5e7eb;
-            display: flex;
-            justify-content: flex-end;
-            gap: 10px;
-        }
 
-        /* 表单 */
-        .form-row {
-            margin-bottom: 14px;
-        }
-        .form-row label {
-            display: block;
-            font-size: 13px;
-            color: #374151;
-            margin-bottom: 5px;
-            font-weight: 500;
-        }
-        .form-row label .required { color: #dc2626; }
-        /* v1.70.4 ②：勾选框 + 文本同行的 inline label（解决 .form-row label{display:block} 撑高问题）*/
-        .form-row label.checkbox-inline {
+        /* 表单：本页 .form-row 语义=单字段纵向组（label 块级 + input 满宽），≠共享 .u-form-row（双列 1fr 1fr 栅格）
+           → 正确对应共享层 .u-form-group（前端统一 C4 Commit 3；base margin/label/input/focus 全走共享 harmonize）。
+           下面仅保留本页专属：required 红标 + checkbox 同行 inline label，选择器改名 .u-form-group 作用域。 */
+        .u-form-group label .required { color: #dc2626; }
+        /* v1.70.4 ②：勾选框 + 文本同行的 inline label（解决共享 .u-form-group label{display:block} 撑高问题）*/
+        .u-form-group label.checkbox-inline {
             display: flex;
             align-items: center;
             gap: 6px;
             margin-bottom: 0;
             cursor: pointer;
         }
-        .form-row label.checkbox-inline input[type="checkbox"] {
+        .u-form-group label.checkbox-inline input[type="checkbox"] {
             width: auto;
             padding: 0;
             margin: 0;
             flex-shrink: 0;
         }
-        .form-row label.checkbox-inline > span { font-weight: 400; }
-        /* 5/25 v1.71.x forward 弹框沟通对象复选框列表（覆盖 .form-row input{width:100%; padding:8px 10px} 全局规则）*/
+        .u-form-group label.checkbox-inline > span { font-weight: 400; }
+        /* 5/25 v1.71.x forward 弹框沟通对象复选框列表（覆盖共享 .u-form-group input{width:100%} 使复选框 width:auto）*/
         .forward-contact-checkbox-list input[type="checkbox"] {
             width: auto;
             padding: 0;
@@ -665,32 +599,9 @@
             font-size: 12px;
             word-break: break-all;
         }
-        .form-row input,
-        .form-row select,
-        .form-row textarea {
-            width: 100%;
-            padding: 8px 10px;
-            border: 1px solid #d1d5db;
-            border-radius: 6px;
-            font-size: 13px;
-            outline: none;
-            font-family: inherit;
-            box-sizing: border-box;
-        }
-        .form-row input:focus,
-        .form-row select:focus,
-        .form-row textarea:focus {
-            border-color: #d97706;
-        }
-        .form-row textarea {
-            resize: vertical;
-            min-height: 70px;
-        }
-        .form-row .hint {
-            font-size: 11px;
-            color: #9ca3af;
-            margin-top: 3px;
-        }
+        /* .form-row input/select/textarea + focus + textarea + hint base 全部并入共享层 components.css
+           .u-form-group（含 focus ring：input/select 聚焦 #d97706 边框 + 3px 光晕）+ .u-hint
+           （前端统一 C4 Commit 3 harmonize；本页 <span class="u-hint"> → u-hint。padding 由旧 8px 10px → 共享 8px 12px 为值差）。 */
         .file-preview {
             margin-top: 8px;
             display: flex;
@@ -762,15 +673,9 @@
             border: none;
             font-weight: 500;
         }
-        .btn-primary {
-            background: #d97706;
-            color: #fff;
-        }
-        .btn-primary:hover { background: #b45309; }
-        .btn-primary:disabled {
-            background: #fbbf24;
-            cursor: not-allowed;
-        }
+        /* .btn-primary base → 共享层 .u-btn-primary（前端统一 C4 Commit 3 harmonize：旧纯色 #d97706 →
+           共享 amber 渐变 linear-gradient(135deg,#d97706,#b45309)）；按钮元素保留 .btn base（非黑名单）+ u-btn-primary。
+           .btn-cancel 非黑名单，residual 保留。 */
         .btn-cancel {
             background: #f3f4f6;
             color: #374151;
@@ -816,7 +721,7 @@
     </style>
 </head>
 
-<body>
+<body class="unified-page">
 
     <!-- 顶部导航栏 -->
     <nav class="navbar fixed-header">
@@ -957,8 +862,8 @@
         </div>
 
         <!-- 筛选栏 -->
-        <div class="filter-bar">
-            <span class="filter-label">状态</span>
+        <div class="u-filter-bar">
+            <span class="u-filter-label">状态</span>
             <select id="filterStatus" onchange="loadList()">
                 <option value="">全部</option>
                 <option value="PENDING_ASSIGN">待指派</option>
@@ -968,14 +873,14 @@
                 <option value="ARCHIVED">已归档</option>
             </select>
 
-            <span class="filter-label">我的角色</span>
+            <span class="u-filter-label">我的角色</span>
             <select id="filterMyRole" onchange="loadList()">
                 <option value="">全部</option>
                 <option value="contact">我对接的</option>
                 <option value="developer">指派给我的</option>
             </select>
 
-            <span class="filter-label">部门</span>
+            <span class="u-filter-label">部门</span>
             <select id="filterDept" onchange="loadList()">
                 <option value="">全部</option>
             </select>
@@ -1006,7 +911,8 @@
                     <th class="sortable" data-sort-by="target_db_connection_id">目标业务库<span class="sort-icon">⇅</span></th>
                     <th class="sortable" data-sort-by="description">需求描述<span class="sort-icon">⇅</span></th>
                     <th class="sortable" data-sort-by="created_at">创建时间<span class="sort-icon">⇅</span></th>
-                    <th class="sortable" data-sort-by="deadline">截止时间<span class="sort-icon">⇅</span></th>
+                    <th class="sortable" data-sort-by="deadline">期望完成时间<span class="sort-icon">⇅</span></th>
+                    <th class="sortable" data-sort-by="dev_estimated_at">预计完成时间<span class="sort-icon">⇅</span></th>
                     <th class="sortable" data-sort-by="last_submitted_at">最后提交<span class="sort-icon">⇅</span></th>
                     <th class="sortable" data-sort-by="contact_person_name">对接人<span class="sort-icon">⇅</span></th>
                     <th class="sortable" data-sort-by="developer_name">处理人<span class="sort-icon">⇅</span></th>
@@ -1016,149 +922,148 @@
                 </tr>
             </thead>
             <tbody id="listBody">
-                <tr class="empty-row"><td colspan="14">加载中...</td></tr>
+                <tr class="empty-row"><td colspan="15">加载中...</td></tr>
             </tbody>
         </table>
     </main>
 
     <!-- 新建/编辑协作单弹窗（v1.66.2 复用同一 modal） -->
-    <div class="modal-overlay" id="newModal">
-        <div class="modal-card">
-            <div class="modal-header">
-                <h3 id="newModalTitle">新建协作单</h3>
+    <div class="u-modal-overlay" id="newModal">
+        <div class="u-modal-box">
+            <div class="u-modal-header">
+                <h2 id="newModalTitle">新建协作单</h2>
                 <button class="modal-close" onclick="closeNewModal()">×</button>
             </div>
-            <div class="modal-body">
-                <div class="form-row">
+            <div class="u-modal-body">
+                <div class="u-form-group">
                     <label>OA 流程号 <span class="required">*</span></label>
                     <input type="text" id="f_oa_no" placeholder="如 364265（只填数字部分）">
-                    <div class="hint">业务方在集团 OA 提交的取数申请流程号，只填数字部分，系统展示自动加 OA- 前缀。一个 OA 流程对应一个协作单（系统强制唯一）。</div>
+                    <div class="u-hint">业务方在集团 OA 提交的取数申请流程号，只填数字部分，系统展示自动加 OA- 前缀。一个 OA 流程对应一个协作单（系统强制唯一）。</div>
                 </div>
-                <div class="form-row">
+                <div class="u-form-group">
                     <label>需求部门 <span class="required">*</span></label>
                     <select id="f_dept"></select>
                 </div>
-                <div class="form-row">
+                <div class="u-form-group">
                     <label>业务方负责人 <span class="required">*</span></label>
                     <input type="text" id="f_requester" placeholder="如 张三">
                 </div>
-                <div class="form-row">
-                    <label>业务方负责人手机号 <span class="hint">（选填，11 位，命中则拉真人进沟通群）</span></label>
+                <div class="u-form-group">
+                    <label>业务方负责人手机号 <span class="u-hint">（选填，11 位，命中则拉真人进沟通群）</span></label>
                     <input type="text" id="f_requester_phone" placeholder="如 13812345678" maxlength="11" inputmode="numeric">
-                    <div class="hint">钉钉企业内可按手机号匹配到真人时，拉群会把业务方加入；查不到则按既有 4 人组拉群，不阻塞建群。</div>
+                    <div class="u-hint">钉钉企业内可按手机号匹配到真人时，拉群会把业务方加入；查不到则按既有 4 人组拉群，不阻塞建群。</div>
                 </div>
-                <div class="form-row">
+                <div class="u-form-group">
                     <label>需求描述 <span class="required">*</span></label>
                     <textarea id="f_desc" placeholder="把和业务方对齐过的关键口径写清楚，作为书面证据"></textarea>
                 </div>
-                <div class="form-row">
+                <div class="u-form-group">
                     <label>期望完成时间 <span class="required">*</span></label>
                     <input type="datetime-local" id="f_deadline">
                 </div>
-                <div class="form-row">
+                <div class="u-form-group">
                     <label>目标业务库 <span class="required">*</span></label>
                     <select id="f_target_db">
                         <option value="">加载中...</option>
                     </select>
-                    <div class="hint">开发交付的 SQL 将在此库执行。下拉为空时联系管理员在「系统设置 → 数据库连接」配置 source 类型连接。</div>
+                    <div class="u-hint">开发交付的 SQL 将在此库执行。下拉为空时联系管理员在「系统设置 → 数据库连接」配置 source 类型连接。</div>
                 </div>
-                <div class="form-row" id="formRow_contact">
+                <div class="u-form-group" id="formRow_contact">
                     <label>对接人 <span class="required" id="contactRequiredMark">*</span></label>
                     <select id="f_contact">
                         <option value="">加载中...</option>
                     </select>
-                    <div class="hint" id="contactHint">外包负责人，由其在平台内将协作单指派给具体开发。下拉显示全部活跃用户（含 admin 兜底），凭备注辨识。</div>
+                    <div class="u-hint" id="contactHint">外包负责人，由其在平台内将协作单指派给具体开发。下拉显示全部活跃用户（含 admin 兜底），凭备注辨识。</div>
                 </div>
                 <!-- v1.72.3 admin 直派模式（仅 admin 可见，新建时显示）-->
-                <div class="form-row" id="formRow_adminDirectToggle" style="display:none;">
+                <div class="u-form-group" id="formRow_adminDirectToggle" style="display:none;">
                     <label class="checkbox-inline">
                         <input type="checkbox" id="f_admin_direct_toggle" onchange="toggleAdminDirectMode()">
                         <span>🎯 admin 直派模式</span>
                     </label>
-                    <div class="hint">勾选后跳过 D1+D2，直接指定数据导出人。常用于"业务方已经知道找谁导数据"的场景。</div>
+                    <div class="u-hint">勾选后跳过 D1+D2，直接指定数据导出人。常用于"业务方已经知道找谁导数据"的场景。</div>
                 </div>
-                <div class="form-row" id="formRow_adminDirectExporter" style="display:none;">
+                <div class="u-form-group" id="formRow_adminDirectExporter" style="display:none;">
                     <label>🎯 数据导出人 <span class="required">*</span></label>
                     <select id="f_admin_direct_exporter">
                         <option value="">加载中...</option>
                     </select>
-                    <div class="hint">下拉显示全部活跃用户，凭备注辨识。该用户将作为协作单的最终数据导出人，状态直接进入「导出中」。</div>
+                    <div class="u-hint">下拉显示全部活跃用户，凭备注辨识。该用户将作为协作单的最终数据导出人，状态直接进入「导出中」。</div>
                 </div>
-                <div class="form-row" id="formRow_files">
-                    <label>原始单据截图 <span class="hint">（选传）</span></label>
+                <div class="u-form-group" id="formRow_files">
+                    <label>原始单据截图 <span class="u-hint">（选传）</span></label>
                     <input type="file" id="f_files" accept=".png,.jpg,.jpeg,.gif,.webp,.pdf,image/*" multiple>
-                    <div class="hint">最多 5 个文件 / 单文件 ≤ 10MB / 支持 PNG·JPG·GIF·WEBP·PDF。OA 截图、对话截图、邮件截图、OA 导出 PDF 单据均可（选传）。</div>
+                    <div class="u-hint">最多 5 个文件 / 单文件 ≤ 10MB / 支持 PNG·JPG·GIF·WEBP·PDF。OA 截图、对话截图、邮件截图、OA 导出 PDF 单据均可（选传）。</div>
                     <div id="filePreview" class="file-preview"></div>
                 </div>
-                <div class="form-row" id="formRow_template">
-                    <label>数据模板 <span class="hint">（选传）</span></label>
+                <div class="u-form-group" id="formRow_template">
+                    <label>数据模板 <span class="u-hint">（选传）</span></label>
                     <input type="file" id="f_template" accept=".xlsx,.xls">
-                    <div class="hint">单个 Excel 文件（.xlsx / .xls），≤ 10MB。用于需求方以具体表格形式描述列名/示例数据，便于开发理解需求。质量校验的列对齐只比对此文件。</div>
+                    <div class="u-hint">单个 Excel 文件（.xlsx / .xls），≤ 10MB。用于需求方以具体表格形式描述列名/示例数据，便于开发理解需求。质量校验的列对齐只比对此文件。</div>
                     <div id="templatePreview" class="file-preview"></div>
                 </div>
-                <div class="form-row" id="formRow_dataScope">
-                    <label>数据范围说明 <span class="hint">（选传）</span></label>
+                <div class="u-form-group" id="formRow_dataScope">
+                    <label>数据范围说明 <span class="u-hint">（选传）</span></label>
                     <input type="file" id="f_data_scope" accept=".xlsx,.xls,.txt" multiple>
-                    <div class="hint">可多个文件（.xlsx / .xls / .txt），每个 ≤ 10MB，最多 5 个。需求方圈定取数范围（如"A部门、B部门…"），供开发按范围取数；不参与列对齐校验。</div>
+                    <div class="u-hint">可多个文件（.xlsx / .xls / .txt），每个 ≤ 10MB，最多 5 个。需求方圈定取数范围（如"A部门、B部门…"），供开发按范围取数；不参与列对齐校验。</div>
                     <div id="dataScopePreview" class="file-preview"></div>
                 </div>
             </div>
-            <div class="modal-footer">
+            <div class="u-modal-footer">
                 <button class="btn btn-cancel" onclick="closeNewModal()">取消</button>
-                <button class="btn btn-primary" id="btnSubmit" onclick="submitNew()">提交</button>
+                <button class="btn u-btn-primary" id="btnSubmit" onclick="submitNew()">提交</button>
             </div>
         </div>
     </div>
 
-    <!-- 协作单详情弹窗（v2.0 Deploy 2 框架，交付/验收/摩擦区块见 Deploy 3；v1.66.2 加编辑/作废）-->
-    <div class="modal-overlay" id="detailModal">
-        <div class="modal-card detail-card">
-            <div class="modal-header">
-                <h3 id="detailTitle">协作单详情</h3>
-                <button class="modal-close" onclick="closeDetailModal()">×</button>
+    <!-- 协作单详情抽屉（v2.0 Deploy 2 框架，交付/验收/摩擦区块见 Deploy 3；v1.66.2 加编辑/作废；前端统一 C4 Commit 2：居中弹窗 → 右侧抽屉，footer 固定=决策A） -->
+    <div class="u-drawer-overlay" id="detailDrawerOverlay"></div>
+    <div class="u-drawer" id="detailDrawer" inert aria-hidden="true">
+        <div class="u-drawer-header">
+            <h2 id="detailTitle">协作单详情</h2>
+            <button class="u-drawer-close" onclick="closeDetailModal()">×</button>
+        </div>
+        <div class="u-drawer-body" id="detailBody">
+            <div style="text-align:center;color:#9ca3af;padding:24px;">加载中...</div>
+        </div>
+        <div class="u-drawer-footer">
+            <div style="display:flex;gap:8px;" id="detailFooterLeft">
+                <!-- v1.66.2 编辑/作废按钮按状态动态显示 -->
             </div>
-            <div class="modal-body" id="detailBody">
-                <div style="text-align:center;color:#9ca3af;padding:24px;">加载中...</div>
-            </div>
-            <div class="modal-footer" style="display:flex;justify-content:space-between;align-items:center;">
-                <div style="display:flex;gap:8px;" id="detailFooterLeft">
-                    <!-- v1.66.2 编辑/作废按钮按状态动态显示 -->
-                </div>
-                <button class="btn btn-cancel" onclick="closeDetailModal()">关闭</button>
-            </div>
+            <button class="btn btn-cancel" onclick="closeDetailModal()">关闭</button>
         </div>
     </div>
 
     <!-- 行政闭环确认弹窗（v1.70.4 ③）-->
-    <div class="modal-overlay" id="adminSubmitModal">
-        <div class="modal-card">
-            <div class="modal-header">
-                <h3>行政闭环</h3>
+    <div class="u-modal-overlay" id="adminSubmitModal">
+        <div class="u-modal-box">
+            <div class="u-modal-header">
+                <h2>行政闭环</h2>
                 <button class="modal-close" onclick="closeAdminSubmitModal()">×</button>
             </div>
-            <div class="modal-body">
+            <div class="u-modal-body">
                 <div style="padding:12px;background:#dbeafe;border:1px solid #93c5fd;border-radius:6px;margin-bottom:14px;color:#1e3a8a;font-size:13px;line-height:1.7;">
                     📋 适用于：admin 因创建协作单时录入错误（如选错业务库），导致开发交付物 smoke test 失败。<br/>
                     通过 admin 修正字段后，<strong>不让开发再回来重传</strong>，admin 单方面将协作单从 SUBMITTED 闭环到 DONE。<br/>
                     <span style="color:#991b1b;">⚠️ 行政闭环<strong>不跑 smoke test</strong>，仅作需求记账，不追溯结果数据；完成时间取最后一次有效提交时间，无则取要求完成时间。</span>
                 </div>
-                <div class="form-row">
-                    <label>行政闭环原因 <span class="required">*</span> <span class="hint">（必填，10..500 字符）</span></label>
+                <div class="u-form-group">
+                    <label>行政闭环原因 <span class="required">*</span> <span class="u-hint">（必填，10..500 字符）</span></label>
                     <textarea id="f_admin_submit_reason" placeholder="例如：创建时业务库选错为 BMS 应为 business_db，已通过修正字段更正，开发交付物本身无问题，无需重新验收" maxlength="500" style="min-height:80px;"></textarea>
                 </div>
                 <!-- v1.70.5 admin 可选补传 SQL + Excel（不做内容校验，仅记录） -->
-                <div class="form-row">
-                    <label>补传 SQL 脚本 <span class="hint">（可选，.sql 文件 ≤ 100MB）</span></label>
+                <div class="u-form-group">
+                    <label>补传 SQL 脚本 <span class="u-hint">（可选，.sql 文件 ≤ 100MB）</span></label>
                     <input type="file" id="f_admin_submit_script" accept=".sql">
-                    <div class="hint">如开发未上传过 SQL / 需要 admin 替开发补全，可在此选传。不做内容校验、不跑 smoke test。</div>
+                    <div class="u-hint">如开发未上传过 SQL / 需要 admin 替开发补全，可在此选传。不做内容校验、不跑 smoke test。</div>
                 </div>
-                <div class="form-row">
-                    <label>补传结果数据 <span class="hint">（可选，.xlsx / .xls 文件 ≤ 100MB）</span></label>
+                <div class="u-form-group">
+                    <label>补传结果数据 <span class="u-hint">（可选，.xlsx / .xls 文件 ≤ 100MB）</span></label>
                     <input type="file" id="f_admin_submit_data" accept=".xlsx,.xls">
-                    <div class="hint">如开发未上传过结果数据 / 需要 admin 替开发补全，可在此选传。同 attachment_type 旧版本会被自动归档。</div>
+                    <div class="u-hint">如开发未上传过结果数据 / 需要 admin 替开发补全，可在此选传。同 attachment_type 旧版本会被自动归档。</div>
                 </div>
             </div>
-            <div class="modal-footer">
+            <div class="u-modal-footer">
                 <button class="btn btn-cancel" onclick="closeAdminSubmitModal()">取消</button>
                 <button class="btn" id="btnAdminSubmit" style="background:#2563eb;color:white;" onclick="submitAdminOnBehalf()">确认闭环</button>
             </div>
@@ -1166,22 +1071,22 @@
     </div>
 
     <!-- 作废确认弹窗（v1.66.2）-->
-    <div class="modal-overlay" id="archiveModal">
-        <div class="modal-card">
-            <div class="modal-header">
-                <h3 id="archiveTitle">作废协作单</h3>
+    <div class="u-modal-overlay" id="archiveModal">
+        <div class="u-modal-box">
+            <div class="u-modal-header">
+                <h2 id="archiveTitle">作废协作单</h2>
                 <button class="modal-close" onclick="closeArchiveModal()">×</button>
             </div>
-            <div class="modal-body">
+            <div class="u-modal-body">
                 <div style="padding:12px;background:#fef2f2;border:1px solid #fca5a5;border-radius:6px;margin-bottom:12px;color:#991b1b;font-size:13px;">
                     ⚠️ 作废后此协作单将从列表消失，对接人/开发不再可见。<strong>此操作不可恢复</strong>，仅 admin 可在"显示已作废"筛选下找到。
                 </div>
-                <div class="form-row">
-                    <label>作废原因 <span class="hint">（选填，≤500 字）</span></label>
+                <div class="u-form-group">
+                    <label>作废原因 <span class="u-hint">（选填，≤500 字）</span></label>
                     <textarea id="f_archive_reason" placeholder="例如：业务方撤回需求 / OA 流程作废 / 重复登记 等" maxlength="500" style="min-height:80px;"></textarea>
                 </div>
             </div>
-            <div class="modal-footer">
+            <div class="u-modal-footer">
                 <button class="btn btn-cancel" onclick="closeArchiveModal()">取消</button>
                 <button class="btn" id="btnArchive" style="background:#dc2626;color:white;" onclick="submitArchive()">确认作废</button>
             </div>
@@ -1189,22 +1094,22 @@
     </div>
 
     <!-- 归档锁定弹窗（v1.67.1）-->
-    <div class="modal-overlay" id="archiveFinalModal">
-        <div class="modal-card">
-            <div class="modal-header">
-                <h3 id="archiveFinalTitle">归档协作单</h3>
+    <div class="u-modal-overlay" id="archiveFinalModal">
+        <div class="u-modal-box">
+            <div class="u-modal-header">
+                <h2 id="archiveFinalTitle">归档协作单</h2>
                 <button class="modal-close" onclick="closeArchiveFinalModal()">×</button>
             </div>
-            <div class="modal-body">
+            <div class="u-modal-body">
                 <div style="padding:12px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:6px;margin-bottom:12px;color:#166534;font-size:13px;">
                     📁 归档后此协作单将进入只读历史状态。<strong>开发不可再修改/重传交付物</strong>，仅 admin 可继续操作。归档与"作废"不同——归档是已完成的入库存档。
                 </div>
-                <div class="form-row">
-                    <label>归档备注 <span class="hint">（选填，≤500 字）</span></label>
+                <div class="u-form-group">
+                    <label>归档备注 <span class="u-hint">（选填，≤500 字）</span></label>
                     <textarea id="f_archive_final_reason" placeholder="例如：验收 OK 入库 / 数据已交付到 PowerBI / 业务方已确认 等" maxlength="500" style="min-height:80px;"></textarea>
                 </div>
             </div>
-            <div class="modal-footer">
+            <div class="u-modal-footer">
                 <button class="btn btn-cancel" onclick="closeArchiveFinalModal()">取消</button>
                 <button class="btn" id="btnArchiveFinal" style="background:#16a34a;color:white;" onclick="submitArchiveFinal()">确认归档</button>
             </div>
@@ -1216,31 +1121,31 @@
          可改字段动态从 GET /admin-fix/allowed-fields?status= 拉，灰显当前状态不可改字段
          字段：oa_request_no / description / target_db_connection_id（下拉）/ contact_person_id / developer_id（下拉，复用 activeUsers）
     -->
-    <div class="modal-overlay" id="adminFixModal">
-        <div class="modal-card" style="max-width:640px;">
-            <div class="modal-header">
-                <h3 id="adminFixTitle">管理员修正</h3>
+    <div class="u-modal-overlay" id="adminFixModal">
+        <div class="u-modal-box" style="max-width:640px;">
+            <div class="u-modal-header">
+                <h2 id="adminFixTitle">管理员修正</h2>
                 <button class="modal-close" onclick="closeAdminFixModal()">×</button>
             </div>
-            <div class="modal-body">
+            <div class="u-modal-body">
                 <div style="padding:12px;background:#fef3c7;border:1px solid #fbbf24;border-radius:6px;margin-bottom:14px;color:#78350f;font-size:13px;">
                     🔧 仅 admin 用于"录错字段救火"场景。修改后会清空 SQL 验收错误状态，让开发可重新提交。<strong>所有改动记入审计日志</strong>，DONE/ARCHIVED 状态不可修正。
                 </div>
                 <div id="adminFixFieldsContainer">
                     <!-- 根据 allowed_fields 动态渲染 -->
                 </div>
-                <div class="form-row" style="margin-top:14px;">
-                    <label>修正原因 <span class="required">*</span> <span class="hint">（必填，10..500 字符）</span></label>
+                <div class="u-form-group" style="margin-top:14px;">
+                    <label>修正原因 <span class="required">*</span> <span class="u-hint">（必填，10..500 字符）</span></label>
                     <textarea id="f_admin_fix_reason" placeholder="例如：录错目标库 BMS 应为 business_db / OA 号写错 等" maxlength="500" style="min-height:80px;"></textarea>
                 </div>
-                <div class="form-row" style="margin-top:10px;">
+                <div class="u-form-group" style="margin-top:10px;">
                     <label class="checkbox-inline">
                         <input type="checkbox" id="f_admin_fix_clear_sql_error" checked>
                         <span>修改后清空 SQL 验收错误（让开发可重新提交）</span>
                     </label>
                 </div>
             </div>
-            <div class="modal-footer">
+            <div class="u-modal-footer">
                 <button class="btn btn-cancel" onclick="closeAdminFixModal()">取消</button>
                 <button class="btn" id="btnAdminFix" style="background:#f59e0b;color:white;" onclick="submitAdminFix()">确认修正</button>
             </div>
@@ -1248,129 +1153,129 @@
     </div>
 
     <!-- 指派/改派开发弹窗（v1.66.0 二级转派：调 POST /:id/assign）-->
-    <div class="modal-overlay" id="assignModal">
-        <div class="modal-card">
-            <div class="modal-header">
-                <h3 id="assignTitle">指派开发</h3>
+    <div class="u-modal-overlay" id="assignModal">
+        <div class="u-modal-box">
+            <div class="u-modal-header">
+                <h2 id="assignTitle">指派开发</h2>
                 <button class="modal-close" onclick="closeAssignModal()">×</button>
             </div>
-            <div class="modal-body">
-                <div class="form-row">
+            <div class="u-modal-body">
+                <div class="u-form-group">
                     <label>开发人员 <span class="required">*</span></label>
                     <select id="f_assign_dev">
                         <option value="">加载中...</option>
                     </select>
-                    <div class="hint">不能指派对接人本人；下拉显示全部活跃用户，凭备注辨识。</div>
+                    <div class="u-hint">不能指派对接人本人；下拉显示全部活跃用户，凭备注辨识。</div>
                 </div>
-                <div id="assignPrevTip" class="hint" style="display:none;color:#92400e;background:#fef3c7;padding:8px 10px;border-radius:6px;margin-top:6px;"></div>
+                <div id="assignPrevTip" class="u-hint" style="display:none;color:#92400e;background:#fef3c7;padding:8px 10px;border-radius:6px;margin-top:6px;"></div>
             </div>
-            <div class="modal-footer">
+            <div class="u-modal-footer">
                 <button class="btn btn-cancel" onclick="closeAssignModal()">取消</button>
-                <button class="btn btn-primary" id="btnAssign" onclick="submitAssign()">提交</button>
+                <button class="btn u-btn-primary" id="btnAssign" onclick="submitAssign()">提交</button>
             </div>
         </div>
     </div>
 
     <!-- 上传交付物弹窗（D3 模块 7 补丁：PENDING/failed 状态调 POST /:id/submit）-->
-    <div class="modal-overlay" id="submitDeliveryModal">
-        <div class="modal-card">
-            <div class="modal-header">
-                <h3 id="submitDeliveryTitle">上传交付物</h3>
+    <div class="u-modal-overlay" id="submitDeliveryModal">
+        <div class="u-modal-box">
+            <div class="u-modal-header">
+                <h2 id="submitDeliveryTitle">上传交付物</h2>
                 <button class="modal-close" onclick="closeSubmitDeliveryModal()">×</button>
             </div>
-            <div class="modal-body">
-                <div class="form-row">
+            <div class="u-modal-body">
+                <div class="u-form-group">
                     <label>SQL 脚本 <span class="required">*</span></label>
                     <input type="file" id="f_delivery_script" accept=".sql,.txt" multiple>
-                    <div class="hint">扩展名 .sql / .txt，每个 ≤ 1MB，最多 5 个。第一份脚本将在目标业务库执行 smoke test，其余为附带交付物。</div>
+                    <div class="u-hint">扩展名 .sql / .txt，每个 ≤ 1MB，最多 5 个。第一份脚本将在目标业务库执行 smoke test，其余为附带交付物。</div>
                     <div id="deliveryScriptPreview" class="file-preview"></div>
                 </div>
-                <div class="form-row">
+                <div class="u-form-group">
                     <label>结果数据 <span class="required">*</span></label>
                     <input type="file" id="f_delivery_data" accept=".xlsx,.xls" multiple>
-                    <div class="hint">扩展名 .xlsx / .xls，每个 ≤ 100MB，最多 5 个。本地跑出的取数结果供业务方验收对照；第一份参与列对齐校验，其余为附带交付物。</div>
+                    <div class="u-hint">扩展名 .xlsx / .xls，每个 ≤ 100MB，最多 5 个。本地跑出的取数结果供业务方验收对照；第一份参与列对齐校验，其余为附带交付物。</div>
                     <div id="deliveryDataPreview" class="file-preview"></div>
                 </div>
-                <div class="hint" style="margin-top:8px;color:#6b7280;">
+                <div class="u-hint" style="margin-top:8px;color:#6b7280;">
                     提交后系统会对 SQL 脚本做 4 层防御 smoke test（语法解析 / 黑名单 / 只读校验 / 真连业务库试跑）。验收通过协作单进入 DONE，否则停留 SUBMITTED 状态并显示错误，可继续重提。
                 </div>
             </div>
-            <div class="modal-footer">
+            <div class="u-modal-footer">
                 <button class="btn btn-cancel" onclick="closeSubmitDeliveryModal()">取消</button>
-                <button class="btn btn-primary" id="btnSubmitDelivery" onclick="submitDelivery()">提交</button>
+                <button class="btn u-btn-primary" id="btnSubmitDelivery" onclick="submitDelivery()">提交</button>
             </div>
         </div>
     </div>
 
     <!-- v1.90.0 开发回填预计完成时间弹框（方案 §4.1）：仅开发本人 + PENDING，后端为真闸门 -->
-    <div class="modal-overlay" id="estimateModal">
-        <div class="modal-card" style="max-width:440px;">
-            <div class="modal-header">
-                <h3 id="estimateTitle">回填预计完成时间</h3>
+    <div class="u-modal-overlay" id="estimateModal">
+        <div class="u-modal-box" style="max-width:440px;">
+            <div class="u-modal-header">
+                <h2 id="estimateTitle">回填预计完成时间</h2>
                 <button class="modal-close" onclick="closeEstimateModal()">×</button>
             </div>
-            <div class="modal-body">
+            <div class="u-modal-body">
                 <input type="hidden" id="f_estimate_collab_id">
-                <div class="form-row">
+                <div class="u-form-group">
                     <label>预计完成时间 <span class="required">*</span></label>
                     <input type="datetime-local" id="f_estimate_at">
-                    <div class="hint">精确到分钟。回填或修改后，需在详情页点「通知需求方」发送钉钉提醒；修改预估或改派开发会重置已发的通知状态。</div>
+                    <div class="u-hint">精确到分钟。回填或修改后，需在详情页点「通知需求方」发送钉钉提醒；修改预估或改派开发会重置已发的通知状态。</div>
                 </div>
             </div>
-            <div class="modal-footer">
+            <div class="u-modal-footer">
                 <button class="btn btn-cancel" onclick="closeEstimateModal()">取消</button>
-                <button class="btn btn-primary" id="btnSubmitEstimate" onclick="submitEstimate()">提交</button>
+                <button class="btn u-btn-primary" id="btnSubmitEstimate" onclick="submitEstimate()">提交</button>
             </div>
         </div>
     </div>
 
     <!-- v1.71.0 三级转发：forwardToExporter 弹框（方案 §4 + codex 39 取舍审 + codex 41 M-5 预选 contact+dev）-->
-    <div class="modal-overlay" id="forwardToExporterModal">
-        <div class="modal-card">
-            <div class="modal-header">
-                <h3 id="forwardToExporterTitle">转发给信息技术部相关人员</h3>
+    <div class="u-modal-overlay" id="forwardToExporterModal">
+        <div class="u-modal-box">
+            <div class="u-modal-header">
+                <h2 id="forwardToExporterTitle">转发给信息技术部相关人员</h2>
                 <button class="modal-close" onclick="closeForwardToExporterModal()">×</button>
             </div>
-            <div class="modal-body">
-                <div class="hint" style="background:#fef3c7;color:#92400e;padding:8px 10px;border-radius:6px;margin-bottom:12px;">
+            <div class="u-modal-body">
+                <div class="u-hint" style="background:#fef3c7;color:#92400e;padding:8px 10px;border-radius:6px;margin-bottom:12px;">
                     ⚠️ 请先与相关人员沟通确认可以从系统端导出，然后再拉人进群
                 </div>
-                <div class="form-row">
+                <div class="u-form-group">
                     <label>请选择信息技术部相关人员 <span class="required">*</span></label>
                     <select id="f_forward_exporter">
                         <option value="">加载中...</option>
                     </select>
-                    <div class="hint">下拉显示全部活跃用户，凭备注辨识。</div>
+                    <div class="u-hint">下拉显示全部活跃用户，凭备注辨识。</div>
                 </div>
-                <div class="form-row">
+                <div class="u-form-group">
                     <label>沟通对象（多选留痕） <span class="required">*</span></label>
                     <div id="f_forward_contact_user_ids" class="forward-contact-checkbox-list" style="max-height:180px;overflow-y:auto;border:1px solid #e2e8f0;border-radius:6px;padding:8px;background:#fff;">
                     </div>
-                    <div class="hint">勾选您事先沟通过的相关人员；默认预选当前对接人、开发与您自己。<strong>所选信息技术部相关人员自动加入并锁定不可移除</strong>。本字段仅作留痕，无需输入文字。</div>
+                    <div class="u-hint">勾选您事先沟通过的相关人员；默认预选当前对接人、开发与您自己。<strong>所选信息技术部相关人员自动加入并锁定不可移除</strong>。本字段仅作留痕，无需输入文字。</div>
                 </div>
-                <div id="forwardAttachmentTip" class="hint" style="display:none;background:#dbeafe;color:#1e40af;padding:8px 10px;border-radius:6px;margin-top:8px;">
+                <div id="forwardAttachmentTip" class="u-hint" style="display:none;background:#dbeafe;color:#1e40af;padding:8px 10px;border-radius:6px;margin-top:8px;">
                     📎 <span id="forwardAttachmentCount">0</span> 个附件，是否告知导出人下载查看？
                 </div>
             </div>
-            <div class="modal-footer">
+            <div class="u-modal-footer">
                 <button class="btn btn-cancel" onclick="closeForwardToExporterModal()">取消</button>
-                <button class="btn btn-primary" id="btnForwardToExporter" onclick="submitForwardToExporter()">确认转发并拉群</button>
+                <button class="btn u-btn-primary" id="btnForwardToExporter" onclick="submitForwardToExporter()">确认转发并拉群</button>
             </div>
         </div>
     </div>
 
     <!-- v1.71.0 三级转发：returnToDev 弹框（方案 §5.3 + codex 39 取舍审 + codex 41 C-2 missing_info+return_note）-->
-    <div class="modal-overlay" id="returnToDevModal">
-        <div class="modal-card">
-            <div class="modal-header">
-                <h3 id="returnToDevTitle" style="color:#b91c1c;">退回任务给开发</h3>
+    <div class="u-modal-overlay" id="returnToDevModal">
+        <div class="u-modal-box">
+            <div class="u-modal-header">
+                <h2 id="returnToDevTitle">退回任务给开发</h2>
                 <button class="modal-close" onclick="closeReturnToDevModal()">×</button>
             </div>
-            <div class="modal-body">
-                <div class="hint" style="background:#fef3c7;color:#92400e;padding:8px 10px;border-radius:6px;margin-bottom:12px;">
+            <div class="u-modal-body">
+                <div class="u-hint" style="background:#fef3c7;color:#92400e;padding:8px 10px;border-radius:6px;margin-bottom:12px;">
                     ⚠️ 退回后任务回到开发手中，您仍在群内可继续协助讨论
                 </div>
-                <div class="form-row">
+                <div class="u-form-group">
                     <label>退回原因 <span class="required">*</span></label>
                     <select id="f_return_reason">
                         <option value="">请选择原因...</option>
@@ -1381,13 +1286,13 @@
                         <option value="other">其他</option>
                     </select>
                 </div>
-                <div class="form-row">
+                <div class="u-form-group">
                     <label>补充说明（可选）</label>
                     <textarea id="f_return_note" rows="3" maxlength="500" placeholder="可选：简述退回的具体上下文（如缺哪些字段、需要哪些权限等）"></textarea>
-                    <div class="hint">最多 500 字。该说明将写入操作日志，供开发与 admin 复盘。</div>
+                    <div class="u-hint">最多 500 字。该说明将写入操作日志，供开发与 admin 复盘。</div>
                 </div>
             </div>
-            <div class="modal-footer">
+            <div class="u-modal-footer">
                 <button class="btn btn-cancel" onclick="closeReturnToDevModal()">取消</button>
                 <button class="btn" id="btnReturnToDev" style="background:#dc2626;color:white;" onclick="submitReturnToDev()">确认退回</button>
             </div>
@@ -1395,17 +1300,17 @@
     </div>
 
     <!-- 取数交付质量记录 v3.0 Commit E：打回开发弹窗（return-quality，4 reason_type 仅 DEV_QUALITY 算返工）-->
-    <div class="modal-overlay" id="returnQualityModal">
-        <div class="modal-card">
-            <div class="modal-header">
-                <h3 id="returnQualityTitle" style="color:#b45309;">打回开发重做</h3>
+    <div class="u-modal-overlay" id="returnQualityModal">
+        <div class="u-modal-box">
+            <div class="u-modal-header">
+                <h2 id="returnQualityTitle">打回开发重做</h2>
                 <button class="modal-close" onclick="closeReturnQualityModal()">×</button>
             </div>
-            <div class="modal-body">
-                <div class="hint" style="background:#fef3c7;color:#92400e;padding:8px 10px;border-radius:6px;margin-bottom:12px;">
+            <div class="u-modal-body">
+                <div class="u-hint" style="background:#fef3c7;color:#92400e;padding:8px 10px;border-radius:6px;margin-bottom:12px;">
                     ⚠️ 打回后任务回到开发手中（状态 → 待处理），仅"开发质量"类打回计入返工统计
                 </div>
-                <div class="form-row">
+                <div class="u-form-group">
                     <label>打回原因 <span class="required">*</span></label>
                     <select id="f_rq_reason_type">
                         <option value="">请选择原因...</option>
@@ -1415,13 +1320,13 @@
                         <option value="BIZ_ADJUST">业务调整</option>
                     </select>
                 </div>
-                <div class="form-row">
+                <div class="u-form-group">
                     <label>补充说明（可选）</label>
                     <textarea id="f_rq_reason_note" rows="3" maxlength="500" placeholder="可选：简述打回的具体原因（如哪些字段算错、缺哪列等），供开发复盘"></textarea>
-                    <div class="hint">最多 500 字。该说明将写入打回记录与操作日志。</div>
+                    <div class="u-hint">最多 500 字。该说明将写入打回记录与操作日志。</div>
                 </div>
             </div>
-            <div class="modal-footer">
+            <div class="u-modal-footer">
                 <button class="btn btn-cancel" onclick="closeReturnQualityModal()">取消</button>
                 <button class="btn" id="btnReturnQuality" style="background:#b45309;color:white;" onclick="submitReturnQuality()">确认打回</button>
             </div>
@@ -1429,35 +1334,35 @@
     </div>
 
     <!-- v1.71.0 三级转发：exportUpload 弹框（方案 §6.3 + codex 39 H-3：multer field 名 result_data_screenshot）-->
-    <div class="modal-overlay" id="exportUploadModal">
-        <div class="modal-card">
-            <div class="modal-header">
-                <h3 id="exportUploadTitle">提交导出物</h3>
+    <div class="u-modal-overlay" id="exportUploadModal">
+        <div class="u-modal-box">
+            <div class="u-modal-header">
+                <h2 id="exportUploadTitle">提交导出物</h2>
                 <button class="modal-close" onclick="closeExportUploadModal()">×</button>
             </div>
-            <div class="modal-body">
-                <div class="form-row">
+            <div class="u-modal-body">
+                <div class="u-form-group">
                     <label>结果数据 <span class="required">*</span></label>
                     <input type="file" id="f_export_result_data" accept=".xlsx,.xls">
-                    <div class="hint">扩展名 .xlsx / .xls，单文件 ≤ 100MB。从业务系统导出的数据交付物。</div>
+                    <div class="u-hint">扩展名 .xlsx / .xls，单文件 ≤ 100MB。从业务系统导出的数据交付物。</div>
                 </div>
-                <div class="form-row">
+                <div class="u-form-group">
                     <label>导出界面截图 <span class="required">*</span></label>
                     <input type="file" id="f_export_screenshot" accept=".png,.jpg,.jpeg,.gif,.webp">
-                    <div class="hint">扩展名 .png / .jpg / .jpeg / .gif / .webp，单文件 ≤ 10MB。截图作为导出操作凭证。</div>
+                    <div class="u-hint">扩展名 .png / .jpg / .jpeg / .gif / .webp，单文件 ≤ 10MB。截图作为导出操作凭证。</div>
                 </div>
-                <div class="form-row">
+                <div class="u-form-group">
                     <label>操作概要（可选）</label>
                     <textarea id="f_export_summary" rows="4" maxlength="500" placeholder="可选：简述本次导出的范围与操作要点（如时间段、过滤条件、是否脱敏等）"></textarea>
-                    <div class="hint">最多 500 字。该概要将展示在详情页并附带在钉钉通知前 80 字。</div>
+                    <div class="u-hint">最多 500 字。该概要将展示在详情页并附带在钉钉通知前 80 字。</div>
                 </div>
-                <div class="hint" style="margin-top:8px;color:#6b7280;">
+                <div class="u-hint" style="margin-top:8px;color:#6b7280;">
                     提交后协作单进入「已提交」状态，由开发或 admin 走最终验收 / 行政闭环。
                 </div>
             </div>
-            <div class="modal-footer">
+            <div class="u-modal-footer">
                 <button class="btn btn-cancel" onclick="closeExportUploadModal()">取消</button>
-                <button class="btn btn-primary" id="btnExportUpload" onclick="submitExportUpload()">提交</button>
+                <button class="btn u-btn-primary" id="btnExportUpload" onclick="submitExportUpload()">提交</button>
             </div>
         </div>
     </div>
@@ -1473,6 +1378,7 @@
     </div>
 
     <script src="assets/js/app.js?v=v1.105.0_pf"></script>
+    <script src="assets/js/unify-helpers.js?v=v1.110.0_unify"></script>
     <script>
         // v1.74.3 纯只读领导账号 id 名单（与后端 server.js READONLY_LEADER_IDS 同步！改动需两处一起改）
         //   示例只读领导A(id=11) / 示例只读领导B(id=6) 为纯只读领导，不参与偏技术类工作，不可被设为协作单数据导出人(exporter)。
@@ -1803,7 +1709,7 @@
 
         async function loadList() {
             const tbody = document.getElementById('listBody');
-            tbody.innerHTML = '<tr class="empty-row"><td colspan="14">加载中...</td></tr>';
+            tbody.innerHTML = '<tr class="empty-row"><td colspan="15">加载中...</td></tr>';
 
             const params = new URLSearchParams();
             const status = document.getElementById('filterStatus').value;
@@ -1819,14 +1725,14 @@
             try {
                 const res = await authFetch('/api/collab/requests?' + params.toString());
                 if (!res || !res.ok) {
-                    tbody.innerHTML = '<tr class="empty-row"><td colspan="14">加载失败</td></tr>';
+                    tbody.innerHTML = '<tr class="empty-row"><td colspan="15">加载失败</td></tr>';
                     return;
                 }
                 const list = await res.json();
                 renderList(list);
             } catch (e) {
                 console.error('加载协作单失败', e);
-                tbody.innerHTML = '<tr class="empty-row"><td colspan="14">加载失败</td></tr>';
+                tbody.innerHTML = '<tr class="empty-row"><td colspan="15">加载失败</td></tr>';
             }
         }
 
@@ -1869,7 +1775,7 @@
             const working = onlyUnrepliedTimeout ? (list || []).filter(r => unrepliedTimeoutLevel(r, nowTs)) : (list || []);
 
             if (!working.length) {
-                tbody.innerHTML = `<tr class="empty-row"><td colspan="14">${onlyUnrepliedTimeout ? '当前无超时未回填的协作单。' : '暂无协作单。点击右上角"新建协作单"开始记录。'}</td></tr>`;
+                tbody.innerHTML = `<tr class="empty-row"><td colspan="15">${onlyUnrepliedTimeout ? '当前无超时未回填的协作单。' : '暂无协作单。点击右上角"新建协作单"开始记录。'}</td></tr>`;
                 updateSortIcons();
                 return;
             }
@@ -1934,10 +1840,11 @@
                     <td class="col-desc" title="${escapeHtml(r.description)}">${escapeHtml(desc)}</td>
                     <td>${fmtDate(r.created_at)}</td>
                     <td>${fmtDate(r.deadline)}</td>
+                    <td>${r.dev_estimated_at ? fmtDate(r.dev_estimated_at) : '<span style="color:#9ca3af">—</span>'}</td>
                     <td>${fmtDate(r.last_submitted_at || r.submitted_at)}</td>
                     <td>${contactCell}</td>
                     <td>${devCell}</td>
-                    <td><span class="status-badge status-${r.status}">${STATUS_LABELS[r.status] || r.status}</span>${timeoutMark}</td>
+                    <td><span class="u-status-badge status-${r.status}">${STATUS_LABELS[r.status] || r.status}</span>${timeoutMark}</td>
                     <td>${valCell}</td>
                     <td>${frictionCell}</td>
                 </tr>`;
@@ -1958,6 +1865,7 @@
             description: 'string',
             created_at: 'date',
             deadline: 'date',
+            dev_estimated_at: 'date',
             last_submitted_at: 'date',
             contact_person_name: 'string',
             developer_name: 'string',
@@ -2069,20 +1977,25 @@
         let currentDetail = null;
 
         async function openDetail(id, fromDeepLink = false) {
-            const detailModalEl = document.getElementById('detailModal');
+            // 前端统一 C4 Commit 2：detailModal 居中弹窗 → detailDrawer 右侧抽屉，变量名保留 detailModalEl
+            // （下方判断/操作逻辑零改动，只改它指向的元素 + show→open 的 class 字面量）。
+            const detailModalEl = document.getElementById('detailDrawer');
             // v1.74.2 抖动修复：区分"同一单原地刷新" vs "首次打开 / 切到另一单"。
             //   同一单原地刷新（通知/转发/提交等 ~20 处操作成功后回刷当前单）→ 不把 detailBody 清空成"加载中…"
             //   （那会让整块高度先坍缩再恢复 = 抖动 + 滚动复位）；保留旧内容直到新数据到达由 renderDetail 整块替换 = 无闪烁。
             //   首次打开（列表点行 / 深链，弹窗未开）/ 切到另一单 → 显示"加载中…"占位 + 不恢复滚动（从顶部看新单）。
             //   codex 25(v1742) M-1/M-2：判定收窄为"同一单"（currentDetail.id===id），而非只看弹窗是否开着——
             //   弹窗开着 ≠ 同一单；当前 UI 全屏模态遮罩无 A→B 切换入口此场景不可达，但收窄让逻辑命中真实意图 + 防未来加跳转入口埋雷。
-            const isSameDetailRefresh = detailModalEl.classList.contains('show')
+            const isSameDetailRefresh = detailModalEl.classList.contains('open')
                 && currentDetail && String(currentDetail.id) === String(id);
             document.getElementById('detailTitle').textContent = `协作单 #${id}`;
             if (!isSameDetailRefresh) {
                 document.getElementById('detailBody').innerHTML = '<div style="text-align:center;color:#9ca3af;padding:24px;">加载中...</div>';
             }
-            detailModalEl.classList.add('show');
+            detailModalEl.classList.add('open');
+            document.getElementById('detailDrawerOverlay').classList.add('open');
+            _drawerForceLock = false;  // 打开/回刷详情 = 进入可交互态，清 forceLock（兜底拉群成功回刷路径）
+            syncDrawerInert();  // C4·ultracode HIGH 修复：打开/回刷详情 → 抽屉 open 且无子弹窗 → 解锁可交互
 
             // 深链：把 ?id=123 同步到 URL（用户主动点列表行打开也同步，便于复制链接）
             try {
@@ -2115,22 +2028,35 @@
             }
         }
 
-        // v1.69.0：仅隐藏详情弹窗 DOM，保留 currentDetail 状态变量
-        // 用途：点详情页"编辑/作废/归档/拉群"按钮时，详情弹窗自动收起让新弹窗独占焦点，
-        //      新弹窗 cancel/确认后由各自路径决定是否刷回详情或彻底关闭
-        function hideDetailModalOnly() {
-            document.getElementById('detailModal').classList.remove('show');
+        // C4·ultracode HIGH 修复：抽屉常驻 DOM（.u-drawer 无条件 display:flex + right:-620px 位移出屏，
+        //   为 slide 动画不能 display:none），旧版弹窗 display:none 天然逐出 Tab 序列的保证没了 → 必须靠
+        //   inert 显式接管焦点可达性。统一由 syncDrawerInert 计算：抽屉可交互 ⟺ 抽屉 open 且无任何子弹窗盖着；
+        //   否则 inert（关闭态 + 被子弹窗遮挡态都锁）。幂等，杜绝手动 true/false 方向错（修 HIGH#1 方向 + HIGH#2 覆盖）。
+        // C4 复审修（MED）：无 .u-modal-overlay 但需锁抽屉的场景（拉群 confirm 确定后的异步窗口），置此标志强制锁。
+        let _drawerForceLock = false;
+        function syncDrawerInert() {
+            const drawer = document.getElementById('detailDrawer');
+            if (!drawer) return;
+            const interactive = drawer.classList.contains('open')
+                && !document.querySelector('.u-modal-overlay.open')
+                && !_drawerForceLock;
+            drawer.inert = !interactive;
+            // C4 复审修（LOW）：用 set/removeAttribute 而非 toggleAttribute（后者锁定态会退化成非法空串 aria-hidden=""）
+            if (!interactive) drawer.setAttribute('aria-hidden', 'true');
+            else drawer.removeAttribute('aria-hidden');
         }
 
-        // 取消子弹窗时若还在详情上下文（currentDetail 未被清），把详情显示回来
-        function restoreDetailIfHidden() {
-            if (currentDetail) {
-                document.getElementById('detailModal').classList.add('show');
-            }
-        }
+        // v1.69.0：点详情页"编辑/作废/归档/拉群"等按钮打开子弹窗时，让子弹窗独占焦点。
+        // C4·ultracode HIGH 修复：改为调 syncDrawerInert 重算抽屉焦点态（子弹窗打开→抽屉被遮→inert）。
+        // 只有 5 个子弹窗显式调这里，另 10 个（指派/修正/交付/转发/退回×2/导出/预计/动态注入×2）
+        // 由页面级 MutationObserver 兜底覆盖（见 bindDrawerInertObserver），故此处显式调 + observer 双保险。
+        function hideDetailModalOnly() { syncDrawerInert(); }
+        function restoreDetailIfHidden() { syncDrawerInert(); }
 
         function closeDetailModal() {
-            document.getElementById('detailModal').classList.remove('show');
+            document.getElementById('detailDrawer').classList.remove('open');
+            document.getElementById('detailDrawerOverlay').classList.remove('open');
+            syncDrawerInert();  // 抽屉关闭 → 无 open → inert 锁（补回旧版 display:none 的焦点逐出，修 ultracode HIGH#1 方向）
             currentDetail = null;
             // 清 URL 中的 id 参数
             try {
@@ -2219,7 +2145,7 @@
             }).join('');
 
             return `
-                <div class="detail-section" style="background:#fef9e7;border-left:4px solid #f1c40f;border-radius:6px;">
+                <div class="u-detail-section" style="background:#fef9e7;border-left:4px solid #f1c40f;border-radius:6px;overflow:hidden;">
                     <div class="detail-section-title" style="color:#7d6608;">够不上证据：${exporterName} 退回前上传的附件 (${exportFiles.length})</div>
                     <div class="detail-section-body">
                         <div style="color:#af831c;font-size:13px;margin-bottom:8px;">退回原因：${returnReasonLabel}</div>
@@ -2241,7 +2167,7 @@
                 ? `<div style="color:#475569;font-size:13px;margin-bottom:6px;">导出人：${escapeHtml(d.exporter_name)}</div>`
                 : '';
             return `
-                <div class="detail-section" style="background:#eef9fb;border-left:4px solid #5dade2;border-radius:6px;">
+                <div class="u-detail-section" style="background:#eef9fb;border-left:4px solid #5dade2;border-radius:6px;overflow:hidden;">
                     <div class="detail-section-title" style="color:#1d4f72;">操作概要（导出人填写）</div>
                     <div class="detail-section-body">
                         ${exporterLine}
@@ -2408,7 +2334,7 @@
             }
 
             return `
-                <div class="detail-section">
+                <div class="u-detail-section">
                     <div class="detail-section-title">预计完成时间</div>
                     <div class="detail-section-body">
                         ${devPart}
@@ -2480,15 +2406,15 @@
                 .join('');
 
             const modalHtml = `
-                <div class="modal-overlay show" id="reassignModal" style="z-index: 10000;">
-                    <div class="modal-card" style="max-width: 480px;">
-                        <div class="modal-header">
-                            <h3>🔄 改派接收人</h3>
+                <div class="u-modal-overlay open" id="reassignModal" style="z-index: 10000;">
+                    <div class="u-modal-box" style="max-width: 480px;">
+                        <div class="u-modal-header">
+                            <h2>🔄 改派接收人</h2>
                             <button class="modal-close" onclick="closeReassignModal()">×</button>
                         </div>
-                        <div class="modal-body">
+                        <div class="u-modal-body">
                             <p style="margin: 0 0 12px 0;">当前接收人：<strong>${escapeHtml(currentName)}</strong></p>
-                            <div class="form-row">
+                            <div class="u-form-group">
                                 <label>新接收人 <span class="required">*</span></label>
                                 <select id="reassign_new_exporter" style="width:100%;">
                                     <option value="">请选择</option>
@@ -2496,9 +2422,9 @@
                                 </select>
                             </div>
                         </div>
-                        <div class="modal-footer">
+                        <div class="u-modal-footer">
                             <button class="btn btn-cancel" onclick="closeReassignModal()">取消</button>
-                            <button class="btn btn-primary" id="btnConfirmReassign" onclick="confirmAdminDirectReassign(${collabId})">确定改派</button>
+                            <button class="btn u-btn-primary" id="btnConfirmReassign" onclick="confirmAdminDirectReassign(${collabId})">确定改派</button>
                         </div>
                     </div>
                 </div>`;
@@ -2551,13 +2477,13 @@
             }
             const currentName = currentDetail.exporter_name || '(无)';
             const modalHtml = `
-                <div class="modal-overlay show" id="fallbackModal" style="z-index: 10000;">
-                    <div class="modal-card" style="max-width: 520px;">
-                        <div class="modal-header">
-                            <h3>↩️ 切回流转模式</h3>
+                <div class="u-modal-overlay open" id="fallbackModal" style="z-index: 10000;">
+                    <div class="u-modal-box" style="max-width: 520px;">
+                        <div class="u-modal-header">
+                            <h2>↩️ 切回流转模式</h2>
                             <button class="modal-close" onclick="closeFallbackModal()">×</button>
                         </div>
-                        <div class="modal-body">
+                        <div class="u-modal-body">
                             <div class="fallback-warning-box">
                                 <p style="margin:0 0 4px 0;"><strong>切回流转将：</strong></p>
                                 <ul>
@@ -2567,14 +2493,14 @@
                                     <li>请你切回后再指派一级负责人接管</li>
                                 </ul>
                             </div>
-                            <div class="form-row">
+                            <div class="u-form-group">
                                 <label>切回原因（选填）</label>
                                 <textarea id="fallback_reason_input" rows="3" maxlength="500" style="width:100%;" placeholder="例：需要部门协调 / 接收人不熟悉技术栈 / 业务范围变化"></textarea>
                             </div>
                         </div>
-                        <div class="modal-footer">
+                        <div class="u-modal-footer">
                             <button class="btn btn-cancel" onclick="closeFallbackModal()">取消</button>
-                            <button class="btn btn-primary" id="btnConfirmFallback" onclick="confirmAdminDirectFallback(${collabId})" style="background:#f59e0b; border-color:#f59e0b;">确定切回流转</button>
+                            <button class="btn u-btn-primary" id="btnConfirmFallback" onclick="confirmAdminDirectFallback(${collabId})" style="background:#f59e0b; border-color:#f59e0b;">确定切回流转</button>
                         </div>
                     </div>
                 </div>`;
@@ -2744,7 +2670,7 @@
 
             // 原始单据截图区块（紧跟任务信息）
             const originalScreenshotsHtml = originalScreenshots.length > 0 ? `
-                <div class="detail-section">
+                <div class="u-detail-section">
                     <div class="detail-section-title">原始单据截图 (${originalScreenshots.length})</div>
                     <div class="detail-section-body">
                         <div class="screenshot-grid">${originalScreenshots.map(_renderScreenshotItem).join('')}</div>
@@ -2753,7 +2679,7 @@
 
             // 导出截图区块（独立 detail-section，渲染顺序由 detailBody 控制，放交付内容附近）
             const exportScreenshotsHtml = exportScreenshots.length > 0 ? `
-                <div class="detail-section">
+                <div class="u-detail-section">
                     <div class="detail-section-title">导出截图 (${exportScreenshots.length})</div>
                     <div class="detail-section-body">
                         <div class="screenshot-grid">${exportScreenshots.map(_renderScreenshotItem).join('')}</div>
@@ -2761,7 +2687,7 @@
                 </div>` : '';
 
             const taskInfoHtml = `
-                <div class="detail-section">
+                <div class="u-detail-section">
                     <div class="detail-section-title">任务信息</div>
                     <div class="detail-section-body">
                         <div class="detail-kv">
@@ -2786,7 +2712,7 @@
                             <div class="detail-kv-label">录入人</div>
                             <div class="detail-kv-value">${escapeHtml(d.created_by_name)} · ${fmtDate(d.created_at)}</div>
                             <div class="detail-kv-label">当前状态</div>
-                            <div class="detail-kv-value"><span class="status-badge status-${d.status}">${STATUS_LABELS[d.status] || d.status}</span></div>
+                            <div class="detail-kv-value"><span class="u-status-badge status-${d.status}">${STATUS_LABELS[d.status] || d.status}</span></div>
                             ${renderExporterFieldRow(d)}
                         </div>
                     </div>
@@ -2827,7 +2753,7 @@
             const expectedHtml = renderExpectedEstimateSection(d, isAdminUser, myUid);
 
             const notifyHtml = `
-                <div class="detail-section">
+                <div class="u-detail-section">
                     <div class="detail-section-title">通知</div>
                     <div class="detail-section-body" id="notifyBody">
                         ${contactBlock}
@@ -2855,11 +2781,16 @@
             const adminDirectActionsHtml = renderAdminDirectActionsSection(d, isAdminUser);
 
             // v1.74.2 抖动修复：整块 innerHTML 替换会把滚动容器 scrollTop 复位到 0——
-            //   用户滚到中段点"重新通知"等操作回刷时会跳回顶部。滚动容器是 .modal-card（max-height:88vh+overflow-y:auto，
-            //   非 detailBody 本身）。仅"同一单原地刷新"(preserveScroll)才存/恢复 scrollTop 保持视觉位置不动；
+            //   用户滚到中段点"重新通知"等操作回刷时会跳回顶部。
+            //   前端统一 C4 Commit 2：滚动容器由旧 .modal-card（header+body+footer 整卡一起滚）
+            //   改为 detailBody 自身（= components.css 的 .u-drawer-body：flex:1+overflow-y:auto；
+            //   u-drawer-header/u-drawer-footer 现固定不随内容滚动，抽屉常驻更实用）。scrollTop 的
+            //   读取对象与下方 innerHTML 替换目标合一（都是 detailBody）：先读自身 scrollTop，
+            //   innerHTML 整块替换后浏览器会把它复位到 0，再按 preserveScroll 判断是否写回——逻辑仍成立。
+            //   仅"同一单原地刷新"(preserveScroll)才存/恢复 scrollTop 保持视觉位置不动；
             //   codex 25(v1742) M-2：首次打开 / 切到另一单（preserveScroll=false）保持顶部，让用户从任务信息看起。
             //   缩略图在 .screenshot-item 固定 120x90 容器(object-fit:cover)，图片异步加载不改高度 → 同步恢复可靠(L-3 验证)。
-            const scrollCard = document.getElementById('detailModal').querySelector('.modal-card');
+            const scrollCard = document.getElementById('detailBody');
             const prevScrollTop = (preserveScroll && scrollCard) ? scrollCard.scrollTop : 0;
             document.getElementById('detailBody').innerHTML =
                 taskInfoHtml
@@ -3183,7 +3114,7 @@
                 ? `<div style="margin-top:8px;font-size:12px;color:#6b7280;">ℹ️ 多文件交付：仅<strong>第一份脚本</strong>参与 smoke test、<strong>第一份数据</strong>参与列对齐校验，其余为附带交付物。</div>`
                 : '';
             return `
-                <div class="detail-section">
+                <div class="u-detail-section">
                     <div class="detail-section-title">交付内容</div>
                     <div class="detail-section-body">${items}${multiNote}${reuploadBtn}</div>
                 </div>`;
@@ -3261,7 +3192,7 @@
             }).join('');
 
             return `
-                <div class="detail-section">
+                <div class="u-detail-section">
                     <div class="detail-section-title">失败提交历史 (${failedFiles.length} 个附件 · ${groups.size} 次失败)</div>
                     <div class="detail-section-body">${groupHtml}</div>
                 </div>`;
@@ -3443,7 +3374,7 @@
                 : '';
 
             return `
-                <div class="detail-section">
+                <div class="u-detail-section">
                     <div class="detail-section-title">取数交付质量</div>
                     <div class="detail-section-body">
                         <div class="detail-kv"><div class="detail-kv-label">交付时长</div><div class="detail-kv-value">${durText}</div></div>
@@ -3471,7 +3402,7 @@
                 const canAssign = isAdminUser || isContactPerson;
                 if (!canAssign) {
                     return `
-                        <div class="detail-section">
+                        <div class="u-detail-section">
                             <div class="detail-section-title">指派进展</div>
                             <div class="detail-section-body">
                                 <div class="val-box" style="background:#fff7ed;border:1px solid #fed7aa;">
@@ -3482,7 +3413,7 @@
                         </div>`;
                 }
                 return `
-                    <div class="detail-section">
+                    <div class="u-detail-section">
                         <div class="detail-section-title">指派开发</div>
                         <div class="detail-section-body">
                             <div class="val-box" style="background:#fff7ed;border:1px solid #fed7aa;">
@@ -3502,7 +3433,7 @@
             if (d.status === 'PENDING') {
                 if (isDeveloper) {
                     return `
-                        <div class="detail-section">
+                        <div class="u-detail-section">
                             <div class="detail-section-title">交付提交</div>
                             <div class="detail-section-body">
                                 <div class="val-box" style="background:#eff6ff;border:1px solid #bfdbfe;">
@@ -3517,7 +3448,7 @@
                 }
                 if (isAdminUser || isContactPerson) {
                     return `
-                        <div class="detail-section">
+                        <div class="u-detail-section">
                             <div class="detail-section-title">指派状态</div>
                             <div class="detail-section-body">
                                 <div class="val-box" style="background:#f0fdf4;border:1px solid #bbf7d0;">
@@ -3596,7 +3527,7 @@
                 bodyHtml = `<div class="empty">— 暂无验收记录</div>`;
             }
             return `
-                <div class="detail-section">
+                <div class="u-detail-section">
                     <div class="detail-section-title">验收结果</div>
                     <div class="detail-section-body">${bodyHtml}</div>
                 </div>`;
@@ -3643,7 +3574,7 @@
                 body = `<div class="empty">— 暂未拉起沟通群</div>`;
             }
             return `
-                <div class="detail-section">
+                <div class="u-detail-section">
                     <div class="detail-section-title">沟通管理</div>
                     <div class="detail-section-body">${body}</div>
                 </div>`;
@@ -3722,7 +3653,7 @@
             }).join('');
 
             return `
-                <div class="detail-section">
+                <div class="u-detail-section">
                     <div class="detail-section-title">管理员修正记录 (${fixLogs.length})</div>
                     <div class="detail-section-body">${rows}</div>
                 </div>`;
@@ -3750,13 +3681,13 @@
                 // 非 admin 或已归档：只读展示
                 if (!occurred) {
                     return `
-                        <div class="detail-section">
+                        <div class="u-detail-section">
                             <div class="detail-section-title">协作摩擦记录</div>
                             <div class="detail-section-body empty">— 未记录</div>
                         </div>`;
                 }
                 return `
-                    <div class="detail-section">
+                    <div class="u-detail-section">
                         <div class="detail-section-title">协作摩擦记录</div>
                         <div class="detail-section-body">
                             <div class="friction-row"><span class="friction-label">归因分类：</span>${escapeHtml(FRICTION_CAUSE_LABELS[cat] || cat || '—')}</div>
@@ -3775,7 +3706,7 @@
             const lastSavedHtml = occurred
                 ? `<div class="friction-saved-meta">已记录于 ${fmtDate(d.friction_recorded_at)}</div>` : '';
             return `
-                <div class="detail-section">
+                <div class="u-detail-section">
                     <div class="detail-section-title">协作摩擦记录</div>
                     <div class="detail-section-body">
                         ${lastSavedHtml}
@@ -3901,11 +3832,11 @@
             const btn = document.getElementById('btnAssign');
             btn.disabled = false;
             btn.textContent = '提交';
-            document.getElementById('assignModal').classList.add('show');
+            document.getElementById('assignModal').classList.add('open');
         }
 
         function closeAssignModal() {
-            document.getElementById('assignModal').classList.remove('show');
+            document.getElementById('assignModal').classList.remove('open');
             _assignCollabId = null;
             _assignIsReassign = false;
         }
@@ -4025,8 +3956,8 @@
                     inputHtml = `<input type="datetime-local" id="f_admin_fix_${field}" data-field="${field}" data-current="${dtVal}" value="${dtVal}">`;
                 }
                 return `
-                    <div class="form-row">
-                        <label>${escapeHtml(meta.label)} <span class="hint">（当前：${escapeHtml(String(currentVal != null ? currentVal : '—'))}）</span></label>
+                    <div class="u-form-group">
+                        <label>${escapeHtml(meta.label)} <span class="u-hint">（当前：${escapeHtml(String(currentVal != null ? currentVal : '—'))}）</span></label>
                         ${inputHtml}
                     </div>`;
             }).join('');
@@ -4045,11 +3976,11 @@
             const btn = document.getElementById('btnAdminFix');
             btn.disabled = false;
             btn.textContent = '确认修正';
-            document.getElementById('adminFixModal').classList.add('show');
+            document.getElementById('adminFixModal').classList.add('open');
         }
 
         function closeAdminFixModal() {
-            document.getElementById('adminFixModal').classList.remove('show');
+            document.getElementById('adminFixModal').classList.remove('open');
             _adminFixCollabId = null;
             _adminFixAllowedFields = [];
         }
@@ -4156,7 +4087,7 @@
             const btn = document.getElementById('btnSubmitDelivery');
             btn.disabled = false;
             btn.textContent = '提交';
-            document.getElementById('submitDeliveryModal').classList.add('show');
+            document.getElementById('submitDeliveryModal').classList.add('open');
         }
 
         // 验收 failed 重新上传：同款弹窗（后端 POST /:id/submit 本身就是覆盖式重提）
@@ -4166,7 +4097,7 @@
         }
 
         function closeSubmitDeliveryModal() {
-            document.getElementById('submitDeliveryModal').classList.remove('show');
+            document.getElementById('submitDeliveryModal').classList.remove('open');
             _submitDeliveryCollabId = null;
         }
 
@@ -4359,7 +4290,7 @@
             btn.disabled = true;
             btn.textContent = '加载中…';
 
-            document.getElementById('forwardToExporterModal').classList.add('show');
+            document.getElementById('forwardToExporterModal').classList.add('open');
 
             // 失败 helper：select 改"加载失败"文案 + 按钮保持 disabled（不关弹框避免用户困惑）
             function _markLoadFailed(msg) {
@@ -4438,7 +4369,7 @@
         }
 
         function closeForwardToExporterModal() {
-            document.getElementById('forwardToExporterModal').classList.remove('show');
+            document.getElementById('forwardToExporterModal').classList.remove('open');
             _forwardCollabId = null;
         }
 
@@ -4512,11 +4443,11 @@
             const btn = document.getElementById('btnReturnToDev');
             btn.disabled = false;
             btn.textContent = '确认退回';
-            document.getElementById('returnToDevModal').classList.add('show');
+            document.getElementById('returnToDevModal').classList.add('open');
         }
 
         function closeReturnToDevModal() {
-            document.getElementById('returnToDevModal').classList.remove('show');
+            document.getElementById('returnToDevModal').classList.remove('open');
             _returnCollabId = null;
         }
 
@@ -4584,10 +4515,10 @@
             const rqBtn = document.getElementById('btnReturnQuality');
             rqBtn.disabled = false;
             rqBtn.textContent = '确认打回';
-            document.getElementById('returnQualityModal').classList.add('show');
+            document.getElementById('returnQualityModal').classList.add('open');
         }
         function closeReturnQualityModal() {
-            document.getElementById('returnQualityModal').classList.remove('show');
+            document.getElementById('returnQualityModal').classList.remove('open');
             _returnQualityCollabId = null;
         }
         async function submitReturnQuality() {
@@ -4651,11 +4582,11 @@
             const btn = document.getElementById('btnExportUpload');
             btn.disabled = false;
             btn.textContent = '提交';
-            document.getElementById('exportUploadModal').classList.add('show');
+            document.getElementById('exportUploadModal').classList.add('open');
         }
 
         function closeExportUploadModal() {
-            document.getElementById('exportUploadModal').classList.remove('show');
+            document.getElementById('exportUploadModal').classList.remove('open');
             _exportUploadCollabId = null;
         }
 
@@ -4942,11 +4873,11 @@
             document.getElementById('estimateTitle').textContent = `回填预计完成时间 · 协作单 #${id}`;
             const btn = document.getElementById('btnSubmitEstimate');
             btn.disabled = false; btn.textContent = '提交';
-            document.getElementById('estimateModal').classList.add('show');
+            document.getElementById('estimateModal').classList.add('open');
         }
 
         function closeEstimateModal() {
-            document.getElementById('estimateModal').classList.remove('show');
+            document.getElementById('estimateModal').classList.remove('open');
         }
 
         async function submitEstimate() {
@@ -5335,7 +5266,7 @@
             // 拉取数据导出人下拉（admin 直派模式用，与对接人下拉同列表，复用 activeUsers）
             await loadAdminDirectExporterOptions();
 
-            document.getElementById('newModal').classList.add('show');
+            document.getElementById('newModal').classList.add('open');
         }
 
         // v1.72.3 admin 直派模式切换
@@ -5445,12 +5376,12 @@
                 document.getElementById('contactHint').textContent = '已指派开发，不可更换对接人（如需更换请删除协作单重建）。';
             }
 
-            document.getElementById('newModal').classList.add('show');
+            document.getElementById('newModal').classList.add('open');
             hideDetailModalOnly();  // v1.69.0：编辑弹窗独占焦点
         }
 
         function closeNewModal() {
-            document.getElementById('newModal').classList.remove('show');
+            document.getElementById('newModal').classList.remove('open');
             editingCollabId = null;
             editingCollabStatus = null;
             restoreDetailIfHidden();  // v1.69.0：取消时若详情还在，把详情显示回来
@@ -5673,12 +5604,12 @@
             const btn = document.getElementById('btnArchive');
             btn.disabled = false;
             btn.textContent = '确认作废';
-            document.getElementById('archiveModal').classList.add('show');
+            document.getElementById('archiveModal').classList.add('open');
             hideDetailModalOnly();  // v1.69.0
         }
 
         function closeArchiveModal() {
-            document.getElementById('archiveModal').classList.remove('show');
+            document.getElementById('archiveModal').classList.remove('open');
             archivingCollabId = null;
             restoreDetailIfHidden();  // v1.69.0
         }
@@ -5732,12 +5663,12 @@
             const btn = document.getElementById('btnAdminSubmit');
             btn.disabled = false;
             btn.textContent = '确认闭环';
-            document.getElementById('adminSubmitModal').classList.add('show');
+            document.getElementById('adminSubmitModal').classList.add('open');
             hideDetailModalOnly();
         }
 
         function closeAdminSubmitModal() {
-            document.getElementById('adminSubmitModal').classList.remove('show');
+            document.getElementById('adminSubmitModal').classList.remove('open');
             _adminSubmitCollabId = null;
             restoreDetailIfHidden();
         }
@@ -5806,12 +5737,12 @@
             const btn = document.getElementById('btnArchiveFinal');
             btn.disabled = false;
             btn.textContent = '确认归档';
-            document.getElementById('archiveFinalModal').classList.add('show');
+            document.getElementById('archiveFinalModal').classList.add('open');
             hideDetailModalOnly();  // v1.69.0
         }
 
         function closeArchiveFinalModal() {
-            document.getElementById('archiveFinalModal').classList.remove('show');
+            document.getElementById('archiveFinalModal').classList.remove('open');
             archivingFinalCollabId = null;
             restoreDetailIfHidden();  // v1.69.0
         }
@@ -5856,36 +5787,36 @@
             if (!currentDetail) return showToast('协作单数据未加载', 'error');
             const id = currentDetail.id;
             const oa = oaCore(currentDetail.oa_request_no) || `id${id}`;
-            hideDetailModalOnly();  // 让 confirm 独占焦点
+            // C4 复审修（MED）：拉群走原生 confirm（无 .u-modal-overlay），confirm 弹出期间浏览器已阻塞交互；
+            //   原 hideDetailModalOnly 现依赖 modal-overlay 判据对 confirm 无效 → 改用 _drawerForceLock 显式锁
+            //   "点确定→请求落地"这段异步窗口，防抽屉内误操作；finally 保证解锁无残留。
             const ok = confirm(
                 `将为协作单【OA-${oa}】拉起钉钉沟通群。\n\n` +
                 `群成员：示例用户A + 对接人 + 当前开发 + 你\n` +
                 `群主：你（钉钉无解散接口，使用完毕后请在钉钉客户端手动解散）\n\n` +
                 `继续？`
             );
-            if (!ok) {
-                restoreDetailIfHidden();  // 取消则恢复详情
-                return;
-            }
+            if (!ok) return;  // 取消：抽屉本就未锁（confirm 前不再预锁），无需 restore
 
+            _drawerForceLock = true; syncDrawerInert();  // 确定后到请求落地：锁抽屉
             try {
                 const res = await authFetch(`/api/collab/requests/${id}/create-chat`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' }
                 });
-                if (!res) { restoreDetailIfHidden(); return; }
+                if (!res) return;
                 const data = await res.json();
                 if (!res.ok) {
                     showToast(data.error || '拉群失败', 'error');
-                    restoreDetailIfHidden();
                     return;
                 }
                 showToast(data.message || '群已创建，请到钉钉客户端查看', 'success');
-                // 刷新详情，按钮变成"已建群"状态（openDetail 会重新 show detailModal）
+                // 刷新详情，按钮变成"已建群"状态（openDetail 会回刷并显示 detailDrawer 抽屉，并清 forceLock）
                 if (typeof openDetail === 'function') await openDetail(id);
             } catch (e) {
                 showToast('网络错误', 'error');
-                restoreDetailIfHidden();
+            } finally {
+                _drawerForceLock = false; syncDrawerInert();  // 无论成功/失败/网络错误，解锁抽屉
             }
         }
 
@@ -5895,6 +5826,19 @@
 
         // 页面初始化
         document.addEventListener('DOMContentLoaded', async () => {
+            // C4·ultracode HIGH#2 修复：兜底覆盖未显式调 hide/restore 的 10 个子弹窗 + 动态注入 reassign/fallback。
+            //   监听抽屉 + 14 个静态子弹窗的 open class 变化 + body 直接子节点增删（动态弹窗 append/remove），
+            //   任一变化都幂等重算抽屉 inert（syncDrawerInert），杜绝"某子弹窗打开时抽屉未锁"的焦点逃逸。
+            (function bindDrawerInertObserver() {
+                const obs = new MutationObserver(syncDrawerInert);
+                const drawer = document.getElementById('detailDrawer');
+                if (drawer) obs.observe(drawer, { attributes: true, attributeFilter: ['class'] });
+                document.querySelectorAll('.u-modal-overlay').forEach(m =>
+                    obs.observe(m, { attributes: true, attributeFilter: ['class'] }));
+                obs.observe(document.body, { childList: true });  // 动态注入 reassign/fallback（append 到 body）
+                syncDrawerInert();
+            })();
+
             // 部门下拉填充
             fillDeptSelect(document.getElementById('filterDept'), true);
             fillDeptSelect(document.getElementById('f_dept'), false);
