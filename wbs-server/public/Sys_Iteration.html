@@ -7,7 +7,7 @@
     <title>系统迭代 - 智数协同平台</title>
     <link rel="icon" href="data:,">
     <link rel="stylesheet" href="assets/css/style.css?v=v1.102.1_nav">
-    <link rel="stylesheet" href="assets/css/components.css?v=v1.110.0_unify">
+    <link rel="stylesheet" href="assets/css/components.css?v=v1.110.4_unify">
     <style>
         /* ============================================================
            系统迭代页 · 页面专属残留（共享组件层已迁移至 assets/css/components.css）
@@ -21,12 +21,10 @@
            改造后共享根类统一加 u- 前缀（.u-btn-secondary/.u-form-group…），与 style.css 不再有同名碰撞，
            13 条补丁已整体删除，仅保留真正的"共享层未提供 / Sys 需要覆盖"的页面专属扩展（下方逐条标注）。
            ============================================================ */
-        .si-wrap { max-width: 1280px; margin: 0 auto; }
+        .si-wrap { width: 100%; }
 
-        /* 页头（Sys 专属） */
-        .si-page-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; flex-wrap: wrap; gap: 10px; }
-        .si-page-head h1 { font-size: 18px; font-weight: 700; color: #1e293b; display: flex; align-items: center; gap: 8px; }
-        .si-page-head .si-head-actions { display: flex; gap: 8px; }
+        /* 页头（Sys 专属）——前端统一：si-page-head 已删（页头对齐基准页 Data_Correction，navbar 后
+           直接接统计卡；原 siHeadActions 动作按钮挪到 si-toolbar 的 si-spacer 之后，见下方 si-toolbar 注释）。 */
 
         /* 按钮 base+修饰 已 harmonize → u-btn-primary/u-btn-secondary/u-btn-danger/u-btn-sm（base 见 components.css）。
            shared .u-btn-sm 无定义（仅 base 按钮系有 base，无 -sm 修饰），页面覆盖回原尺寸（真前缀，C1 任务书 §2.1）。
@@ -53,32 +51,28 @@
         .si-type-tab.active { background: #d97706; color: #fff; border-color: #d97706; }
         .si-type-tab .si-cnt { font-size: 11px; opacity: .8; margin-left: 4px; }
 
-        /* 统计卡（②档保留：共享 .u-stat-card 是 icon+横排，本页 num+label 竖排结构不兼容；
-           容器 si-stats-row 本身已 harmonize → u-stats-row，值与共享完全一致） */
-        .si-stat-card { flex: 1; min-width: 120px; background: #fff; border-radius: 10px; border: 1px solid #e2e8f0; padding: 13px 16px; }
-        .si-stat-card .si-stat-num { font-size: 22px; font-weight: 700; color: #111827; }
-        .si-stat-card .si-stat-label { font-size: 12px; color: #6b7280; margin-top: 2px; }
+        /* 统计卡——前端统一：si-stat-card（num+label 竖排，②档曾判定与共享 icon+横排结构不兼容而保留
+           残留）已换皮为共享 .u-stat-card 结构（icon+u-stat-info，见 siRenderStats()），本节残留删除。 */
 
         /* 工具条（②档保留：共享 .u-filter-bar 是白卡片，本页裸 flex 行结构不兼容） */
         .si-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
         .si-toolbar select, .si-toolbar label.si-chk { padding: 7px 12px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 13px; background: #fff; color: #374151; }
         .si-toolbar label.si-chk { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
         .si-spacer { flex: 1; }
+        /* 原 si-page-head 内 .si-head-actions（页头动作按钮容器：批次管理/建单/上线编排）随页头删除
+           挪到本工具条 si-spacer 之后（右侧）；样式随迁移，选择器去掉 .si-page-head 祖先限定。 */
+        .si-head-actions { display: flex; gap: 8px; }
 
         /* 表格已 harmonize → u-corr-table-wrap/u-corr-table（base 见 components.css）；
-           列数少于数据修正页，min-width 覆盖回原 980（shared 默认 1100，真前缀）。 */
-        .unified-page .u-corr-table { min-width: 980px; }
+           本页跟随共享层默认宽度，和其余列表页保持同一容器/表格骨架。 */
 
         /* 类型标签修饰色（base 已 harmonize → components.css .u-type-tag，本页保留四类颜色，选择器改名对齐 Data_Correction .type-tag.t-X 惯例） */
         .u-type-tag.bug { background: #fee2e2; color: #b91c1c; }
         .u-type-tag.feature { background: #dbeafe; color: #1d4ed8; }
         .u-type-tag.improvement { background: #d1fae5; color: #047857; }
         .u-type-tag.config { background: #ede9fe; color: #6d28d9; }
-        .si-prio { display: inline-block; padding: 1px 7px; border-radius: 4px; font-size: 11px; font-weight: 700; }
-        .si-prio.P0 { background: #dc2626; color: #fff; }
-        .si-prio.P1 { background: #f59e0b; color: #fff; }
-        .si-prio.P2 { background: #e0e7ff; color: #4338ca; }
-        .si-prio.P3 { background: #f1f5f9; color: #94a3b8; }
+        /* 优先级徽章已升共享层 components.css .u-pri（状态列/优先级列统一轮 2026-07-10：本页原
+           si-prio 即共享版蓝本，原样上移后本地删除；数据开发页同步从圆点迁入同款） */
 
         /* style污染根治 B 方案（20260709 v1.1）：本条原为对抗 style.css 裸 `.status-badge`（L1166，早年遗留
            全局徽章样式）透传 box-shadow/letter-spacing/text-transform/flex-shrink 四条的"泄漏收回"补丁
@@ -92,8 +86,10 @@
         .si-s-prerelease { background: #ccfbf1; color: #0f766e; }
         .si-s-released { background: #d1fae5; color: #065f46; }
         .si-s-closed { background: #e2e8f0; color: #475569; }
-        .si-s-hold { background: #fef9c3; color: #a16207; }
-        .si-s-rejected { background: #fae8e8; color: #991b1b; }
+        /* 状态色语义统一轮（2026-07-10）：hold 文字色对齐数据开发"已暂缓"（#a16207→#854d0e）、
+           rejected 底色对齐修正/数据开发"拒绝=灰底红字"（#fae8e8→#f3f4f6） */
+        .si-s-hold { background: #fef9c3; color: #854d0e; }
+        .si-s-rejected { background: #f3f4f6; color: #991b1b; }
         .si-s-void { background: #e5e7eb; color: #9ca3af; text-decoration: line-through; }
 
         .si-flag { font-size: 11px; font-weight: 700; margin-left: 6px; white-space: nowrap; }
@@ -223,7 +219,7 @@
                     <path d="M9 11l3 3L22 4"/>
                     <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
                 </svg>
-                任务池
+                数仓任务池
             </a>
             <a href="/Data_Collab.html" class="nav-item">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -238,7 +234,7 @@
                     <line x1="12" y1="8" x2="12" y2="12"/>
                     <line x1="12" y1="16" x2="12.01" y2="16"/>
                 </svg>
-                需求跟踪
+                数据开发
             </a>
             <a href="/Data_Correction.html" class="nav-item">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -253,13 +249,6 @@
                     <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
                 </svg>
                 系统迭代
-            </a>
-            <a href="/My_Workspace.html" class="nav-item">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
-                    <circle cx="12" cy="7" r="4"/>
-                </svg>
-                我的工作台
             </a>
             <div class="nav-dropdown">
                 <button class="nav-dropdown-trigger">
@@ -332,22 +321,17 @@
     <!-- 主工作区 -->
     <main class="workbench-container">
         <div class="si-wrap">
-            <div class="si-page-head">
-                <h1>⚙️ 系统迭代</h1>
-                <div class="si-head-actions" id="siHeadActions"></div>
-            </div>
-
             <div class="si-info-banner" id="siReadyBanner" style="display:none;"></div>
 
             <!-- 类型 tab -->
             <div class="si-type-tabs" id="siTypeTabs"></div>
 
-            <!-- 统计卡 -->
+            <!-- 统计卡（前端统一：换皮为共享 u-stat-card 结构，统计口径/点击行为不变，见 siRenderStats()） -->
             <div class="u-stats-row" id="siStatsRow"></div>
 
-            <!-- 工具条 -->
+            <!-- 工具条（原页头动作按钮 siHeadActions 挪到 si-spacer 之后，随页头删除迁移至此） -->
             <div class="si-toolbar">
-                <select id="siFStatus" onchange="siLoadList()"><option value="">全部状态</option></select>
+                <select id="siFStatus" onchange="siResetStatFilterAndLoadList()"><option value="">全部状态</option></select>
                 <select id="siFSystem" onchange="siLoadList()"><option value="">全部系统</option></select>
                 <select id="siFPriority" onchange="siLoadList()">
                     <option value="">全部优先级</option>
@@ -359,20 +343,30 @@
                     <input type="checkbox" id="siFVoided" onchange="siLoadList()"> 含已作废
                 </label>
                 <span class="si-spacer"></span>
+                <div class="si-head-actions" id="siHeadActions"></div>
             </div>
 
-            <!-- 表格 -->
+            <!-- 表格（前端统一：表头挂 u-sortable 接 UnifyHelpers.attachTableSort） -->
             <div class="u-corr-table-wrap">
-                <table class="u-corr-table">
+                <table class="u-corr-table" id="sysIterationListTable">
                     <thead>
                         <tr>
-                            <th>编号</th><th>类型</th><th>标题</th><th>系统 · 模块</th>
-                            <th>优先级</th><th>状态</th><th>开发</th><th>预计完成</th><th>建单时间</th>
+                            <th class="u-sortable" data-sort-by="id">ID<span class="u-sort-icon">⇅</span></th>
+                            <th class="u-sortable" data-sort-by="type">类型<span class="u-sort-icon">⇅</span></th>
+                            <th class="u-sortable" data-sort-by="priority">优先级<span class="u-sort-icon">⇅</span></th>
+                            <th class="u-sortable" data-sort-by="status">状态<span class="u-sort-icon">⇅</span></th>
+                            <th class="u-sortable" data-sort-by="title">标题<span class="u-sort-icon">⇅</span></th>
+                            <th class="u-sortable" data-sort-by="system_name">系统 · 模块<span class="u-sort-icon">⇅</span></th>
+                            <th class="u-sortable" data-sort-by="assigned_to_name">开发<span class="u-sort-icon">⇅</span></th>
+                            <th class="u-sortable" data-sort-by="dev_estimated_at">预计完成时间<span class="u-sort-icon">⇅</span></th>
+                            <th class="u-sortable" data-sort-by="created_at">创建时间<span class="u-sort-icon">⇅</span></th>
                         </tr>
                     </thead>
                     <tbody id="siTbody"></tbody>
                 </table>
             </div>
+            <!-- 分页（前端统一 新增 A：每页固定 25 条；siVisibleList() 客户端类型过滤后的结果做全量→排序→切片） -->
+            <div class="u-pagination" id="sysIterationPagination"></div>
         </div>
     </main>
 
@@ -411,6 +405,7 @@
     </div>
 
     <script src="assets/js/app.js?v=v1.105.0_pf"></script>
+    <script src="assets/js/unify-helpers.js?v=v1.110.4_unify"></script>
     <script>
     /* ============================================================
        系统迭代前端 · 纯 meta 驱动（状态机常量来自 GET /api/sys-issues/meta）
@@ -423,6 +418,7 @@
     let siUsers = [];                // 可指派用户
     let siList = [];                 // 当前列表
     let siActiveType = 'all';        // 当前类型 tab
+    let siActiveStat = '';           // 顶部统计卡筛选（''=全部）
     let siOpenId = null;             // 当前打开的详情单 id
     let siDetail = null;             // 当前详情对象
     let siModalConfirm = null;       // 当前弹框确认回调
@@ -444,6 +440,16 @@
         '已作废': 'void'
     };
     function siStatusClass(s) { return SI_STATUS_CLASS[s] || 'pending'; }
+    const SI_STATUS_GROUPS = {
+        active: ['已排期', '开发中', '处理中', '待评估', '待处理'],
+        acceptance: ['待验证', '待验收'],
+        release: ['待上线'],
+        done: ['已上线', '已关闭', '已生效'],
+        // codex API 审 MED-1（2026-07-10）：后端状态机含合法旁路态 已暂缓/已拒绝（transitions.js
+        //   hold/reject 真实流转入口），原 4 组不覆盖 → 这些单在"全部"计数内但点任一组卡后消失。
+        //   补第 5 组；组全集覆盖由 siRenderStats 内守卫兜底（新状态漏归组时 console.warn）。
+        paused: ['已暂缓', '已拒绝'],
+    };
 
     // 开发本人（owner）动作集；其余动作归 admin。meta 不暴露 roleGuard，前端做最小 UX 分类，后端仍强制。
     // 注意：unblock（解除受阻）后端是 admin 专属（roleGuard:'admin'），不能归入开发集，否则 admin 看不到、开发点了必 403。
@@ -506,6 +512,7 @@
         siRenderTypeTabs();
         siBuildFilters();
         await siLoadList();
+        sysIterationSorter.init(); // 前端统一：表头排序初始化（siLoadList 后绑定）
         // 深链 ?issue=<id> 直接打开详情
         const q = new URLSearchParams(location.search);
         const deepId = parseInt(q.get('issue'), 10);
@@ -548,7 +555,7 @@
         let html = '';
         if (META_OK && isAdmin()) {
             html += `<button class="u-btn-secondary" onclick="siOpenBatch()">📦 批次管理</button>`;
-            if (siTypeKeys().length) html += `<button class="u-btn-primary" onclick="siOpenCreate()">+ 建单</button>`;
+            if (siTypeKeys().length) html += `<button class="u-btn-primary" onclick="siOpenCreate()">+ 新建迭代单</button>`;
         }
         // C-orch：上线编排批量面板入口——admin（批量指定 + 批量通知上线开发）与被指定执行开发（批量执行发版）共用入口，
         //   面板内部按角色 + 三态分别出对应操作；任意登录用户可开（无待办项时面板自身显示"暂无"，无害）。
@@ -573,8 +580,27 @@
         siRenderStats();
         siRenderTable();
     }
-    // 当前类型 tab 下可见的单（type 客户端过滤；tab 计数取全量 siList 故各 tab 计数准确）
-    function siVisibleList() { return siActiveType === 'all' ? siList : siList.filter(i => i.type === siActiveType); }
+    function siVisibleTypeList() {
+        return siActiveType === 'all' ? siList : siList.filter(i => i.type === siActiveType);
+    }
+    function siMatchStatFilter(item, filterKey) {
+        if (!filterKey) return true;
+        const statuses = SI_STATUS_GROUPS[filterKey];
+        return Array.isArray(statuses) ? statuses.includes(item.status) : true;
+    }
+    function siSetStatFilter(filterKey) {
+        siActiveStat = filterKey || '';
+        siRenderStats();
+        siRenderTable();
+    }
+    function siResetStatFilterAndLoadList() {
+        siActiveStat = '';
+        siLoadList();
+    }
+    // 当前列表可见单：先按 type tab 客户端过滤，再按顶部统计卡筛选过滤。
+    function siVisibleList() {
+        return siVisibleTypeList().filter(i => siMatchStatFilter(i, siActiveStat));
+    }
 
     // ---- 筛选器 ----
     function siBuildFilters() {
@@ -624,22 +650,72 @@
         siRenderTable();
     }
 
+    // 前端统一补齐：顶部统计卡与其他列表页一致，提供"全部 + 4 组状态"筛选，默认选中"全部"；
+    //   "返工累计"保留纯指标，不参与筛选，避免把 reopen_count（累计次数）误装成状态维度。
     function siRenderStats() {
-        const vis = siVisibleList().filter(i => i.status !== '已作废');
+        const vis = siVisibleTypeList().filter(i => i.status !== '已作废');
+        // 组全集覆盖守卫（codex API 审 MED-1 配套）：出现未归任何组的状态 → console.warn 提示补组，
+        //   防未来后端新增状态时重现"点组卡后该单消失"缺口（不阻断渲染，未知态仍计入"全部"）
+        const grouped = new Set(Object.values(SI_STATUS_GROUPS).flat());
+        vis.forEach(i => { if (!grouped.has(i.status)) console.warn(`[siRenderStats] 状态「${i.status}」未归入任何统计组（SI_STATUS_GROUPS），点组卡后该单不可见，请补组`); });
         const stats = [
-            ['进行中', vis.filter(i => ['已排期', '开发中', '处理中', '待评估', '待处理'].includes(i.status)).length],
-            ['待验收', vis.filter(i => ['待验证', '待验收'].includes(i.status)).length],
-            ['待上线', vis.filter(i => i.status === '待上线').length],
-            ['已完成', vis.filter(i => ['已上线', '已关闭', '已生效'].includes(i.status)).length],
-            ['返工累计', vis.reduce((a, i) => a + (i.reopen_count || 0), 0)]
+            { key: '', bg: '#f3f4f6', icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#6b7280" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/></svg>', label: '全部', n: vis.length },
+            { key: 'active', bg: '#dbeafe', icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#1d4ed8" stroke-width="2"><path d="M12 2v4"/><path d="M12 18v4"/><path d="M4.93 4.93l2.83 2.83"/><path d="M16.24 16.24l2.83 2.83"/></svg>', label: '进行中', n: vis.filter(i => SI_STATUS_GROUPS.active.includes(i.status)).length },
+            { key: 'acceptance', bg: '#fef3c7', icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#92400e" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>', label: '待验收', n: vis.filter(i => SI_STATUS_GROUPS.acceptance.includes(i.status)).length },
+            { key: 'release', bg: '#ccfbf1', icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#0f766e" stroke-width="2"><path d="M12 2v12"/><path d="M5 9l7-7 7 7"/><path d="M5 20h14"/></svg>', label: '待上线', n: vis.filter(i => SI_STATUS_GROUPS.release.includes(i.status)).length },
+            { key: 'done', bg: '#d1fae5', icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#065f46" stroke-width="2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>', label: '已完成', n: vis.filter(i => SI_STATUS_GROUPS.done.includes(i.status)).length },
+            { key: 'paused', bg: '#fef9c3', icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#854d0e" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="10" y1="9" x2="10" y2="15"/><line x1="14" y1="9" x2="14" y2="15"/></svg>', label: '暂缓/拒绝', n: vis.filter(i => SI_STATUS_GROUPS.paused.includes(i.status)).length },
+            { key: null, bg: '#fee2e2', icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>', label: '返工累计', n: vis.reduce((a, i) => a + (i.reopen_count || 0), 0) },
         ];
-        document.getElementById('siStatsRow').innerHTML = stats.map(([l, n]) =>
-            `<div class="si-stat-card"><div class="si-stat-num">${n}</div><div class="si-stat-label">${l}</div></div>`).join('');
+        document.getElementById('siStatsRow').innerHTML = stats.map((s) => {
+            const classes = ['u-stat-card'];
+            if (s.key === null) classes.push('static');
+            if (s.key !== null && s.key === siActiveStat) classes.push('active');
+            if (s.key === '' && siActiveStat === '') classes.push('active');
+            const onClick = s.key === null ? '' : ` onclick="siSetStatFilter('${s.key}')"`
+            return `<div class="${classes.join(' ')}"${onClick}><div class="u-stat-icon" style="background:${s.bg};">${s.icon}</div><div class="u-stat-info"><div class="u-stat-num">${s.n}</div><div class="u-stat-label">${s.label}</div></div></div>`;
+        }).join('');
     }
 
+    // ===== 表头排序 + 分页（前端统一：共享层 UnifyHelpers）=====
+    const SI_SORT_FIELD_TYPES = {
+        id: 'number',
+        type: 'string',
+        title: 'string',
+        system_name: 'string',
+        priority: 'statusOrder',
+        status: 'statusOrder',
+        assigned_to_name: 'string',
+        dev_estimated_at: 'date',
+        created_at: 'date',
+    };
+    // 状态业务序（与 siRenderStats 分组方向一致：进行中→待验收→待上线→已完成→暂缓/拒绝；已作废排末尾）
+    // codex API 审 MED-2（2026-07-10）：补 已暂缓/已拒绝 显式序——共享排序对未知状态给 99 会
+    //   排到已作废之后，与"已作废排末尾"注释矛盾；显式放已生效后、已作废前。
+    const SI_STATUS_SORT_ORDER = {
+        待处理: 0, 待评估: 1, 已排期: 2, 开发中: 3, 处理中: 4,
+        待验证: 5, 待验收: 6, 待上线: 7,
+        已上线: 8, 已关闭: 9, 已生效: 10,
+        已暂缓: 11, 已拒绝: 12,
+        已作废: 13,
+    };
+    const sysIterationSorter = UnifyHelpers.attachTableSort({
+        tableSelector: '#sysIterationListTable',
+        fieldTypes: SI_SORT_FIELD_TYPES,
+        statusOrder: { priority: { P0: 0, P1: 1, P2: 2, P3: 3 }, status: SI_STATUS_SORT_ORDER },
+        getList: () => siVisibleList(),
+        render: renderSysIterationRows,
+        defaultSort: { field: 'id', dir: 'desc' },
+        pagination: { containerSelector: '#sysIterationPagination' },
+    });
+
+    // 外部入口保持原名 siRenderTable()，零改动既有调用点（siSetType/siLoadList）
     function siRenderTable() {
+        sysIterationSorter.render();
+    }
+
+    function renderSysIterationRows(list) {
         const tb = document.getElementById('siTbody');
-        const list = siVisibleList();
         if (!list.length) {
             tb.innerHTML = `<tr><td colspan="9" class="si-empty">${isAdmin() ? '暂无数据' : '暂无指派给你的单据'}</td></tr>`;
             return;
@@ -653,10 +729,10 @@
             return `<tr onclick="siOpenDrawer(${i.id})">
                 <td>#${i.id}</td>
                 <td><span class="u-type-tag ${esc(i.type)}">${esc(siTypeLabel(i.type))}</span></td>
+                <td><span class="u-pri ${esc(i.priority)}">${esc(i.priority)}</span></td>
+                <td><span class="u-status-badge si-s-${siStatusClass(i.status)}">${esc(i.status)}</span></td>
                 <td>${esc(i.title)}${lineage}${flags}</td>
                 <td>${esc(i.system_name)}<span class="si-muted"> · ${esc(i.module_name || '—')}</span></td>
-                <td><span class="si-prio ${esc(i.priority)}">${esc(i.priority)}</span></td>
-                <td><span class="u-status-badge si-s-${siStatusClass(i.status)}">${esc(i.status)}</span></td>
                 <td>${i.assigned_to_name ? esc(i.assigned_to_name) : '<span class="si-muted">—</span>'}</td>
                 <td>${i.dev_estimated_at ? esc(siFmtDT(i.dev_estimated_at)) : '<span class="si-muted">—</span>'}</td>
                 <td class="si-muted">${esc(siFmtDT(i.created_at))}</td>
@@ -699,7 +775,7 @@
         document.getElementById('siDMeta').innerHTML =
             `<span class="u-type-tag ${esc(iss.type)}">${esc(siTypeLabel(iss.type))}</span>` +
             `<span class="u-status-badge si-s-${siStatusClass(iss.status)}">${esc(iss.status)}</span>` +
-            `<span class="si-prio ${esc(iss.priority)}">${esc(iss.priority)}</span>` +
+            `<span class="u-pri ${esc(iss.priority)}">${esc(iss.priority)}</span>` +
             (iss.scope_changed ? `<span class="si-flag scope">· 经历范围变更</span>` : '') +
             (iss.reopen_count ? `<span class="si-flag reopen">· 返工×${iss.reopen_count}</span>` : '') +
             (iss.blocked ? `<span class="si-flag blocked">· 受阻中</span>` : '');
@@ -746,12 +822,12 @@
             <div class="u-kv-item"><label>来源</label><div class="v">${esc(iss.source || '—')}</div></div>
             <div class="u-kv-item"><label>建单人</label><div class="v">${esc(iss.created_by_name || '—')}</div></div>
             <div class="u-kv-item"><label>开发负责人</label><div class="v">${iss.assigned_to_name ? esc(iss.assigned_to_name) : '<span class="si-muted">未指派</span>'}</div></div>
-            <div class="u-kv-item"><label>预计完成</label><div class="v">${iss.dev_estimated_at ? esc(siFmtDT(iss.dev_estimated_at)) : '<span class="si-muted">未回填</span>'}</div></div>
+            <div class="u-kv-item"><label>预计完成时间</label><div class="v">${iss.dev_estimated_at ? esc(siFmtDT(iss.dev_estimated_at)) : '<span class="si-muted">未回填</span>'}</div></div>
             <div class="u-kv-item"><label>期望完成(deadline)</label><div class="v">${iss.deadline ? esc(iss.deadline) : '<span class="si-muted">—</span>'}</div></div>
             <div class="u-kv-item"><label>需求方</label><div class="v">${siRequesterText(iss)}</div></div>
             <div class="u-kv-item"><label>上线批次</label><div class="v">${iss.release_id ? ('#' + iss.release_id) : '<span class="si-muted">—</span>'}</div></div>
             ${iss.type === 'bug' ? `<div class="u-kv-item"><label>上线执行人</label><div class="v">${iss.release_assignee_name ? esc(iss.release_assignee_name) : '<span class="si-muted">未指定</span>'}</div></div>` : ''}
-            <div class="u-kv-item"><label>建单时间</label><div class="v">${esc(siFmtDT(iss.created_at))}</div></div>
+            <div class="u-kv-item"><label>创建时间</label><div class="v">${esc(siFmtDT(iss.created_at))}</div></div>
             ${feas}
             ${relCorrRow}
             <div class="u-kv-item full"><label>描述</label><div class="v">${iss.description ? esc(iss.description) : '—'}</div></div>
@@ -1649,7 +1725,7 @@
             ${siCollaboratorPickerHtml([])}
           </div>
           <div id="siCreateAssignB" style="display:none">${siRelayUserSelectHtml()}</div>`;
-        siModal('建单', [
+        siModal('新建迭代单', [
             fSelectMap('type', '类型', typeOpts, typeOpts[0], SI_TYPE_LABEL),
             fText('title', '标题', '', true),
             fSelectMap('system_name', '所属系统', (META && META.bizSystems) || [], (META && META.bizSystems && META.bizSystems[0]) || '', null),

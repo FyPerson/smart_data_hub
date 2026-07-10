@@ -40,7 +40,7 @@ const UNIFY_HELPERS_JS = path.join(PUBLIC_DIR, 'assets', 'js', 'unify-helpers.js
 // ============================================================
 
 // 已完成"前端统一"改造迁移的页面文件名（相对 wbs-server/public/）。C1-C4 每迁一页往这里加一个。
-const MIGRATED_PAGES = ['Data_Correction.html', 'Sys_Iteration.html', 'Issue_Tracker.html', 'Data_Collab.html'];
+const MIGRATED_PAGES = ['Data_Correction.html', 'Sys_Iteration.html', 'Issue_Tracker.html', 'Data_Collab.html', 'Statistics.html'];
 
 // 共享组件根类黑名单（方案 §二"只给根类加 u-"清单，逐字对齐 components.css 定义的组件本体类名）。
 // 不含状态/变体/枚举修饰类（active/open/full/ellip/wide/s-*/t-*/n-*）——这些保留原名，不在黑名单里。
@@ -59,7 +59,8 @@ const OLD_NAMES = [
     'history-item', 'att-item',
     'action-bar',
     'notify-row', 'nr-label', 'nr-body', 'nb-btn',
-    'empty-state'
+    'empty-state',
+    'sortable', 'sort-icon', // 排序机制升共享层（迁自 Data_Collab 页内 .sortable/.sort-icon → u-sortable/u-sort-icon）
 ];
 
 // ============================================================

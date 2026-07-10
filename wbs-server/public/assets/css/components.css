@@ -58,6 +58,10 @@
 }
 .u-stat-card:hover { border-color: #d97706; box-shadow: 0 2px 8px rgba(217,119,6,0.08); }
 .u-stat-card.active { border-color: #d97706; background: #fffbeb; }
+/* 纯展示统计卡（无点击筛选行为的页面挂 static 修饰类，消除 pointer/hover 的"可点"视觉误导；
+   修饰类不加 u- 前缀对齐 active/open 惯例） */
+.u-stat-card.static { cursor: default; }
+.u-stat-card.static:hover { border-color: #e2e8f0; box-shadow: none; }
 .u-stat-icon { width: 36px; height: 36px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 16px; }
 .u-stat-info .u-stat-num { font-size: 22px; font-weight: 700; color: #111827; }
 .u-stat-info .u-stat-label { font-size: 12px; color: #6b7280; margin-top: 2px; }
@@ -75,11 +79,71 @@
 .u-corr-table tbody tr:hover { background: #fffbeb; }
 .u-corr-table td.ellip { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* ===== 可排序表头（前端统一 排序机制升共享层，迁自 Data_Collab.html v1.72.1/v1.72.2 内联 .sortable/.sort-icon，
+   原样迁移改根类名 sortable→u-sortable、sort-icon→u-sort-icon）=====
+   ⚠️ 选择器故意写纯类 `.u-sortable`（不写 `th.u-sortable`）：assertComponentsCssRootClassesArePrefixed
+   （verify-unify-static.js 断言⓪b）要求 components.css 每条规则的选择器头必须以 `.u-` 开头，元素前缀
+   `th.u-sortable` 会判失败；纯类选择器功能等价（HTML 侧固定写在 <th> 上），且不绑定任何页面表格根类
+   （.data-table / .u-corr-table 均可用），四页表头统一挂 u-sortable 即生效。 */
+/* 交回核对修正（2026-07-10）：codex 接力版曾改 display:none 并删 hover/active 视觉，声明"对齐生产态"；
+   经 git 核对生产原版（374b2b2 Data_Collab L113-141）真貌 = opacity 方案 + hover 背景 + active 列
+   蓝底高亮 + active 列图标固定显示——用户"悬停才出现符号"诉求生产本就满足（本地看到常显是共享
+   资源缓存串未 bump 的旧 CSS，缓存串修复保留 codex 的 v1.110.2_unify）。此处恢复生产等价。 */
+.u-sortable {
+    cursor: pointer;
+    user-select: none;
+    transition: background 0.12s;
+}
+.u-sortable:hover { background: #eef2f7; }
+.u-sortable.active { background: #e0e7ff; color: #1e40af; }
+.u-sortable .u-sort-icon {
+    display: inline-block;
+    margin-left: 4px;
+    color: #94a3b8;
+    font-size: 12px;
+    font-weight: normal;
+    opacity: 0;                  /* 默认隐藏，hover/active 才显示 */
+    transition: opacity 0.15s;
+}
+.u-sortable:hover .u-sort-icon { opacity: 1; }
+.u-sortable.active .u-sort-icon { opacity: 1; color: #1e40af; font-weight: bold; }
+
+/* ===== 分页（四页列表统一前端分页，固定每页 25 条；容器挂列表表格 wrap 之后右下角）=====
+   按钮复用 .u-btn-secondary 尺寸语言（页面侧 HTML 组合 class="u-btn-secondary u-page-btn"），
+   这里只补分页专属的禁用态与容器排版。 */
+.u-pagination {
+    display: flex; align-items: center; justify-content: flex-end; gap: 10px;
+    padding: 12px 2px 0; font-size: 12px; color: #6b7280;
+}
+.u-pagination .u-page-info { white-space: nowrap; }
+.u-page-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ===== 紧凑表格变体（仅 Data_Collab 挂载，消 14 列横向滚动：字号 13→12px + padding 收紧）=====
+   .unified-page 祖先前缀把特异性提到 (0,2,1)，稳压过 Data_Collab 页内 .data-table th/td 残留声明
+   （(0,1,1)，位于页面自身 <style>，文本顺序晚于本文件，等特异性时按级联顺序会赢）——沿用本文件顶部
+   "覆盖钩子" 惯例（那条注释描述反方向：页面覆盖共享层；这里方向相反，机制相同，均靠 .unified-page
+   祖先类补一级特异性）。变体类本身不耦合任何页面残留类名（.data-table 等），保持共享层通用。 */
+.unified-page .u-table-compact th,
+.unified-page .u-table-compact td {
+    font-size: 12px;
+    padding: 8px 10px;
+}
+
 /* 类型标签 base（修饰色 .t-single/.t-batch 等各页专属枚举颜色留页面内联） */
 .u-type-tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 500; white-space: nowrap; }
 
 /* 状态徽章 base（修饰色 .s-* 各页状态枚举颜色留页面内联） */
 .u-status-badge { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: 600; white-space: nowrap; }
+
+/* 优先级徽章（状态列/优先级列样式统一轮 2026-07-10）：P0-P3 是全站唯一语义枚举（数据开发/系统迭代
+   同一套），颜色直接进共享层——与状态徽章"颜色留页面"策略不同，因状态枚举各页状态机不同而优先级
+   全站一致。形态采系统迭代徽章式（与 u-status-badge 同族视觉），替代数据开发原 priority-dot 圆点。
+   修饰类 P0-P3 为值枚举不加 u- 前缀（对齐 active/s-* 惯例，选择器头 .u-pri 满足守卫⓪b）。 */
+.u-pri { display: inline-block; padding: 1px 7px; border-radius: 4px; font-size: 11px; font-weight: 700; white-space: nowrap; }
+.u-pri.P0 { background: #dc2626; color: #fff; }
+.u-pri.P1 { background: #f59e0b; color: #fff; }
+.u-pri.P2 { background: #e0e7ff; color: #4338ca; }
+.u-pri.P3 { background: #f1f5f9; color: #94a3b8; }
 
 /* 通知徽章 base（修饰色 .n-* 各页通知态枚举颜色留页面内联） */
 .u-notify-badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 500; }
@@ -89,7 +153,9 @@
 .u-notify-row:last-child { border-bottom: none; }
 .u-notify-row .u-nr-label { font-size: 12px; color: #6b7280; font-weight: 600; min-width: 110px; }
 .u-notify-row .u-nr-body { flex: 1; font-size: 12px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
-.u-notify-row .u-nb-btn { font-size: 11px; padding: 3px 10px; }
+/* 收口修正：紧凑尺寸从 .u-notify-row 后代放宽为单类——通知按钮不论是否在通知行容器内（Data_Collab/Issue_Tracker
+   历史区块结构无 u-notify-row 容器），尺寸全站一致；原行内 13 处按钮计算值不变，行外按钮从常规收紧对齐 */
+.u-nb-btn { font-size: 11px; padding: 3px 10px; }
 
 /* ===== 详情区块 ===== */
 .u-detail-section { margin-bottom: 18px; }

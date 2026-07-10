@@ -7,7 +7,7 @@
     <title>数据协作 - 智数协同平台</title>
     <link rel="icon" href="data:,">
     <link rel="stylesheet" href="assets/css/style.css?v=v1.102.1_nav">
-    <link rel="stylesheet" href="assets/css/components.css?v=v1.110.0_unify">
+    <link rel="stylesheet" href="assets/css/components.css?v=v1.110.4_unify">
     <style>
         /* 筛选栏 base/select/input/label 已并入共享层 components.css .u-filter-bar（前端统一 C4 Commit 3
            harmonize；本页 filter-bar 无自由文本搜索框，共享层 input[type=text] 宽度差异对本页无影响）。
@@ -78,37 +78,8 @@
         .data-table .empty-row tr:hover {
             background: transparent;
         }
-        /* v1.72.1：可排序表头 + 排序图标 + 激活列高亮 */
-        /* v1.72.2 视觉调优：默认 13 列图标隐藏，hover/active 才显示，避免表头视觉杂乱 */
-        .data-table th.sortable {
-            cursor: pointer;
-            user-select: none;
-            transition: background 0.12s;
-        }
-        .data-table th.sortable:hover {
-            background: #eef2f7;
-        }
-        .data-table th.sortable.active {
-            background: #e0e7ff;
-            color: #1e40af;
-        }
-        .data-table th.sortable .sort-icon {
-            display: inline-block;
-            margin-left: 4px;
-            color: #94a3b8;
-            font-size: 12px;
-            font-weight: normal;
-            opacity: 0;                  /* v1.72.2: 默认隐藏 */
-            transition: opacity 0.15s;
-        }
-        .data-table th.sortable:hover .sort-icon {
-            opacity: 1;                  /* v1.72.2: hover 显示灰色 ⇅ */
-        }
-        .data-table th.sortable.active .sort-icon {
-            opacity: 1;                  /* v1.72.2: active 列固定显示 */
-            color: #1e40af;
-            font-weight: bold;
-        }
+        /* v1.72.1/v1.72.2：可排序表头 + 排序图标 + 激活列高亮——前端统一已升级为共享层
+           components.css 的 .u-sortable/.u-sort-icon（原样迁移，样式逐字节一致），本页不再重复定义。 */
         .data-table .col-id {
             color: #6b7280;
             font-family: ui-monospace, monospace;
@@ -131,9 +102,11 @@
         /* 状态徽章 base 已并入共享层 components.css .u-status-badge（前端统一 C4 Commit 3；
            两边值逐字相同 padding:3px 10px/radius:12px/11px/600/nowrap = 零漂移）。
            下方 .status-* 为本页状态枚举配色，residual 保留不动。 */
-        .status-PENDING_ASSIGN { background: #ffedd5; color: #9a3412; }
-        .status-PENDING { background: #dbeafe; color: #1e40af; }
-        .status-EXPORTING { background: #ccfbf1; color: #115e59; }  /* v1.72.6 修复：v1.71.0 引入 EXPORTING 状态时漏加 CSS 导致白底白字 */
+        /* 状态色语义统一轮（2026-07-10）：待指派 橙→灰（对齐四页"待指派/待处理=灰"语义色；超时
+           警示由列内 timeoutMark 承担不靠底色）；PENDING/EXPORTING 文字色对齐数据修正同语义色值 */
+        .status-PENDING_ASSIGN { background: #f3f4f6; color: #6b7280; }
+        .status-PENDING { background: #dbeafe; color: #1d4ed8; }
+        .status-EXPORTING { background: #ccfbf1; color: #0f766e; }  /* v1.72.6 修复：v1.71.0 引入 EXPORTING 状态时漏加 CSS 导致白底白字 */
         .status-SUBMITTED { background: #fef3c7; color: #92400e; }
         .status-DONE { background: #ddd6fe; color: #5b21b6; }
         .status-ARCHIVED { background: #d1fae5; color: #065f46; }
@@ -202,11 +175,7 @@
             color: white;
             border: 1px solid #f59e0b;
         }
-        .admin-direct-actions .btn-notify-direct {  /* v1.72.6 新增 */
-            background: #10b981;
-            color: white;
-            border: 1px solid #10b981;
-        }
+        /* .admin-direct-actions .btn-notify-direct 规则已删（停点⑦收口 Commit 2：唯一按钮改用 u-btn-secondary u-nb-btn，类零引用）。 */
         .reassign-history {
             margin-top: 10px;
             font-size: 13px;
@@ -702,22 +671,6 @@
         .toast-error { background: #dc2626; }
         .toast-info { background: #d97706; }
 
-        .page-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: baseline;
-            margin-bottom: 16px;
-        }
-        .page-header h1 {
-            margin: 0;
-            font-size: 22px;
-            color: #111827;
-        }
-        .page-header .subtitle {
-            color: #6b7280;
-            font-size: 13px;
-            margin-left: 12px;
-        }
     </style>
 </head>
 
@@ -746,7 +699,7 @@
                     <path d="M9 11l3 3L22 4"/>
                     <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
                 </svg>
-                任务池
+                数仓任务池
             </a>
             <a href="/Data_Collab.html" class="nav-item" aria-current="page" style="color:#d97706; font-weight:600;">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -761,7 +714,7 @@
                     <line x1="12" y1="8" x2="12" y2="12"/>
                     <line x1="12" y1="16" x2="12.01" y2="16"/>
                 </svg>
-                需求跟踪
+                数据开发
             </a>
             <a href="/Data_Correction.html" class="nav-item">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -776,13 +729,6 @@
                 <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
             </svg>
                 系统迭代
-            </a>
-            <a href="/My_Workspace.html" class="nav-item">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
-                    <circle cx="12" cy="7" r="4"/>
-                </svg>
-                我的工作台
             </a>
             <div class="nav-dropdown">
                 <button class="nav-dropdown-trigger">
@@ -854,17 +800,42 @@
 
     <!-- 主工作区 -->
     <main class="workbench-container">
-        <div class="page-header">
-            <div>
-                <h1 style="display:inline-block;">数据协作</h1>
-                <span class="subtitle">跨部门数据需求登记 · 工作量留痕 · 一阶段</span>
+        <!-- 统计卡片（前端统一 向 Data_Correction 基准页看齐：全部 + 5 状态，一一对应 filterStatus 下拉值）。
+             点击卡片=设 filterStatus 值+loadList；下拉变更时卡片 active 跟随（写读同源：active 态唯一真相
+             =filterStatus 当前值，见 syncStatCardsActive）。数字来源=updateCollabStats() 独立请求（不含
+             status 参数，含其余筛选条件），与 Issue_Tracker updateStats() 同一范式——本页 loadList() 的
+             status 走服务端过滤，主列表响应不含被过滤掉的状态数据，无法从已加载列表反推全量分布。 -->
+        <div class="u-stats-row" id="collabStatsRow">
+            <div class="u-stat-card active" onclick="filterByStat('')" data-status="">
+                <div class="u-stat-icon" style="background:#f3f4f6;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#6b7280" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/></svg></div>
+                <div class="u-stat-info"><div class="u-stat-num" id="statAll">0</div><div class="u-stat-label">全部</div></div>
+            </div>
+            <div class="u-stat-card" onclick="filterByStat('PENDING_ASSIGN')" data-status="PENDING_ASSIGN">
+                <div class="u-stat-icon" style="background:#f3f4f6;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#6b7280" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></div>
+                <div class="u-stat-info"><div class="u-stat-num" id="statPendingAssign">0</div><div class="u-stat-label">待指派</div></div>
+            </div>
+            <div class="u-stat-card" onclick="filterByStat('PENDING')" data-status="PENDING">
+                <div class="u-stat-icon" style="background:#dbeafe;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#1d4ed8" stroke-width="2"><path d="M12 2v4"/><path d="M12 18v4"/><path d="M4.93 4.93l2.83 2.83"/><path d="M16.24 16.24l2.83 2.83"/></svg></div>
+                <div class="u-stat-info"><div class="u-stat-num" id="statPending">0</div><div class="u-stat-label">待开发</div></div>
+            </div>
+            <div class="u-stat-card" onclick="filterByStat('SUBMITTED')" data-status="SUBMITTED">
+                <div class="u-stat-icon" style="background:#fef3c7;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#92400e" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg></div>
+                <div class="u-stat-info"><div class="u-stat-num" id="statSubmitted">0</div><div class="u-stat-label">待验收</div></div>
+            </div>
+            <div class="u-stat-card" onclick="filterByStat('DONE')" data-status="DONE">
+                <div class="u-stat-icon" style="background:#d1fae5;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#065f46" stroke-width="2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg></div>
+                <div class="u-stat-info"><div class="u-stat-num" id="statDone">0</div><div class="u-stat-label">已完成</div></div>
+            </div>
+            <div class="u-stat-card" onclick="filterByStat('ARCHIVED')" data-status="ARCHIVED">
+                <div class="u-stat-icon" style="background:#ede9fe;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#6d28d9" stroke-width="2"><rect x="3" y="4" width="18" height="4" rx="1"/><path d="M5 8v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/></svg></div>
+                <div class="u-stat-info"><div class="u-stat-num" id="statArchived">0</div><div class="u-stat-label">已归档</div></div>
             </div>
         </div>
 
         <!-- 筛选栏 -->
         <div class="u-filter-bar">
             <span class="u-filter-label">状态</span>
-            <select id="filterStatus" onchange="loadList()">
+            <select id="filterStatus" onchange="syncStatCardsActive(); loadList();">
                 <option value="">全部</option>
                 <option value="PENDING_ASSIGN">待指派</option>
                 <option value="PENDING">待开发</option>
@@ -900,31 +871,34 @@
             </button>
         </div>
 
-        <!-- 列表（v1.75.4：14 列可排序表头 + 最后提交列） -->
-        <table class="data-table" id="collabListTable">
+        <!-- 列表（v1.75.4：14 列可排序表头 + 最后提交列；前端统一：sortable/sort-icon 升级为共享层 u-sortable/u-sort-icon；
+             中途插入需求 B：挂 u-table-compact 收紧字号/padding，消 14 列在 1920×1080 下的横向滚动条） -->
+        <table class="data-table u-table-compact" id="collabListTable">
             <thead>
                 <tr>
-                    <th class="sortable" data-sort-by="id">ID<span class="sort-icon">⇅</span></th>
-                    <th class="sortable" data-sort-by="oa_request_no">OA 流程号<span class="sort-icon">⇅</span></th>
-                    <th class="sortable" data-sort-by="requester_dept">部门<span class="sort-icon">⇅</span></th>
-                    <th class="sortable" data-sort-by="requester_name">业务方<span class="sort-icon">⇅</span></th>
-                    <th class="sortable" data-sort-by="target_db_connection_id">目标业务库<span class="sort-icon">⇅</span></th>
-                    <th class="sortable" data-sort-by="description">需求描述<span class="sort-icon">⇅</span></th>
-                    <th class="sortable" data-sort-by="created_at">创建时间<span class="sort-icon">⇅</span></th>
-                    <th class="sortable" data-sort-by="deadline">期望完成时间<span class="sort-icon">⇅</span></th>
-                    <th class="sortable" data-sort-by="dev_estimated_at">预计完成时间<span class="sort-icon">⇅</span></th>
-                    <th class="sortable" data-sort-by="last_submitted_at">最后提交<span class="sort-icon">⇅</span></th>
-                    <th class="sortable" data-sort-by="contact_person_name">对接人<span class="sort-icon">⇅</span></th>
-                    <th class="sortable" data-sort-by="developer_name">处理人<span class="sort-icon">⇅</span></th>
-                    <th class="sortable" data-sort-by="status">状态<span class="sort-icon">⇅</span></th>
-                    <th class="sortable" data-sort-by="sql_validation_status">验收<span class="sort-icon">⇅</span></th>
-                    <th class="sortable" data-sort-by="friction_occurred">摩擦<span class="sort-icon">⇅</span></th>
+                    <th class="u-sortable" data-sort-by="id">ID<span class="u-sort-icon">⇅</span></th>
+                    <th class="u-sortable" data-sort-by="oa_request_no">OA 流程号<span class="u-sort-icon">⇅</span></th>
+                    <th class="u-sortable" data-sort-by="requester_dept">部门<span class="u-sort-icon">⇅</span></th>
+                    <th class="u-sortable" data-sort-by="status">状态<span class="u-sort-icon">⇅</span></th>
+                    <th class="u-sortable" data-sort-by="requester_name">业务方<span class="u-sort-icon">⇅</span></th>
+                    <th class="u-sortable" data-sort-by="target_db_connection_id">目标业务库<span class="u-sort-icon">⇅</span></th>
+                    <th class="u-sortable" data-sort-by="description">需求描述<span class="u-sort-icon">⇅</span></th>
+                    <th class="u-sortable" data-sort-by="created_at">创建时间<span class="u-sort-icon">⇅</span></th>
+                    <th class="u-sortable" data-sort-by="deadline">期望完成时间<span class="u-sort-icon">⇅</span></th>
+                    <th class="u-sortable" data-sort-by="dev_estimated_at">预计完成时间<span class="u-sort-icon">⇅</span></th>
+                    <th class="u-sortable" data-sort-by="last_submitted_at">最后提交<span class="u-sort-icon">⇅</span></th>
+                    <th class="u-sortable" data-sort-by="contact_person_name">对接人<span class="u-sort-icon">⇅</span></th>
+                    <th class="u-sortable" data-sort-by="developer_name">开发<span class="u-sort-icon">⇅</span></th>
+                    <th class="u-sortable" data-sort-by="sql_validation_status">验收<span class="u-sort-icon">⇅</span></th>
+                    <th class="u-sortable" data-sort-by="friction_occurred">摩擦<span class="u-sort-icon">⇅</span></th>
                 </tr>
             </thead>
             <tbody id="listBody">
                 <tr class="empty-row"><td colspan="15">加载中...</td></tr>
             </tbody>
         </table>
+        <!-- 分页（前端统一 新增 A：每页固定 25 条） -->
+        <div class="u-pagination" id="collabPagination"></div>
     </main>
 
     <!-- 新建/编辑协作单弹窗（v1.66.2 复用同一 modal） -->
@@ -1017,7 +991,7 @@
     </div>
 
     <!-- 协作单详情抽屉（v2.0 Deploy 2 框架，交付/验收/摩擦区块见 Deploy 3；v1.66.2 加编辑/作废；前端统一 C4 Commit 2：居中弹窗 → 右侧抽屉，footer 固定=决策A） -->
-    <div class="u-drawer-overlay" id="detailDrawerOverlay"></div>
+    <div class="u-drawer-overlay" id="detailDrawerOverlay" onclick="closeDetailModal()"></div>
     <div class="u-drawer" id="detailDrawer" inert aria-hidden="true">
         <div class="u-drawer-header">
             <h2 id="detailTitle">协作单详情</h2>
@@ -1045,7 +1019,7 @@
                 <div style="padding:12px;background:#dbeafe;border:1px solid #93c5fd;border-radius:6px;margin-bottom:14px;color:#1e3a8a;font-size:13px;line-height:1.7;">
                     📋 适用于：admin 因创建协作单时录入错误（如选错业务库），导致开发交付物 smoke test 失败。<br/>
                     通过 admin 修正字段后，<strong>不让开发再回来重传</strong>，admin 单方面将协作单从 SUBMITTED 闭环到 DONE。<br/>
-                    <span style="color:#991b1b;">⚠️ 行政闭环<strong>不跑 smoke test</strong>，仅作需求记账，不追溯结果数据；完成时间取最后一次有效提交时间，无则取要求完成时间。</span>
+                    <span style="color:#991b1b;">⚠️ 行政闭环<strong>不跑 smoke test</strong>，仅作需求记账，不追溯结果数据；完成时间取最后一次有效提交时间，无则取期望完成时间。</span>
                 </div>
                 <div class="u-form-group">
                     <label>行政闭环原因 <span class="required">*</span> <span class="u-hint">（必填，10..500 字符）</span></label>
@@ -1378,7 +1352,7 @@
     </div>
 
     <script src="assets/js/app.js?v=v1.105.0_pf"></script>
-    <script src="assets/js/unify-helpers.js?v=v1.110.0_unify"></script>
+    <script src="assets/js/unify-helpers.js?v=v1.110.4_unify"></script>
     <script>
         // v1.74.3 纯只读领导账号 id 名单（与后端 server.js READONLY_LEADER_IDS 同步！改动需两处一起改）
         //   示例只读领导A(id=11) / 示例只读领导B(id=6) 为纯只读领导，不参与偏技术类工作，不可被设为协作单数据导出人(exporter)。
@@ -1707,7 +1681,14 @@
             searchTimer = setTimeout(loadList, 350);
         }
 
+        // codex 审 MED-2：请求竞态守卫（复用 Sys_Iteration siListSeq 范式）——loadList 主列表与
+        //   updateCollabStats 统计卡是同一轮筛选变更派生的两条请求链，共用同一 seq（一次筛选变更 = 一轮）：
+        //   任一响应回来时若已有更新一轮请求发出（seq !== collabListSeq），直接丢弃不落 DOM，
+        //   防"快速连点统计卡/连续切筛选"时慢的旧响应覆盖新筛选结果。
+        let collabListSeq = 0;
+
         async function loadList() {
+            const seq = ++collabListSeq;
             const tbody = document.getElementById('listBody');
             tbody.innerHTML = '<tr class="empty-row"><td colspan="15">加载中...</td></tr>';
 
@@ -1724,16 +1705,61 @@
 
             try {
                 const res = await authFetch('/api/collab/requests?' + params.toString());
+                if (seq !== collabListSeq) return;   // MED-2：已有更新一轮请求发出，丢弃（含"加载失败"占位也不写）
                 if (!res || !res.ok) {
                     tbody.innerHTML = '<tr class="empty-row"><td colspan="15">加载失败</td></tr>';
                     return;
                 }
                 const list = await res.json();
-                renderList(list);
+                if (seq !== collabListSeq) return;   // MED-2：json 解析的 await 间隙可能又发新一轮，落 DOM 前再校验
+                lastListBackendOrder = list ? list.slice() : [];
+                collabSorter.render();
+                updateCollabStats(seq);
             } catch (e) {
                 console.error('加载协作单失败', e);
-                tbody.innerHTML = '<tr class="empty-row"><td colspan="15">加载失败</td></tr>';
+                if (seq === collabListSeq) tbody.innerHTML = '<tr class="empty-row"><td colspan="15">加载失败</td></tr>';
             }
+        }
+
+        // 统计卡片：全部 + 5 状态计数（独立请求，不含 status 参数、含其余筛选条件——loadList() 的
+        //   status 走服务端过滤，主列表响应不含被过滤掉的状态数据，无法从已加载列表反推全量分布；
+        //   与 Issue_Tracker.html updateStats() 同一范式）。
+        //   MED-2：seq 由 loadList 传入（两条请求链共用一轮 seq），响应落 DOM 前校验非过时。
+        async function updateCollabStats(seq) {
+            try {
+                const params = new URLSearchParams();
+                const dept = document.getElementById('filterDept').value;
+                const search = document.getElementById('filterSearch').value.trim();
+                const myRoleEl = document.getElementById('filterMyRole');
+                const myRole = myRoleEl ? myRoleEl.value : '';
+                if (dept) params.append('requester_dept', dept);
+                if (search) params.append('search', search);
+                if (myRole) params.append('my_role', myRole);
+                const res = await authFetch('/api/collab/requests?' + params.toString());
+                if (seq !== collabListSeq) return;   // MED-2：非最新一轮，丢弃
+                if (!res || !res.ok) return;
+                const all = await res.json();
+                if (seq !== collabListSeq) return;   // MED-2：落 DOM 前再校验（同 loadList）
+                document.getElementById('statAll').textContent = all.length;
+                document.getElementById('statPendingAssign').textContent = all.filter(r => r.status === 'PENDING_ASSIGN').length;
+                document.getElementById('statPending').textContent = all.filter(r => r.status === 'PENDING').length;
+                document.getElementById('statSubmitted').textContent = all.filter(r => r.status === 'SUBMITTED').length;
+                document.getElementById('statDone').textContent = all.filter(r => r.status === 'DONE').length;
+                document.getElementById('statArchived').textContent = all.filter(r => r.status === 'ARCHIVED').length;
+            } catch (e) { /* ignore */ }
+        }
+
+        // 卡片点击=写 filterStatus 值 + 同步 active + 重新加载；下拉变更时 syncStatCardsActive 单独绑定
+        // （见筛选栏 <select id="filterStatus"> onchange）——active 态唯一真相=filterStatus 当前值，双入口同源。
+        function filterByStat(status) {
+            document.getElementById('filterStatus').value = status;
+            syncStatCardsActive();
+            loadList();
+        }
+
+        function syncStatCardsActive() {
+            const cur = document.getElementById('filterStatus').value;
+            document.querySelectorAll('#collabStatsRow .u-stat-card').forEach(c => c.classList.toggle('active', c.dataset.status === cur));
         }
 
         // 目标业务库缓存（id → name）；列表渲染时按需查
@@ -1749,42 +1775,36 @@
             } catch (e) { /* 静默 */ }
         }
 
-        // v1.72.1：列表客户端排序状态（null = 后端默认排序，第三次点同列恢复）
-        let currentSortBy = null;
-        let currentSortDir = 'desc';
-        // 缓存最近一次后端返回的原始顺序，用于"清排序"时还原（不需重新拉接口）
+        // 缓存最近一次后端返回的原始顺序，供表头排序清空态还原（不需重新拉接口）。
+        // 前端统一：不再靠 currentSortBy===null 条件判断是否重缓存——loadList() 每次拉取成功后无条件写入，
+        // 单一权威来源更简单也更正确（原条件判断在"排序态下 loadList 因筛选变化重拉"时不会刷新缓存，属潜在陈旧读）。
         let lastListBackendOrder = [];
-        // 阶段2 盯效率：是否只看「超时未回填」（客户端筛选，独立于后端筛选/排序；用未筛选的 lastListBackendOrder 重渲染）
+        // 阶段2 盯效率：是否只看「超时未回填」（客户端筛选，独立于后端筛选/排序；对 lastListBackendOrder 重过滤后交给排序器渲染）
         let onlyUnrepliedTimeout = false;
+        // 与下方 renderList 行模板共用同一个 nowTs（避免筛选 nowTs 与渲染 nowTs 两次 Date.now() 极端边界跨阈值不一致，codex L-2 原则延续；
+        // collabSortableList()→UnifyHelpers 排序→renderList() 全程同步执行，两次取值间无 await/DOM 操作插入，时间窗口可忽略）
+        let renderNowTs = Date.now();
         function toggleUnrepliedTimeoutFilter() {
             onlyUnrepliedTimeout = !!document.getElementById('filterUnrepliedTimeout').checked;
-            renderList(lastListBackendOrder);
+            collabSorter.render();
         }
 
-        function renderList(list) {
+        // UnifyHelpers.attachTableSort 的 getList()：返回当前待排序数据（应用完客户端"超时未回填"筛选后的结果）
+        function collabSortableList() {
+            renderNowTs = Date.now();
+            return onlyUnrepliedTimeout ? lastListBackendOrder.filter(r => unrepliedTimeoutLevel(r, renderNowTs)) : lastListBackendOrder;
+        }
+
+        // UnifyHelpers.attachTableSort 的 render()：只负责行模板渲染，排序 + 分页切片已由排序器/分页器完成
+        //   （中途插入需求 A：config.pagination 组合后，此处收到的是当前页切片非排序后全量）
+        function renderList(sorted) {
             const tbody = document.getElementById('listBody');
-            // 缓存原始（后端给的）顺序：仅在 list 来自 fetch 时调（renderList 重排时不缓存）
-            // 通过 currentSortBy 是否为 null 判断：null = 后端原始顺序进入
-            if (currentSortBy === null) {
-                lastListBackendOrder = list ? list.slice() : [];
-            }
+            const nowTs = renderNowTs;
 
-            // 阶段2 盯效率筛选：只看超时未回填（橙+红都算）；lastListBackendOrder 缓存未筛选原始，切换开关时 renderList(lastListBackendOrder) 重过滤
-            // 固定一个 nowTs 供筛选 + 渲染共用，避免两次 Date.now() 极端边界跨阈值不一致（codex L-2）
-            const nowTs = Date.now();
-            const working = onlyUnrepliedTimeout ? (list || []).filter(r => unrepliedTimeoutLevel(r, nowTs)) : (list || []);
-
-            if (!working.length) {
+            if (!sorted.length) {
                 tbody.innerHTML = `<tr class="empty-row"><td colspan="15">${onlyUnrepliedTimeout ? '当前无超时未回填的协作单。' : '暂无协作单。点击右上角"新建协作单"开始记录。'}</td></tr>`;
-                updateSortIcons();
                 return;
             }
-
-            // 应用客户端排序：用户点过表头则按其选择，否则默认 ID 倒序（最新建单在前）。
-            // 后期各模块列表页默认排序统一按此逻辑（ID desc）。lastListBackendOrder 仍缓存后端原始顺序（上方 currentSortBy===null 分支），此处仅改默认渲染序、不动缓存语义。
-            // ⚠️ 默认 ID 倒序刻意覆盖了后端的「status 优先级→deadline ASC→id DESC」三级业务排序（server.js GET /api/collab/requests）——用户拍板统一 ID 倒序，知情接受"待指派/紧急单不再默认置顶"。
-            // 前提：id 为数值主键（恒为 number），sortByField 的 number 分支走数值降序，无字典序/NaN 风险。
-            const sorted = currentSortBy ? sortByField(working, currentSortBy, currentSortDir) : sortByField(working, 'id', 'desc');
 
             tbody.innerHTML = sorted.map(r => {
                 const desc = r.description.length > 60 ? r.description.substring(0, 60) + '…' : r.description;
@@ -1815,7 +1835,7 @@
                     ? escapeHtml(targetDbMap[r.target_db_connection_id] || `#${r.target_db_connection_id}`)
                     : '<span style="color:#9ca3af">—</span>';
 
-                // v3 处理人列：优先级 exporter > developer > 待指派
+                // v3 开发列（原名处理人·列名术语统一轮 2026-07-10）：优先级 exporter > developer > 待指派
                 // v1.72.9：admin 直派单（无 developer 占位）+ 三级转发后段（exporter 已接派）均显示 exporter_name
                 const hasExporter = r.exporter_user_id != null && Number(r.exporter_user_id) !== 0;
                 const isUnassigned = r.status === 'PENDING_ASSIGN' || (Number(r.developer_id) === 0 && !hasExporter);
@@ -1835,6 +1855,7 @@
                     <td class="col-id">#${r.id}</td>
                     <td>${oa}</td>
                     <td>${escapeHtml(r.requester_dept)}</td>
+                    <td><span class="u-status-badge status-${r.status}">${STATUS_LABELS[r.status] || r.status}</span>${timeoutMark}</td>
                     <td>${escapeHtml(r.requester_name)}</td>
                     <td>${targetDb}</td>
                     <td class="col-desc" title="${escapeHtml(r.description)}">${escapeHtml(desc)}</td>
@@ -1844,24 +1865,20 @@
                     <td>${fmtDate(r.last_submitted_at || r.submitted_at)}</td>
                     <td>${contactCell}</td>
                     <td>${devCell}</td>
-                    <td><span class="u-status-badge status-${r.status}">${STATUS_LABELS[r.status] || r.status}</span>${timeoutMark}</td>
                     <td>${valCell}</td>
                     <td>${frictionCell}</td>
                 </tr>`;
             }).join('');
-
-            // 同步表头排序图标 + active 高亮
-            updateSortIcons();
         }
 
-        // ===== v1.72.1 列表客户端排序 =====
-        // 字段类型分派（数字 / 日期 / 字符串 / 状态自定义优先级）
+        // ===== 表头排序（前端统一：排序机制升共享层 UnifyHelpers.attachTableSort，四页同源）=====
+        // 字段类型分派（数字 / 日期 / 字符串 / 状态自定义优先级 / labelMap 查表转字典序）
         const SORT_FIELD_TYPES = {
             id: 'number',
             oa_request_no: 'string',
             requester_dept: 'string',
             requester_name: 'string',
-            target_db_connection_id: 'targetDb',   // 解析 targetDbMap 后字典序
+            target_db_connection_id: 'labelMap',   // 经 labelMaps.target_db_connection_id 解析 targetDbMap 后字典序
             description: 'string',
             created_at: 'date',
             deadline: 'date',
@@ -1884,92 +1901,22 @@
             ARCHIVED: 5,
         };
 
-        /**
-         * 按 field + dir 对 list 排序（不修改原数组）
-         * null/undefined 一律排到末尾（无论 asc/desc）
-         */
-        function sortByField(list, field, dir) {
-            const type = SORT_FIELD_TYPES[field] || 'string';
-            const mult = dir === 'asc' ? 1 : -1;
-
-            return list.slice().sort((a, b) => {
-                const va = a[field];
-                const vb = b[field];
-
-                // null/undefined/空字符串统一排末尾
-                const aEmpty = va === null || va === undefined || va === '';
-                const bEmpty = vb === null || vb === undefined || vb === '';
-                if (aEmpty && bEmpty) return 0;
-                if (aEmpty) return 1;
-                if (bEmpty) return -1;
-
-                let cmp = 0;
-                if (type === 'number') {
-                    cmp = Number(va) - Number(vb);
-                } else if (type === 'date') {
-                    cmp = new Date(va).getTime() - new Date(vb).getTime();
-                } else if (type === 'targetDb') {
-                    const la = targetDbMap[va] || `#${va}`;
-                    const lb = targetDbMap[vb] || `#${vb}`;
-                    cmp = la.localeCompare(lb, 'zh-Hans-CN');
-                } else if (type === 'statusOrder') {
-                    const oa = STATUS_SORT_ORDER[va] !== undefined ? STATUS_SORT_ORDER[va] : 99;
-                    const ob = STATUS_SORT_ORDER[vb] !== undefined ? STATUS_SORT_ORDER[vb] : 99;
-                    cmp = oa - ob;
-                } else {
-                    // string：用中文 locale collator 支持中文/英文混排
-                    cmp = String(va).localeCompare(String(vb), 'zh-Hans-CN');
-                }
-                return cmp * mult;
-            });
-        }
-
-        /**
-         * 表头点击处理：第 1 次 desc → 第 2 次 asc → 第 3 次清排序（回默认 ID 倒序，见 renderList）
-         */
-        function initListSorting() {
-            const ths = document.querySelectorAll('#collabListTable th.sortable');
-            ths.forEach(th => {
-                th.addEventListener('click', () => {
-                    const field = th.dataset.sortBy;
-                    if (currentSortBy !== field) {
-                        // 新列首次点击：默认 desc
-                        currentSortBy = field;
-                        currentSortDir = 'desc';
-                    } else if (currentSortDir === 'desc') {
-                        currentSortDir = 'asc';
-                    } else {
-                        // 第 3 次：清排序，回默认 ID 倒序（见 renderList，已非后端原始顺序）
-                        currentSortBy = null;
-                        currentSortDir = 'desc';
-                    }
-                    // 用缓存的后端原始顺序重排，避免重新拉接口
-                    renderList(lastListBackendOrder);
-                });
-            });
-        }
-
-        /**
-         * 同步表头排序图标 + active class
-         */
-        function updateSortIcons() {
-            const ths = document.querySelectorAll('#collabListTable th.sortable');
-            ths.forEach(th => {
-                const field = th.dataset.sortBy;
-                const icon = th.querySelector('.sort-icon');
-                if (currentSortBy === field) {
-                    th.classList.add('active');
-                    if (icon) icon.textContent = currentSortDir === 'asc' ? '↑' : '↓';
-                } else if (currentSortBy === null && field === 'id') {
-                    // 默认态：列表实际按 id 倒序渲染（renderList），ID 列显示 ↓ 弱默认指示；不加 active 高亮以区别于用户主动点击
-                    th.classList.remove('active');
-                    if (icon) icon.textContent = '↓';
-                } else {
-                    th.classList.remove('active');
-                    if (icon) icon.textContent = '⇅';
-                }
-            });
-        }
+        // codex 审 MED-1：labelMaps 传 getter（() => targetDbMap）而非对象引用——loadTargetDbMap() 里
+        // `targetDbMap = {}` 是**整体重绑**（非原地填充），传引用会让共享层永远持旧空对象，库名列排序
+        // 退化为 '#id' 兜底字典序；getter 每次比较现取当前绑定，重绑后立即生效。
+        // defaultSort 沿用 v1.72.1 拍板：ID 倒序，刻意覆盖后端「status 优先级→deadline ASC→id DESC」
+        // 三级业务排序（server.js GET /api/collab/requests）——用户拍板统一 ID 倒序，知情接受
+        // "待指派/紧急单不再默认置顶"。
+        const collabSorter = UnifyHelpers.attachTableSort({
+            tableSelector: '#collabListTable',
+            fieldTypes: SORT_FIELD_TYPES,
+            statusOrder: STATUS_SORT_ORDER,
+            labelMaps: { target_db_connection_id: () => targetDbMap },
+            getList: collabSortableList,
+            render: renderList,
+            defaultSort: { field: 'id', dir: 'desc' },
+            pagination: { containerSelector: '#collabPagination' },
+        });
 
         // ===== 详情弹窗（v2.0 Deploy 2 框架）=====
         // Deploy 2 覆盖：任务信息 + 通知区块（钉钉按钮接通在 5/12）
@@ -2054,6 +2001,10 @@
         function restoreDetailIfHidden() { syncDrawerInert(); }
 
         function closeDetailModal() {
+            // 停点⑦收口：拉群 confirm 确定→请求落地的异步窗口期（_drawerForceLock=true），抽屉锁定，
+            //   所有关闭路径统一不生效——X 按钮 / footer 关闭按钮 / 遮罩点击均走此函数，故此守卫一处生效三处。
+            //   与 syncDrawerInert 的锁语义保持一致（该函数也读 _drawerForceLock 决定 inert）。
+            if (_drawerForceLock) return;
             document.getElementById('detailDrawer').classList.remove('open');
             document.getElementById('detailDrawerOverlay').classList.remove('open');
             syncDrawerInert();  // 抽屉关闭 → 无 open → inert 锁（补回旧版 display:none 的焦点逐出，修 ultracode HIGH#1 方向）
@@ -2195,7 +2146,7 @@
 
             const actionButtons = d.status === 'EXPORTING' ? `
                 <div class="action-buttons">
-                    <button class="btn-notify-direct" onclick="triggerNotify(${safeId})">📨 通知数据导出人</button>
+                    <button class="u-btn-secondary u-nb-btn" onclick="triggerNotify(${safeId})">通知数据导出人</button>
                     <button class="btn-reassign" onclick="openAdminDirectReassignModal(${safeId})">🔄 改派接收人</button>
                     <button class="btn-fallback" onclick="openAdminDirectFallbackModal(${safeId})">↩️ 切回流转模式</button>
                 </div>` : '';
@@ -2245,19 +2196,19 @@
             const readPart = d.done_read_at
                 ? `<span style="color:#16a34a">📖 ${requesterName} 已读 · 于 ${fmtDate(d.done_read_at)}</span>`
                 : `<span id="readStatusBox_requester_done" style="color:#94a3b8"></span>
-                   <button class="notify-btn" style="margin-left:8px" onclick="checkReadStatus(${safeId}, 'requester_done')">查询已读</button>`;
+                   <button class="u-btn-secondary u-nb-btn" onclick="checkReadStatus(${safeId}, 'requester_done')">查询已读</button>`;
 
             const notifiedLine = alreadyNotified
                 ? `<div style="color:#1d4f72;margin-bottom:8px;font-size:13px;">已于 ${fmtDate(d.done_notified_at)} 通知业务方负责人 ${requesterName} 并发送数据 ${readPart}</div>`
                 : `<div style="color:#9ca3af;margin-bottom:8px;font-size:13px;">尚未通知业务方负责人</div>`;
 
-            const btnLabel = alreadyNotified ? '📨 重新通知并发送数据' : '📨 通知业务方并发送数据';
+            const btnLabel = alreadyNotified ? '重新通知并发送数据' : '通知业务方并发送数据';
 
             return `
                 <div class="requester-done-notify" style="border-top:1px dashed #d1d5db;margin-top:12px;padding-top:12px;">
                     <h4 style="margin:0 0 8px;font-size:14px;color:#374151;">📤 通知业务方 · 发送数据</h4>
                     ${notifiedLine}
-                    <button class="requester-done-notify-btn" data-collab-id="${safeId}" onclick="notifyRequesterDone(${safeId})">${btnLabel}</button>
+                    <button class="u-btn-secondary u-nb-btn" data-collab-id="${safeId}" onclick="notifyRequesterDone(${safeId})">${btnLabel}</button>
                     <div style="margin-top:6px;font-size:12px;color:#9ca3af;">将把数据文件（Excel）作为钉钉文件直接发给业务方负责人 ${requesterName} + 一条「已完成」通知</div>
                 </div>`;
         }
@@ -2307,20 +2258,20 @@
                     } else if (st === 'sent') {
                         const readPart = d.expected_read_at
                             ? `<div style="margin-top:8px;font-size:13px;color:#16a34a;">📖 ${requesterName} 已读 · 于 ${fmtDate(d.expected_read_at)}</div>`
-                            : `<button class="notify-btn" style="background:#f1f5f9;color:#475569;" onclick="checkReadStatus(${safeId}, 'expected')">查询已读状态</button>
+                            : `<button class="u-btn-secondary u-nb-btn" onclick="checkReadStatus(${safeId}, 'expected')">查询已读状态</button>
                                <div id="readStatusBox_expected" style="margin-top:8px;font-size:13px;color:#64748b;"></div>`;
                         body = `
                             <span class="notify-status-text">✅ 已于 ${fmtDate(d.expected_notified_at)} 通知 ${requesterName}·预计完成</span>
-                            <button class="notify-btn" onclick="notifyExpected(${safeId}, true)">重新通知</button>
+                            <button class="u-btn-secondary u-nb-btn" onclick="notifyExpected(${safeId}, true)">重新通知</button>
                             ${readPart}`;
                     } else if (st === 'failed') {
                         body = `
                             <span class="notify-status-text" style="color:#dc2626;">⚠️ 上次通知 ${requesterName} 失败，可重试</span>
-                            <button class="notify-btn" onclick="notifyExpected(${safeId}, false)">重新通知</button>`;
+                            <button class="u-btn-secondary u-nb-btn" onclick="notifyExpected(${safeId}, false)">重新通知</button>`;
                     } else if (st === 'not_sent') {
                         body = `
                             <span class="notify-status-text">⏳ 尚未通知 ${requesterName}·预计完成</span>
-                            <button class="notify-btn" onclick="notifyExpected(${safeId}, false)">通知需求方</button>`;
+                            <button class="u-btn-secondary u-nb-btn" onclick="notifyExpected(${safeId}, false)">通知需求方</button>`;
                     } else {
                         // L-3（codex 104）：未知枚举值显式提示，不静默降级为"尚未通知"（后端 CHECK 理论挡住，此处兜旧库迁移/脏数据）
                         body = `<span style="color:#dc2626;font-size:13px;">⚠️ 通知状态异常（${escapeHtml(String(st))}），请刷新或联系管理员</span>`;
@@ -2588,7 +2539,7 @@
                             <div class="detail-kv-label">对接人</div>
                             <div class="detail-kv-value">${escapeHtml(d.contact_person_name || '—')}</div>`;
             const devRowHtml = isAdminDirect ? '' : `
-                            <div class="detail-kv-label">指派开发</div>
+                            <div class="detail-kv-label">开发</div>
                             <div class="detail-kv-value">${devValueHtml}</div>`;
             // 阶段2 盯效率 B：开发回填预计完成「动作时刻」——从 d.logs 找最新 dev_estimate_reply.created_at
             //   （详情接口已返 d.logs 且 ORDER BY created_at DESC, id DESC，find 第一个即最新；对齐 ADMIN_SUBMIT_ON_BEHALF 取日志范式）
@@ -2922,10 +2873,10 @@
                 // 已通知：展示已读时间 / 查询已读按钮（始终可查，对接人区与开发区 readStatusBox id 隔离）
                 const readPart = readAt
                     ? `<div style="margin-top:8px;font-size:13px;color:#16a34a;">📖 ${escapeHtml(recipientName)} 已读 · 于 ${fmtDate(readAt)}</div>`
-                    : `<button class="notify-btn" style="background:#f1f5f9;color:#475569;" onclick="checkReadStatus(${d.id}, 'contact')">查询已读状态</button>
+                    : `<button class="u-btn-secondary u-nb-btn" onclick="checkReadStatus(${d.id}, 'contact')">查询已读状态</button>
                        <div id="readStatusBox_contact" style="margin-top:8px;font-size:13px;color:#64748b;"></div>`;
                 const renotifyBtn = canTrigger
-                    ? `<button class="notify-btn" onclick="triggerNotify(${d.id})">重新通知</button>`
+                    ? `<button class="u-btn-secondary u-nb-btn" onclick="triggerNotify(${d.id})">重新通知</button>`
                     : '';
                 body = `
                     <span class="notify-status-text">✅ 已于 ${fmtDate(notifiedAt)} 通知对接人 ${escapeHtml(recipientName)}</span>
@@ -2936,7 +2887,7 @@
                 body = `
                     <span class="notify-status-text">⏳ 尚未通知对接人 ${escapeHtml(recipientName)}</span>
                     ${canTrigger
-                        ? `<button class="notify-btn" onclick="triggerNotify(${d.id})">通知对接人</button>`
+                        ? `<button class="u-btn-secondary u-nb-btn" onclick="triggerNotify(${d.id})">通知对接人</button>`
                         : '<span style="color:#9ca3af;font-size:12px;">（仅管理员可触发通知）</span>'}`;
             } else {
                 // 未通知但已过 PENDING_ASSIGN（极少见：admin 没发对接人就被对接人直接 assign 了）
@@ -2963,10 +2914,10 @@
             if (notifiedAt) {
                 const readPart = readAt
                     ? `<div style="margin-top:8px;font-size:13px;color:#16a34a;">📖 ${escapeHtml(recipientName)} 已读 · 于 ${fmtDate(readAt)}</div>`
-                    : `<button class="notify-btn" style="background:#f1f5f9;color:#475569;" onclick="checkReadStatus(${d.id}, 'developer')">查询已读状态</button>
+                    : `<button class="u-btn-secondary u-nb-btn" onclick="checkReadStatus(${d.id}, 'developer')">查询已读状态</button>
                        <div id="readStatusBox_developer" style="margin-top:8px;font-size:13px;color:#64748b;"></div>`;
                 const renotifyBtn = canTrigger
-                    ? `<button class="notify-btn" onclick="triggerNotify(${d.id})">重新通知</button>`
+                    ? `<button class="u-btn-secondary u-nb-btn" onclick="triggerNotify(${d.id})">重新通知</button>`
                     : '';
                 body = `
                     <span class="notify-status-text">✅ 已于 ${fmtDate(notifiedAt)} 通知开发 ${escapeHtml(recipientName)}</span>
@@ -2976,7 +2927,7 @@
                 body = `
                     <span class="notify-status-text">⏳ 尚未通知开发 ${escapeHtml(recipientName)}</span>
                     ${canTrigger
-                        ? `<button class="notify-btn" onclick="triggerNotify(${d.id})">通知开发</button>`
+                        ? `<button class="u-btn-secondary u-nb-btn" onclick="triggerNotify(${d.id})">通知开发</button>`
                         : '<span style="color:#9ca3af;font-size:12px;">（仅管理员/本单对接人可触发通知）</span>'}`;
             } else {
                 // SUBMITTED 及之后但 notified_at 为 NULL（理论上几乎不会，因为开发要通知后才知道任务）
@@ -3895,7 +3846,7 @@
             'target_db_connection_id': { label: '目标业务库', type: 'db_select' },
             'contact_person_id': { label: '对接人', type: 'user_select' },
             'developer_id': { label: '开发人员', type: 'user_select' },
-            'deadline': { label: '截止时间', type: 'datetime' }, // v1.78.0
+            'deadline': { label: '期望完成时间', type: 'datetime' }, // v1.78.0；列名术语统一轮 2026-07-10：随列表页 v1.110.0「截止时间→期望完成时间」补齐编辑流（需求方期望口径）
         };
 
         async function openAdminFixDialog() {
@@ -3951,7 +3902,7 @@
                     }
                     inputHtml = `<select id="f_admin_fix_${field}" data-field="${field}" data-current="${currentVal != null ? currentVal : ''}"><option value="">不修改</option>${opts}</select>`;
                 } else if (meta.type === 'datetime') {
-                    // v1.78.0：截止时间 datetime-local，预填当前值（DB 空格分隔 → 控件 T 分隔，slice 到分钟）
+                    // v1.78.0：期望完成时间（原名截止时间）datetime-local，预填当前值（DB 空格分隔 → 控件 T 分隔，slice 到分钟）
                     const dtVal = currentVal ? String(currentVal).replace(' ', 'T').slice(0, 16) : '';
                     inputHtml = `<input type="datetime-local" id="f_admin_fix_${field}" data-field="${field}" data-current="${dtVal}" value="${dtVal}">`;
                 }
@@ -4059,7 +4010,7 @@
                 }
                 // v1.78.0 codex 审 low-3：改了 deadline 时软提醒 admin 手动同步（不发自动通知，沿用 admin-fix 不通知铁律）
                 const _changedDeadline = Array.isArray(data.changed_fields) && data.changed_fields.includes('deadline');
-                showToast(`✅ 修正成功（${data.changed_fields.length} 字段${data.cleared_sql_validation ? ' + 已清空 SQL 验收状态' : ''}）${_changedDeadline ? '；截止时间已修改，如需同步相关人员请用详情页「通知」按钮' : ''}`, 'success');
+                showToast(`✅ 修正成功（${data.changed_fields.length} 字段${data.cleared_sql_validation ? ' + 已清空 SQL 验收状态' : ''}）${_changedDeadline ? '；期望完成时间已修改，如需同步相关人员请用详情页「通知」按钮' : ''}`, 'success');
                 closeAdminFixModal();
                 await openDetail(id);
                 if (typeof loadList === 'function') loadList();
@@ -4695,8 +4646,11 @@
         // 通知按钮 — Deploy 2 接通钉钉通知（v2.0 §7.4 + §7.6 错误分层）
         async function triggerNotify(id) {
             // 取按钮防重复点击
-            const btns = document.querySelectorAll(`.notify-btn[onclick*="triggerNotify(${id})"]`);
-            btns.forEach(b => { b.disabled = true; b.textContent = '发送中…'; });
+            // 停点⑦收口：按钮 class 由 notify-btn 改 u-nb-btn（Commit 2），选择器同步跟随（写读同源）
+            const btns = document.querySelectorAll(`.u-nb-btn[onclick*="triggerNotify(${id})"]`);
+            // codex 收口审 LOW-1：命中集含多种文案（通知数据导出人/重新通知/重试），禁用前存原文，
+            //   finally 按原文恢复——原实现硬编码恢复"通知开发"，失败路径（不回刷 openDetail）会错改文案
+            btns.forEach(b => { b.dataset.originalText = b.textContent; b.disabled = true; b.textContent = '发送中…'; });
 
             // 清掉上次的错误框（如果有）
             const oldErr = document.getElementById('notifyErrorBox');
@@ -4733,7 +4687,7 @@
                         errBox.innerHTML = `
                             <div style="font-weight:500;color:#b91c1c">❌ ${escapeHtml(data.error || '通知失败')}${errcodePart}${errmsgPart}</div>
                             ${suggestionPart}
-                            <div style="margin-top:8px"><button class="notify-btn" onclick="triggerNotify(${id})">重试</button></div>
+                            <div style="margin-top:8px"><button class="u-btn-secondary u-nb-btn" onclick="triggerNotify(${id})">重试</button></div>
                         `;
                         notifyBody.appendChild(errBox);
                     }
@@ -4742,7 +4696,11 @@
             } catch (e) {
                 showToast('网络错误,请检查后端服务', 'error');
             } finally {
-                btns.forEach(b => { b.disabled = false; b.textContent = b.textContent.replace('发送中…', '通知开发'); });
+                // 按存储原文恢复（成功路径 openDetail 已重渲染、旧节点 detach，恢复无害；失败路径按原文准确恢复）
+                btns.forEach(b => {
+                    b.disabled = false;
+                    if (b.dataset.originalText) { b.textContent = b.dataset.originalText; delete b.dataset.originalText; }
+                });
             }
         }
 
@@ -4750,7 +4708,8 @@
         //   M-3 防双击：提交中禁用按钮；codex 53 M-3 强约束：按 json.success 判断（非 res.ok），
         //     因部分失败返 HTTP 200 + success:false，绝不能只看 HTTP 状态（防交付假阳性）
         async function notifyRequesterDone(id) {
-            const btn = document.querySelector(`.requester-done-notify-btn[data-collab-id="${id}"]`);
+            // 停点⑦收口：按钮 class 由 requester-done-notify-btn（无 CSS 定义，纯 JS 选择器钩子）改 u-nb-btn，选择器跟随
+            const btn = document.querySelector(`.u-nb-btn[data-collab-id="${id}"]`);
             const originalText = btn ? btn.textContent : '';
             if (btn) { btn.disabled = true; btn.textContent = '发送中…'; }
             try {
@@ -4928,7 +4887,8 @@
         //   强约束：以 json.success===true 为唯一成功条件（部分失败可能 HTTP 200/4xx + success:false）。
         async function notifyExpected(id, forceResend) {
             if (forceResend && !confirm('确认重新通知需求方（预计完成时间）？将以本次为最新一次通知，旧已读记录清除。')) return;
-            const btns = document.querySelectorAll(`.notify-btn[onclick*="notifyExpected(${id},"]`);
+            // 停点⑦收口：按钮 class 由 notify-btn 改 u-nb-btn（Commit 2），选择器同步跟随（写读同源）
+            const btns = document.querySelectorAll(`.u-nb-btn[onclick*="notifyExpected(${id},"]`);
             btns.forEach(b => { b.disabled = true; });
             try {
                 const res = await fetch(`/api/collab/requests/${id}/notify-expected`, {
@@ -5710,7 +5670,7 @@
                 const sourceLabel = ({
                     admin_supplemental_attachment: '取自 admin 补传附件时间',
                     dev_last_active_attachment: '取自开发最后一次有效提交时间',
-                    deadline: '取自要求完成时间',
+                    deadline: '取自期望完成时间',
                     now: '取自当前时间'
                 })[data.done_at_source] || data.done_at_source;
                 const uploadHint = data.admin_uploaded_count > 0
@@ -5799,10 +5759,16 @@
             if (!ok) return;  // 取消：抽屉本就未锁（confirm 前不再预锁），无需 restore
 
             _drawerForceLock = true; syncDrawerInert();  // 确定后到请求落地：锁抽屉
+            // codex 收口审 MED-1：authFetch 是裸 fetch 无超时——请求悬挂时 Promise 不 settle、finally 不执行，
+            //   forceLock 永久锁死三条关闭路径（遮罩/X/footer），用户只能刷新。加 AbortController 30s 保险丝：
+            //   abort → fetch reject(AbortError) → catch/finally 必执行 → 解锁。后端有已建群幂等判断，超时后重试安全。
+            const chatAbort = new AbortController();
+            const chatTimeout = setTimeout(() => chatAbort.abort(), 30000);
             try {
                 const res = await authFetch(`/api/collab/requests/${id}/create-chat`, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' }
+                    headers: { 'Content-Type': 'application/json' },
+                    signal: chatAbort.signal
                 });
                 if (!res) return;
                 const data = await res.json();
@@ -5814,9 +5780,12 @@
                 // 刷新详情，按钮变成"已建群"状态（openDetail 会回刷并显示 detailDrawer 抽屉，并清 forceLock）
                 if (typeof openDetail === 'function') await openDetail(id);
             } catch (e) {
-                showToast('网络错误', 'error');
+                showToast(e && e.name === 'AbortError'
+                    ? '拉群请求超时（30秒）已中止，请到钉钉确认群是否已建，未建可重试'
+                    : '网络错误', 'error');
             } finally {
-                _drawerForceLock = false; syncDrawerInert();  // 无论成功/失败/网络错误，解锁抽屉
+                clearTimeout(chatTimeout);
+                _drawerForceLock = false; syncDrawerInert();  // 无论成功/失败/超时/网络错误，解锁抽屉
             }
         }
 
@@ -5862,8 +5831,9 @@
             await loadTargetDbMap();
             await loadList();
 
-            // v1.72.1：表头排序初始化（loadList 后绑定，targetDbMap 已加载用于 targetDb 列排序）
-            initListSorting();
+            // v1.72.1：表头排序初始化（loadList 后绑定，targetDbMap 已加载用于 labelMap 列排序）
+            // 前端统一：升级为共享层 UnifyHelpers.attachTableSort（collabSorter，见文件上方定义）
+            collabSorter.init();
 
             // 根据角色调整导航栏（viewer 隐藏工作台/任务池）
             if (typeof adjustNavbarForRole === 'function') {

@@ -18,6 +18,7 @@ const collabVersioning = require('./utils/collab-attachment-versioning');
 const collabSubmitHelpers = require('./utils/collab-submit-helpers');
 const { mapMysqlColumnToSqlServer } = require('./utils/mysql-type-mapper'); // v1.88.0：MySQL 源(HRD) → SQL Server 目标 类型映射
 const { buildMysqlSourceCount, buildMysqlSourcePk, splitMysqlTable } = require('./utils/mysql-source-introspect'); // ODS 验收·MySQL 源行数对比 / 反查源主键
+const efficiencyStats = require('./utils/efficiency-stats'); // 统计中心·效率统计 纯计算 helper（与 verify-statistics-efficiency.js 同源）
 
 const app = express();
 const PORT = parseInt(process.env.PORT || '3000');
@@ -10377,6 +10378,89 @@ app.get('/api/statistics/hours', authenticateToken, (req, res) => {
             onTimeRate
         });
     });
+});
+
+// ==================== 统计中心·效率统计 API（v1.0） ====================
+// 方案：docs/local/统计中心/统计中心效率统计_方案_20260710_v1.0.md
+// 从建单到最终归档，四业务模块（数据修正/数据开发/数据协作/系统迭代）分阶段耗时统计，评估处理效率。
+// 阶段计算 + DB Loader + 聚合逻辑全部抽到 utils/efficiency-stats.js（依赖注入 dbAllAsync/dbGetAsync，
+// 不碰全局 db），与独立验证脚本 scripts/verify-statistics-efficiency.js 共用同一份代码——
+// 两边跑的是完全相同的查询 + 计算逻辑，端点这里只做"接参数、调 helper、拼响应"。
+//
+// 编码前置核实（方案要求，详见 utils/efficiency-stats.js 文件头注释 + 提交报告）：4 模块状态值全集/
+// 历史表语义与方案映射表逐一核实，collab④收尾归档改用 archived_final_at（非方案原文 archived_at）、
+// sys 改用 sys_issues 直接时间戳列（非方案原文 sys_issue_timeline），均为编码期核实后的修正。
+
+// codex 审（统计中心轮 LOW-1）：days 严格校验——resolveStatsDateRange 对 days=abc/0/-1 会静默退化
+//   为不限时间、days=30abc 被 parseInt 截成 30；效率统计两端点入口白名单校验（30|90|all），非法 400。
+//   校验放端点侧不动 resolveStatsDateRange（老 /api/statistics/* 端点共用该函数，D3 不动老端点行为）。
+const EFFICIENCY_ALLOWED_DAYS = new Set(['30', '90', 'all']);
+function validateEfficiencyDays(req, res) {
+    const d = req.query.days === undefined ? '90' : String(req.query.days);
+    if (!EFFICIENCY_ALLOWED_DAYS.has(d)) {
+        res.status(400).json({ error: `无效的时间范围：${d}（仅支持 30/90/all）`, code: 'INVALID_DAYS' });
+        return null;
+    }
+    req.query.days = d;   // 归一化（含缺省补 90，与前端默认一致）
+    return d;
+}
+
+// 6.7 效率统计聚合（四模块 阶段中位/均值/样本数 + 计数卡 + 总周期月度趋势）
+app.get('/api/statistics/efficiency', authenticateToken, async (req, res) => {
+    try {
+        if (validateEfficiencyDays(req, res) === null) return;
+        const { startDate, endDate } = resolveStatsDateRange(req.query);
+        const nowIso = await efficiencyStats.getDbNowLocal(dbGetAsync);
+
+        const moduleKeys = Object.keys(efficiencyStats.EFFICIENCY_MODULES);
+        const perModuleRecords = {};
+        for (const key of moduleKeys) {
+            perModuleRecords[key] = await efficiencyStats.EFFICIENCY_LOADERS[key](dbAllAsync, startDate, endDate, nowIso);
+        }
+
+        const modules = moduleKeys.map((key) => efficiencyStats.summarizeModule(key, perModuleRecords[key]));
+        const trend = efficiencyStats.buildTrend(perModuleRecords, moduleKeys);
+
+        res.json({ days: req.query.days || '90', modules, trend });
+    } catch (err) {
+        logger.error('效率统计聚合查询失败:', err);
+        res.status(500).json({ error: '查询失败' });
+    }
+});
+
+// 6.8 效率统计明细下钻（单模块，逐单分阶段耗时）
+app.get('/api/statistics/efficiency/detail', authenticateToken, async (req, res) => {
+    try {
+        if (validateEfficiencyDays(req, res) === null) return;
+        const moduleKey = req.query.module;
+        if (!efficiencyStats.EFFICIENCY_LOADERS[moduleKey]) {
+            return res.status(400).json({ error: `无效的模块：${moduleKey}`, code: 'INVALID_MODULE' });
+        }
+        const { startDate, endDate } = resolveStatsDateRange(req.query);
+        const nowIso = await efficiencyStats.getDbNowLocal(dbGetAsync);
+        const records = await efficiencyStats.EFFICIENCY_LOADERS[moduleKey](dbAllAsync, startDate, endDate, nowIso);
+        const meta = efficiencyStats.EFFICIENCY_MODULES[moduleKey];
+
+        res.json({
+            module: moduleKey,
+            label: meta.label,
+            stages: meta.stages,
+            rows: records.map((r) => ({
+                id: r.id,
+                title: r.title,
+                created_at: r.created_at,
+                status: r.status,
+                status_group: r.statusGroup,
+                type: r.type,
+                // loader 内部全程 raw 浮点（三段可加性不变量要求），round1 只在序列化出口做
+                stage_hours: r.stageHours.map((v) => efficiencyStats.round1(v)),
+                total_hours: efficiencyStats.round1(r.totalHours),
+            })),
+        });
+    } catch (err) {
+        logger.error('效率统计明细查询失败:', err);
+        res.status(500).json({ error: '查询失败' });
+    }
 });
 
 // ==================== 文档评论 API ====================

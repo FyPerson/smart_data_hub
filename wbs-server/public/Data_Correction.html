@@ -7,7 +7,7 @@
     <title>数据修正 - 智数协同平台</title>
     <link rel="icon" href="data:,">
     <link rel="stylesheet" href="assets/css/style.css?v=v1.102.1_nav">
-    <link rel="stylesheet" href="assets/css/components.css?v=v1.110.0_unify">
+    <link rel="stylesheet" href="assets/css/components.css?v=v1.110.4_unify">
     <style>
         /* ===== 页面专属残留（共享组件层已迁移至 assets/css/components.css；style污染根治 B 方案
            20260709 v1.1 后共享根类均带 u- 前缀，不再依赖 .unified-page 作用域门控，仅作迁移标记/覆盖钩子）===== */
@@ -118,7 +118,7 @@
         <div class="nav-right">
             <a href="/Task_Pool.html" class="nav-item">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
-                任务池
+                数仓任务池
             </a>
             <a href="/Data_Collab.html" class="nav-item">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
@@ -126,7 +126,7 @@
             </a>
             <a href="/Issue_Tracker.html" class="nav-item">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-                需求跟踪
+                数据开发
             </a>
             <a href="/Data_Correction.html" class="nav-item" style="color:#d97706; font-weight:600;">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
@@ -138,10 +138,6 @@
                 <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
             </svg>
                 系统迭代
-            </a>
-            <a href="/My_Workspace.html" class="nav-item">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
-                我的工作台
             </a>
             <div class="nav-dropdown">
                 <button class="nav-dropdown-trigger">
@@ -223,29 +219,33 @@
             </button>
         </div>
 
-        <!-- 列表 -->
+        <!-- 列表（前端统一：表头挂 u-sortable 接块级排序——分组聚类树结构见 clusterItems()，排序只改
+             "组出现的先后顺序"，组内成员/连接线/徽章相对结构不变，见下方 JS 注释） -->
         <div class="u-corr-table-wrap">
-            <table class="u-corr-table">
+            <table class="u-corr-table" id="correctionListTable">
                 <thead>
                     <tr>
-                        <th style="width:1%; white-space:nowrap;">ID</th>
-                        <th style="width:110px;">OA 流程号</th>
-                        <th style="width:90px;">流程类型</th>
-                        <th style="width:90px;">状态</th>
-                        <th style="width:64px;">类型</th>
-                        <th style="width:72px;">修正条数</th>
-                        <th style="width:110px;">所属系统</th>
-                        <th style="min-width:220px;">修正方式</th>
-                        <th style="width:110px;">业务方</th>
-                        <th style="width:100px;">指派开发</th>
-                        <th style="width:90px;">创建人</th>
-                        <th style="width:64px;">提交次数</th>
-                        <th style="width:160px;">创建时间</th>
+                        <th style="width:1%; white-space:nowrap;" class="u-sortable" data-sort-by="id">ID<span class="u-sort-icon">⇅</span></th>
+                        <th style="width:110px;" class="u-sortable" data-sort-by="oa_number">OA 流程号<span class="u-sort-icon">⇅</span></th>
+                        <th style="width:90px;" class="u-sortable" data-sort-by="process_type">流程类型<span class="u-sort-icon">⇅</span></th>
+                        <th style="width:90px;" class="u-sortable" data-sort-by="status">状态<span class="u-sort-icon">⇅</span></th>
+                        <th style="width:64px;" class="u-sortable" data-sort-by="correction_type">类型<span class="u-sort-icon">⇅</span></th>
+                        <th style="width:72px;" class="u-sortable" data-sort-by="correction_count">修正条数<span class="u-sort-icon">⇅</span></th>
+                        <th style="width:110px;" class="u-sortable" data-sort-by="source_system">所属系统<span class="u-sort-icon">⇅</span></th>
+                        <th style="min-width:220px;" class="u-sortable" data-sort-by="location_info">修正方式<span class="u-sort-icon">⇅</span></th>
+                        <th style="width:110px;" class="u-sortable" data-sort-by="requester_name">业务方<span class="u-sort-icon">⇅</span></th>
+                        <th style="width:100px;" class="u-sortable" data-sort-by="assigned_to_name">开发<span class="u-sort-icon">⇅</span></th>
+                        <th style="width:90px;" class="u-sortable" data-sort-by="created_by_name">创建人<span class="u-sort-icon">⇅</span></th>
+                        <th style="width:64px;" class="u-sortable" data-sort-by="submission_count">提交次数<span class="u-sort-icon">⇅</span></th>
+                        <th style="width:160px;" class="u-sortable" data-sort-by="created_at">创建时间<span class="u-sort-icon">⇅</span></th>
                     </tr>
                 </thead>
                 <tbody id="corrTableBody"></tbody>
             </table>
         </div>
+        <!-- 分页（前端统一 新增 A + codex 审 MED-3 块装箱）：以关联组块为最小分页单位装箱，页边界只落
+             块间不拆块（每页 ≤25 行；单块 >25 行独占一页允许超出）；"共 N 条"按可见行数计（含灰显补显行） -->
+        <div class="u-pagination" id="correctionPagination"></div>
         <div class="u-empty-state" id="emptyState" style="display:none;">
             <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#d1d5db" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
             <p>暂无数据修正单</p>
@@ -574,7 +574,7 @@
     </div>
 
     <script src="assets/js/app.js?v=v1.105.0_pf"></script>
-    <script src="assets/js/unify-helpers.js?v=v1.110.0_unify"></script>
+    <script src="assets/js/unify-helpers.js?v=v1.110.4_unify"></script>
     <script>
         // ================= 常量（与后端同源）=================
         // 拉群可选成员排除名单（§5.4，与后端 CORRECTION_CHAT_EXCLUDE_IDS 同源；只排示例只读领导A 11）
@@ -612,6 +612,7 @@
             fillSystemFilter();
             await loadUsers();
             await loadList();
+            correctionSorter.init(); // 前端统一：表头排序初始化（loadList 后绑定）
             const deepId = new URLSearchParams(window.location.search).get('id');
             if (deepId && /^\d+$/.test(deepId)) { const n = parseInt(deepId, 10); if (Number.isSafeInteger(n) && n > 0) openDrawer(n); }
         });
@@ -729,8 +730,48 @@
         //   把同 correction_group_id 的成员聚到一起（原单/主单置顶，跨系统子单 + 返工子单 缩进 flat 挂下方），
         //   组块之间按「组内最新 id」降序（保留"新在上"直觉，刚返工的组浮上来）。
         //   筛选把组根滤掉时，从全量 allItems 补显根行（灰显上下文行）保树完整（用户拍板 A）。
-        //   返回扁平数组，每项含 { it, role, isContext, isLast, hasXsys, hasRework }；role: standalone|root|xsys|rework。
-        function clusterItems(items) {
+        //   返回值（codex 审 MED-3 后改为**块数组**）：[ [row, row, ...], [row], ... ]——每块 = 该组的行数组
+        //   （保留块边界供装箱分页，页边界只落块间不拆块），行含 { it, role, isContext, isLast, hasXsys,
+        //   hasRework }；role: standalone|root|xsys|rework。
+        // 前端统一：表头排序字段类型（供块级排序用，见 clusterItems 的 sortField/sortDir 参数）。
+        //   所属系统/修正方式/业务方/开发/创建人为原始字段值排序（非展示层格式化函数 sysLabel()
+        //   的输出——"其他：XXX"这类格式化文案不参与比较，属可接受的近似，不影响可用性）。
+        const CORR_SORT_FIELD_TYPES = {
+            id: 'number',
+            oa_number: 'string',
+            process_type: 'string',
+            status: 'statusOrder',
+            correction_type: 'string',
+            correction_count: 'number',
+            source_system: 'string',
+            location_info: 'string',
+            requester_name: 'string',
+            assigned_to_name: 'string',
+            created_by_name: 'string',
+            submission_count: 'number',
+            created_at: 'date',
+        };
+        // 状态业务优先级（进行中方向：待指派/待回复 → 修正中 → 已完成待归档 → 已归档；REJECTED/VOIDED 末尾）
+        const CORR_STATUS_SORT_ORDER = {
+            PENDING_ASSIGN: 0,
+            ASSIGNED_PENDING_ESTIMATE: 1,
+            IN_PROGRESS: 2,
+            FIXED: 3,
+            REFIXED: 4,
+            ARCHIVED: 5,
+            REJECTED: 6,
+            VOIDED: 7,
+        };
+
+        // sortField/sortDir 可选：不传=原有行为（blocks 按 maxId 降序，即最新动作的组在前）。
+        //   ⚠️ 分组聚类树是本页架构现实（跨系统关联单/返工链靠左色条+缩进+连接线可视化），非本次任务
+        //   范围内可推翻重做——传入排序字段时，只重排"组出现的先后顺序"（块级排序：取每组代表行
+        //   [root 优先，无 root 时退化为该组第一行] 的字段值排序，用共享层 UnifyHelpers.sortByField
+        //   排出新的组顺序），组内成员相对顺序（xsys id 升序 / rework 链序）、连接线、徽章逻辑一律不变。
+        //   这是"排序机制升共享层"通用 attachTableSort 契约（getList→排序→render(flat)）在本页无法直接
+        //   套用的必然结果——喂入排序后的 items 数组对 clusterItems 无效（其内部固定按 maxId 求块序，
+        //   与入参顺序无关），故改为对 blocks 做块级重排，不改变 clusterItems 的分组算法本身。
+        function clusterItems(items, sortField, sortDir) {
             // L-3：建 id→行 索引，补显根用 O(1) 查找（取代 allItems.find 的 O(组数×全量)）
             const allById = new Map(allItems.map(x => [Number(x.id), x]));
             const standalone = [];           // 独立单（无组）
@@ -741,7 +782,7 @@
                 if (!groups.has(gid)) groups.set(gid, []);
                 groups.get(gid).push(it);
             });
-            const blocks = [];   // { rows:[...], maxId }
+            let blocks = [];   // { rows:[...], maxId }
             // M-1：maxId 用有限数字兜底（脏 id 不污染 blocks.sort）
             standalone.forEach(it => blocks.push({ rows: [{ it, role: 'standalone' }], maxId: Number.isFinite(Number(it.id)) ? Number(it.id) : -Infinity }));
             groups.forEach((members, gid) => {
@@ -768,15 +809,22 @@
                 const memberIds = members.map(m => Number(m.id)).filter(Number.isFinite);   // M-1：过滤非有限 id
                 blocks.push({ rows, maxId: memberIds.length ? Math.max.apply(null, memberIds) : -Infinity });
             });
-            blocks.sort((a, b) => b.maxId - a.maxId);
-            // 标记每组最后一个「子行」（└ 连接线），并扁平化
-            const flat = [];
-            blocks.forEach(block => {
+            if (sortField) {
+                const reps = blocks.map(b => (b.rows[0] ? b.rows[0].it : {}));
+                const sortedReps = UnifyHelpers.sortByField(reps, sortField, sortDir, { fieldTypes: CORR_SORT_FIELD_TYPES, statusOrder: CORR_STATUS_SORT_ORDER });
+                const blockByRep = new Map(reps.map((r, i) => [r, blocks[i]]));
+                blocks = sortedReps.map(r => blockByRep.get(r));
+            } else {
+                blocks.sort((a, b) => b.maxId - a.maxId);
+            }
+            // 标记每组最后一个「子行」（└ 连接线）；MED-3：返回块数组（每块=该组行数组）而非扁平行数组——
+            //   保留块边界供 packCorrectionPages 装箱分页，页边界只落块间，块内 root/子行/连接线渲染语义单元永不拆页。
+            return blocks.map(block => {
                 let lastChildIdx = -1;
                 block.rows.forEach((r, i) => { if (r.role === 'xsys' || r.role === 'rework') lastChildIdx = i; });
-                block.rows.forEach((r, i) => { r.isLast = (i === lastChildIdx); flat.push(r); });
+                block.rows.forEach((r, i) => { r.isLast = (i === lastChildIdx); });
+                return block.rows;
             });
-            return flat;
         }
 
         // OA 流程号归一展示（v1.99.0 三模块统一）：去 OA-/TEST-OA- 前缀取核心，再拼 OA-；空→空白（不显示裸 OA-）
@@ -795,13 +843,65 @@
             return core ? 'OA-' + core : '';
         }
 
+        // ===== 表头排序 + 分页（前端统一：共享层 UnifyHelpers）=====
+        // 本页分组聚类树（clusterItems）对"喂入排序后的 flat items"无效——块序固定按 maxId 求，与入参
+        // 顺序无关（见 clusterItems 顶部注释）。故不走 attachTableSort 的 config.pagination 组合，
+        // 只借它的表头点击状态机 + 图标同步；render 回调忽略拿到的 flat 排序结果，改用
+        // correctionSorter.getState() 读当前排序字段/方向，喂给 clusterItems 做块级排序，再把块数组
+        // 交给独立的 correctionPager 装箱分页（codex 审 MED-3，见 packCorrectionPages）。
+        // codex 审 LOW-1：defaultSort 显式传 null——本页默认序是 maxId 块序（不属于任何单列），默认态
+        // 不点亮任何表头弱指示（原先亮"ID ↓"是失真：默认实际不是按 ID 排的，误导用户）。
+        const correctionSorter = UnifyHelpers.attachTableSort({
+            tableSelector: '#correctionListTable',
+            fieldTypes: CORR_SORT_FIELD_TYPES,
+            statusOrder: CORR_STATUS_SORT_ORDER,
+            getList: () => getFilteredItems(),
+            render: buildClusteredBlocks,
+            defaultSort: null,
+        });
+
+        // codex 审 MED-3：块装箱分页——以块为最小分页单位累计装箱：装入下一块会超 pageSize 行时该块
+        //   整体进下一页（每页实际行数 ≤pageSize；单块自身 >pageSize 行时该块独占一页、允许超出，不拆块）。
+        //   返回页数组，每页已 flatten 为最终渲染行数组（attachPagination packPages 契约）。
+        //   页码按装箱结果计；页码条"共 N 条"仍按总行数计（countTotal），非块数。
+        function packCorrectionPages(blocks, pageSize) {
+            const pages = [];
+            let cur = [];
+            blocks.forEach(rows => {
+                if (cur.length > 0 && cur.length + rows.length > pageSize) { pages.push(cur); cur = []; }
+                cur = cur.concat(rows);
+            });
+            if (cur.length || !pages.length) pages.push(cur);
+            return pages;
+        }
+        const correctionPager = UnifyHelpers.attachPagination({
+            containerSelector: '#correctionPagination',
+            render: renderCorrectionRows,
+            packPages: packCorrectionPages,
+            countTotal: (blocks) => blocks.reduce((a, rows) => a + rows.length, 0),
+        });
+
+        // 外部入口保持原名 renderTable()，零改动既有调用点（筛选 onchange / loadList / debounceSearch /
+        // exclusiveBacklog / filterByGroup）。
         function renderTable() {
+            correctionSorter.render();
+        }
+
+        // attachTableSort 的 render 回调：忽略参数（generic flat 排序结果对分组树无效），读排序态做块级排序
+        function buildClusteredBlocks() {
+            const items = getFilteredItems();
+            const state = correctionSorter.getState();
+            const blocks = clusterItems(items, state.sortBy, state.sortDir);
+            correctionPager.render(blocks);
+        }
+
+        // attachPagination 的 render 回调：真正把当前页切片写入 tbody（原 renderTable 行模板部分）
+        function renderCorrectionRows(pageRows) {
             const tbody = document.getElementById('corrTableBody');
             const empty = document.getElementById('emptyState');
-            const items = getFilteredItems();
-            if (!items.length) { tbody.innerHTML = ''; empty.style.display = 'block'; return; }
+            if (!pageRows.length) { tbody.innerHTML = ''; empty.style.display = 'block'; return; }
             empty.style.display = 'none';
-            tbody.innerHTML = clusterItems(items).map(({ it, role, isContext, isLast, hasXsys, hasRework, rooted }) => {
+            tbody.innerHTML = pageRows.map(({ it, role, isContext, isLast, hasXsys, hasRework, rooted }) => {
                 const groupId = Number(it.correction_group_id), rowId = Number(it.id);
                 const reworkSeq = Number(it.rework_seq);
                 // L-2：脏 id 兜底——非有限 id 显示 '?' 且不挂 openDrawer（见下方 onclickAttr），避免 openDrawer(NaN)
@@ -1019,7 +1119,7 @@
             info += kv('OA 流程号', formatOaNo(r.oa_number) ? escapeHtml(formatOaNo(r.oa_number)) : '-');
             info += kv('流程类型', r.process_type ? escapeHtml(r.process_type) : '-');
             info += kv('提交次数', String(r.submission_count || 0));
-            info += kv('指派开发', escapeHtml(r.assigned_to_name || '未指派'));
+            info += kv('开发', escapeHtml(r.assigned_to_name || '未指派'));
             info += kv('创建人', escapeHtml(r.created_by_name || '-'));
             info += kv('期望完成（业务方参考）', escapeHtml(formatFullTime(r.expected_deadline)));
             info += kv('开发预计完成', escapeHtml(formatFullTime(r.dev_estimated_at)) + (isOverdue(r) ? ' <span class="flag-overdue">已超预计</span>' : ''));
@@ -1988,7 +2088,10 @@
                     line = `<span style="color:#9ca3af;">— 未发送钉钉通知</span>`;
                 }
             }
-            return `<div class="u-notify-row"><span class="u-nr-label">${esc(t.label)}</span><span class="u-nr-body">${line}${btns}</span></div>`;
+            // 已读显示统一（2026-07-10 用户拍板）：u-nr-body 挂稳定 id 供 queryReadStatus 就地反馈
+            //   （对齐 Data_Collab readStatusBox_<recipient> 范式；done 类多业务方逐行带 requesterId 区分）
+            const boxId = `corrReadBox_${t.key}${t.requesterId ? '_' + t.requesterId : ''}`;
+            return `<div class="u-notify-row"><span class="u-nr-label">${esc(t.label)}</span><span class="u-nr-body" id="${boxId}">${line}${btns}</span></div>`;
         }
 
         // 发送 / 重发某类钉钉通知（force=true 走重发契约 force_resend，后端清对应 read_at）
@@ -2016,20 +2119,42 @@
         }
 
         // 查询某类通知的钉钉已读状态（§2.5；查到已读会固化 read_at，刷新详情显示 📖）
+        // 已读显示统一（2026-07-10 用户拍板）：查询结果从 showToast「飘旗」改为通知行内就地反馈，
+        //   对齐 Data_Collab checkReadStatus 范式——查询中/未读/未解析/失败均写入行内 box；
+        //   已读则回刷抽屉，行内自然渲染固化的「📖 已读 · 通知于 X · 已读于 X」形态（后端已固化 read_at）。
         async function queryReadStatus(id, recipient, requesterId) {
+            const boxId = `corrReadBox_${recipient}${requesterId ? '_' + requesterId : ''}`;
+            const box = document.getElementById(boxId);
+            if (box) box.innerHTML = '<span style="color:#94a3b8">查询中…</span>';
             try {
                 let url = `/api/corrections/${id}/notify-read-status?recipient=${encodeURIComponent(recipient)}`;
                 if (recipient === 'done' && requesterId) url += `&requester_id=${requesterId}`;   // L3a 多业务方按人查已读
                 const res = await authFetch(url);
                 const data = await res.json().catch(() => ({}));
                 if (res.ok) {
-                    if (data.read) { showToast(`对方已于 ${data.read_at || '—'} 阅读`, 'success'); openDrawer(id); }
-                    else if (data.read_status === 'recipient_unresolved') showToast('收件人钉钉号未解析，暂无法确认已读', 'warning');
-                    else showToast('对方尚未阅读', 'success');
-                } else {
-                    showToast(data.error || '查询已读失败', 'error');
+                    if (data.read) {
+                        // codex 部署前快审：await 回刷后按 box 实际状态兜底（openDrawer 内部自吞异常不外抛，
+                        //   不能靠 catch）——回刷成功=box 被重渲染为固化已读态；仍停「查询中」=回刷失败，
+                        //   行内写入已读结论保证查询结果不丢
+                        try { await openDrawer(id); } catch (e) { /* openDrawer 自吞，防御性保留 */ }
+                        const boxAfter = document.getElementById(boxId);
+                        if (boxAfter && boxAfter.textContent.includes('查询中')) {
+                            boxAfter.innerHTML = `<span style="color:#059669">📖 已读 · 于 ${escapeHtml(data.read_at || '—')}（详情刷新失败，可重开抽屉）</span>`;
+                        }
+                        return;
+                    }
+                    if (!box) return;
+                    if (data.read_status === 'recipient_unresolved') {
+                        box.innerHTML = '<span style="color:#b45309">⚠️ 收件人钉钉号未解析，暂无法确认已读</span>';
+                    } else if (data.read_status === 'unread_expired') {
+                        box.innerHTML = '<span style="color:#9ca3af">⏰ 未读（已超过钉钉可查询时间）</span>';
+                    } else {
+                        box.innerHTML = '<span style="color:#d97706">👀 尚未读取</span>';
+                    }
+                } else if (box) {
+                    box.innerHTML = `<span style="color:#b91c1c">❌ ${escapeHtml(data.error || '查询已读失败')}</span>`;
                 }
-            } catch (e) { showToast('查询已读失败', 'error'); }
+            } catch (e) { if (box) box.innerHTML = '<span style="color:#b91c1c">网络错误，请检查后端</span>'; }
         }
 
         // ================= 归档 =================
