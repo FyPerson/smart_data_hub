@@ -181,7 +181,13 @@ $excludeDirs = @(
     # 生产数据库备份/（v1.69.x+ deploy-ssh.ps1 步骤 5 拉的 task_pool.db 副本）
     # 生产协作附件备份/（v1.70.1+ deploy-ssh.ps1 步骤 6 拉的 collab 附件含客户名/SQL/截图）
     # 这两个目录在源 repo 根下不能进公开镜像，否则泄漏业务真实客户名 + 数据导出 SQL
-    "生产数据库备份", "生产协作附件备份"
+    "生产数据库备份", "生产协作附件备份",
+    # 2026-07-11 安全加入（v1.111.1 部署事故根因修复）：
+    # unify-baseline/（前端统一视觉基线 PNG 截图，.gitignore 忽略·git 未跟踪·本地专用）——
+    #   截图用本地生产库数据渲染，页面上真实姓名/手机号可见；PNG 是二进制，步骤 3 文本脱敏
+    #   无法覆盖 → 一旦进公开镜像即原样泄漏 PII。⚠️ 通则：任何"渲染了真实数据的图片/二进制"
+    #   都绕过文本脱敏，必须在 robocopy 层排除（不能靠步骤 3/4）。
+    "unify-baseline"
 )
 $excludeFiles = @(
     "task_pool.db", "task_pool.db-journal",
@@ -245,6 +251,13 @@ foreach ($p in $docsToRemove) {
 if (Test-Path "$MirrorPath\mcp-bms") {
     Remove-Item "$MirrorPath\mcp-bms" -Recurse -Force
     Write-Host "  [SECURITY] removed mcp-bms/（.gitignore 本地数仓 MCP 目录·防内网 IP 泄漏）" -ForegroundColor Red
+}
+
+# 2026-07-11 安全兜底：unify-baseline 视觉基线截图（与 $excludeDirs 双重防御）——
+#   robocopy 层已排除，这里兜底删（防未来某处漏配），截图含渲染真实姓名/手机号，PNG 绕过文本脱敏。
+Get-ChildItem -Path $MirrorPath -Recurse -Directory -Filter "unify-baseline" -ErrorAction SilentlyContinue | ForEach-Object {
+    Remove-Item $_.FullName -Recurse -Force
+    Write-Host "  [SECURITY] removed $($_.FullName.Replace($MirrorPath + '\', ''))（视觉基线 PNG·防渲染真实数据泄漏）" -ForegroundColor Red
 }
 
 # 2026-05-22 兜底清除：生产备份目录（与 $excludeDirs 双重防御）

@@ -1612,6 +1612,17 @@
             return uid === devId || uid === contactId;
         }
 
+        // 通知归档态统一 §2：终态分类（archived 优先于 voided；二者互斥——archive-final 要求 archived_at IS NULL）
+        // archived = 归档锁定（status='ARCHIVED'，DONE 后 admin 主动推到的只读终态）
+        // voided = 软删除作废（archived_at 非空但 status 未变为 ARCHIVED，撤销前路径）
+        // 数据协作 DONE ≠ 终态：DONE 是"可变更完成态"（admin 可归档/开发可修正交付物），DONE 走原活跃分支
+        function collabTerminalKind(d) {
+            if (!d) return 'active';
+            if (d.status === 'ARCHIVED') return 'archived';
+            if (d.archived_at) return 'voided';
+            return 'active';
+        }
+
         function getAttachmentSource(att, collab) {
             // codex 42 L-1 采纳：加空 collab 防御，避免 helper 被未来调用方误传时抛异常
             if (!att || !collab || att.attachment_type !== 'screenshot') return 'unknown';
@@ -2055,6 +2066,9 @@
         //   附件来源：getAttachmentSource(att, d) === 'export'（反向排除法）
         function renderInsufficientEvidenceSection(d, isAdminUser) {
             if (d.status !== 'PENDING' || !d.exporter_user_id) return '';
+            // 通知归档态统一 §6 sweep：voided（软删除作废）单可能仍停留在 PENDING（archive 不改 status），
+            //   保留区块+记录，只隐藏删除这个写按钮（后端 isSoftArchived 本就无条件拒绝，此处收口前端残留按钮）
+            const isTerminal = collabTerminalKind(d) !== 'active';
             const exportFiles = (d.attachments || []).filter(
                 a => (a.status === 'active' || !a.status) && getAttachmentSource(a, d) === 'export'
             );
@@ -2075,7 +2089,7 @@
                 const safeDisplay = escapeHtml(displayName);
                 const safeType = escapeHtml(a.attachment_type);
                 const safeTime = fmtDate(a.created_at);
-                const delBtn = isAdminUser
+                const delBtn = (isAdminUser && !isTerminal)
                     ? `<button class="btn" style="margin-left:8px;padding:2px 8px;font-size:12px;background:#fef2f2;color:#dc2626;border:1px solid #fca5a5;" onclick="deleteEvidenceAttachment(${Number(a.id)})">删除</button>`
                     : '';
                 if (!built.ok) {
@@ -2144,7 +2158,10 @@
                     ? '<div style="color:#9ca3af;margin-bottom:8px;font-size:13px;">（已切回流转模式，等待 admin 指派一级负责人）</div>'
                     : '');
 
-            const actionButtons = d.status === 'EXPORTING' ? `
+            // 通知归档态统一 §6 sweep：voided（软删除作废）单可能仍停留在 EXPORTING（archive 不改 status），
+            //   保留区块（exporterLine + 改派历史只读折叠），只隐藏这 3 个写按钮（后端 archived_at 守卫本就会拒绝）
+            const isTerminal = collabTerminalKind(d) !== 'active';
+            const actionButtons = (d.status === 'EXPORTING' && !isTerminal) ? `
                 <div class="action-buttons">
                     <button class="u-btn-secondary u-nb-btn" onclick="triggerNotify(${safeId})">通知数据导出人</button>
                     <button class="btn-reassign" onclick="openAdminDirectReassignModal(${safeId})">🔄 改派接收人</button>
@@ -2172,45 +2189,96 @@
         //     且当前用户是 admin / 本单 exporter / 本单创建人（v1.77.0 创建人统一放行，两路径不切权限）
         //   已通知过（done_notified_at 非空）→ 显示已通知态 + 已读查询入口；可重发（D6）
         function renderRequesterDoneNotifySection(d, isAdminUser, currentUserId) {
-            if (d.status !== 'DONE') return '';
-            // L-1：id 必须有效正整数，异常数据不渲染（避免 notifyRequesterDone(NaN) / 请求 /NaN/...）
-            const safeId = Number(d.id);
-            if (!Number.isSafeInteger(safeId) || safeId <= 0) return '';
-            // v1.77.0：渲染前提从 hasValidExporter 改"有 active result_data"（按钮的本质=有数可发）；
-            //   开发提交路径（exporter=0）DONE 单同样有 1 active result_data，唯一性由后端 M-4 兜底
-            const hasActiveResultData = (d.attachments || []).some(
-                a => a.attachment_type === 'result_data' && (a.status === 'active' || !a.status)
-            );
-            if (!hasActiveResultData) return '';
-            const exporterId = Number(d.exporter_user_id);
-            const hasValidExporter = Number.isSafeInteger(exporterId) && exporterId > 0;
-            // 权限显隐：admin / 本单 exporter / 本单创建人（与后端守卫同条件；真闸门在后端）
-            // L-2：currentUserId 显式 Number 转换 + 校验，与 exporterId 判断风格统一
-            const uid = Number(currentUserId);
-            const isOwnExporter = hasValidExporter && Number.isSafeInteger(uid) && uid > 0 && exporterId === uid;
-            const isCreator = Number.isSafeInteger(uid) && uid > 0 && Number(d.created_by) === uid;
-            if (!isAdminUser && !isOwnExporter && !isCreator) return '';
+            // 通知归档态统一 C1 收口（实测发现的字面结构缺口，见交付报告）：
+            //   DONE 是"可变更完成态"，但 DONE 之后仍可被 admin 作废（voided，status 不变、archived_at 置位）。
+            //   若只判 d.status==='DONE' 会把"voided-at-DONE"单也算进活跃分支——轻则被内部 hasActiveResultData
+            //   门静默吞成空字符串（记录消失），重则（有 active result_data 时）真的渲染出可点击的发送/重发按钮。
+            //   加 collabTerminalKind(d)==='active' 兜底，确保终态（含 DONE 之后被作废）统一走下方终态分支。
+            if (d.status === 'DONE' && collabTerminalKind(d) === 'active') {
+                // L-1：id 必须有效正整数，异常数据不渲染（避免 notifyRequesterDone(NaN) / 请求 /NaN/...）
+                const safeId = Number(d.id);
+                if (!Number.isSafeInteger(safeId) || safeId <= 0) return '';
+                // v1.77.0：渲染前提从 hasValidExporter 改"有 active result_data"（按钮的本质=有数可发）；
+                //   开发提交路径（exporter=0）DONE 单同样有 1 active result_data，唯一性由后端 M-4 兜底
+                const hasActiveResultData = (d.attachments || []).some(
+                    a => a.attachment_type === 'result_data' && (a.status === 'active' || !a.status)
+                );
+                if (!hasActiveResultData) return '';
+                const exporterId = Number(d.exporter_user_id);
+                const hasValidExporter = Number.isSafeInteger(exporterId) && exporterId > 0;
+                // 权限显隐：admin / 本单 exporter / 本单创建人（与后端守卫同条件；真闸门在后端）
+                // L-2：currentUserId 显式 Number 转换 + 校验，与 exporterId 判断风格统一
+                const uid = Number(currentUserId);
+                const isOwnExporter = hasValidExporter && Number.isSafeInteger(uid) && uid > 0 && exporterId === uid;
+                const isCreator = Number.isSafeInteger(uid) && uid > 0 && Number(d.created_by) === uid;
+                if (!isAdminUser && !isOwnExporter && !isCreator) return '';
 
-            const requesterName = d.requester_name ? escapeHtml(d.requester_name) : '业务方负责人';
-            const alreadyNotified = !!d.done_notified_at;
-            const readPart = d.done_read_at
-                ? `<span style="color:#16a34a">📖 ${requesterName} 已读 · 于 ${fmtDate(d.done_read_at)}</span>`
-                : `<span id="readStatusBox_requester_done" style="color:#94a3b8"></span>
-                   <button class="u-btn-secondary u-nb-btn" onclick="checkReadStatus(${safeId}, 'requester_done')">查询已读</button>`;
+                const requesterName = d.requester_name ? escapeHtml(d.requester_name) : '业务方负责人';
+                const alreadyNotified = !!d.done_notified_at;
+                const readPart = d.done_read_at
+                    ? `<span style="color:#16a34a">📖 ${requesterName} 已读 · 于 ${fmtDate(d.done_read_at)}</span>`
+                    : `<span id="readStatusBox_requester_done" style="color:#94a3b8"></span>
+                       <button class="u-btn-secondary u-nb-btn" onclick="checkReadStatus(${safeId}, 'requester_done')">查询已读</button>`;
 
-            const notifiedLine = alreadyNotified
-                ? `<div style="color:#1d4f72;margin-bottom:8px;font-size:13px;">已于 ${fmtDate(d.done_notified_at)} 通知业务方负责人 ${requesterName} 并发送数据 ${readPart}</div>`
-                : `<div style="color:#9ca3af;margin-bottom:8px;font-size:13px;">尚未通知业务方负责人</div>`;
+                const notifiedLine = alreadyNotified
+                    ? `<div style="color:#1d4f72;margin-bottom:8px;font-size:13px;">已于 ${fmtDate(d.done_notified_at)} 通知业务方负责人 ${requesterName} 并发送数据 ${readPart}</div>`
+                    : `<div style="color:#9ca3af;margin-bottom:8px;font-size:13px;">尚未通知业务方负责人</div>`;
 
-            const btnLabel = alreadyNotified ? '重新通知并发送数据' : '通知业务方并发送数据';
+                const btnLabel = alreadyNotified ? '重新通知并发送数据' : '通知业务方并发送数据';
 
-            return `
-                <div class="requester-done-notify" style="border-top:1px dashed #d1d5db;margin-top:12px;padding-top:12px;">
-                    <h4 style="margin:0 0 8px;font-size:14px;color:#374151;">📤 通知业务方 · 发送数据</h4>
-                    ${notifiedLine}
-                    <button class="u-btn-secondary u-nb-btn" data-collab-id="${safeId}" onclick="notifyRequesterDone(${safeId})">${btnLabel}</button>
-                    <div style="margin-top:6px;font-size:12px;color:#9ca3af;">将把数据文件（Excel）作为钉钉文件直接发给业务方负责人 ${requesterName} + 一条「已完成」通知</div>
-                </div>`;
+                return `
+                    <div class="requester-done-notify" style="border-top:1px dashed #d1d5db;margin-top:12px;padding-top:12px;">
+                        <h4 style="margin:0 0 8px;font-size:14px;color:#374151;">📤 通知业务方 · 发送数据</h4>
+                        ${notifiedLine}
+                        <button class="u-btn-secondary u-nb-btn" data-collab-id="${safeId}" onclick="notifyRequesterDone(${safeId})">${btnLabel}</button>
+                        <div style="margin-top:6px;font-size:12px;color:#9ca3af;">将把数据文件（Excel）作为钉钉文件直接发给业务方负责人 ${requesterName} + 一条「已完成」通知</div>
+                    </div>`;
+            }
+
+            // 通知归档态统一 §5.B：终态（archived/voided）只读记录分支——无发送/重发按钮
+            if (collabTerminalKind(d) !== 'active') {
+                const safeId = Number(d.id);
+                const hasSafeId = Number.isSafeInteger(safeId) && safeId > 0;
+                // 角色可见（沿用活跃态权限门同集合）：admin / 本单 exporter / 本单创建人
+                const exporterId = Number(d.exporter_user_id);
+                const hasValidExporter = Number.isSafeInteger(exporterId) && exporterId > 0;
+                const uid = Number(currentUserId);
+                const isOwnExporter = hasValidExporter && Number.isSafeInteger(uid) && uid > 0 && exporterId === uid;
+                const isCreator = Number.isSafeInteger(uid) && uid > 0 && Number(d.created_by) === uid;
+                if (!isAdminUser && !isOwnExporter && !isCreator) return '';
+
+                const requesterName = d.requester_name ? escapeHtml(d.requester_name) : '业务方负责人';
+                const hasReadAt = d.done_read_at && !Number.isNaN(Date.parse(d.done_read_at));
+                const hasNotifiedAt = d.done_notified_at && !Number.isNaN(Date.parse(d.done_notified_at));
+
+                let recordLine;
+                if (hasReadAt) {
+                    // 优先级 1：已读
+                    const missingNotifiedNote = hasNotifiedAt ? '' : '（通知时间缺失）';
+                    recordLine = `<span style="color:#16a34a">📖 ${requesterName} 已读 · 于 ${fmtDate(d.done_read_at)}${missingNotifiedNote}</span>`;
+                } else if (hasNotifiedAt && hasSafeId && d.done_notify_message_key) {
+                    // 优先级 2：已通知 + 未读 + 有 key → 唯一保留的只读动作：查询已读
+                    recordLine = `
+                        <span style="color:#1d4f72">✅ 已于 ${fmtDate(d.done_notified_at)} 通知业务方 ${requesterName} 并发送数据</span>
+                        <span id="readStatusBox_requester_done" style="color:#94a3b8;margin-left:8px;"></span>
+                        <button class="u-btn-secondary u-nb-btn" onclick="checkReadStatus(${safeId}, 'requester_done')">查询已读</button>`;
+                } else if (hasNotifiedAt) {
+                    // 优先级 3：已通知 + 无 key（或 id 非法）→ 纯文字，不显查询
+                    recordLine = `<span style="color:#1d4f72">✅ 已通知业务方 ${requesterName}，已读状态不可查</span>`;
+                } else {
+                    // 优先级 4：从未通知
+                    recordLine = `<span style="color:#9ca3af">— 尚未通知业务方负责人 ${requesterName}</span>`;
+                }
+
+                return `
+                    <div class="requester-done-notify" style="border-top:1px dashed #d1d5db;margin-top:12px;padding-top:12px;">
+                        <h4 style="margin:0 0 8px;font-size:14px;color:#374151;">业务方·完成通知（记录）</h4>
+                        <div style="font-size:13px;">${recordLine}</div>
+                    </div>`;
+            }
+
+            // 其余（DONE 前的活跃态：PENDING_ASSIGN/PENDING/EXPORTING/SUBMITTED）：完成通知只在 DONE 起才有意义
+            return '';
         }
 
         // v1.90.0 预计完成时间·通知需求方（方案 §4）
@@ -2218,7 +2286,11 @@
         //   值的只读展示在任务信息区"开发预计完成"行（所有可见者）；本区只承载"动作"——无可用动作的角色整区不渲染。
         //   边界对齐后端：仅 PENDING 可回填/通知（后端为真闸门）；开发只回填不碰需求方沟通，通知仅建单人/admin。
         function renderExpectedEstimateSection(d, isAdminUser, currentUserId) {
-            if (d.status !== 'PENDING') return '';
+            // 通知归档态统一 C1 收口（与 renderRequesterDoneNotifySection 同一实测发现的字面结构缺口）：
+            //   只判 d.status==='PENDING' 会把"voided-at-PENDING"单（admin 在 PENDING 阶段就把单作废）也算进
+            //   活跃分支——开发本人/建单人/admin 会看到仍可点击的"回填预计完成时间"/"通知需求方"按钮。
+            //   加 collabTerminalKind(d)==='active' 兜底，确保终态统一走下方终态分支。
+            if (d.status === 'PENDING' && collabTerminalKind(d) === 'active') {
             const safeId = Number(d.id);
             if (!Number.isSafeInteger(safeId) || safeId <= 0) return '';
             const uid = Number(currentUserId);
@@ -2292,6 +2364,66 @@
                         ${notifyPart}
                     </div>
                 </div>`;
+            }
+
+            // 通知归档态统一 §5.D：终态（archived/voided）只读记录分支
+            if (collabTerminalKind(d) !== 'active') {
+                // 适用性：仅当 dev_estimated_at 存在才渲染（无预计值→该步骤未发生）
+                if (!d.dev_estimated_at) return '';
+                const safeId = Number(d.id);
+                const hasSafeId = Number.isSafeInteger(safeId) && safeId > 0;
+                const uid = Number(currentUserId);
+                const isDev = d.developer_id && Number(d.developer_id) === uid && Number(d.developer_id) !== 0;
+                const isCreator = Number.isSafeInteger(uid) && uid > 0 && Number(d.created_by) === uid;
+                if (!isDev && !isAdminUser && !isCreator) return '';  // 角色可见（沿用活跃态）
+                // 查已读按钮仅 admin/creator 可见（后端 expected read-status 对 dev 返 403）
+                const canQuery = isAdminUser || isCreator;
+
+                const requesterName = d.requester_name ? escapeHtml(d.requester_name) : '需求方';
+                const st = d.expected_notify_status || '';
+                const hasReadAt = d.expected_read_at && !Number.isNaN(Date.parse(d.expected_read_at));
+                const hasNotifiedAt = d.expected_notified_at && !Number.isNaN(Date.parse(d.expected_notified_at));
+                const hasKey = !!d.expected_notify_message_key;
+                const queryBtnHtml = (canQuery && hasSafeId)
+                    ? `<button class="u-btn-secondary u-nb-btn" onclick="checkReadStatus(${safeId}, 'expected')">查询已读状态</button>
+                       <div id="readStatusBox_expected" style="margin-top:8px;font-size:13px;color:#64748b;"></div>`
+                    : '';
+
+                let body;
+                if (st === 'sent') {
+                    if (hasReadAt) {
+                        const missingNote = hasNotifiedAt ? '' : '（通知时间缺失）';
+                        body = `<span style="color:#16a34a">📖 ${requesterName} 已读 · 于 ${fmtDate(d.expected_read_at)}${missingNote}</span>`;
+                    } else if (hasKey && hasNotifiedAt) {
+                        body = `<span class="notify-status-text">✅ 已于 ${fmtDate(d.expected_notified_at)} 通知·预计完成</span>${queryBtnHtml}`;
+                    } else if (hasKey) {
+                        body = `<span class="notify-status-text">✅ 已通知·通知时间缺失</span>${queryBtnHtml}`;
+                    } else {
+                        body = `<span class="notify-status-text">✅ 已通知，已读不可查</span>`;
+                    }
+                } else if (st === 'failed') {
+                    const anomalyNote = hasReadAt ? '·数据异常' : '';
+                    body = `<span style="color:#dc2626;">⚠️ 上次通知失败${anomalyNote}</span>`;
+                } else if (st === 'no_phone') {
+                    body = `<span style="color:#9ca3af;">— 需求方未填手机号，无法通知</span>`;
+                } else if (st === 'not_sent') {
+                    const anomalyNote = hasReadAt ? '·数据异常' : '';
+                    body = `<span style="color:#9ca3af;">— 尚未通知需求方·预计完成${anomalyNote}</span>`;
+                } else {
+                    body = `<span style="color:#dc2626;">⚠️ 通知状态异常（${escapeHtml(String(st))}）</span>`;
+                }
+
+                return `
+                    <div class="u-detail-section">
+                        <div class="detail-section-title">预计完成时间</div>
+                        <div class="detail-section-body">
+                            <div style="padding:10px 0;font-size:13px;">${body}</div>
+                        </div>
+                    </div>`;
+            }
+
+            // 其余活跃态（EXPORTING/SUBMITTED/DONE）：保持原行为不动
+            return '';
         }
 
         // v1.72.3 加载改派历史
@@ -2691,7 +2823,13 @@
 
             // --- 子区 B：开发通知 ---
             // 仅 PENDING 及之后显示；PENDING 可触发，之后只读
-            const developerBlock = (status === 'PENDING' || status === 'SUBMITTED' || status === 'DONE' || status === 'ARCHIVED')
+            // 通知归档态统一 §7 sweep（codex MED-2）：EXPORTING 阶段被作废（status 仍 EXPORTING、archived_at 置位）时，
+            //   原白名单不含 EXPORTING → 开发通知记录（✅ 已于 X 通知开发，notified_at 完整）整块消失。末尾加"终态 EXPORTING"
+            //   放行，让其渲染只读记录（renderDeveloperNotifySubsection 内 canTrigger 已含 !isTerminal → 无重发按钮）。
+            //   ⚠️ 仅在终态放行 EXPORTING——活跃 EXPORTING（collabTerminalKind==='active'）此项为 false → developerBlock 仍 ''，
+            //     活跃 EXPORTING 行为一字不变（不无条件把 EXPORTING 加进白名单）。
+            const developerBlock = (status === 'PENDING' || status === 'SUBMITTED' || status === 'DONE' || status === 'ARCHIVED'
+                || (collabTerminalKind(d) !== 'active' && status === 'EXPORTING'))
                 ? renderDeveloperNotifySubsection(d, status, isAdminUser, isContactPersonView)
                 : '';
 
@@ -2865,30 +3003,41 @@
             const readAt = d.contact_read_at;
             const recipientName = d.contact_person_name || '';
             const isPendingAssign = status === 'PENDING_ASSIGN';
-            // 触发权限：仅 PENDING_ASSIGN 且是 admin
-            const canTrigger = isPendingAssign && isAdminUser;
+            // 通知归档态统一 §7 sweep：终态（archived/voided）隐藏写按钮、保留只读记录
+            const isTerminal = collabTerminalKind(d) !== 'active';
+            // 触发权限：仅 PENDING_ASSIGN 且是 admin + 非终态（voided-at-PENDING_ASSIGN 单也收口）
+            const canTrigger = isPendingAssign && isAdminUser && !isTerminal;
+            // §0 hygiene（通知归档态统一 C1）：id 非法正整数则关闭 onclick/查询入口，仅保留纯文字记录
+            const safeId = Number(d.id);
+            const hasSafeId = Number.isSafeInteger(safeId) && safeId > 0;
+            // 日期先校验合法再 fmtDate，非法降级"—"
+            const safeNotifiedAt = (notifiedAt && !Number.isNaN(Date.parse(notifiedAt))) ? fmtDate(notifiedAt) : '—';
+            const safeReadAt = (readAt && !Number.isNaN(Date.parse(readAt))) ? fmtDate(readAt) : '—';
 
             let body;
             if (notifiedAt) {
                 // 已通知：展示已读时间 / 查询已读按钮（始终可查，对接人区与开发区 readStatusBox id 隔离）
+                // 查询按钮前提：id 合法 + 有 contact_notify_message_key（无 key 查必 400，收口降级纯文字）
                 const readPart = readAt
-                    ? `<div style="margin-top:8px;font-size:13px;color:#16a34a;">📖 ${escapeHtml(recipientName)} 已读 · 于 ${fmtDate(readAt)}</div>`
-                    : `<button class="u-btn-secondary u-nb-btn" onclick="checkReadStatus(${d.id}, 'contact')">查询已读状态</button>
-                       <div id="readStatusBox_contact" style="margin-top:8px;font-size:13px;color:#64748b;"></div>`;
-                const renotifyBtn = canTrigger
-                    ? `<button class="u-btn-secondary u-nb-btn" onclick="triggerNotify(${d.id})">重新通知</button>`
+                    ? `<div style="margin-top:8px;font-size:13px;color:#16a34a;">📖 ${escapeHtml(recipientName)} 已读 · 于 ${safeReadAt}</div>`
+                    : (hasSafeId && d.contact_notify_message_key)
+                        ? `<button class="u-btn-secondary u-nb-btn" onclick="checkReadStatus(${safeId}, 'contact')">查询已读状态</button>
+                           <div id="readStatusBox_contact" style="margin-top:8px;font-size:13px;color:#64748b;"></div>`
+                        : `<div style="margin-top:8px;font-size:13px;color:#9ca3af;">（已读状态不可查）</div>`;
+                const renotifyBtn = (canTrigger && hasSafeId)
+                    ? `<button class="u-btn-secondary u-nb-btn" onclick="triggerNotify(${safeId})">重新通知</button>`
                     : '';
                 body = `
-                    <span class="notify-status-text">✅ 已于 ${fmtDate(notifiedAt)} 通知对接人 ${escapeHtml(recipientName)}</span>
+                    <span class="notify-status-text">✅ 已于 ${safeNotifiedAt} 通知对接人 ${escapeHtml(recipientName)}</span>
                     ${renotifyBtn}
                     ${readPart}`;
             } else if (isPendingAssign) {
-                // 未通知 + 当前在 PENDING_ASSIGN：admin 可触发
+                // 未通知 + 当前在 PENDING_ASSIGN：admin 可触发（终态下不显 hint，避免对作废单误导）
                 body = `
                     <span class="notify-status-text">⏳ 尚未通知对接人 ${escapeHtml(recipientName)}</span>
-                    ${canTrigger
-                        ? `<button class="u-btn-secondary u-nb-btn" onclick="triggerNotify(${d.id})">通知对接人</button>`
-                        : '<span style="color:#9ca3af;font-size:12px;">（仅管理员可触发通知）</span>'}`;
+                    ${(canTrigger && hasSafeId)
+                        ? `<button class="u-btn-secondary u-nb-btn" onclick="triggerNotify(${safeId})">通知对接人</button>`
+                        : (isTerminal ? '' : '<span style="color:#9ca3af;font-size:12px;">（仅管理员可触发通知）</span>')}`;
             } else {
                 // 未通知但已过 PENDING_ASSIGN（极少见：admin 没发对接人就被对接人直接 assign 了）
                 body = `<span style="color:#9ca3af;font-size:13px;">— 未发送对接人钉钉通知（已跳过指派）</span>`;
@@ -2907,28 +3056,40 @@
             const readAt = d.read_at;
             const recipientName = d.developer_name || '';
             const isPending = status === 'PENDING';
-            // 触发权限：PENDING 且是 admin 或 本单对接人
-            const canTrigger = isPending && (isAdminUser || isContactPersonView);
+            // 通知归档态统一 §7 sweep：终态（archived/voided）隐藏写按钮、保留只读记录
+            const isTerminal = collabTerminalKind(d) !== 'active';
+            // 触发权限：PENDING 且是 admin 或 本单对接人 + 非终态（voided-at-PENDING 单也收口）
+            const canTrigger = isPending && (isAdminUser || isContactPersonView) && !isTerminal;
+            // §0 hygiene（通知归档态统一 C1）：id 非法正整数则关闭 onclick/查询入口，仅保留纯文字记录
+            const safeId = Number(d.id);
+            const hasSafeId = Number.isSafeInteger(safeId) && safeId > 0;
+            // 日期先校验合法再 fmtDate，非法降级"—"
+            const safeNotifiedAt = (notifiedAt && !Number.isNaN(Date.parse(notifiedAt))) ? fmtDate(notifiedAt) : '—';
+            const safeReadAt = (readAt && !Number.isNaN(Date.parse(readAt))) ? fmtDate(readAt) : '—';
 
             let body;
             if (notifiedAt) {
+                // 查询按钮前提：id 合法 + 有 notify_message_key（无 key 查必 400，收口降级纯文字）
                 const readPart = readAt
-                    ? `<div style="margin-top:8px;font-size:13px;color:#16a34a;">📖 ${escapeHtml(recipientName)} 已读 · 于 ${fmtDate(readAt)}</div>`
-                    : `<button class="u-btn-secondary u-nb-btn" onclick="checkReadStatus(${d.id}, 'developer')">查询已读状态</button>
-                       <div id="readStatusBox_developer" style="margin-top:8px;font-size:13px;color:#64748b;"></div>`;
-                const renotifyBtn = canTrigger
-                    ? `<button class="u-btn-secondary u-nb-btn" onclick="triggerNotify(${d.id})">重新通知</button>`
+                    ? `<div style="margin-top:8px;font-size:13px;color:#16a34a;">📖 ${escapeHtml(recipientName)} 已读 · 于 ${safeReadAt}</div>`
+                    : (hasSafeId && d.notify_message_key)
+                        ? `<button class="u-btn-secondary u-nb-btn" onclick="checkReadStatus(${safeId}, 'developer')">查询已读状态</button>
+                           <div id="readStatusBox_developer" style="margin-top:8px;font-size:13px;color:#64748b;"></div>`
+                        : `<div style="margin-top:8px;font-size:13px;color:#9ca3af;">（已读状态不可查）</div>`;
+                const renotifyBtn = (canTrigger && hasSafeId)
+                    ? `<button class="u-btn-secondary u-nb-btn" onclick="triggerNotify(${safeId})">重新通知</button>`
                     : '';
                 body = `
-                    <span class="notify-status-text">✅ 已于 ${fmtDate(notifiedAt)} 通知开发 ${escapeHtml(recipientName)}</span>
+                    <span class="notify-status-text">✅ 已于 ${safeNotifiedAt} 通知开发 ${escapeHtml(recipientName)}</span>
                     ${renotifyBtn}
                     ${readPart}`;
             } else if (isPending) {
+                // 终态下不显 hint，避免对作废单误导
                 body = `
                     <span class="notify-status-text">⏳ 尚未通知开发 ${escapeHtml(recipientName)}</span>
-                    ${canTrigger
-                        ? `<button class="u-btn-secondary u-nb-btn" onclick="triggerNotify(${d.id})">通知开发</button>`
-                        : '<span style="color:#9ca3af;font-size:12px;">（仅管理员/本单对接人可触发通知）</span>'}`;
+                    ${(canTrigger && hasSafeId)
+                        ? `<button class="u-btn-secondary u-nb-btn" onclick="triggerNotify(${safeId})">通知开发</button>`
+                        : (isTerminal ? '' : '<span style="color:#9ca3af;font-size:12px;">（仅管理员/本单对接人可触发通知）</span>')}`;
             } else {
                 // SUBMITTED 及之后但 notified_at 为 NULL（理论上几乎不会，因为开发要通知后才知道任务）
                 body = `<span style="color:#9ca3af;font-size:13px;">— 未发送开发钉钉通知</span>`;
@@ -2961,9 +3122,41 @@
         //   contact/dev 通知是"始终可见 + 按权限显隐按钮"语义；数据导出人通知是"按权限显隐整个子区"语义（M-4 重过改判的核心区别）
         //   原因：forward 比"通知"更接近业务动作（转交任务）而非"提醒"，对无权限用户而言不存在期待入口
         function renderExporterNotifySubsection(d, status, isAdminUser, currentUserId) {
-            // 终态短路：ARCHIVED / 软删除 一律不显示（与 footer decideFooterButtons 短路一致）
-            if (status === 'ARCHIVED') return '';
-            if (d.archived_at) return '';
+            // 通知归档态统一 §5.C：终态（archived/voided）只读记录分支——放在 PENDING_ASSIGN 短路之前
+            //   角色可见【关键】：不能用 canForwardToExporter（内含 status==='PENDING' 门，终态必返 false 会把记录藏掉）；
+            //   改用解耦 status 的 forward 圈成员判据（admin / 本单 dev / 本单 contact_person）
+            if (collabTerminalKind(d) !== 'active') {
+                const uidF = Number(currentUserId);
+                const inFwdCircle = isAdminUser ||
+                    (Number.isSafeInteger(uidF) && uidF > 0 &&
+                     (uidF === (Number(d.developer_id) || 0) || uidF === (Number(d.contact_person_id) || 0)));
+                if (!inFwdCircle) return '';   // viewer/exporter/普通 user 不可见（§4 第2层 M-9：导出人记录限 forward 圈）
+
+                // 适用性：该单走过导出转发路径（forwarded_to_exporter_at 或 exporter_user_id 存在）才渲染；直提单无此步
+                // 注（codex MED-3 复核·维持不改）：`> 0` 是"engagement 判据"非"id 合法性过滤"——exporter_user_id=0/null
+                //   在本仓库是"无导出人"既定约定（对齐 server.js 可见性 `!==0`），故直提单（无 exporter、never forwarded）
+                //   本就该不渲染导出人块，不存在"该显未转发却被藏"的合法记录。
+                const engaged = !!d.forwarded_to_exporter_at || (d.exporter_user_id != null && Number(d.exporter_user_id) > 0);
+                if (!engaged) return '';
+
+                // 转交事实源：已转发判据 = forwarded_to_exporter_at 存在（不以 status/exporter_user_id 推断已转发）
+                const exporterNameT = d.exporter_name ? escapeHtml(d.exporter_name) : '';
+                const forwardedAtT = d.forwarded_to_exporter_at;
+                const hasForwardedAt = forwardedAtT && !Number.isNaN(Date.parse(forwardedAtT));
+                let recordLineT;
+                if (hasForwardedAt && exporterNameT) {
+                    recordLineT = `<span class="notify-status-text" style="color:#475569;">✅ 已转发给信息技术部 - ${exporterNameT} · 于 ${fmtDate(forwardedAtT)}</span>`;
+                } else if (hasForwardedAt) {
+                    recordLineT = `<span class="notify-status-text" style="color:#475569;">✅ 已转发给（原导出人已不可用）· 于 ${fmtDate(forwardedAtT)}</span>`;
+                } else {
+                    recordLineT = `<span style="color:#9ca3af;">— 未转发给导出人</span>`;
+                }
+                return `
+                    <div style="padding:10px 0;border-top:1px solid #f1f5f9;">
+                        <div style="font-size:12px;color:#64748b;margin-bottom:6px;font-weight:600;">该数据支持从业务系统前端导出，请转发给相关人员</div>
+                        ${recordLineT}
+                    </div>`;
+            }
             // PENDING_ASSIGN 不显示（与开发子区一致）
             if (status === 'PENDING_ASSIGN') return '';
 
@@ -3030,7 +3223,10 @@
             // v1.67.1：判断当前用户是否为本单 developer，DONE 且非 ARCHIVED 允许删/重传交付物
             const myId = Number(getCurrentUserId());
             const isCurrentDeveloper = d.developer_id && Number(d.developer_id) === myId && Number(d.developer_id) !== 0;
-            const canModifyDelivery = isCurrentDeveloper && d.status === 'DONE';
+            // 通知归档态统一 §7 sweep（codex MED-1）：DONE 之后被作废（archived_at 置位、status 仍 DONE）也是终态，
+            //   开发本人此前仍能看到每个交付附件的"删除"+底部"🔄 重新上传交付物"两个写入口。加 collabTerminalKind==='active'
+            //   门后隐藏这两个写按钮，交付文件列表（预览/下载链接）不动——只 gate canModifyDelivery 派生的 deleteBtn/reuploadBtn。
+            const canModifyDelivery = isCurrentDeveloper && d.status === 'DONE' && collabTerminalKind(d) === 'active';
 
             const items = deliveryFiles.map(f => {
                 const typeLabel = f.attachment_type === 'result_data' ? '📊 结果数据' : '📜 SQL 脚本';
@@ -3347,6 +3543,9 @@
             const myId = Number(getCurrentUserId());
             const isContactPerson = Number(d.contact_person_id) === myId;
             const isDeveloper = d.developer_id && Number(d.developer_id) === myId && Number(d.developer_id) !== 0;
+            // 通知归档态统一 §7 sweep：终态（archived/voided）逐按钮隐藏写动作，保留所有 val-box 记录
+            //   voided 单 status 不变（仍可停在 PENDING_ASSIGN/PENDING/SUBMITTED），故 4 类写按钮需显式收口
+            const isTerminal = collabTerminalKind(d) !== 'active';
 
             // PENDING_ASSIGN 状态：对接人/admin 看到"指派开发"按钮
             if (d.status === 'PENDING_ASSIGN') {
@@ -3370,9 +3569,9 @@
                             <div class="val-box" style="background:#fff7ed;border:1px solid #fed7aa;">
                                 <div class="val-title" style="color:#9a3412;">📌 等指派开发</div>
                                 <div class="val-meta">对接人：${escapeHtml(d.contact_person_name || '—')}，请选择具体开发并指派</div>
-                                <div class="val-actions" style="margin-top:10px;">
+                                ${isTerminal ? '' : `<div class="val-actions" style="margin-top:10px;">
                                     <button class="val-btn val-btn-retry" onclick="openAssignDialog(${d.id})">指派开发</button>
-                                </div>
+                                </div>`}
                             </div>
                         </div>
                     </div>`;
@@ -3390,9 +3589,9 @@
                                 <div class="val-box" style="background:#eff6ff;border:1px solid #bfdbfe;">
                                     <div class="val-title" style="color:#1e40af;">📤 尚未提交交付物</div>
                                     <div class="val-meta">上传 SQL 脚本 + 结果数据，系统会自动跑 smoke test 验收</div>
-                                    <div class="val-actions" style="margin-top:10px;">
+                                    ${isTerminal ? '' : `<div class="val-actions" style="margin-top:10px;">
                                         <button class="val-btn val-btn-retry" onclick="openSubmitDeliveryDialog(${d.id})">上传交付物</button>
-                                    </div>
+                                    </div>`}
                                 </div>
                             </div>
                         </div>`;
@@ -3405,9 +3604,9 @@
                                 <div class="val-box" style="background:#f0fdf4;border:1px solid #bbf7d0;">
                                     <div class="val-title" style="color:#166534;">✅ 已指派给 ${escapeHtml(d.developer_name)}</div>
                                     <div class="val-meta">${d.assigned_at ? `指派于 ${fmtDate(d.assigned_at)}` : ''}${d.previous_developer_id ? ` · 上一任 ${escapeHtml(d.previous_developer_name || `user#${d.previous_developer_id}`)}` : ''}</div>
-                                    <div class="val-actions" style="margin-top:10px;">
+                                    ${isTerminal ? '' : `<div class="val-actions" style="margin-top:10px;">
                                         <button class="val-btn val-btn-bypass" onclick="openAssignDialog(${d.id}, true)">改派开发</button>
-                                    </div>
+                                    </div>`}
                                 </div>
                             </div>
                         </div>`;
@@ -3457,9 +3656,10 @@
             } else if (vs === 'failed') {
                 // v3：仅本单 developer 本人可见"重新上传"按钮（admin 不再代提交，与 §6 权限矩阵一致）
                 // admin 可见"旁路放行"按钮
-                const retryBtn = isDeveloper
+                // 通知归档态统一 §7 sweep：终态（voided-at-SUBMITTED）隐藏两个写按钮，保留"❌ 验收失败 + 错误详情"记录框
+                const retryBtn = (isDeveloper && !isTerminal)
                     ? `<button class="val-btn val-btn-retry" onclick="openRetryDialog(${d.id})">重新上传交付物</button>` : '';
-                const bypassBtn = isAdminUser
+                const bypassBtn = (isAdminUser && !isTerminal)
                     ? `<button class="val-btn val-btn-bypass" onclick="openBypassDialog(${d.id})">旁路放行</button>` : '';
                 bodyHtml = `
                     <div class="val-box val-failed-bg">
