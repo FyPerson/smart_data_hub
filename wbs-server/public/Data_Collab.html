@@ -2251,22 +2251,29 @@
                 const hasReadAt = d.done_read_at && !Number.isNaN(Date.parse(d.done_read_at));
                 const hasNotifiedAt = d.done_notified_at && !Number.isNaN(Date.parse(d.done_notified_at));
 
+                // 2026-07-12 用户反馈：与对接人/开发通知形式一致——已通知时【通知行 + 已读/查询行】两行都显，
+                //   不再"已读只显已读时间、未读只显通知时间"（原互斥单行降级矩阵会在已读态吞掉通知时间）。
                 let recordLine;
-                if (hasReadAt) {
-                    // 优先级 1：已读
-                    const missingNotifiedNote = hasNotifiedAt ? '' : '（通知时间缺失）';
-                    recordLine = `<span style="color:#16a34a">📖 ${requesterName} 已读 · 于 ${fmtDate(d.done_read_at)}${missingNotifiedNote}</span>`;
-                } else if (hasNotifiedAt && hasSafeId && d.done_notify_message_key) {
-                    // 优先级 2：已通知 + 未读 + 有 key → 唯一保留的只读动作：查询已读
-                    recordLine = `
-                        <span style="color:#1d4f72">✅ 已于 ${fmtDate(d.done_notified_at)} 通知业务方 ${requesterName} 并发送数据</span>
-                        <span id="readStatusBox_requester_done" style="color:#94a3b8;margin-left:8px;"></span>
-                        <button class="u-btn-secondary u-nb-btn" onclick="checkReadStatus(${safeId}, 'requester_done')">查询已读</button>`;
-                } else if (hasNotifiedAt) {
-                    // 优先级 3：已通知 + 无 key（或 id 非法）→ 纯文字，不显查询
-                    recordLine = `<span style="color:#1d4f72">✅ 已通知业务方 ${requesterName}，已读状态不可查</span>`;
+                if (hasNotifiedAt || hasReadAt) {
+                    // 已通知（或有已读回执证明发过）：通知行始终显（对齐 dev/contact 的 "✅ 已于 X 通知 Y"）
+                    const notifiedText = hasNotifiedAt
+                        ? `✅ 已于 ${fmtDate(d.done_notified_at)} 通知业务方 ${requesterName} 并发送数据`
+                        : `✅ 已通知业务方 ${requesterName} 并发送数据（通知时间缺失）`;
+                    let readPart;
+                    if (hasReadAt) {
+                        // 已读：通知行下方另起已读行（与 dev/contact 同形式，两个时间都在）
+                        readPart = `<div style="margin-top:8px;color:#16a34a;">📖 ${requesterName} 已读 · 于 ${fmtDate(d.done_read_at)}</div>`;
+                    } else if (hasSafeId && d.done_notify_message_key) {
+                        // 未读 + 有 key：保留只读动作查询已读
+                        readPart = `<button class="u-btn-secondary u-nb-btn" onclick="checkReadStatus(${safeId}, 'requester_done')">查询已读</button>
+                        <div id="readStatusBox_requester_done" style="margin-top:8px;color:#94a3b8;"></div>`;
+                    } else {
+                        // 无 key / id 非法：不可查
+                        readPart = `<div style="margin-top:8px;color:#9ca3af;font-size:12px;">（已读状态不可查）</div>`;
+                    }
+                    recordLine = `<span class="notify-status-text" style="color:#1d4f72;">${notifiedText}</span> ${readPart}`;
                 } else {
-                    // 优先级 4：从未通知
+                    // 从未通知
                     recordLine = `<span style="color:#9ca3af">— 尚未通知业务方负责人 ${requesterName}</span>`;
                 }
 
@@ -2391,16 +2398,21 @@
 
                 let body;
                 if (st === 'sent') {
+                    // 2026-07-12 用户反馈一致性：通知行 + 已读/查询行两行都显（对齐 dev/contact，不再已读吞通知时间）
+                    const notifiedText = hasNotifiedAt
+                        ? `✅ 已于 ${fmtDate(d.expected_notified_at)} 通知 ${requesterName}·预计完成`
+                        : `✅ 已通知 ${requesterName}·预计完成（通知时间缺失）`;
+                    let readPart = '';
                     if (hasReadAt) {
-                        const missingNote = hasNotifiedAt ? '' : '（通知时间缺失）';
-                        body = `<span style="color:#16a34a">📖 ${requesterName} 已读 · 于 ${fmtDate(d.expected_read_at)}${missingNote}</span>`;
-                    } else if (hasKey && hasNotifiedAt) {
-                        body = `<span class="notify-status-text">✅ 已于 ${fmtDate(d.expected_notified_at)} 通知·预计完成</span>${queryBtnHtml}`;
-                    } else if (hasKey) {
-                        body = `<span class="notify-status-text">✅ 已通知·通知时间缺失</span>${queryBtnHtml}`;
-                    } else {
-                        body = `<span class="notify-status-text">✅ 已通知，已读不可查</span>`;
+                        readPart = `<div style="margin-top:8px;color:#16a34a;">📖 ${requesterName} 已读 · 于 ${fmtDate(d.expected_read_at)}</div>`;
+                    } else if (canQuery && hasSafeId && hasKey) {
+                        // 未读 + 有 key + admin/creator：保留查询已读（dev 后端 403 故不给按钮）
+                        readPart = queryBtnHtml;
+                    } else if (canQuery && !hasKey) {
+                        // 无 key：仅对可查角色（admin/creator）显"不可查"；dev 不涉读态、只显通知行（codex 快审 LOW-2）
+                        readPart = `<div style="margin-top:8px;color:#9ca3af;font-size:12px;">（已读状态不可查）</div>`;
                     }
+                    body = `<span class="notify-status-text">${notifiedText}</span> ${readPart}`;
                 } else if (st === 'failed') {
                     const anomalyNote = hasReadAt ? '·数据异常' : '';
                     body = `<span style="color:#dc2626;">⚠️ 上次通知失败${anomalyNote}</span>`;

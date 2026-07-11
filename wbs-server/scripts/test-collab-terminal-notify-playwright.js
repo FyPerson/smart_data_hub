@@ -236,6 +236,22 @@ function assertBlock(html, mustInclude, mustExclude, label) {
             requester_name: '郑十一',
         });
 
+        // S10 用户反馈（2026-07-12）：终态【已读】态 业务方/预计 记录须【通知时间 + 已读时间两行都显】（对齐 dev/contact）
+        const s10 = await fx.createPendingFixture();
+        createdFixtureIds.push(s10.id);
+        await patchCollab(s10.id, {
+            status: 'ARCHIVED',
+            done_notified_at: '2026-07-09 15:00:00',
+            done_notify_message_key: 'MSGKEY-S10-DONE',
+            done_read_at: '2026-07-09 16:00:00',            // 业务方已读
+            requester_name: '陈十二',
+            dev_estimated_at: '2026-07-09 00:00:00',
+            expected_notify_status: 'sent',
+            expected_notified_at: '2026-07-09 09:00:00',
+            expected_notify_message_key: 'MSGKEY-S10-EXP',
+            expected_read_at: '2026-07-09 10:00:00',        // 需求方·预计已读
+        });
+
         const adminToken = s1.adminToken;
         const exporterToken = await fx.signAs(fx.EXPORTER_ID);
         const devToken = s6.dev1Token;  // dev1 = 示例用户B id=19，S6/S7/S8/S9 fixture 的被指派开发
@@ -248,7 +264,7 @@ function assertBlock(html, mustInclude, mustExclude, label) {
                 '✅ 已于 2026-07-02 15:00 通知业务方 张三 并发送数据',   // 业务方记录
                 '✅ 已转发给信息技术部 - 示例开发A · 于 2026-07-01 10:00',  // 导出人记录
                 '预计完成时间',                                          // 预计区块标题保留
-                '✅ 已于 2026-07-01 09:00 通知·预计完成',                // 预计记录
+                '✅ 已于 2026-07-01 09:00 通知 张三·预计完成',           // 预计记录（含需求方名·对齐活跃态 expected 分支）
                 'checkReadStatus(',                                      // 只读查询动作保留（至少 1 处）
             ], [
                 'onclick="notifyRequesterDone(',
@@ -395,8 +411,25 @@ function assertBlock(html, mustInclude, mustExclude, label) {
             expect(!admHtml.includes('>通知开发</button>') && !admHtml.includes('>重新通知</button>'), 'S9(admin)：开发通知块无通知/重新通知按钮');
         }
 
+        // ===== S10 用户反馈：终态【已读】态 通知时间 + 已读时间两行都显（对齐 dev/contact）=====
+        console.log('\n11. S10 终态已读态一致性 — 业务方/预计 记录【通知时间 + 已读时间都显】');
+        {
+            const { html, text } = await openDetailAndGetHtml(browser, adminToken, s10.id, consoleErrors);
+            assertBlock(html, [
+                '✅ 已于 2026-07-09 15:00 通知业务方 陈十二 并发送数据',   // 业务方·通知时间（已读态仍显·修复点）
+                '📖 陈十二 已读 · 于 2026-07-09 16:00',                    // 业务方·已读时间（两行都在）
+                '✅ 已于 2026-07-09 09:00 通知 陈十二·预计完成',          // 预计·通知时间（已读态仍显·修复点）
+                '📖 陈十二 已读 · 于 2026-07-09 10:00',                    // 预计·已读时间（两行都在）
+            ], [
+                'onclick="notifyRequesterDone(',
+                'onclick="notifyExpected(',
+                'onclick="openEstimateModal(',
+            ], 'S10(admin) 终态已读态一致性');
+            expect(!text.includes('NaN') && !text.includes('Invalid Date'), 'S10：无 NaN / Invalid Date');
+        }
+
         // ===== 全程 console 健康 =====
-        console.log('\n11. console 健康');
+        console.log('\n12. console 健康');
         expect(consoleErrors.length === 0,
             `全程 0 console error（实际 ${consoleErrors.length}${consoleErrors.length ? ': ' + consoleErrors.slice(0, 5).join(' | ') : ''}）`);
 
