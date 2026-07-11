@@ -1707,6 +1707,15 @@
         const bBlock = document.getElementById('siCreateAssignB');
         if (aBlock) aBlock.style.display = (mode === 'A') ? '' : 'none';
         if (bBlock) bBlock.style.display = (mode === 'B') ? '' : 'none';
+        // config-hide（§211 收尾）：needs_feasibility 仅 feature/improvement 适用 → bug/config 隐藏勾选框。
+        //   后端建单已 400 FEASIBILITY_NOT_APPLICABLE 拒非变更类；此处消前端死勾坑 + 隐藏时清勾（防 feature 勾选后切 bug 的 stale 勾选提交致 400）。
+        const nfChk = document.getElementById('f_needs_feasibility');
+        if (nfChk) {
+            const showNf = ['feature', 'improvement'].includes(typeSel.value);
+            const nfWrap = nfChk.closest('.u-form-group');
+            if (nfWrap) nfWrap.style.display = showNf ? '' : 'none';
+            if (!showNf) nfChk.checked = false;
+        }
     }
     function siOpenCreate() {
         const typeOpts = siTypeKeys();
