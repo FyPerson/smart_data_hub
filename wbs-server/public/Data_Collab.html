@@ -5021,9 +5021,9 @@
                         }
                     } else if (data.read_status === 'unread_expired') {
                         // 24h 窗口已过，钉钉不再可查（codex 53 M-2）
-                        box.innerHTML = `<span style="color:#9ca3af">⏰ ${escapeHtml(recipientName)} 未读（已超过钉钉可查询时间）</span>`;
+                        box.innerHTML = `<span style="color:#9ca3af">⏰ 未读（已超过钉钉可查询时间）</span>`;
                     } else {
-                        box.innerHTML = `<span style="color:#d97706">👀 ${escapeHtml(recipientName)} 尚未读取</span>`;
+                        box.innerHTML = `<span style="color:#d97706">👀 尚未读取</span>`;
                     }
                 } else {
                     const detail = formatReadStatusError(data, res.status, label);

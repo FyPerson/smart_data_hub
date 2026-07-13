@@ -865,13 +865,13 @@
                     const devName = escapeHtml(issue.assigned_to_name || '开发');
                     readHtml += issue.read_at
                         ? `<div style="font-size:13px; color:#16a34a;">📖 ${devName} 已读 · 于 ${escapeHtml(issue.read_at)}</div>`
-                        : `<div id="readStatusBox_${issue.id}_issue_developer" style="font-size:13px;"><button class="u-btn-secondary" style="font-size:12px; padding:4px 10px;" onclick="checkIssueReadStatus(${issue.id}, 'issue_developer')">查询开发已读</button></div>`;
+                        : `<div style="font-size:13px;"><button class="u-btn-secondary" style="font-size:12px; padding:4px 10px;" onclick="checkIssueReadStatus(${issue.id}, 'issue_developer')">查询开发已读</button><span id="readStatusBox_${issue.id}_issue_developer" class="issue-read-result" style="margin-left:6px;"></span></div>`;
                 }
                 if (issue.requester_notify_status === 'sent') {
                     const reqName = escapeHtml(issue.requester_name || '业务方');
                     readHtml += issue.requester_read_at
                         ? `<div style="font-size:13px; color:#16a34a; margin-top:4px;">📖 ${reqName} 已读 · 于 ${escapeHtml(issue.requester_read_at)}</div>`
-                        : `<div id="readStatusBox_${issue.id}_issue_requester" style="font-size:13px; margin-top:4px;"><button class="u-btn-secondary" style="font-size:12px; padding:4px 10px;" onclick="checkIssueReadStatus(${issue.id}, 'issue_requester')">查询业务方已读</button></div>`;
+                        : `<div style="font-size:13px; margin-top:4px;"><button class="u-btn-secondary" style="font-size:12px; padding:4px 10px;" onclick="checkIssueReadStatus(${issue.id}, 'issue_requester')">查询业务方已读</button><span id="readStatusBox_${issue.id}_issue_requester" class="issue-read-result" style="margin-left:6px;"></span></div>`;
                 }
                 if (readHtml) {
                     html += `<div style="margin-bottom:16px; padding:10px 14px; background:#f9fafb; border-radius:8px;">
@@ -1166,9 +1166,15 @@
                         box.innerHTML = `<span style="color:#16a34a;">📖 ${label}已读${timePart}</span>`;
                         // box 仍在 = 当前抽屉确为本单，才刷新 drawer 渲染固化的"📖 已读"形态（后端已写 read_at）
                         openDrawer(id);
+                    } else if (data.read_status === 'recipient_unresolved') {
+                        // codex M-3（2026-07-13）：后端 server.js:11676 收件人钉钉号未解析时返此，前端原缺处理会误报"尚未读取"→对齐 correction 文案
+                        box.innerHTML = `<span style="color:#b45309;">⚠️ 收件人钉钉号未解析，暂无法确认已读</span>`;
+                    } else if (data.read_status === 'unread_expired') {
+                        // 统一未读态（2026-07-13）：过期文案对齐 correction/collab（后端未返 read_status 时走下方 else）
+                        box.innerHTML = `<span style="color:#9ca3af;">⏰ 未读（已超过钉钉可查询时间）</span>`;
                     } else {
-                        box.innerHTML = `<span style="color:#d97706;">👀 ${label}尚未读取</span>`
-                            + ` <button class="u-btn-secondary" style="font-size:12px; padding:4px 10px; margin-left:6px;" onclick="checkIssueReadStatus(${id}, '${recipient}')">重查</button>`;
+                        // 去 label + 去"重查"按钮：查询按钮已常驻于结果 span 兄弟位置，可直接反复点（对齐三模块统一未读态）
+                        box.innerHTML = `<span style="color:#d97706;">👀 尚未读取</span>`;
                     }
                 } else {
                     // codex L-1：NO_MESSAGE_KEY 转明确文案（极端历史脏数据：sent 但缺消息标识）

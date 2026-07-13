@@ -71,6 +71,9 @@
         .u-notify-badge.n-failed { background: #fef2f2; color: #dc2626; }
         .u-notify-badge.n-not_sent { background: #f3f4f6; color: #6b7280; }
         .u-notify-badge.n-no_phone { background: #fffbeb; color: #b45309; }
+        /* 查询已读结果框：在 u-nr-body(flex-wrap) 内换行独占一行、右对齐通知按钮列；空时不占位（不覆盖通知时间/按钮，三模块统一未读态） */
+        .u-nr-read-result { flex-basis: 100%; text-align: right; }
+        .u-nr-read-result:empty { display: none; }
 
         /* style污染根治 B 方案（20260709 v1.1，复审新发现）：本页所有表单字段纵向间距（label→input/
            hint 间的视觉留白）改名前一直由 style.css 裸 `.form-group { display:flex; flex-direction:column;
@@ -2088,10 +2091,12 @@
                     line = `<span style="color:#9ca3af;">— 未发送钉钉通知</span>`;
                 }
             }
-            // 已读显示统一（2026-07-10 用户拍板）：u-nr-body 挂稳定 id 供 queryReadStatus 就地反馈
-            //   （对齐 Data_Collab readStatusBox_<recipient> 范式；done 类多业务方逐行带 requesterId 区分）
+            // 已读显示统一（2026-07-10；2026-07-13 修覆盖 bug）：boxId 挂在 u-nr-body 内的独立结果 span(.u-nr-read-result)，
+            //   queryReadStatus 只改结果框、保留通知时间(line)+按钮(btns)（对齐 Data_Collab 独立 box 范式；done 类多业务方逐行带 requesterId 区分）
             const boxId = `corrReadBox_${t.key}${t.requesterId ? '_' + t.requesterId : ''}`;
-            return `<div class="u-notify-row"><span class="u-nr-label">${esc(t.label)}</span><span class="u-nr-body" id="${boxId}">${line}${btns}</span></div>`;
+            // 独立结果框（.u-nr-read-result）承载查询已读反馈，id 从 u-nr-body 挪到此 span——
+            //   queryReadStatus 只改结果框，不再清掉通知时间(line)+按钮(btns)（修 2026-07-10 已读显示统一引入的覆盖 bug）。
+            return `<div class="u-notify-row"><span class="u-nr-label">${esc(t.label)}</span><span class="u-nr-body">${line}${btns}<span class="u-nr-read-result" id="${boxId}"></span></span></div>`;
         }
 
         // 发送 / 重发某类钉钉通知（force=true 走重发契约 force_resend，后端清对应 read_at）
