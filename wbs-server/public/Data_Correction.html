@@ -576,7 +576,7 @@
         </div>
     </div>
 
-    <script src="assets/js/app.js?v=v1.105.0_pf"></script>
+    <script src="assets/js/app.js?v=v1.106.0_deptshare"></script>
     <script src="assets/js/unify-helpers.js?v=v1.110.4_unify"></script>
     <script>
         // ================= 常量（与后端同源）=================
@@ -589,11 +589,12 @@
         // 对接人白名单（路线 B）——与后端 routes/corrections.js 的 CORRECTION_RELAY_USER_IDS 同源！
         //   改名单需三处同步：后端常量 + 本处 + scripts/verify-correction-relay-whitelist.js（verify 卡字面量一致）。
         const CORRECTION_RELAY_USER_IDS = [7, 13];
-        const CORRECTION_REQUESTER_DEPTS = [
-            '市场营销部', '交付运营部', '财务管理部', '人事行政部', '审计风控部', '信息技术部', '安全保卫部', '其他归口部门',
-            '董事会', '公司高管', '华北分公司', '华东分公司', '华南分公司', '华西分公司', '华中分公司', '西南分公司', '西北分公司',
-            '杭州区域', '浙北区域', '浙南区域', '示例关联方B', '示例关联方C', '示例集团关联方A', '示例关联方D', '示例海外子公司', '其他'
-        ];
+        // C4（20260714）：改引用共享常量，本地常量删除。app.js 提前加载（本文件 :579 script 标签），
+        // window.PLATFORM_REQUESTER_DEPTS 就绪先于本 <script> 块执行。
+        // 常量缺失时兜底为空数组——下拉会退化为只剩"（不指定）"一项，不阻断建单（数据修正历史上本字段就是选填，
+        // 与系统迭代模块"禁用+报错"的强防御要求不同：数据修正建单不因这一个选填字段失败而整体不可用，保持现有宽松语义，
+        // 不额外引入新的 UI 报错通路，改动面收在"删常量改引用"这一件事上）。
+        const CORRECTION_REQUESTER_DEPTS = window.PLATFORM_REQUESTER_DEPTS || [];
         const STATUS_LABELS = {
             PENDING_ASSIGN: '待指派', ASSIGNED_PENDING_ESTIMATE: '待回复预计', IN_PROGRESS: '修正中',
             FIXED: '已完成', REFIXED: '已重修', ARCHIVED: '已归档', REJECTED: '已拒绝', VOIDED: '已作废'

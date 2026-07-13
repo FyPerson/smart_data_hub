@@ -2,6 +2,15 @@
 const API_URL = window.location.protocol === 'file:'
     ? `${SERVER_URL}/api`
     : '/api';
+
+// 共享常量（C4，20260714·方案v1.2项1）：系统迭代+数据修正两模块共用的需求方部门清单。
+// 逐字取自数据修正现行常量（Data_Correction.html 改造前 CORRECTION_REQUESTER_DEPTS），不擅自增删。
+// 改这里两处引用页都会连带变化，注意回归。
+window.PLATFORM_REQUESTER_DEPTS = [
+    '市场营销部', '交付运营部', '财务管理部', '人事行政部', '审计风控部', '信息技术部', '安全保卫部', '其他归口部门',
+    '董事会', '公司高管', '华北分公司', '华东分公司', '华南分公司', '华西分公司', '华中分公司', '西南分公司', '西北分公司',
+    '杭州区域', '浙北区域', '浙南区域', '示例关联方B', '示例关联方C', '示例集团关联方A', '示例关联方D', '示例海外子公司', '其他'
+];
 let currentTaskId = null;
 let currentUser = null;  // 当前登录用户
 let selectedModelId = null; // 当前选中的模型ID（发布任务时使用）

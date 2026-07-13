@@ -99,6 +99,24 @@
         .si-flag.lineage { color: #9ca3af; font-weight: 500; }
         .si-muted { color: #9ca3af; }
 
+        /* 优先级=风险等级 口径说明 icon（C2，20260713）：建单/排期表单 label 后附可聚焦 ? 提示 */
+        .si-help { display: inline-flex; align-items: center; justify-content: center; width: 15px; height: 15px; margin-left: 4px; border-radius: 50%; background: #e2e8f0; color: #64748b; font-size: 11px; font-weight: 700; cursor: help; vertical-align: middle; }
+        .si-help:hover { background: #cbd5e1; color: #334155; }
+        .si-help:focus { outline: 2px solid #93c5fd; outline-offset: 1px; }
+
+        /* checkbox 多选行（C3，20260713）：承接原 inline display:flex 声明；checkbox 加 flex:0 0 auto+width:auto
+           覆盖共享层 .u-form-group input{width:100%} 的污染（该污染实测命中 checkbox，导致多选竖排塌陷）。
+           ⚠️ codex62 H-1 修正：撑开文本用显式类名 .si-chk-text 精确限定，不用相邻兄弟选择器"跳过纯文本节点"
+           规避徽章——CSS `+` 选择器判断相邻元素兄弟，纯文本节点不阻断匹配（已用最小实验坐实：
+           <input> #id <span class="u-type-tag"> 的 span 仍会被 input+span 命中），旧写法是错误的 CSS 机制假设，
+           加入批次那处 .u-type-tag 徽章会被误撑 flex:1（当时视觉正常只是内容长度巧合没暴露）。 */
+        .si-chk-row { display: flex; align-items: center; gap: 6px; padding: 3px 0; cursor: pointer; }
+        .si-chk-row input[type="checkbox"] { flex: 0 0 auto; width: auto; }
+        .si-chk-row .si-chk-text { flex: 1; min-width: 0; }
+        /* 加入批次多选行：沿用原 inline 的 gap:7px/padding:5px 0（单据行文字更密，保留原呼吸感，不擅自抹平差异）；
+           该处原 inline 未写 cursor:pointer，改用 .si-chk-row 基础类后附带获得该效果（良性改善·非等价迁移，codex62 L-3）。 */
+        .si-chk-row-wide { gap: 7px; padding: 5px 0; }
+
         /* 抽屉（结构风险件，禁改） */
         .si-overlay { position: fixed; inset: 0; background: rgba(15,23,42,.45); display: none; z-index: 900; }
         .si-overlay.open { display: block; }
@@ -178,6 +196,10 @@
            仅保留 `.u-form-group.inline-chk` 这条真实的"共享层未提供的复选框行内布局"页面专属扩展。 */
         .unified-page .u-form-group.inline-chk { display: flex; align-items: center; gap: 7px; }
         .unified-page .u-form-group.inline-chk label { margin-bottom: 0; }
+        /* codex62 M-1 完整文件盘点发现的第4处塌陷点（C3 同根因顺带修，20260714）：这条规则本身没覆盖
+           checkbox 宽度，被 .u-form-group input{width:100%} 污染命中（实测撑到 310px、不同行），
+           影响 fCheckbox() 通用函数（建单"需要可行性评估"等）+「拉入报障人」checkbox。 */
+        .unified-page .u-form-group.inline-chk input[type="checkbox"] { flex: 0 0 auto; width: auto; }
         .si-note-box { background: #fffbeb; border: 1px solid #fde68a; border-radius: 6px; padding: 8px 11px; color: #92400e; font-size: 12px; line-height: 1.5; margin-bottom: 14px; }
 
         /* 批次管理（Sys 专属） */
@@ -334,7 +356,7 @@
                 <select id="siFStatus" onchange="siResetStatFilterAndLoadList()"><option value="">全部状态</option></select>
                 <select id="siFSystem" onchange="siLoadList()"><option value="">全部系统</option></select>
                 <select id="siFPriority" onchange="siLoadList()">
-                    <option value="">全部优先级</option>
+                    <option value="">全部优先级（风险）</option>
                     <option value="P0">P0</option><option value="P1">P1</option>
                     <option value="P2">P2</option><option value="P3">P3</option>
                 </select>
@@ -353,11 +375,12 @@
                         <tr>
                             <th class="u-sortable" data-sort-by="id">ID<span class="u-sort-icon">⇅</span></th>
                             <th class="u-sortable" data-sort-by="type">类型<span class="u-sort-icon">⇅</span></th>
-                            <th class="u-sortable" data-sort-by="priority">优先级<span class="u-sort-icon">⇅</span></th>
+                            <th class="u-sortable" data-sort-by="priority">优先级（风险）<span class="u-sort-icon">⇅</span></th>
                             <th class="u-sortable" data-sort-by="status">状态<span class="u-sort-icon">⇅</span></th>
                             <th class="u-sortable" data-sort-by="title">标题<span class="u-sort-icon">⇅</span></th>
                             <th class="u-sortable" data-sort-by="system_name">系统 · 模块<span class="u-sort-icon">⇅</span></th>
                             <th class="u-sortable" data-sort-by="assigned_to_name">开发<span class="u-sort-icon">⇅</span></th>
+                            <th class="u-sortable" data-sort-by="created_by_name">建单人<span class="u-sort-icon">⇅</span></th>
                             <th class="u-sortable" data-sort-by="dev_estimated_at">预计完成时间<span class="u-sort-icon">⇅</span></th>
                             <th class="u-sortable" data-sort-by="created_at">创建时间<span class="u-sort-icon">⇅</span></th>
                         </tr>
@@ -404,7 +427,7 @@
         </div>
     </div>
 
-    <script src="assets/js/app.js?v=v1.105.0_pf"></script>
+    <script src="assets/js/app.js?v=v1.106.0_deptshare"></script>
     <script src="assets/js/unify-helpers.js?v=v1.110.4_unify"></script>
     <script>
     /* ============================================================
@@ -425,6 +448,14 @@
 
     // 类型中文 label（meta 不返 type label，前端映射；仅展示 meta.typeFlows 里存在的类型）
     const SI_TYPE_LABEL = { bug: 'BUG', feature: '新功能', improvement: '优化', config: '配置变更' };
+
+    // 优先级=风险等级 口径说明（C2，20260713·方案 v1.2 项3）。
+    //   SI_PRIORITY_HELP_TEXT = 纯文本口径（单一事实源）：建单/排期表单 label 的 title + aria-label + 详情徽章 title 三处共用，
+    //   避免文案多副本漂移（codex60 M-2）。文案为纯中文/全角标点、无英文双引号/&/尖括号，可安全内联进 title 属性。
+    //   若未来文案加入这些字符，需改为 HTML 属性转义后再插入。
+    const SI_PRIORITY_HELP_TEXT = '优先级即风险等级（按改动风险/影响面，命中多条取最高）：P0 高风险改动核心逻辑、可能引发生产事故/数据错误；P1 影响核心业务流程；P2 一般功能改动；P3 优化项/低风险。';
+    // fSelect label 复用（建单表单+排期表单）：可聚焦 ? 图标；title 给鼠标、aria-label 给屏幕阅读器/键盘（codex60 L-2）。
+    const SI_PRIORITY_LABEL = `优先级（风险等级） <span class="si-help" tabindex="0" role="img" aria-label="${SI_PRIORITY_HELP_TEXT}" title="${SI_PRIORITY_HELP_TEXT}">?</span>`;
 
     // 状态 → CSS 语义 key（避免中文类名；含 config 未来态前向兼容）
     const SI_STATUS_CLASS = {
@@ -686,6 +717,7 @@
         priority: 'statusOrder',
         status: 'statusOrder',
         assigned_to_name: 'string',
+        created_by_name: 'string',
         dev_estimated_at: 'date',
         created_at: 'date',
     };
@@ -717,7 +749,7 @@
     function renderSysIterationRows(list) {
         const tb = document.getElementById('siTbody');
         if (!list.length) {
-            tb.innerHTML = `<tr><td colspan="9" class="si-empty">${isAdmin() ? '暂无数据' : '暂无指派给你的单据'}</td></tr>`;
+            tb.innerHTML = `<tr><td colspan="10" class="si-empty">${isAdmin() ? '暂无数据' : '暂无指派给你的单据'}</td></tr>`;
             return;
         }
         tb.innerHTML = list.map(i => {
@@ -734,6 +766,7 @@
                 <td>${esc(i.title)}${lineage}${flags}</td>
                 <td>${esc(i.system_name)}<span class="si-muted"> · ${esc(i.module_name || '—')}</span></td>
                 <td>${i.assigned_to_name ? esc(i.assigned_to_name) : '<span class="si-muted">—</span>'}</td>
+                <td>${esc(i.created_by_name || '—')}</td>
                 <td>${i.dev_estimated_at ? esc(siFmtDT(i.dev_estimated_at)) : '<span class="si-muted">—</span>'}</td>
                 <td class="si-muted">${esc(siFmtDT(i.created_at))}</td>
             </tr>`;
@@ -775,7 +808,7 @@
         document.getElementById('siDMeta').innerHTML =
             `<span class="u-type-tag ${esc(iss.type)}">${esc(siTypeLabel(iss.type))}</span>` +
             `<span class="u-status-badge si-s-${siStatusClass(iss.status)}">${esc(iss.status)}</span>` +
-            `<span class="u-pri ${esc(iss.priority)}">${esc(iss.priority)}</span>` +
+            `<span class="u-pri ${esc(iss.priority)}" title="${SI_PRIORITY_HELP_TEXT}">${esc(iss.priority)}</span>` +
             (iss.scope_changed ? `<span class="si-flag scope">· 经历范围变更</span>` : '') +
             (iss.reopen_count ? `<span class="si-flag reopen">· 返工×${iss.reopen_count}</span>` : '') +
             (iss.blocked ? `<span class="si-flag blocked">· 受阻中</span>` : '');
@@ -1017,11 +1050,16 @@
 
     // ---- 通知区（通知改造 C4：bug 4 类手动通知+三能力；变更流仍只读三侧自动派发展示） ----
     // 通知状态文字化（对齐 Data_Correction 通知栏色彩语言：✅已通知 / 📖已读 / ⚠️失败 / —未发送）。
-    //   系统迭代通知行数据仅 status + read_at（无 notified_at），故不显通知时刻、只显已读时刻。
-    function siNotifyStatusText(status, readAt) {
+    //   通知时刻+已读时刻双显，对齐 Data_Correction 范式；notified_at 缺失时回退只显已读/已通知。
+    function siNotifyStatusText(status, readAt, notifiedAt) {
         if (status === 'sent') {
-            return readAt
-                ? `<span style="color:#059669;">📖 已读 · 于 ${esc(siFmtDT(readAt))}</span>`
+            if (readAt) {
+                return notifiedAt
+                    ? `<span style="color:#059669;">📖 已读 · 通知于 ${esc(siFmtDT(notifiedAt))} · 已读于 ${esc(siFmtDT(readAt))}</span>`
+                    : `<span style="color:#059669;">📖 已读 · 于 ${esc(siFmtDT(readAt))}</span>`;
+            }
+            return notifiedAt
+                ? `<span style="color:#059669;">✅ 已于 ${esc(siFmtDT(notifiedAt))} 通知</span>`
                 : `<span style="color:#059669;">✅ 已通知</span>`;
         }
         if (status === 'failed') return `<span style="color:#dc2626;">⚠️ 通知失败，可重试</span>`;
@@ -1029,8 +1067,8 @@
         return `<span style="color:#9ca3af;">— 未发送钉钉通知</span>`;   // not_sent / null
     }
     // 单行组装（对齐 Data_Correction .notify-row）：左标签 si-nr-label + 右内容 si-nr-body（文字状态 + 操作按钮）+ 可选提示行
-    function siNotifyRowHtml(label, status, readAt, buttonsHtml, extraNote) {
-        return `<div class="u-notify-row"><span class="u-nr-label">${label}</span><span class="u-nr-body">${siNotifyStatusText(status, readAt)}${buttonsHtml || ''}</span></div>` +
+    function siNotifyRowHtml(label, status, readAt, notifiedAt, buttonsHtml, extraNote) {
+        return `<div class="u-notify-row"><span class="u-nr-label">${label}</span><span class="u-nr-body">${siNotifyStatusText(status, readAt, notifiedAt)}${buttonsHtml || ''}</span></div>` +
             (extraNote ? `<div class="u-hint" style="margin:-2px 0 6px">${extraNote}</div>` : '');
     }
 
@@ -1052,7 +1090,7 @@
             if (canQueryRead && d.notify_status === 'sent' && d.notify_message_key) {
                 btns += `<button class="u-btn-secondary u-nb-btn" onclick="siQueryReadStatus('dev', ${d.user_id})">查询已读</button>`;
             }
-            return siNotifyRowHtml(label, d.notify_status, d.read_at, btns);
+            return siNotifyRowHtml(label, d.notify_status, d.read_at, d.notified_at, btns);
         }).join('');
     }
 
@@ -1068,7 +1106,7 @@
         if (canQueryRead && iss.relay_notify_status === 'sent' && iss.relay_notify_message_key) {
             btns += `<button class="u-btn-secondary u-nb-btn" onclick="siQueryReadStatus('relay')">查询已读</button>`;
         }
-        return siNotifyRowHtml(label, iss.relay_notify_status, iss.relay_read_at, btns);
+        return siNotifyRowHtml(label, iss.relay_notify_status, iss.relay_read_at, iss.relay_notified_at, btns);
     }
 
     // 建单人侧：权限=admin/白名单/主开发本人（notify-creator handler 内判定）；self-guard 由 siNotifyManual 内识别 skipped 淡提示。
@@ -1082,7 +1120,7 @@
         if (canQueryRead && iss.creator_notify_status === 'sent' && iss.creator_notify_message_key) {
             btns += `<button class="u-btn-secondary u-nb-btn" onclick="siQueryReadStatus('creator')">查询已读</button>`;
         }
-        return siNotifyRowHtml(label, iss.creator_notify_status, iss.creator_read_at, btns);
+        return siNotifyRowHtml(label, iss.creator_notify_status, iss.creator_read_at, iss.creator_notified_at, btns);
     }
 
     // 上线执行开发侧（release_assignee，通知改造 follow-up 2026-07-07）：仅 admin 可发（notify-release-executor: requireAdmin）；
@@ -1098,7 +1136,7 @@
         if (canQueryRead && iss.release_assignee_notify_status === 'sent' && iss.release_assignee_notify_message_key) {
             btns += `<button class="u-btn-secondary u-nb-btn" onclick="siQueryReadStatus('release_executor')">查询已读</button>`;
         }
-        return siNotifyRowHtml(label, iss.release_assignee_notify_status, iss.release_assignee_read_at, btns);
+        return siNotifyRowHtml(label, iss.release_assignee_notify_status, iss.release_assignee_read_at, iss.release_assignee_notified_at, btns);
     }
 
     // 业务方侧（byPhone 两套规则，§4.2/§6.1）：首发依赖当前 requester_phone；已发送过后重发/查已读依赖快照
@@ -1128,16 +1166,16 @@
         if (canQueryRead && iss.requester_notify_status === 'sent' && iss.requester_notify_message_key && hasSnapshot) {
             btns += `<button class="u-btn-secondary u-nb-btn" onclick="siQueryReadStatus('requester')">查询已读</button>`;
         }
-        return siNotifyRowHtml(label, iss.requester_notify_status, iss.requester_read_at, btns, extraNote);
+        return siNotifyRowHtml(label, iss.requester_notify_status, iss.requester_read_at, iss.requester_notified_at, btns, extraNote);
     }
 
     function siRenderNotify(iss, devAssignees) {
         if (iss.type !== 'bug') {
             // 变更流：只读三侧展示（自动派发，无手动按钮）——保留旧行为。
             return `<div class="u-detail-section"><h3>钉钉通知（三侧独立）</h3>
-                ${siNotifyRowHtml('开发侧（指派/改派/打回/重开）', iss.notify_status, iss.read_at, '')}
-                ${siNotifyRowHtml('需求方侧（回填预计/已上线）', iss.requester_notify_status, iss.requester_read_at, '')}
-                ${siNotifyRowHtml('建单人侧', iss.creator_notify_status, iss.creator_read_at, '')}
+                ${siNotifyRowHtml('开发侧（指派/改派/打回/重开）', iss.notify_status, iss.read_at, iss.notified_at, '')}
+                ${siNotifyRowHtml('需求方侧（回填预计/已上线）', iss.requester_notify_status, iss.requester_read_at, iss.requester_notified_at, '')}
+                ${siNotifyRowHtml('建单人侧', iss.creator_notify_status, iss.creator_read_at, iss.creator_notified_at, '')}
                 <div style="font-size:11px;color:#9ca3af;margin-top:6px">通知在各动作完成后自动派发；本页只读展示送达状态。</div>
             </div>`;
         }
@@ -1402,7 +1440,7 @@
 
     function siModalSchedule(iss) {
         siModal('排期', [
-            fSelect('priority', '优先级', ['P0', 'P1', 'P2', 'P3'], iss.priority || 'P2'),
+            fSelect('priority', SI_PRIORITY_LABEL, ['P0', 'P1', 'P2', 'P3'], iss.priority || 'P2'),
             fDate('deadline', '期望完成时间（选填）', iss.deadline || '')
         ], async v => {
             const body = { priority: v.priority };
@@ -1419,7 +1457,7 @@
     function siCollaboratorPickerHtml(preselectedIds) {
         const pre = new Set((preselectedIds || []).map(Number));
         const opts = siUsers.filter(u => u.role !== 'viewer').map(u =>
-            `<label style="display:flex;align-items:center;gap:6px;padding:3px 0;cursor:pointer"><input type="checkbox" class="si-collab-chk" value="${u.id}" ${pre.has(Number(u.id)) ? 'checked' : ''}><span>${esc(u.display_name || u.username)}</span></label>`
+            `<label class="si-chk-row"><input type="checkbox" class="si-collab-chk" value="${u.id}" ${pre.has(Number(u.id)) ? 'checked' : ''}><span class="si-chk-text">${esc(u.display_name || u.username)}</span></label>`
         ).join('');
         return `<div class="u-form-group"><label>协作开发（可多选，仅收通知不参与状态机）</label>
             <div style="max-height:150px;overflow:auto;border:1px solid #e5e7eb;border-radius:6px;padding:6px">${opts || '<span class="si-muted">无可选用户</span>'}</div>
@@ -1487,7 +1525,7 @@
         const baseNames = baseM.map(b => esc(b.display_name)).join('、') || '群主/建单人/开发/你';
         const pickerHtml = `<div class="u-form-group"><label>可选拉入成员（有手机号的系统用户，手动勾选）</label>
             <div style="max-height:150px;overflow:auto;border:1px solid #e5e7eb;border-radius:6px;padding:6px">
-              ${cand.length ? cand.map(u => `<label style="display:flex;align-items:center;gap:6px;padding:3px 0;cursor:pointer"><input type="checkbox" class="si-mp-chk" value="${u.id}"><span>${esc(u.display_name)}</span></label>`).join('') : '<span class="si-muted">无其他可选成员（无绑手机号的系统用户）</span>'}
+              ${cand.length ? cand.map(u => `<label class="si-chk-row"><input type="checkbox" class="si-mp-chk" value="${u.id}"><span class="si-chk-text">${esc(u.display_name)}</span></label>`).join('') : '<span class="si-muted">无其他可选成员（无绑手机号的系统用户）</span>'}
             </div>
             <div class="u-hint">固定入群（无需勾选）：${baseNames}</div>
           </div>
@@ -1717,6 +1755,23 @@
             if (!showNf) nfChk.checked = false;
         }
     }
+    // C4（20260714）：需求方部门下拉字段构造（共享常量 window.PLATFORM_REQUESTER_DEPTS）。
+    // 不用 fSelect：其 opts 数组假设 value===label，无法表达"（不指定）"文案与空串 value 分离。
+    // 不用 fSelectMap：其 HTML 硬编码必填红星（本页现有 5 处调用均为必填字段的既定语义），
+    //   requester_dept 是选填字段，直接复用会给用户造成"必填"的错误提示；改 fSelectMap 本身会牵动
+    //   全页其余调用点，超出本次改动范围。故手写这一个字段的 HTML，语义上更准确、改动面更小。
+    // 常量缺失（app.js 未加载/未就绪等异常情况）不静默：下拉禁用 + 固定位置可见报错，让用户知道清单没加载成功。
+    // 注：这不阻断建单——禁用态 select 的 .value 仍可被 JS 读取（固定为空串），siModal 收集器(:2258)直接读
+    //   DOM .value（非 FormData，不会跳过 disabled 控件），走到提交判断 v.requester_dept.trim() 天然 falsy 不传该字段，
+    //   等价于用户主动选"（不指定）"——选填字段的加载失败不应上升为阻断整个建单流程（codex63 M-1 收口）。
+    function siRequesterDeptFieldHtml() {
+        const depts = window.PLATFORM_REQUESTER_DEPTS;
+        if (!depts || !depts.length) {
+            return { k: 'requester_dept', html: `<div class="u-form-group"><label>需求方部门（选填）</label><select id="f_requester_dept" disabled><option value="">（不指定）</option></select><div class="u-hint" style="color:#dc2626">部门清单加载失败，请刷新页面重试</div></div>` };
+        }
+        const opts = '<option value="">（不指定）</option>' + depts.map(d => `<option value="${esc(d)}">${esc(d)}</option>`).join('');
+        return { k: 'requester_dept', html: `<div class="u-form-group"><label>需求方部门（选填）</label><select id="f_requester_dept">${opts}</select></div>` };
+    }
     function siOpenCreate() {
         const typeOpts = siTypeKeys();
         if (!typeOpts.length) { showToast('暂无可建类型', 'error'); return; }
@@ -1739,9 +1794,9 @@
             fText('title', '标题', '', true),
             fSelectMap('system_name', '所属系统', (META && META.bizSystems) || [], (META && META.bizSystems && META.bizSystems[0]) || '', null),
             fText('module_name', '模块（选填）', ''),
-            fSelect('priority', '优先级', ['P0', 'P1', 'P2', 'P3'], 'P2'),
+            fSelect('priority', SI_PRIORITY_LABEL, ['P0', 'P1', 'P2', 'P3'], 'P2'),
             fSelect('source', '来源', ['业务方', '内部', '生产故障'], '业务方'),
-            fText('requester_dept', '需求方部门（选填）', ''),
+            siRequesterDeptFieldHtml(),
             fText('requester_name', '需求方姓名（选填）', ''),
             fText('requester_phone', '需求方手机（选填，通知用）', ''),
             fDate('deadline', '期望完成时间（选填）', ''),
@@ -1749,8 +1804,18 @@
             fText('related_correction_no', '关联修正单号（选填，BUG 类用）', '', false, '软引用触发本次迭代的数据修正单（OA号/修正单ID），不联动不跳转，仅留痕'),
             { k: null, html: assignModeHtml },
             fCheckbox('needs_feasibility', '需要可行性评估（开发先评估再排期）', false),
+            { k: null, html: `<div class="u-form-group"><label>需求材料（选填，图片/PDF/Excel/Word/csv/txt/md，单个≤20MB，最多5个）</label><input type="file" id="f_sys_spec_files" multiple accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.pdf,.xlsx,.xls,.docx,.doc,.csv,.txt,.md"></div>` },
             note('建单仅 admin 可操作。新功能/优化进「待评估」，排期后指派开发；BUG 类可在此直接走 A/B 两种指派路径。')
         ], async v => {
+            // C5：文件选择在弹窗打开时快照 FileList → 数组（onConfirm 是 async，中途有 await 网络请求，
+            // 避免弹窗生命周期内 input 状态变化导致 FileList 引用失效；k:null 字段不进 v，需单独读取）
+            const specFilesInput = document.getElementById('f_sys_spec_files');
+            const selectedSpecFiles = specFilesInput ? Array.from(specFilesInput.files) : [];
+            // codex64 M-3：选文件后建单前预校验数量/大小，对齐数据协作模块既有范式（collectFilesInto 同款校验，
+            // Data_Collab.html:5176/5207）——不预校验会让明显超限的选择直到建单成功后才在上传阶段失败，白建一单。
+            if (selectedSpecFiles.length > 5) { showToast(`需求材料最多 5 个，当前选了 ${selectedSpecFiles.length} 个`, 'error'); return false; }
+            const oversizeFile = selectedSpecFiles.find(f => f.size > 20 * 1024 * 1024);
+            if (oversizeFile) { showToast(`${oversizeFile.name} 超过 20MB，请重新选择`, 'error'); return false; }
             if (!v.title.trim()) { showToast('标题必填', 'error'); return false; }
             if (!v.system_name) { showToast('所属系统必填', 'error'); return false; }
             const body = { type: v.type, title: v.title.trim(), system_name: v.system_name, source: v.source, priority: v.priority };
@@ -1784,10 +1849,34 @@
             }
             const r = await siApi('/sys-issues', { method: 'POST', body });
             if (!r.ok) { siApiErr(r); return false; }
-            let msg = '已建单 #' + (r.data && r.data.id);
-            const isWarn = !!(r.data && r.data.assign_failed);
-            if (isWarn) msg += '（自动指派失败：' + ((r.data.assign_error && r.data.assign_error.message) || '未知原因') + '，请到详情页手动指派）';
-            showToast(msg, isWarn ? 'warning' : 'success');
+            // 末次合并审65号 M-2：r.ok=true 但 r.data.id 缺失是极端场景（后端 respBody 恒含 id，理论下不可达，
+            //   仅防未来响应体结构异常）——避免拼出"已建单 #undefined"这种误导性成功文案。
+            if (!(r.data && r.data.id)) { showToast('建单响应异常（缺少单据ID），请刷新列表核对，勿重复提交', 'error'); return false; }
+            let msg = '已建单 #' + r.data.id;
+            let hasFailure = !!(r.data && r.data.assign_failed);   // codex64 M-1：改名 isWarn→hasFailure，纳入下方上传失败信号（不再只接指派失败一路）
+            if (hasFailure) msg += '（自动指派失败：' + ((r.data.assign_error && r.data.assign_error.message) || '未知原因') + '，请到详情页手动指派）';
+            // C5：建单成功后顺带上传需求材料（复刻 Data_Collab.html 朴素两步链范式：建单 JSON POST 拿 id → 独立 FormData POST 上传；
+            // 失败只拼进 msg 提示到详情页补传，不阻塞、不重试、不做状态机）。
+            // codex64 M-2：套 try/catch——authFetch(app.js) 的 fetch() 未包裹异常，真实网络异常会一路抛穿 siApi 到
+            //   siModal 外层 catch，届时建单已成功但弹窗不会关闭/列表不会刷新，用户容易误判未成功而重复点确定致重复建单；
+            //   这里把网络异常当作"上传失败"处理，保证无论上传结果如何都能走到下方关弹窗+刷新+开详情的收尾。
+            if (selectedSpecFiles.length > 0 && r.data && r.data.id) {
+                let uploadOk = false;
+                try {
+                    const specFormData = new FormData();
+                    specFormData.append('attachment_type', 'spec');
+                    selectedSpecFiles.forEach(f => specFormData.append('files', f));
+                    const uploadR = await siApi(`/sys-issues/${r.data.id}/attachments`, { method: 'POST', body: specFormData, isForm: true });
+                    uploadOk = !!(uploadR && uploadR.ok);
+                } catch (e) { console.error('[系统迭代] 建单后上传需求材料异常：', e); uploadOk = false; }
+                if (!uploadOk) {
+                    hasFailure = true;   // codex64 M-1：上传失败也置为失败态，toast 走 warning 样式（不再显示误导的绿色 success）
+                    msg += `；${selectedSpecFiles.length} 个需求材料上传失败，请到详情页补传`;
+                }
+            }
+            showToast(msg, hasFailure ? 'warning' : 'success');
+            // codex64 L-2：这里 id 已存在=建单已成功，return false 仅用于跳过 siModal 默认的 siAfterAction()
+            //   （因为下面已手动做了关弹窗+刷新列表+开详情三件事）；不要根据上传/指派是否失败改这个返回值语义。
             if (r.data && r.data.id) { siCloseModal(); await siLoadList(); siOpenDrawer(r.data.id); return false; }
             return true;
         });
@@ -2080,7 +2169,7 @@
             && (i.type !== 'bug' || i.needs_release === 1)
             && (!bf || siReleaseFamily(i.type) === bf));
         if (!cands.length) { showToast(bf ? `没有可加入本批次（${bf === 'bug' ? 'bug·已标发版' : '功能/优化'}）的「待上线」单据` : '没有可加入的「待上线」单据', 'warning'); return; }
-        const opts = cands.map(i => `<label style="display:flex;gap:7px;align-items:center;padding:5px 0"><input type="checkbox" class="si-add-chk" value="${i.id}"> #${i.id} <span class="u-type-tag ${esc(i.type)}">${esc(siTypeLabel(i.type))}</span> ${esc(i.title)}</label>`).join('');
+        const opts = cands.map(i => `<label class="si-chk-row si-chk-row-wide"><input type="checkbox" class="si-add-chk" value="${i.id}"> #${i.id} <span class="u-type-tag ${esc(i.type)}">${esc(siTypeLabel(i.type))}</span> ${esc(i.title)}</label>`).join('');
         siModal('加入批次', [{ k: null, html: `<div class="u-form-group"><label>选择待上线单据</label><div style="max-height:320px;overflow-y:auto">${opts}</div></div>` }], async () => {
             const ids = [...document.querySelectorAll('.si-add-chk:checked')].map(c => parseInt(c.value, 10));
             if (!ids.length) { showToast('请至少选择一个单据', 'error'); return false; }
@@ -2137,7 +2226,9 @@
     }
     function siCloseModal() { document.getElementById('siModalOverlay').classList.remove('open'); siModalConfirm = null; }
 
-    // 字段构造器（值均经 escapeHtml；label/hint 为静态文案）
+    // 字段构造器（值 v 均经 esc/escapeHtml 转义）。
+    // ⚠️ label（l）与 hint 参数是「原样插入的可信 HTML」通道，不经转义——仅可传源码内静态标记（如 SI_PRIORITY_LABEL 的 ? 图标）。
+    //    严禁把接口数据 / 用户输入 / priority 等动态值直接当 label/hint 传入，否则 label 的原样插 HTML 会演变成 XSS（codex60 L-3）。
     function fText(k, l, v, req, hint) { return { k, html: `<div class="u-form-group"><label>${l}${req ? ' <span class="u-req">*</span>' : ''}</label><input type="text" id="f_${k}" value="${esc(v || '')}">${hint ? `<div class="u-hint">${hint}</div>` : ''}</div>` }; }
     function fTextarea(k, l, v, req, hint) { return { k, html: `<div class="u-form-group"><label>${l}${req ? ' <span class="u-req">*</span>' : ''}</label><textarea id="f_${k}">${esc(v || '')}</textarea>${hint ? `<div class="u-hint">${hint}</div>` : ''}</div>` }; }
     function fDate(k, l, v) { return { k, html: `<div class="u-form-group"><label>${l}</label><input type="date" id="f_${k}" value="${esc(v || '')}"></div>` }; }
