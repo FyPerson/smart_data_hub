@@ -1,4 +1,4 @@
-// 验证脚本：系统迭代 bug 流上线编排（通知改造 v1.6 §2.3，C3b G3-G6）
+﻿// 验证脚本：系统迭代 bug 流上线编排（通知改造 v1.6 §2.3，C3b G3-G6）
 //   用法：node scripts/verify-sys-release-orchestration.js
 //
 // 覆盖（真实 HTTP + 落库状态）：
@@ -88,7 +88,7 @@ async function seedBugToReady(devId = 5, devTokFor = devTok) {
   assert.strictEqual(r.status, 200, 'bug assign 200');
   r = await call('POST', `/api/sys-issues/${id}/estimate`, devTokFor, { dev_estimated_at: EST });
   assert.strictEqual(r.status, 200, 'bug estimate 200, got ' + JSON.stringify(r.body));
-  r = await call('POST', `/api/sys-issues/${id}/submit`, devTokFor, { summary: '修复完成' });
+  r = await call('POST', `/api/sys-issues/${id}/submit`, devTokFor, { mode: 'no_code', no_code_reason: '修复完成（占位理由）' });
   assert.strictEqual(r.status, 200, 'bug submit 200, got ' + JSON.stringify(r.body));
   r = await call('POST', `/api/sys-issues/${id}/accept`, adminTok, {});
   assert.strictEqual(r.status, 200, 'bug accept 200, got ' + JSON.stringify(r.body));
@@ -100,7 +100,7 @@ async function seedFeatureToReady(devId = 5, devTokFor = devTok) {
   await call('POST', `/api/sys-issues/${id}/schedule`, adminTok, {});
   await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: devId });
   await call('POST', `/api/sys-issues/${id}/estimate`, devTokFor, { dev_estimated_at: EST });
-  await call('POST', `/api/sys-issues/${id}/submit`, devTokFor, { summary: '交付' });
+  await call('POST', `/api/sys-issues/${id}/submit`, devTokFor, { mode: 'no_code', no_code_reason: '交付（占位理由）' });
   r = await call('POST', `/api/sys-issues/${id}/accept`, adminTok, {});
   assert.strictEqual(r.status, 200, 'feature accept 200');
   return id;
@@ -466,14 +466,17 @@ async function main() {
     assert.strictEqual(r.status, 409); assert.strictEqual(r.body.code, 'RELEASE_BATCH_ASSIGNEE_MISMATCH');
     ok('[G6] 混入非 bug 单 → 409 RELEASE_BATCH_ASSIGNEE_MISMATCH（type 校验纳入前置一致性判断）');
 
-    // 缺 release_note/version_tag
+    // 缺 release_note → 400（不变）；缺 version_tag → C6 去必填后应成功且落 NULL（[断言变更]，原断言 400 VERSION_TAG_REQUIRED 已随 SSOT §8「去 version_tag 必填」/S21 废止）
     const noteId = await seedBugToReady(5);
     await call('POST', '/api/sys-issues/assign-release-dev', adminTok, { issue_ids: [noteId], release_assignee_id: 5 });
     r = await call('POST', '/api/sys-issues/execute-release', devTok, { mode: 'publish', issue_ids: [noteId] });
     assert.strictEqual(r.status, 400); assert.strictEqual(r.body.code, 'RELEASE_NOTE_REQUIRED');
+    ok('[G6] 缺 release_note → 400 RELEASE_NOTE_REQUIRED（不变）');
     r = await call('POST', '/api/sys-issues/execute-release', devTok, { mode: 'publish', issue_ids: [noteId], release_note: 'x' });
-    assert.strictEqual(r.status, 400); assert.strictEqual(r.body.code, 'VERSION_TAG_REQUIRED');
-    ok('[G6] 缺 release_note/version_tag → 400');
+    assert.strictEqual(r.status, 201, `[C6] 缺 version_tag 应成功（去必填）, got ${r.status} ${JSON.stringify(r.body)}`);
+    const noteRel = await relRow(r.body.release_id);
+    assert.strictEqual(noteRel.version_tag, null, '[C6] 空 version_tag 落库为 NULL（未传值场景）');
+    ok('[G6][C6] version_tag 去必填：缺省发布成功（201）且落库 NULL');
   }
 
   // ═══ [正交] release_assignee 与 dev_assignees 子表相互独立 ═══
@@ -483,7 +486,12 @@ async function main() {
     const id = r.body.id;
     assert.strictEqual(r.status, 201, '建单 path A 带协作 201');
     await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: EST });
-    await call('POST', `/api/sys-issues/${id}/submit`, devTok, { summary: '修复' });
+    // C3：多开发 roster 完成态门禁——path A 带协作(dev6)后 roster=[5主,6协作]，W-GATE 要求全在册完成态才
+    //   能进 SYS_VERIFY（不再是旧模型"仅主开发提交即完成"），故 5 与 6 均需 submit（no_code 占位）。
+    await call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'no_code', no_code_reason: '修复（占位理由）' });
+    const submit2 = await call('POST', `/api/sys-issues/${id}/submit`, dev2Tok, { mode: 'no_code', no_code_reason: '协作完成（占位理由）' });
+    assert.strictEqual(submit2.status, 200, `[正交] 协作(dev6) submit 200, got ${submit2.status} ${JSON.stringify(submit2.body)}`);
+    assert.strictEqual(submit2.body.main_status, '待验证', '[正交] 全员完成 → W-GATE 转待验证');
     await call('POST', `/api/sys-issues/${id}/accept`, adminTok, {});
     // 建单人指定协作开发（dev6，非主开发）为上线执行人——上线编排与开发指派体系正交，允许
     r = await call('POST', '/api/sys-issues/assign-release-dev', adminTok, { issue_ids: [id], release_assignee_id: 6 });
@@ -543,6 +551,52 @@ async function main() {
     assert.strictEqual(r.status, 200, `[U-2] 恢复角色后正常执行 200, got ${r.status} ${JSON.stringify(r.body)}`);
     ok('[U-2] execute-release 角色下限：指派后被降级 viewer → 403 EXECUTOR_NOT_ELIGIBLE（回查当前 role，不信陈旧 JWT）；恢复角色后正常执行 200（不误伤合法执行人）');
   }
+
+  // [codex 102 号 HIGH 回填] RELEASE 守卫接线——真实路由负例②：待上线单含 pending（手工注入模拟脏数据/历史
+  //   遗留，正常业务流程不可达——accept 前置要求 SYS_VERIFY 族在册全完成态，不可能天然产生该态）→
+  //   execute-release(mode=publish) → 400 GATE_INVARIANT，状态/批次/快照全零落库。
+  {
+    const pendingIssue = await seedBugToReady(5);   // 主开发 dev5 已 no_code 完成，待上线
+    await run(
+      `INSERT INTO sys_issue_dev_assignees (issue_id, user_id, user_name, is_primary, dev_status) VALUES (?, ?, ?, 0, 'pending')`,
+      [pendingIssue, 6, '开发李']
+    );
+    let r = await call('POST', '/api/sys-issues/assign-release-dev', adminTok, { issue_ids: [pendingIssue], release_assignee_id: 5 });
+    assert.strictEqual(r.status, 200, `含 pending 反例：assign-release-dev 应 200, got ${r.status} ${JSON.stringify(r.body)}`);
+    r = await call('POST', '/api/sys-issues/execute-release', devTok, { mode: 'publish', issue_ids: [pendingIssue], release_note: '含pending反例', version_tag: 'v-pending' });
+    assert.strictEqual(r.status, 400, `含 pending 反例：execute-release(publish) 应 400, got ${r.status} ${JSON.stringify(r.body)}`);
+    assert.strictEqual(r.body.code, 'GATE_INVARIANT', '含 pending 反例：错误码 GATE_INVARIANT');
+    const rowAfter = await issueRow(pendingIssue);
+    assert.strictEqual(rowAfter.status, '待上线', '含 pending 反例：⭐ 单状态未变（仍待上线）');
+    assert.strictEqual(rowAfter.release_id, null, '含 pending 反例：⭐ 未建批次（release_id 仍 NULL）');
+    const tlPending = await all(`SELECT id FROM sys_issue_timeline WHERE issue_id=? AND event_type='release'`, [pendingIssue]);
+    assert.strictEqual(tlPending.length, 0, '含 pending 反例：release timeline 零残留');
+    ok('[HIGH 回归②] 含 pending 待上线单 execute-release(mode=publish) → 400 GATE_INVARIANT，状态/批次/快照全零落库');
+  }
+
+  // [codex 102 号 HIGH 回填] RELEASE 守卫接线——真实路由负例③：同上但走 execute-release(mode=hotfix)
+  //   （不建批次路径，UPDATE 前置守卫同款接线）。
+  {
+    const pendingIssue2 = await seedBugToReady(5);
+    await run(
+      `INSERT INTO sys_issue_dev_assignees (issue_id, user_id, user_name, is_primary, dev_status) VALUES (?, ?, ?, 0, 'pending')`,
+      [pendingIssue2, 6, '开发李']
+    );
+    let r = await call('POST', '/api/sys-issues/assign-release-dev', adminTok, { issue_ids: [pendingIssue2], release_assignee_id: 5 });
+    assert.strictEqual(r.status, 200, `含 pending 反例(hotfix)：assign-release-dev 应 200, got ${r.status} ${JSON.stringify(r.body)}`);
+    r = await call('POST', '/api/sys-issues/execute-release', devTok, { mode: 'hotfix', issue_ids: [pendingIssue2] });
+    assert.strictEqual(r.status, 400, `含 pending 反例(hotfix)：execute-release(hotfix) 应 400, got ${r.status} ${JSON.stringify(r.body)}`);
+    assert.strictEqual(r.body.code, 'GATE_INVARIANT', '含 pending 反例(hotfix)：错误码 GATE_INVARIANT');
+    const rowAfter2 = await issueRow(pendingIssue2);
+    assert.strictEqual(rowAfter2.status, '待上线', '含 pending 反例(hotfix)：⭐ 单状态未变（仍待上线）');
+    assert.strictEqual(rowAfter2.released_at, null, '含 pending 反例(hotfix)：released_at 未落');
+    const tlPending2 = await all(`SELECT id FROM sys_issue_timeline WHERE issue_id=? AND event_type='release'`, [pendingIssue2]);
+    assert.strictEqual(tlPending2.length, 0, '含 pending 反例(hotfix)：release timeline 零残留');
+    ok('[HIGH 回归③] 含 pending 待上线单 execute-release(mode=hotfix) → 400 GATE_INVARIANT，状态/timeline 全零落库（hotfix 直连 UPDATE 路径守卫已接线）');
+  }
+
+  // [codex 102 号 HIGH 回填] 正例回归：本文件通篇既有用例（seedBugToReady 全走真实 assign→estimate→submit→
+  //   accept，roster 天然在册且非 pending）在本轮接线后全部保持通过——已由本文件整体 EXIT:0 证实。
 
   console.log(`\n✅ verify-sys-release-orchestration 全部通过（${passed} 项断言）`);
   server.close();

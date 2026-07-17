@@ -112,7 +112,7 @@ async function bugAssignedWithCollab(primaryId, collaboratorIds, extra = {}) {
 async function bugReturned(devId = 5, extra = {}) {
   const id = await bugAssigned(devId, extra);
   await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: EST });
-  await call('POST', `/api/sys-issues/${id}/submit`, devTok, { summary: '修复' });   // 待验证
+  await call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'no_code', no_code_reason: '修复（占位理由）' });   // 待验证
   const r = await call('POST', `/api/sys-issues/${id}/return`, adminTok, { reason: '未修好' });   // 打回→处理中 return_count++
   assert.strictEqual(r.status, 200, 'bug return 200');
   return id;
@@ -121,7 +121,7 @@ async function bugReturned(devId = 5, extra = {}) {
 async function bugToVerifying(devId = 5, extra = {}) {
   const id = await bugAssigned(devId, extra);
   await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: EST });
-  const r = await call('POST', `/api/sys-issues/${id}/submit`, devTok, { summary: '修复' });
+  const r = await call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'no_code', no_code_reason: '修复（占位理由）' });
   assert.strictEqual(r.status, 200, 'bug submit 200');
   return id;
 }
@@ -314,7 +314,8 @@ async function main() {
   // ═══ [Rework2] codex 复审 M-1（有意接受语义）：打回后改派新开发，通知仍走返工模板（锁定行为）═══
   {
     const id = await bugReturned(5);   // 处理中 return_count=1, dev5
-    await call('POST', `/api/sys-issues/${id}/reassign`, adminTok, { newAssignedTo: 6, oldAssignedTo: 5, reason: '换人' });   // 处理中 dev6, return_count 保留=1
+    // ⚠️ 既有测试变更（C2：reassign body 改 member_ids+reason，见交付汇报清单）。
+    await call('POST', `/api/sys-issues/${id}/reassign`, adminTok, { member_ids: [6], reason: '换人' });   // 处理中 dev6, return_count 保留=1
     lastDevTitle = null;
     const r = await call('POST', `/api/sys-issues/${id}/notify-developer`, adminTok, { dev_user_id: 6 });
     assert.strictEqual(r.status, 200, '[Rework2] 打回后改派 notify-developer 200');
@@ -571,14 +572,15 @@ async function main() {
     const iid = await seedChangeAssigned('improvement', 5);
     assert.strictEqual(await nStatus(iid), 'sent', '[C] improvement assign 仍自动发开发（变更流两类型均零回归）');
     // feature reassign→新开发 auto（换人 marker）
+    //   ⚠️ 既有测试变更（C2：reassign body 改 member_ids+reason，见交付汇报清单）。
     const fid2 = await seedChangeAssigned('feature', 5);
-    let r = await call('POST', `/api/sys-issues/${fid2}/reassign`, adminTok, { newAssignedTo: 6, oldAssignedTo: 5, reason: '换人' });
+    let r = await call('POST', `/api/sys-issues/${fid2}/reassign`, adminTok, { member_ids: [6], reason: '换人' });
     assert.strictEqual(r.status, 200, 'feature reassign 200');
     assert.strictEqual(await nStatus(fid2), 'sent', '[C] feature reassign 仍自动发新开发（reassign marker）');
     // feature return→dev auto（打回 marker）
     const fid3 = await seedChangeAssigned('feature', 5);
     await call('POST', `/api/sys-issues/${fid3}/estimate`, devTok, { dev_estimated_at: EST });
-    await call('POST', `/api/sys-issues/${fid3}/submit`, devTok, { summary: '交付' });   // 待验证
+    await call('POST', `/api/sys-issues/${fid3}/submit`, devTok, { mode: 'no_code', no_code_reason: '交付（占位理由）' });   // 待验证
     await call('POST', `/api/sys-issues/${fid3}/return`, adminTok, { reason: '打回' });   // 开发中
     assert.strictEqual(await nStatus(fid3), 'sent', '[C] feature return 仍自动发开发（return marker）');
     ok('[C] 变更流零回归 canary：feature+improvement × assign/estimate/reassign/return 全部仍自动派发 sent（dispatchSysNotify bug 早返回精确隔离，快照写入不分叉，publish/reopen 由 verify-sys-notify/release 覆盖）');

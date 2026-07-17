@@ -22,7 +22,11 @@
  *                     （核实发现：needs_feasibility 单回填走 feasibility 事件不写 estimate，
  *                      单查 estimate 漏 4/10 单，双源后与 dev_estimated_at populated 数精确对上）
  *   t2 提交 = correction=首次进入 FIXED / issue=首次进入 待验证 / collab=首次 submitted_at /
- *        sys=first_submitted_at（= timeline 首次 submit 动作，"首次永不变"语义等价，免一次 join）
+ *        sys=sys_issue_timeline 首次 event_type='status_change' AND to_status='待验证' 的时刻
+ *        （= GATE 时刻：多开发单以「在册全完成」为准，非"首个人提交"；与 issue 模块"首次进入
+ *        待验证"同构。first_submitted_at 保留自己的审计语义不变——它是"首次有人提交"的旁证，
+ *        不再充当本文件 t2 边界的数据源。2026-07-17 C3 对抗审 M-P3 回填，既有 fallback 链
+ *        （fillSkippedBoundaries 右侧兜底）不变：老单无 status_change 记录时一路吸收到 t3）
  *   t3 归档终态 = correction/issue=末条 history 行（终态）时刻 / collab=archived_final_at||done_at /
  *        sys=closed_at||released_at（closed_at 生产 0 populated，已上线即视为交付）
  *
@@ -354,6 +358,17 @@ async function loadSysEfficiencyRecords(dbAllAsync, startDate, endDate, nowIso) 
         ids
     );
     const responseByParent = new Map(responseRows.map((r) => [r.parent_id, r.response_at]));
+    // [C3 对抗审 M-P3 回填] t2（提交）改用 timeline 首次 GATE（进「待验证」）时刻，非
+    // first_submitted_at（首个人提交）——多开发单两者可能相差数天，GATE 才是"全员完成"的真实
+    // 提交边界，与 issue 模块"首次进入 待验证"同构；first_submitted_at 审计语义不受影响。
+    const gateRows = await dbAllAsync(
+        `SELECT issue_id AS parent_id, MIN(created_at) AS gate_at
+         FROM sys_issue_timeline
+         WHERE issue_id IN (${placeholders}) AND event_type = 'status_change' AND to_status = '待验证'
+         GROUP BY issue_id`,
+        ids
+    );
+    const gateByParent = new Map(gateRows.map((r) => [r.parent_id, r.gate_at]));
 
     return rows.map((r) => {
         const isAborted = SYS_ABORTED_STATUSES.includes(r.status);
@@ -361,9 +376,10 @@ async function loadSysEfficiencyRecords(dbAllAsync, startDate, endDate, nowIso) 
         const isDone = !isAborted && !!releasedish;
         const statusGroup = isAborted ? 'aborted' : (isDone ? 'done' : 'inflight');
         const t1 = responseByParent.get(r.id) || null;
+        const t2 = gateByParent.get(r.id) || null;
         const t3 = isDone ? releasedish : null;
         const frontierEnd = statusGroup === 'inflight' ? nowIso : (statusGroup === 'aborted' ? (r.updated_at || null) : null);
-        const { stageHours, totalHours } = computeThreeStageRecord(r.created_at, t1, r.first_submitted_at, t3, frontierEnd);
+        const { stageHours, totalHours } = computeThreeStageRecord(r.created_at, t1, t2, t3, frontierEnd);
         return {
             id: r.id, title: r.title || `#${r.id}`, created_at: r.created_at, status: r.status, type: r.type || '(未分类)',
             statusGroup, stageHours, totalHours, terminalAt: t3,

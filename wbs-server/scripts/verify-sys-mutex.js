@@ -88,7 +88,7 @@ async function seedToReady() {
   await call('POST', `/api/sys-issues/${id}/schedule`, adminTok, {});
   await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5 });
   await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: '2026-08-01 10:00' });
-  await call('POST', `/api/sys-issues/${id}/submit`, devTok, { summary: '交付完成' });
+  await call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'no_code', no_code_reason: '交付完成（占位理由）' });
   await call('POST', `/api/sys-issues/${id}/accept`, adminTok, {});
   return id;
 }

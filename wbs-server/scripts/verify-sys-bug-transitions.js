@@ -107,7 +107,7 @@ async function seedBugToReady(devId = 5, devTok2 = devTok) {
   const id = await seedBugToDev(devId);
   let r = await call('POST', `/api/sys-issues/${id}/estimate`, devTok2, { dev_estimated_at: EST });
   assert.strictEqual(r.status, 200, `bug estimate 200, got ${r.status} ${JSON.stringify(r.body)}`);
-  r = await call('POST', `/api/sys-issues/${id}/submit`, devTok2, { summary: '修复完成' });
+  r = await call('POST', `/api/sys-issues/${id}/submit`, devTok2, { mode: 'no_code', no_code_reason: '修复完成（占位理由）' });
   assert.strictEqual(r.status, 200, `bug submit 200, got ${r.status} ${JSON.stringify(r.body)}`);
   r = await call('POST', `/api/sys-issues/${id}/accept`, adminTok, {});
   assert.strictEqual(r.status, 200, `bug accept 200, got ${r.status} ${JSON.stringify(r.body)}`);
@@ -121,7 +121,7 @@ async function seedChangeToReady(type = 'feature', devId = 5, devTok2 = devTok) 
   await call('POST', `/api/sys-issues/${id}/schedule`, adminTok, {});
   await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: devId });
   await call('POST', `/api/sys-issues/${id}/estimate`, devTok2, { dev_estimated_at: EST });
-  await call('POST', `/api/sys-issues/${id}/submit`, devTok2, { summary: '交付' });
+  await call('POST', `/api/sys-issues/${id}/submit`, devTok2, { mode: 'no_code', no_code_reason: '交付（占位理由）' });
   r = await call('POST', `/api/sys-issues/${id}/accept`, adminTok, {});
   assert.strictEqual(r.status, 200, `${type} accept 200, got ${r.status} ${JSON.stringify(r.body)}`);
   return id;
@@ -236,16 +236,16 @@ async function main() {
     ok('指派：待处理 →assign→ 处理中（直达）+ 非 admin 403（对接人白名单=④）+ viewer 拒');
   }
   {
-    // submit 闸门顺序：缺 est → ESTIMATE_REQUIRED；estimate 本人回填；空 summary → SUBMIT_SUMMARY_REQUIRED
-    let r = await call('POST', `/api/sys-issues/${mainId}/submit`, devTok, { summary: '修好了' });
-    assert.strictEqual(r.status, 400); assert.strictEqual(r.body.code, 'ESTIMATE_REQUIRED');
-    r = await call('POST', `/api/sys-issues/${mainId}/estimate`, dev2Tok, { dev_estimated_at: EST });
-    assert.strictEqual(r.status, 403, '非本人 estimate 403');
+    // [C3 退场] 原"submit 闸门（缺 est → ESTIMATE_REQUIRED / 空 summary → SUBMIT_SUMMARY_REQUIRED）"随旧
+    //   单人 summary 模型退场——新 submit（方案 §6.1/§6.2）不查 dev_estimated_at/summary。estimate 的"严格
+    //   在册"仍保留，改走 W06/assertDevMember：非在册开发（dev2）→ 403 NOT_ROSTERED（语义同构于旧
+    //   NOT_AUTHORIZED_FOR_TRANSITION，均为"actor 无权限"，故意不call submit 避免提前推进 mainId 状态，
+    //   下方 [A] 附件区仍需 mainId 停在「处理中」）。
+    let r = await call('POST', `/api/sys-issues/${mainId}/estimate`, dev2Tok, { dev_estimated_at: EST });
+    assert.strictEqual(r.status, 403, '非在册 estimate 403（W06 assertDevMember）');
     r = await call('POST', `/api/sys-issues/${mainId}/estimate`, devTok, { dev_estimated_at: EST });
-    assert.strictEqual(r.status, 200, '本人 estimate 200（bug 处理中态内回填）');
-    r = await call('POST', `/api/sys-issues/${mainId}/submit`, devTok, { summary: '   ' });
-    assert.strictEqual(r.status, 400); assert.strictEqual(r.body.code, 'SUBMIT_SUMMARY_REQUIRED');
-    ok('submit 闸门：缺 dev_estimated_at → ESTIMATE_REQUIRED + estimate 严格本人（处理中态内）+ 空 summary 拒');
+    assert.strictEqual(r.status, 200, '在册开发 estimate 200（bug 处理中态内回填）');
+    ok('estimate 严格在册（W06 assertDevMember 替代旧 ownerGuard）：非在册 403 / 在册 200');
   }
 
   // ═══ [A] 附件（isDevWorkState 放行 bug 处理中）═══
@@ -262,14 +262,14 @@ async function main() {
   }
 
   {
-    // 合法 submit → 待验证（first_submitted_at + round_no=1 timeline）
-    const r = await call('POST', `/api/sys-issues/${mainId}/submit`, devTok, { summary: '空指针已修，补了守卫' });
-    assert.strictEqual(r.status, 200); assert.strictEqual(r.body.status, '待验证');
-    const row = await rowOf(mainId);
-    assert.ok(row.first_submitted_at, 'first_submitted_at 盖');
-    const sub = await get(`SELECT round_no FROM sys_issue_timeline WHERE issue_id=? AND event_type='submit'`, [mainId]);
-    assert.strictEqual(sub.round_no, 1, 'submit round_no=1');
-    ok('提交修复：处理中 →submit→ 待验证 + first_submitted_at + round_no=1');
+    // 合法 submit → 待验证（C3：新 commit 事件模型，无 first_submitted_at/round_no timeline——
+    //   这两个字段随旧单人 summary 模型退场，唯一在册开发 no_code 完成 → W-GATE 同事务转待验证）。
+    const r = await call('POST', `/api/sys-issues/${mainId}/submit`, devTok, { mode: 'no_code', no_code_reason: '空指针已修，补了守卫' });
+    assert.strictEqual(r.status, 200, 'submit 200, got ' + JSON.stringify(r.body));
+    assert.strictEqual(r.body.main_status, '待验证', 'submit → 待验证（W-GATE，main_status 字段，非旧 status）');
+    const devEv = await get(`SELECT action, payload_json FROM sys_issue_dev_events WHERE issue_id=? AND action='no_code'`, [mainId]);
+    assert.ok(devEv, 'sys_issue_dev_events 应有 1 条 no_code 事件（新事件模型落点）');
+    ok('提交修复：处理中 →submit→ 待验证（W-GATE）+ no_code 事件落 sys_issue_dev_events（新模型，替代旧 timeline round_no）');
   }
   {
     // return（待验证→处理中，return_count++ 清 est）；打回原因必填
@@ -283,16 +283,29 @@ async function main() {
     ok('验收打回：待验证 →return→ 处理中 + return_count++ + 清 dev_estimated_at + 原因必填');
   }
   {
-    // 二轮：estimate → submit → accept → 待上线
+    // 二轮：return 后 roster 完成态残留在 no_code（return 只清主表 dev_estimated_at，不碰 dev_assignees 子表——
+    //   §1 不变量1"完成态不回 pending"+§4.1"完成态互转/回 pending 禁止"，本例首次暴露：return 与多开发
+    //   roster 完成态是两条独立不变量线，旧完成态实例不能原地复用重提）。协调人需：① 先加协作解除
+    //   LAST_ASSIGNEE 限制（单开发不能直接 remove 自己）② remove 旧完成态实例 ③ re-add 同一开发（全新
+    //   pending 实例，方案 §4.4）④ 两名在册开发都完成后 W-GATE 才转待验证。
+    let r = await call('POST', `/api/sys-issues/${mainId}/dev-assignees`, adminTok, { user_ids: [6] });
+    assert.strictEqual(r.status, 200, '临时加协作(6) 200, got ' + JSON.stringify(r.body));
+    const oldDa = r.body.dev_assignees.find(d => d.user_id === 5);
+    r = await call('DELETE', `/api/sys-issues/${mainId}/dev-assignees/${oldDa.id}`, adminTok, { reason: '二轮重置旧完成态实例' });
+    assert.strictEqual(r.status, 200, 'remove 旧完成态实例 200, got ' + JSON.stringify(r.body));
+    r = await call('POST', `/api/sys-issues/${mainId}/dev-assignees`, adminTok, { user_ids: [5] });
+    assert.strictEqual(r.status, 200, 're-add(5) 200, got ' + JSON.stringify(r.body));
     await call('POST', `/api/sys-issues/${mainId}/estimate`, devTok, { dev_estimated_at: '2026-08-02 10:00' });
-    let r = await call('POST', `/api/sys-issues/${mainId}/submit`, devTok, { summary: '二轮修复' });
-    assert.strictEqual(r.body.status, '待验证');
-    const sub2 = await all(`SELECT round_no FROM sys_issue_timeline WHERE issue_id=? AND event_type='submit' ORDER BY id`, [mainId]);
-    assert.strictEqual(sub2[1].round_no, 2, '二轮 submit round_no=2');
+    r = await call('POST', `/api/sys-issues/${mainId}/submit`, devTok, { mode: 'no_code', no_code_reason: '二轮修复' });
+    assert.strictEqual(r.status, 200, '二轮 submit(5) 200, got ' + JSON.stringify(r.body));
+    r = await call('POST', `/api/sys-issues/${mainId}/submit`, dev2Tok, { mode: 'no_code', no_code_reason: '协作二轮完成' });
+    assert.strictEqual(r.status, 200, '协作(6) submit 200, got ' + JSON.stringify(r.body));
+    assert.strictEqual(r.body.main_status, '待验证', '全员完成 → W-GATE 转待验证');
     r = await call('POST', `/api/sys-issues/${mainId}/accept`, adminTok, {});
-    assert.strictEqual(r.status, 200); assert.strictEqual(r.body.status, '待上线');
+    assert.strictEqual(r.status, 200, 'accept 200, got ' + JSON.stringify(r.body));
+    assert.strictEqual(r.body.status, '待上线', 'accept → 待上线（W07 具名边，makeTransitionEndpoint 响应形未变）');
     assert.ok((await rowOf(mainId)).accepted_at, 'accepted_at 盖');
-    ok('验收通过：二轮 submit（round_no=2）→ accept → 待上线 + accepted_at（建单人=admin，T-M1）');
+    ok('验收通过：二轮（扩容协作解除 LAST_ASSIGNEE + remove/re-add 重置完成态实例 + 全员完成 submit）→ accept → 待上线 + accepted_at（T-M1；C3：round_no/旧 timeline 模型断言随退场）');
   }
 
   // ═══ [D] 待上线仍无的动作（②后依然如此，非本次范围）═══
@@ -487,33 +500,37 @@ async function main() {
     ok('作废：处理中 →void→ 已作废（from=* 任意态，软删除逃生口）');
   }
   {
-    // reassign：处理中换人 + 待验证换人回处理中；清 dev_estimated_at
+    // ⚠️ 既有测试变更（C2 破坏性变更，详见交付汇报"既有测试变更清单"）：reassign 改声明式最终 roster
+    // （member_ids + reason，方案 §3），不再是 newAssignedTo/oldAssignedTo 换主语义；"换主清 dev_estimated_at"
+    // 是旧版"换主=新一轮"的业务规则，v2.9 无"主开发"概念故也无"换主"这件事，dev_estimated_at 清零属
+    // W07/ADMIN_TRANSITION 侧关切（C3 范围，本轮不碰）——不再断言。"待验证换人→回处理中"这一结果性行为
+    // 仍然成立，但机制变了：新增的 pending 成员触发 W-GATE（VERIFY→DEV），非硬编码 reassign→处理中 映射。
     const id = await seedBugToDev(5);
     await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: EST });
-    let r = await call('POST', `/api/sys-issues/${id}/reassign`, adminTok, { newAssignedTo: 6, oldAssignedTo: 5, reason: '开发王休假' });
+    let r = await call('POST', `/api/sys-issues/${id}/reassign`, adminTok, { member_ids: [6], reason: '开发王休假' });
     assert.strictEqual(r.status, 200, `bug reassign 200, got ${r.status} ${JSON.stringify(r.body)}`);
     let row = await rowOf(id);
-    assert.strictEqual(Number(row.assigned_to), 6, '换人到 dev2');
-    assert.strictEqual(row.status, '处理中', '同态换人仍 处理中');
-    assert.strictEqual(row.dev_estimated_at, null, '换人清 dev_estimated_at');
-    // 待验证换人 → 回 处理中
+    assert.strictEqual(Number(row.assigned_to), 6, '换人到 dev2（选举：5 移除后仅剩 6 在册，当选代表）');
+    assert.strictEqual(row.status, '处理中', '同态换人仍 处理中（DEV 族内增减不触发 W-GATE）');
+    // 待验证换人 → 回 处理中（W-GATE：新增 pending 成员 5 打破"全员完成"，VERIFY→DEV）
     await call('POST', `/api/sys-issues/${id}/estimate`, dev2Tok, { dev_estimated_at: EST });
-    await call('POST', `/api/sys-issues/${id}/submit`, dev2Tok, { summary: '修复完成' });
+    await call('POST', `/api/sys-issues/${id}/submit`, dev2Tok, { mode: 'no_code', no_code_reason: '修复完成（占位理由）' });
     assert.strictEqual(await statusOf(id), '待验证');
-    r = await call('POST', `/api/sys-issues/${id}/reassign`, adminTok, { newAssignedTo: 5, oldAssignedTo: 6, reason: '返工换回' });
-    assert.strictEqual(r.status, 200);
-    assert.strictEqual(await statusOf(id), '处理中', '待验证换人 → 回 处理中');
-    ok('换人：处理中 →reassign→ 处理中（清 est）+ 待验证 →reassign→ 处理中（映射 to 正确）');
+    r = await call('POST', `/api/sys-issues/${id}/reassign`, adminTok, { member_ids: [5], reason: '返工换回' });
+    assert.strictEqual(r.status, 200, `reassign 200, got ${r.status} ${JSON.stringify(r.body)}`);
+    assert.strictEqual(await statusOf(id), '处理中', '待验证换人 → 回 处理中（W-GATE：新增 pending 触发 VERIFY→DEV）');
+    ok('换人（C2 新语义 member_ids）：处理中 →reassign→ 处理中（选举正确）+ 待验证 →reassign→ 处理中（W-GATE 联动，非硬编码映射）');
   }
   {
-    // ownerGuard 严格本人（H-1 同口径）：admin/他人 submit → 403
+    // C3：W05 唯一 submit 改 assertDevMember（在册判定，非旧 ownerGuard 严格本人）——非在册开发/admin 均不在
+    // roster 内，同样 403（错误码 NOT_ROSTERED，语义与旧 H-1"严格本人"口径一致：无权限即拒）。
     const id = await seedBugToDev(5);
     await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: EST });
-    let r = await call('POST', `/api/sys-issues/${id}/submit`, dev2Tok, { summary: 'x' });
-    assert.strictEqual(r.status, 403, '非本人 submit 403');
-    r = await call('POST', `/api/sys-issues/${id}/submit`, adminTok, { summary: 'x' });
-    assert.strictEqual(r.status, 403, 'admin 代提交 403（严格本人）');
-    ok('ownerGuard 严格本人：bug submit 非本人/admin 代办均 403（H-1 口径与变更流一致）');
+    let r = await call('POST', `/api/sys-issues/${id}/submit`, dev2Tok, { mode: 'no_code', no_code_reason: 'x' });
+    assert.strictEqual(r.status, 403, '非在册开发 submit 403');
+    r = await call('POST', `/api/sys-issues/${id}/submit`, adminTok, { mode: 'no_code', no_code_reason: 'x' });
+    assert.strictEqual(r.status, 403, 'admin 代提交 403（admin 本身不在册，W06/W05 assertDevMember 统一口径）');
+    ok('W05 assertDevMember 严格在册：bug submit 非在册开发/admin 均 403（同构于旧 H-1"严格本人"口径）');
   }
 
   // ═══ [C] 变更流零回归 canary（assign expectedFrom=null 改动）═══
@@ -521,10 +538,12 @@ async function main() {
     let r = await call('POST', '/api/sys-issues', adminTok, { type: 'feature', title: 'canary', system_name: 'BMS', source: '内部' });
     const id = r.body.id;
     assert.strictEqual(r.body.status, '待评估', 'feature 建单仍落 待评估');
-    // 待评估直接 assign（跳过 schedule）→ 应仍被拒（findTransition from 白名单守，expectedFrom=null 未放松前置态）
+    // 待评估直接 assign（跳过 schedule）→ 应仍被拒（C3：/assign 重写后改走 assertMainStatusTransition 守卫，
+    //   from 白名单校验仍在但错误码从旧 sysIssueTransition 步骤[1]的 400 INVALID_TRANSITION 统一改为
+    //   守卫既定风格 409 GATE_INVARIANT——§10 API 契约"白名单外组合→409 GATE_INVARIANT"，非回归）。
     r = await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5 });
-    assert.strictEqual(r.status, 400, `feature 待评估直接 assign 应 400, got ${r.status}`);
-    assert.strictEqual(r.body.code, 'INVALID_TRANSITION');
+    assert.strictEqual(r.status, 409, `feature 待评估直接 assign 应 409, got ${r.status}`);
+    assert.strictEqual(r.body.code, 'GATE_INVARIANT');
     r = await call('POST', `/api/sys-issues/${id}/schedule`, adminTok, {});
     assert.strictEqual(r.status, 200);
     r = await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5 });

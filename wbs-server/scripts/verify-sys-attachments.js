@@ -1,16 +1,18 @@
-// 验证脚本：系统迭代 C3b 附件（上传 / submit 绑 round_no / 下载 / 删除 / supersede）
+// 验证脚本：系统迭代 附件（上传 / 下载 / 删除 / supersede）——单人基线场景，C3b 建立 + C5 附件授权改造随本次更新
 //   用法：node scripts/verify-sys-attachments.js
+//   多开发 roster 矩阵场景（历史参与/broad_user/协调人/DEV∪VERIFY 窗口/round_no 遗产存量行）见
+//   verify-sys-multidev-attachments.js（C5 新增，两文件不重复覆盖同一场景）。
 //
 // in-process express app（挂真实 router）+ 内存库 + 真实临时落盘（_sys-attach-test-deps）+ 自签 token，覆盖：
-//   1. 上传 delivery/screenshot（开发本人·开发中，round_no=NULL 暂存）/ spec（admin·非作废）
-//   2. 上传权限/状态/类型/无文件负向（403/409/400）
-//   3. submit 绑 delivery+screenshot round_no（11-H2/RC-M4）+ timeline round_no
-//   4. orphan 回滚：submit 传非法 id → 400 + 整事务 ROLLBACK（已传 id 不被绑、status 不变）
-//   5. spec 不被 submit 绑定（11-H2）
+//   1. 上传 delivery/screenshot（在册∨协调人·SYS_DEV∪SYS_VERIFY，round_no 恒 NULL）/ spec（协调人·∉SYS_TERMINAL）
+//   2. 上传权限/状态/类型/无文件负向（403/409/400）——C5：admin 本就是协调人，delivery 上传由 403 改判 200（断言变更①）
+//   3-5. [C3 退场] 旧 submit attachment_ids round_no 绑定机制（11-H2/RC-M4/orphan 回滚/spec 白名单排除）整体退场
+//        ——新 §6.1 submit body 契约仅 {mode,...}，attachment_ids 为多余字段 → 400 VALIDATION；round_no 恒 null
 //   6. supersede（10-M1 旧 spec superseded + 新 active）+ active 过滤（详情仅 active）
 //   7. 12-M1 二次 WHERE attachment_type 守卫：spec supersede 不误伤 delivery
-//   8. 下载（admin/指派开发 200，其他 403，不存在 404，作废非 admin 403）
-//   9. 删除（未绑 delivery 上传本人 / spec admin；已绑 delivery 409；非授权 403）
+//   8. 下载（C5·§5.4：admin/协调人/在册/历史参与 200，其他 403，不存在 404；作废单下载不再单独 403——
+//      断言变更②，下载列无状态限定，见完成报告契约裁定点）
+//   9. 删除（C5·§5.4：(上传者∧非历史参与∨协调人∨admin) ∧ ∉SYS_TERMINAL；round_no 遗产③=旧"已绑定"判定改判"终态"）
 const assert = require('assert');
 const http = require('http');
 const express = require('express');
@@ -156,14 +158,23 @@ async function main() {
 
     // ── [2] 上传负向（权限/状态/类型/无文件）──
     r = await upload(ATT(id1), devTok, { attachment_type: 'spec' }, 'x.pdf');
-    assert.strictEqual(r.status, 403, 'spec 非 admin 403'); assert.strictEqual(r.body.code, 'NOT_AUTHORIZED_FOR_ATTACHMENT');
-    ok('上传 spec by 开发 → 403（需求材料仅 admin）');
+    assert.strictEqual(r.status, 403, 'spec 非协调人 403'); assert.strictEqual(r.body.code, 'NOT_AUTHORIZED_FOR_ATTACHMENT');
+    ok('上传 spec by 开发（feature 单，非协调人=非 admin 且非 bug 对接人）→ 403');
+    // [C5 断言变更①] delivery 上传 = (在册∨协调人) ∧ SYS_DEV∪SYS_VERIFY——admin 恒为协调人，故 admin 上传 delivery
+    //   由旧"非 assignee 403"改判 200（§5.4 唯一权威表：delivery 上传行含"admin"，非仅"开发本人"）。
+    //   旧断言：r.status===403 code=NOT_AUTHORIZED_FOR_ATTACHMENT；新断言：r.status===200（本条即断言变更①实测）。
     r = await upload(ATT(id1), adminTok, { attachment_type: 'delivery' }, 'x.png');
-    assert.strictEqual(r.status, 403, 'delivery 非 assignee(admin) 403');
-    ok('上传 delivery by admin（非 assignee）→ 403');
+    assert.strictEqual(r.status, 200, `[C5 断言变更①] delivery 上传 by admin（协调人）应 200，实际 ${r.status} ${JSON.stringify(r.body)}`);
+    ok('[C5] 上传 delivery by admin（协调人，非在册）→ 200（§5.4：在册∨协调人，原仅"开发本人"过窄）');
+    {
+      // 本条断言产生真实落库副作用（旧断言是纯负向、零落库）——清理掉，避免污染下方 active 附件计数断言（line ~197）。
+      const adminDeliveryId = r.body.attachments[0].id;
+      const rClean = await call('DELETE', `/api/sys-issues/${id1}/attachments/${adminDeliveryId}`, adminTok);
+      assert.strictEqual(rClean.status, 200, '清理刚上传的 admin delivery（协调人可删，避免影响后续计数）');
+    }
     r = await upload(ATT(id1), dev2Tok, { attachment_type: 'delivery' }, 'x.png');
-    assert.strictEqual(r.status, 403, 'delivery 非本人开发 403');
-    ok('上传 delivery by dev2（非指派本人）→ 403');
+    assert.strictEqual(r.status, 403, 'delivery 非在册非协调人 403');
+    ok('上传 delivery by dev2（非在册/非协调人）→ 403');
     r = await upload(ATT(id1), devTok, { attachment_type: 'bogus' }, 'x.png');
     assert.strictEqual(r.status, 400, 'type 非法 400'); assert.strictEqual(r.body.code, 'INVALID_ATTACHMENT_TYPE');
     ok('上传 attachment_type=bogus → 400 INVALID_ATTACHMENT_TYPE');
@@ -171,61 +182,34 @@ async function main() {
     assert.strictEqual(r.status, 400, '无文件 400'); assert.strictEqual(r.body.code, 'NO_FILE');
     ok('上传无文件 → 400 NO_FILE');
 
-    // ── [3] submit 绑 round_no：判断① delivery-only（screenshot/spec 松散不绑，SSOT 11-H2/RC-M4）+ A2 严格校验 ──
-    // A2：attachment_ids 非数组 / 含非正整数 → 400
-    r = await call('POST', `/api/sys-issues/${id1}/submit`, devTok, { summary: 'x', attachment_ids: 'notarray' });
-    assert.strictEqual(r.status, 400, 'attachment_ids 非数组 400'); assert.strictEqual(r.body.code, 'SUBMIT_ATTACHMENT_INVALID');
-    r = await call('POST', `/api/sys-issues/${id1}/submit`, devTok, { summary: 'x', attachment_ids: [d1, 'bad'] });
-    assert.strictEqual(r.status, 400, 'attachment_ids 含非整数 400'); assert.strictEqual(r.body.code, 'SUBMIT_ATTACHMENT_INVALID');
-    assert.strictEqual((await attRow(d1)).round_no, null, 'A2：非法校验先于绑定，d1 未绑（整事务回滚）');
-    ok('A2：submit attachment_ids 非数组 / 含非正整数 → 400（不静默丢弃）+ 整事务回滚');
-    // 判断①：screenshot 误入 attachment_ids → 400（与 spec 同为松散，不可绑）
-    r = await call('POST', `/api/sys-issues/${id1}/submit`, devTok, { summary: '完成', attachment_ids: [d1, s1] });
-    assert.strictEqual(r.status, 400, 'submit 含 screenshot id 400'); assert.strictEqual(r.body.code, 'SUBMIT_ATTACHMENT_INVALID');
-    assert.strictEqual((await attRow(d1)).round_no, null, 'd1 未绑（整事务回滚）');
-    ok('判断①：submit 传 screenshot id → 400（delivery-only，screenshot 松散不绑）+ 整事务回滚');
-    // 仅传 delivery → 200，d1 绑 round=1；s1(screenshot)/spec1 保持松散 NULL
-    r = await call('POST', `/api/sys-issues/${id1}/submit`, devTok, { summary: '完成', attachment_ids: [d1] });
+    // ── [3-5] C3 退场：submit attachment_ids 绑定机制（旧模型 round_no 绑定/A2 严格校验/orphan 回滚/spec 白名单排除）──
+    //   随 W05 唯一 submit 收敛整体退场：新 §6.1 submit body 契约仅 {mode:'no_code'|'commits', ...}，
+    //   attachment_ids 属「多余字段」→ 400 VALIDATION（写库前拒绝，事务从未开始，无"部分绑定/orphan"概念）。
+    //   附件与开发流程彻底解耦；round_no 列保留但不再被任何写路径填充，值恒为 null（见下方替代断言）。
+    r = await call('POST', `/api/sys-issues/${id1}/submit`, devTok, { mode: 'no_code', no_code_reason: '完成（占位理由）', attachment_ids: [d1, s1] });
+    assert.strictEqual(r.status, 400, 'C3：submit 携 attachment_ids（多余字段）→ 400');
+    assert.strictEqual(r.body.code, 'VALIDATION', 'C3：多余字段统一走 VALIDATION（非旧 SUBMIT_ATTACHMENT_INVALID）');
+    assert.strictEqual((await attRow(d1)).round_no, null, 'C3：拒绝先于任何绑定，d1 未受影响');
+    r = await call('POST', `/api/sys-issues/${id1}/submit`, devTok, { mode: 'no_code', no_code_reason: '完成（占位理由）' });
     assert.strictEqual(r.status, 200, 'submit 200, got ' + r.status + ' ' + JSON.stringify(r.body));
-    assert.strictEqual((await attRow(d1)).round_no, 1, 'delivery 绑 round_no=1');
-    assert.strictEqual((await attRow(s1)).round_no, null, 'screenshot 松散 round_no=NULL（不绑，判断①）');
-    assert.strictEqual((await attRow(spec1)).round_no, null, 'spec round_no=NULL（不绑，11-H2）');
-    const tl = await get("SELECT round_no FROM sys_issue_timeline WHERE issue_id=? AND event_type='submit'", [id1]);
-    assert.strictEqual(tl.round_no, 1, 'submit timeline round_no=1');
-    ok('submit 仅绑 delivery round_no=1 + timeline round_no=1；screenshot/spec 松散不绑（判断① delivery-only）');
+    assert.strictEqual(r.body.main_status, '待验证', 'submit → 待验证（main_status 字段，C2/C3 惯例）');
+    assert.strictEqual((await attRow(d1)).round_no, null, 'C3：submit 不再绑定任何附件，delivery round_no 恒 null');
+    assert.strictEqual((await attRow(s1)).round_no, null, 'C3：screenshot round_no 恒 null');
+    assert.strictEqual((await attRow(spec1)).round_no, null, 'C3：spec round_no 恒 null');
+    ok('C3 退场：submit attachment_ids 绑定机制整体退场（多余字段 400 VALIDATION）+ round_no 恒 null（新 §6.1 契约，附件/开发流程解耦）');
 
-    // 详情 GET active（含 round_no 供前端分组）+ A7 specAttachments/hasSpecAttachment
+    // 详情 GET active（含 round_no 字段供前端读，恒 null）+ A7 specAttachments/hasSpecAttachment（不受 C3 影响，与 submit 无关）
     r = await call('GET', `/api/sys-issues/${id1}`, adminTok);
     assert.strictEqual(r.body.attachments.length, 3, '详情 3 个 active 附件');
-    assert.ok(r.body.attachments.every(a => 'round_no' in a), 'A9：每个附件含 round_no 供前端分组');
+    assert.ok(r.body.attachments.every(a => 'round_no' in a), 'A9：每个附件仍含 round_no 字段（值恒 null）');
     assert.strictEqual(r.body.hasSpecAttachment, true, 'A7 hasSpecAttachment=true');
     assert.strictEqual(r.body.specAttachments.length, 1, 'A7 specAttachments 1 个');
     assert.strictEqual(r.body.specAttachments[0].id, spec1, 'A7 specAttachments=spec 子集');
-    ok('详情 GET active 附件 + 每附件 round_no + A7 specAttachments/hasSpecAttachment（12-M2）');
+    ok('详情 GET active 附件 + round_no 字段存在 + A7 specAttachments/hasSpecAttachment（12-M2，不受 C3 影响）');
 
-    // ── [4] orphan 回滚：submit 传非法 id → 400 + 整事务 ROLLBACK ──
+    // id2：不再用于 submit-orphan 场景（C3 退场），仅保留作 [8] 跨单越权下载测试的治具
     const id2 = await seedDev(5);
-    r = await upload(ATT(id2), devTok, { attachment_type: 'delivery' }, 'b.png');
-    const d2 = r.body.attachments[0].id;
-    r = await call('POST', `/api/sys-issues/${id2}/submit`, devTok, { summary: 'x', attachment_ids: [d2, 999999] });
-    assert.strictEqual(r.status, 400, 'submit 含非法 id 400'); assert.strictEqual(r.body.code, 'SUBMIT_ATTACHMENT_INVALID');
-    assert.strictEqual((await attRow(d2)).round_no, null, 'orphan 回滚：合法 id d2 未被绑（仍 NULL）');
-    assert.strictEqual((await get('SELECT status FROM sys_issues WHERE id=?', [id2])).status, '开发中', 'orphan 回滚：status 仍开发中（整事务 ROLLBACK）');
-    ok('orphan 回滚：submit 含非法 id → 400 + d2 未绑 + status 不变（BEGIN IMMEDIATE 整事务 ROLLBACK）');
-
-    // ── [5] spec 不被 submit 绑：传 spec id 进 attachment_ids → 400（白名单排除 spec）──
-    const id3 = await seedDev(5);
-    r = await upload(ATT(id3), devTok, { attachment_type: 'delivery' }, 'c.png'); const d3 = r.body.attachments[0].id;
-    r = await upload(ATT(id3), adminTok, { attachment_type: 'spec' }, 'sp.pdf'); const spec3 = r.body.attachments[0].id;
-    r = await call('POST', `/api/sys-issues/${id3}/submit`, devTok, { summary: 'x', attachment_ids: [d3, spec3] });
-    assert.strictEqual(r.status, 400, '传 spec id submit 400');
-    assert.strictEqual((await attRow(spec3)).round_no, null, 'spec 不被绑');
-    assert.strictEqual((await get('SELECT status FROM sys_issues WHERE id=?', [id3])).status, '开发中', 'spec 误传整事务回滚');
-    // 仅传 delivery → 成功
-    r = await call('POST', `/api/sys-issues/${id3}/submit`, devTok, { summary: 'x', attachment_ids: [d3] });
-    assert.strictEqual(r.status, 200, '仅 delivery submit 200');
-    assert.strictEqual((await attRow(d3)).round_no, 1, 'd3 绑 round_no=1');
-    ok('spec id 误入 attachment_ids → 400 整事务回滚；仅传 delivery → 200 绑 round=1（11-H2 白名单）');
+    await upload(ATT(id2), devTok, { attachment_type: 'delivery' }, 'b.png');
 
     // ── [6] supersede（10-M1）+ active 过滤 ──
     const id4 = await seedDev(5);
@@ -274,21 +258,44 @@ async function main() {
     assert.strictEqual(r.status, 403, '非上传本人删 403');
     ok('删除未绑 delivery by dev2（非上传本人/非 admin）→ 403');
     r = await call('DELETE', `/api/sys-issues/${id6}/attachments/${d6}`, devTok);
-    assert.strictEqual(r.status, 200, '上传本人删未绑 delivery 200');
+    assert.strictEqual(r.status, 200, '上传本人删 delivery 200');
     assert.strictEqual(await attRow(d6), undefined, '物理删除（行不存在）');
-    ok('删除未绑 delivery by 上传本人 → 200 + 物理删行');
-    // 已绑 delivery（id1 的 d1 round=1）删 → 409
+    ok('删除 delivery by 上传本人（在册非历史参与）→ 200 + 物理删行');
+    // [C5 round_no 遗产③收口] 旧模型："submit 绑 round_no 后 delivery 变'已提交'不可删"（round_no NOT NULL 判定，
+    //   index.js 旧 3697-3699 行）——C3 起 submit 不再写 round_no（[3-5] 已退场），该守卫恒不命中，一度形成
+    //   "已提交交付附件失去历史留痕保护"的真实缺口（[C3 遗留缺口] 曾如实记录此状）。C5 已用状态族门补上：
+    //   ATTACHMENT_BOUND_NOT_DELETABLE 改判「状态∈SYS_TERMINAL」（§4.0，已上线∪非发布终态，不含待上线）。
+    //   id1 此刻状态为「待验证」（VERIFY 族，非终态）——不在新门禁范围内，故 admin（协调人）仍可删除 d1，
+    //   这不是遗留缺口，而是"非终态窗口本就允许删除"的正确行为（§5.4：删除条件仅"∉SYS_TERMINAL"，不含
+    //   "未提交"这一更严格的旧约束）。
     r = await call('DELETE', `/api/sys-issues/${id1}/attachments/${d1}`, adminTok);
-    assert.strictEqual(r.status, 409, '已绑 delivery 删 409'); assert.strictEqual(r.body.code, 'ATTACHMENT_BOUND_NOT_DELETABLE');
-    ok('删除已绑 delivery（round NOT NULL）→ 409 ATTACHMENT_BOUND_NOT_DELETABLE（交付历史留痕）');
-    // spec 删除：dev → 403 / admin → 200
+    assert.strictEqual(r.status, 200, '[C5] 待验证态（非终态）delivery 删除 by 协调人应 200，实际 ' + r.status + ' ' + JSON.stringify(r.body));
+    assert.strictEqual(await attRow(d1), undefined, 'C5：非终态窗口内删除成功，物理删除');
+    ok('[C5] 删除 delivery（待验证态·非终态）by admin（协调人）→ 200（round_no 遗产③：判定依据已从 round_no 改为终态族）');
+    // spec 删除：dev（非协调人/非上传者）→ 403 / admin（协调人）→ 200
     r = await call('DELETE', `/api/sys-issues/${id1}/attachments/${spec1}`, devTok);
     assert.strictEqual(r.status, 403, 'spec 删 by dev 403');
-    ok('删除 spec by dev → 403（需求材料仅 admin）');
+    ok('删除 spec by dev（非协调人/非上传者）→ 403（需求材料删除=(上传者∨协调人∨admin)）');
     r = await call('DELETE', `/api/sys-issues/${id1}/attachments/${spec1}`, adminTok);
     assert.strictEqual(r.status, 200, 'spec 删 by admin 200');
     assert.strictEqual(await attRow(spec1), undefined, 'spec 物理删除');
     ok('删除 spec by admin → 200 + 物理删 + timeline note');
+
+    // ── [C5 新增] 终态门收口实测：delivery 附件所属单进入 SYS_TERMINAL（已作废）后 → 409 ATTACHMENT_BOUND_NOT_DELETABLE ──
+    {
+      const id9 = await seedDev(5);
+      r = await upload(ATT(id9), devTok, { attachment_type: 'delivery' }, 'terminal-guard.png');
+      assert.strictEqual(r.status, 200, '终态门测试：上传 delivery 200');
+      const d9 = r.body.attachments[0].id;
+      const rVoid = await call('POST', `/api/sys-issues/${id9}/void`, adminTok, { reason: '终态删除防线测试' });
+      assert.strictEqual(rVoid.status, 200, '终态门测试：作废成功');
+      r = await call('DELETE', `/api/sys-issues/${id9}/attachments/${d9}`, adminTok);
+      assert.strictEqual(r.status, 409, `[C5] 终态（已作废）delivery 删除应 409，实际 ${r.status} ${JSON.stringify(r.body)}`);
+      assert.strictEqual(r.body.code, 'ATTACHMENT_BOUND_NOT_DELETABLE', 'C5：终态门错误码 ATTACHMENT_BOUND_NOT_DELETABLE（round_no 遗产③新判定依据）');
+      const stillActive = await attRow(d9);
+      assert.ok(stillActive && stillActive.status === 'active', 'C5：终态门拦下后附件行仍 active（未被误删，历史留痕保护生效）');
+      ok('[C5] round_no 遗产③收口实测：终态（已作废）单的 delivery 附件删除 → 409 ATTACHMENT_BOUND_NOT_DELETABLE（admin/协调人也拦，判定看状态非身份）');
+    }
 
     // ── [10] 作废单上传 spec → 409 ──
     const id7 = await seedDev(5);
@@ -296,33 +303,40 @@ async function main() {
     r = await upload(ATT(id7), adminTok, { attachment_type: 'spec' }, 'v.pdf');
     assert.strictEqual(r.status, 409, '作废单上传 spec 409'); assert.strictEqual(r.body.code, 'INVALID_STATE_FOR_ATTACHMENT');
     ok('上传 spec 到已作废单 → 409 INVALID_STATE_FOR_ATTACHMENT');
-    // 作废单下载 by 非 admin → 403（行 assigned_to=5，dev 是 assignee 但作废 → 403）
+    // [C5 断言变更②] 作废单下载：§5.4 下载列本身无状态限定（admin∨对接人∨在册∨历史参与即放行，不再单独判
+    //   "已作废非 admin 403"）——旧断言"非 admin 403"与唯一权威表矛盾，已按契约裁定点改判 200（见完成报告）。
+    //   在册开发（此处仍在册，未 remove）下载已作废单附件 → 200；admin 同 200。
     const id8 = await seedDev(5);
     r = await upload(ATT(id8), devTok, { attachment_type: 'delivery' }, 'f.png'); const d8 = r.body.attachments[0].id;
     await call('POST', `/api/sys-issues/${id8}/void`, adminTok, { reason: 'x' });
     dl = await download(dlPath(id8, d8), devTok);
-    assert.strictEqual(dl.status, 403, '作废单非 admin 下载 403');
-    ok('下载已作废单附件 by 指派开发 → 403（SYS_ISSUE_VOIDED）；admin 仍可下载');
+    assert.strictEqual(dl.status, 200, `[C5 断言变更②] 作废单下载 by 在册开发应 200，实际 ${dl.status}`);
+    ok('[C5] 下载已作废单附件 by 在册开发 → 200（§5.4 下载列无状态限定；旧断言=403 SYS_ISSUE_VOIDED，本条即断言变更②实测）');
     dl = await download(dlPath(id8, d8), adminTok);
     assert.strictEqual(dl.status, 200, '作废单 admin 下载 200');
     ok('下载已作废单附件 by admin → 200');
 
-    // ── [11] A9：多轮 round_no（submit→return→submit 应得 round 2，闭 MAX+1 序列，非恒 1）──
-    const idR = await seedDev(5);
-    r = await upload(ATT(idR), devTok, { attachment_type: 'delivery' }, 'r1.png'); const dr1 = r.body.attachments[0].id;
-    r = await call('POST', `/api/sys-issues/${idR}/submit`, devTok, { summary: '第一轮', attachment_ids: [dr1] });
-    assert.strictEqual(r.status, 200, '第一轮 submit 200');
-    assert.strictEqual((await attRow(dr1)).round_no, 1, '第一轮 delivery round_no=1');
-    await call('POST', `/api/sys-issues/${idR}/return`, adminTok, { reason: '列不齐' });            // 回开发中 + 清 dev_estimated_at
-    await call('POST', `/api/sys-issues/${idR}/estimate`, devTok, { dev_estimated_at: '2026-08-02 10:00' });  // 新一轮重填
-    r = await upload(ATT(idR), devTok, { attachment_type: 'delivery' }, 'r2.png'); const dr2 = r.body.attachments[0].id;
-    r = await call('POST', `/api/sys-issues/${idR}/submit`, devTok, { summary: '第二轮', attachment_ids: [dr2] });
-    assert.strictEqual(r.status, 200, '第二轮 submit 200, got ' + r.status + ' ' + JSON.stringify(r.body));
-    assert.strictEqual((await attRow(dr2)).round_no, 2, '第二轮 delivery round_no=2（MAX+1）');
-    assert.strictEqual((await attRow(dr1)).round_no, 1, '第一轮 delivery round_no 仍=1（历史不变）');
-    const subs = await all("SELECT round_no FROM sys_issue_timeline WHERE issue_id=? AND event_type='submit' ORDER BY round_no", [idR]);
-    assert.deepStrictEqual(subs.map(x => x.round_no), [1, 2], '两轮 submit timeline round_no=[1,2]');
-    ok('A9 多轮：submit→return→submit 得 round 1/2（MAX+1 序列正确，非恒 1）');
+    // ── [11] C3 退场：A9 多轮 round_no（MAX+1 序列）──
+    //   旧模型 submit 事务内对 attachment_ids 做 MAX(round_no)+1 绑定 + 写 sys_issue_timeline(event_type='submit', round_no=N)。
+    //   新模型 submit 不再接受 attachment_ids（§6.1 契约见 [3-5]），且 submit/no_code 事件改写 sys_issue_dev_events
+    //   （insertDevEvent，routes/sys-iteration/index.js:1019 起）而非 sys_issue_timeline——round_no 序列绑定机制随之整体退场。
+    //   §1 不变量1「完成态不回 pending」：return 不重置 roster dev_status，故单人 roster 在 return 后不能直接
+    //   resubmit（需走 remove+re-add 换新实例，属 verify-sys-bug-transitions.js「二轮」场景覆盖，非本文件职责）。
+    //   本文件仅记录 return 后 double-guard 正确拒绝直接 resubmit 的边界，替代旧"两轮 round_no"断言。
+    //   [codex 98 号 HIGH 回填·同批] ESTIMATE_REQUIRED 恢复后，return 同时清 dev_estimated_at（T-M2）——
+    //   resubmit 时新恢复的「dev_estimated_at 未填」闸门在「dev_status 非 pending」闸门**之前**触发（与
+    //   e39e65b 版旧 case 'submit' 的检查顺序一致：ESTIMATE_REQUIRED 排在最前），故实际观测错误码由
+    //   INVALID_STATUS 改为 ESTIMATE_REQUIRED——这是对旧行为的更忠实复刻，非新引入的不一致。
+    {
+      const idR = await seedDev(5);
+      let rr = await call('POST', `/api/sys-issues/${idR}/submit`, devTok, { mode: 'no_code', no_code_reason: '第一轮（占位理由）' });
+      assert.strictEqual(rr.status, 200, '第一轮 submit 200');
+      await call('POST', `/api/sys-issues/${idR}/return`, adminTok, { reason: '列不齐' });            // 回开发中，dev_status 不回 pending（§1 不变量1）+ 清 dev_estimated_at（T-M2）
+      rr = await call('POST', `/api/sys-issues/${idR}/submit`, devTok, { mode: 'no_code', no_code_reason: '直接重提（占位理由）' });
+      assert.strictEqual(rr.status, 400, 'return 后直接 resubmit → 400（dev_estimated_at 被 return 清空，ESTIMATE_REQUIRED 先于 dev_status 闸触发）');
+      assert.strictEqual(rr.body.code, 'ESTIMATE_REQUIRED');
+    }
+    ok('C3 退场：round_no 绑定机制随 submit 事件模型迁移整体退场（见 [3-5]）；「完成态不回 pending」边界回归保留');
 
     // ── [12] A9：supersede 端点级 active 过滤 + superseded 软信号（A4）──
     const idSp = await seedDev(5);

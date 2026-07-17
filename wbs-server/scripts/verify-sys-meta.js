@@ -6,12 +6,13 @@
 //   2. meta 不暴露内部 guard（M-4：typeFlows 不含 roleGuard/ownerGuard/sideEffects/notifyAfterCommit）
 //   3. ⭐ 枚举同步（12-M4 + 05-H1）：transitions 常量的 timelineEvent / actionCode ⊆ DDL CHECK 枚举，无幽灵值
 //   4. 变更流类型流完整（feature/improvement 共用同一份，含 create→...→close 全动作）
-//   5. findTransition / resolveToStatus 行为正确（含 reassign 待验证→开发中映射、'*' 通配、to=null 旁路）
+//   5. findTransition / resolveToStatus 行为正确（含 reassign to=null 动态解析·M3/91 号审、'*' 通配、to=null 旁路）
 const assert = require('assert');
 const sqlite3 = require('sqlite3');
 const path = require('path');
 
 const T = require('../routes/sys-iteration/transitions');
+const SF = require('../routes/sys-iteration/status-families');   // [6] MED-2·92 号审：reassign.from 写读同源核对用
 
 // 取真实 DDL CHECK 枚举（从 index.js initSchema 建表，PRAGMA 读不到 CHECK，改从 sqlite_master.sql 文本解析）
 const db = new sqlite3.Database(':memory:');
@@ -93,7 +94,10 @@ async function main() {
   // 每个 timelineEvent 必须 ∈ DDL event_type 枚举（防 05-H1 那类 CHECK 冲突）
   const eventLeak = [...usedEvents].filter(e => !ddlEventTypes.includes(e));
   assert.strictEqual(eventLeak.length, 0, `transitions 用了 DDL CHECK 没有的 event_type（会触发 CHECK 失败）：${eventLeak.join(',')}`);
-  ok(`枚举同步：transitions 全部 timelineEvent（${[...usedEvents].join('/')}）⊆ DDL event_type CHECK（含 reassign 独立枚举 05-H1，无 CHECK 冲突）`);
+  // LOW（92 号审）：reassign 条目 timelineEvent 已改 null（成员动作只写 dev_events，不进 timeline，见
+  //   transitions.js 同批改动）——DDL CHECK 仍保留 'reassign' 值（供 C2 前的历史 timeline 行渲染，非本次删除
+  //   范围），但它不再出现在 usedEvents 里，故提示语不再点名 05-H1。
+  ok(`枚举同步：transitions 全部 timelineEvent（${[...usedEvents].join('/')}）⊆ DDL event_type CHECK（无 CHECK 冲突；reassign 已随 v2.9 改 timelineEvent=null，DDL 枚举值仅保留供历史行渲染）`);
 
   // actionCode 是 status_change 的细分（RC-L1），不入 DDL CHECK（DDL 无 action_code CHECK），仅自洽检查非空字符串
   for (const ac of usedActionCodes) {
@@ -164,10 +168,14 @@ async function main() {
   // 5a. assign：已排期 → 开发中
   const tAssign = T.findTransition('feature', 'assign', '已排期');
   assert.ok(tAssign && T.resolveToStatus(tAssign, '已排期') === '开发中', 'assign 已排期→开发中');
-  // 5b. reassign：待验证 → 开发中（映射对象）
+  // 5b. reassign（既有测试变更·M3/91 号审）：v2.9 前是静态 from→to 映射（待验证→开发中/开发中→开发中）；
+  //   C2 重写为声明式 member_ids 差量 + W-GATE 动态判定目标态，实际目标态事前不可静态得知——改仿 resume 的
+  //   to=null 动态解析语义（transitions.js 同批改动），故本处断言随之改为 resolveToStatus 返 null（不再改 status
+  //   由端点内 W-GATE 处理），而非旧断言的具体字符串目标态。
   const tReassign = T.findTransition('feature', 'reassign', '待验证');
-  assert.ok(tReassign && T.resolveToStatus(tReassign, '待验证') === '开发中', 'reassign 待验证→开发中（映射）');
-  assert.strictEqual(T.resolveToStatus(tReassign, '开发中'), '开发中', 'reassign 开发中→开发中');
+  assert.ok(tReassign, 'reassign 常量存在（待验证前置）');
+  assert.strictEqual(T.resolveToStatus(tReassign, '待验证'), null, 'reassign to=null（动态解析，不再是静态映射）');
+  assert.strictEqual(T.resolveToStatus(tReassign, '开发中'), null, 'reassign 开发中前置同为 to=null');
   // 5c. void：'*' 通配（任意态）
   const tVoid = T.findTransition('feature', 'void', '待评估');
   assert.ok(tVoid && tVoid.from === '*' && T.resolveToStatus(tVoid, '待评估') === '已作废', 'void 通配 → 已作废');
@@ -178,7 +186,28 @@ async function main() {
   assert.strictEqual(T.findTransition('feature', 'assign', '待评估'), null, 'feature 待评估态不能 assign');
   // 5f. bug/config 本轮未定义
   assert.strictEqual(T.findTransition('bug', 'create', null), null, 'bug 流本轮未定义（追加时填）');
-  ok('findTransition/resolveToStatus：assign(已排期→开发中) / reassign 映射(待验证→开发中) / void 通配 / estimate 旁路 to=null / 非法前置态返 null / bug 未定义');
+  ok('findTransition/resolveToStatus：assign(已排期→开发中) / reassign to=null(动态解析) / void 通配 / estimate 旁路 to=null / 非法前置态返 null / bug 未定义');
+
+  // [6] MED-2（92 号审）+ 93 号收口：reassign 条目 from 与后端 assertMemberActionFamilyAllowed 实际放行集合
+  //   "写读同源"——族清单**直接读后端真源 `_internals.MEMBER_ACTION_FAMILY_MATRIX.reassign`**（index.js 导出），
+  //   再经 status-families.js 展开为状态集合比对。93 号审指出：此前这里手写 ['D_PRE','DEV','VERIFY'] 仍是第二份
+  //   清单——若未来矩阵增删族而 transitions.from 未同步，手写版测试照样通过（防漂移落空）；改读真源后矩阵任何
+  //   变化都会立即被本断言暴露。
+  const reassignAllowedFamilies = mod._internals.MEMBER_ACTION_FAMILY_MATRIX.reassign;
+  assert.ok(Array.isArray(reassignAllowedFamilies) && reassignAllowedFamilies.length > 0, '[6] 后端矩阵应导出 reassign 放行族清单');
+  const reassignAuthoritativeStatuses = (type) =>
+    reassignAllowedFamilies.flatMap(fam => SF.getFamilyStatuses(type, fam));
+  for (const type of ['feature', 'improvement', 'bug']) {
+    // 直接按 action 取条目（不经 findTransition，避免"用待验证的 from 元素去找 from"这种自我耦合的假阳性——
+    // 若 from 漏了某个权威态，findTransition(type,'reassign',那个态) 会返 null，反而让本测试提前误判"条目不存在"
+    // 而非"from 缺项"，掩盖真实问题）。
+    const t = T.transitionsForType(type).find(x => x.action === 'reassign');
+    assert.ok(t, `[6] ${type} reassign 常量应存在`);
+    const expected = reassignAuthoritativeStatuses(type).slice().sort();
+    const actual = (t.from || []).slice().sort();
+    assert.deepStrictEqual(actual, expected, `[6] ${type} reassign.from 应与 D_PRE∪DEV∪VERIFY 权威集合完全一致（写读同源），实际 from=${JSON.stringify(actual)} 权威=${JSON.stringify(expected)}`);
+  }
+  ok('[6] MED-2：reassign.from（feature/improvement/bug 三份）与后端 assertMemberActionFamilyAllowed 矩阵放行集合（D_PRE∪DEV∪VERIFY，动态取自 status-families.js）完全一致，写读同源');
 
   console.log(`\n[全部通过] ${passed}/${passed} ✓ 系统迭代 meta + 状态机常量枚举同步验证通过`);
   console.log(`  覆盖：meta 结构 + M-4 不泄露内部 guard + 枚举同步(timelineEvent ⊆ DDL CHECK 12-M4) + 变更流完整 + findTransition/resolveToStatus`);

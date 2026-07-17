@@ -4,11 +4,12 @@
 // require 真实 index.js _internals.sysIssueTransition 跑变更流全链路，断言：
 //   1. 流转合法性（非法 from→to 拒）+ expectedFrom 比对（陈旧前置态 409）
 //   2. 双 WHERE + changes≠1 → 409（并发：先改 status 再 transition 应 409）
-//   3. 权限分流（roleGuard='admin' 非 admin 拒 / ownerGuard='assignee' 非本人拒）
-//   4. RC-M5 状态级不变量（无 assigned_to 进开发态拒）
+//   3. 权限分流（roleGuard='admin' 非 admin 拒）
+//   [C3 退场] assign/submit 均移出本函数（旧 switch-case 删除），RC-M5/submit 闸门/ownerGuard 白盒测试随之退场
+//     ——真实端点行为分别见 verify-sys-dev-assignee-transition.js / verify-sys-multidev-submit.js
 //   5. ⭐ reassign 不增 return_count（05-M2 判别）vs return 增 return_count（U-2）
-//   6. timeline 写入（event_type/action_code/from/to 正确）
-//   7. 变更流正向链路：建单→排期→指派→提交→验收→...（transition 串起来）
+//   6. timeline 写入（event_type/action_code/from/to 正确，覆盖仍走本函数的 schedule/return）
+//   7. 变更流正向链路（schedule 走 transition，assign/submit 改直接 SQL 快进）→验收→...
 const assert = require('assert');
 const sqlite3 = require('sqlite3');
 
@@ -57,6 +58,24 @@ async function statusOf(id) { return (await get('SELECT status FROM sys_issues W
 async function rowOf(id) { return await get('SELECT * FROM sys_issues WHERE id=?', [id]); }
 async function timelineOf(id) { return await all('SELECT * FROM sys_issue_timeline WHERE issue_id=? ORDER BY id', [id]); }
 
+// [C3] assign/submit 均已移出 sysIssueTransition（'assign' switch 分支随旧 /assign 端点删除、'submit' 改走独立
+//   handleDevSubmit 多开发 commit 事件模型，见 index.js:1303-1314 退场注释）——直接 `I.sysIssueTransition(id,
+//   'assign'|'submit', ...)` 的白盒调用已测不到生产路径（无端点再传这两个 action 给本函数）。本文件后续 fixture
+//   改直接 SQL 落状态 + roster（对齐 seedIssue 既有"跳过端点直插库"风格）快进到所需前置态，不模拟旧闸门行为。
+//   assign 的真实端点行为（含 RC-M5 无 assigned_to 不变量、timeline 记录）由 verify-sys-dev-assignee-transition.js
+//   /verify-sys-bug-transitions.js 覆盖；submit 的真实端点行为（含 roster pending 校验、dev_events 记录）由
+//   verify-sys-multidev-submit.js 覆盖，均为 HTTP 层真实调用，非本文件白盒直调风格。
+async function fastForwardAssign(id, devId = DEV.id, devName = DEV.name) {
+  await run(`UPDATE sys_issues SET status='开发中', assigned_to=?, assigned_to_name=?, assigned_at=datetime('now','localtime') WHERE id=?`,
+    [devId, devName, id]);
+  await run(`INSERT INTO sys_issue_dev_assignees (issue_id, user_id, user_name, is_primary, dev_status) VALUES (?, ?, ?, 1, 'pending')`,
+    [id, devId, devName]);
+}
+async function fastForwardSubmit(id) {
+  await run(`UPDATE sys_issue_dev_assignees SET dev_status='no_code', resolved_at=datetime('now','localtime'), no_code_reason='fixture 快进' WHERE issue_id=? AND removed_at IS NULL`, [id]);
+  await run(`UPDATE sys_issues SET status='待验证', first_submitted_at=datetime('now','localtime') WHERE id=?`, [id]);
+}
+
 async function main() {
   mod.initSchema();
   await waitReady();
@@ -92,15 +111,11 @@ async function main() {
     ok('权限 roleGuard：schedule（admin 动作）由开发执行 → 403 NOT_AUTHORIZED_FOR_TRANSITION');
   }
 
-  // [4] RC-M5：指派时不给 assigned_to → 进开发中态被不变量拦（无开发负责人）
-  {
-    const id = await seedIssue({ status: '已排期', assigned_to: null });
-    await assert.rejects(
-      I.sysIssueTransition(id, 'assign', '已排期', ADMIN, {}),  // 缺 assigned_to
-      e => e instanceof I.SysTransitionError && (e.code === 'NO_ASSIGNEE_FOR_DEV_STATE' || e.code === 'INVALID_ASSIGN_TARGET'),
-      'assign 缺 assigned_to 应被拦');
-    ok('RC-M5 状态级不变量：assign 缺 assigned_to → 进「开发中」被拦（无开发负责人）');
-  }
+  // [C3 退场] [4] RC-M5：指派时不给 assigned_to → 进开发中态被不变量拦（无开发负责人）
+  //   旧路径：I.sysIssueTransition(id,'assign',...) 的 switch-case 内部校验 assigned_to 必填。该 case 已删除，
+  //   'assign' 落到 default 分支 no-op（不再触发此检查）——RC-M5 不变量现由真实 /sys-issues/:id/assign 端点
+  //   在 HTTP 层强制（缺 assigned_to → 400 ASSIGN_TARGET_REQUIRED，见 verify-sys-dev-assignee-transition.js），
+  //   非本函数职责，随退场一并移除，不在本文件补白盒替代（白盒直调该 action 本身已是测试死代码）。
 
   // [5] 正向链路：待评估 → schedule → 已排期 → assign → 开发中（带 assigned_to）
   let mainId;
@@ -113,12 +128,13 @@ async function main() {
     assert.strictEqual(after.priority, 'P1', 'schedule 改 priority=P1');
     assert.ok(after.priority_reviewed_at, 'schedule 盖 priority_reviewed_at');
 
-    r = await I.sysIssueTransition(mainId, 'assign', '已排期', ADMIN, { assigned_to: DEV.id, assigned_to_name: DEV.name });
-    assert.strictEqual(r.toStatus, '开发中', 'assign → 开发中');
+    // [C3] assign 不再走 sysIssueTransition（见上方 [4] 退场说明），改直接 SQL 快进（fastForwardAssign）
+    await fastForwardAssign(mainId);
+    assert.strictEqual(await statusOf(mainId), '开发中', 'assign 快进 → 开发中');
     const afterAssign = await rowOf(mainId);
     assert.strictEqual(Number(afterAssign.assigned_to), DEV.id, 'assigned_to 写入');
     assert.ok(afterAssign.assigned_at, 'assigned_at 盖时间');
-    ok('正向链路：待评估 →schedule→ 已排期（priority/reviewed_at）→assign→ 开发中（assigned_to/at）');
+    ok('正向链路：待评估 →schedule→ 已排期（priority/reviewed_at）→assign(快进)→ 开发中（assigned_to/at）');
   }
 
   // [5b] codex 14 M-2：schedule deadline 校验（非法格式/非法日期 → 400 INVALID_DEADLINE）
@@ -158,53 +174,25 @@ async function main() {
     ok('M-2 闰年边界：2024-02-29 放行 / 2026-02-29 → 400 INVALID_DEADLINE（new Date 回比对挡非法日期）');
   }
 
-  // [6] 提交闸门：开发中 submit 缺 dev_estimated_at → ESTIMATE_REQUIRED
-  {
-    await assert.rejects(
-      I.sysIssueTransition(mainId, 'submit', '开发中', DEV, { summary: '改完了' }),
-      e => e instanceof I.SysTransitionError && e.code === 'ESTIMATE_REQUIRED',
-      'submit 缺 dev_estimated_at 应拒');
-    ok('提交闸门：开发中 submit 缺 dev_estimated_at → ESTIMATE_REQUIRED');
-
-    // 补 dev_estimated_at 后再 submit（缺 summary → SUBMIT_SUMMARY_REQUIRED）
-    await run("UPDATE sys_issues SET dev_estimated_at = datetime('now','localtime') WHERE id=?", [mainId]);
-    await assert.rejects(
-      I.sysIssueTransition(mainId, 'submit', '开发中', DEV, { summary: '   ' }),
-      e => e instanceof I.SysTransitionError && e.code === 'SUBMIT_SUMMARY_REQUIRED',
-      'submit 空 summary 应拒');
-    ok('提交闸门：交付说明 trim 空 → SUBMIT_SUMMARY_REQUIRED');
-
-    // 合法 submit（开发本人）→ 待验证 + first_submitted_at
-    const r = await I.sysIssueTransition(mainId, 'submit', '开发中', DEV, { summary: '已完成功能 X' });
-    assert.strictEqual(r.toStatus, '待验证', 'submit → 待验证');
-    const after = await rowOf(mainId);
-    assert.ok(after.first_submitted_at, 'first_submitted_at 盖');
-    ok('提交：开发本人 + dev_estimated_at + summary 齐 → 待验证（first_submitted_at 盖）');
-  }
-
-  // [7] ownerGuard：非本人开发 submit 应 403（DEV2 不是 assigned_to）
-  {
-    const id = await seedIssue({ status: '开发中', assigned_to: DEV.id, dev_estimated_at: '2026-07-01 10:00' });
-    await assert.rejects(
-      I.sysIssueTransition(id, 'submit', '开发中', DEV2, { summary: '我来交' }),
-      e => e instanceof I.SysTransitionError && e.code === 'NOT_AUTHORIZED_FOR_TRANSITION',
-      '非本人开发 submit 应 403');
-    ok('ownerGuard：submit 由非本人开发（DEV2≠assigned_to）执行 → 403');
-  }
-
-  // [7b] ⭐ codex 14 H-1 复审专项：ownerGuard 严格本人——admin 也不能代提交（submit 已指派 DEV 的单）
-  {
-    const id = await seedIssue({ status: '开发中', assigned_to: DEV.id, dev_estimated_at: '2026-07-01 10:00' });
-    await assert.rejects(
-      I.sysIssueTransition(id, 'submit', '开发中', ADMIN, { summary: 'admin 代交' }),
-      e => e instanceof I.SysTransitionError && e.code === 'NOT_AUTHORIZED_FOR_TRANSITION',
-      'admin submit 已指派 DEV 的单应 403（H-1 严格本人）');
-    ok('⭐ H-1 复审：ownerGuard 严格本人——admin 对已指派 DEV 的 submit → 403（admin 全能仅 roleGuard 动作，不代办开发本人动作）');
-    // 反证：被指派开发本人 submit 仍可（确认没误伤正常路径）
-    const r = await I.sysIssueTransition(id, 'submit', '开发中', DEV, { summary: '本人正常交付' });
-    assert.strictEqual(r.toStatus, '待验证', '开发本人 submit 仍正常 → 待验证');
-    ok('H-1 反证：开发本人 submit 仍正常放行 → 待验证（修 H-1 未误伤正常路径）');
-  }
+  // [C3 退场] [6]/[7]/[7b] 旧 submit 闸门（ESTIMATE_REQUIRED/SUBMIT_SUMMARY_REQUIRED/ownerGuard 严格本人 H-1）
+  //   均属旧 I.sysIssueTransition(...,'submit',...) switch-case 内部逻辑，随该 case 删除一并退场（index.js:
+  //   1307-1314）。新 handleDevSubmit 是完全不同的校验模型，逐项核实覆盖情况（codex 98 号 MED5 要求：凡属
+  //   submit 行为验证必须走真实路由核实，不能只在此处 SQL 快进就断言"已覆盖"）：
+  //   - SUBMIT_SUMMARY_REQUIRED：被新 §6.1 mode 专属必填校验取代（no_code_reason trim 1..500 / commit_ref
+  //     trim 1..200），真实路由反例见 verify-sys-multidev-submit.js VALIDATION 边界组——确认覆盖。
+  //   - ownerGuard 严格本人（H-1，admin 也不能代提交）：assertDevMember 统一在册判定（403 NOT_ROSTERED），
+  //     真实路由反例见 verify-sys-bug-transitions.js:524-533（非在册开发 403 + admin 代提交 403 两条）——确认覆盖。
+  //   - ✅ ESTIMATE_REQUIRED（提交前必须已回填 dev_estimated_at）：上一轮核实时发现新 handleDevSubmit 曾
+  //     遗漏此项校验（既非被取代也未被复刻），已按 codex 98 号 HIGH 同一处方（SSOT 未明确废除的现网 submit
+  //     资格不变量=行为回归，非语义重定义）在同批次内回填——对照 e39e65b 版旧 case 'submit'（index.js:1376）
+  //     逐字复刻（判定/错误码 `ESTIMATE_REQUIRED` 原样，无 type 限定，bug 流同受理）。真实路由反例见
+  //     verify-sys-multidev-submit.js S1b（feature + bug 各一条）——确认覆盖，缺口已回填，非遗留问题。
+  //   [8]/[9] 需要 mainId 处于「待验证」态作前置 fixture（非 submit 行为验证本身）——直接 SQL 快进
+  //   （fastForwardSubmit）绕过 handleDevSubmit 全部校验（含新恢复的 ESTIMATE_REQUIRED），在此仍合规
+  //   （SQL 快进只允许用于非 submit 行为验证的场景准备，不受本轮闸门变化影响）。
+  await fastForwardSubmit(mainId);
+  assert.strictEqual(await statusOf(mainId), '待验证', 'submit 快进 → 待验证');
+  ok('正向链路（续）：开发中 →submit(快进)→ 待验证（fixture 准备，submit 行为本身验证见上方逐项核实）');
 
   // [8] ⭐ return vs reassign 的 return_count 判别（05-M2）
   {
@@ -221,6 +209,10 @@ async function main() {
   // [9] return 闸门：缺 reason → RETURN_REASON_REQUIRED
   {
     const id = await seedIssue({ status: '待验证', assigned_to: DEV.id });
+    // C3：return 是 VERIFY→DEV（enteringDev），guard [2b] 要求在册成员数≥1（方案不变量），需补 roster 行
+    //   否则会被 guard 先一步以 400 GATE_INVARIANT 拦下，掩盖本测试真正要验的 RETURN_REASON_REQUIRED。
+    await run(`INSERT INTO sys_issue_dev_assignees (issue_id, user_id, user_name, is_primary, dev_status) VALUES (?, ?, ?, 1, 'no_code')`,
+      [id, DEV.id, DEV.name]);
     await assert.rejects(
       I.sysIssueTransition(id, 'return', '待验证', ADMIN, { reason: '  ' }),
       e => e instanceof I.SysTransitionError && e.code === 'RETURN_REASON_REQUIRED',
@@ -241,18 +233,17 @@ async function main() {
     ok('双 WHERE 并发守卫：status 被并发改后，旧 expectedFrom 的 transition 被拒（409/INVALID_TRANSITION）');
   }
 
-  // [11] timeline 写入正确（mainId 链路：created? 无——seed 没写；schedule/assign/submit/return 有 timeline）
+  // [11] timeline 写入正确（mainId 链路：schedule/return 仍走 sysIssueTransition，有 timeline；
+  //   assign/submit 本轮改直接 SQL 快进，不经真实端点，故不写 timeline——真实 assign/submit 的 timeline/
+  //   dev_events 落库分别由 verify-sys-dev-assignee-transition.js / verify-sys-multidev-submit.js 覆盖）
   {
     const tl = await timelineOf(mainId);
-    // schedule(status_change/schedule) + assign(assign) + submit(submit) + return(return)
     const events = tl.map(t => t.event_type);
     assert.ok(events.includes('status_change'), 'schedule 写 status_change');
-    assert.ok(events.includes('assign'), 'assign 写 assign');
-    assert.ok(events.includes('submit'), 'submit 写 submit');
     assert.ok(events.includes('return'), 'return 写 return');
     const scheduleEv = tl.find(t => t.action_code === 'schedule');
     assert.ok(scheduleEv && scheduleEv.from_status === '待评估' && scheduleEv.to_status === '已排期', 'schedule timeline from/to 正确');
-    ok(`timeline 写入：schedule(status_change/schedule) + assign + submit + return 各 1 条，from/to/action_code 正确（共 ${tl.length} 条）`);
+    ok(`timeline 写入：schedule(status_change/schedule) + return 各 1 条，from/to/action_code 正确（共 ${tl.length} 条；assign/submit 为快进 fixture 不写 timeline，见上方 [C3 退场] 说明）`);
   }
 
   // [12] reassign 路径（不走 transition，但验 05-M2：reassign 不增 return_count）—— 直接测 transitions 常量层

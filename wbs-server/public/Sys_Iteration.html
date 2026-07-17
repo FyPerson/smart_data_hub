@@ -213,6 +213,38 @@
         .si-empty { text-align: center; padding: 40px; color: #94a3b8; font-size: 13px; }
 
         .si-info-banner { background: #eff6ff; border: 1px solid #bfdbfe; color: #1e40af; font-size: 12px; padding: 8px 13px; border-radius: 8px; margin-bottom: 14px; line-height: 1.5; }
+
+        /* C1（多开发协作与 commit 留痕重构 v2.9 §13 S1）：详情成员区全在册 chip + commit 记录小表——
+           页面本体新增，不进 components.css（本页专属展示，非跨页共享组件）。视觉语言对齐既有 .si-release-badge
+           （小号圆角徽章）+ .u-corr-table（表头浅底/行分隔线），仅收窄宽度适配抽屉（660px）。 */
+        .si-dev-chip-list { display: flex; flex-wrap: wrap; gap: 8px; }
+        .si-dev-chip { display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; border-radius: 14px; background: #f1f5f9; font-size: 12px; color: #334155; }
+        .si-dev-primary-mark { font-size: 10px; color: #94a3b8; border: 1px solid #cbd5e1; border-radius: 6px; padding: 0 4px; line-height: 14px; }
+        .si-dev-status-badge { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+        .si-dev-status-badge.pending { background: #e2e8f0; color: #475569; }
+        .si-dev-status-badge.code_submitted { background: #d1fae5; color: #065f46; }
+        .si-dev-status-badge.no_code { background: #fef3c7; color: #92400e; }
+        .si-dev-status-badge.excused { background: #e0e7ff; color: #4338ca; }
+        .si-commit-table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 12px; }
+        .si-commit-table th { text-align: left; padding: 6px 8px; background: #f8fafc; color: #64748b; font-weight: 600; border-bottom: 1px solid #e2e8f0; }
+        .si-commit-table td { padding: 6px 8px; border-bottom: 1px solid #f1f5f9; color: #374151; }
+        .si-commit-table tr:last-child td { border-bottom: none; }
+        /* 列表负责人列多人展示（人多截断 +N，悬浮 title 显全量） */
+        .si-dev-roster-more { color: #94a3b8; margin-left: 3px; cursor: default; }
+
+        /* C7（多开发协作与 commit 留痕重构 v2.9 §11 前端骨架）：chip 内协调人小按钮（开脱/恢复）+ commit
+           小表行内操作（编辑/删除）——视觉语言对齐既有 .si-att-del（红字小链接）。 */
+        .si-dev-chip-act { font-size: 10px; color: #d97706; cursor: pointer; border: 1px solid #fcd34d; border-radius: 5px; padding: 0 5px; line-height: 15px; }
+        .si-dev-chip-act:hover { background: #fffbeb; }
+        .si-commit-act { font-size: 11px; color: #2563eb; cursor: pointer; margin-right: 8px; }
+        .si-commit-act.danger { color: #dc2626; }
+        /* C7：提交交付弹窗——提交方式单选行 + 动态 commit 行编辑器（component 下拉 + commit_ref 输入 + 删除） */
+        .si-radio-row { display: flex; gap: 16px; }
+        .si-radio-opt { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; font-size: 13px; font-weight: 400; }
+        .si-commit-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+        .si-commit-row select { flex: 0 0 90px; padding: 7px 8px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 13px; }
+        .si-commit-row input[type="text"] { flex: 1; min-width: 0; }
+        .si-commit-row-del { flex: 0 0 auto; font-size: 11px; color: #dc2626; cursor: pointer; }
     </style>
 </head>
 
@@ -445,6 +477,7 @@
     let siOpenId = null;             // 当前打开的详情单 id
     let siDetail = null;             // 当前详情对象
     let siModalConfirm = null;       // 当前弹框确认回调
+    let siCaps = null;               // C7：当前详情的四布尔能力（siComputeCaps 产出，siRenderDrawer 内刷新）
 
     // 类型中文 label（meta 不返 type label，前端映射；仅展示 meta.typeFlows 里存在的类型）
     const SI_TYPE_LABEL = { bug: 'BUG', feature: '新功能', improvement: '优化', config: '配置变更' };
@@ -484,7 +517,9 @@
 
     // 开发本人（owner）动作集；其余动作归 admin。meta 不暴露 roleGuard，前端做最小 UX 分类，后端仍强制。
     // 注意：unblock（解除受阻）后端是 admin 专属（roleGuard:'admin'），不能归入开发集，否则 admin 看不到、开发点了必 403。
-    const SI_DEV_ACTIONS = new Set(['estimate', 'submit', 'feasibility', 'blocked', 'set_release_flag']);
+    // [codex 110 号 LOW] set_release_flag 已随 v1.6 R1 全链退场（端点对所有 type 无生效路径、siDoAction case 已删），
+    //   从开发动作集移除防未来 meta 回归时被当在册动作放出。
+    const SI_DEV_ACTIONS = new Set(['estimate', 'submit', 'feasibility', 'blocked']);
     // 危险按钮样式
     const SI_DANGER_ACTIONS = new Set(['return', 'issue_reject', 'void', 'reopen', 'hold', 'blocked']);
     const SI_SEC_ACTIONS = new Set(['reassign', 'unblock', 'derive', 'close', 'schedule']);
@@ -746,6 +781,29 @@
         sysIterationSorter.render();
     }
 
+    // C1（多开发协作与 commit 留痕重构 v2.9 §13 S1）：列表负责人列多人展示——item.dev_roster_names 是后端
+    //   json_group_array 的 JSON 数组字符串（按 user_id 升序在册成员名，如 '["张三","李四"]'）；无在册成员
+    //   （旧数据/D_PRE 阶段未指派）回退 assigned_to_name（兼容不动）。人多截断显前 2 名 + "等+N"，悬浮 title
+    //   显全量，不做排序/筛选增强（C1 红线）。
+    //   ⚠️ LOW-1（89 号审）：字段值协议是 JSON 数组，非逗号拼接明文——display_name 无"禁逗号"约束，人名可能
+    //   本身含英文逗号，split(',') 会把单个含逗号的名字错拆成两截，故用 JSON.parse；解析失败（脏数据/协议
+    //   变更）时防御性回退 assigned_to_name，不抛错。
+    const SI_DEV_ROSTER_MAX_SHOW = 2;
+    function siDevRosterCellHtml(item) {
+        let names = [];
+        try {
+            const parsed = item.dev_roster_names ? JSON.parse(item.dev_roster_names) : [];
+            if (Array.isArray(parsed)) names = parsed.filter(s => typeof s === 'string' && s.trim()).map(s => s.trim());
+        } catch (_) { names = []; }   // 解析失败防御性回退 assigned_to_name，不抛错
+        if (!names.length) {
+            return item.assigned_to_name ? esc(item.assigned_to_name) : '<span class="si-muted">—</span>';
+        }
+        if (names.length <= SI_DEV_ROSTER_MAX_SHOW) return esc(names.join('、'));
+        const shown = names.slice(0, SI_DEV_ROSTER_MAX_SHOW).join('、');
+        const rest = names.slice(SI_DEV_ROSTER_MAX_SHOW);
+        return `${esc(shown)}<span class="si-dev-roster-more" title="${esc(rest.join('、'))}">等+${rest.length}</span>`;
+    }
+
     function renderSysIterationRows(list) {
         const tb = document.getElementById('siTbody');
         if (!list.length) {
@@ -765,7 +823,7 @@
                 <td><span class="u-status-badge si-s-${siStatusClass(i.status)}">${esc(i.status)}</span></td>
                 <td>${esc(i.title)}${lineage}${flags}</td>
                 <td>${esc(i.system_name)}<span class="si-muted"> · ${esc(i.module_name || '—')}</span></td>
-                <td>${i.assigned_to_name ? esc(i.assigned_to_name) : '<span class="si-muted">—</span>'}</td>
+                <td>${siDevRosterCellHtml(i)}</td>
                 <td>${esc(i.created_by_name || '—')}</td>
                 <td>${i.dev_estimated_at ? esc(siFmtDT(i.dev_estimated_at)) : '<span class="si-muted">—</span>'}</td>
                 <td class="si-muted">${esc(siFmtDT(i.created_at))}</td>
@@ -854,7 +912,6 @@
             <div class="u-kv-item"><label>模块</label><div class="v">${esc(iss.module_name || '—')}</div></div>
             <div class="u-kv-item"><label>来源</label><div class="v">${esc(iss.source || '—')}</div></div>
             <div class="u-kv-item"><label>建单人</label><div class="v">${esc(iss.created_by_name || '—')}</div></div>
-            <div class="u-kv-item"><label>开发负责人</label><div class="v">${iss.assigned_to_name ? esc(iss.assigned_to_name) : '<span class="si-muted">未指派</span>'}</div></div>
             <div class="u-kv-item"><label>预计完成时间</label><div class="v">${iss.dev_estimated_at ? esc(siFmtDT(iss.dev_estimated_at)) : '<span class="si-muted">未回填</span>'}</div></div>
             <div class="u-kv-item"><label>期望完成(deadline)</label><div class="v">${iss.deadline ? esc(iss.deadline) : '<span class="si-muted">—</span>'}</div></div>
             <div class="u-kv-item"><label>需求方</label><div class="v">${siRequesterText(iss)}</div></div>
@@ -865,6 +922,13 @@
             ${relCorrRow}
             <div class="u-kv-item full"><label>描述</label><div class="v">${iss.description ? esc(iss.description) : '—'}</div></div>
         </div></div>`;
+
+        // C1→C7（多开发协作与 commit 留痕重构 v2.9 §13 S1 / §11 前端骨架）：开发成员——全在册 chip（去主次，
+        //   无「主开发」字样，is_primary 仅作只读小标记「代表」）+ 各自 dev_status 徽标 + commit 记录小表。
+        //   C7 起按四布尔升级为读写（siCaps 本次刷新，siRenderActions 复用同一份，不重复计算）。
+        siCaps = siComputeCaps(iss, r.data.dev_assignees, r.data.dev_commits);
+        const devMembers = `<div class="u-detail-section"><h3>开发成员</h3>${siRenderDevMemberChips(r.data.dev_assignees, siCaps, iss)}</div>`;
+        const devCommitsBlock = `<div class="u-detail-section"><h3>Commit 记录</h3>${siRenderDevCommits(r.data.dev_commits, siCaps)}</div>`;
 
         // 演进时间线
         const tl = `<div class="u-detail-section"><h3>演进时间线</h3>${siRenderTimeline(r.data.timeline || [], r.data.attachments || [])}</div>`;
@@ -890,9 +954,10 @@
         // C-orch：上线编排独立区块（2026-07-07 样式统一：从底部操作区拆出，置于「基本信息」与「通知」之间）。
         const orchBlock = siRenderReleaseOrchBlock(iss);
 
-        // 抽屉 body 顺序（对齐 Data_Correction 抽屉范式）：血缘 → 操作栏(顶) → 基本信息 → 上线编排 → 通知 → 讨论群 → 时间线 → 附件
+        // 抽屉 body 顺序（对齐 Data_Correction 抽屉范式；C1 新增「开发成员」「Commit 记录」插入基本信息之后）：
+        //   血缘 → 操作栏(顶) → 基本信息 → 开发成员 → Commit 记录 → 上线编排 → 通知 → 讨论群 → 时间线 → 附件
         document.getElementById('siDBody').innerHTML =
-            lineageHtml + '<div class="u-action-bar" id="siDActions"></div>' + info + orchBlock + notify + chat + tl + att;
+            lineageHtml + '<div class="u-action-bar" id="siDActions"></div>' + info + devMembers + devCommitsBlock + orchBlock + notify + chat + tl + att;
 
         // 操作区（填充 body 顶部的 #siDActions 占位）
         siRenderActions(iss);
@@ -998,19 +1063,131 @@
         }).join('') + '</div>';
     }
 
-    // ---- 附件区 ----
+    // ---- C1（多开发协作与 commit 留痕重构 v2.9 §13 S1）：开发成员 chip + commit 记录小表 ----
+    //   C7：由纯读升级为读写——协调人 chip 级操作（开脱/恢复）+ commit 小表行内编辑（编辑/删除/补充），
+    //   均按 §11 四布尔门禁，纯 UI 镜像，真闸在后端。
+    const SI_DEV_STATUS_LABEL = { pending: '待提交', code_submitted: '已提交', no_code: '无代码', excused: '已开脱' };
+    const SI_COMMIT_COMPONENT_LABEL = { frontend: '前端', backend: '后端' };
+    // SYS_DEV 族状态快照（feature/improvement=开发中；bug=处理中）——SYS_DEV∪SYS_VERIFY 复用既有
+    // SI_ATT_DEV_OR_VERIFY_STATUSES（附件区先定义，函数体内引用不受声明顺序影响，脚本整体先解析完再在
+    // DOMContentLoaded 后执行）。冻结族=非 D_PRE/DEV/VERIFY 的其余状态，复用既有 SI_ATT_TERMINAL_STATUSES
+    // 叠加「待上线」（对齐方案 §4.0 SYS_FROZEN_STATUSES=RELEASE∪非发布终态）。
+    const SI_DEV_FAMILY_STATUSES = ['开发中', '处理中'];
+    const SI_FROZEN_STATUSES = ['已上线', '已关闭', '已拒绝', '已作废', '待上线'];
+
+    // §11 四布尔（后端同源，仅前端 UI 镜像，真闸在后端各端点内部断言）：
+    //   canSubmit=在册∧pending∧SYS_DEV；canEditCommits=当前在册∧存在本人名下行∧SYS_DEV∪SYS_VERIFY（仅管既有行
+    //   PUT/DELETE）；canAddCommit=当前在册实例 dev_status='code_submitted'∧SYS_DEV∪SYS_VERIFY（不复用
+    //   canEditCommits）；canCoordinateMember=对接人∨admin。
+    function siComputeCaps(iss, devAssignees, devCommits) {
+        const uid = currentUser ? Number(currentUser.id) : null;
+        const list = devAssignees || [];
+        const myRow = (uid && uid > 0) ? (list.find(d => Number(d.user_id) === uid) || null) : null;
+        const isCoordinator = isAdmin() || !!(currentUser && iss.type === 'bug' && isSiBugLiaison(currentUser.id));
+        const inDevFamily = SI_DEV_FAMILY_STATUSES.includes(iss.status);
+        const inDevOrVerifyFamily = SI_ATT_DEV_OR_VERIFY_STATUSES.includes(iss.status);
+        const hasMyCommitRow = !!(uid && (devCommits || []).some(c => Number(c.dev_user_id) === uid));
+        return {
+            myRow,
+            isCoordinator,
+            isRosterMember: !!myRow,
+            canSubmit: !!(myRow && myRow.dev_status === 'pending' && inDevFamily),
+            canEditCommits: !!(myRow && inDevOrVerifyFamily && hasMyCommitRow),
+            canAddCommit: !!(myRow && myRow.dev_status === 'code_submitted' && inDevOrVerifyFamily),
+            canCoordinateMember: isCoordinator,
+        };
+    }
+
+    // 全在册 chip：user_name + dev_status 徽标；is_primary 仅作只读小标记「代表」（不得有任何授权暗示文案，
+    //   方案 §11 前端骨架——去主次，禁「主开发」字样）；no_code 的 chip 用 title 属性挂 no_code_reason（悬浮可见，
+    //   不占用可视空间）。C7：协调人（canCoordinateMember）在 pending 成员 chip 上加「开脱」、excused 成员 chip
+    //   上加「恢复」小按钮；chip 列表下方非冻结态显示「管理开发成员」入口（复用 siModalReassign 的 member_ids
+    //   全集编辑器，声明式一个入口覆盖 add/remove，不逐个调 dev-assignees 端点）。
+    function siRenderDevMemberChips(devAssignees, caps, iss) {
+        const list = (!devAssignees || !devAssignees.length)
+            ? '<div class="si-muted">暂无指派开发</div>'
+            : '<div class="si-dev-chip-list">' + devAssignees.map(d => {
+                const statusKey = d.dev_status || 'pending';
+                const statusLabel = SI_DEV_STATUS_LABEL[statusKey] || esc(statusKey);
+                const titleAttr = (statusKey === 'no_code' && d.no_code_reason) ? ` title="${esc(d.no_code_reason)}"` : '';
+                const primaryMark = d.is_primary ? '<span class="si-dev-primary-mark">代表</span>' : '';
+                let act = '';
+                if (caps && caps.canCoordinateMember) {
+                    if (statusKey === 'pending') act = `<span class="si-dev-chip-act" onclick="siModalExcuseMember(${d.id})">开脱</span>`;
+                    else if (statusKey === 'excused') act = `<span class="si-dev-chip-act" onclick="siModalSupersedeExcuse(${d.id})">恢复</span>`;
+                }
+                return `<span class="si-dev-chip"${titleAttr}>${esc(d.user_name || ('#' + d.user_id))}${primaryMark}<span class="si-dev-status-badge ${esc(statusKey)}">${statusLabel}</span>${act}</span>`;
+            }).join('') + '</div>';
+        const manageBtn = (caps && caps.canCoordinateMember && !SI_FROZEN_STATUSES.includes(iss.status))
+            ? `<div style="margin-top:8px"><button class="u-btn-secondary u-btn-sm" onclick="siModalReassign(siDetail.issue)">管理开发成员</button></div>` : '';
+        return list + manageBtn;
+    }
+    // commit 记录小表：开发/component（前端/后端）/commit_ref/时间；含 removed 实例的行（方案 §8 快照口径同源，
+    //   后端 GET 已按 id 升序返回，前端不再排序）。C7：本人行按 canEditCommits 加「编辑/删除」，表下按
+    //   canAddCommit（独立判定，不复用 canEditCommits）加「补充 commit」按钮。
+    function siRenderDevCommits(devCommits, caps) {
+        const uid = currentUser ? Number(currentUser.id) : null;
+        const rows = (devCommits || []).map(c => {
+            const isMine = !!(uid && Number(c.dev_user_id) === uid);
+            const canEditThis = !!(caps && caps.canEditCommits && isMine);
+            const acts = canEditThis
+                ? `<span class="si-commit-act" onclick="siModalEditCommit(${c.id})">编辑</span><span class="si-commit-act danger" onclick="siModalDeleteCommit(${c.id})">删除</span>`
+                : '';
+            return `<tr>
+                <td>${esc(c.dev_user_name || ('#' + c.dev_user_id))}</td>
+                <td>${SI_COMMIT_COMPONENT_LABEL[c.component] || esc(c.component)}</td>
+                <td>${esc(c.commit_ref)}</td>
+                <td>${esc(siFmtDT(c.created_at))}</td>
+                <td>${acts}</td>
+            </tr>`;
+        }).join('');
+        const addBtn = (caps && caps.canAddCommit) ? `<div style="margin-top:8px"><button class="u-btn-secondary u-btn-sm" onclick="siModalAddCommit()">+ 补充 commit</button></div>` : '';
+        if (!devCommits || !devCommits.length) return '<div class="si-muted">暂无 commit 记录</div>' + addBtn;
+        return `<div class="u-corr-table-wrap"><table class="si-commit-table"><thead><tr><th>开发</th><th>组件</th><th>commit_ref</th><th>时间</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>${addBtn}`;
+    }
+
+    // 统一自定义错误文案（commit 行编辑三端点，§10 错误码集合 = COMMIT_SCOPE/INVALID_STATUS/VALIDATION/
+    //   GATE_INVARIANT；siApiErr 默认优先取 r.data.error，后端本就给了可读中文，故仅对「值得改写为更贴合
+    //   UI 场景措辞」的 3 码定制，INVALID_STATUS 及其余码按后端 message 原样显示——任务书要求的"统一走
+    //   siApiErr 但对这几个码给定制文案"落地方式：先查码表命中则短路 showToast，未命中回落 siApiErr）。
+    const SI_COMMIT_ERR_TEXT = {
+        NOT_ROSTERED: '你已不在册，无法操作',
+        COMMIT_SCOPE: '仅本人 commit 行可编辑/删除',
+        GATE_INVARIANT: '已提交（code_submitted）状态下至少需保留 1 条 commit',
+    };
+    function siCommitApiErr(r) {
+        if (r && r.aborted) return null;
+        const code = r && r.data && r.data.code;
+        if (code && SI_COMMIT_ERR_TEXT[code]) { showToast(SI_COMMIT_ERR_TEXT[code], 'error'); return null; }
+        return siApiErr(r);
+    }
+
+    // ---- 附件区（C5：附件授权改造，方案 §5.4「附件口径统一表」+ round_no 遗产②/③ 清理）----
+    //   展示层近似判断——扁平字符串集合，非按 type 精确索引族常量（后端 status-families.js 才是权威，按 type
+    //   精确索引）；用于按钮可见性/删除按钮显隐，误差后果仅"按钮多显/少显"，无安全含义，真拒绝以后端 403/409 为准。
+    const SI_ATT_TERMINAL_STATUSES = ['已上线', '已关闭', '已拒绝', '已作废'];   // 对齐 SYS_TERMINAL_STATUSES（不含"待上线"）
+    const SI_ATT_DEV_OR_VERIFY_STATUSES = ['开发中', '处理中', '待验证'];        // 对齐 SYS_DEV∪SYS_VERIFY
     function siRenderAttachments(data) {
         const iss = data.issue;
         const all = data.attachments || [];
         const spec = all.filter(a => a.attachment_type === 'spec');
-        const delivery = all.filter(a => a.attachment_type === 'delivery' && a.round_no != null);
+        // round_no 遗产②（M-P4）：C3 起唯一 submit 不再绑 round_no（恒 NULL），旧"round_no != null"过滤会让本页
+        //   交付物永久展示为空（真实缺陷，非本次引入）——附件不再按轮次分组/过滤，全部 active 交付物平铺展示
+        //   （后端已按 id 升序=上传时间序返回，前端不再二次排序）。
+        const delivery = all.filter(a => a.attachment_type === 'delivery');
         const screenshots = all.filter(a => a.attachment_type === 'screenshot');
-        const isOwnerDev = currentUser && iss.assigned_to === currentUser.id;
+        const devAssignees = data.dev_assignees || [];
+        // C5（§5.4）：在册 = 当前用户出现在（后端已过滤 removed_at IS NULL 的）dev_assignees 列表——isOwnerDev 保留
+        //   旧名但语义随本次改造升级为"在册"（原仅比对单人 assigned_to，多开发 roster 下会漏判非代表协作成员，
+        //   造成"后端已放行、前端按钮不显示"的写读语义漂移，随附件授权改造一并对齐）。
+        const isOwnerDev = !!(currentUser && devAssignees.some(d => Number(d.user_id) === currentUser.id));
+        // 协调人=对接人∪admin（§0），与后端 isSysCoordinator 同构；isSiBugLiaison 已在文件顶部定义（示例发布者/示例对接人白名单）。
+        const isCoordinator = isAdmin() || !!(currentUser && iss.type === 'bug' && isSiBugLiaison(currentUser.id));
 
         function attList(arr, delType) {
             if (!arr.length) return '<div class="si-muted" style="font-size:12px">无</div>';
             return arr.map(a => {
-                const canDel = siCanDeleteAtt(iss, a, isOwnerDev);
+                const canDel = siCanDeleteAtt(iss, a, isOwnerDev, isCoordinator);
                 return `<div class="si-att-item">
                     <a class="si-att-name" onclick="siDownloadAtt(${iss.id},${a.id})">📎 ${esc(a.original_name || a.file_name)}</a>
                     <span class="si-att-meta">${a.round_no != null ? '第' + a.round_no + '轮 · ' : ''}${a.uploaded_by_name ? esc(a.uploaded_by_name) : ''}</span>
@@ -1020,18 +1197,26 @@
         }
 
         let html = '<div class="u-detail-section"><h3>附件</h3>';
-        // 需求材料 spec（admin 上传）
+        // 需求材料 spec（C5：协调人=对接人∨admin 上传，∉终态）
         html += `<div style="margin-bottom:10px"><div style="font-size:12px;color:#6b7280;margin-bottom:4px;font-weight:600">需求材料（spec）</div>${attList(spec)}`;
-        if (META_OK && isAdmin() && iss.status !== '已作废') {
+        if (META_OK && isCoordinator && !SI_ATT_TERMINAL_STATUSES.includes(iss.status)) {
             html += `<div class="si-upload-box"><input type="file" id="siSpecFile" multiple>
                 <button class="u-btn-secondary u-btn-sm" onclick="siUploadAtt(${iss.id},'spec','siSpecFile')">上传需求材料</button></div>`;
         }
         html += '</div>';
-        // 交付物 delivery（提交时绑定，只读展示）
-        html += `<div style="margin-bottom:10px"><div style="font-size:12px;color:#6b7280;margin-bottom:4px;font-weight:600">交付物（delivery，随各轮提交）</div>${attList(delivery)}</div>`;
-        // 截图 screenshot（开发本人开发中可传）
+        // 交付物 delivery（C5·对抗审 C 回填：在册∨协调人，开发中/处理中/待验证均可传——之前只读展示无上传入口，
+        //   是真实功能缺口：附件区唯一的落库入口只有 siModalSubmit 弹窗内的两阶段 attachment_ids 绑定，而该
+        //   绑定语义随 round_no 退场已失效（见下方拆除说明），意味着后端已放行的 delivery 上传在 C5 之前的前端
+        //   完全没有入口可点。补齐与 spec/screenshot 同构的上传框，不再是"只读展示"）
+        html += `<div style="margin-bottom:10px"><div style="font-size:12px;color:#6b7280;margin-bottom:4px;font-weight:600">交付物（delivery）</div>${attList(delivery)}`;
+        if (META_OK && (isOwnerDev || isCoordinator) && SI_ATT_DEV_OR_VERIFY_STATUSES.includes(iss.status)) {
+            html += `<div class="si-upload-box"><input type="file" id="siDeliveryFile" multiple>
+                <button class="u-btn-secondary u-btn-sm" onclick="siUploadAtt(${iss.id},'delivery','siDeliveryFile')">上传交付物</button></div>`;
+        }
+        html += '</div>';
+        // 截图 screenshot（C5：在册∨协调人，开发中/处理中/待验证均可传，原仅"开发本人·开发中"过窄）
         html += `<div><div style="font-size:12px;color:#6b7280;margin-bottom:4px;font-weight:600">补充截图（screenshot）</div>${attList(screenshots)}`;
-        if (META_OK && isOwnerDev && iss.status === '开发中') {
+        if (META_OK && (isOwnerDev || isCoordinator) && SI_ATT_DEV_OR_VERIFY_STATUSES.includes(iss.status)) {
             html += `<div class="si-upload-box"><input type="file" id="siShotFile" multiple>
                 <button class="u-btn-secondary u-btn-sm" onclick="siUploadAtt(${iss.id},'screenshot','siShotFile')">上传截图</button></div>`;
         }
@@ -1039,12 +1224,14 @@
         html += '</div>';
         return html;
     }
-    function siCanDeleteAtt(iss, a, isOwnerDev) {
+    function siCanDeleteAtt(iss, a, isOwnerDev, isCoordinator) {
         if (!META_OK) return false;
-        if (a.attachment_type === 'spec') return isAdmin();
-        // delivery/screenshot：仅未绑定(round_no NULL) 且 admin 或上传本人
-        if (a.round_no != null) return false;               // 已绑定不可删
-        if (isAdmin()) return true;
+        // C5（§5.4）：删除 = (上传者∨协调人∨admin) ∧ 状态∉SYS_TERMINAL——spec/delivery/screenshot 统一公式。
+        //   round_no 遗产③：旧"已绑定(round_no NOT NULL)不可删"改判"终态不可删"（isAdmin() 已含于 isCoordinator）。
+        if (SI_ATT_TERMINAL_STATUSES.includes(iss.status)) return false;
+        if (isCoordinator) return true;
+        // 历史参与者（曾在 dev_assignees 但当前已移除）即便是本人上传也无删除权（§0 line33）——前端 isOwnerDev
+        // 已限定"当前在册"，故此处 isOwnerDev && uploaded_by 命中即天然满足该裁定，无需额外判断。
         return isOwnerDev && currentUser && a.uploaded_by === currentUser.id;
     }
 
@@ -1210,7 +1397,12 @@
         if (iss.status === '已作废') { box.innerHTML = '<span class="si-muted">单据已作废，只读。</span>'; return; }  // G：作废单只读，不出 void/derive（后端对已作废再 void 会重复写 timeline）
         const flows = (META.typeFlows && META.typeFlows[iss.type]) || [];
         const isAdminUser = isAdmin();
-        const isOwnerDev = currentUser && iss.assigned_to === currentUser.id;
+        // C7 契约裁定点：W06 类动作（estimate/feasibility/blocked）与 submit 原按单一 assigned_to 门控，
+        // 与 C3 起后端 assertDevMember（任一在册成员）已不同源（§0 去主次核心不变量：assigned_to/is_primary
+        // 禁作授权源，方案 §3.6）——改按 siCaps 在册身份判定，不再用 iss.assigned_to 单人比对。isOwnerDev
+        // 变量名沿用（下方 gate 提示/chatBtn 既有引用），语义已升级为"在册成员"而非"单一代表"。
+        const isRosterMember = !!(siCaps && siCaps.isRosterMember);
+        const isOwnerDev = isRosterMember;
         // ④a bug 对接人白名单：bug 单的 assign/reassign 对白名单对接人（示例发布者/示例对接人）放行——与后端
         //   requireAdminOrBugLiaison + roleGuard='admin_or_bug_liaison' 同源；前端只放这两个动作，其余 admin 动作仍仅 admin。
         const isBugLiaison = currentUser && iss.type === 'bug' && isSiBugLiaison(currentUser.id);
@@ -1233,7 +1425,14 @@
             //   ⚠️ 前端是 UI 镜像**非授权源**：真闸在后端 requireAdminOrBugLiaison + roleGuard + reassign handler type 精判；
             //     即便前端误显，点击也会被后端 403，故此处硬编码 action 白名单已足，不再复制后端 from 集合（避免第二处真相源漂移）。
             const liaisonAction = isBugLiaison && (a === 'assign' || a === 'reassign');
-            if (devAction) { if (!isOwnerDev) continue; }
+            if (devAction) {
+                // submit 专属再叠 canSubmit（本人 dev_status=pending 逐人判定）——多开发场景下本人已提交但
+                // 其他成员未完成时，主状态仍留在 SYS_DEV，仅按族状态判会让已提交成员继续看到「提交」按钮，
+                // 点击必 409 INVALID_STATUS；estimate/feasibility/blocked 三个 W06 动作不分 dev_status，
+                // 任一在册成员均可填（§5.3 W06 白名单），故仍用 isRosterMember。
+                if (a === 'submit') { if (!(siCaps && siCaps.canSubmit)) continue; }
+                else if (!isRosterMember) continue;
+            }
             else if (!isAdminUser && !liaisonAction) continue;
 
             // 开发态 / 批次精化（needs_feasibility / blocked / dev_estimated_at / release_id）
@@ -1488,30 +1687,45 @@
         });
     }
 
+    // C7 重做（方案 v2.9 §3 reassign 段 + §10 API 契约）：旧「换主/留主改协作」二分语义随 C2 后端全语义
+    //   重写整段退场——新契约=声明式最终在册名单（member_ids，无主次之分）+ reason 必填。同一函数兼两个
+    //   入口：① 操作栏「改派」按钮（meta flows 驱动，bug 对接人/admin 可见）② 详情「开发成员」区协调人
+    //   「管理开发成员」按钮（canCoordinateMember，任意迭代类型）——两处语义完全一致，不重复实现（任务
+    //   ④ 提示"复用②的多选编辑器思路"，本次直接同一函数覆盖，非另建 modal）。
+    //   M3 乐观锁（94 号对抗审复核 backlog，C7 回填）：进弹窗时快照当前在册 user_id 集合作
+    //   expected_member_ids 一并提交，后端 409 REASSIGN_STALE 时前端刷新重拉（防协调人 A/B 并发改派互相覆盖）。
     function siModalReassign(iss) {
-        // C5：reassign 扩「换主」与「留主改协作」两分支（用户 2026-07 口径拍板，后端批2 已落地）：
-        //   · 选与当前主开发**不同**的人 = 换主（清进度+流转，讨论群自动拉新主）；
-        //   · 选与当前主开发**相同**的人（下拉里标「（当前）」）= 仅改协作集（不清进度不流转），
-        //     须传 expectedCollaboratorIds 作协作集乐观锁（对齐后端 REASSIGN_STALE），锁值=进入本弹框
-        //     时的在册协作集快照（devAssignees 来自 siDetail，非本次勾选后的目标集，两者语义不同）。
         const devAssignees = (siDetail && siDetail.dev_assignees) || [];
-        const currentCollabIds = devAssignees.filter(d => !d.is_primary).map(d => Number(d.user_id));
-        siModal('改派', [
-            fUserSelect('newAssignedTo', '新主开发（与当前相同=仅改协作）', iss.assigned_to),
-            { k: null, html: siCollaboratorPickerHtml(currentCollabIds) },
-            fTextarea('reason', '改派/调整原因', '', true, '必填：换主填「旧开发→新开发+原因」；仅改协作填调整原因'),
-            note('选不同人=换主（清预计完成时间+流转状态，讨论群自动拉新主）；选与当前相同的人（标「当前」）=仅编辑协作集，不清进度不流转，仅「处理中/待验证」态可改协作。若已建讨论群，新主开发会自动加入；旧主不会被移出（钉钉限制），如需移除请群主在钉钉手动操作。')
+        const expectedMemberIds = devAssignees.map(d => Number(d.user_id));
+        const pre = new Set(expectedMemberIds);
+        const pickerHtml = `<div class="u-form-group"><label>开发成员（勾选=最终在册名单，去主次·无「主开发」）</label>
+            <div style="max-height:180px;overflow:auto;border:1px solid #e5e7eb;border-radius:6px;padding:6px">
+            ${siUsers.filter(u => u.role !== 'viewer').map(u =>
+                `<label class="si-chk-row"><input type="checkbox" class="si-member-chk" value="${u.id}" ${pre.has(Number(u.id)) ? 'checked' : ''}><span class="si-chk-text">${esc(u.display_name || u.username)}</span></label>`
+            ).join('') || '<span class="si-muted">无可选用户</span>'}
+            </div></div>`;
+        siModal('管理开发成员', [
+            { k: null, html: pickerHtml },
+            fTextarea('reason', '调整原因', '', true, '必填：本次名单调整的原因，trim 1..200'),
+            note('勾选=最终在册名单：取消勾选=移除，新勾选=加入。当前主状态要求至少 1 名在册开发时，名单不能清空为 0。若他人已先一步调整，本次提交会被拒绝并自动刷新为最新名单。')
         ], async v => {
-            if (!v.newAssignedTo) { showToast('请选择新主开发人员（或保留当前）', 'error'); return false; }
-            if (!v.reason.trim()) { showToast('改派/调整原因必填', 'error'); return false; }
-            const newDevId = parseInt(v.newAssignedTo, 10);
-            const targetCollaboratorIds = siReadCollabChkIds(newDevId);
-            const body = { newAssignedTo: newDevId, oldAssignedTo: iss.assigned_to, reason: v.reason.trim(), collaboratorIds: targetCollaboratorIds };
-            const mainChanged = newDevId !== Number(iss.assigned_to);
-            if (!mainChanged) body.expectedCollaboratorIds = currentCollabIds;   // 留主改协作·协作集乐观锁（对齐后端 REASSIGN_STALE）
+            const reason = (v.reason || '').trim();
+            if (!reason || reason.length > 200) { showToast('调整原因必填（trim 1..200）', 'error'); return false; }
+            const mbody = document.getElementById('siMBody');
+            const memberIds = [...mbody.querySelectorAll('.si-member-chk:checked')].map(x => parseInt(x.value, 10)).filter(Boolean);
+            const body = { member_ids: memberIds, reason, expected_member_ids: expectedMemberIds };
             const r = await siApi('/sys-issues/' + iss.id + '/reassign', { method: 'POST', body });
-            if (!r.ok) { siApiErr(r); return false; }
-            showToast(mainChanged ? '已改派，钉钉已通知新主开发' : '协作开发已更新', 'success'); return true;
+            if (!r.ok) {
+                if (r.status === 409 && r.data && r.data.code === 'REASSIGN_STALE') {
+                    siApiErr(r, '开发名单已被他人修改，已为你刷新');
+                    siCloseModal();
+                    await siAfterAction();
+                    return false;
+                }
+                siApiErr(r);   // VALIDATION（no-op）/LAST_ASSIGNEE 等其余码后端 error 文案已足够清晰，原样透出
+                return false;
+            }
+            showToast('开发成员已更新', 'success'); return true;
         });
     }
 
@@ -1591,43 +1805,206 @@
         });
     }
 
+    // C7 重做（方案 v2.9 §6.1 body 契约，彻底替换旧 summary/attachment_ids 契约——多余字段/summary 一律
+    //   400 VALIDATION，本弹窗绝不能再发 summary/attachment_ids）：mode 二选一——commits（默认，动态行编辑器，
+    //   component∈{frontend,backend} 至多各 1 条，≥1 行）/ no_code（原因 trim 1..500）。fix_gap_note 条件字段
+    //   逻辑沿用旧判定（派生自 bug 的 bug 单首次提交必填）。commit 行编辑器用固定两槽（最多 2 个 component）
+    //   而非动态模板，避免引入额外状态同步复杂度（前端预校验为镜像，后端 §6.2 步骤2/2b/2c 才是真闸）。
     function siModalSubmit(iss) {
         // ⑤ 双描述·fix_gap_note：派生自 bug（origin.type=bug）+ 新单也是 bug + 首次提交 → 需填「修复缺口说明」
         //   （前端镜像后端谓词；origin.type 取自详情 origin_issue。后端 FIX_GAP_NOTE_REQUIRED 为真闸兜底）
         const originIsBug = siDetail && siDetail.origin_issue && siDetail.origin_issue.type === 'bug';
         const needGap = originIsBug && iss.type === 'bug' && iss.origin_issue_id && !iss.first_submitted_at;
-        const fields = [fTextarea('summary', '交付说明', '', true, '必填，trim 后非空')];
+
+        const modeHtml = `
+            <div class="u-form-group"><label>提交方式</label>
+                <div class="si-radio-row">
+                    <label class="si-radio-opt"><input type="radio" name="si-submit-mode" value="commits" checked onchange="siSubmitModeChanged()"> 提交 commit</label>
+                    <label class="si-radio-opt"><input type="radio" name="si-submit-mode" value="no_code" onchange="siSubmitModeChanged()"> 无代码交付</label>
+                </div>
+            </div>
+            <div id="siSubmitCommitsBox" class="u-form-group"><label>Commit 记录 <span class="u-req">*</span></label>
+                <div id="siSubmitCommitRow0" class="si-commit-row">
+                    <select id="siSubmitComponent0"><option value="frontend">前端</option><option value="backend">后端</option></select>
+                    <input type="text" id="siSubmitRef0" placeholder="commit_ref / SVN 版本号（1~200字）">
+                    <span class="si-commit-row-del" id="siSubmitDel0" onclick="siSubmitRemoveRow(0)" style="display:none">删除</span>
+                </div>
+                <div id="siSubmitCommitRow1" class="si-commit-row" style="display:none">
+                    <select id="siSubmitComponent1"><option value="frontend">前端</option><option value="backend" selected>后端</option></select>
+                    <input type="text" id="siSubmitRef1" placeholder="commit_ref / SVN 版本号（1~200字）">
+                    <span class="si-commit-row-del" onclick="siSubmitRemoveRow(1)">删除</span>
+                </div>
+                <button type="button" class="u-btn-secondary u-btn-sm" id="siSubmitAddRowBtn" onclick="siSubmitAddRow()">+ 再加一行（前端 + 后端各一条）</button>
+                <div class="u-hint">前端填 SVN 版本号，后端填 GIT commit；至少 1 条，同类型至多 1 条。</div>
+            </div>
+            <div id="siSubmitNoCodeBox" class="u-form-group" style="display:none">
+                <label>无代码交付原因 <span class="u-req">*</span></label>
+                <textarea id="siSubmitNoCodeReason" placeholder="trim 后 1~500 字：为何本次无需代码提交"></textarea>
+            </div>`;
+
+        const fields = [{ k: null, html: modeHtml }];
         if (needGap) fields.push(fTextarea('fix_gap_note', '修复缺口说明', '', true, '必填：上一版修复缺口在哪（复盘素材，不作考核）'));
-        fields.push(fFile('files', '交付物附件（可多选，可选）', true));
-        fields.push(note(needGap
-            ? '⚠️ 闸门②：交付说明 + 修复缺口说明必填。附件将作为本轮交付物随提交绑定；提交后转「待验证」等验收。'
-            : '⚠️ 闸门②：交付说明必填。附件将作为本轮交付物随提交绑定；提交后转「待验证」等验收。'));
+        if (needGap) fields.push(note('⚠️ 派生自 bug 的修复单首次提交需额外填写「修复缺口说明」。'));
+
         siModal('提交交付', fields, async v => {
-            if (!v.summary.trim()) { showToast('交付说明必填', 'error'); return false; }
-            if (needGap && !v.fix_gap_note.trim()) { showToast('修复缺口说明必填', 'error'); return false; }
-            // 两阶段：先传交付物(delivery, round_no=NULL 暂存) → 拿 id → submit 绑本轮
-            let attachmentIds = [];
-            const fileEl = document.getElementById('f_files');
-            if (fileEl && fileEl.files && fileEl.files.length) {
-                const fd = new FormData();
-                fd.append('attachment_type', 'delivery');
-                for (const f of fileEl.files) fd.append('files', f);
-                const up = await siApi('/sys-issues/' + iss.id + '/attachments', { method: 'POST', body: fd, isForm: true });
-                if (!up.ok) { siApiErr(up, '交付物上传失败'); return false; }
-                attachmentIds = (up.data && up.data.attachments || []).map(a => a.id);
+            const mode = document.querySelector('input[name="si-submit-mode"]:checked').value;
+            const body = { mode };
+            if (needGap) {
+                const gap = (v.fix_gap_note || '').trim();
+                if (!gap) { showToast('修复缺口说明必填', 'error'); return false; }
+                body.fix_gap_note = gap;
             }
-            const body = { summary: v.summary.trim() };
-            if (needGap && v.fix_gap_note.trim()) body.fix_gap_note = v.fix_gap_note.trim();   // ⑤ 双描述·修复缺口说明
-            if (attachmentIds.length) body.attachment_ids = attachmentIds;
+            if (mode === 'no_code') {
+                const reason = (document.getElementById('siSubmitNoCodeReason').value || '').trim();
+                if (!reason || reason.length > 500) { showToast('无代码交付原因必填（trim 1~500字）', 'error'); return false; }
+                body.no_code_reason = reason;
+            } else {
+                const commits = [];
+                const seen = new Set();
+                for (let i = 0; i < 2; i++) {
+                    const row = document.getElementById('siSubmitCommitRow' + i);
+                    if (!row || row.style.display === 'none') continue;
+                    const component = document.getElementById('siSubmitComponent' + i).value;
+                    const ref = (document.getElementById('siSubmitRef' + i).value || '').trim();
+                    if (!ref) continue;   // 展开了第二行但未填时静默跳过，不强制填满两行
+                    if (ref.length > 200) { showToast('commit_ref 不能超过 200 字', 'error'); return false; }
+                    if (seen.has(component)) { showToast('同类型（前端/后端）至多 1 条', 'error'); return false; }
+                    seen.add(component);
+                    commits.push({ component, commit_ref: ref });
+                }
+                if (!commits.length) { showToast('请至少填写 1 条 commit 记录', 'error'); return false; }
+                body.commits = commits;
+            }
             const r = await siApi('/sys-issues/' + iss.id + '/submit', { method: 'POST', body });
             if (!r.ok) {
-                // H：submit 失败时 best-effort 清理刚上传的暂存 delivery 孤儿（round_no=NULL 在附件区不展示、否则永久滞留）
-                for (const aid of attachmentIds) {
-                    try { await siApi('/sys-issues/' + iss.id + '/attachments/' + aid, { method: 'DELETE' }); } catch (e) { /* 清理尽力而为，不阻断错误提示 */ }
+                if (r.status === 409) {
+                    // 409（重复提交/状态已变）：按钮已在 siModal 通用框架内点击即禁用，此处额外关弹窗 + 重拉
+                    // 详情，让用户按本人最新 dev_status 看到真实已提交态，不停留在过期表单里重复尝试。
+                    siApiErr(r, '提交状态已变化，已为你刷新最新数据');
+                    siCloseModal();
+                    await siAfterAction();
+                } else {
+                    siApiErr(r);
                 }
-                siApiErr(r); return false;
+                return false;
             }
-            showToast('已提交，转「待验证」', 'success'); return true;
+            const toMain = r.data && r.data.main_status;
+            showToast(toMain === '待验证' ? '已提交，转「待验证」' : '已提交', 'success');
+            return true;
+        });
+    }
+    // 提交方式切换：commits/no_code 两块显隐互斥
+    function siSubmitModeChanged() {
+        const checked = document.querySelector('input[name="si-submit-mode"]:checked');
+        const mode = checked ? checked.value : 'commits';
+        const cBox = document.getElementById('siSubmitCommitsBox');
+        const nBox = document.getElementById('siSubmitNoCodeBox');
+        if (cBox) cBox.style.display = mode === 'commits' ? '' : 'none';
+        if (nBox) nBox.style.display = mode === 'no_code' ? '' : 'none';
+    }
+    // commit 行编辑器：固定两槽（frontend/backend 各一），第二槽默认隐藏，「+ 再加一行」展开；两行都展开时
+    // 第一行才出现删除（保证至少留 1 行可见——真实"至少 1 条"由提交时业务校验兜底，此处仅 UI 便利）。
+    function siSubmitAddRow() {
+        const row1 = document.getElementById('siSubmitCommitRow1');
+        const addBtn = document.getElementById('siSubmitAddRowBtn');
+        const del0 = document.getElementById('siSubmitDel0');
+        if (row1) row1.style.display = '';
+        if (addBtn) addBtn.style.display = 'none';
+        if (del0) del0.style.display = '';
+    }
+    function siSubmitRemoveRow(idx) {
+        const row1 = document.getElementById('siSubmitCommitRow1');
+        const addBtn = document.getElementById('siSubmitAddRowBtn');
+        const del0 = document.getElementById('siSubmitDel0');
+        if (idx === 0) {
+            if (!row1 || row1.style.display === 'none') return;   // 第二行未展开时第一行删除按钮本就隐藏，防御性早返回
+            // 删第一行=把第二行内容顶上来、隐藏第二行（体感等价于"删除了第一行"，避免维护第三个槽位）
+            document.getElementById('siSubmitComponent0').value = document.getElementById('siSubmitComponent1').value;
+            document.getElementById('siSubmitRef0').value = document.getElementById('siSubmitRef1').value;
+        }
+        if (row1) row1.style.display = 'none';
+        if (addBtn) addBtn.style.display = '';
+        if (del0) del0.style.display = 'none';
+    }
+
+    // C7：commit 行内编辑三入口（canEditCommits 管既有行 PUT/DELETE；canAddCommit 独立判定管补充 POST）。
+    function siModalAddCommit() {
+        const iss = siDetail && siDetail.issue;
+        if (!iss) return;
+        siModal('补充 commit', [
+            fSelectMap('component', '组件', ['frontend', 'backend'], 'frontend', SI_COMMIT_COMPONENT_LABEL),
+            fText('commit_ref', 'commit_ref / SVN 版本号', '', true, 'trim 后 1~200 字'),
+        ], async v => {
+            const ref = (v.commit_ref || '').trim();
+            if (!ref || ref.length > 200) { showToast('commit_ref 必填（trim 1~200字）', 'error'); return false; }
+            const r = await siApi('/sys-issues/' + iss.id + '/dev/commits', { method: 'POST', body: { component: v.component, commit_ref: ref } });
+            if (!r.ok) { siCommitApiErr(r); return false; }
+            showToast('已补充', 'success'); return true;
+        });
+    }
+    function siModalEditCommit(commitId) {
+        const iss = siDetail && siDetail.issue;
+        const row = siDetail && (siDetail.dev_commits || []).find(c => c.id === commitId);
+        if (!iss || !row) return;
+        siModal('编辑 commit', [
+            fSelectMap('component', '组件', ['frontend', 'backend'], row.component, SI_COMMIT_COMPONENT_LABEL),
+            fText('commit_ref', 'commit_ref / SVN 版本号', row.commit_ref, true, 'trim 后 1~200 字'),
+        ], async v => {
+            const ref = (v.commit_ref || '').trim();
+            if (!ref || ref.length > 200) { showToast('commit_ref 必填（trim 1~200字）', 'error'); return false; }
+            const r = await siApi('/sys-issues/' + iss.id + '/dev/commits/' + commitId, { method: 'PUT', body: { component: v.component, commit_ref: ref } });
+            if (!r.ok) { siCommitApiErr(r); return false; }
+            showToast('已更新', 'success'); return true;
+        });
+    }
+    function siModalDeleteCommit(commitId) {
+        const iss = siDetail && siDetail.issue;
+        if (!iss) return;
+        siModal('删除 commit', [
+            fTextarea('reason', '删除原因', '', true, '必填：trim 1..200'),
+            note('⚠️ 若该行所属实例为「已提交」（code_submitted），删除后该实例须仍保留至少 1 条 commit，否则会被拒绝。')
+        ], async v => {
+            const reason = (v.reason || '').trim();
+            if (!reason || reason.length > 200) { showToast('删除原因必填（trim 1~200字）', 'error'); return false; }
+            const r = await siApi('/sys-issues/' + iss.id + '/dev/commits/' + commitId, { method: 'DELETE', body: { reason } });
+            if (!r.ok) { siCommitApiErr(r); return false; }
+            showToast('已删除', 'success'); return true;
+        });
+    }
+
+    // C7：成员管理入口——chip 级开脱/恢复（协调人）。二者是与 reassign 正交的业务动作（reason 留痕的具名
+    // 状态转移，非"加/减名单"），不并入 siModalReassign（详见完成报告"取舍说明"）。
+    function siModalExcuseMember(assigneeId) {
+        const iss = siDetail && siDetail.issue;
+        const d = siDetail && (siDetail.dev_assignees || []).find(x => x.id === assigneeId);
+        if (!iss || !d) return;
+        siModal('开脱开发（' + (d.user_name || ('#' + d.user_id)) + '）', [
+            fTextarea('reason', '开脱原因', '', true, '必填：trim 1..200'),
+            note('开脱后该成员本次不再参与本单开发完成态统计；如需恢复请用 chip 上的「恢复」（supersede-excuse）。')
+        ], async v => {
+            const reason = (v.reason || '').trim();
+            if (!reason || reason.length > 200) { showToast('开脱原因必填（trim 1~200字）', 'error'); return false; }
+            const r = await siApi('/sys-issues/' + iss.id + '/dev-assignees/' + assigneeId + '/excuse', { method: 'POST', body: { reason } });
+            if (!r.ok) { siApiErr(r); return false; }
+            showToast('已开脱', 'success'); return true;
+        });
+    }
+    function siModalSupersedeExcuse(assigneeId) {
+        const iss = siDetail && siDetail.issue;
+        const d = siDetail && (siDetail.dev_assignees || []).find(x => x.id === assigneeId);
+        if (!iss || !d) return;
+        // 契约澄清（对齐后端实际实现，非任务书字面"新人选择"）：supersede-excuse body 仅 reason，后端固定
+        // 为同一 user_id 生成新的 pending 实例（方案 §4.2 步骤4：INSERT 新行复制旧实例 issue_id+user_id）——
+        // "换成另一个人"不是本端点语义，那属于 reassign（移除该 excused 成员 + 加入新成员）。
+        siModal('恢复开脱（' + (d.user_name || ('#' + d.user_id)) + '）', [
+            fTextarea('reason', '恢复原因', '', true, '必填：trim 1..200'),
+            note('恢复后该成员生成新的在册实例（pending），沿用原开发本人，重新参与完成态统计。若要换成另一个人，请用「管理开发成员」。')
+        ], async v => {
+            const reason = (v.reason || '').trim();
+            if (!reason || reason.length > 200) { showToast('恢复原因必填（trim 1~200字）', 'error'); return false; }
+            const r = await siApi('/sys-issues/' + iss.id + '/dev-assignees/' + assigneeId + '/supersede-excuse', { method: 'POST', body: { reason } });
+            if (!r.ok) { siApiErr(r); return false; }
+            showToast('已恢复', 'success'); return true;
         });
     }
 
@@ -1639,11 +2016,10 @@
     function siModalHotfix(iss) {
         siModal('单条上线（hotfix）', [
             fTextarea('release_note', '上线说明', '', true, '必填，≤1000'),
-            fText('version_tag', '版本号', '', true, '必填，≤100'),
-            note('⚠️ 闸门③：单条上线需填说明+版本号。发布后转「已上线」并通知需求方。批量上线请用「批次管理」。')
+            fText('version_tag', '版本号（选填）', '', false, '选填，≤100'),
+            note('⚠️ 闸门③：单条上线需填说明（版本号选填，C6 已去必填）。发布后转「已上线」并通知需求方。批量上线请用「批次管理」。')
         ], async v => {
             if (!v.release_note.trim()) { showToast('上线说明必填', 'error'); return false; }
-            if (!v.version_tag.trim()) { showToast('版本号必填', 'error'); return false; }
             const r = await siApi('/sys-issues/' + iss.id + '/hotfix-publish', { method: 'POST', body: { release_note: v.release_note.trim(), version_tag: v.version_tag.trim() } });
             if (!r.ok) { siApiErr(r); return false; }
             showToast('已上线，钉钉已通知需求方', 'success'); return true;
@@ -1670,20 +2046,19 @@
         });
     }
     // 权限=actor.id===release_assignee_id（H-1，后端独立校验，非常规 admin 万能）。hotfix：单条不建批次、不填版本号；
-    //   publish：建 sys_releases 批次，需填版本号+说明。F2（用户拍板）：不自动触发任何通知，建单人通知走手动 notify-creator。
+    //   publish：建 sys_releases 批次，需填说明（版本号选填，C6 已去必填）。F2（用户拍板）：不自动触发任何通知，建单人通知走手动 notify-creator。
     function siModalExecuteRelease() {
         const iss = siDetail && siDetail.issue;
         if (!iss) return;
         siModal('执行上线', [
-            fSelectMap('mode', '上线方式', ['hotfix', 'publish'], 'hotfix', { hotfix: 'hotfix（确认即上线，不发版不填版本号）', publish: '发版（填版本号+说明，建上线批次）' }),
+            fSelectMap('mode', '上线方式', ['hotfix', 'publish'], 'hotfix', { hotfix: 'hotfix（确认即上线，不发版不填版本号）', publish: '发版（填说明，建上线批次；版本号选填）' }),
             fTextarea('release_note', '上线说明（发版模式必填）', '', false, '仅发版模式需要'),
-            fText('version_tag', '版本号（发版模式必填）', '', false, '仅发版模式需要'),
-            note('hotfix：单条直接标记已上线，不建批次不填版本号。发版：建上线批次，需填版本号与说明。上线后不自动通知任何人，如需通知建单人请到「通知」区手动点「通知建单人」。')
+            fText('version_tag', '版本号（选填）', '', false, '选填，≤100'),
+            note('hotfix：单条直接标记已上线，不建批次不填版本号。发版：建上线批次，需填说明（版本号选填）。上线后不自动通知任何人，如需通知建单人请到「通知」区手动点「通知建单人」。')
         ], async v => {
             const body = { mode: v.mode, issue_ids: [iss.id] };
             if (v.mode === 'publish') {
                 if (!v.release_note.trim()) { showToast('发版模式需填上线说明', 'error'); return false; }
-                if (!v.version_tag.trim()) { showToast('发版模式需填版本号', 'error'); return false; }
                 body.release_note = v.release_note.trim();
                 body.version_tag = v.version_tag.trim();
             }
@@ -2076,11 +2451,10 @@
         const ids = checked.map(el => parseInt(el.value, 10));
         siModal('批量执行上线（发版，' + ids.length + ' 单）', [
             fTextarea('release_note', '上线说明', '', true, '必填，≤1000'),
-            fText('version_tag', '版本号', '', true, '必填，≤100'),
-            note('批量执行仅支持发版模式（建统一批次，全部单据须同属你本人）；hotfix 单条上线请到详情页操作。')
+            fText('version_tag', '版本号（选填）', '', false, '选填，≤100'),
+            note('批量执行仅支持发版模式（建统一批次，全部单据须同属你本人）；hotfix 单条上线请到详情页操作。版本号选填（C6 已去必填）。')
         ], async v => {
             if (!v.release_note.trim()) { showToast('上线说明必填', 'error'); return false; }
-            if (!v.version_tag.trim()) { showToast('版本号必填', 'error'); return false; }
             const r = await siApi('/sys-issues/execute-release', { method: 'POST', body: { mode: 'publish', issue_ids: ids, release_note: v.release_note.trim(), version_tag: v.version_tag.trim() } });
             if (!r.ok) { siApiErr(r); return false; }
             showToast('已上线 ' + ((r.data && r.data.count) || ids.length) + ' 单（' + ((r.data && r.data.release_no) || '') + '）', 'success');
@@ -2191,7 +2565,7 @@
         siModal('发布批次', [
             fTextarea('release_note', '上线说明（选填，覆盖批次已填）', '', false),
             fText('version_tag', '版本号（选填，覆盖批次已填）', ''),
-            note('⚠️ 闸门③：发布需上线说明+版本号（此处留空则用批次已填值，最终不得为空）。发布后批次内单据全部转「已上线」并通知需求方。')
+            note('⚠️ 闸门③：发布需上线说明（此处留空则用批次已填值，最终不得为空）；版本号选填（C6 已去必填）。发布后批次内单据全部转「已上线」并通知需求方。')
         ], async v => {
             const body = {};
             if (v.release_note.trim()) body.release_note = v.release_note.trim();

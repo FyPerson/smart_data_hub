@@ -273,7 +273,7 @@ async function runDbIntegration() {
     await dbRunAsync(`CREATE TABLE collab_operation_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, collab_request_id INTEGER, operation_type TEXT, operator_id INTEGER, operator TEXT, reason TEXT, created_at TEXT)`);
     await dbRunAsync(`CREATE TABLE sys_issues (id INTEGER PRIMARY KEY, title TEXT, created_at TEXT, status TEXT, type TEXT, updated_at TEXT,
         first_submitted_at TEXT, released_at TEXT, closed_at TEXT)`);
-    await dbRunAsync(`CREATE TABLE sys_issue_timeline (id INTEGER PRIMARY KEY AUTOINCREMENT, issue_id INTEGER, event_type TEXT, created_at TEXT)`);
+    await dbRunAsync(`CREATE TABLE sys_issue_timeline (id INTEGER PRIMARY KEY AUTOINCREMENT, issue_id INTEGER, event_type TEXT, to_status TEXT, created_at TEXT)`);
 
     // ---- 数据修正（正常完结/在途/返工/异常终止 四类） ----
     await dbRunAsync(`INSERT INTO correction_requests (id, location_info, created_at, status, correction_type) VALUES
@@ -339,22 +339,34 @@ async function runDbIntegration() {
     assertRecordAdditivity(collabRecords, 'DB/协作');
     assertAggregateAdditivity(eff.summarizeModule('collab', collabRecords), 'DB/协作 聚合');
 
-    // ---- 系统迭代（estimate 命中/作废/feasibility 命中/双缺失 fallback） ----
+    // ---- 系统迭代（estimate 命中/作废/feasibility 命中/双缺失 fallback/多开发 GATE≠首提） ----
+    // [C3 对抗审 M-P3] t2 边界改用 timeline 首次 event_type='status_change' AND to_status='待验证'
+    // 的 GATE 时刻，不再用 first_submitted_at——#201/#204 特意把 first_submitted_at 设成与 GATE
+    // 不同的更早时刻，证明它已被忽略（数值仍与旧断言一致，说明 GATE 事件时刻沿用了旧口径下
+    // first_submitted_at 的原值，纯粹是数据源切换非行为漂移）；#205 老单缺 timeline 记录验证
+    // fallback 链仍一路吸收到归档终态；#206 是显式多开发场景（首提早/GATE 晚）专项回归。
     await dbRunAsync(`INSERT INTO sys_issues
         (id, title, created_at, status, type, updated_at, first_submitted_at, released_at, closed_at) VALUES
-        (201, '迭代X-已上线', '2026-03-01 00:00:00', '已上线', 'feature', '2026-03-01 03:10:00', '2026-03-01 01:30:00', '2026-03-01 03:00:00', NULL),
+        (201, '迭代X-已上线', '2026-03-01 00:00:00', '已上线', 'feature', '2026-03-01 03:10:00', '2026-03-01 00:45:00', '2026-03-01 03:00:00', NULL),
         (203, '迭代Z-作废', '2026-03-01 00:00:00', '已作废', 'feature', '2026-03-01 01:15:00', NULL, NULL, NULL),
-        (204, '迭代-可行性评估路径', '2026-03-01 00:00:00', '已上线', 'improvement', NULL, '2026-03-01 02:00:00', '2026-03-01 03:00:00', NULL),
-        (205, '迭代-跳过预计', '2026-03-01 00:00:00', '已上线', 'feature', NULL, '2026-03-01 01:00:00', '2026-03-01 02:00:00', NULL)`);
-    await dbRunAsync(`INSERT INTO sys_issue_timeline (issue_id, event_type, created_at) VALUES
-        (201, 'estimate', '2026-03-01 01:00:00'),
-        (204, 'feasibility', '2026-03-01 00:30:00')`);
-    const sysRecords = await eff.EFFICIENCY_LOADERS.sys(dbAllAsync, null, null, '2026-03-01 04:20:00');
+        (204, '迭代-可行性评估路径', '2026-03-01 00:00:00', '已上线', 'improvement', NULL, '2026-03-01 00:40:00', '2026-03-01 03:00:00', NULL),
+        (205, '迭代-跳过预计', '2026-03-01 00:00:00', '已上线', 'feature', NULL, '2026-03-01 01:00:00', '2026-03-01 02:00:00', NULL),
+        (206, '迭代-多开发GATE晚于首提', '2026-03-01 00:00:00', '已上线', 'feature', NULL, '2026-03-01 00:30:00', '2026-03-01 05:00:00', NULL)`);
+    await dbRunAsync(`INSERT INTO sys_issue_timeline (issue_id, event_type, to_status, created_at) VALUES
+        (201, 'estimate', NULL, '2026-03-01 01:00:00'),
+        (201, 'status_change', '待验证', '2026-03-01 01:30:00'),
+        (204, 'feasibility', NULL, '2026-03-01 00:30:00'),
+        (204, 'status_change', '待验证', '2026-03-01 02:00:00'),
+        (206, 'estimate', NULL, '2026-03-01 00:15:00'),
+        (206, 'status_change', '开发中', '2026-03-01 00:20:00'),
+        (206, 'status_change', '待验证', '2026-03-01 03:00:00')`);
+    const sysRecords = await eff.EFFICIENCY_LOADERS.sys(dbAllAsync, null, null, '2026-03-01 06:20:00');
     const bySid = Object.fromEntries(sysRecords.map((r) => [r.id, r]));
-    assertDeepEqual(bySid[201].stageHours, [1, 0.5, 1.5], 'DB/迭代 #201：[1,0.5,1.5]（estimate 事件命中）');
+    assertDeepEqual(bySid[201].stageHours, [1, 0.5, 1.5], 'DB/迭代 #201：[1,0.5,1.5]（estimate 事件命中 + GATE 时刻取代 first_submitted_at）');
     assertDeepEqual(bySid[203].stageHours, [1.25, null, null], 'DB/迭代 #203 作废：raw 1.25（updated_at 兜底终止时刻，内部不预 round）');
-    assertDeepEqual(bySid[204].stageHours, [0.5, 1.5, 1], 'DB/迭代 #204：[0.5,1.5,1]（feasibility 事件命中——核实遗漏修正验证）');
-    assertDeepEqual(bySid[205].stageHours, [1, 0, 1], 'DB/迭代 #205 跳过预计：[1,0,1]（fallback 到 first_submitted_at）');
+    assertDeepEqual(bySid[204].stageHours, [0.5, 1.5, 1], 'DB/迭代 #204：[0.5,1.5,1]（feasibility 事件命中——GATE 时刻取代 first_submitted_at）');
+    assertDeepEqual(bySid[205].stageHours, [2, 0, 0], 'DB/迭代 #205 跳过预计+无 GATE 记录：[2,0,0]（老单缺 timeline，fallback 一路吸收到归档终态，first_submitted_at 不再兜底）');
+    assertDeepEqual(bySid[206].stageHours, [0.25, 2.75, 2], 'DB/迭代 #206 ⭐多开发 GATE≠首提：[0.25,2.75,2]（t2=GATE 时刻 03:00，非 first_submitted_at 00:30——若误用首提会得 stage2=0.25 而非 2.75）');
     assertRecordAdditivity(sysRecords, 'DB/迭代');
     const sysSummary = eff.summarizeModule('sys', sysRecords);
     assertAggregateAdditivity(sysSummary, 'DB/迭代 聚合');

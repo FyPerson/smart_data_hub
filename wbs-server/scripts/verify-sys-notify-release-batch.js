@@ -1,4 +1,4 @@
-// 验证脚本：系统迭代 批量通知上线开发（POST /sys-issues/notify-release-executor-batch）
+﻿// 验证脚本：系统迭代 批量通知上线开发（POST /sys-issues/notify-release-executor-batch）
 //   用法：node scripts/verify-sys-notify-release-batch.js
 //
 // 覆盖（真实 HTTP + 落库状态 + 注入可控 sendIssueDingtalkRaw stub 断言"合并一条"）：
@@ -94,7 +94,7 @@ async function seedReady(assignDev, releaseDevId, releaseDevTok) {
   const id = r.body.id;
   await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: assignDev });
   await call('POST', `/api/sys-issues/${id}/estimate`, tokFor, { dev_estimated_at: EST });
-  await call('POST', `/api/sys-issues/${id}/submit`, tokFor, { summary: '修复完成' });
+  await call('POST', `/api/sys-issues/${id}/submit`, tokFor, { mode: 'no_code', no_code_reason: '修复完成（占位理由）' });
   r = await call('POST', `/api/sys-issues/${id}/accept`, adminTok, {});
   assert.strictEqual(r.status, 200, 'bug accept 200, got ' + JSON.stringify(r.body));
   if (releaseDevId) {

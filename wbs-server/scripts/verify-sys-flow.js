@@ -1,4 +1,4 @@
-// 验证脚本：系统迭代 C3a 开发动作 + 旁路态端点全流程（方案 §3.4/§3.5/§5/§7）
+﻿// 验证脚本：系统迭代 C3a 开发动作 + 旁路态端点全流程（方案 §3.4/§3.5/§5/§7）
 //   用法：node scripts/verify-sys-flow.js
 //
 // in-process express app（挂真实 router）+ 内存库 + seed users + 自签 token，测端点链路：
@@ -129,10 +129,11 @@ async function main() {
     ok('L-1(复)：estimate assigned_at 缺失脏单 → 409 ASSIGNED_AT_MISSING（防绕过 >=assigned_at 闸门）');
 
     // ── [2] submit → accept 全流程 ──
-    r = await call('POST', `/api/sys-issues/${id1}/submit`, devTok, { summary: '功能 X 完成' });
+    r = await call('POST', `/api/sys-issues/${id1}/submit`, devTok, { mode: 'no_code', no_code_reason: '功能 X 完成（占位理由）' });
     assert.strictEqual(r.status, 200, 'submit 200');
-    assert.strictEqual(r.body.status, '待验证', 'submit → 待验证');
-    ok('submit：开发本人 + summary → 待验证');
+    // C3：新 submit 响应体字段为 main_status（同 C2 add/reassign 端点惯例），非旧 makeTransitionEndpoint 的 status。
+    assert.strictEqual(r.body.main_status, '待验证', 'submit → 待验证（main_status 字段）');
+    ok('submit：在册开发 + no_code → 待验证（W05 唯一 submit，C3 多开发 commit 事件模型）');
     r = await call('POST', `/api/sys-issues/${id1}/accept`, adminTok, {});
     assert.strictEqual(r.status, 200, 'accept 200');   // L-1
     assert.strictEqual(r.body.status, '待上线', 'accept → 待上线');
@@ -141,7 +142,7 @@ async function main() {
     // ── [3] return（打回，return_count++）──
     const id2 = await seedToDevInProgress(5);
     await call('POST', `/api/sys-issues/${id2}/estimate`, devTok, { dev_estimated_at: '2026-08-01 10:00' });
-    await call('POST', `/api/sys-issues/${id2}/submit`, devTok, { summary: '交付' });
+    await call('POST', `/api/sys-issues/${id2}/submit`, devTok, { mode: 'no_code', no_code_reason: '交付（占位理由）' });
     r = await call('POST', `/api/sys-issues/${id2}/return`, adminTok, { reason: '列不齐' });
     assert.strictEqual(r.status, 200, 'return 200');   // L-1
     assert.strictEqual(r.body.status, '开发中', 'return → 开发中');
@@ -156,6 +157,11 @@ async function main() {
     assert.strictEqual(r.status, 200, 'hold 200');   // L-1
     assert.strictEqual(r.body.status, '已暂缓', 'hold → 已暂缓');
     ok('hold：开发中 → 已暂缓（admin + reason）');
+    // [codex 98 号 MED7① 自检补漏] W07 证据表——hold 此前只有合法通过例，补非法拒绝：缺 reason → 400
+    const id3b = await seedToDevInProgress(5);
+    r = await call('POST', `/api/sys-issues/${id3b}/hold`, adminTok, { reason: '  ' });
+    assert.strictEqual(r.status, 400, `[W07 证据·hold] hold 缺 reason 应 400, got ${r.status} ${JSON.stringify(r.body)}`);
+    ok('[W07 证据·hold] 非法拒绝：hold 缺 reason（trim 空）→ 400（requiredPayload 校验）');
     r = await call('POST', `/api/sys-issues/${id3}/resume`, adminTok, {});
     assert.strictEqual(r.status, 200, 'resume 200');
     assert.strictEqual(r.body.status, '开发中', 'resume 回暂缓前态（开发中）');
@@ -180,6 +186,12 @@ async function main() {
     assert.strictEqual(d4.closed_at, null, 'reopen 清 closed_at');
     assert.ok(d4.reopened_at, 'reopen 盖 reopened_at');
     ok('reopen：已关闭 → 开发中，reopen_count=1 + 清 accepted_at/closed_at + 盖 reopened_at');
+    // [codex 98 号 MED7① 自检补漏] W07 证据表——reopen 补非法拒绝：from 白名单仅 [已上线,已关闭]，开发中态 reopen → 400
+    const id4b = await seedToDevInProgress(5);
+    r = await call('POST', `/api/sys-issues/${id4b}/reopen`, adminTok, { reason: '误触' });
+    assert.strictEqual(r.status, 400, `[W07 证据·reopen] 开发中态 reopen 应 400, got ${r.status} ${JSON.stringify(r.body)}`);
+    assert.strictEqual(r.body.code, 'INVALID_TRANSITION', 'reopen from 白名单外应 INVALID_TRANSITION');
+    ok('[W07 证据·reopen] 非法拒绝：开发中态 reopen → 400 INVALID_TRANSITION（from 白名单仅已上线/已关闭）');
 
     // ── [6] issue_reject → reactivate（待评估 → 已拒绝 → 待评估）──
     let rr = await call('POST', '/api/sys-issues', adminTok, { type: 'feature', title: 'reject测', system_name: 'BMS', source: '内部' });
@@ -193,8 +205,19 @@ async function main() {
     const d5 = await get('SELECT reopen_count FROM sys_issues WHERE id=?', [id5]);
     assert.strictEqual(d5.reopen_count, 0, 'reactivate 不计返工（reopen_count 不变 RC-M1）');
     ok('issue_reject → reactivate：待评估 → 已拒绝 → 待评估（回初始态，reopen_count 不变 RC-M1）');
+    // [codex 98 号 MED7① 自检补漏] W07 证据表——reactivate 补非法拒绝：from 白名单仅 [已拒绝]，非该态 reactivate → 400
+    r = await call('POST', `/api/sys-issues/${id5}/reactivate`, adminTok, { reason: '再试一次' });   // id5 此时已是「待评估」（上面刚 reactivate 过），非「已拒绝」
+    assert.strictEqual(r.status, 400, `[W07 证据·reactivate] 非已拒绝态 reactivate 应 400, got ${r.status} ${JSON.stringify(r.body)}`);
+    assert.strictEqual(r.body.code, 'INVALID_TRANSITION', 'reactivate from 白名单外应 INVALID_TRANSITION');
+    ok('[W07 证据·reactivate] 非法拒绝：待评估态（非已拒绝）reactivate → 400 INVALID_TRANSITION');
 
     // ── [7] void（作废）──
+    // [codex 98 号 MED7① 自检补漏] W07 证据表——void from='*'（任意态皆可作废），故唯一可测的"非法拒绝"
+    //   维度是权限（roleGuard='admin'）而非 from 状态：非 admin（开发）void → 403。先测负例，再测正例作废
+    //   （避免先作废后 id5 状态提前进「已作废」污染负例的可读性）。
+    r = await call('POST', `/api/sys-issues/${id5}/void`, devTok, { reason: '开发想删单' });
+    assert.strictEqual(r.status, 403, `[W07 证据·void] 非 admin void 应 403, got ${r.status} ${JSON.stringify(r.body)}`);
+    ok('[W07 证据·void] 非法拒绝：非 admin（开发）void → 403（from=* 无状态维度可拒，权限维度替代）');
     r = await call('POST', `/api/sys-issues/${id5}/void`, adminTok, { reason: '误建' });
     assert.strictEqual(r.status, 200, 'void 200');   // L-1
     assert.strictEqual(r.body.status, '已作废', 'void → 已作废');

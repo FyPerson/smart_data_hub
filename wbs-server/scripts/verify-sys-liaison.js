@@ -164,16 +164,19 @@ async function main() {
     ok('[P1] assign：admin/对接人(7,13) bug 200（新放开）+ 非白名单非 admin 403(中间件 NOT_ADMIN_OR_BUG_LIAISON)');
 
     // 白名单对接人 reassign bug → 200：先 admin 建单指派到 dev5（处理中），对接人换到 dev6
+    //   ⚠️ 既有测试变更（C2：reassign body 改 member_ids+reason 声明式最终 roster，见交付汇报清单）。
     id = await createBug();
     await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5 });
-    r = await call('POST', `/api/sys-issues/${id}/reassign`, liaison1Tok, { newAssignedTo: 6, oldAssignedTo: 5, reason: '换人' });
+    r = await call('POST', `/api/sys-issues/${id}/reassign`, liaison1Tok, { member_ids: [6], reason: '换人' });
     assert.strictEqual(r.status, 200, '对接人 reassign bug 200，got ' + r.status + ' ' + JSON.stringify(r.body));
-    assert.strictEqual(r.body.assigned_to, 6, 'reassign 后开发=6');
+    const rAssignees = r.body.dev_assignees || [];
+    assert.strictEqual(rAssignees.length, 1, 'reassign 后子表恰 1 行');
+    assert.strictEqual(rAssignees[0].user_id, 6, 'reassign 后开发=6（选举结果）');
 
     // 非白名单非 admin reassign bug → 403（中间件）
     id = await createBug();
     await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5 });
-    r = await call('POST', `/api/sys-issues/${id}/reassign`, dev2Tok, { newAssignedTo: 6, oldAssignedTo: 5, reason: '换人' });
+    r = await call('POST', `/api/sys-issues/${id}/reassign`, dev2Tok, { member_ids: [6], reason: '换人' });
     assert.strictEqual(r.status, 403, '非白名单非 admin reassign bug 403');
     assert.strictEqual(r.body.code, 'NOT_ADMIN_OR_BUG_LIAISON', 'reassign 403 中间件层');
     ok('[P2] reassign：admin/对接人 bug 200 + 非白名单非 admin 403（中间件）');
@@ -187,7 +190,7 @@ async function main() {
     // 越界②：对接人 reassign FEATURE → 403（reassign handler type='bug' 精判拒）
     id = await createFeatureScheduled();
     await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5 });   // feature → 开发中
-    r = await call('POST', `/api/sys-issues/${id}/reassign`, liaison1Tok, { newAssignedTo: 6, oldAssignedTo: 5, reason: '换人' });
+    r = await call('POST', `/api/sys-issues/${id}/reassign`, liaison1Tok, { member_ids: [6], reason: '换人' });
     assert.strictEqual(r.status, 403, '对接人 reassign feature 应 403（handler type 精判）');
 
     // 越界③：对接人对其余 admin 动作(accept) → 403（accept 仍 requireAdmin，对接人不获泛化写权限）

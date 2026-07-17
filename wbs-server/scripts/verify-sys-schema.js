@@ -358,7 +358,12 @@ async function verifyMissingColLib() {
   await run2(`CREATE TABLE sys_issues (id INTEGER PRIMARY KEY, type TEXT, status TEXT, priority TEXT, system_name TEXT, source TEXT, record_source TEXT, import_batch_id TEXT, origin_issue_id INTEGER, release_id INTEGER, created_by INTEGER, assigned_to INTEGER, assigned_to_name TEXT, dev_estimated_at TEXT, deadline TEXT, assigned_at TEXT, first_submitted_at TEXT, accepted_at TEXT, released_at TEXT, closed_at TEXT, reopened_at TEXT, reopen_count INTEGER, return_count INTEGER, scope_changed INTEGER, notify_status TEXT, notified_at TEXT, notify_message_key TEXT, notify_error TEXT, read_at TEXT, requester_notify_status TEXT)`);
   await run2(`CREATE TABLE sys_issue_timeline (id INTEGER PRIMARY KEY, event_type TEXT, from_status TEXT, to_status TEXT, action_code TEXT, ref_id INTEGER, round_no INTEGER)`);
   await run2(`CREATE TABLE sys_issue_attachments (id INTEGER PRIMARY KEY, attachment_type TEXT, round_no INTEGER, status TEXT)`);
-  await run2(`CREATE TABLE sys_issue_dev_assignees (id INTEGER PRIMARY KEY, issue_id INTEGER, user_id INTEGER, user_name TEXT, is_primary INTEGER, notify_status TEXT, notified_at DATETIME, read_at DATETIME, notify_message_key TEXT, notify_error TEXT, removed_at DATETIME)`);   // 全列建全（对齐扩全列后的 SYS_DEV_ASSIGNEES_KEY_COLS，本测试焦点是 sys_issues 缺列先命中）
+  await run2(`CREATE TABLE sys_issue_dev_assignees (id INTEGER PRIMARY KEY, issue_id INTEGER, user_id INTEGER, user_name TEXT, is_primary INTEGER, notify_status TEXT, notified_at DATETIME, read_at DATETIME, notify_message_key TEXT, notify_error TEXT, removed_at DATETIME, dev_status TEXT, resolved_at TEXT, no_code_reason TEXT, superseded_by INTEGER)`);   // 全列建全（对齐扩全列后的 SYS_DEV_ASSIGNEES_KEY_COLS，含 C0 4 列；本测试焦点是 sys_issues 缺列先命中）
+  // C0（多开发协作与 commit 留痕重构 v2.9）3 新表：本测试焦点在 sys_issues 缺列（[2] 排第一命中即 return），
+  //   3 新表只需满足 [1] 表存在性即可，故建最小桩表（仅 id 列）。
+  await run2(`CREATE TABLE sys_issue_dev_commits (id INTEGER PRIMARY KEY)`);
+  await run2(`CREATE TABLE sys_issue_dev_events (id INTEGER PRIMARY KEY)`);
+  await run2(`CREATE TABLE sys_issue_release_commit_snapshots (id INTEGER PRIMARY KEY)`);
   await mod2._internals.runSysMigration(null);
   const st = mod2._internals.SYS_SCHEMA_STATE;
   assert.strictEqual(st.ready, false, '缺列库 readiness 应为 false');
@@ -402,6 +407,10 @@ async function verifyMissingDevAssigneesColLib() {
   await run3(`CREATE TABLE sys_issue_attachments (id INTEGER PRIMARY KEY, attachment_type TEXT, round_no INTEGER, status TEXT)`);
   // 新表存在，但故意只建 id/issue_id/user_id/user_name/removed_at——缺 is_primary + notify_status（本场景焦点）。
   await run3(`CREATE TABLE sys_issue_dev_assignees (id INTEGER PRIMARY KEY, issue_id INTEGER, user_id INTEGER, user_name TEXT, removed_at DATETIME)`);
+  // C0 3 新表：本测试焦点在 dev_assignees 自身缺列（checks 数组第 5 项命中即 return，早于 3 新表），建最小桩表满足 [1] 表存在性。
+  await run3(`CREATE TABLE sys_issue_dev_commits (id INTEGER PRIMARY KEY)`);
+  await run3(`CREATE TABLE sys_issue_dev_events (id INTEGER PRIMARY KEY)`);
+  await run3(`CREATE TABLE sys_issue_release_commit_snapshots (id INTEGER PRIMARY KEY)`);
   await mod3._internals.runSysMigration(null);
   const st3 = mod3._internals.SYS_SCHEMA_STATE;
   assert.strictEqual(st3.ready, false, 'dev_assignees 缺列库 readiness 应为 false');
@@ -424,6 +433,11 @@ async function verifyDevAssigneesGuardAlignment() {
     await run(`CREATE TABLE sys_issues (id INTEGER PRIMARY KEY, type TEXT, status TEXT, priority TEXT, system_name TEXT, source TEXT, record_source TEXT, import_batch_id TEXT, origin_issue_id INTEGER, release_id INTEGER, created_by INTEGER, assigned_to INTEGER, assigned_to_name TEXT, dev_estimated_at TEXT, deadline TEXT, assigned_at TEXT, first_submitted_at TEXT, accepted_at TEXT, released_at TEXT, effected_at TEXT, closed_at TEXT, reopened_at TEXT, reopen_count INTEGER, return_count INTEGER, scope_changed INTEGER, notify_status TEXT, notified_at TEXT, notify_message_key TEXT, notify_error TEXT, read_at TEXT, requester_notify_status TEXT, creator_notify_status TEXT, needs_feasibility INTEGER, feasibility_conclusion TEXT, blocked INTEGER, needs_release INTEGER, related_correction_no TEXT, fix_gap_note TEXT, dingtalk_chat_id TEXT, relay_notify_status TEXT)`);
     await run(`CREATE TABLE sys_issue_timeline (id INTEGER PRIMARY KEY, event_type TEXT, from_status TEXT, to_status TEXT, action_code TEXT, ref_id INTEGER, round_no INTEGER)`);
     await run(`CREATE TABLE sys_issue_attachments (id INTEGER PRIMARY KEY, attachment_type TEXT, round_no INTEGER, status TEXT)`);
+    // C0（多开发协作与 commit 留痕重构 v2.9）3 新表：Case A/B 焦点均在 dev_assignees 自身缺列（checks 数组
+    //   第 5 项命中即 return，早于 3 新表），建最小桩表满足 [1] 表存在性。
+    await run(`CREATE TABLE sys_issue_dev_commits (id INTEGER PRIMARY KEY)`);
+    await run(`CREATE TABLE sys_issue_dev_events (id INTEGER PRIMARY KEY)`);
+    await run(`CREATE TABLE sys_issue_release_commit_snapshots (id INTEGER PRIMARY KEY)`);
   };
   const bootMod = (db, run, get, all) => require('../routes/sys-iteration')({
     logger: { info: noop, warn: noop, error: noop, debug: noop },

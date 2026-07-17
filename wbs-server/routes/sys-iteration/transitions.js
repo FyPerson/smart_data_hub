@@ -83,13 +83,29 @@ const CHANGE_FLOW_TRANSITIONS = [
     notifyAfterCommit: 'notifyAssignedDeveloper',  // C5 落地
   },
   {
-    action: 'reassign',                     // 重新指派：开发中/待验证 → 开发中（换人，不走 transition，乐观锁绑 oldAssignedTo，照 correction v1.85.0 L-R / 06-M3）
-    from: ['开发中', '待验证'], to: { '开发中': '开发中', '待验证': '开发中' },
+    // 重新指派（M3·91 号审 v2.9 重写，MED-2/LOW·92 号审补 from）：改派开发集合（member_ids 声明式差量），
+    //   不走 sysIssueTransition/findTransition（独立事务，端点 POST .../reassign 自行处理）。to 目标态不再是
+    //   静态映射——去主次化后 assigned_to 纯派生，实际主状态变化（若有）由 W-GATE 依 roster 完成态判定，事前
+    //   不可静态得知，故仿 resume 用 to:null 动态解析语义标注（本条目不在 SIDE_EFFECT_ACTIONS 白名单，
+    //   buildMeta 仍正确归类 kind='transition'）。dev_estimated_at 清空语义随旧"换主清进度"概念一并废除
+    //   （v2.9 §3 无此要求，去主次后无"主"可清）。
+    // MED-2（92 号审）：from 补 D_PRE 前置态——v2.9 §4.3 矩阵 reassign 行对 D_PRE 族=✅（最终集合可空，
+    //   assertMemberActionFamilyAllowed 的 MEMBER_ACTION_FAMILY_MATRIX.reassign=['D_PRE','DEV','VERIFY']），
+    //   feature/improvement 的 D_PRE 族=[待评估,已排期,已暂缓]（status-families.js SYS_D_PRE_STATUSES，含已暂缓——
+    //   已暂缓虽是"暂缓"语义态，但按 §4.3 是纯族判断不特殊化，矩阵 D_PRE 行统一 ✅）。此前 from 只有
+    //   [开发中,待验证]（DEV/VERIFY），漏 D_PRE 三态会让前端 typeFlows.find(f=>f.from.includes(status)) 误判
+    //   D_PRE 态下无改派按钮——与后端实际放行集合（assertMemberActionFamilyAllowed 才是真校验，此处只是
+    //   前端展示用只读镜像）不同源。补齐后 from 与矩阵完全同源（写读同源）。
+    action: 'reassign',
+    from: ['待评估', '已排期', '已暂缓', '开发中', '待验证'], to: null,
     roleGuard: 'admin', ownerGuard: null,
-    requiredPayload: ['newAssignedTo', 'oldAssignedTo', 'reason'],
-    sideEffects: ['assigned_to/_name/assigned_at 更新', 'dev_estimated_at 清空（T-M2）', '仅重置开发侧 notify_*（不动 requester/creator，05-L3）', 'return_count 不变（05-M2）'],
-    timelineEvent: 'reassign', actionCode: null,
-    notifyAfterCommit: 'notifyAssignedDeveloper',  // C5
+    requiredPayload: ['member_ids', 'reason'],
+    sideEffects: ['开发集合差量应用（新增 INSERT pending / 移除软删）', '选举 electRepresentative 重算 assigned_to/_name（assigned_at 仅首次形成时补写）', 'W-GATE 按新 roster 完成态判定主状态是否联动', '仅代表真实变化时才 notifyAssignedDeveloper（不再按 toAdd.length 判定）', 'return_count 不变（05-M2，v2.9 沿用）'],
+    // LOW（92 号审）：timelineEvent 置 null——成员动作只写 sys_issue_dev_events，不进 sys_issue_timeline
+    //   （M4/91 号审拍板：主状态变化才写 timeline，成员差量本身不写；本字段目前无消费方，此前留
+    //   'reassign' 是历史静态映射时代的残留，纯误导，去掉防未来误接线）。
+    timelineEvent: null, actionCode: null,
+    notifyAfterCommit: 'notifyAssignedDeveloper',  // C5；实际触发条件见端点内 repChanged 判定
   },
   {
     action: 'estimate',                     // 回填预计完成：开发中（不改 status，写 dev_estimated_at）—— 端点 C3
@@ -281,12 +297,13 @@ const BUG_FLOW_TRANSITIONS = [
     notifyAfterCommit: 'notifyAssignedDeveloper',
   },
   {
-    action: 'reassign',                     // 换人：处理中/待验证 → 处理中（同变更流范式；群成员同步=③）
-    from: ['处理中', '待验证'], to: { '处理中': '处理中', '待验证': '处理中' },
+    // 换人（M3·91 号审 v2.9 重写，同变更流范式，理由同上条；MED-2/LOW·92 号审补 from=待处理 + timelineEvent=null，理由同上条）：
+    action: 'reassign',
+    from: ['待处理', '处理中', '待验证'], to: null,
     roleGuard: 'admin_or_bug_liaison', ownerGuard: null,   // ④ 对接人白名单放开——reassign 走独立事务（不经 sysIssueTransition [3]），故此 roleGuard 仅作 SSOT 记录，实际由端点中间件 requireAdminOrBugLiaison + handler type='bug' 精判 enforced
-    requiredPayload: ['newAssignedTo', 'oldAssignedTo', 'reason'],
-    sideEffects: ['assigned_to/_name/assigned_at 更新', 'dev_estimated_at 清空', '仅重置开发侧 notify_*', 'return_count 不变'],
-    timelineEvent: 'reassign', actionCode: null,
+    requiredPayload: ['member_ids', 'reason'],
+    sideEffects: ['开发集合差量应用（新增 INSERT pending / 移除软删）', '选举 electRepresentative 重算 assigned_to/_name（assigned_at 仅首次形成时补写）', 'W-GATE 按新 roster 完成态判定主状态是否联动', '仅代表真实变化时才 notifyAssignedDeveloper', 'return_count 不变（v2.9 沿用）'],
+    timelineEvent: null, actionCode: null,
     notifyAfterCommit: 'notifyAssignedDeveloper',
   },
   {

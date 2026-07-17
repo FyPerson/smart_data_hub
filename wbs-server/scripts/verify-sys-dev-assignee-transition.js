@@ -30,6 +30,39 @@ const all = (sql, params = []) => new Promise((res, rej) => db.all(sql, params, 
 const get = (sql, params = []) => new Promise((res, rej) => db.get(sql, params, (e, row) => e ? rej(e) : res(row)));
 const noop = () => {};
 
+// [codex 99 号 M4 补强] 故障注入——同既有范式（verify-sys-multidev-members.js H2 / verify-sys-multidev-submit.js
+//   S4c）：平时 injectFailureOnSql=null 行为与直接用 run 完全一致，测试内临时置位一次 SQL 片段。
+let injectFailureOnSql = null;
+let injectFailureFired = false;
+const runFI = (sql, params = []) => {
+  if (injectFailureOnSql && sql.includes(injectFailureOnSql)) {
+    const marker = injectFailureOnSql;
+    injectFailureOnSql = null;
+    injectFailureFired = true;
+    return Promise.reject(new Error(`[测试注入故障] 命中 SQL 片段「${marker}」`));
+  }
+  return run(sql, params);
+};
+// [codex C3 对抗审 M-P1 回填] dbGetAsync 侧独立故障注入（与上方 runFI 各自独立、互不干扰）——
+//   resolveCollaboratorList 内部只做 SELECT（dbGetAsync），要模拟"非业务错误"（非 SysTransitionError，
+//   如真实 DB/连接层异常）必须在 dbGetAsync 层注入，SysTransitionError 类校验失败（如 COLLABORATOR_NOT_FOUND）
+//   是该函数自己 throw 的业务错误，不适合也不需要用故障注入模拟。
+let injectGetFailureOnSql = null;
+let injectGetFailureSkip = 0;   // 跳过前 N 次命中（同一 SQL 文本在同一请求内可能被多个不同调用点复用，如
+                                  // /assign 先查主开发、resolveCollaboratorList 后查协作开发，文本完全相同，
+                                  // 只能靠跳过次数区分要打到哪一次）
+let injectGetFailureFired = false;
+const getFI = (sql, params = []) => {
+  if (injectGetFailureOnSql && sql.includes(injectGetFailureOnSql)) {
+    if (injectGetFailureSkip > 0) { injectGetFailureSkip--; return get(sql, params); }
+    const marker = injectGetFailureOnSql;
+    injectGetFailureOnSql = null;
+    injectGetFailureFired = true;
+    return Promise.reject(new Error(`[测试注入故障] 命中 SELECT 片段「${marker}」`));
+  }
+  return get(sql, params);
+};
+
 const authenticateToken = (req, res, next) => {
   const h = req.headers.authorization || '';
   const tok = h.startsWith('Bearer ') ? h.slice(7) : null;
@@ -41,7 +74,7 @@ const requireAdmin = (req, res, next) => (req.user && req.user.role === 'admin')
 
 const mod = require('../routes/sys-iteration')({
   logger: { info: noop, warn: noop, error: noop, debug: noop },
-  db, dbRunAsync: run, dbGetAsync: get, dbAllAsync: all,
+  db, dbRunAsync: runFI, dbGetAsync: getFI, dbAllAsync: all,
   authenticateToken, requireAdmin,
   ...require('./_sys-attach-test-deps'),
 });
@@ -174,28 +207,26 @@ async function main() {
     ok('[A] 建单三路径 none/A(主+2协作)/B(对接人白名单+反规范化名) 落点全对 + 6 种互斥/校验错误码精确');
   }
 
-  // ═══ [B] path A 首事务字段边界 + assign 失败原子（主=viewer/不存在） ═══
+  // ═══ [B] path A 单事务原子性（C2 破坏性变更：主=viewer/不存在 → 整体回滚，不再是"事务1提交+事务2失败"）═══
+  //   ⚠️ 既有测试变更（详见交付汇报"既有测试变更清单"）：C2 前 path A 是两段式事务（事务1 INSERT 主表提交，
+  //   事务2 sysIssueTransition('assign') 失败则单停留待处理+assign_failed 标记，仍 201）；C2 后 path A 改单一
+  //   事务（校验主开发/协作存在性→INSERT 主表→插子表→选举→UPDATE 到 DEV，任一步失败整体回滚），不再产生
+  //   "单已建但未指派"的半成品态——失败即 400，压根不建单（cntBefore===cntAfter 直接证明）。
   {
+    const cntBefore = (await get('SELECT COUNT(*) c FROM sys_issues')).c;
     let r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: '主是viewer', system_name: 'BMS', source: '内部', assign_mode: 'A', assigned_to: 9 });
-    assert.strictEqual(r.status, 201, '主=viewer：事务1 仍提交，单已建，201');
-    assert.strictEqual(r.body.assign_failed, true, '主=viewer：assign_failed=true');
-    assert.strictEqual(r.body.assign_error.code, 'ASSIGN_TARGET_VIEWER', '主=viewer：assign_error.code 正确');
-    let row = await get('SELECT status, assigned_to, assigned_to_name, assigned_at FROM sys_issues WHERE id=?', [r.body.id]);
-    assert.strictEqual(row.status, '待处理', '主=viewer：单停留待处理（首事务字段边界）');
-    assert.strictEqual(row.assigned_to, null, '主=viewer：assigned_to 仍 NULL（事务2 回滚，无 owner 漂移）');
-    assert.strictEqual(row.assigned_to_name, null, '主=viewer：assigned_to_name 仍 NULL');
-    assert.strictEqual(row.assigned_at, null, '主=viewer：assigned_at 仍 NULL');
-    assert.deepStrictEqual(await allDevAssigneeRows(r.body.id), [], '主=viewer：无任何子表行（含软删）');
+    assert.strictEqual(r.status, 400, '主=viewer：整体回滚，400（C2：不再有半成品态）');
+    assert.strictEqual(r.body.code, 'ASSIGN_TARGET_VIEWER', '主=viewer：错误码正确');
+    let cntAfter = (await get('SELECT COUNT(*) c FROM sys_issues')).c;
+    assert.strictEqual(cntAfter, cntBefore, '主=viewer：未创建任何 sys_issues 行（整体原子回滚）');
 
     r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: '主不存在', system_name: 'BMS', source: '内部', assign_mode: 'A', assigned_to: 999 });
-    assert.strictEqual(r.status, 201, '主不存在：事务1 仍提交，201');
-    assert.strictEqual(r.body.assign_error.code, 'ASSIGN_TARGET_NOT_FOUND', '主不存在：正确错误码');
-    row = await get('SELECT status, assigned_to FROM sys_issues WHERE id=?', [r.body.id]);
-    assert.strictEqual(row.status, '待处理', '主不存在：单停留待处理');
-    assert.strictEqual(row.assigned_to, null, '主不存在：无 owner 漂移');
-    assert.deepStrictEqual(await allDevAssigneeRows(r.body.id), [], '主不存在：无子表行');
+    assert.strictEqual(r.status, 400, '主不存在：整体回滚，400');
+    assert.strictEqual(r.body.code, 'ASSIGN_TARGET_NOT_FOUND', '主不存在：错误码正确');
+    cntAfter = (await get('SELECT COUNT(*) c FROM sys_issues')).c;
+    assert.strictEqual(cntAfter, cntBefore, '主不存在：未创建任何 sys_issues 行');
 
-    ok('[B] path A 首事务字段边界：主开发 viewer/不存在 → 事务2 回滚，单已建但停留待处理∧无 assigned_*∧无子表行（含软删）');
+    ok('[B] path A 单事务原子性（C2）：主开发 viewer/不存在 → 整体回滚，不产生"单已建但未指派"的半成品态（400，未建单）');
   }
 
   // ═══ [H] 白盒：sysIssueTransition('assign') 在不兼容前置态失败 → 无 assigned_*/无子表行 ═══
@@ -216,90 +247,39 @@ async function main() {
     ok('[H] 白盒：sysIssueTransition 在不兼容前置态（已上线）执行 assign 失败 → 主表/子表均无写入残留（底层机制直证）');
   }
 
-  // ═══ [C]+[D] 差量 upsert 五步矩阵 + OWNER_GUARD_FAILED（连贯剧本，同一张单反复改派）═══
-  let mainId, dev5RowId;
+  // [C3 退场] 原 [C]（差量 upsert 五步矩阵，白盒直调 I.applyDevAssigneeDiff）整节移除——该函数随旧
+  //   /sys-issues/:id/assign 单人授权模型一并删除（C3 消灭旧 /assign，applyDevAssigneeDiff 唯一调用点不再
+  //   存在，函数体已删）。"主开发/协作差量 upsert（保留通知状态/软删复活/降协作 vs 软删两分支）"这套算法
+  //   本身随旧模型退场——新模型下"谁是代表"由 electRepresentative 派生（§3.6：现任仍在册优先/在册 pending
+  //   最小 user_id/全在册最小 user_id/零在册→NULL），没有"指定主开发/协作差量"这个概念了。等价的多开发
+  //   roster 差量能力（在册保留通知状态/软删/复活语义）已在 C2 的 reassign（声明式最终 roster，方案 §3）
+  //   与 dev-assignees 加人/移除端点重新实现，覆盖见 scripts/verify-sys-multidev-members.js S31 等。
+  let mainId;
   {
-    // 建单 path A：主=5，协作=[6]
-    let r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: '剧本单', system_name: 'BMS', source: '内部', assign_mode: 'A', assigned_to: 5, collaborator_ids: [6] });
+    // C3 重写 /assign：mainId 仅用于 [G] 详情 GET 读端断言（写读同源），无需剧本历史，建单+一次 assign 即可。
+    let r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: '剧本单', system_name: 'BMS', source: '内部' });
     mainId = r.body.id;
-    let da = await activeDevAssignees(mainId);
-    assert.strictEqual(da.length, 2, '剧本①：子表 2 行（5主+6协作）');
-    dev5RowId = da.find(d => d.user_id === 5).id;
-    const dev6RowId = da.find(d => d.user_id === 6).id;
-
-    // 模拟 dev6 已被通知（供步骤1"保留通知状态"断言）
-    await run(`UPDATE sys_issue_dev_assignees SET notify_status='sent', notified_at='2026-01-01 10:00:00', notify_message_key='mk1' WHERE id=?`, [dev6RowId]);
-
-    // OWNER_GUARD_FAILED：oldAssignedTo 传错（旧主停留旧页面提交场景）
-    r = await call('POST', `/api/sys-issues/${mainId}/reassign`, adminTok, { newAssignedTo: 8, oldAssignedTo: 999, reason: '测试乐观锁' });
-    assert.strictEqual(r.status, 409, 'oldAssignedTo 不匹配应 409');
-    assert.strictEqual(r.body.code, 'OWNER_GUARD_FAILED', 'code 已改名为 OWNER_GUARD_FAILED（非旧 CONCURRENT_REASSIGN）');
-    da = await activeDevAssignees(mainId);
-    assert.strictEqual(da.length, 2, 'OWNER_GUARD_FAILED：守卫先于差量 upsert，子表未受影响');
-
-    // 剧本②：reassign 8(主)+[6,10]（6=在册保留/step1；10=全新/step3；5=旧主不在协作集→软删/step4）
-    r = await call('POST', `/api/sys-issues/${mainId}/reassign`, adminTok, { newAssignedTo: 8, oldAssignedTo: 5, reason: '第一次改派', collaboratorIds: [6, 10] });
-    assert.strictEqual(r.status, 200, '剧本②改派 200, got ' + JSON.stringify(r.body));
-    da = await activeDevAssignees(mainId);
-    assert.strictEqual(da.length, 3, '剧本②：在册 3 行（8主+6,10协作）');
-    assert.deepStrictEqual(da.filter(d => d.is_primary === 1).map(d => d.user_id), [8], '剧本②：恰好1主=8');
-    const dev6After2 = da.find(d => d.user_id === 6);
-    assert.strictEqual(dev6After2.notify_status, 'sent', '步骤1：dev6 在册保留 → notify_status 未被清零');
-    assert.strictEqual(dev6After2.notify_message_key, 'mk1', '步骤1：dev6 notify_message_key 保留');
-    const dev5Row = await get(`SELECT is_primary, removed_at FROM sys_issue_dev_assignees WHERE id=?`, [dev5RowId]);
-    assert.ok(dev5Row.removed_at, '步骤4：旧主5不在新协作集 → 软删（旧主去向分支①：软删）');
-    const dev10Row = da.find(d => d.user_id === 10);
-    assert.strictEqual(dev10Row.notify_status, 'not_sent', '步骤3：dev10 全新 INSERT，notify_status=not_sent');
-
-    // 剧本③：reassign 回 5(主)+[6]（5=软删复活取最新/step2，同一行id；8=旧主不在协作集→软删；10=协作出集→软删）
-    r = await call('POST', `/api/sys-issues/${mainId}/reassign`, adminTok, { newAssignedTo: 5, oldAssignedTo: 8, reason: '复活旧主', collaboratorIds: [6] });
-    assert.strictEqual(r.status, 200, '剧本③改派 200, got ' + JSON.stringify(r.body));
-    da = await activeDevAssignees(mainId);
-    assert.strictEqual(da.length, 2, '剧本③：在册 2 行（5主+6协作）');
-    const dev5Reactivated = await get(`SELECT id, is_primary, removed_at FROM sys_issue_dev_assignees WHERE user_id=5 AND issue_id=?`, [mainId]);
-    assert.strictEqual(dev5Reactivated.id, dev5RowId, '步骤2：复活的是同一行（id 不变，非新 INSERT）');
-    assert.strictEqual(dev5Reactivated.removed_at, null, '步骤2：removed_at 复位 NULL（复活）');
-    assert.strictEqual(dev5Reactivated.is_primary, 1, '步骤2：复活即为主（is_primary=1）');
-    const dev8RowAfter3 = await get(`SELECT removed_at FROM sys_issue_dev_assignees WHERE user_id=8 AND issue_id=?`, [mainId]);
-    assert.ok(dev8RowAfter3.removed_at, '步骤4：旧主8不在新协作集 → 软删（旧主去向分支①，第二次验证）');
-    const dev10RowAfter3 = await get(`SELECT removed_at FROM sys_issue_dev_assignees WHERE user_id=10 AND issue_id=?`, [mainId]);
-    assert.ok(dev10RowAfter3.removed_at, '步骤4：协作 10 出集 → 软删（非仅主开发才走此分支）');
-    const dev6Row3 = da.find(d => d.user_id === 6);
-    assert.strictEqual(dev6Row3.notify_status, 'sent', '步骤1：dev6 连续两轮改派后通知状态仍保留（幂等）');
-
-    // 剧本④：reassign 6(主，原协作提升)+[5]（原主降协作，旧主去向分支②：仍在协作集→降协作，非软删）
-    r = await call('POST', `/api/sys-issues/${mainId}/reassign`, adminTok, { newAssignedTo: 6, oldAssignedTo: 5, reason: '协作转正', collaboratorIds: [5] });
-    assert.strictEqual(r.status, 200, '剧本④改派 200, got ' + JSON.stringify(r.body));
-    da = await activeDevAssignees(mainId);
-    assert.strictEqual(da.length, 2, '剧本④：在册 2 行（6主+5协作）');
-    const dev6Promoted = da.find(d => d.user_id === 6);
-    assert.strictEqual(dev6Promoted.is_primary, 1, '步骤1：dev6（原在册协作）提升为主');
-    const dev5Demoted = await get(`SELECT id, is_primary, removed_at FROM sys_issue_dev_assignees WHERE user_id=5 AND issue_id=?`, [mainId]);
-    assert.strictEqual(dev5Demoted.id, dev5RowId, '旧主降协作：仍是同一行（第三次复用，非新建）');
-    assert.strictEqual(dev5Demoted.is_primary, 0, '旧主去向分支②：仍在目标集 → 降协作（is_primary 0），非软删');
-    assert.strictEqual(dev5Demoted.removed_at, null, '旧主去向分支②：降协作后仍在册（removed_at NULL）');
-
-    // 恰好1主不变式：全程每一步之后都应满足（逐一复核最终态）
-    const finalPrimaries = await all(`SELECT user_id FROM sys_issue_dev_assignees WHERE issue_id=? AND is_primary=1 AND removed_at IS NULL`, [mainId]);
-    assert.strictEqual(finalPrimaries.length, 1, '[G12/step5] 最终态恰好 1 条在册 primary');
-    const finalRow = await get('SELECT assigned_to FROM sys_issues WHERE id=?', [mainId]);
-    assert.strictEqual(finalPrimaries[0].user_id, finalRow.assigned_to, '[step5] 在册 primary user_id == sys_issues.assigned_to');
-
-    ok('[C] 差量 upsert 五步矩阵：在册保留通知状态(step1×3轮幂等) + 全新INSERT(step3) + 软删复活取最新且同行复用(step2×2次) + 出集软删含协作非仅主(step4) + 旧主两分支(降协作 vs 软删各验2次) + 恰好1主不变式(step5)全程保持');
-    ok('[D] OWNER_GUARD_FAILED：旧命名 CONCURRENT_REASSIGN 已改名，守卫失败时子表差量 upsert 不触发（未受影响）');
+    r = await call('POST', `/api/sys-issues/${mainId}/assign`, adminTok, { assigned_to: 5, collaborator_ids: [6] });
+    assert.strictEqual(r.status, 200, 'mainId assign 200, got ' + JSON.stringify(r.body));
+    ok('[C 替代] mainId 建单 + assign(主=5,协作=[6])，供 [G] 详情 GET 读端 dev_assignees[] join 断言复用（旧差量算法白盒测试随 applyDevAssigneeDiff 一并退场，见上方注释）');
   }
 
   // ═══ [E] 单开发向后兼容 ═══
   {
     const r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: '单开发', system_name: 'BMS', source: '内部' });
     const id = r.body.id;
+    // [codex 101 号 MED 回填] updated_at 成功断言——种一个明显过期的旧值（避开 SQLite datetime() 1 秒粒度
+    //   与"前后取值同一秒"的时序抖动风险），assign 成功后应不再等于该旧值（真实被刷新，非巧合同值）。
+    await run(`UPDATE sys_issues SET updated_at = '2020-01-01 00:00:00' WHERE id = ?`, [id]);
     const a = await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5 });
     assert.strictEqual(a.status, 200, '单开发 assign（不传协作）200');
     const da = await activeDevAssignees(id);
     assert.strictEqual(da.length, 1, '单开发向后兼容：子表恰 1 行');
     assert.strictEqual(da[0].user_id, 5, '子表行=主开发');
     assert.strictEqual(da[0].is_primary, 1, '子表行 is_primary=1');
-    ok('[E] 单开发向后兼容：assign 不传 collaborator_ids → 子表恰 1 行（对齐既有 19 套 verify 的单开发语义）');
+    const afterUpd = await get('SELECT updated_at FROM sys_issues WHERE id=?', [id]);
+    assert.notStrictEqual(afterUpd.updated_at, '2020-01-01 00:00:00', 'M2 回填：/assign 成功刷新 sys_issues.updated_at（旧版公共 UPDATE 既有行为）');
+    ok('[E] 单开发向后兼容：assign 不传 collaborator_ids → 子表恰 1 行（对齐既有 19 套 verify 的单开发语义）+ updated_at 刷新');
   }
 
   // ═══ [F] 协作开发校验错误码 ═══
@@ -332,11 +312,10 @@ async function main() {
     assert.strictEqual(detail.status, 200, '详情 200');
     const das = detail.body.dev_assignees;
     assert.ok(Array.isArray(das), 'dev_assignees 为数组');
-    assert.strictEqual(das.length, 2, '详情 dev_assignees：仅在册 2 行（历史软删的 8/10 不出现）');
-    assert.strictEqual(das[0].is_primary, 1, '详情 dev_assignees：主开发排第一（is_primary DESC）');
-    assert.strictEqual(das[0].user_id, 6, '详情 dev_assignees：当前主开发=6（剧本④终态）');
-    assert.ok(!das.some(d => d.user_id === 8 || d.user_id === 10), '详情 dev_assignees：软删的 8/10 不出现（写读同源）');
-    // [修④] mutation 响应（reassign 剧本④ 的响应体）应含 notify_status 等全列字段
+    assert.strictEqual(das.length, 2, '详情 dev_assignees：在册 2 行（5主+6协作，C3 简化 mainId 建单一次 assign）');
+    assert.strictEqual(das[0].is_primary, 1, '详情 dev_assignees：代表排第一（is_primary DESC）');
+    assert.strictEqual(das[0].user_id, 5, '详情 dev_assignees：electRepresentative 派生代表=5（在册 pending 最小 user_id，§3.6 规则②，新单 assigned_to 起始 NULL）');
+    // [修④] mutation 响应应含 notify_status 等全列字段
     assert.ok(das.every(d => 'notify_status' in d && 'notified_at' in d && 'read_at' in d && 'notify_message_key' in d && 'notify_error' in d),
       '详情 dev_assignees 含全列字段（notify_status/notified_at/read_at/notify_message_key/notify_error）');
     // [修B·轮2] 真验 mutation 响应形（非只 GET）：/assign 端点响应体 dev_assignees[0] 含全列字段
@@ -351,116 +330,163 @@ async function main() {
     ok('[G] 详情 GET + assign mutation 响应体 dev_assignees[] 均含全列字段 + 仅在册行 + 主开发排前（附录A 契约·修④ 真断言响应形）');
   }
 
-  // ═══ [I] 留主改协作（修①·集成审收口）：不换主、只增删协作 → 不清进度不流转 ═══
-  {
-    // 建 bug path A：主=5、协作=[6]；estimate 填预计完成（进度），确认留主改协作后进度不丢
-    let r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: '留主改协作', system_name: 'BMS', source: '内部', assign_mode: 'A', assigned_to: 5, collaborator_ids: [6] });
-    const id = r.body.id;
-    const EST = '2026-09-01 10:00';
-    r = await call('POST', `/api/sys-issues/${id}/estimate`, dev5Tok, { dev_estimated_at: EST });
-    assert.strictEqual(r.status, 200, '主开发 estimate 填预计完成 200');
-    let issue = await get('SELECT status, dev_estimated_at, assigned_to FROM sys_issues WHERE id=?', [id]);
-    assert.strictEqual(issue.status, '处理中', '前置：status=处理中');
-    assert.strictEqual(issue.dev_estimated_at, EST, '前置：dev_estimated_at 已填');
-
-    // 留主改协作：newAssignedTo=5(不变)、oldAssignedTo=5、协作 [6]→[6,8]（带 expectedCollaboratorIds=当前在册协作集 [6]，修A collab 集乐观锁）
-    r = await call('POST', `/api/sys-issues/${id}/reassign`, adminTok, { newAssignedTo: 5, oldAssignedTo: 5, reason: '加个协作', collaboratorIds: [6, 8], expectedCollaboratorIds: [6] });
-    assert.strictEqual(r.status, 200, '留主改协作 200, got ' + JSON.stringify(r.body));
-    // [轮3 收口·codex-LOW] 真验 /reassign 端点响应体 dev_assignees[] 全列（非只 GET / assign）
-    assert.ok(Array.isArray(r.body.dev_assignees) && r.body.dev_assignees.length >= 1, 'reassign 响应含 dev_assignees 非空');
-    for (const col of ['id', 'user_id', 'user_name', 'is_primary', 'notify_status', 'notified_at', 'read_at', 'notify_message_key', 'notify_error']) {
-      assert.ok(col in r.body.dev_assignees[0], `reassign mutation 响应 dev_assignees[0] 含 ${col}（真锁修④ reassign 响应形）`);
-    }
-    const da = await activeDevAssignees(id);
-    assert.deepStrictEqual(da.filter(d => d.is_primary === 1).map(d => d.user_id), [5], '① 主开发仍=5（未换主）');
-    assert.deepStrictEqual(da.filter(d => d.is_primary === 0).map(d => d.user_id).sort(), [6, 8], '① 协作集 [6,8]（8 进子表在册）');
-    issue = await get('SELECT status, dev_estimated_at FROM sys_issues WHERE id=?', [id]);
-    assert.strictEqual(issue.dev_estimated_at, EST, '② dev_estimated_at 未清（留主改协作保留进度）');
-    assert.strictEqual(issue.status, '处理中', '③ status 未流转（仍处理中）');
-    const tl = await all(`SELECT event_type, from_status, to_status, summary FROM sys_issue_timeline WHERE issue_id=? AND event_type='reassign' ORDER BY id DESC LIMIT 1`, [id]);
-    assert.ok(/编辑协作开发/.test(tl[0].summary), '④ timeline summary 含"编辑协作开发"');
-    assert.strictEqual(tl[0].from_status, tl[0].to_status, '④ timeline from==to（不流转）');
-    const finalPrim = await all(`SELECT user_id FROM sys_issue_dev_assignees WHERE issue_id=? AND is_primary=1 AND removed_at IS NULL`, [id]);
-    assert.strictEqual(finalPrim.length, 1, '⑤ 恰好1主');
-    assert.strictEqual(finalPrim[0].user_id, 5, '⑤ 恰好1主==assigned_to=5');
-
-    // [I-d 轮3 收口·codex-LOW] expectedCollaboratorIds 严格校验（非数组/脏元素显式拒，不静默丢弃）：
-    //   collaboratorIds=[6] 与当前在册 [6,8] 不同 → 过 NO_CHANGE guard，到 expectedCollaboratorIds 校验
-    let rBad = await call('POST', `/api/sys-issues/${id}/reassign`, adminTok, { newAssignedTo: 5, oldAssignedTo: 5, reason: '脏参', collaboratorIds: [6], expectedCollaboratorIds: 'x' });
-    assert.strictEqual(rBad.body.code, 'INVALID_EXPECTED_COLLABORATORS', '非数组 expectedCollaboratorIds → INVALID_EXPECTED_COLLABORATORS');
-    rBad = await call('POST', `/api/sys-issues/${id}/reassign`, adminTok, { newAssignedTo: 5, oldAssignedTo: 5, reason: '脏元素', collaboratorIds: [6], expectedCollaboratorIds: [6, 'bad'] });
-    assert.strictEqual(rBad.body.code, 'INVALID_EXPECTED_COLLABORATORS', '含非法元素 expectedCollaboratorIds → INVALID_EXPECTED_COLLABORATORS');
-    assert.deepStrictEqual((await activeDevAssignees(id)).filter(d => d.is_primary === 0).map(d => d.user_id).sort(), [6, 8], 'INVALID 拒绝后子表未变（仍 [6,8]）');
-
-    // [I-b] 真无变更（主+协作都不变）→ REASSIGN_NO_CHANGE（NO_CHANGE guard 先于 collab 集乐观锁，故无需 expected 也拒）
-    r = await call('POST', `/api/sys-issues/${id}/reassign`, adminTok, { newAssignedTo: 5, oldAssignedTo: 5, reason: '啥都没改', collaboratorIds: [6, 8], expectedCollaboratorIds: [6, 8] });
-    assert.strictEqual(r.status, 400, '主+协作都不变应 400');
-    assert.strictEqual(r.body.code, 'REASSIGN_NO_CHANGE', 'code=REASSIGN_NO_CHANGE');
-    // 进度仍未被 NO_CHANGE 分支意外触碰
-    issue = await get('SELECT dev_estimated_at FROM sys_issues WHERE id=?', [id]);
-    assert.strictEqual(issue.dev_estimated_at, EST, 'NO_CHANGE 拒绝后进度仍在（事务已 rollback）');
-
-    // [I-c] 留主改协作缺 expectedCollaboratorIds → 400 EXPECTED_COLLABORATORS_REQUIRED（修A：collab 集乐观锁必填）
-    r = await call('POST', `/api/sys-issues/${id}/reassign`, adminTok, { newAssignedTo: 5, oldAssignedTo: 5, reason: '缺乐观锁', collaboratorIds: [6] });
-    assert.strictEqual(r.status, 400, '缺 expectedCollaboratorIds 应 400');
-    assert.strictEqual(r.body.code, 'EXPECTED_COLLABORATORS_REQUIRED', 'code=EXPECTED_COLLABORATORS_REQUIRED');
-    ok('[I] 留主改协作：不换主只增删协作 → 8 进子表在册 + dev_estimated_at 未清 + status 未流转 + timeline"编辑协作开发"(from==to) + 恰好1主；真无变更→REASSIGN_NO_CHANGE；缺 expectedCollaboratorIds→EXPECTED_COLLABORATORS_REQUIRED');
-  }
-
-  // ═══ [J] 换主仍清进度（回归护住换主分支）═══
-  {
-    let r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: '换主清进度', system_name: 'BMS', source: '内部', assign_mode: 'A', assigned_to: 5, collaborator_ids: [6] });
-    const id = r.body.id;
-    const EST = '2026-09-02 11:00';
-    await call('POST', `/api/sys-issues/${id}/estimate`, dev5Tok, { dev_estimated_at: EST });
-    let issue = await get('SELECT dev_estimated_at FROM sys_issues WHERE id=?', [id]);
-    assert.strictEqual(issue.dev_estimated_at, EST, '前置：dev_estimated_at 已填');
-    // 换主：5→8
-    r = await call('POST', `/api/sys-issues/${id}/reassign`, adminTok, { newAssignedTo: 8, oldAssignedTo: 5, reason: '换个人', collaboratorIds: [6] });
-    assert.strictEqual(r.status, 200, '换主 200');
-    issue = await get('SELECT status, dev_estimated_at, assigned_to FROM sys_issues WHERE id=?', [id]);
-    assert.strictEqual(issue.dev_estimated_at, null, '换主=新一轮：dev_estimated_at 被清');
-    assert.strictEqual(Number(issue.assigned_to), 8, '换主：assigned_to=8');
-    const tl = await all(`SELECT summary, from_status, to_status FROM sys_issue_timeline WHERE issue_id=? AND event_type='reassign' ORDER BY id DESC LIMIT 1`, [id]);
-    assert.ok(/改派 旧#5→新#8/.test(tl[0].summary), '换主 timeline summary "改派 旧→新"');
-    ok('[J] 换主回归：newAssignedTo≠old → dev_estimated_at 清 + assigned_to 换 + timeline"改派 旧→新"（换主分支未被留主改协作逻辑破坏）');
-  }
+  // ═══ [I]/[J]/[L]（移除，C2 破坏性变更）═══
+  //   ⚠️ 既有测试变更（详见交付汇报"既有测试变更清单"）：以下三节原测试的是 HTTP `/reassign` 端点的旧版
+  //   "换主 vs 留主改协作"二分语义——[I] 留主改协作不清进度不流转+expectedCollaboratorIds 协作集乐观锁；
+  //   [J] 换主清进度（dev_estimated_at 清零）+ timeline"改派 旧→新"摘要；[L] REASSIGN_STALE 并发丢更新防护。
+  //   这三者依赖的核心概念——"主开发"这个特殊身份、"换主=新一轮清进度"业务规则、`expectedCollaboratorIds`
+  //   协作集乐观锁字段——在 v2.9"去主次"重构下**均不存在对应物**：新版 reassign 是纯声明式最终 roster 差量
+  //   （方案 §3），没有"谁是主"这个概念就没有"换主"这件事，dev_estimated_at 清零是 W07/ADMIN_TRANSITION 侧
+  //   关切（本轮不碰，C3 范围），乐观锁改用最终集合与当前在册集合的差量比较（no-op→400 VALIDATION，无需额外
+  //   expected 字段）。故不是"翻译成新等价物"而是整节概念retired，直接删除（非静默注释掉）。新版 reassign
+  //   的完整语义（差量+operation_id 分组+LAST_ASSIGNEE+W-GATE 联动）在 scripts/verify-sys-multidev-members.js
+  //   S31 全新覆盖。
 
   // ═══ [K] assign viewer 拦截（users 表存在时强制校验，不被传入名绕过）═══
   {
     // 本 harness users 表存在且含 viewer(id=9) → assign 该 viewer → ASSIGN_TARGET_VIEWER
     let r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: 'assign viewer', system_name: 'BMS', source: '内部' });
     const id = r.body.id;
+    // [codex 101 号 MED 回填] updated_at 回滚断言——种旧值，拒绝路径应整事务回滚，updated_at 不被误刷。
+    await run(`UPDATE sys_issues SET updated_at = '2020-01-01 00:00:00' WHERE id = ?`, [id]);
     r = await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 9 });
     assert.strictEqual(r.status, 400, 'assign viewer 应 400');
     assert.strictEqual(r.body.code, 'ASSIGN_TARGET_VIEWER', 'users 表存在 → 强制校验拦 viewer');
-    // 白盒直证：即便通过 sysIssueTransition 直传 assigned_to_name 也无法绕过（users 表存在时忽略传入名走 db 校验）
-    const ADMIN = { id: 1, name: 'admin', role: 'admin' };
-    const seed = await run(`INSERT INTO sys_issues (type, status, title, system_name, source, created_by, created_by_name) VALUES ('bug','待处理','绕过测试','BMS','内部',1,'admin')`);
-    await assert.rejects(
-      I.sysIssueTransition(seed.lastID, 'assign', null, ADMIN, { assigned_to: 9, assigned_to_name: '伪造名绕过' }),
-      e => e instanceof I.SysTransitionError && e.code === 'ASSIGN_TARGET_VIEWER',
-      'users 表存在时传 assigned_to_name 不能绕过 viewer 校验');
-    ok('[K] assign viewer 拦截（修②）：users 表存在 → 强制查库校验，传入名/伪造名无法绕过 viewer 闸（ASSIGN_TARGET_VIEWER）');
+    const rejectedUpd = await get('SELECT updated_at FROM sys_issues WHERE id=?', [id]);
+    assert.strictEqual(rejectedUpd.updated_at, '2020-01-01 00:00:00', 'M2 回填：assign 校验失败整事务回滚，updated_at 不被误刷');
+    // [C3 退场] 原白盒直调 I.sysIssueTransition(...,'assign',...) 验证"传 assigned_to_name 无法绕过 viewer
+    //   校验"——该白盒路径已不代表真实行为：'assign' switch 分支随旧 /assign 端点一并删除（C3），
+    //   sysIssueTransition 不再处理 'assign' 动作的任何指派/roster 逻辑，viewer 校验现只存在于重写后的
+    //   HTTP 端点内（上方已验证，且新实现始终查库权威角色，无"assigned_to_name 信任回退分支"可绕）。
+    ok('[K] assign viewer 拦截：users 表存在 → 强制查库校验（ASSIGN_TARGET_VIEWER），新端点始终 DB 权威、无客户端传名回退分支可绕（C3 重写后更严格，白盒二次验证随旧 switch 分支退场）');
   }
 
-  // ═══ [L] 并发丢更新防护（修A·轮2）：留主改协作传与实际不符的 expectedCollaboratorIds → REASSIGN_STALE ═══
+  // ═══ [M] codex 99 号 M4：/assign 重建反例补强（重复候选去重已在 [F] 覆盖，此处补剩 3 项）═══
   {
-    // 建 bug path A：主=5、协作=[6]（实际当前协作集 = {6}）
-    let r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: '并发丢更新', system_name: 'BMS', source: '内部', assign_mode: 'A', assigned_to: 5, collaborator_ids: [6] });
-    const id = r.body.id;
-    const before = await allDevAssigneeRows(id);
-    // B 拿旧页面（误以为当前协作是 [6,8]）想改成 [6,10]：expected [6,8] ≠ 实际 [6] → 409 REASSIGN_STALE
-    r = await call('POST', `/api/sys-issues/${id}/reassign`, adminTok, { newAssignedTo: 5, oldAssignedTo: 5, reason: '并发提交', collaboratorIds: [6, 10], expectedCollaboratorIds: [6, 8] });
-    assert.strictEqual(r.status, 409, '协作集乐观锁不匹配应 409, got ' + JSON.stringify(r.body));
-    assert.strictEqual(r.body.code, 'REASSIGN_STALE', 'code=REASSIGN_STALE');
-    // 子表未被改动（乐观锁生效、事务已 rollback）：行集逐字不变 + 10 未进子表
-    const after = await allDevAssigneeRows(id);
-    assert.strictEqual(JSON.stringify(after), JSON.stringify(before), '子表逐字未变（事务 rollback）');
-    assert.ok(!after.some(d => d.user_id === 10), '10 未进子表（丢更新被拦，未静默覆盖）');
-    const activeC = await activeDevAssignees(id);
-    assert.deepStrictEqual(activeC.filter(d => d.is_primary === 0).map(d => d.user_id).sort(), [6], '在册协作仍=[6]（未被 B 的 [6,10] 覆盖）');
-    ok('[L] 并发丢更新防护：留主改协作传 expectedCollaboratorIds=[6,8] 但实际=[6] → 409 REASSIGN_STALE + 子表逐字未变（声明式全集替换的丢更新被 collab 集乐观锁拦住）');
+    // M4①：重复请求幂等——同一 issue 二次 /assign（首次已把 D_PRE 推进 DEV，第二次 before===after=开发中，
+    //   'assign' 具名边 from 白名单仅 [已排期]（feature）/[待处理]（bug），开发中不在其中）→ 确定性 409
+    //   GATE_INVARIANT（非静默 200/非数据损坏），roster/status 均不受二次请求影响（幂等=可重复安全调用，
+    //   非"返回同样 200"——assign 是一次性 D_PRE→DEV 边，非 PUT 语义幂等）。
+    {
+      let r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: 'M4①重复请求', system_name: 'BMS', source: '内部' });
+      const id = r.body.id;
+      r = await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5, collaborator_ids: [6] });
+      assert.strictEqual(r.status, 200, 'M4①：首次 assign 200');
+      // [codex 100 号 M4③ 同批加强] 全量快照对比（非仅计数）：roster 行完整内容 + dev_events + timeline +
+      //   代表字段（assigned_to/_name/assigned_at），证明二次请求真正"零副作用"而非恰好计数相同的假阳性
+      const rosterBefore = await allDevAssigneeRows(id);
+      const issueBefore = await get('SELECT status, assigned_to, assigned_to_name, assigned_at FROM sys_issues WHERE id=?', [id]);
+      const eventsBefore = await all(`SELECT id FROM sys_issue_dev_events WHERE issue_id=? ORDER BY id`, [id]);
+      const timelineBefore = await all(`SELECT id FROM sys_issue_timeline WHERE issue_id=? ORDER BY id`, [id]);
+      r = await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5, collaborator_ids: [6] });
+      assert.strictEqual(r.status, 409, `M4①：二次 assign（重复请求）应 409, got ${r.status} ${JSON.stringify(r.body)}`);
+      assert.strictEqual(r.body.code, 'GATE_INVARIANT', 'M4①：二次 assign 错误码 GATE_INVARIANT（开发中不在 assign 具名边 from 白名单）');
+      const rosterAfter = await allDevAssigneeRows(id);
+      const issueAfter = await get('SELECT status, assigned_to, assigned_to_name, assigned_at FROM sys_issues WHERE id=?', [id]);
+      const eventsAfter = await all(`SELECT id FROM sys_issue_dev_events WHERE issue_id=? ORDER BY id`, [id]);
+      const timelineAfter = await all(`SELECT id FROM sys_issue_timeline WHERE issue_id=? ORDER BY id`, [id]);
+      assert.deepStrictEqual(rosterAfter, rosterBefore, 'M4①：⭐ roster 行完整内容逐字段不变（非仅行数相同，含 dev_status/is_primary/removed_at 等全列）');
+      assert.deepStrictEqual(issueAfter, issueBefore, 'M4①：⭐ 代表字段（status/assigned_to/_name/assigned_at）逐字段不变');
+      assert.deepStrictEqual(eventsAfter, eventsBefore, 'M4①：dev_events 零新增（roster INSERT 分支因 existingSet 命中而全跳过，从未到写事件那步）');
+      assert.deepStrictEqual(timelineAfter, timelineBefore, 'M4①：timeline 零新增（guard 抛错先于 timeline INSERT）');
+      ok('M4①：重复请求幂等——二次 /assign 确定性 409 GATE_INVARIANT，roster 行内容/代表字段/dev_events/timeline 全量快照逐字段不变（真正零副作用，非仅计数巧合）');
+    }
+
+    // M4②：removed 候选生成新 pending 生命周期——D_PRE 态先经 dev-assignees 加人再移除（矩阵§4.3 D_PRE 允许，
+    //   主状态不动），留下 removed_at 非空历史行；随后 /assign 把该 removed 用户作为 collaborator_ids 传入，
+    //   应生成全新 pending 实例（新 id/removed_at=NULL），而非复活旧行（对齐 S24 established re-add 范式，
+    //   本次经由 /assign 路径验证同一约束——INSERT 分支只看 removed_at IS NULL 的 existingActive 集合，
+    //   历史 removed 行天然不在其中）。
+    {
+      let r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: 'M4②removed候选', system_name: 'BMS', source: '内部' });
+      const id = r.body.id;   // 待处理（D_PRE）
+      r = await call('POST', `/api/sys-issues/${id}/dev-assignees`, adminTok, { user_ids: [8] });
+      assert.strictEqual(r.status, 200, `M4②：D_PRE 态预加人应 200（矩阵§4.3 主状态不动）, got ${r.status} ${JSON.stringify(r.body)}`);
+      const preAdd = await activeDevAssignees(id);
+      const oldRowId = preAdd.find(d => d.user_id === 8).id;
+      r = await call('DELETE', `/api/sys-issues/${id}/dev-assignees/${oldRowId}`, adminTok, { reason: '预加人后又移除' });
+      assert.strictEqual(r.status, 200, `M4②：D_PRE 态移除应 200, got ${r.status} ${JSON.stringify(r.body)}`);
+      const oldRow = await get('SELECT removed_at FROM sys_issue_dev_assignees WHERE id=?', [oldRowId]);
+      assert.ok(oldRow.removed_at, 'M4②：旧行 removed_at 非空（软删历史留痕）');
+      // 主戏：/assign 把 user8 作为协作候选传入
+      r = await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5, collaborator_ids: [8] });
+      assert.strictEqual(r.status, 200, `M4②：assign 携历史 removed 用户为协作候选应 200, got ${r.status} ${JSON.stringify(r.body)}`);
+      const roster = await activeDevAssignees(id);
+      const newRow = roster.find(d => d.user_id === 8);
+      assert.ok(newRow, 'M4②：user8 在新在册集合中');
+      assert.notStrictEqual(newRow.id, oldRowId, 'M4②：⭐ 新行 id≠旧行 id（全新实例，非复活旧行）');
+      const newRowFull = await get('SELECT dev_status, removed_at FROM sys_issue_dev_assignees WHERE id=?', [newRow.id]);
+      assert.strictEqual(newRowFull.dev_status, 'pending', 'M4②：新实例 dev_status=pending（全新生命周期起点）');
+      assert.strictEqual(newRowFull.removed_at, null, 'M4②：新实例 removed_at=NULL（在册）');
+      const allRows = await allDevAssigneeRows(id);
+      assert.strictEqual(allRows.filter(d => d.user_id === 8).length, 2, 'M4②：user8 共 2 行（1 条历史 removed + 1 条全新 pending，非合并复用）');
+      ok('M4②：removed 候选经 /assign 重新加入 → 生成全新 pending 实例（新 id/removed_at=NULL），旧历史行原样保留不被复活');
+    }
+
+    // M4③：roster INSERT 后注入失败（timeline INSERT 处）→ roster/assigned_to/status/timeline 全部回滚
+    //   （fault-injection 范式同 verify-sys-multidev-members.js H2 / verify-sys-multidev-submit.js S4c）
+    {
+      let r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: 'M4③故障注入', system_name: 'BMS', source: '内部' });
+      const id = r.body.id;
+      // [codex 102 号 MED 回填] updated_at 种明显过期旧值（'2020-01-01'）——101 号轮的三处 updated_at 用例
+      // 验证的是"前置拒绝未误刷"（从未执行到 UPDATE），非"已写入后随事务整体回滚"；本例的 UPDATE（roster
+      // INSERT 后、timeline INSERT 前，即 /assign 自身状态 UPDATE 已把 updated_at 刷成"此刻"）确实先执行、
+      // 后续才在 timeline INSERT 处注入失败——真正验证"写后回滚"而非"从未写过"。
+      await run(`UPDATE sys_issues SET updated_at = '2020-01-01 00:00:00' WHERE id = ?`, [id]);
+      // [codex 100 号 M4③ 补强] 全量快照（非仅 status/assigned_to）：含 assigned_at/assigned_to_name（代表位）
+      //   + notify_status 等通知字段，证明 electRepresentative 的 UPDATE（含 notify 五列重置）同随事务回滚
+      const issueRowBefore = await get(
+        `SELECT status, assigned_to, assigned_to_name, assigned_at, updated_at,
+                notify_status, notified_at, notify_message_key, notify_error, read_at
+           FROM sys_issues WHERE id=?`, [id]);
+      injectFailureFired = false;
+      injectFailureOnSql = `VALUES (?, 'assign', ?, ?, ?, ?, ?)`;   // 命中 /assign 自身 timeline INSERT（roster INSERT + 状态/updated_at UPDATE 之后、commit 之前）
+      r = await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5, collaborator_ids: [6] });
+      assert.strictEqual(r.status, 500, `M4③：故障注入应 500, got ${r.status} ${JSON.stringify(r.body)}`);
+      assert.ok(injectFailureFired, 'M4③：确认故障注入真实命中过（防 SQL 片段写错导致测试静默失效）');
+      injectFailureOnSql = null; injectFailureFired = false;   // 复位
+      const rosterAfter = await allDevAssigneeRows(id);
+      assert.strictEqual(rosterAfter.length, 0, 'M4③：roster INSERT 已回滚（零残留行，含已成功插入的两条）');
+      const issueRowAfter = await get(
+        `SELECT status, assigned_to, assigned_to_name, assigned_at, updated_at,
+                notify_status, notified_at, notify_message_key, notify_error, read_at
+           FROM sys_issues WHERE id=?`, [id]);
+      assert.deepStrictEqual(issueRowAfter, issueRowBefore, 'M4③：⭐ status/代表位（assigned_to/_name/assigned_at）/updated_at/通知五列全部逐字段不变（electRepresentative + 状态/updated_at 的 UPDATE 随事务整体回滚，非仅 status/assigned_to 两列表面相同）');
+      assert.strictEqual(issueRowAfter.updated_at, '2020-01-01 00:00:00', 'M4③：⭐ updated_at 回滚到种子旧值（证明"已写后回滚"而非"从未写过"——101 号三处用例只测了后者）');
+      const tl = await all(`SELECT id FROM sys_issue_timeline WHERE issue_id=? AND event_type='assign'`, [id]);
+      assert.strictEqual(tl.length, 0, 'M4③：timeline 零残留（INSERT 本身即注入点，未提交）');
+      const ev = await all(`SELECT id FROM sys_issue_dev_events WHERE issue_id=?`, [id]);
+      assert.strictEqual(ev.length, 0, 'M4③：dev_events 零残留（roster INSERT 时同步写的 add 事件随事务回滚，非仅 roster 表回滚而事件表残留）');
+      ok('M4③：roster INSERT 成功后于 timeline INSERT 处注入失败 → 整事务回滚，roster/dev_events/assigned_to/代表位/通知字段/status/timeline 全部零残留（无部分写入）');
+    }
+
+    // M-P1：[codex C3 对抗审 M-P1 回填] 双重 sysRollback 修复回归——在 resolveCollaboratorList 内部（协作
+    //   开发查询，非主开发查询，故 injectGetFailureSkip=1 跳过第一次命中）注入一个非 SysTransitionError
+    //   的原始异常，验证：① /assign 本身 500（非业务错误未被误判成某个具体业务错误码）；② 锁所有权未被破坏
+    //   ——断言紧随其后的一个全新请求（另一张单的 /assign）事务能正常完成，证明 mutex 没有卡死/被提前释放
+    //   导致后续请求跑进一个"半途"的事务上下文。
+    {
+      let r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: 'M-P1故障注入', system_name: 'BMS', source: '内部' });
+      const idA = r.body.id;
+      injectGetFailureFired = false;
+      injectGetFailureSkip = 1;   // 跳过 /assign 自身查主开发（devId=5）那一次，命中 resolveCollaboratorList 查协作开发（6）那一次
+      injectGetFailureOnSql = 'SELECT id, display_name, username, role FROM users WHERE id = ?';
+      r = await call('POST', `/api/sys-issues/${idA}/assign`, adminTok, { assigned_to: 5, collaborator_ids: [6] });
+      assert.strictEqual(r.status, 500, `M-P1：非业务错误应 500（未被误判成某个具体业务错误码）, got ${r.status} ${JSON.stringify(r.body)}`);
+      assert.ok(injectGetFailureFired, 'M-P1：确认故障注入真实命中过（防 SQL 片段写错导致测试静默失效）');
+      injectGetFailureOnSql = null; injectGetFailureSkip = 0; injectGetFailureFired = false;   // 复位
+      const rosterA = await allDevAssigneeRows(idA);
+      assert.strictEqual(rosterA.length, 0, 'M-P1：故障单本身整事务回滚，零残留（外层唯一回滚点生效）');
+      // 关键：锁所有权未被破坏——紧随其后另一张单的正常 /assign 请求应完整成功（若锁被提前释放/破坏，
+      //   这里可能报错、挂起，或数据出现跨事务污染）。
+      r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: 'M-P1后续请求', system_name: 'BMS', source: '内部' });
+      const idB = r.body.id;
+      r = await call('POST', `/api/sys-issues/${idB}/assign`, adminTok, { assigned_to: 5, collaborator_ids: [6] });
+      assert.strictEqual(r.status, 200, `M-P1：⭐ 后续请求应正常成功 200（锁所有权未被破坏）, got ${r.status} ${JSON.stringify(r.body)}`);
+      const rosterB = await allDevAssigneeRows(idB);
+      assert.strictEqual(rosterB.length, 2, 'M-P1：⭐ 后续请求 roster 正确落库 2 行（事务完全正常，非受污染的半成品态）');
+      ok('M-P1：⭐ 双重 sysRollback 修复——resolveCollaboratorList 注入非业务错误 → /assign 500 + 故障单零残留；紧随其后另一张单的 /assign 请求正常成功（锁所有权未被破坏，事务隔离完整）');
+    }
   }
 
   server.close();

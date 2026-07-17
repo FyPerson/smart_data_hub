@@ -117,7 +117,9 @@ async function seedToVerify(extra = {}) {
   const id = await seedAssigned(extra);
   let r = await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: '2026-08-01 10:00' });
   assert.strictEqual(r.status, 200, 'estimate 200, got ' + JSON.stringify(r.body));
-  r = await call('POST', `/api/sys-issues/${id}/submit`, devTok, { summary: '交付完成' });
+  // C3：submit 唯一写入口改多开发 commit 事件模型（方案 §6.1），旧 {summary} 单人摘要体已随之退场；
+  //   本文件测的是 notify 派发，用 no_code 模式最省事（无需构造合法 commit_ref）。
+  r = await call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'no_code', no_code_reason: '交付完成（notify 测试占位理由）' });
   assert.strictEqual(r.status, 200, 'submit 200, got ' + JSON.stringify(r.body));
   return id;
 }
@@ -249,9 +251,10 @@ async function main() {
   ok('estimate 同分钟 unchanged 零写入 → 不重复推送需求方（#6）');
 
   // ── Re. reassign 派发新开发（#7：独立派发路径，verify 此前漏测）──────────
+  //   ⚠️ 既有测试变更（C2：reassign body 改 member_ids+reason，见交付汇报清单）。
   id = await seedAssigned();   // 指派 dev5（dev 侧 sent）
   before = sentLog.length;
-  r = await call('POST', `/api/sys-issues/${id}/reassign`, adminTok, { newAssignedTo: 6, oldAssignedTo: 5, reason: '换人' });
+  r = await call('POST', `/api/sys-issues/${id}/reassign`, adminTok, { member_ids: [6], reason: '换人' });
   assert.strictEqual(r.status, 200, 'Re: reassign 200, got ' + JSON.stringify(r.body));
   row = await notifyRow(id);
   assert.strictEqual(row.notify_status, 'sent', 'Re: reassign → dev 侧重新 sent');
@@ -265,7 +268,7 @@ async function main() {
   id = await seedAssigned();
   await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: '2026-08-01 10:00' });
   before = sentLog.length;
-  r = await call('POST', `/api/sys-issues/${id}/submit`, devTok, { summary: '交付完成' });
+  r = await call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'no_code', no_code_reason: '交付完成（notify 测试占位理由）' });
   assert.strictEqual(r.status, 200, 'F: submit 200');
   assert.strictEqual(sentLog.length, before, 'F: submit 不触发任何发送（admin 自身按需精简）');
   ok('转待验证(submit) → 无发送（admin 自身，§8.1）');

@@ -122,10 +122,10 @@ async function main() {
     r = await call('POST', `/api/sys-issues/${idF}/feasibility`, devTok, { conclusion: '不可行', requirement_confirm: 'x', risk: '技术不支持', dev_estimated_at: EST });
     assert.strictEqual(r.status, 200, '不可行 200'); assert.strictEqual(r.body.not_feasible, true, 'not_feasible=true');
     ok('[F6] 不可行 + 风险 → 200 not_feasible=true（不阻断本动作，阻断在 submit）');
-    // F7 非本人
+    // F7 非本人（C3：W06 ownerGuard→assertDevMember，非在册 → 403 NOT_ROSTERED，非旧 NOT_AUTHORIZED_FOR_TRANSITION）
     r = await call('POST', `/api/sys-issues/${idF}/feasibility`, dev2Tok, { conclusion: '可行', requirement_confirm: 'x', dev_estimated_at: EST });
-    assert.strictEqual(r.status, 403, '非本人 403'); assert.strictEqual(r.body.code, 'NOT_AUTHORIZED_FOR_TRANSITION');
-    ok('[F7] 非本人开发（dev6）→ 403 NOT_AUTHORIZED_FOR_TRANSITION');
+    assert.strictEqual(r.status, 403, '非本人 403'); assert.strictEqual(r.body.code, 'NOT_ROSTERED');
+    ok('[F7] 非在册开发（dev6）→ 403 NOT_ROSTERED（C3 assertDevMember 严格在册）');
     // F8 needs_feasibility=0 单
     const idF0 = await seedToDev(0);
     r = await call('POST', `/api/sys-issues/${idF0}/feasibility`, devTok, { conclusion: '可行', requirement_confirm: 'x', dev_estimated_at: EST });
@@ -200,7 +200,7 @@ async function main() {
     // BL7 待验证态标受阻 → 409 BLOCKED_STATUS_INVALID（nf=1 单经 feasibility→submit 到待验证）
     const idHV1 = await seedToDev(1);
     await call('POST', `/api/sys-issues/${idHV1}/feasibility`, devTok, { conclusion: '可行', requirement_confirm: '确认', dev_estimated_at: EST });
-    await call('POST', `/api/sys-issues/${idHV1}/submit`, devTok, { summary: '交付' });   // → 待验证
+    await call('POST', `/api/sys-issues/${idHV1}/submit`, devTok, { mode: 'no_code', no_code_reason: '交付（占位理由）' });   // → 待验证
     r = await call('POST', `/api/sys-issues/${idHV1}/blocked`, devTok, { reason: '待验证标受阻' });
     assert.strictEqual(r.status, 409, '待验证标受阻 409'); assert.strictEqual(r.body.code, 'BLOCKED_STATUS_INVALID');
     ok('[BL7] 待验证态标受阻 → 409 BLOCKED_STATUS_INVALID（仅开发中可受阻）');
@@ -231,26 +231,30 @@ async function main() {
     // E1 建单评估→submit 放行（真实链路，验证 F2a 闸门读 F2b 写入）
     const idE1 = await seedToDev(1);
     await call('POST', `/api/sys-issues/${idE1}/feasibility`, devTok, { conclusion: '可行', requirement_confirm: '需求已确认', dev_estimated_at: EST });
-    r = await call('POST', `/api/sys-issues/${idE1}/submit`, devTok, { summary: '功能完成' });
+    r = await call('POST', `/api/sys-issues/${idE1}/submit`, devTok, { mode: 'no_code', no_code_reason: '功能完成（占位理由）' });
     assert.strictEqual(r.status, 200, 'E1 submit 200, got ' + r.status + ' ' + JSON.stringify(r.body));
-    assert.strictEqual(r.body.status, '待验证', 'E1 → 待验证');
+    assert.strictEqual(r.body.main_status, '待验证', 'E1 → 待验证（main_status 字段，C2/C3 惯例）');
     ok('[E2E-1] ⭐ 建单(评估)→assign→feasibility(可行)→submit 放行 200 待验证（F2a 闸门 + F2b 端点真实联动，非 DB 模拟）');
-    // E2 受阻闭环：feasibility→blocked→submit 拒→unblock→submit 放行
+    // [codex 98 号 HIGH 回填] E2/E3：blocked/feasibility 闸门已在新 submit handler 内逐条复刻恢复
+    //   （routes/sys-iteration/index.js 「[codex 98 号 HIGH 回填] submit 资格不变量」注释块，对照 e39e65b
+    //   版旧 case 'submit' 逐条照搬判定与错误码），本轮改回真实路由断言，替代上一轮"如实记录现状"的临时降级。
     const idE2 = await seedToDev(1);
     await call('POST', `/api/sys-issues/${idE2}/feasibility`, devTok, { conclusion: '可行', requirement_confirm: '确认', dev_estimated_at: EST });
     await call('POST', `/api/sys-issues/${idE2}/blocked`, devTok, { reason: '阻塞中' });
-    r = await call('POST', `/api/sys-issues/${idE2}/submit`, devTok, { summary: '交付' });
-    assert.strictEqual(r.body.code, 'ISSUE_BLOCKED', 'E2 受阻 submit 拒, got ' + (r.body && r.body.code));
+    r = await call('POST', `/api/sys-issues/${idE2}/submit`, devTok, { mode: 'no_code', no_code_reason: '交付（占位理由）' });
+    assert.strictEqual(r.status, 400, 'E2 受阻 submit 拒, got ' + r.status + ' ' + JSON.stringify(r.body));
+    assert.strictEqual(r.body.code, 'ISSUE_BLOCKED', 'E2 受阻 submit 拒 code=ISSUE_BLOCKED');
     await call('POST', `/api/sys-issues/${idE2}/unblock`, adminTok, { reason: '解除' });
-    r = await call('POST', `/api/sys-issues/${idE2}/submit`, devTok, { summary: '交付' });
-    assert.strictEqual(r.status, 200, 'E2 解除后 submit 200'); assert.strictEqual(r.body.status, '待验证');
-    ok('[E2E-2] ⭐ 受阻闭环：feasibility→blocked→submit 拒 ISSUE_BLOCKED→unblock→submit 放行（完整受阻链路）');
-    // E3 不可行闭环：feasibility(不可行)→submit 拒
+    r = await call('POST', `/api/sys-issues/${idE2}/submit`, devTok, { mode: 'no_code', no_code_reason: '交付（占位理由）' });
+    assert.strictEqual(r.status, 200, 'E2 解除后 submit 200');
+    assert.strictEqual(r.body.main_status, '待验证', 'E2 解除后 submit → 待验证');
+    ok('[E2E-2] ⭐ 受阻闭环：feasibility→blocked→submit 拒 400 ISSUE_BLOCKED→unblock→submit 放行（真实路由，闸门已恢复）');
     const idE3 = await seedToDev(1);
     await call('POST', `/api/sys-issues/${idE3}/feasibility`, devTok, { conclusion: '不可行', requirement_confirm: '确认', risk: '做不了', dev_estimated_at: EST });
-    r = await call('POST', `/api/sys-issues/${idE3}/submit`, devTok, { summary: '交付' });
-    assert.strictEqual(r.body.code, 'FEASIBILITY_NOT_FEASIBLE', 'E3 不可行 submit 拒, got ' + (r.body && r.body.code));
-    ok('[E2E-3] ⭐ 不可行闭环：feasibility(不可行)→submit 拒 FEASIBILITY_NOT_FEASIBLE（评估真实写入后闸门拦住）');
+    r = await call('POST', `/api/sys-issues/${idE3}/submit`, devTok, { mode: 'no_code', no_code_reason: '交付（占位理由）' });
+    assert.strictEqual(r.status, 400, 'E3 不可行 submit 拒, got ' + r.status + ' ' + JSON.stringify(r.body));
+    assert.strictEqual(r.body.code, 'FEASIBILITY_NOT_FEASIBLE', 'E3 不可行 submit 拒 code=FEASIBILITY_NOT_FEASIBLE');
+    ok('[E2E-3] ⭐ 不可行闭环：feasibility(不可行)→submit 拒 400 FEASIBILITY_NOT_FEASIBLE（真实路由，闸门已恢复）');
 
     console.log(`\n[全部通过] ${passed}/${passed} ✓ 系统迭代 F2b 评估旁路端点验证通过`);
     console.log('  覆盖：feasibility(填写/枚举/完整性/本人/态/未勾选/早于指派/快照) + blocked(标记/M-1收口/重复/本人/禁改评估/态守卫) + unblock(解除/M-7前置/admin) + hold·void清blocked(留评估·修卡死) + E2E(评估→submit放行/受阻闭环/不可行闭环)');

@@ -10,6 +10,9 @@
 //   [D7] 跨类型 bug→feature 派生：新单 feature 首提免 fix_gap_note（M5 跳过）；feature→bug 派生首提亦跳过（origin.type≠bug）
 //   [D8] 写读同源：详情 GET 返回 derive_reason + fix_gap_note
 //   [D9] 防环（① 起逻辑，⑤ 仅移位未改）：派生链成环 → 409 DERIVE_CYCLE
+//   [D10] fix_gap_note 闸门 fail-closed（codex M-1 采纳）：origin 查不到 → 409 SYS_ORIGIN_MISSING
+//   （codex 100 号 HIGH-2：D6/D7/D8/D10 在 C3 一度被误判"随旧 submit 退场"而移除，现按 e39e65b 版旧 case
+//    'submit' 逐字复刻回填 first_submitted_at/fix_gap_note 后已恢复，本文件断言相应改回真实路由验证）
 const assert = require('assert');
 const http = require('http');
 const express = require('express');
@@ -52,6 +55,7 @@ function waitReady() {
 
 const adminTok = jwt.sign({ id: 1, username: 'admin', display_name: '管理员', role: 'admin' }, SECRET);
 const devTok = jwt.sign({ id: 5, username: 'dev', display_name: '开发王', role: 'user' }, SECRET);
+const dev2Tok = jwt.sign({ id: 6, username: 'dev2', display_name: '开发李', role: 'user' }, SECRET);
 
 let server, port;
 function call(method, path, tok, body) {
@@ -84,7 +88,7 @@ async function seedBugToReady(devId = 5) {
   const id = await seedBugToDev(devId);
   let r = await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: EST });
   assert.strictEqual(r.status, 200, `bug estimate 200, got ${r.status} ${JSON.stringify(r.body)}`);
-  r = await call('POST', `/api/sys-issues/${id}/submit`, devTok, { summary: '修复完成' });
+  r = await call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'no_code', no_code_reason: '修复完成（占位理由）' });
   assert.strictEqual(r.status, 200, `bug submit 200, got ${r.status} ${JSON.stringify(r.body)}`);
   r = await call('POST', `/api/sys-issues/${id}/accept`, adminTok, {});
   assert.strictEqual(r.status, 200, `bug accept 200, got ${r.status} ${JSON.stringify(r.body)}`);
@@ -110,7 +114,7 @@ async function seedFeatureToReady(devId = 5) {
   await call('POST', `/api/sys-issues/${id}/schedule`, adminTok, {});
   await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: devId });
   await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: EST });
-  await call('POST', `/api/sys-issues/${id}/submit`, devTok, { summary: '交付' });
+  await call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'no_code', no_code_reason: '交付（占位理由）' });
   r = await call('POST', `/api/sys-issues/${id}/accept`, adminTok, {});
   assert.strictEqual(r.status, 200, `feature accept 200, got ${r.status} ${JSON.stringify(r.body)}`);
   return id;
@@ -206,7 +210,9 @@ async function main() {
     ok('[D5] derive_reason 落列 + 作 derive timeline summary（Q2 取代 derive_note；旧 derive_note 传入被忽略）');
   }
 
-  // ═══ [D6] fix_gap_note 首提闸门 + 仅首提 ═══
+  // ═══ [codex 100 号 HIGH-2 回填] [D6] fix_gap_note 首提闸门 + 仅首提 ═══
+  //   新 submit handler 曾静默遗漏此不变量（与 98 号 HIGH 同类回归），已按 e39e65b 版旧 case 'submit'
+  //   （index.js:1385-1396）逐字复刻恢复，本文件断言改回真实路由验证（非"多余字段 400"的临时降级）。
   {
     const originId = await seedBugToOnline();
     let r = await call('POST', `/api/sys-issues/${originId}/derive`, adminTok,
@@ -215,25 +221,40 @@ async function main() {
     await call('POST', `/api/sys-issues/${newId}/assign`, adminTok, { assigned_to: 5 });
     await call('POST', `/api/sys-issues/${newId}/estimate`, devTok, { dev_estimated_at: EST });
     // 首提缺 fix_gap_note → 400
-    r = await call('POST', `/api/sys-issues/${newId}/submit`, devTok, { summary: '修好了' });
+    r = await call('POST', `/api/sys-issues/${newId}/submit`, devTok, { mode: 'no_code', no_code_reason: '修好了' });
     assert.strictEqual(r.status, 400, `派生 bug 首提缺 fix_gap_note 应 400, got ${r.status} ${JSON.stringify(r.body)}`);
     assert.strictEqual(r.body.code, 'FIX_GAP_NOTE_REQUIRED');
-    assert.strictEqual(await statusOf(newId), '处理中', '首提被拒仍停处理中');
-    // 首提带 fix_gap_note → 200 + 落列
-    r = await call('POST', `/api/sys-issues/${newId}/submit`, devTok, { summary: '修好了', fix_gap_note: '上版漏了 join 空指针' });
+    assert.strictEqual((await get('SELECT first_submitted_at FROM sys_issues WHERE id=?', [newId])).first_submitted_at, null, '首提被拒 first_submitted_at 未盖（整事务回滚）');
+    // 首提带 fix_gap_note → 200 + 落列 + first_submitted_at 盖章
+    r = await call('POST', `/api/sys-issues/${newId}/submit`, devTok, { mode: 'no_code', no_code_reason: '修好了', fix_gap_note: '上版漏了 join 空指针' });
     assert.strictEqual(r.status, 200, `带 fix_gap_note 首提应 200, got ${r.status} ${JSON.stringify(r.body)}`);
-    assert.strictEqual((await get('SELECT fix_gap_note FROM sys_issues WHERE id=?', [newId])).fix_gap_note, '上版漏了 join 空指针', 'fix_gap_note 落列');
+    const afterFirst = await get('SELECT fix_gap_note, first_submitted_at FROM sys_issues WHERE id=?', [newId]);
+    assert.strictEqual(afterFirst.fix_gap_note, '上版漏了 join 空指针', 'fix_gap_note 落列');
+    assert.ok(afterFirst.first_submitted_at, 'first_submitted_at 首次提交原子盖章');
     // 打回 → 返工重提不再要求 fix_gap_note（first_submitted_at 已盖），且不覆写原值
     r = await call('POST', `/api/sys-issues/${newId}/return`, adminTok, { reason: '还有问题' });
     assert.strictEqual(r.status, 200, `打回 200, got ${r.status} ${JSON.stringify(r.body)}`);
+    // §1 不变量1「完成态不回 pending」：return 不重置 roster dev_status（同 verify-sys-bug-transitions.js
+    //   「二轮」场景已验证的既有事实），单开发不能直接 remove 自己（LAST_ASSIGNEE）——需先加协作解除限制→
+    //   remove 旧完成态实例→re-add 同一开发（全新 pending 实例，方案 §4.4）才能真正重提。
+    r = await call('POST', `/api/sys-issues/${newId}/dev-assignees`, adminTok, { user_ids: [6] });
+    assert.strictEqual(r.status, 200, '临时加协作(6) 200, got ' + JSON.stringify(r.body));
+    const oldDa = r.body.dev_assignees.find(d => d.user_id === 5);
+    r = await call('DELETE', `/api/sys-issues/${newId}/dev-assignees/${oldDa.id}`, adminTok, { reason: '二轮重置旧完成态实例' });
+    assert.strictEqual(r.status, 200, 'remove 旧完成态实例 200, got ' + JSON.stringify(r.body));
+    r = await call('POST', `/api/sys-issues/${newId}/dev-assignees`, adminTok, { user_ids: [5] });
+    assert.strictEqual(r.status, 200, 're-add(5) 200, got ' + JSON.stringify(r.body));
+    // 协作(6) 仍在册 pending（不影响本节断言，仅验证 5 的 fix_gap_note/first_submitted_at 行为，故不必撤回）
     await call('POST', `/api/sys-issues/${newId}/estimate`, devTok, { dev_estimated_at: EST });
-    r = await call('POST', `/api/sys-issues/${newId}/submit`, devTok, { summary: '二轮修复' });   // 无 fix_gap_note
+    r = await call('POST', `/api/sys-issues/${newId}/submit`, devTok, { mode: 'no_code', no_code_reason: '二轮修复' });   // 无 fix_gap_note
     assert.strictEqual(r.status, 200, `返工重提免 fix_gap_note 应 200, got ${r.status} ${JSON.stringify(r.body)}`);
-    assert.strictEqual((await get('SELECT fix_gap_note FROM sys_issues WHERE id=?', [newId])).fix_gap_note, '上版漏了 join 空指针', '返工重提不覆写首版 fix_gap_note');
-    ok('[D6] fix_gap_note 首提闸门：派生 bug 首提缺则 400 FIX_GAP_NOTE_REQUIRED / 带则落列 / 返工重提不再要求也不覆写（一次性首版留痕）');
+    const afterSecond = await get('SELECT fix_gap_note, first_submitted_at FROM sys_issues WHERE id=?', [newId]);
+    assert.strictEqual(afterSecond.fix_gap_note, '上版漏了 join 空指针', '返工重提不覆写首版 fix_gap_note');
+    assert.strictEqual(afterSecond.first_submitted_at, afterFirst.first_submitted_at, 'first_submitted_at 首次永不变（返工不重盖）');
+    ok('[D6] fix_gap_note 首提闸门：派生 bug 首提缺则 400 FIX_GAP_NOTE_REQUIRED / 带则落列 + first_submitted_at 原子盖章 / 返工重提不再要求也不覆写（一次性首版留痕）');
   }
 
-  // ═══ [D7] 跨类型派生首提跳过 fix_gap_note（M5）═══
+  // ═══ [codex 100 号 HIGH-2 回填] [D7] 跨类型派生首提跳过 fix_gap_note（M5）═══
   {
     // bug→feature：新单 feature，走变更流首提不要 fix_gap_note
     const bugOrigin = await seedBugToOnline();
@@ -245,7 +266,7 @@ async function main() {
     await call('POST', `/api/sys-issues/${featChild}/schedule`, adminTok, {});
     await call('POST', `/api/sys-issues/${featChild}/assign`, adminTok, { assigned_to: 5 });
     await call('POST', `/api/sys-issues/${featChild}/estimate`, devTok, { dev_estimated_at: EST });
-    r = await call('POST', `/api/sys-issues/${featChild}/submit`, devTok, { summary: '做完了' });   // 无 fix_gap_note
+    r = await call('POST', `/api/sys-issues/${featChild}/submit`, devTok, { mode: 'no_code', no_code_reason: '做完了' });   // 无 fix_gap_note
     assert.strictEqual(r.status, 200, `bug→feature 派生单首提应免 fix_gap_note 200, got ${r.status} ${JSON.stringify(r.body)}`);
     assert.strictEqual((await get('SELECT fix_gap_note FROM sys_issues WHERE id=?', [featChild])).fix_gap_note, null, '跨类型派生单 fix_gap_note 保持 NULL');
     // feature→bug：新单 bug 但 origin.type=feature，首提亦跳过（谓词要求 origin.type=bug）
@@ -256,12 +277,12 @@ async function main() {
     const bugChild = r.body.id;
     await call('POST', `/api/sys-issues/${bugChild}/assign`, adminTok, { assigned_to: 5 });
     await call('POST', `/api/sys-issues/${bugChild}/estimate`, devTok, { dev_estimated_at: EST });
-    r = await call('POST', `/api/sys-issues/${bugChild}/submit`, devTok, { summary: '修好' });   // 无 fix_gap_note
+    r = await call('POST', `/api/sys-issues/${bugChild}/submit`, devTok, { mode: 'no_code', no_code_reason: '修好' });   // 无 fix_gap_note
     assert.strictEqual(r.status, 200, `feature→bug 派生单首提应免 fix_gap_note（origin.type≠bug）200, got ${r.status} ${JSON.stringify(r.body)}`);
     ok('[D7] 跨类型派生跳过 fix_gap_note（M5）：bug→feature 新单 feature 首提免填；feature→bug 新单 bug 但 origin≠bug 亦免填');
   }
 
-  // ═══ [D8] 写读同源：详情 GET 返回 derive_reason + fix_gap_note ═══
+  // ═══ [codex 100 号 HIGH-2 回填] [D8] 写读同源：详情 GET 返回 derive_reason + fix_gap_note ═══
   {
     const originId = await seedBugToOnline();
     let r = await call('POST', `/api/sys-issues/${originId}/derive`, adminTok,
@@ -269,7 +290,7 @@ async function main() {
     const newId = r.body.id;
     await call('POST', `/api/sys-issues/${newId}/assign`, adminTok, { assigned_to: 5 });
     await call('POST', `/api/sys-issues/${newId}/estimate`, devTok, { dev_estimated_at: EST });
-    await call('POST', `/api/sys-issues/${newId}/submit`, devTok, { summary: '修复', fix_gap_note: '缺口在边界判断' });
+    await call('POST', `/api/sys-issues/${newId}/submit`, devTok, { mode: 'no_code', no_code_reason: '修复', fix_gap_note: '缺口在边界判断' });
     r = await call('GET', `/api/sys-issues/${newId}`, adminTok);
     assert.strictEqual(r.status, 200);
     assert.strictEqual(r.body.issue.derive_reason, '读端可见性验证', '详情读端返回 derive_reason');
@@ -293,7 +314,7 @@ async function main() {
     ok('[D9] 防环 M-1 移位后仍生效：派生链成环 → 409 DERIVE_CYCLE');
   }
 
-  // ═══ [D10] fix_gap_note 闸门 fail-closed（codex M-1 采纳）：origin 查不到 → 409 SYS_ORIGIN_MISSING ═══
+  // ═══ [codex 100 号 HIGH-2 回填] [D10] fix_gap_note 闸门 fail-closed（codex M-1 采纳）：origin 查不到 → 409 SYS_ORIGIN_MISSING ═══
   {
     const originId = await seedBugToOnline();
     let r = await call('POST', `/api/sys-issues/${originId}/derive`, adminTok,
@@ -303,7 +324,7 @@ async function main() {
     await call('POST', `/api/sys-issues/${newId}/estimate`, devTok, { dev_estimated_at: EST });
     // 手工污染：令 origin_issue_id 指向不存在的行（模拟脏谱系；正常 API 不可达——无硬删除端点）
     await run('UPDATE sys_issues SET origin_issue_id=999999 WHERE id=?', [newId]);
-    r = await call('POST', `/api/sys-issues/${newId}/submit`, devTok, { summary: '修好了', fix_gap_note: '缺口' });
+    r = await call('POST', `/api/sys-issues/${newId}/submit`, devTok, { mode: 'no_code', no_code_reason: '修好了', fix_gap_note: '缺口' });
     assert.strictEqual(r.status, 409, `origin 缺失首提应 fail-closed 409, got ${r.status} ${JSON.stringify(r.body)}`);
     assert.strictEqual(r.body.code, 'SYS_ORIGIN_MISSING');
     assert.strictEqual(await statusOf(newId), '处理中', 'fail-closed 后仍停处理中（事务未推进）');

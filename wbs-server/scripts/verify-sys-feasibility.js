@@ -118,63 +118,21 @@ async function main() {
     assert.strictEqual(r.body.code, 'INVALID_NEEDS_FEASIBILITY', 'got ' + (r.body && r.body.code));
     ok('[A3] 建单 needs_feasibility=非法值「yes」→ 400 INVALID_NEEDS_FEASIBILITY（输入收窄，不静默落 0）');
 
-    // ── [B] submit 评估闸门（needs_feasibility=1，逐态 DB 改库模拟评估写入）──
-    const idB = await seedToDev(1);   // needs_feasibility=1，开发中，评估全空
-    await fillFeasibility(idB, { dev_estimated_at: '2026-08-01 10:00' });   // 仅写 dev_est（过通用 ESTIMATE_REQUIRED），评估结论空
-    r = await call('POST', `/api/sys-issues/${idB}/submit`, devTok, { summary: '交付' });
-    assert.strictEqual(r.status, 400, 'submit 无评估 400, got ' + r.status);
-    assert.strictEqual(r.body.code, 'FEASIBILITY_REQUIRED', 'got ' + (r.body && r.body.code));
-    ok('[B1] needs_feasibility=1 + 无评估结论 → submit 400 FEASIBILITY_REQUIRED');
+    // [C3 退场] 原 [B1]-[B7]（submit 评估闸门：FEASIBILITY_REQUIRED/FEASIBILITY_NOT_FEASIBLE/
+    //   FEASIBILITY_INCOMPLETE/ISSUE_BLOCKED/FEASIBILITY_RISK_REQUIRED 五类闸门 + 放行两例）已整体移除——
+    //   W05 唯一 submit 改多开发 commit 事件模型（方案 §6.1/§6.2），body 收窄为 mode=no_code|commits 二选一，
+    //   不再校验 feasibility_conclusion/blocked/dev_estimated_at 等旧单人字段，这些闸门随旧 summary 模型一并
+    //   退场（同 §submit switch 分支退场注释：新模型下 commit 行本身即交付证据，"评估未完成不许提交"这类
+    //   业务规则若要在新模型上重建，属 C7「交付 D5」范围，非本轮静默保留）。needs_feasibility 建单入库
+    //   （[A]）与 estimate 端点自身的 ESTIMATE_REQUIRES_FEASIBILITY 封口（[D]）不受影响，继续覆盖。
 
-    await fillFeasibility(idB, { dev_estimated_at: '2026-08-01 10:00', conclusion: '不可行' });
-    r = await call('POST', `/api/sys-issues/${idB}/submit`, devTok, { summary: '交付' });
-    assert.strictEqual(r.status, 400, '[B2] status 400, got ' + r.status);
-    assert.strictEqual(r.body.code, 'FEASIBILITY_NOT_FEASIBLE', '不可行 → FEASIBILITY_NOT_FEASIBLE, got ' + (r.body && r.body.code));
-    ok('[B2] 结论=不可行 → submit 400 FEASIBILITY_NOT_FEASIBLE');
-
-    await fillFeasibility(idB, { dev_estimated_at: '2026-08-01 10:00', conclusion: '可行', requirement_confirm: '  ' });
-    r = await call('POST', `/api/sys-issues/${idB}/submit`, devTok, { summary: '交付' });
-    assert.strictEqual(r.status, 400, '[B3] status 400, got ' + r.status);
-    assert.strictEqual(r.body.code, 'FEASIBILITY_INCOMPLETE', '需求理解空 → FEASIBILITY_INCOMPLETE, got ' + (r.body && r.body.code));
-    ok('[B3] 结论=可行 + 需求理解空 → submit 400 FEASIBILITY_INCOMPLETE');
-
-    await fillFeasibility(idB, { dev_estimated_at: '2026-08-01 10:00', conclusion: '可行', requirement_confirm: '懂了', blocked: 1, blocked_reason: '等接口' });
-    r = await call('POST', `/api/sys-issues/${idB}/submit`, devTok, { summary: '交付' });
-    assert.strictEqual(r.status, 400, '[B4] status 400, got ' + r.status);
-    assert.strictEqual(r.body.code, 'ISSUE_BLOCKED', 'blocked=1 → ISSUE_BLOCKED, got ' + (r.body && r.body.code));
-    ok('[B4] blocked=1 → submit 400 ISSUE_BLOCKED');
-    // [B4b] 真正验证「blocked 优先于完整性校验」（ultracode 对抗审补强）：blocked=1 且 requirement_confirm 空 → 仍 ISSUE_BLOCKED（非 FEASIBILITY_INCOMPLETE）
-    await fillFeasibility(idB, { dev_estimated_at: '2026-08-01 10:00', conclusion: '可行', requirement_confirm: '  ', blocked: 1, blocked_reason: '等接口' });
-    r = await call('POST', `/api/sys-issues/${idB}/submit`, devTok, { summary: '交付' });
-    assert.strictEqual(r.status, 400, '[B4b] status 400, got ' + r.status);
-    assert.strictEqual(r.body.code, 'ISSUE_BLOCKED', 'blocked=1 + 需求理解空 → 仍 ISSUE_BLOCKED（证明 blocked 短路在 INCOMPLETE 之前）, got ' + (r.body && r.body.code));
-    ok('[B4b] blocked=1 + 需求理解空 → submit 仍 ISSUE_BLOCKED（证明 blocked 优先于完整性校验，非 FEASIBILITY_INCOMPLETE）');
-
-    await fillFeasibility(idB, { dev_estimated_at: '2026-08-01 10:00', conclusion: '有条件可行', requirement_confirm: '懂了', risk: '  ' });
-    r = await call('POST', `/api/sys-issues/${idB}/submit`, devTok, { summary: '交付' });
-    assert.strictEqual(r.status, 400, '[B5] status 400, got ' + r.status);
-    assert.strictEqual(r.body.code, 'FEASIBILITY_RISK_REQUIRED', '有条件可行缺风险 → FEASIBILITY_RISK_REQUIRED, got ' + (r.body && r.body.code));
-    ok('[B5] 结论=有条件可行 + 风险空 → submit 400 FEASIBILITY_RISK_REQUIRED');
-
-    await fillFeasibility(idB, { dev_estimated_at: '2026-08-01 10:00', conclusion: '有条件可行', requirement_confirm: '懂了', risk: '依赖外部接口' });
-    r = await call('POST', `/api/sys-issues/${idB}/submit`, devTok, { summary: '交付' });
-    assert.strictEqual(r.status, 200, '完整评估 → submit 200, got ' + r.status + ' ' + JSON.stringify(r.body));
-    assert.strictEqual(r.body.status, '待验证', 'submit → 待验证');
-    ok('[B6] 有条件可行 + 风险填全 → submit 放行 200 待验证');
-
-    const idB7 = await seedToDev(1);
-    await fillFeasibility(idB7, { dev_estimated_at: '2026-08-01 10:00', conclusion: '可行', requirement_confirm: '懂了' });
-    r = await call('POST', `/api/sys-issues/${idB7}/submit`, devTok, { summary: '交付' });
-    assert.strictEqual(r.status, 200, '可行完整 → submit 200, got ' + r.status);
-    ok('[B7] 结论=可行 + 需求理解（可行无需风险）→ submit 放行 200');
-
-    // ── [C] needs_feasibility=0 不触发评估闸门 ──
+    // ── [C] needs_feasibility=0 场景下 estimate 正常 + submit 结构性放行（新模型已不查 feasibility，恒放行）──
     const idC = await seedToDev(0);
     r = await call('POST', `/api/sys-issues/${idC}/estimate`, devTok, { dev_estimated_at: '2026-08-01 10:00' });
     assert.strictEqual(r.status, 200, 'needs_feasibility=0 estimate 200, got ' + r.status);
-    r = await call('POST', `/api/sys-issues/${idC}/submit`, devTok, { summary: '交付' });
-    assert.strictEqual(r.status, 200, 'needs_feasibility=0 submit 无评估放行, got ' + r.status);
-    ok('[C1] needs_feasibility=0 → estimate 正常 + submit 无评估放行（不触发评估闸门）');
+    r = await call('POST', `/api/sys-issues/${idC}/submit`, devTok, { mode: 'no_code', no_code_reason: 'feasibility 测试占位理由' });
+    assert.strictEqual(r.status, 200, 'needs_feasibility=0 submit 放行, got ' + r.status + ' ' + JSON.stringify(r.body));
+    ok('[C1] needs_feasibility=0 → estimate 正常 + submit 放行（新模型不查 feasibility，C3 起恒放行）');
 
     // ── [D] estimate 封口（needs_feasibility=1，codex 17 M-6）──
     const idD = await seedToDev(1);
@@ -192,29 +150,17 @@ async function main() {
     ok('[E1] feature 开发中 → scope-change 409 SCOPE_CHANGE_DISABLED（禁开发态调需求）');
 
     // ── [F] 换轮清字段 + timeline 冻结（§六 H-2/H-3）──
-    // F-reassign：填评估+blocked + 造 feasibility timeline → reassign → 主表清 + timeline 保留
-    const idF1 = await seedToDev(1, 5);
-    await fillFeasibility(idF1, { dev_estimated_at: '2026-08-01 10:00', conclusion: '可行', requirement_confirm: '懂了', risk: '风险', blocked: 1, blocked_reason: '等', blocked_at: '2026-01-01 09:00' });
-    await run(`INSERT INTO sys_issue_timeline (issue_id, event_type, summary, operator_id, operator_name) VALUES (?, 'feasibility', '评估快照', 5, '开发王')`, [idF1]);
-    r = await call('POST', `/api/sys-issues/${idF1}/reassign`, adminTok, { newAssignedTo: 6, oldAssignedTo: 5, reason: '换人' });
-    assert.strictEqual(r.status, 200, 'reassign 200, got ' + r.status + ' ' + JSON.stringify(r.body));
-    d = await get('SELECT feasibility_conclusion, feasibility_requirement_confirm, feasibility_risk, blocked, blocked_reason, blocked_at, dev_estimated_at FROM sys_issues WHERE id=?', [idF1]);
-    assert.strictEqual(d.feasibility_conclusion, null, 'reassign 清 conclusion');
-    assert.strictEqual(d.feasibility_requirement_confirm, null, 'reassign 清 requirement_confirm');
-    assert.strictEqual(d.feasibility_risk, null, 'reassign 清 risk');
-    assert.strictEqual(d.blocked, 0, 'reassign 清 blocked=0');
-    assert.strictEqual(d.blocked_reason, null, 'reassign 清 blocked_reason');
-    assert.strictEqual(d.blocked_at, null, 'reassign 清 blocked_at');
-    assert.strictEqual(d.dev_estimated_at, null, 'reassign 清 dev_estimated_at');
-    const fbEv = await get(`SELECT id FROM sys_issue_timeline WHERE issue_id=? AND event_type='feasibility'`, [idF1]);
-    assert.ok(fbEv, 'reassign 后 feasibility timeline 快照仍保留（H-3 清主表非 timeline）');
-    ok('[F-reassign] 换人清评估3+blocked3+dev_est（helper），timeline feasibility 快照保留（H-3 冻结）');
+    // ⚠️ 既有测试变更（C2 破坏性变更，详见交付汇报"既有测试变更清单"）：F-reassign 子测原断言 reassign
+    //   （旧版"换主=新一轮"语义）清评估+blocked+dev_estimated_at 三组字段。v2.9 reassign 重写为声明式最终
+    //   roster 差量（方案 §3），无"主开发换人=新一轮"这个业务规则了（没有"主"就没有"换主"），字段清零属
+    //   W07/ADMIN_TRANSITION 侧关切（C3 范围，本轮不碰）——该子测整体移除，非静默改断言。F-return/F-reopen
+    //   （下方两段）走 return/reopen 两个 ADMIN_TRANSITION 端点，与 reassign 无关，未受影响、保持不变。
 
     // F-return：完整评估 → submit → 造 blocked → return → 清
     const idF2 = await seedToDev(1, 5);
     await fillFeasibility(idF2, { dev_estimated_at: '2026-08-01 10:00', conclusion: '可行', requirement_confirm: '懂了' });
-    r = await call('POST', `/api/sys-issues/${idF2}/submit`, devTok, { summary: '交付' });
-    assert.strictEqual(r.status, 200, 'F2 submit 200（评估完整）, got ' + r.status);
+    r = await call('POST', `/api/sys-issues/${idF2}/submit`, devTok, { mode: 'no_code', no_code_reason: 'feasibility 测试占位理由' });
+    assert.strictEqual(r.status, 200, 'F2 submit 200, got ' + r.status + ' ' + JSON.stringify(r.body));
     await run(`UPDATE sys_issues SET blocked=1, blocked_reason='x' WHERE id=?`, [idF2]);   // 造受阻残留测 return 清理覆盖
     r = await call('POST', `/api/sys-issues/${idF2}/return`, adminTok, { reason: '列不齐' });
     assert.strictEqual(r.status, 200, 'return 200, got ' + r.status);
@@ -249,23 +195,14 @@ async function main() {
     //      findTransition 返 null，请求在到达闸门前 409，故 type 过滤分支 bug/config 侧不可达。
     //   ② 建单 FEASIBILITY_NOT_APPLICABLE（非 feature/improvement 传 needs_feasibility=1 拒）——config/bug 建单先被 TYPE_NOT_SUPPORTED 拦，到不了该守卫。
     //   两处 type 维度断言待 bug/config 流追加（C 系列后续）补端到端；needs_feasibility 维度已由 [B]/[C] 全覆盖。
-    ok('[G] H-1 submit type 过滤 + 建单 FEASIBILITY_NOT_APPLICABLE 均为防御性死代码（无 bug/config 流不可达）；needs_feasibility 维度 [B]/[C] 已覆盖');
+    ok('[G] H-1 submit type 过滤 + 建单 FEASIBILITY_NOT_APPLICABLE 均为防御性死代码（无 bug/config 流不可达）；needs_feasibility 维度 [A]/[C] 已覆盖');
 
-    // ── [H] 跳过评估直接 submit 的守卫（ultracode 对抗审，F2b 落地后语义更新）──
-    //   [B]/[F] 块用 fillFeasibility 裸 DB UPDATE 模拟 F2b /feasibility 端点写入，测 F2a 闸门 + 换轮清字段。
-    //   本块测：needs_feasibility=1 单若开发不调 /feasibility 直接 submit → dev_estimated_at 为 NULL（estimate 封口）→
-    //   submit 撞通用 ESTIMATE_REQUIRED 拦住，无法绕过评估闸门。F2b 实现 /feasibility 后该单有了正常出路（不再死锁），但此守卫路径仍有效。
-    const idH = await seedToDev(1);   // needs_feasibility=1，不 DB 注入 dev_est，走真实 F2a-only 链路
-    let rH = await call('POST', `/api/sys-issues/${idH}/estimate`, devTok, { dev_estimated_at: '2026-08-01 10:00' });
-    assert.strictEqual(rH.status, 409, 'F2a-only estimate 封口 409, got ' + rH.status);
-    assert.strictEqual(rH.body.code, 'ESTIMATE_REQUIRES_FEASIBILITY', 'estimate 封口码, got ' + (rH.body && rH.body.code));
-    rH = await call('POST', `/api/sys-issues/${idH}/submit`, devTok, { summary: '交付' });
-    assert.strictEqual(rH.status, 400, 'F2a-only submit 400, got ' + rH.status);
-    assert.strictEqual(rH.body.code, 'ESTIMATE_REQUIRED', 'F2a-only 真实链路 submit 撞通用 ESTIMATE_REQUIRED（非 FEASIBILITY_REQUIRED）, got ' + (rH.body && rH.body.code));
-    ok('[H] F2a-only 真实链路：needs_feasibility=1 单 estimate 封口 + submit 撞 ESTIMATE_REQUIRED（暴露死锁约束=F2a 不可单独部署，必须 F2a+F2b 同批）');
+    // [C3 退场] 原 [H]（"跳过评估直接 submit 撞 ESTIMATE_REQUIRED 死锁约束"）随旧 submit 的 ESTIMATE_REQUIRED
+    //   闸门一并移除——新 submit 不再校验 dev_estimated_at，"F2a 不可单独部署、必须 F2a+F2b 同批"这条约束
+    //   本身随旧模型退场，不再有对应物可测。
 
     console.log(`\n[全部通过] ${passed}/${passed} ✓ 系统迭代 F2a 可行性评估约束闸门验证通过`);
-    console.log('  覆盖：建单 needs_feasibility 入库 + submit 闸门（必填/不可行/blocked/需求理解/风险/放行 + blocked 优先级 B4b）+ needs_feasibility=0 不触发 + estimate 封口 + scope_change 禁用 + 换轮清字段（reassign/return/reopen）+ timeline 冻结 + F2a-only 死锁约束[H]（必须 F2a+F2b 同批部署）');
+    console.log('  覆盖：建单 needs_feasibility 入库（含非法值收窄）+ needs_feasibility=0 场景 submit 结构性放行 + estimate 封口（ESTIMATE_REQUIRES_FEASIBILITY）+ scope_change 禁用 + 换轮清字段（return/reopen）+ timeline 冻结（C3：原 submit 评估闸门[B]/[H] 随旧单人 summary 模型退场，见文内注释）');
   } finally {
     server.close();
     db.close();
