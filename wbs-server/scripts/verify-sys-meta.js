@@ -193,10 +193,16 @@ async function main() {
   //   再经 status-families.js 展开为状态集合比对。93 号审指出：此前这里手写 ['D_PRE','DEV','VERIFY'] 仍是第二份
   //   清单——若未来矩阵增删族而 transitions.from 未同步，手写版测试照样通过（防漂移落空）；改读真源后矩阵任何
   //   变化都会立即被本断言暴露。
-  const reassignAllowedFamilies = mod._internals.MEMBER_ACTION_FAMILY_MATRIX.reassign;
-  assert.ok(Array.isArray(reassignAllowedFamilies) && reassignAllowedFamilies.length > 0, '[6] 后端矩阵应导出 reassign 放行族清单');
+  // C2c·codex115 MED：reassign 族门改 **type 感知**（memberActionFamiliesFor）——bug 保留 D_PRE(待处理可预指派改派)，
+  //   变更流排除 D_PRE(去主次后 D_PRE 无在册开发)。断言逐 type 读真源 memberActionFamiliesFor('reassign',type)，
+  //   任何一侧漂移（矩阵/type 覆盖/transitions.from）都会立即暴露（防写读不同源）。
+  const famFor = mod._internals.memberActionFamiliesFor;
+  assert.ok(typeof famFor === 'function', '[6] 后端应导出 type 感知 memberActionFamiliesFor');
   const reassignAuthoritativeStatuses = (type) =>
-    reassignAllowedFamilies.flatMap(fam => SF.getFamilyStatuses(type, fam));
+    famFor('reassign', type).flatMap(fam => SF.getFamilyStatuses(type, fam));
+  // 附加同源自证：变更流排除 D_PRE、bug 含 D_PRE（type 覆盖真生效，防覆盖表写错静默回落）
+  assert.ok(!famFor('reassign', 'feature').includes('D_PRE'), '[6] 变更流(feature) reassign 族门应排除 D_PRE');
+  assert.ok(famFor('reassign', 'bug').includes('D_PRE'), '[6] bug reassign 族门应保留 D_PRE（待处理态预指派后可改派）');
   for (const type of ['feature', 'improvement', 'bug']) {
     // 直接按 action 取条目（不经 findTransition，避免"用待验证的 from 元素去找 from"这种自我耦合的假阳性——
     // 若 from 漏了某个权威态，findTransition(type,'reassign',那个态) 会返 null，反而让本测试提前误判"条目不存在"
@@ -205,9 +211,9 @@ async function main() {
     assert.ok(t, `[6] ${type} reassign 常量应存在`);
     const expected = reassignAuthoritativeStatuses(type).slice().sort();
     const actual = (t.from || []).slice().sort();
-    assert.deepStrictEqual(actual, expected, `[6] ${type} reassign.from 应与 D_PRE∪DEV∪VERIFY 权威集合完全一致（写读同源），实际 from=${JSON.stringify(actual)} 权威=${JSON.stringify(expected)}`);
+    assert.deepStrictEqual(actual, expected, `[6] ${type} reassign.from 应与后端 memberActionFamiliesFor('reassign',${type}) 展开状态集合完全一致（写读同源·C2c 变更流去 D_PRE/bug 留待处理），实际 from=${JSON.stringify(actual)} 权威=${JSON.stringify(expected)}`);
   }
-  ok('[6] MED-2：reassign.from（feature/improvement/bug 三份）与后端 assertMemberActionFamilyAllowed 矩阵放行集合（D_PRE∪DEV∪VERIFY，动态取自 status-families.js）完全一致，写读同源');
+  ok('[6] MED-2/C2c：reassign.from（feature/improvement/bug 三份）与后端 memberActionFamiliesFor type 感知放行集合（变更流去 D_PRE=DEV∪VERIFY / bug 留待处理=D_PRE∪DEV∪VERIFY，动态取自 MEMBER_ACTION_FAMILY_MATRIX + TYPE_OVERRIDE + status-families.js）完全一致，写读同源');
 
   console.log(`\n[全部通过] ${passed}/${passed} ✓ 系统迭代 meta + 状态机常量枚举同步验证通过`);
   console.log(`  覆盖：meta 结构 + M-4 不泄露内部 guard + 枚举同步(timelineEvent ⊆ DDL CHECK 12-M4) + 变更流完整 + findTransition/resolveToStatus`);

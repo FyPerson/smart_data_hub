@@ -374,26 +374,25 @@ async function main() {
     assert.strictEqual(r.body.skipped, true, '[Creator] self-guard：skipped=true');
     assert.strictEqual(r.body.code, 'SELF_NOTIFY_SKIPPED', '[Creator] code=SELF_NOTIFY_SKIPPED');
     assert.strictEqual((await get('SELECT creator_notify_status FROM sys_issues WHERE id=?', [id])).creator_notify_status, 'not_sent', '[Creator] self-guard 不实际发送，creator_notify_status 仍 not_sent');
-    // 主开发本人（非建单人）触发 → 实际发送 sent
-    lastRawTitle = null;
+    // C2a·H3 修正：主开发本人（devTok）现在 → 403（删「主开发本人」放权·is_primary 禁作授权源，与去主次一致）
     r = await call('POST', `/api/sys-issues/${id}/notify-creator`, devTok);
-    assert.strictEqual(r.status, 200, '[Creator] 主开发触发 200 ' + JSON.stringify(r.body));
-    assert.strictEqual(r.body.creator_notify_status, 'sent', '[Creator] 主开发（非建单人）触发 → 实发 sent');
-    assert.strictEqual((await get('SELECT creator_notify_status FROM sys_issues WHERE id=?', [id])).creator_notify_status, 'sent', '[Creator] 落库 sent');
-    // 白名单对接人触发 → 也能发（未被 self-guard 拦，因对接人非建单人）
+    assert.strictEqual(r.status, 403, '[Creator·H3] 主开发本人触发 → 403（不再放权）');
+    assert.strictEqual(r.body.code, 'NOT_AUTHORIZED_FOR_NOTIFY', '[Creator·H3] code=NOT_AUTHORIZED_FOR_NOTIFY');
+    assert.strictEqual((await get('SELECT creator_notify_status FROM sys_issues WHERE id=?', [id])).creator_notify_status, 'not_sent', '[Creator·H3] 主开发被拒后 creator_notify_status 仍 not_sent');
+    // 白名单对接人触发 → 能发（bug creator 通道 = admin∨对接人）
     const id2 = await bugToVerifying(5);
     r = await call('POST', `/api/sys-issues/${id2}/notify-creator`, liaisonTok);
     assert.strictEqual(r.status, 200, '[Creator] 白名单对接人触发 200');
     assert.strictEqual(r.body.creator_notify_status, 'sent', '[Creator] 白名单触发 → sent');
-    // 未授权（dev2 非本单主开发/非白名单/非 admin）→ 403
+    // 未授权（dev2 非白名单/非 admin）→ 403
     const id3 = await bugToVerifying(5);
     r = await call('POST', `/api/sys-issues/${id3}/notify-creator`, dev2Tok);
     assert.strictEqual(r.status, 403); assert.strictEqual(r.body.code, 'NOT_AUTHORIZED_FOR_NOTIFY');
-    // 状态门：处理中态不可通知建单人（sendable={待验证,待上线,已上线}）
+    // 状态门：处理中态不可通知建单人（sendable={待验证,待上线,已上线}）——用白名单触发（过授权、卡状态门）
     const idMid = await bugAssigned(5);
-    r = await call('POST', `/api/sys-issues/${idMid}/notify-creator`, devTok);
+    r = await call('POST', `/api/sys-issues/${idMid}/notify-creator`, liaisonTok);
     assert.strictEqual(r.status, 409); assert.strictEqual(r.body.code, 'STATUS_NOT_NOTIFIABLE');
-    ok('[Creator] 通知建单人：admin(=created_by) self-guard 200 skipped + 主开发/白名单实发 sent + 未授权 403 + 状态门 409');
+    ok('[Creator] 通知建单人：admin(=created_by) self-guard skipped + 白名单实发 sent + 主开发本人 403(H3删) + 未授权 403 + 状态门 409');
   }
 
   // ═══ [RelExec] 通知上线开发（release_assignee 侧，follow-up 2026-07-07，仅 admin）═══
@@ -517,23 +516,87 @@ async function main() {
     ok('[G] 闸门：处理中态优先报状态门（非手机号门）+ 待验证态无手机号 → 409 NO_REQUESTER_PHONE');
   }
 
-  // ═══ [T] type 精判（变更流无手动端点，4 类端点全覆盖）═══
+  // ═══ [T] 交互优化 C2a：变更流手动端点放开 + 精确断言（codex H1/M3：不用"200或409"兼容，逐格精确）═══
+  //   建变更流单并推到「待验证」（此态 developer/creator/requester 三通道均在白名单，便于一处覆盖 3 通道成功）：
+  //   建单→schedule→assign(dev6)→estimate(dev6)→submit(no_code)→到待验证。
+  const seedChangeToVerifying = async (type, extra = {}) => {
+    let r = await call('POST', '/api/sys-issues', adminTok, { type, title: type + '-t', system_name: 'BMS', source: '内部', requester_phone: PHONE, ...extra });
+    const cid = r.body.id;
+    await call('POST', `/api/sys-issues/${cid}/schedule`, adminTok, {});
+    await call('POST', `/api/sys-issues/${cid}/assign`, adminTok, { assigned_to: 6 });
+    await call('POST', `/api/sys-issues/${cid}/estimate`, dev2Tok, { dev_estimated_at: EST });   // dev6=dev2Tok 回填
+    await call('POST', `/api/sys-issues/${cid}/submit`, dev2Tok, { mode: 'no_code', no_code_reason: '交付（占位）' });   // →待验证
+    return cid;
+  };
+  // 表驱动：feature/improvement × 通道 × (admin 放行 / 对接人拒绝) 逐格
+  for (const type of ['feature', 'improvement']) {
+    const vid = await seedChangeToVerifying(type);
+    // developer：待验证在变更流 dev 白名单（开发中/待验证）——admin 发 dev6（非自己）→ 200 sent
+    let r = await call('POST', `/api/sys-issues/${vid}/notify-developer`, adminTok, { dev_user_id: 6 });
+    assert.strictEqual(r.status, 200, `[T] ${type} developer admin 放行 200 ` + JSON.stringify(r.body));
+    assert.strictEqual(await devRowStatus(vid, 6), 'sent', `[T] ${type} developer 落子表 sent`);
+    // developer：对接人白名单对变更流 → 403（变更流仅 admin）
+    r = await call('POST', `/api/sys-issues/${vid}/notify-developer`, liaisonTok, { dev_user_id: 6 });
+    assert.strictEqual(r.status, 403, `[T] ${type} developer 对接人 → 403`);
+    assert.strictEqual(r.body.code, 'NOT_AUTHORIZED_FOR_NOTIFY', `[T] ${type} developer 对接人 code`);
+    // creator：admin=created_by → self-guard skipped 200 + creator_notify_status 仍 not_sent
+    r = await call('POST', `/api/sys-issues/${vid}/notify-creator`, adminTok);
+    assert.strictEqual(r.status, 200, `[T] ${type} creator admin self-guard 200`);
+    assert.strictEqual(r.body.code, 'SELF_NOTIFY_SKIPPED', `[T] ${type} creator self-guard skipped`);
+    assert.strictEqual((await get('SELECT creator_notify_status FROM sys_issues WHERE id=?', [vid])).creator_notify_status, 'not_sent', `[T] ${type} creator self-guard 不写状态`);
+    // creator：对接人对变更流 → 403
+    r = await call('POST', `/api/sys-issues/${vid}/notify-creator`, liaisonTok);
+    assert.strictEqual(r.status, 403, `[T] ${type} creator 对接人 → 403`);
+    // requester：admin 发（待验证在 requester 白名单 + 有 phone）→ 200 sent + 落快照
+    r = await call('POST', `/api/sys-issues/${vid}/notify-requester`, adminTok);
+    assert.strictEqual(r.status, 200, `[T] ${type} requester admin 放行 200 ` + JSON.stringify(r.body));
+    assert.strictEqual((await get('SELECT requester_notify_status FROM sys_issues WHERE id=?', [vid])).requester_notify_status, 'sent', `[T] ${type} requester sent`);
+    assert.strictEqual((await get('SELECT requester_notify_phone_snapshot FROM sys_issues WHERE id=?', [vid])).requester_notify_phone_snapshot, PHONE, `[T] ${type} requester 落快照`);
+    // requester：对接人对变更流 → 403
+    r = await call('POST', `/api/sys-issues/${vid}/notify-requester`, liaisonTok);
+    assert.strictEqual(r.status, 403, `[T] ${type} requester 对接人 → 403`);
+    // relay：变更流无对接人通道 → 400 CHANNEL_NA（admin 也拒）
+    r = await call('POST', `/api/sys-issues/${vid}/notify-relay`, adminTok);
+    assert.strictEqual(r.body.code, 'MANUAL_NOTIFY_CHANNEL_NA', `[T] ${type} relay → CHANNEL_NA`);
+    // 查已读（channel 级授权，codex M2）：admin 查 creator 通道 → 非 403；对接人查 → 403（变更流仅 admin）
+    r = await call('GET', `/api/sys-issues/${vid}/notify-read-status?type=creator`, adminTok);
+    assert.notStrictEqual(r.status, 403, `[T] ${type} 查已读 admin 放行`);
+    r = await call('GET', `/api/sys-issues/${vid}/notify-read-status?type=creator`, liaisonTok);
+    assert.strictEqual(r.status, 403, `[T] ${type} 查已读对接人 → 403（变更流仅 admin）`);
+  }
+  // 状态门：变更流 developer 在「开发中」允许、在终态拒绝（相邻状态精确覆盖·codex M3）
   {
-    let r = await call('POST', '/api/sys-issues', adminTok, { type: 'feature', title: 'feat', system_name: 'BMS', source: '内部', requester_phone: PHONE });
+    let r = await call('POST', '/api/sys-issues', adminTok, { type: 'feature', title: 'feat-st', system_name: 'BMS', source: '内部' });
     const fid = r.body.id;
     await call('POST', `/api/sys-issues/${fid}/schedule`, adminTok, {});
-    await call('POST', `/api/sys-issues/${fid}/assign`, adminTok, { assigned_to: 5 });
-    r = await call('POST', `/api/sys-issues/${fid}/notify-developer`, adminTok, { dev_user_id: 5 });
-    assert.strictEqual(r.status, 400, '[T] feature notify-developer → 400'); assert.strictEqual(r.body.code, 'MANUAL_NOTIFY_BUG_ONLY');
-    r = await call('POST', `/api/sys-issues/${fid}/notify-requester`, adminTok);
-    assert.strictEqual(r.status, 400); assert.strictEqual(r.body.code, 'MANUAL_NOTIFY_BUG_ONLY');
-    r = await call('POST', `/api/sys-issues/${fid}/notify-relay`, adminTok);
-    assert.strictEqual(r.status, 400); assert.strictEqual(r.body.code, 'MANUAL_NOTIFY_BUG_ONLY');
+    await call('POST', `/api/sys-issues/${fid}/assign`, adminTok, { assigned_to: 6 });   // 开发中
+    r = await call('POST', `/api/sys-issues/${fid}/notify-developer`, adminTok, { dev_user_id: 6 });
+    assert.strictEqual(r.status, 200, '[T] feature developer 开发中态放行 200');   // 开发中 ∈ 变更流 dev 白名单
+    // creator 在「开发中」：admin=created_by → self-guard 优先于状态门（授权/自指先于状态检查）→ 200 skipped。
+    //   注：变更流 creator 状态门无法用现有角色单独触发（admin 恒 self-guard skip / 对接人对变更流 403），
+    //   故此处验证的是"self-guard 优先"这一实际顺序，非状态门本身（bug creator 状态门已由 [Creator] 块覆盖）。
     r = await call('POST', `/api/sys-issues/${fid}/notify-creator`, adminTok);
-    assert.strictEqual(r.status, 400); assert.strictEqual(r.body.code, 'MANUAL_NOTIFY_BUG_ONLY');
-    r = await call('GET', `/api/sys-issues/${fid}/notify-read-status?type=requester`, adminTok);
-    assert.strictEqual(r.status, 400); assert.strictEqual(r.body.code, 'MANUAL_NOTIFY_BUG_ONLY');
-    ok('[T] type 精判：feature 4 类手动通知端点 + 查已读端点 → 400 MANUAL_NOTIFY_BUG_ONLY（变更流无手动端点）');
+    assert.strictEqual(r.status, 200, '[T] feature creator 开发中 admin → self-guard 200（优先于状态门）');
+    assert.strictEqual(r.body.code, 'SELF_NOTIFY_SKIPPED', '[T] feature creator self-guard skipped');
+  }
+  ok('[T] C2a 表驱动：feature+improvement × developer/creator/requester × admin放行(精确 sent/skipped/快照)+对接人403 · relay=CHANNEL_NA · 查已读channel级 · 状态门相邻覆盖');
+
+  // ═══ [SG] C2a·codex M1：自指守卫顺序——先查活动成员行，再判自指 ═══
+  //   伪造/非成员的"自己 ID" → 应先归 DEV_ASSIGNEE_NOT_FOUND（非 SELF_NOTIFY_FORBIDDEN）；在册成员发自己 → SELF_NOTIFY_FORBIDDEN。
+  {
+    // bug 单，dev5 在册。用 devTok(id5) 发给自己(dev_user_id=5)——在册 → SELF_NOTIFY_FORBIDDEN
+    //   （但 dev 非 admin/对接人，会先被 sysManualNotifyGuard developer 通道 403 挡在自指之前）——故改用 admin 发给"admin 自己"验顺序：
+    //   admin(id1) 非本单成员，发 dev_user_id=1 → 应 DEV_ASSIGNEE_NOT_FOUND（顺序正确：先查活动行、admin 不在册）。
+    const id = await bugAssigned(5);   // 处理中，dev5 在册；admin 有权（bug developer=admin∨对接人）
+    let r = await call('POST', `/api/sys-issues/${id}/notify-developer`, adminTok, { dev_user_id: 1 });   // admin 自己非本单成员
+    assert.strictEqual(r.status, 409, '[SG] admin 发非成员的自己 → 先查活动行 → 409（非自指）');
+    assert.strictEqual(r.body.code, 'DEV_ASSIGNEE_NOT_FOUND', '[SG] 顺序正确：DEV_ASSIGNEE_NOT_FOUND 优先于自指');
+    // 构造"在册成员发自己"：把 admin(id1) 加为本单在册开发，再 admin 发给自己 → SELF_NOTIFY_FORBIDDEN
+    const id2 = await bugAssignedWithCollab(5, [1]);   // dev5 主 + admin(1) 协作，均在册·处理中
+    r = await call('POST', `/api/sys-issues/${id2}/notify-developer`, adminTok, { dev_user_id: 1 });
+    assert.strictEqual(r.status, 403, '[SG] admin 在册后发给自己 → 403');
+    assert.strictEqual(r.body.code, 'SELF_NOTIFY_FORBIDDEN', '[SG] 在册自己 → SELF_NOTIFY_FORBIDDEN');
+    ok('[SG] C2a 自指守卫顺序：非成员自己→DEV_ASSIGNEE_NOT_FOUND（先查活动行）· 在册自己→SELF_NOTIFY_FORBIDDEN');
   }
 
   // ═══ [P] 权限 ═══
@@ -552,7 +615,9 @@ async function main() {
     ok('[P] 权限：非白名单非 admin 手动通知开发 → 403 NOT_ADMIN_OR_BUG_LIAISON + notify-relay 仅 admin（白名单/普通开发均 403）');
   }
 
-  // ═══ [C] ⭐变更流零回归 canary（feature/improvement 多 marker 自动派发仍生效）═══
+  // ═══ [C] 交互优化 C2a：变更流通知已全手动 canary（feature/improvement 不再自动派发）═══
+  //   ⚠️ 语义反转（C2a）：原断言"变更流仍自动发 sent"，现 isAutoNotifyEnabled 恒 false → 全 type 不自动派发，
+  //   变更流 assign/estimate/reassign/return 后 notify_status/requester_notify_status 保持 not_sent（改由通知区手动触发）。
   const seedChangeAssigned = async (type, devId, extra = {}) => {
     const rr = await call('POST', '/api/sys-issues', adminTok, { type, title: type + '-canary', system_name: 'BMS', source: '业务方', ...extra });
     const cid = rr.body.id;
@@ -561,29 +626,26 @@ async function main() {
     return cid;
   };
   {
-    // feature assign→dev auto + estimate→requester auto
+    // feature assign→dev 不再 auto + estimate→requester 不再 auto
     const fid = await seedChangeAssigned('feature', 5, { requester_dept: '市场部', requester_name: '李四', requester_phone: PHONE });
-    assert.strictEqual(await nStatus(fid), 'sent', '[C] ⭐feature assign 仍自动发开发（主表 notify_*）——bug 早返回未误伤变更流');
+    assert.strictEqual(await nStatus(fid), 'not_sent', '[C] ⭐feature assign 不再自动发开发（C2a 全手动）');
     await call('POST', `/api/sys-issues/${fid}/estimate`, devTok, { dev_estimated_at: EST });
-    assert.strictEqual(await rStatus(fid), 'sent', '[C] ⭐feature estimate 仍自动发需求方');
-    const featSnap = (await get('SELECT requester_notify_phone_snapshot FROM sys_issues WHERE id=?', [fid])).requester_notify_phone_snapshot;
-    assert.strictEqual(featSnap, PHONE, '[C] feature 自动派发同样落收件人快照（共享 sendSysRequesterNotify，无 type 分叉）');
-    // improvement assign→dev auto（覆盖 improvement 类型，codex M-2 点名）
+    assert.strictEqual(await rStatus(fid), 'not_sent', '[C] ⭐feature estimate 不再自动发需求方（C2a 全手动）');
+    // improvement assign→dev 不再 auto
     const iid = await seedChangeAssigned('improvement', 5);
-    assert.strictEqual(await nStatus(iid), 'sent', '[C] improvement assign 仍自动发开发（变更流两类型均零回归）');
-    // feature reassign→新开发 auto（换人 marker）
-    //   ⚠️ 既有测试变更（C2：reassign body 改 member_ids+reason，见交付汇报清单）。
+    assert.strictEqual(await nStatus(iid), 'not_sent', '[C] improvement assign 不再自动发开发（变更流两类型均全手动）');
+    // feature reassign→新开发 不再 auto（reassign body = member_ids+reason）
     const fid2 = await seedChangeAssigned('feature', 5);
     let r = await call('POST', `/api/sys-issues/${fid2}/reassign`, adminTok, { member_ids: [6], reason: '换人' });
     assert.strictEqual(r.status, 200, 'feature reassign 200');
-    assert.strictEqual(await nStatus(fid2), 'sent', '[C] feature reassign 仍自动发新开发（reassign marker）');
-    // feature return→dev auto（打回 marker）
+    assert.strictEqual(await nStatus(fid2), 'not_sent', '[C] feature reassign 不再自动发新开发（C2a 全手动）');
+    // feature return→dev 不再 auto
     const fid3 = await seedChangeAssigned('feature', 5);
     await call('POST', `/api/sys-issues/${fid3}/estimate`, devTok, { dev_estimated_at: EST });
     await call('POST', `/api/sys-issues/${fid3}/submit`, devTok, { mode: 'no_code', no_code_reason: '交付（占位理由）' });   // 待验证
     await call('POST', `/api/sys-issues/${fid3}/return`, adminTok, { reason: '打回' });   // 开发中
-    assert.strictEqual(await nStatus(fid3), 'sent', '[C] feature return 仍自动发开发（return marker）');
-    ok('[C] 变更流零回归 canary：feature+improvement × assign/estimate/reassign/return 全部仍自动派发 sent（dispatchSysNotify bug 早返回精确隔离，快照写入不分叉，publish/reopen 由 verify-sys-notify/release 覆盖）');
+    assert.strictEqual(await nStatus(fid3), 'not_sent', '[C] feature return 不再自动发开发（C2a 全手动）');
+    ok('[C] C2a 全手动 canary：feature+improvement × assign/estimate/reassign/return 全部 not_sent（isAutoNotifyEnabled 恒 false·改手动触发）');
   }
 
   server.close();

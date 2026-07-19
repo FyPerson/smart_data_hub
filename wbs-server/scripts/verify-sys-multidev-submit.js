@@ -437,7 +437,7 @@ async function main() {
   }
 
   // ══════════════════════════════════════════════════════════════════════
-  // S8：submit 同 component 两条 → 400
+  // S8：submit 同 component 多条不同 ref → 200 全部落库（commit 记录改造 2026-07-19：删「同 component 至多 1 条」限制）
   // ══════════════════════════════════════════════════════════════════════
   {
     const id = await mkIssue('feature', '开发中');
@@ -446,13 +446,30 @@ async function main() {
       mode: 'commits',
       commits: [{ component: 'backend', commit_ref: 'r1' }, { component: 'backend', commit_ref: 'r2' }],
     });
-    assert.strictEqual(r.status, 400, `S8：同 component 两条应 400，实际 ${r.status}`);
-    assert.strictEqual(r.body.code, 'VALIDATION', 'S8：错误码 VALIDATION');
+    assert.strictEqual(r.status, 200, `S8：同 component 两条不同 ref 应 200，实际 ${r.status} ${JSON.stringify(r.body)}`);
     const row = await get('SELECT dev_status FROM sys_issue_dev_assignees WHERE id = ?', [daId]);
-    assert.strictEqual(row.dev_status, 'pending', 'S8：状态未变化（写库前拒绝）');
+    assert.strictEqual(row.dev_status, 'code_submitted', 'S8：唯一在册完成 → dev_status 转 code_submitted');
     const commits = await commitsOf(id);
-    assert.strictEqual(commits.length, 0, 'S8：无 commit 行落库（body 校验先于事务）');
-    ok('S8：submit 同 component 两条 → 400 VALIDATION（写库前拒绝，无副作用）');
+    const backendRefs = commits.filter(c => c.component === 'backend').map(c => c.commit_ref).sort();
+    assert.deepStrictEqual(backendRefs, ['r1', 'r2'], 'S8：同 component 两条不同 ref 全部落库');
+    ok('S8：submit 同 component 多条不同 ref → 200 全部落库（分组多行·去「至多 1 条」限制）');
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // S8b：submit 同 component + 同 ref 完全重复行 → 400（自然键查重兜底，防完全重复行）
+  // ══════════════════════════════════════════════════════════════════════
+  {
+    const id = await mkIssue('feature', '开发中');
+    const daId = await mkMember(id, 5, '开发甲', 'pending');
+    const r = await call('POST', `/api/sys-issues/${id}/submit`, devTok(5), {
+      mode: 'commits',
+      commits: [{ component: 'backend', commit_ref: 'dup' }, { component: 'backend', commit_ref: 'dup' }],
+    });
+    assert.strictEqual(r.status, 400, `S8b：完全重复行应 400，实际 ${r.status}`);
+    assert.strictEqual(r.body.code, 'VALIDATION', 'S8b：错误码 VALIDATION（自然键重复）');
+    const row = await get('SELECT dev_status FROM sys_issue_dev_assignees WHERE id = ?', [daId]);
+    assert.strictEqual(row.dev_status, 'pending', 'S8b：状态未变化（事务整体回滚）');
+    ok('S8b：submit 同 component + 同 ref 完全重复 → 400 自然键查重兜底（分组多行仍防完全重复）');
   }
 
   // ══════════════════════════════════════════════════════════════════════
@@ -510,6 +527,61 @@ async function main() {
     assert.strictEqual(r.status, 400, 'commits 模式携带 no_code_reason 字段应 400');
     assert.strictEqual(r.body.code, 'VALIDATION', 'commits 携带 no_code_reason 错误码 VALIDATION');
     ok('附加：多余字段 / null 值 / commits 模式禁止携带 no_code_reason → 均 400 VALIDATION（写库前拒绝，§6.1）');
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // P4（work_note 工作说明·2026-07-19）：白名单/类型/长度校验 + 落 submit 事件 payload_json + 多开发不覆盖
+  // ══════════════════════════════════════════════════════════════════════
+  {
+    // ① 非法类型：work_note 非 string（数字/对象）→ 400 VALIDATION（不静默吞·§4.3 H-MED）
+    let id = await mkIssue('feature', '开发中');
+    await mkMember(id, 5, '开发甲', 'pending');
+    let r = await call('POST', `/api/sys-issues/${id}/submit`, devTok(5), { mode: 'commits', commits: [{ component: 'frontend', commit_ref: 'fe1' }], work_note: 123 });
+    assert.strictEqual(r.status, 400, 'P4-①：work_note 非 string(数字) 应 400');
+    assert.strictEqual(r.body.code, 'VALIDATION', 'P4-①：错误码 VALIDATION');
+    r = await call('POST', `/api/sys-issues/${id}/submit`, devTok(5), { mode: 'commits', commits: [{ component: 'frontend', commit_ref: 'fe1' }], work_note: { a: 1 } });
+    assert.strictEqual(r.status, 400, 'P4-①：work_note 对象 应 400');
+
+    // ② 超长：>1000 Unicode 码点 → 400
+    r = await call('POST', `/api/sys-issues/${id}/submit`, devTok(5), { mode: 'commits', commits: [{ component: 'frontend', commit_ref: 'fe1' }], work_note: '字'.repeat(1001) });
+    assert.strictEqual(r.status, 400, 'P4-②：work_note 超 1000 字应 400');
+
+    // ③ 合法 commits 模式 → 落 submit 事件 payload_json.work_note
+    r = await call('POST', `/api/sys-issues/${id}/submit`, devTok(5), { mode: 'commits', commits: [{ component: 'frontend', commit_ref: 'fe1' }], work_note: '  前端改了登录页  ' });
+    assert.strictEqual(r.status, 200, `P4-③：合法 commits+work_note 应 200，实际 ${r.status} ${JSON.stringify(r.body)}`);
+    let ev = await get(`SELECT payload_json FROM sys_issue_dev_events WHERE issue_id=? AND action='submit' ORDER BY id DESC LIMIT 1`, [id]);
+    let pl = JSON.parse(ev.payload_json);
+    assert.strictEqual(pl.work_note, '前端改了登录页', 'P4-③：work_note 落 payload_json 且 trim');
+
+    // ④ no_code 模式也落（action='no_code'）
+    let id2 = await mkIssue('feature', '开发中');
+    await mkMember(id2, 5, '开发甲', 'pending');
+    r = await call('POST', `/api/sys-issues/${id2}/submit`, devTok(5), { mode: 'no_code', no_code_reason: '无需代码', work_note: '仅配置调整' });
+    assert.strictEqual(r.status, 200, 'P4-④：no_code+work_note 应 200');
+    ev = await get(`SELECT payload_json FROM sys_issue_dev_events WHERE issue_id=? AND action='no_code' ORDER BY id DESC LIMIT 1`, [id2]);
+    pl = JSON.parse(ev.payload_json);
+    assert.strictEqual(pl.work_note, '仅配置调整', 'P4-④：no_code 事件也落 work_note');
+
+    // ⑤ 空白 work_note → 不落 work_note 键（payload 无该键·后端 undefined→不加）
+    let id3 = await mkIssue('feature', '开发中');
+    await mkMember(id3, 5, '开发甲', 'pending');
+    r = await call('POST', `/api/sys-issues/${id3}/submit`, devTok(5), { mode: 'commits', commits: [{ component: 'frontend', commit_ref: 'fe1' }], work_note: '   ' });
+    assert.strictEqual(r.status, 200, 'P4-⑤：空白 work_note 应 200');
+    ev = await get(`SELECT payload_json FROM sys_issue_dev_events WHERE issue_id=? AND action='submit' ORDER BY id DESC LIMIT 1`, [id3]);
+    pl = JSON.parse(ev.payload_json);
+    assert.ok(!('work_note' in pl), 'P4-⑤：空白 work_note 不落键（payload 无 work_note）');
+
+    // ⑥ 多开发各自 work_note 不覆盖（两 dev 各提交带不同 work_note·各自事件独立）
+    let id4 = await mkIssue('feature', '开发中');
+    await mkMember(id4, 5, '开发甲', 'pending');
+    await mkMember(id4, 6, '开发乙', 'pending');
+    await call('POST', `/api/sys-issues/${id4}/submit`, devTok(5), { mode: 'commits', commits: [{ component: 'frontend', commit_ref: 'a' }], work_note: '甲的说明' });
+    await call('POST', `/api/sys-issues/${id4}/submit`, devTok(6), { mode: 'commits', commits: [{ component: 'backend', commit_ref: 'b' }], work_note: '乙的说明' });
+    const evs = await all(`SELECT e.payload_json, da.user_id FROM sys_issue_dev_events e JOIN sys_issue_dev_assignees da ON da.id=e.dev_assignee_id WHERE e.issue_id=? AND e.action='submit'`, [id4]);
+    const wnByUser = {}; evs.forEach(e => { const p = JSON.parse(e.payload_json); wnByUser[e.user_id] = p.work_note; });
+    assert.strictEqual(wnByUser[5], '甲的说明', 'P4-⑥：开发甲 work_note 独立');
+    assert.strictEqual(wnByUser[6], '乙的说明', 'P4-⑥：开发乙 work_note 不覆盖甲');
+    ok('P4：work_note 白名单/非法类型400/超长400/commits+no_code 落 payload_json/空白不落键/多开发各自不覆盖');
   }
 
   server.close();

@@ -828,6 +828,33 @@ async function main() {
   }
 
   // ══════════════════════════════════════════════════════════════════════
+  // S33（C2c·codex 115 MED 回归）：reassign type 感知族门直调断言——证明「变更流去 D_PRE 不误伤 bug 待处理改派」
+  //   assertMemberActionFamilyAllowed 直调（不 seed 整单），逐 (type,status) 验放行/拒绝：
+  //   · 变更流 D_PRE(已排期/待评估/已暂缓) reassign → 拒（去主次后无在册开发，首次指派走 assign）
+  //   · bug D_PRE(待处理) reassign → **放行**（待处理态可 add 预指派/reactivate 带 roster，声明式改派合法·92 号审保留）
+  //   · 两 type 的 DEV/VERIFY reassign → 放行（对照·核心改派态不受收窄影响）
+  // ══════════════════════════════════════════════════════════════════════
+  {
+    const throws = (fn) => { try { fn(); return false; } catch (_) { return true; } };
+    const reassignAllowed = (type, status) => I.assertMemberActionFamilyAllowed('reassign', type, status);
+    // 变更流 D_PRE 三态 → 拒（INVALID_STATUS）
+    for (const st of ['待评估', '已排期', '已暂缓']) {
+      assert.ok(throws(() => reassignAllowed('feature', st)), `S33a：feature「${st}」(D_PRE) reassign 应被拒（去 D_PRE）`);
+      assert.ok(throws(() => reassignAllowed('improvement', st)), `S33a：improvement「${st}」(D_PRE) reassign 应被拒`);
+    }
+    // bug 待处理(D_PRE) → 放行（不抛）——关键回归：证明 C2c 未误伤 bug
+    assert.ok(!throws(() => reassignAllowed('bug', '待处理')), 'S33b：bug「待处理」(D_PRE) reassign 应放行（预指派后可声明式改派·未被变更流去 D_PRE 误伤）');
+    // 两 type DEV/VERIFY → 放行（对照，核心态不受影响）
+    assert.ok(!throws(() => reassignAllowed('feature', '开发中')), 'S33c：feature「开发中」(DEV) reassign 放行');
+    assert.ok(!throws(() => reassignAllowed('feature', '待验证')), 'S33c：feature「待验证」(VERIFY) reassign 放行');
+    assert.ok(!throws(() => reassignAllowed('bug', '处理中')), 'S33c：bug「处理中」(DEV) reassign 放行');
+    assert.ok(!throws(() => reassignAllowed('bug', '待验证')), 'S33c：bug「待验证」(VERIFY) reassign 放行');
+    // add 对照：变更流 D_PRE add 仍放行（去 D_PRE 只作用于 reassign·不波及 add/remove）——防"改 reassign 波及其他动作"
+    assert.ok(!throws(() => I.assertMemberActionFamilyAllowed('add', 'feature', '已排期')), 'S33d：feature「已排期」add 仍放行（type 覆盖仅作用 reassign，未波及 add）');
+    ok('S33（C2c·codex115 MED 回归）：reassign type 感知族门——变更流 D_PRE 拒 / bug 待处理放行（不误伤）/ DEV·VERIFY 放行 / add 不受波及');
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
   // 91 号审新增：H1 routeKind 真值表直调负例（resume 动态边 + RELEASE 配对 + RESET fail-closed）
   // ══════════════════════════════════════════════════════════════════════
   {

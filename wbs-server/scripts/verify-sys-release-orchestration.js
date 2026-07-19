@@ -517,16 +517,16 @@ async function main() {
     ok('H-1（收口）：纯 bug 成员 + release_type=NULL 的历史/脏批次走 legacy /publish → 409 LEGACY_RELEASE_FLOW_DISABLED（堵绕 release_assignee 执行权直发；R5g-b 混族别变体同拒，见 verify-sys-bug-transitions.js）');
   }
 
-  // ═══ [M-1 收口·codex40] read-status 权限：非 admin/非白名单[7,13]/非本单主开发 → 403；主开发本人 + admin 放行 ═══
+  // ═══ [M-1·C2a/H3] read-status 权限（bug 单）：admin/白名单[7,13] 放行；主开发本人 → 403（H3 删放权·写读同源）═══
   {
     const rsIssue = await seedBugToReady(5);   // 主开发 = dev5
     // dev6（id6·非 admin·非白名单·非本单主开发）查已读 → 403
     let r = await call('GET', `/api/sys-issues/${rsIssue}/notify-read-status?type=creator`, dev2Tok);
     assert.strictEqual(r.status, 403, `M-1：非授权用户查已读应 403, got ${r.status} ${JSON.stringify(r.body)}`);
     assert.strictEqual(r.body.code, 'NOT_AUTHORIZED_FOR_NOTIFY', 'M-1：403 code=NOT_AUTHORIZED_FOR_NOTIFY');
-    // 主开发本人（dev5）→ 非 403（未发过则 NOTIFY_NOT_SENT，关键=通过权限闸，写读同源不误挡能发者）
+    // C2a·H3 修正：主开发本人（dev5）查已读现在 → 403（发送侧删「主开发本人」放权后，查已读侧同步删·写读同源）
     r = await call('GET', `/api/sys-issues/${rsIssue}/notify-read-status?type=creator`, devTok);
-    assert.notStrictEqual(r.status, 403, `M-1：主开发本人查已读不应 403, got ${r.status} ${JSON.stringify(r.body)}`);
+    assert.strictEqual(r.status, 403, `M-1·H3：主开发本人查已读应 403（写读同源删）, got ${r.status} ${JSON.stringify(r.body)}`);
     // admin → 非 403
     r = await call('GET', `/api/sys-issues/${rsIssue}/notify-read-status?type=creator`, adminTok);
     assert.notStrictEqual(r.status, 403, `M-1：admin 查已读不应 403, got ${r.status}`);

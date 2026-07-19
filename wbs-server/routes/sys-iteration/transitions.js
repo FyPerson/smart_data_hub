@@ -89,15 +89,15 @@ const CHANGE_FLOW_TRANSITIONS = [
     //   不可静态得知，故仿 resume 用 to:null 动态解析语义标注（本条目不在 SIDE_EFFECT_ACTIONS 白名单，
     //   buildMeta 仍正确归类 kind='transition'）。dev_estimated_at 清空语义随旧"换主清进度"概念一并废除
     //   （v2.9 §3 无此要求，去主次后无"主"可清）。
-    // MED-2（92 号审）：from 补 D_PRE 前置态——v2.9 §4.3 矩阵 reassign 行对 D_PRE 族=✅（最终集合可空，
-    //   assertMemberActionFamilyAllowed 的 MEMBER_ACTION_FAMILY_MATRIX.reassign=['D_PRE','DEV','VERIFY']），
-    //   feature/improvement 的 D_PRE 族=[待评估,已排期,已暂缓]（status-families.js SYS_D_PRE_STATUSES，含已暂缓——
-    //   已暂缓虽是"暂缓"语义态，但按 §4.3 是纯族判断不特殊化，矩阵 D_PRE 行统一 ✅）。此前 from 只有
-    //   [开发中,待验证]（DEV/VERIFY），漏 D_PRE 三态会让前端 typeFlows.find(f=>f.from.includes(status)) 误判
-    //   D_PRE 态下无改派按钮——与后端实际放行集合（assertMemberActionFamilyAllowed 才是真校验，此处只是
-    //   前端展示用只读镜像）不同源。补齐后 from 与矩阵完全同源（写读同源）。
+    // C2c（2026-07-18 交互优化·用户实测发现）：from 去掉 D_PRE 族（待评估/已排期/已暂缓），只留 DEV/VERIFY
+    //   （开发中/待验证）。**背景**：92 号审曾把 from 补 D_PRE 以与矩阵同源，但去主次后「已排期」态本无在册
+    //   开发成员（首次指派走 assign：已排期→开发中），reassign（改派现有集合）在此无实际对象——却让「已排期」
+    //   态同时渲染 assign(指派) + reassign(改派) 两按钮共存，逻辑上未进开发的态只应有「指派」。故收窄 from。
+    //   **写读同源铁律**：前端 from 收窄的同时必须同步后端真校验 MEMBER_ACTION_FAMILY_MATRIX.reassign（index.js:1030
+    //   `['D_PRE','DEV','VERIFY']`→`['DEV','VERIFY']`），否则前端不显但后端仍放行=写宽读窄。已暂缓（D_PRE）改派
+    //   诉求随之收敛：暂缓单需先 resume 回开发中再改派（暂缓态本就无活跃开发编排）。
     action: 'reassign',
-    from: ['待评估', '已排期', '已暂缓', '开发中', '待验证'], to: null,
+    from: ['开发中', '待验证'], to: null,
     roleGuard: 'admin', ownerGuard: null,
     requiredPayload: ['member_ids', 'reason'],
     sideEffects: ['开发集合差量应用（新增 INSERT pending / 移除软删）', '选举 electRepresentative 重算 assigned_to/_name（assigned_at 仅首次形成时补写）', 'W-GATE 按新 roster 完成态判定主状态是否联动', '仅代表真实变化时才 notifyAssignedDeveloper（不再按 toAdd.length 判定）', 'return_count 不变（05-M2，v2.9 沿用）'],
@@ -297,7 +297,10 @@ const BUG_FLOW_TRANSITIONS = [
     notifyAfterCommit: 'notifyAssignedDeveloper',
   },
   {
-    // 换人（M3·91 号审 v2.9 重写，同变更流范式，理由同上条；MED-2/LOW·92 号审补 from=待处理 + timelineEvent=null，理由同上条）：
+    // 换人（M3·91 号审 v2.9 重写，同变更流范式）。C2c（2026-07-18·codex 115 MED 修正）：bug **保留**「待处理」
+    //   (D_PRE)——bug 待处理态可经 add 预指派/reactivate(已拒绝→待处理)带 roster，reassign 声明式改派是既有合法能力
+    //   （92 号审有意保留），**不随变更流去 D_PRE 一并收窄**（矩阵一刀切会误伤 bug）。故 bug from 含待处理，与后端
+    //   memberActionFamiliesFor('reassign','bug')=基础矩阵（含 D_PRE）同源；变更流侧才排除 D_PRE（type 覆盖）。
     action: 'reassign',
     from: ['待处理', '处理中', '待验证'], to: null,
     roleGuard: 'admin_or_bug_liaison', ownerGuard: null,   // ④ 对接人白名单放开——reassign 走独立事务（不经 sysIssueTransition [3]），故此 roleGuard 仅作 SSOT 记录，实际由端点中间件 requireAdminOrBugLiaison + handler type='bug' 精判 enforced
@@ -495,7 +498,7 @@ function buildMeta() {
   const actions = {};           // action → 中文 label（前端动作按钮文案）
   const ACTION_LABELS = {
     create: '建单', schedule: '排期', assign: '指派', reassign: '改派',
-    estimate: '回填预计完成', submit: '提交', accept: '验收通过', return: '验收打回',
+    estimate: '回填预计完成', submit: '标记我的开发完成', accept: '验收通过', return: '验收打回',   // P4：submit 改名（去主次多开发·仅标记本人开发项完成·H7）
     publish: '批次发布', close: '关闭', hold: '暂缓', resume: '恢复',
     reactivate: '重新激活', issue_reject: '拒绝', void: '作废', reopen: '重开',
     feasibility: '可行性评估', blocked: '标记受阻', unblock: '解除受阻',

@@ -121,7 +121,18 @@ async function main() {
     `INSERT INTO sys_issue_dev_commits (issue_id, dev_assignee_id, dev_user_id, component, commit_ref, created_at) VALUES (?, ?, 9, 'frontend', 'fe/removed-inst', datetime('now'))`,
     [issue1, da3]
   )).lastID;
-  ok('种子1：issue1（4 名 dev_assignees：pending/code_submitted/已软删code_submitted/no_code，四态配对全合法）+ 3 条 commit（含 1 条挂软删实例）造数完成');
+  // P4（work_note 读回·codex 审 LOW-2）：给 da2(在册·code_submitted) 插 submit 事件带 work_note、给 da4(在册·no_code)
+  //   插 no_code 事件**无** work_note 键——验证详情端补查：有值正确回填 + 空白场景 work_note/submitted_at 成对 null。
+  //   再给 da2 插一条更早的 submit 事件（旧 work_note）验证 MAX(id) 取最新（打回重提交语义）。
+  //   payload 结构须满足 P11 探针（submit：mode=commits+commits≥1+commit_id 正整数唯一+component 枚举+commit_ref 合法
+  //   +dev_assignee_id 严格等于事件行；no_code：no_code_reason 非空）——补齐结构后额外挂 work_note 键。
+  await run(`INSERT INTO sys_issue_dev_events (issue_id, dev_assignee_id, action, operator_id, payload_json, created_at)
+             VALUES (?, ?, 'submit', 5, '{"mode":"commits","commits":[{"commit_id":${c1},"component":"backend","commit_ref":"bk/r2"}],"dev_assignee_id":${da2},"work_note":"旧版说明(应被覆盖)"}', '2026-07-20 09:00:00')`, [issue1, da2]);
+  await run(`INSERT INTO sys_issue_dev_events (issue_id, dev_assignee_id, action, operator_id, payload_json, created_at)
+             VALUES (?, ?, 'submit', 5, '{"mode":"commits","commits":[{"commit_id":${c2},"component":"frontend","commit_ref":"fe/r1"}],"dev_assignee_id":${da2},"work_note":"开发王的最新工作说明"}', '2026-07-20 10:00:00')`, [issue1, da2]);
+  await run(`INSERT INTO sys_issue_dev_events (issue_id, dev_assignee_id, action, operator_id, payload_json, created_at)
+             VALUES (?, ?, 'no_code', 10, '{"mode":"no_code","no_code_reason":"临时抽调支援其他项目，本轮未编码"}', '2026-07-20 09:00:00')`, [issue1, da4]);
+  ok('种子1：issue1（4 名 dev_assignees：pending/code_submitted/已软删code_submitted/no_code，四态配对全合法）+ 3 条 commit（含 1 条挂软删实例）+ P4 work_note 事件（da2 两条 submit 取最新/da4 no_code 无 work_note）造数完成');
 
   // LOW-2（89 号审）自证：种子必须全部满足 P1-P15 恒真——直接跑一遍既有探针（非新增探针，复用 C0 交付物）。
   const seedProbeResults = await runProbes(db);
@@ -148,6 +159,15 @@ async function main() {
   assert.strictEqual(byId.get(da4).dev_status, 'no_code', 'da4.dev_status 应为 no_code');
   assert.ok(byId.get(da4).no_code_reason && byId.get(da4).no_code_reason.length > 0, `da4（合法在册 no_code 成员）详情 GET 应回显非空 no_code_reason，实际：${byId.get(da4).no_code_reason}`);
   ok('[1] 详情 GET dev_assignees 三新列（dev_status/resolved_at/no_code_reason）值正确 + 仅在册 3 条（软删 da3 排除）+ 合法 no_code 成员 no_code_reason 非空回显');
+
+  // ── [1b] P4 work_note 读回（codex 审 LOW-2）：详情端补查 json_extract + MAX(id) 取最新 + 空白成对 null ──────────
+  assert.strictEqual(byId.get(da2).work_note, '开发王的最新工作说明', 'P4：da2 详情 work_note 应取最新 submit 事件（MAX(id)·打回重提交语义·非旧版）');
+  assert.strictEqual(byId.get(da2).work_note_submitted_at, '2026-07-20 10:00:00', 'P4：da2 work_note_submitted_at 应为最新事件时刻');
+  assert.strictEqual(byId.get(da4).work_note, null, 'P4：da4（no_code 事件无 work_note 键）work_note 应为 null');
+  assert.strictEqual(byId.get(da4).work_note_submitted_at, null, 'P4·LOW-1：da4 无 work_note 时 submitted_at 也成对为 null（不返回"有时刻无内容"脏字段）');
+  assert.strictEqual(byId.get(da1).work_note, null, 'P4：da1（pending·无 submit 事件）work_note 应为 null');
+  assert.strictEqual(byId.get(da1).work_note_submitted_at, null, 'P4：da1 无事件 submitted_at 应为 null');
+  ok('[1b] P4 work_note 读回：da2 取最新 submit work_note+时刻 / da4 无 work_note 键→成对 null / da1 无事件→null（LOW-1 成对语义 + LOW-2 详情读回全覆盖）');
 
   const devCommits = r.body.dev_commits;
   assert.ok(Array.isArray(devCommits), 'dev_commits 应为数组');
@@ -193,11 +213,18 @@ async function main() {
     const rDetail = await call('GET', `/api/sys-issues/${issueId}`, adminTok);
     assert.strictEqual(rDetail.status, 200, `${label}：详情 GET 应 200`);
     assert.ok(Array.isArray(rDetail.body.dev_assignees) && rDetail.body.dev_assignees.length >= 1, `${label}：详情 dev_assignees 应至少 1 条`);
+    // P4：详情端在 fetchActiveDevAssignees 基础列集之上**合并**详情专属增强列（work_note/work_note_submitted_at，
+    //   由详情端单独补查 dev_events payload_json·mutation 响应无此需求不带）。故断言从「完全相等」放宽为
+    //   「detail = mutation ∪ 已知详情专属列」——基础列集仍防漂移（mutation⊆detail 且差集只能是白名单增强列）。
+    const DETAIL_ONLY_KEYS = ['work_note', 'work_note_submitted_at'];   // P4 详情端专属增强（唯一允许的差集）
     const detailKeys = Object.keys(rDetail.body.dev_assignees[0]).sort();
-    assert.deepStrictEqual(mutationKeys, detailKeys, `${label}：mutation 响应与详情 GET 的 dev_assignees 列集应完全一致（防镜像漂移），mutation=${JSON.stringify(mutationKeys)} detail=${JSON.stringify(detailKeys)}`);
+    const detailBaseKeys = detailKeys.filter(k => !DETAIL_ONLY_KEYS.includes(k));
+    assert.deepStrictEqual(mutationKeys, detailBaseKeys, `${label}：mutation 响应与详情 GET 的 dev_assignees **基础列集**应完全一致（防镜像漂移·排除 P4 详情专属列 ${DETAIL_ONLY_KEYS.join('/')}），mutation=${JSON.stringify(mutationKeys)} detailBase=${JSON.stringify(detailBaseKeys)}`);
+    // 详情端应恰好含 P4 两增强列（防补查逻辑漏挂/字段名漂移）
+    assert.ok(DETAIL_ONLY_KEYS.every(k => detailKeys.includes(k)), `${label}：详情 GET 的 dev_assignees 应含 P4 增强列 ${DETAIL_ONLY_KEYS.join('/')}`);
     assert.ok(mutationKeys.includes('dev_status') && mutationKeys.includes('resolved_at') && mutationKeys.includes('no_code_reason'),
       `${label}：mutation 响应列集应含 C1 新增三列（否则前端拿 mutation 响应刷详情会丢新字段）`);
-    ok(`[4] 写读同源（${label}）：mutation 响应与详情 GET 的 dev_assignees 列集完全一致（${mutationKeys.join(',')}）`);
+    ok(`[4] 写读同源（${label}）：mutation 基础列集与详情一致（${mutationKeys.join(',')}）+ 详情专属增强 ${DETAIL_ONLY_KEYS.join('/')}`);
   }
 
   // [4a] path A（建单同时指派，仅 bug 可用 assign_mode=A）

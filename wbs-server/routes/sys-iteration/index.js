@@ -1027,13 +1027,34 @@ module.exports = (deps) => {
     remove: ['D_PRE', 'DEV', 'VERIFY'],    // remove/self-remove 同列
     excuse: ['DEV'],                        // 仅 SYS_DEV（§4.3/§5.2）
     supersede: ['DEV', 'VERIFY'],
-    reassign: ['D_PRE', 'DEV', 'VERIFY'],
+    reassign: ['D_PRE', 'DEV', 'VERIFY'],  // 基础全族（bug 待处理态经 add 预指派/reactivate 后可带 roster，声明式改派合法）
     // [C4] commit 行编辑三端点守卫③（方案 §6.3："主状态∈(SYS_DEV∪SYS_VERIFY)"）——复用本矩阵而非另写一份
     // family 判定，与既有五个成员动作同一 409 INVALID_STATUS 语义收口（S17/S27"冻结态→409"实测依据）。
     commit: ['DEV', 'VERIFY'],
   };
+  // C2c（2026-07-18·codex 115 MED 修正）：type 级族门覆盖——reassign 对**变更流(feature/improvement)**排除 D_PRE 族。
+  //   设计立场（对抗审 B·WEAKENED 后精确化）：变更流 **声明式改派(reassign)仅开放 DEV/VERIFY**——D_PRE 首次组建
+  //   开发集走 assign(已排期→开发中)、若需预调名单走 add/remove 差量端点（add/remove 族门仍含 D_PRE·有意保留）。
+  //   这是"动作语义分门"的设计选择（reassign≠add/remove），**非"D_PRE 必无 roster"的事实断言**——D_PRE 经 add
+  //   预指派确可产生 roster，故 add/remove 保留 D_PRE 服务这条路径、reassign 收窄不与之矛盾（对抗审 B 核为设计选择非缺陷）。
+  //   背景来源：用户实测「已排期」态 assign+reassign 按钮共存。**bug 不同**——bug 待处理(D_PRE)保留 reassign
+  //   （92 号审有意·bug 待处理可 add 预指派/reactivate 带 roster 后声明式改派），矩阵一刀切去 D_PRE 会误伤 bug。
+  //   故按 type 拆：矩阵基础含 D_PRE（服务 bug），变更流在此覆盖排除。前端 transitions.js reassign.from 同源。
+  const MEMBER_ACTION_FAMILY_TYPE_OVERRIDE = {
+    reassign: {
+      feature: ['DEV', 'VERIFY'],
+      improvement: ['DEV', 'VERIFY'],
+      // bug 未列 → 回落基础矩阵（含 D_PRE）
+    },
+  };
+  // 取某 (actionKey, issueType) 的允许族清单（type 覆盖优先，否则回落基础矩阵）——唯一权威，verify 与端点同源读此。
+  function memberActionFamiliesFor(actionKey, issueType) {
+    const override = MEMBER_ACTION_FAMILY_TYPE_OVERRIDE[actionKey];
+    if (override && Object.prototype.hasOwnProperty.call(override, issueType)) return override[issueType];
+    return MEMBER_ACTION_FAMILY_MATRIX[actionKey];
+  }
   function assertMemberActionFamilyAllowed(actionKey, issueType, status) {
-    const allowedFamilies = MEMBER_ACTION_FAMILY_MATRIX[actionKey];
+    const allowedFamilies = memberActionFamiliesFor(actionKey, issueType);
     if (!allowedFamilies) throw new Error(`assertMemberActionFamilyAllowed: 未登记的 actionKey="${actionKey}"`);
     const family = SF.familyOfStatus(issueType, status);
     if (!family || !allowedFamilies.includes(family)) {
@@ -2815,6 +2836,37 @@ module.exports = (deps) => {
       //   ⚠️ 写读同源铁律：本列集用 fetchActiveDevAssignees 单一来源，与全部 mutation 响应镜像
       //   （path A 建单/assign/reassign/C2 四新端点）共用同一 SELECT，杜绝各自手写漂移。
       const devAssignees = await fetchActiveDevAssignees(id);
+      // P4（详情端补查·仅此端点）：每个在册 dev 最近一次 submit/no_code 事件的 work_note（工作说明）——从 dev_events
+      //   payload_json 提取（json_extract），按 dev_assignee_id 关联当前在册行，取该行最近事件（id DESC LIMIT 1）。
+      //   写读同源：写侧落 submit/no_code 事件 payload_json.work_note（上方 eventPayload），读侧此处提取回填。
+      //   多开发各自 work_note 不覆盖（各 dev_assignee 行独立取自己的事件）。合并进 devAssignees 供开发成员区展示。
+      if (devAssignees && devAssignees.length) {
+        const workNoteRows = await dbAllAsync(
+          `SELECT e.dev_assignee_id AS da_id,
+                  json_extract(e.payload_json, '$.work_note') AS work_note,
+                  e.created_at AS submitted_at
+             FROM sys_issue_dev_events e
+             JOIN (
+               SELECT dev_assignee_id, MAX(id) AS max_id
+                 FROM sys_issue_dev_events
+                WHERE issue_id = ? AND action IN ('submit','no_code')
+                GROUP BY dev_assignee_id
+             ) latest ON latest.dev_assignee_id = e.dev_assignee_id AND latest.max_id = e.id
+            WHERE e.issue_id = ?`,
+          [id, id]
+        );
+        // codex P4 审 LOW-1：work_note 与 work_note_submitted_at 成对——某 dev 提交了但没填 work_note 时（事件存在但
+        //   payload 无 work_note 键→json_extract 返 null），submitted_at 也置 null，避免"有时刻无内容"的脏字段语义。
+        const wnMap = new Map(workNoteRows.map(r => {
+          const note = r.work_note || null;
+          return [r.da_id, { work_note: note, submitted_at: note ? r.submitted_at : null }];
+        }));
+        for (const d of devAssignees) {
+          const wn = wnMap.get(d.id);
+          d.work_note = wn ? wn.work_note : null;
+          d.work_note_submitted_at = wn ? wn.submitted_at : null;
+        }
+      }
       // C1（新增）：commit 留痕行（方案 §13 S1「各自 commit 行」+ §8 快照口径同源——含 removed 实例的行，
       //   即使该实例已软删也不撤回其历史 commit 记录）。JOIN 取 user_name 供前端直接渲染"开发"列，不用前端
       //   自行按 dev_assignee_id 反查在册成员名（在册成员可能已被移除，join 用 sys_issue_dev_assignees 的
@@ -2909,11 +2961,19 @@ module.exports = (deps) => {
     // [codex 100 号 HIGH-2 回填] fix_gap_note 纳入 §6.1 body 契约的"条件字段"——是否必填取决于事务内 row 状态
     //   （派生自 bug 的 bug 单首次提交），此处只做类型层放行（同旧代码 non-string→视为未填，不在此报错），
     //   必填判定与真正校验在事务内进行（见 submit handler 内 [codex 100 号 HIGH-2 回填] 注释）。
-    const ALLOWED_TOP_KEYS = ['mode', 'no_code_reason', 'commits', 'fix_gap_note'];
+    const ALLOWED_TOP_KEYS = ['mode', 'no_code_reason', 'commits', 'fix_gap_note', 'work_note'];   // P4：+work_note（选填工作说明）
     const extraTop = Object.keys(b).filter(k => !ALLOWED_TOP_KEYS.includes(k));
     if (extraTop.length > 0) return { ok: false, message: `不支持的字段：${extraTop.join(',')}` };
     if (b.mode !== 'no_code' && b.mode !== 'commits') return { ok: false, message: 'mode 仅支持 no_code/commits' };
     const fixGapNote = typeof b.fix_gap_note === 'string' ? b.fix_gap_note : null;
+    // P4 work_note（选填·两模式均可带）：非 string 且非 undefined/null → 400（不静默吞·方案 §4.3 H-MED）；
+    //   trim 上限 1000 字符（Unicode 码点 [...str].length 计·防中文/emoji 组合字符按字节误判）；空白落 null（统一）。
+    if (b.work_note !== undefined && b.work_note !== null && typeof b.work_note !== 'string') {
+      return { ok: false, message: 'work_note 须为字符串' };
+    }
+    const workNoteRaw = typeof b.work_note === 'string' ? b.work_note.trim() : '';
+    if ([...workNoteRaw].length > 1000) return { ok: false, message: 'work_note 过长（上限 1000 字）' };
+    const workNote = workNoteRaw || null;
 
     if (b.mode === 'no_code') {
       if (b.no_code_reason === null) return { ok: false, message: 'no_code_reason 不能为 null' };
@@ -2923,13 +2983,15 @@ module.exports = (deps) => {
         if (!Array.isArray(b.commits)) return { ok: false, message: 'commits 须为数组' };
         if (b.commits.length > 0) return { ok: false, message: 'no_code 模式不应携带非空 commits' };
       }
-      return { ok: true, mode: 'no_code', noCodeReason: reason, commits: [], fixGapNote };
+      return { ok: true, mode: 'no_code', noCodeReason: reason, commits: [], fixGapNote, workNote };
     }
 
     // mode === 'commits'
     if (b.no_code_reason !== undefined) return { ok: false, message: 'commits 模式禁止携带 no_code_reason 字段' };
     if (!Array.isArray(b.commits) || b.commits.length === 0) return { ok: false, message: 'commits 至少 1 条' };
-    const seenComponents = new Set();
+    // commit 记录改造（2026-07-19）：删除「同 component 至多 1 条」限制——前端改为「前端组/后端组」两分组、组内多行，
+    //   同一 component 可含多条 commit。完全重复行（同实例+component+ref）由 §6.2 步骤4 自然键查重兜底（同批第一条
+    //   入库后第二条 SELECT 即命中→400），故此处不再维护 seenComponents，仅做元素级字段校验。
     const commits = [];
     for (const raw of b.commits) {
       if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { ok: false, message: 'commits 元素非法' };
@@ -2939,11 +3001,9 @@ module.exports = (deps) => {
       if (typeof raw.commit_ref !== 'string') return { ok: false, message: 'commit_ref 须为字符串' };
       const ref = raw.commit_ref.trim();
       if (!ref || ref.length > 200) return { ok: false, message: 'commit_ref 必填（trim 长度 1..200）' };
-      if (seenComponents.has(raw.component)) return { ok: false, message: `同 component 至多 1 条：${raw.component}` };
-      seenComponents.add(raw.component);
       commits.push({ component: raw.component, commit_ref: ref });
     }
-    return { ok: true, mode: 'commits', noCodeReason: null, commits, fixGapNote };
+    return { ok: true, mode: 'commits', noCodeReason: null, commits, fixGapNote, workNote };
   }
 
   router.post('/sys-issues/:id/submit', authenticateToken, requireSysSchemaReady, async (req, res) => {
@@ -3083,9 +3143,11 @@ module.exports = (deps) => {
 
         // §6.2 步骤5：写恰 1 条 submit|no_code 事件（payload 含全部初始 commit 明细，方案 §3 模型）
         //   → electRepresentative → 门禁：全完成态→主状态待验证（W-GATE 内，同事务，不变量 8）
+        // P4：work_note（选填工作说明）落进本条 submit/no_code 事件的 payload_json——每个 dev 各自的 submit 事件行
+        //   独立承载，多开发各自 work_note 不覆盖（方案 §4.3 H1：不落主表/不落可变 dev_assignees 行）。仅有值时加键。
         const eventPayload = parsed.mode === 'no_code'
-          ? { mode: 'no_code', no_code_reason: parsed.noCodeReason }
-          : { mode: 'commits', commits: insertedCommits, dev_assignee_id: memberRow.id };
+          ? { mode: 'no_code', no_code_reason: parsed.noCodeReason, ...(parsed.workNote ? { work_note: parsed.workNote } : {}) }
+          : { mode: 'commits', commits: insertedCommits, dev_assignee_id: memberRow.id, ...(parsed.workNote ? { work_note: parsed.workNote } : {}) };
         await insertDevEvent({
           issueId: id, devAssigneeId: memberRow.id,
           action: parsed.mode === 'no_code' ? 'no_code' : 'submit',
@@ -5533,6 +5595,19 @@ module.exports = (deps) => {
     await recordSysRequesterNotify(issue.id, !!result.ok, result.message_key, result.reason, requesterDispatched ? phoneToUse : null);
   }
 
+  // ── 交互优化 C2：自动通知总开关（具名策略函数，替代原 type==='bug' 早返回）──────────────
+  //   本期把变更流(feature/improvement) 的自动钉钉派发也改为「全手动」，对齐 bug 单——即所有 type 都不
+  //   自动派发（bug 早已手动；变更流本次改手动；config 未来加时亦手动）。用具名函数而非无条件 return，
+  //   显式列 type、留可观测性、未来若要恢复某 type 自动派发只需改此一处（codex H4）。
+  //   ⚠️ 部署切换：本项目=单开发者一次性部署（deploy skill 前后端同步上 + bump 缓存串），不存在多用户
+  //     新旧前端长期并存窗口，故未实现 AUTO/CUTOVER/MANUAL 三态状态机 + CLIENT_UPGRADE_REQUIRED
+  //     （方案 §4.6 为多用户平滑切换设计，对单人一次性部署过重）；回滚=改本函数返回值重部署。
+  function isAutoNotifyEnabled(issueType) {
+    // 本期全关（返回 false）。保留 type 形参：未来若要给某 type 恢复自动派发，在此按 type 放行即可。
+    void issueType;
+    return false;
+  }
+
   // 通知派发主入口（端点在事务提交后 await 调用；marker = transition.notifyAfterCommit）。
   async function dispatchSysNotify(issueId, marker) {
     if (!marker) return;
@@ -5542,10 +5617,12 @@ module.exports = (deps) => {
     try {
       const issue = await dbGetAsync('SELECT * FROM sys_issues WHERE id = ?', [issueId]);
       if (!issue) return;
-      // ── ④b-1 bug 流通知改「手动点按钮触发」──：跳过一切自动派发（bug 走 notify-developer/notify-requester 手动端点）。
-      //   ⚠️ 只对 type='bug' 早返回——变更流(feature/improvement) 仍自动派发（其 auto→手动改造另立专用 commit，见 backlog）；
-      //   config 追加时再定。这是本 commit 唯一改变 dispatchSysNotify 行为处，变更流零回归靠此 type 门限精确隔离。
-      if (issue.type === 'bug') return;
+      // ── 交互优化 C2：自动派发总闸（替代原 `if (issue.type === 'bug') return`）──
+      //   全 type 手动化——变更流通知改由详情页通知区手动点按钮触发（同 bug 单）。isAutoNotifyEnabled 现恒 false，
+      //   故此处对所有 type 早返回。保留具名判断而非删 10 个调用点（无发送副作用）。
+      //   ⚠️ codex L2 诚实标注：判断位于 SELECT 之后，故每个调用点仍付出一次只读 issue 查询（非真"空操作"）；
+      //   现每次状态变更后多一次 SELECT，无发送/写库副作用、开销可接受。逐个删调用点（彻底省这次查询）留 backlog。
+      if (!isAutoNotifyEnabled(issue.type)) return;
       const baseUrl = await getSafePlatformBaseUrl();
       switch (marker) {
         case 'notifyAssignedDeveloper':
@@ -5591,6 +5668,56 @@ module.exports = (deps) => {
   const SYS_NOTIFY_REQUESTER_STATUSES = ['待验证', '待上线', '已上线'];
   const SYS_NOTIFY_RELEASE_EXECUTOR_STATUSES = ['待上线'];   // 通知改造 follow-up：仅待上线态（release_assignee 已指定）可通知上线开发
 
+  // ── 交互优化 C2a：变更流(feature/improvement) 手动通知状态白名单（方案 §3.2 矩阵）──────────────
+  //   与 bug 流分开（bug 开发态='处理中'，变更流='开发中'）。channel×type 精确取，后端权威、前端镜像。
+  //   developer：开发中/待验证（指派/改派/打回后开发在干活或待验证回合）；
+  //   creator/requester：待验证/待上线/已上线（开发完成→建单人验收/需求方进展-上线闭环，同 bug creator/requester 口径）。
+  const SYS_NOTIFY_DEV_STATUSES_CHANGE = ['开发中', '待验证'];
+  const SYS_NOTIFY_CREATOR_STATUSES_CHANGE = ['待验证', '待上线', '已上线'];
+  const SYS_NOTIFY_REQUESTER_STATUSES_CHANGE = ['待验证', '待上线', '已上线'];
+  // 按 type + 通道取可发状态白名单（bug 用原常量，变更流用 *_CHANGE；未知 type 返空=一律不可发，默认拒绝）。
+  function sysNotifyStatusesFor(type, channel) {
+    if (type === 'bug') {
+      return { developer: SYS_NOTIFY_DEV_STATUSES, relay: SYS_NOTIFY_RELAY_STATUSES,
+               creator: SYS_NOTIFY_CREATOR_STATUSES, requester: SYS_NOTIFY_REQUESTER_STATUSES }[channel] || [];
+    }
+    if (type === 'feature' || type === 'improvement') {
+      // 变更流无 relay 通道（对接人是 bug path B 专属）——relay 返空=永远拒绝。
+      return { developer: SYS_NOTIFY_DEV_STATUSES_CHANGE, relay: [],
+               creator: SYS_NOTIFY_CREATOR_STATUSES_CHANGE, requester: SYS_NOTIFY_REQUESTER_STATUSES_CHANGE }[channel] || [];
+    }
+    return [];   // 未知 type（含 config 未定）默认拒绝
+  }
+
+  // ── 交互优化 C2a：手动通知统一授权守卫（方案 §3.2 授权表 type×channel）──────────────────────
+  //   返回 null=放行；返回 {status, body}=拒绝（handler 原样 res.status().json()）。
+  //   授权表：
+  //     bug：developer/creator/requester = admin∨对接人白名单；relay = 仅 admin。
+  //     feature/improvement：developer/creator/requester = 仅 admin；relay = 永远拒绝（无对接人角色）。
+  //     未知 type = 全部拒绝（默认拒绝）。
+  //   ⚠️ H3 修正：creator 通道**不含**「主开发本人」——is_primary/assigned_to 禁作授权源（去主次核心）。
+  //   注：self-guard（本人不给自己发）与 relay 收件人白名单复核等通道专属细节仍在各 handler 内单独处理，
+  //   本守卫只统一「type 门限 + 角色授权」这一层。
+  function sysManualNotifyGuard(issue, channel, actor) {
+    const type = issue.type;
+    const isAdmin = actor.role === 'admin';
+    const isLiaison = isSysBugLiaison(actor.id);
+    if (type === 'bug') {
+      if (channel === 'relay') {
+        return isAdmin ? null : { status: 403, body: { error: '仅管理员可通知对接人', code: 'NOT_AUTHORIZED_FOR_NOTIFY' } };
+      }
+      // developer / creator / requester：admin ∨ 对接人
+      return (isAdmin || isLiaison) ? null : { status: 403, body: { error: '仅管理员/对接人可发送该通知', code: 'NOT_AUTHORIZED_FOR_NOTIFY' } };
+    }
+    if (type === 'feature' || type === 'improvement') {
+      if (channel === 'relay') {
+        return { status: 400, body: { error: '变更流无对接人通知', code: 'MANUAL_NOTIFY_CHANNEL_NA' } };
+      }
+      return isAdmin ? null : { status: 403, body: { error: '变更流通知仅管理员可发送', code: 'NOT_AUTHORIZED_FOR_NOTIFY' } };
+    }
+    return { status: 400, body: { error: '该类型暂不支持手动通知', code: 'MANUAL_NOTIFY_TYPE_NA' } };   // 未知 type 默认拒绝
+  }
+
   //   通知开发（逐 dev，通知改造 C3 G9 改造）：带 body.dev_user_id，定位子表活动行 (issue_id,user_id,removed_at IS NULL)，
   //   状态落子表行（notify_status 等 5 列）——主表 notify_*（dev 侧）自本端点起转只读回溯，只服务变更流自动派发（C1b 已回填）。
   router.post('/sys-issues/:id/notify-developer', authenticateToken, requireSysSchemaReady, requireAdminOrBugLiaison, async (req, res) => {
@@ -5601,13 +5728,23 @@ module.exports = (deps) => {
     try {
       const issue = await dbGetAsync('SELECT * FROM sys_issues WHERE id = ?', [id]);
       if (!issue) return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' });
-      if (issue.type !== 'bug') return res.status(400).json({ error: '手动通知仅用于 bug 单', code: 'MANUAL_NOTIFY_BUG_ONLY' });   // 变更流仍自动派发
-      if (!SYS_NOTIFY_DEV_STATUSES.includes(issue.status)) return res.status(409).json({ error: `当前状态（${issue.status}）不可通知开发（仅处理中）`, code: 'STATUS_NOT_NOTIFIABLE' });
+      // C2a：放开变更流手动通知（授权表 §3.2 developer 通道：bug=admin∨对接人 / 变更流=仅 admin）。
+      //   中间件 requireAdminOrBugLiaison 放行 admin∨白名单，但白名单是 bug 专属——变更流单须在此收紧为仅 admin。
+      const devAuthErr = sysManualNotifyGuard(issue, 'developer', sysActor(req));
+      if (devAuthErr) return res.status(devAuthErr.status).json(devAuthErr.body);
+      const devStatuses = sysNotifyStatusesFor(issue.type, 'developer');
+      if (!devStatuses.includes(issue.status)) return res.status(409).json({ error: `当前状态（${issue.status}）不可通知开发`, code: 'STATUS_NOT_NOTIFIABLE' });
+      // 先查目标活动成员行（removed_at IS NULL），确认目标有效——放在自指判断之前（C2a·codex M1）：
+      //   伪造/已移除的自己 ID 应先归类为 DEV_ASSIGNEE_NOT_FOUND，而非被自指守卫误判为 SELF_NOTIFY_FORBIDDEN。
       const devRow = await dbGetAsync(
         `SELECT id, user_id FROM sys_issue_dev_assignees WHERE issue_id = ? AND user_id = ? AND removed_at IS NULL`,
         [id, devUserId]
       );
       if (!devRow) return res.status(409).json({ error: '该开发不在本单指派子表中（可能已被移除）', code: 'DEV_ASSIGNEE_NOT_FOUND' });
+      // C2a 自指守卫：目标确认在册后，本人不能给自己发（仅 developer 通道）。
+      if (Number(devUserId) === Number(sysActor(req).id)) {
+        return res.status(403).json({ error: '不能给自己发送通知', code: 'SELF_NOTIFY_FORBIDDEN' });
+      }
       const dev = await dbGetAsync('SELECT id, display_name, phone, dingtalk_user_id FROM users WHERE id = ?', [devUserId]);
       if (!dev) return res.status(409).json({ error: '开发用户不存在', code: 'DEV_ASSIGNEE_NOT_FOUND' });
       // [ultracode devil MED] bug 打回返工后仍在「处理中」但 return_count>0 → 用返工模板（否则发陈旧「指派/请回填」误导；auto 路径原 return 的 notifyReturnedToDeveloper 被 bug 早返回吞掉，此处手动补偿）。
@@ -5631,7 +5768,9 @@ module.exports = (deps) => {
     try {
       const issue = await dbGetAsync('SELECT * FROM sys_issues WHERE id = ?', [id]);
       if (!issue) return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' });
-      if (issue.type !== 'bug') return res.status(400).json({ error: '手动通知仅用于 bug 单', code: 'MANUAL_NOTIFY_BUG_ONLY' });
+      // C2a：授权走统一守卫（relay 通道：bug=仅 admin / 变更流=永远拒绝 MANUAL_NOTIFY_CHANNEL_NA·无对接人角色）。
+      const relayAuthErr = sysManualNotifyGuard(issue, 'relay', sysActor(req));
+      if (relayAuthErr) return res.status(relayAuthErr.status).json(relayAuthErr.body);
       if (!issue.relay_notified_user_id) return res.status(409).json({ error: '该单未指定通知对接人', code: 'NO_RELAY_USER_TO_NOTIFY' });
       if (!isSysBugLiaison(issue.relay_notified_user_id)) return res.status(409).json({ error: '通知对接人已不在白名单，无法发送', code: 'RELAY_USER_NOT_WHITELISTED' });
       if (!SYS_NOTIFY_RELAY_STATUSES.includes(issue.status)) return res.status(409).json({ error: `当前状态（${issue.status}）不可通知对接人（仅待处理）`, code: 'STATUS_NOT_NOTIFIABLE' });
@@ -5655,19 +5794,18 @@ module.exports = (deps) => {
     try {
       const issue = await dbGetAsync('SELECT * FROM sys_issues WHERE id = ?', [id]);
       if (!issue) return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' });
-      if (issue.type !== 'bug') return res.status(400).json({ error: '手动通知仅用于 bug 单', code: 'MANUAL_NOTIFY_BUG_ONLY' });
       const actor = sysActor(req);
-      const isAdmin = actor.role === 'admin';
-      const isWhitelist = isSysBugLiaison(actor.id);
-      const isPrimaryDev = Number(issue.assigned_to) === actor.id && actor.id > 0;
-      if (!isAdmin && !isWhitelist && !isPrimaryDev) {
-        return res.status(403).json({ error: '仅管理员/对接人/主开发本人可通知建单人', code: 'NOT_AUTHORIZED_FOR_NOTIFY' });
-      }
+      // C2a：授权走统一守卫（授权表 §3.2 creator 通道：bug=admin∨对接人 / 变更流=仅 admin）。
+      //   ⚠️ H3 修正：**删除原「主开发本人（isPrimaryDev）」放权**——is_primary/assigned_to 禁作授权源（去主次核心），
+      //   bug 主开发不再能发建单人通知（用户拍板接受收窄，与去主次一致）。查已读侧 notify-read-status 同步删（写读同源）。
+      const creatorAuthErr = sysManualNotifyGuard(issue, 'creator', actor);
+      if (creatorAuthErr) return res.status(creatorAuthErr.status).json(creatorAuthErr.body);
       // self-guard 优先于状态闸门（M-2 横切例外：无论状态如何，本人恒不实际发送）
       if (Number(actor.id) === Number(issue.created_by)) {
         return res.json({ id, skipped: true, code: 'SELF_NOTIFY_SKIPPED' });
       }
-      if (!SYS_NOTIFY_CREATOR_STATUSES.includes(issue.status)) return res.status(409).json({ error: `当前状态（${issue.status}）不可通知建单人`, code: 'STATUS_NOT_NOTIFIABLE' });
+      const creatorStatuses = sysNotifyStatusesFor(issue.type, 'creator');
+      if (!creatorStatuses.includes(issue.status)) return res.status(409).json({ error: `当前状态（${issue.status}）不可通知建单人`, code: 'STATUS_NOT_NOTIFIABLE' });
       const creator = await dbGetAsync('SELECT id, display_name, phone, dingtalk_user_id FROM users WHERE id = ?', [issue.created_by]);
       if (!creator) return res.status(409).json({ error: '建单人用户不存在', code: 'CREATOR_NOT_FOUND' });
       const baseUrl = await getSafePlatformBaseUrl();
@@ -5808,8 +5946,11 @@ module.exports = (deps) => {
     try {
       const issue = await dbGetAsync('SELECT * FROM sys_issues WHERE id = ?', [id]);
       if (!issue) return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' });
-      if (issue.type !== 'bug') return res.status(400).json({ error: '手动通知仅用于 bug 单', code: 'MANUAL_NOTIFY_BUG_ONLY' });
-      if (!SYS_NOTIFY_REQUESTER_STATUSES.includes(issue.status)) return res.status(409).json({ error: `当前状态（${issue.status}）不可通知报障人`, code: 'STATUS_NOT_NOTIFIABLE' });   // 排终态矛盾卡片（复审）+ F3 收窄（去处理中）
+      // C2a：授权走统一守卫（授权表 §3.2 requester 通道：bug=admin∨对接人 / 变更流=仅 admin·中间件放行白名单但变更流须收紧）。
+      const reqAuthErr = sysManualNotifyGuard(issue, 'requester', sysActor(req));
+      if (reqAuthErr) return res.status(reqAuthErr.status).json(reqAuthErr.body);
+      const reqStatuses = sysNotifyStatusesFor(issue.type, 'requester');
+      if (!reqStatuses.includes(issue.status)) return res.status(409).json({ error: `当前状态（${issue.status}）不可通知报障人`, code: 'STATUS_NOT_NOTIFIABLE' });   // 排终态矛盾卡片（复审）+ F3 收窄（去处理中）
       // M-A：快照非空=已发送过，允许重发（不看当前 phone）；快照空=首发，须当前 phone 非空
       if (!issue.requester_notify_phone_snapshot && !issue.requester_phone) {
         return res.status(409).json({ error: '无报障人手机号，无法通知', code: 'NO_REQUESTER_PHONE' });   // 显式前置拦（避免误落 failed）
@@ -5825,10 +5966,9 @@ module.exports = (deps) => {
   // ── GET /sys-issues/:id/notify-read-status（新，通知改造 C3 G11）：byId(dev/relay/creator)+byPhone(requester) 双寻址 ──
   //   复刻 issue-tracker /api/issues/:id/notify-read-status 范式（server.js:11552，token 重试+已读固化写回）。
   //   dev 定位子表活动行（?dev_user_id=）；relay/creator 走 sys_issues 反规范化列；requester 走收件人快照反查。
-  // [M-1 收口·codex40] 权限闸：原仅 authenticateToken，任意登录用户可探任意 bug 单四侧通知触达/已读时间（越权泄露）。
-  //   **不用 requireAdminOrBugLiaison 中间件**——notify-creator 允许"主开发本人"发送（isPrimaryDev），中间件在
-  //   handler 前无 issue 上下文、无法表达"本单主开发"，会把"能发但非白名单主开发"挡在查已读外（写读不同源）。
-  //   改 in-handler 检查 admin/白名单/主开发本人（与发送侧权限并集对称，见下方 canQueryReadStatus）。
+  // [M-1 收口·codex40] 权限闸：原仅 authenticateToken，任意登录用户可探任意单四侧通知触达/已读时间（越权泄露）。
+  //   in-handler 检查（非中间件）：需按 issue.type 区分授权（bug=admin∨对接人 / 变更流=仅 admin），中间件在
+  //   handler 前无 issue 上下文无法表达 type 差异。与发送侧写读同源（C2a·H3 已一并删除「主开发本人」放权）。
   router.get('/sys-issues/:id/notify-read-status', authenticateToken, requireSysSchemaReady, async (req, res) => {
     const id = parsePositiveId(req.params.id);
     if (!id) return res.status(400).json({ error: '无效的迭代单 ID', code: 'INVALID_SYS_ISSUE_ID' });
@@ -5839,11 +5979,23 @@ module.exports = (deps) => {
     try {
       const issue = await dbGetAsync('SELECT * FROM sys_issues WHERE id = ?', [id]);
       if (!issue) return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' });
-      if (issue.type !== 'bug') return res.status(400).json({ error: '查已读仅用于 bug 单', code: 'MANUAL_NOTIFY_BUG_ONLY' });
-      // [M-1 收口·codex40] 权限：admin / 白名单对接人 / 主开发本人（发送侧权限并集，写读同源）——挡"任意登录用户探任意单"越权。
+      // C2a·codex L1：未知 issue.type 统一先拒（400 MANUAL_NOTIFY_TYPE_NA，与发送端点错误码一致；不再用"变更流"文案误标）。
+      if (!['bug', 'feature', 'improvement'].includes(issue.type)) {
+        return res.status(400).json({ error: '该类型暂不支持通知查已读', code: 'MANUAL_NOTIFY_TYPE_NA' });
+      }
+      // C2a·codex M2：查已读改**逐通道**授权（与发送侧 sysManualNotifyGuard 完全写读同源），非仅单据级 type 判——
+      //   否则 bug 对接人能查 relay 已读，但 relay 发送仅 admin（漏格）。query.type(通道) 映射到 guard 的 channel。
+      //   release_executor 无发送 guard 映射（独立端点·仅 admin），单独按 admin 判。
+      //   ⚠️ H3：guard 内 creator 通道已不含「主开发本人」，故查已读侧天然同步删（写读同源）。
       const rsActor = sysActor(req);
-      const rsCanQuery = rsActor.role === 'admin' || isSysBugLiaison(rsActor.id) || (Number(issue.assigned_to) === rsActor.id && rsActor.id > 0);
-      if (!rsCanQuery) return res.status(403).json({ error: '仅管理员/对接人/主开发本人可查看该单通知已读状态', code: 'NOT_AUTHORIZED_FOR_NOTIFY' });
+      const rsChannelMap = { dev: 'developer', relay: 'relay', creator: 'creator', requester: 'requester' };
+      let rsAuthErr;
+      if (type === 'release_executor') {
+        rsAuthErr = (rsActor.role === 'admin') ? null : { status: 403, body: { error: '仅管理员可查看上线开发通知已读状态', code: 'NOT_AUTHORIZED_FOR_NOTIFY' } };
+      } else {
+        rsAuthErr = sysManualNotifyGuard(issue, rsChannelMap[type], rsActor);
+      }
+      if (rsAuthErr) return res.status(rsAuthErr.status).json(rsAuthErr.body);
 
       let notifyStatus, messageKey, readAt, devRowId = null, devUserId = null;
       if (type === 'dev') {
@@ -6001,6 +6153,8 @@ module.exports = (deps) => {
     assertMemberActionFamilyAllowed,
     isSysCoordinator,
     MEMBER_ACTION_FAMILY_MATRIX,
+    MEMBER_ACTION_FAMILY_TYPE_OVERRIDE,   // C2c·codex115 MED：reassign type 级族门覆盖（变更流排除 D_PRE / bug 保留）
+    memberActionFamiliesFor,               // type 感知取族门（verify [6] 写读同源断言 + 端点同源读此）
     DEV_ASSIGNEES_SELECT_COLS,
   };
 
