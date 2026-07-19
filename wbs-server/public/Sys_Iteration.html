@@ -911,6 +911,13 @@
         // P2 迭代（弹窗式）：切单时清空三块上传弹窗组件残留（防上一单未上传的选择串到本单·revoke objectURL）。
         ['modal-spec', 'modal-delivery', 'modal-screenshot'].forEach(k => siPickerReset(k));
         siOpenId = id;
+        // codex123 末次审 MED-1：切单起手即失效旧缩略图（在替换 siDBody 前 revoke + 递增代际），
+        //   使"切单即失效"而非"渲染成功才失效"——否则 siRenderDrawer 请求挂起/非 403-404 失败时
+        //   旧 objectURL 滞留 siAttThumbUrls 且旧加载任务代际未失效，要等关抽屉/下次成功渲染才释放。
+        //   先关引用这些地址的放大层，避免放大层停在已 revoke 的地址。siRenderDrawer 内的再次 revoke 保留为幂等保险。
+        const _lb = document.getElementById('siImgLightbox');
+        if (_lb && _lb.classList.contains('show')) siCloseLightbox(null);
+        siRevokeAttThumbs();
         document.getElementById('siOverlay').classList.add('open');
         document.getElementById('siDrawer').classList.add('open');
         document.getElementById('siDBody').innerHTML = '<div class="si-empty">加载中…</div>';
@@ -921,6 +928,7 @@
     function siCloseDrawer() {
         siOpenId = null; siDetail = null;
         ['modal-spec', 'modal-delivery', 'modal-screenshot'].forEach(k => siPickerReset(k));   // P2 迭代：关闭清理三块上传弹窗组件资源
+        siRevokeAttThumbs();   // 附件融入：关抽屉 revoke 缩略图 objectURL 防内存泄漏
         document.getElementById('siOverlay').classList.remove('open');
         document.getElementById('siDrawer').classList.remove('open');
     }
@@ -991,6 +999,7 @@
             ${feas}
             ${relCorrRow}
             <div class="u-kv-item full"><label>描述</label><div class="v">${iss.description ? esc(iss.description) : '—'}</div></div>
+            ${siRenderSpecInline(r.data)}
         </div></div>`;
 
         // C1→C7（多开发协作与 commit 留痕重构 v2.9 §13 S1 / §11 前端骨架）：开发成员——全在册 chip（去主次，
@@ -1004,7 +1013,8 @@
         const tl = `<div class="u-detail-section"><h3>演进时间线</h3>${siRenderTimeline(r.data.timeline || [], r.data.attachments || [])}</div>`;
 
         // 附件区
-        const att = siRenderAttachments(r.data);
+        // 附件融入（2026-07-19）：spec 已融入基本信息（info 内），delivery+screenshot 合并为「开发交付」区（Commit 记录后）。
+        const deliverySection = siRenderDeliverySection(r.data);
 
         // 通知区（C4：bug 4 类手动通知 + 三能力；非 bug 仍只读三侧展示）——可见方=admin/白名单对接人/主开发本人
         //   （主开发新增于 C4：其可发 notify-creator + 查自己通知行的已读，故须能看到本区）。
@@ -1026,15 +1036,17 @@
         // C-orch：上线编排独立区块（2026-07-07 样式统一：从底部操作区拆出，置于「基本信息」与「通知」之间）。
         const orchBlock = siRenderReleaseOrchBlock(iss);
 
-        // 抽屉 body 顺序（对齐 Data_Correction 抽屉范式；C1 新增「开发成员」「Commit 记录」插入基本信息之后）：
-        //   血缘 → 操作栏(顶) → 基本信息 → 开发成员 → Commit 记录 → 上线编排 → 通知 → 讨论群 → 时间线 → 附件
+        // 抽屉 body 顺序（对齐 Data_Correction 抽屉范式；附件融入 2026-07-19：spec 融入基本信息、delivery+screenshot
+        //   合并为「开发交付」区置于 Commit 记录后，独立「附件」区已取消）：
+        //   血缘 → 操作栏(顶) → 基本信息(含需求材料) → 开发成员 → Commit 记录 → 开发交付 → 上线编排 → 通知 → 讨论群 → 时间线
+        siRevokeAttThumbs();   // 重渲前先 revoke 上次缩略图 objectURL，防内存泄漏
         document.getElementById('siDBody').innerHTML =
-            lineageHtml + '<div class="u-action-bar" id="siDActions"></div>' + info + devMembers + devCommitsBlock + orchBlock + notify + chat + tl + att;
+            lineageHtml + '<div class="u-action-bar" id="siDActions"></div>' + info + devMembers + devCommitsBlock + deliverySection + orchBlock + notify + chat + tl;
 
         // 操作区（填充 body 顶部的 #siDActions 占位）
         siRenderActions(iss);
-        // P2 迭代（弹窗式）：三块上传组件已移入弹窗（siOpenUploadModal·key='modal-<type>'），详情页不再内联组件，
-        //   故无需在抽屉重渲后恢复预览（弹窗自管生命周期·打开 reset/关闭 reset）。
+        // 附件融入：详情页重渲后异步加载图片缩略图（authFetch 鉴权 blob→objectURL·不能直接 <img src>）。
+        siLoadAttThumbs();
     }
 
     // C-orch：上线编排区块「是否有内容」的单一判据（MED-2 codex 43：抽出供 siRenderActions 兜底 + 本区块共享，
@@ -1256,60 +1268,133 @@
     //   精确索引）；用于按钮可见性/删除按钮显隐，误差后果仅"按钮多显/少显"，无安全含义，真拒绝以后端 403/409 为准。
     const SI_ATT_TERMINAL_STATUSES = ['已上线', '已关闭', '已拒绝', '已作废'];   // 对齐 SYS_TERMINAL_STATUSES（不含"待上线"）
     const SI_ATT_DEV_OR_VERIFY_STATUSES = ['开发中', '处理中', '待验证'];        // 对齐 SYS_DEV∪SYS_VERIFY
-    function siRenderAttachments(data) {
+
+    // ============================================================
+    // 附件融入各模块（2026-07-19 用户诉求）：取消独立「附件」区，spec 融入基本信息、delivery+screenshot 合并为
+    //   「开发交付」区。展示对齐数据协作详情页：图片=缩略图（点击放大）/ 非图片=图标+文件名（点击下载）/ 无=「-」。
+    //   ⚠️ 与数据协作的关键差异：系统迭代附件下载走 siDownloadAtt=authFetch 鉴权 blob（携 Bearer），**不能直接
+    //   <img src=下载URL>（会 401）**——故缩略图走异步：先同步吐占位，再 siLoadAttThumbs() authFetch 拿 blob→
+    //   objectURL 填 img.src。objectURL 存入 siAttThumbUrls，重渲/关抽屉时统一 revoke 防内存泄漏。
+    // ============================================================
+    const SI_IMG_EXTS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'];
+    let siAttThumbUrls = [];   // 本次详情渲染产生的缩略图 objectURL（重渲/关抽屉前 revoke）
+    let siAttThumbGen = 0;     // codex120 MED：渲染代际——重渲/关抽屉递增，旧 async 加载任务据此失效（防泄漏+防给已卸载 img 设 src）
+    function siRevokeAttThumbs() {
+        siAttThumbGen++;   // 使正在跑的旧 siLoadAttThumbs 循环失效（每次 await 后校验代际，不符即退出并自 revoke）
+        for (const u of siAttThumbUrls) { try { URL.revokeObjectURL(u); } catch (_) {} }
+        siAttThumbUrls = [];
+    }
+    function siAttExt(name) {
+        const m = /\.([a-z0-9]+)$/i.exec(String(name || ''));
+        return m ? m[1].toLowerCase() : '';
+    }
+    function siAttIconFor(ext) {
+        if (ext === 'pdf') return '📄';
+        if (['xlsx', 'xls', 'csv'].includes(ext)) return '📊';
+        if (['docx', 'doc'].includes(ext)) return '📝';
+        return '📎';
+    }
+    // 渲染一组附件的缩略图预览（同步吐 HTML；图片项含 data-att-* 供 siLoadAttThumbs 异步填图）。空数组 → 「-」。
+    function siRenderAttGrid(issueId, arr, iss, isOwnerDev, isCoordinator) {
+        if (!arr || !arr.length) return '<div class="si-muted" style="font-size:12px">-</div>';
+        const items = arr.map(a => {
+            const name = a.original_name || (a.file_name ? String(a.file_name).split('/').pop() : '附件');
+            const safeName = siEscapeHtmlAttr(name);
+            const ext = siAttExt(name);
+            const isImg = SI_IMG_EXTS.includes(ext);
+            const canDel = siCanDeleteAtt(iss, a, isOwnerDev, isCoordinator);
+            const delBtn = canDel ? `<button class="si-file-rm" onclick="event.stopPropagation();siDeleteAtt(${issueId},${a.id})" title="删除">&times;</button>` : '';
+            if (isImg) {
+                // 图片：占位 img（无 src），data-att-* 供异步 authFetch 填 blob objectURL + 点击放大
+                return `<div class="si-file-item" title="${safeName}（点击放大）">
+                    <img class="si-clickable-thumb si-att-thumb" alt="${safeName}" data-att-issue="${issueId}" data-att-id="${a.id}" data-att-name="${safeName}">
+                    ${delBtn}
+                </div>`;
+            }
+            // 非图片：图标 + 文件名，点击走 siDownloadAtt 鉴权下载
+            return `<div class="si-file-item" title="${safeName}（点击下载）" style="cursor:pointer" onclick="siDownloadAtt(${issueId},${a.id})">
+                <span class="si-pdf-icon" style="color:#4b5563">${siAttIconFor(ext)}</span>
+                <span class="si-file-name">${esc(name)}</span>
+                ${delBtn}
+            </div>`;
+        }).join('');
+        return `<div class="si-file-preview">${items}</div>`;
+    }
+    // 详情重渲后异步填充图片缩略图（authFetch 拿 blob → objectURL → img.src）+ 绑定点击放大。
+    //   对齐既有 siFilePicker 预览的 lightbox 绑定模式（2947 行区），但图源是服务器附件（鉴权 blob）。
+    // codex120 MED+2LOW 补丁（异步生命周期）：
+    //   ① 代际守卫（MED）：进函数快照 myGen=siAttThumbGen；每次 await 后若 siAttThumbGen !== myGen（关抽屉/重渲已 revoke）
+    //      → 立即退出；若此时已 createObjectURL 则先 revoke 再退（不 push 进已清空的共享数组·杜绝最后一次关闭后的泄漏）。
+    //   ② claim 防并发（LOW-1）：循环内即时 hasAttribute 复检 + 立即 set（静态 NodeList 下同代并发调用不重复处理同一 img）。
+    //   ③ 异常占位（LOW-2）：catch 内也换「预览加载失败」占位（与非 ok 分支一致）·失败 img 仍标 loaded 不重试（避免打不开的附件反复打接口）。
+    async function siLoadAttThumbs() {
+        const myGen = siAttThumbGen;
+        const imgs = document.querySelectorAll('img.si-att-thumb[data-att-id]:not([data-att-loaded])');
+        const failPlaceholder = () => Object.assign(document.createElement('span'), { className: 'si-pdf-icon', textContent: '⚠️', title: '预览加载失败' });
+        for (const img of imgs) {
+            if (img.hasAttribute('data-att-loaded')) continue;   // LOW-1：同代并发调用已认领此 img，跳过
+            img.setAttribute('data-att-loaded', '1');            // 即时认领（claim）
+            const issueId = img.getAttribute('data-att-issue');
+            const attId = img.getAttribute('data-att-id');
+            const cap = img.getAttribute('data-att-name') || '';
+            try {
+                const res = await authFetch('/api/sys-issues/' + issueId + '/attachments/' + attId + '/download');
+                if (siAttThumbGen !== myGen) return;   // MED：本轮已失效（关抽屉/重渲），旧任务整体退出
+                if (!res || !res.ok) { if (img.isConnected) img.replaceWith(failPlaceholder()); continue; }
+                const blob = await res.blob();
+                if (siAttThumbGen !== myGen) return;   // MED：blob 期间失效——尚未 createObjectURL，直接退出
+                const url = URL.createObjectURL(blob);
+                if (siAttThumbGen !== myGen || !img.isConnected) { try { URL.revokeObjectURL(url); } catch (_) {} return; }   // MED：已创建但失效→立即 revoke 再退（不入共享数组）
+                siAttThumbUrls.push(url);
+                img.src = url;
+                img.addEventListener('click', () => siOpenLightbox(url, cap));
+            } catch (_) { if (siAttThumbGen === myGen && img.isConnected) img.replaceWith(failPlaceholder()); /* LOW-2：异常也换占位 */ }
+        }
+    }
+    // 附件权限计算（共享）：isOwnerDev=在册开发∨ / isCoordinator=对接人∪admin。spec/开发交付两处渲染共用。
+    function siAttPerms(data) {
         const iss = data.issue;
-        const all = data.attachments || [];
-        const spec = all.filter(a => a.attachment_type === 'spec');
-        // round_no 遗产②（M-P4）：C3 起唯一 submit 不再绑 round_no（恒 NULL），旧"round_no != null"过滤会让本页
-        //   交付物永久展示为空（真实缺陷，非本次引入）——附件不再按轮次分组/过滤，全部 active 交付物平铺展示
-        //   （后端已按 id 升序=上传时间序返回，前端不再二次排序）。
-        const delivery = all.filter(a => a.attachment_type === 'delivery');
-        const screenshots = all.filter(a => a.attachment_type === 'screenshot');
         const devAssignees = data.dev_assignees || [];
-        // C5（§5.4）：在册 = 当前用户出现在（后端已过滤 removed_at IS NULL 的）dev_assignees 列表——isOwnerDev 保留
-        //   旧名但语义随本次改造升级为"在册"（原仅比对单人 assigned_to，多开发 roster 下会漏判非代表协作成员，
-        //   造成"后端已放行、前端按钮不显示"的写读语义漂移，随附件授权改造一并对齐）。
+        // C5（§5.4）：在册 = 当前用户出现在（后端已过滤 removed_at IS NULL 的）dev_assignees 列表。
         const isOwnerDev = !!(currentUser && devAssignees.some(d => Number(d.user_id) === currentUser.id));
         // 协调人=对接人∪admin（§0），与后端 isSysCoordinator 同构；isSiBugLiaison 已在文件顶部定义（示例发布者/示例对接人白名单）。
         const isCoordinator = isAdmin() || !!(currentUser && iss.type === 'bug' && isSiBugLiaison(currentUser.id));
-
-        function attList(arr, delType) {
-            if (!arr.length) return '<div class="si-muted" style="font-size:12px">无</div>';
-            return arr.map(a => {
-                const canDel = siCanDeleteAtt(iss, a, isOwnerDev, isCoordinator);
-                return `<div class="si-att-item">
-                    <a class="si-att-name" onclick="siDownloadAtt(${iss.id},${a.id})">📎 ${esc(a.original_name || a.file_name)}</a>
-                    <span class="si-att-meta">${a.round_no != null ? '第' + a.round_no + '轮 · ' : ''}${a.uploaded_by_name ? esc(a.uploaded_by_name) : ''}</span>
-                    ${canDel ? `<span class="si-att-del" onclick="siDeleteAtt(${iss.id},${a.id})">删除</span>` : ''}
-                </div>`;
-            }).join('');
-        }
-
-        let html = '<div class="u-detail-section"><h3>附件</h3>';
-        // 需求材料 spec（C5：协调人=对接人∨admin 上传，∉终态）
-        html += `<div style="margin-bottom:10px"><div style="font-size:12px;color:#6b7280;margin-bottom:4px;font-weight:600">需求材料（spec）</div>${attList(spec)}`;
-        if (META_OK && isCoordinator && !SI_ATT_TERMINAL_STATUSES.includes(iss.status)) {
-            // P2 迭代（弹窗式·对齐数据协作 submitDeliveryModal 范式）：详情页只留触发按钮 → 点开弹窗选文件+预览+确认上传。
-            html += `<div style="margin-top:6px"><button class="u-btn-secondary u-btn-sm" onclick="siOpenUploadModal(${iss.id},'spec','需求材料')">＋ 上传需求材料</button></div>`;
-        }
-        html += '</div>';
-        // 交付物 delivery（C5·对抗审 C 回填：在册∨协调人，开发中/处理中/待验证均可传——之前只读展示无上传入口，
-        //   是真实功能缺口：附件区唯一的落库入口只有 siModalSubmit 弹窗内的两阶段 attachment_ids 绑定，而该
-        //   绑定语义随 round_no 退场已失效（见下方拆除说明），意味着后端已放行的 delivery 上传在 C5 之前的前端
-        //   完全没有入口可点。补齐与 spec/screenshot 同构的上传框，不再是"只读展示"）
-        html += `<div style="margin-bottom:10px"><div style="font-size:12px;color:#6b7280;margin-bottom:4px;font-weight:600">交付物（delivery）</div>${attList(delivery)}`;
-        if (META_OK && (isOwnerDev || isCoordinator) && SI_ATT_DEV_OR_VERIFY_STATUSES.includes(iss.status)) {
-            html += `<div style="margin-top:6px"><button class="u-btn-secondary u-btn-sm" onclick="siOpenUploadModal(${iss.id},'delivery','交付物')">＋ 上传交付物</button></div>`;
-        }
-        html += '</div>';
-        // 截图 screenshot（C5：在册∨协调人，开发中/处理中/待验证均可传，原仅"开发本人·开发中"过窄）
-        html += `<div><div style="font-size:12px;color:#6b7280;margin-bottom:4px;font-weight:600">补充截图（screenshot）</div>${attList(screenshots)}`;
-        if (META_OK && (isOwnerDev || isCoordinator) && SI_ATT_DEV_OR_VERIFY_STATUSES.includes(iss.status)) {
-            html += `<div style="margin-top:6px"><button class="u-btn-secondary u-btn-sm" onclick="siOpenUploadModal(${iss.id},'screenshot','补充截图')">＋ 上传截图</button></div>`;
-        }
-        html += '</div>';
-        html += '</div>';
-        return html;
+        return { iss, isOwnerDev, isCoordinator };
+    }
+    // 上传按钮 HTML（弹窗式·对齐数据协作 submitDeliveryModal）。canUpload=false 时不出。
+    // ⚠️ codex123 末次审 LOW-1：label 拼进内联 onclick 的 JS 字符串上下文，此处用 esc（HTML 转义）
+    //   仅因全部调用点的 label 都是硬编码常量（'需求材料'/'交付物'/'截图'）→ 当前安全。
+    //   【约束】label / type 必须为常量，严禁传用户可控/动态值——HTML 实体在事件属性解析后会解码，
+    //   动态 label 里的单引号等会破坏 JS 字符串边界（esc≠JS 字符串转义）。若未来需动态 label，
+    //   改 data 属性 + 统一事件监听。（归入 title 转义 hygiene 统一治理 backlog）
+    function siAttUploadBtn(issueId, type, label, canUpload) {
+        if (!canUpload) return '';
+        return `<button class="u-btn-secondary u-btn-sm" style="margin-top:6px" onclick="siOpenUploadModal(${issueId},'${type}','${esc(label)}')">＋ 上传${esc(label)}</button>`;
+    }
+    // 附件融入（2026-07-19）：需求材料 spec 融入「基本信息」——返回一个 u-kv-item full（缩略图预览 + 上传按钮·无则「-」）。
+    //   权限：协调人（对接人∨admin）上传，∉终态。删除按钮走 siCanDeleteAtt（在 siRenderAttGrid 内判）。
+    function siRenderSpecInline(data) {
+        const { iss, isOwnerDev, isCoordinator } = siAttPerms(data);
+        const spec = (data.attachments || []).filter(a => a.attachment_type === 'spec');
+        const canUpload = META_OK && isCoordinator && !SI_ATT_TERMINAL_STATUSES.includes(iss.status);
+        const grid = siRenderAttGrid(iss.id, spec, iss, isOwnerDev, isCoordinator);
+        return `<div class="u-kv-item full"><label>需求材料</label><div class="v">${grid}${siAttUploadBtn(iss.id, 'spec', '需求材料', canUpload)}</div></div>`;
+    }
+    // 附件融入（2026-07-19）：交付物 delivery + 截图 screenshot 合并为「开发交付」独立区（紧跟 Commit 记录）。
+    //   权限：在册开发∨协调人上传，状态∈开发中/处理中/待验证。两小组各自缩略图预览 + 上传按钮·无则「-」。
+    function siRenderDeliverySection(data) {
+        const { iss, isOwnerDev, isCoordinator } = siAttPerms(data);
+        const all = data.attachments || [];
+        // round_no 遗产②（M-P4）：C3 起唯一 submit 不再绑 round_no（恒 NULL），附件全部 active 平铺展示（后端已按 id 升序返回）。
+        const delivery = all.filter(a => a.attachment_type === 'delivery');
+        const screenshots = all.filter(a => a.attachment_type === 'screenshot');
+        const canUpload = META_OK && (isOwnerDev || isCoordinator) && SI_ATT_DEV_OR_VERIFY_STATUSES.includes(iss.status);
+        const deliveryGrid = siRenderAttGrid(iss.id, delivery, iss, isOwnerDev, isCoordinator);
+        const screenshotGrid = siRenderAttGrid(iss.id, screenshots, iss, isOwnerDev, isCoordinator);
+        return `<div class="u-detail-section"><h3>开发交付</h3><div class="u-kv-grid">
+            <div class="u-kv-item full"><label>交付物</label><div class="v">${deliveryGrid}${siAttUploadBtn(iss.id, 'delivery', '交付物', canUpload)}</div></div>
+            <div class="u-kv-item full"><label>补充截图</label><div class="v">${screenshotGrid}${siAttUploadBtn(iss.id, 'screenshot', '补充截图', canUpload)}</div></div>
+        </div></div>`;
     }
     function siCanDeleteAtt(iss, a, isOwnerDev, isCoordinator) {
         if (!META_OK) return false;
@@ -1370,7 +1455,8 @@
             if (canOperateDev && sendable && !isSelf) {
                 btns += `<button class="u-btn-secondary u-nb-btn" onclick="siNotifyDevSend(${d.user_id})">${d.notify_status === 'sent' ? '重新通知' : '发送通知'}</button>`;
             }
-            if (canQueryRead && d.notify_status === 'sent' && d.notify_message_key) {
+            // 已读态隐藏「查询已读」（用户 2026-07-19：已读了不必再查·此时重发入口=上方「重新通知」按钮·受 sendable 状态门）。
+            if (canQueryRead && d.notify_status === 'sent' && d.notify_message_key && !d.read_at) {
                 btns += `<button class="u-btn-secondary u-nb-btn" onclick="siQueryReadStatus('dev', ${d.user_id})">查询已读</button>`;
             }
             return siNotifyRowHtml(label, d.notify_status, d.read_at, d.notified_at, btns);
@@ -1386,7 +1472,8 @@
         if (canOperateRelay && sendable) {
             btns += `<button class="u-btn-secondary u-nb-btn" onclick="siNotifyRelayClick()">${iss.relay_notify_status === 'sent' ? '重新通知' : '发送通知'}</button>`;
         }
-        if (canQueryRead && iss.relay_notify_status === 'sent' && iss.relay_notify_message_key) {
+        // 已读态隐藏「查询已读」（用户 2026-07-19·同 dev 侧口径）。
+        if (canQueryRead && iss.relay_notify_status === 'sent' && iss.relay_notify_message_key && !iss.relay_read_at) {
             btns += `<button class="u-btn-secondary u-nb-btn" onclick="siQueryReadStatus('relay')">查询已读</button>`;
         }
         return siNotifyRowHtml(label, iss.relay_notify_status, iss.relay_read_at, iss.relay_notified_at, btns);
@@ -1400,7 +1487,8 @@
         if (canOperateCreator && sendable) {
             btns += `<button class="u-btn-secondary u-nb-btn" onclick="siNotifyCreatorClick()">${iss.creator_notify_status === 'sent' ? '重新通知' : '发送通知'}</button>`;
         }
-        if (canQueryRead && iss.creator_notify_status === 'sent' && iss.creator_notify_message_key) {
+        // 已读态隐藏「查询已读」（用户 2026-07-19·同 dev 侧口径）。
+        if (canQueryRead && iss.creator_notify_status === 'sent' && iss.creator_notify_message_key && !iss.creator_read_at) {
             btns += `<button class="u-btn-secondary u-nb-btn" onclick="siQueryReadStatus('creator')">查询已读</button>`;
         }
         return siNotifyRowHtml(label, iss.creator_notify_status, iss.creator_read_at, iss.creator_notified_at, btns);
@@ -1416,7 +1504,8 @@
         if (canOperateReleaseExecutor && sendable) {
             btns += `<button class="u-btn-secondary u-nb-btn" onclick="siNotifyReleaseExecutorClick()">${iss.release_assignee_notify_status === 'sent' ? '重新通知' : '发送通知'}</button>`;
         }
-        if (canQueryRead && iss.release_assignee_notify_status === 'sent' && iss.release_assignee_notify_message_key) {
+        // 已读态隐藏「查询已读」（用户 2026-07-19·同 dev 侧口径）。
+        if (canQueryRead && iss.release_assignee_notify_status === 'sent' && iss.release_assignee_notify_message_key && !iss.release_assignee_read_at) {
             btns += `<button class="u-btn-secondary u-nb-btn" onclick="siQueryReadStatus('release_executor')">查询已读</button>`;
         }
         return siNotifyRowHtml(label, iss.release_assignee_notify_status, iss.release_assignee_read_at, iss.release_assignee_notified_at, btns);
@@ -1446,7 +1535,8 @@
                 extraNote = '<span class="si-muted">无手机号，无法通知</span>';
             }
         }
-        if (canQueryRead && iss.requester_notify_status === 'sent' && iss.requester_notify_message_key && hasSnapshot) {
+        // 已读态隐藏「查询已读」（用户 2026-07-19·同 dev 侧口径）。
+        if (canQueryRead && iss.requester_notify_status === 'sent' && iss.requester_notify_message_key && hasSnapshot && !iss.requester_read_at) {
             btns += `<button class="u-btn-secondary u-nb-btn" onclick="siQueryReadStatus('requester')">查询已读</button>`;
         }
         return siNotifyRowHtml(label, iss.requester_notify_status, iss.requester_read_at, iss.requester_notified_at, btns, extraNote);
@@ -2878,7 +2968,7 @@
     const SI_SPEC_MAX_FILES = 5;
     const SI_SPEC_MAX_SIZE = 20 * 1024 * 1024;  // 单个 ≤20MB（对齐提示 + 后端）
     const SI_SPEC_ALLOWED_EXTS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'pdf', 'xlsx', 'xls', 'docx', 'doc', 'csv', 'txt', 'md'];
-    const SI_IMG_EXTS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'];
+    // SI_IMG_EXTS 已在附件融入区（siRenderAttGrid 上方）声明并复用于此（原此处重复声明，附件融入改造时合并）。
     function siPickerFiles(key) { if (!siFilePickers[key]) siFilePickers[key] = []; return siFilePickers[key]; }
     // 重置（打开/关闭/上传成功时调用；revoke 旧 URL 防泄漏）——实例隔离核心
     function siPickerReset(key) {

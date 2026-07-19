@@ -98,14 +98,16 @@ async function main() {
     // 详情页附件区应只有三个上传按钮（无内联 input）
     const hasInlineInput = await pB.evaluate(() => !!document.getElementById('siPickerInput_drawer-delivery'));
     must(!hasInlineInput, `B1 详情页附件区无内联 input（改弹窗式·drawer-delivery 组件已移入弹窗）`);
+    // 附件融入（2026-07-19）：附件区已取消——需求材料融入基本信息、交付物/截图融入「开发交付」区，故上传按钮
+    //   分散在多个 section。codex123 末次审 LOW-2：断言范围收窄到 #siDBody（详情抽屉体），
+    //   而非整个 document——否则未来页面新增隐藏弹窗/其他模块同名「上传」按钮时，即使抽屉内漏掉入口断言仍假阳性通过。
     const uploadBtns = await pB.evaluate(() => {
-      const secs = [...document.querySelectorAll('.u-detail-section')];
-      const s = secs.find(x => /附件/.test(x.querySelector('h3') ? x.querySelector('h3').textContent : ''));
-      if (!s) return [];
-      return [...s.querySelectorAll('button')].map(b => b.textContent.trim()).filter(t => /上传/.test(t));
+      const body = document.getElementById('siDBody');
+      if (!body) return [];
+      return [...body.querySelectorAll('button')].map(b => b.textContent.trim()).filter(t => /上传/.test(t));
     });
-    must(uploadBtns.some(t => /上传交付物/.test(t)) && uploadBtns.some(t => /上传需求材料/.test(t)) && uploadBtns.some(t => /上传截图/.test(t)),
-      `B1b 详情页含三个上传按钮（需求材料/交付物/截图·实际=${JSON.stringify(uploadBtns)}）`);
+    must(uploadBtns.some(t => /上传交付物/.test(t)) && uploadBtns.some(t => /上传需求材料/.test(t)) && uploadBtns.some(t => /上传补充截图/.test(t)),
+      `B1b 详情页含三个上传按钮（需求材料/交付物/补充截图·实际=${JSON.stringify(uploadBtns)}）`);
     // 点「上传交付物」开弹窗
     await pB.evaluate(() => { const b = [...document.querySelectorAll('button')].find(x => x.textContent.includes('上传交付物')); if (b) b.click(); });
     await pB.waitForTimeout(500);
@@ -149,7 +151,7 @@ async function main() {
     const specRes = await uploadViaModal('上传需求材料', 'modal-spec', f2);
     must(specRes.keyOk, `B6a 点上传需求材料→弹窗含 modal-spec key（防传参错）`);
     must(specRes.status === 200, `B6b spec 弹窗上传→200（实际 ${specRes.status}）`);
-    const shotRes = await uploadViaModal('上传截图', 'modal-screenshot', f3);
+    const shotRes = await uploadViaModal('上传补充截图', 'modal-screenshot', f3);
     must(shotRes.keyOk, `B6c 点上传截图→弹窗含 modal-screenshot key（防传参错）`);
     must(shotRes.status === 200, `B6d screenshot 弹窗上传→200（实际 ${shotRes.status}）`);
     // 查落库 type 正确（spec 归 spec·screenshot 归 screenshot·证明 type 传参没串）
