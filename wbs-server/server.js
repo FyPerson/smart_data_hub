@@ -6709,8 +6709,11 @@ app.get('/api/models', authenticateToken, (req, res) => {
         params.push(`%${owner}%`, `%${owner}%`);
     }
     if (keyword) {
-        sql += " AND (dm.table_name LIKE ? OR dm.table_comment LIKE ?)";
-        params.push(`%${keyword}%`, `%${keyword}%`);
+        // 搜索维度：表名 + 描述 + ODS 系统源表名/源系统（与 /api/models/ods-tables 端点行为对齐，
+        //   消除"选源表能搜 source_table、主列表搜不到"的不一致。DIM/DWD 的 source_table/source_system
+        //   为空，此两条 LIKE 对它们自然不命中，无副作用）
+        sql += " AND (dm.table_name LIKE ? OR dm.table_comment LIKE ? OR dm.source_table LIKE ? OR dm.source_system LIKE ?)";
+        params.push(`%${keyword}%`, `%${keyword}%`, `%${keyword}%`, `%${keyword}%`);
     }
 
     sql += " ORDER BY dm.table_name"; // 默认按表名排序, 方便下拉选择
