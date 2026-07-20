@@ -4947,12 +4947,177 @@ function initAdminTodoPanel() {
     `;
     document.body.appendChild(wrapper);
 
+    // 悬浮球拖动化：恢复上次拖放位置 + 绑定拖动（详见 initAdminTodoFabDrag）
+    initAdminTodoFabDrag();
+
     // 恢复面板展开状态
     if (localStorage.getItem('adminTodoPanelOpen') === '1') {
         document.getElementById('adminTodoPanel').style.display = 'flex';
         document.getElementById('adminTodoFab').classList.add('active');
+        positionAdminTodoPanel();
     }
     loadAdminTodos();
+}
+
+// 悬浮待办球拖动化（2026-07-20）：原固定 right:24/bottom:24 会压住协作单详情抽屉右下角按钮，
+//   改为可拖动 + 位置持久化。区分"点击"（<5px 位移，触发面板开合）与"拖动"（≥5px，仅挪位不开合）。
+const ADMIN_TODO_FAB_DRAG_THRESHOLD = 5;   // px：判定拖动的最小位移
+const ADMIN_TODO_FAB_MARGIN = 8;           // px：贴边时距视口边缘的安全间距
+let _adminTodoFabDragState = null;
+
+function clampAdminTodoFabPos(left, top) {
+    const fab = document.getElementById('adminTodoFab');
+    const w = fab ? fab.offsetWidth : 48;
+    const h = fab ? fab.offsetHeight : 48;
+    const maxLeft = Math.max(ADMIN_TODO_FAB_MARGIN, window.innerWidth - w - ADMIN_TODO_FAB_MARGIN);
+    const maxTop = Math.max(ADMIN_TODO_FAB_MARGIN, window.innerHeight - h - ADMIN_TODO_FAB_MARGIN);
+    return {
+        left: Math.min(Math.max(ADMIN_TODO_FAB_MARGIN, left), maxLeft),
+        top: Math.min(Math.max(ADMIN_TODO_FAB_MARGIN, top), maxTop),
+    };
+}
+
+// 用 left/top 定位覆盖 CSS 的 right/bottom（一旦拖动过就永久走 left/top，right/bottom 置 auto）
+function applyAdminTodoFabPos(left, top) {
+    const fab = document.getElementById('adminTodoFab');
+    if (!fab) return;
+    const p = clampAdminTodoFabPos(left, top);
+    fab.style.left = p.left + 'px';
+    fab.style.top = p.top + 'px';
+    fab.style.right = 'auto';
+    fab.style.bottom = 'auto';
+}
+
+// 幂等清理：无论从 pointerup / pointercancel / lostpointercapture / 捕获失败降级 哪条路径进来都安全，
+//   始终移除 dragging 类 + 清空拖动状态 + 解绑降级用的 window 监听（codex 审 #3 采纳）
+function endAdminTodoFabDrag(commit) {
+    const fab = document.getElementById('adminTodoFab');
+    const st = _adminTodoFabDragState;
+    if (fab) fab.classList.remove('dragging');
+    // 拆掉捕获失败时降级到 window 的临时监听
+    if (st && st._winMove) {
+        window.removeEventListener('pointermove', st._winMove);
+        window.removeEventListener('pointerup', st._winUp);
+        window.removeEventListener('pointercancel', st._winCancel);
+    }
+    if (commit && st && st.moved && fab) {
+        // codex 审 #6 采纳：setItem 用 try/catch 包裹，存储失败只丢持久化不破坏状态机
+        try {
+            const rect = fab.getBoundingClientRect();
+            localStorage.setItem('adminTodoFabPos', JSON.stringify({ left: rect.left, top: rect.top }));
+        } catch (_) { /* 存储被禁用/写入异常：忽略，位置本次仍生效只是不持久化 */ }
+        // codex 审 #1 采纳：改永久布尔为"拖动结束时间戳"，只抑制紧邻拖动的那次合成 click，避免标志悬挂吞掉后续真点击
+        _adminTodoFabDragEndAt = Date.now();
+    }
+    _adminTodoFabDragState = null;
+}
+
+function initAdminTodoFabDrag() {
+    const fab = document.getElementById('adminTodoFab');
+    if (!fab) return;
+
+    // 恢复持久化位置（无则维持 CSS 默认右下角）
+    try {
+        const saved = JSON.parse(localStorage.getItem('adminTodoFabPos') || 'null');
+        if (saved && Number.isFinite(saved.left) && Number.isFinite(saved.top)) {
+            applyAdminTodoFabPos(saved.left, saved.top);
+        }
+    } catch (e) { /* 脏数据忽略，走默认位置 */ }
+
+    fab.addEventListener('pointerdown', (e) => {
+        if (e.button !== undefined && e.button !== 0) return;   // 仅左键/主键
+        if (e.isPrimary === false) return;                       // codex 审 #2 采纳：忽略多指的非主指针
+        if (_adminTodoFabDragState) return;                      // 已有活动拖动：忽略后续指针，防状态被覆盖
+        const rect = fab.getBoundingClientRect();
+        const st = {
+            pointerId: e.pointerId,                              // codex 审 #2：记 pointerId，后续事件校验一致才处理
+            startX: e.clientX,
+            startY: e.clientY,
+            offsetX: e.clientX - rect.left,   // 指针相对 FAB 左上角偏移
+            offsetY: e.clientY - rect.top,
+            moved: false,
+            captured: false,
+        };
+        _adminTodoFabDragState = st;
+        try { fab.setPointerCapture(e.pointerId); st.captured = true; } catch (_) { st.captured = false; }
+        // codex 审 #3 采纳：捕获失败时事件可能不再到达 FAB，降级到 window 监听该 pointerId
+        if (!st.captured) {
+            st._winMove = (ev) => { if (ev.pointerId === st.pointerId) onFabPointerMove(ev); };
+            st._winUp = (ev) => { if (ev.pointerId === st.pointerId) endAdminTodoFabDrag(true); };
+            st._winCancel = (ev) => { if (ev.pointerId === st.pointerId) endAdminTodoFabDrag(false); };
+            window.addEventListener('pointermove', st._winMove);
+            window.addEventListener('pointerup', st._winUp);
+            window.addEventListener('pointercancel', st._winCancel);
+        }
+    });
+
+    function onFabPointerMove(e) {
+        const st = _adminTodoFabDragState;
+        if (!st || e.pointerId !== st.pointerId) return;         // 只处理发起拖动的那个指针
+        const dx = e.clientX - st.startX;
+        const dy = e.clientY - st.startY;
+        if (!st.moved && Math.hypot(dx, dy) < ADMIN_TODO_FAB_DRAG_THRESHOLD) return;  // 未越阈值仍算点击
+        if (!st.moved) { st.moved = true; fab.classList.add('dragging'); }
+        applyAdminTodoFabPos(e.clientX - st.offsetX, e.clientY - st.offsetY);
+        // 面板打开时跟随（保持贴着球）
+        const panel = document.getElementById('adminTodoPanel');
+        if (panel && panel.style.display !== 'none') positionAdminTodoPanel();
+    }
+    fab.addEventListener('pointermove', onFabPointerMove);
+
+    // pointerup=成功结束（commit 位置 + 记抑制时间戳）；pointercancel=中断（不 commit，也不抑制 click）
+    fab.addEventListener('pointerup', (e) => {
+        const st = _adminTodoFabDragState;
+        if (!st || e.pointerId !== st.pointerId) return;
+        endAdminTodoFabDrag(true);
+    });
+    fab.addEventListener('pointercancel', (e) => {
+        const st = _adminTodoFabDragState;
+        if (!st || e.pointerId !== st.pointerId) return;
+        endAdminTodoFabDrag(false);
+    });
+    // codex 审 #3：意外丢失指针捕获也走幂等清理（不 commit）
+    fab.addEventListener('lostpointercapture', () => {
+        if (_adminTodoFabDragState) endAdminTodoFabDrag(false);
+    });
+
+    // 视口缩放：球拖过则拉回可见区；打开的面板每次都重定位（codex 审 #5 采纳：面板重定位移出球条件，
+    //   否则 CSS 默认定位的球缩放后自动移动，已开面板仍留旧 left/top 会脱离球）
+    window.addEventListener('resize', () => {
+        if (fab.style.left) {
+            applyAdminTodoFabPos(parseFloat(fab.style.left), parseFloat(fab.style.top));
+        }
+        const panel = document.getElementById('adminTodoPanel');
+        if (panel && panel.style.display !== 'none') positionAdminTodoPanel();
+    });
+}
+
+// 面板跟随球定位：默认贴球上方、右缘对齐；上方放不下则翻到下方；再 clamp 进视口。
+function positionAdminTodoPanel() {
+    const fab = document.getElementById('adminTodoFab');
+    const panel = document.getElementById('adminTodoPanel');
+    if (!fab || !panel) return;
+    const fabRect = fab.getBoundingClientRect();
+    const gap = 12;
+    // 先让 panel 可测量真实高度
+    panel.style.right = 'auto';
+    panel.style.bottom = 'auto';
+    const pw = panel.offsetWidth || 360;
+    const ph = panel.offsetHeight || 320;
+
+    // 水平：球在右半屏→面板右缘对齐球右缘（向左展开）；球在左半屏→左缘对齐球左缘（向右展开）；再 clamp 进视口
+    const fabCenterX = fabRect.left + fabRect.width / 2;
+    let left = (fabCenterX > window.innerWidth / 2) ? (fabRect.right - pw) : fabRect.left;
+    left = Math.min(Math.max(ADMIN_TODO_FAB_MARGIN, left), Math.max(ADMIN_TODO_FAB_MARGIN, window.innerWidth - pw - ADMIN_TODO_FAB_MARGIN));
+
+    // 垂直：优先放球上方；上方空间不够则放球下方
+    let top = fabRect.top - gap - ph;
+    if (top < ADMIN_TODO_FAB_MARGIN) {
+        const below = fabRect.bottom + gap;
+        top = (below + ph <= window.innerHeight - ADMIN_TODO_FAB_MARGIN) ? below : ADMIN_TODO_FAB_MARGIN;
+    }
+    panel.style.left = left + 'px';
+    panel.style.top = top + 'px';
 }
 
 async function loadAdminTodos() {
@@ -5075,7 +5240,14 @@ async function deleteAdminTodo(id) {
     }
 }
 
+// codex 审 #1 采纳：用"拖动结束时间戳"替代永久布尔——只吞掉紧邻拖动的合成 click，
+//   避免 pointercancel 等不产生 click 的路径把布尔永久置 true、误吞后续真点击
+let _adminTodoFabDragEndAt = 0;
+const ADMIN_TODO_FAB_CLICK_SUPPRESS_MS = 250;   // 合成 click 紧随 pointerup 派发（通常<50ms）；250ms 足够吞它又不误伤紧接的真点击
+
 function toggleAdminTodoPanel() {
+    // 拖动刚结束（紧邻窗口内）浏览器会派发一次合成 click，吞掉它避免"拖完就误开/误关面板"
+    if (Date.now() - _adminTodoFabDragEndAt < ADMIN_TODO_FAB_CLICK_SUPPRESS_MS) return;
     const panel = document.getElementById('adminTodoPanel');
     const fab = document.getElementById('adminTodoFab');
     if (!panel) return;
@@ -5084,6 +5256,7 @@ function toggleAdminTodoPanel() {
     fab.classList.toggle('active', !isOpen);
     localStorage.setItem('adminTodoPanelOpen', isOpen ? '0' : '1');
     if (!isOpen) {
+        positionAdminTodoPanel();   // 跟随球当前位置弹出（球被拖走后不再固定右下角）
         // 聚焦到输入框
         setTimeout(() => document.getElementById('adminTodoInput')?.focus(), 100);
     }

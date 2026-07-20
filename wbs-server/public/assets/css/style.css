@@ -3661,7 +3661,8 @@
     background: #2d3748;
     color: #fff;
     border: none;
-    cursor: pointer;
+    cursor: grab;                      /* 可拖动提示（拖动化后语义从"仅点击"变"可拖可点"） */
+    touch-action: none;                /* 触屏拖动不被浏览器手势（滚动/缩放）抢走 pointer 事件 */
     display: flex;
     align-items: center;
     justify-content: center;
@@ -3675,6 +3676,12 @@
 }
 .admin-todo-fab.active {
     background: #4a5568;
+}
+/* 拖动中：取消 hover 放大 transition（跟手无延迟）+ 光标变抓握态 */
+.admin-todo-fab.dragging {
+    cursor: grabbing;
+    transition: none;
+    transform: none;
 }
 
 .admin-todo-badge {
@@ -3700,7 +3707,8 @@
     bottom: 80px;
     right: 24px;
     width: 360px;
-    max-height: 60vh;
+    max-width: calc(100vw - 16px);   /* codex 审 #4：窄屏不越界（内部 list 已 overflow-y:auto 可滚） */
+    max-height: min(60vh, calc(100vh - 16px));
     background: #fff;
     border-radius: 12px;
     box-shadow: 0 8px 32px rgba(0,0,0,0.16), 0 0 0 1px rgba(0,0,0,0.04);
