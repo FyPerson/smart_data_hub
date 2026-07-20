@@ -2639,7 +2639,7 @@
             fText('related_correction_no', '关联修正单号（选填，BUG 类用）', '', false, '软引用触发本次迭代的数据修正单（OA号/修正单ID），不联动不跳转，仅留痕'),
             { k: null, html: assignModeHtml },
             fCheckbox('needs_feasibility', '需要可行性评估（开发进入后先做可行性评估）', false),
-            fCheckbox('intake_required', '需对接人受理确认（勾选后进「待受理」，先由对接人受理再进开发；不勾直接进开发/可指派）', false),
+            fCheckbox('intake_required', '需对接人受理确认（默认开启·新单先由对接人受理再进开发；取消则直接进开发/可指派）', true),
             { k: null, html: `<div class="u-form-group"><label>需求材料（选填，图片/PDF/Excel/Word/csv/txt/md，单个≤20MB，最多5个）</label>
                 ${siFilePickerHtml('create-spec', '选择文件')}</div>` },
             note('建单仅 admin 可操作。新功能/优化进「待指派」，可直接指派开发；BUG 类可在此直接走 A/B 两种指派路径。')
