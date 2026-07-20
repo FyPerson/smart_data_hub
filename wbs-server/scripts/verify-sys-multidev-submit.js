@@ -386,7 +386,7 @@ async function main() {
   // S5：D_pre/待验证主状态 submit → 409 INVALID_STATUS（族门）
   // ══════════════════════════════════════════════════════════════════════
   {
-    const idPre = await mkIssue('feature', '待评估');
+    const idPre = await mkIssue('feature', '待指派');
     await mkMember(idPre, 5, '开发甲', 'pending');
     let r = await call('POST', `/api/sys-issues/${idPre}/submit`, devTok(5), { mode: 'no_code', no_code_reason: 'x' });
     assert.strictEqual(r.status, 409, `S5：D_PRE 态 submit 应 409，实际 ${r.status}`);

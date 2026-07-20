@@ -118,7 +118,7 @@ async function seedBugToReady(devId = 5, devTok2 = devTok) {
 async function seedChangeToReady(type = 'feature', devId = 5, devTok2 = devTok) {
   let r = await call('POST', '/api/sys-issues', adminTok, { type, title: type + '-mix', system_name: 'BMS', source: '内部' });
   const id = r.body.id;
-  await call('POST', `/api/sys-issues/${id}/schedule`, adminTok, {});
+  // 受理排期改造：schedule 退场——建单直落待指派，直接 assign。
   await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: devId });
   await call('POST', `/api/sys-issues/${id}/estimate`, devTok2, { dev_estimated_at: EST });
   await call('POST', `/api/sys-issues/${id}/submit`, devTok2, { mode: 'no_code', no_code_reason: '交付（占位理由）' });
@@ -147,19 +147,22 @@ async function main() {
   // ═══ [M] meta / 常量层 ═══
   {
     const meta = T.buildMeta();
-    assert.deepStrictEqual(meta.statusLabels.bug, ['待处理', '处理中', '待验证', '待上线', '已上线', '已拒绝', '已作废'], 'bug 状态集 7 态');
-    assert.strictEqual(meta.initialStatusByType.bug, '待处理', 'bug 初始态=待处理');
+    // 受理排期改造 §4.1/§4.3：bug 状态集 7→9 态（加「待受理/待修改」受理门·bug 也走受理门·用户拍板）。
+    assert.deepStrictEqual(meta.statusLabels.bug, ['待受理', '待修改', '待处理', '处理中', '待验证', '待上线', '已上线', '已拒绝', '已作废'], 'bug 状态集 9 态（含受理门）');
+    // 受理排期改造 §9：initialStatusesByType 新形状（bug 受理→待受理·无受理→待处理）。
+    assert.strictEqual(meta.initialStatusesByType.bug.with_intake, '待受理', 'bug 受理模式初始态=待受理');
+    assert.strictEqual(meta.initialStatusesByType.bug.without_intake, '待处理', 'bug 无受理初始态=待处理');
     const bugActions = meta.typeFlows.bug.map(t => t.action).sort();
-    // [v1.6 退场，通知改造 C3b]：set_release_flag/publish/confirm-online-norelease 三条随
-    //   BUG_FLOW_TRANSITIONS 移除（§2.3 [C-1 旧入口替换矩阵]），新增 assign-release-dev/execute-release
-    //   两条上线编排动作——净 14→13 个（移3 加2）。
+    // [v1.6 退场] set_release_flag/publish/confirm-online-norelease 移除，新增 assign-release-dev/execute-release。
+    // 受理排期改造 §4.3：bug 也走受理门 → 加 6 个受理门动作（intake_accept/intake_return/resubmit_intake/edit_in_revision/request_tech_consult/change_intake_mode）+ set_scheduled_start（H2 bug 亦支持）→ 13+7=20 个。
     assert.deepStrictEqual(bugActions,
-      ['accept', 'assign', 'assign-release-dev', 'create', 'derive', 'estimate', 'execute-release', 'issue_reject',
-       'reactivate', 'reassign', 'return', 'submit', 'void'].sort(),
-      `bug 动作集恰好 13 个（v1.6 退场 3 + 新增 2 上线编排 + Commit⑤ derive），实际 ${bugActions.join(',')}`);
+      ['accept', 'assign', 'assign-release-dev', 'change_intake_mode', 'create', 'derive', 'edit_in_revision', 'estimate', 'execute-release',
+       'intake_accept', 'intake_return', 'issue_reject', 'reactivate', 'reassign', 'request_tech_consult', 'resubmit_intake',
+       'return', 'set_scheduled_start', 'submit', 'void'].sort(),
+      `bug 动作集恰好 20 个（原 13 + 受理门 6 + set_scheduled_start），实际 ${bugActions.join(',')}`);
     for (const banned of ['hold', 'resume', 'close', 'reopen', 'feasibility', 'blocked', 'unblock', 'scope_change', 'schedule',
       'set_release_flag', 'publish', 'confirm-online-norelease']) {
-      assert.ok(!bugActions.includes(banned), `bug typeFlows 不应含 ${banned}`);   // v1.6 退场三动作 + ⑤ 后 derive 移出 banned（reopen 仍禁：上线后一律派生非重开）
+      assert.ok(!bugActions.includes(banned), `bug typeFlows 不应含 ${banned}`);   // v1.6 退场三动作 + ⑤ 后 derive 移出 banned（reopen 仍禁：上线后一律派生非重开）；schedule 退场后 bug 亦无
     }
     const assignReleaseDevEntry = meta.typeFlows.bug.find(t => t.action === 'assign-release-dev');
     assert.strictEqual(assignReleaseDevEntry.kind, 'side_effect', 'assign-release-dev 应标 side_effect（不改 status，SIDE_EFFECT_ACTIONS 白名单）');
@@ -173,7 +176,7 @@ async function main() {
     assert.strictEqual(meta.actions.set_release_flag, '填发版信息', 'set_release_flag 标签保留（历史 timeline 渲染）');
     assert.strictEqual(meta.actions['confirm-online-norelease'], '确认上线（不发版）', 'confirm-online-norelease 标签保留');
     assert.ok(meta.actions['assign-release-dev'] && meta.actions['execute-release'], '新增两动作标签存在');
-    ok('meta：bug 状态集 7 态 + 初始态待处理 + 动作集恰好 13（v1.6 退场 set_release_flag/publish/confirm-online-norelease + 新增 assign-release-dev[side_effect]/execute-release[transition,to=已上线] + Commit⑤ derive[from=已上线/side_effect]，仍无 hold/close/reopen/评估三动作/scope_change/schedule）+ 旧标签保留供历史渲染');
+    ok('meta：bug 状态集 9 态（含受理门待受理/待修改）+ 初始态新形状（受理→待受理/无受理→待处理）+ 动作集恰好 20（原 13 + 受理门 6 + set_scheduled_start）+ 仍无 hold/close/reopen/评估三动作/scope_change/schedule + 旧标签保留供历史渲染');
   }
   {
     assert.strictEqual(T.isDevWorkState('bug', '处理中'), true, 'bug 处理中=开发工作态');
@@ -219,9 +222,10 @@ async function main() {
   }
   {
     const r = await call('POST', `/api/sys-issues/${mainId}/schedule`, adminTok, {});
-    assert.strictEqual(r.status, 400, 'bug schedule 应 400');
-    assert.strictEqual(r.body.code, 'INVALID_TRANSITION');
-    ok('前段裁剪：bug 无 schedule 动作 → 400 INVALID_TRANSITION');
+    // 受理排期改造：schedule 端点退场·恒返 409 SCHEDULE_DISABLED（早于 findTransition·比 INVALID_TRANSITION 更友好）。
+    assert.strictEqual(r.status, 409, 'schedule 退场应 409');
+    assert.strictEqual(r.body.code, 'SCHEDULE_DISABLED');
+    ok('schedule 退场：任意 type schedule → 409 SCHEDULE_DISABLED');
   }
   {
     let r = await call('POST', `/api/sys-issues/${mainId}/assign`, devTok, { assigned_to: 5 });
@@ -485,10 +489,11 @@ async function main() {
     assert.strictEqual(r.status, 400); assert.strictEqual(r.body.code, 'REASON_REQUIRED');
     r = await call('POST', `/api/sys-issues/${rejId}/issue-reject`, adminTok, { reason: '非缺陷，操作问题' });
     assert.strictEqual(r.status, 200); assert.strictEqual(await statusOf(rejId), '已拒绝');
-    // reactivate 回 待处理（bug 初始态，非变更流的 待评估）
+    // 受理排期改造 §4.3：bug issue_reject.from 双 from（待受理/待处理）·bug 建单 intake_required=0 落待处理 → 待处理可拒。
+    //   reactivate 动态解析（§9·intake_required=0）→ 回待处理（bug 无受理分支初始态）。
     r = await call('POST', `/api/sys-issues/${rejId}/reactivate`, adminTok, { reason: '复现了' });
     assert.strictEqual(r.status, 200); assert.strictEqual(await statusOf(rejId), '待处理');
-    ok('拒绝/重新激活：待处理 →issue_reject→ 已拒绝（原因必填）→reactivate→ 回「待处理」（bug 初始态分流正确）');
+    ok('拒绝/重新激活：待处理 →issue_reject→ 已拒绝（原因必填）→reactivate→ 回「待处理」（bug intake_required=0 无受理分支）');
     // 处理中不可拒（bug 仅前段可拒）
     const midId = await seedBugToDev(5);
     r = await call('POST', `/api/sys-issues/${midId}/issue-reject`, adminTok, { reason: 'x' });
@@ -533,22 +538,17 @@ async function main() {
     ok('W05 assertDevMember 严格在册：bug submit 非在册开发/admin 均 403（同构于旧 H-1"严格本人"口径）');
   }
 
-  // ═══ [C] 变更流零回归 canary（assign expectedFrom=null 改动）═══
+  // ═══ [C] 变更流零回归 canary（受理排期改造：schedule 退场·建单直落待指派）═══
   {
     let r = await call('POST', '/api/sys-issues', adminTok, { type: 'feature', title: 'canary', system_name: 'BMS', source: '内部' });
     const id = r.body.id;
-    assert.strictEqual(r.body.status, '待评估', 'feature 建单仍落 待评估');
-    // 待评估直接 assign（跳过 schedule）→ 应仍被拒（C3：/assign 重写后改走 assertMainStatusTransition 守卫，
-    //   from 白名单校验仍在但错误码从旧 sysIssueTransition 步骤[1]的 400 INVALID_TRANSITION 统一改为
-    //   守卫既定风格 409 GATE_INVARIANT——§10 API 契约"白名单外组合→409 GATE_INVARIANT"，非回归）。
+    // 受理排期改造 §9：建单 intake_required=0（列未加/未选对接人）→ 落待指派（非旧待评估）。
+    assert.strictEqual(r.body.status, '待指派', 'feature 建单落待指派（受理排期改造·无受理分支）');
+    // 待指派直接 assign → 成功（受理排期改造后 assign.from=待指派·无需 schedule 中转）。
     r = await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5 });
-    assert.strictEqual(r.status, 409, `feature 待评估直接 assign 应 409, got ${r.status}`);
-    assert.strictEqual(r.body.code, 'GATE_INVARIANT');
-    r = await call('POST', `/api/sys-issues/${id}/schedule`, adminTok, {});
-    assert.strictEqual(r.status, 200);
-    r = await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5 });
-    assert.strictEqual(r.status, 200); assert.strictEqual(r.body.status, '开发中');
-    ok('⭐ 变更流 canary：assign expectedFrom 改 null 后，feature 待评估直接指派仍被 from 白名单拒 + 正常路径 待评估→schedule→assign→开发中 零回归');
+    assert.strictEqual(r.status, 200, `feature 待指派 assign 应 200, got ${r.status} ${JSON.stringify(r.body)}`);
+    assert.strictEqual(r.body.status, '开发中', 'assign 待指派→开发中');
+    ok('⭐ 变更流 canary：schedule 退场后·建单落待指派→直接 assign→开发中（新前段状态机零回归）');
   }
 
   console.log(`\n[全部通过] ${passed}/${passed} ✓ 系统迭代 bug 流状态机 + 端点验证通过（Commit ①+②）`);

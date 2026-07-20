@@ -16,10 +16,22 @@
 //   逐条肉眼核对与未来分裂时不致命漏改，成本可控（每族最多 3 个状态字符串））。
 'use strict';
 
-// ── 开发前态（D_PRE）：建单后、进入开发前的态 ──────────
+// ── 受理阶段态（INTAKE）：建单后、进入 D_PRE 前的对接人受理门内态（受理排期改造 §B）──────────
+//   ⚠️ 独立成族，**不并入 D_PRE**（codex 128-H1 设计缺陷闭合）：成员动作族矩阵（MEMBER_ACTION_FAMILY_MATRIX）
+//   对 add/remove/reassign 允许 D_PRE；若把待受理/待修改并入 D_PRE，reassign 等独立端点会在受理阶段被放行
+//   → 对接人/admin 绕过受理直接改派=写宽读窄。解法=INTAKE 独立族，矩阵不含 INTAKE → 受理阶段天然禁成员动作 409。
+//   变更流 + bug 的 INTAKE 态相同（待受理/待修改），两 key 独立誊抄（同族其他常量范式）。
+const SYS_INTAKE_STATUSES = {
+  feature: ['待受理', '待修改'],
+  improvement: ['待受理', '待修改'],
+  bug: ['待受理', '待修改'],
+};
+
+// ── 开发前态（D_PRE）：受理通过后、进入开发前的态 ──────────
+//   受理排期改造：变更流删「待评估/已排期」→ 改「待指派」（受理通过落态）；bug D_PRE 保持「待处理」。
 const SYS_D_PRE_STATUSES = {
-  feature: ['待评估', '已排期', '已暂缓'],
-  improvement: ['待评估', '已排期', '已暂缓'],
+  feature: ['待指派', '已暂缓'],
+  improvement: ['待指派', '已暂缓'],
   bug: ['待处理'],
 };
 
@@ -76,6 +88,7 @@ const SYS_TERMINAL_STATUSES = (() => {
 
 // ── 族名 → 快照 map 的统一索引（isInFamily 用；FAMILY_NAMES 供调用方枚举/校验）──────────
 const FAMILIES = {
+  INTAKE: SYS_INTAKE_STATUSES,
   D_PRE: SYS_D_PRE_STATUSES,
   DEV: SYS_DEV_STATUSES,
   VERIFY: SYS_VERIFY_STATUSES,
@@ -108,10 +121,11 @@ function getFamilyStatuses(issueType, familyName) {
   return map[issueType] || [];
 }
 
-// 反向查询：(issue_type,status) 属于哪个「基础族」（D_PRE/DEV/VERIFY/RELEASE/NONRELEASE_TERMINAL 五者之一，
+// 反向查询：(issue_type,status) 属于哪个「基础族」（INTAKE/D_PRE/DEV/VERIFY/RELEASE/NONRELEASE_TERMINAL 六者之一，
 //   不含派生族 FROZEN/TERMINAL——那两个是并集，任何合法状态本就落在某个基础族里，查"派生族"没有唯一答案）。
 //   查不到（族外/未知 type）→ null（fail-closed，供 assertMainStatusTransition 白名单判断用）。
-const BASE_FAMILY_NAMES = ['D_PRE', 'DEV', 'VERIFY', 'RELEASE', 'NONRELEASE_TERMINAL'];
+//   ⚠️ 受理排期改造 §B：待受理/待修改归 INTAKE（非 null）——成员动作族矩阵不含 INTAKE → 受理阶段成员动作天然 409。
+const BASE_FAMILY_NAMES = ['INTAKE', 'D_PRE', 'DEV', 'VERIFY', 'RELEASE', 'NONRELEASE_TERMINAL'];
 function familyOfStatus(issueType, status) {
   for (const name of BASE_FAMILY_NAMES) {
     if (isInFamily(issueType, status, name)) return name;
@@ -146,6 +160,7 @@ function isW06Allowed(action, issueType, status) {
 }
 
 module.exports = {
+  SYS_INTAKE_STATUSES,
   SYS_D_PRE_STATUSES,
   SYS_DEV_STATUSES,
   SYS_VERIFY_STATUSES,

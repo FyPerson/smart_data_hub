@@ -1,0 +1,320 @@
+// 验证脚本：系统迭代 受理排期改造 C9 — verify 全套「系统性覆盖」
+//   用法：node scripts/verify-sys-intake-schedule-c9.js
+//
+// 定位（方案 §14.2 C9）：C3-C8 各自增量写了专项 verify，本脚本做**系统性收口**——补齐三块，
+//   核心价值 = 补 C3-C8 分散 verify 的真空，不重抄已覆盖的断言（诚实标注重叠段的性质）。
+//
+//   [H] INTAKE→hold 跨状态回归（129-H1·⭐ 当前完全零覆盖·C9 首次覆盖的真空）：
+//       待受理/待修改 hold → 被拒（hold.from 去 INTAKE·§4.2/§B），堵「待受理→暂缓(D_PRE)→加减成员→resume 回
+//       待受理」绕过受理门链的**第一道闸**（hold 本身进不去）。与既有 verify-sys-multidev-members S28c（INTAKE 态
+//       直接成员动作 409）形成双闸——本块验「暂缓侧门」入口断，S28c 验「直接成员动作」断。
+//       ⚠️ 归因用**常量层 + HTTP 行为两层**（codex 145 MED-1）：H-0 直读 transitions 真源锁「hold.from 去 INTAKE /
+//       bug 无 hold」这个 129-H1 具体常量约束，使 H-1/H-2 的 400 不只靠 HTTP、有独立归因（防「另一守卫也返 400
+//       导致归因失真」）。H-3 再用真实 HTTP 路径(intake_return)产生待修改态，证 H-1 拒绝非「UPDATE 夹具不合法」假象。
+//   [M] §11 权限回归矩阵「系统 canary」（真 HTTP·四类用户×四能力单点汇总·定位=权限烟雾测试）：
+//       ⚠️ 诚实声明：矩阵多数格 verify-sys-liaison([P]bug assign/变更流越界) + c3([A]intake/[C]resubmit) +
+//       c5([R]被选技术负责人) 已真 HTTP 逐格验过（含落态/无副作用）。本段**不是重新发现**，而是把分散断言收敛成
+//       矩阵级单点 canary（任何角色划分改动→一处红）；对**唯一新覆盖格**（示例对接人13 变更流 assign→403）单独强化
+//       错误标识 + 无副作用（M-1b·codex 145 MED-3）。
+//   [F] 六族双向集合断言汇总（读后端真源·常量层+引擎层·与 S28c 端点层互补）：
+//       ①根因(INTAKE 态归独立 'INTAKE' 族·该族不在任何成员动作允许族) ②常量层(展开集合不含 INTAKE)
+//       ③引擎层(assertMemberActionFamilyAllowed 抛 409 INVALID_STATUS)。动作集合用**精确契约**枚举（F-0·codex 145
+//       HIGH-1）——不从被测矩阵反射，防「删动作后覆盖自动缩水仍绿」假绿。
+'use strict';
+const assert = require('assert');
+const http = require('http');
+const express = require('express');
+const sqlite3 = require('sqlite3');
+const jwt = require('jsonwebtoken');
+const SF = require('../routes/sys-iteration/status-families');
+
+const SECRET = 'verify-sys-intake-c9-secret';
+const db = new sqlite3.Database(':memory:');
+const run = (sql, params = []) => new Promise((res, rej) => db.run(sql, params, function (e) { e ? rej(e) : res(this); }));
+const all = (sql, params = []) => new Promise((res, rej) => db.all(sql, params, (e, rows) => e ? rej(e) : res(rows)));
+const get = (sql, params = []) => new Promise((res, rej) => db.get(sql, params, (e, row) => e ? rej(e) : res(row)));
+const noop = () => {};
+
+const authenticateToken = (req, res, next) => {
+  const h = req.headers.authorization || '';
+  const tok = h.startsWith('Bearer ') ? h.slice(7) : null;
+  if (!tok) return res.status(401).json({ error: '未登录' });
+  try { req.user = jwt.verify(tok, SECRET); next(); }
+  catch { return res.status(401).json({ error: 'token 无效' }); }
+};
+const requireAdmin = (req, res, next) => (req.user && req.user.role === 'admin') ? next() : res.status(403).json({ error: '需要 admin' });
+
+// 通知桩（矩阵段 request_tech_consult / intake_return 会触发首发·稳定 ok·本脚本只验权限 status 不验通知内容）
+async function mockSendIssueDingtalkRaw(user, title, md) { return { ok: true, message_key: 'stub-c9' }; }
+async function mockGetSafePlatformBaseUrl() { return ''; }
+
+const mod = require('../routes/sys-iteration')({
+  logger: { info: noop, warn: noop, error: noop, debug: noop },
+  db, dbRunAsync: run, dbGetAsync: get, dbAllAsync: all,
+  authenticateToken, requireAdmin,
+  ...require('./_sys-attach-test-deps'),
+  sendIssueDingtalkRaw: mockSendIssueDingtalkRaw,
+  getSafePlatformBaseUrl: mockGetSafePlatformBaseUrl,
+});
+const I = mod._internals;
+const T = I.transitions;
+
+function waitReady() {
+  return new Promise((res, rej) => {
+    let n = 0;
+    const t = setInterval(() => {
+      if (I.SYS_SCHEMA_STATE.ready) { clearInterval(t); res(); }
+      else if (I.SYS_SCHEMA_STATE.error) { clearInterval(t); rej(new Error(I.SYS_SCHEMA_STATE.error)); }
+      else if (++n > 500) { clearInterval(t); rej(new Error('readiness 超时')); }
+    }, 10);
+  });
+}
+
+// id 对齐生产语义：1=admin / 5,6=普通开发 / 13=示例对接人(受理人 SYS_INTAKE_LIAISON) / 7=示例发布者(技术负责人 SYS_TECH_LEAD·亦 bug 对接人·非受理人)
+const adminTok = jwt.sign({ id: 1, username: 'admin', display_name: '管理员', role: 'admin' }, SECRET);
+const devTok = jwt.sign({ id: 5, username: 'dev', display_name: '开发王', role: 'user' }, SECRET);
+const techLeadTok = jwt.sign({ id: 7, username: 'shenjun', display_name: '示例发布者', role: 'publisher' }, SECRET);   // 技术负责人（非受理人）
+const liaisonTok = jwt.sign({ id: 13, username: 'wangtaotao', display_name: '示例对接人', role: 'user' }, SECRET);   // 受理人
+
+let server, port;
+function call(method, p, tok, body) {
+  return new Promise((resolve, reject) => {
+    const data = body ? JSON.stringify(body) : null;
+    const req = http.request({ host: '127.0.0.1', port, path: p, method, headers: {
+      'Authorization': 'Bearer ' + tok, 'Content-Type': 'application/json',
+      ...(data ? { 'Content-Length': Buffer.byteLength(data) } : {})
+    }}, (r) => {
+      let b = '';
+      r.on('data', c => b += c);
+      r.on('end', () => {
+        // codex 145 LOW-2：JSON 解析失败转 reject（附状态码+响应片段），不让截断/HTML 响应形成静默未捕获异常
+        try { resolve({ status: r.statusCode, body: b ? JSON.parse(b) : null }); }
+        catch (e) { reject(new Error(`响应体 JSON 解析失败 (HTTP ${r.statusCode}) ${method} ${p}: ${b.slice(0, 200)}`)); }
+      });
+    });
+    req.on('error', reject); if (data) req.write(data); req.end();
+  });
+}
+
+let passed = 0;
+const ok = (m) => { passed++; console.log('  ✓ ' + m); };
+
+// 建单（admin·恒 intake_required=0 默认态）→ 直接 UPDATE 播种到目标 status/intake_required/created_by（同 c3 夹具惯例）。
+//   ⚠️ 待受理态无公开 HTTP 建单路径（建单端点恒传 intake_required=0·选对接人 UI 属 C7-8·白名单写值属后续），
+//   故 INTAKE 态只能 UPDATE 播种——这是 c3-c8 既定夹具范式。夹具有效性由 H-0 常量层归因 + H-3 真实路径锚兜底。
+async function seed(type, { status, ir = 0, createdBy = null } = {}) {
+  const r = await call('POST', '/api/sys-issues', adminTok, { type, title: `${type}单`, system_name: 'BMS', source: '内部' });
+  assert.strictEqual(r.status, 201, `建 ${type} 单 201, got ${r.status} ${JSON.stringify(r.body)}`);
+  const id = r.body.id;
+  const sets = ['status = ?', 'intake_required = ?'];
+  const params = [status, ir];
+  if (createdBy !== null) { sets.push('created_by = ?'); params.push(createdBy); }
+  await run(`UPDATE sys_issues SET ${sets.join(', ')} WHERE id = ?`, [...params, id]);
+  return id;
+}
+
+const TYPES = ['feature', 'improvement', 'bug'];
+const INTAKE_STATES = ['待受理', '待修改'];
+// 成员动作精确契约（codex 145 HIGH-1）：固定集合·不从被测矩阵反射·删/增动作须显式改此处 → 覆盖不随实现缩水。
+const EXPECTED_MEMBER_ACTIONS = ['add', 'commit', 'excuse', 'reassign', 'remove', 'supersede'];
+
+async function main() {
+  mod.initSchema();
+  await waitReady();
+  await run(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT, phone TEXT, dingtalk_user_id TEXT)`);
+  await run(`INSERT INTO users (id, username, display_name, role, phone) VALUES
+    (1,'admin','管理员','admin','13800000001'),(5,'dev','开发王','user','13800000005'),(6,'dev2','开发李','user','13800000006'),
+    (7,'shenjun','示例发布者','publisher','13800000007'),(13,'wangtaotao','示例对接人','user','13800000013'),(99,'other','建单人乙','user','13800000099')`);
+  const app = express();
+  app.use(express.json());
+  app.use('/api', mod.router);
+  await new Promise(res => { server = app.listen(0, '127.0.0.1', res); });
+  port = server.address().port;
+  ok('readiness ready + HTTP harness 起服务（受理人 13 示例对接人 / 技术负责人 7 示例发布者 / 建单人乙 99）');
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // [H] INTAKE→hold 跨状态回归（129-H1·⭐ C9 首次覆盖的真空·常量层归因 + HTTP 行为两层）
+  // ═══════════════════════════════════════════════════════════════════════════
+  {
+    // (H-0) 常量层归因锚（codex 145 MED-1）：直读 transitions 真源锁 129-H1 的具体常量约束，
+    //   让 H-1/H-2 的 400 有独立于 HTTP/夹具的归因来源——防「另一守卫也返 400」把归因悄悄替换掉。
+    for (const type of ['feature', 'improvement']) {
+      assert.ok(T.findTransition(type, 'hold', '待指派'),
+        `${type} 待指派 findTransition('hold') 应存在（hold 对该 type 可用·H-canary 常量侧证据）`);
+      for (const st of INTAKE_STATES) {
+        assert.ok(!T.findTransition(type, 'hold', st),
+          `${type} ${st} findTransition('hold') 应无匹配（hold.from 去 INTAKE·129-H1 常量层归因）`);
+      }
+    }
+    assert.ok(!T.transitionsForType('bug').some(x => x.action === 'hold'),
+      "bug transitionsForType 不含任何 action='hold' 条目（§2.2 有意省略·H-2 归因锚：bug 是「根本无 hold」非「态不匹配」）");
+    ok("[H-0] 常量层归因：feature/improvement hold.from 有待指派、无待受理/待修改（129-H1 收窄）+ bug 无 hold 条目（§2.2）——H-1/H-2 的 400 有常量层独立归因");
+
+    // (H-canary) HTTP 侧证 hold 对「有 hold 的 type + 白名单态」正常可用（与 H-0 常量侧互印）。
+    for (const type of ['feature', 'improvement']) {
+      const id = await seed(type, { status: '待指派', ir: 0 });
+      const r = await call('POST', `/api/sys-issues/${id}/hold`, adminTok, { reason: '正常暂缓（canary）' });
+      assert.strictEqual(r.status, 200, `canary：${type} 待指派 hold 应 200, got ${r.status} ${JSON.stringify(r.body)}`);
+      assert.strictEqual(r.body.status, '已暂缓', `canary：${type} 待指派 hold → 已暂缓`);
+    }
+    ok('[H-canary] feature/improvement 待指派 hold → 200 已暂缓（HTTP 侧证 hold 对白名单态可用·与 H-0 常量侧互印）');
+
+    // (H-1) feature/improvement：hold 存在但 from 去 INTAKE → 待受理/待修改 hold → 400 INVALID_TRANSITION + 态不变
+    for (const type of ['feature', 'improvement']) {
+      for (const st of INTAKE_STATES) {
+        const id = await seed(type, { status: st, ir: 1 });
+        const r = await call('POST', `/api/sys-issues/${id}/hold`, adminTok, { reason: '尝试受理阶段暂缓' });
+        assert.strictEqual(r.status, 400, `${type} ${st} hold 应 400（hold.from 去 INTAKE）, got ${r.status} ${JSON.stringify(r.body)}`);
+        assert.strictEqual(r.body.code, 'INVALID_TRANSITION', `${type} ${st} hold 400 code=INVALID_TRANSITION`);
+        const row = await get('SELECT status FROM sys_issues WHERE id=?', [id]);
+        assert.strictEqual(row.status, st, `${type} ${st} hold 被拒后态不变（未进 D_PRE·暂缓侧门入口断）`);
+      }
+    }
+    ok('[H-1] feature/improvement × 待受理/待修改 hold → 400 INVALID_TRANSITION + 态不变（hold.from 去 INTAKE·堵暂缓侧门·态未进 D_PRE）');
+
+    // (H-2) bug：本无 hold（§2.2）→ 待受理/待修改 hold 同样 400 + 态不变（codex 145 LOW-1：补态不变·与 H-1 对齐）
+    for (const st of INTAKE_STATES) {
+      const id = await seed('bug', { status: st, ir: 1 });
+      const r = await call('POST', `/api/sys-issues/${id}/hold`, adminTok, { reason: '尝试暂缓' });
+      assert.strictEqual(r.status, 400, `bug ${st} hold 应 400（bug 无 hold·§2.2）, got ${r.status} ${JSON.stringify(r.body)}`);
+      assert.strictEqual(r.body.code, 'INVALID_TRANSITION', `bug ${st} hold 400 code=INVALID_TRANSITION`);
+      const row = await get('SELECT status FROM sys_issues WHERE id=?', [id]);
+      assert.strictEqual(row.status, st, `bug ${st} hold 被拒后态不变`);
+    }
+    ok('[H-2] bug × 待受理/待修改 hold → 400 INVALID_TRANSITION + 态不变（bug 无 hold·§2.2·与 H-1 归因区分：由 H-0 锚定「无 hold 条目」非「态不匹配」）');
+
+    // (H-3) 夹具有效性锚（codex 145 MED-2）：待修改态用真实 HTTP 路径产生（seed 待受理 → intake_return），
+    //   证 H-1 待修改 hold 拒绝不是「UPDATE 夹具不合法致端点提前 400」的假象。
+    const realId = await seed('feature', { status: '待受理', ir: 1 });
+    let rr = await call('POST', `/api/sys-issues/${realId}/intake-return`, liaisonTok, { reason: '退改后验 hold' });
+    assert.strictEqual(rr.status, 200, `真实 intake_return → 200, got ${rr.status} ${JSON.stringify(rr.body)}`);
+    assert.strictEqual(rr.body.status, '待修改', '真实 intake_return 产生待修改态');
+    rr = await call('POST', `/api/sys-issues/${realId}/hold`, adminTok, { reason: '尝试暂缓' });
+    assert.strictEqual(rr.status, 400, '真实路径待修改态 hold → 400（非 UPDATE 夹具假象）');
+    assert.strictEqual(rr.body.code, 'INVALID_TRANSITION', '真实待修改 hold 400 INVALID_TRANSITION');
+    const realRow = await get('SELECT status FROM sys_issues WHERE id=?', [realId]);
+    assert.strictEqual(realRow.status, '待修改', '真实待修改 hold 被拒后态不变');
+    ok('[H-3] 夹具有效性锚：真实 HTTP 路径(intake_return)产生的待修改态 hold → 400 + 态不变（证 H-1 拒绝非 UPDATE 夹具不合法假象）');
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // [M] §11 权限矩阵「系统 canary」（真 HTTP·四类用户 × 四能力·权限烟雾测试）
+  // ═══════════════════════════════════════════════════════════════════════════
+  {
+    // 四能力：每次新种对应态单（避免跨格状态污染），调真 HTTP 端点，返回 status。
+    const cap = {
+      bugAssign: async (tok) => (await call('POST', `/api/sys-issues/${await seed('bug', { status: '待处理' })}/assign`, tok, { assigned_to: 6 })).status,
+      featAssign: async (tok) => (await call('POST', `/api/sys-issues/${await seed('feature', { status: '待指派' })}/assign`, tok, { assigned_to: 6 })).status,
+      intakeAccept: async (tok) => (await call('POST', `/api/sys-issues/${await seed('feature', { status: '待受理', ir: 1 })}/intake-accept`, tok, {})).status,
+      resubmitOther: async (tok) => (await call('POST', `/api/sys-issues/${await seed('feature', { status: '待修改', ir: 1, createdBy: 99 })}/resubmit-intake`, tok, {})).status,
+    };
+    // §11 期望矩阵（真相=各端点权限实现·非方案文字）
+    const MATRIX = [
+      { who: 'admin(1)',    tok: adminTok,    exp: { bugAssign: 200, featAssign: 200, intakeAccept: 200, resubmitOther: 200 } },
+      { who: '示例发布者(7)',     tok: techLeadTok, exp: { bugAssign: 200, featAssign: 403, intakeAccept: 403, resubmitOther: 403 } },
+      { who: '示例对接人(13)',  tok: liaisonTok,  exp: { bugAssign: 200, featAssign: 403, intakeAccept: 200, resubmitOther: 403 } },
+      { who: 'dev(5)',      tok: devTok,      exp: { bugAssign: 403, featAssign: 403, intakeAccept: 403, resubmitOther: 403 } },
+    ];
+    for (const row of MATRIX) {
+      for (const capKey of Object.keys(cap)) {
+        const got = await cap[capKey](row.tok);
+        assert.strictEqual(got, row.exp[capKey],
+          `§11 矩阵：${row.who} 执行 ${capKey} 期望 ${row.exp[capKey]}，实得 ${got}`);
+      }
+    }
+    ok('[M-1] §11 矩阵系统 canary：admin/示例发布者7/王13/dev5 × bugAssign/featAssign/intakeAccept/resubmitOther 全 16 格状态码与期望一致（角色划分漂移单点报警·详格落态验在 liaison/c3/c5）');
+
+    // (M-1b) 唯一新覆盖格强化（codex 145 MED-3 + 复审 MED）：示例对接人13 变更流 assign→403 是本段唯一新增格。
+    //   ⚠️ 断言**精确授权错误码**（NOT_AUTHORIZED_FOR_TRANSITION·引擎 [3] roleGuard 层）而非任意非空 code——
+    //   证 403 确来自角色授权分支，非某个也带 code 的无关校验（复审 MED：任意 code 归因偏弱）。
+    //   副作用只比对**主状态 + 负责人字段**（status/assigned_to·防拒绝前部分写入）；完整副作用（timeline/
+    //   成员事件/assigned_at 等）详验在 verify-sys-liaison·此处不重复（M 段定位=权限烟雾 canary·避免过度归因）。
+    {
+      const featId = await seed('feature', { status: '待指派' });
+      const before = await get('SELECT status, assigned_to FROM sys_issues WHERE id=?', [featId]);
+      const r = await call('POST', `/api/sys-issues/${featId}/assign`, liaisonTok, { assigned_to: 6 });
+      assert.strictEqual(r.status, 403, `示例对接人13 变更流 assign → 403, got ${r.status} ${JSON.stringify(r.body)}`);
+      assert.strictEqual(r.body && r.body.code, 'NOT_AUTHORIZED_FOR_TRANSITION',
+        '403 精确授权码 NOT_AUTHORIZED_FOR_TRANSITION（引擎 [3] roleGuard 层·证是授权分支拒非无关校验）');
+      const after = await get('SELECT status, assigned_to FROM sys_issues WHERE id=?', [featId]);
+      assert.strictEqual(after.status, before.status, '拒绝后主状态不变（无部分写入）');
+      assert.strictEqual(after.assigned_to, before.assigned_to, '拒绝后 assigned_to 不变（无部分写入）');
+      ok('[M-1b] 唯一新增格强化：示例对接人13 变更流 assign → 403 code=NOT_AUTHORIZED_FOR_TRANSITION（精确授权码）+ 主状态/负责人字段不变（完整副作用详验在 liaison）');
+    }
+
+    // (M-2) 被选技术负责人白名单（tech_lead_id 白名单·与操作者无关·c5[R] 已验·此处汇总为矩阵 canary）
+    {
+      const seedIntake = () => seed('feature', { status: '待受理', ir: 1 });
+      let r = await call('POST', `/api/sys-issues/${await seedIntake()}/request-tech-consult`, liaisonTok, { tech_lead_id: 7 });
+      assert.strictEqual(r.status, 200, `选示例发布者7 为技术负责人 → 200, got ${r.status} ${JSON.stringify(r.body)}`);
+      for (const badId of [1, 13, 5]) {
+        r = await call('POST', `/api/sys-issues/${await seedIntake()}/request-tech-consult`, liaisonTok, { tech_lead_id: badId });
+        assert.strictEqual(r.status, 400, `选非白名单 id=${badId} 为技术负责人 → 400（仅示例发布者7 可被选）, got ${r.status} ${JSON.stringify(r.body)}`);
+      }
+      ok('[M-2] 被选技术负责人白名单 canary：仅示例发布者7 可被选(200)·admin1/王13/dev5 被选→400（tech_lead_id 白名单·与操作者无关）');
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // [F] 六族双向集合断言汇总（读后端真源·常量层+引擎层·与 S28c 端点层 409 互补）
+  // ═══════════════════════════════════════════════════════════════════════════
+  {
+    // (F-0) 动作集合精确契约（codex 145 HIGH-1）：断言矩阵键精确等于固定集合，不从被测矩阵反射——
+    //   删/增动作会在此立即红，强制显式更新本系统性测试，防「覆盖随实现缩水仍绿」假绿。
+    const actualActions = Object.keys(I.MEMBER_ACTION_FAMILY_MATRIX).slice().sort();
+    assert.deepStrictEqual(actualActions, EXPECTED_MEMBER_ACTIONS,
+      `成员动作矩阵键须精确 = [${EXPECTED_MEMBER_ACTIONS.join(',')}]（删/增动作须显式改本测试·防覆盖缩水假绿），实得 [${actualActions.join(',')}]`);
+    ok(`[F-0] 动作集合精确契约：MEMBER_ACTION_FAMILY_MATRIX 键 === [${EXPECTED_MEMBER_ACTIONS.join('/')}]（固定集合·下面 F-1~F-3 基于它遍历·防反射缩水假绿）`);
+
+    // (F-1) 根因（status-families.js:19-28/127）：待受理/待修改 归**独立 'INTAKE' 族**（非并入 D_PRE·128-H1），
+    //   且 'INTAKE' 不在任何成员动作允许族里 → assertMemberActionFamilyAllowed 的 !allowedFamilies.includes('INTAKE')
+    //   命中 → 受理阶段成员动作天然 409。两条一起锁死根因（族归属 + 族名排除），防未来把 INTAKE 误加进某族允许集。
+    for (const type of TYPES) {
+      for (const st of INTAKE_STATES) {
+        assert.strictEqual(SF.familyOfStatus(type, st), 'INTAKE',
+          `${type} 的 INTAKE 态「${st}」应归独立 'INTAKE' 族（非 D_PRE·128-H1），实得 ${SF.familyOfStatus(type, st)}`);
+      }
+    }
+    for (const act of EXPECTED_MEMBER_ACTIONS) {
+      for (const type of TYPES) {
+        assert.ok(!(I.memberActionFamiliesFor(act, type) || []).includes('INTAKE'),
+          `成员动作「${act}」(${type}) 允许族不应含 'INTAKE'（否则受理阶段被放行·绕过受理门）`);
+      }
+    }
+    ok("[F-1] 根因：待受理/待修改 × 三 type 归独立 'INTAKE' 族（非 D_PRE·128-H1）+ 'INTAKE' 不在任何成员动作允许族（→ 受理阶段成员动作天然 409）");
+
+    // (F-2) 常量层：全部成员动作族（固定集合）× 三 type 经 memberActionFamiliesFor 展开为状态集合，均不含待受理/待修改。
+    for (const act of EXPECTED_MEMBER_ACTIONS) {
+      for (const type of TYPES) {
+        const fams = I.memberActionFamiliesFor(act, type) || [];
+        const statuses = fams.flatMap(f => SF.getFamilyStatuses(type, f));
+        for (const st of INTAKE_STATES) {
+          assert.ok(!statuses.includes(st),
+            `成员动作「${act}」(${type}) 展开状态集合不应含 INTAKE 态「${st}」，实得 [${statuses.join(',')}]`);
+        }
+      }
+    }
+    ok(`[F-2] 常量层：${EXPECTED_MEMBER_ACTIONS.length} 族成员动作(${EXPECTED_MEMBER_ACTIONS.join('/')}) × 三 type 展开集合均不含待受理/待修改（含 INTAKE 被塞入其他允许族也会红）`);
+
+    // (F-3) 引擎层：assertMemberActionFamilyAllowed 对 INTAKE 态直调 → 抛 409 INVALID_STATUS（引擎判定函数层·非重跑 S28c 端点）
+    let engineChecks = 0;
+    for (const act of EXPECTED_MEMBER_ACTIONS) {
+      for (const type of TYPES) {
+        for (const st of INTAKE_STATES) {
+          assert.throws(
+            () => I.assertMemberActionFamilyAllowed(act, type, st),
+            (e) => e && e.httpStatus === 409 && e.code === 'INVALID_STATUS',
+            `assertMemberActionFamilyAllowed('${act}','${type}','${st}') 应抛 409 INVALID_STATUS`);
+          engineChecks++;
+        }
+      }
+    }
+    ok(`[F-3] 引擎层：assertMemberActionFamilyAllowed 对 INTAKE 态全 ${engineChecks} 组(${EXPECTED_MEMBER_ACTIONS.length}族×3type×2态) 抛 409 INVALID_STATUS（引擎判定函数层·与 S28c 端点层 409 互补形成纵深）`);
+  }
+
+  server.close();
+  db.close();   // codex 145 LOW-2：显式关 sqlite·不依赖 process 退出兜底
+  console.log(`\n✅ verify-sys-intake-schedule-c9 全部通过：${passed} 组断言`);
+}
+
+main().catch(e => { console.error('❌ verify-sys-intake-schedule-c9 失败:', e && (e.stack || e.message || e)); if (server) server.close(); try { db.close(); } catch (_) {} process.exit(1); });

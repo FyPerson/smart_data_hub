@@ -46,11 +46,15 @@ let passed = 0;
 const ok = (msg) => { passed++; console.log(`  ✓ ${msg}`); };
 
 // 直接 INSERT 一个变更流单（指定 status/assigned_to，跳过端点，专测 transition）
-async function seedIssue({ status = '待评估', assigned_to = null, type = 'feature', dev_estimated_at = null } = {}) {
+//   受理排期改造：默认前段态由「待评估」改「待受理」（新前段·intake_accept 引擎测起点）。
+async function seedIssue({ status = '待受理', assigned_to = null, type = 'feature', dev_estimated_at = null, intake_required = null } = {}) {
+  // 受理排期改造 C3（codex MED-1 连带修）：受理态（待受理/待修改）结构上恒 intake_required=1（引擎受理门不变量要求）——
+  //   夹具不显式传时按 status 自动派生（待受理/待修改→1·其余→0），保持 fixture 与不变量一致（旧夹具默认 0 会被新不变量拒）。
+  const ir = intake_required !== null ? intake_required : ((status === '待受理' || status === '待修改') ? 1 : 0);
   const r = await run(
-    `INSERT INTO sys_issues (type, status, title, system_name, source, created_by, created_by_name, assigned_to, assigned_to_name, dev_estimated_at)
-     VALUES (?, ?, 't', 'BMS', '内部', 1, 'admin', ?, ?, ?)`,
-    [type, status, assigned_to, assigned_to ? '开发王' : null, dev_estimated_at]
+    `INSERT INTO sys_issues (type, status, title, system_name, source, created_by, created_by_name, assigned_to, assigned_to_name, dev_estimated_at, intake_required)
+     VALUES (?, ?, 't', 'BMS', '内部', 1, 'admin', ?, ?, ?, ?)`,
+    [type, status, assigned_to, assigned_to ? '开发王' : null, dev_estimated_at, ir]
   );
   return r.lastID;
 }
@@ -81,34 +85,60 @@ async function main() {
   await waitReady();
   ok('readiness ready=true（真实 initSchema）');
 
-  // [1] 流转合法性：待评估 → assign（assign 需「已排期」前置）应拒
+  // 受理排期改造：schedule 退场·引擎白盒测的具名边改用 intake_accept（待受理→待指派·仍走 sysIssueTransition）。
+  // [1] 流转合法性：待受理 → assign（assign 需「待指派」前置·受理门未过不能直派）应拒
   {
-    const id = await seedIssue({ status: '待评估' });
+    const id = await seedIssue({ status: '待受理' });
     await assert.rejects(
-      I.sysIssueTransition(id, 'assign', '待评估', ADMIN, { assigned_to: DEV.id, assigned_to_name: DEV.name }),
+      I.sysIssueTransition(id, 'assign', '待受理', ADMIN, { assigned_to: DEV.id, assigned_to_name: DEV.name }),
       e => e instanceof I.SysTransitionError && e.code === 'INVALID_TRANSITION',
-      '待评估态 assign 应 INVALID_TRANSITION');
-    ok('流转合法性：feature 待评估态执行 assign（需已排期前置）被拒 INVALID_TRANSITION');
+      '待受理态 assign 应 INVALID_TRANSITION');
+    ok('流转合法性：feature 待受理态执行 assign（需待指派前置·受理门未过）被拒 INVALID_TRANSITION');
   }
 
-  // [2] expectedFrom 比对：实际「已排期」但传 expectedFrom='待评估' 应 409
+  // [2] expectedFrom 比对：实际「待受理」但传 expectedFrom='待修改' 应拒（陈旧前置态）
   {
-    const id = await seedIssue({ status: '已排期' });
+    const id = await seedIssue({ status: '待受理' });
     await assert.rejects(
-      I.sysIssueTransition(id, 'schedule', '待评估', ADMIN, {}),
+      I.sysIssueTransition(id, 'intake_accept', '待修改', ADMIN, {}),
       e => e instanceof I.SysTransitionError && (e.code === 'CONCURRENT_STATE_CHANGE' || e.code === 'INVALID_TRANSITION'),
       'expectedFrom 不匹配应拒');
-    ok('expectedFrom 比对：实际已排期 + 传 expectedFrom=待评估 → 拒（陈旧前置态）');
+    ok('expectedFrom 比对：实际待受理 + 传 expectedFrom=待修改 → 拒（陈旧前置态）');
   }
 
-  // [3] 权限：schedule roleGuard=admin，非 admin（开发）执行应 403
+  // [3] 权限：intake_accept roleGuard=intake_liaison∨admin，非受理人（开发）执行应 403
   {
-    const id = await seedIssue({ status: '待评估' });
+    const id = await seedIssue({ status: '待受理' });
     await assert.rejects(
-      I.sysIssueTransition(id, 'schedule', '待评估', DEV, {}),
+      I.sysIssueTransition(id, 'intake_accept', '待受理', DEV, {}),
       e => e instanceof I.SysTransitionError && e.code === 'NOT_AUTHORIZED_FOR_TRANSITION',
-      'schedule 非 admin 应 403');
-    ok('权限 roleGuard：schedule（admin 动作）由开发执行 → 403 NOT_AUTHORIZED_FOR_TRANSITION');
+      'intake_accept 非受理人/admin 应 403');
+    ok('权限 roleGuard：intake_accept（受理人/admin 动作）由开发执行 → 403 NOT_AUTHORIZED_FOR_TRANSITION');
+  }
+
+  // [3b] 受理排期改造 codex131-H1：roleGuard='creator_or_admin'（resubmit_intake）——建单人∨admin·引擎按事务内 row.created_by 校验
+  {
+    // 待修改单·created_by=DEV(5)。resubmit_intake：待修改→待受理（INTAKE 族内·无 roster 门）
+    // 待修改态 intake_required=1（受理排期改造 C3 codex MED-1 连带修：受理门不变量在权限校验前·夹具须一致否则先撞 409）
+    const mk = async (createdBy) => (await run(
+      `INSERT INTO sys_issues (type, status, title, system_name, source, created_by, created_by_name, intake_required)
+       VALUES ('feature', '待修改', 't', 'BMS', '内部', ?, ?, 1)`,
+      [createdBy, createdBy === 1 ? 'admin' : '开发王'])).lastID;
+    // ① 非 admin 非 creator（DEV2=6·单 created_by=5）→ 403
+    const idA = await mk(DEV.id);
+    await assert.rejects(
+      I.sysIssueTransition(idA, 'resubmit_intake', '待修改', DEV2, {}),
+      e => e instanceof I.SysTransitionError && e.code === 'NOT_AUTHORIZED_FOR_TRANSITION',
+      'resubmit_intake 非建单人非 admin 应 403');
+    // ② 建单人本人（DEV=5·单 created_by=5）→ 200 待受理
+    const idB = await mk(DEV.id);
+    const rB = await I.sysIssueTransition(idB, 'resubmit_intake', '待修改', DEV, {});
+    assert.strictEqual(rB.toStatus, '待受理', 'resubmit_intake 建单人本人 → 待受理');
+    // ③ admin（非建单人·单 created_by=5）→ 200（admin 全能）
+    const idC = await mk(DEV.id);
+    const rC = await I.sysIssueTransition(idC, 'resubmit_intake', '待修改', ADMIN, {});
+    assert.strictEqual(rC.toStatus, '待受理', 'resubmit_intake admin（非建单人）→ 待受理');
+    ok('权限 roleGuard creator_or_admin（codex131-H1）：resubmit_intake 非建单人非 admin→403 / 建单人本人→200 / admin→200（引擎按事务内 row.created_by 校验）');
   }
 
   // [C3 退场] [4] RC-M5：指派时不给 assigned_to → 进开发中态被不变量拦（无开发负责人）
@@ -117,16 +147,13 @@ async function main() {
   //   在 HTTP 层强制（缺 assigned_to → 400 ASSIGN_TARGET_REQUIRED，见 verify-sys-dev-assignee-transition.js），
   //   非本函数职责，随退场一并移除，不在本文件补白盒替代（白盒直调该 action 本身已是测试死代码）。
 
-  // [5] 正向链路：待评估 → schedule → 已排期 → assign → 开发中（带 assigned_to）
+  // [5] 正向链路：待受理 → intake_accept → 待指派 → assign(快进) → 开发中（带 assigned_to）
   let mainId;
   {
-    mainId = await seedIssue({ status: '待评估' });
-    let r = await I.sysIssueTransition(mainId, 'schedule', '待评估', ADMIN, { priority: 'P1', deadline: '2026-07-01' });
-    assert.strictEqual(r.toStatus, '已排期', 'schedule → 已排期');
-    assert.strictEqual(await statusOf(mainId), '已排期');
-    const after = await rowOf(mainId);
-    assert.strictEqual(after.priority, 'P1', 'schedule 改 priority=P1');
-    assert.ok(after.priority_reviewed_at, 'schedule 盖 priority_reviewed_at');
+    mainId = await seedIssue({ status: '待受理' });
+    let r = await I.sysIssueTransition(mainId, 'intake_accept', '待受理', ADMIN, {});
+    assert.strictEqual(r.toStatus, '待指派', 'intake_accept 待受理 → 待指派');
+    assert.strictEqual(await statusOf(mainId), '待指派');
 
     // [C3] assign 不再走 sysIssueTransition（见上方 [4] 退场说明），改直接 SQL 快进（fastForwardAssign）
     await fastForwardAssign(mainId);
@@ -134,45 +161,11 @@ async function main() {
     const afterAssign = await rowOf(mainId);
     assert.strictEqual(Number(afterAssign.assigned_to), DEV.id, 'assigned_to 写入');
     assert.ok(afterAssign.assigned_at, 'assigned_at 盖时间');
-    ok('正向链路：待评估 →schedule→ 已排期（priority/reviewed_at）→assign(快进)→ 开发中（assigned_to/at）');
+    ok('正向链路：待受理 →intake_accept→ 待指派 →assign(快进)→ 开发中（assigned_to/at）');
   }
 
-  // [5b] codex 14 M-2：schedule deadline 校验（非法格式/非法日期 → 400 INVALID_DEADLINE）
-  {
-    const id = await seedIssue({ status: '待评估' });
-    await assert.rejects(
-      I.sysIssueTransition(id, 'schedule', '待评估', ADMIN, { deadline: '随便写' }),
-      e => e instanceof I.SysTransitionError && e.code === 'INVALID_DEADLINE',
-      'schedule 非法 deadline 格式应 400');
-    await assert.rejects(
-      I.sysIssueTransition(id, 'schedule', '待评估', ADMIN, { deadline: '2026-13-45' }),
-      e => e instanceof I.SysTransitionError && e.code === 'INVALID_DEADLINE',
-      'schedule 格式对但非法日期应 400');
-    // 合法 deadline 放行
-    const r = await I.sysIssueTransition(id, 'schedule', '待评估', ADMIN, { deadline: '2026-07-15' });
-    assert.strictEqual(r.toStatus, '已排期', '合法 deadline schedule → 已排期');
-    const after = await rowOf(id);
-    assert.strictEqual(after.deadline, '2026-07-15', 'deadline 规范化入库');
-    ok('M-2：schedule deadline 校验——「随便写」/「2026-13-45」→ 400 INVALID_DEADLINE，合法「2026-07-15」放行入库');
-
-    // codex 14b M-1：纯空格 deadline = 可选未填，放行（不报 400）
-    const id2 = await seedIssue({ status: '待评估' });
-    const r2 = await I.sysIssueTransition(id2, 'schedule', '待评估', ADMIN, { deadline: '   ' });
-    assert.strictEqual(r2.toStatus, '已排期', '纯空格 deadline 应放行 → 已排期');
-    assert.strictEqual((await rowOf(id2)).deadline, null, '纯空格 deadline 入库为 NULL（未填）');
-    ok('M-1(复)：schedule 纯空格 deadline「   」→ 放行（trim 后判空=可选未填，不误报 400）');
-
-    // 闰年边界：2024-02-29 合法放行 / 2026-02-29 非法 400
-    const id3 = await seedIssue({ status: '待评估' });
-    const r3 = await I.sysIssueTransition(id3, 'schedule', '待评估', ADMIN, { deadline: '2024-02-29' });
-    assert.strictEqual(r3.toStatus, '已排期', '闰年 2024-02-29 应放行');
-    const id4 = await seedIssue({ status: '待评估' });
-    await assert.rejects(
-      I.sysIssueTransition(id4, 'schedule', '待评估', ADMIN, { deadline: '2026-02-29' }),
-      e => e instanceof I.SysTransitionError && e.code === 'INVALID_DEADLINE',
-      '非闰年 2026-02-29 应 400');
-    ok('M-2 闰年边界：2024-02-29 放行 / 2026-02-29 → 400 INVALID_DEADLINE（new Date 回比对挡非法日期）');
-  }
+  // [5b] 受理排期改造：schedule 的 deadline/priority 校验专测已退场（schedule 动作删·priority/deadline 改由建单填 + 待修改态 edit_in_revision 承接·§7.3）。
+  //   deadline 格式校验（normalizeDeadline）逻辑本身在建单端点仍生效，其单元反例由 verify-sys-schema.js/建单 verify 覆盖，不在本引擎白盒测。
 
   // [C3 退场] [6]/[7]/[7b] 旧 submit 闸门（ESTIMATE_REQUIRED/SUBMIT_SUMMARY_REQUIRED/ownerGuard 严格本人 H-1）
   //   均属旧 I.sysIssueTransition(...,'submit',...) switch-case 内部逻辑，随该 case 删除一并退场（index.js:
@@ -222,28 +215,28 @@ async function main() {
 
   // [10] 双 WHERE 并发：事务外先改 status，再用旧 expectedFrom transition → 409
   {
-    const id = await seedIssue({ status: '待评估' });
-    // 模拟并发：先把 status 改成 已排期（绕过 transition）
-    await run("UPDATE sys_issues SET status='已排期' WHERE id=?", [id]);
-    // 此时用 expectedFrom='待评估' 调 schedule → expectedFrom 比对先拦（409 或 INVALID_TRANSITION）
+    const id = await seedIssue({ status: '待受理' });
+    // 模拟并发：先把 status 改成 待指派（绕过 transition·模拟已被 intake_accept）
+    await run("UPDATE sys_issues SET status='待指派' WHERE id=?", [id]);
+    // 此时用 expectedFrom='待受理' 调 intake_accept → expectedFrom 比对先拦（409 或 INVALID_TRANSITION）
     await assert.rejects(
-      I.sysIssueTransition(id, 'schedule', '待评估', ADMIN, {}),
+      I.sysIssueTransition(id, 'intake_accept', '待受理', ADMIN, {}),
       e => e instanceof I.SysTransitionError && (e.code === 'CONCURRENT_STATE_CHANGE' || e.code === 'INVALID_TRANSITION'),
       '并发改状态后旧 expectedFrom 应拒');
     ok('双 WHERE 并发守卫：status 被并发改后，旧 expectedFrom 的 transition 被拒（409/INVALID_TRANSITION）');
   }
 
-  // [11] timeline 写入正确（mainId 链路：schedule/return 仍走 sysIssueTransition，有 timeline；
+  // [11] timeline 写入正确（mainId 链路：intake_accept/return 仍走 sysIssueTransition，有 timeline；
   //   assign/submit 本轮改直接 SQL 快进，不经真实端点，故不写 timeline——真实 assign/submit 的 timeline/
   //   dev_events 落库分别由 verify-sys-dev-assignee-transition.js / verify-sys-multidev-submit.js 覆盖）
   {
     const tl = await timelineOf(mainId);
     const events = tl.map(t => t.event_type);
-    assert.ok(events.includes('status_change'), 'schedule 写 status_change');
+    assert.ok(events.includes('status_change'), 'intake_accept 写 status_change');
     assert.ok(events.includes('return'), 'return 写 return');
-    const scheduleEv = tl.find(t => t.action_code === 'schedule');
-    assert.ok(scheduleEv && scheduleEv.from_status === '待评估' && scheduleEv.to_status === '已排期', 'schedule timeline from/to 正确');
-    ok(`timeline 写入：schedule(status_change/schedule) + return 各 1 条，from/to/action_code 正确（共 ${tl.length} 条；assign/submit 为快进 fixture 不写 timeline，见上方 [C3 退场] 说明）`);
+    const intakeEv = tl.find(t => t.action_code === 'intake_accept');
+    assert.ok(intakeEv && intakeEv.from_status === '待受理' && intakeEv.to_status === '待指派', 'intake_accept timeline from/to 正确');
+    ok(`timeline 写入：intake_accept(status_change/intake_accept) + return 各 1 条，from/to/action_code 正确（共 ${tl.length} 条；assign/submit 为快进 fixture 不写 timeline，见上方 [C3 退场] 说明）`);
   }
 
   // [12] reassign 路径（不走 transition，但验 05-M2：reassign 不增 return_count）—— 直接测 transitions 常量层

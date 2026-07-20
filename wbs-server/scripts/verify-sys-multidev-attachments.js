@@ -294,12 +294,12 @@ async function main() {
     assert.strictEqual(r.status, 200, `DEV∪VERIFY窗口：待验证态在册上传 screenshot 应 200，实际 ${r.status} ${JSON.stringify(r.body)}`);
     ok('[C5] DEV∪VERIFY 上传窗口：待验证（VERIFY 族）在册开发可传 screenshot → 200（§5.4 拓宽，原 isDevWorkState 仅放 DEV 会 409）');
 
-    const idPre = await mkIssue('feature', '待评估');
+    const idPre = await mkIssue('feature', '待指派');
     await mkMember(idPre, 5, '开发甲', 'pending');
     const r2 = await upload(ATT(idPre), devTok(5), { attachment_type: 'delivery' }, 'j.png');
     assert.strictEqual(r2.status, 409, `DEV∪VERIFY窗口：D_PRE 态上传应仍 409，实际 ${r2.status} ${JSON.stringify(r2.body)}`);
     assert.strictEqual(r2.body.code, 'INVALID_STATE_FOR_ATTACHMENT');
-    ok('DEV∪VERIFY 上传窗口：待评估（D_PRE 族）在册开发上传 delivery → 仍 409（未越界拓宽，只加 VERIFY 不加 D_PRE）');
+    ok('DEV∪VERIFY 上传窗口：待指派（D_PRE 族）在册开发上传 delivery → 仍 409（未越界拓宽，只加 VERIFY 不加 D_PRE）');
   }
 
   // ══════════════════════════════════════════════════════════════════════

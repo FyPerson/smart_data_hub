@@ -13,7 +13,7 @@ const express = require('express');
 const sqlite3 = require('sqlite3');
 const jwt = require('jsonwebtoken');
 const { runProbes } = require('./lib/sys-multidev-probes');
-const { assertMainStatusTransition } = require('../routes/sys-iteration/status-transition-guard');
+const { assertMainStatusTransition, MainStatusGuardError } = require('../routes/sys-iteration/status-transition-guard');
 
 const SECRET = 'verify-sys-multidev-members-secret';
 const db = new sqlite3.Database(':memory:');
@@ -290,7 +290,7 @@ async function main() {
   //   仅作非 submit 场景准备，reopen/estimate 本身走真实路由）
   // ══════════════════════════════════════════════════════════════════════
   {
-    const id = await mkIssue('feature', '待评估');   // seed 占位态，随后 SQL 快进到已关闭（非 submit 行为，场景准备用途合规）
+    const id = await mkIssue('feature', '待指派');   // seed 占位态，随后 SQL 快进到已关闭（非 submit 行为，场景准备用途合规）
     const daId = await mkMember(id, 5, '开发甲', 'no_code');   // 已完成态成员（模拟原周期已提交）
     await run(`UPDATE sys_issues SET status='已关闭', assigned_to=5, assigned_to_name='开发甲', assigned_at=datetime('now','localtime'),
                accepted_at='2026-07-01 10:00', closed_at='2026-07-02 10:00', dev_estimated_at='2026-06-25 10:00' WHERE id=?`, [id]);
@@ -497,7 +497,7 @@ async function main() {
   // S11：excuse 非 SYS_DEV → 409
   // ══════════════════════════════════════════════════════════════════════
   {
-    const id = await mkIssue('feature', '待评估');   // D_PRE
+    const id = await mkIssue('feature', '待指派');   // D_PRE
     const daId = await mkMember(id, 5, '开发甲', 'pending');
     const r = await call('POST', `/api/sys-issues/${id}/dev-assignees/${daId}/excuse`, adminTok, { reason: '测试' });
     assert.strictEqual(r.status, 409, `S11：D_PRE 态 excuse 应 409，实际 ${r.status} ${JSON.stringify(r.body)}`);
@@ -581,12 +581,12 @@ async function main() {
   // S15：D_PRE 加/移人 → 允许；主状态不动；移最后一名允许
   // ══════════════════════════════════════════════════════════════════════
   {
-    const id = await mkIssue('feature', '待评估');
+    const id = await mkIssue('feature', '待指派');
     let r = await call('POST', `/api/sys-issues/${id}/dev-assignees`, adminTok, { user_ids: [5, 6] });
     assert.strictEqual(r.status, 200, `S15：D_PRE 加人应 200，实际 ${r.status} ${JSON.stringify(r.body)}`);
     assert.strictEqual(r.body.added_dev_assignee_ids.length, 2, 'S15：2 人均成功加入');
     let row = await issueRow(id);
-    assert.strictEqual(row.status, '待评估', 'S15：加人后主状态不动（D_PRE 矩阵"预指派"）');
+    assert.strictEqual(row.status, '待指派', 'S15：加人后主状态不动（D_PRE 矩阵"预指派"）');
 
     const members = await activeMembers(id);
     for (const m of members) {
@@ -594,7 +594,7 @@ async function main() {
       assert.strictEqual(r.status, 200, `S15：D_PRE 移人应 200（含最后一名），实际 ${r.status} ${JSON.stringify(r.body)}`);
     }
     row = await issueRow(id);
-    assert.strictEqual(row.status, '待评估', 'S15：移空后主状态仍不动');
+    assert.strictEqual(row.status, '待指派', 'S15：移空后主状态仍不动');
     assert.strictEqual(row.assigned_to, null, 'S15：移空后 assigned_to=NULL（选举④零在册分支）');
     const remaining = await activeMembers(id);
     assert.strictEqual(remaining.length, 0, 'S15：D_PRE 可移到零在册（无 LAST_ASSIGNEE 限制）');
@@ -621,7 +621,7 @@ async function main() {
   // S22：代表选举——remove 现代表→确定性补位；零在册→NULL
   // ══════════════════════════════════════════════════════════════════════
   {
-    const id = await mkIssue('feature', '待评估');
+    const id = await mkIssue('feature', '待指派');
     let r = await call('POST', `/api/sys-issues/${id}/dev-assignees`, adminTok, { user_ids: [5, 6] });
     assert.strictEqual(r.status, 200);
     let row = await issueRow(id);
@@ -650,7 +650,7 @@ async function main() {
   // S24：re-add——曾 removed 用户新实例 pending；uq 索引防双在册
   // ══════════════════════════════════════════════════════════════════════
   {
-    const id = await mkIssue('feature', '待评估');
+    const id = await mkIssue('feature', '待指派');
     let r = await call('POST', `/api/sys-issues/${id}/dev-assignees`, adminTok, { user_ids: [5] });
     const firstDaId = r.body.added_dev_assignee_ids[0];
     r = await call('DELETE', `/api/sys-issues/${id}/dev-assignees/${firstDaId}`, adminTok, { reason: '先移除测试 re-add' });
@@ -690,6 +690,43 @@ async function main() {
     assert.strictEqual(threw.httpStatus, 400, 'S28：HTTP 状态应为 400（请求破坏门禁不变量）');
     assert.strictEqual(threw.code, 'GATE_INVARIANT', 'S28：错误码 GATE_INVARIANT');
     ok('S28：assertMainStatusTransition 直调——进 SYS_DEV 零在册（CREATE routeKind）→ 400 GATE_INVARIANT');
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // S28b：受理排期改造 guard 直调——create/reactivate/change_intake_mode 动态目标不被误拒（codex131-M2 + create 契约）
+  // ══════════════════════════════════════════════════════════════════════
+  {
+    // ① create dynamicTarget=initial_status：null→待受理(INTAKE) / null→待指派(D_PRE) 均放行
+    assert.doesNotThrow(() => assertMainStatusTransition({ routeKind: 'CREATE', action: 'create', actionKind: null, issueType: 'feature', before: null, after: '待受理' }), 'S28b①：create→待受理(INTAKE) 放行');
+    assert.doesNotThrow(() => assertMainStatusTransition({ routeKind: 'CREATE', action: 'create', actionKind: null, issueType: 'feature', before: null, after: '待指派' }), 'S28b①：create→待指派(D_PRE) 放行');
+    // ② reactivate dynamicTarget=initial_status：已拒绝→待指派(intake=0 分支) 放行·→非初始态拒
+    assert.doesNotThrow(() => assertMainStatusTransition({ routeKind: 'ADMIN_TRANSITION', action: 'reactivate', actionKind: null, issueType: 'feature', before: '已拒绝', after: '待指派' }), 'S28b②：reactivate 已拒绝→待指派 放行');
+    // codex132-L2：负向用例加谓词（证明确以 guard 不变量错误拒·非任意异常放水）
+    const guard409 = (e) => e instanceof MainStatusGuardError && e.httpStatus === 409 && e.code === 'GATE_INVARIANT';
+    assert.throws(() => assertMainStatusTransition({ routeKind: 'ADMIN_TRANSITION', action: 'reactivate', actionKind: null, issueType: 'feature', before: '已拒绝', after: '开发中' }), guard409, 'S28b②：reactivate→开发中(非初始态) 拒(409 GATE_INVARIANT)');
+    // ③ change_intake_mode dynamicTarget=intake_mode（codex131-M2 修·不被误拒为旁路）：待指派↔待受理/待修改 前段态放行·非前段态拒
+    assert.doesNotThrow(() => assertMainStatusTransition({ routeKind: 'ADMIN_TRANSITION', action: 'change_intake_mode', actionKind: null, issueType: 'feature', before: '待指派', after: '待受理' }), 'S28b③：change_intake_mode 待指派→待受理 放行(不误拒旁路)');
+    assert.doesNotThrow(() => assertMainStatusTransition({ routeKind: 'ADMIN_TRANSITION', action: 'change_intake_mode', actionKind: null, issueType: 'bug', before: '待受理', after: '待处理' }), 'S28b③：bug change_intake_mode 待受理→待处理 放行');
+    assert.throws(() => assertMainStatusTransition({ routeKind: 'ADMIN_TRANSITION', action: 'change_intake_mode', actionKind: null, issueType: 'feature', before: '待指派', after: '开发中' }), guard409, 'S28b③：change_intake_mode→开发中(非前段态) 拒(409 GATE_INVARIANT)');
+    ok('S28b：guard 动态目标（codex131-M2）——create/reactivate initial_status + change_intake_mode intake_mode 前段态放行·非法目标拒（不误判旁路）');
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // S28c：受理排期改造 §B——INTAKE 族成员动作天然 409（矩阵不含 INTAKE·codex131 关注点2）
+  // ══════════════════════════════════════════════════════════════════════
+  {
+    // 待受理/待修改（INTAKE 族）·五类成员动作全应被 assertMemberActionFamilyAllowed 拒（INVALID_STATUS 409）
+    for (const st of ['待受理', '待修改']) {
+      for (const act of ['add', 'remove', 'reassign', 'excuse', 'commit']) {
+        assert.throws(() => I.assertMemberActionFamilyAllowed(act, 'feature', st),
+          e => e && e.httpStatus === 409 && e.code === 'INVALID_STATUS',
+          `S28c：INTAKE 态「${st}」成员动作「${act}」应 409 INVALID_STATUS（矩阵不含 INTAKE）`);
+        assert.throws(() => I.assertMemberActionFamilyAllowed(act, 'bug', st),
+          e => e && e.httpStatus === 409 && e.code === 'INVALID_STATUS',
+          `S28c：bug INTAKE 态「${st}」成员动作「${act}」应 409`);
+      }
+    }
+    ok('S28c：INTAKE 族（待受理/待修改）× 五类成员动作 × feature/bug 全 409 INVALID_STATUS（§B 受理阶段天然禁改派/加减成员·写宽读窄防护）');
   }
 
   // ══════════════════════════════════════════════════════════════════════
@@ -830,7 +867,7 @@ async function main() {
   // ══════════════════════════════════════════════════════════════════════
   // S33（C2c·codex 115 MED 回归）：reassign type 感知族门直调断言——证明「变更流去 D_PRE 不误伤 bug 待处理改派」
   //   assertMemberActionFamilyAllowed 直调（不 seed 整单），逐 (type,status) 验放行/拒绝：
-  //   · 变更流 D_PRE(已排期/待评估/已暂缓) reassign → 拒（去主次后无在册开发，首次指派走 assign）
+  //   · 变更流 D_PRE(待指派/已暂缓·受理排期改造删已排期/待评估) reassign → 拒（去主次后无在册开发，首次指派走 assign）
   //   · bug D_PRE(待处理) reassign → **放行**（待处理态可 add 预指派/reactivate 带 roster，声明式改派合法·92 号审保留）
   //   · 两 type 的 DEV/VERIFY reassign → 放行（对照·核心改派态不受收窄影响）
   // ══════════════════════════════════════════════════════════════════════
@@ -838,7 +875,7 @@ async function main() {
     const throws = (fn) => { try { fn(); return false; } catch (_) { return true; } };
     const reassignAllowed = (type, status) => I.assertMemberActionFamilyAllowed('reassign', type, status);
     // 变更流 D_PRE 三态 → 拒（INVALID_STATUS）
-    for (const st of ['待评估', '已排期', '已暂缓']) {
+    for (const st of ['待指派', '已暂缓']) {   // 受理排期改造：变更流 D_PRE 族=待指派/已暂缓（删已排期/待评估）
       assert.ok(throws(() => reassignAllowed('feature', st)), `S33a：feature「${st}」(D_PRE) reassign 应被拒（去 D_PRE）`);
       assert.ok(throws(() => reassignAllowed('improvement', st)), `S33a：improvement「${st}」(D_PRE) reassign 应被拒`);
     }
@@ -850,7 +887,7 @@ async function main() {
     assert.ok(!throws(() => reassignAllowed('bug', '处理中')), 'S33c：bug「处理中」(DEV) reassign 放行');
     assert.ok(!throws(() => reassignAllowed('bug', '待验证')), 'S33c：bug「待验证」(VERIFY) reassign 放行');
     // add 对照：变更流 D_PRE add 仍放行（去 D_PRE 只作用于 reassign·不波及 add/remove）——防"改 reassign 波及其他动作"
-    assert.ok(!throws(() => I.assertMemberActionFamilyAllowed('add', 'feature', '已排期')), 'S33d：feature「已排期」add 仍放行（type 覆盖仅作用 reassign，未波及 add）');
+    assert.ok(!throws(() => I.assertMemberActionFamilyAllowed('add', 'feature', '待指派')), 'S33d：feature「待指派」(D_PRE) add 仍放行（type 覆盖仅作用 reassign，未波及 add）');
     ok('S33（C2c·codex115 MED 回归）：reassign type 感知族门——变更流 D_PRE 拒 / bug 待处理放行（不误伤）/ DEV·VERIFY 放行 / add 不受波及');
   }
 
@@ -862,7 +899,7 @@ async function main() {
     //   resolvedTo===null 检查误判成"旁路动作"拒绝（resume 与 estimate 等旁路动作共用 to:null 但语义不同）。
     let threw = null;
     try {
-      assertMainStatusTransition({ routeKind: 'ADMIN_TRANSITION', action: 'resume', actionKind: null, issueType: 'feature', before: '已暂缓', after: '待评估' });
+      assertMainStatusTransition({ routeKind: 'ADMIN_TRANSITION', action: 'resume', actionKind: null, issueType: 'feature', before: '已暂缓', after: '待指派' });
     } catch (e) { threw = e; }
     assert.strictEqual(threw, null, `H1-resume→D_PRE：应放行，实际抛错 ${threw && threw.message}`);
 
@@ -900,7 +937,7 @@ async function main() {
     // resume 具名边要求 before=已暂缓
     threw = null;
     try {
-      assertMainStatusTransition({ routeKind: 'ADMIN_TRANSITION', action: 'resume', actionKind: null, issueType: 'feature', before: '开发中', after: '待评估' });
+      assertMainStatusTransition({ routeKind: 'ADMIN_TRANSITION', action: 'resume', actionKind: null, issueType: 'feature', before: '开发中', after: '待指派' });
     } catch (e) { threw = e; }
     assert.ok(threw, 'H1-resume before≠已暂缓：应拒绝');
     assert.strictEqual(threw.code, 'GATE_INVARIANT', 'H1-resume before≠已暂缓：错误码 GATE_INVARIANT');
@@ -943,14 +980,14 @@ async function main() {
     // RESET fail-closed（H1）：传 action/actionKind → 拒；before≠after → 拒；未知状态 → 拒；合法输入放行
     let threw = null;
     try {
-      assertMainStatusTransition({ routeKind: 'RESET', action: 'noop', actionKind: null, issueType: 'feature', before: '待评估', after: '待评估' });
+      assertMainStatusTransition({ routeKind: 'RESET', action: 'noop', actionKind: null, issueType: 'feature', before: '待指派', after: '待指派' });
     } catch (e) { threw = e; }
     assert.ok(threw, 'H1-RESET 传 action：应拒绝');
     assert.strictEqual(threw.code, 'GATE_INVARIANT', 'H1-RESET 传 action：错误码 GATE_INVARIANT');
 
     threw = null;
     try {
-      assertMainStatusTransition({ routeKind: 'RESET', action: null, actionKind: null, issueType: 'feature', before: '待评估', after: '开发中' });
+      assertMainStatusTransition({ routeKind: 'RESET', action: null, actionKind: null, issueType: 'feature', before: '待指派', after: '开发中' });
     } catch (e) { threw = e; }
     assert.ok(threw, 'H1-RESET before≠after：应拒绝');
     assert.strictEqual(threw.code, 'GATE_INVARIANT', 'H1-RESET before≠after：错误码 GATE_INVARIANT');
@@ -964,7 +1001,7 @@ async function main() {
 
     threw = null;
     try {
-      assertMainStatusTransition({ routeKind: 'RESET', action: null, actionKind: null, issueType: 'feature', before: '待评估', after: '待评估' });
+      assertMainStatusTransition({ routeKind: 'RESET', action: null, actionKind: null, issueType: 'feature', before: '待指派', after: '待指派' });
     } catch (e) { threw = e; }
     assert.strictEqual(threw, null, `H1-RESET 合法输入：应放行，实际抛错 ${threw && threw.message}`);
 
@@ -1121,7 +1158,7 @@ async function main() {
   // 91 号审新增：L1 add/re-add user_ids 逐项 parsePositiveId 严格校验——任一非法整请求 400 零副作用
   // ══════════════════════════════════════════════════════════════════════
   {
-    const id = await mkIssue('feature', '待评估');
+    const id = await mkIssue('feature', '待指派');
     const beforeCnt = (await get('SELECT COUNT(*) c FROM sys_issue_dev_assignees WHERE issue_id = ?', [id])).c;
     let r = await call('POST', `/api/sys-issues/${id}/dev-assignees`, adminTok, { user_ids: [5, 'abc'] });
     assert.strictEqual(r.status, 400, `L1a：user_ids 含字符串非法值应 400，实际 ${r.status} ${JSON.stringify(r.body)}`);

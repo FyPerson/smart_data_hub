@@ -73,10 +73,9 @@ function upload(p, tok, fields, fileName) {
 }
 let passed = 0; const ok = (m) => { passed++; console.log('  ✓ ' + m); };
 
-// 推到「开发中」（create→schedule→assign→estimate），供附件上传
+// 推到「开发中」（create→assign→estimate·受理排期改造：schedule 退场·建单直落待指派），供附件上传
 async function seedInProgress() {
   const id = (await call('POST', '/api/sys-issues', adminTok, { type: 'feature', title: 'a', system_name: 'BMS', source: '内部' })).body.id;
-  await call('POST', `/api/sys-issues/${id}/schedule`, adminTok, {});
   await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5 });
   await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: '2026-08-01 10:00' });
   return id;
@@ -85,7 +84,6 @@ async function seedInProgress() {
 async function seedToReady() {
   let r = await call('POST', '/api/sys-issues', adminTok, { type: 'feature', title: 't', system_name: 'BMS', source: '内部' });
   const id = r.body.id;
-  await call('POST', `/api/sys-issues/${id}/schedule`, adminTok, {});
   await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5 });
   await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: '2026-08-01 10:00' });
   await call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'no_code', no_code_reason: '交付完成（占位理由）' });
@@ -139,18 +137,19 @@ async function main() {
   assert.strictEqual(relTl.length, 1, 'release timeline 恰 1 条（无重复写入）');
   ok('⭐ 并发双击 publish：恰一 200 一 409（非 500）+ 批次已发布 release_note 完好 + 单翻已上线 + release timeline 仅 1 条（finding 脏态不可达）');
 
-  // ── 3. 并发混合事务（建单 + 建批次 + schedule 各 10）：零 500 ──────────
+  // ── 3. 并发混合事务（建单 + 建批次 + assign 各 10）：零 500 ──────────
+  //   受理排期改造：schedule 退场·并发写目标改用 assign（建单直落待指派→并发指派各进开发中·10 个独立单不互斥）。
   const drafts = await Promise.all(Array.from({ length: 10 }, (_, k) =>
     call('POST', '/api/sys-issues', adminTok, { type: 'improvement', title: 'mix-' + k, system_name: 'OA', source: '内部' })));
   const mixed = await Promise.all([
     ...Array.from({ length: 10 }, (_, k) => call('POST', '/api/sys-releases', adminTok, { title: 'mix-rel-' + k })),
-    ...drafts.map(d => call('POST', `/api/sys-issues/${d.body.id}/schedule`, adminTok, {})),
+    ...drafts.map(d => call('POST', `/api/sys-issues/${d.body.id}/assign`, adminTok, { assigned_to: 5 })),
   ]);
   const mix500 = mixed.filter(r => r.status === 500);
   assert.strictEqual(mix500.length, 0, '并发混合事务零 500，实际：' + JSON.stringify(mix500.map(e => e.body)));
-  const allScheduled = mixed.filter(r => r.body && r.body.status === '已排期').length;
-  assert.strictEqual(allScheduled, 10, '10 个 schedule 全成功（已排期）');
-  ok('并发混合事务（建单/建批次/schedule 各 10）：零 500 + schedule 全成');
+  const allAssigned = mixed.filter(r => r.body && r.body.status === '开发中').length;
+  assert.strictEqual(allAssigned, 10, '10 个 assign 全成功（开发中）');
+  ok('并发混合事务（建单/建批次/assign 各 10）：零 500 + assign 全成（schedule 退场后改测 assign 并发）');
 
   // ── 4. F3a：事务内错误早退（inline sysRollback return）后锁不泄漏 ──────────
   const badRel = (await call('POST', '/api/sys-releases', adminTok, {})).body.id;

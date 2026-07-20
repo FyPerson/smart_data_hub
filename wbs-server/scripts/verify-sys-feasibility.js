@@ -65,13 +65,11 @@ function call(method, path, tok, body) {
 let passed = 0;
 const ok = (m) => { passed++; console.log('  ✓ ' + m); };
 
-// 建单（可带 needs_feasibility）→ schedule → assign → 开发中，返回 id
+// 建单（可带 needs_feasibility）→ assign → 开发中，返回 id（受理排期改造：schedule 退场·建单直落待指派）
 async function seedToDev(needsFeasibility = 0, assignTo = 5) {
   let r = await call('POST', '/api/sys-issues', adminTok, { type: 'feature', title: 't', system_name: 'BMS', source: '内部', needs_feasibility: needsFeasibility });
   assert.strictEqual(r.status, 201, '建单 201, got ' + r.status + ' ' + JSON.stringify(r.body));
   const id = r.body.id;
-  r = await call('POST', `/api/sys-issues/${id}/schedule`, adminTok, {});
-  assert.strictEqual(r.status, 200, 'schedule 200, got ' + r.status);
   r = await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: assignTo });
   assert.strictEqual(r.status, 200, 'assign 200, got ' + r.status);
   return id;

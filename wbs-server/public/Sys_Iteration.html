@@ -24,7 +24,7 @@
         .si-wrap { width: 100%; }
 
         /* 页头（Sys 专属）——前端统一：si-page-head 已删（页头对齐基准页 Data_Correction，navbar 后
-           直接接统计卡；原 siHeadActions 动作按钮挪到 si-toolbar 的 si-spacer 之后，见下方 si-toolbar 注释）。 */
+           直接接统计卡；siHeadActions 动作按钮现位于筛选栏 u-filter-bar 右侧 flex:1 之后）。 */
 
         /* 按钮 base+修饰 已 harmonize → u-btn-primary/u-btn-secondary/u-btn-danger/u-btn-sm（base 见 components.css）。
            shared .u-btn-sm 无定义（仅 base 按钮系有 base，无 -sm 修饰），页面覆盖回原尺寸（真前缀，C1 任务书 §2.1）。
@@ -44,23 +44,18 @@
             display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; line-height: normal;
         }
 
-        /* 类型 tab（Sys 专属） */
-        .si-type-tabs { display: flex; gap: 6px; margin-bottom: 14px; flex-wrap: wrap; }
-        .si-type-tab { padding: 8px 18px; background: #fff; border: 1px solid #e2e8f0; border-radius: 8px; font-size: 13px; cursor: pointer; transition: .15s; font-weight: 500; color: #475569; }
-        .si-type-tab:hover { border-color: #d97706; }
-        .si-type-tab.active { background: #d97706; color: #fff; border-color: #d97706; }
-        .si-type-tab .si-cnt { font-size: 11px; opacity: .8; margin-left: 4px; }
+        /* 类型 tab 已改为筛选栏下拉（siFType）·对齐数据修正/数据协作·相关样式随 tab 删除 */
 
         /* 统计卡——前端统一：si-stat-card（num+label 竖排，②档曾判定与共享 icon+横排结构不兼容而保留
            残留）已换皮为共享 .u-stat-card 结构（icon+u-stat-info，见 siRenderStats()），本节残留删除。 */
 
-        /* 工具条（②档保留：共享 .u-filter-bar 是白卡片，本页裸 flex 行结构不兼容） */
-        .si-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
-        .si-toolbar select, .si-toolbar label.si-chk { padding: 7px 12px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 13px; background: #fff; color: #374151; }
-        .si-toolbar label.si-chk { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
-        .si-spacer { flex: 1; }
-        /* 原 si-page-head 内 .si-head-actions（页头动作按钮容器：批次管理/建单/上线编排）随页头删除
-           挪到本工具条 si-spacer 之后（右侧）；样式随迁移，选择器去掉 .si-page-head 祖先限定。 */
+        /* 筛选栏改用共享 .u-filter-bar 白卡片（对齐数据修正/数据协作）；本页仅保留 si-chk 复选框（含已作废）样式，
+           select/input base 样式由 components.css .u-filter-bar 共享层提供 */
+        .u-filter-bar label.si-chk { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; font-size: 13px; color: #374151; white-space: nowrap; }
+        /* 共享 .u-filter-bar input 通配含 checkbox（会套文本框 padding/border）→ 本页 si-chk 复选框恢复原生（codex 审 MED） */
+        .u-filter-bar label.si-chk input[type="checkbox"] { padding: 0; border: none; width: auto; margin: 0; }
+        /* .si-head-actions（页头动作按钮容器：批次管理/建单/上线编排）位于筛选栏 u-filter-bar 右侧
+           flex:1 之后；样式随迁移，选择器去掉 .si-page-head 祖先限定。 */
         .si-head-actions { display: flex; gap: 8px; }
 
         /* 表格已 harmonize → u-corr-table-wrap/u-corr-table（base 见 components.css）；
@@ -80,7 +75,9 @@
 
         /* 状态徽章修饰色（十态，按语义英文 key 上色；base 已 harmonize → components.css .u-status-badge） */
         .si-s-pending { background: #f3f4f6; color: #6b7280; }
-        .si-s-scheduled { background: #e0e7ff; color: #4338ca; }
+        .si-s-scheduled { background: #e0e7ff; color: #4338ca; }   /* 受理排期改造：已排期态退场·类保留供历史徽章兜底 */
+        .si-s-intake { background: #e0e7ff; color: #4338ca; }      /* 待受理（对接人受理门·待办感） */
+        .si-s-revision { background: #fef3c7; color: #92400e; }    /* 待修改（退改需建单人改·提醒色） */
         .si-s-dev { background: #dbeafe; color: #1d4ed8; }
         .si-s-review { background: #fef3c7; color: #92400e; }
         .si-s-prerelease { background: #ccfbf1; color: #0f766e; }
@@ -219,7 +216,7 @@
            （小号圆角徽章）+ .u-corr-table（表头浅底/行分隔线），仅收窄宽度适配抽屉（660px）。 */
         .si-dev-chip-list { display: flex; flex-wrap: wrap; gap: 8px; }
         .si-dev-chip { display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; border-radius: 14px; background: #f1f5f9; font-size: 12px; color: #334155; }
-        .si-dev-primary-mark { font-size: 10px; color: #94a3b8; border: 1px solid #cbd5e1; border-radius: 6px; padding: 0 4px; line-height: 14px; }
+        /* .si-dev-primary-mark（is_primary「代表」小标记）随文案移除删除·后端 electRepresentative 仍选代表 */
         .si-dev-status-badge { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 11px; font-weight: 600; }
         .si-dev-status-badge.pending { background: #e2e8f0; color: #475569; }
         .si-dev-status-badge.code_submitted { background: #d1fae5; color: #065f46; }
@@ -420,14 +417,12 @@
         <div class="si-wrap">
             <div class="si-info-banner" id="siReadyBanner" style="display:none;"></div>
 
-            <!-- 类型 tab -->
-            <div class="si-type-tabs" id="siTypeTabs"></div>
-
             <!-- 统计卡（前端统一：换皮为共享 u-stat-card 结构，统计口径/点击行为不变，见 siRenderStats()） -->
             <div class="u-stats-row" id="siStatsRow"></div>
 
-            <!-- 工具条（原页头动作按钮 siHeadActions 挪到 si-spacer 之后，随页头删除迁移至此） -->
-            <div class="si-toolbar">
+            <!-- 筛选栏（对齐数据修正/数据协作 u-filter-bar 白卡片：类型下拉[原 tab 改此]+状态+系统+优先级+搜索框；siHeadActions 动作按钮居右） -->
+            <div class="u-filter-bar">
+                <select id="siFType" onchange="siSetType(this.value)"><option value="all">全部类型</option></select>
                 <select id="siFStatus" onchange="siResetStatFilterAndLoadList()"><option value="">全部状态</option></select>
                 <select id="siFSystem" onchange="siLoadList()"><option value="">全部系统</option></select>
                 <select id="siFPriority" onchange="siLoadList()">
@@ -439,7 +434,8 @@
                 <label class="si-chk" id="siVoidedWrap" style="display:none;">
                     <input type="checkbox" id="siFVoided" onchange="siLoadList()"> 含已作废
                 </label>
-                <span class="si-spacer"></span>
+                <input type="text" id="siFSearch" placeholder="搜索标题/系统/单号…" oninput="siDebounceSearch()">
+                <div style="flex:1;"></div>
                 <div class="si-head-actions" id="siHeadActions"></div>
             </div>
 
@@ -456,6 +452,7 @@
                             <th class="u-sortable" data-sort-by="system_name">系统 · 模块<span class="u-sort-icon">⇅</span></th>
                             <th class="u-sortable" data-sort-by="assigned_to_name">开发<span class="u-sort-icon">⇅</span></th>
                             <th class="u-sortable" data-sort-by="created_by_name">建单人<span class="u-sort-icon">⇅</span></th>
+                            <th class="u-sortable" data-sort-by="scheduled_start">计划开工日<span class="u-sort-icon">⇅</span></th>
                             <th class="u-sortable" data-sort-by="dev_estimated_at">预计完成时间<span class="u-sort-icon">⇅</span></th>
                             <th class="u-sortable" data-sort-by="created_at">创建时间<span class="u-sort-icon">⇅</span></th>
                         </tr>
@@ -509,6 +506,16 @@
         </div>
     </div>
 
+    <!-- 流程说明弹层（iframe 懒加载独立页 Sys_Guide.html·样式隔离） -->
+    <div class="si-modal-overlay" id="siFlowGuideOverlay" role="dialog" aria-modal="true" aria-label="迭代流程说明" onclick="if(event.target===this)siCloseFlowGuide()">
+        <div class="si-modal" id="siFlowGuideBox" style="width:min(1180px,95vw); height:88vh; padding:0; display:flex; flex-direction:column;">
+            <div class="si-modal-head"><span>📖 迭代流程说明</span><button type="button" class="si-close" aria-label="关闭" onclick="siCloseFlowGuide()">&times;</button></div>
+            <div class="si-modal-body" style="flex:1; padding:0; overflow:hidden;">
+                <iframe id="siFlowGuideFrame" title="迭代流程说明" style="width:100%; height:100%; border:0; display:block;"></iframe>
+            </div>
+        </div>
+    </div>
+
     <script src="assets/js/app.js?v=v1.117.0_fabdrag"></script>
     <script src="assets/js/unify-helpers.js?v=v1.110.4_unify"></script>
     <script>
@@ -542,8 +549,9 @@
 
     // 状态 → CSS 语义 key（避免中文类名；含 config 未来态前向兼容）
     const SI_STATUS_CLASS = {
-        '待评估': 'pending', '待处理': 'pending',
-        '已排期': 'scheduled',
+        // 受理排期改造：删「待评估/已排期」→「待受理/待修改」(受理门·intake 语义) +「待指派」(受理通过待派开发)。
+        '待受理': 'intake', '待修改': 'revision',
+        '待指派': 'pending', '待处理': 'pending',
         '开发中': 'dev', '处理中': 'dev',
         '待验证': 'review', '待验收': 'review',
         '待上线': 'prerelease',
@@ -555,7 +563,8 @@
     };
     function siStatusClass(s) { return SI_STATUS_CLASS[s] || 'pending'; }
     const SI_STATUS_GROUPS = {
-        active: ['已排期', '开发中', '处理中', '待评估', '待处理'],
+        // 受理排期改造：删「已排期/待评估」→「待受理/待修改/待指派」（受理门+待派均属"进行中"前段·归 active）。
+        active: ['待受理', '待修改', '待指派', '开发中', '处理中', '待处理'],
         acceptance: ['待验证', '待验收'],
         release: ['待上线'],
         done: ['已上线', '已关闭', '已生效'],
@@ -572,7 +581,19 @@
     const SI_DEV_ACTIONS = new Set(['estimate', 'submit', 'feasibility', 'blocked']);
     // 危险按钮样式
     const SI_DANGER_ACTIONS = new Set(['return', 'issue_reject', 'void', 'reopen', 'hold', 'blocked']);
-    const SI_SEC_ACTIONS = new Set(['reassign', 'unblock', 'derive', 'close', 'schedule']);
+    const SI_SEC_ACTIONS = new Set(['reassign', 'unblock', 'derive', 'close',
+        // 受理排期改造 C7：受理门/排期旁路动作用 secondary 样式（intake_accept/resubmit_intake 用 primary·见下不加入）
+        'intake_return', 'change_intake_mode', 'request_tech_consult', 'edit_in_revision', 'set_scheduled_start']);   // schedule 退场（动作已从 meta.typeFlows 移除·前端不再渲染排期按钮）
+    // ── 受理排期改造 C7：受理人/技术负责人白名单（前端镜像后端·真闸在后端 requireIntakeLiaison/roleGuard/isSysTechLead）──
+    //   ⚠️ 三处同步：后端 index.js SYS_INTAKE_LIAISON_IDS[13]/SYS_TECH_LEAD_IDS[7] + 本常量 + verify（卡字面量一致防漂移）。
+    const SI_INTAKE_LIAISON_IDS = [13];   // 示例对接人：受理动作（intake_accept/intake_return/request_tech_consult）
+    const SI_TECH_LEAD_IDS = [7];         // 示例发布者：技术负责人（request_tech_consult 下拉候选 + 被通知）
+    function isSiIntakeLiaison(uid) { return Number(uid) > 0 && SI_INTAKE_LIAISON_IDS.includes(Number(uid)); }
+    function isSiTechLead(uid) { return Number(uid) > 0 && SI_TECH_LEAD_IDS.includes(Number(uid)); }
+    // 受理门动作前端权限门（镜像 §5.3 逐动作授权表·前端非授权源·后端精判兜底）：
+    //   intake_accept/intake_return/request_tech_consult = admin∨受理人；resubmit_intake/edit_in_revision = admin∨建单人；change_intake_mode = 仅 admin（落通用 admin 分支）。
+    const SI_INTAKE_LIAISON_ACTIONS = new Set(['intake_accept', 'intake_return', 'request_tech_consult']);
+    const SI_CREATOR_ACTIONS = new Set(['resubmit_intake', 'edit_in_revision']);
     // [codex29 L-3] 拉群可发起态——⚠️ 须与后端 SYS_CHAT_ALLOWED_STATUSES（index.js）同源：改一端必须改另一端。
     //   （sys 模块动作可见性一贯是前端硬编码镜像后端，未上 capability 字段以保模块一致性；后端有真门槛兜底）。
     const SI_CHAT_STATUSES = ['处理中', '待验证', '待上线'];
@@ -642,7 +663,6 @@
         await siLoadMeta();
         await siLoadUsers();
         siRenderHeadActions();
-        siRenderTypeTabs();
         siBuildFilters();
         await siLoadList();
         sysIterationSorter.init(); // 前端统一：表头排序初始化（siLoadList 后绑定）
@@ -687,34 +707,61 @@
         const box = document.getElementById('siHeadActions');
         let html = '';
         if (META_OK && isAdmin()) {
-            html += `<button class="u-btn-secondary" onclick="siOpenBatch()">📦 批次管理</button>`;
             if (siTypeKeys().length) html += `<button class="u-btn-primary" onclick="siOpenCreate()">+ 新建迭代单</button>`;
+            html += `<button class="u-btn-secondary" onclick="siOpenBatch()">📦 批次管理</button>`;
         }
         // C-orch：上线编排批量面板入口——admin（批量指定 + 批量通知上线开发）与被指定执行开发（批量执行发版）共用入口，
         //   面板内部按角色 + 三态分别出对应操作；任意登录用户可开（无待办项时面板自身显示"暂无"，无害）。
         if (META_OK && currentUser) {
             html += `<button class="u-btn-secondary" onclick="siOpenReleaseOrch()">🚀 上线编排</button>`;
+            html += `<button class="u-btn-secondary" onclick="siOpenFlowGuide()">📖 流程说明</button>`;
         }
         box.innerHTML = html;
     }
 
-    // ---- 类型 tab ----
-    function siRenderTypeTabs() {
-        const tabs = [['all', '全部']].concat(siTypeKeys().map(t => [t, siTypeLabel(t)]));
-        document.getElementById('siTypeTabs').innerHTML = tabs.map(([k, l]) => {
-            const cnt = k === 'all' ? siList.length : siList.filter(i => i.type === k).length;
-            return `<div class="si-type-tab ${siActiveType === k ? 'active' : ''}" onclick="siSetType('${k}')">${esc(l)}<span class="si-cnt">${cnt}</span></div>`;
-        }).join('');
+    // ---- 类型筛选（原 tab 改为筛选栏下拉 siFType·对齐数据修正/数据协作；客户端过滤，siList 已含全类型不重拉） ----
+    function siBuildTypeOptions() {
+        const sel = document.getElementById('siFType');
+        if (!sel) return;
+        const validKeys = siTypeKeys();
+        // siActiveType 为准（防 DOM 静态 all 覆盖 URL/恢复态）；当前值失效（类型集变化）则归一 all，避免"下拉显示全部但列表空"
+        if (siActiveType !== 'all' && !validKeys.includes(siActiveType)) siActiveType = 'all';
+        const cur = siActiveType || 'all';
+        const opts = [['all', '全部类型']].concat(validKeys.map(t => [t, siTypeLabel(t)]));
+        sel.innerHTML = opts.map(([k, l]) => `<option value="${esc(k)}" ${cur === k ? 'selected' : ''}>${esc(l)}</option>`).join('');
     }
     function siSetType(k) {
-        // I：type 改客户端过滤——切 tab 只重渲染（siList 已含全类型），不重拉，其余筛选保持不变
+        // type 客户端过滤——切类型只重渲染（siList 已含全类型），不重拉，其余筛选保持不变
         siActiveType = k;
-        siRenderTypeTabs();
         siRenderStats();
         siRenderTable();
     }
+    // ---- 搜索（客户端·标题/系统名/单号·debounce·对齐 Correction/Data_Collab 的 debounceSearch） ----
+    let siActiveSearch = '';
+    let siSearchTimer = null;
+    function siDebounceSearch() {
+        clearTimeout(siSearchTimer);
+        siSearchTimer = setTimeout(() => {
+            const v = (document.getElementById('siFSearch').value || '').trim().toLowerCase();
+            if (v === siActiveSearch) return;
+            siActiveSearch = v;
+            siRenderStats();
+            siRenderTable();
+        }, 250);
+    }
+    function siMatchSearch(item) {
+        if (!siActiveSearch) return true;
+        const q = siActiveSearch;
+        const idText = item.id == null ? '' : String(item.id);   // null 安全（防 '#undefined' 伪匹配·codex 审 MED）
+        return (item.title || '').toLowerCase().includes(q)
+            || (item.system_name || '').toLowerCase().includes(q)
+            || (idText && idText.includes(q))
+            || (idText && q !== '#' && ('#' + idText).includes(q));   // 单独 '#' 不匹配全部
+    }
+    // 当前类型 + 搜索下的可见单（统计卡基数 + 列表基数共用；再叠统计卡组过滤见 siVisibleList）
     function siVisibleTypeList() {
-        return siActiveType === 'all' ? siList : siList.filter(i => i.type === siActiveType);
+        const byType = siActiveType === 'all' ? siList : siList.filter(i => i.type === siActiveType);
+        return byType.filter(siMatchSearch);
     }
     function siMatchStatFilter(item, filterKey) {
         if (!filterKey) return true;
@@ -737,6 +784,7 @@
 
     // ---- 筛选器 ----
     function siBuildFilters() {
+        siBuildTypeOptions();
         // 系统下拉
         const sysSel = document.getElementById('siFSystem');
         const systems = (META && META.bizSystems) ? META.bizSystems : [];
@@ -778,7 +826,6 @@
         if (seq !== siListSeq) return;                           // J：已有更新的请求发出，丢弃过时结果
         if (!r.ok) { siApiErr(r, '加载列表失败'); return; }
         siList = (r.data && r.data.items) || [];
-        siRenderTypeTabs();
         siRenderStats();
         siRenderTable();
     }
@@ -820,6 +867,7 @@
         status: 'statusOrder',
         assigned_to_name: 'string',
         created_by_name: 'string',
+        scheduled_start: 'date',
         dev_estimated_at: 'date',
         created_at: 'date',
     };
@@ -827,7 +875,8 @@
     // codex API 审 MED-2（2026-07-10）：补 已暂缓/已拒绝 显式序——共享排序对未知状态给 99 会
     //   排到已作废之后，与"已作废排末尾"注释矛盾；显式放已生效后、已作废前。
     const SI_STATUS_SORT_ORDER = {
-        待处理: 0, 待评估: 1, 已排期: 2, 开发中: 3, 处理中: 4,
+        // 受理排期改造：删「待评估/已排期」→ 前段序=待受理→待修改→待指派/待处理（受理门在最前·待派开发次之）。
+        待受理: 0, 待修改: 1, 待指派: 2, 待处理: 2, 开发中: 3, 处理中: 4,
         待验证: 5, 待验收: 6, 待上线: 7,
         已上线: 8, 已关闭: 9, 已生效: 10,
         已暂缓: 11, 已拒绝: 12,
@@ -874,7 +923,7 @@
     function renderSysIterationRows(list) {
         const tb = document.getElementById('siTbody');
         if (!list.length) {
-            tb.innerHTML = `<tr><td colspan="10" class="si-empty">${isAdmin() ? '暂无数据' : '暂无指派给你的单据'}</td></tr>`;
+            tb.innerHTML = `<tr><td colspan="11" class="si-empty">${isAdmin() ? '暂无数据' : '暂无指派给你的单据'}</td></tr>`;   // 11 列（加计划开工日列后 +1·codex 审 MED）
             return;
         }
         tb.innerHTML = list.map(i => {
@@ -892,6 +941,7 @@
                 <td>${esc(i.system_name)}<span class="si-muted"> · ${esc(i.module_name || '—')}</span></td>
                 <td>${siDevRosterCellHtml(i)}</td>
                 <td>${esc(i.created_by_name || '—')}</td>
+                <td>${i.scheduled_start ? esc(i.scheduled_start) : '<span class="si-muted">—</span>'}</td>
                 <td>${i.dev_estimated_at ? esc(siFmtDT(i.dev_estimated_at)) : '<span class="si-muted">—</span>'}</td>
                 <td class="si-muted">${esc(siFmtDT(i.created_at))}</td>
             </tr>`;
@@ -902,6 +952,23 @@
         if (!v) return '—';
         // 复用 app.js 统一日期格式化（本地时间），失败原样返回
         try { const s = formatDateTimeUnified(v, 'full'); return s === '无效时间' ? v : s; } catch (e) { return v; }
+    }
+    // 受理排期改造 C7（§7.4）：距预计完成的粗略剩余自然日（**本地时区**日历日差·同日=0·过去=告警不拦·纯前端不落库）。
+    //   ⚠️ codex C7 MED-2 诚实化：用浏览器本地时区 new Date()·非显式 Asia/Shanghai——内网用户均东八区·本地≡Asia/Shanghai·
+    //     纯参考显示（§7.4「粗略」「告警不拦」）不为零收益做 TZ 无关计算。target 取 server 已校验的 dev_estimated_at 日期部分·不会是非法日期。
+    //   不称"工期"·仅参考。dev_estimated_at 是 'YYYY-MM-DD HH:MM' 本地串·取日期部分算日历日差。
+    function siRemainingDaysHtml(est) {
+        try {
+            const m = String(est).match(/^(\d{4})-(\d{2})-(\d{2})/);
+            if (!m) return '';
+            const target = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+            const now = new Date();
+            const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+            const diff = Math.round((target - today) / 86400000);
+            if (diff > 0) return ` <span class="si-muted">（距预计完成还有 ${diff} 个自然日）</span>`;
+            if (diff === 0) return ` <span class="si-muted">（预计今天完成）</span>`;
+            return ` <span style="color:#dc2626">（已超预计 ${-diff} 个自然日）</span>`;
+        } catch (e) { return ''; }
     }
 
     // ============================================================
@@ -990,7 +1057,8 @@
             <div class="u-kv-item"><label>模块</label><div class="v">${esc(iss.module_name || '—')}</div></div>
             <div class="u-kv-item"><label>来源</label><div class="v">${esc(iss.source || '—')}</div></div>
             <div class="u-kv-item"><label>建单人</label><div class="v">${esc(iss.created_by_name || '—')}</div></div>
-            <div class="u-kv-item"><label>预计完成时间</label><div class="v">${iss.dev_estimated_at ? esc(siFmtDT(iss.dev_estimated_at)) : '<span class="si-muted">未回填</span>'}</div></div>
+            <div class="u-kv-item"><label>预计完成时间</label><div class="v">${iss.dev_estimated_at ? (esc(siFmtDT(iss.dev_estimated_at)) + siRemainingDaysHtml(iss.dev_estimated_at)) : '<span class="si-muted">未回填</span>'}</div></div>
+            <div class="u-kv-item"><label>计划开工日</label><div class="v">${iss.scheduled_start ? esc(iss.scheduled_start) : '<span class="si-muted">—</span>'}</div></div>
             <div class="u-kv-item"><label>期望完成(deadline)</label><div class="v">${iss.deadline ? esc(iss.deadline) : '<span class="si-muted">—</span>'}</div></div>
             <div class="u-kv-item"><label>需求方</label><div class="v">${siRequesterText(iss)}</div></div>
             <div class="u-kv-item"><label>上线批次</label><div class="v">${iss.release_id ? ('#' + iss.release_id) : '<span class="si-muted">—</span>'}</div></div>
@@ -1196,7 +1264,7 @@
                 const statusKey = d.dev_status || 'pending';
                 const statusLabel = SI_DEV_STATUS_LABEL[statusKey] || esc(statusKey);
                 const titleAttr = (statusKey === 'no_code' && d.no_code_reason) ? ` title="${esc(d.no_code_reason)}"` : '';
-                const primaryMark = d.is_primary ? '<span class="si-dev-primary-mark">代表</span>' : '';
+                const primaryMark = '';   // 「代表」小标记按用户要求移除（后端 electRepresentative 仍自动选代表·仅前端不展示）
                 let act = '';
                 if (caps && caps.canCoordinateMember) {
                     if (statusKey === 'pending') act = `<span class="si-dev-chip-act" onclick="siModalExcuseMember(${d.id})">开脱</span>`;
@@ -1446,7 +1514,7 @@
         const selfReady = Number.isFinite(selfUid) && selfUid > 0;
         return devAssignees.map(d => {
             // 去主次：is_primary 仅作只读「代表」小标记（后端 electRepresentative 自动选），非授权源。
-            const tag = d.is_primary ? '（代表）' : '';
+            const tag = '';   // 「（代表）」按用户要求移除（后端 electRepresentative 仍选代表·仅前端不展示）
             const label = `开发 ${esc(d.user_name || ('#' + d.user_id))}${tag}`;
             // C2b 本人行隐藏发送按钮（对齐后端自指守卫 SELF_NOTIFY_FORBIDDEN·仅 developer 通道）；查已读不受限。
             //   身份未就绪(selfReady=false)→ isSelf=true 保守隐藏；就绪→按 user_id 精确比对。
@@ -1542,6 +1610,32 @@
         return siNotifyRowHtml(label, iss.requester_notify_status, iss.requester_read_at, iss.requester_notified_at, btns, extraNote);
     }
 
+    // 受理排期改造 C7：技术负责人通知行（§6）——tech_lead_id 已发起才渲染。重发权限=admin∨受理人∨建单人（§6·前端镜像·后端兜底）。
+    function siRenderTechLeadNotifyRow(iss) {
+        if (!iss.tech_lead_id) return '';   // codex C7 LOW-3：行只看 tech_lead_id（已发起即显状态）；重发另 gate request_event_id
+        const label = `技术负责人 ${esc(iss.tech_lead_name || ('#' + iss.tech_lead_id))}`;
+        const uid = currentUser && currentUser.id;
+        const canResend = isAdmin() || isSiIntakeLiaison(uid) || (Number(iss.created_by) === Number(uid) && Number(uid) > 0);
+        let btns = '';
+        // 重发须有 request_event_id（正常与 tech_lead_id 原子同设·防脏数据/裁剪导致无版本锚点时重发发不出）
+        if (canResend && iss.tech_lead_notify_request_event_id) btns += `<button class="u-btn-secondary u-nb-btn" onclick="siResendTechConsult()">${iss.tech_lead_notify_status === 'sent' ? '重发' : '重发通知'}</button>`;
+        return siNotifyRowHtml(label, iss.tech_lead_notify_status, iss.tech_lead_read_at, iss.tech_lead_notified_at, btns);
+    }
+    async function siResendTechConsult() {
+        const iss = siDetail && siDetail.issue;
+        if (!iss || !iss.tech_lead_notify_request_event_id) return;
+        if (siNotifyInflight) return;
+        siNotifyInflight = true;
+        try {
+            // 携带 expected_request_event_id（§6·版本一致·期间又换人/连发→后端 409 VERSION_CONFLICT）
+            const r = await siApi('/sys-issues/' + iss.id + '/resend-tech-consult', { method: 'POST', body: { expected_request_event_id: iss.tech_lead_notify_request_event_id } });
+            if (!r.ok) { siApiErr(r); return; }
+            const st = r.data && r.data.tech_lead_notify_status;
+            showToast(st === 'sent' ? '技术负责人通知已重发' : (st === 'failed' ? '重发失败（可稍后再试）' : '已触发重发'), st === 'failed' ? 'error' : 'success');
+            await siAfterAction();
+        } finally { siNotifyInflight = false; }
+    }
+
     function siRenderNotify(iss, devAssignees) {
         const isAdminUser = isAdmin();
         const uid = currentUser && currentUser.id;
@@ -1551,6 +1645,7 @@
         if (iss.type === 'feature' || iss.type === 'improvement') {
             const canOperate = isAdminUser;   // 变更流三通道均仅 admin（含发送+查已读）
             return `<div class="u-detail-section"><h3>钉钉通知（手动触发）</h3>
+                ${siRenderTechLeadNotifyRow(iss)}
                 ${siRenderDevNotifyRows(iss, devAssignees || [], canOperate, canOperate)}
                 ${siRenderCreatorNotifyRow(iss, canOperate, canOperate)}
                 ${siRenderRequesterNotifyRow(iss, canOperate, canOperate)}
@@ -1571,7 +1666,8 @@
         const canOperateReleaseExecutor = isAdminUser;                   // notify-release-executor: requireAdmin（仅 admin）
         const canQueryRead = isAdminUser || isBugLiaison;               // read-status 逐通道走 sysManualNotifyGuard（H3/M2 后 = admin∨对接人）
 
-        return `<div class="u-detail-section"><h3>钉钉通知（5 类独立·手动触发）</h3>
+        return `<div class="u-detail-section"><h3>钉钉通知（独立·手动触发）</h3>
+            ${siRenderTechLeadNotifyRow(iss)}
             ${siRenderDevNotifyRows(iss, devAssignees || [], canOperateDev, canQueryRead)}
             ${siRenderRelayNotifyRow(iss, canOperateRelay, canQueryRead)}
             ${siRenderCreatorNotifyRow(iss, canOperateCreator, canQueryRead)}
@@ -1599,6 +1695,9 @@
         // ④a bug 对接人白名单：bug 单的 assign/reassign 对白名单对接人（示例发布者/示例对接人）放行——与后端
         //   requireAdminOrBugLiaison + roleGuard='admin_or_bug_liaison' 同源；前端只放这两个动作，其余 admin 动作仍仅 admin。
         const isBugLiaison = currentUser && iss.type === 'bug' && isSiBugLiaison(currentUser.id);
+        // 受理排期改造 C7：受理人 / 建单人身份（前端权限门·镜像后端 §5.3）
+        const isIntakeLiaisonUser = !!(currentUser && isSiIntakeLiaison(currentUser.id));
+        const isCreatorUser = !!(currentUser && Number(iss.created_by) === Number(currentUser.id) && Number(currentUser.id) > 0);
         // C-orch 上线编排（待上线态双角色按钮 + gate）已于 2026-07-07 样式统一拆到独立区块 siRenderReleaseOrchBlock，
         //   本操作区不再涉及 release_assignee，故原 isReleaseExecutor 声明一并移除。
 
@@ -1626,8 +1725,17 @@
                 if (a === 'submit') { if (!(siCaps && siCaps.canSubmit)) continue; }
                 else if (!isRosterMember) continue;
             }
-            else if (!isAdminUser && !liaisonAction) continue;
+            // 受理排期改造 C7：受理门动作前端权限门（镜像后端 §5.3·前端非授权源·点击被后端 403 兜底）
+            else if (SI_INTAKE_LIAISON_ACTIONS.has(a)) { if (!(isAdminUser || isIntakeLiaisonUser)) continue; }   // intake_accept/return/request_tech_consult = admin∨受理人
+            else if (SI_CREATOR_ACTIONS.has(a)) { if (!(isAdminUser || isCreatorUser)) continue; }               // resubmit_intake/edit_in_revision = admin∨建单人
+            else if (!isAdminUser && !liaisonAction) continue;   // change_intake_mode + 其余 admin 动作 = 仅 admin
 
+            // 受理排期改造 C7：change_intake_mode 已过受理门（无受理落态 待指派/待处理 + intake_required=1）隐藏——后端 409 INTAKE_MODE_LOCKED·避免死按钮（镜像 §5.4）。
+            if (a === 'change_intake_mode' && Number(iss.intake_required) === 1 && (iss.status === '待指派' || iss.status === '待处理')) continue;
+            // set_scheduled_start（C10 末次审 #7·codex149）：设值须 dev_estimated_at 非空（后端 SCHEDULED_START_REQUIRES_ESTIMATE），
+            //   清除不须 estimate。按钮可见条件=「有 estimate 可设值」∨「有 scheduled_start 可清除」——两者皆空时按钮无有效操作
+            //   （设值必 409·无值可清），隐藏以消除条件性死按钮（原为保留按钮+gate 引导·改为直接隐藏）。开发态 gate 仍引导先回填。
+            if (a === 'set_scheduled_start' && !iss.dev_estimated_at && !iss.scheduled_start) continue;
             // 开发态 / 批次精化（needs_feasibility / blocked / dev_estimated_at / release_id）
             if (a === 'estimate' && iss.needs_feasibility) continue;             // 需评估的走 feasibility
             if (a === 'feasibility' && (!iss.needs_feasibility || iss.blocked)) continue;  // F：受阻时不出评估（后端 409 ISSUE_BLOCKED）
@@ -1655,6 +1763,13 @@
             else if (!iss.dev_estimated_at) gate = `<div class="si-gate-hint">📋 两步完成开发：<b>第 1 步</b> 先「回填预计完成时间」 → <b>第 2 步</b> 回填后即可「标记我的开发完成」。（当前在第 1 步）</div>`;
         } else if (isAdminUser && iss.status === '待上线' && iss.release_id) {
             gate = `<div class="si-gate-hint">📦 已加入批次 #${iss.release_id}，请在「批次管理」中发布。</div>`;   // C（变更流；bug 走 release_assignee 体系不再挂此批次面板）
+        } else if (iss.status === '待受理') {
+            // 受理排期改造 C8：受理阶段角色引导（判定镜像后端资格·前端提示非授权源）
+            if (isAdminUser || isIntakeLiaisonUser) gate = `<div class="si-gate-hint">📥 本单待受理：可「受理通过」进入指派 / 「退回修改」（填退改原因）/「发起技术负责人沟通」。</div>`;
+            else gate = `<div class="si-gate-hint">⏳ 本单已提交，等待对接人受理确认。</div>`;
+        } else if (iss.status === '待修改') {
+            if (isAdminUser || isCreatorUser) gate = `<div class="si-gate-hint">✏️ 本单已退回修改：请「编辑内容」修改后「重新提交受理」。</div>`;
+            else gate = `<div class="si-gate-hint">⏳ 本单已退回，等待建单人修改后重新提交受理。</div>`;
         }
         // C-orch bug 待上线态的四个引导分支（指定/等待/可执行）已随上线编排一起移入 siRenderReleaseOrchBlock，本操作区不再重复。
 
@@ -1695,10 +1810,18 @@
         const iss = siDetail && siDetail.issue;
         if (!iss) return;
         switch (action) {
-            case 'schedule': return siModalSchedule(iss);
+            // 受理排期改造：schedule 退场（case + siModalSchedule 函数一并删·端点返 409 SCHEDULE_DISABLED）
             case 'assign': return siModalAssign(iss);
             case 'reassign': return siModalReassign(iss);
             case 'create-chat': return siModalCreateChat(iss);
+            // 受理排期改造 C7：受理门 + 排期动作分发
+            case 'intake_accept': return siConfirmSimple(iss, 'intake_accept', '确认受理通过？受理后单据进入指派/处理阶段。', '/intake-accept');
+            case 'intake_return': return siModalReason(iss, 'intake_return', '退回修改', '退改原因', '/intake-return');
+            case 'resubmit_intake': return siConfirmSimple(iss, 'resubmit_intake', '确认修改完成、重新提交受理？', '/resubmit-intake');
+            case 'edit_in_revision': return siModalEditInRevision(iss);
+            case 'change_intake_mode': return siModalChangeIntakeMode(iss);
+            case 'request_tech_consult': return siModalRequestTechConsult(iss);
+            case 'set_scheduled_start': return siModalSetScheduledStart(iss);
             // C4：notify-developer/notify-relay/notify-creator/notify-requester 已从本操作区迁移到详情页
             //   「通知」区（siRenderNotify），改由 siNotifyDevSend/siNotifyRelayClick/siNotifyCreatorClick/
             //   siNotifyRequesterClick 各自读 siDetail 直调，不再经本 switch。
@@ -1830,18 +1953,8 @@
         );
     }
 
-    function siModalSchedule(iss) {
-        siModal('排期', [
-            fSelect('priority', SI_PRIORITY_LABEL, ['P0', 'P1', 'P2', 'P3'], iss.priority || 'P2'),
-            fDate('deadline', '期望完成时间（选填）', iss.deadline || '')
-        ], async v => {
-            const body = { priority: v.priority };
-            if (v.deadline) body.deadline = v.deadline;
-            const r = await siApi('/sys-issues/' + iss.id + '/schedule', { method: 'POST', body });
-            if (!r.ok) { siApiErr(r); return false; }
-            showToast('已排期', 'success'); return true;
-        });
-    }
+    // 受理排期改造：siModalSchedule（排期弹窗）已删——schedule 动作退场（端点返 409 SCHEDULE_DISABLED）。
+    //   priority/deadline 改由建单填 + 待修改态编辑承接（§7.3）；计划开工日走后续 commit 的 set_scheduled_start 弹窗。
 
     // 开发成员多选 picker（镜像 siModalCreateChat 1105 附近的 checkbox 多选范式）。
     //   preselectedIds=预勾选 user_id 数组；label 可覆盖（默认去主次口径）；提交时读取走 #siMBody 局部 query
@@ -1997,6 +2110,86 @@
             const r = await siApi('/sys-issues/' + iss.id + '/feasibility', { method: 'POST', body });
             if (!r.ok) { siApiErr(r); return false; }
             showToast('已提交可行性评估', 'success'); return true;
+        });
+    }
+
+    // ── 受理排期改造 C7：受理门 + 排期弹窗 ──────────────────────────────────────
+    //   edit_in_revision（待修改态编辑白名单字段·§5.2）：镜像后端字段白名单·未知字段后端 400·空标题拦。
+    function siModalEditInRevision(iss) {
+        const systems = (META && META.bizSystems) || [];
+        const isChangeFlow = (iss.type === 'feature' || iss.type === 'improvement');
+        const fields = [
+            fText('title', '标题', iss.title || '', true, '必填'),
+            fTextarea('description', '需求描述', iss.description || '', false, ''),
+            fSelectMap('system_name', '所属系统', systems, iss.system_name, null),
+            fText('module_name', '模块', iss.module_name || '', false, ''),
+            fSelect('priority', '优先级', ['P0', 'P1', 'P2', 'P3'], iss.priority || 'P2'),
+            fDate('deadline', '预期完成日期', iss.deadline || ''),
+            fText('requester_dept', '需求方部门', iss.requester_dept || '', false, ''),
+            fText('requester_name', '需求方姓名', iss.requester_name || '', false, ''),
+            fText('requester_phone', '需求方电话', iss.requester_phone || '', false, ''),
+        ];
+        if (isChangeFlow) fields.push(fSelectMap('needs_feasibility', '需可行性评估', ['0', '1'], String(Number(iss.needs_feasibility) === 1 ? 1 : 0), { '0': '否', '1': '是' }));
+        fields.push(note('仅「待修改」态可编辑；修改后仍需「重新提交受理」才回到待受理。'));
+        siModal('编辑待修改内容 #' + iss.id, fields, async v => {
+            if (!v.title.trim()) { showToast('标题必填', 'error'); return false; }
+            // 白名单字段·空串后端 trim 归 null（自由文本）；needs_feasibility 转 0/1。deadline 空串=清除。
+            const body = {
+                title: v.title.trim(), description: v.description, system_name: v.system_name,
+                module_name: v.module_name, priority: v.priority, deadline: v.deadline,
+                requester_dept: v.requester_dept, requester_name: v.requester_name, requester_phone: v.requester_phone,
+            };
+            if (isChangeFlow) body.needs_feasibility = Number(v.needs_feasibility) === 1 ? 1 : 0;
+            const r = await siApi('/sys-issues/' + iss.id + '/edit-in-revision', { method: 'POST', body });
+            if (!r.ok) { siApiErr(r); return false; }
+            showToast(r.data && r.data.unchanged ? '内容未变' : '已保存修改', 'success'); return true;
+        });
+    }
+    //   change_intake_mode（切换受理模式·§5.4·admin·原因必填）：按当前 intake_required 决定开↔关方向。
+    function siModalChangeIntakeMode(iss) {
+        const cur = Number(iss.intake_required) === 1 ? 1 : 0;
+        const target = cur === 1 ? 0 : 1;
+        const dirLabel = target === 1 ? '开启受理确认' : '关闭受理确认';
+        const dirNote = target === 1
+            ? '开启后：本单进入「待受理」，由对接人受理确认。'
+            : '关闭后：本单跳过受理，直接进入指派/处理阶段。';
+        siModal(dirLabel + ' #' + iss.id, [
+            note(dirNote),
+            fTextarea('reason', '切换原因', '', true, '必填')
+        ], async v => {
+            if (!v.reason.trim()) { showToast('切换原因必填', 'error'); return false; }
+            const r = await siApi('/sys-issues/' + iss.id + '/change-intake-mode', { method: 'POST', body: { intake_required: target, reason: v.reason.trim() } });
+            if (!r.ok) { siApiErr(r); return false; }
+            showToast(r.data && r.data.unchanged ? '受理模式未变' : (target === 1 ? '已开启受理' : '已关闭受理'), 'success'); return true;
+        });
+    }
+    //   request_tech_consult（发起技术负责人沟通·§6·选技术负责人白名单）：候选 = siUsers ∩ SI_TECH_LEAD_IDS。
+    function siModalRequestTechConsult(iss) {
+        const cands = siUsers.filter(u => SI_TECH_LEAD_IDS.includes(Number(u.id)));
+        if (!cands.length) { showToast('无可选技术负责人（白名单为空）', 'error'); return; }
+        const opts = cands.map(u => String(u.id));
+        const labelMap = {}; cands.forEach(u => { labelMap[String(u.id)] = u.display_name || u.username || ('#' + u.id); });
+        siModal('发起技术负责人沟通 #' + iss.id, [
+            fSelectMap('tech_lead_id', '技术负责人', opts, opts[0], labelMap),
+            note('发起后自动向所选技术负责人推送钉钉，请其协助技术评估。可在通知区重发。')
+        ], async v => {
+            const r = await siApi('/sys-issues/' + iss.id + '/request-tech-consult', { method: 'POST', body: { tech_lead_id: Number(v.tech_lead_id) } });
+            if (!r.ok) { siApiErr(r); return false; }
+            const st = r.data && r.data.tech_lead_notify_status;
+            showToast(st === 'sent' ? '已发起并通知技术负责人' : (st === 'failed' ? '已发起，但钉钉通知失败（可在通知区重发）' : '已发起技术负责人沟通'), st === 'failed' ? 'error' : 'success');
+            return true;
+        });
+    }
+    //   set_scheduled_start（定计划开工日·§7.2·admin·可清除）：fDate 空=清除（显式传 null）。
+    function siModalSetScheduledStart(iss) {
+        siModal((iss.scheduled_start ? '修改' : '定') + '计划开工日 #' + iss.id, [
+            fDate('scheduled_start', '计划开工日', iss.scheduled_start || ''),
+            note('计划开工日为参考字段（非闸门）。清空日期即清除。打回/重开会自动清除。')
+        ], async v => {
+            const raw = (v.scheduled_start || '').trim();
+            const r = await siApi('/sys-issues/' + iss.id + '/set-scheduled-start', { method: 'POST', body: { scheduled_start: raw === '' ? null : raw } });
+            if (!r.ok) { siApiErr(r); return false; }
+            showToast(r.data && r.data.unchanged ? '计划开工日未变' : (r.data && r.data.scheduled_start ? '已设定计划开工日' : '已清除计划开工日'), 'success'); return true;
         });
     }
 
@@ -2445,10 +2638,11 @@
             fTextarea('description', '描述（选填）', '', false),
             fText('related_correction_no', '关联修正单号（选填，BUG 类用）', '', false, '软引用触发本次迭代的数据修正单（OA号/修正单ID），不联动不跳转，仅留痕'),
             { k: null, html: assignModeHtml },
-            fCheckbox('needs_feasibility', '需要可行性评估（开发先评估再排期）', false),
+            fCheckbox('needs_feasibility', '需要可行性评估（开发进入后先做可行性评估）', false),
+            fCheckbox('intake_required', '需对接人受理确认（勾选后进「待受理」，先由对接人受理再进开发；不勾直接进开发/可指派）', false),
             { k: null, html: `<div class="u-form-group"><label>需求材料（选填，图片/PDF/Excel/Word/csv/txt/md，单个≤20MB，最多5个）</label>
                 ${siFilePickerHtml('create-spec', '选择文件')}</div>` },
-            note('建单仅 admin 可操作。新功能/优化进「待评估」，排期后指派开发；BUG 类可在此直接走 A/B 两种指派路径。')
+            note('建单仅 admin 可操作。新功能/优化进「待指派」，可直接指派开发；BUG 类可在此直接走 A/B 两种指派路径。')
         ], async v => {
             // 交互体验优化 Commit①：文件选择由 key-based 通用组件持有（P2 通用化后 'create-spec' 实例·选择即预览+可删+可追加）。
             //   数量/大小/扩展名/去重校验已在 siPickerCollect 收集时完成，此处直接快照数组（复制一份，防
@@ -2465,10 +2659,13 @@
             if (v.description.trim()) body.description = v.description.trim();
             if (v.related_correction_no && v.related_correction_no.trim()) body.related_correction_no = v.related_correction_no.trim();   // ④a §7 软关联
             if (v.needs_feasibility) body.needs_feasibility = 1;
+            if (v.intake_required) body.intake_required = 1;   // 受理排期改造 §47（C10 末次审 #1·codex149）：勾选→进「待受理」
             // C5：仅 type=bug 读 A/B 字段（与后端 ASSIGN_MODE_BUG_ONLY 同源；非 bug 不传 assign_mode，默认 none 零行为变化）
             if (v.type === 'bug') {
                 const modeSel = document.getElementById('f_assign_mode');
                 const mode = modeSel ? modeSel.value : 'none';
+                // 受理排期改造 §47（C10 #1）：受理门与建单即指派互斥（后端 INTAKE_WITH_ASSIGN_CONFLICT 兜底·前端友好提示先拦）
+                if (v.intake_required && mode !== 'none') { showToast('勾选「需对接人受理」时不能同时指派开发/对接人，请先受理再指派', 'error'); return false; }
                 if (mode === 'A') {
                     // 去主次（2026-07-18）：path A 改开发成员多选，勾选第一个作 assigned_to 首批候选、其余 collaborator_ids
                     //   （后端 electRepresentative 重选代表，传谁不影响）。assign_mode='A' 契约不变。
@@ -2600,6 +2797,15 @@
         siRenderBatchList();
     }
     function siCloseBatch() { document.getElementById('siBatchOverlay').classList.remove('open'); }
+
+    // 流程说明弹层（iframe 懒加载独立页 Sys_Guide.html）
+    function siOpenFlowGuide() {
+        const f = document.getElementById('siFlowGuideFrame');
+        if (!f.getAttribute('src')) f.setAttribute('src', 'Sys_Guide.html');   // 懒加载·首次打开才载
+        document.getElementById('siFlowGuideOverlay').classList.add('open');
+    }
+    function siCloseFlowGuide() { document.getElementById('siFlowGuideOverlay').classList.remove('open'); }
+    document.addEventListener('keydown', function(e){ if (e.key === 'Escape' && document.getElementById('siFlowGuideOverlay').classList.contains('open')) siCloseFlowGuide(); });
 
     // ============================================================
     // C-orch §6.3：上线编排批量面板（复用批次管理同一套 overlay DOM，同一时刻只开一个面板）——

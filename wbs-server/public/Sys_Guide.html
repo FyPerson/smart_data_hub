@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>系统迭代 · 流程说明</title>
+<style>
+  :root {
+    --requester: #2563eb;   /* 建单人（需求方） */
+    --liaison:   #ea580c;   /* 对接人（受理人）·平台橙系 */
+    --techlead:  #7c3aed;   /* 技术负责人 */
+    --dev:       #16a34a;   /* 开发 */
+    --admin:     #0891b2;   /* 管理员 */
+    --terminal:  #334155;   /* 终态 */
+    --ink: #0f172a;
+    --muted: #64748b;
+    --line: #dbe4f0;
+    --bg: #f5f8fc;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", Arial, sans-serif;
+    color: var(--ink);
+    background:
+      radial-gradient(circle at 12% 8%, rgba(37,99,235,.06), transparent 32%),
+      radial-gradient(circle at 88% 6%, rgba(234,88,12,.06), transparent 28%),
+      linear-gradient(180deg, #fbfdff 0%, var(--bg) 100%);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .guide { display: grid; grid-template-columns: 208px minmax(0,1fr); min-height: 100vh; }
+
+  /* ── 左导航 ── */
+  .nav {
+    padding: 26px 16px;
+    border-right: 1px solid var(--line);
+    background: rgba(255,255,255,.6);
+    backdrop-filter: blur(4px);
+  }
+  .nav-brand { font-size: 12px; letter-spacing: .12em; color: var(--muted); font-weight: 700; margin-bottom: 4px; }
+  .nav-title { font-size: 18px; font-weight: 800; margin-bottom: 22px; letter-spacing: .01em; }
+  .nav-item {
+    display: flex; align-items: center; gap: 11px;
+    width: 100%; text-align: left; font-family: inherit; background: transparent;
+    padding: 12px 14px; margin-bottom: 8px;
+    border-radius: 11px; cursor: pointer;
+    font-size: 14px; font-weight: 700; color: #475569;
+    border: 1px solid transparent;
+    transition: .18s;
+  }
+  .nav-item:focus-visible { outline: 2px solid var(--tone); outline-offset: 2px; }
+  .nav-item:hover { background: #fff; border-color: var(--line); transform: translateX(2px); }
+  .nav-item.active { background: #fff; color: var(--ink); border-color: var(--tone); border-color: color-mix(in srgb, var(--tone) 45%, var(--line)); box-shadow: 0 6px 18px rgba(15,23,42,.07); }
+  .nav-item .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--tone); flex: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--tone) 16%, transparent); }
+  .nav-item .sub { display:block; font-size: 11px; font-weight: 600; color: var(--muted); margin-top: 2px; }
+  .nav-foot { margin-top: 26px; padding-top: 18px; border-top: 1px solid var(--line); }
+  .nav-foot h4 { margin: 0 0 12px; font-size: 11px; letter-spacing: .1em; color: var(--muted); }
+  .legend-item { display:flex; align-items:center; gap:8px; font-size:12px; color:#475569; margin-bottom:9px; font-weight:600; }
+  .legend-item i { width: 20px; height: 5px; border-radius: 999px; background: var(--c); flex:none; }
+  .nav-ver { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); font-size: 11px; color: #94a3b8; line-height: 1.7; }
+
+  /* ── 主区 ── */
+  .main { padding: 30px 34px 40px; overflow-x: auto; }
+  .head { margin-bottom: 8px; }
+  .head h1 { margin: 0 0 6px; font-size: 25px; font-weight: 800; letter-spacing: .01em; }
+  .head .lead { margin: 0; color: var(--muted); font-size: 13.5px; line-height: 1.7; max-width: 720px; }
+  .head .same-note {
+    display:inline-flex; align-items:center; gap:7px; margin-top:12px;
+    padding: 6px 12px; border-radius: 999px; font-size: 12px; font-weight:700;
+    background: #f8fafc; background: color-mix(in srgb, var(--tone) 9%, #fff); color: var(--tone);
+    border: 1px solid var(--tone);
+  }
+
+  /* 受理门分叉提示 */
+  .intake-note { display:flex; align-items:center; gap:9px; margin: 24px 0 -8px; padding: 11px 15px; border-radius:10px; font-size:12.5px; font-weight:600; color:#78591b; background: linear-gradient(90deg, rgba(234,179,8,.11), rgba(234,179,8,.05)); border:1px solid rgba(234,179,8,.32); }
+  .intake-note:empty { display:none; }
+  .intake-note .ig-ico { font-size:15px; flex:none; }
+
+  /* ── 流程链 ── */
+  .flow-wrap { margin: 30px 0 8px; padding: 4px 2px 14px; }
+  .flow { display: flex; align-items: stretch; gap: 0; min-width: max-content; }
+  .step { position: relative; display: flex; align-items: center; opacity: 0; transform: translateY(10px); animation: rise .5s cubic-bezier(.2,.7,.3,1) forwards; }
+  .step:hover { z-index: 6; }   /* forwards 后 .step 成堆叠上下文·hover 提层防气泡被后续节点覆盖（codex 复审 MED） */
+  .node {
+    position: relative; width: 152px; min-height: 96px;
+    display: flex; flex-direction: column; justify-content: center;
+    padding: 15px 15px 14px; border-radius: 13px;
+    background: #fff; border: 1px solid var(--line);
+    box-shadow: 0 8px 22px rgba(15,23,42,.06);
+    cursor: default; transition: transform .16s, box-shadow .16s, border-color .16s;
+  }
+  .node::before { content:""; position:absolute; left:0; top:14px; bottom:14px; width:4px; border-radius:0 4px 4px 0; background: var(--tone); }
+  .node:hover { transform: translateY(-3px); border-color: var(--tone); border-color: color-mix(in srgb, var(--tone) 55%, var(--line)); box-shadow: 0 16px 34px rgba(15,23,42,.13); z-index: 5; }
+  .node .stat { font-size: 15.5px; font-weight: 800; letter-spacing: .01em; }
+  .node .who { display:inline-flex; align-items:center; gap:6px; margin-top:8px; font-size: 12px; font-weight:800; color: var(--tone); }
+  .node .who::before { content:""; width:7px; height:7px; border-radius:50%; background: var(--tone); }
+  .node .act { margin-top:9px; font-size:11.5px; line-height:1.55; color: var(--muted); font-weight:600; }
+
+  /* 终态节点 */
+  .node.terminal { --tone: var(--terminal); background: linear-gradient(165deg,#475569,#1e293b); border:0; color:#fff; min-height:0; align-items:center; }
+  .node.terminal::before { display:none; }
+  .node.terminal .stat { color:#fff; }
+  .node.terminal .who { color:#cbd5e1; }
+
+  /* 连接箭头 */
+  .arrow { width: 40px; flex:none; display:flex; align-items:center; justify-content:center; color: #94a3b8; align-self:center; }
+  .arrow svg { width: 40px; height: 22px; }
+
+  /* 分支标注（退回/打回/暂缓） */
+  .branches { margin-top: 26px; display:grid; grid-template-columns: repeat(auto-fit, minmax(230px,1fr)); gap: 14px; }
+  .branch {
+    display:flex; gap:12px; padding: 14px 16px; border-radius: 12px;
+    background: rgba(255,255,255,.72); border: 1px solid var(--line);
+  }
+  .branch .bi { flex:none; width:34px; height:34px; border-radius:10px; display:flex; align-items:center; justify-content:center; font-size:16px; background:#f4f7fb; background: color-mix(in srgb, var(--bc) 12%, #fff); }
+  .branch b { display:block; font-size:13px; margin-bottom:3px; }
+  .branch span { font-size:12px; color:var(--muted); line-height:1.6; }
+
+  /* hover 气泡（环节详情+设计理由） */
+  .tip {
+    position:absolute; left:50%; bottom: calc(100% + 14px); z-index:30;
+    width: 250px; padding: 13px 15px; border-radius: 11px;
+    background:#fff; border:1px solid #e2e8f0; color:#334155;
+    box-shadow: 0 16px 38px rgba(15,23,42,.16);
+    font-size:12px; line-height:1.6;
+    opacity:0; pointer-events:none; transform: translate(-50%,8px);
+    transition: opacity .16s, transform .16s;
+  }
+  .node:hover .tip, .node:focus-visible .tip { opacity:1; transform: translate(-50%,0); }
+  .node:focus-visible { outline: 2px solid var(--tone); outline-offset: 2px; }
+  .step:focus-within { z-index: 6; }
+  .tip::before { content:""; position:absolute; left:0; top:14px; bottom:14px; width:4px; border-radius:0 4px 4px 0; background:var(--tone); }
+  .tip::after { content:""; position:absolute; left:50%; bottom:-7px; width:12px; height:12px; background:#fff; border-right:1px solid #e2e8f0; border-bottom:1px solid #e2e8f0; transform:translateX(-50%) rotate(45deg); }
+  .tip strong { display:block; color:var(--ink); font-size:12.5px; margin-bottom:5px; }
+  .tip .why { display:block; margin-top:8px; padding-top:8px; border-top:1px dashed #e2e8f0; color:#7c3aed; }
+  .tip .why b { color:#7c3aed; }
+
+  /* 设计理由区 */
+  .rationale { margin-top: 34px; }
+  .rationale h2 { font-size: 16px; font-weight:800; margin:0 0 4px; }
+  .rationale .rl-sub { font-size:12.5px; color:var(--muted); margin:0 0 18px; }
+  .rl-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(280px,1fr)); gap: 15px; }
+  .rl-card { padding: 18px 19px; border-radius: 13px; background:#fff; border:1px solid var(--line); box-shadow: 0 6px 16px rgba(15,23,42,.05); }
+  .rl-card .rl-ico { width:38px; height:38px; border-radius:11px; display:flex; align-items:center; justify-content:center; font-size:18px; margin-bottom:12px; background:#f4f7fb; background: color-mix(in srgb, var(--rc) 12%, #fff); }
+  .rl-card h3 { margin:0 0 7px; font-size:14px; font-weight:800; }
+  .rl-card p { margin:0; font-size:12.5px; line-height:1.75; color:#475569; }
+
+  @keyframes rise { to { opacity:1; transform: translateY(0); } }
+  @media (max-width: 720px) { .guide { grid-template-columns: 1fr; } .nav { border-right:0; border-bottom:1px solid var(--line); } }
+</style>
+</head>
+<body>
+<div class="guide">
+  <aside class="nav">
+    <div class="nav-brand">SYSTEM ITERATION</div>
+    <div class="nav-title">流程说明</div>
+    <div id="navList"></div>
+    <div class="nav-foot">
+      <h4>角色图例</h4>
+      <div class="legend-item" style="--c:var(--requester)"><i></i>建单人 · 需求方</div>
+      <div class="legend-item" style="--c:var(--liaison)"><i></i>对接人 · 受理</div>
+      <div class="legend-item" style="--c:var(--techlead)"><i></i>技术负责人</div>
+      <div class="legend-item" style="--c:var(--dev)"><i></i>开发</div>
+      <div class="legend-item" style="--c:var(--admin)"><i></i>管理员</div>
+    </div>
+    <div class="nav-ver">流程对应「受理排期改造」<br>最后同步 2026-07-20</div>
+  </aside>
+
+  <main class="main">
+    <div class="head">
+      <h1 id="flowTitle"></h1>
+      <p class="lead" id="flowLead"></p>
+      <div id="sameNote"></div>
+    </div>
+    <div class="intake-note" id="intakeNote"></div>
+    <div class="flow-wrap"><div class="flow" id="flow"></div></div>
+    <div class="branches" id="branches"></div>
+
+    <section class="rationale">
+      <h2>为什么这样设计</h2>
+      <p class="rl-sub">理解流程背后的取舍，比记住每个按钮更重要。</p>
+      <div class="rl-grid" id="rationale"></div>
+    </section>
+  </main>
+</div>
+
+<script>
+const R = { requester:'var(--requester)', liaison:'var(--liaison)', techlead:'var(--techlead)', dev:'var(--dev)', admin:'var(--admin)' };
+const RLABEL = { requester:'建单人', liaison:'对接人', techlead:'技术负责人', dev:'开发', admin:'管理员' };
+
+// 变更流节点（feature/improvement 共享·状态机一致）
+const CHANGE_NODES = [
+  { stat:'需求提出', role:'requester', act:'填写标题 / 系统 / 需求描述 / 材料', tip:'提交新功能或优化需求，可附需求材料。（此处为业务需求方视角；系统内建单录入操作权限为管理员）', why:'' },
+  { stat:'待受理', role:'liaison', act:'受理确认 → 待指派\n退回修改 → 待修改\n可发起技术负责人沟通', tip:'对接人审核需求是否清晰、完整、可做。不清楚就退回让建单人补充。', why:'外包多角色协作，对接人先把关——无效 / 说不清的需求先退回，不占用开发资源。' },
+  { stat:'待指派', role:'admin', act:'指派开发（可多人协作）', tip:'管理员把受理通过的单分配给开发，可指派多个开发协作。', why:'' },
+  { stat:'开发中', role:'dev', act:'回填预计完成 + 管理员定计划开工日\n标记完成 → 待验证', tip:'开发干活。开发本人回填「预计完成时间」，管理员补「计划开工日」供多任务排先后。完成后由开发本人标记。', why:'完成时间由开发估（专业判断），计划开工日由管理员排（协调参考）；标记完成必须开发本人做——署名不可代劳。' },
+  { stat:'待验证', role:'admin', act:'验收通过 → 待上线\n打回 → 开发中', tip:'管理员执行验收（accept/return 均仅管理员）。不达标打回开发中重做。', why:'' },
+  { stat:'待上线', role:'admin', act:'批次发布 → 已上线', tip:'管理员执行上线：变更流走批次发布（publish），一个批次可仅含一条单据（前端称「单条上线」，底层仍是批次）。', why:'变更流天然要上线，走批次发布即可。' },
+  { stat:'已上线', role:null, act:'', terminal:true, termLabel:'上线完成', tip:'上线达成（完成态，非绝对终态）。管理员可「关闭」归档，或从已上线 / 已关闭「重开」回开发中（见下方分支）。', why:'' },
+];
+const CHANGE_BRANCHES = [
+  { ico:'↩️', bc:'var(--liaison)', b:'退回修改（待受理 → 待修改）', s:'需求不清时对接人退回，建单人补充后「重新提交」回到待受理。' },
+  { ico:'🧭', bc:'var(--techlead)', b:'技术咨询（待受理 · 旁路）', s:'受理阶段对接人可发起「技术负责人沟通」，不改变主状态，用于厘清技术可行性。' },
+  { ico:'🚫', bc:'var(--admin)', b:'拒绝（待受理 → 已拒绝）', s:'受理阶段判定不做，管理员可拒绝（原因必填），单据进入「已拒绝」；管理员可「再激活」重走流程。' },
+  { ico:'⤴️', bc:'var(--admin)', b:'打回（待验证 → 开发中）', s:'验收不通过，管理员打回，开发重新处理并再次提交。' },
+  { ico:'⏸️', bc:'var(--muted)', b:'暂缓 / 恢复', s:'仅待指派 / 开发中 / 待验证 / 待上线 四个进行中态可由管理员暂缓，恢复后回到暂缓前的状态。' },
+  { ico:'📦', bc:'var(--admin)', b:'关闭 / 重开（已上线 ⇄ 已关闭 / 开发中）', s:'上线后可关闭归档为「已关闭」；已上线 / 已关闭 均可由管理员「重开」回开发中（原因必填）——故是完成 / 归档态，非绝对终态。' },
+  { ico:'🗂️', bc:'var(--muted)', b:'其他管理动作', s:'作废（任意态 → 已作废）；派生新单（任意态·不改原单）；换人 reassign（开发中 / 待验证）；切换受理门 change_intake_mode（受理阶段开↔关）。均为管理员操作。' },
+];
+
+// bug 流节点
+const BUG_NODES = [
+  { stat:'BUG 提出', role:'requester', act:'填写标题 / 系统 / 问题描述', tip:'提交缺陷单，可关联修正单号。（此处为业务需求方视角；系统内建单录入操作权限为管理员）', why:'' },
+  { stat:'待受理', role:'liaison', act:'受理 → 待处理\n退回修改 → 待修改', tip:'对接人审核缺陷是否描述清楚、能复现。不清楚退回补充。', why:'与变更流同源——对接人先把关，无效 / 说不清的缺陷不占开发资源。' },
+  { stat:'待处理', role:'admin', act:'指派开发（可多人）', tip:'管理员或授权的 BUG 对接人（系统配置白名单）把受理通过的缺陷分配给开发。', why:'' },
+  { stat:'处理中', role:'dev', act:'开发回填预计完成\n管理员定计划开工日\n提交 → 待验证', tip:'开发修复缺陷并回填「预计完成时间」；「计划开工日」由管理员设置（同变更流的角色分工）。完成后开发提交。', why:'' },
+  { stat:'待验证', role:'admin', act:'验收通过 → 待上线\n打回 → 处理中', tip:'管理员执行验收（accept/return 均仅管理员）。不达标打回处理中。', why:'' },
+  { stat:'待上线', role:'admin', act:'上线编排（双角色）:\n管理员指定上线开发 → 开发执行上线', tip:'与变更流不同——bug 上线走「上线编排」：管理员批量指定上线开发，被指定开发执行上线（两种模式：热修=不建发布批次 / 正式发布=建/更新发布批次）。', why:'BUG 上线分「热修（不建批次）/ 正式发布（建批次）」两种执行模式，由指定开发按情况执行。' },
+  { stat:'已上线', role:null, act:'', terminal:true, termLabel:'上线完成', tip:'BUG 上线即完成，无「关闭 / 重开」流转（与变更流不同）。', why:'' },
+];
+const BUG_BRANCHES = [
+  { ico:'↩️', bc:'var(--liaison)', b:'退回修改（待受理 → 待修改）', s:'缺陷说不清时退回，建单人补充后重新提交。' },
+  { ico:'🧭', bc:'var(--techlead)', b:'技术咨询（待受理 · 旁路）', s:'受理阶段对接人可发起「技术负责人沟通」，不改变主状态。' },
+  { ico:'🚫', bc:'var(--admin)', b:'拒绝（待受理 / 待处理 → 已拒绝）', s:'判定不修的缺陷，管理员可拒绝，进入「已拒绝」（管理员可再激活）。' },
+  { ico:'⤴️', bc:'var(--admin)', b:'打回（待验证 → 处理中）', s:'验收不通过打回，开发重新处理再提交。' },
+  { ico:'🚀', bc:'var(--dev)', b:'上线编排双角色', s:'管理员指定上线开发 + 开发执行上线（hotfix 热修=不建批次 / publish 正式发布=建批次）——BUG 专属。' },
+  { ico:'🗂️', bc:'var(--muted)', b:'其他管理动作', s:'作废（任意态 → 已作废）；派生新单（BUG 仅「已上线」态·不改原单）；换人 reassign（管理员或 BUG 对接人·待处理 / 处理中 / 待验证）；切换受理门 change_intake_mode。' },
+];
+
+const RATIONALE = [
+  { ico:'🛂', rc:'var(--liaison)', h:'为什么有「受理门」', p:'外包多角色协作下，需求 / 缺陷质量参差。对接人先受理把关，说不清、不该做的先退回，避免直接涌入开发、浪费资源。要缓走「退回修改」，而非硬塞给开发。' },
+  { ico:'📅', rc:'var(--dev)', h:'为什么「预计完成」和「计划开工日」分开', p:'预计完成时间由开发本人估（最懂工作量）；计划开工日由管理员排（协调多任务先后）。两者都是参考、不卡流程——进入「开发中」即可开工，排期只帮开发在多任务并行时排先后。' },
+  { ico:'✍️', rc:'var(--admin)', h:'为什么「标记完成」只能开发本人点', p:'标记完成是开发对交付的署名承诺，不可代劳。管理员是协调人可上传协作材料，但「我做完了」这句话必须由本人说——管事不管人，责任归到本人。' },
+  { ico:'🧭', rc:'var(--techlead)', h:'为什么受理阶段能找技术负责人', p:'需求受理时若拿不准技术可行性 / 方案，对接人可发起「技术负责人沟通」，在正式进开发前先厘清技术判断，减少开发中途返工。' },
+];
+
+const FLOWS = {
+  feature:     { title:'新功能需求', tone:'var(--dev)', lead:'新增系统能力的需求。从提出到上线，经过受理把关、开发排期、验收、发布的完整闭环。', intakeGate:'受理门开启时，需求先进「待受理」由对接人把关；关闭时跳过受理、直接进「待指派」。受理阶段动作管理员均可代办。', nodes:CHANGE_NODES, branches:CHANGE_BRANCHES, same:'与「优化需求」走完全相同的流程（同一条变更流）' },
+  improvement: { title:'优化需求', tone:'var(--dev)', lead:'改进现有功能的需求。流转与新功能需求完全一致，区别只在业务定位——一个是「新增」，一个是「改进」。', intakeGate:'受理门开启时，需求先进「待受理」由对接人把关；关闭时跳过受理、直接进「待指派」。受理阶段动作管理员均可代办。', nodes:CHANGE_NODES, branches:CHANGE_BRANCHES, same:'与「新功能需求」走完全相同的流程（同一条变更流）' },
+  bug:         { title:'BUG 修复', tone:'var(--liaison)', lead:'缺陷修复。整体流转与变更流相似，但上线环节不同——BUG 走「上线编排」双角色发版。', intakeGate:'受理门开启时，缺陷先进「待受理」；关闭时跳过受理、直接进「待处理」。受理阶段动作管理员均可代办。', nodes:BUG_NODES, branches:BUG_BRANCHES, same:'' },
+};
+const NAV = [
+  { key:'feature', label:'新功能需求', sub:'新增能力', tone:'var(--dev)' },
+  { key:'improvement', label:'优化需求', sub:'改进现有', tone:'var(--dev)' },
+  { key:'bug', label:'BUG 修复', sub:'缺陷 · 双角色上线', tone:'var(--liaison)' },
+];
+
+const ARROW = '<svg viewBox="0 0 40 22" fill="none"><path d="M2 11h32" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M30 5l7 6-7 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+function renderNav(active){
+  document.getElementById('navList').innerHTML = NAV.map(n =>
+    `<button type="button" class="nav-item ${n.key===active?'active':''}" style="--tone:${n.tone}" onclick="select('${n.key}')"${n.key===active?' aria-current="true"':''}>
+       <span class="dot"></span><span>${n.label}<span class="sub">${n.sub}</span></span>
+     </button>`).join('');
+}
+
+function select(key){
+  const f = FLOWS[key];
+  document.documentElement.style.setProperty('--tone', f.tone);
+  renderNav(key);
+  document.getElementById('flowTitle').textContent = f.title;
+  document.getElementById('flowLead').textContent = f.lead;
+  document.getElementById('sameNote').innerHTML = f.same ? `<div class="same-note" style="--tone:${f.tone}">🔗 ${esc(f.same)}</div>` : '';
+
+  document.getElementById('intakeNote').innerHTML = f.intakeGate ? `<span class="ig-ico">⚙️</span><span>${esc(f.intakeGate)}</span>` : '';
+  document.getElementById('flow').innerHTML = f.nodes.map((n,i) => {
+    const tone = n.terminal ? 'var(--terminal)' : R[n.role];
+    const who = n.terminal ? (n.termLabel || '流程终点') : RLABEL[n.role];
+    const actHtml = n.act ? `<div class="act">${esc(n.act).replace(/\n/g,'<br>')}</div>` : '';
+    const tip = (n.tip || n.why) ? `<div class="tip" style="--tone:${tone}"><strong>${esc(n.stat)}</strong>${esc(n.tip)}${n.why?`<span class="why"><b>为什么：</b>${esc(n.why)}</span>`:''}</div>` : '';
+    const node = `<div class="step" style="animation-delay:${i*70}ms"><div class="node ${n.terminal?'terminal':''}" style="--tone:${tone}"${tip?' tabindex="0"':''}>
+        <div class="stat">${esc(n.stat)}</div>
+        <div class="who">${esc(who)}</div>${actHtml}${tip}
+      </div></div>`;
+    const arrow = i < f.nodes.length-1 ? `<div class="arrow">${ARROW}</div>` : '';
+    return node + arrow;
+  }).join('');
+
+  document.getElementById('branches').innerHTML = f.branches.map(b =>
+    `<div class="branch"><div class="bi" style="--bc:${b.bc}">${b.ico}</div><div><b>${esc(b.b)}</b><span>${esc(b.s)}</span></div></div>`).join('');
+
+  document.getElementById('rationale').innerHTML = RATIONALE.map(r =>
+    `<div class="rl-card"><div class="rl-ico" style="--rc:${r.rc}">${r.ico}</div><h3>${esc(r.h)}</h3><p>${esc(r.p)}</p></div>`).join('');
+}
+
+select('feature');
+</script>
+</body>
+</html>

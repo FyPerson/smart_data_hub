@@ -339,6 +339,89 @@ async function main() {
     ok('[C] 变更流零回归：admin assign feature 200 + 非 admin 非白名单 feature assign 403（中间件层不变）');
   }
 
+  // ═══ 受理排期改造 C2：三白名单 + 引擎 intake_liaison roleGuard 单元级 ═══
+  //   ⚠️ 边界：受理动作端点属 C3（未建）→ 本段验**单元级**（判定函数 + 引擎 roleGuard 逻辑直调 sysIssueTransition），
+  //     真 HTTP 受理端点回归（§11 完整矩阵）留 C3。前端 SI_INTAKE_LIAISON/SI_TECH_LEAD 字面量属 C7-8（未建·此处不验）。
+  {
+    // [W2] 三白名单字面量 + 独立不共享引用 + 判定函数单元
+    assert.deepStrictEqual(I.SYS_INTAKE_LIAISON_IDS, [13], 'SYS_INTAKE_LIAISON_IDS 须 = [13]（示例对接人·受理）');
+    assert.deepStrictEqual(I.SYS_TECH_LEAD_IDS, [7], 'SYS_TECH_LEAD_IDS 须 = [7]（示例发布者·技术负责人）');
+    // ⭐ 示例发布者 bug 权零回归：SYS_BUG_LIAISON_USER_IDS 不动（仍 [7,13]）·三名单独立不共享引用
+    assert.deepStrictEqual(I.SYS_BUG_LIAISON_USER_IDS, [7, 13], 'SYS_BUG_LIAISON_USER_IDS 保持 [7,13]（示例发布者 bug 权零回归·C2 不动）');
+    assert.ok(I.SYS_INTAKE_LIAISON_IDS !== I.SYS_BUG_LIAISON_USER_IDS && I.SYS_TECH_LEAD_IDS !== I.SYS_BUG_LIAISON_USER_IDS,
+      '三名单独立引用（非共享同一数组·防角色重划撤权连带）');
+    // isSysIntakeLiaison：13 示例对接人在·7 示例发布者不在（受理是示例对接人专属）·字符串归一·非法拒
+    assert.strictEqual(I.isSysIntakeLiaison(13), true, 'id=13 示例对接人 在受理白名单');
+    assert.strictEqual(I.isSysIntakeLiaison('13'), true, '字符串 "13" 也认（Number 归一）');
+    assert.strictEqual(I.isSysIntakeLiaison(7), false, 'id=7 示例发布者 不在受理白名单（受理≠bug对接≠技术负责人）');
+    assert.strictEqual(I.isSysIntakeLiaison(5), false, 'id=5 普通开发 不在');
+    assert.strictEqual(I.isSysIntakeLiaison(0), false, 'id=0 非法');
+    assert.strictEqual(I.isSysIntakeLiaison(null), false, 'null 非法');
+    // isSysTechLead：7 示例发布者在·13 示例对接人不在
+    assert.strictEqual(I.isSysTechLead(7), true, 'id=7 示例发布者 在技术负责人白名单');
+    assert.strictEqual(I.isSysTechLead(13), false, 'id=13 示例对接人 不在技术负责人白名单');
+    assert.strictEqual(I.isSysTechLead(0), false, 'id=0 非法');
+    assert.strictEqual(typeof I.requireIntakeLiaison, 'function', 'requireIntakeLiaison 中间件已导出');
+    ok('⭐ [W2] 三白名单：SYS_INTAKE_LIAISON=[13]/SYS_TECH_LEAD=[7]/SYS_BUG_LIAISON=[7,13](零回归)·独立不共享引用 + isSysIntakeLiaison/isSysTechLead 单元(归属/字符串/非法) + 中间件导出');
+
+    // [MW] requireIntakeLiaison 中间件行为（codex C2 MED-1→LOW·mock req/res/next 五组输入·C2 阶段端点未挂→单测保护）
+    //   ⚠️ 复刻 requireAdminOrBugLiaison 但白名单是新的（SYS_INTAKE_LIAISON_IDS）·须独立验行为·防 C3 挂路由时被改坏发现不了。
+    const runMw = (user) => {
+      let nextCalled = false, statusCode = null, jsonBody = null;
+      const req = { user };
+      const res = { status(c) { statusCode = c; return this; }, json(b) { jsonBody = b; return this; } };
+      I.requireIntakeLiaison(req, res, () => { nextCalled = true; });
+      return { nextCalled, statusCode, jsonBody };
+    };
+    // admin → next
+    let mw = runMw({ id: 1, role: 'admin' });
+    assert.ok(mw.nextCalled && mw.statusCode === null, 'admin → next()（放行·不返 403）');
+    // 示例对接人 13 → next（受理白名单）
+    mw = runMw({ id: 13, role: 'user' });
+    assert.ok(mw.nextCalled && mw.statusCode === null, '示例对接人(13) → next()（受理白名单放行）');
+    // 示例发布者 7 → 403（bug 名单但非受理名单·三名单隔离）
+    mw = runMw({ id: 7, role: 'publisher' });
+    assert.ok(!mw.nextCalled && mw.statusCode === 403 && mw.jsonBody.code === 'NOT_ADMIN_OR_INTAKE_LIAISON', '示例发布者(7) → 403 NOT_ADMIN_OR_INTAKE_LIAISON（三名单隔离·不放行）');
+    // 普通开发 5 → 403
+    mw = runMw({ id: 5, role: 'user' });
+    assert.ok(!mw.nextCalled && mw.statusCode === 403 && mw.jsonBody.code === 'NOT_ADMIN_OR_INTAKE_LIAISON', '普通开发(5) → 403');
+    // 无身份（req.user 缺失）→ 403（fail-closed·不 crash）
+    mw = runMw(undefined);
+    assert.ok(!mw.nextCalled && mw.statusCode === 403, '无身份(req.user 缺失) → 403（fail-closed·不 crash）');
+    ok('⭐ [MW] requireIntakeLiaison 中间件行为（mock req/res/next 五组）：admin✅next / 示例对接人13✅next / 示例发布者7❌403 / 普通5❌403 / 无身份❌403(fail-closed)');
+
+    // [E] 引擎 intake_liaison roleGuard 单元级（直调 sysIssueTransition·绕过 HTTP·C3 端点未建）
+    //   种一条 feature 待受理单（intake_required=1），用不同 actor 执行 intake_accept，验引擎放行/拒。
+    const seedIntakeIssue = async () => {
+      const r = await run(
+        `INSERT INTO sys_issues (type, status, title, system_name, source, created_by, created_by_name, intake_required)
+         VALUES ('feature', '待受理', '受理单', 'BMS', '内部', 1, 'admin', 1)`);
+      return r.lastID;
+    };
+    const actor = (id, role) => ({ id, name: `u${id}`, role });
+    // admin → 放行（待受理→待指派）
+    let iid = await seedIntakeIssue();
+    let res = await I.sysIssueTransition(iid, 'intake_accept', null, actor(1, 'admin'));
+    assert.strictEqual(res.toStatus, '待指派', 'admin intake_accept → 待指派（roleGuard 放行）');
+    // 示例对接人 id13 → 放行（受理人白名单·C2 放开点）
+    iid = await seedIntakeIssue();
+    res = await I.sysIssueTransition(iid, 'intake_accept', null, actor(13, 'user'));
+    assert.strictEqual(res.toStatus, '待指派', '示例对接人(13) intake_accept → 待指派（受理白名单放行·C2 引擎放开生效）');
+    // 示例发布者 id7 → 403（在 bug 名单但不在受理名单·三名单隔离铁证）
+    iid = await seedIntakeIssue();
+    await assert.rejects(
+      () => I.sysIssueTransition(iid, 'intake_accept', null, actor(7, 'publisher')),
+      (e) => e && e.httpStatus === 403 && e.code === 'NOT_AUTHORIZED_FOR_TRANSITION',
+      '示例发布者(7) intake_accept → 403（在 bug 白名单但不在受理白名单·三名单隔离·非泛化）');
+    // 普通开发 id5 → 403
+    iid = await seedIntakeIssue();
+    await assert.rejects(
+      () => I.sysIssueTransition(iid, 'intake_accept', null, actor(5, 'user')),
+      (e) => e && e.httpStatus === 403 && e.code === 'NOT_AUTHORIZED_FOR_TRANSITION',
+      '普通开发(5) intake_accept → 403');
+    ok('⭐ [E] 引擎 intake_liaison roleGuard 放开生效（单元级·直调 sysIssueTransition）：admin✅ / 示例对接人13✅ / 示例发布者7❌403(三名单隔离) / 普通5❌403');
+  }
+
   server.close();
   console.log(`\n✅ verify-sys-liaison 全部通过：${passed} 组断言`);
 }

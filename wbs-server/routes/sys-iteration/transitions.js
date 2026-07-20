@@ -16,25 +16,40 @@
 //   system_name 后端白名单校验，不进 DB CHECK（业务系统列表可能微调，常量层更灵活）。
 const BIZ_SYSTEMS = ['BMS', 'HRD', 'OA', '智数协同', '其他'];
 
-// ── 类型 → 初始态（建单落地态，§3.6）──────────
-//   bug→待处理 / 变更（feature/improvement）→待评估 / config→待处理（config 本轮留位）。
-const INITIAL_STATUS_BY_TYPE = {
-  feature: '待评估',
-  improvement: '待评估',
-  bug: '待处理',           // bug 前段最短（无评估/排期，建单直落 待处理，bug 方案 §2.1）
+// ── 类型 → 无受理分支的初始态（建单未选对接人时落地态，受理排期改造 §9）──────────
+//   ⚠️ 受理排期改造：初始态不再是单一常量——依 intake_required 分两支（选对接人→待受理 / 未选→本表）。
+//   本表 = intake_required=0（无受理）分支：变更（feature/improvement）→待指派（消歧「待评估」）/ bug→待处理 / config 留位。
+//   历史「待评估」态语义拆分：admin triage 的「待评估」→「待指派」（受理通过后待派开发），开发技术评估仍叫「可行性评估」。
+const INITIAL_STATUS_WITHOUT_INTAKE_BY_TYPE = {
+  feature: '待指派',
+  improvement: '待指派',
+  bug: '待处理',           // bug 前段最短（建单直落 待处理，bug 方案 §2.1）
   // config: '待处理',     // TODO 追加 config 流时填
 };
 
-// ── 每个 type 的合法状态集（§3.3 变更流 + §3.4 旁路态）──────────
+// resolveInitialStatus(type, intakeRequired)：建单/派生/reactivate 落态唯一权威（受理排期改造 §9）。
+//   intakeRequired 必须已由调用方归一化为 0/1（严格布尔）；1→'待受理'（进受理门），0→无受理分支（本 type 的 WITHOUT_INTAKE 态）。
+//   非法 type/flag → throw（fail-closed，禁静默落错态）。create.to=null 的机器契约配套（§9 create/derive/reactivate 均调本函数）。
+function resolveInitialStatus(type, intakeRequired) {
+  if (intakeRequired !== 0 && intakeRequired !== 1) {
+    throw new Error(`resolveInitialStatus: intakeRequired 必须已归一化为 0/1，实际=${intakeRequired}`);
+  }
+  const withoutIntake = INITIAL_STATUS_WITHOUT_INTAKE_BY_TYPE[type];
+  if (!withoutIntake) throw new Error(`resolveInitialStatus: 未知/未登记 type="${type}"`);
+  return intakeRequired === 1 ? '待受理' : withoutIntake;
+}
+
+// ── 每个 type 的合法状态集（§3.3 变更流 + §3.4 旁路态·受理排期改造 §4.1）──────────
+//   受理排期改造：删「待评估/已排期」→ 加「待受理/待修改」(INTAKE 族) +「待指派」(D_PRE 族·受理通过落态)。
 const CHANGE_FLOW_STATUSES = [
-  '待评估', '已排期', '开发中', '待验证', '待上线', '已上线', '已关闭',  // 主流程
-  '已暂缓', '已拒绝', '已作废',                                          // 旁路态（§3.4）
+  '待受理', '待修改', '待指派', '开发中', '待验证', '待上线', '已上线', '已关闭',  // 主流程
+  '已暂缓', '已拒绝', '已作废',                                                    // 旁路态（§3.4）
 ];
-// bug 流状态集（bug 方案 §2.2）：无 已排期/待评估（前段裁剪）、无 已暂缓（暂缓有意省略）、
-//   无 已关闭（已上线即终态，上线后再出问题一律派生新单）。
+// bug 流状态集（bug 方案 §2.2 + 受理排期改造 §4.1）：加「待受理/待修改」(受理门·用户拍板 bug 也走)、
+//   无 已暂缓（暂缓有意省略）、无 已关闭（已上线即终态，上线后再出问题一律派生新单）。
 const BUG_FLOW_STATUSES = [
-  '待处理', '处理中', '待验证', '待上线', '已上线',   // 主流程（已上线=终态）
-  '已拒绝', '已作废',                                  // 旁路态
+  '待受理', '待修改', '待处理', '处理中', '待验证', '待上线', '已上线',   // 主流程（已上线=终态）
+  '已拒绝', '已作废',                                                     // 旁路态
 ];
 const ALLOWED_STATUSES = {
   feature: CHANGE_FLOW_STATUSES,
@@ -57,25 +72,74 @@ const ALLOWED_STATUSES = {
 const CHANGE_FLOW_TRANSITIONS = [
   {
     action: 'create',                       // 建单（端点 POST /sys-issues，不走 transition，单独 INSERT；此条供 meta 完整性）
-    from: [], to: '待评估',
+    // 受理排期改造 §9：create.to 改机器契约——落态由 resolveInitialStatus(type,intake_required) 动态解析（选对接人→待受理 / 未选→待指派），
+    //   不可静态读；to:null + dynamicTarget:'initial_status' + targetEntity:'current_issue'（作用当前单）。buildMeta 原样暴露标记。
+    from: [], to: null, dynamicTarget: 'initial_status', targetEntity: 'current_issue',
     roleGuard: 'admin', ownerGuard: null,
     requiredPayload: ['type', 'title', 'system_name', 'source'],
     sideEffects: ['INSERT 主表 + 写 created timeline'],
     timelineEvent: 'created', actionCode: null,
     notifyAfterCommit: null,
   },
+  // ── 受理门动作（受理排期改造 §5·intake_required=1 才走）──────────
   {
-    action: 'schedule',                     // 排期：待评估 → 已排期（admin 确认做 + 定优先级/deadline）
-    from: ['待评估'], to: '已排期',
-    roleGuard: 'admin', ownerGuard: null,
+    action: 'intake_accept',                // 受理通过：待受理 → 待指派（对接人∨admin）
+    from: ['待受理'], to: '待指派',
+    roleGuard: 'intake_liaison', ownerGuard: null,   // 引擎侧 intake_liaison∨admin（roleGuard 语义见 index.js requireIntakeLiaison）
     requiredPayload: [],
-    sideEffects: ['priority_reviewed_at=now', '可改 priority/deadline'],
-    timelineEvent: 'status_change', actionCode: 'schedule',
+    sideEffects: [],
+    timelineEvent: 'status_change', actionCode: 'intake_accept',
     notifyAfterCommit: null,
   },
   {
-    action: 'assign',                       // 指派：已排期 → 开发中（admin 派给开发，被指派人非 viewer）
-    from: ['已排期'], to: '开发中',
+    action: 'intake_return',                // 受理退改：待受理 → 待修改（对接人∨admin，原因必填）
+    from: ['待受理'], to: '待修改',
+    roleGuard: 'intake_liaison', ownerGuard: null,
+    requiredPayload: ['reason'],
+    sideEffects: ['notify 建单人（退改需修改）'],
+    timelineEvent: 'status_change', actionCode: 'intake_return',
+    notifyAfterCommit: null,                // 通知由端点显式发（§8.2 note 不自动触发 notifyAfterCommit）
+  },
+  {
+    action: 'resubmit_intake',              // 修改后重新提交：待修改 → 待受理（建单人∨admin）
+    from: ['待修改'], to: '待受理',
+    roleGuard: 'creator_or_admin', ownerGuard: null,   // 授权=created_by∨admin（§5.3·codex131-H1 修：roleGuard 与意图同源·引擎按 row.created_by 事务内校验）
+    requiredPayload: [],
+    sideEffects: [],
+    timelineEvent: 'status_change', actionCode: 'resubmit_intake',
+    notifyAfterCommit: null,                // 本期不发·待受理列表驱动（§4.5）
+  },
+  {
+    action: 'request_tech_consult',         // 发起技术负责人沟通：待受理 → 待受理（对接人∨admin，选技术负责人）
+    from: ['待受理'], to: null,             // 旁路·不改 status（选技术负责人 + 自动首发通知，§6）
+    roleGuard: 'intake_liaison', ownerGuard: null,
+    requiredPayload: ['tech_lead_id'],
+    sideEffects: ['tech_lead_id/_name 写入', '自动首发技术负责人通知（§6）'],
+    timelineEvent: 'note', actionCode: 'request_tech_consult',
+    notifyAfterCommit: null,                // 通知由端点显式发
+  },
+  {
+    action: 'edit_in_revision',             // 待修改态编辑内容：待修改 → 待修改（建单人∨admin·旁路）
+    from: ['待修改'], to: null,
+    roleGuard: 'creator_or_admin', ownerGuard: null,   // 授权=created_by∨admin（§5.3·codex131-H1 修·引擎按 row.created_by 校验）
+    requiredPayload: [],
+    sideEffects: ['白名单字段更新（§5.2）', 'note timeline 快照改动字段'],
+    timelineEvent: 'note', actionCode: 'edit_in_revision',
+    notifyAfterCommit: null,
+  },
+  {
+    action: 'change_intake_mode',           // 切换受理模式：待受理/待修改/待指派 → §5.4 真值表（admin，原因必填）
+    from: ['待受理', '待修改', '待指派'], to: null,   // 动态·§5.4 真值表（开↔关切换目标态因 status 而异）
+    dynamicTarget: 'intake_mode', targetEntity: 'current_issue',
+    roleGuard: 'admin', ownerGuard: null,
+    requiredPayload: ['reason'],
+    sideEffects: ['intake_required 翻转 + status 同事务切换（§5.4）'],
+    timelineEvent: 'status_change', actionCode: 'change_intake_mode',
+    notifyAfterCommit: null,
+  },
+  {
+    action: 'assign',                       // 指派：待指派 → 开发中（admin 派给开发，被指派人非 viewer）
+    from: ['待指派'], to: '开发中',         // 受理排期改造：from 由「已排期」改「待指派」
     roleGuard: 'admin', ownerGuard: null,
     requiredPayload: ['assigned_to'],
     sideEffects: ['assigned_to/_name/assigned_at 写入'],   // codex 14 L-1：DDL 无 assigned_by 字段（系统迭代 admin 集中主导，"谁指派"恒 admin 不单记）
@@ -117,6 +181,15 @@ const CHANGE_FLOW_TRANSITIONS = [
     notifyAfterCommit: 'notifyEstimateToCreatorAndRequester',  // C5（双收件人，T-M3）
   },
   {
+    action: 'set_scheduled_start',          // 定计划开工日：开发中（不改 status·须 dev_estimated_at 非空·admin·参考字段）—— 受理排期改造 §7.2
+    from: ['开发中'], to: null,             // 旁路·YYYY-MM-DD·可传 null 清除
+    roleGuard: 'admin', ownerGuard: null,
+    requiredPayload: ['scheduled_start'],   // 端点校 dev_estimated_at 非空 + 日期格式
+    sideEffects: ['scheduled_start 写入/清除（参考字段·非闸门·§7.2）'],
+    timelineEvent: 'note', actionCode: 'set_scheduled_start',
+    notifyAfterCommit: null,
+  },
+  {
     action: 'submit',                       // 提交：开发中 → 待验证（闸门 交付说明 + dev_estimated_at 非空）—— 端点 C3
     from: ['开发中'], to: '待验证',
     roleGuard: null, ownerGuard: 'assignee',
@@ -139,7 +212,7 @@ const CHANGE_FLOW_TRANSITIONS = [
     from: ['待验证'], to: '开发中',
     roleGuard: 'admin', ownerGuard: null,
     requiredPayload: ['reason'],            // 打回原因 trim 非空
-    sideEffects: ['return_count++（U-2）', 'dev_estimated_at 清空（T-M2）'],
+    sideEffects: ['return_count++（U-2）', 'dev_estimated_at 清空（T-M2）', 'scheduled_start 清空（受理排期改造 §7.2·预计变则开工日失效）'],
     timelineEvent: 'return', actionCode: null,
     notifyAfterCommit: 'notifyReturnedToDeveloper',  // C5
   },
@@ -163,8 +236,11 @@ const CHANGE_FLOW_TRANSITIONS = [
   },
   // ── 旁路态动作（§3.4，端点 C3+）──────────
   {
-    action: 'hold',                         // 暂缓：任意活跃态 → 已暂缓（admin，原因必填）
-    from: ['待评估', '已排期', '开发中', '待验证', '待上线'], to: '已暂缓',
+    action: 'hold',                         // 暂缓：活跃态 → 已暂缓（admin，原因必填）
+    // 受理排期改造 §4.2/§B（129-H1）：from 去「待评估/已排期」（态已删）+ 去「待受理/待修改」（INTAKE 族·禁受理阶段暂缓）——
+    //   若允许 INTAKE→hold→已暂缓(D_PRE)，因 add/remove 允许 D_PRE 会形成「待受理→暂缓→加减成员→resume 回待受理」绕过受理门。
+    //   受理阶段未进开发无需暂缓·要缓走 intake_return 退改。
+    from: ['待指派', '开发中', '待验证', '待上线'], to: '已暂缓',
     roleGuard: 'admin', ownerGuard: null,
     requiredPayload: ['reason'],
     sideEffects: ['进入暂缓前活跃态记入 timeline from_status（H-1 恢复用）'],
@@ -182,16 +258,17 @@ const CHANGE_FLOW_TRANSITIONS = [
   },
   {
     action: 'reactivate',                   // 重新激活：已拒绝 → 初始态（admin，不计返工，RC-M1）
-    from: ['已拒绝'], to: '待评估',         // 变更流回 待评估（bug 流有独立条目回 待处理，见 BUG_FLOW_TRANSITIONS）
+    // 受理排期改造 §9：to 动态解析（resolveInitialStatus 读单据当前 intake_required·1→待受理·0→待指派）·不固定待指派。
+    from: ['已拒绝'], to: null, dynamicTarget: 'initial_status', targetEntity: 'current_issue',
     roleGuard: 'admin', ownerGuard: null,
     requiredPayload: ['reason'],
-    sideEffects: ['回初始态重走指派流程（reopen_count 不变）'],
+    sideEffects: ['回初始态重走受理/指派流程（reopen_count 不变）'],
     timelineEvent: 'status_change', actionCode: 'reactivate',
     notifyAfterCommit: null,
   },
   {
-    action: 'issue_reject',                 // 拒绝：待评估 → 已拒绝（admin，原因必填，§3.4）
-    from: ['待评估'], to: '已拒绝',
+    action: 'issue_reject',                 // 拒绝：待受理 → 已拒绝（admin，原因必填，§3.4）
+    from: ['待受理'], to: '已拒绝',         // 受理排期改造：from 由「待评估」改「待受理」（前段唯一可拒态）
     roleGuard: 'admin', ownerGuard: null,
     requiredPayload: ['reason'],
     sideEffects: [],
@@ -212,7 +289,7 @@ const CHANGE_FLOW_TRANSITIONS = [
     from: ['已上线', '已关闭'], to: '开发中',
     roleGuard: 'admin', ownerGuard: null,
     requiredPayload: ['reason'],
-    sideEffects: ['reopen_count++', 'reopened_at=now', '清 accepted_at/released_at/closed_at/release_id/dev_estimated_at（first_submitted_at 永不变）'],
+    sideEffects: ['reopen_count++', 'reopened_at=now', '清 accepted_at/released_at/closed_at/release_id/dev_estimated_at/scheduled_start（first_submitted_at 永不变·受理排期改造 §7.2）'],
     timelineEvent: 'reopen', actionCode: null,
     notifyAfterCommit: 'notifyAssignedDeveloper',  // C5
   },
@@ -254,10 +331,12 @@ const CHANGE_FLOW_TRANSITIONS = [
   },
   {
     action: 'derive',                       // 派生迭代：原单任意态 → 新建一单（admin，防环，§5.1）
-    from: '*', to: null,                    // 新建单，不改原单 status
+    // 受理排期改造 §9：derive 不改原单（to:null·kind='side_effect'）但**新单**落态动态解析（resolveInitialStatus·新单默认 intake_required=0）——
+    //   用 createdIssueDynamicTarget（非共用 dynamicTarget·区分目标属当前单还是新单）+ targetEntity='created_issue'。
+    from: '*', to: null, createdIssueDynamicTarget: 'initial_status', targetEntity: 'created_issue',
     roleGuard: 'admin', ownerGuard: null,
     requiredPayload: ['type', 'title', 'system_name', 'source'],  // 新单建单字段 + origin_issue_id
-    sideEffects: ['新建单 origin_issue_id=原单 id', '先写 created 再写 derive（T-L3）', '防环 M-1'],
+    sideEffects: ['新建单 origin_issue_id=原单 id·新单默认 intake_required=0（不继承·admin 可后续 change_intake_mode）', '先写 created 再写 derive（T-L3）', '防环 M-1'],
     timelineEvent: 'derive', actionCode: null,
     notifyAfterCommit: null,
   },
@@ -280,12 +359,69 @@ const CHANGE_FLOW_TRANSITIONS = [
 const BUG_FLOW_TRANSITIONS = [
   {
     action: 'create',                       // 建单（端点 POST /sys-issues，不走 transition；此条供 meta 完整性）
-    from: [], to: '待处理',
+    // 受理排期改造 §9：bug create.to 亦改机器契约（选对接人→待受理 / 未选→待处理·resolveInitialStatus 动态解析）。
+    from: [], to: null, dynamicTarget: 'initial_status', targetEntity: 'current_issue',
     roleGuard: 'admin', ownerGuard: null,
     requiredPayload: ['type', 'title', 'system_name', 'source'],
     sideEffects: ['INSERT 主表 + 写 created timeline', '可选报障人 requester_*（§3 复用，不新增 reporter_*）'],
     timelineEvent: 'created', actionCode: null,
     notifyAfterCommit: null,                // 建单后路由（先通知对接人/直通开发）= Commit ④ 手动链
+  },
+  // ── 受理门动作（受理排期改造 §4.3·bug 也走受理门·用户拍板·intake_required=1 才走）──────────
+  {
+    action: 'intake_accept',                // 受理通过：待受理 → 待处理（bug 正常汇合边·对接人∨admin）
+    from: ['待受理'], to: '待处理',
+    roleGuard: 'intake_liaison', ownerGuard: null,
+    requiredPayload: [],
+    sideEffects: [],
+    timelineEvent: 'status_change', actionCode: 'intake_accept',
+    notifyAfterCommit: null,
+  },
+  {
+    action: 'intake_return',                // 受理退改：待受理 → 待修改（对接人∨admin，原因必填）
+    from: ['待受理'], to: '待修改',
+    roleGuard: 'intake_liaison', ownerGuard: null,
+    requiredPayload: ['reason'],
+    sideEffects: ['notify 建单人（退改需修改）'],
+    timelineEvent: 'status_change', actionCode: 'intake_return',
+    notifyAfterCommit: null,
+  },
+  {
+    action: 'resubmit_intake',              // 修改后重新提交：待修改 → 待受理（建单人∨admin·§5.3·codex131-H1 修）
+    from: ['待修改'], to: '待受理',
+    roleGuard: 'creator_or_admin', ownerGuard: null,
+    requiredPayload: [],
+    sideEffects: [],
+    timelineEvent: 'status_change', actionCode: 'resubmit_intake',
+    notifyAfterCommit: null,                // 本期不发·待受理列表驱动（§4.5）
+  },
+  {
+    action: 'edit_in_revision',             // 待修改态编辑内容：待修改 → 待修改（建单人∨admin·旁路·130-M 补 bug 亦有·codex131-H1 修）
+    from: ['待修改'], to: null,
+    roleGuard: 'creator_or_admin', ownerGuard: null,
+    requiredPayload: [],
+    sideEffects: ['白名单字段更新（§5.2）', 'note timeline 快照改动字段'],
+    timelineEvent: 'note', actionCode: 'edit_in_revision',
+    notifyAfterCommit: null,
+  },
+  {
+    action: 'request_tech_consult',         // 发起技术负责人沟通：待受理 → 待受理（对接人∨admin·文案"请技术负责人协助判断/定位"）
+    from: ['待受理'], to: null,
+    roleGuard: 'intake_liaison', ownerGuard: null,
+    requiredPayload: ['tech_lead_id'],
+    sideEffects: ['tech_lead_id/_name 写入', '自动首发技术负责人通知（§6）'],
+    timelineEvent: 'note', actionCode: 'request_tech_consult',
+    notifyAfterCommit: null,
+  },
+  {
+    action: 'change_intake_mode',           // 切换受理模式：待受理/待修改/待处理 → §5.4 bug 真值表（admin·原因必填）
+    from: ['待受理', '待修改', '待处理'], to: null,
+    dynamicTarget: 'intake_mode', targetEntity: 'current_issue',
+    roleGuard: 'admin', ownerGuard: null,
+    requiredPayload: ['reason'],
+    sideEffects: ['intake_required 翻转 + status 同事务切换（§5.4 bug）'],
+    timelineEvent: 'status_change', actionCode: 'change_intake_mode',
+    notifyAfterCommit: null,
   },
   {
     action: 'assign',                       // 指派：待处理 → 处理中（前段直达，无排期）
@@ -319,6 +455,15 @@ const BUG_FLOW_TRANSITIONS = [
     notifyAfterCommit: 'notifyEstimateToCreatorAndRequester',   // 报障人侧复用 requester_*（无报障人保持 not_sent）
   },
   {
+    action: 'set_scheduled_start',          // 定计划开工日：处理中（不改 status·须 dev_estimated_at 非空·admin·参考字段）—— 受理排期改造 §7.2（H2 bug 亦支持）
+    from: ['处理中'], to: null,
+    roleGuard: 'admin', ownerGuard: null,
+    requiredPayload: ['scheduled_start'],
+    sideEffects: ['scheduled_start 写入/清除（参考字段·非闸门）'],
+    timelineEvent: 'note', actionCode: 'set_scheduled_start',
+    notifyAfterCommit: null,
+  },
+  {
     action: 'submit',                       // 提交修复：处理中 → 待验证（闸门：交付说明 + dev_estimated_at 非空）
     from: ['处理中'], to: '待验证',
     roleGuard: null, ownerGuard: 'assignee',
@@ -342,14 +487,14 @@ const BUG_FLOW_TRANSITIONS = [
     from: ['待验证'], to: '处理中',
     roleGuard: 'admin', ownerGuard: null,
     requiredPayload: ['reason'],
-    sideEffects: ['return_count++', 'dev_estimated_at 清空',
+    sideEffects: ['return_count++', 'dev_estimated_at 清空', 'scheduled_start 清空（受理排期改造 §7.2·H2）',
       '（共享 switch 分支连带清评估+blocked 字段——bug 恒 NULL/0，零副作用）'],
     timelineEvent: 'return', actionCode: null,
     notifyAfterCommit: 'notifyReturnedToDeveloper',
   },
   {
-    action: 'issue_reject',                 // 拒绝：待处理 → 已拒绝（admin，原因必填；bug 仅前段可拒）
-    from: ['待处理'], to: '已拒绝',
+    action: 'issue_reject',                 // 拒绝：待受理/待处理 → 已拒绝（admin，原因必填·受理排期改造 §4.3 双 from）
+    from: ['待受理', '待处理'], to: '已拒绝',
     roleGuard: 'admin', ownerGuard: null,
     requiredPayload: ['reason'],
     sideEffects: [],
@@ -357,11 +502,12 @@ const BUG_FLOW_TRANSITIONS = [
     notifyAfterCommit: null,
   },
   {
-    action: 'reactivate',                   // 重新激活：已拒绝 → 待处理（回 bug 初始态，不计返工）
-    from: ['已拒绝'], to: '待处理',
+    action: 'reactivate',                   // 重新激活：已拒绝 → 初始态（回 bug 初始态·不计返工）
+    // 受理排期改造 §9：to 动态解析（resolveInitialStatus 读当前 intake_required·1→待受理·0→待处理）·存量已拒绝 intake_required=0 走待处理。
+    from: ['已拒绝'], to: null, dynamicTarget: 'initial_status', targetEntity: 'current_issue',
     roleGuard: 'admin', ownerGuard: null,
     requiredPayload: ['reason'],
-    sideEffects: ['回初始态重走指派流程（reopen_count 不变）'],
+    sideEffects: ['回初始态重走受理/指派流程（reopen_count 不变）'],
     timelineEvent: 'status_change', actionCode: 'reactivate',
     notifyAfterCommit: null,
   },
@@ -468,7 +614,11 @@ function resolveToStatus(transition, fromStatus) {
 //   本白名单集不因此报废——保留字面量对 KIND_EXPECT 类测试无害（Set.has 对不存在的 action 从不命中，
 //   不影响 buildMeta 分类）；新增 assign-release-dev（不改 status，真旁路）入本白名单，execute-release
 //   （真改 status 为 已上线）不入，走默认 'transition' 分类。
-const SIDE_EFFECT_ACTIONS = new Set(['estimate', 'feasibility', 'blocked', 'unblock', 'derive', 'scope_change', 'set_release_flag', 'assign-release-dev']);
+//   ⚠️ 受理排期改造 §4.4 断言3：request_tech_consult/edit_in_revision/set_scheduled_start 入旁路（to=null 不改 status·真旁路）。
+//     change_intake_mode/reactivate/create 虽 to=null 但带 dynamicTarget（动态解析**当前单** status·非"不改"）→ 不入旁路、走 'transition' 分类。
+//     ⚠️ derive **仍入旁路 side_effect**（codex131-L5 修·方案 §9）——derive **不改原单 status**（to=null 真旁路），createdIssueDynamicTarget 只描述**新建实体**的动态初始态·不改变原单分类。
+const SIDE_EFFECT_ACTIONS = new Set(['estimate', 'feasibility', 'blocked', 'unblock', 'derive', 'scope_change', 'set_release_flag', 'assign-release-dev',
+  'request_tech_consult', 'edit_in_revision', 'set_scheduled_start']);
 
 // ── 开发工作态统一判定（bug 方案 [审:M4] isDevWorkState，Commit ①）──────────
 //   「开发正在干活」的态名按类型不同（变更流=开发中 / bug=处理中 / config 追加时=处理中），
@@ -497,11 +647,16 @@ function buildMeta() {
   const typeFlows = {};         // type → [{ action, from, to, requiredPayload, needsPayload }]（前端类型联动按钮显隐）
   const actions = {};           // action → 中文 label（前端动作按钮文案）
   const ACTION_LABELS = {
+    // ⚠️ schedule '排期' 标签保留（受理排期改造：schedule 动作退场·TRANSITIONS 已删条目·但历史 timeline 行 action_code='schedule' 仍需渲染）。
     create: '建单', schedule: '排期', assign: '指派', reassign: '改派',
     estimate: '回填预计完成', submit: '标记我的开发完成', accept: '验收通过', return: '验收打回',   // P4：submit 改名（去主次多开发·仅标记本人开发项完成·H7）
     publish: '批次发布', close: '关闭', hold: '暂缓', resume: '恢复',
     reactivate: '重新激活', issue_reject: '拒绝', void: '作废', reopen: '重开',
     feasibility: '可行性评估', blocked: '标记受阻', unblock: '解除受阻',
+    // 受理排期改造 §5/§6/§7：受理门 + 技术负责人 + 计划开工日新动作
+    intake_accept: '受理通过', intake_return: '退回修改', resubmit_intake: '重新提交受理',
+    request_tech_consult: '请技术负责人沟通', edit_in_revision: '编辑内容', change_intake_mode: '切换受理模式',
+    set_scheduled_start: '定计划开工日',
     // scope_change label 为 config 流预留（feature/improvement 已移除该动作，typeFlows 不含）——
     //   meta.actions 是全动作 label 超集，前端按 typeFlows 显隐按钮，故残留此 label 无害（ultracode 对抗审确认）。
     scope_change: '范围变更', derive: '派生迭代',
@@ -522,18 +677,49 @@ function buildMeta() {
       to: t.to,                                  // 字符串 / 映射 / null（前端据此判断是否旁路动作）
       requiredPayload: t.requiredPayload || [],
       kind: SIDE_EFFECT_ACTIONS.has(t.action) ? 'side_effect' : 'transition',   // codex 17 M-1 + codex 20 L-1：显式白名单判定旁路动作（路由专用端点），新增动作默认 transition；resume 虽 to=null（动态解析 status）但不在白名单 → 正确标 transition
+      // 受理排期改造 §9：动态目标标记原样暴露（消费者见即知"目标由 resolver 解析·不可静态读 to"）——
+      //   dynamicTarget='initial_status'/'intake_mode'（作用当前单）｜createdIssueDynamicTarget（作用新单·derive）｜targetEntity 区分实体。
+      ...(t.dynamicTarget ? { dynamicTarget: t.dynamicTarget } : {}),
+      ...(t.createdIssueDynamicTarget ? { createdIssueDynamicTarget: t.createdIssueDynamicTarget } : {}),
+      ...(t.targetEntity ? { targetEntity: t.targetEntity } : {}),
       // 仅暴露"是否需弹窗收集 payload"，不暴露内部 guard/sideEffects（M-4）
     }));
   }
   for (const a of Object.keys(ACTION_LABELS)) actions[a] = ACTION_LABELS[a];
 
-  return { statusLabels, typeFlows, actions, bizSystems: BIZ_SYSTEMS, initialStatusByType: INITIAL_STATUS_BY_TYPE };
+  // 受理排期改造 §9：initialStatusesByType（复数·新形状）替代旧 initialStatusByType——前端从此取初始态，禁从 create.to 推导。
+  //   ⚠️ codex132-L1 修（单一事实源）：两分支值统一由 resolveInitialStatus 生成·不再硬编码 '待受理'/直读 WITHOUT_INTAKE 映射·
+  //   杜绝"resolver 唯一权威"声明与 meta 组装第二套逻辑漂移。
+  const initialStatusesByType = {};
+  for (const type of Object.keys(INITIAL_STATUS_WITHOUT_INTAKE_BY_TYPE)) {
+    initialStatusesByType[type] = { with_intake: resolveInitialStatus(type, 1), without_intake: resolveInitialStatus(type, 0) };
+  }
+
+  return { statusLabels, typeFlows, actions, bizSystems: BIZ_SYSTEMS, initialStatusesByType };
 }
+
+// ⚠️ 已实现 roleGuard 枚举（SSOT·受理排期改造 C2·codex C2 常规审 MED-1 收口）：引擎（index.js sysIssueTransition [3]）
+//   逐个判断这些 guard 字符串·permitted 初值 true → 未知 guard 静默放行是结构性 fail-open。引擎对**非空未知 roleGuard**
+//   显式拒绝（500 UNKNOWN_ROLE_GUARD·fail-closed）·本集是判定基准。roleGuard 为空/undefined 合法（靠 ownerGuard·如 estimate/submit）。
+//   verify-sys-meta 断言 TRANSITIONS 里所有非空 roleGuard ∈ 本集（防新增 transition 拼错/漏实现）。
+const KNOWN_ROLE_GUARDS = new Set(['admin', 'admin_or_bug_liaison', 'intake_liaison', 'creator_or_admin']);
+
+// 受理排期改造 C3（codex C3 常规审 MED-1）：受理门动作运行期不变量集——**仅被 sysIssueTransition 引擎消费**（[3.5] 处校验）：
+//   这些经引擎流转的受理动作**仅当 intake_required=1 才可执行**（transitions.js:84「intake_required=1 才走」升级为引擎 fail-closed·
+//   堵 resubmit_intake 产「待受理+intake_required=0」矛盾组合）。
+//   ⚠️ 只含**走 sysIssueTransition** 的受理动作。以下不在本集：
+//     · change_intake_mode（C4·自持事务端点·非引擎）——它翻转 intake_required·加了会自锁开受理门路径。
+//     · edit_in_revision（C4·自持事务端点·直接查 status='待修改' 门·不经引擎）——待修改态结构上 intake_required=1，网关由端点 status 门隐含保证，无需入本集。
+//   C5 的 request_tech_consult 若**走 sysIssueTransition** 才须加入本集（待受理态发起·要 intake_required=1）；若做成自持端点则同 edit_in_revision 由 status 门隐含。
+const INTAKE_GATE_ACTIONS = new Set(['intake_accept', 'intake_return', 'resubmit_intake']);
 
 module.exports = {
   BIZ_SYSTEMS,
-  INITIAL_STATUS_BY_TYPE,
+  INITIAL_STATUS_WITHOUT_INTAKE_BY_TYPE,
+  resolveInitialStatus,          // 受理排期改造 §9：建单/派生/reactivate 落态唯一权威
   ALLOWED_STATUSES,
+  KNOWN_ROLE_GUARDS,             // 受理排期改造 C2（codex MED-1）：引擎默认拒绝未知 roleGuard 的判定基准
+  INTAKE_GATE_ACTIONS,           // 受理排期改造 C3（codex MED-1）：受理门动作 intake_required=1 运行期不变量集
   TRANSITIONS,
   transitionsForType,
   findTransition,

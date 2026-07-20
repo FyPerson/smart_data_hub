@@ -74,8 +74,7 @@ async function seedToDevInProgress(assignTo = 5) {
   let r = await call('POST', '/api/sys-issues', adminTok, { type: 'feature', title: 't', system_name: 'BMS', source: '内部' });
   assert.strictEqual(r.status, 201, '建单 201, got ' + r.status);
   const id = r.body.id;
-  r = await call('POST', `/api/sys-issues/${id}/schedule`, adminTok, {});
-  assert.strictEqual(r.status, 200, 'schedule 200, got ' + r.status + ' ' + JSON.stringify(r.body));   // codex 15 L-1
+  // 受理排期改造：schedule 退场——建单直落「待指派」(intake_required=0)，直接 assign（待指派→开发中）。
   r = await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: assignTo });
   assert.strictEqual(r.status, 200, 'assign 200, got ' + r.status + ' ' + JSON.stringify(r.body));      // codex 15 L-1
   return id;
@@ -193,23 +192,27 @@ async function main() {
     assert.strictEqual(r.body.code, 'INVALID_TRANSITION', 'reopen from 白名单外应 INVALID_TRANSITION');
     ok('[W07 证据·reopen] 非法拒绝：开发中态 reopen → 400 INVALID_TRANSITION（from 白名单仅已上线/已关闭）');
 
-    // ── [6] issue_reject → reactivate（待评估 → 已拒绝 → 待评估）──
+    // ── [6] issue_reject → reactivate（待受理 → 已拒绝 → 待指派）──
+    //   受理排期改造：issue_reject.from 由「待评估」改「待受理」（前段唯一可拒态）。C0 阶段 intake_required 列未加、
+    //   建单只能落待指派，无法经业务路径造待受理单，故用 DB 直接置态造夹具（测状态机边本身·非业务流）。
     let rr = await call('POST', '/api/sys-issues', adminTok, { type: 'feature', title: 'reject测', system_name: 'BMS', source: '内部' });
-    const id5 = rr.body.id;   // 待评估
+    const id5 = rr.body.id;   // 待指派（intake_required=0）
+    await run("UPDATE sys_issues SET status='待受理' WHERE id=?", [id5]);   // 夹具置态：模拟受理门内单据
     r = await call('POST', `/api/sys-issues/${id5}/issue-reject`, adminTok, { reason: '不做' });
-    assert.strictEqual(r.status, 200, 'issue-reject 200');   // L-1
+    assert.strictEqual(r.status, 200, 'issue-reject 200 (待受理→已拒绝)');   // L-1
     assert.strictEqual(r.body.status, '已拒绝', 'issue_reject → 已拒绝');
     r = await call('POST', `/api/sys-issues/${id5}/reactivate`, adminTok, { reason: '重新考虑' });
     assert.strictEqual(r.status, 200, 'reactivate 200');   // L-1
-    assert.strictEqual(r.body.status, '待评估', 'reactivate → 待评估（回初始态）');
+    // reactivate 动态解析（§9）：存量 intake_required=0 → 待指派（非待受理·非旧待评估）
+    assert.strictEqual(r.body.status, '待指派', 'reactivate → 待指派（回初始态·intake_required=0 无受理分支）');
     const d5 = await get('SELECT reopen_count FROM sys_issues WHERE id=?', [id5]);
     assert.strictEqual(d5.reopen_count, 0, 'reactivate 不计返工（reopen_count 不变 RC-M1）');
-    ok('issue_reject → reactivate：待评估 → 已拒绝 → 待评估（回初始态，reopen_count 不变 RC-M1）');
+    ok('issue_reject → reactivate：待受理 → 已拒绝 → 待指派（回初始态·reopen_count 不变 RC-M1）');
     // [codex 98 号 MED7① 自检补漏] W07 证据表——reactivate 补非法拒绝：from 白名单仅 [已拒绝]，非该态 reactivate → 400
-    r = await call('POST', `/api/sys-issues/${id5}/reactivate`, adminTok, { reason: '再试一次' });   // id5 此时已是「待评估」（上面刚 reactivate 过），非「已拒绝」
+    r = await call('POST', `/api/sys-issues/${id5}/reactivate`, adminTok, { reason: '再试一次' });   // id5 此时已是「待指派」（上面刚 reactivate 过），非「已拒绝」
     assert.strictEqual(r.status, 400, `[W07 证据·reactivate] 非已拒绝态 reactivate 应 400, got ${r.status} ${JSON.stringify(r.body)}`);
     assert.strictEqual(r.body.code, 'INVALID_TRANSITION', 'reactivate from 白名单外应 INVALID_TRANSITION');
-    ok('[W07 证据·reactivate] 非法拒绝：待评估态（非已拒绝）reactivate → 400 INVALID_TRANSITION');
+    ok('[W07 证据·reactivate] 非法拒绝：待指派态（非已拒绝）reactivate → 400 INVALID_TRANSITION');
 
     // ── [7] void（作废）──
     // [codex 98 号 MED7① 自检补漏] W07 证据表——void from='*'（任意态皆可作废），故唯一可测的"非法拒绝"

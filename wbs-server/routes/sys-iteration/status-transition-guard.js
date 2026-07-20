@@ -42,9 +42,11 @@ function reject400(msg) { throw new MainStatusGuardError(400, 'GATE_INVARIANT', 
 
 // routeKind → 允许的「目标基础族」白名单（开发计划 v2.9 §2.6 表，联合 SSOT）。RESET 不改主状态，不在此列。
 const ALLOWED_TARGET_FAMILIES = {
-  CREATE: ['D_PRE', 'DEV'],
+  // 受理排期改造 §9/§B：CREATE 可落 INTAKE(待受理)/D_PRE(待指派/待处理)/DEV(A 路径 assign)；
+  //   ADMIN_TRANSITION 加 INTAKE——intake_accept/return/resubmit/change_intake_mode/reactivate 可进出 INTAKE 态（受理门流转）。
+  CREATE: ['INTAKE', 'D_PRE', 'DEV'],
   GATE: ['DEV', 'VERIFY'],
-  ADMIN_TRANSITION: ['D_PRE', 'DEV', 'VERIFY', 'NONRELEASE_TERMINAL', 'RELEASE'],
+  ADMIN_TRANSITION: ['INTAKE', 'D_PRE', 'DEV', 'VERIFY', 'NONRELEASE_TERMINAL', 'RELEASE'],
   RELEASE: ['RELEASE'],
 };
 
@@ -127,10 +129,16 @@ function assertMainStatusTransition(p) {
 
   if (routeKind === 'CREATE') {
     if (before !== null && before !== undefined) reject409('CREATE 边要求 before=null（before=null 只校验 after）');
-    const dPreInitial = T.INITIAL_STATUS_BY_TYPE[issueType];
-    if (after === dPreInitial) afterFamily = 'D_PRE';
+    // 受理排期改造 §9：create 落态由 resolveInitialStatus(type,intake_required) 动态解析——两种合法落态：
+    //   intake_required=1 → '待受理'(INTAKE)；intake_required=0 → 无受理初始态（feature/improvement=待指派 / bug=待处理·D_PRE）。
+    //   guard 纯函数拿不到 intake_required，故按"after 命中两解之一"校验（禁放宽任意 D_PRE/INTAKE 态）。
+    //   建单后立即 A 路径 assign（→devStatus）仍保留（bug 专属·建单端点内串 assign）。
+    const initialWithIntake = T.resolveInitialStatus(issueType, 1);      // 恒 '待受理'
+    const initialWithoutIntake = T.resolveInitialStatus(issueType, 0);   // 待指派 / 待处理
+    if (after === initialWithIntake) afterFamily = 'INTAKE';
+    else if (after === initialWithoutIntake) afterFamily = SF.familyOfStatus(issueType, after);  // D_PRE
     else if (after === devStatus) afterFamily = 'DEV';
-    else reject409(`CREATE 边非法：null→${after}（仅允许 null→${dPreInitial} 或 null→${devStatus}）`);
+    else reject409(`CREATE 边非法：null→${after}（仅允许 null→${initialWithIntake} / null→${initialWithoutIntake} / null→${devStatus}）`);
 
   } else if (routeKind === 'GATE') {
     if (before === devStatus && after === verifyStatus) afterFamily = 'VERIFY';
@@ -170,15 +178,37 @@ function assertMainStatusTransition(p) {
     } else {
       const transition = T.findTransition(issueType, action, before);
       if (!transition) reject409(`ADMIN_TRANSITION 无此边：type=${issueType} action=${action} from=${before}`);
-      const resolvedTo = T.resolveToStatus(transition, before);
-      // resolvedTo===null 表示旁路动作（不改 status，如 estimate/feasibility）——不该以 ADMIN_TRANSITION 主状态
-      //   routeKind 调用本函数（旁路动作不算主状态转换）。resume 已在上面单独处理，这里不会再遇到
-      //   resolvedTo===undefined 的动态解析情形。
-      if (resolvedTo === null) reject409(`action=${action} 是旁路动作（不改 status），不应以 ADMIN_TRANSITION routeKind 校验主状态转换`);
-      if (resolvedTo !== undefined && resolvedTo !== after) {
-        reject409(`ADMIN_TRANSITION 边解析目标「${resolvedTo}」与传入 after「${after}」不一致`);
+      // 受理排期改造 §9：dynamicTarget 具名边（reactivate·to=null 但落态由 resolveInitialStatus 动态解析·作用当前单）——
+      //   仿 resume：不走"resolvedTo===null→旁路误拒"，只校 after 落在合法初始态集（两解之一）+ 求族。
+      if (transition.dynamicTarget === 'initial_status' && transition.targetEntity === 'current_issue') {
+        const initWithIntake = T.resolveInitialStatus(issueType, 1);      // 待受理
+        const initWithoutIntake = T.resolveInitialStatus(issueType, 0);   // 待指派/待处理
+        if (after !== initWithIntake && after !== initWithoutIntake) {
+          reject409(`${action} 动态目标「${after}」不在合法初始态集（${initWithIntake}/${initWithoutIntake}）`);
+        }
+        afterFamily = SF.familyOfStatus(issueType, after);
+      } else if (transition.dynamicTarget === 'intake_mode' && transition.targetEntity === 'current_issue') {
+        // 受理排期改造 §5.4（codex131-M2 修）：change_intake_mode 切换受理模式·目标态依 before+intake_required+方向动态解析（§5.4 真值表）。
+        //   ⚠️ 松校验：C0 阶段 guard 拿不到 intake_required（列未加·算不出开↔关方向），故只校 after ∈ 合法前段态集（INTAKE∪D_PRE 前段·待受理/待修改/待指派/待处理）+ 求族；
+        //   完整方向校验（哪个方向落哪个态）留 change_intake_mode 端点事务内（C4）。防"dynamicTarget!=initial_status 掉进 else 被 resolveToStatus→null 误拒为旁路"。
+        const intakeStatuses = SF.getFamilyStatuses(issueType, 'INTAKE');                    // 待受理/待修改
+        const dPreFrontStatuses = SF.getFamilyStatuses(issueType, 'D_PRE').filter(s => s !== '已暂缓');   // 待指派(变更流)/待处理(bug)·非暂缓
+        const legalTargets = [...intakeStatuses, ...dPreFrontStatuses];
+        if (!legalTargets.includes(after)) {
+          reject409(`change_intake_mode 动态目标「${after}」不在合法前段态集（${legalTargets.join('/')}）`);
+        }
+        afterFamily = SF.familyOfStatus(issueType, after);
+      } else {
+        const resolvedTo = T.resolveToStatus(transition, before);
+        // resolvedTo===null 表示旁路动作（不改 status，如 estimate/feasibility）——不该以 ADMIN_TRANSITION 主状态
+        //   routeKind 调用本函数（旁路动作不算主状态转换）。resume 已在上面单独处理，这里不会再遇到
+        //   resolvedTo===undefined 的动态解析情形。
+        if (resolvedTo === null) reject409(`action=${action} 是旁路动作（不改 status），不应以 ADMIN_TRANSITION routeKind 校验主状态转换`);
+        if (resolvedTo !== undefined && resolvedTo !== after) {
+          reject409(`ADMIN_TRANSITION 边解析目标「${resolvedTo}」与传入 after「${after}」不一致`);
+        }
+        afterFamily = SF.familyOfStatus(issueType, after);
       }
-      afterFamily = SF.familyOfStatus(issueType, after);
     }
 
   } else if (routeKind === 'RELEASE') {

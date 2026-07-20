@@ -56,11 +56,15 @@ async function main() {
 
   // [1] buildMeta 结构完整
   const meta = T.buildMeta();
-  for (const k of ['statusLabels', 'typeFlows', 'actions', 'bizSystems', 'initialStatusByType']) {
+  for (const k of ['statusLabels', 'typeFlows', 'actions', 'bizSystems', 'initialStatusesByType']) {
     assert.ok(meta[k] !== undefined, `meta 缺字段 ${k}`);
   }
   assert.deepStrictEqual(meta.bizSystems, ['BMS', 'HRD', 'OA', '智数协同', '其他'], 'bizSystems 应为 BIZ_SYSTEMS');
-  ok('buildMeta 结构完整（statusLabels/typeFlows/actions/bizSystems/initialStatusByType）');
+  // 受理排期改造 §9：initialStatusesByType 新形状（{with_intake,without_intake} 每 type）——建单落态两分支权威。
+  assert.strictEqual(meta.initialStatusesByType.feature.with_intake, '待受理', 'feature 受理模式初始态=待受理');
+  assert.strictEqual(meta.initialStatusesByType.feature.without_intake, '待指派', 'feature 无受理初始态=待指派');
+  assert.strictEqual(meta.initialStatusesByType.bug.without_intake, '待处理', 'bug 无受理初始态=待处理');
+  ok('buildMeta 结构完整（statusLabels/typeFlows/actions/bizSystems/initialStatusesByType 新形状）');
 
   // [2] M-4：typeFlows 不暴露内部 guard
   for (const type of Object.keys(meta.typeFlows)) {
@@ -69,8 +73,9 @@ async function main() {
         assert.ok(!(leak in tf), `typeFlows[${type}] 泄露内部字段 ${leak}`);
       }
       // 只暴露 action/from/to/requiredPayload/kind（kind = F2b codex 17 M-1 旁路标记）
+      //   + 受理排期改造 §9：动态目标标记 dynamicTarget/createdIssueDynamicTarget/targetEntity（消费者据此知"目标 resolver 解析·不可静态读 to"）。
       for (const k of Object.keys(tf)) {
-        assert.ok(['action', 'from', 'to', 'requiredPayload', 'kind'].includes(k), `typeFlows[${type}] 含非预期字段 ${k}`);
+        assert.ok(['action', 'from', 'to', 'requiredPayload', 'kind', 'dynamicTarget', 'createdIssueDynamicTarget', 'targetEntity'].includes(k), `typeFlows[${type}] 含非预期字段 ${k}`);
       }
     }
   }
@@ -82,15 +87,22 @@ async function main() {
   assert.ok(Array.isArray(ddlEventTypes) && ddlEventTypes.length > 0, '无法解析 sys_issue_timeline event_type CHECK 枚举');
   ok(`DDL event_type CHECK 枚举解析成功（${ddlEventTypes.length} 个：${ddlEventTypes.join('/')}）`);
 
-  // 收集所有 transition 用到的 timelineEvent + actionCode
+  // 收集所有 transition 用到的 timelineEvent + actionCode + roleGuard
   const usedEvents = new Set();
   const usedActionCodes = new Set();
+  const usedRoleGuards = new Set();
   for (const type of Object.keys(T.TRANSITIONS)) {
     for (const t of T.transitionsForType(type)) {
       if (t.timelineEvent) usedEvents.add(t.timelineEvent);
       if (t.actionCode) usedActionCodes.add(t.actionCode);
+      if (t.roleGuard) usedRoleGuards.add(t.roleGuard);   // 空/undefined 合法（靠 ownerGuard）·只收非空
     }
   }
+  // 受理排期改造 C2（codex MED-1）：所有非空 roleGuard 必须 ∈ KNOWN_ROLE_GUARDS——引擎对未知 roleGuard 默认拒绝
+  //   （500 UNKNOWN_ROLE_GUARD·fail-closed），此断言防 transition 新增/拼错未实现的 guard 值（引擎会拒→动作全挂）。
+  const guardLeak = [...usedRoleGuards].filter(g => !T.KNOWN_ROLE_GUARDS.has(g));
+  assert.strictEqual(guardLeak.length, 0, `transitions 用了引擎未实现的 roleGuard（引擎会 500 UNKNOWN_ROLE_GUARD 拒绝）：${guardLeak.join(',')}`);
+  ok(`⭐ roleGuard 枚举同步（C2·MED-1）：transitions 全部非空 roleGuard（${[...usedRoleGuards].join('/')}）⊆ KNOWN_ROLE_GUARDS（引擎默认拒绝未知 guard·防拼错/漏实现静默放行）`);
   // 每个 timelineEvent 必须 ∈ DDL event_type 枚举（防 05-H1 那类 CHECK 冲突）
   const eventLeak = [...usedEvents].filter(e => !ddlEventTypes.includes(e));
   assert.strictEqual(eventLeak.length, 0, `transitions 用了 DDL CHECK 没有的 event_type（会触发 CHECK 失败）：${eventLeak.join(',')}`);
@@ -108,10 +120,13 @@ async function main() {
   // [4] 变更流类型流完整（feature/improvement 共用 + 含核心动作）
   assert.deepStrictEqual(meta.statusLabels.feature, meta.statusLabels.improvement, 'feature/improvement 状态集应一致（共用变更流）');
   const featureActions = meta.typeFlows.feature.map(t => t.action);
-  for (const a of ['create', 'schedule', 'assign', 'reassign', 'estimate', 'submit', 'accept', 'return', 'publish', 'close']) {
+  // 受理排期改造 §4.2：schedule 退场（从必含动作删）+ 新增受理门动作（intake_accept/intake_return/resubmit_intake/change_intake_mode 等）。
+  for (const a of ['create', 'assign', 'reassign', 'estimate', 'submit', 'accept', 'return', 'publish', 'close',
+    'intake_accept', 'intake_return', 'resubmit_intake', 'request_tech_consult', 'edit_in_revision', 'change_intake_mode', 'set_scheduled_start']) {
     assert.ok(featureActions.includes(a), `变更流缺动作 ${a}`);
   }
-  ok(`变更流类型流完整（feature/improvement 共用，含 create/schedule/assign/reassign/estimate/submit/accept/return/publish/close ${featureActions.length} 动作）`);
+  assert.ok(!featureActions.includes('schedule'), '变更流 schedule 已退场（typeFlows 不应含）');
+  ok(`变更流类型流完整（feature/improvement 共用·schedule 退场·含受理门 intake_accept/return/resubmit/change_intake_mode + set_scheduled_start ${featureActions.length} 动作）`);
 
   // [4b] F2a §3.2：feature/improvement 全禁 scope_change（评估环节"禁开发态调需求"）——typeFlows 彻底移除该动作
   assert.ok(!featureActions.includes('scope_change'), 'feature typeFlows 不应含 scope_change（F2a 已移除）');
@@ -144,6 +159,10 @@ async function main() {
   //   side_effect = 真正不改 status 的旁路动作（路由专用端点）；transition = 改 status（含 resume：to=null 但动态解析目标态）。
   const KIND_EXPECT = {
     estimate: 'side_effect', feasibility: 'side_effect', blocked: 'side_effect', unblock: 'side_effect', derive: 'side_effect', scope_change: 'side_effect',
+    // 受理排期改造 §4.4 断言3：request_tech_consult/edit_in_revision/set_scheduled_start 真旁路（to=null 不改 status）=side_effect；
+    //   change_intake_mode/reactivate 带 dynamicTarget（动态解析 status）+ intake_accept/return/resubmit（静态改态）=transition。
+    request_tech_consult: 'side_effect', edit_in_revision: 'side_effect', set_scheduled_start: 'side_effect',
+    intake_accept: 'transition', intake_return: 'transition', resubmit_intake: 'transition', change_intake_mode: 'transition',
     create: 'transition', schedule: 'transition', assign: 'transition', reassign: 'transition',
     submit: 'transition', accept: 'transition', return: 'transition', publish: 'transition',
     close: 'transition', hold: 'transition', resume: 'transition', reactivate: 'transition',
@@ -165,9 +184,15 @@ async function main() {
   ok('[4d] kind 全集断言：6 旁路 side_effect + 其余 transition（含 resume 专项=transition 防 to=null 误标，codex 17 M-1 + ultracode 对抗审）');
 
   // [5] findTransition / resolveToStatus 行为
-  // 5a. assign：已排期 → 开发中
-  const tAssign = T.findTransition('feature', 'assign', '已排期');
-  assert.ok(tAssign && T.resolveToStatus(tAssign, '已排期') === '开发中', 'assign 已排期→开发中');
+  // 5a. assign：待指派 → 开发中（受理排期改造：from 由已排期改待指派）
+  const tAssign = T.findTransition('feature', 'assign', '待指派');
+  assert.ok(tAssign && T.resolveToStatus(tAssign, '待指派') === '开发中', 'assign 待指派→开发中');
+  // 5a2. 受理排期改造 §5：intake 门流转 + schedule 退场
+  assert.ok(T.findTransition('feature', 'intake_accept', '待受理'), 'intake_accept 待受理→存在');
+  assert.strictEqual(T.resolveToStatus(T.findTransition('feature', 'intake_accept', '待受理'), '待受理'), '待指派', 'intake_accept 待受理→待指派');
+  assert.strictEqual(T.resolveToStatus(T.findTransition('bug', 'intake_accept', '待受理'), '待受理'), '待处理', 'bug intake_accept 待受理→待处理');
+  assert.strictEqual(T.findTransition('feature', 'schedule', '待受理'), null, 'schedule 退场：findTransition 恒 null');
+  assert.strictEqual(T.findTransition('feature', 'schedule', '待指派'), null, 'schedule 退场：任意态 findTransition 恒 null');
   // 5b. reassign（既有测试变更·M3/91 号审）：v2.9 前是静态 from→to 映射（待验证→开发中/开发中→开发中）；
   //   C2 重写为声明式 member_ids 差量 + W-GATE 动态判定目标态，实际目标态事前不可静态得知——改仿 resume 的
   //   to=null 动态解析语义（transitions.js 同批改动），故本处断言随之改为 resolveToStatus 返 null（不再改 status
@@ -176,17 +201,20 @@ async function main() {
   assert.ok(tReassign, 'reassign 常量存在（待验证前置）');
   assert.strictEqual(T.resolveToStatus(tReassign, '待验证'), null, 'reassign to=null（动态解析，不再是静态映射）');
   assert.strictEqual(T.resolveToStatus(tReassign, '开发中'), null, 'reassign 开发中前置同为 to=null');
-  // 5c. void：'*' 通配（任意态）
-  const tVoid = T.findTransition('feature', 'void', '待评估');
-  assert.ok(tVoid && tVoid.from === '*' && T.resolveToStatus(tVoid, '待评估') === '已作废', 'void 通配 → 已作废');
+  // 5c. void：'*' 通配（任意态·用新态待受理验证）
+  const tVoid = T.findTransition('feature', 'void', '待受理');
+  assert.ok(tVoid && tVoid.from === '*' && T.resolveToStatus(tVoid, '待受理') === '已作废', 'void 通配 → 已作废');
   // 5d. estimate：to=null（不改 status 的旁路）
   const tEst = T.findTransition('feature', 'estimate', '开发中');
   assert.strictEqual(T.resolveToStatus(tEst, '开发中'), null, 'estimate to=null（旁路不改 status）');
-  // 5e. 非法：feature 在「待评估」不能 assign（assign 需「已排期」前置）
-  assert.strictEqual(T.findTransition('feature', 'assign', '待评估'), null, 'feature 待评估态不能 assign');
-  // 5f. bug/config 本轮未定义
-  assert.strictEqual(T.findTransition('bug', 'create', null), null, 'bug 流本轮未定义（追加时填）');
-  ok('findTransition/resolveToStatus：assign(已排期→开发中) / reassign to=null(动态解析) / void 通配 / estimate 旁路 to=null / 非法前置态返 null / bug 未定义');
+  // 5e. 非法：feature 在「待受理」不能 assign（assign 需「待指派」前置·受理门未通过不可直派）
+  assert.strictEqual(T.findTransition('feature', 'assign', '待受理'), null, 'feature 待受理态不能 assign（须先 intake_accept 到待指派）');
+  // 5f. create.to=null 机器契约（受理排期改造 §9）：create from:[]·findTransition(create,null) 不命中（防静态读 create.to）
+  const cf = T.buildMeta().typeFlows.feature.find(t => t.action === 'create');
+  assert.strictEqual(cf.to, null, 'create.to=null（机器契约·落态由 resolveInitialStatus 动态解析）');
+  assert.strictEqual(cf.dynamicTarget, 'initial_status', 'create 带 dynamicTarget=initial_status');
+  assert.strictEqual(cf.targetEntity, 'current_issue', 'create targetEntity=current_issue');
+  ok('findTransition/resolveToStatus：assign(待指派→开发中) / intake 门流转 / schedule 退场返 null / void 通配 / estimate 旁路 / 待受理不可 assign / create.to=null 机器契约');
 
   // [6] MED-2（92 号审）+ 93 号收口：reassign 条目 from 与后端 assertMemberActionFamilyAllowed 实际放行集合
   //   "写读同源"——族清单**直接读后端真源 `_internals.MEMBER_ACTION_FAMILY_MATRIX.reassign`**（index.js 导出），

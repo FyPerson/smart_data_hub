@@ -364,6 +364,7 @@ async function verifyMissingColLib() {
   await run2(`CREATE TABLE sys_issue_dev_commits (id INTEGER PRIMARY KEY)`);
   await run2(`CREATE TABLE sys_issue_dev_events (id INTEGER PRIMARY KEY)`);
   await run2(`CREATE TABLE sys_issue_release_commit_snapshots (id INTEGER PRIMARY KEY)`);
+  await run2(`CREATE TABLE sys_schema_migrations (migration_key TEXT PRIMARY KEY, applied_at TEXT NOT NULL)`);   // C1 迁移标记表（须存在满足 [1] 表存在性；本测试焦点是 sys_issues 缺列）
   await mod2._internals.runSysMigration(null);
   const st = mod2._internals.SYS_SCHEMA_STATE;
   assert.strictEqual(st.ready, false, '缺列库 readiness 应为 false');
@@ -411,6 +412,7 @@ async function verifyMissingDevAssigneesColLib() {
   await run3(`CREATE TABLE sys_issue_dev_commits (id INTEGER PRIMARY KEY)`);
   await run3(`CREATE TABLE sys_issue_dev_events (id INTEGER PRIMARY KEY)`);
   await run3(`CREATE TABLE sys_issue_release_commit_snapshots (id INTEGER PRIMARY KEY)`);
+  await run3(`CREATE TABLE sys_schema_migrations (migration_key TEXT PRIMARY KEY, applied_at TEXT NOT NULL)`);   // C1 迁移标记表（满足 [1] 表存在性；本测试焦点是 dev_assignees 缺列）
   await mod3._internals.runSysMigration(null);
   const st3 = mod3._internals.SYS_SCHEMA_STATE;
   assert.strictEqual(st3.ready, false, 'dev_assignees 缺列库 readiness 应为 false');
@@ -438,6 +440,7 @@ async function verifyDevAssigneesGuardAlignment() {
     await run(`CREATE TABLE sys_issue_dev_commits (id INTEGER PRIMARY KEY)`);
     await run(`CREATE TABLE sys_issue_dev_events (id INTEGER PRIMARY KEY)`);
     await run(`CREATE TABLE sys_issue_release_commit_snapshots (id INTEGER PRIMARY KEY)`);
+    await run(`CREATE TABLE sys_schema_migrations (migration_key TEXT PRIMARY KEY, applied_at TEXT NOT NULL)`);   // C1 迁移标记表（满足 [1] 表存在性；Case A/B 焦点均在 dev_assignees 缺列）
   };
   const bootMod = (db, run, get, all) => require('../routes/sys-iteration')({
     logger: { info: noop, warn: noop, error: noop, debug: noop },

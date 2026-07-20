@@ -63,13 +63,11 @@ function call(method, path, tok, body) {
 let passed = 0;
 const ok = (m) => { passed++; console.log('  ✓ ' + m); };
 
-// 建单（needs_feasibility 默认 1）→ schedule → assign → 开发中，返回 id
+// 建单（needs_feasibility 默认 1）→ assign → 开发中，返回 id（受理排期改造：schedule 退场·建单直落待指派）
 async function seedToDev(needsFeasibility = 1, assignTo = 5) {
   let r = await call('POST', '/api/sys-issues', adminTok, { type: 'feature', title: 't', system_name: 'BMS', source: '内部', needs_feasibility: needsFeasibility });
   assert.strictEqual(r.status, 201, '建单 201, got ' + r.status + ' ' + JSON.stringify(r.body));
   const id = r.body.id;
-  r = await call('POST', `/api/sys-issues/${id}/schedule`, adminTok, {});
-  assert.strictEqual(r.status, 200, 'schedule 200');
   r = await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: assignTo });
   assert.strictEqual(r.status, 200, 'assign 200');
   return id;
@@ -131,11 +129,11 @@ async function main() {
     r = await call('POST', `/api/sys-issues/${idF0}/feasibility`, devTok, { conclusion: '可行', requirement_confirm: 'x', dev_estimated_at: EST });
     assert.strictEqual(r.status, 409, 'needs_feasibility=0 → 409'); assert.strictEqual(r.body.code, 'FEASIBILITY_NOT_REQUIRED');
     ok('[F8] needs_feasibility=0 单填评估 → 409 FEASIBILITY_NOT_REQUIRED');
-    // F9 非开发态（待评估单）
-    let rr = await call('POST', '/api/sys-issues', adminTok, { type: 'feature', title: '待评估', system_name: 'BMS', source: '内部', needs_feasibility: 1 });
+    // F9 非开发态（受理排期改造：建单落待指派·非开发态·填评估仍应拒）
+    let rr = await call('POST', '/api/sys-issues', adminTok, { type: 'feature', title: '待指派', system_name: 'BMS', source: '内部', needs_feasibility: 1 });
     r = await call('POST', `/api/sys-issues/${rr.body.id}/feasibility`, devTok, { conclusion: '可行', requirement_confirm: 'x', dev_estimated_at: EST });
     assert.strictEqual(r.status, 409, '非开发态 409'); assert.strictEqual(r.body.code, 'FEASIBILITY_STATUS_INVALID');
-    ok('[F9] 待评估态填评估 → 409 FEASIBILITY_STATUS_INVALID');
+    ok('[F9] 待指派态（非开发态）填评估 → 409 FEASIBILITY_STATUS_INVALID');
     // F10 早于 assigned_at
     r = await call('POST', `/api/sys-issues/${idF}/feasibility`, devTok, { conclusion: '可行', requirement_confirm: 'x', dev_estimated_at: '2020-01-01 10:00' });
     assert.strictEqual(r.body.code, 'ESTIMATE_BEFORE_ASSIGN', 'got ' + (r.body && r.body.code));
