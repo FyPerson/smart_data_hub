@@ -16112,6 +16112,12 @@ const VALID_RETURN_REASONS = ['business_permission', 'dev_permission', 'underlyi
 const RETURN_NOTE_MAX_LEN = 500;
 // v1.71.0 Commit E：数据导出人提交交付物 export_summary 上限（与 RETURN_NOTE 对齐）
 const EXPORT_SUMMARY_MAX_LEN = 500;
+// v1.120.0 直派大文件行政闭环：真直派单 submit-export 的 export_summary 必填下限 10 字。
+//   业务理由：直派单交付物可能是十几 G 大文件无法上传平台，只能线下传递；
+//   要求导出人写清「导出了什么 + 附件情况 / 线下怎么给」留痕（≥10 字）。
+//   2026-07-21 用户调整：从「无附件才必填」扩为「真直派单无论有无附件都必填」（故改名 _DIRECT）。
+//   normal 单 export_summary 仍可选（不受此下限约束）。
+const EXPORT_SUMMARY_MIN_LEN_DIRECT = 10;
 
 app.post('/api/collab/requests/:id/return-to-dev', authenticateToken, requireExporterOrNonViewer, async (req, res) => {
     const idStr = req.params.id;
@@ -16574,38 +16580,49 @@ app.post('/api/collab/requests/:id/submit-export',
             return res.status(400).json({ error: '当前用户 id 非法', code: 'INVALID_USER_ID' });
         }
 
-        // === 前置：附件必填校验 ===
+        // === 前置：附件探测 + 格式校验（v1.120.0 放开必填）===
+        //   放开前：result_data + screenshot 两附件均必填（十几 G 大文件传不了 → 卡死）。
+        //   放开后：允许「无附件提交」——但仅限直派单（assign_mode='admin_direct'，守卫延到 SELECT 后，
+        //   因 assign_mode 需查库），且无附件时 export_summary 变必填（≥10 字，见下方 SELECT 后校验）。
+        //   本段只做：①探测有无附件 ②「同时有或同时无」互斥（防只传一个的半残状态）③有附件时校验格式。
         const resultDataFile = req.files && req.files.result_data && req.files.result_data[0];
         const screenshotFile = req.files && req.files.result_data_screenshot && req.files.result_data_screenshot[0];
-        if (!resultDataFile || !screenshotFile) {
+        const hasResultData = !!resultDataFile;
+        const hasScreenshot = !!screenshotFile;
+        // ②互斥：要么两个都传（走原文件落盘路径），要么都不传（走无附件路径）；只传一个 → 拒绝
+        if (hasResultData !== hasScreenshot) {
             cleanupPending();
             return res.status(400).json({
-                error: 'result_data + result_data_screenshot 均必填',
-                code: 'MISSING_REQUIRED_FILES'
+                error: 'result_data 与 result_data_screenshot 必须同时提交，或同时留空（无附件提交需填写导出概要）',
+                code: 'PARTIAL_ATTACHMENTS'
             });
         }
+        const hasFiles = hasResultData && hasScreenshot;
 
-        // === 前置：result_data 文件二次校验（按 result_data 规则：.xlsx/.xls + 100MB）===
-        const dataCheck = validateCollabAttachmentRule('result_data', resultDataFile.originalname, resultDataFile.size);
-        if (!dataCheck.ok) {
-            cleanupPending();
-            return res.status(400).json({ error: dataCheck.error, code: 'INVALID_RESULT_DATA' });
-        }
-        // === 前置：screenshot 文件二次校验（按 screenshot 规则：图片 + 10MB，codex 39 L-2 采纳）===
-        // v1.77.0 收紧：screenshot 规则为「原始单据截图」放开了 .pdf，但导出截图业务语义=屏幕截图，
-        //   本入口单独排除 PDF（共享规则的两个入口语义不同，防连带放宽）
-        const shotExt = normalizeAttachmentExt(screenshotFile.originalname);
-        if (shotExt === '.pdf') {
-            cleanupPending();
-            return res.status(400).json({ error: '导出数据截图仅支持图片格式（PNG/JPG/GIF/WEBP），不支持 PDF', code: 'INVALID_SCREENSHOT' });
-        }
-        const shotCheck = validateCollabAttachmentRule('screenshot', screenshotFile.originalname, screenshotFile.size);
-        if (!shotCheck.ok) {
-            cleanupPending();
-            return res.status(400).json({ error: shotCheck.error, code: 'INVALID_SCREENSHOT' });
+        if (hasFiles) {
+            // === 前置：result_data 文件二次校验（按 result_data 规则：.xlsx/.xls + 100MB）===
+            const dataCheck = validateCollabAttachmentRule('result_data', resultDataFile.originalname, resultDataFile.size);
+            if (!dataCheck.ok) {
+                cleanupPending();
+                return res.status(400).json({ error: dataCheck.error, code: 'INVALID_RESULT_DATA' });
+            }
+            // === 前置：screenshot 文件二次校验（按 screenshot 规则：图片 + 10MB，codex 39 L-2 采纳）===
+            // v1.77.0 收紧：screenshot 规则为「原始单据截图」放开了 .pdf，但导出截图业务语义=屏幕截图，
+            //   本入口单独排除 PDF（共享规则的两个入口语义不同，防连带放宽）
+            const shotExt = normalizeAttachmentExt(screenshotFile.originalname);
+            if (shotExt === '.pdf') {
+                cleanupPending();
+                return res.status(400).json({ error: '导出数据截图仅支持图片格式（PNG/JPG/GIF/WEBP），不支持 PDF', code: 'INVALID_SCREENSHOT' });
+            }
+            const shotCheck = validateCollabAttachmentRule('screenshot', screenshotFile.originalname, screenshotFile.size);
+            if (!shotCheck.ok) {
+                cleanupPending();
+                return res.status(400).json({ error: shotCheck.error, code: 'INVALID_SCREENSHOT' });
+            }
         }
 
-        // === 前置：export_summary 校验（可选，≤500 字，codex 39 L-1 采纳）===
+        // === 前置：export_summary 上限校验（≤500 字，codex 39 L-1 采纳）===
+        //   下限校验（无附件时 ≥10 字必填）延到 SELECT 之后，因需 assign_mode + hasFiles 联合判定。
         let exportSummary = null;
         if (req.body && req.body.export_summary !== undefined && req.body.export_summary !== null) {
             if (typeof req.body.export_summary !== 'string') {
@@ -16647,7 +16664,7 @@ app.post('/api/collab/requests/:id/submit-export',
             const collab = await dbGetAsync(
                 `SELECT id, status, archived_at, archived_final_at, oa_request_no, description,
                         developer_id, exporter_user_id, exporter_name, attachment_dir, submission_version,
-                        requester_dept, requester_name, created_at
+                        requester_dept, requester_name, created_at, assign_mode, forwarded_to_exporter_at
                    FROM collab_requests WHERE id = ?`,
                 [id]
             );
@@ -16685,9 +16702,54 @@ app.post('/api/collab/requests/:id/submit-export',
                 });
             }
 
-            // === 文件落盘：照搬 admin-submit-on-behalf 路径（codex 39 H-1 采纳）===
-            const versInternal = collabVersioning._internal;
+            // === v1.120.0 无附件路径业务守卫（仅在 hasFiles=false 时生效）===
+            //   缺口来源：直派单交付物可能是十几 G 大文件无法上传平台，只能线下传递。
+            //   守卫①：仅限「真直派 EXPORTING 单」。判据 = assign_mode='admin_direct' && forwarded_to_exporter_at IS NULL。
+            //     ⚠️ codex 02 审 HIGH-1 收严（2026-07-21）：assign_mode 是「来源/历史标识」非「当前流程模式」，
+            //     单看 assign_mode='admin_direct'+EXPORTING 会被下述绕过链骗过：
+            //       admin_direct 单 → admin-direct-fallback 切回流转（status→PENDING_ASSIGN，assign_mode 仍 admin_direct，
+            //       见建表注释 server.js:1814）→ assign → PENDING → forward-to-exporter → EXPORTING。
+            //     此时它已是「正常流转」语义（有 developer 做 SQL、走三级转发），不该允许无附件闭环。
+            //     精确区分字段 = forwarded_to_exporter_at（已核实全部写点，codex 02 复审 MED-2）：
+            //       · admin-direct-create（真直派）：INSERT 只写 exporter_assigned_at 不写 forwarded_to_exporter_at → 恒 NULL
+            //       · forward-to-exporter（三级转发）：写非 NULL
+            //       · admin-direct-fallback（切回流转）：清 forwarded_to_exporter_at=NULL，但状态同步变 PENDING_ASSIGN（非 EXPORTING）
+            //       · admin-direct-reassign（改派导出人）：EXPORTING→EXPORTING 只换 exporter，不动 forwarded_to_exporter_at
+            //     ∴ status='EXPORTING' && forwarded_to_exporter_at IS NULL 的唯一来源=admin-direct-create（含 reassign 换人后），
+            //       从未被 forward 过——fallback 清 NULL 那刻状态已是 PENDING_ASSIGN，要回 EXPORTING 必经 forward（重写非 NULL）。
+            //       故该判据严密等价于「当前是真直派导出态」。
+            //   守卫②：无附件提交仅限真直派单。
+            //   守卫③（2026-07-21 用户调整）：真直派单 export_summary **无论有无附件都必填**（≥10 字符），
+            //     便于留痕说明「导出了什么 + 附件情况 / 线下如何移交」。非直派单概要仍可选（原逻辑）。
+            const isGenuineDirectExporting =
+                collab.assign_mode === 'admin_direct' && collab.forwarded_to_exporter_at == null;
+            if (!hasFiles && !isGenuineDirectExporting) {
+                cleanupPending();
+                return res.status(400).json({
+                    error: '仅直派单支持无附件提交；本单为正常流转单，请上传导出结果与截图',
+                    code: 'NO_FILE_ONLY_FOR_DIRECT'
+                });
+            }
+            if (isGenuineDirectExporting) {
+                // 真直派单：概要必填 ≥10 字（无论有无附件）
+                if (!exportSummary || exportSummary.length < EXPORT_SUMMARY_MIN_LEN_DIRECT) {
+                    cleanupPending();
+                    return res.status(400).json({
+                        error: `直派单提交时，导出概要必填且不少于 ${EXPORT_SUMMARY_MIN_LEN_DIRECT} 字符（说明导出了什么、附件情况，如需线下移交请说明方式）`,
+                        code: 'EXPORT_SUMMARY_REQUIRED_DIRECT',
+                        min_length: EXPORT_SUMMARY_MIN_LEN_DIRECT,
+                        actual_length: exportSummary ? exportSummary.length : 0
+                    });
+                }
+            }
 
+            // === 文件落盘：照搬 admin-submit-on-behalf 路径（codex 39 H-1 采纳）===
+            //   v1.120.0：整段仅 hasFiles=true 时执行；无附件路径下 movedFiles 保持空，
+            //   事务内跳过 supersede/INSERT，仅走 UPDATE collab_requests。
+            const versInternal = collabVersioning._internal;
+            let attachmentDirName = collab.attachment_dir;
+
+            if (hasFiles) {
             // ① 路径校验：每个 multer 文件必须在 _pending/{id}/ 下
             const pendingRoot = path.join(COLLAB_UPLOAD_BASE, '_pending', String(id));
             const uploadedFiles = [
@@ -16705,7 +16767,6 @@ app.post('/api/collab/requests/:id/submit-export',
             }
 
             // ② 决定目标目录（首次激活才需算）
-            let attachmentDirName = collab.attachment_dir;
             if (!attachmentDirName) {
                 attachmentDirName = versInternal.computeAttachmentDirName(id, collab.description);
             }
@@ -16766,11 +16827,13 @@ app.post('/api/collab/requests/:id/submit-export',
                 cleanupPending();
                 return res.status(500).json({ error: '附件文件移动失败', code: 'FILE_MOVE_FAILED' });
             }
+            } // === end if (hasFiles) 文件落盘段 ===
 
             // === 阶段 1：BEGIN IMMEDIATE 事务（supersede 同 type 旧 active + INSERT 新 active + UPDATE collab_requests + INSERT log）===
             //   codex 39 H-1 + codex 47 H-2：submit-export 不递增 submission_version
             //   首次 submit-export 时 collab.submission_version 可能为 NULL/0，用 `|| 1` 统一 rdSeq 与 INSERT 值
             //   → 文件名 seq 与 DB submission_version 字段始终一致
+            //   v1.120.0：无附件路径下 movedFiles 为空，newSubmissionVersion 仅用于 ROLLBACK 时 moveToOrphaned（无文件则 no-op）
             const newSubmissionVersion = collab.submission_version || 1;
 
             try {
@@ -16778,14 +16841,19 @@ app.post('/api/collab/requests/:id/submit-export',
 
                 // 先查同 type 旧 active 用于日志（codex 39 H-2 + M-4 采纳）
                 // 注意：screenshot 类型也会同 type supersede，这是预期（避免一对多 active screenshot 混淆来源）
-                supersededAttachments = await dbAllAsync(
-                    `SELECT id, attachment_type, original_name, uploaded_by, uploaded_by_name
-                       FROM collab_attachments
-                      WHERE collab_request_id = ?
-                        AND attachment_type IN ('result_data', 'screenshot')
-                        AND status = 'active'`,
-                    [id]
-                );
+                // v1.120.0 codex 02 审 MED-2 收严：仅 hasFiles=true 时查询——无附件路径不 supersede 任何附件，
+                //   若仍查询会把仍处 active 的旧附件误报进日志/响应体的 superseded_attachments（审计失真）。
+                //   无附件路径下 supersededAttachments 固定为空数组（初始值）。
+                if (hasFiles) {
+                    supersededAttachments = await dbAllAsync(
+                        `SELECT id, attachment_type, original_name, uploaded_by, uploaded_by_name
+                           FROM collab_attachments
+                          WHERE collab_request_id = ?
+                            AND attachment_type IN ('result_data', 'screenshot')
+                            AND status = 'active'`,
+                        [id]
+                    );
+                }
 
                 // supersede 同 type 旧 active
                 for (const mf of movedFiles) {
@@ -16817,6 +16885,13 @@ app.post('/api/collab/requests/:id/submit-export',
                 //   admin 兜底：若 exporter 上传错误，admin 走 admin-submit-on-behalf 走 DONE→DONE 路径替换文件
                 // codex 39 M-5 采纳保留：清 sql_validation_error + validation_started_at（不残留 dev submit 旧校验）
                 // 双轨守卫：status=EXPORTING + exporter_user_id=userId + archived 双轨
+                // v1.120.0 codex 02 审 MED-1 收严：无附件路径把「真直派 EXPORTING」不变量下沉到 UPDATE 的 WHERE
+                //   （assign_mode='admin_direct' + forwarded_to_exporter_at IS NULL），让数据库写入点兜底——
+                //   即使 SELECT 与 UPDATE 之间被未走本 mutex 的管理端更新改了状态，写点仍守住不变量（changes=0 → 409）。
+                //   有附件路径不加此条件（正常流转单 EXPORTING 传附件闭环是合法的），保持原行为。
+                const noFileWhereGuard = hasFiles
+                    ? ''
+                    : ` AND assign_mode = 'admin_direct' AND forwarded_to_exporter_at IS NULL`;
                 const updResult = await dbRunAsync(
                     `UPDATE collab_requests
                         SET status = 'DONE',
@@ -16832,18 +16907,22 @@ app.post('/api/collab/requests/:id/submit-export',
                         AND status = 'EXPORTING'
                         AND exporter_user_id = ?
                         AND archived_at IS NULL
-                        AND archived_final_at IS NULL`,
+                        AND archived_final_at IS NULL${noFileWhereGuard}`,
                     [exportSummary, attachmentDirName, id, userId]
                 );
 
                 if (!updResult || updResult.changes === 0) {
                     await dbRunAsync('ROLLBACK');
                     // 已移动的文件挪 _orphaned/{id}_v{ver}_{ts}/ 避免污染正式目录
-                    try {
-                        await versInternal.moveToOrphaned(
-                            movedFiles, id, newSubmissionVersion, COLLAB_UPLOAD_BASE, logger
-                        );
-                    } catch (_) { /* ignore */ }
+                    // v1.120.0 codex 02 审 LOW-1 采纳：与事务异常分支一致，仅 movedFiles.length>0 时调用
+                    //   （无附件路径 movedFiles 空，避免空数组调用可能产生的空孤儿目录/无效日志）
+                    if (movedFiles.length > 0) {
+                        try {
+                            await versInternal.moveToOrphaned(
+                                movedFiles, id, newSubmissionVersion, COLLAB_UPLOAD_BASE, logger
+                            );
+                        } catch (_) { /* ignore */ }
+                    }
                     return res.status(409).json({
                         error: '协作单状态已变更，请刷新后重试',
                         code: 'CONCURRENT_STATE_CHANGE'
@@ -17895,11 +17974,26 @@ app.post('/api/collab/requests/:id/admin-submit-on-behalf',
         }
         const hasAdminUpload = adminUploadedFiles.length > 0;
 
+        // v1.120.0 Commit B codex 02-B 审 HIGH 采纳（并发实测暴露）：admin-submit-on-behalf 事务段
+        //   原本无 mutex——单全局 sqlite 连接下，并发两次 BEGIN IMMEDIATE 会「cannot start a transaction
+        //   within a transaction」双双 500（B9 用例实测复现）。虽既有 SUBMITTED/DONE 路径本就有此缺陷，
+        //   但 Commit B 放开 EXPORTING 扩大触发面，一并修复：复用 collabExporterTransitionMutex 与
+        //   submit-export/forward/return/reassign 串行化（EXPORTING 闭环与 exporter 自助提交本就该互斥）。
+        //   锁范围偏大（含 SUBMITTED/DONE 路径）但内网低并发下开销 <100ms 可接受，换事务隔离正确性划算。
+        let release;
+        try {
+            release = await collabExporterTransitionMutex.acquire(5000);
+        } catch (mutexErr) {
+            cleanupPending();
+            logger.warn(`[collab-admin-submit] 协作单 #${id} 等待 collabExporterTransitionMutex 超时: ${mutexErr.message}`);
+            return res.status(503).json({ error: '系统繁忙，请稍后重试', code: 'COLLAB_EXPORTER_MUTEX_BUSY' });
+        }
+
         try {
             const collab = await dbGetAsync(
                 `SELECT id, status, deadline, description, attachment_dir, submission_version,
                         archived_at, archived_final_at, sql_validation_status,
-                        oa_request_no, created_at
+                        oa_request_no, created_at, assign_mode, forwarded_to_exporter_at
                    FROM collab_requests WHERE id = ?`,
                 [id]
             );
@@ -17917,10 +18011,25 @@ app.post('/api/collab/requests/:id/admin-submit-on-behalf',
                 return res.status(409).json({ error: '已归档协作单不允许行政闭环', code: 'ARCHIVED_PROTECTED' });
             }
             // v1.72.10：扩展支持 DONE→DONE（admin 修正已 exporter 闭环单的交付物）
-            if (!['SUBMITTED', 'DONE'].includes(collab.status)) {
+            // v1.120.0 Commit B：扩展支持 EXPORTING→DONE（admin 在直派导出态直接行政闭环，
+            //   缺口=十几 G 大文件线下传递、导出人不便自助提交时由 admin 兜底闭环）。
+            //   ⚠️ EXPORTING 仅限「真直派单」= assign_mode='admin_direct' && forwarded_to_exporter_at IS NULL
+            //   （与 submit-export 无附件路径同判据，见该端点状态转换矩阵注释）。
+            //   正常流转单（normal）或 fallback 后重流转单的 EXPORTING = exporter 待提交态，
+            //   不该被 admin 意外行政闭环绕过 exporter 验收（[[feedback_state_machine_update_invariant]]）。
+            const isGenuineDirectExporting =
+                collab.assign_mode === 'admin_direct' && collab.forwarded_to_exporter_at == null;
+            const isAllowedAdminSubmitState =
+                collab.status === 'SUBMITTED' ||
+                collab.status === 'DONE' ||
+                (collab.status === 'EXPORTING' && isGenuineDirectExporting);
+            if (!isAllowedAdminSubmitState) {
                 cleanupPending();
+                const exportingHint = collab.status === 'EXPORTING'
+                    ? '（EXPORTING 仅直派单可由 admin 行政闭环）'
+                    : '';
                 return res.status(409).json({
-                    error: `当前状态 ${collab.status} 不允许行政闭环（仅 SUBMITTED / DONE 可走）`,
+                    error: `当前状态 ${collab.status} 不允许行政闭环（仅 SUBMITTED / DONE / 直派 EXPORTING 可走）${exportingHint}`,
                     code: 'STATE_NOT_ALLOWED_FOR_ADMIN_SUBMIT',
                     current_status: collab.status,
                 });
@@ -18060,29 +18169,52 @@ app.post('/api/collab/requests/:id/admin-submit-on-behalf',
                 //   - SUBMITTED→DONE 路径：done_at 走原 COALESCE 子查询（首次完成需要写时间）
                 //   - DONE→DONE 路径：COALESCE(done_at, ...) 已有 done_at 保留，不被新上传附件 max(created_at) 改写
                 //     业务上 admin 兜底修文件不应改写"首次完成时间"
+                // v1.120.0 Commit B：EXPORTING→DONE 走与 SUBMITTED→DONE 同款（isDoneFix=false → done_at 走
+                //   COALESCE 子查询 + sql_validation_status='admin_closed'），语义=admin 替直派导出人画句号未走 smoke。
                 const isDoneFix = (collab.status === 'DONE');
+                const isExportingClosure = (collab.status === 'EXPORTING');
+                // v1.120.0 Commit B：WHERE 加 EXPORTING（真直派下沉守卫），有附件路径不影响。
+                //   EXPORTING 分支必须带 assign_mode='admin_direct' AND forwarded_to_exporter_at IS NULL，
+                //   防止 SELECT 与 UPDATE 之间被并发改状态，让写点兜住「仅真直派 EXPORTING 可 admin 闭环」不变量。
+                const exportingWhereGuard = isExportingClosure
+                    ? ` AND assign_mode = 'admin_direct' AND forwarded_to_exporter_at IS NULL`
+                    : '';
+                const allowedStatesInWhere = isExportingClosure
+                    ? `('EXPORTING')`
+                    : `('SUBMITTED', 'DONE')`;
+                // v1.120.0 Commit B codex 02-B 审 MED + 末次审 MED-3 + 轻复审 HIGH 采纳（done_at = 本次闭环时间）：
+                //   EXPORTING→DONE 是直派大文件「快速留痕闭环」，done_at 语义 = 本次行政闭环动作时间。
+                //   ⭐ 轻复审 HIGH 收严：EXPORTING→DONE **无论有无本次上传，done_at 一律 datetime('now')**。
+                //     不再查「全表 active 附件 MAX(created_at)」——该子查询无法限定到「本次插入的附件」，
+                //     若单上有历史残留 active 附件（fallback/reassign 边界）且其 created_at 更晚，MAX 会取到历史时间。
+                //     直接用 now() 彻底根治（有本次上传时附件时间与 now 仅差上传耗时秒级，对闭环时间语义无影响），
+                //     且更简单——契合「留痕闭环 done_at=闭环动作时间」定位，不做「记录本次附件 ID 再查」的过度设计。
+                //   SUBMITTED→DONE / DONE→DONE 老路径保持原 COALESCE（含 deadline / 保留原 done_at）不变，避免回归。
+                const doneAtExpr = isDoneFix
+                    ? `COALESCE(done_at, datetime('now','localtime'))`
+                    : isExportingClosure
+                        ? `datetime('now','localtime')`
+                        : `COALESCE(
+                            (SELECT MAX(created_at) FROM collab_attachments
+                              WHERE collab_request_id = collab_requests.id
+                                AND status = 'active'
+                                AND attachment_type IN ('result_data','result_script')),
+                            deadline,
+                            datetime('now','localtime')
+                        )`;
                 const updResult = await dbRunAsync(
                     `UPDATE collab_requests
                         SET status = 'DONE',
-                            done_at = ${isDoneFix
-                                ? `COALESCE(done_at, datetime('now','localtime'))`
-                                : `COALESCE(
-                                    (SELECT MAX(created_at) FROM collab_attachments
-                                      WHERE collab_request_id = collab_requests.id
-                                        AND status = 'active'
-                                        AND attachment_type IN ('result_data','result_script')),
-                                    deadline,
-                                    datetime('now','localtime')
-                                )`},
+                            done_at = ${doneAtExpr},
                             sql_validation_status = ${isDoneFix
                                 ? `sql_validation_status`
                                 : `'admin_closed'`},
                             sql_validation_error = NULL,
                             attachment_dir = COALESCE(attachment_dir, ?)
                       WHERE id = ?
-                        AND status IN ('SUBMITTED', 'DONE')
+                        AND status IN ${allowedStatesInWhere}
                         AND archived_at IS NULL
-                        AND archived_final_at IS NULL`,
+                        AND archived_final_at IS NULL${exportingWhereGuard}`,
                     [hasAdminUpload ? attachmentDirName : null, id]
                 );
 
@@ -18120,7 +18252,9 @@ app.post('/api/collab/requests/:id/admin-submit-on-behalf',
             const updated = await dbGetAsync(`SELECT * FROM collab_requests WHERE id = ?`, [id]);
             let doneAtSource = 'now';
             const finalDoneAt = updated && updated.done_at;
-            if (finalDoneAt) {
+            // v1.120.0 轻复审：EXPORTING→DONE 的 done_at 恒为 now()（快速留痕闭环），doneAtSource 直接 'now'，
+            //   跳过附件反推——避免历史残留 active 附件的 created_at 极端下毫秒级等于 now 时被误标为附件来源。
+            if (finalDoneAt && collab.status !== 'EXPORTING') {
                 const lastActive = await dbGetAsync(
                     `SELECT MAX(created_at) AS last_at FROM collab_attachments
                       WHERE collab_request_id = ?
@@ -18131,18 +18265,28 @@ app.post('/api/collab/requests/:id/admin-submit-on-behalf',
                 if (lastActive && lastActive.last_at === finalDoneAt) {
                     // 区分 admin 上传 vs dev 上传作为来源（仅用作日志/前端展示语义）
                     doneAtSource = hasAdminUpload ? 'admin_supplemental_attachment' : 'dev_last_active_attachment';
-                } else if (collab.deadline === finalDoneAt) {
+                } else if (collab.status === 'SUBMITTED' && collab.deadline === finalDoneAt) {
+                    // v1.120.0 Commit B codex 02-B 复审 LOW 采纳：deadline 推断仅对 SUBMITTED 路径成立
+                    //   （只有 SUBMITTED→DONE 的 done_at 表达式含 deadline 兜底）。EXPORTING→DONE 已不回退 deadline，
+                    //   若不限定状态，极端巧合（deadline 恰等于 now() 到秒）会把 EXPORTING 的 now() 误标为 'deadline'。
                     doneAtSource = 'deadline';
                 }
             }
 
             // 审计日志（reason JSON 含 source 推断依据 + admin 上传文件清单）
-            // codex 50 M-3 采纳：加 flow 字段区分流程来源（SUBMITTED→DONE = 'submitted_to_done_admin_closure' /
-            //   DONE→DONE = 'done_to_done_admin_fix'），未来 grep 审计/统计可按 flow 字段精确分流，
-            //   不依赖 sql_validation_status + ADMIN_SUBMIT_ON_BEHALF 双条件推断
+            // codex 50 M-3 采纳：加 flow 字段区分流程来源，未来 grep 审计/统计可按 flow 字段精确分流，
+            //   不依赖 sql_validation_status + ADMIN_SUBMIT_ON_BEHALF 双条件推断。
+            // flow 取值（v1.120.0 Commit B 加 exporting_to_done_admin_closure 第三态）：
+            //   · SUBMITTED→DONE = 'submitted_to_done_admin_closure'（admin 替开发画句号）
+            //   · DONE→DONE      = 'done_to_done_admin_fix'（admin 修正已闭环单交付物）
+            //   · EXPORTING→DONE = 'exporting_to_done_admin_closure'（admin 在直派导出态直接行政闭环·大文件线下传递）
+            const adminSubmitFlow =
+                collab.status === 'DONE' ? 'done_to_done_admin_fix'
+                : collab.status === 'EXPORTING' ? 'exporting_to_done_admin_closure'
+                : 'submitted_to_done_admin_closure';
             insertCollabLog(id, 'ADMIN_SUBMIT_ON_BEHALF', userId, userName, JSON.stringify({
                 reason,
-                flow: collab.status === 'DONE' ? 'done_to_done_admin_fix' : 'submitted_to_done_admin_closure',
+                flow: adminSubmitFlow,
                 done_at_source: doneAtSource,
                 done_at_value: finalDoneAt,
                 old_sql_validation_status: collab.sql_validation_status || null,
@@ -18164,6 +18308,9 @@ app.post('/api/collab/requests/:id/admin-submit-on-behalf',
             cleanupPending();
             logger.error(`[collab-admin-submit] 协作单 #${id} 行政闭环异常: ${e.message}`, e);
             return res.status(500).json({ error: '行政闭环失败，请联系管理员', code: 'ADMIN_SUBMIT_FAILED' });
+        } finally {
+            // v1.120.0 Commit B codex 02-B HIGH：释放 collabExporterTransitionMutex（无论成功/异常/提前 return）
+            if (release) release();
         }
     }
 );

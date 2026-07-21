@@ -1315,18 +1315,23 @@
                 <button class="modal-close" onclick="closeExportUploadModal()">×</button>
             </div>
             <div class="u-modal-body">
+                <!-- v1.120.0 Commit C：真直派单显示「大文件线下传递·无附件提交」提示条 -->
+                <div class="u-hint" id="exportNoFileTip" style="display:none;margin-bottom:10px;padding:8px 10px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:6px;color:#1e40af;">
+                    📦 本单为 admin 直派单。若导出结果为大文件无法上传平台，可<strong>不选附件</strong>直接提交，
+                    但需在下方<strong>导出概要</strong>里写明（≥10 字）：导出了什么、为何不传附件、线下如何移交。
+                </div>
                 <div class="u-form-group">
-                    <label>结果数据 <span class="required">*</span></label>
+                    <label>结果数据 <span class="required" id="exportDataStar">*</span></label>
                     <input type="file" id="f_export_result_data" accept=".xlsx,.xls">
                     <div class="u-hint">扩展名 .xlsx / .xls，单文件 ≤ 100MB。从业务系统导出的数据交付物。</div>
                 </div>
                 <div class="u-form-group">
-                    <label>导出界面截图 <span class="required">*</span></label>
+                    <label>导出界面截图 <span class="required" id="exportShotStar">*</span></label>
                     <input type="file" id="f_export_screenshot" accept=".png,.jpg,.jpeg,.gif,.webp">
                     <div class="u-hint">扩展名 .png / .jpg / .jpeg / .gif / .webp，单文件 ≤ 10MB。截图作为导出操作凭证。</div>
                 </div>
                 <div class="u-form-group">
-                    <label>操作概要（可选）</label>
+                    <label><span id="exportSummaryLabel">操作概要（可选）</span><span class="required" id="exportSummaryStar" style="display:none;"> *</span></label>
                     <textarea id="f_export_summary" rows="4" maxlength="500" placeholder="可选：简述本次导出的范围与操作要点（如时间段、过滤条件、是否脱敏等）"></textarea>
                     <div class="u-hint">最多 500 字。该概要将展示在详情页并附带在钉钉通知前 80 字。</div>
                 </div>
@@ -2139,6 +2144,24 @@
                         <pre style="white-space:pre-wrap;font-family:inherit;font-size:13px;color:#2c3e50;margin:0;max-width:760px;background:transparent;border:0;padding:0;">${safeSummary}</pre>
                     </div>
                 </div>`;
+        }
+
+        // v1.120.0 Commit C：判「真直派来源单」——与后端 submit-export/admin-submit-on-behalf
+        //   同判据 = assign_mode='admin_direct' && forwarded_to_exporter_at IS NULL。
+        //   ⚠️ codex 04 审 LOW-1：本 helper 只判「来源属性」（是否真直派·从未被三级转发），
+        //     不含 status 检查——status='EXPORTING' 由调用方显式组合（admin 按钮 / 导出人 EXPORTING 分支）。
+        //     命名保留 …ExportingSingle 因两处调用点都在 EXPORTING 语境；复用到其他状态需调用方自行加 status 门。
+        //   ⚠️ codex 04 审 MED 收紧（2026-07-21）：逐字复刻后端 `IS NULL`，去掉原 `=== ''` 分支。
+        //     forwarded_to_exporter_at 是 DATETIME 列，全部写点只写 datetime() 或 NULL（server.js:15538/15997），
+        //     从不写空字符串 → 空串分支实际不可达；去掉它消除「前端比后端宽松」隐患（防字段语义漂移）。
+        //   用途：控制①导出人无附件提交②admin 直接行政闭环两个入口只对真直派单放开。
+        //   normal 单 / fallback 后重流转单（forwarded_to_exporter_at 非 NULL）不算——其 EXPORTING=
+        //   exporter 待提交态，须传附件走正常验收，不放开无附件 / admin 越权闭环。
+        function isGenuineDirectExportingSingle(d) {
+            // codex 末次审 MED-1：用 === null（不匹配 undefined）。详情/列表接口 SELECT * 保证
+            //   forwarded_to_exporter_at 字段一定存在（值为 null 或时间戳），=== null 逐字对齐后端 IS NULL；
+            //   万一未来某接口改显式列 SELECT 漏此字段（undefined），=== null 会按非直派处理隐藏入口（安全侧）。
+            return !!d && d.assign_mode === 'admin_direct' && d.forwarded_to_exporter_at === null;
         }
 
         // v1.72.3 admin 直派操作区（仅 admin + assign_mode='admin_direct' 显示）
@@ -2991,9 +3014,16 @@
             // v1.72.10：行政闭环按钮状态扩展 SUBMITTED + DONE
             //   SUBMITTED：D1→D2 链路 admin 替开发画句号（v1.70.4 原场景）
             //   DONE：兑底修正已 exporter 完成单的交付物（v1.72.10 新增；admin 单方面替换 result_data 保持 DONE 终态）
-            // codex 50 M-4 采纳：按状态区分按钮文案降低 admin 认知摩擦（SUBMITTED 显示"行政闭环" / DONE 显示"修正交付物"）
-            if (isAdminUser && (status === 'SUBMITTED' || status === 'DONE')) {
-                const adminSubmitLabel = status === 'DONE' ? '🔧 修正交付物' : '📋 行政闭环';
+            // v1.120.0 Commit C：EXPORTING（真直派单）扩展——大文件线下传递、导出人不便自助提交时
+            //   admin 直接行政闭环。真直派判据 = assign_mode='admin_direct' && !forwarded_to_exporter_at
+            //   （与后端 submit-export/admin-submit-on-behalf 同判据；normal / fallback 重流转单不放开，
+            //   其 EXPORTING=exporter 待提交态，不该被 admin 越过验收）。
+            // codex 50 M-4 采纳：按状态区分按钮文案降低 admin 认知摩擦
+            const isGenuineDirectExporting = status === 'EXPORTING' && isGenuineDirectExportingSingle(d);
+            if (isAdminUser && (status === 'SUBMITTED' || status === 'DONE' || isGenuineDirectExporting)) {
+                const adminSubmitLabel = status === 'DONE' ? '🔧 修正交付物'
+                    : isGenuineDirectExporting ? '🗂️ 直接行政闭环'
+                    : '📋 行政闭环';
                 buttons.push(`<button class="btn" style="background:#dbeafe;color:#1e40af;border:1px solid #93c5fd;" onclick="openAdminSubmitDialog()">${adminSubmitLabel}</button>`);
             }
             if (isAdminUser && isDone) {
@@ -3200,8 +3230,10 @@
                 const isCurrentExporter = currentUserId
                     && d.exporter_user_id != null
                     && Number(d.exporter_user_id) === Number(currentUserId);
+                // v1.120.0 Commit C：真直派单传 genuineDirect=true → 提交弹框放开附件必填（大文件线下传递）
+                const genuineDirectFlag = isGenuineDirectExportingSingle(d) ? 'true' : 'false';
                 const exporterActions = isCurrentExporter
-                    ? ` <button class="notify-btn" style="background:#16a34a;color:white;" onclick="openExportUploadDialog(${Number(d.id)})">📦 提交导出物</button>`
+                    ? ` <button class="notify-btn" style="background:#16a34a;color:white;" onclick="openExportUploadDialog(${Number(d.id)}, ${genuineDirectFlag})">📦 提交导出物</button>`
                     + ` <button class="notify-btn" style="background:#dc2626;color:white;margin-left:6px;" onclick="openReturnToDevDialog(${Number(d.id)})">↩️ 退回任务</button>`
                     : '';
                 body = `<span class="notify-status-text">✅ ${timeText}给信息技术部 - ${exporterName} · 待提交</span>${exporterActions}`;
@@ -4731,17 +4763,34 @@
         // ---------- exportUpload modal ----------
         // codex 41 H-3 采纳：multer field 名 result_data_screenshot
         // codex 41 M-2 采纳：superseded_attachments.length > 0 时 toast 覆盖数量
-        function openExportUploadDialog(id) {
+        // v1.120.0 Commit C：genuineDirect=true（真直派单）时放开附件必填 UI——
+        //   附件 * 去掉、显示无附件提示条、概要标签改「可选」为「可选（无附件时必填 ≥10 字）」。
+        let _exportUploadGenuineDirect = false;
+        function openExportUploadDialog(id, genuineDirect) {
             const safeId = Number(id);
             if (!Number.isSafeInteger(safeId) || safeId <= 0) {
                 showToast('协作单 id 非法', 'error');
                 return;
             }
             _exportUploadCollabId = safeId;
+            _exportUploadGenuineDirect = genuineDirect === true;
             document.getElementById('exportUploadTitle').textContent = `提交导出物 · 协作单 #${safeId}`;
             document.getElementById('f_export_result_data').value = '';
             document.getElementById('f_export_screenshot').value = '';
             document.getElementById('f_export_summary').value = '';
+            // 真直派单：放开附件必填 UI + 导出概要变必填（无论有无附件·≥10 字·加红星 *）
+            const gd = _exportUploadGenuineDirect;
+            document.getElementById('exportNoFileTip').style.display = gd ? 'block' : 'none';
+            document.getElementById('exportDataStar').style.display = gd ? 'none' : '';
+            document.getElementById('exportShotStar').style.display = gd ? 'none' : '';
+            document.getElementById('exportSummaryLabel').textContent = gd
+                ? '导出概要（≥10 字）'
+                : '操作概要（可选）';
+            document.getElementById('exportSummaryStar').style.display = gd ? '' : 'none';
+            // codex 审 LOW-2：placeholder 随模式切换，避免「必填标签 + 可选 placeholder」文案冲突
+            document.getElementById('f_export_summary').placeholder = gd
+                ? '必填（≥10 字）：说明本次导出了什么、附件情况；如为大文件线下移交，请说明移交方式'
+                : '可选：简述本次导出的范围与操作要点（如时间段、过滤条件、是否脱敏等）';
             const btn = document.getElementById('btnExportUpload');
             btn.disabled = false;
             btn.textContent = '提交';
@@ -4759,18 +4808,37 @@
 
             const dataFile = document.getElementById('f_export_result_data').files[0];
             const shotFile = document.getElementById('f_export_screenshot').files[0];
-            if (!dataFile) { showToast('请选择结果数据文件', 'error'); return; }
-            if (!shotFile) { showToast('请选择导出界面截图', 'error'); return; }
-
             const summary = (document.getElementById('f_export_summary').value || '').trim();
+            const gd = _exportUploadGenuineDirect;
+
+            // v1.120.0 Commit C：附件校验分两路（与后端 submit-export 对齐）
+            //   · 非真直派单：两附件必填（原逻辑），概要仍可选
+            //   · 真直派单：允许无附件，但两附件必须「同时有或同时无」；导出概要**无论有无附件都必填 ≥10 字**
+            //     （2026-07-21 用户调整：直派模式概要为必填项，便于留痕说明导出内容/线下移交方式）
+            const hasData = !!dataFile, hasShot = !!shotFile;
+            if (!gd) {
+                if (!hasData) { showToast('请选择结果数据文件', 'error'); return; }
+                if (!hasShot) { showToast('请选择导出界面截图', 'error'); return; }
+            } else {
+                if (hasData !== hasShot) {
+                    showToast('结果数据与截图需同时提交，或同时留空（无附件提交需填写导出概要 ≥10 字）', 'error');
+                    return;
+                }
+                // 直派模式导出概要必填 ≥10 字（无论有无附件）
+                if (summary.length < 10) {
+                    showToast('直派单提交时，导出概要必填且不少于 10 字（说明导出了什么、附件情况、如需线下移交请说明方式）', 'error');
+                    return;
+                }
+            }
+
             if (summary.length > 500) {
                 showToast('操作概要不能超过 500 字符', 'error');
                 return;
             }
 
             const fd = new FormData();
-            fd.append('result_data', dataFile);
-            fd.append('result_data_screenshot', shotFile);
+            if (hasData) fd.append('result_data', dataFile);
+            if (hasShot) fd.append('result_data_screenshot', shotFile);
             if (summary) fd.append('export_summary', summary);
 
             const btn = document.getElementById('btnExportUpload');
