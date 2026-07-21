@@ -549,6 +549,10 @@ function updateUserUI() {
             // 下拉入口——不进普通导航栏（会要求同步改 11 个既有页面的导航栏 HTML，超出该模块新增范围），
             // 复用这个已存在于每一页的 profile 下拉菜单即可让 admin 全站可发现，无需改动任何既有页面。
             menuItems += `<a href="/Periodic_Fetch.html" style="text-decoration:none;">📅 周期取数推送</a>`;
+            // 数据开发换壳（issue_lite）：极简台账页替换导航"数据开发"入口后，重型页 Issue_Tracker
+            //   挪到本 admin-only 下拉（照上方"周期取数推送"同款先例，免改各页导航栏 HTML）——
+            //   普通用户/开发只用极简台账页，admin 需完整协作能力（指派/改派/拉群/评估/历史）时从这里进重型页。
+            menuItems += `<a href="/Issue_Tracker.html" style="text-decoration:none;">🗂️ 数据开发（完整版）</a>`;
         }
         menuItems += `<a href="#" onclick="openChangePasswordModal()">🔑 修改密码</a>`;
         menuItems += `<a href="#" onclick="logout()" style="color:#e53e3e;">🚪 退出登录</a>`;

@@ -14,6 +14,7 @@ const compression = require('compression');
 const packageJson = require('./package.json');
 const dingtalkNotify = require('./utils/dingtalk-notify');
 const issueNotify = require('./utils/issue-notify');  // v1.74.0 C2：需求跟踪钉钉通知 helper（纯封装）
+const issueLiteNotify = require('./utils/issue-lite-notify');  // 数据开发换壳 C2：极简台账通知 markdown builder（薄编排，复用 issueNotify 无状态部件）
 const collabVersioning = require('./utils/collab-attachment-versioning');
 const collabSubmitHelpers = require('./utils/collab-submit-helpers');
 const { mapMysqlColumnToSqlServer } = require('./utils/mysql-type-mapper'); // v1.88.0：MySQL 源(HRD) → SQL Server 目标 类型映射
@@ -153,6 +154,29 @@ function requireIssueV1750SchemaReady(req, res, next) {
         return res.status(503).json({
             error: '需求跟踪 v1.75.0 优化功能正在初始化，请稍后重试',
             code: 'ISSUE_V1750_SCHEMA_INITIALIZING'
+        });
+    }
+    next();
+}
+
+// ── 数据开发换壳·极简台账（issue_lite）schema readiness（换壳方案 v0.1 C1）────────
+//   极简"数据开发"台账页用全新独立表 issue_lite（与 issues 物理隔离，不共用一行代码）。
+//   全新表无历史数据，故无需 issues C1 的"有数据→硬门槛/DROP 重建"逻辑：直接 CREATE IF NOT EXISTS
+//   + PRAGMA 复查关键列全部到位才 ready。未就绪 → 极简端点入口挂 requireIssueLiteSchemaReady 返 503
+//   （模块级降级，不 process.exit，不连累 collab/指标/数仓/需求跟踪等同进程其他模块）。
+const ISSUE_LITE_SCHEMA_STATE = { ready: false, error: null };
+function requireIssueLiteSchemaReady(req, res, next) {
+    if (ISSUE_LITE_SCHEMA_STATE.error) {
+        return res.status(503).json({
+            error: '数据开发台账模块暂不可用：schema 未就绪',
+            detail: ISSUE_LITE_SCHEMA_STATE.error,
+            code: 'ISSUE_LITE_SCHEMA_NOT_READY'
+        });
+    }
+    if (!ISSUE_LITE_SCHEMA_STATE.ready) {
+        return res.status(503).json({
+            error: '数据开发台账模块正在初始化，请稍后重试',
+            code: 'ISSUE_LITE_SCHEMA_INITIALIZING'
         });
     }
     next();
@@ -664,6 +688,11 @@ app.use(express.static(path.join(__dirname, 'public'), {
     }
 }));
 // Serve uploaded and archived files
+// D3 复审 H-2（数据开发换壳）：issue_lite 附件物理落在 uploads/issue-lite/ 但**不走无鉴权静态服务**——
+//   本拦截中间件（注册在 express.static 之前）挡掉 /uploads/issue-lite/* 直连，强制所有访问走鉴权下载
+//   端点 GET /api/issue-lite/attachments/:aid/download（authenticateToken + isPathSafe + res.download）。
+//   区别于 collab/issues 附件（沿用静态服务 + 文件名不可猜）：issue_lite 数据敏感 + 新模块，收紧为鉴权唯一入口。
+app.use('/uploads/issue-lite', (req, res) => res.status(403).json({ error: '附件请通过登录后的下载入口获取', code: 'DIRECT_ACCESS_FORBIDDEN' }));
 app.use('/uploads', express.static(UPLOAD_DIR));
 app.use('/archive', express.static(ARCHIVE_DIR));
 
@@ -1571,6 +1600,124 @@ function initTable() {
             });
         }); // 闭合重建 db.serialize
     })(); // 闭合计数 async IIFE
+
+    // ==================== 数据开发换壳·轻量协作台账（issue_lite）====================
+    // 换壳方案 docs/local/数据开发换壳/数据开发换壳_方案_20260721_v0.1.md（含 v0.2 扩展段）· D1
+    //   全新独立表，与 issues 物理隔离（不共用状态机/端点/通知）。v0.2「需求发起→闭环」完整流程：
+    //   建单(需求方字段+附件) → 状态 4 态(待处理/处理中/已完成/已归档) → N1 建单通知对方(示例开发C/示例用户A) →
+    //   拉群 → 完成(说明+看板地址) → N2 完成通知业务方(手机号+已读+重发) → 归档。
+    //   仍明显轻于重型页（无指派/改派/评估/viewer ACL/状态历史/失败分类/幂等）。
+    //   全新表无历史 → 无"有数据→503"门槛，只 CREATE IF NOT EXISTS + PRAGMA 复查列齐置 ready。
+    //   ⚠️ 未部署期 schema 演进：本地 dev 表 drop 重建；生产全新表首启建全（无迁移）。
+    const ISSUE_LITE_REQUIRED_COLS = [
+        'id', 'title', 'description', 'oa_number',
+        'requester_name', 'requester_dept', 'requester_phone',   // 需求方(业务方)
+        'req_date', 'estimated_at', 'assignee_id', 'assignee_name', 'status',  // req_date=需求完成时间(期望) · estimated_at=预计完成(开发回填)
+        'complete_note', 'board_url',                            // 完成说明 + 看板地址
+        // N1 建单通知对方(示例开发C/示例用户A):
+        'notify_target_id', 'notify_status', 'notify_at', 'notify_message_key', 'notify_read_at',
+        // N-estimate 通知业务方·预计完成时间:
+        'est_notify_status', 'est_notify_at', 'est_notify_message_key', 'est_notify_read_at',
+        // N2 完成通知业务方:
+        'req_notify_status', 'req_notify_at', 'req_notify_message_key', 'req_notify_read_at',
+        // 拉群(复用 collab 命名):
+        'dingtalk_chat_id', 'dingtalk_open_conversation_id', 'dingtalk_chat_created_at',
+        'dingtalk_chat_created_by', 'dingtalk_chat_name',
+        'created_by', 'created_by_name', 'created_at', 'completed_at', 'updated_at'
+    ];
+    db.serialize(() => {
+        // codex 范式对齐：db.run 不传 callback 时前序失败不中止队列，故每个 DDL 挂 recordLiteDdlError，
+        //   末条（末 index）回调据 liteDdlError 综合判定，任一失败都不置 ready。
+        let liteDdlError = null;
+        const recordLiteDdlError = (label) => (err) => {
+            if (err && !liteDdlError) {
+                liteDdlError = `${label}: ${err.message}`;
+                logger.error(`[数据开发换壳 C1] DDL 失败 @${label}：${err.message}`);
+            }
+        };
+        db.run(`CREATE TABLE IF NOT EXISTS issue_lite (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            title         TEXT NOT NULL,
+            description   TEXT,
+            oa_number     TEXT,
+            requester_name  TEXT NOT NULL,
+            requester_dept  TEXT NOT NULL,
+            requester_phone TEXT NOT NULL,
+            req_date      TEXT,
+            estimated_at  TEXT,
+            assignee_id   INTEGER NOT NULL,
+            assignee_name TEXT NOT NULL,
+            status        TEXT NOT NULL DEFAULT '待处理' CHECK (status IN ('待处理','处理中','已完成','已归档')),
+            complete_note TEXT,
+            board_url     TEXT,
+            notify_target_id   INTEGER,
+            notify_status      TEXT,
+            notify_at          DATETIME,
+            notify_message_key TEXT,
+            notify_read_at     DATETIME,
+            est_notify_status      TEXT,
+            est_notify_at          DATETIME,
+            est_notify_message_key TEXT,
+            est_notify_read_at     DATETIME,
+            req_notify_status      TEXT,
+            req_notify_at          DATETIME,
+            req_notify_message_key TEXT,
+            req_notify_read_at     DATETIME,
+            dingtalk_chat_id              TEXT,
+            dingtalk_open_conversation_id TEXT,
+            dingtalk_chat_created_at      DATETIME,
+            dingtalk_chat_created_by      INTEGER,
+            dingtalk_chat_name            TEXT,
+            created_by    INTEGER NOT NULL,
+            created_by_name TEXT,
+            created_at    DATETIME DEFAULT (datetime('now','localtime')),
+            completed_at  DATETIME,
+            updated_at    DATETIME DEFAULT (datetime('now','localtime'))
+        )`, recordLiteDdlError('CREATE issue_lite'));
+        db.run(`CREATE INDEX IF NOT EXISTS idx_issue_lite_status ON issue_lite(status)`, recordLiteDdlError('CREATE idx status'));
+        // D3 附件表（照 issue_attachments 精简·复用 UPLOAD_DIR/多态白名单；不做版本化/按人锁）
+        db.run(`CREATE TABLE IF NOT EXISTS issue_lite_attachments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            issue_lite_id INTEGER NOT NULL,
+            file_name TEXT NOT NULL,
+            original_name TEXT NOT NULL,
+            file_size INTEGER,
+            mime_type TEXT,
+            uploaded_by INTEGER,
+            uploaded_by_name TEXT,
+            created_at DATETIME DEFAULT (datetime('now','localtime'))
+        )`, recordLiteDdlError('CREATE issue_lite_attachments'));
+        db.run(`CREATE INDEX IF NOT EXISTS idx_ila_issue ON issue_lite_attachments(issue_lite_id)`, recordLiteDdlError('CREATE idx ila'));
+        db.run(`CREATE INDEX IF NOT EXISTS idx_issue_lite_assignee ON issue_lite(assignee_id)`, (idxErr) => {
+            const failMsg = liteDdlError || (idxErr ? `CREATE idx assignee: ${idxErr.message}` : null);
+            if (failMsg) {
+                ISSUE_LITE_SCHEMA_STATE.error = `数据开发台账 schema 建表失败：${failMsg}`;
+                ISSUE_LITE_SCHEMA_STATE.ready = false;
+                logger.error(`[数据开发换壳 C1] 🚫 建表失败：${failMsg} → 数据开发台账接口将返 503`);
+                return;
+            }
+            // 建表成功 → PRAGMA 复查关键列全部到位才 ready（不信 CREATE 返回值，以实际列为准）
+            db.all(`PRAGMA table_info("issue_lite")`, (pErr, rows) => {
+                if (pErr) {
+                    ISSUE_LITE_SCHEMA_STATE.error = `数据开发台账 schema 复查失败（PRAGMA）：${pErr.message}`;
+                    ISSUE_LITE_SCHEMA_STATE.ready = false;
+                    logger.error(`[数据开发换壳 C1] 🚫 PRAGMA 复查失败：${pErr.message}`);
+                    return;
+                }
+                const cols = rows ? rows.map(r => r.name) : [];
+                const missing = ISSUE_LITE_REQUIRED_COLS.filter(c => !cols.includes(c));
+                if (missing.length) {
+                    ISSUE_LITE_SCHEMA_STATE.error = `数据开发台账 issue_lite 缺列：${missing.join(',')}`;
+                    ISSUE_LITE_SCHEMA_STATE.ready = false;
+                    logger.error(`[数据开发换壳 C1] 🚫 issue_lite 缺关键列 [${missing.join(',')}] → 接口将返 503`);
+                    return;
+                }
+                ISSUE_LITE_SCHEMA_STATE.error = null;
+                ISSUE_LITE_SCHEMA_STATE.ready = true;
+                logger.info('[数据开发换壳 C1] ✅ issue_lite 表就绪（列齐），数据开发台账接口放行');
+            });
+        });
+    });
 
     // ==================== 数据协作模块（v1.0.1 一阶段）====================
     // 详细方案见 docs/local/数据协作模块_一阶段方案.md
@@ -12218,6 +12365,514 @@ app.post('/api/issues/webhook/schedule', requireWebhookSecret, requireIssueSchem
 });
 
 // ============================================================
+// 数据开发换壳·轻量协作台账 API（issue_lite）· D2（v0.2）
+// 换壳方案 v0.2。全新独立端点，与 /api/issues 物理隔离。全挂 requireIssueLiteSchemaReady。
+// 「需求发起→闭环」：建单(需求方+附件) → 状态 4 态 → N1 建单通知对方(示例开发C/示例用户A) → 拉群 →
+//   完成(说明+看板) → N2 完成通知业务方(手机号·已读·重发) → 归档。
+// 复用不造轮子：sendIssueDingtalkRaw / sendIssueDingtalkToRequester / callDingtalkWithTokenRetry /
+//   getReadStatus 均为 server.js 顶层通用 helper；markdown 走 issueLiteNotify（薄）。
+// 仍砍：指派/改派/评估/viewer ACL/状态历史/失败分类/幂等。
+// ============================================================
+
+// 4 态排序权重（待处理→处理中→已完成→已归档）
+const ISSUE_LITE_STATES = ['待处理', '处理中', '已完成', '已归档'];
+// 身份 fallback（生产 SSH 查：示例开发C=10 / 示例用户A=3）；可被系统配置覆盖，不硬编码进业务逻辑
+const ISSUE_LITE_FALLBACK = { developerId: 10, ownerId: 3, notifyTargets: [10, 3] };
+async function getIssueLiteIdentities() {
+    const [devRaw, ownerRaw, targetsRaw] = await Promise.all([
+        readSystemConfig('issue_lite_developer_id'),
+        readSystemConfig('issue_lite_chat_owner_id'),
+        readSystemConfig('issue_lite_notify_target_ids'),
+    ]);
+    // D-L-5(codex D1D2 审)：配置缺失=用默认(正常不告警)；配置存在但非法(疑似手误)→ warn 后回退，运维可见
+    const toInt = (v, fb, key) => {
+        if (v === null || v === undefined || String(v).trim() === '') return fb;
+        const n = Number(v);
+        if (Number.isSafeInteger(n) && n > 0) return n;
+        logger.warn(`[数据开发换壳] 系统配置 ${key} 值非法(${v})，回退默认 ${fb}`);
+        return fb;
+    };
+    let targets = ISSUE_LITE_FALLBACK.notifyTargets;
+    if (targetsRaw && String(targetsRaw).trim() !== '') {
+        const arr = String(targetsRaw).split(',').map(s => Number(String(s).trim())).filter(n => Number.isSafeInteger(n) && n > 0);
+        if (arr.length) targets = arr;
+        else logger.warn(`[数据开发换壳] 系统配置 issue_lite_notify_target_ids 值非法(${targetsRaw})，回退默认 ${targets.join(',')}`);
+    }
+    return {
+        developerId: toInt(devRaw, ISSUE_LITE_FALLBACK.developerId, 'issue_lite_developer_id'),
+        chatOwnerId: toInt(ownerRaw, ISSUE_LITE_FALLBACK.ownerId, 'issue_lite_chat_owner_id'),
+        notifyTargetIds: targets,
+    };
+}
+function issueLiteIsAdmin(req) { return req.user && req.user.role === 'admin'; }
+
+// 列表（支持 status 4 态筛选；待处理/处理中在前，各组内新→旧）
+app.get('/api/issue-lite', authenticateToken, requireIssueLiteSchemaReady, async (req, res) => {
+    try {
+        const { status } = req.query;
+        if (status !== undefined && !ISSUE_LITE_STATES.includes(status)) {
+            return res.status(400).json({ error: '无效的 status 筛选', code: 'INVALID_STATUS_FILTER' });
+        }
+        let sql = 'SELECT * FROM issue_lite WHERE 1=1';
+        const params = [];
+        if (status) { sql += ' AND status = ?'; params.push(status); }
+        // 按 4 态权重升序（活跃在前），各组内建单时间新→旧（CASE 值为写死常量，无注入）
+        sql += ` ORDER BY CASE status WHEN '待处理' THEN 0 WHEN '处理中' THEN 1 WHEN '已完成' THEN 2 ELSE 3 END ASC, created_at DESC`;
+        const rows = await dbAllAsync(sql, params);
+        res.json(rows || []);
+    } catch (err) {
+        logger.error('[数据开发换壳] 列表失败:', err.message);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// 详情
+app.get('/api/issue-lite/:id', authenticateToken, requireIssueLiteSchemaReady, async (req, res) => {
+    try {
+        const row = await dbGetAsync('SELECT * FROM issue_lite WHERE id = ?', [req.params.id]);
+        if (!row) return res.status(404).json({ error: '登记单不存在' });
+        res.json(row);
+    } catch (err) {
+        logger.error('[数据开发换壳] 详情失败:', err.message);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// 建单（v0.2）：必填 标题 + 需求人 + 需求部门 + 需求人手机号；开发固定示例开发C(配置)；
+//   notify_target_id 选填(建单时选通知对象·限配置的示例开发C/示例用户A)；assignee/created_by 服务端派生。
+app.post('/api/issue-lite', authenticateToken, requireIssueLiteSchemaReady, requireNonViewer, async (req, res) => {
+    try {
+        const { title, description, oa_number, requester_name, requester_dept, requester_phone, req_date, notify_target_id } = req.body || {};
+        // 字符串必填字段统一校验
+        const reqStr = (v, label, code, max) => {
+            if (typeof v !== 'string') return { err: `${label}必填`, code };
+            const s = v.trim();
+            if (!s) return { err: `${label}必填`, code };
+            if (max && s.length > max) return { err: `${label}过长（上限 ${max} 字）`, code: code + '_TOO_LONG' };
+            return { val: s };
+        };
+        const rt = reqStr(title, '标题', 'TITLE_REQUIRED', 200);
+        if (rt.err) return res.status(400).json({ error: rt.err, code: rt.code });
+        const rn = reqStr(requester_name, '需求人', 'REQUESTER_NAME_REQUIRED', 50);
+        if (rn.err) return res.status(400).json({ error: rn.err, code: rn.code });
+        const rdept = reqStr(requester_dept, '需求部门', 'REQUESTER_DEPT_REQUIRED', 50);
+        if (rdept.err) return res.status(400).json({ error: rdept.err, code: rdept.code });
+        const rp = reqStr(requester_phone, '需求人手机号', 'REQUESTER_PHONE_REQUIRED', 21); // D-L-1：max 21 = 可选 + 前缀 + 20 位数字
+        if (rp.err) return res.status(400).json({ error: rp.err, code: rp.code });
+        if (!/^\+?\d{6,20}$/.test(rp.val)) return res.status(400).json({ error: '需求人手机号格式不正确', code: 'REQUESTER_PHONE_INVALID' });
+        if (description !== undefined && description !== null && typeof description !== 'string') return res.status(400).json({ error: '需求描述格式错误', code: 'DESCRIPTION_INVALID' });
+        // OA 号可选（规则参考数据修正 validateInputOaNumber）：留空=不填；填则须 1-20 位纯数字（拒全角/中文/1e3/123abc）
+        let oaClean = null;
+        if (oa_number !== undefined && oa_number !== null && oa_number !== '') {
+            // E-M-1(codex E1E2 审)：强类型——拒数组/对象经 String 蒙混（typeof 只放行 string/number）
+            if (typeof oa_number !== 'string' && typeof oa_number !== 'number') return res.status(400).json({ error: 'OA 流程号格式错误', code: 'OA_NUMBER_INVALID' });
+            const t = String(oa_number).trim();
+            // 复E-M-1(codex E1E2 复审)：纯空白视为不填（不报 400），与留空一致
+            if (t === '') oaClean = null;
+            else if (!/^\d{1,20}$/.test(t)) return res.status(400).json({ error: 'OA 流程号须为 1-20 位纯数字（留空则不填）', code: 'OA_NUMBER_INVALID' });
+            else oaClean = t;
+        }
+        // req_date 验真实日期（拒 2026-02-31）
+        let rdClean = null;
+        if (req_date !== undefined && req_date !== null && String(req_date).trim() !== '') {
+            rdClean = String(req_date).trim();
+            const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(rdClean);
+            const dt = m ? new Date(`${rdClean}T00:00:00`) : null;
+            const ok = m && dt && !isNaN(dt.getTime()) && dt.getFullYear() === +m[1] && (dt.getMonth() + 1) === +m[2] && dt.getDate() === +m[3];
+            if (!ok) return res.status(400).json({ error: '需求日期非法（应为真实存在的 YYYY-MM-DD）', code: 'REQ_DATE_INVALID' });
+        }
+        const identities = await getIssueLiteIdentities();
+        // notify_target_id 选填：若填必须 ∈ 配置的通知对象（示例开发C/示例用户A）
+        let notifyTargetId = null;
+        if (notify_target_id !== undefined && notify_target_id !== null && notify_target_id !== '') {
+            // D-M-5(codex D1D2 审)：强类型——拒 [10]/true 经 Number 蒙混成合法 id
+            let nt;
+            if (typeof notify_target_id === 'number') nt = notify_target_id;
+            else if (typeof notify_target_id === 'string' && /^[1-9]\d*$/.test(notify_target_id.trim())) nt = Number(notify_target_id.trim());
+            else return res.status(400).json({ error: '通知对象格式错误', code: 'NOTIFY_TARGET_INVALID' });
+            if (!Number.isSafeInteger(nt) || !identities.notifyTargetIds.includes(nt)) {
+                return res.status(400).json({ error: '通知对象不在允许范围（仅示例开发C/示例用户A）', code: 'NOTIFY_TARGET_INVALID' });
+            }
+            notifyTargetId = nt;
+        }
+        // 开发固定为配置的示例开发C——服务端查快照（不接受用户入参 assignee）
+        const dev = await dbGetAsync('SELECT id, display_name, username, status FROM users WHERE id = ?', [identities.developerId]);
+        if (!dev || dev.status !== 'active') return res.status(500).json({ error: '开发人（示例开发C）账号未配置或未启用，请联系管理员', code: 'DEVELOPER_UNCONFIGURED' });
+        const assigneeName = dev.display_name || dev.username || ('user#' + identities.developerId);
+        const desc = (description !== null && description !== undefined && String(description).trim() !== '') ? String(description).slice(0, 2000) : null;
+        const createdByName = req.user.display_name || req.user.username || ('user#' + req.user.id);
+        const result = await dbRunAsync(
+            `INSERT INTO issue_lite (title, description, oa_number, requester_name, requester_dept, requester_phone, req_date,
+                                     assignee_id, assignee_name, status, notify_target_id, created_by, created_by_name)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '待处理', ?, ?, ?)`,
+            [rt.val, desc, oaClean, rn.val, rdept.val, rp.val, rdClean, dev.id, assigneeName, notifyTargetId, req.user.id, createdByName]);
+        const row = await dbGetAsync('SELECT * FROM issue_lite WHERE id = ?', [result.lastID]);
+        logger.info(`[数据开发换壳] 建单 #${result.lastID} by ${req.user.username}（需求方 ${rdept.val} ${rn.val}）`);
+        res.json({ success: true, issue: row });
+    } catch (err) {
+        logger.error('[数据开发换壳] 建单失败:', err.message);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// 状态流转（4 态·轻守卫）：待处理/处理中/已完成/已归档。
+//   守卫：① 已归档=终态不可再改 ② 目标=已归档 须 admin ③ 目标=已完成 须填完成说明(≥10)+看板地址(可选)。
+//   并发守卫铁律：UPDATE WHERE id=? AND status=<读到的当前态> + 查 changes，冲突返 409 不静默。
+//   D-M-2(codex D1D2 审) 转移规则：非归档态之间自由流转（2 人信任·不设刚性矩阵）；已完成↔处理中(reopen)
+//     允许，reopen 会清完成痕迹(completed_at/complete_note/board_url)；已归档=唯一终态(admin 置·不可逆)。
+app.put('/api/issue-lite/:id/status', authenticateToken, requireIssueLiteSchemaReady, requireNonViewer, async (req, res) => {
+    try {
+        const id = req.params.id;
+        const { status, complete_note, board_url } = req.body || {};
+        if (!ISSUE_LITE_STATES.includes(status)) return res.status(400).json({ error: '无效的目标状态', code: 'INVALID_TARGET_STATUS' });
+        const row = await dbGetAsync('SELECT id, status FROM issue_lite WHERE id = ?', [id]);
+        if (!row) return res.status(404).json({ error: '登记单不存在' });
+        if (row.status === '已归档') return res.status(409).json({ error: '已归档为终态，不可再变更', code: 'ARCHIVED_TERMINAL' });
+        if (row.status === status) return res.status(400).json({ error: `已是「${status}」`, code: 'SAME_STATUS' });
+        if (status === '已归档' && !issueLiteIsAdmin(req)) return res.status(403).json({ error: '仅管理员可归档', code: 'ARCHIVE_ADMIN_ONLY' });
+
+        // 目标=已完成：完成说明必填(≥10)，看板地址可选(过 sanitizeUrl)
+        let noteVal = null, boardVal = null;
+        if (status === '已完成') {
+            if (typeof complete_note !== 'string' || complete_note.trim().length < 10) {
+                return res.status(400).json({ error: '完成说明必填且不少于 10 字', code: 'COMPLETE_NOTE_REQUIRED' });
+            }
+            noteVal = complete_note.trim().slice(0, 2000);
+            if (board_url !== undefined && board_url !== null && String(board_url).trim() !== '') {
+                const safe = issueNotify.sanitizeUrl(String(board_url).trim());
+                if (!safe) return res.status(400).json({ error: '看板地址非法（须 http/https 且无非法字符）', code: 'BOARD_URL_INVALID' });
+                boardVal = safe;
+            }
+        }
+
+        // 组装 UPDATE：仅 →已完成 时写 completed_at/complete_note/board_url，其余只改 status
+        let sql, params;
+        if (status === '已完成') {
+            sql = `UPDATE issue_lite SET status='已完成', complete_note=?, board_url=?, completed_at=datetime('now','localtime'), updated_at=datetime('now','localtime') WHERE id=? AND status=?`;
+            params = [noteVal, boardVal, id, row.status];
+        } else if (row.status === '已完成') {
+            // D-M-3 + 末次审 M-1：reopen(离开已完成)清完成痕迹 + 清 N2 完成通知态（否则新完成周期残留旧"已通知/已读"）
+            sql = `UPDATE issue_lite SET status=?, completed_at=NULL, complete_note=NULL, board_url=NULL,
+                    req_notify_status=NULL, req_notify_at=NULL, req_notify_message_key=NULL, req_notify_read_at=NULL,
+                    updated_at=datetime('now','localtime') WHERE id=? AND status=?`;
+            params = [status, id, row.status];
+        } else {
+            sql = `UPDATE issue_lite SET status=?, updated_at=datetime('now','localtime') WHERE id=? AND status=?`;
+            params = [status, id, row.status];
+        }
+        const upd = await dbRunAsync(sql, params);
+        if (upd.changes === 0) return res.status(409).json({ error: '状态已变化，请刷新后重试', code: 'STATUS_CONFLICT' });
+        const updated = await dbGetAsync('SELECT * FROM issue_lite WHERE id = ?', [id]);
+        logger.info(`[数据开发换壳] #${id} 状态 ${row.status}→${status} by ${req.user.username}`);
+        res.json({ success: true, issue: updated });
+    } catch (err) {
+        logger.error('[数据开发换壳] 状态流转失败:', err.message);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// 回填预计完成时间（照数据修正 estimate 范式）：**仅示例开发C(开发)或 admin 可回填**（E-H-1 codex 审：开发动作）
+//   「待处理」回填即自动进「处理中」；「处理中」仅更新预计时间。取代旧手动"开始处理"。已完成/已归档不可再回填。
+app.put('/api/issue-lite/:id/estimate', authenticateToken, requireIssueLiteSchemaReady, requireNonViewer, async (req, res) => {
+    try {
+        const id = req.params.id;
+        const { estimated_at } = req.body || {};
+        // E-H-1(codex E1E2 审)：回填是开发动作 → 仅示例开发C(config developerId)或 admin
+        const identities = await getIssueLiteIdentities();
+        if (req.user.role !== 'admin' && Number(req.user.id) !== identities.developerId) {
+            return res.status(403).json({ error: '仅开发（示例开发C）或管理员可回填预计完成时间', code: 'ESTIMATE_NOT_ALLOWED' });
+        }
+        if (typeof estimated_at !== 'string' || estimated_at.trim() === '') return res.status(400).json({ error: '请填写预计完成时间', code: 'ESTIMATE_REQUIRED' });
+        const eta = estimated_at.trim();
+        const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(eta);
+        const dt = m ? new Date(`${eta}T00:00:00`) : null;
+        const ok = m && dt && !isNaN(dt.getTime()) && dt.getFullYear() === +m[1] && (dt.getMonth() + 1) === +m[2] && dt.getDate() === +m[3];
+        if (!ok) return res.status(400).json({ error: '预计完成时间非法（应为真实存在的 YYYY-MM-DD）', code: 'ESTIMATE_INVALID' });
+        const row = await dbGetAsync('SELECT id, status, estimated_at FROM issue_lite WHERE id = ?', [id]);
+        if (!row) return res.status(404).json({ error: '登记单不存在' });
+        if (row.status === '已完成' || row.status === '已归档') return res.status(409).json({ error: '已完成/已归档单不可再回填预计时间', code: 'STATUS_LOCKED' });
+        // 待处理 → 回填即自动进处理中；处理中 → 仅更新预计时间（并发守卫 WHERE 当前态）
+        // E-H-2 + 复E-M-3(codex E1E2 审+复审)：仅当预计时间**真变**才连带清 est_notify_*（旧预计通知作废）；
+        //   重存同一 ETA 不清（防误抹已通知/已读状态）。
+        const newStatus = row.status === '待处理' ? '处理中' : row.status;
+        const clearEst = (row.estimated_at !== eta)
+            ? ', est_notify_status=NULL, est_notify_at=NULL, est_notify_message_key=NULL, est_notify_read_at=NULL' : '';
+        const upd = await dbRunAsync(
+            `UPDATE issue_lite SET estimated_at=?, status=?${clearEst}, updated_at=datetime('now','localtime') WHERE id=? AND status=?`,
+            [eta, newStatus, id, row.status]);
+        if (upd.changes === 0) return res.status(409).json({ error: '状态已变化，请刷新后重试', code: 'STATUS_CONFLICT' });
+        const updated = await dbGetAsync('SELECT * FROM issue_lite WHERE id = ?', [id]);
+        logger.info(`[数据开发换壳] #${id} 回填预计完成 ${eta}（${row.status}→${newStatus}）by ${req.user.username}`);
+        res.json({ success: true, issue: updated });
+    } catch (err) {
+        logger.error('[数据开发换壳] 回填预计失败:', err.message);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// 通知落库统一 helper（N1/N-est/N2 共用）：成功落 sent；成功但落库失败→partial_success 不裸 500(防盲重试)；失败落 failed。
+//   prefix ∈ {'', 'est_', 'req_'} 为写死常量拼列名(notify_* / est_notify_* / req_notify_*)，非用户输入，无注入。
+async function persistIssueLiteNotifyResult(id, prefix, attemptAt, result, res) {
+    const sc = prefix + 'notify_status', ac = prefix + 'notify_at', kc = prefix + 'notify_message_key', rc = prefix + 'notify_read_at';
+    if (result.ok) {
+        try {
+            const upd = await dbRunAsync(`UPDATE issue_lite SET ${sc}='sent', ${ac}=?, ${kc}=?, ${rc}=NULL WHERE id=?`, [attemptAt, result.message_key, id]);
+            if (upd.changes === 0) {
+                logger.error(`[数据开发换壳] #${id} 通知已发送(${prefix || 'peer'})但落库未命中 → 勿重复`);
+                return res.json({ success: true, partial_success: true, persistence_ok: false, code: 'NOTIFY_SENT_STATE_NOT_SAVED', message_key: result.message_key, warning: '通知已发送，但状态记录未生效，请勿重复发送' });
+            }
+        } catch (dbErr) {
+            logger.error(`[数据开发换壳] #${id} 通知已发送(${prefix || 'peer'})但落库失败：${dbErr.message} → 勿重复`);
+            return res.json({ success: true, partial_success: true, persistence_ok: false, code: 'NOTIFY_SENT_STATE_NOT_SAVED', message_key: result.message_key, warning: '通知已发送，但状态记录失败，请勿重复发送' });
+        }
+        return res.json({ success: true, message_key: result.message_key });
+    }
+    // D-M-1(codex D1D2 审)：失败分支落库也包 try/catch，DB 异常不吞成裸 500 掩盖发送失败真相
+    try {
+        await dbRunAsync(`UPDATE issue_lite SET ${sc}='failed', ${ac}=?, ${kc}=NULL, ${rc}=NULL WHERE id=?`, [attemptAt, id]);
+    } catch (dbErr) {
+        logger.error(`[数据开发换壳] #${id} 通知失败(${prefix || 'peer'})落库亦失败：${dbErr.message}`);
+    }
+    logger.warn(`[数据开发换壳] #${id} 通知失败(${prefix || 'peer'})：${result.reason}`);
+    return res.status(502).json({ success: false, ...result.body });
+}
+
+// N1 建单通知对方（示例开发C/示例用户A·全手动·可重发）：钉 notify_target_id。复用 sendIssueDingtalkRaw，落 notify_*。
+app.post('/api/issue-lite/:id/notify', authenticateToken, requireIssueLiteSchemaReady, requireNonViewer, async (req, res) => {
+    const id = req.params.id;
+    const attemptAt = new Date().toISOString();
+    try {
+        const rec = await dbGetAsync('SELECT * FROM issue_lite WHERE id = ?', [id]);
+        if (!rec) return res.status(404).json({ error: '登记单不存在' });
+        if (rec.status === '已归档') return res.status(409).json({ error: '已归档单不可再通知对方', code: 'ARCHIVED_LOCKED' }); // 末次审 M-2
+        if (!rec.notify_target_id) return res.status(400).json({ error: '未指定通知对象（建单时选择示例开发C/示例用户A）', code: 'NO_NOTIFY_TARGET' });
+        // D-L-3(codex D1D2 审)：通知对象须 active（停用账号不发）
+        const target = await dbGetAsync('SELECT id, display_name, phone, dingtalk_user_id, status FROM users WHERE id = ?', [rec.notify_target_id]);
+        if (!target || target.status !== 'active') return res.status(400).json({ error: '通知对象账号不存在或未启用', code: 'TARGET_UNAVAILABLE' });
+        const baseUrl = await getSafePlatformBaseUrl();
+        const md = issueLiteNotify.buildIssueLitePeerMarkdown(rec, baseUrl);
+        const result = await sendIssueDingtalkRaw(target, `📋 新数据开发单：${rec.title}`, md);
+        return await persistIssueLiteNotifyResult(id, '', attemptAt, result, res);
+    } catch (err) {
+        logger.error('[数据开发换壳] N1 通知对方失败:', err.message);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// N2 完成通知业务方（需求人手机号·须已完成·可重发）：复用 sendIssueDingtalkToRequester，落 req_notify_*。
+app.post('/api/issue-lite/:id/notify-requester', authenticateToken, requireIssueLiteSchemaReady, requireNonViewer, async (req, res) => {
+    const id = req.params.id;
+    const attemptAt = new Date().toISOString();
+    try {
+        const rec = await dbGetAsync('SELECT * FROM issue_lite WHERE id = ?', [id]);
+        if (!rec) return res.status(404).json({ error: '登记单不存在' });
+        if (rec.status !== '已完成' && rec.status !== '已归档') return res.status(400).json({ error: '仅已完成（含已归档）的单可通知业务方', code: 'NOT_COMPLETED' });
+        // 末次审 H-1：admin 可跳过完成直接归档→无 completed_at；N2 须真走过完成流程才可发"已完成"通知
+        if (!rec.completed_at) return res.status(400).json({ error: '该单未走完成流程（无完成说明），不能发完成通知业务方', code: 'NOT_ACTUALLY_COMPLETED' });
+        if (!rec.requester_phone) return res.status(400).json({ error: '需求人手机号为空', code: 'REQUESTER_PHONE_EMPTY' });
+        const md = issueLiteNotify.buildIssueLiteRequesterDoneMarkdown(rec);
+        const result = await sendIssueDingtalkToRequester(rec.requester_phone, `✅ 数据需求已完成：${rec.title}`, md);
+        return await persistIssueLiteNotifyResult(id, 'req_', attemptAt, result, res);
+    } catch (err) {
+        logger.error('[数据开发换壳] N2 通知业务方失败:', err.message);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// N-est 通知业务方·预计完成时间（须已回填 estimated_at·可重发）：复用 sendIssueDingtalkToRequester，落 est_notify_*。
+app.post('/api/issue-lite/:id/notify-estimate', authenticateToken, requireIssueLiteSchemaReady, requireNonViewer, async (req, res) => {
+    const id = req.params.id;
+    const attemptAt = new Date().toISOString();
+    try {
+        const rec = await dbGetAsync('SELECT * FROM issue_lite WHERE id = ?', [id]);
+        if (!rec) return res.status(404).json({ error: '登记单不存在' });
+        if (!rec.estimated_at) return res.status(400).json({ error: '尚未回填预计完成时间', code: 'NO_ESTIMATE' });
+        if (rec.status === '已归档') return res.status(409).json({ error: '已归档单不可再通知业务方预计', code: 'ARCHIVED_LOCKED' });
+        if (!rec.requester_phone) return res.status(400).json({ error: '需求人手机号为空', code: 'REQUESTER_PHONE_EMPTY' });
+        const md = issueLiteNotify.buildIssueLiteEstimateMarkdown(rec);
+        const result = await sendIssueDingtalkToRequester(rec.requester_phone, `⏳ 数据需求已排期：${rec.title}`, md);
+        return await persistIssueLiteNotifyResult(id, 'est_', attemptAt, result, res);
+    } catch (err) {
+        logger.error('[数据开发换壳] N-est 通知业务方预计失败:', err.message);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// 已读查询（recipient=peer 默认 | estimate | requester）：peer 走 notify_*+notify_target_id(users.id)；
+//   estimate/requester 走 est_notify_*/req_notify_*+requester_phone(byPhone 反查)。字段名为写死常量映射(无注入)。首次查到 READ CAS 固化。
+app.get('/api/issue-lite/:id/notify-read-status', authenticateToken, requireIssueLiteSchemaReady, async (req, res) => {
+    const id = req.params.id;
+    // D-L-2(codex D1D2 审)：recipient 非法值不静默当 peer，明确 400
+    const rcpRaw = req.query.recipient;
+    if (rcpRaw !== undefined && rcpRaw !== 'peer' && rcpRaw !== 'requester' && rcpRaw !== 'estimate') {
+        return res.status(400).json({ error: '无效的 recipient（仅 peer/estimate/requester）', code: 'INVALID_RECIPIENT' });
+    }
+    const recipient = (rcpRaw === 'requester' || rcpRaw === 'estimate') ? rcpRaw : 'peer';
+    const fm = recipient === 'requester'
+        ? { sc: 'req_notify_status', ac: 'req_notify_at', kc: 'req_notify_message_key', rc: 'req_notify_read_at', byPhone: true }
+        : recipient === 'estimate'
+        ? { sc: 'est_notify_status', ac: 'est_notify_at', kc: 'est_notify_message_key', rc: 'est_notify_read_at', byPhone: true }
+        : { sc: 'notify_status', ac: 'notify_at', kc: 'notify_message_key', rc: 'notify_read_at', byPhone: false };
+    try {
+        const rec = await dbGetAsync(`SELECT id, notify_target_id, requester_phone, ${fm.sc} AS st, ${fm.ac} AS at, ${fm.kc} AS mkey, ${fm.rc} AS read_at FROM issue_lite WHERE id = ?`, [id]);
+        if (!rec) return res.status(404).json({ error: '登记单不存在' });
+        if (!rec.at || rec.st !== 'sent') return res.status(400).json({ error: '尚未成功通知', code: 'NOT_NOTIFIED', read: false });
+        if (rec.read_at) return res.json({ recipient, read: true, read_at: rec.read_at, cached: true });
+        if (!rec.mkey) return res.status(400).json({ error: '缺少消息标识', code: 'NO_MESSAGE_KEY', read: false });
+
+        const [appKey, appSecret, robotCode] = await Promise.all(
+            ['dingtalk_app_key', 'dingtalk_app_secret', 'dingtalk_robot_code'].map(readSystemConfig));
+        if (!appKey || !appSecret || !robotCode) return res.status(500).json({ error: '钉钉配置未填写', code: 'NO_DINGTALK_CONFIG' });
+        let token;
+        try { token = await dingtalkNotify.getAccessToken(appKey, appSecret); }
+        catch (err) { const cls = dingtalkNotify.classifyError(err); return res.status(502).json({ error: cls.hint, reason: cls.reason }); }
+
+        // 解析收件人钉钉 user_id
+        let dingUid = '';
+        if (fm.byPhone) {
+            if (!rec.requester_phone) return res.status(400).json({ error: '业务方手机号为空', code: 'REQUESTER_PHONE_EMPTY', read: false });
+            try { const raw = await callDingtalkWithTokenRetry(appKey, appSecret, token, (t) => dingtalkNotify.getUserIdByMobile(t, rec.requester_phone)); dingUid = raw != null ? String(raw).trim() : ''; }
+            catch (err) { const cls = dingtalkNotify.classifyError(err); return res.status(502).json({ error: '业务方钉钉号查询失败：' + cls.hint, reason: cls.reason }); }
+        } else {
+            const u = await dbGetAsync('SELECT dingtalk_user_id FROM users WHERE id = ?', [rec.notify_target_id]);
+            dingUid = u && u.dingtalk_user_id ? String(u.dingtalk_user_id).trim() : '';
+        }
+        if (!dingUid) return res.json({ recipient, read: false, read_at: null, read_status: 'recipient_unresolved' });
+
+        let readResult;
+        try { readResult = await callDingtalkWithTokenRetry(appKey, appSecret, token, (t) => dingtalkNotify.getReadStatus(t, robotCode, rec.mkey)); }
+        catch (err) { const cls = dingtalkNotify.classifyError(err); return res.status(502).json({ error: cls.hint, reason: cls.reason }); }
+
+        const myEntry = (readResult.readDetails || []).find(d => String(d.userId).trim() === dingUid && d.readStatus === 'READ');
+        let readAt = null;
+        if (myEntry) {
+            const ts = Number(myEntry.readTimestamp) || 0;
+            const ms = ts > 1e12 ? ts : (ts > 1e9 ? ts * 1000 : Date.now());
+            readAt = new Date(ms).toLocaleString('zh-CN');
+            // CAS 固化（防查询期重发换 message_key 误标）——列名写死常量
+            const casUpd = await dbRunAsync(`UPDATE issue_lite SET ${fm.rc}=? WHERE id=? AND ${fm.sc}='sent' AND ${fm.kc}=? AND ${fm.rc} IS NULL`, [readAt, id, rec.mkey]);
+            if (casUpd.changes === 0) {
+                const fresh = await dbGetAsync(`SELECT ${fm.rc} AS read_at FROM issue_lite WHERE id = ?`, [id]);
+                return res.json({ recipient, read: !!(fresh && fresh.read_at), read_at: fresh ? fresh.read_at : null, superseded: true });
+            }
+        }
+        res.json({ recipient, read: !!myEntry, read_at: readAt, read_user_count: (readResult.readUserIds || []).length });
+    } catch (err) {
+        logger.error('[数据开发换壳] 查已读失败:', err.message);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// D4 拉群讨论：仅建单人 或 示例开发C 可拉；成员=需求人(phone反查)+示例开发C(config)+示例用户A(config)；示例用户A恒群主；
+//   群名 [数据开发]{title}-讨论（复用数据修正 ≤20 码点规则）。复用 dingtalkNotify.createChatGroup +
+//   getUserIdByMobile + addRealChatMember；朴素幂等(查 open_conv_id·落库 WHERE open_conv IS NULL 守并发)。
+//   issue_lite 开发固定示例开发C无改派 → 无需 issues 的 assigned_to 乐观锁复杂度。
+app.post('/api/issue-lite/:id/create-chat', authenticateToken, requireIssueLiteSchemaReady, requireNonViewer, async (req, res) => {
+    const idStr = req.params.id;
+    if (!/^[1-9]\d*$/.test(idStr)) return res.status(400).json({ error: 'id 必须是正整数', code: 'INVALID_ID' });
+    const id = parseInt(idStr, 10);
+    if (!Number.isSafeInteger(id)) return res.status(400).json({ error: 'id 超出安全整数范围', code: 'INVALID_ID' }); // D4-M-6(codex 审)
+    const userId = Number(req.user.id);
+    const userName = req.user.display_name || req.user.username || `user#${userId}`;
+    if (!Number.isSafeInteger(userId) || userId <= 0) return res.status(400).json({ error: '当前用户 id 非法', code: 'INVALID_USER_ID' });
+    try {
+        const rec = await dbGetAsync('SELECT id, title, status, requester_name, requester_phone, created_by, dingtalk_chat_id, dingtalk_open_conversation_id, dingtalk_chat_name FROM issue_lite WHERE id = ?', [id]);
+        if (!rec) return res.status(404).json({ error: '登记单不存在' });
+        if (rec.status === '已归档') return res.status(409).json({ error: '已归档单不可再拉群', code: 'ARCHIVED_LOCKED' }); // 末次审 M-2
+        const identities = await getIssueLiteIdentities();
+        // 权限：仅建单人 或 示例开发C 可拉群（viewer 已被 requireNonViewer 挡）
+        const isCreator = Number(rec.created_by) > 0 && Number(rec.created_by) === userId;
+        const isDeveloper = userId === identities.developerId;
+        if (!isCreator && !isDeveloper) return res.status(403).json({ error: '仅建单人或示例开发C可拉起讨论群', code: 'NOT_ALLOWED' });
+        // 幂等：已建群直接返回
+        const existingOpenConv = String(rec.dingtalk_open_conversation_id || '').trim();
+        if (existingOpenConv) return res.json({ message: '该单已有讨论群（请到钉钉客户端查看）', id, chat_id: String(rec.dingtalk_chat_id || '').trim(), open_conversation_id: existingOpenConv, chat_name: String(rec.dingtalk_chat_name || '').trim(), idempotent: true });
+        // 凭证
+        const [appKey, appSecret, robotCode] = await Promise.all(['dingtalk_app_key', 'dingtalk_app_secret', 'dingtalk_robot_code'].map(readSystemConfig));
+        if (!appKey || !appSecret || !robotCode) return res.status(500).json({ error: '钉钉配置未填写，请管理员先填钉钉凭证', code: 'NO_DINGTALK_CONFIG' });
+        // 平台成员 = 示例开发C + 示例用户A（addRealChatMember 排除内置 admin(1)/占位）
+        const memberSet = new Set();
+        addRealChatMember(memberSet, identities.developerId);
+        addRealChatMember(memberSet, identities.chatOwnerId);
+        const memberRows = await dbAllAsync(`SELECT id, display_name, phone, dingtalk_user_id FROM users WHERE id IN (${[...memberSet].map(() => '?').join(',')})`, [...memberSet]);
+        if (memberRows.length !== memberSet.size) {
+            const found = new Set(memberRows.map(r => r.id));
+            return res.status(400).json({ error: `群成员账号查询不全，缺 user.id=${[...memberSet].filter(x => !found.has(x)).join(',')}`, code: 'MEMBER_NOT_FOUND' });
+        }
+        // token
+        let token;
+        try { token = await dingtalkNotify.getAccessToken(appKey, appSecret); }
+        catch (err) { const cls = dingtalkNotify.classifyError(err); return res.status(502).json({ error: cls.hint, reason: cls.reason, code: 'GETTOKEN_FAILED' }); }
+        // 补齐平台成员 dingtalk_user_id（缺则 phone 反查 + 回写 users）
+        const dingUserIds = [];
+        for (const m of memberRows) {
+            let dingUid = String(m.dingtalk_user_id || '').trim();
+            const phone = String(m.phone || '').trim();
+            if (!dingUid) {
+                if (!phone) return res.status(400).json({ error: `${m.display_name || 'user#' + m.id} 未绑定手机号，无法拉入钉钉群`, code: 'NO_PHONE', target_user_id: m.id });
+                try {
+                    const raw = await dingtalkNotify.getUserIdByMobile(token, phone);
+                    dingUid = raw != null ? String(raw).trim() : '';
+                    if (!dingUid) return res.status(502).json({ error: `${m.display_name} 钉钉账号反查为空，无法拉入群`, code: 'DINGTALK_USER_LOOKUP_EMPTY', target_user_id: m.id });
+                    // D4-M-2(codex 审)：回写单独 try——回写失败(DB异常)不误报成钉钉反查失败，且已有 dingUid 不阻断建群
+                    try { await dbRunAsync(`UPDATE users SET dingtalk_user_id=? WHERE id=? AND (dingtalk_user_id IS NULL OR TRIM(dingtalk_user_id)='')`, [dingUid, m.id]); }
+                    catch (wbErr) { logger.warn(`[数据开发换壳 拉群] #${id} 回写 users.dingtalk_user_id 失败(不阻断)：${wbErr.message}`); }
+                } catch (err) { const cls = dingtalkNotify.classifyError(err); return res.status(502).json({ error: `${m.display_name} 钉钉账号查询失败：${cls.hint}`, code: 'DINGTALK_USER_LOOKUP_FAILED', target_user_id: m.id }); }
+            }
+            dingUserIds.push({ userId: m.id, dingtalk_user_id: dingUid });
+        }
+        // 业务方(需求人)手机号反查加入（最佳努力·命中才加·不进 users 用 0 占位 userId）
+        const reqPhone = String(rec.requester_phone || '').trim();
+        if (/^1\d{10}$/.test(reqPhone)) {
+            try {
+                const raw = await dingtalkNotify.getUserIdByMobile(token, reqPhone);
+                const rUid = raw != null ? String(raw).trim() : '';
+                if (rUid && !dingUserIds.some(u => u.dingtalk_user_id === rUid)) dingUserIds.push({ userId: 0, dingtalk_user_id: rUid });
+            } catch (err) { logger.warn(`[数据开发换壳 拉群] #${id} 业务方反查失败（降级不加）：${dingtalkNotify.classifyError(err).reason}`); }
+        }
+        // 最小成群 ≥2
+        const uniqueUids = new Set(dingUserIds.map(u => u.dingtalk_user_id).filter(Boolean));
+        if (uniqueUids.size < 2) return res.status(400).json({ error: '群成员不足 2 人无法建群（确认示例开发C/示例用户A/业务方已绑钉钉手机号）', code: 'NOT_ENOUGH_MEMBERS' });
+        // 群主固定示例用户A(config chatOwnerId)
+        const owner = dingUserIds.find(u => u.userId === identities.chatOwnerId);
+        if (!owner) return res.status(500).json({ error: '群主（示例用户A）钉钉账号未找到', code: 'OWNER_NOT_FOUND' });
+        // 群名 [数据开发]{title}-讨论 ≤20 码点（复用数据修正规则·Array.from 防截半字）
+        const rawName = `[数据开发]${String(rec.title || ('#' + id)).trim()}-讨论`;
+        const cp = Array.from(rawName);
+        const chatName = cp.length > 20 ? cp.slice(0, 20).join('') : rawName;
+        // 建群（D4-M-3 codex 审：去重后的钉钉号列表传入·防触发人/成员/业务方解析到同一 dingUid 重复入群）
+        let chatRes;
+        try { chatRes = await dingtalkNotify.createChatGroup(token, chatName, owner.dingtalk_user_id, [...uniqueUids]); }
+        catch (err) { const cls = dingtalkNotify.classifyError(err); logger.warn(`[数据开发换壳 拉群] #${id} chat/create 异常：${cls.reason}`); return res.status(502).json({ error: cls.hint, reason: cls.reason, code: 'CHAT_CREATE_FAILED' }); }
+        if (chatRes.errcode !== 0) { const cls = dingtalkNotify.classifyError(chatRes); logger.warn(`[数据开发换壳 拉群] #${id} chat/create 被拒 errcode=${chatRes.errcode}`); return res.status(502).json({ error: cls.hint, errcode: chatRes.errcode, reason: cls.reason, code: 'CHAT_CREATE_REJECTED' }); }
+        // D4-H-2(codex 审)：errcode=0 也校验 chatid/openConvId 非空——防钉钉返成功但字段缺失，写空 open_conv 造孤儿群 + 假成功
+        const newChatId = String(chatRes.chatid || '').trim();
+        const newOpenConv = String(chatRes.openConversationId || '').trim();
+        if (!newChatId || !newOpenConv) {
+            logger.warn(`[数据开发换壳 拉群] #${id} chat/create errcode=0 但 chatid/openConvId 缺失 → 视为失败(可能孤儿群)`);
+            return res.status(502).json({ error: '钉钉建群返回缺少群标识，请重试', code: 'CHAT_CREATE_INCOMPLETE' });
+        }
+        // 条件落库（open_conv IS NULL 守卫并发后写者·防孤儿群覆盖）
+        const upd = await dbRunAsync(
+            `UPDATE issue_lite SET dingtalk_chat_id=?, dingtalk_open_conversation_id=?, dingtalk_chat_created_at=datetime('now','localtime'), dingtalk_chat_created_by=?, dingtalk_chat_name=? WHERE id=? AND (dingtalk_open_conversation_id IS NULL OR TRIM(dingtalk_open_conversation_id)='')`,
+            [newChatId, newOpenConv, userId, chatName, id]);
+        if (upd.changes === 0) {
+            logger.warn(`[数据开发换壳 拉群] #${id} 落库未命中（并发已建群）·本次 chatid=${newChatId} 可能孤儿群，需群主钉钉手动解散`);
+            const fresh = await dbGetAsync('SELECT dingtalk_chat_id, dingtalk_open_conversation_id, dingtalk_chat_name FROM issue_lite WHERE id=?', [id]);
+            const freshOpenConv = String((fresh && fresh.dingtalk_open_conversation_id) || '').trim();
+            // D4-M-4(codex 审)：changes=0 但 fresh 也无群 → 非"并发已建"而是记录异常，明确报错不伪装 idempotent
+            if (!freshOpenConv) return res.status(500).json({ error: '建群落库异常（单状态可能已变），请刷新后重试', code: 'CHAT_PERSIST_ANOMALY' });
+            return res.json({ message: '该单已有讨论群（并发已先建）', id, chat_id: String((fresh && fresh.dingtalk_chat_id) || '').trim(), open_conversation_id: freshOpenConv, idempotent: true });
+        }
+        logger.info(`[数据开发换壳 拉群] #${id} 建群成功「${chatName}」by ${userName}`);
+        res.json({ success: true, id, chat_id: newChatId, open_conversation_id: newOpenConv, chat_name: chatName });
+    } catch (err) {
+        logger.error('[数据开发换壳] 拉群失败:', err.message);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ============================================================
 // 数据协作模块 API（v1.0.1 一阶段）
 // 详细方案见 docs/local/数据协作模块_一阶段方案.md
 // ============================================================
@@ -12501,6 +13156,130 @@ const issueUpload = multer({
         }
         cb(null, true);
     }
+});
+
+// ── 数据开发换壳 issue_lite 附件（D3）─────────────────────────────────────────
+// 复用 collab 白名单 + 加压缩类型(zip/rar/7z)；直接落 uploads/issue-lite/（低频·不做 _pending 暂存，
+//   多写的孤儿文件在 handler 校验 issue 不存在时 unlink 兜底）。不做版本化/按人锁/attachment_type 分级。
+const ISSUE_LITE_UPLOAD_BASE = path.join(UPLOAD_DIR, 'issue-lite');
+if (!fs.existsSync(ISSUE_LITE_UPLOAD_BASE)) fs.mkdirSync(ISSUE_LITE_UPLOAD_BASE, { recursive: true });
+const ISSUE_LITE_ALLOWED_EXTS = Array.from(new Set([...COLLAB_ALLOWED_EXTS_UNION, '.zip', '.rar', '.7z']));
+const issueLiteStorage = multer.diskStorage({
+    destination: function (req, file, cb) {
+        // 纵深防御：id 非正整数直接拒（filename 用 id 拼名，防落非预期路径）
+        if (!/^[1-9]\d*$/.test(String(req.params.id))) return cb(new Error('非法 id'));
+        cb(null, ISSUE_LITE_UPLOAD_BASE);
+    },
+    filename: function (req, file, cb) {
+        file.originalname = Buffer.from(file.originalname, 'latin1').toString('utf8'); // 中文名乱码修复
+        // D3-L-1 + 末次审 M-5 + D6 复审：落盘名截断防 ENAMETOOLONG——Array.from 按码点截断(不截半 emoji/CJK)60 个 +
+        //   去 Windows 尾部点/空格(不合法) + 空兜底。原名完整存 DB original_name·此处仅磁盘唯一名。
+        const safe = Array.from(file.originalname.replace(/[\\/:*?"<>|]/g, '_')).slice(0, 60).join('').replace(/[. ]+$/, '') || 'file';
+        cb(null, `${req.params.id}_${Date.now()}_${Math.round(Math.random() * 1e9)}_${safe}`);
+    }
+});
+const issueLiteUpload = multer({
+    storage: issueLiteStorage,
+    limits: { fileSize: 200 * 1024 * 1024, files: 1 }, // 200MB（压缩包可能较大·防 DoS）·单文件逐个传
+    fileFilter: function (req, file, cb) {
+        const ext = normalizeAttachmentExt(file.originalname);
+        if (!ext) return cb(new Error('文件名为空或包含非法字符'));
+        if (!ISSUE_LITE_ALLOWED_EXTS.includes(ext)) return cb(new Error(`不支持的扩展名 ${ext}，仅允许 ${ISSUE_LITE_ALLOWED_EXTS.join('/')}`));
+        cb(null, true);
+    }
+});
+
+// 附件列表（可见性：内部透明口径——对齐 issues/collab 既有范式，任意登录用户可见；D3-H-2 codex 审：
+//   列表只暴露 original_name 不暴露内部 file_name·下载走 res.download attachment disposition·白名单无
+//   svg/html/js 无内联 XSS 面。2-3 人内部工具·数据对团队透明，不单独加读 ACL）
+app.get('/api/issue-lite/:id/attachments', authenticateToken, requireIssueLiteSchemaReady, async (req, res) => {
+    if (!/^[1-9]\d*$/.test(req.params.id)) return res.status(400).json({ error: 'id 必须是正整数' });
+    try {
+        const rows = await dbAllAsync(
+            'SELECT id, issue_lite_id, original_name, file_size, mime_type, uploaded_by, uploaded_by_name, created_at FROM issue_lite_attachments WHERE issue_lite_id = ? ORDER BY created_at ASC',
+            [req.params.id]);
+        res.json(rows || []);
+    } catch (err) { logger.error('[数据开发换壳] 附件列表失败:', err.message); res.status(500).json({ error: err.message }); }
+});
+
+// 附件上传（multipart·field 名 files·单文件逐个传）
+app.post('/api/issue-lite/:id/attachments', authenticateToken, requireIssueLiteSchemaReady, requireNonViewer,
+    (req, res, next) => { // 前置 id 校验（在 multer 之前·纵深防御）
+        if (!/^[1-9]\d*$/.test(req.params.id)) return res.status(400).json({ error: 'id 必须是正整数' });
+        next();
+    },
+    (req, res, next) => { // multer 错误捕获（对齐 issues 范式）
+        issueLiteUpload.array('files', 1)(req, res, (err) => {
+            if (!err) return next();
+            const isMulterErr = err && err.name === 'MulterError';
+            try { collabSubmitHelpers.cleanupPendingFiles(req.files, logger); } catch (_) {}
+            logger.warn(`[数据开发换壳 附件] multer error: ${err.message}`);
+            return res.status(400).json({ error: '上传文件失败', code: isMulterErr ? err.code : 'UPLOAD_ERROR', detail: err.message });
+        });
+    },
+    async (req, res) => {
+        const id = parseInt(req.params.id, 10);
+        const file = Array.isArray(req.files) && req.files.length > 0 ? req.files[0] : null;
+        const relPath = file ? path.join('issue-lite', file.filename).replace(/\\/g, '/') : null;
+        const cleanup = () => { if (relPath) safeDeleteFileSync(relPath, UPLOAD_DIR); };
+        if (!file) return res.status(400).json({ error: '未收到上传文件（field 名应为 files）', code: 'NO_FILE' });
+        try {
+            const rec = await dbGetAsync('SELECT id, status FROM issue_lite WHERE id = ?', [id]);
+            if (!rec) { cleanup(); return res.status(404).json({ error: '登记单不存在' }); }
+            if (rec.status === '已归档') { cleanup(); return res.status(409).json({ error: '已归档单不可再传附件', code: 'ARCHIVED_LOCKED' }); }
+            // D3-H-1(codex 审)：单级附件数量上限（防累积占盘·200MB×N 无界增长）
+            const cnt = await dbGetAsync('SELECT COUNT(*) AS c FROM issue_lite_attachments WHERE issue_lite_id = ?', [id]);
+            if (cnt && cnt.c >= 20) { cleanup(); return res.status(400).json({ error: '单个登记附件数已达上限(20)', code: 'ATTACHMENT_LIMIT' }); }
+            const uploaderId = Number(req.user.id);
+            const uploaderName = req.user.display_name || req.user.username || ('user#' + uploaderId);
+            const fileSize = (typeof file.size === 'number') ? file.size : null;
+            const mimeType = (typeof file.mimetype === 'string' && file.mimetype.trim()) ? file.mimetype : null;
+            // D3-M-4(codex 审)：条件 INSERT...SELECT 关 TOCTOU——落库瞬间再确认单存在且非归档，changes=0=并发归档/删单
+            const result = await dbRunAsync(
+                `INSERT INTO issue_lite_attachments (issue_lite_id, file_name, original_name, file_size, mime_type, uploaded_by, uploaded_by_name)
+                 SELECT ?,?,?,?,?,?,? FROM issue_lite WHERE id=? AND status != '已归档'`,
+                [id, relPath, file.originalname, fileSize, mimeType, uploaderId, uploaderName, id]);
+            if (result.changes === 0) { cleanup(); return res.status(409).json({ error: '登记单状态已变化（已归档或删除），附件未保存', code: 'STATE_CHANGED' }); }
+            logger.info(`[数据开发换壳] #${id} 上传附件 ${file.originalname} by ${req.user.username}`);
+            res.json({ success: true, attachment: { id: result.lastID, issue_lite_id: id, original_name: file.originalname, file_size: fileSize, mime_type: mimeType, uploaded_by_name: uploaderName } });
+        } catch (err) {
+            cleanup();
+            logger.error('[数据开发换壳] 附件上传失败:', err.message);
+            res.status(500).json({ error: err.message });
+        }
+    });
+
+// 附件下载（res.download·isPathSafe 兜底防穿越·返回原名）
+app.get('/api/issue-lite/attachments/:aid/download', authenticateToken, requireIssueLiteSchemaReady, async (req, res) => {
+    if (!/^[1-9]\d*$/.test(req.params.aid)) return res.status(400).json({ error: 'aid 必须是正整数' });
+    try {
+        const att = await dbGetAsync('SELECT file_name, original_name FROM issue_lite_attachments WHERE id = ?', [req.params.aid]);
+        if (!att) return res.status(404).json({ error: '附件不存在' });
+        const fullPath = path.join(UPLOAD_DIR, att.file_name);
+        if (!isPathSafe(fullPath, UPLOAD_DIR) || !fs.existsSync(fullPath)) return res.status(404).json({ error: '附件文件不存在' });
+        res.download(fullPath, att.original_name || path.basename(att.file_name));
+    } catch (err) { logger.error('[数据开发换壳] 附件下载失败:', err.message); res.status(500).json({ error: err.message }); }
+});
+
+// 附件删除（上传人或 admin·已归档单锁定仅 admin·safeDeleteFileSync 白名单）
+app.delete('/api/issue-lite/attachments/:aid', authenticateToken, requireIssueLiteSchemaReady, requireNonViewer, async (req, res) => {
+    if (!/^[1-9]\d*$/.test(req.params.aid)) return res.status(400).json({ error: 'aid 必须是正整数' });
+    const isAdmin = req.user.role === 'admin';
+    try {
+        const att = await dbGetAsync('SELECT id, issue_lite_id, file_name, uploaded_by FROM issue_lite_attachments WHERE id = ?', [req.params.aid]);
+        if (!att) return res.status(404).json({ error: '附件不存在' });
+        const parent = await dbGetAsync('SELECT id, status FROM issue_lite WHERE id = ?', [att.issue_lite_id]);
+        if (parent && parent.status === '已归档' && !isAdmin) return res.status(403).json({ error: '已归档单附件仅管理员可删', code: 'ARCHIVED_LOCKED' });
+        if (!isAdmin && Number(att.uploaded_by) !== Number(req.user.id)) return res.status(403).json({ error: '只能删除自己上传的附件', code: 'NOT_UPLOADER' });
+        await dbRunAsync('DELETE FROM issue_lite_attachments WHERE id = ?', [req.params.aid]);
+        // 物理删（最佳努力·白名单内·DB 行已删=逻辑已移除；D3-M-2 codex 审：检查返回值·失败 warn 留痕）
+        try {
+            const delOk = safeDeleteFileSync(att.file_name, UPLOAD_DIR);
+            if (!delOk) logger.warn(`[数据开发换壳] 附件 #${req.params.aid} 物理文件未删除（不存在或越界）：${att.file_name}`);
+        } catch (e) { logger.warn(`[数据开发换壳] 附件物理删失败 ${att.file_name}: ${e.message}`); }
+        logger.info(`[数据开发换壳] 删附件 #${req.params.aid} by ${req.user.username}`);
+        res.json({ success: true });
+    } catch (err) { logger.error('[数据开发换壳] 附件删除失败:', err.message); res.status(500).json({ error: err.message }); }
 });
 
 // 协作单附件目录路径生成

@@ -1,0 +1,527 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>数据开发 - 智数协同平台</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="assets/css/style.css?v=v1.117.0_fabdrag">
+    <link rel="stylesheet" href="assets/css/components.css?v=v1.110.4_unify">
+    <style>
+        /* 数据开发·轻量协作台账页（issue_lite 换壳 v0.2·D5）· 页面专属
+           复用共享 u- 组件层（筛选栏/按钮/表格/徽章/抽屉/弹窗/表单/空状态）；补 4 态徽章 + 详情网格 + 附件区。 */
+        .unified-page .u-corr-table { min-width: 1080px; }
+        .u-status-badge.s-待处理 { background: #f3f4f6; color: #6b7280; }
+        .u-status-badge.s-处理中 { background: #dbeafe; color: #1d4ed8; }
+        .u-status-badge.s-已完成 { background: #d1fae5; color: #065f46; }
+        .u-status-badge.s-已归档 { background: #ede9fe; color: #6d28d9; }
+        .il-detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 20px; margin-bottom: 16px; }
+        .il-detail-item label { display: block; font-size: 11px; color: #6b7280; margin-bottom: 4px; font-weight: 500; }
+        .il-detail-item .val { font-size: 13px; color: #111827; word-break: break-word; }
+        .il-detail-item.full { grid-column: 1 / -1; }
+        .il-desc { background: #f9fafb; border-radius: 8px; padding: 12px; font-size: 13px; color: #374151; line-height: 1.6; white-space: pre-wrap; word-break: break-word; min-height: 36px; }
+        .il-muted { color: #9ca3af; }
+        .il-sec { border-top: 1px solid #f1f5f9; padding-top: 14px; margin-top: 14px; }
+        .il-sec h3 { font-size: 13px; font-weight: 600; color: #374151; margin: 0 0 10px; }
+        .il-att { display: flex; align-items: center; justify-content: space-between; padding: 7px 10px; background: #f9fafb; border-radius: 6px; margin-bottom: 6px; font-size: 12px; }
+        .il-att a { color: #2563eb; text-decoration: none; cursor: pointer; }
+        .il-att .del { color: #dc2626; cursor: pointer; margin-left: 10px; }
+        .il-chip { display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 10px; background: #eef2ff; color: #4338ca; margin-left: 6px; }
+    </style>
+</head>
+
+<body class="unified-page">
+    <!-- 顶部导航栏（本页"数据开发"高亮指向 /Issue_Lite.html） -->
+    <nav class="navbar fixed-header">
+        <div class="nav-left">
+            <div class="nav-logo">
+                <svg viewBox="0 0 24 24" fill="none" stroke="url(#logo-gradient)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <defs><linearGradient id="logo-gradient" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" style="stop-color:#d97706"/><stop offset="100%" style="stop-color:#b45309"/></linearGradient></defs>
+                    <circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>
+                </svg>
+            </div>
+            <div class="nav-title">智数协同平台</div>
+        </div>
+        <div class="nav-right">
+            <a href="/Task_Pool.html" class="nav-item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>数仓任务池</a>
+            <a href="/Data_Collab.html" class="nav-item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>数据协作</a>
+            <a href="/Issue_Lite.html" class="nav-item" style="color:#d97706; font-weight:600;"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>数据开发</a>
+            <a href="/Data_Correction.html" class="nav-item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>数据修正</a>
+            <a href="/Sys_Iteration.html" class="nav-item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>系统迭代</a>
+            <div class="nav-dropdown">
+                <button class="nav-dropdown-trigger"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>数据中心<svg class="arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg></button>
+                <div class="nav-dropdown-menu">
+                    <a href="/Dashboard.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>建设总览</a>
+                    <a href="/Asset_Center.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>资产中心</a>
+                    <a href="/Model_Center.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>模型中心</a>
+                    <a href="/Metrics.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>指标中心</a>
+                </div>
+            </div>
+            <a href="/Statistics.html" class="nav-item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="20" x2="12" y2="10"/><line x1="18" y1="20" x2="18" y2="4"/><line x1="6" y1="20" x2="6" y2="16"/></svg>统计中心</a>
+            <a href="/Doc_Viewer.html" target="_blank" class="nav-item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>文档中心</a>
+            <div class="nav-divider"></div>
+            <div id="userProfileArea"></div>
+        </div>
+    </nav>
+
+    <main class="workbench-container">
+        <div class="u-filter-bar">
+            <span class="u-filter-label">状态</span>
+            <select id="filterStatus" onchange="loadList()">
+                <option value="">全部</option>
+                <option value="待处理">待处理</option>
+                <option value="处理中">处理中</option>
+                <option value="已完成">已完成</option>
+                <option value="已归档">已归档</option>
+            </select>
+            <div style="flex:1;"></div>
+            <button class="u-btn-primary" id="btnNew" onclick="openCreateModal()" style="display:none;">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>新建登记
+            </button>
+        </div>
+
+        <div class="u-corr-table-wrap">
+            <table class="u-corr-table" id="issueLiteTable">
+                <thead>
+                    <tr>
+                        <th style="width:1%; white-space:nowrap;" class="u-sortable" data-sort-by="id">ID<span class="u-sort-icon">⇅</span></th>
+                        <th style="min-width:180px;" class="u-sortable" data-sort-by="title">标题<span class="u-sort-icon">⇅</span></th>
+                        <th style="width:110px;" class="u-sortable" data-sort-by="requester_name">需求方<span class="u-sort-icon">⇅</span></th>
+                        <th style="width:84px;" class="u-sortable" data-sort-by="status">状态<span class="u-sort-icon">⇅</span></th>
+                        <th style="width:150px;" class="u-sortable" data-sort-by="created_at">创建时间<span class="u-sort-icon">⇅</span></th>
+                        <th style="width:110px;" class="u-sortable" data-sort-by="req_date">需求完成时间<span class="u-sort-icon">⇅</span></th>
+                        <th style="width:110px;" class="u-sortable" data-sort-by="estimated_at">预计完成时间<span class="u-sort-icon">⇅</span></th>
+                        <th style="width:150px;" class="u-sortable" data-sort-by="completed_at">实际完成时间<span class="u-sort-icon">⇅</span></th>
+                    </tr>
+                </thead>
+                <tbody id="ilTableBody"></tbody>
+            </table>
+        </div>
+        <div class="u-pagination" id="ilPagination"></div>
+        <div class="u-empty-state" id="emptyState" style="display:none;">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#d1d5db" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+            <p>暂无数据开发登记</p>
+        </div>
+    </main>
+
+    <!-- 详情抽屉 -->
+    <div class="u-drawer-overlay" id="drawerOverlay" onclick="closeDrawer()"></div>
+    <div class="u-drawer" id="drawer">
+        <div class="u-drawer-header"><h2 id="drawerTitle">登记详情</h2><button class="u-drawer-close" onclick="closeDrawer()">&times;</button></div>
+        <div class="u-drawer-body" id="drawerBody"></div>
+    </div>
+
+    <!-- 新建登记弹窗 -->
+    <div class="u-modal-overlay" id="createModal">
+        <div class="u-modal-box">
+            <div class="u-modal-header"><h2>新建数据开发登记</h2><button class="u-drawer-close" onclick="closeCreateModal()">&times;</button></div>
+            <div class="u-modal-body">
+                <div class="u-form-group"><label>标题 <span class="u-req">*</span></label><input type="text" id="fTitle" maxlength="200" placeholder="一句话写清要开发/取数的内容"></div>
+                <div class="u-form-row">
+                    <div class="u-form-group"><label>需求人 <span class="u-req">*</span></label><input type="text" id="fReqName" maxlength="50" placeholder="业务方姓名"></div>
+                    <div class="u-form-group"><label>需求部门 <span class="u-req">*</span></label><input type="text" id="fReqDept" maxlength="50" placeholder="业务方部门"></div>
+                </div>
+                <div class="u-form-row">
+                    <div class="u-form-group"><label>需求人手机号 <span class="u-req">*</span></label><input type="text" id="fReqPhone" maxlength="21" placeholder="用于拉群 + 完成通知（如 138…）"></div>
+                    <div class="u-form-group"><label>需求完成时间</label><input type="date" id="fReqDate"></div>
+                </div>
+                <div class="u-form-group"><label>OA 流程号</label><input type="text" id="fOa" maxlength="20" placeholder="可选：1-20 位纯数字（如 364265），留空则不填"></div>
+                <div class="u-form-group">
+                    <label>建单后通知对方</label>
+                    <select id="fNotifyTarget"><option value="">暂不通知</option><option value="10">示例开发C</option><option value="3">示例用户A</option></select>
+                    <div class="u-hint">建单后可主动钉钉一位对方（示例开发C/示例用户A）；也可稍后在详情里再发。</div>
+                </div>
+                <div class="u-form-group"><label>需求描述</label><textarea id="fDesc" rows="3" maxlength="2000" placeholder="可选：补充背景 / 口径 / 关联表等"></textarea></div>
+                <div class="u-hint" id="createErr" style="display:none; color:#d93025;"></div>
+            </div>
+            <div class="u-modal-footer">
+                <button class="u-btn-secondary" onclick="closeCreateModal()">取消</button>
+                <button class="u-btn-primary" id="btnSubmitCreate" onclick="submitCreate()">提交登记</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 标记完成弹窗（说明 + 看板地址） -->
+    <div class="u-modal-overlay" id="completeModal">
+        <div class="u-modal-box">
+            <div class="u-modal-header"><h2>标记完成</h2><button class="u-drawer-close" onclick="closeCompleteModal()">&times;</button></div>
+            <div class="u-modal-body">
+                <div class="u-form-group"><label>完成说明 <span class="u-req">*</span></label><textarea id="cNote" rows="3" maxlength="2000" placeholder="不少于 10 字：交付了什么 / 口径 / 注意事项"></textarea></div>
+                <div class="u-form-group"><label>看板地址（可选）</label><input type="text" id="cBoard" placeholder="http(s):// 报表/看板链接，将随完成通知发给业务方"></div>
+                <div class="u-hint" id="completeErr" style="display:none; color:#d93025;"></div>
+            </div>
+            <div class="u-modal-footer">
+                <button class="u-btn-secondary" onclick="closeCompleteModal()">取消</button>
+                <button class="u-btn-primary" id="btnSubmitComplete" onclick="submitComplete()">确认完成</button>
+            </div>
+        </div>
+    </div>
+
+    <input type="file" id="attachInput" style="display:none;" onchange="onAttachPicked()">
+
+    <script src="assets/js/app.js?v=v1.121.0_issuelite"></script>
+    <script src="assets/js/unify-helpers.js?v=v1.110.4_unify"></script>
+    <script>
+        let allItems = [];
+        let allUsers = [];             // /api/users/active·通知区解析 notify_target_id → 人名
+        let busy = false;              // 写操作 in-flight 守卫（呼应后端并发 P3）
+        let currentDrawerId = null;
+        let completingId = null;       // 完成弹窗目标 id（与 currentDrawerId 解耦·D5-M-4 codex 审）
+        let drawerAtts = [];           // 当前抽屉附件缓存（D5-H-1：downloadAttach 从此查名·不把文件名拼进 onclick）
+        let currentDrawerStatus = null; // 当前抽屉单状态（复D5-L-1：附件重载 status 兜底）
+
+        function canWrite() { return typeof currentUser !== 'undefined' && currentUser && currentUser.role !== 'viewer'; }
+        function isAdminRole() { return typeof currentUser !== 'undefined' && currentUser && currentUser.role === 'admin'; }
+        // D5-M-1(codex 审)：board_url 前端也做协议守卫（后端 sanitizeUrl 已挡·防御纵深防脏数据/回滚残留 javascript:）
+        function safeHref(url) { const s = String(url || '').trim(); return /^https?:\/\//i.test(s) ? s : ''; }
+        function esc(v) {
+            const s = (v == null) ? '' : String(v);
+            if (typeof escapeHtml === 'function') return escapeHtml(s);
+            return s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+        }
+
+        const IL_SORT_TYPES = { id: 'number', title: 'string', requester_name: 'string', status: 'statusOrder', created_at: 'date', req_date: 'date', estimated_at: 'date', completed_at: 'date' };
+        const ilSorter = UnifyHelpers.attachTableSort({
+            tableSelector: '#issueLiteTable', fieldTypes: IL_SORT_TYPES,
+            statusOrder: { status: { '待处理': 0, '处理中': 1, '已完成': 2, '已归档': 3 } },
+            getList: () => allItems, render: renderTable,
+            defaultSort: { field: 'created_at', dir: 'desc' }, pagination: { containerSelector: '#ilPagination' },
+        });
+
+        document.addEventListener('DOMContentLoaded', async () => {
+            if (typeof checkAuth === 'function') { const ok = await checkAuth(); if (!ok) return; }
+            document.getElementById('btnNew').style.display = canWrite() ? '' : 'none';
+            await loadUsers();
+            await loadList();
+            ilSorter.init();
+            try { const deepId = new URLSearchParams(location.search).get('id'); if (deepId && /^\d+$/.test(deepId)) { const n = parseInt(deepId, 10); if (Number.isSafeInteger(n) && n > 0) openDrawer(n); } } catch (e) {}
+        });
+
+        async function loadUsers() {
+            try { const res = await authFetch('/api/users/active'); if (res && res.ok) allUsers = await res.json(); } catch (e) { console.error('加载用户失败', e); }
+        }
+        function userName(id) { const u = allUsers.find(x => Number(x.id) === Number(id)); return u ? (u.display_name || u.username) : ('用户#' + id); }
+
+        async function loadList() {
+            const empty = document.getElementById('emptyState');
+            try {
+                const st = document.getElementById('filterStatus').value;
+                const res = await authFetch('/api/issue-lite' + (st ? ('?status=' + encodeURIComponent(st)) : ''));
+                if (!res || !res.ok) { allItems = []; ilSorter.render(); empty.style.display = ''; empty.querySelector('p').textContent = '加载失败，请刷新重试'; return; }
+                empty.querySelector('p').textContent = '暂无数据开发登记';
+                allItems = await res.json();
+                ilSorter.render();
+            } catch (e) { console.error(e); allItems = []; ilSorter.render(); empty.style.display = ''; empty.querySelector('p').textContent = '加载失败，请刷新重试'; }
+        }
+
+        function renderTable(rows) {
+            const list = rows || allItems;
+            const body = document.getElementById('ilTableBody'), empty = document.getElementById('emptyState');
+            if (!list.length) { body.innerHTML = ''; empty.style.display = ''; return; }
+            empty.style.display = 'none';
+            const STATES = ['待处理', '处理中', '已完成', '已归档'];
+            const dash = '<span class="il-muted">—</span>';
+            body.innerHTML = list.map(it => {
+                const sid = Number.isSafeInteger(Number(it.id)) ? Number(it.id) : 0;
+                const st = STATES.includes(it.status) ? it.status : '待处理';
+                return `<tr style="cursor:pointer;" onclick="openDrawer(${sid})">
+                    <td>#${sid}</td>
+                    <td>${esc(it.title)}</td>
+                    <td>${esc(it.requester_dept)} ${esc(it.requester_name)}</td>
+                    <td><span class="u-status-badge s-${st}">${st}</span></td>
+                    <td>${it.created_at ? esc(it.created_at) : dash}</td>
+                    <td>${it.req_date ? esc(it.req_date) : dash}</td>
+                    <td>${it.estimated_at ? esc(it.estimated_at) : dash}</td>
+                    <td>${it.completed_at ? esc(it.completed_at) : dash}</td>
+                </tr>`;
+            }).join('');
+        }
+
+        // ===== 详情抽屉 =====
+        async function openDrawer(id) {
+            currentDrawerId = id;
+            try {
+                const res = await authFetch('/api/issue-lite/' + id);
+                if (!res || !res.ok) return;
+                const it = await res.json();
+                if (Number(currentDrawerId) !== Number(id)) return; // refine-L-1(codex 审)：抽屉已切走·丢弃这次渲染
+                // 复D5-M-1(codex 审)：st 归一到 4 态、id 强转数字再拼进 HTML/onclick（防后端异常值注入）
+                const STATES = ['待处理', '处理中', '已完成', '已归档'];
+                const st = STATES.includes(it.status) ? it.status : '待处理';
+                const sid = Number.isSafeInteger(Number(it.id)) ? Number(it.id) : 0;
+                const canDo = canWrite();
+                currentDrawerStatus = st;
+                document.getElementById('drawerTitle').textContent = '登记 #' + sid;
+                const chatOpen = String(it.dingtalk_open_conversation_id || '').trim();
+                // 状态流转按钮（顶部操作栏）——「待处理→处理中」由"回填预计完成时间"驱动（见下方预计完成时间区），此处不放"开始处理"
+                const flow = [];
+                if (canDo && (st === '待处理' || st === '处理中')) flow.push(`<button class="u-btn-primary" onclick="openCompleteModal(${sid})">标记完成</button>`);
+                if (canDo && st === '已完成') flow.push(`<button class="u-btn-secondary" onclick="toStatus(${sid},'处理中')">重新打开</button>`);
+                if (isAdminRole() && st !== '已归档') flow.push(`<button class="u-btn-secondary" onclick="toStatus(${sid},'已归档')">归档</button>`);
+
+                // 通知区（照数据修正 notifyTypes + buildNotifyRow 范式：每类显人名 + 发送/查已读/重发）
+                const notifyTypes = [];
+                if (it.notify_target_id) {
+                    // 通知对象若就是当前登录人 → 不通知自己（隐藏发送/重发/查已读，仅信息展示）
+                    const selfTarget = typeof currentUser !== 'undefined' && currentUser && Number(currentUser.id) === Number(it.notify_target_id);
+                    notifyTypes.push({
+                        key: 'peer', label: '通知对方', recipient: userName(it.notify_target_id),
+                        status: it.notify_status, notifiedAt: it.notify_at, readAt: it.notify_read_at,
+                        sendable: (st !== '已归档') && !selfTarget, canSend: canDo && !selfTarget, byPhone: false, noPhone: false, needDone: false, selfTarget,
+                    });
+                }
+                notifyTypes.push({
+                    key: 'estimate', label: '通知业务方·预计', recipient: it.requester_name || '业务方',
+                    status: it.est_notify_status, notifiedAt: it.est_notify_at, readAt: it.est_notify_read_at,
+                    sendable: (!!it.estimated_at && st !== '已归档'), canSend: canDo,
+                    byPhone: true, noPhone: !String(it.requester_phone || '').trim(), needDone: false, needEst: true,
+                });
+                notifyTypes.push({
+                    key: 'requester', label: '通知业务方·完成', recipient: it.requester_name || '业务方',
+                    status: it.req_notify_status, notifiedAt: it.req_notify_at, readAt: it.req_notify_read_at,
+                    sendable: ((st === '已完成' || st === '已归档') && !!it.completed_at), canSend: canDo,
+                    byPhone: true, noPhone: !String(it.requester_phone || '').trim(), needDone: true,
+                });
+                const notifyHtml = notifyTypes.map(t => buildNotifyRow(t, sid)).join('');
+
+                document.getElementById('drawerBody').innerHTML = `
+                    ${flow.length ? `<div class="u-action-bar" style="margin-bottom:14px;">${flow.join('')}</div>` : ''}
+                    <div class="il-detail-grid">
+                        <div class="il-detail-item full"><label>标题</label><div class="val">${esc(it.title)}</div></div>
+                        <div class="il-detail-item"><label>状态</label><div class="val"><span class="u-status-badge s-${st}">${st}</span></div></div>
+                        <div class="il-detail-item"><label>OA 流程号</label><div class="val">${it.oa_number ? esc(it.oa_number) : '<span class="il-muted">—</span>'}</div></div>
+                        <div class="il-detail-item"><label>需求人</label><div class="val">${esc(it.requester_dept)} ${esc(it.requester_name)}</div></div>
+                        <div class="il-detail-item"><label>需求人手机号</label><div class="val">${esc(it.requester_phone)}</div></div>
+                        <div class="il-detail-item"><label>需求完成时间</label><div class="val">${it.req_date ? esc(it.req_date) : '<span class="il-muted">—</span>'}</div></div>
+                        <div class="il-detail-item"><label>预计完成时间</label><div class="val">${it.estimated_at ? esc(it.estimated_at) : '<span class="il-muted">未回填</span>'}</div></div>
+                        <div class="il-detail-item"><label>实际完成时间</label><div class="val">${it.completed_at ? esc(it.completed_at) : '<span class="il-muted">—</span>'}</div></div>
+                        <div class="il-detail-item"><label>开发 / 登记人</label><div class="val">${esc(it.assignee_name)} / ${esc(it.created_by_name)}</div></div>
+                        <div class="il-detail-item full"><label>需求描述</label><div class="il-desc">${it.description ? esc(it.description) : '<span class="il-muted">（无）</span>'}</div></div>
+                        ${it.complete_note ? `<div class="il-detail-item full"><label>完成说明${it.completed_at ? ' · ' + esc(it.completed_at) : ''}</label><div class="il-desc">${esc(it.complete_note)}${safeHref(it.board_url) ? `<br><a href="${esc(safeHref(it.board_url))}" target="_blank" rel="noopener" style="color:#2563eb;">📊 看板地址</a>` : ''}</div></div>` : ''}
+                    </div>
+                    <div class="u-detail-section"><h3>预计完成时间</h3>
+                        ${canDo && (st === '待处理' || st === '处理中')
+                          ? `<div class="u-notify-row"><span class="u-nr-label">${st === '待处理' ? '回填（进处理中）' : '更新'}</span><span class="u-nr-body"><input type="date" id="ilEtaInput" value="${it.estimated_at ? esc(it.estimated_at) : ''}" style="font-size:12px; padding:2px 6px;"><button class="u-btn-secondary u-nb-btn" onclick="submitEstimate(${sid})">保存预计完成时间</button><span class="il-muted" style="margin-left:8px;">${st === '待处理' ? '（保存后单据自动进入"处理中"）' : ''}</span></span></div>`
+                          : `<div class="u-notify-row"><span class="u-nr-label">预计完成</span><span class="u-nr-body">${it.estimated_at ? esc(it.estimated_at) : '<span class="il-muted">未回填</span>'}</span></div>`}
+                    </div>
+                    <div class="u-detail-section"><h3>通知</h3>${notifyHtml}</div>
+                    <div class="u-detail-section"><h3>讨论群</h3>
+                        ${chatOpen
+                          ? `<div class="u-notify-row"><span class="u-nr-label">钉钉群</span><span class="u-nr-body"><span style="color:#059669;">💬 已建群「${esc(it.dingtalk_chat_name || '')}」（请到钉钉客户端查看）</span></span></div>`
+                          : `<div class="u-notify-row"><span class="u-nr-label">钉钉群</span><span class="u-nr-body"><span class="il-muted">尚未建群</span>${canDo && st !== '已归档' ? `<button class="u-btn-secondary u-nb-btn" onclick="createChat(${sid})">拉群讨论</button>` : ''}</span></div>`}
+                    </div>
+                    <div class="u-detail-section">
+                        <h3>附件 <span id="attCount" class="il-muted"></span> ${canDo && st !== '已归档' ? `<button class="u-btn-secondary u-nb-btn" style="float:right;" onclick="pickAttach(${sid})">上传附件</button>` : ''}</h3>
+                        <div id="attList"><span class="il-muted">加载中…</span></div>
+                    </div>`;
+                document.getElementById('drawerOverlay').classList.add('open');
+                document.getElementById('drawer').classList.add('open');
+                loadAttachments(sid, st);
+            } catch (e) { console.error(e); }
+        }
+        function closeDrawer() { document.getElementById('drawerOverlay').classList.remove('open'); document.getElementById('drawer').classList.remove('open'); currentDrawerId = null; }
+
+        async function refreshDrawer(id) { if (currentDrawerId === id) await openDrawer(id); await loadList(); }
+
+        // ===== 状态流转 =====
+        async function toStatus(id, status) {
+            if (busy) return; if (!confirm(`确认将状态改为「${status}」？`)) return; busy = true;
+            try {
+                const res = await authFetch('/api/issue-lite/' + id + '/status', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status }) });
+                const j = await res.json().catch(() => ({}));
+                if (res.ok) await refreshDrawer(id); else alert(j.error || '操作失败');
+            } catch (e) { alert('操作失败'); } finally { busy = false; }
+        }
+        // 回填预计完成时间（待处理→自动进处理中·取代旧"开始处理"）
+        async function submitEstimate(id) {
+            if (busy) return;
+            const el = document.getElementById('ilEtaInput'); const v = el ? el.value : '';
+            if (!v) { alert('请选择预计完成时间'); return; }
+            if (!confirm('保存预计完成时间？（待处理单将自动进入"处理中"）')) return;
+            busy = true;
+            try {
+                const res = await authFetch('/api/issue-lite/' + id + '/estimate', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ estimated_at: v }) });
+                const j = await res.json().catch(() => ({}));
+                if (res.ok) await refreshDrawer(id); else alert(j.error || '保存失败');
+            } catch (e) { alert('保存失败'); } finally { busy = false; }
+        }
+        function openCompleteModal(id) { completingId = id; document.getElementById('cNote').value = ''; document.getElementById('cBoard').value = ''; document.getElementById('completeErr').style.display = 'none'; document.getElementById('completeModal').classList.add('open'); }
+        function closeCompleteModal() { document.getElementById('completeModal').classList.remove('open'); }
+        async function submitComplete() {
+            if (busy) return;
+            const targetId = completingId; // D5-M-4：捕获目标 id，与后续异步/抽屉切换解耦
+            const note = document.getElementById('cNote').value.trim(), board = document.getElementById('cBoard').value.trim();
+            const err = document.getElementById('completeErr'); err.style.display = 'none';
+            if (note.length < 10) { err.textContent = '完成说明必填且不少于 10 字'; err.style.display = ''; return; }
+            busy = true; const btn = document.getElementById('btnSubmitComplete'); btn.disabled = true;
+            try {
+                const payload = { status: '已完成', complete_note: note }; if (board) payload.board_url = board;
+                const res = await authFetch('/api/issue-lite/' + targetId + '/status', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                const j = await res.json().catch(() => ({}));
+                if (res.ok) { closeCompleteModal(); await refreshDrawer(targetId); } else { err.textContent = j.error || '操作失败'; err.style.display = ''; }
+            } catch (e) { err.textContent = '操作失败'; err.style.display = ''; } finally { busy = false; btn.disabled = false; }
+        }
+
+        // ===== 通知区（照数据修正 buildNotifyRow 范式：人名 + 发送/查已读/重发 + 独立已读结果框）=====
+        function buildNotifyRow(t, sid) {
+            const rname = esc(t.recipient);
+            // 通知对象=当前登录人本人：不通知自己——仅信息展示，无任何按钮
+            if (t.selfTarget) {
+                const l = (t.status === 'sent')
+                    ? `<span style="color:#059669;">✅ 通知对象是你本人${t.notifiedAt ? '（已于 ' + esc(t.notifiedAt) + '）' : ''}</span>`
+                    : `<span class="il-muted">通知对象是你本人，无需通知</span>`;
+                return `<div class="u-notify-row"><span class="u-nr-label">${esc(t.label)}</span><span class="u-nr-body">${l}</span></div>`;
+            }
+            const sendBtn = (force, text) => (t.canSend && t.sendable) ? `<button class="u-btn-secondary u-nb-btn" onclick="notifySend(${sid}, '${t.key}', ${force})">${text}</button>` : '';
+            const readBtn = t.canSend ? `<button class="u-btn-secondary u-nb-btn" onclick="notifyRead(${sid}, '${t.key}')">查询已读</button>` : '';
+            let line = '', btns = '';
+            if (t.byPhone && t.noPhone && t.status !== 'sent') {
+                line = `<span style="color:#b45309;">— 业务方未填手机号，无法通知</span>`;
+            } else if (t.status === 'sent') {
+                if (t.readAt) {
+                    line = `<span style="color:#059669;">📖 ${rname} 已读${t.notifiedAt ? ' · 通知于 ' + esc(t.notifiedAt) : ''} · 已读于 ${esc(t.readAt)}</span>`;
+                    btns = sendBtn(true, '重新通知');
+                } else {
+                    line = `<span style="color:#059669;">✅ 已通知 ${rname}${t.notifiedAt ? ' · ' + esc(t.notifiedAt) : ''}</span>`;
+                    btns = readBtn + sendBtn(true, '重新通知');
+                }
+            } else if (t.status === 'failed') {
+                line = `<span style="color:#dc2626;">⚠️ 通知失败，可重试</span>`;
+                btns = sendBtn(true, '重新通知');
+            } else {
+                if (t.sendable) { line = `<span style="color:#6b7280;">⏳ 尚未通知 ${rname}</span>`; btns = sendBtn(false, '发送通知'); }
+                else { line = `<span style="color:#9ca3af;">— 未发送${t.needDone ? '（需先标记完成）' : t.needEst ? '（需先回填预计完成时间）' : ''}</span>`; }
+            }
+            return `<div class="u-notify-row"><span class="u-nr-label">${esc(t.label)}</span><span class="u-nr-body">${line}${btns}<span class="u-nr-read-result" id="ilReadBox_${t.key}"></span></span></div>`;
+        }
+        async function notifySend(id, key, force) {
+            if (busy) return;
+            const url = key === 'peer' ? `/api/issue-lite/${id}/notify` : key === 'estimate' ? `/api/issue-lite/${id}/notify-estimate` : `/api/issue-lite/${id}/notify-requester`;
+            const who = key === 'peer' ? '对方' : key === 'estimate' ? '业务方（预计完成时间）' : '业务方（完成）';
+            if (!confirm(`确认${force ? '重新' : ''}通知${who}（钉钉）？`)) return;
+            busy = true;
+            try {
+                const res = await authFetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+                const j = await res.json().catch(() => ({}));
+                if (res.ok && j.success) { alert(j.partial_success ? ('⚠️ ' + (j.warning || '已发送，请勿重复')) : '已发送'); await refreshDrawer(id); }
+                else alert((j && j.error) || '通知失败');
+            } catch (e) { alert('通知失败'); } finally { busy = false; }
+        }
+        async function notifyRead(id, key) {
+            const recipient = key === 'peer' ? 'peer' : key === 'estimate' ? 'estimate' : 'requester';
+            const box = document.getElementById('ilReadBox_' + key);
+            if (box) box.textContent = '查询中…';
+            try {
+                const res = await authFetch(`/api/issue-lite/${id}/notify-read-status?recipient=${recipient}`);
+                const j = await res.json().catch(() => ({}));
+                if (Number(currentDrawerId) !== Number(id)) return; // refine-M-1(codex 审)：抽屉已切走·不写旧结果到当前框
+                if (box) box.textContent = res.ok ? (j.read ? ('✅ 已读' + (j.read_at ? ' ' + j.read_at : '')) : '⏳ 尚未读') : ('查询失败：' + ((j && j.error) || ''));
+            } catch (e) { if (Number(currentDrawerId) === Number(id) && box) box.textContent = '查询失败'; }
+        }
+
+        // ===== 拉群 =====
+        async function createChat(id) {
+            if (busy) return; if (!confirm('拉起钉钉讨论群？成员=需求人+示例开发C+示例用户A（示例用户A为群主），会真实建群。')) return; busy = true;
+            try {
+                const res = await authFetch('/api/issue-lite/' + id + '/create-chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+                const j = await res.json().catch(() => ({}));
+                if (res.ok) { alert(j.idempotent ? (j.message || '该单已有讨论群') : ('讨论群已建：' + (j.chat_name || ''))); await refreshDrawer(id); }
+                else alert((j && j.error) || '拉群失败');
+            } catch (e) { alert('拉群失败'); } finally { busy = false; }
+        }
+
+        // ===== 附件 =====
+        async function loadAttachments(id, status) {
+            const st = (status !== undefined && status !== null) ? status : currentDrawerStatus; // 复D5-L-1：status 兜底
+            try {
+                const res = await authFetch('/api/issue-lite/' + id + '/attachments');
+                // 复D5-H-1(codex 审)：时效守卫——请求返回时抽屉已切走则丢弃，防显/删错单附件（Number 归一·id 可能来自 dataset 字符串）
+                if (Number(currentDrawerId) !== Number(id)) return;
+                const list = (res && res.ok) ? await res.json() : [];
+                drawerAtts = list; // D5-H-1：缓存供 downloadAttach 查名（不把文件名拼进 HTML 属性）
+                const box = document.getElementById('attList'), cnt = document.getElementById('attCount');
+                if (cnt) cnt.textContent = list.length ? '(' + list.length + ')' : '';
+                if (!box) return;
+                // D5-M-3(codex 审)：归档单删除仅 admin（与后端一致·避免非 admin 看到删除后被 403）
+                const canDelAtt = canWrite() && (st !== '已归档' || isAdminRole());
+                box.innerHTML = list.length ? list.map(a => `<div class="il-att">
+                    <span>📎 <a onclick="downloadAttach(${Number(a.id)})">${esc(a.original_name)}</a> <span class="il-muted">${a.file_size ? (Math.round(a.file_size/1024) + 'KB') : ''}</span></span>
+                    <span>${esc(a.uploaded_by_name)}${canDelAtt ? ` <span class="del" onclick="delAttach(${Number(a.id)}, ${Number(id)})">删除</span>` : ''}</span>
+                </div>`).join('') : '<span class="il-muted">暂无附件</span>';
+            } catch (e) { const box = document.getElementById('attList'); if (box) box.innerHTML = '<span class="il-muted">附件加载失败</span>'; }
+        }
+        function pickAttach(id) { document.getElementById('attachInput').dataset.issueId = id; document.getElementById('attachInput').click(); }
+        function onAttachPicked() {
+            const inp = document.getElementById('attachInput'), id = inp.dataset.issueId, file = inp.files && inp.files[0];
+            if (!file || !id) return;
+            uploadAttach(id, file).finally(() => { inp.value = ''; });
+        }
+        async function uploadAttach(id, file) {
+            if (busy) return; busy = true;
+            try {
+                const fd = new FormData(); fd.append('files', file);
+                const res = await authFetch('/api/issue-lite/' + id + '/attachments', { method: 'POST', body: fd });
+                const j = await res.json().catch(() => ({}));
+                if (res.ok && j.success) { await loadAttachments(id); }
+                else alert((j && (j.error || j.detail)) || '上传失败');
+            } catch (e) { alert('上传失败'); } finally { busy = false; }
+        }
+        async function downloadAttach(aid) {
+            // D5-H-1：文件名从缓存查（不从 onclick 传·杜绝文件名注入）
+            const att = (drawerAtts || []).find(a => Number(a.id) === Number(aid));
+            const name = (att && att.original_name) ? att.original_name : ('attachment_' + aid);
+            try {
+                const res = await authFetch('/api/issue-lite/attachments/' + aid + '/download');
+                if (!res || !res.ok) { alert('下载失败'); return; }
+                const blob = await res.blob(); const url = URL.createObjectURL(blob);
+                const a = document.createElement('a'); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 2000);
+            } catch (e) { alert('下载失败'); }
+        }
+        async function delAttach(aid, id) {
+            if (busy) return; if (!confirm('删除该附件？')) return; busy = true;
+            try {
+                const res = await authFetch('/api/issue-lite/attachments/' + aid, { method: 'DELETE' });
+                const j = await res.json().catch(() => ({}));
+                if (res.ok) await loadAttachments(id); else alert((j && j.error) || '删除失败');
+            } catch (e) { alert('删除失败'); } finally { busy = false; }
+        }
+
+        // ===== 新建登记 =====
+        function openCreateModal() {
+            if (!canWrite()) return;
+            ['fTitle', 'fReqName', 'fReqDept', 'fReqPhone', 'fReqDate', 'fOa', 'fDesc'].forEach(k => document.getElementById(k).value = '');
+            // 通知对象下拉：排除当前登录人本人（不通知自己）——admin 见示例开发C+示例用户A·示例开发C见示例用户A·示例用户A见示例开发C
+            const myId = (typeof currentUser !== 'undefined' && currentUser) ? Number(currentUser.id) : null;
+            const sel = document.getElementById('fNotifyTarget');
+            const opts = [10, 3].filter(uid => uid !== myId).map(uid => `<option value="${uid}">${escapeHtml(userName(uid))}</option>`).join('');
+            sel.innerHTML = '<option value="">暂不通知</option>' + opts;
+            document.getElementById('fNotifyTarget').value = '';
+            document.getElementById('createErr').style.display = 'none';
+            document.getElementById('createModal').classList.add('open');
+        }
+        function closeCreateModal() { document.getElementById('createModal').classList.remove('open'); }
+        async function submitCreate() {
+            if (busy) return;
+            const g = k => document.getElementById(k).value.trim();
+            const title = g('fTitle'), rn = g('fReqName'), rd = g('fReqDept'), rp = g('fReqPhone'), date = g('fReqDate'), oa = g('fOa'), desc = g('fDesc'), nt = document.getElementById('fNotifyTarget').value;
+            const err = document.getElementById('createErr'); err.style.display = 'none';
+            if (!title) return showErr(err, '标题必填');
+            if (!rn) return showErr(err, '需求人必填');
+            if (!rd) return showErr(err, '需求部门必填');
+            if (!rp) return showErr(err, '需求人手机号必填');
+            busy = true; const btn = document.getElementById('btnSubmitCreate'); btn.disabled = true;
+            try {
+                const payload = { title, requester_name: rn, requester_dept: rd, requester_phone: rp };
+                if (date) payload.req_date = date; if (oa) payload.oa_number = oa; if (desc) payload.description = desc; if (nt) payload.notify_target_id = Number(nt);
+                const res = await authFetch('/api/issue-lite', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                const j = await res.json().catch(() => ({}));
+                if (res.ok && j.success) { closeCreateModal(); await loadList(); if (j.issue) openDrawer(j.issue.id); }
+                else showErr(err, (j && j.error) || '提交失败');
+            } catch (e) { showErr(err, '提交失败'); } finally { busy = false; btn.disabled = false; }
+        }
+        function showErr(el, msg) { el.textContent = msg; el.style.display = ''; }
+    </script>
+</body>
+
+</html>
