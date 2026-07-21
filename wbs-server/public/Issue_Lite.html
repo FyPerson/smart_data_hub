@@ -90,7 +90,7 @@
                         <th style="width:110px;" class="u-sortable" data-sort-by="requester_name">需求方<span class="u-sort-icon">⇅</span></th>
                         <th style="width:84px;" class="u-sortable" data-sort-by="status">状态<span class="u-sort-icon">⇅</span></th>
                         <th style="width:150px;" class="u-sortable" data-sort-by="created_at">创建时间<span class="u-sort-icon">⇅</span></th>
-                        <th style="width:110px;" class="u-sortable" data-sort-by="req_date">需求完成时间<span class="u-sort-icon">⇅</span></th>
+                        <th style="width:110px;" class="u-sortable" data-sort-by="req_date">期望完成时间<span class="u-sort-icon">⇅</span></th>
                         <th style="width:110px;" class="u-sortable" data-sort-by="estimated_at">预计完成时间<span class="u-sort-icon">⇅</span></th>
                         <th style="width:150px;" class="u-sortable" data-sort-by="completed_at">实际完成时间<span class="u-sort-icon">⇅</span></th>
                     </tr>
@@ -124,7 +124,7 @@
                 </div>
                 <div class="u-form-row">
                     <div class="u-form-group"><label>需求人手机号 <span class="u-req">*</span></label><input type="text" id="fReqPhone" maxlength="21" placeholder="用于拉群 + 完成通知（如 138…）"></div>
-                    <div class="u-form-group"><label>需求完成时间</label><input type="date" id="fReqDate"></div>
+                    <div class="u-form-group"><label>期望完成时间</label><input type="date" id="fReqDate"></div>
                 </div>
                 <div class="u-form-group"><label>OA 流程号</label><input type="text" id="fOa" maxlength="20" placeholder="可选：1-20 位纯数字（如 364265），留空则不填"></div>
                 <div class="u-form-group">
@@ -139,6 +139,19 @@
                 <button class="u-btn-secondary" onclick="closeCreateModal()">取消</button>
                 <button class="u-btn-primary" id="btnSubmitCreate" onclick="submitCreate()">提交登记</button>
             </div>
+        </div>
+    </div>
+
+    <!-- 回复预计完成时间弹窗（位置与数据修正模块一致：抽屉顶部操作栏触发） -->
+    <div class="u-modal-overlay" id="estimateModal">
+        <div class="u-modal-box" style="max-width:440px;">
+            <div class="u-modal-header"><h2>回复预计完成时间</h2><button class="u-drawer-close" onclick="closeEstimateModal()">&times;</button></div>
+            <div class="u-modal-body">
+                <input type="hidden" id="estimateIssueId">
+                <div class="u-form-group"><label>预计完成时间 <span class="u-req">*</span></label><input type="date" id="ilEtaInput"></div>
+                <div style="font-size:12px; color:#6b7280;">回复后单据进入「处理中」；钉钉通知业务方需在详情页手动点「通知业务方·预计」发送。</div>
+            </div>
+            <div class="u-modal-footer"><button class="u-btn-secondary" onclick="closeEstimateModal()">取消</button><button class="u-btn-primary" id="btnSubmitEstimate" onclick="submitEstimate()">提交</button></div>
         </div>
     </div>
 
@@ -254,8 +267,10 @@
                 currentDrawerStatus = st;
                 document.getElementById('drawerTitle').textContent = '登记 #' + sid;
                 const chatOpen = String(it.dingtalk_open_conversation_id || '').trim();
-                // 状态流转按钮（顶部操作栏）——「待处理→处理中」由"回填预计完成时间"驱动（见下方预计完成时间区），此处不放"开始处理"
+                // 状态流转按钮（顶部操作栏）——对齐数据修正：预计完成时间从顶部按钮进入弹窗回填，不在详情中另设编辑区。
                 const flow = [];
+                const canEstimate = it.can_estimate === true;
+                if (canEstimate && (st === '待处理' || st === '处理中')) flow.push(`<button class="u-btn-primary" onclick="openEstimateModal(${sid}, '${it.estimated_at ? esc(it.estimated_at) : ''}')">${st === '待处理' ? '回复预计完成' : '更新预计完成'}</button>`);
                 if (canDo && (st === '待处理' || st === '处理中')) flow.push(`<button class="u-btn-primary" onclick="openCompleteModal(${sid})">标记完成</button>`);
                 if (canDo && st === '已完成') flow.push(`<button class="u-btn-secondary" onclick="toStatus(${sid},'处理中')">重新打开</button>`);
                 if (isAdminRole() && st !== '已归档') flow.push(`<button class="u-btn-secondary" onclick="toStatus(${sid},'已归档')">归档</button>`);
@@ -293,17 +308,13 @@
                         <div class="il-detail-item"><label>OA 流程号</label><div class="val">${it.oa_number ? esc(it.oa_number) : '<span class="il-muted">—</span>'}</div></div>
                         <div class="il-detail-item"><label>需求人</label><div class="val">${esc(it.requester_dept)} ${esc(it.requester_name)}</div></div>
                         <div class="il-detail-item"><label>需求人手机号</label><div class="val">${esc(it.requester_phone)}</div></div>
-                        <div class="il-detail-item"><label>需求完成时间</label><div class="val">${it.req_date ? esc(it.req_date) : '<span class="il-muted">—</span>'}</div></div>
+                        <div class="il-detail-item"><label>期望完成时间</label><div class="val">${it.req_date ? esc(it.req_date) : '<span class="il-muted">—</span>'}</div></div>
                         <div class="il-detail-item"><label>预计完成时间</label><div class="val">${it.estimated_at ? esc(it.estimated_at) : '<span class="il-muted">未回填</span>'}</div></div>
                         <div class="il-detail-item"><label>实际完成时间</label><div class="val">${it.completed_at ? esc(it.completed_at) : '<span class="il-muted">—</span>'}</div></div>
+                        <div class="il-detail-item"><label>创建时间</label><div class="val">${it.created_at ? esc(it.created_at) : '<span class="il-muted">—</span>'}</div></div>
                         <div class="il-detail-item"><label>开发 / 登记人</label><div class="val">${esc(it.assignee_name)} / ${esc(it.created_by_name)}</div></div>
                         <div class="il-detail-item full"><label>需求描述</label><div class="il-desc">${it.description ? esc(it.description) : '<span class="il-muted">（无）</span>'}</div></div>
                         ${it.complete_note ? `<div class="il-detail-item full"><label>完成说明${it.completed_at ? ' · ' + esc(it.completed_at) : ''}</label><div class="il-desc">${esc(it.complete_note)}${safeHref(it.board_url) ? `<br><a href="${esc(safeHref(it.board_url))}" target="_blank" rel="noopener" style="color:#2563eb;">📊 看板地址</a>` : ''}</div></div>` : ''}
-                    </div>
-                    <div class="u-detail-section"><h3>预计完成时间</h3>
-                        ${canDo && (st === '待处理' || st === '处理中')
-                          ? `<div class="u-notify-row"><span class="u-nr-label">${st === '待处理' ? '回填（进处理中）' : '更新'}</span><span class="u-nr-body"><input type="date" id="ilEtaInput" value="${it.estimated_at ? esc(it.estimated_at) : ''}" style="font-size:12px; padding:2px 6px;"><button class="u-btn-secondary u-nb-btn" onclick="submitEstimate(${sid})">保存预计完成时间</button><span class="il-muted" style="margin-left:8px;">${st === '待处理' ? '（保存后单据自动进入"处理中"）' : ''}</span></span></div>`
-                          : `<div class="u-notify-row"><span class="u-nr-label">预计完成</span><span class="u-nr-body">${it.estimated_at ? esc(it.estimated_at) : '<span class="il-muted">未回填</span>'}</span></div>`}
                     </div>
                     <div class="u-detail-section"><h3>通知</h3>${notifyHtml}</div>
                     <div class="u-detail-section"><h3>讨论群</h3>
@@ -334,17 +345,25 @@
             } catch (e) { alert('操作失败'); } finally { busy = false; }
         }
         // 回填预计完成时间（待处理→自动进处理中·取代旧"开始处理"）
-        async function submitEstimate(id) {
+        function openEstimateModal(id, estimatedAt) {
+            document.getElementById('estimateIssueId').value = String(id);
+            document.getElementById('ilEtaInput').value = estimatedAt || '';
+            document.getElementById('estimateModal').classList.add('open');
+        }
+        function closeEstimateModal() { document.getElementById('estimateModal').classList.remove('open'); }
+        async function submitEstimate() {
             if (busy) return;
+            const id = Number(document.getElementById('estimateIssueId').value);
             const el = document.getElementById('ilEtaInput'); const v = el ? el.value : '';
+            if (!Number.isSafeInteger(id) || id <= 0) { alert('单据编号无效，请关闭弹窗后重试'); return; }
             if (!v) { alert('请选择预计完成时间'); return; }
             if (!confirm('保存预计完成时间？（待处理单将自动进入"处理中"）')) return;
-            busy = true;
+            busy = true; const btn = document.getElementById('btnSubmitEstimate'); btn.disabled = true;
             try {
                 const res = await authFetch('/api/issue-lite/' + id + '/estimate', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ estimated_at: v }) });
                 const j = await res.json().catch(() => ({}));
-                if (res.ok) await refreshDrawer(id); else alert(j.error || '保存失败');
-            } catch (e) { alert('保存失败'); } finally { busy = false; }
+                if (res.ok) { closeEstimateModal(); await refreshDrawer(id); } else alert(j.error || '保存失败');
+            } catch (e) { alert('保存失败'); } finally { busy = false; btn.disabled = false; }
         }
         function openCompleteModal(id) { completingId = id; document.getElementById('cNote').value = ''; document.getElementById('cBoard').value = ''; document.getElementById('completeErr').style.display = 'none'; document.getElementById('completeModal').classList.add('open'); }
         function closeCompleteModal() { document.getElementById('completeModal').classList.remove('open'); }

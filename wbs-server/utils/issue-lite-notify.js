@@ -40,7 +40,7 @@ function buildIssueLitePeerMarkdown(rec, platformBaseUrl) {
         '',
         `**标题**：${st(rec.title)}`,
         `**需求方**：${st(rec.requester_dept)} ${st(rec.requester_name)}`,
-        rec.req_date ? `**需求日期**：${st(rec.req_date)}` : '',
+        rec.req_date ? `**期望完成时间**：${st(rec.req_date)}` : '',
         '',
     ];
     if (rec.description) {

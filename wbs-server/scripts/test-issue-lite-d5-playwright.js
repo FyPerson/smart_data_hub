@@ -66,11 +66,14 @@ async function loginAs(ctx, token) {
         // 建单全字段
         await page.click('#btnNew'); await page.waitForTimeout(300);
         ok('建单弹窗打开', await page.locator('#createModal.open').isVisible());
+        const createModalText = await page.locator('#createModal').innerText();
+        ok('建单弹窗统一为期望完成时间', createModalText.includes('期望完成时间') && !createModalText.includes('需求完成时间'));
         const t = TITLE_PREFIX + '合同取数';
         await page.fill('#fTitle', t);
         await page.fill('#fReqName', '赵六');
         await page.fill('#fReqDept', '市场营销部');
         await page.fill('#fReqPhone', '13811112222');
+        await page.fill('#fReqDate', '2026-08-18');
         await page.fill('#fOa', '364265');
         await page.selectOption('#fNotifyTarget', '10');
         await page.fill('#fDesc', 'D5 UI 描述');
@@ -83,13 +86,26 @@ async function loginAs(ctx, token) {
         ok('列表出现新单 + 需求方列(市场营销部 赵六)', rowHtml.includes('市场营销部') && rowHtml.includes('赵六'), rowHtml.slice(0, 80));
         ok('列表 ID 带 # 前缀', rowHtml.includes('#'));
         const heads = await page.locator('#issueLiteTable thead').innerText();
+        ok('列表表头统一为期望完成时间', heads.includes('期望完成时间') && !heads.includes('需求完成时间'), heads.replace(/\n/g, '|'));
         ok('列表表头有 预计完成时间 + 无 附件/群', heads.includes('预计完成时间') && heads.includes('创建时间') && !heads.includes('附件') && !heads.includes('群'), heads.replace(/\n/g, '|'));
 
-        // 打开详情：回填预计完成时间 → 自动进处理中（取代开始处理）
+        // 打开详情：顶部操作栏进入预计完成弹窗 → 自动进处理中（对齐数据修正范式）
         await page.click(`#ilTableBody tr:has-text("${t}")`); await page.waitForTimeout(500);
-        ok('详情有「预计完成时间」区', (await page.locator('#drawerBody').innerText()).includes('预计完成时间'));
+        const beforeEta = await page.locator('#drawerBody').innerText();
+        const detailCreatedAt = await page.locator('.il-detail-item:has(> label:text-is("创建时间")) .val').innerText();
+        ok('详情显示期望完成时间且无旧文案', beforeEta.includes('期望完成时间') && beforeEta.includes('2026-08-18') && !beforeEta.includes('需求完成时间'));
+        ok('详情显示非空创建时间值', /^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}$/.test(detailCreatedAt.trim()), detailCreatedAt);
+        ok('预计回填入口位于顶部操作栏且无独立编辑区', (await page.locator('#drawerBody > .u-action-bar button:has-text("回复预计完成")').count()) === 1 && (await page.locator('#drawerBody > .u-detail-section h3:has-text("预计完成时间")').count()) === 0);
+        // 单据仍在待处理态时，非开发非管理员不能看到回填入口（验证 can_estimate 前后端契约，不靠终态隐藏）。
+        const ctx3 = await browser.newContext();
+        const page3 = await loginAs(ctx3, await fx.signAs(fx.CONTACT_ID)); await page3.waitForTimeout(800);
+        await page3.goto(`${BASE}/Issue_Lite.html?id=${await page.evaluate(() => currentDrawerId)}`, { waitUntil: 'load' }); await page3.waitForTimeout(700);
+        ok('待处理态非开发非管理员不显示预计回填入口', (await page3.locator('#drawerBody button:has-text("预计完成")').count()) === 0);
+        await ctx3.close();
+        await page.click('#drawerBody > .u-action-bar button:has-text("回复预计完成")');
+        ok('预计完成弹窗打开', await page.locator('#estimateModal.open').isVisible());
         await page.fill('#ilEtaInput', '2026-08-20');
-        await page.click('#drawerBody button:has-text("保存预计完成时间")'); await page.waitForTimeout(800);
+        await page.click('#btnSubmitEstimate'); await page.waitForTimeout(800);
         const afterEta = await page.locator('#drawerBody').innerText();
         ok('回填预计 → 自动进处理中 + 显示预计时间', afterEta.includes('处理中') && afterEta.includes('2026-08-20'));
         ok('通知区有「通知业务方·预计」行', afterEta.includes('通知业务方·预计'));

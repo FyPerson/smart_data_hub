@@ -1612,7 +1612,7 @@ function initTable() {
     const ISSUE_LITE_REQUIRED_COLS = [
         'id', 'title', 'description', 'oa_number',
         'requester_name', 'requester_dept', 'requester_phone',   // 需求方(业务方)
-        'req_date', 'estimated_at', 'assignee_id', 'assignee_name', 'status',  // req_date=需求完成时间(期望) · estimated_at=预计完成(开发回填)
+        'req_date', 'estimated_at', 'assignee_id', 'assignee_name', 'status',  // req_date=期望完成时间 · estimated_at=预计完成(开发回填)
         'complete_note', 'board_url',                            // 完成说明 + 看板地址
         // N1 建单通知对方(示例开发C/示例用户A):
         'notify_target_id', 'notify_status', 'notify_at', 'notify_message_key', 'notify_read_at',
@@ -12431,6 +12431,9 @@ app.get('/api/issue-lite/:id', authenticateToken, requireIssueLiteSchemaReady, a
     try {
         const row = await dbGetAsync('SELECT * FROM issue_lite WHERE id = ?', [req.params.id]);
         if (!row) return res.status(404).json({ error: '登记单不存在' });
+        // 回填权限以服务端当前配置为准，避免配置开发人变更后前端按历史 assignee_id 误显/漏显入口。
+        const identities = await getIssueLiteIdentities();
+        row.can_estimate = issueLiteIsAdmin(req) || Number(req.user.id) === identities.developerId;
         res.json(row);
     } catch (err) {
         logger.error('[数据开发换壳] 详情失败:', err.message);
@@ -12479,7 +12482,7 @@ app.post('/api/issue-lite', authenticateToken, requireIssueLiteSchemaReady, requ
             const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(rdClean);
             const dt = m ? new Date(`${rdClean}T00:00:00`) : null;
             const ok = m && dt && !isNaN(dt.getTime()) && dt.getFullYear() === +m[1] && (dt.getMonth() + 1) === +m[2] && dt.getDate() === +m[3];
-            if (!ok) return res.status(400).json({ error: '需求日期非法（应为真实存在的 YYYY-MM-DD）', code: 'REQ_DATE_INVALID' });
+            if (!ok) return res.status(400).json({ error: '期望完成时间非法（应为真实存在的 YYYY-MM-DD）', code: 'REQ_DATE_INVALID' });
         }
         const identities = await getIssueLiteIdentities();
         // notify_target_id 选填：若填必须 ∈ 配置的通知对象（示例开发C/示例用户A）

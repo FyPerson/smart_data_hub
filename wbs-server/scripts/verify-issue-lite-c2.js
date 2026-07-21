@@ -14,6 +14,7 @@ const { spawn, execSync } = require('child_process');
 const path = require('path');
 const sqlite3 = require('sqlite3');
 const fx = require('./_test-fixture');
+const issueLiteNotify = require('../utils/issue-lite-notify');
 
 const TEST_PORT = 3399;
 const BASE = `http://localhost:${TEST_PORT}`;
@@ -105,6 +106,8 @@ function bodyWith(extra) { return Object.assign({ title: TITLE_PREFIX + '单', r
         check('正常建单 → 200 + 待处理 + 开发=示例开发C(10) + notify_target=10',
             r.status === 200 && it && it.status === '待处理' && it.assignee_id === DEV_ID && it.notify_target_id === DEV_ID && it.requester_name === '张三', JSON.stringify(r.body));
         const id = it ? it.id : null;
+        const peerMarkdown = issueLiteNotify.buildIssueLitePeerMarkdown(it, 'http://localhost:3000');
+        check('N1 文案统一为期望完成时间', peerMarkdown.includes('**期望完成时间**：2026-07-25') && !peerMarkdown.includes('需求日期') && !peerMarkdown.includes('需求完成时间'), peerMarkdown);
 
         // ===== 列表 / 筛选 =====
         let list = (await api('GET', '/api/issue-lite', adminTok)).body || [];
@@ -115,7 +118,9 @@ function bodyWith(extra) { return Object.assign({ title: TITLE_PREFIX + '单', r
 
         // ===== 详情 =====
         r = await api('GET', `/api/issue-lite/${id}`, adminTok);
-        check('详情 → 200 + 字段对', r.status === 200 && r.body && r.body.id === id && r.body.description === 'D2 描述');
+        check('详情 → 200 + 字段对 + 创建时间 + 管理员可回填', r.status === 200 && r.body && r.body.id === id && r.body.description === 'D2 描述' && !!r.body.created_at && r.body.can_estimate === true);
+        r = await api('GET', `/api/issue-lite/${id}`, fengTok);
+        check('详情 → 非开发非管理员不可回填', r.status === 200 && r.body && r.body.can_estimate === false, JSON.stringify(r.body));
         check('详情不存在 → 404', (await api('GET', '/api/issue-lite/999999', adminTok)).status === 404);
 
         // ===== 4 态流转 =====
