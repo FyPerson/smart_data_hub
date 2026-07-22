@@ -1,6 +1,6 @@
 /**
  * D2 verify e2e · 数据开发换壳（issue_lite）v0.2 后端端点
- * 换壳方案 v0.2 · D2 / _HANDOFF
+ * 换壳方案 v0.2 · D2 / docs/local/HANDOFF.md 附录 A
  *
  * 覆盖：建单需求方字段校验 → 4 态流转守卫(完成填说明/看板·归档 admin-only·终态) → N1/N2 通知门(404/未完成/无对象)
  *       → 已读双 recipient(peer/requester) NOT_NOTIFIED → 未鉴权/viewer。
@@ -39,11 +39,18 @@ async function api(method, urlPath, token, body) {
     let j = null; try { j = await r.json(); } catch (_) {}
     return { status: r.status, body: j };
 }
+// codex 15 C-1 范式（F 收口 sweep）：netstat 本地地址列精确端口比较（findstr :3399 子串匹配会误命中 33990-33999）
 function killPort(port) {
     try {
-        const out = execSync(`netstat -ano | findstr :${port} | findstr LISTENING`, { encoding: 'utf8', shell: 'cmd.exe' });
+        const out = execSync('netstat -ano -p tcp', { encoding: 'utf8', shell: 'cmd.exe' });
         const pids = new Set();
-        out.split(/\r?\n/).forEach(line => { const m = line.trim().match(/(\d+)\s*$/); if (m) pids.add(m[1]); });
+        out.split(/\r?\n/).forEach(line => {
+            const cols = line.trim().split(/\s+/);
+            if (cols.length >= 5 && cols[0] === 'TCP' && /LISTENING/i.test(cols[3])) {
+                const m = cols[1].match(/:(\d+)$/);
+                if (m && Number(m[1]) === port) pids.add(cols[4]);
+            }
+        });
         pids.forEach(pid => { try { execSync(`taskkill /F /PID ${pid}`, { shell: 'cmd.exe' }); } catch (_) {} });
     } catch (_) {}
 }
@@ -89,11 +96,12 @@ function bodyWith(extra) { return Object.assign({ title: TITLE_PREFIX + '单', r
 
         let r = await api('POST', '/api/issue-lite', adminTok, bodyWith({ title: '' }));
         check('缺标题 → 400 TITLE_REQUIRED', r.status === 400 && r.body && r.body.code === 'TITLE_REQUIRED', JSON.stringify(r.body));
-        r = await api('POST', '/api/issue-lite', adminTok, { title: TITLE_PREFIX + 'x', requester_dept: '市场', requester_phone: '13800001111' });
+        r = await api('POST', '/api/issue-lite', adminTok, { title: TITLE_PREFIX + 'x', requester_dept: '市场营销部', requester_phone: '13800001111' });
         check('缺需求人 → 400 REQUESTER_NAME_REQUIRED', r.status === 400 && r.body && r.body.code === 'REQUESTER_NAME_REQUIRED', JSON.stringify(r.body));
         r = await api('POST', '/api/issue-lite', adminTok, { title: TITLE_PREFIX + 'x', requester_name: '张三', requester_phone: '13800001111' });
         check('缺需求部门 → 400 REQUESTER_DEPT_REQUIRED', r.status === 400 && r.body && r.body.code === 'REQUESTER_DEPT_REQUIRED', JSON.stringify(r.body));
-        r = await api('POST', '/api/issue-lite', adminTok, { title: TITLE_PREFIX + 'x', requester_name: '张三', requester_dept: '市场' });
+        // Commit D 部门白名单后：dept 须用合法值（'市场'会先命中 REQUESTER_DEPT_INVALID），本用例意图=缺手机号
+        r = await api('POST', '/api/issue-lite', adminTok, { title: TITLE_PREFIX + 'x', requester_name: '张三', requester_dept: '市场营销部' });
         check('缺需求人手机号 → 400 REQUESTER_PHONE_REQUIRED', r.status === 400 && r.body && r.body.code === 'REQUESTER_PHONE_REQUIRED', JSON.stringify(r.body));
         r = await api('POST', '/api/issue-lite', adminTok, bodyWith({ requester_phone: 'abcdef' }));
         check('手机号非法 → 400 REQUESTER_PHONE_INVALID', r.status === 400 && r.body && r.body.code === 'REQUESTER_PHONE_INVALID', JSON.stringify(r.body));
@@ -178,6 +186,12 @@ function bodyWith(extra) { return Object.assign({ title: TITLE_PREFIX + '单', r
         check('OA 号非法(含字母) → 400 OA_NUMBER_INVALID', r.status === 400 && r.body.code === 'OA_NUMBER_INVALID', JSON.stringify(r.body));
         r = await api('POST', '/api/issue-lite', adminTok, bodyWith({ title: TITLE_PREFIX + 'OA合法', oa_number: '364265' }));
         check('OA 号合法(纯数字) → 200 + 存 oa_number', r.status === 200 && r.body.issue.oa_number === '364265', JSON.stringify(r.body));
+        // datadev 占位号（用户拍板·镜像数据修正 datafix 范式）：留空 OA → 自动补 datadev-{自身id}
+        r = await api('POST', '/api/issue-lite', adminTok, bodyWith({ title: TITLE_PREFIX + 'OA留空' }));
+        check('OA 留空 → 自动补 datadev-{id} 占位号', r.status === 200 && r.body.issue.oa_number === `datadev-${r.body.issue.id}`, JSON.stringify(r.body.issue && { id: r.body.issue.id, oa: r.body.issue.oa_number }));
+        // 占位号格式不可作为输入提交（校验只吃原始输入·M-6 职责隔离同源）
+        r = await api('POST', '/api/issue-lite', adminTok, bodyWith({ title: TITLE_PREFIX + 'OA伪占位', oa_number: 'datadev-99' }));
+        check('输入 datadev-xx 伪占位号 → 400 OA_NUMBER_INVALID', r.status === 400 && r.body.code === 'OA_NUMBER_INVALID');
         r = await api('POST', '/api/issue-lite', adminTok, bodyWith({ title: TITLE_PREFIX + 'OA数组', oa_number: ['364265'] }));
         check('OA 号数组蒙混 → 400 OA_NUMBER_INVALID', r.status === 400 && r.body.code === 'OA_NUMBER_INVALID', JSON.stringify(r.body));
 

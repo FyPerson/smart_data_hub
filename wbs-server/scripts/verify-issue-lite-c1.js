@@ -1,11 +1,11 @@
 /**
  * C1 verify · 数据开发换壳（issue_lite）schema 建表
- * 换壳方案 v0.1 §4 / _HANDOFF C1
+ * 换壳方案 v0.1 §4 / docs/local/HANDOFF.md 附录 A C1
  *
  * 验证点：
  *   ① 启服务后 stdout 出现 "[数据开发换壳 C1] ✅ issue_lite 表就绪"
- *   ② 本地 task_pool.db 里 issue_lite 表存在且 16 关键列全部到位（PRAGMA）
- *   ③ 两条索引 idx_issue_lite_status / idx_issue_lite_assignee 存在
+ *   ② 本地 task_pool.db 里 issue_lite 表存在且 41 关键列全部到位（PRAGMA，含作废 4 列）
+ *   ③ 三条索引 idx_issue_lite_status / idx_issue_lite_assignee / idx_issue_lite_voided 存在
  *
  * 用法：node scripts/verify-issue-lite-c1.js
  *   自启服务于 PORT=3399（不碰生产 3000），检查完按端口精确杀（禁全杀 node）。
@@ -28,21 +28,27 @@ const REQUIRED_COLS = [
     'req_notify_status', 'req_notify_at', 'req_notify_message_key', 'req_notify_read_at',
     'dingtalk_chat_id', 'dingtalk_open_conversation_id', 'dingtalk_chat_created_at',
     'dingtalk_chat_created_by', 'dingtalk_chat_name',
-    'created_by', 'created_by_name', 'created_at', 'completed_at', 'updated_at'
+    'created_by', 'created_by_name', 'created_at', 'completed_at', 'updated_at',
+    // 作废软作废 4 列（作废与查询优化 v0.1 Commit A）
+    'voided_at', 'voided_by', 'voided_by_name', 'void_reason'
 ];
 // D1: 校验 status CHECK 为 4 态
 const EXPECT_STATUS_CHECK = /CHECK\s*\(\s*status\s+IN\s*\(\s*'待处理'\s*,\s*'处理中'\s*,\s*'已完成'\s*,\s*'已归档'\s*\)/;
 
+// codex 15 C-1 范式（F 收口 sweep）：netstat 本地地址列精确端口比较（findstr :3399 子串匹配会误命中 33990-33999）
 function killPort(port) {
     try {
-        const out = execSync(`netstat -ano | findstr :${port} | findstr LISTENING`, { encoding: 'utf8', shell: 'cmd.exe' });
+        const out = execSync('netstat -ano -p tcp', { encoding: 'utf8', shell: 'cmd.exe' });
         const pids = new Set();
         out.split(/\r?\n/).forEach(line => {
-            const m = line.trim().match(/(\d+)\s*$/);
-            if (m) pids.add(m[1]);
+            const cols = line.trim().split(/\s+/);
+            if (cols.length >= 5 && cols[0] === 'TCP' && /LISTENING/i.test(cols[3])) {
+                const m = cols[1].match(/:(\d+)$/);
+                if (m && Number(m[1]) === port) pids.add(cols[4]);
+            }
         });
         pids.forEach(pid => { try { execSync(`taskkill /F /PID ${pid}`, { shell: 'cmd.exe' }); } catch (_) {} });
-    } catch (_) { /* 无监听即无需杀 */ }
+    } catch (_) {}
 }
 
 function checkDb() {
@@ -54,9 +60,16 @@ function checkDb() {
             if (err) { db.close(); return resolve({ ok: false, msg: `PRAGMA 失败：${err.message}` }); }
             const cols = (rows || []).map(r => r.name);
             const missing = REQUIRED_COLS.filter(c => !cols.includes(c));
-            db.all(`SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='issue_lite'`, (e2, idxRows) => {
-                const idxNames = (idxRows || []).map(r => r.name);
-                const idxMissing = ['idx_issue_lite_status', 'idx_issue_lite_assignee'].filter(i => !idxNames.includes(i));
+            db.all(`SELECT name, type, sql FROM sqlite_master WHERE tbl_name='issue_lite' AND type IN ('index','trigger')`, (e2, idxRows) => {
+                const idxNames = (idxRows || []).filter(r => r.type === 'index').map(r => r.name);
+                let idxMissing = ['idx_issue_lite_status', 'idx_issue_lite_assignee', 'idx_issue_lite_voided'].filter(i => !idxNames.includes(i));
+                // datadev 占位号触发器（codex 19 uxH-3·复审 uxL-1）：不止查名——断言定义含 AFTER INSERT +
+                //   WHEN NEW.oa_number IS NULL + 'datadev-' || NEW.id（防 IF NOT EXISTS 保留同名陈旧定义）
+                const trg = (idxRows || []).find(r => r.type === 'trigger' && r.name === 'trg_issue_lite_datadev_oa');
+                const trgSql = (trg && trg.sql) || '';
+                const trgOk = /AFTER\s+INSERT/i.test(trgSql) && /WHEN\s+NEW\.oa_number\s+IS\s+NULL/i.test(trgSql)
+                    && /'datadev-'\s*\|\|\s*NEW\.id/i.test(trgSql);
+                if (!trgOk) idxMissing = idxMissing.concat(['trg_issue_lite_datadev_oa(定义不符或缺失)']);
                 db.get(`SELECT sql FROM sqlite_master WHERE type='table' AND name='issue_lite'`, (e3, row) => {
                     db.close();
                     if (missing.length) return resolve({ ok: false, msg: `issue_lite 缺列：${missing.join(',')}` });

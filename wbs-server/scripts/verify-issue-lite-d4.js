@@ -1,6 +1,6 @@
 /**
  * D4 verify e2e · 数据开发换壳（issue_lite）拉群守卫
- * 换壳方案 v0.2 · D4 / _HANDOFF
+ * 换壳方案 v0.2 · D4 / docs/local/HANDOFF.md 附录 A
  *
  * ⚠️ 拉群会真建钉钉群——本 verify **只测钉钉调用前的守卫**（权限/幂等/id），绝不触发真建群。
  *    真建群 e2e 需用户在场（会真拉群）。授权路径靠"预置 open_conv_id 幂等短路"安全验证。
@@ -28,10 +28,18 @@ async function api(method, urlPath, token, body) {
     let j = null; try { j = await r.json(); } catch (_) {}
     return { status: r.status, body: j };
 }
+// codex 15 C-1 范式（F 收口 sweep）：netstat 本地地址列精确端口比较（findstr :3399 子串匹配会误命中 33990-33999）
 function killPort(port) {
     try {
-        const out = execSync(`netstat -ano | findstr :${port} | findstr LISTENING`, { encoding: 'utf8', shell: 'cmd.exe' });
-        const pids = new Set(); out.split(/\r?\n/).forEach(l => { const m = l.trim().match(/(\d+)\s*$/); if (m) pids.add(m[1]); });
+        const out = execSync('netstat -ano -p tcp', { encoding: 'utf8', shell: 'cmd.exe' });
+        const pids = new Set();
+        out.split(/\r?\n/).forEach(line => {
+            const cols = line.trim().split(/\s+/);
+            if (cols.length >= 5 && cols[0] === 'TCP' && /LISTENING/i.test(cols[3])) {
+                const m = cols[1].match(/:(\d+)$/);
+                if (m && Number(m[1]) === port) pids.add(cols[4]);
+            }
+        });
         pids.forEach(pid => { try { execSync(`taskkill /F /PID ${pid}`, { shell: 'cmd.exe' }); } catch (_) {} });
     } catch (_) {}
 }

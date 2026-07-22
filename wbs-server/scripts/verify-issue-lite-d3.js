@@ -1,6 +1,6 @@
 /**
  * D3 verify e2e · 数据开发换壳（issue_lite）附件
- * 换壳方案 v0.2 · D3 / _HANDOFF
+ * 换壳方案 v0.2 · D3 / docs/local/HANDOFF.md 附录 A
  *
  * 覆盖：上传(txt/zip 合法·exe 拒) → 列表 → 下载(内容比对) → 删除(上传人/admin/越权) → 归档锁 → 不存在单。
  * 自启 PORT=3399，跑完按端口精确杀 + 清理测试单 + 清理落盘附件。
@@ -36,10 +36,18 @@ async function upload(urlPath, token, filename, content, mime) {
     let j = null; try { j = await r.json(); } catch (_) {}
     return { status: r.status, body: j };
 }
+// codex 15 C-1 范式（F 收口 sweep）：netstat 本地地址列精确端口比较（findstr :3399 子串匹配会误命中 33990-33999）
 function killPort(port) {
     try {
-        const out = execSync(`netstat -ano | findstr :${port} | findstr LISTENING`, { encoding: 'utf8', shell: 'cmd.exe' });
-        const pids = new Set(); out.split(/\r?\n/).forEach(l => { const m = l.trim().match(/(\d+)\s*$/); if (m) pids.add(m[1]); });
+        const out = execSync('netstat -ano -p tcp', { encoding: 'utf8', shell: 'cmd.exe' });
+        const pids = new Set();
+        out.split(/\r?\n/).forEach(line => {
+            const cols = line.trim().split(/\s+/);
+            if (cols.length >= 5 && cols[0] === 'TCP' && /LISTENING/i.test(cols[3])) {
+                const m = cols[1].match(/:(\d+)$/);
+                if (m && Number(m[1]) === port) pids.add(cols[4]);
+            }
+        });
         pids.forEach(pid => { try { execSync(`taskkill /F /PID ${pid}`, { shell: 'cmd.exe' }); } catch (_) {} });
     } catch (_) {}
 }

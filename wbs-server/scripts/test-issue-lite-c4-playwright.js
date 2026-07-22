@@ -1,6 +1,6 @@
 /**
  * C4 UI 验证（Playwright）· 数据开发换壳 入口切换
- * 换壳方案 v0.1 §5 C4 / _HANDOFF
+ * 换壳方案 v0.1 §5 C4 / docs/local/HANDOFF.md 附录 A
  *
  * 验证：
  *   - 导航"数据开发"指向 /Issue_Lite.html（换壳后 13 页统一，抽查几页）
@@ -20,10 +20,18 @@ const TEST_PORT = 3399;
 const BASE = `http://localhost:${TEST_PORT}`;
 let pass = 0, fail = 0;
 function ok(name, cond, detail) { if (cond) { pass++; console.log(`  ✓ ${name}`); } else { fail++; console.log(`  ✗ ${name}  ${detail || ''}`); } }
+// codex 15 C-1 范式（F 收口 sweep）：netstat 本地地址列精确端口比较（findstr :3399 子串匹配会误命中 33990-33999）
 function killPort(port) {
     try {
-        const out = execSync(`netstat -ano | findstr :${port} | findstr LISTENING`, { encoding: 'utf8', shell: 'cmd.exe' });
-        const pids = new Set(); out.split(/\r?\n/).forEach(l => { const m = l.trim().match(/(\d+)\s*$/); if (m) pids.add(m[1]); });
+        const out = execSync('netstat -ano -p tcp', { encoding: 'utf8', shell: 'cmd.exe' });
+        const pids = new Set();
+        out.split(/\r?\n/).forEach(line => {
+            const cols = line.trim().split(/\s+/);
+            if (cols.length >= 5 && cols[0] === 'TCP' && /LISTENING/i.test(cols[3])) {
+                const m = cols[1].match(/:(\d+)$/);
+                if (m && Number(m[1]) === port) pids.add(cols[4]);
+            }
+        });
         pids.forEach(pid => { try { execSync(`taskkill /F /PID ${pid}`, { shell: 'cmd.exe' }); } catch (_) {} });
     } catch (_) {}
 }

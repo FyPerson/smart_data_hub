@@ -38,13 +38,13 @@ function buildIssueLitePeerMarkdown(rec, platformBaseUrl) {
     const lines = [
         '### 📋 有一条新的数据开发单',
         '',
-        `**标题**：${st(rec.title)}`,
-        `**需求方**：${st(rec.requester_dept)} ${st(rec.requester_name)}`,
+        `**需求描述**：${st(rec.title)}`, // 文案统一（2026-07-22 用户拍板）：标题→需求描述（字段仍 title）
+        `**业务方**：${st(rec.requester_dept)} ${st(rec.requester_name)}`, // 文案统一（v0.1 §6.1）：需求方→业务方
         rec.req_date ? `**期望完成时间**：${st(rec.req_date)}` : '',
         '',
     ];
     if (rec.description) {
-        lines.push('**需求描述**：', st(rec.description), '');
+        lines.push('**补充说明**：', st(rec.description), ''); // description 字段随文案统一改称补充说明
     }
     if (link) {
         lines.push('---', `📍 [打开平台查看 →](${link})`);
