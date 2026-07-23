@@ -214,7 +214,7 @@
             <label id="includeVoidedWrap" style="font-size:12px; color:#6b7280; display:none; align-items:center; gap:5px; cursor:pointer;">
                 <input type="checkbox" id="filterIncludeVoided" onchange="loadList()"> 含已作废
             </label>
-            <input type="text" id="filterSearch" placeholder="搜索修正方式/业务方/OA/流程类型..." onkeyup="debounceSearch()">
+            <input type="text" id="filterSearch" placeholder="搜索修正方式/业务方/OA/流程类型/创建人..." onkeyup="debounceSearch()">
             <div style="flex:1;"></div>
             <button class="u-btn-primary" id="btnNewCorrection" onclick="openCreateModal()" style="display:none;">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
@@ -484,8 +484,10 @@
             <div class="u-modal-header"><h2>补充附件</h2><button class="u-drawer-close" onclick="closeModal('attachModal')">&times;</button></div>
             <div class="u-modal-body">
                 <input type="hidden" id="attachCorrId">
-                <div style="font-size:12px; color:#6b7280; margin-bottom:8px;">仅补充证据留存，不改变状态、不计入提交次数。</div>
-                <div class="u-form-group"><label>补充附件 <span class="u-req">*</span></label><input type="file" id="formAttachFiles" multiple accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.pdf,.xlsx,.xls"></div>
+                <div style="font-size:12px; color:#6b7280; margin-bottom:8px;">仅补充证据留存，不改变状态、不计入提交次数。单次最多 5 个文件、每个 ≤20MB。</div>
+                <!-- 2026-07-23 上传交互优化：裸 input → 追加式选择 + 预览（复刻数据协作 selectedFiles 范式）-->
+                <div class="u-form-group"><label>补充附件 <span class="u-req">*</span></label><input type="file" id="formAttachFiles" multiple accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.pdf,.xlsx,.xls" onchange="corrAttachFilesChange(event)"></div>
+                <div id="corrAttachPreview" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;"></div>
             </div>
             <div class="u-modal-footer"><button class="u-btn-secondary" onclick="closeModal('attachModal')">取消</button><button class="u-btn-primary" id="btnSubmitAttach" onclick="submitAttachments()">提交</button></div>
         </div>
@@ -723,7 +725,8 @@
                 if (onlyBacklog && !isBacklog(it)) return false;
                 if (onlyUnarchived && !isUnarchivedBacklog(it)) return false;
                 if (kw) {
-                    const hay = [it.location_info, it.requester_name, it.oa_number, formatOaNo(it.oa_number), it.process_type].map(x => (x || '').toLowerCase()).join(' ');
+                    // 2026-07-23 用户拍板：搜索字段补创建人（此前只有业务字段，输入创建人命中 0 条造成困惑）
+                    const hay = [it.location_info, it.requester_name, it.oa_number, formatOaNo(it.oa_number), it.process_type, it.created_by_name].map(x => (x || '').toLowerCase()).join(' ');
                     if (!hay.includes(kw)) return false;
                 }
                 return true;
@@ -1254,7 +1257,7 @@
             // codex 61 M-4：待修复数据文字说明读统一字段 effective_error_proof_note（主单/无组取自身、子单取主单，后端已算好，前端无分支）。
             const errProofNoteHtml = r.effective_error_proof_note ? `<div style="font-size:13px; color:#374151; margin-bottom:6px; white-space:pre-wrap;">📝 ${escapeHtml(r.effective_error_proof_note)}</div>` : '';
             const errProofAddHtml = canAddErrProof
-                ? `<div style="margin-top:8px;"><input type="file" id="errProofFiles_${Number(r.id)}" multiple accept="image/*,.pdf,.xlsx,.xls" style="font-size:12px;"><button class="u-btn-secondary u-nb-btn" onclick="uploadErrorProof(${Number(r.id)})">上传待修复数据</button></div>`
+                ? `<div style="margin-top:8px;"><input type="file" id="errProofFiles_${Number(r.id)}" multiple accept="image/*,.pdf,.xlsx,.xls" style="font-size:12px;" onchange="renderErrProofPicked(${Number(r.id)})"><button class="u-btn-secondary u-nb-btn" onclick="uploadErrorProof(${Number(r.id)})">上传待修复数据</button><div id="errProofPicked_${Number(r.id)}" style="margin-top:4px;"></div></div>`
                 : '';
             // codex 61·方案 A：待修复数据 = 诉求级材料（组内共享一份、物理存主单）。子单从"整块隐藏"改为"只读展示主单 error_proof"——
             //   解决系统2 开发看不到待修复数据（后端详情已合并返回主单 error_proof 附件 + effective_error_proof_note）。
@@ -1913,25 +1916,107 @@
         }
 
         // ================= 补充附件 =================
+        // 2026-07-23 上传交互优化（用户实测诉求）：裸 input（选完无预览直接提交）→ 复刻数据协作
+        //   selectedFiles 范式——数组持态（input.files 不能增删）+ 追加式选择（可分多次选、可单个移除）
+        //   + 缩略图/占位预览。校验对齐后端 multer limits（corrections.js：files:5 / fileSize:20MB）。
+        //   objectURL 不 revoke 对齐数据协作 codex 27 #7 拍板（弹窗 ≤5 文件小图、关闭刷新自动 GC）。
+        let corrAttachFiles = [];
+        const CORR_ATTACH_MAX = 5;
+        const CORR_ATTACH_MAX_SIZE = 20 * 1024 * 1024;
+        const CORR_ATTACH_EXTS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'pdf', 'xlsx', 'xls'];
+        const CORR_IMG_EXTS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'];
+
+        function corrAttachFilesChange(e) {
+            for (const f of Array.from(e.target.files || [])) {
+                if (corrAttachFiles.length >= CORR_ATTACH_MAX) { showToast(`最多 ${CORR_ATTACH_MAX} 个文件`, 'error'); break; }
+                const ext = f.name.split('.').pop().toLowerCase();
+                if (!CORR_ATTACH_EXTS.includes(ext)) { showToast(`不支持的格式：${f.name}`, 'error'); continue; }
+                if (f.size > CORR_ATTACH_MAX_SIZE) { showToast(`${f.name} 超过 20MB`, 'error'); continue; }
+                if (corrAttachFiles.some(x => x.name === f.name && x.size === f.size && x.lastModified === f.lastModified)) {
+                    showToast(`该文件已选：${f.name}`, 'info'); continue;
+                }
+                corrAttachFiles.push(f);
+            }
+            renderCorrAttachPreview();
+            e.target.value = '';   // 清 input 允许再次选同一文件触发 change
+        }
+        function removeCorrAttachFile(idx) {
+            corrAttachFiles.splice(idx, 1);
+            renderCorrAttachPreview();
+        }
+        function renderCorrAttachPreview() {
+            const wrap = document.getElementById('corrAttachPreview');
+            if (!wrap) return;
+            wrap.innerHTML = corrAttachFiles.map((f, idx) => {
+                const safeName = escapeHtml(f.name);
+                // 属性位加转双引号（app.js escapeHtml 是 textContent→innerHTML 实现，不转义引号——
+                // 文件名含 " 时可逃逸 title/alt 属性边界；文本节点位用 safeName 即可）
+                const safeAttr = safeName.replace(/"/g, '&quot;');
+                const ext = f.name.split('.').pop().toLowerCase();
+                const sizeKB = (f.size / 1024).toFixed(1);
+                if (CORR_IMG_EXTS.includes(ext)) {
+                    // blob: URL 由 URL.createObjectURL 生成，格式恒为 blob:<origin>/<uuid>（无引号/尖括号），
+                    // 属性内插安全；本页无 escapeHtmlAttr（那是 Data_Collab 页内 helper），不为此引入
+                    const urlAttr = URL.createObjectURL(f);
+                    return `<div style="position:relative;" title="${safeAttr}">
+                        <img src="${urlAttr}" alt="${safeAttr}" style="width:120px;height:90px;object-fit:cover;border-radius:6px;border:1px solid #e5e7eb;display:block;">
+                        <button onclick="removeCorrAttachFile(${idx})" title="移除" style="position:absolute;top:-6px;right:-6px;width:20px;height:20px;line-height:18px;text-align:center;background:#dc2626;color:#fff;border:0;border-radius:50%;cursor:pointer;font-size:12px;padding:0;">×</button>
+                        <div style="max-width:120px;font-size:10px;color:#6b7280;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px;">${safeName}</div>
+                    </div>`;
+                }
+                const icon = ext === 'pdf' ? '📄' : '📊';
+                return `<div style="position:relative;" title="${safeAttr}">
+                    <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;width:120px;height:90px;background:#fef3c7;color:#92400e;border-radius:6px;border:1px solid #fde68a;">
+                        <span style="font-size:26px;line-height:1;">${icon}</span>
+                        <span style="font-size:10px;margin-top:3px;max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${safeName}</span>
+                        <span style="font-size:9px;color:#b45309;">${sizeKB} KB</span>
+                    </div>
+                    <button onclick="removeCorrAttachFile(${idx})" title="移除" style="position:absolute;top:-6px;right:-6px;width:20px;height:20px;line-height:18px;text-align:center;background:#dc2626;color:#fff;border:0;border-radius:50%;cursor:pointer;font-size:12px;padding:0;">×</button>
+                </div>`;
+            }).join('');
+        }
         function openAttach(id) {
             document.getElementById('attachCorrId').value = id;
             document.getElementById('formAttachFiles').value = '';
+            corrAttachFiles = [];
+            renderCorrAttachPreview();
             document.getElementById('attachModal').classList.add('open');
         }
         async function submitAttachments() {
             const id = document.getElementById('attachCorrId').value;
-            const files = document.getElementById('formAttachFiles').files;
-            if (!files.length) return showToast('请选择文件', 'error');
+            if (!corrAttachFiles.length) return showToast('请选择文件', 'error');
             const fd = new FormData();
-            for (const f of files) fd.append('files', f);
+            for (const f of corrAttachFiles) fd.append('files', f);
             const btn = document.getElementById('btnSubmitAttach'); btn.disabled = true;
             try {
                 const res = await authFetch(`/api/corrections/${id}/attachments`, { method: 'POST', body: fd });
                 const data = await res.json().catch(() => ({}));
                 if (!res.ok) { showToast(data.error || '补充失败', 'error'); return; }
                 showToast('附件已补充', 'success');
-                closeModal('attachModal'); await loadList(); openDrawer(id);
+                // codex（数据修正 UX 审）M-3：大附件上传窗口内用户可能关弹窗、为另一单重开并选新文件——
+                //   旧响应返回时若无条件清数组/关弹窗/openDrawer(旧id)，会清空新弹窗的选择并跳错单。
+                //   仅当上下文仍匹配（同一单 && 弹窗仍开）才执行清理与跳转；不匹配只 toast 成功+刷列表。
+                const stillSame = document.getElementById('attachCorrId').value === id
+                    && document.getElementById('attachModal').classList.contains('open');
+                if (stillSame) {
+                    corrAttachFiles = [];
+                    renderCorrAttachPreview();
+                    closeModal('attachModal');
+                }
+                await loadList();
+                if (stillSame) openDrawer(id);
             } catch (e) { showToast('补充失败', 'error'); } finally { btn.disabled = false; }
+        }
+        // 2026-07-23 上传交互优化：内联补传入口加已选文件列表预览（纯展示 input.files，重选即覆盖——
+        //   低频路径不引入数组状态管理；主入口 attachModal 已是完整追加式+缩略图预览）
+        function renderErrProofPicked(id) {
+            const input = document.getElementById('errProofFiles_' + id);
+            const wrap = document.getElementById('errProofPicked_' + id);
+            if (!input || !wrap) return;
+            const files = Array.from(input.files || []);
+            wrap.innerHTML = files.map(f =>
+                `<div style="font-size:11px;color:#166534;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:4px;padding:2px 8px;margin-top:2px;display:inline-block;margin-right:4px;">📎 ${escapeHtml(f.name)} <span style="color:#9ca3af;">(${(f.size / 1024).toFixed(1)} KB)</span></div>`
+            ).join('') + (files.length > 5 ? '<div style="font-size:11px;color:#dc2626;margin-top:2px;">⚠️ 最多 5 个文件，请重新选择</div>' : '');
         }
         // L3b 详情页补传待修复数据（§6.7：建单人/admin，早期态；attachment_type=error_proof，子单后端 409 引导主单）
         async function uploadErrorProof(id) {
