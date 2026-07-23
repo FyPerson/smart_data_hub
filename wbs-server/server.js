@@ -85,6 +85,66 @@ function isReadonlyLeaderId(id) {
     return READONLY_LEADER_IDS.includes(Number(id));
 }
 
+// H0（模型详情抽屉方案 §0）：数仓表标识符校验，杜绝 metadata/验收 OBJECT_ID + 动态 FROM 注入面。
+// 唯一校验函数，五类写入口（注册/编辑/批量导入/伴生表 + source_table）统一复用。
+// 正则：字母开头 + 字母数字下划线，≤128 字符（SQL Server 标识符上限，审 H0 L1）；
+// 平台生成的 ods_/dim_/dwd_ 命名天然满足；拒绝引号/空格/点号/分号等注入字符。
+const MODEL_TABLE_NAME_RE = /^[A-Za-z][A-Za-z0-9_]{0,127}$/;
+function validateModelTableName(name) {
+    return typeof name === 'string' && MODEL_TABLE_NAME_RE.test(name);
+}
+// source_table 是 BMS 源系统原始表名，允许中文等非 ASCII（业务系统真实存在中文命名表，如"内部交易客户"）。
+// 因此不用 ASCII 白名单（会误伤中文表名），改为：① 黑名单拦真正破坏 SQL 结构的字符 ② SQL Server 侧用 [ ] 分隔标识符 + ]]转义 兜底。
+// 拦截字符：单/双引号、分号、方括号（防闭合逃逸）、反引号、控制字符（\x00-\x1F）、注释符 --。可含单层 schema.table。
+const SOURCE_TABLE_FORBIDDEN_RE = /['"`;\[\]]|--|[\x00-\x1F]/;
+function validateSourceTable(name) {
+    if (typeof name !== 'string' || !name) return { ok: false };
+    if (SOURCE_TABLE_FORBIDDEN_RE.test(name)) return { ok: false };
+    const parts = name.split('.');
+    if (parts.length > 2) return { ok: false };
+    const table = parts.length === 2 ? parts[1] : parts[0];
+    const schema = parts.length === 2 ? parts[0] : null;
+    if (!table || (schema !== null && !schema)) return { ok: false }; // 空段（如 "a." / ".b" / "a..b"）
+    // H0（审复审 L1）：每段 ≤128（SQL Server 标识符上限），而非仅限总长
+    if (parts.some(p => p.length > 128)) return { ok: false };
+    return { ok: true, schema, table };
+}
+// SQL Server 分隔标识符转义（] → ]]），生成 [schema].[table] 或 [table]
+function quoteSqlServerIdent(schema, table) {
+    const esc = s => s.replace(/\]/g, ']]');
+    return schema ? `[${esc(schema)}].[${esc(table)}]` : `[${esc(table)}]`;
+}
+// H0（审三审 M1）：dim_config 类型守卫。校验假设 dim_config 是普通对象——
+// 若以 JSON 字符串提交（`dim_config: "{...}"`），属性访问全 undefined 会绕过下方 changeTableName 校验，
+// 但写库时 JSON.stringify 双重编码、读取时两次 JSON.parse（server.js 8818）还原出恶意对象，前端 truthy 拼进 DDL/ETL。
+// 故在写入口强制：dim_config 必须是普通对象（非字符串/数组/其他），否则拒绝。返回 {ok:true} 或 {ok:false,msg}。
+function isPlainObject(v) {
+    return v !== null && typeof v === 'object' && !Array.isArray(v);
+}
+function validateDimConfigShape(dimConfig) {
+    if (dimConfig === undefined || dimConfig === null) return { ok: true }; // 未提供，放行
+    if (!isPlainObject(dimConfig)) {
+        return { ok: false, msg: 'dim_config 必须是 JSON 对象，不接受字符串/数组等其他类型' };
+    }
+    return { ok: true };
+}
+// H0（审复审 M1 + 三审 LOW）：dim_config 里的变更追踪表名校验，供注册/编辑统一复用。
+// 语义对齐前端 truthy 判断（Model_Center.html 10885 用 `enabled || false` + 非空 changeTableName 即拼进 DDL/ETL），
+// 因此不能只在 `enabled===true` 时校验：只要提供了非空 changeTableName 就校验（防 enabled:"true" 字符串绕过）。
+// 三审 LOW：两个位置（dwdConfig.changeTracking / 顶层 changeTracking）都校验，不用 || 只选一个（防双写污染）。
+// 前置：调用前须先过 validateDimConfigShape 确保 dimConfig 是对象。返回 {ok:true} 或 {ok:false, msg}。
+function validateChangeTableName(dimConfig) {
+    const cts = [dimConfig?.dwdConfig?.changeTracking, dimConfig?.changeTracking];
+    for (const ct of cts) {
+        if (!isPlainObject(ct)) continue;
+        const name = ct.changeTableName;
+        if (name && !validateModelTableName(name)) {
+            return { ok: false, msg: `变更追踪表名 ${name} 不合法：仅允许字母开头、字母/数字/下划线组成` };
+        }
+    }
+    return { ok: true };
+}
+
 // 需求跟踪常量（v1.74.0 升级：问题跟踪 → 需求跟踪，方案见 docs/local/需求跟踪升级_方案_20260531_v1.1.md §1.4-§1.8）
 // 类型 7 类（§1.4）：原"需求"过笼统被新 3 类覆盖、"变更请求"并入"数据治理需求"已砍
 const ISSUE_TYPES = [
@@ -2634,10 +2694,14 @@ process.on('SIGINT', async () => {
  * @returns {Promise<{columns: Array, primaryKeys: Array}>}
  */
 async function getTableMetadata(pool, schema, tableName) {
+    // H0（模型详情抽屉方案 §0）：fullTableName 参数化，杜绝 OBJECT_ID 字符串注入。
+    // schema 来自连接配置 default_schema，tableName 已在写入口经 validateModelTableName 校验，此处再以绑定参数兜底。
     const fullTableName = `${schema}.${tableName}`;
 
     // 获取列信息
-    const columnsResult = await pool.request().query(`
+    const columnsResult = await pool.request()
+        .input('fullTableName', sql.NVarChar, fullTableName)
+        .query(`
         SELECT
             c.name AS column_name,
             t.name AS data_type,
@@ -2647,18 +2711,20 @@ async function getTableMetadata(pool, schema, tableName) {
             c.scale
         FROM sys.columns c
         JOIN sys.types t ON c.user_type_id = t.user_type_id
-        WHERE c.object_id = OBJECT_ID('${fullTableName}')
+        WHERE c.object_id = OBJECT_ID(@fullTableName)
         ORDER BY c.column_id
     `);
 
     // 获取主键
-    const pkResult = await pool.request().query(`
+    const pkResult = await pool.request()
+        .input('fullTableName', sql.NVarChar, fullTableName)
+        .query(`
         SELECT col.name AS pk_column
         FROM sys.indexes idx
         JOIN sys.index_columns ic ON idx.object_id = ic.object_id AND idx.index_id = ic.index_id
         JOIN sys.columns col ON ic.object_id = col.object_id AND ic.column_id = col.column_id
         WHERE idx.is_primary_key = 1
-          AND idx.object_id = OBJECT_ID('${fullTableName}')
+          AND idx.object_id = OBJECT_ID(@fullTableName)
         ORDER BY ic.key_ordinal
     `);
 
@@ -2771,14 +2837,16 @@ async function executeOdsValidation(params) {
                         }
                         const sourceFullTableName = `${sourceSchema}.${sourceTableName}`;
 
-                        // 查询源表主键
-                        const sourcePkResult = await params.sourcePool.request().query(`
+                        // 查询源表主键（H0：OBJECT_ID 参数化，杜绝 source_table 注入）
+                        const sourcePkResult = await params.sourcePool.request()
+                            .input('sourceFullTableName', sql.NVarChar, sourceFullTableName)
+                            .query(`
                             SELECT col.name AS pk_column
                             FROM sys.indexes idx
                             JOIN sys.index_columns ic ON idx.object_id = ic.object_id AND idx.index_id = ic.index_id
                             JOIN sys.columns col ON ic.object_id = col.object_id AND ic.column_id = col.column_id
                             WHERE idx.is_primary_key = 1
-                              AND idx.object_id = OBJECT_ID('${sourceFullTableName}')
+                              AND idx.object_id = OBJECT_ID(@sourceFullTableName)
                             ORDER BY ic.key_ordinal
                         `);
                         sourcePrimaryKeys = sourcePkResult.recordset.map(r => r.pk_column);
@@ -2947,11 +3015,22 @@ async function executeOdsValidation(params) {
             const isMysqlSrc = params.sourceDialect === 'mysql';
             // 展示用源表名（catch 也要用）：MySQL 走 splitMysqlTable 规范化避免 db.table 输入时重复库名（M-2）；SQL Server 沿用现状
             let sourceFullTable;
+            // H0：SQL Server 源表名校验 + 分隔标识符引用（]]转义），杜绝动态 FROM 注入（COUNT 查询表名不能参数化）
+            let sourceSqlServerQuoted = null;
             if (isMysqlSrc) {
                 const { db: srcDb, table: srcTbl } = splitMysqlTable(params.sourceTable, params.sourceDatabase);
                 sourceFullTable = srcDb ? `${srcDb}.${srcTbl}` : srcTbl;
             } else {
-                sourceFullTable = `${params.sourceSchema || 'dbo'}.${params.sourceTable}`;
+                // 优先用 source_table 内含的 schema，其次连接默认 schema
+                const parsed = validateSourceTable(params.sourceTable);
+                const effSchema = (parsed.ok && parsed.schema) ? parsed.schema : (params.sourceSchema || 'dbo');
+                sourceFullTable = `${effSchema}.${parsed.ok ? parsed.table : params.sourceTable}`;
+                if (parsed.ok) {
+                    // effSchema 可能来自连接配置（非 source_table 段），也过一遍禁字符校验再引用
+                    if (!SOURCE_TABLE_FORBIDDEN_RE.test(effSchema)) {
+                        sourceSqlServerQuoted = quoteSqlServerIdent(effSchema, parsed.table);
+                    }
+                }
             }
             try {
                 let sourceRowCount;
@@ -2961,7 +3040,11 @@ async function executeOdsValidation(params) {
                     const [cntRows] = await params.sourcePool.query(cntSql, cntParams);
                     sourceRowCount = cntRows[0].cnt;
                 } else {
-                    const sourceCountResult = await params.sourcePool.request().query(`SELECT COUNT(*) as cnt FROM ${sourceFullTable}`);
+                    // H0：表名非法（未通过校验）→ 拒绝执行动态 FROM，不落入注入面
+                    if (!sourceSqlServerQuoted) {
+                        throw new Error(`源表名不合法，拒绝源表数据量对比：${params.sourceTable}`);
+                    }
+                    const sourceCountResult = await params.sourcePool.request().query(`SELECT COUNT(*) as cnt FROM ${sourceSqlServerQuoted}`);
                     sourceRowCount = sourceCountResult.recordset[0].cnt;
                 }
 
@@ -7061,6 +7144,22 @@ app.post('/api/models', authenticateToken, requireNonViewer, (req, res) => {
         return res.status(400).json({ error: "表名(table_name)和分层(layer)必填" });
     }
 
+    // H0：表名标识符校验（注册入口）
+    if (!validateModelTableName(table_name)) {
+        return res.status(400).json({ error: "表名不合法：仅允许字母开头、字母/数字/下划线组成" });
+    }
+    // H0：source_table 校验（防验收引擎动态 SQL 注入；可含 schema.table）
+    if (source_table && !validateSourceTable(source_table).ok) {
+        return res.status(400).json({ error: "源表名不合法：仅允许字母/数字/下划线（可含单层 schema.）" });
+    }
+    // H0（审 M1/三审）：注册入口 dim_config 类型守卫 + changeTableName 校验（防字符串化 dim_config / enabled 类型 / 双写绕过）
+    if (dim_config !== undefined) {
+        const shapeCheck = validateDimConfigShape(dim_config);
+        if (!shapeCheck.ok) return res.status(400).json({ error: shapeCheck.msg });
+        const ctCheck = validateChangeTableName(dim_config);
+        if (!ctCheck.ok) return res.status(400).json({ error: ctCheck.msg });
+    }
+
     // 记录创建者ID，用于后续权限控制（开发者只能编辑自己注册的模型）
     const createdById = req.user.id;
     const userName = req.user.display_name || req.user.username;
@@ -7344,6 +7443,10 @@ app.put('/api/models/:id', authenticateToken, requireNonViewer, async (req, res)
 
         // 如果要修改 table_name，检查新名称是否已存在
         if (table_name && table_name !== oldModel.table_name) {
+            // H0：表名标识符校验（编辑入口，仅表名变更时）
+            if (!validateModelTableName(table_name)) {
+                return res.status(400).json({ error: "表名不合法：仅允许字母开头、字母/数字/下划线组成" });
+            }
             const existingModel = await dbGetAsync("SELECT id FROM data_models WHERE table_name = ? AND id != ? AND (is_deleted = 0 OR is_deleted IS NULL)", [table_name, id]);
             if (existingModel) {
                 return res.status(400).json({ error: `表名 ${table_name} 已被其他模型使用` });
@@ -7367,6 +7470,20 @@ app.put('/api/models/:id', authenticateToken, requireNonViewer, async (req, res)
             } catch (e) {
                 oldDimConfig = null;
             }
+        }
+
+        // H0：source_table 校验（编辑入口，仅变更时）——防验收引擎动态 SQL 注入
+        if (source_table !== undefined && source_table && source_table !== oldModel.source_table
+            && !validateSourceTable(source_table).ok) {
+            return res.status(400).json({ error: "源表名不合法：仅允许字母/数字/下划线（可含单层 schema.）" });
+        }
+
+        // H0（审 M1/三审）：编辑入口 dim_config 类型守卫（不限层，字符串化 dim_config 对任何层都是攻击面）+ changeTableName 校验
+        if (dim_config !== undefined) {
+            const shapeCheck = validateDimConfigShape(dim_config);
+            if (!shapeCheck.ok) return res.status(400).json({ error: shapeCheck.msg });
+            const ctCheck = validateChangeTableName(dim_config);
+            if (!ctCheck.ok) return res.status(400).json({ error: ctCheck.msg });
         }
 
         // 判断变更类型 - 使用深度比较检测是否有实际变化
@@ -7831,6 +7948,19 @@ app.post('/api/models/batch', authenticateToken, requirePublisherOrAdmin, async 
             // 基础验证
             if (!m.table_name || !m.layer) {
                 errors.push(`第${i + 1}行: 表名和分层为必填项`);
+                failCount++;
+                continue;
+            }
+
+            // H0：表名标识符校验（批量导入入口，逐行拒绝）
+            if (!validateModelTableName(m.table_name)) {
+                errors.push(`第${i + 1}行: 表名 ${m.table_name} 不合法（仅允许字母开头、字母/数字/下划线）`);
+                failCount++;
+                continue;
+            }
+            // H0：source_table 校验（批量导入入口，逐行拒绝）
+            if (m.source_table && !validateSourceTable(m.source_table).ok) {
+                errors.push(`第${i + 1}行: 源表名 ${m.source_table} 不合法（仅允许字母/数字/下划线，可含单层 schema.）`);
                 failCount++;
                 continue;
             }
