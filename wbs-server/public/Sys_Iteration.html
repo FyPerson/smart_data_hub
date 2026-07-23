@@ -7,7 +7,7 @@
     <title>系统迭代 - 智数协同平台</title>
     <link rel="icon" href="data:,">
     <link rel="stylesheet" href="assets/css/style.css?v=v1.117.0_fabdrag">
-    <link rel="stylesheet" href="assets/css/components.css?v=v1.110.4_unify">
+    <link rel="stylesheet" href="assets/css/components.css?v=v1.123.0_unify12">
     <style>
         /* ============================================================
            系统迭代页 · 页面专属残留（共享组件层已迁移至 assets/css/components.css）
@@ -169,6 +169,9 @@
            si-action-bar 有 align-items:center，自测 computed-style 探针实测出可感知差异（任务书 §2.1 已预判此项
            为条件覆盖，探针证实需要），真前缀覆盖回。 */
         .unified-page .u-action-bar { align-items: center; }
+        /* 前端统一 #12 吸顶操作栏：共享 .u-action-bar-sticky 的 top:-20px 按 u-drawer-body padding-top=20px
+           设计；本页自有 si-drawer-body padding-top=18px → 条件覆盖对齐（同上 align-items 条件覆盖范式）。 */
+        .unified-page .si-drawer-body > .u-action-bar-sticky { top: -18px; }
         .si-gate-hint { font-size: 11px; color: #b45309; background: #fffbeb; border: 1px solid #fde68a; border-radius: 6px; padding: 4px 9px; width: 100%; }
 
         /* 弹框（结构风险件，禁改） */
@@ -1109,7 +1112,7 @@
         //   血缘 → 操作栏(顶) → 基本信息(含需求材料) → 开发成员 → Commit 记录 → 开发交付 → 上线编排 → 通知 → 讨论群 → 时间线
         siRevokeAttThumbs();   // 重渲前先 revoke 上次缩略图 objectURL，防内存泄漏
         document.getElementById('siDBody').innerHTML =
-            lineageHtml + '<div class="u-action-bar" id="siDActions"></div>' + info + devMembers + devCommitsBlock + deliverySection + orchBlock + notify + chat + tl;
+            lineageHtml + '<div class="u-action-bar u-action-bar-sticky" id="siDActions"></div>' + info + devMembers + devCommitsBlock + deliverySection + orchBlock + notify + chat + tl;
 
         // 操作区（填充 body 顶部的 #siDActions 占位）
         siRenderActions(iss);

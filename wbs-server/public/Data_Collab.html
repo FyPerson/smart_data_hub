@@ -7,7 +7,7 @@
     <title>数据协作 - 智数协同平台</title>
     <link rel="icon" href="data:,">
     <link rel="stylesheet" href="assets/css/style.css?v=v1.117.0_fabdrag">
-    <link rel="stylesheet" href="assets/css/components.css?v=v1.110.4_unify">
+    <link rel="stylesheet" href="assets/css/components.css?v=v1.123.0_unify12">
     <style>
         /* 筛选栏 base/select/input/label 已并入共享层 components.css .u-filter-bar（前端统一 C4 Commit 3
            harmonize；本页 filter-bar 无自由文本搜索框，共享层 input[type=text] 宽度差异对本页无影响）。
@@ -305,19 +305,9 @@
         }
         /* 弹窗卡片 .modal-card → 共享层 .u-modal-box（前端统一 C4 Commit 3；14 弹窗改用共享盒，
            本地 .modal-card 规则删除；共享 u-modal-box width:560px/radius:14px 与旧 520px/12px 为 harmonize 值差）。 */
-        /* 前端统一 C4 Commit 2：detailModal 改右侧抽屉后，共享层 .u-drawer 没有 footer 段
-           （components.css 只定义 overlay/drawer/header/body/close）；抽屉决策 A=固定 footer
-           承载 detailFooterLeft 动态按钮 + 关闭按钮，局部覆盖不进共享层（避免动刚冻结的 components.css）。 */
-        .unified-page .u-drawer-footer {
-            padding: 16px 24px;
-            border-top: 1px solid #e2e8f0;
-            background: #fff;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            flex-wrap: wrap;
-            gap: 8px;
-        }
+        /* 前端统一 C4 Commit 2 曾用「决策 A=固定 footer」承载 detailFooterLeft 动态按钮（当时为避免动
+           刚冻结的 components.css 做的局部覆盖）；前端统一 #12（2026-07-23）用户拍板按钮移到 body 顶部
+           u-action-bar-sticky（共享层）+ footer 整体删除，.u-drawer-footer 局部规则一并移除。 */
         /* .detail-section base → 共享层 .u-detail-section（前端统一 C4 Commit 3；harmonize=无边框化，
            用户已认可：区块从"框卡（border+radius+overflow:hidden）"变"无框 + margin-bottom:18px"；
            区块视觉分隔由下方 .detail-section-title 自带 bg + border-bottom 提供，不会糊在一起。
@@ -1000,12 +990,8 @@
         <div class="u-drawer-body" id="detailBody">
             <div style="text-align:center;color:#9ca3af;padding:24px;">加载中...</div>
         </div>
-        <div class="u-drawer-footer">
-            <div style="display:flex;gap:8px;" id="detailFooterLeft">
-                <!-- v1.66.2 编辑/作废按钮按状态动态显示 -->
-            </div>
-            <button class="btn btn-cancel" onclick="closeDetailModal()">关闭</button>
-        </div>
+        <!-- 前端统一 #12（2026-07-23）：原 u-drawer-footer（detailFooterLeft 动态按钮 + 关闭）整体删除——
+             操作按钮移到 body 顶部 u-action-bar（renderDetail 组装），关闭入口=header × + 点遮罩，对齐其他模块 -->
     </div>
 
     <!-- 行政闭环确认弹窗（v1.70.4 ③）-->
@@ -2908,16 +2894,24 @@
             //   用户滚到中段点"重新通知"等操作回刷时会跳回顶部。
             //   前端统一 C4 Commit 2：滚动容器由旧 .modal-card（header+body+footer 整卡一起滚）
             //   改为 detailBody 自身（= components.css 的 .u-drawer-body：flex:1+overflow-y:auto；
-            //   u-drawer-header/u-drawer-footer 现固定不随内容滚动，抽屉常驻更实用）。scrollTop 的
+            //   u-drawer-header 固定不随内容滚动（footer 已于 #12 删除，按钮移 body 顶吸顶）。scrollTop 的
             //   读取对象与下方 innerHTML 替换目标合一（都是 detailBody）：先读自身 scrollTop，
             //   innerHTML 整块替换后浏览器会把它复位到 0，再按 preserveScroll 判断是否写回——逻辑仍成立。
             //   仅"同一单原地刷新"(preserveScroll)才存/恢复 scrollTop 保持视觉位置不动；
             //   codex 25(v1742) M-2：首次打开 / 切到另一单（preserveScroll=false）保持顶部，让用户从任务信息看起。
             //   缩略图在 .screenshot-item 固定 120x90 容器(object-fit:cover)，图片异步加载不改高度 → 同步恢复可靠(L-3 验证)。
+            // 前端统一 #12（2026-07-23）：操作按钮从固定 footer 移到 body 顶部 u-action-bar（对齐修正/
+            //   系统迭代/Issue_Lite 范式）+ 挂共享 u-action-bar-sticky 吸顶。按钮集仍由 decideFooterButtons
+            //   矩阵 helper 决定（含终态"已归档/已作废"提示 span），空集不渲染 bar。footer 已整体删除
+            //   （用户拍板：关闭入口=header × + 点遮罩，与其他模块一致）。
+            const actionBtns = decideFooterButtons(d, Number(getCurrentUserId()), isAdminUser).join('');
+            const actionBarHtml = actionBtns ? `<div class="u-action-bar u-action-bar-sticky">${actionBtns}</div>` : '';
+
             const scrollCard = document.getElementById('detailBody');
             const prevScrollTop = (preserveScroll && scrollCard) ? scrollCard.scrollTop : 0;
             document.getElementById('detailBody').innerHTML =
-                taskInfoHtml
+                actionBarHtml
+                + taskInfoHtml
                 + adminDirectActionsHtml
                 + notifyHtml
                 + expectedHtml
@@ -2940,13 +2934,6 @@
                     openLightbox(img.getAttribute('data-lightbox-url'), img.getAttribute('data-lightbox-caption') || '');
                 });
             });
-
-            // v1.71.0 Commit F codex 41 H-2 采纳：footer 按钮矩阵抽 helper（替代原 if-else 嵌套）
-            const footerLeft = document.getElementById('detailFooterLeft');
-            if (footerLeft) {
-                const currentUserId = Number(getCurrentUserId());
-                footerLeft.innerHTML = decideFooterButtons(d, currentUserId, isAdminUser).join('');
-            }
         }
 
         // v1.71.0 Commit F codex 41 H-2 采纳：footer 按钮矩阵 helper（返回 string[] 固定顺序）

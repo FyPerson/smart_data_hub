@@ -7,7 +7,7 @@
     <title>数据开发 - 智数协同平台</title>
     <link rel="icon" href="data:,">
     <link rel="stylesheet" href="assets/css/style.css?v=v1.117.0_fabdrag">
-    <link rel="stylesheet" href="assets/css/components.css?v=v1.110.4_unify">
+    <link rel="stylesheet" href="assets/css/components.css?v=v1.123.0_unify12">
     <style>
         /* 数据开发·轻量协作台账页（issue_lite 换壳 v0.2·D5）· 页面专属
            复用共享 u- 组件层（筛选栏/按钮/表格/徽章/抽屉/弹窗/表单/空状态）；补 4 态徽章 + 详情网格 + 附件区。 */
@@ -414,7 +414,7 @@
                         <span style="margin-left:8px;">原状态「${st}」· ${esc(it.voided_by_name || '')} 于 ${esc(it.voided_at)} 作废（不可恢复·只读留痕）</span>
                         <div style="margin-top:6px; color:#7f1d1d;">作废原因：${esc(it.void_reason || '')}</div>
                     </div>` : ''}
-                    ${flow.length ? `<div class="u-action-bar" style="margin-bottom:14px;">${flow.join('')}</div>` : ''}
+                    ${flow.length ? `<div class="u-action-bar u-action-bar-sticky" style="margin-bottom:14px;">${flow.join('')}</div>` : ''}
                     <div class="il-detail-grid">
                         <div class="il-detail-item full"><label>需求描述</label><div class="val">${esc(it.title)}</div></div>
                         <div class="il-detail-item"><label>状态</label><div class="val"><span class="u-status-badge s-${isVoided ? '已作废' : st}">${isVoided ? '已作废' : st}</span>${isVoided ? ` <span class="il-muted" style="font-size:11px;">原状态：${st}</span>` : ''}</div></div>

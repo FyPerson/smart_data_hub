@@ -175,6 +175,16 @@
 .u-action-bar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
 .u-action-bar select { font-size: 12px; padding: 5px 8px; border: 1px solid #d1d5db; border-radius: 6px; }
 .u-action-bar .u-btn-primary, .u-action-bar .u-btn-secondary, .u-action-bar .u-btn-danger { font-size: 12px; padding: 5px 12px; }
+/* 抽屉吸顶操作栏（前端统一 #12，2026-07-23）：挂在抽屉滚动容器直接子级的 u-action-bar 上，下滑时按钮区
+   锁定（标题区由 drawer flex column 结构天然固定，无需处理）。top:-20px 抵 .u-drawer-body 的 padding-top
+   （吸顶时贴 header 底边不留内容穿帮缝）；系统迭代自有 si-drawer-body padding-top=18px，由该页内条件覆盖
+   top:-18px。刻意用 opt-in 类而非 .u-drawer-body>.u-action-bar 自动匹配——①系统迭代抽屉是自有 si- 结构
+   罩不住 ②防误伤区块内嵌的 action-bar（如系统迭代「上线编排」区）。 */
+.u-action-bar-sticky { position: sticky; top: -20px; z-index: 5; background: #fff; padding: 10px 0; box-shadow: 0 2px 6px -4px rgba(0,0,0,0.18); }
+/* 空操作栏兜底（codex #12 审 L-1）：sticky 类带 padding+阴影，空节点会成 20px 吸顶白条（如
+   siDActions 占位未填）——:empty 时整体隐藏。注意：抽屉 body 内未来若新增定位浮层，z-index 须 >5
+   否则会被吸顶栏遮住（现状各页浮层均 ≥1000，无冲突）。 */
+.u-action-bar-sticky:empty { display: none; }
 
 /* ===== 详情抽屉（自定义，覆盖 style.css 的常显 .drawer-overlay 旧样式；带 .open 门控）===== */
 .u-drawer-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.3); z-index: 900; }
