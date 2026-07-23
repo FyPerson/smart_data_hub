@@ -12759,8 +12759,11 @@ app.put('/api/issue-lite/:id/status', authenticateToken, requireIssueLiteSchemaR
         if (status === '已完成') {
             sql = `UPDATE issue_lite SET status='已完成', complete_note=?, board_url=?, completed_at=datetime('now','localtime'), updated_at=datetime('now','localtime') WHERE id=? AND status=? AND voided_at IS NULL`;
             params = [noteVal, boardVal, id, row.status];
-        } else if (row.status === '已完成') {
+        } else if (row.status === '已完成' && status !== '已归档') {
             // D-M-3 + 末次审 M-1：reopen(离开已完成)清完成痕迹 + 清 N2 完成通知态（否则新完成周期残留旧"已通知/已读"）
+            // fix(2026-07-23 生产实证 bug)：条件补 `status !== '已归档'`——归档是完成后的正常收尾，完成痕迹必须
+            //   保留；原条件只判"离开已完成"，已完成→已归档也误走本分支，把 completed_at/complete_note/board_url/
+            //   完成通知态全抹（生产 #1 中招·v1.122.0 起存在）。→已归档 落下方"只改 status"分支。
             sql = `UPDATE issue_lite SET status=?, completed_at=NULL, complete_note=NULL, board_url=NULL,
                     req_notify_status=NULL, req_notify_at=NULL, req_notify_message_key=NULL, req_notify_read_at=NULL,
                     updated_at=datetime('now','localtime') WHERE id=? AND status=? AND voided_at IS NULL`;
