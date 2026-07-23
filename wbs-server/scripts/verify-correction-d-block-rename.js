@@ -56,14 +56,17 @@ const mustKeep = [
   `errProofEmpty`,
   `canAddErrProof`,
   `ERR_PROOF_STATES`,
-  `uploadErrorProof`,
+  // uploadErrorProof 已于 U1 弹窗式统一（2026-07-23）随内联两步式入口退役，error_proof 补传
+  // 统一走 openAttach(id,'error_proof') → submitAttachments，不再作为存活标识符断言。
+  `openAttach`,
 ];
 for (const token of mustKeep) {
   ok(html.includes(token), `③底层标识符完好：${token}`);
 }
-// fd.append('attachment_type', 'error_proof') 应出现 2 次（建单两步上传 + 详情页补传，均未被误伤）
+// fd.append('attachment_type', 'error_proof') 应出现 2 次（建单两步上传 + attachModal error_proof 分支
+// —— U1 弹窗式统一后详情页补传并入 submitAttachments，总数不变）
 const appendErrorProofCount = (html.match(/fd\.append\('attachment_type', 'error_proof'\)/g) || []).length;
-ok(appendErrorProofCount === 2, `③attachment_type='error_proof' 写入点仍为 2 处（建单两步上传 + 详情页补传补传，实得 ${appendErrorProofCount}）`);
+ok(appendErrorProofCount === 2, `③attachment_type='error_proof' 写入点仍为 2 处（建单两步上传 + attachModal error_proof 分支，实得 ${appendErrorProofCount}）`);
 
 // ④ 内嵌 <script> 语法仍可解析
 const scriptMatch = html.match(/<script>([\s\S]*?)<\/script>/);

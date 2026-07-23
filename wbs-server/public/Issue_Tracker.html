@@ -809,10 +809,18 @@
             const canDoStatus = (s) => isAdmin || (isAssignee && ASSIGNEE_STATUS_TARGETS.includes(s));
             const visibleStatuses = nextStatuses.filter(canDoStatus);
 
+            // E1（建单人编辑权限，2026-07-23）：建单人本人对自己的单可编辑录入信息，限非终态
+            //   （已关闭/已拒绝锁定）。可见性对齐后端 PUT /api/issues/:id 双通道判定（后端才是真闸门）。
+            // M-4（codex E1 审）：镜像后端 id>0 约束——currentUser.id 规范化为正整数再参与建单人比较，
+            //   防 null/0/空串等异常值在前端误显编辑按钮（点了必被后端拒）。
+            const _uid = currentUser ? Number(currentUser.id) : NaN;
+            const isCreator = Number.isInteger(_uid) && _uid > 0 && Number(issue.created_by) === _uid;
+            const creatorCanEdit = isCreator && !isManager && !['已关闭', '已拒绝'].includes(issue.status);
+
             let html = '';
 
-            // 操作栏：isManager（指派/编辑/删除/通知）或 有可见状态按钮（被指派 user 推进）时渲染容器
-            if (isManager || visibleStatuses.length > 0) {
+            // 操作栏：isManager（指派/编辑/删除/通知）或 有可见状态按钮（被指派 user 推进）或 建单人可编辑 时渲染容器
+            if (isManager || visibleStatuses.length > 0 || creatorCanEdit) {
                 html += `<div class="u-action-bar u-action-bar-sticky">`;
                 // 状态流转（按 H-1 过滤后的 visibleStatuses）
                 visibleStatuses.forEach(s => {
@@ -832,6 +840,12 @@
                     html += `</select>`;
                     // 编辑
                     html += `<button class="u-btn-secondary" onclick="openEditModal(${issue.id})" style="font-size:12px; padding:5px 12px;">编辑</button>`;
+                }
+                // E1：建单人（非 manager）编辑入口——独立于 isManager 块，仅非终态可见
+                if (creatorCanEdit) {
+                    html += `<button class="u-btn-secondary" onclick="openEditModal(${issue.id})" style="font-size:12px; padding:5px 12px;">编辑</button>`;
+                }
+                if (isManager) {
                     // 删除（仅admin）
                     if (currentUser.role === 'admin') {
                         html += `<button class="u-btn-danger" onclick="deleteIssue(${issue.id})" style="font-size:12px; padding:5px 12px;">删除</button>`;
@@ -1422,6 +1436,13 @@
             //   编辑弹窗显示指派下拉会误导（改了静默无效）。新建模式仅 viewer 隐藏。
             const hideAssign = isViewer || isEdit;
             document.getElementById('assignedToGroup').style.display = hideAssign ? 'none' : 'block';
+            // E1（建单人编辑权限）：viewer 编辑模式禁用优先级——后端 PUT 对 viewer 丢弃 priority 变更
+            //   （镜像 POST 强制 P2 口径），控件可改会误导（同 C6b M-3 教训）。新建模式保持现状不动。
+            const prioritySel = document.getElementById('formPriority');
+            if (prioritySel) {
+                prioritySel.disabled = isViewer && isEdit;
+                prioritySel.title = (isViewer && isEdit) ? '优先级由信息技术部统一评估管理' : '';
+            }
         }
 
         // 重置表单（resetIssueForm，L-8）

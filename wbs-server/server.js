@@ -1774,6 +1774,17 @@ function initTable() {
             created_at DATETIME DEFAULT (datetime('now','localtime'))
         )`, recordLiteDdlError('CREATE issue_lite_attachments'));
         db.run(`CREATE INDEX IF NOT EXISTS idx_ila_issue ON issue_lite_attachments(issue_lite_id)`, recordLiteDdlError('CREATE idx ila'));
+        // E2（建单人编辑权限，2026-07-23）：编辑留痕表——issue_lite 无状态历史表（换壳时明确砍掉），
+        //   编辑留痕单独建轻量表（editor + 变更字段中文清单 + 时间），不引入通用 timeline。
+        db.run(`CREATE TABLE IF NOT EXISTS issue_lite_edit_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            issue_lite_id INTEGER NOT NULL,
+            editor_id INTEGER NOT NULL,
+            editor_name TEXT,
+            changed_fields TEXT NOT NULL,
+            created_at DATETIME DEFAULT (datetime('now','localtime'))
+        )`, recordLiteDdlError('CREATE issue_lite_edit_logs'));
+        db.run(`CREATE INDEX IF NOT EXISTS idx_ilel_issue ON issue_lite_edit_logs(issue_lite_id)`, recordLiteDdlError('CREATE idx ilel'));
         db.run(`CREATE INDEX IF NOT EXISTS idx_issue_lite_assignee ON issue_lite(assignee_id)`, (idxErr) => {
             const failMsg = liteDdlError || (idxErr ? `CREATE idx assignee: ${idxErr.message}` : null);
             if (failMsg) {
@@ -11148,47 +11159,134 @@ app.get('/api/issues/:id', authenticateToken, requireIssueSchemaReady, (req, res
 });
 
 // 编辑需求（C3：字段白名单更新 + preview_url→acceptance_url 过 sanitizeUrl；status/assign 走专用 endpoint）
-app.put('/api/issues/:id', authenticateToken, requireIssueSchemaReady, requirePublisherOrAdmin, (req, res) => {
+// E1（建单人编辑权限，2026-07-23）：权限从中间件角色制（requirePublisherOrAdmin）改为 handler 内双通道——
+//   manager（admin/publisher，保持既有语义：全状态可编辑）∨ 建单人本人（仅自己的单 + 非终态）。
+//   编辑锁定态=已关闭/已拒绝（已暂缓/待验证等流转中状态仍可修录入信息）。viewer 建单人可编辑，
+//   但 priority 字段变更丢弃（镜像 POST viewer 强制 P2 口径）。编辑成功记系统评论留痕
+//   （is_system=1，与改派留痕同范式），UPDATE + 留痕同事务。
+const ISSUE_EDIT_LOCKED_STATUSES = ['已关闭', '已拒绝'];
+app.put('/api/issues/:id', authenticateToken, requireIssueSchemaReady, async (req, res) => {
+    // H-4（codex E1 复审）：外层 try 兜底整个 handler——async handler 的未预期异常不被 Express 4
+    //   同步机制接管，必须自兜为稳定 500（防未处理拒绝/请求悬挂）。内层缩进保持原级不重排（降 diff 噪音）。
+    let transactionActive = false;   // L-2：事务活跃标志（COMMIT/ROLLBACK 后复位，catch 仅在活跃时回滚）
+    try {
+    const issueId = parseInt(req.params.id, 10);
+    if (!Number.isInteger(issueId) || issueId <= 0) return res.status(400).json({ error: '无效的需求 ID' });
+    // H-4：请求体防线——无 body/数组 body 在解构与字段处理前稳定 400
+    if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
+        return res.status(400).json({ error: '请求体格式错误', code: 'INVALID_BODY' });
+    }
+    const isManager = req.user.role === 'admin' || req.user.role === 'publisher';
+    let row;
+    try {
+        row = await dbGetAsync('SELECT created_by, status FROM issues WHERE id = ?', [issueId]);
+    } catch (e) { return res.status(500).json({ error: e.message }); }
+    if (!row) return res.status(404).json({ error: '需求不存在' });
+    const isCreator = Number(row.created_by) === Number(req.user.id) && Number(req.user.id) > 0;
+    if (!isManager && !isCreator) return res.status(403).json({ error: '权限不足：仅发布者/管理员或建单人本人可编辑', code: 'NOT_AUTHORIZED_FOR_EDIT' });
+    if (!isManager && ISSUE_EDIT_LOCKED_STATUSES.includes(row.status)) {
+        return res.status(409).json({ error: `需求已${row.status === '已关闭' ? '关闭' : '拒绝'}，不可再编辑`, code: 'TERMINAL_STATE_LOCKED' });
+    }
+
     const {
         title, raw_requirement, description, type, source, priority,
         requester_dept, requester_name, requester_phone, oa_number, deadline,
         data_domain, acceptance_url, related_table, error_time
     } = req.body;
+    // M-2（codex E1 审）：字符串字段统一类型闸——trim/处理前拒非字符串 payload。handler 已 async 化，
+    //   未捕获 throw 不再被 Express 同步兜底（请求会悬挂），类型闸在源头消除 trim 抛错面。
+    //   type/source/priority/requester_dept 走 includes 白名单，非字符串天然不命中 → 既有 400，无需重复设闸。
+    const strTypeGate = { title, raw_requirement, description, requester_name, requester_phone, oa_number, deadline, data_domain, acceptance_url, related_table, error_time };
+    for (const [k, v] of Object.entries(strTypeGate)) {
+        if (v !== undefined && v !== null && typeof v !== 'string') {
+            return res.status(400).json({ error: `字段 ${k} 格式错误（须为字符串）`, code: 'INVALID_FIELD_TYPE' });
+        }
+    }
+    // H-4（codex E1 复审）：title/requester_name 走 trim 必填路径，显式拒 null——类型闸豁免 null 是给
+    //   可空字段（deadline/oa_number 等）保留"传 null 清空"语义，必填字段不适用该豁免。
+    if (title === null) return res.status(400).json({ error: '标题不能为空' });
+    if (requester_name === null) return res.status(400).json({ error: '业务方姓名不能为空' });
     const fields = [];
     const values = [];
+    const changedLabels = [];   // E1 留痕：变更字段中文清单
+    const ignoredFields = [];   // M-3（codex E1 审）：被丢弃字段显性化回传（ignored_fields），接口不假装全量生效
+    const pushField = (sqlFrag, value, label) => { fields.push(sqlFrag); values.push(value); changedLabels.push(label); };
 
-    if (title !== undefined) { if (!title.trim()) return res.status(400).json({ error: '标题不能为空' }); fields.push('title = ?'); values.push(title.trim()); }
-    if (raw_requirement !== undefined) { fields.push('raw_requirement = ?'); values.push(raw_requirement || ''); }
-    if (description !== undefined) { fields.push('description = ?'); values.push(description); }
-    if (type !== undefined) { if (!ISSUE_TYPES.includes(type)) return res.status(400).json({ error: '无效的需求类型' }); fields.push('type = ?'); values.push(type); }
-    if (source !== undefined) { if (!ISSUE_SOURCES.includes(source)) return res.status(400).json({ error: '无效的需求来源' }); fields.push('source = ?'); values.push(source); }
-    if (priority !== undefined) { if (!ISSUE_PRIORITIES.includes(priority)) return res.status(400).json({ error: '无效的优先级' }); fields.push('priority = ?'); values.push(priority); }
-    if (requester_dept !== undefined) { if (!COLLAB_REQUESTER_DEPTS.includes(requester_dept)) return res.status(400).json({ error: '无效的业务方部门' }); fields.push('requester_dept = ?'); values.push(requester_dept); }
-    if (requester_name !== undefined) { if (!requester_name.trim()) return res.status(400).json({ error: '业务方姓名不能为空' }); fields.push('requester_name = ?'); values.push(requester_name.trim()); }
-    if (requester_phone !== undefined) { fields.push('requester_phone = ?'); values.push(requester_phone || null); }
-    if (oa_number !== undefined) { fields.push('oa_number = ?'); values.push(oa_number || null); }
-    if (deadline !== undefined) { fields.push('deadline = ?'); values.push(deadline || null); }
-    if (data_domain !== undefined) { fields.push('data_domain = ?'); values.push((data_domain && String(data_domain).trim()) ? String(data_domain).trim() : null); }
+    if (title !== undefined) { if (!title.trim()) return res.status(400).json({ error: '标题不能为空' }); pushField('title = ?', title.trim(), '标题'); }
+    if (raw_requirement !== undefined) { pushField('raw_requirement = ?', raw_requirement || '', '原始诉求'); }
+    if (description !== undefined) { pushField('description = ?', description, '需求描述'); }
+    if (type !== undefined) { if (!ISSUE_TYPES.includes(type)) return res.status(400).json({ error: '无效的需求类型' }); pushField('type = ?', type, '需求类型'); }
+    if (source !== undefined) { if (!ISSUE_SOURCES.includes(source)) return res.status(400).json({ error: '无效的需求来源' }); pushField('source = ?', source, '需求来源'); }
+    if (priority !== undefined) {
+        // E1：viewer 的优先级由系统管理（POST 强制 P2 同口径），变更丢弃并经 ignored_fields 显性化
+        //   （不 403——前端 disabled 的 select 仍随表单提交 priority，硬拒会打断 viewer 正常编辑流）
+        if (req.user.role !== 'viewer') {
+            if (!ISSUE_PRIORITIES.includes(priority)) return res.status(400).json({ error: '无效的优先级' });
+            pushField('priority = ?', priority, '优先级');
+        } else {
+            ignoredFields.push('priority');
+        }
+    }
+    if (requester_dept !== undefined) { if (!COLLAB_REQUESTER_DEPTS.includes(requester_dept)) return res.status(400).json({ error: '无效的业务方部门' }); pushField('requester_dept = ?', requester_dept, '业务方部门'); }
+    if (requester_name !== undefined) { if (!requester_name.trim()) return res.status(400).json({ error: '业务方姓名不能为空' }); pushField('requester_name = ?', requester_name.trim(), '业务方姓名'); }
+    if (requester_phone !== undefined) { pushField('requester_phone = ?', requester_phone || null, '联系电话'); }
+    if (oa_number !== undefined) { pushField('oa_number = ?', oa_number || null, 'OA单号'); }
+    if (deadline !== undefined) { pushField('deadline = ?', deadline || null, '期望完成时间'); }
+    if (data_domain !== undefined) { pushField('data_domain = ?', (data_domain && String(data_domain).trim()) ? String(data_domain).trim() : null, '数据域'); }
     if (acceptance_url !== undefined) {
         let safeUrl = null;
         if (acceptance_url) {
             safeUrl = issueNotify.sanitizeUrl(acceptance_url);  // codex 10 L-1：落 sanitize 后的值
             if (!safeUrl) return res.status(400).json({ error: '预览/验收地址非法：仅支持 http/https 且不含特殊字符', code: 'INVALID_ACCEPTANCE_URL' });
         }
-        fields.push('acceptance_url = ?'); values.push(safeUrl);
+        pushField('acceptance_url = ?', safeUrl, '预览/验收地址');
     }
-    if (related_table !== undefined) { fields.push('related_table = ?'); values.push(related_table || null); }
-    if (error_time !== undefined) { fields.push('error_time = ?'); values.push(error_time || null); }
+    if (related_table !== undefined) { pushField('related_table = ?', related_table || null, '相关表'); }
+    if (error_time !== undefined) { pushField('error_time = ?', error_time || null, '异常时间'); }
 
     if (fields.length === 0) return res.status(400).json({ error: '无更新字段' });
     fields.push("updated_at = datetime('now','localtime')");
-    values.push(req.params.id);
+    values.push(issueId);
 
-    db.run(`UPDATE issues SET ${fields.join(', ')} WHERE id = ?`, values, function(err) {
-        if (err) return res.status(500).json({ error: err.message });
-        if (this.changes === 0) return res.status(404).json({ error: '需求不存在' });
-        res.json({ updated: this.changes });
-    });
+    // 状态机 UPDATE 三件套：建单人通道 WHERE 带非终态 + created_by 复校守卫（M-1：闭 TOCTOU——权限检查
+    //   →UPDATE 间被关闭/拒绝或建单人变更则 0 changes 阻断）+ changes 检查 + 失败回滚阻断；
+    //   manager 通道保持既有"全状态可编辑"语义不加守卫。
+    const whereGuard = isManager
+        ? 'WHERE id = ?'
+        : `WHERE id = ? AND created_by = ? AND status NOT IN ('已关闭', '已拒绝')`;
+    if (!isManager) values.push(Number(req.user.id));   // M-1：created_by 复校参数
+    try {
+        // H-2（codex E1 审）+ L-2（复审）：仅本请求成功 BEGIN 后才允许 ROLLBACK（防误滚共享连接上
+        //   他人事务）；COMMIT/显式 ROLLBACK 后立即复位，catch 仅在事务仍活跃时回滚。
+        await dbRunAsync('BEGIN IMMEDIATE');
+        transactionActive = true;
+        const result = await dbRunAsync(`UPDATE issues SET ${fields.join(', ')} ${whereGuard}`, values);
+        if (!result || result.changes === 0) {
+            await dbRunAsync('ROLLBACK');
+            transactionActive = false;
+            return isManager
+                ? res.status(404).json({ error: '需求不存在' })
+                : res.status(409).json({ error: '需求状态或归属已变化，编辑未生效，请刷新查看', code: 'EDIT_NOT_APPLIED' });   // L-3：0 changes 三因（终态/被删/归属变）不假定原因
+        }
+        // 系统评论留痕（固定 user_name='系统'，user_id 记操作者，is_system=1——与改派系统评论同范式）
+        const operator = req.user.display_name || req.user.username;
+        await dbRunAsync(
+            `INSERT INTO issue_comments (issue_id, user_id, user_name, content, is_system)
+             VALUES (?, ?, '系统', ?, 1)`,
+            [issueId, Number(req.user.id), `${operator} 编辑了需求录入信息：${changedLabels.join('、')}`]
+        );
+        await dbRunAsync('COMMIT');
+        transactionActive = false;   // L-2：事务已结束，后续任何异常不再触发回滚
+        return res.json({ updated: result.changes, ...(ignoredFields.length ? { ignored_fields: ignoredFields } : {}) });
+    } catch (txErr) {
+        if (transactionActive) { try { await dbRunAsync('ROLLBACK'); } catch (_) {} transactionActive = false; }   // H-2/L-2
+        return res.status(500).json({ error: txErr.message });
+    }
+    } catch (unexpected) {
+        // H-4：未预期异常兜底（解构/校验层等 try 外 throw）——稳定 500 不悬挂；事务活跃则先回滚
+        if (transactionActive) { try { await dbRunAsync('ROLLBACK'); } catch (_) {} transactionActive = false; }   // L-4（三轮审）：与内层 catch 收尾一致
+        if (!res.headersSent) return res.status(500).json({ error: unexpected.message });
+    }
 });
 
 // 状态流转
@@ -12631,10 +12729,184 @@ app.get('/api/issue-lite/:id', authenticateToken, requireIssueLiteSchemaReady, a
         //   前端只管显隐（建单人被降为 viewer 后不再投影出作废入口，与 requireNonViewer 写闸口径一致）
         row.can_void = !row.voided_at && row.status !== '已归档' && req.user.role !== 'viewer'
             && (issueLiteIsAdmin(req) || Number(req.user.id) === Number(row.created_by));
+        // E2（建单人编辑权限）：编辑资格服务端投影（前端只管显隐，范式同 can_void）——
+        //   (admin ∨ 建单人) 且未归档未作废；viewer 不给（含建单人被降 viewer 场景，与 requireNonViewer 写闸口径一致）
+        row.can_edit = !row.voided_at && row.status !== '已归档' && req.user.role !== 'viewer'
+            && (issueLiteIsAdmin(req) || Number(req.user.id) === Number(row.created_by));
+        // E2：编辑留痕随详情返回（轻量，最近 50 条倒序）
+        row.edit_logs = await dbAllAsync('SELECT editor_name, changed_fields, created_at FROM issue_lite_edit_logs WHERE issue_lite_id = ? ORDER BY id DESC LIMIT 50', [row.id]) || [];
         res.json(row);
     } catch (err) {
         logger.error('[数据开发换壳] 详情失败:', err.message);
         res.status(500).json({ error: err.message });
+    }
+});
+
+// E2（建单人编辑权限，2026-07-23）：录入信息编辑——(admin ∨ 建单人) 且未归档未作废；可编辑字段=建单
+//   录入集（title/description/requester_*/req_date/oa_number）；notify_target_id 走既有专用端点不进本口。
+//   校验逐条镜像 POST（同文案同 code）；OA 清空回写 datadev-{id} 占位（AFTER INSERT 触发器不覆盖 UPDATE，
+//   "OA 恒非空"不变量须显式维护）；留痕 issue_lite_edit_logs 与 UPDATE 同事务。
+//   输入面四防线 + transactionActive 范式承 E1（codex 40 号三轮审教训：async handler 必配 body 防线/
+//   必填拒 null/可空 null 清空分层/外层 try 兜底）。
+app.put('/api/issue-lite/:id', authenticateToken, requireIssueLiteSchemaReady, requireNonViewer, async (req, res) => {
+    let transactionActive = false;
+    try {
+        const issueId = parseInt(req.params.id, 10);
+        if (!Number.isInteger(issueId) || issueId <= 0) return res.status(400).json({ error: '无效的登记单 ID' });
+        if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
+            return res.status(400).json({ error: '请求体格式错误', code: 'INVALID_BODY' });
+        }
+        const row = await dbGetAsync('SELECT id, status, created_by, voided_at, title, description, requester_name, requester_dept, requester_phone, req_date, oa_number FROM issue_lite WHERE id = ?', [issueId]);
+        if (!row) return res.status(404).json({ error: '登记单不存在' });
+        const isAdmin = issueLiteIsAdmin(req);
+        const isCreator = Number(row.created_by) === Number(req.user.id) && Number(req.user.id) > 0;
+        if (!isAdmin && !isCreator) return res.status(403).json({ error: '权限不足：仅建单人本人或管理员可编辑', code: 'NOT_AUTHORIZED_FOR_EDIT' });
+        if (row.voided_at) return res.status(409).json({ error: '登记单已作废（只读留痕），不可编辑', code: 'VOIDED_LOCKED' });
+        if (row.status === '已归档') return res.status(409).json({ error: '登记单已归档，不可编辑', code: 'TERMINAL_STATE_LOCKED' });
+
+        const { title, description, requester_name, requester_dept, requester_phone, req_date, oa_number } = req.body;
+        const fields = [];
+        const values = [];
+        const changedLabels = [];
+        let providedCount = 0;   // H-1：显式提供的可编辑字段数（区分"没提供字段 400"与"提供但全同值 200 no-op"）
+        const pushField = (frag, val, label) => { fields.push(frag); values.push(val); changedLabels.push(label); };
+        // H-1（codex E2 审）：服务端比对制——逐字段与现值比较，仅真变更进 UPDATE/留痕（审计真实性不依赖
+        //   前端判脏）；未变更字段跳过格式/白名单校验（M-2：历史值不受现行规则回溯约束，改无关字段不被阻断）。
+        const reqStr = (v, label, code, max) => {
+            if (typeof v !== 'string') return { err: `${label}必填`, code };
+            const s = v.trim();
+            if (!s) return { err: `${label}必填`, code };
+            if (max && s.length > max) return { err: `${label}过长（上限 ${max} 字）`, code: code + '_TOO_LONG' };
+            return { val: s };
+        };
+        if (title !== undefined) {
+            providedCount++;
+            if (typeof title !== 'string') return res.status(400).json({ error: '需求描述必填', code: 'TITLE_REQUIRED' });
+            if (title.trim() !== String(row.title || '')) {
+                const rt = reqStr(title, '需求描述', 'TITLE_REQUIRED', 200);
+                if (rt.err) return res.status(400).json({ error: rt.err, code: rt.code });
+                pushField('title = ?', rt.val, '需求描述');
+            }
+        }
+        if (requester_name !== undefined) {
+            providedCount++;
+            if (typeof requester_name !== 'string') return res.status(400).json({ error: '业务方必填', code: 'REQUESTER_NAME_REQUIRED' });
+            if (requester_name.trim() !== String(row.requester_name || '')) {
+                const rn = reqStr(requester_name, '业务方', 'REQUESTER_NAME_REQUIRED', 50);
+                if (rn.err) return res.status(400).json({ error: rn.err, code: rn.code });
+                pushField('requester_name = ?', rn.val, '业务方');
+            }
+        }
+        if (requester_dept !== undefined) {
+            providedCount++;
+            if (typeof requester_dept !== 'string') return res.status(400).json({ error: '业务部门必填', code: 'REQUESTER_DEPT_REQUIRED' });
+            if (requester_dept.trim() !== String(row.requester_dept || '')) {
+                const rdept = reqStr(requester_dept, '业务部门', 'REQUESTER_DEPT_REQUIRED', 50);
+                if (rdept.err) return res.status(400).json({ error: rdept.err, code: rdept.code });
+                if (!issueLiteDeptWhitelist().includes(rdept.val)) {
+                    return res.status(400).json({ error: '业务部门不在允许清单（请从下拉选择）', code: 'REQUESTER_DEPT_INVALID' });
+                }
+                pushField('requester_dept = ?', rdept.val, '业务部门');
+            }
+        }
+        if (requester_phone !== undefined) {
+            providedCount++;
+            if (typeof requester_phone !== 'string') return res.status(400).json({ error: '业务方手机号必填', code: 'REQUESTER_PHONE_REQUIRED' });
+            if (requester_phone.trim() !== String(row.requester_phone || '')) {
+                const rp = reqStr(requester_phone, '业务方手机号', 'REQUESTER_PHONE_REQUIRED', 21);
+                if (rp.err) return res.status(400).json({ error: rp.err, code: rp.code });
+                if (!/^\+?\d{6,20}$/.test(rp.val)) return res.status(400).json({ error: '业务方手机号格式不正确', code: 'REQUESTER_PHONE_INVALID' });
+                pushField('requester_phone = ?', rp.val, '业务方手机号');
+                // 末次合并审 MED（镜像 correction E3 HIGH-1 / reassign 重置范式）：手机号真变更 → N-est/N2
+                //   两套通知四件套+已读一并重置——否则 est/req 的旧「已发/已读」错误归属新手机号，且
+                //   already-sent 语义会挡住给新号的首发。N1（notify_*）发平台用户非手机号，不重置。
+                fields.push('est_notify_status = NULL', 'est_notify_at = NULL', 'est_notify_message_key = NULL', 'est_notify_read_at = NULL',
+                    'req_notify_status = NULL', 'req_notify_at = NULL', 'req_notify_message_key = NULL', 'req_notify_read_at = NULL');
+            }
+        }
+        if (description !== undefined) {
+            providedCount++;
+            // 可空字段：null/空白=清空（trim 归一对齐前端）。M-5（codex E2 复审）：长度校验挪到比对之后——
+            //   历史超长说明未变更时不拦无关编辑（比对制"未变更跳过校验"语义全字段一致）；双侧 trim 归一比较，
+            //   防历史尾随空白被虚记为变更。
+            if (description !== null && typeof description !== 'string') return res.status(400).json({ error: '补充说明格式错误', code: 'DESCRIPTION_INVALID' });
+            const descNorm = description === null ? null : (description.trim() || null);
+            const descCurNorm = row.description == null ? null : (String(row.description).trim() || null);
+            if (descNorm !== descCurNorm) {
+                if (descNorm !== null && descNorm.length > 2000) return res.status(400).json({ error: '补充说明过长（上限 2000 字）', code: 'DESCRIPTION_TOO_LONG' });
+                pushField('description = ?', descNorm, '补充说明');
+            }
+        }
+        if (req_date !== undefined) {
+            providedCount++;
+            let rdClean = null;
+            if (req_date !== null && req_date !== '') {
+                if (typeof req_date !== 'string') return res.status(400).json({ error: '期望完成时间格式错误', code: 'REQ_DATE_INVALID' });
+                rdClean = req_date.trim() || null;
+            }
+            const rdCur = row.req_date == null ? null : String(row.req_date);
+            if (rdClean !== rdCur) {
+                if (rdClean !== null) {
+                    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(rdClean);
+                    const dt = m ? new Date(`${rdClean}T00:00:00`) : null;
+                    const ok = m && dt && !isNaN(dt.getTime()) && dt.getFullYear() === +m[1] && (dt.getMonth() + 1) === +m[2] && dt.getDate() === +m[3];
+                    if (!ok) return res.status(400).json({ error: '期望完成时间非法（应为真实存在的 YYYY-MM-DD）', code: 'REQ_DATE_INVALID' });
+                }
+                pushField('req_date = ?', rdClean, '期望完成时间');
+            }
+        }
+        if (oa_number !== undefined) {
+            providedCount++;
+            // M-3（codex E2 审）：编辑口只接受字符串——number 经 JSON 解析对 16-20 位号有精度舍入面（静默
+            //   存错号）+ 丢前导零；POST 的 number 兼容是建单期既有口径，编辑新契约不背。
+            //   清空/任意 datadev-* 一律归一为本单 datadev-{id}（维护"OA 恒非空"不变量；UPDATE 不触发 INSERT 触发器）。
+            let oaClean;
+            if (oa_number === null || oa_number === '') oaClean = `datadev-${issueId}`;
+            else if (typeof oa_number !== 'string') return res.status(400).json({ error: 'OA 流程号格式错误（须为字符串）', code: 'OA_NUMBER_INVALID' });
+            else {
+                const t = oa_number.trim();
+                if (t === '') oaClean = `datadev-${issueId}`;
+                else if (/^datadev-\d+$/i.test(t)) oaClean = `datadev-${issueId}`;
+                else if (!/^\d{1,20}$/.test(t)) return res.status(400).json({ error: 'OA 流程号须为 1-20 位纯数字（留空恢复系统占位号）', code: 'OA_NUMBER_INVALID' });
+                else oaClean = t;
+            }
+            const oaCur = row.oa_number == null ? '' : String(row.oa_number);   // == null 判空，防数值 0 被 || 折叠
+            if (oaClean !== oaCur) pushField('oa_number = ?', oaClean, 'OA流程号');
+        }
+
+        if (providedCount === 0) return res.status(400).json({ error: '无更新字段' });
+        if (fields.length === 0) return res.json({ updated: 0 });   // H-1：全同值 no-op——不刷 updated_at、不写留痕
+        fields.push(`updated_at = datetime('now','localtime')`);
+        values.push(issueId);
+        // 三件套：WHERE 复校非终态+归属（非 admin 连 created_by 一起复校，闭 TOCTOU）+ changes 检查 + 失败阻断
+        const whereGuard = isAdmin
+            ? `WHERE id = ? AND voided_at IS NULL AND status != '已归档'`
+            : `WHERE id = ? AND created_by = ? AND voided_at IS NULL AND status != '已归档'`;
+        if (!isAdmin) values.push(Number(req.user.id));
+        try {
+            await dbRunAsync('BEGIN IMMEDIATE');
+            transactionActive = true;
+            const result = await dbRunAsync(`UPDATE issue_lite SET ${fields.join(', ')} ${whereGuard}`, values);
+            if (!result || result.changes === 0) {
+                await dbRunAsync('ROLLBACK');
+                transactionActive = false;
+                return res.status(409).json({ error: '登记单状态或归属已变化，编辑未生效，请刷新查看', code: 'EDIT_NOT_APPLIED' });
+            }
+            const editorName = req.user.display_name || req.user.username;
+            await dbRunAsync(
+                `INSERT INTO issue_lite_edit_logs (issue_lite_id, editor_id, editor_name, changed_fields) VALUES (?, ?, ?, ?)`,
+                [issueId, Number(req.user.id), editorName, changedLabels.join('、')]
+            );
+            await dbRunAsync('COMMIT');
+            transactionActive = false;
+            return res.json({ updated: result.changes });
+        } catch (txErr) {
+            if (transactionActive) { try { await dbRunAsync('ROLLBACK'); } catch (_) {} transactionActive = false; }
+            return res.status(500).json({ error: txErr.message });
+        }
+    } catch (unexpected) {
+        if (transactionActive) { try { await dbRunAsync('ROLLBACK'); } catch (_) {} transactionActive = false; }
+        if (!res.headersSent) return res.status(500).json({ error: unexpected.message });
     }
 });
 
@@ -12868,12 +13140,26 @@ app.post('/api/issue-lite/:id/void', authenticateToken, requireIssueLiteSchemaRe
 
 // 通知落库统一 helper（N1/N-est/N2 共用）：成功落 sent；成功但落库失败→partial_success 不裸 500(防盲重试)；失败落 failed。
 //   prefix ∈ {'', 'est_', 'req_'} 为写死常量拼列名(notify_* / est_notify_* / req_notify_*)，非用户输入，无注入。
-async function persistIssueLiteNotifyResult(id, prefix, attemptAt, result, res) {
+//   phoneSnapshot（末次合并审 MED，镜像 correction MED-1 收件人乐观锁）：est/req 按手机号发送的调用方传
+//   「读时原始 requester_phone」（null→''），回写 WHERE 加 COALESCE(requester_phone,'')=快照——发送在途
+//   建单人改号（E2 PUT 已重置通知态）时放弃回写保留 not_sent；N1 发平台用户不传（行为不变）。
+async function persistIssueLiteNotifyResult(id, prefix, attemptAt, result, res, phoneSnapshot) {
     const sc = prefix + 'notify_status', ac = prefix + 'notify_at', kc = prefix + 'notify_message_key', rc = prefix + 'notify_read_at';
+    const hasLock = phoneSnapshot !== undefined;
+    const guard = hasLock ? ` AND COALESCE(requester_phone,'') = ?` : '';
+    const gp = hasLock ? [phoneSnapshot] : [];
     if (result.ok) {
         try {
-            const upd = await dbRunAsync(`UPDATE issue_lite SET ${sc}='sent', ${ac}=?, ${kc}=?, ${rc}=NULL WHERE id=?`, [attemptAt, result.message_key, id]);
+            const upd = await dbRunAsync(`UPDATE issue_lite SET ${sc}='sent', ${ac}=?, ${kc}=?, ${rc}=NULL WHERE id=?${guard}`, [attemptAt, result.message_key, id, ...gp]);
             if (upd.changes === 0) {
+                if (hasLock) {
+                    // 区分「收件人已变更」与「行丢失」：前者返回引导重新通知，后者维持既有 NOTIFY_SENT_STATE_NOT_SAVED
+                    const cur = await dbGetAsync('SELECT requester_phone FROM issue_lite WHERE id = ?', [id]);
+                    if (cur && (cur.requester_phone == null ? '' : String(cur.requester_phone)) !== phoneSnapshot) {
+                        logger.warn(`[数据开发换壳] #${id} 通知已发送(${prefix})但发送期间业务方手机号被修改，sent 未回写（保留编辑重置的状态）`);
+                        return res.json({ success: false, code: 'RECIPIENT_CHANGED_DURING_SEND', delivery_status: 'sent', persist_status: 'skipped', message: '通知已发送给发送时的手机号，但发送期间业务方手机号已被修改，状态保持未发送；请核实新手机号后重新通知' });
+                    }
+                }
                 logger.error(`[数据开发换壳] #${id} 通知已发送(${prefix || 'peer'})但落库未命中 → 勿重复`);
                 return res.json({ success: true, partial_success: true, persistence_ok: false, code: 'NOTIFY_SENT_STATE_NOT_SAVED', message_key: result.message_key, warning: '通知已发送，但状态记录未生效，请勿重复发送' });
             }
@@ -12885,7 +13171,8 @@ async function persistIssueLiteNotifyResult(id, prefix, attemptAt, result, res) 
     }
     // D-M-1(codex D1D2 审)：失败分支落库也包 try/catch，DB 异常不吞成裸 500 掩盖发送失败真相
     try {
-        await dbRunAsync(`UPDATE issue_lite SET ${sc}='failed', ${ac}=?, ${kc}=NULL, ${rc}=NULL WHERE id=?`, [attemptAt, id]);
+        const updF = await dbRunAsync(`UPDATE issue_lite SET ${sc}='failed', ${ac}=?, ${kc}=NULL, ${rc}=NULL WHERE id=?${guard}`, [attemptAt, id, ...gp]);
+        if (hasLock && updF && updF.changes === 0) logger.warn(`[数据开发换壳] #${id} 通知失败(${prefix})状态未回写：发送期间业务方手机号已变更（保留编辑重置的状态）`);
     } catch (dbErr) {
         logger.error(`[数据开发换壳] #${id} 通知失败(${prefix || 'peer'})落库亦失败：${dbErr.message}`);
     }
@@ -12987,7 +13274,8 @@ app.post('/api/issue-lite/:id/notify-requester', authenticateToken, requireIssue
         if (!rec.requester_phone) return res.status(400).json({ error: '业务方手机号为空', code: 'REQUESTER_PHONE_EMPTY' });
         const md = issueLiteNotify.buildIssueLiteRequesterDoneMarkdown(rec);
         const result = await sendIssueDingtalkToRequester(rec.requester_phone, `✅ 数据需求已完成：${rec.title}`, md);
-        return await persistIssueLiteNotifyResult(id, 'req_', attemptAt, result, res);
+        // 末次合并审 MED：传读时原始手机号快照（收件人乐观锁，发送在途改号不覆盖 E2 编辑重置）
+        return await persistIssueLiteNotifyResult(id, 'req_', attemptAt, result, res, rec.requester_phone == null ? '' : String(rec.requester_phone));
     } catch (err) {
         logger.error('[数据开发换壳] N2 通知业务方失败:', err.message);
         res.status(500).json({ error: err.message });
@@ -13007,7 +13295,8 @@ app.post('/api/issue-lite/:id/notify-estimate', authenticateToken, requireIssueL
         if (!rec.requester_phone) return res.status(400).json({ error: '业务方手机号为空', code: 'REQUESTER_PHONE_EMPTY' });
         const md = issueLiteNotify.buildIssueLiteEstimateMarkdown(rec);
         const result = await sendIssueDingtalkToRequester(rec.requester_phone, `⏳ 数据需求已排期：${rec.title}`, md);
-        return await persistIssueLiteNotifyResult(id, 'est_', attemptAt, result, res);
+        // 末次合并审 MED：传读时原始手机号快照（收件人乐观锁，发送在途改号不覆盖 E2 编辑重置）
+        return await persistIssueLiteNotifyResult(id, 'est_', attemptAt, result, res, rec.requester_phone == null ? '' : String(rec.requester_phone));
     } catch (err) {
         logger.error('[数据开发换壳] N-est 通知业务方预计失败:', err.message);
         res.status(500).json({ error: err.message });

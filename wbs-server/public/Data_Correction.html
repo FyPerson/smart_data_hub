@@ -104,6 +104,48 @@
            源序反转意外胜出（C0 自测测出的真实回归）。故删除这条从未生效的 display:flex；align-items/gap
            同样一直是死代码，为最小改动保留不动，行为与迁移前逐属性一致。 */
         .radio-row label { align-items: center; gap: 5px; cursor: pointer; }
+        /* U2（2026-07-23）：图片附件 lightbox 预览（复刻数据协作 v1.70.2 范式，CSS/DOM/JS 三段同源） */
+        .img-lightbox {
+            display: none;
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0, 0, 0, 0.85);
+            z-index: 2000;
+            cursor: zoom-out;
+            justify-content: center;
+            align-items: center;
+            flex-direction: column;
+            padding: 24px;
+            box-sizing: border-box;
+        }
+        .img-lightbox.show { display: flex; }
+        .img-lightbox img {
+            max-width: 92vw;
+            max-height: 82vh;
+            object-fit: contain;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+            border-radius: 4px;
+            cursor: default;
+        }
+        .img-lightbox-close {
+            position: absolute;
+            top: 16px; right: 24px;
+            color: #fff;
+            font-size: 40px;
+            line-height: 1;
+            cursor: pointer;
+            user-select: none;
+            text-shadow: 0 2px 8px rgba(0, 0, 0, 0.6);
+        }
+        .img-lightbox-close:hover { color: #fca5a5; }
+        .img-lightbox-caption {
+            margin-top: 12px;
+            color: #e5e7eb;
+            font-size: 13px;
+            text-align: center;
+            max-width: 92vw;
+            word-break: break-all;
+        }
     </style>
 </head>
 
@@ -268,10 +310,12 @@
     <!-- 新建修正单弹窗（仅 admin） -->
     <div class="u-modal-overlay" id="createModal">
         <div class="u-modal-box">
-            <div class="u-modal-header"><h2>新建修正单</h2><button class="u-drawer-close" onclick="closeCreateModal()">&times;</button></div>
+            <div class="u-modal-header"><h2 id="createModalTitle">新建修正单</h2><button class="u-drawer-close" onclick="closeCreateModal()">&times;</button></div>
             <div class="u-modal-body">
+                <!-- E3（建单人编辑权限）：编辑弹窗复用本弹窗——editCorrId 非空=编辑模式（隐藏 OA/类型/跨系统/指派/附件上传区，仅录入文字字段） -->
+                <input type="hidden" id="editCorrId">
                 <div class="u-form-row">
-                    <div class="u-form-group"><label>OA 流程号</label><input type="text" id="formOaNumber" placeholder="可选，只填数字部分（如 364265）；留空=信息技术部自发现" oninput="toggleOaMode()">
+                    <div class="u-form-group" id="oaNumberGroup"><label>OA 流程号</label><input type="text" id="formOaNumber" placeholder="可选，只填数字部分（如 364265）；留空=信息技术部自发现" oninput="toggleOaMode()">
                         <!-- codex 84 L-1：非法格式即时提示（前端镜像后端 validateInputOaNumber 口径，防"引导传截图后才被 400"的摩擦） -->
                         <div class="u-hint" id="oaFormatHint" style="display:none;color:#d93025;">OA 流程号须为 1-20 位纯数字（如 364265）；留空则视为信息技术部自发现。</div>
                     </div>
@@ -280,10 +324,11 @@
                 <!-- B2（建单字段体系优化，OA 截图强制）：填写真实 OA 流程号后必须同步上传截图；留空（信息技术部自发现）免此项，见 toggleOaMode() -->
                 <div class="u-form-group" id="oaProofGroup" style="display:none;">
                     <label>OA 流程截图 <span class="u-req">*</span></label>
-                    <input type="file" id="formOaProofFiles" multiple accept="image/*,.pdf,.xlsx,.xls">
+                    <input type="file" id="formOaProofFiles" multiple accept="image/*,.pdf,.xlsx,.xls" onchange="renderPickedChips('formOaProofFiles','createOaProofPicked',5)">
+                    <div id="createOaProofPicked"></div>
                     <div class="u-hint">填写了真实 OA 流程号，须随建单同步上传截图留档（建单后不可补传，事后如需变更请联系信息技术部）。</div>
                 </div>
-                <div class="u-form-group">
+                <div class="u-form-group" id="corrTypeGroup">
                     <label>修正类型 <span class="u-req">*</span></label>
                     <div class="radio-row">
                         <label><input type="radio" name="corrType" value="single" checked onchange="toggleCorrectionCountByType()"> 单数据修正</label>
@@ -312,7 +357,7 @@
                     <div class="u-hint">批量数据修正必填，须 ≥2（仅 1 条请改用单数据修正）；单数据修正系统固定为 1，无需填写。</div>
                 </div>
                 <!-- L5 跨系统关联（§7.1 / 契约 B）：勾上展开系统2 字段（不含开发2、不含独立业务方——业务方共享主单）；勾上隐藏指派方式区（禁建单时直派） -->
-                <div class="u-form-group" style="margin-bottom:8px;">
+                <div class="u-form-group" id="crossSystemToggleGroup" style="margin-bottom:8px;">
                     <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
                         <input type="checkbox" id="formCrossSystem" onchange="toggleCrossSystem()" style="width:auto; margin:0;"> 跨系统关联（同一诉求需在两个系统分别修正）
                     </label>
@@ -347,7 +392,7 @@
                     <div class="u-form-group">
                         <label>业务方 <span class="u-req">*</span>（第一行为主业务方，可加多个）</label>
                         <div id="requesterList"></div>
-                        <button type="button" class="u-btn-secondary" onclick="addRequesterRow()" style="margin-top:6px; padding:4px 10px; font-size:12px;">+ 添加业务方</button>
+                        <button type="button" class="u-btn-secondary" id="btnAddRequester" onclick="addRequesterRow()" style="margin-top:6px; padding:4px 10px; font-size:12px;">+ 添加业务方</button>
                         <div class="u-hint">主业务方姓名必填；同一修正诉求可能涉及多个业务方，完成后逐个发钉钉通知（需手机号）。</div>
                     </div>
                 </div>
@@ -373,11 +418,12 @@
                 </div>
                 <!-- D 块（错误证明→待修复数据正名，v1.3 §2）：改显示文案，底层 error_proof 标识符/字段名/变量名一律不动。
                      L3b 待修复数据（§6.7：L2a 后端已支持 error_proof 早期态上传；建单 JSON → 拿 id → 两步上传锚点单） -->
-                <div class="u-form-group">
+                <div class="u-form-group" id="errProofGroup">
                     <label>待修复数据（可选）</label>
                     <textarea id="formErrorProofNote" rows="2" maxlength="1000" placeholder="可补充说明（如：表格第几列是待改字段），选填"></textarea>
-                    <input type="file" id="formErrorProofFiles" multiple accept="image/*,.pdf,.xlsx,.xls" style="margin-top:6px;">
-                    <div class="u-hint">待修复数据附件（表格清单为主，图片/PDF/xlsx，≤5 个文件）+ 选填文字备注；建单后两步上传到本单（上传失败不影响建单，详情页可补传）。</div>
+                    <input type="file" id="formErrorProofFiles" multiple accept="image/*,.pdf,.xlsx,.xls" style="margin-top:6px;" onchange="renderPickedChips('formErrorProofFiles','createErrProofPicked',5)">
+                    <div id="createErrProofPicked"></div>
+                    <div class="u-hint" id="errProofFilesHint">待修复数据附件（表格清单为主，图片/PDF/xlsx，≤5 个文件）+ 选填文字备注；建单后两步上传到本单（上传失败不影响建单，详情页可补传）。</div>
                 </div>
             </div>
             <div class="u-modal-footer">
@@ -439,7 +485,8 @@
                 <div id="completeReworkHint" style="display:none; font-size:12px; color:#6d28d9; background:#f3e8ff; border:1px solid #ddd0f5; border-radius:6px; padding:8px 10px; margin-bottom:10px;">🔄 返工子单：结果证明截图 + 文字说明（≥5 字）均必填，请补充本次实际改了什么。</div>
                 <div class="u-form-group" id="completeSingleGroup">
                     <label id="completeSingleProofLabel">结果证明截图（选填）</label>
-                    <input type="file" id="formCompleteFiles" multiple accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.pdf,.xlsx,.xls">
+                    <input type="file" id="formCompleteFiles" multiple accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.pdf,.xlsx,.xls" onchange="renderPickedChips('formCompleteFiles','completeFilesPicked',5)">
+                    <div id="completeFilesPicked"></div>
                     <label style="margin-top:8px;">完成说明 <span class="u-req">*</span>（必填，至少 5 字）</label>
                     <textarea id="formCompleteSingleNote" rows="3" maxlength="500" placeholder="请说明实际修正了什么（避免「1」「完成」等敷衍）"></textarea>
                 </div>
@@ -447,7 +494,8 @@
                     <label>完成说明 <span class="u-req">*</span>（批量数据修正必填，至少 5 字）</label>
                     <textarea id="formBatchNote" rows="3" maxlength="500" placeholder="请说明实际修正了什么，如：已批量更新 183 人社保基数 / 修正 30 条客户编号映射"></textarea>
                     <div style="font-size:11px; color:#9ca3af; margin-top:2px;">批量可选附结果证明（可不传）</div>
-                    <input type="file" id="formCompleteBatchFiles" multiple accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.pdf,.xlsx,.xls" style="margin-top:6px;">
+                    <input type="file" id="formCompleteBatchFiles" multiple accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.pdf,.xlsx,.xls" style="margin-top:6px;" onchange="renderPickedChips('formCompleteBatchFiles','completeBatchFilesPicked',5)">
+                    <div id="completeBatchFilesPicked"></div>
                 </div>
             </div>
             <div class="u-modal-footer"><button class="u-btn-secondary" onclick="closeModal('completeModal')">取消</button><button class="u-btn-primary" id="btnSubmitComplete" onclick="submitComplete()">提交</button></div>
@@ -464,29 +512,32 @@
                 <div id="resubmitReworkHint" style="display:none; font-size:12px; color:#6d28d9; background:#f3e8ff; border:1px solid #ddd0f5; border-radius:6px; padding:8px 10px; margin-bottom:10px;">🔄 返工子单：结果证明截图 + 本次说明（≥5 字）均必填。</div>
                 <div class="u-form-group" id="resubmitSingleGroup">
                     <label id="resubmitSingleProofLabel">本次新增结果证明（选填）</label>
-                    <input type="file" id="formResubmitFiles" multiple accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.pdf,.xlsx,.xls">
+                    <input type="file" id="formResubmitFiles" multiple accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.pdf,.xlsx,.xls" onchange="renderPickedChips('formResubmitFiles','resubmitFilesPicked',5)">
+                    <div id="resubmitFilesPicked"></div>
                     <label style="margin-top:8px;">本次重修说明 <span class="u-req">*</span>（必填）</label>
                     <textarea id="formResubmitSingleNote" rows="3" maxlength="500" placeholder="本次重修做了什么、上次为何没过"></textarea>
                 </div>
                 <div class="u-form-group" id="resubmitBatchGroup" style="display:none;">
                     <label>本次重修说明 <span class="u-req">*</span>（批量数据修正必填）</label>
                     <textarea id="formResubmitNote" rows="3" maxlength="500" placeholder="本次重修做了什么"></textarea>
-                    <input type="file" id="formResubmitBatchFiles" multiple accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.pdf,.xlsx,.xls" style="margin-top:6px;">
+                    <input type="file" id="formResubmitBatchFiles" multiple accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.pdf,.xlsx,.xls" style="margin-top:6px;" onchange="renderPickedChips('formResubmitBatchFiles','resubmitBatchFilesPicked',5)">
+                    <div id="resubmitBatchFilesPicked"></div>
                 </div>
             </div>
             <div class="u-modal-footer"><button class="u-btn-secondary" onclick="closeModal('resubmitModal')">取消</button><button class="u-btn-primary" id="btnSubmitResubmit" onclick="submitResubmit()">提交</button></div>
         </div>
     </div>
 
-    <!-- 补充附件弹窗 -->
+    <!-- 补充附件/上传待修复数据 弹窗（U1 泛化：#attachType 区分 fix_proof/error_proof，标题/文案随 openAttach 切换）-->
     <div class="u-modal-overlay" id="attachModal">
         <div class="u-modal-box" style="max-width:440px;">
-            <div class="u-modal-header"><h2>补充附件</h2><button class="u-drawer-close" onclick="closeModal('attachModal')">&times;</button></div>
+            <div class="u-modal-header"><h2 id="attachModalTitle">补充附件</h2><button class="u-drawer-close" onclick="closeModal('attachModal')">&times;</button></div>
             <div class="u-modal-body">
                 <input type="hidden" id="attachCorrId">
-                <div style="font-size:12px; color:#6b7280; margin-bottom:8px;">仅补充证据留存，不改变状态、不计入提交次数。单次最多 5 个文件、每个 ≤20MB。</div>
+                <input type="hidden" id="attachType" value="fix_proof">
+                <div id="attachModalHint" style="font-size:12px; color:#6b7280; margin-bottom:8px;">仅补充证据留存，不改变状态、不计入提交次数。单次最多 5 个文件、每个 ≤20MB。</div>
                 <!-- 2026-07-23 上传交互优化：裸 input → 追加式选择 + 预览（复刻数据协作 selectedFiles 范式）-->
-                <div class="u-form-group"><label>补充附件 <span class="u-req">*</span></label><input type="file" id="formAttachFiles" multiple accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.pdf,.xlsx,.xls" onchange="corrAttachFilesChange(event)"></div>
+                <div class="u-form-group"><label id="attachModalLabel">补充附件 <span class="u-req">*</span></label><input type="file" id="formAttachFiles" multiple accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.pdf,.xlsx,.xls" onchange="corrAttachFilesChange(event)"></div>
                 <div id="corrAttachPreview" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;"></div>
             </div>
             <div class="u-modal-footer"><button class="u-btn-secondary" onclick="closeModal('attachModal')">取消</button><button class="u-btn-primary" id="btnSubmitAttach" onclick="submitAttachments()">提交</button></div>
@@ -580,6 +631,13 @@
 
     <script src="assets/js/app.js?v=v1.121.0_issuelite"></script>
     <script src="assets/js/unify-helpers.js?v=v1.110.4_unify"></script>
+    <!-- U2：图片附件 lightbox（复刻数据协作范式；点 overlay/×/ESC 关，点图本身不关） -->
+    <div id="imgLightbox" class="img-lightbox" onclick="closeLightbox(event)">
+        <span class="img-lightbox-close" onclick="closeLightbox(event)" title="关闭">×</span>
+        <img id="imgLightboxImg" alt="">
+        <div class="img-lightbox-caption" id="imgLightboxCaption"></div>
+    </div>
+
     <script>
         // ================= 常量（与后端同源）=================
         // 拉群可选成员排除名单（§5.4，与后端 CORRECTION_CHAT_EXCLUDE_IDS 同源；只排示例只读领导A 11）
@@ -982,24 +1040,85 @@
         }
 
         // ================= 详情抽屉 =================
+        // M-3（codex U1 复审）：导航目标 + 响应令牌——drawerTargetId 在入口同步赋值（供异步回调判断
+        //   "抽屉还在本单吗"，currentDetail 是 fetch 后才赋值的滞后缓存不能用于此判断）；drawerNav 令牌
+        //   丢弃过期响应（顺带闭合存量的快速切单响应竞态：先点 A 再点 B，A 慢返回不再覆盖 B 的内容）。
+        let drawerTargetId = null;
+        let drawerNav = 0;
         async function openDrawer(id) {
+            drawerTargetId = Number(id);
+            const nav = ++drawerNav;
             try {
                 const res = await authFetch(`/api/corrections/${id}`);
+                if (nav !== drawerNav) return;   // M-3：期间已切往其他单/已关闭，本响应过期丢弃
                 if (!res || !res.ok) {
                     const e = await res.json().catch(() => ({}));
+                    if (nav !== drawerNav) return;   // L-4（codex 三轮审）：错误正文解析窗口内切单/关闭 → 过期错误不提示（与成功分支对齐）
+                    // M-4（codex 三轮审）：当前导航失败 → 目标恢复与实际显示一致（抽屉仍开=回退当前显示单，
+                    //   未开=置空），防 drawerTargetId 漂移到失败单导致后续 drawerOnSame 误判不刷新。
+                    drawerTargetId = (document.getElementById('drawer').classList.contains('open') && currentDetail)
+                        ? Number(currentDetail.id) : null;
                     showToast(e.error || '加载详情失败', 'error');
                     return;
                 }
                 const data = await res.json();
+                if (nav !== drawerNav) return;
                 renderDrawer(data);
                 document.getElementById('drawerOverlay').classList.add('open');
                 document.getElementById('drawer').classList.add('open');
-            } catch (e) { console.error('加载详情失败', e); }
+            } catch (e) {
+                if (nav !== drawerNav) return;   // M-4：过期异常不做状态协调、不记噪声日志
+                drawerTargetId = (document.getElementById('drawer').classList.contains('open') && currentDetail)
+                    ? Number(currentDetail.id) : null;
+                console.error('加载详情失败', e);
+            }
         }
         function closeDrawer() {
+            drawerTargetId = null;
+            drawerNav++;   // M-3：关闭后在途的 open 响应一并作废
             document.getElementById('drawerOverlay').classList.remove('open');
             document.getElementById('drawer').classList.remove('open');
         }
+
+        // ================= U2 图片附件 lightbox（复刻数据协作 v1.70.2 范式）=================
+        // 用法：openLightbox(url, captionText) / 关闭：closeLightbox(event)、ESC
+        function openLightbox(url, caption) {
+            const lb = document.getElementById('imgLightbox');
+            const img = document.getElementById('imgLightboxImg');
+            const cap = document.getElementById('imgLightboxCaption');
+            if (!lb || !img) return;
+            img.src = url;
+            if (cap) cap.textContent = caption || '';
+            lb.classList.add('show');
+            document.body.style.overflow = 'hidden';   // 阻止页面滚动
+        }
+        function closeLightbox(event) {
+            // 仅当点击 overlay 自身或关闭按钮才关；点击 img 不关（让用户可以单击图本身查看）
+            if (event && event.target && event.target.tagName === 'IMG' && event.target.id === 'imgLightboxImg') return;
+            const lb = document.getElementById('imgLightbox');
+            const img = document.getElementById('imgLightboxImg');
+            if (!lb) return;
+            lb.classList.remove('show');
+            if (img) img.src = '';
+            document.body.style.overflow = '';
+        }
+        // ESC 关闭（沿数据协作 codex 27 #6 拍板：仅 lightbox 用 ESC，无 modal-stack 冲突，不做 stack-aware）
+        document.addEventListener('keydown', function (e) {
+            if (e.key === 'Escape') {
+                const lb = document.getElementById('imgLightbox');
+                if (lb && lb.classList.contains('show')) closeLightbox(null);
+            }
+        });
+        // 附件缩略图/图片名点击 → lightbox（委托监听：文件名含引号也不经 inline onclick，无属性逃逸面；
+        //   caption 属性位存 escapeHtml 后文本，getAttribute 取回时浏览器已解码为原始名，textContent 展示正确）
+        // L-2（codex U2 审）：链接 href=真实附件 URL（渐进增强——JS 失效/中键/复制链接时新标签看原图），
+        //   JS 正常时 preventDefault 改开 lightbox。
+        document.addEventListener('click', function (e) {
+            const t = e.target && e.target.closest ? e.target.closest('.corr-att-thumb') : null;
+            if (!t) return;
+            e.preventDefault();
+            openLightbox(t.getAttribute('data-lightbox-url'), t.getAttribute('data-lightbox-caption') || '');
+        });
 
         function renderDrawer(data) {
             const r = data.request;
@@ -1084,6 +1203,10 @@
             // 行政闭环（I2/I3 §3.3）：仅 admin，在未完成态（PENDING_ASSIGN/ASSIGNED_PENDING_ESTIMATE/IN_PROGRESS）记账式收口 → ARCHIVED + admin_closure
             if (isAdmin && ['PENDING_ASSIGN', 'ASSIGNED_PENDING_ESTIMATE', 'IN_PROGRESS'].includes(s)) {
                 actions += `<button class="u-btn-primary" style="background:linear-gradient(135deg,#2563eb,#1d4ed8);" onclick="openAdminClose(${r.id})">行政闭环</button>`;
+            }
+            // E3 编辑录入信息（服务端投影 can_edit：admin∨建单人 + 非终态 + 未作废；PUT /:id 为真闸门）
+            if (data.can_edit === true) {
+                actions += `<button class="u-btn-secondary" onclick="openEditCorrection(${Number(r.id)})">编辑</button>`;
             }
             // 作废：admin/creator，任意非作废
             if ((isAdmin || isCreator) && s !== 'VOIDED') {
@@ -1241,9 +1364,29 @@
             const errProofs = attachments.filter(a => a.attachment_type === 'error_proof');
             const fixProofs = attachments.filter(a => a.attachment_type === 'fix_proof');
             const oaProofs = attachments.filter(a => a.attachment_type === 'oa_proof');
-            const renderAtts = (list, emptyText) => list.length ? list.map(a => `
-                <div class="u-att-item">📎 <a href="${attLink(a)}" target="_blank">${escapeHtml(a.original_name || a.file_name)}</a>
-                <span style="color:#9ca3af;"> · ${escapeHtml(a.uploaded_by_name || '-')} · ${escapeHtml(formatFullTime(a.created_at))}</span></div>`).join('') : `<div style="color:#9ca3af; font-size:12px;">${emptyText}</div>`;
+            // U2（2026-07-23）：已上传附件分层预览（复刻数据协作范式）——图片=缩略图+lightbox 放大 /
+            //   PDF=新标签浏览器原生预览 / xlsx 等=强制下载。attLink 经 encodeURIComponent 分段构造，属性位安全；
+            //   文件名属性位用 safeAttr（&quot;）、点击走 .corr-att-thumb 委托监听不经 inline onclick。
+            // E3：canDel=true（仅 error_proof 区传入）时每项带「删除」——权限门与后端 DELETE 同源（admin∨建单人+非终态+未作废+主单）；
+            //   onclick 仅传数字 id 无注入面；from_master 项只出现在子单视角（canDel 恒 false），主单删除锚点天然成立。
+            const renderAtts = (list, emptyText, canDel) => list.length ? list.map(a => {
+                const name = String(a.original_name || a.file_name || '');
+                const safeName = escapeHtml(name);
+                const safeAttr = safeName.replace(/"/g, '&quot;');
+                const url = attLink(a);
+                const meta = `<span style="color:#9ca3af;"> · ${escapeHtml(a.uploaded_by_name || '-')} · ${escapeHtml(formatFullTime(a.created_at))}</span>`;
+                const delBtn = canDel ? `<button class="u-btn-secondary" style="margin-left:8px; padding:2px 8px; font-size:12px; color:#d93025; border-color:#f3c1bd;" onclick="delCorrErrProof(${Number(a.id)}, ${Number(r.id)})">删除</button>` : '';
+                if (/\.(jpe?g|png|gif|webp|bmp)$/i.test(name)) {
+                    return `<div class="u-att-item" style="display:flex;align-items:center;gap:8px;">
+                        <img class="corr-att-thumb" src="${url}" alt="${safeAttr}" title="${safeAttr}（点击放大）" data-lightbox-url="${url}" data-lightbox-caption="${safeAttr}" style="width:56px;height:42px;object-fit:cover;border-radius:4px;border:1px solid #e5e7eb;cursor:zoom-in;flex-shrink:0;">
+                        <span>🖼️ <a href="${url}" target="_blank" rel="noopener" class="corr-att-thumb" data-lightbox-url="${url}" data-lightbox-caption="${safeAttr}">${safeName}</a>${meta}</span>${delBtn}</div>`;
+                }
+                if (/\.pdf$/i.test(name)) {
+                    return `<div class="u-att-item">📄 <a href="${url}" target="_blank" rel="noopener" title="点击新窗口预览">${safeName}</a>${meta}${delBtn}</div>`;
+                }
+                const icon = /\.(xlsx?|xls)$/i.test(name) ? '📊' : '📎';
+                return `<div class="u-att-item">${icon} <a href="${url}" target="_blank" download="${safeAttr}">${safeName}</a>${meta}${delBtn}</div>`;
+            }).join('') : `<div style="color:#9ca3af; font-size:12px;">${emptyText}</div>`;
             // B2（方案 §2.4 L-10）：oa_proof 单级展示，仅本单自身（后端 SQL 已不合并 anchor），复用 renderAtts 但不复用 error_proof 的 anchor 逻辑；
             //   仅真实 OA 号（非 datafix- 占位号）才展示本区——自发现单本就免 OA 截图，不该出现空白区块造成"是不是漏传"的误解。
             const hasRealOa = r.oa_number && !/^datafix-/i.test(String(r.oa_number));
@@ -1256,8 +1399,10 @@
             const canAddErrProof = (isAdmin || isCreator) && !isChild && ERR_PROOF_STATES.includes(s) && !r.voided_at;   // L5 子单 error_proof 归主单（后端 ERROR_PROOF_ON_MASTER_ONLY），子单只读展示不带补传入口
             // codex 61 M-4：待修复数据文字说明读统一字段 effective_error_proof_note（主单/无组取自身、子单取主单，后端已算好，前端无分支）。
             const errProofNoteHtml = r.effective_error_proof_note ? `<div style="font-size:13px; color:#374151; margin-bottom:6px; white-space:pre-wrap;">📝 ${escapeHtml(r.effective_error_proof_note)}</div>` : '';
+            // U1（2026-07-23 弹窗式统一）：内联裸 input 两步式（先选文件再点上传）退役，改为复用 attachModal 弹窗
+            //   （追加式选择+缩略图预览+确认落库，openAttach 第二参数切 error_proof 文案与 attachment_type）。
             const errProofAddHtml = canAddErrProof
-                ? `<div style="margin-top:8px;"><input type="file" id="errProofFiles_${Number(r.id)}" multiple accept="image/*,.pdf,.xlsx,.xls" style="font-size:12px;" onchange="renderErrProofPicked(${Number(r.id)})"><button class="u-btn-secondary u-nb-btn" onclick="uploadErrorProof(${Number(r.id)})">上传待修复数据</button><div id="errProofPicked_${Number(r.id)}" style="margin-top:4px;"></div></div>`
+                ? `<div style="margin-top:8px;"><button class="u-btn-secondary u-nb-btn" onclick="openAttach(${Number(r.id)}, 'error_proof')">上传待修复数据</button></div>`
                 : '';
             // codex 61·方案 A：待修复数据 = 诉求级材料（组内共享一份、物理存主单）。子单从"整块隐藏"改为"只读展示主单 error_proof"——
             //   解决系统2 开发看不到待修复数据（后端详情已合并返回主单 error_proof 附件 + effective_error_proof_note）。
@@ -1268,7 +1413,7 @@
             const errProofEmpty = isChild
                 ? (errProofNoteHtml ? '（暂无附件）' : '主单暂无待修复数据附件')
                 : (errProofNoteHtml ? '（暂无附件）' : '无');
-            const errProofSection = `<div class="u-detail-section"><h3>${errProofTitle}</h3>${errProofNoteHtml}${renderAtts(errProofs, errProofEmpty)}${errProofAddHtml}</div>`;
+            const errProofSection = `<div class="u-detail-section"><h3>${errProofTitle}</h3>${errProofNoteHtml}${renderAtts(errProofs, errProofEmpty, canAddErrProof)}${errProofAddHtml}</div>`;
 
             // ===== 群信息 =====
             let chatBlock = '';
@@ -1352,8 +1497,16 @@
                     ? `<span style="font-weight:600; color:#6d28d9;">原单${rootStateSuffix}</span>`
                     : `<span class="rework-badge ${rwClass}">返工·第 ${Number(m.rework_seq)} 次</span>`;
                 const stBadge = `<span class="u-status-badge s-${statusClass(m.status)}" style="font-size:10px;">${escapeHtml(STATUS_LABELS[m.status] || m.status)}</span>`;
+                // U2：摘要区图片链接改开 lightbox（零布局变化）；PDF/xlsx 保持新标签/下载
                 const proofs = (Array.isArray(m.fix_proofs) && m.fix_proofs.length)
-                    ? m.fix_proofs.map(a => `<a href="${attLink(a)}" target="_blank">📎 ${escapeHtml(a.original_name || a.file_name)}</a>`).join('　')
+                    ? m.fix_proofs.map(a => {
+                        const pName = String(a.original_name || a.file_name || '');
+                        const pSafe = escapeHtml(pName);
+                        if (/\.(jpe?g|png|gif|webp|bmp)$/i.test(pName)) {
+                            return `<a href="${attLink(a)}" target="_blank" rel="noopener" class="corr-att-thumb" data-lightbox-url="${attLink(a)}" data-lightbox-caption="${pSafe.replace(/"/g, '&quot;')}">🖼️ ${pSafe}</a>`;
+                        }
+                        return `<a href="${attLink(a)}" target="_blank">📎 ${pSafe}</a>`;
+                    }).join('　')
                     : '<span style="color:#9ca3af;">无</span>';
                 const tail = isCur
                     ? '<span style="color:#9ca3af; margin-left:6px;">（当前单）</span>'
@@ -1382,6 +1535,17 @@
 
         // ================= 建单 =================
         function openCreateModal() {
+            // E3：清编辑态残留（编辑弹窗复用本弹窗；显隐组恢复 + 历史部门临时 option 移除 + 在途编辑请求作废）
+            corrEditSeq++;
+            corrEditCtx = null;
+            document.getElementById('editCorrId').value = '';
+            document.getElementById('createModalTitle').textContent = '新建修正单';
+            document.getElementById('btnSubmitCreate').textContent = '提交';
+            document.getElementById('btnSubmitCreate').disabled = false;   // L-2（codex E3 二审）：新会话初始化显式恢复——旧会话在途保存的 disabled 不遗留给新弹窗
+            ['oaNumberGroup', 'corrTypeGroup', 'crossSystemToggleGroup', 'errProofGroup', 'requesterSectionGroup'].forEach(hid => { const el = document.getElementById(hid); if (el) el.style.display = ''; });
+            ['formErrorProofFiles', 'createErrProofPicked', 'errProofFilesHint', 'btnAddRequester'].forEach(hid => { const el = document.getElementById(hid); if (el) el.style.display = ''; });
+            const histOpt = document.getElementById('corrHistDeptOpt');
+            if (histOpt) histOpt.remove();
             // 填所属系统（系统1 + L5 系统2 同源选项）
             const sysOpts = '<option value="">请选择</option>' + CORRECTION_SOURCE_SYSTEMS.map(s => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join('');
             document.getElementById('formSourceSystem').innerHTML = sysOpts;
@@ -1401,13 +1565,167 @@
              'formSourceSystemOther2', 'formLocationInfo2', 'formCorrectionCount2', 'formExpectedDeadline'].forEach(id => document.getElementById(id).value = '');   // L5 含系统2 字段；L-2 codex 57 补 formExpectedDeadline 防连续建单残留
             document.getElementById('formErrorProofFiles').value = '';   // L3b 清待修复数据附件选择
             document.getElementById('formOaProofFiles').value = '';   // B2 清 OA 截图附件选择
+            renderPickedChips('formErrorProofFiles', 'createErrProofPicked', 5); renderPickedChips('formOaProofFiles', 'createOaProofPicked', 5);   // U1 清已选 chips 残留
             document.getElementById('formCrossSystem').checked = false;   // L5 重置跨系统开关
             document.getElementById('formSourceSystem2').value = '';
             resetRequesterList();
             toggleSourceOther(); toggleAssignMode(); toggleCrossSystem(); toggleSourceOther2(); toggleCorrectionCountByType(); toggleOaMode();   // L5 跨系统/系统2 联动复位 + 修正条数按类型显隐 + B2 OA 号驱动业务方/截图区显隐复位（留空 OA 默认态）
             document.getElementById('createModal').classList.add('open');
         }
-        function closeCreateModal() { document.getElementById('createModal').classList.remove('open'); }
+        function closeCreateModal() { corrEditSeq++; corrEditCtx = null; document.getElementById('createModal').classList.remove('open'); }   // E3：关弹窗作废在途编辑请求
+
+        // ================= E3 建单人编辑（2026-07-23）=================
+        //   编辑弹窗复用 createModal：回填录入字段；隐藏 OA 号/OA 截图/修正类型/跨系统/指派方式/附件上传区
+        //   （OA 不可改拍板 + correction_type 决定交付闸门不可改 + 附件增删走详情页入口）。业务方仅真OA
+        //   主单/标准单可改现有行文字（不增删行）；自发现单业务方=建单人系统固定、子单业务方/待修复说明归主单。
+        let corrEditSeq = 0;      // 详情请求令牌（E2 L-5 范式：连点两单/请求中开新建，过期响应不回填）
+        let corrEditCtx = null;   // 编辑上下文 {id, isChild, correctionType, hasRealOa, requesters}
+        async function openEditCorrection(id) {
+            const seq = ++corrEditSeq;
+            try {
+                const res = await authFetch(`/api/corrections/${id}`);
+                if (seq !== corrEditSeq) return;
+                if (!res || !res.ok) { showToast('加载修正单失败', 'error'); return; }
+                const data = await res.json();
+                if (seq !== corrEditSeq) return;
+                if (data.can_edit !== true) { showToast('当前状态不可编辑', 'error'); return; }
+                const r = data.request;
+                const group = data.group || null;
+                const isChild = !!(group && group.is_master === false);
+                const hasRealOa = !!(r.oa_number && !/^datafix-/i.test(String(r.oa_number)));
+                // 先走一遍新建复位（下拉填充/残留清理/联动复位，含 corrEditSeq++——本函数后续无 await，不受影响），再切编辑态覆盖
+                openCreateModal();
+                corrEditCtx = { id: Number(r.id), isChild, correctionType: r.correction_type, hasRealOa, requesters: (data.requesters || []) };
+                document.getElementById('editCorrId').value = String(r.id);
+                document.getElementById('createModalTitle').textContent = `编辑修正单 #${r.id}`;
+                document.getElementById('btnSubmitCreate').textContent = '保存修改';
+                ['oaNumberGroup', 'oaProofGroup', 'corrTypeGroup', 'crossSystemToggleGroup', 'system2Group', 'assignModeGroup', 'assignAGroup', 'assignBGroup'].forEach(hid => { const el = document.getElementById(hid); if (el) el.style.display = 'none'; });
+                // 待修复数据：编辑面只留文字说明（附件增删走详情页「上传待修复数据」/删除按钮）；子单整块隐藏（归主单）
+                ['formErrorProofFiles', 'createErrProofPicked', 'errProofFilesHint'].forEach(hid => { const el = document.getElementById(hid); if (el) el.style.display = 'none'; });
+                document.getElementById('errProofGroup').style.display = isChild ? 'none' : '';
+                // ── 回填 ──
+                document.getElementById('formProcessType').value = r.process_type || '';
+                const typeRadio = document.querySelector(`input[name="corrType"][value="${r.correction_type === 'batch' ? 'batch' : 'single'}"]`);
+                if (typeRadio) typeRadio.checked = true;
+                toggleCorrectionCountByType();   // radio 区已隐藏，仅借联动控制修正条数区显隐（batch 显示/single 隐藏）
+                document.getElementById('formSourceSystem').value = r.source_system || '';
+                toggleSourceOther();
+                document.getElementById('formSourceSystemOther').value = r.source_system === '其他' ? (r.source_system_other || '') : '';
+                document.getElementById('formLocationInfo').value = r.location_info || '';
+                if (r.correction_type === 'batch') document.getElementById('formCorrectionCount').value = r.correction_count != null ? String(r.correction_count) : '';
+                document.getElementById('formReason').value = r.reason || '';
+                document.getElementById('formErrorProofNote').value = isChild ? '' : (r.error_proof_note || '');
+                // 期望完成时间：'YYYY-MM-DD HH:mm:ss' → datetime-local 'YYYY-MM-DDTHH:mm'
+                const ed = String(r.expected_deadline || '');
+                document.getElementById('formExpectedDeadline').value = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}/.test(ed) ? ed.slice(0, 16).replace(' ', 'T') : '';
+                // ── 业务方区（真OA 主单/标准单：现有行可改文字，不增删；自发现/子单隐藏）──
+                const showReq = hasRealOa && !isChild;
+                document.getElementById('requesterSectionGroup').style.display = showReq ? 'block' : 'none';
+                document.getElementById('btnAddRequester').style.display = 'none';
+                if (showReq) {
+                    // 部门回填（E2 M-2 范式：历史部门不在现行下拉时插临时 option，防回填为空被误判"清空"）
+                    const deptSel = document.getElementById('formRequesterDept');
+                    deptSel.value = r.requester_dept || '';
+                    if (r.requester_dept && deptSel.value !== r.requester_dept) {
+                        const opt = document.createElement('option');
+                        opt.id = 'corrHistDeptOpt'; opt.value = r.requester_dept; opt.textContent = r.requester_dept + '（历史部门）';
+                        deptSel.appendChild(opt); deptSel.value = r.requester_dept;
+                    }
+                    // 现有行回填（data-row-id 锚定子表行；createElement+value 设值，沿 codex 51 L-3 无属性逃逸范式）
+                    const list = document.getElementById('requesterList');
+                    list.innerHTML = '';
+                    corrEditCtx.requesters.forEach(rq => {
+                        const rowEl = document.createElement('div');
+                        rowEl.className = 'u-form-row requester-row';
+                        rowEl.style.cssText = 'gap:6px; align-items:center; margin-bottom:6px;';
+                        rowEl.dataset.rowId = String(rq.id);
+                        const nameInput = document.createElement('input');
+                        nameInput.type = 'text'; nameInput.className = 'rq-name'; nameInput.style.flex = '1';
+                        nameInput.placeholder = Number(rq.is_primary) === 1 ? '主业务方姓名（必填）' : '业务方姓名';
+                        nameInput.value = rq.requester_name || '';
+                        const phoneInput = document.createElement('input');
+                        phoneInput.type = 'text'; phoneInput.className = 'rq-phone'; phoneInput.style.flex = '1';
+                        phoneInput.placeholder = '手机号（可选，发钉钉用）';
+                        phoneInput.value = rq.requester_phone || '';
+                        rowEl.appendChild(nameInput); rowEl.appendChild(phoneInput);
+                        const tag = document.createElement('span');
+                        tag.style.cssText = 'width:54px; font-size:12px; color:#9ca3af; text-align:center;';
+                        tag.textContent = Number(rq.is_primary) === 1 ? '主' : '';
+                        rowEl.appendChild(tag);
+                        list.appendChild(rowEl);
+                    });
+                }
+            } catch (e) { showToast('加载修正单失败', 'error'); }
+        }
+        async function submitCorrectionEdit(id) {
+            const v = k => document.getElementById(k).value.trim();
+            const ctx = corrEditCtx || {};
+            const sourceSystem = document.getElementById('formSourceSystem').value;
+            if (!sourceSystem) return showToast('请选择所属系统', 'error');
+            if (sourceSystem === '其他' && !v('formSourceSystemOther')) return showToast('选「其他」时须填写系统说明', 'error');
+            if (!v('formLocationInfo')) return showToast('请填写修正方式', 'error');
+            if (!v('formReason')) return showToast('请填写原因/背景', 'error');
+            const payload = {
+                source_system: sourceSystem,
+                source_system_other: sourceSystem === '其他' ? v('formSourceSystemOther') : undefined,
+                location_info: v('formLocationInfo'),
+                reason: v('formReason'),
+                process_type: v('formProcessType') || null,
+                expected_deadline: (() => { const ed = v('formExpectedDeadline'); if (!ed) return null; return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(ed) ? ed.replace('T', ' ') + ':00' : ed.replace('T', ' '); })(),   // 分钟精度→秒（对齐建单细优 E 口径）；空=null 清空
+            };
+            if (ctx.correctionType === 'batch') {
+                const raw = v('formCorrectionCount');
+                if (!raw) return showToast('批量数据修正必须填写修正条数', 'error');
+                if (!/^[1-9]\d{0,8}$/.test(raw)) return showToast('修正条数须为正整数（1-999999999）', 'error');
+                if (Number(raw) < 2) return showToast('批量数据修正的修正条数须 ≥2（仅 1 条请改用单数据修正）', 'error');
+                payload.correction_count = raw;
+            }
+            if (!ctx.isChild) payload.error_proof_note = v('formErrorProofNote') || null;   // 子单不提交（归主单，后端 409 真闸门）
+            if (ctx.hasRealOa && !ctx.isChild) {
+                payload.requester_dept = document.getElementById('formRequesterDept').value || null;
+                const rows = Array.from(document.querySelectorAll('#requesterList .requester-row'));
+                const requesters = [];
+                for (const rowEl of rows) {
+                    const rid = Number(rowEl.dataset.rowId);
+                    const name = rowEl.querySelector('.rq-name').value.trim();
+                    const phone = rowEl.querySelector('.rq-phone').value.trim();
+                    if (!name) return showToast('业务方姓名不能为空（仅可修改现有行，不支持删除行）', 'error');
+                    requesters.push({ id: rid, name, phone: phone || null });
+                }
+                if (requesters.length) payload.requesters = requesters;
+            }
+            const btn = document.getElementById('btnSubmitCreate');
+            btn.disabled = true;
+            // L-6（codex E3 首审，[[feedback_async_callback_session_token]]）：保存响应也圈进会话令牌——
+            //   请求在途时用户关弹窗/开新建/开编辑 B（均 corrEditSeq++），A 的迟到响应不再关当前弹窗、
+            //   不刷列表、不强开 A 的抽屉（数据已落库，仅放弃本地副作用）。
+            const seq = corrEditSeq;
+            try {
+                const res = await authFetch(`/api/corrections/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                const j = await res.json().catch(() => ({}));
+                if (seq !== corrEditSeq) return;   // 弹窗已关/已切会话：放弃全部本地副作用（数据已落库）
+                if (res.ok) {
+                    closeCreateModal();   // 内部 corrEditSeq++，后续副作用以关闭后基线重新圈定
+                    const postCloseSeq = corrEditSeq;
+                    showToast(j.updated === 0 ? '内容无变化' : '修改已保存', 'success');
+                    await loadList();
+                    if (postCloseSeq !== corrEditSeq) return;   // L-2（二审）：列表刷新期间用户开了新弹窗 → 不强开旧单抽屉
+                    openDrawer(id);
+                } else showToast((j && j.error) || '保存失败', 'error');
+            } catch (e) { if (seq === corrEditSeq) showToast('保存失败', 'error'); }
+            finally { if (seq === corrEditSeq) btn.disabled = false; }   // L-2：仅当前会话仍在时恢复（防旧响应松开新会话在途提交的禁用）；新会话由 openCreateModal 初始化恢复
+        }
+        // E3 待修复数据附件删除（仅 error_proof；后端 DELETE 为真闸门：类型/权限/非终态/主单锚定）
+        async function delCorrErrProof(aid, cid) {
+            if (!confirm('删除该待修复数据附件？删除后不可恢复。')) return;
+            try {
+                const res = await authFetch(`/api/corrections/${cid}/attachments/${aid}`, { method: 'DELETE' });
+                const j = await res.json().catch(() => ({}));
+                // 末次审 L-1：仅当前仍在看该单才刷新抽屉——删除请求期间用户已切往他单/关闭时不强拉回旧单（沿 U1 drawerTargetId 导航隔离语义）
+                if (res.ok) { showToast('附件已删除', 'success'); if (Number(drawerTargetId) === Number(cid)) openDrawer(cid); }
+                else showToast((j && j.error) || '删除失败', 'error');
+            } catch (e) { showToast('删除失败', 'error'); }
+        }
         // B2（建单字段体系优化 §2.1/§2.3/§2.4）：OA 流程号输入驱动业务方录入区 + OA 截图上传区显隐——
         //   填了真实数字 → 展开两区（真OA模式：业务方自由填 + 截图强制）；留空 → 收起（自发现模式：后端静默以建单人为业务方，免截图）。
         //   纯 UX 便利，后端仍是真闸门（静默覆盖业务方 / OA_PROOF_REQUIRED），隐藏区域的残留值不影响后端判定。
@@ -1504,6 +1822,9 @@
             return fd;
         }
         async function submitCorrection() {
+            // E3：编辑模式分流（editCorrId 非空 → PUT 保存修改，独立提交路径不混建单 multipart/两步上传）
+            const editCorrIdVal = document.getElementById('editCorrId').value;
+            if (editCorrIdVal) return submitCorrectionEdit(Number(editCorrIdVal));
             const v = id => document.getElementById(id).value.trim();
             const sourceSystem = document.getElementById('formSourceSystem').value;
             const correctionType = document.querySelector('input[name="corrType"]:checked').value;
@@ -1711,6 +2032,7 @@
             document.getElementById('formCompleteSingleNote').value = '';
             document.getElementById('formBatchNote').value = '';
             document.getElementById('formCompleteBatchFiles').value = '';
+            renderPickedChips('formCompleteFiles', 'completeFilesPicked', 5); renderPickedChips('formCompleteBatchFiles', 'completeBatchFilesPicked', 5);   // U1 清已选 chips 残留
             document.getElementById('completeReworkHint').style.display = isRework ? 'block' : 'none';   // 返工双必填提示（Commit D §六）
             // 截图要求随返工动态标（v1.97.1）：返工 single 必传 / 普通 single 选填（文字始终必填，标签静态）
             document.getElementById('completeSingleProofLabel').innerHTML = isRework
@@ -1782,6 +2104,7 @@
             document.getElementById('formResubmitSingleNote').value = '';
             document.getElementById('formResubmitNote').value = '';
             document.getElementById('formResubmitBatchFiles').value = '';
+            renderPickedChips('formResubmitFiles', 'resubmitFilesPicked', 5); renderPickedChips('formResubmitBatchFiles', 'resubmitBatchFilesPicked', 5);   // U1 清已选 chips 残留
             document.getElementById('resubmitReworkHint').style.display = isRework ? 'block' : 'none';   // 返工双必填提示（Commit D §六）
             // 截图要求随返工动态标（v1.97.1）：返工 single 必传 / 普通 single 选填（重修说明始终必填，标签静态）
             document.getElementById('resubmitSingleProofLabel').innerHTML = isRework
@@ -1921,6 +2244,7 @@
         //   + 缩略图/占位预览。校验对齐后端 multer limits（corrections.js：files:5 / fileSize:20MB）。
         //   objectURL 不 revoke 对齐数据协作 codex 27 #7 拍板（弹窗 ≤5 文件小图、关闭刷新自动 GC）。
         let corrAttachFiles = [];
+        let corrAttachSession = 0;   // H-1（codex U1 首审）：弹窗会话令牌，openAttach 每次自增；旧响应令牌不符即不碰弹窗状态
         const CORR_ATTACH_MAX = 5;
         const CORR_ATTACH_MAX_SIZE = 20 * 1024 * 1024;
         const CORR_ATTACH_EXTS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'pdf', 'xlsx', 'xls'];
@@ -1975,67 +2299,87 @@
                 </div>`;
             }).join('');
         }
-        function openAttach(id) {
+        // U1（2026-07-23 弹窗式统一）：attachModal 泛化两用——fix_proof=补充附件（FIXED/REFIXED 入口）/
+        //   error_proof=上传待修复数据（详情页早期态入口，替代原内联裸 input 两步式）。type 存 hidden #attachType
+        //   随 DOM 持态（与 attachCorrId 同范式），M-3 竞态守卫连 type 一起比对。
+        function openAttach(id, type) {
+            const t = type === 'error_proof' ? 'error_proof' : 'fix_proof';
+            const isErr = t === 'error_proof';
             document.getElementById('attachCorrId').value = id;
-            document.getElementById('formAttachFiles').value = '';
+            document.getElementById('attachType').value = t;
+            document.getElementById('attachModalTitle').textContent = isErr ? '上传待修复数据' : '补充附件';
+            document.getElementById('attachModalHint').textContent = isErr
+                ? '待修复数据附件（表格清单为主，图片/PDF/xlsx）。单次最多 5 个文件、每个 ≤20MB；仅补充材料，不改变状态。'
+                : '仅补充证据留存，不改变状态、不计入提交次数。单次最多 5 个文件、每个 ≤20MB。';
+            document.getElementById('attachModalLabel').innerHTML = (isErr ? '待修复数据附件' : '补充附件') + ' <span class="u-req">*</span>';
+            corrAttachSession++;   // H-1：新会话开始，令旧上传响应的清理逻辑失效
+            const fileInput = document.getElementById('formAttachFiles');
+            fileInput.value = '';
+            // H-2（codex U1 复审）：控件状态与数据同属会话生命周期——新会话起点双控件都归位
+            //   （旧请求挂起中重开时，按钮若不复位新会话没法提交）
+            fileInput.disabled = false;
+            document.getElementById('btnSubmitAttach').disabled = false;
             corrAttachFiles = [];
             renderCorrAttachPreview();
             document.getElementById('attachModal').classList.add('open');
         }
         async function submitAttachments() {
             const id = document.getElementById('attachCorrId').value;
+            const type = document.getElementById('attachType').value === 'error_proof' ? 'error_proof' : 'fix_proof';
             if (!corrAttachFiles.length) return showToast('请选择文件', 'error');
+            const session = corrAttachSession;   // H-1：捕获本次弹窗会话令牌
             const fd = new FormData();
+            if (type === 'error_proof') fd.append('attachment_type', 'error_proof');   // fix_proof 走后端缺省，不带字段保持原契约不变
             for (const f of corrAttachFiles) fd.append('files', f);
             const btn = document.getElementById('btnSubmitAttach'); btn.disabled = true;
+            const fileInput = document.getElementById('formAttachFiles');
+            fileInput.disabled = true;   // H-1：上传中禁选择，防 in-flight 期间追加的文件被成功回调误清
             try {
                 const res = await authFetch(`/api/corrections/${id}/attachments`, { method: 'POST', body: fd });
                 const data = await res.json().catch(() => ({}));
-                if (!res.ok) { showToast(data.error || '补充失败', 'error'); return; }
-                showToast('附件已补充', 'success');
-                // codex（数据修正 UX 审）M-3：大附件上传窗口内用户可能关弹窗、为另一单重开并选新文件——
-                //   旧响应返回时若无条件清数组/关弹窗/openDrawer(旧id)，会清空新弹窗的选择并跳错单。
-                //   仅当上下文仍匹配（同一单 && 弹窗仍开）才执行清理与跳转；不匹配只 toast 成功+刷列表。
-                const stillSame = document.getElementById('attachCorrId').value === id
+                if (!res.ok) {
+                    // error_proof 子单 409 引导主单（原 uploadErrorProof 逻辑随迁）
+                    if (data.code === 'ERROR_PROOF_ON_MASTER_ONLY' && data.master_id) showToast(`待修复数据只能传到主单 #${data.master_id}`, 'warning', 4500);
+                    else showToast(data.error || (type === 'error_proof' ? '上传失败' : '补充失败'), 'error');
+                    return;
+                }
+                showToast(type === 'error_proof' ? '待修复数据已上传' : '附件已补充', 'success');
+                // H-1（codex U1 首审，取代 v1.124.0 M-3 的条件比对）：id+type+open 比对无法区分"同单同类型
+                //   重开的新会话"——旧响应会误清新选择。改会话令牌：openAttach 每次自增，令牌不符即不碰弹窗。
+                const sameSession = session === corrAttachSession
                     && document.getElementById('attachModal').classList.contains('open');
-                if (stillSame) {
+                if (sameSession) {
                     corrAttachFiles = [];
                     renderCorrAttachPreview();
                     closeModal('attachModal');
                 }
                 await loadList();
-                if (stillSame) openDrawer(id);
-            } catch (e) { showToast('补充失败', 'error'); } finally { btn.disabled = false; }
+                // M-1（codex U1 首审）：抽屉刷新与弹窗清理拆开判断——详情抽屉仍显示本单就就地刷新
+                //   （保留原内联入口"上传成功抽屉必刷新"语义），但不强制打开已被用户关闭/切走的抽屉。
+                // M-3（codex U1 复审）：比对同步维护的 drawerTargetId（导航意图）而非滞后的 currentDetail
+                //   （后者是 fetch 成功后才赋值的缓存，切单加载期间仍指旧单，会误刷回旧单）。
+                const drawerOnSame = Number(drawerTargetId) === Number(id)
+                    && document.getElementById('drawer').classList.contains('open');
+                if (drawerOnSame) openDrawer(id);
+            } catch (e) { showToast(type === 'error_proof' ? '上传失败' : '补充失败', 'error'); }   // L-2：catch 文案随 type
+            finally {
+                // H-2（codex U1 复审）：仅当前会话可复位共享控件——旧请求的 finally 若无条件复位，
+                //   会在新会话请求在途时提前启用按钮/输入，导致重复提交或新选择被误清。
+                if (session === corrAttachSession) { btn.disabled = false; fileInput.disabled = false; }
+            }
         }
-        // 2026-07-23 上传交互优化：内联补传入口加已选文件列表预览（纯展示 input.files，重选即覆盖——
-        //   低频路径不引入数组状态管理；主入口 attachModal 已是完整追加式+缩略图预览）
-        function renderErrProofPicked(id) {
-            const input = document.getElementById('errProofFiles_' + id);
-            const wrap = document.getElementById('errProofPicked_' + id);
+        // U1（2026-07-23 弹窗式统一）：裸 input 已选文件 chip 预览（纯展示 input.files，重选即覆盖）。
+        //   用于完成/重修弹窗与建单表单附件区——这些入口文件随表单一次提交、无独立"上传"步，不引入数组状态；
+        //   主入口 attachModal 走 corrAttachFiles 数组范式。原 renderErrProofPicked/uploadErrorProof（内联两步式）
+        //   已随内联入口退役，error_proof 补传统一走 openAttach(id, 'error_proof') 弹窗。
+        function renderPickedChips(inputId, wrapId, max) {
+            const input = document.getElementById(inputId);
+            const wrap = document.getElementById(wrapId);
             if (!input || !wrap) return;
             const files = Array.from(input.files || []);
             wrap.innerHTML = files.map(f =>
                 `<div style="font-size:11px;color:#166534;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:4px;padding:2px 8px;margin-top:2px;display:inline-block;margin-right:4px;">📎 ${escapeHtml(f.name)} <span style="color:#9ca3af;">(${(f.size / 1024).toFixed(1)} KB)</span></div>`
-            ).join('') + (files.length > 5 ? '<div style="font-size:11px;color:#dc2626;margin-top:2px;">⚠️ 最多 5 个文件，请重新选择</div>' : '');
-        }
-        // L3b 详情页补传待修复数据（§6.7：建单人/admin，早期态；attachment_type=error_proof，子单后端 409 引导主单）
-        async function uploadErrorProof(id) {
-            const input = document.getElementById('errProofFiles_' + id);
-            if (!input || !input.files.length) return showToast('请选择待修复数据文件', 'error');
-            if (input.files.length > 5) return showToast('待修复数据附件最多 5 个文件', 'error');   // codex 52 M-2：前端早拦超限
-            const fd = new FormData(); fd.append('attachment_type', 'error_proof');
-            for (const f of input.files) fd.append('files', f);
-            try {
-                const res = await authFetch(`/api/corrections/${id}/attachments`, { method: 'POST', body: fd });
-                const data = await res.json().catch(() => ({}));
-                if (!res.ok) {
-                    if (data.code === 'ERROR_PROOF_ON_MASTER_ONLY' && data.master_id) showToast(`待修复数据只能传到主单 #${data.master_id}`, 'warning', 4500);
-                    else showToast(data.error || '上传失败', 'error');
-                    return;
-                }
-                showToast('待修复数据已上传', 'success');
-                await loadList(); openDrawer(id);   // codex 52 M-1：与 submitAttachments 范式一致（openDrawer 本就 re-fetch 详情，附件必刷新）
-            } catch (e) { showToast('上传失败', 'error'); }
+            ).join('') + (max && files.length > max ? `<div style="font-size:11px;color:#dc2626;margin-top:2px;">⚠️ 最多 ${max} 个文件，请重新选择</div>` : '');
         }
 
         // ================= L5 追加关联单（§6.2 / D-9，admin 主单详情触发）=================

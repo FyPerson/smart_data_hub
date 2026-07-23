@@ -1797,6 +1797,308 @@ router.post('/:id/reopen-rework', authenticateToken, requireCorrectionSchemaRead
     }
 });
 
+// ── PUT /:id 建单人编辑录入信息（E3，2026-07-23 四模块建单人编辑权限）─────────────────────
+//   权限 = admin ∨ 建单人；非终态可编辑（ARCHIVED/REJECTED/VOIDED 锁）。可编辑字段 = 建单录入集：
+//   process_type / source_system(+other) / location_info / correction_count / reason / expected_deadline /
+//   error_proof_note + requester_dept + requesters 现有行文字（姓名/电话，仅改现有行不增删——每行带完成
+//   通知四件套，行的增删动通知语义，拍板不放开）。**OA 号不进白名单**（OA 截图铁律 + datafix 占位语义，
+//   录错走作废重建）；correction_type 不可改（single/batch 决定交付闸门）。
+//   范式：⭐服务端比对制留痕（E2 拍板 H-1：归一→与现值比对→仅真变更校验+写+留痕；全同值 updated:0
+//   no-op 不写 history）+ 输入面四防线（body 校验/必填拒 null/可空 null 清空分层/外层 try 兜底）+
+//   reassign 事务范式（BEGIN IMMEDIATE 内读真实 row + 权限/状态守卫 + changes 检查；history 同态留痕
+//   from=to，非状态机转移）。跨系统子单：可编辑自身结构字段（source_system/location_info/count/reason/
+//   process_type/expected_deadline），业务方行与 error_proof_note 归主单（对齐附件 ERROR_PROOF_ON_MASTER_ONLY）。
+//   ⚠️ 快照语义：跨系统子单建单时复制的主单兼容列（requester_name/phone/dept 等）不随主单编辑联动——
+//   子表（主单 requesters）是完成通知真相源，兼容列仅供列表显示，保持建单时快照（与既有 createLinkedChild 语义一致）。
+const CORRECTION_EDITABLE_STATUSES = ['PENDING_ASSIGN', 'ASSIGNED_PENDING_ESTIMATE', 'IN_PROGRESS', 'FIXED', 'REFIXED'];
+router.put('/:id', authenticateToken, requireCorrectionSchemaReady, correctionIdGuard, async (req, res) => {
+    let transactionActive = false;
+    try {
+        const id = Number(req.params.id);
+        // 防线①：body 必须是普通对象（数组/原始值直接 400，防 for...of 展开等隐性行为）
+        if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
+            return res.status(400).json({ error: '请求体格式错误', code: 'INVALID_BODY' });
+        }
+        const b = req.body;
+        const actor = correctionActor(req);
+        const isAdmin = actor.role === 'admin';
+
+        await dbRunAsync('BEGIN IMMEDIATE');
+        transactionActive = true;
+        try {
+            // 事务内读真实 row（reassign 范式：BEGIN IMMEDIATE 已抢写锁，读到即稳定，无 TOCTOU 窗口）
+            const row = await dbGetAsync('SELECT * FROM correction_requests WHERE id = ?', [id]);
+            if (!row) { await dbRunAsync('ROLLBACK'); transactionActive = false; return res.status(404).json({ error: '修正单不存在' }); }
+            const isCreator = Number(row.created_by) === actor.id && actor.id > 0;
+            if (!isAdmin && !isCreator) {
+                await dbRunAsync('ROLLBACK'); transactionActive = false;
+                return res.status(403).json({ error: '权限不足：仅建单人本人或管理员可编辑', code: 'NOT_AUTHORIZED_FOR_EDIT' });
+            }
+            if (row.voided_at) {
+                await dbRunAsync('ROLLBACK'); transactionActive = false;
+                return res.status(409).json({ error: '修正单已作废（只读留痕），不可编辑', code: 'VOIDED_LOCKED' });
+            }
+            if (!CORRECTION_EDITABLE_STATUSES.includes(row.status)) {
+                await dbRunAsync('ROLLBACK'); transactionActive = false;
+                return res.status(409).json({ error: `当前状态「${row.status}」为终态，不可编辑`, code: 'TERMINAL_STATE_LOCKED' });
+            }
+            const isChild = row.correction_group_id != null && Number(row.correction_group_id) !== Number(row.id);
+            // 自发现单判定：OA 为 datafix 占位号（建单留空 OA 由 A 块补号）→ 业务方=建单人（后端建单时静默强制），编辑不可改业务方
+            const isSelfDiscovered = !row.oa_number || /^datafix-\d+$/i.test(String(row.oa_number));
+
+            const fields = [];            // 主表 SET 片段
+            const values = [];
+            const changedLabels = [];
+            let providedCount = 0;        // 显式提供的可编辑字段数（区分"没提供 400"与"提供但全同值 200 no-op"）
+            const bail = async (status, payload) => { await dbRunAsync('ROLLBACK'); transactionActive = false; return res.status(status).json(payload); };
+            const pushField = (frag, val, label) => { fields.push(frag); values.push(val); changedLabels.push(label); };
+            const normOpt = (v) => (v === null ? null : (typeof v === 'string' ? (v.trim() || null) : undefined));   // 可空字段归一（undefined=类型非法）
+
+            // ── process_type（可空 ≤100，镜像 POST）──
+            if (b.process_type !== undefined) {
+                providedCount++;
+                const pt = normOpt(b.process_type);
+                if (pt === undefined) return bail(400, { error: '流程类型格式错误', code: 'PROCESS_TYPE_INVALID' });
+                const cur = row.process_type == null ? null : (String(row.process_type).trim() || null);
+                if (pt !== cur) {
+                    if (pt !== null && pt.length > 100) return bail(400, { error: '流程类型过长（≤100 字）', code: 'PROCESS_TYPE_TOO_LONG' });
+                    pushField('process_type = ?', pt, '流程类型');
+                }
+            }
+            // ── source_system(+other) 成对比对（镜像 POST 白名单 + 「其他」联动；不变量：非「其他」时 other 恒 NULL）──
+            if (b.source_system !== undefined || b.source_system_other !== undefined) {
+                providedCount++;
+                let effSys = row.source_system;
+                if (b.source_system !== undefined) {
+                    if (typeof b.source_system !== 'string' || !b.source_system.trim()) return bail(400, { error: '所属系统必填', code: 'INVALID_SOURCE_SYSTEM' });
+                    effSys = b.source_system.trim();
+                    if (!CORRECTION_SOURCE_SYSTEMS.includes(effSys)) return bail(400, { error: '所属系统非法', code: 'INVALID_SOURCE_SYSTEM', allowed: CORRECTION_SOURCE_SYSTEMS });
+                }
+                let effOther = null;
+                if (effSys === '其他') {
+                    if (b.source_system_other !== undefined) {
+                        if (typeof b.source_system_other !== 'string' || !b.source_system_other.trim()) {
+                            return bail(400, { error: '所属系统选「其他」时必须填写补充说明', code: 'SOURCE_SYSTEM_OTHER_REQUIRED' });
+                        }
+                        effOther = b.source_system_other.trim();
+                    } else {
+                        effOther = row.source_system_other == null ? null : (String(row.source_system_other).trim() || null);
+                        if (!effOther) return bail(400, { error: '所属系统选「其他」时必须填写补充说明', code: 'SOURCE_SYSTEM_OTHER_REQUIRED' });
+                    }
+                }
+                const curSys = row.source_system;
+                const curOther = row.source_system_other == null ? null : (String(row.source_system_other).trim() || null);
+                if (effSys !== curSys || effOther !== curOther) {
+                    // 跨系统组内系统互异守卫（镜像建单 CROSS_SYSTEM_SAME_SYSTEM，codex 57 M-2）：改系统不得与组内其他成员撞系统
+                    if (row.correction_group_id != null) {
+                        const members = await dbAllAsync(
+                            `SELECT id, source_system, source_system_other FROM correction_requests
+                              WHERE correction_group_id = ? AND id != ? AND voided_at IS NULL`,
+                            [row.correction_group_id, id]
+                        );
+                        for (const m of (members || [])) {
+                            if (isSameCorrectionSystem(effSys, effOther, m.source_system, m.source_system_other)) {
+                                return bail(400, { error: `所属系统不能与关联组成员 #${m.id} 相同（跨系统组内系统须互异）`, code: 'CROSS_SYSTEM_SAME_SYSTEM' });
+                            }
+                        }
+                    }
+                    if (effSys !== curSys) pushField('source_system = ?', effSys, '所属系统');
+                    if (effOther !== curOther) pushField('source_system_other = ?', effOther, '其他系统说明');
+                }
+            }
+            // ── location_info（必填，镜像 POST）──
+            if (b.location_info !== undefined) {
+                providedCount++;
+                if (typeof b.location_info !== 'string' || !b.location_info.trim()) return bail(400, { error: '修正方式必填', code: 'LOCATION_INFO_REQUIRED' });
+                const li = b.location_info.trim();
+                if (li !== String(row.location_info || '').trim()) pushField('location_info = ?', li, '修正方式');
+            }
+            // ── correction_count（single 恒 1 锁定；batch 必为 ≥2 正整数，镜像 POST 正则口径）──
+            if (b.correction_count !== undefined) {
+                providedCount++;
+                // L-5（codex E3 首审）：字段级类型面收严——仅收 string/number/null，拒数组/对象
+                //   （String([8])==='8' 会让嵌套数组穿过输入防线，与顶层 INVALID_BODY 口径不一致）。
+                if (b.correction_count !== null && typeof b.correction_count !== 'string' && typeof b.correction_count !== 'number') {
+                    return bail(400, { error: '修正条数格式错误', code: 'INVALID_CORRECTION_COUNT' });
+                }
+                const rawCount = b.correction_count === null ? '' : String(b.correction_count).trim();
+                if (row.correction_type === 'single') {
+                    if (rawCount !== '1') return bail(400, { error: '单数据修正的修正条数固定为 1，不可修改', code: 'COUNT_LOCKED_FOR_SINGLE' });
+                    // rawCount==='1' 与现值恒同 → 无变更，不 push
+                } else {
+                    if (!/^[1-9]\d{0,8}$/.test(rawCount)) return bail(400, { error: '修正条数须为正整数（1-999999999）', code: 'INVALID_CORRECTION_COUNT' });
+                    const cnt = Number(rawCount);
+                    if (cnt !== Number(row.correction_count)) {
+                        if (cnt < 2) return bail(400, { error: '批量数据修正的修正条数须 ≥2（仅 1 条请改用单数据修正）', code: 'BATCH_COUNT_MIN' });
+                        pushField('correction_count = ?', cnt, '修正条数');
+                    }
+                }
+            }
+            // ── reason（必填，镜像 POST REASON_REQUIRED）──
+            if (b.reason !== undefined) {
+                providedCount++;
+                if (typeof b.reason !== 'string' || !b.reason.trim()) return bail(400, { error: '原因/背景必填', code: 'REASON_REQUIRED' });
+                const rs = b.reason.trim();
+                if (rs !== String(row.reason || '').trim()) pushField('reason = ?', rs, '原因/背景');
+            }
+            // ── expected_deadline（可空：null/'' 清空；非空须合法 datetime，镜像 normalizeCorrectionDatetime）──
+            if (b.expected_deadline !== undefined) {
+                providedCount++;
+                let ed = null;
+                if (b.expected_deadline !== null && String(b.expected_deadline).trim() !== '') {
+                    if (typeof b.expected_deadline !== 'string') return bail(400, { error: '期望完成时间格式错误', code: 'INVALID_EXPECTED_DEADLINE' });
+                    ed = normalizeCorrectionDatetime(b.expected_deadline);
+                    if (!ed) return bail(400, { error: '期望完成时间非法（应为 YYYY-MM-DD HH:mm[:ss] 且真实存在）', code: 'INVALID_EXPECTED_DEADLINE' });
+                }
+                const cur = row.expected_deadline == null ? null : String(row.expected_deadline);
+                if (ed !== cur) pushField('expected_deadline = ?', ed, '期望完成时间');
+            }
+            // ── error_proof_note（可空 ≤1000；子单归主单，对齐附件 ERROR_PROOF_ON_MASTER_ONLY）──
+            if (b.error_proof_note !== undefined) {
+                providedCount++;
+                const note = normOpt(b.error_proof_note);
+                if (note === undefined) return bail(400, { error: '待修复数据说明格式错误', code: 'ERROR_PROOF_NOTE_INVALID' });
+                const cur = row.error_proof_note == null ? null : (String(row.error_proof_note).trim() || null);
+                if (note !== cur) {
+                    if (isChild) return bail(409, { error: '待修复数据说明归关联组主单，请在主单编辑', code: 'ERROR_PROOF_ON_MASTER_ONLY' });
+                    if (note !== null && note.length > 1000) return bail(400, { error: '错误证明说明过长（≤1000 字）', code: 'ERROR_PROOF_NOTE_TOO_LONG' });
+                    pushField('error_proof_note = ?', note, '待修复数据说明');
+                }
+            }
+            // ── requester_dept（可空；自发现单/子单锁定——自发现业务方=建单人系统固定、子单业务方归主单快照）──
+            if (b.requester_dept !== undefined) {
+                providedCount++;
+                const dept = normOpt(b.requester_dept);
+                if (dept === undefined) return bail(400, { error: '业务方部门格式错误', code: 'REQUESTER_DEPT_INVALID' });
+                const cur = row.requester_dept == null ? null : (String(row.requester_dept).trim() || null);
+                if (dept !== cur) {
+                    if (isSelfDiscovered) return bail(400, { error: '自发现单（留空 OA）业务方信息由系统固定为建单人，不可编辑', code: 'SELF_DISCOVERED_REQUESTER_LOCKED' });
+                    if (isChild) return bail(409, { error: '业务方信息归关联组主单，请在主单编辑', code: 'REQUESTERS_ON_MASTER_ONLY' });
+                    pushField('requester_dept = ?', dept, '业务方部门');
+                }
+            }
+            // ── requesters 现有行文字编辑（仅改现有行姓名/电话，不增删；主业务方行变更同步主表兼容列）──
+            const requesterUpdates = [];   // [{rowId, name, phone, labels:[]}]
+            if (b.requesters !== undefined) {
+                providedCount++;
+                if (!Array.isArray(b.requesters)) return bail(400, { error: '业务方列表格式错误（须为数组）', code: 'REQUESTERS_INVALID' });
+                if (isChild) return bail(409, { error: '业务方信息归关联组主单，请在主单编辑', code: 'REQUESTERS_ON_MASTER_ONLY' });
+                const curRows = await dbAllAsync(
+                    'SELECT id, requester_name, requester_phone, is_primary, seq FROM correction_requesters WHERE correction_request_id = ? ORDER BY seq',
+                    [id]
+                );
+                const rowById = new Map((curRows || []).map(r => [Number(r.id), r]));
+                const seenIds = new Set();
+                for (const item of b.requesters) {
+                    if (!item || typeof item !== 'object' || Array.isArray(item)) return bail(400, { error: '业务方行格式错误', code: 'REQUESTERS_INVALID' });
+                    const rowId = Number(item.id);
+                    if (!Number.isInteger(rowId) || rowId <= 0) return bail(400, { error: '业务方行 ID 非法', code: 'REQUESTER_ROW_ID_INVALID' });
+                    if (seenIds.has(rowId)) return bail(400, { error: `业务方行 #${rowId} 重复提交`, code: 'REQUESTER_ROW_DUPLICATE' });
+                    seenIds.add(rowId);
+                    const cur = rowById.get(rowId);
+                    if (!cur) return bail(400, { error: '业务方行不存在或不属于本单（仅可修改现有行，不支持新增/删除）', code: 'REQUESTER_ROW_NOT_FOUND' });
+                    if (typeof item.name !== 'string' || !item.name.trim()) return bail(400, { error: '业务方姓名必填', code: 'REQUESTER_NAME_REQUIRED' });
+                    const name = item.name.trim();
+                    if (name.length > 100) return bail(400, { error: '业务方姓名过长（≤100 字）', code: 'REQUESTER_NAME_TOO_LONG' });
+                    const curName = String(cur.requester_name || '').trim();
+                    const curPhone = cur.requester_phone == null ? null : (String(cur.requester_phone).trim() || null);
+                    // MED-2（codex E3 首审）：phone 分层对齐顶层字段比对制——未提供=不修改（保持现值）/
+                    //   显式 null·空串=清空 / 字符串=归一后覆盖。原实现"缺省即 null"会把仅改姓名的请求静默清空手机号。
+                    let phone;
+                    if (item.phone === undefined) phone = curPhone;
+                    else if (item.phone === null) phone = null;
+                    else if (typeof item.phone !== 'string') return bail(400, { error: '业务方手机号格式错误', code: 'REQUESTER_PHONE_INVALID' });
+                    else {
+                        phone = item.phone.trim() || null;
+                        if (phone && phone.length > 50) return bail(400, { error: '业务方手机号过长（≤50 字）', code: 'REQUESTER_PHONE_TOO_LONG' });
+                    }
+                    if (name !== curName || phone !== curPhone) {
+                        if (isSelfDiscovered) return bail(400, { error: '自发现单（留空 OA）业务方信息由系统固定为建单人，不可编辑', code: 'SELF_DISCOVERED_REQUESTER_LOCKED' });
+                        const labels = [];
+                        const phoneChanged = phone !== curPhone;
+                        if (name !== curName) labels.push(`业务方#${cur.seq}姓名`);
+                        if (phoneChanged) labels.push(`业务方#${cur.seq}电话`);
+                        requesterUpdates.push({ rowId, name, phone, isPrimary: Number(cur.is_primary) === 1, phoneChanged, labels });
+                        changedLabels.push(...labels);
+                        // 主业务方行 → 同步主表兼容冗余列（写读同源：列表/详情显示 requester_name/phone 来自主表）
+                        if (Number(cur.is_primary) === 1) {
+                            if (name !== String(row.requester_name || '').trim()) { fields.push('requester_name = ?'); values.push(name); }
+                            const curMainPhone = row.requester_phone == null ? null : (String(row.requester_phone).trim() || null);
+                            if (phone !== curMainPhone) { fields.push('requester_phone = ?'); values.push(phone); }
+                            // HIGH-1（codex E3 首审，镜像 reassign 重置开发通知四件套范式）：主业务方手机号真变更 →
+                            //   主表「通知业务方·预计」四件套+已读一并重置——否则 notify-estimate 因旧 sent 短路，
+                            //   新手机号收不到通知且已读状态错误归属旧收件人。
+                            // L-1（codex E3 二审）：主表 completion_notify_* 兼容列同步重置——notify-done 对主业务方
+                            //   行会回写主表兼容列（归档弹窗读主表判"未发完成通知"提示），只重置子表会让归档提示误隐藏。
+                            if (phoneChanged) {
+                                fields.push(`requester_notify_status = 'not_sent'`, 'requester_notified_at = NULL',
+                                    'requester_notify_message_key = NULL', 'requester_notify_error = NULL', 'requester_read_at = NULL');
+                                fields.push(`completion_notify_status = 'not_sent'`, 'completion_notified_at = NULL',
+                                    'completion_notify_message_key = NULL', 'completion_notify_error = NULL', 'completion_read_at = NULL');
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (providedCount === 0) return bail(400, { error: '无更新字段', code: 'NO_EDITABLE_FIELDS' });
+            if (fields.length === 0 && requesterUpdates.length === 0) {
+                // 比对制全同值 no-op：不写主表、不写留痕（审计只记真变更）
+                await dbRunAsync('ROLLBACK'); transactionActive = false;
+                return res.json({ id, updated: 0 });
+            }
+
+            // 主表 UPDATE（双条件 WHERE 复校非终态+归属，changes 检查——事务内读已稳定，此为范式级第二道防线）
+            if (fields.length > 0) {
+                const guard = isAdmin
+                    ? ` WHERE id = ? AND voided_at IS NULL AND status IN (${CORRECTION_EDITABLE_STATUSES.map(() => '?').join(',')})`
+                    : ` WHERE id = ? AND created_by = ? AND voided_at IS NULL AND status IN (${CORRECTION_EDITABLE_STATUSES.map(() => '?').join(',')})`;
+                const guardParams = isAdmin ? [id, ...CORRECTION_EDITABLE_STATUSES] : [id, actor.id, ...CORRECTION_EDITABLE_STATUSES];
+                const upd = await dbRunAsync(`UPDATE correction_requests SET ${fields.join(', ')}${guard}`, [...values, ...guardParams]);
+                if (!upd || upd.changes !== 1) return bail(409, { error: '修正单状态或归属已变更，编辑未生效，请刷新重试', code: 'EDIT_NOT_APPLIED' });
+            }
+            // 业务方行 UPDATE（逐行 changes 检查）。HIGH-1：手机号真变更的行连带重置该行完成通知
+            //   四件套+已读（notify-done 按行发送/短路判 sent+message_key，旧状态留着会把旧收件人的
+            //   已发/已读错误归属到新手机号）；仅改姓名不重置（收件人身份锚=手机号，同人改名不重发）。
+            let anyPhoneReset = false;
+            for (const u of requesterUpdates) {
+                const r2 = await dbRunAsync(
+                    u.phoneChanged
+                        ? `UPDATE correction_requesters
+                              SET requester_name = ?, requester_phone = ?,
+                                  completion_notify_status = 'not_sent', completion_notified_at = NULL,
+                                  completion_notify_message_key = NULL, completion_notify_error = NULL, completion_read_at = NULL
+                            WHERE id = ? AND correction_request_id = ?`
+                        : 'UPDATE correction_requesters SET requester_name = ?, requester_phone = ? WHERE id = ? AND correction_request_id = ?',
+                    [u.name, u.phone, u.rowId, id]
+                );
+                if (!r2 || r2.changes !== 1) return bail(409, { error: '业务方行已变更，编辑未生效，请刷新重试', code: 'EDIT_NOT_APPLIED' });
+                if (u.phoneChanged) anyPhoneReset = true;
+            }
+            // history 同态留痕（from=to=当前状态，非状态机转移；reason 记变更字段清单，与 UPDATE 同事务）
+            await dbRunAsync(
+                `INSERT INTO correction_status_history (correction_request_id, from_status, to_status, reason, operator_id, operator_name)
+                 VALUES (?, ?, ?, ?, ?, ?)`,
+                [id, row.status, row.status,
+                 `编辑录入信息：${changedLabels.join('、')}${anyPhoneReset ? '（业务方电话变更，相关通知状态已重置）' : ''}`.slice(0, 500),
+                 actor.id, actor.name]
+            );
+            await dbRunAsync('COMMIT');
+            transactionActive = false;
+            logger.info(`用户 ${actor.name} 编辑数据修正单 #${id} 录入信息（${changedLabels.join('、')}）`);
+            return res.json({ id, updated: changedLabels.length });
+        } catch (txErr) {
+            if (transactionActive) { try { await dbRunAsync('ROLLBACK'); } catch (_) {} transactionActive = false; }
+            throw txErr;
+        }
+    } catch (err) {
+        // 防线④：外层兜底（async handler throw 不再有 Express 同步兜底，必须自接防请求悬挂）
+        if (transactionActive) { try { await dbRunAsync('ROLLBACK'); } catch (_) {} transactionActive = false; }
+        logger.error('编辑数据修正单失败:', err && err.message);
+        if (!res.headersSent) return res.status(500).json({ error: (err && err.message) || '编辑失败' });
+    }
+});
+
 // ── GET /api/corrections 列表（最小版，§7.1 可见性 + G-14 软删过滤；时长/积压筛选留 F）────────
 router.get('/', authenticateToken, requireCorrectionSchemaReady, async (req, res) => {
     try {
@@ -1807,15 +2109,17 @@ router.get('/', authenticateToken, requireCorrectionSchemaReady, async (req, res
         // 默认过滤作废（G-14）；include_voided=1 仅 admin 可查作废（细优①收紧去 publisher，MS-L1）
         const includeVoided = req.query.include_voided === '1' && role === 'admin';   // 细优①：含已作废仅 admin（收紧去 publisher；前端 canViewVoided 同步，写读同源）
         if (!includeVoided) where.push('voided_at IS NULL');
-        // 可见性最小版（§7.1）：admin/publisher 全部；其余（user/viewer）仅 assigned_to=self。F/G 再细化 viewer 只读惯例。
+        // 可见性最小版（§7.1）：admin/publisher 全部；其余（user/viewer）assigned_to=self ∨ created_by=self。
+        //   created_by=self 为 E3 补齐（codex E3 首审 M-3）：详情 GET /:id 一直允许 isCreator 查看，列表却查不到
+        //   自己创建的未指派/派他人单——建单人编辑契约落地后该裂缝会让编辑入口只能靠深链，故列表与详情可见性对齐。
         if (role !== 'admin' && role !== 'publisher') {
             // 路线 B：白名单对接人额外可见其经手的 relay 单（全生命周期非作废）；移出白名单即失去此特权（含白名单判定）。
             if (isCorrectionRelayWhitelisted(uid)) {
-                where.push('(assigned_to = ? OR relay_notified_user_id = ?)');
-                params.push(uid, uid);
+                where.push('(assigned_to = ? OR relay_notified_user_id = ? OR created_by = ?)');
+                params.push(uid, uid, uid);
             } else {
-                where.push('assigned_to = ?');
-                params.push(uid);
+                where.push('(assigned_to = ? OR created_by = ?)');
+                params.push(uid, uid);
             }
         }
         const rows = await dbAllAsync(
@@ -1947,7 +2251,10 @@ router.get('/:id', authenticateToken, requireCorrectionSchemaReady, async (req, 
                 fix_proofs: fixByReq[c.id] || [],
             }));
         }
-        res.json({ request: { ...row, effective_error_proof_note: effectiveErrorProofNote }, history, attachments, requesters, group, rework_chain: reworkChain });
+        // E3 can_edit 服务端投影（判定逻辑与 PUT /:id 编辑闸同源：admin∨建单人 + 非终态 + 未作废）；
+        //   前端据此显隐「编辑」入口与待修复数据附件删除按钮，后端 PUT/DELETE 仍是真闸门。
+        const canEdit = (isAdmin || isCreator) && !row.voided_at && CORRECTION_EDITABLE_STATUSES.includes(row.status);
+        res.json({ request: { ...row, effective_error_proof_note: effectiveErrorProofNote }, history, attachments, requesters, group, rework_chain: reworkChain, can_edit: canEdit });
     } catch (err) {
         logger.error('查询数据修正单详情失败:', err.message);
         res.status(500).json({ error: err.message });
@@ -2447,6 +2754,74 @@ router.post('/:id/attachments', authenticateToken, requireCorrectionSchemaReady,
     }
 });
 
+// ── DELETE /:id/attachments/:attId 删除待修复数据附件（E3，2026-07-23 建单人编辑权限）──────────
+//   仅 error_proof 可删（建单人录入侧材料）：oa_proof=OA 证据链铁律不可删（对齐"OA 号不可改"拍板）、
+//   fix_proof=开发交付物 + 完成通知钉钉文件载荷（notify-done 取最新 fix_proof 发送）不可删。
+//   权限 = admin ∨ 建单人；非终态（对齐 PUT 编辑口径）；已作废只读留痕。error_proof 物理存主单
+//   （ERROR_PROOF_ON_MASTER_ONLY），att.correction_request_id === :id 校验天然把删除锚定在主单。
+//   事务：DELETE 行 + history 同态留痕同事务；物理文件 COMMIT 后 best-effort 删（镜像 issue-lite DELETE 范式，
+//   失败仅 warn 不回滚——DB 行已删=逻辑已移除，孤儿文件靠巡检兜底）。
+router.delete('/:id/attachments/:attId', authenticateToken, requireCorrectionSchemaReady, correctionIdGuard, async (req, res) => {
+    let transactionActive = false;
+    try {
+        const id = Number(req.params.id);
+        if (!/^[1-9]\d*$/.test(String(req.params.attId))) return res.status(400).json({ error: '附件 ID 必须是正整数', code: 'INVALID_ATTACHMENT_ID' });
+        const attId = Number(req.params.attId);
+        const actor = correctionActor(req);
+        const isAdmin = actor.role === 'admin';
+        let att = null;   // 事务内读取、COMMIT 后物理删还要用（file_name），须在事务块外声明
+
+        await dbRunAsync('BEGIN IMMEDIATE');
+        transactionActive = true;
+        try {
+            const bail = async (status, payload) => { await dbRunAsync('ROLLBACK'); transactionActive = false; return res.status(status).json(payload); };
+            // L-4（codex E3 首审）：先校验修正单+操作权限+状态，后触碰附件——无权用户拿不到
+            //   "附件是否存在/什么类型"的枚举信息（403 先于 404/409 类型披露）。
+            const row = await dbGetAsync('SELECT id, status, created_by, voided_at FROM correction_requests WHERE id = ?', [id]);
+            if (!row) return bail(404, { error: '修正单不存在', code: 'CORRECTION_NOT_FOUND' });
+            const isCreator = Number(row.created_by) === actor.id && actor.id > 0;
+            if (!isAdmin && !isCreator) return bail(403, { error: '权限不足：仅建单人本人或管理员可删除待修复数据附件', code: 'NOT_AUTHORIZED_FOR_EDIT' });
+            if (row.voided_at) return bail(409, { error: '修正单已作废（只读留痕），附件不可删除', code: 'VOIDED_LOCKED' });
+            if (!CORRECTION_EDITABLE_STATUSES.includes(row.status)) {
+                return bail(409, { error: `当前状态「${row.status}」为终态，附件不可删除`, code: 'TERMINAL_STATE_LOCKED' });
+            }
+            att = await dbGetAsync(
+                'SELECT id, correction_request_id, attachment_type, file_name, original_name FROM correction_attachments WHERE id = ?',
+                [attId]
+            );
+            if (!att) return bail(404, { error: '附件不存在', code: 'ATTACHMENT_NOT_FOUND' });
+            if (Number(att.correction_request_id) !== id) return bail(404, { error: '附件不属于本修正单', code: 'ATTACHMENT_NOT_FOUND' });
+            if (att.attachment_type !== 'error_proof') {
+                return bail(409, { error: '仅待修复数据附件可删除（OA 截图为流程证据、完成附件为开发交付物，均不可删）', code: 'ATTACHMENT_TYPE_NOT_DELETABLE' });
+            }
+            const del = await dbRunAsync('DELETE FROM correction_attachments WHERE id = ? AND correction_request_id = ?', [attId, id]);
+            if (!del || del.changes !== 1) return bail(409, { error: '附件状态已变化，请刷新后重试', code: 'STATE_CHANGED' });
+            const dispName = att.original_name || att.file_name || `附件#${attId}`;
+            await dbRunAsync(
+                `INSERT INTO correction_status_history (correction_request_id, from_status, to_status, reason, operator_id, operator_name)
+                 VALUES (?, ?, ?, ?, ?, ?)`,
+                [id, row.status, row.status, `删除待修复数据附件「${dispName}」`.slice(0, 500), actor.id, actor.name]
+            );
+            await dbRunAsync('COMMIT');
+            transactionActive = false;
+        } catch (txErr) {
+            if (transactionActive) { try { await dbRunAsync('ROLLBACK'); } catch (_) {} transactionActive = false; }
+            throw txErr;
+        }
+        // COMMIT 后物理删（best-effort·白名单内路径；失败 warn 留痕不影响响应——镜像 issue-lite D3-M-2 口径）
+        try {
+            const delOk = safeDeleteFileSync(att.file_name, UPLOAD_DIR);
+            if (!delOk) logger.warn(`[数据修正] 附件 #${attId} 物理文件未删除（不存在或越界）：${att.file_name}`);
+        } catch (e) { logger.warn(`[数据修正] 附件物理删失败 ${att.file_name}: ${e && e.message}`); }
+        logger.info(`用户 ${actor.name} 删除数据修正单 #${id} 待修复数据附件 #${attId}`);
+        return res.json({ ok: true, id, attachment_id: attId });
+    } catch (err) {
+        if (transactionActive) { try { await dbRunAsync('ROLLBACK'); } catch (_) {} transactionActive = false; }
+        logger.error('删除待修复数据附件失败:', err && err.message);
+        if (!res.headersSent) return res.status(500).json({ error: (err && err.message) || '删除附件失败' });
+    }
+});
+
 // ============================================================
 // 数据修正模块 API（v1.81.0 Commit D1：拒绝 + 归档 + 作废）
 //   纯 correctionTransition 薄封装（无钉钉/无 multer）——闸门全在 transition（Commit B 已建 + verify 18/18 验过）：
@@ -2648,18 +3023,38 @@ router.post('/:id/notify-done', authenticateToken, requireCorrectionSchemaReady,
         //   主业务方(is_primary=1) 同步回写主表兼容列（RC2-M2，best-effort 不阻断）。
         //   **一并清 completion_read_at**（codex 50 M-2）：这些态都把 message_key 置 NULL，旧 read_at 成孤儿
         //   （指向已失效消息），failed/no_phone 行带 read_at 自相矛盾，列表/人工排查会误判已读 → 一律清。
+        //   MED-1（codex E3 二审）：回写带「读时手机号」乐观锁（AND TRIM(COALESCE(requester_phone,''))=读时值）——
+        //   反查/发送在途窗口内建单人改了手机号（E3 PUT 已重置通知态）时 changes=0 放弃回写，保留编辑产生的
+        //   not_sent，不把旧收件人的状态盖到新号上。返工路径（persistRework）无需此锁：返工只发生在 ARCHIVED
+        //   主单上，主单终态锁死编辑面（PUT 409），返工窗口内主业务方手机号不可变。
         const persistNotify = async (status, messageKey, errorVal) => {
-            await dbRunAsync(`UPDATE correction_requesters SET completion_notify_status=?, completion_notified_at=datetime('now','localtime'), completion_notify_message_key=?, completion_notify_error=?, completion_read_at=NULL WHERE id=?`, [status, messageKey, errorVal, target.id]);
-            if (Number(target.is_primary) === 1) {
-                try { await dbRunAsync(`UPDATE correction_requests SET completion_notify_status=?, completion_notified_at=datetime('now','localtime'), completion_notify_message_key=?, completion_notify_error=?, completion_read_at=NULL WHERE id=?`, [status, messageKey, errorVal, id]); }
-                catch (e) { logger.warn(`[correction-notify-done] #${id} 主表兼容列回写失败（子表已更新，真相源正确）：${e.message}`); }
+            // 三审 L-1：乐观锁用【读时原始值】相等比较（COALESCE(requester_phone,'')=快照），不做 SQL 端归一——
+            //   JS trim() 与 SQLite TRIM() 归一口径不等价（后者只去 ASCII 空格），历史 "\t138..." 数据会在无并发时误判 changes=0。
+            const w = await dbRunAsync(`UPDATE correction_requesters SET completion_notify_status=?, completion_notified_at=datetime('now','localtime'), completion_notify_message_key=?, completion_notify_error=?, completion_read_at=NULL WHERE id=? AND COALESCE(requester_phone,'') = ?`, [status, messageKey, errorVal, target.id, phoneSnapshot]);
+            if (!w || w.changes === 0) {
+                logger.warn(`[correction-notify-done] #${id} 业务方#${requesterId} ${status} 状态未回写：发送期间收件人手机号已变更（保留编辑重置的通知状态）`);
+                return false;
             }
+            // 主表兼容列镜像（三审 MED）：不锁主表 phone（派生列，存量可与子表不同步，锁 phone 误挡合法镜像
+            //   ——rework-notify F3 实证），改锚【EXISTS 子表仍持有本次刚写入的状态】：子表写→镜像写之间被
+            //   E3 PUT 重置（status 变 not_sent）则 EXISTS 失败跳过镜像，主表保持 PUT 重置值，两表恒一致。
+            if (Number(target.is_primary) === 1) {
+                try {
+                    // 四审 L-1：failed/no_phone 的 key 恒 NULL，EXISTS 锚补 error 比较——否则两个并发 failed（error 不同）
+                    //   后写行仍满足先写请求的 status+NULL key 锚，先写请求会把主表 error 覆盖成旧值。
+                    await dbRunAsync(`UPDATE correction_requests SET completion_notify_status=?, completion_notified_at=datetime('now','localtime'), completion_notify_message_key=?, completion_notify_error=?, completion_read_at=NULL
+                        WHERE id=? AND EXISTS (SELECT 1 FROM correction_requesters r2 WHERE r2.id=? AND r2.completion_notify_status=? AND COALESCE(r2.completion_notify_message_key,'') = COALESCE(?,'') AND COALESCE(r2.completion_notify_error,'') = COALESCE(?,''))`,
+                        [status, messageKey, errorVal, id, target.id, status, messageKey, errorVal]);
+                } catch (e) { logger.warn(`[correction-notify-done] #${id} 主表兼容列回写失败（子表已更新，真相源正确）：${e.message}`); }
+            }
+            return true;
         };
         // RC-M3 统一重发契约：未传 force_resend 且该业务方已 sent 且有 message_key → already_sent
         if (!(req.body && req.body.force_resend === true) && target.completion_notify_status === 'sent' && target.completion_notify_message_key) {
             return res.json({ success: true, already_sent: true, status: 'sent', requester_id: requesterId, message: '已通知过该业务方完成，未重复发送（如需重发传 force_resend）' });
         }
         // ① 无手机号分支（G-11）：不调钉钉，落 no_phone，前端提示线下交付
+        const phoneSnapshot = target.requester_phone == null ? '' : String(target.requester_phone);   // 三审 L-1：读时原始值快照（乐观锁比较基准，不归一）
         const requesterPhone = String(target.requester_phone || '').trim();
         if (!requesterPhone) {
             await persistNotify('no_phone', null, 'no_phone');
@@ -2708,7 +3103,13 @@ router.post('/:id/notify-done', authenticateToken, requireCorrectionSchemaReady,
         if (allOk) {
             // 子表是真相源——子表落库失败才报 NOTIFY_SENT_BUT_DB_UPDATE_FAILED；主表回写在 persistNotify 内 best-effort
             try {
-                await dbRunAsync(`UPDATE correction_requesters SET completion_notify_status='sent', completion_notified_at=datetime('now','localtime'), completion_notify_message_key=?, completion_notify_error=NULL, completion_read_at=NULL WHERE id=?`, [mdResp.processQueryKey, target.id]);
+                // MED-1（codex E3 二审）：sent 回写带「读时原始手机号」乐观锁（三审 L-1：原始值相等比较，非 SQL TRIM 归一）；
+                //   changes=0=发送期间收件人已变更 → 保留编辑重置的 not_sent（消息已发给旧号，新号确实未收到），响应引导核实后重新通知。
+                const wSent = await dbRunAsync(`UPDATE correction_requesters SET completion_notify_status='sent', completion_notified_at=datetime('now','localtime'), completion_notify_message_key=?, completion_notify_error=NULL, completion_read_at=NULL WHERE id=? AND COALESCE(requester_phone,'') = ?`, [mdResp.processQueryKey, target.id, phoneSnapshot]);
+                if (!wSent || wSent.changes === 0) {
+                    logger.warn(`[correction-notify-done] #${id} 业务方#${requesterId} 钉钉已发但发送期间收件人手机号被修改，sent 未回写（保留编辑重置的状态，key=${mdResp.processQueryKey}）`);
+                    return res.status(200).json({ success: false, code: 'RECIPIENT_CHANGED_DURING_SEND', delivery_status: 'sent', persist_status: 'skipped', requester_id: requesterId, message: '通知已发送给发送时的手机号，但发送期间业务方手机号已被修改，状态保持未发送；请核实新手机号后重新通知' });
+                }
             } catch (dbErr) {
                 // codex 50 M-1：这是**继承自原主表 notify-done 的已接受边界**（非 L2b 新增）——钉钉已发但落库失败时，
                 //   子表未更新 → 后续 already_sent 不命中，重试会重复发送；"请勿重发"是软提示、系统不强阻。
@@ -2717,9 +3118,14 @@ router.post('/:id/notify-done', authenticateToken, requireCorrectionSchemaReady,
                 logger.error(`[correction-notify-done] #${id} 业务方#${requesterId} 钉钉已发但子表落库失败：${dbErr.message}（key=${mdResp.processQueryKey}）`);
                 return res.status(200).json({ success: false, code: 'NOTIFY_SENT_BUT_DB_UPDATE_FAILED', message: '通知已发送但状态保存失败，请勿重发', delivery_status: 'sent', persist_status: 'failed', requester_id: requesterId });
             }
+            // 主表兼容列镜像（三审 MED）：锚 EXISTS 子表仍持有本次 sent+key（同 persistNotify 注释——不锁主表 phone
+            //   防 F3 存量不同步误挡；子表写→镜像写之间被 E3 PUT 重置则 EXISTS 失败跳过，两表恒一致）。
             if (Number(target.is_primary) === 1) {
-                try { await dbRunAsync(`UPDATE correction_requests SET completion_notify_status='sent', completion_notified_at=datetime('now','localtime'), completion_notify_message_key=?, completion_notify_error=NULL, completion_read_at=NULL WHERE id=?`, [mdResp.processQueryKey, id]); }
-                catch (e) { logger.warn(`[correction-notify-done] #${id} 主表兼容列回写失败（子表已更新，真相源正确）：${e.message}`); }
+                try {
+                    await dbRunAsync(`UPDATE correction_requests SET completion_notify_status='sent', completion_notified_at=datetime('now','localtime'), completion_notify_message_key=?, completion_notify_error=NULL, completion_read_at=NULL
+                        WHERE id=? AND EXISTS (SELECT 1 FROM correction_requesters r2 WHERE r2.id=? AND r2.completion_notify_status='sent' AND r2.completion_notify_message_key = ?)`,
+                        [mdResp.processQueryKey, id, target.id, mdResp.processQueryKey]);
+                } catch (e) { logger.warn(`[correction-notify-done] #${id} 主表兼容列回写失败（子表已更新，真相源正确）：${e.message}`); }
             }
             logger.info(`[correction-notify-done] #${id} 完成通知已发业务方#${requesterId}(${resolved.userid}) by ${userName}（${att ? '含附件' : '无附件'}）`);
             return res.json({ success: true, status: 'sent', requester_id: requesterId, has_attachment: !!att });
@@ -2881,9 +3287,14 @@ router.post('/:id/notify-estimate', authenticateToken, requireCorrectionSchemaRe
         if (actor.role !== 'admin') return res.status(403).json({ error: '无权通知业务方预计完成（仅 admin）', code: 'NOT_AUTHORIZED_TO_NOTIFY' });
         if (!CORRECTION_NOTIFY_SENDABLE.estimate.includes(c.status)) return res.status(409).json({ error: `当前状态「${c.status}」不可通知预计完成`, code: 'STATUS_NOT_NOTIFIABLE' });
         if (!c.dev_estimated_at) return res.status(400).json({ error: '尚未回复预计完成时间', code: 'ESTIMATE_REQUIRED' });   // RC-L1 不变量二次校验
+        const estPhoneSnapshot = c.requester_phone == null ? '' : String(c.requester_phone);   // 三审 L-1：读时原始值快照（乐观锁基准，不归一）
         if (!String(c.requester_phone || '').trim()) {
             // H-1（codex 26）：no_phone 也要落库（对齐 notify-done 范式），否则通知四态/审计黑洞——失败不可观测
-            try { await dbRunAsync(`UPDATE correction_requests SET requester_notify_status='no_phone', requester_notified_at=datetime('now','localtime'), requester_notify_message_key=NULL, requester_notify_error='no_phone' WHERE id=?`, [id]); }
+            // MED-1（codex E3 二审）：带「读时原始值」乐观锁——读检与落库之间建单人补/改了手机号则放弃写 no_phone
+            try {
+                const wNp = await dbRunAsync(`UPDATE correction_requests SET requester_notify_status='no_phone', requester_notified_at=datetime('now','localtime'), requester_notify_message_key=NULL, requester_notify_error='no_phone' WHERE id=? AND COALESCE(requester_phone,'') = ?`, [id, estPhoneSnapshot]);
+                if (!wNp || wNp.changes === 0) logger.warn(`[correction-notify-estimate] #${id} no_phone 未落库：期间业务方手机号已被补填（保留现状态）`);
+            }
             catch (dbErr) { logger.error(`[correction-notify-estimate] #${id} no_phone 落库失败：${dbErr.message}`); }   // RC-M1（codex 27）：落库失败留痕，闭合可观测性
             return res.status(400).json({ success: false, error: '业务方未填手机号，无法通知', code: 'REQUESTER_PHONE_EMPTY', status: 'no_phone' });
         }
@@ -2902,9 +3313,15 @@ router.post('/:id/notify-estimate', authenticateToken, requireCorrectionSchemaRe
         catch (e) { sr = { ok: false, reason: 'exception' }; logger.warn(`[correction-notify-estimate] #${id} 发送异常：${e.message}`); }
         const status = sr.ok ? 'sent' : (sr.reason === 'no_phone' ? 'no_phone' : 'failed');
         try {
-            await dbRunAsync(
-                `UPDATE correction_requests SET requester_notify_status=?, requester_notified_at=datetime('now','localtime'), requester_notify_message_key=?, requester_notify_error=?, requester_read_at=CASE WHEN ?='sent' THEN NULL ELSE requester_read_at END WHERE id=?`,
-                [status, sr.ok ? sr.message_key : null, sr.ok ? null : (sr.reason || 'other'), status, id]);
+            // MED-1（codex E3 二审）：回写带「读时原始手机号」乐观锁（三审 L-1：原始值相等比较，非 SQL TRIM 归一）——
+            //   发送在途窗口内建单人改了手机号（E3 PUT 已重置通知态）时 changes=0 放弃回写；sent 场景响应引导核实后重新通知（消息已发给旧号）。
+            const wEst = await dbRunAsync(
+                `UPDATE correction_requests SET requester_notify_status=?, requester_notified_at=datetime('now','localtime'), requester_notify_message_key=?, requester_notify_error=?, requester_read_at=CASE WHEN ?='sent' THEN NULL ELSE requester_read_at END WHERE id=? AND COALESCE(requester_phone,'') = ?`,
+                [status, sr.ok ? sr.message_key : null, sr.ok ? null : (sr.reason || 'other'), status, id, estPhoneSnapshot]);
+            if (!wEst || wEst.changes === 0) {
+                logger.warn(`[correction-notify-estimate] #${id} ${status} 状态未回写：发送期间业务方手机号已变更（保留编辑重置的通知状态）`);
+                if (sr.ok) return res.status(200).json({ success: false, code: 'RECIPIENT_CHANGED_DURING_SEND', delivery_status: 'sent', persist_status: 'skipped', message: '通知已发送给发送时的手机号，但发送期间业务方手机号已被修改，状态保持未发送；请核实新手机号后重新通知' });
+            }
         } catch (dbErr) { logger.error(`[correction-notify-estimate] #${id} 落库失败：${dbErr.message}`); }
         if (sr.ok) return res.json({ success: true, status: 'sent', message_key: sr.message_key });
         if (status === 'no_phone') return res.status(400).json({ success: false, status: 'no_phone', code: 'REQUESTER_PHONE_EMPTY' });

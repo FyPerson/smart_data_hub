@@ -119,11 +119,12 @@
         <div class="u-drawer-body" id="drawerBody"></div>
     </div>
 
-    <!-- 新建登记弹窗 -->
+    <!-- 新建/编辑登记弹窗（E2：编辑模式复用，#editLiteId 区分，通知对象区编辑时隐藏） -->
     <div class="u-modal-overlay" id="createModal">
         <div class="u-modal-box">
-            <div class="u-modal-header"><h2>新建数据开发单</h2><button class="u-drawer-close" onclick="closeCreateModal()">&times;</button></div>
+            <div class="u-modal-header"><h2 id="createModalTitle">新建数据开发单</h2><button class="u-drawer-close" onclick="closeCreateModal()">&times;</button></div>
             <div class="u-modal-body">
+                <input type="hidden" id="editLiteId">
                 <div class="u-form-group"><label>需求描述 <span class="u-req">*</span></label><input type="text" id="fTitle" maxlength="200" placeholder="一句话写清要开发/取数的内容"></div>
                 <div class="u-form-row">
                     <div class="u-form-group"><label>业务方 <span class="u-req">*</span></label><input type="text" id="fReqName" maxlength="50" placeholder="业务方姓名"></div>
@@ -134,7 +135,8 @@
                     <div class="u-form-group"><label>期望完成时间</label><input type="date" id="fReqDate"></div>
                 </div>
                 <div class="u-form-group"><label>OA 流程号</label><input type="text" id="fOa" maxlength="20" placeholder="可选：1-20 位纯数字（如 364265），留空则不填"></div>
-                <div class="u-form-group">
+                <!-- E2：编辑模式隐藏（notify_target 有专用端点+建单时点语义，编辑口不动，防"改了静默无效"）-->
+                <div class="u-form-group" id="notifyTargetGroup">
                     <label>建单后通知对方</label>
                     <select id="fNotifyTarget"><option value="">暂不通知</option><option value="10">示例开发C</option><option value="3">示例用户A</option></select>
                     <div class="u-hint">建单后可主动钉钉一位对方（示例开发C/示例用户A）；也可稍后在详情里再发。</div>
@@ -370,6 +372,8 @@
                     if (canDo && (st === '待处理' || st === '处理中')) flow.push(`<button class="u-btn-primary" onclick="openCompleteModal(${sid})">标记完成</button>`);
                     if (canDo && st === '已完成') flow.push(`<button class="u-btn-secondary" onclick="toStatus(${sid},'处理中')">重新打开</button>`);
                     if (isAdminRole() && st !== '已归档') flow.push(`<button class="u-btn-secondary" onclick="toStatus(${sid},'已归档')">归档</button>`);
+                    // E2：编辑（can_edit 服务端投影：建单人/admin 且未归档未作废，范式同 can_void）
+                    if (it.can_edit === true) flow.push(`<button class="u-btn-secondary" onclick="openEditLite(${sid})">编辑</button>`);
                     // 作废（v0.1 §9.1）：can_void 服务端算好（建单人/admin 且未归档未作废）·危险按钮进独立确认弹窗
                     if (it.can_void === true) flow.push(`<button class="u-btn-danger" onclick="openVoidModal(${sid})">作废</button>`);
                 }
@@ -438,7 +442,8 @@
                     <div class="u-detail-section">
                         <h3>附件 <span id="attCount" class="il-muted"></span> ${canDo && st !== '已归档' && !isVoided ? `<button class="u-btn-secondary u-nb-btn" style="float:right;" onclick="pickAttach(${sid})">上传附件</button>` : ''}</h3>
                         <div id="attList"><span class="il-muted">加载中…</span></div>
-                    </div>`;
+                    </div>
+                    ${(Array.isArray(it.edit_logs) && it.edit_logs.length) ? `<div class="u-detail-section"><h3>编辑记录</h3>${it.edit_logs.map(l => `<div style="font-size:12px;color:#6b7280;padding:2px 0;">${esc(l.created_at)} · ${esc(l.editor_name || '-')} 编辑了：${esc(l.changed_fields)}</div>`).join('')}</div>` : ''}`;
                 document.getElementById('drawerOverlay').classList.add('open');
                 document.getElementById('drawer').classList.add('open');
                 loadAttachments(sid, st, isVoided);
@@ -589,7 +594,12 @@
                 const res = await authFetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
                 const j = await res.json().catch(() => ({}));
                 if (res.ok && j.success) { alert(j.partial_success ? ('⚠️ ' + (j.warning || '已发送，请勿重复')) : '已发送'); await refreshDrawer(id); }
-                else alert((j && j.error) || '通知失败');
+                else {
+                    // 六审 M-1：消费后端 message——含 RECIPIENT_CHANGED_DURING_SEND 的「旧号已发送/请核实新号重发」
+                    //   人工处置信息（对齐数据修正页 error||message 口径）；该 code 下通知态已被编辑重置，刷新抽屉展示真实态
+                    alert((j && (j.error || j.message)) || '通知失败');
+                    if (j && j.code === 'RECIPIENT_CHANGED_DURING_SEND') await refreshDrawer(id);
+                }
             } catch (e) { alert('通知失败'); } finally { busy = false; }
         }
         async function notifyRead(id, key) {
@@ -681,6 +691,14 @@
         // ===== 新建登记 =====
         function openCreateModal() {
             if (!canWrite()) return;
+            // E2：清编辑态残留（编辑弹窗复用本弹窗；含 M-2 历史部门临时 option）
+            editLiteReqSeq++;   // L-5：作废在途编辑详情请求
+            document.getElementById('editLiteId').value = '';
+            document.getElementById('createModalTitle').textContent = '新建数据开发单';
+            document.getElementById('btnSubmitCreate').textContent = '提交登记';
+            document.getElementById('notifyTargetGroup').style.display = 'block';
+            const histOpt = document.getElementById('histDeptOpt');
+            if (histOpt) histOpt.remove();
             ['fTitle', 'fReqName', 'fReqDept', 'fReqPhone', 'fReqDate', 'fOa', 'fDesc'].forEach(k => document.getElementById(k).value = '');
             // 通知对象下拉：排除当前登录人本人（不通知自己）——admin 见示例开发C+示例用户A·示例开发C见示例用户A·示例用户A见示例开发C
             const myId = (typeof currentUser !== 'undefined' && currentUser) ? Number(currentUser.id) : null;
@@ -691,10 +709,51 @@
             document.getElementById('createErr').style.display = 'none';
             document.getElementById('createModal').classList.add('open');
         }
-        function closeCreateModal() { document.getElementById('createModal').classList.remove('open'); }
+        function closeCreateModal() { editLiteReqSeq++; document.getElementById('createModal').classList.remove('open'); }   // L-5：关弹窗作废在途编辑请求
+        // E2（建单人编辑权限）：编辑弹窗复用 createModal——回填录入字段、隐藏通知对象区（专用端点语义）。
+        //   OA 占位号（datadev-N）回填为空（placeholder 提示留空=系统占位），提交空串后端归一为本单占位不变。
+        let editLiteReqSeq = 0;   // L-5（codex E2 复审）：详情请求令牌——连点两单/请求中开新建，过期响应不回填
+        async function openEditLite(id) {
+            const seq = ++editLiteReqSeq;
+            try {
+                const res = await authFetch(`/api/issue-lite/${id}`);
+                if (seq !== editLiteReqSeq) return;   // L-5：期间已切往其他单/开新建，本响应过期丢弃
+                if (!res || !res.ok) { showToast('加载登记单失败', 'error'); return; }
+                const it = await res.json();
+                if (seq !== editLiteReqSeq) return;
+                if (it.can_edit !== true) { showToast('当前状态不可编辑', 'error'); return; }
+                document.getElementById('editLiteId').value = id;
+                document.getElementById('createModalTitle').textContent = '编辑数据开发单 #' + id;
+                document.getElementById('btnSubmitCreate').textContent = '保存修改';
+                document.getElementById('notifyTargetGroup').style.display = 'none';
+                document.getElementById('fTitle').value = it.title || '';
+                document.getElementById('fReqName').value = it.requester_name || '';
+                // M-2（codex E2 审）：历史部门不在现行下拉时临时插 option（防 select 回填为空 → 提交被必填拦）；
+                //   后端比对制保证未变更部门不过白名单校验，历史值可原样保留。
+                const deptSel = document.getElementById('fReqDept');
+                const oldHist = document.getElementById('histDeptOpt');
+                if (oldHist) oldHist.remove();
+                deptSel.value = it.requester_dept || '';
+                if (it.requester_dept && deptSel.value !== it.requester_dept) {
+                    const opt = document.createElement('option');
+                    opt.id = 'histDeptOpt';
+                    opt.value = it.requester_dept;
+                    opt.textContent = it.requester_dept + '（历史部门）';
+                    deptSel.appendChild(opt);
+                    deptSel.value = it.requester_dept;
+                }
+                document.getElementById('fReqPhone').value = it.requester_phone || '';
+                document.getElementById('fReqDate').value = it.req_date || '';
+                document.getElementById('fOa').value = /^datadev-/i.test(String(it.oa_number || '')) ? '' : (it.oa_number || '');
+                document.getElementById('fDesc').value = it.description || '';
+                document.getElementById('createErr').style.display = 'none';
+                document.getElementById('createModal').classList.add('open');
+            } catch (e) { showToast('加载登记单失败', 'error'); }
+        }
         async function submitCreate() {
             if (busy) return;
             const g = k => document.getElementById(k).value.trim();
+            const editId = document.getElementById('editLiteId').value;
             const title = g('fTitle'), rn = g('fReqName'), rd = g('fReqDept'), rp = g('fReqPhone'), date = g('fReqDate'), oa = g('fOa'), desc = g('fDesc'), nt = document.getElementById('fNotifyTarget').value;
             const err = document.getElementById('createErr'); err.style.display = 'none';
             if (deptListMissing) return showErr(err, '部门清单加载失败，无法提交（请刷新或联系管理员）');
@@ -704,13 +763,23 @@
             if (!rp) return showErr(err, '业务方手机号必填');
             busy = true; const btn = document.getElementById('btnSubmitCreate'); btn.disabled = true;
             try {
-                const payload = { title, requester_name: rn, requester_dept: rd, requester_phone: rp };
-                if (date) payload.req_date = date; if (oa) payload.oa_number = oa; if (desc) payload.description = desc; if (nt) payload.notify_target_id = Number(nt);
-                const res = await authFetch('/api/issue-lite', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-                const j = await res.json().catch(() => ({}));
-                if (res.ok && j.success) { closeCreateModal(); await loadList(); if (j.issue) openDrawer(j.issue.id); }
-                else showErr(err, (j && j.error) || '提交失败');
-            } catch (e) { showErr(err, '提交失败'); } finally { busy = false; btn.disabled = false; }
+                if (editId) {
+                    // E2 编辑分支：全字段提交（date/desc 清空传 null 清值，oa 空串由后端归一占位号）
+                    const payload = { title, requester_name: rn, requester_dept: rd, requester_phone: rp,
+                        req_date: date || null, oa_number: oa, description: desc || null };
+                    const res = await authFetch(`/api/issue-lite/${editId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                    const j = await res.json().catch(() => ({}));
+                    if (res.ok) { closeCreateModal(); await loadList(); openDrawer(Number(editId)); }
+                    else showErr(err, (j && j.error) || '保存失败');
+                } else {
+                    const payload = { title, requester_name: rn, requester_dept: rd, requester_phone: rp };
+                    if (date) payload.req_date = date; if (oa) payload.oa_number = oa; if (desc) payload.description = desc; if (nt) payload.notify_target_id = Number(nt);
+                    const res = await authFetch('/api/issue-lite', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                    const j = await res.json().catch(() => ({}));
+                    if (res.ok && j.success) { closeCreateModal(); await loadList(); if (j.issue) openDrawer(j.issue.id); }
+                    else showErr(err, (j && j.error) || '提交失败');
+                }
+            } catch (e) { showErr(err, editId ? '保存失败' : '提交失败'); } finally { busy = false; btn.disabled = false; }
         }
         function showErr(el, msg) { el.textContent = msg; el.style.display = ''; }
     </script>
