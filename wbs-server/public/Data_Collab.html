@@ -3261,9 +3261,6 @@
                 a => (a.attachment_type === 'result_data' || a.attachment_type === 'result_script')
                   && (a.status === 'active' || !a.status)  // 兼容 status 字段未填的旧数据
             ).sort((a, b) => (a.id ?? Number.MAX_SAFE_INTEGER) - (b.id ?? Number.MAX_SAFE_INTEGER));  // M3：按 id 升序=上传序，"第一份"视觉居首对齐取首语义（codex 缺失 id 排末）
-            if (deliveryFiles.length === 0) {
-                return ''; // 未提交过交付物，不显示区块
-            }
             // v1.67.1：判断当前用户是否为本单 developer，DONE 且非 ARCHIVED 允许删/重传交付物
             const myId = Number(getCurrentUserId());
             const isCurrentDeveloper = d.developer_id && Number(d.developer_id) === myId && Number(d.developer_id) !== 0;
@@ -3271,14 +3268,49 @@
             //   开发本人此前仍能看到每个交付附件的"删除"+底部"🔄 重新上传交付物"两个写入口。加 collabTerminalKind==='active'
             //   门后隐藏这两个写按钮，交付文件列表（预览/下载链接）不动——只 gate canModifyDelivery 派生的 deleteBtn/reuploadBtn。
             const canModifyDelivery = isCurrentDeveloper && d.status === 'DONE' && collabTerminalKind(d) === 'active';
+            if (deliveryFiles.length === 0) {
+                // #11 交付物删光重传缺口（2026-07-23）：「提交过但交付物被删光」的 DONE 单不能一并 return——
+                //   否则「🔄 重新上传交付物」入口随区块消失，开发删光后无法自助重传（后端 /submit 状态白名单
+                //   本就含 DONE，v1.67.1 设计即「删→重传→重走 smoke」闭环）；且完成通知因无 active result_data
+                //   被 409（RESULT_DATA_MISSING），单据陷入「已完成但发不出完成通知」死角。
+                //   从未提交过交付物的单不会是 DONE，用 status==='DONE' 区分「从未提交」vs「删光」；
+                //   作废/归档终态（collabTerminalKind!=='active'）无重传语义，维持不渲染。
+                if (d.status !== 'DONE' || collabTerminalKind(d) !== 'active') {
+                    return ''; // 未提交过交付物（或终态单），不显示区块
+                }
+                const emptyReuploadBtn = canModifyDelivery
+                    ? `<div style="margin-top:12px;">
+                           <button class="btn" style="background:#f59e0b;color:white;" onclick="openSubmitDeliveryDialog(${d.id})">🔄 重新上传交付物</button>
+                           <span style="color:#92400e;font-size:12px;margin-left:10px;">重传后会自动重走 smoke test 验收</span>
+                       </div>`
+                    : '';
+                // codex 22 审 L-2：文案改「当前无有效交付物」（superseded 历史仍在库，"已全部删除"过于绝对）；
+                //   非开发视角补操作指引（谁该处理）
+                const emptyAudienceHint = canModifyDelivery ? '' : '请联系本单开发人员重新上传。';
+                return `
+                    <div class="u-detail-section">
+                        <div class="detail-section-title">交付内容</div>
+                        <div class="detail-section-body">
+                            <div style="padding:10px;background:#fffbeb;border:1px solid #fcd34d;border-radius:6px;font-size:13px;color:#92400e;">
+                                ⚠️ 当前无有效交付物。本单状态仍为「已完成」，但缺少数据文件时无法给业务方发送完成通知，需重新上传交付物并通过验收。${emptyAudienceHint}
+                            </div>
+                            ${emptyReuploadBtn}
+                        </div>
+                    </div>`;
+            }
 
+            // M3 透明度计数（上移到 map 前：#11 删除警示需按类型计数判断"最后一个数据文件"）
+            const dataCnt = deliveryFiles.filter(f => f.attachment_type === 'result_data').length;
+            const scriptCnt = deliveryFiles.filter(f => f.attachment_type === 'result_script').length;
             const items = deliveryFiles.map(f => {
                 const typeLabel = f.attachment_type === 'result_data' ? '📊 结果数据' : '📜 SQL 脚本';
                 // codex 24 审 #7：用 buildAttachmentDownloadUrl 过滤 .. / 空段 / 绝对路径
                 const built = buildAttachmentDownloadUrl(f.file_name);
                 const displayName = f.original_name || (f.file_name ? String(f.file_name).split('/').pop() : '附件');
+                // #11（2026-07-23）：传附件类型 + 当前 active 数据文件数，删除最后一个 result_data 时前端加重警示
+                //   （attachment_type 为后端受控枚举 result_data/result_script，内插安全）
                 const deleteBtn = canModifyDelivery
-                    ? `<button class="btn" style="background:#fef2f2;color:#dc2626;border:1px solid #fca5a5;padding:2px 8px;font-size:12px;margin-left:8px;" onclick="deleteDeliveryAttachment(${f.id}, ${d.id})">删除</button>`
+                    ? `<button class="btn" style="background:#fef2f2;color:#dc2626;border:1px solid #fca5a5;padding:2px 8px;font-size:12px;margin-left:8px;" onclick="deleteDeliveryAttachment(${f.id}, ${d.id}, '${f.attachment_type}', ${dataCnt})">删除</button>`
                     : '';
                 const linkHtml = built.ok
                     ? `<a class="delivery-link" href="${escapeHtmlAttr(built.url)}" target="_blank" rel="noopener" download="${escapeHtml(displayName)}">${escapeHtml(displayName)}</a>`
@@ -3298,9 +3330,7 @@
                        <span style="color:#92400e;font-size:12px;margin-left:10px;">归档前可修改：重传后会自动重走 smoke test 验收</span>
                    </div>`
                 : '';
-            // M3 透明度（§C）：同类型 active >1 时提示"仅首份参与校验，其余附带"
-            const dataCnt = deliveryFiles.filter(f => f.attachment_type === 'result_data').length;
-            const scriptCnt = deliveryFiles.filter(f => f.attachment_type === 'result_script').length;
+            // M3 透明度（§C）：同类型 active >1 时提示"仅首份参与校验，其余附带"（计数已上移 map 前）
             const multiNote = (dataCnt > 1 || scriptCnt > 1)
                 ? `<div style="margin-top:8px;font-size:12px;color:#6b7280;">ℹ️ 多文件交付：仅<strong>第一份脚本</strong>参与 smoke test、<strong>第一份数据</strong>参与列对齐校验，其余为附带交付物。</div>`
                 : '';
@@ -3407,8 +3437,14 @@
         }
 
         // v1.67.1：开发人员删除已交付的 result_* 附件（仅 DONE 状态、本单 developer）
-        async function deleteDeliveryAttachment(attId, collabId) {
-            if (!confirm('确定删除此交付物？删除后请重新上传，将自动重走 smoke test 验收。')) return;
+        // #11（2026-07-23）：attType/activeDataCnt 由渲染处传入——删除最后一个 result_data 时加重警示
+        //   （完成通知需随附数据文件，删光后 notify-requester-done 会 409 RESULT_DATA_MISSING）
+        async function deleteDeliveryAttachment(attId, collabId, attType, activeDataCnt) {
+            const isLastData = attType === 'result_data' && Number(activeDataCnt) === 1;
+            const confirmMsg = isLastData
+                ? '⚠️ 这是本单最后一个数据文件！\n\n删除后本单将没有可发送的数据，无法给业务方发送完成通知；需重新上传交付物并重走 smoke test 验收后才能恢复。\n\n确定删除？'
+                : '确定删除此交付物？删除后请重新上传，将自动重走 smoke test 验收。';
+            if (!confirm(confirmMsg)) return;
             try {
                 const res = await authFetch(`/api/collab/attachments/${attId}`, { method: 'DELETE' });
                 if (!res) return;
