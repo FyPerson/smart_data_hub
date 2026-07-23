@@ -7,7 +7,7 @@
     <title>系统迭代 - 智数协同平台</title>
     <link rel="icon" href="data:,">
     <link rel="stylesheet" href="assets/css/style.css?v=v1.117.0_fabdrag">
-    <link rel="stylesheet" href="assets/css/components.css?v=v1.123.0_unify12">
+    <link rel="stylesheet" href="assets/css/components.css?v=v1.123.1_unify12b">
     <style>
         /* ============================================================
            系统迭代页 · 页面专属残留（共享组件层已迁移至 assets/css/components.css）
@@ -169,9 +169,10 @@
            si-action-bar 有 align-items:center，自测 computed-style 探针实测出可感知差异（任务书 §2.1 已预判此项
            为条件覆盖，探针证实需要），真前缀覆盖回。 */
         .unified-page .u-action-bar { align-items: center; }
-        /* 前端统一 #12 吸顶操作栏：共享 .u-action-bar-sticky 的 top:-20px 按 u-drawer-body padding-top=20px
-           设计；本页自有 si-drawer-body padding-top=18px → 条件覆盖对齐（同上 align-items 条件覆盖范式）。 */
-        .unified-page .si-drawer-body > .u-action-bar-sticky { top: -18px; }
+        /* 前端统一 #12 吸顶操作栏：共享 .u-action-bar-sticky 的 ::before 遮布按 u-drawer-body
+           padding(20px 24px) 设计；本页自有 si-drawer-body padding=18px 22px → 条件覆盖遮布尺寸
+           （同上 align-items 条件覆盖范式；sticky top 共享 0 无需覆盖）。 */
+        .unified-page .si-drawer-body > .u-action-bar-sticky::before { top: -18px; height: 18px; left: -22px; right: -22px; }
         .si-gate-hint { font-size: 11px; color: #b45309; background: #fffbeb; border: 1px solid #fde68a; border-radius: 6px; padding: 4px 9px; width: 100%; }
 
         /* 弹框（结构风险件，禁改） */

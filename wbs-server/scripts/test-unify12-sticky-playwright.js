@@ -34,16 +34,18 @@ async function openPage(browser, token, pagePath, consoleErrors) {
     return { context, page };
 }
 
-// 在指定容器内插入挂类探针元素，返回 computed {position, top}
+// 在指定容器内插入挂类探针元素，返回 computed {position, top, beforeTop, beforeHeight}
 async function probeComputed(page, containerSelector) {
     return page.evaluate((sel) => {
         const host = document.querySelector(sel);
         if (!host) return { error: `container ${sel} not found` };
         const el = document.createElement('div');
         el.className = 'u-action-bar u-action-bar-sticky';
+        el.textContent = 'x'; // 非空避开 :empty 隐藏
         host.appendChild(el);
         const cs = getComputedStyle(el);
-        const out = { position: cs.position, top: cs.top };
+        const csb = getComputedStyle(el, '::before');
+        const out = { position: cs.position, top: cs.top, beforeTop: csb.top, beforeHeight: csb.height };
         el.remove();
         return out;
     }, containerSelector);
@@ -63,18 +65,20 @@ async function probeComputed(page, containerSelector) {
             ['Data_Correction.html', '#drawerBody', '-20px'],
             ['Issue_Lite.html', '#drawerBody', '-20px'],
         ];
-        for (const [pagePath, sel, expectTop] of shared) {
+        for (const [pagePath, sel, expectBefore] of shared) {
             const { context, page } = await openPage(browser, adminToken, pagePath, consoleErrors);
             const r = await probeComputed(page, sel);
             expect(!r.error && r.position === 'sticky', `${pagePath}：position=sticky（实际 ${r.error || r.position}）`);
-            expect(r.top === expectTop, `${pagePath}：top=${expectTop}（实际 ${r.top}）`);
+            expect(r.top === '0px', `${pagePath}：top=0（零位移·实际 ${r.top}）`);
+            expect(r.beforeTop === expectBefore, `${pagePath}：::before 遮布 top=${expectBefore}（实际 ${r.beforeTop}）`);
             await context.close();
         }
         {
             const { context, page } = await openPage(browser, adminToken, 'Sys_Iteration.html', consoleErrors);
             const r = await probeComputed(page, '#siDBody');
             expect(!r.error && r.position === 'sticky', `Sys_Iteration.html：position=sticky（实际 ${r.error || r.position}）`);
-            expect(r.top === '-18px', `Sys_Iteration.html：top=-18px 页内覆盖生效（实际 ${r.top}）`);
+            expect(r.top === '0px', `Sys_Iteration.html：top=0（零位移·实际 ${r.top}）`);
+            expect(r.beforeTop === '-18px' && r.beforeHeight === '18px', `Sys_Iteration.html：::before 遮布 -18px/18px 页内覆盖生效（实际 ${r.beforeTop}/${r.beforeHeight}）`);
             await context.close();
         }
 
@@ -107,12 +111,11 @@ async function probeComputed(page, containerSelector) {
             });
             expect(!r.error, `抽屉/容器就绪（${r.error || 'ok'}）`);
             if (!r.error) {
-                // 未滚动：bar 在 padding-top(20px) 之下 ≈ bodyTop+20
+                // top:0 零位移（用户实测修正）：初始位置即吸附阈值，任意滚动量 bar 完全钉死不动
                 expect(Math.abs(r.beforeTop - (r.bodyTop + 20)) <= 1, `未滚动时 bar 在内容顶（bodyTop+20≈${(r.bodyTop + 20).toFixed(1)}，实际 ${r.beforeTop.toFixed(1)}）`);
-                // 滚动后：bar 吸在容器顶（top:-20px 抵 padding → 贴 bodyTop）
-                expect(Math.abs(r.afterTop - r.bodyTop) <= 1, `滚动 800 后 bar 吸顶贴容器顶（${r.bodyTop.toFixed(1)}，实际 ${r.afterTop.toFixed(1)}）`);
-                expect(Math.abs(r.afterTop2 - r.afterTop) <= 1, `继续滚动 bar 位置稳定（${r.afterTop.toFixed(1)} → ${r.afterTop2.toFixed(1)}）`);
-                expect(Math.abs(r.resetTop - r.beforeTop) <= 1, `滚回顶部 bar 复位（${r.beforeTop.toFixed(1)}，实际 ${r.resetTop.toFixed(1)}）`);
+                expect(Math.abs(r.afterTop - r.beforeTop) <= 1, `滚动 800 后 bar 完全不动（零位移·${r.beforeTop.toFixed(1)}，实际 ${r.afterTop.toFixed(1)}）`);
+                expect(Math.abs(r.afterTop2 - r.beforeTop) <= 1, `继续滚动 bar 仍不动（实际 ${r.afterTop2.toFixed(1)}）`);
+                expect(Math.abs(r.resetTop - r.beforeTop) <= 1, `滚回顶部 bar 位置不变（实际 ${r.resetTop.toFixed(1)}）`);
             }
 
             // C4 inert 回归：走真实 closeDetailModal()（syncDrawerInert 链路），断言关闭后 inert/aria-hidden 恢复

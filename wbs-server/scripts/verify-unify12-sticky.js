@@ -46,14 +46,21 @@ const pages = {
 };
 
 console.log('— 1. 共享层定义 —');
-check('components.css：.u-action-bar-sticky 定义齐全', () => {
+check('components.css：.u-action-bar-sticky 定义齐全（top:0 零位移 + ::before 遮布）', () => {
     const m = css.match(/\.u-action-bar-sticky\s*\{([^}]+)\}/);
     assert.ok(m, '缺 .u-action-bar-sticky 规则');
     const body = m[1];
     assert.ok(body.includes('position: sticky'), '缺 position:sticky');
-    assert.ok(body.includes('top: -20px'), '缺 top:-20px（抵 u-drawer-body padding-top）');
+    assert.ok(body.includes('top: 0'), '缺 top:0（初始即吸附阈值·滚动零位移，用户实测修正）');
     assert.ok(body.includes('z-index'), '缺 z-index');
     assert.ok(body.includes('background'), '缺 background（吸顶遮内容）');
+    const before = css.match(/\.u-action-bar-sticky::before\s*\{([^}]+)\}/);
+    assert.ok(before, '缺 ::before 遮布规则');
+    assert.ok(before[1].includes('top: -20px') && before[1].includes('height: 20px'), '::before 应遮 20px padding 缝');
+    assert.ok(before[1].includes('left: -24px') && before[1].includes('right: -24px'), '::before 应左右扩到 padding 边缘');
+});
+check('components.css：.u-action-bar-sticky:empty 隐藏兜底（codex 117 L-1）', () => {
+    assert.ok(/\.u-action-bar-sticky:empty\s*\{\s*display:\s*none;?\s*\}/.test(css), '缺 :empty 兜底');
 });
 
 console.log('— 2. 五页挂类 —');
@@ -76,16 +83,16 @@ check('区块内嵌 action-bar 未被误挂（系统迭代上线编排区保持�
     assert.ok(pages['Sys_Iteration.html'].includes('<div class="u-action-bar" style="margin-bottom:0">'), '上线编排区 action-bar 应保持无 sticky');
 });
 
-console.log('— 3. Sys_Iteration top 差值覆盖 —');
-check('Sys_Iteration：si-drawer-body > .u-action-bar-sticky top:-18px 覆盖存在', () => {
-    assert.ok(/\.unified-page \.si-drawer-body > \.u-action-bar-sticky \{ top: -18px; \}/.test(pages['Sys_Iteration.html']), '缺页内 top:-18px 条件覆盖');
+console.log('— 3. Sys_Iteration 遮布差值覆盖 —');
+check('Sys_Iteration：si-drawer-body > .u-action-bar-sticky::before 尺寸覆盖存在（18px/22px）', () => {
+    assert.ok(/\.unified-page \.si-drawer-body > \.u-action-bar-sticky::before \{ top: -18px; height: 18px; left: -22px; right: -22px; \}/.test(pages['Sys_Iteration.html']), '缺页内 ::before 尺寸覆盖');
 });
 
 console.log('— 4. 缓存串 —');
 for (const [name, src] of Object.entries(pages)) {
-    check(`${name}：components.css?v=v1.123.0_unify12`, () => {
-        assert.ok(src.includes('components.css?v=v1.123.0_unify12'), '缓存串未 bump');
-        assert.ok(!src.includes('components.css?v=v1.110.4_unify'), '旧缓存串残留');
+    check(`${name}：components.css?v=v1.123.1_unify12b`, () => {
+        assert.ok(src.includes('components.css?v=v1.123.1_unify12b'), '缓存串未 bump');
+        assert.ok(!/components\.css\?v=v1\.1(10\.4_unify|23\.0_unify12)"/.test(src), '旧缓存串残留');
     });
 }
 
