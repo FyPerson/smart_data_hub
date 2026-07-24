@@ -1,0 +1,1040 @@
+{
+  "_note": "本地库 #52 dwd_contract_header_df 真实快照(2026-07-24)。selectedFields=100+derivedFields=8",
+  "model": {
+    "id": 52,
+    "layer": "dwd",
+    "domain": "contract",
+    "table_name": "dwd_contract_header_df",
+    "table_comment": "合同主表",
+    "tech_owner": "示例用户A",
+    "biz_owner": "",
+    "update_cycle": "df",
+    "status": "CREATED",
+    "created_at": "2026-02-04 17:02:15",
+    "updated_at": "2026-02-28 08:56:20",
+    "source_table": null,
+    "source_system": null,
+    "model_type": "TABLE",
+    "created_by_id": 1,
+    "category": "core",
+    "dim_config": {
+      "configType": "DWD",
+      "dwdConfig": {
+        "dataGranularity": "一行一份合同",
+        "updateStrategy": "FULL_OVERWRITE",
+        "primaryKeys": [
+          "contract_id"
+        ],
+        "hashConfig": {
+          "enabled": true,
+          "excludeFields": [
+            "dw_create_ts",
+            "dw_update_ts",
+            "dw_hash_val",
+            "dw_etl_job",
+            "dw_load_ts",
+            "dw_src_sys",
+            "dw_batch_id"
+          ],
+          "userExcludeFields": []
+        },
+        "changeTracking": {
+          "enabled": true,
+          "changeTableName": "",
+          "companionModelId": 53
+        },
+        "filterCondition": ""
+      },
+      "sourceTables": [
+        {
+          "name": "ods_contract_df",
+          "isPrimary": true,
+          "alias": "c"
+        },
+        {
+          "name": "ods_contract_renewal_feedback_df",
+          "isPrimary": false,
+          "alias": "rf",
+          "joinType": "LEFT JOIN",
+          "joinCondition": "c.ContractID = rf.ContractID"
+        },
+        {
+          "name": "ods_base_data_item_df",
+          "isPrimary": false,
+          "alias": "di_tpl",
+          "joinType": "LEFT JOIN",
+          "joinCondition": "c.ContractTemplateType = di_tpl.DataItemID"
+        },
+        {
+          "name": "ods_base_data_item_df",
+          "isPrimary": false,
+          "alias": "di_sign",
+          "joinType": "LEFT JOIN",
+          "joinCondition": "c.SigningObjectID = di_sign.DataItemID"
+        },
+        {
+          "name": "ods_base_data_item_df",
+          "isPrimary": false,
+          "alias": "di_cc",
+          "joinType": "LEFT JOIN",
+          "joinCondition": "c.CustomerCategoryID = di_cc.DataItemID"
+        },
+        {
+          "name": "ods_base_data_item_df",
+          "isPrimary": false,
+          "alias": "di_cl",
+          "joinType": "LEFT JOIN",
+          "joinCondition": "c.CustomerLine = di_cl.DataItemID"
+        },
+        {
+          "name": "ods_base_data_item_df",
+          "isPrimary": false,
+          "alias": "di_bf",
+          "joinType": "LEFT JOIN",
+          "joinCondition": "c.BusinessField = di_bf.DataItemID"
+        },
+        {
+          "name": "ods_base_data_item_df",
+          "isPrimary": false,
+          "alias": "di_rm",
+          "joinType": "LEFT JOIN",
+          "joinCondition": "c.RenewMethod = di_rm.DataItemID"
+        },
+        {
+          "name": "ods_base_data_item_df",
+          "isPrimary": false,
+          "alias": "di_hy",
+          "joinType": "LEFT JOIN",
+          "joinCondition": "c.HYID = di_hy.DataItemID"
+        },
+        {
+          "name": "ods_base_data_item_df",
+          "isPrimary": false,
+          "alias": "di_hk",
+          "joinType": "LEFT JOIN",
+          "joinCondition": "c.HKID = di_hk.DataItemID"
+        },
+        {
+          "name": "ods_base_official_customer_df",
+          "isPrimary": false,
+          "alias": "cust",
+          "joinType": "LEFT JOIN",
+          "joinCondition": "c.CustomerID = cust.OfficialCustomerID"
+        },
+        {
+          "name": "ods_base_org_df",
+          "isPrimary": false,
+          "alias": "org",
+          "joinType": "LEFT JOIN",
+          "joinCondition": "c.SponsorDept = org.OrgID"
+        }
+      ],
+      "advancedSql": {
+        "type": "NONE",
+        "types": [],
+        "applyContent": "",
+        "cteContent": "",
+        "cteAlias": "",
+        "customFromContent": ""
+      },
+      "selectedFields": [
+        {
+          "srcField": "ContractID",
+          "targetField": "contract_id",
+          "dataType": "int",
+          "comment": "合同ID",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "ContractCode",
+          "targetField": "contract_code",
+          "dataType": "varchar(64)",
+          "comment": "合同编号",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "MainContractID",
+          "targetField": "main_contract_id",
+          "dataType": "int",
+          "comment": "主合同ID",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "MainContractCode",
+          "targetField": "main_contract_code",
+          "dataType": "varchar(64)",
+          "comment": "主合同编号",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "IsOut",
+          "targetField": "is_out",
+          "dataType": "bit",
+          "comment": "是否对外合同:0-false,1-true",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "ContractType",
+          "targetField": "contract_type",
+          "dataType": "int",
+          "comment": "合同类型：从基础数据库取",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "SigningObjectID",
+          "targetField": "signing_object_id",
+          "dataType": "int",
+          "comment": "合同主体：单选，以哪个公司的名义签的合同，比如浙江文博，中通文博",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "Sponsor",
+          "targetField": "sponsor",
+          "dataType": "int",
+          "comment": "合同发起人：可选，默认当前操作人",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "SponsorDept",
+          "targetField": "sponsor_dept",
+          "dataType": "int",
+          "comment": "发起部门",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "BiddingID",
+          "targetField": "bidding_id",
+          "dataType": "int",
+          "comment": "投标ID：对外合同要关联投标ID",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "ContractTemplateType",
+          "targetField": "contract_template_type",
+          "dataType": "int",
+          "comment": "合同模板类型：基础数据取",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "ContractName",
+          "targetField": "contract_name",
+          "dataType": "nvarchar(256)",
+          "comment": "合同名称：工程类合同为工程名称",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "CustomerLine",
+          "targetField": "customer_line",
+          "dataType": "int",
+          "comment": "客户线：基础数据取",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "BusinessTypeID",
+          "targetField": "business_type_id",
+          "dataType": "varchar(256)",
+          "comment": "业务类别：多选，基础数据取",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "SupportDept",
+          "targetField": "support_dept",
+          "dataType": "varchar(256)",
+          "comment": "支撑部门：基础数据取，多选",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "SigningDate",
+          "targetField": "signing_date",
+          "dataType": "datetime",
+          "comment": "拟签订日期",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "BeginDate",
+          "targetField": "begin_date",
+          "dataType": "datetime",
+          "comment": "开始日期",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "EndDate",
+          "targetField": "end_date",
+          "dataType": "datetime",
+          "comment": "结束日期",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "TotalAmount",
+          "targetField": "total_amount",
+          "dataType": "decimal(18,2)",
+          "comment": "合同总金额：合同价款（框架合同可以不填金钱相关字段，标准合同一定要填。）",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "GrossProfit",
+          "targetField": "gross_profit",
+          "dataType": "decimal(18,2)",
+          "comment": "合同预估毛利：（框架合同可以不填金钱相关字段，标准合同一定要填。）",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "LoaningAgreement",
+          "targetField": "loaning_agreement",
+          "dataType": "decimal(12,2)",
+          "comment": "垫资约定(手动输入)",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "LoaningMoney",
+          "targetField": "loaning_money",
+          "dataType": "decimal(10,2)",
+          "comment": "垫资量：（框架合同可以不填金钱相关字段，标准合同一定要填。）",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "GrossProfitRate",
+          "targetField": "gross_profit_rate",
+          "dataType": "decimal(7,4)",
+          "comment": "项目毛利率：“在工程施工情况”为“自营”和“自营与业务协作”时，项目毛利率为必填 （%）",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "TaxPoint",
+          "targetField": "tax_point",
+          "dataType": "varchar(512)",
+          "comment": "项目毛利率：“应纳税点：小数例0.XXXX",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "LaborFeeRate",
+          "targetField": "labor_fee_rate",
+          "dataType": "decimal(6,2)",
+          "comment": "劳务费比例",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "LoaningCycle",
+          "targetField": "loaning_cycle",
+          "dataType": "int",
+          "comment": "垫资周期：单位天",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "BillingCycle",
+          "targetField": "billing_cycle",
+          "dataType": "int",
+          "comment": "结算周期：单位天，基础数据取",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "UnitPrice",
+          "targetField": "unit_price",
+          "dataType": "decimal(10,2)",
+          "comment": "合同单价/单价(元/每人每月 - 对内合同起拟)：元",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "CustomerID",
+          "targetField": "customer_id",
+          "dataType": "int",
+          "comment": "客户名称/业务合作单位 ID：基础数据取",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "Linkman",
+          "targetField": "linkman",
+          "dataType": "varchar(64)",
+          "comment": "联系人/客户经办人：基础数据取",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "Phone",
+          "targetField": "phone",
+          "dataType": "varchar(64)",
+          "comment": "联系电话",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "CustomerCategoryID",
+          "targetField": "customer_category_id",
+          "dataType": "int",
+          "comment": "客户类别：从数据字典表中选择",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "Address",
+          "targetField": "address",
+          "dataType": "nvarchar(1024)",
+          "comment": "地址",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "RenewType",
+          "targetField": "renew_type",
+          "dataType": "int",
+          "comment": "合同新续：基础数据取",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "RenewMethod",
+          "targetField": "renew_method",
+          "dataType": "int",
+          "comment": "续签方式：基础数据取。系统自动处理合同到期后的到期时间后延，同时记录下合同变更情况（系统自动续延，只能自动续签一次）",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "ContractContent",
+          "targetField": "contract_content",
+          "dataType": "nvarchar(1024)",
+          "comment": "合同内容：合同内容技术 /标准服务要求",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "BillingIndustry",
+          "targetField": "billing_industry",
+          "dataType": "varchar(512)",
+          "comment": "发票行业：基础数据取",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "Taxrate",
+          "targetField": "taxrate",
+          "dataType": "varchar(512)",
+          "comment": "税率",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "ContractTemplate",
+          "targetField": "contract_template",
+          "dataType": "int",
+          "comment": "合同模板：基础数据取，废弃字段",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "BillingContent",
+          "targetField": "billing_content",
+          "dataType": "nvarchar(512)",
+          "comment": "开票内容",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "Email",
+          "targetField": "email",
+          "dataType": "varchar(128)",
+          "comment": "Email",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "IsSecret",
+          "targetField": "is_secret",
+          "dataType": "bit",
+          "comment": "加密标识：0-false，1-true",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "SubmitDate",
+          "targetField": "submit_date",
+          "dataType": "datetime",
+          "comment": "提交时间，废弃字段",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "Status",
+          "targetField": "status",
+          "dataType": "int",
+          "comment": "合同状态：0-未提交；1-已提交；2-审批中；3-审批成功；4-已反馈；-1作废；",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "ApprovalFlag",
+          "targetField": "approval_flag",
+          "dataType": "int",
+          "comment": "审批状态流：标识已经到那个部门在审批。 逻辑：当一个部门审批成功后，将这个字段置为下一级。若审批失败，则将该审批部门记录在失败记录内",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "FalseApprovalFlag",
+          "targetField": "false_approval_flag",
+          "dataType": "int",
+          "comment": "审批失败部门标识",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "Memo",
+          "targetField": "memo",
+          "dataType": "nvarchar(1024)",
+          "comment": "备注",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "CreateBy",
+          "targetField": "create_by",
+          "dataType": "int",
+          "comment": "创建人",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "CreateTime",
+          "targetField": "create_time",
+          "dataType": "datetime",
+          "comment": "创建时间",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "Deposit",
+          "targetField": "deposit",
+          "dataType": "decimal(18,2)",
+          "comment": "押金",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "DepositMemo",
+          "targetField": "deposit_memo",
+          "dataType": "varchar(300)",
+          "comment": "押金备注",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "DepositDate",
+          "targetField": "deposit_date",
+          "dataType": "datetime",
+          "comment": "押金转接日期",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "HandOverBy",
+          "targetField": "hand_over_by",
+          "dataType": "int",
+          "comment": "交人",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "AcceptBy",
+          "targetField": "accept_by",
+          "dataType": "int",
+          "comment": "接人",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "AcceptMemo",
+          "targetField": "accept_memo",
+          "dataType": "varchar(300)",
+          "comment": "押金责任人交接 备注",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "AcceptDate",
+          "targetField": "accept_date",
+          "dataType": "datetime",
+          "comment": "接受日期",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "DepositState",
+          "targetField": "deposit_state",
+          "dataType": "bit",
+          "comment": "押金要回状态：0-false，1-要回",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "OtherDatas",
+          "targetField": "other_datas",
+          "dataType": "text",
+          "comment": "对于不同模板的额外数据都转为json格式存与此",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "BusinessChanceID",
+          "targetField": "business_chance_id",
+          "dataType": "int",
+          "comment": "关联商机",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "MinPrice",
+          "targetField": "min_price",
+          "dataType": "decimal(18,2)",
+          "comment": "最低单价",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "ProjectID",
+          "targetField": "project_id",
+          "dataType": "int",
+          "comment": "项目ID",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "AutoEndDate",
+          "targetField": "auto_end_date",
+          "dataType": "datetime",
+          "comment": "自动续签到期时间",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "OriginalID",
+          "targetField": "original_id",
+          "dataType": "varchar(500)",
+          "comment": "原始合同",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "BusinessCooperatorID",
+          "targetField": "business_cooperator_id",
+          "dataType": "int",
+          "comment": "业务合作单位ID",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "IsArchive",
+          "targetField": "is_archive",
+          "dataType": "bit",
+          "comment": "是否归档：0-false，1-true",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "IsAutomaticRenewal",
+          "targetField": "is_automatic_renewal",
+          "dataType": "bit",
+          "comment": "是否执行自动续签：0-false，1-true",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "BusinessField",
+          "targetField": "business_field",
+          "dataType": "int",
+          "comment": "业务板块",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "RiskAssessmentState",
+          "targetField": "risk_assessment_state",
+          "dataType": "int",
+          "comment": "合同风险金计提状态",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "CreditMaxMoney",
+          "targetField": "credit_max_money",
+          "dataType": "decimal(18,2)",
+          "comment": "最高垫资金额(万元)",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "ContractMemo",
+          "targetField": "contract_memo",
+          "dataType": "varchar(5000)",
+          "comment": "合同备注",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "PriceUnitName",
+          "targetField": "price_unit_name",
+          "dataType": "varchar(500)",
+          "comment": "比价信息-单位名称",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "PriceMoney",
+          "targetField": "price_money",
+          "dataType": "varchar(500)",
+          "comment": "比价信息-报价金额",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "PriceLinkMan",
+          "targetField": "price_link_man",
+          "dataType": "varchar(500)",
+          "comment": "比价信息-联系人",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "PriceTel",
+          "targetField": "price_tel",
+          "dataType": "varchar(500)",
+          "comment": "比价信息-联系电话",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "PriceMemo",
+          "targetField": "price_memo",
+          "dataType": "varchar(500)",
+          "comment": "比价信息-备注",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "PriceFaildReson",
+          "targetField": "price_faild_reson",
+          "dataType": "varchar(5000)",
+          "comment": "不能比价原因",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "IsLabourUnionContract",
+          "targetField": "is_labour_union_contract",
+          "dataType": "bit",
+          "comment": "是否工会合同",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "LastArchivedTime",
+          "targetField": "last_archived_time",
+          "dataType": "datetime",
+          "comment": "废弃字段",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "IsTestBusiness",
+          "targetField": "is_test_business",
+          "dataType": "bit",
+          "comment": "是否体验业务",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "IsBusinessContract",
+          "targetField": "is_business_contract",
+          "dataType": "bit",
+          "comment": "是否商务合同",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "EndOriginalID",
+          "targetField": "end_original_id",
+          "dataType": "int",
+          "comment": "终止合同的原始合同ID",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "EndContractTime",
+          "targetField": "end_contract_time",
+          "dataType": "datetime",
+          "comment": "终止时间",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "EndContractMemo",
+          "targetField": "end_contract_memo",
+          "dataType": "varchar(MAX)",
+          "comment": "终止原因",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "IsCompanyTemplate",
+          "targetField": "is_company_template",
+          "dataType": "bit",
+          "comment": "是否我司标准模板",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "IsCanChangeContractTerm",
+          "targetField": "is_can_change_contract_term",
+          "dataType": "bit",
+          "comment": "合同条款是否可更改",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "RiskAssessmentAmount",
+          "targetField": "risk_assessment_amount",
+          "dataType": "decimal(18,2)",
+          "comment": "风险金计提标准(金额)",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "IsRiskAssessmentAmount",
+          "targetField": "is_risk_assessment_amount",
+          "dataType": "bit",
+          "comment": "是否已填写风险金计提标准(金额)",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "HYID",
+          "targetField": "hy_id",
+          "dataType": "int",
+          "comment": "行业id",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "HKID",
+          "targetField": "hk_id",
+          "dataType": "int",
+          "comment": "行客id",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "DeliveryTypes",
+          "targetField": "delivery_types",
+          "dataType": "varchar(128)",
+          "comment": "交付业务类别",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "IsImport",
+          "targetField": "is_import",
+          "dataType": "bit",
+          "comment": "是否来源导入",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "di_sign.DataItemName",
+          "targetField": "signing_object_name",
+          "dataType": "nvarchar(64)",
+          "comment": "签约主体名称",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "di_tpl.DataItemName",
+          "targetField": "contract_template_type_name",
+          "dataType": "nvarchar(64)",
+          "comment": "合同模板类型名称",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "cust.OfficialCustomerName",
+          "targetField": "customer_name",
+          "dataType": "nvarchar(128)",
+          "comment": "客户名称",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "di_cc.DataItemName",
+          "targetField": "customer_category_name",
+          "dataType": "nvarchar(64)",
+          "comment": "客户类别名称",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "di_cl.DataItemName",
+          "targetField": "customer_line_name",
+          "dataType": "nvarchar(64)",
+          "comment": "客户线名称",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "di_bf.DataItemName",
+          "targetField": "business_field_name",
+          "dataType": "nvarchar(64)",
+          "comment": "业务板块名称",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "org.FullName",
+          "targetField": "sponsor_dept_name",
+          "dataType": "nvarchar(64)",
+          "comment": "发起部门名称",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "di_hy.DataItemName",
+          "targetField": "hy_name",
+          "dataType": "nvarchar(64)",
+          "comment": "行业名称",
+          "scdStrategy": "SCD2"
+        },
+        {
+          "srcField": "di_hk.DataItemName",
+          "targetField": "hk_name",
+          "dataType": "nvarchar(64)",
+          "comment": "行客名称",
+          "scdStrategy": "SCD2"
+        }
+      ],
+      "derivedFields": [
+        {
+          "name": "contract_category",
+          "type": "NVARCHAR(64)",
+          "comment": "统一收支分类: '收入合同'/'支出合同'",
+          "exprType": "CASE",
+          "exprConfig": {
+            "branches": [
+              {
+                "field": "c.IsOut",
+                "whenValue": "1",
+                "thenValue": "N'收入合同'"
+              }
+            ],
+            "elseValue": "N'支出合同'"
+          },
+          "source": "CASE WHEN c.IsOut = 1 THEN N'收入合同' ELSE N'支出合同' END"
+        },
+        {
+          "name": "contract_type_std",
+          "type": "NVARCHAR(64)",
+          "comment": "标准化合同类型（收支前缀+类型名）",
+          "exprType": "RAW",
+          "exprConfig": {
+            "expression": "CASE\n    WHEN c.IsOut = 1 AND c.ContractType = 3296  THEN N'收入合同-常规合同'\n    WHEN c.IsOut = 1 AND c.ContractType = 3297  THEN N'收入合同-框架合同'\n    WHEN c.IsOut = 1 AND c.ContractType = 3298  THEN N'收入合同-子合同'\n    WHEN c.IsOut = 1 AND c.ContractType = 3299  THEN N'收入合同-备忘录'\n    WHEN c.IsOut = 1 AND c.ContractType = 5000822 THEN N'收入合同-战略合同'\n    WHEN c.IsOut = 1 AND c.ContractType = 5001475 THEN N'收入合同-商务合作合同'\n    WHEN c.IsOut = 1 AND c.ContractType = 5002337 THEN N'收入合同-紧密型单项收入合同'\n    WHEN c.IsOut = 1 AND c.ContractType = 51    THEN N'收入合同-终止合同'\n    WHEN c.IsOut = 0 AND c.ContractType = 5002338 THEN N'支出合同-业务支出合同'\n    WHEN c.IsOut = 0 AND c.ContractType = 5002339 THEN N'支出合同-非业务支出合同'\n    WHEN c.IsOut = 0 AND c.ContractType = 5001475 THEN N'支出合同-商务合作合同'\n    WHEN c.IsOut = 0 AND c.ContractType = 3296  THEN N'支出合同-常规合同'\n    WHEN c.IsOut = 0 AND (c.ContractType = 0 OR c.ContractType IS NULL) THEN N'支出合同-未细分'\n    ELSE N'未知类型'\nEND"
+          },
+          "source": "CASE\n    WHEN c.IsOut = 1 AND c.ContractType = 3296  THEN N'收入合同-常规合同'\n    WHEN c.IsOut = 1 AND c.ContractType = 3297  THEN N'收入合同-框架合同'\n    WHEN c.IsOut = 1 AND c.ContractType = 3298  THEN N'收入合同-子合同'\n    WHEN c.IsOut = 1 AND c.ContractType = 3299  THEN N'收入合同-备忘录'\n    WHEN c.IsOut = 1 AND c.ContractType = 5000822 THEN N'收入合同-战略合同'\n    WHEN c.IsOut = 1 AND c.ContractType = 5001475 THEN N'收入合同-商务合作合同'\n    WHEN c.IsOut = 1 AND c.ContractType = 5002337 THEN N'收入合同-紧密型单项收入合同'\n    WHEN c.IsOut = 1 AND c.ContractType = 51    THEN N'收入合同-终止合同'\n    WHEN c.IsOut = 0 AND c.ContractType = 5002338 THEN N'支出合同-业务支出合同'\n    WHEN c.IsOut = 0 AND c.ContractType = 5002339 THEN N'支出合同-非业务支出合同'\n    WHEN c.IsOut = 0 AND c.ContractType = 5001475 THEN N'支出合同-商务合作合同'\n    WHEN c.IsOut = 0 AND c.ContractType = 3296  THEN N'支出合同-常规合同'\n    WHEN c.IsOut = 0 AND (c.ContractType = 0 OR c.ContractType IS NULL) THEN N'支出合同-未细分'\n    ELSE N'未知类型'\nEND"
+        },
+        {
+          "name": "renew_type_std",
+          "type": "NVARCHAR(64)",
+          "comment": "标准化续签类型：新签/续签/自动续签/三方转签/不适用",
+          "exprType": "CASE",
+          "exprConfig": {
+            "branches": [
+              {
+                "field": "c.IsOut",
+                "whenValue": "0",
+                "thenValue": "N'不适用'"
+              },
+              {
+                "field": "c.RenewType",
+                "whenValue": "3305",
+                "thenValue": "N'新签'"
+              },
+              {
+                "field": "c.RenewType",
+                "whenValue": "3306",
+                "thenValue": "N'续签'"
+              },
+              {
+                "field": "c.RenewType",
+                "whenValue": "163",
+                "thenValue": "N'新签'"
+              },
+              {
+                "field": "c.RenewType",
+                "whenValue": "164",
+                "thenValue": "N'续签'"
+              },
+              {
+                "field": "c.RenewType",
+                "whenValue": "165",
+                "thenValue": "N'自动续签'"
+              },
+              {
+                "field": "c.RenewType",
+                "whenValue": "166",
+                "thenValue": "N'三方转签'"
+              },
+              {
+                "field": "c.RenewType",
+                "whenValue": "220",
+                "thenValue": "N'新增新签'"
+              },
+              {
+                "field": "c.RenewType",
+                "whenValue": "0",
+                "thenValue": "N'未标记'"
+              }
+            ],
+            "elseValue": "N'未知'"
+          },
+          "source": "CASE\n        WHEN c.IsOut = 0 THEN N'不适用'\n        WHEN c.RenewType = 3305 THEN N'新签'\n        WHEN c.RenewType = 3306 THEN N'续签'\n        WHEN c.RenewType = 163 THEN N'新签'\n        WHEN c.RenewType = 164 THEN N'续签'\n        WHEN c.RenewType = 165 THEN N'自动续签'\n        WHEN c.RenewType = 166 THEN N'三方转签'\n        WHEN c.RenewType = 220 THEN N'新增新签'\n        WHEN c.RenewType = 0 THEN N'未标记'\n        ELSE N'未知'\n    END"
+        },
+        {
+          "name": "status_name",
+          "type": "NVARCHAR(64)",
+          "comment": "合同状态名称",
+          "exprType": "CASE",
+          "exprConfig": {
+            "branches": [
+              {
+                "field": "c.Status",
+                "whenValue": "0",
+                "thenValue": "N'未提交'"
+              },
+              {
+                "field": "c.Status",
+                "whenValue": "1",
+                "thenValue": "N'已提交'"
+              },
+              {
+                "field": "c.Status",
+                "whenValue": "2",
+                "thenValue": "N'审批中'"
+              },
+              {
+                "field": "c.Status",
+                "whenValue": "3",
+                "thenValue": "N'审批成功'"
+              },
+              {
+                "field": "c.Status",
+                "whenValue": "4",
+                "thenValue": "N'已反馈'"
+              },
+              {
+                "field": "c.Status",
+                "whenValue": "5",
+                "thenValue": "N'已终止'"
+              },
+              {
+                "field": "c.Status",
+                "whenValue": "-1",
+                "thenValue": "N'作废'"
+              },
+              {
+                "field": "c.Status",
+                "whenValue": "-2",
+                "thenValue": "N'终止'"
+              },
+              {
+                "field": "c.Status",
+                "whenValue": "-3",
+                "thenValue": "N'顺延'"
+              }
+            ],
+            "elseValue": "N'未知'"
+          },
+          "source": "CASE\n        WHEN c.Status = 0 THEN N'未提交'\n        WHEN c.Status = 1 THEN N'已提交'\n        WHEN c.Status = 2 THEN N'审批中'\n        WHEN c.Status = 3 THEN N'审批成功'\n        WHEN c.Status = 4 THEN N'已反馈'\n        WHEN c.Status = 5 THEN N'已终止'\n        WHEN c.Status = -1 THEN N'作废'\n        WHEN c.Status = -2 THEN N'终止'\n        WHEN c.Status = -3 THEN N'顺延'\n        ELSE N'未知'\n    END"
+        },
+        {
+          "name": "dq_renew_flag",
+          "type": "NVARCHAR(64)",
+          "comment": "续签数据质量标记",
+          "exprType": "RAW",
+          "exprConfig": {
+            "expression": "CASE\n    WHEN c.IsOut = 0 THEN 'N/A'\n    WHEN c.RenewType IN (164, 3306) AND (c.OriginalID IS NULL OR c.OriginalID = '' OR c.OriginalID = '0') THEN 'A-renew-no-source'\n    WHEN c.RenewType IN (163, 3305, 220) AND c.OriginalID IS NOT NULL AND c.OriginalID <> '' AND c.OriginalID <> '0' THEN 'B-new-has-source'\n    WHEN c.RenewType = 165 AND (c.OriginalID IS NULL OR c.OriginalID = '' OR c.OriginalID = '0') THEN 'C-auto-no-source'\n    WHEN c.RenewType = 166 AND (c.OriginalID IS NULL OR c.OriginalID = '' OR c.OriginalID = '0') THEN 'D-transfer-no-source'\n    ELSE 'OK'\nEND"
+          },
+          "source": "CASE\n    WHEN c.IsOut = 0 THEN 'N/A'\n    WHEN c.RenewType IN (164, 3306) AND (c.OriginalID IS NULL OR c.OriginalID = '' OR c.OriginalID = '0') THEN 'A-renew-no-source'\n    WHEN c.RenewType IN (163, 3305, 220) AND c.OriginalID IS NOT NULL AND c.OriginalID <> '' AND c.OriginalID <> '0' THEN 'B-new-has-source'\n    WHEN c.RenewType = 165 AND (c.OriginalID IS NULL OR c.OriginalID = '' OR c.OriginalID = '0') THEN 'C-auto-no-source'\n    WHEN c.RenewType = 166 AND (c.OriginalID IS NULL OR c.OriginalID = '' OR c.OriginalID = '0') THEN 'D-transfer-no-source'\n    ELSE 'OK'\nEND"
+        },
+        {
+          "name": "is_renewed",
+          "type": "BIT",
+          "comment": "是否已续签（有其他有效合同的 original_id 指向本合同，基于 ods_contract_original_df）",
+          "exprType": "RAW",
+          "exprConfig": {
+            "expression": "CASE\n    WHEN c.IsOut = 0 THEN NULL\n    WHEN EXISTS (\n        SELECT 1\n        FROM dbo.ods_contract_original_df o\n        INNER JOIN dbo.ods_contract_df c2\n            ON o.ContractID = c2.ContractID\n        WHERE o.OriginalId = c.ContractID\n          AND c2.IsOut = 1\n          AND c2.Status NOT IN (-1, -2, 5)\n    ) THEN 1\n    ELSE 0\nEND"
+          },
+          "source": "CASE\n    WHEN c.IsOut = 0 THEN NULL\n    WHEN EXISTS (\n        SELECT 1\n        FROM dbo.ods_contract_original_df o\n        INNER JOIN dbo.ods_contract_df c2\n            ON o.ContractID = c2.ContractID\n        WHERE o.OriginalId = c.ContractID\n          AND c2.IsOut = 1\n          AND c2.Status NOT IN (-1, -2, 5)\n    ) THEN 1\n    ELSE 0\nEND"
+        },
+        {
+          "name": "is_renewed_name",
+          "type": "NVARCHAR(64)",
+          "comment": "是否已续签名称：'已续签'/'未续签'/'不适用'",
+          "exprType": "RAW",
+          "exprConfig": {
+            "expression": "CASE\n    WHEN c.IsOut = 0 THEN N'不适用'\n    WHEN EXISTS (\n        SELECT 1\n        FROM dbo.ods_contract_original_df o\n        INNER JOIN dbo.ods_contract_df c2\n            ON o.ContractID = c2.ContractID\n        WHERE o.OriginalId = c.ContractID\n          AND c2.IsOut = 1\n          AND c2.Status NOT IN (-1, -2, 5)\n    ) THEN N'已续签'\n    ELSE N'未续签'\nEND"
+          },
+          "source": "CASE\n    WHEN c.IsOut = 0 THEN N'不适用'\n    WHEN EXISTS (\n        SELECT 1\n        FROM dbo.ods_contract_original_df o\n        INNER JOIN dbo.ods_contract_df c2\n            ON o.ContractID = c2.ContractID\n        WHERE o.OriginalId = c.ContractID\n          AND c2.IsOut = 1\n          AND c2.Status NOT IN (-1, -2, 5)\n    ) THEN N'已续签'\n    ELSE N'未续签'\nEND"
+        },
+        {
+          "name": "renew_method_name",
+          "type": "NVARCHAR(64)",
+          "comment": "续签方式描述",
+          "exprType": "REF",
+          "exprConfig": {
+            "expression": "di_rm.DataItemName"
+          },
+          "source": "di_rm.DataItemName"
+        }
+      ]
+    },
+    "is_deleted": 0,
+    "deleted_at": null,
+    "delete_reason": null,
+    "deleted_by": null,
+    "script_path": null,
+    "script_saved_at": null,
+    "script_saved_by": null,
+    "script_modified": 0,
+    "script_modified_by": null,
+    "script_modified_at": null,
+    "config_mode": "standard",
+    "design_notes": null,
+    "companion_of": null
+  }
+}

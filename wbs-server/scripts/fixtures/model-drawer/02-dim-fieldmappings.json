@@ -1,0 +1,597 @@
+{
+  "_note": "本地库 #50 dim_official_customer 真实快照。fieldMappings=41+scdConfig.derivedFields",
+  "model": {
+    "id": 50,
+    "layer": "dim",
+    "domain": null,
+    "table_name": "dim_official_customer",
+    "table_comment": "正式客户信息维度表",
+    "tech_owner": "管理员",
+    "biz_owner": "",
+    "update_cycle": "di",
+    "status": "DEVELOPING",
+    "created_at": "2026-01-22 15:15:19",
+    "updated_at": "2026-02-27 11:40:14",
+    "source_table": null,
+    "source_system": null,
+    "model_type": "TABLE",
+    "created_by_id": 1,
+    "category": "general",
+    "dim_config": {
+      "scdConfig": {
+        "scdType": "HYBRID",
+        "businessKey": "OfficialCustomerID",
+        "versionKey": "ChangeID",
+        "trackFields": [
+          "ChangeID",
+          "OfficialCustomerID",
+          "ParentID",
+          "LinkMan",
+          "AreaID",
+          "ShortOfficialCustomerName",
+          "OfficialCustomerName",
+          "OfficialCustomerCode",
+          "IndustryID",
+          "CustomerCategoryID",
+          "Enable",
+          "IsCooperating",
+          "Memo",
+          "LinkTel",
+          "CreateBy",
+          "Address",
+          "CustomerLine",
+          "CorporateTurnOver",
+          "CorporateTurnIn",
+          "PersonalRate",
+          "DutyParagraph",
+          "BusinessLicenseCode",
+          "FinancialCode",
+          "ModifyTime",
+          "ModifyBy",
+          "IsCustomer",
+          "LabourUnionCode",
+          "BusinessField",
+          "Province",
+          "City",
+          "CustomerType",
+          "AffiliationBusinessFields",
+          "HYID",
+          "HKID",
+          "OrgID",
+          "State",
+          "ApprovalStaffIDs",
+          "PassTime",
+          "defaultHYID",
+          "defaultHKID",
+          "FlowTypeID"
+        ],
+        "fieldMappings": [
+          {
+            "srcField": "ChangeID",
+            "targetField": "change_id",
+            "dataType": "int",
+            "comment": "变更记录ID（来源追溯）",
+            "scdStrategy": "SCD1"
+          },
+          {
+            "srcField": "OfficialCustomerID",
+            "targetField": "official_customer_id",
+            "dataType": "int",
+            "comment": "客户ID",
+            "scdStrategy": "SCD1"
+          },
+          {
+            "srcField": "ParentID",
+            "targetField": "parent_id",
+            "dataType": "int",
+            "comment": "上级客户ID",
+            "scdStrategy": "SCD2"
+          },
+          {
+            "srcField": "LinkMan",
+            "targetField": "link_man",
+            "dataType": "nvarchar(64)",
+            "comment": "联系人",
+            "scdStrategy": "SCD1"
+          },
+          {
+            "srcField": "AreaID",
+            "targetField": "area_id",
+            "dataType": "int",
+            "comment": "区域ID",
+            "scdStrategy": "SCD2"
+          },
+          {
+            "srcField": "ShortOfficialCustomerName",
+            "targetField": "short_customer_name",
+            "dataType": "nvarchar(64)",
+            "comment": "客户简称",
+            "scdStrategy": "SCD2"
+          },
+          {
+            "srcField": "OfficialCustomerName",
+            "targetField": "official_customer_name",
+            "dataType": "nvarchar(128)",
+            "comment": "客户名称",
+            "scdStrategy": "SCD2"
+          },
+          {
+            "srcField": "OfficialCustomerCode",
+            "targetField": "official_customer_code",
+            "dataType": "varchar(64)",
+            "comment": "客户编码",
+            "scdStrategy": "SCD2"
+          },
+          {
+            "srcField": "IndustryID",
+            "targetField": "industry_id",
+            "dataType": "int",
+            "comment": "行业ID",
+            "scdStrategy": "SCD2"
+          },
+          {
+            "srcField": "CustomerCategoryID",
+            "targetField": "customer_category_id",
+            "dataType": "int",
+            "comment": "客户类别",
+            "scdStrategy": "SCD2"
+          },
+          {
+            "srcField": "Enable",
+            "targetField": "enable",
+            "dataType": "int",
+            "comment": "启用:-1删除、0-未启用、1-启用",
+            "scdStrategy": "SCD2"
+          },
+          {
+            "srcField": "IsCooperating",
+            "targetField": "is_cooperating",
+            "dataType": "bit",
+            "comment": "合作状态：0-未合作，1-已合作",
+            "scdStrategy": "SCD2"
+          },
+          {
+            "srcField": "Memo",
+            "targetField": "memo",
+            "dataType": "nvarchar(2048)",
+            "comment": "备注",
+            "scdStrategy": "SCD1"
+          },
+          {
+            "srcField": "LinkTel",
+            "targetField": "link_tel",
+            "dataType": "varchar(64)",
+            "comment": "联系电话",
+            "scdStrategy": "SCD1"
+          },
+          {
+            "srcField": "CreateBy",
+            "targetField": "create_by",
+            "dataType": "int",
+            "comment": "创建人",
+            "scdStrategy": "SCD1"
+          },
+          {
+            "srcField": "Address",
+            "targetField": "address",
+            "dataType": "nvarchar(1024)",
+            "comment": "客户地址",
+            "scdStrategy": "SCD1"
+          },
+          {
+            "srcField": "CustomerLine",
+            "targetField": "customer_line_id",
+            "dataType": "int",
+            "comment": "客户线",
+            "scdStrategy": "SCD2"
+          },
+          {
+            "srcField": "CorporateTurnOver",
+            "targetField": "corporate_turn_over",
+            "dataType": "decimal(6,4)",
+            "comment": "企业工会费上缴率",
+            "scdStrategy": "SCD1"
+          },
+          {
+            "srcField": "CorporateTurnIn",
+            "targetField": "corporate_turn_in",
+            "dataType": "decimal(6,4)",
+            "comment": "企业工会费自留率",
+            "scdStrategy": "SCD1"
+          },
+          {
+            "srcField": "PersonalRate",
+            "targetField": "personal_rate",
+            "dataType": "decimal(6,4)",
+            "comment": "个人工会费比率",
+            "scdStrategy": "SCD1"
+          },
+          {
+            "srcField": "DutyParagraph",
+            "targetField": "duty_paragraph",
+            "dataType": "nvarchar(150)",
+            "comment": "税号",
+            "scdStrategy": "SCD1"
+          },
+          {
+            "srcField": "BusinessLicenseCode",
+            "targetField": "business_license_code",
+            "dataType": "nvarchar(150)",
+            "comment": "营业执照代码",
+            "scdStrategy": "SCD1"
+          },
+          {
+            "srcField": "FinancialCode",
+            "targetField": "financial_code",
+            "dataType": "nvarchar(100)",
+            "comment": "财务编码",
+            "scdStrategy": "SCD1"
+          },
+          {
+            "srcField": "ModifyTime",
+            "targetField": "modify_time",
+            "dataType": "datetime",
+            "comment": "",
+            "scdStrategy": "SCD1"
+          },
+          {
+            "srcField": "ModifyBy",
+            "targetField": "modify_by",
+            "dataType": "int",
+            "comment": "修改人",
+            "scdStrategy": "SCD1"
+          },
+          {
+            "srcField": "IsCustomer",
+            "targetField": "is_customer",
+            "dataType": "bit",
+            "comment": "是否通服专户客户",
+            "scdStrategy": "SCD1"
+          },
+          {
+            "srcField": "LabourUnionCode",
+            "targetField": "labour_union_code",
+            "dataType": "nvarchar(1024)",
+            "comment": "工会财务编码",
+            "scdStrategy": "SCD1"
+          },
+          {
+            "srcField": "BusinessField",
+            "targetField": "business_field",
+            "dataType": "int",
+            "comment": "支撑业务板块",
+            "scdStrategy": "SCD2"
+          },
+          {
+            "srcField": "Province",
+            "targetField": "province",
+            "dataType": "int",
+            "comment": "省份",
+            "scdStrategy": "SCD2"
+          },
+          {
+            "srcField": "City",
+            "targetField": "city",
+            "dataType": "int",
+            "comment": "市",
+            "scdStrategy": "SCD2"
+          },
+          {
+            "srcField": "CustomerType",
+            "targetField": "customer_type",
+            "dataType": "int",
+            "comment": "客户类型",
+            "scdStrategy": "SCD2"
+          },
+          {
+            "srcField": "AffiliationBusinessFields",
+            "targetField": "affiliation_business_fields",
+            "dataType": "varchar(50)",
+            "comment": "所属业务板块",
+            "scdStrategy": "SCD1"
+          },
+          {
+            "srcField": "HYID",
+            "targetField": "hy_id",
+            "dataType": "int",
+            "comment": "行业线",
+            "scdStrategy": "SCD2"
+          },
+          {
+            "srcField": "HKID",
+            "targetField": "hk_id",
+            "dataType": "int",
+            "comment": "行客id",
+            "scdStrategy": "SCD2"
+          },
+          {
+            "srcField": "OrgID",
+            "targetField": "org_id",
+            "dataType": "int",
+            "comment": "所属部门ID",
+            "scdStrategy": "SCD2"
+          },
+          {
+            "srcField": "State",
+            "targetField": "state",
+            "dataType": "int",
+            "comment": "状态",
+            "scdStrategy": "SCD2"
+          },
+          {
+            "srcField": "ApprovalStaffIDs",
+            "targetField": "approval_staff_ids",
+            "dataType": "nvarchar(4000)",
+            "comment": "审批人员",
+            "scdStrategy": "SCD1"
+          },
+          {
+            "srcField": "PassTime",
+            "targetField": "pass_time",
+            "dataType": "datetime",
+            "comment": "",
+            "scdStrategy": "SCD1"
+          },
+          {
+            "srcField": "defaultHYID",
+            "targetField": "default_hy_id",
+            "dataType": "int",
+            "comment": "行业id",
+            "scdStrategy": "SCD1"
+          },
+          {
+            "srcField": "defaultHKID",
+            "targetField": "default_hk_id",
+            "dataType": "int",
+            "comment": "行客id",
+            "scdStrategy": "SCD1"
+          },
+          {
+            "srcField": "FlowTypeID",
+            "targetField": "flow_type_id",
+            "dataType": "int",
+            "comment": "流程类型ID",
+            "scdStrategy": "SCD1"
+          }
+        ],
+        "derivedFields": [
+          {
+            "name": "customer_line_name",
+            "type": "NVARCHAR(64)",
+            "comment": "客户小类名称",
+            "exprType": "REF",
+            "exprConfig": {
+              "expression": "cl.DataItemName"
+            },
+            "source": "cl.DataItemName"
+          },
+          {
+            "name": "customer_category_name",
+            "type": "NVARCHAR(64)",
+            "comment": "客户大类名称",
+            "exprType": "REF",
+            "exprConfig": {
+              "expression": "catname.DataItemName"
+            },
+            "source": "catname.DataItemName"
+          },
+          {
+            "name": "hy_name",
+            "type": "NVARCHAR(64)",
+            "comment": "行业线名称",
+            "exprType": "REF",
+            "exprConfig": {
+              "expression": "hy.DataItemName"
+            },
+            "source": "hy.DataItemName"
+          },
+          {
+            "name": "hk_name",
+            "type": "NVARCHAR(64)",
+            "comment": "行客线名称",
+            "exprType": "REF",
+            "exprConfig": {
+              "expression": "hk.DataItemName"
+            },
+            "source": "hk.DataItemName"
+          },
+          {
+            "name": "industry_name",
+            "type": "NVARCHAR(64)",
+            "comment": "行业名称",
+            "exprType": "REF",
+            "exprConfig": {
+              "expression": "ind.DataItemName"
+            },
+            "source": "ind.DataItemName"
+          },
+          {
+            "name": "org_name",
+            "type": "NVARCHAR(64)",
+            "comment": "部门名称",
+            "exprType": "REF",
+            "exprConfig": {
+              "expression": "org.OrgName"
+            },
+            "source": "org.OrgName"
+          },
+          {
+            "name": "business_field_name",
+            "type": "NVARCHAR(64)",
+            "comment": "经营领域名称",
+            "exprType": "REF",
+            "exprConfig": {
+              "expression": "bf.DataItemName"
+            },
+            "source": "bf.DataItemName"
+          },
+          {
+            "name": "customer_type_name",
+            "type": "NVARCHAR(64)",
+            "comment": "客户类型名称",
+            "exprType": "REF",
+            "exprConfig": {
+              "expression": "ct.DataItemName"
+            },
+            "source": "ct.DataItemName"
+          },
+          {
+            "name": "customer_create_dt",
+            "type": "DATE",
+            "comment": "客户创建日期（来自主表CreateDate）",
+            "exprType": "REF",
+            "exprConfig": {
+              "expression": ""
+            },
+            "source": ""
+          }
+        ],
+        "options": {
+          "deleteDetection": true,
+          "modifyDetection": true,
+          "consistencyAlert": true,
+          "auditLog": true,
+          "stateFilter": "c.State = 3",
+          "versionOrderField": "ChangeID",
+          "effDtExpr": "COALESCE(CAST(wfp.ApprovalTime AS DATE), CAST(bocc.CreateDate AS DATE))",
+          "consistencySourceTable": {
+            "name": "ods_base_official_customer_df",
+            "alias": "m",
+            "joinField": "OfficialCustomerID"
+          },
+          "additionalIndexes": [
+            {
+              "name": "IX_dim_official_customer_change_id",
+              "columns": "change_id",
+              "where": ""
+            },
+            {
+              "name": "IX_dim_official_customer_composite",
+              "columns": "official_customer_id, dw_eff_dt",
+              "where": ""
+            },
+            {
+              "name": "IX_dim_official_customer_batch",
+              "columns": "dw_batch_id",
+              "where": ""
+            },
+            {
+              "name": "IX_dim_official_customer_category",
+              "columns": "customer_category_id, customer_line_id",
+              "where": ""
+            },
+            {
+              "name": "IX_dim_official_customer_parent",
+              "columns": "parent_id",
+              "where": ""
+            }
+          ],
+          "consistencyExcludeFields": [
+            "FlowTypeID"
+          ]
+        }
+      },
+      "sourceTables": [
+        {
+          "name": "ods_base_official_customer_change_df",
+          "isPrimary": true,
+          "alias": "bocc"
+        },
+        {
+          "name": "ods_base_official_customer_df",
+          "isPrimary": false,
+          "alias": "m",
+          "joinType": "LEFT JOIN",
+          "joinCondition": "bocc.OfficialCustomerID = m.OfficialCustomerID"
+        },
+        {
+          "name": "ods_base_data_item_df",
+          "isPrimary": false,
+          "alias": "cl",
+          "joinType": "LEFT JOIN",
+          "joinCondition": "cl.DataItemID = bocc.CustomerLine -- CustomerLine name"
+        },
+        {
+          "name": "ods_base_data_item_df",
+          "isPrimary": false,
+          "alias": "cata",
+          "joinType": "LEFT JOIN",
+          "joinCondition": "cata.DataItemID = bocc.CustomerLine AND cata.DICategoryID = 35 -- Category mapping"
+        },
+        {
+          "name": "ods_base_data_item_df",
+          "isPrimary": false,
+          "alias": "catname",
+          "joinType": "LEFT JOIN",
+          "joinCondition": "catname.DataItemID = cata.Extendedproperty -- Category name"
+        },
+        {
+          "name": "ods_base_data_item_df",
+          "isPrimary": false,
+          "alias": "hy",
+          "joinType": "LEFT JOIN",
+          "joinCondition": "hy.DataItemID = bocc.HYID -- HY line name"
+        },
+        {
+          "name": "ods_base_data_item_df",
+          "isPrimary": false,
+          "alias": "hk",
+          "joinType": "LEFT JOIN",
+          "joinCondition": "hk.DataItemID = bocc.HKID -- HK line name"
+        },
+        {
+          "name": "ods_base_data_item_df",
+          "isPrimary": false,
+          "alias": "ind",
+          "joinType": "LEFT JOIN",
+          "joinCondition": "ind.DataItemID = bocc.IndustryID -- Industry name"
+        },
+        {
+          "name": "ods_base_org_df",
+          "isPrimary": false,
+          "alias": "org",
+          "joinType": "LEFT JOIN",
+          "joinCondition": "org.OrgID = bocc.OrgID -- Org name"
+        },
+        {
+          "name": "ods_base_data_item_df",
+          "isPrimary": false,
+          "alias": "bf",
+          "joinType": "LEFT JOIN",
+          "joinCondition": "bf.DataItemID = bocc.BusinessField -- BusinessField name"
+        },
+        {
+          "name": "ods_base_data_item_df",
+          "isPrimary": false,
+          "alias": "ct",
+          "joinType": "LEFT JOIN",
+          "joinCondition": "ct.DataItemID = bocc.CustomerType -- CustomerType name"
+        }
+      ],
+      "advancedSql": {
+        "type": "APPLY",
+        "types": [
+          "APPLY",
+          "CTE"
+        ],
+        "applyContent": "OUTER APPLY (\n    SELECT TOP 1 wfp.ApprovalTime\n    FROM ods_wf_flow_progress_df wfp\n    WHERE wfp.FlowID = bocc.ChangeID\n      AND wfp.FlowTypeID = 1806\n    ORDER BY wfp.ApprovalTime DESC\n) wfp",
+        "cteContent": "cust_cata AS (\n    SELECT DataItemID, Extendedproperty\n    FROM ods_base_data_item_df\n    WHERE DICategoryID = 35\n)",
+        "cteAlias": "cust_cata",
+        "customFromContent": ""
+      }
+    },
+    "is_deleted": 0,
+    "deleted_at": null,
+    "delete_reason": null,
+    "deleted_by": null,
+    "script_path": null,
+    "script_saved_at": null,
+    "script_saved_by": null,
+    "script_modified": 0,
+    "script_modified_by": null,
+    "script_modified_at": null,
+    "config_mode": "standard",
+    "design_notes": null,
+    "companion_of": null
+  }
+}

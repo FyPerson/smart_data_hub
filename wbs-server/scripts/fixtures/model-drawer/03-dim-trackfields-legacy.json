@@ -1,0 +1,216 @@
+{
+  "_note": "#50 派生构造：仅 trackFields(41 个纯字段名)模拟旧数据形态,type 允许空",
+  "model": {
+    "id": 50,
+    "layer": "dim",
+    "domain": null,
+    "table_name": "dim_official_customer",
+    "table_comment": "正式客户信息维度表",
+    "tech_owner": "管理员",
+    "biz_owner": "",
+    "update_cycle": "di",
+    "status": "DEVELOPING",
+    "created_at": "2026-01-22 15:15:19",
+    "updated_at": "2026-02-27 11:40:14",
+    "source_table": null,
+    "source_system": null,
+    "model_type": "TABLE",
+    "created_by_id": 1,
+    "category": "general",
+    "dim_config": {
+      "scdConfig": {
+        "scdType": "HYBRID",
+        "businessKey": "OfficialCustomerID",
+        "versionKey": "ChangeID",
+        "trackFields": [
+          "ChangeID",
+          "OfficialCustomerID",
+          "ParentID",
+          "LinkMan",
+          "AreaID",
+          "ShortOfficialCustomerName",
+          "OfficialCustomerName",
+          "OfficialCustomerCode",
+          "IndustryID",
+          "CustomerCategoryID",
+          "Enable",
+          "IsCooperating",
+          "Memo",
+          "LinkTel",
+          "CreateBy",
+          "Address",
+          "CustomerLine",
+          "CorporateTurnOver",
+          "CorporateTurnIn",
+          "PersonalRate",
+          "DutyParagraph",
+          "BusinessLicenseCode",
+          "FinancialCode",
+          "ModifyTime",
+          "ModifyBy",
+          "IsCustomer",
+          "LabourUnionCode",
+          "BusinessField",
+          "Province",
+          "City",
+          "CustomerType",
+          "AffiliationBusinessFields",
+          "HYID",
+          "HKID",
+          "OrgID",
+          "State",
+          "ApprovalStaffIDs",
+          "PassTime",
+          "defaultHYID",
+          "defaultHKID",
+          "FlowTypeID"
+        ],
+        "options": {
+          "deleteDetection": true,
+          "modifyDetection": true,
+          "consistencyAlert": true,
+          "auditLog": true,
+          "stateFilter": "c.State = 3",
+          "versionOrderField": "ChangeID",
+          "effDtExpr": "COALESCE(CAST(wfp.ApprovalTime AS DATE), CAST(bocc.CreateDate AS DATE))",
+          "consistencySourceTable": {
+            "name": "ods_base_official_customer_df",
+            "alias": "m",
+            "joinField": "OfficialCustomerID"
+          },
+          "additionalIndexes": [
+            {
+              "name": "IX_dim_official_customer_change_id",
+              "columns": "change_id",
+              "where": ""
+            },
+            {
+              "name": "IX_dim_official_customer_composite",
+              "columns": "official_customer_id, dw_eff_dt",
+              "where": ""
+            },
+            {
+              "name": "IX_dim_official_customer_batch",
+              "columns": "dw_batch_id",
+              "where": ""
+            },
+            {
+              "name": "IX_dim_official_customer_category",
+              "columns": "customer_category_id, customer_line_id",
+              "where": ""
+            },
+            {
+              "name": "IX_dim_official_customer_parent",
+              "columns": "parent_id",
+              "where": ""
+            }
+          ],
+          "consistencyExcludeFields": [
+            "FlowTypeID"
+          ]
+        }
+      },
+      "sourceTables": [
+        {
+          "name": "ods_base_official_customer_change_df",
+          "isPrimary": true,
+          "alias": "bocc"
+        },
+        {
+          "name": "ods_base_official_customer_df",
+          "isPrimary": false,
+          "alias": "m",
+          "joinType": "LEFT JOIN",
+          "joinCondition": "bocc.OfficialCustomerID = m.OfficialCustomerID"
+        },
+        {
+          "name": "ods_base_data_item_df",
+          "isPrimary": false,
+          "alias": "cl",
+          "joinType": "LEFT JOIN",
+          "joinCondition": "cl.DataItemID = bocc.CustomerLine -- CustomerLine name"
+        },
+        {
+          "name": "ods_base_data_item_df",
+          "isPrimary": false,
+          "alias": "cata",
+          "joinType": "LEFT JOIN",
+          "joinCondition": "cata.DataItemID = bocc.CustomerLine AND cata.DICategoryID = 35 -- Category mapping"
+        },
+        {
+          "name": "ods_base_data_item_df",
+          "isPrimary": false,
+          "alias": "catname",
+          "joinType": "LEFT JOIN",
+          "joinCondition": "catname.DataItemID = cata.Extendedproperty -- Category name"
+        },
+        {
+          "name": "ods_base_data_item_df",
+          "isPrimary": false,
+          "alias": "hy",
+          "joinType": "LEFT JOIN",
+          "joinCondition": "hy.DataItemID = bocc.HYID -- HY line name"
+        },
+        {
+          "name": "ods_base_data_item_df",
+          "isPrimary": false,
+          "alias": "hk",
+          "joinType": "LEFT JOIN",
+          "joinCondition": "hk.DataItemID = bocc.HKID -- HK line name"
+        },
+        {
+          "name": "ods_base_data_item_df",
+          "isPrimary": false,
+          "alias": "ind",
+          "joinType": "LEFT JOIN",
+          "joinCondition": "ind.DataItemID = bocc.IndustryID -- Industry name"
+        },
+        {
+          "name": "ods_base_org_df",
+          "isPrimary": false,
+          "alias": "org",
+          "joinType": "LEFT JOIN",
+          "joinCondition": "org.OrgID = bocc.OrgID -- Org name"
+        },
+        {
+          "name": "ods_base_data_item_df",
+          "isPrimary": false,
+          "alias": "bf",
+          "joinType": "LEFT JOIN",
+          "joinCondition": "bf.DataItemID = bocc.BusinessField -- BusinessField name"
+        },
+        {
+          "name": "ods_base_data_item_df",
+          "isPrimary": false,
+          "alias": "ct",
+          "joinType": "LEFT JOIN",
+          "joinCondition": "ct.DataItemID = bocc.CustomerType -- CustomerType name"
+        }
+      ],
+      "advancedSql": {
+        "type": "APPLY",
+        "types": [
+          "APPLY",
+          "CTE"
+        ],
+        "applyContent": "OUTER APPLY (\n    SELECT TOP 1 wfp.ApprovalTime\n    FROM ods_wf_flow_progress_df wfp\n    WHERE wfp.FlowID = bocc.ChangeID\n      AND wfp.FlowTypeID = 1806\n    ORDER BY wfp.ApprovalTime DESC\n) wfp",
+        "cteContent": "cust_cata AS (\n    SELECT DataItemID, Extendedproperty\n    FROM ods_base_data_item_df\n    WHERE DICategoryID = 35\n)",
+        "cteAlias": "cust_cata",
+        "customFromContent": ""
+      }
+    },
+    "is_deleted": 0,
+    "deleted_at": null,
+    "delete_reason": null,
+    "deleted_by": null,
+    "script_path": null,
+    "script_saved_at": null,
+    "script_saved_by": null,
+    "script_modified": 0,
+    "script_modified_by": null,
+    "script_modified_at": null,
+    "config_mode": "standard",
+    "design_notes": null,
+    "companion_of": null
+  }
+}

@@ -2739,9 +2739,34 @@ async function getTableMetadata(pool, schema, tableName) {
         ORDER BY ic.key_ordinal
     `);
 
+    // 近似行数（C6：ODS 详情抽屉「表行数」）——用 sys.partitions 而非 sys.dm_db_partition_stats：
+    // 后者需 VIEW DATABASE STATE，前者只需表元数据权限，在受限只读账号下更不易被权限收敛挡（对齐 F1 探针结论）。
+    // index_id 0=堆 / 1=聚集索引（含 CCI）；分区表多行故 SUM。失败不阻断字段结构返回（行数是增强信息，非主体）。
+    let rowCount = null;
+    try {
+        const rowsResult = await pool.request()
+            .input('fullTableName', sql.NVarChar, fullTableName)
+            .query(`
+            SELECT SUM(p.rows) AS row_count
+            FROM sys.partitions p
+            WHERE p.object_id = OBJECT_ID(@fullTableName)
+              AND p.index_id IN (0, 1)
+        `);
+        const raw = rowsResult.recordset && rowsResult.recordset[0] ? rowsResult.recordset[0].row_count : null;
+        if (raw !== null && raw !== undefined) {
+            // SUM(bigint) 驱动可能回 number 也可能回 string。审 12（grok/gpt 双方 LOW）：用 isSafeInteger 而非 isFinite——
+            // 超 2^53 会被静默舍入成「看似精确的错数」，宁可返回 null 显示「—」。现网最大表 ~3747 万 << 2^53。
+            const n = Number(raw);
+            if (Number.isSafeInteger(n) && n >= 0) { rowCount = n; }
+        }
+    } catch (e) {
+        logger.warn(`[metadata] ${fullTableName} 行数查询失败（不阻断字段结构）: ${e.message}`);
+    }
+
     return {
         columns: columnsResult.recordset,
-        primaryKeys: pkResult.recordset.map(r => r.pk_column)
+        primaryKeys: pkResult.recordset.map(r => r.pk_column),
+        rowCount: rowCount
     };
 }
 
@@ -8894,6 +8919,39 @@ app.get('/api/models/:id/metadata', authenticateToken, async (req, res) => {
     } catch (err) {
         logger.error('Get metadata error:', err.message);
         res.status(500).json({ error: err.message });
+    }
+});
+
+// 10b. 下游引用扫描（C5：模型详情抽屉 D5「平台配置中发现的下游引用」）
+//   在其他模型的 dim_config（sourceTables 表名/JOIN 条件/高级 SQL）里 LIKE 扫本模型 table_name，
+//   返回候选引用（LIKE 假阳性接受·统一称「候选引用」）。table_name 由 H0 正则约束（^[A-Za-z][A-Za-z0-9_]*$），
+//   无 LIKE 通配符风险；仍参数化传值 + 转义 % _ \（防御性）。
+app.get('/api/models/:id/downstream', authenticateToken, async (req, res) => {
+    const { id } = req.params;
+    try {
+        const model = await dbGetAsync("SELECT id, table_name FROM data_models WHERE id = ?", [id]);
+        if (!model) { return res.status(404).json({ error: '模型不存在' }); }
+        const tn = String(model.table_name || '');
+        if (!tn) { return res.json({ table_name: '', candidates: [] }); }
+        // LIKE 转义：\ 作转义符，% _ \ 前加 \（配合 ESCAPE '\'）
+        const likeVal = '%' + tn.replace(/[\\%_]/g, '\\$&') + '%';
+        const t0 = Date.now();
+        const rows = await dbAllAsync(
+            `SELECT id, table_name, table_comment, layer, status, config_mode
+             FROM data_models
+             WHERE id != ?
+               AND (is_deleted IS NULL OR is_deleted = 0)
+               AND dim_config LIKE ? ESCAPE '\\'
+             ORDER BY layer, table_name`,
+            [id, likeVal]
+        );
+        // C5 审 M-4：全表 dim_config LIKE 无索引，记耗时供部署后观察（现网模型 ~百级毫秒内）
+        const elapsed = Date.now() - t0;
+        if (elapsed > 300) { logger.warn(`[downstream] 模型 ${id} 下游扫描耗时 ${elapsed}ms（${rows.length} 候选）`); }
+        res.json({ table_name: tn, candidates: rows });
+    } catch (err) {
+        logger.error('Get downstream error:', err.message);
+        res.status(500).json({ error: '下游引用查询失败' }); // C5 审 L-1：不外溢 SQL/驱动内部信息
     }
 });
 

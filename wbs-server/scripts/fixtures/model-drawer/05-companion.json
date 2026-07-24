@@ -1,0 +1,39 @@
+{
+  "_note": "本地库 #53 dwd_contract_header_change_di 真实快照。companion_of=52+parentModelId/parentTableName",
+  "model": {
+    "id": 53,
+    "layer": "dwd",
+    "domain": "contract",
+    "table_name": "dwd_contract_header_change_di",
+    "table_comment": "合同主表 - 变更追踪",
+    "tech_owner": "示例用户A",
+    "biz_owner": "合同管理部",
+    "update_cycle": "di",
+    "status": "CREATED",
+    "created_at": "2026-02-05 15:08:13",
+    "updated_at": "2026-02-28 09:02:31",
+    "source_table": null,
+    "source_system": null,
+    "model_type": "TABLE",
+    "created_by_id": 1,
+    "category": "core",
+    "dim_config": {
+      "configType": "DWD_COMPANION",
+      "parentModelId": 52,
+      "parentTableName": "dwd_contract_header_df"
+    },
+    "is_deleted": 0,
+    "deleted_at": null,
+    "delete_reason": null,
+    "deleted_by": null,
+    "script_path": null,
+    "script_saved_at": null,
+    "script_saved_by": null,
+    "script_modified": 0,
+    "script_modified_by": null,
+    "script_modified_at": null,
+    "config_mode": "companion",
+    "design_notes": null,
+    "companion_of": 52
+  }
+}

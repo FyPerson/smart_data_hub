@@ -7,6 +7,8 @@
     <title>智数模型中心 (Model Center)</title>
     <link rel="icon" href="data:,">
     <link rel="stylesheet" href="assets/css/style.css?v=v1.117.0_fabdrag">
+    <!-- 模型详情抽屉 C3：引入共享组件层（u-drawer 骨架；全 .u- 前缀无污染面）-->
+    <link rel="stylesheet" href="assets/css/components.css?v=v1.123.1_unify12b">
     <style>
         /* 加载动画 */
         @keyframes spin {
@@ -108,8 +110,11 @@
             color: #e53e3e;
         }
 
-        /* 模型列表行交互样式 */
-        #modelListBody tr:hover { background: #f9fafb; }
+        /* 模型列表行交互样式 —— hover 对齐全站范式：#fffbeb 米黄 + 0.15s 过渡
+           （同 components.css 的 .u-corr-table / Data_Collab .data-table / Statistics，
+             原 #f9fafb 淡灰是本页孤例，C7 整行可点后手感也需要更明确的行反馈） */
+        #modelListBody tr { transition: background 0.15s; }
+        #modelListBody tr:hover { background: #fffbeb; }
         #modelListBody tr.selected-row { background: #ebf5ff !important; }
 
         /* v1.105.x：模型列表可排序表头 + 排序图标 + 激活列高亮（移植自 Data_Collab.html v1.72.1 客户端排序范式） */
@@ -142,6 +147,133 @@
             color: #1e40af;
             font-weight: bold;
         }
+
+        /* ===== 模型详情抽屉 C3（方案 v1.4 §5.3/§5.5/§5.8）===== */
+        /* 宽度页面作用域覆盖：不改共享 .u-drawer（全局 600px）；#id 特异性高于 .u-drawer.open，
+           故 open 态的 right:0 必须在本作用域显式补回 */
+        #modelDetailDrawer { width: 620px; right: -640px; }
+        #modelDetailDrawer.open { right: 0; }
+        /* D2：表名/描述两列的打开按钮——真实 <button>，视觉继承单元格文本样式 */
+        .model-open-btn {
+            display: block; width: 100%; background: none; border: 0; padding: 0; margin: 0;
+            font: inherit; color: inherit; text-align: left; cursor: pointer;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        }
+        /* 不加 hover 下划线：C7 起整行可点，行级米黄底已是足够的可点反馈；
+           两列再各自划线会让「表名/描述是特殊链接」的暗示与实际行为不符。
+           键盘焦点环保留（无障碍入口仍是这两个 button）。 */
+        .model-open-btn:focus-visible { outline: 2px solid #d97706; outline-offset: 1px; }
+        /* 抽屉内区块骨架（C3 先 identity/状态区；C4 填视图四段） */
+        #modelDrawerBody .mdc-section { margin-bottom: 18px; }
+        #modelDrawerBody .mdc-section-title { font-size: 13px; font-weight: 700; color: #374151; margin: 0 0 8px; padding-bottom: 6px; border-bottom: 1px solid #e5e7eb; }
+        #modelDrawerBody .mdc-kv { display: grid; grid-template-columns: 96px 1fr; gap: 4px 12px; font-size: 13px; }
+        #modelDrawerBody .mdc-kv dt { color: #6b7280; }
+        #modelDrawerBody .mdc-kv dd { margin: 0; color: #111827; word-break: break-all; }
+        #modelDrawerBody .mdc-state { text-align: center; color: #9ca3af; padding: 40px 0; font-size: 14px; }
+        #modelDrawerBody .mdc-state.mdc-error { color: #dc2626; }
+
+        /* ===== C4 视图四段版式（demo v2 定稿移植，作用域 #modelDetailDrawer 内防污染）===== */
+        #modelDetailDrawer .u-drawer-header h2 { font-family: Consolas, Monaco, monospace; font-size: 15px; color: #fff; }
+        #modelDetailDrawer .mdc-sub { font-size: 12px; color: #fef3c7; font-weight: 400; margin-top: 2px; }
+        /* 排版节拍（P4）：段间 24 / 段内块间 12 */
+        #modelDrawerBody .sec { margin-bottom: 24px; }
+        #modelDrawerBody .sec > * + * { margin-top: 12px; }
+        #modelDrawerBody .sec-title { font-size: 12px; font-weight: 700; color: #6b7280; letter-spacing: .05em; display: flex; align-items: center; gap: 8px; }
+        #modelDrawerBody .sec-title::after { content: ''; flex: 1; height: 1px; background: #e5e7eb; }
+        #modelDrawerBody .sec-title .cnt { font-weight: 500; color: #9ca3af; }
+        /* ① 徽章 + 紧凑 kv（P1/P3） */
+        #modelDrawerBody .badges-identity { display: flex; gap: 8px; flex-wrap: wrap; }
+        #modelDrawerBody .mdc-badge { display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px; border-radius: 12px; font-size: 11.5px; font-weight: 600; }
+        #modelDrawerBody .b-layer { background: #ede9fe; color: #6d28d9; }
+        #modelDrawerBody .b-layer-ods { background: #dbeafe; color: #1d4ed8; }
+        #modelDrawerBody .b-layer-dim { background: #fef3c7; color: #b45309; }
+        #modelDrawerBody .b-domain { background: #f1f5f9; color: #475569; }
+        #modelDrawerBody .b-status { background: #d1fae5; color: #047857; }
+        #modelDrawerBody .b-status-off { background: #f1f5f9; color: #6b7280; }
+        #modelDrawerBody .kv { display: grid; grid-template-columns: 88px 1fr; gap: 8px 12px; font-size: 12.5px; align-items: baseline; }
+        #modelDrawerBody .kv .k { color: #9ca3af; text-align: right; }
+        #modelDrawerBody .kv .v { color: #111827; word-break: break-all; }
+        #modelDrawerBody .kv .v .dim-note { color: #9ca3af; font-weight: 400; }
+        #modelDrawerBody .kv .v code, #modelDrawerBody .lineage code { font-family: Consolas, monospace; font-size: 11.5px; background: #f1f5f9; padding: 1px 6px; border-radius: 4px; color: #334155; }
+        /* ① 血缘卡 */
+        #modelDrawerBody .lineage { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px 14px; }
+        #modelDrawerBody .lineage-grid { display: grid; grid-template-columns: 92px auto; gap: 7px 10px; align-items: center; }
+        #modelDrawerBody .lineage-grid .lg-type { font-size: 10.5px; color: #9ca3af; font-weight: 700; text-align: right; letter-spacing: .02em; }
+        #modelDrawerBody .lineage-grid .lg-tbl { display: flex; align-items: center; gap: 6px; min-width: 0; }
+        #modelDrawerBody .lineage-grid code { background: #eef2ff; color: #3730a3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        #modelDrawerBody .lineage-grid code.primary-src { background: #fef3c7; color: #92400e; font-weight: 700; }
+        #modelDrawerBody .lineage-grid .lg-alias { font-size: 11px; color: #9ca3af; flex-shrink: 0; }
+        #modelDrawerBody .lineage-grain { margin-top: 10px; padding-top: 8px; border-top: 1px dashed #e2e8f0; font-size: 12px; color: #c2410c; font-weight: 600; }
+        /* ② 字段表（P5：截断+title） */
+        #modelDrawerBody .field-toolbar { display: flex; align-items: center; gap: 10px; }
+        #modelDrawerBody .field-search { flex: 1; padding: 6px 10px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 12.5px; }
+        /* C9：字段清单一键复制（建模/写 SQL 高频动作） */
+        #modelDrawerBody .field-copy { flex-shrink: 0; padding: 6px 10px; border: 1px solid #d1d5db; border-radius: 6px; background: #fff; color: #374151; font-size: 12px; cursor: pointer; white-space: nowrap; }
+        #modelDrawerBody .field-copy:hover { background: #f9fafb; border-color: #9ca3af; }
+        #modelDrawerBody .field-copy:disabled { cursor: default; color: #059669; border-color: #a7f3d0; background: #ecfdf5; }
+        #modelDrawerBody .field-table-wrap { border: 1px solid #e5e7eb; border-radius: 8px; overflow: hidden; }
+        #modelDrawerBody .field-table-scroll { max-height: 360px; overflow-y: auto; }
+        #modelDrawerBody .field-table { width: 100%; border-collapse: collapse; font-size: 12px; table-layout: fixed; }
+        #modelDrawerBody .field-table thead th { position: sticky; top: 0; background: #f9fafb; padding: 8px 10px; font-weight: 600; color: #475569; border-bottom: 1px solid #e5e7eb; z-index: 1; text-align: left; }
+        #modelDrawerBody .field-table td { padding: 7px 10px; border-bottom: 1px solid #f8fafc; vertical-align: middle; }
+        #modelDrawerBody .field-table tr:hover td { background: #fafbfd; }
+        #modelDrawerBody .f-name { font-family: Consolas, monospace; font-size: 11.5px; color: #111827; }
+        #modelDrawerBody .f-type { font-family: Consolas, monospace; font-size: 11px; color: #6b7280; white-space: nowrap; }
+        #modelDrawerBody .f-src { font-family: Consolas, monospace; font-size: 11px; color: #8b5cf6; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; }
+        #modelDrawerBody .f-comment { color: #4b5563; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; }
+        #modelDrawerBody .mk { display: inline-block; font-size: 9.5px; font-weight: 700; padding: 1px 5px; border-radius: 3px; margin-left: 5px; vertical-align: 1px; }
+        #modelDrawerBody .mk-pk { background: #fef3c7; color: #b45309; }
+        #modelDrawerBody .mk-derived { background: #f3e8ff; color: #7e22ce; }
+        #modelDrawerBody .mk-new { background: #dcfce7; color: #15803d; }
+        #modelDrawerBody .tr-tech td { background: #fafafa; }
+        #modelDrawerBody .tr-tech .f-name, #modelDrawerBody .tr-tech .f-comment { color: #9ca3af; }
+        #modelDrawerBody .tech-toggle { font-size: 11.5px; color: #3b82f6; cursor: pointer; text-align: center; padding: 7px; background: #f8fafc; border-top: 1px solid #f1f5f9; user-select: none; width: 100%; border-left: 0; border-right: 0; border-bottom: 0; }
+        #modelDrawerBody .tech-toggle:hover { background: #eff6ff; }
+        /* ③ 加工逻辑（details 折叠） */
+        #modelDrawerBody details.logic { border: 1px solid #e5e7eb; border-radius: 8px; overflow: hidden; }
+        #modelDrawerBody details.logic summary { padding: 10px 14px; background: #f8fafc; cursor: pointer; font-size: 12.5px; font-weight: 600; color: #374151; user-select: none; list-style: none; display: flex; align-items: center; gap: 6px; }
+        #modelDrawerBody details.logic summary::before { content: '▸'; color: #9ca3af; transition: transform .15s; }
+        #modelDrawerBody details.logic[open] summary::before { transform: rotate(90deg); }
+        #modelDrawerBody details.logic .logic-body { padding: 12px 14px; }
+        #modelDrawerBody details.logic .logic-body > * + * { margin-top: 12px; }
+        #modelDrawerBody .join-table { width: 100%; border-collapse: collapse; }
+        #modelDrawerBody .join-table td { padding: 6px 8px; border-bottom: 1px dashed #f1f5f9; font-size: 11.5px; vertical-align: top; }
+        #modelDrawerBody .join-table .jt { font-weight: 700; color: #c2410c; white-space: nowrap; width: 64px; }
+        #modelDrawerBody .join-table code { font-family: Consolas, monospace; font-size: 11px; color: #4338ca; background: none; padding: 0; }
+        #modelDrawerBody .join-table .jc { color: #6b7280; font-family: Consolas, monospace; font-size: 10.5px; }
+        #modelDrawerBody .sql-block { background: #1e293b; color: #e2e8f0; border-radius: 6px; padding: 10px 12px; font-family: Consolas, monospace; font-size: 11px; line-height: 1.6; overflow-x: auto; white-space: pre; }
+        #modelDrawerBody .filter-line { padding: 6px 10px; background: #fff7ed; border-left: 3px solid #fb923c; border-radius: 0 4px 4px 0; font-size: 11.5px; }
+        #modelDrawerBody .filter-line code { font-family: Consolas, monospace; color: #c2410c; background: none; padding: 0; }
+        /* C8：高级 SQL 分段标签（一个模型可同时有 CTE 与 APPLY 两段） */
+        #modelDrawerBody .sql-part-label, #modelDrawerBody .scd-sub-label { font-size: 10.5px; font-weight: 700; color: #64748b; letter-spacing: .04em; margin: 8px 0 3px; }
+        /* C8：DIM SCD 策略细节 */
+        #modelDrawerBody .scd-flags { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+        #modelDrawerBody .scd-flag { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 10px; font-size: 11px; border: 1px solid transparent; }
+        #modelDrawerBody .scd-flag.on { background: #ecfdf5; color: #047857; border-color: #a7f3d0; }
+        #modelDrawerBody .scd-flag.off { background: #f8fafc; color: #94a3b8; border-color: #e2e8f0; }
+        #modelDrawerBody .scd-expr { display: block; margin-top: 2px; font-family: Consolas, monospace; font-size: 10.5px; color: #334155; background: #f1f5f9; padding: 4px 8px; border-radius: 4px; white-space: pre-wrap; word-break: break-all; }
+        #modelDrawerBody .scd-fields { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+        #modelDrawerBody .scd-fields code { font-family: Consolas, monospace; font-size: 10.5px; background: #f1f5f9; padding: 1px 6px; border-radius: 4px; color: #334155; }
+        /* ④ 足迹 + 底部链接 */
+        #modelDrawerBody .foot-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+        #modelDrawerBody .foot-links { display: flex; gap: 16px; font-size: 12px; }
+        #modelDrawerBody .foot-links button { color: #3b82f6; background: none; border: 0; padding: 0; cursor: pointer; font-size: 12px; }
+        #modelDrawerBody .foot-links button:hover { text-decoration: underline; }
+        #modelDrawerBody .script-stamp { font-size: 11px; color: #9ca3af; }
+        /* companion/custom 提示条 */
+        #modelDrawerBody .mdc-note { font-size: 11.5px; color: #92400e; padding: 8px 12px; background: #fffbeb; border-left: 3px solid #fbbf24; border-radius: 0 4px 4px 0; line-height: 1.6; }
+        #modelDrawerBody .mdc-link-btn { color: #3b82f6; background: none; border: 0; padding: 0; cursor: pointer; font-size: inherit; font-family: inherit; }
+        #modelDrawerBody .mdc-link-btn:hover { text-decoration: underline; }
+        /* C5：下游引用项 + ODS 贴源 */
+        #modelDrawerBody .mdc-dep-item { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; padding: 9px 12px; border: 1px solid #e5e7eb; border-radius: 8px; margin-bottom: 6px; cursor: pointer; background: #fff; transition: background .1s; }
+        #modelDrawerBody .mdc-dep-item:hover { background: #eff6ff; border-color: #bfdbfe; }
+        #modelDrawerBody .mdc-dep-name { font-family: Consolas, monospace; font-size: 12px; color: #1d4ed8; font-weight: 600; }
+        #modelDrawerBody .mdc-dep-desc { color: #6b7280; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        /* ④ 足迹 timeline */
+        #modelDrawerBody .mdc-tl-row { display: flex; gap: 10px; padding: 7px 0; font-size: 12px; border-bottom: 1px dashed #f1f5f9; align-items: baseline; }
+        #modelDrawerBody .mdc-tl-time { color: #9ca3af; white-space: nowrap; font-family: Consolas, monospace; font-size: 11px; flex-shrink: 0; }
+        #modelDrawerBody .mdc-tl-tag { font-size: 10px; padding: 1px 6px; border-radius: 3px; font-weight: 600; background: #f3e8ff; color: #7e22ce; flex-shrink: 0; }
+        #modelDrawerBody .mdc-tl-text { color: #4b5563; flex: 1; }
     </style>
 </head>
 
@@ -1216,19 +1348,21 @@ OUTER APPLY (
                 <table id="modelListTable"
                     style="width:100%; table-layout:fixed; border-collapse:collapse; background:white; border-radius:8px; overflow:hidden; box-shadow:0 2px 10px rgba(0,0,0,0.05);">
                     <colgroup>
+                        <col style="width:4%;">   <!-- ID -->
                         <col style="width:5%;">   <!-- 分层 -->
-                        <col style="width:19%;">  <!-- 表名 -->
-                        <col style="width:11%;">  <!-- 中文描述 -->
+                        <col style="width:17%;">  <!-- 表名 -->
+                        <col style="width:10%;">  <!-- 中文描述 -->
                         <col style="width:7%;">   <!-- 技术负责人 -->
                         <col style="width:7%;">   <!-- 业务负责人 -->
                         <col style="width:4%;">   <!-- 周期 -->
                         <col style="width:5%;">   <!-- 状态 -->
                         <col style="width:4%;">   <!-- 迭代 -->
-                        <col style="width:12%;">  <!-- 最后更新 -->
+                        <col style="width:11%;">  <!-- 最后更新 -->
                         <col style="width:26%;">  <!-- 操作 -->
                     </colgroup>
                     <thead>
                         <tr style="background:#f7fafc; color:#4a5568; text-align:left; font-size:0.9em;">
+                            <th class="sortable" data-sort-by="id" style="padding:12px 10px; white-space:nowrap;">ID<span class="sort-icon">⇅</span></th>
                             <th class="sortable" data-sort-by="layer" style="padding:12px 10px; white-space:nowrap;">分层<span class="sort-icon">⇅</span></th>
                             <th class="sortable" data-sort-by="table_name" style="padding:12px 10px; white-space:nowrap;">表名 (Table Name)<span class="sort-icon">⇅</span></th>
                             <th class="sortable" data-sort-by="table_comment" style="padding:12px 10px; white-space:nowrap;">中文描述<span class="sort-icon">⇅</span></th>
@@ -1260,6 +1394,21 @@ OUTER APPLY (
         </div>
 
     </main>
+
+    <!-- ===== 模型详情抽屉 C3（方案 v1.4 §5.3/§5.5；常驻 DOM，inert 管焦点——对齐 Data_Collab 范式）===== -->
+    <div class="u-drawer-overlay" id="modelDrawerOverlay" onclick="closeModelDrawer()"></div>
+    <div class="u-drawer" id="modelDetailDrawer" inert aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="modelDrawerTitle">
+        <div class="u-drawer-header">
+            <div style="flex:1; min-width:0;">
+                <h2 id="modelDrawerTitle">模型详情</h2>
+                <div class="mdc-sub" id="modelDrawerSub"></div>
+            </div>
+            <button class="u-drawer-close" id="modelDrawerCloseBtn" onclick="closeModelDrawer()" aria-label="关闭详情抽屉">×</button>
+        </div>
+        <div class="u-drawer-body" id="modelDrawerBody">
+            <div class="mdc-state">加载中...</div>
+        </div>
+    </div>
 
     <!-- 注册模态框 -->
     <div class="modal" id="registerModal"
@@ -1887,6 +2036,8 @@ OUTER APPLY (
     <!-- SheetJS Library: 按需加载（仅批量导入时使用） -->
 
     <script src="assets/js/app.js?v=v1.121.0_issuelite"></script>
+    <!-- 模型详情抽屉 C2：normalize 适配层 + 安全渲染工具（方案 v1.4 §5.1/§5.2），C3 起消费 -->
+    <script src="assets/js/model-detail-normalize.js?v=v1.125.0_mdc4"></script>
     <script>
         // 页面特有逻辑
         document.addEventListener('DOMContentLoaded', async () => {
@@ -1920,6 +2071,9 @@ OUTER APPLY (
 
             // v1.105.x：初始化模型列表可排序表头点击事件（表头为静态 DOM，无需等 loadModels 完成）
             initListSorting();
+
+            // 模型详情抽屉 C3：行按钮委托 + Esc 层级 + inert 观察器
+            initModelDrawer();
 
             // 处理 URL 参数 - 支持从任务详情页跳转过来时自动搜索
             const urlParams = new URLSearchParams(window.location.search);
@@ -1980,6 +2134,11 @@ OUTER APPLY (
                 if (!res || !res.ok) return;
 
                 const systems = await res.json();
+                // C6：顺带缓存 code→name（详情抽屉 ODS「来源系统」显示中文名；本函数在页面初始化无条件调用，
+                // viewer 角色下表单 select 不存在也只跳过填充、缓存照建）
+                MDC_SOURCE_SYSTEM_NAMES = {};
+                systems.forEach(s => { if (s && s.code) { MDC_SOURCE_SYSTEM_NAMES[String(s.code)] = s.name || ''; } });
+                MDC_SOURCE_SYSTEM_LOADED = true; // 置于填充之后：失败/未返回时保持 false，供抽屉懒补重试
                 const selects = ['genSourceSystem', 'regSourceSystem'];
 
                 selects.forEach(selectId => {
@@ -12323,6 +12482,7 @@ ${window.generatedScripts.incremental}`;
 
         // 字段类型分派（数字 / 日期 / 字符串 / 状态自定义优先级）
         const SORT_FIELD_TYPES = {
+            id: 'number',
             layer: 'string',
             table_name: 'string',
             table_comment: 'string',
@@ -12454,6 +12614,1106 @@ ${window.generatedScripts.incremental}`;
             renderModelsPage(); // 渲染当前页
         }
 
+        // ==================== 模型详情抽屉 C3（方案 v1.4 §5.3 双层 controller / §5.5 焦点）====================
+        // 状态中文映射（原 renderModelsPage 局部 statusMap 提升为模块级，抽屉 identity 区复用）
+        const MODEL_STATUS_MAP = {
+            'CREATED': '规划中',
+            'DEVELOPING': '开发中',
+            'REVIEWING': '待验收',
+            'ONLINE': '已上线',
+            'OFFLINE': '已下线'
+        };
+
+        // 导航生命周期层 ctx：每次导航（打开/切换/关闭后重开）重建；旧 ctx navAborter.abort() 并失效
+        let mdcCtx = null;
+        let mdcCtxSeq = 0;
+        // C6：源系统 code→中文名（由 loadSourceSystems 页面初始化时填充；未就绪则退化为只显示 code + 懒补一次）
+        let MDC_SOURCE_SYSTEM_NAMES = {};
+        let MDC_SOURCE_SYSTEM_LOADED = false; // 仅在 /api/source-systems 真取到数据后置 true
+
+        function mdcDrawerEl() { return document.getElementById('modelDetailDrawer'); }
+
+        // C3 审 M-3：「是否有浮层盖在抽屉之上」单一判据。Model_Center 浮层分两类：
+        //   ① 声明式 .modal（display:flex/none 内联切换）② 命令式动态注入（iterationHistoryModal/changeLogsModal/
+        //   scriptDiffModal/modelDrawerTestModal 等 document.body.appendChild 的定位层，z-index≥1000）。
+        //   两类都要认，否则子弹窗开着时 Esc 会越级关抽屉、inert 误放行。
+        // 抽屉派生浮层 id 清单（C4 审 M-2/M-3：Esc 关最上层 + 关抽屉时一并清理）
+        const MDC_DERIVED_MODAL_IDS = ['iterationHistoryModal', 'changeLogsModal', 'scriptDiffModal', 'modelDrawerTestModal'];
+        function isAnyModalOpen() {
+            const declared = Array.from(document.querySelectorAll('.modal:not(#modelDrawerTestModal)')).some(m => getComputedStyle(m).display !== 'none');
+            const injected = MDC_DERIVED_MODAL_IDS.some(id => document.getElementById(id));
+            return declared || injected;
+        }
+        // 关最上层派生浮层（后注入者视为更上层，倒序找第一个存在的）。返回是否关掉了一个。
+        function closeTopDerivedModal() {
+            for (let i = MDC_DERIVED_MODAL_IDS.length - 1; i >= 0; i--) {
+                const el = document.getElementById(MDC_DERIVED_MODAL_IDS[i]);
+                if (el) { el.remove(); return true; } // remove 触发 body childList observer → syncModelDrawerInert → 焦点归还
+            }
+            return false;
+        }
+
+        // C3 审 M-4：子弹窗关闭后焦点归还目标（打开子弹窗的按钮）
+        let mdcSubModalTrigger = null;
+
+        // 焦点态统一计算（对齐 Data_Collab syncDrawerInert 幂等范式；§5.5 反向用法：抽屉 open 时主内容 inert）
+        function syncModelDrawerInert() {
+            const drawer = mdcDrawerEl();
+            if (!drawer) return;
+            const open = drawer.classList.contains('open');
+            const interactive = open && !isAnyModalOpen(); // 抽屉被任一浮层盖住时也 inert（Esc 层级同判据）
+            drawer.inert = !interactive;
+            if (!interactive) { drawer.setAttribute('aria-hidden', 'true'); }
+            else { drawer.removeAttribute('aria-hidden'); }
+            const main = document.querySelector('main.workbench-container');
+            if (main) { main.inert = open; } // 背景隔离：抽屉 open 期间主内容退出焦点序（overlay 管视觉/点击）
+            // M-4：子弹窗刚关闭且抽屉仍 open → 焦点回原触发链接（§5.5）
+            if (interactive && mdcSubModalTrigger && document.contains(mdcSubModalTrigger)) {
+                const t = mdcSubModalTrigger;
+                mdcSubModalTrigger = null;
+                try { t.focus(); } catch (e) { /* ignore */ }
+            }
+        }
+
+        // 单请求层（§5.3）：每次发起创建独立 requestAborter；navAborter 的 abort 转发；
+        // abortReason 分流（审 04 M-N1）：navigation=静默丢弃 / timeout=渲染超时态（C5 metadata 10s 用）
+        function mdcRequest(ctx, url, opts) {
+            const timeoutMs = opts && opts.timeoutMs;
+            const holder = { aborter: new AbortController(), reason: null };
+            const onNavAbort = () => { holder.reason = 'navigation'; holder.aborter.abort(); };
+            if (ctx.navAborter.signal.aborted) { onNavAbort(); }
+            else { ctx.navAborter.signal.addEventListener('abort', onNavAbort); }
+            let timer = null;
+            if (timeoutMs) { timer = setTimeout(() => { holder.reason = 'timeout'; holder.aborter.abort(); }, timeoutMs); }
+            const cleanup = () => { // 每请求 finally：清定时器 + 移除转发监听（防泄漏）
+                if (timer) { clearTimeout(timer); timer = null; }
+                ctx.navAborter.signal.removeEventListener('abort', onNavAbort);
+            };
+            return authFetch(url, { signal: holder.aborter.signal })
+                .then(res => { cleanup(); return res; })
+                .catch(err => { cleanup(); if (err) { err.mdcAbortReason = holder.reason; } throw err; });
+        }
+
+        // 落 DOM 三重门禁（§5.3）：ctx 未失效 && ctx 仍是当前导航 && 抽屉 open。
+        //   注：`mdcCtx === ctx` 蕴含方案字面的「ctx.modelId === 当前抽屉 modelId」——ctx 不可变，
+        //   同一 ctx 引用即同一 modelId，故无需再显式比 modelId（C3 审 L-5）。
+        function mdcGuard(ctx) {
+            return !!ctx && !ctx.dead && mdcCtx === ctx && mdcDrawerEl().classList.contains('open');
+        }
+
+        function renderDrawerState(msg, isError) {
+            const kit = window.ModelDetailKit;
+            const body = document.getElementById('modelDrawerBody');
+            kit.dom.clear(body);
+            const box = kit.dom.el('div', { className: 'mdc-state' + (isError ? ' mdc-error' : ''), text: msg });
+            body.appendChild(box);
+            if (isError && mdcCtx) {
+                const wrap = kit.dom.el('div', { className: 'mdc-state' });
+                const btn = kit.dom.el('button', { className: 'u-btn-secondary', text: '重试' });
+                // 重试：创建全新 requestAborter（mdcRequest 每次新建）并继续过三重门禁（§5.3）
+                btn.addEventListener('click', () => {
+                    const c = mdcCtx;
+                    if (!c) { return; }
+                    renderDrawerState('加载中...');
+                    loadModelDrawerDetail(c);
+                });
+                wrap.appendChild(btn);
+                body.appendChild(wrap);
+            }
+        }
+
+        async function loadModelDrawerDetail(ctx) {
+            try {
+                const res = await mdcRequest(ctx, `/api/models/${ctx.modelId}`);
+                if (!mdcGuard(ctx) || !res) { return; }
+                if (res.status === 404) { renderDrawerState('模型不存在', true); return; }
+                if (!res.ok) { renderDrawerState('加载失败，请重试', true); return; }
+                const model = await res.json();
+                if (!mdcGuard(ctx)) { return; }
+                const detail = window.ModelDetailKit.normalizeModelDetail(model);
+                renderModelDrawer(detail, model);
+            } catch (err) {
+                if (err && err.name === 'AbortError') {
+                    // abortReason 分流：timeout 且门禁成立 → 渲染超时态（唯一到达路径）；navigation → 静默
+                    if (err.mdcAbortReason === 'timeout' && mdcGuard(ctx)) { renderDrawerState('查询超时', true); }
+                    return;
+                }
+                if (!mdcGuard(ctx)) { return; }
+                console.error('模型详情加载失败:', err);
+                renderDrawerState('网络错误，请重试', true);
+            }
+        }
+
+        // ==================== C4 视图四段（demo v2 版式定稿；全部经 ModelDetailKit.dom 安全渲染）====================
+        const MDC_STRATEGY_LABEL = { 'FULL_OVERWRITE': '每日全量覆盖', 'INCREMENTAL_APPEND': '增量追加', 'PARTITION_OVERWRITE': '分区覆盖' };
+
+        // D4：addedAt 0≤天≤30 显示「新」徽章（本地自然日，含第 30 天；无 addedAt=无打点不推断）
+        function mdcIsNewField(addedAt) {
+            if (!addedAt) { return false; }
+            const added = new Date(String(addedAt).slice(0, 10) + 'T00:00:00');
+            if (isNaN(added.getTime())) { return false; }
+            const now = new Date();
+            const today0 = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+            const diff = Math.floor((today0 - added) / 86400000);
+            return diff >= 0 && diff <= 30;
+        }
+
+        function mdcEl(tag, opts) { return window.ModelDetailKit.dom.el(tag, opts); }
+
+        // ④ 足迹懒加载：最近 5 条变更摘要（C5·方案 §5.3「最近 5 条摘要」）
+        const MDC_CHANGE_TYPE_LABEL = { basic_info: '基本信息', dim_config: '配置', full_delete: '完全删除', soft_delete: '软删除', restore: '恢复', script_edit: '脚本编辑' };
+        async function loadFootprintTimeline(ctx, modelId, host) {
+            try {
+                const res = await mdcRequest(ctx, `/api/models/${modelId}/change-logs`);
+                if (!mdcGuard(ctx) || !res) { return; }
+                if (!res.ok) { host.textContent = '变更历史加载失败'; return; }
+                const logs = await res.json();
+                if (!mdcGuard(ctx)) { return; }
+                const list = (Array.isArray(logs) ? logs : []).slice(0, 5);
+                const parent = host.parentNode;
+                const tl = mdcEl('div', { className: 'mdc-timeline' });
+                if (!list.length) {
+                    tl.appendChild(mdcEl('div', { className: 'mdc-state', text: '暂无变更记录' }));
+                } else {
+                    list.forEach(log => {
+                        const row = mdcEl('div', { className: 'mdc-tl-row' });
+                        row.appendChild(mdcEl('span', { className: 'mdc-tl-time', text: formatDateTimeUnified(log.created_at) }));
+                        const typeLabel = MDC_CHANGE_TYPE_LABEL[log.change_type] || log.change_type || '';
+                        if (typeLabel) { row.appendChild(mdcEl('span', { className: 'mdc-tl-tag', text: typeLabel })); }
+                        row.appendChild(mdcEl('span', { className: 'mdc-tl-text', text: (log.change_summary || '-') + (log.operator_name ? '（' + log.operator_name + '）' : '') }));
+                        tl.appendChild(row);
+                    });
+                }
+                parent.replaceChild(tl, host);
+            } catch (err) {
+                if (err && err.name === 'AbortError') { return; }
+                if (!mdcGuard(ctx)) { return; }
+                console.error('足迹加载失败:', err);
+                host.textContent = '变更历史加载失败';
+            }
+        }
+
+        // ① 身份徽章行
+        function mdcRenderBadges(detail) {
+            const wrap = mdcEl('div', { className: 'badges-identity' });
+            const layer = detail.identity.layer;
+            const layerCls = layer === 'ODS' ? 'b-layer-ods' : (layer === 'DIM' ? 'b-layer-dim' : 'b-layer');
+            wrap.appendChild(mdcEl('span', { className: 'mdc-badge ' + layerCls, text: layer || '-' }));
+            if (detail.identity.domain) { wrap.appendChild(mdcEl('span', { className: 'mdc-badge b-domain', text: detail.identity.domain + ' 域' })); }
+            const stText = MODEL_STATUS_MAP[detail.identity.status] || detail.identity.status || '-';
+            const stCls = detail.identity.status === 'ONLINE' ? 'b-status' : 'b-status-off';
+            wrap.appendChild(mdcEl('span', { className: 'mdc-badge ' + stCls, text: '● ' + stText }));
+            return wrap;
+        }
+
+        // ① 血缘卡（sources 网格 + 粒度）
+        function mdcRenderLineage(detail) {
+            if (!detail.sources.length && !(detail.logic && detail.logic.grain)) { return null; }
+            const card = mdcEl('div', { className: 'lineage' });
+            if (detail.sources.length) {
+                const grid = mdcEl('div', { className: 'lineage-grid' });
+                detail.sources.forEach(s => {
+                    grid.appendChild(mdcEl('span', { className: 'lg-type', text: s.isPrimary ? '主表' : (s.joinType || 'JOIN') }));
+                    const tbl = mdcEl('span', { className: 'lg-tbl' });
+                    tbl.appendChild(mdcEl('code', { className: s.isPrimary ? 'primary-src' : '', text: s.name, title: s.name }));
+                    if (s.alias) { tbl.appendChild(mdcEl('span', { className: 'lg-alias', text: s.alias })); }
+                    grid.appendChild(tbl);
+                });
+                card.appendChild(grid);
+            }
+            if (detail.logic && detail.logic.grain) {
+                card.appendChild(mdcEl('div', { className: 'lineage-grain', text: '↓ 粒度：' + detail.logic.grain }));
+            }
+            return card;
+        }
+
+        // ① 紧凑 kv
+        function mdcRenderKv(rows) {
+            const kv = mdcEl('div', { className: 'kv' });
+            rows.forEach(([k, node]) => {
+                kv.appendChild(mdcEl('span', { className: 'k', text: k }));
+                const v = mdcEl('span', { className: 'v' });
+                if (typeof node === 'string') { v.textContent = node; }
+                else if (node) { v.appendChild(node); }
+                kv.appendChild(v);
+            });
+            return kv;
+        }
+
+        // ② 字段清单（搜索 × dw_* 技术字段折叠组合态，方案 §5.8：搜索时技术字段临时显示、
+        //    计数「匹配 N / 共 M」、清空搜索恢复用户此前折叠态）
+        function mdcRenderFieldSection(detail) {
+            const fields = detail.fields;
+            const bizFields = fields.filter(f => !/^dw_/i.test(f.name));
+            const techFields = fields.filter(f => /^dw_/i.test(f.name));
+            const derivedCount = bizFields.filter(f => f.isDerived).length;
+            const hasSrcCol = detail.kind !== 'ods';
+
+            const sec = mdcEl('div', { className: 'sec' });
+            const title = mdcEl('div', { className: 'sec-title', text: detail.kind === 'ods' ? '字段清单（镜像源表）' : '字段清单' });
+            const cnt = mdcEl('span', { className: 'cnt' });
+            title.appendChild(cnt);
+            sec.appendChild(title);
+
+            if (!fields.length) {
+                const msg = detail.warnings.indexOf('FIELDS_EMPTY') >= 0 ? '配置中未解析到字段' : '无字段信息';
+                sec.appendChild(mdcEl('div', { className: 'mdc-state', text: msg }));
+                return sec;
+            }
+
+            const toolbar = mdcEl('div', { className: 'field-toolbar' });
+            const search = mdcEl('input', { className: 'field-search' });
+            search.placeholder = '搜索字段名 / 注释…';
+            toolbar.appendChild(search);
+            // C9：复制的是 renderRows 真实渲染出的那批字段（lastVisible），不复刻一份过滤逻辑——
+            // 否则搜索/折叠态一变，复制内容就可能和用户看到的不一致。
+            let lastVisible = [];
+            toolbar.appendChild(mdcMakeFieldCopyBtn(() => lastVisible));
+            sec.appendChild(toolbar);
+
+            const wrap = mdcEl('div', { className: 'field-table-wrap' });
+            const scroll = mdcEl('div', { className: 'field-table-scroll' });
+            const table = mdcEl('table', { className: 'field-table' });
+            const thead = mdcEl('thead');
+            const htr = mdcEl('tr');
+            const headCols = hasSrcCol
+                ? [['目标字段', '36%'], ['类型', '15%'], ['来源', '22%'], ['注释', '27%']]
+                : [['字段', '40%'], ['类型', '22%'], ['注释', '38%']];
+            headCols.forEach(([t, w]) => { const th = mdcEl('th', { text: t }); th.style.width = w; htr.appendChild(th); });
+            thead.appendChild(htr);
+            table.appendChild(thead);
+            const tbodyEl = mdcEl('tbody');
+            table.appendChild(tbodyEl);
+            scroll.appendChild(table);
+            wrap.appendChild(scroll);
+
+            const state = { kw: '', showTech: false }; // 每次渲染重置（导航到新模型即新会话态）
+            let toggleBtn = null;
+            if (techFields.length) {
+                toggleBtn = mdcEl('button', { className: 'tech-toggle' });
+                toggleBtn.type = 'button';
+                wrap.appendChild(toggleBtn);
+            }
+            sec.appendChild(wrap);
+
+            function renderRows() {
+                const kw = state.kw.trim().toLowerCase();
+                window.ModelDetailKit.dom.clear(tbodyEl);
+                let shown = 0;
+                lastVisible = []; // C9：与本次渲染同步重建
+                const pushRow = (f, isTech) => {
+                    if (kw && !(f.name.toLowerCase().includes(kw) || (f.comment || '').toLowerCase().includes(kw))) { return; }
+                    shown++;
+                    lastVisible.push(f);
+                    const tr = mdcEl('tr', { className: isTech ? 'tr-tech' : '' });
+                    const tdName = mdcEl('td');
+                    tdName.appendChild(mdcEl('span', { className: 'f-name', text: f.name }));
+                    if (f.isPk) { tdName.appendChild(mdcEl('span', { className: 'mk mk-pk', text: 'PK' })); }
+                    if (f.isDerived) { tdName.appendChild(mdcEl('span', { className: 'mk mk-derived', text: 'ƒ', title: '派生字段' })); }
+                    if (mdcIsNewField(f.addedAt)) { tdName.appendChild(mdcEl('span', { className: 'mk mk-new', text: '新', title: '新增于 ' + f.addedAt })); }
+                    tr.appendChild(tdName);
+                    tr.appendChild(mdcEl('td', { className: 'f-type', text: f.type || '—' }));
+                    if (hasSrcCol) {
+                        const tdSrc = mdcEl('td');
+                        tdSrc.appendChild(mdcEl('span', { className: 'f-src', text: f.source || '—', title: f.source || '' }));
+                        tr.appendChild(tdSrc);
+                    }
+                    const tdC = mdcEl('td');
+                    tdC.appendChild(mdcEl('span', { className: 'f-comment', text: f.comment || '—', title: f.comment || '' }));
+                    tr.appendChild(tdC);
+                    tbodyEl.appendChild(tr);
+                };
+                bizFields.forEach(f => pushRow(f, false));
+                if (state.showTech || kw) { techFields.forEach(f => pushRow(f, true)); } // 搜索时技术字段临时显示
+                if (!shown) {
+                    const tr = mdcEl('tr');
+                    const td = mdcEl('td', { text: '无匹配字段' });
+                    td.colSpan = headCols.length;
+                    td.style.cssText = 'text-align:center; color:#9ca3af; padding:20px;';
+                    tr.appendChild(td);
+                    tbodyEl.appendChild(tr);
+                }
+                const total = fields.length;
+                cnt.textContent = kw ? ('匹配 ' + shown + ' / 共 ' + total)
+                    : (techFields.length
+                        ? (bizFields.length + ' 个（' + (bizFields.length - derivedCount) + ' 业务 + ' + derivedCount + ' 派生）+ ' + techFields.length + ' 技术')
+                        : (total + ' 个（' + (bizFields.length - derivedCount) + ' 业务 + ' + derivedCount + ' 派生）'));
+                if (toggleBtn) {
+                    toggleBtn.style.display = kw ? 'none' : '';
+                    toggleBtn.textContent = state.showTech ? '▴ 收起 dw_* 技术字段' : ('▾ 展开 ' + techFields.length + ' 个 dw_* 技术字段');
+                    toggleBtn.setAttribute('aria-expanded', String(state.showTech));
+                }
+            }
+            search.addEventListener('input', () => { state.kw = search.value; renderRows(); }); // 清空即恢复 showTech 原态
+            if (toggleBtn) { toggleBtn.addEventListener('click', () => { state.showTech = !state.showTech; renderRows(); }); }
+            renderRows();
+            return sec;
+        }
+
+        // ③ 加工逻辑（details 折叠：JOIN 表 + 过滤条件 + 高级 SQL）
+        function mdcRenderLogicSection(detail) {
+            const logic = detail.logic;
+            const joins = detail.sources.length > 1 ? detail.sources : [];
+            const hasFilter = !!(logic && logic.filterCondition);
+            // C8：改读 normalize 产出的 sqlParts（单一真相源）。旧实现只读 applyContent——
+            // dim_org(type=CTE) 那 432 字符递归 CTE 整段不显示、dim_official_customer 也丢了 CTE 段。
+            const sqlParts = (logic && Array.isArray(logic.sqlParts)) ? logic.sqlParts : [];
+            if (!joins.length && !hasFilter && !sqlParts.length) { return null; }
+
+            const sec = mdcEl('div', { className: 'sec' });
+            sec.appendChild(mdcEl('div', { className: 'sec-title', text: '加工逻辑' }));
+            const det = mdcEl('details', { className: 'logic' });
+            const parts = [];
+            if (joins.length) { parts.push('JOIN 链'); }
+            if (hasFilter) { parts.push('过滤条件'); }
+            if (sqlParts.length) { parts.push(sqlParts.map(p => p.kind).join(' + ')); } // 「CTE」「APPLY」「CTE + APPLY」
+            det.appendChild(mdcEl('summary', { text: parts.join(' · ') }));
+            const bodyDiv = mdcEl('div', { className: 'logic-body' });
+            if (joins.length) {
+                const jt = mdcEl('table', { className: 'join-table' });
+                joins.forEach(s => {
+                    const tr = mdcEl('tr');
+                    const jtLabel = s.isPrimary ? '主表' : ((s.joinType || 'JOIN').replace(/\s*JOIN$/i, '').trim() || 'JOIN'); // L-6：纯 JOIN 去后缀后回退 JOIN
+                    tr.appendChild(mdcEl('td', { className: 'jt', text: jtLabel }));
+                    const tdName = mdcEl('td');
+                    tdName.appendChild(mdcEl('code', { text: s.name }));
+                    if (s.alias) { tdName.appendChild(mdcEl('span', { text: ' ' + s.alias })); }
+                    tr.appendChild(tdName);
+                    tr.appendChild(mdcEl('td', { className: 'jc', text: s.joinCondition || '' }));
+                    jt.appendChild(tr);
+                });
+                bodyDiv.appendChild(jt);
+            }
+            if (hasFilter) {
+                const fl = mdcEl('div', { className: 'filter-line', text: '过滤条件：' });
+                fl.appendChild(mdcEl('code', { text: logic.filterCondition }));
+                bodyDiv.appendChild(fl);
+            }
+            if (logic && logic.sqlDescription) {
+                bodyDiv.appendChild(mdcEl('div', { className: 'filter-line', text: logic.sqlDescription }));
+            }
+            sqlParts.forEach(part => {
+                bodyDiv.appendChild(mdcEl('div', { className: 'sql-part-label', text: part.kind }));
+                bodyDiv.appendChild(mdcEl('pre', { className: 'sql-block', text: part.content }));
+            });
+            det.appendChild(bodyDiv);
+            sec.appendChild(det);
+            return sec;
+        }
+
+        // C9：字段清单一键复制。复用页面既有 copyToClipboard()——生产是 http://192.168.1.100:3000
+        //（非安全上下文，navigator.clipboard 不可用），该 helper 已带 execCommand 回退，不另造轮子。
+        // 复制范围 = 当前搜索/折叠状态下**可见**的字段，与用户所见一致（getVisible 由各字段表传入）。
+        function mdcMakeFieldCopyBtn(getVisible) {
+            const btn = mdcEl('button', { className: 'field-copy', text: '复制字段' });
+            btn.type = 'button';
+            btn.title = '复制当前可见字段（字段名 + 类型，Tab 分隔），可直接粘进 SQL / Excel';
+            let restoreTimer = null;
+            const restore = () => { btn.textContent = '复制字段'; };
+            const flash = (msg, ms) => {
+                btn.textContent = msg;
+                if (restoreTimer) { clearTimeout(restoreTimer); }
+                restoreTimer = setTimeout(restore, ms || 1600);
+            };
+            btn.addEventListener('click', () => {
+                const rows = getVisible();
+                // 审 19 L：搜索无匹配时给明确反馈，不做「点了没反应」
+                if (!rows.length) { flash('无可复制字段', 1200); return; }
+                const text = rows.map(f => (f.type ? f.name + '\t' + f.type : f.name)).join('\n');
+                // 审 19 M-2：只改文案、不 disabled——复制是幂等操作，连点无害；
+                // 而禁用会挡住「改了搜索词想立刻再复制」这个高频动作。
+                copyToClipboard(text).then(() => flash('已复制 ' + rows.length + ' 个字段'))
+                    .catch(() => flash('复制失败'));
+            });
+            return btn;
+        }
+
+        // C8：DIM「SCD 策略」段——scdConfig.options 里的生产真实配置此前一条都没露出
+        //（dim_org：TRUNCATE_INSERT / T+1 每日 / 12 个监控字段；dim_official_customer：状态过滤 / 生效日期表达式 / 5 个附加索引）
+        // 折叠呈现，避免把抽屉撑长；无任何可展示内容时返回 null 不占位。
+        function mdcRenderScdSection(detail) {
+            const scd = detail.scd;
+            if (!scd) { return null; }
+            const flags = scd.flags || {};
+            const flagDefs = [
+                ['deleteDetection', '删除检测'], ['modifyDetection', '修改检测'],
+                ['consistencyAlert', '一致性告警'], ['auditLog', '审计日志']
+            ];
+            // 审 16 M-2：表单默认值 = auditLog 勾选（Model_Center.html:648 `<input id="scdOptAudit" checked>`），
+            // 其余三项默认不勾。所以「只有 auditLog=true」等价于「没配过 SCD 策略」——为它单独渲染一段
+            // 会让用户误以为该表存在明确的表级策略配置。判据取「是否偏离默认」：默认值不携带信息，偏离才有。
+            // （auditLog 被显式关掉也算偏离——数仓审计缺失是要紧信息，值得露出。）
+            const FLAG_DEFAULTS = { deleteDetection: false, modifyDetection: false, consistencyAlert: false, auditLog: true };
+            // 审 18 L：视图层再补一次生效默认值。normalize 已补齐，但手写 detail / 旧 DTO / 异步中间态若绕过 normalize，
+            // flags.auditLog 为 undefined 会被判成「不等于默认 true」→ 误渲染「审计日志已关闭」。显式 false 不被覆盖。
+            const eff = {};
+            Object.keys(FLAG_DEFAULTS).forEach(k => {
+                eff[k] = (flags[k] === undefined || flags[k] === null) ? FLAG_DEFAULTS[k] : flags[k] === true;
+            });
+            const anyNonDefaultFlag = Object.keys(FLAG_DEFAULTS).some(k => eff[k] !== FLAG_DEFAULTS[k]);
+            const rows = [];
+            if (scd.etlStrategy) { rows.push(['ETL 策略', scd.etlStrategy]); }
+            if (scd.schedule) { rows.push(['调度', scd.schedule]); }
+            if (scd.auditTable) { const c = mdcEl('span'); c.appendChild(mdcEl('code', { text: scd.auditTable })); rows.push(['审计表', c]); }
+            if (scd.indexCount > 0) { rows.push(['附加索引', scd.indexCount + ' 个']); }
+            const hasExpr = !!(scd.stateFilter || scd.effDtExpr);
+            // 审 16 L-1：视图层也对数组收口一次，把渲染函数从 DTO 脏值中隔离（不假设 normalize 一定产出数组）
+            const monitoredFields = Array.isArray(scd.monitoredFields) ? scd.monitoredFields : [];
+            const hasMonitored = monitoredFields.length > 0;
+            if (!anyNonDefaultFlag && !rows.length && !hasExpr && !hasMonitored && !scd.description) { return null; }
+
+            const sec = mdcEl('div', { className: 'sec' });
+            sec.appendChild(mdcEl('div', { className: 'sec-title', text: 'SCD 策略' }));
+            const det = mdcEl('details', { className: 'logic' });
+            const summaryBits = [];
+            if (scd.etlStrategy) { summaryBits.push(scd.etlStrategy); }
+            if (hasMonitored) { summaryBits.push('监控 ' + monitoredFields.length + ' 字段'); }
+            if (anyNonDefaultFlag) {
+                const onCount = flagDefs.filter(([k]) => eff[k]).length;
+                // 审 17 L：偏离默认但一项没开 = 审计日志被显式关掉。写「0 项检测开启」会把这个要紧异常说得像「没配置」
+                summaryBits.push(onCount > 0 ? (onCount + ' 项检测开启') : '审计日志已关闭');
+            }
+            det.appendChild(mdcEl('summary', { text: summaryBits.join(' · ') || '策略明细' }));
+            const body = mdcEl('div', { className: 'logic-body' });
+
+            if (scd.description) { body.appendChild(mdcEl('div', { className: 'filter-line', text: scd.description })); }
+            {
+                const fl = mdcEl('div', { className: 'scd-flags' });
+                flagDefs.forEach(([k, label]) => {
+                    fl.appendChild(mdcEl('span', { className: 'scd-flag ' + (eff[k] ? 'on' : 'off'), text: (eff[k] ? '● ' : '○ ') + label }));
+                });
+                body.appendChild(fl);
+            }
+            if (rows.length) { body.appendChild(mdcRenderKv(rows)); }
+            if (scd.stateFilter) {
+                body.appendChild(mdcEl('div', { className: 'scd-sub-label', text: '状态过滤' }));
+                body.appendChild(mdcEl('code', { className: 'scd-expr', text: scd.stateFilter }));
+            }
+            if (scd.effDtExpr) {
+                body.appendChild(mdcEl('div', { className: 'scd-sub-label', text: '生效日期表达式' }));
+                body.appendChild(mdcEl('code', { className: 'scd-expr', text: scd.effDtExpr }));
+            }
+            if (hasMonitored) {
+                body.appendChild(mdcEl('div', { className: 'scd-sub-label', text: '变更监控字段（' + monitoredFields.length + '）' }));
+                const wrap = mdcEl('div', { className: 'scd-fields' });
+                monitoredFields.forEach(f => wrap.appendChild(mdcEl('code', { text: f })));
+                body.appendChild(wrap);
+            }
+            det.appendChild(body);
+            sec.appendChild(det);
+            return sec;
+        }
+
+        // ④ 动态足迹（C5：懒加载最近 5 条变更摘要 + 链接区 + 脚本留档）
+        function mdcRenderFootSection(detail, model) {
+            const sec = mdcEl('div', { className: 'sec' });
+            sec.appendChild(mdcEl('div', { className: 'sec-title', text: '动态足迹' }));
+            const tl = mdcEl('div', { className: 'mdc-state', text: '加载最近变更…' });
+            sec.appendChild(tl);
+            const ctx = mdcCtx;
+            loadFootprintTimeline(ctx, detail.identity.id, tl);
+            const foot = mdcEl('div', { className: 'foot-row' });
+            const links = mdcEl('div', { className: 'foot-links' });
+            const modelId = detail.identity.id;
+            const btnLogs = mdcEl('button', { text: '查看全部变更 →' });
+            btnLogs.type = 'button';
+            btnLogs.addEventListener('click', (e) => { mdcSubModalTrigger = e.currentTarget; viewModelChangeLogs(modelId, { readOnly: true }); }); // §5.7 恒 readOnly
+            links.appendChild(btnLogs);
+            const btnTests = mdcEl('button', { text: '验收记录 →' });
+            btnTests.type = 'button';
+            btnTests.addEventListener('click', (e) => { mdcSubModalTrigger = e.currentTarget; viewTestRecordsReadOnly(modelId); });
+            links.appendChild(btnTests);
+            foot.appendChild(links);
+            if (model && model.script_saved_at) {
+                foot.appendChild(mdcEl('span', { className: 'script-stamp', text: '脚本留档 ' + formatDateTimeUnified(model.script_saved_at) }));
+            }
+            sec.appendChild(foot);
+            return sec;
+        }
+
+        // companion：伴生身份 + 主模型链接（点击导航到主模型详情）
+        function mdcRenderCompanionView(body, detail) {
+            const sec = mdcEl('div', { className: 'sec' });
+            sec.appendChild(mdcRenderBadges(detail));
+            sec.appendChild(mdcEl('div', { className: 'mdc-note', text: '变更追踪伴生表：配置由主表自动管理（只读）；DDL 请在主表 DDL 弹窗切「伴生表 DDL」标签页查看；写入逻辑在主表增量 ETL Step 3。' }));
+            const rows = [];
+            if (detail.parent && detail.parent.parentModelId) {
+                const link = mdcEl('button', { className: 'mdc-link-btn', text: (detail.parent.parentTableName || ('模型 #' + detail.parent.parentModelId)) + ' →' });
+                link.type = 'button';
+                const pid = Number(detail.parent.parentModelId);
+                // C4 审 M-3：抽屉内导航保留原 opener（列表触发按钮），关闭后焦点仍能按 §5.5 归还
+                link.addEventListener('click', () => { if (Number.isInteger(pid) && pid > 0) { openModelDrawer(pid, mdcCtx && mdcCtx.openerEl); } });
+                rows.push(['主模型', link]);
+            }
+            rows.push(['技术负责人', detail.identity.techOwner || '-']);
+            rows.push(['更新周期', detail.identity.updateCycle || '-']);
+            sec.appendChild(mdcRenderKv(rows));
+            body.appendChild(sec);
+        }
+
+        // custom：脚本模式说明 + 既有 DDL/ETL 弹窗入口（D3 兜底视图）
+        function mdcRenderCustomView(body, detail) {
+            const sec = mdcEl('div', { className: 'sec' });
+            sec.appendChild(mdcRenderBadges(detail));
+            sec.appendChild(mdcEl('div', { className: 'mdc-note', text: '手工脚本模式：DDL / ETL 完全手工编写，配置不可结构化解析。' }));
+            const rows = [['技术负责人', detail.identity.techOwner || '-'], ['更新周期', detail.identity.updateCycle || '-']];
+            const modelId = detail.identity.id;
+            const layer = detail.identity.layer;
+            if (layer === 'DIM' || layer === 'DWD') {
+                const linkWrap = mdcEl('span');
+                const ddlBtn = mdcEl('button', { className: 'mdc-link-btn', text: '查看 DDL →' });
+                ddlBtn.type = 'button';
+                ddlBtn.addEventListener('click', (e) => { mdcSubModalTrigger = e.currentTarget; (layer === 'DIM' ? openDimDDLModal : openDwdDDLModal)(modelId); });
+                linkWrap.appendChild(ddlBtn);
+                rows.push(['脚本', linkWrap]);
+            }
+            sec.appendChild(mdcRenderKv(rows));
+            body.appendChild(sec);
+        }
+
+        // 足迹区「验收记录 →」只读弹窗（复用 /test-records 端点；纳入抽屉 inert/Esc 体系走 .modal 动态注入判据外，
+        //   本弹窗用独立 id modelDrawerTestModal，isAnyModalOpen 已含动态注入判据故 Esc 层级自动生效）
+        async function viewTestRecordsReadOnly(modelId) {
+            const existing = document.getElementById('modelDrawerTestModal');
+            if (existing) { existing.remove(); }
+            const modal = document.createElement('div');
+            modal.id = 'modelDrawerTestModal';
+            modal.className = 'modal';
+            modal.style.cssText = 'display:flex; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.5); z-index:2100; align-items:center; justify-content:center;';
+            modal.innerHTML = `<div style="background:#fff; border-radius:12px; padding:20px; max-width:560px; width:90%; max-height:80vh; overflow-y:auto;">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px; padding-bottom:10px; border-bottom:1px solid #e2e8f0;">
+                    <h3 style="margin:0; color:#1e293b; font-size:1em;">验收记录</h3>
+                    <button onclick="document.getElementById('modelDrawerTestModal').remove()" style="border:none; background:none; font-size:1.5em; cursor:pointer; color:#64748b;">&times;</button>
+                </div>
+                <div id="modelDrawerTestList"><div style="text-align:center; padding:20px; color:#94a3b8;">加载中...</div></div>
+            </div>`;
+            document.body.appendChild(modal);
+            modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
+            const listEl = document.getElementById('modelDrawerTestList');
+            try {
+                const res = await authFetch(`/api/models/${modelId}/test-records?limit=20`);
+                if (!res || !res.ok) throw new Error('获取验收记录失败');
+                const records = await res.json();
+                if (!records.length) { listEl.innerHTML = '<div style="text-align:center; padding:30px; color:#94a3b8;">暂无验收记录</div>'; return; }
+                // 真实列（model_test_records）：overall_result / test_user / total_rows / test_time；phase 藏在 detail_json 不平铺展示
+                listEl.innerHTML = records.map(r => {
+                    const pass = r.overall_result === 'pass', warn = r.overall_result === 'warn';
+                    const color = pass ? '#16a34a' : warn ? '#d97706' : '#dc2626';
+                    const label = pass ? '通过' : warn ? '通过（有警告）' : '不通过';
+                    return `<div style="padding:10px 12px; border:1px solid #e5e7eb; border-radius:8px; margin-bottom:6px; display:flex; align-items:center; gap:10px;">
+                        <span style="color:${color}; font-weight:600; font-size:0.9em;">${label}</span>
+                        <span style="color:#6b7280; font-size:0.85em;">${escapeHtml(r.test_user || '-')}</span>
+                        ${r.total_rows != null ? `<span style="color:#9ca3af; font-size:0.8em;">${r.total_rows} 行</span>` : ''}
+                        <span style="margin-left:auto; color:#9ca3af; font-size:0.8em;">${formatDateTimeUnified(r.test_time || r.created_at)}</span>
+                    </div>`;
+                }).join('');
+            } catch (e) {
+                listEl.innerHTML = `<div style="text-align:center; padding:20px; color:#dc2626;">${escapeHtml(e.message)}</div>`;
+            }
+        }
+
+        // ODS 退路开关（方案 §8）：false 时完全不发 metadata 请求，ODS 字段区显示「字段结构暂未接入，请查看 DDL」
+        const ENABLE_ODS_METADATA = true;
+        const MDC_METADATA_TIMEOUT_MS = 10000;
+
+        // C5：ODS 字段区（先渲染占位容器 + 懒加载 metadata·§5.4 状态映射）
+        // 审 12 M-3：来源系统中文名懒补。依赖方向 = 抽屉主动拉数据（而非让 loadSourceSystems 反向回调 UI，
+        // 那会使数据加载函数依赖抽屉状态）。MDC_SOURCE_SYSTEM_LOADED 防「源系统表里本就没这个 code」时每次开抽屉都重发请求。
+        async function mdcFillSourceSystemName(ctx, el, code) {
+            if (MDC_SOURCE_SYSTEM_LOADED) { return; } // 已成功加载过 → 缺名就是真没有，不重试
+            try { await loadSourceSystems(); } catch (e) { return; }
+            if (!mdcGuard(ctx) || !document.contains(el)) { return; } // 导航已切走/节点已 detach → 丢弃
+            const name = MDC_SOURCE_SYSTEM_NAMES[code];
+            if (name) { el.textContent = code + ' · ' + name; }
+        }
+
+        // C6：近似行数格式化（千分位；null=查询失败/无权限 → 「—」）
+        function mdcFormatRowCount(n) {
+            if (n === null || n === undefined) { return '—'; }
+            return Number(n).toLocaleString('en-US') + ' 行';
+        }
+
+        // C6：行数占位统一收口——失败态也要把「查询中…」落定，否则永久悬停在加载文案
+        function mdcSetRowCount(rowCountEl, n) {
+            if (!rowCountEl) { return; }
+            const missing = (n === null || n === undefined);
+            rowCountEl.textContent = mdcFormatRowCount(n);
+            // 取到值=主信息用常规色；未取到/加载中保持 dim-note 弱化（与「查询中…」占位同色系）
+            rowCountEl.className = missing ? 'dim-note' : '';
+            // 审 12（gpt L）：失败原因由字段区状态精确表达（未配连接/表不可见/超时…），
+            // 此处不复述以免把 400/404/超时都误导成「无权限」
+            rowCountEl.title = missing
+                ? '行数未取到（原因见字段区状态）'
+                : '来自 sys.partitions 统计的近似行数，可能与实时值有微小偏差';
+        }
+
+        function mdcRenderOdsFieldSection(detail, rowCountEl) {
+            const sec = mdcEl('div', { className: 'sec' });
+            const title = mdcEl('div', { className: 'sec-title', text: '字段清单（镜像源表）' });
+            const cnt = mdcEl('span', { className: 'cnt' });
+            title.appendChild(cnt);
+            sec.appendChild(title);
+            const host = mdcEl('div');
+            host.id = 'mdcOdsFieldHost';
+            sec.appendChild(host);
+
+            if (!ENABLE_ODS_METADATA) {
+                // §8：关闭态显示文案 + DDL 链接（C5 审 M-1）
+                const box = mdcEl('div', { className: 'mdc-state' });
+                box.appendChild(mdcEl('span', { text: '字段结构暂未接入，请查看 ' }));
+                const ddlBtn = mdcEl('button', { className: 'mdc-link-btn', text: 'DDL' });
+                ddlBtn.type = 'button';
+                ddlBtn.addEventListener('click', () => { mdcSubModalTrigger = ddlBtn; if (detail._rawModel) { openDDLModal(detail._rawModel); } });
+                box.appendChild(ddlBtn);
+                host.appendChild(box);
+                return sec;
+            }
+            host.appendChild(mdcEl('div', { className: 'mdc-state', text: '加载字段结构…' }));
+            const ctx = mdcCtx; // 捕获当前导航 ctx（懒加载完成时校验仍是它）
+            loadOdsMetadata(ctx, detail, host, cnt, rowCountEl);
+            return sec;
+        }
+
+        // rowCountEl 传 null 有两种含义（均无需本函数处理）：① §8 关闭态压根没有行数行
+        // ② 调用方已按真实 payload 落定行数（审 12 M-1 的 columns=[] 分支）——本函数只负责「未知即清」的场景
+        function mdcOdsStateRender(host, msg, withRetry, ctx, detail, cnt, rowCountEl) {
+            window.ModelDetailKit.dom.clear(host);
+            host.appendChild(mdcEl('div', { className: 'mdc-state mdc-error', text: msg }));
+            mdcSetRowCount(rowCountEl, null); // C6：任一失败态都把行数占位落定，不留「查询中…」悬停
+            if (withRetry) {
+                const wrap = mdcEl('div', { className: 'mdc-state' });
+                const btn = mdcEl('button', { className: 'u-btn-secondary', text: '重试' });
+                btn.type = 'button';
+                btn.addEventListener('click', () => {
+                    if (!mdcGuard(ctx)) { return; }
+                    window.ModelDetailKit.dom.clear(host);
+                    host.appendChild(mdcEl('div', { className: 'mdc-state', text: '加载字段结构…' }));
+                    if (rowCountEl) { rowCountEl.textContent = '查询中…'; rowCountEl.title = ''; rowCountEl.className = 'dim-note'; }
+                    loadOdsMetadata(ctx, detail, host, cnt, rowCountEl);
+                });
+                wrap.appendChild(btn);
+                host.appendChild(wrap);
+            }
+        }
+
+        async function loadOdsMetadata(ctx, detail, host, cnt, rowCountEl) {
+            try {
+                const res = await mdcRequest(ctx, `/api/models/${detail.identity.id}/metadata`, { timeoutMs: MDC_METADATA_TIMEOUT_MS });
+                if (!mdcGuard(ctx)) { return; }
+                // §5.4 状态映射（按接口真实语义）
+                if (res.status === 400) { mdcOdsStateRender(host, '未配置数仓连接', false, ctx, detail, cnt, rowCountEl); return; }
+                if (res.status === 404) { mdcOdsStateRender(host, '模型不存在', false, ctx, detail, cnt, rowCountEl); return; }
+                if (res.status === 500) { mdcOdsStateRender(host, '数仓结构查询失败', true, ctx, detail, cnt, rowCountEl); return; }
+                if (!res.ok) { mdcOdsStateRender(host, '数仓结构查询失败', true, ctx, detail, cnt, rowCountEl); return; }
+                const payload = await res.json();
+                if (!mdcGuard(ctx)) { return; }
+                const odsDetail = window.ModelDetailKit.normalizeModelDetail(detail._rawModel || {}, payload);
+                const fields = odsDetail.fields;
+                // 审 12 M-1：行数与字段区失败态解耦——200 拿到 payload 就按其真实 rowCount 落定，
+                // 不因「字段读不到」连带清掉行数（现实中两者同源多半一起为空，但不能让字段区新增失败分支时误伤行数）
+                mdcSetRowCount(rowCountEl, odsDetail.odsMeta ? odsDetail.odsMeta.rowCount : null);
+                if (odsDetail.warnings.indexOf('FIELDS_EMPTY') >= 0 || !fields.length) {
+                    // 200 + columns=[] → 表不存在或当前连接不可见（不伪装成精确"表不存在"）
+                    mdcOdsStateRender(host, '表不存在或当前连接不可见', false, ctx, detail, cnt, null); // 传 null：行数已按真实值落定，不再覆盖
+                    return;
+                }
+                mdcRenderOdsFieldTable(host, cnt, fields);
+            } catch (err) {
+                if (err && err.name === 'AbortError') {
+                    if (err.mdcAbortReason === 'timeout' && mdcGuard(ctx)) {
+                        // §5.4：注明 abort 只停 UI 等待，不保证数仓侧 SQL 停止
+                        mdcOdsStateRender(host, '查询超时（仅停止界面等待，数仓查询可能仍在执行）', true, ctx, detail, cnt, rowCountEl);
+                    // 审 12 L-5：navigation 中止**故意**不落定行数——换模/关抽屉会重建 modalDrawerBody，
+                    // 旧 odsRowCountEl 随之 detach 丢弃，不存在悬停「查询中…」。若将来改成局部更新 kv 而不重建 body，
+                    // 这里必须补 mdcSetRowCount(rowCountEl, null)。
+                    } else if (err.mdcAbortReason !== 'navigation' && mdcGuard(ctx)) {
+                        // C5 审 L-3：防御性——未标记原因的中止（非导航）不静默卡「加载中」，渲染可重试失败态
+                        mdcOdsStateRender(host, '数仓结构查询失败', true, ctx, detail, cnt, rowCountEl);
+                    }
+                    return;
+                }
+                if (!mdcGuard(ctx)) { return; }
+                console.error('ODS metadata 加载失败:', err);
+                mdcOdsStateRender(host, '数仓结构查询失败', true, ctx, detail, cnt, rowCountEl);
+            }
+        }
+
+        // ODS 字段表（贴源·无来源列·dw_* 折叠·搜索）——复用 dwd/dim 字段渲染同款交互
+        function mdcRenderOdsFieldTable(host, cnt, fields) {
+            window.ModelDetailKit.dom.clear(host);
+            const bizFields = fields.filter(f => !/^dw_/i.test(f.name));
+            const techFields = fields.filter(f => /^dw_/i.test(f.name));
+
+            const toolbar = mdcEl('div', { className: 'field-toolbar' });
+            const search = mdcEl('input', { className: 'field-search' });
+            search.placeholder = '搜索字段名 / 注释…';
+            toolbar.appendChild(search);
+            let lastVisible = []; // C9：同 dwd/dim，复制真实渲染出的那批
+            toolbar.appendChild(mdcMakeFieldCopyBtn(() => lastVisible));
+            host.appendChild(toolbar);
+
+            const wrap = mdcEl('div', { className: 'field-table-wrap' });
+            const scroll = mdcEl('div', { className: 'field-table-scroll' });
+            const table = mdcEl('table', { className: 'field-table' });
+            const thead = mdcEl('thead');
+            const htr = mdcEl('tr');
+            [['字段', '40%'], ['类型', '22%'], ['注释', '38%']].forEach(([t, w]) => { const th = mdcEl('th', { text: t }); th.style.width = w; htr.appendChild(th); });
+            thead.appendChild(htr);
+            table.appendChild(thead);
+            const tbodyEl = mdcEl('tbody');
+            table.appendChild(tbodyEl);
+            scroll.appendChild(table);
+            wrap.appendChild(scroll);
+            const state = { kw: '', showTech: false };
+            let toggleBtn = null;
+            if (techFields.length) { toggleBtn = mdcEl('button', { className: 'tech-toggle' }); toggleBtn.type = 'button'; wrap.appendChild(toggleBtn); }
+            host.appendChild(wrap);
+
+            function renderRows() {
+                const kw = state.kw.trim().toLowerCase();
+                window.ModelDetailKit.dom.clear(tbodyEl);
+                let shown = 0;
+                lastVisible = [];
+                const pushRow = (f, isTech) => {
+                    if (kw && !(f.name.toLowerCase().includes(kw) || (f.comment || '').toLowerCase().includes(kw))) { return; }
+                    shown++;
+                    lastVisible.push(f);
+                    const tr = mdcEl('tr', { className: isTech ? 'tr-tech' : '' });
+                    const tdName = mdcEl('td');
+                    tdName.appendChild(mdcEl('span', { className: 'f-name', text: f.name }));
+                    if (f.isPk) { tdName.appendChild(mdcEl('span', { className: 'mk mk-pk', text: 'PK' })); }
+                    tr.appendChild(tdName);
+                    tr.appendChild(mdcEl('td', { className: 'f-type', text: f.type || '—' }));
+                    const tdC = mdcEl('td');
+                    tdC.appendChild(mdcEl('span', { className: 'f-comment', text: f.comment || '—', title: f.comment || '' }));
+                    tr.appendChild(tdC);
+                    tbodyEl.appendChild(tr);
+                };
+                bizFields.forEach(f => pushRow(f, false));
+                if (state.showTech || kw) { techFields.forEach(f => pushRow(f, true)); }
+                if (!shown) {
+                    const tr = mdcEl('tr'); const td = mdcEl('td', { text: '无匹配字段' });
+                    td.colSpan = 3; td.style.cssText = 'text-align:center; color:#9ca3af; padding:20px;';
+                    tr.appendChild(td); tbodyEl.appendChild(tr);
+                }
+                cnt.textContent = kw ? ('匹配 ' + shown + ' / 共 ' + fields.length)
+                    : (techFields.length ? (bizFields.length + ' 个 + ' + techFields.length + ' 技术') : (fields.length + ' 个'));
+                if (toggleBtn) {
+                    toggleBtn.style.display = kw ? 'none' : '';
+                    toggleBtn.textContent = state.showTech ? '▴ 收起 dw_* 技术字段' : ('▾ 展开 ' + techFields.length + ' 个 dw_* 技术字段');
+                    toggleBtn.setAttribute('aria-expanded', String(state.showTech));
+                }
+            }
+            search.addEventListener('input', () => { state.kw = search.value; renderRows(); });
+            if (toggleBtn) { toggleBtn.addEventListener('click', () => { state.showTech = !state.showTech; renderRows(); }); }
+            renderRows();
+        }
+
+        // C5：下游引用区（D5 文案；懒加载 /downstream 候选引用）
+        // C9：hideWhenEmpty —— DIM/DWD 用。端点照常查询、有候选就照常展示，只是**空结果时不留区块**。
+        // 依据（2026-07-24 实探，非永久业务规则）：当时库内 DWD 只从 ODS 加工（#52 的 12 张源表全是 ods_*），
+        // DIM↔DWD 的关联发生在 PowerBI 语义层而非数仓 ETL，DIM 的下游候选多为空——常驻一个
+        // 「未发现下游引用」区块是噪音。若日后建模方式变化、DIM/DWD 有了下游，展示逻辑无需改动。
+        // ODS 不传该参数、保留空态文案：那句「确认无下游」正是 ODS 下线决策要看的结论（C5 D5 原始用途）。
+        function mdcRenderDownstreamSection(modelId, hideWhenEmpty) {
+            const sec = mdcEl('div', { className: 'sec' });
+            const title = mdcEl('div', { className: 'sec-title', text: '下游引用' });
+            const cnt = mdcEl('span', { className: 'cnt' });
+            title.appendChild(cnt);
+            sec.appendChild(title);
+            sec.appendChild(mdcEl('div', { className: 'mdc-note', text: '平台配置中发现的下游引用（按表名候选匹配，供影响评估参考）。' }));
+            const host = mdcEl('div');
+            host.appendChild(mdcEl('div', { className: 'mdc-state', text: '加载中…' }));
+            sec.appendChild(host);
+            const ctx = mdcCtx;
+            loadDownstream(ctx, modelId, host, cnt, hideWhenEmpty ? sec : null);
+            return sec;
+        }
+
+        function mdcDownstreamError(ctx, modelId, host, cnt, msg, secToHideIfEmpty) {
+            window.ModelDetailKit.dom.clear(host);
+            host.appendChild(mdcEl('div', { className: 'mdc-state mdc-error', text: msg }));
+            const wrap = mdcEl('div', { className: 'mdc-state' });
+            const btn = mdcEl('button', { className: 'u-btn-secondary', text: '重试' });
+            btn.type = 'button';
+            btn.addEventListener('click', () => {
+                if (!mdcGuard(ctx)) { return; }
+                window.ModelDetailKit.dom.clear(host);
+                host.appendChild(mdcEl('div', { className: 'mdc-state', text: '加载中…' }));
+                loadDownstream(ctx, modelId, host, cnt, secToHideIfEmpty);
+            });
+            wrap.appendChild(btn);
+            host.appendChild(wrap);
+        }
+
+        async function loadDownstream(ctx, modelId, host, cnt, secToHideIfEmpty) {
+            try {
+                const res = await mdcRequest(ctx, `/api/models/${modelId}/downstream`, { timeoutMs: MDC_METADATA_TIMEOUT_MS }); // C5 审 M-3：加超时
+                if (!mdcGuard(ctx) || !res) { return; }
+                if (!res.ok) { mdcDownstreamError(ctx, modelId, host, cnt, '下游引用查询失败', secToHideIfEmpty); return; }
+                const data = await res.json();
+                if (!mdcGuard(ctx)) { return; }
+                const list = Array.isArray(data.candidates) ? data.candidates : [];
+                window.ModelDetailKit.dom.clear(host);
+                cnt.textContent = list.length ? (list.length + ' 个候选引用') : '';
+                if (!list.length) {
+                    // C9：DIM/DWD 无候选 → 整段撤掉（恒空区块是噪音）；ODS 仍保留空态文案
+                    if (secToHideIfEmpty && secToHideIfEmpty.parentNode) { secToHideIfEmpty.remove(); return; }
+                    host.appendChild(mdcEl('div', { className: 'mdc-state', text: '未在平台配置中发现下游引用' })); // 禁写"无下游依赖"
+                    return;
+                }
+                const ul = mdcEl('div');
+                list.forEach(m => {
+                    const item = mdcEl('button', { className: 'mdc-dep-item' });
+                    item.type = 'button';
+                    const layerTag = mdcEl('span', { className: 'mdc-badge ' + (String(m.layer).toUpperCase() === 'ODS' ? 'b-layer-ods' : (String(m.layer).toUpperCase() === 'DIM' ? 'b-layer-dim' : 'b-layer')), text: String(m.layer || '').toUpperCase() });
+                    item.appendChild(layerTag);
+                    item.appendChild(mdcEl('span', { className: 'mdc-dep-name', text: m.table_name }));
+                    item.appendChild(mdcEl('span', { className: 'mdc-dep-desc', text: m.table_comment || '' }));
+                    const pid = Number(m.id);
+                    item.addEventListener('click', () => { if (Number.isInteger(pid) && pid > 0) { openModelDrawer(pid, mdcCtx && mdcCtx.openerEl); } });
+                    ul.appendChild(item);
+                });
+                host.appendChild(ul);
+            } catch (err) {
+                if (err && err.name === 'AbortError') {
+                    if (err.mdcAbortReason === 'timeout' && mdcGuard(ctx)) { mdcDownstreamError(ctx, modelId, host, cnt, '下游引用查询超时', secToHideIfEmpty); }
+                    return; // navigation 静默
+                }
+                if (!mdcGuard(ctx)) { return; }
+                console.error('下游引用加载失败:', err);
+                mdcDownstreamError(ctx, modelId, host, cnt, '下游引用查询失败', secToHideIfEmpty);
+            }
+        }
+
+        function renderModelDrawer(detail, model) {
+            const kit = window.ModelDetailKit;
+            const body = document.getElementById('modelDrawerBody');
+            detail._rawModel = model; // ODS metadata normalize 复用原始 model（identity 已在 detail，此处仅透传）
+            document.getElementById('modelDrawerTitle').textContent = detail.identity.tableName || '模型详情';
+            document.getElementById('modelDrawerSub').textContent =
+                (detail.identity.tableComment ? detail.identity.tableComment + ' · ' : '') + '#' + detail.identity.id;
+            kit.dom.clear(body);
+
+            if (detail.warnings.indexOf('CONFIG_UNPARSEABLE_OR_MISSING') >= 0) {
+                body.appendChild(mdcEl('div', { className: 'mdc-note', text: '配置缺失或不可解析——以下仅展示基本信息与足迹。' }));
+            }
+
+            if (detail.kind === 'companion') {
+                mdcRenderCompanionView(body, detail);
+                body.appendChild(mdcRenderFootSection(detail, model));
+                return;
+            }
+            if (detail.kind === 'custom') {
+                mdcRenderCustomView(body, detail);
+                body.appendChild(mdcRenderFootSection(detail, model));
+                return;
+            }
+
+            // ① 身份 + 血缘 + kv（dwd/dim/ods/generic 共用骨架）
+            const sec1 = mdcEl('div', { className: 'sec' });
+            sec1.appendChild(mdcRenderBadges(detail));
+            const lineage = mdcRenderLineage(detail);
+            if (lineage) { sec1.appendChild(lineage); }
+            const kvRows = [];
+            if (detail.kind === 'dwd') {
+                // C4 审 M-1：只读 normalize 产出的 detail.dwdMeta，不再直读 raw model.dim_config（单一真相源）
+                const meta = detail.dwdMeta || {};
+                const strat = MDC_STRATEGY_LABEL[meta.updateStrategy] || meta.updateStrategy || '-';
+                kvRows.push(['更新策略', strat + (meta.hashEnabled ? ' · hash 比对开启' : '')]);
+                const pks = detail.fields.filter(f => f.isPk).map(f => f.name);
+                if (pks.length) {
+                    const pkWrap = mdcEl('span');
+                    pks.forEach((p, i) => {
+                        if (i > 0) { pkWrap.appendChild(window.ModelDetailKit.dom.text(', ')); } // L-8：多 PK 加分隔符
+                        pkWrap.appendChild(mdcEl('code', { text: p }));
+                    });
+                    kvRows.push(['主键', pkWrap]);
+                }
+            }
+            // C6 ODS 贴源三件套：来源系统 / 源表 / 表行数（前两项同步可得；行数随 metadata 懒加载回填）
+            let odsRowCountEl = null;
+            if (detail.kind === 'ods') {
+                const ss = detail.identity.sourceSystem;
+                const ssName = ss ? (MDC_SOURCE_SYSTEM_NAMES[ss] || '') : '';
+                // 审 12 L-3：显式走 mdcEl(text) 落 textContent，不依赖 mdcRenderKv 对字符串的处理约定
+                const ssEl = mdcEl('span', { text: ss ? (ssName ? ss + ' · ' + ssName : ss) : '—' });
+                kvRows.push(['来源系统', ssEl]);
+                // 审 12 M-3（grok/gpt 双方最高优先）：缓存未就绪时先显示 code，再懒补中文名。
+                // 时序（页面初始化就发起、SQLite 毫秒级）几乎追不上，但 loadSourceSystems 失败时 catch 只 console.error
+                // → 缓存永久为空 → 整个会话所有 ODS 抽屉都只剩 code。故按「失败」而非「慢」来兜。
+                if (ss && !ssName) { mdcFillSourceSystemName(mdcCtx, ssEl, ss); }
+                if (detail.identity.sourceTable) {
+                    const stWrap = mdcEl('span');
+                    stWrap.appendChild(mdcEl('code', { text: detail.identity.sourceTable, title: detail.identity.sourceTable }));
+                    kvRows.push(['源表', stWrap]);
+                } else {
+                    kvRows.push(['源表', '—']);
+                }
+                if (ENABLE_ODS_METADATA) {
+                    odsRowCountEl = mdcEl('span', { className: 'dim-note', text: '查询中…' });
+                    kvRows.push(['表行数', odsRowCountEl]);
+                }
+            }
+            if (detail.kind === 'dim' && detail.scd) {
+                kvRows.push(['SCD 类型', detail.scd.scdType || '-']);
+                if (detail.scd.businessKey) {
+                    const bkWrap = mdcEl('span');
+                    bkWrap.appendChild(mdcEl('code', { text: detail.scd.businessKey }));
+                    kvRows.push(['业务键', bkWrap]);
+                }
+                // C8：版本键（SCD2/HYBRID 的版本序列字段，如 dim_official_customer 的 ChangeID）
+                if (detail.scd.versionKey) {
+                    const vkWrap = mdcEl('span');
+                    vkWrap.appendChild(mdcEl('code', { text: detail.scd.versionKey }));
+                    kvRows.push(['版本键', vkWrap]);
+                }
+                kvRows.push(['追踪字段数', String(detail.scd.trackFieldCount)]);
+            }
+            kvRows.push(['技术负责人', detail.identity.techOwner || '-']);
+            const cycleWrap = mdcEl('span', { text: (detail.identity.updateCycle || '-') + ' ' });
+            cycleWrap.appendChild(mdcEl('span', { className: 'dim-note', text: '· ' + (detail.identity.configMode === 'custom' ? '手工脚本' : (detail.identity.configMode || 'standard') + ' 平台配置') }));
+            kvRows.push(['更新周期', cycleWrap]);
+            sec1.appendChild(mdcRenderKv(kvRows));
+            body.appendChild(sec1);
+
+            // ② 字段清单
+            if (detail.kind === 'ods') {
+                // C5：下游引用（先渲染骨架 + 懒加载）+ metadata 字段区
+                body.appendChild(mdcRenderDownstreamSection(detail.identity.id));
+                body.appendChild(mdcRenderOdsFieldSection(detail, odsRowCountEl));
+            } else if (detail.kind === 'dwd' || detail.kind === 'dim') {
+                body.appendChild(mdcRenderFieldSection(detail));
+                // ③ 加工逻辑
+                const logicSec = mdcRenderLogicSection(detail);
+                if (logicSec) { body.appendChild(logicSec); }
+                // ③b C8：DIM 专属 SCD 策略段（dwd 无 scdConfig，mdcRenderScdSection 内部按 detail.scd 判空）
+                const scdSec = mdcRenderScdSection(detail);
+                if (scdSec) { body.appendChild(scdSec); }
+                // ③c C9：下游引用扩到 dwd/dim（后端 /downstream 端点不限 layer）。
+                //   传 hideWhenEmpty=true：无候选时整段撤掉，不给 DIM 留恒空区块。
+                body.appendChild(mdcRenderDownstreamSection(detail.identity.id, true));
+            }
+
+            // ④ 足迹
+            body.appendChild(mdcRenderFootSection(detail, model));
+        }
+
+        function openModelDrawer(modelId, openerEl) {
+            if (mdcCtx) { mdcCtx.dead = true; mdcCtx.navAborter.abort(); } // 导航切换：旧 ctx 失效（reason=navigation 由转发器标记）
+            const ctx = mdcCtx = {
+                token: ++mdcCtxSeq,
+                modelId: Number(modelId),
+                navAborter: new AbortController(),
+                dead: false,
+                openerEl: openerEl || null
+            };
+            const drawer = mdcDrawerEl();
+            document.getElementById('modelDrawerTitle').textContent = '模型详情';
+            renderDrawerState('加载中...');
+            drawer.classList.add('open');
+            document.getElementById('modelDrawerOverlay').classList.add('open');
+            syncModelDrawerInert();
+            const closeBtn = document.getElementById('modelDrawerCloseBtn');
+            if (closeBtn) { closeBtn.focus(); } // 初始聚焦关闭按钮（§5.5）
+            loadModelDrawerDetail(ctx);
+        }
+
+        function closeModelDrawer() {
+            const drawer = mdcDrawerEl();
+            if (!drawer || !drawer.classList.contains('open')) { return; }
+            const opener = mdcCtx && mdcCtx.openerEl;
+            const closedId = mdcCtx ? mdcCtx.modelId : null; // 审 13 M-4：opener 失效时按 id 重查兜底
+            if (mdcCtx) { mdcCtx.dead = true; mdcCtx.navAborter.abort(); } // 迟到响应一律丢弃（§5.3）
+            mdcCtx = null;
+            mdcSubModalTrigger = null; // C4 审 M-3：清理待归还焦点标记（抽屉都关了不再归还给子弹窗触发按钮）
+            MDC_DERIVED_MODAL_IDS.forEach(id => { const m = document.getElementById(id); if (m) { m.remove(); } }); // 清理孤儿派生浮层
+            drawer.classList.remove('open');
+            document.getElementById('modelDrawerOverlay').classList.remove('open');
+            syncModelDrawerInert();
+            // 关闭后焦点恢复到触发按钮（§5.5）。审 13 M-4：C7 让打开入口变多（整行可点），
+            // 抽屉停留期间列表重渲染的窗口也变大——opener 节点被替换时按 modelId 重查同行按钮，避免焦点掉到 body。
+            if (opener && document.contains(opener)) { opener.focus(); return; }
+            if (Number.isInteger(closedId) && closedId > 0) {
+                const fallback = document.querySelector('#modelListBody tr[data-id="' + closedId + '"] .model-open-btn');
+                if (fallback) { fallback.focus(); }
+            }
+        }
+
+        // 与 assets/js/model-detail-normalize.js 的 KIT_VERSION 对齐；改那个文件时两处一起改。
+        // 不一致 = 浏览器用了缓存的旧版 JS（新增字段全落空、界面显示「—」却不报错）。
+        const MDC_KIT_EXPECTED = 'mdc4';
+        function mdcCheckKitVersion() {
+            const kit = window.ModelDetailKit;
+            if (!kit) { console.error('[模型详情抽屉] model-detail-normalize.js 未加载'); return; }
+            if (kit.KIT_VERSION !== MDC_KIT_EXPECTED) {
+                console.error('[模型详情抽屉] normalize.js 版本不匹配：期望 ' + MDC_KIT_EXPECTED +
+                    '，实际 ' + kit.KIT_VERSION + '。多半是浏览器缓存了旧版 JS —— 请硬刷新（Ctrl+F5）；' +
+                    '若是开发期，检查 Model_Center.html 里 model-detail-normalize.js 的 ?v= 缓存串是否已 bump。');
+            }
+        }
+
+        function initModelDrawer() {
+            mdcCheckKitVersion();
+            // 事件委托（§5.2）：handler 只从 dataset 取数值 ID
+            const tbody = document.getElementById('modelListBody');
+            if (tbody) {
+                tbody.addEventListener('click', (e) => {
+                    // ① 显式打开按钮（表名列 / 描述列）——键盘 Tab 可达的无障碍入口，openerEl = 按钮自身
+                    const btn = e.target.closest('.model-open-btn');
+                    if (btn && tbody.contains(btn)) {
+                        const id = Number(btn.dataset.modelId);
+                        if (Number.isInteger(id) && id > 0) { openModelDrawer(id, btn); }
+                        return;
+                    }
+                    // ② C7 整行点击（对齐数据协作 Data_Collab 的行级打开手感）。
+                    //    与该模块不同的是本列表行内有 6 个操作按钮（验证/ETL/DDL/编辑/历史/删除）+ 设计说明图标，
+                    //    故必须先排除交互元素，否则点「删除」会连带弹出详情抽屉。
+                    //    ⚠️ 排除清单不能只写 button：验收/编辑是 `.dim-*-dropdown` 容器 + **裸 <div> 菜单项**，
+                    //    其祖先链（div.menu → div.dropdown → td → tr）中没有 button，closest('button') 抓不到。
+                    //    审 13 HIGH 实证：编辑菜单项当时无 stopPropagation → 点「编辑配置」会编辑弹窗 + 详情抽屉双开。
+                    //    容器级排除是主防线（顺带覆盖菜单 padding 空白区），不依赖各菜单项自己写 stopPropagation。
+                    //    `.model-row-actions`（操作 td）整列排除：按钮间 4px gap 与 td padding 不该开抽屉——
+                    //    心智是「操作列＝操作，数据列＝看详情」。
+                    //    注：disabled 按钮无需额外处理——实测 Chromium 下 disabled button 参与命中测试
+                    //    （elementFromPoint 返回 BUTTON[disabled]）但**不派发 click**，事件根本到不了这里。
+                    if (e.target.closest('button, a, input, select, textarea, label, .dim-edit-dropdown, .dim-validate-dropdown, .model-row-actions')) { return; }
+                    // 拖选文本（复制表名/负责人）松开鼠标同样触发 click——有选区时不视为「点击打开」
+                    const sel = window.getSelection();
+                    if (sel && !sel.isCollapsed && sel.toString().trim()) { return; }
+                    const tr = e.target.closest('tr[data-id]');
+                    if (!tr || !tbody.contains(tr)) { return; }
+                    const id = Number(tr.dataset.id);
+                    if (!Number.isInteger(id) || id <= 0) { return; }
+                    // openerEl 取该行的打开按钮：<tr> 不可聚焦，关闭抽屉时焦点无处可归（§5.5 焦点归还）
+                    openModelDrawer(id, tr.querySelector('.model-open-btn') || null);
+                });
+            }
+            // Esc 层级（§5.5 + C4 审 M-2）：抽屉派生浮层无自身 Esc → 先关最上层派生浮层；派生浮层全关净后再关抽屉。
+            // 其他非派生 .modal（注册/编辑等有自己交互）开着时抽屉让位不处理。
+            document.addEventListener('keydown', (e) => {
+                if (e.key !== 'Escape') { return; }
+                const drawer = mdcDrawerEl();
+                if (!drawer || !drawer.classList.contains('open')) { return; }
+                // 派生浮层开着 → 关最上层那个（不关抽屉）
+                if (MDC_DERIVED_MODAL_IDS.some(id => document.getElementById(id))) {
+                    e.preventDefault(); e.stopPropagation();
+                    closeTopDerivedModal();
+                    return;
+                }
+                if (isAnyModalOpen()) { return; } // 非派生弹窗（注册/编辑）自己处理 Esc
+                e.preventDefault();      // 抽屉为最上层时消费 Esc，防与页面其他 Esc 逻辑双触发
+                e.stopPropagation();
+                closeModelDrawer();
+            });
+            // 子弹窗开合时重算抽屉 inert（对齐 Data_Collab bindDrawerInertObserver 兜底范式）
+            // 声明式 .modal 观察 style+class；动态注入弹窗（append/remove 到 body）观察 body childList（C3 审 M-3）
+            const obs = new MutationObserver(syncModelDrawerInert);
+            document.querySelectorAll('.modal').forEach(m => obs.observe(m, { attributes: true, attributeFilter: ['style', 'class'] }));
+            obs.observe(document.body, { childList: true });
+            syncModelDrawerInert();
+        }
+
         // 高亮并滚动到指定模型
         function highlightModel(modelId) {
             // 找到模型在列表中的位置（用当前排序后的顺序算页码，与 renderModelsPage 的渲染顺序保持一致）
@@ -12492,13 +13752,7 @@ ${window.generatedScripts.incremental}`;
             const isAdminOrPublisher = currentUser && (currentUser.role === 'admin' || currentUser.role === 'publisher');
             const currentUserId = currentUser ? currentUser.id : null;
 
-            const statusMap = {
-                'CREATED': '规划中',
-                'DEVELOPING': '开发中',
-                'REVIEWING': '待验收',
-                'ONLINE': '已上线',
-                'OFFLINE': '已下线'
-            };
+            const statusMap = MODEL_STATUS_MAP; // C3 提升为模块级常量（抽屉 identity 区复用）
 
             const tbody = document.getElementById('modelListBody');
 
@@ -12507,7 +13761,8 @@ ${window.generatedScripts.incremental}`;
             // For simplicity, let's just use CSS or simple logic. 
             // Better approach: Re-render the header? Or just hide the last column via CSS class?
             // Let's toggle the header visibility using ID or selector.
-            const opHeader = document.querySelector('th:last-child');
+            // 选择器收窄到本表 thead，避免命中页面其他表格的 th:last-child（模型详情抽屉方案 v1.4 §5.6）
+            const opHeader = document.querySelector('#modelListTable thead th:last-child');
             if (opHeader) {
                 opHeader.style.display = isViewer ? 'none' : '';
             }
@@ -12541,7 +13796,7 @@ ${window.generatedScripts.incremental}`;
                 // 迭代徽章：统一为只查看迭代历史，不触发编辑
                 let iterBadge;
                 if (iterCount > 0) {
-                    iterBadge = `<span style="background:#fef3c7; color:#b45309; padding:2px 8px; border-radius:10px; font-size:0.8em; cursor:pointer;" onclick='viewIterationHistory(${m.id})' title="点击查看迭代历史"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 2px;"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>v${iterCount}</span>`;
+                    iterBadge = `<button type="button" style="background:#fef3c7; color:#b45309; padding:2px 8px; appearance:none; border:0; border-radius:10px; font-size:0.8em; font-family:inherit; vertical-align:middle; cursor:pointer;" onclick='viewIterationHistory(${m.id})' title="点击查看迭代历史"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 2px;"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>v${iterCount}</button>`;
                 } else {
                     iterBadge = `<span style="color:#a0aec0; font-size:0.85em;">-</span>`;
                 }
@@ -12640,10 +13895,10 @@ ${window.generatedScripts.incremental}`;
                         editBtn = `<div style="position:relative; display:inline-block;" class="dim-edit-dropdown" data-model="${mJson}">
                             <button ${btnBase} background:#f59e0b; color:white; border-color:#d97706; min-width:62px; text-align:center;" onclick="toggleDimEditMenu(event, this)">${icoEdit}编辑${icoArrow}</button>
                             <div class="dim-edit-menu" style="display:none; position:absolute; top:100%; left:0; margin-top:2px; background:white; border:1px solid #e5e7eb; border-radius:6px; box-shadow:0 4px 12px rgba(0,0,0,0.15); z-index:100; min-width:120px; overflow:hidden;">
-                                <div style="padding:8px 12px; cursor:pointer; font-size:0.8em; white-space:nowrap; border-bottom:1px solid #f1f5f9;" onmouseover="this.style.background='#fef3c7'" onmouseout="this.style.background=''" onclick="closeDimEditMenus(); ${editConfigAction}">
+                                <div style="padding:8px 12px; cursor:pointer; font-size:0.8em; white-space:nowrap; border-bottom:1px solid #f1f5f9;" onmouseover="this.style.background='#fef3c7'" onmouseout="this.style.background=''" onclick="event.stopPropagation(); closeDimEditMenus(); ${editConfigAction}">
                                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#d97706" stroke-width="2" style="vertical-align:middle; margin-right:4px;"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>编辑配置
                                 </div>
-                                <div style="padding:8px 12px; cursor:pointer; font-size:0.8em; white-space:nowrap;" onmouseover="this.style.background='#fef3c7'" onmouseout="this.style.background=''" onclick="closeDimEditMenus(); openEditModal(JSON.parse(this.closest('.dim-edit-dropdown').dataset.model))">
+                                <div style="padding:8px 12px; cursor:pointer; font-size:0.8em; white-space:nowrap;" onmouseover="this.style.background='#fef3c7'" onmouseout="this.style.background=''" onclick="event.stopPropagation(); closeDimEditMenus(); openEditModal(JSON.parse(this.closest('.dim-edit-dropdown').dataset.model))">
                                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#d97706" stroke-width="2" style="vertical-align:middle; margin-right:4px;"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>编辑信息
                                 </div>
                             </div>
@@ -12668,7 +13923,7 @@ ${window.generatedScripts.incremental}`;
 
                     // 统一组装：所有行固定6个按钮位置
                     actionButtons = `
-                    <td style="padding:10px;">
+                    <td class="model-row-actions" style="padding:10px;">
                         <div style="display:flex; flex-wrap:nowrap; gap:4px; align-items:center;">
                             ${validateBtn}
                             ${etlBtn}
@@ -12692,11 +13947,14 @@ ${window.generatedScripts.incremental}`;
 
                 return `
                 <tr data-id="${m.id}" style="border-bottom:1px solid #edf2f7; cursor:pointer;" onclick="this.parentElement.querySelectorAll('tr.selected-row').forEach(r=>r.classList.remove('selected-row')); this.classList.add('selected-row');">
+                    <td style="padding:10px 8px; white-space:nowrap; font-family:Consolas,monospace; font-size:0.85em; color:#64748b;">#${m.id}</td>
                     <td style="padding:10px 8px; white-space:nowrap;"><span style="display:inline-block; width:48px; text-align:center; padding:4px 8px; border-radius:4px; font-size:0.8em; font-weight:600; ${layerStyle}">${m.layer.toUpperCase()}</span></td>
-                    <td style="padding:10px 8px; font-weight:600; font-family:Consolas,monospace; color:#92400e; font-size:0.85em; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="${escapeHtml(m.table_name)}${m.companion_of ? ' [变更追踪伴生表]' : ''}${m.config_mode === 'custom' ? ' [手工模式]' : ''}">
-                        ${m.companion_of ? '<span style="color:#15803d; margin-right:3px; font-family:sans-serif;" title="变更追踪伴生表，由主表配置自动管理">●</span>' : ''}${m.config_mode === 'custom' ? '<span style="color:#d97706; margin-right:3px; font-family:sans-serif;" title="完全手工编写DDL和ETL脚本，无标准配置">●</span>' : ''}${m.model_type === 'DICT' ? '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 2px;"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>' : ''}${m.table_name}
+                    <td style="padding:10px 8px; font-weight:600; font-family:Consolas,monospace; color:#92400e; font-size:0.85em; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
+                        <button type="button" class="model-open-btn" data-model-id="${m.id}" title="${escapeHtml(m.table_name)}${m.companion_of ? ' [变更追踪伴生表]' : ''}${m.config_mode === 'custom' ? ' [手工模式]' : ''}（点击查看详情）">${m.companion_of ? '<span style="color:#15803d; margin-right:3px; font-family:sans-serif;" title="变更追踪伴生表，由主表配置自动管理">●</span>' : ''}${m.config_mode === 'custom' ? '<span style="color:#d97706; margin-right:3px; font-family:sans-serif;" title="完全手工编写DDL和ETL脚本，无标准配置">●</span>' : ''}${m.model_type === 'DICT' ? '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 2px;"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>' : ''}${escapeHtml(m.table_name)}</button>
                     </td>
-                    <td style="padding:10px 8px; font-size:${(m.table_comment || '').length > 8 ? '0.75em' : '0.85em'}; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="${escapeHtml(m.table_comment)}">${escapeHtml(m.table_comment)}${m.design_notes ? `<span style="cursor:pointer; margin-left:4px; color:#6366f1; position:relative;" onclick="event.stopPropagation(); showDesignNotesPopover(this, ${JSON.stringify(escapeHtml(m.design_notes)).replace(/"/g, '&quot;')})"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg></span>` : ''}</td>
+                    <td style="padding:10px 8px; font-size:${(m.table_comment || '').length > 8 ? '0.75em' : '0.85em'}; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
+                        <span style="display:flex; align-items:center; gap:4px; min-width:0;"><button type="button" class="model-open-btn" data-model-id="${m.id}" style="flex:1; min-width:0;" title="${escapeHtml(m.table_comment)}（点击查看详情）">${escapeHtml(m.table_comment)}</button>${m.design_notes ? `<button type="button" style="flex-shrink:0; cursor:pointer; color:#6366f1; background:none; border:0; padding:0; line-height:1;" title="查看设计说明" onclick="event.stopPropagation(); showDesignNotesPopover(this, ${JSON.stringify(escapeHtml(m.design_notes)).replace(/"/g, '&quot;')})"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg></button>` : ''}</span>
+                    </td>
                     <td style="padding:10px 8px; white-space:nowrap;">
                         <div style="font-size:0.85em;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 2px;"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>${escapeHtml(m.tech_owner) || '-'}</div>
                     </td>
@@ -12713,7 +13971,7 @@ ${window.generatedScripts.incremental}`;
 
             if (models.length === 0) {
                 // Adjust colspan based on viewer
-                const colspan = isViewer ? 9 : 10;
+                const colspan = isViewer ? 10 : 11;
                 tbody.innerHTML = `<tr><td colspan="${colspan}" style="text-align:center; padding:30px; color:#a0aec0;">暂无模型数据</td></tr>`;
             }
 
@@ -13985,8 +15243,9 @@ ${window.generatedScripts.incremental}`;
             }
         }
 
-        // 查看模型变更日志
-        async function viewModelChangeLogs(modelId) {
+        // 查看模型变更日志（§5.7：opts.readOnly 时不渲染 script_edit 的「回退」按钮——从详情抽屉进入恒 readOnly）
+        async function viewModelChangeLogs(modelId, opts) {
+            const readOnly = !!(opts && opts.readOnly);
             const actionMap = {
                 'CREATE': '<span style="color:#22c55e;">创建</span>',
                 'UPDATE': '<span style="color:#f59e0b;">修改</span>',
@@ -14043,7 +15302,7 @@ ${window.generatedScripts.incremental}`;
                             ${log.change_type ? `<span style="background:#e2e8f0;padding:1px 6px;border-radius:3px;">${changeTypeMap[log.change_type] || log.change_type}</span>` : ''}
                             ${log.change_type === 'script_edit' ? `
                                 <button onclick='viewScriptDiff(${JSON.stringify(log).replace(/'/g, "&#39;")})' style="background:#3b82f6; color:white; border:none; padding:2px 8px; border-radius:3px; cursor:pointer; font-size:0.95em;">查看变更</button>
-                                <button onclick='revertScript(${log.id}, ${modelId})' style="background:#ef4444; color:white; border:none; padding:2px 8px; border-radius:3px; cursor:pointer; font-size:0.95em;">回退</button>
+                                ${readOnly ? '' : `<button onclick='revertScript(${log.id}, ${modelId})' style="background:#ef4444; color:white; border:none; padding:2px 8px; border-radius:3px; cursor:pointer; font-size:0.95em;">回退</button>`}
                             ` : ''}
                         </div>
                     </div>
