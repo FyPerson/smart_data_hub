@@ -141,66 +141,71 @@ async function main() {
   // ═══ [A] 建单三路径 A/B/none 落点 + 互斥校验 ═══
   {
     // none（省略 assign_mode，既有 19 套 verify 的调用形态）
-    let r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: 'none路径', system_name: 'BMS', source: '内部' });
+    let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'none路径', system_name: 'BMS', source: '内部' });
     assert.strictEqual(r.status, 201, 'none 路径建单 201');
     let row = await get('SELECT status, assigned_to, relay_notified_user_id FROM sys_issues WHERE id=?', [r.body.id]);
-    assert.strictEqual(row.status, '待处理', 'none：状态停留待处理');
+    // ⭐ 角色权限重构 C0：受理门焊死 → bug 建单落「待受理」（原「待处理」改为受理通过后的落态）
+    assert.strictEqual(row.status, '待受理', 'C0：none 路径建单落 待受理');
     assert.strictEqual(row.assigned_to, null, 'none：无 assigned_to');
     assert.strictEqual(row.relay_notified_user_id, null, 'none：无 relay');
     assert.deepStrictEqual(await activeDevAssignees(r.body.id), [], 'none：无子表行');
+    const iaNone = await call('POST', `/api/sys-issues/${r.body.id}/intake-accept`, adminTok, {});
+    assert.strictEqual(iaNone.body.status, '待处理', 'C0：受理通过 → 待处理（与旧 none 落态一致）');
 
-    // A（主开发 + 2 协作）
-    r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: 'pathA', system_name: 'BMS', source: '内部', assign_mode: 'A', assigned_to: 5, collaborator_ids: [6, 8] });
-    assert.strictEqual(r.status, 201, 'pathA 建单 201, got ' + JSON.stringify(r.body));
-    assert.strictEqual(r.body.status, '处理中', 'pathA：事务2 成功，状态直达处理中');
-    assert.strictEqual(r.body.assigned_to, 5, 'pathA：响应含主开发');
-    assert.ok(!r.body.assign_failed, 'pathA：无 assign_failed 标记');
-    const pathAId = r.body.id;
-    const daA = await activeDevAssignees(pathAId);
-    assert.strictEqual(daA.length, 3, 'pathA：子表 3 行（主+2协作）');
-    assert.deepStrictEqual(daA.filter(d => d.is_primary === 1).map(d => d.user_id), [5], 'pathA：恰好1主=5');
-    assert.deepStrictEqual(daA.filter(d => d.is_primary === 0).map(d => d.user_id).sort(), [6, 8], 'pathA：协作=[6,8]');
-    assert.ok(daA.every(d => d.notify_status === 'not_sent'), 'pathA：全部 notify_status=not_sent（建单不自动发钉钉）');
+    // ⭐ path A/B 结构性关闭（C0·方案 v1.5 §4-C0）：受理门恒开 ⟹「建单即指派 / 建单即通知对接人」两条路径
+    //   一律被 INTAKE_WITH_ASSIGN_CONFLICT 拒——原「A 直达处理中 + 子表 3 行」「B 写 relay_notified_user_id」
+    //   两组正向断言随之作废，改测**拒绝契约 + 零副作用**（拒绝时不得留下半条单或子表行）。
+    //   ⚠️ 守卫顺序：参数校验（ASSIGN_MODE_CONFLICT/ASSIGN_TARGET_REQUIRED/RELAY_USER_REQUIRED/ASSIGN_MODE_BUG_ONLY）
+    //     仍在本冲突守卫之前，故下方"互斥/校验错误码"各例期望值不变（本组末尾已覆盖）。
+    const cntBeforeAB = (await get('SELECT COUNT(*) c FROM sys_issues')).c;
+    const daCntBeforeAB = (await get('SELECT COUNT(*) c FROM sys_issue_dev_assignees')).c;
 
-    // B（对接人，示例发布者 id=7）
-    r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: 'pathB', system_name: 'BMS', source: '内部', assign_mode: 'B', relay_user_id: 7 });
-    assert.strictEqual(r.status, 201, 'pathB 建单 201');
-    assert.strictEqual(r.body.relay_notified_user_id, 7, 'pathB：relay_notified_user_id=7');
-    assert.strictEqual(r.body.relay_notified_user_name, '示例发布者', 'pathB：relay_notified_user_name 反规范化正确');
-    row = await get('SELECT status, assigned_to FROM sys_issues WHERE id=?', [r.body.id]);
-    assert.strictEqual(row.status, '待处理', 'pathB：状态停留待处理（无自动发钉钉/无自动指派）');
-    assert.strictEqual(row.assigned_to, null, 'pathB：无 assigned_to');
-    assert.deepStrictEqual(await activeDevAssignees(r.body.id), [], 'pathB：无子表行');
+    // A（主开发 + 2 协作）→ 400
+    r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'pathA', system_name: 'BMS', source: '内部', assign_mode: 'A', assigned_to: 5, collaborator_ids: [6, 8] });
+    assert.strictEqual(r.status, 400, 'C0：pathA 建单应 400, got ' + r.status + ' ' + JSON.stringify(r.body));
+    assert.strictEqual(r.body.code, 'INTAKE_WITH_ASSIGN_CONFLICT', 'C0：pathA code=INTAKE_WITH_ASSIGN_CONFLICT');
+
+    // B（对接人，示例发布者 id=7）→ 400
+    r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'pathB', system_name: 'BMS', source: '内部', assign_mode: 'B', relay_user_id: 7 });
+    assert.strictEqual(r.status, 400, 'C0：pathB 建单应 400, got ' + r.status + ' ' + JSON.stringify(r.body));
+    assert.strictEqual(r.body.code, 'INTAKE_WITH_ASSIGN_CONFLICT', 'C0：pathB code=INTAKE_WITH_ASSIGN_CONFLICT');
+
+    // 零副作用：两次拒绝均未建单、未写子表（守卫置于 INSERT 之前）
+    assert.strictEqual((await get('SELECT COUNT(*) c FROM sys_issues')).c, cntBeforeAB, 'C0：A/B 被拒时不创建 sys_issues 行');
+    assert.strictEqual((await get('SELECT COUNT(*) c FROM sys_issue_dev_assignees')).c, daCntBeforeAB, 'C0：A/B 被拒时不写 dev_assignees 子表');
 
     // 互斥/校验错误码
-    r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: 'x', system_name: 'BMS', source: '内部', assigned_to: 5, relay_user_id: 7 });
+    r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'x', system_name: 'BMS', source: '内部', assigned_to: 5, relay_user_id: 7 });
     assert.strictEqual(r.status, 400, '同传 A+B 参数应 400');
     assert.strictEqual(r.body.code, 'ASSIGN_MODE_CONFLICT', 'code=ASSIGN_MODE_CONFLICT');
 
-    r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: 'x', system_name: 'BMS', source: '内部', assign_mode: 'C' });
+    r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'x', system_name: 'BMS', source: '内部', assign_mode: 'C' });
     assert.strictEqual(r.status, 400, 'assign_mode=C 非法应 400');
     assert.strictEqual(r.body.code, 'INVALID_ASSIGN_MODE');
 
     const cntBefore = (await get('SELECT COUNT(*) c FROM sys_issues')).c;
-    r = await call('POST', '/api/sys-issues', adminTok, { type: 'feature', title: 'x', system_name: 'BMS', source: '内部', assign_mode: 'A', assigned_to: 5 });
+    r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 'x', system_name: 'BMS', source: '内部', assign_mode: 'A', assigned_to: 5 });
     assert.strictEqual(r.status, 400, 'feature + assign_mode=A 应 400（变更流不适用三路径）');
     assert.strictEqual(r.body.code, 'ASSIGN_MODE_BUG_ONLY');
     const cntAfter = (await get('SELECT COUNT(*) c FROM sys_issues')).c;
     assert.strictEqual(cntAfter, cntBefore, 'ASSIGN_MODE_BUG_ONLY：拒绝时不创建任何行');
 
-    r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: 'x', system_name: 'BMS', source: '内部', assign_mode: 'A' });
+    r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'x', system_name: 'BMS', source: '内部', assign_mode: 'A' });
     assert.strictEqual(r.status, 400, 'mode=A 缺 assigned_to 应 400');
     assert.strictEqual(r.body.code, 'ASSIGN_TARGET_REQUIRED');
 
-    r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: 'x', system_name: 'BMS', source: '内部', assign_mode: 'B' });
+    r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'x', system_name: 'BMS', source: '内部', assign_mode: 'B' });
     assert.strictEqual(r.status, 400, 'mode=B 缺 relay_user_id 应 400');
     assert.strictEqual(r.body.code, 'RELAY_USER_REQUIRED');
 
-    r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: 'x', system_name: 'BMS', source: '内部', assign_mode: 'B', relay_user_id: 6 });
+    r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'x', system_name: 'BMS', source: '内部', assign_mode: 'B', relay_user_id: 6 });
     assert.strictEqual(r.status, 400, '非白名单 relay_user_id 应 400');
-    assert.strictEqual(r.body.code, 'RELAY_USER_NOT_WHITELISTED');
+    // ⭐ C0 行为变更：relay 白名单校验（RELAY_USER_NOT_WHITELISTED·index.js path B 分支内）位于
+    //   INTAKE_WITH_ASSIGN_CONFLICT 守卫**之后**，受理门恒开后该分支不可达 → 提前被冲突守卫拒。
+    //   仍是 400 且仍不建单，只是错误码更靠前——契约上更准确（"这条路径整体关闭"优先于"参数里某个 id 不合法"）。
+    assert.strictEqual(r.body.code, 'INTAKE_WITH_ASSIGN_CONFLICT', 'C0：path B 关闭后白名单校验被前置守卫遮蔽');
 
-    r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: 'x', system_name: 'BMS', source: '内部', collaborator_ids: [6] });
+    r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'x', system_name: 'BMS', source: '内部', collaborator_ids: [6] });
     assert.strictEqual(r.status, 400, 'mode=none 却传 collaborator_ids 应 400');
     assert.strictEqual(r.body.code, 'ASSIGN_MODE_CONFLICT');
 
@@ -212,21 +217,20 @@ async function main() {
   //   事务2 sysIssueTransition('assign') 失败则单停留待处理+assign_failed 标记，仍 201）；C2 后 path A 改单一
   //   事务（校验主开发/协作存在性→INSERT 主表→插子表→选举→UPDATE 到 DEV，任一步失败整体回滚），不再产生
   //   "单已建但未指派"的半成品态——失败即 400，压根不建单（cntBefore===cntAfter 直接证明）。
+  //   ⭐ 角色权限重构 C0：path A 已**结构性关闭**（受理门恒开 → INTAKE_WITH_ASSIGN_CONFLICT 早于主开发校验），
+  //     "path A 单事务原子性"不再有被测对象。本组改测**关闭后的兜底不变量**：无论主开发参数多不合法，
+  //     一律停在冲突守卫、且不建单——即"关闭是彻底的，不存在某种参数组合把 path A 的建单路径重新打开"。
+  //     ⚠️ 原被测的 viewer/不存在两条校验**未丢失覆盖**：它们在 assign 端点上的等价断言见本文件 [K] 组
+  //     （assign viewer 拦截）与 [M] 组（/assign 重建反例），那才是 C0 后唯一的指派入口。
   {
     const cntBefore = (await get('SELECT COUNT(*) c FROM sys_issues')).c;
-    let r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: '主是viewer', system_name: 'BMS', source: '内部', assign_mode: 'A', assigned_to: 9 });
-    assert.strictEqual(r.status, 400, '主=viewer：整体回滚，400（C2：不再有半成品态）');
-    assert.strictEqual(r.body.code, 'ASSIGN_TARGET_VIEWER', '主=viewer：错误码正确');
-    let cntAfter = (await get('SELECT COUNT(*) c FROM sys_issues')).c;
-    assert.strictEqual(cntAfter, cntBefore, '主=viewer：未创建任何 sys_issues 行（整体原子回滚）');
-
-    r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: '主不存在', system_name: 'BMS', source: '内部', assign_mode: 'A', assigned_to: 999 });
-    assert.strictEqual(r.status, 400, '主不存在：整体回滚，400');
-    assert.strictEqual(r.body.code, 'ASSIGN_TARGET_NOT_FOUND', '主不存在：错误码正确');
-    cntAfter = (await get('SELECT COUNT(*) c FROM sys_issues')).c;
-    assert.strictEqual(cntAfter, cntBefore, '主不存在：未创建任何 sys_issues 行');
-
-    ok('[B] path A 单事务原子性（C2）：主开发 viewer/不存在 → 整体回滚，不产生"单已建但未指派"的半成品态（400，未建单）');
+    for (const [label, assignedTo] of [['主是viewer', 9], ['主不存在', 999], ['主合法', 5]]) {
+      const r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: label, system_name: 'BMS', source: '内部', assign_mode: 'A', assigned_to: assignedTo });
+      assert.strictEqual(r.status, 400, `C0：path A(${label}) 应 400, got ${r.status} ${JSON.stringify(r.body)}`);
+      assert.strictEqual(r.body.code, 'INTAKE_WITH_ASSIGN_CONFLICT', `C0：path A(${label}) 恒停在冲突守卫（早于主开发校验）`);
+    }
+    assert.strictEqual((await get('SELECT COUNT(*) c FROM sys_issues')).c, cntBefore, 'C0：path A 三种参数全被拒且均未建单（关闭彻底·无半成品态）');
+    ok('[B] C0：path A 结构性关闭——viewer/不存在/合法主开发三种参数一律 INTAKE_WITH_ASSIGN_CONFLICT 且不建单（原 viewer/不存在校验覆盖已迁移至 [K]/[M] 的 assign 端点断言）');
   }
 
   // ═══ [H] 白盒：sysIssueTransition('assign') 在不兼容前置态失败 → 无 assigned_*/无子表行 ═══
@@ -257,8 +261,10 @@ async function main() {
   let mainId;
   {
     // C3 重写 /assign：mainId 仅用于 [G] 详情 GET 读端断言（写读同源），无需剧本历史，建单+一次 assign 即可。
-    let r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: '剧本单', system_name: 'BMS', source: '内部' });
+    let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: '剧本单', system_name: 'BMS', source: '内部' });
     mainId = r.body.id;
+    // ⭐ 角色权限重构 C0：建单恒落「待受理」→ 补一步受理（→待处理）才能 assign
+    await call('POST', `/api/sys-issues/${mainId}/intake-accept`, adminTok, {});
     r = await call('POST', `/api/sys-issues/${mainId}/assign`, adminTok, { assigned_to: 5, collaborator_ids: [6] });
     assert.strictEqual(r.status, 200, 'mainId assign 200, got ' + JSON.stringify(r.body));
     ok('[C 替代] mainId 建单 + assign(主=5,协作=[6])，供 [G] 详情 GET 读端 dev_assignees[] join 断言复用（旧差量算法白盒测试随 applyDevAssigneeDiff 一并退场，见上方注释）');
@@ -266,8 +272,10 @@ async function main() {
 
   // ═══ [E] 单开发向后兼容 ═══
   {
-    const r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: '单开发', system_name: 'BMS', source: '内部' });
+    const r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: '单开发', system_name: 'BMS', source: '内部' });
     const id = r.body.id;
+  // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
+    await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, {});
     // [codex 101 号 MED 回填] updated_at 成功断言——种一个明显过期的旧值（避开 SQLite datetime() 1 秒粒度
     //   与"前后取值同一秒"的时序抖动风险），assign 成功后应不再等于该旧值（真实被刷新，非巧合同值）。
     await run(`UPDATE sys_issues SET updated_at = '2020-01-01 00:00:00' WHERE id = ?`, [id]);
@@ -284,8 +292,10 @@ async function main() {
 
   // ═══ [F] 协作开发校验错误码 ═══
   {
-    let r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: 'F校验', system_name: 'BMS', source: '内部' });
+    let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'F校验', system_name: 'BMS', source: '内部' });
     const id1 = r.body.id;
+  // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
+    await call('POST', `/api/sys-issues/${id1}/intake-accept`, adminTok, {});
     r = await call('POST', `/api/sys-issues/${id1}/assign`, adminTok, { assigned_to: 5, collaborator_ids: [999] });
     assert.strictEqual(r.status, 400); assert.strictEqual(r.body.code, 'COLLABORATOR_NOT_FOUND', 'COLLABORATOR_NOT_FOUND');
     r = await call('POST', `/api/sys-issues/${id1}/assign`, adminTok, { assigned_to: 5, collaborator_ids: [9] });
@@ -319,7 +329,8 @@ async function main() {
     assert.ok(das.every(d => 'notify_status' in d && 'notified_at' in d && 'read_at' in d && 'notify_message_key' in d && 'notify_error' in d),
       '详情 dev_assignees 含全列字段（notify_status/notified_at/read_at/notify_message_key/notify_error）');
     // [修B·轮2] 真验 mutation 响应形（非只 GET）：/assign 端点响应体 dev_assignees[0] 含全列字段
-    const freshBug = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: 'mutation响应形', system_name: 'BMS', source: '内部' });
+    const freshBug = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'mutation响应形', system_name: 'BMS', source: '内部' });
+    await call('POST', `/api/sys-issues/${freshBug.body.id}/intake-accept`, adminTok, {});   // C0：建单恒落待受理，先受理
     const mres = await call('POST', `/api/sys-issues/${freshBug.body.id}/assign`, adminTok, { assigned_to: 5, collaborator_ids: [6] });
     assert.strictEqual(mres.status, 200, 'assign 200');
     assert.ok(Array.isArray(mres.body.dev_assignees) && mres.body.dev_assignees.length >= 1, 'assign 响应含 dev_assignees 非空');
@@ -345,8 +356,10 @@ async function main() {
   // ═══ [K] assign viewer 拦截（users 表存在时强制校验，不被传入名绕过）═══
   {
     // 本 harness users 表存在且含 viewer(id=9) → assign 该 viewer → ASSIGN_TARGET_VIEWER
-    let r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: 'assign viewer', system_name: 'BMS', source: '内部' });
+    let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'assign viewer', system_name: 'BMS', source: '内部' });
     const id = r.body.id;
+  // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
+    await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, {});
     // [codex 101 号 MED 回填] updated_at 回滚断言——种旧值，拒绝路径应整事务回滚，updated_at 不被误刷。
     await run(`UPDATE sys_issues SET updated_at = '2020-01-01 00:00:00' WHERE id = ?`, [id]);
     r = await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 9 });
@@ -368,8 +381,10 @@ async function main() {
     //   GATE_INVARIANT（非静默 200/非数据损坏），roster/status 均不受二次请求影响（幂等=可重复安全调用，
     //   非"返回同样 200"——assign 是一次性 D_PRE→DEV 边，非 PUT 语义幂等）。
     {
-      let r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: 'M4①重复请求', system_name: 'BMS', source: '内部' });
+      let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'M4①重复请求', system_name: 'BMS', source: '内部' });
       const id = r.body.id;
+  // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
+      await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, {});
       r = await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5, collaborator_ids: [6] });
       assert.strictEqual(r.status, 200, 'M4①：首次 assign 200');
       // [codex 100 号 M4③ 同批加强] 全量快照对比（非仅计数）：roster 行完整内容 + dev_events + timeline +
@@ -398,8 +413,9 @@ async function main() {
     //   本次经由 /assign 路径验证同一约束——INSERT 分支只看 removed_at IS NULL 的 existingActive 集合，
     //   历史 removed 行天然不在其中）。
     {
-      let r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: 'M4②removed候选', system_name: 'BMS', source: '内部' });
-      const id = r.body.id;   // 待处理（D_PRE）
+      let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'M4②removed候选', system_name: 'BMS', source: '内部' });
+      const id = r.body.id;
+      await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, {});   // C0：受理后落 待处理（D_PRE）
       r = await call('POST', `/api/sys-issues/${id}/dev-assignees`, adminTok, { user_ids: [8] });
       assert.strictEqual(r.status, 200, `M4②：D_PRE 态预加人应 200（矩阵§4.3 主状态不动）, got ${r.status} ${JSON.stringify(r.body)}`);
       const preAdd = await activeDevAssignees(id);
@@ -426,8 +442,10 @@ async function main() {
     // M4③：roster INSERT 后注入失败（timeline INSERT 处）→ roster/assigned_to/status/timeline 全部回滚
     //   （fault-injection 范式同 verify-sys-multidev-members.js H2 / verify-sys-multidev-submit.js S4c）
     {
-      let r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: 'M4③故障注入', system_name: 'BMS', source: '内部' });
+      let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'M4③故障注入', system_name: 'BMS', source: '内部' });
       const id = r.body.id;
+  // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
+      await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, {});
       // [codex 102 号 MED 回填] updated_at 种明显过期旧值（'2020-01-01'）——101 号轮的三处 updated_at 用例
       // 验证的是"前置拒绝未误刷"（从未执行到 UPDATE），非"已写入后随事务整体回滚"；本例的 UPDATE（roster
       // INSERT 后、timeline INSERT 前，即 /assign 自身状态 UPDATE 已把 updated_at 刷成"此刻"）确实先执行、
@@ -466,8 +484,10 @@ async function main() {
     //   ——断言紧随其后的一个全新请求（另一张单的 /assign）事务能正常完成，证明 mutex 没有卡死/被提前释放
     //   导致后续请求跑进一个"半途"的事务上下文。
     {
-      let r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: 'M-P1故障注入', system_name: 'BMS', source: '内部' });
+      let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'M-P1故障注入', system_name: 'BMS', source: '内部' });
       const idA = r.body.id;
+  // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
+      await call('POST', `/api/sys-issues/${idA}/intake-accept`, adminTok, {});
       injectGetFailureFired = false;
       injectGetFailureSkip = 1;   // 跳过 /assign 自身查主开发（devId=5）那一次，命中 resolveCollaboratorList 查协作开发（6）那一次
       injectGetFailureOnSql = 'SELECT id, display_name, username, role FROM users WHERE id = ?';
@@ -479,8 +499,10 @@ async function main() {
       assert.strictEqual(rosterA.length, 0, 'M-P1：故障单本身整事务回滚，零残留（外层唯一回滚点生效）');
       // 关键：锁所有权未被破坏——紧随其后另一张单的正常 /assign 请求应完整成功（若锁被提前释放/破坏，
       //   这里可能报错、挂起，或数据出现跨事务污染）。
-      r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: 'M-P1后续请求', system_name: 'BMS', source: '内部' });
+      r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'M-P1后续请求', system_name: 'BMS', source: '内部' });
       const idB = r.body.id;
+  // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
+      await call('POST', `/api/sys-issues/${idB}/intake-accept`, adminTok, {});
       r = await call('POST', `/api/sys-issues/${idB}/assign`, adminTok, { assigned_to: 5, collaborator_ids: [6] });
       assert.strictEqual(r.status, 200, `M-P1：⭐ 后续请求应正常成功 200（锁所有权未被破坏）, got ${r.status} ${JSON.stringify(r.body)}`);
       const rosterB = await allDevAssigneeRows(idB);

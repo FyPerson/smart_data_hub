@@ -1662,21 +1662,28 @@
         //   查已读」（sysManualNotifyGuard bug creator=admin∨对接人；notify-read-status 逐通道走同 guard·写读同源）。
         //   前端旧含 isPrimaryDev 会让非 admin 非对接人的主开发看到「发送建单人通知」+「查已读」按钮、点击必 403 死按钮。
         //   镜像后端收窄：creator/查已读 = admin∨对接人（与其余 bug 通道一致）。
-        const isBugLiaison = currentUser && isSiBugLiaison(uid);
-        const canOperateDev = isAdminUser || isBugLiaison;              // notify-developer: requireAdminOrBugLiaison
-        const canOperateRelay = isAdminUser;                             // notify-relay: requireAdmin
-        const canOperateCreator = isAdminUser || isBugLiaison;          // notify-creator: sysManualNotifyGuard(bug creator=admin∨对接人·H3 已删主开发)
-        const canOperateRequester = isAdminUser || isBugLiaison;        // notify-requester: requireAdminOrBugLiaison
-        const canOperateReleaseExecutor = isAdminUser;                   // notify-release-executor: requireAdmin（仅 admin）
-        const canQueryRead = isAdminUser || isBugLiaison;               // read-status 逐通道走 sysManualNotifyGuard（H3/M2 后 = admin∨对接人）
+        //   ⭐ 角色权限重构 C1：通知权由「bug 对接人白名单[7,13]」收敛为「admin ∨ 受理人[13]」，
+        //     且 developer/creator/requester 三通道**全类型统一**（后端 sysManualNotifyGuard 已删"变更流仅 admin"特判）。
+        //     示例发布者[7] 随之在前端也看不到这些按钮——他转纯技术负责人。
+        const isIntakeLiaisonForNotify = !!(currentUser && isSiIntakeLiaison(uid));
+        const canOperateDev = isAdminUser || isIntakeLiaisonForNotify;          // notify-developer: requireIntakeLiaison
+        const canOperateRelay = isAdminUser;                                     // notify-relay: 仍仅 admin（该通道随 path B 退场·不扩权）
+        const canOperateCreator = isAdminUser || isIntakeLiaisonForNotify;      // notify-creator: sysManualNotifyGuard(admin∨受理人)
+        const canOperateRequester = isAdminUser || isIntakeLiaisonForNotify;    // notify-requester: requireIntakeLiaison
+        const canOperateReleaseExecutor = isAdminUser;                           // notify-release-executor: requireAdmin（仅 admin）
+        // ⚠️ 查已读必须**逐通道**镜像后端（codex C1 审 HIGH-1）：后端 notify-read-status 对 relay / release_executor
+        //   走的是 admin-only 分支，只有 dev/creator/requester 三通道是 admin∨受理人。
+        //   用一个全局 canQueryRead 会让受理人在 relay / 上线开发两行看到「查已读」按钮，点击必 403 —— 死按钮。
+        const canQueryRead = isAdminUser || isIntakeLiaisonForNotify;           // dev / creator / requester 三通道
+        const canQueryReadAdminOnly = isAdminUser;                              // relay / release_executor 两通道
 
         return `<div class="u-detail-section"><h3>钉钉通知（独立·手动触发）</h3>
             ${siRenderTechLeadNotifyRow(iss)}
             ${siRenderDevNotifyRows(iss, devAssignees || [], canOperateDev, canQueryRead)}
-            ${siRenderRelayNotifyRow(iss, canOperateRelay, canQueryRead)}
+            ${siRenderRelayNotifyRow(iss, canOperateRelay, canQueryReadAdminOnly)}
             ${siRenderCreatorNotifyRow(iss, canOperateCreator, canQueryRead)}
             ${siRenderRequesterNotifyRow(iss, canOperateRequester, canQueryRead)}
-            ${siRenderReleaseExecutorNotifyRow(iss, canOperateReleaseExecutor, canQueryRead)}
+            ${siRenderReleaseExecutorNotifyRow(iss, canOperateReleaseExecutor, canQueryReadAdminOnly)}
             <div style="font-size:11px;color:#9ca3af;margin-top:6px">bug 通知均<b>手动触发</b>——点对应「发送/重发」按钮；「查已读」查询钉钉已读回执。</div>
         </div>`;
     }
@@ -1696,9 +1703,11 @@
         // 变量名沿用（下方 gate 提示/chatBtn 既有引用），语义已升级为"在册成员"而非"单一代表"。
         const isRosterMember = !!(siCaps && siCaps.isRosterMember);
         const isOwnerDev = isRosterMember;
-        // ④a bug 对接人白名单：bug 单的 assign/reassign 对白名单对接人（示例发布者/示例对接人）放行——与后端
-        //   requireAdminOrBugLiaison + roleGuard='admin_or_bug_liaison' 同源；前端只放这两个动作，其余 admin 动作仍仅 admin。
-        const isBugLiaison = currentUser && iss.type === 'bug' && isSiBugLiaison(currentUser.id);
+        // ⭐ 角色权限重构 C1：协调人动作（assign/reassign）的前端门由「bug 对接人白名单 ∧ type=bug」
+        //   改为「受理人[13] ∧ 全类型」——与后端 requireIntakeLiaison + roleGuard='intake_liaison' 同源。
+        //   示例发布者[7] 随之在前端也看不到这两个按钮（他转纯技术负责人）。
+        //   ⚠️ isSiBugLiaison 常量保留未删：它还服务 path B relay 收件人语义（该白名单是"通知发给谁"，
+        //     与操作权正交）；C1 只切操作权这一条线。
         // 受理排期改造 C7：受理人 / 建单人身份（前端权限门·镜像后端 §5.3）
         const isIntakeLiaisonUser = !!(currentUser && isSiIntakeLiaison(currentUser.id));
         const isCreatorUser = !!(currentUser && Number(iss.created_by) === Number(currentUser.id) && Number(currentUser.id) > 0);
@@ -1715,12 +1724,12 @@
             const hit = (f.from === '*') || (Array.isArray(f.from) && f.from.includes(iss.status));
             if (!hit) continue;
             const devAction = SI_DEV_ACTIONS.has(a);
-            // ④a 对接人放行契约（codex 30 M-1 显式化）：对接人可见动作 = type='bug'(isBugLiaison) ∧ action∈{assign,reassign}
-            //   （**动作名硬编码在此处，不依赖 flows 配置**——将来给 bug 流加新动作/改 flows 也不会扩大对接人放行范围）
-            //   ∧ 状态由共享 hit(from 命中，见上方) 收窄（assign 仅待处理 / reassign 仅处理中·待验证）。
-            //   ⚠️ 前端是 UI 镜像**非授权源**：真闸在后端 requireAdminOrBugLiaison + roleGuard + reassign handler type 精判；
-            //     即便前端误显，点击也会被后端 403，故此处硬编码 action 白名单已足，不再复制后端 from 集合（避免第二处真相源漂移）。
-            const liaisonAction = isBugLiaison && (a === 'assign' || a === 'reassign');
+            // ⭐ C1 协调人放行契约：受理人可见动作 = action∈{assign,reassign}（**全类型**·不再限 type='bug'）
+            //   （动作名硬编码在此处，不依赖 flows 配置——将来加新动作/改 flows 也不会扩大放行范围）
+            //   ∧ 状态由共享 hit(from 命中，见上方) 收窄。
+            //   ⚠️ 前端是 UI 镜像**非授权源**：真闸在后端 requireIntakeLiaison + roleGuard='intake_liaison'
+            //     + handler 的 isSysCoordinator 精判；即便前端误显，点击也会被后端 403。
+            const liaisonAction = isIntakeLiaisonUser && (a === 'assign' || a === 'reassign');
             if (devAction) {
                 // submit 专属再叠 canSubmit（本人 dev_status=pending 逐人判定）——多开发场景下本人已提交但
                 // 其他成员未完成时，主状态仍留在 SYS_DEV，仅按族状态判会让已提交成员继续看到「提交」按钮，
@@ -1734,8 +1743,13 @@
             else if (SI_CREATOR_ACTIONS.has(a)) { if (!(isAdminUser || isCreatorUser)) continue; }               // resubmit_intake/edit_in_revision = admin∨建单人
             else if (!isAdminUser && !liaisonAction) continue;   // change_intake_mode + 其余 admin 动作 = 仅 admin
 
-            // 受理排期改造 C7：change_intake_mode 已过受理门（无受理落态 待指派/待处理 + intake_required=1）隐藏——后端 409 INTAKE_MODE_LOCKED·避免死按钮（镜像 §5.4）。
-            if (a === 'change_intake_mode' && Number(iss.intake_required) === 1 && (iss.status === '待指派' || iss.status === '待处理')) continue;
+            // ⭐ 角色权限重构 C0（codex 复审 MED-3）：change_intake_mode **整体下线**——受理门已焊死为全类型必经，
+            //   "切换受理模式"语义消失，后端一律 409 INTAKE_MODE_SWITCH_DISABLED。此处无条件隐藏按钮，
+            //   否则新页面会留一个**必然失败**的死按钮。
+            //   ⚠️ 只隐藏入口、不删 siModalChangeIntakeMode 函数与路由：后端 409 需继续服务**已缓存的旧页面**
+            //     （阶段1 语义），阶段2 同发布批次再连函数、路由、meta 动作一并删除。
+            //   （原逻辑是"已过受理门才隐藏"，C0 后条件退化为恒真，直接写成无条件更诚实。）
+            if (a === 'change_intake_mode') continue;
             // set_scheduled_start（C10 末次审 #7·codex149）：设值须 dev_estimated_at 非空（后端 SCHEDULED_START_REQUIRES_ESTIMATE），
             //   清除不须 estimate。按钮可见条件=「有 estimate 可设值」∨「有 scheduled_start 可清除」——两者皆空时按钮无有效操作
             //   （设值必 409·无值可清），隐藏以消除条件性死按钮（原为保留按钮+gate 引导·改为直接隐藏）。开发态 gate 仍引导先回填。
@@ -1868,6 +1882,17 @@
             if (!r.ok) { siApiErr(r); return; }
             if (r.data && r.data.skipped) { showToast(label + '：无需通知自己', 'info'); await siAfterAction(); return; }   // self-guard（notify-creator，M-2）
             const st = r.data && r.data[statusKey];
+            // ⭐ 角色权限重构 C0（codex 四轮审 MED-2）：superseded = 后端回写被"收件人围栏"拒绝，
+            //   即单据在发送期间已进入新一轮（通知目标被清/换人），本次投递**未计入当前轮次**。
+            //   必须先于 st 分支判断：此时 relay_notify_status 返回的是**当前落库值**而非本次结果，
+            //   按 st 渲染会给出误导性的"已发送"。文案如实说明"外部消息可能已送达"（§14 业务接受项）。
+            //   ⚠️ 严格 === true（codex 五轮审 LOW）：本函数被四个通知端点共用，将来任一端点若返回
+            //     字符串 "false" 或同名异义字段，truthy 判断会误入本分支给出不匹配文案。
+            if (r.data && r.data.superseded === true) {
+                showToast(label + '：' + ((r.data && r.data.message) || '该单已进入新一轮，本次通知未计入当前轮次'), 'warning');
+                await siAfterAction();
+                return;
+            }
             if (st === 'sent') showToast(label + '：钉钉已发送', 'success');
             else if (st === 'failed') showToast(label + '：发送失败（' + ((r.data && r.data[errKey]) || '未知') + '）', 'error');
             else showToast(label + '：已触发', 'success');
@@ -2564,27 +2589,17 @@
     }
 
     // ---- 建单 ----
-    // C5：建单三路径（assign_mode ∈ {A,B,none}，仅 type=bug 生效，对齐后端 §2.1）——
-    //   A=指定主开发（可选协作）；B=指定通知对接人（白名单）；none=不指派（既有默认行为，零变化）。
-    //   通知对接人下拉限白名单 SI_BUG_LIAISON_USER_IDS（对齐后端 RELAY_USER_NOT_WHITELISTED 校验）。
-    function siRelayUserSelectHtml() {
-        const cands = siUsers.filter(u => SI_BUG_LIAISON_USER_IDS.includes(Number(u.id)));
-        const opts = cands.map(u => `<option value="${u.id}">${esc(u.display_name || u.username)}</option>`).join('');
-        return `<div class="u-form-group"><label>通知对接人 <span class="u-req">*</span></label><select id="f_relay_user_id"><option value="">请选择</option>${opts}</select>${!cands.length ? '<div class="u-hint">白名单用户不在可选列表中（可能未激活）</div>' : ''}</div>`;
-    }
-    // type/assign_mode 联动显隐（无框架响应式绑定，手动挂 onchange + 首次渲染后立即校正一次）。
-    function siToggleCreateAssignMode() {
+    // ⭐ 角色权限重构 C0（方案 v1.5 §4-C0）：建单三路径（assign_mode A/B/none）**整区移除**——
+    //   受理门焊死为全类型必经后，「建单即指派开发」「建单即指定通知对接人」两条路径在后端已被
+    //   INTAKE_WITH_ASSIGN_CONFLICT 结构性关闭，前端保留入口只会让用户填完再被拒。
+    //   随之退场：siRelayUserSelectHtml()（其唯一调用点在本区）+ f_assign_mode/f_relay_user_id 两个控件。
+    //   保留：siCollaboratorPickerHtml/siReadCollabChkIds（指派弹窗仍在用·见 :1989/:1992）。
+    // 建单表单的 type 联动显隐（无框架响应式绑定，手动挂 onchange + 首次渲染后立即校正一次）。
+    //   ⚠️ 原名 siToggleCreateAssignMode——assign 区移除后本函数只剩 needs_feasibility 一项职责，随之改名，
+    //     免得留一个名不副实的函数误导后来者（调用点：本文件 f_type.onchange + 弹窗渲染后首次校正）。
+    function siToggleCreateTypeFields() {
         const typeSel = document.getElementById('f_type');
-        const wrap = document.getElementById('siCreateAssignModeWrap');
-        if (!typeSel || !wrap) return;
-        const isBug = typeSel.value === 'bug';
-        wrap.style.display = isBug ? '' : 'none';
-        const modeSel = document.getElementById('f_assign_mode');
-        const mode = isBug ? (modeSel ? modeSel.value : 'none') : 'none';
-        const aBlock = document.getElementById('siCreateAssignA');
-        const bBlock = document.getElementById('siCreateAssignB');
-        if (aBlock) aBlock.style.display = (mode === 'A') ? '' : 'none';
-        if (bBlock) bBlock.style.display = (mode === 'B') ? '' : 'none';
+        if (!typeSel) return;
         // config-hide（§211 收尾）：needs_feasibility 仅 feature/improvement 适用 → bug/config 隐藏勾选框。
         //   后端建单已 400 FEASIBILITY_NOT_APPLICABLE 拒非变更类；此处消前端死勾坑 + 隐藏时清勾（防 feature 勾选后切 bug 的 stale 勾选提交致 400）。
         const nfChk = document.getElementById('f_needs_feasibility');
@@ -2615,19 +2630,6 @@
     function siOpenCreate() {
         const typeOpts = siTypeKeys();
         if (!typeOpts.length) { showToast('暂无可建类型', 'error'); return; }
-        const assignModeHtml = `
-          <div class="u-form-group" id="siCreateAssignModeWrap" style="display:none">
-            <label>建单指派（仅 BUG 类可用）</label>
-            <select id="f_assign_mode" onchange="siToggleCreateAssignMode()">
-              <option value="none">暂不指派</option>
-              <option value="A">A：指定开发成员（可多选）</option>
-              <option value="B">B：指定通知对接人</option>
-            </select>
-          </div>
-          <div id="siCreateAssignA" style="display:none">
-            ${siCollaboratorPickerHtml([], '开发成员（可多选，勾选=在册开发名单）')}
-          </div>
-          <div id="siCreateAssignB" style="display:none">${siRelayUserSelectHtml()}</div>`;
         siModal('新建迭代单', [
             fSelectMap('type', '类型', typeOpts, typeOpts[0], SI_TYPE_LABEL),
             fText('title', '标题', '', true),
@@ -2641,12 +2643,10 @@
             fDate('deadline', '期望完成时间（选填）', ''),
             fTextarea('description', '描述（选填）', '', false),
             fText('related_correction_no', '关联修正单号（选填，BUG 类用）', '', false, '软引用触发本次迭代的数据修正单（OA号/修正单ID），不联动不跳转，仅留痕'),
-            { k: null, html: assignModeHtml },
             fCheckbox('needs_feasibility', '需要可行性评估（开发进入后先做可行性评估）', false),
-            fCheckbox('intake_required', '需对接人受理确认（默认开启·新单先由对接人受理再进开发；取消则直接进开发/可指派）', true),
             { k: null, html: `<div class="u-form-group"><label>需求材料（选填，图片/PDF/Excel/Word/csv/txt/md，单个≤20MB，最多5个）</label>
                 ${siFilePickerHtml('create-spec', '选择文件')}</div>` },
-            note('建单仅 admin 可操作。新功能/优化进「待指派」，可直接指派开发；BUG 类可在此直接走 A/B 两种指派路径。')
+            note('建单仅 admin 可操作。所有新单一律进「待受理」，由对接人受理通过后再指派开发。')
         ], async v => {
             // 交互体验优化 Commit①：文件选择由 key-based 通用组件持有（P2 通用化后 'create-spec' 实例·选择即预览+可删+可追加）。
             //   数量/大小/扩展名/去重校验已在 siPickerCollect 收集时完成，此处直接快照数组（复制一份，防
@@ -2654,7 +2654,10 @@
             const selectedSpecFiles = siPickerFiles('create-spec').slice();
             if (!v.title.trim()) { showToast('标题必填', 'error'); return false; }
             if (!v.system_name) { showToast('所属系统必填', 'error'); return false; }
-            const body = { type: v.type, title: v.title.trim(), system_name: v.system_name, source: v.source, priority: v.priority };
+            // ⭐ 角色权限重构 C0（codex 审 HIGH-1）：显式声明建单契约版本。后端据此识别"旧页面取消勾选"
+            //   （旧逻辑不传 intake_required 时请求体与新版逐字相同，无法区分）→ 缺失/过旧一律 400 引导强制刷新。
+            //   与后端 SYS_INTAKE_CONTRACT_VERSION 必须同步改（改一处不改另一处 = 全站建单 400，属显性失败）。
+            const body = { intake_contract_version: 2, type: v.type, title: v.title.trim(), system_name: v.system_name, source: v.source, priority: v.priority };
             if (v.module_name.trim()) body.module_name = v.module_name.trim();
             if (v.requester_dept.trim()) body.requester_dept = v.requester_dept.trim();
             if (v.requester_name.trim()) body.requester_name = v.requester_name.trim();
@@ -2663,37 +2666,17 @@
             if (v.description.trim()) body.description = v.description.trim();
             if (v.related_correction_no && v.related_correction_no.trim()) body.related_correction_no = v.related_correction_no.trim();   // ④a §7 软关联
             if (v.needs_feasibility) body.needs_feasibility = 1;
-            if (v.intake_required) body.intake_required = 1;   // 受理排期改造 §47（C10 末次审 #1·codex149）：勾选→进「待受理」
-            // C5：仅 type=bug 读 A/B 字段（与后端 ASSIGN_MODE_BUG_ONLY 同源；非 bug 不传 assign_mode，默认 none 零行为变化）
-            if (v.type === 'bug') {
-                const modeSel = document.getElementById('f_assign_mode');
-                const mode = modeSel ? modeSel.value : 'none';
-                // 受理排期改造 §47（C10 #1）：受理门与建单即指派互斥（后端 INTAKE_WITH_ASSIGN_CONFLICT 兜底·前端友好提示先拦）
-                if (v.intake_required && mode !== 'none') { showToast('勾选「需对接人受理」时不能同时指派开发/对接人，请先受理再指派', 'error'); return false; }
-                if (mode === 'A') {
-                    // 去主次（2026-07-18）：path A 改开发成员多选，勾选第一个作 assigned_to 首批候选、其余 collaborator_ids
-                    //   （后端 electRepresentative 重选代表，传谁不影响）。assign_mode='A' 契约不变。
-                    const memberIds = siReadCollabChkIds(0);
-                    if (!memberIds.length) { showToast('path A 需至少勾选 1 名开发', 'error'); return false; }
-                    body.assign_mode = 'A';
-                    body.assigned_to = memberIds[0];
-                    if (memberIds.length > 1) body.collaborator_ids = memberIds.slice(1);
-                } else if (mode === 'B') {
-                    const relaySel = document.getElementById('f_relay_user_id');
-                    const relayId = relaySel ? parseInt(relaySel.value, 10) : NaN;
-                    if (!relayId) { showToast('path B 需选择通知对接人', 'error'); return false; }
-                    body.assign_mode = 'B';
-                    body.relay_user_id = relayId;
-                }
-            }
+            // ⭐ 角色权限重构 C0：不再传 intake_required（后端已封该参数·传任何值都 400 INTAKE_REQUIRED_FIXED），
+            //   也不再传 assign_mode/assigned_to/relay_user_id（path A/B 已结构性关闭）。新单一律落「待受理」。
             const r = await siApi('/sys-issues', { method: 'POST', body });
             if (!r.ok) { siApiErr(r); return false; }
             // 末次合并审65号 M-2：r.ok=true 但 r.data.id 缺失是极端场景（后端 respBody 恒含 id，理论下不可达，
             //   仅防未来响应体结构异常）——避免拼出"已建单 #undefined"这种误导性成功文案。
             if (!(r.data && r.data.id)) { showToast('建单响应异常（缺少单据ID），请刷新列表核对，勿重复提交', 'error'); return false; }
             let msg = '已建单 #' + r.data.id;
-            let hasFailure = !!(r.data && r.data.assign_failed);   // codex64 M-1：改名 isWarn→hasFailure，纳入下方上传失败信号（不再只接指派失败一路）
-            if (hasFailure) msg += '（自动指派失败：' + ((r.data.assign_error && r.data.assign_error.message) || '未知原因') + '，请到详情页手动指派）';
+            // ⭐ C0：assign_failed 是 path A 两段式事务时代的残留信号（path A 已结构性关闭，后端不再产出该字段）；
+            //   保留读取只为兼容极端情况下的旧响应体，恒 false 即可，下方上传失败仍会把它置真。
+            let hasFailure = !!(r.data && r.data.assign_failed);   // codex64 M-1：改名 isWarn→hasFailure，纳入下方上传失败信号
             // C5：建单成功后顺带上传需求材料（复刻 Data_Collab.html 朴素两步链范式：建单 JSON POST 拿 id → 独立 FormData POST 上传；
             // 失败只拼进 msg 提示到详情页补传，不阻塞、不重试、不做状态机）。
             // codex64 M-2：套 try/catch——authFetch(app.js) 的 fetch() 未包裹异常，真实网络异常会一路抛穿 siApi 到
@@ -2719,10 +2702,10 @@
             if (r.data && r.data.id) { siCloseModal(); await siLoadList(); siOpenDrawer(r.data.id); return false; }
             return true;
         });
-        // siModal 已把上方 assignModeHtml 渲染进 #siMBody；type 下拉挂 onchange 联动 + 立即按默认 type 值校正一次显隐。
+        // type 下拉挂 onchange 联动 + 立即按默认 type 值校正一次显隐（C0 后仅剩 needs_feasibility 一项联动）。
         const typeSel = document.getElementById('f_type');
-        if (typeSel) typeSel.onchange = siToggleCreateAssignMode;
-        siToggleCreateAssignMode();
+        if (typeSel) typeSel.onchange = siToggleCreateTypeFields;
+        siToggleCreateTypeFields();
         // 交互体验优化 Commit①：建单弹窗打开时重置 spec 文件组件（实例隔离——每次建单从空开始，
         //   revoke 上次残留的 object URL）；预览容器已随 siMBody 重渲染为空，这里清数组 + 保险再渲一次。
         //   siCreateModalOpen 标记供 siCloseModal 判定"当前是建单弹窗"以在关闭时清理资源（M1，防误清其他弹窗）。

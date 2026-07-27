@@ -89,9 +89,11 @@ async function issueRow(id) { return await get('SELECT * FROM sys_issues WHERE i
 // 建 bug 单 → 指派 devId → estimate → submit → accept → assign-release-dev(releaseDevId)，返回待上线+已指定上线开发的 id
 async function seedReady(assignDev, releaseDevId, releaseDevTok) {
   const tokFor = assignDev === 6 ? dev2Tok : devTok;
-  let r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: 'bug单', system_name: 'BMS', source: '内部' });
+  let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'bug单', system_name: 'BMS', source: '内部' });
   assert.strictEqual(r.status, 201, '建 bug 201, got ' + r.status + ' ' + JSON.stringify(r.body));
   const id = r.body.id;
+  // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
+  await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, {});
   await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: assignDev });
   await call('POST', `/api/sys-issues/${id}/estimate`, tokFor, { dev_estimated_at: EST });
   await call('POST', `/api/sys-issues/${id}/submit`, tokFor, { mode: 'no_code', no_code_reason: '修复完成（占位理由）' });
@@ -173,13 +175,17 @@ async function main() {
   {
     sentCalls = []; sendOk = true;
     // 非待上线（刚建单 待处理）
-    let r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: 'x', system_name: 'BMS', source: '内部' });
+    let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'x', system_name: 'BMS', source: '内部' });
     const pendingId = r.body.id;
+  // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
+    await call('POST', `/api/sys-issues/${pendingId}/intake-accept`, adminTok, {});
     // 待上线但未指派 release_assignee
     const noAssigneeId = await seedReady(5, null);
     // 非 bug（feature）
-    r = await call('POST', '/api/sys-issues', adminTok, { type: 'feature', title: 'f', system_name: 'BMS', source: '内部' });
+    r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 'f', system_name: 'BMS', source: '内部' });
     const featId = r.body.id;
+  // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
+    await call('POST', `/api/sys-issues/${featId}/intake-accept`, adminTok, {});
     r = await call('POST', BATCH, adminTok, { issue_ids: [pendingId, noAssigneeId, featId, 999999] });
     assert.strictEqual(r.status, 200, '[B4] 200');
     for (const id of [pendingId, noAssigneeId, featId, 999999]) {

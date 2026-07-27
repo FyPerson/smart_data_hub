@@ -1,4 +1,4 @@
-// 验证脚本：系统迭代 bug 流 对接人白名单端点隔离 + 关联修正单号（bug流_方案_20260702_v1.2 §3/§7，Commit ④a）
+﻿// 验证脚本：系统迭代 bug 流 对接人白名单端点隔离 + 关联修正单号（bug流_方案_20260702_v1.2 §3/§7，Commit ④a）
 //   用法：node scripts/verify-sys-liaison.js
 //
 // 覆盖（真实 HTTP 端点 + 常量层三处一致）：
@@ -83,17 +83,28 @@ let passed = 0;
 const ok = (m) => { passed++; console.log('  ✓ ' + m); };
 const EST = '2026-08-01 10:00';
 
-// 建 bug 单（待处理，未指派），返回 id
+// 建 bug 单 → 受理 →「待处理」（未指派），返回 id
+//   ⚠️ 每一步都断言（codex C1 审 MED）：夹具里静默吞掉 4xx 会让后续断言在错误前置态上"假绿"。
 async function createBug(extra = {}) {
-  const r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: 'bug单', system_name: 'BMS', source: '内部', ...extra });
+  const r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'bug单', system_name: 'BMS', source: '内部', ...extra });
   assert.strictEqual(r.status, 201, '建 bug 单 201, got ' + r.status + ' ' + JSON.stringify(r.body));
+  // ⭐ 角色权限重构 C0：建单恒落「待受理」→ 补一步受理，落态回到旧的 待处理（下游断言不变）
+  const acc = await call('POST', `/api/sys-issues/${r.body.id}/intake-accept`, adminTok, {});
+  assert.strictEqual(acc.status, 200, 'bug 受理 200, got ' + acc.status + ' ' + JSON.stringify(acc.body));
+  assert.strictEqual(acc.body.status, '待处理', 'bug 受理后落「待处理」');
   return r.body.id;
 }
-// 建 feature 单并推到 已排期（未指派），返回 id
-async function createFeatureScheduled() {
-  const r = await call('POST', '/api/sys-issues', adminTok, { type: 'feature', title: 'feat单', system_name: 'BMS', source: '内部' });
+// ⚠️ 原 createFeatureScheduled 已删除（codex C1 审 MED）：它在受理之后还调用了**早已退场**的 /schedule，
+//   该请求必然失败但返回值没被断言，靠"单据恰好停在待指派"蒙混过关——典型的夹具静默失败。
+//   统一改用下方 createFeatureAssignable（每步断言 + 断言最终落态）。
+
+// ⭐ C1：建 feature 单并受理到「待指派」（C0 后建单恒落待受理·assign.from=待指派）
+async function createFeatureAssignable() {
+  const r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 'feat可指派单', system_name: 'BMS', source: '内部' });
+  assert.strictEqual(r.status, 201, '建 feature 单 201, got ' + r.status + ' ' + JSON.stringify(r.body));
   const id = r.body.id;
-  await call('POST', `/api/sys-issues/${id}/schedule`, adminTok, {});
+  const acc = await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, {});
+  assert.strictEqual(acc.status, 200, 'feature 受理 200, got ' + acc.status + ' ' + JSON.stringify(acc.body));
   return id;
 }
 
@@ -116,8 +127,11 @@ async function main() {
   ok('readiness ready + HTTP harness 起服务（对接人 id=7 示例发布者/13 示例对接人，对齐生产语义）');
 
   // ═══ [W] 白名单三处字面量一致 + isSysBugLiaison 单元 + 成员非 viewer 防御 ═══
+  //   ⭐ 角色权限重构 C1 后本组的语义收窄：SYS_BUG_LIAISON_USER_IDS **不再是操作权来源**，
+  //     仅剩两项非操作权用途 ①列表/详情可见性（技术负责人看 bug 单接咨询）②path B relay 收件人白名单。
+  //     操作权已全部迁到 SYS_INTAKE_LIAISON_IDS[13]（见 [W2]/[MW]/[E] 三组）。
   {
-    assert.deepStrictEqual(I.SYS_BUG_LIAISON_USER_IDS, [7, 13], '后端 SYS_BUG_LIAISON_USER_IDS 须 = [7,13]');
+    assert.deepStrictEqual(I.SYS_BUG_LIAISON_USER_IDS, [7, 13], '后端 SYS_BUG_LIAISON_USER_IDS 须 = [7,13]（可见性/relay 收件人语义）');
     // 前端字面量（防三处漂移，对齐 correction relay 白名单纪律）
     const htmlSrc = fs.readFileSync(path.join(__dirname, '..', 'public', 'Sys_Iteration.html'), 'utf8');
     assert.ok(/const\s+SI_BUG_LIAISON_USER_IDS\s*=\s*\[\s*7\s*,\s*13\s*\]/.test(htmlSrc),
@@ -134,79 +148,82 @@ async function main() {
       const u = await get('SELECT role FROM users WHERE id=?', [uid]);
       assert.ok(u && u.role !== 'viewer', `白名单成员 id=${uid} 不应是 viewer（防误获指派权）`);
     }
-    assert.strictEqual(typeof I.requireAdminOrBugLiaison, 'function', 'requireAdminOrBugLiaison 中间件已导出');
-    ok('[W] 白名单三处字面量一致([7,13]) + isSysBugLiaison 单元(7/13/字符串/非法) + 成员非 viewer 防御 + 中间件导出');
+    // ⭐ C1 退场断言：requireAdminOrBugLiaison 已删除且**不再导出**——保留一个无人调用的授权中间件是风险，
+    //   任何新端点误挂它都会让示例发布者[7] 重新拿回本应撤销的写权限。本断言就是那道防线。
+    assert.strictEqual(I.requireAdminOrBugLiaison, undefined,
+      '⭐ C1：requireAdminOrBugLiaison 应已退场（不再导出）——若此断言红灯，说明有人把旧中间件加了回来');
+    ok('[W] 白名单三处字面量一致([7,13]·**可见性/relay 收件人语义**) + isSysBugLiaison 单元 + 成员非 viewer 防御 + ⭐ requireAdminOrBugLiaison 已退场');
   }
 
-  // ═══ [P] 权限精判（真 HTTP）═══
+  // ═══ [P] 权限精判（真 HTTP）· ⭐ 角色权限重构 C1 重写 ═══
+  //   C1 把指派权从「bug 对接人白名单 [7,13] 且仅 bug」收敛为「受理人 [13] 且**全类型**」：
+  //     · 示例发布者[7]  失去 assign/reassign/dev-assignees/附件/通知 全部协调人动作 → 转纯技术负责人（只回一条评估留言）
+  //     · 示例对接人[13] 获得 **feature/improvement/bug 三类型**的指派与改派权（原先只有 bug）
+  //   故本组由"白名单两人都能操作 bug、但都不能碰变更流"整体反转为下面的矩阵。
   {
-    // admin assign bug → 200
-    let id = await createBug();
-    let r = await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5 });
-    assert.strictEqual(r.status, 200, 'admin assign bug 200');
+    // ── [P1] assign：admin ∨ 受理人[13] 全类型 200；示例发布者[7] 与普通开发一律 403 ──
+    for (const [label, mk] of [['bug', createBug], ['feature', createFeatureAssignable]]) {
+      // admin
+      let id = await mk();
+      let r = await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5 });
+      assert.strictEqual(r.status, 200, `admin assign ${label} 200, got ${r.status} ${JSON.stringify(r.body)}`);
+      // ⭐ 受理人示例对接人[13]：C1 新获全类型指派权（feature 这一条原先是"越界 403"）
+      id = await mk();
+      r = await call('POST', `/api/sys-issues/${id}/assign`, liaison2Tok, { assigned_to: 6 });
+      assert.strictEqual(r.status, 200, `⭐ 受理人(示例对接人13) assign ${label} 应 200（C1 全类型放开）, got ${r.status} ${JSON.stringify(r.body)}`);
+      // ⭐ 示例发布者[7]：C1 起失去指派权（原先 bug 可以）
+      id = await mk();
+      r = await call('POST', `/api/sys-issues/${id}/assign`, liaison1Tok, { assigned_to: 5 });
+      assert.strictEqual(r.status, 403, `⭐ 示例发布者(7) assign ${label} 应 403（C1 转纯技术负责人）, got ${r.status} ${JSON.stringify(r.body)}`);
+      assert.strictEqual(r.body.code, 'NOT_ADMIN_OR_INTAKE_LIAISON', `示例发布者 assign ${label} 被中间件拒（NOT_ADMIN_OR_INTAKE_LIAISON）`);
+      // 普通开发
+      id = await mk();
+      r = await call('POST', `/api/sys-issues/${id}/assign`, devTok, { assigned_to: 6 });
+      assert.strictEqual(r.status, 403, `普通开发 assign ${label} 403`);
+      assert.strictEqual(r.body.code, 'NOT_ADMIN_OR_INTAKE_LIAISON', '中间件层 code 已随 C1 改名');
+    }
+    ok('[P1] assign 全类型矩阵：admin/受理人(13) bug+feature 均 200（⭐ feature 是 C1 新放开）；示例发布者(7)/普通开发一律 403 NOT_ADMIN_OR_INTAKE_LIAISON');
 
-    // 白名单对接人(7) assign bug → 200（新放开）
-    id = await createBug();
-    r = await call('POST', `/api/sys-issues/${id}/assign`, liaison1Tok, { assigned_to: 5 });
-    assert.strictEqual(r.status, 200, '对接人(示例发布者 id=7) assign bug 200，got ' + r.status + ' ' + JSON.stringify(r.body));
-    assert.strictEqual(r.body.status, '处理中', 'assign 直达 处理中');
+    // ── [P2] reassign：同一矩阵（走独立事务·中间件 + handler isSysCoordinator 双层）──
+    for (const [label, mk] of [['bug', createBug], ['feature', createFeatureAssignable]]) {
+      let id = await mk();
+      await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5 });
+      let r = await call('POST', `/api/sys-issues/${id}/reassign`, liaison2Tok, { member_ids: [6], reason: '换人' });
+      assert.strictEqual(r.status, 200, `⭐ 受理人(13) reassign ${label} 应 200, got ${r.status} ${JSON.stringify(r.body)}`);
+      const rAssignees = r.body.dev_assignees || [];
+      assert.strictEqual(rAssignees.length, 1, `reassign ${label} 后子表恰 1 行`);
+      assert.strictEqual(rAssignees[0].user_id, 6, `reassign ${label} 后开发=6（选举结果）`);
 
-    // 白名单对接人(13) assign bug → 200
-    id = await createBug();
-    r = await call('POST', `/api/sys-issues/${id}/assign`, liaison2Tok, { assigned_to: 6 });
-    assert.strictEqual(r.status, 200, '对接人(示例对接人 id=13) assign bug 200');
+      id = await mk();
+      await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5 });
+      r = await call('POST', `/api/sys-issues/${id}/reassign`, liaison1Tok, { member_ids: [6], reason: '换人' });
+      assert.strictEqual(r.status, 403, `⭐ 示例发布者(7) reassign ${label} 应 403`);
 
-    // 非白名单非 admin(dev id=5) assign bug → 403（中间件）
-    id = await createBug();
-    r = await call('POST', `/api/sys-issues/${id}/assign`, devTok, { assigned_to: 6 });
-    assert.strictEqual(r.status, 403, '非白名单非 admin assign bug 403');
-    assert.strictEqual(r.body.code, 'NOT_ADMIN_OR_BUG_LIAISON', '403 code=NOT_ADMIN_OR_BUG_LIAISON（中间件层）');
-    ok('[P1] assign：admin/对接人(7,13) bug 200（新放开）+ 非白名单非 admin 403(中间件 NOT_ADMIN_OR_BUG_LIAISON)');
+      id = await mk();
+      await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5 });
+      r = await call('POST', `/api/sys-issues/${id}/reassign`, dev2Tok, { member_ids: [6], reason: '换人' });
+      assert.strictEqual(r.status, 403, `普通开发 reassign ${label} 403`);
+    }
+    ok('[P2] reassign 全类型矩阵：受理人(13) bug+feature 200；示例发布者(7)/普通开发 403');
 
-    // 白名单对接人 reassign bug → 200：先 admin 建单指派到 dev5（处理中），对接人换到 dev6
-    //   ⚠️ 既有测试变更（C2：reassign body 改 member_ids+reason 声明式最终 roster，见交付汇报清单）。
-    id = await createBug();
-    await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5 });
-    r = await call('POST', `/api/sys-issues/${id}/reassign`, liaison1Tok, { member_ids: [6], reason: '换人' });
-    assert.strictEqual(r.status, 200, '对接人 reassign bug 200，got ' + r.status + ' ' + JSON.stringify(r.body));
-    const rAssignees = r.body.dev_assignees || [];
-    assert.strictEqual(rAssignees.length, 1, 'reassign 后子表恰 1 行');
-    assert.strictEqual(rAssignees[0].user_id, 6, 'reassign 后开发=6（选举结果）');
-
-    // 非白名单非 admin reassign bug → 403（中间件）
-    id = await createBug();
-    await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5 });
-    r = await call('POST', `/api/sys-issues/${id}/reassign`, dev2Tok, { member_ids: [6], reason: '换人' });
-    assert.strictEqual(r.status, 403, '非白名单非 admin reassign bug 403');
-    assert.strictEqual(r.body.code, 'NOT_ADMIN_OR_BUG_LIAISON', 'reassign 403 中间件层');
-    ok('[P2] reassign：admin/对接人 bug 200 + 非白名单非 admin 403（中间件）');
-
-    // 越界①：对接人 assign FEATURE → 403（[3] roleGuard='admin' 拒）
-    id = await createFeatureScheduled();
-    r = await call('POST', `/api/sys-issues/${id}/assign`, liaison1Tok, { assigned_to: 5 });
-    assert.strictEqual(r.status, 403, '对接人 assign feature 应 403（不越界变更流）');
-    assert.strictEqual(r.body.code, 'NOT_AUTHORIZED_FOR_TRANSITION', 'feature assign 越界 403 code（[3] roleGuard 层）');
-
-    // 越界②：对接人 reassign FEATURE → 403（reassign handler type='bug' 精判拒）
-    id = await createFeatureScheduled();
-    await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5 });   // feature → 开发中
-    r = await call('POST', `/api/sys-issues/${id}/reassign`, liaison1Tok, { member_ids: [6], reason: '换人' });
-    assert.strictEqual(r.status, 403, '对接人 reassign feature 应 403（handler type 精判）');
-
-    // 越界③：对接人对其余 admin 动作(accept) → 403（accept 仍 requireAdmin，对接人不获泛化写权限）
-    id = await createBug();
-    await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5 });
-    await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: EST });
-    await call('POST', `/api/sys-issues/${id}/submit`, devTok, { summary: '修复完成' });   // → 待验证
-    r = await call('POST', `/api/sys-issues/${id}/accept`, liaison1Tok, {});
-    assert.strictEqual(r.status, 403, '对接人 accept 应 403（accept 仍 requireAdmin，不获泛化写权限 H-2 隔离）');
-    ok('[P3] 不越界：对接人 assign/reassign feature 403 + accept(其余 admin 动作) 403（白名单仅 bug 指派/换人）');
+    // ── [P3] 不越界：受理人拿到的是"协调人"权，不是泛化 admin 权 ──
+    //   accept/close/hold 等仍 requireAdmin —— C1 只收敛「指派/改派/成员/附件/通知」这一族，
+    //   验收与上线编排仍属甲方 admin（方案 v1.5 §3 角色模型）。
+    let id3 = await createBug();
+    await call('POST', `/api/sys-issues/${id3}/assign`, adminTok, { assigned_to: 5 });
+    await call('POST', `/api/sys-issues/${id3}/estimate`, devTok, { dev_estimated_at: EST });
+    await call('POST', `/api/sys-issues/${id3}/submit`, devTok, { summary: '修复完成' });   // → 待验证
+    let r3 = await call('POST', `/api/sys-issues/${id3}/accept`, liaison2Tok, {});
+    assert.strictEqual(r3.status, 403, '⭐ 受理人(13) accept 应 403（验收仍属 admin·不获泛化写权限）');
+    r3 = await call('POST', `/api/sys-issues/${id3}/accept`, liaison1Tok, {});
+    assert.strictEqual(r3.status, 403, '示例发布者(7) accept 同样 403');
+    ok('[P3] 不越界：受理人/技术负责人对 accept（验收）均 403 —— C1 只收敛协调人族动作，验收/上线仍属 admin');
   }
 
   // ═══ [V] 可见性写读同源 ═══
   {
     // 造一张 feature（对接人不应见）+ 一张 bug（对接人应见）
-    const featId = await createFeatureScheduled();
+    const featId = await createFeatureAssignable();
     const bugId = await createBug();
 
     // 对接人列表：见 bug，不见 feature（未指派给他）
@@ -286,7 +303,7 @@ async function main() {
     assert.strictEqual(r.body.related_correction, null, '无 related_correction_no → related_correction=null');
 
     // >100 字拒 400
-    r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: 'x', system_name: 'BMS', source: '内部', related_correction_no: 'A'.repeat(101) });
+    r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'x', system_name: 'BMS', source: '内部', related_correction_no: 'A'.repeat(101) });
     assert.strictEqual(r.status, 400, '>100 字关联单号拒 400');
     assert.strictEqual(r.body.code, 'RELATED_CORRECTION_NO_TOO_LONG', '400 code=RELATED_CORRECTION_NO_TOO_LONG');
     ok('[R] 关联单号：落库 + 软查 active/voided/oa_number/not_found/datafix + matched_by 消歧(M-2) + 边界输入 trim/前导零/全零(L-2) + 无值 null + >100 拒 400');
@@ -295,7 +312,7 @@ async function main() {
   // ═══ [M3] codex 30 M-3：对接人本人被指派非 bug 单，读权限不被削弱（isAssignee 优先于 isBugLiaison）═══
   {
     // admin 建 feature → schedule → 指派给对接人示例发布者(id=7)（publisher 非 viewer，可被指派）→ 开发中
-    const featId = await createFeatureScheduled();
+    const featId = await createFeatureAssignable();
     let r = await call('POST', `/api/sys-issues/${featId}/assign`, adminTok, { assigned_to: 7 });
     assert.strictEqual(r.status, 200, 'admin 指派 feature 给对接人(id=7) 200');
     // 对接人(7) 作为 assignee：列表能看到该 feature + 详情能打开（对接人身份不削弱 assignee 读权限）
@@ -327,13 +344,13 @@ async function main() {
   // ═══ [C] 变更流零回归 canary ═══
   {
     // admin assign feature 正常 200（中间件放开对接人不影响 admin 路径）
-    let id = await createFeatureScheduled();
+    let id = await createFeatureAssignable();
     let r = await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5 });
     assert.strictEqual(r.status, 200, 'canary：admin assign feature 200（无回归）');
     assert.strictEqual(r.body.status, '开发中', 'feature assign → 开发中');
 
     // 非 admin 非白名单(dev5) feature assign → 403（中间件层，与 ④a 前一致）
-    id = await createFeatureScheduled();
+    id = await createFeatureAssignable();
     r = await call('POST', `/api/sys-issues/${id}/assign`, devTok, { assigned_to: 6 });
     assert.strictEqual(r.status, 403, 'canary：非 admin 非白名单 feature assign 仍 403');
     ok('[C] 变更流零回归：admin assign feature 200 + 非 admin 非白名单 feature assign 403（中间件层不变）');

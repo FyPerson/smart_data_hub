@@ -56,7 +56,10 @@ function waitReady() {
 // 用户：admin(1) / dev5,dev6,dev8（普通开发） / liaison7（bug 对接人白名单，见 index.js SYS_BUG_LIAISON_USER_IDS=[7,13]）
 const adminTok = jwt.sign({ id: 1, username: 'admin', display_name: '管理员', role: 'admin' }, SECRET);
 const devTok = (id) => jwt.sign({ id, username: 'dev' + id, display_name: '开发' + id, role: 'user' }, SECRET);
+// ⭐ 角色权限重构 C1：协调人（附件上传/删除权）由「bug 对接人[7,13] 且 type=bug」收敛为「受理人[13]·全类型」。
+//   liaisonTok 保留 id=7 用于**失权负例**；新增 intakeTok(13) 作为 C1 后真正的协调人。
 const liaisonTok = jwt.sign({ id: 7, username: 'liaison7', display_name: '对接人柒', role: 'user' }, SECRET);
+const intakeTok = jwt.sign({ id: 13, username: 'wangtaotao', display_name: '示例对接人', role: 'user' }, SECRET);
 
 let server, port;
 const png = Buffer.from('89504e470d0a1a0a', 'hex');
@@ -206,23 +209,33 @@ async function main() {
   }
 
   // ══════════════════════════════════════════════════════════════════════
-  // 协调人 type 精判：bug 对接人（liaison7）在 bug 单可上传/删除；在变更流单（非 bug）不可
+  // ⭐ 角色权限重构 C1：协调人 = admin ∨ 受理人[13]·**全类型**（原为 bug 对接人[7,13] 且仅 bug）
+  //   本组由"type 精判：bug 能、变更流不能"反转为"全类型都能；而原白名单里的示例发布者(7) 全类型都不能"。
   // ══════════════════════════════════════════════════════════════════════
   {
-    const idBug = await mkIssue('bug', '处理中');
-    let r = await upload(ATT(idBug), liaisonTok, { attachment_type: 'delivery' }, 'd.png');
-    assert.strictEqual(r.status, 200, `协调人-bug：liaison7 上传 delivery（协调人，非在册）应 200，实际 ${r.status} ${JSON.stringify(r.body)}`);
-    const attIdBug = r.body.attachments[0].id;
-    let del = await call('DELETE', `/api/sys-issues/${idBug}/attachments/${attIdBug}`, liaisonTok);
-    assert.strictEqual(del.status, 200, `协调人-bug：liaison7 删除应 200，实际 ${del.status} ${JSON.stringify(del.body)}`);
-    ok('协调人 type 精判：bug 对接人（isSysBugLiaison 白名单）在 bug 单 → 上传/删除均 200（协调人=对接人∪admin）');
+    // ① 受理人(13)：bug 与变更流**都**可上传/删除（全类型放开）
+    for (const [type, st] of [['bug', '处理中'], ['feature', '开发中']]) {
+      const id = await mkIssue(type, st);
+      let r = await upload(ATT(id), intakeTok, { attachment_type: 'delivery' }, `d-${type}.png`);
+      assert.strictEqual(r.status, 200, `⭐ 协调人(13) 在 ${type} 单上传 delivery 应 200，实际 ${r.status} ${JSON.stringify(r.body)}`);
+      const attId = r.body.attachments[0].id;
+      const del = await call('DELETE', `/api/sys-issues/${id}/attachments/${attId}`, intakeTok);
+      assert.strictEqual(del.status, 200, `⭐ 协调人(13) 在 ${type} 单删除应 200，实际 ${del.status} ${JSON.stringify(del.body)}`);
+      // spec 通道同样放开
+      r = await upload(ATT(id), intakeTok, { attachment_type: 'spec' }, `s-${type}.pdf`);
+      assert.strictEqual(r.status, 200, `⭐ 协调人(13) 在 ${type} 单上传 spec 应 200，实际 ${r.status} ${JSON.stringify(r.body)}`);
+    }
+    ok('⭐ [C1] 协调人全类型放开：受理人(13) 在 bug 与 feature 单上传/删除 delivery + 上传 spec 均 200（原先仅 bug 可用）');
 
-    const idChange = await mkIssue('feature', '开发中');
-    r = await upload(ATT(idChange), liaisonTok, { attachment_type: 'delivery' }, 'e.png');
-    assert.strictEqual(r.status, 403, `协调人-非bug：liaison7 在变更流单上传应 403，实际 ${r.status} ${JSON.stringify(r.body)}`);
-    r = await upload(ATT(idChange), liaisonTok, { attachment_type: 'spec' }, 'f.pdf');
-    assert.strictEqual(r.status, 403, `协调人-非bug：liaison7 在变更流单上传 spec 应 403，实际 ${r.status} ${JSON.stringify(r.body)}`);
-    ok('协调人 type 精判：bug 对接人在变更流（feature）单 → 403（isSysCoordinator 精判 type=bug，不越权到其它类型）');
+    // ② 示例发布者(7)：C1 后不再是协调人，全类型均拒（他既不在册开发、也不再有协调人身份）
+    for (const [type, st] of [['bug', '处理中'], ['feature', '开发中']]) {
+      const id = await mkIssue(type, st);
+      let r = await upload(ATT(id), liaisonTok, { attachment_type: 'delivery' }, `x-${type}.png`);
+      assert.strictEqual(r.status, 403, `⭐ 示例发布者(7) 在 ${type} 单上传 delivery 应 403，实际 ${r.status} ${JSON.stringify(r.body)}`);
+      r = await upload(ATT(id), liaisonTok, { attachment_type: 'spec' }, `y-${type}.pdf`);
+      assert.strictEqual(r.status, 403, `⭐ 示例发布者(7) 在 ${type} 单上传 spec 应 403，实际 ${r.status} ${JSON.stringify(r.body)}`);
+    }
+    ok('⭐ [C1] 技术负责人无附件权：示例发布者(7) 在 bug 与 feature 单上传 delivery/spec 全部 403（方案 v1.5 §3「不看附件」）');
   }
 
   // ══════════════════════════════════════════════════════════════════════

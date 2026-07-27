@@ -227,15 +227,19 @@ async function main() {
     ok(`[4] 写读同源（${label}）：mutation 基础列集与详情一致（${mutationKeys.join(',')}）+ 详情专属增强 ${DETAIL_ONLY_KEYS.join('/')}`);
   }
 
-  // [4a] path A（建单同时指派，仅 bug 可用 assign_mode=A）
-  r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: 'C1镜像-pathA', system_name: 'BMS', source: '内部', assign_mode: 'A', assigned_to: 5 });
-  assert.strictEqual(r.status, 201, `path A 建单应 201，实际 ${r.status} ${JSON.stringify(r.body)}`);
-  await assertMirrorKeys('path A 建单', (r.body.dev_assignees || [])[0], r.body.id);
+  // [4a] ⭐ 角色权限重构 C0：path A（建单同时指派）**结构性关闭**——受理门恒开 ⟹ 400 INTAKE_WITH_ASSIGN_CONFLICT。
+  //   原断言"path A 建单响应的 dev_assignees[0] 含全部镜像列"随之作废；**镜像列覆盖未丢失**——
+  //   建单已不可能带 dev_assignees，该镜像契约的唯一入口是 assign 端点，由紧邻的 [4b] 完整覆盖。
+  r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'C1镜像-pathA', system_name: 'BMS', source: '内部', assign_mode: 'A', assigned_to: 5 });
+  assert.strictEqual(r.status, 400, `C0：path A 建单应 400，实际 ${r.status} ${JSON.stringify(r.body)}`);
+  assert.strictEqual(r.body.code, 'INTAKE_WITH_ASSIGN_CONFLICT', 'C0：path A code=INTAKE_WITH_ASSIGN_CONFLICT');
 
   // [4b] assign（既有覆盖，保留）
-  r = await call('POST', '/api/sys-issues', adminTok, { type: 'feature', title: 'C1镜像-assign', system_name: 'BMS', source: '内部' });
+  r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 'C1镜像-assign', system_name: 'BMS', source: '内部' });
   assert.strictEqual(r.status, 201, `建单应 201，实际 ${r.status} ${JSON.stringify(r.body)}`);
   const issue2 = r.body.id;
+  // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
+  await call('POST', `/api/sys-issues/${issue2}/intake-accept`, adminTok, {});
   await call('POST', `/api/sys-issues/${issue2}/schedule`, adminTok, {});
   r = await call('POST', `/api/sys-issues/${issue2}/assign`, adminTok, { assigned_to: 5 });
   assert.strictEqual(r.status, 200, `assign 应 200，实际 ${r.status} ${JSON.stringify(r.body)}`);
@@ -244,9 +248,11 @@ async function main() {
   // [4c] reassign（C2 破坏性变更：改声明式最终 roster member_ids+reason，见方案 §3；本文件既有测试变更清单——
   //   原用 newAssignedTo/oldAssignedTo 换主语义）：先建单→排期→指派 5 号推进到「开发中」，再改派到仅 [6]
   //   （移除 5、新增 6）触发一次差量。
-  r = await call('POST', '/api/sys-issues', adminTok, { type: 'feature', title: 'C1镜像-reassign', system_name: 'BMS', source: '内部' });
+  r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 'C1镜像-reassign', system_name: 'BMS', source: '内部' });
   assert.strictEqual(r.status, 201, `建单应 201，实际 ${r.status} ${JSON.stringify(r.body)}`);
   const issue4 = r.body.id;
+  // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
+  await call('POST', `/api/sys-issues/${issue4}/intake-accept`, adminTok, {});
   await call('POST', `/api/sys-issues/${issue4}/schedule`, adminTok, {});
   await call('POST', `/api/sys-issues/${issue4}/assign`, adminTok, { assigned_to: 5 });
   r = await call('POST', `/api/sys-issues/${issue4}/reassign`, adminTok, { member_ids: [6], reason: '测试改派以验证镜像一致性' });

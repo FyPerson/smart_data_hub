@@ -1099,16 +1099,32 @@ async function main() {
   {
     const issuesCntBefore = (await get('SELECT COUNT(*) c FROM sys_issues')).c;
     const assigneesCntBefore = (await get('SELECT COUNT(*) c FROM sys_issue_dev_assignees')).c;
+    // ⭐ 角色权限重构 C0：原用 path A（建单即指派）触发 electRepresentative，该路径已结构性关闭
+    //   （受理门恒开 → 400 INTAKE_WITH_ASSIGN_CONFLICT）。改用 C0 后唯一的指派入口 /assign 触发同一函数：
+    //   建单（→待受理）→ 受理（→待处理）→ assign（内部走 roster INSERT + electRepresentative）。
+    //   ⚠️ 断言随入口调整：单在 assign 之前就已合法存在，故不再断言 sys_issues 零新增，
+    //     改断言**故障事务自身零残留**——dev_assignees 不新增 + 主表 status/assigned_to 未被推进。
+    const preIssue = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'H2故障注入回滚测试', system_name: 'BMS', source: '内部' });
+    assert.strictEqual(preIssue.status, 201, 'H2 夹具建单 201');
+    const h2Id = preIssue.body.id;
+    await call('POST', `/api/sys-issues/${h2Id}/intake-accept`, adminTok, {});
+    const h2Before = await get('SELECT status, assigned_to FROM sys_issues WHERE id=?', [h2Id]);
+    assert.strictEqual(h2Before.status, '待处理', 'H2 夹具：受理后落 待处理（assign 的合法前置态）');
+    const assigneesCntBefore2 = (await get('SELECT COUNT(*) c FROM sys_issue_dev_assignees')).c;
+
     injectFailureFired = false;
-    injectFailureOnSql = 'SET is_primary = CASE';   // 命中 electRepresentative 的 UPDATE（发生在 sys_issues/dev_assignees 两处 INSERT 之后）
-    const r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: 'H2故障注入回滚测试', system_name: 'BMS', source: '内部', assign_mode: 'A', assigned_to: 5 });
+    injectFailureOnSql = 'SET is_primary = CASE';   // 命中 electRepresentative 的 UPDATE（发生在 roster INSERT 之后）
+    const r = await call('POST', `/api/sys-issues/${h2Id}/assign`, adminTok, { assigned_to: 5 });
     assert.strictEqual(r.status, 500, `H2：electRepresentative 中途故障应 500（未预期错误），实际 ${r.status} ${JSON.stringify(r.body)}`);
     assert.ok(injectFailureFired, 'H2：确认故障注入真实命中过（防 SQL 片段写错导致测试静默失效）');
     injectFailureOnSql = null; injectFailureFired = false;   // 复位（防污染后续用例）
-    const issuesCntAfter = (await get('SELECT COUNT(*) c FROM sys_issues')).c;
     const assigneesCntAfter = (await get('SELECT COUNT(*) c FROM sys_issue_dev_assignees')).c;
-    assert.strictEqual(issuesCntAfter, issuesCntBefore, 'H2：sys_issues 未残留部分写入行（INSERT 随事务回滚）');
-    assert.strictEqual(assigneesCntAfter, assigneesCntBefore, 'H2：sys_issue_dev_assignees 未残留部分写入行（INSERT 随事务回滚）');
+    const h2After = await get('SELECT status, assigned_to FROM sys_issues WHERE id=?', [h2Id]);
+    assert.strictEqual(assigneesCntAfter, assigneesCntBefore2, 'H2：sys_issue_dev_assignees 未残留部分写入行（roster INSERT 随事务回滚）');
+    assert.strictEqual(h2After.status, h2Before.status, 'H2：主状态未被推进（仍 待处理·UPDATE 随事务回滚）');
+    assert.strictEqual(h2After.assigned_to, null, 'H2：assigned_to 未落（代表位选举失败即整体回滚）');
+    const issuesCntAfter = (await get('SELECT COUNT(*) c FROM sys_issues')).c;
+    assert.strictEqual(issuesCntAfter, issuesCntBefore + 1, 'H2：仅夹具单 1 行（故障事务本身不新建单）');
     ok('H2：CREATE path A 中途失败（electRepresentative 故障注入）→ 500 + 已发生的 sys_issues/dev_assignees INSERT 均随事务整体回滚，无部分写入残留');
   }
 

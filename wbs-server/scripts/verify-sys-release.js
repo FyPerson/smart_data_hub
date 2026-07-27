@@ -78,9 +78,11 @@ const ok = (m) => { passed++; console.log('  ✓ ' + m); };
 //   D（codex L-1）：固定指派 dev(id=5)、estimate/submit 用 devTok——ownerGuard 严格本人，admin 不能代开发提交，
 //   不再保留 adminTok 误导分支。
 async function seedToReady() {
-  let r = await call('POST', '/api/sys-issues', adminTok, { type: 'feature', title: 't', system_name: 'BMS', source: '内部' });
+  let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 't', system_name: 'BMS', source: '内部' });
   assert.strictEqual(r.status, 201, '建单 201, got ' + r.status + ' ' + JSON.stringify(r.body));
   const id = r.body.id;
+  // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
+  await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, {});
   await call('POST', `/api/sys-issues/${id}/schedule`, adminTok, {});
   await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5 });
   r = await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: '2026-08-01 10:00' });
@@ -152,7 +154,7 @@ async function main() {
   ok('已挂批次单加入它批次 → 409 ISSUE_NOT_ADDABLE');
 
   // 非待上线（新建未走流程，状态=待评估）→ 不能加
-  const draftId = (await call('POST', '/api/sys-issues', adminTok, { type: 'feature', title: 'd', system_name: 'BMS', source: '内部' })).body.id;
+  const draftId = (await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 'd', system_name: 'BMS', source: '内部' })).body.id;
   r = await call('POST', `/api/sys-releases/${relB}/add-issues`, adminTok, { issue_ids: [draftId] });
   assert.strictEqual(r.status, 409); assert.strictEqual(r.body.code, 'ISSUE_NOT_ADDABLE');
   ok('非待上线单加入 → 409');
@@ -376,8 +378,10 @@ async function main() {
     ok('release_id 三段断言①：type∈(feature,improvement) AND status=已上线 ⟹ release_id IS NOT NULL（全库扫描零违例）');
 
     // bug 段：走新 G3+G5/G6 端点，各建一条分别验证 hotfix/publish 两模式的 release_id/version_tag 归宿（H-2）
-    let r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: 'seg-bug-a', system_name: 'BMS', source: '内部' });
+    let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'seg-bug-a', system_name: 'BMS', source: '内部' });
     const bugA = r.body.id;
+  // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
+    await call('POST', `/api/sys-issues/${bugA}/intake-accept`, adminTok, {});
     await call('POST', `/api/sys-issues/${bugA}/assign`, adminTok, { assigned_to: 5 });
     await call('POST', `/api/sys-issues/${bugA}/estimate`, devTok, { dev_estimated_at: '2026-08-01 10:00' });
     await call('POST', `/api/sys-issues/${bugA}/submit`, devTok, { mode: 'no_code', no_code_reason: '修复（占位理由）' });
@@ -393,8 +397,10 @@ async function main() {
     //   故 hotfix 模式下 version_tag 天然无处依附，不再单独查询断言（H-2 不变量由 release_id 一列即可完整表达）。
     ok('release_id 三段断言②（H-2 新语义）：type=bug AND execute-release(mode=hotfix) AND status=已上线 ⟹ release_id 为 NULL（不建批次，version_tag 天然无处依附）');
 
-    r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: 'seg-bug-b', system_name: 'BMS', source: '内部' });
+    r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'seg-bug-b', system_name: 'BMS', source: '内部' });
     const bugB = r.body.id;
+  // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
+    await call('POST', `/api/sys-issues/${bugB}/intake-accept`, adminTok, {});
     await call('POST', `/api/sys-issues/${bugB}/assign`, adminTok, { assigned_to: 5 });
     await call('POST', `/api/sys-issues/${bugB}/estimate`, devTok, { dev_estimated_at: '2026-08-01 10:00' });
     await call('POST', `/api/sys-issues/${bugB}/submit`, devTok, { mode: 'no_code', no_code_reason: '修复（占位理由）' });
@@ -415,8 +421,10 @@ async function main() {
   // [codex 102 号 HIGH 回填] RELEASE 守卫接线——真实路由负例①：零在册待上线单走 legacy /publish → 400
   //   GATE_INVARIANT，且状态/批次/快照均未落库（早于批量 UPDATE 拦下，H-3 原子性精神）。
   {
-    let r = await call('POST', '/api/sys-issues', adminTok, { type: 'feature', title: '零在册待上线单', system_name: 'BMS', source: '内部' });
+    let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: '零在册待上线单', system_name: 'BMS', source: '内部' });
     const zeroRosterId = r.body.id;
+  // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
+    await call('POST', `/api/sys-issues/${zeroRosterId}/intake-accept`, adminTok, {});
     // 手工快进到"待上线"但不建任何 roster 行（模拟脏数据/历史遗留单，正常业务流程不可达——非 submit 场景准备）。
     await run(`UPDATE sys_issues SET status='待上线' WHERE id=?`, [zeroRosterId]);
     r = await call('POST', '/api/sys-releases', adminTok, { title: '零在册反例批次' });

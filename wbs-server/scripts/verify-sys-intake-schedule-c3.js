@@ -105,7 +105,7 @@ const ok = (m) => { passed++; console.log('  ✓ ' + m); };
 
 // 建单（admin·恒 intake_required=0）→ 直接 UPDATE 播种为「待受理」(intake_required=1)。可指定 createdBy 覆盖建单人。
 async function seedIntakeIssue(type, { status = '待受理', createdBy = null } = {}) {
-  const r = await call('POST', '/api/sys-issues', adminTok, { type, title: `${type}单`, system_name: 'BMS', source: '内部' });
+  const r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type, title: `${type}单`, system_name: 'BMS', source: '内部' });
   assert.strictEqual(r.status, 201, `建 ${type} 单 201, got ${r.status} ${JSON.stringify(r.body)}`);
   const id = r.body.id;
   const sets = ['intake_required = 1', 'status = ?'];
@@ -291,9 +291,23 @@ async function main() {
   }
 
   // ═══ [F] 受理门不变量（codex MED-1·intake_required=1 才走·fail-closed·堵矛盾组合）═══
-  {
+  //   ⭐ 角色权限重构 C0：DB 层新增了 intake_required 恒 1 触发器（INSERT/UPDATE 写入 ≠1 一律 ABORT），
+  //     本组的脏夹具在 DB 层已造不出来。**两道防线都要保回归**，故这里临时摘掉触发器造脏数据、造完按
+  //     原样重建（DDL 从 _internals 取，不手抄——防两处漂移）。
+  //     为什么内层防线不能因外层加固而删：触发器可能被误删/旧库升级前就带着历史脏数据，届时引擎层
+  //     [3.5] fail-closed 是最后一道闸；且本组还覆盖"不变量置于权限校验之后"的侧信道收口语义。
+  //   ⚠️ 整组包在 try/finally 里（codex 三轮审 MED-3）：任一断言抛错也必须重建触发器，
+  //     否则后续所有测试组会在**无 DB 约束**的环境下跑，红灯变绿的假阳性比原始失败更难查。
+  const dropGateTriggers = async () => {
+    for (const n of I.SYS_INTAKE_GATE_TRIGGER_NAMES) await run(`DROP TRIGGER IF EXISTS ${n}`);
+  };
+  const restoreGateTriggers = async () => {
+    for (const sql of I.SYS_INTAKE_GATE_TRIGGERS_SQL) await run(sql);
+  };
+  try {
     // intake_required=0 + 待受理（不一致夹具·结构上不该出现）→ intake_accept 409 INTAKE_REQUIRED_INVARIANT
     let id = await seedIntakeIssue('feature');
+    await dropGateTriggers();
     await run('UPDATE sys_issues SET intake_required=0 WHERE id=?', [id]);   // 破坏不变量
     let r = await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, {});
     assert.strictEqual(r.status, 409, 'intake_required=0+待受理 intake_accept 409');
@@ -303,7 +317,9 @@ async function main() {
     assert.strictEqual(r.status, 409, 'intake_required=0+待受理 intake_return 409');
     assert.strictEqual(r.body.code, 'INTAKE_REQUIRED_INVARIANT', 'intake_return 409 code');
     // intake_required=0 + 待修改 → resubmit 409（否则产「待受理+intake_required=0」矛盾·污染 reactivate 初始态）
+    await restoreGateTriggers();                     // 先恢复，证明 seed 走的是合规路径（受理态恒 ir=1）
     id = await seedIntakeIssue('feature', { status: '待修改', createdBy: 5 });
+    await dropGateTriggers();                        // 再摘掉去造第二个脏夹具
     await run('UPDATE sys_issues SET intake_required=0 WHERE id=?', [id]);
     r = await call('POST', `/api/sys-issues/${id}/resubmit-intake`, adminTok, {});
     assert.strictEqual(r.status, 409, 'intake_required=0+待修改 resubmit(admin 有权) 409');
@@ -313,7 +329,18 @@ async function main() {
     r = await call('POST', `/api/sys-issues/${id}/resubmit-intake`, dev2Tok, {});
     assert.strictEqual(r.status, 403, 'intake_required=0 脏数据·无权者(dev6) resubmit 得 403 而非 409（侧信道收口）');
     assert.strictEqual(r.body.code, 'NOT_AUTHORIZED_FOR_TRANSITION', '无权者 403（权限先于不变量）');
-    ok('[F] 受理门不变量：intake_required=0+受理态 有权者 409 INTAKE_REQUIRED_INVARIANT(fail-closed) + 无权者 403(不变量在权限后·侧信道收口)');
+    ok('[F] 受理门不变量（引擎层纵深）：intake_required=0+受理态 有权者 409 INTAKE_REQUIRED_INVARIANT(fail-closed) + 无权者 403(不变量在权限后·侧信道收口)；DB 层触发器临时摘除→按 _internals DDL 原样重建并自检');
+  } finally {
+    // 无论断言是否抛错，都必须把 DB 约束恢复到与生产一致（见组头说明）
+    await restoreGateTriggers();
+  }
+  {
+    // 收尾自检：触发器确已按原样重建——再造一条脏数据必须被 ABORT。
+    //   放在 finally 之外单独成组，因为它本身是断言（失败该让整个脚本红），不属于清理逻辑。
+    const probe = await seedIntakeIssue('feature');
+    await assert.rejects(run(`UPDATE sys_issues SET intake_required=0 WHERE id=?`, [probe]),
+      /intake_required|受理/, '[F 收尾] 触发器已重建：再写 intake_required=0 会被 ABORT');
+    ok('[F 收尾] DB 约束已恢复（摘除→重建闭环自检通过·后续组在与生产一致的约束下运行）');
   }
 
   // ═══ [G] bug 流受理门完整链 + 失败无副作用（codex MED-4）═══

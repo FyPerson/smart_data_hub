@@ -67,9 +67,11 @@ const ok = (m) => { passed++; console.log('  ✓ ' + m); };
 
 // 建单（可带 needs_feasibility）→ assign → 开发中，返回 id（受理排期改造：schedule 退场·建单直落待指派）
 async function seedToDev(needsFeasibility = 0, assignTo = 5) {
-  let r = await call('POST', '/api/sys-issues', adminTok, { type: 'feature', title: 't', system_name: 'BMS', source: '内部', needs_feasibility: needsFeasibility });
+  let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 't', system_name: 'BMS', source: '内部', needs_feasibility: needsFeasibility });
   assert.strictEqual(r.status, 201, '建单 201, got ' + r.status + ' ' + JSON.stringify(r.body));
   const id = r.body.id;
+  // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
+  await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, {});
   r = await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: assignTo });
   assert.strictEqual(r.status, 200, 'assign 200, got ' + r.status);
   return id;
@@ -99,19 +101,19 @@ async function main() {
 
   try {
     // ── [A] 建单 needs_feasibility 入库（§4.5 / 开放④建单后锁定）──
-    let r = await call('POST', '/api/sys-issues', adminTok, { type: 'feature', title: '需评估', system_name: 'BMS', source: '内部', needs_feasibility: 1 });
+    let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: '需评估', system_name: 'BMS', source: '内部', needs_feasibility: 1 });
     assert.strictEqual(r.status, 201, '建单 needs_feasibility=1 → 201');
     let d = await get('SELECT needs_feasibility FROM sys_issues WHERE id=?', [r.body.id]);
     assert.strictEqual(d.needs_feasibility, 1, 'needs_feasibility=1 入库');
     ok('[A1] 建单 needs_feasibility=1（feature）→ 入库 needs_feasibility=1');
 
-    r = await call('POST', '/api/sys-issues', adminTok, { type: 'feature', title: '不评估', system_name: 'BMS', source: '内部' });
+    r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: '不评估', system_name: 'BMS', source: '内部' });
     d = await get('SELECT needs_feasibility FROM sys_issues WHERE id=?', [r.body.id]);
     assert.strictEqual(d.needs_feasibility, 0, '不传默认 needs_feasibility=0');
     ok('[A2] 建单不传 needs_feasibility（feature）→ 默认 0');
 
     // [A3] L-2（codex 19）：建单传非法 needs_feasibility（非 0/1 真值串）→ 400 INVALID_NEEDS_FEASIBILITY（失败响亮不静默落 0）
-    r = await call('POST', '/api/sys-issues', adminTok, { type: 'feature', title: '非法nf', system_name: 'BMS', source: '内部', needs_feasibility: 'yes' });
+    r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: '非法nf', system_name: 'BMS', source: '内部', needs_feasibility: 'yes' });
     assert.strictEqual(r.status, 400, '非法 needs_feasibility 400, got ' + r.status);
     assert.strictEqual(r.body.code, 'INVALID_NEEDS_FEASIBILITY', 'got ' + (r.body && r.body.code));
     ok('[A3] 建单 needs_feasibility=非法值「yes」→ 400 INVALID_NEEDS_FEASIBILITY（输入收窄，不静默落 0）');

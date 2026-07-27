@@ -99,11 +99,12 @@ function call(method, p, tok, body) {
 let passed = 0;
 const ok = (m) => { passed++; console.log('  ✓ ' + m); };
 
-// 建单（admin·恒 intake_required=0 默认态）→ 直接 UPDATE 播种到目标 status/intake_required/created_by（同 c3 夹具惯例）。
-//   ⚠️ 待受理态无公开 HTTP 建单路径（建单端点恒传 intake_required=0·选对接人 UI 属 C7-8·白名单写值属后续），
-//   故 INTAKE 态只能 UPDATE 播种——这是 c3-c8 既定夹具范式。夹具有效性由 H-0 常量层归因 + H-3 真实路径锚兜底。
-async function seed(type, { status, ir = 0, createdBy = null } = {}) {
-  const r = await call('POST', '/api/sys-issues', adminTok, { type, title: `${type}单`, system_name: 'BMS', source: '内部' });
+// 建单 → 直接 UPDATE 播种到目标 status/intake_required/created_by（同 c3 夹具惯例）。
+//   ⚠️ 非受理态（开发中/待上线…）无公开 HTTP 路径直达，故用 UPDATE 播种——c3-c8 既定夹具范式。
+//   ⭐ 角色权限重构 C0：ir 默认由 0 改 **1**——受理门焊死后 intake_required 全表恒 1，0 已是非法态
+//     （DB 触发器 ABORT）。本文件各用例的被测点都不是 ir 值本身，改默认即可，无需摘约束。
+async function seed(type, { status, ir = 1, createdBy = null } = {}) {
+  const r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type, title: `${type}单`, system_name: 'BMS', source: '内部' });
   assert.strictEqual(r.status, 201, `建 ${type} 单 201, got ${r.status} ${JSON.stringify(r.body)}`);
   const id = r.body.id;
   const sets = ['status = ?', 'intake_required = ?'];
@@ -152,7 +153,8 @@ async function main() {
 
     // (H-canary) HTTP 侧证 hold 对「有 hold 的 type + 白名单态」正常可用（与 H-0 常量侧互印）。
     for (const type of ['feature', 'improvement']) {
-      const id = await seed(type, { status: '待指派', ir: 0 });
+      // ⭐ C0：ir 由 0 改 1（本 canary 测的是 hold 可用性，与 ir 无关；C0 后 ir=0 已是非法态）
+      const id = await seed(type, { status: '待指派', ir: 1 });
       const r = await call('POST', `/api/sys-issues/${id}/hold`, adminTok, { reason: '正常暂缓（canary）' });
       assert.strictEqual(r.status, 200, `canary：${type} 待指派 hold 应 200, got ${r.status} ${JSON.stringify(r.body)}`);
       assert.strictEqual(r.body.status, '已暂缓', `canary：${type} 待指派 hold → 已暂缓`);
@@ -209,10 +211,16 @@ async function main() {
       resubmitOther: async (tok) => (await call('POST', `/api/sys-issues/${await seed('feature', { status: '待修改', ir: 1, createdBy: 99 })}/resubmit-intake`, tok, {})).status,
     };
     // §11 期望矩阵（真相=各端点权限实现·非方案文字）
+    //   ⭐ 角色权限重构 C1 后的两处反转（方案 v1.5 §3 角色模型）：
+    //     · 示例发布者(7) bugAssign  200 → **403**：他失去全部协调人动作，转纯技术负责人（只回一条评估留言）
+    //     · 示例对接人(13) featAssign 403 → **200**：受理人指派权扩到全类型（这正是 v1.4 漏改 roleGuard 的那一格）
+    //   不变的两格同样是 C1 的边界证据：
+    //     · 示例对接人 resubmitOther 仍 403 —— 重提**他人**单属建单人权（creator_or_admin），受理人不获
+    //     · 示例发布者 intakeAccept 仍 403 —— 受理是示例对接人专属，三名单按能力拆而非按角色
     const MATRIX = [
       { who: 'admin(1)',    tok: adminTok,    exp: { bugAssign: 200, featAssign: 200, intakeAccept: 200, resubmitOther: 200 } },
-      { who: '示例发布者(7)',     tok: techLeadTok, exp: { bugAssign: 200, featAssign: 403, intakeAccept: 403, resubmitOther: 403 } },
-      { who: '示例对接人(13)',  tok: liaisonTok,  exp: { bugAssign: 200, featAssign: 403, intakeAccept: 200, resubmitOther: 403 } },
+      { who: '示例发布者(7)',     tok: techLeadTok, exp: { bugAssign: 403, featAssign: 403, intakeAccept: 403, resubmitOther: 403 } },
+      { who: '示例对接人(13)',  tok: liaisonTok,  exp: { bugAssign: 200, featAssign: 200, intakeAccept: 200, resubmitOther: 403 } },
       { who: 'dev(5)',      tok: devTok,      exp: { bugAssign: 403, featAssign: 403, intakeAccept: 403, resubmitOther: 403 } },
     ];
     for (const row of MATRIX) {
@@ -224,22 +232,30 @@ async function main() {
     }
     ok('[M-1] §11 矩阵系统 canary：admin/示例发布者7/王13/dev5 × bugAssign/featAssign/intakeAccept/resubmitOther 全 16 格状态码与期望一致（角色划分漂移单点报警·详格落态验在 liaison/c3/c5）');
 
-    // (M-1b) 唯一新覆盖格强化（codex 145 MED-3 + 复审 MED）：示例对接人13 变更流 assign→403 是本段唯一新增格。
-    //   ⚠️ 断言**精确授权错误码**（NOT_AUTHORIZED_FOR_TRANSITION·引擎 [3] roleGuard 层）而非任意非空 code——
-    //   证 403 确来自角色授权分支，非某个也带 code 的无关校验（复审 MED：任意 code 归因偏弱）。
-    //   副作用只比对**主状态 + 负责人字段**（status/assigned_to·防拒绝前部分写入）；完整副作用（timeline/
-    //   成员事件/assigned_at 等）详验在 verify-sys-liaison·此处不重复（M 段定位=权限烟雾 canary·避免过度归因）。
+    // (M-1b) ⭐ 角色权限重构 C1 反转格强化：原断言「示例对接人13 变更流 assign → 403」是 C1 之前的正确期望，
+    //   C1 把 transitions.js 变更流 assign 的 roleGuard 由 'admin' 改为 'intake_liaison' 后，**该格反转为 200**。
+    //   这一格正是 v1.4 方案漏改、v1.5 源码核实时补上的那处阻断级缺口——所以这里不只断言 200，
+    //   还要断言**落态与副作用真的发生**（若只看状态码，roleGuard 改对但引擎没走到写路径也会"绿"）。
+    //   同时保留示例发布者的负例：同一格他必须 403，且 403 来自**中间件层**（他连粗筛都过不去）。
     {
       const featId = await seed('feature', { status: '待指派' });
-      const before = await get('SELECT status, assigned_to FROM sys_issues WHERE id=?', [featId]);
       const r = await call('POST', `/api/sys-issues/${featId}/assign`, liaisonTok, { assigned_to: 6 });
-      assert.strictEqual(r.status, 403, `示例对接人13 变更流 assign → 403, got ${r.status} ${JSON.stringify(r.body)}`);
-      assert.strictEqual(r.body && r.body.code, 'NOT_AUTHORIZED_FOR_TRANSITION',
-        '403 精确授权码 NOT_AUTHORIZED_FOR_TRANSITION（引擎 [3] roleGuard 层·证是授权分支拒非无关校验）');
+      assert.strictEqual(r.status, 200, `⭐ 示例对接人13 变更流 assign → 200（C1 全类型放开）, got ${r.status} ${JSON.stringify(r.body)}`);
       const after = await get('SELECT status, assigned_to FROM sys_issues WHERE id=?', [featId]);
-      assert.strictEqual(after.status, before.status, '拒绝后主状态不变（无部分写入）');
-      assert.strictEqual(after.assigned_to, before.assigned_to, '拒绝后 assigned_to 不变（无部分写入）');
-      ok('[M-1b] 唯一新增格强化：示例对接人13 变更流 assign → 403 code=NOT_AUTHORIZED_FOR_TRANSITION（精确授权码）+ 主状态/负责人字段不变（完整副作用详验在 liaison）');
+      assert.strictEqual(after.status, '开发中', 'C1：变更流 assign 落态 开发中（证真走了引擎写路径·非仅放行状态码）');
+      assert.strictEqual(Number(after.assigned_to), 6, 'C1：assigned_to 落 6（选举结果）');
+
+      // 示例发布者同格负例：中间件层就拒（他不在受理人白名单）
+      const featId2 = await seed('feature', { status: '待指派' });
+      const before2 = await get('SELECT status, assigned_to FROM sys_issues WHERE id=?', [featId2]);
+      const r2 = await call('POST', `/api/sys-issues/${featId2}/assign`, techLeadTok, { assigned_to: 6 });
+      assert.strictEqual(r2.status, 403, `⭐ 示例发布者7 变更流 assign → 403, got ${r2.status} ${JSON.stringify(r2.body)}`);
+      assert.strictEqual(r2.body && r2.body.code, 'NOT_ADMIN_OR_INTAKE_LIAISON',
+        '示例发布者 403 来自中间件层 requireIntakeLiaison（精确归因·非无关校验）');
+      const after2 = await get('SELECT status, assigned_to FROM sys_issues WHERE id=?', [featId2]);
+      assert.strictEqual(after2.status, before2.status, '拒绝后主状态不变（无部分写入）');
+      assert.strictEqual(after2.assigned_to, before2.assigned_to, '拒绝后 assigned_to 不变（无部分写入）');
+      ok('[M-1b] ⭐ C1 反转格强化：示例对接人13 变更流 assign → 200 且真落「开发中」+assigned_to（证走通引擎写路径）；示例发布者7 同格 403 且来自中间件层 + 零副作用');
     }
 
     // (M-2) 被选技术负责人白名单（tech_lead_id 白名单·与操作者无关·c5[R] 已验·此处汇总为矩阵 canary）

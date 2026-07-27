@@ -1,4 +1,4 @@
-// 验证脚本：系统迭代 bug 流通知（④b-1 手动通知基座 + 通知改造 C3 四方扩展）
+﻿// 验证脚本：系统迭代 bug 流通知（④b-1 手动通知基座 + 通知改造 C3 四方扩展）
 //   用法：node scripts/verify-sys-bug-notify.js
 //
 // 覆盖（真实 HTTP + 落库状态）：
@@ -69,7 +69,11 @@ function waitReady() {
 const adminTok = jwt.sign({ id: 1, username: 'admin', role: 'admin' }, SECRET);
 const devTok = jwt.sign({ id: 5, username: 'dev', display_name: '开发王', role: 'user' }, SECRET);
 const dev2Tok = jwt.sign({ id: 6, username: 'dev2', display_name: '开发李', role: 'user' }, SECRET);
-const liaisonTok = jwt.sign({ id: 7, username: 'shenjun', display_name: '示例发布者', role: 'publisher' }, SECRET);
+// ⭐ 角色权限重构 C1：手动通知权由「bug 对接人白名单[7,13]」收敛为「admin ∨ 受理人[13]」全类型统一。
+//   本文件里 liaisonTok 原是示例发布者(7)，现改为**示例对接人(13)** —— 它在各用例中扮演的是"有通知权的非 admin 角色"，
+//   C1 后这个角色由受理人担任。示例发布者另起 techLeadTok，专用于"已失权"的负例断言。
+const liaisonTok = jwt.sign({ id: 13, username: 'wangtaotao', display_name: '示例对接人', role: 'user' }, SECRET);
+const techLeadTok = jwt.sign({ id: 7, username: 'shenjun', display_name: '示例发布者', role: 'publisher' }, SECRET);
 const liaison2Tok = jwt.sign({ id: 13, username: 'wangtaotao', display_name: '示例对接人', role: 'user' }, SECRET);
 
 let server, port;
@@ -92,8 +96,10 @@ const rStatus = async (id) => (await get('SELECT requester_notify_status FROM sy
 const devRowStatus = async (issueId, userId) => (await get('SELECT notify_status FROM sys_issue_dev_assignees WHERE issue_id=? AND user_id=? AND removed_at IS NULL', [issueId, userId])).notify_status;
 
 async function createBug(extra = {}) {
-  const r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: 'bug', system_name: 'BMS', source: '内部', ...extra });
+  const r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'bug', system_name: 'BMS', source: '内部', ...extra });
   assert.strictEqual(r.status, 201, '建 bug 201 ' + JSON.stringify(r.body));
+  // ⭐ 角色权限重构 C0：建单恒落「待受理」→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
+  await call('POST', `/api/sys-issues/${r.body.id}/intake-accept`, adminTok, {});
   return r.body.id;
 }
 async function bugAssigned(devId = 5, extra = {}) {
@@ -186,11 +192,14 @@ async function main() {
     assert.strictEqual(await devRowStatus(id, 5), 'sent', '[Md] 落库子表 notify_status=sent（非主表）');
     assert.strictEqual(await nStatus(id), 'not_sent', '[Md] 主表 notify_status 保持 not_sent（子表才是真相源）');
     assert.ok(/指派/.test(lastDevTitle), '[Md] 首次(return_count=0)用指派模板，title 含"指派" got ' + lastDevTitle);
-    // 对接人也能手动通知开发
+    // ⭐ C1：受理人(13) 能手动通知开发；示例发布者(7) 不再能（转纯技术负责人）
     const id2 = await bugAssigned(5);
     r = await call('POST', `/api/sys-issues/${id2}/notify-developer`, liaisonTok, { dev_user_id: 5 });
-    assert.strictEqual(r.status, 200, '[Md] 对接人 notify-developer 200');
-    assert.strictEqual(await devRowStatus(id2, 5), 'sent', '[Md] 对接人触发也落子表 sent');
+    assert.strictEqual(r.status, 200, `[Md] ⭐ 受理人(13) notify-developer 200, got ${r.status} ${JSON.stringify(r.body)}`);
+    assert.strictEqual(await devRowStatus(id2, 5), 'sent', '[Md] 受理人触发也落子表 sent');
+    const id2b = await bugAssigned(5);
+    r = await call('POST', `/api/sys-issues/${id2b}/notify-developer`, techLeadTok, { dev_user_id: 5 });
+    assert.strictEqual(r.status, 403, `[Md] ⭐ 示例发布者(7) notify-developer 应 403（C1 失去通知权）, got ${r.status} ${JSON.stringify(r.body)}`);
     // 缺 dev_user_id → 400
     const id3 = await bugAssigned(5);
     r = await call('POST', `/api/sys-issues/${id3}/notify-developer`, adminTok, {});
@@ -337,10 +346,18 @@ async function main() {
 
   // ═══ [Relay] 通知对接人（新，G7）═══
   {
-    // path B 建单（relay_user_id=7 示例发布者）→ 待处理态 → notify-relay 成功
-    let r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: 'relay-a', system_name: 'BMS', source: '内部', assign_mode: 'B', relay_user_id: 7 });
-    assert.strictEqual(r.status, 201, '[Relay] path B 建单 201 ' + JSON.stringify(r.body));
-    const idA = r.body.id;
+    // ⭐ 角色权限重构 C0：path B（建单即指定通知对接人）**结构性关闭** —— 受理门恒开 ⟹ 400。
+    //   ⚠️ 连带事实（C0 编码期发现·已回写方案 v1.5）：path B 是 `relay_notified_user_id` 的**唯一业务写入路径**，
+    //     关闭后该列在新单上永不写值 → notify-relay 端点在 C0 后只服务历史单（生产零单据 ⟹ 实质不可达）。
+    //     本方案 §2.7 判定 relay 属"低危·保持不动"，故端点与其防御纵深**保留**，此处继续回归其行为，
+    //     夹具改用 DB 直接置列（沿用本文件既有范式，见下方"白名单外脏数据"用例）。端点是否随 C1/C5 退场另议。
+    let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'relay-a', system_name: 'BMS', source: '内部', assign_mode: 'B', relay_user_id: 7 });
+    assert.strictEqual(r.status, 400, '[Relay] C0：path B 建单应 400 ' + JSON.stringify(r.body));
+    assert.strictEqual(r.body.code, 'INTAKE_WITH_ASSIGN_CONFLICT', '[Relay] C0：path B code=INTAKE_WITH_ASSIGN_CONFLICT');
+
+    // 夹具：建单 → 受理（→待处理）→ DB 置 relay 目标（等价于旧 path B 的落库结果）
+    const idA = await createBug();
+    await run(`UPDATE sys_issues SET relay_notified_user_id=7, relay_notified_user_name='示例发布者' WHERE id=?`, [idA]);
     lastRawTitle = null;
     r = await call('POST', `/api/sys-issues/${idA}/notify-relay`, adminTok);
     assert.strictEqual(r.status, 200, '[Relay] notify-relay 200 ' + JSON.stringify(r.body));
@@ -352,9 +369,8 @@ async function main() {
     r = await call('POST', `/api/sys-issues/${idNone}/notify-relay`, adminTok);
     assert.strictEqual(r.status, 409); assert.strictEqual(r.body.code, 'NO_RELAY_USER_TO_NOTIFY');
     // 非待处理态（已指派进处理中）→ 409 STATUS_NOT_NOTIFIABLE（即便有 relay_user_id，此单走 path A 未设置 relay，构造脏数据验证状态门）
-    let r2 = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: 'relay-b', system_name: 'BMS', source: '内部', assign_mode: 'B', relay_user_id: 13 });
-    const idB = r2.body.id;
-    await run(`UPDATE sys_issues SET status='处理中', assigned_to=5, assigned_to_name='开发王' WHERE id=?`, [idB]);
+    const idB = await createBug();   // C0：path B 已关闭，改 DB 置 relay 目标（同上）
+    await run(`UPDATE sys_issues SET relay_notified_user_id=13, relay_notified_user_name='示例对接人', status='处理中', assigned_to=5, assigned_to_name='开发王' WHERE id=?`, [idB]);
     r = await call('POST', `/api/sys-issues/${idB}/notify-relay`, adminTok);
     assert.strictEqual(r.status, 409); assert.strictEqual(r.body.code, 'STATUS_NOT_NOTIFIABLE');
     // 白名单外（脏数据：relay_notified_user_id 指向非白名单用户）→ 409 RELAY_USER_NOT_WHITELISTED
@@ -375,24 +391,27 @@ async function main() {
     assert.strictEqual(r.body.code, 'SELF_NOTIFY_SKIPPED', '[Creator] code=SELF_NOTIFY_SKIPPED');
     assert.strictEqual((await get('SELECT creator_notify_status FROM sys_issues WHERE id=?', [id])).creator_notify_status, 'not_sent', '[Creator] self-guard 不实际发送，creator_notify_status 仍 not_sent');
     // C2a·H3 修正：主开发本人（devTok）现在 → 403（删「主开发本人」放权·is_primary 禁作授权源，与去主次一致）
+    //   ⚠️ C1 复审 MED-1：本端点补挂 requireIntakeLiaison 后，403 由**中间件层**发出，code 随之从
+    //     NOT_AUTHORIZED_FOR_NOTIFY（handler guard）变为 NOT_ADMIN_OR_INTAKE_LIAISON（中间件），
+    //     与 notify-developer / notify-requester 两通道口径一致（它们本就有中间件）。放行面完全不变。
     r = await call('POST', `/api/sys-issues/${id}/notify-creator`, devTok);
     assert.strictEqual(r.status, 403, '[Creator·H3] 主开发本人触发 → 403（不再放权）');
-    assert.strictEqual(r.body.code, 'NOT_AUTHORIZED_FOR_NOTIFY', '[Creator·H3] code=NOT_AUTHORIZED_FOR_NOTIFY');
+    assert.strictEqual(r.body.code, 'NOT_ADMIN_OR_INTAKE_LIAISON', '[Creator·H3] code=NOT_ADMIN_OR_INTAKE_LIAISON（C1 复审补挂中间件后由中间件层拒）');
     assert.strictEqual((await get('SELECT creator_notify_status FROM sys_issues WHERE id=?', [id])).creator_notify_status, 'not_sent', '[Creator·H3] 主开发被拒后 creator_notify_status 仍 not_sent');
-    // 白名单对接人触发 → 能发（bug creator 通道 = admin∨对接人）
+    // 受理人[13] 触发 → 能发（C1 起 creator 通道 = 全类型 admin∨受理人）
     const id2 = await bugToVerifying(5);
     r = await call('POST', `/api/sys-issues/${id2}/notify-creator`, liaisonTok);
-    assert.strictEqual(r.status, 200, '[Creator] 白名单对接人触发 200');
-    assert.strictEqual(r.body.creator_notify_status, 'sent', '[Creator] 白名单触发 → sent');
-    // 未授权（dev2 非白名单/非 admin）→ 403
+    assert.strictEqual(r.status, 200, '[Creator] 受理人(13) 触发 200');
+    assert.strictEqual(r.body.creator_notify_status, 'sent', '[Creator] 受理人触发 → sent');
+    // 未授权（dev2 非受理人/非 admin）→ 403（同上：C1 复审后由中间件层拒）
     const id3 = await bugToVerifying(5);
     r = await call('POST', `/api/sys-issues/${id3}/notify-creator`, dev2Tok);
-    assert.strictEqual(r.status, 403); assert.strictEqual(r.body.code, 'NOT_AUTHORIZED_FOR_NOTIFY');
-    // 状态门：处理中态不可通知建单人（sendable={待验证,待上线,已上线}）——用白名单触发（过授权、卡状态门）
+    assert.strictEqual(r.status, 403); assert.strictEqual(r.body.code, 'NOT_ADMIN_OR_INTAKE_LIAISON');
+    // 状态门：处理中态不可通知建单人（sendable={待验证,待上线,已上线}）——用受理人触发（过授权、卡状态门）
     const idMid = await bugAssigned(5);
     r = await call('POST', `/api/sys-issues/${idMid}/notify-creator`, liaisonTok);
     assert.strictEqual(r.status, 409); assert.strictEqual(r.body.code, 'STATUS_NOT_NOTIFIABLE');
-    ok('[Creator] 通知建单人：admin(=created_by) self-guard skipped + 白名单实发 sent + 主开发本人 403(H3删) + 未授权 403 + 状态门 409');
+    ok('[Creator] 通知建单人：admin(=created_by) self-guard skipped + 受理人实发 sent + 主开发本人 403(H3删·中间件层) + 未授权 403 + 状态门 409');
   }
 
   // ═══ [RelExec] 通知上线开发（release_assignee 侧，follow-up 2026-07-07，仅 admin）═══
@@ -425,7 +444,7 @@ async function main() {
     assert.strictEqual(r.body.code, 'STATUS_NOT_NOTIFIABLE', '[RelExec] 非待上线 code=STATUS_NOT_NOTIFIABLE');
 
     // feature 单（变更流）→ 400 MANUAL_NOTIFY_BUG_ONLY（第 5 类同其余 4 类，仅 bug）
-    const rf = await call('POST', '/api/sys-issues', adminTok, { type: 'feature', title: 'feat', system_name: 'BMS', source: '内部' });
+    const rf = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 'feat', system_name: 'BMS', source: '内部' });
     r = await call('POST', `/api/sys-issues/${rf.body.id}/notify-release-executor`, adminTok);
     assert.strictEqual(r.status, 400, '[RelExec] feature 单 400');
     assert.strictEqual(r.body.code, 'MANUAL_NOTIFY_BUG_ONLY', '[RelExec] feature code=MANUAL_NOTIFY_BUG_ONLY');
@@ -520,8 +539,10 @@ async function main() {
   //   建变更流单并推到「待验证」（此态 developer/creator/requester 三通道均在白名单，便于一处覆盖 3 通道成功）：
   //   建单→schedule→assign(dev6)→estimate(dev6)→submit(no_code)→到待验证。
   const seedChangeToVerifying = async (type, extra = {}) => {
-    let r = await call('POST', '/api/sys-issues', adminTok, { type, title: type + '-t', system_name: 'BMS', source: '内部', requester_phone: PHONE, ...extra });
+    let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type, title: type + '-t', system_name: 'BMS', source: '内部', requester_phone: PHONE, ...extra });
     const cid = r.body.id;
+  // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
+    await call('POST', `/api/sys-issues/${cid}/intake-accept`, adminTok, {});
     await call('POST', `/api/sys-issues/${cid}/schedule`, adminTok, {});
     await call('POST', `/api/sys-issues/${cid}/assign`, adminTok, { assigned_to: 6 });
     await call('POST', `/api/sys-issues/${cid}/estimate`, dev2Tok, { dev_estimated_at: EST });   // dev6=dev2Tok 回填
@@ -535,39 +556,50 @@ async function main() {
     let r = await call('POST', `/api/sys-issues/${vid}/notify-developer`, adminTok, { dev_user_id: 6 });
     assert.strictEqual(r.status, 200, `[T] ${type} developer admin 放行 200 ` + JSON.stringify(r.body));
     assert.strictEqual(await devRowStatus(vid, 6), 'sent', `[T] ${type} developer 落子表 sent`);
-    // developer：对接人白名单对变更流 → 403（变更流仅 admin）
+    // ⭐ C1：变更流通知**放开给受理人**（原「变更流仅 admin」特判已删）——受理人 200 / 技术负责人 403
     r = await call('POST', `/api/sys-issues/${vid}/notify-developer`, liaisonTok, { dev_user_id: 6 });
-    assert.strictEqual(r.status, 403, `[T] ${type} developer 对接人 → 403`);
-    assert.strictEqual(r.body.code, 'NOT_AUTHORIZED_FOR_NOTIFY', `[T] ${type} developer 对接人 code`);
+    assert.strictEqual(r.status, 200, `[T] ⭐ ${type} developer 受理人(13) → 200（C1 全类型统一）, got ${r.status} ${JSON.stringify(r.body)}`);
+    r = await call('POST', `/api/sys-issues/${vid}/notify-developer`, techLeadTok, { dev_user_id: 6 });
+    assert.strictEqual(r.status, 403, `[T] ⭐ ${type} developer 示例发布者(7) → 403（转纯技术负责人）`);
+    assert.strictEqual(r.body.code, 'NOT_ADMIN_OR_INTAKE_LIAISON', `[T] ${type} developer 示例发布者被中间件拒`);
     // creator：admin=created_by → self-guard skipped 200 + creator_notify_status 仍 not_sent
     r = await call('POST', `/api/sys-issues/${vid}/notify-creator`, adminTok);
     assert.strictEqual(r.status, 200, `[T] ${type} creator admin self-guard 200`);
     assert.strictEqual(r.body.code, 'SELF_NOTIFY_SKIPPED', `[T] ${type} creator self-guard skipped`);
     assert.strictEqual((await get('SELECT creator_notify_status FROM sys_issues WHERE id=?', [vid])).creator_notify_status, 'not_sent', `[T] ${type} creator self-guard 不写状态`);
-    // creator：对接人对变更流 → 403
+    // ⭐ C1：creator 通道变更流同样放开给受理人
     r = await call('POST', `/api/sys-issues/${vid}/notify-creator`, liaisonTok);
-    assert.strictEqual(r.status, 403, `[T] ${type} creator 对接人 → 403`);
+    assert.strictEqual(r.status, 200, `[T] ⭐ ${type} creator 受理人(13) → 200, got ${r.status} ${JSON.stringify(r.body)}`);
+    r = await call('POST', `/api/sys-issues/${vid}/notify-creator`, techLeadTok);
+    assert.strictEqual(r.status, 403, `[T] ⭐ ${type} creator 示例发布者(7) → 403`);
     // requester：admin 发（待验证在 requester 白名单 + 有 phone）→ 200 sent + 落快照
     r = await call('POST', `/api/sys-issues/${vid}/notify-requester`, adminTok);
     assert.strictEqual(r.status, 200, `[T] ${type} requester admin 放行 200 ` + JSON.stringify(r.body));
     assert.strictEqual((await get('SELECT requester_notify_status FROM sys_issues WHERE id=?', [vid])).requester_notify_status, 'sent', `[T] ${type} requester sent`);
     assert.strictEqual((await get('SELECT requester_notify_phone_snapshot FROM sys_issues WHERE id=?', [vid])).requester_notify_phone_snapshot, PHONE, `[T] ${type} requester 落快照`);
-    // requester：对接人对变更流 → 403
+    // ⭐ C1：requester 通道变更流同样放开给受理人
     r = await call('POST', `/api/sys-issues/${vid}/notify-requester`, liaisonTok);
-    assert.strictEqual(r.status, 403, `[T] ${type} requester 对接人 → 403`);
+    assert.strictEqual(r.status, 200, `[T] ⭐ ${type} requester 受理人(13) → 200, got ${r.status} ${JSON.stringify(r.body)}`);
+    r = await call('POST', `/api/sys-issues/${vid}/notify-requester`, techLeadTok);
+    assert.strictEqual(r.status, 403, `[T] ⭐ ${type} requester 示例发布者(7) → 403`);
     // relay：变更流无对接人通道 → 400 CHANNEL_NA（admin 也拒）
     r = await call('POST', `/api/sys-issues/${vid}/notify-relay`, adminTok);
     assert.strictEqual(r.body.code, 'MANUAL_NOTIFY_CHANNEL_NA', `[T] ${type} relay → CHANNEL_NA`);
     // 查已读（channel 级授权，codex M2）：admin 查 creator 通道 → 非 403；对接人查 → 403（变更流仅 admin）
     r = await call('GET', `/api/sys-issues/${vid}/notify-read-status?type=creator`, adminTok);
     assert.notStrictEqual(r.status, 403, `[T] ${type} 查已读 admin 放行`);
+    // ⭐ C1：查已读走同一 sysManualNotifyGuard，受理人放行、示例发布者拒
     r = await call('GET', `/api/sys-issues/${vid}/notify-read-status?type=creator`, liaisonTok);
-    assert.strictEqual(r.status, 403, `[T] ${type} 查已读对接人 → 403（变更流仅 admin）`);
+    assert.notStrictEqual(r.status, 403, `[T] ⭐ ${type} 查已读受理人(13) 放行（写读同源）`);
+    r = await call('GET', `/api/sys-issues/${vid}/notify-read-status?type=creator`, techLeadTok);
+    assert.strictEqual(r.status, 403, `[T] ⭐ ${type} 查已读示例发布者(7) → 403`);
   }
   // 状态门：变更流 developer 在「开发中」允许、在终态拒绝（相邻状态精确覆盖·codex M3）
   {
-    let r = await call('POST', '/api/sys-issues', adminTok, { type: 'feature', title: 'feat-st', system_name: 'BMS', source: '内部' });
+    let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 'feat-st', system_name: 'BMS', source: '内部' });
     const fid = r.body.id;
+  // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
+    await call('POST', `/api/sys-issues/${fid}/intake-accept`, adminTok, {});
     await call('POST', `/api/sys-issues/${fid}/schedule`, adminTok, {});
     await call('POST', `/api/sys-issues/${fid}/assign`, adminTok, { assigned_to: 6 });   // 开发中
     r = await call('POST', `/api/sys-issues/${fid}/notify-developer`, adminTok, { dev_user_id: 6 });
@@ -604,23 +636,27 @@ async function main() {
     const id = await bugAssigned(5);
     let r = await call('POST', `/api/sys-issues/${id}/notify-developer`, devTok, { dev_user_id: 5 });   // dev(5) 非白名单非 admin
     assert.strictEqual(r.status, 403, '[P] 非白名单非 admin notify-developer → 403');
-    assert.strictEqual(r.body.code, 'NOT_ADMIN_OR_BUG_LIAISON', '[P] code=NOT_ADMIN_OR_BUG_LIAISON');
+    assert.strictEqual(r.body.code, 'NOT_ADMIN_OR_INTAKE_LIAISON', '[P] code=NOT_ADMIN_OR_INTAKE_LIAISON');
     // relay：仅 admin，白名单成员（对接人）不可发（G7 §3.1：对接人不能发 notify-relay 给自己）
-    let r2 = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: 'relay-p', system_name: 'BMS', source: '内部', assign_mode: 'B', relay_user_id: 7 });
+    let r2 = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'relay-p', system_name: 'BMS', source: '内部', assign_mode: 'B', relay_user_id: 7 });
     const idB = r2.body.id;
+  // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
+    await call('POST', `/api/sys-issues/${idB}/intake-accept`, adminTok, {});
     r = await call('POST', `/api/sys-issues/${idB}/notify-relay`, liaisonTok);
     assert.strictEqual(r.status, 403, '[P] 白名单对接人 notify-relay 应 403（仅 admin）');
     r = await call('POST', `/api/sys-issues/${idB}/notify-relay`, devTok);
     assert.strictEqual(r.status, 403, '[P] 普通开发 notify-relay 应 403');
-    ok('[P] 权限：非白名单非 admin 手动通知开发 → 403 NOT_ADMIN_OR_BUG_LIAISON + notify-relay 仅 admin（白名单/普通开发均 403）');
+    ok('[P] 权限：非白名单非 admin 手动通知开发 → 403 NOT_ADMIN_OR_INTAKE_LIAISON + notify-relay 仅 admin（白名单/普通开发均 403）');
   }
 
   // ═══ [C] 交互优化 C2a：变更流通知已全手动 canary（feature/improvement 不再自动派发）═══
   //   ⚠️ 语义反转（C2a）：原断言"变更流仍自动发 sent"，现 isAutoNotifyEnabled 恒 false → 全 type 不自动派发，
   //   变更流 assign/estimate/reassign/return 后 notify_status/requester_notify_status 保持 not_sent（改由通知区手动触发）。
   const seedChangeAssigned = async (type, devId, extra = {}) => {
-    const rr = await call('POST', '/api/sys-issues', adminTok, { type, title: type + '-canary', system_name: 'BMS', source: '业务方', ...extra });
+    const rr = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type, title: type + '-canary', system_name: 'BMS', source: '业务方', ...extra });
     const cid = rr.body.id;
+  // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
+    await call('POST', `/api/sys-issues/${cid}/intake-accept`, adminTok, {});
     await call('POST', `/api/sys-issues/${cid}/schedule`, adminTok, {});
     await call('POST', `/api/sys-issues/${cid}/assign`, adminTok, { assigned_to: devId });   // 开发中
     return cid;

@@ -84,8 +84,10 @@ let passed = 0;
 const ok = (m) => { passed++; console.log('  ✓ ' + m); };
 
 async function createIssue(type) {
-  const r = await call('POST', '/api/sys-issues', adminTok, { type, title: `${type}单`, system_name: 'BMS', source: '内部' });
+  const r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type, title: `${type}单`, system_name: 'BMS', source: '内部' });
   assert.strictEqual(r.status, 201, `建 ${type} 单 201, got ${r.status}`);
+  // ⭐ 角色权限重构 C0：建单恒落「待受理」→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
+  await call('POST', `/api/sys-issues/${r.body.id}/intake-accept`, adminTok, {});
   return r.body.id;
 }
 async function seedIntake(id, { status = '待受理', created_by } = {}) {

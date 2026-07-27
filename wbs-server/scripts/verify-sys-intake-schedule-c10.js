@@ -79,7 +79,7 @@ const ok = (m) => { passed++; console.log('  ✓ ' + m); };
 
 // 建单（admin），可带任意额外字段（intake_required / assign_mode 等）
 function create(extra) {
-  return call('POST', '/api/sys-issues', adminTok, { type: 'feature', title: '测试单', system_name: 'BMS', source: '内部', ...extra });
+  return call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: '测试单', system_name: 'BMS', source: '内部', ...extra });
 }
 
 async function main() {
@@ -96,70 +96,48 @@ async function main() {
   port = server.address().port;
   ok('readiness ready + HTTP harness 起服务');
 
-  // ═══ [A] intake_required=1 建单 → 待受理 + 入库 1（三类）═══
+  // ═══ [A] 建单恒落「待受理」+ 入库 1（角色权限重构 C0 焊死受理门·方案 v1.5 §4-C0）═══
+  //   ⚠️ 原 [A]/[B]/[C]/[D] 四组（intake=1 建单 / 显式 0 走无受理分支 / 非法值归一 / intake=1+assignA/B 冲突）
+  //     随 C0「参数面封死」整体重写：客户端不再能选受理门开关，"选或不选"这条业务规则本身消失，
+  //     原真值表不再有被测对象。新覆盖 = 恒定落态（本组）+ 参数拒绝（[A2]）+ path A/B 结构性关闭（[D]）。
   {
     for (const type of ['feature', 'improvement', 'bug']) {
-      const r = await create({ type, intake_required: 1 });
-      assert.strictEqual(r.status, 201, `${type} intake=1 建单 201, got ${r.status} ${JSON.stringify(r.body)}`);
+      const r = await create({ type });
+      assert.strictEqual(r.status, 201, `${type} 建单 201, got ${r.status} ${JSON.stringify(r.body)}`);
       const row = await get('SELECT status, intake_required FROM sys_issues WHERE id=?', [r.body.id]);
-      assert.strictEqual(row.status, '待受理', `${type} intake=1 → 待受理（实际 ${row.status}）`);
-      assert.strictEqual(row.intake_required, 1, `${type} 入库 intake_required=1（实际 ${row.intake_required}）`);
+      assert.strictEqual(row.status, '待受理', `C0：${type} 建单恒落 待受理（实际 ${row.status}）`);
+      assert.strictEqual(row.intake_required, 1, `C0：${type} 入库 intake_required=1（实际 ${row.intake_required}）`);
     }
-    // 字符串 '1' / 布尔 true 亦归一为 1
-    for (const v of ['1', true]) {
-      const r = await create({ intake_required: v });
-      const row = await get('SELECT status, intake_required FROM sys_issues WHERE id=?', [r.body.id]);
-      assert.strictEqual(row.status, '待受理', `intake_required=${JSON.stringify(v)} → 待受理`);
-      assert.strictEqual(row.intake_required, 1, `intake_required=${JSON.stringify(v)} 归一为 1`);
-    }
-    ok('[A] intake_required=1 建单 → 待受理 + 入库 1（feature/improvement/bug + \'1\'/true 归一）');
+    ok('[A] C0 受理门焊死：三类型（feature/improvement/bug）建单恒落 待受理 + 入库 intake_required=1');
   }
 
-  // ═══ [B] 不传 / 显式 0 → 无受理落态 + intake_required=0（回归·零行为变化）═══
+  // ═══ [A2] intake_required 参数面封死：任何传值（含原本合法的 0/1）→ 400 INTAKE_REQUIRED_FIXED ═══
+  //   ⚠️ 刻意不做"静默忽略后恒 1"：旧前端/缓存页面传 0 时若静默 201，调用方会误以为自己关掉了受理门，
+  //     而实际开着——受理门是安全边界，失败必须响亮（沿用本模块 INVALID_INTAKE_REQUIRED 的失败响亮范式）。
   {
-    const cases = [
-      { type: 'feature', extra: {}, want: '待指派' },
-      { type: 'feature', extra: { intake_required: 0 }, want: '待指派' },
-      { type: 'improvement', extra: { intake_required: '0' }, want: '待指派' },
-      { type: 'improvement', extra: { intake_required: false }, want: '待指派' },
-      { type: 'bug', extra: {}, want: '待处理' },
-      { type: 'bug', extra: { intake_required: 0 }, want: '待处理' },
-    ];
-    for (const c of cases) {
-      const r = await create({ type: c.type, ...c.extra });
-      assert.strictEqual(r.status, 201, `${c.type} ${JSON.stringify(c.extra)} 建单 201, got ${r.status} ${JSON.stringify(r.body)}`);
-      const row = await get('SELECT status, intake_required FROM sys_issues WHERE id=?', [r.body.id]);
-      assert.strictEqual(row.status, c.want, `${c.type} ${JSON.stringify(c.extra)} → ${c.want}（实际 ${row.status}）`);
-      assert.strictEqual(row.intake_required, 0, `${c.type} ${JSON.stringify(c.extra)} 入库 intake_required=0`);
-    }
-    ok('[B] 不传/显式 0/\'0\'/false → 无受理落态（feature/improvement=待指派·bug=待处理）+ 入库 0');
-  }
-
-  // ═══ [C] 非法值 → 400 INVALID_INTAKE_REQUIRED（严格·不静默落 0·含收口审 MED 收严的 null/空串）═══
-  {
-    // 收口审 MED（codex149-B）：null / '' / 空白串不再静默落 0，须 400（只 undefined 默认 0）
-    for (const v of ['yes', 2, 'true', -1, null, '', '  ']) {
+    for (const v of [1, 0, '1', '0', true, false, 'yes', 2, null, '', '  ']) {
       const r = await create({ intake_required: v });
       assert.strictEqual(r.status, 400, `intake_required=${JSON.stringify(v)} → 400, got ${r.status} ${JSON.stringify(r.body)}`);
-      assert.strictEqual(r.body.code, 'INVALID_INTAKE_REQUIRED', `intake_required=${JSON.stringify(v)} code=INVALID_INTAKE_REQUIRED`);
+      assert.strictEqual(r.body.code, 'INTAKE_REQUIRED_FIXED', `intake_required=${JSON.stringify(v)} code=INTAKE_REQUIRED_FIXED`);
     }
-    ok('[C] 非法值 \'yes\'/2/\'true\'/-1/null/\'\'/空白 → 400 INVALID_INTAKE_REQUIRED（严格归一·收口审收严 null/空串）');
+    ok('[A2] intake_required 参数面封死：0/1/\'0\'/\'1\'/true/false/\'yes\'/2/null/\'\'/空白 一律 400 INTAKE_REQUIRED_FIXED（含原合法值·失败响亮不静默）');
   }
 
-  // ═══ [D] intake_required=1 + assign_mode A/B（bug）→ 400 INTAKE_WITH_ASSIGN_CONFLICT ═══
+  // ═══ [D] assign_mode A/B（bug）→ 400 INTAKE_WITH_ASSIGN_CONFLICT（受理门恒开 ⟹「建单即指派」结构性关闭）═══
+  //   与原组的差别：不再需要显式传 intake_required=1 来触发冲突——受理门恒开，A/B 任何情况下都被拒。
   {
-    let r = await create({ type: 'bug', intake_required: 1, assign_mode: 'A', assigned_to: 5 });
-    assert.strictEqual(r.status, 400, `intake=1 + assign A → 400, got ${r.status} ${JSON.stringify(r.body)}`);
+    let r = await create({ type: 'bug', assign_mode: 'A', assigned_to: 5 });
+    assert.strictEqual(r.status, 400, `assign A → 400, got ${r.status} ${JSON.stringify(r.body)}`);
     assert.strictEqual(r.body.code, 'INTAKE_WITH_ASSIGN_CONFLICT', 'assign A code=INTAKE_WITH_ASSIGN_CONFLICT');
-    r = await create({ type: 'bug', intake_required: 1, assign_mode: 'B', relay_user_id: 13 });
-    assert.strictEqual(r.status, 400, `intake=1 + assign B → 400, got ${r.status} ${JSON.stringify(r.body)}`);
+    r = await create({ type: 'bug', assign_mode: 'B', relay_user_id: 13 });
+    assert.strictEqual(r.status, 400, `assign B → 400, got ${r.status} ${JSON.stringify(r.body)}`);
     assert.strictEqual(r.body.code, 'INTAKE_WITH_ASSIGN_CONFLICT', 'assign B code=INTAKE_WITH_ASSIGN_CONFLICT');
-    ok('[D] intake_required=1 + assign_mode A/B → 400 INTAKE_WITH_ASSIGN_CONFLICT（防建单绕过受理门）');
+    ok('[D] C0：path A/B 结构性关闭——assign_mode A/B 无需显式 intake=1 即 400 INTAKE_WITH_ASSIGN_CONFLICT');
   }
 
-  // ═══ [E] 端到端：建单 intake=1 → 待受理 → admin intake-accept → 待指派（受理门贯通）═══
+  // ═══ [E] 端到端：建单 → 待受理 → 受理人 intake-accept → 待指派（受理门贯通）═══
   {
-    const r = await create({ type: 'feature', intake_required: 1 });
+    const r = await create({ type: 'feature' });
     const id = r.body.id;
     let row = await get('SELECT status FROM sys_issues WHERE id=?', [id]);
     assert.strictEqual(row.status, '待受理', '建单落 待受理');
@@ -167,7 +145,7 @@ async function main() {
     assert.strictEqual(acc.status, 200, `受理人 intake-accept 200, got ${acc.status} ${JSON.stringify(acc.body)}`);
     row = await get('SELECT status FROM sys_issues WHERE id=?', [id]);
     assert.strictEqual(row.status, '待指派', 'intake-accept → 待指派（受理门贯通）');
-    ok('[E] 端到端：建单 intake=1 → 待受理 → 受理人 intake-accept → 待指派（受理门真正生效）');
+    ok('[E] 端到端：建单 → 待受理 → 受理人 intake-accept → 待指派（受理门真正生效）');
   }
 
   // ═══ [F] #2 resume 存量兼容：历史 hold from_status=待评估/已排期 → resume 映射待指派 ═══
@@ -176,8 +154,10 @@ async function main() {
   {
     for (const type of ['feature', 'improvement']) {
       for (const legacy of ['待评估', '已排期']) {
+        // ⭐ 角色权限重构 C0：ir 由 0 改 1——本组被测点是"历史 hold 的 from_status 能否映射回待指派"，
+        //   与 ir 无关；而 C0 后 ir=0 已是非法态（DB 触发器 ABORT），夹具须合规。
         const ins = await run(`INSERT INTO sys_issues (type, status, priority, title, system_name, source, intake_required, created_by, created_by_name, record_source)
-          VALUES (?,'已暂缓','P2',?, 'BMS','内部',0,1,'管理员','native')`, [type, `存量暂缓单-${type}-${legacy}`]);
+          VALUES (?,'已暂缓','P2',?, 'BMS','内部',1,1,'管理员','native')`, [type, `存量暂缓单-${type}-${legacy}`]);
         const id = ins.lastID;
         await run(`INSERT INTO sys_issue_timeline (issue_id, event_type, from_status, to_status, action_code, operator_id, operator_name)
           VALUES (?, 'status_change', ?, '已暂缓', 'hold', 1, '管理员')`, [id, legacy]);
@@ -191,8 +171,8 @@ async function main() {
 
   // ═══ [G] #5 resend-tech-consult 状态门：仅待受理可重发·离开受理阶段 → 409 ═══
   {
-    // 建单 intake=1 → 待受理 → 发起技术负责人沟通（示例发布者 7）→ 拿 request_event_id
-    const cr = await create({ type: 'feature', intake_required: 1 });
+    // 建单（C0 后恒落待受理·不再传 intake_required）→ 发起技术负责人沟通（示例发布者 7）→ 拿 request_event_id
+    const cr = await create({ type: 'feature' });
     const id = cr.body.id;
     const req = await call('POST', `/api/sys-issues/${id}/request-tech-consult`, liaisonTok, { tech_lead_id: 7 });
     assert.strictEqual(req.status, 200, `request-tech-consult 200, got ${req.status} ${JSON.stringify(req.body)}`);
@@ -212,11 +192,13 @@ async function main() {
     ok('[G] #5 resend 状态门：待受理可重发·离开受理阶段(待指派) → 409·无权限用户 → 403（权限先于状态门·防侧信道）');
   }
 
-  // ═══ [H] #3 组合：intake_required=1 + needs_feasibility=1（收口审 LOW·此前正常建单无法触达的新可达路径）═══
+  // ═══ [H] #3 组合：受理门（恒开）+ needs_feasibility=1 —— 两个正交开关互不吞噬 ═══
+  //   ⭐ C0 后受理门恒开，本组不再传 intake_required（参数已封）；被测点收敛为
+  //     「needs_feasibility 独立入库、且受理通过后仍保留（评估在开发中做·不被受理门跳过）」。
   {
     for (const type of ['feature', 'improvement']) {
-      const r = await create({ type, intake_required: 1, needs_feasibility: 1 });
-      assert.strictEqual(r.status, 201, `${type} intake=1+needs_feas=1 建单 201, got ${r.status} ${JSON.stringify(r.body)}`);
+      const r = await create({ type, needs_feasibility: 1 });
+      assert.strictEqual(r.status, 201, `${type} needs_feas=1 建单 201, got ${r.status} ${JSON.stringify(r.body)}`);
       const id = r.body.id;
       let row = await get('SELECT status, intake_required, needs_feasibility FROM sys_issues WHERE id=?', [id]);
       assert.strictEqual(row.status, '待受理', `${type} 组合 → 待受理`);

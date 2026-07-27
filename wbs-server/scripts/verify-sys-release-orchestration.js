@@ -59,7 +59,10 @@ const adminTok = jwt.sign({ id: 1, username: 'admin', display_name: '管理员',
 const devTok = jwt.sign({ id: 5, username: 'dev', display_name: '开发王', role: 'user' }, SECRET);
 const dev2Tok = jwt.sign({ id: 6, username: 'dev2', display_name: '开发李', role: 'user' }, SECRET);
 const dev3Tok = jwt.sign({ id: 8, username: 'dev3', display_name: '开发赵', role: 'user' }, SECRET);
-const liaisonTok = jwt.sign({ id: 7, username: 'viewer1', display_name: '观察员', role: 'viewer' }, SECRET);   // id7 ∈ bug 对接人白名单[7,13]（M-1 正向覆盖）
+// ⭐ 角色权限重构 C1：通知/查已读权由「bug 对接人白名单[7,13]」收敛为「admin ∨ 受理人[13]」。
+//   本 token 的用途是"非 admin 但有通知权的角色"（M-1 正向覆盖），该角色 C1 后由受理人[13] 担任，故改 id。
+const liaisonTok = jwt.sign({ id: 13, username: 'wangtaotao', display_name: '示例对接人', role: 'user' }, SECRET);
+const techLeadTok = jwt.sign({ id: 7, username: 'shenjun', display_name: '示例发布者', role: 'publisher' }, SECRET);   // C1 后失去通知权·负例用
 
 let server, port;
 function call(method, p, tok, body) {
@@ -81,9 +84,11 @@ async function relRow(id) { return await get('SELECT * FROM sys_releases WHERE i
 
 // 建 bug 单 → 指派 devId → estimate → submit → accept，返回 id（待上线态）
 async function seedBugToReady(devId = 5, devTokFor = devTok) {
-  let r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: 'bug单', system_name: 'BMS', source: '内部' });
+  let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'bug单', system_name: 'BMS', source: '内部' });
   assert.strictEqual(r.status, 201, '建 bug 201, got ' + r.status + ' ' + JSON.stringify(r.body));
   const id = r.body.id;
+  // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
+  await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, {});
   r = await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: devId });
   assert.strictEqual(r.status, 200, 'bug assign 200');
   r = await call('POST', `/api/sys-issues/${id}/estimate`, devTokFor, { dev_estimated_at: EST });
@@ -95,8 +100,10 @@ async function seedBugToReady(devId = 5, devTokFor = devTok) {
   return id;
 }
 async function seedFeatureToReady(devId = 5, devTokFor = devTok) {
-  let r = await call('POST', '/api/sys-issues', adminTok, { type: 'feature', title: 'feat单', system_name: 'BMS', source: '内部' });
+  let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 'feat单', system_name: 'BMS', source: '内部' });
   const id = r.body.id;
+  // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
+  await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, {});
   await call('POST', `/api/sys-issues/${id}/schedule`, adminTok, {});
   await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: devId });
   await call('POST', `/api/sys-issues/${id}/estimate`, devTokFor, { dev_estimated_at: EST });
@@ -188,8 +195,10 @@ async function main() {
     ok('[G3] 非 bug 单 → 409 RELEASE_ASSIGN_TYPE_INVALID');
 
     // 非待上线态
-    let rr = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: 'mid', system_name: 'BMS', source: '内部' });
+    let rr = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'mid', system_name: 'BMS', source: '内部' });
     const midId = rr.body.id;
+  // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
+    await call('POST', `/api/sys-issues/${midId}/intake-accept`, adminTok, {});
     await call('POST', `/api/sys-issues/${midId}/assign`, adminTok, { assigned_to: 5 });   // 处理中
     r = await call('POST', '/api/sys-issues/assign-release-dev', adminTok, { issue_ids: [midId], release_assignee_id: 5 });
     assert.strictEqual(r.status, 409); assert.strictEqual(r.body.code, 'RELEASE_ASSIGN_STATUS_INVALID');
@@ -481,10 +490,16 @@ async function main() {
 
   // ═══ [正交] release_assignee 与 dev_assignees 子表相互独立 ═══
   {
-    // 建单 path A 带协作，指派 dev5 主 + dev6 协作；上线编排仍以 release_assignee_id 独立决定（可指定协作者 dev6 执行）
-    let r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: 'collab-release', system_name: 'BMS', source: '内部', assign_mode: 'A', assigned_to: 5, collaborator_ids: [6] });
+    // 指派 dev5 主 + dev6 协作；上线编排仍以 release_assignee_id 独立决定（可指定协作者 dev6 执行）
+    // ⭐ 角色权限重构 C0：原用 path A（建单即指派带协作）造夹具，该路径已结构性关闭 →
+    //   改走 C0 后的正规链路：建单（→待受理）→ 受理（→待处理）→ assign（主+协作一次带入）。
+    //   被测点（release_assignee 与 dev_assignees 正交）不变，只换造夹具的入口。
+    let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'collab-release', system_name: 'BMS', source: '内部' });
+    assert.strictEqual(r.status, 201, '建单 201');
     const id = r.body.id;
-    assert.strictEqual(r.status, 201, '建单 path A 带协作 201');
+    await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, {});
+    const asg = await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5, collaborator_ids: [6] });
+    assert.strictEqual(asg.status, 200, `assign 主5+协作6 应 200, got ${asg.status} ${JSON.stringify(asg.body)}`);
     await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: EST });
     // C3：多开发 roster 完成态门禁——path A 带协作(dev6)后 roster=[5主,6协作]，W-GATE 要求全在册完成态才
     //   能进 SYS_VERIFY（不再是旧模型"仅主开发提交即完成"），故 5 与 6 均需 submit（no_code 占位）。
@@ -530,10 +545,13 @@ async function main() {
     // admin → 非 403
     r = await call('GET', `/api/sys-issues/${rsIssue}/notify-read-status?type=creator`, adminTok);
     assert.notStrictEqual(r.status, 403, `M-1：admin 查已读不应 403, got ${r.status}`);
-    // 白名单对接人（id7 ∈ [7,13]）→ 非 403（正向覆盖 codex41 note）
+    // ⭐ C1：受理人(13) → 非 403（他是 C1 后唯一有通知权的非 admin 角色）
     r = await call('GET', `/api/sys-issues/${rsIssue}/notify-read-status?type=creator`, liaisonTok);
-    assert.notStrictEqual(r.status, 403, `M-1：白名单对接人查已读不应 403, got ${r.status} ${JSON.stringify(r.body)}`);
-    ok('M-1（权限收口）：read-status 非 admin/非白名单/非主开发 → 403 NOT_AUTHORIZED_FOR_NOTIFY；主开发本人 + admin + 白名单对接人均放行（in-handler 检查与发送侧权限并集对称，不误挡能发者）');
+    assert.notStrictEqual(r.status, 403, `⭐ M-1：受理人(13) 查已读不应 403, got ${r.status} ${JSON.stringify(r.body)}`);
+    // ⭐ C1：示例发布者(7) → 403（原白名单成员，C1 后失去通知权 → 查已读同步收紧·写读同源）
+    r = await call('GET', `/api/sys-issues/${rsIssue}/notify-read-status?type=creator`, techLeadTok);
+    assert.strictEqual(r.status, 403, `⭐ M-1：示例发布者(7) 查已读应 403（C1 失权·写读同源）, got ${r.status} ${JSON.stringify(r.body)}`);
+    ok('M-1（权限收口·⭐C1 更新）：read-status 与发送侧权限并集对称——admin + 受理人(13) 放行；示例发布者(7)/主开发本人/其他人 403 NOT_AUTHORIZED_FOR_NOTIFY');
   }
 
   // ═══ [U-2 收口·ultracode] execute-release 角色下限：指派后被降级 viewer/禁用者不能执行上线（守 viewer-never-write）═══

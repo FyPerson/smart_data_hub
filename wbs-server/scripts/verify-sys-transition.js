@@ -48,9 +48,10 @@ const ok = (msg) => { passed++; console.log(`  ✓ ${msg}`); };
 // 直接 INSERT 一个变更流单（指定 status/assigned_to，跳过端点，专测 transition）
 //   受理排期改造：默认前段态由「待评估」改「待受理」（新前段·intake_accept 引擎测起点）。
 async function seedIssue({ status = '待受理', assigned_to = null, type = 'feature', dev_estimated_at = null, intake_required = null } = {}) {
-  // 受理排期改造 C3（codex MED-1 连带修）：受理态（待受理/待修改）结构上恒 intake_required=1（引擎受理门不变量要求）——
-  //   夹具不显式传时按 status 自动派生（待受理/待修改→1·其余→0），保持 fixture 与不变量一致（旧夹具默认 0 会被新不变量拒）。
-  const ir = intake_required !== null ? intake_required : ((status === '待受理' || status === '待修改') ? 1 : 0);
+  // ⭐ 角色权限重构 C0：受理门焊死为全类型必经 → intake_required **全表恒 1**（0 已是非法态，
+  //   DB 触发器会 ABORT）。原按 status 派生 0/1 的逻辑随之作废：非受理态也必须是 1。
+  //   （旧注释语境是"受理态恒 1、其余 0"，那是受理门可选时代的口径。）
+  const ir = intake_required !== null ? intake_required : 1;
   const r = await run(
     `INSERT INTO sys_issues (type, status, title, system_name, source, created_by, created_by_name, assigned_to, assigned_to_name, dev_estimated_at, intake_required)
      VALUES (?, ?, 't', 'BMS', '内部', 1, 'admin', ?, ?, ?, ?)`,

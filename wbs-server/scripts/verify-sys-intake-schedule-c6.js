@@ -71,7 +71,7 @@ let passed = 0;
 const ok = (m) => { passed++; console.log('  ✓ ' + m); };
 
 async function createIssue(type) {
-  const r = await call('POST', '/api/sys-issues', adminTok, { type, title: `${type}单`, system_name: 'BMS', source: '内部' });
+  const r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type, title: `${type}单`, system_name: 'BMS', source: '内部' });
   assert.strictEqual(r.status, 201, `建 ${type} 单 201, got ${r.status}`);
   return r.body.id;
 }

@@ -76,9 +76,11 @@ async function statusOf(id) { return (await get('SELECT status FROM sys_issues W
 
 // 建 bug 单 → 指派 devId → 返回 id（处理中态）
 async function seedBugToDev(devId = 5) {
-  let r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: 'bug单', system_name: 'BMS', source: '内部' });
+  let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'bug单', system_name: 'BMS', source: '内部' });
   assert.strictEqual(r.status, 201, '建 bug 单 201, got ' + r.status + ' ' + JSON.stringify(r.body));
   const id = r.body.id;
+  // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
+  await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, {});
   r = await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: devId });
   assert.strictEqual(r.status, 200, 'bug assign 200, got ' + r.status + ' ' + JSON.stringify(r.body));
   return id;
@@ -109,8 +111,10 @@ async function seedBugToOnline(devId = 5) {
 }
 // feature 单 → 待上线（走变更流）
 async function seedFeatureToReady(devId = 5) {
-  let r = await call('POST', '/api/sys-issues', adminTok, { type: 'feature', title: 'feat单', system_name: 'BMS', source: '内部' });
+  let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 'feat单', system_name: 'BMS', source: '内部' });
   const id = r.body.id;
+  // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
+  await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, {});
   await call('POST', `/api/sys-issues/${id}/schedule`, adminTok, {});
   await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: devId });
   await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: EST });
@@ -139,7 +143,11 @@ async function main() {
       { type: 'bug', title: '同源导出再复现', system_name: 'BMS', source: '生产故障', derive_reason: '上次只修单表导出，多表 join 复现' });
     assert.strictEqual(r.status, 201, `bug 已上线派生应 201, got ${r.status} ${JSON.stringify(r.body)}`);
     assert.strictEqual(r.body.type, 'bug');
-    assert.strictEqual(r.body.status, '待处理', '派生 bug 新单初始态=待处理');
+    // ⭐ 角色权限重构 C0：derive 新单走创建路径唯一入口（resolveSysInitialStatusForCreate）→ 恒落「待受理」。
+    //   原「新单默认 intake_required=0 直落待处理」正是 v1.5 §2.2-A 认定的"derive 绕过受理门"缺口。
+    assert.strictEqual(r.body.status, '待受理', 'C0：派生 bug 新单落 待受理（派生单同样必经受理）');
+    const drvRow = await get('SELECT intake_required FROM sys_issues WHERE id=?', [r.body.id]);
+    assert.strictEqual(drvRow.intake_required, 1, 'C0：derive INSERT 显式落 intake_required=1（防「待受理+ir0」矛盾单卡死受理）');
     assert.strictEqual(r.body.origin_issue_id, originId);
     const child = await get('SELECT origin_issue_id FROM sys_issues WHERE id=?', [r.body.id]);
     assert.strictEqual(child.origin_issue_id, originId, '新单 origin_issue_id 指向原单');
@@ -218,6 +226,8 @@ async function main() {
     let r = await call('POST', `/api/sys-issues/${originId}/derive`, adminTok,
       { type: 'bug', title: '派生修复单', system_name: 'BMS', source: '内部', derive_reason: '需再修' });
     const newId = r.body.id;
+    // ⭐ 角色权限重构 C0：派生新单同样恒落「待受理」→ 先受理（→待处理）才能 assign
+    await call('POST', `/api/sys-issues/${newId}/intake-accept`, adminTok, {});
     await call('POST', `/api/sys-issues/${newId}/assign`, adminTok, { assigned_to: 5 });
     await call('POST', `/api/sys-issues/${newId}/estimate`, devTok, { dev_estimated_at: EST });
     // 首提缺 fix_gap_note → 400
@@ -263,6 +273,9 @@ async function main() {
     assert.strictEqual(r.status, 201, `bug→feature 跨类型派生应 201, got ${r.status} ${JSON.stringify(r.body)}`);
     const featChild = r.body.id;
     assert.strictEqual(r.body.type, 'feature');
+    // ⭐ 角色权限重构 C0：派生新单恒落「待受理」→ 先受理（feature → 待指派）才能 assign
+    //   （schedule 早已退场，此处调用是历史遗留 no-op，保留不动以免扩大 C0 diff）
+    await call('POST', `/api/sys-issues/${featChild}/intake-accept`, adminTok, {});
     await call('POST', `/api/sys-issues/${featChild}/schedule`, adminTok, {});
     await call('POST', `/api/sys-issues/${featChild}/assign`, adminTok, { assigned_to: 5 });
     await call('POST', `/api/sys-issues/${featChild}/estimate`, devTok, { dev_estimated_at: EST });
@@ -275,6 +288,8 @@ async function main() {
       { type: 'bug', title: '迭代出的 bug', system_name: 'BMS', source: '内部' });   // feature 原单免 derive_reason
     assert.strictEqual(r.status, 201, `feature→bug 派生应 201, got ${r.status} ${JSON.stringify(r.body)}`);
     const bugChild = r.body.id;
+    // ⭐ 角色权限重构 C0：派生新单恒落「待受理」→ 先受理（bug → 待处理）才能 assign
+    await call('POST', `/api/sys-issues/${bugChild}/intake-accept`, adminTok, {});
     await call('POST', `/api/sys-issues/${bugChild}/assign`, adminTok, { assigned_to: 5 });
     await call('POST', `/api/sys-issues/${bugChild}/estimate`, devTok, { dev_estimated_at: EST });
     r = await call('POST', `/api/sys-issues/${bugChild}/submit`, devTok, { mode: 'no_code', no_code_reason: '修好' });   // 无 fix_gap_note
@@ -288,6 +303,8 @@ async function main() {
     let r = await call('POST', `/api/sys-issues/${originId}/derive`, adminTok,
       { type: 'bug', title: '同源单', system_name: 'BMS', source: '内部', derive_reason: '读端可见性验证' });
     const newId = r.body.id;
+    // ⭐ 角色权限重构 C0：派生新单同样恒落「待受理」→ 先受理（→待处理）才能 assign
+    await call('POST', `/api/sys-issues/${newId}/intake-accept`, adminTok, {});
     await call('POST', `/api/sys-issues/${newId}/assign`, adminTok, { assigned_to: 5 });
     await call('POST', `/api/sys-issues/${newId}/estimate`, devTok, { dev_estimated_at: EST });
     await call('POST', `/api/sys-issues/${newId}/submit`, devTok, { mode: 'no_code', no_code_reason: '修复', fix_gap_note: '缺口在边界判断' });
@@ -320,6 +337,8 @@ async function main() {
     let r = await call('POST', `/api/sys-issues/${originId}/derive`, adminTok,
       { type: 'bug', title: '孤儿单', system_name: 'BMS', source: '内部', derive_reason: 'r' });
     const newId = r.body.id;
+    // ⭐ 角色权限重构 C0：派生新单同样恒落「待受理」→ 先受理（→待处理）才能 assign
+    await call('POST', `/api/sys-issues/${newId}/intake-accept`, adminTok, {});
     await call('POST', `/api/sys-issues/${newId}/assign`, adminTok, { assigned_to: 5 });
     await call('POST', `/api/sys-issues/${newId}/estimate`, devTok, { dev_estimated_at: EST });
     // 手工污染：令 origin_issue_id 指向不存在的行（模拟脏谱系；正常 API 不可达——无硬删除端点）

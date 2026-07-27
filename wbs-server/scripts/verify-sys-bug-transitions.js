@@ -95,9 +95,11 @@ const EST = '2026-08-01 10:00';
 
 // 建 bug 单 → 指派到 devId，返回 id（处理中态）
 async function seedBugToDev(devId = 5) {
-  let r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: 'bug单', system_name: 'BMS', source: '内部' });
+  let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'bug单', system_name: 'BMS', source: '内部' });
   assert.strictEqual(r.status, 201, '建 bug 单 201, got ' + r.status + ' ' + JSON.stringify(r.body));
   const id = r.body.id;
+  // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
+  await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, {});
   r = await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: devId });
   assert.strictEqual(r.status, 200, 'bug assign 200, got ' + r.status + ' ' + JSON.stringify(r.body));
   return id;
@@ -116,8 +118,10 @@ async function seedBugToReady(devId = 5, devTok2 = devTok) {
 }
 // 走变更流（feature/improvement）全流程到待上线（[R] 批次族别测试用）
 async function seedChangeToReady(type = 'feature', devId = 5, devTok2 = devTok) {
-  let r = await call('POST', '/api/sys-issues', adminTok, { type, title: type + '-mix', system_name: 'BMS', source: '内部' });
+  let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type, title: type + '-mix', system_name: 'BMS', source: '内部' });
   const id = r.body.id;
+  // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
+  await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, {});
   // 受理排期改造：schedule 退场——建单直落待指派，直接 assign。
   await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: devId });
   await call('POST', `/api/sys-issues/${id}/estimate`, devTok2, { dev_estimated_at: EST });
@@ -206,16 +210,20 @@ async function main() {
   // ═══ [E] 端点正向链路 ═══
   let mainId;
   {
-    let r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: '导出按钮报错', system_name: 'BMS', source: '业务方', requester_dept: '财务部', requester_name: '张三', requester_phone: '13800000000' });
+    let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: '导出按钮报错', system_name: 'BMS', source: '业务方', requester_dept: '财务部', requester_name: '张三', requester_phone: '13800000000' });
     assert.strictEqual(r.status, 201, '建 bug 单 201');
-    assert.strictEqual(r.body.status, '待处理', 'bug 建单落 待处理');
+    // ⭐ 角色权限重构 C0：受理门焊死（全类型必经）→ bug 建单落「待受理」，「待处理」改为受理通过后的落态。
+    assert.strictEqual(r.body.status, '待受理', 'C0：bug 建单落 待受理（原直落待处理已是绕过受理门的缺口）');
     mainId = r.body.id;
+    const iaMain = await call('POST', `/api/sys-issues/${mainId}/intake-accept`, adminTok, {});
+    assert.strictEqual(iaMain.status, 200, '夹具受理 200, got ' + iaMain.status + ' ' + JSON.stringify(iaMain.body));
+    assert.strictEqual(iaMain.body.status, '待处理', 'C0：bug 受理通过 → 待处理（与旧建单落态一致·下游链路断言不变）');
     const tl = await all('SELECT * FROM sys_issue_timeline WHERE issue_id=?', [mainId]);
     assert.strictEqual(tl[0].event_type, 'created', '建单写 created timeline');
     ok('建单：type=bug → 201 落「待处理」（前段裁剪，无评估/排期）+ created timeline + 报障人 requester_* 可选录入');
   }
   {
-    const r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: 'x', system_name: 'BMS', source: '内部', needs_feasibility: 1 });
+    const r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'x', system_name: 'BMS', source: '内部', needs_feasibility: 1 });
     assert.strictEqual(r.status, 400, 'bug + needs_feasibility=1 应 400');
     assert.strictEqual(r.body.code, 'FEASIBILITY_NOT_APPLICABLE');
     ok('建单守卫：bug 传 needs_feasibility=1 → 400 FEASIBILITY_NOT_APPLICABLE（评估环节不适用 bug，守卫实弹）');
@@ -259,7 +267,7 @@ async function main() {
     assert.strictEqual(r.body.attachments.length, 1);
     ok('⭐ 附件：bug 单「处理中」开发本人可传 delivery（isDevWorkState 修复——旧硬编码「开发中」会 409 断链）');
     // 负向：待处理 bug 单（未指派）上传 → 403/409（守卫仍在）
-    const r2 = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: 'x2', system_name: 'OA', source: '内部' });
+    const r2 = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'x2', system_name: 'OA', source: '内部' });
     const rUp = await upload(r2.body.id, devTok, 'x.png', 'delivery');
     assert.ok(rUp.status === 403 || rUp.status === 409, `待处理 bug 上传应拒, got ${rUp.status}`);
     ok('附件负向：待处理（非工作态/非本人）上传仍被拒（isDevWorkState 未放松守卫）');
@@ -463,8 +471,10 @@ async function main() {
   {
     // ⑤ 放开验证：从 feature 原单派生 bug 新单 —— 旧 ① 临时闸 SYS_BUG_DERIVE_PENDING 应已消失（201 成功）。
     //   feature 原单 originIsBug=false，故无 M5 反向约束、derive_reason 免填、fix_gap_note 首提亦跳过（origin.type≠bug）。
-    let r = await call('POST', '/api/sys-issues', adminTok, { type: 'feature', title: 'f', system_name: 'BMS', source: '内部' });
+    let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 'f', system_name: 'BMS', source: '内部' });
     const featureId = r.body.id;
+  // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
+    await call('POST', `/api/sys-issues/${featureId}/intake-accept`, adminTok, {});
     r = await call('POST', `/api/sys-issues/${featureId}/derive`, adminTok, { type: 'bug', title: 'd', system_name: 'BMS', source: '内部' });
     assert.strictEqual(r.status, 201, `feature→bug 派生应放开 201, got ${r.status} ${JSON.stringify(r.body)}`);
     assert.notStrictEqual(r.body.code, 'SYS_BUG_DERIVE_PENDING');
@@ -483,17 +493,22 @@ async function main() {
 
   // ═══ [G] 旁路：issue_reject / reactivate / void / reassign ═══
   {
-    let r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: '误报', system_name: 'OA', source: '内部' });
+    let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: '误报', system_name: 'OA', source: '内部' });
     const rejId = r.body.id;
+  // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
+    await call('POST', `/api/sys-issues/${rejId}/intake-accept`, adminTok, {});
     r = await call('POST', `/api/sys-issues/${rejId}/issue-reject`, adminTok, {});
     assert.strictEqual(r.status, 400); assert.strictEqual(r.body.code, 'REASON_REQUIRED');
     r = await call('POST', `/api/sys-issues/${rejId}/issue-reject`, adminTok, { reason: '非缺陷，操作问题' });
     assert.strictEqual(r.status, 200); assert.strictEqual(await statusOf(rejId), '已拒绝');
-    // 受理排期改造 §4.3：bug issue_reject.from 双 from（待受理/待处理）·bug 建单 intake_required=0 落待处理 → 待处理可拒。
-    //   reactivate 动态解析（§9·intake_required=0）→ 回待处理（bug 无受理分支初始态）。
+    // 受理排期改造 §4.3：bug issue_reject.from 双 from（待受理/待处理）——本例从「待处理」拒（上方已受理过）。
+    // ⭐ 角色权限重构 C0：reactivate 落态**不再读单据 intake_required 分两支**，恒回受理门（待受理）。
+    //   原断言「回待处理（intake_required=0 无受理分支）」正是 v1.5 §2.2-B 认定的绕过缺口，已堵。
     r = await call('POST', `/api/sys-issues/${rejId}/reactivate`, adminTok, { reason: '复现了' });
-    assert.strictEqual(r.status, 200); assert.strictEqual(await statusOf(rejId), '待处理');
-    ok('拒绝/重新激活：待处理 →issue_reject→ 已拒绝（原因必填）→reactivate→ 回「待处理」（bug intake_required=0 无受理分支）');
+    assert.strictEqual(r.status, 200); assert.strictEqual(await statusOf(rejId), '待受理');
+    const rejRow = await get('SELECT intake_required FROM sys_issues WHERE id=?', [rejId]);
+    assert.strictEqual(rejRow.intake_required, 1, 'C0：reactivate 同事务置 intake_required=1（防「待受理+ir0」卡死受理）');
+    ok('拒绝/重新激活：待处理 →issue_reject→ 已拒绝（原因必填）→reactivate→ 回「待受理」（C0 恒回受理门 + intake_required=1 原子同写）');
     // 处理中不可拒（bug 仅前段可拒）
     const midId = await seedBugToDev(5);
     r = await call('POST', `/api/sys-issues/${midId}/issue-reject`, adminTok, { reason: 'x' });
@@ -540,10 +555,13 @@ async function main() {
 
   // ═══ [C] 变更流零回归 canary（受理排期改造：schedule 退场·建单直落待指派）═══
   {
-    let r = await call('POST', '/api/sys-issues', adminTok, { type: 'feature', title: 'canary', system_name: 'BMS', source: '内部' });
+    let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 'canary', system_name: 'BMS', source: '内部' });
     const id = r.body.id;
-    // 受理排期改造 §9：建单 intake_required=0（列未加/未选对接人）→ 落待指派（非旧待评估）。
-    assert.strictEqual(r.body.status, '待指派', 'feature 建单落待指派（受理排期改造·无受理分支）');
+    // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死·全类型），「待指派」改为受理通过后的落态。
+    assert.strictEqual(r.body.status, '待受理', 'C0：feature 建单落待受理（全类型必经受理门）');
+    const canaryIa = await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, {});
+    assert.strictEqual(canaryIa.status, 200, `canary 受理 200, got ${canaryIa.status} ${JSON.stringify(canaryIa.body)}`);
+    assert.strictEqual(canaryIa.body.status, '待指派', 'C0：feature 受理通过 → 待指派（与旧建单落态一致）');
     // 待指派直接 assign → 成功（受理排期改造后 assign.from=待指派·无需 schedule 中转）。
     r = await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5 });
     assert.strictEqual(r.status, 200, `feature 待指派 assign 应 200, got ${r.status} ${JSON.stringify(r.body)}`);

@@ -72,8 +72,10 @@ let passed = 0; const ok = (m) => { passed++; console.log('  ✓ ' + m); };
 
 // 建 bug（admin 建=created_by 1）→ 指派 dev5 → 处理中；带报障人手机号
 async function seedBug(reqPhone) {
-  const r = await call('POST', '/api/sys-issues', adminTok, { type: 'bug', title: 'b', system_name: 'BMS', source: '内部', requester_name: '赵报障', requester_phone: reqPhone });
+  const r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'b', system_name: 'BMS', source: '内部', requester_name: '赵报障', requester_phone: reqPhone });
   const id = r.body.id;
+  // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
+  await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, {});
   await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5 });
   return id;
 }
@@ -126,7 +128,7 @@ async function main() {
     let r = await call('GET', `/api/sys-issues/${id}/chat-candidates`, dev6);
     assert.strictEqual(r.status, 403, '[Cand-auth] 非 admin/assignee → 403');
     // feature 单 → 409 CHAT_ONLY_FOR_BUG
-    const rf = await call('POST', '/api/sys-issues', adminTok, { type: 'feature', title: 'f', system_name: 'BMS', source: '内部' });
+    const rf = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 'f', system_name: 'BMS', source: '内部' });
     await call('POST', `/api/sys-issues/${rf.body.id}/schedule`, adminTok, {});
     await call('POST', `/api/sys-issues/${rf.body.id}/assign`, adminTok, { assigned_to: 5 });
     r = await call('GET', `/api/sys-issues/${rf.body.id}/chat-candidates`, adminTok);

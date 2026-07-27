@@ -1,4 +1,4 @@
-// routes/sys-iteration/index.js — 系统迭代模块（业务系统软件迭代跟踪）
+﻿// routes/sys-iteration/index.js — 系统迭代模块（业务系统软件迭代跟踪）
 //   业务设计 SSOT = docs/local/系统迭代/系统迭代_方案_20260624_v1.6.md（4 类型 bug/feature/improvement/config）
 //   编码实施 SSOT = docs/local/系统迭代/系统迭代_编码实施方案_20260624_v1.3.md
 //
@@ -175,6 +175,21 @@ module.exports = (deps) => {
     ...SYS_CLEAR_BLOCKED_FIELDS_SQL,
   ];
 
+  // ── 角色权限重构 C0：受理门 SQL/DDL 常量统一从 intake-gate-sql.js 取（**单一真相源**）─────────────
+  //   曾经把"回受理门"的字段清单在 index.js 与运维脚本各写一份，结果脚本漏清 tech_lead_*/relay_* 十六列，
+  //   把违规单修成「表面合法、跨轮次状态仍脏」的半清状态（codex 七轮审 HIGH-1）。故收敛为一处定义、多处引用。
+  //   触发器 DDL **不带 IF NOT EXISTS**、恢复时一律 DROP 后重建——名称存在不等于定义正确（七轮审 MED-1）。
+  const {
+    SYS_CLEAR_TECH_LEAD_FIELDS_SQL,
+    SYS_CLEAR_RELAY_FIELDS_SQL,
+    SYS_BACK_TO_INTAKE_GATE_SQL,
+    SYS_INTAKE_GATE_TRIGGER_NAMES,
+    SYS_INTAKE_GATE_TRIGGERS_SQL,
+    SYS_INTAKE_GATE_DROP_SQL,
+    C0_INTAKE_GATE_MIGRATION_KEY,
+    INTAKE_VIOLATION_WHERE,
+  } = require('./intake-gate-sql');
+
   // 守门中间件：C2 起所有 sys-* 写入口（建单/指派/流转/批次/附件/通知）挂在路由前。
   //   readiness=false → 503，避免建表/迁移失败被吞后入口运行期 SQL 崩。
   function requireSysSchemaReady(req, res, next) {
@@ -204,7 +219,8 @@ module.exports = (deps) => {
   //     ② `relay_notified_user_id`（per-单）= **"通知对接人"这一动作的收件目标**（path B 建单写入，通知改造新增列，
   //        与①同为白名单成员但语义不同——不是"谁能操作"而是"该单通知发给谁"，白名单成员不能发 notify-relay 给自己）；
   //     ③ `assigned_to` = 主开发（DRI，状态机 owner）；④ `sys_issue_dev_assignees` 子表 = 开发集（主+协作）。
-  //     type 精判仍把①的操作权**收窄到 type='bug'**（不波及 feature/improvement 变更流，§3「不全局化」）。
+  //     ⚠️ 历史口径（C1 已废）：此处原写「type 精判把①的操作权收窄到 type='bug'」——C1 后①**不再是操作权来源**，
+  //     操作权唯一来自 SYS_INTAKE_LIAISON_IDS（见下方 isSysIntakeLiaison / requireIntakeLiaison）。
   //   ⚠️ 改名单需三处同步：本常量 + 前端 public/Sys_Iteration.html 同名常量 + scripts/verify-sys-liaison.js
   //     （verify 卡三处字面量一致防漂移，对齐 correction relay 白名单三处同步纪律）。
   //   ⚠️ 部署前探针（deferred 到 5 片齐部署前，[[feedback_real_sample_before_deploy]]）：确认生产 users 表
@@ -214,14 +230,15 @@ module.exports = (deps) => {
   function isSysBugLiaison(uid) {
     return Number(uid) > 0 && SYS_BUG_LIAISON_USER_IDS.includes(Number(uid));
   }
-  //   粗筛中间件（挂 bug 指派/换人端点前）：放行 admin 或白名单对接人；进 handler 后由
-  //   sysIssueTransition [3] 的 roleGuard='admin_or_bug_liaison'（assign）/ 端点 handler type='bug' 精判（reassign）
-  //   权威收窄到「仅 bug 单」——对接人不获变更流/config 的指派权（H-2 隔离，§3「不全局化」）。
-  function requireAdminOrBugLiaison(req, res, next) {
-    const role = req.user && req.user.role;
-    if (role === 'admin' || isSysBugLiaison(req.user && req.user.id)) return next();
-    return res.status(403).json({ error: '仅管理员或对接人可操作', code: 'NOT_ADMIN_OR_BUG_LIAISON' });
-  }
+  // ⭐ 角色权限重构 C1：**requireAdminOrBugLiaison 已删除**（codex C1 审 MED）。
+  //   它曾是 bug 指派/换人/成员/通知端点的粗筛中间件（放行 admin ∨ 白名单[7,13]）。
+  //   C1 把这一族端点的粗筛统一换成 requireIntakeLiaison（admin ∨ 受理人[13]·全类型），
+  //   该中间件随之**零路由引用**。保留一个无人调用的授权中间件是风险而非兼容——
+  //   任何新端点误挂它都会让示例发布者[7] 重新拿回本应撤销的写权限，故连同 _internals 导出一并删除。
+  //   ⚠️ SYS_BUG_LIAISON_USER_IDS / isSysBugLiaison **保留**，但语义已收窄为两项**非操作权**用途：
+  //     ① 列表/详情**可见性**（技术负责人示例发布者需看到 bug 单才能接咨询、回评估意见）
+  //     ② path B relay **收件人**白名单（"该单通知发给谁"，与"谁能操作"正交）
+  //   verify-sys-liaison [W] 组据此断言"该中间件已退场"，防日后被重新挂上。
 
   // ── 受理与排期改造 C2（§3 三白名单·按能力拆·三名单独立不共享引用）────────────────────────
   //   ⚠️ 三名单独立（不复用 SYS_BUG_LIAISON_USER_IDS）——按能力拆而非按角色：受理能力(示例对接人) ≠ bug 对接能力(示例发布者+示例对接人)
@@ -229,6 +246,20 @@ module.exports = (deps) => {
   //   SYS_BUG_LIAISON_USER_IDS index.js:212 保持不动）。
   //   ⚠️ 部署前探针（同 SYS_BUG_LIAISON 先例·[[feedback_real_sample_before_deploy]]）：确认生产 users id=13 是示例对接人、
   //     id=7 是示例发布者·均 active 非 viewer（id=7/13 已在 SYS_BUG_LIAISON 产用·属产验事实·探针复核即可）。
+  // ── 角色权限重构 C0：**建单表单**客户端契约版本（codex C0 审 HIGH-1 / 复审 HIGH-1 范围澄清）───────
+  //   语义：客户端显式声明自己知道当前的建单表单契约。C0 把受理门焊死为全类型必经后，
+  //   "不传 intake_required"在旧页面意味着"用户取消了勾选"、在新页面意味着"该开关已不存在"——
+  //   两者请求体逐字相同，只能靠本字段区分（否则旧页面取消勾选会被静默强制进受理门）。
+  //
+  //   ⭐ **适用范围：仅 POST /sys-issues（建单表单）**，刻意不扩展到 derive / reactivate。判据是
+  //     「该端点是否承载了**用户在表单里表达的、可能被静默改义的意图**」：
+  //     · 建单：有——用户勾/不勾「需对接人受理」是明确意图，被强制翻转必须响亮拒绝。
+  //     · derive / reactivate：无——它们是详情页的单一动作按钮，用户只表达"派生"/"重新激活"这个动作本身，
+  //       不表达受理门开关；且结果状态在同一次交互里就回写抽屉与列表（用户立刻看到「待受理」），
+  //       是**可见的行为升级**而非静默改义。为它们加闸会让契约字段渗透到所有写端点（每个新端点都得记得带），
+  //       却换不到等价收益。该范围划定由 verify-sys-intake-gate [SCOPE] 组固化，防日后被误当作"漏了"。
+  //   ⚠️ 契约再变（如未来放开某类型免受理）必须 +1，并同步前端 + verify 夹具；旧值一律 400 引导刷新。
+  const SYS_INTAKE_CONTRACT_VERSION = 2;   // 1 = C0 之前（受理门可选）；2 = C0 起（全类型必经·参数面封死）
   const SYS_INTAKE_LIAISON_IDS = [13];   // 示例对接人：受理动作（intake_accept/intake_return/request_tech_consult）授权
   const SYS_TECH_LEAD_IDS = [7];         // 示例发布者：技术负责人（被通知·下拉候选·tech_lead_id ∈ 此名单·§6/§8.1）
   //   单一真相点（对齐 isSysBugLiaison 范式）：uid 是否在受理人 / 技术负责人白名单。
@@ -238,11 +269,17 @@ module.exports = (deps) => {
   function isSysTechLead(uid) {
     return Number(uid) > 0 && SYS_TECH_LEAD_IDS.includes(Number(uid));
   }
-  //   粗筛中间件（C3 挂受理动作端点前·镜像 requireAdminOrBugLiaison）：放行 admin ∨ 受理人白名单；
+  //   粗筛中间件：放行 admin ∨ 受理人白名单；
   //   进 handler 后由 sysIssueTransition [3] roleGuard='intake_liaison' 精判（引擎权威·中间件只粗筛）。
   //   ⚠️ resubmit_intake/edit_in_revision 授权是 created_by∨admin（§5.3）**不走本中间件**——它们由端点 handler
   //     加载 issue 后按 created_by 精判（受理人不获重提他人单权·§11 示例对接人 resubmit 他人单→403 回归）。
-  //   ⚠️ C2 阶段本中间件**建而未挂**（受理端点属 C3）——与引擎 intake_liaison 放开（下方 [3]）配套，C3 接线即生效。
+  //   ⭐ 角色权限重构 C1 起**已实弹挂载 11 条路由**（取代已删除的 requireAdminOrBugLiaison）：
+  //     · 受理 3：intake-accept / intake-return / request-tech-consult
+  //     · 协调人族 5：assign / reassign / dev-assignees(POST 加人) / dev-assignees/:id/excuse / …/supersede-excuse
+  //     · 通知 3：notify-developer / notify-creator（C1 三轮审 MED-1 补挂）/ notify-requester
+  //   ⚠️ **DELETE /dev-assignees/:assigneeId 有意不挂**：它的授权是「协调人 ∨ **本人**」（成员可自移除），
+  //     挂上会把自移除一并挡掉；该端点在 handler 内用 isSysCoordinator 精判非本人的情形。
+  //   此前"建而未挂"的阶段性说明已作废。
   function requireIntakeLiaison(req, res, next) {
     const role = req.user && req.user.role;
     if (role === 'admin' || isSysIntakeLiaison(req.user && req.user.id)) return next();
@@ -588,6 +625,13 @@ module.exports = (deps) => {
   //   再 [2] PRAGMA 复查四表 + 关键列（含新锚点），全部就位才置 SYS_SCHEMA_STATE.ready=true。
   //   入参 ddlError：建表 serialize 块收集的首个 DDL 错误。
   async function runSysMigration(ddlError) {
+    // ⚠️ 曾用 `gateTriggersDropped` 标志决定 finally 是否收口，已废弃（codex 五轮审 HIGH-1）：
+    //   它只记录**本次调用**是否走到过 DROP，挡不住"上次进程 DROP 后被强杀 + 本次在 [0b] 之前早退"
+    //   这条跨启动缺口。现在 finally [F] 的触发条件改为「sys_issues 表存在」，与本次是否 DROP 过无关。
+    //
+    // 迁移主体是否成功（[3] 置位）。ready 的最终置位在 finally [F] 末尾——必须等受理门收口跑完，
+    //   否则调用方会在收口事务提交前就认为初始化完成（间歇性 SQLITE_ERROR 的根因）。
+    let migrationBodyOk = false;
     try {
       // 函数开头显式重置 ready=false，状态转移清晰（corrections.js codex 08 L-1）。
       SYS_SCHEMA_STATE.ready = false;
@@ -598,6 +642,17 @@ module.exports = (deps) => {
         logger.error(`[系统迭代 C1] 🚫 ${SYS_SCHEMA_STATE.error} → sys-* 写入口将返 503`);
         return;
       }
+
+      // [0b] ⭐ 角色权限重构 C0：**迁移期先摘掉受理门触发器**（codex 三轮审："历史迁移应在创建触发器之前执行"）。
+      //   必要性：C1 的 intake_required 归一化会把非法值写成 **0**（`CASE WHEN =1 THEN 1 ELSE 0 END`，
+      //   那是受理门可选时代的正确口径），而 C0 触发器要求恒 1 —— 若触发器已在，C1 重跑会被自己拦死，
+      //   整个 readiness 挂掉。首次启动时触发器尚不存在，问题只在"删标记重跑"场景暴露，但那正是迁移设计支持的场景。
+      //   安全性：迁移跑在启动初始化阶段（端点未注册、无并发请求），摘除窗口内不存在业务写入；
+      //   ⚠️ 重建与全表后验统一收在函数末尾的 **finally [F]**（覆盖所有 return 早退与 throw 路径），
+      //     不再依赖"正常路径走到某一行"——见 [F] 的完整说明。
+      //   ⚠️ 本步之后的任何路径（含 return 早退 / throw / 进程被强杀后的下次启动）都由 [F] 兜底重建，
+      //     [F] 不依赖"本次是否 DROP 过"这一标志，只看 sys_issues 表是否存在。
+      for (const n of SYS_INTAKE_GATE_TRIGGER_NAMES) await dbRunAsync(`DROP TRIGGER IF EXISTS ${n}`);
 
       // [1] 表存在性（C0 起 8 表 + C1 起迁移标记表 sys_schema_migrations = 9 表）
       const tables = await new Promise((resolve, reject) => {
@@ -745,7 +800,12 @@ module.exports = (deps) => {
         //   relay_notify_status 先例）——值域由服务层枚举校验 + verify 断言兜底，两路径不变量等效。
         //   NOT NULL DEFAULT 常量可通过 ALTER 回填旧行（intake_required→0 / tech_lead_notify_status→'not_sent'）。
         const INTAKE_SCHEDULE_C1_ISSUE_COLS = [
-          ['intake_required', "INTEGER NOT NULL DEFAULT 0"],   // §8.1：0=无受理/1=启用受理；归一化+verify 保证 ∈{0,1}
+          // ⭐ 角色权限重构 C0（codex C0 审 HIGH-2）：DEFAULT 由 0 改 1——受理门已焊死为全类型必经，
+          //   "新行的默认值"必须与该不变量同向。⚠️ 本改动只对**全新库**生效（alterAddMissingCols 列已存在即跳过，
+          //   已迁移库的 DEFAULT 保持 0 且 SQLite 无法原地改）；已有库由下方 [1a-7] C0 迁移把存量归一为 1、
+          //   再由 readiness 哨兵持续监测矛盾单。三道防线（统一创建函数 / 迁移归一 / 启动哨兵）叠加，
+          //   不为改一个 DEFAULT 去重建 60+ 列的主表（成本与回归风险远高于收益·方案 §7「零 DDL」）。
+          ['intake_required', "INTEGER NOT NULL DEFAULT 1"],   // §8.1：0=无受理/1=启用受理；C0 起恒 1（归一化+verify 保证 ∈{0,1}）
           ['scheduled_start', 'TEXT'],                          // §8.1：admin 定计划开工日（参考字段·仅变更流）
           ['tech_lead_id', 'INTEGER'],                          // §8.1：技术负责人 id（∈ SYS_TECH_LEAD_IDS·服务端校验）
           ['tech_lead_name', 'TEXT'],                           // 服务端派生
@@ -857,6 +917,49 @@ module.exports = (deps) => {
           throw e;   // 抛到外层 catch → SYS_SCHEMA_STATE.error（可观测·不静默吞）·sys 写入口 503
         }
       }
+
+      // [1a-7] ⭐ 角色权限重构 C0（codex C0 审 HIGH-2 收口）：intake_required 存量归一为 1。
+      //   背景：C0 把受理门焊死为全类型必经（三创建入口恒 intake=1），但 C1 迁移把旧行回填成了 0，
+      //   且已迁移库的列 DEFAULT 无法原地改。存量里任何 intake_required=0 的单都是**新模型下的非法态**：
+      //   ① 若其 status 已是受理态（待受理/待修改）→「待受理+ir0」矛盾组合，受理动作被 [3.5] 不变量 409 拒 → 单卡死；
+      //   ② 若其 status 是开发前段（待指派/待处理）→ 该单当初正是"绕过受理门"进来的，语义上应视为"已受理"，
+      //      归一为 1 不改变它的 status（只修正标志位），后续流转不受影响。
+      //   ⚠️ 生产当前零单据（方案 §7），本迁移预期命中 0 行；保留它是为了 ①开发/测试库自愈 ②未来存量非零时的确定性。
+      //   幂等：WHERE intake_required != 1，二跑命中 0 行。原子：单条 UPDATE + 后验 + 标记同一事务。
+      const C0_MIGRATION_KEY = C0_INTAKE_GATE_MIGRATION_KEY;
+      const c0Done = await new Promise((resolve, reject) => {
+        db.get('SELECT migration_key FROM sys_schema_migrations WHERE migration_key = ?', [C0_MIGRATION_KEY],
+          (err, row) => err ? reject(err) : resolve(!!row));
+      });
+      if (!c0Done) {
+        await dbRunAsync('BEGIN IMMEDIATE');
+        try {
+          const normResult = await dbRunAsync(`UPDATE sys_issues SET intake_required = 1 WHERE ${INTAKE_VIOLATION_WHERE}`);
+          if (!normResult || !Number.isInteger(normResult.changes) || normResult.changes < 0) {
+            throw new Error(`C0 迁移归一数不可得（dbRunAsync 未返回合法 changes：${normResult && normResult.changes}）→ 回滚`);
+          }
+          // 后验（同事务·fail-closed）：全表 intake_required 必须恒 1，否则回滚（宁可启动失败也不放矛盾单进生产）。
+          const bad = await new Promise((resolve, reject) => {
+            db.get(`SELECT COUNT(*) AS c FROM sys_issues WHERE ${INTAKE_VIOLATION_WHERE}`,
+              (err, row) => err ? reject(err) : resolve(row ? row.c : -1));
+          });
+          if (bad !== 0) throw new Error(`C0 迁移后验失败：仍有 ${bad} 行 intake_required != 1 → 回滚`);
+          await dbRunAsync(`INSERT INTO sys_schema_migrations (migration_key, applied_at) VALUES (?, datetime('now','localtime'))`,
+            [C0_MIGRATION_KEY]);
+          await dbRunAsync('COMMIT');
+          logger.info(`[系统迭代迁移] ✅ C0 受理门焊死：intake_required 存量归一 ${normResult.changes} 行 → 全表恒 1（标记 ${C0_MIGRATION_KEY} 已落）`);
+        } catch (e) {
+          try { await dbRunAsync('ROLLBACK'); } catch (_) { /* best-effort */ }
+          throw e;
+        }
+      }
+
+      // [1a-7b/1a-8 已移除] ⭐ 角色权限重构 C0（codex 四轮审 HIGH-1/HIGH-2）：
+      //   原先在此处"创建受理门触发器"+"启动哨兵只告警"，两者都有生命周期缺陷——
+      //   前者不在 finally 里（迁移任一早退/抛错都会让触发器长期缺失），后者只记日志不阻断
+      //   （"触发器在、存量却非法、readiness=true"这种最坏组合仍可发生）。
+      //   现统一收进本函数末尾的 **finally [F]**：无条件全表归一 → 后验 → 重建触发器 → 校验 sqlite_master，
+      //   任一不达标即阻断 readiness（保留原始迁移错误作根因）。此处不再有触发器相关逻辑。
 
       // [1b] release_type **族别**回填（D-A：bug vs 非bug，用户 2026-07-03 拍板）：按成员族别回填非空批次——
       //   含 bug 成员 → 'bug'，否则（feature/improvement）→ 'change'；空批次留 NULL（② 建批次/加单时写值）。
@@ -971,14 +1074,125 @@ module.exports = (deps) => {
         }
       }
 
-      // [3] 全部就位 → 置 ready
+      // [3] 迁移主体全部就位 → 记下"可以 ready"，但**先不置位**。
+      //   ⚠️ ready 必须等 finally [F] 的受理门收口跑完才置（见 [F] 末尾）：
+      //     finally 在 try 之后执行，若在这里就置 ready=true，调用方（如 verify 的 waitReady、
+      //     server.js 启动流程）会在 [F] 的事务尚未提交时就认为初始化完成 —— 随后关闭连接/发起写入，
+      //     与正在执行的收口事务相撞，表现为**间歇性**的 SQLITE_ERROR（真实踩坑：
+      //     verify-sys-multidev-reset 连跑 5 次 OK/FAIL/FAIL/OK/FAIL）。
       SYS_SCHEMA_STATE.error = null;
-      SYS_SCHEMA_STATE.ready = true;
-      logger.info(`[系统迭代 C1] ✅ sys ${SYS_REQUIRED_TABLES.length}表就绪（${tables.length}/${SYS_REQUIRED_TABLES.length} 表 + 关键列锚点齐全），写入口放行。`);
+      migrationBodyOk = true;
     } catch (e) {
       SYS_SCHEMA_STATE.ready = false;
       SYS_SCHEMA_STATE.error = `迁移异常：${e && e.message}`;
       logger.error(`[系统迭代 C1] 🚫 ${SYS_SCHEMA_STATE.error}`);
+    } finally {
+      // ── [F] ⭐ 角色权限重构 C0：受理门约束收口（**已按 codex 九轮审的收敛判断大幅简化**）────────────
+      //
+      //   职责边界（这是本段唯一要记住的事）：
+      //     **[F] 只负责"恢复约束"与"如实报告"，不负责"修数据"。**
+      //     数据归一只属于 [1a-7] 那个带迁移标记的正式迁移事务；[F] 发现非法行一律阻断 readiness、留证据。
+      //
+      //   为什么这么切（第 2~8 轮的教训）：早期版本让 [F] 也承担归一，就必须回答"这批非法行是首次升级的存量、
+      //   还是 C0 生效后被绕过的证据"，于是长出 markerTable 探测 / trustedFirstUpgrade / polluted 分类 /
+      //   降级恢复的降级 等一层层分支，而每层分支自身又需要失效恢复——连续 5 轮的 HIGH 都出在这些**恢复层的恢复层**上。
+      //   本项目的真实风险面（生产零单据 / 内网 / 单机 PM2 fork 单实例 / 无外部进程写库）
+      //   ⚠️ 此处原写「单 admin」作为论据之一，2026-07-27 核实生产实为 **6 个 active admin**，该词已删。
+      //     本条论据的真实支点是**单实例 fork + 无外部写库进程**（迁移期 DROP 触发器的前提），与 admin 人数无关，故结论不变。
+      //   根本撑不起这套复杂度。砍掉"自动修数据"这一职责后，猜测成因的整棵分支树随之消失。
+      //
+      //   为什么仍放在 finally：[0b] 在迁移开始处 DROP 了触发器，而迁移体内有多处 return 早退与 throw；
+      //   重建若只写在正常路径上，任一异常都会让数据库长期无约束（比迁移失败本身更危险）。
+      //   触发条件是「sys_issues 表存在」而非"本次是否 DROP 过"——后者挡不住"上次进程 DROP 后被强杀"的跨启动缺口。
+      //
+      //   为什么 DROP 后重建而非 IF NOT EXISTS：名称存在 ≠ 定义正确；同名漂移的旧触发器会被静默保留，
+      //   造成"名称齐全 → 判定已恢复 → readiness 放行"而实际约束无效。
+      const appendErr = (msg) => {
+        SYS_SCHEMA_STATE.ready = false;
+        SYS_SCHEMA_STATE.error = `${SYS_SCHEMA_STATE.error ? SYS_SCHEMA_STATE.error + ' | ' : ''}${msg}`;
+        logger.error(`[系统迭代] 🚫 ${SYS_SCHEMA_STATE.error} → sys-* 写入口将返 503`);
+      };
+      try {
+        const tableRow = await new Promise((resolve, reject) => {
+          db.get(`SELECT name FROM sqlite_master WHERE type='table' AND name='sys_issues'`,
+            (err, row) => err ? reject(err) : resolve(row));
+        });
+        if (tableRow) {
+          let txnOpen = false;
+          try {
+            await dbRunAsync('BEGIN IMMEDIATE');
+            txnOpen = true;
+
+            // intake_required 列可能尚未 ALTER 到位（补列步骤失败/早退）——无该列则约束无从建立
+            const hasIrCol = (await new Promise((resolve, reject) => {
+              db.all(`PRAGMA table_info(sys_issues)`, (err, rows) => err ? reject(err) : resolve(rows || []));
+            })).some(c => c.name === 'intake_required');
+
+            if (!hasIrCol) {
+              await dbRunAsync('ROLLBACK'); txnOpen = false;
+              appendErr('C0 受理门约束无法建立：sys_issues 缺少 intake_required 列（补列步骤未完成）');
+            } else {
+              // 重建约束（无条件·与数据是否干净无关）
+              for (const sql of SYS_INTAKE_GATE_DROP_SQL) await dbRunAsync(sql);
+              const ddlErrs = [];
+              for (const sql of SYS_INTAKE_GATE_TRIGGERS_SQL) {
+                try { await dbRunAsync(sql); } catch (e) { ddlErrs.push(e && e.message); }
+              }
+              const present = await new Promise((resolve, reject) => {
+                db.all(`SELECT name FROM sqlite_master WHERE type='trigger' AND name IN (${SYS_INTAKE_GATE_TRIGGER_NAMES.map(() => '?').join(',')})`,
+                  SYS_INTAKE_GATE_TRIGGER_NAMES, (err, rows) => err ? reject(err) : resolve((rows || []).map(r => r.name)));
+              });
+              const missingTrg = SYS_INTAKE_GATE_TRIGGER_NAMES.filter(n => !present.includes(n));
+
+              if (missingTrg.length || ddlErrs.length) {
+                await dbRunAsync('ROLLBACK'); txnOpen = false;
+                const why = [];
+                if (missingTrg.length) why.push(`触发器缺失：${missingTrg.join(',')}`);
+                if (ddlErrs.length) why.push(`DDL 报错：${ddlErrs.join(' / ')}`);
+                appendErr(`C0 受理门约束未就位：${why.join('；')} —— 请人工处理后重启（数据未做任何修改）`);
+              } else {
+                await dbRunAsync('COMMIT'); txnOpen = false;
+
+                // 约束已就位，再**只读**核对一次数据；有非法行只阻断 + 留证据，**不修**（见职责边界）。
+                //   ⚠️ 单独 try/catch（codex 十轮审 LOW）：这段是"提交之后的只读后验"，与上面的恢复事务
+                //     是两件事。若混在外层 catch 里，查询失败会被报成"恢复事务失败"，把运维排查引到错误方向。
+                try {
+                  const badRows = await new Promise((resolve, reject) => {
+                    db.all(`SELECT id, type, status, intake_required FROM sys_issues WHERE ${INTAKE_VIOLATION_WHERE} LIMIT 20`,
+                      (err, rows) => err ? reject(err) : resolve(rows || []));
+                  });
+                  if (badRows.length) {
+                    const cntRow = await new Promise((resolve, reject) => {
+                      db.get(`SELECT COUNT(*) AS c FROM sys_issues WHERE ${INTAKE_VIOLATION_WHERE}`,
+                        (err, row) => err ? reject(err) : resolve(row));
+                    });
+                    const sample = badRows.map(r => `#${r.id}(${r.type}/${r.status}/ir=${r.intake_required})`).join(' ');
+                    appendErr(`C0 受理门存在非法数据：${cntRow ? cntRow.c : badRows.length} 行 intake_required != 1（样本≤20：${sample}）。` +
+                      `**触发器已就位**，新的违规写入会被拒；已存在的这些行未做任何自动修改（自动改成 1 会把"绕过受理门"洗成表面合法，并抹掉判别信号）。` +
+                      `处理：node scripts/fix-sys-intake-gate-violation.js --db <path> 先 dry-run 看清单，逐单裁决后重启。`);
+                  }
+                } catch (verifyErr) {
+                  appendErr(`C0 受理门数据后验查询失败（约束已恢复，但无法确认存量是否合规）：${verifyErr && verifyErr.message}`);
+                }
+              }
+            }
+          } catch (txErr) {
+            if (txnOpen) { try { await dbRunAsync('ROLLBACK'); } catch (_) { /* best-effort */ } }
+            appendErr(`C0 受理门恢复事务失败：${txErr && txErr.message}`);
+          }
+        }
+      } catch (probeErr) {
+        appendErr(`C0 受理门收口探测失败：${probeErr && probeErr.message}`);
+      }
+
+      // ── [F-end] ready 的**唯一置位点**：迁移主体 OK ∧ 收口未报错，才放行写入口。
+      //   放在最末尾是关键：若在 try 里就置 ready=true，调用方（server.js 启动流程、verify 的 waitReady）
+      //   会在收口事务尚未提交时认为初始化完成，随后关连接/发起写入撞上该事务，表现为间歇性 SQLITE_ERROR
+      //   （实测 verify-sys-multidev-reset 连跑 5 次 OK/FAIL/FAIL/OK/FAIL，修正后连跑 6 次全 OK）。
+      if (migrationBodyOk && !SYS_SCHEMA_STATE.error) {
+        SYS_SCHEMA_STATE.ready = true;
+        logger.info(`[系统迭代 C1] ✅ sys ${SYS_REQUIRED_TABLES.length}表就绪 + C0 受理门约束就位，写入口放行。`);
+      }
     }
   }
 
@@ -1244,10 +1458,18 @@ module.exports = (deps) => {
     return family;
   }
 
-  // 协调人判定（附录B：协调人=对接人∪admin）——与现网 bug 对接人白名单同源（isSysBugLiaison + type='bug' 精判，
-  //   对齐既有 reassign/assign 端点"对接人仅可操作 bug 单"惯例，§3「不全局化」）。
+  // 协调人判定（附录B：协调人=对接人∪admin）。
+  //   ⭐ 角色权限重构 C1（方案 v1.5 §4-C1）：由「admin ∨ (bug 对接人[7,13] 且 type='bug')」
+  //     改为「admin ∨ 受理人[13]」——**去掉 type 精判，全类型统一**。
+  //     · 示例发布者[7] 不再是协调人：他转为纯技术负责人（只在被咨询时回一条评估留言），
+  //       指派/改派/开发成员管理/附件操作全部收归受理人示例对接人[13]。
+  //     · 去 type 精判是因为受理人本就该全类型主导（v1.5 §3 角色模型），原先的
+  //       "对接人仅可操作 bug 单"隔离是 bug 流白名单时代的产物。
+  //   ⚠️ issueType 参数保留但不再参与判定：6 类消费点（指派族 3 + 附件族 3）的调用签名不动，
+  //     避免为一次语义收敛去改 12 处调用点；下一次若确认无人需要该参数，由 C5 末次审一并清理。
   function isSysCoordinator(actor, issueType) {
-    return actor.role === 'admin' || (isSysBugLiaison(actor.id) && issueType === 'bug');
+    void issueType;
+    return actor.role === 'admin' || isSysIntakeLiaison(actor.id);
   }
 
   // C2 交付物⑥：写一条 sys_issue_dev_events 行（方案 §3 events 规格）。必须在已开启的事务内调用。
@@ -1508,17 +1730,20 @@ module.exports = (deps) => {
       if (typeof opts.resolveToStatusInTxn === 'function') {
         toStatus = await opts.resolveToStatusInTxn(row);
       } else if (transition.dynamicTarget === 'initial_status') {
-        // 受理排期改造 §9：dynamicTarget='initial_status' 的具名边（reactivate）落态 = resolveInitialStatus(type, 当前 intake_required)。
-        //   C1（本 commit）起 intake_required 列已存在（迁移 [1a-6] 补列 + 归一化 → 库中恒为 0/1 整数）。
-        //   ⚠️ 收严（C1·codex131-M3·方案 §8.3 断言5「严格 0/1·非法值拒绝」）：已移除 C0 兼容 undefined/'1' 的宽松归一化。
-        //     只接受 0/1（sqlite3 INTEGER 列返 JS number）及驱动等价字符串 '0'/'1'；其余（含 NULL/undefined）视为数据不变量破坏 → 抛错阻断。
-        //     ——迁移后验已保证 intake_required∈{0,1}，此处运行期读到非 0/1 即库被外部污染或迁移未生效，宁可 fail 不静默归 0。
+        // 受理排期改造 §9：dynamicTarget='initial_status' 的具名边（引擎内**仅 reactivate** 走此分支——
+        //   create 不经本函数[端点直接 INSERT]、derive 用 createdIssueDynamicTarget、change_intake_mode 是自持端点）。
+        //   ⭐ 角色权限重构 C0（方案 v1.5 §4-C0）：落态**不再依赖单据当前 intake_required**，改走创建路径唯一入口
+        //     恒落「待受理」——原实现读 row.intake_required 分两支，是 v1.4 §2.2-B 认定的"reactivate 落态绕过受理门"缺口
+        //     （已拒绝单若 intake_required=0，重新激活会直落待指派/待处理，跳过受理）。
+        //   ⚠️ 落态恒定不等于放弃脏数据探测：下方仍保留 0/1 严格归一化校验（C1·codex131-M3 既有防线），
+        //     读到非 0/1 照旧 500 阻断——库被外部污染/迁移未生效时仍要响亮失败，只是**校验结果不再参与落态决策**。
+        //   ⚠️ 落态置「待受理」的同时必须把 intake_required 一并写 1（见下方 switch 的 reactivate 分支 setFrags），
+        //     否则产出「待受理 + intake_required=0」矛盾组合 → 后续 intake_accept 被 [3.5] 不变量拒 409，单卡死。
         const rawIntake = row.intake_required;
-        let normalizedIntake;
-        if (rawIntake === 1 || rawIntake === '1') normalizedIntake = 1;
-        else if (rawIntake === 0 || rawIntake === '0') normalizedIntake = 0;
-        else throw new SysTransitionError(500, 'INTAKE_REQUIRED_INVARIANT', `intake_required 数据不变量破坏：期望 0/1，实际=${rawIntake}（issue ${row.id}）`);
-        toStatus = T.resolveInitialStatus(type, normalizedIntake);
+        if (rawIntake !== 1 && rawIntake !== '1' && rawIntake !== 0 && rawIntake !== '0') {
+          throw new SysTransitionError(500, 'INTAKE_REQUIRED_INVARIANT', `intake_required 数据不变量破坏：期望 0/1，实际=${rawIntake}（issue ${row.id}）`);
+        }
+        toStatus = T.resolveSysInitialStatusForCreate(type);
       } else {
         toStatus = T.resolveToStatus(transition, fromStatus);
       }
@@ -1566,15 +1791,16 @@ module.exports = (deps) => {
         const isAssignee = Number(row.assigned_to) === Number(actor.id) && Number(actor.id) > 0;
         let permitted = true;
         if (transition.roleGuard === 'admin' && !isAdmin) permitted = false;
-        // bug 流对接人白名单（Commit ④，§3）：roleGuard='admin_or_bug_liaison' = admin 或白名单对接人（示例发布者/示例对接人）。
-        //   ⚠️ 该 roleGuard **仅挂在 bug transition**（transitions.js assign，变更流 assign 仍 'admin'），故此处放行
-        //     白名单对接人时 **type 精判隐含**——transition 由 findTransition(row.type,...) 查出，能命中 'admin_or_bug_liaison'
-        //     即 row.type='bug'，对接人不获变更流/config 指派权（§3「不全局化」，H-2 隔离）。
-        if (transition.roleGuard === 'admin_or_bug_liaison' && !(isAdmin || isSysBugLiaison(actor.id))) permitted = false;
-        // 受理排期改造 §5.3/§10：roleGuard='intake_liaison'（受理门动作 intake_accept/intake_return/request_tech_consult）=
-        //   admin ∨ SYS_INTAKE_LIAISON_IDS 白名单（示例对接人 id13）。**C2（本 commit）放开**：从 C0-C1 的 fail-closed 只认 admin
-        //   → isAdmin || isSysIntakeLiaison(actor.id)。⚠️ 受理动作端点属 C3——C2 阶段无端点触发本 transition，本判定
-        //   与 requireIntakeLiaison 中间件同为「建而未接线」·C3 端点接线即整链生效（verify 单元级直调 sysIssueTransition 验此判定）。
+        // ⭐ 角色权限重构 C1：roleGuard='admin_or_bug_liaison' 分支**已删除**。
+        //   原语义 = admin ∨ bug 对接人白名单[7,13]，且靠"仅挂 bug transition"实现 type 隔离。
+        //   C1 后四条曾用它的 transition（bug/变更流 × assign/reassign）统一改为 'intake_liaison'
+        //   （admin ∨ 受理人[13]·**全类型**），示例发布者[7] 由此失去指派权、转为纯技术负责人。
+        //   该字符串已从 KNOWN_ROLE_GUARDS 移除：若哪里还残留，引擎会以 500 UNKNOWN_ROLE_GUARD fail-closed，
+        //   verify-sys-meta 的"非空 roleGuard ∈ 已知集"断言也会先一步红灯。
+        // roleGuard='intake_liaison' = admin ∨ SYS_INTAKE_LIAISON_IDS 白名单（示例对接人 id13）。
+        //   ⭐ 覆盖面（角色权限重构 C1 后）：受理门三动作（intake_accept/intake_return/request_tech_consult）
+        //   **＋ 指派族 assign/reassign 的 bug 与变更流共四条**——后者由 C1 从 'admin_or_bug_liaison'/'admin' 收敛而来，
+        //   是「受理人全类型主导」的引擎侧落点。全部已接线（verify-sys-role-perm-c1 走真实 HTTP 端点验整链）。
         if (transition.roleGuard === 'intake_liaison' && !(isAdmin || isSysIntakeLiaison(actor.id))) permitted = false;
         // 受理排期改造 §5.3（codex131-H1 修）：roleGuard='creator_or_admin'（resubmit_intake/edit_in_revision）=
         //   建单人 ∨ admin。⚠️ 用事务内**锁定后的 row.created_by** 校验（BEGIN IMMEDIATE 后读的 row·非端点事务外预检·防 TOCTOU）——
@@ -1652,7 +1878,23 @@ module.exports = (deps) => {
         // ── 受理门动作（受理排期改造 §5·C3 接线）──────────────────────
         //   intake_accept（待受理→待指派/待处理）：无 payload、无额外 SET，走通用 UPDATE（default 语义），
         //     不列 case（summary 恒 null·timeline actionCode='intake_accept' 已由常量给）。故此处只处理需 reason 的 intake_return。
-        //   resubmit_intake（待修改→待受理）：同 intake_accept，无 payload、无额外 SET，不列 case。
+        //   resubmit_intake（待修改→待受理）：⭐ 角色权限重构 C0 起**改为有额外 SET**（见下方 case·原为"无额外 SET 不列 case"）。
+        case 'resubmit_intake': {
+          // ⭐ 角色权限重构 C0（方案 v1.5 §4-C0）：重新提交 = **开启新一轮受理**，须把上一轮咨询痕迹整组清干净。
+          //   ① intake_required=1：方案要求的"原子恢复"。C0 后此处结构上恒已为 1（[3.5] 受理门不变量先行拒了 ≠1 的单），
+          //      属**防御性冗余**——保留是因为它把"重提必回受理门"写成了本地不变量，不依赖上游检查的存续。
+          //   ② tech_lead_* 九列整组归零：**与 request-tech-consult(:3991-3997) 同一套重置语义**，不是只清 id/name。
+          //      ⚠️ 若只清 id/name 会留两个真缺陷（[[feedback_write_read_same_semantic]] 写读同源）：
+          //        · 展示面矛盾：tech_lead_id=NULL 却 notify_status='sent'/notified_at 有值 =「无负责人却有通知记录」
+          //        · **跨轮次污染（真 bug）**：recordSysTechLeadNotify(:6310-6314) 的版本围栏 WHERE 是
+          //          `tech_lead_notify_request_event_id=?`。上一轮的在途通知回写只认这个 event_id——不清它，
+          //          回写会命中**新一轮**的行，把已归零的投递态改成 sent/failed（而负责人已被清空）。
+          //      归零后单回到"从未咨询过"的干净态，与 §8.3 不变量（not_sent ⟹ sent_by/read_at 空）自洽。
+          //   ③ relay_* 七列同批清（codex C0 审 MED-3）：见 SYS_CLEAR_RELAY_FIELDS_SQL 处的语义定性。
+          //   ⚠️ 三组字段走同一常量 SYS_BACK_TO_INTAKE_GATE_SQL，与 reactivate 逐字一致（防两处清单漂移）。
+          setFrags.push(...SYS_BACK_TO_INTAKE_GATE_SQL);
+          break;
+        }
         case 'intake_return': {
           // 受理退改（§5.1②·原因必填）：待受理→待修改，reason 落 timeline.summary（对齐 return/reopen 的 reason→summary 范式）。
           const reason = (typeof payload.reason === 'string' ? payload.reason.trim() : '');
@@ -1709,6 +1951,16 @@ module.exports = (deps) => {
           const reason = (typeof payload.reason === 'string' ? payload.reason.trim() : '');
           if (!reason) throw new SysTransitionError(400, 'REASON_REQUIRED', '请填写原因');
           summary = reason;
+          // ⭐ 角色权限重构 C0（方案 v1.5 §4-C0）：reactivate 回受理门——落态已恒「待受理」（见上方 [动态目标解析]），
+          //   此处同事务把 intake_required 一并置 1，两者必须原子（同一条 UPDATE 的 SET 列表）；否则会留下
+          //   「待受理 + intake_required=0」矛盾单，被 [3.5] 受理门不变量拒 409 而永久卡死（已拒绝单的 ir 可能是
+          //   0——历史单或旧 derive 产出）。置 1 是把脏态修正回不变量，不是覆盖用户意图。
+          //   ⚠️ 只对 reactivate 生效：本块与 issue_reject 共用（→已拒绝·不进受理门），故按 action 精判，
+          //     **不能**另写一个 `case 'reactivate'`——JS switch 重复 case 标签只有首个可达，后写的是死代码
+          //     （本 commit 首版正是这么写的，被 verify-sys-intake-gate [C3] 的 ir=0 脏单用例抓出）。
+          //   ⚠️ 同时清上一轮咨询/转派痕迹（codex C0 审 MED-3）：已拒绝单可能带着上一轮的 tech_lead_*（受理期
+          //     发起过咨询后被拒）与 relay_*（历史 path B 建单），回受理门即新一轮，旧轮次状态不跨轮继承。
+          if (action === 'reactivate') setFrags.push(...SYS_BACK_TO_INTAKE_GATE_SQL);
           break;
         }
         case 'void': {
@@ -1860,21 +2112,39 @@ module.exports = (deps) => {
       // deadline 校验（codex 14 M-2）
       const dl = normalizeDeadline(b.deadline);
       if (!dl.ok) return res.status(400).json({ error: '预期完成日期格式非法（应为 YYYY-MM-DD 真实日期）', code: 'INVALID_DEADLINE' });
-      // 受理排期改造 §47/§9（C10 末次审 #1 收口·codex149）：对接人受理门入口——admin 建单可勾选「需对接人受理」→
-      //   intake_required=1（落态「待受理」·由对接人受理通过再进开发）；默认 0（无受理分支：feature/improvement→待指派 / bug→待处理）。
-      //   严格 0/1 归一化（同 needs_feasibility 范式·拒其它值·不依赖 JS 真值转换）。intake_required 属服务端语义字段·不进普通字段
-      //   白名单（§174）·仅此端点受控解析（建单本就 requireAdmin·天然 admin 决定）·INSERT 显式落库（不再靠列 DEFAULT）。
-      let intakeRequired = 0;
-      const rawIntake = b.intake_required;
-      // 收严（C10 收口审 MED·codex149-B）：仅字段缺失(undefined) 作默认 0；显式值只认 0/'0'/false（关）与 1/'1'/true（开），
-      //   null/空串/空白/其它一律 400（不静默落 0）——契约「严格 0/1」名实一致·防格式错误请求静默绕过受理门。
-      //   （区别于 needs_feasibility 的宽松范式：intake_required 是受理门总开关·更该严·不沿用宽松 FALSY 白名单。）
-      if (rawIntake === undefined || rawIntake === 0 || rawIntake === '0' || rawIntake === false) intakeRequired = 0;
-      else if (rawIntake === 1 || rawIntake === '1' || rawIntake === true) intakeRequired = 1;
-      else {
-        return res.status(400).json({ error: 'intake_required 仅接受 0/1（布尔），不接受 null/空串等', code: 'INVALID_INTAKE_REQUIRED' });
+      // ── 角色权限重构 C0（方案 v1.5 §4-C0）：受理门焊死 ──────────────────────────────────────
+      //   ⭐ 全类型建单**必经受理**（bug/feature/improvement），intake_required 由服务端恒定为 1，
+      //     落态恒「待受理」——不再由 admin 勾选决定（原「需对接人受理」checkbox 随本 commit 从前端移除）。
+      //   ⚠️ **客户端传 intake_required 一律 400**（不是"忽略后静默恒 1"）：静默忽略会让旧前端/缓存页面
+      //     误以为"我关掉了受理门"而实际开着，失败必须响亮（沿用本模块 INVALID_INTAKE_REQUIRED 失败响亮范式）。
+      //     旧客户端（阶段1 部署后、静态资源未刷新）传 0 时会收到该 400，属预期——§14 阶段1/2 兼容用例覆盖。
+      //   ⚠️ 落态一律走 T.resolveSysInitialStatusForCreate（创建路径唯一入口·不再直调 resolveInitialStatus·
+      //     verify 源码扫描断言锁定），三创建入口（建单/derive/reactivate）同源。
+      //   ⭐⭐ 客户端契约版本闸（codex C0 审 HIGH-1 收口）：**必须放在 intake_required 判断之前**。
+      //     缺口还原：旧页面的提交逻辑是 `if (v.intake_required) body.intake_required = 1`——用户**取消勾选**时
+      //     该字段被整个省略，请求体与新前端逐字相同。若只拒"字段存在"，则旧页面勾选→400（响亮）、
+      //     旧页面取消勾选→201 且被服务端强制置 1（**静默改义**：用户以为关掉了受理门，实际开着）。
+      //     "字段是否出现"无法区分新旧客户端，必须由客户端显式声明契约版本。
+      //   ⚠️ 拒绝文案给可执行动作（强制刷新），而不是只报错——阶段1 部署后旧页面是**预期内**的常见状态（§14）。
+      //   ⚠️ 严格比较不用 Number() 强制转换（codex 复审 LOW-1）：Number(['2'])===2、Number(' 2 ')===2，
+      //     数组/空白包裹的字符串都会被放行，与"客户端显式声明整数版本"的契约不符。只认数字 2 与字符串 '2'。
+      if (b.intake_contract_version !== SYS_INTAKE_CONTRACT_VERSION
+          && b.intake_contract_version !== String(SYS_INTAKE_CONTRACT_VERSION)) {
+        return res.status(400).json({
+          error: '页面版本过旧（受理规则已更新：所有迭代单必经对接人受理）。请按 Ctrl+F5 强制刷新后重新建单',
+          code: 'CLIENT_CONTRACT_OUTDATED',
+          expected_contract_version: SYS_INTAKE_CONTRACT_VERSION,
+        });
       }
-      const initialStatus = T.resolveInitialStatus(type, intakeRequired);
+      //   受理门已固化：intake_required 由服务端恒定为 1，客户端传任何值（含 0/1）都拒——失败响亮不静默。
+      if (b.intake_required !== undefined) {
+        return res.status(400).json({
+          error: '受理门已固化：所有迭代单必经对接人受理，不再接受 intake_required 参数',
+          code: 'INTAKE_REQUIRED_FIXED',
+        });
+      }
+      const intakeRequired = 1;
+      const initialStatus = T.resolveSysInitialStatusForCreate(type);
 
       // needs_feasibility（F2a §4.5 / 开放④建单后锁定，无中途改入口）：仅 feature/improvement 可设 1；
       //   其他 type 传 1 拒绝（防 bug/config 误带评估）。bug 流 Commit ① 起该守卫实弹生效
@@ -1936,8 +2206,12 @@ module.exports = (deps) => {
       // 受理排期改造 §47（C10 末次审 #1·codex149）：受理门与「建单即指派」互斥——intake_required=1（落态「待受理」）时禁 A/B。
       //   否则 path A 会把 finalStatus 拨到开发态（SF.SYS_DEV_STATUSES[type][0]·见下方 rawAssignMode==='A' 分支）跳过受理门，
       //   等于建单直接绕过受理确认（受理门核心洞）。要先受理·受理通过（intake_accept）后再走指派/改派。
+      //   ⭐ 角色权限重构 C0：intakeRequired 已恒 1（见上方焊死段）→ 本守卫对 **所有** path A/B 请求生效，
+      //     bug「建单即指派/建单即通知对接人」两条旧路径由此**结构性关闭**（前端 assign_mode 区同 commit 移除）。
+      //     判据保留写成 `intakeRequired === 1 && ...` 而非直接判 rawAssignMode——保住"受理门开则禁 A/B"这条
+      //     业务不变量的字面表达，日后若 intake 再度可变（不预期）守卫语义不随之失真。
       if (intakeRequired === 1 && rawAssignMode !== 'none') {
-        return res.status(400).json({ error: '勾选「需对接人受理」时不能同时指定开发/对接人，请先受理通过再指派', code: 'INTAKE_WITH_ASSIGN_CONFLICT' });
+        return res.status(400).json({ error: '所有迭代单必经对接人受理，不能在建单时直接指派开发/对接人；请先受理通过再指派', code: 'INTAKE_WITH_ASSIGN_CONFLICT' });
       }
 
       // path B：白名单校验 + 反规范化姓名（单事务内随 INSERT 一并写入，无第二事务）。
@@ -2024,6 +2298,10 @@ module.exports = (deps) => {
         );
         newId = result.lastID;
 
+        // ⚠️ 角色权限重构 C0 起本分支**结构性不可达**：intakeRequired 恒 1 → 上方 INTAKE_WITH_ASSIGN_CONFLICT
+        //   守卫对任意 rawAssignMode !== 'none' 先行 400（方案 v1.5 §4-C0「path A/B 自然拒」）。
+        //   ⚠️ **本 commit 刻意不删这段代码**：C0 的收口手段是"入口守卫拒绝"，删实现属 C5「断旧路」范围；
+        //     两件事分开做，C0 才能保持"只焊死入口、不动开发态写路径"的可回滚性（§14 阶段1 回滚只需还原守卫）。
         if (rawAssignMode === 'A') {
           const memberIds = [primaryDevIdRaw, ...collaborators.map(c => c.id)];
           for (const uid of memberIds) {
@@ -2117,7 +2395,7 @@ module.exports = (deps) => {
   //   ⚠️ 行为差异（去主次的必然结果，非 bug）：请求体 `assigned_to` 只是"首批候选成员之一"，最终谁是
   //   assigned_to（派生代表）由 electRepresentative 决定（本单首次形成 roster=在册最小 user_id，§3.6），
   //   不保证等于请求体传入值——旧模型"客户端指定谁是主开发"的授权语义正是本次要移除的对象（§0）。
-  router.post('/sys-issues/:id/assign', authenticateToken, requireSysSchemaReady, requireAdminOrBugLiaison, async (req, res) => {
+  router.post('/sys-issues/:id/assign', authenticateToken, requireSysSchemaReady, requireIntakeLiaison, async (req, res) => {
     const id = parsePositiveId(req.params.id);
     if (!id) return res.status(400).json({ error: '无效的迭代单 ID', code: 'INVALID_SYS_ISSUE_ID' });
     const devId = parsePositiveId((req.body || {}).assigned_to);
@@ -2214,7 +2492,7 @@ module.exports = (deps) => {
   //   （与 supersede-excuse 顺序相反，§3）；差量 events 按 operation_id 分组（同请求内共享同一 UUID）；
   //   差量落地后跑**一次** W-GATE（VERIFY 下含新增 pending→转 DEV，仅移除且剩余全完成→保持 VERIFY，矩阵§4.3）。
   //   是否主开发（is_primary）不再由请求方指定，选举全权交给 electRepresentative（§3.6）。
-  router.post('/sys-issues/:id/reassign', authenticateToken, requireSysSchemaReady, requireAdminOrBugLiaison, async (req, res) => {
+  router.post('/sys-issues/:id/reassign', authenticateToken, requireSysSchemaReady, requireIntakeLiaison, async (req, res) => {
     const id = parsePositiveId(req.params.id);
     if (!id) return res.status(400).json({ error: '无效的迭代单 ID', code: 'INVALID_SYS_ISSUE_ID' });
     const reason = (typeof (req.body || {}).reason === 'string' ? req.body.reason.trim() : '');
@@ -2367,7 +2645,7 @@ module.exports = (deps) => {
   // ============================================================
 
   // ── POST /sys-issues/:id/dev-assignees：加人/复活（协调人）──────────
-  router.post('/sys-issues/:id/dev-assignees', authenticateToken, requireSysSchemaReady, requireAdminOrBugLiaison, async (req, res) => {
+  router.post('/sys-issues/:id/dev-assignees', authenticateToken, requireSysSchemaReady, requireIntakeLiaison, async (req, res) => {
     const id = parsePositiveId(req.params.id);
     if (!id) return res.status(400).json({ error: '无效的迭代单 ID', code: 'INVALID_SYS_ISSUE_ID' });
     const rawIds = (req.body || {}).user_ids;
@@ -2470,7 +2748,7 @@ module.exports = (deps) => {
 
   // ── POST /sys-issues/:id/dev-assignees/:assigneeId/excuse：开脱（协调人；仅 SYS_DEV；目标须 pending）──────────
   //   D11：允许开脱最后一名 pending（全员开脱=协调人显式行为，若因此触发"全员完成"→ W-GATE 天然进待验证）。
-  router.post('/sys-issues/:id/dev-assignees/:assigneeId/excuse', authenticateToken, requireSysSchemaReady, requireAdminOrBugLiaison, async (req, res) => {
+  router.post('/sys-issues/:id/dev-assignees/:assigneeId/excuse', authenticateToken, requireSysSchemaReady, requireIntakeLiaison, async (req, res) => {
     const id = parsePositiveId(req.params.id);
     const assigneeId = parsePositiveId(req.params.assigneeId);
     if (!id || !assigneeId) return res.status(400).json({ error: '无效的参数', code: 'VALIDATION' });
@@ -2513,7 +2791,7 @@ module.exports = (deps) => {
   });
 
   // ── POST /sys-issues/:id/dev-assignees/:assigneeId/supersede-excuse：开脱恢复（协调人；§4.2 八步固定序逐字）──────────
-  router.post('/sys-issues/:id/dev-assignees/:assigneeId/supersede-excuse', authenticateToken, requireSysSchemaReady, requireAdminOrBugLiaison, async (req, res) => {
+  router.post('/sys-issues/:id/dev-assignees/:assigneeId/supersede-excuse', authenticateToken, requireSysSchemaReady, requireIntakeLiaison, async (req, res) => {
     const id = parsePositiveId(req.params.id);
     const assigneeId = parsePositiveId(req.params.assigneeId);
     if (!id || !assigneeId) return res.status(400).json({ error: '无效的参数', code: 'VALIDATION' });
@@ -2961,10 +3239,15 @@ module.exports = (deps) => {
       //   附件是历史参与读权的子集示例非全部）——一并纳入，用 `EXISTS` 子查询覆盖"曾有行"（不筛 removed_at，
       //   在册与历史参与同等可见，与 SSOT 措辞完全对应，不额外区分）。
       const rosterVisibilitySql = `EXISTS (SELECT 1 FROM sys_issue_dev_assignees da WHERE da.issue_id = sys_issues.id AND da.user_id = ?)`;
-      if (!isAdmin) {
-        // ④ bug 对接人白名单：除本人被指派单外，额外可见**全部 bug 单**（type='bug'）——对接人需看到待处理 bug
-        //   才能指派/换人（§3 全局白名单，无每单绑定）。⚠️ 必与详情读端同源（[[feedback_write_read_same_semantic]]，
-        //   下方详情端点同步放行 bug 对接人），否则「列表看不到但能开详情」写读不一致。移出白名单即失去此可见性。
+      // ⭐ 角色权限重构 C1（codex C1 审 HIGH-2）：**受理人[13] 全类型可见**，与 admin 同不加 where 限制。
+      //   必要性：C1 把指派权扩到全类型，若列表仍只放行 bug，示例对接人就会「后端能指派 feature、界面却找不到那张单」
+      //   ——写读不同源造成的功能断裂（[[feedback_write_read_same_semantic]]）。受理人要受理**所有**新单、
+      //   指派**所有**类型，故其可见面与 admin 一致（作废单仍由下方 include_voided 统一过滤，那条仅 admin 生效）。
+      const isIntakeLiaisonUser = isSysIntakeLiaison(uid);
+      if (!isAdmin && !isIntakeLiaisonUser) {
+        // ④ bug 对接人白名单（**可见性语义·非操作权**）：C1 后该名单在写路径上已完全退场，
+        //   这里保留是因为技术负责人示例发布者[7] 仍需看到 bug 单才能接收咨询、回评估意见（C3）。
+        //   ⚠️ 必与详情读端同源，否则「列表看不到但能开详情」写读不一致。
         if (isSysBugLiaison(uid)) {
           where.push(`(assigned_to = ? OR type = 'bug' OR ${rosterVisibilitySql})`);
           params.push(uid, uid);
@@ -3044,8 +3327,11 @@ module.exports = (deps) => {
       const role = req.user.role, uid = Number(req.user.id);
       const isAdmin = role === 'admin';
       const isAssignee = Number(row.assigned_to) === uid && uid > 0;
-      // ④ bug 对接人白名单：与列表读端同源（[[feedback_write_read_same_semantic]]）——白名单对接人可见 bug 单详情
-      //   （type='bug'）。移出白名单即失效；非 bug 单（变更流/config）对接人仍不可见（type 精判）。
+      // ⭐ 角色权限重构 C1（codex C1 审 HIGH-2）：受理人[13] **全类型**可见详情，与列表读端同源。
+      //   理由同列表：C1 的全类型指派权若没有配套的全类型可见性，就会出现"能指派却打不开单"的断裂。
+      const isIntakeLiaisonUser = isSysIntakeLiaison(uid);
+      // ④ bug 对接人白名单（**可见性语义·非操作权**）：C1 后写路径已完全不用该名单；
+      //   保留可见性是为技术负责人示例发布者[7] 能看到 bug 单以接收咨询、回评估意见（C3）。
       const isBugLiaison = isSysBugLiaison(uid) && row.type === 'bug';
       // C-orch 写读同源：被指定上线执行开发（release_assignee_id）可见 bug 单详情（否则够不到「执行上线」按钮）——
       //   与列表读端同源；release orchestration 是 bug 专属，故叠 type='bug' 精判。
@@ -3055,7 +3341,8 @@ module.exports = (deps) => {
       const isRosterMember = uid > 0 && !!(await dbGetAsync(
         `SELECT 1 FROM sys_issue_dev_assignees WHERE issue_id = ? AND user_id = ? LIMIT 1`, [id, uid]
       ));
-      if (!isAdmin && !isAssignee && !isBugLiaison && !isReleaseExecutor && !isRosterMember) {
+      // ⭐ C1：受理人加入放行集（全类型·与列表读端同源）
+      if (!isAdmin && !isIntakeLiaisonUser && !isAssignee && !isBugLiaison && !isReleaseExecutor && !isRosterMember) {
         return res.status(403).json({ error: '无权查看此迭代单', code: 'NOT_AUTHORIZED_TO_VIEW' });
       }
       if (row.status === '已作废' && !isAdmin) {
@@ -3860,81 +4147,25 @@ module.exports = (deps) => {
   //   自持事务（非 sysIssueTransition）：真值表含幂等零写入 / 409 INTAKE_MODE_LOCKED / 后段 409·不适配通用引擎「恒转换」语义。
   //   条件 UPDATE 含 id + type + status + **旧 intake_required**（§5.4 防竞态：并发切换只有一个命中·另一个 changes≠1→409）。
   //   ⚠️ change_intake_mode **不入 T.INTAKE_GATE_ACTIONS**（它是翻转 intake_required 的动作·若要求 intake_required=1 会自锁开受理门路径）。
+  //   ⭐ 角色权限重构 C0（方案 v1.5 §4-C0/§14）：**下线——后端一律拒绝；新页面已隐藏入口，本路由只服务旧缓存页面**。
+  //     受理门已焊死为"全类型必经"（intake_required 恒 1·三创建入口同源），"切换受理模式"这一动作在新模型下
+  //     语义消失（关掉它等于开一条绕过受理的后门，正是本次要堵的缺口）。
+  //     ⚠️ 分两步而非一次删净（§14 发布顺序·codex 三轮审 MED-3 修正表述）：
+  //       · 本 commit：**前端按钮无条件隐藏**（新页面不再出现必然失败的死按钮）+ 后端保留路由返 409；
+  //         保留路由是为了让**已加载的旧页面/缓存客户端**点到时得到明确业务提示，而不是 404/白屏。
+  //       · 阶段2（同发布批次）：连同本路由、前端 siModalChangeIntakeMode 函数、meta 动作条目一并删除。
+  //     ⚠️ 拒绝范式照抄本模块既有端点退场先例（confirm-online-norelease `:4191` / set-release-flag）：
+  //       **409 + 专属 code + 指向新流程的文案**，不用 410（本项目未采用该语义，保持一致）。
+  //     ⚠️ 置于所有参数校验**之前**：下线是端点级结论，与入参是否合法无关；先校验会让调用方收到误导性的 400
+  //       （像是"参数写对了就能用"）。verify-sys-intake-schedule-c4.js 的既有用例随本 commit 同步改期望值。
   router.post('/sys-issues/:id/change-intake-mode', authenticateToken, requireSysSchemaReady, requireAdmin, async (req, res) => {
-    const id = parsePositiveId(req.params.id);
-    if (!id) return res.status(400).json({ error: '无效的迭代单 ID', code: 'INVALID_SYS_ISSUE_ID' });
-    const reason = (typeof (req.body || {}).reason === 'string' ? req.body.reason.trim() : '');
-    if (!reason) return res.status(400).json({ error: '请填写切换原因', code: 'CHANGE_INTAKE_MODE_REASON_REQUIRED' });
-    // 目标受理模式（0/1·显式非 toggle·并发安全·§5.4「目标」列）
-    const rawTarget = (req.body || {}).intake_required;
-    const target = (rawTarget === 1 || rawTarget === '1') ? 1 : ((rawTarget === 0 || rawTarget === '0') ? 0 : null);
-    if (target === null) return res.status(400).json({ error: 'intake_required 目标仅接受 0/1', code: 'INVALID_TARGET_INTAKE_MODE' });
-    const actor = sysActor(req);
-    try {
-      await sysBeginImmediate();
-      try {
-        const row = await dbGetAsync('SELECT id, type, status, intake_required FROM sys_issues WHERE id = ?', [id]);
-        if (!row) { await sysRollback(); return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' }); }
-        assertKnownIssueStatus(row.type, row.status);
-        // §5.4 真值表：前段态集 = 无受理落态(待指派/待处理) + 待受理 + 待修改
-        const noIntakeLanding = T.resolveInitialStatus(row.type, 0);   // 待指派(feature/improvement) / 待处理(bug)
-        const intakeStatus = T.resolveInitialStatus(row.type, 1);      // 待受理
-        const frontStatuses = [noIntakeLanding, intakeStatus, '待修改'];
-        if (!frontStatuses.includes(row.status)) {
-          // 开发中及之后（含终态）→ 409（无论同值·优先级高于幂等·§5.4）
-          await sysRollback();
-          return res.status(409).json({ error: `当前状态「${row.status}」已过受理阶段，不可切换受理模式`, code: 'INTAKE_MODE_LATE' });
-        }
-        // 当前 intake_required 归一（只认 0/1·否则数据不变量破坏）
-        const ri = row.intake_required;
-        const curIr = (ri === 1 || ri === '1') ? 1 : ((ri === 0 || ri === '0') ? 0 : null);
-        if (curIr === null) { await sysRollback(); return res.status(409).json({ error: `intake_required 数据异常（${ri}）`, code: 'INTAKE_REQUIRED_INVARIANT' }); }
-        // 幂等零写入（目标==当前·§5.4 前段态同值不加 timeline）
-        if (target === curIr) { await sysRollback(); return res.json({ id, status: row.status, intake_required: curIr, unchanged: true }); }
-        // 计算目标态（§5.4 真值表）
-        let toStatus;
-        if (target === 1) {
-          // 开受理门（cur=0）：仅无受理落态(待指派/待处理) 可开·脏数据(待受理/待修改+cur0)拒
-          if (row.status === noIntakeLanding) toStatus = intakeStatus;
-          else { await sysRollback(); return res.status(409).json({ error: `「${row.status}」态不可开启受理模式`, code: 'INTAKE_MODE_INVALID' }); }
-        } else {
-          // 关受理门（cur=1·target=0）：受理态(待受理/待修改)→无受理落态·已过受理门(无受理落态+cur1)→ LOCKED
-          if (row.status === intakeStatus || row.status === '待修改') toStatus = noIntakeLanding;
-          else { await sysRollback(); return res.status(409).json({ error: '该单已过受理门，不可关闭受理模式', code: 'INTAKE_MODE_LOCKED' }); }
-        }
-        // 守卫（不变量7 backstop·change_intake_mode 只在前段态间移动·不进 DEV 族·roster 无关传 0）
-        assertMainStatusTransition({
-          routeKind: 'ADMIN_TRANSITION', action: 'change_intake_mode', actionKind: null, issueType: row.type,
-          before: row.status, after: toStatus, rosterActiveCount: 0, rosterAllComplete: false,
-        });
-        // 原子 UPDATE：status + intake_required 同事务·条件含 id + type + 旧 status + 旧 intake_required（§5.4·CAS 原子性守卫）。
-        //   ⚠️ 诚实说明（codex C4 MED-1）：sysBeginImmediate 模块级 mutex 已串行化所有 sys 写事务·SELECT 在事务内→读到即最新，
-        //     故 changes≠1 分支在 mutex 下实际不可达（防御性保留·兜 mutex 万一移除）；**不承诺「并发第二个请求得 409」**——
-        //     串行化下第二个请求读到新状态后按真值表重判（同值→unchanged·反向→再切换成功）。真「拒绝基于旧页面状态的请求」
-        //     需客户端提交 expected_status/expected_intake_required 做 CAS（单 admin 内网低频·YAGNI·未做）。
-        const upd = await dbRunAsync(
-          `UPDATE sys_issues SET status = ?, intake_required = ?, updated_at = datetime('now','localtime')
-            WHERE id = ? AND type = ? AND status = ? AND intake_required = ?`,
-          [toStatus, target, id, row.type, row.status, curIr]);
-        if (!upd || upd.changes !== 1) { await sysRollback(); return res.status(409).json({ error: '迭代单状态已变更，请刷新重试', code: 'CONCURRENT_STATE_CHANGE' }); }
-        await dbRunAsync(
-          `INSERT INTO sys_issue_timeline (issue_id, event_type, from_status, to_status, summary, action_code, operator_id, operator_name)
-           VALUES (?, 'status_change', ?, ?, ?, 'change_intake_mode', ?, ?)`,
-          [id, row.status, toStatus, `切换受理模式（${target === 1 ? '开启' : '关闭'}）：${reason}`,
-           Number(actor.id) || null, actor.name || null]);
-        await sysCommit();
-        return res.json({ id, status: toStatus, intake_required: target, action: 'change_intake_mode' });
-      } catch (txErr) {
-        try { await sysRollback(); } catch (_) { /* ignore */ }
-        throw txErr;
-      }
-    } catch (err) {
-      if (err instanceof SysTransitionError) return sendSysTransitionError(res, err);
-      if (err && typeof err.httpStatus === 'number' && typeof err.code === 'string') return res.status(err.httpStatus).json({ error: err.message, code: err.code });   // MainStatusGuardError（业务守卫·安全文案）
-      // codex C4 MED-4：未识别异常不回传 err.message（防泄露 SQLite 内部细节）·日志留全·客户端通用文案+稳定码。
-      logger.error('[系统迭代] 切换受理模式失败:', err && err.stack || (err && err.message));
-      return res.status(500).json({ error: '切换受理模式失败，请稍后重试', code: 'INTERNAL_ERROR' });
-    }
+    return res.status(409).json({
+      error: '受理门已固化：全部迭代单必经对接人受理，「切换受理模式」功能已下线',
+      code: 'INTAKE_MODE_SWITCH_DISABLED',
+    });
+    // ⚠️ 阶段2（同发布批次·§14）：连同本路由一并删除，并移除前端 siModalChangeIntakeMode 入口。
+    //   实现体已在本 commit 删除（codex C0 审 MED-1）——保留不可达代码既拿不到"删一行 return 就回滚"的能力
+    //   （建单/derive/reactivate/前端契约不会跟着回来），又会随表结构演进无声腐化。回滚以整个 commit 为单位。
   });
 
   // ── request_tech_consult：发起技术负责人沟通（受理排期改造 §6·C5）──────────────────────
@@ -4715,8 +4946,13 @@ module.exports = (deps) => {
         if (!T.ALLOWED_STATUSES[type]) { await sysRollback(); return res.status(400).json({ error: `类型暂不支持（当前支持 ${Object.keys(T.ALLOWED_STATUSES).join('/')}）`, code: 'TYPE_NOT_SUPPORTED', allowed: Object.keys(T.ALLOWED_STATUSES) }); }
         if (originIsBug && origin.status !== '已上线') { await sysRollback(); return res.status(409).json({ error: 'bug 类单仅可从「已上线」派生（上线后再出问题才派生新单）', code: 'SYS_DERIVE_ORIGIN_NOT_ONLINE' }); }
         if (originIsBug && !deriveReason) { await sysRollback(); return res.status(400).json({ error: '派生自 bug 的单需填写派生原因', code: 'DERIVE_REASON_REQUIRED' }); }
-        // 受理排期改造 §9：derive 新单默认 intake_required=0（不继承原单·admin 可后续 change_intake_mode 开启）→ resolveInitialStatus(type,0)。
-        const initialStatus = T.resolveInitialStatus(type, 0);
+        // ⭐ 角色权限重构 C0（方案 v1.5 §4-C0/§2.4）：derive 新单同样**必经受理**——落态走创建路径唯一入口（恒「待受理」），
+        //   取代原「新单默认 intake_required=0 → 直落待指派/待处理」（那正是 v1.4 §2.2-A 认定的"derive 绕过受理门"缺口）。
+        //   ⚠️ **必须同时在下方 INSERT 显式落 intake_required=1**：本表列定义为 `INTEGER NOT NULL DEFAULT 0`，
+        //     原 INSERT 未列该字段（靠 DEFAULT 落 0）。若只改落态不补列，新单将是「待受理 + intake_required=0」的
+        //     矛盾组合 → 被 sysIssueTransition 受理门不变量（INTAKE_GATE_ACTIONS·本文件 [3.5]）fail-closed 拒绝，
+        //     派生单永远无法受理（卡死）。建单入口 INSERT 本就显式落该列，derive 此前是唯一漏网点。
+        const initialStatus = T.resolveSysInitialStatusForCreate(type);
         resolvedType = type; resolvedStatus = initialStatus;   // 供事务外 201 响应体
         // M-1 防环：沿 origin 链回溯，链深阈值 + 不成环（新单尚未建，故只回溯原单祖先链，确保有限）
         let cursor = origin.origin_issue_id, depth = 0;
@@ -4731,8 +4967,8 @@ module.exports = (deps) => {
           `INSERT INTO sys_issues
              (type, status, priority, title, description, system_name, module_name, source,
               requester_dept, requester_name, requester_phone, deadline, origin_issue_id, derive_reason,
-              created_by, created_by_name, record_source)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'native')`,
+              created_by, created_by_name, record_source, intake_required)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'native', 1)`,
           [type, initialStatus, priority, title,
            (typeof b.description === 'string' ? b.description.trim() : null),
            systemName, (typeof b.module_name === 'string' ? b.module_name.trim() : null), source,
@@ -5714,7 +5950,10 @@ module.exports = (deps) => {
       //   故先回响应，再**后台**逐单顺序 best-effort 派发（dispatch 内绝不抛 + record 进 mutex 串行化，不阻塞主响应）。
       // ⚠️ codex 审 M-2：此后台派发为**进程内非持久 best-effort**——PM2 重启/进程退出会丢未发完的通知，单据停在
       //   requester_notify_status='not_sent'/'failed'。补偿口径 = C6 前端按 not_sent/failed 筛出提供**手动补发**入口
-      //   （对齐 issue-tracker 既有手动 notify 端点范式）；内网单 admin + 批次量小，不引入持久队列（见 backlog）。
+      //   （对齐 issue-tracker 既有手动 notify 端点范式）；内网 + 批次量小，不引入持久队列（见 backlog）。
+      //   ⚠️ 论据更正（2026-07-27）：原写「内网**单 admin** + 批次量小」，核实生产实为 **6 个 active admin** ——
+      //     "只有一个人会点发布"这个前提不成立，6 人可并发启动多个最多 200 单的后台循环。当前仍不引入持久队列，
+      //     但依据改为「内网低频 + 有手动补发兜底」，并已记入 backlog：若真出现并发批量发布，需加进程级有界队列 + 并发上限。
       res.json({ id, status: '已发布', released: releasedIds, count: r.count });
       (async () => { for (const iid of releasedIds) await dispatchSysNotify(iid, 'notifyReleasedToRequester'); })().catch(() => { /* dispatch 内已 best-effort，此处兜底防 unhandledRejection */ });
     } catch (err) { sendSysTransitionError(res, err); }
@@ -6252,11 +6491,20 @@ module.exports = (deps) => {
       [ok ? 'sent' : 'failed', ok ? messageKey : null, ok ? null : (error || 'other'), phoneSnapshot || null, issueId]);
   }
   // 对接人侧落库（通知改造 C3 G7，relay_* 5 列，与三侧 notify_status 处理同构）。
-  async function recordSysRelayNotify(issueId, ok, messageKey, error) {
-    await sysNotifyWrite(
+  //   ⭐ 角色权限重构 C0（codex 第三轮审 MED-1）：WHERE 补 `relay_notified_user_id=?` 收件人围栏。
+  //     缺口：本函数原先只按 id 更新。C0 让 reactivate/resubmit 会**清空** relay 七列（回受理门=新一轮），
+  //     而"通知已通过前置校验、正在发送"的在途请求随后完成回调时，会把已归零的 relay_notify_status
+  //     重新写成 sent/failed → 出现「无收件人却有发送状态」的跨轮污染。
+  //     （我上一轮判断"C0 后 relay 无写入路径故不可达"是**不完整的**：部署前已存在 relay 目标的历史单、
+  //      以及"校验已过、清理发生在发送与回写之间"的在途请求，都仍可达。）
+  //     修法取 codex 的低成本方案：把**发起发送时的收件人**作为 CAS 条件——清空后旧回调零命中，
+  //     无需新增版本列（与 tech_lead 侧的 request_event_id 围栏同构，只是复用现成列）。
+  async function recordSysRelayNotify(issueId, ok, messageKey, error, relayUserId) {
+    return await sysNotifyWriteRun(
       `UPDATE sys_issues SET relay_notify_status=?, relay_notified_at=datetime('now','localtime'),
-              relay_notify_message_key=?, relay_notify_error=?, relay_read_at=NULL WHERE id=?`,
-      [ok ? 'sent' : 'failed', ok ? messageKey : null, ok ? null : (error || 'other'), issueId]);
+              relay_notify_message_key=?, relay_notify_error=?, relay_read_at=NULL
+         WHERE id=? AND relay_notified_user_id=?`,
+      [ok ? 'sent' : 'failed', ok ? messageKey : null, ok ? null : (error || 'other'), issueId, relayUserId]);
   }
   // 建单人侧落库（通知改造 C3 G8，creator_notify_* 5 列，C1a 已建列·本 commit 起首次接入写路径）。
   async function recordSysCreatorNotify(issueId, ok, messageKey, error) {
@@ -6270,7 +6518,9 @@ module.exports = (deps) => {
   //     只在「当前请求版本仍是 requestEventId」时落库；若期间又 request_tech_consult（换人/同人连发→request_event_id 已变）则本次
   //     首发/重发/异步回写作废（返回 changes=0·调用方据此判过期·不覆盖新版本的投递态）。返回 run 结果供调用方判 changes。
   //   ⚠️ 语义边界（codex C5 MED-4）：这是**版本围栏写回**（护 DB 结果归属·防旧版本投递态污染新版本）·**非 exactly-once 投递**——
-  //     旧版本的外部钉钉消息仍可能实际送达（只是回写被拒）·同一版本的并发重发也都会实际发送。本期单 admin 内网低频**接受 at-least-once/可能重复**
+  //     旧版本的外部钉钉消息仍可能实际送达（只是回写被拒）·同一版本的并发重发也都会实际发送。本期内网低频**接受 at-least-once/可能重复**
+  //     （⚠️ 2026-07-27 论据更正：原写「本期**单 admin** 内网低频」，核实生产实为 **6 个 active admin**，"只有一个人会点重发"不成立；
+  //      结论仍维持接受重复，但依据改为「内网低频 + 重复投递业务可容忍」，不再以操作者唯一为前提）
   //     （方案 §13 本期不做通知代际/幂等锁）；真要恰好一次需 attempt_id/inflight 状态或事务型 outbox（YAGNI·未做）。
   //   §8.3 字段不变量：sent⟹notified_at+message_key+sent_by 非空；failed⟹error+sent_by 非空；read_at 每次新投递重置 NULL。
   //   （not_sent⟹sent_by/read_at 空 由 request_tech_consult 端点重置字段时保证·本函数只落 sent/failed·恒写 sent_by。）
@@ -6398,12 +6648,16 @@ module.exports = (deps) => {
   }
 
   // ============================================================
-  // 三·六、bug 流手动通知端点（④b-1 复刻 correction notify-* 手动范式 + 通知改造 C3 四方扩展，§6 手动链式）
-  //   bug 流通知不自动派发（dispatchSysNotify 对 bug 早返回），改由 admin/白名单/相关方在详情页手动点按钮触发。
-  //   4 类：开发（逐 dev，子表）/ 对接人（仅 admin）/ 建单人（self-guard）/ 业务方（byPhone 快照）。
-  //   权限：dev/relay/requester 走 requireAdminOrBugLiaison 粗筛（部分端点收紧至仅 admin）；
-  //         creator 权限矩阵较宽（admin/白名单/主开发本人），端点内自行判定（见 G8）。
-  //   handler 内一律 type='bug' 精判（变更流无手动端点，仍自动 dispatchSysNotify）。
+  // 三·六、手动通知端点（④b-1 复刻 correction notify-* 手动范式 + 通知改造 C3 四方扩展，§6 手动链式）
+  //   bug 流通知不自动派发（dispatchSysNotify 对 bug 早返回），改由相关方在详情页手动点按钮触发；
+  //   变更流自 C2a 起**同样支持手动通知**（自动派发照旧），两者可发状态白名单不同，见 sysNotifyStatusesFor。
+  //   4 类：开发（逐 dev，子表）/ 对接人（relay·仅 admin·随 C0 关闭 path B 正在退场）/ 建单人（self-guard）/ 业务方（byPhone 快照）。
+  //   ⭐ 权限（角色权限重构 C1 后·全类型统一）：developer / creator / requester 三通道 = **admin ∨ 受理人[13]**，
+  //     对应的**三个**端点均挂 requireIntakeLiaison 粗筛 + handler 内 sysManualNotifyGuard 精判（type 门限 / 状态 / 通道白名单）；
+  //     relay 与 release_executor 两通道 = **仅 admin**（requireAdmin），不随 C1 放开。
+  //     此前的「走 requireAdminOrBugLiaison 粗筛」「creator 含主开发本人」「变更流仅 admin」三条口径均已作废
+  //     （中间件已删除 / H3 删主开发放权 / C1 删变更流特判）。
+  //   ⚠️ 端点不再限 type='bug'：C2a 起变更流亦走手动通知（bug 与变更流的可发状态白名单不同，见 sysNotifyStatusesFor）。
   // ============================================================
 
   // ── [codex31/ultracode ④b-1 复审 + 通知改造 C3 §5.2] 手动通知状态闸门（**后端真闸=权威**；前端按钮硬编码镜像同一状态集=非授权源，改一侧须同步另一侧，对齐本模块 SI_CHAT_STATUSES/白名单前端镜像范式；复刻 issue-tracker STATUS_NOT_NOTIFIABLE 范式 server.js:11321）──
@@ -6442,36 +6696,50 @@ module.exports = (deps) => {
 
   // ── 交互优化 C2a：手动通知统一授权守卫（方案 §3.2 授权表 type×channel）──────────────────────
   //   返回 null=放行；返回 {status, body}=拒绝（handler 原样 res.status().json()）。
-  //   授权表：
-  //     bug：developer/creator/requester = admin∨对接人白名单；relay = 仅 admin。
-  //     feature/improvement：developer/creator/requester = 仅 admin；relay = 永远拒绝（无对接人角色）。
+  //   ⭐ 角色权限重构 C1（用户 2026-07-27 拍板·方案 v1.5 §4-C1③）：**developer/creator/requester 三通道
+  //     全类型统一为 admin ∨ 受理人[13]**，删掉原先"变更流仅 admin"的特判。
+  //     理由：示例对接人既然全类型受理 + 全类型指派，"通知开发/建单人/报障人"是同一条协作动作的延续；
+  //     留着特判会造出「能指派变更流开发、却不能通知他」的割裂。
+  //     示例发布者[7] 同步失去这三个通道（他转纯技术负责人，只回一条评估留言）。
+  //   授权表（C1 后）：
+  //     bug / feature / improvement：developer/creator/requester = admin ∨ 受理人[13]
+  //     relay = 仅 admin（bug）/ 永远拒绝（变更流·无对接人角色）——relay 通道**不随本次放开**，
+  //            因为 C0 已关闭其唯一业务写入路径（path B 建单），该通道正在退场，不给它扩权。
   //     未知 type = 全部拒绝（默认拒绝）。
   //   ⚠️ H3 修正：creator 通道**不含**「主开发本人」——is_primary/assigned_to 禁作授权源（去主次核心）。
   //   注：self-guard（本人不给自己发）与 relay 收件人白名单复核等通道专属细节仍在各 handler 内单独处理，
   //   本守卫只统一「type 门限 + 角色授权」这一层。
+  //   ⚠️ 通道白名单 fail-closed（codex C1 审 HIGH-1）：原实现只特判 relay、其余 channel 一律走"admin∨受理人"分支，
+  //     是**结构性 fail-open**——将来新增通道（或调用方传错字符串）会被静默放行给受理人。
+  //     现改为显式枚举：只有 SYS_MANUAL_NOTIFY_CHANNELS 里的通道才有判定，未知通道一律 400。
+  const SYS_MANUAL_NOTIFY_CHANNELS = new Set(['developer', 'creator', 'requester', 'relay']);
   function sysManualNotifyGuard(issue, channel, actor) {
     const type = issue.type;
     const isAdmin = actor.role === 'admin';
-    const isLiaison = isSysBugLiaison(actor.id);
-    if (type === 'bug') {
-      if (channel === 'relay') {
+    const isIntakeLiaison = isSysIntakeLiaison(actor.id);
+    if (!SYS_MANUAL_NOTIFY_CHANNELS.has(channel)) {
+      return { status: 400, body: { error: '未知通知通道', code: 'MANUAL_NOTIFY_CHANNEL_UNKNOWN' } };
+    }
+    // relay 通道：bug 仅 admin（该通道随 C0 关闭 path B 后正在退场·不给受理人扩权）；变更流本就没有该通道。
+    if (channel === 'relay') {
+      if (type === 'bug') {
         return isAdmin ? null : { status: 403, body: { error: '仅管理员可通知对接人', code: 'NOT_AUTHORIZED_FOR_NOTIFY' } };
       }
-      // developer / creator / requester：admin ∨ 对接人
-      return (isAdmin || isLiaison) ? null : { status: 403, body: { error: '仅管理员/对接人可发送该通知', code: 'NOT_AUTHORIZED_FOR_NOTIFY' } };
-    }
-    if (type === 'feature' || type === 'improvement') {
-      if (channel === 'relay') {
+      if (type === 'feature' || type === 'improvement') {
         return { status: 400, body: { error: '变更流无对接人通知', code: 'MANUAL_NOTIFY_CHANNEL_NA' } };
       }
-      return isAdmin ? null : { status: 403, body: { error: '变更流通知仅管理员可发送', code: 'NOT_AUTHORIZED_FOR_NOTIFY' } };
+      return { status: 400, body: { error: '该类型暂不支持手动通知', code: 'MANUAL_NOTIFY_TYPE_NA' } };
+    }
+    // developer / creator / requester：C1 起**全类型统一** = admin ∨ 受理人[13]
+    if (type === 'bug' || type === 'feature' || type === 'improvement') {
+      return (isAdmin || isIntakeLiaison) ? null : { status: 403, body: { error: '仅管理员/受理人可发送该通知', code: 'NOT_AUTHORIZED_FOR_NOTIFY' } };
     }
     return { status: 400, body: { error: '该类型暂不支持手动通知', code: 'MANUAL_NOTIFY_TYPE_NA' } };   // 未知 type 默认拒绝
   }
 
   //   通知开发（逐 dev，通知改造 C3 G9 改造）：带 body.dev_user_id，定位子表活动行 (issue_id,user_id,removed_at IS NULL)，
   //   状态落子表行（notify_status 等 5 列）——主表 notify_*（dev 侧）自本端点起转只读回溯，只服务变更流自动派发（C1b 已回填）。
-  router.post('/sys-issues/:id/notify-developer', authenticateToken, requireSysSchemaReady, requireAdminOrBugLiaison, async (req, res) => {
+  router.post('/sys-issues/:id/notify-developer', authenticateToken, requireSysSchemaReady, requireIntakeLiaison, async (req, res) => {
     const id = parsePositiveId(req.params.id);
     if (!id) return res.status(400).json({ error: '无效的迭代单 ID', code: 'INVALID_SYS_ISSUE_ID' });
     const devUserId = parsePositiveId((req.body || {}).dev_user_id);
@@ -6479,8 +6747,7 @@ module.exports = (deps) => {
     try {
       const issue = await dbGetAsync('SELECT * FROM sys_issues WHERE id = ?', [id]);
       if (!issue) return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' });
-      // C2a：放开变更流手动通知（授权表 §3.2 developer 通道：bug=admin∨对接人 / 变更流=仅 admin）。
-      //   中间件 requireAdminOrBugLiaison 放行 admin∨白名单，但白名单是 bug 专属——变更流单须在此收紧为仅 admin。
+      // 授权走统一守卫（C1 后 developer 通道 = 全类型 admin ∨ 受理人[13]；守卫另负责 type 门限与未知通道 fail-closed）。
       const devAuthErr = sysManualNotifyGuard(issue, 'developer', sysActor(req));
       if (devAuthErr) return res.status(devAuthErr.status).json(devAuthErr.body);
       const devStatuses = sysNotifyStatusesFor(issue.type, 'developer');
@@ -6530,23 +6797,52 @@ module.exports = (deps) => {
       const baseUrl = await getSafePlatformBaseUrl();
       const { title, md } = buildSysRelayMarkdown(issue, baseUrl);
       const result = await sendIssueDingtalkRaw(relayUser, title, md);
-      await recordSysRelayNotify(id, !!result.ok, result.message_key, result.reason);
+      // ⭐ C0（codex 三轮审 MED-1）：带上**发起发送时**捕获的收件人做 CAS 围栏——若这期间单据被
+      //   reactivate/resubmit 清空了 relay 目标（回受理门=新一轮），本次回写零命中，不污染新轮次。
+      const rec = await recordSysRelayNotify(id, !!result.ok, result.message_key, result.reason, issue.relay_notified_user_id);
+      if (!rec || rec.changes !== 1) {
+        // 回写被围栏拒绝：单据已进入新一轮（relay 目标被清或换人）。不是错误，但要如实告知调用方，
+        //   免得前端按"已发送"渲染——外部钉钉消息可能已实际送达，这一点由 §14 业务接受项承担。
+        //   ⚠️ 不把 'superseded' 塞进 relay_notify_status（codex 四轮审 MED-2）：该字段是**持久化枚举**
+        //     （not_sent/sent/failed），混入临时值会污染前端与后续读取方对枚举的假设。
+        //     改用独立布尔 superseded + persisted=false 表达"本次投递未计入当前轮次"。
+        logger.warn(`[系统迭代] notify-relay 回写被收件人围栏拒绝（单据已进入新一轮）：issue=${id}, 原收件人=${issue.relay_notified_user_id}`);
+        const cur = await dbGetAsync('SELECT relay_notify_status FROM sys_issues WHERE id = ?', [id]);
+        return res.json({
+          id,
+          superseded: true,
+          persisted: false,
+          relay_notify_status: cur ? cur.relay_notify_status : null,   // 当前真实落库值（不是本次结果）
+          message: '该单已进入新一轮受理，本次通知未计入当前轮次；外部钉钉消息可能已送达',
+        });
+      }
       const fresh = await dbGetAsync('SELECT relay_notify_status, relay_notify_error FROM sys_issues WHERE id = ?', [id]);
       res.json({ id, relay_notify_status: fresh.relay_notify_status, relay_notify_error: fresh.relay_notify_error });
     } catch (err) { logger.error('[系统迭代] 手动通知对接人失败:', err && err.message); res.status(500).json({ error: (err && err.message) || '通知对接人失败' }); }
   });
 
-  //   通知建单人（新，通知改造 C3 G8）：权限=admin/白名单对接人/主开发本人；self-guard 横切例外（M-2）——
+  //   通知建单人（新，通知改造 C3 G8）：权限=admin ∨ 受理人[13]（C1 起全类型统一）；self-guard 横切例外（M-2）——
   //   actor.id===created_by 一律不实际发送，返 200 {skipped:true, code:'SELF_NOTIFY_SKIPPED'}（非错误，前端淡提示）。
-  //   因 native 建单 created_by 恒=admin，故 admin 点此按钮总被跳过；真正发出的是非建单人的开发/白名单对接人。
-  router.post('/sys-issues/:id/notify-creator', authenticateToken, requireSysSchemaReady, async (req, res) => {
+  //   ⚠️ **self-guard 按人不按角色**（2026-07-27 更正）：本段原写「因 native 建单 created_by 恒=admin，
+  //     故 **admin 点此按钮总被跳过**」——后半句只在"系统里只有一个 admin"时成立，而生产实为 **6 个 active admin**。
+  //     准确语义：**只有建单人本人触发才跳过**。admin A 建的单、admin B 点此按钮 → `actor.id !== created_by` →
+  //     **不跳过、真发钉钉给 A**。实现（比 `actor.id` 与 `created_by`）本就正确，错的是这条注释与 verify 的单 admin 夹具。
+  //     verify-sys-role-perm-c1 [M3] 已补 admin2 交叉用例锁定该语义。
+  //   ⚠️ 中间件 requireIntakeLiaison（C1 复审 MED-1 补挂）：C1 前本端点刻意不挂角色中间件——授权表按 type 分叉
+  //     （bug=admin∨对接人 / 变更流=仅 admin），中间件在 handler 前拿不到 issue 无法表达 type 差异。
+  //     C1 把 creator 通道拍成**全类型 admin∨受理人**（与 type 无关）后，该理由消失，而"不挂"留下一个
+  //     **单据存在性预言机**：无权用户打不存在的 id 得 404、打存在的 id 得 403，可枚举出哪些单据号真实存在
+  //     （notify-developer / notify-requester 因有中间件一律 403，无此差异）。补挂后与另两通道对齐。
+  //     中间件放行面（admin ∨ 受理人）与 handler 内 sysManualNotifyGuard 的 creator 通道判定**逐格等价**，
+  //     故对合法调用者零行为变更；guard 仍保留，负责 type 门限 / 未知通道 / 状态校验。
+  router.post('/sys-issues/:id/notify-creator', authenticateToken, requireSysSchemaReady, requireIntakeLiaison, async (req, res) => {
     const id = parsePositiveId(req.params.id);
     if (!id) return res.status(400).json({ error: '无效的迭代单 ID', code: 'INVALID_SYS_ISSUE_ID' });
     try {
       const issue = await dbGetAsync('SELECT * FROM sys_issues WHERE id = ?', [id]);
       if (!issue) return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' });
       const actor = sysActor(req);
-      // C2a：授权走统一守卫（授权表 §3.2 creator 通道：bug=admin∨对接人 / 变更流=仅 admin）。
+      // 授权走统一守卫（C1 后 creator 通道 = 全类型 admin ∨ 受理人[13]）。
       //   ⚠️ H3 修正：**删除原「主开发本人（isPrimaryDev）」放权**——is_primary/assigned_to 禁作授权源（去主次核心），
       //   bug 主开发不再能发建单人通知（用户拍板接受收窄，与去主次一致）。查已读侧 notify-read-status 同步删（写读同源）。
       const creatorAuthErr = sysManualNotifyGuard(issue, 'creator', actor);
@@ -6655,10 +6951,16 @@ module.exports = (deps) => {
         } else {
           // 部分命中：回读按当前态判「命中(sent/failed)」vs「并发改动(concurrent_changed)」。
           //   hit 判定条件与守卫 UPDATE 的 WHERE 完全同源（type/release_assignee_id/status/notify_status）+ sent 再比对
-          //   message_key（本次发送唯一标识）。failed 分支无 message_key 唯一标识（codex M-1）：单管理员低并发下，
+          //   message_key（本次发送唯一标识）。failed 分支无 message_key 唯一标识（codex M-1）：低并发下，
           //   守卫 UPDATE 经 sysBeginImmediate 全局锁串行、reread 紧随其后，未命中行必因 type/assignee/status/notify_status
           //   某项在 UPDATE 时不匹配——该项若仍不匹配（如改派→id 变、离态→status 变）reread 即判 concurrent_changed；
-          //   要误判"命中"须该行状态在 UPDATE 与 reread 之间恰好翻回匹配态（多写者竞态），单 admin 场景不存在。
+          //   要误判"命中"须该行状态在 UPDATE 与 reread 之间恰好翻回匹配态（多写者竞态）。
+          //   ⚠️ **论据失效（2026-07-27 核实·本段原写"单 admin 场景不存在"）**：生产实为 **6 个 active admin**，
+          //     多写者竞态**不再是"不存在"，而是"低概率"** —— 6 人可并发跑批量通知，理论上存在
+          //     "A 的 UPDATE 与 reread 之间，B 把该行改走又改回"导致本次把 B 的写入误判为自己命中的窗口。
+          //     **未改代码**（真正的修法是给每次批量尝试生成 attempt_id 写入条件更新、或用 UPDATE...RETURNING 直接取命中 ID，
+          //     属设计变更）。用户 2026-07-27 判定 6 个 admin 均为数据/信息部门自己人、可信 → 定级 **P2 待办**，
+          //     触发修 = 真出现并发批量通知的归因错乱。见 PROJECT_STATUS backlog。
           const fresh = await dbAllAsync(
             `SELECT id, type, release_assignee_id, status, release_assignee_notify_status AS ns, release_assignee_notify_message_key AS mk
                FROM sys_issues WHERE id IN (${gph})`, groupIds);
@@ -6691,13 +6993,13 @@ module.exports = (deps) => {
 
   //   通知报障人（requester 侧 requester_notify_*，进展/已上线卡片）：需有报障人手机号（sendSysRequesterNotify 内亦有"无报障人保持 not_sent"守卫）。
   //   [M-A 两套规则] 首发依赖当前 requester_phone；已发送过（快照非空）后重发不受当前 requester_phone 是否为空限制。
-  router.post('/sys-issues/:id/notify-requester', authenticateToken, requireSysSchemaReady, requireAdminOrBugLiaison, async (req, res) => {
+  router.post('/sys-issues/:id/notify-requester', authenticateToken, requireSysSchemaReady, requireIntakeLiaison, async (req, res) => {
     const id = parsePositiveId(req.params.id);
     if (!id) return res.status(400).json({ error: '无效的迭代单 ID', code: 'INVALID_SYS_ISSUE_ID' });
     try {
       const issue = await dbGetAsync('SELECT * FROM sys_issues WHERE id = ?', [id]);
       if (!issue) return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' });
-      // C2a：授权走统一守卫（授权表 §3.2 requester 通道：bug=admin∨对接人 / 变更流=仅 admin·中间件放行白名单但变更流须收紧）。
+      // 授权走统一守卫（C1 后 requester 通道 = 全类型 admin ∨ 受理人[13]）。
       const reqAuthErr = sysManualNotifyGuard(issue, 'requester', sysActor(req));
       if (reqAuthErr) return res.status(reqAuthErr.status).json(reqAuthErr.body);
       const reqStatuses = sysNotifyStatusesFor(issue.type, 'requester');
@@ -6718,14 +7020,34 @@ module.exports = (deps) => {
   //   复刻 issue-tracker /api/issues/:id/notify-read-status 范式（server.js:11552，token 重试+已读固化写回）。
   //   dev 定位子表活动行（?dev_user_id=）；relay/creator 走 sys_issues 反规范化列；requester 走收件人快照反查。
   // [M-1 收口·codex40] 权限闸：原仅 authenticateToken，任意登录用户可探任意单四侧通知触达/已读时间（越权泄露）。
-  //   in-handler 检查（非中间件）：需按 issue.type 区分授权（bug=admin∨对接人 / 变更流=仅 admin），中间件在
-  //   handler 前无 issue 上下文无法表达 type 差异。与发送侧写读同源（C2a·H3 已一并删除「主开发本人」放权）。
+  //   in-handler 检查（非中间件）：本端点是**多通道复用**的（?type=dev|relay|creator|requester|release_executor），
+  //   各通道授权面不同（前三 = admin∨受理人 / 后两 = 仅 admin），中间件层表达不了逐通道差异，故在 handler 内
+  //   按 query.type 映射到发送侧同一个 sysManualNotifyGuard（写读同源·C2a·H3 已一并删除「主开发本人」放权）。
   router.get('/sys-issues/:id/notify-read-status', authenticateToken, requireSysSchemaReady, async (req, res) => {
     const id = parsePositiveId(req.params.id);
     if (!id) return res.status(400).json({ error: '无效的迭代单 ID', code: 'INVALID_SYS_ISSUE_ID' });
     const type = req.query.type;
     if (!['dev', 'relay', 'creator', 'requester', 'release_executor'].includes(type)) {
       return res.status(400).json({ error: '无效的通知类型', code: 'INVALID_NOTIFY_TYPE' });
+    }
+    // ⚠️ 单据存在性预言机防线（C1 三轮审 MED-1·与 notify-creator 补挂中间件同构）：本端点的授权原本**全部**在
+    //   issue 加载之后，于是未授权者打不存在的 id 得 404、打存在的 id 得 403 —— 可据此枚举真实单号。
+    //   这里前置一道**静态角色粗筛**：它只用 JWT 身份 + query 通道，不需要 issue 上下文，因此能放到查库之前，
+    //   让"存在"与"不存在"对未授权者一律 403。
+    //   ⚠️ 放行面必须与下方 sysManualNotifyGuard / release_executor 分支**逐通道等价**（改一处必同步另一处）：
+    //     dev / creator / requester = admin ∨ 受理人[13]；relay / release_executor = 仅 admin。
+    //   精判（issue.type 门限 / 通道 NA / 状态 / 收件人快照）仍由 issue 加载后的 guard 承担——本层只回答
+    //   "这个角色连这个通道都碰不到吗"，不回答"这张单此刻能不能查"。错误码沿用 NOT_AUTHORIZED_FOR_NOTIFY 不变。
+    {
+      const preActor = sysActor(req);
+      const preAdminOnly = (type === 'relay' || type === 'release_executor');
+      const prePermitted = preActor.role === 'admin' || (!preAdminOnly && isSysIntakeLiaison(preActor.id));
+      if (!prePermitted) {
+        return res.status(403).json({
+          error: preAdminOnly ? '仅管理员可查看该通知已读状态' : '仅管理员/受理人可查看通知已读状态',
+          code: 'NOT_AUTHORIZED_FOR_NOTIFY',
+        });
+      }
     }
     try {
       const issue = await dbGetAsync('SELECT * FROM sys_issues WHERE id = ?', [id]);
@@ -6837,6 +7159,11 @@ module.exports = (deps) => {
   // ============================================================
   const _internals = {
     SYS_SCHEMA_STATE,
+    // 角色权限重构 C0：受理态一致性触发器（供 verify 临时摘除后按原样重建·防两处 DDL 漂移）
+    SYS_INTAKE_GATE_TRIGGERS_SQL,
+    SYS_INTAKE_GATE_TRIGGER_NAMES,
+    // 角色权限重构 C1：手动通知授权守卫（verify 直调做通道白名单 fail-closed 单元断言）
+    sysManualNotifyGuard,
     SYS_REQUIRED_TABLES,
     SYS_ISSUES_KEY_COLS,
     SYS_RELEASES_KEY_COLS,
@@ -6889,7 +7216,7 @@ module.exports = (deps) => {
     // bug 流 Commit ④a：对接人白名单（verify-sys-liaison require 真实逻辑，防三处字面量漂移 + 权限精判回归）
     SYS_BUG_LIAISON_USER_IDS,
     isSysBugLiaison,
-    requireAdminOrBugLiaison,
+    // requireAdminOrBugLiaison 已随 C1 删除（见其定义处说明）——刻意不再导出，防误挂新端点
     // 受理排期改造 C2：三白名单（verify-sys-liaison 扩·require 真实逻辑防字面量漂移 + 权限单元级回归）
     SYS_INTAKE_LIAISON_IDS,
     SYS_TECH_LEAD_IDS,

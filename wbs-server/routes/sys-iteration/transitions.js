@@ -39,6 +39,25 @@ function resolveInitialStatus(type, intakeRequired) {
   return intakeRequired === 1 ? '待受理' : withoutIntake;
 }
 
+// ── 角色权限重构 C0（方案 v1.5 §4-C0）：**创建路径落态唯一入口**──────────────────────────
+//   ⭐ 受理门焊死：全类型（bug/feature/improvement·config 无 transitions 不适用·v1.5 §2.6）建单必经受理，
+//     故创建落态**恒 intake_required=1 → '待受理'**，不再由调用方/客户端决定。
+//   ⚠️ **本函数不收 intakeRequired 参数**（方案 v1.5 §4-C0「内部固定 intake=1、不收外部参数」）——
+//     这是"焊死"的实现手段：参数一旦开放，创建入口就能再次绕过受理门（v1.4 前 derive 硬编码 0 即此类漏洞）。
+//   ⚠️ 创建入口共 3 个（v1.5 §2.4 枚举闭合·routes/ 下无复制/批量导入/后台任务入口）：
+//     index.js 建单 INSERT / derive 新单 INSERT / reactivate 落态 UPDATE —— **三者必须且只能调本函数**。
+//     verify-sys-intake-gate.js 以源码扫描断言"index.js 创建路径不再直调 resolveInitialStatus"锁定该不变量。
+//   ⚠️ resolveInitialStatus 本身保留未删，但**已无任何直调方**：原唯一消费者 change_intake_mode 的实现体
+//     随 C0 删除（该路由现在只返 409），index.js 的直调数已归零并被 verify 源码扫描断言锁定。
+//     它现在仅作为本函数的内部实现，以及 buildMeta 组装 initialStatusesByType 两分支时的取值来源；
+//     `intakeRequired=0` 分支已是纯历史遗留，由 C5 末次审决定是否连同 meta 的 without_intake 字段一并清理。
+//   ⚠️ **config 不在本模块的支持范围**：ALLOWED_STATUSES / TRANSITIONS 均无 config 键，
+//     本函数对 config 会 fail-closed 抛错，建单入口先以 400 TYPE_NOT_SUPPORTED 拒绝
+//     （verify-sys-intake-gate [I]/[C1] 各有断言钉死）。文件早期注释里"四类型含 config"是历史表述，以此处为准。
+function resolveSysInitialStatusForCreate(type) {
+  return resolveInitialStatus(type, 1);
+}
+
 // ── 每个 type 的合法状态集（§3.3 变更流 + §3.4 旁路态·受理排期改造 §4.1）──────────
 //   受理排期改造：删「待评估/已排期」→ 加「待受理/待修改」(INTAKE 族) +「待指派」(D_PRE 族·受理通过落态)。
 const CHANGE_FLOW_STATUSES = [
@@ -138,9 +157,13 @@ const CHANGE_FLOW_TRANSITIONS = [
     notifyAfterCommit: null,
   },
   {
-    action: 'assign',                       // 指派：待指派 → 开发中（admin 派给开发，被指派人非 viewer）
+    action: 'assign',                       // 指派：待指派 → 开发中（admin ∨ 受理人，被指派人非 viewer）
     from: ['待指派'], to: '开发中',         // 受理排期改造：from 由「已排期」改「待指派」
-    roleGuard: 'admin', ownerGuard: null,
+    // ⭐ 角色权限重构 C1（方案 v1.5 §4-C1）：指派权由 admin 扩到「admin ∨ 受理人[13]」**全类型**。
+    //   ⚠️ 这一处是 v1.4 的**阻断级漏项**：v1.4 只写了处置 bug 流的 'admin_or_bug_liaison'，漏了变更流这条
+    //     仍是 'admin' —— 不改的话示例对接人指派 feature/improvement 会在引擎 [3] 被 `roleGuard==='admin' && !isAdmin`
+    //     直接 403，「受理人全类型主导」这个 C1 核心目标根本跑不通（v1.5 §2.2 源码核实时发现）。
+    roleGuard: 'intake_liaison', ownerGuard: null,
     requiredPayload: ['assigned_to'],
     sideEffects: ['assigned_to/_name/assigned_at 写入'],   // codex 14 L-1：DDL 无 assigned_by 字段（系统迭代 admin 集中主导，"谁指派"恒 admin 不单记）
     timelineEvent: 'assign', actionCode: null,
@@ -162,7 +185,11 @@ const CHANGE_FLOW_TRANSITIONS = [
     //   诉求随之收敛：暂缓单需先 resume 回开发中再改派（暂缓态本就无活跃开发编排）。
     action: 'reassign',
     from: ['开发中', '待验证'], to: null,
-    roleGuard: 'admin', ownerGuard: null,
+    // ⭐ 角色权限重构 C1：同 assign 扩到「admin ∨ 受理人[13]」。
+    //   ⚠️ reassign 走独立事务（不经 sysIssueTransition [3]），故此 roleGuard 仅作 **SSOT 记录**——
+    //     实际闸门是端点中间件 requireIntakeLiaison + handler 的 isSysCoordinator 精判。
+    //     即便如此也必须同步改：buildMeta 把它暴露给前端做按钮显隐，不改会造成「前端不显但后端放行」的写宽读窄。
+    roleGuard: 'intake_liaison', ownerGuard: null,
     requiredPayload: ['member_ids', 'reason'],
     sideEffects: ['开发集合差量应用（新增 INSERT pending / 移除软删）', '选举 electRepresentative 重算 assigned_to/_name（assigned_at 仅首次形成时补写）', 'W-GATE 按新 roster 完成态判定主状态是否联动', '仅代表真实变化时才 notifyAssignedDeveloper（不再按 toAdd.length 判定）', 'return_count 不变（05-M2，v2.9 沿用）'],
     // LOW（92 号审）：timelineEvent 置 null——成员动作只写 sys_issue_dev_events，不进 sys_issue_timeline
@@ -354,8 +381,9 @@ const CHANGE_FLOW_TRANSITIONS = [
 //     额外的 release_id/needs_release 双 WHERE 守卫（§8.2 [审:H1]）——由 index.js switch 分支追加 whereFrags，
 //     常量层仅声明 from/to/roleGuard，实际闸门在端点实现（Commit ②）。
 //   · 无 feasibility/blocked/unblock/scope_change：评估环节与范围变更均不适用 bug（建单守卫已拒 needs_feasibility）。
-//   ⚠️ 权限口径（Commit ① 暂全 admin，安全侧收紧）：§3 对接人白名单（requireAdminOrBugLiaison 粗筛 +
-//     handler 内 type='bug' 精判）= Commit ④，届时 assign/reassign 放开白名单；ownerGuard='assignee' 口径同变更流（严格本人）。
+//   ⚠️ 权限口径（角色权限重构 C1 后·历史演进：Commit ① 全 admin → Commit ④ bug 对接人白名单[7,13] → C1 收敛）：
+//     assign/reassign 现为 roleGuard='intake_liaison'（admin ∨ 受理人[13]·**与变更流同口径、无 type 隔离**），
+//     粗筛中间件 = requireIntakeLiaison（requireAdminOrBugLiaison 已随 C1 删除）；ownerGuard='assignee' 口径同变更流（严格本人）。
 const BUG_FLOW_TRANSITIONS = [
   {
     action: 'create',                       // 建单（端点 POST /sys-issues，不走 transition；此条供 meta 完整性）
@@ -426,7 +454,10 @@ const BUG_FLOW_TRANSITIONS = [
   {
     action: 'assign',                       // 指派：待处理 → 处理中（前段直达，无排期）
     from: ['待处理'], to: '处理中',
-    roleGuard: 'admin_or_bug_liaison', ownerGuard: null,   // ④ 对接人白名单放开（示例发布者/示例对接人）——仅挂 bug transition，不全局化（变更流 assign 仍 roleGuard='admin'），sysIssueTransition [3] 精判 type 隐含
+    // ⭐ 角色权限重构 C1：由 'admin_or_bug_liaison'（admin∨[7,13]·仅 bug）改为 'intake_liaison'（admin∨[13]·全类型统一）。
+    //   语义变化有两处：① 示例发布者[7] **失去 bug 指派权**（转纯技术负责人，只回一条评估留言）
+    //   ② 不再需要"仅挂 bug transition 以免全局化"这套隔离——受理人本就该全类型主导，变更流侧同步改成同一 guard。
+    roleGuard: 'intake_liaison', ownerGuard: null,
     requiredPayload: ['assigned_to'],
     sideEffects: ['assigned_to/_name/assigned_at 写入'],
     timelineEvent: 'assign', actionCode: null,
@@ -439,7 +470,10 @@ const BUG_FLOW_TRANSITIONS = [
     //   memberActionFamiliesFor('reassign','bug')=基础矩阵（含 D_PRE）同源；变更流侧才排除 D_PRE（type 覆盖）。
     action: 'reassign',
     from: ['待处理', '处理中', '待验证'], to: null,
-    roleGuard: 'admin_or_bug_liaison', ownerGuard: null,   // ④ 对接人白名单放开——reassign 走独立事务（不经 sysIssueTransition [3]），故此 roleGuard 仅作 SSOT 记录，实际由端点中间件 requireAdminOrBugLiaison + handler type='bug' 精判 enforced
+    // ⭐ 角色权限重构 C1：同 bug assign 改 'intake_liaison'（admin∨[13]）。
+    //   reassign 走独立事务（不经 sysIssueTransition [3]），此 roleGuard 仅作 SSOT 记录 + 供 buildMeta 前端显隐，
+    //   实际闸门 = 端点中间件 requireIntakeLiaison + handler 的 isSysCoordinator 精判。
+    roleGuard: 'intake_liaison', ownerGuard: null,
     requiredPayload: ['member_ids', 'reason'],
     sideEffects: ['开发集合差量应用（新增 INSERT pending / 移除软删）', '选举 electRepresentative 重算 assigned_to/_name（assigned_at 仅首次形成时补写）', 'W-GATE 按新 roster 完成态判定主状态是否联动', '仅代表真实变化时才 notifyAssignedDeveloper', 'return_count 不变（v2.9 沿用）'],
     timelineEvent: null, actionCode: null,
@@ -702,7 +736,11 @@ function buildMeta() {
 //   逐个判断这些 guard 字符串·permitted 初值 true → 未知 guard 静默放行是结构性 fail-open。引擎对**非空未知 roleGuard**
 //   显式拒绝（500 UNKNOWN_ROLE_GUARD·fail-closed）·本集是判定基准。roleGuard 为空/undefined 合法（靠 ownerGuard·如 estimate/submit）。
 //   verify-sys-meta 断言 TRANSITIONS 里所有非空 roleGuard ∈ 本集（防新增 transition 拼错/漏实现）。
-const KNOWN_ROLE_GUARDS = new Set(['admin', 'admin_or_bug_liaison', 'intake_liaison', 'creator_or_admin']);
+// ⭐ 角色权限重构 C1：'admin_or_bug_liaison' **退场**——四条曾用它的 transition（bug/变更流的 assign+reassign）
+//   已统一改为 'intake_liaison'（admin∨受理人[13]·全类型）。本集是 fail-closed 判定基准（引擎对非空未知
+//   roleGuard 返 500 UNKNOWN_ROLE_GUARD），故必须同步删；verify-sys-meta 断言"所有非空 roleGuard ∈ 本集"，
+//   若哪里还残留旧字符串会立刻红灯。
+const KNOWN_ROLE_GUARDS = new Set(['admin', 'intake_liaison', 'creator_or_admin']);
 
 // 受理排期改造 C3（codex C3 常规审 MED-1）：受理门动作运行期不变量集——**仅被 sysIssueTransition 引擎消费**（[3.5] 处校验）：
 //   这些经引擎流转的受理动作**仅当 intake_required=1 才可执行**（transitions.js:84「intake_required=1 才走」升级为引擎 fail-closed·
@@ -716,7 +754,8 @@ const INTAKE_GATE_ACTIONS = new Set(['intake_accept', 'intake_return', 'resubmit
 module.exports = {
   BIZ_SYSTEMS,
   INITIAL_STATUS_WITHOUT_INTAKE_BY_TYPE,
-  resolveInitialStatus,          // 受理排期改造 §9：建单/派生/reactivate 落态唯一权威
+  resolveInitialStatus,          // 受理排期改造 §9：落态解析器（C0 后创建路径不再直调·仅 change_intake_mode 与 meta 组装消费）
+  resolveSysInitialStatusForCreate,   // 角色权限重构 C0：创建路径（建单/derive/reactivate）落态唯一入口·恒 intake=1
   ALLOWED_STATUSES,
   KNOWN_ROLE_GUARDS,             // 受理排期改造 C2（codex MED-1）：引擎默认拒绝未知 roleGuard 的判定基准
   INTAKE_GATE_ACTIONS,           // 受理排期改造 C3（codex MED-1）：受理门动作 intake_required=1 运行期不变量集

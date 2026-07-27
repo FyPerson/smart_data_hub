@@ -65,9 +65,11 @@ const ok = (m) => { passed++; console.log('  ✓ ' + m); };
 
 // 建单（needs_feasibility 默认 1）→ assign → 开发中，返回 id（受理排期改造：schedule 退场·建单直落待指派）
 async function seedToDev(needsFeasibility = 1, assignTo = 5) {
-  let r = await call('POST', '/api/sys-issues', adminTok, { type: 'feature', title: 't', system_name: 'BMS', source: '内部', needs_feasibility: needsFeasibility });
+  let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 't', system_name: 'BMS', source: '内部', needs_feasibility: needsFeasibility });
   assert.strictEqual(r.status, 201, '建单 201, got ' + r.status + ' ' + JSON.stringify(r.body));
   const id = r.body.id;
+  // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
+  await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, {});
   r = await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: assignTo });
   assert.strictEqual(r.status, 200, 'assign 200');
   return id;
@@ -130,7 +132,7 @@ async function main() {
     assert.strictEqual(r.status, 409, 'needs_feasibility=0 → 409'); assert.strictEqual(r.body.code, 'FEASIBILITY_NOT_REQUIRED');
     ok('[F8] needs_feasibility=0 单填评估 → 409 FEASIBILITY_NOT_REQUIRED');
     // F9 非开发态（受理排期改造：建单落待指派·非开发态·填评估仍应拒）
-    let rr = await call('POST', '/api/sys-issues', adminTok, { type: 'feature', title: '待指派', system_name: 'BMS', source: '内部', needs_feasibility: 1 });
+    let rr = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: '待指派', system_name: 'BMS', source: '内部', needs_feasibility: 1 });
     r = await call('POST', `/api/sys-issues/${rr.body.id}/feasibility`, devTok, { conclusion: '可行', requirement_confirm: 'x', dev_estimated_at: EST });
     assert.strictEqual(r.status, 409, '非开发态 409'); assert.strictEqual(r.body.code, 'FEASIBILITY_STATUS_INVALID');
     ok('[F9] 待指派态（非开发态）填评估 → 409 FEASIBILITY_STATUS_INVALID');

@@ -75,15 +75,19 @@ let passed = 0; const ok = (m) => { passed++; console.log('  ✓ ' + m); };
 
 // 推到「开发中」（create→assign→estimate·受理排期改造：schedule 退场·建单直落待指派），供附件上传
 async function seedInProgress() {
-  const id = (await call('POST', '/api/sys-issues', adminTok, { type: 'feature', title: 'a', system_name: 'BMS', source: '内部' })).body.id;
+  const id = (await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 'a', system_name: 'BMS', source: '内部' })).body.id;
+  // ⭐ 角色权限重构 C0：建单恒落「待受理」→ 补一步受理（→待指派）才能 assign
+  await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, {});
   await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5 });
   await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: '2026-08-01 10:00' });
   return id;
 }
 
 async function seedToReady() {
-  let r = await call('POST', '/api/sys-issues', adminTok, { type: 'feature', title: 't', system_name: 'BMS', source: '内部' });
+  let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 't', system_name: 'BMS', source: '内部' });
   const id = r.body.id;
+  // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
+  await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, {});
   await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5 });
   await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: '2026-08-01 10:00' });
   await call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'no_code', no_code_reason: '交付完成（占位理由）' });
@@ -101,7 +105,7 @@ async function main() {
   // ── 1. 并发建单（30 并发）：全 201 + id 互异 + 零 500（无 nested-transaction 交错）──────────
   const N = 30;
   const results = await Promise.all(Array.from({ length: N }, (_, k) =>
-    call('POST', '/api/sys-issues', adminTok, { type: 'feature', title: 'concurrent-' + k, system_name: 'BMS', source: '内部' })));
+    call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 'concurrent-' + k, system_name: 'BMS', source: '内部' })));
   const created201 = results.filter(r => r.status === 201);
   const errs500 = results.filter(r => r.status === 500);
   assert.strictEqual(errs500.length, 0, `并发建单不应有 500（nested-transaction），实际 ${errs500.length} 个：` + JSON.stringify(errs500.map(e => e.body)));
@@ -140,7 +144,10 @@ async function main() {
   // ── 3. 并发混合事务（建单 + 建批次 + assign 各 10）：零 500 ──────────
   //   受理排期改造：schedule 退场·并发写目标改用 assign（建单直落待指派→并发指派各进开发中·10 个独立单不互斥）。
   const drafts = await Promise.all(Array.from({ length: 10 }, (_, k) =>
-    call('POST', '/api/sys-issues', adminTok, { type: 'improvement', title: 'mix-' + k, system_name: 'OA', source: '内部' })));
+    call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'improvement', title: 'mix-' + k, system_name: 'OA', source: '内部' })));
+  // ⭐ 角色权限重构 C0：建单恒落「待受理」→ 并发 assign 前先串行受理到「待指派」（assign 的合法前置态）。
+  //   受理刻意串行：本用例测的是 **assign 并发**不产生 500，受理只是夹具，串行可排除夹具本身的并发噪音。
+  for (const d of drafts) await call('POST', `/api/sys-issues/${d.body.id}/intake-accept`, adminTok, {});
   const mixed = await Promise.all([
     ...Array.from({ length: 10 }, (_, k) => call('POST', '/api/sys-releases', adminTok, { title: 'mix-rel-' + k })),
     ...drafts.map(d => call('POST', `/api/sys-issues/${d.body.id}/assign`, adminTok, { assigned_to: 5 })),
@@ -157,7 +164,7 @@ async function main() {
     const r = await call('POST', `/api/sys-releases/${badRel}/add-issues`, adminTok, { issue_ids: [990000 + k] });   // 不存在/不可加 → 409 inline rollback
     assert.strictEqual(r.status, 409, '不可加单 → 409 inline rollback');
   }
-  const afterErr = await call('POST', '/api/sys-issues', adminTok, { type: 'feature', title: 'after-err', system_name: 'BMS', source: '内部' });
+  const afterErr = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 'after-err', system_name: 'BMS', source: '内部' });
   assert.strictEqual(afterErr.status, 201, '错误早退 5 次后建单仍 201（inline rollback 未泄漏锁）');
   ok('F3a：事务内错误早退后建单成功（inline sysRollback 锁不泄漏）');
 
@@ -166,7 +173,7 @@ async function main() {
   const attRes = await Promise.all([
     ...Array.from({ length: 6 }, (_, k) => upload(`/api/sys-issues/${att1}/attachments`, devTok, { attachment_type: 'delivery' }, `a${k}.png`)),
     ...Array.from({ length: 6 }, (_, k) => upload(`/api/sys-issues/${att2}/attachments`, devTok, { attachment_type: 'delivery' }, `b${k}.png`)),
-    ...Array.from({ length: 6 }, (_, k) => call('POST', '/api/sys-issues', adminTok, { type: 'feature', title: 'cc' + k, system_name: 'BMS', source: '内部' })),
+    ...Array.from({ length: 6 }, (_, k) => call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 'cc' + k, system_name: 'BMS', source: '内部' })),
   ]);
   const att500 = attRes.filter(r => r.status === 500);
   assert.strictEqual(att500.length, 0, '并发上传+建单零 500（附件 INSERT 已纳入 mutex 不交错），实际：' + JSON.stringify(att500.map(e => e.body)));

@@ -72,7 +72,11 @@ const seedIssue = (run, type, status, intakeRaw) =>
            VALUES (?, ?, '存量单', 'BMS', '内部', 1, 'admin', ?)`, [type, status, intakeRaw]);
 
 const C1_KEY = 'intake_schedule_c1';
-const clearMarker = (run) => run(`DELETE FROM sys_schema_migrations WHERE migration_key = ?`, [C1_KEY]);
+// ⭐ 角色权限重构 C0：新增 role_perm_c0_intake_gate 迁移（intake_required 存量归一为 1），紧随 C1 之后跑。
+//   夹具"删标记重跑"必须**两个一起删**——只删 C1 会造出真实启动流程里不存在的中间态
+//   （C1 把非法值归一为 0，而 C0 因标记仍在被跳过 → 残留 0），进而让断言测到一个假的最终态。
+const C0_KEY = 'role_perm_c0_intake_gate';
+const clearMarker = (run) => run(`DELETE FROM sys_schema_migrations WHERE migration_key IN (?, ?)`, [C1_KEY, C0_KEY]);
 const markerRow = (get) => get(`SELECT migration_key, applied_at FROM sys_schema_migrations WHERE migration_key = ?`, [C1_KEY]);
 
 // ── 场景①+③+④：有旧态数据首次迁移（映射 + 后验 + 补列 + 归一化 + 幂等）──────────
@@ -94,12 +98,18 @@ async function scenarioMigrateWithLegacyData() {
   ok(`⭐ [1] 补列：sys_issues 11 新列全部 ALTER 到位（${NEW_COLS.length} 列）`);
 
   // 种旧态 + 边界数据（含归一化样本），再删标记 → 重跑（复现「列在无标记的残留态」=场景③，语义等价首次有旧态数据）
-  await seedIssue(run, 'feature', '待评估');        // 应映射 → 待指派
-  await seedIssue(run, 'improvement', '已排期');    // 应映射 → 待指派
-  await seedIssue(run, 'feature', '开发中');        // 非旧态·零破坏对照
-  await seedIssue(run, 'bug', '待处理');            // bug 无旧态·不动
-  await seedIssue(run, 'feature', '待评估', '1');   // intake_required='1'（字符串）→ 归一化 1
-  await seedIssue(run, 'improvement', '待指派', 7); // intake_required=7（非法值）→ 归一化 0
+  //   ⭐ 角色权限重构 C0：本组要造的正是「C0 之前的旧库形态」——含 intake_required 缺省/'1'/7 等非 1 值。
+  //     C0 之后这些在 DB 层已被触发器拒（全表恒 1），故造夹具时**显式摘除约束**（真实升级顺序也是
+  //     先有旧数据、迁移修完才建约束）。绝不为迁就夹具去调弱生产约束（codex C0 三轮审 HIGH）。
+  const gate = require('./lib/sys-intake-gate-triggers')(run, I);
+  await gate.withoutTriggers(async () => {
+    await seedIssue(run, 'feature', '待评估');        // 应映射 → 待指派
+    await seedIssue(run, 'improvement', '已排期');    // 应映射 → 待指派
+    await seedIssue(run, 'feature', '开发中');        // 非旧态·零破坏对照
+    await seedIssue(run, 'bug', '待处理');            // bug 无旧态·不动
+    await seedIssue(run, 'feature', '待评估', '1');   // intake_required='1'（字符串）→ C1 归一化 1
+    await seedIssue(run, 'improvement', '待指派', 7); // intake_required=7（非法值）→ C1 归一化 0 → C0 再归一 1
+  });
   const beforeTotal = (await get('SELECT COUNT(*) c FROM sys_issues')).c;
   await clearMarker(run);
   await I.runSysMigration(null);
@@ -116,12 +126,18 @@ async function scenarioMigrateWithLegacyData() {
   assert.strictEqual(rows[5].status, '待指派', 'improvement 待指派 非旧态·不动');
   ok('⭐ [3] 状态映射：feature/improvement 待评估/已排期 → 待指派；bug 与非旧态零破坏');
 
-  // [2] 归一化：'1'→1 / 7→0 / 未显式写→DEFAULT 0
-  assert.strictEqual(rows[4].intake_required, 1, "intake_required '1'（字符串）→ 归一化 1");
-  assert.strictEqual(rows[5].intake_required, 0, 'intake_required 7（非法）→ 归一化 0');
-  assert.strictEqual(rows[0].intake_required, 0, '未显式写 intake_required → DEFAULT 0');
-  for (const r of rows) assert.ok(r.intake_required === 0 || r.intake_required === 1, `intake_required∈{0,1}（实际 ${r.intake_required}）`);
-  ok("⭐ [2]+[4] 归一化：'1'→1 / 7→0 / 缺省→0；所有行 intake_required∈{0,1}");
+  // [2] 归一化：⭐ 角色权限重构 C0 起本断言测的是**迁移链最终态**（C1 归一化 → C0 归一 两段叠加）。
+  //   C1 段：'1'（字符串）→1 / 7（非法）→0 / 未显式写→列 DEFAULT；
+  //   C0 段（migration_key=role_perm_c0_intake_gate·紧随 C1）：受理门焊死为全类型必经 → 全表归一为 1。
+  //   故最终态**所有行恒 1**，C1 段的中间态（0）在本脚本已观测不到——这正是 C0 的目标：
+  //   新模型下 intake_required=0 是非法态（会造出「待受理+ir0」矛盾单卡死受理），不允许存量残留。
+  //   ⚠️ C1 归一化逻辑本身的回归保护由"非法值 7 不会残留"承担（若 C1 段失灵，7 会被 C0 的 !=1 条件一并改成 1，
+  //     故这里额外断言不存在任何非 0/1 的脏值，作为两段共同的兜底）。
+  for (const [i, r] of rows.entries()) {
+    assert.strictEqual(r.intake_required, 1,
+      `第 ${i} 行 intake_required 应为 1（C1 归一化 + C0 全表归一叠加后的最终态），实际 ${r.intake_required}`);
+  }
+  ok('⭐ [2]+[4] 归一化最终态：C1（\'1\'→1 / 7→0 / 缺省→DEFAULT）叠加 C0（全表归一 1）→ 所有行 intake_required 恒 1（新模型下 0 为非法态）');
 
   // [4] 后验守恒：总行数守恒 + 旧态清零
   const afterTotal = (await get('SELECT COUNT(*) c FROM sys_issues')).c;
