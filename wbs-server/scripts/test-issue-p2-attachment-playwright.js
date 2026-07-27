@@ -194,7 +194,7 @@ async function main() {
     must(allErrs.length === 0, `D 控制台无 JS 报错（${allErrs.length} 个${allErrs.length ? ': ' + allErrs.slice(0, 2).join(' | ') : ''}）`);
   } finally {
     await browser.close();
-    if (issueId) { const d = await api(tok, 'DELETE', `/api/sys-issues/${issueId}`); console.log(`  · 清理测试单 #${issueId}（${d.status}）`); }
+    if (issueId) { const d = await api(tok, 'DELETE', `/api/sys-issues/${issueId}`, { reason: '自动化实测收尾清理（C2a 起 reason 必填）' }); console.log(`  · 清理测试单 #${issueId}（${d.status}）`); }
   }
   console.log(`\n  合计 ${pass} PASS / ${fail} FAIL`);
   console.log(fail === 0 ? '  🎉 P2 冒烟全部通过\n' : '  🚫 存在失败项\n');

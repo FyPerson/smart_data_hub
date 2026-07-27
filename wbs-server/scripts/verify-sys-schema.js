@@ -71,6 +71,24 @@ async function main() {
   assert.strictEqual(tables.length, 5, `应有 5 表，实际 ${tables.length}: ${tables.join(',')}`);
   ok(`五表存在：${tables.sort().join(' / ')}`);
 
+  // [1-C2a] 角色权限重构 C2a：物删审计表结构与约束（本文件是"约束漂移"的权威检查点——
+  //   readiness 按既有分工只查表在/列在，CHECK/NOT NULL/UNIQUE 一律由本脚本守，见 index.js initSchema 头部注释）。
+  //   ⚠️ 这条断言的真实用途是**防止 CHECK 被人从建表语句里删掉**：审计表的 reason 是"不可逆删除必须说明原因"
+  //   这条契约的 DB 兜底，端点层校验只覆盖走端点的写入，运维直连 SQLite / 未来新端点会绕开它。
+  //   ⚠️ 它**测不到**"生产库里已存在一张无 CHECK 的旧表"——`CREATE TABLE IF NOT EXISTS` 对已存在表 no-op，
+  //   本脚本每次跑在全新库上。那个场景由**部署前提**兜：C2a 首次部署前须确认生产无 sys_issue_delete_audit
+  //   （方案 v1.7 §14 部署清单）。codex C2a 复审 MED 记录在案。
+  const auditSql = (await get("SELECT sql FROM sqlite_master WHERE type='table' AND name='sys_issue_delete_audit'") || {}).sql || '';
+  assert.ok(auditSql, 'sys_issue_delete_audit 表应存在（C2a 物删审计）');
+  assert.ok(/CHECK\s*\(\s*length\s*\(\s*trim\s*\(\s*reason\s*\)\s*\)\s*BETWEEN\s*1\s*AND\s*200\s*\)/i.test(auditSql),
+    `sys_issue_delete_audit.reason 必须带 DB 层 CHECK(trim 后 1..200)，实际建表语句：${auditSql}`);
+  for (const c of ['issue_json', 'timeline_json', 'attachments_json', 'operator_id', 'operator_name', 'reason', 'deleted_at']) {
+    assert.ok(new RegExp(`${c}[^,]*NOT NULL`, 'i').test(auditSql), `sys_issue_delete_audit.${c} 必须 NOT NULL（审计行不允许半空）`);
+  }
+  assert.strictEqual((await all("PRAGMA foreign_key_list(sys_issue_delete_audit)")).length, 0,
+    '⭐ 审计表不得有外键——它必须在被审计的业务行消失之后继续存在');
+  ok('⭐ C2a 物删审计表：reason DB 层 CHECK(trim 1..200) + 七列 NOT NULL + 零外键（约束漂移由本脚本守，非 readiness）');
+
   // [2] sys_issues 关键列齐全（含三侧通知锚点 + effected_at）
   const issueColRows = await all('PRAGMA table_info(sys_issues)');
   const issueCols = issueColRows.map(r => r.name);
@@ -337,6 +355,17 @@ async function main() {
   db.close();
 }
 
+// ⭐ C2a 新增：给"残缺库"夹具补齐 SYS_REQUIRED_TABLES 里尚未建的表（最小桩：只需过 [1] 表存在性）。
+//   动机：这三个夹具的焦点是**缺列**诊断，[1] 表存在性只是它们必须先跨过的门槛。此前每处都手写一份表清单，
+//   于是每加一张新表（C2a 的 sys_issue_delete_audit）三处同时红灯，且报的是"表缺失"——把真正要测的
+//   缺列断言整个遮住。改为从 mod._internals.SYS_REQUIRED_TABLES 派生后，加表不再需要回来改夹具。
+//   ⚠️ 只补"还没建的"：焦点表由各夹具显式建成残缺形态，这里绝不覆盖（CREATE TABLE IF NOT EXISTS 保证）。
+async function stubMissingRequiredTables(run, mod) {
+  for (const t of mod._internals.SYS_REQUIRED_TABLES) {
+    await run(`CREATE TABLE IF NOT EXISTS ${t} (id INTEGER PRIMARY KEY)`);
+  }
+}
+
 // [15] readiness 缺列库：在独立内存库手工建一个缺关键列的 sys_issues，调 runSysMigration 应判 ready=false
 async function verifyMissingColLib() {
   const db2 = new sqlite3.Database(':memory:');
@@ -365,6 +394,10 @@ async function verifyMissingColLib() {
   await run2(`CREATE TABLE sys_issue_dev_events (id INTEGER PRIMARY KEY)`);
   await run2(`CREATE TABLE sys_issue_release_commit_snapshots (id INTEGER PRIMARY KEY)`);
   await run2(`CREATE TABLE sys_schema_migrations (migration_key TEXT PRIMARY KEY, applied_at TEXT NOT NULL)`);   // C1 迁移标记表（须存在满足 [1] 表存在性；本测试焦点是 sys_issues 缺列）
+  // ⭐ C2a 起：SYS_REQUIRED_TABLES 中尚未显式建的表一律补最小桩（只需过 [1] 表存在性）。
+  //   这样写是为了**下次再加表时不必回来改三处残缺库夹具**——本测试焦点是"缺列"，不是"表清单齐不齐"；
+  //   C2a 新增 sys_issue_delete_audit 时三处夹具同时红灯，报的却是"表缺失"，把真正要测的缺列断言遮住了。
+  await stubMissingRequiredTables(run2, mod2);
   await mod2._internals.runSysMigration(null);
   const st = mod2._internals.SYS_SCHEMA_STATE;
   assert.strictEqual(st.ready, false, '缺列库 readiness 应为 false');
@@ -413,6 +446,7 @@ async function verifyMissingDevAssigneesColLib() {
   await run3(`CREATE TABLE sys_issue_dev_events (id INTEGER PRIMARY KEY)`);
   await run3(`CREATE TABLE sys_issue_release_commit_snapshots (id INTEGER PRIMARY KEY)`);
   await run3(`CREATE TABLE sys_schema_migrations (migration_key TEXT PRIMARY KEY, applied_at TEXT NOT NULL)`);   // C1 迁移标记表（满足 [1] 表存在性；本测试焦点是 dev_assignees 缺列）
+  await stubMissingRequiredTables(run3, mod3);   // C2a 起：其余 REQUIRED_TABLES 自动补最小桩（说明见 verifyMissingColLib）
   await mod3._internals.runSysMigration(null);
   const st3 = mod3._internals.SYS_SCHEMA_STATE;
   assert.strictEqual(st3.ready, false, 'dev_assignees 缺列库 readiness 应为 false');
@@ -458,6 +492,7 @@ async function verifyDevAssigneesGuardAlignment() {
     const modA = bootMod(dbA, runA, getA, allA);
     await mkComplete(runA);
     await runA(`CREATE TABLE sys_issue_dev_assignees (id INTEGER PRIMARY KEY, issue_id INTEGER, user_id INTEGER, user_name TEXT, is_primary INTEGER, notify_status TEXT, notified_at DATETIME, read_at DATETIME, notify_message_key TEXT, notify_error TEXT)`);  // 缺 removed_at
+    await stubMissingRequiredTables(runA, modA);   // C2a 起：其余 REQUIRED_TABLES 自动补最小桩
     await modA._internals.runSysMigration(null);
     const stA = modA._internals.SYS_SCHEMA_STATE;
     assert.strictEqual(stA.ready, false, 'Case A：缺 removed_at（旧 2 锚点在）应 ready=false');
@@ -476,6 +511,7 @@ async function verifyDevAssigneesGuardAlignment() {
     await mkComplete(runB);
     await runB(`INSERT INTO sys_issues (id, type, status, assigned_to, assigned_to_name) VALUES (1, 'bug', '处理中', 5, '开发5')`);  // legacy 待迁移行
     await runB(`CREATE TABLE sys_issue_dev_assignees (id INTEGER PRIMARY KEY, user_id INTEGER, user_name TEXT, is_primary INTEGER, notify_status TEXT, notified_at DATETIME, read_at DATETIME, notify_message_key TEXT, notify_error TEXT, removed_at DATETIME)`);  // 缺 issue_id
+    await stubMissingRequiredTables(runB, modB);   // C2a 起：其余 REQUIRED_TABLES 自动补最小桩
     await modB._internals.runSysMigration(null);
     const stB = modB._internals.SYS_SCHEMA_STATE;
     assert.strictEqual(stB.ready, false, 'Case B：缺 issue_id 应 ready=false');

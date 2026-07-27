@@ -137,7 +137,7 @@ async function main() {
   } finally {
     await browser.close();
     try { fs.unlinkSync(tmpPng); } catch (_) {}
-    if (issueId) { const d = await api(adminTok, 'DELETE', `/api/sys-issues/${issueId}`); console.log(`  · 清理测试单 #${issueId}（${d.status}）`); }
+    if (issueId) { const d = await api(adminTok, 'DELETE', `/api/sys-issues/${issueId}`, { reason: '自动化实测收尾清理（C2a 起 reason 必填）' }); console.log(`  · 清理测试单 #${issueId}（${d.status}）`); }
   }
   console.log(`\n  合计 ${pass} PASS / ${fail} FAIL`);
   console.log(fail === 0 ? '  🎉 附件融入各模块 端到端冒烟全部通过\n' : '  🚫 存在失败项\n');

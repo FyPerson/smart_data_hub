@@ -216,8 +216,8 @@ async function main() {
         must(allErrs.length === 0, `B4 控制台无 JS 报错（${allErrs.length} 个${allErrs.length ? ': ' + allErrs.slice(0, 2).join(' | ') : ''}）`);
     } finally {
         await browser.close();
-        if (createdId) { const d = await api(adminToken, 'DELETE', `/api/sys-issues/${createdId}`); console.log(`  · 清理测试单 #${createdId}（${d.status}）`); }
-        if (cBugId) { const d = await api(adminToken, 'DELETE', `/api/sys-issues/${cBugId}`); console.log(`  · 清理 C 回归 bug 单 #${cBugId}（${d.status}）`); }
+        if (createdId) { const d = await api(adminToken, 'DELETE', `/api/sys-issues/${createdId}`, { reason: '自动化实测收尾清理（C2a 起 reason 必填）' }); console.log(`  · 清理测试单 #${createdId}（${d.status}）`); }
+        if (cBugId) { const d = await api(adminToken, 'DELETE', `/api/sys-issues/${cBugId}`, { reason: '自动化实测收尾清理（C2a 起 reason 必填）' }); console.log(`  · 清理 C 回归 bug 单 #${cBugId}（${d.status}）`); }
     }
 
     console.log(`\n  合计 ${pass} PASS / ${fail} FAIL`);

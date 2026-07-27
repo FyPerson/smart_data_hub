@@ -82,7 +82,10 @@ module.exports = (deps) => {
     // ← C0（多开发协作与 commit 留痕重构 v2.9 §9/附录C）新增 3 表：sys_issue_dev_commits / sys_issue_dev_events / sys_issue_release_commit_snapshots
     'sys_issue_dev_commits', 'sys_issue_dev_events', 'sys_issue_release_commit_snapshots',
     // ← C1（受理与排期改造 §12）迁移完成标记表：迁移事务写标记的落点，须存在（否则迁移无处写标记→无限重跑）
-    'sys_schema_migrations'];
+    'sys_schema_migrations',
+    // ← 角色权限重构 C2a：物删审计表。**必须进 readiness 硬清单**——它不在就意味着"删了查不到"，
+    //   而删除是不可逆的；宁可整个 sys 写入口 503，也不放行一个审计写不进去的删除端点。
+    'sys_issue_delete_audit'];
 
   // readiness 复查是"启动期就绪 status-only 抽样"——挑代表性关键不变量列（三侧通知 status 锚点/质量计数/
   //   来源/血缘批次/config 生效时刻），不做全字段全量校验（那是 verify-sys-schema.js 的职责，对齐 corrections
@@ -142,6 +145,9 @@ module.exports = (deps) => {
   //   三处列集漂移（通知改造批1 集成审收口：codex MEDIUM + ultracode 五视角 #5/#6）。
   const SYS_DEV_ASSIGNEES_KEY_COLS = ['issue_id', 'user_id', 'user_name', 'is_primary', 'notify_status',
     'notified_at', 'read_at', 'notify_message_key', 'notify_error', 'removed_at',
+    // ← C2b（角色权限重构）ALTER 追加：notify_sent_by（逐 dev 通知的操作者）。本表是"结构全列在"模型，
+    //   新列必须同步入锚点，否则"表在但缺该列"会被判 ready，随后写入撞 no such column → 通知端点 500。
+    'notify_sent_by',
     // ← C0（多开发协作与 commit 留痕重构 v2.9 §9/附录C）ALTER 追加 4 列：dev_status 四态 + resolved_at + no_code_reason + superseded_by。
     //   本表由「全新表」范式（无 ALTER）首次破例引入 ALTER 演进——C-1 顺序铁律同样适用：ALTER 必须在下方
     //   [2] 复查之前完成（见 runSysMigration [1a-4]）。
@@ -153,6 +159,16 @@ module.exports = (deps) => {
   const SYS_DEV_COMMITS_KEY_COLS = ['issue_id', 'dev_assignee_id', 'dev_user_id', 'component', 'commit_ref', 'created_at', 'updated_at'];
   const SYS_DEV_EVENTS_KEY_COLS = ['issue_id', 'dev_assignee_id', 'related_dev_assignee_id', 'action', 'from_status', 'to_status', 'operator_id', 'reason', 'payload_json', 'created_at'];
   const SYS_RELEASE_COMMIT_SNAPSHOTS_KEY_COLS = ['release_id', 'issue_id', 'snapshot_json', 'created_at'];
+  // ── 角色权限重构 C2a（方案 v1.7 §4-C2a）：物理删除审计表锚点 ──────────────────────────────────
+  //   同上"结构全列在"模型（一次性 CREATE TABLE，无 ALTER 路径）。本表是**不可逆动作的唯一 DB 留证**——
+  //   缺列即审计不完整，宁可 readiness 不放行也不能让删除端点在"审计写不全"的库上跑（fail-closed）。
+  const SYS_DELETE_AUDIT_KEY_COLS = ['issue_id', 'issue_type', 'issue_status', 'issue_title',
+    'issue_created_by', 'issue_created_at', 'attachment_count', 'timeline_count',
+    // ← 对抗审 F1/F2/F7 收口：四张子表的快照与计数（按 issue_id 子表统一枚举，非"挑三张"）
+    'dev_assignee_count', 'dev_commit_count', 'dev_event_count', 'release_snapshot_count',
+    'issue_json', 'timeline_json', 'attachments_json',
+    'dev_assignees_json', 'dev_commits_json', 'dev_events_json', 'release_snapshots_json',
+    'operator_id', 'operator_name', 'reason', 'deleted_at'];
 
   // ── 受阻三件套清理（§⑥ admin 处置后清当前 blocked 字段）：hold/void 处置 + unblock 解除 + 换轮复用 ──────────
   //   F2b 修（ultracode 对抗审）：F2b 让 blocked=1 首次可达后，hold/void 处置 blocked 单必须清 blocked，
@@ -599,6 +615,58 @@ module.exports = (deps) => {
         applied_at TEXT NOT NULL           -- 完成时刻（随迁移事务提交一并写入，失败则不落 → 下次重跑）
       )`, recordSysErr('sys_schema_migrations'));
 
+      // ── 2.10 sys_issue_delete_audit（角色权限重构 C2a，方案 v1.7 §4-C2a）─────────────────────────
+      //   物理删除审计：`DELETE /sys-issues/:id` 会连 sys_issue_timeline 一起清掉，**审计链随单据一起消失**，
+      //   DB 内零痕迹（此前只有 PM2 应用日志记 username——会轮转、不可查询、不是审计表）。生产有 6 个 active admin，
+      //   风险性质 = 误操作 + 事后查不清是谁删了什么（非越权），故本表只解决"查得到"，**不改软删**（方案 §4-C2a）。
+      //
+      //   ⚠️ 三条设计约束，改本表前先读：
+      //   ① **不带 issue_id 外键、不进任何级联清单**——本模块的级联是手写 DELETE（PRAGMA foreign_keys 从未开），
+      //      只要没人写 `DELETE FROM sys_issue_delete_audit` 它就不会被删。这正是"审计表活得比业务行久"的实现方式。
+      //      issue_id 在这里是**历史编号快照**（被删单据的号），不是引用——单据已不存在，不可 JOIN。
+      //   ② **全量 JSON 快照**（issue_json/timeline_json/attachments_json）与计数列并存：计数便于不解 JSON 看规模，
+      //      也是 JSON 完整性的交叉校验（count 与数组长度对不上 = 快照有问题）。只留计数等于知道"有过 12 条证据"
+      //      却不知道是什么，事后照样查不清（方案 v1.7 §0-③）。
+      //   ③ reason NOT NULL——删除是不可逆动作，"为什么删"必须由操作者当场说明（端点 trim 1..200 校验，
+      //      同 DELETE /dev/commits/:commitId 既有范式）。
+      db.run(`CREATE TABLE IF NOT EXISTS sys_issue_delete_audit (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        issue_id INTEGER NOT NULL,                -- 被删单据号（历史快照·非外键·单据已不存在）
+        issue_type TEXT,
+        issue_status TEXT,
+        issue_title TEXT,
+        issue_created_by INTEGER,
+        issue_created_at TEXT,
+        attachment_count INTEGER NOT NULL DEFAULT 0,
+        timeline_count INTEGER NOT NULL DEFAULT 0,
+        -- ⭐ 对抗审 F1/F2/F7 收口：**按 issue_id 子表统一枚举**，不再是"挑三张"。
+        --   初版只快照 issue/timeline/attachments 三份，而带 issue_id 的子表实为 6 张 ——
+        --   dev_assignees 被删却没快照（协作开发名册 + 每人的 C2b notify_sent_by 一起消失，
+        --   "谁给这张被删单的哪个开发发过钉钉"恰好查不到，正是 C2b 存在的理由）；
+        --   dev_commits/dev_events 更是**既没删也没快照**（C0 加表时漏补级联，留永久孤儿行）。
+        dev_assignee_count INTEGER NOT NULL DEFAULT 0,
+        dev_commit_count INTEGER NOT NULL DEFAULT 0,
+        dev_event_count INTEGER NOT NULL DEFAULT 0,
+        release_snapshot_count INTEGER NOT NULL DEFAULT 0,
+        issue_json TEXT NOT NULL,                 -- sys_issues 整行快照（JSON）
+        timeline_json TEXT NOT NULL,              -- 被删 timeline 全部行（JSON 数组·按 id 升序）
+        attachments_json TEXT NOT NULL,           -- 被删附件清单（JSON 数组·含 file_name/original_name/type/size）
+        dev_assignees_json TEXT NOT NULL,         -- 被删协作开发名册（含 removed_at 软删历史行 + 逐人 notify_sent_by）
+        dev_commits_json TEXT NOT NULL,           -- 被删 commit 留痕行
+        dev_events_json TEXT NOT NULL,            -- 被删开发侧事件审计链（含 operator_id/reason）
+        release_snapshots_json TEXT NOT NULL,     -- 被删发布冻结快照（守卫②使其正常为空·见端点注释）
+        operator_id INTEGER NOT NULL,
+        operator_name TEXT NOT NULL,
+        -- reason 带 DB 层 CHECK（codex C2a 审 MED）：NOT NULL 只挡 NULL，挡不住空白/超长。
+        --   本表是全新表（非 ALTER 演进），可直接带 CHECK 上线——同 sys_issue_dev_commits.commit_ref 既有先例。
+        --   意义：端点层校验只覆盖"经端点写入"，而运维直连 SQLite / 未来新端点会绕过它；
+        --   审计契约「不可逆删除必须说明原因」应当由 DB 兜底，而不是靠"大家都记得走端点"。
+        reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 200),
+        deleted_at TEXT NOT NULL
+      )`, recordSysErr('sys_issue_delete_audit'));
+      db.run(`CREATE INDEX IF NOT EXISTS idx_sys_delete_audit_issue ON sys_issue_delete_audit(issue_id)`, recordSysErr('idx_sys_delete_audit_issue'));
+      db.run(`CREATE INDEX IF NOT EXISTS idx_sys_delete_audit_deleted_at ON sys_issue_delete_audit(deleted_at)`, recordSysErr('idx_sys_delete_audit_deleted_at'));
+
       // ── 2.8 sys_issue_release_commit_snapshots（C0，多开发协作与 commit 留痕重构 v2.9 §9/附录C）──────────
       //   发布冻结快照（D3）；UNIQUE(release_id,issue_id) 保证同一 (release_id,issue_id) 生命周期只快照一次
       //   （方案 §8「快照基数与插入语义」，写入用 ON CONFLICT(release_id,issue_id) DO NOTHING，禁 INSERT OR IGNORE
@@ -654,10 +722,16 @@ module.exports = (deps) => {
       //     [F] 不依赖"本次是否 DROP 过"这一标志，只看 sys_issues 表是否存在。
       for (const n of SYS_INTAKE_GATE_TRIGGER_NAMES) await dbRunAsync(`DROP TRIGGER IF EXISTS ${n}`);
 
-      // [1] 表存在性（C0 起 8 表 + C1 起迁移标记表 sys_schema_migrations = 9 表）
+      // [1] 表存在性（C0 起 8 表 + C1 迁移标记表 + C2a 物删审计表 = 10 表）
+      //   ⚠️ **IN 列表由 SYS_REQUIRED_TABLES 动态生成，不再硬编码**（C2a 踩坑根治）：
+      //   原实现把同一份表清单写了两遍——常量里一份、这条 SQL 的 IN 里一份。C2a 新增 sys_issue_delete_audit
+      //   时只加了常量，表明明建成了却被判"缺失"（IN 里没有 → 查不回来 → filter 认定缺）。
+      //   这类"两份清单必然漂移"的缺口不会报语法错，只会在下一个加表的人身上再犯一次，故改为单一来源派生。
+      const tablePh = SYS_REQUIRED_TABLES.map(() => '?').join(',');
       const tables = await new Promise((resolve, reject) => {
         db.all(
-          "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('sys_releases','sys_issues','sys_issue_timeline','sys_issue_attachments','sys_issue_dev_assignees','sys_issue_dev_commits','sys_issue_dev_events','sys_issue_release_commit_snapshots','sys_schema_migrations')",
+          `SELECT name FROM sqlite_master WHERE type='table' AND name IN (${tablePh})`,
+          SYS_REQUIRED_TABLES,
           (err, rows) => err ? reject(err) : resolve((rows || []).map(r => r.name))
         );
       });
@@ -777,6 +851,27 @@ module.exports = (deps) => {
         ['gate_deferred_at', 'DATETIME'],   // NULL=无 deferred；非空=曾在此刻被 GATE 判定"全完成态但资格未过"，等待资格修复端点消费
       ];
       await alterAddMissingCols('sys_issues', GATE_DEFERRED_COLS, 'codex 100 号 HIGH-1 GATE 纵深方案 A（deferred 标记）');
+
+      // [1a-5b] ⭐ 角色权限重构 C2b（方案 v1.7 §4-C2b·承 codex 167 号 HIGH-2）：五个通知通道补 `*_sent_by`。
+      //   背景：生产有 6 个 active admin + 受理人 = **7 个可能触发者**，而 creator/requester/relay/
+      //   release_assignee/dev 五个通道只记了"发过没、成没成、message_key"，**没记谁发的** ——
+      //   事后无法区分是谁给业务方发了那条钉钉。
+      //   ⭐ 本片是**复刻不是设计**：`tech_lead` 通道早有 `tech_lead_notify_sent_by` + §8.3 不变量
+      //   （`sent/failed ⟹ sent_by 非空`，`recordSysTechLeadNotify` 对非正整数 sentBy 直接抛契约错），
+      //   这里把同一套范式铺到另外五个通道。
+      //   ALTER 不带 CHECK（同 relay_notify_status / needs_release 先例）：值域由服务层守卫 + verify 断言兜底。
+      //   **历史行 sent_by 为 NULL 可接受**（迁移前无从追溯谁发的），不变量只约束迁移后的新投递。
+      //   ⚠️ 顺序铁律同 [1a]：必须在下方 [2] 复查之前（子表列已入 SYS_DEV_ASSIGNEES_KEY_COLS「全列在」锚点）。
+      const NOTIFY_SENT_BY_ISSUE_COLS = [
+        ['notify_sent_by', 'INTEGER'],                      // dev 侧（主表 notify_*·仅自动派发路径写·详见 recordSysDevNotify 注释）
+        ['requester_notify_sent_by', 'INTEGER'],            // 业务方侧——**唯一对外发声通道**，本片最核心的一列
+        ['creator_notify_sent_by', 'INTEGER'],              // 建单人侧
+        ['relay_notify_sent_by', 'INTEGER'],                // 对接人侧（通道随 C0 关闭 path B 正在退场，仍补齐以免留半拉子不变量）
+        ['release_assignee_notify_sent_by', 'INTEGER'],     // 上线开发侧（单条端点 + 批量端点两个写点共用）
+      ];
+      await alterAddMissingCols('sys_issues', NOTIFY_SENT_BY_ISSUE_COLS, '角色权限重构 C2b·五通道通知操作者留痕');
+      await alterAddMissingCols('sys_issue_dev_assignees', [['notify_sent_by', 'INTEGER']],
+        '角色权限重构 C2b·逐 dev 子表通知操作者留痕');
 
       // [1a-6] ⭐ C1（受理与排期改造 §8 Schema 迁移 + §12 存量迁移）：sys_issues 补 11 列（受理/排期/技术负责人通知）+
       //   状态映射（待评估/已排期 → 待指派）+ intake_required 归一化到 0/1。**单一原子迁移**（方案 §12 步骤8·codex 128-M）：
@@ -1044,7 +1139,9 @@ module.exports = (deps) => {
       //   HISTORICAL_SNAPSHOT_MISSING 降级逻辑留给 C3 read-status 端点按此组合判读（不新增标记列，任务书 §批1 口径）。
       //   生产 sys_issues=0 行，本缺口生产不可达；测试库验证见 verify-sys-bug-migration.js。
 
-      // [2] 八表关键列 PRAGMA 复查（抽样锚点，非全字段；[1a]/[1a-2]/[1a-4] ALTER 后的最新列集）
+      // [2] 九表关键列 PRAGMA 复查（抽样锚点，非全字段；[1a]/[1a-2]/[1a-4] ALTER 后的最新列集）
+      //   ⚠️ 表数随 SYS_REQUIRED_TABLES 增长（C2a 起含 sys_issue_delete_audit）——新增表建完必须同时进
+      //   SYS_REQUIRED_TABLES（表在）与本 checks（列全），只进一处会留"表在但列缺"的半成品放行缺口。
       const checks = [
         ['sys_issues', SYS_ISSUES_KEY_COLS],
         ['sys_releases', SYS_RELEASES_KEY_COLS],
@@ -1055,6 +1152,8 @@ module.exports = (deps) => {
         ['sys_issue_dev_commits', SYS_DEV_COMMITS_KEY_COLS],
         ['sys_issue_dev_events', SYS_DEV_EVENTS_KEY_COLS],
         ['sys_issue_release_commit_snapshots', SYS_RELEASE_COMMIT_SNAPSHOTS_KEY_COLS],
+        // ← C2a 物删审计表（角色权限重构）：结构全列在才放行——审计列缺失 = 删除留不下证据，fail-closed 到 503。
+        ['sys_issue_delete_audit', SYS_DELETE_AUDIT_KEY_COLS],
       ];
       for (const [tbl, keyCols] of checks) {
         const cols = await new Promise((resolve, reject) => {
@@ -1515,7 +1614,8 @@ module.exports = (deps) => {
     // M2：代表实变时随主 UPDATE 一并重置（同一 UPDATE 语句内，非另开一条——避免"选举 UPDATE 成功、重置 UPDATE
     //   失败"的半写状态；失败按现有事务范式自然向上抛错回滚，不 .catch(warn) 静默吞，同状态机字段 UPDATE 三件套精神）。
     const notifyResetSql = repChanged
-      ? `, notify_status = 'not_sent', notified_at = NULL, notify_message_key = NULL, notify_error = NULL, read_at = NULL`
+      ? `, notify_status = 'not_sent', notified_at = NULL, notify_message_key = NULL, notify_error = NULL, read_at = NULL` +
+        `, notify_sent_by = NULL`   // C2b：not_sent ⟹ sent_by 空（留着会造出「没发过、却记着谁发的」违约行）
       : '';
 
     // ⚠️ M2（91 号审）assigned_at 语义拍板：assigned_at = **roster 首次形成时间**，代表变化（含换人）不推进——
@@ -2345,7 +2445,7 @@ module.exports = (deps) => {
       }
 
       if (rawAssignMode === 'A') {
-        await dispatchSysNotify(newId, 'notifyAssignedDeveloper');   // best-effort，同旧版 assign 动作的通知标记
+        await dispatchSysNotify(newId, 'notifyAssignedDeveloper', actor.id);   // best-effort，同旧版 assign 动作的通知标记
       }
 
       const respBody = { id: newId, type, status: finalStatus };
@@ -2479,7 +2579,7 @@ module.exports = (deps) => {
         try { await sysRollback(); } catch (_) { /* ignore */ }
         throw txErr;
       }
-      await dispatchSysNotify(id, 'notifyAssignedDeveloper');
+      await dispatchSysNotify(id, 'notifyAssignedDeveloper', actor.id);
       res.json({ id, assigned_to: primaryRow.user_id, assigned_to_name: primaryRow.user_name, dev_assignees: devAssignees, status: targetStatus });
     } catch (err) { sendSysTransitionError(res, err); }
   });
@@ -2626,7 +2726,7 @@ module.exports = (deps) => {
       //   变化"——旧判定会在"只加协作、代表未变"时误发重复通知，也会在"纯移除导致代表被动换人"时漏发；
       //   代表真实变化才是"需要通知新负责人"的准确信号）。
       if (repChanged && newRepUserId !== null) {
-        await dispatchSysNotify(id, 'notifyAssignedDeveloper');
+        await dispatchSysNotify(id, 'notifyAssignedDeveloper', actor.id);
         await syncSysChatAddDev(id, newRepUserId);
       }
       const devAssignees = await fetchActiveDevAssignees(id);
@@ -3469,10 +3569,13 @@ module.exports = (deps) => {
       const id = parsePositiveId(req.params.id);
       if (!id) return res.status(400).json({ error: '无效的迭代单 ID', code: 'INVALID_SYS_ISSUE_ID' });
       try {
-        const r = await sysIssueTransition(id, action, null, sysActor(req), req.body || {});
+        // C2b（codex 审 MED）：actor 取一次复用 —— 流转的操作者与通知的 sent_by 必须**同源**，
+        //   双取虽当前等价，但一旦 sysActor 引入派生字段/请求态就会分叉，而这是审计字段。
+        const actor = sysActor(req);
+        const r = await sysIssueTransition(id, action, null, actor, req.body || {});
         // notifyAfterCommit：return→notifyReturnedToDeveloper（发 dev）/ reopen→notifyAssignedDeveloper（发 dev）/
         //   submit→notifySubmittedToAdmin（dispatch 内早返回不发）/ 其余 null（dispatch 早返回）。best-effort。
-        await dispatchSysNotify(id, r.notifyAfterCommit);
+        await dispatchSysNotify(id, r.notifyAfterCommit, actor.id);
         res.json({ id, status: r.toStatus, action });
       } catch (err) { sendSysTransitionError(res, err); }
     };
@@ -4024,7 +4127,7 @@ module.exports = (deps) => {
               result = { ok: false, reason: (prepOrSendErr && prepOrSendErr.message) || 'notify_exception' };
             }
             // record 在 try 外：通知尝试无论准备/发送哪步失败都落 failed（record 自身 DB 写失败无法自证·由外层 catch 记 warn）。
-            await recordSysCreatorNotify(id, !!(result && result.ok), result && result.message_key, result && result.reason);
+            await recordSysCreatorNotify(id, !!(result && result.ok), result && result.message_key, result && result.reason, actor.id);
           }
         }
       } catch (notifyErr) { logger.warn('[系统迭代] 退改通知建单人失败（不影响流转）:', notifyErr && notifyErr.message); }
@@ -4378,23 +4481,55 @@ module.exports = (deps) => {
       if (row.type === 'bug') {
         return res.status(409).json({ error: '该功能已下线，bug 上线流程请改用「批量指定上线开发」+「执行上线」', code: 'LEGACY_RELEASE_FLOW_DISABLED' });
       }
-      const r = await sysIssueTransition(id, 'confirm-online-norelease', null, sysActor(req), req.body || {});
-      await dispatchSysNotify(id, r.notifyAfterCommit);
+      const actor = sysActor(req);   // C2b：流转 actor 与通知 sent_by 同源，不双取
+      const r = await sysIssueTransition(id, 'confirm-online-norelease', null, actor, req.body || {});
+      await dispatchSysNotify(id, r.notifyAfterCommit, actor.id);
       res.json({ id, status: r.toStatus, action: 'confirm-online-norelease' });
     } catch (err) { sendSysTransitionError(res, err); }
   });
 
   // ── DELETE /sys-issues/:id：物理删除迭代单（admin 专用·不可逆·2026-07-07）──────────
-  //   场景：admin 单人清理测试/脏单。物理删除（非 void 软删）——sys_issues 主表 + 三张子表全清 + 附件磁盘文件。
+  //   场景：清理测试/脏单。物理删除（非 void 软删）——sys_issues 主表 + **六张 issue_id 子表**全清 + 附件磁盘文件。
+  //   ⚠️ 原文写"admin **单人**清理"是单 admin 时代的化石（生产实为 6 个 active admin）；
+  //     "三张子表"同样是化石（C0 后带 issue_id 的子表已达 6 张）——两处都已按事实更正。
   //   ⚠️ 级联必须手动做：本库从未开 PRAGMA foreign_keys=ON（子表 FK ON DELETE CASCADE 仅自文档、运行不生效，
   //     见 sys_issue_timeline 建表注释），故显式 DELETE 每张子表，否则留孤儿（timeline / 附件行 / 协作开发通知行）。
   //   守边界（方案 a）：拒删「被别的单派生引用（origin）」或「已挂上线批次（release_id）」的单——防悬空引用 / 破坏
   //     批次成员一致性。真要删这类单说明有特殊情况，应单独处置，不让删除按钮默默替决策。
   //   通知数据落点：creator/requester/release_assignee 三侧通知快照在 sys_issues 主表列（删主行即清）；
   //     协作开发通知在 sys_issue_dev_assignees（删子表即清）——两处都在本级联范围内，零残留。
+  //
+  //   ⭐ 角色权限重构 C2a（方案 v1.7 §4-C2a·codex 167 号 HIGH-1）：**删前先写 sys_issue_delete_audit**。
+  //     背景：本端点原注释写「场景：admin **单人**清理测试/脏单」——那是"系统里只有一个 admin"时代的化石，
+  //     生产实为 **6 个 active admin**，每人都能不可逆物删他人单，且 `DELETE FROM sys_issue_timeline`
+  //     把审计链一并抹掉，DB 内零痕迹（仅 PM2 日志记 username：会轮转、不可查询、非审计表）。
+  //     用户 2026-07-27 拍板：6 人皆自己人可信 → 风险性质是"误操作 + 事后查不清"而非越权 →
+  //     **只补审计留痕，不拆 admin 权限、不改软删**（软删要动 origin 引用完整性 / 附件磁盘保留策略 /
+  //     "清理测试脏单"这个真实场景，改动面远大于收益）。
+  //   ⚠️ 三条不变量（改本段前先读）：
+  //     ① **审计写在同一事务内、且在 DELETE 之前**——审计写失败即整体 rollback。
+  //        ⚠️ **成立域到此为止：sys 模块内**（对抗审 F5 收口·原文写的是无条件的"结构性排除"，那是绝对词失准）。
+  //        跨模块不成立：本项目单个共享 sqlite3 连接，sys mutex 只串行化 sys 模块自己的事务点，
+  //        而 corrections/collab 等模块另有 20+ 处**裸 BEGIN**（catch 里例行 ROLLBACK）。
+  //        若删除事务的某个 await 空隙里，另一模块的请求在同一连接上 BEGIN 撞出 nested-transaction 错误，
+  //        它的 catch-ROLLBACK 回滚的是**本删除事务** → 审计 INSERT 被撤销、后续 DELETE 退化 autocommit
+  //        逐条提交 → 终态恰是"删了但没记"+子表孤儿。该机制在 collab e2e T18 **已复现过**
+  //        （见 sysTxnMutex 段注释），根治=全局 DB 事务锁，属 [[collab_transaction_mutex_p3_todo]] P3 债。
+  //        本片不局部硬拧（局部锁救不了跨模块），改为：**表述收窄 + 失败路径留 CRITICAL 线索**（见下方 catch）。
+  //     ② 快照必须在 DELETE **之前**读（删后就没有了）：单据整行 + timeline 全部行 + 附件清单。
+  //     ③ reason 必填——不可逆动作要求操作者当场说明"为什么删"（trim 1..200，body 传，
+  //        同 DELETE /dev/commits/:commitId 既有范式）。**这是契约变更**：前端删除弹窗已同 commit 加输入框，
+  //        6 个 playwright 实测脚本的收尾清理调用也同批补了 reason（它们只打日志不断言，漏改会静默留脏单）。
+  //   ℹ️ 已知取舍（codex C2a 复审 LOW·不改）：快照在事务内一次性读出并序列化，体积随该单 timeline/附件行数
+  //     线性增长，持锁时间同理。当前 admin 低频 + 单据规模小，且"删前完整快照"正是本片目标，
+  //     不为此牺牲完整性；若将来出现超大单据再考虑规模提示或上限保护。
   router.delete('/sys-issues/:id', authenticateToken, requireSysSchemaReady, requireAdmin, async (req, res) => {
     const id = parsePositiveId(req.params.id);
     if (!id) return res.status(400).json({ error: '无效的迭代单 ID', code: 'INVALID_SYS_ISSUE_ID' });
+    // C2a：reason 必填（入事务前先校，省一次无谓持锁）
+    const reason = (typeof (req.body || {}).reason === 'string' ? req.body.reason.trim() : '');
+    if (!reason || reason.length > 200) return res.status(400).json({ error: '删除原因必填（trim 1..200，经 body 传）', code: 'VALIDATION' });
+    const actor = sysActor(req);
     try {
       // 【codex 44 审 H-1/H-2 采纳】守卫读 + 附件清单读全部下沉到 sysBeginImmediate 之后：
       //   所有 sys 写路径（建单/派生/挂批次/传附件）都走同一模块级全局锁（见本文件 sysBeginImmediate 注释），
@@ -4404,7 +4539,10 @@ module.exports = (deps) => {
       let titleForLog = '';
       await sysBeginImmediate();
       try {
-        const row = await dbGetAsync('SELECT id, title, release_id FROM sys_issues WHERE id = ?', [id]);
+        //   C2a：守卫读由 `SELECT id, title, release_id` 扩为 **`SELECT *`** —— 同一行既做守卫判定又做审计快照，
+        //   一次读两用（不再单独跑一条快照查询，也就不存在"两次读之间行被改"的窗口）。
+        //   列举式 SELECT 在这里是错的：本表 60+ 列且仍在演进，审计要的正是"删除当时的全貌"，漏列即漏证。
+        const row = await dbGetAsync('SELECT * FROM sys_issues WHERE id = ?', [id]);
         if (!row) { await sysRollback(); return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' }); }
         titleForLog = row.title || '';
         // 守卫①：有派生子单（被引用为 origin）→ 删母单会让子单 origin_issue_id 悬空，拒删。
@@ -4414,9 +4552,68 @@ module.exports = (deps) => {
         if (row.release_id) { await sysRollback(); return res.status(409).json({ error: '该单已加入上线批次，不可删除', code: 'SYS_ISSUE_IN_RELEASE' }); }
 
         // 附件磁盘文件清单：持锁后读，与下方 DELETE 处于同一持锁窗口（防读后删前被传新附件 → 只删库不删盘）。
-        atts = await dbAllAsync('SELECT file_name FROM sys_issue_attachments WHERE issue_id = ?', [id]);
+        //   C2a：由 `SELECT file_name` 扩为 **`SELECT *`**（原只取 file_name 供磁盘删除）——同一次查询两用：
+        //   下方磁盘删除仍只读 `a.file_name`，审计则拿到整行。三份快照口径统一为"整行"，理由见下方 timeline 段。
+        atts = await dbAllAsync(
+          `SELECT * FROM sys_issue_attachments WHERE issue_id = ? ORDER BY id`, [id]);
 
-        // 先删三张 issue_id 子表，再删主表（PRAGMA OFF 下顺序不影响 FK，但逻辑自洽）。
+        // ⭐ C2a 审计快照（必须在 DELETE 之前读——删完就没有了）：单据整行（上方 row）+ 附件清单（上方 atts）
+        //   + 下面这**四张 issue_id 子表**的整行快照。
+        //   ⚠️ **`SELECT *` 不是偷懒，是契约**（codex C2a 审 HIGH）：初版这里列举了 11 列，当时确实一列不漏，
+        //   但 timeline 表是演进中的（历史上加过 action_code / ref_id / round_no），挑列快照会在下一次加列时
+        //   **静默漏证**——而漏的恰恰是"删除时刻的完整审计链"，事后无从发现。与上方 issue 快照同一口径。
+        //
+        // ⭐⭐ **子表清单必须与下方 DELETE 清单逐张对齐**（对抗审 F1/F2/F7 收口）：
+        //   初版快照三份（issue/timeline/attachments）、DELETE 三张（dev_assignees/attachments/timeline），
+        //   两份清单**互不相同且都不完整** —— dev_assignees 删了没快照、dev_commits/dev_events 既没删也没快照。
+        //   带 issue_id 的子表实为 **6 张**（timeline / attachments / dev_assignees / dev_commits /
+        //   dev_events / release_commit_snapshots）。加表的人只往 SYS_REQUIRED_TABLES 和 readiness 里加，
+        //   没人回头看"删除端点是不是也要跟着删"——这就是"两份清单必然漂移"在级联场景的实例。
+        //   ⛔ **以后再加带 issue_id 的表，必须同时改这里的快照读、下方的 DELETE、以及 verify 的六表残留断言。**
+        const timelineRows = await dbAllAsync(
+          `SELECT * FROM sys_issue_timeline WHERE issue_id = ? ORDER BY id`, [id]);
+        const devAssigneeRows = await dbAllAsync(
+          `SELECT * FROM sys_issue_dev_assignees WHERE issue_id = ? ORDER BY id`, [id]);
+        const devCommitRows = await dbAllAsync(
+          `SELECT * FROM sys_issue_dev_commits WHERE issue_id = ? ORDER BY id`, [id]);
+        const devEventRows = await dbAllAsync(
+          `SELECT * FROM sys_issue_dev_events WHERE issue_id = ? ORDER BY id`, [id]);
+        //   release_commit_snapshots：守卫②（已挂批次拒删）使它在正常路径下**恒为空**——
+        //   有快照 ⟹ 曾发布过 ⟹ release_id 非空 ⟹ 上面就被 409 拦了。仍然读+删+快照，
+        //   理由是"靠另一个守卫保证为空"是**跨条件的间接论证**，一旦守卫②口径变化（例如将来允许删已发布单）
+        //   这里会静默留孤儿。显式处理的成本是两行，不值得省。
+        const releaseSnapshotRows = await dbAllAsync(
+          `SELECT * FROM sys_issue_release_commit_snapshots WHERE issue_id = ? ORDER BY id`, [id]);
+
+        // 审计行先落库：写失败 → 抛 → 外层 catch rollback → 业务行一条不删（"删了但没记"被结构性排除）。
+        await dbRunAsync(
+          `INSERT INTO sys_issue_delete_audit
+             (issue_id, issue_type, issue_status, issue_title, issue_created_by, issue_created_at,
+              attachment_count, timeline_count, dev_assignee_count, dev_commit_count, dev_event_count,
+              release_snapshot_count,
+              issue_json, timeline_json, attachments_json,
+              dev_assignees_json, dev_commits_json, dev_events_json, release_snapshots_json,
+              operator_id, operator_name, reason, deleted_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, datetime('now','localtime'))`,
+          [id, row.type, row.status, row.title, row.created_by, row.created_at,
+           atts.length, timelineRows.length, devAssigneeRows.length, devCommitRows.length,
+           devEventRows.length, releaseSnapshotRows.length,
+           JSON.stringify(row), JSON.stringify(timelineRows), JSON.stringify(atts),
+           JSON.stringify(devAssigneeRows), JSON.stringify(devCommitRows),
+           JSON.stringify(devEventRows), JSON.stringify(releaseSnapshotRows),
+           actor.id, actor.name, reason]);
+
+        // 删**全部六张** issue_id 子表，再删主表。
+        //   ⚠️ **顺序按依赖从叶子到根**（收口审 MED）：`dev_commits`/`dev_events` 通过 `dev_assignee_id`
+        //   引用 `dev_assignees`，故先删前两者。当前 `PRAGMA foreign_keys` 未开启，顺序不影响执行；
+        //   但一旦将来开启，反过来的顺序会直接违反外键约束 —— 让顺序与真实依赖一致是零成本的未来兼容。
+        //   ⚠️ 原注释写的是"先删三张子表"——那是 2026-07-07 的化石，C0（多开发协作与 commit 留痕重构）
+        //   新增 dev_commits/dev_events/release_commit_snapshots 三张带 issue_id 的表时没回头补这里，
+        //   于是 commit 留痕与开发侧事件审计链在物删后成为**永久孤儿**（sys_issues 是 AUTOINCREMENT，
+        //   id 不复用，故不会张冠李戴，但"零残留"这个承诺一直是假的）。对抗审 F7 抓出。
+        await dbRunAsync('DELETE FROM sys_issue_dev_commits WHERE issue_id = ?', [id]);            // 叶：引用 dev_assignees.id
+        await dbRunAsync('DELETE FROM sys_issue_dev_events WHERE issue_id = ?', [id]);            // 叶：引用 dev_assignees.id
+        await dbRunAsync('DELETE FROM sys_issue_release_commit_snapshots WHERE issue_id = ?', [id]);
         await dbRunAsync('DELETE FROM sys_issue_dev_assignees WHERE issue_id = ?', [id]);
         await dbRunAsync('DELETE FROM sys_issue_attachments WHERE issue_id = ?', [id]);
         await dbRunAsync('DELETE FROM sys_issue_timeline WHERE issue_id = ?', [id]);
@@ -4428,6 +4625,14 @@ module.exports = (deps) => {
         await sysCommit();
       } catch (txErr) {
         try { await sysRollback(); } catch (_) { /* ignore */ }
+        //   ⭐ 对抗审 F5 收口：物删是**不可逆**动作，其事务异常与普通端点不同级 ——
+        //   若异常发生在"部分 DELETE 已被 autocommit 提交"之后（跨模块事务纠缠场景，见上方不变量①），
+        //   业务行可能已经没了、而审计行被回滚掉，DB 内不留任何线索。
+        //   这条 CRITICAL 日志是那种情况下**唯一的人工补审计入口**：带单据摘要与操作者，
+        //   使运维能据此重建"谁在什么时候试图删了什么"。正常回滚路径也会打——宁可多打。
+        logger.error(`[系统迭代][CRITICAL] 物理删除事务异常 #${id} —— 若业务行已消失而审计表无对应行，` +
+          `请据本条人工补审计：operator=${actor.id}/${actor.name}·reason=${reason.replace(/[\r\n\t]+/g, ' ').slice(0, 120)}·` +
+          `title=${String(titleForLog).slice(0, 80)}·err=${(txErr && txErr.message) || txErr}`);
         throw txErr;
       }
       // COMMIT 成功后才物理删附件文件（DB 为准；文件删失败留 orphan，不影响已提交的 DB 删除，无幽灵行）。
@@ -4441,7 +4646,12 @@ module.exports = (deps) => {
           logger.warn(`[系统迭代] 物理删除 #${id} 附件文件未删除（可能已不存在或删除受阻，留待人工核对）：${a.file_name}`);
         }
       }
-      logger.info(`用户 ${req.user.username} 物理删除迭代单 #${id}（${titleForLog}）+ ${atts.length} 个附件${fileDelFailed ? `（其中 ${fileDelFailed} 个文件未删除，见 warn）` : ''}`);
+      //   C2a：应用日志保留（便于运维时序排查），但**它不再是唯一留痕**——权威留证在 sys_issue_delete_audit
+      //   （可查询、不轮转、含快照与 reason）。日志带上 reason 便于 grep 时一眼看清动机。
+      //   ⚠️ reason 是管理员自由输入，进日志前**单行化 + 截断**（codex C2a 审 LOW）：换行会把一条日志
+      //   撕成多行、破坏按行 grep，也让日志可被输入内容"伪造成多条记录"。审计表存完整原文，日志只求可读。
+      const reasonForLog = reason.replace(/[\r\n\t]+/g, ' ').slice(0, 120);
+      logger.info(`用户 ${req.user.username} 物理删除迭代单 #${id}（${titleForLog}）+ ${atts.length} 个附件${fileDelFailed ? `（其中 ${fileDelFailed} 个文件未删除，见 warn）` : ''}·原因：${reasonForLog}`);
       return res.json({ ok: true, id });
     } catch (err) {
       if (err instanceof SysTransitionError) return sendSysTransitionError(res, err);   // SYS_BUSY 等保 503
@@ -4522,7 +4732,7 @@ module.exports = (deps) => {
         try { await sysRollback(); } catch (_) { /* ignore */ }
         throw txErr;
       }
-      await dispatchSysNotify(id, 'notifyEstimateToCreatorAndRequester');   // 仅发需求方侧；creator 侧本期 not_sent（M-4）；best-effort
+      await dispatchSysNotify(id, 'notifyEstimateToCreatorAndRequester', actor.id);   // 仅发需求方侧；creator 侧本期 not_sent（M-4）；best-effort
       res.json({ id, dev_estimated_at: est });
     } catch (err) {
       if (err instanceof SysTransitionError) return sendSysTransitionError(res, err);   // F2：SYS_BUSY 等保 503
@@ -4655,7 +4865,7 @@ module.exports = (deps) => {
       //   （/estimate 被 ESTIMATE_REQUIRES_FEASIBILITY 闸门拒），若此处不派发，这一整类单的需求方永远收不到「预计完成」通知。
       //   口径：可行/有条件可行 → 工作推进，发需求方·预计完成（creator 侧 not_sent，同 estimate）；不可行 → 工作不推进，不发。
       if (conclusion === '可行' || conclusion === '有条件可行') {
-        await dispatchSysNotify(id, 'notifyEstimateToCreatorAndRequester');
+        await dispatchSysNotify(id, 'notifyEstimateToCreatorAndRequester', actor.id);
       }
       // 不可行结论：返回标记（前端提示联系建单人处置；不阻断本动作，阻断在 submit）
       res.json({ id, feasibility_conclusion: conclusion, not_feasible: conclusion === '不可行' });
@@ -5943,7 +6153,8 @@ module.exports = (deps) => {
       if (rel.release_type === 'bug') {
         return res.status(409).json({ error: '该功能已下线，bug 批次请改用「执行上线」流程', code: 'LEGACY_RELEASE_FLOW_DISABLED' });
       }
-      const r = await publishReleaseTransition(id, sysActor(req), req.body || {});
+      const actor = sysActor(req);   // C2b：发布 actor 与后台派发的 sent_by 同源
+      const r = await publishReleaseTransition(id, actor, req.body || {});
       const releasedIds = r.releasedIssueIds || [];
       // 批次通知逐单发需求方·已上线（§6.2：状态先提交成功）。ultracode 审 #4：批次可达 200 单（C4 上限），
       //   N 条钉钉网络发送串行 await 在响应前会阻塞 HTTP 响应至超时（504），而批次其实已发布成功。
@@ -5955,7 +6166,10 @@ module.exports = (deps) => {
       //     "只有一个人会点发布"这个前提不成立，6 人可并发启动多个最多 200 单的后台循环。当前仍不引入持久队列，
       //     但依据改为「内网低频 + 有手动补发兜底」，并已记入 backlog：若真出现并发批量发布，需加进程级有界队列 + 并发上限。
       res.json({ id, status: '已发布', released: releasedIds, count: r.count });
-      (async () => { for (const iid of releasedIds) await dispatchSysNotify(iid, 'notifyReleasedToRequester'); })().catch(() => { /* dispatch 内已 best-effort，此处兜底防 unhandledRejection */ });
+      //   ⚠️ C2b：actorId 在**进入后台循环前**捕获为局部值（不在闭包里现读 req）——后台循环跑在响应之后，
+      //     让它依赖请求对象的生命周期是没必要的耦合；审计归属应在发起那一刻就定下来。
+      const releaseActorId = actor.id;
+      (async () => { for (const iid of releasedIds) await dispatchSysNotify(iid, 'notifyReleasedToRequester', releaseActorId); })().catch(() => { /* dispatch 内已 best-effort，此处兜底防 unhandledRejection */ });
     } catch (err) { sendSysTransitionError(res, err); }
   });
 
@@ -6017,7 +6231,7 @@ module.exports = (deps) => {
         try { await sysRollback(); } catch (_) { /* ignore */ }
         throw txErr;
       }
-      await dispatchSysNotify(issueId, 'notifyReleasedToRequester');   // hotfix 单条发需求方·已上线（best-effort）
+      await dispatchSysNotify(issueId, 'notifyReleasedToRequester', actor.id);   // hotfix 单条发需求方·已上线（best-effort）
       res.status(201).json({ issue_id: issueId, release_id: releaseId, release_no: releaseNo, status: '已上线', count: result.count });
     } catch (err) {
       // A（codex M-1）：hotfix 自动号极端竞态撞 UNIQUE 时转 409（不退化为 500 + 原始 SQLite 错误外泄）
@@ -6134,7 +6348,8 @@ module.exports = (deps) => {
             `UPDATE sys_issues SET release_assignee_id = ?, release_assignee_name = ?,
                release_assignee_notify_status = 'not_sent', release_assignee_notified_at = NULL,
                release_assignee_notify_message_key = NULL, release_assignee_notify_error = NULL,
-               release_assignee_read_at = NULL, updated_at = datetime('now','localtime')
+               release_assignee_read_at = NULL, release_assignee_notify_sent_by = NULL,
+               updated_at = datetime('now','localtime')
                WHERE id = ? AND type = 'bug' AND status = '待上线' AND release_id IS NULL
                  AND release_assignee_id IS NOT NULL AND release_assignee_id <> ?`,
             [devId, devName, r.id, devId]
@@ -6472,23 +6687,113 @@ module.exports = (deps) => {
     try { const r = await dbRunAsync(sql, params); await sysCommit(); return r; }
     catch (e) { try { await sysRollback(); } catch (_) { /* ignore */ } throw e; }
   }
+  // ⭐ 对抗审 F8 收口：**投递历史**与**投递状态**分离。
+  //   问题：`*_notify_sent_by` 是**轮次状态列**，四个重置点（换代表 / 换执行人 / 回受理门 / 重发咨询）
+  //   都会按不变量 `not_sent ⟹ sent_by 空` 把它清成 NULL —— 这个不变量本身是对的（否则会造出
+  //   "没发过却记着谁发的"的矛盾行，Fable 主张"不变量在为信息销毁背书"这半被 GPT 核推翻了）。
+  //   但真问题在另一半：**手动通知从不写 timeline**，于是重置一发生，
+  //   "上一轮那条钉钉是谁发的"就在全库消失 —— C2b 的审计承诺**只在当前轮次内成立**。
+  //   修法：状态列照旧重置，另外补一条**只增不改**的 timeline 留痕（'note' + action_code='notify_sent'）。
+  //   为什么用 timeline 而不是新建 sys_notify_log 表：timeline 本就是本模块的 append-only 审计链、
+  //   已有 operator_id/operator_name/created_at 三列语义完全对口，且详情页已经在渲染它——
+  //   新建表要连带做查询、渲染、readiness、级联与快照（刚被 F1/F7 教育过），成本远大于收益。
+  //   ⚠️ 本函数是 **best-effort**：留痕失败不能影响"通知已发出"这个既成事实，也不能回滚业务，
+  //   故内部自吞异常只记 warn（与通知落库同为 best-effort 语义）。
+  async function recordSysNotifyTimeline(issueId, channel, recipientDesc, ok, messageKeyOrErr, actor) {
+    try {
+      //   ⚠️ 收口审 MED-security：留痕长期保存，而 messageKey/错误串可能夹带 token 片段、手机号、
+      //   HTTP 响应体。统一走 sanitizeAuditText（去控制字符 + 掩手机号 + 长 hash 串替换 + 截断）。
+      const who = recipientDesc ? sanitizeAuditText(recipientDesc, 60) : '(未知收件人)';
+      const tail = ok ? `message_key=${sanitizeAuditText(messageKeyOrErr, 40)}` : `失败=${sanitizeAuditText(messageKeyOrErr || 'other', 40)}`;
+      await dbRunAsync(
+        `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, operator_id, operator_name)
+         VALUES (?, 'note', ?, 'notify_sent', ?, ?)`,
+        [issueId, `发送${channel}通知 → ${who}：${ok ? '成功' : '失败'}（${tail}）`,
+         Number(actor && actor.id) || null, (actor && actor.name) || null]);
+    } catch (e) {
+      logger.warn(`[系统迭代] 通知留痕写入失败 #${issueId} ${channel}: ${(e && e.message) || e}`);
+    }
+  }
+
+  // ⭐ 角色权限重构 C2b（方案 v1.7 §4-C2b）：五通道 sent_by 统一契约守卫 —— **照抄 recordSysTechLeadNotify
+  //   的既有范式**（本文件下方 §8.3 段），不是新设计。
+  //   语义：sent_by = **本次投递的责任人**。手动通道 = 点发送按钮的人；自动派发通道 = **引发本次通知的
+  //   流转操作者**（谁做了 estimate / 发布 / 打回）。两者共用同一条不变量，不分列。
+  //   为什么非正整数要**抛错**而不是写 NULL：写 NULL 会静默产出违反 `sent/failed ⟹ sent_by 非空` 的行，
+  //   而这类行事后无法与"迁移前的历史行"区分 —— 审计表里混进说不清来源的行，比当场失败糟得多。
+  //   调用方均为 best-effort 通知路径（外层已 catch），抛错不会打断业务事务。
+  //   ⚠️ 比 tech_lead 原范式**多一格严**：原守卫只判 `sb > 0`，`1.5` 这类非整数能过。sent_by 是 users.id，
+  //   小数写进去就是查不回人的脏数据，故这里补 Number.isInteger。下方 recordSysTechLeadNotify 已改为
+  //   复用本函数 —— 六通道 + tech_lead 共用**同一个**守卫，不留"两套略不同的校验"这种必然漂移的结构。
+  //   ⚠️ 类型面刻意收窄到 number | 十进制整数字符串（codex C2b 审 MED）：
+  //   裸 `Number(x)` 会把 `true` 归一成 1、`' 13 '` 归一成 13 —— 前者会把审计归属**错记到 user 1 头上**，
+  //   而"错记"比"没记"更糟（查审计的人会得到一个看起来可信的错误答案）。审计字段宁可当场失败。
+  function assertNotifySentBy(fnName, sentBy) {
+    const okType = typeof sentBy === 'number'
+      || (typeof sentBy === 'string' && /^[1-9]\d*$/.test(sentBy));   // 不接受前后空白/前导零/符号
+    const sb = okType ? Number(sentBy) : NaN;
+    if (!Number.isSafeInteger(sb) || !(sb > 0)) {
+      throw new Error(`${fnName}: sent_by 必须为正整数（不变量 sent/failed⟹sent_by 非空）·实际=${typeof sentBy}:${String(sentBy)}`);
+    }
+    return sb;
+  }
+
+  // ⭐ 收口审 MED：**通知回写零命中必须留可 grep 的线索**（对抗审 F6 的真正兜底）。
+  //   场景：钉钉**已经真的发出去了**，但回写 UPDATE 命中 0 行 —— 单据在发送的秒级窗口里被删了 /
+  //   收件人被改派（CAS 围栏拒写）/ 子表行被软删。此前四个走 `sysNotifyWrite` 的 helper 直接丢弃 changes，
+  //   于是"外部消息已送达、库内零痕迹"这种最难查的情况**连一条日志都没有**。
+  //   ⚠️ 为什么不能靠 F8 那条 timeline 兜底（我原本的推理有漏洞，收口审指出）：单据已删时，
+  //   那条 timeline 要么写不进去、要么变成指向已删单据的**孤儿行**，反而与"删除后六表全清"自相矛盾。
+  //   故这里落**应用日志**（不是审计表）——它的定位就是"排时序用的线索"，与 C2a 的权威留证分工不同。
+  function warnNotifyWriteMissed(channel, issueId, sentBy, ok, detail, runResult) {
+    if (runResult && runResult.changes > 0) return;
+    logger.warn(`[系统迭代][通知回写零命中] channel=${channel} issue=#${issueId} sent_by=${sentBy} ` +
+      `外部发送=${ok ? '成功' : '失败'}(${sanitizeAuditText(detail, 60)}) —— ` +
+      `钉钉可能已实际送达但库内无处落（单据已删 / 收件人已变更 / 成员行已软删），此日志是唯一线索`);
+  }
+
+  // 审计/留痕文本清洗（收口审 MED-security）：留痕会长期保存，而错误串可能夹带 token 片段、
+  //   手机号、HTTP 响应体。统一在这里去控制字符 + 掩手机号 + 截断，再落库。
+  function sanitizeAuditText(s, maxLen = 80) {
+    return String(s == null ? '' : s)
+      .replace(/[\r\n\t]+/g, ' ')
+      .replace(/1[3-9]\d{9}/g, m => `${m.slice(0, 3)}****${m.slice(7)}`)   // 夹带的手机号一并掩码
+      .replace(/[a-f0-9]{32,}/gi, '[hash]')                                 // token/密钥样式的长串
+      .slice(0, maxLen);
+  }
+
   // 三侧落库 helper（read_at 在每次新发送时一并重置——新 message_key 后旧已读时刻失去意义；失败时同样清，failed=无可读消息）。
-  async function recordSysDevNotify(issueId, ok, messageKey, error) {
-    await sysNotifyWrite(
+  //   ⚠️ C2b 诚实标注：本函数**当前无可达调用路径** —— 唯一调用者 sendSysDevNotify 只服务自动派发
+  //   （dispatchSysNotify），而 isAutoNotifyEnabled 现恒 false，对所有 type 早返回。补 sent_by 仍是必要的：
+  //   将来若恢复自动派发，缺 actor 会在这里**当场抛契约错**（fail-closed），而不是静默写出一批无操作者的行。
+  async function recordSysDevNotify(issueId, ok, messageKey, error, sentBy) {
+    const sb = assertNotifySentBy('recordSysDevNotify', sentBy);
+    const r = await sysNotifyWriteRun(
       `UPDATE sys_issues SET notify_status=?, notified_at=datetime('now','localtime'),
-              notify_message_key=?, notify_error=?, read_at=NULL WHERE id=?`,
-      [ok ? 'sent' : 'failed', ok ? messageKey : null, ok ? null : (error || 'other'), issueId]);
+              notify_message_key=?, notify_error=?, read_at=NULL, notify_sent_by=? WHERE id=?`,
+      [ok ? 'sent' : 'failed', ok ? messageKey : null, ok ? null : (error || 'other'), sb, issueId]);
+    warnNotifyWriteMissed('dev主表', issueId, sb, ok, ok ? messageKey : error, r);
+    return r;
   }
   // requester 落库 helper 扩展落 phone_snapshot（通知改造 C3 H-5/M-A）：每次实际尝试发送（无论成败）都把
   //   本次使用的手机号固化进 requester_notify_phone_snapshot——首次发送=当前 requester_phone；此后任何
   //   重发/自动再触发都读快照（sendSysRequesterNotify 内 phoneToUse 已按此口径解析），故这里"再写一次快照"
   //   对已有快照是幂等 no-op、对首次发送是"落快照"动作，单一写点不分裂。
-  async function recordSysRequesterNotify(issueId, ok, messageKey, error, phoneSnapshot) {
-    await sysNotifyWrite(
+  //   ⭐ C2b：requester 是**唯一对业务方发声**的通道，也正是 167 号 HIGH-2 点名的场景——
+  //   "谁给业务方发了那条钉钉"必须查得到。可达路径 = 手动 notify-requester 端点（actor 现成）
+  //   + 自动派发（当前总闸关闭，不可达）。
+  async function recordSysRequesterNotify(issueId, ok, messageKey, error, phoneSnapshot, sentBy) {
+    const sb = assertNotifySentBy('recordSysRequesterNotify', sentBy);
+    const r = await sysNotifyWriteRun(
       `UPDATE sys_issues SET requester_notify_status=?, requester_notified_at=datetime('now','localtime'),
               requester_notify_message_key=?, requester_notify_error=?, requester_read_at=NULL,
+              requester_notify_sent_by=?,
               requester_notify_phone_snapshot=COALESCE(requester_notify_phone_snapshot, ?) WHERE id=?`,
-      [ok ? 'sent' : 'failed', ok ? messageKey : null, ok ? null : (error || 'other'), phoneSnapshot || null, issueId]);
+      [ok ? 'sent' : 'failed', ok ? messageKey : null, ok ? null : (error || 'other'), sb, phoneSnapshot || null, issueId]);
+    //   ⚠️ requester 是唯一对**业务方**发声的通道 —— "钉钉发出去了、库里却没落"在这一路后果最重
+    //   （业务方拿着消息来问，而平台查不到任何记录）。零命中必须留线索。
+    warnNotifyWriteMissed('业务方', issueId, sb, ok, ok ? messageKey : error, r);
+    return r;
   }
   // 对接人侧落库（通知改造 C3 G7，relay_* 5 列，与三侧 notify_status 处理同构）。
   //   ⭐ 角色权限重构 C0（codex 第三轮审 MED-1）：WHERE 补 `relay_notified_user_id=?` 收件人围栏。
@@ -6499,19 +6804,23 @@ module.exports = (deps) => {
   //      以及"校验已过、清理发生在发送与回写之间"的在途请求，都仍可达。）
   //     修法取 codex 的低成本方案：把**发起发送时的收件人**作为 CAS 条件——清空后旧回调零命中，
   //     无需新增版本列（与 tech_lead 侧的 request_event_id 围栏同构，只是复用现成列）。
-  async function recordSysRelayNotify(issueId, ok, messageKey, error, relayUserId) {
+  async function recordSysRelayNotify(issueId, ok, messageKey, error, relayUserId, sentBy) {
+    const sb = assertNotifySentBy('recordSysRelayNotify', sentBy);
     return await sysNotifyWriteRun(
       `UPDATE sys_issues SET relay_notify_status=?, relay_notified_at=datetime('now','localtime'),
-              relay_notify_message_key=?, relay_notify_error=?, relay_read_at=NULL
+              relay_notify_message_key=?, relay_notify_error=?, relay_read_at=NULL, relay_notify_sent_by=?
          WHERE id=? AND relay_notified_user_id=?`,
-      [ok ? 'sent' : 'failed', ok ? messageKey : null, ok ? null : (error || 'other'), issueId, relayUserId]);
+      [ok ? 'sent' : 'failed', ok ? messageKey : null, ok ? null : (error || 'other'), sb, issueId, relayUserId]);
   }
   // 建单人侧落库（通知改造 C3 G8，creator_notify_* 5 列，C1a 已建列·本 commit 起首次接入写路径）。
-  async function recordSysCreatorNotify(issueId, ok, messageKey, error) {
-    await sysNotifyWrite(
+  async function recordSysCreatorNotify(issueId, ok, messageKey, error, sentBy) {
+    const sb = assertNotifySentBy('recordSysCreatorNotify', sentBy);
+    const r = await sysNotifyWriteRun(
       `UPDATE sys_issues SET creator_notify_status=?, creator_notified_at=datetime('now','localtime'),
-              creator_notify_message_key=?, creator_notify_error=?, creator_read_at=NULL WHERE id=?`,
-      [ok ? 'sent' : 'failed', ok ? messageKey : null, ok ? null : (error || 'other'), issueId]);
+              creator_notify_message_key=?, creator_notify_error=?, creator_read_at=NULL, creator_notify_sent_by=? WHERE id=?`,
+      [ok ? 'sent' : 'failed', ok ? messageKey : null, ok ? null : (error || 'other'), sb, issueId]);
+    warnNotifyWriteMissed('建单人', issueId, sb, ok, ok ? messageKey : error, r);
+    return r;
   }
   // 技术负责人侧落库（受理排期改造 §6·C5·9 列 tech_lead_notify_*）。
   //   ⚠️ 与 creator/relay 范式关键差异：WHERE 加 `tech_lead_notify_request_event_id=?`——**条件更新拒过期回写**（§6·codex 128-M/130-H）：
@@ -6528,8 +6837,9 @@ module.exports = (deps) => {
     // §8.3 契约守卫（codex C5 HIGH-3）：
     //   ① sent/failed 都要求 sent_by 正整数——sentBy 非正整数是调用方 bug（应传 actor.id）·抛契约错（由调用方 best-effort catch 兜·不静默写非法行）。
     //   ② sent⟹message_key 非空——ok=true 但发送器漏返 message_key = 软失败（复刻 issue-tracker「message_key 缺失即判失败」范式）·降级 failed(message_key_missing)·杜绝「sent 但 message_key 空」违约行。
-    const sb = Number(sentBy);
-    if (!(sb > 0)) throw new Error(`recordSysTechLeadNotify: sent_by 必须为正整数（§8.3 sent/failed⟹sent_by 非空）·实际=${sentBy}`);
+    //   C2b：改为复用统一守卫 assertNotifySentBy（语义不变、多判一格整数）——原地重复实现的那版
+    //   与 C2b 五通道的守卫是同一条规则的两处表达，留着必然漂移。
+    const sb = assertNotifySentBy('recordSysTechLeadNotify', sentBy);
     let effectiveOk = !!ok, mk = messageKey, err = error;
     if (effectiveOk && (messageKey == null || messageKey === '')) { effectiveOk = false; err = 'message_key_missing'; mk = null; }
     return await sysNotifyWriteRun(
@@ -6539,46 +6849,80 @@ module.exports = (deps) => {
       [effectiveOk ? 'sent' : 'failed', effectiveOk ? mk : null, effectiveOk ? null : (err || 'other'), sb, issueId, requestEventId]);
   }
   // 上线执行开发侧落库（通知改造 follow-up 2026-07-07，release_assignee_notify_* 5 列，镜像 creator 范式）。
-  async function recordSysReleaseExecutorNotify(issueId, ok, messageKey, error) {
-    await sysNotifyWrite(
+  //   ⭐ 对抗审 F3 收口：**补收件人 CAS 围栏**（`AND release_assignee_id=?`）。
+  //   缺口：本函数原先只按 id 更新，而发送在锁外、耗时秒级。时序 ——
+  //     T1 admin A 点"通知上线开发"（此刻执行人=5）→ 钉钉发送在途
+  //     T2 admin B 调 reassign-release-dev 换执行人为 6 → 事务内原子重置 5 列 + sent_by=NULL
+  //     T3 A 的回调落库（无围栏）→ 把刚重置的行写成 sent + sent_by=A
+  //   终态：执行人=6、状态=sent、sent_by=A，**而钉钉实际发给的是 5**；此后批量端点的②态闸判
+  //   ALREADY_NOTIFIED 拒发 → **新执行人永远收不到通知**，界面还显示"已通知"。
+  //   查审计得到"A 通知了 6"这个**看起来可信的错误答案** —— 正是 C2b 自己写下的"错记比没记更糟"。
+  //   ⚠️ 这是 relay 通道（C0 审 MED-1）修过的**同一种缺陷的另一处实例**：relay 有 CAS、tech_lead 有版本围栏，
+  //   唯独 release_executor 两者皆无。「修一个洞要顺手找它的同构兄弟」这条教训，这次是在自己身上应验的。
+  //   返回 run 结果供调用方判 changes（0=在途期间已换人，本次回写作废）。
+  async function recordSysReleaseExecutorNotify(issueId, ok, messageKey, error, sentBy, releaseAssigneeId) {
+    const sb = assertNotifySentBy('recordSysReleaseExecutorNotify', sentBy);
+    const fence = Number(releaseAssigneeId);
+    if (!(fence > 0)) throw new Error(`recordSysReleaseExecutorNotify: 缺收件人围栏 releaseAssigneeId（防换人后回写污染新执行人）·实际=${releaseAssigneeId}`);
+    return await sysNotifyWriteRun(
       `UPDATE sys_issues SET release_assignee_notify_status=?, release_assignee_notified_at=datetime('now','localtime'),
-              release_assignee_notify_message_key=?, release_assignee_notify_error=?, release_assignee_read_at=NULL WHERE id=?`,
-      [ok ? 'sent' : 'failed', ok ? messageKey : null, ok ? null : (error || 'other'), issueId]);
+              release_assignee_notify_message_key=?, release_assignee_notify_error=?, release_assignee_read_at=NULL,
+              release_assignee_notify_sent_by=? WHERE id=? AND release_assignee_id=?`,
+      [ok ? 'sent' : 'failed', ok ? messageKey : null, ok ? null : (error || 'other'), sb, issueId, fence]);
   }
   // 开发协作子表逐 dev 落库（通知改造 C3 G9）：定位 = (issue_id, user_id, removed_at IS NULL) 活动行（§6.1 M-2），
   //   软删历史行不参与——WHERE 天然排除，若并发中该行恰被软删，changes=0，本函数吞（best-effort 通知写，不抛）。
-  async function recordSysDevAssigneeNotify(issueId, userId, ok, messageKey, error) {
-    await sysNotifyWrite(
+  //   ⭐ 对抗审 F4 收口：定位从 `(issue_id, user_id, removed_at IS NULL)` 改为**行主键**。
+  //   缺口：原条件的设计意图是"行被软删则 changes=0 静默吞"，但它只挡"删"、不挡"**删了又加**"——
+  //     T1 受理人点通知 dev5 → 钉钉在途
+  //     T2 协调人移除 dev5（软删 R1）后又重新加回 dev5 → 生成新行 R2（新一轮，not_sent/sent_by=NULL）
+  //     T3 T1 的回写按 (issue_id,user_id,removed_at IS NULL) 唯一命中的是 **R2**
+  //   于是 R2 带着上一轮的投递结果与操作者出生：成功则显示"已通知"而新一轮内容从未发出，
+  //   失败则新行一出生就是 failed + 红标。与 relay 的跨轮污染同构，只是这里连代际标识都没有。
+  //   修法取最低成本：handler 早就查出了 devRow.id，直接拿它当围栏，**无需新增列**。
+  async function recordSysDevAssigneeNotify(issueId, devAssigneeRowId, ok, messageKey, error, sentBy) {
+    const sb = assertNotifySentBy('recordSysDevAssigneeNotify', sentBy);
+    const rowId = Number(devAssigneeRowId);
+    if (!(rowId > 0)) throw new Error(`recordSysDevAssigneeNotify: 需传 sys_issue_dev_assignees 行主键（防"移除→重加"跨代污染）·实际=${devAssigneeRowId}`);
+    const r = await sysNotifyWriteRun(
       `UPDATE sys_issue_dev_assignees SET notify_status=?, notified_at=datetime('now','localtime'),
-              notify_message_key=?, notify_error=?, read_at=NULL
-        WHERE issue_id=? AND user_id=? AND removed_at IS NULL`,
-      [ok ? 'sent' : 'failed', ok ? messageKey : null, ok ? null : (error || 'other'), issueId, userId]);
+              notify_message_key=?, notify_error=?, read_at=NULL, notify_sent_by=?
+        WHERE id=? AND issue_id=? AND removed_at IS NULL`,
+      [ok ? 'sent' : 'failed', ok ? messageKey : null, ok ? null : (error || 'other'), sb, rowId, issueId]);
+    //   零命中 = 该成员行在发送窗口内被软删（或整单被删）。原实现"静默吞"是有意的（best-effort），
+    //   但静默的代价是"钉钉已发、库里无痕"完全不可查 —— 保留不抛，改为留一条线索。
+    warnNotifyWriteMissed('开发(子表)', issueId, sb, ok, ok ? messageKey : error, r);
+    return r;
   }
 
   // dev 侧发送（收件人 = assigned_to → users.id/phone/dingtalk_user_id；§8.2）。
   //   ⚠️ 本函数只服务【自动派发】路径（dispatchSysNotify，对 bug 早返回不触达——现只有变更流 feature/improvement
   //   会走到这里）——单开发 + 主表 notify_* 语义在通知改造后对变更流保持零回归。bug 的手动逐 dev 通知走
   //   G9（notify-developer 端点）+ recordSysDevAssigneeNotify（子表），两条路径按 type 天然分流，互不覆盖。
-  async function sendSysDevNotify(issue, marker, baseUrl) {
-    if (!issue.assigned_to) { await recordSysDevNotify(issue.id, false, null, 'no_assignee'); return; }
+  //   C2b：新增 sentBy 入参（= 引发本次自动派发的流转操作者 id）——由 dispatchSysNotify 一路透传自各端点的 actor。
+  async function sendSysDevNotify(issue, marker, baseUrl, sentBy) {
+    if (!issue.assigned_to) { await recordSysDevNotify(issue.id, false, null, 'no_assignee', sentBy); return; }
     const dev = await dbGetAsync('SELECT id, display_name, phone, dingtalk_user_id FROM users WHERE id = ?', [issue.assigned_to]);
-    if (!dev) { await recordSysDevNotify(issue.id, false, null, 'dev_not_found'); return; }
+    if (!dev) { await recordSysDevNotify(issue.id, false, null, 'dev_not_found', sentBy); return; }
     const { title, md } = buildSysDevMarkdown(issue, marker, baseUrl);
     const result = await sendIssueDingtalkRaw(dev, title, md);
-    await recordSysDevNotify(issue.id, !!result.ok, result.message_key, result.reason);
+    await recordSysDevNotify(issue.id, !!result.ok, result.message_key, result.reason, sentBy);
   }
 
   // 需求方侧发送（收件人 = requester_phone 反查钉钉号；业务方无平台账号；§8.2）。
   //   通知改造 C3 H-5/M-A 收件人快照：phoneToUse 优先取已落的 requester_notify_phone_snapshot（"重发"场景——
   //   一旦首次实际尝试过发送，后续一律认准同一快照，不受当前 requester_phone 被清空/改号影响）；
   //   快照为空（真正首次发送，或历史 pre-C1a 无快照旧数据不适用——生产 0 行不可达）才退回当前 requester_phone。
-  async function sendSysRequesterNotify(issue, kind, baseUrl) {
+  //   C2b：新增 sentBy 入参 —— 手动 notify-requester 端点传点按钮的人；自动派发路径传引发流转的 actor。
+  //   ⚠️ 注意「无需求方直接 return」这一支**不落库也不需要 sentBy**（保持 not_sent，见下方 ultracode #2 注释），
+  //   所以 sentBy 的契约校验发生在真正落库的两条路径上，不会把"根本没发"误判为契约违规。
+  async function sendSysRequesterNotify(issue, kind, baseUrl, sentBy) {
     const phoneToUse = issue.requester_notify_phone_snapshot || issue.requester_phone;
     // ultracode 审 #2：无需求方（内部自发现单常见，requester 三字段+快照皆空）→ 无人可通知，保持 not_sent（不算失败）。
     //   否则每张内部单 estimate/已上线后都被打成 requester『failed』，C6 满屏假失败红标 + admin 无意义重试。
     //   区分『有需求方但缺手机号』(→failed) 与『根本无需求方』(→保持 not_sent)。
     if (!phoneToUse && !issue.requester_name && !issue.requester_dept) return;
-    if (!phoneToUse) { await recordSysRequesterNotify(issue.id, false, null, 'requester_phone_empty', null); return; }
+    if (!phoneToUse) { await recordSysRequesterNotify(issue.id, false, null, 'requester_phone_empty', null, sentBy); return; }
     let extra = null;
     if (kind === 'released' && issue.release_id) {
       const rel = await dbGetAsync('SELECT version_tag, release_note FROM sys_releases WHERE id = ?', [issue.release_id]);
@@ -6593,7 +6937,7 @@ module.exports = (deps) => {
     //      投递**、只是无法跟踪已读→消息已到该人，必须固化（否则 admin 误以为没发去改号，重发到新号=违反 M-A"重发认同一人"）。
     //   ③ 成功=固化。成功后再失败重发传 null→COALESCE 保留成功快照不被抹。
     const requesterDispatched = result.ok || result.reason === 'message_key_missing';
-    await recordSysRequesterNotify(issue.id, !!result.ok, result.message_key, result.reason, requesterDispatched ? phoneToUse : null);
+    await recordSysRequesterNotify(issue.id, !!result.ok, result.message_key, result.reason, requesterDispatched ? phoneToUse : null, sentBy);
   }
 
   // ── 交互优化 C2：自动通知总开关（具名策略函数，替代原 type==='bug' 早返回）──────────────
@@ -6610,7 +6954,18 @@ module.exports = (deps) => {
   }
 
   // 通知派发主入口（端点在事务提交后 await 调用；marker = transition.notifyAfterCommit）。
-  async function dispatchSysNotify(issueId, marker) {
+  //   ⭐ C2b 新增第三个入参 `actorId`（方案 v1.7 §4-C2b）：自动派发通道的 `sent_by` 语义 =
+  //   **引发本次通知的流转操作者**（谁做了 estimate / 发布 / 打回），与手动通道「谁点了发送」并列，
+  //   共用同一条不变量。9 个调用点全部显式传入。
+  //   ⚠️ 为什么在"自动派发当前恒关"的情况下仍要透传：这条参数把「恢复自动派发时必须提供操作者」
+  //   结构性地钉住了 —— 缺 actor 会在 record 层**当场抛契约错**（fail-closed），
+  //   而不是静默写出一批 sent_by 为空、事后与历史行无法区分的记录。
+  //   ⚠️ **准确说 fail-closed 发生在"真正落库那一刻"，不是本函数入口**（codex C2b 复审 LOW·如实标注）：
+  //   不落库的分支（marker 为空 / 总闸关闭 / 无需求方早返回）不会校验 actorId，错值会被静默带过。
+  //   **刻意不在入口加守卫**：本函数被 9 处调用，其中多数 marker 根本不发送；入口抛错会沿调用栈
+  //   传到端点的 catch（如 sendSysTransitionError），把一次 **best-effort 通知**升级成**业务请求 500**
+  //   —— 通知失败不该打断已经提交成功的业务流转，这条边界比"更早失败"更重要。
+  async function dispatchSysNotify(issueId, marker, actorId) {
     if (!marker) return;
     // 本期不发的 marker（admin 自身，§8.1 + 用户拍板）：早返回不查库不发——submit→admin / blocked→admin。
     //   estimate 的 creator 侧不发由 estimate 分支内部只走需求方侧实现（creator 字段保持 not_sent）。
@@ -6628,13 +6983,13 @@ module.exports = (deps) => {
       switch (marker) {
         case 'notifyAssignedDeveloper':
         case 'notifyReturnedToDeveloper':
-          await sendSysDevNotify(issue, marker, baseUrl);
+          await sendSysDevNotify(issue, marker, baseUrl, actorId);
           break;
         case 'notifyEstimateToCreatorAndRequester':
-          await sendSysRequesterNotify(issue, 'estimate', baseUrl);   // 仅需求方侧；creator 侧本期 not_sent（M-4）
+          await sendSysRequesterNotify(issue, 'estimate', baseUrl, actorId);   // 仅需求方侧；creator 侧本期 not_sent（M-4）
           break;
         case 'notifyReleasedToRequester':
-          await sendSysRequesterNotify(issue, 'released', baseUrl);
+          await sendSysRequesterNotify(issue, 'released', baseUrl, actorId);
           break;
         default:
           logger.warn('[系统迭代] 未知通知标记: ' + marker);
@@ -6748,7 +7103,8 @@ module.exports = (deps) => {
       const issue = await dbGetAsync('SELECT * FROM sys_issues WHERE id = ?', [id]);
       if (!issue) return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' });
       // 授权走统一守卫（C1 后 developer 通道 = 全类型 admin ∨ 受理人[13]；守卫另负责 type 门限与未知通道 fail-closed）。
-      const devAuthErr = sysManualNotifyGuard(issue, 'developer', sysActor(req));
+      const actor = sysActor(req);   // C2b（codex 审 MED）：授权判定与 sent_by 同源，一个 handler 只取一次 actor
+      const devAuthErr = sysManualNotifyGuard(issue, 'developer', actor);
       if (devAuthErr) return res.status(devAuthErr.status).json(devAuthErr.body);
       const devStatuses = sysNotifyStatusesFor(issue.type, 'developer');
       if (!devStatuses.includes(issue.status)) return res.status(409).json({ error: `当前状态（${issue.status}）不可通知开发`, code: 'STATUS_NOT_NOTIFIABLE' });
@@ -6760,7 +7116,7 @@ module.exports = (deps) => {
       );
       if (!devRow) return res.status(409).json({ error: '该开发不在本单指派子表中（可能已被移除）', code: 'DEV_ASSIGNEE_NOT_FOUND' });
       // C2a 自指守卫：目标确认在册后，本人不能给自己发（仅 developer 通道）。
-      if (Number(devUserId) === Number(sysActor(req).id)) {
+      if (Number(devUserId) === Number(actor.id)) {
         return res.status(403).json({ error: '不能给自己发送通知', code: 'SELF_NOTIFY_FORBIDDEN' });
       }
       const dev = await dbGetAsync('SELECT id, display_name, phone, dingtalk_user_id FROM users WHERE id = ?', [devUserId]);
@@ -6772,7 +7128,11 @@ module.exports = (deps) => {
       const baseUrl = await getSafePlatformBaseUrl();
       const { title, md } = buildSysDevMarkdown(issue, marker, baseUrl);
       const result = await sendIssueDingtalkRaw(dev, title, md);
-      await recordSysDevAssigneeNotify(id, devUserId, !!result.ok, result.message_key, result.reason);
+      //   对抗审 F4：传**行主键** devRow.id（上方 :7030 已查出）而非 user_id —— 软删后重加会生成新行，
+      //   按 (issue_id,user_id) 定位会让本轮回写落到下一轮的新行上。
+      await recordSysDevAssigneeNotify(id, devRow.id, !!result.ok, result.message_key, result.reason, actor.id);
+      //   对抗审 F8：状态列会被重置抹掉，历史投递另落一条只增 timeline（谁在何时发给了谁、成没成）
+      await recordSysNotifyTimeline(id, '开发', `${dev.display_name || dev.username || ''}(id${devUserId})`, !!result.ok, result.ok ? result.message_key : result.reason, actor);
       const fresh = await dbGetAsync('SELECT notify_status, notify_error FROM sys_issue_dev_assignees WHERE id = ?', [devRow.id]);
       res.json({ id, dev_user_id: devUserId, notify_status: fresh.notify_status, notify_error: fresh.notify_error });
     } catch (err) { logger.error('[系统迭代] 手动通知开发失败:', err && err.message); res.status(500).json({ error: (err && err.message) || '通知开发失败' }); }
@@ -6787,7 +7147,8 @@ module.exports = (deps) => {
       const issue = await dbGetAsync('SELECT * FROM sys_issues WHERE id = ?', [id]);
       if (!issue) return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' });
       // C2a：授权走统一守卫（relay 通道：bug=仅 admin / 变更流=永远拒绝 MANUAL_NOTIFY_CHANNEL_NA·无对接人角色）。
-      const relayAuthErr = sysManualNotifyGuard(issue, 'relay', sysActor(req));
+      const actor = sysActor(req);   // C2b：同上，授权与 sent_by 同源
+      const relayAuthErr = sysManualNotifyGuard(issue, 'relay', actor);
       if (relayAuthErr) return res.status(relayAuthErr.status).json(relayAuthErr.body);
       if (!issue.relay_notified_user_id) return res.status(409).json({ error: '该单未指定通知对接人', code: 'NO_RELAY_USER_TO_NOTIFY' });
       if (!isSysBugLiaison(issue.relay_notified_user_id)) return res.status(409).json({ error: '通知对接人已不在白名单，无法发送', code: 'RELAY_USER_NOT_WHITELISTED' });
@@ -6799,7 +7160,8 @@ module.exports = (deps) => {
       const result = await sendIssueDingtalkRaw(relayUser, title, md);
       // ⭐ C0（codex 三轮审 MED-1）：带上**发起发送时**捕获的收件人做 CAS 围栏——若这期间单据被
       //   reactivate/resubmit 清空了 relay 目标（回受理门=新一轮），本次回写零命中，不污染新轮次。
-      const rec = await recordSysRelayNotify(id, !!result.ok, result.message_key, result.reason, issue.relay_notified_user_id);
+      const rec = await recordSysRelayNotify(id, !!result.ok, result.message_key, result.reason, issue.relay_notified_user_id, actor.id);
+      await recordSysNotifyTimeline(id, '对接人', `${issue.relay_notified_user_name || ''}(id${issue.relay_notified_user_id})`, !!result.ok, result.ok ? result.message_key : result.reason, actor);   // 对抗审 F8
       if (!rec || rec.changes !== 1) {
         // 回写被围栏拒绝：单据已进入新一轮（relay 目标被清或换人）。不是错误，但要如实告知调用方，
         //   免得前端按"已发送"渲染——外部钉钉消息可能已实际送达，这一点由 §14 业务接受项承担。
@@ -6858,7 +7220,8 @@ module.exports = (deps) => {
       const baseUrl = await getSafePlatformBaseUrl();
       const { title, md } = buildSysCreatorMarkdown(issue, baseUrl);
       const result = await sendIssueDingtalkRaw(creator, title, md);
-      await recordSysCreatorNotify(id, !!result.ok, result.message_key, result.reason);
+      await recordSysCreatorNotify(id, !!result.ok, result.message_key, result.reason, actor.id);
+      await recordSysNotifyTimeline(id, '建单人', `${creator.display_name || creator.username || ''}(id${issue.created_by})`, !!result.ok, result.ok ? result.message_key : result.reason, actor);   // 对抗审 F8
       const fresh = await dbGetAsync('SELECT creator_notify_status, creator_notify_error FROM sys_issues WHERE id = ?', [id]);
       res.json({ id, creator_notify_status: fresh.creator_notify_status, creator_notify_error: fresh.creator_notify_error });
     } catch (err) { logger.error('[系统迭代] 手动通知建单人失败:', err && err.message); res.status(500).json({ error: (err && err.message) || '通知建单人失败' }); }
@@ -6880,7 +7243,33 @@ module.exports = (deps) => {
       const baseUrl = await getSafePlatformBaseUrl();
       const { title, md } = buildSysReleaseExecutorMarkdown(issue, baseUrl);
       const result = await sendIssueDingtalkRaw(executor, title, md);
-      await recordSysReleaseExecutorNotify(id, !!result.ok, result.message_key, result.reason);
+      //   C2b（codex 复审 MED·核实后判为不适用）：本 handler **没有** handler 内授权守卫——授权全由
+      //   `requireAdmin` 中间件承担（本端点是"仅 admin"，不走 sysManualNotifyGuard），故这里是**单取**
+      //   而非双取，不存在"授权 actor 与 sent_by actor 分叉"的面。其余三个手动通知端点因 handler 内
+      //   还要跑 sysManualNotifyGuard/self-guard，已统一为开头取一次。
+      //   对抗审 F3：传**发起发送时的收件人** issue.release_assignee_id 作 CAS 围栏。
+      //   若在钉钉发送的秒级窗口里有人改派了执行人，回写零命中（changes=0）——宁可不落库，
+      //   也不能把"发给旧执行人的结果"记成"新执行人已通知"（那会让批量②态闸永久跳过他）。
+      const relRec = await recordSysReleaseExecutorNotify(id, !!result.ok, result.message_key, result.reason,
+        sysActor(req).id, issue.release_assignee_id);
+      if (!relRec || relRec.changes !== 1) {
+        //   与 relay 通道同口径：外部钉钉可能已实际送达旧执行人（不可撤回），但库里不记 —— 提示前端重查。
+        logger.warn(`[系统迭代] 通知上线开发回写零命中（在途期间执行人已变更）#${id}`);
+        //   ⚠️ 状态列没落，但**钉钉可能真的发出去了** —— 这种"库里查不到、人却收到了"的情况恰恰最需要留痕。
+        await recordSysNotifyTimeline(id, '上线开发(回写作废)', `${executor.display_name || ''}(id${issue.release_assignee_id})`,
+          !!result.ok, result.ok ? result.message_key : result.reason, sysActor(req));
+        //   ⚠️ 收口审 MED：409 会被读成"没发成"，而事实可能相反 —— 钉钉**已经发给原执行人了**，
+        //   只是结果没落库。响应必须把这两件事分开说，否则操作者不知道原执行人已经收到过一条。
+        return res.status(409).json({
+          error: '上线开发已变更；本次钉钉可能已发给原执行人，结果未落库，请刷新后重新通知当前执行人',
+          code: 'RELEASE_ASSIGNEE_CHANGED_DURING_NOTIFY',
+          external_send_attempted: true,
+          external_send_ok: !!result.ok,
+          stale_recipient_id: issue.release_assignee_id,
+        });
+      }
+      await recordSysNotifyTimeline(id, '上线开发', `${executor.display_name || ''}(id${issue.release_assignee_id})`,
+        !!result.ok, result.ok ? result.message_key : result.reason, sysActor(req));   // 对抗审 F8
       const fresh = await dbGetAsync('SELECT release_assignee_notify_status, release_assignee_notify_error FROM sys_issues WHERE id = ?', [id]);
       res.json({ id, release_assignee_notify_status: fresh.release_assignee_notify_status, release_assignee_notify_error: fresh.release_assignee_notify_error });
     } catch (err) { logger.error('[系统迭代] 手动通知上线开发失败:', err && err.message); res.status(500).json({ error: (err && err.message) || '通知上线开发失败' }); }
@@ -6922,6 +7311,10 @@ module.exports = (deps) => {
         eligibleByDev.get(devId).push(r);
       }
 
+      // ⭐ C2b（codex 审 LOW 采纳）：sent_by 在**进入分组循环前**求一次 —— 一次批量请求只有一个责任人，
+      //   放在循环里会读成"每组可以不同"，与审计语义相反（且重复解析 actor 无意义）。
+      const batchSentBy = assertNotifySentBy('notify-release-executor-batch', sysActor(req).id);
+
       // 按执行人分组：查执行人 → 建合并 markdown → 发一条 → 按组守卫 UPDATE → 据 changes(+回读) 生成每单结果
       for (const [devId, groupRows] of eligibleByDev) {
         const groupIds = groupRows.map(r => r.id);
@@ -6938,12 +7331,16 @@ module.exports = (deps) => {
         // 守卫 UPDATE 的 WHERE 与分类读侧完全同源（type='bug' + status='待上线' + release_assignee_id + ②态）——
         //   codex H-1 [[write_read_same_semantic]]：type 现不可变（无端点改 sys_issues.type）故写侧漏 type 当前不可达，
         //   但读侧分类带了 type='bug'，写侧同源加固防未来加 type 编辑路径破防（零成本）。
+        // ⭐ C2b：本端点**自己拼 UPDATE、不走 recordSysReleaseExecutorNotify**（按组守卫需要 changes 判命中数），
+        //   所以它是第 6 个独立写点 —— 只改 record 函数会让批量路径 sent_by 恒 NULL，
+        //   当场破坏 `sent/failed ⟹ sent_by 非空`。这类"绕过统一 helper 的第二写点"是最容易漏的一种。
         const upd = await sysNotifyWriteRun(
           `UPDATE sys_issues SET release_assignee_notify_status=?, release_assignee_notified_at=datetime('now','localtime'),
-             release_assignee_notify_message_key=?, release_assignee_notify_error=?, release_assignee_read_at=NULL
+             release_assignee_notify_message_key=?, release_assignee_notify_error=?, release_assignee_read_at=NULL,
+             release_assignee_notify_sent_by=?
            WHERE id IN (${gph}) AND type = 'bug' AND release_assignee_id=? AND status='待上线'
              AND COALESCE(release_assignee_notify_status,'not_sent') IN ('not_sent','failed')`,
-          [ok ? 'sent' : 'failed', messageKey, sendErr, ...groupIds, devId]);
+          [ok ? 'sent' : 'failed', messageKey, sendErr, batchSentBy, ...groupIds, devId]);
         const targetStatus = ok ? 'sent' : 'failed';
         if (upd && upd.changes === groupIds.length) {
           // 全部命中（无并发）：直接标结果，免回读
@@ -7000,7 +7397,8 @@ module.exports = (deps) => {
       const issue = await dbGetAsync('SELECT * FROM sys_issues WHERE id = ?', [id]);
       if (!issue) return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' });
       // 授权走统一守卫（C1 后 requester 通道 = 全类型 admin ∨ 受理人[13]）。
-      const reqAuthErr = sysManualNotifyGuard(issue, 'requester', sysActor(req));
+      const actor = sysActor(req);   // C2b：同上
+      const reqAuthErr = sysManualNotifyGuard(issue, 'requester', actor);
       if (reqAuthErr) return res.status(reqAuthErr.status).json(reqAuthErr.body);
       const reqStatuses = sysNotifyStatusesFor(issue.type, 'requester');
       if (!reqStatuses.includes(issue.status)) return res.status(409).json({ error: `当前状态（${issue.status}）不可通知报障人`, code: 'STATUS_NOT_NOTIFIABLE' });   // 排终态矛盾卡片（复审）+ F3 收窄（去处理中）
@@ -7010,8 +7408,13 @@ module.exports = (deps) => {
       }
       const baseUrl = await getSafePlatformBaseUrl();
       const kind = issue.status === '已上线' ? 'released' : 'progress';   // 已上线走 released（带版本，release_id=NULL 时 sendSysRequesterNotify 优雅降级无版本行），否则 progress（当前状态）
-      await sendSysRequesterNotify(issue, kind, baseUrl);   // 落库 requester_notify_*（含快照，H-5/M-A）
+      await sendSysRequesterNotify(issue, kind, baseUrl, actor.id);   // 落库 requester_notify_*（含快照 H-5/M-A + C2b sent_by=点发送的人）
       const fresh = await dbGetAsync('SELECT requester_notify_status, requester_notify_error FROM sys_issues WHERE id = ?', [id]);
+      //   ⭐ 对抗审 F8：requester 是**唯一对业务方发声**的通道，"谁给业务方发了那条钉钉"正是 167 号 HIGH-2 的原问题。
+      //   状态列会被后续轮次重置抹掉，故另落一条只增 timeline。收件人取快照优先（与实际发送口径同源）。
+      await recordSysNotifyTimeline(id, '业务方',
+        maskPhone(issue.requester_notify_phone_snapshot || issue.requester_phone || ''),
+        fresh.requester_notify_status === 'sent', fresh.requester_notify_status === 'sent' ? 'ok' : (fresh.requester_notify_error || 'other'), actor);
       res.json({ id, requester_notify_status: fresh.requester_notify_status, requester_notify_error: fresh.requester_notify_error });
     } catch (err) { logger.error('[系统迭代] 手动通知报障人失败:', err && err.message); res.status(500).json({ error: (err && err.message) || '通知报障人失败' }); }
   });
@@ -7164,6 +7567,17 @@ module.exports = (deps) => {
     SYS_INTAKE_GATE_TRIGGER_NAMES,
     // 角色权限重构 C1：手动通知授权守卫（verify 直调做通道白名单 fail-closed 单元断言）
     sysManualNotifyGuard,
+    // 角色权限重构 C2a：物删审计表锚点
+    SYS_DELETE_AUDIT_KEY_COLS,
+    // 角色权限重构 C2b：**三个测试专用导出** = 契约守卫 assertNotifySentBy + 两个落库 helper。
+    //   导出理由同 snapshotReleaseCommitsInTxn 既有先例——「契约错必须抛而不是静默写 NULL」这条性质，
+    //   经 HTTP 层测不到（端点总是传得出 actor.id），只能直调验证。不导出就等于这条守卫没有断言看着。
+    //   ⚠️ **仅供 verify / 契约测试直调，不是业务调用入口**（codex C2b 审 LOW）：这两个 helper 只做落库，
+    //   绕开了端点侧的授权、状态白名单、self-guard 与收件人解析。业务代码一律走 HTTP 端点。
+    assertNotifySentBy,
+    recordSysCreatorNotify,
+    recordSysDevAssigneeNotify,
+    recordSysReleaseExecutorNotify,   // ← 对抗审 F3 后加入：verify 直调验证 CAS 围栏（换人后旧回写须零命中）
     SYS_REQUIRED_TABLES,
     SYS_ISSUES_KEY_COLS,
     SYS_RELEASES_KEY_COLS,

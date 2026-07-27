@@ -103,7 +103,7 @@ async function main() {
     fs.writeFileSync(attAbs, Buffer.from('89504e470d0a1a0a', 'hex'));
     await run(`INSERT INTO sys_issue_attachments (issue_id, attachment_type, file_name, original_name, uploaded_by, uploaded_by_name) VALUES (100,'delivery','sys-iteration/100/f.png','f.png',5,'开发王')`);
 
-    let r = await call('DELETE', '/api/sys-issues/100', adminTok);
+    let r = await call('DELETE', '/api/sys-issues/100', adminTok, { reason: 'verify 用例删除' });
     assert.strictEqual(r.status, 200, '删除应 200, got ' + r.status + ' ' + JSON.stringify(r.body));
     assert.strictEqual(r.body.ok, true, 'body.ok');
     assert.strictEqual(await cnt('SELECT COUNT(*) n FROM sys_issues WHERE id=100'), 0, '主表残留');
@@ -111,48 +111,55 @@ async function main() {
     assert.strictEqual(await cnt('SELECT COUNT(*) n FROM sys_issue_attachments WHERE issue_id=100'), 0, '附件行残留');
     assert.strictEqual(await cnt('SELECT COUNT(*) n FROM sys_issue_dev_assignees WHERE issue_id=100'), 0, '协作开发行残留');
     assert.strictEqual(fs.existsSync(attAbs), false, '附件磁盘文件残留');
-    ok('级联删除：主表 + timeline + 附件行 + 协作开发行全清 + 附件磁盘文件删除（零残留）');
+    // ⭐ 角色权限重构 C2a：删除是不可逆的，业务行清零的**同时**必须留下审计行。
+    //   本脚本的其余用例已全部改为携带 reason（C2a 起 body.reason 必填，trim 1..200）。
+    //   审计内容的完整校验（快照可还原 / 写失败整体回滚 / 拒删路径不留行）在 verify-sys-delete-audit.js；
+    //   这里放一条**最低限度**的存在性断言——它的作用是：将来若有人把审计写从事务里挪走或删掉，
+    //   删除主脚本自己就会红，而不是只有那个"专测审计"的脚本红（安全性质要在它所属的场景里也被钉住）。
+    assert.strictEqual(await cnt('SELECT COUNT(*) n FROM sys_issue_delete_audit WHERE issue_id=100'), 1,
+      '删除后应留下且仅留下 1 条审计行（C2a：先写审计再删业务行，同事务）');
+    ok('级联删除：主表 + timeline + 附件行 + 协作开发行全清 + 附件磁盘文件删除（零残留）+ **审计行落库**');
 
     // ── [2] 守卫①：有派生子单 → 409，母单保留；子单可删 ──────────
     await insIssue(200, { title: '母单' });
     await insIssue(201, { title: '派生子单', origin_issue_id: 200 });
-    r = await call('DELETE', '/api/sys-issues/200', adminTok);
+    r = await call('DELETE', '/api/sys-issues/200', adminTok, { reason: 'verify 用例删除' });
     assert.strictEqual(r.status, 409, '母单删除应 409, got ' + r.status);
     assert.strictEqual(r.body.code, 'SYS_ISSUE_HAS_DERIVED', 'code');
     assert.strictEqual(await cnt('SELECT COUNT(*) n FROM sys_issues WHERE id=200'), 1, '母单被误删');
     ok('守卫①：有派生子单 → 409 SYS_ISSUE_HAS_DERIVED，母单保留');
 
-    r = await call('DELETE', '/api/sys-issues/201', adminTok);
+    r = await call('DELETE', '/api/sys-issues/201', adminTok, { reason: 'verify 用例删除' });
     assert.strictEqual(r.status, 200, '子单应可删, got ' + r.status);
     assert.strictEqual(await cnt('SELECT COUNT(*) n FROM sys_issues WHERE id=201'), 0, '子单未删');
     assert.strictEqual(await cnt('SELECT COUNT(*) n FROM sys_issues WHERE id=200'), 1, '删子单误伤母单');
     ok('子单可删（origin 指向母单，删子单不影响母单）');
 
-    r = await call('DELETE', '/api/sys-issues/200', adminTok);
+    r = await call('DELETE', '/api/sys-issues/200', adminTok, { reason: 'verify 用例删除' });
     assert.strictEqual(r.status, 200, '派生链清空后母单应可删, got ' + r.status);
     ok('派生链清空后母单可删');
 
     // ── [3] 守卫②：已挂上线批次 → 409 ──────────
     await run(`INSERT INTO sys_releases (id, release_no, status, created_by, created_by_name) VALUES (1,'R-1','计划中',1,'admin')`);
     await insIssue(300, { title: '批次单', release_id: 1 });
-    r = await call('DELETE', '/api/sys-issues/300', adminTok);
+    r = await call('DELETE', '/api/sys-issues/300', adminTok, { reason: 'verify 用例删除' });
     assert.strictEqual(r.status, 409, '批次单删除应 409, got ' + r.status);
     assert.strictEqual(r.body.code, 'SYS_ISSUE_IN_RELEASE', 'code');
     assert.strictEqual(await cnt('SELECT COUNT(*) n FROM sys_issues WHERE id=300'), 1, '批次单被误删');
     ok('守卫②：已挂上线批次 → 409 SYS_ISSUE_IN_RELEASE，单保留');
 
     // ── [4] 边界：不存在 404 / 非 admin 403 / 非法 id 400 ──────────
-    r = await call('DELETE', '/api/sys-issues/999999', adminTok);
+    r = await call('DELETE', '/api/sys-issues/999999', adminTok, { reason: 'verify 用例删除' });
     assert.strictEqual(r.status, 404, '不存在应 404, got ' + r.status);
     assert.strictEqual(r.body.code, 'SYS_ISSUE_NOT_FOUND', 'code');
     ok('不存在单 → 404 SYS_ISSUE_NOT_FOUND');
 
-    r = await call('DELETE', '/api/sys-issues/300', devTok);
+    r = await call('DELETE', '/api/sys-issues/300', devTok, { reason: 'verify 用例删除' });
     assert.strictEqual(r.status, 403, '非 admin 应 403, got ' + r.status);
     assert.strictEqual(await cnt('SELECT COUNT(*) n FROM sys_issues WHERE id=300'), 1, '非 admin 竟删成功');
     ok('非 admin → 403（requireAdmin 中间件先拦，单保留）');
 
-    r = await call('DELETE', '/api/sys-issues/abc', adminTok);
+    r = await call('DELETE', '/api/sys-issues/abc', adminTok, { reason: 'verify 用例删除' });
     assert.strictEqual(r.status, 400, '非法 id 应 400, got ' + r.status);
     assert.strictEqual(r.body.code, 'INVALID_SYS_ISSUE_ID', 'code');
     ok('非法 id → 400 INVALID_SYS_ISSUE_ID');
@@ -165,11 +172,11 @@ async function main() {
     await run(`INSERT INTO sys_releases (id, release_no, status, created_by, created_by_name) VALUES (2,'R-2','计划中',1,'admin')`);
     await insIssue(402, { title: '批次单2', release_id: 2 });
     await insIssue(403, { title: '干净单-可删' });
-    r = await call('DELETE', '/api/sys-issues/400', adminTok);
+    r = await call('DELETE', '/api/sys-issues/400', adminTok, { reason: 'verify 用例删除' });
     assert.strictEqual(r.status, 409, '母单2 守卫应 409, got ' + r.status); assert.strictEqual(r.body.code, 'SYS_ISSUE_HAS_DERIVED');
-    r = await call('DELETE', '/api/sys-issues/402', adminTok);
+    r = await call('DELETE', '/api/sys-issues/402', adminTok, { reason: 'verify 用例删除' });
     assert.strictEqual(r.status, 409, '批次单2 守卫应 409（非 503=锁未泄漏）, got ' + r.status); assert.strictEqual(r.body.code, 'SYS_ISSUE_IN_RELEASE');
-    r = await call('DELETE', '/api/sys-issues/403', adminTok);
+    r = await call('DELETE', '/api/sys-issues/403', adminTok, { reason: 'verify 用例删除' });
     assert.strictEqual(r.status, 200, '连续 2 次守卫失败后干净单应可删（锁未泄漏）, got ' + r.status);
     assert.strictEqual(await cnt('SELECT COUNT(*) n FROM sys_issues WHERE id=403'), 0);
     ok('锁释放回归：连续 2 次守卫失败（事务内 rollback）后干净单仍能拿锁删除（锁无泄漏）');

@@ -25,9 +25,12 @@ const SYS_CLEAR_TECH_LEAD_FIELDS_SQL = [
   'tech_lead_notify_sent_by = NULL',
 ];
 
-// ── 对接人通知 7 列 ──────────────────────────────────────────────────────────
+// ── 对接人通知 8 列（C2b 起含 sent_by）──────────────────────────────────────
 //   relay_notified_user_id 原由 bug path B 建单写入，C0 关闭 path B 后已无业务写入路径。
 //   定性为**轮次状态**（这一轮该通知谁），非永久审计字段（审计留痕在 timeline）。
+//   ⭐ C2b：`relay_notify_sent_by` 必须一并清 —— 不变量是 `not_sent ⟹ sent_by 空`，
+//   回受理门把 status 归零却留着 sent_by，会造出「没发过、却记着是谁发的」的违约行。
+//   （tech_lead 组的 sent_by 早已在上面那份清单里，本行是把同一条规则补齐到 relay 组。）
 const SYS_CLEAR_RELAY_FIELDS_SQL = [
   'relay_notified_user_id = NULL',
   'relay_notified_user_name = NULL',
@@ -36,6 +39,7 @@ const SYS_CLEAR_RELAY_FIELDS_SQL = [
   'relay_read_at = NULL',
   'relay_notify_message_key = NULL',
   'relay_notify_error = NULL',
+  'relay_notify_sent_by = NULL',
 ];
 
 // ── 回受理门 = 恢复受理门标志 + 清两组轮次痕迹 ────────────────────────────────

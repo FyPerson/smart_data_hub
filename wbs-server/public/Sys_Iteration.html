@@ -1962,6 +1962,9 @@
     // 物理删除迭代单（admin·不可逆·2026-07-07）：二次确认后 DELETE /sys-issues/:id → 级联清主表+三子表+附件文件。
     //   前置镜像后端守卫①（有派生子单则直接拦，省一次弹框往返）；守卫②（已挂批次）由后端 409 兜底、siApiErr 直出。
     //   note() 不转义 → iss.title 必须 esc()；换行用 <br>（\n 在 div 内折叠）。成功后关抽屉 + 刷列表。
+    //   ⭐ 角色权限重构 C2a（方案 v1.7 §4-C2a）：**删除原因必填**（后端 trim 1..200，经 body 传，缺失/超长 400 VALIDATION）。
+    //     后端同 commit 把单据整行 + timeline 全部行 + 附件清单快照进 sys_issue_delete_audit（先写审计再删，同事务），
+    //     这里填的 reason 就是那条审计行的「为什么删」。校验与后端逐字同源（1..200），前端先挡省一次往返。
     function siDeleteIssue() {
         const iss = siDetail && siDetail.issue;
         if (!iss) return;
@@ -1969,9 +1972,14 @@
         if (hasDerived) { showToast('该单已派生出子单，不可删除（请先处理派生链）', 'error'); return; }
         siModal(
             '删除任务 #' + iss.id,
-            [note(`确认物理删除迭代单 #${iss.id}「${esc(iss.title || '')}」？<br><br>此操作<b>不可恢复</b>，将一并清除该单的：状态历史、附件（含文件）、协作开发、四方通知记录。`)],
-            async () => {
-                const r = await siApi('/sys-issues/' + iss.id, { method: 'DELETE' });
+            [
+                note(`确认物理删除迭代单 #${iss.id}「${esc(iss.title || '')}」？<br><br>此操作<b>不可恢复</b>，将一并清除该单的：状态历史、附件（含文件）、协作开发名册、commit 留痕、开发事件记录、各方通知记录。<br>删除动作本身会留审计记录（含操作人、时间、原因，以及上述全部内容的快照）。`),
+                fTextarea('reason', '删除原因', '', true, '必填：trim 1..200')
+            ],
+            async v => {
+                const reason = (v.reason || '').trim();
+                if (!reason || reason.length > 200) { showToast('删除原因必填（trim 1~200字）', 'error'); return false; }
+                const r = await siApi('/sys-issues/' + iss.id, { method: 'DELETE', body: { reason } });
                 if (!r.ok) { siApiErr(r); return false; }
                 showToast('已删除', 'success');
                 siCloseDrawer();

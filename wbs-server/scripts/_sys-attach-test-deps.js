@@ -42,7 +42,16 @@ async function getSafePlatformBaseUrl() { return ''; }
 async function readSystemConfig(_key) { return ''; }                           // 空配置：非 ③ 脚本不触达；若触达 → NO_DINGTALK_CONFIG 安全失败
 const COLLAB_CHAT_ADMIN_ID = 3;                                                // 示例用户A user.id（对齐 server.js:13315）
 async function callDingtalkWithTokenRetry(_ak, _as, _token, _fn) { return {}; } // stub：不发真钉钉（非 ③ 脚本不触达）
-function maskPhone(p) { return p; }                                            // 日志脱敏 stub（identity）
+// 日志脱敏：**贴齐 server.js:13578 真实实现**（本文件头部纪律：stub 偏离真实语义会致假绿/假红）。
+//   原为 identity stub，2026-07-27 对抗审 F8 补通知留痕脱敏断言时暴露——它让"手机号已脱敏"这条断言
+//   在测试里永远失败（真实实现是脱敏的，stub 不脱）。identity 版还会让"留痕不含裸手机号"这类
+//   安全断言在别的脚本里**假绿**（stub 原样返回，恰好也没人断言过）。
+function maskPhone(phone) {
+  if (phone == null || typeof phone !== 'string') return '[invalid_phone]';
+  const trimmed = phone.trim();
+  if (!/^1\d{10}$/.test(trimmed)) return '[invalid_phone]';
+  return `${trimmed.slice(0, 3)}****${trimmed.slice(7)}`;
+}
 
 module.exports = { UPLOAD_DIR, normalizeAttachmentExt, safeDeleteFileSync, ALLOWED_FILE_DIRS,
   sendIssueDingtalkRaw, sendIssueDingtalkToRequester, getSafePlatformBaseUrl,
