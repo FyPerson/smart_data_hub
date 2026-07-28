@@ -72,3 +72,8 @@ sql/
 # 个人导出文件
 reference.docx
 *.xlsx
+
+# 2026-07-28 事故防复发：生产 db 快照 + 长任务摘要（含内网/业务细节）禁入公开仓
+wbs-server/*.db
+wbs-server/*.db.*
+长任务摘要/
