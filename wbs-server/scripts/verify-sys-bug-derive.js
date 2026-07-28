@@ -113,9 +113,13 @@ async function seedBugToOnline(devId = 5) {
 async function seedFeatureToReady(devId = 5) {
   let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 'feat单', system_name: 'BMS', source: '内部' });
   const id = r.body.id;
+  // ⭐ 角色权限重构 C2.5 撤销（v2.1）：变更流建单直落「待受理」，无需再走预沟通段。
   // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
   await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, {});
   await call('POST', `/api/sys-issues/${id}/schedule`, adminTok, {});
+  // ⭐ 角色权限重构 v2.1 §4：变更流 assign 前置要求 oa_number 通过校验 → 待指派态内先补号。
+  r = await call('POST', `/api/sys-issues/${id}/set-oa-number`, adminTok, { oa_number: '2026070001' });
+  assert.strictEqual(r.status, 200, `feature 补 OA 号 200, got ${r.status} ${JSON.stringify(r.body)}`);
   await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: devId });
   await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: EST });
   await call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'no_code', no_code_reason: '交付（占位理由）' });
@@ -273,10 +277,15 @@ async function main() {
     assert.strictEqual(r.status, 201, `bug→feature 跨类型派生应 201, got ${r.status} ${JSON.stringify(r.body)}`);
     const featChild = r.body.id;
     assert.strictEqual(r.body.type, 'feature');
-    // ⭐ 角色权限重构 C0：派生新单恒落「待受理」→ 先受理（feature → 待指派）才能 assign
+    // ⭐ 角色权限重构 C2.5 撤销（v2.1）：派生出的**变更流**新单同建单一样直落「待受理」——预沟通段整体撤销，
+    //   不再需要 pre-discuss-pass 中转。
+    // ⭐ 角色权限重构 C0：派生新单恒 intake_required=1 → 先受理（feature → 待指派）才能 assign
     //   （schedule 早已退场，此处调用是历史遗留 no-op，保留不动以免扩大 C0 diff）
     await call('POST', `/api/sys-issues/${featChild}/intake-accept`, adminTok, {});
     await call('POST', `/api/sys-issues/${featChild}/schedule`, adminTok, {});
+    // ⭐ 角色权限重构 v2.1 §4：变更流 assign 前置要求 oa_number 通过校验 → 待指派态内先补号。
+    const oaChild = await call('POST', `/api/sys-issues/${featChild}/set-oa-number`, adminTok, { oa_number: '2026070001' });
+    assert.strictEqual(oaChild.status, 200, `派生 feature 子单补 OA 号 200, got ${oaChild.status} ${JSON.stringify(oaChild.body)}`);
     await call('POST', `/api/sys-issues/${featChild}/assign`, adminTok, { assigned_to: 5 });
     await call('POST', `/api/sys-issues/${featChild}/estimate`, devTok, { dev_estimated_at: EST });
     r = await call('POST', `/api/sys-issues/${featChild}/submit`, devTok, { mode: 'no_code', no_code_reason: '做完了' });   // 无 fix_gap_note

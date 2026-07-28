@@ -162,6 +162,8 @@ async function main() {
     // 受理排期改造 §4.4 断言3：request_tech_consult/edit_in_revision/set_scheduled_start 真旁路（to=null 不改 status）=side_effect；
     //   change_intake_mode/reactivate 带 dynamicTarget（动态解析 status）+ intake_accept/return/resubmit（静态改态）=transition。
     request_tech_consult: 'side_effect', edit_in_revision: 'side_effect', set_scheduled_start: 'side_effect',
+    // ⭐ 角色权限重构 C2.5 撤销（v2.1）：pre_discuss_pass 随预沟通段整体撤销，条目已删（不再是合法 action，
+    //   不应出现在任何 typeFlows 里；若仍出现，[4d] 循环会因下方缺键而当场红灯）。
     intake_accept: 'transition', intake_return: 'transition', resubmit_intake: 'transition', change_intake_mode: 'transition',
     create: 'transition', schedule: 'transition', assign: 'transition', reassign: 'transition',
     submit: 'transition', accept: 'transition', return: 'transition', publish: 'transition',

@@ -101,14 +101,18 @@ async function main() {
   //     随 C0「参数面封死」整体重写：客户端不再能选受理门开关，"选或不选"这条业务规则本身消失，
   //     原真值表不再有被测对象。新覆盖 = 恒定落态（本组）+ 参数拒绝（[A2]）+ path A/B 结构性关闭（[D]）。
   {
+    // ⭐ 角色权限重构 C2.5 撤销（v2.1）：落态全类型归一「待受理」（预沟通段整体撤销）。
+    //   **C0 的不变量是「intake_required 恒 1」，不是「status 恒待受理」**——DB 触发器只判 intake_required
+    //   （intake-gate-sql.js·与 status 无关），故新态不削弱 C0；下面把两条分开断言，别再混为一谈。
+    const EXPECT_CREATE_STATUS = { feature: '待受理', improvement: '待受理', bug: '待受理' };
     for (const type of ['feature', 'improvement', 'bug']) {
       const r = await create({ type });
       assert.strictEqual(r.status, 201, `${type} 建单 201, got ${r.status} ${JSON.stringify(r.body)}`);
       const row = await get('SELECT status, intake_required FROM sys_issues WHERE id=?', [r.body.id]);
-      assert.strictEqual(row.status, '待受理', `C0：${type} 建单恒落 待受理（实际 ${row.status}）`);
+      assert.strictEqual(row.status, EXPECT_CREATE_STATUS[type], `v2.1：${type} 建单落态应为「${EXPECT_CREATE_STATUS[type]}」（实际 ${row.status}）`);
       assert.strictEqual(row.intake_required, 1, `C0：${type} 入库 intake_required=1（实际 ${row.intake_required}）`);
     }
-    ok('[A] C0 受理门焊死：三类型（feature/improvement/bug）建单恒落 待受理 + 入库 intake_required=1');
+    ok('[A] C0 受理门焊死 + v2.1 落态归一：三类型入库 intake_required=1 恒成立（C0 不变量）· 全类型落待受理（C2.5 撤销）');
   }
 
   // ═══ [A2] intake_required 参数面封死：任何传值（含原本合法的 0/1）→ 400 INTAKE_REQUIRED_FIXED ═══
@@ -140,7 +144,8 @@ async function main() {
     const r = await create({ type: 'feature' });
     const id = r.body.id;
     let row = await get('SELECT status FROM sys_issues WHERE id=?', [id]);
-    assert.strictEqual(row.status, '待受理', '建单落 待受理');
+    // ⭐ v2.1（C2.5 撤销）：变更流建单直落「待受理」（预沟通段整体撤销），受理门是唯一必经关口
+    assert.strictEqual(row.status, '待受理', '建单落 待受理（v2.1：C2.5 已撤销）');
     const acc = await call('POST', `/api/sys-issues/${id}/intake-accept`, liaisonTok, {});
     assert.strictEqual(acc.status, 200, `受理人 intake-accept 200, got ${acc.status} ${JSON.stringify(acc.body)}`);
     row = await get('SELECT status FROM sys_issues WHERE id=?', [id]);
@@ -169,9 +174,10 @@ async function main() {
     ok('[F] #2 resume 存量兼容：feature/improvement 历史 hold from_status=待评估/已排期 → 映射待指派（兑现方案 §12.7·防存量单永久卡死）');
   }
 
-  // ═══ [G] #5 resend-tech-consult 状态门：仅待受理可重发·离开受理阶段 → 409 ═══
+  // ═══ [G] #5 resend-tech-consult 状态门：仅开放态可重发·离开该态 → 409 ═══
   {
-    // 建单（C0 后恒落待受理·不再传 intake_required）→ 发起技术负责人沟通（示例发布者 7）→ 拿 request_event_id
+    // ⭐ 角色权限重构 v2.1（C2.5 撤销）：request_tech_consult 的开放态谓词全类型统一为「待受理」，
+    //   直接在建单落态（待受理）上发起咨询——预沟通段整体撤销，无需再经中转。
     const cr = await create({ type: 'feature' });
     const id = cr.body.id;
     const req = await call('POST', `/api/sys-issues/${id}/request-tech-consult`, liaisonTok, { tech_lead_id: 7 });
@@ -180,16 +186,40 @@ async function main() {
     // 待受理态重发 → 过状态门（200·发送 best-effort stub ok）
     let r = await call('POST', `/api/sys-issues/${id}/resend-tech-consult`, liaisonTok, { expected_request_event_id: eid });
     assert.strictEqual(r.status, 200, `待受理态 resend 200（过状态门）, got ${r.status} ${JSON.stringify(r.body)}`);
-    // 模拟受理通过后离开待受理（→待指派）→ 重发 409 TECH_CONSULT_RESEND_LATE
+    // ⭐ codex Round-B 审 MED（采纳）：关闭态负例改表驱动——原实现只造了一个"相邻态"就断言 409，覆盖不到
+    //   "离得更远的态是否也 409"这条更强的性质。⭐ v2.1：开放态本身已改「待受理」，原"待受理"远态例随之
+    //   失去意义（它现在就是开放态），改用「待指派」（紧邻的下一站）+「开发中」（更远态）两个关闭态覆盖近远。
+    //   对每个状态各自独立造一份夹具（各自 request 一次拿到新鲜 eid，避免共用同一单据的状态跳变互相干扰），
+    //   逐个断言 409 + 确切码，保住"任意离开开放态（不论远近）都应被拒"的覆盖面。
+    for (const farStatus of ['待指派', '开发中']) {
+      const crFar = await create({ type: 'feature' });
+      const idFar = crFar.body.id;
+      const reqFar = await call('POST', `/api/sys-issues/${idFar}/request-tech-consult`, liaisonTok, { tech_lead_id: 7 });
+      assert.strictEqual(reqFar.status, 200, `[远态=${farStatus}] 夹具 request-tech-consult 200, got ${reqFar.status} ${JSON.stringify(reqFar.body)}`);
+      const eidFar = reqFar.body.request_event_id;
+      await run(`UPDATE sys_issues SET status=? WHERE id=?`, [farStatus, idFar]);
+      const rFar = await call('POST', `/api/sys-issues/${idFar}/resend-tech-consult`, liaisonTok, { expected_request_event_id: eidFar });
+      assert.strictEqual(rFar.status, 409, `[远态=${farStatus}] resend 应 409, got ${rFar.status} ${JSON.stringify(rFar.body)}`);
+      assert.strictEqual(rFar.body.code, 'TECH_CONSULT_RESEND_LATE', `[远态=${farStatus}] code 应为 TECH_CONSULT_RESEND_LATE，实际 ${rFar.body.code}`);
+    }
+    // 收口审 LOW（codex149-B）：权限先于状态门——无权限用户(dev5·非admin/受理人/建单人)对非开放态单 resend 仍先得 403（不借状态码侧信道泄露单据态）
+    // ⭐ v2.1：开放态本身已改「待受理」，本组要造的是"非开放态"夹具 → 改用「待指派」（不能再用「待受理」，
+    //   那现在恰是开放态本身，达不到"非开放态"这个前提）。
     await run(`UPDATE sys_issues SET status='待指派' WHERE id=?`, [id]);
-    r = await call('POST', `/api/sys-issues/${id}/resend-tech-consult`, liaisonTok, { expected_request_event_id: eid });
-    assert.strictEqual(r.status, 409, `离开受理阶段 resend 409, got ${r.status} ${JSON.stringify(r.body)}`);
-    assert.strictEqual(r.body.code, 'TECH_CONSULT_RESEND_LATE', 'code=TECH_CONSULT_RESEND_LATE');
-    // 收口审 LOW（codex149-B）：权限先于状态门——无权限用户(dev5·非admin/受理人/建单人)对非待受理单 resend 仍先得 403（不借状态码侧信道泄露单据态）
     const r403 = await call('POST', `/api/sys-issues/${id}/resend-tech-consult`, devTok, { expected_request_event_id: eid });
     assert.strictEqual(r403.status, 403, `无权限 resend 403（权限先于状态门）, got ${r403.status} ${JSON.stringify(r403.body)}`);
     assert.strictEqual(r403.body.code, 'NOT_AUTHORIZED_FOR_TECH_CONSULT_RESEND', 'code=NOT_AUTHORIZED_FOR_TECH_CONSULT_RESEND（权限校验先执行）');
-    ok('[G] #5 resend 状态门：待受理可重发·离开受理阶段(待指派) → 409·无权限用户 → 403（权限先于状态门·防侧信道）');
+    // bug 侧不受本次撤销影响：仍锚定「待受理」（bug 从未走过预沟通段，§3）——回归哨兵防日后误把 bug 挪走。
+    const crb = await create({ type: 'bug' });
+    const idb = crb.body.id;
+    const reqb = await call('POST', `/api/sys-issues/${idb}/request-tech-consult`, liaisonTok, { tech_lead_id: 7 });
+    assert.strictEqual(reqb.status, 200, `bug 待受理态 request-tech-consult 200（不受本次谓词前移影响）, got ${reqb.status} ${JSON.stringify(reqb.body)}`);
+    // ⭐ codex Round-B 审 LOW（采纳）：本组此前只测了 bug 的 request，没独立守住 bug 的 resend 分流——
+    //   补一次 bug resend-tech-consult 调用（用 reqb 拿到的 request_event_id），不依赖跨脚本覆盖
+    //   （resend 的 bug 场景另在 verify-sys-tech-lead-comment.js [M] 组测过，但那属另一文件，本组独立自洽）。
+    const rb = await call('POST', `/api/sys-issues/${idb}/resend-tech-consult`, liaisonTok, { expected_request_event_id: reqb.body.request_event_id });
+    assert.strictEqual(rb.status, 200, `bug 待受理态 resend-tech-consult 200（本组独立守住分流）, got ${rb.status} ${JSON.stringify(rb.body)}`);
+    ok('[G] #5 resend 状态门：变更流待受理可重发（v2.1：C2.5 撤销）·离开该态(表驱动·待指派/开发中两个远态均 409 TECH_CONSULT_RESEND_LATE)·无权限用户 → 403（权限先于状态门·防侧信道）；bug 侧 request+resend 均 200（本组独立守住分流）');
   }
 
   // ═══ [H] #3 组合：受理门（恒开）+ needs_feasibility=1 —— 两个正交开关互不吞噬 ═══
@@ -201,6 +231,7 @@ async function main() {
       assert.strictEqual(r.status, 201, `${type} needs_feas=1 建单 201, got ${r.status} ${JSON.stringify(r.body)}`);
       const id = r.body.id;
       let row = await get('SELECT status, intake_required, needs_feasibility FROM sys_issues WHERE id=?', [id]);
+      // ⭐ v2.1（C2.5 撤销）：变更流落「待受理」；needs_feasibility 仍须独立入库（不被落态吞掉）
       assert.strictEqual(row.status, '待受理', `${type} 组合 → 待受理`);
       assert.strictEqual(row.intake_required, 1, `${type} 组合 intake_required=1`);
       assert.strictEqual(row.needs_feasibility, 1, `${type} 组合 needs_feasibility=1 独立入库（不被 intake 吞掉）`);

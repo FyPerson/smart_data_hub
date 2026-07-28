@@ -120,9 +120,14 @@ async function seedBugToReady(devId = 5, devTok2 = devTok) {
 async function seedChangeToReady(type = 'feature', devId = 5, devTok2 = devTok) {
   let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type, title: type + '-mix', system_name: 'BMS', source: '内部' });
   const id = r.body.id;
+  // ⭐ 角色权限重构 C2.5 撤销（v2.1）：本 seed 专服务**变更流**（feature/improvement），建单直落「待受理」，
+  //   无需再走预沟通段。bug 流的 seed 是 seedBugToReady，不含本步。
   // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
   await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, {});
   // 受理排期改造：schedule 退场——建单直落待指派，直接 assign。
+  // ⭐ 角色权限重构 v2.1 §4：变更流 assign 前置要求 oa_number 通过校验 → 待指派态内先补号。
+  r = await call('POST', `/api/sys-issues/${id}/set-oa-number`, adminTok, { oa_number: '2026070001' });
+  assert.strictEqual(r.status, 200, `${type} 补 OA 号 200, got ${r.status} ${JSON.stringify(r.body)}`);
   await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: devId });
   await call('POST', `/api/sys-issues/${id}/estimate`, devTok2, { dev_estimated_at: EST });
   await call('POST', `/api/sys-issues/${id}/submit`, devTok2, { mode: 'no_code', no_code_reason: '交付（占位理由）' });
@@ -557,16 +562,20 @@ async function main() {
   {
     let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 'canary', system_name: 'BMS', source: '内部' });
     const id = r.body.id;
-    // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死·全类型），「待指派」改为受理通过后的落态。
-    assert.strictEqual(r.body.status, '待受理', 'C0：feature 建单落待受理（全类型必经受理门）');
+    // ⭐ 角色权限重构 C0：建单恒 intake_required=1（受理门焊死·全类型）。
+    // ⭐ 角色权限重构 C2.5 撤销（v2.1）：变更流建单落态回归「待受理」（预沟通段整体撤销）。
+    assert.strictEqual(r.body.status, '待受理', 'v2.1：feature 建单落待受理（C2.5 已撤销）');
     const canaryIa = await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, {});
     assert.strictEqual(canaryIa.status, 200, `canary 受理 200, got ${canaryIa.status} ${JSON.stringify(canaryIa.body)}`);
     assert.strictEqual(canaryIa.body.status, '待指派', 'C0：feature 受理通过 → 待指派（与旧建单落态一致）');
+    // ⭐ 角色权限重构 v2.1 §4：变更流 assign 前置要求 oa_number 通过校验 → 待指派态内先补号。
+    const canaryOa = await call('POST', `/api/sys-issues/${id}/set-oa-number`, adminTok, { oa_number: '2026070001' });
+    assert.strictEqual(canaryOa.status, 200, `canary 补 OA 号 200, got ${canaryOa.status} ${JSON.stringify(canaryOa.body)}`);
     // 待指派直接 assign → 成功（受理排期改造后 assign.from=待指派·无需 schedule 中转）。
     r = await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5 });
     assert.strictEqual(r.status, 200, `feature 待指派 assign 应 200, got ${r.status} ${JSON.stringify(r.body)}`);
     assert.strictEqual(r.body.status, '开发中', 'assign 待指派→开发中');
-    ok('⭐ 变更流 canary：schedule 退场后·建单落待指派→直接 assign→开发中（新前段状态机零回归）');
+    ok('⭐ 变更流 canary：v2.1 C2.5 撤销后·建单落待受理→受理→待指派→补 OA→assign→开发中（新前段状态机零回归）');
   }
 
   console.log(`\n[全部通过] ${passed}/${passed} ✓ 系统迭代 bug 流状态机 + 端点验证通过（Commit ①+②）`);

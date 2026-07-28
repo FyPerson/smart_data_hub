@@ -76,8 +76,14 @@ let passed = 0; const ok = (m) => { passed++; console.log('  ✓ ' + m); };
 // 推到「开发中」（create→assign→estimate·受理排期改造：schedule 退场·建单直落待指派），供附件上传
 async function seedInProgress() {
   const id = (await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 'a', system_name: 'BMS', source: '内部' })).body.id;
+  // ⭐ 角色权限重构 C2.5 撤销（v2.1）：建单直落「待受理」，无需再走预沟通段。
+  //   ⚠️ 本 seed 原先各步均不断言，一旦前置态错就只在最终断言处露出一个**看不懂的**结果
+  //     （C2.5 编码期实测：publish 用例报 [409,409]，真因是 seed 早就断在这里）。新增步一律断言。
   // ⭐ 角色权限重构 C0：建单恒落「待受理」→ 补一步受理（→待指派）才能 assign
   await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, {});
+  // ⭐ 角色权限重构 v2.1 §4：变更流 assign 前置要求 oa_number 通过校验 → 待指派态内先补号。
+  const oa1 = await call('POST', `/api/sys-issues/${id}/set-oa-number`, adminTok, { oa_number: '2026070001' });
+  assert.strictEqual(oa1.status, 200, `夹具补 OA 号 200, got ${oa1.status} ${JSON.stringify(oa1.body)}`);
   await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5 });
   await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: '2026-08-01 10:00' });
   return id;
@@ -86,8 +92,12 @@ async function seedInProgress() {
 async function seedToReady() {
   let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 't', system_name: 'BMS', source: '内部' });
   const id = r.body.id;
+  // ⭐ 角色权限重构 C2.5 撤销（v2.1）：变更流建单直落「待受理」，无需再走预沟通段·断言不省
   // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
   await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, {});
+  // ⭐ 角色权限重构 v2.1 §4：变更流 assign 前置要求 oa_number 通过校验 → 待指派态内先补号。
+  r = await call('POST', `/api/sys-issues/${id}/set-oa-number`, adminTok, { oa_number: '2026070001' });
+  assert.strictEqual(r.status, 200, `夹具补 OA 号 200, got ${r.status} ${JSON.stringify(r.body)}`);
   await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5 });
   await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: '2026-08-01 10:00' });
   await call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'no_code', no_code_reason: '交付完成（占位理由）' });
@@ -145,9 +155,16 @@ async function main() {
   //   受理排期改造：schedule 退场·并发写目标改用 assign（建单直落待指派→并发指派各进开发中·10 个独立单不互斥）。
   const drafts = await Promise.all(Array.from({ length: 10 }, (_, k) =>
     call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'improvement', title: 'mix-' + k, system_name: 'OA', source: '内部' })));
-  // ⭐ 角色权限重构 C0：建单恒落「待受理」→ 并发 assign 前先串行受理到「待指派」（assign 的合法前置态）。
-  //   受理刻意串行：本用例测的是 **assign 并发**不产生 500，受理只是夹具，串行可排除夹具本身的并发噪音。
-  for (const d of drafts) await call('POST', `/api/sys-issues/${d.body.id}/intake-accept`, adminTok, {});
+  // ⭐ 角色权限重构 C0：建单恒落受理门前段 → 并发 assign 前先串行推到「待指派」（assign 的合法前置态）。
+  //   ⭐ v2.1（C2.5 撤销）：improvement 属变更流，建单落「待受理」→ 直接 intake-accept；随后补 OA 号
+  //   （assign 前置校验，§4）——三步都串行。
+  //   刻意串行：本用例测的是 **assign 并发**不产生 500，前置只是夹具，串行可排除夹具本身的并发噪音。
+  for (const d of drafts) {
+    const a = await call('POST', `/api/sys-issues/${d.body.id}/intake-accept`, adminTok, {});
+    assert.strictEqual(a.status, 200, `夹具受理 200, got ${a.status} ${JSON.stringify(a.body)}`);
+    const oa = await call('POST', `/api/sys-issues/${d.body.id}/set-oa-number`, adminTok, { oa_number: '2026070001' });
+    assert.strictEqual(oa.status, 200, `夹具补 OA 号 200, got ${oa.status} ${JSON.stringify(oa.body)}`);
+  }
   const mixed = await Promise.all([
     ...Array.from({ length: 10 }, (_, k) => call('POST', '/api/sys-releases', adminTok, { title: 'mix-rel-' + k })),
     ...drafts.map(d => call('POST', `/api/sys-issues/${d.body.id}/assign`, adminTok, { assigned_to: 5 })),

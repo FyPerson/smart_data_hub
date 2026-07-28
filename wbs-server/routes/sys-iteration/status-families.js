@@ -4,7 +4,13 @@
 //
 // ⚠️ C0 范围：本文件只建常量 + 族判断函数，**不接线任何业务路由**（业务写入口改造是 C2/C3 的事）。
 //   本文件的族快照值已在方案 §12「Step0-1 族常量固化」核对过与现网 v1.113.0 transitions.js 100% 一致
-//   （五族对 feature/improvement(10态)/bug(7态) 完备互斥，禁「等」）；本次建常量时逐条复核一遍不变。
+//   （各基础族对 feature/improvement/bug 各自的状态全集完备互斥，禁「等」）；本次建常量时逐条复核一遍不变。
+//   ⚠️ 角色权限重构 C4·184 号预审（PL-2·去基数化）：角色权限重构 C2.5（v1.9）一度令 feature/improvement
+//     新增「待商议」态、基础族集新增一个预沟通族。**C2.5 已随方案 v2.1 撤销**（预沟通段废除，建单直落
+//     「待受理」）——该族随之整族删除（不再是 BASE_FAMILY_NAMES 成员），本文件当前状态即撤销后的终态。
+//     ⚠️ 本节故意不写具体数量（如"N 态"/"M 族"）——状态机仍在演进（受理排期改造/C0/C2.5 等历次改动都动过
+//     状态集），写死数字会在下一次改动时静默过期而没人发现；具体状态清单以 transitions.js 的
+//     CHANGE_FLOW_STATUSES/BUG_FLOW_STATUSES 与本文件下方 BASE_FAMILY_NAMES 为准，不在注释里重复计数。
 //
 // ── 按 issue_type 索引（禁平面集合、禁「等」）──────────
 //   现网只有 feature/improvement/bug 三类流已定义状态机（transitions.js CHANGE_FLOW_STATUSES / BUG_FLOW_STATUSES）；
@@ -15,6 +21,11 @@
 //   "共用同一数组引用"写法刻意不同：那是"转移规则"共用可以引用同一份，这里是"状态字符串快照"独立誊抄更利于
 //   逐条肉眼核对与未来分裂时不致命漏改，成本可控（每族最多 3 个状态字符串））。
 'use strict';
+
+// ── （C2.5 撤销·方案 v2.1）预沟通态常量已删 ──────────
+//   历史沿革：角色权限重构 C2.5（v1.9 §4-C2.5）曾建"建单后、进入受理门之前"的需求商议态「待商议」独立成族
+//   （不并入 INTAKE，理由是 INTAKE 定义="对接人受理门内态"，而预沟通发生在受理门之前）。方案 v2.1 撤销
+//   预沟通段（建单直落「待受理」）后，该族已无任何消费方（grep 归零核实）——本常量随之整体删除，不留残留导出。
 
 // ── 受理阶段态（INTAKE）：建单后、进入 D_PRE 前的对接人受理门内态（受理排期改造 §B）──────────
 //   ⚠️ 独立成族，**不并入 D_PRE**（codex 128-H1 设计缺陷闭合）：成员动作族矩阵（MEMBER_ACTION_FAMILY_MATRIX）
@@ -121,10 +132,13 @@ function getFamilyStatuses(issueType, familyName) {
   return map[issueType] || [];
 }
 
-// 反向查询：(issue_type,status) 属于哪个「基础族」（INTAKE/D_PRE/DEV/VERIFY/RELEASE/NONRELEASE_TERMINAL 六者之一，
+// 反向查询：(issue_type,status) 属于哪个「基础族」（INTAKE/D_PRE/DEV/VERIFY/RELEASE/NONRELEASE_TERMINAL
+//   之一，权威清单见下方 BASE_FAMILY_NAMES 数组本身——本注释不重复列举总数，
+//   防未来再加/删族时注释里的数字或清单跟着漂移过时，见文件头 PL-2 去基数化说明；
 //   不含派生族 FROZEN/TERMINAL——那两个是并集，任何合法状态本就落在某个基础族里，查"派生族"没有唯一答案）。
 //   查不到（族外/未知 type）→ null（fail-closed，供 assertMainStatusTransition 白名单判断用）。
 //   ⚠️ 受理排期改造 §B：待受理/待修改归 INTAKE（非 null）——成员动作族矩阵不含 INTAKE → 受理阶段成员动作天然 409。
+//   （C2.5 撤销·方案 v2.1）预沟通族已随预沟通段撤销整族删除，不再是本数组成员。
 const BASE_FAMILY_NAMES = ['INTAKE', 'D_PRE', 'DEV', 'VERIFY', 'RELEASE', 'NONRELEASE_TERMINAL'];
 function familyOfStatus(issueType, status) {
   for (const name of BASE_FAMILY_NAMES) {

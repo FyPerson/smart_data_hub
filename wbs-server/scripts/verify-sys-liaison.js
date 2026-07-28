@@ -103,8 +103,14 @@ async function createFeatureAssignable() {
   const r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 'feat可指派单', system_name: 'BMS', source: '内部' });
   assert.strictEqual(r.status, 201, '建 feature 单 201, got ' + r.status + ' ' + JSON.stringify(r.body));
   const id = r.body.id;
+  // ⭐ 角色权限重构 C2.5 撤销（v2.1）：变更流建单直落「待受理」，无需再走预沟通段。
   const acc = await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, {});
   assert.strictEqual(acc.status, 200, 'feature 受理 200, got ' + acc.status + ' ' + JSON.stringify(acc.body));
+  // ⭐ 角色权限重构 v2.1 §4：变更流 assign 前置要求 oa_number 通过校验 → 待指派态内先补号
+  //   （本 helper 名为"可指派"，把 OA 前置一并做进来，使所有调用点的 assign 测的都是"权限/状态"本身，
+  //   不会被"忘设 OA"这个无关变量污染）。
+  const oa = await call('POST', `/api/sys-issues/${id}/set-oa-number`, adminTok, { oa_number: '2026070001' });
+  assert.strictEqual(oa.status, 200, 'feature 补 OA 号 200, got ' + oa.status + ' ' + JSON.stringify(oa.body));
   return id;
 }
 

@@ -81,9 +81,13 @@ async function seedToReady() {
   let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 't', system_name: 'BMS', source: '内部' });
   assert.strictEqual(r.status, 201, '建单 201, got ' + r.status + ' ' + JSON.stringify(r.body));
   const id = r.body.id;
+  // ⭐ 角色权限重构 C2.5 撤销（v2.1）：建单直落「待受理」，无需再走预沟通段。
   // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
   await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, {});
   await call('POST', `/api/sys-issues/${id}/schedule`, adminTok, {});
+  // ⭐ 角色权限重构 v2.1 §4：变更流 assign 前置要求 oa_number 通过校验 → 待指派态内先补号。
+  r = await call('POST', `/api/sys-issues/${id}/set-oa-number`, adminTok, { oa_number: '2026070001' });
+  assert.strictEqual(r.status, 200, '夹具补 OA 号 200, got ' + r.status + ' ' + JSON.stringify(r.body));
   await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5 });
   r = await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: '2026-08-01 10:00' });
   assert.strictEqual(r.status, 200, 'estimate 200, got ' + r.status + ' ' + JSON.stringify(r.body));
@@ -423,6 +427,7 @@ async function main() {
   {
     let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: '零在册待上线单', system_name: 'BMS', source: '内部' });
     const zeroRosterId = r.body.id;
+  // ⭐ 角色权限重构 C2.5 撤销（v2.1）：变更流建单直落「待受理」，无需再走预沟通段，直接受理。
   // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
     await call('POST', `/api/sys-issues/${zeroRosterId}/intake-accept`, adminTok, {});
     // 手工快进到"待上线"但不建任何 roster 行（模拟脏数据/历史遗留单，正常业务流程不可达——非 submit 场景准备）。

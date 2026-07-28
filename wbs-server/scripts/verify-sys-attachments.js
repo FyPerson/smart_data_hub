@@ -109,9 +109,13 @@ async function seedDev(assignTo = 5) {
   let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 't', system_name: 'BMS', source: '内部' });
   assert.strictEqual(r.status, 201, '建单 201, got ' + r.status + ' ' + JSON.stringify(r.body));
   const id = r.body.id;
-  // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
+  // ⭐ 角色权限重构 C2.5 撤销（v2.1）：建单直落「待受理」，无需再走预沟通段。
+  // ⭐ 角色权限重构 C0：受理门仍必经 → 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
   await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, {});
   await call('POST', `/api/sys-issues/${id}/schedule`, adminTok, {});
+  // ⭐ 角色权限重构 v2.1 §4：变更流 assign 前置要求 oa_number 通过校验 → 待指派态内先补号。
+  r = await call('POST', `/api/sys-issues/${id}/set-oa-number`, adminTok, { oa_number: '2026070001' });
+  assert.strictEqual(r.status, 200, '夹具补 OA 号 200, got ' + r.status + ' ' + JSON.stringify(r.body));
   await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: assignTo });
   const tok = assignTo === 5 ? devTok : dev2Tok;
   r = await call('POST', `/api/sys-issues/${id}/estimate`, tok, { dev_estimated_at: '2026-08-01 10:00' });

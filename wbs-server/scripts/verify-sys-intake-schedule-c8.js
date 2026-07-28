@@ -76,6 +76,24 @@ function main() {
     ok(`[G] 分组完整：${allStatuses.size} 个状态全归入某组（0 孤儿·组筛选无消失）+ 待受理/待修改/待指派 ∈ active`);
   }
 
+  // ═══ [S] 排序序完整（角色权限重构 C2.5 补·本组此前缺失）═══
+  //   ⚠️ 缺口来源：C2.5 加「待商议」时，[B] 徽章与 [G] 分组两组守卫都红灯提示了，**唯独排序表没人看着**——
+  //     漏登记不报错，只会让新态按未知兜底值 99 排到「已作废」之后（最早的态排在最末，与本表语义矛盾）。
+  //     同类踩法 2026-07-10 已发生过一次（codex API 审 MED-2：已暂缓/已拒绝 漏显式序）。故补成常设守卫。
+  //   ⭐ v2.1（C2.5 撤销）：「待商议」随预沟通段整体撤销，原"必须早于待受理"这条专项排序断言随之删除
+  //   （allStatuses 现由 T.buildMeta() 动态派生，已不含「待商议」，下方的 missingOrder 完整性检查自动适配）。
+  {
+    const SI_STATUS_SORT_ORDER = evalConstObj('SI_STATUS_SORT_ORDER');
+    const missingOrder = [...allStatuses].filter(s => typeof SI_STATUS_SORT_ORDER[s] !== 'number');
+    assert.strictEqual(missingOrder.length, 0,
+      `以下状态无 SI_STATUS_SORT_ORDER 显式序（共享排序按未知兜底 99 → 排到「已作废」之后）：${missingOrder.join(', ')}`);
+    // 已作废必须是最大值（本表注释自称"已作废排末尾"，这条把注释变成断言）
+    const voidOrder = SI_STATUS_SORT_ORDER['已作废'];
+    const maxOther = Math.max(...[...allStatuses].filter(s => s !== '已作废').map(s => SI_STATUS_SORT_ORDER[s]));
+    assert.ok(voidOrder > maxOther, `「已作废」应排末尾（实际 ${voidOrder}，其余最大 ${maxOther}）`);
+    ok(`[S] 排序序完整：${allStatuses.size} 个状态全有显式序（0 落兜底 99）+ 已作废排末尾`);
+  }
+
   // ═══ [H] 受理阶段引导文案（siRenderActions gate）═══
   {
     assert.ok(/iss\.status === '待受理'/.test(html) && /待受理.*受理确认|本单待受理/.test(html), '待受理 受理阶段引导文案存在');

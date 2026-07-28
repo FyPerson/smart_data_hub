@@ -84,6 +84,9 @@ function waitReady() {
 
 const adminTok = jwt.sign({ id: 1, username: 'admin', display_name: '管理员', role: 'admin' }, SECRET);
 const liaisonTok = jwt.sign({ id: 13, username: 'wangtaotao', display_name: '示例对接人', role: 'user' }, SECRET);
+// ⭐ 角色权限重构 C4·184 号预审（PH-2 上线后 [R] 组补的技术负责人 token）：id=7（示例发布者）已在下方 users
+//   夹具里，与 verify-sys-tech-lead-comment.js 的 techTok 同一 id，仅本文件此前未声明。
+const techTok = jwt.sign({ id: 7, username: 'shenjun', display_name: '示例发布者', role: 'publisher' }, SECRET);
 
 let server, port;
 function call(method, p, tok, body) {
@@ -176,9 +179,19 @@ async function main() {
 
     // ④ 统一函数确实不接受外部 intake 参数（形参数为 0 或仅 type）——防日后被"顺手加个参数"重新打开后门
     assert.strictEqual(T.resolveSysInitialStatusForCreate.length, 1, 'resolveSysInitialStatusForCreate 应只接受 type 一个形参（不得开放 intake 参数）');
+    // ⭐ 角色权限重构 C2.5 撤销（v2.1 §5）：落态**全类型归一「待受理」**——预沟通段/PRE_DISCUSS 族整体撤销，
+    //   建单/derive/reactivate 三入口统一收敛为恰一个目标值，不再按 type 分流。C0 焊死的「不受调用方影响」
+    //   （函数不收 intake 参数、三入口只能调它）不变，只是分流表退化为单值表。
+    const EXPECT_CREATE_STATUS = { feature: '待受理', improvement: '待受理', bug: '待受理' };
     for (const t of ['feature', 'improvement', 'bug']) {
-      assert.strictEqual(T.resolveSysInitialStatusForCreate(t), '待受理', `${t} 统一函数落态恒「待受理」`);
+      assert.strictEqual(T.resolveSysInitialStatusForCreate(t), EXPECT_CREATE_STATUS[t],
+        `${t} 统一函数落态应为「${EXPECT_CREATE_STATUS[t]}」（v2.1：C2.5 撤销后全类型归一待受理）`);
     }
+    // ⭐ 撤销哨兵（v2.1 §7"可执行状态引用必须删"）：PRE_DISCUSS 相关导出不应再被生产代码使用。
+    //   ⚠️ 待主会话确认：若 transitions.js 物理删除了这两个导出，下两行访问不存在的属性本身即为
+    //   undefined（断言仍成立）；若改为保留导出但清空内容，同样成立。两种实现路径本组均覆盖。
+    assert.strictEqual(T.SYS_PRE_DISCUSS_TYPES, undefined, 'SYS_PRE_DISCUSS_TYPES 应已随 C2.5 撤销被删除（不得残留可执行状态引用）');
+    assert.strictEqual(T.SYS_PRE_DISCUSS_STATUS, undefined, 'SYS_PRE_DISCUSS_STATUS 应已随 C2.5 撤销被删除（不得残留可执行状态引用）');
     assert.throws(() => T.resolveSysInitialStatusForCreate('unknown_type'), /未知\/未登记 type/, '未知 type fail-closed 抛错（不静默落态）');
     // ⭐ config **不参与受理流**（codex 九轮审 HIGH）：它没有 transitions，若能建单就会产生
     //   「config/待受理」这种**无受理转换可走**的卡死单。这里用三条断言把"已被拒绝"钉死，
@@ -187,17 +200,21 @@ async function main() {
     assert.ok(!T.TRANSITIONS.config, 'config 不在 TRANSITIONS（无状态机）');
     assert.throws(() => T.resolveSysInitialStatusForCreate('config'), /未知\/未登记 type/,
       'config 落态解析 fail-closed 抛错（不会产生 config/待受理 卡死单）');
-    ok('[I] 创建入口不变量：服务端 INSERT INTO sys_issues 恰 2 处且均显式列出 intake_required + index.js 统一函数调用恰 3 处 + 不再直调 resolveInitialStatus(0 处) + 统一函数单形参/三类型恒待受理/未知 type fail-closed');
+    ok('[I] 创建入口不变量：服务端 INSERT INTO sys_issues 恰 2 处且均显式列出 intake_required + index.js 统一函数调用恰 3 处 + 不再直调 resolveInitialStatus(0 处) + 统一函数单形参/落态全类型归一待受理(v2.1 撤销分流) + PRE_DISCUSS 导出撤销哨兵 + 未知 type 与 config fail-closed');
   }
 
-  // ═══ [C1] 建单三类型 → 恒「待受理」+ 入库 intake_required=1 ═══
+  // ═══ [C1] 建单三类型 → 落态全类型归一「待受理」（C2.5 撤销后）+ 入库 intake_required=1 恒成立（C0 不变量）═══
+  //   ⭐ 角色权限重构 C2.5 撤销（v2.1）：预沟通段整体撤销后，三类型建单统一落「待受理」；
+  //     intake_required 恒 1 这条 C0 不变量不受影响，受理门（DB 触发器只判 intake_required·与 status 无关）
+  //     对三条路径**同样必经**。
   {
+    const EXPECT_CREATE_STATUS = { feature: '待受理', improvement: '待受理', bug: '待受理' };
     for (const type of ['feature', 'improvement', 'bug']) {
       const r = await create({ type });
       assert.strictEqual(r.status, 201, `${type} 建单 201, got ${r.status} ${JSON.stringify(r.body)}`);
-      assert.strictEqual(r.body.status, '待受理', `${type} 建单响应 status=待受理`);
+      assert.strictEqual(r.body.status, EXPECT_CREATE_STATUS[type], `${type} 建单响应 status=${EXPECT_CREATE_STATUS[type]}`);
       const row = await get('SELECT status, intake_required FROM sys_issues WHERE id=?', [r.body.id]);
-      assert.strictEqual(row.status, '待受理', `${type} 落库 status=待受理`);
+      assert.strictEqual(row.status, EXPECT_CREATE_STATUS[type], `${type} 落库 status=${EXPECT_CREATE_STATUS[type]}`);
       assert.strictEqual(row.intake_required, 1, `${type} 落库 intake_required=1`);
     }
     // ⭐ config 建单端到端被拒（承 [I] 的常量层断言·这里证 HTTP 入口同样拒绝）
@@ -229,26 +246,42 @@ async function main() {
     // 零副作用：四次被拒均未建单
     const cnt = (await get(`SELECT COUNT(*) c FROM sys_issues WHERE title='旧页面模拟'`)).c;
     assert.strictEqual(cnt, 0, '契约闸拒绝时不建单（守卫早于 INSERT）');
-    ok('[C1] 建单三类型恒落 待受理 + 入库 ir=1；intake_required 传值 400 FIXED；⭐ 契约版本缺失/过旧/非法一律 400 CLIENT_CONTRACT_OUTDATED（含"旧页面取消勾选"这一静默改义缺口）+ 零副作用');
+    ok('[C1] 建单三类型落态全类型归一待受理（v2.1：C2.5 撤销）+ 入库 ir=1 恒成立（C0 不变量）；intake_required 传值 400 FIXED；⭐ 契约版本缺失/过旧/非法一律 400 CLIENT_CONTRACT_OUTDATED（含"旧页面取消勾选"这一静默改义缺口）+ 零副作用');
   }
 
-  // ═══ [C2] derive 派生新单 → 待受理 + INSERT 显式落 intake_required=1（矛盾单哨兵）═══
+  // ═══ [C2] derive 派生新单：落态全类型归一「待受理」（C2.5 撤销）+ INSERT 显式落 intake_required=1（矛盾单哨兵）═══
+  //   ⭐ 角色权限重构 C2.5 撤销（v2.1）：预沟通段整体撤销，派生出的变更流新单同建单一样直落「待受理」，
+  //     不再需要 pre-discuss-pass 中转。表驱动直测三类型，把落态本身钉死。
   {
     // 造一张「已上线」bug 原单（derive 的 bug 分支要求 origin.status='已上线'）
     const ins = await run(`INSERT INTO sys_issues (type, status, priority, title, system_name, source, intake_required, created_by, created_by_name, record_source)
       VALUES ('bug','已上线','P2','派生原单','BMS','内部',1,1,'管理员','native')`);
     const originId = ins.lastID;
-    const r = await call('POST', `/api/sys-issues/${originId}/derive`, adminTok,
-      { type: 'bug', title: '派生新单', system_name: 'BMS', source: '内部', derive_reason: '同源复现' });
-    assert.strictEqual(r.status, 201, `derive 201, got ${r.status} ${JSON.stringify(r.body)}`);
-    assert.strictEqual(r.body.status, '待受理', 'derive 新单落 待受理（不再直落待处理）');
-    const row = await get('SELECT status, intake_required FROM sys_issues WHERE id=?', [r.body.id]);
-    assert.strictEqual(row.intake_required, 1, '⭐ derive INSERT 显式落 intake_required=1（列 DEFAULT 0·漏列会造矛盾单）');
-    // 矛盾单哨兵：派生单必须真能被受理（若 ir=0 会被受理门不变量 409 卡死）
-    const acc = await call('POST', `/api/sys-issues/${r.body.id}/intake-accept`, liaisonTok, {});
-    assert.strictEqual(acc.status, 200, `派生单可被受理 200, got ${acc.status} ${JSON.stringify(acc.body)}`);
-    assert.strictEqual(acc.body.status, '待处理', 'bug 派生单受理后 → 待处理');
-    ok('[C2] derive 新单落 待受理 + INSERT 显式 intake_required=1 + 可被正常受理（矛盾单「待受理+ir0」不会产生）');
+    // 派生落态期望表（与建单同源：都走 resolveSysInitialStatusForCreate）+ 受理后落态
+    const DERIVE_EXPECT = {
+      bug:         { create: '待受理', afterIntake: '待处理' },
+      feature:     { create: '待受理', afterIntake: '待指派' },
+      improvement: { create: '待受理', afterIntake: '待指派' },
+    };
+    for (const [type, want] of Object.entries(DERIVE_EXPECT)) {
+      const r = await call('POST', `/api/sys-issues/${originId}/derive`, adminTok,
+        { type, title: `派生新单-${type}`, system_name: 'BMS', source: '内部', derive_reason: '同源复现' });
+      assert.strictEqual(r.status, 201, `${type} derive 201, got ${r.status} ${JSON.stringify(r.body)}`);
+      assert.strictEqual(r.body.status, want.create, `${type} derive 新单落「${want.create}」（响应体）`);
+      const row = await get('SELECT type, status, intake_required, oa_number, origin_issue_id FROM sys_issues WHERE id=?', [r.body.id]);
+      // ⚠️ type 必须一并断言（codex Round-D 审 LOW）：feature 与 improvement 的状态路径逐字相同，
+      //   improvement 被错存成 feature 时，只看 status 的断言会全绿。
+      assert.strictEqual(row.type, type, `${type} derive 新单落库 type 应为 ${type}（实际 ${row.type}）`);
+      assert.strictEqual(row.origin_issue_id, originId, `${type} derive 新单 origin_issue_id 应指回原单 ${originId}`);
+      assert.strictEqual(row.status, want.create, `${type} derive 新单落「${want.create}」（落库）`);
+      assert.strictEqual(row.intake_required, 1, `⭐ ${type} derive INSERT 显式落 intake_required=1（列 DEFAULT 0·漏列会造矛盾单）`);
+      assert.strictEqual(row.oa_number, null, `${type} derive 新单 oa_number 为 NULL（派生单同样尚未走 OA）`);
+      // 矛盾单哨兵：派生单必须真能被受理（若 ir=0 会被受理门不变量 409 卡死）
+      const acc = await call('POST', `/api/sys-issues/${r.body.id}/intake-accept`, liaisonTok, {});
+      assert.strictEqual(acc.status, 200, `${type} 派生单可被受理 200, got ${acc.status} ${JSON.stringify(acc.body)}`);
+      assert.strictEqual(acc.body.status, want.afterIntake, `${type} 派生单受理后 → ${want.afterIntake}`);
+    }
+    ok('[C2] derive 三类型落态全类型归一待受理（v2.1：C2.5 撤销）+ INSERT 显式 intake_required=1 + oa_number NULL + 均可走完前段（矛盾单「受理态+ir0」不会产生）');
   }
 
   // ═══ [C3] reactivate → 恒回受理门 + 同事务置 intake_required=1（含 ir=0 脏单自愈）═══
@@ -265,34 +298,81 @@ async function main() {
       const id = ins.lastID;
       const r = await call('POST', `/api/sys-issues/${id}/reactivate`, adminTok, { reason: '重新考虑' });
       assert.strictEqual(r.status, 200, `${label} reactivate 200, got ${r.status} ${JSON.stringify(r.body)}`);
-      assert.strictEqual(r.body.status, '待受理', `${label} reactivate 落 待受理（不再按单据 ir 分两支）`);
+      // ⭐ 角色权限重构 C2.5 撤销（v2.1）：**变更流复活恒回「待受理」**（预沟通段整体撤销，走同一个
+      //   resolveSysInitialStatusForCreate）。C0 的关键性质没变：落态由创建路径唯一入口决定、
+      //   **不按单据自身 ir 分两支**（v1.4 §2.2-C 的缺口仍堵着）。
+      assert.strictEqual(r.body.status, '待受理', `${label} reactivate 落 待受理（v2.1：C2.5 撤销·仍不按单据 ir 分支）`);
       const row = await get(`SELECT status, intake_required, ${TECH_LEAD_COLS.join(',')}, ${RELAY_COLS.join(',')} FROM sys_issues WHERE id=?`, [id]);
       assert.strictEqual(row.intake_required, 1, `${label} reactivate 同事务置 intake_required=1`);
       assertCleared(row, TECH_LEAD_COLS, 'tech_lead_notify_status', `${label} reactivate 清 tech_lead_*`);
       assertCleared(row, RELAY_COLS, 'relay_notify_status', `${label} reactivate 清 relay_*`);
-      // 自愈证明：恢复后能真正被受理（ir=0 脏单若不置 1 会在此 409）
+      // 自愈证明：恢复后能真正走完前段（ir=0 脏单若不置 1 会在受理那步 409）
       const acc = await call('POST', `/api/sys-issues/${id}/intake-accept`, liaisonTok, {});
       assert.strictEqual(acc.status, 200, `${label} 恢复后可被受理 200, got ${acc.status} ${JSON.stringify(acc.body)}`);
     }
-    ok('[C3] reactivate 恒回「待受理」+ 同事务 intake_required=1 + tech_lead_*九列/relay_*七列 整组清空（ir=0 脏单自愈·恢复后均可正常受理）');
+    ok('[C3] reactivate 变更流恒回「待受理」（v2.1：C2.5 撤销）+ 同事务 intake_required=1 + tech_lead_*九列/relay_*七列 整组清空（ir=0 脏单自愈·恢复后可直接受理）');
   }
 
   // ═══ [R] resubmit-intake：原子恢复 + tech_lead_* 九列整组归零 ═══
+  //   ⭐ 角色权限重构 v2.1（clearPendingConsultOnLeave 覆盖面扩至 intake_return）：本组咨询夹具补了一次
+  //   tech-lead-comment 真实回复（见下方前置调用注释）——"未回复轮会被 intake_return 自动清"是 v2.1
+  //   新增的合法行为，不是本组要测的东西；补上回复后这轮变成"已回复"（自动清对已回复轮次是 no-op），
+  //   [R] 组才能继续验证它原本关心的"resubmit-intake 才是唯一清空点"这条不变量。
   {
     const c = await create({ type: 'feature' });
     const id = c.body.id;
-    // 发起技术负责人沟通 → 写 tech_lead_id/_name/request_event_id + 首发通知（stub 成功 → notify_status=sent）
+    // ⭐ 角色权限重构 C2.5 撤销（v2.1 §2）：request-tech-consult 的开放态谓词全类型统一为「待受理」，
+    //   建单落态已直接就是「待受理」，无需再经中转即可发起咨询。
     const rq = await call('POST', `/api/sys-issues/${id}/request-tech-consult`, liaisonTok, { tech_lead_id: 7 });
     assert.strictEqual(rq.status, 200, `request-tech-consult 200, got ${rq.status} ${JSON.stringify(rq.body)}`);
+    // ⭐ 角色权限重构 v2.1 §2（clearPendingConsultOnLeave 自动清覆盖面扩至 intake_return）：本组要走
+    //   intake-return 验证"tech_lead_* 随单一路存续、不因中途状态流转被提前清空"——但 v2.1 起
+    //   intake_return 边会**自动清空"未回复"的咨询**（本组下方原本从未提交过意见）。
+    //   若不补一次 tech-lead-comment 回复，intake-return 会把 tech_lead_* 九列直接清空，[R] 组原本
+    //   要验证的"存续"这件事根本无从谈起（这是新增的合法行为，非提前清空的回归 bug）。补一条真实回复，
+    //   让这一轮变成"已回复"（明文口径：已回复的轮次是历史，不清不留痕），[R] 组原本关心的
+    //   "resubmit-intake 才是唯一清空点、中途步骤不提前清"这条不变量才继续成立
+    //   （自动清对已回复轮次是 no-op，不会干扰这条不变量）。
+    // ⭐ 186 号 HIGH（轮次围栏）：tech-lead-comment 新增必填 expected_request_event_id——取上一步
+    //   request-tech-consult 刚写入的当前轮 id（本组测的是"字段存续"不是围栏本身，取当前轮即保持原语义）。
+    const roundEv = (await get('SELECT tech_lead_notify_request_event_id AS ev FROM sys_issues WHERE id=?', [id])).ev;
+    const commentR = await call('POST', `/api/sys-issues/${id}/tech-lead-comment`, techTok,
+      { comment: '[R]组前置：技术负责人已回复的意见（防 intake-return 自动清清空）', expected_request_event_id: roundEv });
+    assert.strictEqual(commentR.status, 200, `[R] 组前置：技术负责人回复应 200, got ${commentR.status} ${JSON.stringify(commentR.body)}`);
+    // ⭐ codex Round-C 审 MED（采纳·升级为真九列）：request-tech-consult 成功后 tech_lead_notify_error /
+    //   tech_lead_read_at 两列本就是 NULL（v2.1 起 not_sent 场景恒无失败、尚未有人读）——Round-B 曾因此
+    //   把它俩从中间态比对里豁免。这里改用原子 SQL 给这两列注入合法格式的哨兵值（error 用可辨识文本；
+    //   read_at 用合法时间串），让下面的比对能覆盖全九列，不再豁免任何一列（这两列与
+    //   tech_lead_notify_status='not_sent' 同时存在在真实业务里不会发生，但本组关心的是"中间步骤有没有
+    //   提前清空"，不是业务语义完整性，注入哨兵值只是为了让这两列也有非空前值可比）。
+    await run(`UPDATE sys_issues SET tech_lead_notify_error=?, tech_lead_read_at=? WHERE id=?`,
+      ['SENTINEL-error-占位', '2020-06-01 00:00:00', id]);
     const before = await get(`SELECT ${TECH_LEAD_COLS.join(',')} FROM sys_issues WHERE id=?`, [id]);
     assert.strictEqual(Number(before.tech_lead_id), 7, '前置：tech_lead_id=7 已写入');
     assert.ok(before.tech_lead_notify_request_event_id > 0, '前置：request_event_id 已写入（版本围栏依赖它）');
-    assert.strictEqual(before.tech_lead_notify_status, 'sent', '前置：通知态 sent（stub 发送成功）');
+    // ⭐ 角色权限重构 v2.1 §6（S5 通知手动化）：request-tech-consult 不再自动发钉钉，首发响应/落库恒 not_sent。
+    assert.strictEqual(before.tech_lead_notify_status, 'not_sent', '前置：通知态 not_sent（S5：首发不再自动发送）');
+
+    // ⭐ codex Round-B 审 HIGH（采纳）：补中间态存续断言——原实现只在"request 之后"和"resubmit 之后"两点
+    //   各拍一张快照，中间的 intake-return 步骤完全没读过 tech_lead_* 列（v2.1：原先另一个中间检查点
+    //   pre-discuss-pass 随 C2.5 撤销一并删除，此处只剩 intake-return 一步）。这意味着，
+    //   哪怕这一步"提前"误清了这些列（例如未来有人把 tech_lead 清理逻辑错挂到 intake_return 上而不判断
+    //   是否已回复），本组照样绿——因为最终态"resubmit 后九列全空"这个断言分不清"是 resubmit 清的"还是
+    //   "更早就被清了、resubmit 只是在一片已经是空的地上又清了一遍"。故在 intake-return 之后补一次
+    //   读取，逐列比对与 request 后的快照一致。
+    //   ⭐ codex Round-C 审 MED（采纳）：比对列从"七列非空子集"升级为**全九列**（TECH_LEAD_COLS）——
+    //   上方已给 error/read_at 注入哨兵值，不再需要豁免它们。
+    const assertTechLeadUnchanged = (row, label) => {
+      for (const col of TECH_LEAD_COLS) {
+        assert.strictEqual(row[col], before[col], `[R] ${label}：${col} 与 request 后快照一致（中间步骤未提前清空）`);
+      }
+    };
 
     // 受理退改 → 待修改
     const ret = await call('POST', `/api/sys-issues/${id}/intake-return`, liaisonTok, { reason: '材料不全' });
     assert.strictEqual(ret.status, 200, `intake-return 200, got ${ret.status} ${JSON.stringify(ret.body)}`);
     assert.strictEqual((await get('SELECT status FROM sys_issues WHERE id=?', [id])).status, '待修改', '退改后 待修改');
+    assertTechLeadUnchanged(await get(`SELECT ${TECH_LEAD_COLS.join(',')} FROM sys_issues WHERE id=?`, [id]), 'intake-return 之后');
 
     // 建单人（admin=created_by）重新提交
     const re = await call('POST', `/api/sys-issues/${id}/resubmit-intake`, adminTok, {});
@@ -310,12 +390,47 @@ async function main() {
   }
 
   // ═══ [ATOM] 原子性直证（codex C0 审 MED-5）：注入 timeline 写入失败 → 新增 SET 片段与 status 一并回滚 ═══
-  //   本组回答的是"新增 setFrags 真的和 status 在同一条 UPDATE / 同一个事务里吗"——只看最终字段值证明不了。
+  //   ⭐ codex Round-D 审 LOW（声称收窄）：本组能证明的是"全部字段与 status 在**同一事务**内原子回滚"——
+  //   证明不了"同一条 UPDATE / 非分两次写"（两条 UPDATE 在同一事务里回滚结果与一条无异）；后者是代码审查
+  //   结论非测试结论。另：哨兵值（900001 等虚构 ID）只满足字段格式不满足引用完整性——当前 schema 无外键
+  //   约束故可用；若未来启用外键/跨字段触发器，本夹具会在进入被测路径前**显式失败**（红灯非假绿），届时换真实 ID 即可。
+  //   ⭐ codex Round-B 审 HIGH：① request-tech-consult 调用补 200 断言 ② 发现原实现从没验证过 beforeRow
+  //   里"预期该非空"的列真的非空——若某处代码回归把这些列错误地清成了 NULL，"逐列比对 afterRow===beforeRow"
+  //   依然全绿（NULL===NULL），本组就失去了它号称要验的"原子性"证明力。Round-B 当时按各场景真实产生路径
+  //   声明了一份"理应非空"的子集，但那只覆盖了"碰巧非空"的列。
+  //   ⭐ codex Round-C 审 HIGH（采纳·彻底消灭 NULL 对 NULL 假绿面）：reactivate 与 resubmit_intake 两个
+  //   端点的 case 分支都 push 了同一个 SYS_BACK_TO_INTAKE_GATE_SQL（intake-gate-sql.js），它的 SET 片段
+  //   覆盖 tech_lead_* 全部九列 + relay_* 全部七列——不管这两个场景各自的"真实产生路径"是否恰好把每一列
+  //   都填上了值（resubmit_intake 场景从未触达 relay_*，reactivate 的夹具 INSERT 也只显式赋值了其中几列），
+  //   guarded UPDATE 的 SET 子句都会尝试清空全部十六列。故本组不再依赖"场景恰好产生了哪些非空列"，
+  //   而是在注入故障前，用原子 SQL 把全部十六列**统一写成合法可辨识的哨兵值**（不是场景自然产生的值，
+  //   是本组专门指定、一眼可辨"这是测试写的"的值）——这样无论该列在真实业务流程里是否会被填充，
+  //   故障后的逐列比对都具备真实归因力：afterRow[col] === beforeRow[col] 证明的是"这一列的 SET 片段
+  //   确实和 status 在同一个回滚的事务里"，不再可能是"两边都是 NULL"的巧合。
   {
+    // 十六列统一哨兵值（notify_status 类用 DB 认可的合法枚举值 'failed'；时间列用可辨识的哨兵时间串；
+    // 文本列用带 SENTINEL 前缀的字符串；id 类用不会与真实白名单用户冲突的大数字）——按 SYS_BACK_TO_INTAKE_GATE_SQL
+    // 实际清理的字段清单来（intake-gate-sql.js：SYS_CLEAR_TECH_LEAD_FIELDS_SQL 九列 + SYS_CLEAR_RELAY_FIELDS_SQL 七列）。
+    const TECH_LEAD_SENTINELS = {
+      tech_lead_id: 900001, tech_lead_name: 'SENTINEL-技术负责人',
+      tech_lead_notify_request_event_id: 900002, tech_lead_notify_status: 'failed',
+      tech_lead_notified_at: '2020-01-01 00:00:01', tech_lead_notify_message_key: 'SENTINEL-msgkey-techlead',
+      tech_lead_read_at: '2020-01-01 00:00:02', tech_lead_notify_error: 'SENTINEL-error-techlead',
+      tech_lead_notify_sent_by: 900003,
+    };
+    const RELAY_SENTINELS = {
+      relay_notified_user_id: 900004, relay_notified_user_name: 'SENTINEL-对接人',
+      relay_notify_status: 'failed', relay_notified_at: '2020-01-01 00:00:03',
+      relay_read_at: '2020-01-01 00:00:04', relay_notify_message_key: 'SENTINEL-msgkey-relay',
+      relay_notify_error: 'SENTINEL-error-relay',
+    };
+    const ALL_SENTINEL_COLS = [...TECH_LEAD_COLS, ...RELAY_COLS];
+    const ALL_SENTINELS = { ...TECH_LEAD_SENTINELS, ...RELAY_SENTINELS };
     for (const scene of ['reactivate', 'resubmit_intake']) {
-      let id, beforeRow;
+      let id;
       if (scene === 'reactivate') {
-        // ir=0 脏夹具 → 显式摘约束（同 [C3]）
+        // ir=0 脏夹具 → 显式摘约束（同 [C3]）；INSERT 本身的 tech_lead_*/relay_* 赋值仅用于建立"合法存在"的
+        // 起点，随后统一被下方的哨兵注入覆盖，故此处不必逐列齐全。
         const ins = await gate.withoutTriggers(() => run(`INSERT INTO sys_issues (type, status, priority, title, system_name, source, intake_required,
             tech_lead_id, tech_lead_name, tech_lead_notify_status, relay_notified_user_id, relay_notify_status,
             created_by, created_by_name, record_source)
@@ -324,10 +439,31 @@ async function main() {
       } else {
         const c = await create({ type: 'feature', title: '原子性-resubmit' });
         id = c.body.id;
-        await call('POST', `/api/sys-issues/${id}/request-tech-consult`, liaisonTok, { tech_lead_id: 7 });
+        // ⭐ 角色权限重构 v2.1（C2.5 撤销）：request_tech_consult 的开放态谓词全类型统一为「待受理」——
+        //   建单落态已直接就是「待受理」，直接发起咨询即可进入"发起咨询→受理退改→重提"这条受理门内剧本
+        //   （无需再经预沟通中转）。
+        // ⭐ codex Round-B 审 HIGH（采纳）：补 200 断言（此前调用了但从不检查结果，静默失败会被后续
+        //   快照掩盖）。
+        const rq = await call('POST', `/api/sys-issues/${id}/request-tech-consult`, liaisonTok, { tech_lead_id: 7 });
+        assert.strictEqual(rq.status, 200, `[ATOM] 夹具 request-tech-consult 200, got ${rq.status} ${JSON.stringify(rq.body)}`);
         await call('POST', `/api/sys-issues/${id}/intake-return`, liaisonTok, { reason: '补材料' });
       }
-      beforeRow = await get(`SELECT status, intake_required, ${TECH_LEAD_COLS.join(',')}, ${RELAY_COLS.join(',')} FROM sys_issues WHERE id=?`, [id]);
+
+      // ⭐ codex Round-C 审 HIGH（采纳）：注入故障前，用原子 SQL 把十六列**全部**覆盖成哨兵值——不依赖
+      // 场景自然产生的值恰好覆盖哪些列（resubmit_intake 场景从不触达 relay_*，此处也照样把它写上哨兵值，
+      // 因为 guarded UPDATE 的 SET 子句本就会尝试清它，必须证明"清它"这个动作也参与了同一次回滚）。
+      // ⚠️ reactivate 场景的夹具故意 ir=0（脏单）：受理门触发器对**任何** UPDATE 都按结果值校验
+      // intake_required（不只是显式改它的 UPDATE），故这条纯改 tech_lead_*/relay_* 的哨兵注入也要
+      // 摘除触发器（同 INSERT 夹具一样的理由），否则会被 C0 焊死的触发器拦下——这不是本组要测的东西。
+      const sentinelSets = ALL_SENTINEL_COLS.map(c => `${c} = ?`).join(', ');
+      const sentinelParams = [...ALL_SENTINEL_COLS.map(c => ALL_SENTINELS[c]), id];
+      await gate.withoutTriggers(() => run(`UPDATE sys_issues SET ${sentinelSets} WHERE id=?`, sentinelParams));
+      const beforeRow = await get(`SELECT status, intake_required, ${TECH_LEAD_COLS.join(',')}, ${RELAY_COLS.join(',')} FROM sys_issues WHERE id=?`, [id]);
+      // 哨兵写入自证：全部十六列都应等于哨兵值（不是"非空"这种弱断言，而是精确匹配预期哨兵，
+      // 防哨兵 UPDATE 本身的列名/参数对不齐却静默通过）。
+      for (const col of ALL_SENTINEL_COLS) {
+        assert.strictEqual(beforeRow[col], ALL_SENTINELS[col], `[ATOM/${scene}] 哨兵注入自证：${col} 应等于哨兵值 ${ALL_SENTINELS[col]}，实际 ${beforeRow[col]}`);
+      }
 
       injectFailureFired = false;
       injectFailureOnSql = 'INSERT INTO sys_issue_timeline';   // 状态 UPDATE 之后、COMMIT 之前
@@ -341,16 +477,17 @@ async function main() {
       const afterRow = await get(`SELECT status, intake_required, ${TECH_LEAD_COLS.join(',')}, ${RELAY_COLS.join(',')} FROM sys_issues WHERE id=?`, [id]);
       for (const col of ['status', 'intake_required', ...TECH_LEAD_COLS, ...RELAY_COLS]) {
         assert.strictEqual(afterRow[col], beforeRow[col],
-          `[ATOM/${scene}] ${col} 随事务整体回滚（新增 SET 片段与 status 同一条 UPDATE·非分两次写）`);
+          `[ATOM/${scene}] ${col} 随事务整体回滚到哨兵值（与 status 同一事务原子回滚·非 NULL 对 NULL 假绿——"同一条 UPDATE"属代码审查结论，见组头 Round-D 收窄注）`);
       }
     }
-    ok('[ATOM] 原子性直证：reactivate / resubmit 在 timeline 写入失败时，status + intake_required + tech_lead_*九列 + relay_*七列 **全部**回滚到原值（证明同一事务·非顺序多次写）');
+    ok('[ATOM] 原子性直证：reactivate / resubmit 在 timeline 写入失败时，status + intake_required + tech_lead_*九列 + relay_*七列 **全部十六列**（注入前统一写为合法可辨识哨兵值）回滚到哨兵值（证明同一事务·非顺序多次写·彻底消灭 NULL 对 NULL 假绿面）');
   }
 
   // ═══ [CC] 并发 CAS（codex C0 审 MED-5）：并发两次 resubmit → 恰一成功，另一个按既有乐观锁拒绝 ═══
   {
     const c = await create({ type: 'feature', title: '并发-resubmit' });
     const id = c.body.id;
+    // ⭐ v2.1（C2.5 撤销）：建单落态已直接是「待受理」，无需预沟通中转即可发起咨询。
     await call('POST', `/api/sys-issues/${id}/request-tech-consult`, liaisonTok, { tech_lead_id: 7 });
     await call('POST', `/api/sys-issues/${id}/intake-return`, liaisonTok, { reason: '补材料' });
 
@@ -379,6 +516,7 @@ async function main() {
   {
     for (const [type, want] of [['feature', '待指派'], ['improvement', '待指派'], ['bug', '待处理']]) {
       const c = await create({ type });
+      // ⭐ v2.1（C2.5 撤销）：三类型建单均直落「待受理」，受理门是唯一必经关口，无需预沟通中转。
       const acc = await call('POST', `/api/sys-issues/${c.body.id}/intake-accept`, liaisonTok, {});
       assert.strictEqual(acc.status, 200, `${type} 受理 200, got ${acc.status} ${JSON.stringify(acc.body)}`);
       assert.strictEqual(acc.body.status, want, `${type} 受理通过 → ${want}（与 C0 前建单落态逐字一致）`);
@@ -404,7 +542,9 @@ async function main() {
       VALUES ('feature','已拒绝','P2','SCOPE-reactivate','BMS','内部',1,1,'管理员','native')`);
     const rea = await call('POST', `/api/sys-issues/${rej.lastID}/reactivate`, adminTok, { reason: '范围固化用例' });
     assert.strictEqual(rea.status, 200, `reactivate 不要求契约字段（有意设计）, got ${rea.status} ${JSON.stringify(rea.body)}`);
-    assert.strictEqual(rea.body.status, '待受理', 'reactivate 仍恒回受理门');
+    // ⭐ v2.1（C2.5 撤销）：本单是 feature（变更流）→ 复活回「待受理」（预沟通段整体撤销）。本组要钉的是
+    //   "落态由服务端统一函数决定、与契约字段无关"，这一点不因撤销而改变（变的只是那个函数的返回值）。
+    assert.strictEqual(rea.body.status, '待受理', 'reactivate 落态仍由服务端统一函数决定（v2.1：变更流→待受理·与契约字段无关）');
     ok('[SCOPE] 契约闸范围固化：derive / reactivate **不要求** intake_contract_version 仍正常（有意设计·非遗漏），且落态照样由服务端统一函数决定');
   }
 

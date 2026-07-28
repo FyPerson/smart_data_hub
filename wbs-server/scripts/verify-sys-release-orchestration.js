@@ -102,9 +102,13 @@ async function seedBugToReady(devId = 5, devTokFor = devTok) {
 async function seedFeatureToReady(devId = 5, devTokFor = devTok) {
   let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 'feat单', system_name: 'BMS', source: '内部' });
   const id = r.body.id;
+  // ⭐ 角色权限重构 C2.5 撤销（v2.1）：建单直落「待受理」，无需再走预沟通段。
   // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
   await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, {});
   await call('POST', `/api/sys-issues/${id}/schedule`, adminTok, {});
+  // ⭐ 角色权限重构 v2.1 §4：变更流 assign 前置要求 oa_number 通过校验 → 待指派态内先补号。
+  r = await call('POST', `/api/sys-issues/${id}/set-oa-number`, adminTok, { oa_number: '2026070001' });
+  assert.strictEqual(r.status, 200, 'feature 补 OA 号 200, got ' + JSON.stringify(r.body));
   await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: devId });
   await call('POST', `/api/sys-issues/${id}/estimate`, devTokFor, { dev_estimated_at: EST });
   await call('POST', `/api/sys-issues/${id}/submit`, devTokFor, { mode: 'no_code', no_code_reason: '交付（占位理由）' });

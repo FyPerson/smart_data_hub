@@ -91,10 +91,15 @@ async function mkIssue(type, status, extra = {}) {
   //   约束——本文件测的是成员 add/remove/excuse/reassign 机制，非 estimate 本身，默认种占位值避免 GATE 场景
   //   （如 S10 excuse 触发 GATE）被新闸拦下；devEstimatedAt: null 显式传空可测该闸本身。
   const est = extra.devEstimatedAt === null ? null : (extra.devEstimatedAt || '2026-07-01 10:00:00');
+  // ⭐ R4 下沉（v2.1·实现变了非断言错·196 号线）：变更流夹具**默认带 OA**——v2.1 后任何进过指派/开发态的
+  //   变更流单必有号（三入口共享守卫），raw SQL 直造的无号态是 v2.1 前的人工态。extra.oaNumber:null 可显式造
+  //   无号态（测守卫本身用）；bug 恒不带（D2 可选）。
+  const oa = (type === 'feature' || type === 'improvement')
+    ? (extra.oaNumber === null ? null : (extra.oaNumber || '20260728300')) : null;
   const r = await run(
-    `INSERT INTO sys_issues (type, status, title, system_name, source, created_by, created_by_name, dev_estimated_at)
-     VALUES (?, ?, ?, 'BMS', '内部', 1, '管理员', ?)`,
-    [type, status, extra.title || `${type}-${status}-单`, est]
+    `INSERT INTO sys_issues (type, status, title, system_name, source, created_by, created_by_name, dev_estimated_at, oa_number)
+     VALUES (?, ?, ?, 'BMS', '内部', 1, '管理员', ?, ?)`,
+    [type, status, extra.title || `${type}-${status}-单`, est, oa]
   );
   return r.lastID;
 }
@@ -678,31 +683,56 @@ async function main() {
   }
 
   // ══════════════════════════════════════════════════════════════════════
-  // S28：进 SYS_DEV 零在册（建单直置/W07）→ 400 GATE_INVARIANT（assertMainStatusTransition 直调，
-  //   path A 因 assigned_to 必填结构性不可达零在册直置 DEV，故本条只能在函数级验证，详见交付汇报）
+  // S28：进 SYS_DEV 零在册 → 400 GATE_INVARIANT（assertMainStatusTransition 直调）
+  //   ⭐ 角色权限重构 C2.5（codex Round-C 审 MED）：本组原用 `CREATE + null→处理中` 触达③层门禁。
+  //     C2.5 把 CREATE 的合法落态收敛为「创建路径唯一入口的返回值」单值后，那条边在**①层**就被拒
+  //     （409 GATE_INVARIANT），根本走不到③层——再用它测门禁就变成"测了个寂寞"（错误码看着还挺像）。
+  //     改用 **GATE routeKind（待验证→处理中）**：①层 GATE 分支放行、②层族白名单含 DEV，
+  //     恰好把③层 enteringDev 的零在册门禁单独暴露出来——被测对象与原意图逐字一致，且不依赖已收敛的 CREATE 边。
   // ══════════════════════════════════════════════════════════════════════
   {
     let threw = null;
     try {
-      assertMainStatusTransition({ routeKind: 'CREATE', action: 'create', actionKind: null, issueType: 'bug', before: null, after: '处理中', rosterActiveCount: 0 });
+      assertMainStatusTransition({ routeKind: 'GATE', action: null, actionKind: null, issueType: 'bug', before: '待验证', after: '处理中', rosterActiveCount: 0 });
     } catch (e) { threw = e; }
-    assert.ok(threw, 'S28：零在册直置 DEV 应抛错');
-    assert.strictEqual(threw.httpStatus, 400, 'S28：HTTP 状态应为 400（请求破坏门禁不变量）');
+    assert.ok(threw, 'S28：零在册进 DEV 应抛错');
+    assert.strictEqual(threw.httpStatus, 400, 'S28：HTTP 状态应为 400（请求破坏门禁不变量·非 409 的边非法）');
     assert.strictEqual(threw.code, 'GATE_INVARIANT', 'S28：错误码 GATE_INVARIANT');
-    ok('S28：assertMainStatusTransition 直调——进 SYS_DEV 零在册（CREATE routeKind）→ 400 GATE_INVARIANT');
+    // 反证：同一条边有在册成员时放行——证明上面的 400 确实来自③层 roster 门禁，而不是边本身不合法
+    assert.doesNotThrow(() => assertMainStatusTransition({ routeKind: 'GATE', action: null, actionKind: null, issueType: 'bug', before: '待验证', after: '处理中', rosterActiveCount: 1 }),
+      'S28：同边有在册成员则放行（证明 400 来自③层门禁·非①层边非法）');
+    ok('S28：assertMainStatusTransition 直调——进 SYS_DEV 零在册（GATE routeKind）→ 400 GATE_INVARIANT + 有在册则放行（③层门禁被单独暴露）');
   }
 
   // ══════════════════════════════════════════════════════════════════════
   // S28b：受理排期改造 guard 直调——create/reactivate/change_intake_mode 动态目标不被误拒（codex131-M2 + create 契约）
   // ══════════════════════════════════════════════════════════════════════
   {
-    // ① create dynamicTarget=initial_status：null→待受理(INTAKE) / null→待指派(D_PRE) 均放行
-    assert.doesNotThrow(() => assertMainStatusTransition({ routeKind: 'CREATE', action: 'create', actionKind: null, issueType: 'feature', before: null, after: '待受理' }), 'S28b①：create→待受理(INTAKE) 放行');
-    assert.doesNotThrow(() => assertMainStatusTransition({ routeKind: 'CREATE', action: 'create', actionKind: null, issueType: 'feature', before: null, after: '待指派' }), 'S28b①：create→待指派(D_PRE) 放行');
-    // ② reactivate dynamicTarget=initial_status：已拒绝→待指派(intake=0 分支) 放行·→非初始态拒
-    assert.doesNotThrow(() => assertMainStatusTransition({ routeKind: 'ADMIN_TRANSITION', action: 'reactivate', actionKind: null, issueType: 'feature', before: '已拒绝', after: '待指派' }), 'S28b②：reactivate 已拒绝→待指派 放行');
+    // ① create dynamicTarget=initial_status：null→建单落态 均放行
+    // ⭐ 角色权限重构 C2.5 撤销（v2.1）：**feature 的 CREATE 落态回归「待受理」**（PRE_DISCUSS 族整体撤销），
+    //   与 bug 同源——两条 type 现走同一目标值，仍各测各的 type（防未来再分流时漏一边）。
     // codex132-L2：负向用例加谓词（证明确以 guard 不变量错误拒·非任意异常放水）
     const guard409 = (e) => e instanceof MainStatusGuardError && e.httpStatus === 409 && e.code === 'GATE_INVARIANT';
+    assert.doesNotThrow(() => assertMainStatusTransition({ routeKind: 'CREATE', action: 'create', actionKind: null, issueType: 'feature', before: null, after: '待受理' }), 'S28b①：feature create→待受理(INTAKE) 放行（v2.1：C2.5 撤销）');
+    assert.doesNotThrow(() => assertMainStatusTransition({ routeKind: 'CREATE', action: 'create', actionKind: null, issueType: 'bug', before: null, after: '待受理' }), 'S28b①：bug create→待受理(INTAKE) 放行');
+    // ⭐ 角色权限重构 C2.5 + codex Round-A 审 HIGH 收紧：**CREATE 的合法落态收敛为"统一入口返回值"单值**
+    //   （bug 额外保留 devStatus 供 path A/B 的死调用点，见 guard 注释）。原先还接受 `(type,0)` 的
+    //   「待指派/待处理」——C0 之后没有任何入口产生该落态，留着等于给"绕过受理门"留守卫层后门。
+    //   负例把收敛钉死，防日后有人"顺手放宽回去"。
+    assert.throws(() => assertMainStatusTransition({ routeKind: 'CREATE', action: 'create', actionKind: null, issueType: 'feature', before: null, after: '待指派' }), guard409,
+      'S28b①：feature create→待指派 拒（C0 后无入口产生该落态·守卫不得留后门）');
+    assert.throws(() => assertMainStatusTransition({ routeKind: 'CREATE', action: 'create', actionKind: null, issueType: 'feature', before: null, after: '开发中', rosterActiveCount: 1 }), guard409,
+      'S28b①：feature create→开发中 拒（变更流不得凭空进开发）');
+    // ⭐ codex Round-C 审 MED 二次收敛：bug 的建单直置 DEV 例外**也已删除**——留一个没有活调用方的放行分支
+    //   就是结构性 fail-open（对 feature 一套标准、对 bug 另一套并不自洽）。path A/B 若要复活，
+    //   端点层 INTAKE_WITH_ASSIGN_CONFLICT 与本守卫必须同批放开，那本就该是一次有意决策。
+    assert.throws(() => assertMainStatusTransition({ routeKind: 'CREATE', action: 'create', actionKind: null, issueType: 'bug', before: null, after: '处理中', rosterActiveCount: 1 }), guard409,
+      'S28b①：bug create→处理中 亦拒（建单直置 DEV 的守卫后门已关·CREATE 合法落态收敛为单值）');
+    // ② reactivate dynamicTarget=initial_status：合法目标同样收敛为单值（v2.1：全类型=待受理）
+    assert.doesNotThrow(() => assertMainStatusTransition({ routeKind: 'ADMIN_TRANSITION', action: 'reactivate', actionKind: null, issueType: 'feature', before: '已拒绝', after: '待受理' }), 'S28b②：reactivate feature 已拒绝→待受理 放行（v2.1：C2.5 撤销）');
+    assert.doesNotThrow(() => assertMainStatusTransition({ routeKind: 'ADMIN_TRANSITION', action: 'reactivate', actionKind: null, issueType: 'bug', before: '已拒绝', after: '待受理' }), 'S28b②：reactivate bug 已拒绝→待受理 放行');
+    assert.throws(() => assertMainStatusTransition({ routeKind: 'ADMIN_TRANSITION', action: 'reactivate', actionKind: null, issueType: 'feature', before: '已拒绝', after: '待指派' }), guard409,
+      'S28b②：reactivate feature→待指派 拒（复活落态唯一来源=创建路径统一入口·不得绕过预沟通段）');
     assert.throws(() => assertMainStatusTransition({ routeKind: 'ADMIN_TRANSITION', action: 'reactivate', actionKind: null, issueType: 'feature', before: '已拒绝', after: '开发中' }), guard409, 'S28b②：reactivate→开发中(非初始态) 拒(409 GATE_INVARIANT)');
     // ③ change_intake_mode dynamicTarget=intake_mode（codex131-M2 修·不被误拒为旁路）：待指派↔待受理/待修改 前段态放行·非前段态拒
     assert.doesNotThrow(() => assertMainStatusTransition({ routeKind: 'ADMIN_TRANSITION', action: 'change_intake_mode', actionKind: null, issueType: 'feature', before: '待指派', after: '待受理' }), 'S28b③：change_intake_mode 待指派→待受理 放行(不误拒旁路)');

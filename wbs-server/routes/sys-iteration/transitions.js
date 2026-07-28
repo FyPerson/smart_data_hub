@@ -39,6 +39,16 @@ function resolveInitialStatus(type, intakeRequired) {
   return intakeRequired === 1 ? '待受理' : withoutIntake;
 }
 
+// ── 角色权限重构 C2.5（方案 v1.9 §4-C2.5）：预沟通段常量 ────────────────────────────────
+//   业务来由：真实流程里"admin 判需求合不合理"与"和开发讨论能不能做"都发生在**业务方走 OA 之前**，
+//   而被拒绝的需求永远不会有 OA 单 → 原设计（起点=OA 之后的「待受理」）让这一段决策永久无痕。
+//   C2.5 把单据生命周期起点前移到「待商议」，拒绝走已有的 issue_reject（原因必填）。
+// ⚠️ **命名避坑**：平台曾有过「待评估」态（受理排期改造砍掉，index.js 的 C1_LEGACY_STATUSES 里还留着
+//   它作迁移识别用）。新态**必须叫「待商议」**，与历史迁移语义不撞车。
+// ⚠️ **bug 不走本段**：生产故障没有"合不合理/能不能做"的讨论空间，也不走 OA（用户 2026-07-27 拍板）。
+// （C2.5 撤销·方案 v2.1）预沟通段的两个专属常量已删——
+//   预沟通段废除后已无任何消费方（grep 归零核实）；verify-sys-pre-discuss [S] 哨兵断言两者恒 undefined。
+
 // ── 角色权限重构 C0（方案 v1.5 §4-C0）：**创建路径落态唯一入口**──────────────────────────
 //   ⭐ 受理门焊死：全类型（bug/feature/improvement·config 无 transitions 不适用·v1.5 §2.6）建单必经受理，
 //     故创建落态**恒 intake_required=1 → '待受理'**，不再由调用方/客户端决定。
@@ -54,12 +64,26 @@ function resolveInitialStatus(type, intakeRequired) {
 //   ⚠️ **config 不在本模块的支持范围**：ALLOWED_STATUSES / TRANSITIONS 均无 config 键，
 //     本函数对 config 会 fail-closed 抛错，建单入口先以 400 TYPE_NOT_SUPPORTED 拒绝
 //     （verify-sys-intake-gate [I]/[C1] 各有断言钉死）。文件早期注释里"四类型含 config"是历史表述，以此处为准。
+//   ⭐ **C2.5（v1.9）起按 type 分流**：变更流（feature/improvement）落「待商议」进预沟通段；bug 仍落「待受理」。
+//     ⚠️ 分流点只此一处——三个创建入口（建单 / derive / reactivate）与 status-transition-guard 的
+//     CREATE 边、reactivate 动态边**全部改调本函数**，不再各自持有一份"合法初始态集"副本
+//     （C1+C2 对抗审 F1「两份清单必然漂移」的直接应用：v1.8 只改本函数就会让 guard 当场分叉 → 建单 409）。
+//     ⚠️ **`intake_required` 与本次分流正交**：新态在受理门**之前**，DB 触发器只判 `NEW.intake_required IS NOT 1`
+//     （intake-gate-sql.js·与 status 无关），故创建仍恒 intake=1、受理门仍必经，**C0 焊死不作废**。
+//     ⚠️ reactivate（已拒绝复活）随本函数自动回「待商议」重走预沟通（用户拍板）——这正是"唯一入口"的价值：
+//     不为它开分叉参数，否则 C0 焊死的"落态不受调用方影响"就破了。
+//   ⭐⭐ C2.5 撤销（方案 v2.1·2026-07-28）：预沟通段废除，**全类型恒落「待受理」**——"建单即代表该做"
+//     （用户澄清：不存在 admin 判"该不该做"的环节，业务沟通在建单前完成）。分流逻辑删除；
+//     "唯一入口"性质不变（建单/derive/reactivate 与 guard 仍全部调本函数），C0 焊死不作废（intake 恒 1）。
 function resolveSysInitialStatusForCreate(type) {
   return resolveInitialStatus(type, 1);
 }
 
 // ── 每个 type 的合法状态集（§3.3 变更流 + §3.4 旁路态·受理排期改造 §4.1）──────────
 //   受理排期改造：删「待评估/已排期」→ 加「待受理/待修改」(INTAKE 族) +「待指派」(D_PRE 族·受理通过落态)。
+//   角色权限重构 C2.5：**队首加「待商议」**（预沟通段·OA 之前·仅变更流）——数组顺序即前端状态筛选/流程图展示序，
+//     新态是整条流的真实起点，必须排在「待受理」之前。
+//   角色权限重构 C2.5 撤销（方案 v2.1）：「待商议」从状态集移除——预沟通段废除，建单直落「待受理」。
 const CHANGE_FLOW_STATUSES = [
   '待受理', '待修改', '待指派', '开发中', '待验证', '待上线', '已上线', '已关闭',  // 主流程
   '已暂缓', '已拒绝', '已作废',                                                    // 旁路态（§3.4）
@@ -100,6 +124,8 @@ const CHANGE_FLOW_TRANSITIONS = [
     timelineEvent: 'created', actionCode: null,
     notifyAfterCommit: null,
   },
+  // ── （C2.5 撤销·方案 v2.1）"预沟通通过"条目已删除——预沟通段废除，OA 号改为受理后经
+  //    set-oa-number 端点补填（§4-R4），变更流指派前守卫必有号 ──────────
   // ── 受理门动作（受理排期改造 §5·intake_required=1 才走）──────────
   {
     action: 'intake_accept',                // 受理通过：待受理 → 待指派（对接人∨admin）
@@ -129,13 +155,15 @@ const CHANGE_FLOW_TRANSITIONS = [
     notifyAfterCommit: null,                // 本期不发·待受理列表驱动（§4.5）
   },
   {
+    // ⭐ C2.5 撤销（方案 v2.1 §3）：谓词回「待受理」——预沟通段废除，"对接人拿不准转技术负责人"发生在
+    //   待受理阶段（转不转都不改状态·"都是开发团队的评估时长"）。至此与 bug 侧同值（全类型待受理）。
     action: 'request_tech_consult',         // 发起技术负责人沟通：待受理 → 待受理（对接人∨admin，选技术负责人）
-    from: ['待受理'], to: null,             // 旁路·不改 status（选技术负责人 + 自动首发通知，§6）
+    from: ['待受理'], to: null,             // 旁路·不改 status（选技术负责人·通知发送 S5 起改手动）
     roleGuard: 'intake_liaison', ownerGuard: null,
     requiredPayload: ['tech_lead_id'],
-    sideEffects: ['tech_lead_id/_name 写入', '自动首发技术负责人通知（§6）'],
+    sideEffects: ['tech_lead_id/_name 写入', '通知列组重置为 not_sent（S5 手动化：不自动发送·用户点「发送通知」经 resend-tech-consult 发·方案 v2.1 §6）'],
     timelineEvent: 'note', actionCode: 'request_tech_consult',
-    notifyAfterCommit: null,                // 通知由端点显式发
+    notifyAfterCommit: null,                // 本动作不发送通知（S5 手动化）；用户后续经 resend-tech-consult 手动发
   },
   {
     action: 'edit_in_revision',             // 待修改态编辑内容：待修改 → 待修改（建单人∨admin·旁路）
@@ -294,11 +322,18 @@ const CHANGE_FLOW_TRANSITIONS = [
     notifyAfterCommit: null,
   },
   {
-    action: 'issue_reject',                 // 拒绝：待受理 → 已拒绝（admin，原因必填，§3.4）
-    from: ['待受理'], to: '已拒绝',         // 受理排期改造：from 由「待评估」改「待受理」（前段唯一可拒态）
-    roleGuard: 'admin', ownerGuard: null,
+    action: 'issue_reject',                 // 拒绝：待受理 → 已拒绝（**仅受理人**·意见前置·原因必填）
+    // ⭐⭐ C2.5 撤销 + R2 重构（方案 v2.1 §2/§3·用户拍板）：
+    //   · from 收回单值「待受理」（待商议随预沟通段废除）。
+    //   · roleGuard='intake_liaison_only'（**新增值·排除 admin**）：拒绝语义=开发方回绝需求，天然属对接人；
+    //     admin=建单人，"建单即该做"，事后确实不能做走 void 作废（用户原话拍板）。判定只看 uid∈受理人
+    //     白名单不看 role（双身份 uid∈白名单即放行·方案 §2 矩阵 190 号钉死）。bug 条目不受影响（保持 admin）。
+    //   · 前置守卫「当前轮已有评估意见」在引擎执行器内（同事务·非本表可表达），见 index.js R2 守卫段——
+    //     未咨询/未回复 → 409 REJECT_REQUIRES_TECH_COMMENT（"拒绝的依据必须是技术负责人的意见"）。
+    from: ['待受理'], to: '已拒绝',
+    roleGuard: 'intake_liaison_only', ownerGuard: null,
     requiredPayload: ['reason'],
-    sideEffects: [],
+    sideEffects: ['前置守卫：当前轮已有 tech_lead_comment（引擎执行器·REJECT_REQUIRES_TECH_COMMENT）'],
     timelineEvent: 'status_change', actionCode: 'issue_reject',
     notifyAfterCommit: null,
   },
@@ -433,11 +468,17 @@ const BUG_FLOW_TRANSITIONS = [
     notifyAfterCommit: null,
   },
   {
+    // 角色权限重构 C3（方案 v1.9 §4-C3）历史沿革：本条目语义从来就是"请技术负责人协助判断/定位"（诊断协助），
+    //   谓词锚定「待受理」，C3 当时曾令 tech-lead-comment/cancel-consult 两个端点谓词硬编码「待商议」（仅变更流可用，
+    //   bug 不获得"回一条评估意见"的能力，只沿用本条目 request-tech-consult 的既有诊断协助能力）。
+    // ⭐⭐ C2.5 撤销（方案 v2.1）：预沟通段废除后，tech-lead-comment/cancel-consult 的开放态谓词已改**全类型
+    //   统一「待受理」**（见 index.js）——bug 现在与变更流同等可用"回一条评估意见"/"取消咨询"两个端点，
+    //   不再是变更流专属能力。本条目 request_tech_consult 的谓词本就是「待受理」，故这次改写对它是零回归。
     action: 'request_tech_consult',         // 发起技术负责人沟通：待受理 → 待受理（对接人∨admin·文案"请技术负责人协助判断/定位"）
     from: ['待受理'], to: null,
     roleGuard: 'intake_liaison', ownerGuard: null,
     requiredPayload: ['tech_lead_id'],
-    sideEffects: ['tech_lead_id/_name 写入', '自动首发技术负责人通知（§6）'],
+    sideEffects: ['tech_lead_id/_name 写入', '通知列组重置为 not_sent（S5 手动化：不自动发送·用户点「发送通知」经 resend-tech-consult 发·方案 v2.1 §6）'],
     timelineEvent: 'note', actionCode: 'request_tech_consult',
     notifyAfterCommit: null,
   },
@@ -688,9 +729,15 @@ function buildMeta() {
     reactivate: '重新激活', issue_reject: '拒绝', void: '作废', reopen: '重开',
     feasibility: '可行性评估', blocked: '标记受阻', unblock: '解除受阻',
     // 受理排期改造 §5/§6/§7：受理门 + 技术负责人 + 计划开工日新动作
+    // C2.5 已撤销（方案 v2.1）——⚠️ 下方标签**保留**供历史 timeline 行渲染（本地库曾真实产生过
+    //   "预沟通通过"事件行；同上方 set_release_flag 先例：只删 TRANSITIONS 条目不删标签，
+    //   删标签会让历史行渲染成 undefined。方案 §7 历史兼容允许清单第②类）。
+    pre_discuss_pass: '预沟通通过',
     intake_accept: '受理通过', intake_return: '退回修改', resubmit_intake: '重新提交受理',
     request_tech_consult: '请技术负责人沟通', edit_in_revision: '编辑内容', change_intake_mode: '切换受理模式',
     set_scheduled_start: '定计划开工日',
+    // C2.5 撤销·R4：OA 号补填端点的 timeline action_code 标签（set-oa-number 是旁路路由不进 TRANSITIONS·仅供渲染）
+    set_oa_number: '补填 OA 号',
     // scope_change label 为 config 流预留（feature/improvement 已移除该动作，typeFlows 不含）——
     //   meta.actions 是全动作 label 超集，前端按 typeFlows 显隐按钮，故残留此 label 无害（ultracode 对抗审确认）。
     scope_change: '范围变更', derive: '派生迭代',
@@ -724,9 +771,20 @@ function buildMeta() {
   // 受理排期改造 §9：initialStatusesByType（复数·新形状）替代旧 initialStatusByType——前端从此取初始态，禁从 create.to 推导。
   //   ⚠️ codex132-L1 修（单一事实源）：两分支值统一由 resolveInitialStatus 生成·不再硬编码 '待受理'/直读 WITHOUT_INTAKE 映射·
   //   杜绝"resolver 唯一权威"声明与 meta 组装第二套逻辑漂移。
+  //   ⭐ 角色权限重构 C2.5（方案 v1.9 §4-C2.5·前置核实查出的第 5 处漂移）：**新增 `for_create` 才是建单落态权威**。
+  //   C2.5 起变更流建单落「待商议」，而 `with_intake` 恒等于 `resolveInitialStatus(type,1)`='待受理' ——
+  //   它**不再等于"建单会落到哪"**，只是"intake_required=1 分支的解析值"（受理门内态）。
+  //   两个 key 保留原语义不动（既有 verify 断言与历史消费者不破），另加 `for_create` 直接暴露
+  //   `resolveSysInitialStatusForCreate`。消费者要"建单落态"一律读 `for_create`，**别再读 with_intake**。
   const initialStatusesByType = {};
   for (const type of Object.keys(INITIAL_STATUS_WITHOUT_INTAKE_BY_TYPE)) {
-    initialStatusesByType[type] = { with_intake: resolveInitialStatus(type, 1), without_intake: resolveInitialStatus(type, 0) };
+    initialStatusesByType[type] = {
+      for_create: resolveSysInitialStatusForCreate(type),   // ⭐ 建单/derive/reactivate 真实落态（C2.5 起按 type 分流）
+      // ⚠️ 角色权限重构 C4·184 号预审（PM-5·弃用性注释）：不再等于建单落态（C2.5 分流后）——
+      //   建单落态请读 for_create；本字段=进入受理门时的落态（intake_required=1 分支的解析值，恒'待受理'）。
+      with_intake: resolveInitialStatus(type, 1),           // 历史分支值 = 受理门内初始态（恒'待受理'）·非建单落态
+      without_intake: resolveInitialStatus(type, 0),        // 历史分支值 = intake_required=0 分支（C0 后创建路径不再产生）
+    };
   }
 
   return { statusLabels, typeFlows, actions, bizSystems: BIZ_SYSTEMS, initialStatusesByType };
@@ -740,7 +798,8 @@ function buildMeta() {
 //   已统一改为 'intake_liaison'（admin∨受理人[13]·全类型）。本集是 fail-closed 判定基准（引擎对非空未知
 //   roleGuard 返 500 UNKNOWN_ROLE_GUARD），故必须同步删；verify-sys-meta 断言"所有非空 roleGuard ∈ 本集"，
 //   若哪里还残留旧字符串会立刻红灯。
-const KNOWN_ROLE_GUARDS = new Set(['admin', 'intake_liaison', 'creator_or_admin']);
+// C2.5 撤销·R2：+'intake_liaison_only'（仅受理人白名单·不含 admin·变更流 issue_reject 专用·判定见 index.js 引擎段）
+const KNOWN_ROLE_GUARDS = new Set(['admin', 'intake_liaison', 'creator_or_admin', 'intake_liaison_only']);
 
 // 受理排期改造 C3（codex C3 常规审 MED-1）：受理门动作运行期不变量集——**仅被 sysIssueTransition 引擎消费**（[3.5] 处校验）：
 //   这些经引擎流转的受理动作**仅当 intake_required=1 才可执行**（transitions.js:84「intake_required=1 才走」升级为引擎 fail-closed·
@@ -755,7 +814,7 @@ module.exports = {
   BIZ_SYSTEMS,
   INITIAL_STATUS_WITHOUT_INTAKE_BY_TYPE,
   resolveInitialStatus,          // 受理排期改造 §9：落态解析器（C0 后创建路径不再直调·仅 change_intake_mode 与 meta 组装消费）
-  resolveSysInitialStatusForCreate,   // 角色权限重构 C0：创建路径（建单/derive/reactivate）落态唯一入口·恒 intake=1
+  resolveSysInitialStatusForCreate,   // 角色权限重构 C0：创建路径（建单/derive/reactivate）落态唯一入口·恒 intake=1·C2.5 起按 type 分流
   ALLOWED_STATUSES,
   KNOWN_ROLE_GUARDS,             // 受理排期改造 C2（codex MED-1）：引擎默认拒绝未知 roleGuard 的判定基准
   INTAKE_GATE_ACTIONS,           // 受理排期改造 C3（codex MED-1）：受理门动作 intake_required=1 运行期不变量集

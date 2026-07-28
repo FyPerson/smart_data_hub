@@ -133,6 +133,10 @@ module.exports = (deps) => {
     //   tech_lead_notify_status 是 NOT NULL 列，同 relay_notify_status 先例整组通知列以 status 锚点代表入 readiness
     //   （其余 tech_lead_* 由 verify-sys-schema 全量保障）；scheduled_start/tech_lead_id 等纯数据列 C1 无热读，暂不锚。
     'intake_required', 'tech_lead_notify_status',
+    // ← 角色权限重构 v2.1（C2.5 撤销·§4 OA 生命周期）锚点：oa_number 是**被消费的热路径列**——
+    //   set-oa-number 的 SET 写它、assign 的 OA 前置守卫与列表/详情 SELECT 读它，mid-migration 崩溃
+    //   （列未补）会让这些语句撞 no such column → 500（同 release_assignee_id / gate_deferred_at 先例）。
+    'oa_number',
   ];
   const SYS_RELEASES_KEY_COLS = ['release_no', 'status', 'is_hotfix', 'release_note', 'version_tag',
     'release_type'];   // ← bug 流 Commit ① 批次类型隔离锚点（[codex三审:L] 值域非空由 ② 服务端守卫强制，readiness 只查列在）
@@ -285,6 +289,21 @@ module.exports = (deps) => {
   function isSysTechLead(uid) {
     return Number(uid) > 0 && SYS_TECH_LEAD_IDS.includes(Number(uid));
   }
+  // 角色权限重构 C3（方案 v1.9 §4-C3）历史沿革：request-tech-consult / resend-tech-consult 两个既有端点的
+  //   开放态谓词单一来源——按 type 分流，避免两个端点各自硬编码一份、日后改一处漏另一处（写读同源）。
+  //   C3 当时曾令变更流（feature/improvement）随预沟通段前移到「待商议」，bug 保持锚定「待受理」（bug 不走
+  //   预沟通段，本动作对 bug 的语义从来是"请技术负责人协助判断/定位"，与变更流那条不是同一件事）；
+  //   彼时新增的 tech-lead-comment / cancel-consult 也不复用本函数，各自硬编码「待商议」（不分 type）。
+  //   ⭐ codex Round-A 审 MED（同 C2.5a A-HIGH「合法初始态收敛为单值」教训）：改为**显式映射 + fail-closed**，
+  //   不用"非预沟通类型即回退『待受理』"这种隐式兜底——原实现对 config/拼写错误/脏 type 值也会静默返回
+  //   「待受理」，一个从未设计过的 type 混进来时守卫毫无反应。现在未登记的 type 显式返回 null，
+  //   调用方（request/resend-tech-consult）必须显式判断 null 并拒绝（409 REQUEST_TECH_CONSULT_TYPE_INVALID）。
+  //   ⭐⭐ C2.5 撤销（方案 v2.1 §3）：**全类型收敛为「待受理」单值**——预沟通段废除，变更流与 bug 的
+  //   咨询开放态自此同值（v1.9 的 P5 分流随撤销自然消失）。fail-closed 对未登记 type 保留。
+  function sysTechConsultGateStatus(type) {
+    if (type === 'feature' || type === 'improvement' || type === 'bug') return '待受理';
+    return null;                                       // 未登记 type（config/脏数据/拼写错误）→ fail-closed
+  }
   //   粗筛中间件：放行 admin ∨ 受理人白名单；
   //   进 handler 后由 sysIssueTransition [3] roleGuard='intake_liaison' 精判（引擎权威·中间件只粗筛）。
   //   ⚠️ resubmit_intake/edit_in_revision 授权是 created_by∨admin（§5.3）**不走本中间件**——它们由端点 handler
@@ -373,6 +392,14 @@ module.exports = (deps) => {
         requester_dept TEXT,
         requester_name TEXT,
         requester_phone TEXT,
+
+        -- 角色权限重构 v2.1 §4：OA 流程号。受理通过后、单据进入「§4 显式允许状态集」内时经
+        --   POST /sys-issues/:id/set-oa-number 回填。⚠️ 允许集只限制**补填/修改窗口**，不限制字段存续——
+        --   已有值随正常流转保留（唯一清空点=reactivate）；「待受理」等窗口开启前的态恒 NULL——
+        --   NULL = 尚未走 OA，是有意义的业务态，故**不设占位号**。
+        --   值域 1-20 位纯数字由服务层 assertSysOaNumber 守卫（不加 DB CHECK：ALTER 路径补不了约束，
+        --   新库/旧库两条路径若一边有 CHECK 一边没有，反而制造"看起来一致实则不同"的假象）。
+        oa_number TEXT,
 
         origin_issue_id INTEGER REFERENCES sys_issues(id),
         release_id INTEGER REFERENCES sys_releases(id),
@@ -516,6 +543,10 @@ module.exports = (deps) => {
         FOREIGN KEY (issue_id) REFERENCES sys_issues(id) ON DELETE CASCADE
       )`, recordSysErr('sys_issue_timeline'));
       db.run(`CREATE INDEX IF NOT EXISTS idx_sys_timeline_issue ON sys_issue_timeline(issue_id, created_at)`, recordSysErr('idx_sys_timeline_issue'));
+      // ⭐ 技术负责人读权（写读同源修复·codex 审 MED）：列表 WHERE 里对本表跑相关 EXISTS
+      //   （issue_id + action_code + operator_id 三等值），既有 idx_sys_timeline_issue 只覆盖前一列。
+      //   本表是只增流水（每单每次流转写行），随数据增长该子查询会退化为逐单扫描 → 补三列复合索引。
+      db.run(`CREATE INDEX IF NOT EXISTS idx_sys_timeline_actor_action ON sys_issue_timeline(issue_id, action_code, operator_id)`, recordSysErr('idx_sys_timeline_actor_action'));
 
       // ── 2.4 sys_issue_attachments（附件，§4.3）──────────
       //   attachment_type CHECK 含 spec（建单需求附件，方案 C）；status CHECK active/superseded（无 pending，09-M3）。
@@ -873,6 +904,23 @@ module.exports = (deps) => {
       await alterAddMissingCols('sys_issue_dev_assignees', [['notify_sent_by', 'INTEGER']],
         '角色权限重构 C2b·逐 dev 子表通知操作者留痕');
 
+      // [1a-5c] ⭐ 角色权限重构 v2.1 §4：OA 流程号列。历史沿革：C2.5（v1.9）时期本列曾在"预沟通通过"
+      //   端点提交时才回填；**C2.5 已撤销**，现由受理通过后、单据进入 §4 显式允许状态集内时经 set-oa-number 端点
+      //   回填。⚠️ 191 复审 M 勘定：允许集只限制**补填/修改窗口**（窗口外 409），不等于"窗口外恒 NULL"——
+      //   已有值随正常流转保留到终态（唯一清空点=reactivate 防御性归一）；窗口开启前（待受理/待修改）恒
+      //   NULL。**NULL 在这里是有意义的业务态（尚未走 OA），
+      //   不是缺陷**，因此**不设占位号**（刻意不学 issue_lite 的 `datadev-{id}` / correction 的
+      //   `datafix-{id}` 触发器范式：那两处的不变量是"OA 恒非空"，本模块不变量形态不同）。
+      //   ⭐ 角色权限重构 C4·184 号预审（PM-1·收窄不回填）：本列的"应有值"不变量只约束新流程产生的单据，
+      //   不是对全表存量数据的断言——历史路径（derive/reactivate 等）落在允许集状态的存量单，oa_number
+      //   恒为 NULL 属**合法历史态**，不做回填也不造占位号。部署前用探针核查存量单规模，见
+      //   `docs/local/系统迭代/任务_C25b_C3_无人值守执行段_20260727.md` §11 新增的部署探针条目。
+      //   值域（1-20 位纯数字）由服务层 assertSysOaNumber 守卫，ALTER 不补 CHECK（同 relay_notify_status 先例）。
+      const OA_NUMBER_ISSUE_COLS = [
+        ['oa_number', 'TEXT'],
+      ];
+      await alterAddMissingCols('sys_issues', OA_NUMBER_ISSUE_COLS, '角色权限重构 v2.1 §4·OA 流程号');
+
       // [1a-6] ⭐ C1（受理与排期改造 §8 Schema 迁移 + §12 存量迁移）：sys_issues 补 11 列（受理/排期/技术负责人通知）+
       //   状态映射（待评估/已排期 → 待指派）+ intake_required 归一化到 0/1。**单一原子迁移**（方案 §12 步骤8·codex 128-M）：
       //   补列 + 归一化 + 状态映射 + 后验校验 + 写完成标记**同一事务**（BEGIN IMMEDIATE），标记最后写且随事务提交
@@ -1047,6 +1095,22 @@ module.exports = (deps) => {
           try { await dbRunAsync('ROLLBACK'); } catch (_) { /* best-effort */ }
           throw e;
         }
+      }
+
+      // [1a-9] ⭐⭐ C2.5 撤销存量迁移（191 号审 CRITICAL 收口·幂等）：「待商议」→「待受理」。
+      //   生产从未部署过 C2.5（该态只存在于未部署代码与本地测试库·本地已一次性脚本迁毕），本迁移是
+      //   **防御层**：备份恢复/其他副本/任何跑过 v1.9 分支代码的库，启动即自愈——否则存量待商议单在
+      //   新状态机下是非法态（无任何出边·守卫拒绝），单据永久卡死。幂等：无匹配行时 UPDATE changes=0，
+      //   无需迁移标记（与 C0 归一不同——本条的 WHERE 本身就是收敛判据，重复执行天然 no-op）。
+      //   不动 oa_number（迁移前置断言语义已由一次性脚本验证：停在待商议的单该列恒 NULL）。
+      try {
+        const pdMig = await dbRunAsync(`UPDATE sys_issues SET status = '待受理' WHERE status = '待商议'`);
+        if (pdMig && pdMig.changes > 0) {
+          logger.info(`[系统迭代迁移] ✅ C2.5 撤销：存量「待商议」归一「待受理」 ${pdMig.changes} 行（防御层·幂等）`);
+        }
+      } catch (pdErr) {
+        // fail-closed 同 C0 口径：迁移失败宁可阻断 readiness 也不放非法态单进流程
+        throw new Error(`C2.5 撤销存量迁移失败：${pdErr && pdErr.message}`);
       }
 
       // [1a-7b/1a-8 已移除] ⭐ 角色权限重构 C0（codex 四轮审 HIGH-1/HIGH-2）：
@@ -1313,6 +1377,20 @@ module.exports = (deps) => {
     if (v === undefined || v === null || v === '') return null;
     const n = Number(v);
     return Number.isInteger(n) && n > 0 ? n : null;
+  }
+
+  // ⭐ 角色权限重构 C4·184 号预审（PL-1，原是 codex C4 审 Round-2 收口的 before_id 专用校验，
+  //   本次抽成共享 helper）：整串十进制正整数正则 + Number.isSafeInteger 双重把关——比 parsePositiveId
+  //   更严（那层用 `Number(v)` 隐式转换，会把 '1e3'/'+123'/' 123 ' 这类字符串误判成合法正整数，见
+  //   parsePositiveId 与本函数的行为差异）。用于"精确过滤/翻页游标"类参数——语义歧义会直接导致查错单
+  //   或翻页错位，值得比一般的正整数 ID 参数更严格。删除跨端点重复实现分别验证：本函数与旧的
+  //   before_id 内联校验代码逐字等价（这次抽取零行为变化），供 GET /sys-issue-delete-audit 的
+  //   before_id 与 issue_id 两个参数共用，防止两处各写一份、以后改一处忘改另一处。
+  function parseStrictPositiveId(v) {
+    if (typeof v !== 'string') return null;
+    if (!/^[1-9]\d*$/.test(v)) return null;
+    const n = Number(v);
+    return Number.isSafeInteger(n) && n > 0 ? n : null;
   }
 
   // datetime 规范化（核实#8 / §6.2：C3 复刻 correction normalizeCorrectionDatetime 零回归；
@@ -1794,6 +1872,45 @@ module.exports = (deps) => {
     return { added, skipped };
   }
 
+  // ⭐ 角色权限重构 v2.1 §4：OA 流程号契约守卫。
+  //   口径**逐字照抄 issue_lite 的编辑口**（server.js `PATCH /issue-lite/:id` 的 oa_number 分支），
+  //   不是另起炉灶 —— 两处是同一个业务概念（公司 OA 系统的流程号），值域必须一致。
+  //   ⚠️ **只吃字符串、拒 number**（issue_lite 的 codex E2 审已踩过这个坑）：number 经 JSON 解析对
+  //   16-20 位号有**精度舍入**面（静默存错号，事后对不上账且看不出异常）+ 丢前导零。
+  //   ⚠️ 与 issue_lite 的**刻意差异**：这里**不做占位号归一**（对方空值归一为 `datadev-{id}` 维护
+  //   "OA 恒非空"不变量）。本模块的 NULL 有独立业务含义 =「尚未走 OA」（OA 允许状态集之外全程恒此态），
+  //   把它填成占位号会抹掉"这单到底走没走 OA"这个真实信息。本守卫用于 set-oa-number 端点的**必填**校验。
+  // ⭐⭐ R4 守卫下沉（用户手测抓出绕过·191 号审 M"守卫只在单一 HTTP 处理器"当时被主会话裁定漏掉——
+  //   如实记录）：变更流在「待指派」族投入开发资源的**所有入口**共用本守卫——/assign（A 路径）、
+  //   dev-assignees POST（加成员）、reassign（批量差量含新增）。语义=「指派开发前必须有 OA 号」盖的是
+  //   "把人放上单子"这件事本身，不是某一个端点。bug 不受限（D2）；DEV/VERIFY 族的加人不查（进族时
+  //   已过本守卫·存量不追溯）。同事务自查 oa_number（不依赖调用方 row 列形状——[3.6] 踩过的坑）。
+  async function assertSysDevCommitmentOaGuard(issueId, issueType) {
+    if (issueType !== 'feature' && issueType !== 'improvement') return;
+    const r = await dbGetAsync('SELECT oa_number FROM sys_issues WHERE id = ?', [issueId]);
+    try {
+      assertSysOaNumber(r && r.oa_number);
+    } catch (e) {
+      throw new SysTransitionError(409, 'ASSIGN_REQUIRES_OA_NUMBER', '指派开发前须先补填 OA 流程号（受理通过后由管理员在详情页填写）');
+    }
+  }
+  function assertSysOaNumber(raw) {
+    if (raw === undefined || raw === null || raw === '') {
+      throw new SysTransitionError(400, 'OA_NUMBER_REQUIRED', '请填写 OA 流程号（业务方在 OA 发起的需求流程单号）');
+    }
+    if (typeof raw !== 'string') {
+      throw new SysTransitionError(400, 'OA_NUMBER_INVALID', 'OA 流程号格式错误（须为字符串）');
+    }
+    const t = raw.trim();
+    if (!t) {
+      throw new SysTransitionError(400, 'OA_NUMBER_REQUIRED', '请填写 OA 流程号（业务方在 OA 发起的需求流程单号）');
+    }
+    if (!/^\d{1,20}$/.test(t)) {
+      throw new SysTransitionError(400, 'OA_NUMBER_INVALID', 'OA 流程号须为 1-20 位纯数字');
+    }
+    return t;
+  }
+
   // 唯一允许写 sys_issues.status 的函数（H-2 铁律，照 correctionTransition）：
   //   事务内读真实 status + 流转合法性（查 transitions 常量）+ 双 WHERE（含 expectedFrom）守卫 changes≠1→409 +
   //   权限分流（roleGuard/ownerGuard）+ 闸门校验（requiredPayload）+ sideEffects 写入 + timeline 写入 + COMMIT。
@@ -1809,7 +1926,8 @@ module.exports = (deps) => {
                 first_submitted_at, reopen_count, return_count, origin_issue_id,
                 needs_feasibility, feasibility_conclusion, feasibility_requirement_confirm,
                 feasibility_risk, blocked, release_id, needs_release, gate_deferred_at,
-                intake_required
+                intake_required,
+                oa_number
            FROM sys_issues WHERE id = ?`,
         [issueId]
       );
@@ -1902,6 +2020,12 @@ module.exports = (deps) => {
         //   **＋ 指派族 assign/reassign 的 bug 与变更流共四条**——后者由 C1 从 'admin_or_bug_liaison'/'admin' 收敛而来，
         //   是「受理人全类型主导」的引擎侧落点。全部已接线（verify-sys-role-perm-c1 走真实 HTTP 端点验整链）。
         if (transition.roleGuard === 'intake_liaison' && !(isAdmin || isSysIntakeLiaison(actor.id))) permitted = false;
+        // ⭐⭐ C2.5 撤销·R2（方案 v2.1 §3·新增 roleGuard 值）：'intake_liaison_only' = **仅受理人白名单，
+        //   不含 admin**——与上一行 'intake_liaison'（受理人∨admin）刻意区分。拒绝语义=开发方回绝需求，
+        //   admin=建单人（"建单即该做"），admin 的出口是 void 作废（用户拍板收走 admin 拒绝权）。
+        //   判定**只看 uid∈白名单不看 role**（方案 §2 矩阵 190 号钉死：双身份 uid∈白名单即放行，
+        //   role=admin 而 uid∉白名单必拒）。当前仅变更流 issue_reject 使用；bug issue_reject 仍 'admin'。
+        if (transition.roleGuard === 'intake_liaison_only' && !isSysIntakeLiaison(actor.id)) permitted = false;
         // 受理排期改造 §5.3（codex131-H1 修）：roleGuard='creator_or_admin'（resubmit_intake/edit_in_revision）=
         //   建单人 ∨ admin。⚠️ 用事务内**锁定后的 row.created_by** 校验（BEGIN IMMEDIATE 后读的 row·非端点事务外预检·防 TOCTOU）——
         //   杜绝"端点预检通过但进引擎被 admin guard 误拒"的契约冲突（roleGuard 声明与意图同源）。
@@ -1931,6 +2055,30 @@ module.exports = (deps) => {
         const riNorm = (ri === 1 || ri === '1') ? 1 : ((ri === 0 || ri === '0') ? 0 : null);
         if (riNorm !== 1) {
           throw new SysTransitionError(409, 'INTAKE_REQUIRED_INVARIANT', `受理门动作「${action}」要求 intake_required=1（当前=${ri}·issue ${row.id}）`);
+        }
+      }
+
+      // [3.6] ⭐⭐ R2/R3 咨询前置守卫（C2.5 撤销·方案 v2.1 §2 状态矩阵·用户拍板 D3）：
+      //   · R3 受理阻断（全类型）：挂着"未回复"的技术咨询时不可受理——先等回复或手动取消（**取代**旧 PH-2
+      //     在受理方向上的自动清：用户拍板选阻断非清理）。
+      //   · R2 拒绝前置（仅变更流）：拒绝的依据必须是技术负责人的意见——当前轮无意见（含从未咨询/被清）
+      //     一律 409。"当前轮已回复"判定与 PH-1 轮次模型同源（timeline.id > 本轮 event_id）。
+      //   位置=[3.5] 同段（权限[3]之后·UPDATE 之前·同事务读锁定行）：无权者稳得 403 不泄露咨询态；
+      //   bug 的 issue_reject 不进本守卫（保持 admin 现状·未回复悬挂由 [PH-2 挂点] 自动清收口）。
+      if (action === 'intake_accept' || (action === 'issue_reject' && (row.type === 'feature' || row.type === 'improvement'))) {
+        // ⚠️ 守卫**自查两列**（S3 红灯诊断修）：引擎各路径加载 row 的 SELECT 列清单不一，row.tech_lead_id
+        //   可能是 undefined——而 `undefined != null` 为 false，会让 hasActiveConsult 恒 false → 变更流拒绝
+        //   恒 409（首跑 [RA] 组红灯坐实）。同事务内单查一次，不依赖调用方 row 的形状。
+        const cRow = await dbGetAsync('SELECT tech_lead_id, tech_lead_notify_request_event_id FROM sys_issues WHERE id = ?', [row.id]);
+        const hasActiveConsult = !!cRow && cRow.tech_lead_id != null && cRow.tech_lead_notify_request_event_id != null;
+        const hasCurrentRoundComment = hasActiveConsult ? !!(await dbGetAsync(
+          `SELECT 1 FROM sys_issue_timeline WHERE issue_id=? AND action_code='tech_lead_comment' AND id > ?`,
+          [row.id, cRow.tech_lead_notify_request_event_id])) : false;
+        if (action === 'intake_accept' && hasActiveConsult && !hasCurrentRoundComment) {
+          throw new SysTransitionError(409, 'INTAKE_BLOCKED_BY_PENDING_CONSULT', '技术负责人咨询尚未回复：请先等待回复，或取消咨询后再受理');
+        }
+        if (action === 'issue_reject' && !hasCurrentRoundComment) {
+          throw new SysTransitionError(409, 'REJECT_REQUIRES_TECH_COMMENT', '拒绝须以技术负责人评估意见为依据：请先发起技术咨询并获得意见后再操作');
         }
       }
 
@@ -1995,6 +2143,11 @@ module.exports = (deps) => {
           setFrags.push(...SYS_BACK_TO_INTAKE_GATE_SQL);
           break;
         }
+        // （C2.5 撤销·方案 v2.1）"预沟通通过"这一 case 分支已删除——该 action 在 transitions.js 已无条目，
+        //   findTransition 对任意 type 恒返 null，[1] 会在到达本 switch 前就以 INVALID_TRANSITION 抛出
+        //   （本函数入口处 findTransition 查表在 switch 之前），本分支曾 100% 不可达（路由已 404），
+        //   随撤销一并删除死代码（保留会误导读者以为仍有路径可达）。OA 号回填改经独立路由
+        //   POST /sys-issues/:id/set-oa-number（见该端点实现，非本引擎 switch 内）。
         case 'intake_return': {
           // 受理退改（§5.1②·原因必填）：待受理→待修改，reason 落 timeline.summary（对齐 return/reopen 的 reason→summary 范式）。
           const reason = (typeof payload.reason === 'string' ? payload.reason.trim() : '');
@@ -2060,7 +2213,21 @@ module.exports = (deps) => {
           //     （本 commit 首版正是这么写的，被 verify-sys-intake-gate [C3] 的 ir=0 脏单用例抓出）。
           //   ⚠️ 同时清上一轮咨询/转派痕迹（codex C0 审 MED-3）：已拒绝单可能带着上一轮的 tech_lead_*（受理期
           //     发起过咨询后被拒）与 relay_*（历史 path B 建单），回受理门即新一轮，旧轮次状态不跨轮继承。
-          if (action === 'reactivate') setFrags.push(...SYS_BACK_TO_INTAKE_GATE_SQL);
+          if (action === 'reactivate') {
+            setFrags.push(...SYS_BACK_TO_INTAKE_GATE_SQL);
+            // ⭐ oa_number 也必须归零：本块上方那句"回受理门即新一轮，旧轮次状态不跨轮继承"是既定不变量，
+            //   reactivate 落态回「待受理」——而「待受理」不在 OA 允许状态集内（§4 显式允许集·OA_NUMBER_STATUS_NOT_ALLOWED
+            //   的判定边界），若不清零就会产生"待受理 + 非空 OA 号"这种状态与字段矛盾的脏数据，且详情/
+            //   列表会展示上一轮那个已作废的号，误导判断（写读语义不同源）。
+            //   旧号不丢：上一轮 set-oa-number 的 timeline.summary 记着它，历史可回溯。
+            //   ⚠️ **只放在 reactivate 分支，不并进 SYS_BACK_TO_INTAKE_GATE_SQL 常量本体**——那个常量与
+            //     resubmit_intake（待修改→待受理）共用；resubmit_intake 的单从「待受理」经 intake_return
+            //     退回「待修改」再提交，全程未经过 OA 可填窗口（该窗口在 intake-accept 之后才开），
+            //     其 oa_number 结构上恒为 NULL，无需显式清（清了也是 no-op）——reactivate 的显式清零是
+            //     防御性归一，防已拒绝单历史上曾在 OA 可填窗口内被设置过号（如受理后又被拒的边缘路径）。
+            //   ⚠️ bug 流的 oa_number 同样受 §4 允许集约束（待受理不在内），reactivate 同样清零，无需按 type 分支。
+            setFrags.push('oa_number = NULL');
+          }
           break;
         }
         case 'void': {
@@ -2142,12 +2309,68 @@ module.exports = (deps) => {
         if (gateResult.changed) finalToStatus = gateResult.to;
       }
 
+      // ⭐⭐ PH-2 挂载点改造（C2.5 撤销·方案 v2.1 §2 矩阵·helper 本体不变）：原挂"离开待商议"两条边
+      //   （随预沟通段废除退场）。新挂三条边——离开「待受理」且可能带着"未回复"咨询的路径：
+      //   ① bug 的 issue_reject（from=待受理·admin·无 R2 意见前置守卫→可能带未回复咨询·188 号审 H2）
+      //   ② intake_return（退回后单在待修改，comment 谓词=待受理，示例发布者答不了→必悬挂·自决 P3）
+      //   ③ void（终态必清·自决 P3；from='*' 下对已过受理阶段的单，未回复咨询结构上已不可能
+      //     ——R3 阻断+①②清理保证——helper 对"已回复/无咨询"恒 no-op，防御性挂上无害）
+      //   变更流 issue_reject **不挂**：R2 前置守卫要求当前轮已有意见，"未回复"结构上到不了这条边。
+      if ((action === 'issue_reject' && row.type === 'bug' && fromStatus === '待受理')
+          || action === 'intake_return' || action === 'void') {
+        const reasonLabel = action === 'issue_reject' ? 'bug 拒绝' : (action === 'intake_return' ? '退回修改' : '作废');
+        await clearPendingConsultOnLeave(issueId, actor, reasonLabel);
+      }
+
       await sysCommit();
       return { ok: true, fromStatus, toStatus: finalToStatus, notifyAfterCommit: transition.notifyAfterCommit || null };
     } catch (txErr) {
       try { await sysRollback(); } catch (_) { /* ignore */ }
       throw txErr;
     }
+  }
+
+  // ⭐ 角色权限重构 C4·PH-2（184 号预审 HIGH·用户裁定，挂载点随 C2.5 撤销·方案 v2.1 §2 矩阵改造，
+  //   helper 本体逻辑不变）：在特定离场边上原子清"未回复"的技术负责人咨询 + 留痕。背景：若单据离开
+  //   「待受理」（bug issue_reject / intake_return / void，见调用点 [7] 之后的挂载判断）时还挂着一轮
+  //   "已发起但技术负责人尚未回复"的咨询，它会变成永久悬挂的死数据（tech_lead_id 还指向一个已经离场的
+  //   沟通对象，展示面/后续 resend 全部失去意义）。
+  //   ⚠️ 只清"未回复"的悬挂咨询——**已回复**的轮次是历史事实（技术负责人确实提交过意见），不是垃圾，
+  //   必须保留（PH-1 世界模型：意见唯一性绑咨询轮次，旧轮意见不因换轮/离开「待受理」而失效）。判定复用
+  //   PH-1 同一条"当前轮是否有意见"（timeline id > 本轮 request_event_id 且 action_code='tech_lead_comment'），
+  //   两处口径同源，不再各写一份（防漂移）。
+  //   ⚠️ 必须在调用方已持有的同一事务内调用（本函数不自己 sysBeginImmediate/sysCommit）——失败必须
+  //   throw 让外层事务整体回滚，不能吞错误静默 warn（同 [[feedback_state_machine_update_invariant]]：
+  //   changes 检查 + 失败阻断，不用 .catch(warn) 假装无事发生）。
+  //   ⚠️ NULL 防御（PH-1 世界模型明文要求）：`tech_lead_notify_request_event_id` 为 NULL 时 `id > NULL`
+  //   在 SQL 三值逻辑下恒为 NULL，若不显式挡在前面，"无活动轮"会被悄悄当成"当前轮无意见"处理——
+  //   这里先在 JS 层用 `== null` 短路返回（no-op），不依赖 SQL 侧的 NULL 语义兜底。
+  async function clearPendingConsultOnLeave(issueId, actor, reasonLabel) {
+    const row = await dbGetAsync(
+      'SELECT tech_lead_id, tech_lead_name, tech_lead_notify_request_event_id FROM sys_issues WHERE id = ?',
+      [issueId]
+    );
+    if (!row || row.tech_lead_id == null || row.tech_lead_notify_request_event_id == null) return false;   // 无活动轮，no-op
+    const hasCurrentRoundComment = await dbGetAsync(
+      `SELECT 1 FROM sys_issue_timeline WHERE issue_id=? AND action_code='tech_lead_comment' AND id > ?`,
+      [issueId, row.tech_lead_notify_request_event_id]
+    );
+    if (hasCurrentRoundComment) return false;   // 当前轮已有意见——已回复的轮次是历史，不清不留痕
+    const upd = await dbRunAsync(
+      `UPDATE sys_issues SET ${SYS_CLEAR_TECH_LEAD_FIELDS_SQL.join(', ')}, updated_at=datetime('now','localtime')
+         WHERE id=? AND tech_lead_id=? AND tech_lead_notify_request_event_id=?`,
+      [issueId, row.tech_lead_id, row.tech_lead_notify_request_event_id]
+    );
+    if (!upd || upd.changes !== 1) {
+      throw new SysTransitionError(500, 'CLEAR_PENDING_CONSULT_FAILED', '自动取消未回复的技术负责人咨询失败');
+    }
+    await dbRunAsync(
+      `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, operator_id, operator_name)
+       VALUES (?, 'note', ?, 'cancel_consult', ?, ?)`,
+      [issueId, `${reasonLabel}：未回复的技术咨询已自动取消（原技术负责人：${row.tech_lead_name || ('#' + row.tech_lead_id)}）`,
+       Number(actor.id) || null, actor.name || null]
+    );
+    return true;
   }
 
   // endpoint catch 转 HTTP（对齐 corrections sendCorrectionTransitionError）。
@@ -2505,7 +2728,7 @@ module.exports = (deps) => {
       await sysBeginImmediate();
       let devAssignees, primaryRow, targetStatus;
       try {
-        const row = await dbGetAsync('SELECT id, type, status FROM sys_issues WHERE id = ?', [id]);
+        const row = await dbGetAsync('SELECT id, type, status, oa_number FROM sys_issues WHERE id = ?', [id]);
         if (!row) { await sysRollback(); return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' }); }
         assertKnownIssueStatus(row.type, row.status);
         // 权限精判同 sysIssueTransition [3] 口径：admin 全能；bug 对接人白名单仅限 type='bug'（§3「不全局化」）。
@@ -2513,6 +2736,12 @@ module.exports = (deps) => {
           await sysRollback();
           return res.status(403).json({ error: '无权执行此状态流转', code: 'NOT_AUTHORIZED_FOR_TRANSITION' });
         }
+        // ⭐⭐ R4 指派守卫（C2.5 撤销·方案 v2.1 §4·用户拍板"指派开发前必须有号"）：**变更流专属**——
+        //   开发资源投入必须挂 OA 立项依据。对 oa_number **现值跑完整格式校验**（189 号审：`IS NOT NULL`
+        //   会放过空串/空白/绕道写入的非法值），不合格一律 409 引导先补号。bug 不受限（OA 对 bug 可选·D2）。
+        //   置于权限精判之后（无权者稳得 403，不借 409 侧信道探单据 OA 状态——同 [3.5] 排序理由）。
+        // 统一走共享守卫（三入口同源·两份实现=漂移温床）；throw→txErr 回滚→外层 sendSysTransitionError
+        await assertSysDevCommitmentOaGuard(id, row.type);
 
         const dev = await dbGetAsync('SELECT id, display_name, username, role FROM users WHERE id = ?', [devId]);
         if (!dev) { await sysRollback(); return res.status(400).json({ error: '指派目标用户不存在', code: 'ASSIGN_TARGET_NOT_FOUND' }); }
@@ -2627,6 +2856,11 @@ module.exports = (deps) => {
         const currentSet = new Set(currentIds);
         const targetSet = new Set(targetIds);
         toAdd = targetIds.filter(uid => !currentSet.has(uid));
+        // R4 下沉：批量差量含新增且在待指派族 → 同守卫（纯移除不拦）。⚠️ 现状**防御性在位但不可触发**：
+        //   变更流 reassign 被上方族闸拦在 DEV/VERIFY（TYPE_OVERRIDE），bug 可达 D_PRE 但 helper 对 bug
+        //   early-return（D2）。留守卫=若未来放开变更流 D_PRE reassign，OA 不变量已就位（verify [AS] 有
+        //   不可达哨兵联动提醒）。
+        if (family === 'D_PRE' && toAdd.length > 0) await assertSysDevCommitmentOaGuard(id, row.type);
         toRemove = currentIds.filter(uid => !targetSet.has(uid));
 
         // [C7 回填] M3（94 号对抗审复核：旧乐观锁 REASSIGN_STALE/expectedCollaboratorIds 被 C2 去主次重写删除
@@ -2760,7 +2994,12 @@ module.exports = (deps) => {
         rowStatusAtStart = row.status;
         assertKnownIssueStatus(row.type, row.status);
         if (!isSysCoordinator(actor, row.type)) { await sysRollback(); return res.status(403).json({ error: '仅协调人可操作', code: 'FORBIDDEN' }); }
-        assertMemberActionFamilyAllowed('add', row.type, row.status);
+        const addFamily = assertMemberActionFamilyAllowed('add', row.type, row.status);
+        // R4 下沉：待指派族加成员=投入开发资源，变更流须先有 OA（与 /assign、reassign 同守卫）。
+        //   ⚠️ 口径钉死（196 增量审 M2·产品语义裁定）：**D_PRE 族任何加成员请求先过 OA**——含重复加已在册、
+        //   复活已移除成员（fail-closed 宁严勿漏·空数组在上游 rawIds 校验已 400 不达此处）；不做"算出实际
+        //   新增集合再守卫"的精细化——那要在守卫前复制 addOrReaddMembers 的集合逻辑，两份必漂。
+        if (addFamily === 'D_PRE') await assertSysDevCommitmentOaGuard(id, row.type);
 
         addResult = await addOrReaddMembers(id, rawIds, actor.id);
         await electRepresentative(id);
@@ -3339,26 +3578,64 @@ module.exports = (deps) => {
       //   附件是历史参与读权的子集示例非全部）——一并纳入，用 `EXISTS` 子查询覆盖"曾有行"（不筛 removed_at，
       //   在册与历史参与同等可见，与 SSOT 措辞完全对应，不额外区分）。
       const rosterVisibilitySql = `EXISTS (SELECT 1 FROM sys_issue_dev_assignees da WHERE da.issue_id = sys_issues.id AND da.user_id = ?)`;
+      // ⭐⭐ 技术负责人读权（2026-07-28 手工验收发现·**写读不同源**）：C3 把提交评估意见的**写权**给了
+      //   本单技术负责人（含变更流的「待商议」单），但读端可见性还停在 C1 时代的 `type='bug'`——
+      //   方案 §4-C1 核实表当时判「可见性默认保持」，那是 C2.5 预沟通段**还不存在**时做的决定，
+      //   C2.5/C3 把技术负责人的工作对象扩到变更流后，这条决定就过期了，没人回头改它。
+      //   后果（实测）：示例发布者列表看不到被咨询的 feature 单、详情 403、钉钉深链点进去也 403——
+      //   方案 §3 角色表要求他「平台回一条最终评估意见」，而他**在平台上根本够不到那张单**。
+      //   ⚠️ 判定**刻意不依赖 SYS_TECH_LEAD_IDS 白名单**（与 rosterVisibilitySql 同范式）：
+      //     `tech_lead_id=我` 与「timeline 里有我提交的 tech_lead_comment」这两个条件本身就是参与证据，
+      //     只有真被咨询过的人才满足。挂白名单反而会让「日后换人」把前任已写的评估记录一并锁死。
+      //   ⚠️ 覆盖两段（用户 2026-07-28 拍板选 A）：① 当前被咨询 ② 历史回过意见（咨询已被 cancel /
+      //     PH-2 自动清 / reactivate 清九列之后，仍看得到自己写过的那张单）——与开发成员「曾有行即可见」一致。
+      //   ⚠️⚠️ **本改动把 sys_issue_timeline 从「纯审计日志」提升为「授权依据」**（codex 审 MED 的
+      //     recommendation·已验证当前不成立但必须固化）：一旦某条 `action_code='tech_lead_comment'`
+      //     的流水行可被伪造，伪造者就获得该单的**持久读权**。当前**生产运行时写路径**（routes/ 下的
+      //     HTTP 路由与服务端代码）已核实成立的三条不变量：
+      //       ① 全部 10 处 `INSERT INTO sys_issue_timeline` 的 `action_code` 均为 **SQL 字面量**，
+      //          无一处用占位符从变量/请求体传入；
+      //       ② `'tech_lead_comment'` 在生产代码内只有 tech-lead-comment 端点一处写入，`operator_id` 取
+      //          `sysActor(req)` 的认证用户 id（非请求体字段）；
+      //       ③ 不存在通用的 timeline 写入 / 修改 HTTP 端点。
+      //     ⚠️ 核实范围**刻意排除 `scripts/` 验证夹具**（187 号审 LOW 收窄）：verify-sys-tech-lead-comment
+      //     的 [V] 组自身就用 raw SQL 插入该 action_code 造"历史参与"夹具——那是测试进程内存库里的受控
+      //     写入，非生产攻击面；此前"全仓"的表述把它也圈了进去，会误导后续安全审查以为夹具也被禁止。
+      //     ⚠️ **日后若新增"可自定义 action_code 的 timeline 写入口"（含导入、后台脚本、批量修复工具），
+      //     必须同步评估本处授权语义**——那不再只是多了一条日志，而是多了一条发读权的路。
+      const techLeadVisibilitySql = `(tech_lead_id = ? OR EXISTS (SELECT 1 FROM sys_issue_timeline tl
+             WHERE tl.issue_id = sys_issues.id AND tl.action_code = 'tech_lead_comment' AND tl.operator_id = ?))`;
       // ⭐ 角色权限重构 C1（codex C1 审 HIGH-2）：**受理人[13] 全类型可见**，与 admin 同不加 where 限制。
       //   必要性：C1 把指派权扩到全类型，若列表仍只放行 bug，示例对接人就会「后端能指派 feature、界面却找不到那张单」
       //   ——写读不同源造成的功能断裂（[[feedback_write_read_same_semantic]]）。受理人要受理**所有**新单、
       //   指派**所有**类型，故其可见面与 admin 一致（作废单仍由下方 include_voided 统一过滤，那条仅 admin 生效）。
       const isIntakeLiaisonUser = isSysIntakeLiaison(uid);
-      if (!isAdmin && !isIntakeLiaisonUser) {
+      // ⚠️ codex 审 LOW：列表此前缺 `uid > 0` 防护（详情端有）。uid 非正（脏 token / id 缺失）时下面所有
+      //   等值判据都会拿一个无意义的值去比对（`assigned_to = 0` 之类可能命中脏行），故显式挡在最前：
+      //   非 admin 非受理人且 uid 非正 → 恒空集（与"其他登录用户不可见"的既有语义一致，非 403）。
+      if (!isAdmin && !isIntakeLiaisonUser && !(uid > 0)) {
+        where.push('1 = 0');
+      } else if (!isAdmin && !isIntakeLiaisonUser) {
         // ④ bug 对接人白名单（**可见性语义·非操作权**）：C1 后该名单在写路径上已完全退场，
         //   这里保留是因为技术负责人示例发布者[7] 仍需看到 bug 单才能接收咨询、回评估意见（C3）。
         //   ⚠️ 必与详情读端同源，否则「列表看不到但能开详情」写读不一致。
         if (isSysBugLiaison(uid)) {
-          where.push(`(assigned_to = ? OR type = 'bug' OR ${rosterVisibilitySql})`);
-          params.push(uid, uid);
+          // 参数顺序：assigned_to / roster / techLead(tech_lead_id) / techLead(operator_id)——type='bug' 无占位符
+          where.push(`(assigned_to = ? OR type = 'bug' OR ${rosterVisibilitySql} OR ${techLeadVisibilitySql})`);
+          params.push(uid, uid, uid, uid);
         } else {
           // 非 admin 非对接人：自己被指派的单（开发）∪ 被指定为上线执行开发的单（release_assignee_id，通知改造 C-orch）
           //   ∪ 在册/历史参与该单的成员（HIGH-B）。
           //   ⚠️ 写读同源（[[feedback_write_read_same_semantic]]）：execute-release 把上线终态写权授给 release_assignee_id，
           //   读端必须镜像——否则被指定执行开发（既非 assigned_to 也非白名单对接人时）列表看不到该单、够不到「执行上线」。
           //   release orchestration 是 bug 专属，故 release_assignee_id 仅对 bug 有值，无需再叠 type 条件；详情端点同步放行。
-          where.push(`(assigned_to = ? OR release_assignee_id = ? OR ${rosterVisibilitySql})`);
-          params.push(uid, uid, uid);
+          // 参数顺序：assigned_to / release_assignee_id / roster / techLead(tech_lead_id) / techLead(operator_id)
+          // ⚠️ codex 审 MED（既有不同源·顺手收口）：`release_assignee_id` 这一格详情端叠了 `row.type==='bug'`
+          //   而列表端没有——注释称"该列仅 bug 有值"是**写路径约定**，库里并无 CHECK 保证。一旦出现非 bug
+          //   脏数据就会"列表看得见、点进去 403"。这里补齐 type 条件，与详情端逐字同源（宁可两端都看不到，
+          //   也不要两端不一致——不一致是 bug，一致的收紧只是行为定义）。
+          where.push(`(assigned_to = ? OR (release_assignee_id = ? AND type = 'bug') OR ${rosterVisibilitySql} OR ${techLeadVisibilitySql})`);
+          params.push(uid, uid, uid, uid, uid);
         }
       }
       // 默认过滤作废（前端可传 include_voided=1，仅 admin 生效）
@@ -3390,6 +3667,13 @@ module.exports = (deps) => {
                 created_by, created_by_name, origin_issue_id, release_id, needs_release,
                 release_assignee_id, release_assignee_name, release_assignee_notify_status,
                 reopen_count, return_count, scope_changed, created_at, updated_at,
+                tech_lead_id, tech_lead_notify_status,   -- S5 手动化：列表通知徽章消费（193 复审：oa_number 已撤——
+                --   "顺带"加列=未经 187 读权契约证明的扩面；徽章不消费它，列表不需要它）
+                (SELECT EXISTS(SELECT 1 FROM sys_issue_timeline tl2 WHERE tl2.issue_id = sys_issues.id
+                    AND tl2.action_code = 'tech_lead_comment'
+                    AND tl2.id > sys_issues.tech_lead_notify_request_event_id))
+                  AS has_current_tech_lead_comment,       -- 193 复审 M：列表徽章"已留言收口"权威判定（与详情红条同口径·
+                --   event_id NULL 时 id>NULL 恒 NULL→EXISTS false→徽章条件另判 tech_lead_id·前端零自推导）
                 (SELECT json_group_array(user_name) FROM (
                    SELECT user_name FROM sys_issue_dev_assignees
                     WHERE issue_id = sys_issues.id AND removed_at IS NULL
@@ -3433,6 +3717,16 @@ module.exports = (deps) => {
       // ④ bug 对接人白名单（**可见性语义·非操作权**）：C1 后写路径已完全不用该名单；
       //   保留可见性是为技术负责人示例发布者[7] 能看到 bug 单以接收咨询、回评估意见（C3）。
       const isBugLiaison = isSysBugLiaison(uid) && row.type === 'bug';
+      // ⭐⭐ 技术负责人读权（写读同源修复·**与列表读端逐条同源**，见列表端 techLeadVisibilitySql 的完整说明）：
+      //   ① 当前被咨询（tech_lead_id=我）② 历史回过意见（timeline 有我提交的 tech_lead_comment）。
+      //   不挂 SYS_TECH_LEAD_IDS 白名单——两个条件本身即参与证据，挂白名单会让换人后前任够不到自己写的记录。
+      const isTechLeadOfIssue = uid > 0 && (
+        Number(row.tech_lead_id) === uid
+        || !!(await dbGetAsync(
+          `SELECT 1 FROM sys_issue_timeline WHERE issue_id = ? AND action_code = 'tech_lead_comment' AND operator_id = ? LIMIT 1`,
+          [id, uid]
+        ))
+      );
       // C-orch 写读同源：被指定上线执行开发（release_assignee_id）可见 bug 单详情（否则够不到「执行上线」按钮）——
       //   与列表读端同源；release orchestration 是 bug 专属，故叠 type='bug' 精判。
       const isReleaseExecutor = Number(row.release_assignee_id) === uid && uid > 0 && row.type === 'bug';
@@ -3442,7 +3736,7 @@ module.exports = (deps) => {
         `SELECT 1 FROM sys_issue_dev_assignees WHERE issue_id = ? AND user_id = ? LIMIT 1`, [id, uid]
       ));
       // ⭐ C1：受理人加入放行集（全类型·与列表读端同源）
-      if (!isAdmin && !isIntakeLiaisonUser && !isAssignee && !isBugLiaison && !isReleaseExecutor && !isRosterMember) {
+      if (!isAdmin && !isIntakeLiaisonUser && !isAssignee && !isBugLiaison && !isReleaseExecutor && !isRosterMember && !isTechLeadOfIssue) {
         return res.status(403).json({ error: '无权查看此迭代单', code: 'NOT_AUTHORIZED_TO_VIEW' });
       }
       if (row.status === '已作废' && !isAdmin) {
@@ -3450,8 +3744,14 @@ module.exports = (deps) => {
       }
 
       // timeline（演进时间线，§5.3）
+      // ⭐ 角色权限重构 C4·184 号预审 PH-1（世界模型：意见唯一性绑咨询轮次）：投影补 `id`——
+      //   前端 hasTechLeadComment 判定改轮内（`timeline行.id > iss.tech_lead_notify_request_event_id`），
+      //   没有这一列前端拿不到可比较的 timeline 行序号（此前只投影业务字段，没人需要行号本身）。
+      //   本次核实发现：详情端点此前从未把 timeline.id 投影出去（列举式 SELECT 的既有缺口），世界模型
+      //   要求的轮内比较结构上做不到，故本次一并补上——纯新增列，不影响任何既有消费方（无消费方按
+      //   固定 key 数量/顺序做过 deepStrictEqual，已 grep 全部 verify-sys-*.js 确认）。
       const timeline = await dbAllAsync(
-        `SELECT event_type, from_status, to_status, summary, action_code, ref_id, round_no,
+        `SELECT id, event_type, from_status, to_status, summary, action_code, ref_id, round_no,
                 operator_id, operator_name, created_at
            FROM sys_issue_timeline WHERE issue_id = ? ORDER BY id`,
         [id]
@@ -3549,7 +3849,24 @@ module.exports = (deps) => {
 
       // 12-M2（A7）：具名 spec 子集 + 布尔，使前端补传入口刷新不丢、不依赖临时前端状态
       const specAttachments = attachments.filter(a => a.attachment_type === 'spec');
-      res.json({ issue: row, timeline, attachments, specAttachments, hasSpecAttachment: specAttachments.length > 0, origin_issue: originIssue, derived_issues: derivedIssues, related_correction: relatedCorrection, dev_assignees: devAssignees, dev_commits: devCommits });
+      // ⭐⭐ 附件面裁剪（技术负责人读权修复**自身引入的新暴露面**·必须与本次改动同批处置）：
+      //   本次把详情可见性放开给「本单技术负责人」之前，示例发布者打不开变更流详情（403），自然也看不到附件；
+      //   放开之后，他虽然仍**下载不了**（下载端点判据独立，未放开），却能在响应里读到附件**列表**
+      //   （原始文件名等元数据）。方案 §3 角色表明写技术负责人「**不看附件**」「看材料/讨论走线下」，
+      //   文件名本身即材料信息，故须裁剪。
+      //   ⚠️ 判据与**附件下载端点逐字同源**（`sysAttachmentRosterState` 同一函数）——他下载不到的东西，
+      //   就不该在详情里看到；两处用同一判据才不会再长出"列表能看见、下载 403"这类新的读端不一致。
+      //   ⚠️ 不误伤：admin / 受理人（isSysCoordinator = admin ∨ 受理人）/ 在册成员 / 历史参与成员全部照旧；
+      //   示例发布者若同时兼任本单开发（方案 §3 明确允许兼任），会命中 roster 分支，附件照常可见。
+      //   187 号审 LOW（采纳）：先判角色再查库——admin/受理人（详情请求的大多数）本就有权，无条件先跑
+      //   roster 查询等于给热路径白加一次 DB 往返和一个失败点；短路后语义不变（角色不满足才落到 roster）。
+      const attActor = sysActor(req);
+      const attIsCoordinator = attActor.role === 'admin' || isSysCoordinator(attActor, row.type);
+      const attRoster = attIsCoordinator ? null : await sysAttachmentRosterState(id, attActor.id);
+      const canSeeAttachmentList = attIsCoordinator || !!(attRoster && (attRoster.active || attRoster.historical));
+      const outAttachments = canSeeAttachmentList ? attachments : [];
+      const outSpecAttachments = canSeeAttachmentList ? specAttachments : [];
+      res.json({ issue: row, timeline, attachments: outAttachments, specAttachments: outSpecAttachments, hasSpecAttachment: outSpecAttachments.length > 0, origin_issue: originIssue, derived_issues: derivedIssues, related_correction: relatedCorrection, dev_assignees: devAssignees, dev_commits: devCommits });
     } catch (err) {
       logger.error('[系统迭代] 详情查询失败:', err && err.message);
       res.status(500).json({ error: (err && err.message) || '详情查询失败' });
@@ -4073,9 +4390,75 @@ module.exports = (deps) => {
   router.post('/sys-issues/:id/close', authenticateToken, requireSysSchemaReady, requireAdmin, makeTransitionEndpoint('close'));
   router.post('/sys-issues/:id/hold', authenticateToken, requireSysSchemaReady, requireAdmin, makeTransitionEndpoint('hold'));
   router.post('/sys-issues/:id/reactivate', authenticateToken, requireSysSchemaReady, requireAdmin, makeTransitionEndpoint('reactivate'));
-  router.post('/sys-issues/:id/issue-reject', authenticateToken, requireSysSchemaReady, requireAdmin, makeTransitionEndpoint('issue_reject'));
+  // ⭐⭐ R2（C2.5 撤销·方案 v2.1 §3·190 号消歧"替换非叠加"）：中间件 requireAdmin **替换为**
+  //   requireIntakeLiaison（粗筛 admin∨受理人——受理人要进得来拒变更单，admin 要进得来拒 bug；
+  //   中间件加载不了 issue 做不了 type 分支）。**引擎 roleGuard 才是最终授权边界**：
+  //   变更流条目 'intake_liaison_only'（admin 403）/ bug 条目 'admin'（受理人 403）——两层都过才放行。
+  router.post('/sys-issues/:id/issue-reject', authenticateToken, requireSysSchemaReady, requireIntakeLiaison, makeTransitionEndpoint('issue_reject'));
   router.post('/sys-issues/:id/void', authenticateToken, requireSysSchemaReady, requireAdmin, makeTransitionEndpoint('void'));
   router.post('/sys-issues/:id/reopen', authenticateToken, requireSysSchemaReady, requireAdmin, makeTransitionEndpoint('reopen'));
+
+  // ── （C2.5 撤销·方案 v2.1）pre-discuss-pass 路由已删除（预沟通段废除·404）；OA 号改经下方
+  //    set-oa-number 端点在受理后补填 ────────────────────────
+  // ── ⭐⭐ R4 OA 号补填（方案 v2.1 §4·用户拍板"受理后 admin 补填·指派前必须有"）──────────
+  //   权限=仅 admin——理由是**信息可达性**：只有 admin/建单人在 OA 系统内、知道流程号是多少（对接人与
+  //   开发团队不在 OA 内、无从获知），所以只能由 admin 来填。⚠️ 这不是平台内保密要求——OA 号填进平台后
+  //   就是全链路可见的过程参考号（详情/timeline 正常展示），191 号审曾据旧表述误判 timeline 泄露。
+  //   **可填窗口=显式允许集（默认拒绝·189 号审）**：受理之后的全部非终态+已上线才可填/改——
+  //   具体集合**以下方常量为准，注释不再重复枚举**（191 复审 L：注释枚举已漂移过一次）。
+  //   bug 的 OA 可选（D2·填了同样校验格式）；指派后仍可改=纠错窗口（timeline 留痕可审计）。
+  //   服务端比对制（[[feedback_server_side_diff_for_audit]]）：同值 no-op（200·不写 timeline 不留痕）。
+  const SYS_OA_ALLOWED_STATUSES = {
+    // 191 号审 M（同型第三次·终版口径=受理后全部非终态+已上线·逐状态对照 ALLOWED_STATUSES 核出不手拼）：+待验证
+    feature: ['待指派', '开发中', '待验证', '待上线', '已上线', '已暂缓'],
+    improvement: ['待指派', '开发中', '待验证', '待上线', '已上线', '已暂缓'],
+    // ⚠️ bug 集合无「已暂缓」（agent 复核抓的方案笔误）：BUG_FLOW_STATUSES 本就没有该态（暂缓有意省略·
+    //   见 transitions.js bug 状态集注释），方案 v2.1 首版把变更流集合照抄给 bug 属契约错误，已收窄。
+    bug: ['待处理', '处理中', '待验证', '待上线', '已上线'],
+  };
+  router.post('/sys-issues/:id/set-oa-number', authenticateToken, requireSysSchemaReady, requireAdmin, async (req, res) => {
+    const id = parsePositiveId(req.params.id);
+    if (!id) return res.status(400).json({ error: '无效的迭代单 ID', code: 'INVALID_SYS_ISSUE_ID' });
+    const actor = sysActor(req);
+    try {
+      let oa;
+      try {
+        oa = assertSysOaNumber((req.body || {}).oa_number);   // 复用引擎同一校验（1-20 位纯数字·拒 number 类型·写读同源）
+      } catch (vErr) {
+        if (vErr instanceof SysTransitionError) return res.status(vErr.httpStatus).json({ error: vErr.message, code: vErr.code });
+        throw vErr;
+      }
+      await sysBeginImmediate();
+      try {
+        const row = await dbGetAsync('SELECT id, type, status, oa_number FROM sys_issues WHERE id = ?', [id]);
+        if (!row) { await sysRollback(); return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' }); }
+        const allowed = SYS_OA_ALLOWED_STATUSES[row.type];
+        if (!Array.isArray(allowed) || !allowed.includes(row.status)) {
+          await sysRollback();
+          return res.status(409).json({ error: `当前状态「${row.status}」不可填写 OA 号（受理通过后方可补填）`, code: 'OA_NUMBER_STATUS_NOT_ALLOWED' });
+        }
+        if (String(row.oa_number || '') === oa) {   // 同值 no-op（服务端比对制·不产伪审计行）
+          await sysRollback();
+          return res.json({ id, oa_number: oa, changed: false });
+        }
+        const upd = await dbRunAsync(`UPDATE sys_issues SET oa_number = ?, updated_at = datetime('now','localtime') WHERE id = ? AND status = ?`, [oa, id, row.status]);
+        if (!upd || upd.changes !== 1) { await sysRollback(); return res.status(409).json({ error: '单据状态已变化，请刷新后重试', code: 'OA_NUMBER_STATE_CHANGED' }); }
+        const prev = row.oa_number ? `（原 ${row.oa_number}）` : '';
+        await dbRunAsync(
+          `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, operator_id, operator_name)
+           VALUES (?, 'note', ?, 'set_oa_number', ?, ?)`,
+          [id, `补填 OA 流程号：${oa}${prev}`, Number(actor.id) || null, actor.name || null]);
+        await sysCommit();
+        return res.json({ id, oa_number: oa, changed: true });
+      } catch (txErr) {
+        try { await sysRollback(); } catch (_) { /* ignore */ }
+        throw txErr;
+      }
+    } catch (err) {
+      logger.error('[系统迭代] 补填 OA 号失败:', err && err.stack || (err && err.message));
+      return res.status(500).json({ error: '补填 OA 号失败，请稍后重试', code: 'INTERNAL_ERROR' });
+    }
+  });
 
   // ── 受理门三出口（受理排期改造 §5.1·C3）──────────────────────────────────────
   //   ⚠️ 权限分两档（§5.3 逐动作授权表）：
@@ -4283,14 +4666,27 @@ module.exports = (deps) => {
     if (!techLeadId) return res.status(400).json({ error: '请选择技术负责人', code: 'TECH_LEAD_ID_REQUIRED' });
     if (!isSysTechLead(techLeadId)) return res.status(400).json({ error: '技术负责人须为白名单成员', code: 'TECH_LEAD_NOT_WHITELISTED' });
     const actor = sysActor(req);
-    let requestEventId = null, techLeadUser = null, issueSnap = null, techLeadName = null;
+    let requestEventId = null, techLeadName = null;   // S5 手动化：techLeadUser/issueSnap 随首发段删除退场
     try {
       await sysBeginImmediate();
       try {
         const row = await dbGetAsync('SELECT id, type, status, title, system_name FROM sys_issues WHERE id = ?', [id]);
         if (!row) { await sysRollback(); return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' }); }
-        // 仅待受理态可发起（§5.1③·受理态结构上 intake_required=1·status 门隐含·同 edit_in_revision 范式）
-        if (row.status !== '待受理') { await sysRollback(); return res.status(409).json({ error: `仅「待受理」态可发起技术负责人沟通（当前「${row.status}」）`, code: 'REQUEST_TECH_CONSULT_STATUS_INVALID' }); }
+        // ⭐ 角色权限重构 v2.1（C2.5 撤销）：开放态经 sysTechConsultGateStatus 统一判定——全类型均「待受理」
+        //   （C3 时期曾按 type 分流，变更流「待商议」/bug「待受理」，该分流已随预沟通段撤销归一）。
+        //   codex Round-A 审 MED：分流函数 fail-closed 返 null（未登记 type）时必须显式拒绝，
+        //   不能让 `row.status !== null` 恒真而被误判为"状态不对"（那会给出一条误导性错误信息）。
+        const gateStatus = sysTechConsultGateStatus(row.type);
+        if (gateStatus === null) { await sysRollback(); return res.status(409).json({ error: `未知的迭代单类型「${row.type}」，无法判定技术负责人沟通开放态`, code: 'REQUEST_TECH_CONSULT_TYPE_INVALID' }); }
+        if (row.status !== gateStatus) { await sysRollback(); return res.status(409).json({ error: `仅「${gateStatus}」态可发起技术负责人沟通（当前「${row.status}」）`, code: 'REQUEST_TECH_CONSULT_STATUS_INVALID' }); }
+        // ⭐ 角色权限重构 C4·184 号预审 HIGH（用户裁定 PH-1，撤销 codex Round-A 审 HIGH 加的终局守卫）：
+        //   **换轮合法化**——原「本轮已有意见即终局，永不可再发起」制造了一个死角（新负责人留言撞唯一性
+        //   约束、取消咨询被"已留言不可取消"挡住，单据卡死无法再往下走）。新世界模型：意见唯一性不再是
+        //   "整单只能有一条"，而是**绑定咨询轮次**——`tech_lead_notify_request_event_id` 标识"当前轮"，
+        //   判定改为"轮内唯一"（EXISTS 判断改用 `timeline.id > 当前 request_event_id`，见 tech-lead-comment
+        //   端点的 INSERT…SELECT 子查询）。已有意见后 admin/受理人**可以**直接再次 request 开新轮，旧意见
+        //   留在 timeline 作历史（不删不改）。本处早检查（事务内 hasComment→409）随之整体删除，唯一性判定
+        //   下沉到 tech-lead-comment 端点自己的轮内 NOT EXISTS 子查询里。
         // tech_lead_name 服务端派生（禁客户端提交·§6）
         const tl = await dbGetAsync('SELECT id, display_name, username, phone, dingtalk_user_id FROM users WHERE id = ?', [techLeadId]);
         if (!tl) { await sysRollback(); return res.status(409).json({ error: '技术负责人用户不存在', code: 'TECH_LEAD_NOT_FOUND' }); }
@@ -4302,43 +4698,35 @@ module.exports = (deps) => {
           [id, `发起技术负责人沟通：${techLeadName}(id${techLeadId})`, Number(actor.id) || null, actor.name || null]);
         requestEventId = tlIns.lastID;
         // 每次 request（含同人连发·非仅换人·§6·130-H）生成新版本 + 重置全部投递字段（含 sent_by 清空·§8.3 not_sent⟹sent_by 空）
+        // ⭐ 角色权限重构 C4·184 号预审 HIGH（换轮合法化）：WHERE 的 NOT EXISTS(tech_lead_comment) 已删除——
+        //   开新轮不再要求"整单尚无意见"，唯一性判定下沉到 tech-lead-comment 端点自己的轮内子查询。
         const upd = await dbRunAsync(
           `UPDATE sys_issues SET tech_lead_id=?, tech_lead_name=?, tech_lead_notify_request_event_id=?,
                   tech_lead_notify_status='not_sent', tech_lead_notify_message_key=NULL, tech_lead_read_at=NULL,
                   tech_lead_notify_error=NULL, tech_lead_notified_at=NULL, tech_lead_notify_sent_by=NULL,
                   updated_at=datetime('now','localtime')
-             WHERE id=? AND status='待受理'`,
-          [techLeadId, techLeadName, requestEventId, id]);
-        if (!upd || upd.changes !== 1) { await sysRollback(); return res.status(409).json({ error: '迭代单状态已变更，请刷新重试', code: 'CONCURRENT_STATE_CHANGE' }); }
+             WHERE id=? AND status=?`,
+          [techLeadId, techLeadName, requestEventId, id, gateStatus]);
+        if (!upd || upd.changes !== 1) {
+          await sysRollback();
+          return res.status(409).json({ error: '迭代单状态已变更，请刷新重试', code: 'CONCURRENT_STATE_CHANGE' });
+        }
         await sysCommit();
-        techLeadUser = tl; issueSnap = row;
       } catch (txErr) {
         try { await sysRollback(); } catch (_) { /* ignore */ }
         throw txErr;
       }
-      // === 提交后：request 已成功落库（timeline+负责人+版本重置持久化）。以下首发+回写全 best-effort ===
-      //   codex C5 HIGH-2：提交后任何异常（record 抛/DB 抖）不把「已提交的 request」伪装成 500 整体失败——否则诱导客户端重试→生成新版本+重复通知。
-      //   codex C5 HIGH-1：不做无条件 fresh 查询（并发新 request 会让 fresh 反映新版本而响应带旧 request_event_id=混版）——
-      //     用**本次 sendResult + record 的 changes** 派生响应状态：changes=1 用本次结果·changes=0 标 superseded（本次被并发新 request 取代）。
-      let notifyStatus = 'unknown', superseded = false;
-      try {
-        let sendResult;
-        try {
-          const baseUrl = await getSafePlatformBaseUrl();
-          const { title, md } = buildSysTechLeadMarkdown({ id, title: issueSnap.title, system_name: issueSnap.system_name }, baseUrl);
-          sendResult = await sendIssueDingtalkRaw(techLeadUser, title, md);
-        } catch (prepOrSendErr) {
-          sendResult = { ok: false, reason: 'notify_exception' };   // codex C5 MED-6：不用 raw message（防泄露 infra 细节）
-        }
-        const rec = await recordSysTechLeadNotify(id, requestEventId, !!(sendResult && sendResult.ok), sendResult && sendResult.message_key, sendResult && sendResult.reason, actor.id);
-        // 派生须与 record 内部降级口径一致（ok 但无 message_key→failed·HIGH-3）·否则响应与库不符
-        if (rec && rec.changes === 1) notifyStatus = (sendResult && sendResult.ok && sendResult.message_key) ? 'sent' : 'failed';
-        else superseded = true;   // changes=0：期间又 request→本次回写作废·响应标 superseded（不混版）
-      } catch (notifyErr) {
-        logger.warn('[系统迭代] 技术负责人首发回写失败（request 已提交·不影响）:', notifyErr && notifyErr.message);
-        notifyStatus = 'unknown';   // request 成功·投递结果未知（客户端可重发·非重发 request）
-      }
-      return res.json({ id, tech_lead_id: techLeadId, tech_lead_name: techLeadName, request_event_id: requestEventId, tech_lead_notify_status: notifyStatus, ...(superseded ? { superseded: true } : {}) });
+      // ⭐⭐ S5 通知手动化（方案 v2.1 §6·用户拍板 D4·2026-07-28）：**提交后首发段整体删除**——
+      //   发起/换轮咨询不再自动发钉钉。事务内本就把 notify 列组重置为 not_sent（见上方 UPDATE），删掉
+      //   首发后状态天然停 not_sent；发送改由用户在详情页点独立「发送通知」按钮 → 复用 resend-tech-consult
+      //   端点（expected_request_event_id 围栏/白名单复检/条件落库全套既有机制·首发与重发对它无机制差别）。
+      //   随首发退场的还有：`superseded` 响应标记（那是首发回写的并发保护——没有回写就没有"本次回写被
+      //   新 request 取代"这回事·响应体不再含该字段）与 unknown 派生态（无发送即无"结果未知"）。
+      //   原 C5 HIGH-1/HIGH-2 的两条防护（不 fresh 查询防混版/提交后异常不伪装 500）随段删除自然消解——
+      //   它们防的是"提交后 best-effort 段"的故障面，该段已不存在。
+      //   漏发风险的闭环（同批前端）：详情页未发送红条 + 列表 not_sent/failed 徽章 + 已留言收口；
+      //   且 R3 受理阻断本身兜底——想受理必进详情，红条可见。
+      return res.json({ id, tech_lead_id: techLeadId, tech_lead_name: techLeadName, request_event_id: requestEventId, tech_lead_notify_status: 'not_sent' });
     } catch (err) {
       if (err instanceof SysTransitionError) return sendSysTransitionError(res, err);
       logger.error('[系统迭代] 发起技术负责人沟通失败:', err && err.stack || (err && err.message));
@@ -4357,18 +4745,32 @@ module.exports = (deps) => {
     if (!expectedEventId) return res.status(400).json({ error: '缺少 expected_request_event_id', code: 'EXPECTED_REQUEST_EVENT_ID_REQUIRED' });
     const actor = sysActor(req);
     try {
-      const row = await dbGetAsync('SELECT id, title, system_name, status, created_by, tech_lead_id, tech_lead_notify_request_event_id FROM sys_issues WHERE id = ?', [id]);
+      const row = await dbGetAsync('SELECT id, type, title, system_name, status, created_by, tech_lead_id, tech_lead_notify_request_event_id FROM sys_issues WHERE id = ?', [id]);
       if (!row) return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' });
       // 权限：admin∨受理人∨建单人（§6）
       const isAdmin = actor.role === 'admin';
       const isLiaison = isSysIntakeLiaison(actor.id);
       const isCreator = Number(row.created_by) === Number(actor.id) && Number(actor.id) > 0;
       if (!(isAdmin || isLiaison || isCreator)) return res.status(403).json({ error: '仅管理员/受理人/建单人可重发', code: 'NOT_AUTHORIZED_FOR_TECH_CONSULT_RESEND' });
-      // C10 末次审 #5（codex149）：重发仅限受理阶段——技术负责人沟通是「待受理」态动作（request 发起门=待受理·transitions §6），
-      //   受理通过(intake_accept→待指派/待处理)/退改(→待修改)后单已离开待受理，旧受理请求不应继续向技术负责人发过期通知
-      //   （intake_accept 不清 tech_lead 字段·仅由本状态门约束）。置于权限校验之后（避免非权限者借状态码侧信道探单据态·同 C3 不变量顺序）。
-      if (row.status !== '待受理') return res.status(409).json({ error: '该单已离开受理阶段，不可重发技术负责人沟通', code: 'TECH_CONSULT_RESEND_LATE' });
+      // C10 末次审 #5（codex149）：重发仅限受理阶段——原表述"技术负责人沟通是「待受理」态动作"是 C10 时代
+      //   （C3 谓词前移前）的旧口径，C3 时期曾按 type 分流（变更流「待商议」/bug「待受理」）；**v2.1 撤销
+      //   C2.5 后归一为全类型「待受理」**。受理通过(intake_accept)/退改后单已离开开放态，旧请求不应继续
+      //   向技术负责人发过期通知（intake_accept 不清 tech_lead 字段·仅由本状态门约束）。
+      //   置于权限校验之后（避免非权限者借状态码侧信道探单据态·同不变量顺序）。
+      // ⭐ 角色权限重构 v2.1：与 request-tech-consult 同一分流来源（sysTechConsultGateStatus）。
+      //   codex Round-A 审 MED：分流函数 fail-closed 返 null（未登记 type）时须显式拒绝。
+      const gateStatus = sysTechConsultGateStatus(row.type);
+      if (gateStatus === null) return res.status(409).json({ error: `未知的迭代单类型「${row.type}」，无法判定技术负责人沟通开放态`, code: 'REQUEST_TECH_CONSULT_TYPE_INVALID' });
+      if (row.status !== gateStatus) return res.status(409).json({ error: `该单已离开${gateStatus}阶段，不可重发技术负责人沟通`, code: 'TECH_CONSULT_RESEND_LATE' });
+      // ⭐ 角色权限重构 C4·184 号预审 HIGH（PH-1 换轮合法化，撤销原"整单终局"判定）：ALREADY_COMMENTED
+      //   改**轮内**判定——先确认"当前轮"存在（tech_lead_id/event_id 均非空，NULL=无活动轮，见 PH-1 世界
+      //   模型 NULL 防御），再判该轮是否已有意见；旧轮的意见不拦（换轮后是新一轮，"重发请评估通知"对
+      //   新一轮而言仍然成立）。故顺序反过来：先判"有没有当前轮"，再判"当前轮有没有意见"。
       if (!row.tech_lead_id || !row.tech_lead_notify_request_event_id) return res.status(409).json({ error: '该单未发起技术负责人沟通，无可重发', code: 'NO_TECH_CONSULT_TO_RESEND' });
+      const hasComment = await dbGetAsync(
+        `SELECT 1 FROM sys_issue_timeline WHERE issue_id=? AND action_code='tech_lead_comment' AND id > ?`,
+        [id, row.tech_lead_notify_request_event_id]);
+      if (hasComment) return res.status(409).json({ error: '本单技术评估已终局（已提交评估意见），不可重新发起技术负责人沟通', code: 'TECH_CONSULT_ALREADY_COMMENTED' });
       // expected_request_event_id 一致性（防基于旧页面版本重发）
       if (Number(expectedEventId) !== Number(row.tech_lead_notify_request_event_id)) {
         return res.status(409).json({ error: '技术负责人沟通已更新（换人/重新发起），请刷新后重发', code: 'TECH_CONSULT_VERSION_CONFLICT' });
@@ -4395,6 +4797,331 @@ module.exports = (deps) => {
     } catch (err) {
       logger.error('[系统迭代] 重发技术负责人通知失败:', err && err.stack || (err && err.message));
       return res.status(500).json({ error: '重发技术负责人通知失败，请稍后重试', code: 'INTERNAL_ERROR' });
+    }
+  });
+
+  // ── tech-lead-comment：技术负责人提交最终评估意见（角色权限重构 C3·方案 v1.9 §4-C3）──────────────────────
+  //   权限：仅 isSysTechLead(actor.id)（[7]·**不放行 admin**——本判定只按 id 白名单不按 role，即便某 admin
+  //     的 user_id 恰好也在白名单里，本函数本身对"是不是 admin"零感知，不给 admin 开任何后门）
+  //     + 本单 tech_lead_id === actor.id（本人门·isSysTechLead 只证明"是白名单里的技术负责人"，
+  //     不证明"是本单被咨询的那个人"，白名单未来若扩容这一步不可省）。
+  //   谓词：**status='待受理'（硬编码字面量，非按 type 分流的 sysTechConsultGateStatus）**。历史沿革：
+  //     C3 落地时随 C2.5 预沟通段令本端点谓词硬编码「待商议」，只服务变更流（bug 不获得本端点）；
+  //     **C2.5 已随方案 v2.1 撤销**，谓词改回「待受理」——bug 现与变更流同等可用本端点提交评估意见
+  //     （不再是变更流专属能力，见 transitions.js request_tech_consult 条目注释的沿革说明）。
+  //   ⭐ 角色权限重构 C4·184 号预审 HIGH（PH-1 用户裁定，世界模型：意见唯一性绑咨询轮次，非整单唯一）：
+  //     一条不可变**改为轮内**——同一 `tech_lead_notify_request_event_id`（当前轮）内只能提交一次；
+  //     换轮（request-tech-consult 重新发起）后旧轮的 timeline.id 必小于新轮 request_event_id，天然
+  //     不参与新一轮的唯一性判断（timeline id 单调递增，见 PH-1 世界模型）。一条不可变·单条原子写
+  //     （照抄 request_tech_consult「写 timeline note + INSERT 回调自身 changes/lastID」范式）：
+  //     资格（tech_lead_id=本人 且 status=待受理 且 **event_id 非 NULL**——NULL 防御，无活动轮不可提交）
+  //     + 唯一性（当前轮尚无 tech_lead_comment，`timeline.id > 当前 request_event_id`）+ 插入合并进
+  //     一条 INSERT…SELECT，无查插竞态；结果读取用本次 INSERT 回调自身的 changes/lastID（不再发起
+  //     独立 changes()/last_insert_rowid() 查询，避免共享连接结果被并发请求污染）。
+  //   SQLITE_BUSY：本端点**不经 sysBeginImmediate/mutex**（单条语句本身在 SQLite 里已原子，无需事务包裹，
+  //     属方案 §7.1 已接受的共享连接架构风险同类）——按方案 §4-C3 显式把该 driver 错误单独映射 503，
+  //     不与业务冲突的 409 混同（弱判据 status>=400 会把它误判成"合格拒绝"）。
+  //   ⭐⭐ C5 末次合并审 HIGH（186 号·**PH-1 收口自身留下的死角**）：轮次围栏。PH-1 撤销了 request 端的
+  //     终局守卫（换轮合法化），于是"技术负责人正在填写意见时 admin 重新发起咨询"从不可能变成设计允许。
+  //     此前本端点只校验「本人 + 待受理 + 当前轮非空」，不校验"提交的这条意见回答的是哪一轮"——旧弹窗
+  //     提交时三个条件全满足，意见被写成**新轮**的唯一意见（timeline.id 必然 > 新轮 event_id），造成
+  //     ①意见归属错轮（示例发布者回答的是上一轮的问题）②新轮再也提交不了真意见（轮内唯一性已被占用，需 admin
+  //     再换一轮才能解锁）。⚠️ 放大因素：`SYS_TECH_LEAD_IDS` 当前只有一人，换轮必然换给同一人，
+  //     上面的"本人门"在这个场景下**完全不提供保护**。
+  //     修法与 `resend-tech-consult`（同批 PH-1 收口已配围栏，见其 `:4586`）**同构**：前端提交时带上打开
+  //     弹窗那一刻的 `expected_request_event_id`，后端在 INSERT 资格谓词里追加 `= ?` 严格比对（不匹配
+  //     则 changes=0，由下方诊断分支给确切码 TECH_LEAD_COMMENT_ROUND_CHANGED，不与"已提交过"混同）。
+  router.post('/sys-issues/:id/tech-lead-comment', authenticateToken, requireSysSchemaReady, async (req, res) => {
+    const id = parsePositiveId(req.params.id);
+    if (!id) return res.status(400).json({ error: '无效的迭代单 ID', code: 'INVALID_SYS_ISSUE_ID' });
+    // 轮次围栏（186 号 HIGH）：必填——缺失即拒，不做"未传就放行"的向后兼容（那等于给旧前端留一条绕过
+    //   围栏的路；本端点与前端同批部署，无第三方消费者）。照抄 resend-tech-consult:4556 的解析范式。
+    const expectedEventId = parsePositiveId((req.body || {}).expected_request_event_id);
+    if (!expectedEventId) return res.status(400).json({ error: '缺少 expected_request_event_id', code: 'EXPECTED_REQUEST_EVENT_ID_REQUIRED' });
+    const actor = sysActor(req);
+    // 权限①：白名单本身（与 role 无关——不放行 admin）
+    if (!isSysTechLead(actor.id)) return res.status(403).json({ error: '仅技术负责人可提交评估意见', code: 'NOT_TECH_LEAD' });
+    // 输入面（服务端纯文本 + trim 非空 + 长度 ≤2000 + 拒纯空白；前端非授权源，这里才是真闸）
+    const raw = (req.body || {}).comment;
+    if (typeof raw !== 'string') return res.status(400).json({ error: '评估意见须为文本', code: 'TECH_LEAD_COMMENT_INVALID' });
+    const comment = raw.trim();
+    if (!comment) return res.status(400).json({ error: '评估意见不能为空', code: 'TECH_LEAD_COMMENT_REQUIRED' });
+    if (comment.length > 2000) return res.status(400).json({ error: '评估意见不超过 2000 字', code: 'TECH_LEAD_COMMENT_TOO_LONG' });
+    try {
+      const row = await dbGetAsync('SELECT id, type, status, title, system_name, tech_lead_id FROM sys_issues WHERE id = ?', [id]);
+      if (!row) return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' });
+      // 权限②：本人门
+      if (Number(row.tech_lead_id) !== Number(actor.id)) {
+        return res.status(403).json({ error: '仅本单被指定的技术负责人可提交评估意见', code: 'NOT_ASSIGNED_TECH_LEAD' });
+      }
+      let ins;
+      try {
+        // ⭐ 角色权限重构 C4·184 号预审 HIGH（PH-1）：资格 EXISTS 追加 `tech_lead_notify_request_event_id
+        //   IS NOT NULL`（无活动轮不可提交，NULL 防御）；唯一性 NOT EXISTS 改**轮内**——嵌套子查询取
+        //   本单当前的 request_event_id，与 timeline.id 比较（同一条语句内完成，保持原子，不引入
+        //   "先查 event_id 再拼 JS 参数"的查插竞态）。
+        //   ⭐ 186 号 HIGH：资格谓词追加 `tech_lead_notify_request_event_id = ?`（轮次围栏）。与 IS NOT NULL
+        //     并存不冗余：`= ?` 在 NULL 时恒为 NULL（不满足）已能挡住无活动轮，但显式保留 IS NOT NULL 让
+        //     "NULL 防御"这条不变量在语句里可读、不依赖三值逻辑的隐式行为（PH-1 世界模型的一贯写法）。
+        ins = await dbRunAsync(
+          `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, operator_id, operator_name)
+           SELECT ?, 'note', ?, 'tech_lead_comment', ?, ?
+            WHERE EXISTS(SELECT 1 FROM sys_issues WHERE id=? AND tech_lead_id=? AND status=? AND tech_lead_notify_request_event_id IS NOT NULL
+                           AND tech_lead_notify_request_event_id = ?)
+              AND NOT EXISTS(SELECT 1 FROM sys_issue_timeline WHERE issue_id=? AND action_code='tech_lead_comment'
+                               AND id > (SELECT tech_lead_notify_request_event_id FROM sys_issues WHERE id=?))`,
+          [id, comment, Number(actor.id) || null, actor.name || null, id, actor.id, '待受理'  /* C2.5 撤销·谓词回待受理（方案 v2.1 §3） */, expectedEventId, id, id]
+        );
+      } catch (dbErr) {
+        // SQLITE_BUSY 可重试服务错误（方案 §4-C3）——不是业务冲突，不应归 409
+        if (dbErr && (dbErr.code === 'SQLITE_BUSY' || /SQLITE_BUSY/.test(String(dbErr.message || '')))) {
+          return res.status(503).json({ error: '系统繁忙，请稍后重试', code: 'SYS_BUSY' });
+        }
+        throw dbErr;
+      }
+      if (!ins || ins.changes !== 1) {
+        // 只读诊断（changes=0 的确切原因，非弱判据）：已提交过（轮内）优先于 状态/指派已变。
+        //   ⭐ PH-1：与上方 INSERT 唯一性判定同一口径——嵌套子查询取当前 event_id，NULL（无活动轮）时
+        //   `id > NULL` 恒 NULL，本查询天然查无结果（不会误判"已提交过"），落到下面的 STATE_CHANGED
+        //   分支，同样是确切码，不会因 NULL 比较放空唯一性而误报"提交成功"。
+        //   ⭐ 186 号 HIGH：轮次诊断**排在最前**——轮次已变时 dup 查的是"新轮有没有意见"，对提交者而言
+        //     那不是真实原因（他的意见属于旧轮），报 ALREADY_SUBMITTED 会误导他以为自己重复提交了。
+        //     event_id 为 NULL（咨询已被 cancel-consult 取消，九列已清）时 Number(null)=0 ≠ expectedEventId，
+        //     同样落这条——文案"重新发起或已取消"覆盖两种成因，都指向同一个可操作动作：刷新后重看。
+        const cur = await dbGetAsync('SELECT tech_lead_notify_request_event_id AS ev FROM sys_issues WHERE id=?', [id]);
+        if (cur && Number(cur.ev || 0) !== Number(expectedEventId)) {
+          return res.status(409).json({ error: '技术负责人沟通已更新（重新发起或已取消），请刷新后重新评估', code: 'TECH_LEAD_COMMENT_ROUND_CHANGED' });
+        }
+        const dup = await dbGetAsync(
+          `SELECT 1 FROM sys_issue_timeline WHERE issue_id=? AND action_code='tech_lead_comment'
+             AND id > (SELECT tech_lead_notify_request_event_id FROM sys_issues WHERE id=?)`,
+          [id, id]
+        );
+        if (dup) return res.status(409).json({ error: '本单已提交过评估意见，不可重复提交', code: 'TECH_LEAD_COMMENT_ALREADY_SUBMITTED' });
+        return res.status(409).json({ error: '迭代单状态或指派已变化，无法提交评估意见', code: 'TECH_LEAD_COMMENT_STATE_CHANGED' });
+      }
+      // 通知受理人「评估已回」——best-effort，失败不回滚已落库的意见（至少一次投递语义·方案原文）。
+      //   ⭐ F8 教训：同批落 action_code='notify_sent' 只增 timeline（复用 recordSysNotifyTimeline）——本通道
+      //   零持久状态列（C3 方案 §4「schema：零新列」），timeline 行是这条通知**唯一**的历史记录，不写就永久无痕。
+      //   sent_by 走 assertNotifySentBy 校验（fail-closed，非法 actor.id 直接抛错，不静默写非法行）。
+      let notifyStatus = 'unknown';
+      try {
+        const sentBy = assertNotifySentBy('sysTechLeadCommentNotify', actor.id);
+        const liaisonUserId = SYS_INTAKE_LIAISON_IDS[0];
+        const liaison = await dbGetAsync('SELECT id, display_name, username, phone, dingtalk_user_id FROM users WHERE id = ?', [liaisonUserId]);
+        let sendResult;
+        if (!liaison) {
+          sendResult = { ok: false, reason: 'liaison_not_found' };
+        } else {
+          try {
+            const baseUrl = await getSafePlatformBaseUrl();
+            const { title, md } = buildSysTechLeadCommentReplyMarkdown(row, baseUrl);
+            sendResult = await sendIssueDingtalkRaw(liaison, title, md);
+          } catch (sendErr) {
+            sendResult = { ok: false, reason: 'notify_exception' };
+          }
+        }
+        const ok = !!(sendResult && sendResult.ok && sendResult.message_key);
+        const who = liaison ? `${liaison.display_name || liaison.username || ''}(id${liaisonUserId})` : `(id${liaisonUserId})`;
+        // ⭐ codex Round-C 审 MED（采纳）：recordSysNotifyTimeline 现有返回契约（成功 true / catch 分支 false，
+        //   不再是"万一它抛错"这类推测——它本就不抛，只是此前无法从外部区分"写成功"和"静默吞掉"）。
+        //   notifyStatus 语义：发送成功且留痕成功→sent；发送成功但留痕失败→unknown（钉钉可能已送达，
+        //   只是这条"谁发的/什么时候发的"记录没能落库，不能谎称 sent，但也不是"发送失败"）；发送失败→failed。
+        const recorded = await recordSysNotifyTimeline(id, '受理人', who, ok, ok ? sendResult.message_key : (sendResult && sendResult.reason), { id: sentBy, name: actor.name });
+        notifyStatus = ok ? (recorded ? 'sent' : 'unknown') : 'failed';
+      } catch (notifyErr) {
+        logger.warn('[系统迭代] 技术负责人评估意见回复通知失败（意见已提交·不影响）:', notifyErr && notifyErr.message);
+      }
+      return res.json({ id, tech_lead_comment_id: ins.lastID, notify_status: notifyStatus });
+    } catch (err) {
+      if (err instanceof SysTransitionError) return sendSysTransitionError(res, err);
+      logger.error('[系统迭代] 提交技术负责人评估意见失败:', err && err.stack || (err && err.message));
+      return res.status(500).json({ error: '提交评估意见失败，请稍后重试', code: 'INTERNAL_ERROR' });
+    }
+  });
+
+  // ── cancel-consult：取消技术负责人沟通（角色权限重构 C3·方案 v1.9 §4-C3 异常收口）──────────────────────
+  //   权限：admin ∨ 受理人（沿用既有 requireIntakeLiaison 中间件，与 intake-accept/intake-return/
+  //     request-tech-consult 三个受理门动作同源，不新造一个等价判断）。
+  //   谓词：**硬编码 status='待受理'**（与 tech-lead-comment 同一决定，理由见其端点注释——C2.5 撤销后
+  //     回归「待受理」，bug 同样可用本端点）+ 已留言（tech_lead_comment 存在）则不可取消。
+  //   条件更新 + changes 检查 + 失败阻断（[[feedback_state_machine_update_invariant]] 双条件守卫范式）：
+  //     changes=0 时只读诊断返回确切冲突原因（已留言不可取消 / 已被取消或尚未发起 / 咨询已换轮 / 状态已变）。
+  //   ⭐ 整组清空 tech_lead_* 九列（复用 SYS_CLEAR_TECH_LEAD_FIELDS_SQL 单一真相源，非只清 tech_lead_id）：
+  //     只清 id 会留两个真缺陷——展示面矛盾（已清负责人却仍留着通知记录）+ 跨轮次污染
+  //     （tech_lead_notify_request_event_id 不清，下一轮 request-tech-consult 的回调可能命中本轮残留版本号），
+  //     同 C0 七轮审 HIGH-1「只清 id/name 会留半清状态」的教训，直接复用既有清单，不再另起一份副本。
+  //   ⭐ codex Round-A 审 MED（采纳·F3/F4 同构兄弟教训）：**前置 SELECT 必须在 sysBeginImmediate 之内**——
+  //     原实现读在事务外（未持锁），读到的 tech_lead_id 快照与随后事务内的 UPDATE 之间存在窗口：另一并发
+  //     请求（如受理人重新发起咨询·同人连发生成新 request_event_id、或换人）可能在这个窗口内完成提交，
+  //     此时若仍用"事务外读到的旧快照"做 WHERE 条件，会用过期数据判定一次本不该成立的取消/或该拒的没拒。
+  //     修法 = relay/tech_lead 通知函数已用过的同款版本围栏：把 SELECT 挪进事务、多绑 CAS 一列
+  //     （tech_lead_notify_request_event_id），把"读"和"用来写的条件"钉在同一次原子操作里。
+  router.post('/sys-issues/:id/cancel-consult', authenticateToken, requireSysSchemaReady, requireIntakeLiaison, async (req, res) => {
+    const id = parsePositiveId(req.params.id);
+    if (!id) return res.status(400).json({ error: '无效的迭代单 ID', code: 'INVALID_SYS_ISSUE_ID' });
+    const actor = sysActor(req);
+    try {
+      await sysBeginImmediate();
+      try {
+        // ⭐ 读挪进事务内（见上方端点注释）：同一事务内先读后写，杜绝"事务外读到的旧快照"窗口。
+        const row = await dbGetAsync('SELECT id, tech_lead_id, tech_lead_name, tech_lead_notify_request_event_id FROM sys_issues WHERE id = ?', [id]);
+        if (!row) { await sysRollback(); return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' }); }
+        // ⭐ 角色权限重构 C4·184 号预审 MED（合并复审收尾）：NULL 退化态短路——event_id 为 NULL（哪怕
+        //   tech_lead_id 恰好有值，属理论上不该出现的脏态：request-tech-consult 恒同时写这两列，两者
+        //   不该出现"一个有值一个空"的组合）时，直接判定"无活动轮"拒绝，不进入下面的 guarded UPDATE。
+        //   ⚠️ 不加这层短路的话：下面 WHERE 的 `tech_lead_notify_request_event_id IS ?`（NULL 时是
+        //   `IS NULL`）会命中这一行，而 NOT EXISTS 子查询里的 `id > ?`（NULL）在 SQL 三值逻辑下对任何
+        //   timeline 行都不成立，NOT EXISTS 因此"查无匹配"而恒真——两者叠加会让 guarded UPDATE 把这个
+        //   本不该存在的脏态当成"一个可以合法取消的活动轮"清掉。与 PH-1/PH-2 各处"event_id NULL=无活动轮"
+        //   的世界模型同源，本短路是一致性防御，不是业务新增判断。
+        if (row.tech_lead_notify_request_event_id == null) {
+          await sysRollback();
+          return res.status(409).json({ error: '技术负责人沟通已被取消或尚未发起', code: 'CANCEL_CONSULT_NO_ACTIVE_CONSULT' });
+        }
+        // ⭐ 角色权限重构 C4·184 号预审 HIGH（PH-1）：已留言不可取消——改**轮内**判定（id > 本轮 request_event_id，
+        //   同 tech-lead-comment/resend-tech-consult 同一口径）。理论上到不了"当前轮已留言又来取消"这个
+        //   组合（前端按钮按轮内态互斥展示），但同源改齐防未来漂移——不留一处判定还是整单口径的死角。
+        const upd = await dbRunAsync(
+          `UPDATE sys_issues SET ${SYS_CLEAR_TECH_LEAD_FIELDS_SQL.join(', ')}, updated_at=datetime('now','localtime')
+             WHERE id=? AND tech_lead_id=? AND tech_lead_notify_request_event_id IS ? AND status=?
+               AND NOT EXISTS(SELECT 1 FROM sys_issue_timeline WHERE issue_id=? AND action_code='tech_lead_comment' AND id > ?)`,
+          [id, row.tech_lead_id, row.tech_lead_notify_request_event_id, '待受理'  /* C2.5 撤销·谓词回待受理（方案 v2.1 §3） */, id, row.tech_lead_notify_request_event_id]
+        );
+        if (!upd || upd.changes !== 1) {
+          await sysRollback();
+          const hasComment = await dbGetAsync(
+            `SELECT 1 FROM sys_issue_timeline WHERE issue_id=? AND action_code='tech_lead_comment' AND id > ?`,
+            [id, row.tech_lead_notify_request_event_id]);
+          if (hasComment) return res.status(409).json({ error: '技术负责人已提交评估意见，不可取消', code: 'CANCEL_CONSULT_ALREADY_COMMENTED' });
+          const fresh = await dbGetAsync('SELECT tech_lead_id, tech_lead_notify_request_event_id, status FROM sys_issues WHERE id = ?', [id]);
+          if (!fresh || !fresh.tech_lead_id) return res.status(409).json({ error: '技术负责人沟通已被取消或尚未发起', code: 'CANCEL_CONSULT_NO_ACTIVE_CONSULT' });
+          // ⭐ 换轮诊断：tech_lead_id 未变但 request_event_id 已变——期间又发起了一轮咨询（同人连发/换人后又连发），
+          //   本次取消所依据的快照已过期，不能当作"取消当前这一轮"（否则会取消一个自己都没见过的新轮次）。
+          if (Number(fresh.tech_lead_notify_request_event_id) !== Number(row.tech_lead_notify_request_event_id)) {
+            return res.status(409).json({ error: '技术负责人沟通已换轮（重新发起/换人），请刷新后重试', code: 'CANCEL_CONSULT_CONSULT_ROUND_CHANGED' });
+          }
+          return res.status(409).json({ error: '迭代单状态或指派已变更，请刷新重试', code: 'CANCEL_CONSULT_STATE_CHANGED' });
+        }
+        await dbRunAsync(
+          `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, operator_id, operator_name)
+           VALUES (?, 'note', ?, 'cancel_consult', ?, ?)`,
+          [id, `取消技术负责人沟通：${row.tech_lead_name || ('#' + row.tech_lead_id)}`, Number(actor.id) || null, actor.name || null]
+        );
+        await sysCommit();
+        return res.json({ id, canceled: true });
+      } catch (txErr) {
+        try { await sysRollback(); } catch (_) { /* ignore */ }
+        throw txErr;
+      }
+    } catch (err) {
+      if (err instanceof SysTransitionError) return sendSysTransitionError(res, err);
+      logger.error('[系统迭代] 取消技术负责人沟通失败:', err && err.stack || (err && err.message));
+      return res.status(500).json({ error: '取消技术负责人沟通失败，请稍后重试', code: 'INTERNAL_ERROR' });
+    }
+  });
+
+  // ── tech-lead-comment/resend-notify：重发「评估已回」通知给受理人（角色权限重构 C3 补丁·方案 §4-C3）─────
+  //   来由：方案原文"投递状态记录 + 失败可重试补发入口"——tech-lead-comment 端点只做了首发 + 留痕，
+  //   缺补发入口。本端点补上，与首发同构（不新起一套发送逻辑）。
+  //   权限：admin ∨ 受理人（复用既有 isSysCoordinator，等价 requireIntakeLiaison 的判定逻辑，handler 内判
+  //   而非中间件——因为要额外放行"本单技术负责人"这一格，中间件表达不了这个 OR 条件）∨ 本单技术负责人本人
+  //   （isSysTechLead(actor.id) 且 tech_lead_id===actor.id，同 tech-lead-comment 端点的本人门）。
+  //   守卫：单不存在 404；**当前轮**尚无 tech_lead_comment（未曾提交评估意见，或仅有旧轮的历史意见）→
+  //   409（补发无意义，没什么可发的——PH-1 第二半：换轮合法化后必须堵住"旧轮意见被当成现役意见补发"，
+  //   否则受理人会收到一条指向已作废轮次的过期通知）；status 已离开「待受理」→ 409（受理人已行动/单据
+  //   已流转，补发失去意义）。
+  //   行为：与 tech-lead-comment 端点的通知段逐字同构——发给 SYS_INTAKE_LIAISON_IDS[0]，sent_by 走
+  //   assertNotifySentBy，复用 buildSysTechLeadCommentReplyMarkdown + recordSysNotifyTimeline 再落一条
+  //   只增 timeline 行（至少一次投递语义·方案降级声明明说不追求 exactly-once，重复通知可容忍）。
+  //   通知失败也 200（补发本身 best-effort，与首发同语义），响应体如实带 notify_status:'failed'。
+  router.post('/sys-issues/:id/tech-lead-comment/resend-notify', authenticateToken, requireSysSchemaReady, async (req, res) => {
+    const id = parsePositiveId(req.params.id);
+    if (!id) return res.status(400).json({ error: '无效的迭代单 ID', code: 'INVALID_SYS_ISSUE_ID' });
+    const actor = sysActor(req);
+    try {
+      const row = await dbGetAsync('SELECT id, type, status, title, system_name, tech_lead_id, tech_lead_notify_request_event_id FROM sys_issues WHERE id = ?', [id]);
+      if (!row) return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' });
+      const isSelfTechLead = isSysTechLead(actor.id) && Number(row.tech_lead_id) === Number(actor.id);
+      if (!(isSysCoordinator(actor, row.type) || isSelfTechLead)) {
+        return res.status(403).json({ error: '仅管理员/受理人/本单技术负责人可重发通知', code: 'NOT_AUTHORIZED_FOR_TECH_LEAD_COMMENT_RESEND' });
+      }
+      // ⭐ 角色权限重构 C4·184 号预审 HIGH（PH-1 第二半）：hasComment 改**仅当前轮**——`id > 本轮
+      //   request_event_id`。event_id 为 NULL（无活动轮）时 `id > NULL` 恒 NULL，hasComment 查询天然
+      //   查无结果，落入下方 409（NULL 防御，不会因三值逻辑放空判断而误判"有当前轮意见"）。
+      const hasComment = row.tech_lead_notify_request_event_id != null
+        ? await dbGetAsync(
+            `SELECT 1 FROM sys_issue_timeline WHERE issue_id=? AND action_code='tech_lead_comment' AND id > ?`,
+            [id, row.tech_lead_notify_request_event_id])
+        : null;
+      if (!hasComment) return res.status(409).json({ error: '本单尚无技术负责人评估意见，无可重发', code: 'NO_TECH_LEAD_COMMENT_TO_NOTIFY' });
+      if (row.status !== '待受理'  /* C2.5 撤销·谓词回待受理（方案 v2.1 §3） */) {
+        return res.status(409).json({ error: '本单已离开待受理阶段，无需重发通知', code: 'TECH_LEAD_COMMENT_NOTIFY_RESEND_LATE' });
+      }
+      // ⭐⭐ C5 末次合并审 MED（186 号）：**原注释的竞态分析漏了一条路径**——它只考虑"被带离待商议"，
+      //   并断言"不会是同时被 cancel-consult 取消（已留言的单 cancel 恒 409）"，但漏了 **request_tech_consult
+      //   换轮**：PH-1 撤销终局守卫后，已留言的单**可以**被重新发起咨询。换轮后旧意见的 timeline.id 小于
+      //   新轮 event_id，"当前轮已回复"不再成立，此时补发"评估已回"就是向受理人**谎报新轮已完成评估**
+      //   （不是"发晚了"，是内容与现状不符）。故这条不能沿用 at-least-once 容忍，必须堵。
+      //   修法：发送前二次确认 status 与 event_id 都还是首次读到的那一份，不一致即 409 不发送。
+      //   ⚠️ 残余窗口如实声明：二次确认与外部发送之间仍有微秒级窗口（外部调用无法纳入事务），本修复把
+      //   窗口从"整个权限校验+构造期"收窄到"确认后立即发送"，不是消除。原注释接受的"被带离待商议"竞态
+      //   同样由这次二次确认一并收窄（status 也在比对项里）。
+      //   ⭐⭐ **该残余窗口已由用户于 2026-07-28 明确接受**（186 号复审判"部分闭合"，二选一：实现轮次绑定
+      //   的待发送记录+条件领取〔架构级〕/ 取得明确风险接受结论 —— 用户选后者）。
+      //   ⚠️ **接受依据（末轮审修正版·初版依据有事实错误，见下）**：
+      //     ① 后果是一条**语义过期的通知**而非数据错误——受理人点进单据看到的永远是现状，通知的作用是
+      //        提醒去看单据而不是替代看单据，最坏结果是白点一次；
+      //     ② 概率低但**真实可达**：需要一次换轮请求的 DB 写入恰好落在本端点"二次确认 → 外部发送"之间，
+      //        两个操作在时间上高度接近才会命中。
+      //   ⚠️ **初版依据错在哪（留档防重犯）**：初版写的是"触发需 admin 在微秒级窗口内完成换轮，人工操作
+      //     粒度是秒，物理上几乎不可达"。**这是错的**——它把"admin 的操作时长"与"admin 请求的落库时刻"
+      //     混为一谈：admin 在点按钮那一刻操作就结束了，之后请求排队/等 mutex，**只要它的写入落在窗口内
+      //     即触发，人不需要在窗口内做任何事**。且窗口**无硬上界**（事件循环调度、系统负载、外部网络调用
+      //     前的异步边界都可能拉长它），"微秒级"同样是想当然。此外初版把多人并发列为"未来才需复查"，
+      //     而生产**当前就有 6 个 active admin**（167 号审已查明的事实）——并发前提当下即成立。
+      //   ⚠️ **复查触发条件（不是永久接受）**：**任何提高「轮次变更」并发度或自动化程度的变化**，
+      //     包括但不限于：① SYS_TECH_LEAD_IDS 扩容至多人 ② 批量 / 脚本化咨询操作入口 ③ 多 admin 同时
+      //     处理同一单成为常态操作 ④ 任何自动 / 定时修改 status 或 tech_lead_notify_request_event_id 的路径。
+      //     任一显著变化时须重新评估，届时回到轮次绑定待发送记录 + 条件领取方案。
+      const fresh = await dbGetAsync('SELECT status, tech_lead_notify_request_event_id AS ev FROM sys_issues WHERE id=?', [id]);
+      if (!fresh || fresh.status !== '待受理'  /* C2.5 撤销·谓词回待受理（方案 v2.1 §3） */
+          || Number(fresh.ev || 0) !== Number(row.tech_lead_notify_request_event_id || 0)) {
+        return res.status(409).json({ error: '技术负责人沟通已更新（重新发起/取消）或单据已流转，请刷新后再试', code: 'TECH_LEAD_COMMENT_NOTIFY_ROUND_CHANGED' });
+      }
+      let notifyStatus = 'failed';   // 默认 failed（而非 unknown）——本端点是补发，任何未能完成发送都应如实报"没发成"
+      try {
+        const sentBy = assertNotifySentBy('sysTechLeadCommentResendNotify', actor.id);
+        const liaisonUserId = SYS_INTAKE_LIAISON_IDS[0];
+        const liaison = await dbGetAsync('SELECT id, display_name, username, phone, dingtalk_user_id FROM users WHERE id = ?', [liaisonUserId]);
+        let sendResult;
+        if (!liaison) {
+          sendResult = { ok: false, reason: 'liaison_not_found' };
+        } else {
+          try {
+            const baseUrl = await getSafePlatformBaseUrl();
+            const { title, md } = buildSysTechLeadCommentReplyMarkdown(row, baseUrl);
+            sendResult = await sendIssueDingtalkRaw(liaison, title, md);
+          } catch (sendErr) {
+            sendResult = { ok: false, reason: 'notify_exception' };
+          }
+        }
+        const ok = !!(sendResult && sendResult.ok && sendResult.message_key);
+        const who = liaison ? `${liaison.display_name || liaison.username || ''}(id${liaisonUserId})` : `(id${liaisonUserId})`;
+        // ⭐ codex Round-D 审 MED（采纳）：与 tech-lead-comment 端点统一三态语义——"发送成功但留痕失败"
+        //   报 'unknown' 而非 'failed'。此前本端点把这两种情形都报 failed，会诱导消费方把"其实已送达"
+        //   当作可重试失败再发一遍（重复通知虽在 at-least-once 容忍内，但明知已送达还引导重发是语义谎报）；
+        //   两端点同一情形必须同一状态词（写读同源）。发送失败仍恒 failed。
+        const recorded = await recordSysNotifyTimeline(id, '受理人', who, ok, ok ? sendResult.message_key : (sendResult && sendResult.reason), { id: sentBy, name: actor.name });
+        notifyStatus = ok ? (recorded ? 'sent' : 'unknown') : 'failed';
+      } catch (notifyErr) {
+        logger.warn('[系统迭代] 技术负责人评估意见重发通知失败:', notifyErr && notifyErr.message);
+      }
+      return res.json({ id, notify_status: notifyStatus });
+    } catch (err) {
+      if (err instanceof SysTransitionError) return sendSysTransitionError(res, err);
+      logger.error('[系统迭代] 重发技术负责人评估意见通知失败:', err && err.stack || (err && err.message));
+      return res.status(500).json({ error: '重发通知失败，请稍后重试', code: 'INTERNAL_ERROR' });
     }
   });
 
@@ -4657,6 +5384,90 @@ module.exports = (deps) => {
       if (err instanceof SysTransitionError) return sendSysTransitionError(res, err);   // SYS_BUSY 等保 503
       logger.error('[系统迭代] 物理删除失败:', err && err.message);
       return res.status(500).json({ error: (err && err.message) || '删除失败' });
+    }
+  });
+
+  // ── GET /sys-issue-delete-audit：物删审计查询入口（角色权限重构 C4·F9，172 号对抗审）─────────────
+  //   背景：C2a 建了 sys_issue_delete_audit（删前整行+子表快照+reason），但对抗审 172 号指出它**零查询面**——
+  //   写进去后没有任何入口能看，等于没有。用户拍板口径三条：仅 admin 可查；展示层手机号脱敏（中间四位星号）；
+  //   库内快照原文不动（脱敏只发生在响应序列化时，不改 DB）。
+  //   本端点只读——列表版只投影摘要列（不含 issue_json 等大 JSON 字段，避免列表页面被单条记录的完整快照拖垮）；
+  //   详情版按 id 单条取全部列。两者共用同一份 requireAdmin（复用既有中间件，不新造）+ 同一份
+  //   serializeAuditRow（脱敏字段清单单一来源）。
+  //   ⚠️ 中间件顺序（codex C4 审 Round-1 收口·LOW）：authenticateToken → requireAdmin → requireSysSchemaReady——
+  //   非 admin 必须恒 403，不能因为 schema 未就绪就先 503（那会向未授权用户泄露"表结构是否就绪"这个内部状态）。
+  //   ⚠️ 分页改游标（codex C4 审 Round-1 收口·MED）：**追加型表**（只 INSERT 不 UPDATE，本表刻意不进任何
+  //   级联/更新路径，见建表注释）用 offset 翻页存在经典缺陷——翻页期间若有新行插入（本表恰恰是持续增长的，
+  //   随时可能有新的物删发生），后续页会因为"前面多插了几行"而重复看到本该在上一页出现过的行，或跳过
+  //   本该出现的行。改用 id 游标（audit id 是 AUTOINCREMENT，单调递增，与 id DESC 排序天然一致）：
+  //   `WHERE id < ?`（无 before_id 则不加此条件，从最新一条开始）+ 可选 `issue_id = ?` 过滤，
+  //   `ORDER BY id DESC LIMIT ?`。翻页把上一页最后一条的 id 作为下一页的 before_id，不重不漏。
+  //   ⚠️ issue_id 过滤当前无索引（codex C4 审 Round-1）：物删属低频操作、本表体量小，全表扫描可接受；
+  //   若未来审计行数量级上升，再补 `idx_sys_delete_audit_issue`（已有，见建表段——其实已经有索引，
+  //   这里指的是"按 issue_id 过滤 + id 排序"这个组合暂无复合索引，单列索引对小表足够）。
+  router.get('/sys-issue-delete-audit', authenticateToken, requireAdmin, requireSysSchemaReady, async (req, res) => {
+    const q = req.query || {};
+    const DEFAULT_LIMIT = 50, MAX_LIMIT = 200;
+    // ⭐ codex C4 审 Round-1 收口（MED）：limit 解析改严格——整串十进制正整数正则校验，不满足就落回默认值。
+    //   ⚠️ 宽松兜底是刻意选择：本端点是只读查询，传了个奇怪的 limit（'abc'/'-5'/'5.5'/'0'）没有必要 400，
+    //   直接按默认分页大小服务更符合"只读查询容错优先"的取向；issue_id/before_id 则相反（见下方），
+    //   因为那两个是"精确过滤/翻页游标"，语义歧义会导致查错单或翻页错位，值得用 400 显式拒绝。
+    const LIMIT_RE = /^[1-9]\d*$/;
+    let limit = DEFAULT_LIMIT;
+    if (typeof q.limit === 'string' && LIMIT_RE.test(q.limit)) {
+      limit = Math.min(Number(q.limit), MAX_LIMIT);
+    }
+    // ⭐ codex C4 审 Round-2 收口（LOW，184 号预审 PL-1 收口后改调共享 parseStrictPositiveId）：
+    //   before_id 与 issue_id 都是"精确过滤/翻页游标"语义（值歧义会导致查错单或翻页错位），统一走比
+    //   parsePositiveId 更严的正则+isSafeInteger 双重校验，不再各写一份（见 parseStrictPositiveId 定义处）。
+    let beforeId = null;
+    if (q.before_id !== undefined && q.before_id !== '') {
+      beforeId = parseStrictPositiveId(q.before_id);
+      if (!beforeId) return res.status(400).json({ error: 'before_id 须为正整数', code: 'INVALID_BEFORE_ID' });
+    }
+    const whereParts = [];
+    const params = [];
+    if (beforeId) { whereParts.push('id < ?'); params.push(beforeId); }
+    if (q.issue_id !== undefined && q.issue_id !== '') {
+      const issueIdFilter = parseStrictPositiveId(q.issue_id);
+      if (!issueIdFilter) return res.status(400).json({ error: 'issue_id 须为正整数', code: 'INVALID_ISSUE_ID_FILTER' });
+      whereParts.push('issue_id = ?'); params.push(issueIdFilter);
+    }
+    const where = whereParts.length ? ('WHERE ' + whereParts.join(' AND ')) : '';
+    try {
+      const rows = await dbAllAsync(
+        `SELECT id, issue_id, issue_type, issue_status, issue_title, operator_id, operator_name, reason, deleted_at
+           FROM sys_issue_delete_audit ${where}
+          ORDER BY id DESC
+          LIMIT ?`,
+        [...params, limit]
+      );
+      const items = rows.map(r => serializeAuditRow(r, { withSnapshots: false }));
+      // next_before_id：本页恰好取满 limit 条时才给出（= 本页最后一条 id，下一页请求带上它）——
+      // 不满 limit 说明已经到底（含空表），此时为 null，前端据此隐藏「加载更多」。
+      const nextBeforeId = (rows.length === limit && rows.length > 0) ? rows[rows.length - 1].id : null;
+      res.json({ items, limit, next_before_id: nextBeforeId });
+    } catch (err) {
+      logger.error('[系统迭代] 查询删除审计列表失败:', err && err.message);
+      res.status(500).json({ error: '查询删除审计列表失败' });
+    }
+  });
+
+  // ── GET /sys-issue-delete-audit/:auditId：物删审计详情（角色权限重构 C4·F9）───────────────────
+  //   含完整快照 JSON（issue_json/timeline_json/attachments_json/dev_assignees_json/dev_commits_json/
+  //   dev_events_json/release_snapshots_json）——这些字段体积可能较大，故只在详情端点返回，不进列表。
+  //   展示层脱敏统一走 serializeAuditRow（withSnapshots:true）——覆盖 issue_title/operator_name/reason
+  //   三个自由文本摘要字段 + 全部七个快照 JSON（结构化脱敏，见 maskJsonSnapshotText）。
+  router.get('/sys-issue-delete-audit/:auditId', authenticateToken, requireAdmin, requireSysSchemaReady, async (req, res) => {
+    const auditId = parsePositiveId(req.params.auditId);
+    if (!auditId) return res.status(400).json({ error: '无效的审计记录 ID', code: 'INVALID_AUDIT_ID' });
+    try {
+      const row = await dbGetAsync('SELECT * FROM sys_issue_delete_audit WHERE id = ?', [auditId]);
+      if (!row) return res.status(404).json({ error: '审计记录不存在', code: 'AUDIT_NOT_FOUND' });
+      res.json(serializeAuditRow(row, { withSnapshots: true }));
+    } catch (err) {
+      logger.error('[系统迭代] 查询删除审计详情失败:', err && err.message);
+      res.status(500).json({ error: '查询删除审计详情失败' });
     }
   });
 
@@ -6631,7 +7442,11 @@ module.exports = (deps) => {
     };
   }
 
-  // 技术负责人侧 markdown（受理排期改造 §6·C5·对接人/admin 请技术负责人对待受理单做技术评估沟通）。
+  // 技术负责人侧 markdown（受理排期改造 §6·C5·对接人/admin 请技术负责人做技术评估沟通）。
+  //   ⭐ codex Round-A 审 MED（采纳）：措辞去掉"（受理沟通）"——该动作经 sysTechConsultGateStatus 判定开放态
+  //   （历史沿革：C3 时期曾按 type 分流，变更流「待商议」/bug「待受理」；v2.1 撤销 C2.5 后全类型归一
+  //   「待受理」，"受理阶段内的诊断协助"对两类型均成立）；改用中性的"技术评估沟通"，两类型共用同一条
+  //   文案不失真。
   function buildSysTechLeadMarkdown(issue, baseUrl) {
     const title = issueNotify.issueSafeText(issue.title, 80);
     const safeTitle = sysNotifyTitle(issue.title);
@@ -6639,7 +7454,21 @@ module.exports = (deps) => {
     const link = sysDeepLinkLine(baseUrl, issue.id);
     return {
       title: `🔧 请协助技术评估：${safeTitle}`,
-      md: `### 🔧 请协助技术评估（受理沟通）\n\n- **单号**：#${issue.id}\n- **系统**：${system}\n- **标题**：${title}\n\n对接人就该单发起了技术负责人沟通，请登录平台查看需求并给出技术评估意见。${link}`,
+      md: `### 🔧 请协助技术评估\n\n- **单号**：#${issue.id}\n- **系统**：${system}\n- **标题**：${title}\n\n对接人就该单发起了技术负责人沟通，请登录平台查看需求并给出技术评估意见。${link}`,
+    };
+  }
+
+  // 受理人侧·技术负责人评估已回 markdown（角色权限重构 C3；技术负责人提交最终评估意见后
+  //   通知受理人"评估已回"，请其登录平台查看内容并决定后续处置——可做则受理通过（intake_accept）后
+  //   由 admin 经 set-oa-number 补 OA 号，不可做则受理人 issue_reject（前置守卫要求当前轮已有评估意见）。
+  function buildSysTechLeadCommentReplyMarkdown(issue, baseUrl) {
+    const title = issueNotify.issueSafeText(issue.title, 80);
+    const safeTitle = sysNotifyTitle(issue.title);
+    const system = issueNotify.issueSafeText(issue.system_name, 40);
+    const link = sysDeepLinkLine(baseUrl, issue.id);
+    return {
+      title: `✅ 技术负责人评估已回复：${safeTitle}`,
+      md: `### ✅ 技术负责人评估已回复\n\n- **单号**：#${issue.id}\n- **系统**：${system}\n- **标题**：${title}\n\n技术负责人已提交本单最终评估意见，请登录平台查看具体内容并决定后续处置。${link}`,
     };
   }
 
@@ -6699,6 +7528,10 @@ module.exports = (deps) => {
   //   新建表要连带做查询、渲染、readiness、级联与快照（刚被 F1/F7 教育过），成本远大于收益。
   //   ⚠️ 本函数是 **best-effort**：留痕失败不能影响"通知已发出"这个既成事实，也不能回滚业务，
   //   故内部自吞异常只记 warn（与通知落库同为 best-effort 语义）。
+  //   ⭐ codex Round-C 审 MED（采纳）：加返回契约——成功 return true，catch 分支 return false（此前恒
+  //   返回 undefined，调用方无从区分"留痕真的写进去了"还是"发生了什么但被吞掉了"）。既有调用点（notify-developer
+  //   等一批既有端点）此前全部忽略返回值，加这个契约对它们零影响；C3 的两个新通知段（tech-lead-comment /
+  //   resend-notify）借此判断"发送成功但留痕失败"这类此前无法区分的边界情形（见两处调用点注释）。
   async function recordSysNotifyTimeline(issueId, channel, recipientDesc, ok, messageKeyOrErr, actor) {
     try {
       //   ⚠️ 收口审 MED-security：留痕长期保存，而 messageKey/错误串可能夹带 token 片段、手机号、
@@ -6710,8 +7543,10 @@ module.exports = (deps) => {
          VALUES (?, 'note', ?, 'notify_sent', ?, ?)`,
         [issueId, `发送${channel}通知 → ${who}：${ok ? '成功' : '失败'}（${tail}）`,
          Number(actor && actor.id) || null, (actor && actor.name) || null]);
+      return true;
     } catch (e) {
       logger.warn(`[系统迭代] 通知留痕写入失败 #${issueId} ${channel}: ${(e && e.message) || e}`);
+      return false;
     }
   }
 
@@ -6752,14 +7587,143 @@ module.exports = (deps) => {
       `钉钉可能已实际送达但库内无处落（单据已删 / 收件人已变更 / 成员行已软删），此日志是唯一线索`);
   }
 
+  // ⭐ 角色权限重构 C4·F9（172 号对抗审）：手机号掩码抽成独立 helper——F9 审计查询端点的展示层
+  //   脱敏也要用同一条规则，若两处各写一份正则就是漂移温床（改了掩码格式，另一处忘改）。
+  //   下方 sanitizeAuditText 改为调用本函数，顺序/结果与原实现逐字一致，零行为变化。
+  // ⭐ 角色权限重构 C4·184 号预审（PM-3·脱敏多格式升级）：真实数据里手机号不总是纯 11 位连续数字——
+  //   业务方口头/录入习惯常带分隔符（138-1234-5678 / 138 1234 5678），原实现只认连续 11 位数字，这类
+  //   分隔格式会被漏判、明文外泄。升级为两条互补规则（由调用方按"这个值是不是一个 phone 语义字段"
+  //   传 `opts.keyIsPhone` 选择路径，见下方 walk 的两处调用）：
+  //   ① `opts.keyIsPhone===true`（键名含 phone 的整段字符串/数字值，见 maskJsonSnapshotText 的 walk）：
+  //      先剥离 `[-\s]` 归一，若归一后恰好是合法 11 位「1[3-9]开头」手机号，判定"这整个值就是一个手机号"，
+  //      直接把整值替换成标准掩码形态 `138****5678`。⚠️ **不逐字还原原分隔符格式**（剥离归一后已丢失
+  //      "分隔符原来在第几位"这个信息，逆向拼回没有实际收益，反而增加实现复杂度；本路径命中的字段本身
+  //      语义就是"一个电话号码"这个原子值，标准形态已经达成脱敏目的，这个简化是 184 收口批的裁定取舍）。
+  //      归一后不是合法 11 位格式（脏数据/非手机号内容）→ 不提前 return，落到下面②的自由文本规则，不裸奔。
+  //   ② 默认路径（自由文本，未声明 keyIsPhone 或值不是纯手机号）：正则升级为
+  //      `1[3-9]\d[-\s]?\d{4}[-\s]?\d{4}`（分隔符可选、允许 - 或空格）+ 前后非数字边界断言——边界断言
+  //      是防误伤的关键：OA 号/订单号常是长串连续数字，其中任何"看似手机号"的中间子串前后必然紧邻其他
+  //      数字，会被 `(?<!\d)`/`(?!\d)` 正确排除在外（不会被误判成手机号而遭掩码，verify [M] 补了 20 位
+  //      纯数字 OA 号负例用例证明这一点）。命中后掩中间 4 位、**保留原分隔符**（"138-1234-5678"→
+  //      "138-****-5678"；自由文本要保留原文可读性，只挖掉隐私部分，与①"整值替换"的取舍刻意不同）。
+  function maskPhoneDigits(s, opts) {
+    const str = String(s == null ? '' : s);
+    if (opts && opts.keyIsPhone) {
+      const normalized = str.replace(/[-\s]/g, '');
+      if (/^1[3-9]\d{9}$/.test(normalized)) {
+        return `${normalized.slice(0, 3)}****${normalized.slice(7)}`;
+      }
+      // 归一后不是合法手机号格式——不裸奔，落到下面的自由文本规则继续尝试。
+    }
+    // ⚠️ 角色权限重构 C4·184 号预审 LOW（合并复审收尾）：`(?<!\d)`/`(?!\d)` 是 lookbehind/lookahead——
+    //   lookbehind 需 Node ≥10（V8 6.2+/Chrome 62+ 起支持，V8 lookbehind 特性）；本项目 `package.json`
+    //   未声明 `engines` 字段固定最低版本，本地开发运行时为 Node v24（远高于该门槛）。生产侧未能直接
+    //   核实版本号（未做生产 SSH 探测，超出本次改动范围），但仓库内 `scripts/verify-unify-static.js:107`
+    //   已有同款 lookbehind 用法（`(?<![\w-])...`，前端统一项目既有代码，已合并 main），是"这条语法在
+    //   本项目实际部署环境下可用"的既有先例佐证。若未来需要支持 Node <10 的运行时，这两处 lookbehind
+    //   都要一并改写（如手动前置一个非捕获组读前一字符判断），不是本函数独有的风险点。
+    return str.replace(/(?<!\d)(1[3-9]\d)([-\s]?)(\d{4})([-\s]?)(\d{4})(?!\d)/g,
+      (m, p1, sep1, mid, sep2, tail) => `${p1}${sep1}****${sep2}${tail}`);
+  }
   // 审计/留痕文本清洗（收口审 MED-security）：留痕会长期保存，而错误串可能夹带 token 片段、
   //   手机号、HTTP 响应体。统一在这里去控制字符 + 掩手机号 + 截断，再落库。
   function sanitizeAuditText(s, maxLen = 80) {
-    return String(s == null ? '' : s)
+    return maskPhoneDigits(s)
       .replace(/[\r\n\t]+/g, ' ')
-      .replace(/1[3-9]\d{9}/g, m => `${m.slice(0, 3)}****${m.slice(7)}`)   // 夹带的手机号一并掩码
       .replace(/[a-f0-9]{32,}/gi, '[hash]')                                 // token/密钥样式的长串
       .slice(0, maxLen);
+  }
+
+  // ⭐ 角色权限重构 C4·F9（172 号对抗审 Round-1 收口·MED）：快照脱敏改结构化，不再对整段 JSON 文本
+  //   做一次性正则替换——那种做法命中不了"键名含 phone 的数字型字段"（JSON.stringify 后是裸数字，
+  //   不带引号，值本身也未必凑够 11 位连续数字被正则命中）。改为：先 JSON.parse，递归遍历对象/数组——
+  //   字符串值一律走 maskPhoneDigits；键名含 "phone"（大小写不敏感）的数字值先转字符串再同样脱敏
+  //   （覆盖"库内该列意外存成数字"这种边缘情况）；处理完 JSON.stringify 写回。
+  //   ⚠️ 两层策略：**结构化处理是主路径**（对已知形状的快照有键名感知，更精确）；若 JSON.parse 失败
+  //   （脏数据/历史遗留非法 JSON），退化为对原始文本的字符串级正则兜底——不追求精确，只求"不裸奔"
+  //   （宁可脱敏面稍宽也不漏一个手机号）。
+  // ⭐⭐ C5 末次合并审 MED（186 号）：**纯数字标识字段豁免手机号规则**。上面②自由文本正则的边界断言
+  //   `(?<!\d)…(?!\d)` 只能挡住"长数字串里的子串"，挡不住**整个值恰好长得像手机号**的情形——`oa_number`
+  //   值域是 `/^\d{1,20}$/`，若某个 OA 流程号恰为 11 位且以 13-19 开头（如 13812345678），首尾边界均满足，
+  //   会被整条掩成 `138****5678`，导致 admin 查删除审计时看不到真实 OA 号（可追溯性受损）。
+  //   ⚠️ 上面那段注释自称"verify [M] 补了 20 位纯数字 OA 号负例证明不误伤"——20 位确实不命中，**11 位会**，
+  //   负例选窄了（186 号 verify 已补 11 位用例）。
+  //   豁免安全性：这些键在写入端就有格式闸门（oa_number 过 `/^\d{1,20}$/`），不可能承载自由文本，
+  //   因此"跳过手机号扫描"不会放过真实手机号；反过来若把它们交给正则，损失的是真实业务标识。
+  //   ⚠️ 新增键前先确认该键**写入端有纯数字/受限格式校验**，否则不得加入本集合。
+  //   ⚠️⚠️ 186 号复审 MED（**本修复自身引入的过宽面·已收窄**）：豁免最初按键名递归生效，等于
+  //   "任意快照、任意层级、任意同名键（含 oa_number 数组里的字符串元素）一律跳过手机号扫描"。
+  //   写入端的 `/^\d{1,20}$/` 闸门只管得住 `sys_issues.oa_number` 这**一个顶层列**，管不住嵌套结构里
+  //   任何人塞进来的同名键——那些位置一旦存手机号就会明文外泄。故收窄为**路径精确豁免**：
+  //   仅 `issue_json` 的**顶层直接属性** `oa_number` 生效（depth===1），数组元素与嵌套对象一律照常脱敏。
+  const SYS_AUDIT_NON_PHONE_NUMERIC_KEYS = new Set(['oa_number']);
+  const SYS_AUDIT_NUMERIC_ID_EXEMPT_SNAPSHOT_COL = 'issue_json';   // 豁免只在这一份快照里成立
+  function maskJsonSnapshotText(rawText, snapshotCol) {
+    if (rawText == null) return rawText;
+    let parsed;
+    try {
+      parsed = JSON.parse(rawText);
+    } catch (e) {
+      return maskPhoneDigits(rawText);   // 兜底路径：非法 JSON 原文做字符串级脱敏，不裸奔
+    }
+    //   depth 语义：顶层 JSON 值本身 = 0，其直接属性 = 1，再往里/数组元素依次 +1。
+    const walk = (node, keyHint, depth) => {
+      // ⭐ 角色权限重构 C4·184 号预审（PM-3）：字符串分支也按 keyHint 走①路径（整值即手机号→标准形态）——
+      //   此前字符串分支不看 keyHint，一律走自由文本正则；键名含 phone 的字符串值（如 requester_phone
+      //   存的就是纯手机号）现在优先尝试①的整值判定，未命中再自然退化到②的自由文本正则（同一函数内部
+      //   已处理该退化，见 maskPhoneDigits 定义）。
+      const keyIsPhone = /phone/i.test(keyHint || '');
+      // 186 号 MED（复审收窄）：纯数字标识字段豁免——**路径精确**：仅 issue_json 顶层直接属性（depth===1）。
+      //   数组元素（depth≥2·同 keyHint 但已不是那个受校验的顶层标量）与任何嵌套层级的同名键都不豁免。
+      const keyIsOpaqueNumericId = snapshotCol === SYS_AUDIT_NUMERIC_ID_EXEMPT_SNAPSHOT_COL && depth === 1
+        && SYS_AUDIT_NON_PHONE_NUMERIC_KEYS.has(String(keyHint || '').toLowerCase());
+      if (typeof node === 'string') return keyIsOpaqueNumericId ? node : maskPhoneDigits(node, { keyIsPhone });
+      // ⭐⭐ 186 号末轮 MED（**注释声称过强·实现补齐**）：数字分支原先只看 keyIsPhone，其余数字一律原样
+      //   返回——于是上一批注释里那句"数组元素与嵌套对象一律照常脱敏"对**数字型**值并不成立
+      //   （`{"nested":{"oa_number":13812345678}}` 会明文输出）。该泄露面本身是既有行为（非本次引入），
+      //   但把它留着而注释声称已覆盖，就是拿一个只在字符串路径成立的结论去背书全类型——同 MED-1 本体
+      //   同一形态的错误。故补齐：非 phone 键的数字也按自由文本规则扫一遍。
+      //   ⚠️ 类型保持：未命中手机号形态时返回**原数字**（不把 42 变成 "42"，避免改变快照的 JSON 类型面）；
+      //   命中时才返回掩码字符串（此时原值已不可保留，类型变化是脱敏的必然代价）。
+      if (typeof node === 'number') {
+        if (keyIsPhone) return maskPhoneDigits(String(node), { keyIsPhone: true });
+        if (keyIsOpaqueNumericId) return node;   // 受写入端 /^\d{1,20}$/ 闸门保护的那一个位置：原样
+        const numStr = String(node);
+        const maskedNum = maskPhoneDigits(numStr);
+        return maskedNum === numStr ? node : maskedNum;
+      }
+      if (Array.isArray(node)) return node.map(item => walk(item, keyHint, depth + 1));
+      if (node && typeof node === 'object') {
+        const out = {};
+        for (const k of Object.keys(node)) out[k] = walk(node[k], k, depth + 1);
+        return out;
+      }
+      return node;   // boolean / null / undefined 原样保留
+    };
+    return JSON.stringify(walk(parsed, null, 0));
+  }
+
+  // ⭐ 角色权限重构 C4·F9（172 号对抗审 Round-1 收口·HIGH）：审计响应序列化统一入口——此前列表/详情
+  //   两个端点各自手写脱敏字段清单，只脱敏了 reason，漏了 issue_title/operator_name（同样是用户可控的
+  //   自由文本，同样可能夹带手机号），违反用户拍板口径的字面意思（"展示层手机号脱敏"没有限定只脱 reason）。
+  //   集中一处，列表/详情共用，杜绝以后再有第三处各写一份脱敏字段清单。
+  //   withSnapshots=false（列表用）只处理三个自由文本摘要字段；true（详情用）额外处理七份快照 JSON
+  //   （用 hasOwnProperty 判断，天然兼容"列表 SELECT 没有这些列"的情形，不需要按调用方传参再分叉一次）。
+  const SYS_AUDIT_TEXT_MASK_COLS = ['issue_title', 'operator_name', 'reason'];
+  const SYS_AUDIT_SNAPSHOT_JSON_COLS = ['issue_json', 'timeline_json', 'attachments_json',
+    'dev_assignees_json', 'dev_commits_json', 'dev_events_json', 'release_snapshots_json'];
+  function serializeAuditRow(row, { withSnapshots } = {}) {
+    const out = { ...row };
+    for (const col of SYS_AUDIT_TEXT_MASK_COLS) {
+      if (Object.prototype.hasOwnProperty.call(out, col)) out[col] = maskPhoneDigits(out[col]);
+    }
+    if (withSnapshots) {
+      for (const col of SYS_AUDIT_SNAPSHOT_JSON_COLS) {
+        // 186 号复审 MED：传列名——豁免只在 issue_json 里成立，其余六份快照的同名键照常脱敏。
+        if (Object.prototype.hasOwnProperty.call(out, col)) out[col] = maskJsonSnapshotText(out[col], col);
+      }
+    }
+    return out;
   }
 
   // 三侧落库 helper（read_at 在每次新发送时一并重置——新 message_key 后旧已读时刻失去意义；失败时同样清，failed=无可读消息）。
@@ -7638,6 +8602,8 @@ module.exports = (deps) => {
     isSysTechLead,
     requireIntakeLiaison,
     recordSysTechLeadNotify,   // C5：技术负责人通知条件落库（verify 直测 request_event_id 拒过期回写 changes=0）
+    sysTechConsultGateStatus,   // 角色权限重构 C3：request/resend-tech-consult 开放态按 type 分流单一来源（verify 直测分流值）
+    recordSysNotifyTimeline,   // 角色权限重构 C3：受理人「评估已回」通知复用此 helper（verify 直测 timeline 落库）
     // [C3] applyDevAssigneeDiff 已删除（见函数体退场注释）；resolveCollaboratorList 保留（W01 path A + 新版
     //   /assign 仍用，verify-sys-dev-assignee-transition require 真实逻辑）。
     resolveCollaboratorList,

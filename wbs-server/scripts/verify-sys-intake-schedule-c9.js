@@ -206,7 +206,12 @@ async function main() {
     // 四能力：每次新种对应态单（避免跨格状态污染），调真 HTTP 端点，返回 status。
     const cap = {
       bugAssign: async (tok) => (await call('POST', `/api/sys-issues/${await seed('bug', { status: '待处理' })}/assign`, tok, { assigned_to: 6 })).status,
-      featAssign: async (tok) => (await call('POST', `/api/sys-issues/${await seed('feature', { status: '待指派' })}/assign`, tok, { assigned_to: 6 })).status,
+      featAssign: async (tok) => {
+        // R4（C2.5 撤销）：变更流 assign 前置 OA 守卫——夹具用 admin 补号，被测变量仍是"谁能 assign"
+        const fid = await seed('feature', { status: '待指派' });
+        await call('POST', `/api/sys-issues/${fid}/set-oa-number`, adminTok, { oa_number: '20260728100' });
+        return (await call('POST', `/api/sys-issues/${fid}/assign`, tok, { assigned_to: 6 })).status;
+      },
       intakeAccept: async (tok) => (await call('POST', `/api/sys-issues/${await seed('feature', { status: '待受理', ir: 1 })}/intake-accept`, tok, {})).status,
       resubmitOther: async (tok) => (await call('POST', `/api/sys-issues/${await seed('feature', { status: '待修改', ir: 1, createdBy: 99 })}/resubmit-intake`, tok, {})).status,
     };
@@ -239,6 +244,8 @@ async function main() {
     //   同时保留示例发布者的负例：同一格他必须 403，且 403 来自**中间件层**（他连粗筛都过不去）。
     {
       const featId = await seed('feature', { status: '待指派' });
+      // R4（C2.5 撤销）：变更流 assign 前置 OA 守卫——admin 补号，被测变量仍是"示例对接人能否 assign"
+      await call('POST', `/api/sys-issues/${featId}/set-oa-number`, adminTok, { oa_number: '20260728101' });
       const r = await call('POST', `/api/sys-issues/${featId}/assign`, liaisonTok, { assigned_to: 6 });
       assert.strictEqual(r.status, 200, `⭐ 示例对接人13 变更流 assign → 200（C1 全类型放开）, got ${r.status} ${JSON.stringify(r.body)}`);
       const after = await get('SELECT status, assigned_to FROM sys_issues WHERE id=?', [featId]);
@@ -259,15 +266,20 @@ async function main() {
     }
 
     // (M-2) 被选技术负责人白名单（tech_lead_id 白名单·与操作者无关·c5[R] 已验·此处汇总为矩阵 canary）
+    //   ⭐ 角色权限重构 v2.1（C2.5 撤销）：request_tech_consult 开放态全类型统一为「待受理」，
+    //   种子态同步改「待受理」（否则本组会撞上 REQUEST_TECH_CONSULT_STATUS_INVALID 而非本组要测的白名单 400）。
     {
       const seedIntake = () => seed('feature', { status: '待受理', ir: 1 });
       let r = await call('POST', `/api/sys-issues/${await seedIntake()}/request-tech-consult`, liaisonTok, { tech_lead_id: 7 });
       assert.strictEqual(r.status, 200, `选示例发布者7 为技术负责人 → 200, got ${r.status} ${JSON.stringify(r.body)}`);
+      // ⭐ codex Round-B 审 MED（采纳）：只断 400 太弱（任何 400 都能让它绿）；补确切错误码——
+      //   已 grep index.js:4390 request-tech-consult 的白名单校验，实际返回 code='TECH_LEAD_NOT_WHITELISTED'。
       for (const badId of [1, 13, 5]) {
         r = await call('POST', `/api/sys-issues/${await seedIntake()}/request-tech-consult`, liaisonTok, { tech_lead_id: badId });
         assert.strictEqual(r.status, 400, `选非白名单 id=${badId} 为技术负责人 → 400（仅示例发布者7 可被选）, got ${r.status} ${JSON.stringify(r.body)}`);
+        assert.strictEqual(r.body.code, 'TECH_LEAD_NOT_WHITELISTED', `选非白名单 id=${badId} 应为确切码 TECH_LEAD_NOT_WHITELISTED，实际 ${r.body.code}`);
       }
-      ok('[M-2] 被选技术负责人白名单 canary：仅示例发布者7 可被选(200)·admin1/王13/dev5 被选→400（tech_lead_id 白名单·与操作者无关）');
+      ok('[M-2] 被选技术负责人白名单 canary：仅示例发布者7 可被选(200)·admin1/王13/dev5 被选→400 TECH_LEAD_NOT_WHITELISTED（确切码·tech_lead_id 白名单·与操作者无关）');
     }
   }
 

@@ -73,9 +73,13 @@
            全局徽章样式）透传 box-shadow/letter-spacing/text-transform/flex-shrink 四条的"泄漏收回"补丁
            （13 条之一），改名 .u-status-badge 后不再与 style.css 碰撞，整体删除。 */
 
-        /* 状态徽章修饰色（十态，按语义英文 key 上色；base 已 harmonize → components.css .u-status-badge） */
+        /* 状态徽章修饰色（按语义英文 key 上色，逐条见下方规则本身；base 已 harmonize → components.css
+           .u-status-badge。⭐ 角色权限重构 C4·184 号预审 PL-2 去基数化：此前写"十态"，但状态集持续
+           演进（C2.5 待商议/受理排期改造已排期退场等），写死数字会静默过期，改为不带数字的描述——
+           具体状态清单请数下方规则条数或读 status-families.js/transitions.js 的状态常量数组。 */
         .si-s-pending { background: #f3f4f6; color: #6b7280; }
         .si-s-scheduled { background: #e0e7ff; color: #4338ca; }   /* 受理排期改造：已排期态退场·类保留供历史徽章兜底 */
+        /* （C2.5 撤销·方案 v2.1）.si-s-prediscuss「待商议」徽章色已删——预沟通段废除，该状态不再产生。 */
         .si-s-intake { background: #e0e7ff; color: #4338ca; }      /* 待受理（对接人受理门·待办感） */
         .si-s-revision { background: #fef3c7; color: #92400e; }    /* 待修改（退改需建单人改·提醒色） */
         .si-s-dev { background: #dbeafe; color: #1d4ed8; }
@@ -129,6 +133,9 @@
 
         .si-lineage { background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px; padding: 9px 13px; font-size: 12px; color: #92400e; margin-bottom: 14px; }
         .si-lineage a { color: #b45309; font-weight: 600; cursor: pointer; text-decoration: underline; }
+        /* 角色权限重构 v2.1 §6（S5 通知手动化·D4）：技术负责人通知未发送/失败红条——独立于 si-gate-hint（那是
+           动作引导，此处是"漏发不能只靠详情页被发现"这条不变量的可见信号），红色区分优先级。 */
+        .si-notify-alert { background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 9px 13px; font-size: 12px; color: #b91c1c; font-weight: 600; margin-bottom: 14px; }
 
         /* 详情区块已 harmonize → u-detail-section/u-kv-grid/u-kv-item（base 见 components.css）；
            通知区标题右侧元素需 flex，shared .u-detail-section h3 无此布局，页面覆盖（真前缀）。 */
@@ -552,6 +559,7 @@
     const SI_PRIORITY_LABEL = `优先级（风险等级） <span class="si-help" tabindex="0" role="img" aria-label="${SI_PRIORITY_HELP_TEXT}" title="${SI_PRIORITY_HELP_TEXT}">?</span>`;
 
     // 状态 → CSS 语义 key（避免中文类名；含 config 未来态前向兼容）
+    // （C2.5 撤销·方案 v2.1）'待商议': 'prediscuss' 映射已删——预沟通段废除，该状态不再产生。
     const SI_STATUS_CLASS = {
         // 受理排期改造：删「待评估/已排期」→「待受理/待修改」(受理门·intake 语义) +「待指派」(受理通过待派开发)。
         '待受理': 'intake', '待修改': 'revision',
@@ -568,6 +576,8 @@
     function siStatusClass(s) { return SI_STATUS_CLASS[s] || 'pending'; }
     const SI_STATUS_GROUPS = {
         // 受理排期改造：删「已排期/待评估」→「待受理/待修改/待指派」（受理门+待派均属"进行中"前段·归 active）。
+        // （C2.5 撤销·方案 v2.1）「待商议」归 active 一项已删——预沟通段废除，该状态不再产生。
+        //   漏归组会让这些单在"全部"计数内、点任一分组卡后消失（siRenderStats 的组全集守卫会 console.warn）。
         active: ['待受理', '待修改', '待指派', '开发中', '处理中', '待处理'],
         acceptance: ['待验证', '待验收'],
         release: ['待上线'],
@@ -598,6 +608,17 @@
     //   intake_accept/intake_return/request_tech_consult = admin∨受理人；resubmit_intake/edit_in_revision = admin∨建单人；change_intake_mode = 仅 admin（落通用 admin 分支）。
     const SI_INTAKE_LIAISON_ACTIONS = new Set(['intake_accept', 'intake_return', 'request_tech_consult']);
     const SI_CREATOR_ACTIONS = new Set(['resubmit_intake', 'edit_in_revision']);
+    // ── 角色权限重构 v2.1 §4：OA 号可填状态集（前端镜像后端 SYS_OA_ALLOWED_STATUSES·真闸在后端 set-oa-number
+    //   端点）——⚠️ 两处同步：后端 index.js SYS_OA_ALLOWED_STATUSES + 本常量，改一端必须改另一端（写读同源）。
+    //   ⚠️ bug 集合无「已暂缓」（bug 无该态，见 transitions.js BUG_FLOW_STATUSES 注释），不可照抄变更流集合。
+    // ⚠️ 本表是后端 SYS_OA_ALLOWED_STATUSES 的**镜像**（前端提示非授权源·后端 409 恒兜底）——改后端必同步此处。
+    //   镜像漂移风险已登记待追认（服务端返回 oa_fillable 派生字段是根治法·本批不动）。191 号审后+待验证。
+    const SI_OA_ALLOWED_STATUSES = {
+        feature: ['待指派', '开发中', '待验证', '待上线', '已上线', '已暂缓'],
+        improvement: ['待指派', '开发中', '待验证', '待上线', '已上线', '已暂缓'],
+        bug: ['待处理', '处理中', '待验证', '待上线', '已上线'],
+    };
+    function siOaFillable(iss) { return (SI_OA_ALLOWED_STATUSES[iss.type] || []).includes(iss.status); }
     // [codex29 L-3] 拉群可发起态——⚠️ 须与后端 SYS_CHAT_ALLOWED_STATUSES（index.js）同源：改一端必须改另一端。
     //   （sys 模块动作可见性一贯是前端硬编码镜像后端，未上 capability 字段以保模块一致性；后端有真门槛兜底）。
     const SI_CHAT_STATUSES = ['处理中', '待验证', '待上线'];
@@ -713,6 +734,9 @@
         if (META_OK && isAdmin()) {
             if (siTypeKeys().length) html += `<button class="u-btn-primary" onclick="siOpenCreate()">+ 新建迭代单</button>`;
             html += `<button class="u-btn-secondary" onclick="siOpenBatch()">📦 批次管理</button>`;
+            // ⭐ 角色权限重构 C4·F9（172 号对抗审）：物删审计查询入口——仅 admin 可见（前端镜像，真闸在后端
+            //   requireAdmin）。C2a 建了审计表但零查询面，本入口补上"看得到"这一步。
+            html += `<button class="u-btn-secondary" onclick="siOpenDeleteAudit()">🗑️ 删除审计</button>`;
         }
         // C-orch：上线编排批量面板入口——admin（批量指定 + 批量通知上线开发）与被指定执行开发（批量执行发版）共用入口，
         //   面板内部按角色 + 三态分别出对应操作；任意登录用户可开（无待办项时面板自身显示"暂无"，无害）。
@@ -879,6 +903,10 @@
     // codex API 审 MED-2（2026-07-10）：补 已暂缓/已拒绝 显式序——共享排序对未知状态给 99 会
     //   排到已作废之后，与"已作废排末尾"注释矛盾；显式放已生效后、已作废前。
     const SI_STATUS_SORT_ORDER = {
+        // ⚠️ 漏登记不是"少个颜色"这种小事：共享排序对未知状态给 99，会把最早的态排到「已作废」**之后**，
+        //   与本表"已作废排末尾"的语义直接矛盾（同 2026-07-10 codex MED-2 已暂缓/已拒绝 漏序的踩法）。
+        // （C2.5 撤销·方案 v2.1）「待商议」曾排最前（序号 0）——预沟通段废除，该状态不再产生，条目已删，
+        //   其余各态序号相应前移。
         // 受理排期改造：删「待评估/已排期」→ 前段序=待受理→待修改→待指派/待处理（受理门在最前·待派开发次之）。
         待受理: 0, 待修改: 1, 待指派: 2, 待处理: 2, 开发中: 3, 处理中: 4,
         待验证: 5, 待验收: 6, 待上线: 7,
@@ -924,6 +952,22 @@
         return `${esc(shown)}<span class="si-dev-roster-more" title="${esc(rest.join('、'))}">等+${rest.length}</span>`;
     }
 
+    // ⭐ 角色权限重构 v2.1 §6（S5 通知手动化）：列表行技术负责人通知徽章——tech_lead_id 非空时按
+    //   notify_status 显「待发送」(amber)/「发送失败」(red)；sent 不显（漏发才需要在列表层就能看到，
+    //   已发送是正常态不占视觉噪音）。
+    //   ⚠️⚠️ **前端待生效·依赖列表端点补列**：GET /sys-issues 当前显式列投影（index.js 约 3654 行 SELECT）
+    //   不含 tech_lead_id / tech_lead_notify_status，本函数在字段缺失时读到 undefined、静默不显示徽章
+    //   （零回归，不会因缺字段报错）——但也意味着在后端补列之前，本徽章**实际不会出现**。需要另一批
+    //   在允许改 routes/ 时给该 SELECT 追加这两列。
+    function siTechLeadNotifyBadgeHtml(i) {
+        if (!i.tech_lead_id) return '';
+        // 193 复审 M 收口：已留言收口与详情红条同口径——当前轮已回复则不再提示发送（通知目的已达成）。
+        //   判定消费后端派生字段 has_current_tech_lead_comment（列表 SELECT EXISTS·前端零自推导防漂移）。
+        if (Number(i.has_current_tech_lead_comment) === 1) return '';
+        if (i.tech_lead_notify_status === 'not_sent') return `<span class="si-flag" style="color:#b45309">待发送</span>`;
+        if (i.tech_lead_notify_status === 'failed') return `<span class="si-flag" style="color:#dc2626">发送失败</span>`;
+        return '';
+    }
     function renderSysIterationRows(list) {
         const tb = document.getElementById('siTbody');
         if (!list.length) {
@@ -934,7 +978,8 @@
             const flags =
                 (i.scope_changed ? `<span class="si-flag scope">范围变更</span>` : '') +
                 (i.reopen_count ? `<span class="si-flag reopen">返工×${i.reopen_count}</span>` : '') +
-                (i.blocked ? `<span class="si-flag blocked">受阻</span>` : '');
+                (i.blocked ? `<span class="si-flag blocked">受阻</span>` : '') +
+                siTechLeadNotifyBadgeHtml(i);
             const lineage = i.origin_issue_id ? `<span class="si-flag lineage">🔁基于#${i.origin_issue_id}</span>` : '';
             return `<tr onclick="siOpenDrawer(${i.id})">
                 <td>#${i.id}</td>
@@ -1020,6 +1065,24 @@
             (iss.reopen_count ? `<span class="si-flag reopen">· 返工×${iss.reopen_count}</span>` : '') +
             (iss.blocked ? `<span class="si-flag blocked">· 受阻中</span>` : '');
 
+        // ⭐ 角色权限重构 v2.1 §6（S5 通知手动化·D4）：技术负责人通知未发送/失败红条——漏发不能只靠详情页
+        //   红条被发现（本身也是兜底信号，见列表徽章 siNotifyBadgeHtml）。条件=待受理 ∧ 有活动轮 ∧
+        //   notify_status∈{not_sent,failed} ∧ 当前轮未回复（已留言收口：已回复则误导——通知目的已达成，
+        //   再提示"未发送"会让人误以为还要发，191 系列审点名的误导态）。
+        let notifyAlertHtml = '';
+        if (iss.status === '待受理' && siHasActiveConsult(iss)
+            && (iss.tech_lead_notify_status === 'not_sent' || iss.tech_lead_notify_status === 'failed')
+            && !siHasTechLeadComment(iss)) {
+            notifyAlertHtml = iss.tech_lead_notify_status === 'not_sent'
+                ? `<div class="si-notify-alert">🔴 技术负责人通知尚未发送，请点「发送通知」</div>`
+                : `<div class="si-notify-alert">🔴 通知发送失败，请重发</div>`;
+        } else if (iss.status === '待受理' && siHasActiveConsult(iss)
+            && iss.tech_lead_notify_status === 'sent' && !siHasTechLeadComment(iss)) {
+            // 用户 2026-07-28 手测新增：已发送但技术负责人尚未回复 → 温和提醒（琥珀·非红——通知已尽责，
+            //   这里提示的是"等待中可催"，与未发送的行动指令性质不同）。判定用"未回复"非"未查看"：
+            //   read_at 是钉钉已读回执（可能取不到），回复才是可靠的业务信号。
+            notifyAlertHtml = `<div class="si-notify-alert" style="background:#fffbeb;border-color:#f59e0b;color:#92400e">🟡 已通知技术负责人，尚未回复；可视情况点「重发通知」提醒</div>`;
+        }
         // 血缘
         let lineageHtml = '';
         if (r.data.origin_issue) {
@@ -1065,6 +1128,7 @@
             <div class="u-kv-item"><label>计划开工日</label><div class="v">${iss.scheduled_start ? esc(iss.scheduled_start) : '<span class="si-muted">—</span>'}</div></div>
             <div class="u-kv-item"><label>期望完成(deadline)</label><div class="v">${iss.deadline ? esc(iss.deadline) : '<span class="si-muted">—</span>'}</div></div>
             <div class="u-kv-item"><label>需求方</label><div class="v">${siRequesterText(iss)}</div></div>
+            <div class="u-kv-item"><label>OA 流程号</label><div class="v">${iss.oa_number ? esc(iss.oa_number) : ((iss.type !== 'bug' && siOaFillable(iss)) ? (iss.status === '待指派' ? '<span style="color:#b45309;font-weight:600">尚未补填 OA 号，指派开发前必填</span>' : '<span style="color:#b45309">尚未补填 OA 号，请补充台账信息</span>') : '<span class="si-muted">—</span>')}</div></div>
             <div class="u-kv-item"><label>上线批次</label><div class="v">${iss.release_id ? ('#' + iss.release_id) : '<span class="si-muted">—</span>'}</div></div>
             ${iss.type === 'bug' ? `<div class="u-kv-item"><label>上线执行人</label><div class="v">${iss.release_assignee_name ? esc(iss.release_assignee_name) : '<span class="si-muted">未指定</span>'}</div></div>` : ''}
             <div class="u-kv-item"><label>创建时间</label><div class="v">${esc(siFmtDT(iss.created_at))}</div></div>
@@ -1090,9 +1154,12 @@
 
         // 通知区（C4：bug 4 类手动通知 + 三能力；非 bug 仍只读三侧展示）——可见方=admin/白名单对接人/主开发本人
         //   （主开发新增于 C4：其可发 notify-creator + 查自己通知行的已读，故须能看到本区）。
-        // C2b：变更流通知区放开可见——admin 分支已覆盖（变更流手动通知仅 admin，故 admin 可见即够；非 admin
-        //   在变更流下无手动能力也无需看通知区）。bug 分支保留对接人/主开发本人可见（各有手动/查已读能力）。
-        const canSeeNotify = isAdmin() || (iss.type === 'bug' && currentUser && (isSiBugLiaison(currentUser.id) || (Number(iss.assigned_to) === Number(currentUser.id) && currentUser.id > 0)));
+        // ⭐ 用户 2026-07-28 手测拍板（转技术负责人=开发团队内部沟通·平台职责=留痕）：受理人**全类型可见**
+        //   通知区——原"非 admin 在变更流无手动能力"的注释停在 C2b 时代，S5 给了受理人技术负责人通知的
+        //   发送权、C1 起后端三通道（developer/creator/requester）本就是 admin∨受理人全类型（已核
+        //   sysManualNotifyGuard），门不放开=示例对接人整个通知区都看不见。bug 分支的对接人/主开发本人可见不变。
+        const canSeeNotify = isAdmin() || (currentUser && isSiIntakeLiaison(currentUser.id))
+            || (iss.type === 'bug' && currentUser && (isSiBugLiaison(currentUser.id) || (Number(iss.assigned_to) === Number(currentUser.id) && currentUser.id > 0)));
         const notify = canSeeNotify ? siRenderNotify(iss, r.data.dev_assignees) : '';
 
         // 讨论群（§5 bug 流拉群；已建才展示，留痕：议题 + 拉群时间）
@@ -1111,9 +1178,10 @@
         // 抽屉 body 顺序（对齐 Data_Correction 抽屉范式；附件融入 2026-07-19：spec 融入基本信息、delivery+screenshot
         //   合并为「开发交付」区置于 Commit 记录后，独立「附件」区已取消）：
         //   血缘 → 操作栏(顶) → 基本信息(含需求材料) → 开发成员 → Commit 记录 → 开发交付 → 上线编排 → 通知 → 讨论群 → 时间线
+        //   ⭐ S5：通知未发送红条置最顶（先于血缘），attention 优先级高于血缘展示。
         siRevokeAttThumbs();   // 重渲前先 revoke 上次缩略图 objectURL，防内存泄漏
         document.getElementById('siDBody').innerHTML =
-            lineageHtml + '<div class="u-action-bar u-action-bar-sticky" id="siDActions"></div>' + info + devMembers + devCommitsBlock + deliverySection + orchBlock + notify + chat + tl;
+            notifyAlertHtml + lineageHtml + '<div class="u-action-bar u-action-bar-sticky" id="siDActions"></div>' + info + devMembers + devCommitsBlock + deliverySection + orchBlock + notify + chat + tl;
 
         // 操作区（填充 body 顶部的 #siDActions 占位）
         siRenderActions(iss);
@@ -1236,12 +1304,20 @@
     // §11 四布尔（后端同源，仅前端 UI 镜像，真闸在后端各端点内部断言）：
     //   canSubmit=在册∧pending∧SYS_DEV；canEditCommits=当前在册∧存在本人名下行∧SYS_DEV∪SYS_VERIFY（仅管既有行
     //   PUT/DELETE）；canAddCommit=当前在册实例 dev_status='code_submitted'∧SYS_DEV∪SYS_VERIFY（不复用
-    //   canEditCommits）；canCoordinateMember=对接人∨admin。
+    //   canEditCommits）；canCoordinateMember=受理人∨admin（全类型）。
+    //   ⭐ 角色权限重构 C4（方案 §4-C4 残余核实·2026-07-27）：isCoordinator 由旧口径「type==='bug' 且对接人
+    //   白名单」改为「受理人[13]∨admin·全类型」——与后端 isSysCoordinator（routes/sys-iteration/index.js，
+    //   dev-assignees 的加人/移除/开脱/换轮恢复等端点在用）同源（行号会随改动漂移，故不在此列具体行号）。
+    //   此前的 type==='bug' 分支是 C1 前的残留：C1 已把后端 isSysCoordinator 改成全类型 admin∨isSysIntakeLiaison，
+    //   前端这份拷贝没跟上，导致受理人在变更流单上看不到「开脱/恢复」「管理开发成员」按钮——不是没权限，
+    //   是前端没显示（点了会 200，因为压根显示不出来）。
     function siComputeCaps(iss, devAssignees, devCommits) {
+        // ⚠️ iss.type 不再参与 isCoordinator 判断（全类型统一），但 iss 本身仍用于下方 inDevFamily 等——
+        //   与后端 isSysCoordinator(actor, issueType) 同款处理：形参保留、issueType 不参与判断。
         const uid = currentUser ? Number(currentUser.id) : null;
         const list = devAssignees || [];
         const myRow = (uid && uid > 0) ? (list.find(d => Number(d.user_id) === uid) || null) : null;
-        const isCoordinator = isAdmin() || !!(currentUser && iss.type === 'bug' && isSiBugLiaison(currentUser.id));
+        const isCoordinator = isAdmin() || !!(currentUser && isSiIntakeLiaison(currentUser.id));
         const inDevFamily = SI_DEV_FAMILY_STATUSES.includes(iss.status);
         const inDevOrVerifyFamily = SI_ATT_DEV_OR_VERIFY_STATUSES.includes(iss.status);
         const hasMyCommitRow = !!(uid && (devCommits || []).some(c => Number(c.dev_user_id) === uid));
@@ -1429,8 +1505,13 @@
         const devAssignees = data.dev_assignees || [];
         // C5（§5.4）：在册 = 当前用户出现在（后端已过滤 removed_at IS NULL 的）dev_assignees 列表。
         const isOwnerDev = !!(currentUser && devAssignees.some(d => Number(d.user_id) === currentUser.id));
-        // 协调人=对接人∪admin（§0），与后端 isSysCoordinator 同构；isSiBugLiaison 已在文件顶部定义（示例发布者/示例对接人白名单）。
-        const isCoordinator = isAdmin() || !!(currentUser && iss.type === 'bug' && isSiBugLiaison(currentUser.id));
+        // ⭐ 角色权限重构 C4（方案 §4-C4 残余核实·2026-07-27）：协调人=受理人∨admin（全类型），与后端
+        //   isSysCoordinator（routes/sys-iteration/index.js，spec/delivery/screenshot 三处附件端点在用）
+        //   同构（行号会随改动漂移，故不在此列具体行号）。原「type==='bug' 且
+        //   isSiBugLiaison」是 C1 前遗留——C1 已把后端附件授权改成全类型 admin∨isSysIntakeLiaison，
+        //   前端这份拷贝没跟上，导致受理人在变更流单上传/删附件按钮不显示（isSiBugLiaison 常量仍保留，
+        //   服务另一处正交语义——path B relay 收件人，见文件顶部定义处注释）。
+        const isCoordinator = isAdmin() || !!(currentUser && isSiIntakeLiaison(currentUser.id));
         return { iss, isOwnerDev, isCoordinator };
     }
     // 上传按钮 HTML（弹窗式·对齐数据协作 submitDeliveryModal）。canUpload=false 时不出。
@@ -1615,14 +1696,28 @@
     }
 
     // 受理排期改造 C7：技术负责人通知行（§6）——tech_lead_id 已发起才渲染。重发权限=admin∨受理人∨建单人（§6·前端镜像·后端兜底）。
+    // ⭐ 角色权限重构 v2.1 §6（S5 通知手动化·D4）：request-tech-consult 首发/换轮不再自动发钉钉——独立
+    //   「发送通知」按钮与既有「重发/重发通知」区分（同一 siResendTechConsult 调用·下发端点仍是既有
+    //   resend-tech-consult，机制不变，仅 UI 语义与显隐条件不同）。显条件=有活动轮 ∧ notify_status='not_sent'
+    //   ∧ 当前轮未回复 ∧ (admin∨受理人)——比既有 canResend 少"建单人"这一格（发送首条通知是受理动作，
+    //   建单人不在受理人角色内；建单人的重发权保留在已发送场景，不动）。
     function siRenderTechLeadNotifyRow(iss) {
         if (!iss.tech_lead_id) return '';   // codex C7 LOW-3：行只看 tech_lead_id（已发起即显状态）；重发另 gate request_event_id
         const label = `技术负责人 ${esc(iss.tech_lead_name || ('#' + iss.tech_lead_id))}`;
         const uid = currentUser && currentUser.id;
-        const canResend = isAdmin() || isSiIntakeLiaison(uid) || (Number(iss.created_by) === Number(uid) && Number(uid) > 0);
+        // 193 复审 H1 收口：首发与重发**同权**（admin∨受理人∨建单人·与后端 resend-tech-consult 既有三方
+        //   逐字同源）。原"首发仅 admin/受理人"是前端注释虚构的规则（无用户拍板依据），且实践中建单人≡admin
+        //   （建单 requireAdmin）——两个显隐集不一致只会制造"建单人被 canSendFirst 拒又落进 canResend"的
+        //   自相矛盾（193 号审抓的正是这个），统一后矛盾消除。后端恒为授权权威，前端仅显隐。
+        const canSend = isAdmin() || isSiIntakeLiaison(uid) || (Number(iss.created_by) === Number(uid) && Number(uid) > 0);
+        const hasComment = siHasTechLeadComment(iss);
         let btns = '';
-        // 重发须有 request_event_id（正常与 tech_lead_id 原子同设·防脏数据/裁剪导致无版本锚点时重发发不出）
-        if (canResend && iss.tech_lead_notify_request_event_id) btns += `<button class="u-btn-secondary u-nb-btn" onclick="siResendTechConsult()">${iss.tech_lead_notify_status === 'sent' ? '重发' : '重发通知'}</button>`;
+        // 发送/重发须有 request_event_id（正常与 tech_lead_id 原子同设·防脏数据/裁剪导致无版本锚点时发不出）
+        if (canSend && iss.tech_lead_notify_request_event_id && iss.tech_lead_notify_status === 'not_sent' && !hasComment) {
+            btns += `<button class="u-btn-primary u-nb-btn" onclick="siResendTechConsult()">发送通知</button>`;
+        } else if (canSend && iss.tech_lead_notify_request_event_id) {
+            btns += `<button class="u-btn-secondary u-nb-btn" onclick="siResendTechConsult()">${iss.tech_lead_notify_status === 'sent' ? '重发' : '重发通知'}</button>`;
+        }
         return siNotifyRowHtml(label, iss.tech_lead_notify_status, iss.tech_lead_read_at, iss.tech_lead_notified_at, btns);
     }
     async function siResendTechConsult() {
@@ -1635,7 +1730,10 @@
             const r = await siApi('/sys-issues/' + iss.id + '/resend-tech-consult', { method: 'POST', body: { expected_request_event_id: iss.tech_lead_notify_request_event_id } });
             if (!r.ok) { siApiErr(r); return; }
             const st = r.data && r.data.tech_lead_notify_status;
-            showToast(st === 'sent' ? '技术负责人通知已重发' : (st === 'failed' ? '重发失败（可稍后再试）' : '已触发重发'), st === 'failed' ? 'error' : 'success');
+            // P10（用户裁定尾巴）：首发/重发文案分流——发起后手动首发（原 not_sent）说"已发送"，再次点才是"重发"
+            const wasFirst = iss.tech_lead_notify_status === 'not_sent';
+            showToast(st === 'sent' ? (wasFirst ? '技术负责人通知已发送' : '技术负责人通知已重发')
+                : (st === 'failed' ? (wasFirst ? '发送失败（可稍后再试）' : '重发失败（可稍后再试）') : '已触发发送'), st === 'failed' ? 'error' : 'success');
             await siAfterAction();
         } finally { siNotifyInflight = false; }
     }
@@ -1644,10 +1742,11 @@
         const isAdminUser = isAdmin();
         const uid = currentUser && currentUser.id;
         // C2b：变更流(feature/improvement)通知全手动——与 bug 同款逐 dev 手动按钮 + 建单人 + 业务方（无对接人 relay、
-        //   无上线执行 release_executor：前者后端永远拒绝 CHANNEL_NA，后者是 bug 专属上线编排）。权限=仅 admin（发送+查已读，
-        //   镜像后端 sysManualNotifyGuard 变更流分支）。dev 逐行沿用 siRenderDevNotifyRows（内部已按 type 取状态门 + 本人隐藏）。
+        //   无上线执行 release_executor：前者后端永远拒绝 CHANNEL_NA，后者是 bug 专属上线编排）。
+        //   权限=admin∨受理人（**2026-07-28 修正过期镜像**：C1 起后端 sysManualNotifyGuard 三通道
+        //   全类型=admin∨受理人，前端此处一直停在"仅 admin"——受理人缺合法按钮·写读不同源）。
         if (iss.type === 'feature' || iss.type === 'improvement') {
-            const canOperate = isAdminUser;   // 变更流三通道均仅 admin（含发送+查已读）
+            const canOperate = isAdminUser || (currentUser && isSiIntakeLiaison(uid));   // 镜像后端三通道
             return `<div class="u-detail-section"><h3>钉钉通知（手动触发）</h3>
                 ${siRenderTechLeadNotifyRow(iss)}
                 ${siRenderDevNotifyRows(iss, devAssignees || [], canOperate, canOperate)}
@@ -1688,6 +1787,26 @@
         </div>`;
     }
 
+    // ⭐ 角色权限重构 C4·184 号预审 PH-1（用户裁定，撤销原"整单终局"世界模型）：hasTechLeadComment
+    //   改**轮内**判定——`tech_lead_notify_request_event_id` 标识"当前轮"，timeline.id 单调递增，
+    //   旧轮意见的 id 必小于新轮 request 事件 id，天然按序隔轮（与后端 tech-lead-comment/
+    //   resend-tech-consult/cancel-consult 三处同一口径，见 index.js 对应端点注释）。
+    //   ⚠️ NULL 防御：`iss.tech_lead_notify_request_event_id` 为 NULL（无活动轮）时不能只靠
+    //   `Number(t.id) > Number(null)`（Number(null)===0，任何正 id 都会被误判"大于"，把"无活动轮"
+    //   误判成"当前轮有意见"）——显式先判 `!= null` 短路。
+    //   ⚠️ 前提哨兵：依赖 detail 端点 timeline 全量返回（无分页）；若日后分页，须改读后端权威字段
+    //   has_tech_lead_comment，不能再扫前端 timeline 数组。
+    //   ⭐ S5 通知手动化：提到函数级复用（原内联在 siRenderActions 顶部），siRenderTechLeadNotifyRow /
+    //   siRenderDrawer 的红条判断同样需要这条口径，不再各写一份（防两份拷贝漂移，同 PH-1 去重精神）。
+    // 195 定点审 2M 收口：活动咨询=两列均非空（与后端 [3.6] 守卫同口径）——红条/琥珀条/按钮过滤三处共用，
+    //   退化态（单列非空·仅 SQL 篡改可造）按"无活动咨询"处理，三处口径一致不再各查各的。
+    function siHasActiveConsult(iss) { return !!(iss && iss.tech_lead_id && iss.tech_lead_notify_request_event_id); }
+    function siHasTechLeadComment(iss) {
+        return ((siDetail && siDetail.timeline) || []).some(t =>
+            t.action_code === 'tech_lead_comment' && iss.tech_lead_notify_request_event_id != null
+                && Number(t.id) > Number(iss.tech_lead_notify_request_event_id));
+    }
+
     // ============================================================
     // 操作区（meta 驱动 + 角色 + 单据标志精化）
     // ============================================================
@@ -1713,6 +1832,9 @@
         const isCreatorUser = !!(currentUser && Number(iss.created_by) === Number(currentUser.id) && Number(currentUser.id) > 0);
         // C-orch 上线编排（待上线态双角色按钮 + gate）已于 2026-07-07 样式统一拆到独立区块 siRenderReleaseOrchBlock，
         //   本操作区不再涉及 release_assignee，故原 isReleaseExecutor 声明一并移除。
+        // hasTechLeadComment 已提到函数级共享 siHasTechLeadComment（S5 通知手动化·防两份拷贝漂移，
+        //   见该函数头注释；原 PH-1 内联实现逐字迁移，判定口径不变）。
+        const hasTechLeadComment = siHasTechLeadComment(iss);
 
         const acts = [];
         for (const f of flows) {
@@ -1721,6 +1843,13 @@
             // C-orch：assign-release-dev / execute-release 抑制出通用循环——两者可见性/权限模型与其余 meta
             //   动作不同（admin 万能 vs 仅被指定执行人），改走 siRenderActions 末尾的自定义双角色渲染（§6）。
             if (a === 'assign-release-dev' || a === 'execute-release') continue;
+            // ⭐ 角色权限重构 C4·184 号预审 HIGH（换轮合法化，PH-1 用户裁定）：原"本单已有意见即不出现
+            //   request_tech_consult"的 continue 已删除——新世界模型下，当前轮已有意见后 admin/受理人
+            //   **可以**直接再发起新一轮咨询（旧意见留在 timeline 作历史），不再是终局动作。
+            // ⭐ 用户 2026-07-28 手测拍板（入口互斥）：**活动咨询未回复期间隐藏本按钮**——选定示例发布者后
+            //   入口转到通知区（发送/重发）与「取消咨询」（换人先取消再发起）；当前轮已回复后按钮**重现**
+            //   （PH-1 换轮入口保留·再咨询一轮）。三态：无咨询→显 / 咨询中未回复→隐 / 已回复→显。
+            if (a === 'request_tech_consult' && siHasActiveConsult(iss) && !siHasTechLeadComment(iss)) continue;
             const hit = (f.from === '*') || (Array.isArray(f.from) && f.from.includes(iss.status));
             if (!hit) continue;
             const devAction = SI_DEV_ACTIONS.has(a);
@@ -1783,7 +1912,19 @@
             gate = `<div class="si-gate-hint">📦 已加入批次 #${iss.release_id}，请在「批次管理」中发布。</div>`;   // C（变更流；bug 走 release_assignee 体系不再挂此批次面板）
         } else if (iss.status === '待受理') {
             // 受理排期改造 C8：受理阶段角色引导（判定镜像后端资格·前端提示非授权源）
-            if (isAdminUser || isIntakeLiaisonUser) gate = `<div class="si-gate-hint">📥 本单待受理：可「受理通过」进入指派 / 「退回修改」（填退改原因）/「发起技术负责人沟通」。</div>`;
+            // ⭐ C2.5b 微调：受理门语义已重定义为排期/指派入口（方案 §3）——退回的理由只能是"信息不全"。
+            // ⭐⭐ 角色权限重构 v2.1（C2.5 撤销）：预沟通段废除，原「待商议」分支的引导内容（判断需求合理性/
+            //   可视需要发起技术负责人沟通/技术负责人回复提示）并入本态，全类型统一（不再按 type 分流——
+            //   bug 与变更流的 request_tech_consult 均在本态可用，见 sysTechConsultGateStatus）。
+            //   拒绝的角色按类型分岔：变更流须**受理人**操作且要求当前轮已有技术负责人评估意见；bug 仍
+            //   admin 操作、无此前置（镜像后端 §3 issue_reject 权限交叉矩阵；按钮可见性见下方 acts 过滤）。
+            const isTechLeadForThisGate = !!(currentUser && isSiTechLead(currentUser.id) && Number(iss.tech_lead_id) === Number(currentUser.id));
+            if (isTechLeadForThisGate && !hasTechLeadComment) {
+                gate = `<div class="si-gate-hint">💬 本单已就你发起技术负责人沟通，请在下方「回复评估意见」提交你的最终判断（一条不可变）。</div>`;
+            } else if (isAdminUser || isIntakeLiaisonUser) {
+                const rejectHint = iss.type === 'bug' ? '「拒绝」写明原因' : '「拒绝」（须已有技术负责人评估意见，原因必填）';
+                gate = `<div class="si-gate-hint">📥 本单待受理：请判断需求合理性/可行性，可视需要「发起技术负责人沟通」协助判断。<b>可做</b> → 「受理通过」进入指派（变更流指派前需先补填 OA 号）；<b>不该做 / 做不了</b> → ${rejectHint}；<b>信息不全</b> → 「退回修改」。</div>`;
+            }
             else gate = `<div class="si-gate-hint">⏳ 本单已提交，等待对接人受理确认。</div>`;
         } else if (iss.status === '待修改') {
             if (isAdminUser || isCreatorUser) gate = `<div class="si-gate-hint">✏️ 本单已退回修改：请「编辑内容」修改后「重新提交受理」。</div>`;
@@ -1818,7 +1959,31 @@
         //   已挂批次）由 siDeleteIssue 前置镜像 + 后端 DELETE 守卫双重兜底——前端非授权源，真闸在后端。
         let adminDelBtn = '';
         if (isAdminUser) adminDelBtn = `<button class="u-btn-danger u-btn-sm" onclick="siDeleteIssue()">删除任务</button>`;
-        box.innerHTML = gate + ((btns + chatBtn + adminDelBtn) || fallback);
+        // ⭐ 角色权限重构 v2.1（C2.5 撤销）：技术负责人评估意见 + 取消咨询——两个自持端点（谓词硬编码
+        //   「待受理」+ 本人门/admin∨受理人门，历史沿革：C3 落地时曾硬编码「待商议」，随预沟通段撤销回归
+        //   「待受理」），不经 meta/typeFlows 的通用 roleGuard 模型，独立渲染（同 chatBtn/adminDelBtn 范式）。
+        //   前端仅镜像展示，真闸在后端。
+        let techLeadBtns = '';
+        // hasTechLeadComment 已在 acts 循环之前声明（本函数顶部，codex Round-C 审），此处直接复用，
+        // 不再重复计算（避免"同一函数里两份独立算出同一件事"的漂移风险）。
+        const isTechLeadForThis = !!(currentUser && isSiTechLead(currentUser.id) && Number(iss.tech_lead_id) === Number(currentUser.id));
+        if (iss.status === '待受理' && iss.tech_lead_id && !hasTechLeadComment) {
+            if (isTechLeadForThis) techLeadBtns += `<button class="u-btn-primary u-btn-sm" onclick="siModalTechLeadComment()">回复评估意见</button>`;
+            if (isAdminUser || isIntakeLiaisonUser) techLeadBtns += `<button class="u-btn-secondary u-btn-sm" onclick="siCancelConsult()">取消咨询</button>`;
+        }
+        // ⭐ 角色权限重构 C3 补丁（方案 §4-C3"失败可重试补发入口"）：已有评估意见 + 仍在待受理 →
+        //   admin/受理人/本单技术负责人 均可点「重发评估通知」（镜像后端 admin∨受理人∨本单技术负责人 三方 OR）。
+        if (iss.status === '待受理' && hasTechLeadComment && (isAdminUser || isIntakeLiaisonUser || isTechLeadForThis)) {
+            techLeadBtns += `<button class="u-btn-secondary u-btn-sm" onclick="siResendTechLeadCommentNotify()">重发评估通知</button>`;
+        }
+        // ⭐ 角色权限重构 v2.1 §4（OA 号补填入口）：仅 admin 可见（只有 admin/建单人能进 OA 系统，对接人与
+        //   开发团队看不到 OA 号——用户澄清的信息可达性事实）；状态∈§4 允许集时才出（前端镜像 siOaFillable，
+        //   真闸在后端 set-oa-number 端点的 SYS_OA_ALLOWED_STATUSES 判定）。指派后仍可改，故不因已有值隐藏。
+        let oaBtn = '';
+        if (isAdminUser && siOaFillable(iss)) {
+            oaBtn = `<button class="u-btn-secondary u-btn-sm" onclick="siOpenSetOaNumber()">${iss.oa_number ? '修改' : '补填'} OA 号</button>`;
+        }
+        box.innerHTML = gate + ((btns + chatBtn + adminDelBtn + techLeadBtns + oaBtn) || fallback);
     }
 
     // ============================================================
@@ -1832,9 +1997,14 @@
             case 'assign': return siModalAssign(iss);
             case 'reassign': return siModalReassign(iss);
             case 'create-chat': return siModalCreateChat(iss);
+            // （C2.5 撤销·方案 v2.1）"预沟通通过"这一 case 已删（meta 无该 action·c7 孤儿守卫锚点）——
+            //   OA 号回填改经独立入口 siOpenSetOaNumber（受理通过后，见详情页「补填 OA 号」按钮）。
             // 受理排期改造 C7：受理门 + 排期动作分发
             case 'intake_accept': return siConfirmSimple(iss, 'intake_accept', '确认受理通过？受理后单据进入指派/处理阶段。', '/intake-accept');
-            case 'intake_return': return siModalReason(iss, 'intake_return', '退回修改', '退改原因', '/intake-return');
+            // ⭐ C2.5b（方案 §3 受理门语义重定义）：退回弹窗写明本动作的边界——"不该做"应在「待受理」态用「拒绝」，
+            //   两道门的判断标准不写清就会混用（方案原文点名要求此提示）。
+            case 'intake_return': return siModalReason(iss, 'intake_return', '退回修改', '退改原因', '/intake-return',
+                '退回修改<b>仅用于单据信息不全 / 需求描述不清</b>，退回后由建单人补充并重新提交受理。<br>若判断是"这个需求不该做"，请勿用退回——变更类需求应在「待受理」阶段用「拒绝」处理。');
             case 'resubmit_intake': return siConfirmSimple(iss, 'resubmit_intake', '确认修改完成、重新提交受理？', '/resubmit-intake');
             case 'edit_in_revision': return siModalEditInRevision(iss);
             case 'change_intake_mode': return siModalChangeIntakeMode(iss);
@@ -1941,8 +2111,13 @@
     }
 
     // ---- 通用「原因」弹框 ----
-    function siModalReason(iss, action, title, label, path) {
+    // ⭐ C2.5b：加可选第 6 参 trustedNoteHtml——弹窗顶部说明块（如 intake_return 的"信息不全非否决"语义提示）。
+    //   其余调用点不传 = undefined = 不渲染，零影响。
+    //   ⚠️ 可信 HTML 通道（note() 直拼模板串不转义，最终进 innerHTML）：仅允许传静态字面量，
+    //     禁止拼接用户输入/接口响应数据——否则形成 DOM XSS（codex 审 177 号 L-2：参数名带 trusted 前缀立约束）。
+    function siModalReason(iss, action, title, label, path, trustedNoteHtml) {
         siModal(title, [
+            ...(trustedNoteHtml ? [note(trustedNoteHtml)] : []),
             fTextarea('reason', label, '', true, '必填，trim 后非空')
         ], async v => {
             if (!v.reason.trim()) { showToast(label + '必填', 'error'); return false; }
@@ -1950,6 +2125,37 @@
             if (!r.ok) { siApiErr(r); return false; }
             showToast(title + '完成', 'success'); return true;
         });
+    }
+    // ⭐ 角色权限重构 v2.1 §4（OA 号补填入口）：受理通过后、单据进入 §4 显式允许状态集内时，admin 可回填
+    //   OA 流程号——变更流指派前必填（assign 的 OA 前置守卫），bug 可选（D2）。指派后仍可改（纠错窗口，
+    //   timeline 留痕可审计）。同值再提交=200 no-op（服务端比对制，不重复留痕）。
+    //   历史沿革：本函数原名 siModalPreDiscussPass，服务已撤销的 C2.5 预沟通通过端点；C2.5 撤销后复用
+    //   同一套 siModal 结构改造为本入口（endpoint 改 set-oa-number，语义改为"补填"非"通过预沟通"）。
+    //   ⚠️ 校验与后端 assertSysOaNumber **逐字同源**（1-20 位纯数字）：前端先挡省一次往返，
+    //     但真闸在后端（前端非授权源）。两处若哪天要改口径，必须同批改（写读同源）。
+    function siModalSetOaNumber(iss) {
+        siModal('补填 OA 号 #' + iss.id, [
+            note('受理通过后回填 OA 立项流程号。<br>' + (iss.type === 'bug' ? 'bug 单 OA 号可选，仅供台账关联使用。' : '变更流单据<b>指派开发前必填</b>，否则「指派」会被后端拒绝。') + '<br>已有号时可覆盖（覆盖会留痕）；填入相同号不产生变更。'),
+            fText('oa_number', 'OA 流程号', iss.oa_number || '', iss.type !== 'bug', '1-20 位纯数字（业务方 OA 需求流程的单号）' + (iss.type === 'bug' ? '，可留空' : '，必填'))
+        ], async v => {
+            const oa = (v.oa_number || '').trim();
+            if (!oa) {
+                // bug 单 OA 可选（D2）：留空视为"本次不填"，不调用后端（assertSysOaNumber 对空值恒拒绝，
+                //   调了必 400）；变更流单据前面已挡必填，理论到不了这里，双重保险仍保留判断。
+                if (iss.type !== 'bug') { showToast('变更流单据 OA 流程号必填', 'error'); return false; }
+                showToast('未填写，已跳过', 'success'); return true;
+            }
+            if (!/^\d{1,20}$/.test(oa)) { showToast('OA 流程号须为 1-20 位纯数字', 'error'); return false; }
+            const r = await siApi('/sys-issues/' + iss.id + '/set-oa-number', { method: 'POST', body: { oa_number: oa } });
+            if (!r.ok) { siApiErr(r); return false; }
+            showToast('OA 流程号已保存', 'success'); return true;
+        });
+    }
+    // 无参分发包装（与 siCancelConsult/siResendTechLeadCommentNotify 同一范式，供按钮 onclick 直调）。
+    function siOpenSetOaNumber() {
+        const iss = siDetail && siDetail.issue;
+        if (!iss) return;
+        siModalSetOaNumber(iss);
     }
     function siConfirmSimple(iss, action, prompt, path) {
         siModal(prompt, [note(prompt)], async () => {
@@ -2206,16 +2412,78 @@
         if (!cands.length) { showToast('无可选技术负责人（白名单为空）', 'error'); return; }
         const opts = cands.map(u => String(u.id));
         const labelMap = {}; cands.forEach(u => { labelMap[String(u.id)] = u.display_name || u.username || ('#' + u.id); });
+        // ⭐ 角色权限重构 v2.1 §6（S5 通知手动化·D4）：发起不再自动发钉钉——文案改为引导手动发送。
         siModal('发起技术负责人沟通 #' + iss.id, [
             fSelectMap('tech_lead_id', '技术负责人', opts, opts[0], labelMap),
-            note('发起后自动向所选技术负责人推送钉钉，请其协助技术评估。可在通知区重发。')
+            note('发起后<b>不会自动</b>推送钉钉，请在通知区点「发送通知」手动发出。')
         ], async v => {
             const r = await siApi('/sys-issues/' + iss.id + '/request-tech-consult', { method: 'POST', body: { tech_lead_id: Number(v.tech_lead_id) } });
             if (!r.ok) { siApiErr(r); return false; }
-            const st = r.data && r.data.tech_lead_notify_status;
-            showToast(st === 'sent' ? '已发起并通知技术负责人' : (st === 'failed' ? '已发起，但钉钉通知失败（可在通知区重发）' : '已发起技术负责人沟通'), st === 'failed' ? 'error' : 'success');
+            showToast('已发起咨询（通知未发送，请在详情页点「发送通知」）', 'success');
             return true;
         });
+    }
+    // ⭐ 角色权限重构 v2.1（C2.5 撤销）：技术负责人回复最终评估意见——仅本人门（status=待受理 且
+    //   tech_lead_id=本人；历史沿革：C3 落地时曾硬编码「待商议」，随预沟通段撤销回归「待受理」）；
+    //   按钮显隐已在 siRenderActions 镜像该谓词，这里不重复判断。后端真闸同源
+    //   （isSysTechLead + tech_lead_id===actor.id + status='待受理'）；提交后端零附件字段（方案 §5：不给附件权）。
+    //   一条不可变：提交成功后 hasTechLeadComment 变 true，按钮下一次渲染自然消失，不做前端二次拦截。
+    // ⭐⭐ C5 末次合并审 HIGH（186 号·轮次围栏前端半）：提交时必须带上**打开弹窗那一刻**的
+    //   `tech_lead_notify_request_event_id`。这里天然靠闭包拿到正确语义——`iss` 捕获的是打开时的
+    //   issue 对象，弹窗期间若详情被重新加载，`siDetail.issue` 会指向新对象而 `iss` 不变，正是我们
+    //   需要的"我回答的是哪一轮"。⚠️ 不要改成提交时现读 `siDetail.issue`，那会把围栏变成永真。
+    function siModalTechLeadComment() {
+        const iss = siDetail && siDetail.issue;
+        if (!iss) return;
+        // 无活动轮直接拦（按钮显隐已镜像谓词，这里是兜底；照抄 siResendTechConsult:1661 范式），
+        //   避免走到后端拿一个对用户无意义的 400 EXPECTED_REQUEST_EVENT_ID_REQUIRED。
+        if (!iss.tech_lead_notify_request_event_id) { showToast('本单当前没有进行中的技术咨询，请刷新后重试', 'error'); return; }
+        const roundEventId = iss.tech_lead_notify_request_event_id;
+        siModal('回复评估意见 #' + iss.id, [
+            fTextarea('comment', '评估意见', '', true, '必填：本单最终技术评估意见，≤2000 字，提交后不可修改'),
+            note('提交后为本单唯一一条最终意见，<b>不可修改或补充</b>，请确认内容完整后再提交。')
+        ], async v => {
+            const comment = (v.comment || '').trim();
+            if (!comment) { showToast('评估意见必填', 'error'); return false; }
+            if (comment.length > 2000) { showToast('评估意见不超过 2000 字', 'error'); return false; }
+            // 186 号 HIGH：带轮次围栏（roundEventId = 打开弹窗时的轮次·非提交时现读）
+            const r = await siApi('/sys-issues/' + iss.id + '/tech-lead-comment', { method: 'POST', body: { comment, expected_request_event_id: roundEventId } });
+            if (!r.ok) { siApiErr(r); return false; }
+            // ⭐ codex Round-A 审 MED（采纳）：意见本身必已提交成功（走到这里 r.ok 为 true）；toast 按
+            //   notify_status 分流——sent 才是"通知也送达了"，failed/unknown 都要引导用户可用"重发评估通知"补发，
+            //   不能笼统报"已通知受理人"（那样通知失败时会给出一个假的心安）。
+            const ns = r.data && r.data.notify_status;
+            showToast(ns === 'sent' ? '评估意见已提交，已通知受理人' : '评估意见已提交，但通知未送达，可用「重发评估通知」补发', ns === 'sent' ? 'success' : 'warning');
+            return true;
+        });
+    }
+    // ⭐ 角色权限重构 C3：admin/受理人取消技术负责人沟通（已留言不可取消·后端条件更新兜底诊断确切原因）。
+    //   直接复用 siConfirmSimple（同 intake_accept/resume/close 等一次性确认动作范式），不新起弹窗。
+    function siCancelConsult() {
+        const iss = siDetail && siDetail.issue;
+        if (!iss) return;
+        siConfirmSimple(iss, 'cancel_consult', '确认取消本单的技术负责人沟通？取消后可重新发起。', '/cancel-consult');
+    }
+    // ⭐ 角色权限重构 C3 补丁（方案 §4-C3"失败可重试补发入口"）：重发"评估已回"通知给受理人——
+    //   admin/受理人/本单技术负责人 均可发起（镜像后端三方 OR）。
+    // ⭐ 角色权限重构 C4·184 号预审（PM-2·补发误报成功修复）：**不再复用 siConfirmSimple**——它成功路径
+    //   一律弹"操作完成"success toast，而本端点是 best-effort 首发/补发，HTTP 200 只代表"请求处理完成"，
+    //   不代表钉钉真的送达（notify_status 三态：sent 才是真送达，failed=发送失败，unknown=发送成功但
+    //   留痕失败/结果未知）。笼统报"操作完成"会让受理人误以为通知已确实送达，是货真价实的误报成功。
+    //   改专用确认+提交处理，读响应 notify_status 分流三态 toast。
+    function siResendTechLeadCommentNotify() {
+        const iss = siDetail && siDetail.issue;
+        if (!iss) return;
+        const prompt = '确认重发「评估已回」通知给受理人？';
+        siModal(prompt, [note(prompt)], async () => {
+            const r = await siApi('/sys-issues/' + iss.id + '/tech-lead-comment/resend-notify', { method: 'POST', body: {} });
+            if (!r.ok) { siApiErr(r); return false; }
+            const ns = r.data && r.data.notify_status;
+            if (ns === 'sent') showToast('已重发给受理人', 'success');
+            else if (ns === 'failed') showToast('补发未送达，可稍后重试', 'error');
+            else showToast('已尝试补发，送达状态未知（留痕失败）', 'warning');
+            return true;
+        }, '确定');
     }
     //   set_scheduled_start（定计划开工日·§7.2·admin·可清除）：fDate 空=清除（显式传 null）。
     function siModalSetScheduledStart(iss) {
@@ -2654,7 +2922,10 @@
             fCheckbox('needs_feasibility', '需要可行性评估（开发进入后先做可行性评估）', false),
             { k: null, html: `<div class="u-form-group"><label>需求材料（选填，图片/PDF/Excel/Word/csv/txt/md，单个≤20MB，最多5个）</label>
                 ${siFilePickerHtml('create-spec', '选择文件')}</div>` },
-            note('建单仅 admin 可操作。所有新单一律进「待受理」，由对接人受理通过后再指派开发。')
+            // ⭐ 角色权限重构 v2.1（C2.5 撤销）：建单落态已全类型归一「待受理」——C2.5（v1.9）时期曾按 type
+            //   分流出「待商议」预沟通段，方案 v2.1 撤销后按 type 分流的文案随之作废，恢复 C0-C2 时代的
+            //   单一口径（不再需要静态双分支说明）。
+            note('建单仅 admin 可操作。所有新单一律进「待受理」，由对接人判断需求合理性/可行性（可发起技术负责人沟通协助判断），受理通过后进入指派 / 处理阶段；变更流单据指派开发前需由 admin 补填 OA 号。')
         ], async v => {
             // 交互体验优化 Commit①：文件选择由 key-based 通用组件持有（P2 通用化后 'create-spec' 实例·选择即预览+可删+可追加）。
             //   数量/大小/扩展名/去重校验已在 siPickerCollect 收集时完成，此处直接快照数组（复制一份，防
@@ -2675,7 +2946,8 @@
             if (v.related_correction_no && v.related_correction_no.trim()) body.related_correction_no = v.related_correction_no.trim();   // ④a §7 软关联
             if (v.needs_feasibility) body.needs_feasibility = 1;
             // ⭐ 角色权限重构 C0：不再传 intake_required（后端已封该参数·传任何值都 400 INTAKE_REQUIRED_FIXED），
-            //   也不再传 assign_mode/assigned_to/relay_user_id（path A/B 已结构性关闭）。新单一律落「待受理」。
+            //   也不再传 assign_mode/assigned_to/relay_user_id（path A/B 已结构性关闭）。落态由后端统一解析
+            //   （v2.1：C2.5 撤销后全类型恒落「待受理」；恒 intake_required=1——codex 审 177 号 L-1 修漂移注释）。
             const r = await siApi('/sys-issues', { method: 'POST', body });
             if (!r.ok) { siApiErr(r); return false; }
             // 末次合并审65号 M-2：r.ok=true 但 r.data.id 缺失是极端场景（后端 respBody 恒含 id，理论下不可达，
@@ -2791,7 +3063,10 @@
         document.getElementById('siBatchOverlay').classList.add('open');
         siRenderBatchList();
     }
-    function siCloseBatch() { document.getElementById('siBatchOverlay').classList.remove('open'); }
+    // ⚠️ siBatchOverlay 是批次管理/上线编排/删除审计三者共享的面板 DOM——关闭时把 siAuditGen 也一并
+    //   作废（+1），防止"关闭删除审计面板后紧接着打开另一个共享面板（批次管理/上线编排）"这个窗口期内，
+    //   删除审计一条还在飞的旧请求晚到，凭旧令牌值巧合仍等于当前值而误写进已经被其他面板占用的 DOM。
+    function siCloseBatch() { document.getElementById('siBatchOverlay').classList.remove('open'); siAuditGen++; }
 
     // 流程说明弹层（iframe 懒加载独立页 Sys_Guide.html）
     function siOpenFlowGuide() {
@@ -2962,6 +3237,125 @@
                 <div class="si-batch-meta">${esc(b.title || '（无标题）')}${b.version_tag ? ' · ' + esc(b.version_tag) : ''} · 含 ${b.issue_count || 0} 单${b.released_at ? ' · 发布于 ' + esc(siFmtDT(b.released_at)) : ''}</div>
             </div>`;
         }).join('');
+    }
+
+    // ============================================================
+    // 删除审计查询（角色权限重构 C4·F9，172 号对抗审·admin 专属·只读）
+    //   复用 siBatchOverlay 同一套共享面板 DOM（siBatchHead/siBatchBody/siBatchFoot），与批次管理/上线编排
+    //   同一时刻只开一个面板的既有约定一致，不新起一套 overlay。
+    //   ⚠️ 只读查证：本面板不提供任何还原/恢复操作按钮——sys_issue_delete_audit 记的是"已发生的不可逆删除"，
+    //   查证之外没有别的动作。
+    // ============================================================
+    // ⭐ codex C4 审 Round-1 收口（MED·feedback_async_callback_session_token 项目既有范式）：共享面板
+    //   防串扰——siBatchOverlay 同时服务批次管理/上线编排/本面板三个用途，若不管理好"打开新面板"与
+    //   "上一个面板的异步响应还没回来"这两件事的时序，会出现两类真实 bug：
+    //   ① 切面板瞬间残留上一面板的写按钮（如批次管理的「+新建批次」）可见并可点——本面板 open 时同步
+    //      （非异步 then 里）立即重置标题/正文/页脚，不等 fetch 回来才清；
+    //   ② 面板关闭重开 / 列表-详情来回切换期间，旧请求晚到，若不加区分地直接写 DOM，会用**过期数据**
+    //      覆盖用户当前正在看的新视图。用自增会话令牌 siAuditGen 圈住整个会话生命周期：每次"进入一个新视图"
+    //      （打开面板 / 打开详情）令牌 +1 并捕获当次值，异步响应回来时先比对令牌，不匹配就静默丢弃。
+    let siAuditItems = [];           // 累积列表（"加载更多"追加，非替换，故需要跨请求持有）
+    let siAuditNextBeforeId = null;  // 服务端返回的下一页游标（游标翻页，见后端注释：追加型表用 offset 会重复/漏记）
+    let siAuditGen = 0;              // 自增会话令牌
+    let siAuditLoadingMore = false;  // 「加载更多」防连点并发锁
+    const SI_AUDIT_LIST_LIMIT = 50;
+    function siOpenDeleteAudit() {
+        siAuditGen++;
+        const myGen = siAuditGen;
+        siAuditItems = []; siAuditNextBeforeId = null; siAuditLoadingMore = false;
+        // 同步重置（见上方①）：不等异步 fetch 回来才清面板内容。
+        document.getElementById('siBatchHead').textContent = '删除审计';
+        document.getElementById('siBatchBody').innerHTML = '<div class="si-empty">加载中…</div>';
+        document.getElementById('siBatchFoot').innerHTML = `<button class="u-btn-secondary" onclick="siCloseBatch()">关闭</button>`;
+        document.getElementById('siBatchOverlay').classList.add('open');
+        siLoadDeleteAuditPage(myGen);
+    }
+    async function siLoadDeleteAuditPage(gen) {
+        // gen 未显式传入 = 由「加载更多」按钮 onclick 直接触发，沿用当前会话令牌（非新开视图，不再 +1）。
+        const myGen = (gen === undefined) ? siAuditGen : gen;
+        if (siAuditLoadingMore) return;   // 防连点并发（见上方防串扰说明）
+        siAuditLoadingMore = true;
+        const qs = new URLSearchParams({ limit: String(SI_AUDIT_LIST_LIMIT) });
+        if (siAuditNextBeforeId) qs.set('before_id', String(siAuditNextBeforeId));
+        const r = await siApi('/sys-issue-delete-audit?' + qs.toString());
+        siAuditLoadingMore = false;
+        if (myGen !== siAuditGen) return;   // 面板已关闭重开/已切到详情，丢弃过期响应，不写脏当前 DOM
+        if (!r.ok) { document.getElementById('siBatchBody').innerHTML = '<div class="si-empty">加载失败</div>'; siApiErr(r); return; }
+        const items = (r.data && r.data.items) || [];
+        siAuditItems = siAuditItems.concat(items);
+        siAuditNextBeforeId = (r.data && r.data.next_before_id) || null;
+        siRenderDeleteAuditListBody();
+    }
+    function siRenderDeleteAuditListBody() {
+        document.getElementById('siBatchHead').textContent = '删除审计';
+        if (!siAuditItems.length) {
+            document.getElementById('siBatchBody').innerHTML = '<div class="si-empty">暂无删除审计记录</div>';
+            document.getElementById('siBatchFoot').innerHTML = `<button class="u-btn-secondary" onclick="siCloseBatch()">关闭</button>`;
+            return;
+        }
+        // 复用批次管理列表卡片同款样式（si-batch-item/si-batch-meta），不新起一套 CSS。reason 摘要截断
+        // 到 40 字防超长撑破卡片；详情页展开可看完整原因（同样已脱敏）。
+        document.getElementById('siBatchBody').innerHTML = `<div style="margin-bottom:6px" class="si-muted">共 ${siAuditItems.length} 条${siAuditNextBeforeId ? '（还有更多）' : ''}，点击行查看完整快照</div>` +
+            siAuditItems.map(it => {
+                const reasonRaw = it.reason || '';
+                const reasonShort = reasonRaw.length > 40 ? esc(reasonRaw.slice(0, 40)) + '…' : esc(reasonRaw);
+                return `<div class="si-batch-item" onclick="siOpenDeleteAuditDetail(${it.id})">
+                    <div><span class="si-batch-no">#${it.issue_id}</span> ${esc(it.issue_title || '（无标题）')} <span class="si-muted">${esc(siTypeLabel(it.issue_type) || it.issue_type || '')}</span></div>
+                    <div class="si-batch-meta">删除于 ${esc(siFmtDT(it.deleted_at))} · 操作者 ${esc(it.operator_name || ('#' + it.operator_id))} · 原因：${reasonShort}</div>
+                </div>`;
+            }).join('');
+        document.getElementById('siBatchFoot').innerHTML = `<button class="u-btn-secondary" onclick="siCloseBatch()">关闭</button>` +
+            (siAuditNextBeforeId ? `<button class="u-btn-secondary" onclick="siLoadDeleteAuditPage()">加载更多</button>` : '');
+    }
+    // ⭐ codex C4 审 Round-2 收口（MED）：从详情返回列表也要令牌失效——否则"点了返回列表，但上一次
+    //   详情请求这时才姗姗来迟"会命中详情页里 `myGen !== siAuditGen` 校验……**校验的是详情自己的令牌**，
+    //   与"现在应显示列表"这件事无关，迟到的详情响应仍会通过校验、把已经切回的列表页覆盖掉。
+    //   令牌只在"进入新视图"时 +1，而"返回列表"同样是进入一个新视图，必须同样 +1 才能让所有仍在飞的
+    //   旧详情请求在自己的 `myGen !== siAuditGen` 里失配。
+    function siBackToDeleteAuditList() {
+        siAuditGen++;
+        siRenderDeleteAuditListBody();
+    }
+    // 详情：七份快照 JSON 各自一个只读区块。⚠️ XSS 防线——快照原文可能含用户输入（title/description/reason 等），
+    //   一律不走 innerHTML 拼接，用 <pre> 占位 + textContent 赋值（浏览器逐字符转义显示，不会被解析成标签/脚本）。
+    async function siOpenDeleteAuditDetail(auditId) {
+        siAuditGen++;   // 新开一个视图（详情）——令牌 +1，届时列表侧任何还在飞的旧请求会被自动丢弃
+        const myGen = siAuditGen;
+        document.getElementById('siBatchHead').textContent = '删除审计详情 #' + auditId;
+        document.getElementById('siBatchBody').innerHTML = '<div class="si-empty">加载中…</div>';
+        document.getElementById('siBatchFoot').innerHTML = `<button class="u-btn-secondary" onclick="siBackToDeleteAuditList()">← 返回列表</button><button class="u-btn-secondary" onclick="siCloseBatch()">关闭</button>`;
+        const r = await siApi('/sys-issue-delete-audit/' + auditId);
+        if (myGen !== siAuditGen) return;   // 面板已切走/关闭重开，丢弃过期响应
+        if (!r.ok) { document.getElementById('siBatchBody').innerHTML = '<div class="si-empty">加载失败</div>'; siApiErr(r); return; }
+        const d = r.data || {};
+        const SECTIONS = [
+            ['issue_json', '被删单据整行快照'],
+            ['timeline_json', '演进时间线快照'],
+            ['attachments_json', '附件清单快照'],
+            ['dev_assignees_json', '开发协作名册快照'],
+            ['dev_commits_json', 'Commit 记录快照'],
+            ['dev_events_json', '开发事件快照'],
+            ['release_snapshots_json', '发布冻结快照'],
+        ];
+        document.getElementById('siBatchBody').innerHTML = `<div class="u-detail-section"><h3>基本信息</h3><div class="u-kv-grid">
+                <div class="u-kv-item"><label>删除时间</label><div class="v">${esc(siFmtDT(d.deleted_at))}</div></div>
+                <div class="u-kv-item"><label>被删单号</label><div class="v">#${esc(d.issue_id)}</div></div>
+                <div class="u-kv-item"><label>标题</label><div class="v">${esc(d.issue_title || '')}</div></div>
+                <div class="u-kv-item"><label>类型</label><div class="v">${esc(siTypeLabel(d.issue_type) || d.issue_type || '')}</div></div>
+                <div class="u-kv-item"><label>删除时状态</label><div class="v">${esc(d.issue_status || '')}</div></div>
+                <div class="u-kv-item"><label>操作者</label><div class="v">${esc(d.operator_name || '')}（id${esc(d.operator_id)}）</div></div>
+                <div class="u-kv-item full"><label>删除原因</label><div class="v">${esc(d.reason || '')}</div></div>
+            </div></div>` +
+            SECTIONS.map(([key, label]) => `<div class="u-detail-section"><h3>${esc(label)}</h3><pre id="siAuditJson-${key}" style="white-space:pre-wrap;word-break:break-all;max-height:240px;overflow:auto;background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px;padding:8px;font-size:12px;font-family:monospace"></pre></div>`).join('') +
+            `<div class="si-muted">以上均为只读快照（响应层已脱敏手机号，库内原文不动）；本页不提供任何还原/恢复操作。</div>`;
+        // textContent 赋值（防 XSS）：JSON 字符串本就是文本，格式化只为可读性，解析失败则原样显示。
+        for (const [key] of SECTIONS) {
+            const el = document.getElementById('siAuditJson-' + key);
+            if (!el) continue;
+            let text = d[key] == null ? '' : String(d[key]);
+            try { text = JSON.stringify(JSON.parse(text), null, 2); } catch (_) { /* 非合法 JSON 原样展示 */ }
+            el.textContent = text;
+        }
     }
 
     function siModalCreateBatch() {

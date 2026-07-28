@@ -134,10 +134,19 @@ async function mkAssignable(type) {
   const r = await call('POST', '/api/sys-issues', adminTok,
     { intake_contract_version: 2, type, title: `${type}-C1`, system_name: 'BMS', source: '内部', requester_phone: '13800000009' });
   assert.strictEqual(r.status, 201, `建 ${type} 单 201, got ${r.status} ${JSON.stringify(r.body)}`);
+  // ⭐ 角色权限重构 C2.5 撤销（v2.1）：三类型建单均直落「待受理」，预沟通段整体撤销，无需按 type 分支中转。
   const acc = await call('POST', `/api/sys-issues/${r.body.id}/intake-accept`, adminTok, {});
   assert.strictEqual(acc.status, 200, `${type} 受理 200, got ${acc.status} ${JSON.stringify(acc.body)}`);
   assert.strictEqual(await statusOf(r.body.id), ASSIGNABLE_STATUS[type],
     `夹具 mkAssignable(${type})：受理后须真落「${ASSIGNABLE_STATUS[type]}」`);
+  // ⭐ 角色权限重构 v2.1 §4：变更流 assign 前置要求 oa_number 通过校验（bug 不受限）→ 本 helper 名为
+  //   "可指派"，把 OA 前置一并做进来，使所有调用点的 assign 测的都是"权限/状态"本身，不被"忘设 OA"
+  //   这个无关变量污染。⚠️ 这个分支本身就是被测语义之一：若哪天 bug 也被误拉进 OA 门槛，这里会因
+  //   set-oa-number 未被调用而在下游 assign 处当场红灯（bug 分支不调用，故不受影响）。
+  if (type !== 'bug') {
+    const oa = await call('POST', `/api/sys-issues/${r.body.id}/set-oa-number`, adminTok, { oa_number: '2026070001' });
+    assert.strictEqual(oa.status, 200, `${type} 补 OA 号 200, got ${oa.status} ${JSON.stringify(oa.body)}`);
+  }
   return r.body.id;
 }
 // 推进到开发态（已指派 dev5）

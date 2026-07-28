@@ -238,9 +238,13 @@ async function main() {
   r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 'C1镜像-assign', system_name: 'BMS', source: '内部' });
   assert.strictEqual(r.status, 201, `建单应 201，实际 ${r.status} ${JSON.stringify(r.body)}`);
   const issue2 = r.body.id;
+  // ⭐ 角色权限重构 C2.5 撤销（v2.1）：变更流建单直落「待受理」，无需再走预沟通段，直接受理。
   // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
   await call('POST', `/api/sys-issues/${issue2}/intake-accept`, adminTok, {});
   await call('POST', `/api/sys-issues/${issue2}/schedule`, adminTok, {});
+  // ⭐ 角色权限重构 v2.1 §4：变更流 assign 前置要求 oa_number 通过校验 → 待指派态内先补号。
+  r = await call('POST', `/api/sys-issues/${issue2}/set-oa-number`, adminTok, { oa_number: '2026070001' });
+  assert.strictEqual(r.status, 200, `补 OA 号应 200，实际 ${r.status} ${JSON.stringify(r.body)}`);
   r = await call('POST', `/api/sys-issues/${issue2}/assign`, adminTok, { assigned_to: 5 });
   assert.strictEqual(r.status, 200, `assign 应 200，实际 ${r.status} ${JSON.stringify(r.body)}`);
   await assertMirrorKeys('assign', (r.body.dev_assignees || [])[0], issue2);
@@ -251,9 +255,13 @@ async function main() {
   r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 'C1镜像-reassign', system_name: 'BMS', source: '内部' });
   assert.strictEqual(r.status, 201, `建单应 201，实际 ${r.status} ${JSON.stringify(r.body)}`);
   const issue4 = r.body.id;
+  // ⭐ 角色权限重构 C2.5 撤销（v2.1）：变更流建单直落「待受理」，无需再走预沟通段，直接受理。
   // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
   await call('POST', `/api/sys-issues/${issue4}/intake-accept`, adminTok, {});
   await call('POST', `/api/sys-issues/${issue4}/schedule`, adminTok, {});
+  // ⭐ 角色权限重构 v2.1 §4：变更流 assign 前置要求 oa_number 通过校验 → 待指派态内先补号。
+  const oa4 = await call('POST', `/api/sys-issues/${issue4}/set-oa-number`, adminTok, { oa_number: '2026070001' });
+  assert.strictEqual(oa4.status, 200, `补 OA 号应 200，实际 ${oa4.status} ${JSON.stringify(oa4.body)}`);
   await call('POST', `/api/sys-issues/${issue4}/assign`, adminTok, { assigned_to: 5 });
   r = await call('POST', `/api/sys-issues/${issue4}/reassign`, adminTok, { member_ids: [6], reason: '测试改派以验证镜像一致性' });
   assert.strictEqual(r.status, 200, `reassign 应 200，实际 ${r.status} ${JSON.stringify(r.body)}`);

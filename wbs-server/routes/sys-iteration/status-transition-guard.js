@@ -42,9 +42,17 @@ function reject400(msg) { throw new MainStatusGuardError(400, 'GATE_INVARIANT', 
 
 // routeKind → 允许的「目标基础族」白名单（开发计划 v2.9 §2.6 表，联合 SSOT）。RESET 不改主状态，不在此列。
 const ALLOWED_TARGET_FAMILIES = {
-  // 受理排期改造 §9/§B：CREATE 可落 INTAKE(待受理)/D_PRE(待指派/待处理)/DEV(A 路径 assign)；
+  // 【历史规则·已不再成立，保留以说明沿革】受理排期改造 §9/§B 时期：CREATE 可落
+  //   INTAKE(待受理)/D_PRE(待指派/待处理)/DEV(A 路径 assign)。
+  //   角色权限重构 C2.5（方案 v1.9 §4-C2.5）一度令 CREATE 只落预沟通族(变更流) 或 INTAKE(bug)、
+  //   ADMIN_TRANSITION 加预沟通族（reactivate/issue_reject/"预沟通通过"三条边进出该族）——
+  //   **C2.5 已随方案 v2.1 撤销**，该族随之从两个白名单里整体移除；CREATE 的合法落态
+  //   收敛回单值 INTAKE（全类型恒落「待受理」），ADMIN_TRANSITION 不再需要该族。
   //   ADMIN_TRANSITION 加 INTAKE——intake_accept/return/resubmit/change_intake_mode/reactivate 可进出 INTAKE 态（受理门流转）。
-  CREATE: ['INTAKE', 'D_PRE', 'DEV'],
+  // ⭐ **CREATE 同批去掉 D_PRE / DEV（codex Round-C 审 LOW·采纳）**：①层收敛为单值后，CREATE 的落态
+  //   只可能是 INTAKE，D_PRE/DEV 已不可达。①层虽已拦住、留着不构成绕过，
+  //   但白名单是"这个 routeKind 允许写进哪些族"的**声明**，与实现不符就会误导下一个人以为 CREATE 还能进开发态。
+  CREATE: ['INTAKE'],
   GATE: ['DEV', 'VERIFY'],
   ADMIN_TRANSITION: ['INTAKE', 'D_PRE', 'DEV', 'VERIFY', 'NONRELEASE_TERMINAL', 'RELEASE'],
   RELEASE: ['RELEASE'],
@@ -129,16 +137,29 @@ function assertMainStatusTransition(p) {
 
   if (routeKind === 'CREATE') {
     if (before !== null && before !== undefined) reject409('CREATE 边要求 before=null（before=null 只校验 after）');
-    // 受理排期改造 §9：create 落态由 resolveInitialStatus(type,intake_required) 动态解析——两种合法落态：
-    //   intake_required=1 → '待受理'(INTAKE)；intake_required=0 → 无受理初始态（feature/improvement=待指派 / bug=待处理·D_PRE）。
-    //   guard 纯函数拿不到 intake_required，故按"after 命中两解之一"校验（禁放宽任意 D_PRE/INTAKE 态）。
-    //   建单后立即 A 路径 assign（→devStatus）仍保留（bug 专属·建单端点内串 assign）。
-    const initialWithIntake = T.resolveInitialStatus(issueType, 1);      // 恒 '待受理'
-    const initialWithoutIntake = T.resolveInitialStatus(issueType, 0);   // 待指派 / 待处理
-    if (after === initialWithIntake) afterFamily = 'INTAKE';
-    else if (after === initialWithoutIntake) afterFamily = SF.familyOfStatus(issueType, after);  // D_PRE
-    else if (after === devStatus) afterFamily = 'DEV';
-    else reject409(`CREATE 边非法：null→${after}（仅允许 null→${initialWithIntake} / null→${initialWithoutIntake} / null→${devStatus}）`);
+    // 历史沿革（受理排期改造 §9 → C0 → C2.5 → C2.5 撤销）：create 落态曾由
+    //   resolveInitialStatus(type,intake_required) 两分支解析（intake=1→待受理 / intake=0→待指派·待处理），
+    //   且建单可串 path A 直置 DEV；C0 焊死受理门后 intake 恒 1、path A/B 端点层关闭；C2.5（v1.9）一度按
+    //   type 分流出「待商议」（变更流单独走预沟通段）；**方案 v2.1 撤销 C2.5**，分流逻辑随之删除。
+    //   **现状 = 落态由 resolveSysInitialStatusForCreate 单点决定，全类型恒返「待受理」，本分支只认它的返回值。**
+    // ⭐ 写读同源（C1+C2 对抗审 F1「两份清单必然漂移」的直接应用）：**改调 resolveSysInitialStatusForCreate**——
+    //   guard 不再另存一份"合法初始态集"，落态规则将来再变（加 type、改分流）本处自动跟随。
+    // ⭐ **同批收紧（codex C2.5a Round-A 审 HIGH·核实后采纳，v2.1 撤销后依然成立）**：原实现还接受
+    //   `resolveInitialStatus(type,0)`（待指派/待处理）与**任意 type** 的 devStatus。C0 之后这两条都没有活调用方：
+    //     · `(type,0)` 分支——创建路径恒走统一入口（内部固定 intake=1），没有任何入口再产生「待指派/待处理」落态；
+    //     · devStatus——只有 path A/B（建单即指派）直置 DEV，而 C0 在端点层 `INTAKE_WITH_ASSIGN_CONFLICT`
+    //       已对**所有** type 拒死（index.js），其 INSERT 分支自注「结构性不可达」。
+    //   留着不是"兼容"而是**结构性 fail-open**：本函数是不变量 7 的最后一道防线，哪天某个调用方算错落态传进
+    //   '待指派'，feature 就绕过了受理门这道业务控制，而守卫毫无反应。
+    //   同族收口先例：C1 的 sysManualNotifyGuard 改显式通道白名单、C2 的 KNOWN_ROLE_GUARDS 默认拒未知值。
+    //   ⚠️ **devStatus 例外一并删除（codex Round-C 审 MED·二次采纳）**：留着一个没有活调用方的放行分支，
+    //     是对 feature 用一套标准、对 bug 用另一套，不一致。日后若真要恢复"建单即指派"，端点层的
+    //     INTAKE_WITH_ASSIGN_CONFLICT 和这里必须同批放开，那本就该是一次有意决策，而不是靠守卫里预留的
+    //     后门悄悄生效。
+    //   ⇒ CREATE 的合法落态 = **恰好一个值**：resolveSysInitialStatusForCreate(issueType)。
+    const initialForCreate = T.resolveSysInitialStatusForCreate(issueType);   // v2.1：全类型恒='待受理'
+    if (after === initialForCreate) afterFamily = SF.familyOfStatus(issueType, after);   // INTAKE
+    else reject409(`CREATE 边非法：${issueType} null→${after}（唯一合法落态：${initialForCreate}）`);
 
   } else if (routeKind === 'GATE') {
     if (before === devStatus && after === verifyStatus) afterFamily = 'VERIFY';
@@ -179,12 +200,17 @@ function assertMainStatusTransition(p) {
       const transition = T.findTransition(issueType, action, before);
       if (!transition) reject409(`ADMIN_TRANSITION 无此边：type=${issueType} action=${action} from=${before}`);
       // 受理排期改造 §9：dynamicTarget 具名边（reactivate·to=null 但落态由 resolveInitialStatus 动态解析·作用当前单）——
-      //   仿 resume：不走"resolvedTo===null→旁路误拒"，只校 after 落在合法初始态集（两解之一）+ 求族。
+      //   仿 resume：不走"resolvedTo===null→旁路误拒"，只校 after 落在合法初始态集（唯一解）+ 求族。
+      // ⭐ 写读同源（与 CREATE 分支同一处修改·C1+C2 对抗审 F1 应用）：reactivate 的落态就是"创建路径落态"
+      //   （走同一个 resolveSysInitialStatusForCreate），guard 改调唯一入口，不自存第二份落态规则副本。
+      //   ⭐ `resolveInitialStatus(type,0)` 已去掉——reactivate 的落态由 resolveSysInitialStatusForCreate
+      //     单点决定，它不可能返回「待指派/待处理」，接受它等于给"复活时绕过受理门直落待指派"留一道守卫层
+      //     后门。合法目标收敛为**恰好一个值**。（历史沿革：角色权限重构 C2.5 v1.9 期间曾令变更流复活回
+      //     「待商议」重走预沟通段；方案 v2.1 撤销 C2.5 后，全类型复活统一回「待受理」。）
       if (transition.dynamicTarget === 'initial_status' && transition.targetEntity === 'current_issue') {
-        const initWithIntake = T.resolveInitialStatus(issueType, 1);      // 待受理
-        const initWithoutIntake = T.resolveInitialStatus(issueType, 0);   // 待指派/待处理
-        if (after !== initWithIntake && after !== initWithoutIntake) {
-          reject409(`${action} 动态目标「${after}」不在合法初始态集（${initWithIntake}/${initWithoutIntake}）`);
+        const initForCreate = T.resolveSysInitialStatusForCreate(issueType);   // v2.1：全类型恒='待受理'
+        if (after !== initForCreate) {
+          reject409(`${action} 动态目标「${after}」不是本 type 的创建路径落态（唯一合法值：${initForCreate}）`);
         }
         afterFamily = SF.familyOfStatus(issueType, after);
       } else if (transition.dynamicTarget === 'intake_mode' && transition.targetEntity === 'current_issue') {
