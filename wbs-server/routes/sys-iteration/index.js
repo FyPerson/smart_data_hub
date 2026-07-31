@@ -3913,9 +3913,24 @@ module.exports = (deps) => {
           [id, uid]
         ))
       );
-      // C-orch 写读同源：被指定上线执行开发（release_assignee_id）可见 bug 单详情（否则够不到「执行上线」按钮）——
-      //   与列表读端同源；release orchestration 是 bug 专属，故叠 type='bug' 精判。
-      const isReleaseExecutor = Number(row.release_assignee_id) === uid && uid > 0 && row.type === 'bug';
+      // C-orch 写读同源（历史批次·2026-07-07 旧机制）：issue 级 release_assignee_id 列在 v3.4 C5 断镜像后
+      //   已是只读残留（新批次不再回写），仅历史 bug 单可能非空——保留原判据（含 type='bug' 精判）兼容历史数据。
+      // ⭐ 执行人入口批（2026-07-31 用户拍板）：补**批次级**执行人判断——新机制执行人身份只在
+      //   sys_releases.release_assignee_id（批次表），且 C3 全类型统一后 feature/improvement 成员单的执行人
+      //   同样需要打开单据（从批次详情成员列表进入/核对内容），不叠 type='bug'。release_brief 同查兼作
+      //   详情响应字段（前端「前往上线单」按钮判权的数据源——此前后端不返批次级执行人字段，按钮只能
+      //   "宁可少显示"锁 admin∨对接人，正是 07-30 记录的已知限制，本批一并解除）。
+      let releaseBrief = null;
+      if (row.release_id) {
+        releaseBrief = await dbGetAsync(
+          `SELECT id, release_no, status, release_kind, release_assignee_id, release_assignee_name
+             FROM sys_releases WHERE id = ?`, [row.release_id]
+        );
+      }
+      const isReleaseExecutor = uid > 0 && (
+        (Number(row.release_assignee_id) === uid && row.type === 'bug')
+        || !!(releaseBrief && Number(releaseBrief.release_assignee_id) === uid)
+      );
       // [codex C3 对抗审 HIGH-B 回填] 在册/历史参与成员读可见性——与列表读端同源（同一 EXISTS 语义，SSOT 依据
       //   同上方列表端点注释：方案 v2.9 line 33"历史参与…只读整单"+ line 88"assigned_to 禁作授权源"）。
       const isRosterMember = uid > 0 && !!(await dbGetAsync(
@@ -4052,7 +4067,12 @@ module.exports = (deps) => {
       const canSeeAttachmentList = attIsCoordinator || !!(attRoster && (attRoster.active || attRoster.historical));
       const outAttachments = canSeeAttachmentList ? attachments : [];
       const outSpecAttachments = canSeeAttachmentList ? specAttachments : [];
-      res.json({ issue: row, timeline, attachments: outAttachments, specAttachments: outSpecAttachments, hasSpecAttachment: outSpecAttachments.length > 0, origin_issue: originIssue, derived_issues: derivedIssues, related_correction: relatedCorrection, dev_assignees: devAssignees, dev_commits: devCommits });
+      // [执行人入口批·codex 审 MED-1 收口] release_brief 条件下发：单据可读集（建单人/在册成员/技术负责人等）
+      //   比批次可读集宽——批次元数据（执行人 id/name/通知面）只发给与 GET /sys-releases/:id 同一放行集
+      //   （admin ∨ 对接人 ∨ 本批次执行人），其余读者拿 null。前端 siCanOpenRelease 以"brief 非空"为唯一
+      //   判据（数据即权限，前端不复算三分支），写读同源单点在此。
+      const canSeeReleaseBrief = isAdmin || isIntakeLiaisonUser || isReleaseExecutor;
+      res.json({ issue: row, timeline, attachments: outAttachments, specAttachments: outSpecAttachments, hasSpecAttachment: outSpecAttachments.length > 0, origin_issue: originIssue, derived_issues: derivedIssues, related_correction: relatedCorrection, dev_assignees: devAssignees, dev_commits: devCommits, release_brief: canSeeReleaseBrief ? releaseBrief : null });
     } catch (err) {
       logger.error('[系统迭代] 详情查询失败:', err && err.message);
       res.status(500).json({ error: (err && err.message) || '详情查询失败' });
@@ -7325,19 +7345,32 @@ module.exports = (deps) => {
     }
   });
 
-  // ── GET /sys-releases：批次列表（admin；可选 status 筛选 + 含成员数）──────────
+  // ── GET /sys-releases：批次列表（admin ∨ 对接人 = 全量；其他登录用户 = 仅「执行人=我」的批次；可选 status 筛选 + 含成员数）──────────
   // ⭐ C2b 第2批（Playwright 冒烟发现的真实缺口·非本次新引入）：middleware 由 requireAdmin 改为
   //   requireIntakeLiaison（admin ∨ 对接人）——对接人要能真实执行「撤销上线安排」（cancel-schedule，
   //   §6.8 明文 admin 不可用、仅对接人），前提是先能看到批次列表/详情本身；这两个 GET 端点此前仍锁
   //   requireAdmin（C2a 遗留，那时还没有 cancel-schedule 这个只属于对接人的动作），对接人点开「批次管理」
   //   会直接 403，功能完全不可达——纯只读放开，不影响任何写路径的权限边界（写端点各自维持原判据不变）。
-  router.get('/sys-releases', authenticateToken, requireSysSchemaReady, requireIntakeLiaison, async (req, res) => {
+  // ⭐ 执行人入口批（2026-07-31 用户拍板·v1.130.0 部署首日实测反馈）：执行人入口不能只活在钉钉深链上——
+  //   登录后系统迭代页要有可见入口。下方 :id 端点注释里「列表端点刻意不做此扩展」的旧裁定被部分推翻：
+  //   列表对**其他登录用户**开放，但行内过滤只返回 release_assignee_id=本人 的批次（含全部状态，供回看
+  //   历史执行记录，同日拍板"含历史"）——"最小可见面"原则保持，只是从"零列表"放宽到"仅自己的行"，
+  //   仍不向普通用户暴露全局上线计划。无关普通用户拿空数组而非 403（前端按"空则不显示入口"处理）。
+  //   requireIntakeLiaison 中间件从本路由摘除、改行内 scope 分支（其余端点的该中间件不受影响）；
+  //   响应新增 scope 字段（'all'|'mine'）供前端区分视角（面板标题/管理动作显隐）。
+  router.get('/sys-releases', authenticateToken, requireSysSchemaReady, async (req, res) => {
     try {
+      const actor = sysActor(req);
+      const isFullScope = actor.role === 'admin' || isSysIntakeLiaison(actor.id);
       const where = [], params = [];
       if (req.query.status === '计划中' || req.query.status === '已发布') { where.push('r.status = ?'); params.push(req.query.status); }
+      if (!isFullScope) { where.push('r.release_assignee_id = ?'); params.push(Number(actor.id)); }
+      // SELECT 补执行人 3 列（纯增量，旧键全保留）：mine 视角前端要渲染"待执行"徽章（status+notify_status
+      //   组合判断），all 视角列表也顺带能显示执行人——此前列表不返回执行人列，admin 只能逐个点详情看。
       const rows = await dbAllAsync(
         `SELECT r.id, r.release_no, r.title, r.status, r.is_hotfix, r.release_note, r.version_tag,
-                r.planned_date, r.released_at, r.created_by, r.created_by_name, r.created_at
+                r.planned_date, r.released_at, r.created_by, r.created_by_name, r.created_at,
+                r.release_assignee_id, r.release_assignee_name, r.release_assignee_notify_status
            FROM sys_releases r
           ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
           ORDER BY r.id DESC`,
@@ -7359,7 +7392,7 @@ module.exports = (deps) => {
         const gm = await getReleaseMembers({ id: r.id, status: r.status }, { countOnly: true });
         items.push({ ...r, issue_count: gm.count, source: gm.source, degraded: gm.degraded });
       }
-      res.json({ items, total: items.length });
+      res.json({ items, total: items.length, scope: isFullScope ? 'all' : 'mine' });
     } catch (err) {
       logger.error('[系统迭代] 批次列表失败:', err && err.message);
       res.status(500).json({ error: (err && err.message) || '批次列表查询失败' });
@@ -7372,8 +7405,9 @@ module.exports = (deps) => {
   //   §6.14「完成上线」明文授权"值班开发本人"可执行上线，但此前本端点仍锁 admin∨对接人，被通知的执行人
   //   自己点不进详情页看「执行上线」按钮，功能与「撤销上线安排」同款 0% 可达。放行判据依赖数据行本身
   //   （只有本单，非全局），故不能用路由级中间件表达，改路由级仅登录、行内判定——**镜像 GET /sys-duty-roster
-  //   已有的"全量 vs 仅本人"读权限缩放先例**（§6.14「排班表读」行），非新发明模式；列表端点 GET /sys-releases
-  //   刻意不做此扩展（避免向普通执行人暴露全部批次列表，只开放"点开我被指派的这一条"这条最小必要缝隙）。
+  //   已有的"全量 vs 仅本人"读权限缩放先例**（§6.14「排班表读」行），非新发明模式。列表端点 GET /sys-releases
+  //   原"刻意不做此扩展"的裁定已于 2026-07-31 被用户拍板部分推翻（执行人入口批）：列表对普通用户开放但
+  //   行内过滤只返回本人批次——与本端点"只开自己那条"的最小可见面原则同向，见列表端点注释。
   //   信息暴露边界（codex 200 审 MED-1 主会话裁定·不加通知态条件）：执行人读权由状态机自动管理——
   //   cancel-schedule/改期/移单经 applyReleaseChange 清执行人两列即同步收回读权；failed/stale 保留原执行人
   //   =重发目标本人，应可读；已发布单保留执行人=本人回看自己执行发布的批次（审计对称）。不存在"漏清"路径。

@@ -495,8 +495,21 @@ async function main() {
   assert.strictEqual(r.status, 409, `[C3] /publish 非 admin 也应 409（非 403）, got ${r.status}`);
   assert.strictEqual(r.body.code, 'LEGACY_RELEASE_FLOW_DISABLED', '[C3] /publish 全类型 409 确切码');
   ok('[C3 改造] /publish 全类型 409（含非 admin），端点已整体退场不再区分角色');
+  // 执行人入口批（2026-07-31 用户拍板）：列表对普通用户从 403 改为 200 + mine 过滤（仅"执行人=我"的
+  //   批次，无则空数组）——原"非 admin → 403"断言随行为拍板变更而更新，全量分支断言在
+  //   verify-sys-release-my-entry.js 专项覆盖。
+  // [codex 审 LOW-3 收口] 直插一条"执行人=user 5"批次做正例——没有它 every([]) 恒真（断言永远成立形态，
+  //   feedback_test_assertion_self_error 第三形态），mine 过滤"过滤了什么"完全没被本脚本咬合。
+  await run(`INSERT INTO sys_releases (release_no, title, status, is_hotfix, release_assignee_id, release_assignee_name,
+              release_assignee_notify_status, created_by, created_by_name, created_at)
+             VALUES ('R-MINE-5', 'mine 过滤正例·执行人5', '计划中', 0, 5, '开发王', 'sent', 1, '管理员', datetime('now'))`);
   r = await call('GET', '/api/sys-releases', devTok, null);
-  assert.strictEqual(r.status, 403); ok('非 admin 看批次列表 → 403');
+  assert.strictEqual(r.status, 200, `非 admin 看批次列表 → 200 mine 视角, got ${r.status}`);
+  assert.strictEqual(r.body.scope, 'mine', '普通用户 scope=mine');
+  assert.ok(r.body.items.length >= 1, 'mine 视角至少含刚插入的本人批次（非空数组，every 真实咬合）');
+  assert.ok(r.body.items.every(x => Number(x.release_assignee_id) === 5), 'mine 视角只含"执行人=我"的行（夹具中另有多条他人/无执行人批次被过滤掉）');
+  assert.ok(r.body.items.some(x => x.release_no === 'R-MINE-5'), '本人批次真实返回');
+  ok('非 admin 看批次列表 → 200 mine 过滤（正例非空 + 他人批次被滤·执行人入口批新契约）');
 
   r = await call('GET', '/api/sys-releases', adminTok, null);
   assert.strictEqual(r.status, 200); assert.ok(r.body.total >= 3, '列表含多批次');
