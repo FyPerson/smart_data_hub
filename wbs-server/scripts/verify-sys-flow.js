@@ -193,12 +193,23 @@ async function main() {
     assert.strictEqual(d4.closed_at, null, 'reopen 清 closed_at');
     assert.ok(d4.reopened_at, 'reopen 盖 reopened_at');
     ok('reopen：已关闭 → 开发中，reopen_count=1 + 清 accepted_at/closed_at + 盖 reopened_at');
-    // [codex 98 号 MED7① 自检补漏] W07 证据表——reopen 补非法拒绝：from 白名单仅 [已上线,已关闭]，开发中态 reopen → 400
+    // [codex 98 号 MED7① 自检补漏] W07 证据表——reopen 补非法拒绝：from 白名单仅 [已关闭]（C6·§6.5 收窄前
+    //   曾是 [已上线,已关闭]），开发中态 reopen → 400。
     const id4b = await seedToDevInProgress(5);
     r = await call('POST', `/api/sys-issues/${id4b}/reopen`, adminTok, { reason: '误触' });
     assert.strictEqual(r.status, 400, `[W07 证据·reopen] 开发中态 reopen 应 400, got ${r.status} ${JSON.stringify(r.body)}`);
     assert.strictEqual(r.body.code, 'INVALID_TRANSITION', 'reopen from 白名单外应 INVALID_TRANSITION');
-    ok('[W07 证据·reopen] 非法拒绝：开发中态 reopen → 400 INVALID_TRANSITION（from 白名单仅已上线/已关闭）');
+    ok('[W07 证据·reopen] 非法拒绝：开发中态 reopen → 400 INVALID_TRANSITION（from 白名单仅已关闭）');
+    // [C6·方案 v3.4 §6.5] reopen 收窄：已上线（未归档）→ 409 ISSUE_NOT_ARCHIVED（须先归档），不再是合法
+    //   from——直接 DB 改到已上线，隔离测试该态本身，不依赖真实发布/批次基础设施（完整发布→归档→重开
+    //   回环见 verify-sys-release.js；本文件只钉这一条 from 收窄的核心负例，与该文件全流程回环互补）。
+    const id4c = await seedToDevInProgress(5);
+    await run("UPDATE sys_issues SET status='已上线', accepted_at='2026-01-01', released_at='2026-01-02' WHERE id=?", [id4c]);
+    r = await call('POST', `/api/sys-issues/${id4c}/reopen`, adminTok, { reason: '未归档误触' });
+    assert.strictEqual(r.status, 409, `[C6] 已上线未归档 reopen 应 409, got ${r.status} ${JSON.stringify(r.body)}`);
+    assert.strictEqual(r.body.code, 'ISSUE_NOT_ARCHIVED', '[C6] code=ISSUE_NOT_ARCHIVED（须先归档）');
+    assert.strictEqual((await get('SELECT status FROM sys_issues WHERE id=?', [id4c])).status, '已上线', '[C6] 拒绝后仍停在已上线（未被误翻）');
+    ok('[C6·§6.5] reopen 收窄：已上线（未归档）→ 409 ISSUE_NOT_ARCHIVED（from 白名单收窄为仅[已关闭]，须先 close 归档才能 reopen，附录 A 明列）');
 
     // ── [6] issue_reject → reactivate（待受理 → 已拒绝 → 待受理）──
     //   受理排期改造：issue_reject.from 由「待评估」改「待受理」（前段唯一可拒态）。
@@ -291,7 +302,7 @@ async function main() {
     ok('normalizeSysDatetime 分钟级（M-2）：标准/T分隔/trim/空/非法月日时/乱码/带秒判非法 + truncToMinute 截秒');
 
     console.log(`\n[全部通过] ${passed}/${passed} ✓ 系统迭代 C3a 开发动作 + 旁路态端点全流程验证通过`);
-    console.log('  覆盖：estimate(本人/格式/>=assigned_at) + submit/accept/return(计数) + hold/resume(RC-M2 暂缓前态) + reopen(计数/清时间戳) + reactivate(RC-M1) + void + scope_change(F2a 全禁 409) + derive(防环 M-1/T-L3) + normalizeSysDatetime');
+    console.log('  覆盖：estimate(本人/格式/>=assigned_at) + submit/accept/return(计数) + hold/resume(RC-M2 暂缓前态) + reopen(计数/清时间戳 + [C6]已上线未归档→409 ISSUE_NOT_ARCHIVED) + reactivate(RC-M1) + void + scope_change(F2a 全禁 409) + derive(防环 M-1/T-L3) + normalizeSysDatetime');
   } finally {
     server.close();
     db.close();

@@ -96,16 +96,15 @@ async function seedBugToReady(devId = 5) {
   assert.strictEqual(r.status, 200, `bug accept 200, got ${r.status} ${JSON.stringify(r.body)}`);
   return id;
 }
-// bug 单 → 已上线（待上线 → assign-release-dev 指定 devId → execute-release(mode=hotfix) 由 devId 本人执行）
-//   ⚠️ 通知改造 v1.6 §2.3 C3b 退场后，旧 set-release-flag/confirm-online-norelease 对 bug 已
-//   LEGACY_RELEASE_FLOW_DISABLED，本 helper 改走新 G3+G5 编排流程（devTok 假定为 devId=5 的 token，
-//   本文件所有调用点均用默认 devId=5，与既有 devTok 常量一致）。
+// bug 单 → 已上线（待上线 → 直接 SQL 打状态）
+//   ⚠️ C3（上线体统一重构）后端批：execute-release 全类型 409 退场（旧 G5 hotfix/G6 publish 两模式随
+//   "全类型统一"一并收口，bug 现与其他类型同走 hotfix-publish/排班+安排上线+执行上线），本 helper
+//   （用于给"派生"功能造一个已上线的 origin 样本，不测发布机制本身）改走直接 SQL 构造，不依赖已退场
+//   端点——循 verify-sys-bug-notify.js:139-144 bugOnlineNoRelease 同款先例（release_id 保持 NULL，
+//   与 bug 流"hotfix 不建批次"的既有语义一致）。
 async function seedBugToOnline(devId = 5) {
   const id = await seedBugToReady(devId);
-  let r = await call('POST', '/api/sys-issues/assign-release-dev', adminTok, { issue_ids: [id], release_assignee_id: devId });
-  assert.strictEqual(r.status, 200, `assign-release-dev 200, got ${r.status} ${JSON.stringify(r.body)}`);
-  r = await call('POST', '/api/sys-issues/execute-release', devTok, { mode: 'hotfix', issue_ids: [id] });
-  assert.strictEqual(r.status, 200, `execute-release(hotfix) 200, got ${r.status} ${JSON.stringify(r.body)}`);
+  await run(`UPDATE sys_issues SET status='已上线', released_at=datetime('now','localtime') WHERE id=?`, [id]);
   assert.strictEqual(await statusOf(id), '已上线', 'seedBugToOnline 应停在 已上线');
   return id;
 }

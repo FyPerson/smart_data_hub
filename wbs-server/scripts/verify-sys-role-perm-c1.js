@@ -8,12 +8,17 @@
 //     拍板：他会兼任开发）。届时他按 ownerGuard='assignee' 拿到**该单**的 estimate/submit 与开发侧读写——那是
 //     开发角色的权，与 C1 收走的协调人权正交，且无自提权路径（assign 本身已收归 admin∨受理人）。
 //     既有断言见 verify-sys-liaison [M3]（admin 指派 feature 给 id=7 → 200 + 读权不削弱）。
-//   · admin：额外独占 验收(accept) / 暂缓(hold) / 关闭(close) / 上线编排(assign-release-dev 等)
+//   · admin：额外独占 验收(accept) / 暂缓(hold) / 关闭(close)
 //     （本模块无「配置」端点——config 是第 4 种单据类型，不是管理面配置项，勿写进 admin 专属族清单）
+//     ⚠️ 2026-07-30 用户裁定：旧上线编排家族 4 端点（assign-release-dev / reassign-release-dev /
+//     notify-release-executor / notify-release-executor-batch）全部封禁退场——不再是"仅 admin"的
+//     专属族成员，改为任意已登录角色一律 409 LEGACY_RELEASE_FLOW_DISABLED（见 [M2]④⑤ 封禁契约两格）。
 //
 // 本脚本是 C1 的**表驱动权限矩阵**（codex C1 审 MED：既有脚本只覆盖 bug+feature、admin 专属动作只测了 accept）：
 //   [M1] 协调人族 × 三类型 × 四角色（assign / reassign / dev-assignees / 附件上传）
-//   [M2] admin 专属族 × 四角色（accept×3类型 / hold / close / assign-release-dev）—— 证受理人拿到的不是泛化 admin 权
+//   [M2] admin 专属族 × 四角色（accept×3类型 / hold / close）—— 证受理人拿到的不是泛化 admin 权；
+//        另附④⑤两格上线编排封禁契约（assign-release-dev / reassign-release-dev，2026-07-30 全封，
+//        四角色一律 409，已不是"admin 专属"语义，只是挂在 M2 组里顺带回归）
 //   [M3] 通知三通道 × 三类型 × 四角色（developer / creator / requester）
 //   [M4] 查已读通道差异：dev/creator/requester = admin∨受理人；relay/release_executor = **仅 admin**（死按钮防线）
 //   [M5] ⭐ 角色轴 × 开发轴正交：示例发布者兼任开发后，开发动作放行、协调人动作仍全拒（把方案 §3 口径测死）
@@ -175,14 +180,17 @@ async function mkPendingRelease(type) {
   assert.strictEqual(await statusOf(id), '待上线', `夹具 mkPendingRelease(${type})：验收后须真落「待上线」`);
   return id;
 }
-// 推进到「已上线」（变更流专属·hotfix-publish 一步建批次+绑单+发布；bug 该路已退场且 bug 流本就无 close）
+// 推进到「已上线」（[C6·方案 v3.4 §6.5 起三类型通用]：bug 补「已关闭」终态后 close 不再是变更流专属）——
+//   C3（上线体统一重构）后端批改造：hotfix-publish 收窄为两阶段"建单+加单+抢占发送权"，本身不再直接把
+//   单翻到「已上线」（真正发布现移到 /sys-releases/:id/execute，须由被排班通知的值班执行人本人调用，
+//   且要求 notify_status='sent'）——本文件只关心"已上线"这个**终态**对权限矩阵的影响（如 close/reopen
+//   的前置态判断），不关心怎么走到这个终态，故改走直接 SQL 构造，不依赖已改语义的端点（循
+//   verify-sys-bug-notify.js:139-144 bugOnlineNoRelease 同款先例：那里也是"已上线路径本身由别的脚本
+//   覆盖，本文件只需要一个已上线态样本"）。
 async function mkOnline(type) {
-  assert.ok(type !== 'bug', 'mkOnline 仅用于变更流：bug 流无 close，且 hotfix-publish 对 bug 已 LEGACY_RELEASE_FLOW_DISABLED');
   const id = await mkPendingRelease(type);
-  const p = await call('POST', `/api/sys-issues/${id}/hotfix-publish`, adminTok, { release_note: 'C1 矩阵夹具上线' });
-  // 201：该端点建了新批次（资源创建语义），非 200
-  assert.strictEqual(p.status, 201, `夹具 mkOnline(${type}) hotfix-publish 201, got ${p.status} ${JSON.stringify(p.body)}`);
-  assert.strictEqual(await statusOf(id), '已上线', `夹具 mkOnline(${type})：发布后须真落「已上线」`);
+  await run(`UPDATE sys_issues SET status='已上线', released_at=datetime('now','localtime') WHERE id=?`, [id]);
+  assert.strictEqual(await statusOf(id), '已上线', `夹具 mkOnline(${type})：直造后须真落「已上线」`);
   return id;
 }
 
@@ -267,8 +275,9 @@ async function main() {
         m2Cells++;
       }
     }
-    // ③ close（关闭：已上线 → 已关闭）—— 变更流专属（bug 已上线即终态·无 close）·两类型都测（C1 三轮审 MED-3）
-    for (const type of ['feature', 'improvement']) {
+    // ③ close（关闭：已上线 → 已关闭）—— [C6·方案 v3.4 §6.5] bug 补「已关闭」终态后三类型都测
+    //   （原"变更流专属·bug 已上线即终态"设计已作废，close 现全类型统一同一套 admin-only 闸门，C1 三轮审 MED-3 起底）
+    for (const type of TYPES) {
       for (const role of ROLES) {
         const id = await mkOnline(type);
         const r = await call('POST', `/api/sys-issues/${id}/close`, role.tok, {});
@@ -279,33 +288,40 @@ async function main() {
         m2Cells++;
       }
     }
-    // ④ 上线编排 assign-release-dev（bug 专属·须「待上线」且未挂批次）
+    // ④ 上线编排 assign-release-dev —— ⚠️ 2026-07-30 用户裁定：旧上线编排家族 4 端点全封退场，
+    //    本格语义从"仅 admin 200/其余 403"改写为"封禁契约"：任意角色（含 admin）一律 409
+    //    LEGACY_RELEASE_FLOW_DISABLED，且落库零副作用（release_assignee_id 调用后必须仍为空，
+    //    不因角色不同而有别）。不再证"受理人拿到的不是泛化 admin 权"，只回归"封禁不分角色"。
     for (const role of ROLES) {
       const id = await mkPendingRelease('bug');
       const r = await call('POST', '/api/sys-issues/assign-release-dev', role.tok, { issue_ids: [id], release_assignee_id: 5 });
-      assert.strictEqual(r.status, role.isAdmin ? 200 : 403,
-        `[M2/assign-release-dev] ${role.who} 期望 ${role.isAdmin ? 200 : 403}（上线编排仅 admin）, got ${r.status} ${JSON.stringify(r.body)}`);
+      assert.strictEqual(r.status, 409,
+        `[M2/assign-release-dev·封禁契约] ${role.who} 期望 409（旧上线编排家族全封，2026-07-30 裁定）, got ${r.status} ${JSON.stringify(r.body)}`);
+      assert.strictEqual(r.body.code, 'LEGACY_RELEASE_FLOW_DISABLED',
+        `[M2/assign-release-dev·封禁契约] ${role.who} code 须为 LEGACY_RELEASE_FLOW_DISABLED, got ${JSON.stringify(r.body)}`);
       const row = await get('SELECT release_assignee_id FROM sys_issues WHERE id=?', [id]);
-      assert.strictEqual(row.release_assignee_id === null ? null : Number(row.release_assignee_id), role.isAdmin ? 5 : null,
-        `[M2/assign-release-dev] ${role.who} 落库须与授权结果一致（403 后 release_assignee_id 必须仍为空）`);
+      assert.strictEqual(row.release_assignee_id, null,
+        `[M2/assign-release-dev·封禁契约] ${role.who} 调用后 release_assignee_id 必须仍为空（任何角色·零副作用）`);
       m2Cells++;
     }
-    // ⑤ 上线编排换人 reassign-release-dev（C1 三轮审 MED-3 补：同族另一入口，防只测一条路漏掉错误接线）
-    //    前置须**已指定**上线开发（M-1：仅已指定单可换），故每格先由 admin 指派 dev5，再由被测角色换成 dev6。
+    // ⑤ 上线编排换人 reassign-release-dev（同④封禁契约）—— 前置的"已指定上线开发"改用 SQL 直写
+    //    造夹具（assign-release-dev 端点本身已封，不能再靠调它来建立"已指定"前置态）。
     for (const role of ROLES) {
       const id = await mkPendingRelease('bug');
-      const pre = await call('POST', '/api/sys-issues/assign-release-dev', adminTok, { issue_ids: [id], release_assignee_id: 5 });
-      assert.strictEqual(pre.status, 200, `[M2/reassign-release-dev] 夹具预指派须 200, got ${pre.status} ${JSON.stringify(pre.body)}`);
+      await run(`UPDATE sys_issues SET release_assignee_id=5, release_assignee_name='开发王' WHERE id=?`, [id]);
       const r = await call('POST', '/api/sys-issues/reassign-release-dev', role.tok, { issue_ids: [id], release_assignee_id: 6, reason: '换人' });
-      assert.strictEqual(r.status, role.isAdmin ? 200 : 403,
-        `[M2/reassign-release-dev] ${role.who} 期望 ${role.isAdmin ? 200 : 403}（上线编排换人仅 admin）, got ${r.status} ${JSON.stringify(r.body)}`);
+      assert.strictEqual(r.status, 409,
+        `[M2/reassign-release-dev·封禁契约] ${role.who} 期望 409（旧上线编排家族全封，2026-07-30 裁定）, got ${r.status} ${JSON.stringify(r.body)}`);
+      assert.strictEqual(r.body.code, 'LEGACY_RELEASE_FLOW_DISABLED',
+        `[M2/reassign-release-dev·封禁契约] ${role.who} code 须为 LEGACY_RELEASE_FLOW_DISABLED, got ${JSON.stringify(r.body)}`);
       const row = await get('SELECT release_assignee_id FROM sys_issues WHERE id=?', [id]);
-      assert.strictEqual(Number(row.release_assignee_id), role.isAdmin ? 6 : 5,
-        `[M2/reassign-release-dev] ${role.who} 落库须与授权结果一致（403 后须仍是预指派的 dev5）`);
+      assert.strictEqual(Number(row.release_assignee_id), 5,
+        `[M2/reassign-release-dev·封禁契约] ${role.who} 调用后必须仍是预指派的 dev5（任何角色·零副作用，未被换成 dev6）`);
       m2Cells++;
     }
-    assert.strictEqual(m2Cells, 3 * 4 + 2 * 4 + 2 * 4 + 4 + 4, `[M2] 应跑满 36 格，实跑 ${m2Cells}（防再次出现 break 跳格）`);
-    ok(`[M2] admin 专属族 ${m2Cells} 格（accept×3类型 / hold×2类型 / close×2类型 / assign-release-dev / reassign-release-dev，各 4 角色·每格独立夹具）：admin 200 且真落态，受理人(13)/示例发布者(7)/dev(5) 一律 403 且状态原样 —— 证 C1 只放开协调人族、未泛化为 admin 权`);
+    // [C6] close 由 2 类型扩为 3 类型（+bug），36→40 格。④⑤ 转封禁契约后格数不变（仍各 4 角色）。
+    assert.strictEqual(m2Cells, 3 * 4 + 2 * 4 + 3 * 4 + 4 + 4, `[M2] 应跑满 40 格，实跑 ${m2Cells}（防再次出现 break 跳格）`);
+    ok(`[M2] admin 专属族 ${m2Cells} 格（accept×3类型 / hold×2类型 / close×3类型[C6] 仍是"仅 admin 200/其余 403"专属族闸；assign-release-dev / reassign-release-dev 两格 2026-07-30 起转"旧上线编排家族封禁契约"——四角色一律 409 LEGACY_RELEASE_FLOW_DISABLED + 落库零副作用，各 4 角色·每格独立夹具）：专属族部分 admin 200 真落态、受理人(13)/示例发布者(7)/dev(5) 403 状态原样，证 C1 只放开协调人族未泛化为 admin 权；上线编排两格证封禁不分角色`);
   }
 
   // ═══ [M3] 通知三通道 × 三类型 × 四角色（C1 删除了「变更流仅 admin」特判）═══

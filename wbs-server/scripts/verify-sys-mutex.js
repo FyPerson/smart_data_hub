@@ -108,8 +108,10 @@ async function seedToReady() {
 async function main() {
   mod.initSchema();
   await waitReady();
-  await run(`CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT)`);
-  await run(`INSERT INTO users (id, username, display_name, role) VALUES (1,'admin','管理员','admin'),(5,'dev','开发王','user')`);
+  // status 列：C3 后端批新增用例需要 hasReleaseEligibility(userId)（SELECT status, role FROM users），
+  //   该函数原不在本文件的 sys 覆盖范围内，users 夹具此前无需 status 列——现补上（DEFAULT 'active'）。
+  await run(`CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT, status TEXT DEFAULT 'active', phone TEXT, dingtalk_user_id TEXT)`);
+  await run(`INSERT INTO users (id, username, display_name, role, status) VALUES (1,'admin','管理员','admin','active'),(5,'dev','开发王','user','active')`);
   await new Promise((res) => { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = app.listen(0, () => { port = server.address().port; res(); }); });
 
   // ── 1. 并发建单（30 并发）：全 201 + id 互异 + 零 500（无 nested-transaction 交错）──────────
@@ -126,18 +128,42 @@ async function main() {
   assert.strictEqual(dbCount, N, `库内应恰好 ${N} 条并发单（无部分提交丢失）`);
   ok(`并发建单 ${N} 个：全 201 + id 互异 + 库内 ${N} 条 + 零 500（mutex 串行化无交错）`);
 
-  // ── 2. ⭐ 并发双击 publish（C4 审 finding 直击场景）──────────
-  //   批次含 1 待上线单，两个并发 publish（都带 release_note/version_tag）→ 恰一胜（200）一负（409 非 500），
-  //   且批次终态=已发布 + release_note 完好（非 NULL，不违反闸门③）。
+  // ── 2. ⭐ 并发双击 execute（C4 审 finding 直击场景，C3 后端批改造）──────────
+  //   ⚠️ 原用例并发双击 legacy /sys-releases/:id/publish——C3（上线体统一重构）已把该端点收窄为全类型
+  //   409（LEGACY_RELEASE_FLOW_DISABLED，见 index.js 路由处注释），响应体不再触发任何 DB 写入/事务，
+  //   mutex 串行化在该端点上已无"并发交错"这个风险面可测。finding 的真实关注点——"两个并发请求同时
+  //   写同一 sys_releases 行的多步事务，mutex 是否真的把它们串行化、不出现 nested-transaction 脏态"——
+  //   现由 _publishReleaseCoreInTxn 唯一 HTTP 可达入口 /sys-releases/:id/execute 承接，改测它（同一批次
+  //   两次并发 execute，同用户 devTok，因为 execute 只认"被通知的执行人本人"）。
   const relId = (await call('POST', '/api/sys-releases', adminTok, {})).body.id;
   const iss = await seedToReady();
   await call('POST', `/api/sys-releases/${relId}/add-issues`, adminTok, { issue_ids: [iss] });
+  // RELEASE 中心守卫要求在册开发≥1 且全完成态——seedToReady()（本文件既有）的 assign 步骤已经给
+  //   devTok(5) 建了一条 dev_assignees 在册行（dev_status 默认 'pending'），这里只需把它推成完成态
+  //   （UPDATE 而非 INSERT——重复 INSERT 会撞 idx_sys_dev_assignee_active 部分唯一索引）。
+  await run(
+    `UPDATE sys_issue_dev_assignees SET dev_status='no_code', resolved_at=datetime('now')
+       WHERE issue_id=? AND user_id=5 AND removed_at IS NULL`,
+    [iss]
+  );
+  // 推到 notify_status=sent + release_assignee_id=devTok(5)：改期到今日 → 排今日班 → 安排上线（真走两段 CAS）。
+  const today = (await get("SELECT date('now','localtime') AS d")).d;
+  const rPd = await call('POST', `/api/sys-releases/${relId}/update-planned-date`, adminTok, { planned_date: today });
+  assert.strictEqual(rPd.status, 200, `夹具改期 200, got ${rPd.status} ${JSON.stringify(rPd.body)}`);
+  await run(
+    `INSERT INTO sys_release_duty_roster (duty_date, user_id, user_name, created_by, created_by_name) VALUES (?, 5, '开发王', 1, '管理员')`,
+    [today]
+  );
+  const rNotify = await call('POST', `/api/sys-releases/${relId}/notify-executor`, adminTok, {});
+  assert.strictEqual(rNotify.status, 200, `夹具安排上线 200, got ${rNotify.status} ${JSON.stringify(rNotify.body)}`);
+  assert.strictEqual(rNotify.body.notify_status, 'sent', '夹具安排上线后 notify_status=sent（供 execute 中心守卫通过）');
+
   const [p1, p2] = await Promise.all([
-    call('POST', `/api/sys-releases/${relId}/publish`, adminTok, { release_note: '并发上线说明', version_tag: 'v9.9.9' }),
-    call('POST', `/api/sys-releases/${relId}/publish`, adminTok, { release_note: '并发上线说明', version_tag: 'v9.9.9' }),
+    call('POST', `/api/sys-releases/${relId}/execute`, devTok, { release_note: '并发上线说明', version_tag: 'v9.9.9' }),
+    call('POST', `/api/sys-releases/${relId}/execute`, devTok, { release_note: '并发上线说明', version_tag: 'v9.9.9' }),
   ]);
   const pubStatuses = [p1.status, p2.status].sort();
-  assert.deepStrictEqual(pubStatuses, [200, 409], `并发双击 publish 应恰一 200 一 409，实际 ${JSON.stringify(pubStatuses)}（500=nested-transaction 脏态）`);
+  assert.deepStrictEqual(pubStatuses, [200, 409], `并发双击 execute 应恰一 200 一 409，实际 ${JSON.stringify(pubStatuses)}（500=nested-transaction 脏态）`);
   const loser = [p1, p2].find(r => r.status === 409);
   assert.strictEqual(loser.body.code, 'RELEASE_NOT_PLANNING', '败者应为 RELEASE_NOT_PLANNING（非 500）');
   const relRow = await get('SELECT status, release_note, version_tag FROM sys_releases WHERE id=?', [relId]);
@@ -149,7 +175,7 @@ async function main() {
   assert.ok(issRow.released_at, 'released_at 落');
   const relTl = await all("SELECT id FROM sys_issue_timeline WHERE issue_id=? AND event_type='release'", [iss]);
   assert.strictEqual(relTl.length, 1, 'release timeline 恰 1 条（无重复写入）');
-  ok('⭐ 并发双击 publish：恰一 200 一 409（非 500）+ 批次已发布 release_note 完好 + 单翻已上线 + release timeline 仅 1 条（finding 脏态不可达）');
+  ok('⭐ 并发双击 execute：恰一 200 一 409（非 500）+ 批次已发布 release_note 完好 + 单翻已上线 + release timeline 仅 1 条（finding 脏态不可达，C3 改测新唯一发布入口）');
 
   // ── 3. 并发混合事务（建单 + 建批次 + assign 各 10）：零 500 ──────────
   //   受理排期改造：schedule 退场·并发写目标改用 assign（建单直落待指派→并发指派各进开发中·10 个独立单不互斥）。

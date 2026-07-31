@@ -68,10 +68,14 @@ const SYS_RELEASE_STATUSES = {
 };
 
 // ── 非发布终态（NONRELEASE_TERMINAL）：不经发布流程结束的态 ──────────
+//   ⭐ [C6·上线体统一重构方案 v3.4 §6.5] bug 流补「已关闭」终态——原"bug 流无 close，已上线即终态，
+//   上线后再出问题一律派生新单"的设计（§3.4 现网差异）已作废：归档改为全类型统一复用 close/reopen
+//   （已上线→已关闭·admin·写 closed_at；reopen 收窄为仅从已关闭发起，目标态按 type 分：change→开发中/
+//   bug→处理中，见 transitions.js BUG_FLOW_TRANSITIONS 新增 close/reopen 两条目）。
 const SYS_NONRELEASE_TERMINAL_STATUSES = {
   feature: ['已关闭', '已拒绝', '已作废'],
   improvement: ['已关闭', '已拒绝', '已作废'],
-  bug: ['已拒绝', '已作废'],   // bug 流无「已关闭」（已上线即终态，§3.4 现网差异）
+  bug: ['已关闭', '已拒绝', '已作废'],
 };
 
 // ── 派生族（不在方案 §4.0 表内单独定义快照值，由上面 4 族按 type 逐一并集算出）──────────

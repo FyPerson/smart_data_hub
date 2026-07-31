@@ -53,6 +53,11 @@ function main() {
     // siRenderActions 会为 typeFlows 里的 action 渲染按钮（排除 create + 两个 C-orch 特殊动作·它们走独立区块非 siDoAction）。
     const RENDER_EXCLUDED = new Set(['create', 'assign-release-dev', 'execute-release']);
     // siDoAction 里的非 meta 旁路动作（create-chat 是拉群·非 transition·允许存在）。
+    // [C3 第2批收口·对抗审 B 项裁定] 'publish' 白名单已删除——第2批前端已把 siDoAction 的
+    //   `case 'publish': return siModalHotfix(iss);` 一并移除（siModalHotfix 改由独立按钮 hotfixBtn 直接
+    //   调用，不再经 siDoAction('publish') 分发，见 Sys_Iteration.html siRenderActions/siDoAction 两处注释），
+    //   'publish' 已不再是孤儿 case，本白名单条目随之失去存在意义。原批1注释已预告"批2会把新入口接上，届时
+    //   应删除本行白名单"——本次补上，同时在下方新增回归钉防未来误回退。
     const NON_META_CASES = new Set(['create-chat']);
 
     const renderableActions = new Set();
@@ -74,6 +79,12 @@ function main() {
       assert.ok(doActionCases.has(a), `siDoAction 含 ${a} case`);
     }
     ok(`[D] 双向完整性：${renderableActions.size} 个可渲染 action 全有 siDoAction handler（0 死按钮）+ 0 孤儿 case（含受理排期 7 新动作）`);
+
+    // [C3 第2批收口·对抗审 B 项裁定] 回归钉：siDoAction 不应再出现 `case 'publish'`——上方 orphanCases
+    //   通用检查在"重新加回却不接 meta"时已会失败，但那条错误信息是"孤儿 case"泛指，不点名具体是谁；
+    //   这里显式点名断言，防未来误回退时排障要绕一圈才能定位到具体是哪个 action 复活了。
+    assert.ok(!doActionCases.has('publish'), 'siDoAction 不应再含 case \'publish\'（旧 hotfix-publish 触发点已改走独立按钮 hotfixBtn 直调 siModalHotfix，不再经 siDoAction 分发；若此断言失败说明该 case 被误回退）');
+    ok('[D-回归钉] siDoAction 确认不含 case \'publish\'（C3 第2批退场，防未来误回退）');
   }
 
   // ═══ [W] 白名单三处一致（前端字面量 == 后端 _internals）═══

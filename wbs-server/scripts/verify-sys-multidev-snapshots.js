@@ -4,10 +4,14 @@
 //   用法：node scripts/verify-sys-multidev-snapshots.js
 //
 // 覆盖：
-//   S21：发布无 version_tag 允许（+批次 version_tag 落 NULL）；publish/execute(mode=publish) 首次产快照
-//        （字段=版本1固定七字段，commit_id 升序）；execute(mode=hotfix) 不产快照；全员 no_code 零 commit
-//        首发 changes=1 且快照恰为 []（Mz-5）；ON CONFLICT 幂等（直调 snapshotReleaseCommitsInTxn 两次同 pair）；
-//        changes=0 已冻结继续（预插同 (release_id,issue_id) 行后发布仍成功，不重复插不覆盖，Lz-1）
+//   S21：发布无 version_tag 允许（+批次 version_tag 落 NULL）；首次产快照（字段=版本1固定七字段，commit_id 升序）；
+//        全员 no_code 零 commit 首发 changes=1 且快照恰为 []（Mz-5）；ON CONFLICT 幂等（直调
+//        snapshotReleaseCommitsInTxn 两次同 pair）；changes=0 已冻结继续（预插同 (release_id,issue_id) 行后
+//        发布仍成功，不重复插不覆盖，Lz-1）。
+//        ⚠️ C3（上线体统一重构）改造：legacy /sys-releases/:id/publish 与旧 execute-release 全类型 409 退场，
+//        发布唯一入口收窄为 /sys-releases/:id/execute（中心守卫）；原"S21b execute-release mode=hotfix
+//        不产快照"子用例随之整条退场（新统一入口下发布必经 _publishReleaseCoreInTxn，无"绕过共用内核"
+//        路径可测），S21b 现测 bug 类型经统一入口（hotfix-publish 建单+execute 发布）仍正确产快照 v2。
 //   S25：提交→remove→re-add→编辑旧实例行→(accept)→发布：快照含更正后行
 //   S26：提交→remove→不 re-add→(accept)→发布：快照含 removed 实例行
 //   S37：accept/resume 进待上线不产快照
@@ -127,16 +131,32 @@ async function mkReleaseWithIssues(issueIds, extra = {}) {
   assert.strictEqual(r2.status, 200, `加单 200, got ${r2.status} ${JSON.stringify(r2.body)}`);
   return relId;
 }
-function publishRelease(relId, body) {
-  return call('POST', `/api/sys-releases/${relId}/publish`, adminTok, body);
+// C3（上线体统一重构）后端批改造：legacy /sys-releases/:id/publish 现全类型 409（LEGACY_RELEASE_FLOW_DISABLED），
+//   唯一合法发布入口收窄为 /sys-releases/:id/execute（中心守卫要求 notify_status='sent' ∧
+//   release_assignee_id===actor.id ∧ 实时资格）。本文件关注的是 _publishReleaseCoreInTxn 内核本身
+//   的快照写入行为（S21/S25/S26/S37/Lz-1），不关心"怎么走到可执行态"这段——直接 SQL 把中心守卫三前提
+//   钉好（同 verify-sys-mutex.js 并发 execute 用例同款手法），再调真实 /execute，内核校验/写入逻辑
+//   逐字未变，验证目标不受影响。
+async function publishRelease(relId, body, executorId = 5, executorName = '开发甲') {
+  await run(
+    `UPDATE sys_releases SET release_assignee_id=?, release_assignee_name=?, release_assignee_notify_status='sent'
+       WHERE id=?`,
+    [executorId, executorName, relId]
+  );
+  return call('POST', `/api/sys-releases/${relId}/execute`, devTok(executorId), body);
 }
 
 async function main() {
   mod.initSchema();
   await waitReady();
-  await run(`CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT)`);
-  await run(`INSERT INTO users (id, username, display_name, role) VALUES
-    (1,'admin','管理员','admin'),(5,'dev5','开发甲','user'),(6,'dev6','开发乙','user'),(8,'dev8','开发戊','user')`);
+  // status 列：C3 后端批 publishRelease() 改走 /execute，其中心守卫要走 hasReleaseEligibility(userId)
+  //   （SELECT status, role FROM users），补列（DEFAULT 'active'，本文件所有夹具用户天然在职有资格）。
+  // phone/dingtalk_user_id 列：[C3 裁定修正 2026-07-29] S21b 补了真实排班后 hotfix-publish 会真走到
+  //   preempt 成功 → sendReleaseNotifyAndWriteback（SELECT id, display_name, phone, dingtalk_user_id
+  //   FROM users），缺列即报错，此前该分支从未在本文件被触发过（无排班时抢占早早短路，见 S21b 处注释）。
+  await run(`CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT, status TEXT DEFAULT 'active', phone TEXT, dingtalk_user_id TEXT)`);
+  await run(`INSERT INTO users (id, username, display_name, role, status) VALUES
+    (1,'admin','管理员','admin','active'),(5,'dev5','开发甲','user','active'),(6,'dev6','开发乙','user','active'),(8,'dev8','开发戊','user','active')`);
   await new Promise((resolve) => { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = app.listen(0, () => { port = server.address().port; resolve(); }); });
   ok('readiness ready + HTTP harness 起服务');
 
@@ -155,15 +175,21 @@ async function main() {
     assert.strictEqual(rel.version_tag, null, 'S21a：批次 version_tag 落库 NULL（未传值场景，去必填生效）');
     const snap = await snapshotRow(relId, id);
     assert.ok(snap, 'S21a：快照行已产生');
-    const commits = JSON.parse(snap.snapshot_json);
+    // ⭐ C2a snapshot v2（方案 §6.6a）：snapshot_json 现为对象 {schema_version:2,type,title_snapshot,status_at_publish,commits}
+    const parsed = JSON.parse(snap.snapshot_json);
+    assert.strictEqual(parsed.schema_version, 2, 'S21a：snapshot v2 schema_version=2');
+    assert.strictEqual(parsed.type, 'feature', 'S21a：v2 type=发布时类型');
+    assert.strictEqual(parsed.title_snapshot, 'feature-待上线-单', 'S21a：v2 title_snapshot=发布时标题（mkIssue 默认标题）');
+    assert.strictEqual(parsed.status_at_publish, '已上线', 'S21a：v2 status_at_publish=已上线（本函数只在批量翻牌成功后调用）');
+    const commits = parsed.commits;
     assert.strictEqual(commits.length, 2, 'S21a：快照含 2 条 commit');
     assert.deepStrictEqual(commits.map(c => c.commit_id), [c1, c2], 'S21a：commit_id 升序');
     const keys = Object.keys(commits[0]).sort();
-    assert.deepStrictEqual(keys, ['commit_id', 'commit_ref', 'component', 'created_at', 'dev_assignee_id', 'dev_user_id', 'updated_at'], 'S21a：快照字段=版本1固定七字段');
+    assert.deepStrictEqual(keys, ['commit_id', 'commit_ref', 'component', 'created_at', 'dev_assignee_id', 'dev_user_id', 'updated_at'], 'S21a：commits[] 内每条仍是版本1固定七字段（v2 只是外层多包一层元数据，commit 明细字段不变）');
     assert.strictEqual(commits[0].dev_assignee_id, daId, 'S21a：dev_assignee_id 正确');
     assert.strictEqual(commits[0].dev_user_id, 5, 'S21a：dev_user_id 正确');
     await selfCertifyProbes('S21a');
-    ok('S21a：发布无 version_tag 允许（200+批次 version_tag NULL）；首次产快照，字段=版本1固定七字段，commit_id 升序');
+    ok('S21a：发布无 version_tag 允许（200+批次 version_tag NULL）；首次产快照 v2（schema_version=2+type+title_snapshot+status_at_publish），commits[] 字段=版本1固定七字段，commit_id 升序');
   }
 
   // ══════════════════════════════════════════════════════════════════════
@@ -178,44 +204,47 @@ async function main() {
     assert.strictEqual(r.body.count, 1, 'Mz-5：changes=1（单单批次翻已上线）');
     const snap = await snapshotRow(relId, id);
     assert.ok(snap, 'Mz-5：零 commit 也产生快照行（非跳过）');
-    assert.strictEqual(snap.snapshot_json, '[]', 'Mz-5：快照 JSON 字符串恰为合法空数组 []');
-    assert.deepStrictEqual(JSON.parse(snap.snapshot_json), [], 'Mz-5：解析后为空数组（非 null/非全 NULL 聚合对象）');
-    ok('S21·Mz-5：全员 no_code 零 commit 首发：changes=1 且快照恰为 []（JS 层拼数组，非 SQL 聚合，防 LEFT JOIN 误产）');
+    // ⭐ C2a snapshot v2：零 commit 场景验证 commits 字段恰为 []（非 null/非全 NULL 聚合对象），外层元数据仍完整。
+    const parsed = JSON.parse(snap.snapshot_json);
+    assert.strictEqual(parsed.schema_version, 2, 'Mz-5：v2 schema_version=2（零 commit 不影响外层元数据）');
+    assert.strictEqual(parsed.type, 'feature', 'Mz-5：v2 type 正确');
+    assert.strictEqual(parsed.status_at_publish, '已上线', 'Mz-5：v2 status_at_publish=已上线');
+    assert.deepStrictEqual(parsed.commits, [], 'Mz-5：commits 恰为合法空数组 []（非 null/非全 NULL 聚合对象）');
+    ok('S21·Mz-5：全员 no_code 零 commit 首发：changes=1 且 snapshot v2 的 commits 恰为 []（JS 层拼数组，非 SQL 聚合，防 LEFT JOIN 误产），外层元数据仍完整');
   }
 
   // ══════════════════════════════════════════════════════════════════════
-  // S21b：bug execute-release mode=hotfix 不产快照（release_id 恒 NULL）；mode=publish 首次产快照（release_id 非空）
-  // ══════════════════════════════════════════════════════════════════════
+  // S21b（C3 改造）：bug 首次产快照 v2——全类型统一后 bug 走与 feature/improvement 相同的
+  //   /sys-releases/:id/execute 唯一发布入口（不再是 legacy execute-release 的双模式）。
+  //   ⚠️ 原"mode=hotfix 不产快照（release_id 恒 NULL，不经共用内核）"这条子用例随 execute-release 一并
+  //   退场——新统一入口下 bug 发布必经 _publishReleaseCoreInTxn（该函数是快照写入的唯一交汇点，见其函数头
+  //   注释），"绕过共用内核不产快照"这条旁路已不存在，无对应场景可测，故不做保留式改写、直接删除。
   {
     const id = await mkIssue('bug', '待上线');
-    await run(`UPDATE sys_issues SET release_assignee_id = 5 WHERE id = ?`, [id]);
-    const daId = await mkMember(id, 5, '开发甲', 'code_submitted', { skipCommit: true });
-    await seedCommit(id, daId, 5, 'backend', 'fix/hotfix-1');
-    const r = await call('POST', '/api/sys-issues/execute-release', devTok(5), { mode: 'hotfix', issue_ids: [id] });
-    assert.strictEqual(r.status, 200, `S21b：bug hotfix 应 200, got ${r.status} ${JSON.stringify(r.body)}`);
-    const row = await issueRow(id);
-    assert.strictEqual(row.status, '已上线', 'S21b：hotfix 主状态置已上线');
-    assert.strictEqual(row.release_id, null, 'S21b：hotfix release_id 仍 NULL（不建批次）');
-    const cnt = await get('SELECT COUNT(*) c FROM sys_issue_release_commit_snapshots WHERE issue_id=?', [id]);
-    assert.strictEqual(cnt.c, 0, 'S21b：hotfix 不产快照');
-    ok('S21b：execute-release mode=hotfix 不产快照，主状态置已上线（release_id 恒 NULL，不经共用内核）');
-  }
-  {
-    const id = await mkIssue('bug', '待上线');
-    await run(`UPDATE sys_issues SET release_assignee_id = 5 WHERE id = ?`, [id]);
     const daId = await mkMember(id, 5, '开发甲', 'code_submitted', { skipCommit: true });
     const cId = await seedCommit(id, daId, 5, 'backend', 'fix/publish-mode-1');
-    const r = await call('POST', '/api/sys-issues/execute-release', devTok(5), { mode: 'publish', issue_ids: [id], release_note: 'bug批次发布' });
-    assert.strictEqual(r.status, 201, `S21b：bug execute publish 应 201, got ${r.status} ${JSON.stringify(r.body)}`);
-    const relId = r.body.release_id;
-    assert.ok(relId, 'S21b：execute publish release_id 非空');
+    // [2026-07-29 双闸拆除后更正] bug 现同样可走 add-issues 进普通批次（见 verify-sys-bug-transitions.js
+    //   [R5①放行]）——本用例仍选用 hotfix-publish 建批次，纯粹因为它是"单条应急、一步建单+加单+抢占"
+    //   的最短路径，与本用例验证目标（发布快照写入）无关，非因 add-issues 对 bug 仍有闸门。
+    // [C3 裁定修正 2026-07-29] 抢占失败（当日无在册值班人）现回滚+409——本用例验证目标是快照写入，
+    //   非抢占分支，先补今日排班让 hotfix-publish 走通①全链（幂等：本文件仅这一处调用，不会重复 INSERT）。
+    await run(`INSERT INTO sys_release_duty_roster (duty_date, user_id, user_name, created_by, created_by_name) VALUES (date('now','localtime'), 5, '开发甲', 1, '管理员')`);
+    const rHf = await call('POST', `/api/sys-issues/${id}/hotfix-publish`, adminTok, { release_note: 'bug批次发布' });
+    assert.strictEqual(rHf.status, 200, `S21b：bug hotfix-publish 建单应 200, got ${rHf.status} ${JSON.stringify(rHf.body)}`);
+    const relId = rHf.body.release_id;
+    assert.ok(relId, 'S21b：hotfix-publish 建单后 release_id 非空');
+    const r = await publishRelease(relId, { release_note: 'bug批次发布' });
+    assert.strictEqual(r.status, 200, `S21b：bug execute 应 200, got ${r.status} ${JSON.stringify(r.body)}`);
     const snap = await snapshotRow(relId, id);
-    assert.ok(snap, 'S21b：execute publish 快照行产生');
-    const commits = JSON.parse(snap.snapshot_json);
+    assert.ok(snap, 'S21b：execute 快照行产生');
+    const parsed = JSON.parse(snap.snapshot_json);
+    assert.strictEqual(parsed.schema_version, 2, 'S21b：v2 schema_version=2');
+    assert.strictEqual(parsed.type, 'bug', 'S21b：v2 type=bug');
+    const commits = parsed.commits;
     assert.strictEqual(commits.length, 1);
     assert.strictEqual(commits[0].commit_id, cId, 'S21b：快照内容正确');
     await selfCertifyProbes('S21b');
-    ok('S21b：execute-release mode=publish 首次产快照（release_id 非空，复用共用内核，快照内容正确）');
+    ok('S21b：bug 经统一 /execute 入口首次产快照 v2（复用共用内核，快照内容正确，全类型统一后 bug/变更流同一条路径）');
   }
 
   // ══════════════════════════════════════════════════════════════════════
@@ -227,15 +256,18 @@ async function main() {
     await seedCommit(id, daId, 5, 'backend', 'fix/idem-1');
     const rRel = await call('POST', '/api/sys-releases', adminTok, { title: 'idem-batch' });
     const relId = rRel.body.id;
+    // ⭐ C2a：snapshotReleaseCommitsInTxn 签名从 (releaseId, issueId) 改为 (releaseId, issue={id,type,title})——
+    //   直调需按新签名传入 issue 元数据（供 v2 payload 的 type/title_snapshot 使用）。
+    const issueForSnap = await get('SELECT id, type, title FROM sys_issues WHERE id=?', [id]);
 
     await run('BEGIN IMMEDIATE');
-    await I.snapshotReleaseCommitsInTxn(relId, id);
+    await I.snapshotReleaseCommitsInTxn(relId, issueForSnap);
     await run('COMMIT');
     const rows1 = await snapshotRows(relId);
     assert.strictEqual(rows1.length, 1, '首次调用产生 1 行快照');
 
     await run('BEGIN IMMEDIATE');
-    await I.snapshotReleaseCommitsInTxn(relId, id);   // 二次调用同 pair：ON CONFLICT DO NOTHING，changes=0 且 SELECT 命中已存在行
+    await I.snapshotReleaseCommitsInTxn(relId, issueForSnap);   // 二次调用同 pair：ON CONFLICT DO NOTHING，changes=0 且 SELECT 命中已存在行
     await run('COMMIT');
     const rows2 = await snapshotRows(relId);
     assert.strictEqual(rows2.length, 1, '[Lz-1] 二次调用不产生新行（ON CONFLICT 幂等）');
@@ -286,7 +318,7 @@ async function main() {
     const r2 = await publishRelease(relId, { release_note: 'S25 发布' });
     assert.strictEqual(r2.status, 200, `S25：发布应 200, got ${r2.status} ${JSON.stringify(r2.body)}`);
     const snap = await snapshotRow(relId, id);
-    const commits = JSON.parse(snap.snapshot_json);
+    const commits = JSON.parse(snap.snapshot_json).commits;   // C2a snapshot v2：commits 从对象内取
     assert.strictEqual(commits.length, 1, 'S25：快照仅 1 条 commit（旧实例行，未新增）');
     assert.strictEqual(commits[0].commit_id, oldCommit.id, 'S25：快照行 commit_id=被编辑的旧实例行');
     assert.strictEqual(commits[0].commit_ref, 'fix/s25-corrected', 'S25：快照含更正后内容（非原始种子值）');
@@ -309,7 +341,7 @@ async function main() {
     const r = await publishRelease(relId, { release_note: 'S26 发布' });
     assert.strictEqual(r.status, 200, `S26：发布应 200, got ${r.status} ${JSON.stringify(r.body)}`);
     const snap = await snapshotRow(relId, id);
-    const commits = JSON.parse(snap.snapshot_json);
+    const commits = JSON.parse(snap.snapshot_json).commits;   // C2a snapshot v2：commits 从对象内取
     assert.strictEqual(commits.length, 2, 'S26：快照含 2 条（dev5 removed 实例行 + dev6 在册行）');
     const removedRow = commits.find(c => c.commit_id === c1);
     assert.ok(removedRow, 'S26：快照含 removed 实例行（dev5 已移除，仍留痕）');

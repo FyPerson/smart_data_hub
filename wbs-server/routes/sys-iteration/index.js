@@ -85,7 +85,10 @@ module.exports = (deps) => {
     'sys_schema_migrations',
     // ← 角色权限重构 C2a：物删审计表。**必须进 readiness 硬清单**——它不在就意味着"删了查不到"，
     //   而删除是不可逆的；宁可整个 sys 写入口 503，也不放行一个审计写不进去的删除端点。
-    'sys_issue_delete_audit'];
+    'sys_issue_delete_audit',
+    // ← 上线体统一重构 C0（方案 v3.4 §6.2，2026-07-28）：上线值班排班表。**全新表**（软删 CHECK
+    //   含 removed_by_name IS NOT NULL 是 C0 硬门槛——SQLite 已建表无法补 CHECK，见 initSchema 2.11 段）。
+    'sys_release_duty_roster'];
 
   // readiness 复查是"启动期就绪 status-only 抽样"——挑代表性关键不变量列（三侧通知 status 锚点/质量计数/
   //   来源/血缘批次/config 生效时刻），不做全字段全量校验（那是 verify-sys-schema.js 的职责，对齐 corrections
@@ -112,9 +115,9 @@ module.exports = (deps) => {
     'needs_release', 'related_correction_no', 'fix_gap_note', 'dingtalk_chat_id',  // ← bug 流 Commit ① 锚点（[审:M1] 指定 4 锚；derive_reason + 其余 4 群字段由 verify 全量保障）
     'relay_notify_status',  // ← 通知改造 C1a 锚点（bug流通知改造_方案_20260703_v1.5.md §4.1）：对接人通知侧状态，
                              //   relay 其余 6 列由 verify-sys-schema 全量保障。
-    // ← 通知改造 C3b/C4 锚点：release_assignee_id/name 在 C1a 时确为纯数据列（不入锚点），但 C3b（execute-release/
-    //   assign-release-dev SELECT release_assignee_id 判执行权）+ C4（列表 GET SELECT release_assignee_id/name 供批量面板
-    //   + 详情可见性闸门读 release_assignee_id）后已成**被消费的热路径列**——须入锚点，否则 mid-migration 崩溃后
+    // ← 通知改造 C3b/C4 锚点：release_assignee_id/name 在 C1a 时确为纯数据列（不入锚点），后成**被消费的热路径列**
+    //   ——须入锚点（[2026-07-30] 旧上线编排家族封禁后写端点已死，但列表 GET SELECT + 详情只读展示仍读这两列，
+    //   锚点保留），否则 mid-migration 崩溃后
     //   （key 列已补但这两列未补）readiness 误报 ready → 列表 SELECT「no such column」500（codex 末次合并审 MED 收口）。
     'release_assignee_id', 'release_assignee_name',
     // ← 通知改造 follow-up（2026-07-07）第 5 类「通知上线开发」：release_assignee_notify_* 5 列**整组**入 readiness 锚点
@@ -139,7 +142,14 @@ module.exports = (deps) => {
     'oa_number',
   ];
   const SYS_RELEASES_KEY_COLS = ['release_no', 'status', 'is_hotfix', 'release_note', 'version_tag',
-    'release_type'];   // ← bug 流 Commit ① 批次类型隔离锚点（[codex三审:L] 值域非空由 ② 服务端守卫强制，readiness 只查列在）
+    'release_type',   // ← bug 流 Commit ① 批次类型隔离锚点（[codex三审:L] 值域非空由 ② 服务端守卫强制，readiness 只查列在）
+    // ← 上线体统一重构 C0（方案 v3.4 §6.1，2026-07-28）新增 10 列，整组入锚点（同 release_assignee_notify_*
+    //   在 sys_issues 侧的先例：被消费的热路径列，mid-migration 崩溃后半成品态会致端点 500，须整组锚定；
+    //   本 C0 是纯 schema commit，这些列本身尚无消费者，仍先整组入锚，避免后续接线 commit 忘记补锚点）。
+    'release_assignee_id', 'release_assignee_name', 'release_assignee_notify_status',
+    'release_assignee_notify_started_at', 'release_assignee_notified_at',
+    'release_assignee_notify_message_key', 'release_assignee_notify_error',
+    'release_assignee_notify_token', 'release_assignee_read_at', 'release_kind'];
   const SYS_TIMELINE_KEY_COLS = ['event_type', 'from_status', 'to_status', 'action_code', 'ref_id', 'round_no'];
   const SYS_ATTACHMENTS_KEY_COLS = ['attachment_type', 'round_no', 'status'];
   // ← 通知改造 C1a 新表锚点（bug流通知改造_方案_20260703_v1.5.md §4.1）。sys_issue_dev_assignees 是**一次性
@@ -156,6 +166,12 @@ module.exports = (deps) => {
     //   本表由「全新表」范式（无 ALTER）首次破例引入 ALTER 演进——C-1 顺序铁律同样适用：ALTER 必须在下方
     //   [2] 复查之前完成（见 runSysMigration [1a-4]）。
     'dev_status', 'resolved_at', 'no_code_reason', 'superseded_by'];
+  // ── 上线体统一重构 C0（方案 v3.4 §6.2，2026-07-28）：排班表锚点，「结构全列在」模型 ────────────────────
+  //   同 sys_issue_delete_audit 首版一样：**一次性 CREATE TABLE（无 ALTER 路径）**——软删成组 CHECK
+  //   （含 removed_by_name IS NOT NULL）是 C0 硬门槛，SQLite 已建表无法补 CHECK，本表建表即终版。
+  //   缺任一结构列=建表未完整→[2] 判 ready=false。
+  const SYS_DUTY_ROSTER_KEY_COLS = ['duty_date', 'user_id', 'user_name', 'created_by',
+    'removed_at', 'removed_by', 'removed_by_name'];
 
   // ── C0 新增 3 表锚点（多开发协作与 commit 留痕重构 v2.9 §9/附录C）：readiness「结构全列在」模型 ──────────
   //   与 sys_issue_dev_assignees 首版同款——三表均为**一次性 CREATE TABLE（无 ALTER 路径）**，要么整表建全
@@ -321,6 +337,21 @@ module.exports = (deps) => {
     return res.status(403).json({ error: '仅管理员或受理人可操作', code: 'NOT_ADMIN_OR_INTAKE_LIAISON' });
   }
 
+  // ── 上线体统一重构 C1（方案 v3.4 §6.14 权限矩阵「排班表写」行）→ C2a 泛化（§6.8「撤销上线安排」同判据）──
+  //   仅对接人可用，**admin 一律 403**——不能复用 requireIntakeLiaison（那是 admin ∨ 白名单）。
+  //   这是本模块内**唯一"admin 也不能写"**的写权限例外（其余端点几乎都是 admin 天然放行 ∨ 白名单），
+  //   故独立写一个中间件、不与 requireIntakeLiaison 共享判据——防止未来 requireIntakeLiaison 若加别的
+  //   豁免分支被本端点误继承，悄悄放开本该焊死的 admin 例外。
+  //   ⚠️ C2a 改名（codex 决策点，主会话裁定）：原名 `requireDutyRosterWrite`（C1 排班表专属）泛化为
+  //   `requireLiaisonOnly`——判据与 C1 逐字相同（仅 isSysIntakeLiaison），C2a `cancel-schedule`（撤销上线
+  //   安排）复用同一判据（§6.8「权限=对接人，admin不可用」）。错误码同步从 `DUTY_ROSTER_WRITE_LIAISON_ONLY`
+  //   泛化为 `INTAKE_LIAISON_ONLY`（不再绑定"排班表"这一具体资源名，两个功能共用同一 403 语义）——
+  //   verify-sys-duty-roster.js 的 5 处引用已同步改码（C2a 收口时一并改）。
+  function requireLiaisonOnly(req, res, next) {
+    if (isSysIntakeLiaison(req.user && req.user.id)) return next();
+    return res.status(403).json({ error: '仅对接人可操作（管理员无此权限）', code: 'INTAKE_LIAISON_ONLY' });
+  }
+
   // ============================================================
   // 二、DDL（四表 + 索引）。建表 serialize 块包进 initSchema()，
   //   server.js 启动 db 回调内调用 sysIterModule.initSchema()（busy_timeout + initTable + correction initSchema 之后）。
@@ -367,7 +398,23 @@ module.exports = (deps) => {
         created_at DATETIME DEFAULT (datetime('now','localtime')),
         -- 批次类型隔离（bug 方案 [审:L1]，Commit ① 建列+回填 / Commit ② add-issues 校一致启用；表尾对齐 ALTER 追加序）。
         --   NULLABLE 建列（[codex三审:L]：SQLite 已有表不能补 NOT NULL/CHECK，改 readiness 复查 + 服务端守卫强制）。
-        release_type TEXT
+        release_type TEXT,
+        -- ── 上线体统一重构 C0（方案 v3.4 §6.1，2026-07-28）新增 10 列：上线值班执行人 + 通知状态机 + 应急标记 ──
+        --   表尾对齐 ALTER 追加序（同 release_type 惯例）；旧库演进走 runSysMigration [1a-10] 幂等 ALTER
+        --   （不带 CHECK，同 needs_release/relay_notify_status 先例——值域由服务层守卫 + 本表新库 CREATE 路径
+        --   CHECK 双重兜底）。本 commit 仅建列，不接入任何读/写/守卫逻辑（同 C1a release_assignee_id 首次
+        --   建列的「schema 一次到位免二次迁移」惯例，业务接线留给后续 commit）。
+        release_assignee_id INTEGER,
+        release_assignee_name TEXT,
+        release_assignee_notify_status TEXT NOT NULL DEFAULT 'not_sent'
+          CHECK (release_assignee_notify_status IN ('not_sent','sending','sent','failed','stale')),
+        release_assignee_notify_started_at DATETIME,
+        release_assignee_notified_at DATETIME,
+        release_assignee_notify_message_key TEXT,
+        release_assignee_notify_error TEXT,
+        release_assignee_notify_token TEXT,
+        release_assignee_read_at DATETIME,
+        release_kind TEXT NOT NULL DEFAULT 'normal' CHECK (release_kind IN ('normal','emergency'))
       )`, recordSysErr('sys_releases'));
       db.run(`CREATE INDEX IF NOT EXISTS idx_sys_releases_status ON sys_releases(status)`, recordSysErr('idx_sys_releases_status'));
 
@@ -462,8 +509,19 @@ module.exports = (deps) => {
 
         -- ── bug 流（bug流_方案_20260702_v1.2 §9，Commit ①）──────────
         --   置于表尾（table-level CHECK 之前）：与旧库 ALTER ADD COLUMN 追加序一致，两路径列序不漂移。
-        --   needs_release：bug 待上线态内开发填「是否发版」（NULL=未填；1=发版走 hotfix 批次/0=不发版走专用 transition，§8.2，Commit ② 写入）。
+        --   needs_release：bug 待上线态内开发填「是否发版」（NULL=未填；1=发版走 hotfix 批次/0=不发版走专用 transition，§8.2，Commit ② 写入，历史设计）。
         --     CHECK 仅新库带（旧库 ALTER 不补 CHECK，corrections [2a-x3] 同源；靠 ② 写入口枚举校验 + verify 兜底，两路径不变量等效）。
+        --   ⚠️⚠️ [上线体统一重构 C3→C6 起] 本列**唯一写点** POST /sys-issues/:id/set-release-flag 已随 C3
+        --   全类型退场为 410 Gone（该端点历史上只服务 bug，退场即整端点实质停用）——全项目 grep 确认此后再无
+        --   任何代码路径能把本列写成非 NULL，bug 建单起即恒停在初值 NULL，**转为纯只读残留**（与下方本表
+        --   release_assignee_id 组"双重身份"8 列不同：本列没有第二套仍在活跃读写它的独立机制，是单一身份、
+        --   彻底死透的残留列）。方案 v3.4 §5b 业务口径 #2 明文「needs_release｜废弃」——add-issues 端点曾额外
+        --   叠加"bug 须 needs_release=1"闸门（因唯一写点已死，该闸门等价于对 bug 恒拒），2026-07-29 主会话
+        --   裁定选项 A 随双闸一并拆除（见 add-issues 路由处注释），此后 bug 与 feature/improvement 经同一
+        --   add-issues 入口完全同源放行，不再依赖本列取值。**结论**：禁止未来任何人以此列"看似还在 SELECT
+        --   里"为由恢复对它的准入判断——C5 收口批曾因这一列使 bug 永久无法加单，是本次拆闸的直接起因；
+        --   本列仍会被部分 SELECT 语句读出（供前端历史 timeline 标签渲染 + 建单初值展示），这是展示用途，
+        --   不是业务判断依据。DROP COLUMN 更是硬约束下禁止的操作（37 列表重建风险），故保留列不删。
         needs_release INTEGER CHECK (needs_release IS NULL OR needs_release IN (0,1)),
         related_correction_no TEXT,        -- §7 软关联数据修正单号（不跳转/不硬校验/不 join；建单接收=Commit ④）
         derive_reason TEXT,                -- §4 双描述·建单人派生原因（derive 端点必填=Commit ⑤）
@@ -493,12 +551,28 @@ module.exports = (deps) => {
         --   重发/查已读走快照不走当前 requester_phone（防发后改号已读失真）。
         requester_notify_phone_snapshot TEXT,
         requester_notify_ding_uid TEXT,
-        -- 上线编排指定执行开发（§2.3，C3b assign-release-dev/execute-release 消费）：
+        -- 上线编排指定执行开发（§2.3 历史：C3b assign-release-dev/execute-release 消费·家族已于 2026-07-30 全封）：
         --   C1a 仅建列——nullable inert，本 commit 不接入任何读/写/守卫逻辑（schema 一次到位免二次迁移）。
+        --   ⚠️⚠️ [上线体统一重构 C5 起注记] 本组 8 列（release_assignee_id/name + 下方 5 列 + 表尾
+        --   ALTER 补的 release_assignee_notify_sent_by）**不是单纯的"只读残留列"**，情况分两半：
+        --   ① 对**本次上线体统一重构**（C0-C9，权威源=sys_releases 同名 10 列 + 排班表）而言，这 8 列
+        --      C5 起确实只读——曾经把 sys_releases 权威态镜像进来的 syncReleaseLegacyMirror 双写函数
+        --      已随 C5 整体删除（见该函数原定义处的删除注释），本重构的任何写路径不会再碰它们。
+        --   ② 这 8 列曾同时是另一套独立、更早于本次重构的机制（2026-07-07「通知上线开发」follow-up：
+        --      assign-release-dev/reassign-release-dev 写 release_assignee_id/name；notify-release-executor(-batch)
+        --      写通知 5 列）的活跃读写字段。[2026-07-30 用户裁定] 该"旧上线编排"机制 4 端点已全部封禁退场
+        --      （409 LEGACY_RELEASE_FLOW_DISABLED，实现体已删，见 index.js 旧上线编排退场段）——自此全库
+        --      对这 8 列**零写路径**，②也归入只读残留。
+        --   **结论**：8 列业务写路径全封（指派/换人/通知发送）；唯一残留写点=notify-read-status 的已读固化回写
+        --   release_assignee_read_at（仅历史 sent 数据可达，生产 0 行，codex 208 审 HIGH-1 精确口径）。仍禁止
+        --   DROP COLUMN/复用/改写语义——DROP 是 37 列表重建硬约束下禁止的操作；历史数据读路径保留。
         release_assignee_id INTEGER,
         release_assignee_name TEXT,
-        -- ── 通知改造 follow-up（2026-07-07）：第 5 类「通知上线开发」——admin 指定上线执行开发后手动通知其执行 hotfix/发版。
-        --   镜像 creator_notify_* 五列范式（byId 发送，无 phone 快照）；旧库 ALTER 路径见 runSysMigration [1a-3]。
+        -- ── 通知改造 follow-up（2026-07-07）：第 5 类「通知上线开发」5 列——镜像 creator_notify_* 五列范式（byId 发送，无 phone 快照）；旧库 ALTER 路径见 runSysMigration [1a-3]。
+        --   [C5 起] 不再被 sys_releases 侧镜像双写触碰（syncReleaseLegacyMirror 已删）；[2026-07-30 起] 唯一写入方
+        --   （旧上线编排 notify-release-executor(-batch) 经 recordSysReleaseExecutorNotify）亦随家族封禁整体删除。
+        --   ⚠️ 精确口径（codex 208 审 HIGH-1 修正）：5 列中 4 列零写路径；release_assignee_read_at 尚存唯一残留写点=
+        --   notify-read-status?type=release_executor 的已读固化回写（仅对历史 sent+message_key 数据可达，生产 0 行，前端触发点已删）。
         release_assignee_notify_status TEXT NOT NULL DEFAULT 'not_sent' CHECK (release_assignee_notify_status IN ('not_sent','sent','failed')),
         release_assignee_notified_at DATETIME,
         release_assignee_notify_message_key TEXT,
@@ -547,6 +621,12 @@ module.exports = (deps) => {
       //   （issue_id + action_code + operator_id 三等值），既有 idx_sys_timeline_issue 只覆盖前一列。
       //   本表是只增流水（每单每次流转写行），随数据增长该子查询会退化为逐单扫描 → 补三列复合索引。
       db.run(`CREATE INDEX IF NOT EXISTS idx_sys_timeline_actor_action ON sys_issue_timeline(issue_id, action_code, operator_id)`, recordSysErr('idx_sys_timeline_actor_action'));
+      // ── 上线体统一重构 C0（方案 v3.4 §6.13，2026-07-28）：上线单动作反查索引 ──────────────────────────
+      //   反查双条件 `event_type='scope_change' AND action_code IN (...) AND ref_id=<上线单id>`；本索引配
+      //   ref_id 等值 + action_code 覆盖。ref_id/action_code 均是本表**首版原生列**（非 ALTER 追加），故可与
+      //   其余索引同批建在 initSchema（不存在"列尚未 ALTER 到位、索引编译期撞 no such column"的时序风险，
+      //   区别于下方 idx_sys_releases_assignee 那种建在 ALTER 追加列上的索引）。
+      db.run(`CREATE INDEX IF NOT EXISTS idx_sys_timeline_action_ref ON sys_issue_timeline(ref_id, action_code)`, recordSysErr('idx_sys_timeline_action_ref'));
 
       // ── 2.4 sys_issue_attachments（附件，§4.3）──────────
       //   attachment_type CHECK 含 spec（建单需求附件，方案 C）；status CHECK active/superseded（无 pending，09-M3）。
@@ -698,6 +778,62 @@ module.exports = (deps) => {
       db.run(`CREATE INDEX IF NOT EXISTS idx_sys_delete_audit_issue ON sys_issue_delete_audit(issue_id)`, recordSysErr('idx_sys_delete_audit_issue'));
       db.run(`CREATE INDEX IF NOT EXISTS idx_sys_delete_audit_deleted_at ON sys_issue_delete_audit(deleted_at)`, recordSysErr('idx_sys_delete_audit_deleted_at'));
 
+      // ── 2.11 sys_release_duty_roster（上线值班排班表，上线体统一重构方案 v3.4 §6.2，2026-07-28）──────────
+      //   **全新表**——CREATE TABLE IF NOT EXISTS 首次真建，直接带完整 CHECK 上线（同 sys_issue_delete_audit
+      //   首版范式，不走 alterAddMissingCols——那是给"已存在表加列"用的，本表整表是新的）。
+      //   ⚠️ C0 硬门槛（方案 §6.2 注·锚点 14）：SQLite 已建表无法补 CHECK，本 DDL 必须在首次建表时即为
+      //   最终版——尤其软删成组 CHECK 第二分支须显式 `removed_by_name IS NOT NULL`（v3.4 codex L-1 修正：
+      //   SQLite CHECK 结果为 NULL 时不拒绝该行，`length(trim(removed_by_name)) > 0` 单独写在
+      //   removed_by_name IS NULL 时求值为 NULL → 半软删可逃逸写入，故须与 duty_date 的 date(...,'+0 days')
+      //   IS NOT NULL 同源显式判空）。
+      //   ⚠️ 环境偏差修正（主会话 2026-07-28 实测裁定，建表前唯一修补窗口）：实测 sqlite 3.44.2 裸
+      //   `date(duty_date)`（不带 modifier）对"月内溢出但数字仍在 GLOB 允许范围"的日期（如 02-30、非闰年
+      //   02-29、04-31）**原样回显、不做 Julian 回转归一化**——`date('2026-02-30')` = '2026-02-30'
+      //   （非 NULL 也不等于'2026-03-02'），导致方案 v3.4 §6.2 原式"date() 归一化不等于原值→拒"这条防线
+      //   对月内溢出日期实际不生效。改为 `date(duty_date,'+0 days')`（带 '+0 days' modifier）后，sqlite
+      //   会走 Julian day 计算再回转，真正触发归一化：'2026-02-30'→'2026-03-02'（≠原值→拒）、
+      //   非闰年'2026-02-29'→'2026-03-01'（≠原值→拒）、闰年'2024-02-29'→'2024-02-29'（=原值→放行）。
+      //   9 组用例经**主会话外部实测**（独立 probe 脚本直连 sqlite3 验证 date(x,'+0 days') 归一化语义）
+      //   符合方案意图，此为方案原式与实际运行环境的已知偏差修正（裁定=方案意图>方案字面 DDL），非本次
+      //   实现新引入的逻辑变更；**本 verify-sys-schema.js [11c] 覆盖清单**是另一层——它是走真实
+      //   initSchema() 建表 + 真实 CHECK 拒写的自动化回归断言（非临时 probe），两者验证目标一致但载体不同。
+      //   ⚠️ codex C0 审收口（0 HIGH/1 MED/4 LOW，主会话裁定，2026-07-28，建表前唯一修补窗口）三处加固：
+      //   ① 软删成组 CHECK 第二分支追加 `datetime(removed_at) IS NOT NULL`（removed_at 系服务端
+      //     datetime('now') 生成、无月内溢出输入面，故不需要 duty_date 那种 '+0 days' 归一化技巧，
+      //     datetime() 判 NULL 足够拦空串/纯空格/垃圾串这类污染值）与 `removed_by > 0`（防 0/负数占位符
+      //     伪装成"已处理"）；② user_id 补 `CHECK (user_id > 0)`；③ created_by 补 `CHECK (created_by > 0)`
+      //     （均防 0/负数这类非法 id 静默入库）。
+      //   ⚠️ codex LOW-2（duty_date 未设业务下限，如拒绝早于建表日期的历史值）**裁定不采纳**——DB 层只做
+      //     结构校验（GLOB 格式 + 归一化后一致），SQLite 接受 0000-9999 全日期域；具体业务允许的排班日期
+      //     范围（如"不得早于今天""不得超前 N 天"）是运行时会变的业务规则，交服务层校验，DB 层不写死。
+      db.run(`CREATE TABLE IF NOT EXISTS sys_release_duty_roster (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        duty_date       DATE    NOT NULL
+                          CHECK (duty_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'
+                                 AND date(duty_date,'+0 days') IS NOT NULL
+                                 AND date(duty_date,'+0 days') = duty_date),
+        user_id         INTEGER NOT NULL CHECK (user_id > 0),
+        user_name       TEXT    NOT NULL CHECK (length(trim(user_name)) > 0),
+        note            TEXT    CHECK (note IS NULL OR length(note) <= 200),
+        created_by      INTEGER NOT NULL CHECK (created_by > 0),
+        created_by_name TEXT    NOT NULL CHECK (length(trim(created_by_name)) > 0),
+        created_at      DATETIME NOT NULL DEFAULT (datetime('now','localtime')),
+        removed_at      DATETIME,
+        removed_by      INTEGER,
+        removed_by_name TEXT,
+        CHECK (
+          (removed_at IS NULL     AND removed_by IS NULL     AND removed_by_name IS NULL)
+          OR
+          (removed_at IS NOT NULL AND datetime(removed_at) IS NOT NULL
+           AND removed_by IS NOT NULL AND removed_by > 0
+           AND removed_by_name IS NOT NULL AND length(trim(removed_by_name)) > 0)
+        )
+      )`, recordSysErr('sys_release_duty_roster'));
+      db.run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_sys_duty_roster_active
+        ON sys_release_duty_roster(duty_date) WHERE removed_at IS NULL`, recordSysErr('idx_sys_duty_roster_active'));
+      db.run(`CREATE INDEX IF NOT EXISTS idx_sys_duty_roster_user
+        ON sys_release_duty_roster(user_id, duty_date)`, recordSysErr('idx_sys_duty_roster_user'));
+
       // ── 2.8 sys_issue_release_commit_snapshots（C0，多开发协作与 commit 留痕重构 v2.9 §9/附录C）──────────
       //   发布冻结快照（D3）；UNIQUE(release_id,issue_id) 保证同一 (release_id,issue_id) 生命周期只快照一次
       //   （方案 §8「快照基数与插入语义」，写入用 ON CONFLICT(release_id,issue_id) DO NOTHING，禁 INSERT OR IGNORE
@@ -799,7 +935,8 @@ module.exports = (deps) => {
         }
       };
       const BUG_FLOW_ISSUE_COLS = [
-        ['needs_release', 'INTEGER'],              // NULL=未填；1=发版/0=不发版（§8.2，② 端点写入+枚举校验）
+        ['needs_release', 'INTEGER'],              // [上线体统一重构 C3→C6 起只读残留] 唯一写点 set-release-flag
+        //   已 410 退场，恒停在初值 NULL；旧库 ALTER 路径同 CREATE TABLE 处完整只读残留说明，不重复展开。
         ['related_correction_no', 'TEXT'],         // §7 软关联修正单号（④ 建单接收）
         ['derive_reason', 'TEXT'],                 // §4 双描述·派生原因（⑤ derive 端点必填）
         ['fix_gap_note', 'TEXT'],                  // §4 双描述·修复缺口说明（⑤ submit 闸门）
@@ -898,7 +1035,8 @@ module.exports = (deps) => {
         ['requester_notify_sent_by', 'INTEGER'],            // 业务方侧——**唯一对外发声通道**，本片最核心的一列
         ['creator_notify_sent_by', 'INTEGER'],              // 建单人侧
         ['relay_notify_sent_by', 'INTEGER'],                // 对接人侧（通道随 C0 关闭 path B 正在退场，仍补齐以免留半拉子不变量）
-        ['release_assignee_notify_sent_by', 'INTEGER'],     // 上线开发侧（单条端点 + 批量端点两个写点共用）
+        ['release_assignee_notify_sent_by', 'INTEGER'],     // 上线开发侧（单条端点 + 批量端点两个写点共用）——
+        //   C5 起注记见 CREATE TABLE sys_issues 处 release_assignee_id 列旁的完整说明（8 列只读残留 vs 旧上线编排活跃字段）。
       ];
       await alterAddMissingCols('sys_issues', NOTIFY_SENT_BY_ISSUE_COLS, '角色权限重构 C2b·五通道通知操作者留痕');
       await alterAddMissingCols('sys_issue_dev_assignees', [['notify_sent_by', 'INTEGER']],
@@ -1113,6 +1251,33 @@ module.exports = (deps) => {
         throw new Error(`C2.5 撤销存量迁移失败：${pdErr && pdErr.message}`);
       }
 
+      // [1a-10] ⭐ 上线体统一重构 C0（方案 v3.4 §6.1，2026-07-28）：sys_releases 已上线表演进——补 10 列
+      //   （上线值班执行人 id/name + 通知状态机 6 列 + release_kind 应急标记）。ALTER 不带 CHECK（SQLite ALTER
+      //   补约束受限，同 release_type/needs_release/relay_notify_status 先例）——值域由服务层枚举校验 + verify
+      //   断言兜底（新库 CREATE 路径全量 CHECK，见 initSchema 2.1 段），两路径不变量等效。
+      //   release_assignee_notify_status/release_kind 用 NOT NULL DEFAULT 常量可通过 ALTER 回填旧行
+      //   （同 relay_notify_status 先例）。
+      //   ⚠️ 顺序铁律同 [1a]：这 10 列已入 SYS_RELEASES_KEY_COLS——本 ALTER 必须在下方 [2] 关键列复查之前完成。
+      const RELEASE_DUTY_ASSIGNEE_COLS = [
+        ['release_assignee_id', 'INTEGER'],
+        ['release_assignee_name', 'TEXT'],
+        ['release_assignee_notify_status', "TEXT NOT NULL DEFAULT 'not_sent'"],
+        ['release_assignee_notify_started_at', 'DATETIME'],
+        ['release_assignee_notified_at', 'DATETIME'],
+        ['release_assignee_notify_message_key', 'TEXT'],
+        ['release_assignee_notify_error', 'TEXT'],
+        ['release_assignee_notify_token', 'TEXT'],
+        ['release_assignee_read_at', 'DATETIME'],
+        ['release_kind', "TEXT NOT NULL DEFAULT 'normal'"],
+      ];
+      await alterAddMissingCols('sys_releases', RELEASE_DUTY_ASSIGNEE_COLS, '上线体统一重构 C0·方案 v3.4 §6.1');
+      // ⚠️ 索引须在上方 ALTER 之后建：release_assignee_id 是本步 ALTER 才追加的列，旧库在 ALTER 之前不存在
+      //   该列——若把这条 CREATE INDEX 挪去 initSchema 的 serialize 块（建表阶段），旧库会在 ALTER 执行前
+      //   先跑到它、撞"no such column: release_assignee_id"（同本文件 341 行"CREATE INDEX 编译期校验列名，
+      //   与 CREATE TABLE 并发触发竞态"同源问题，只是这里的竞态对象是 ALTER 而非 CREATE TABLE）。新库该列
+      //   已在初版 CREATE 里，此处 IF NOT EXISTS 对新库是幂等 no-op、不受影响。
+      await dbRunAsync(`CREATE INDEX IF NOT EXISTS idx_sys_releases_assignee ON sys_releases(release_assignee_id)`);
+
       // [1a-7b/1a-8 已移除] ⭐ 角色权限重构 C0（codex 四轮审 HIGH-1/HIGH-2）：
       //   原先在此处"创建受理门触发器"+"启动哨兵只告警"，两者都有生命周期缺陷——
       //   前者不在 finally 里（迁移任一早退/抛错都会让触发器长期缺失），后者只记日志不阻断
@@ -1203,9 +1368,10 @@ module.exports = (deps) => {
       //   HISTORICAL_SNAPSHOT_MISSING 降级逻辑留给 C3 read-status 端点按此组合判读（不新增标记列，任务书 §批1 口径）。
       //   生产 sys_issues=0 行，本缺口生产不可达；测试库验证见 verify-sys-bug-migration.js。
 
-      // [2] 九表关键列 PRAGMA 复查（抽样锚点，非全字段；[1a]/[1a-2]/[1a-4] ALTER 后的最新列集）
-      //   ⚠️ 表数随 SYS_REQUIRED_TABLES 增长（C2a 起含 sys_issue_delete_audit）——新增表建完必须同时进
-      //   SYS_REQUIRED_TABLES（表在）与本 checks（列全），只进一处会留"表在但列缺"的半成品放行缺口。
+      // [2] 十表关键列 PRAGMA 复查（抽样锚点，非全字段；[1a]/[1a-2]/[1a-4]/[1a-10] ALTER 后的最新列集）
+      //   ⚠️ 表数随 SYS_REQUIRED_TABLES 增长（C2a 起含 sys_issue_delete_audit，上线体统一重构 C0 起含
+      //   sys_release_duty_roster）——新增表建完必须同时进 SYS_REQUIRED_TABLES（表在）与本 checks（列全），
+      //   只进一处会留"表在但列缺"的半成品放行缺口。
       const checks = [
         ['sys_issues', SYS_ISSUES_KEY_COLS],
         ['sys_releases', SYS_RELEASES_KEY_COLS],
@@ -1218,6 +1384,8 @@ module.exports = (deps) => {
         ['sys_issue_release_commit_snapshots', SYS_RELEASE_COMMIT_SNAPSHOTS_KEY_COLS],
         // ← C2a 物删审计表（角色权限重构）：结构全列在才放行——审计列缺失 = 删除留不下证据，fail-closed 到 503。
         ['sys_issue_delete_audit', SYS_DELETE_AUDIT_KEY_COLS],
+        // ← 上线体统一重构 C0（方案 v3.4 §6.2）：排班表，结构全列在模型（同 dev_assignees/delete_audit 首版）。
+        ['sys_release_duty_roster', SYS_DUTY_ROSTER_KEY_COLS],
       ];
       for (const [tbl, keyCols] of checks) {
         const cols = await new Promise((resolve, reject) => {
@@ -1938,6 +2106,24 @@ module.exports = (deps) => {
       // [1] 查 transition 常量（type + action + fromStatus → 唯一 transition）
       const transition = T.findTransition(type, action, fromStatus);
       if (!transition) {
+        // [C6·方案 v3.4 §6.5] reopen 的 from 已收窄为仅「已关闭」（两流同步，见 transitions.js）——
+        //   从「已上线」（未归档）调用 reopen 现查无此边，给更精确的 409「须先归档」而非泛化的 400
+        //   INVALID_TRANSITION：语义上"动作合法但业务前置未满足"更贴近本函数其余同类场景（如
+        //   NOTIFY_NOT_SENT）的 409 措辞哲学，附录 A 明列「reopen｜admin·已上线（未归档）｜409」。
+        //   仅对 reopen 单独精判，不改动其余动作的 400 兜底面（那些是"动作对该态从未定义过"的真泛化拒绝）。
+        //   ⭐ [codex 204 审收口] 精判加两道限定，避免收窄带来的两处语义回退：
+        //   ① **类型限定**（审 HIGH-1 降级采纳为防御纵深）：仅对"确实支持归档→重开"的类型精判——用
+        //      `findTransition(type,'reopen','已关闭')` 非 null 表达（config 等未登记类型恒 null，
+        //      transitions.js:64 fail-closed 基石）。当前 config 流是 TODO 未实现、建单入口即 400
+        //      TYPE_NOT_SUPPORTED 拒绝，故该分支当前不可达；此限定是为"未来 config 流实现时不误伤"预留。
+        //   ② **权限限定**（审 MED-1 采纳·真回退）：本精判位于 [1]，早于 [3] roleGuard——收窄前该边存在时
+        //      非 admin 会在 [3] 得 403，收窄后若一律给 409 等于把业务态信息（"该单已上线未归档"）暴露给
+        //      无权限者，且权限语义回退。故仅 admin 得精判 409，非 admin 落下方泛化 400（不泄露业务事实）。
+        if (action === 'reopen' && fromStatus === '已上线'
+            && T.findTransition(type, 'reopen', '已关闭')
+            && actor && actor.role === 'admin') {
+          throw new SysTransitionError(409, 'ISSUE_NOT_ARCHIVED', '已上线的迭代单需先「归档」才能重开');
+        }
         throw new SysTransitionError(400, 'INVALID_TRANSITION', `「${type}」单在「${fromStatus}」态不能执行「${action}」`);
       }
       // 目标态解析（codex 15 M-1：动态目标态必须在事务内解析，杜绝 stale 并发读）：
@@ -5557,49 +5743,15 @@ module.exports = (deps) => {
   //   mode 参数，H-2）；本端点对 type='bug' 一律 LEGACY_RELEASE_FLOW_DISABLED（本端点历史上只服务 bug——
   //   findTransition 对 feature/improvement 从未定义 set_release_flag，故本端点 100% 面向 bug 流量，
   //   本次退场即整端点实质停用）。needs_release 列转只读残留（F5，历史 timeline 标签保留渲染）。
-  router.post('/sys-issues/:id/set-release-flag', authenticateToken, requireSysSchemaReady, async (req, res) => {
-    const id = parsePositiveId(req.params.id);
-    if (!id) return res.status(400).json({ error: '无效的迭代单 ID', code: 'INVALID_SYS_ISSUE_ID' });
-    const raw = (req.body || {}).needs_release;
-    if (raw !== 0 && raw !== 1) return res.status(400).json({ error: 'needs_release 仅支持 0（不发版）/1（发版）', code: 'INVALID_NEEDS_RELEASE' });
-    try {
-      const actor = sysActor(req);
-      await sysBeginImmediate();
-      try {
-        const row = await dbGetAsync('SELECT id, type, status, assigned_to, release_id FROM sys_issues WHERE id = ?', [id]);
-        if (!row) { await sysRollback(); return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' }); }
-        if (row.type === 'bug') {
-          await sysRollback();
-          return res.status(409).json({ error: '该功能已下线，bug 上线流程请改用「批量指定上线开发」+「执行上线」', code: 'LEGACY_RELEASE_FLOW_DISABLED' });
-        }
-        // set_release_flag 合法前置态（历史仅 bug 流定义；feature/improvement 从未有此条目，findTransition 恒 null，防御性保留）
-        const t = T.findTransition(row.type, 'set_release_flag', row.status);
-        if (!t) { await sysRollback(); return res.status(409).json({ error: `当前状态「${row.status}」不可填发版信息`, code: 'SET_RELEASE_FLAG_STATUS_INVALID' }); }
-        const isAssignee = Number(row.assigned_to) === actor.id && actor.id > 0;
-        if (!isAssignee) { await sysRollback(); return res.status(403).json({ error: '仅被指派开发本人可填发版信息', code: 'NOT_AUTHORIZED_FOR_TRANSITION' }); }
-        if (row.release_id !== null) { await sysRollback(); return res.status(409).json({ error: '该单已挂上线批次，不能再改发版信息', code: 'ISSUE_ALREADY_IN_RELEASE' }); }
-        const upd = await dbRunAsync(
-          `UPDATE sys_issues SET needs_release = ?, updated_at = datetime('now','localtime')
-             WHERE id = ? AND status = ? AND assigned_to = ? AND release_id IS NULL`,
-          [raw, id, row.status, actor.id]
-        );
-        if (!upd || upd.changes !== 1) { await sysRollback(); return res.status(409).json({ error: '迭代单状态已变更，请刷新重试', code: 'CONCURRENT_STATE_CHANGE' }); }
-        await dbRunAsync(
-          `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, operator_id, operator_name)
-           VALUES (?, 'status_change', ?, 'set_release_flag', ?, ?)`,
-          [id, raw === 1 ? '发版' : '不发版', actor.id, actor.name]
-        );
-        await sysCommit();
-      } catch (txErr) {
-        try { await sysRollback(); } catch (_) { /* ignore */ }
-        throw txErr;
-      }
-      res.json({ id, needs_release: raw });
-    } catch (err) {
-      if (err instanceof SysTransitionError) return sendSysTransitionError(res, err);   // F2：SYS_BUSY 等保 503
-      logger.error('[系统迭代] 填发版信息失败:', err && err.message);
-      res.status(500).json({ error: (err && err.message) || '填发版信息失败' });
-    }
+  // ── C3 退场（方案 §6.7/§6.14/附录A）：POST /sys-issues/:id/set-release-flag 全类型 410 Gone ──────────
+  //   本端点早于 C3 已对 bug 恒 409、对 feature/improvement 因 findTransition 恒返 null 而恒 409
+  //   SET_RELEASE_FLAG_STATUS_INVALID——两类型都已是事实上的死端点，C3 明确收口为 410（而非继续
+  //   409），语义更准确："资源曾经存在、现已永久移除"，与"业务前置条件不满足"的 409 区分开。
+  router.post('/sys-issues/:id/set-release-flag', authenticateToken, requireSysSchemaReady, (req, res) => {
+    res.status(410).json({
+      error: '该端点已下线（410 Gone）：发版信息填写流程已随上线体统一重构退场，无需再单独标记 needs_release',
+      code: 'ENDPOINT_GONE',
+    });
   });
 
   // ── POST /sys-issues/:id/feasibility：填可行性评估（在册开发，不改 status，旁路独立事务，F2b §4.1 / v1.7 §十九）──────────
@@ -6477,9 +6629,12 @@ module.exports = (deps) => {
   const SYS_RELEASE_TITLE_MAX = 200;    // 批次说明长度上限
   const SYS_BATCH_ISSUE_MAX = 200;      // E（ultracode 安全）：单次加/移单元素数上限（防超大数组 DoS）
   // bug 流 Commit ② 起 'bug' 恢复可进批次/hotfix（① 曾临时收窄防 needs_release 未填被误发）：
-  //   闸门收敛到「bug 类型的 needs_release 必须=1」——add-issues/hotfix-publish/_publishReleaseCoreInTxn
-  //   三处写入口均同步加 needs_release=1 校验（K1，运行时防线，旧库 ALTER 无 CHECK）+ release_type 批次隔离
-  //   （§8.3 [审:L1]，add-issues 校一致禁混批）。config 不进批次（§6.1）不变。
+  //   闸门当时收敛到「bug 类型的 needs_release 必须=1」——add-issues/hotfix-publish/_publishReleaseCoreInTxn
+  //   三处写入口曾同步加 needs_release=1 校验（K1，运行时防线，旧库 ALTER 无 CHECK）+ release_type 批次隔离
+  //   （§8.3 [审:L1]，add-issues 校一致禁混批）。**历史设计，现状**：_publishReleaseCoreInTxn 的校验随
+  //   v1.6/C3b 退场（见其函数体内注释）、release_type 族别隔离随 C5"混批守卫拆除"整体删除（方案 §5a）、
+  //   add-issues 的 needs_release=1 条件随本次双闸拆除删除（2026-07-29 主会话裁定选项 A）——三处校验现已
+  //   全部不存在，config 不进批次（§6.1）是本表仅存的原样闸门。
   const RELEASABLE_TYPES = ['feature', 'improvement', 'bug'];
 
   // ── D-A（codex H-1 + ultracode CT-1，用户 2026-07-03 拍板）：批次按「族别」隔离，非精确 type ──────────
@@ -6511,23 +6666,41 @@ module.exports = (deps) => {
     return prefix + (maxSeq + 1);
   }
 
-  // ── C6：发布冻结快照写入（§8「快照基数与插入语义」，**假定调用方已 BEGIN IMMEDIATE**）─────────
+  // ── C6→C2a 演进：发布冻结快照写入（§8「快照基数与插入语义」+ 上线体统一重构 §6.6a 快照 v2，
+  //   **假定调用方已 BEGIN IMMEDIATE**）─────────
   //   同一 (release_id,issue_id) 生命周期只快照一次：INSERT ... ON CONFLICT(release_id,issue_id) DO NOTHING
   //   （禁 INSERT OR IGNORE——会静默吞 NOT NULL/CHECK 等一切约束失败，方案 §8 明文）。
   //   changes 读取纪律（Lz-1）：changes 直接取本 INSERT 语句的 dbRunAsync 返回值（`this.changes`，sqlite3 单连接
   //   serialize 队列内该 Promise resolve 时即该语句执行完毕的直接结果，中间未插入任何其他语句），非另起查询估算。
   //   changes=0 → 同事务显式 SELECT 确认该 (release_id,issue_id) 是否已存在快照行：存在→视为已冻结继续（幂等，
   //   覆盖"同一批次内理论不会二次发布但脏库/竞态"防线）；不存在→抛错，由调用方 catch 整体 ROLLBACK 发布事务。
-  //   snapshot_json 由 JS 层查 sys_issue_dev_commits 全部现存行（含 removed 实例，方案 §8 明文）拼数组后
-  //   JSON.stringify——不用 SQL 聚合（防 LEFT JOIN 誤产：零行本应 []，聚合函数在无匹配行时常产出单个
-  //   全 NULL 聚合结果而非空集，见 Mz-5）。commit_id 即表主键 id，ORDER BY id ASC 天然升序。
-  async function snapshotReleaseCommitsInTxn(releaseId, issueId) {
+  //   ⭐ C2a snapshot v2（方案 §6.6a，codex 三源统一字段集）：snapshot_json 从纯 commit 数组升级为对象
+  //   `{schema_version:2, type, title_snapshot, status_at_publish, commits}`——`issue` 入参须含
+  //   `{id, type, title}`（调用方 `_publishReleaseCoreInTxn` 的 members 查询已补 `title` 列）；
+  //   `status_at_publish` 固定为 `'已上线'`——本函数只在批量翻牌 UPDATE 成功（`changes===expected`）之后被
+  //   调用，届时所有成员必已是「已上线」，无需另查，直接常量赋值（同一事务内的确定性事实，非猜测）。
+  //   **启动门已拍板**：不写 v1（纯数组）兼容读端——GET /sys-releases/:id/commit-snapshots 的读端小兼容
+  //   分支（同时接受数组/对象两种历史形态）不算"v1 兼容读端"，那专指 getReleaseMembers()（C4 才做）。
+  //   commits 数组本身仍是 JS 层查 sys_issue_dev_commits 全部现存行（含 removed 实例，方案 §8 明文）拼出，
+  //   不用 SQL 聚合（防 LEFT JOIN 誤产：零行本应 []，聚合函数在无匹配行时常产出单个全 NULL 聚合结果而非
+  //   空集，见 Mz-5）。commit_id 即表主键 id，ORDER BY id ASC 天然升序。
+  //   **返回值**：v2 payload 对象（供调用方复用同一份 commits 查询结果去写 release_published timeline 载荷，
+  //   不重复查一次 sys_issue_dev_commits）。
+  async function snapshotReleaseCommitsInTxn(releaseId, issue) {
+    const issueId = issue.id;
     const commitRows = await dbAllAsync(
       `SELECT id AS commit_id, dev_assignee_id, dev_user_id, component, commit_ref, created_at, updated_at
          FROM sys_issue_dev_commits WHERE issue_id = ? ORDER BY id ASC`,
       [issueId]
     );
-    const snapshotJson = JSON.stringify(commitRows);   // 零行 → commitRows=[] → '[]'（Mz-5 固定合法空数组）
+    const payload = {
+      schema_version: 2,
+      type: issue.type,
+      title_snapshot: issue.title,
+      status_at_publish: '已上线',
+      commits: commitRows,   // 零行 → []（Mz-5 固定合法空数组）
+    };
+    const snapshotJson = JSON.stringify(payload);
     const ins = await dbRunAsync(
       `INSERT INTO sys_issue_release_commit_snapshots (release_id, issue_id, snapshot_json, created_at)
        VALUES (?, ?, ?, datetime('now','localtime'))
@@ -6545,6 +6718,7 @@ module.exports = (deps) => {
       }
       // 已存在 → 视为已冻结，继续（幂等；正常路径不可达——同一 (release_id,issue_id) 只有一次发布边——此为防御性覆盖）。
     }
+    return payload;
   }
 
   // 事务内发布核心（**假定调用方已 BEGIN IMMEDIATE**，本函数不 begin/commit/rollback）。
@@ -6559,10 +6733,64 @@ module.exports = (deps) => {
   //     （方案 §2.5"publish=变更流 publish 动作"这一桶的结构特征=建真批次/产快照，hotfix-publish 完全符合，
   //     不是 execute-release 的 hotfix 分支——那支不建批次不落 release_id，语义不同）
   //   - `execute-release`(mode=publish) → action='execute-release', actionKind='execute'
+  //
+  // [C9·codex 207 审 HIGH-2 轻量采纳] 不变量显式声明——「同一 release_id 永不二次发布」：
+  //   本函数把 releaseId 写入 sys_releases.status='已发布'（下方步骤4末尾 UPDATE，WHERE status='计划中'）
+  //   后，该行的 status 全项目再无任何写点会把它拨回「计划中」（status 列仅两处写：本函数这里单向
+  //   计划中→已发布；POST /sys-releases 建批次时的初值，恒'计划中'新建行）。担心点是：若某个已发布
+  //   release 的旧成员被 close→reopen 后又设法"回到"同一个 release_id 并再次触发本函数，
+  //   snapshotReleaseCommitsInTxn 的 `INSERT ... ON CONFLICT(release_id,issue_id) DO NOTHING` 会让
+  //   第二次快照静默丢弃（旧快照原样保留、新 commits 变更进不去），同时下方 H-3 步骤4 的
+  //   release_published timeline 行没有唯一约束，会对同一 (release_id,issue_id) 多插一条。
+  //   该场景由两道独立守卫组合兜死（缺一不可，需同时失效才会真出问题）：
+  //     ① reopen 不动 release：sysIssueTransition 的 reopen sideEffects（transitions.js 变更流/bug 流两条
+  //        目分别在 ~363/~665 行）只清 issue 自身列（accepted_at/released_at/closed_at/release_id/
+  //        dev_estimated_at/scheduled_start），从未写过 sys_releases 任何列——reopen 后该 issue 的
+  //        release_id 被清空、脱离原批次，但原批次那一行的 status 原地不动，永远停在「已发布」。
+  //     ② add-issues 拦非「计划中」：POST /sys-releases/:id/add-issues（本文件 ~7643 行）前置校验
+  //        `rel.status!=='计划中'` 才放行加单——即使有人拿 reopen 后释放出来的 issue 硬要传回**同一个**
+  //        已发布 release_id，也会在加单这一步先吃 409 RELEASE_NOT_PLANNING，走不到本函数。
+  //   纵深第三层（本函数自身）：即便前两道被绕过（如未来新功能允许「已发布」批次撤回改「计划中」），
+  //   本函数入口处的 `rel.status !== '计划中'` 前置校验（上方数行）与步骤4末尾 UPDATE 的
+  //   `WHERE status='计划中' AND changes===1` 双重确认仍会各自单独拦下——三层任一存活，不变量都不破。
+  //   ⚠️ 若上述守卫在未来被同时削弱/绕过：真实后果**不是**"静默产出错误但被判完整的数据"——
+  //   getReleaseMembers()（下方 C4 段）的完整性校验除 Set 去重后的 `expectedIds.size` 外，另有一条
+  //   `snapRows.length === publishedTlRows.length` 的**原始行数**比对（[C5 收口批·codex 203 审 A 项]
+  //   专为这个假设场景加的防线，见其函数体内该行注释），timeline 重复行会让这个原始行数比对失配，
+  //   从而正确判 `degraded`（返回红线提示"历史记录不完整"）而非误判完整——真实后果是**发布历史从
+  //   精确快照降级为不可用**（用户可见的功能损失），不是静默数据污染。verify-sys-release-batch.js
+  //   ⑬组内的「⑬-C9锁定」子断言直接构造这一具体场景（已发布批次成员 close→reopen 后加回同一旧批次）
+  //   锁定当前代码下②这道守卫确实生效，防回归。
   async function _publishReleaseCoreInTxn(releaseId, actor, payload = {}, action, actionKind) {
-    const rel = await dbGetAsync('SELECT id, status, release_note, version_tag, release_type FROM sys_releases WHERE id = ?', [releaseId]);
+    const rel = await dbGetAsync(
+      // [C5 收口批] release_type 列已从本 SELECT 移除——族别一致性检查随"混批守卫拆除"一并删除后，
+      //   本函数体内不再有任何地方读取 rel.release_type（已核对，见上方族别检查删除处注释）。
+      `SELECT id, status, release_note, version_tag,
+              release_assignee_id, release_assignee_notify_status AS notify_status
+         FROM sys_releases WHERE id = ?`,
+      [releaseId]
+    );
     if (!rel) throw new SysTransitionError(404, 'RELEASE_NOT_FOUND', '上线批次不存在');
     if (rel.status !== '计划中') throw new SysTransitionError(409, 'RELEASE_NOT_PLANNING', '批次非「计划中」，不能发布');
+
+    // ── C3 中心守卫（方案 §6.10）：进入「已上线」的唯一合法上下文——本函数自己在同一写事务内读取
+    //   release_assignee_id/notify_status 并判定，**不接受调用方传入的"已验证"标记**。任何调用方
+    //   （HTTP 端点或内部直调，如 verify 直调 publishReleaseTransition/_internals 绕过 HTTP）想让某个
+    //   release 发布，都必须真实满足这三项，无法绕过——这是"内部调用绕过 HTTP 也会被拦"的具体落点。
+    //   ⚠️ 与 /execute 路由自身的前置校验逐字同码（EXECUTOR_GUARD_FAILED/EXECUTOR_NOT_ELIGIBLE/
+    //   NOTIFY_NOT_SENT）——对该路由是纯冗余复核（其自身校验已同事务内先做过一遍，这里必然重新通过），
+    //   冗余是有意的防御纵深；对其余任何调用方（现存的 publishReleaseTransition 及未来可能新增的调用方）
+    //   这才是唯一防线。校验顺序=通知态优先于执行人身份（与 /execute 路由既有判序一致，不新造顺序）。
+    if (rel.notify_status !== 'sent') {
+      throw new SysTransitionError(409, 'NOTIFY_NOT_SENT', `通知状态（${rel.notify_status}）非「已通知」，不能执行上线`);
+    }
+    if (!rel.release_assignee_id || Number(rel.release_assignee_id) !== Number(actor.id)) {
+      throw new SysTransitionError(403, 'EXECUTOR_GUARD_FAILED', '仅被通知的值班执行人本人可执行上线');
+    }
+    const centralGuardEligible = await hasReleaseEligibility(actor.id);
+    if (!centralGuardEligible) {
+      throw new SysTransitionError(403, 'EXECUTOR_NOT_ELIGIBLE', '当前账号无执行上线资格（非在职，或为查看者/管理员）');
+    }
 
     // 闸门③（D7，§7·C6 去 version_tag 必填）：release_note trim 非空 + 长度上限；version_tag 仅长度上限，允许空
     //   （SSOT §8「去 version_tag 必填」/S21）。payload 覆盖优先（单步填+发布）。
@@ -6580,7 +6808,9 @@ module.exports = (deps) => {
       [releaseNote, versionTag || null, releaseId, '计划中']);
 
     // H-3 步骤2：读组内 issue，校 ≥1 且全「待上线」（add-issues 已守，此处防并发被移出/重开清空/混入非待上线）。
-    const members = await dbAllAsync('SELECT id, status, type, needs_release FROM sys_issues WHERE release_id = ?', [releaseId]);
+    // ⭐ C2a：members 补 `title` 列——snapshot v2（§6.6a）需要发布时的标题快照 `title_snapshot`，
+    //   不额外查询，直接复用本次已查的 members（同一事务内一致性快照，避免二次 SELECT 产生的读撕裂窗口）。
+    const members = await dbAllAsync('SELECT id, status, type, title, needs_release FROM sys_issues WHERE release_id = ?', [releaseId]);
     if (members.length === 0) throw new SysTransitionError(409, 'RELEASE_EMPTY', '批次内无待上线单，不能发布');
     const bad = members.find(m => m.status !== '待上线');
     if (bad) throw new SysTransitionError(409, 'RELEASE_MEMBER_NOT_READY', `批次内 #${bad.id} 非「待上线」（当前「${bad.status}」），请先移除`);
@@ -6599,16 +6829,12 @@ module.exports = (deps) => {
     //   退场前唯二能带 bug 成员进本函数的旧入口（R2 hotfix-publish 单条 / R4 批次 publish）现均在各自
     //   端点入口处对 type='bug'/release_type='bug' 提前拒绝（本 commit 同步落地），故本谓词移除前后，
     //   legacy 路径实际上都已到不了这里——唯一新增的合法调用方是 execute-release(mode=publish)（G6）。
-    // 族别一致性纵深防线（D-A：bug vs 非bug，codex H-2 fail-closed）：**从成员推导族别强制校验，不依赖存的 release_type**——
-    //   ① 组内成员族别必须唯一（bug 与非 bug 不能混）——覆盖历史 release_type=NULL 混批批次（发布前也挡住）；
-    //   ② release_type 已存且与成员实际族别不符（脏库/手工改）也拒。config 已被 badType 挡（releaseFamilyOf 返 null 亦不计入）。
-    const memberFamilies = [...new Set(members.map(m => releaseFamilyOf(m.type)).filter(Boolean))];
-    if (memberFamilies.length > 1) {
-      throw new SysTransitionError(409, 'RELEASE_MEMBER_TYPE_MISMATCH', '批次内混了 bug 与非 bug 单，不能发布（请拆分）');
-    }
-    if (rel.release_type && memberFamilies[0] && memberFamilies[0] !== rel.release_type) {
-      throw new SysTransitionError(409, 'RELEASE_MEMBER_TYPE_MISMATCH', `批次族别（${rel.release_type}）与成员实际族别（${memberFamilies[0]}）不符，请核对`);
-    }
+    // [C5 收口批·C3 遗留补做] 族别一致性纵深防线（原"混批守卫"）已整体删除——方案 §5a 架构决策表明文
+    //   "混批守卫 → 拆除"，§6.10 发布事务内校验清单里"④ 类型一致"一条也已删除；C3"全类型统一"落地后，
+    //   bug/feature/improvement 可合法同批（deriveReleaseType 把 mixed 列为合法派生值本身即是佐证）。
+    //   原两条检查（① 组内成员族别不可混 ② 与批次已存 release_type 不符也拒）连同 memberFamilies 变量
+    //   一并删除——badType（上方，config 排除）与 needs_release 校验（同上，v1.6 已退场）逐字不动，
+    //   本次只删族别隔离这一层，不影响其余闸门。
     const expected = members.length;
 
     // [codex 102 号 HIGH 回填] RELEASE 守卫接线——此前守卫纯函数已实现 RELEASE 的 action/actionKind 配对 +
@@ -6648,20 +6874,41 @@ module.exports = (deps) => {
       throw new SysTransitionError(409, 'RELEASE_PUBLISH_CONFLICT', '批次内单状态已变更，请刷新重试');
     }
 
-    // H-3 步骤3.5（C6·§8「发布与快照」）：主状态置「已上线」成功后、事务提交前，逐单落发布冻结快照。
-    //   本函数是 publish / hotfix-publish 端点 / execute-release(mode=publish) 三入口的共用内核（见函数头注释），
-    //   快照逻辑长在这唯一交汇点即天然满足"三入口同事务"——execute-release(mode=hotfix) 走的是完全独立的直接
-    //   UPDATE 分支（不经本函数、release_id 恒 NULL），故不产快照，无需额外排除。
+    // H-3 步骤3.5（C6·§8「发布与快照」+ C2a §6.6a v2 演进）：主状态置「已上线」成功后、事务提交前，逐单落
+    //   发布冻结快照。本函数是 publish / hotfix-publish 端点 / execute-release(mode=publish/hotfix) /
+    //   新 execute 端点（C2a）共用内核（见函数头注释），快照逻辑长在这唯一交汇点即天然满足"入口同事务"——
+    //   execute-release(mode=hotfix) 走的是完全独立的直接 UPDATE 分支（不经本函数、release_id 恒 NULL），
+    //   故不产快照，无需额外排除。
+    //   ⚠️ 保留每单快照 payload（Map），供下方 timeline 写 release_published 复用同一份 commits 查询结果，
+    //   不重复查一次 sys_issue_dev_commits（同一批 commit 行两处消费，一次查询）。
+    const snapPayloadByIssue = new Map();
     for (const m of members) {
-      await snapshotReleaseCommitsInTxn(releaseId, m.id);
+      const payload = await snapshotReleaseCommitsInTxn(releaseId, m);
+      snapPayloadByIssue.set(m.id, payload);
     }
 
-    // H-3 步骤4：每单写 release timeline（ref_id=批次 id，summary=上线说明）+ 批次置「已发布」。
+    // H-3 步骤4：每单写 release timeline（ref_id=批次 id，summary=上线说明，**逐字不动，旧流兼容**）
+    //   + **C2a 新增**：每单另写一条 release_published 结构化留痕行（§6.6a/§6.13）+ 批次置「已发布」。
+    //   ⚠️ [C2a 编码前置②探查结论，见完成报告详述] 现有 event_type='release' 行的 `summary` 列被前端
+    //   siRenderTimeline（Sys_Iteration.html:~1302）消费为**人类可读文本**直接 esc() 展示；本表
+    //   （sys_issue_timeline）没有 payload_json 列（那是 sys_issue_dev_commits 表独有，:683）。若把
+    //   §6.6a 结构化 JSON 塞进这条既有行的 summary，会让详情页时间线显示裸 JSON（可见回归）且丢失现有
+    //   人类可读文案。故**不改动**这条既有 release 行的任何字段（event_type/summary/无 action_code）——
+    //   **另写一条**新行（event_type='scope_change'·action_code='release_published'），与 release_add/
+    //   release_remove/release_date_change/release_schedule_cancel 四个新 action_code 同属一套"scope_change
+    //   留痕体系"、地位对等，非从旧行"升级"。JSON 落在这条**新行**的 summary（本表唯一可承载文本的列），
+    //   旧行完全不受影响、前端现有渲染逐字不变。
     for (const m of members) {
       await dbRunAsync(
         `INSERT INTO sys_issue_timeline (issue_id, event_type, from_status, to_status, summary, ref_id, operator_id, operator_name)
          VALUES (?, 'release', '待上线', '已上线', ?, ?, ?, ?)`,
         [m.id, releaseNote, releaseId, Number(actor.id) || null, actor.name || null]
+      );
+      const publishedPayload = { issue_id: m.id, ...snapPayloadByIssue.get(m.id) };
+      await dbRunAsync(
+        `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, ref_id, operator_id, operator_name)
+         VALUES (?, 'scope_change', ?, 'release_published', ?, ?, ?)`,
+        [m.id, JSON.stringify(publishedPayload), releaseId, Number(actor.id) || null, actor.name || null]
       );
     }
     const done = await dbRunAsync(
@@ -6671,6 +6918,347 @@ module.exports = (deps) => {
     if (!done || done.changes !== 1) throw new SysTransitionError(409, 'RELEASE_NOT_PLANNING', '批次状态已变更，请刷新重试');
 
     return { releaseId, releasedIssueIds: members.map(m => m.id), count: expected };
+  }
+
+  // ============================================================
+  // 上线体统一重构 C4（方案 v3.4 §6.6/§6.6a/§6.6b）：getReleaseMembers 统一读源
+  // ============================================================
+  //
+  //   **唯一读源规则**（§6.6）：`release.status='计划中'` → `live`（当前 sys_issues.release_id 直读）；
+  //   `release.status='已发布'` → 优先**快照表**（`sys_issue_release_commit_snapshots`，完整性校验通过）；
+  //   快照缺失或完整性校验失败 → 回落 `sys_issue_timeline` 的 `release_published` 载荷重建，标记 `degraded`。
+  //   `sys_releases.status` CHECK 只有 `计划中`/`已发布` 两值（:390），故本函数只需二分支，无第三态需处理。
+  //
+  //   **三源统一字段集**（§6.6a）：`{issue_id, type, title_snapshot, status_at_publish, commits}`——
+  //   三个源码路径（live/snapshot/degraded）无论走哪一条，`members[]` 里每个元素的字段名逐字相同，消费者
+  //   不必为三态各写一份"这个字段在这一态叫什么名字"的分支。`live` 态没有"发布时"这个时间点，`title_snapshot`
+  //   /`status_at_publish` 取的是**当前**值（live 态语义上等价于"此刻的快照"），`commits` 取当前
+  //   `sys_issue_dev_commits` 全部现存行（与 `snapshotReleaseCommitsInTxn` 写入时的查询逐字同构，未发布
+  //   前这份数据本就在持续变化，是 live 态的正常语义，不是伪造）。
+  //
+  //   **完整性校验的独立锚点**（§6.6a）：不能拿快照表的行数比自己（那样任何整体缺失都会"自认完整"）——
+  //   用同一次发布事务里必然写入的 `release_published` timeline 行数作独立锚点（`_publishReleaseCoreInTxn`
+  //   步骤4对每个发布成员各写一条，见其函数体，与快照写入同一事务，数量天然对等）。快照行数≠该锚点行数，
+  //   或任一行解析失败/`schema_version` 非 2/必需字段缺失 → 整体判 `degraded`（**不允许部分快照当完整返回**，
+  //   §6.6a 原话）。
+  //
+  //   **降级路径"不伪造字段"**（任务 A 硬要求）：timeline 载荷解析失败或字段缺失时，对应字段回填 `null`
+  //   （不是猜测值/不是默认值），字段名进 `unavailable_fields`——与 C2b 对 timeline JSON 解析失败的处理精神
+  //   一致（那处也是"解析不出来就如实说解析不出来"，不拿兜底文案冒充真实内容）。
+  //
+  //   **调用契约**：`release` 至少含 `{id, status}`——多数调用方（GET /sys-releases、GET /sys-releases/:id）
+  //   本就已查过 release 主行，直接传入，不重复查一次 `SELECT status FROM sys_releases`。`status` 严格
+  //   校验值域（[C5 收口批·codex 203 审 B 项]：此前只校验 `id`，`status` 缺失/拼写错/传了非法值时会被
+  //   `!== '已发布'` 静默当 `live` 处理——对一个真实已发布批次会因此错读"当前可变值"而非发布时冻结值，
+  //   是隐蔽的脏读，非"读源判定分支"意义上的第三态）。
+  //
+  //   **`opts.countOnly`**（[C5 收口批·codex 203 审 C 项]）：仅需成员数/`source`/`degraded`（如批次列表）
+  //   时置 `true`——跳过组装完整 `members[]`（live 态跳过 commits JOIN；snapshot/degraded 态跳过逐条构造
+  //   返回对象）。⚠️ 三态判定本身（live/snapshot 完整性校验/degraded 判定的每一步条件）**逐字复用同一段
+  //   代码**，`countOnly` 只影响"要不要把已经算出的结果塞进返回数组"这一步，不是另写一套更"轻"的判定
+  //   逻辑——避免两套判定各自演进后悄悄漂移（两次真实业务事故的教训模式，本函数从设计起就要防）。
+  async function getReleaseMembers(release, opts = {}) {
+    if (!release || !release.id) {
+      throw new Error('getReleaseMembers: release.id 必填（调用方须先查到 release 行再传入，不接受裸 id）');
+    }
+    if (release.status !== '计划中' && release.status !== '已发布') {
+      throw new Error(`getReleaseMembers: release.status 非法（须为「计划中」或「已发布」），实际=${JSON.stringify(release.status)}——调用契约要求传入真实 release 行，不接受缺失/伪造 status（脏读防线，见函数头注释）`);
+    }
+    const releaseId = release.id;
+    const countOnly = !!opts.countOnly;
+
+    if (release.status !== '已发布') {
+      // ── live：计划中 ──
+      const rows = await dbAllAsync(
+        countOnly
+          ? `SELECT id AS issue_id FROM sys_issues WHERE release_id = ? ORDER BY id ASC`
+          : `SELECT id AS issue_id, type, title AS title_snapshot, status AS status_at_publish
+               FROM sys_issues WHERE release_id = ? ORDER BY id ASC`,
+        [releaseId]
+      );
+      if (countOnly) {
+        return { count: rows.length, source: 'live', degraded: false, unavailable_fields: [], duplicate_release_published: [], duplicate_release_published_conflict: [] };
+      }
+      if (rows.length === 0) {
+        return { members: [], source: 'live', degraded: false, unavailable_fields: [], duplicate_release_published: [], duplicate_release_published_conflict: [] };
+      }
+      // commits：与 snapshotReleaseCommitsInTxn 写入时同构查询（当前全部现存行，含软删实例，方案 §8 明文），
+      // 批量查询后按 issue_id 分组（N 单一次查询，非逐单 N 次往返）。
+      const issueIds = rows.map(r => r.issue_id);
+      const ph = issueIds.map(() => '?').join(',');
+      const commitRows = await dbAllAsync(
+        `SELECT issue_id, id AS commit_id, dev_assignee_id, dev_user_id, component, commit_ref, created_at, updated_at
+           FROM sys_issue_dev_commits WHERE issue_id IN (${ph}) ORDER BY id ASC`,
+        issueIds
+      );
+      const commitsByIssue = new Map(issueIds.map(id => [id, []]));
+      for (const c of commitRows) {
+        const { issue_id, ...rest } = c;
+        commitsByIssue.get(issue_id).push(rest);
+      }
+      const members = rows.map(r => ({ ...r, commits: commitsByIssue.get(r.issue_id) || [] }));
+      return { members, source: 'live', degraded: false, unavailable_fields: [], duplicate_release_published: [], duplicate_release_published_conflict: [] };
+    }
+
+    // ── 已发布：优先快照表，完整性校验（countOnly 与否共用本段全部判定代码，见函数头注释）──
+    const snapRows = await dbAllAsync(
+      `SELECT issue_id, snapshot_json FROM sys_issue_release_commit_snapshots WHERE release_id = ? ORDER BY issue_id ASC`,
+      [releaseId]
+    );
+    // 独立锚点：release_published timeline 行（同一发布事务内与快照同步写入，数量=真实发布成员数）。
+    // [C9 二次收口·codex 207 审 MED-1] `ORDER BY issue_id ASC, id ASC`——补第二排序键（`id` 是本表自增
+    //   主键，天然反映写入先后）。仅 `issue_id ASC` 时，同 issue_id 的多行彼此顺序由 SQLite 隐式决定
+    //   （未定义、不保证跨查询稳定），下方"去重取首条"若不加这道稳定排序，脏数据下"首条"到底是哪条会
+    //   随机漂移；加上 `id ASC` 后"首条"确定=该 issue_id 最早写入的那一行，可复现、可解释。
+    const publishedTlRows = await dbAllAsync(
+      `SELECT issue_id, summary FROM sys_issue_timeline
+         WHERE ref_id = ? AND event_type = 'scope_change' AND action_code = 'release_published'
+        ORDER BY issue_id ASC, id ASC`,
+      [releaseId]
+    );
+    const expectedIds = new Set(publishedTlRows.map(r => r.issue_id));
+
+    // [C5 收口批·codex 203 审 A 项] 补 `snapRows.length===publishedTlRows.length` 直接比对（不依赖
+    //   expectedIds 去重后的 `.size`）——当前快照表 `UNIQUE(release_id,issue_id)` + 发布 CAS
+    //   `WHERE status='计划中'` 双防线下，publishedTlRows 出现同 issue_id 重复行理论不可达，本条与
+    //   `snapRows.length===expectedIds.size` 恒等价，是纯防御纵深（廉价，不依赖去重语义）；C6 若允许
+    //   reopen 后复用同一 release_id 二次发布，会让两者真正分叉，到时这条判定才会成为救命的那一条。
+    let complete = expectedIds.size > 0
+      && snapRows.length === expectedIds.size
+      && snapRows.length === publishedTlRows.length;
+    const snapMembers = [];
+    if (complete) {
+      for (const row of snapRows) {
+        if (!expectedIds.has(row.issue_id)) { complete = false; break; }   // 快照行不在预期集合内（脏数据防线）
+        let parsed;
+        try { parsed = JSON.parse(row.snapshot_json); } catch (_) { complete = false; break; }
+        if (!parsed || parsed.schema_version !== 2) { complete = false; break; }
+        if (parsed.type == null || parsed.title_snapshot == null || parsed.status_at_publish == null || !Array.isArray(parsed.commits)) {
+          complete = false; break;
+        }
+        if (!countOnly) {
+          snapMembers.push({
+            issue_id: row.issue_id, type: parsed.type, title_snapshot: parsed.title_snapshot,
+            status_at_publish: parsed.status_at_publish, commits: parsed.commits,
+          });
+        }
+      }
+    }
+    if (complete) {
+      return countOnly
+        ? { count: snapRows.length, source: 'snapshot', degraded: false, unavailable_fields: [], duplicate_release_published: [], duplicate_release_published_conflict: [] }
+        : { members: snapMembers, source: 'snapshot', degraded: false, unavailable_fields: [], duplicate_release_published: [], duplicate_release_published_conflict: [] };
+    }
+
+    // ── degraded：回落 timeline release_published 载荷重建；解析失败/字段缺失一律 null，不伪造 ──
+    // [C9 任务C·codex 207 审 MED-3 防御，二次收口·codex 207 复审 MED-1/LOW-1 修正] publishedTlRows 按
+    //   issue_id 去重——正常路径下一个 issue_id 只会有一条 release_published timeline 行（同一次发布事务
+    //   写一次，_publishReleaseCoreInTxn 头部注释声明的"同一 release_id 永不二次发布"不变量保证不会有
+    //   第二次发布产生第二条）。此处去重是脏数据兜底（历史遗留/手工改库/该不变量未来被破坏），**去重
+    //   不静默、也不假定重复行内容一致**：
+    //   - `duplicate_release_published`：出现重复行的 issue_id 去重后数组（语义="哪些 issue 出现了重复
+    //     行"，每个 issue_id 至多出现一次——不随重复行数量线性增长，3 条重复行也只计 1 次）。
+    //   - `duplicate_release_published_conflict`：上面这个集合的**子集**——重复行之间 summary 字节不相同
+    //     （逐字符串比较，两次 JSON.stringify 同一份逻辑数据在本项目写入路径下天然产出相同字符串，见
+    //     snapshotReleaseCommitsInTxn/本函数上方写入处，故字符串不等 ⟺ 内容真不同，不需要反序列化后
+    //     深度比较）。conflict 情形下"取哪条"不再是无关紧要的选择——本函数保留 `issue_id ASC, id ASC`
+    //     稳定排序下的**首条**（该 issue_id 最早写入的一行），可复现、可解释，但**不代表内容必然正确**，
+    //     这正是 conflict 诊断字段存在的意义：把"存在分歧、我武断选了一条"如实报给调用方，不伪装成
+    //     "反正都一样选哪条都无所谓"。
+    const seenPubSummary = new Map();   // issue_id → 保留（首条）行的 summary，供后续行比对是否冲突
+    const dupPubIdSet = new Set();
+    const conflictPubIdSet = new Set();
+    const dedupedTlRows = [];
+    for (const row of publishedTlRows) {
+      if (seenPubSummary.has(row.issue_id)) {
+        dupPubIdSet.add(row.issue_id);
+        if (seenPubSummary.get(row.issue_id) !== row.summary) conflictPubIdSet.add(row.issue_id);
+        continue;
+      }
+      seenPubSummary.set(row.issue_id, row.summary);
+      dedupedTlRows.push(row);
+    }
+    const dupPubIds = [...dupPubIdSet];
+    const conflictPubIds = [...conflictPubIdSet];
+    if (countOnly) {
+      // 成员数 = dedupedTlRows.length（去重后，与下方完整路径的成员数枚举依据一致）——不逐行解析 summary
+      // 构造完整对象，unavailable_fields 对列表视图无意义故给空数组（非另一套判定：上面 `complete` 已判定
+      // 为 false 的过程与完整路径逐字相同，这里只是不做后续组装）。
+      return { count: dedupedTlRows.length, source: 'degraded', degraded: true, unavailable_fields: [], duplicate_release_published: dupPubIds, duplicate_release_published_conflict: conflictPubIds };
+    }
+    const degradedMembers = [];
+    const unavailable = new Set();
+    for (const row of dedupedTlRows) {
+      let parsed = null;
+      try { parsed = JSON.parse(row.summary); } catch (_) { parsed = null; }
+      if (!parsed || parsed.schema_version !== 2) {
+        // 整条载荷不可用——issue_id 本身来自 timeline 行本身（可信，非载荷内容），其余字段全部标不可用。
+        degradedMembers.push({ issue_id: row.issue_id, type: null, title_snapshot: null, status_at_publish: null, commits: null });
+        unavailable.add('type'); unavailable.add('title_snapshot'); unavailable.add('status_at_publish'); unavailable.add('commits');
+        continue;
+      }
+      const member = { issue_id: row.issue_id };
+      for (const f of ['type', 'title_snapshot', 'status_at_publish']) {
+        if (parsed[f] === undefined || parsed[f] === null) { member[f] = null; unavailable.add(f); }
+        else member[f] = parsed[f];
+      }
+      if (!Array.isArray(parsed.commits)) { member.commits = null; unavailable.add('commits'); }
+      else member.commits = parsed.commits;
+      degradedMembers.push(member);
+    }
+    // dedupedTlRows 为空（快照与 timeline 双双缺失的极端脏数据）→ members=[] 但 degraded 仍为 true——
+    // "该有却什么都读不到"与"真的没有"是两回事，不能悄悄当"合法空批次"处理（RELEASE_EMPTY 早挡，正常
+    // 路径不可达已发布空批次，此处属兜底防线，即使 unavailable 集合空也不改变 degraded=true 的判定）。
+    return { members: degradedMembers, source: 'degraded', degraded: true, unavailable_fields: [...unavailable], duplicate_release_published: dupPubIds, duplicate_release_published_conflict: conflictPubIds };
+  }
+
+  // ── §6.9 release_type 类型派生：从 getReleaseMembers() 的返回结果派生，不回落读当前任务表/存量
+  //   release_type 列——那一列已"停止作为可写事实"（§6.9，本函数是它的读端替代）。三值：
+  //   `{category:'single', type:'bug'|'feature'|'improvement'}` / `{category:'mixed', type:null}` /
+  //   `{category:'unknown', type:null}`（members 为空，或 type 字段已在 unavailable_fields 中——降级且
+  //   type 不可用时，此时即使 members[].type 恰好非 null 也不可信任，必须先查 unavailable_fields 短路，
+  //   不能只看字段值本身是否为空来判断，方案原话"不回落读当前任务表"正是防止这种情形下悄悄信了脏值）。
+  function deriveReleaseType(gm) {
+    if (!gm) return { category: 'unknown', type: null };
+    if (gm.unavailable_fields && gm.unavailable_fields.includes('type')) return { category: 'unknown', type: null };
+    if (!gm.members || gm.members.length === 0) return { category: 'unknown', type: null };
+    const types = new Set(gm.members.map(m => m.type).filter(t => t != null));
+    if (types.size === 0) return { category: 'unknown', type: null };   // 防御：unavailable_fields 未标但值仍全空
+    if (types.size > 1) return { category: 'mixed', type: null };
+    const only = [...types][0];
+    return RELEASABLE_TYPES.includes(only) ? { category: 'single', type: only } : { category: 'unknown', type: null };
+  }
+
+  // ============================================================
+  // 上线体统一重构 C2a（方案 v3.4 §6.3a/§6.10/§6.11/§10.2）：通知状态机共享原语
+  // ============================================================
+
+  // ── 上线资格判定（§6.3a）：存在 ∧ status='active' ∧ role∉('viewer','admin')，**每次实时读库**，
+  //   不接受调用方传入的"已验证"标记（§6.10 中心守卫不变量）。 ──────────
+  async function hasReleaseEligibility(userId) {
+    if (!userId) return false;
+    const u = await dbGetAsync('SELECT status, role FROM users WHERE id = ?', [userId]);
+    return !!(u && u.status === 'active' && u.role !== 'viewer' && u.role !== 'admin');
+  }
+
+  // ── stale 惰性转换（§6.4a③/§7b③）：仅 notify-executor / execute / cancel-schedule / 详情写路径调用；
+  //   列表与只读 GET 不做。单条 UPDATE，天然原子，不需要 sysBeginImmediate 包裹（同 softDeleteDutyRoster
+  //   先例：单语句状态转移无需多语句事务协调）。 ──────────
+  async function staleTransitionForRelease(releaseId) {
+    await dbRunAsync(
+      `UPDATE sys_releases SET release_assignee_notify_status = 'stale'
+         WHERE id = ? AND release_assignee_notify_status = 'sending'
+           AND release_assignee_notify_started_at < datetime('now','localtime','-5 minutes')`,
+      [releaseId]
+    );
+  }
+
+  // [C5 删除] syncReleaseLegacyMirror（§10.2·C2-C4 过渡期双写兼容函数）已整体删除——曾把 sys_releases
+  //   批次级执行人/通知态镜像到 sys_issues 旧单级 8 列（release_assignee_id/name + release_assignee_
+  //   notify_status/notified_at/message_key/error/read_at + release_assignee_notify_sent_by）。
+  //   删除依据（§10.1"双写期到 C4 终止"）：C4 已把 getReleaseMembers() 唯一读源接入全部"列表/详情/导出/
+  //   统计/类型派生"消费者（见 C4 完成报告），全项目 grep 确认**没有任何消费者依赖这份镜像**——本次删除
+  //   前逐处核对了读消费者（见 C5 完成报告 §1），原两处调用点（applyReleaseChange 步骤⑥ /
+  //   sendReleaseNotifyAndWriteback ②步）已一并删除，改动见各自函数体内注释。
+  //   ⚠️ 这 8 列本身**保留在 schema 里**（不 DROP，§项目"不再 drop 重建"铁律）。[2026-07-30 用户裁定后
+  //   补记] C5 当时不能笼统宣称"完全只读"——另一套独立的旧上线编排机制（assign-release-dev 等 4 端点）
+  //   仍在读写；该家族现已全部封禁（见"旧上线编排退场段"），8 列业务写路径全封转只读残留（唯一残留
+  //   写点=notify-read-status 已读固化 read_at，仅历史 sent 数据可达），见 schema 定义处注释。
+
+  // ── applyReleaseChange 原语（§6.11 七步，假定调用方已在 mutex 事务内）：────────────────────────────
+  //   ① 校验单 status='计划中'（防御性重查——调用方通常已查过一次，这里是同一事务内的第二道闸，成本极低）
+  //   ② 读旧执行人（供 timeline 记旧值/§6.8 撤销安排文案）——本函数不重读成员集/planned_date，那些是
+  //      调用方已经知道的东西（差量本就由调用方算好传入）
+  //   ③ **CAS 应用变更**：add-issues/remove-issues 的实际变更（sys_issues.release_id）与
+  //      update-planned-date 的实际变更（sys_releases.planned_date）**均已由调用方在调用本函数之前完成**
+  //      （"现有逻辑加单成功后经原语收尾"——族别守卫/needs_release 条件一概不动，C3 才拆）；
+  //      **仅 cancel-schedule** 的实际变更（§6.8 CAS 重置）也由调用方自己做（因为它需要比本函数默认重置
+  //      更强的 CAS 保护：与预读的 notify_status/release_assignee_id/token 逐列比对），并通过
+  //      `opts.skipReset=true` 告知本函数"重置已完成，不要重复做"。
+  //   ④ 差量已由调用方结构化传入（`delta`），本函数只负责判定是否全空
+  //   ⑤ 差量非空 → 重置通知六列 + 清执行人两列 + 换 token（除非 opts.skipReset）
+  //   ⑥ 双写兼容：当前成员（含新增）∪ 明确移除的旧成员，一律清空旧单级 8 列
+  //   ⑦ 按差量写 timeline（event_type='scope_change'，每受影响成员一条，同 ref_id=releaseId + 同批次标识）
+  //   差量全空 → 直接返回（幂等：不清通知、不写 timeline）。任一步失败抛错，由调用方 catch 整体 ROLLBACK。
+  async function applyReleaseChange(releaseId, actor, delta, opts = {}) {
+    const addedIds = delta.added_issue_ids || [];
+    const removedIds = delta.removed_issue_ids || [];
+    // ⚠️ codex 199 审 LOW-1（组合语义焊死为显式契约）：add/remove/改期/撤销安排四类 delta 信号
+    //   **至多一类为真**——四个调用方（add-issues/remove-issues/update-planned-date/cancel-schedule）
+    //   各自天然只触发其中一类，本函数从未设计过"同一次调用里同时加单又改期"这种混合语义（若真出现，
+    //   §6.11 七步的"重置/双写/timeline"该按哪类文案写都没有定义）。
+    //   不是业务错误（不该让用户看到 400），是**编程契约违反**——某调用方传错了参数，直接抛 500 级异常，
+    //   越早炸越好，别让"组合语义未定义"悄悄按某一类的逻辑跑出一个看似正常但实际错误的结果。
+    const activeKinds = [addedIds.length > 0, removedIds.length > 0, !!delta.planned_date_changed, !!delta.schedule_cancelled]
+      .filter(Boolean).length;
+    if (activeKinds > 1) {
+      throw new Error(`applyReleaseChange 契约违反：delta 组合语义未定义——added_issue_ids/removed_issue_ids/planned_date_changed/schedule_cancelled 至多一类非空/为真，实际同时命中 ${activeKinds} 类（releaseId=${releaseId}）`);
+    }
+
+    const rel = await dbGetAsync(
+      `SELECT id, status, release_assignee_id, release_assignee_name FROM sys_releases WHERE id = ?`,
+      [releaseId]
+    );
+    if (!rel) throw new SysTransitionError(404, 'RELEASE_NOT_FOUND', '上线批次不存在');
+    if (rel.status !== '计划中') throw new SysTransitionError(409, 'RELEASE_NOT_PLANNING', '批次非「计划中」，不能变更');
+
+    const isEmpty = addedIds.length === 0 && removedIds.length === 0
+      && !delta.planned_date_changed && !delta.schedule_cancelled;
+    if (isEmpty) return { applied: false };
+
+    // ⚠️ opts.skipReset=true 时（cancel-schedule），调用方在调用本函数**之前**已自行完成 CAS 重置——
+    //   此刻再读 sys_releases 拿到的 release_assignee_name 早已是 NULL（被调用方自己的 CAS UPDATE 清空），
+    //   不能代表"旧执行人"。此时必须由调用方通过 opts 显式传入它自己重置前捕获的旧值，本函数不再信自己
+    //   的这次 SELECT（同一事务内，读到的已经是调用方重置后的新值，语义上已经"晚了一步"）。
+    const oldAssigneeId = opts.skipReset ? opts.oldAssigneeId : rel.release_assignee_id;
+    const oldAssigneeName = opts.skipReset ? opts.oldAssigneeName : rel.release_assignee_name;
+
+    if (!opts.skipReset) {
+      const newToken = crypto.randomBytes(16).toString('hex');
+      await dbRunAsync(
+        `UPDATE sys_releases SET release_assignee_id = NULL, release_assignee_name = NULL,
+           release_assignee_notify_status = 'not_sent', release_assignee_notify_started_at = NULL,
+           release_assignee_notified_at = NULL, release_assignee_notify_message_key = NULL,
+           release_assignee_notify_error = NULL, release_assignee_notify_token = ?, release_assignee_read_at = NULL
+         WHERE id = ?`,
+        [newToken, releaseId]
+      );
+    }
+
+    // [C5 删除] 双写兼容镜像调用（syncReleaseLegacyMirror）已删除——§10.1"双写期到 C4 终止"，见函数删除处
+    //   注释。currentMembers 查询保留（下方 timeline 仍需要它枚举 planned_date_changed/schedule_cancelled
+    //   受影响成员），只是不再额外拼 affectedIds/调镜像函数。
+    const currentMembers = await dbAllAsync('SELECT id FROM sys_issues WHERE release_id = ?', [releaseId]);
+
+    // timeline（§6.13）：每受影响成员各写一条，同 ref_id=releaseId 天然关联同一次调用产生的多行
+    //   （sys_issue_timeline 按 ref_id 查询即可枚举——[C9 任务D·codex 207 审 LOW-1] 此前此处另生成过
+    //   一个 batchKey 字符串，注释称"供日志/排障关联"，但既未落库也未 logger 输出，返回值也查无任何
+    //   消费者（grep 全项目 batch_key/batchKey 零命中，四个调用方都是 `await applyReleaseChange(...)`
+    //   未接收返回值）——是"承诺了却没兑现"的虚假注释，已随本次一并删除，不留假排障线索）。
+    const timelineTargets = [];
+    for (const iid of addedIds) timelineTargets.push({ issueId: iid, actionCode: 'release_add', summary: '加入上线批次，通知与执行人已重置' });
+    for (const iid of removedIds) timelineTargets.push({ issueId: iid, actionCode: 'release_remove', summary: '移出上线批次，通知与执行人已重置' });
+    if (delta.planned_date_changed) {
+      for (const m of currentMembers) timelineTargets.push({ issueId: m.id, actionCode: 'release_date_change', summary: '上线计划日期变更，通知与执行人已重置' });
+    }
+    if (delta.schedule_cancelled) {
+      const reasonTxt = delta.cancel_reason || '';
+      for (const m of currentMembers) {
+        timelineTargets.push({
+          issueId: m.id, actionCode: 'release_schedule_cancel',
+          summary: `撤销上线安排（原执行人：${oldAssigneeName || '（无）'}）原因：${reasonTxt}`,
+        });
+      }
+    }
+    for (const t of timelineTargets) {
+      await dbRunAsync(
+        `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, ref_id, operator_id, operator_name)
+         VALUES (?, 'scope_change', ?, ?, ?, ?, ?)`,
+        [t.issueId, t.summary, t.actionCode, releaseId, Number(actor.id) || null, actor.name || null]
+      );
+    }
+
+    return { applied: true, old_assignee_id: oldAssigneeId, old_assignee_name: oldAssigneeName };
   }
 
   // 标准发布（攒批）：独立 BEGIN IMMEDIATE 事务包裹 core（§6.2 H-3）。
@@ -6738,39 +7326,92 @@ module.exports = (deps) => {
   });
 
   // ── GET /sys-releases：批次列表（admin；可选 status 筛选 + 含成员数）──────────
-  router.get('/sys-releases', authenticateToken, requireSysSchemaReady, requireAdmin, async (req, res) => {
+  // ⭐ C2b 第2批（Playwright 冒烟发现的真实缺口·非本次新引入）：middleware 由 requireAdmin 改为
+  //   requireIntakeLiaison（admin ∨ 对接人）——对接人要能真实执行「撤销上线安排」（cancel-schedule，
+  //   §6.8 明文 admin 不可用、仅对接人），前提是先能看到批次列表/详情本身；这两个 GET 端点此前仍锁
+  //   requireAdmin（C2a 遗留，那时还没有 cancel-schedule 这个只属于对接人的动作），对接人点开「批次管理」
+  //   会直接 403，功能完全不可达——纯只读放开，不影响任何写路径的权限边界（写端点各自维持原判据不变）。
+  router.get('/sys-releases', authenticateToken, requireSysSchemaReady, requireIntakeLiaison, async (req, res) => {
     try {
       const where = [], params = [];
       if (req.query.status === '计划中' || req.query.status === '已发布') { where.push('r.status = ?'); params.push(req.query.status); }
       const rows = await dbAllAsync(
         `SELECT r.id, r.release_no, r.title, r.status, r.is_hotfix, r.release_note, r.version_tag,
-                r.planned_date, r.released_at, r.created_by, r.created_by_name, r.created_at,
-                (SELECT COUNT(*) FROM sys_issues i WHERE i.release_id = r.id) AS issue_count
+                r.planned_date, r.released_at, r.created_by, r.created_by_name, r.created_at
            FROM sys_releases r
           ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
           ORDER BY r.id DESC`,
         params
       );
-      res.json({ items: rows, total: rows.length });
+      // 上线体统一重构 C4（方案 §6.6/§6.9 "列表 / 详情 / 导出 / 统计一律调用同一函数，禁止各自查询"）：
+      //   issue_count 不再用 sys_issues 的相关子查询（那是纯 live 计数——「已发布」批次一旦有成员被 reopen
+      //   （清 release_id，§6.4），live 计数会比"真实发布过的成员数"更小，与该批次的历史事实脱节）。改为
+      //   逐行调用 getReleaseMembers()，其内部按 status 自动走 live/snapshot/degraded 三态正确读源。
+      //   N+1：每行一次 getReleaseMembers 调用（内部 1-3 条子查询，视源而定）——与被替换的相关子查询同一
+      //   量级的每行开销，本管理端点数据规模小（上线批次远非高频海量表），可接受，非本次引入新性能风险。
+      //   [消费者策略·§6.6b] 列表视图按"详情页"同类对待——标注 degraded，不做统计口径的"排除"（那是统计/
+      //   报表消费者的策略，列表只是给管理员一览，仍应可见，只是标出"这条的成员数是降级重建的，不一定准"）。
+      //   [C5 收口批·codex 203 审 C 项] 列表只需要 issue_count/source/degraded，不需要组装完整
+      //   members[]（type/title_snapshot/commits 等）——改用 `{countOnly:true}` 轻量路径（与详情端点的
+      //   完整调用共用同一套三态判定代码，见 getReleaseMembers 函数头注释，非另写一套判定）。
+      const items = [];
+      for (const r of rows) {
+        const gm = await getReleaseMembers({ id: r.id, status: r.status }, { countOnly: true });
+        items.push({ ...r, issue_count: gm.count, source: gm.source, degraded: gm.degraded });
+      }
+      res.json({ items, total: items.length });
     } catch (err) {
       logger.error('[系统迭代] 批次列表失败:', err && err.message);
       res.status(500).json({ error: (err && err.message) || '批次列表查询失败' });
     }
   });
 
-  // ── GET /sys-releases/:id：批次详情（admin；批次 + 组内 issue 列表，供 C6 展示/挑单）──────────
-  router.get('/sys-releases/:id', authenticateToken, requireSysSchemaReady, requireAdmin, async (req, res) => {
+  // ── GET /sys-releases/:id：批次详情（admin ∨ 对接人 ∨ 本单执行人；批次 + 组内 issue 列表，供 C6 展示/挑单）──────────
+  //   同上方 GET /sys-releases 的 C2b 第2批权限放开理由：对接人须能看到详情才能真用「撤销上线安排」。
+  //   ⭐ 第三条放行分支（本单 release_assignee_id === actor.id）——Playwright 冒烟实测发现的第二个真实缺口：
+  //   §6.14「完成上线」明文授权"值班开发本人"可执行上线，但此前本端点仍锁 admin∨对接人，被通知的执行人
+  //   自己点不进详情页看「执行上线」按钮，功能与「撤销上线安排」同款 0% 可达。放行判据依赖数据行本身
+  //   （只有本单，非全局），故不能用路由级中间件表达，改路由级仅登录、行内判定——**镜像 GET /sys-duty-roster
+  //   已有的"全量 vs 仅本人"读权限缩放先例**（§6.14「排班表读」行），非新发明模式；列表端点 GET /sys-releases
+  //   刻意不做此扩展（避免向普通执行人暴露全部批次列表，只开放"点开我被指派的这一条"这条最小必要缝隙）。
+  //   信息暴露边界（codex 200 审 MED-1 主会话裁定·不加通知态条件）：执行人读权由状态机自动管理——
+  //   cancel-schedule/改期/移单经 applyReleaseChange 清执行人两列即同步收回读权；failed/stale 保留原执行人
+  //   =重发目标本人，应可读；已发布单保留执行人=本人回看自己执行发布的批次（审计对称）。不存在"漏清"路径。
+  router.get('/sys-releases/:id', authenticateToken, requireSysSchemaReady, async (req, res) => {
     const id = parsePositiveId(req.params.id);
     if (!id) return res.status(400).json({ error: '无效的批次 ID', code: 'INVALID_RELEASE_ID' });
     try {
       const rel = await dbGetAsync('SELECT * FROM sys_releases WHERE id = ?', [id]);
       if (!rel) return res.status(404).json({ error: '上线批次不存在', code: 'RELEASE_NOT_FOUND' });
-      const issues = await dbAllAsync(
-        `SELECT id, type, status, priority, title, system_name, module_name, assigned_to_name
-           FROM sys_issues WHERE release_id = ? ORDER BY id`,
-        [id]
-      );
-      res.json({ release: rel, issues });
+      const actor = sysActor(req);
+      const isAssignee = rel.release_assignee_id != null && Number(rel.release_assignee_id) === Number(actor.id);
+      if (actor.role !== 'admin' && !isSysIntakeLiaison(actor.id) && !isAssignee) {
+        return res.status(403).json({ error: '仅管理员、对接人或本批次执行人可查看', code: 'NOT_ADMIN_OR_INTAKE_LIAISON_OR_ASSIGNEE' });
+      }
+      // 上线体统一重构 C4（方案 §6.6/§6.6b）：批次内 issue 列表改走统一读源——「计划中」批次仍是直读
+      //   sys_issues（live，等价于本端点改造前的直接查询）；「已发布」批次优先走发布快照，快照缺失/
+      //   校验失败则回落 timeline release_published 载荷重建（degraded，不静默当空）。
+      //   ⚠️ **返回契约刻意保留旧字段名**（id/type/title/status，非 getReleaseMembers 内部的
+      //   issue_id/type/title_snapshot/status_at_publish）——前端 siOpenBatchDetail 现有渲染逐字读这四个
+      //   旧键名（`i.id`/`i.type`/`i.title`/`i.status`，见 Sys_Iteration.html），本批只切读源不改前端，
+      //   字段名对齐旧契约是"旧消费者拿到不同形状的数据"这条风险的具体防线，非随手照抄内部命名。
+      //   priority/system_name/module_name/assigned_to_name 四列**不再返回**——它们是"当前"（可变）任务
+      //   表字段，对 snapshot/degraded 态的历史成员显示"当前值"会重犯 §6.6a 明确警告的错（"正常快照反而
+      //   拿不到发布时的标题，得回头读可变的当前任务表"，同理不该混入可变的优先级/系统名等字段）；核实
+      //   前端 siOpenBatchDetail 渲染逻辑（Sys_Iteration.html:~3508-3512）本就只消费 id/type/title/status
+      //   四个字段，未读这四列，故删除它们对现有前端**零回归**（已用 grep 核对该渲染函数体，非猜测）。
+      const gm = await getReleaseMembers(rel);
+      const issues = gm.members.map(m => ({
+        id: m.issue_id, type: m.type, title: m.title_snapshot, status: m.status_at_publish,
+      }));
+      // [C9 任务C·codex 207 审 MED-3 防御，二次收口新增 duplicate_release_published_conflict] 两个诊断
+      //   字段与 unavailable_fields 同级暴露——仅 degraded 源可能非空（脏数据兜底诊断），live/snapshot
+      //   恒 []，不静默吞掉这个信号。conflict 是 duplicate 的子集：前者=重复行内容确实不一致（更严重）。
+      res.json({
+        release: rel, issues, source: gm.source, degraded: gm.degraded, unavailable_fields: gm.unavailable_fields,
+        duplicate_release_published: gm.duplicate_release_published || [],
+        duplicate_release_published_conflict: gm.duplicate_release_published_conflict || [],
+      });
     } catch (err) {
       logger.error('[系统迭代] 批次详情失败:', err && err.message);
       res.status(500).json({ error: (err && err.message) || '批次详情查询失败' });
@@ -6795,8 +7436,13 @@ module.exports = (deps) => {
         [id]
       );
       const items = rows.map(r => {
-        let commits = [];
-        try { commits = JSON.parse(r.snapshot_json); } catch (_) { commits = []; }   // 防御性：正常写路径（snapshotReleaseCommitsInTxn）不会产生非法 JSON
+        let parsed = null;
+        try { parsed = JSON.parse(r.snapshot_json); } catch (_) { parsed = null; }   // 防御性：正常写路径（snapshotReleaseCommitsInTxn）不会产生非法 JSON
+        // ⭐ C2a snapshot v2 演进：新写入是对象 {schema_version:2,...,commits:[...]}；本端点仅做类型分支
+        //   取出 commits 数组本身（非"v1 兼容读端"——那是 getReleaseMembers() 的职责，C4 才做统一读源/降级
+        //   契约。这里只是不让本已有的零消费者调试端点在写端演进后把整个 v2 对象错当 commits 数组返回，
+        //   属避免引入回归的最小必要修正，同时对早于本次的历史纯数组行保持兼容）。
+        const commits = Array.isArray(parsed) ? parsed : (parsed && Array.isArray(parsed.commits) ? parsed.commits : []);
         return { id: r.id, release_id: r.release_id, issue_id: r.issue_id, commits, created_at: r.created_at };
       });
       res.json({ release_id: id, items });
@@ -6806,9 +7452,261 @@ module.exports = (deps) => {
     }
   });
 
+  // ============================================================
+  // 上线体统一重构 C1（方案 v3.4 §6.2/§6.3a/§6.14）：排班表 CRUD 三端点 + 资格闸
+  // ============================================================
+
+  // 共享软删（POST 调班与 DELETE 共用，保证三字段同写、语义唯一——不能两处各写一份，否则以后改一处漏另一处）：
+  //   双条件守卫（id + removed_at IS NULL）+ changes 检查（状态机字段 UPDATE 三件套，同 feedback_state_machine_
+  //   update_invariant 范式）；removed_at 用 datetime('now','localtime') 服务端生成，写读同源与 created_at/
+  //   released_at 等既有列一致。调用方负责判断返回值：changes!==1 表示目标已不在活跃态（并发已被移除/不存在）。
+  async function softDeleteDutyRoster(id, actor) {
+    const result = await dbRunAsync(
+      `UPDATE sys_release_duty_roster SET removed_at = datetime('now','localtime'), removed_by = ?, removed_by_name = ?
+        WHERE id = ? AND removed_at IS NULL`,
+      [actor.id, actor.name, id]
+    );
+    return !!(result && result.changes === 1);
+  }
+
+  // ── GET /sys-duty-roster：排班列表（§6.2 端点段·query from/to 必填 + ≤366 天 + 权限视图）──────────
+  //   [2026-07-30 用户提出] 查询上限 93 天 → 366 天（**固定日数滚动窗口**，足以覆盖闰年长度——非"自然年"
+  //   日历语义，codex 212 审 LOW-2 措辞修正）：开发按月轮值需要一年视图；数据面每天
+  //   ≤1 条活跃排班，一年最多 366 行，配合前端区间合并展示（按月轮值约 12 段行）无性能压力。批量**写**
+  //   上限 62 天不放宽（写路径成本不同，见 batch 端点注释；按月轮值逐月批量设置足够）。
+  //   权限视图（§6.14「排班表读」行）：admin ∨ 对接人 → 全量；其他登录用户 → 只返回本人的行。
+  //   日期校验复用 normalizeDeadline（与 POST duty_date 同一函数——YYYY-MM-DD + 真实日历日校验，不新写
+  //   重复逻辑，见该函数既有注释：deadline/planned_date 已在用，语义完全等价）。
+  router.get('/sys-duty-roster', authenticateToken, requireSysSchemaReady, async (req, res) => {
+    try {
+      const fromRaw = req.query.from, toRaw = req.query.to;
+      if (!fromRaw || !toRaw) return res.status(400).json({ error: 'from/to 均为必填（YYYY-MM-DD）', code: 'DUTY_RANGE_REQUIRED' });
+      const fromCheck = normalizeDeadline(fromRaw), toCheck = normalizeDeadline(toRaw);
+      if (!fromCheck.ok || !fromCheck.value || !toCheck.ok || !toCheck.value) {
+        return res.status(400).json({ error: 'from/to 格式非法（应为 YYYY-MM-DD 真实日期）', code: 'INVALID_DUTY_DATE' });
+      }
+      const from = fromCheck.value, to = toCheck.value;
+      if (to < from) return res.status(400).json({ error: 'to 不得早于 from', code: 'DUTY_RANGE_INVALID' });
+      // 用 Date.UTC 计算跨度天数（避免本地时区/夏令时导致的 23/25 小时日造成天数误差）。
+      const [fy, fm, fd] = from.split('-').map(Number);
+      const [ty, tm, td] = to.split('-').map(Number);
+      const diffDays = Math.round((Date.UTC(ty, tm - 1, td) - Date.UTC(fy, fm - 1, fd)) / 86400000);
+      if (diffDays > 365) return res.status(400).json({ error: '查询区间不得超过 366 天', code: 'DUTY_RANGE_TOO_LONG' });   // 含首尾两端，diffDays=365 即 366 天（固定日数上限非自然年，2026-07-30 自 93 天放宽）
+
+      const actor = sysActor(req);
+      const isAdminOrLiaison = actor.role === 'admin' || isSysIntakeLiaison(actor.id);
+      const where = ['duty_date BETWEEN ? AND ?', 'removed_at IS NULL'];
+      const params = [from, to];
+      if (!isAdminOrLiaison) { where.push('user_id = ?'); params.push(actor.id); }
+      const rows = await dbAllAsync(
+        `SELECT id, duty_date, user_id, user_name, note, created_by, created_by_name, created_at
+           FROM sys_release_duty_roster WHERE ${where.join(' AND ')} ORDER BY duty_date ASC`,
+        params
+      );
+      res.json({ items: rows, from, to });
+    } catch (err) {
+      logger.error('[系统迭代] 排班列表查询失败:', err && err.message);
+      res.status(500).json({ error: (err && err.message) || '排班列表查询失败' });
+    }
+  });
+
+  // ── POST /sys-duty-roster：新增/调班（§6.2 端点段·仅对接人）──────────
+  //   资格闸（§6.3a）：**事务内**实时读库判定 存在 ∧ status='active' ∧ role∉('viewer','admin')——codex 198
+  //   审 MED-1 采纳：与同日旧行查询/软删/插入同一 mutex 事务，写入时强 R-2（消除判定与写入之间的漂移窗口，
+  //   详见事务内注释）；user_name 服务端从 users.display_name 派生，不信 body（同建单/指派等既有端点范式）。
+  //   调班语义：该 duty_date 已有活跃行 → 事务内先软删旧行再插新行（原子，mutex 串行化天然避免同日并发双插撞
+  //   partial UNIQUE idx_sys_duty_roster_active）；无则直接插。
+  //   ⚠️ 纯输入校验（日期格式/user_id 格式/note 长度）留在事务外——无库依赖，先拒早拒，不占用 mutex 窗口。
+  router.post('/sys-duty-roster', authenticateToken, requireSysSchemaReady, requireLiaisonOnly, async (req, res) => {
+    const b = req.body || {};
+    try {
+      const actor = sysActor(req);
+      const dateCheck = normalizeDeadline(b.duty_date);
+      if (!dateCheck.ok || !dateCheck.value) {
+        return res.status(400).json({ error: '排班日期格式非法（应为 YYYY-MM-DD 真实日期）', code: 'INVALID_DUTY_DATE' });
+      }
+      const dutyDate = dateCheck.value;
+
+      const userId = parsePositiveId(b.user_id);
+      if (!userId) return res.status(400).json({ error: '无效的用户 ID', code: 'INVALID_DUTY_USER_ID' });
+
+      const note = (typeof b.note === 'string' ? b.note.trim() : '') || null;
+      if (note && note.length > 200) return res.status(400).json({ error: '备注超长（≤200）', code: 'DUTY_NOTE_TOO_LONG' });
+
+      let newId = null, replacedName = null, userName = null;
+      await sysBeginImmediate();
+      try {
+        // 资格闸（§6.3a，codex 198 审 MED-1 采纳）：资格查询在事务内=写入时强 R-2——与同日旧行查询/软删/
+        //   插入同一 mutex 事务，消除"判定合格"到"实际写入"之间用户角色/状态漂移的窗口（事务外读存在
+        //   TOCTOU：判定时合格，写入前被撤权/禁用，仍会写入过时资格）。不信调用方声称的资格，实时读库。
+        const target = await dbGetAsync('SELECT id, display_name, username, status, role FROM users WHERE id = ?', [userId]);
+        if (!target || target.status !== 'active' || target.role === 'viewer' || target.role === 'admin') {
+          await sysRollback();
+          return res.status(400).json({ error: '该用户不具备上线值班资格（须为在职且非查看者/管理员）', code: 'DUTY_USER_NOT_ELIGIBLE' });
+        }
+        userName = target.display_name || target.username || `user#${userId}`;
+
+        const existing = await dbGetAsync('SELECT id, user_name FROM sys_release_duty_roster WHERE duty_date = ? AND removed_at IS NULL', [dutyDate]);
+        if (existing) {
+          const softDeleted = await softDeleteDutyRoster(existing.id, actor);
+          if (!softDeleted) {
+            await sysRollback();
+            return res.status(409).json({ error: '该日排班已被并发修改，请重试', code: 'DUTY_ROSTER_CONFLICT' });
+          }
+          replacedName = existing.user_name;
+        }
+        const result = await dbRunAsync(
+          `INSERT INTO sys_release_duty_roster (duty_date, user_id, user_name, note, created_by, created_by_name)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          [dutyDate, userId, userName, note, actor.id, actor.name]
+        );
+        newId = result.lastID;
+        await sysCommit();
+      } catch (txErr) {
+        try { await sysRollback(); } catch (_) { /* ignore */ }
+        throw txErr;
+      }
+      res.status(201).json({ id: newId, duty_date: dutyDate, user_id: userId, user_name: userName, note, replaced: replacedName });
+    } catch (err) {
+      if (err instanceof SysTransitionError) return sendSysTransitionError(res, err);
+      logger.error('[系统迭代] 排班新增/调班失败:', err && err.message);
+      res.status(500).json({ error: (err && err.message) || '排班新增/调班失败' });
+    }
+  });
+
+  // ── DELETE /sys-duty-roster/:id：移除排班（§6.2 端点段·仅对接人）──────────
+  //   [C9 任务E·codex 207 审 LOW-2] 并发下的 404 语义说明（不改实现）：下方先有一次事务外 SELECT
+  //   （仅为给正常路径一个更友好的早期 404，非并发控制手段）,真正的软删是 softDeleteDutyRoster 内部
+  //   单条 `UPDATE ... WHERE id=? AND removed_at IS NULL` 原子完成（该语句自身对并发安全，不会双删/
+  //   丢更新）。但两次请求race 时：A 的 SELECT 读到"存在"之后、A 调用 softDeleteDutyRoster 之前，
+  //   B 先一步把该行软删——A 的 UPDATE 因 WHERE 条件不再匹配而 changes=0，A 走到下方"softDeleted 为
+  //   false"分支同样返回 404。即"SELECT 时还在，DELETE 时已消失"这种 404 是**预期可接受**的并发覆盖
+  //   语义（该行事实上确实已被移除，返回 404 而非 500/静默成功是正确结果，只是不是本次这个请求删的），
+  //   不代表数据损坏或需要额外加锁。
+  router.delete('/sys-duty-roster/:id', authenticateToken, requireSysSchemaReady, requireLiaisonOnly, async (req, res) => {
+    const id = parsePositiveId(req.params.id);
+    if (!id) return res.status(400).json({ error: '无效的排班 ID', code: 'INVALID_DUTY_ROSTER_ID' });
+    try {
+      const actor = sysActor(req);
+      const row = await dbGetAsync('SELECT id, removed_at FROM sys_release_duty_roster WHERE id = ?', [id]);
+      if (!row || row.removed_at !== null) return res.status(404).json({ error: '排班记录不存在或已移除', code: 'DUTY_ROSTER_NOT_FOUND' });
+      const softDeleted = await softDeleteDutyRoster(id, actor);
+      if (!softDeleted) return res.status(404).json({ error: '排班记录不存在或已移除', code: 'DUTY_ROSTER_NOT_FOUND' });
+      res.json({ id, removed: true });
+    } catch (err) {
+      logger.error('[系统迭代] 排班移除失败:', err && err.message);
+      res.status(500).json({ error: (err && err.message) || '排班移除失败' });
+    }
+  });
+
+  // ── POST /sys-duty-roster-batch：区间批量设置值班人（§6.2 端点段泛化·用户 2026-07-29 实测后提出，C2b 第2批）──────────
+  //   命名镜像既有"单条/批量"并存范式（notify-release-executor / notify-release-executor-batch）。
+  //   语义=逐日复用单日 POST 的"软删旧活跃行+插新行"调班语义（不新起第二套写法，本函数体内直接调用同一个
+  //   softDeleteDutyRoster + 同一句 INSERT SQL），**同一个 BEGIN IMMEDIATE…COMMIT 事务**跑完整个区间——
+  //   任一环节失败（并发冲突/DB 约束违反/其它异常）都会走 catch 块 sysRollback() 回滚**已执行的全部**软删+插入，
+  //   零部分提交（事务边界=资格闸读取起到 for 循环最后一条 INSERT 止，见下方代码）。
+  //   写权限仍 requireLiaisonOnly（仅对接人，admin 403 焊死不例外，与单日 POST 同判据）。
+  //   区间上限 62 天——比 GET 的 93 天查询上限更紧：批量写会连带触发最多 62 次软删+62 次插入+62 条 timeline
+  //   量级的库操作，比只读查询成本高，收紧上限防误操作污染过大区间（限额与 GET 的查询上限是两件事，不复用
+  //   同一常量/错误码，防止未来只改一处遗漏另一处的写读同源漂移）。
+  router.post('/sys-duty-roster-batch', authenticateToken, requireSysSchemaReady, requireLiaisonOnly, async (req, res) => {
+    const b = req.body || {};
+    try {
+      const actor = sysActor(req);
+      // 纯输入校验留在事务外（同单日 POST 既有注释："无库依赖，先拒早拒，不占用 mutex 窗口"）。
+      //   date_from/date_to 本身的日历合法性由 normalizeDeadline 挡（月内溢出如 2026-02-30 在此已被拒，
+      //   400 INVALID_DUTY_DATE，零写入）；区间内部逐日日期由本函数用 Date.UTC 步进生成，天然全部合法，
+      //   不会出现"区间边界合法但内部某天非法"的情形——DB 侧 duty_date CHECK（date(x,'+0 days') 归一化）
+      //   仍作为最后一道防线保留在 DDL（C0），本端点的编程路径下预期不会触发，但不因此撤防。
+      const fromCheck = normalizeDeadline(b.date_from);
+      const toCheck = normalizeDeadline(b.date_to);
+      if (!fromCheck.ok || !fromCheck.value || !toCheck.ok || !toCheck.value) {
+        return res.status(400).json({ error: 'date_from/date_to 均为必填（YYYY-MM-DD 真实日期）', code: 'INVALID_DUTY_DATE' });
+      }
+      const dateFrom = fromCheck.value, dateTo = toCheck.value;
+      if (dateTo < dateFrom) return res.status(400).json({ error: 'date_to 不得早于 date_from', code: 'DUTY_RANGE_INVALID' });
+
+      // Date.UTC 计算跨度天数（同 GET /sys-duty-roster 既有写法，避免本地时区/夏令时导致的 23/25 小时日误差）。
+      const [fy, fm, fd] = dateFrom.split('-').map(Number);
+      const [ty, tm, td] = dateTo.split('-').map(Number);
+      const diffDays = Math.round((Date.UTC(ty, tm - 1, td) - Date.UTC(fy, fm - 1, fd)) / 86400000);
+      if (diffDays > 61) return res.status(400).json({ error: '批量设置区间不得超过 62 天', code: 'DUTY_BATCH_RANGE_TOO_LONG' });   // 含首尾两端，diffDays=61 即 62 天
+
+      const userId = parsePositiveId(b.user_id);
+      if (!userId) return res.status(400).json({ error: '无效的用户 ID', code: 'INVALID_DUTY_USER_ID' });
+
+      const note = (typeof b.note === 'string' ? b.note.trim() : '') || null;
+      if (note && note.length > 200) return res.status(400).json({ error: '备注超长（≤200）', code: 'DUTY_NOTE_TOO_LONG' });
+
+      // 区间内全部日期字符串——UTC 毫秒步进 + toISOString 切片取 YYYY-MM-DD，规避本地时区/DST 漂移
+      //   （与上面 diffDays 同一套 Date.UTC 基准，两处不一致会导致生成日期数与声称的 diffDays 对不上）。
+      const dates = [];
+      const fromUtcMs = Date.UTC(fy, fm - 1, fd);
+      for (let i = 0; i <= diffDays; i++) {
+        dates.push(new Date(fromUtcMs + i * 86400000).toISOString().slice(0, 10));
+      }
+
+      let userName = null;
+      const items = [];
+      await sysBeginImmediate();
+      try {
+        // 资格闸（§6.3a，同单日 POST 判据）：事务内实时读库一次——区间内所有日期共享同一事务时刻的资格
+        //   快照（不是"信调用方声称"，是"判定与写入落在同一个事务里"，满足 R-2 核心诉求；不逐日重复查询
+        //   同一 userId 的 users 行，这不是资格漂移，是同一事务时刻内的常量）。
+        const target = await dbGetAsync('SELECT id, display_name, username, status, role FROM users WHERE id = ?', [userId]);
+        if (!target || target.status !== 'active' || target.role === 'viewer' || target.role === 'admin') {
+          await sysRollback();
+          return res.status(400).json({ error: '该用户不具备上线值班资格（须为在职且非查看者/管理员）', code: 'DUTY_USER_NOT_ELIGIBLE' });
+        }
+        userName = target.display_name || target.username || `user#${userId}`;
+
+        // 逐日复用单日 POST 的写法：先查当日活跃行 → 有则软删（softDeleteDutyRoster，与单日 POST/DELETE
+        //   共用同一函数，三字段同写不出现第二套语义）→ 插入新行。任一天 softDeleteDutyRoster 返回 false
+        //   （changes!==1，同日活跃行被并发抢先改动）立即 rollback 整个事务并 409，已写入的前 N 天全部撤销
+        //   ——这就是"全成或全不成"的具体落点（非仅理论声明，见此处真实控制流）。
+        for (const dutyDate of dates) {
+          const existing = await dbGetAsync('SELECT id, user_name FROM sys_release_duty_roster WHERE duty_date = ? AND removed_at IS NULL', [dutyDate]);
+          let replacedName = null;
+          if (existing) {
+            const softDeleted = await softDeleteDutyRoster(existing.id, actor);
+            if (!softDeleted) {
+              await sysRollback();
+              return res.status(409).json({ error: `该日（${dutyDate}）排班已被并发修改，请重试`, code: 'DUTY_ROSTER_CONFLICT' });
+            }
+            replacedName = existing.user_name;
+          }
+          const result = await dbRunAsync(
+            `INSERT INTO sys_release_duty_roster (duty_date, user_id, user_name, note, created_by, created_by_name)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+            [dutyDate, userId, userName, note, actor.id, actor.name]
+          );
+          items.push({ id: result.lastID, duty_date: dutyDate, replaced: replacedName });
+        }
+        await sysCommit();
+      } catch (txErr) {
+        // 兜底：DB 层任何异常（含理论上不该触发但仍是最后防线的 CHECK 违例）在此统一回滚——
+        //   本 catch 与外层单日 POST/其余端点的 txErr 处理逐字同款范式，不新写变体。
+        try { await sysRollback(); } catch (_) { /* ignore */ }
+        throw txErr;
+      }
+      res.status(201).json({ date_from: dateFrom, date_to: dateTo, user_id: userId, user_name: userName, note, count: items.length, items });
+    } catch (err) {
+      if (err instanceof SysTransitionError) return sendSysTransitionError(res, err);
+      logger.error('[系统迭代] 排班区间批量设置失败:', err && err.message);
+      res.status(500).json({ error: (err && err.message) || '排班区间批量设置失败' });
+    }
+  });
+
   // ── POST /sys-releases/:id/add-issues：加单（admin，M-8 双 WHERE 原子全成或全败）──────────
-  //   闸门：批次「计划中」+ 每单「待上线」AND release_id IS NULL AND type∈可发布3类（防多批次抢占/config 混入）+
-  //   bug 类型须 needs_release=1（K1）+ release_type **族别**隔离（D-A：bug vs 非bug，feature/improvement 可同批）。
+  //   闸门：批次「计划中」+ 每单「待上线」AND release_id IS NULL AND type∈可发布3类（防多批次抢占/config 混入）。
+  //   [上线体统一重构] bug 双闸拆除（2026-07-29 主会话裁定选项 A，依据方案 v3.4 §5a 架构决策表「混批守卫/
+  //   needs_release/release_type 可写性 → 拆除/废弃/停止」+ §5b #2「needs_release｜废弃」+ #3「上线单类型｜
+  //   完全不限（config 除外）」）：① 恒 409 的 bugIssueIds 闸门（曾把任意 bug 单挡在 add-issues 门外，见本
+  //   commit 前的历史注释）② 逐单 UPDATE 里的 `(type <> 'bug' OR needs_release = 1)` 条件（needs_release
+  //   唯一写点 set-release-flag 已随 C3 退场为 410 Gone，此条件对 bug 恒假，与①叠加后 bug 100% 无法加单，
+  //   见 needs_release 列定义处的完整只读残留说明）——两者一并拆除后，bug 与 feature/improvement 完全同源，
+  //   仅剩 type IN (${typePh}) 这一道类型闸（RELEASABLE_TYPES 排除 config，附录 A 明文负例，与本次拆闸无关，
+  //   逐字保留）。
   router.post('/sys-releases/:id/add-issues', authenticateToken, requireSysSchemaReady, requireAdmin, async (req, res) => {
     const id = parsePositiveId(req.params.id);
     if (!id) return res.status(400).json({ error: '无效的批次 ID', code: 'INVALID_RELEASE_ID' });
@@ -6818,72 +7716,33 @@ module.exports = (deps) => {
     for (const x of raw) if (!parsePositiveId(x)) return res.status(400).json({ error: '迭代单 id 非法', code: 'INVALID_ISSUE_ID' });
     const issueIds = [...new Set(raw.map(parsePositiveId))];
     const typePh = RELEASABLE_TYPES.map(() => '?').join(',');
+    const actor = sysActor(req);   // C2a：applyReleaseChange 原语收尾需要 actor（timeline operator_id/name）
     try {
       await sysBeginImmediate();
       try {
-        const rel = await dbGetAsync('SELECT id, status, release_type FROM sys_releases WHERE id = ?', [id]);
+        const rel = await dbGetAsync('SELECT id, status FROM sys_releases WHERE id = ?', [id]);
         if (!rel) { await sysRollback(); return res.status(404).json({ error: '上线批次不存在', code: 'RELEASE_NOT_FOUND' }); }
         if (rel.status !== '计划中') { await sysRollback(); return res.status(409).json({ error: '批次非「计划中」，不能加单', code: 'RELEASE_NOT_PLANNING' }); }
-        // ── release_type 族别隔离（D-A：bug vs 非bug）──────────
-        //   本次入参族别须唯一（bug 与 feature/improvement 不能混选）；与批次已定族别一致；
-        //   批次族别未定（新批次 / 历史 NULL 批次）时，**连读已有成员族别一并判定**（codex H-2 fail-closed：
-        //   不只看本次入参，防历史混批被本次入参回填成错误族别）。feature+improvement 同族 'change' 可共批。
-        const idPh = issueIds.map(() => '?').join(',');
-        const typeRows = await dbAllAsync(`SELECT id, type FROM sys_issues WHERE id IN (${idPh})`, issueIds);
-        // [R5①退场，v1.6 §2.3 C-1 回填] bug 单一律拒绝走 legacy 批次编辑链路——v1.6 后 bug 批次只能由
-        //   execute-release(mode=publish) 在事务内建/更（H-3 单一聚合根），admin 手动"建批次→add-issues(bug)→publish"
-        //   整链对 bug 停用，否则绕过 release_assignee 守卫复活双入口。同时天然覆盖 [R5②]（建批次拒 bug 族别）——
-        //   批次的 release_type='bug' 只能由本次判断阻止的这条入口产生，堵住这一条即无其他途径可达。
-        const bugIssueIds = typeRows.filter(r => r.type === 'bug').map(r => r.id);
-        if (bugIssueIds.length > 0) {
-          await sysRollback();
-          return res.status(409).json({ error: '该功能已下线，bug 上线流程请改用「批量指定上线开发」+「执行上线」', code: 'LEGACY_RELEASE_FLOW_DISABLED', issue_ids: bugIssueIds });
-        }
-        const newFamilies = [...new Set(typeRows.map(r => releaseFamilyOf(r.type)).filter(Boolean))];
-        if (newFamilies.length > 1) {
-          await sysRollback();
-          return res.status(409).json({ error: '本次加单混了 bug 与非 bug，不能同批（bug 单独成批）', code: 'MIXED_TYPE_BATCH' });
-        }
-        const newFam = newFamilies[0] || null;
-        let targetFamily = rel.release_type;
-        if (targetFamily) {
-          if (newFam && newFam !== targetFamily) {
-            await sysRollback();
-            return res.status(409).json({ error: `本次加单族别（${newFam}）与批次族别（${targetFamily}）不一致，不能混批`, code: 'RELEASE_TYPE_MISMATCH' });
-          }
-        } else {
-          // 批次族别未定：读已有成员族别（H-2）——历史 NULL 批次可能已有成员，须一并判唯一族别。
-          const existRows = await dbAllAsync('SELECT DISTINCT type FROM sys_issues WHERE release_id = ?', [id]);
-          const existFamilies = [...new Set(existRows.map(r => releaseFamilyOf(r.type)).filter(Boolean))];
-          const combined = [...new Set([...existFamilies, ...(newFam ? [newFam] : [])])];
-          if (combined.length > 1) {
-            await sysRollback();
-            return res.status(409).json({ error: '批次已有成员与本次加单族别不一致，不能混批（请分批或清空后重来）', code: 'RELEASE_TYPE_MISMATCH' });
-          }
-          targetFamily = combined[0] || null;   // 全部 id 无效且批次空 → null，交由下方逐单 UPDATE 自然失败
-        }
-        // 逐单 UPDATE：可发布类型 + bug 须 needs_release=1 + 族别闸门（targetFamily='bug'→只收 bug；='change'→只收非 bug）。
-        const famClause = targetFamily === 'bug' ? "AND type = 'bug'" : (targetFamily === 'change' ? "AND type <> 'bug'" : '');
+        // [C5 收口批·C3 遗留补做] release_type 族别隔离（D-A：bug vs 非bug）已整体删除——方案 §5a"混批守卫→
+        //   拆除"，原逻辑（本次入参族别唯一 + 与批次已定族别一致 + 批次未定族别时连读已有成员一并判定）
+        //   连同其落地机制（famClause 限定 WHERE + release_type 首次落定回填）一并删除。
+        // 逐单 UPDATE：仅剩"可发布类型"一道闸（config 排除靠 type IN 子句）——bugIssueIds 恒 409 闸门 +
+        //   needs_release=1 条件已一并拆除（见上方端点头注释），bug 与 feature/improvement 完全同源。
         for (const iid of issueIds) {
           const upd = await dbRunAsync(
             `UPDATE sys_issues SET release_id = ?, updated_at = datetime('now','localtime')
-               WHERE id = ? AND status = '待上线' AND release_id IS NULL AND type IN (${typePh})
-                 AND (type <> 'bug' OR needs_release = 1) ${famClause}`,
+               WHERE id = ? AND status = '待上线' AND release_id IS NULL AND type IN (${typePh})`,
             [id, iid, ...RELEASABLE_TYPES]
           );
           if (!upd || upd.changes !== 1) {
             await sysRollback();
-            return res.status(409).json({ error: `#${iid} 不可加入（须为未挂批次的「待上线」单、非配置类、与批次族别一致，bug 须已标记「发版」）`, code: 'ISSUE_NOT_ADDABLE', issue_id: iid });
+            return res.status(409).json({ error: `#${iid} 不可加入（须为未挂批次的「待上线」单、非配置类）`, code: 'ISSUE_NOT_ADDABLE', issue_id: iid });
           }
         }
-        // 批次族别首次落定（release_type 原为空）——同事务内回填族别，changes 校验兜底（F-5，防未来绕过 mutex 的写路径）。
-        if (!rel.release_type && targetFamily) {
-          const back = await dbRunAsync('UPDATE sys_releases SET release_type = ? WHERE id = ? AND release_type IS NULL', [targetFamily, id]);
-          if (!back || back.changes !== 1) {
-            await sysRollback();
-            return res.status(409).json({ error: '批次族别落定冲突，请刷新重试', code: 'RELEASE_TYPE_BACKFILL_CONFLICT' });
-          }
-        }
+        // C2a §6.11 原语收尾：加单成功后经 applyReleaseChange 原子重置通知/执行人 + 双写 + timeline。
+        await applyReleaseChange(id, actor, {
+          added_issue_ids: issueIds, removed_issue_ids: [], planned_date_changed: false, schedule_cancelled: false,
+        });
         await sysCommit();
       } catch (txErr) {
         try { await sysRollback(); } catch (_) { /* ignore */ }
@@ -6907,18 +7766,21 @@ module.exports = (deps) => {
     if (raw.length > SYS_BATCH_ISSUE_MAX) return res.status(400).json({ error: `单次最多 ${SYS_BATCH_ISSUE_MAX} 条`, code: 'TOO_MANY_ISSUES' });   // E（ultracode 安全）：元素数上限防 DoS
     for (const x of raw) if (!parsePositiveId(x)) return res.status(400).json({ error: '迭代单 id 非法', code: 'INVALID_ISSUE_ID' });
     const issueIds = [...new Set(raw.map(parsePositiveId))];
+    const actor = sysActor(req);   // C2a：applyReleaseChange 原语收尾需要 actor（timeline operator_id/name）
     try {
       await sysBeginImmediate();
       try {
         const rel = await dbGetAsync('SELECT id, status, release_type FROM sys_releases WHERE id = ?', [id]);
         if (!rel) { await sysRollback(); return res.status(404).json({ error: '上线批次不存在', code: 'RELEASE_NOT_FOUND' }); }
         if (rel.status !== '计划中') { await sysRollback(); return res.status(409).json({ error: '批次非「计划中」，不能移除', code: 'RELEASE_NOT_PLANNING' }); }
-        // [R5⑤退场，v1.6 §2.3 C-1 回填] bug 族别批次 fail-closed 同拒——v1.6 后 add-issues 已堵住 bug 进 legacy
-        //   批次的唯一入口，故本分支正常路径不可达（防御性闸，覆盖脏库/历史残留 release_type='bug' 批次场景）。
-        if (rel.release_type === 'bug') {
-          await sysRollback();
-          return res.status(409).json({ error: '该功能已下线，bug 批次请改用「执行上线」流程', code: 'LEGACY_RELEASE_FLOW_DISABLED' });
-        }
+        // [R5⑤防御闸已删·2026-07-30 用户拍板] 旧闸（release_type='bug' 一律 409 LEGACY）的前提——"v1.6 后
+        //   add-issues 已堵住 bug 进批次，本分支正常路径不可达，仅防脏库/历史残留"——在 C3 全类型统一后失效：
+        //   bug 经 hotfix-publish 建应急批次会真实写入 release_type='bug'（见该端点 INSERT 的 releaseFamilyOf），
+        //   每个 bug 应急单都命中旧闸＝应急上线单永远无法移单（用户实测发现的误伤；C3 拆双闸时已在
+        //   verify-sys-bug-transitions 头注标注"仅 emergency 批次可能命中、递延处理"，本次即收尾）。
+        //   "过度拦截让脏批次更难清理"本就是 codex40 第十人视角不给 remove 扩防线的理由（见
+        //   publishReleaseTransition 处注释）；生产 sys 表 0 行亦无历史残留可防。移单后语义自洽：单回
+        //   「待上线」可重新应急/常规安排上线，批次移空走下方 F-4 复位 release_type=NULL 可复用。
         for (const iid of issueIds) {
           const upd = await dbRunAsync(
             `UPDATE sys_issues SET release_id = NULL, updated_at = datetime('now','localtime')
@@ -6937,6 +7799,11 @@ module.exports = (deps) => {
              WHERE id = ? AND NOT EXISTS (SELECT 1 FROM sys_issues WHERE sys_issues.release_id = ?)`,
           [id, id]
         );
+        // C2a §6.11 原语收尾：移单成功后经 applyReleaseChange 原子重置通知/执行人 + 双写（清移除单的旧
+        //   单级 8 列）+ timeline（现有逻辑逐字保留，本行是本次改造唯一新增副作用）。
+        await applyReleaseChange(id, actor, {
+          added_issue_ids: [], removed_issue_ids: issueIds, planned_date_changed: false, schedule_cancelled: false,
+        });
         await sysCommit();
       } catch (txErr) {
         try { await sysRollback(); } catch (_) { /* ignore */ }
@@ -6950,100 +7817,649 @@ module.exports = (deps) => {
     }
   });
 
-  // ── POST /sys-releases/:id/publish：发布（admin，H-3 原子性，走 publishReleaseTransition）──────────
-  //   body 可选 release_note/version_tag（"填说明+版本→发布"单步）；闸门③ 在 core 内校最终值非空。
-  //   [R4 退场，v1.6 §2.3 C-1] **release_type='bug' 批次一律拒发**（替代者=execute-release(mode=publish)，
-  //   其内部复用 _publishReleaseCoreInTxn 但入口守卫换成 release_assignee 体系）——**变更流（release_type='change'
-  //   或历史 NULL 批次）保留，唯一发布入口，行为逐字不变**。
-  router.post('/sys-releases/:id/publish', authenticateToken, requireSysSchemaReady, requireAdmin, async (req, res) => {
+  // ── C3 退场（方案 §6.7/§6.10/§6.14/附录A）：POST /sys-releases/:id/publish 全类型 409 ──────────
+  //   唯一合法发布入口收窄为 /sys-releases/:id/execute（中心守卫自读自判，§6.10）。admin 直发已不再是
+  //   合法路径——即使 admin 是被排入值班的执行人，也必须走"安排上线→（作为执行人）执行上线"两步，
+  //   不能再靠本端点一步转已上线。**保留 publishReleaseTransition 函数本体不删**（不接路由，仅供
+  //   verify 直调作为"内部调用绕过 HTTP"的测试载体，验证 _publishReleaseCoreInTxn 内嵌的中心守卫
+  //   即使被这条路子直接调用也照样拦——见该函数定义处注释）。
+  router.post('/sys-releases/:id/publish', authenticateToken, requireSysSchemaReady, async (req, res) => {
+    res.status(409).json({
+      error: '该端点已下线：发布唯一入口现为「安排上线」（通知值班执行人）+ 执行人本人「执行上线」，请改用 /sys-releases/:id/notify-executor 与 /sys-releases/:id/execute',
+      code: 'LEGACY_RELEASE_FLOW_DISABLED',
+    });
+  });
+
+  // ============================================================
+  // 上线体统一重构 C2a：排班驱动的通知/执行/撤销三端点 + 改期端点（§6.4/§6.4a/§6.8/§6.11）
+  // ============================================================
+
+  // ── POST /sys-releases/:id/update-planned-date：改计划上线日期（admin·单计划中·§6.11 原语④）──────────
+  //   [C2a 编码前置勘误②] 方案未逐字定路由动词——本端点是**新建端点**（既有 POST /sys-releases 仅建批次时
+  //   可写 planned_date，无既有"改期"入口），沿用项目既有"POST 语义动作"风格（非严格 REST PATCH）。
+  //   相同日期（含都为 NULL）= 差量空，applyReleaseChange 内部幂等跳过（不清通知不写 timeline）。
+  router.post('/sys-releases/:id/update-planned-date', authenticateToken, requireSysSchemaReady, requireAdmin, async (req, res) => {
+    const id = parsePositiveId(req.params.id);
+    if (!id) return res.status(400).json({ error: '无效的批次 ID', code: 'INVALID_RELEASE_ID' });
+    const dateCheck = normalizeDeadline((req.body || {}).planned_date);   // 复用日期校验（YYYY-MM-DD 真实日期 / 空可选=清除）
+    if (!dateCheck.ok) return res.status(400).json({ error: '计划上线日期格式非法（应为 YYYY-MM-DD 真实日期，留空可清除）', code: 'INVALID_PLANNED_DATE' });
+    const newDate = dateCheck.value;
+    const actor = sysActor(req);
+    try {
+      // codex 199 审 LOW-2：写路径统一先做惰性 stale 转换（与 notify-executor/execute/cancel-schedule
+      //   三端点对齐审计语义——即便本端点不直接读 notify_status 做前置判断，改期仍属于会触发通知重置的
+      //   写路径，统一在写入口先把陈旧的 sending 判活，避免"审计口径三缺一"）。
+      await staleTransitionForRelease(id);
+      await sysBeginImmediate();
+      try {
+        const rel = await dbGetAsync('SELECT id, status, planned_date FROM sys_releases WHERE id = ?', [id]);
+        if (!rel) { await sysRollback(); return res.status(404).json({ error: '上线批次不存在', code: 'RELEASE_NOT_FOUND' }); }
+        if (rel.status !== '计划中') { await sysRollback(); return res.status(409).json({ error: '批次非「计划中」，不能改期', code: 'RELEASE_NOT_PLANNING' }); }
+        const changed = rel.planned_date !== newDate;   // 相同日期（含都为 null）= 差量空
+        if (changed) {
+          // CAS 对旧值比对，防并发窗口内被另一次改期抢先。
+          const upd = await dbRunAsync(
+            `UPDATE sys_releases SET planned_date = ? WHERE id = ? AND status = '计划中' AND COALESCE(planned_date,'') = COALESCE(?,'')`,
+            [newDate, id, rel.planned_date]
+          );
+          if (!upd || upd.changes !== 1) {
+            await sysRollback();
+            return res.status(409).json({ error: '批次状态已并发变更，请刷新重试', code: 'CONCURRENT_STATE_CHANGE' });
+          }
+        }
+        await applyReleaseChange(id, actor, {
+          added_issue_ids: [], removed_issue_ids: [], planned_date_changed: changed, schedule_cancelled: false,
+        });
+        await sysCommit();
+        res.json({ id, planned_date: newDate, changed });
+      } catch (txErr) {
+        try { await sysRollback(); } catch (_) { /* ignore */ }
+        throw txErr;
+      }
+    } catch (err) {
+      if (err instanceof SysTransitionError) return sendSysTransitionError(res, err);
+      logger.error('[系统迭代] 改计划上线日期失败:', err && err.message);
+      res.status(500).json({ error: (err && err.message) || '改计划上线日期失败' });
+    }
+  });
+
+  // ── POST /sys-releases/:id/cancel-schedule：撤销上线安排（仅对接人，admin 403，§6.8）──────────
+  router.post('/sys-releases/:id/cancel-schedule', authenticateToken, requireSysSchemaReady, requireLiaisonOnly, async (req, res) => {
+    const id = parsePositiveId(req.params.id);
+    if (!id) return res.status(400).json({ error: '无效的批次 ID', code: 'INVALID_RELEASE_ID' });
+    const reason = (typeof (req.body || {}).reason === 'string' ? req.body.reason.trim() : '');
+    if (!reason || reason.length > 200) return res.status(400).json({ error: '撤销原因必填（trim 后 1..200 字）', code: 'CANCEL_REASON_REQUIRED' });
+    const actor = sysActor(req);
+    try {
+      await staleTransitionForRelease(id);   // §6.4a③ 惰性 stale 转换
+      await sysBeginImmediate();
+      try {
+        const rel = await dbGetAsync(
+          `SELECT id, status, release_assignee_id, release_assignee_name,
+                  release_assignee_notify_status AS ns, release_assignee_notify_token AS tok
+             FROM sys_releases WHERE id = ?`,
+          [id]
+        );
+        if (!rel) { await sysRollback(); return res.status(404).json({ error: '上线批次不存在', code: 'RELEASE_NOT_FOUND' }); }
+        if (rel.status !== '计划中') { await sysRollback(); return res.status(409).json({ error: '批次非「计划中」，不能撤销上线安排', code: 'RELEASE_NOT_PLANNING' }); }
+        if (!['sent', 'stale', 'failed'].includes(rel.ns)) {
+          await sysRollback();
+          return res.status(409).json({ error: `当前通知状态（${rel.ns}）不可撤销上线安排`, code: 'CANCEL_SCHEDULE_STATUS_INVALID' });
+        }
+        // §6.8 CAS：重置六列 + WHERE 与预读值逐列比对（status/notify_status/release_assignee_id/token）——
+        //   比 applyReleaseChange 默认重置更强的保护（防并发窗口内被 notify-executor 抢先改动）。
+        const newToken = crypto.randomBytes(16).toString('hex');
+        const cas = await dbRunAsync(
+          `UPDATE sys_releases SET
+             release_assignee_id = NULL, release_assignee_name = NULL,
+             release_assignee_notify_status = 'not_sent', release_assignee_notify_started_at = NULL,
+             release_assignee_notified_at = NULL, release_assignee_notify_message_key = NULL,
+             release_assignee_notify_error = NULL, release_assignee_notify_token = ?, release_assignee_read_at = NULL
+           WHERE id = ? AND status = '计划中' AND release_assignee_notify_status IN ('sent','stale','failed')
+             AND COALESCE(release_assignee_id,0) = COALESCE(?,0)
+             AND COALESCE(release_assignee_notify_token,'') = COALESCE(?,'')`,
+          [newToken, id, rel.release_assignee_id, rel.tok]
+        );
+        if (!cas || cas.changes !== 1) {
+          await sysRollback();
+          return res.status(409).json({ error: '上线安排状态已并发变更，请刷新重试', code: 'CANCEL_SCHEDULE_CONFLICT' });
+        }
+        // 已完成 CAS 保护的重置——告知 applyReleaseChange 跳过它自己的默认重置（skipReset），只做双写+timeline。
+        //   ⚠️ 旧执行人 id/name 必须由本端点显式传入（opts.oldAssigneeId/oldAssigneeName）：上面的 CAS UPDATE
+        //   已经把 release_assignee_name 清成 NULL，applyReleaseChange 若自己重新 SELECT 只能读到 NULL，
+        //   写不出"原执行人：xxx"这句 timeline 文案（见该函数内注释）。这里的 rel 是 CAS 重置**之前**读到的旧值。
+        await applyReleaseChange(id, actor, {
+          added_issue_ids: [], removed_issue_ids: [], planned_date_changed: false,
+          schedule_cancelled: true, cancel_reason: reason,
+        }, { skipReset: true, oldAssigneeId: rel.release_assignee_id, oldAssigneeName: rel.release_assignee_name });
+        await sysCommit();
+        res.json({ id, cancelled: true, old_assignee_name: rel.release_assignee_name || null });
+      } catch (txErr) {
+        try { await sysRollback(); } catch (_) { /* ignore */ }
+        throw txErr;
+      }
+    } catch (err) {
+      if (err instanceof SysTransitionError) return sendSysTransitionError(res, err);
+      logger.error('[系统迭代] 撤销上线安排失败:', err && err.message);
+      res.status(500).json({ error: (err && err.message) || '撤销上线安排失败' });
+    }
+  });
+
+  // ── 批次级上线执行通知 markdown（区别于 issue 级 buildSysReleaseExecutorMarkdown，供 sys_releases
+  //   批次通知复用；简洁自足，不依赖成员明细，避免为消息文案再查一轮成员列表）。 ──────────
+  function buildReleaseBatchExecutorMarkdown(rel, baseUrl) {
+    const title = `【上线值班】${rel.release_no || ('#' + rel.id)} 待您执行上线`;
+    const lines = [
+      `### 上线值班通知`,
+      `批次：${rel.release_no || ('#' + rel.id)}${rel.title ? '（' + rel.title + '）' : ''}`,
+      `计划上线日期：${rel.planned_date || '（未设置）'}`,
+    ];
+    // C2b 第2批：原式裸 baseUrl 只到首页，执行人无路径找到自己被指派的批次——改深链直达详情页「安排上线」
+    // 面板（sysReleaseDeepLinkLine 定义于本文件下方，同 sysDeepLinkLine 一起维护）。link 自带 \n\n 前缀，
+    // 直接字符串拼接（不进 lines 数组走 join，避免与 join 分隔符叠加产生多余空行——同 buildSysReleaseExecutorMarkdown
+    // 既有拼接范式）。
+    const link = sysReleaseDeepLinkLine(baseUrl, rel.id);
+    return { title, md: lines.join('\n\n') + link };
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // C3 提取（方案 §6.7 明文"不得另写旁路"）：notify-executor 的核心两段 CAS 逻辑拆成两个可复用函数，
+  //   供 /sys-releases/:id/notify-executor 路由与 hotfix-publish 两阶段的第一次通知共用同一份实现——
+  //   不是各自重写一份相似逻辑，是同一份代码两个调用方。
+  //
+  //   preemptReleaseNotifySend(id)：§7b①抢占发送权。**假定调用方已 sysBeginImmediate()，本函数不
+  //     begin/commit**（同 _publishReleaseCoreInTxn 既有范式，见其函数头注释）——调用方按返回的
+  //     outcome 自行决定 commit 还是 rollback。返回判别式对象 { outcome, ... }，never throws（除底层
+  //     DB 异常，交由调用方外层 catch 统一处理）。
+  //   sendReleaseNotifyAndWriteback(id, preempt, actor)：§7b⑤外呼 + §7b②回写 CAS + 镜像双写。调用方
+  //     必须在 preempt 那次事务已 COMMIT 之后（事务外）调用；本函数内部自己开一个新 sysBeginImmediate
+  //     做回写，函数签名不暴露额外事务边界给调用方。
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  // C3·D（notify-executor 补成员非空校验，与 execute 的 RELEASE_EMPTY fail-closed 一致）：抢占发送权前
+  //   先确认批次成员非空——对 notify-executor 路由本身是新增防呆（此前可对空批次"安排上线"，通知一个
+  //   无事可做的执行人）；对 hotfix-publish 首次调用路径是零成本天然满足（建单+加单与抢占在同一事务，
+  //   member 恒=1），此check 对它是 no-op，不改变其行为。
+  //   [2026-07-30 用户提出·通知三件套对齐] opts.allowResend=true 时 sent 态不再幂等早退，改走"保留原执行人
+  //   重发"分支（与 failed/stale 完全同一条代码路径与 CAS——不是旁路，是同一服务的准入放宽）：token 换新、
+  //   message_key/read_at 清零重置，两段 CAS 并发防护原样生效。调用方：notify-executor 路由按 body.resend
+  //   透传；hotfix-publish 不传（首发语义不变）。
+  async function preemptReleaseNotifySend(id, opts) {
+    const allowResend = !!(opts && opts.allowResend);
+    const rel = await dbGetAsync(
+      `SELECT id, status, planned_date, release_assignee_id, release_assignee_name,
+              release_assignee_notify_status AS ns, release_assignee_notify_token AS tok
+         FROM sys_releases WHERE id = ?`,
+      [id]
+    );
+    if (!rel) return { outcome: 'not_found' };
+    if (rel.status !== '计划中') return { outcome: 'not_planning' };
+
+    // D：成员非空（fail-closed，与 _publishReleaseCoreInTxn 的 RELEASE_EMPTY 同码同语义）。
+    //   [codex 201 审 MED-1] 置于 sent/sending 幂等早退**之前**：正常流程"sent∧空成员"不可达（移单必经
+    //   applyReleaseChange 重置 not_sent），但 fail-closed 不依赖"上游一定重置"的假设——若真出现异常态，
+    //   空批次在此一律 empty，不再借幂等分支混过（execute 端六校验②仍是终防线，双保险）。
+    const memberCount = await dbGetAsync('SELECT COUNT(*) AS c FROM sys_issues WHERE release_id = ?', [id]);
+    if (!memberCount || memberCount.c === 0) {
+      return { outcome: 'empty' };
+    }
+
+    if (rel.ns === 'sent' && !allowResend) {
+      return { outcome: 'idempotent_sent', release_assignee_id: rel.release_assignee_id, release_assignee_name: rel.release_assignee_name };
+    }
+    if (rel.ns === 'sending') {
+      return { outcome: 'sending_in_progress' };
+    }
+    if (!['not_sent', 'failed', 'stale'].includes(rel.ns) && !(allowResend && rel.ns === 'sent')) {
+      return { outcome: 'status_invalid', ns: rel.ns };
+    }
+
+    let candidateId = null, candidateName = null;
+    if (rel.ns === 'not_sent') {
+      // 唯一重查点（§6.4）：仅原态 not_sent 才按当日排班定人。
+      if (!rel.planned_date) return { outcome: 'no_planned_date' };
+      const roster = await dbGetAsync(
+        `SELECT user_id, user_name FROM sys_release_duty_roster WHERE duty_date = ? AND removed_at IS NULL`,
+        [rel.planned_date]
+      );
+      if (!roster) return { outcome: 'no_duty_roster', planned_date: rel.planned_date };
+      candidateId = roster.user_id; candidateName = roster.user_name;
+    } else {
+      // failed/stale/sent-重发（allowResend）：保留原执行人（§6.4「否——保留原执行人」；重发不重查排班，
+      //   执行人已锁定，换人唯一路径仍是对接人 cancel-schedule 后重新安排）。
+      candidateId = rel.release_assignee_id; candidateName = rel.release_assignee_name;
+    }
+    if (!candidateId) {
+      return { outcome: 'assignee_invalid' };
+    }
+    const eligible = await hasReleaseEligibility(candidateId);
+    if (!eligible) {
+      return { outcome: rel.ns === 'not_sent' ? 'duty_not_eligible' : 'assignee_invalid' };
+    }
+
+    // ④ CAS 更新（§7b①步骤4，逐列比对旧值）
+    const newToken = crypto.randomBytes(16).toString('hex');
+    const casSql = rel.ns === 'not_sent'
+      ? `UPDATE sys_releases SET
+           release_assignee_notify_status='sending', release_assignee_notify_started_at=datetime('now','localtime'),
+           release_assignee_notify_token=?, release_assignee_notified_at=NULL, release_assignee_notify_message_key=NULL,
+           release_assignee_notify_error=NULL, release_assignee_read_at=NULL,
+           release_assignee_id=?, release_assignee_name=?
+         WHERE id=? AND status='计划中' AND release_assignee_notify_status=?
+           AND COALESCE(release_assignee_notify_token,'')=COALESCE(?,'')
+           AND COALESCE(release_assignee_id,0)=COALESCE(?,0)`
+      : `UPDATE sys_releases SET
+           release_assignee_notify_status='sending', release_assignee_notify_started_at=datetime('now','localtime'),
+           release_assignee_notify_token=?, release_assignee_notified_at=NULL, release_assignee_notify_message_key=NULL,
+           release_assignee_notify_error=NULL, release_assignee_read_at=NULL
+         WHERE id=? AND status='计划中' AND release_assignee_notify_status=?
+           AND COALESCE(release_assignee_notify_token,'')=COALESCE(?,'')
+           AND COALESCE(release_assignee_id,0)=COALESCE(?,0)`;
+    const casParams = rel.ns === 'not_sent'
+      ? [newToken, candidateId, candidateName, id, rel.ns, rel.tok, rel.release_assignee_id]
+      : [newToken, id, rel.ns, rel.tok, rel.release_assignee_id];
+    const cas = await dbRunAsync(casSql, casParams);
+    if (!cas || cas.changes !== 1) {
+      const fresh = await dbGetAsync('SELECT release_assignee_notify_status AS ns FROM sys_releases WHERE id=?', [id]);
+      if (fresh && fresh.ns === 'sent') return { outcome: 'idempotent_sent_race' };
+      if (fresh && fresh.ns === 'sending') return { outcome: 'sending_in_progress' };
+      return { outcome: 'cas_conflict' };
+    }
+    return { outcome: 'preempted', token: newToken, assigneeId: candidateId, assigneeName: candidateName };
+  }
+
+  // §7b⑤外呼 + §7b②回写 CAS（同一事务）。调用方须在 preempt 事务提交后（事务外）调用。
+  //   [C5] 原"+镜像双写"已删除（syncReleaseLegacyMirror 调用点，见下方 try 块内注释）——`actor` 形参
+  //   自此起在本函数体内不再被引用（原只用于镜像的 release_assignee_notify_sent_by 字段），刻意保留
+  //   不删：两处调用方（notify-executor 路由 / hotfix-publish 路由）传参逐字未动，改函数签名收益小
+  //   于风险，未使用形参本身无副作用。
+  async function sendReleaseNotifyAndWriteback(id, preempt, actor) {
+    // ⑤ 事务外调钉钉（§7b①步骤5，唯一允许外呼的位置）
+    const executor = await dbGetAsync('SELECT id, display_name, phone, dingtalk_user_id FROM users WHERE id = ?', [preempt.assigneeId]);
+    let sendResult = { ok: false, reason: '执行人用户不存在' };
+    if (executor) {
+      const relInfo = await dbGetAsync('SELECT id, release_no, title, planned_date FROM sys_releases WHERE id = ?', [id]);
+      const baseUrl = await getSafePlatformBaseUrl();
+      const { title, md } = buildReleaseBatchExecutorMarkdown(relInfo || { id }, baseUrl);
+      sendResult = await sendIssueDingtalkRaw(executor, title, md);
+    }
+
+    // ② 结果回写 CAS（§7b②）。[C5 历史注记] codex 199 审 HIGH-1 当年修的是"回写 CAS + 镜像写"两步必须
+    //   同事务（此前裸跑在事务外，cancel-schedule 可在缝隙插入导致镜像与权威态打架）——镜像写本身已随
+    //   C5 删除（见下方），HIGH-1 的"同事务"约束现仅剩回写 CAS 这一步，约束自然满足（单条 UPDATE 天然
+    //   原子），不影响该修复的有效性。
+    const nowRow = sendResult.ok ? await dbGetAsync(`SELECT datetime('now','localtime') AS n`) : null;
+    const notifiedAt = sendResult.ok ? (nowRow && nowRow.n) : null;
+    const messageKey = sendResult.ok ? sendResult.message_key : null;
+    const errMsg = sendResult.ok ? null : (sendResult.reason || '发送失败');
+    await sysBeginImmediate();
+    try {
+      const writeback = await dbRunAsync(
+        `UPDATE sys_releases SET
+           release_assignee_notify_status = ?, release_assignee_notify_started_at = NULL,
+           release_assignee_notified_at = ?, release_assignee_notify_message_key = ?, release_assignee_notify_error = ?
+         WHERE id = ? AND status = '计划中' AND release_assignee_notify_status = 'sending'
+           AND release_assignee_id = ? AND release_assignee_notify_token = ?`,
+        [sendResult.ok ? 'sent' : 'failed', notifiedAt, messageKey, errMsg, id, preempt.assigneeId, preempt.token]
+      );
+      if (!writeback || writeback.changes !== 1) {
+        await sysRollback();
+        logger.warn(`[系统迭代] notify-executor 结果回写被 CAS 拒绝（并发变更）：release=${id}`);
+        const fresh = await dbGetAsync('SELECT release_assignee_notify_status AS ns FROM sys_releases WHERE id=?', [id]);
+        return { outcome: 'concurrent_changed', notify_status: fresh ? fresh.ns : null };
+      }
+      // [C5 删除] 双写镜像调用（syncReleaseLegacyMirror + 当前成员查询）已删除——§10.1"双写期到 C4 终止"，
+      //   见函数定义处删除注释。回写 CAS 成功后直接提交，不再额外查成员/写镜像列。
+      await sysCommit();
+    } catch (txErr) {
+      try { await sysRollback(); } catch (_) { /* ignore */ }
+      throw txErr;
+    }
+    return {
+      outcome: sendResult.ok ? 'sent' : 'failed', notify_status: sendResult.ok ? 'sent' : 'failed',
+      release_assignee_id: preempt.assigneeId, release_assignee_name: preempt.assigneeName, notify_error: errMsg,
+    };
+  }
+
+  // ── POST /sys-releases/:id/notify-executor：通知执行开发（admin，两段 CAS，§6.4/§6.4a/§7b）──────────
+  //   HTTP 契约逐字不变（本次仅内部重构为调用共享函数，外部行为零回归——见 verify-sys-release-batch.js
+  //   15 组既有断言复跑验证）。
+  router.post('/sys-releases/:id/notify-executor', authenticateToken, requireSysSchemaReady, requireAdmin, async (req, res) => {
+    const id = parsePositiveId(req.params.id);
+    if (!id) return res.status(400).json({ error: '无效的批次 ID', code: 'INVALID_RELEASE_ID' });
+    const actor = sysActor(req);
+    // [2026-07-30] body.resend=true：sent 态重发（保留原执行人，通知三件套对齐——同一服务准入放宽，非旁路）。
+    const resend = ((req.body || {}).resend === true);
+    try {
+      await staleTransitionForRelease(id);   // §7b③ 惰性 stale 转换
+
+      let preempt = null;
+      await sysBeginImmediate();
+      try {
+        preempt = await preemptReleaseNotifySend(id, { allowResend: resend });
+        if (preempt.outcome === 'preempted') { await sysCommit(); } else { await sysRollback(); }
+      } catch (txErr) {
+        try { await sysRollback(); } catch (_) { /* ignore */ }
+        throw txErr;
+      }
+
+      switch (preempt.outcome) {
+        case 'not_found': return res.status(404).json({ error: '上线批次不存在', code: 'RELEASE_NOT_FOUND' });
+        case 'not_planning': return res.status(409).json({ error: '批次非「计划中」，不能通知执行开发', code: 'RELEASE_NOT_PLANNING' });
+        case 'idempotent_sent':
+          return res.json({ id, notify_status: 'sent', release_assignee_id: preempt.release_assignee_id, release_assignee_name: preempt.release_assignee_name, idempotent: true });
+        case 'sending_in_progress': return res.status(409).json({ error: '已有发送在途，请稍候', code: 'NOTIFY_SENDING_IN_PROGRESS' });
+        case 'status_invalid': return res.status(409).json({ error: `当前通知状态（${preempt.ns}）不支持发送`, code: 'NOTIFY_STATUS_INVALID' });
+        case 'empty': return res.status(409).json({ error: '批次内无待上线单，不能通知执行开发', code: 'RELEASE_EMPTY' });
+        case 'no_planned_date': return res.status(409).json({ error: '批次未设置计划上线日期，无法查排班', code: 'NO_PLANNED_DATE' });
+        case 'no_duty_roster': return res.status(409).json({ error: `计划上线日期（${preempt.planned_date}）无在册值班人，请联系对接人安排排班`, code: 'NO_DUTY_ROSTER' });
+        case 'duty_not_eligible': return res.status(409).json({ error: '该日值班人无上线资格，请联系对接人调整', code: 'DUTY_USER_NOT_ELIGIBLE' });
+        case 'assignee_invalid': return res.status(409).json({ error: '原执行人已失效，请联系对接人撤销上线安排', code: 'RELEASE_ASSIGNEE_INVALID' });
+        case 'idempotent_sent_race': return res.json({ id, notify_status: 'sent', idempotent: true });
+        case 'cas_conflict': return res.status(409).json({ error: '通知状态已并发变更，请重试', code: 'NOTIFY_CAS_CONFLICT' });
+        default: break;   // 'preempted' → 往下走事务外通知
+      }
+
+      const sendOutcome = await sendReleaseNotifyAndWriteback(id, preempt, actor);
+      if (sendOutcome.outcome === 'concurrent_changed') {
+        return res.json({ id, concurrent_changed: true, notify_status: sendOutcome.notify_status });
+      }
+      res.json({
+        id, notify_status: sendOutcome.notify_status, release_assignee_id: sendOutcome.release_assignee_id,
+        release_assignee_name: sendOutcome.release_assignee_name, notify_error: sendOutcome.notify_error,
+      });
+    } catch (err) {
+      if (err instanceof SysTransitionError) return sendSysTransitionError(res, err);
+      logger.error('[系统迭代] 通知执行开发失败:', err && err.message);
+      res.status(500).json({ error: (err && err.message) || '通知执行开发失败' });
+    }
+  });
+
+  // ── GET /sys-releases/:id/executor-read-status：批次执行人通知查已读（2026-07-30 用户提出·通知三件套对齐）──────────
+  //   镜像单据级 notify-read-status 的 release_executor 通道范式：token 重试 + 已读固化写回 + 权限同通道仅 admin。
+  //   固化写回带**收件人+message_key 双围栏**（镜像单据级对抗审 F3 教训：回写按"这一次投递"定位——查询在途期间
+  //   批次被撤销/换人/重发[message_key 已换]则本次结果作废不落库，防跨代际污染）；已固化 read_at 直接返 cached
+  //   （钉钉无取消已读语义）。
+  //   [codex 211 审 MED-1 裁定·刻意允许的边界] 查询在途期间批次被 execute 发布：发布不动通知列（assignee/mk
+  //   原样保留供审计展示），固化写回会落在已发布批次上——这是**同一次投递的事实固化**（执行人确实读了那条
+  //   通知），审计友好，故不加 status='计划中' 围栏；本端点整体是**历史查询能力**（已发布批次也可查/cached），
+  //   与"计划中才有操作按钮"的前端门是两回事（verify ⑭(f) 锁定该语义）。
+  //   [codex 211 审 LOW-1 裁定] 不调 staleTransitionForRelease：stale 只源于 sending 悬挂超时（⑪组崩溃恢复链），
+  //   sent 态不会被 stale 转换，本端点前置又要求 ns='sent'——两者无交集，无需转换。
+  router.get('/sys-releases/:id/executor-read-status', authenticateToken, requireSysSchemaReady, requireAdmin, async (req, res) => {
     const id = parsePositiveId(req.params.id);
     if (!id) return res.status(400).json({ error: '无效的批次 ID', code: 'INVALID_RELEASE_ID' });
     try {
-      const rel = await dbGetAsync('SELECT release_type FROM sys_releases WHERE id = ?', [id]);
+      const rel = await dbGetAsync(
+        `SELECT id, release_assignee_id, release_assignee_notify_status AS ns,
+                release_assignee_notify_message_key AS mk, release_assignee_read_at AS ra
+           FROM sys_releases WHERE id = ?`, [id]);
       if (!rel) return res.status(404).json({ error: '上线批次不存在', code: 'RELEASE_NOT_FOUND' });
-      if (rel.release_type === 'bug') {
-        return res.status(409).json({ error: '该功能已下线，bug 批次请改用「执行上线」流程', code: 'LEGACY_RELEASE_FLOW_DISABLED' });
+      if (rel.ns !== 'sent' || !rel.mk) return res.status(400).json({ error: '尚未成功发送执行通知', code: 'NOTIFY_NOT_SENT', read: false });
+      if (rel.ra) return res.json({ read: true, read_at: rel.ra, cached: true });
+      const [appKey, appSecret, robotCode] = await Promise.all(
+        ['dingtalk_app_key', 'dingtalk_app_secret', 'dingtalk_robot_code'].map(readSystemConfig));
+      if (!appKey || !appSecret || !robotCode) return res.status(500).json({ error: '钉钉配置未填写', code: 'NO_DINGTALK_CONFIG' });
+      let token;
+      try { token = await dingtalkNotify.getAccessToken(appKey, appSecret); }
+      catch (err) { const cls = dingtalkNotify.classifyError(err); return res.status(502).json({ error: cls.hint, reason: cls.reason }); }
+      const u = await dbGetAsync('SELECT dingtalk_user_id FROM users WHERE id = ?', [rel.release_assignee_id]);
+      const uid = u && u.dingtalk_user_id ? String(u.dingtalk_user_id).trim() : '';
+      if (!uid) return res.json({ read: false, read_at: null, read_status: 'recipient_unresolved' });
+      let readResult;
+      try { readResult = await callDingtalkWithTokenRetry(appKey, appSecret, token, (t) => dingtalkNotify.getReadStatus(t, robotCode, rel.mk)); }
+      catch (err) { const cls = dingtalkNotify.classifyError(err); return res.status(502).json({ error: cls.hint, reason: cls.reason }); }
+      const my = (readResult.readDetails || []).find(d => String(d.userId).trim() === uid && d.readStatus === 'READ');
+      let readAtStr = null;
+      if (my) {
+        // readTimestamp 单位兼容归一（镜像单据级 codex 12 M-3：>1e12 毫秒、>1e9 秒，不凭印象 *1000）
+        const ts = Number(my.readTimestamp) || 0;
+        const ms = ts > 1e12 ? ts : (ts > 1e9 ? ts * 1000 : Date.now());
+        readAtStr = new Date(ms).toLocaleString('zh-CN');
+        await sysNotifyWrite(
+          `UPDATE sys_releases SET release_assignee_read_at = ?
+             WHERE id = ? AND release_assignee_id = ? AND release_assignee_notify_message_key = ? AND release_assignee_read_at IS NULL`,
+          [readAtStr, id, rel.release_assignee_id, rel.mk]);
       }
-      const actor = sysActor(req);   // C2b：发布 actor 与后台派发的 sent_by 同源
-      const r = await publishReleaseTransition(id, actor, req.body || {});
-      const releasedIds = r.releasedIssueIds || [];
-      // 批次通知逐单发需求方·已上线（§6.2：状态先提交成功）。ultracode 审 #4：批次可达 200 单（C4 上限），
-      //   N 条钉钉网络发送串行 await 在响应前会阻塞 HTTP 响应至超时（504），而批次其实已发布成功。
-      //   故先回响应，再**后台**逐单顺序 best-effort 派发（dispatch 内绝不抛 + record 进 mutex 串行化，不阻塞主响应）。
-      // ⚠️ codex 审 M-2：此后台派发为**进程内非持久 best-effort**——PM2 重启/进程退出会丢未发完的通知，单据停在
-      //   requester_notify_status='not_sent'/'failed'。补偿口径 = C6 前端按 not_sent/failed 筛出提供**手动补发**入口
-      //   （对齐 issue-tracker 既有手动 notify 端点范式）；内网 + 批次量小，不引入持久队列（见 backlog）。
-      //   ⚠️ 论据更正（2026-07-27）：原写「内网**单 admin** + 批次量小」，核实生产实为 **6 个 active admin** ——
-      //     "只有一个人会点发布"这个前提不成立，6 人可并发启动多个最多 200 单的后台循环。当前仍不引入持久队列，
-      //     但依据改为「内网低频 + 有手动补发兜底」，并已记入 backlog：若真出现并发批量发布，需加进程级有界队列 + 并发上限。
-      res.json({ id, status: '已发布', released: releasedIds, count: r.count });
-      //   ⚠️ C2b：actorId 在**进入后台循环前**捕获为局部值（不在闭包里现读 req）——后台循环跑在响应之后，
-      //     让它依赖请求对象的生命周期是没必要的耦合；审计归属应在发起那一刻就定下来。
-      const releaseActorId = actor.id;
-      (async () => { for (const iid of releasedIds) await dispatchSysNotify(iid, 'notifyReleasedToRequester', releaseActorId); })().catch(() => { /* dispatch 内已 best-effort，此处兜底防 unhandledRejection */ });
-    } catch (err) { sendSysTransitionError(res, err); }
+      res.json({ read: !!my, read_at: readAtStr, read_user_count: (readResult.readUserIds || []).length });
+    } catch (err) {
+      logger.error('[系统迭代] 批次执行人查已读失败:', err && err.message);
+      res.status(500).json({ error: (err && err.message) || '查已读失败' });
+    }
   });
 
-  // ── [R2 退场，v1.6 §2.3 C-1] POST /sys-issues/:id/hotfix-publish：单条 hotfix 兜底 ──────────
-  //   **变更流(feature/improvement)保留**（admin，自动建 is_hotfix=1 批次 + 一键发布，§6.1，行为逐字不变）；
-  //   **bug 一律 LEGACY_RELEASE_FLOW_DISABLED**（替代者=execute-release(mode=hotfix)，注意新 hotfix
-  //   **不建批次**，与本端点"hotfix 也建 is_hotfix=1 批次"语义不同，H-3）。
-  //   单事务原子：校单「待上线」AND 未挂批次 AND 非 config/非 bug → 建 hotfix 批次 → 绑单 → 复用 _publishReleaseCoreInTxn 发布。
+  // ── POST /sys-releases/:id/execute：值班开发本人执行上线（§6.4/§6.10，中间件仅登录，权限事务内自读自判）──────────
+  router.post('/sys-releases/:id/execute', authenticateToken, requireSysSchemaReady, async (req, res) => {
+    const id = parsePositiveId(req.params.id);
+    if (!id) return res.status(400).json({ error: '无效的批次 ID', code: 'INVALID_RELEASE_ID' });
+    const actor = sysActor(req);
+    const b = req.body || {};
+    const releaseNote = (typeof b.release_note === 'string' ? b.release_note.trim() : '');
+    const versionTag = (typeof b.version_tag === 'string' ? b.version_tag.trim() : '');
+    try {
+      await staleTransitionForRelease(id);
+      let result = null;
+      await sysBeginImmediate();
+      try {
+        const rel = await dbGetAsync(
+          `SELECT id, status, release_assignee_id, release_assignee_notify_status AS ns FROM sys_releases WHERE id=?`,
+          [id]
+        );
+        if (!rel) { await sysRollback(); return res.status(404).json({ error: '上线批次不存在', code: 'RELEASE_NOT_FOUND' }); }
+        if (rel.status !== '计划中') { await sysRollback(); return res.status(409).json({ error: '批次非「计划中」，不能执行上线', code: 'RELEASE_NOT_PLANNING' }); }
+        if (rel.ns !== 'sent') { await sysRollback(); return res.status(409).json({ error: `通知状态（${rel.ns}）非「已通知」，不能执行上线`, code: 'NOTIFY_NOT_SENT' }); }
+        if (!rel.release_assignee_id || Number(rel.release_assignee_id) !== actor.id) {
+          await sysRollback();
+          return res.status(403).json({ error: '仅被通知的值班执行人本人可执行上线', code: 'EXECUTOR_GUARD_FAILED' });
+        }
+        // §6.10 中心守卫不变量②③⑤：实时资格，事务内自读自判，不接受调用方"已验证"标记。
+        const eligible = await hasReleaseEligibility(actor.id);
+        if (!eligible) {
+          await sysRollback();
+          return res.status(403).json({ error: '当前账号无执行上线资格（非在职，或为查看者/管理员）', code: 'EXECUTOR_NOT_ELIGIBLE' });
+        }
+        result = await _publishReleaseCoreInTxn(
+          id, actor,
+          { release_note: releaseNote || undefined, version_tag: versionTag || undefined },
+          'execute-release', 'execute'
+        );
+        await sysCommit();
+      } catch (txErr) {
+        try { await sysRollback(); } catch (_) { /* ignore */ }
+        throw txErr;
+      }
+      res.json({ id, status: '已上线', released: result.releasedIssueIds, count: result.count });
+      // 发布成功后通知需求方——沿用 /publish 端点既有派发范式（照搬：先响应后台 best-effort 派发，dispatch
+      //   内 isAutoNotifyEnabled 现恒 false 故实际不发，但架构与 /publish 一致，若未来手动化策略调整两路同步生效）。
+      const releaseActorId = actor.id;
+      (async () => { for (const iid of result.releasedIssueIds) await dispatchSysNotify(iid, 'notifyReleasedToRequester', releaseActorId); })().catch(() => { /* 兜底防 unhandledRejection */ });
+    } catch (err) {
+      // C3 实测发现（HIGH 回归②③ 改造用例首次真实经由 /execute 走通 roster 门违例路径）：assertMainStatusTransition
+      //   抛的是 MainStatusGuardError（status-transition-guard.js 独立模块，不 instanceof SysTransitionError，
+      //   防循环依赖不 require index.js）——旧写法 `if (err instanceof SysTransitionError) ...` 会漏判这个类，
+      //   落到下面的通用 500，把本该是 400 GATE_INVARIANT 的响应错报成 500。sendSysTransitionError 内部本就
+      //   duck-type 兼容两种类型（.httpStatus/.code 结构），直接无条件调用即可，不必在外层重复做类型分支
+      //   （同 hotfix-publish catch 块既有写法）。
+      sendSysTransitionError(res, err);
+    }
+  });
+
+  // ── C3 重写（方案 §6.7）：POST /sys-issues/:id/hotfix-publish：应急一键——甲方一键完成
+  //   「建上线单+加单+安排上线」，**发布仍由值班开发执行**（R-3，本端点不再直接翻已上线）。──────────
+  //   **两阶段语义**（方案 §6.7 首段字面，2026-07-29 主会话裁定收口）：①本地"建单+加单+抢占发送权"
+  //   是**原子提交**（同一 BEGIN IMMEDIATE）——抢占失败（无排班/无资格等）= ①整体失败，回滚建单+绑单，
+  //   409（无排班/无资格同样 409，§6.7 首段明文）；②事务外通知——**仅**②阶段的外部通知失败**不回滚**
+  //   已提交的建单，只影响 notification_attempted/notify_status 字段与提示文案
+  //   （附录A「任务无 release_id → 200·created_new=true」的前提是走通①全链，或②失败落 failed——
+  //   不覆盖①阶段抢占失败）。
+  //   ⚠️ **本请求可能的②阶段落态精确说明**（对抗审视角 1 LOW-2 更正·原注释把 failed/stale 并列为本阶段
+  //   结果，属注释里的行为断言不实）：外呼失败 → 本请求直接写 `failed`；`stale` **不由本请求产生**——它
+  //   只来自"外呼后回写前进程中断"留下的 `sending` 被后续写路径惰性转换（staleTransitionForRelease）。
+  //   调用方不应期待本请求返回 stale。
+  //   **全类型统一**：RELEASABLE_TYPES（bug/feature/improvement）一视同仁，不再对 bug 特殊拒绝——上线体
+  //   统一重构 C3 的核心目标（旧 bug 专属 execute-release 通道本次一并 409 退场，见其路由处）。
+  //   **通知必须复用 notify-executor 同一内部服务**（§6.7"不得另写旁路"）：抢占用 preemptReleaseNotifySend，
+  //   外呼+回写用 sendReleaseNotifyAndWriteback——与 notify-executor 路由是同一份实现两个调用方。
   router.post('/sys-issues/:id/hotfix-publish', authenticateToken, requireSysSchemaReady, requireAdmin, async (req, res) => {
     const issueId = parsePositiveId(req.params.id);
     if (!issueId) return res.status(400).json({ error: '无效的迭代单 ID', code: 'INVALID_SYS_ISSUE_ID' });
     const b = req.body || {};
     const releaseNote = (typeof b.release_note === 'string' ? b.release_note.trim() : '');
-    // C6 去 version_tag 必填（SSOT §8/S21）：不再校非空，仅长度上限。
     const versionTag = (typeof b.version_tag === 'string' ? b.version_tag.trim() : '');
     if (!releaseNote) return res.status(400).json({ error: '请填写上线说明', code: 'RELEASE_NOTE_REQUIRED' });
     if (releaseNote.length > SYS_RELEASE_NOTE_MAX) return res.status(400).json({ error: `上线说明超长（≤${SYS_RELEASE_NOTE_MAX} 字）`, code: 'RELEASE_NOTE_TOO_LONG' });
     if (versionTag.length > SYS_VERSION_TAG_MAX) return res.status(400).json({ error: `版本号超长（≤${SYS_VERSION_TAG_MAX} 字）`, code: 'VERSION_TAG_TOO_LONG' });
     try {
       const actor = sysActor(req);
-      let releaseId = null, releaseNo = null, result = null;
+
+      // ① 建单+加单+抢占发送权（同一事务）。phase1=null 表示"重复调用"分支已在事务内提前 return 响应。
+      let phase1 = null;
       await sysBeginImmediate();
       try {
-        const issue = await dbGetAsync('SELECT id, status, release_id, type, needs_release FROM sys_issues WHERE id = ?', [issueId]);
+        const issue = await dbGetAsync('SELECT id, status, release_id, type FROM sys_issues WHERE id = ?', [issueId]);
         if (!issue) { await sysRollback(); return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' }); }
-        // C（codex L-2）：类型判断用 RELEASABLE_TYPES 白名单（与 add-issues 同源，防未来加类型漂移）；config 保留特化错误码。
+
+        if (issue.release_id !== null) {
+          // ── 重复调用（7 态响应表·§6.7）：该单已挂某上线单，按其现状分支 ──
+          const rel = await dbGetAsync(
+            `SELECT id, status, release_kind, release_no,
+                    release_assignee_id, release_assignee_name, release_assignee_notify_status AS ns
+               FROM sys_releases WHERE id = ?`,
+            [issue.release_id]
+          );
+          await sysRollback();   // 本分支纯读，无写入
+          if (!rel || rel.release_kind !== 'emergency') {
+            return res.status(409).json({ error: `该任务已在上线单 #${issue.release_id} 中，请勿混用应急口`, code: 'ISSUE_IN_NON_EMERGENCY_RELEASE' });
+          }
+          if (rel.status === '已发布') {
+            return res.status(409).json({ error: '该任务已上线，不可再建应急单', code: 'ISSUE_ALREADY_RELEASED' });
+          }
+          const common = {
+            issue_id: issueId, release_id: rel.id, release_no: rel.release_no,
+            notify_status: rel.ns, created_new: false, notification_attempted: false,
+            // [C3 第2批·前端契约] release_assignee_name 随 rel 一并查出（本 SELECT 已含该列，零额外查询成本）——
+            //   供前端"重复调用"提示展示当前执行人姓名，不必只靠 issue_id/release_id 裸数字。
+            release_assignee_id: rel.release_assignee_id, release_assignee_name: rel.release_assignee_name,
+          };
+          if (['sending', 'sent'].includes(rel.ns)) return res.json({ ...common, idempotent: true });
+          // failed / stale / not_sent（v3.4 新增，可达：cancel-schedule/加单/移单/改日期均会重置到此态）
+          return res.json({ ...common, hint: rel.ns === 'not_sent' ? '请用「安排上线」重新发送' : '请用「安排上线」重试' });
+        }
+
+        // ── 首次调用：校验 + 建 release_kind='emergency' 批次 + 抢占绑单 + 同事务内抢占发送权 ──
         if (!RELEASABLE_TYPES.includes(issue.type)) {
           await sysRollback();
           return res.status(409).json(issue.type === 'config'
             ? { error: '配置类不进上线批次', code: 'CONFIG_NO_RELEASE' }
             : { error: `该类型暂不可进上线批次（当前仅 ${RELEASABLE_TYPES.join('/')}）`, code: 'TYPE_NOT_RELEASABLE' });
         }
-        // [R2 退场] bug 一律拒绝（放在 status/release_id 校验之前，防止"该单非待上线"这类通用错误掩盖"整条路已下线"的更根本事实）
-        if (issue.type === 'bug') {
+        if (issue.status !== '待上线') {
           await sysRollback();
-          return res.status(409).json({ error: '该功能已下线，bug 上线流程请改用「批量指定上线开发」+「执行上线」', code: 'LEGACY_RELEASE_FLOW_DISABLED' });
+          return res.status(409).json({ error: '该单非「待上线」，不能 hotfix', code: 'ISSUE_NOT_HOTFIXABLE' });
         }
-        if (issue.status !== '待上线' || issue.release_id !== null) {
-          await sysRollback();
-          return res.status(409).json({ error: '该单非「待上线」或已挂批次，不能 hotfix', code: 'ISSUE_NOT_HOTFIXABLE' });
-        }
-        releaseNo = await nextReleaseNo();
+
+        const releaseNo = await nextReleaseNo();
         const relIns = await dbRunAsync(
-          `INSERT INTO sys_releases (release_no, title, status, is_hotfix, release_note, version_tag, created_by, created_by_name, release_type)
-           VALUES (?, ?, '计划中', 1, ?, ?, ?, ?, ?)`,
-          // C6：空 version_tag 落 NULL（与核心函数 UPDATE 步骤同源语义，见 _publishReleaseCoreInTxn 契约裁定点注释）；
-          // 核心函数随后会以同值再次 UPDATE 覆盖，此处仅保持初始建批次记录本身语义一致，非功能必需。
-          [releaseNo, `hotfix #${issueId}`, releaseNote, versionTag || null, actor.id, actor.name, releaseFamilyOf(issue.type)]   // D-A：存族别（bug→'bug' / feature·improvement→'change'）
+          `INSERT INTO sys_releases (release_no, title, status, is_hotfix, release_note, version_tag,
+                                      created_by, created_by_name, release_type, release_kind, planned_date)
+           VALUES (?, ?, '计划中', 1, ?, ?, ?, ?, ?, 'emergency', date('now','localtime'))`,
+          // release_kind='emergency' 供 emergency_display 口径识别（§6.12）；planned_date=当日——
+          //   preemptReleaseNotifySend 的 not_sent 分支按 planned_date 查当日排班，应急单须查"今天"值班人。
+          [releaseNo, `hotfix #${issueId}`, releaseNote, versionTag || null, actor.id, actor.name, releaseFamilyOf(issue.type)]
         );
-        releaseId = relIns.lastID;
+        const releaseId = relIns.lastID;
+
+        // 并发首次调用抢占（§6.7）：WHERE release_id IS NULL 条件更新——败方 changes=0。
         const bind = await dbRunAsync(
           "UPDATE sys_issues SET release_id = ?, updated_at = datetime('now','localtime') WHERE id = ? AND status = '待上线' AND release_id IS NULL",
           [releaseId, issueId]
         );
-        if (!bind || bind.changes !== 1) { await sysRollback(); return res.status(409).json({ error: '该单状态已变更，请刷新重试', code: 'ISSUE_NOT_HOTFIXABLE' }); }
-        result = await _publishReleaseCoreInTxn(releaseId, actor, { release_note: releaseNote, version_tag: versionTag }, 'publish', 'publish');
+        if (!bind || bind.changes !== 1) {
+          // 败方：回滚本次新建的批次（含刚才的 INSERT），改读赢家现状返回（与"重复调用"分支同一响应形状）。
+          await sysRollback();
+          const loser = await dbGetAsync('SELECT release_id FROM sys_issues WHERE id = ?', [issueId]);
+          if (loser && loser.release_id) {
+            const winnerRel = await dbGetAsync(
+              `SELECT id, status, release_kind, release_no, release_assignee_id, release_assignee_name,
+                      release_assignee_notify_status AS ns FROM sys_releases WHERE id = ?`,
+              [loser.release_id]
+            );
+            if (winnerRel && winnerRel.release_kind === 'emergency' && winnerRel.status !== '已发布') {
+              const common = {
+                issue_id: issueId, release_id: winnerRel.id, release_no: winnerRel.release_no,
+                notify_status: winnerRel.ns, created_new: false, notification_attempted: false,
+                release_assignee_id: winnerRel.release_assignee_id, release_assignee_name: winnerRel.release_assignee_name,
+              };
+              if (['sending', 'sent'].includes(winnerRel.ns)) return res.json({ ...common, idempotent: true });
+              return res.json({ ...common, hint: winnerRel.ns === 'not_sent' ? '请用「安排上线」重新发送' : '请用「安排上线」重试' });
+            }
+          }
+          return res.status(409).json({ error: '该单状态已变更，请刷新重试', code: 'ISSUE_NOT_HOTFIXABLE' });
+        }
+
+        // 加单成功——同一事务内继续抢占发送权（复用共享函数，不另写旁路，§6.7）。
+        // [C3 裁定修正 2026-07-29] 方案 §6.7 首段字面：①"建单+加单+抢占发送权"是**原子提交**——抢占失败
+        //   （无排班/无资格等）= ①阶段整体失败，须回滚本次新建的批次+绑单，不留 not_sent 悬单；"不回滚
+        //   建单"字面只限定②外部通知失败（保单落 failed/stale），不覆盖①阶段内的抢占失败。与
+        //   notify-executor 对既有批次做同一次抢占失败时的 409 语义完全同源，唯一差异是这里连带把本次
+        //   新建的批次/绑单一并撤销（因为该批次是本次调用自己建的，非既有资源）。
+        const preempt = await preemptReleaseNotifySend(releaseId);
+        if (preempt.outcome !== 'preempted') {
+          await sysRollback();
+          const CODE_BY_OUTCOME = {
+            no_duty_roster: 'NO_ELIGIBLE_DUTY_ROSTER',
+            duty_not_eligible: 'DUTY_NOT_ELIGIBLE',
+            // 以下两支理论不可达（本端点建单即加单·member 恒=1；建批次时已写今日 planned_date），
+            // 保留兜底 code 防御 schema/时序漂移导致的意外分支——同样整体回滚+409，不留 200 旁路。
+            empty: 'RELEASE_EMPTY',
+            no_planned_date: 'NO_PLANNED_DATE',
+          };
+          const MSG_BY_OUTCOME = {
+            no_duty_roster: '计划上线日期（今日）无在册值班人，请联系对接人安排排班后再重新发起应急上线',
+            duty_not_eligible: '该日值班人无上线资格，请联系对接人调整后再重新发起应急上线',
+            empty: '批次成员异常，请联系管理员核查',
+            no_planned_date: '计划上线日期异常，请联系管理员核查',
+          };
+          // [codex 201 审 LOW-1] 未映射 outcome（not_found/cas_conflict 等·本路径理论不可达）留痕便于排障
+          if (!CODE_BY_OUTCOME[preempt.outcome]) {
+            logger.warn(`[系统迭代] hotfix-publish 抢占失败落入未映射 outcome=${preempt.outcome}（理论不可达分支，请排查时序/schema 漂移）`);
+          }
+          // 200 与 409 响应字段同样完整（方案字面）：字段齐全但语义置空/置假，不省略键。
+          return res.status(409).json({
+            error: MSG_BY_OUTCOME[preempt.outcome] || '安排上线未成功，请重新发起应急上线',
+            code: CODE_BY_OUTCOME[preempt.outcome] || 'RELEASE_NOTIFY_PREEMPT_FAILED',
+            issue_id: issueId, release_id: null, notify_status: null,
+            created_new: false, notification_attempted: false,
+          });
+        }
         await sysCommit();
+        phase1 = { releaseId, releaseNo, preempt };
       } catch (txErr) {
         try { await sysRollback(); } catch (_) { /* ignore */ }
         throw txErr;
       }
-      await dispatchSysNotify(issueId, 'notifyReleasedToRequester', actor.id);   // hotfix 单条发需求方·已上线（best-effort）
-      res.status(201).json({ issue_id: issueId, release_id: releaseId, release_no: releaseNo, status: '已上线', count: result.count });
+      if (!phase1) return;   // 上面"重复调用"/"并发败方"/"抢占失败回滚"分支已提前 return 响应
+
+      const { releaseId, releaseNo, preempt } = phase1;
+
+      // ② 事务外通知（唯一允许外呼的位置，复用 notify-executor 同一份实现）
+      const sendOutcome = await sendReleaseNotifyAndWriteback(releaseId, preempt, actor);
+      if (sendOutcome.outcome === 'concurrent_changed') {
+        // 提交后到这里之间被并发操作（如 cancel-schedule）抢先改动——如实返回现状，不假装已发送。
+        return res.json({
+          issue_id: issueId, release_id: releaseId, release_no: releaseNo,
+          notify_status: sendOutcome.notify_status, created_new: true, notification_attempted: false,
+        });
+      }
+      res.json({
+        issue_id: issueId, release_id: releaseId, release_no: releaseNo,
+        notify_status: sendOutcome.notify_status, created_new: true, notification_attempted: true,
+        notify_error: sendOutcome.notify_error,
+        // [C3 第2批·前端契约] sendReleaseNotifyAndWriteback 本已返回这两列（notify-executor 路由早就在用，
+        //   见其响应 :7883-7886）——hotfix-publish 此前漏带，前端"成功态提示执行人姓名"需要它，补齐即可，
+        //   非新查询、零额外成本。
+        release_assignee_id: sendOutcome.release_assignee_id, release_assignee_name: sendOutcome.release_assignee_name,
+      });
     } catch (err) {
       // A（codex M-1）：hotfix 自动号极端竞态撞 UNIQUE 时转 409（不退化为 500 + 原始 SQLite 错误外泄）
       if (err && /UNIQUE/i.test(err.message || '')) return res.status(409).json({ error: '批次号生成冲突，请重试', code: 'RELEASE_NO_GENERATE_CONFLICT' });
@@ -7052,269 +8468,46 @@ module.exports = (deps) => {
   });
 
   // ============================================================
-  // 三·四·五、通知改造 C3b 上线编排（§2.3，G3-G6）——批量指定上线开发 + 换人 + 指定开发本人执行上线
-  //   替代 v1.103.0 已上线 ②「建单人确认发布」为「建单人编排、指定开发执行」，改已上线执行权。
-  //   三端点均对 issue 批量操作（非 /sys-issues/:id/xxx 单条模式），因待执行阶段尚无 sys_releases 批次可挂。
+  // 三·四·五、[已退场] 旧上线编排（原通知改造 C3b §2.3 G3-G6：批量指定/换人/通知上线开发 + execute-release）
+  //   [2026-07-30 用户裁定·上线体统一重构收尾] 旧家族 4 端点全部封禁（assign-release-dev /
+  //   reassign-release-dev / notify-release-executor / notify-release-executor-batch）——上线体 C0-C9 后，
+  //   执行人唯一权威源 = sys_releases 级（排班表经 notify-executor 两段 CAS 写入），issue 级
+  //   release_assignee_* 8 列业务写路径自此全封、转只读残留（唯一残留写点=notify-read-status 已读固化
+  //   release_assignee_read_at，仅历史 sent 数据可达·codex 208 审 HIGH-1 精确口径；列不 DROP，37 列表重建硬约束见 schema 注释）。
+  //   拒绝范式照抄本模块退场先例（下方 execute-release 同 code；change-intake-mode 同结构）：
+  //   409 + 专属 code，置于一切参数校验之前（端点级结论与入参无关）；requireAdmin 一并摘除（对任何角色
+  //   都是同一个"已下线"，留 403 会误导"换个身份就能用"）；实现体删除不留不可达代码（照 change-intake-mode
+  //   C0 审 MED-1 先例，回滚以整个 commit 为单位）。
+  //   meta（transitions.js）中 assign-release-dev 条目照 execute-release 退场先例**保留**（前端通用循环已
+  //   抑制渲染，动 meta 会连带状态机断言面，收益为零）。
   // ============================================================
 
-  // ── POST /sys-issues/assign-release-dev：批量指定上线开发（建单人，G3，H-4 先整批资格校验）──────────
-  //   仅允许"未指定执行人"或"同人幂等重提"（M-1）；改 A→B 须走 reassign-release-dev。
-  router.post('/sys-issues/assign-release-dev', authenticateToken, requireSysSchemaReady, requireAdmin, async (req, res) => {
-    const b = req.body || {};
-    const raw = b.issue_ids;
-    if (!Array.isArray(raw) || raw.length === 0) return res.status(400).json({ error: '请选择要指定上线开发的迭代单', code: 'ISSUE_IDS_REQUIRED' });
-    if (raw.length > SYS_BATCH_ISSUE_MAX) return res.status(400).json({ error: `单次最多 ${SYS_BATCH_ISSUE_MAX} 条`, code: 'TOO_MANY_ISSUES' });
-    for (const x of raw) if (!parsePositiveId(x)) return res.status(400).json({ error: '迭代单 id 非法', code: 'INVALID_ISSUE_ID' });
-    const issueIds = [...new Set(raw.map(parsePositiveId))];
-    const devId = parsePositiveId(b.release_assignee_id);
-    if (!devId) return res.status(400).json({ error: '必须指定上线开发', code: 'RELEASE_ASSIGNEE_REQUIRED' });
-    const actor = sysActor(req);
-    try {
-      await sysBeginImmediate();
-      try {
-        const dev = await dbGetAsync('SELECT id, display_name, username, role FROM users WHERE id = ?', [devId]);
-        if (!dev) { await sysRollback(); return res.status(400).json({ error: '指定的上线开发不存在', code: 'RELEASE_ASSIGNEE_NOT_FOUND' }); }
-        if (dev.role === 'viewer') { await sysRollback(); return res.status(400).json({ error: '不能指定查看者为上线开发', code: 'RELEASE_ASSIGNEE_VIEWER' }); }
-        const devName = dev.display_name || dev.username || `user#${dev.id}`;
-
-        const idPh = issueIds.map(() => '?').join(',');
-        const rows = await dbAllAsync(`SELECT id, type, status, release_id, release_assignee_id FROM sys_issues WHERE id IN (${idPh})`, issueIds);
-        if (rows.length !== issueIds.length) { await sysRollback(); return res.status(404).json({ error: '部分迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' }); }
-        // H-4：先整批资格校验，任一失败整批不落库。
-        for (const r of rows) {
-          if (r.type !== 'bug') { await sysRollback(); return res.status(409).json({ error: `#${r.id} 非 bug 单，不支持上线编排`, code: 'RELEASE_ASSIGN_TYPE_INVALID', issue_id: r.id }); }
-          if (r.status !== '待上线') { await sysRollback(); return res.status(409).json({ error: `#${r.id} 非「待上线」，不能指定上线开发`, code: 'RELEASE_ASSIGN_STATUS_INVALID', issue_id: r.id }); }
-          if (r.release_id !== null) { await sysRollback(); return res.status(409).json({ error: `#${r.id} 已挂上线批次，不能重新指定`, code: 'ISSUE_ALREADY_IN_RELEASE', issue_id: r.id }); }
-          // M-1：仅"未指定"或"同人幂等重提"；已指定他人须走 reassign-release-dev。
-          if (r.release_assignee_id !== null && Number(r.release_assignee_id) !== devId) {
-            await sysRollback();
-            return res.status(409).json({ error: `#${r.id} 已指定其他上线开发，请改用「换人」（reassign-release-dev）`, code: 'RELEASE_ASSIGNEE_ALREADY_SET', issue_id: r.id });
-          }
-        }
-        for (const iid of issueIds) {
-          const upd = await dbRunAsync(
-            `UPDATE sys_issues SET release_assignee_id = ?, release_assignee_name = ?, updated_at = datetime('now','localtime')
-               WHERE id = ? AND type = 'bug' AND status = '待上线' AND release_id IS NULL
-                 AND (release_assignee_id IS NULL OR release_assignee_id = ?)`,
-            [devId, devName, iid, devId]
-          );
-          if (!upd || upd.changes !== 1) {
-            await sysRollback();
-            return res.status(409).json({ error: `#${iid} 状态已变更，请刷新重试`, code: 'CONCURRENT_STATE_CHANGE', issue_id: iid });
-          }
-          await dbRunAsync(
-            `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, operator_id, operator_name)
-             VALUES (?, 'note', ?, 'assign_release_dev', ?, ?)`,
-            [iid, `指定上线开发：${devName}`, actor.id, actor.name]
-          );
-        }
-        await sysCommit();
-      } catch (txErr) {
-        try { await sysRollback(); } catch (_) { /* ignore */ }
-        throw txErr;
-      }
-      res.json({ assigned: issueIds, release_assignee_id: devId, count: issueIds.length });
-    } catch (err) { sendSysTransitionError(res, err); }
+  // ── [已退场] POST /sys-issues/assign-release-dev：批量指定上线开发（原 G3）──────────
+  router.post('/sys-issues/assign-release-dev', authenticateToken, requireSysSchemaReady, (req, res) => {
+    res.status(409).json({
+      error: '该端点已下线：上线执行人现由排班表在「安排上线」（notify-executor）时确定，不再单据级手工指定',
+      code: 'LEGACY_RELEASE_FLOW_DISABLED',
+    });
   });
 
-  // ── POST /sys-issues/reassign-release-dev：批量换人（建单人，G4，M-1 边界：仅已指定单可换）──────────
-  router.post('/sys-issues/reassign-release-dev', authenticateToken, requireSysSchemaReady, requireAdmin, async (req, res) => {
-    const b = req.body || {};
-    const raw = b.issue_ids;
-    if (!Array.isArray(raw) || raw.length === 0) return res.status(400).json({ error: '请选择要换人的迭代单', code: 'ISSUE_IDS_REQUIRED' });
-    if (raw.length > SYS_BATCH_ISSUE_MAX) return res.status(400).json({ error: `单次最多 ${SYS_BATCH_ISSUE_MAX} 条`, code: 'TOO_MANY_ISSUES' });
-    for (const x of raw) if (!parsePositiveId(x)) return res.status(400).json({ error: '迭代单 id 非法', code: 'INVALID_ISSUE_ID' });
-    const issueIds = [...new Set(raw.map(parsePositiveId))];
-    const devId = parsePositiveId(b.release_assignee_id);
-    if (!devId) return res.status(400).json({ error: '必须指定新的上线开发', code: 'RELEASE_ASSIGNEE_REQUIRED' });
-    const actor = sysActor(req);
-    try {
-      await sysBeginImmediate();
-      try {
-        const dev = await dbGetAsync('SELECT id, display_name, username, role FROM users WHERE id = ?', [devId]);
-        if (!dev) { await sysRollback(); return res.status(400).json({ error: '指定的上线开发不存在', code: 'RELEASE_ASSIGNEE_NOT_FOUND' }); }
-        if (dev.role === 'viewer') { await sysRollback(); return res.status(400).json({ error: '不能指定查看者为上线开发', code: 'RELEASE_ASSIGNEE_VIEWER' }); }
-        const devName = dev.display_name || dev.username || `user#${dev.id}`;
-
-        const idPh = issueIds.map(() => '?').join(',');
-        const rows = await dbAllAsync(`SELECT id, type, status, release_id, release_assignee_id, release_assignee_name FROM sys_issues WHERE id IN (${idPh})`, issueIds);
-        if (rows.length !== issueIds.length) { await sysRollback(); return res.status(404).json({ error: '部分迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' }); }
-        for (const r of rows) {
-          if (r.type !== 'bug') { await sysRollback(); return res.status(409).json({ error: `#${r.id} 非 bug 单，不支持上线编排`, code: 'RELEASE_ASSIGN_TYPE_INVALID', issue_id: r.id }); }
-          if (r.status !== '待上线') { await sysRollback(); return res.status(409).json({ error: `#${r.id} 非「待上线」，不能换人`, code: 'RELEASE_ASSIGN_STATUS_INVALID', issue_id: r.id }); }
-          if (r.release_id !== null) { await sysRollback(); return res.status(409).json({ error: `#${r.id} 已挂上线批次（已进入执行），不能换人`, code: 'ISSUE_ALREADY_IN_RELEASE', issue_id: r.id }); }
-          // 换人专用：必须已有指定人（未指定应走 assign-release-dev）。
-          if (r.release_assignee_id === null) { await sysRollback(); return res.status(409).json({ error: `#${r.id} 尚未指定上线开发，请改用「批量指定上线开发」（assign-release-dev）`, code: 'RELEASE_ASSIGNEE_NOT_SET', issue_id: r.id }); }
-          // 【批量通知 Commit 0 · H-1 同人守卫】新人 == 现执行人 → 整批拒（不清零/不写 timeline）。
-          //   否则换人重置会把该单已有的 sent/failed 通知态无意义打回 not_sent、清已读、写"X→X"伪 timeline。
-          //   整批任一同人即 409（对齐本端点"任一失败整批不落库"范式）。
-          if (Number(r.release_assignee_id) === devId) { await sysRollback(); return res.status(409).json({ error: `#${r.id} 的上线开发已是该人，无需换人`, code: 'RELEASE_ASSIGNEE_UNCHANGED', issue_id: r.id }); }
-        }
-        for (const r of rows) {
-          const oldName = r.release_assignee_name;
-          // 【批量通知 Commit 0 · C-1】换人时原子重置 release_assignee_notify_* 5 列——新执行人的通知态归零，
-          //   否则沿用旧人 sent/failed → 新人被判"已通知"、已读时刻失真、批量通知②态闸误拦。
-          //   末行 release_assignee_id <> devId 双保险（H-1 已在前置循环拒同人，此处再兜一层防并发插入同人）。
-          const upd = await dbRunAsync(
-            `UPDATE sys_issues SET release_assignee_id = ?, release_assignee_name = ?,
-               release_assignee_notify_status = 'not_sent', release_assignee_notified_at = NULL,
-               release_assignee_notify_message_key = NULL, release_assignee_notify_error = NULL,
-               release_assignee_read_at = NULL, release_assignee_notify_sent_by = NULL,
-               updated_at = datetime('now','localtime')
-               WHERE id = ? AND type = 'bug' AND status = '待上线' AND release_id IS NULL
-                 AND release_assignee_id IS NOT NULL AND release_assignee_id <> ?`,
-            [devId, devName, r.id, devId]
-          );
-          if (!upd || upd.changes !== 1) {
-            await sysRollback();
-            return res.status(409).json({ error: `#${r.id} 状态已变更，请刷新重试`, code: 'CONCURRENT_STATE_CHANGE', issue_id: r.id });
-          }
-          await dbRunAsync(
-            `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, operator_id, operator_name)
-             VALUES (?, 'note', ?, 'reassign_release_dev', ?, ?)`,
-            [r.id, `改派上线开发：${oldName || '（原执行人）'} → ${devName}`, actor.id, actor.name]
-          );
-        }
-        await sysCommit();
-      } catch (txErr) {
-        try { await sysRollback(); } catch (_) { /* ignore */ }
-        throw txErr;
-      }
-      res.json({ reassigned: issueIds, release_assignee_id: devId, count: issueIds.length });
-    } catch (err) { sendSysTransitionError(res, err); }
+  // ── [已退场] POST /sys-issues/reassign-release-dev：批量换执行人（原 G4 + Path A 单条换人）──────────
+  router.post('/sys-issues/reassign-release-dev', authenticateToken, requireSysSchemaReady, (req, res) => {
+    res.status(409).json({
+      error: '该端点已下线：换执行人请由对接人「撤销上线安排」（cancel-schedule）后重新「安排上线」',
+      code: 'LEGACY_RELEASE_FLOW_DISABLED',
+    });
   });
 
-  // ── POST /sys-issues/execute-release：指定开发本人执行上线（G5 hotfix / G6 publish）──────────
-  //   权限=actor.id===release_assignee_id（H-1，admin 无隐式执行权，除非 admin 本人被显式指定）。
-  //   mode=hotfix：单 issue，不建批次，release_id/version_tag 保持 NULL（H-2/H-3）。
-  //   mode=publish：请求级前置（全选中 issue 状态=待上线∧release_assignee_id 非空∧全相同∧==actor.id，H-4）+
-  //     单事务建/更 sys_releases 批次（复用 _publishReleaseCoreInTxn 内核）+ 全部转已上线；任一失败整批回滚。
-  //   F2（2026-07-06 用户拍板）：不自动触发任何通知（建单人通知走手动 notify-creator，G8）。
+  // ── C3 退场（方案 §6.7/§6.10/§6.14/附录A）：POST /sys-issues/execute-release 全类型 409 ──────────
+  //   旧 bug 专属"上线编排"G5(hotfix)/G6(publish) 两模式随"全类型统一"一并退场——bug 现与 feature/
+  //   improvement 同走 hotfix-publish（应急）或排班+安排上线+执行上线（常规）两条统一路径。
+  //   [2026-07-30 用户裁定] 同族 assign-release-dev/reassign-release-dev（及通知两端点）此前"隐藏前端
+  //   入口、保留端点"的过渡态已终结——4 端点全部封禁（见上方退场段），与本端点同 code 同范式。
   router.post('/sys-issues/execute-release', authenticateToken, requireSysSchemaReady, async (req, res) => {
-    const b = req.body || {};
-    const mode = b.mode;
-    if (!['hotfix', 'publish'].includes(mode)) return res.status(400).json({ error: 'mode 仅支持 hotfix/publish', code: 'INVALID_RELEASE_MODE' });
-    const raw = b.issue_ids;
-    if (!Array.isArray(raw) || raw.length === 0) return res.status(400).json({ error: '请选择要执行上线的迭代单', code: 'ISSUE_IDS_REQUIRED' });
-    if (raw.length > SYS_BATCH_ISSUE_MAX) return res.status(400).json({ error: `单次最多 ${SYS_BATCH_ISSUE_MAX} 条`, code: 'TOO_MANY_ISSUES' });
-    for (const x of raw) if (!parsePositiveId(x)) return res.status(400).json({ error: '迭代单 id 非法', code: 'INVALID_ISSUE_ID' });
-    const issueIds = [...new Set(raw.map(parsePositiveId))];
-    if (mode === 'hotfix' && issueIds.length !== 1) return res.status(400).json({ error: 'hotfix 模式仅支持单条', code: 'HOTFIX_SINGLE_ONLY' });
-    const actor = sysActor(req);
-
-    try {
-      // [U-2 收口·ultracode] execute-release 角色下限：指定执行人若在 assign 后被降级为 viewer
-      //   （assign-release-dev 已校 viewer，但降级不清 release_assignee_id、authenticateToken 只回查 status 不回查 role，
-      //   server.js 亦不清该字段），执行时**回查当前 role** 守 viewer-never-write 不变量（本端点内闭合，不碰 server.js）。
-      //   status 不在此查——authenticateToken 已强制 status='active'（否则 403 账号已被禁用），此处再查冗余且会误伤未设
-      //   status 的测试夹具；本收口只补 authenticateToken 不覆盖的 role 维度。
-      const execUser = await dbGetAsync('SELECT role FROM users WHERE id = ?', [actor.id]);
-      if (!execUser || execUser.role === 'viewer') {
-        return res.status(403).json({ error: '当前账号无执行上线权限（已降级为查看者）', code: 'EXECUTOR_NOT_ELIGIBLE' });
-      }
-      if (mode === 'hotfix') {
-        const issueId = issueIds[0];
-        await sysBeginImmediate();
-        try {
-          const issue = await dbGetAsync('SELECT id, type, status, release_id, release_assignee_id FROM sys_issues WHERE id = ?', [issueId]);
-          if (!issue) { await sysRollback(); return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' }); }
-          if (issue.type !== 'bug') { await sysRollback(); return res.status(409).json({ error: '仅 bug 单支持上线编排', code: 'RELEASE_ASSIGN_TYPE_INVALID' }); }
-          // H-1：仅被指定执行人本人可执行；admin 无隐式执行权（除非 admin 恰被指定）。
-          if (!issue.release_assignee_id || Number(issue.release_assignee_id) !== actor.id) {
-            await sysRollback();
-            return res.status(403).json({ error: '仅被指定的上线开发本人可执行上线', code: 'RELEASE_ASSIGNEE_GUARD_FAILED' });
-          }
-          if (issue.status !== '待上线' || issue.release_id !== null) {
-            await sysRollback();
-            return res.status(409).json({ error: '该单非「待上线」或已挂批次，不能执行 hotfix', code: 'ISSUE_NOT_EXECUTABLE' });
-          }
-          // [codex 102 号 HIGH 回填] RELEASE 守卫接线（hotfix 路径，与 _publishReleaseCoreInTxn 同批修复）——
-          //   UPDATE 前查询该单 roster（与 W07/_publishReleaseCoreInTxn 同源的查询方式：removed_at IS NULL
-          //   在册行），调用 assertMainStatusTransition(routeKind='RELEASE', action='execute-release',
-          //   actionKind='hotfix')；零在册/含 pending 在此处 400 GATE_INVARIANT 拦下，早于下方 UPDATE。
-          {
-            const rosterRows = await dbAllAsync(
-              `SELECT dev_status FROM sys_issue_dev_assignees WHERE issue_id = ? AND removed_at IS NULL`,
-              [issueId]
-            );
-            const rosterActiveCount = rosterRows.length;
-            const rosterAllComplete = rosterActiveCount > 0 && rosterRows.every(r => r.dev_status !== 'pending');
-            assertMainStatusTransition({
-              routeKind: 'RELEASE', action: 'execute-release', actionKind: 'hotfix', issueType: issue.type,
-              before: issue.status, after: '已上线', rosterActiveCount, rosterAllComplete,
-            });
-          }
-          const upd = await dbRunAsync(
-            `UPDATE sys_issues SET status = '已上线', released_at = datetime('now','localtime'), updated_at = datetime('now','localtime')
-               WHERE id = ? AND status = '待上线' AND release_id IS NULL AND release_assignee_id = ?`,
-            [issueId, actor.id]
-          );
-          if (!upd || upd.changes !== 1) { await sysRollback(); return res.status(409).json({ error: '迭代单状态已变更，请刷新重试', code: 'CONCURRENT_STATE_CHANGE' }); }
-          await dbRunAsync(
-            `INSERT INTO sys_issue_timeline (issue_id, event_type, from_status, to_status, summary, action_code, operator_id, operator_name)
-             VALUES (?, 'release', '待上线', '已上线', ?, 'execute_release_hotfix', ?, ?)`,
-            [issueId, 'hotfix 上线（不发版，不建批次）', actor.id, actor.name]
-          );
-          await sysCommit();
-        } catch (txErr) {
-          try { await sysRollback(); } catch (_) { /* ignore */ }
-          throw txErr;
-        }
-        // F2：不自动通知
-        return res.json({ mode: 'hotfix', issue_id: issueId, status: '已上线' });
-      }
-
-      // mode === 'publish'（C6 去 version_tag 必填，SSOT §8/S21：不再校非空，仅长度上限）
-      const releaseNote = (typeof b.release_note === 'string' ? b.release_note.trim() : '');
-      const versionTag = (typeof b.version_tag === 'string' ? b.version_tag.trim() : '');
-      if (!releaseNote) return res.status(400).json({ error: '请填写上线说明', code: 'RELEASE_NOTE_REQUIRED' });
-      if (releaseNote.length > SYS_RELEASE_NOTE_MAX) return res.status(400).json({ error: `上线说明超长（≤${SYS_RELEASE_NOTE_MAX} 字）`, code: 'RELEASE_NOTE_TOO_LONG' });
-      if (versionTag.length > SYS_VERSION_TAG_MAX) return res.status(400).json({ error: `版本号超长（≤${SYS_VERSION_TAG_MAX} 字）`, code: 'VERSION_TAG_TOO_LONG' });
-
-      let releaseId = null, releaseNo = null, result = null;
-      await sysBeginImmediate();
-      try {
-        const idPh = issueIds.map(() => '?').join(',');
-        const rows = await dbAllAsync(`SELECT id, type, status, release_id, release_assignee_id FROM sys_issues WHERE id IN (${idPh})`, issueIds);
-        if (rows.length !== issueIds.length) { await sysRollback(); return res.status(404).json({ error: '部分迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' }); }
-        // H-4/G6 请求级前置：全部满足 type=bug ∧ 状态=待上线 ∧ release_id IS NULL ∧ release_assignee_id 非空
-        //   ∧ 全部相同 ∧ ==actor.id，否则整批拒绝（不指出具体哪条，防止批量场景下逐条泄露过多信息且语义本就是"整批"）。
-        const assigneeIdSet = new Set(rows.map(r => (r.release_assignee_id === null ? null : Number(r.release_assignee_id))));
-        const anyBad = rows.some(r => r.type !== 'bug' || r.status !== '待上线' || r.release_id !== null
-          || r.release_assignee_id === null || Number(r.release_assignee_id) !== actor.id);
-        if (anyBad || assigneeIdSet.size !== 1) {
-          await sysRollback();
-          return res.status(409).json({ error: '批次内所有单必须为 bug、「待上线」且指定同一上线开发（即当前登录人）', code: 'RELEASE_BATCH_ASSIGNEE_MISMATCH' });
-        }
-        // H-3：单一聚合根——建批次（release_type='bug'，created_by 复用为"批次持执行人"字段，即当前登录开发）。
-        releaseNo = await nextReleaseNo();
-        const relIns = await dbRunAsync(
-          `INSERT INTO sys_releases (release_no, title, status, is_hotfix, release_note, version_tag, created_by, created_by_name, release_type)
-           VALUES (?, ?, '计划中', 0, ?, ?, ?, ?, 'bug')`,
-          [releaseNo, `执行上线（${actor.name}）`, releaseNote, versionTag || null, actor.id, actor.name]   // C6：空 version_tag 落 NULL，同源见 hotfix-publish 注释
-        );
-        releaseId = relIns.lastID;
-        // 绑单：双 WHERE 守卫（待上线 + release_id IS NULL + release_assignee_id=actor.id），changes 须等于批次数（原子）。
-        const idPh2 = issueIds.map(() => '?').join(',');
-        const bind = await dbRunAsync(
-          `UPDATE sys_issues SET release_id = ?, updated_at = datetime('now','localtime')
-             WHERE id IN (${idPh2}) AND status = '待上线' AND release_id IS NULL AND release_assignee_id = ?`,
-          [releaseId, ...issueIds, actor.id]
-        );
-        if (!bind || bind.changes !== issueIds.length) { await sysRollback(); return res.status(409).json({ error: '批次内单状态已变更，请刷新重试', code: 'CONCURRENT_STATE_CHANGE' }); }
-        // 复用共享内核发布（H-3）：核心校验（成员≥1/全待上线/type 白名单/族别一致）+ 原子翻已上线 + release timeline + 批次已发布。
-        result = await _publishReleaseCoreInTxn(releaseId, actor, { release_note: releaseNote, version_tag: versionTag }, 'execute-release', 'execute');
-        await sysCommit();
-      } catch (txErr) {
-        try { await sysRollback(); } catch (_) { /* ignore */ }
-        throw txErr;
-      }
-      // F2：不自动通知
-      res.status(201).json({ mode: 'publish', release_id: releaseId, release_no: releaseNo, status: '已上线', released: result.releasedIssueIds, count: result.count });
-    } catch (err) {
-      if (err && /UNIQUE/i.test(err.message || '')) return res.status(409).json({ error: '批次号生成冲突，请重试', code: 'RELEASE_NO_GENERATE_CONFLICT' });
-      sendSysTransitionError(res, err);
-    }
+    res.status(409).json({
+      error: '该端点已下线：bug 上线流程现与其他类型统一，请改用「应急一键」(hotfix-publish) 或「安排上线」(notify-executor)+「执行上线」(execute)',
+      code: 'LEGACY_RELEASE_FLOW_DISABLED',
+    });
   });
 
   // ============================================================
@@ -7342,6 +8535,16 @@ module.exports = (deps) => {
   function sysDeepLinkLine(baseUrl, issueId) {
     if (!baseUrl) return '';
     return `\n\n[查看详情](${baseUrl}/Sys_Iteration.html?issue=${issueId})`;
+  }
+
+  // 批次深链（C2b 第2批·Playwright 冒烟实测发现的第三个真实缺口）：值班执行人此前拿到的通知只有裸
+  //   baseUrl（buildReleaseBatchExecutorMarkdown 原式），落地页面没有任何入口能让非 admin/非对接人的
+  //   普通执行人找到自己被指派的那一条批次——「批次管理」入口仍锁 admin∨对接人（避免向普通执行人暴露
+  //   全部批次列表），执行人唯一合法路径就是这条深链。镜像 sysDeepLinkLine 写法，query 参数用
+  //   `?release=<id>`（前端 Sys_Iteration.html 已接线，见该文件 DOMContentLoaded 深链段）。
+  function sysReleaseDeepLinkLine(baseUrl, releaseId) {
+    if (!baseUrl) return '';
+    return `\n\n[前往安排上线面板](${baseUrl}/Sys_Iteration.html?release=${releaseId})`;
   }
 
   // 钉钉消息 title 字段是纯文本（通知栏/会话列表展示，非 markdown 渲染，JSON 序列化无注入面）——codex 审 L-1：
@@ -7472,34 +8675,9 @@ module.exports = (deps) => {
     };
   }
 
-  // 上线执行开发侧 markdown（通知改造 follow-up 2026-07-07；admin 通知被指定上线开发执行 hotfix/发版）。
-  function buildSysReleaseExecutorMarkdown(issue, baseUrl) {
-    const title = issueNotify.issueSafeText(issue.title, 80);
-    const safeTitle = sysNotifyTitle(issue.title);
-    const system = issueNotify.issueSafeText(issue.system_name, 40);
-    const link = sysDeepLinkLine(baseUrl, issue.id);
-    return {
-      title: `🚀 请执行上线：${safeTitle}`,
-      md: `### 🚀 你被指定为本单上线开发\n\n- **单号**：#${issue.id}\n- **系统**：${system}\n- **标题**：${title}\n\n该 bug 单已进入「待上线」，请登录平台执行 hotfix（不发版直接上线）或发版（建批次填版本号）。${link}`,
-    };
-  }
-
-  // 批量通知上线开发·合并 markdown（模型B 同执行人多单合并一条，镜像单条 buildSysReleaseExecutorMarkdown 转义范式）。
-  //   M-2（方案 §3）：正文最多列前 SYS_RELEASE_BATCH_MD_MAX 条，超出附「…其余 M 条请登录平台查看」——防同执行人
-  //   极端批量（理论至 SYS_BATCH_ISSUE_MAX=200）markdown 超钉钉消息长度上限致整组 failed。平台入口用无 issue 参数的
-  //   总入口链接（非逐单深链）。
-  const SYS_RELEASE_BATCH_MD_MAX = 20;
-  function buildSysReleaseExecutorBatchMarkdown(issueList, baseUrl) {
-    const n = issueList.length;
-    const shown = issueList.slice(0, SYS_RELEASE_BATCH_MD_MAX);
-    const lines = shown.map(it => `- #${it.id} ${issueNotify.issueSafeText(it.title, 60)}（${issueNotify.issueSafeText(it.system_name, 30)}）`);
-    const overflow = n > SYS_RELEASE_BATCH_MD_MAX ? `\n- …其余 ${n - SYS_RELEASE_BATCH_MD_MAX} 条请登录平台查看` : '';
-    const entry = baseUrl ? `\n\n[登录平台查看](${baseUrl}/Sys_Iteration.html)` : '';
-    return {
-      title: `🚀 你有 ${n} 个待上线单待执行`,
-      md: `### 🚀 你被指定为以下 ${n} 个待上线单的上线开发\n\n${lines.join('\n')}${overflow}\n\n请登录平台执行 hotfix（不发版直接上线）或发版（建批次填版本号）。${entry}`,
-    };
-  }
+  // [已退场 2026-07-30·用户裁定] buildSysReleaseExecutorMarkdown / buildSysReleaseExecutorBatchMarkdown
+  //   （含 SYS_RELEASE_BATCH_MD_MAX）已随旧上线编排家族封禁整体删除——唯二调用方 notify-release-executor(-batch)
+  //   已封 409。批次级执行人通知的 buildReleaseBatchExecutorMarkdown 是独立函数，不受影响。
 
   // 通知落库写串行化进 sys mutex（ultracode 审 #1，C4.5 同类防线）：通知写跑在主事务提交后、mutex 已释放，
   //   若用裸 autocommit dbRunAsync，会落进另一并发请求已打开的 BEGIN IMMEDIATE 事务里，随其 ROLLBACK 一起丢失
@@ -7510,7 +8688,7 @@ module.exports = (deps) => {
     try { await dbRunAsync(sql, params); await sysCommit(); }
     catch (e) { try { await sysRollback(); } catch (_) { /* ignore */ } throw e; }
   }
-  // 同 sysNotifyWrite，但回传 run 结果（批量通知按组守卫 UPDATE 需 changes 判命中数，见 notify-release-executor-batch）。
+  // 同 sysNotifyWrite，但回传 run 结果（各 record* 落库 helper 需 changes 判围栏命中，如 recordSysTechLeadNotify/recordSysDevAssigneeNotify）。
   async function sysNotifyWriteRun(sql, params) {
     await sysBeginImmediate();
     try { const r = await dbRunAsync(sql, params); await sysCommit(); return r; }
@@ -7812,28 +8990,10 @@ module.exports = (deps) => {
          WHERE id=? AND tech_lead_notify_request_event_id=?`,
       [effectiveOk ? 'sent' : 'failed', effectiveOk ? mk : null, effectiveOk ? null : (err || 'other'), sb, issueId, requestEventId]);
   }
-  // 上线执行开发侧落库（通知改造 follow-up 2026-07-07，release_assignee_notify_* 5 列，镜像 creator 范式）。
-  //   ⭐ 对抗审 F3 收口：**补收件人 CAS 围栏**（`AND release_assignee_id=?`）。
-  //   缺口：本函数原先只按 id 更新，而发送在锁外、耗时秒级。时序 ——
-  //     T1 admin A 点"通知上线开发"（此刻执行人=5）→ 钉钉发送在途
-  //     T2 admin B 调 reassign-release-dev 换执行人为 6 → 事务内原子重置 5 列 + sent_by=NULL
-  //     T3 A 的回调落库（无围栏）→ 把刚重置的行写成 sent + sent_by=A
-  //   终态：执行人=6、状态=sent、sent_by=A，**而钉钉实际发给的是 5**；此后批量端点的②态闸判
-  //   ALREADY_NOTIFIED 拒发 → **新执行人永远收不到通知**，界面还显示"已通知"。
-  //   查审计得到"A 通知了 6"这个**看起来可信的错误答案** —— 正是 C2b 自己写下的"错记比没记更糟"。
-  //   ⚠️ 这是 relay 通道（C0 审 MED-1）修过的**同一种缺陷的另一处实例**：relay 有 CAS、tech_lead 有版本围栏，
-  //   唯独 release_executor 两者皆无。「修一个洞要顺手找它的同构兄弟」这条教训，这次是在自己身上应验的。
-  //   返回 run 结果供调用方判 changes（0=在途期间已换人，本次回写作废）。
-  async function recordSysReleaseExecutorNotify(issueId, ok, messageKey, error, sentBy, releaseAssigneeId) {
-    const sb = assertNotifySentBy('recordSysReleaseExecutorNotify', sentBy);
-    const fence = Number(releaseAssigneeId);
-    if (!(fence > 0)) throw new Error(`recordSysReleaseExecutorNotify: 缺收件人围栏 releaseAssigneeId（防换人后回写污染新执行人）·实际=${releaseAssigneeId}`);
-    return await sysNotifyWriteRun(
-      `UPDATE sys_issues SET release_assignee_notify_status=?, release_assignee_notified_at=datetime('now','localtime'),
-              release_assignee_notify_message_key=?, release_assignee_notify_error=?, release_assignee_read_at=NULL,
-              release_assignee_notify_sent_by=? WHERE id=? AND release_assignee_id=?`,
-      [ok ? 'sent' : 'failed', ok ? messageKey : null, ok ? null : (error || 'other'), sb, issueId, fence]);
-  }
+  // [已退场 2026-07-30·用户裁定] recordSysReleaseExecutorNotify（release_assignee_notify_* 5 列落库 +
+  //   对抗审 F3 收件人 CAS 围栏）已随旧上线编排家族封禁整体删除——唯一调用方 notify-release-executor 已封
+  //   409，发送侧对 5 列零写路径（read_at 的已读固化残留写点见 notify-read-status 端点注释）；exports 的
+  //   verify 直调出口一并移除（verify-sys-notify-sent-by 对应用例已删）。
   // 开发协作子表逐 dev 落库（通知改造 C3 G9）：定位 = (issue_id, user_id, removed_at IS NULL) 活动行（§6.1 M-2），
   //   软删历史行不参与——WHERE 天然排除，若并发中该行恰被软删，changes=0，本函数吞（best-effort 通知写，不抛）。
   //   ⭐ 对抗审 F4 收口：定位从 `(issue_id, user_id, removed_at IS NULL)` 改为**行主键**。
@@ -7990,7 +9150,6 @@ module.exports = (deps) => {
   const SYS_NOTIFY_RELAY_STATUSES = ['待处理'];
   const SYS_NOTIFY_CREATOR_STATUSES = ['待验证', '待上线', '已上线'];
   const SYS_NOTIFY_REQUESTER_STATUSES = ['待验证', '待上线', '已上线'];
-  const SYS_NOTIFY_RELEASE_EXECUTOR_STATUSES = ['待上线'];   // 通知改造 follow-up：仅待上线态（release_assignee 已指定）可通知上线开发
 
   // ── 交互优化 C2a：变更流(feature/improvement) 手动通知状态白名单（方案 §3.2 矩阵）──────────────
   //   与 bug 流分开（bug 开发态='处理中'，变更流='开发中'）。channel×type 精确取，后端权威、前端镜像。
@@ -8191,165 +9350,24 @@ module.exports = (deps) => {
     } catch (err) { logger.error('[系统迭代] 手动通知建单人失败:', err && err.message); res.status(500).json({ error: (err && err.message) || '通知建单人失败' }); }
   });
 
-  //   通知上线开发（release_assignee 侧，通知改造 follow-up 2026-07-07）：admin 指定上线执行开发后手动通知其执行 hotfix/发版。
-  //   权限=仅 admin（与 assign-release-dev 一致，谁指定谁通知）；须已指定 release_assignee_id + 状态=待上线。byId 发送（无 phone 快照）。
-  router.post('/sys-issues/:id/notify-release-executor', authenticateToken, requireSysSchemaReady, requireAdmin, async (req, res) => {
-    const id = parsePositiveId(req.params.id);
-    if (!id) return res.status(400).json({ error: '无效的迭代单 ID', code: 'INVALID_SYS_ISSUE_ID' });
-    try {
-      const issue = await dbGetAsync('SELECT * FROM sys_issues WHERE id = ?', [id]);
-      if (!issue) return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' });
-      if (issue.type !== 'bug') return res.status(400).json({ error: '手动通知仅用于 bug 单', code: 'MANUAL_NOTIFY_BUG_ONLY' });
-      if (!issue.release_assignee_id) return res.status(409).json({ error: '该单未指定上线开发，请先「指定上线开发」', code: 'NO_RELEASE_ASSIGNEE_TO_NOTIFY' });
-      if (!SYS_NOTIFY_RELEASE_EXECUTOR_STATUSES.includes(issue.status)) return res.status(409).json({ error: `当前状态（${issue.status}）不可通知上线开发（仅待上线）`, code: 'STATUS_NOT_NOTIFIABLE' });
-      const executor = await dbGetAsync('SELECT id, display_name, phone, dingtalk_user_id FROM users WHERE id = ?', [issue.release_assignee_id]);
-      if (!executor) return res.status(409).json({ error: '上线开发用户不存在', code: 'RELEASE_ASSIGNEE_NOT_FOUND' });
-      const baseUrl = await getSafePlatformBaseUrl();
-      const { title, md } = buildSysReleaseExecutorMarkdown(issue, baseUrl);
-      const result = await sendIssueDingtalkRaw(executor, title, md);
-      //   C2b（codex 复审 MED·核实后判为不适用）：本 handler **没有** handler 内授权守卫——授权全由
-      //   `requireAdmin` 中间件承担（本端点是"仅 admin"，不走 sysManualNotifyGuard），故这里是**单取**
-      //   而非双取，不存在"授权 actor 与 sent_by actor 分叉"的面。其余三个手动通知端点因 handler 内
-      //   还要跑 sysManualNotifyGuard/self-guard，已统一为开头取一次。
-      //   对抗审 F3：传**发起发送时的收件人** issue.release_assignee_id 作 CAS 围栏。
-      //   若在钉钉发送的秒级窗口里有人改派了执行人，回写零命中（changes=0）——宁可不落库，
-      //   也不能把"发给旧执行人的结果"记成"新执行人已通知"（那会让批量②态闸永久跳过他）。
-      const relRec = await recordSysReleaseExecutorNotify(id, !!result.ok, result.message_key, result.reason,
-        sysActor(req).id, issue.release_assignee_id);
-      if (!relRec || relRec.changes !== 1) {
-        //   与 relay 通道同口径：外部钉钉可能已实际送达旧执行人（不可撤回），但库里不记 —— 提示前端重查。
-        logger.warn(`[系统迭代] 通知上线开发回写零命中（在途期间执行人已变更）#${id}`);
-        //   ⚠️ 状态列没落，但**钉钉可能真的发出去了** —— 这种"库里查不到、人却收到了"的情况恰恰最需要留痕。
-        await recordSysNotifyTimeline(id, '上线开发(回写作废)', `${executor.display_name || ''}(id${issue.release_assignee_id})`,
-          !!result.ok, result.ok ? result.message_key : result.reason, sysActor(req));
-        //   ⚠️ 收口审 MED：409 会被读成"没发成"，而事实可能相反 —— 钉钉**已经发给原执行人了**，
-        //   只是结果没落库。响应必须把这两件事分开说，否则操作者不知道原执行人已经收到过一条。
-        return res.status(409).json({
-          error: '上线开发已变更；本次钉钉可能已发给原执行人，结果未落库，请刷新后重新通知当前执行人',
-          code: 'RELEASE_ASSIGNEE_CHANGED_DURING_NOTIFY',
-          external_send_attempted: true,
-          external_send_ok: !!result.ok,
-          stale_recipient_id: issue.release_assignee_id,
-        });
-      }
-      await recordSysNotifyTimeline(id, '上线开发', `${executor.display_name || ''}(id${issue.release_assignee_id})`,
-        !!result.ok, result.ok ? result.message_key : result.reason, sysActor(req));   // 对抗审 F8
-      const fresh = await dbGetAsync('SELECT release_assignee_notify_status, release_assignee_notify_error FROM sys_issues WHERE id = ?', [id]);
-      res.json({ id, release_assignee_notify_status: fresh.release_assignee_notify_status, release_assignee_notify_error: fresh.release_assignee_notify_error });
-    } catch (err) { logger.error('[系统迭代] 手动通知上线开发失败:', err && err.message); res.status(500).json({ error: (err && err.message) || '通知上线开发失败' }); }
+  // ── [已退场] POST /sys-issues/:id/notify-release-executor：手动通知上线开发（通知改造 follow-up 2026-07-07）──────────
+  //   [2026-07-30 用户裁定·旧上线编排家族 4 端点全封] 写入口 assign-release-dev 已封 ⇒ release_assignee_id
+  //   全库零写路径，本端点前置条件在生产永不满足；执行人通知已并入「安排上线」（notify-executor）链路。
+  router.post('/sys-issues/:id/notify-release-executor', authenticateToken, requireSysSchemaReady, (req, res) => {
+    res.status(409).json({
+      error: '该端点已下线：执行人通知已并入「安排上线」（notify-executor）流程，不再单据级单独通知',
+      code: 'LEGACY_RELEASE_FLOW_DISABLED',
+    });
   });
 
-  // ── POST /sys-issues/notify-release-executor-batch：批量通知上线开发（admin，模型B 同执行人合并一条）──────────
-  //   两步流后端强制②态（H-2）：仅 type='bug' + status='待上线' + release_assignee_id 非空 +
-  //     COALESCE(notify_status,'not_sent') IN ('not_sent','failed') 可通知；已通知(sent)→ALREADY_NOTIFIED（不进发送分组）。
-  //   按 release_assignee_id 分组，跨执行人各发一条合并 markdown；发送(sendIssueDingtalkRaw)在锁外，仅按组守卫 UPDATE
-  //     进 sysNotifyWriteRun 短事务（②态闸 + release_assignee_id + status 三重 WHERE 防 TOCTOU）；未命中(changes<组内数)→
-  //     concurrent_changed（合并钉钉已尝试发送、落库前该行被并发改派/离态、本行未记结果，前端不无脑重发）。
-  //   L-1：单条端点 notify-release-executor 有意保持现状不加②态闸（sent 单详情重发保留）——仅本批量端点强制②态。
-  router.post('/sys-issues/notify-release-executor-batch', authenticateToken, requireSysSchemaReady, requireAdmin, async (req, res) => {
-    const b = req.body || {};
-    const raw = b.issue_ids;
-    if (!Array.isArray(raw) || raw.length === 0) return res.status(400).json({ error: '请选择要通知的迭代单', code: 'ISSUE_IDS_REQUIRED' });
-    if (raw.length > SYS_BATCH_ISSUE_MAX) return res.status(400).json({ error: `单次最多 ${SYS_BATCH_ISSUE_MAX} 条`, code: 'TOO_MANY_ISSUES' });
-    for (const x of raw) if (!parsePositiveId(x)) return res.status(400).json({ error: '迭代单 id 非法', code: 'INVALID_ISSUE_ID' });
-    const issueIds = [...new Set(raw.map(parsePositiveId))];
-    try {
-      const baseUrl = await getSafePlatformBaseUrl();
-      const idPh = issueIds.map(() => '?').join(',');
-      const rows = await dbAllAsync(
-        `SELECT id, type, status, title, system_name, release_assignee_id,
-                COALESCE(release_assignee_notify_status,'not_sent') AS notify_status
-           FROM sys_issues WHERE id IN (${idPh})`, issueIds);
-      const byId = new Map(rows.map(r => [r.id, r]));
-
-      // 逐单资格分类（H-2 后端强制②态）：skipped / ALREADY_NOTIFIED / 进入按执行人分组
-      const resultMap = new Map();
-      const eligibleByDev = new Map();   // release_assignee_id → [row...]
-      for (const iid of issueIds) {
-        const r = byId.get(iid);
-        if (!r || r.type !== 'bug' || r.status !== '待上线' || !r.release_assignee_id) { resultMap.set(iid, { id: iid, code: 'skipped' }); continue; }
-        if (r.notify_status === 'sent') { resultMap.set(iid, { id: iid, code: 'ALREADY_NOTIFIED' }); continue; }
-        if (r.notify_status !== 'not_sent' && r.notify_status !== 'failed') { resultMap.set(iid, { id: iid, code: 'skipped' }); continue; }   // 兜底（schema CHECK 保证不可达）
-        const devId = Number(r.release_assignee_id);
-        if (!eligibleByDev.has(devId)) eligibleByDev.set(devId, []);
-        eligibleByDev.get(devId).push(r);
-      }
-
-      // ⭐ C2b（codex 审 LOW 采纳）：sent_by 在**进入分组循环前**求一次 —— 一次批量请求只有一个责任人，
-      //   放在循环里会读成"每组可以不同"，与审计语义相反（且重复解析 actor 无意义）。
-      const batchSentBy = assertNotifySentBy('notify-release-executor-batch', sysActor(req).id);
-
-      // 按执行人分组：查执行人 → 建合并 markdown → 发一条 → 按组守卫 UPDATE → 据 changes(+回读) 生成每单结果
-      for (const [devId, groupRows] of eligibleByDev) {
-        const groupIds = groupRows.map(r => r.id);
-        const executor = await dbGetAsync('SELECT id, display_name, phone, dingtalk_user_id FROM users WHERE id = ?', [devId]);
-        let ok = false, messageKey = null, sendErr = null;
-        if (!executor) {
-          sendErr = 'executor_not_found';   // 执行人查不到 → 组内全 failed（守卫 UPDATE 落 failed）
-        } else {
-          const { title, md } = buildSysReleaseExecutorBatchMarkdown(groupRows, baseUrl);
-          const sendResult = await sendIssueDingtalkRaw(executor, title, md);   // 锁外网络调用
-          ok = !!sendResult.ok; messageKey = ok ? sendResult.message_key : null; sendErr = ok ? null : (sendResult.reason || 'other');
-        }
-        const gph = groupIds.map(() => '?').join(',');
-        // 守卫 UPDATE 的 WHERE 与分类读侧完全同源（type='bug' + status='待上线' + release_assignee_id + ②态）——
-        //   codex H-1 [[write_read_same_semantic]]：type 现不可变（无端点改 sys_issues.type）故写侧漏 type 当前不可达，
-        //   但读侧分类带了 type='bug'，写侧同源加固防未来加 type 编辑路径破防（零成本）。
-        // ⭐ C2b：本端点**自己拼 UPDATE、不走 recordSysReleaseExecutorNotify**（按组守卫需要 changes 判命中数），
-        //   所以它是第 6 个独立写点 —— 只改 record 函数会让批量路径 sent_by 恒 NULL，
-        //   当场破坏 `sent/failed ⟹ sent_by 非空`。这类"绕过统一 helper 的第二写点"是最容易漏的一种。
-        const upd = await sysNotifyWriteRun(
-          `UPDATE sys_issues SET release_assignee_notify_status=?, release_assignee_notified_at=datetime('now','localtime'),
-             release_assignee_notify_message_key=?, release_assignee_notify_error=?, release_assignee_read_at=NULL,
-             release_assignee_notify_sent_by=?
-           WHERE id IN (${gph}) AND type = 'bug' AND release_assignee_id=? AND status='待上线'
-             AND COALESCE(release_assignee_notify_status,'not_sent') IN ('not_sent','failed')`,
-          [ok ? 'sent' : 'failed', messageKey, sendErr, batchSentBy, ...groupIds, devId]);
-        const targetStatus = ok ? 'sent' : 'failed';
-        if (upd && upd.changes === groupIds.length) {
-          // 全部命中（无并发）：直接标结果，免回读
-          for (const iid of groupIds) resultMap.set(iid, { id: iid, code: targetStatus, release_assignee_notify_status: targetStatus });
-        } else {
-          // 部分命中：回读按当前态判「命中(sent/failed)」vs「并发改动(concurrent_changed)」。
-          //   hit 判定条件与守卫 UPDATE 的 WHERE 完全同源（type/release_assignee_id/status/notify_status）+ sent 再比对
-          //   message_key（本次发送唯一标识）。failed 分支无 message_key 唯一标识（codex M-1）：低并发下，
-          //   守卫 UPDATE 经 sysBeginImmediate 全局锁串行、reread 紧随其后，未命中行必因 type/assignee/status/notify_status
-          //   某项在 UPDATE 时不匹配——该项若仍不匹配（如改派→id 变、离态→status 变）reread 即判 concurrent_changed；
-          //   要误判"命中"须该行状态在 UPDATE 与 reread 之间恰好翻回匹配态（多写者竞态）。
-          //   ⚠️ **论据失效（2026-07-27 核实·本段原写"单 admin 场景不存在"）**：生产实为 **6 个 active admin**，
-          //     多写者竞态**不再是"不存在"，而是"低概率"** —— 6 人可并发跑批量通知，理论上存在
-          //     "A 的 UPDATE 与 reread 之间，B 把该行改走又改回"导致本次把 B 的写入误判为自己命中的窗口。
-          //     **未改代码**（真正的修法是给每次批量尝试生成 attempt_id 写入条件更新、或用 UPDATE...RETURNING 直接取命中 ID，
-          //     属设计变更）。用户 2026-07-27 判定 6 个 admin 均为数据/信息部门自己人、可信 → 定级 **P2 待办**，
-          //     触发修 = 真出现并发批量通知的归因错乱。见 PROJECT_STATUS backlog。
-          const fresh = await dbAllAsync(
-            `SELECT id, type, release_assignee_id, status, release_assignee_notify_status AS ns, release_assignee_notify_message_key AS mk
-               FROM sys_issues WHERE id IN (${gph})`, groupIds);
-          const freshById = new Map(fresh.map(f => [f.id, f]));
-          for (const iid of groupIds) {
-            const f = freshById.get(iid);
-            const hit = f && f.type === 'bug' && Number(f.release_assignee_id) === devId && f.status === '待上线' && f.ns === targetStatus
-              && (ok ? f.mk === messageKey : true);
-            if (hit) resultMap.set(iid, { id: iid, code: targetStatus, release_assignee_notify_status: f.ns });
-            else resultMap.set(iid, { id: iid, code: 'concurrent_changed', release_assignee_notify_status: f ? f.ns : null });
-          }
-        }
-      }
-
-      const results = issueIds.map(iid => resultMap.get(iid));
-      const agg = { sent: 0, failed: 0, skipped: 0, already_notified: 0, concurrent_changed: 0 };
-      for (const r of results) {
-        if (r.code === 'sent') agg.sent++;
-        else if (r.code === 'failed') agg.failed++;
-        else if (r.code === 'skipped') agg.skipped++;
-        else if (r.code === 'ALREADY_NOTIFIED') agg.already_notified++;
-        else if (r.code === 'concurrent_changed') agg.concurrent_changed++;
-      }
-      res.json({ results, ...agg });
-    } catch (err) {
-      logger.error('[系统迭代] 批量通知上线开发失败:', err && err.message);
-      res.status(500).json({ error: (err && err.message) || '批量通知上线开发失败' });
-    }
+  // ── [已退场] POST /sys-issues/notify-release-executor-batch：批量通知上线开发（模型B 合并发送）──────────
+  //   [2026-07-30 用户裁定·旧上线编排家族 4 端点全封] 理由同上方单条端点；②态闸/按组守卫 UPDATE/竞态对账
+  //   等实现整体删除（历史设计见 git 历史 + codex 审 48-51 归档），回滚以整个 commit 为单位。
+  router.post('/sys-issues/notify-release-executor-batch', authenticateToken, requireSysSchemaReady, (req, res) => {
+    res.status(409).json({
+      error: '该端点已下线：执行人通知已并入「安排上线」（notify-executor）流程，不再按单据批量通知',
+      code: 'LEGACY_RELEASE_FLOW_DISABLED',
+    });
   });
 
   //   通知报障人（requester 侧 requester_notify_*，进展/已上线卡片）：需有报障人手机号（sendSysRequesterNotify 内亦有"无报障人保持 not_sent"守卫）。
@@ -8386,6 +9404,10 @@ module.exports = (deps) => {
   // ── GET /sys-issues/:id/notify-read-status（新，通知改造 C3 G11）：byId(dev/relay/creator)+byPhone(requester) 双寻址 ──
   //   复刻 issue-tracker /api/issues/:id/notify-read-status 范式（server.js:11552，token 重试+已读固化写回）。
   //   dev 定位子表活动行（?dev_user_id=）；relay/creator 走 sys_issues 反规范化列；requester 走收件人快照反查。
+  //   ⚠️ [2026-07-30 家族封禁后·codex 208 审 HIGH-1 定位] type=release_executor 分支保留（读+已读固化回写
+  //   release_assignee_read_at）——这是 release_assignee_* 8 列在家族封禁后的**唯一残留写点**：仅对历史
+  //   sent+message_key 数据可达（发送写路径已全封 ⇒ 生产 0 行永不满足前置），前端触发点已删，仅剩直打 API；
+  //   语义是"固化钉钉已读事实"的读侧缓存，非业务状态变更，故保留不封。
   // [M-1 收口·codex40] 权限闸：原仅 authenticateToken，任意登录用户可探任意单四侧通知触达/已读时间（越权泄露）。
   //   in-handler 检查（非中间件）：本端点是**多通道复用**的（?type=dev|relay|creator|requester|release_executor），
   //   各通道授权面不同（前三 = admin∨受理人 / 后两 = 仅 admin），中间件层表达不了逐通道差异，故在 handler 内
@@ -8541,7 +9563,6 @@ module.exports = (deps) => {
     assertNotifySentBy,
     recordSysCreatorNotify,
     recordSysDevAssigneeNotify,
-    recordSysReleaseExecutorNotify,   // ← 对抗审 F3 后加入：verify 直调验证 CAS 围栏（换人后旧回写须零命中）
     SYS_REQUIRED_TABLES,
     SYS_ISSUES_KEY_COLS,
     SYS_RELEASES_KEY_COLS,
@@ -8552,6 +9573,8 @@ module.exports = (deps) => {
     SYS_DEV_COMMITS_KEY_COLS,
     SYS_DEV_EVENTS_KEY_COLS,
     SYS_RELEASE_COMMIT_SNAPSHOTS_KEY_COLS,
+    // 上线体统一重构 C0（方案 v3.4 §6.2）新增排班表锚点（verify-sys-schema 等 require 真实逻辑）
+    SYS_DUTY_ROSTER_KEY_COLS,
     requireSysSchemaReady,
     runSysMigration,
     // C2：状态机 + helper（verify require 真实逻辑）
@@ -8582,6 +9605,15 @@ module.exports = (deps) => {
     //   直测 ON CONFLICT(release_id,issue_id) DO NOTHING 的幂等/changes=0 分支，业务状态机正常路径
     //   不可达二次发布，需绕开 HTTP 层直调本函数验证 SQL 层不变量）
     snapshotReleaseCommitsInTxn,
+    // C4：getReleaseMembers 统一读源（verify 直调覆盖三态+完整性校验分支，RC-L2 防复刻漂移）
+    getReleaseMembers,
+    deriveReleaseType,   // §6.9 类型派生（verify 直调覆盖 single/mixed/unknown 三值）
+    // C2a：通知状态机共享原语（verify-sys-release-batch require 真实逻辑，RC-L2 防复刻漂移）
+    hasReleaseEligibility,
+    staleTransitionForRelease,
+    // [C5 删除] syncReleaseLegacyMirror 导出项一并移除——函数本体已删（见其原定义处删除注释）。
+    applyReleaseChange,
+    requireLiaisonOnly,   // C1 排班表写权泛化（原 requireDutyRosterWrite），C2a cancel-schedule 复用同判据
     // C5：钉钉通知派发（verify-sys-notify require 真实逻辑）
     dispatchSysNotify,
     buildSysDevMarkdown,

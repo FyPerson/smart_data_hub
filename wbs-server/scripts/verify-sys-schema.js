@@ -48,6 +48,11 @@ const EXPECTED_INDEXES = [
   'idx_sys_issues_assigned', 'idx_sys_issues_release', 'idx_sys_issues_origin',
   'idx_sys_timeline_issue', 'idx_sys_attach_issue',
   'idx_sys_dev_assignees_issue', 'idx_sys_dev_assignee_active',   // 通知改造 C1a 新表（后者=部分唯一索引，G12）
+  // ── 上线体统一重构 C0（方案 v3.4 §6.1/§6.2/§6.13，2026-07-28）新增 4 索引 ──────────
+  'idx_sys_releases_assignee',       // sys_releases.release_assignee_id（旧库 ALTER 后建，见 [1a-10]）
+  'idx_sys_duty_roster_active',      // 排班表：部分唯一索引（duty_date, WHERE removed_at IS NULL）
+  'idx_sys_duty_roster_user',        // 排班表：(user_id, duty_date)
+  'idx_sys_timeline_action_ref',     // sys_issue_timeline(ref_id, action_code)，配 §6.13 反查双条件
 ];
 
 let passed = 0;
@@ -130,11 +135,11 @@ async function main() {
   assert.strictEqual(nnBroken.length, 0, `sys_issues NOT NULL 约束缺失: ${nnBroken.join(',')}`);
   ok(`sys_issues 核心 NOT NULL 约束生效（${ISSUE_NOTNULL.length} 列：type/status/title/system_name/source/created_by(_name)/record_source/三计数/三通知/评估两闸门列 needs_feasibility·blocked，codex 18 M-1）`);
 
-  // [4] 索引齐全（11 个，通知改造 C1a 新增 dev_assignees ×2）
+  // [4] 索引齐全（15 个，通知改造 C1a 新增 dev_assignees ×2 + 上线体统一重构 C0 新增 4）
   const idxRows = (await all("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_sys%'")).map(r => r.name);
   const missingIdx = EXPECTED_INDEXES.filter(i => !idxRows.includes(i));
   assert.strictEqual(missingIdx.length, 0, `索引缺失: ${missingIdx.join(',')}`);
-  ok(`${EXPECTED_INDEXES.length} 索引齐全（releases ×1 + issues ×6 + timeline ×1 + attach ×1 + dev_assignees ×2[含部分唯一索引]）`);
+  ok(`${EXPECTED_INDEXES.length} 索引齐全（releases ×1 + issues ×6 + timeline ×1 + attach ×1 + dev_assignees ×2[含部分唯一索引] + 上线体统一重构 C0 新增 4[releases_assignee/duty_roster×2/timeline_action_ref]）`);
 
   // ── 各表合法插入需要的最小列工具 ──
   const insIssue = (extra = '', cols = '', vals = []) =>
@@ -278,6 +283,37 @@ async function main() {
   }
   ok('⭐ 通知改造 follow-up 第 5 类通知列（新库路径）：release_assignee_notify_* 5 列齐全 + status CHECK/NOT NULL/默认 not_sent + 其余 4 列默认 NULL（镜像 creator 范式）');
 
+  // [9f] ⭐ 上线体统一重构 C5：sys_issues 8 列只读残留断言（防未来误删）——syncReleaseLegacyMirror（C2a-C4
+  //   过渡期双写镜像函数）已随 C5 整体删除，但这 8 列本身**保留在 schema 里不 DROP**（37 列表重建风险，
+  //   项目"不再 drop 重建"铁律）。[2026-07-30 用户裁定补记] 曾长期活跃读写这 8 列的旧"上线编排"机制
+  //   （assign-release-dev/reassign-release-dev/notify-release-executor(-batch) 4 端点）已全部封禁退场
+  //   ——8 列自此全库零写路径、成为**纯只读残留**（历史展示/列表 SELECT 仍读，禁止 DROP 的结论不变）。
+  //   本组是[9d]/[9e]两组既有列存在性断言之外**唯一覆盖全部 8 列（含此前从未被任何断言覆盖过的
+  //   release_assignee_notify_sent_by）的清单式核对**，专门防止未来有人把这 8 列一并 DROP 掉。
+  const RELEASE_ASSIGNEE_LEGACY_8_COLS = ['release_assignee_id', 'release_assignee_name',
+    'release_assignee_notify_status', 'release_assignee_notified_at', 'release_assignee_notify_message_key',
+    'release_assignee_notify_error', 'release_assignee_read_at', 'release_assignee_notify_sent_by'];
+  {
+    const nowCols = (await all('PRAGMA table_info(sys_issues)')).map(r => r.name);
+    const missLegacy8 = RELEASE_ASSIGNEE_LEGACY_8_COLS.filter(c => !nowCols.includes(c));
+    assert.strictEqual(missLegacy8.length, 0, `C5 只读残留 8 列缺失（被误删？）: ${missLegacy8.join(',')}——业务写路径已全封（旧上线编排家族 2026-07-30），历史展示/列表 SELECT/查已读固化仍读写 read_at，不得 DROP`);
+  }
+  ok(`⭐ 上线体统一重构 C5：sys_issues 8 列只读残留断言——${RELEASE_ASSIGNEE_LEGACY_8_COLS.join('/')} 全部仍在 schema 里（syncReleaseLegacyMirror 双写已删；旧上线编排家族 2026-07-30 全封后业务写路径为零，唯一残留写点=notify-read-status 已读固化 read_at，读路径仍在，禁止未来误删）`);
+
+  // [9g] ⭐ 上线体统一重构 C6：sys_issues.needs_release 单列只读残留断言（防未来误删）——与上方 [9f] 8 列
+  //   "双重身份"不同，needs_release **没有**第二套仍在活跃读写它的独立机制：唯一写点 set-release-flag 已
+  //   随 C3 全类型退场为 410 Gone，add-issues 端点曾叠加的"bug 须 needs_release=1"闸门也已随本次双闸拆除
+  //   （2026-07-29 主会话裁定选项 A，方案 v3.4 §5b #2「needs_release｜废弃」）一并删除——此后本列在全项目
+  //   范围内没有任何写路径、也没有任何准入判断读它，是彻底死透的单一身份残留（仅供历史 timeline 标签/
+  //   建单初值展示读出）。DROP COLUMN 仍被硬约束禁止（37 列表重建风险），保留列不删，本断言专防未来
+  //   误删该列（若被删，PRAGMA table_info 里会缺失，下方 CHECK 断言 [9c] 也会连带报错，但本断言单独
+  //   钉一个不依赖其他断言顺序的清单式核对）。
+  {
+    const nowCols = (await all('PRAGMA table_info(sys_issues)')).map(r => r.name);
+    assert.ok(nowCols.includes('needs_release'), 'C6 只读残留列缺失（被误删？）: needs_release——此列虽已无任何写路径/准入判断消费，但仍供历史 timeline 标签展示，不得 DROP');
+  }
+  ok('⭐ 上线体统一重构 C6：sys_issues.needs_release 单列只读残留断言——列仍在 schema 里（唯一写点 set-release-flag 已 410 退场 + add-issues 的 needs_release=1 闸门已随双闸拆除删除，此后本列无任何写路径/读判断消费，纯供历史展示，禁止未来误删）');
+
   // [10] sys_issues NOT NULL：缺 system_name / created_by / title 被拒
   await assert.rejects(run(`INSERT INTO sys_issues (type, status, title, created_by, created_by_name) VALUES ('feature', '待评估', 't', 1, 'admin')`), /NOT NULL|constraint/i, 'system_name NOT NULL 未生效');
   await assert.rejects(run(`INSERT INTO sys_issues (type, status, system_name, created_by, created_by_name) VALUES ('feature', '待评估', 'BMS', 1, 'admin')`), /NOT NULL|constraint/i, 'title NOT NULL 未生效');
@@ -291,6 +327,154 @@ async function main() {
   assert.strictEqual(relDefault.is_hotfix, 0, 'is_hotfix 默认 0');
   ok('sys_releases：release_no UNIQUE 防重 + status CHECK（计划中/已发布）+ 默认 计划中/is_hotfix=0');
 
+  // [11a] ⭐ 上线体统一重构 C0（方案 v3.4 §6.1，2026-07-28）：sys_releases 新增 10 列全量断言（新库 CREATE 路径）
+  const releaseCols = (await all('PRAGMA table_info(sys_releases)')).map(r => r.name);
+  const RELEASE_DUTY_ASSIGNEE_COLS_EXPECT = ['release_assignee_id', 'release_assignee_name',
+    'release_assignee_notify_status', 'release_assignee_notify_started_at', 'release_assignee_notified_at',
+    'release_assignee_notify_message_key', 'release_assignee_notify_error', 'release_assignee_notify_token',
+    'release_assignee_read_at', 'release_kind'];
+  {
+    const missRelDuty = RELEASE_DUTY_ASSIGNEE_COLS_EXPECT.filter(c => !releaseCols.includes(c));
+    assert.strictEqual(missRelDuty.length, 0, `sys_releases 上线体统一重构 C0 新列缺失: ${missRelDuty.join(',')}`);
+  }
+  //   默认值：不带这两列插入 → release_assignee_notify_status='not_sent' / release_kind='normal'，其余 8 列 NULL
+  await run(`INSERT INTO sys_releases (release_no, created_by, created_by_name) VALUES ('R-C0-DEFAULTS', 1, 'admin')`);
+  const relC0Default = await get(`SELECT release_assignee_notify_status, release_kind, release_assignee_id, release_assignee_name,
+    release_assignee_notify_started_at, release_assignee_notified_at, release_assignee_notify_message_key,
+    release_assignee_notify_error, release_assignee_notify_token, release_assignee_read_at
+    FROM sys_releases WHERE release_no='R-C0-DEFAULTS'`);
+  assert.strictEqual(relC0Default.release_assignee_notify_status, 'not_sent', 'release_assignee_notify_status 默认应 not_sent');
+  assert.strictEqual(relC0Default.release_kind, 'normal', 'release_kind 默认应 normal');
+  for (const k of ['release_assignee_id', 'release_assignee_name', 'release_assignee_notify_started_at',
+    'release_assignee_notified_at', 'release_assignee_notify_message_key', 'release_assignee_notify_error',
+    'release_assignee_notify_token', 'release_assignee_read_at']) {
+    assert.strictEqual(relC0Default[k], null, `${k} 默认应 NULL`);
+  }
+  //   CHECK 负例：release_assignee_notify_status='bogus' 拒；release_kind='urgent' 拒
+  await assert.rejects(run(`INSERT INTO sys_releases (release_no, created_by, created_by_name, release_assignee_notify_status) VALUES ('R-C0-BOGUS', 1, 'admin', 'bogus')`),
+    /CHECK|constraint/i, 'release_assignee_notify_status=bogus 应被 CHECK 拒');
+  await assert.rejects(run(`INSERT INTO sys_releases (release_no, created_by, created_by_name, release_kind) VALUES ('R-C0-URGENT', 1, 'admin', 'urgent')`),
+    /CHECK|constraint/i, 'release_kind=urgent 应被 CHECK 拒');
+  //   CHECK 正例：notify_status 5 态全合法（not_sent/sending/sent/failed/stale）；release_kind 2 态全合法
+  for (const st of ['not_sent', 'sending', 'sent', 'failed', 'stale']) {
+    await run(`INSERT INTO sys_releases (release_no, created_by, created_by_name, release_assignee_notify_status) VALUES (?, 1, 'admin', ?)`, [`R-C0-ST-${st}`, st]);
+  }
+  for (const k of ['normal', 'emergency']) {
+    await run(`INSERT INTO sys_releases (release_no, created_by, created_by_name, release_kind) VALUES (?, 1, 'admin', ?)`, [`R-C0-KIND-${k}`, k]);
+  }
+  ok('⭐ 上线体统一重构 C0 sys_releases 新列（新库路径）：10 列齐全 + release_assignee_notify_status 5 态合法/bogus 拒 + release_kind 2 态合法/urgent 拒 + 默认 not_sent/normal + 其余 8 列默认 NULL');
+
+  // [11b] ⭐ 上线体统一重构 C0（方案 v3.4 §6.2）：排班表 sys_release_duty_roster 结构 + 索引存在
+  const dutyCols = (await all('PRAGMA table_info(sys_release_duty_roster)')).map(r => r.name);
+  const DUTY_ROSTER_COLS_EXPECT = ['id', 'duty_date', 'user_id', 'user_name', 'note', 'created_by',
+    'created_by_name', 'created_at', 'removed_at', 'removed_by', 'removed_by_name'];
+  {
+    const missDuty = DUTY_ROSTER_COLS_EXPECT.filter(c => !dutyCols.includes(c));
+    assert.strictEqual(missDuty.length, 0, `sys_release_duty_roster 列缺失: ${missDuty.join(',')}`);
+  }
+  const dutyIdx = (await all("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='sys_release_duty_roster'")).map(r => r.name);
+  assert.ok(dutyIdx.includes('idx_sys_duty_roster_active'), 'idx_sys_duty_roster_active 应存在');
+  assert.ok(dutyIdx.includes('idx_sys_duty_roster_user'), 'idx_sys_duty_roster_user 应存在');
+  ok('排班表 sys_release_duty_roster：11 列齐全 + 两索引（idx_sys_duty_roster_active 部分唯一 + idx_sys_duty_roster_user）存在');
+
+  const insDuty = (dutyDate, userId, userName) =>
+    run(`INSERT INTO sys_release_duty_roster (duty_date, user_id, user_name, created_by, created_by_name) VALUES (?, ?, ?, 1, 'admin')`,
+      [dutyDate, userId, userName]);
+
+  // [11c] ⭐ duty_date CHECK：负例（月 00/13、日 00/32、两位年份 GLOB 不匹配、月内溢出）+ 正例（含闰年 2/29）
+  await assert.rejects(insDuty('2026-00-15', 5, '开发甲'), /CHECK|constraint/i, 'duty_date=2026-00-15（月00）应被 CHECK 拒');
+  await assert.rejects(insDuty('2026-13-01', 5, '开发甲'), /CHECK|constraint/i, 'duty_date=2026-13-01（月13）应被 CHECK 拒');
+  await assert.rejects(insDuty('2026-07-00', 5, '开发甲'), /CHECK|constraint/i, 'duty_date=2026-07-00（日00）应被 CHECK 拒');
+  await assert.rejects(insDuty('2026-07-32', 5, '开发甲'), /CHECK|constraint/i, 'duty_date=2026-07-32（日32）应被 CHECK 拒');
+  await assert.rejects(insDuty('26-7-8', 5, '开发甲'), /CHECK|constraint/i, 'duty_date=26-7-8（GLOB 不匹配 4-2-2 位格式）应被 CHECK 拒');
+  await assert.doesNotReject(insDuty('2026-07-28', 5, '开发甲'), 'duty_date=2026-07-28 合法应可插入');
+  // ⭐ 环境偏差修正专项：裸 date(x)（不带 modifier）对"月内溢出但数字仍在 GLOB 允许范围"的日期
+  //   （02-30、非闰年 02-29、04-31 等）原样回显、不归一化，会让方案 v3.4 §6.2 这条防线对月内溢出日期
+  //   实际不生效；DDL 已改为 date(x,'+0 days')（带 modifier 触发真正 Julian 回转归一化）。此偏差**先由
+  //   主会话外部实测**（独立 probe 脚本直连 sqlite3，验证 date(x,'+0 days') 的归一化语义，9 组用例）
+  //   发现并裁定修法；**本组断言是另一层**——走真实 initSchema() 建表 + 真实 CHECK 拒写的自动化回归
+  //   覆盖清单（非临时 probe），验证修正后的真实行为：2026-02-30 → 归一化为 2026-03-02（≠原值→拒）；
+  //   非闰年 2026-02-29 → 归一化为 2026-03-01（≠原值→拒）；闰年 2024-02-29 → 归一化后仍是 2024-02-29
+  //   （=原值→放行）；2026-04-31（4 月仅 30 天，月内溢出第三形态）→ 归一化为 2026-05-01（≠原值→拒）。
+  await assert.rejects(insDuty('2026-02-30', 5, '开发甲'), /CHECK|constraint/i,
+    'duty_date=2026-02-30（date(x,\'+0 days\')归一化为2026-03-02≠原值）应被 CHECK 拒');
+  await assert.rejects(insDuty('2026-02-29', 5, '开发甲'), /CHECK|constraint/i,
+    'duty_date=2026-02-29（2026 非闰年，date(x,\'+0 days\')归一化为2026-03-01≠原值）应被 CHECK 拒');
+  await assert.doesNotReject(insDuty('2024-02-29', 5, '开发甲'), 'duty_date=2024-02-29（闰年，date(x,\'+0 days\')归一化后仍等于原值）应可插入');
+  await assert.rejects(insDuty('2026-04-31', 5, '开发甲'), /CHECK|constraint/i,
+    'duty_date=2026-04-31（4 月仅 30 天，月内溢出第三形态，date(x,\'+0 days\')归一化为2026-05-01≠原值）应被 CHECK 拒');
+  ok("排班表 duty_date CHECK：月 00/13、日 00/32、26-7-8（GLOB 不匹配）、2026-02-30/2026-02-29/2026-04-31（三种月内溢出形态，date(x,'+0 days')归一化后≠原值）全被拒；合法日期与闰年 2024-02-29（归一化后仍等于原值）可插（环境偏差修正专项：主会话外部 probe 实测裁定修法，本组是 verify 层自动化回归覆盖清单）");
+
+  // [11d] ⭐ 软删成组 CHECK（v3.4 codex L-1 修正专项）：负例①仅 removed_at ②removed_at+removed_by 但 name NULL
+  //   （正是 v3.3 会漏放的那条）③removed_by_name 空串/纯空格；正例：三者全 NULL（已隐含于上方插入）+ 三者全写。
+  await assert.rejects(
+    run(`INSERT INTO sys_release_duty_roster (duty_date, user_id, user_name, created_by, created_by_name, removed_at)
+         VALUES ('2026-08-01', 6, '开发乙', 1, 'admin', datetime('now'))`),
+    /CHECK|constraint/i, '负例①：仅 removed_at 非空（removed_by/name 均 NULL）应被 CHECK 拒');
+  await assert.rejects(
+    run(`INSERT INTO sys_release_duty_roster (duty_date, user_id, user_name, created_by, created_by_name, removed_at, removed_by)
+         VALUES ('2026-08-02', 6, '开发乙', 1, 'admin', datetime('now'), 1)`),
+    /CHECK|constraint/i, '负例②（v3.4 codex L-1 专项）：removed_at+removed_by 非空但 removed_by_name 为 NULL 应被 CHECK 拒');
+  await assert.rejects(
+    run(`INSERT INTO sys_release_duty_roster (duty_date, user_id, user_name, created_by, created_by_name, removed_at, removed_by, removed_by_name)
+         VALUES ('2026-08-03', 6, '开发乙', 1, 'admin', datetime('now'), 1, '')`),
+    /CHECK|constraint/i, '负例③a：removed_by_name 空串应被 CHECK 拒（length(trim())>0）');
+  await assert.rejects(
+    run(`INSERT INTO sys_release_duty_roster (duty_date, user_id, user_name, created_by, created_by_name, removed_at, removed_by, removed_by_name)
+         VALUES ('2026-08-04', 6, '开发乙', 1, 'admin', datetime('now'), 1, '   ')`),
+    /CHECK|constraint/i, '负例③b：removed_by_name 纯空格应被 CHECK 拒（trim 后长度 0）');
+  await assert.doesNotReject(
+    run(`INSERT INTO sys_release_duty_roster (duty_date, user_id, user_name, created_by, created_by_name, removed_at, removed_by, removed_by_name)
+         VALUES ('2026-08-05', 6, '开发乙', 1, 'admin', datetime('now'), 1, '对接人示例对接人')`),
+    '正例：三字段全写合法值应可插入（合法软删行）');
+  ok('排班表软删成组 CHECK：负例①仅 removed_at ②removed_at+removed_by 但 name NULL（v3.4 codex L-1 专项）③空串/纯空格 name 全被拒 + 三字段全 NULL/全写两态合法');
+
+  // [11f] ⭐ codex C0 审收口加固（0 HIGH/1 MED/4 LOW，主会话裁定，2026-07-28）三处断言：
+  //   a. removed_at 时间有效性：空串/垃圾串/纯空格均应被 datetime(removed_at) IS NOT NULL 拒
+  //   b. user_id/created_by > 0：0 与负数均应被拒
+  //   c. 加严后合法软删仍可插入（确认没误伤正常路径）
+  await assert.rejects(
+    run(`INSERT INTO sys_release_duty_roster (duty_date, user_id, user_name, created_by, created_by_name, removed_at, removed_by, removed_by_name)
+         VALUES ('2026-10-04', 6, '开发乙', 1, 'admin', '', 1, 'admin')`),
+    /CHECK|constraint/i, "codex 加固 a1：removed_at='' 应被 datetime(removed_at) IS NOT NULL 拒（配 removed_by=1+合法 name，隔离变量只测 removed_at）");
+  await assert.rejects(
+    run(`INSERT INTO sys_release_duty_roster (duty_date, user_id, user_name, created_by, created_by_name, removed_at, removed_by, removed_by_name)
+         VALUES ('2026-10-05', 6, '开发乙', 1, 'admin', 'not-a-time', 1, 'admin')`),
+    /CHECK|constraint/i, "codex 加固 a2：removed_at='not-a-time' 应被 datetime(removed_at) IS NOT NULL 拒");
+  await assert.rejects(
+    run(`INSERT INTO sys_release_duty_roster (duty_date, user_id, user_name, created_by, created_by_name, removed_at, removed_by, removed_by_name)
+         VALUES ('2026-10-06', 6, '开发乙', 1, 'admin', '   ', 1, 'admin')`),
+    /CHECK|constraint/i, "codex 加固 a3：removed_at='   '（纯空格）应被 datetime(removed_at) IS NOT NULL 拒");
+  ok('codex C0 审收口 a 组：removed_at 空串/垃圾串/纯空格三态均被 datetime(removed_at) IS NOT NULL 拒（配 removed_by=1+合法 name 隔离变量，只测 removed_at 本身）');
+
+  await assert.rejects(
+    run(`INSERT INTO sys_release_duty_roster (duty_date, user_id, user_name, created_by, created_by_name) VALUES ('2026-10-01', 0, '开发甲', 1, 'admin')`),
+    /CHECK|constraint/i, 'codex 加固 b1：user_id=0 应被 CHECK (user_id > 0) 拒');
+  await assert.rejects(
+    run(`INSERT INTO sys_release_duty_roster (duty_date, user_id, user_name, created_by, created_by_name) VALUES ('2026-10-02', -1, '开发甲', 1, 'admin')`),
+    /CHECK|constraint/i, 'codex 加固 b2：user_id=-1 应被 CHECK (user_id > 0) 拒');
+  await assert.rejects(
+    run(`INSERT INTO sys_release_duty_roster (duty_date, user_id, user_name, created_by, created_by_name) VALUES ('2026-10-03', 5, '开发甲', 0, 'admin')`),
+    /CHECK|constraint/i, 'codex 加固 b3：created_by=0 应被 CHECK (created_by > 0) 拒');
+  ok('codex C0 审收口 b 组：user_id=0/-1、created_by=0 均被 CHECK (>0) 拒（防 0/负数非法 id 静默入库）');
+
+  await assert.doesNotReject(
+    run(`INSERT INTO sys_release_duty_roster (duty_date, user_id, user_name, created_by, created_by_name, removed_at, removed_by, removed_by_name)
+         VALUES ('2026-10-07', 8, '开发戊', 1, 'admin', datetime('now'), 1, '对接人示例对接人')`),
+    'codex 加固 c 组回归：合法软删（datetime(\'now\') + removed_by=1(>0) + 非空 removed_by_name）在加严后仍可插入——确认三处加固未误伤正常路径');
+  ok("codex C0 审收口 c 组回归：加严三条 CHECK（removed_at 时间有效性 + user_id>0 + created_by>0）后，合法软删行（datetime('now')/正数 removed_by/非空 name）仍可正常插入，未误伤");
+
+  // [11e] ⭐ 唯一活跃索引 idx_sys_duty_roster_active：同 duty_date 两条 active 行冲突，软删第一条后可再插
+  await run(`INSERT INTO sys_release_duty_roster (duty_date, user_id, user_name, created_by, created_by_name) VALUES ('2026-09-01', 10, '开发丙', 1, 'admin')`);
+  await assert.rejects(
+    run(`INSERT INTO sys_release_duty_roster (duty_date, user_id, user_name, created_by, created_by_name) VALUES ('2026-09-01', 11, '开发丁', 1, 'admin')`),
+    /UNIQUE|constraint/i, '同 duty_date 第二条 active 行应被 idx_sys_duty_roster_active 部分唯一索引拒（即便 user_id 不同）');
+  await run(`UPDATE sys_release_duty_roster SET removed_at = datetime('now'), removed_by = 1, removed_by_name = 'admin' WHERE duty_date = '2026-09-01' AND user_id = 10`);
+  await assert.doesNotReject(
+    run(`INSERT INTO sys_release_duty_roster (duty_date, user_id, user_name, created_by, created_by_name) VALUES ('2026-09-01', 11, '开发丁', 1, 'admin')`),
+    '软删第一条后，同 duty_date 再插 active 行应成功（部分索引只约束 removed_at IS NULL 的在册行）');
+  ok('排班表唯一活跃索引：同 duty_date 两条 active 冲突被拒（跨 user_id 仍拒——约束落在 duty_date 不在 user_id）+ 软删旧行后同日可再插新值班人');
+
   // [12] sys_issue_timeline：event_type CHECK（含 reassign 独立枚举 05-H1）+ NOT NULL
   const issueId = (await get(`SELECT id FROM sys_issues WHERE type='feature' LIMIT 1`)).id;
   for (const ev of ['created', 'assign', 'reassign', 'estimate', 'status_change', 'scope_change', 'submit', 'return', 'release', 'reopen', 'derive', 'note', 'feasibility', 'blocked', 'unblock']) {
@@ -299,6 +483,17 @@ async function main() {
   await assert.rejects(run(`INSERT INTO sys_issue_timeline (issue_id, event_type, operator_id, operator_name) VALUES (?, 'reject', 1, 'admin')`, [issueId]), /CHECK|constraint/i, "event_type=reject 应被 CHECK 拒（打回叫 return 非 reject，L-1）");
   await assert.rejects(run(`INSERT INTO sys_issue_timeline (issue_id, event_type, operator_name) VALUES (?, 'note', 'admin')`, [issueId]), /NOT NULL|constraint/i, 'operator_id NOT NULL 未生效');
   ok('sys_issue_timeline：15 event_type（含 reassign 独立 05-H1 + feasibility/blocked/unblock 评估 F1 §2.2）合法，reject 被拒（L-1 打回叫 return），operator_id NOT NULL');
+
+  // [12b] ⭐ 上线体统一重构 C0（方案 v3.4 §6.13，2026-07-28）：留痕反查基础设施
+  //   action_code 是 sys_issue_timeline 首版原生列（非本 C0 新增），此处显式断言防未来被误删——
+  //   idx_sys_timeline_action_ref 正是配它做 `event_type='scope_change' AND action_code IN (...) AND ref_id=?` 反查。
+  const timelineCols = (await all('PRAGMA table_info(sys_issue_timeline)')).map(r => r.name);
+  assert.ok(timelineCols.includes('action_code'), 'sys_issue_timeline 应含 action_code 列（首版原生列，非本 C0 新增）');
+  const timelineIdx = (await all("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='sys_issue_timeline'")).map(r => r.name);
+  assert.ok(timelineIdx.includes('idx_sys_timeline_action_ref'), 'idx_sys_timeline_action_ref 应存在');
+  const releaseIdxCheck = (await all("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='sys_releases'")).map(r => r.name);
+  assert.ok(releaseIdxCheck.includes('idx_sys_releases_assignee'), 'idx_sys_releases_assignee 应存在');
+  ok('上线体统一重构 C0 §6.13 反查基础设施：sys_issue_timeline.action_code 列存在（首版原生列）+ idx_sys_timeline_action_ref/idx_sys_releases_assignee 两索引存在');
 
   // [13] sys_issue_attachments：attachment_type CHECK（含 spec）+ status CHECK + NOT NULL
   await run(`INSERT INTO sys_issue_attachments (issue_id, attachment_type, file_name, original_name, uploaded_by, uploaded_by_name) VALUES (?, 'spec', 'f.pdf', '需求.pdf', 1, 'admin')`, [issueId]);
@@ -350,8 +545,8 @@ async function main() {
   //   缺 issue_id + 有 legacy 行 → guard 跳过回填、[2] 给干净 issue_id 缺列诊断（非 [1c] SELECT 撞 da.issue_id 原始报错）
   await verifyDevAssigneesGuardAlignment();
 
-  console.log(`\n[全部通过] ${passed}/${passed} ✓ 系统迭代 sys 五表 schema 验证通过【require 真实 initSchema，非复刻 DDL】`);
-  console.log(`  覆盖：5 表（含通知改造 C1a 新表 sys_issue_dev_assignees）+ 关键列（含 effected_at/三侧通知 5 列全量/可行性评估 7 列/通知改造 11 新列）+ 11 索引（含 G12 部分唯一索引）+ type/source/priority/三通知/relay_notify_status/event_type(15)/attachment/release status/feasibility_conclusion/needs_feasibility·blocked(0,1)/dev_assignees is_primary·notify_status CHECK + config release_id 永空 DB CHECK（12-H2）+ NOT NULL + UNIQUE + 部分唯一索引(软删复活) + FK 定义 + readiness 三态（含新表专项）`);
+  console.log(`\n[全部通过] ${passed}/${passed} ✓ 系统迭代 sys 六表 schema 验证通过【require 真实 initSchema，非复刻 DDL】`);
+  console.log(`  覆盖：6 表（含通知改造 C1a 新表 sys_issue_dev_assignees + 上线体统一重构 C0 新表 sys_release_duty_roster）+ 关键列（含 effected_at/三侧通知 5 列全量/可行性评估 7 列/通知改造 11 新列/上线体统一重构 C0 的 sys_releases 10 新列 + 排班表 11 列）+ 15 索引（含 G12 部分唯一索引 + C0 新增 4 索引）+ type/source/priority/三通知/relay_notify_status/event_type(15)/attachment/release status/release_assignee_notify_status(5态)/release_kind/feasibility_conclusion/needs_feasibility·blocked(0,1)/dev_assignees is_primary·notify_status/排班表 duty_date 与软删成组 CHECK + config release_id 永空 DB CHECK（12-H2）+ NOT NULL + UNIQUE + 部分唯一索引(软删复活/唯一活跃值班) + FK 定义 + readiness 三态（含新表专项）`);
   db.close();
 }
 

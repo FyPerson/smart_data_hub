@@ -121,12 +121,15 @@ async function main() {
   assert.deepStrictEqual(meta.statusLabels.feature, meta.statusLabels.improvement, 'feature/improvement 状态集应一致（共用变更流）');
   const featureActions = meta.typeFlows.feature.map(t => t.action);
   // 受理排期改造 §4.2：schedule 退场（从必含动作删）+ 新增受理门动作（intake_accept/intake_return/resubmit_intake/change_intake_mode 等）。
-  for (const a of ['create', 'assign', 'reassign', 'estimate', 'submit', 'accept', 'return', 'publish', 'close',
+  for (const a of ['create', 'assign', 'reassign', 'estimate', 'submit', 'accept', 'return', 'close',
     'intake_accept', 'intake_return', 'resubmit_intake', 'request_tech_consult', 'edit_in_revision', 'change_intake_mode', 'set_scheduled_start']) {
     assert.ok(featureActions.includes(a), `变更流缺动作 ${a}`);
   }
   assert.ok(!featureActions.includes('schedule'), '变更流 schedule 已退场（typeFlows 不应含）');
-  ok(`变更流类型流完整（feature/improvement 共用·schedule 退场·含受理门 intake_accept/return/resubmit/change_intake_mode + set_scheduled_start ${featureActions.length} 动作）`);
+  // [C3 退场] publish 条目随上线体统一重构删除（legacy /sys-releases/:id/publish 全类型 409，唯一合法
+  //   发布入口收窄为 /sys-releases/:id/execute，不再是 sysIssueTransition 引擎驱动的逐单动作）。
+  assert.ok(!featureActions.includes('publish'), '变更流 publish 已退场（typeFlows 不应含，C3 收窄）');
+  ok(`变更流类型流完整（feature/improvement 共用·schedule/publish 退场·含受理门 intake_accept/return/resubmit/change_intake_mode + set_scheduled_start ${featureActions.length} 动作）`);
 
   // [4b] F2a §3.2：feature/improvement 全禁 scope_change（评估环节"禁开发态调需求"）——typeFlows 彻底移除该动作
   assert.ok(!featureActions.includes('scope_change'), 'feature typeFlows 不应含 scope_change（F2a 已移除）');
@@ -245,8 +248,46 @@ async function main() {
   }
   ok('[6] MED-2/C2c：reassign.from（feature/improvement/bug 三份）与后端 memberActionFamiliesFor type 感知放行集合（变更流去 D_PRE=DEV∪VERIFY / bug 留待处理=D_PRE∪DEV∪VERIFY，动态取自 MEMBER_ACTION_FAMILY_MATRIX + TYPE_OVERRIDE + status-families.js）完全一致，写读同源');
 
+  // [7] ⭐ [C6·方案 v3.4 §6.5 附录 B「六族双向集合断言」重跑] 每 type 六个基础族（INTAKE/D_PRE/DEV/VERIFY/
+  //   RELEASE/NONRELEASE_TERMINAL，status-families.js BASE_FAMILY_NAMES）的并集须与 transitions.js
+  //   ALLOWED_STATUSES[type] **严格集合相等**（双向：族里没有 ALLOWED_STATUSES 之外的幽灵态，
+  //   ALLOWED_STATUSES 里也没有漏挂族的孤儿态）+ 六族两两不相交（同一状态不得同时落在两个基础族——否则
+  //   familyOfStatus 的"按 BASE_FAMILY_NAMES 顺序找第一个命中"会掩盖另一族的真实归属，引擎误判）。
+  //   源自受理与排期改造方案 v1.3.x §B 原始定义："六族并集=ALLOWED_STATUSES 严格集合相等（双向·防幽灵态）
+  //   +各族两两不相交"；bug 补「已关闭」终态（C6）后必须重新钉一遍——NONRELEASE_TERMINAL.bug 从
+  //   ['已拒绝','已作废'] 变为 ['已关闭','已拒绝','已作废']，任何一侧漏改都会在此立即红灯。
+  for (const type of ['feature', 'improvement', 'bug']) {
+    const unionSet = new Set();
+    const seenIn = new Map();   // status → 命中的族名（用于两两不相交的具体定位）
+    let disjointViolation = null;
+    for (const fam of SF.BASE_FAMILY_NAMES) {
+      for (const st of SF.getFamilyStatuses(type, fam)) {
+        if (seenIn.has(st) && !disjointViolation) {
+          disjointViolation = `状态「${st}」同时属于「${seenIn.get(st)}」与「${fam}」两个基础族`;
+        }
+        seenIn.set(st, fam);
+        unionSet.add(st);
+      }
+    }
+    assert.strictEqual(disjointViolation, null, `[7] ${type} 六族两两不相交违例：${disjointViolation}`);
+    const unionSorted = [...unionSet].sort();
+    const allowedSorted = (T.ALLOWED_STATUSES[type] || []).slice().sort();
+    assert.deepStrictEqual(unionSorted, allowedSorted,
+      `[7] ${type} 六族并集应与 ALLOWED_STATUSES 严格集合相等（双向·防幽灵态），六族并集=${JSON.stringify(unionSorted)} ALLOWED_STATUSES=${JSON.stringify(allowedSorted)}`);
+    // 反向补一手：familyOfStatus 对 ALLOWED_STATUSES 里每个状态都应能查到非 null 的族（否则会是"漏挂族"的
+    // 幽灵态，虽已被上面的并集相等断言间接钉住，这里再用 familyOfStatus 这条独立函数路径直接复核一遍）。
+    for (const st of allowedSorted) {
+      assert.ok(SF.familyOfStatus(type, st), `[7] ${type} 状态「${st}」应能被 familyOfStatus 查到所属基础族（非 null）`);
+    }
+  }
+  // [C6] 精确锚点：bug 的 NONRELEASE_TERMINAL 族现含「已关闭」，且该状态与 change 流一致落在 NONRELEASE_TERMINAL
+  //   （而非误落进 RELEASE 或其他族）——直接钉死这条本次改动的核心事实，不完全依赖上面的通用循环。
+  assert.strictEqual(SF.familyOfStatus('bug', '已关闭'), 'NONRELEASE_TERMINAL', '[C6] bug「已关闭」应归 NONRELEASE_TERMINAL 族（与 feature/improvement 一致）');
+  assert.ok(SF.getFamilyStatuses('bug', 'NONRELEASE_TERMINAL').includes('已关闭'), '[C6] bug NONRELEASE_TERMINAL 族含「已关闭」');
+  ok('[7] ⭐ 六族双向集合断言（方案附录 B·C6 bug 补已关闭终态后重跑）：feature/improvement/bug 三类型的六基础族（INTAKE/D_PRE/DEV/VERIFY/RELEASE/NONRELEASE_TERMINAL）并集与 ALLOWED_STATUSES 严格相等 + 两两不相交 + familyOfStatus 全覆盖，bug「已关闭」精确落 NONRELEASE_TERMINAL 族');
+
   console.log(`\n[全部通过] ${passed}/${passed} ✓ 系统迭代 meta + 状态机常量枚举同步验证通过`);
-  console.log(`  覆盖：meta 结构 + M-4 不泄露内部 guard + 枚举同步(timelineEvent ⊆ DDL CHECK 12-M4) + 变更流完整 + findTransition/resolveToStatus`);
+  console.log(`  覆盖：meta 结构 + M-4 不泄露内部 guard + 枚举同步(timelineEvent ⊆ DDL CHECK 12-M4) + 变更流完整 + findTransition/resolveToStatus + [C6]六族双向集合断言重跑（bug 补已关闭终态）`);
   db.close();
 }
 

@@ -7,7 +7,12 @@
 //   `tech_lead` 通道早有 `tech_lead_notify_sent_by` + 契约守卫，本片是把该范式复刻到其余通道。
 //
 // ⚠️ 可达性事实（v1.7 §4-C2b 源码核实·勿按"五通道都能手动发"想当然）：
-//   · 手动端点可达：creator / requester / dev(子表) / relay / release_executor(单条 + **批量**)
+//   · 手动端点可达：creator / requester / dev(子表) / relay
+//   · ⚠️ 2026-07-30 更新：release_executor(单条 + 批量) 随旧上线编排家族封禁退场——原本可达的
+//     两个写点（notify-release-executor 单条 + notify-release-executor-batch 批量）现一律 409
+//     LEGACY_RELEASE_FLOW_DISABLED，不再产生任何 sent_by 落库；本文件对应用例（原 [B] 批量端点
+//     整段 + [R]①换上线开发重置点）已删除，release_executor 通道的封禁契约覆盖转交
+//     verify-sys-release-orchestration.js（不再验证"谁发的"，只验证"发不出去 + 零副作用"）。
 //   · 自动派发路径（dispatchSysNotify）当前**恒早返回**（isAutoNotifyEnabled 全 type 关闭），
 //     故 `recordSysDevNotify`（dev 主表）当前**无可达调用路径**；requester 的自动分支同理不可达。
 //     它们仍补了 sent_by + 契约守卫：将来恢复自动派发时缺 actor 会**当场抛错**（fail-closed），
@@ -17,8 +22,10 @@
 //   [S] schema：主表 5 列 + 子表 1 列存在；子表列入 SYS_DEV_ASSIGNEES_KEY_COLS「全列在」锚点
 //   [G] ⭐ 契约守卫：sentBy 为 undefined/null/0/-1/'abc'/'12'(字符串数字放行) 的判定 + **抛错时不写库**
 //   [N] 四通道手动端点正例：**admin 与受理人分别触发 → sent_by 各记各的**（多操作者归属=本片存在的理由）
-//   [B] 批量通知端点：它自己拼 UPDATE 不走 record helper（第 6 个写点·最易漏），sent_by 同样落库
-//   [R] 重置点：换上线开发 → sent_by 清空；回受理门(resubmit) → relay 组 sent_by 清空
+//   [B]（已随旧上线编排家族封禁退场，2026-07-30——批量端点 notify-release-executor-batch 现一律
+//        409，原"自己拼 UPDATE 不走 record helper"用例随之作废，见文件内 tombstone）
+//   [R] 重置点：回受理门(resubmit) → relay 组 sent_by 清空；换代表(electRepresentative) → dev 主表
+//        通道 sent_by 清空（原"换上线开发 → release 组归零"子块随封禁退场，见文件内 tombstone）
 //   [I] 不变量全表扫描：`sent|failed ⟹ sent_by 非空` 且 `not_sent ⟹ sent_by 空`
 'use strict';
 const assert = require('assert');
@@ -238,48 +245,19 @@ async function main() {
     ok('[N] 四通道手动端点：creator（admin2=2 / 受理人=13 **两人分得开**）+ requester（sent 与 **failed 都记**）+ dev 子表，sent_by 逐格正确');
   }
 
-  // ═══ [B] 批量通知端点（自己拼 UPDATE·第 6 个写点·最易漏）═══
-  {
-    const ids = [];
-    for (let i = 0; i < 2; i++) {
-      const b = await createBug({ title: `B-批量${i}` });
-      await run(`UPDATE sys_issues SET status='待上线', release_assignee_id=5, release_assignee_name='开发王' WHERE id=?`, [b.body.id]);
-      ids.push(b.body.id);
-    }
-    const rb = await call('POST', '/api/sys-issues/notify-release-executor-batch', admin2Tok, { issue_ids: ids });
-    assert.strictEqual(rb.status, 200, `批量通知 200（实际 ${rb.status}：${JSON.stringify(rb.body)}）`);
-    for (const iid of ids) {
-      const r = await get(`SELECT release_assignee_notify_status s, release_assignee_notify_sent_by b FROM sys_issues WHERE id=?`, [iid]);
-      assert.strictEqual(r.s, 'sent', `#${iid} 批量通知落 sent`);
-      assert.strictEqual(r.b, 2, `⭐ #${iid} sent_by=2 —— 批量路径**绕过 record helper 自己拼 UPDATE**，只改 helper 会让这里恒 NULL`);
-    }
-    // 单条端点（另一个写点，同一组列）
-    const s1 = await createBug({ title: 'B-单条' });
-    await run(`UPDATE sys_issues SET status='待上线', release_assignee_id=6, release_assignee_name='开发李' WHERE id=?`, [s1.body.id]);
-    const rs = await call('POST', `/api/sys-issues/${s1.body.id}/notify-release-executor`, adminTok);
-    assert.strictEqual(rs.status, 200, `单条通知上线开发 200（实际 ${rs.status}：${JSON.stringify(rs.body)}）`);
-    const rr = await get(`SELECT release_assignee_notify_sent_by b FROM sys_issues WHERE id=?`, [s1.body.id]);
-    assert.strictEqual(rr.b, 1, '单条端点 sent_by=1');
-    await assertInvariant('[B] 后');
-    ok('[B] release_executor 两个写点均落 sent_by：**批量端点自拼 UPDATE（第 6 写点）**=2 / 单条端点=1');
-  }
+  // ═══ [B]（已随旧上线编排家族封禁退场，2026-07-30）═══
+  //   原用例经 notify-release-executor-batch（批量·自拼 UPDATE 不走 record helper，"第 6 个写点"）+
+  //   notify-release-executor（单条）两个写点验证 sent_by 落库——两个端点现一律 409
+  //   LEGACY_RELEASE_FLOW_DISABLED，业务逻辑不可达，两个写点均无法再产生任何 sent_by 落库，用例
+  //   随之整体删除。release_executor 通道的封禁契约覆盖见 verify-sys-release-orchestration.js
+  //   （不再验证"谁发的"，只验证"发不出去 + 零副作用"）。
 
   // ═══ [R] 重置点：not_sent ⟹ sent_by 空 ═══
+  //   ⚠️ 2026-07-30：原①"换上线开发（reassign-release-dev）→ release_assignee 组归零"随旧上线
+  //   编排家族封禁一并删除——该端点现一律 409，不再触发任何重置逻辑，用例已作废。本块现只剩两个
+  //   重置点（原②③，序号顺移为①②）。
   {
-    // ① 换上线开发 → release_assignee 组归零
-    const x = await createBug({ title: 'R-换上线开发' });
-    await run(`UPDATE sys_issues SET status='待上线', release_assignee_id=5, release_assignee_name='开发王' WHERE id=?`, [x.body.id]);
-    await call('POST', `/api/sys-issues/${x.body.id}/notify-release-executor`, adminTok);
-    let r = await get(`SELECT release_assignee_notify_status s, release_assignee_notify_sent_by b FROM sys_issues WHERE id=?`, [x.body.id]);
-    assert.strictEqual(r.s, 'sent', '前置：已通知（否则下面的"重置"测的是空气）');
-    assert.strictEqual(r.b, 1, '前置：sent_by 已落');
-    const chg = await call('POST', '/api/sys-issues/reassign-release-dev', adminTok, { issue_ids: [x.body.id], release_assignee_id: 6 });
-    assert.strictEqual(chg.status, 200, `换上线开发 200（实际 ${chg.status}：${JSON.stringify(chg.body)}）`);
-    r = await get(`SELECT release_assignee_notify_status s, release_assignee_notify_sent_by b FROM sys_issues WHERE id=?`, [x.body.id]);
-    assert.strictEqual(r.s, 'not_sent', '换人后通知态归零');
-    assert.strictEqual(r.b, null, '⭐ sent_by 一并清空 —— 否则会留下「没发过、却记着是谁发的」违约行');
-
-    // ② 回受理门（resubmit-intake）→ relay 组归零。先人为造一条 relay 已发态（该通道写路径随 C0 关闭 path B 退场）
+    // ① 回受理门（resubmit-intake）→ relay 组归零。先人为造一条 relay 已发态（该通道写路径随 C0 关闭 path B 退场）
     const y = await createBug({ title: 'R-回受理门' });
     const yid = y.body.id;
     await run(`UPDATE sys_issues SET status='待修改', relay_notified_user_id=5, relay_notified_user_name='开发王',
@@ -293,7 +271,7 @@ async function main() {
     assert.strictEqual(yr.u, null, 'relay 收件人归零');
     assert.strictEqual(yr.b, null,
       '⭐ relay_notify_sent_by 一并清 —— 该列是加在 intake-gate-sql.js 的**单一真相源**清单里的，不是在调用方手写');
-    // ③ ⭐ 换代表（electRepresentative）→ 主表 dev 通道归零（codex C2b 复审 MED 补）。
+    // ② ⭐ 换代表（electRepresentative）→ 主表 dev 通道归零（codex C2b 复审 MED 补）。
     //   为什么单独测：这是 MED-3 复查点名的 4 个重置点里**唯一只有 grep 结论、没有断言看着**的一个。
     //   而它的写法特殊 —— 重置片段是拼进选举 UPDATE 的 SQL 字符串（`notifyResetSql`），不是独立语句，
     //   最容易在后续重构里被整段替换掉。
@@ -320,7 +298,7 @@ async function main() {
       '⭐ notify_sent_by 一并清空 —— 新代表还没被通知过，却记着"上一任是谁通知的"就是违约行');
 
     await assertInvariant('[R] 后');
-    ok('[R] **三个**重置点均清 sent_by：换上线开发（release 组）+ 回受理门（relay 组·单一真相源清单）+ **换代表（dev 主表·拼进选举 UPDATE 的片段）**');
+    ok('[R] **两个**重置点均清 sent_by：回受理门（relay 组·单一真相源清单）+ **换代表（dev 主表·拼进选举 UPDATE 的片段）**（原"换上线开发→release 组"重置点随旧上线编排家族封禁退场，2026-07-30）');
   }
 
   // ═══ [H] ⭐ 投递历史与投递状态分离（对抗审 F8 收口）═══
@@ -329,27 +307,31 @@ async function main() {
   //   C2b 的审计承诺只在当前轮次内有效。修法=状态列照旧重置，另补一条只增的 timeline。
   //   本组要证明的正是：**重置之后，历史投递的操作者仍然查得到**。
   {
+    // [2026-07-30 家族封禁改造] 原场景经 notify-release-executor + reassign-release-dev（均已封 409）验证
+    //   "重置后历史留痕仍在"——但该机制（recordSysNotifyTimeline）是跨通道通用的，主张不该随封禁丢覆盖，
+    //   改用 dev 通道等价重写：通知开发（受理人触发）→ 换代表重置轮次状态（[R]② 已证真重置）→ 留痕仍可查。
     const h = await createBug({ title: 'H-历史留痕' });
     const hid = h.body.id;
-    await run(`UPDATE sys_issues SET status='待上线', release_assignee_id=5, release_assignee_name='开发王' WHERE id=?`, [hid]);
-    const rn = await call('POST', `/api/sys-issues/${hid}/notify-release-executor`, admin2Tok);
-    assert.strictEqual(rn.status, 200, `通知上线开发 200（实际 ${rn.status}：${JSON.stringify(rn.body)}）`);
-    let st = await get(`SELECT release_assignee_notify_sent_by b FROM sys_issues WHERE id=?`, [hid]);
-    assert.strictEqual(st.b, 2, '前置：状态列记着 sent_by=2');
+    await call('POST', `/api/sys-issues/${hid}/intake-accept`, liaisonTok, {});
+    await call('POST', `/api/sys-issues/${hid}/assign`, liaisonTok, { assigned_to: 5 });
+    const rn = await call('POST', `/api/sys-issues/${hid}/notify-developer`, liaisonTok, { dev_user_id: 5 });
+    assert.strictEqual(rn.status, 200, `通知开发 200（实际 ${rn.status}：${JSON.stringify(rn.body)}）`);
+    let sub5 = await get(`SELECT notify_sent_by b FROM sys_issue_dev_assignees WHERE issue_id=? AND user_id=5 AND removed_at IS NULL`, [hid]);
+    assert.strictEqual(sub5.b, 13, '前置：子表状态列记着 sent_by=13');
 
-    // 触发重置：换执行人 → 状态列被清（这是**正确行为**，不变量要求如此）
-    const chg = await call('POST', '/api/sys-issues/reassign-release-dev', adminTok, { issue_ids: [hid], release_assignee_id: 6 });
-    assert.strictEqual(chg.status, 200, `换执行人 200（实际 ${chg.status}：${JSON.stringify(chg.body)}）`);
-    st = await get(`SELECT release_assignee_notify_sent_by b FROM sys_issues WHERE id=?`, [hid]);
-    assert.strictEqual(st.b, null, '状态列 sent_by 已按不变量清空（这一步是对的，不是缺陷）');
+    // 触发重置：换代表 → dev5 活动行退场（这是**正确行为**，轮次状态就该被抹掉）
+    const chg = await call('POST', `/api/sys-issues/${hid}/reassign`, liaisonTok, { member_ids: [6], reason: 'H-换代表触发重置' });
+    assert.strictEqual(chg.status, 200, `换代表 200（实际 ${chg.status}：${JSON.stringify(chg.body)}）`);
+    sub5 = await get(`SELECT notify_sent_by b FROM sys_issue_dev_assignees WHERE issue_id=? AND user_id=5 AND removed_at IS NULL`, [hid]);
+    assert.strictEqual(sub5, undefined, 'dev5 活动行已随换代表退场（轮次状态确实被抹掉，不是在测空气）');
 
     // ⭐ 关键断言：历史投递记录仍在 timeline 里，且能查出「是谁发的」
     const logs = await all(
       `SELECT * FROM sys_issue_timeline WHERE issue_id=? AND action_code='notify_sent' ORDER BY id`, [hid]);
     assert.strictEqual(logs.length, 1, `应有 1 条通知留痕（实际 ${logs.length}）`);
-    assert.strictEqual(logs[0].operator_id, 2,
-      '⭐⭐ **重置之后仍查得到「上一轮是 admin2 发的」** —— 状态列可以被轮次抹掉，历史不行');
-    assert.ok(/上线开发/.test(logs[0].summary), '留痕含通道');
+    assert.strictEqual(logs[0].operator_id, 13,
+      '⭐⭐ **重置之后仍查得到「上一轮是受理人发的」** —— 状态列可以被轮次抹掉，历史不行');
+    assert.ok(/开发/.test(logs[0].summary), '留痕含通道');
     assert.ok(/id5/.test(logs[0].summary), '留痕含**当时的**收件人（换人后仍能还原发给过谁）');
     assert.ok(/成功/.test(logs[0].summary), '留痕含投递结果');
 
@@ -363,33 +345,21 @@ async function main() {
     assert.strictEqual(logs2[0].operator_id, 13, '失败留痕记的是尝试者(13)');
     assert.ok(/失败/.test(logs2[0].summary), '留痕标明失败');
     assert.ok(!/13900000001/.test(logs2[0].summary), '⭐ 业务方手机号在留痕里**已脱敏**（maskPhone），审计不等于裸存个人信息');
-    ok('[H] ⭐ 投递历史独立于状态列：换人重置后仍可查「上一轮谁发给谁、成没成」· 失败同样留痕 · 手机号脱敏');
+    ok('[H] ⭐ 投递历史独立于状态列：换代表重置后仍可查「上一轮谁发给谁、成没成」· 失败同样留痕 · 手机号脱敏（原 release_executor 版场景随家族封禁改 dev 通道等价重写，2026-07-30）');
   }
 
-  // ═══ [F] ⭐ 两处回写围栏（对抗审 F3/F4 收口）═══
-  //   这两条是同一种缺陷的两处实例：**回写按"业务身份"定位而非"这一次投递的那一行/那个收件人"**。
-  //   relay 通道当初（C0 审 MED-1）修过一次，release_executor 与 dev 子表一直没修。
-  //   两者共同的危害面：不是"少记一条"，而是**把上一轮的结果记到下一轮头上** ——
-  //   审计里出现一个看起来可信的错误答案，比没有记录更糟。
+  // ═══ [F] ⭐ 回写围栏（对抗审 F3/F4 收口）═══
+  //   缺陷本质：回写按"业务身份"定位而非"这一次投递的那一行/那个收件人"，会把上一轮的结果记到
+  //   下一轮头上 —— 审计里出现一个看起来可信的错误答案，比没有记录更糟。relay 通道当初（C0 审
+  //   MED-1）修过一次；release_executor 与 dev 子表当时也各补了一个同款围栏用例。
+  //   ⚠️ 2026-07-30：用户裁定旧上线编排家族 4 端点（含 notify-release-executor 单条/批量）全部
+  //   封禁退场，其内部 helper recordSysReleaseExecutorNotify 已整体删除、export 已摘，原"①
+  //   release_executor CAS 围栏"用例（直调该 helper）随之退场，见下方 tombstone；本块现只剩
+  //   dev 子表一个用例。
   {
-    // ① release_executor：发送在途期间换执行人 → 回写必须零命中（不能把旧结果记成新执行人已通知）
-    const x = await createBug({ title: 'F-换执行人围栏' });
-    const xid = x.body.id;
-    await run(`UPDATE sys_issues SET status='待上线', release_assignee_id=5, release_assignee_name='开发王' WHERE id=?`, [xid]);
-    //   模拟"在途期间被改派"：直接改库把执行人换成 6，再让 record 拿着旧收件人(5)回写
-    await run(`UPDATE sys_issues SET release_assignee_id=6, release_assignee_name='开发李' WHERE id=?`, [xid]);
-    const staleRec = await I.recordSysReleaseExecutorNotify(xid, true, 'k-stale', null, 1, 5);
-    assert.strictEqual(staleRec.changes, 0,
-      '⭐ 旧收件人(5)的在途回写在执行人已换成 6 之后**零命中** —— CAS 围栏生效');
-    const xr = await get(`SELECT release_assignee_notify_status s, release_assignee_notify_sent_by b FROM sys_issues WHERE id=?`, [xid]);
-    assert.strictEqual(xr.s, 'not_sent', '新执行人的通知态未被旧结果污染（仍是 not_sent，批量②态闸不会跳过他）');
-    assert.strictEqual(xr.b, null, 'sent_by 未被错记');
-    //   正例反证围栏不是"永远零命中"：拿当前收件人(6)回写应命中
-    const freshRec = await I.recordSysReleaseExecutorNotify(xid, true, 'k-fresh', null, 2, 6);
-    assert.strictEqual(freshRec.changes, 1, '当前收件人(6)的回写正常命中（证明围栏不是把所有回写都挡掉）');
-    assert.strictEqual((await get(`SELECT release_assignee_notify_sent_by b FROM sys_issues WHERE id=?`, [xid])).b, 2, 'sent_by=2 正确落库');
+    // recordSysReleaseExecutorNotify 已随旧上线编排家族封禁（2026-07-30）整体删除，其 CAS 围栏用例一并退场
 
-    // ② dev 子表：软删后重加同一开发 → 旧轮回写不得落到新行上
+    // dev 子表：软删后重加同一开发 → 旧轮回写不得落到新行上
     const d = await createBug({ title: 'F-dev重加围栏' });
     const did = d.body.id;
     await call('POST', `/api/sys-issues/${did}/intake-accept`, liaisonTok, {});
@@ -410,7 +380,7 @@ async function main() {
     assert.strictEqual(nr2.s, 'sent', '新行 id 回写正常命中');
     assert.strictEqual(nr2.b, 2, '新行 sent_by=2 正确');
     await assertInvariant('[F] 后');
-    ok('[F] ⭐ 两处回写围栏：release_executor 换人后旧回写零命中（+当前收件人正常命中反证）· dev 子表"移除→重加"旧轮不污染新行');
+    ok('[F] ⭐ 回写围栏（dev 子表）："移除→重加"旧轮不污染新行（+当前行正常命中反证）；release_executor 半的 CAS 围栏用例已随旧上线编排家族封禁退场（2026-07-30）');
   }
 
   // ═══ [I] 全表不变量总扫 ═══

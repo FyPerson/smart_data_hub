@@ -14,6 +14,13 @@
 //   [T] type 精判：notify-developer/relay/creator/requester 对 feature → 400 MANUAL_NOTIFY_BUG_ONLY（变更流无手动端点）
 //   [P] 权限：dev 非白名单非 admin → 403 / relay 白名单成员不可发（仅 admin）/ creator 宽松矩阵
 //   [C] ⭐变更流零回归 canary：feature assign 仍自动发开发(notify_status='sent') + feature estimate 仍自动发需求方
+//   [RelExec] 通知上线开发（release_assignee 侧）：⚠️ 2026-07-30 用户裁定，随旧上线编排家族 4 端点
+//        （assign-release-dev/reassign-release-dev/notify-release-executor/notify-release-executor-batch）
+//        全部封禁退场——原五类业务分支（admin 发送成功 sent / 未指定 409 / 非 admin 403 / 非待上线 409 /
+//        feature 400）全部作废，改测封禁契约本身：任意角色 + 任意场景一律 409 LEGACY_RELEASE_FLOW_DISABLED，
+//        零落库副作用（本文件不含批量端点 notify-release-executor-batch 的测试，批量端点的封禁契约
+//        并入 verify-sys-release-orchestration.js——原专属套件 verify-sys-notify-release-batch.js
+//        已随功能删除，其行为测试同随之作废）
 'use strict';
 const assert = require('assert');
 const http = require('http');
@@ -414,42 +421,39 @@ async function main() {
     ok('[Creator] 通知建单人：admin(=created_by) self-guard skipped + 受理人实发 sent + 主开发本人 403(H3删·中间件层) + 未授权 403 + 状态门 409');
   }
 
-  // ═══ [RelExec] 通知上线开发（release_assignee 侧，follow-up 2026-07-07，仅 admin）═══
+  // ═══ [RelExec·封禁契约] 通知上线开发（release_assignee 侧）═══
+  //   ⚠️ 2026-07-30 用户裁定：旧上线编排家族 4 端点全封退场，notify-release-executor 单条端点在此列。
+  //   原"admin 发送成功 sent / 未指定 409 NO_RELEASE_ASSIGNEE_TO_NOTIFY / 非 admin 403 / 非待上线 409
+  //   STATUS_NOT_NOTIFIABLE / feature 400 MANUAL_NOTIFY_BUG_ONLY"五类业务分支全部随端点封禁作废——
+  //   封禁闸门置于一切业务判定之前，不再有分支，只剩一种行为：任意已登录角色 + 任意场景一律 409
+  //   LEGACY_RELEASE_FLOW_DISABLED，零落库副作用。改测封禁契约本身。
   {
-    // 未指定上线开发（release_assignee_id 空）+ 待上线 → 409 NO_RELEASE_ASSIGNEE_TO_NOTIFY
-    const idNo = await bugToVerifying(5);
-    await call('POST', `/api/sys-issues/${idNo}/accept`, adminTok, {});   // 待上线，未指定 release_assignee
-    let r = await call('POST', `/api/sys-issues/${idNo}/notify-release-executor`, adminTok);
-    assert.strictEqual(r.status, 409, '[RelExec] 未指定上线开发 409 ' + JSON.stringify(r.body));
-    assert.strictEqual(r.body.code, 'NO_RELEASE_ASSIGNEE_TO_NOTIFY', '[RelExec] code=NO_RELEASE_ASSIGNEE_TO_NOTIFY');
-
-    // 指定 release_assignee(6) + 待上线 → admin 发送成功 sent
+    // 造一条「待上线」+ 已指定 release_assignee(6) 的单——即便 body/状态本该走通旧业务逻辑（这条单
+    // 若在封禁前调用会 200 sent），封禁闸门也须在一切判定之前先拦下。
     const id = await bugToPrereleaseWithExecutor(5, 6);
-    r = await call('POST', `/api/sys-issues/${id}/notify-release-executor`, adminTok);
-    assert.strictEqual(r.status, 200, '[RelExec] admin 发送 200 ' + JSON.stringify(r.body));
-    assert.strictEqual(r.body.release_assignee_notify_status, 'sent', '[RelExec] admin 发送 → sent');
-    assert.strictEqual((await get('SELECT release_assignee_notify_status FROM sys_issues WHERE id=?', [id])).release_assignee_notify_status, 'sent', '[RelExec] 落库 sent');
+    const before = await get('SELECT release_assignee_id, release_assignee_name, release_assignee_notify_status FROM sys_issues WHERE id=?', [id]);
 
-    // 非 admin（主开发 / 白名单对接人）→ 403（requireAdmin，仅 admin 可发，区别于 dev/requester 的 admin_or_bug_liaison）
+    // admin 合法调用（封禁前本该 200 sent 的场景）→ 409
+    let r = await call('POST', `/api/sys-issues/${id}/notify-release-executor`, adminTok);
+    assert.strictEqual(r.status, 409, `[RelExec·封禁契约] admin 合法调用应 409（旧上线编排家族全封）, got ${r.status} ${JSON.stringify(r.body)}`);
+    assert.strictEqual(r.body.code, 'LEGACY_RELEASE_FLOW_DISABLED', '[RelExec·封禁契约] admin code=LEGACY_RELEASE_FLOW_DISABLED');
+
+    // 非 admin（主开发）→ 同样 409 同 code（证明不是走到旧的"仅 admin"403，而是端点级封禁，requireAdmin 已摘）
     r = await call('POST', `/api/sys-issues/${id}/notify-release-executor`, devTok);
-    assert.strictEqual(r.status, 403, '[RelExec] 主开发 403（仅 admin）');
-    r = await call('POST', `/api/sys-issues/${id}/notify-release-executor`, liaisonTok);
-    assert.strictEqual(r.status, 403, '[RelExec] 白名单对接人 403（仅 admin）');
+    assert.strictEqual(r.status, 409, `[RelExec·封禁契约] 主开发调用应 409（非 403）, got ${r.status} ${JSON.stringify(r.body)}`);
+    assert.strictEqual(r.body.code, 'LEGACY_RELEASE_FLOW_DISABLED', '[RelExec·封禁契约] 主开发 code=LEGACY_RELEASE_FLOW_DISABLED');
 
-    // 非待上线态（处理中，即便已指定 release_assignee）→ 409 STATUS_NOT_NOTIFIABLE
-    const idMid = await bugAssigned(5);
-    await run('UPDATE sys_issues SET release_assignee_id=6, release_assignee_name=? WHERE id=?', ['开发李', idMid]);
-    r = await call('POST', `/api/sys-issues/${idMid}/notify-release-executor`, adminTok);
-    assert.strictEqual(r.status, 409, '[RelExec] 处理中态 409');
-    assert.strictEqual(r.body.code, 'STATUS_NOT_NOTIFIABLE', '[RelExec] 非待上线 code=STATUS_NOT_NOTIFIABLE');
-
-    // feature 单（变更流）→ 400 MANUAL_NOTIFY_BUG_ONLY（第 5 类同其余 4 类，仅 bug）
-    const rf = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 'feat', system_name: 'BMS', source: '内部' });
+    // feature 单（封禁前本该 400 MANUAL_NOTIFY_BUG_ONLY 的场景）→ 同样 409（封禁在类型校验之前）
+    const rf = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 'feat-relexec', system_name: 'BMS', source: '内部' });
     r = await call('POST', `/api/sys-issues/${rf.body.id}/notify-release-executor`, adminTok);
-    assert.strictEqual(r.status, 400, '[RelExec] feature 单 400');
-    assert.strictEqual(r.body.code, 'MANUAL_NOTIFY_BUG_ONLY', '[RelExec] feature code=MANUAL_NOTIFY_BUG_ONLY');
+    assert.strictEqual(r.status, 409, `[RelExec·封禁契约] feature 单也应 409（封禁在类型校验之前）, got ${r.status} ${JSON.stringify(r.body)}`);
+    assert.strictEqual(r.body.code, 'LEGACY_RELEASE_FLOW_DISABLED', '[RelExec·封禁契约] feature code=LEGACY_RELEASE_FLOW_DISABLED');
 
-    ok('[RelExec] 通知上线开发（仅 admin）：admin 发 sent + 未指定 409 + 主开发/白名单 403 + 非待上线 409 + feature 400');
+    // 零落库副作用：反复调用后 release_assignee 三列纹丝不动
+    const after = await get('SELECT release_assignee_id, release_assignee_name, release_assignee_notify_status FROM sys_issues WHERE id=?', [id]);
+    assert.deepStrictEqual(after, before, '[RelExec·封禁契约] 反复调用后 release_assignee_id/_name/notify_status 一列未动（零副作用）');
+
+    ok('[RelExec·封禁契约] notify-release-executor 全封：admin/主开发一律 409 LEGACY_RELEASE_FLOW_DISABLED + feature 单同样 409（封禁在类型校验前）+ 零落库副作用');
   }
 
   // ═══ [RS] 查已读状态（新，G11）═══

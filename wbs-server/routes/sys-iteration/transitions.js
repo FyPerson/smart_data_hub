@@ -88,10 +88,13 @@ const CHANGE_FLOW_STATUSES = [
   '待受理', '待修改', '待指派', '开发中', '待验证', '待上线', '已上线', '已关闭',  // 主流程
   '已暂缓', '已拒绝', '已作废',                                                    // 旁路态（§3.4）
 ];
-// bug 流状态集（bug 方案 §2.2 + 受理排期改造 §4.1）：加「待受理/待修改」(受理门·用户拍板 bug 也走)、
-//   无 已暂缓（暂缓有意省略）、无 已关闭（已上线即终态，上线后再出问题一律派生新单）。
+// bug 流状态集（bug 方案 §2.2 + 受理排期改造 §4.1 + 上线体统一重构 §6.5）：加「待受理/待修改」(受理门·
+//   用户拍板 bug 也走)、无 已暂缓（暂缓有意省略）。
+//   ⭐ [C6·方案 v3.4 §6.5] 补「已关闭」终态——原"bug 已上线即终态、上线后再出问题一律派生新单"的设计
+//   作废：归档改为全类型统一复用 close（已上线→已关闭），BUG_FLOW_TRANSITIONS 新增 close/reopen 两条目
+//   （见下方，reopen 目标态回「处理中」，与 change 流回「开发中」对称）。
 const BUG_FLOW_STATUSES = [
-  '待受理', '待修改', '待处理', '处理中', '待验证', '待上线', '已上线',   // 主流程（已上线=终态）
+  '待受理', '待修改', '待处理', '处理中', '待验证', '待上线', '已上线', '已关闭',   // 主流程（已关闭=归档终态，§6.5）
   '已拒绝', '已作废',                                                     // 旁路态
 ];
 const ALLOWED_STATUSES = {
@@ -271,15 +274,16 @@ const CHANGE_FLOW_TRANSITIONS = [
     timelineEvent: 'return', actionCode: null,
     notifyAfterCommit: 'notifyReturnedToDeveloper',  // C5
   },
-  {
-    action: 'publish',                      // 批次发布：待上线 → 已上线（走 publishReleaseTransition，批次级）—— 端点 C4
-    from: ['待上线'], to: '已上线',
-    roleGuard: 'admin', ownerGuard: null,
-    requiredPayload: [],                    // 批次级闸门（release_note/version_tag）在 publishReleaseTransition 校
-    sideEffects: ['released_at=now', 'release_id 绑批次', 'release timeline（ref_id=批次 id）'],
-    timelineEvent: 'release', actionCode: null,
-    notifyAfterCommit: 'notifyReleasedToRequester',  // C5
-  },
+  // [C3 退场，方案 v3.4 §6.7/§6.14] 原 'publish' 条目（待上线→已上线，走 publishReleaseTransition/legacy
+  //   /sys-releases/:id/publish）已删除——该端点本身现全类型 409（LEGACY_RELEASE_FLOW_DISABLED，见
+  //   index.js 路由），发布唯一合法入口收窄为 /sys-releases/:id/execute（中心守卫自读自判）。本条目
+  //   "无路由通过 sysIssueTransition 引擎实际触发"（HTTP 层从未注册 POST /sys-issues/:id/publish），
+  //   数据库实测 sys_issue_timeline 里 action_code='publish' 历史行数=0（2026-07-29 主会话核实），
+  //   故直接删除条目本体，不留"退役但保标签"式兼容（那是给*真有历史行*的旧动作用的，如 schedule/
+  //   pre_discuss_pass；本条目没有这个负担）。ACTION_LABELS 里的 publish 标签同步删除（见下方 `label`
+  //   常量块）。⚠️ 副作用：feature/improvement 的 typeFlows 不再含 publish 动作，前端「单条上线」按钮
+  //   （现接 hotfix-publish，Sys_Iteration.html action==='publish' 分支）会随之消失，需第2批前端一并
+  //   重接新版「安排上线」入口——本批只做后端，交付报告已记录此依赖。
   {
     action: 'close',                        // 关闭：已上线 → 已关闭（admin）—— 端点 C4
     from: ['已上线'], to: '已关闭',
@@ -347,8 +351,13 @@ const CHANGE_FLOW_TRANSITIONS = [
     notifyAfterCommit: null,
   },
   {
-    action: 'reopen',                       // 重开：已上线/已关闭 → 开发中（admin，计返工，§3.5）
-    from: ['已上线', '已关闭'], to: '开发中',
+    // ⭐ [C6·方案 v3.4 §6.5] from 收窄为**仅** `['已关闭']`（原 `['已上线', '已关闭']`）——重开前必须先
+    //   「归档」（close），不再允许从「已上线」直接重开。附录 A 明列「reopen｜admin·已上线（未归档）｜
+    //   ❌ 409（须先归档）」：findTransition 对 from=已上线 现查无此边（返 null），index.js
+    //   sysIssueTransition [1] 对这一具体组合（action='reopen' && fromStatus='已上线'）额外精判返
+    //   409 ISSUE_NOT_ARCHIVED（而非泛化的 400 INVALID_TRANSITION），语义更贴近"动作合法但业务前置未满足"。
+    action: 'reopen',                       // 重开：已关闭 → 开发中（admin，计返工，§3.5，§6.5 收窄）
+    from: ['已关闭'], to: '开发中',
     roleGuard: 'admin', ownerGuard: null,
     requiredPayload: ['reason'],
     sideEffects: ['reopen_count++', 'reopened_at=now', '清 accepted_at/released_at/closed_at/release_id/dev_estimated_at/scheduled_start（first_submitted_at 永不变·受理排期改造 §7.2）'],
@@ -408,8 +417,11 @@ const CHANGE_FLOW_TRANSITIONS = [
 //   与变更流的刻意差异（不是漏配）：
 //   · 前段最短：无 schedule（建单直落 待处理，指派直达 处理中）。
 //   · 无 hold/resume：暂缓有意省略（§2.2）。
-//   · 无 close：已上线=终态。
-//   · 无 reopen：上线后再出问题一律派生新单（§4；[覆盖]主方案 reopen）。
+//   · ⭐⭐ [C6·方案 v3.4 §6.5·2026-07-29] 原"无 close：已上线=终态"+"无 reopen：上线后再出问题一律
+//     派生新单（§4；[覆盖]主方案 reopen）"两条**均作废**——归档/重开改为全类型统一复用 close/reopen
+//     （见下方新增两条目）：已上线→已关闭（close，与变更流同条目逐字复用）；已关闭→处理中（reopen，
+//     from 收窄为仅「已关闭」，目标态='处理中' 与变更流的'开发中'对称，两流各自独立条目、非共用引用）。
+//     derive_reason/fix_gap_note 双描述机制（⑤）与本次归档/重开改动正交，不受影响。
 //   · 无 derive 条目（Commit ⑤ 随双描述 derive_reason/fix_gap_note + 反向约束一并放开——
 //     ① 先不进 meta/typeFlows，端点层另有 SYS_BUG_DERIVE_PENDING 临时闸，fail-closed）。
 //   · confirm-online-norelease 与变更流的 'accept'/'return' 一样走 sysIssueTransition 通用引擎，但需要
@@ -625,6 +637,35 @@ const BUG_FLOW_TRANSITIONS = [
     timelineEvent: 'release', actionCode: null,
     notifyAfterCommit: null,
   },
+  // ── [C6·方案 v3.4 §6.5·2026-07-29] 归档 + 重开——bug 补「已关闭」终态 ──────────
+  //   原设计"bug 已上线即终态，上线后再出问题一律派生新单"作废（见文件头差异说明）。归档改为全类型
+  //   统一复用 close：字段/动作码/闸门与 CHANGE_FLOW_TRANSITIONS 的 close 条目逐字同构（同一份 index.js
+  //   switch case 'close' 通用实现消费，见该处注释——两个条目共享同一套 sideEffects 落地代码，非各自
+  //   实现一遍）。
+  {
+    action: 'close',                        // 关闭（归档）：已上线 → 已关闭（admin）—— §6.5
+    from: ['已上线'], to: '已关闭',
+    roleGuard: 'admin', ownerGuard: null,
+    requiredPayload: [],
+    sideEffects: ['closed_at=now'],
+    timelineEvent: 'status_change', actionCode: 'close',
+    notifyAfterCommit: null,
+  },
+  {
+    // 重开目标态='处理中'（bug 的 DEV 族），与变更流 reopen 的目标态='开发中' 对称——两流各自独立条目
+    // （非共用同一数组引用，同 bug 流其余具名边的既有写法），from 同收窄为仅 ['已关闭']（附录 A：从「已
+    // 上线」直接 reopen → 409 须先归档，判定逻辑在 index.js sysIssueTransition [1] 内、两流共用同一段
+    // 精判代码，非各自实现）。sideEffects 逐字复用变更流 reopen 同款清列语义（字段名跨类型通用，同一张
+    // sys_issues 表），红线核对：清 release_id 后旧 release 本身不被触碰（不回「计划中」），见 index.js
+    // switch case 'reopen' 通用实现。
+    action: 'reopen',                       // 重开：已关闭 → 处理中（admin，计返工，§6.5）
+    from: ['已关闭'], to: '处理中',
+    roleGuard: 'admin', ownerGuard: null,
+    requiredPayload: ['reason'],
+    sideEffects: ['reopen_count++', 'reopened_at=now', '清 accepted_at/released_at/closed_at/release_id/dev_estimated_at/scheduled_start（first_submitted_at 永不变）'],
+    timelineEvent: 'reopen', actionCode: null,
+    notifyAfterCommit: 'notifyAssignedDeveloper',
+  },
   // ── Commit ⑤ 追加：派生（bug流_方案_20260702_v1.2 §4）──────────
   //   ① 起端点层 SYS_BUG_DERIVE_PENDING 临时闸 + 本 meta 无 derive 条目双重 fail-closed；⑤ 一并放开。
   //   与变更流 derive 的差异：from=['已上线']（§4「仅从已上线单发起」，非 '*'）——bug 上线后再出问题才派生新单。
@@ -725,7 +766,8 @@ function buildMeta() {
     // ⚠️ schedule '排期' 标签保留（受理排期改造：schedule 动作退场·TRANSITIONS 已删条目·但历史 timeline 行 action_code='schedule' 仍需渲染）。
     create: '建单', schedule: '排期', assign: '指派', reassign: '改派',
     estimate: '回填预计完成', submit: '标记我的开发完成', accept: '验收通过', return: '验收打回',   // P4：submit 改名（去主次多开发·仅标记本人开发项完成·H7）
-    publish: '批次发布', close: '关闭', hold: '暂缓', resume: '恢复',
+    // [C3 退场] publish 标签随 TRANSITIONS 条目一并删除（见上方该条目处注释：0 历史行，无兼容负担）。
+    close: '关闭', hold: '暂缓', resume: '恢复',
     reactivate: '重新激活', issue_reject: '拒绝', void: '作废', reopen: '重开',
     feasibility: '可行性评估', blocked: '标记受阻', unblock: '解除受阻',
     // 受理排期改造 §5/§6/§7：受理门 + 技术负责人 + 计划开工日新动作
