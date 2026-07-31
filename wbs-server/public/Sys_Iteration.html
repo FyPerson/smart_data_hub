@@ -800,6 +800,9 @@
             // ⭐ 角色权限重构 C4·F9（172 号对抗审）：物删审计查询入口——仅 admin 可见（前端镜像，真闸在后端
             //   requireAdmin）。C2a 建了审计表但零查询面，本入口补上"看得到"这一步。
             html += `<button class="u-btn-secondary" onclick="siOpenDeleteAudit()">🗑️ 删除审计</button>`;
+            // 上线日志（2026-07-31 用户拍板）：已发布批次 + 成员清单只读浏览——门槛与显隐条件与「删除审计」
+            //   完全同款（同一 META_OK 降级条件、同一 admin-only），非应急路径，容忍随 meta 一起降级。
+            html += `<button class="u-btn-secondary" onclick="siOpenReleaseLog()">📜 上线日志</button>`;
         }
         // [已退场 2026-07-30·用户裁定] 「🚀 上线编排」入口——C7 先隐藏（保留代码过渡），本批随旧家族
         //   4 端点封禁把面板代码整体删除（见文件下方 C-orch 面板 tombstone）；恢复 = git revert 对应 commit。
@@ -3250,9 +3253,10 @@
         document.getElementById('siBatchOverlay').classList.add('open');
         siRenderBatchList();
     }
-    // ⚠️ siBatchOverlay 是批次管理/上线编排/删除审计三者共享的面板 DOM——关闭时把 siAuditGen 也一并
-    //   作废（+1），防止"关闭删除审计面板后紧接着打开另一个共享面板（批次管理/上线编排）"这个窗口期内，
-    //   删除审计一条还在飞的旧请求晚到，凭旧令牌值巧合仍等于当前值而误写进已经被其他面板占用的 DOM。
+    // ⚠️ siBatchOverlay 是批次管理/删除审计/上线日志（2026-07-31 新增，「上线编排」legacy 面板已于
+    //   2026-07-30 随旧家族封禁整体删除）三者共享的面板 DOM——关闭时把 siAuditGen 也一并作废（+1），
+    //   防止"关闭其中一个面板后紧接着打开另一个共享面板"这个窗口期内，上一个面板一条还在飞的旧请求
+    //   晚到，凭旧令牌值巧合仍等于当前值而误写进已经被其他面板占用的 DOM。
     function siCloseBatch() { document.getElementById('siBatchOverlay').classList.remove('open'); siAuditGen++; siBatchDetailRel = null; }
     // 上线体统一重构 C3 第2批：从单据详情（drawer）深链直达某上线单详情——镜像既有反向跳转
     // `siCloseBatch();siOpenDrawer(id)`（批次→单据）先例，本函数是它的逆（单据→批次），供「已建上线单 #X」
@@ -3698,6 +3702,57 @@
         }
     }
 
+    // ============================================================
+    // 上线日志（admin 专属，2026-07-31 用户拍板）：已发布批次 + 成员清单只读浏览。
+    //   复用 siBatchOverlay 同一套共享面板 DOM（第 4 个用途，与批次管理/删除审计同一门槛）——完全照抄
+    //   删除审计的会话令牌范式：打开时同步重置标题/正文/页脚（不等异步 fetch 回来才清）+ 令牌 siAuditGen
+    //   +1，响应回来先比对令牌不匹配则静默丢弃过期响应。siAuditGen 本就是整个 siBatchOverlay 复合体的
+    //   共享会话令牌（siOpenBatchDetail/siRenderBatchList/siOpenDeleteAudit(Detail) 均已接入，见各自
+    //   定义处注释），本面板是其第 4 个消费者，复用同一枚令牌而非另起一个——siCloseBatch 现有的
+    //   `siAuditGen++` 已同等保护本面板在飞的旧请求，不需要为本面板单独再维护一个令牌。
+    //   不做分页：批次量级小，GET /sys-releases?include_members=1 端点本就全量返回（同其既有假设，见
+    //   后端该端点注释），非漏做。
+    // ============================================================
+    async function siOpenReleaseLog() {
+        siAuditGen++;
+        const myGen = siAuditGen;
+        document.getElementById('siBatchHead').textContent = '上线日志';
+        document.getElementById('siBatchBody').innerHTML = '<div class="si-empty">加载中…</div>';
+        document.getElementById('siBatchFoot').innerHTML = `<button class="u-btn-secondary" onclick="siCloseBatch()">关闭</button>`;
+        document.getElementById('siBatchOverlay').classList.add('open');
+        let r;
+        try {
+            r = await siApi('/sys-releases?' + new URLSearchParams({ status: '已发布', include_members: '1' }).toString());
+        } catch (netErr) {
+            if (myGen !== siAuditGen || !document.getElementById('siBatchOverlay').classList.contains('open')) return;
+            document.getElementById('siBatchBody').innerHTML = '<div class="si-empty">网络异常，请重试</div>';
+            return;
+        }
+        if (myGen !== siAuditGen || !document.getElementById('siBatchOverlay').classList.contains('open')) return;
+        if (!r.ok) { document.getElementById('siBatchBody').innerHTML = '<div class="si-empty">加载失败</div>'; siApiErr(r); return; }
+        const items = (r.data && r.data.items) || [];
+        if (!items.length) { document.getElementById('siBatchBody').innerHTML = '<div class="si-empty">暂无已发布批次</div>'; return; }
+        document.getElementById('siBatchBody').innerHTML = items.map(b => {
+            const hot = b.is_hotfix ? ' · <span style="color:#b45309">应急</span>' : '';
+            const assigneeMeta = '执行人：' + (b.release_assignee_name ? esc(b.release_assignee_name) : '（未记录）');
+            const versionMeta = b.version_tag ? ' · ' + esc(b.version_tag) : '';
+            const degradedNote = b.degraded ? ' <span style="color:#b91c1c">（成员清单为降级重建，可能不准）</span>' : '';
+            const members = (b.members || []).map(m => {
+                const typeHtml = m.type ? `<span class="u-type-tag ${esc(m.type)}">${esc(siTypeLabel(m.type))}</span>` : '<span class="si-muted">类型不可用</span>';
+                const titleHtml = m.title != null ? esc(m.title) : '<span class="si-muted">（标题不可用）</span>';
+                return `<div style="font-size:12px;padding:2px 0">${typeHtml} #${esc(m.id)} ${titleHtml}</div>`;
+            }).join('') || '<div class="si-muted" style="font-size:12px">（无成员）</div>';
+            const noteRaw = b.release_note || '';
+            const noteHtml = noteRaw ? `<div class="si-muted" style="margin-top:4px">${esc(noteRaw.length > 80 ? noteRaw.slice(0, 80) + '…' : noteRaw)}</div>` : '';
+            return `<div class="si-batch-item">
+                <div><span class="si-batch-no">${esc(b.release_no)}</span>${b.title ? ' ' + esc(b.title) : ''}${hot}</div>
+                <div class="si-batch-meta">发布于 ${b.released_at ? esc(siFmtDT(b.released_at)) : '—'} · ${assigneeMeta}${versionMeta}${degradedNote}</div>
+                ${members}
+                ${noteHtml}
+            </div>`;
+        }).join('');
+    }
+
     function siModalCreateBatch() {
         siModal('新建上线单', [
             fText('title', '上线单标题（选填）', ''),
@@ -3759,6 +3814,10 @@
         siBatchDetailRel = rel;
         document.getElementById('siBatchHead').textContent = '上线单 ' + rel.release_no;
         const planning = rel.status === '计划中';
+        // 提前到成员行渲染之前（原先声明在下方 footer 区块，成员行「移出」按钮的可见条件同样需要）：
+        // ns=通知状态；uid=当前登录用户 id（未登录为 null）。
+        const ns = rel.release_assignee_notify_status || 'not_sent';
+        const uid = currentUser ? Number(currentUser.id) : null;
         // 值班预览（2026-07-30 用户提出）：not_sent 态此前「上线执行人」恒显示「—」，admin 点「安排上线」前看不到
         //   会通知谁。这里按 planned_date 只读预取当天排班做**展示性预览**（执行人格 + 确认弹窗带名）——真定人仍在
         //   后端 notify-executor 事务内查排班 CAS 写入（§6.4a），预览不参与任何门限判断；点击前排班变更以发送时为准
@@ -3801,11 +3860,17 @@
             const idLinkHtml = idOk
                 ? `<a class="si-att-name" onclick="siCloseBatch();siOpenDrawer(${issueId})">#${issueId} ${titleHtml}</a>`
                 : `<span class="si-att-name si-muted" title="单据编号异常，无法定位">单据编号不可用 ${titleHtml}</span>`;
+            // 执行人移单（2026-07-31 用户拍板）：可见条件镜像下方「执行上线」按钮同款（本人+已通知+计划中），
+            //   独立于 admin 既有「移除」（siRemoveFromBatch，无需原因，条件见下方 isAdmin() 门）——两者互不
+            //   替代：admin 分支 reason 可选，执行人分支 reason 必填，故走各自的入口/弹窗，不复用同一个 onclick。
+            const executorRemoveBtn = (planning && idOk && uid && Number(rel.release_assignee_id) === uid && ns === 'sent')
+                ? `<button class="u-btn-secondary u-btn-sm" onclick="siRemoveFromBatchExecutorModal(${id},${issueId},${siJsStringAttr(i.title || '')})">移出</button>` : '';
             return `<div class="si-att-item">
             ${typeHtml}
             ${idLinkHtml}
             ${statusHtml}
-            ${planning && idOk ? `<span class="si-att-del" onclick="siRemoveFromBatch(${id},${issueId})">移除</span>` : ''}
+            ${planning && idOk && isAdmin() ? `<span class="si-att-del" onclick="siRemoveFromBatch(${id},${issueId})">移除</span>` : ''}
+            ${executorRemoveBtn}
         </div>`;
         }).join('') : '<div class="si-muted" style="font-size:12px">上线单内暂无单据</div>';
 
@@ -3824,7 +3889,6 @@
         //   C2a 已在 sys_releases 落了这些列（10 列 ALTER，C0），此前详情页零展示。本区块**不挂 META_OK 门**
         //   （§6.7 断言：安排上线通道须始终可达，不受 /sys-issues/meta 加载成败影响，见页头按钮同款处理）。
         //   「改期」按钮（第2批新增）接已有 update-planned-date 端点——admin·仅 planning 可见，权限门镜像后端 requireAdmin。
-        const ns = rel.release_assignee_notify_status || 'not_sent';
         const plannedDateEditBtn = (planning && isAdmin())
             ? `<button class="u-btn-secondary u-btn-sm" style="margin-left:8px" onclick="siReleaseUpdatePlannedDateModal(${id})">改期</button>` : '';
         document.getElementById('siBatchBody').innerHTML =
@@ -3854,7 +3918,6 @@
             //   整体 409 退场，见 index.js 该路由处注释）+ 其唯一调用方 siModalPublishBatch 一并删除——
             //   §6.15「C3 同提交隐藏旧执行按钮」在本批（前端）落地。「安排上线」+「执行上线」是现在唯一的
             //   发布路径（两阶段，§6.7/§6.14），各自独立权限门，均**不挂 META_OK**（与本面板整体一致）。
-            const uid = currentUser ? Number(currentUser.id) : null;
             // 安排上线：admin·通知态 ∈ (not_sent/failed/stale)。成员非空的门槛后端 notify-executor 暂未强制
             //   （只有 _publishReleaseCoreInTxn/execute 强制 RELEASE_EMPTY），前端仍防呆收窄——对空批次发起
             //   通知没有实际意义，属于纯 UX 加固，见完成报告「遗留问题」。
@@ -4064,6 +4127,27 @@
         if (!r.ok) { siApiErr(r); return; }
         showToast('已移除', 'success');
         siOpenBatchDetail(releaseId);
+    }
+
+    // 执行人移单（2026-07-31 用户拍板·执行人移单四口径）：仅被通知的值班执行人本人可用，原因必填——
+    //   与 admin 的 siRemoveFromBatch（无需原因）各自独立入口，可见条件见 siOpenBatchDetail 成员行注释。
+    //   剩余成员数=0（移空）时后端 executor_kept=false 并把通知/执行人一并重置，与「保留身份」态措辞不同，
+    //   前端按响应字段分别提示，不猜测。
+    function siRemoveFromBatchExecutorModal(releaseId, issueId, title) {
+        siModal('移出上线单（#' + issueId + (title ? ' ' + esc(title) : '') + '）', [
+            fTextarea('reason', '移出原因', '', true, '必填，trim 后 1-200 字'),
+            note('移出后该单回到「待上线」，可重新安排上线；若移出后本批次仍有其他成员，你的执行人身份与已通知状态将保留，无需重新通知。')
+        ], async v => {
+            const reason = v.reason.trim();
+            if (!reason) { showToast('移出原因必填', 'error'); return false; }
+            if (reason.length > 200) { showToast('移出原因超长（≤200）', 'error'); return false; }
+            const r = await siApi('/sys-releases/' + releaseId + '/remove-issues', { method: 'POST', body: { issue_ids: [issueId], reason } });
+            if (!r.ok) { siApiErr(r, '移出失败'); return false; }
+            const d = r.data || {};
+            if (d.executor_kept === false) showToast('已移出，批次已移空，执行安排已重置', 'success');
+            else showToast('已移出，你的执行人身份与通知状态已保留', 'success');
+            siCloseModal(); await siOpenBatchDetail(releaseId); return false;
+        });
     }
 
     // 上线体统一重构 C3 第2批（Task B-①）：siModalPublishBatch（legacy /publish，现恒 409）已整体删除——

@@ -28,9 +28,13 @@
  *   - 仍可用：「上线单管理」（含内部安排上线/执行上线/撤销上线安排/改期/加单）、「值班排班」、
  *     单据详情页的只读展示区（§1922 附近 `if (!META_OK) box.innerHTML='只读模式…'` 分支——单据的
  *     状态流转动作按钮才降级，不影响上线单体系）
- *   - 降级/隐藏：「+ 新建迭代单」（依赖 typeFlows 判断可建类型）、「🗑️ 删除审计」（纯查询功能，
- *     非应急路径，容忍随 meta 一起降级）、「📖 流程说明」（静态说明文档，随 meta 降级不影响写操作）
+ *   - 降级/隐藏：「+ 新建迭代单」（依赖 typeFlows 判断可建类型）、「🗑️ 删除审计」「📜 上线日志」
+ *     （2026-07-31 新增，与删除审计同门槛——均为纯查询功能，非应急路径，容忍随 meta 一起降级）、
+ *     「📖 流程说明」（静态说明文档，随 meta 降级不影响写操作）
  *   - 已删除（非降级）：「🚀 上线编排」legacy 面板（2026-07-30 随旧家族 4 端点封禁整体删除）
+ *
+ * 【2026-07-31 变更】原"四入口"（新建迭代单/删除审计/上线编排[已删]/流程说明）反向降级断言组扩为
+ * 五入口，新增「上线日志」与「删除审计」同门槛同断言写法（见下方 §④ 新增 check）。
  */
 'use strict';
 
@@ -142,6 +146,12 @@ check('「删除审计」（siOpenDeleteAudit）守卫条件含 META_OK', () => 
     const body = extractFunctionBody(src, 'siRenderHeadActions');
     const cond = guardConditionBefore(body, 'onclick="siOpenDeleteAudit()"');
     assert.ok(cond.includes('META_OK'), `期望仍挂 META_OK 门，实际条件：${cond}`);
+});
+check('「上线日志」（siOpenReleaseLog，2026-07-31 新增）守卫条件含 META_OK（与「删除审计」同门槛）', () => {
+    const body = extractFunctionBody(src, 'siRenderHeadActions');
+    const cond = guardConditionBefore(body, 'onclick="siOpenReleaseLog()"');
+    assert.ok(cond.includes('META_OK'), `期望仍挂 META_OK 门，实际条件：${cond}`);
+    assert.ok(cond.includes('isAdmin()'), `期望仍挂 isAdmin() 门，实际条件：${cond}`);
 });
 // ⭐ [C7 裁定·2026-07-29 → 2026-07-30 终局] C7 曾"隐藏入口保留代码"过渡；2026-07-30 用户裁定旧上线编排
 //   家族 4 端点全封（assign-release-dev/reassign-release-dev/notify-release-executor(-batch)），前端面板/

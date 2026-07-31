@@ -5,7 +5,8 @@
  *   T2 归档 + 重开真实全链路（feature）：关闭按钮可见可点 → 徽标「已归档」→「重开」按钮出现可点 → 回「开发中」
  *       + 重开后 release_id 清空、旧上线单的 getReleaseMembers 仍 snapshot（红线，API 层核对，非 UI 断言）
  *   T3 「安排上线」/「上线单管理」/「值班排班」在 META_OK 异常态仍可达（拦截 /api/sys-issues/meta 返 500）
- *       + 反向：「新建迭代单」/「删除审计」/「上线编排」/「流程说明」四个入口此时应隐藏（§6.7 边界）
+ *       + 反向：「新建迭代单」/「删除审计」/「上线编排」/「流程说明」/「上线日志」（2026-07-31 新增，
+ *       与删除审计同门槛）五个入口此时应隐藏（§6.7 边界）
  *   T4 降级历史显著提示：构造快照缺失的已发布上线单，详情页应出现红底提示 + 成员行「不可用」占位
  *   T5 排班维护只读预览（非对接人视角）：无写表单/无「操作」列 + 出现「只读预览」提示文案
  *
@@ -213,6 +214,7 @@ async function main() {
             await shotOnFail(page, (await page.locator('button:has-text("值班排班")').count()) > 0, 't3-duty-roster-visible-degraded', '「值班排班」在 meta 加载失败时仍可见（§6.15 登录即可见）');
             await shotOnFail(page, (await page.locator('button:has-text("新建迭代单")').count()) === 0, 't3-create-hidden-degraded', '「新建迭代单」在 meta 加载失败时应隐藏（依赖 typeFlows）');
             await shotOnFail(page, (await page.locator('button:has-text("删除审计")').count()) === 0, 't3-audit-hidden-degraded', '「删除审计」在 meta 加载失败时应隐藏（与 meta 一起降级，非应急路径）');
+            await shotOnFail(page, (await page.locator('button:has-text("上线日志")').count()) === 0, 't3-release-log-hidden-degraded', '「上线日志」（2026-07-31 新增）在 meta 加载失败时应隐藏（与删除审计同门槛，非应急路径）');
             await shotOnFail(page, (await page.locator('button:has-text("上线编排")').count()) === 0, 't3-orch-hidden-degraded', '「上线编排」legacy 面板在 meta 加载失败时应隐藏');
             await shotOnFail(page, (await page.locator('button:has-text("流程说明")').count()) === 0, 't3-guide-hidden-degraded', '「流程说明」在 meta 加载失败时应隐藏');
 

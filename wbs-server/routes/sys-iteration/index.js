@@ -7196,7 +7196,8 @@ module.exports = (deps) => {
   //      更强的 CAS 保护：与预读的 notify_status/release_assignee_id/token 逐列比对），并通过
   //      `opts.skipReset=true` 告知本函数"重置已完成，不要重复做"。
   //   ④ 差量已由调用方结构化传入（`delta`），本函数只负责判定是否全空
-  //   ⑤ 差量非空 → 重置通知六列 + 清执行人两列 + 换 token（除非 opts.skipReset）
+  //   ⑤ 差量非空 → 重置通知六列 + 清执行人两列 + 换 token（除非 opts.skipReset 或 opts.keepExecutor——
+  //      后者是 2026-07-31 用户拍板"执行人移单保留身份继续执行"专用，见 remove-issues 端点与本函数内实现）
   //   ⑥ 双写兼容：当前成员（含新增）∪ 明确移除的旧成员，一律清空旧单级 8 列
   //   ⑦ 按差量写 timeline（event_type='scope_change'，每受影响成员一条，同 ref_id=releaseId + 同批次标识）
   //   差量全空 → 直接返回（幂等：不清通知、不写 timeline）。任一步失败抛错，由调用方 catch 整体 ROLLBACK。
@@ -7216,11 +7217,47 @@ module.exports = (deps) => {
     }
 
     const rel = await dbGetAsync(
-      `SELECT id, status, release_assignee_id, release_assignee_name FROM sys_releases WHERE id = ?`,
+      `SELECT id, status, release_assignee_id, release_assignee_name, release_assignee_notify_status FROM sys_releases WHERE id = ?`,
       [releaseId]
     );
     if (!rel) throw new SysTransitionError(404, 'RELEASE_NOT_FOUND', '上线批次不存在');
     if (rel.status !== '计划中') throw new SysTransitionError(409, 'RELEASE_NOT_PLANNING', '批次非「计划中」，不能变更');
+
+    // [C5 删除] 双写兼容镜像调用（syncReleaseLegacyMirror）已删除——§10.1"双写期到 C4 终止"，见函数删除处
+    //   注释。currentMembers 查询保留，且**提前到 isEmpty 判断之前**（2026-07-31 codex 审 MED-2）：下方
+    //   opts.keepExecutor 的 fail-closed 契约检查需要它判断"移除后批次是否仍非空"——本查询查的就是
+    //   "当前"（调用方已在调用本函数之前完成删除）成员集，timeline 阶段 planned_date_changed/
+    //   schedule_cancelled 两个分支继续复用同一份结果，不重复查询。
+    const currentMembers = await dbAllAsync('SELECT id FROM sys_issues WHERE release_id = ?', [releaseId]);
+
+    // [2026-07-31 codex 审 MED-2 采纳] opts.keepExecutor 契约级 fail-closed 检查——对齐上面 activeKinds
+    //   "编程契约违反直接抛异常，越早炸越好"的风格：keepExecutor 只允许"执行人本人移单、且移除后批次
+    //   仍非空"这一种场景使用，防未来其他调用方（加单/改期/撤销上线安排等）误传 keepExecutor，导致一个
+    //   本该被重置的过期 sent 态被悄悄保留下来（执行人已经不该再对着一个语义已变化的批次"当场继续执行"）。
+    //   五个子条件均为必要条件，逐条显式核对（不依赖调用方"应该没传错"的假设）：
+    //   ① removedOnly：虽然上面的 activeKinds 互斥检查已保证至多一类 delta 为真，但那只挡"同时命中多类"，
+    //      没规定命中的到底是哪一类——这里显式绑定必须是 removedIds 那一类，堵住"改期/撤销安排误传
+    //      keepExecutor"这种活得下来的漏网场景。
+    //   ② remove_by_executor：必须是执行人分支产生的移除（admin 分支永远不传 keepExecutor，双重锁定）。
+    //   ③ assigneeMatches / ④ notifiedSent：rel 这次 SELECT 读到的必须是"当前仍是 sent 态、且执行人正是
+    //      本次操作者"——不是缓存值、不是调用方口头保证。
+    //   ⑤ nonEmptyAfterRemoval：currentMembers 是调用方完成删除**之后**的当前成员集，非空才谈得上"保留
+    //      身份继续执行"，否则应当走完整重置（sent∧空成员不可达的常态不能被本分支破坏）。
+    if (opts.keepExecutor) {
+      const removedOnly = removedIds.length > 0 && addedIds.length === 0
+        && !delta.planned_date_changed && !delta.schedule_cancelled;
+      const isExecutorRemove = delta.remove_by_executor === true;
+      const assigneeMatches = rel.release_assignee_id != null && Number(rel.release_assignee_id) === Number(actor.id);
+      const notifiedSent = rel.release_assignee_notify_status === 'sent';
+      const nonEmptyAfterRemoval = currentMembers.length > 0;
+      if (!removedOnly || !isExecutorRemove || !assigneeMatches || !notifiedSent || !nonEmptyAfterRemoval) {
+        throw new Error(
+          `applyReleaseChange 契约违反：opts.keepExecutor 仅允许"执行人本人移单且移除后批次仍非空"场景使用——` +
+          `releaseId=${releaseId} 命中：removedOnly=${removedOnly}, remove_by_executor=${isExecutorRemove}, ` +
+          `assigneeMatches=${assigneeMatches}, notifiedSent=${notifiedSent}, nonEmptyAfterRemoval=${nonEmptyAfterRemoval}`
+        );
+      }
+    }
 
     const isEmpty = addedIds.length === 0 && removedIds.length === 0
       && !delta.planned_date_changed && !delta.schedule_cancelled;
@@ -7230,10 +7267,14 @@ module.exports = (deps) => {
     //   此刻再读 sys_releases 拿到的 release_assignee_name 早已是 NULL（被调用方自己的 CAS UPDATE 清空），
     //   不能代表"旧执行人"。此时必须由调用方通过 opts 显式传入它自己重置前捕获的旧值，本函数不再信自己
     //   的这次 SELECT（同一事务内，读到的已经是调用方重置后的新值，语义上已经"晚了一步"）。
+    //   opts.keepExecutor=true 时（2026-07-31 用户拍板，remove-issues 执行人分支·剩余成员>0）：调用方
+    //   压根不做任何重置——执行人身份/通知六列/token 原样保留，rel 这次 SELECT 读到的仍是"当前"（未被
+    //   任何人动过）的真实值，故沿用与"既不 skipReset 也不 keepExecutor"相同的取值路径
+    //   （rel.release_assignee_id/name），不需要单独分支。
     const oldAssigneeId = opts.skipReset ? opts.oldAssigneeId : rel.release_assignee_id;
     const oldAssigneeName = opts.skipReset ? opts.oldAssigneeName : rel.release_assignee_name;
 
-    if (!opts.skipReset) {
+    if (!opts.skipReset && !opts.keepExecutor) {
       const newToken = crypto.randomBytes(16).toString('hex');
       await dbRunAsync(
         `UPDATE sys_releases SET release_assignee_id = NULL, release_assignee_name = NULL,
@@ -7245,10 +7286,8 @@ module.exports = (deps) => {
       );
     }
 
-    // [C5 删除] 双写兼容镜像调用（syncReleaseLegacyMirror）已删除——§10.1"双写期到 C4 终止"，见函数删除处
-    //   注释。currentMembers 查询保留（下方 timeline 仍需要它枚举 planned_date_changed/schedule_cancelled
-    //   受影响成员），只是不再额外拼 affectedIds/调镜像函数。
-    const currentMembers = await dbAllAsync('SELECT id FROM sys_issues WHERE release_id = ?', [releaseId]);
+    // currentMembers 已在函数上方（isEmpty 判断之前）提前查询——供 opts.keepExecutor 契约检查复用，此处
+    //   不再重复查询，下方 timeline 的 planned_date_changed/schedule_cancelled 两个分支直接沿用同一份结果。
 
     // timeline（§6.13）：每受影响成员各写一条，同 ref_id=releaseId 天然关联同一次调用产生的多行
     //   （sys_issue_timeline 按 ref_id 查询即可枚举——[C9 任务D·codex 207 审 LOW-1] 此前此处另生成过
@@ -7257,7 +7296,24 @@ module.exports = (deps) => {
     //   未接收返回值）——是"承诺了却没兑现"的虚假注释，已随本次一并删除，不留假排障线索）。
     const timelineTargets = [];
     for (const iid of addedIds) timelineTargets.push({ issueId: iid, actionCode: 'release_add', summary: '加入上线批次，通知与执行人已重置' });
-    for (const iid of removedIds) timelineTargets.push({ issueId: iid, actionCode: 'release_remove', summary: '移出上线批次，通知与执行人已重置' });
+    // 2026-07-31 用户拍板（执行人移单四口径"仅时间线留痕"）：移除文案按"操作者角色 × 是否移空"分支——
+    //   admin 分支维持改造前逐字文案（无 reason 时不变，有 reason 时追加原因，通知与执行人恒重置，
+    //   因 admin 分支从不传 opts.keepExecutor）；执行人分支恒带 reason（端点已强制必填），按
+    //   opts.keepExecutor 决定是否出现"通知与执行人已重置"字样——保留执行人时**不得**出现该字样
+    //   （身份未被动），移空时才如实出现（keepExecutor 由 remove-issues 端点按剩余成员数算好传入）。
+    for (const iid of removedIds) {
+      let summary;
+      if (delta.remove_by_executor) {
+        summary = opts.keepExecutor
+          ? `执行人移出上线批次（原因：${delta.remove_reason}）`
+          : `执行人移出上线批次（原因：${delta.remove_reason}）；批次已移空，通知与执行人已重置`;
+      } else {
+        summary = delta.remove_reason
+          ? `移出上线批次（原因：${delta.remove_reason}），通知与执行人已重置`
+          : '移出上线批次，通知与执行人已重置';
+      }
+      timelineTargets.push({ issueId: iid, actionCode: 'release_remove', summary });
+    }
     if (delta.planned_date_changed) {
       for (const m of currentMembers) timelineTargets.push({ issueId: m.id, actionCode: 'release_date_change', summary: '上线计划日期变更，通知与执行人已重置' });
     }
@@ -7387,10 +7443,21 @@ module.exports = (deps) => {
       //   [C5 收口批·codex 203 审 C 项] 列表只需要 issue_count/source/degraded，不需要组装完整
       //   members[]（type/title_snapshot/commits 等）——改用 `{countOnly:true}` 轻量路径（与详情端点的
       //   完整调用共用同一套三态判定代码，见 getReleaseMembers 函数头注释，非另写一套判定）。
+      // 上线日志页需求（2026-07-31 用户拍板）：admin 专属 include_members=1——非 admin 传了也静默忽略
+      //   （不报错，按未传处理）。成员读源仍走 getReleaseMembers() 统一函数（live/snapshot/degraded 三态），
+      //   禁止另写查询（同 C4「列表/详情/导出/统计一律调用同一函数」纪律）。
+      const wantMembers = req.query.include_members === '1' && actor.role === 'admin';
       const items = [];
       for (const r of rows) {
-        const gm = await getReleaseMembers({ id: r.id, status: r.status }, { countOnly: true });
-        items.push({ ...r, issue_count: gm.count, source: gm.source, degraded: gm.degraded });
+        if (wantMembers) {
+          const gm = await getReleaseMembers({ id: r.id, status: r.status });
+          // 字段映射对齐批次详情端点旧契约（id/type/title/status，见 GET /sys-releases/:id 注释）。
+          const members = gm.members.map(m => ({ id: m.issue_id, type: m.type, title: m.title_snapshot, status: m.status_at_publish }));
+          items.push({ ...r, issue_count: members.length, source: gm.source, degraded: gm.degraded, members });
+        } else {
+          const gm = await getReleaseMembers({ id: r.id, status: r.status }, { countOnly: true });
+          items.push({ ...r, issue_count: gm.count, source: gm.source, degraded: gm.degraded });
+        }
       }
       res.json({ items, total: items.length, scope: isFullScope ? 'all' : 'mine' });
     } catch (err) {
@@ -7790,9 +7857,13 @@ module.exports = (deps) => {
     }
   });
 
-  // ── POST /sys-releases/:id/remove-issues：移除单（admin，M-8 双 WHERE 原子全成或全败）──────────
+  // ── POST /sys-releases/:id/remove-issues：移除单（admin ∨ 执行人本人，M-8 双 WHERE 原子全成或全败）──────────
   //   闸门：批次「计划中」+ 每单 release_id=:id AND「待上线」；移除后清空 release_id。
-  router.post('/sys-releases/:id/remove-issues', authenticateToken, requireSysSchemaReady, requireAdmin, async (req, res) => {
+  //   2026-07-31 用户拍板（执行人移单四口径）：移单不再是 admin 专属——被通知的执行人本人也可在执行
+  //   环节移出成员（如发现某单不该随本批发布）。权限判据不再走路由级 requireAdmin，改端点内自读自判：
+  //   admin 分支行为与改造前完全一致（唯一增量=可选 reason）；执行人分支镜像 /execute 的守卫结构（见其
+  //   注释），全部在 BEGIN IMMEDIATE 事务内自读自判，不接受调用方"已验证"标记。
+  router.post('/sys-releases/:id/remove-issues', authenticateToken, requireSysSchemaReady, async (req, res) => {
     const id = parsePositiveId(req.params.id);
     if (!id) return res.status(400).json({ error: '无效的批次 ID', code: 'INVALID_RELEASE_ID' });
     const raw = (req.body || {}).issue_ids;
@@ -7801,12 +7872,49 @@ module.exports = (deps) => {
     for (const x of raw) if (!parsePositiveId(x)) return res.status(400).json({ error: '迭代单 id 非法', code: 'INVALID_ISSUE_ID' });
     const issueIds = [...new Set(raw.map(parsePositiveId))];
     const actor = sysActor(req);   // C2a：applyReleaseChange 原语收尾需要 actor（timeline operator_id/name）
+    const isAdminActor = actor.role === 'admin';
+    // reason：admin 可选（trim 后非空才使用，超长仍拒），执行人必填（2026-07-31 用户拍板"仅执行人原因
+    //   必填"）。长度上限镜像 cancel-schedule 端点既有规则（本文件 cancel-schedule 路由，trim 后 1..200
+    //   字），非另定新上限。
+    const rawReason = (typeof (req.body || {}).reason === 'string' ? req.body.reason.trim() : '');
+    let reason = null;
+    if (isAdminActor) {
+      if (rawReason) {
+        if (rawReason.length > 200) return res.status(400).json({ error: '移除原因超长（trim 后 ≤200 字）', code: 'REMOVE_REASON_TOO_LONG' });
+        reason = rawReason;
+      }
+    } else {
+      if (!rawReason) return res.status(400).json({ error: '移除原因必填（仅已被通知的执行人可在执行环节移单）', code: 'REMOVE_REASON_REQUIRED' });
+      if (rawReason.length > 200) return res.status(400).json({ error: '移除原因超长（trim 后 ≤200 字）', code: 'REMOVE_REASON_TOO_LONG' });
+      reason = rawReason;
+    }
     try {
       await sysBeginImmediate();
+      let remainingCount = 0, keepExecutor = false;
       try {
-        const rel = await dbGetAsync('SELECT id, status, release_type FROM sys_releases WHERE id = ?', [id]);
+        const rel = await dbGetAsync(
+          'SELECT id, status, release_type, release_assignee_id, release_assignee_notify_status FROM sys_releases WHERE id = ?',
+          [id]
+        );
         if (!rel) { await sysRollback(); return res.status(404).json({ error: '上线批次不存在', code: 'RELEASE_NOT_FOUND' }); }
         if (rel.status !== '计划中') { await sysRollback(); return res.status(409).json({ error: '批次非「计划中」，不能移除', code: 'RELEASE_NOT_PLANNING' }); }
+        if (!isAdminActor) {
+          // 执行人分支守卫（镜像 /execute 的守卫结构，见其注释）：全部事务内自读自判，不接受"已验证"标记。
+          if (rel.release_assignee_notify_status !== 'sent') {
+            await sysRollback();
+            return res.status(409).json({ error: '仅已被通知的执行人可在执行环节移单', code: 'EXECUTOR_REMOVE_NOT_NOTIFIED' });
+          }
+          if (!rel.release_assignee_id || Number(rel.release_assignee_id) !== actor.id) {
+            await sysRollback();
+            return res.status(403).json({ error: '仅被通知的值班执行人本人可移单', code: 'EXECUTOR_GUARD_FAILED' });
+          }
+          // §6.10 中心守卫同款不变量：实时资格，事务内自读自判（文案对齐 /execute 的 EXECUTOR_NOT_ELIGIBLE）。
+          const eligible = await hasReleaseEligibility(actor.id);
+          if (!eligible) {
+            await sysRollback();
+            return res.status(403).json({ error: '当前账号无执行上线资格（非在职，或为查看者/管理员）', code: 'EXECUTOR_NOT_ELIGIBLE' });
+          }
+        }
         // [R5⑤防御闸已删·2026-07-30 用户拍板] 旧闸（release_type='bug' 一律 409 LEGACY）的前提——"v1.6 后
         //   add-issues 已堵住 bug 进批次，本分支正常路径不可达，仅防脏库/历史残留"——在 C3 全类型统一后失效：
         //   bug 经 hotfix-publish 建应急批次会真实写入 release_type='bug'（见该端点 INSERT 的 releaseFamilyOf），
@@ -7833,17 +7941,26 @@ module.exports = (deps) => {
              WHERE id = ? AND NOT EXISTS (SELECT 1 FROM sys_issues WHERE sys_issues.release_id = ?)`,
           [id, id]
         );
-        // C2a §6.11 原语收尾：移单成功后经 applyReleaseChange 原子重置通知/执行人 + 双写（清移除单的旧
-        //   单级 8 列）+ timeline（现有逻辑逐字保留，本行是本次改造唯一新增副作用）。
+        const remainRow = await dbGetAsync('SELECT COUNT(*) AS c FROM sys_issues WHERE release_id = ?', [id]);
+        remainingCount = remainRow ? remainRow.c : 0;
+        // 2026-07-31 用户拍板（执行人移单四口径"保留执行人继续执行"）：执行人分支 ∧ 剩余>0 时保留执行人
+        //   身份（opts.keepExecutor，见 applyReleaseChange 内该 opts 的处理）——变更是执行人本人做的，
+        //   无需重新知会；保留身份让其当场继续发布剩余任务。执行人分支 ∧ 剩余=0，或 admin 分支，一律走
+        //   现行完整重置（不传 keepExecutor）——移空场景需保住既有"正常流程 sent∧空成员不可达"性质（见
+        //   本文件 preemptReleaseNotifySend 函数内 fail-closed 注释所依赖的常态），批次回到干净可复用态。
+        keepExecutor = !isAdminActor && remainingCount > 0;
+        // C2a §6.11 原语收尾：移单成功后经 applyReleaseChange 原子重置通知/执行人（除非 keepExecutor）+
+        //   双写（清移除单的旧单级 8 列）+ timeline（按角色/是否移空分支生成文案，见该函数内注释）。
         await applyReleaseChange(id, actor, {
           added_issue_ids: [], removed_issue_ids: issueIds, planned_date_changed: false, schedule_cancelled: false,
-        });
+          remove_reason: reason, remove_by_executor: !isAdminActor,
+        }, keepExecutor ? { keepExecutor: true } : {});
         await sysCommit();
       } catch (txErr) {
         try { await sysRollback(); } catch (_) { /* ignore */ }
         throw txErr;
       }
-      res.json({ id, removed: issueIds, count: issueIds.length });
+      res.json({ id, removed: issueIds, count: issueIds.length, remaining_count: remainingCount, executor_kept: keepExecutor });
     } catch (err) {
       if (err instanceof SysTransitionError) return sendSysTransitionError(res, err);   // F2：SYS_BUSY 等保 503
       logger.error('[系统迭代] 批次移除失败:', err && err.message);
