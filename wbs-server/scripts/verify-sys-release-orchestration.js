@@ -84,13 +84,19 @@ function call(method, p, tok, body) {
 }
 let passed = 0;
 const ok = (m) => { passed++; console.log('  ✓ ' + m); };
-const EST = '2026-08-01 10:00';
+// 2026-08-01：硬编码未来日期到期（ESTIMATE_BEFORE_ASSIGN 时限炸弹），改动态生成——远期字面量迟早到期，勿回退此写法
+function futureEst(days) {
+  const d = new Date(Date.now() + days * 86400000);
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+const EST = futureEst(30);
 
 async function issueRow(id) { return await get('SELECT * FROM sys_issues WHERE id=?', [id]); }
 
 // 建 bug 单 → 指派 devId → estimate → submit → accept，返回 id（待上线态）
 async function seedBugToReady(devId = 5, devTokFor = devTok) {
-  let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'bug单', system_name: 'BMS', source: '内部' });
+  let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'bug单', system_name: 'BMS', source: '内部', description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13 });
   assert.strictEqual(r.status, 201, '建 bug 201, got ' + r.status + ' ' + JSON.stringify(r.body));
   const id = r.body.id;
   // 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）

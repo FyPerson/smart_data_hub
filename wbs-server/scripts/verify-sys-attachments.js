@@ -105,8 +105,16 @@ function download(path, tok) {
 let passed = 0;
 const ok = (m) => { passed++; console.log('  ✓ ' + m); };
 
+// 2026-08-01：硬编码未来日期到期（ESTIMATE_BEFORE_ASSIGN 时限炸弹），改动态生成——远期字面量迟早到期，勿回退此写法
+function futureEst(days) {
+  const d = new Date(Date.now() + days * 86400000);
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+const EST = futureEst(30);
+
 async function seedDev(assignTo = 5) {
-  let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 't', system_name: 'BMS', source: '内部' });
+  let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 't', system_name: 'BMS', source: '内部', description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13 });
   assert.strictEqual(r.status, 201, '建单 201, got ' + r.status + ' ' + JSON.stringify(r.body));
   const id = r.body.id;
   // ⭐ 角色权限重构 C2.5 撤销（v2.1）：建单直落「待受理」，无需再走预沟通段。
@@ -118,7 +126,7 @@ async function seedDev(assignTo = 5) {
   assert.strictEqual(r.status, 200, '夹具补 OA 号 200, got ' + r.status + ' ' + JSON.stringify(r.body));
   await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: assignTo });
   const tok = assignTo === 5 ? devTok : dev2Tok;
-  r = await call('POST', `/api/sys-issues/${id}/estimate`, tok, { dev_estimated_at: '2026-08-01 10:00' });
+  r = await call('POST', `/api/sys-issues/${id}/estimate`, tok, { dev_estimated_at: EST });
   assert.strictEqual(r.status, 200, 'estimate 200, got ' + r.status + ' ' + JSON.stringify(r.body));
   return id;
 }
@@ -129,8 +137,10 @@ const activeAtts = (id) => all("SELECT id, attachment_type, round_no FROM sys_is
 async function main() {
   mod.initSchema();
   await waitReady();
-  await run(`CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT)`);
-  await run(`INSERT INTO users (id, username, display_name, role) VALUES (1,'admin','管理员','admin'),(5,'dev','开发王','user'),(6,'dev2','开发李','user'),(9,'viewer','查看者','viewer')`);
+  // 建单优化批 C3b（方案 §6c）：主建单端点需求方三字段全空时会 SELECT users.phone 做固化——
+  //   users 夹具须含该列，否则撞 SQLITE_ERROR: no such column: phone（本次一并补齐）。
+  await run(`CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT, status TEXT DEFAULT 'active', phone TEXT)`);
+  await run(`INSERT INTO users (id, username, display_name, role) VALUES (1,'admin','管理员','admin'),(5,'dev','开发王','user'),(6,'dev2','开发李','user'),(9,'viewer','查看者','viewer'),(13,'wangtaotao','示例对接人','user')`);
 
   const app = express();
   app.use(express.json());

@@ -169,11 +169,14 @@ const CHANGE_FLOW_TRANSITIONS = [
     notifyAfterCommit: null,                // 本动作不发送通知（S5 手动化）；用户后续经 resend-tech-consult 手动发
   },
   {
-    action: 'edit_in_revision',             // 待修改态编辑内容：待修改 → 待修改（建单人∨admin·旁路）
-    from: ['待修改'], to: null,
+    // 建单优化批 C3（方案 20260731_v1.2 §6）：编辑窗口两档扩展——from 从单一「待修改」扩至 A 档
+    //   （待受理/待修改/待指派）+ B 档（开发中，剔除 needs_feasibility）；待验证起冻结不变。字段档位
+    //   由端点 handler 事务内按真实 status 判定（§6.2 并发终闸），本 from 仅供前端按钮可见性镜像。
+    action: 'edit_in_revision',             // 编辑内容：指派前/开发期均可编辑（建单人∨admin·旁路）
+    from: ['待受理', '待修改', '待指派', '开发中'], to: null,
     roleGuard: 'creator_or_admin', ownerGuard: null,   // 授权=created_by∨admin（§5.3·codex131-H1 修·引擎按 row.created_by 校验）
     requiredPayload: [],
-    sideEffects: ['白名单字段更新（§5.2）', 'note timeline 快照改动字段'],
+    sideEffects: ['两档白名单字段更新（建单优化批 C3·方案 §6.1）', 'note timeline 快照改动字段'],
     timelineEvent: 'note', actionCode: 'edit_in_revision',
     notifyAfterCommit: null,
   },
@@ -471,11 +474,14 @@ const BUG_FLOW_TRANSITIONS = [
     notifyAfterCommit: null,                // 本期不发·待受理列表驱动（§4.5）
   },
   {
-    action: 'edit_in_revision',             // 待修改态编辑内容：待修改 → 待修改（建单人∨admin·旁路·130-M 补 bug 亦有·codex131-H1 修）
-    from: ['待修改'], to: null,
+    // 建单优化批 C3（方案 20260731_v1.2 §6）：编辑窗口两档扩展——from 从单一「待修改」扩至 A 档
+    //   （待受理/待修改/待处理）+ B 档（处理中，剔除 needs_feasibility）；待验证起冻结不变。字段档位
+    //   由端点 handler 事务内按真实 status 判定（§6.2 并发终闸），本 from 仅供前端按钮可见性镜像。
+    action: 'edit_in_revision',             // 编辑内容：指派前/开发期均可编辑（建单人∨admin·旁路·130-M 补 bug 亦有·codex131-H1 修）
+    from: ['待受理', '待修改', '待处理', '处理中'], to: null,
     roleGuard: 'creator_or_admin', ownerGuard: null,
     requiredPayload: [],
-    sideEffects: ['白名单字段更新（§5.2）', 'note timeline 快照改动字段'],
+    sideEffects: ['两档白名单字段更新（建单优化批 C3·方案 §6.1）', 'note timeline 快照改动字段'],
     timelineEvent: 'note', actionCode: 'edit_in_revision',
     notifyAfterCommit: null,
   },

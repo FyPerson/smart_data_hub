@@ -72,7 +72,7 @@ let passed = 0;
 const ok = (m) => { passed++; console.log('  ✓ ' + m); };
 
 async function createIssue(type) {
-  const r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type, title: `${type}单`, system_name: 'BMS', source: '内部' });
+  const r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type, title: `${type}单`, system_name: 'BMS', source: '内部', description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13 });
   assert.strictEqual(r.status, 201, `建 ${type} 单 201, got ${r.status} ${JSON.stringify(r.body)}`);
   return r.body.id;
 }
@@ -93,7 +93,7 @@ async function mkRevision(type, createdBy) {   // 待修改 + intake_required=1
 async function main() {
   mod.initSchema();
   await waitReady();
-  await run(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT, phone TEXT, dingtalk_user_id TEXT)`);
+  await run(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT, status TEXT DEFAULT 'active', phone TEXT, dingtalk_user_id TEXT)`);
   await run(`INSERT INTO users (id, username, display_name, role) VALUES
     (1,'admin','管理员','admin'),(5,'dev','开发王','user'),(6,'dev2','开发李','user'),(13,'wangtaotao','示例对接人','user')`);
   const app = express();
@@ -136,12 +136,14 @@ async function main() {
     r = await call('POST', `/api/sys-issues/${id}/edit-in-revision`, dev2Tok, { title: 'x' });
     assert.strictEqual(r.status, 403, '非建单人非 admin edit 403');
 
-    // 非待修改态(待受理) → 409 EDIT_STATUS_INVALID
+    // ⭐ 建单优化批 C3（方案 20260731_v1.2 §6 A 档）：待受理态编辑窗口已从「仅待修改」拓宽为 A 档
+    //   （待受理/待修改/待指派/待处理），本断言由旧约束「非待修改态 409」改为「待受理态(A档) 200」——
+    //   两档矩阵/待验证起终态族 409/并发终闸 的完整覆盖见 verify-sys-edit-window.js，本脚本不重复展开。
     id = await createIssue('feature');
     await seed(id, { status: '待受理', intake_required: 1, created_by: 5 });
     r = await call('POST', `/api/sys-issues/${id}/edit-in-revision`, devTok, { title: 'x' });
-    assert.strictEqual(r.status, 409, '待受理态 edit 409');
-    assert.strictEqual(r.body.code, 'EDIT_STATUS_INVALID', '409 code=EDIT_STATUS_INVALID');
+    assert.strictEqual(r.status, 200, '待受理态(A档) edit 200');
+    assert.deepStrictEqual(r.body.changed, ['title'], 'changed=[title]');
 
     // 未知字段(status) → 400 EDIT_FIELD_NOT_ALLOWED（禁写服务端字段）
     id = await mkRevision('feature', 5);

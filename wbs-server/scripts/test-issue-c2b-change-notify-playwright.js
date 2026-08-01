@@ -75,7 +75,7 @@ async function main() {
 
     // 造数：建变更流(feature)单 → schedule
     const c = await api(adminToken, 'POST', '/api/sys-issues', {
-        type: 'feature', title: 'C2b冒烟测试单', system_name: '智数协同', source: '内部', description: 'x',
+        type: 'feature', title: 'C2b冒烟测试单', system_name: '智数协同', source: '内部', description: 'x', intake_liaison_id: 13,
     });
     if (c.status !== 200 && c.status !== 201) { console.error('建单失败', c.status, c.json); process.exit(1); }
     createdId = c.json.id;
@@ -171,7 +171,7 @@ async function main() {
         // ===== C 回归（对抗审 MED）：bug 主开发（非 admin 非对接人）通知区无「建单人发送」+ 无「查已读」按钮 =====
         // 造 bug 单 → assign user19(主开发·role=user·非白名单) → SQL 直推「待验证」(creator sendable 态·绕 submit 闸门造渲染态)
         const cBug = await api(adminToken, 'POST', '/api/sys-issues', {
-            type: 'bug', title: 'C回归bug单', system_name: '智数协同', source: '生产故障', description: 'x',
+            type: 'bug', title: 'C回归bug单', system_name: '智数协同', source: '生产故障', description: 'x', intake_liaison_id: 13,
         });
         if (cBug.status === 200 || cBug.status === 201) {
             cBugId = cBug.json.id;

@@ -286,6 +286,8 @@ async function createFixtures(adminToken) {
             title: FX_TEXT.sysTitle,
             system_name: 'BMS',
             source: '内部',
+            description: FX_TEXT.sysTitle,
+            intake_liaison_id: 13,
         };
         const r = await apiRequest(adminToken, 'POST', '/api/sys-issues', body);
         if (r.status !== 201) throw new Error(`建系统迭代单 fixture 失败：status=${r.status} body=${(r.body || '').slice(0, 300)}`);

@@ -82,6 +82,16 @@ function call(method, p, tok, body) {
 
 let passed = 0;
 const ok = (m) => { passed++; console.log('  ✓ ' + m); };
+// 2026-08-01：硬编码未来日期到期（ESTIMATE_BEFORE_ASSIGN 时限炸弹），改动态生成——远期字面量迟早到期，勿回退此写法
+//   ⚠️ codex 221a 收口更正（全文扫描收尾）：mkIssue 内 est 默认值虽是**直连 SQL 造数**、不经过 /estimate
+//   端点闸门，但字段本身仍是 dev_estimated_at（潜伏型时限炸弹，同 intake-schedule-c6.js 判定口径）——
+//   已改用本函数动态生成（见下方 mkIssue）。mkMember 内 resolvedAt 默认值是另一类字段（"该开发何时
+//   完成"的历史记录，无 futures 比较语义），维持原样不改，与 est 分开判定。
+function futureEst(days) {
+  const d = new Date(Date.now() + days * 86400000);
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
 
 // ── 造数 helper（C2 范围内没有 API 能把 issue 推进到"全员完成态待验证"——submit/no_code 是 C3 范围，
 //   handleDevSubmit 尚未接线——故 VERIFY 前置状态用 raw SQL 直接构造，测的是 C2 自己的成员 API/W-GATE 反应，
@@ -90,7 +100,7 @@ async function mkIssue(type, status, extra = {}) {
   // [codex 98 号 HIGH 回填·同批] ESTIMATE_REQUIRED 现同时受 submit 与 GATE（isGateEligibleForVerify）双重
   //   约束——本文件测的是成员 add/remove/excuse/reassign 机制，非 estimate 本身，默认种占位值避免 GATE 场景
   //   （如 S10 excuse 触发 GATE）被新闸拦下；devEstimatedAt: null 显式传空可测该闸本身。
-  const est = extra.devEstimatedAt === null ? null : (extra.devEstimatedAt || '2026-07-01 10:00:00');
+  const est = extra.devEstimatedAt === null ? null : (extra.devEstimatedAt || futureEst(30));
   // ⭐ R4 下沉（v2.1·实现变了非断言错·196 号线）：变更流夹具**默认带 OA**——v2.1 后任何进过指派/开发态的
   //   变更流单必有号（三入口共享守卫），raw SQL 直造的无号态是 v2.1 前的人工态。extra.oaNumber:null 可显式造
   //   无号态（测守卫本身用）；bug 恒不带（D2 可选）。
@@ -137,12 +147,14 @@ async function selfCertifyProbes(label) {
 async function main() {
   mod.initSchema();
   await waitReady();
-  await run(`CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT)`);
+  // 建单优化批 C3b（方案 §6c）：主建单端点需求方三字段全空时会 SELECT users.phone 做固化——
+  //   users 夹具须含该列，否则撞 SQLITE_ERROR: no such column: phone（本次一并补齐）。
+  await run(`CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT, status TEXT DEFAULT 'active', phone TEXT)`);
   await run(`INSERT INTO users (id, username, display_name, role) VALUES
     (1,'admin','管理员','admin'),
     (5,'dev5','开发甲','user'),(6,'dev6','开发乙','user'),(8,'dev8','开发丙','user'),
     (10,'dev10','开发丁','user'),(11,'dev11','开发戊','user'),(12,'dev12','开发己','user'),
-    (9,'viewer9','观察员','viewer'),(7,'shenjun','示例发布者','publisher')`);
+    (9,'viewer9','观察员','viewer'),(7,'shenjun','示例发布者','publisher'),(13,'wangtaotao','示例对接人','user')`);
   await new Promise((resolve) => { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = app.listen(0, () => { port = server.address().port; resolve(); }); });
   ok('readiness ready + HTTP harness 起服务');
 
@@ -222,7 +234,7 @@ async function main() {
     let row = await get('SELECT status FROM sys_issues WHERE id = ?', [id]);
     assert.strictEqual(row.status, '处理中', 'S10d：sys_issues.status 落库仍处理中（GATE 未推进）');
     // 修复前：estimate 只写 dev_estimated_at，GATE 永不重跑，工单卡死；修复后：estimate 事务尾部重跑 runWGate
-    r = await call('POST', `/api/sys-issues/${id}/estimate`, devTok(5), { dev_estimated_at: '2026-08-01 10:00' });
+    r = await call('POST', `/api/sys-issues/${id}/estimate`, devTok(5), { dev_estimated_at: futureEst(30) });
     assert.strictEqual(r.status, 200, `S10d：补填 estimate 应 200，实际 ${r.status} ${JSON.stringify(r.body)}`);
     row = await get('SELECT status, dev_estimated_at FROM sys_issues WHERE id = ?', [id]);
     assert.ok(row.dev_estimated_at, 'S10d：dev_estimated_at 已落库');
@@ -251,7 +263,7 @@ async function main() {
     const memberRow = await get('SELECT dev_status FROM sys_issue_dev_assignees WHERE id = ?', [daId]);
     assert.strictEqual(memberRow.dev_status, 'no_code', 'S10e：roster 完成态保留（§1 不变量1「完成态不回 pending」，return 不重置）');
     // 关键反例：补 estimate 后不应被误判为 deferred 消费，应保持开发中（非弹回待验证）
-    r = await call('POST', `/api/sys-issues/${id}/estimate`, devTok(5), { dev_estimated_at: '2026-08-05 10:00' });
+    r = await call('POST', `/api/sys-issues/${id}/estimate`, devTok(5), { dev_estimated_at: futureEst(31) });
     assert.strictEqual(r.status, 200, `S10e：estimate 200, got ${r.status} ${JSON.stringify(r.body)}`);
     row = await get('SELECT status FROM sys_issues WHERE id = ?', [id]);
     assert.strictEqual(row.status, '开发中', 'S10e：⭐ estimate 后仍开发中（未被误弹回待验证——gate_deferred_at 为空，estimate 不重跑 runWGate）');
@@ -268,7 +280,7 @@ async function main() {
     // needs_feasibility=1 单：submit 前需先经 feasibility 端点写 dev_estimated_at（estimate 端点对此类单被
     //   ESTIMATE_REQUIRES_FEASIBILITY 拦截），此处先走一次 feasibility 建立初始合格态
     let r = await call('POST', `/api/sys-issues/${id}/feasibility`, devTok(5), {
-      conclusion: '可行', requirement_confirm: '已确认', dev_estimated_at: '2026-08-01 10:00',
+      conclusion: '可行', requirement_confirm: '已确认', dev_estimated_at: futureEst(32),
     });
     assert.strictEqual(r.status, 200, `S10f：首次 feasibility 200, got ${r.status} ${JSON.stringify(r.body)}`);
     r = await call('POST', `/api/sys-issues/${id}/submit`, devTok(5), { mode: 'no_code', no_code_reason: '完成（占位理由）' });
@@ -282,7 +294,7 @@ async function main() {
     assert.strictEqual(row.gate_deferred_at, null, 'S10f：return 清 gate_deferred_at');
     // 关键反例：补 feasibility 后不应被误判为 deferred 消费，应保持开发中
     r = await call('POST', `/api/sys-issues/${id}/feasibility`, devTok(5), {
-      conclusion: '可行', requirement_confirm: '重新确认', dev_estimated_at: '2026-08-06 10:00',
+      conclusion: '可行', requirement_confirm: '重新确认', dev_estimated_at: futureEst(33),
     });
     assert.strictEqual(r.status, 200, `S10f：二次 feasibility 200, got ${r.status} ${JSON.stringify(r.body)}`);
     row = await get('SELECT status FROM sys_issues WHERE id = ?', [id]);
@@ -308,7 +320,7 @@ async function main() {
     const memberRow = await get('SELECT dev_status FROM sys_issue_dev_assignees WHERE id = ?', [daId]);
     assert.strictEqual(memberRow.dev_status, 'no_code', 'S10g：roster 完成态保留（reopen 不重置 dev_status，同 return）');
     // 关键反例：补 estimate 后不应被误判为 deferred 消费，应保持开发中
-    r = await call('POST', `/api/sys-issues/${id}/estimate`, devTok(5), { dev_estimated_at: '2026-08-10 10:00' });
+    r = await call('POST', `/api/sys-issues/${id}/estimate`, devTok(5), { dev_estimated_at: futureEst(34) });
     assert.strictEqual(r.status, 200, `S10g：estimate 200, got ${r.status} ${JSON.stringify(r.body)}`);
     row = await get('SELECT status FROM sys_issues WHERE id = ?', [id]);
     assert.strictEqual(row.status, '开发中', 'S10g：⭐ estimate 后仍开发中（未被误弹回待验证）');
@@ -324,7 +336,7 @@ async function main() {
     await run(`UPDATE sys_issues SET needs_feasibility = 1, assigned_at = datetime('now','localtime') WHERE id = ?`, [id]);
     const daId = await mkMember(id, 5, '开发甲', 'pending');
     let r = await call('POST', `/api/sys-issues/${id}/feasibility`, devTok(5), {
-      conclusion: '可行', requirement_confirm: '已确认', dev_estimated_at: '2026-08-01 10:00',
+      conclusion: '可行', requirement_confirm: '已确认', dev_estimated_at: futureEst(35),
     });
     assert.strictEqual(r.status, 200, `S10h：feasibility 200, got ${r.status} ${JSON.stringify(r.body)}`);
     r = await call('POST', `/api/sys-issues/${id}/blocked`, devTok(5), { reason: '等外部接口联调' });
@@ -438,7 +450,7 @@ async function main() {
     const tl = await get(`SELECT summary FROM sys_issue_timeline WHERE issue_id=? AND action_code='resume' ORDER BY id DESC LIMIT 1`, [id]);
     assert.ok(tl && tl.summary && tl.summary.includes('自动降级') && tl.summary.includes('待上线'), `S10k：timeline summary 备注自动降级+原目标，实际：${tl && tl.summary}`);
     // 新成员可正常走完估时+提交流程（验证降级后不是"死单"，能正常继续干活）
-    r = await call('POST', `/api/sys-issues/${id}/estimate`, devTok(6), { dev_estimated_at: '2026-08-15 10:00' });
+    r = await call('POST', `/api/sys-issues/${id}/estimate`, devTok(6), { dev_estimated_at: futureEst(36) });
     assert.strictEqual(r.status, 200, `S10k：降级后新成员 estimate 应 200, got ${r.status} ${JSON.stringify(r.body)}`);
     r = await call('POST', `/api/sys-issues/${id}/submit`, devTok(6), { mode: 'no_code', no_code_reason: '换血后完成（占位理由）' });
     assert.strictEqual(r.status, 200, `S10k：降级后新成员 submit 应 200, got ${r.status} ${JSON.stringify(r.body)}`);
@@ -1134,7 +1146,7 @@ async function main() {
     //   建单（→待受理）→ 受理（→待处理）→ assign（内部走 roster INSERT + electRepresentative）。
     //   ⚠️ 断言随入口调整：单在 assign 之前就已合法存在，故不再断言 sys_issues 零新增，
     //     改断言**故障事务自身零残留**——dev_assignees 不新增 + 主表 status/assigned_to 未被推进。
-    const preIssue = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'H2故障注入回滚测试', system_name: 'BMS', source: '内部' });
+    const preIssue = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'H2故障注入回滚测试', system_name: 'BMS', source: '内部', description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13 });
     assert.strictEqual(preIssue.status, 201, 'H2 夹具建单 201');
     const h2Id = preIssue.body.id;
     await call('POST', `/api/sys-issues/${h2Id}/intake-accept`, adminTok, {});

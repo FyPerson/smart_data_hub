@@ -42,12 +42,28 @@ const SYS_CLEAR_RELAY_FIELDS_SQL = [
   'relay_notify_sent_by = NULL',
 ];
 
-// ── 回受理门 = 恢复受理门标志 + 清两组轮次痕迹 ────────────────────────────────
-//   三者必须在**同一条 UPDATE 的 SET 列表**里原子生效（引擎侧由 sysIssueTransition 的单条 UPDATE 保证）。
+// ── 建单优化批 C1（方案 20260731_v1.2 §4 未覆盖·主会话 2026-07-31 补裁）：intake 受理通知 5 列 ──
+//   回受理门=新一轮受理，intake 通知态与 tech_lead_*/relay_* 同定性——都是"这一轮通知发过没"的
+//   轮次状态，不跨轮继承。不归零会让回流单的「通知对接人受理」按钮停在上一轮 sent 态，
+//   对新一轮受理既无法重发也无法如实反映"这一轮还没通知过"。
+//   ⚠️ intake_liaison_id **刻意不在本清单**——它是"这张单归谁对接"的持久属性（同一对接人经手
+//   同一张单的多个受理轮次是正常业务语义，不因回受理门而失效），定性与 tech_lead_id/
+//   relay_notified_user_id（"这一轮该找谁"的轮次状态）不同，明确保留、不清零。
+const SYS_CLEAR_INTAKE_NOTIFY_FIELDS_SQL = [
+  "intake_notify_status = 'not_sent'",
+  'intake_notify_message_key = NULL',
+  'intake_notify_error = NULL',
+  'intake_read_at = NULL',
+  'intake_notify_sent_by = NULL',
+];
+
+// ── 回受理门 = 恢复受理门标志 + 清三组轮次痕迹 ────────────────────────────────
+//   四者必须在**同一条 UPDATE 的 SET 列表**里原子生效（引擎侧由 sysIssueTransition 的单条 UPDATE 保证）。
 const SYS_BACK_TO_INTAKE_GATE_SQL = [
   'intake_required = 1',
   ...SYS_CLEAR_TECH_LEAD_FIELDS_SQL,
   ...SYS_CLEAR_RELAY_FIELDS_SQL,
+  ...SYS_CLEAR_INTAKE_NOTIFY_FIELDS_SQL,
 ];
 
 // ── 受理态一致性触发器（全表 intake_required 恒 1）────────────────────────────
@@ -79,6 +95,7 @@ const INTAKE_VIOLATION_WHERE = 'intake_required != 1 OR intake_required IS NULL'
 module.exports = {
   SYS_CLEAR_TECH_LEAD_FIELDS_SQL,
   SYS_CLEAR_RELAY_FIELDS_SQL,
+  SYS_CLEAR_INTAKE_NOTIFY_FIELDS_SQL,
   SYS_BACK_TO_INTAKE_GATE_SQL,
   SYS_INTAKE_GATE_TRIGGER_NAMES,
   SYS_INTAKE_GATE_TRIGGERS_SQL,

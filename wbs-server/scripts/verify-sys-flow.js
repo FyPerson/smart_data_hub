@@ -68,10 +68,18 @@ function call(method, path, tok, body) {
 
 let passed = 0;
 const ok = (m) => { passed++; console.log('  ✓ ' + m); };
+// 2026-08-01：硬编码未来日期到期（ESTIMATE_BEFORE_ASSIGN 时限炸弹），改动态生成——远期字面量迟早到期，勿回退此写法
+function futureEst(days) {
+  const d = new Date(Date.now() + days * 86400000);
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+const EST = futureEst(30);
+// ⚠️ '2020-01-01 10:00' 是刻意的过去时刻（测「早于 assigned_at」400 负例），永远合法地"早于现在"，不属时限炸弹，不改。
 
 // 用端点建一个 feature 单并推进到指定状态（admin 视角），返回 id
 async function seedToDevInProgress(assignTo = 5) {
-  let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 't', system_name: 'BMS', source: '内部' });
+  let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 't', system_name: 'BMS', source: '内部', description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13 });
   assert.strictEqual(r.status, 201, '建单 201, got ' + r.status);
   const id = r.body.id;
   // ⭐ 角色权限重构 C2.5 撤销（v2.1）：建单直落「待受理」，无需再走预沟通段。
@@ -92,8 +100,10 @@ async function main() {
   mod.initSchema();
   await waitReady();
   // seed users 表（assign 端点校验被指派人存在 + 非 viewer）
-  await run(`CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT)`);
-  await run(`INSERT INTO users (id, username, display_name, role) VALUES (1,'admin','管理员','admin'),(5,'dev','开发王','user'),(6,'dev2','开发李','user'),(9,'viewer','查看者','viewer')`);
+  // 建单优化批 C3b（方案 §6c）：主建单端点需求方三字段全空时会 SELECT users.phone 做固化——
+  //   users 夹具须含该列，否则撞 SQLITE_ERROR: no such column: phone（本次一并补齐）。
+  await run(`CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT, status TEXT DEFAULT 'active', phone TEXT)`);
+  await run(`INSERT INTO users (id, username, display_name, role) VALUES (1,'admin','管理员','admin'),(5,'dev','开发王','user'),(6,'dev2','开发李','user'),(9,'viewer','查看者','viewer'),(13,'wangtaotao','示例对接人','user')`);
 
   const app = express();
   app.use(express.json());
@@ -112,7 +122,7 @@ async function main() {
     assert.strictEqual(r.body.code, 'INVALID_ESTIMATE');
     ok('estimate：非法时间格式「随便」→ 400 INVALID_ESTIMATE');
     // 非本人开发 estimate → 403
-    r = await call('POST', `/api/sys-issues/${id1}/estimate`, dev2Tok, { dev_estimated_at: '2026-08-01 10:00' });
+    r = await call('POST', `/api/sys-issues/${id1}/estimate`, dev2Tok, { dev_estimated_at: EST });
     assert.strictEqual(r.status, 403, 'estimate 非本人 403');
     ok('estimate：非本人开发（dev6≠assignee）→ 403 NOT_AUTHORIZED_FOR_TRANSITION');
     // 早于 assigned_at → 400（assigned_at 是 datetime now，传 2020 必早）
@@ -121,16 +131,16 @@ async function main() {
     assert.strictEqual(r.body.code, 'ESTIMATE_BEFORE_ASSIGN');
     ok('estimate：早于 assigned_at（2020）→ 400 ESTIMATE_BEFORE_ASSIGN');
     // 合法 estimate（本人）→ 200，不改 status（仍开发中）
-    r = await call('POST', `/api/sys-issues/${id1}/estimate`, devTok, { dev_estimated_at: '2026-08-01 10:00' });
+    r = await call('POST', `/api/sys-issues/${id1}/estimate`, devTok, { dev_estimated_at: EST });
     assert.strictEqual(r.status, 200, 'estimate 合法 200');
     const d1 = await get('SELECT status, dev_estimated_at FROM sys_issues WHERE id=?', [id1]);
     assert.strictEqual(d1.status, '开发中', 'estimate 不改 status');
-    assert.strictEqual(d1.dev_estimated_at, '2026-08-01 10:00', 'dev_estimated_at 规范化入库');
+    assert.strictEqual(d1.dev_estimated_at, EST, 'dev_estimated_at 规范化入库');
     ok('estimate：本人 + 合法时间 → 200，不改 status（仍开发中）+ dev_estimated_at 入库');
     // codex 15b L-1：assigned_at 缺失保护——造一个"开发中但 assigned_at 空"的脏单，estimate 应 409 ASSIGNED_AT_MISSING
     const dirtyId = await seedToDevInProgress(5);
     await run('UPDATE sys_issues SET assigned_at = NULL WHERE id=?', [dirtyId]);   // 模拟 import/人工修库脏单
-    r = await call('POST', `/api/sys-issues/${dirtyId}/estimate`, devTok, { dev_estimated_at: '2026-08-01 10:00' });
+    r = await call('POST', `/api/sys-issues/${dirtyId}/estimate`, devTok, { dev_estimated_at: EST });
     assert.strictEqual(r.status, 409, 'assigned_at 空脏单 estimate 409, got ' + r.status);
     assert.strictEqual(r.body.code, 'ASSIGNED_AT_MISSING', 'assigned_at 空应 ASSIGNED_AT_MISSING');
     ok('L-1(复)：estimate assigned_at 缺失脏单 → 409 ASSIGNED_AT_MISSING（防绕过 >=assigned_at 闸门）');
@@ -148,7 +158,7 @@ async function main() {
 
     // ── [3] return（打回，return_count++）──
     const id2 = await seedToDevInProgress(5);
-    await call('POST', `/api/sys-issues/${id2}/estimate`, devTok, { dev_estimated_at: '2026-08-01 10:00' });
+    await call('POST', `/api/sys-issues/${id2}/estimate`, devTok, { dev_estimated_at: EST });
     await call('POST', `/api/sys-issues/${id2}/submit`, devTok, { mode: 'no_code', no_code_reason: '交付（占位理由）' });
     r = await call('POST', `/api/sys-issues/${id2}/return`, adminTok, { reason: '列不齐' });
     assert.strictEqual(r.status, 200, 'return 200');   // L-1
@@ -220,7 +230,7 @@ async function main() {
     //   受理人/技术负责人咨询夹具；改用 bug 类型保留"直接拒绝→reactivate"这条最简路径（bug 的
     //   issue_reject 现状不变：仅 admin、无前置守卫），本组要测的 reactivate 白名单/reopen_count/
     //   intake_required 三条不变量与 type 无关。
-    let rr = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'reject测', system_name: 'BMS', source: '内部' });
+    let rr = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'reject测', system_name: 'BMS', source: '内部', description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13 });
     const id5 = rr.body.id;   // C0 后：待受理 + intake_required=1
     r = await call('POST', `/api/sys-issues/${id5}/issue-reject`, adminTok, { reason: '不做' });
     assert.strictEqual(r.status, 200, 'issue-reject 200 (待受理→已拒绝)');   // L-1

@@ -64,10 +64,17 @@ function call(method, path, tok, body) {
 
 let passed = 0;
 const ok = (m) => { passed++; console.log('  ✓ ' + m); };
+// 2026-08-01：硬编码未来日期到期（ESTIMATE_BEFORE_ASSIGN 时限炸弹），改动态生成——远期字面量迟早到期，勿回退此写法
+function futureEst(days) {
+  const d = new Date(Date.now() + days * 86400000);
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+const EST = futureEst(30);
 
 // 建单（可带 needs_feasibility）→ assign → 开发中，返回 id（受理排期改造：schedule 退场·建单直落待指派）
 async function seedToDev(needsFeasibility = 0, assignTo = 5) {
-  let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 't', system_name: 'BMS', source: '内部', needs_feasibility: needsFeasibility });
+  let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 't', system_name: 'BMS', source: '内部', description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13, needs_feasibility: needsFeasibility });
   assert.strictEqual(r.status, 201, '建单 201, got ' + r.status + ' ' + JSON.stringify(r.body));
   const id = r.body.id;
   // ⭐ 角色权限重构 C2.5 撤销（v2.1）：建单直落「待受理」，无需再走预沟通段。
@@ -83,7 +90,7 @@ async function seedToDev(needsFeasibility = 0, assignTo = 5) {
 
 // 模拟 F2b /feasibility 端点写入（F2a 阶段端点未实现，直接改库注入评估/受阻字段）
 async function fillFeasibility(id, { conclusion = null, requirement_confirm = null, risk = null,
-  dev_estimated_at = '2026-08-01 10:00', blocked = 0, blocked_reason = null, blocked_at = null } = {}) {
+  dev_estimated_at = EST, blocked = 0, blocked_reason = null, blocked_at = null } = {}) {
   await run(`UPDATE sys_issues SET feasibility_conclusion=?, feasibility_requirement_confirm=?, feasibility_risk=?,
                 dev_estimated_at=?, blocked=?, blocked_reason=?, blocked_at=? WHERE id=?`,
     [conclusion, requirement_confirm, risk, dev_estimated_at, blocked, blocked_reason, blocked_at, id]);
@@ -92,8 +99,10 @@ async function fillFeasibility(id, { conclusion = null, requirement_confirm = nu
 async function main() {
   mod.initSchema();
   await waitReady();
-  await run(`CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT)`);
-  await run(`INSERT INTO users (id, username, display_name, role) VALUES (1,'admin','管理员','admin'),(5,'dev','开发王','user'),(6,'dev2','开发李','user'),(9,'viewer','查看者','viewer')`);
+  // 建单优化批 C3b（方案 §6c）：主建单端点需求方三字段全空时会 SELECT users.phone 做固化——
+  //   users 夹具须含该列，否则撞 SQLITE_ERROR: no such column: phone（本次一并补齐）。
+  await run(`CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT, status TEXT DEFAULT 'active', phone TEXT)`);
+  await run(`INSERT INTO users (id, username, display_name, role) VALUES (1,'admin','管理员','admin'),(5,'dev','开发王','user'),(6,'dev2','开发李','user'),(9,'viewer','查看者','viewer'),(13,'wangtaotao','示例对接人','user')`);
 
   const app = express();
   app.use(express.json());
@@ -105,19 +114,19 @@ async function main() {
 
   try {
     // ── [A] 建单 needs_feasibility 入库（§4.5 / 开放④建单后锁定）──
-    let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: '需评估', system_name: 'BMS', source: '内部', needs_feasibility: 1 });
+    let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: '需评估', system_name: 'BMS', source: '内部', description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13, needs_feasibility: 1 });
     assert.strictEqual(r.status, 201, '建单 needs_feasibility=1 → 201');
     let d = await get('SELECT needs_feasibility FROM sys_issues WHERE id=?', [r.body.id]);
     assert.strictEqual(d.needs_feasibility, 1, 'needs_feasibility=1 入库');
     ok('[A1] 建单 needs_feasibility=1（feature）→ 入库 needs_feasibility=1');
 
-    r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: '不评估', system_name: 'BMS', source: '内部' });
+    r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: '不评估', system_name: 'BMS', source: '内部', description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13 });
     d = await get('SELECT needs_feasibility FROM sys_issues WHERE id=?', [r.body.id]);
     assert.strictEqual(d.needs_feasibility, 0, '不传默认 needs_feasibility=0');
     ok('[A2] 建单不传 needs_feasibility（feature）→ 默认 0');
 
     // [A3] L-2（codex 19）：建单传非法 needs_feasibility（非 0/1 真值串）→ 400 INVALID_NEEDS_FEASIBILITY（失败响亮不静默落 0）
-    r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: '非法nf', system_name: 'BMS', source: '内部', needs_feasibility: 'yes' });
+    r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: '非法nf', system_name: 'BMS', source: '内部', description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13, needs_feasibility: 'yes' });
     assert.strictEqual(r.status, 400, '非法 needs_feasibility 400, got ' + r.status);
     assert.strictEqual(r.body.code, 'INVALID_NEEDS_FEASIBILITY', 'got ' + (r.body && r.body.code));
     ok('[A3] 建单 needs_feasibility=非法值「yes」→ 400 INVALID_NEEDS_FEASIBILITY（输入收窄，不静默落 0）');
@@ -132,7 +141,7 @@ async function main() {
 
     // ── [C] needs_feasibility=0 场景下 estimate 正常 + submit 结构性放行（新模型已不查 feasibility，恒放行）──
     const idC = await seedToDev(0);
-    r = await call('POST', `/api/sys-issues/${idC}/estimate`, devTok, { dev_estimated_at: '2026-08-01 10:00' });
+    r = await call('POST', `/api/sys-issues/${idC}/estimate`, devTok, { dev_estimated_at: EST });
     assert.strictEqual(r.status, 200, 'needs_feasibility=0 estimate 200, got ' + r.status);
     r = await call('POST', `/api/sys-issues/${idC}/submit`, devTok, { mode: 'no_code', no_code_reason: 'feasibility 测试占位理由' });
     assert.strictEqual(r.status, 200, 'needs_feasibility=0 submit 放行, got ' + r.status + ' ' + JSON.stringify(r.body));
@@ -140,7 +149,7 @@ async function main() {
 
     // ── [D] estimate 封口（needs_feasibility=1，codex 17 M-6）──
     const idD = await seedToDev(1);
-    r = await call('POST', `/api/sys-issues/${idD}/estimate`, devTok, { dev_estimated_at: '2026-08-01 10:00' });
+    r = await call('POST', `/api/sys-issues/${idD}/estimate`, devTok, { dev_estimated_at: EST });
     assert.strictEqual(r.status, 409, 'needs_feasibility=1 estimate 409, got ' + r.status);
     assert.strictEqual(r.body.code, 'ESTIMATE_REQUIRES_FEASIBILITY', 'got ' + (r.body && r.body.code));
     ok('[D1] needs_feasibility=1 → estimate 409 ESTIMATE_REQUIRES_FEASIBILITY（预计只能评估端写）');
@@ -162,7 +171,7 @@ async function main() {
 
     // F-return：完整评估 → submit → 造 blocked → return → 清
     const idF2 = await seedToDev(1, 5);
-    await fillFeasibility(idF2, { dev_estimated_at: '2026-08-01 10:00', conclusion: '可行', requirement_confirm: '懂了' });
+    await fillFeasibility(idF2, { dev_estimated_at: EST, conclusion: '可行', requirement_confirm: '懂了' });
     r = await call('POST', `/api/sys-issues/${idF2}/submit`, devTok, { mode: 'no_code', no_code_reason: 'feasibility 测试占位理由' });
     assert.strictEqual(r.status, 200, 'F2 submit 200, got ' + r.status + ' ' + JSON.stringify(r.body));
     await run(`UPDATE sys_issues SET blocked=1, blocked_reason='x' WHERE id=?`, [idF2]);   // 造受阻残留测 return 清理覆盖
@@ -180,7 +189,7 @@ async function main() {
 
     // F-reopen：开发中→已关闭+填评估 → reopen → 清
     const idF3 = await seedToDev(1, 5);
-    await fillFeasibility(idF3, { dev_estimated_at: '2026-08-01 10:00', conclusion: '可行', requirement_confirm: '懂了', blocked: 1, blocked_reason: 'x' });
+    await fillFeasibility(idF3, { dev_estimated_at: EST, conclusion: '可行', requirement_confirm: '懂了', blocked: 1, blocked_reason: 'x' });
     await run("UPDATE sys_issues SET status='已关闭', accepted_at='2026-01-01', closed_at='2026-01-02' WHERE id=?", [idF3]);
     r = await call('POST', `/api/sys-issues/${idF3}/reopen`, adminTok, { reason: '回归' });
     assert.strictEqual(r.status, 200, 'reopen 200, got ' + r.status);

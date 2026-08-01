@@ -81,12 +81,19 @@ function call(method, p, tok, body) {
 
 let passed = 0;
 const ok = (m) => { passed++; console.log('  ✓ ' + m); };
-const EST = '2026-08-01 10:00';
+// codex 221a HIGH 收口（验证层残余日期字面量·P4 教训漏网）：硬编码 '2026-08-01 10:00' 已随日历滚到
+// 当天到期（ESTIMATE_BEFORE_ASSIGN 时限炸弹），改动态生成——远期字面量迟早到期，勿回退此写法。
+function futureEst(days) {
+  const d = new Date(Date.now() + days * 86400000);
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+const EST = futureEst(30);
 
 // 建 bug 单 → 受理 →「待处理」（未指派），返回 id
 //   ⚠️ 每一步都断言（codex C1 审 MED）：夹具里静默吞掉 4xx 会让后续断言在错误前置态上"假绿"。
 async function createBug(extra = {}) {
-  const r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'bug单', system_name: 'BMS', source: '内部', ...extra });
+  const r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'bug单', system_name: 'BMS', source: '内部', description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13, ...extra });
   assert.strictEqual(r.status, 201, '建 bug 单 201, got ' + r.status + ' ' + JSON.stringify(r.body));
   // ⭐ 角色权限重构 C0：建单恒落「待受理」→ 补一步受理，落态回到旧的 待处理（下游断言不变）
   const acc = await call('POST', `/api/sys-issues/${r.body.id}/intake-accept`, adminTok, {});
@@ -100,7 +107,7 @@ async function createBug(extra = {}) {
 
 // ⭐ C1：建 feature 单并受理到「待指派」（C0 后建单恒落待受理·assign.from=待指派）
 async function createFeatureAssignable() {
-  const r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 'feat可指派单', system_name: 'BMS', source: '内部' });
+  const r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 'feat可指派单', system_name: 'BMS', source: '内部', description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13 });
   assert.strictEqual(r.status, 201, '建 feature 单 201, got ' + r.status + ' ' + JSON.stringify(r.body));
   const id = r.body.id;
   // ⭐ 角色权限重构 C2.5 撤销（v2.1）：变更流建单直落「待受理」，无需再走预沟通段。
@@ -118,7 +125,7 @@ async function main() {
   mod.initSchema();
   await waitReady();
   // users 表（assign/reassign 端点查 users 校验被指派人）
-  await run(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT, phone TEXT, dingtalk_user_id TEXT)`);
+  await run(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT, status TEXT DEFAULT 'active', phone TEXT, dingtalk_user_id TEXT)`);
   await run(`INSERT INTO users (id, username, display_name, role) VALUES
     (1,'admin','管理员','admin'),(5,'dev','开发王','user'),(6,'dev2','开发李','user'),
     (7,'shenjun','示例发布者','publisher'),(13,'wangtaotao','示例对接人','user'),(9,'viewer','观察员','viewer')`);
@@ -215,10 +222,18 @@ async function main() {
     // ── [P3] 不越界：受理人拿到的是"协调人"权，不是泛化 admin 权 ──
     //   accept/close/hold 等仍 requireAdmin —— C1 只收敛「指派/改派/成员/附件/通知」这一族，
     //   验收与上线编排仍属甲方 admin（方案 v1.5 §3 角色模型）。
+    // codex 221a HIGH 收口：assign/estimate/submit 三步原本零断言（静默失败也不会暴露）——本组的
+    //   403 断言只检验权限门（accept 需 admin），与前置三步是否真的成功推进到「待验证」无关，故此前
+    //   estimate 因日期字面量到期而 400、submit 因 body 契约过时（旧 `{summary}` 早被 W05 多开发
+    //   commit 模型取代为 `{mode,...}`）而 400，两条真实回归都被侥幸放行的 403 断言掩盖了（同 P4
+    //   mutex 夹具的吞码漂移同款问题）。三步补上返回值断言，让类似回归当场炸出。
     let id3 = await createBug();
-    await call('POST', `/api/sys-issues/${id3}/assign`, adminTok, { assigned_to: 5 });
-    await call('POST', `/api/sys-issues/${id3}/estimate`, devTok, { dev_estimated_at: EST });
-    await call('POST', `/api/sys-issues/${id3}/submit`, devTok, { summary: '修复完成' });   // → 待验证
+    const rAssign3 = await call('POST', `/api/sys-issues/${id3}/assign`, adminTok, { assigned_to: 5 });
+    assert.strictEqual(rAssign3.status, 200, `[P3] 夹具 assign 200, got ${rAssign3.status} ${JSON.stringify(rAssign3.body)}`);
+    const rEst3 = await call('POST', `/api/sys-issues/${id3}/estimate`, devTok, { dev_estimated_at: EST });
+    assert.strictEqual(rEst3.status, 200, `[P3] 夹具 estimate 200, got ${rEst3.status} ${JSON.stringify(rEst3.body)}`);
+    const rSubmit3 = await call('POST', `/api/sys-issues/${id3}/submit`, devTok, { mode: 'no_code', no_code_reason: '修复完成（占位理由）' });   // → 待验证
+    assert.strictEqual(rSubmit3.status, 200, `[P3] 夹具 submit 200, got ${rSubmit3.status} ${JSON.stringify(rSubmit3.body)}`);
     let r3 = await call('POST', `/api/sys-issues/${id3}/accept`, liaison2Tok, {});
     assert.strictEqual(r3.status, 403, '⭐ 受理人(13) accept 应 403（验收仍属 admin·不获泛化写权限）');
     r3 = await call('POST', `/api/sys-issues/${id3}/accept`, liaison1Tok, {});
@@ -309,7 +324,7 @@ async function main() {
     assert.strictEqual(r.body.related_correction, null, '无 related_correction_no → related_correction=null');
 
     // >100 字拒 400
-    r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'x', system_name: 'BMS', source: '内部', related_correction_no: 'A'.repeat(101) });
+    r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'x', system_name: 'BMS', source: '内部', description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13, related_correction_no: 'A'.repeat(101) });
     assert.strictEqual(r.status, 400, '>100 字关联单号拒 400');
     assert.strictEqual(r.body.code, 'RELATED_CORRECTION_NO_TOO_LONG', '400 code=RELATED_CORRECTION_NO_TOO_LONG');
     ok('[R] 关联单号：落库 + 软查 active/voided/oa_number/not_found/datafix + matched_by 消歧(M-2) + 边界输入 trim/前导零/全零(L-2) + 无值 null + >100 拒 400');

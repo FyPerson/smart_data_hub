@@ -74,9 +74,11 @@ const ok = (m) => { passed++; console.log('  ✓ ' + m); };
 async function main() {
   mod.initSchema();
   await waitReady();
-  await run(`CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT)`);
+  // 建单优化批 C3b（方案 §6c）：主建单端点需求方三字段全空时会 SELECT users.phone 做固化——
+  //   users 夹具须含该列，否则撞 SQLITE_ERROR: no such column: phone（本次一并补齐）。
+  await run(`CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT, status TEXT DEFAULT 'active', phone TEXT)`);
   await run(`INSERT INTO users (id, username, display_name, role) VALUES
-    (1,'admin','管理员','admin'), (5,'devwang','开发王','user'), (6,'devli','开发李','user')`);
+    (1,'admin','管理员','admin'), (5,'devwang','开发王','user'), (6,'devli','开发李','user'), (13,'wangtaotao','示例对接人','user')`);
   await new Promise((resolve) => { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = app.listen(0, () => { port = server.address().port; resolve(); }); });
 
   // ── 种子1：raw SQL 直插（C2-C7 写入口未接线，只能绕过写路径造数据）──────────
@@ -230,12 +232,12 @@ async function main() {
   // [4a] ⭐ 角色权限重构 C0：path A（建单同时指派）**结构性关闭**——受理门恒开 ⟹ 400 INTAKE_WITH_ASSIGN_CONFLICT。
   //   原断言"path A 建单响应的 dev_assignees[0] 含全部镜像列"随之作废；**镜像列覆盖未丢失**——
   //   建单已不可能带 dev_assignees，该镜像契约的唯一入口是 assign 端点，由紧邻的 [4b] 完整覆盖。
-  r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'C1镜像-pathA', system_name: 'BMS', source: '内部', assign_mode: 'A', assigned_to: 5 });
+  r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'C1镜像-pathA', system_name: 'BMS', source: '内部', description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13, assign_mode: 'A', assigned_to: 5 });
   assert.strictEqual(r.status, 400, `C0：path A 建单应 400，实际 ${r.status} ${JSON.stringify(r.body)}`);
   assert.strictEqual(r.body.code, 'INTAKE_WITH_ASSIGN_CONFLICT', 'C0：path A code=INTAKE_WITH_ASSIGN_CONFLICT');
 
   // [4b] assign（既有覆盖，保留）
-  r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 'C1镜像-assign', system_name: 'BMS', source: '内部' });
+  r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 'C1镜像-assign', system_name: 'BMS', source: '内部', description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13 });
   assert.strictEqual(r.status, 201, `建单应 201，实际 ${r.status} ${JSON.stringify(r.body)}`);
   const issue2 = r.body.id;
   // ⭐ 角色权限重构 C2.5 撤销（v2.1）：变更流建单直落「待受理」，无需再走预沟通段，直接受理。
@@ -252,7 +254,7 @@ async function main() {
   // [4c] reassign（C2 破坏性变更：改声明式最终 roster member_ids+reason，见方案 §3；本文件既有测试变更清单——
   //   原用 newAssignedTo/oldAssignedTo 换主语义）：先建单→排期→指派 5 号推进到「开发中」，再改派到仅 [6]
   //   （移除 5、新增 6）触发一次差量。
-  r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 'C1镜像-reassign', system_name: 'BMS', source: '内部' });
+  r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 'C1镜像-reassign', system_name: 'BMS', source: '内部', description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13 });
   assert.strictEqual(r.status, 201, `建单应 201，实际 ${r.status} ${JSON.stringify(r.body)}`);
   const issue4 = r.body.id;
   // ⭐ 角色权限重构 C2.5 撤销（v2.1）：变更流建单直落「待受理」，无需再走预沟通段，直接受理。

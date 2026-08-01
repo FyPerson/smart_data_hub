@@ -131,6 +131,7 @@ async function assertInvariant(label) {
 
 const createBug = (extra) => call('POST', '/api/sys-issues', adminTok,
   { intake_contract_version: CONTRACT_V, type: 'bug', title: 'C2b 测试单', system_name: 'BMS', source: '内部',
+    description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13,
     requester_name: '业务小王', requester_phone: '13900000001', ...extra });
 
 // 把单据推到指定状态（直改 DB —— 本脚本焦点是 sent_by 落库，不重复测状态机）
@@ -139,7 +140,7 @@ const setStatus = (id, status) => run(`UPDATE sys_issues SET status=? WHERE id=?
 async function main() {
   mod.initSchema();
   await waitReady();
-  await run(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT, phone TEXT, dingtalk_user_id TEXT)`);
+  await run(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT, status TEXT DEFAULT 'active', phone TEXT, dingtalk_user_id TEXT)`);
   await run(`INSERT INTO users (id, username, display_name, role, phone, dingtalk_user_id) VALUES
     (1,'admin','管理员','admin','13800000001','ding1'),(2,'admin2','第二管理员','admin','13800000002','ding2'),
     (5,'dev','开发王','user','13800000005','ding5'),(6,'dev6','开发李','user','13800000006','ding6'),

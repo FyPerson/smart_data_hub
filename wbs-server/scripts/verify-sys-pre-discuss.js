@@ -115,7 +115,8 @@ let passed = 0;
 const ok = (m) => { passed++; console.log('  ✓ ' + m); };
 
 const create = (type, extra = {}) => call('POST', '/api/sys-issues', adminTok,
-  { intake_contract_version: 2, type, title: `${type}-v2.1`, system_name: 'BMS', source: '内部', ...extra });
+  { intake_contract_version: 2, type, title: `${type}-v2.1`, system_name: 'BMS', source: '内部',
+    description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13, ...extra });
 const statusOf = async (id) => (await get('SELECT status FROM sys_issues WHERE id=?', [id])).status;
 const consult = (id, tok = liaisonTok) => call('POST', `/api/sys-issues/${id}/request-tech-consult`, tok, { tech_lead_id: 7 });
 const currentRound = async (id) => {

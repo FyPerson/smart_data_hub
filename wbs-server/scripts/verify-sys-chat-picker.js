@@ -72,7 +72,7 @@ let passed = 0; const ok = (m) => { passed++; console.log('  ✓ ' + m); };
 
 // 建 bug（admin 建=created_by 1）→ 指派 dev5 → 处理中；带报障人手机号
 async function seedBug(reqPhone) {
-  const r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'b', system_name: 'BMS', source: '内部', requester_name: '赵报障', requester_phone: reqPhone });
+  const r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'b', system_name: 'BMS', source: '内部', description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13, requester_name: '赵报障', requester_phone: reqPhone });
   const id = r.body.id;
   // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
   await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, {});
@@ -94,7 +94,11 @@ async function main() {
     (9,'nophone','无手机','user',NULL,NULL,'active'),
     (10,'viewer','观察员','viewer','13100000000',NULL,'active'),
     (11,'inact','离职','user','13200000000',NULL,'disabled'),
-    (12,'ndf','钉钉查无','user','${NOTFOUND_PHONE}',NULL,'active')`);
+    (12,'ndf','钉钉查无','user','${NOTFOUND_PHONE}',NULL,'active'),
+    (13,'wangtaotao','示例对接人','user',NULL,NULL,'active')`);
+    // ⚠️ 13 号（示例对接人/intake_liaison_id 唯一受理人）刻意不给手机号——resolveActiveSysIntakeLiaisons()
+    //   只判 status='active'，不判 phone；给了手机号会被本组 [Cand] 候选枚举误收（本组测的是 chat-candidates
+    //   候选池，与 intake_liaison_id 无关，不应因新增受理人夹具而改变其精确枚举断言 [7,8,12]）。
   const app = express(); app.use(express.json()); app.use('/api', mod.router);
   await new Promise(res => { server = app.listen(0, '127.0.0.1', res); });
   port = server.address().port;
@@ -128,7 +132,7 @@ async function main() {
     let r = await call('GET', `/api/sys-issues/${id}/chat-candidates`, dev6);
     assert.strictEqual(r.status, 403, '[Cand-auth] 非 admin/assignee → 403');
     // feature 单 → 409 CHAT_ONLY_FOR_BUG
-    const rf = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 'f', system_name: 'BMS', source: '内部' });
+    const rf = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 'f', system_name: 'BMS', source: '内部', description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13 });
     await call('POST', `/api/sys-issues/${rf.body.id}/schedule`, adminTok, {});
     await call('POST', `/api/sys-issues/${rf.body.id}/assign`, adminTok, { assigned_to: 5 });
     r = await call('GET', `/api/sys-issues/${rf.body.id}/chat-candidates`, adminTok);

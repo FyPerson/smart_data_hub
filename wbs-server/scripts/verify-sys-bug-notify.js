@@ -96,14 +96,20 @@ function call(method, p, tok, body) {
 }
 let passed = 0;
 const ok = (m) => { passed++; console.log('  ✓ ' + m); };
-const EST = '2026-08-01 10:00';
+// 2026-08-01：硬编码未来日期到期（ESTIMATE_BEFORE_ASSIGN 时限炸弹），改动态生成——远期字面量迟早到期，勿回退此写法
+function futureEst(days) {
+  const d = new Date(Date.now() + days * 86400000);
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+const EST = futureEst(30);
 const PHONE = '13800000000';
 const nStatus = async (id) => (await get('SELECT notify_status FROM sys_issues WHERE id=?', [id])).notify_status;
 const rStatus = async (id) => (await get('SELECT requester_notify_status FROM sys_issues WHERE id=?', [id])).requester_notify_status;
 const devRowStatus = async (issueId, userId) => (await get('SELECT notify_status FROM sys_issue_dev_assignees WHERE issue_id=? AND user_id=? AND removed_at IS NULL', [issueId, userId])).notify_status;
 
 async function createBug(extra = {}) {
-  const r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'bug', system_name: 'BMS', source: '内部', ...extra });
+  const r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'bug', system_name: 'BMS', source: '内部', description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13, ...extra });
   assert.strictEqual(r.status, 201, '建 bug 201 ' + JSON.stringify(r.body));
   // ⭐ 角色权限重构 C0：建单恒落「待受理」→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
   await call('POST', `/api/sys-issues/${r.body.id}/intake-accept`, adminTok, {});
@@ -163,7 +169,7 @@ async function bugToPrereleaseWithExecutor(devId = 5, execId = 6, extra = {}) {
 async function main() {
   mod.initSchema();
   await waitReady();
-  await run(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT, phone TEXT, dingtalk_user_id TEXT)`);
+  await run(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT, status TEXT DEFAULT 'active', phone TEXT, dingtalk_user_id TEXT)`);
   await run(`INSERT INTO users (id, username, display_name, role, phone, dingtalk_user_id) VALUES
     (1,'admin','管理员','admin',NULL,NULL),(5,'dev','开发王','user','13900000000','du5'),
     (6,'dev2','开发李','user','13600000000','du6'),(7,'shenjun','示例发布者','publisher','13700000000','du7'),
@@ -358,7 +364,7 @@ async function main() {
     //     关闭后该列在新单上永不写值 → notify-relay 端点在 C0 后只服务历史单（生产零单据 ⟹ 实质不可达）。
     //     本方案 §2.7 判定 relay 属"低危·保持不动"，故端点与其防御纵深**保留**，此处继续回归其行为，
     //     夹具改用 DB 直接置列（沿用本文件既有范式，见下方"白名单外脏数据"用例）。端点是否随 C1/C5 退场另议。
-    let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'relay-a', system_name: 'BMS', source: '内部', assign_mode: 'B', relay_user_id: 7 });
+    let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'relay-a', system_name: 'BMS', source: '内部', description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13, assign_mode: 'B', relay_user_id: 7 });
     assert.strictEqual(r.status, 400, '[Relay] C0：path B 建单应 400 ' + JSON.stringify(r.body));
     assert.strictEqual(r.body.code, 'INTAKE_WITH_ASSIGN_CONFLICT', '[Relay] C0：path B code=INTAKE_WITH_ASSIGN_CONFLICT');
 
@@ -444,7 +450,7 @@ async function main() {
     assert.strictEqual(r.body.code, 'LEGACY_RELEASE_FLOW_DISABLED', '[RelExec·封禁契约] 主开发 code=LEGACY_RELEASE_FLOW_DISABLED');
 
     // feature 单（封禁前本该 400 MANUAL_NOTIFY_BUG_ONLY 的场景）→ 同样 409（封禁在类型校验之前）
-    const rf = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 'feat-relexec', system_name: 'BMS', source: '内部' });
+    const rf = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 'feat-relexec', system_name: 'BMS', source: '内部', description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13 });
     r = await call('POST', `/api/sys-issues/${rf.body.id}/notify-release-executor`, adminTok);
     assert.strictEqual(r.status, 409, `[RelExec·封禁契约] feature 单也应 409（封禁在类型校验之前）, got ${r.status} ${JSON.stringify(r.body)}`);
     assert.strictEqual(r.body.code, 'LEGACY_RELEASE_FLOW_DISABLED', '[RelExec·封禁契约] feature code=LEGACY_RELEASE_FLOW_DISABLED');
@@ -543,7 +549,7 @@ async function main() {
   //   建变更流单并推到「待验证」（此态 developer/creator/requester 三通道均在白名单，便于一处覆盖 3 通道成功）：
   //   建单→schedule→assign(dev6)→estimate(dev6)→submit(no_code)→到待验证。
   const seedChangeToVerifying = async (type, extra = {}) => {
-    let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type, title: type + '-t', system_name: 'BMS', source: '内部', requester_phone: PHONE, ...extra });
+    let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type, title: type + '-t', system_name: 'BMS', source: '内部', description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13, requester_phone: PHONE, ...extra });
     const cid = r.body.id;
   // ⭐ 角色权限重构 C2.5 撤销（v2.1）：本 seed 专服务**变更流**（feature/improvement）→ 建单直落「待受理」，
   //   无需再走预沟通段，直接接既有受理一步。
@@ -605,7 +611,7 @@ async function main() {
   }
   // 状态门：变更流 developer 在「开发中」允许、在终态拒绝（相邻状态精确覆盖·codex M3）
   {
-    let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 'feat-st', system_name: 'BMS', source: '内部' });
+    let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 'feat-st', system_name: 'BMS', source: '内部', description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13 });
     const fid = r.body.id;
   // ⭐ 角色权限重构 C2.5 撤销（v2.1）：变更流建单直落「待受理」，无需再走预沟通段，直接受理。
   // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
@@ -651,7 +657,7 @@ async function main() {
     assert.strictEqual(r.status, 403, '[P] 非白名单非 admin notify-developer → 403');
     assert.strictEqual(r.body.code, 'NOT_ADMIN_OR_INTAKE_LIAISON', '[P] code=NOT_ADMIN_OR_INTAKE_LIAISON');
     // relay：仅 admin，白名单成员（对接人）不可发（G7 §3.1：对接人不能发 notify-relay 给自己）
-    let r2 = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'relay-p', system_name: 'BMS', source: '内部', assign_mode: 'B', relay_user_id: 7 });
+    let r2 = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'relay-p', system_name: 'BMS', source: '内部', description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13, assign_mode: 'B', relay_user_id: 7 });
     const idB = r2.body.id;
   // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
     await call('POST', `/api/sys-issues/${idB}/intake-accept`, adminTok, {});
@@ -666,7 +672,7 @@ async function main() {
   //   ⚠️ 语义反转（C2a）：原断言"变更流仍自动发 sent"，现 isAutoNotifyEnabled 恒 false → 全 type 不自动派发，
   //   变更流 assign/estimate/reassign/return 后 notify_status/requester_notify_status 保持 not_sent（改由通知区手动触发）。
   const seedChangeAssigned = async (type, devId, extra = {}) => {
-    const rr = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type, title: type + '-canary', system_name: 'BMS', source: '业务方', ...extra });
+    const rr = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type, title: type + '-canary', system_name: 'BMS', source: '业务方', description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13, ...extra });
     const cid = rr.body.id;
   // ⭐ 角色权限重构 C2.5 撤销（v2.1）：本 seed 专服务**变更流**（feature/improvement）→ 建单直落「待受理」，
   //   无需再走预沟通段。

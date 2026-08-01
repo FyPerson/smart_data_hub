@@ -89,6 +89,7 @@ async function main() {
     const mkIssue = async (title, type) => {
         const r = await api(adminTok, 'POST', '/api/sys-issues', {
             type: type || 'feature', title, system_name: '智数协同', source: '内部', intake_contract_version: 2,
+            description: title, intake_liaison_id: 13,
         });
         if (r.status !== 201) throw new Error(`建单失败: ${JSON.stringify(r.body)}`);
         const id = r.body.id;

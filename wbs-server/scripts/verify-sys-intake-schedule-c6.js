@@ -53,7 +53,15 @@ function waitReady() {
 
 const adminTok = jwt.sign({ id: 1, username: 'admin', display_name: '管理员', role: 'admin' }, SECRET);
 const devTok = jwt.sign({ id: 5, username: 'dev', display_name: '开发王', role: 'user' }, SECRET);
-const EST = '2026-08-01 10:00';
+// codex 221a HIGH 收口（验证层残余日期字面量·P4 教训漏网）：硬编码 '2026-08-01 10:00' 已随日历滚到
+// 当天到期——本文件里仅被 seedDevWork 用于 raw SQL 直写 dev_estimated_at（不经 /estimate 端点闸门，
+// 当前潜伏未触发 ESTIMATE_BEFORE_ASSIGN），但远期字面量迟早到期，同 P4 范式统一改动态生成，不留隐患。
+function futureEst(days) {
+  const d = new Date(Date.now() + days * 86400000);
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+const EST = futureEst(30);
 
 let server, port;
 function call(method, p, tok, body) {
@@ -71,7 +79,7 @@ let passed = 0;
 const ok = (m) => { passed++; console.log('  ✓ ' + m); };
 
 async function createIssue(type) {
-  const r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type, title: `${type}单`, system_name: 'BMS', source: '内部' });
+  const r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type, title: `${type}单`, system_name: 'BMS', source: '内部', description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13 });
   assert.strictEqual(r.status, 201, `建 ${type} 单 201, got ${r.status}`);
   return r.body.id;
 }
@@ -88,8 +96,8 @@ async function seedDevWork(type, { estimate = EST, scheduled_start = null } = {}
 async function main() {
   mod.initSchema();
   await waitReady();
-  await run(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT, phone TEXT, dingtalk_user_id TEXT)`);
-  await run(`INSERT INTO users (id, username, display_name, role) VALUES (1,'admin','管理员','admin'),(5,'dev','开发王','user')`);
+  await run(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT, status TEXT DEFAULT 'active', phone TEXT, dingtalk_user_id TEXT)`);
+  await run(`INSERT INTO users (id, username, display_name, role) VALUES (1,'admin','管理员','admin'),(5,'dev','开发王','user'),(13,'wangtaotao','示例对接人','user')`);
   const app = express();
   app.use(express.json());
   app.use('/api', mod.router);

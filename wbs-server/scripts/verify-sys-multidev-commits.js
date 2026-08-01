@@ -66,9 +66,17 @@ function call(method, p, tok, body) {
 
 let passed = 0;
 const ok = (m) => { passed++; console.log('  ✓ ' + m); };
+// codex 221a HIGH 收口（验证层残余日期字面量·全文扫描收尾）：dev_estimated_at 默认值原硬编码
+// '2026-07-01 10:00:00'，本文件是直连 SQL 造数（不经 /estimate 端点闸门，当前潜伏未触发
+// ESTIMATE_BEFORE_ASSIGN），但远期字面量迟早到期，同 P4/221a 范式统一改动态生成，不留隐患。
+function futureEst(days) {
+  const d = new Date(Date.now() + days * 86400000);
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
 
 async function mkIssue(type, status, extra = {}) {
-  const est = extra.devEstimatedAt === null ? null : (extra.devEstimatedAt || '2026-07-01 10:00:00');
+  const est = extra.devEstimatedAt === null ? null : (extra.devEstimatedAt || futureEst(30));
   const r = await run(
     `INSERT INTO sys_issues (type, status, title, system_name, source, created_by, created_by_name, dev_estimated_at)
      VALUES (?, ?, ?, 'BMS', '内部', 1, '管理员', ?)`,

@@ -72,10 +72,16 @@ function upload(p, tok, fields, fileName) {
   });
 }
 let passed = 0; const ok = (m) => { passed++; console.log('  ✓ ' + m); };
+// 2026-08-01：硬编码未来日期到期（ESTIMATE_BEFORE_ASSIGN 时限炸弹），改动态生成——远期字面量迟早到期，勿回退此写法
+function futureEst(days) {
+  const d = new Date(Date.now() + days * 86400000);
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
 
 // 推到「开发中」（create→assign→estimate·受理排期改造：schedule 退场·建单直落待指派），供附件上传
 async function seedInProgress() {
-  const id = (await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 'a', system_name: 'BMS', source: '内部' })).body.id;
+  const id = (await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 'a', system_name: 'BMS', source: '内部', description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13 })).body.id;
   // ⭐ 角色权限重构 C2.5 撤销（v2.1）：建单直落「待受理」，无需再走预沟通段。
   //   ⚠️ 本 seed 原先各步均不断言，一旦前置态错就只在最终断言处露出一个**看不懂的**结果
   //     （C2.5 编码期实测：publish 用例报 [409,409]，真因是 seed 早就断在这里）。新增步一律断言。
@@ -85,12 +91,15 @@ async function seedInProgress() {
   const oa1 = await call('POST', `/api/sys-issues/${id}/set-oa-number`, adminTok, { oa_number: '2026070001' });
   assert.strictEqual(oa1.status, 200, `夹具补 OA 号 200, got ${oa1.status} ${JSON.stringify(oa1.body)}`);
   await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5 });
-  await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: '2026-08-01 10:00' });
+  // 2026-08-01 修复：原调用未断言返回值，estimate 若因日期字面量到期而 400 会被静默吞掉，症状漂移到
+  //   下游（本文件 ②「安排上线」断言处才炸出 RELEASE_EMPTY，掩盖真根因）——补断言让同类问题当场炸出。
+  const estR = await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: futureEst(30) });
+  assert.strictEqual(estR.status, 200, `夹具 seedInProgress estimate 200, got ${estR.status} ${JSON.stringify(estR.body)}`);
   return id;
 }
 
 async function seedToReady() {
-  let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 't', system_name: 'BMS', source: '内部' });
+  let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 't', system_name: 'BMS', source: '内部', description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13 });
   const id = r.body.id;
   // ⭐ 角色权限重构 C2.5 撤销（v2.1）：变更流建单直落「待受理」，无需再走预沟通段·断言不省
   // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
@@ -99,7 +108,10 @@ async function seedToReady() {
   r = await call('POST', `/api/sys-issues/${id}/set-oa-number`, adminTok, { oa_number: '2026070001' });
   assert.strictEqual(r.status, 200, `夹具补 OA 号 200, got ${r.status} ${JSON.stringify(r.body)}`);
   await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5 });
-  await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: '2026-08-01 10:00' });
+  // 2026-08-01 修复：同 seedInProgress，补返回值断言（原静默吞 400 会让本函数产出的"待上线"单实际上
+  //   卡在开发中，症状要到下游用例才炸出）。
+  r = await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: futureEst(30) });
+  assert.strictEqual(r.status, 200, `夹具 seedToReady estimate 200, got ${r.status} ${JSON.stringify(r.body)}`);
   await call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'no_code', no_code_reason: '交付完成（占位理由）' });
   await call('POST', `/api/sys-issues/${id}/accept`, adminTok, {});
   return id;
@@ -111,13 +123,13 @@ async function main() {
   // status 列：C3 后端批新增用例需要 hasReleaseEligibility(userId)（SELECT status, role FROM users），
   //   该函数原不在本文件的 sys 覆盖范围内，users 夹具此前无需 status 列——现补上（DEFAULT 'active'）。
   await run(`CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT, status TEXT DEFAULT 'active', phone TEXT, dingtalk_user_id TEXT)`);
-  await run(`INSERT INTO users (id, username, display_name, role, status) VALUES (1,'admin','管理员','admin','active'),(5,'dev','开发王','user','active')`);
+  await run(`INSERT INTO users (id, username, display_name, role, status) VALUES (1,'admin','管理员','admin','active'),(5,'dev','开发王','user','active'),(13,'wangtaotao','示例对接人','user','active')`);
   await new Promise((res) => { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = app.listen(0, () => { port = server.address().port; res(); }); });
 
   // ── 1. 并发建单（30 并发）：全 201 + id 互异 + 零 500（无 nested-transaction 交错）──────────
   const N = 30;
   const results = await Promise.all(Array.from({ length: N }, (_, k) =>
-    call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 'concurrent-' + k, system_name: 'BMS', source: '内部' })));
+    call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 'concurrent-' + k, system_name: 'BMS', source: '内部', description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13 })));
   const created201 = results.filter(r => r.status === 201);
   const errs500 = results.filter(r => r.status === 500);
   assert.strictEqual(errs500.length, 0, `并发建单不应有 500（nested-transaction），实际 ${errs500.length} 个：` + JSON.stringify(errs500.map(e => e.body)));
@@ -180,7 +192,7 @@ async function main() {
   // ── 3. 并发混合事务（建单 + 建批次 + assign 各 10）：零 500 ──────────
   //   受理排期改造：schedule 退场·并发写目标改用 assign（建单直落待指派→并发指派各进开发中·10 个独立单不互斥）。
   const drafts = await Promise.all(Array.from({ length: 10 }, (_, k) =>
-    call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'improvement', title: 'mix-' + k, system_name: 'OA', source: '内部' })));
+    call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'improvement', title: 'mix-' + k, system_name: 'OA', source: '内部', description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13 })));
   // ⭐ 角色权限重构 C0：建单恒落受理门前段 → 并发 assign 前先串行推到「待指派」（assign 的合法前置态）。
   //   ⭐ v2.1（C2.5 撤销）：improvement 属变更流，建单落「待受理」→ 直接 intake-accept；随后补 OA 号
   //   （assign 前置校验，§4）——三步都串行。
@@ -207,7 +219,7 @@ async function main() {
     const r = await call('POST', `/api/sys-releases/${badRel}/add-issues`, adminTok, { issue_ids: [990000 + k] });   // 不存在/不可加 → 409 inline rollback
     assert.strictEqual(r.status, 409, '不可加单 → 409 inline rollback');
   }
-  const afterErr = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 'after-err', system_name: 'BMS', source: '内部' });
+  const afterErr = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 'after-err', system_name: 'BMS', source: '内部', description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13 });
   assert.strictEqual(afterErr.status, 201, '错误早退 5 次后建单仍 201（inline rollback 未泄漏锁）');
   ok('F3a：事务内错误早退后建单成功（inline sysRollback 锁不泄漏）');
 
@@ -216,7 +228,7 @@ async function main() {
   const attRes = await Promise.all([
     ...Array.from({ length: 6 }, (_, k) => upload(`/api/sys-issues/${att1}/attachments`, devTok, { attachment_type: 'delivery' }, `a${k}.png`)),
     ...Array.from({ length: 6 }, (_, k) => upload(`/api/sys-issues/${att2}/attachments`, devTok, { attachment_type: 'delivery' }, `b${k}.png`)),
-    ...Array.from({ length: 6 }, (_, k) => call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 'cc' + k, system_name: 'BMS', source: '内部' })),
+    ...Array.from({ length: 6 }, (_, k) => call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 'cc' + k, system_name: 'BMS', source: '内部', description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13 })),
   ]);
   const att500 = attRes.filter(r => r.status === 500);
   assert.strictEqual(att500.length, 0, '并发上传+建单零 500（附件 INSERT 已纳入 mutex 不交错），实际：' + JSON.stringify(att500.map(e => e.body)));

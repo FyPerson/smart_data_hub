@@ -79,13 +79,13 @@ const ok = (m) => { passed++; console.log('  ✓ ' + m); };
 
 // 建单（admin），可带任意额外字段（intake_required / assign_mode 等）
 function create(extra) {
-  return call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: '测试单', system_name: 'BMS', source: '内部', ...extra });
+  return call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: '测试单', system_name: 'BMS', source: '内部', description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13, ...extra });
 }
 
 async function main() {
   mod.initSchema();
   await waitReady();
-  await run(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT, phone TEXT, dingtalk_user_id TEXT)`);
+  await run(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT, status TEXT DEFAULT 'active', phone TEXT, dingtalk_user_id TEXT)`);
   await run(`INSERT INTO users (id, username, display_name, role, phone) VALUES
     (1,'admin','管理员','admin','13800000001'),(5,'dev','开发王','user','13800000005'),
     (7,'shenjun','示例发布者','publisher','13800000007'),(13,'wangtaotao','示例对接人','user','13800000013')`);

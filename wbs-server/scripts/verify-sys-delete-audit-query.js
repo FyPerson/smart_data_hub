@@ -96,7 +96,8 @@ const okReady = (m) => { passedReadiness++; console.log('  ✓ ' + m); };
 const ok = (m) => { passedBiz++; console.log('  ✓ ' + m); };
 
 const create = (extra = {}) => call('POST', '/api/sys-issues', adminTok,
-  { intake_contract_version: 2, type: 'bug', title: '删除审计测试单', system_name: 'BMS', source: '内部', ...extra });
+  { intake_contract_version: 2, type: 'bug', title: '删除审计测试单', system_name: 'BMS', source: '内部',
+    description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13, ...extra });
 // bug 直落待受理（不走预沟通段），删除守卫①②（派生/批次）在新建单上天然不触发，最省事的夹具选型。
 const del = (id, reason, tok = adminTok) => call('DELETE', `/api/sys-issues/${id}`, tok, { reason });
 

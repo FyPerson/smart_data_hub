@@ -105,7 +105,7 @@ const ok = (m) => { passed++; console.log('  ✓ ' + m); };
 
 // 建单（admin·恒 intake_required=0）→ 直接 UPDATE 播种为「待受理」(intake_required=1)。可指定 createdBy 覆盖建单人。
 async function seedIntakeIssue(type, { status = '待受理', createdBy = null } = {}) {
-  const r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type, title: `${type}单`, system_name: 'BMS', source: '内部' });
+  const r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type, title: `${type}单`, system_name: 'BMS', source: '内部', description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13 });
   assert.strictEqual(r.status, 201, `建 ${type} 单 201, got ${r.status} ${JSON.stringify(r.body)}`);
   const id = r.body.id;
   const sets = ['intake_required = 1', 'status = ?'];
@@ -118,7 +118,7 @@ async function seedIntakeIssue(type, { status = '待受理', createdBy = null } 
 async function main() {
   mod.initSchema();
   await waitReady();
-  await run(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT, phone TEXT, dingtalk_user_id TEXT)`);
+  await run(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT, status TEXT DEFAULT 'active', phone TEXT, dingtalk_user_id TEXT)`);
   await run(`INSERT INTO users (id, username, display_name, role, phone) VALUES
     (1,'admin','管理员','admin','13800000001'),(5,'dev','开发王','user','13800000005'),(6,'dev2','开发李','user','13800000006'),
     (7,'shenjun','示例发布者','publisher','13800000007'),(13,'wangtaotao','示例对接人','user','13800000013')`);

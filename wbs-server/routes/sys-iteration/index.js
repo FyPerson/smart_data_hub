@@ -140,6 +140,16 @@ module.exports = (deps) => {
     //   set-oa-number 的 SET 写它、assign 的 OA 前置守卫与列表/详情 SELECT 读它，mid-migration 崩溃
     //   （列未补）会让这些语句撞 no such column → 500（同 release_assignee_id / gate_deferred_at 先例）。
     'oa_number',
+    // ← 建单优化批 C1（方案 20260731_v1.2 §3/§4）锚点：intake_liaison_id 是**被消费的热路径列**——
+    //   三创建入口写它 + notify-intake/notify-read-status 读它 + 详情 SELECT * 展示它，mid-migration
+    //   崩溃（列未补）会让这些语句撞 no such column → 500（同 oa_number/gate_deferred_at 先例）。
+    //   intake_notify_status 是 NOT NULL 列，同 relay/tech_lead_notify_status 先例整组通知列以 status
+    //   锚点代表入 readiness（其余 intake_notify_* 由 verify-sys-schema 全量保障）。
+    'intake_liaison_id', 'intake_notify_status',
+    // ← 建单优化批 C3b（方案 20260801_v1.3 §6c）锚点：oa_exempt 是**被消费的热路径列**——三创建入口写它
+    //   （主建单按提交值/衍生入口恒 0）+ assertSysDevCommitmentOaGuard 的 SELECT 读它做放行判定，
+    //   mid-migration 崩溃（列未补）会让这些语句撞 no such column → 500（同 oa_number/intake_liaison_id 先例）。
+    'oa_exempt',
   ];
   const SYS_RELEASES_KEY_COLS = ['release_no', 'status', 'is_hotfix', 'release_note', 'version_tag',
     'release_type',   // ← bug 流 Commit ① 批次类型隔离锚点（[codex三审:L] 值域非空由 ② 服务端守卫强制，readiness 只查列在）
@@ -218,6 +228,7 @@ module.exports = (deps) => {
   const {
     SYS_CLEAR_TECH_LEAD_FIELDS_SQL,
     SYS_CLEAR_RELAY_FIELDS_SQL,
+    SYS_CLEAR_INTAKE_NOTIFY_FIELDS_SQL,
     SYS_BACK_TO_INTAKE_GATE_SQL,
     SYS_INTAKE_GATE_TRIGGER_NAMES,
     SYS_INTAKE_GATE_TRIGGERS_SQL,
@@ -337,6 +348,20 @@ module.exports = (deps) => {
     return res.status(403).json({ error: '仅管理员或受理人可操作', code: 'NOT_ADMIN_OR_INTAKE_LIAISON' });
   }
 
+  // ── 建单优化批 C1（方案 20260731_v1.2 §3 改动点2，审 215 M-4）：对接人下拉候选同源 helper ──────────
+  //   从 SYS_INTAKE_LIAISON_IDS JOIN users 过滤 active，返回 [{id,name}]。**四处全部复用此一个函数**
+  //   （下拉查询端点 GET intake-liaisons / 主建单校验 / 衍生入口自动填 / notify-intake 收件人解析），
+  //   active 判定不许四处各写——本期该常量恒 1 人，升级为多人时（受理人角色加第二人）只需改本函数。
+  async function resolveActiveSysIntakeLiaisons() {
+    if (!SYS_INTAKE_LIAISON_IDS || SYS_INTAKE_LIAISON_IDS.length === 0) return [];
+    const ph = SYS_INTAKE_LIAISON_IDS.map(() => '?').join(',');
+    const rows = await dbAllAsync(
+      `SELECT id, display_name, username FROM users WHERE id IN (${ph}) AND status = 'active' ORDER BY id`,
+      SYS_INTAKE_LIAISON_IDS
+    );
+    return (rows || []).map(r => ({ id: r.id, name: r.display_name || r.username || `user#${r.id}` }));
+  }
+
   // ── 上线体统一重构 C1（方案 v3.4 §6.14 权限矩阵「排班表写」行）→ C2a 泛化（§6.8「撤销上线安排」同判据）──
   //   仅对接人可用，**admin 一律 403**——不能复用 requireIntakeLiaison（那是 admin ∨ 白名单）。
   //   这是本模块内**唯一"admin 也不能写"**的写权限例外（其余端点几乎都是 admin 天然放行 ∨ 白名单），
@@ -447,6 +472,13 @@ module.exports = (deps) => {
         --   值域 1-20 位纯数字由服务层 assertSysOaNumber 守卫（不加 DB CHECK：ALTER 路径补不了约束，
         --   新库/旧库两条路径若一边有 CHECK 一边没有，反而制造"看起来一致实则不同"的假象）。
         oa_number TEXT,
+
+        -- 建单优化批 C3b（方案 20260801_v1.3 §6c）：免 OA 声明标志。1=本单无需 OA 立项（内部自发/未走
+        --   OA），建单弹窗显式勾选、建单后一次性定死（编辑窗口不提供修改入口，§6c 设计点5）；号与豁免
+        --   正交——exempt=1 单仍可正常 set-oa-number 填号（守卫任一满足即过，填号不联动清标志）。
+        --   NOT NULL DEFAULT 0（同 intake_notify_status 先例：CREATE TABLE 与 ALTER 双路径都写
+        --   NOT NULL DEFAULT，旧库 ALTER 语义自动回填 0，无需求）。
+        oa_exempt INTEGER NOT NULL DEFAULT 0 CHECK (oa_exempt IN (0,1)),
 
         origin_issue_id INTEGER REFERENCES sys_issues(id),
         release_id INTEGER REFERENCES sys_releases(id),
@@ -585,6 +617,20 @@ module.exports = (deps) => {
         --   任一资格修复端点消费并原子清除；return/reopen/新 pending 生命周期（add/re-add/assign 产生 pending）
         --   同样清除（防陈旧标记被后续无关轮次误消费）。旧库 ALTER 路径见 runSysMigration [1a-5]。
         gate_deferred_at DATETIME,
+
+        -- ── 建单优化批 C1（方案 20260731_v1.2 §3/§4）：对接人字段 + intake 通知通道 5 列 ──────────
+        --   置于表尾（同惯例，与旧库 ALTER ADD COLUMN 追加序一致）。intake_liaison_id 可空（存量单/
+        --   导入单无对接人为合法态，§3 改动点1）；intake 通知 5 列逐列镜像 creator_notify_* 范式
+        --   （§4 改动点1，NOT NULL DEFAULT 双路径同 creator_notify_status 先例）——⚠️ 本通道刻意不设
+        --   独立的 intake_notified_at 列（方案 §4 列清单明列 5 列：status/message_key/error/read_at/
+        --   sent_by，不含 notified_at），status/message_key/error/sent_by 四列已足支撑三态流转与查
+        --   已读判定，旧库 ALTER 路径见 runSysMigration [1a-11]。
+        intake_liaison_id INTEGER,
+        intake_notify_status TEXT NOT NULL DEFAULT 'not_sent' CHECK (intake_notify_status IN ('not_sent','sent','failed')),
+        intake_notify_message_key TEXT,
+        intake_notify_error TEXT,
+        intake_read_at DATETIME,
+        intake_notify_sent_by INTEGER,
 
         CHECK (type <> 'config' OR release_id IS NULL)
       )`, recordSysErr('sys_issues'));
@@ -1285,6 +1331,42 @@ module.exports = (deps) => {
       //   现统一收进本函数末尾的 **finally [F]**：无条件全表归一 → 后验 → 重建触发器 → 校验 sqlite_master，
       //   任一不达标即阻断 readiness（保留原始迁移错误作根因）。此处不再有触发器相关逻辑。
 
+      // [1a-11] ⭐ 建单优化批 C1（方案 20260731_v1.2 §3/§4/§7）：sys_issues 补 6 列——对接人 id
+      //   （intake_liaison_id）+ intake 通知通道 5 列（status/message_key/error/read_at/sent_by，
+      //   逐列镜像 creator_notify_* 范式，§4 改动点1）。ALTER 不带 CHECK（同 relay_notify_status/
+      //   needs_release 先例）——值域由服务层枚举校验 + verify 断言兜底；intake_notify_status 走
+      //   NOT NULL DEFAULT 常量 ALTER 路径可自动回填旧行为 'not_sent'（同 relay_notify_status/
+      //   release_assignee_notify_status 先例，审 215 H-2：CREATE TABLE 与 ALTER 双路径都写
+      //   NOT NULL DEFAULT）。
+      const SYS_INTAKE_LIAISON_ISSUE_COLS = [
+        ['intake_liaison_id', 'INTEGER'],
+        ['intake_notify_status', "TEXT NOT NULL DEFAULT 'not_sent'"],
+        ['intake_notify_message_key', 'TEXT'],
+        ['intake_notify_error', 'TEXT'],
+        ['intake_read_at', 'DATETIME'],
+        ['intake_notify_sent_by', 'INTEGER'],
+      ];
+      await alterAddMissingCols('sys_issues', SYS_INTAKE_LIAISON_ISSUE_COLS, '建单优化批 C1·对接人字段 + intake 通知通道');
+      // ⚠️ 半迁移防御（方案 §7·复审 M-2 + 终审 M 双检）：全新库/正常存量库的 ALTER 本身已能通过
+      //   NOT NULL DEFAULT 自动回填旧行为 'not_sent'（SQLite ALTER TABLE ADD COLUMN 语义），此处 UPDATE
+      //   是防御性收敛——只应对"该列此前已存在但未走本 ALTER 语句"（如手工建列/历史损坏迁移）留下
+      //   NULL 值的极端场景，正常路径二跑恒 0 行命中（幂等无害）。verify 做数据+schema 双检：除本处
+      //   数据扫描外，PRAGMA table_info(sys_issues) 断言该列 notnull=1 且 dflt_value='not_sent'。
+      const intakeNotifyNullBackfill = await dbRunAsync(
+        `UPDATE sys_issues SET intake_notify_status = 'not_sent' WHERE intake_notify_status IS NULL`);
+      if (intakeNotifyNullBackfill && intakeNotifyNullBackfill.changes > 0) {
+        logger.info(`[系统迭代迁移] 建单优化批 C1：intake_notify_status 半迁移残留回填 ${intakeNotifyNullBackfill.changes} 行 → 'not_sent'`);
+      }
+
+      // [1a-12] ⭐ 建单优化批 C3b（方案 20260801_v1.3 §6c）：sys_issues 补 1 列——oa_exempt（本单无需 OA
+      //   立项声明标志）。INTEGER NOT NULL DEFAULT 0（同 intake_notify_status 先例：CREATE TABLE 与
+      //   ALTER 双路径都写 NOT NULL DEFAULT）——0/1 无"尚未走 OA"这类独立业务含义的 NULL 态，ALTER 的
+      //   DEFAULT 语义本身即可让旧行自动回填 0，不需要额外半迁移 backfill 步骤。
+      const SYS_OA_EXEMPT_ISSUE_COLS = [
+        ['oa_exempt', 'INTEGER NOT NULL DEFAULT 0'],
+      ];
+      await alterAddMissingCols('sys_issues', SYS_OA_EXEMPT_ISSUE_COLS, '建单优化批 C3b·免 OA 声明标志');
+
       // [1b] release_type **族别**回填（D-A：bug vs 非bug，用户 2026-07-03 拍板）：按成员族别回填非空批次——
       //   含 bug 成员 → 'bug'，否则（feature/improvement）→ 'change'；空批次留 NULL（② 建批次/加单时写值）。
       //   ⭐ 这消解了旧「按精确 type 唯一性回填」留下的 codex H-2 哑弹：历史批次（bug 流未上线前只可能含
@@ -1545,6 +1627,22 @@ module.exports = (deps) => {
     if (v === undefined || v === null || v === '') return null;
     const n = Number(v);
     return Number.isInteger(n) && n > 0 ? n : null;
+  }
+
+  // ── 建单优化批 C1（方案 20260731_v1.2 §6b.3）：标题自动派生（描述→标题）──────────
+  //   算法（复审 M-2 收口，可测试伪代码）：description 整体 trim → 按换行分割取第一个非空行 →
+  //   按 Unicode code point（Array.from）截取前 40 个字符 → 有截断则追加"…"。
+  //   调用前提：description 已过非空校验（主建单端点先判 DESCRIPTION_REQUIRED），故首个非空行必然
+  //   存在，派生结果恒非空——不需要额外的空标题兜底分支。
+  //   "40 字符"口径 = Unicode code point（终审 L·接受 ZWJ 组合 emoji/字素簇可能被拆，内部工单标题
+  //   极端边缘场景，不引入 Intl.Segmenter 升级）。
+  function deriveSysTitleFromDescription(desc) {
+    const trimmed = String(desc == null ? '' : desc).trim();
+    const lines = trimmed.split(/\r\n|\r|\n/);
+    const firstNonEmptyLine = (lines.find(l => l.trim().length > 0) || '').trim();
+    const chars = Array.from(firstNonEmptyLine);
+    if (chars.length <= 40) return firstNonEmptyLine;
+    return chars.slice(0, 40).join('') + '…';
   }
 
   // ⭐ 角色权限重构 C4·184 号预审（PL-1，原是 codex C4 审 Round-2 收口的 before_id 专用校验，
@@ -2053,9 +2151,14 @@ module.exports = (deps) => {
   //   dev-assignees POST（加成员）、reassign（批量差量含新增）。语义=「指派开发前必须有 OA 号」盖的是
   //   "把人放上单子"这件事本身，不是某一个端点。bug 不受限（D2）；DEV/VERIFY 族的加人不查（进族时
   //   已过本守卫·存量不追溯）。同事务自查 oa_number（不依赖调用方 row 列形状——[3.6] 踩过的坑）。
+  // ⭐⭐⭐ 建单优化批 C3b（方案 20260801_v1.3 §6c 设计点4）：新契约——`oa_exempt=1`（建单弹窗显式勾选
+  //   「本单无需 OA」，一次性定死，编辑窗口不提供翻转入口）单直接放行，不再走 OA 号格式校验；
+  //   `oa_exempt=0` 时现状规则不变（无号 409 引导补号）。号与豁免正交：exempt=1 单事后仍可正常
+  //   set-oa-number 填号（守卫任一条件满足即过，填号不联动清标志，见 set-oa-number 端点）。
   async function assertSysDevCommitmentOaGuard(issueId, issueType) {
     if (issueType !== 'feature' && issueType !== 'improvement') return;
-    const r = await dbGetAsync('SELECT oa_number FROM sys_issues WHERE id = ?', [issueId]);
+    const r = await dbGetAsync('SELECT oa_number, oa_exempt FROM sys_issues WHERE id = ?', [issueId]);
+    if (r && Number(r.oa_exempt) === 1) return;   // 免 OA 单：豁免格式校验，直接放行
     try {
       assertSysOaNumber(r && r.oa_number);
     } catch (e) {
@@ -2595,6 +2698,21 @@ module.exports = (deps) => {
     res.json(T.buildMeta());
   });
 
+  // ── GET /sys-issues/intake-liaisons：对接人下拉候选（建单优化批 C1 §3 改动点5）──────────
+  //   ⚠️ 挂 requireAdmin（审 215 M-3）：建单弹窗现仅 admin 可用；**将来开放业务方建单时，本端点权限
+  //   随建单权限同步放宽**（演进意图，非遗留欠账）。返回值来自同源 helper resolveActiveSysIntakeLiaisons()
+  //   ——与主建单校验/衍生入口自动填/notify-intake 收件人解析共用同一 active 判据，不许四处各写。
+  //   ⚠️ 顺序：须在 /sys-issues/:id 之前注册（同 /sys-issues/meta 先例），否则 'intake-liaisons' 被 :id 捕获。
+  router.get('/sys-issues/intake-liaisons', authenticateToken, requireSysSchemaReady, requireAdmin, async (req, res) => {
+    try {
+      const items = await resolveActiveSysIntakeLiaisons();
+      res.json({ items });
+    } catch (err) {
+      logger.error('[系统迭代] 查询对接人候选失败:', err && err.message);
+      res.status(500).json({ error: (err && err.message) || '查询对接人候选失败' });
+    }
+  });
+
   // ── POST /sys-issues：建单（admin；不带 multer，spec 附件走建单后两步，§12/方案 C）──────────
   //   建单不走 transition（无前置态），直接 INSERT + 写 created timeline，一个事务。
   router.post('/sys-issues', authenticateToken, requireSysSchemaReady, requireAdmin, async (req, res) => {
@@ -2606,8 +2724,27 @@ module.exports = (deps) => {
         // 放行类型 = ALLOWED_STATUSES 已定义流（bug 流 Commit ① 起含 bug）；config 待追加。
         return res.status(400).json({ error: `类型暂不支持（当前支持 ${Object.keys(T.ALLOWED_STATUSES).join('/')}）`, code: 'TYPE_NOT_SUPPORTED', allowed: Object.keys(T.ALLOWED_STATUSES) });
       }
-      const title = (typeof b.title === 'string' ? b.title.trim() : '');
-      if (!title) return res.status(400).json({ error: '标题必填', code: 'TITLE_REQUIRED' });
+      // ── 建单优化批 C1（方案 20260731_v1.2 §6b.2·复审 H-1 收口·新契约）──────────────────────────
+      //   主建单端点请求矩阵（撤销 v1.1"旧客户端兼容零变化"的说法）：description 从本版起为**主建单
+      //   端点必填**（新契约）；title 缺省时服务端按 description 首个非空行自动派生。
+      //   ⚠️ 衍生建单两入口（/derive、/:id/reactivate 等独立代码路径）**完全不受影响**——自带 title、
+      //   description 可空现状保留，不走本矩阵（方案 §6b.2 明文划界）。
+      const rawDescription = (typeof b.description === 'string' ? b.description.trim() : '');
+      if (!rawDescription) {
+        return res.status(400).json({ error: '描述必填', code: 'DESCRIPTION_REQUIRED' });
+      }
+      const rawTitle = (typeof b.title === 'string' ? b.title.trim() : '');
+      const title = rawTitle || deriveSysTitleFromDescription(rawDescription);
+      // ── 建单优化批 C1（方案 §3 改动点3）：对接人必填，且须 ∈ resolveActiveSysIntakeLiaisons() 结果集
+      //   （写读同源，不信前端）——与衍生入口自动填/notify-intake 收件人解析共用同一 helper。
+      const intakeLiaisonId = parsePositiveId(b.intake_liaison_id);
+      if (!intakeLiaisonId) {
+        return res.status(400).json({ error: '对接人必填', code: 'INTAKE_LIAISON_REQUIRED' });
+      }
+      const activeIntakeLiaisonsAtCreate = await resolveActiveSysIntakeLiaisons();
+      if (!activeIntakeLiaisonsAtCreate.some(l => l.id === intakeLiaisonId)) {
+        return res.status(400).json({ error: '对接人非法（须为当前受理人）', code: 'INVALID_INTAKE_LIAISON' });
+      }
       const systemName = (typeof b.system_name === 'string' ? b.system_name.trim() : '');
       if (!T.BIZ_SYSTEMS.includes(systemName)) {
         return res.status(400).json({ error: '所属系统非法', code: 'INVALID_SYSTEM_NAME', allowed: T.BIZ_SYSTEMS });
@@ -2746,6 +2883,49 @@ module.exports = (deps) => {
       }
 
       const actor = sysActor(req);
+      // ── 建单优化批 C3b（方案 20260801_v1.3 §6c 设计点1）：需求方三字段缺省整组固化 ──────────────
+      //   三字段全部缺省（未传或 trim 空）→ 整组按建单人身份固化：姓名=建单人 display_name、
+      //   电话=建单人 users.phone（查不到/未填保持空，不造假值）、部门=「信息技术部」；
+      //   任一字段有值 → 整组按提交值落库（**不逐字段混填默认**——防"业务方姓名+建单人电话"错配组合）。
+      // ⭐ codex 219 M-1 收口：三字段类型白名单前置——只接受 undefined/null/string，其余类型（数字/对象/
+      //   数组/布尔）400 拒绝，不静默当空处理。原逻辑用 `typeof v === 'string' ? trim : ''` 把非字符串
+      //   脏值悄悄当"未提供"，会让 `requester_name:123` 这类客户端类型错误被误判为"三字段全缺省"，
+      //   进而误固化为建单人身份——真实的输入错误被吞掉，故必须先响亮拒绝，再进 trim+整组判定。
+      const invalidRequesterFields = ['requester_dept', 'requester_name', 'requester_phone'].filter(f => {
+        const v = b[f];
+        return v !== undefined && v !== null && typeof v !== 'string';
+      });
+      if (invalidRequesterFields.length) {
+        return res.status(400).json({
+          error: `需求方字段类型非法（须为字符串或不传）：${invalidRequesterFields.join(',')}`,
+          code: 'INVALID_REQUESTER_FIELDS',
+        });
+      }
+      const rawReqDept = (typeof b.requester_dept === 'string' ? b.requester_dept.trim() : '');
+      const rawReqName = (typeof b.requester_name === 'string' ? b.requester_name.trim() : '');
+      const rawReqPhone = (typeof b.requester_phone === 'string' ? b.requester_phone.trim() : '');
+      let finalReqDept, finalReqName, finalReqPhone;
+      if (!rawReqDept && !rawReqName && !rawReqPhone) {
+        const actorRow = await dbGetAsync('SELECT phone FROM users WHERE id = ?', [actor.id]);
+        finalReqDept = '信息技术部';
+        finalReqName = actor.name;
+        finalReqPhone = (actorRow && actorRow.phone) ? actorRow.phone : null;   // 无电话保持空，不造假值
+      } else {
+        finalReqDept = rawReqDept || null;
+        finalReqName = rawReqName || null;
+        finalReqPhone = rawReqPhone || null;
+      }
+      // ── 建单优化批 C3b §6c 设计点3：oa_exempt——严格 0/1（同 needs_feasibility 输入收窄范式），
+      //   非法值 400 不静默降级。checkbox 是权威声明，服务端只认提交值（不从需求方字段反推——
+      //   固化后需求方恒非空，反推必错）。
+      let oaExempt = 0;
+      const rawOaExempt = b.oa_exempt;
+      const TRUTHY_OA = [1, '1', true];
+      const FALSY_OA = [undefined, null, 0, '0', false, ''];
+      if (TRUTHY_OA.includes(rawOaExempt)) oaExempt = 1;
+      else if (!FALSY_OA.includes(rawOaExempt)) {
+        return res.status(400).json({ error: 'oa_exempt 仅接受 0/1（布尔）', code: 'INVALID_OA_EXEMPT' });
+      }
       let newId = null;
       // C2（多开发协作与 commit 留痕重构 v2.9 交付物⑤）：path A 改单一事务、routeKind=CREATE 直置 DEV——
       //   替换旧版"事务1 INSERT(D_PRE) + 事务2 sysIssueTransition('assign')"两段式。旧版允许"单已建但指派
@@ -2790,20 +2970,18 @@ module.exports = (deps) => {
           `INSERT INTO sys_issues
              (type, status, priority, title, description, system_name, module_name, source,
               requester_dept, requester_name, requester_phone, deadline,
-              needs_feasibility, intake_required, related_correction_no,
+              needs_feasibility, intake_required, related_correction_no, intake_liaison_id,
               created_by, created_by_name, record_source,
-              relay_notified_user_id, relay_notified_user_name)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'native', ?, ?)`,
+              relay_notified_user_id, relay_notified_user_name, oa_exempt)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'native', ?, ?, ?)`,
           [type, initialStatus, priority, title,
-           (typeof b.description === 'string' ? b.description.trim() : null),
+           rawDescription,
            systemName, (typeof b.module_name === 'string' ? b.module_name.trim() : null), source,
-           (typeof b.requester_dept === 'string' ? b.requester_dept.trim() : null),
-           (typeof b.requester_name === 'string' ? b.requester_name.trim() : null),
-           (typeof b.requester_phone === 'string' ? b.requester_phone.trim() : null),
+           finalReqDept, finalReqName, finalReqPhone,
            dl.value,
-           needsFeasibility, intakeRequired, relatedCorrectionNo,
+           needsFeasibility, intakeRequired, relatedCorrectionNo, intakeLiaisonId,
            actor.id, actor.name,
-           relayUserId, relayUserName]
+           relayUserId, relayUserName, oaExempt]
         );
         newId = result.lastID;
 
@@ -2844,7 +3022,9 @@ module.exports = (deps) => {
         await dbRunAsync(
           `INSERT INTO sys_issue_timeline (issue_id, event_type, from_status, to_status, summary, operator_id, operator_name)
            VALUES (?, 'created', NULL, ?, ?, ?, ?)`,
-          [newId, finalStatus, (typeof b.description === 'string' ? b.description.trim() : null) || '信息技术部建单', actor.id, actor.name]
+          // 建单优化批 C1：description 从本版起主建单端点必填，rawDescription 恒非空（不再需要
+          //   '信息技术部建单' 兜底文案——旧兜底只在 description 可空的旧契约下才可能触达）。
+          [newId, finalStatus, rawDescription, actor.id, actor.name]
         );
 
         await sysCommit();
@@ -2914,7 +3094,7 @@ module.exports = (deps) => {
       await sysBeginImmediate();
       let devAssignees, primaryRow, targetStatus;
       try {
-        const row = await dbGetAsync('SELECT id, type, status, oa_number FROM sys_issues WHERE id = ?', [id]);
+        const row = await dbGetAsync('SELECT id, type, status, oa_number, oa_exempt FROM sys_issues WHERE id = ?', [id]);
         if (!row) { await sysRollback(); return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' }); }
         assertKnownIssueStatus(row.type, row.status);
         // 权限精判同 sysIssueTransition [3] 口径：admin 全能；bug 对接人白名单仅限 type='bug'（§3「不全局化」）。
@@ -2981,10 +3161,16 @@ module.exports = (deps) => {
         if (!upd || upd.changes !== 1) {
           throw new SysTransitionError(409, 'GATE_INVARIANT', '迭代单状态已变更，请刷新重试');
         }
+        // 建单优化批 C3b（方案 §6c 设计点6）：免 OA 单（oa_exempt=1）的指派留痕追加标注，与该单能绕过
+        //   assertSysDevCommitmentOaGuard 格式校验这件事对齐，便于事后审计"这单为什么无号也能指派"。
+        // ⭐ codex 219 M-2 裁定口径：免 OA 标注仅在**首次** /assign 落 timeline；dev-assignees 加成员/
+        //   reassign 对 exempt 单同样经守卫放行，但**不重复标注**——详情页 OA 行常驻展示豁免态（见
+        //   `无需 OA（内部自发）`），逐次标注是审计噪音，不追加。零行为改动（本条仅注释声明口径）。
+        const assignSummary = `指派给 ${devName}` + (Number(row.oa_exempt) === 1 ? '（免 OA 单）' : '');
         await dbRunAsync(
           `INSERT INTO sys_issue_timeline (issue_id, event_type, from_status, to_status, summary, operator_id, operator_name)
            VALUES (?, 'assign', ?, ?, ?, ?, ?)`,
-          [id, row.status, targetStatus, `指派给 ${devName}`, actor.id, actor.name]
+          [id, row.status, targetStatus, assignSummary, actor.id, actor.name]
         );
 
         devAssignees = await fetchActiveDevAssignees(id);
@@ -4724,38 +4910,83 @@ module.exports = (deps) => {
     } catch (err) { sendSysTransitionError(res, err); }
   });
 
-  // ── edit_in_revision：待修改态编辑内容（受理排期改造 §5.2·C4）──────────────────────
-  //   旁路动作（transitions.js to=null·不改 status·类比 estimate 独立事务）：待修改态白名单字段编辑。
+  // ── edit_in_revision：编辑窗口两档扩展（建单优化批 C3·方案 20260731_v1.2 §6）──────────────────────
+  //   旁路动作（transitions.js to=null·不改 status·类比 estimate 独立事务）：两档白名单字段编辑。
   //   ⚠️ **不挂 requireIntakeLiaison**（授权=created_by∨admin·§5.3·受理人不获编辑他人单权）：只挂 auth+readiness·handler 内按事务内 row.created_by 精判。
-  //   字段白名单（§5.2）——禁 status/intake_required/type/tech_lead_*/created_by（服务端字段禁客户端写·未知字段 400）。
-  //   审计（§5.2 codex M 消歧）：event_type=note + action_code=edit_in_revision（priority 改动也走此码·不单列 priority_change）·改动字段名列入 summary（timeline 无 payload_json 列·不为审计明文差异做 schema 迁移·codex C4 LOW-6：不落前后值）。
-  const EDIT_IN_REVISION_FIELDS = ['title', 'description', 'system_name', 'module_name', 'priority', 'deadline', 'needs_feasibility', 'requester_dept', 'requester_name', 'requester_phone'];
+  //   两档**按流分开**（§6.1·codex C3 审 0ed6fb8 M-1 收口——族外状态与档位判定不能共用一份全局并集常量，
+  //   否则"待处理"这类 bug 专属态会被错误地当成变更流的合法 A 档，反之亦然）：
+  //   变更流（feature/improvement）A 档=待受理/待修改/待指派（10 字段全量）、B 档=开发中（9 字段）；
+  //   bug 流 A 档=待受理/待修改/待处理（10 字段全量）、B 档=处理中（9 字段，剔除 needs_feasibility——
+  //   开发完成判定条件不得在开发期变更，B 档传该字段显式 400 明示原因）；待验证起（含所有后续态与终态）
+  //   维持 409 冻结。族外/未知状态（如 config 或数据损坏产生的非法组合）由 assertKnownIssueStatus 先行
+  //   fail-closed 拒绝（409 GATE_INVARIANT，同 assign 端点 :3033 用法，置于权限判定之前）。
+  //   ⭐ 并发终闸（§6.2·[[feedback_state_machine_update_invariant]] 三件套直接应用）：状态读取/档位判断/
+  //   请求字段校验/最终 UPDATE 全部在同一事务内完成，**不在事务外预计算可编辑字段集合**——未知字段 400 判定
+  //   随之从"进事务前"挪到"读到真实 status、定完档位之后"（档位本身依赖事务内重读的 status 与 type）。
+  //   最终 UPDATE 带 `WHERE id=? AND status IN (<该流该档白名单>)` 双条件守卫 + changes===0 → 409 回滚，
+  //   防跨档漂移/TOCTOU。
+  //   审计（§5.2 codex M 消歧）：event_type=note + action_code=edit_in_revision（priority 改动也走此码·不单列 priority_change）·改动字段名列入 summary（timeline 无 payload_json 列·不为审计明文差异做 schema 迁移·codex C4 LOW-6：不落前后值）；
+  //   当前轮已有技术负责人评估意见时追加"（当前轮已有评估意见，评估在先）"标注（§6.4·审 215 M-6 轻量版）——
+  //   判定口径同源 clearPendingConsultOnLeave（:2612）："当前轮是否有意见" = tech_lead_notify_request_event_id
+  //   非空 且 存在 timeline.id > 该 event_id 的 action_code='tech_lead_comment' 行，不再各写一份防漂移。
+  const EDIT_TIER_A_CHANGE = ['待受理', '待修改', '待指派'];   // 变更流 A 档（指派前）
+  const EDIT_TIER_B_CHANGE = ['开发中'];                       // 变更流 B 档（开发期）
+  const EDIT_TIER_A_BUG = ['待受理', '待修改', '待处理'];      // bug 流 A 档（指派前）
+  const EDIT_TIER_B_BUG = ['处理中'];                          // bug 流 B 档（开发期）
+  const EDIT_TIER_A_FIELDS = ['title', 'description', 'system_name', 'module_name', 'priority', 'deadline', 'needs_feasibility', 'requester_dept', 'requester_name', 'requester_phone'];
+  const EDIT_TIER_B_FIELDS = EDIT_TIER_A_FIELDS.filter(f => f !== 'needs_feasibility');   // B 档剔除 needs_feasibility
   const EDIT_FIELD_LABELS = { title: '标题', description: '描述', system_name: '所属系统', module_name: '模块', priority: '优先级', deadline: '预期完成', needs_feasibility: '需可行性评估', requester_dept: '需求方部门', requester_name: '需求方姓名', requester_phone: '需求方电话' };
   router.post('/sys-issues/:id/edit-in-revision', authenticateToken, requireSysSchemaReady, async (req, res) => {
     const id = parsePositiveId(req.params.id);
     if (!id) return res.status(400).json({ error: '无效的迭代单 ID', code: 'INVALID_SYS_ISSUE_ID' });
     const b = req.body || {};
-    // 未知字段拒绝（防客户端写服务端字段·§5.2 白名单外一律拒）
-    const extra = Object.keys(b).filter(k => !EDIT_IN_REVISION_FIELDS.includes(k));
-    if (extra.length) return res.status(400).json({ error: `不支持编辑的字段：${extra.join(',')}`, code: 'EDIT_FIELD_NOT_ALLOWED' });
     const actor = sysActor(req);
     try {
       await sysBeginImmediate();
       try {
         const row = await dbGetAsync(
           `SELECT id, type, status, created_by, title, description, system_name, module_name, priority, deadline,
-                  needs_feasibility, requester_dept, requester_name, requester_phone
+                  needs_feasibility, requester_dept, requester_name, requester_phone, tech_lead_notify_request_event_id
              FROM sys_issues WHERE id = ?`, [id]);
         if (!row) { await sysRollback(); return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' }); }
+        // 族外/未知状态 fail-closed（codex C3 审 M-1·同 assign 端点 :3033 用法，置于权限判定之前）：
+        //   config 或数据损坏产生的"type/status 非法组合"在此先被拒绝，不会漏到下方按 type 选档的逻辑里
+        //   被误判成某个流的合法态。
+        assertKnownIssueStatus(row.type, row.status);
         // 权限：created_by∨admin（§5.3·事务内锁定后 row.created_by 校验·防 TOCTOU）
         const isAdmin = actor.role === 'admin';
         const isCreator = Number(row.created_by) === Number(actor.id) && Number(actor.id) > 0;
         if (!(isAdmin || isCreator)) { await sysRollback(); return res.status(403).json({ error: '仅建单人或管理员可编辑', code: 'NOT_AUTHORIZED_FOR_EDIT' }); }
-        // 仅待修改态可编辑（§5.2·乐观锁 WHERE status='待修改' 兜 TOCTOU）
-        if (row.status !== '待修改') { await sysRollback(); return res.status(409).json({ error: `仅「待修改」态可编辑内容（当前「${row.status}」）`, code: 'EDIT_STATUS_INVALID' }); }
+        // 两档判定（§6.1·M-1 按流分档）：以事务内刚读到的真实 status/type 为准，不在事务外预计算
+        //   （§6.2 并发终闸前提）。assertKnownIssueStatus 已保证 row.type ∈ {feature,improvement,bug}。
+        const isChangeFlowRow = (row.type === 'feature' || row.type === 'improvement');
+        const rowTierAStatuses = isChangeFlowRow ? EDIT_TIER_A_CHANGE : EDIT_TIER_A_BUG;
+        const rowTierBStatuses = isChangeFlowRow ? EDIT_TIER_B_CHANGE : EDIT_TIER_B_BUG;
+        let tierFields, tierStatuses;
+        if (rowTierAStatuses.includes(row.status)) { tierFields = EDIT_TIER_A_FIELDS; tierStatuses = rowTierAStatuses; }
+        else if (rowTierBStatuses.includes(row.status)) { tierFields = EDIT_TIER_B_FIELDS; tierStatuses = rowTierBStatuses; }
+        else {
+          await sysRollback();
+          const editableHint = isChangeFlowRow ? '待受理/待修改/待指派/开发中' : '待受理/待修改/待处理/处理中';
+          return res.status(409).json({ error: `当前「${row.status}」态不可编辑内容（仅${editableHint}可编辑）`, code: 'EDIT_STATUS_INVALID' });
+        }
+        // 未知字段拒绝（防客户端写服务端字段·档位内白名单外一律拒·§6.1）——需在档位判定之后才能做，
+        //   B 档缺 needs_feasibility，传该字段落入 extra。
+        //   ⚠️ codex C3 审 L-1 收口：专属码 EDIT_NEEDS_FEASIBILITY_LOCKED_IN_TIER_B **仅当 extra 恰好只含
+        //   needs_feasibility 一项**时才返回——否则（needs_feasibility 与其他未知字段混传）会用"开发期不可
+        //   变更评估"这句话掩盖掉同批混入的其他非法字段，误导调用方以为只有一个问题。混传时统一走通用码，
+        //   文案列出全部 extra（含 needs_feasibility），不做特例吞并。
+        const extra = Object.keys(b).filter(k => !tierFields.includes(k));
+        if (extra.length) {
+          await sysRollback();
+          if (extra.length === 1 && extra[0] === 'needs_feasibility') {
+            return res.status(400).json({ error: '开发中/处理中阶段不可修改"需可行性评估"（开发完成判定条件不得在开发期变更）', code: 'EDIT_NEEDS_FEASIBILITY_LOCKED_IN_TIER_B' });
+          }
+          return res.status(400).json({ error: `不支持编辑的字段：${extra.join(',')}`, code: 'EDIT_FIELD_NOT_ALLOWED' });
+        }
         // 逐字段校验（复用建单口径）+ 计算改动集（幂等：值未变不列入）
         const setFrags = [], setParams = [], changed = [];
-        for (const f of EDIT_IN_REVISION_FIELDS) {
+        for (const f of tierFields) {
           if (!(f in b)) continue;   // 未传字段不动
           let val;
           if (f === 'title') {
@@ -4806,20 +5037,29 @@ module.exports = (deps) => {
           await sysRollback();
           return res.json({ id, unchanged: true });
         }
-        // 旁路 UPDATE（不改 status）+ 乐观锁绑 status='待修改'（防 TOCTOU：编辑期间状态被 resubmit/change_intake_mode 改走）
+        // 旁路 UPDATE（不改 status）+ 双条件守卫绑该档 status 白名单（§6.2 并发终闸：防 TOCTOU/跨档漂移——
+        //   若编辑期间单据被 assign/intake_accept 等动作带出本档，WHERE 不命中，changes=0 → 409，不静默误写）。
+        const statusPlaceholders = tierStatuses.map(() => '?').join(',');
         const upd = await dbRunAsync(
-          `UPDATE sys_issues SET ${setFrags.join(', ')}, updated_at = datetime('now','localtime') WHERE id = ? AND status = '待修改'`,
-          [...setParams, id]);
+          `UPDATE sys_issues SET ${setFrags.join(', ')}, updated_at = datetime('now','localtime') WHERE id = ? AND status IN (${statusPlaceholders})`,
+          [...setParams, id, ...tierStatuses]);
         if (!upd || upd.changes !== 1) { await sysRollback(); return res.status(409).json({ error: '迭代单状态已变更，请刷新重试', code: 'CONCURRENT_EDIT' }); }
+        // 当前轮已有技术负责人评估意见 → summary 追加"评估在先"标注（§6.4·判定口径同源 clearPendingConsultOnLeave）。
+        //   NULL 防御：tech_lead_notify_request_event_id 为 NULL（无活动轮）时短路，不查 timeline。
+        const hasCurrentRoundComment = row.tech_lead_notify_request_event_id != null
+          ? await dbGetAsync(
+              `SELECT 1 FROM sys_issue_timeline WHERE issue_id=? AND action_code='tech_lead_comment' AND id > ?`,
+              [id, row.tech_lead_notify_request_event_id])
+          : null;
         // note timeline + action_code=edit_in_revision（改动字段名列入 summary·结构化审计够用）。
         //   ⚠️ sys_issue_timeline 无 payload_json 列（该列在 sys_issue_dev_events）——改动快照落 summary 文本·
         //     不为审计明文差异做 schema 迁移（超 C4 范围·字段名列表已满足「哪些字段改了」审计需求）。
         const changedLabels = changed.map(f => EDIT_FIELD_LABELS[f] || f);
+        const noteSummary = `编辑内容（${changedLabels.join('、')}）` + (hasCurrentRoundComment ? '（当前轮已有评估意见，评估在先）' : '');
         await dbRunAsync(
           `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, operator_id, operator_name)
            VALUES (?, 'note', ?, 'edit_in_revision', ?, ?)`,
-          [id, `编辑待修改内容（${changedLabels.join('、')}）`,
-           Number(actor.id) || null, actor.name || null]);
+          [id, noteSummary, Number(actor.id) || null, actor.name || null]);
         await sysCommit();
         return res.json({ id, changed, action: 'edit_in_revision' });
       } catch (txErr) {
@@ -4829,7 +5069,7 @@ module.exports = (deps) => {
     } catch (err) {
       if (err instanceof SysTransitionError) return sendSysTransitionError(res, err);   // SYS_BUSY 等保 503（业务错误·安全文案）
       // codex C4 MED-4：未识别异常不回传 err.message（防泄露 SQLite 错误/约束名/内部实现）·日志留全供排查·客户端仅通用文案+稳定码。
-      logger.error('[系统迭代] 编辑待修改内容失败:', err && err.stack || (err && err.message));
+      logger.error('[系统迭代] 编辑内容失败:', err && err.stack || (err && err.message));
       return res.status(500).json({ error: '编辑失败，请稍后重试', code: 'INTERNAL_ERROR' });
     }
   });
@@ -6122,6 +6362,20 @@ module.exports = (deps) => {
       //   必填范围（Q1）= 仅 bug 语境（origin.type='bug'），feature→feature 派生保持选填——精判在事务内（需 origin.type）。
       const deriveReason = (typeof b.derive_reason === 'string' ? b.derive_reason.trim() : '');
 
+      // ── 建单优化批 C1（方案 §3 改动点4）：派生单不加表单，服务端自动填对接人——仅当 active 受理人
+      //   恰好 1 人时自动填该成员；数量 ≠1（0 人，或未来受理人角色加人后 ≥2 人）一律 409 阻断创建
+      //   （不建任何行）。同源 helper resolveActiveSysIntakeLiaisons()，与主建单端点/notify-intake
+      //   收件人解析共用同一判据。不依赖 origin，故置于事务外（同 title/systemName 等独立校验一致）。
+      //   ⚠️ codex 461a1e0 审 LOW-1（注明不修）：本解析在事务外，存在 TOCTOU——解析后、INSERT 前，
+      //   若 SYS_INTAKE_LIAISON_IDS 或目标用户 active 态发生变化，写入的 intake_liaison_id 可能与
+      //   INSERT 那一刻的真实 active 集合不一致。SYS_INTAKE_LIAISON_IDS 为进程内常量、users.status
+      //   是低频人工管理操作，窗口期极窄，事务外解析为已接受的残余风险（不升级为事务内解析）。
+      const derivedActiveLiaisons = await resolveActiveSysIntakeLiaisons();
+      if (derivedActiveLiaisons.length !== 1) {
+        return res.status(409).json({ error: '受理人配置异常（非唯一），无法自动指定对接人，请联系管理员核查受理人账号状态', code: 'INTAKE_LIAISON_AUTO_FILL_FAILED' });
+      }
+      const autoIntakeLiaisonId = derivedActiveLiaisons[0].id;
+
       const actor = sysActor(req);
       let newId = null, resolvedType = null, resolvedStatus = null;
       await sysBeginImmediate();
@@ -6156,19 +6410,23 @@ module.exports = (deps) => {
           cursor = parent ? parent.origin_issue_id : null;
         }
         // 建新单（origin_issue_id = 原单 id；[⑤] 落 derive_reason 列——feature 派生留空则存 NULL）
+        // ⭐ 建单优化批 C3b（方案 20260801_v1.3 §6c 设计点5）：oa_exempt **刻意不入本 INSERT 列表**——
+        //   靠 CREATE TABLE / ALTER 的 `DEFAULT 0` 落 0（fail-closed：衍生单源自业务需求几乎必走 OA，
+        //   免 OA 需求真出现再议，入方案 §9 观察项；显式恒 0 也可以，但少一处需要维护的硬编码值，
+        //   DEFAULT 本身就是最不容易漂移的"恒 0"实现）。
         const result = await dbRunAsync(
           `INSERT INTO sys_issues
              (type, status, priority, title, description, system_name, module_name, source,
               requester_dept, requester_name, requester_phone, deadline, origin_issue_id, derive_reason,
-              created_by, created_by_name, record_source, intake_required)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'native', 1)`,
+              created_by, created_by_name, record_source, intake_required, intake_liaison_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'native', 1, ?)`,
           [type, initialStatus, priority, title,
            (typeof b.description === 'string' ? b.description.trim() : null),
            systemName, (typeof b.module_name === 'string' ? b.module_name.trim() : null), source,
            (typeof b.requester_dept === 'string' ? b.requester_dept.trim() : null),
            (typeof b.requester_name === 'string' ? b.requester_name.trim() : null),
            (typeof b.requester_phone === 'string' ? b.requester_phone.trim() : null),
-           dl.value, originId, (deriveReason || null), actor.id, actor.name]
+           dl.value, originId, (deriveReason || null), actor.id, actor.name, autoIntakeLiaisonId]
         );
         newId = result.lastID;
         // T-L3：先写 created（新单建立，to_status=初始态），再写 derive（ref_id=原单 id），同事务、created 在前
@@ -8782,6 +9040,20 @@ module.exports = (deps) => {
     };
   }
 
+  // 对接人受理侧 markdown（建单优化批 C1 §4 改动点2/6）：仅带单号+标题+深链，**不内联 description/
+  //   priority 等可编辑字段**——通知后内容可变已成常态（第十人自查·214 风险备注同族），文案不内联
+  //   可变字段则通知永不失真。渠道截断以落库 title 为输入（issueSafeText/sysNotifyTitle 本身只
+  //   slice 不追加省略号，即便 title 已含派生截断的"…"也不会叠成"……"）。
+  function buildSysIntakeMarkdown(issue, baseUrl) {
+    const title = issueNotify.issueSafeText(issue.title, 80);
+    const safeTitle = sysNotifyTitle(issue.title);
+    const link = sysDeepLinkLine(baseUrl, issue.id);
+    return {
+      title: `📥 新迭代单待受理：${safeTitle}`,
+      md: `### 📥 新迭代单待受理\n\n- **单号**：#${issue.id}\n- **标题**：${title}\n\n请登录平台受理该单。${link}`,
+    };
+  }
+
   // 建单人侧·受理退改 markdown（受理排期改造 §5.1②·C3；对接人/admin 退改后自动通知建单人去「待修改」补充修改）。
   //   与 buildSysCreatorMarkdown（进展/完结汇报）区分：退改是「请你改」的 actionable 通知，带退改原因。
   function buildSysIntakeReturnCreatorMarkdown(issue, reason, baseUrl) {
@@ -9115,6 +9387,19 @@ module.exports = (deps) => {
     warnNotifyWriteMissed('建单人', issueId, sb, ok, ok ? messageKey : error, r);
     return r;
   }
+  // 对接人受理侧落库（建单优化批 C1 §4 改动点1/5；intake_notify_* 5 列，逐字镜像 recordSysCreatorNotify
+  //   格局——含每次发送（含 failed 后重发）无条件清 intake_read_at、恒写 sent_by。⚠️ 本通道无
+  //   intake_notified_at 列（方案 §4 列清单只列 5 列：status/message_key/error/read_at/sent_by，
+  //   不含 notified_at），故 SET 子句比 creator 少一句，其余逐字一致。
+  async function recordSysIntakeNotify(issueId, ok, messageKey, error, sentBy) {
+    const sb = assertNotifySentBy('recordSysIntakeNotify', sentBy);
+    const r = await sysNotifyWriteRun(
+      `UPDATE sys_issues SET intake_notify_status=?,
+              intake_notify_message_key=?, intake_notify_error=?, intake_read_at=NULL, intake_notify_sent_by=? WHERE id=?`,
+      [ok ? 'sent' : 'failed', ok ? messageKey : null, ok ? null : (error || 'other'), sb, issueId]);
+    warnNotifyWriteMissed('对接人受理', issueId, sb, ok, ok ? messageKey : error, r);
+    return r;
+  }
   // 技术负责人侧落库（受理排期改造 §6·C5·9 列 tech_lead_notify_*）。
   //   ⚠️ 与 creator/relay 范式关键差异：WHERE 加 `tech_lead_notify_request_event_id=?`——**条件更新拒过期回写**（§6·codex 128-M/130-H）：
   //     只在「当前请求版本仍是 requestEventId」时落库；若期间又 request_tech_consult（换人/同人连发→request_event_id 已变）则本次
@@ -9301,6 +9586,9 @@ module.exports = (deps) => {
   const SYS_NOTIFY_RELAY_STATUSES = ['待处理'];
   const SYS_NOTIFY_CREATOR_STATUSES = ['待验证', '待上线', '已上线'];
   const SYS_NOTIFY_REQUESTER_STATUSES = ['待验证', '待上线', '已上线'];
+  // ── 建单优化批 C1（方案 §4 改动点3）：intake 通道判定 = 仅「待受理」态可发——三 type 共用同一值
+  //   （受理门统一焊死为「待受理」单值，不像 relay/developer 那样分 bug/变更流两套，见下方 sysNotifyStatusesFor）。
+  const SYS_NOTIFY_INTAKE_STATUSES = ['待受理'];
 
   // ── 交互优化 C2a：变更流(feature/improvement) 手动通知状态白名单（方案 §3.2 矩阵）──────────────
   //   与 bug 流分开（bug 开发态='处理中'，变更流='开发中'）。channel×type 精确取，后端权威、前端镜像。
@@ -9313,12 +9601,14 @@ module.exports = (deps) => {
   function sysNotifyStatusesFor(type, channel) {
     if (type === 'bug') {
       return { developer: SYS_NOTIFY_DEV_STATUSES, relay: SYS_NOTIFY_RELAY_STATUSES,
-               creator: SYS_NOTIFY_CREATOR_STATUSES, requester: SYS_NOTIFY_REQUESTER_STATUSES }[channel] || [];
+               creator: SYS_NOTIFY_CREATOR_STATUSES, requester: SYS_NOTIFY_REQUESTER_STATUSES,
+               intake: SYS_NOTIFY_INTAKE_STATUSES }[channel] || [];
     }
     if (type === 'feature' || type === 'improvement') {
-      // 变更流无 relay 通道（对接人是 bug path B 专属）——relay 返空=永远拒绝。
+      // 变更流无 relay 通道（对接人是 bug path B 专属）——relay 返空=永远拒绝。intake 通道三 type 同值。
       return { developer: SYS_NOTIFY_DEV_STATUSES_CHANGE, relay: [],
-               creator: SYS_NOTIFY_CREATOR_STATUSES_CHANGE, requester: SYS_NOTIFY_REQUESTER_STATUSES_CHANGE }[channel] || [];
+               creator: SYS_NOTIFY_CREATOR_STATUSES_CHANGE, requester: SYS_NOTIFY_REQUESTER_STATUSES_CHANGE,
+               intake: SYS_NOTIFY_INTAKE_STATUSES }[channel] || [];
     }
     return [];   // 未知 type（含 config 未定）默认拒绝
   }
@@ -9341,7 +9631,7 @@ module.exports = (deps) => {
   //   ⚠️ 通道白名单 fail-closed（codex C1 审 HIGH-1）：原实现只特判 relay、其余 channel 一律走"admin∨受理人"分支，
   //     是**结构性 fail-open**——将来新增通道（或调用方传错字符串）会被静默放行给受理人。
   //     现改为显式枚举：只有 SYS_MANUAL_NOTIFY_CHANNELS 里的通道才有判定，未知通道一律 400。
-  const SYS_MANUAL_NOTIFY_CHANNELS = new Set(['developer', 'creator', 'requester', 'relay']);
+  const SYS_MANUAL_NOTIFY_CHANNELS = new Set(['developer', 'creator', 'requester', 'relay', 'intake']);
   function sysManualNotifyGuard(issue, channel, actor) {
     const type = issue.type;
     const isAdmin = actor.role === 'admin';
@@ -9356,6 +9646,17 @@ module.exports = (deps) => {
       }
       if (type === 'feature' || type === 'improvement') {
         return { status: 400, body: { error: '变更流无对接人通知', code: 'MANUAL_NOTIFY_CHANNEL_NA' } };
+      }
+      return { status: 400, body: { error: '该类型暂不支持手动通知', code: 'MANUAL_NOTIFY_TYPE_NA' } };
+    }
+    // ── 建单优化批 C1（方案 §4 改动点2，审 215 M-5）：intake 通道——路由级 requireAdmin 是唯一放行条件，
+    //   本分支只做业务校验的一部分（type 门限 fail-closed）；但本函数同时被 notify-read-status 复用
+    //   （该端点无路由级 requireAdmin，靠这里精判），故仍需显式判 isAdmin——**与 relay 同构**（受理人
+    //   是通知对象本人，不给自己发；全类型统一，不像 relay 那样仅 bug 可用，因 intake_liaison_id 适用
+    //   全部三类型）。
+    if (channel === 'intake') {
+      if (type === 'bug' || type === 'feature' || type === 'improvement') {
+        return isAdmin ? null : { status: 403, body: { error: '仅管理员可通知对接人受理', code: 'NOT_AUTHORIZED_FOR_NOTIFY' } };
       }
       return { status: 400, body: { error: '该类型暂不支持手动通知', code: 'MANUAL_NOTIFY_TYPE_NA' } };
     }
@@ -9552,6 +9853,96 @@ module.exports = (deps) => {
     } catch (err) { logger.error('[系统迭代] 手动通知报障人失败:', err && err.message); res.status(500).json({ error: (err && err.message) || '通知报障人失败' }); }
   });
 
+  //   通知对接人受理（新，建单优化批 C1 §4 改动点2）：**权限分层语义（审 215 M-5）**——路由级
+  //   requireAdmin 是唯一放行条件；handler 内 sysManualNotifyGuard(issue,'intake',actor) 只做业务
+  //   校验（type 门限 fail-closed，内部仍判 isAdmin——本函数同时被 notify-read-status 复用，那个
+  //   端点没有路由级 requireAdmin）。仅「待受理」态可发（sysNotifyStatusesFor 三 type 同值）。
+  //   收件人解析（复审 M-1 收口 + codex 461a1e0 HIGH/MED 收口 + codex 221a HIGH 收口）：intake_liaison_id
+  //   须命中 resolveActiveSysIntakeLiaisons() 当前 active 受理人集合才算"可用"——**为 NULL 的存量单**与
+  //   **非空但已停用/被移出白名单的历史对接人**统一视为"当前无可达对接人"，走同一降级路径：仅当 active
+  //   受理人恰好 1 人才降级发给该唯一成员（≠1 一律 409，0 人/多人两文案），且**降级解析成功即回写**
+  //   intake_liaison_id（覆盖旧值，含 NULL 或已失效的旧 id——通知即指派语义，不依赖发送结果）。单列
+  //   read_at/message_key 模型只支持单收件人，永不群发。
+  //   ⚠️ 221a 之前 inactive 单独判 409 INTAKE_LIAISON_INACTIVE、文案让"先更正对接人"，但编辑白名单不含
+  //   该字段、无任何修正入口，是无法自行走出的死局——现已与 NULL 分支合一，该错误码不再产出。
+  router.post('/sys-issues/:id/notify-intake', authenticateToken, requireSysSchemaReady, requireAdmin, async (req, res) => {
+    const id = parsePositiveId(req.params.id);
+    if (!id) return res.status(400).json({ error: '无效的迭代单 ID', code: 'INVALID_SYS_ISSUE_ID' });
+    try {
+      const issue = await dbGetAsync('SELECT * FROM sys_issues WHERE id = ?', [id]);
+      if (!issue) return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' });
+      const actor = sysActor(req);
+      const intakeAuthErr = sysManualNotifyGuard(issue, 'intake', actor);
+      if (intakeAuthErr) return res.status(intakeAuthErr.status).json(intakeAuthErr.body);
+      const intakeStatuses = sysNotifyStatusesFor(issue.type, 'intake');
+      if (!intakeStatuses.includes(issue.status)) return res.status(409).json({ error: `当前状态（${issue.status}）不可通知对接人受理`, code: 'STATUS_NOT_NOTIFIABLE' });
+
+      // codex 审 461a1e0 HIGH 收口：常规路径与降级路径**共用同一次** resolveActiveSysIntakeLiaisons()
+      //   调用（同源 helper，不许两条分支各判各的）——此前常规路径（intake_liaison_id 非空）完全绕开
+      //   helper，只查 users 是否存在，未验证该人是否仍是当前 active 受理人（已停用/已被移出白名单的
+      //   历史对接人仍会收到通知）。
+      const activeLiaisons = await resolveActiveSysIntakeLiaisons();
+      let targetLiaisonId = issue.intake_liaison_id;
+      // ⭐⭐ codex 221a HIGH 收口（notify-intake 对接人失效死局修复）：intake_liaison_id 非空但不在当前
+      //   active 受理人集合（已停用/被移出白名单）与 intake_liaison_id 为 NULL（存量单）统一视为
+      //   "当前无可达对接人"同一语义——原实现把 inactive 单独判 409 INTAKE_LIAISON_INACTIVE、文案让
+      //   "先更正对接人"，但编辑白名单不含该字段、无任何修正入口，是无法自行走出的死局。改为与 NULL
+      //   分支合一：仅当 active 受理人恰好 1 人才降级发送 + 受控回写覆盖旧值（含 NULL 或已失效的旧
+      //   id）；0 人/多人两分支沿用既有文案与错误码，不新增码。
+      const targetIsUsable = !!(targetLiaisonId && activeLiaisons.some(l => l.id === targetLiaisonId));
+      if (!targetIsUsable) {
+        if (activeLiaisons.length === 0) {
+          return res.status(409).json({ error: '受理人配置异常，请联系管理员核查受理人账号状态', code: 'INTAKE_LIAISON_CONFIG_ERROR' });
+        }
+        if (activeLiaisons.length > 1) {
+          return res.status(409).json({ error: '请先补录对接人', code: 'INTAKE_LIAISON_MISSING' });
+        }
+        const staleLiaisonId = targetLiaisonId;   // 读取时的原值：NULL（存量单）或已失效的旧 id（inactive）
+        targetLiaisonId = activeLiaisons[0].id;
+        // codex 审 461a1e0 MED 收口（221a 扩展覆盖 inactive 场景）：**通知即指派**——对接人归属在"降级
+        //   解析出唯一候选"这一刻即确定，回写不依赖发送结果（即便本次 sendIssueDingtalkRaw 失败，
+        //   intake_liaison_id 仍落库，重发会走命中集合的常规路径；read-status 从此也走常规
+        //   intake_liaison_id 读取，不再空转降级判断）。守卫式 UPDATE（`WHERE intake_liaison_id IS ?`
+        //   绑读取时原值——SQLite `IS` 绑 NULL 时精确匹配 NULL、绑非空值时等价 `=`，同一条语句覆盖
+        //   NULL 与 inactive 两种"旧值"）防并发覆盖：若并发请求已先一步回写，本次 no-op（changes=0）。
+        // ⚠️ codex 221a M-2 契约注明：inactive 与 NULL 同语义=当前无可达对接人；回写与发送同流，
+        //   message_key 恒对应回写后的 liaison_id——read-status 查询自洽，无需额外收件人快照列。
+        const claimRes = await dbRunAsync(`UPDATE sys_issues SET intake_liaison_id = ? WHERE id = ? AND intake_liaison_id IS ?`, [targetLiaisonId, id, staleLiaisonId]);
+        // codex 复审 MED 收口：守卫 UPDATE no-op（changes=0）= 并发请求已先一步完成指派——通知必须发给
+        //   「已被指派的那个人」而非本请求解析出的候选（两次解析之间 active 集合可能已变）。以库内值为准
+        //   重读收敛，否则通知对象与库内指派可能指向两个人，破坏「通知即指派」一致性。
+        if (!claimRes || claimRes.changes === 0) {
+          const claimed = await dbGetAsync('SELECT intake_liaison_id FROM sys_issues WHERE id = ?', [id]);
+          // codex 221 复审 MED 收口：重读值必须**再过一次 active 集合校验**才可采信——当前唯一写入口
+          //   （本降级路径）写入的恒为写入时刻的 active 唯一人，但若未来新增维护入口/脚本直写出非白名单
+          //   值，无此校验则 no-op 分支会成为 active 白名单的旁路（把通知发给库内非 active 用户）。
+          //   不命中 → 409 请重试（fail-closed，不静默替换、不递归重解析）。
+          if (claimed && claimed.intake_liaison_id && activeLiaisons.some(l => l.id === claimed.intake_liaison_id)) {
+            targetLiaisonId = claimed.intake_liaison_id;
+          } else {
+            return res.status(409).json({ error: '对接人指派状态刚发生变化，请刷新后重试', code: 'INTAKE_LIAISON_CHANGED' });
+          }
+        }
+      }
+      // codex 221a M-1 变体裁定（竞态残余窗口注明，零行为改动）：状态校验（上方 intakeStatuses.includes）
+      //   与本处发送/回写之间无事务终闸——与既有 5 类手动通知 helper（notify-developer/creator/
+      //   requester/relay/release-executor）逐字一致的既定契约，非本次新增缺口。残余窗口：通知发送
+      //   过程中单据被流转走（如恰好此时受理通过/退回修改），写回会落在新态上；这是自愈的——通知行
+      //   仅在「待受理」态渲染（siRenderNotify 按 status 门控），回受理门（intake_return/reactivate）
+      //   整组归零 intake 通知 5 列（SYS_CLEAR_INTAKE_NOTIFY_FIELDS_SQL），污染既不可见也不跨轮。
+      const liaisonUser = await dbGetAsync('SELECT id, display_name, phone, dingtalk_user_id FROM users WHERE id = ?', [targetLiaisonId]);
+      if (!liaisonUser) return res.status(409).json({ error: '对接人用户不存在', code: 'INTAKE_LIAISON_NOT_FOUND' });
+
+      const baseUrl = await getSafePlatformBaseUrl();
+      const { title, md } = buildSysIntakeMarkdown(issue, baseUrl);
+      const result = await sendIssueDingtalkRaw(liaisonUser, title, md);
+      await recordSysIntakeNotify(id, !!result.ok, result.message_key, result.reason, actor.id);
+      await recordSysNotifyTimeline(id, '对接人受理', `${liaisonUser.display_name || liaisonUser.username || ''}(id${targetLiaisonId})`, !!result.ok, result.ok ? result.message_key : result.reason, actor);
+      const fresh = await dbGetAsync('SELECT intake_notify_status, intake_notify_error FROM sys_issues WHERE id = ?', [id]);
+      res.json({ id, intake_notify_status: fresh.intake_notify_status, intake_notify_error: fresh.intake_notify_error });
+    } catch (err) { logger.error('[系统迭代] 手动通知对接人受理失败:', err && err.message); res.status(500).json({ error: (err && err.message) || '通知对接人受理失败' }); }
+  });
+
   // ── GET /sys-issues/:id/notify-read-status（新，通知改造 C3 G11）：byId(dev/relay/creator)+byPhone(requester) 双寻址 ──
   //   复刻 issue-tracker /api/issues/:id/notify-read-status 范式（server.js:11552，token 重试+已读固化写回）。
   //   dev 定位子表活动行（?dev_user_id=）；relay/creator 走 sys_issues 反规范化列；requester 走收件人快照反查。
@@ -9567,7 +9958,7 @@ module.exports = (deps) => {
     const id = parsePositiveId(req.params.id);
     if (!id) return res.status(400).json({ error: '无效的迭代单 ID', code: 'INVALID_SYS_ISSUE_ID' });
     const type = req.query.type;
-    if (!['dev', 'relay', 'creator', 'requester', 'release_executor'].includes(type)) {
+    if (!['dev', 'relay', 'creator', 'requester', 'release_executor', 'intake'].includes(type)) {
       return res.status(400).json({ error: '无效的通知类型', code: 'INVALID_NOTIFY_TYPE' });
     }
     // ⚠️ 单据存在性预言机防线（C1 三轮审 MED-1·与 notify-creator 补挂中间件同构）：本端点的授权原本**全部**在
@@ -9575,12 +9966,13 @@ module.exports = (deps) => {
     //   这里前置一道**静态角色粗筛**：它只用 JWT 身份 + query 通道，不需要 issue 上下文，因此能放到查库之前，
     //   让"存在"与"不存在"对未授权者一律 403。
     //   ⚠️ 放行面必须与下方 sysManualNotifyGuard / release_executor 分支**逐通道等价**（改一处必同步另一处）：
-    //     dev / creator / requester = admin ∨ 受理人[13]；relay / release_executor = 仅 admin。
+    //     dev / creator / requester = admin ∨ 受理人[13]；relay / release_executor / intake = 仅 admin
+    //     （建单优化批 C1：intake 通道镜像 relay/release_executor，同为仅 admin）。
     //   精判（issue.type 门限 / 通道 NA / 状态 / 收件人快照）仍由 issue 加载后的 guard 承担——本层只回答
     //   "这个角色连这个通道都碰不到吗"，不回答"这张单此刻能不能查"。错误码沿用 NOT_AUTHORIZED_FOR_NOTIFY 不变。
     {
       const preActor = sysActor(req);
-      const preAdminOnly = (type === 'relay' || type === 'release_executor');
+      const preAdminOnly = (type === 'relay' || type === 'release_executor' || type === 'intake');
       const prePermitted = preActor.role === 'admin' || (!preAdminOnly && isSysIntakeLiaison(preActor.id));
       if (!prePermitted) {
         return res.status(403).json({
@@ -9601,7 +9993,7 @@ module.exports = (deps) => {
       //   release_executor 无发送 guard 映射（独立端点·仅 admin），单独按 admin 判。
       //   ⚠️ H3：guard 内 creator 通道已不含「主开发本人」，故查已读侧天然同步删（写读同源）。
       const rsActor = sysActor(req);
-      const rsChannelMap = { dev: 'developer', relay: 'relay', creator: 'creator', requester: 'requester' };
+      const rsChannelMap = { dev: 'developer', relay: 'relay', creator: 'creator', requester: 'requester', intake: 'intake' };
       let rsAuthErr;
       if (type === 'release_executor') {
         rsAuthErr = (rsActor.role === 'admin') ? null : { status: 403, body: { error: '仅管理员可查看上线开发通知已读状态', code: 'NOT_AUTHORIZED_FOR_NOTIFY' } };
@@ -9627,6 +10019,8 @@ module.exports = (deps) => {
         notifyStatus = issue.creator_notify_status; messageKey = issue.creator_notify_message_key; readAt = issue.creator_read_at;
       } else if (type === 'release_executor') {
         notifyStatus = issue.release_assignee_notify_status; messageKey = issue.release_assignee_notify_message_key; readAt = issue.release_assignee_read_at;
+      } else if (type === 'intake') {
+        notifyStatus = issue.intake_notify_status; messageKey = issue.intake_notify_message_key; readAt = issue.intake_read_at;
       } else {
         notifyStatus = issue.requester_notify_status; messageKey = issue.requester_notify_message_key; readAt = issue.requester_read_at;
       }
@@ -9662,7 +10056,14 @@ module.exports = (deps) => {
           recipientDingUid = raw != null ? String(raw).trim() : '';
         } catch (err) { const cls = dingtalkNotify.classifyError(err); return res.status(502).json({ error: '业务方钉钉号查询失败：' + cls.hint, reason: cls.reason }); }
       } else {
-        const uid = type === 'dev' ? devUserId : (type === 'relay' ? issue.relay_notified_user_id : (type === 'release_executor' ? issue.release_assignee_id : issue.created_by));
+        // intake：uid 取 issue.intake_liaison_id——为 NULL 的存量单（发送时曾走 §4 降级发送）此处不
+        //   重新推导 fallback，直接落 uid=null → 下方 dingtalk_user_id 查无该行 → recipientDingUid=''
+        //   → 走既有 recipient_unresolved 分支（同"无 dingtalk_user_id"降级路径，不新增分支）。
+        const uid = type === 'dev' ? devUserId
+          : (type === 'relay' ? issue.relay_notified_user_id
+          : (type === 'release_executor' ? issue.release_assignee_id
+          : (type === 'intake' ? issue.intake_liaison_id
+          : issue.created_by)));
         const u = await dbGetAsync('SELECT dingtalk_user_id FROM users WHERE id = ?', [uid]);
         recipientDingUid = u && u.dingtalk_user_id ? String(u.dingtalk_user_id).trim() : '';
       }
@@ -9683,7 +10084,11 @@ module.exports = (deps) => {
         if (type === 'dev') {
           await sysNotifyWrite('UPDATE sys_issue_dev_assignees SET read_at = ? WHERE id = ?', [readAtStr, devRowId]);
         } else {
-          const col = type === 'relay' ? 'relay_read_at' : (type === 'creator' ? 'creator_read_at' : (type === 'release_executor' ? 'release_assignee_read_at' : 'requester_read_at'));
+          const col = type === 'relay' ? 'relay_read_at'
+            : (type === 'creator' ? 'creator_read_at'
+            : (type === 'release_executor' ? 'release_assignee_read_at'
+            : (type === 'intake' ? 'intake_read_at'
+            : 'requester_read_at')));
           await sysNotifyWrite(`UPDATE sys_issues SET ${col} = ? WHERE id = ?`, [readAtStr, id]);
         }
       }
@@ -9714,6 +10119,13 @@ module.exports = (deps) => {
     assertNotifySentBy,
     recordSysCreatorNotify,
     recordSysDevAssigneeNotify,
+    // 建单优化批 C1（方案 20260731_v1.2）：对接人同源 helper + intake 通道落库/文案 + 标题派生——
+    //   导出供 verify 直调真实逻辑（RC-L2 防复刻漂移），业务代码一律走 HTTP 端点。
+    resolveActiveSysIntakeLiaisons,
+    recordSysIntakeNotify,
+    buildSysIntakeMarkdown,
+    deriveSysTitleFromDescription,
+    SYS_NOTIFY_INTAKE_STATUSES,
     SYS_REQUIRED_TABLES,
     SYS_ISSUES_KEY_COLS,
     SYS_RELEASES_KEY_COLS,

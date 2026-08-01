@@ -77,12 +77,18 @@ function call(method, p, tok, body) {
 
 let passed = 0;
 const ok = (m) => { passed++; console.log('  ✓ ' + m); };
+// 2026-08-01：硬编码未来日期到期（ESTIMATE_BEFORE_ASSIGN 时限炸弹），改动态生成——远期字面量迟早到期，勿回退此写法
+function futureEst(days) {
+  const d = new Date(Date.now() + days * 86400000);
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
 
 // 把一张 feature 单推到「待上线」（create→schedule→assign→estimate→submit→accept）。
 //   D（codex L-1）：固定指派 dev(id=5)、estimate/submit 用 devTok——ownerGuard 严格本人，admin 不能代开发提交，
 //   不再保留 adminTok 误导分支。
 async function seedToReady() {
-  let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 't', system_name: 'BMS', source: '内部' });
+  let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 't', system_name: 'BMS', source: '内部', description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13 });
   assert.strictEqual(r.status, 201, '建单 201, got ' + r.status + ' ' + JSON.stringify(r.body));
   const id = r.body.id;
   // ⭐ 角色权限重构 C2.5 撤销（v2.1）：建单直落「待受理」，无需再走预沟通段。
@@ -93,7 +99,7 @@ async function seedToReady() {
   r = await call('POST', `/api/sys-issues/${id}/set-oa-number`, adminTok, { oa_number: '2026070001' });
   assert.strictEqual(r.status, 200, '夹具补 OA 号 200, got ' + r.status + ' ' + JSON.stringify(r.body));
   await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5 });
-  r = await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: '2026-08-01 10:00' });
+  r = await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: futureEst(30) });
   assert.strictEqual(r.status, 200, 'estimate 200, got ' + r.status + ' ' + JSON.stringify(r.body));
   r = await call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'no_code', no_code_reason: '交付完成（占位理由）' });
   assert.strictEqual(r.status, 200, 'submit 200, got ' + r.status + ' ' + JSON.stringify(r.body));
@@ -130,7 +136,7 @@ async function main() {
   //   hasReleaseEligibility(userId)：SELECT status, role）+ §7 hotfix-publish 首次调用真走 notify-executor
   //   同款抢占+外呼服务（sendReleaseNotifyAndWriteback：SELECT id, display_name, phone, dingtalk_user_id）。
   await run(`CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT, status TEXT DEFAULT 'active', phone TEXT, dingtalk_user_id TEXT)`);
-  await run(`INSERT INTO users (id, username, display_name, role, status) VALUES (1,'admin','管理员','admin','active'),(5,'dev','开发王','user','active')`);
+  await run(`INSERT INTO users (id, username, display_name, role, status) VALUES (1,'admin','管理员','admin','active'),(5,'dev','开发王','user','active'),(13,'wangtaotao','示例对接人','user','active')`);
   await new Promise((res) => { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = app.listen(0, () => { port = server.address().port; res(); }); });
 
   // 当天号前缀（与后端 strftime 同源）
@@ -181,7 +187,7 @@ async function main() {
   ok('已挂批次单加入它批次 → 409 ISSUE_NOT_ADDABLE');
 
   // 非待上线（新建未走流程，状态=待评估）→ 不能加
-  const draftId = (await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 'd', system_name: 'BMS', source: '内部' })).body.id;
+  const draftId = (await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 'd', system_name: 'BMS', source: '内部', description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13 })).body.id;
   r = await call('POST', `/api/sys-releases/${relB}/add-issues`, adminTok, { issue_ids: [draftId] });
   assert.strictEqual(r.status, 409); assert.strictEqual(r.body.code, 'ISSUE_NOT_ADDABLE');
   ok('非待上线单加入 → 409');
@@ -615,7 +621,7 @@ async function main() {
     //   系列全覆盖），故直接 SQL 把该行重置回 'pending'——只影响本测试无关注的 roster 完成态字段，不影响
     //   本用例真正验证的 release/snapshot/timeline 隔离逻辑。
     await run(`UPDATE sys_issue_dev_assignees SET dev_status='pending' WHERE issue_id=? AND user_id=5 AND removed_at IS NULL`, [cycId]);
-    r13 = await call('POST', `/api/sys-issues/${cycId}/estimate`, devTok, { dev_estimated_at: '2026-09-01 10:00' });
+    r13 = await call('POST', `/api/sys-issues/${cycId}/estimate`, devTok, { dev_estimated_at: futureEst(60) });
     assert.strictEqual(r13.status, 200, `[C6回环⑤] estimate 应 200, got ${r13.status}`);
     r13 = await call('POST', `/api/sys-issues/${cycId}/submit`, devTok, { mode: 'no_code', no_code_reason: '缺陷已修复（占位理由）' });
     assert.strictEqual(r13.status, 200, `[C6回环⑤] submit 应 200, got ${r13.status} ${JSON.stringify(r13.body)}`);
@@ -700,12 +706,12 @@ async function main() {
     //   为止），不再存在"不建批次"的旁路分支，"mode 决定 release_id 归宿"这条不变量不复存在。改为单一
     //   断言：bug 经统一入口（hotfix-publish 建单+加单+抢占 → execute 真发布）⟹ release_id/version_tag
     //   均非空（与 feature/improvement 完全同构，佐证"全类型统一"）。
-    let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'seg-bug', system_name: 'BMS', source: '内部' });
+    let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'seg-bug', system_name: 'BMS', source: '内部', description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13 });
     const bugSeg = r.body.id;
     // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
     await call('POST', `/api/sys-issues/${bugSeg}/intake-accept`, adminTok, {});
     await call('POST', `/api/sys-issues/${bugSeg}/assign`, adminTok, { assigned_to: 5 });
-    await call('POST', `/api/sys-issues/${bugSeg}/estimate`, devTok, { dev_estimated_at: '2026-08-01 10:00' });
+    await call('POST', `/api/sys-issues/${bugSeg}/estimate`, devTok, { dev_estimated_at: futureEst(30) });
     await call('POST', `/api/sys-issues/${bugSeg}/submit`, devTok, { mode: 'no_code', no_code_reason: '修复（占位理由）' });
     await call('POST', `/api/sys-issues/${bugSeg}/accept`, adminTok, {});
     r = await call('POST', `/api/sys-issues/${bugSeg}/hotfix-publish`, adminTok, { release_note: 'seg-bug 应急建单' });
@@ -732,7 +738,7 @@ async function main() {
   //   sent ∧ 执行人本人 ∧ 资格）用 publishRelease() 直接 SQL 钉好在先，故本用例命中的必然是"三前提之后"
   //   的 roster 门，而非被中心守卫提前挡下——与改造前 legacy /publish 直达 roster 门的验证目标一致。
   {
-    let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: '零在册待上线单', system_name: 'BMS', source: '内部' });
+    let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: '零在册待上线单', system_name: 'BMS', source: '内部', description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13 });
     const zeroRosterId = r.body.id;
   // ⭐ 角色权限重构 C2.5 撤销（v2.1）：变更流建单直落「待受理」，无需再走预沟通段，直接受理。
   // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）

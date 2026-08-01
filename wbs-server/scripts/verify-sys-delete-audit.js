@@ -105,7 +105,8 @@ const ok = (m) => { passed++; console.log('  ✓ ' + m); };
 
 const CONTRACT_V = 2;
 const create = (extra) => call('POST', '/api/sys-issues', adminTok,
-  { intake_contract_version: CONTRACT_V, type: 'feature', title: '待删测试单', system_name: 'BMS', source: '内部', ...extra });
+  { intake_contract_version: CONTRACT_V, type: 'feature', title: '待删测试单', system_name: 'BMS', source: '内部',
+    description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13, ...extra });
 
 // 业务表残留计数（负例断"无副作用"、正例断"真清干净"都用它）
 //   ⭐ 对抗审 F7 收口：原来只查四张表（issue/timeline/attachments/dev_assignees），
@@ -158,7 +159,7 @@ async function makeRichIssue(title) {
 async function main() {
   mod.initSchema();
   await waitReady();
-  await run(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT, phone TEXT, dingtalk_user_id TEXT)`);
+  await run(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT, status TEXT DEFAULT 'active', phone TEXT, dingtalk_user_id TEXT)`);
   await run(`INSERT INTO users (id, username, display_name, role, phone) VALUES
     (1,'admin','管理员','admin','13800000001'),(2,'admin2','第二管理员','admin','13800000002'),
     (5,'dev','开发王','user','13800000005'),(13,'wangtaotao','示例对接人','user','13800000013')`);

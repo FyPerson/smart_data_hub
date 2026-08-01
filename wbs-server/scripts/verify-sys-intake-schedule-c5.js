@@ -93,7 +93,7 @@ let passed = 0;
 const ok = (m) => { passed++; console.log('  ✓ ' + m); };
 
 async function createIssue(type) {
-  const r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type, title: `${type}单`, system_name: 'BMS', source: '内部' });
+  const r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type, title: `${type}单`, system_name: 'BMS', source: '内部', description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13 });
   assert.strictEqual(r.status, 201, `建 ${type} 单 201, got ${r.status}`);
   // ⭐ codex Round-B 审 MED（采纳）：原先这里还有一句 intake-accept 残留调用（C2.5 起对 feature 恒 409、
   //   未断言、静默忽略）——已删除。删除前逐一核实本文件全部 14 处 createIssue() 调用点，确认**每一处**
@@ -114,7 +114,7 @@ async function seedIntake(id, { status = '待受理', created_by } = {}) {
 async function main() {
   mod.initSchema();
   await waitReady();
-  await run(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT, phone TEXT, dingtalk_user_id TEXT)`);
+  await run(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT, status TEXT DEFAULT 'active', phone TEXT, dingtalk_user_id TEXT)`);
   await run(`INSERT INTO users (id, username, display_name, role, phone) VALUES
     (1,'admin','管理员','admin','13800000001'),(5,'dev','开发王','user','13800000005'),(6,'dev2','开发李','user','13800000006'),
     (7,'shenjun','示例发布者','publisher','13800000007'),(13,'wangtaotao','示例对接人','user','13800000013')`);

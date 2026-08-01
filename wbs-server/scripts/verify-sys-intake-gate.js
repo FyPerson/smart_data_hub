@@ -105,7 +105,8 @@ const ok = (m) => { passed++; console.log('  ✓ ' + m); };
 // 建单必带契约版本（codex C0 审 HIGH-1）：后端据此识别旧页面，缺失/过旧 → 400 CLIENT_CONTRACT_OUTDATED
 const CONTRACT_V = 2;
 const create = (extra) => call('POST', '/api/sys-issues', adminTok,
-  { intake_contract_version: CONTRACT_V, type: 'feature', title: '测试单', system_name: 'BMS', source: '内部', ...extra });
+  { intake_contract_version: CONTRACT_V, type: 'feature', title: '测试单', system_name: 'BMS', source: '内部',
+    description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13, ...extra });
 
 // tech_lead_* 九列 + relay_* 七列（方案 v1.5 §2.5 + codex C0 审 MED-3：回受理门时两组均须整组归零）
 const TECH_LEAD_COLS = ['tech_lead_id', 'tech_lead_name', 'tech_lead_notify_request_event_id', 'tech_lead_notify_status',
@@ -123,7 +124,7 @@ const assertCleared = (row, cols, statusCol, label) => {
 async function main() {
   mod.initSchema();
   await waitReady();
-  await run(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT, phone TEXT, dingtalk_user_id TEXT)`);
+  await run(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT, status TEXT DEFAULT 'active', phone TEXT, dingtalk_user_id TEXT)`);
   await run(`INSERT INTO users (id, username, display_name, role, phone) VALUES
     (1,'admin','管理员','admin','13800000001'),(5,'dev','开发王','user','13800000005'),
     (7,'shenjun','示例发布者','publisher','13800000007'),(13,'wangtaotao','示例对接人','user','13800000013')`);
@@ -230,7 +231,10 @@ async function main() {
     // ⭐ 客户端契约版本闸（codex C0 审 HIGH-1）：旧页面**取消勾选**时不传 intake_required，请求体与新版逐字相同，
     //   只能靠契约版本区分。缺失/过旧一律 400，且必须**早于** INTAKE_REQUIRED_FIXED 判定（旧页面勾选时两条都命中，
     //   应给"请刷新页面"这个可执行动作，而不是"参数已废弃"这个用户无从下手的提示）。
-    const base = { type: 'feature', title: '旧页面模拟', system_name: 'BMS', source: '内部' };
+    // ⚠️ base 须满足建单优化批 C1 新契约（description/intake_liaison_id 必填，且判定早于契约版本闸）——
+    //   否则本组测的会是 DESCRIPTION_REQUIRED 而非本组真正要测的 CLIENT_CONTRACT_OUTDATED（两闸都缺时前者先触发）。
+    const base = { type: 'feature', title: '旧页面模拟', system_name: 'BMS', source: '内部',
+      description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13 };
     for (const [label, extra] of [
       ['旧页面·取消勾选（整个省略 intake_required）', {}],
       ['旧页面·勾选（传 intake_required=1）', { intake_required: 1 }],

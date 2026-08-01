@@ -120,6 +120,12 @@ function upload(id, tok, attachmentType, filename) {
 
 let passed = 0;
 const ok = (m) => { passed++; console.log('  ✓ ' + m); };
+// 2026-08-01：硬编码未来日期到期（ESTIMATE_BEFORE_ASSIGN 时限炸弹），改动态生成——远期字面量迟早到期，勿回退此写法
+function futureEst(days) {
+  const d = new Date(Date.now() + days * 86400000);
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
 const TYPES = ['bug', 'feature', 'improvement'];
 const ROLES = [
   { who: 'admin(1)',   tok: adminTok,  isAdmin: true,  isIntake: false },
@@ -137,7 +143,8 @@ async function statusOf(id) { return (await get('SELECT status FROM sys_issues W
 // 建单（C0 后恒落待受理）→ 受理 → 落「待指派」(变更流) /「待处理」(bug)
 async function mkAssignable(type) {
   const r = await call('POST', '/api/sys-issues', adminTok,
-    { intake_contract_version: 2, type, title: `${type}-C1`, system_name: 'BMS', source: '内部', requester_phone: '13800000009' });
+    { intake_contract_version: 2, type, title: `${type}-C1`, system_name: 'BMS', source: '内部', requester_phone: '13800000009',
+      description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13 });
   assert.strictEqual(r.status, 201, `建 ${type} 单 201, got ${r.status} ${JSON.stringify(r.body)}`);
   // ⭐ 角色权限重构 C2.5 撤销（v2.1）：三类型建单均直落「待受理」，预沟通段整体撤销，无需按 type 分支中转。
   const acc = await call('POST', `/api/sys-issues/${r.body.id}/intake-accept`, adminTok, {});
@@ -165,7 +172,7 @@ async function mkInDev(type) {
 // 推进到「待验证」（开发本人回填预计完成 + 提交）——accept 的合法前置态，也是 creator/requester 通道的可发状态
 async function mkVerifying(type) {
   const id = await mkInDev(type);
-  const e = await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: '2026-08-01 10:00' });
+  const e = await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: futureEst(30) });
   assert.strictEqual(e.status, 200, `夹具 mkVerifying(${type}) estimate 200, got ${e.status} ${JSON.stringify(e.body)}`);
   const s = await call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'no_code', no_code_reason: '完成（占位理由）' });
   assert.strictEqual(s.status, 200, `夹具 mkVerifying(${type}) submit 200, got ${s.status} ${JSON.stringify(s.body)}`);
@@ -197,7 +204,7 @@ async function mkOnline(type) {
 async function main() {
   mod.initSchema();
   await waitReady();
-  await run(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT, phone TEXT, dingtalk_user_id TEXT)`);
+  await run(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT, status TEXT DEFAULT 'active', phone TEXT, dingtalk_user_id TEXT)`);
   await run(`INSERT INTO users (id, username, display_name, role, phone) VALUES
     (1,'admin','管理员','admin','13800000001'),(2,'admin2','管理员乙','admin','13800000002'),
     (5,'dev','开发王','user','13800000005'),
@@ -506,9 +513,10 @@ async function main() {
     assert.strictEqual(addDev5.status, 200, '[M5] admin 加协作开发 dev5 须 200');
 
     // ① 开发轴：示例发布者以 assignee 身份可 estimate（态内旁路动作）
-    const est = await call('POST', `/api/sys-issues/${id}/estimate`, techTok, { dev_estimated_at: '2026-08-02 10:00' });
+    const est31 = futureEst(31);
+    const est = await call('POST', `/api/sys-issues/${id}/estimate`, techTok, { dev_estimated_at: est31 });
     assert.strictEqual(est.status, 200, `[M5/开发轴] 示例发布者被指派后 estimate 应放行（ownerGuard=assignee）, got ${est.status} ${JSON.stringify(est.body)}`);
-    assert.strictEqual((await get('SELECT dev_estimated_at FROM sys_issues WHERE id=?', [id])).dev_estimated_at, '2026-08-02 10:00',
+    assert.strictEqual((await get('SELECT dev_estimated_at FROM sys_issues WHERE id=?', [id])).dev_estimated_at, est31,
       '[M5/开发轴] estimate 须真落 dev_estimated_at（证明确实以开发身份走通，而非被静默吞）');
 
     // ② 协调人轴：开发身份不得穿透成协调人权
@@ -558,7 +566,7 @@ async function main() {
       const sid = await mkAssignable('improvement');
       const a2 = await call('POST', `/api/sys-issues/${sid}/assign`, adminTok, { assigned_to: 7 });
       assert.strictEqual(a2.status, 200, '[M5/开发轴] 夹具：admin 指派 improvement 给示例发布者(7) 须 200');
-      const e2 = await call('POST', `/api/sys-issues/${sid}/estimate`, techTok, { dev_estimated_at: '2026-08-03 10:00' });
+      const e2 = await call('POST', `/api/sys-issues/${sid}/estimate`, techTok, { dev_estimated_at: futureEst(32) });
       assert.strictEqual(e2.status, 200, `[M5/开发轴] 示例发布者 estimate 应放行, got ${e2.status} ${JSON.stringify(e2.body)}`);
       const s2 = await call('POST', `/api/sys-issues/${sid}/submit`, techTok, { mode: 'no_code', no_code_reason: '示例发布者以开发身份提交' });
       assert.strictEqual(s2.status, 200, `⭐ [M5/开发轴] 示例发布者 submit 应放行（ownerGuard=assignee 本人门）, got ${s2.status} ${JSON.stringify(s2.body)}`);

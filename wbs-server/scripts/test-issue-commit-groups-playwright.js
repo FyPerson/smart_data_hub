@@ -63,7 +63,7 @@ async function main() {
   console.log('\n══════ commit 记录改造 端到端冒烟 ══════');
 
   // 造数：变更流单 → schedule → assign 示例用户B → 回填 estimate（进可提交态）
-  const c = await api(adminTok, 'POST', '/api/sys-issues', { type: 'feature', title: 'commit改造冒烟单', system_name: '智数协同', source: '内部', description: 'x' });
+  const c = await api(adminTok, 'POST', '/api/sys-issues', { type: 'feature', title: 'commit改造冒烟单', system_name: '智数协同', source: '内部', description: 'x', intake_liaison_id: 13 });
   if (c.status !== 200 && c.status !== 201) { console.error('建单失败', c.status, c.j); process.exit(1); }
   issueId = c.j.id;
   await api(adminTok, 'POST', `/api/sys-issues/${issueId}/schedule`, { priority: 'P2' });
