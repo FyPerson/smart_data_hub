@@ -242,6 +242,30 @@ function requireIssueLiteSchemaReady(req, res, next) {
     next();
 }
 
+// ── 零星事项台账（快速通道，sys_quick_log）schema readiness ──────────────────────
+//   方案 docs/local/系统迭代/系统迭代_零星事项台账_方案_20260801_v0.1.md。全新独立表，
+//   建表位置与写法照 issue_lite（紧邻其后，见下方 db.serialize 块）；readiness 闸门同款：
+//   CREATE TABLE IF NOT EXISTS 首启自建 + PRAGMA 复查关键列全部到位才 ready，未就绪 → 503。
+//   端点在独立路由模块 routes/quick-log（工厂/DI 范式对齐 sys-iteration），本中间件作为
+//   deps 注入该模块使用（该模块与 sys-iteration 内部基础设施零交集，见其文件头注释）。
+const QUICK_LOG_SCHEMA_STATE = { ready: false, error: null };
+function requireQuickLogSchemaReady(req, res, next) {
+    if (QUICK_LOG_SCHEMA_STATE.error) {
+        return res.status(503).json({
+            error: '零星事项台账模块暂不可用：schema 未就绪',
+            detail: QUICK_LOG_SCHEMA_STATE.error,
+            code: 'QUICK_LOG_SCHEMA_NOT_READY'
+        });
+    }
+    if (!QUICK_LOG_SCHEMA_STATE.ready) {
+        return res.status(503).json({
+            error: '零星事项台账模块正在初始化，请稍后重试',
+            code: 'QUICK_LOG_SCHEMA_INITIALIZING'
+        });
+    }
+    next();
+}
+
 // ── 取数质量双校验增强 schema readiness（方案 §3-§4.4 / §8b.2）────────────
 //   v2 给 collab_quality_record 加 7 列（excel 5 + sql_unchecked_reason + record_kind）+ 唯一索引收窄
 //   到 record_kind='passed'（让 failed 行纯 append 不进唯一索引，方案 §4.4 第十人视角简化）。
@@ -753,6 +777,9 @@ app.use(express.static(path.join(__dirname, 'public'), {
 //   端点 GET /api/issue-lite/attachments/:aid/download（authenticateToken + isPathSafe + res.download）。
 //   区别于 collab/issues 附件（沿用静态服务 + 文件名不可猜）：issue_lite 数据敏感 + 新模块，收紧为鉴权唯一入口。
 app.use('/uploads/issue-lite', (req, res) => res.status(403).json({ error: '附件请通过登录后的下载入口获取', code: 'DIRECT_ACCESS_FORBIDDEN' }));
+// 零星事项台账（sys_quick_log）附件同款收紧：物理落在 uploads/quick-log/ 但不走无鉴权静态服务，
+//   强制走鉴权下载端点 GET /api/quick-logs/attachments/:attId/download（对齐 issue-lite 上一行）。
+app.use('/uploads/quick-log', (req, res) => res.status(403).json({ error: '附件请通过登录后的下载入口获取', code: 'DIRECT_ACCESS_FORBIDDEN' }));
 app.use('/uploads', express.static(UPLOAD_DIR));
 app.use('/archive', express.static(ARCHIVE_DIR));
 
@@ -1812,6 +1839,116 @@ function initTable() {
                 ISSUE_LITE_SCHEMA_STATE.error = null;
                 ISSUE_LITE_SCHEMA_STATE.ready = true;
                 logger.info('[数据开发换壳 C1] ✅ issue_lite 表就绪（列齐），数据开发台账接口放行');
+            });
+        });
+    });
+
+    // ==================== 零星事项台账（快速通道，sys_quick_log）====================
+    // 方案 docs/local/系统迭代/系统迭代_零星事项台账_方案_20260801_v0.1.md
+    //   admin 自主记录提效工具/demo 类小开发，无状态纯完成留痕。全新独立表，CREATE TABLE IF NOT EXISTS
+    //   首启自建，生产零迁移（照 issue_lite v1.121 先例，紧邻其后建表，位置与写法对齐上方 issue_lite 块）。
+    //   与 sys_issues / issue_lite 状态机/事务互斥零交集——本表无状态、无触发器、无多步事务。
+    //   category 值域 tool/demo/other 服务层白名单保证、不设 CHECK（方案 §二，吸取 issue_lite「改 CHECK
+    //   需重建 37 列表」教训）。start_date/end_date 列级 CHECK 用 date(x,'+0 days')=x 强制 Julian 回转，
+    //   拦 2026-02-30 一类月内溢出（sqlite_date_check_gotcha 铁律）。
+    //   路由端点在独立模块 routes/quick-log（工厂/DI 范式对齐 sys-iteration，见文末实例化 + 挂载点）；
+    //   本表 schema 不随该模块 initSchema（本模块无 initSchema）——直接在此建表，同 issue_lite 一致。
+    const QUICK_LOG_REQUIRED_COLS = [
+        'id', 'category', 'category_note', 'title',
+        'requester_name', 'requester_dept',
+        'description', 'result_note', 'result_link',
+        'start_date', 'end_date',
+        'created_by', 'created_by_name', 'created_at', 'updated_at'
+    ];
+    // codex S1 审 MED 采纳：readiness 此前只复查主表列，附件表缺列会被"CREATE IF NOT EXISTS 成功即当列齐"
+    // 悄悄放过（PRAGMA 只在 DDL 失败时兜底，半成品缺列不算 DDL 失败）——补附件表同款复查，同结构同文案。
+    const QUICK_LOG_ATT_REQUIRED_COLS = [
+        'id', 'quick_log_id', 'file_name', 'original_name', 'file_size', 'mime_type',
+        'uploaded_by', 'uploaded_by_name', 'created_at'
+    ];
+    db.serialize(() => {
+        let quickLogDdlError = null;
+        const recordQuickLogDdlError = (label) => (err) => {
+            if (err && !quickLogDdlError) {
+                quickLogDdlError = `${label}: ${err.message}`;
+                logger.error(`[零星事项台账] DDL 失败 @${label}：${err.message}`);
+            }
+        };
+        db.run(`CREATE TABLE IF NOT EXISTS sys_quick_log (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            category        TEXT NOT NULL,
+            category_note   TEXT,
+            title           TEXT NOT NULL,
+            requester_name  TEXT,
+            requester_dept  TEXT,
+            description     TEXT NOT NULL,
+            result_note     TEXT NOT NULL,
+            result_link     TEXT,
+            start_date      TEXT CHECK (start_date IS NULL OR date(start_date,'+0 days') = start_date),
+            end_date        TEXT CHECK (end_date IS NULL OR date(end_date,'+0 days') = end_date),
+            created_by      INTEGER NOT NULL,
+            created_by_name TEXT NOT NULL,
+            created_at      DATETIME DEFAULT (datetime('now','localtime')),
+            updated_at      DATETIME DEFAULT (datetime('now','localtime'))
+        )`, recordQuickLogDdlError('CREATE sys_quick_log'));
+        db.run(`CREATE INDEX IF NOT EXISTS idx_quick_log_category ON sys_quick_log(category)`, recordQuickLogDdlError('CREATE idx category'));
+        db.run(`CREATE INDEX IF NOT EXISTS idx_quick_log_end_date ON sys_quick_log(end_date)`, recordQuickLogDdlError('CREATE idx end_date'));
+        // 附件表（照 issue_lite_attachments 范式整套对齐：字段/落盘目录隔离/`/uploads` 403 静态拦截沿用）
+        db.run(`CREATE TABLE IF NOT EXISTS sys_quick_log_attachments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            quick_log_id INTEGER NOT NULL,
+            file_name TEXT NOT NULL,
+            original_name TEXT NOT NULL,
+            file_size INTEGER,
+            mime_type TEXT,
+            uploaded_by INTEGER,
+            uploaded_by_name TEXT,
+            created_at DATETIME DEFAULT (datetime('now','localtime'))
+        )`, recordQuickLogDdlError('CREATE sys_quick_log_attachments'));
+        db.run(`CREATE INDEX IF NOT EXISTS idx_quick_log_att_parent ON sys_quick_log_attachments(quick_log_id)`, (idxErr) => {
+            const failMsg = quickLogDdlError || (idxErr ? `CREATE idx att_parent: ${idxErr.message}` : null);
+            if (failMsg) {
+                QUICK_LOG_SCHEMA_STATE.error = `零星事项台账 schema 建表失败：${failMsg}`;
+                QUICK_LOG_SCHEMA_STATE.ready = false;
+                logger.error(`[零星事项台账] 🚫 建表失败：${failMsg} → 零星事项台账接口将返 503`);
+                return;
+            }
+            // 建表成功 → PRAGMA 复查关键列全部到位才 ready（不信 CREATE 返回值，以实际列为准，对齐 issue_lite）
+            db.all(`PRAGMA table_info("sys_quick_log")`, (pErr, rows) => {
+                if (pErr) {
+                    QUICK_LOG_SCHEMA_STATE.error = `零星事项台账 schema 复查失败（PRAGMA）：${pErr.message}`;
+                    QUICK_LOG_SCHEMA_STATE.ready = false;
+                    logger.error(`[零星事项台账] 🚫 PRAGMA 复查失败：${pErr.message}`);
+                    return;
+                }
+                const cols = rows ? rows.map(r => r.name) : [];
+                const missing = QUICK_LOG_REQUIRED_COLS.filter(c => !cols.includes(c));
+                if (missing.length) {
+                    QUICK_LOG_SCHEMA_STATE.error = `零星事项台账 sys_quick_log 缺列：${missing.join(',')}`;
+                    QUICK_LOG_SCHEMA_STATE.ready = false;
+                    logger.error(`[零星事项台账] 🚫 sys_quick_log 缺关键列 [${missing.join(',')}] → 接口将返 503`);
+                    return;
+                }
+                // 主表列齐后接着复查附件表列（同结构同文案，codex S1 审 MED 采纳）
+                db.all(`PRAGMA table_info("sys_quick_log_attachments")`, (pErr2, attRows) => {
+                    if (pErr2) {
+                        QUICK_LOG_SCHEMA_STATE.error = `零星事项台账 schema 复查失败（附件表 PRAGMA）：${pErr2.message}`;
+                        QUICK_LOG_SCHEMA_STATE.ready = false;
+                        logger.error(`[零星事项台账] 🚫 附件表 PRAGMA 复查失败：${pErr2.message}`);
+                        return;
+                    }
+                    const attCols = attRows ? attRows.map(r => r.name) : [];
+                    const attMissing = QUICK_LOG_ATT_REQUIRED_COLS.filter(c => !attCols.includes(c));
+                    if (attMissing.length) {
+                        QUICK_LOG_SCHEMA_STATE.error = `零星事项台账 sys_quick_log_attachments 缺列：${attMissing.join(',')}`;
+                        QUICK_LOG_SCHEMA_STATE.ready = false;
+                        logger.error(`[零星事项台账] 🚫 sys_quick_log_attachments 缺关键列 [${attMissing.join(',')}] → 接口将返 503`);
+                        return;
+                    }
+                    QUICK_LOG_SCHEMA_STATE.error = null;
+                    QUICK_LOG_SCHEMA_STATE.ready = true;
+                    logger.info('[零星事项台账] ✅ sys_quick_log / sys_quick_log_attachments 双表就绪（列齐），零星事项台账接口放行');
+                });
             });
         });
     });
@@ -20258,6 +20395,21 @@ const periodicFetchModule = require('./routes/periodic-fetch')({
   getMssqlPool, getMysqlPool, readSystemConfig, maskPhone, decryptPassword,
 });
 app.use('/api', periodicFetchModule.router);
+
+// ============================================================
+// 零星事项台账（快速通道，sys_quick_log）模块——工厂/DI 范式对齐 sys-iteration 挂载方式，
+//   但 schema 建表不在本模块内（照 issue_lite 直接建在 server.js db 连接回调前，见上方 db.serialize 块），
+//   故本模块无 initSchema，仅实例化 + 挂载路由。deps 最小档：与 sys-iteration 内部基础设施零交集
+//   （不注入状态机/mutex/通知链路），仅取用附件基础设施（UPLOAD_DIR/normalizeAttachmentExt/
+//   safeDeleteFileSync/COLLAB_ALLOWED_EXTS_UNION）+ 鉴权中间件 + 本模块专属 schema readiness 闸门。
+//   ⚠️ 挂载到 /api：router 内只注册 /quick-logs* 路径，未匹配自动 next() fall-through，不拦截其他 /api/*。
+// ============================================================
+const quickLogModule = require('./routes/quick-log')({
+  logger, dbRunAsync, dbGetAsync, dbAllAsync, authenticateToken, requireAdmin,
+  requireQuickLogSchemaReady, UPLOAD_DIR, normalizeAttachmentExt, safeDeleteFileSync,
+  COLLAB_ALLOWED_EXTS_UNION,
+});
+app.use('/api', quickLogModule.router);
 
 // ============================================================
 // MCP Demo - 数仓对话查询

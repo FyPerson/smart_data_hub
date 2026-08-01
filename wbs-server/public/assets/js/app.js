@@ -549,6 +549,11 @@ function updateUserUI() {
             // 下拉入口——不进普通导航栏（会要求同步改 11 个既有页面的导航栏 HTML，超出该模块新增范围），
             // 复用这个已存在于每一页的 profile 下拉菜单即可让 admin 全站可发现，无需改动任何既有页面。
             menuItems += `<a href="/Periodic_Fetch.html" style="text-decoration:none;">📅 周期取数推送</a>`;
+            // 零星事项台账（仅 admin·2026-08-01 用户验收裁定入口位置，2026-08-02 用户验收裁定改独立页）：
+            //   入口置于「周期取数推送」同级下方——同款 admin-only 下拉先例免改 12 页导航栏 HTML。
+            //   原实现挂在 Sys_Iteration.html 内嵌弹层面板（?quicklog=1 深链自动打开），浏览器验收后
+            //   改造成独立页 Quick_Log.html（平铺列表，不再是弹层），深链参数随之作废，直链目标页即可。
+            menuItems += `<a href="/Quick_Log.html" style="text-decoration:none;">📋 零星事项</a>`;
             // 数据开发换壳（issue_lite）：极简台账页替换导航"数据开发"入口后，重型页 Issue_Tracker
             //   挪到本 admin-only 下拉（照上方"周期取数推送"同款先例，免改各页导航栏 HTML）——
             //   普通用户/开发只用极简台账页，admin 需完整协作能力（指派/改派/拉群/评估/历史）时从这里进重型页。

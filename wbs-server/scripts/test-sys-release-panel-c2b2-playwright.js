@@ -38,6 +38,9 @@ const path = require('path');
 const sqlite3 = require('sqlite3').verbose();
 const jwt = require('jsonwebtoken');
 const { chromium } = require('playwright');
+// 2026-08-02 用户裁定二：上线单管理/值班排班/上线日志/删除审计/流程说明五个入口从筛选栏平铺按钮
+// 收进「⚙️ 管理」下拉——点击/断言可见性前须先开菜单，抽公共 helper 避免每个用例各自复制粘贴。
+const { openSysHeadMenu, clickSysHeadMenuItem, sysHeadMenuItemLocator } = require('./_sys-head-menu-helper');
 
 require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 
@@ -81,7 +84,10 @@ async function shotOnFail(page, cond, name, msg) {
 async function loginPage(browser, token) {
     const page = await browser.newPage();
     const consoleErrors = [];
-    page.on('console', m => { if (m.type() === 'error') consoleErrors.push(m.text()); });
+    // m.location().url 对 "Failed to load resource" 这类网络层 console error 会携带失败请求的真实
+    // URL（已用独立探针脚本对本项目实际接口验证过，见 test-quick-log-playwright.js 同款处理注释），
+    // 拼进文本末尾（` @url`）供下方 unexpectedConsoleErrors() 精确识别噪音，而不是笼统数量判断。
+    page.on('console', m => { if (m.type() === 'error') consoleErrors.push(m.text() + (m.location() && m.location().url ? ' @' + m.location().url : '')); });
     page.on('pageerror', e => consoleErrors.push('pageerror: ' + e.message));
     page.on('dialog', d => d.accept());   // confirm() 自动接受（批量设置等有原生 confirm 弹窗）
     await page.goto(`${BASE_URL}/login.html`);
@@ -89,10 +95,19 @@ async function loginPage(browser, token) {
     page._consoleErrors = consoleErrors;
     return page;
 }
+// 本轮实测发现的既有噪音（与本次「⚙️ 管理」下拉改造无关）：Sys_Iteration.html DOMContentLoaded 对
+// 任意登录用户无条件调用 siLoadIntakeLiaisons()（GET /sys-issues/intake-liaisons，admin-only），
+// 非 admin 角色必 403（见该函数注释"非 admin 会 403，符合预期，不提示"——早于本次改动就存在，
+// test-quick-log-playwright.js 处理同一噪音源时已有先例）。本文件多处用非 admin token 打开
+// Sys_Iteration.html 做"0 console error"断言，此前从未被本套件自己的断言口径捕捉到——按精确签名
+// （URL 命中该端点 + 403/Failed to load resource）过滤，其余任何报错仍一律计入失败。
+function unexpectedConsoleErrors(errs) {
+    return (errs || []).filter(e => !(/\/api\/sys-issues\/intake-liaisons/.test(e) && (/403/.test(e) || /Failed to load resource/i.test(e))));
+}
 async function openBatchDetail(page, batchTitle) {
     await page.goto(`${BASE_URL}/Sys_Iteration.html`);
     await page.waitForLoadState('networkidle');
-    await page.click('button:has-text("上线单管理")');
+    await clickSysHeadMenuItem(page, '上线单管理');
     await page.waitForTimeout(300);
     await page.click(`.si-batch-item:has-text("${batchTitle}")`);
     await page.waitForTimeout(400);
@@ -224,7 +239,7 @@ async function main() {
             );
             await page.reload();
             await page.waitForLoadState('networkidle');
-            await page.click('button:has-text("上线单管理")');
+            await clickSysHeadMenuItem(page, '上线单管理');
             await page.waitForTimeout(300);
             await page.click(`.si-batch-item:has-text("C2b2冒烟批次T1")`);
             await page.waitForTimeout(400);
@@ -286,11 +301,26 @@ async function main() {
             // ⚠️ 执行人非 admin/对接人，看不到「上线单管理」入口（Playwright 冒烟本环节实测发现的真实缺口，
             //   已修：GET /sys-releases/:id 放行「本批次执行人」+ 前端新增 ?release=<id> 深链，见完成报告）——
             //   走深链直达详情页，不能复用 openBatchDetail() 那套点「上线单管理」的导航路径。
+            // 2026-08-02 用户裁定二：「上线单管理」已收进「⚙️ 管理」下拉——执行人是登录用户，「值班排班」/
+            // 「流程说明」条件仍成立，下拉本体仍会渲染（只是不含「上线单管理」这一项），故仍需先开菜单，
+            // 在菜单范围内断言该项确实缺席，而非直接假设整个下拉都不存在。
             const pageExec = await loginPage(browser, executorTok);
             await pageExec.goto(`${BASE_URL}/Sys_Iteration.html?release=${relT2}`);
             await pageExec.waitForLoadState('networkidle');
             await pageExec.waitForTimeout(500);
-            await shotOnFail(pageExec, (await pageExec.locator('button:has-text("上线单管理")').count()) === 0, 't2-batch-mgmt-hidden-executor', '执行人（非 admin/对接人）看不到「上线单管理」入口（列表端点未放开，符合最小暴露面设计）');
+            // ?release= 深链会在 DOMContentLoaded 内自动打开批次详情弹窗（#siBatchOverlay.open），
+            // 该弹窗视觉/pointer-events 上盖住筛选栏（含「⚙️ 管理」触发按钮）——先关掉弹窗，回到
+            // 列表页本身的状态再开菜单，否则 openSysHeadMenu 的真实 click() 会被弹窗拦截超时
+            // （.count() 式的纯 DOM 断言不受此影响，但这里要做的是真实点开菜单，须先清障）。
+            await pageExec.evaluate(() => siCloseBatch());
+            await pageExec.waitForTimeout(200);
+            await openSysHeadMenu(pageExec);
+            await shotOnFail(pageExec, (await sysHeadMenuItemLocator(pageExec, '上线单管理').count()) === 0, 't2-batch-mgmt-hidden-executor', '执行人（非 admin/对接人）看不到「上线单管理」菜单项（列表端点未放开，符合最小暴露面设计）');
+            // 上面为了能真实点开下拉菜单关掉了深链自动打开的详情弹窗——重新打开它，恢复后续「执行上线」
+            // 全链路断言所需的页面状态（不重新 goto 整页，直接复刻深链处理逻辑的两步：开弹窗壳 +
+            // siOpenBatchDetail 异步填内容，见 Sys_Iteration.html DOMContentLoaded 里 ?release= 分支）。
+            await pageExec.evaluate((id) => { document.getElementById('siBatchOverlay').classList.add('open'); siOpenBatchDetail(id); }, relT2);
+            await pageExec.waitForTimeout(300);
             await shotOnFail(pageExec, (await pageExec.locator('#siBatchFoot button:has-text("执行上线")').count()) > 0, 't2-execute-btn-visible-self', 'T2 执行人本人（示例开发A）经 ?release= 深链直达详情，「执行上线」按钮可见');
             await shotOnFail(pageExec, (await pageExec.locator('#siBatchFoot button:has-text("安排上线")').count()) === 0, 't2-notify-btn-hidden-nonadmin', '非 admin 本就看不到「安排上线」');
 
@@ -347,7 +377,7 @@ async function main() {
             const orchText = (await orchSection.textContent()) || '';
             await shotOnFail(page, orchText.includes('历史留痕机制') && orchText.includes('入口已下线'), 't3-orch-assign-hint-text', 'T3「上线编排」区块仍保留只读历史说明文案（"历史留痕机制"+"入口已下线"），只是没有可点击按钮');
 
-            await shotOnFail(page, page._consoleErrors.length === 0, 't3-console-clean', `T3 页面全程无 JS 报错（${page._consoleErrors.length} 个${page._consoleErrors.length ? ': ' + page._consoleErrors.slice(0, 2).join(' | ') : ''}）`);
+            { const errs = unexpectedConsoleErrors(page._consoleErrors); await shotOnFail(page, errs.length === 0, 't3-console-clean', `T3 页面全程无意外 JS 报错（已豁免既有 intake-liaisons 噪音，实得=${errs.length}${errs.length ? ': ' + errs.slice(0, 2).join(' | ') : ''}）`); }
             await page.close();
         }
 
@@ -366,7 +396,7 @@ async function main() {
             await pageAdmin.waitForLoadState('networkidle');
             await pageAdmin.waitForTimeout(500);
             await shotOnFail(pageAdmin, (await pageAdmin.locator(goBtnSel).count()) > 0, 't3b-admin-btn-visible', 'T3b admin 视角「前往上线单」按钮可见（镜像后端 GET /sys-releases/:id 的 admin 分支）');
-            await shotOnFail(pageAdmin, pageAdmin._consoleErrors.length === 0, 't3b-admin-console-clean', `T3b admin 页面全程无 JS 报错（${pageAdmin._consoleErrors.length} 个）`);
+            { const errs = unexpectedConsoleErrors(pageAdmin._consoleErrors); await shotOnFail(pageAdmin, errs.length === 0, 't3b-admin-console-clean', `T3b admin 页面全程无意外 JS 报错（实得=${errs.length}${errs.length ? ': ' + errs.slice(0, 2).join(' | ') : ''}）`); }
             await pageAdmin.close();
 
             const pageLiaison = await loginPage(browser, liaisonTok);
@@ -386,7 +416,7 @@ async function main() {
             await shotOnFail(pageOther, (await pageOther.locator(goBtnSel).count()) === 0, 't3b-other-btn-hidden', 'T3b 普通用户（非 admin/对接人/批次执行人）「前往上线单」按钮不可见——点击会 403，故不显示（宁可少显示不要显示了点不开）');
             const otherOrchText = (await pageOther.locator(orchSel).textContent()) || '';
             await shotOnFail(pageOther, otherOrchText.includes('已建应急上线单'), 't3b-other-progress-text-kept', 'T3b 普通用户仍能看到「已建应急上线单」进度文案（按钮隐藏≠信息也隐藏）');
-            await shotOnFail(pageOther, pageOther._consoleErrors.length === 0, 't3b-other-console-clean', `T3b 普通用户页面全程无 JS 报错（${pageOther._consoleErrors.length} 个）`);
+            { const errs = unexpectedConsoleErrors(pageOther._consoleErrors); await shotOnFail(pageOther, errs.length === 0, 't3b-other-console-clean', `T3b 普通用户页面全程无意外 JS 报错（已豁免既有 intake-liaisons 噪音，实得=${errs.length}${errs.length ? ': ' + errs.slice(0, 2).join(' | ') : ''}）`); }
             await pageOther.close();
         }
 
@@ -418,7 +448,7 @@ async function main() {
             const visibleAfterHide = await page.$$eval('.si-tl-release-scope', els => els.filter(e => getComputedStyle(e).display !== 'none').length);
             await shotOnFail(page, releaseScopeCountBefore > 0 && visibleAfterHide === 0, 'tl-filter-hides-rows', `勾选过滤开关后 ${releaseScopeCountBefore} 条上线单调整记录全部隐藏（实际仍可见 ${visibleAfterHide} 条）`);
 
-            await shotOnFail(page, page._consoleErrors.length === 0, 'tl-console-clean', `timeline 页面全程无 JS 报错（${page._consoleErrors.length} 个${page._consoleErrors.length ? ': ' + page._consoleErrors.slice(0, 2).join(' | ') : ''}）`);
+            { const errs = unexpectedConsoleErrors(page._consoleErrors); await shotOnFail(page, errs.length === 0, 'tl-console-clean', `timeline 页面全程无意外 JS 报错（实得=${errs.length}${errs.length ? ': ' + errs.slice(0, 2).join(' | ') : ''}）`); }
             await page.close();
         }
 
@@ -430,7 +460,7 @@ async function main() {
             const page = await loginPage(browser, liaisonTok);
             await page.goto(`${BASE_URL}/Sys_Iteration.html`);
             await page.waitForLoadState('networkidle');
-            await page.click('button:has-text("值班排班")');
+            await clickSysHeadMenuItem(page, '值班排班');
             await page.waitForTimeout(400);
 
             await shotOnFail(page, (await page.locator('#siDutyRosterBody button:has-text("批量设置")').count()) > 0, 'duty-batch-btn-present', '排班维护面板出现「批量设置」按钮（对接人写权）');
@@ -473,7 +503,7 @@ async function main() {
             await shotOnFail(page, subVisible === 3 && subRemoveBtns === 3, 'duty-batch-sub-expand',
                 `点击区间行展开后 3 条逐日子行可见且各带「移除」按钮（可见 ${subVisible}/3·按钮 ${subRemoveBtns}/3）`);
 
-            await shotOnFail(page, page._consoleErrors.length === 0, 'duty-console-clean', `排班维护面板全程无 JS 报错（${page._consoleErrors.length} 个${page._consoleErrors.length ? ': ' + page._consoleErrors.slice(0, 2).join(' | ') : ''}）`);
+            { const errs = unexpectedConsoleErrors(page._consoleErrors); await shotOnFail(page, errs.length === 0, 'duty-console-clean', `排班维护面板全程无意外 JS 报错（已豁免既有 intake-liaisons 噪音，实得=${errs.length}${errs.length ? ': ' + errs.slice(0, 2).join(' | ') : ''}）`); }
             await page.close();
 
             // 记录清理用日期区间（清理阶段按日期段删，不逐行查 id）

@@ -24,6 +24,9 @@ const path = require('path');
 const sqlite3 = require('sqlite3').verbose();
 const jwt = require('jsonwebtoken');
 const { chromium } = require('playwright');
+// 2026-08-02 用户裁定二：上线单管理/值班排班/上线日志/删除审计/流程说明五个入口从筛选栏平铺按钮
+// 收进「⚙️ 管理」下拉——点击/断言可见性前须先开菜单，抽公共 helper 避免每个用例各自复制粘贴。
+const { openSysHeadMenu, clickSysHeadMenuItem, sysHeadMenuItemLocator } = require('./_sys-head-menu-helper');
 
 require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 
@@ -66,13 +69,22 @@ async function shotOnFail(page, cond, name, msg) {
 async function loginPage(browser, token) {
     const page = await browser.newPage();
     const consoleErrors = [];
-    page.on('console', m => { if (m.type() === 'error') consoleErrors.push(m.text()); });
+    // m.location().url 对 "Failed to load resource" 这类网络层 console error 会携带失败请求的真实
+    // URL（已用独立探针脚本对本项目实际接口验证过，见 test-quick-log-playwright.js 同款处理注释），
+    // 拼进文本末尾（` @url`）供下方 unexpectedConsoleErrors() 精确识别噪音。
+    page.on('console', m => { if (m.type() === 'error') consoleErrors.push(m.text() + (m.location() && m.location().url ? ' @' + m.location().url : '')); });
     page.on('pageerror', e => consoleErrors.push('pageerror: ' + e.message));
     page.on('dialog', d => d.accept());
     await page.goto(`${BASE_URL}/login.html`);
     await page.evaluate((t) => { localStorage.setItem('token', t); }, token);
     page._consoleErrors = consoleErrors;
     return page;
+}
+// 与本次「⚙️ 管理」下拉改造无关的既有噪音（详见 test-sys-release-panel-c2b2-playwright.js 同名函数
+// 注释）：Sys_Iteration.html 对任意登录用户无条件调用 siLoadIntakeLiaisons()，非 admin 必 403。
+// 本文件 T5 用非 admin token 打开该页做"0 console error"断言，按精确签名过滤，其余报错仍计入失败。
+function unexpectedConsoleErrors(errs) {
+    return (errs || []).filter(e => !(/\/api\/sys-issues\/intake-liaisons/.test(e) && (/403/.test(e) || /Failed to load resource/i.test(e))));
 }
 
 async function main() {
@@ -194,7 +206,7 @@ async function main() {
             await shotOnFail(page, relRowAfter.status === '已发布', 't2-release-not-reverted',
                 `[红线] 重开后旧上线单 #${relA} 仍「已发布」（未被拖回计划中，实得："${relRowAfter.status}"）`);
 
-            await shotOnFail(page, page._consoleErrors.length === 0, 't2-console-clean', `页面全程无 JS 报错（${page._consoleErrors.length} 个${page._consoleErrors.length ? ': ' + page._consoleErrors.slice(0, 2).join(' | ') : ''}）`);
+            { const errs = unexpectedConsoleErrors(page._consoleErrors); await shotOnFail(page, errs.length === 0, 't2-console-clean', `页面全程无意外 JS 报错（实得=${errs.length}${errs.length ? ': ' + errs.slice(0, 2).join(' | ') : ''}）`); }
             await page.close();
         }
 
@@ -210,17 +222,36 @@ async function main() {
             await page.waitForTimeout(600);
 
             const metaOkVal = await page.evaluate(() => window.META_OK !== undefined ? META_OK : null).catch(() => null);
-            // META_OK 是模块内 let 变量非 window 属性，取不到属正常；改用按钮可见性间接验证（更贴近用户视角）。
-            await shotOnFail(page, (await page.locator('button:has-text("上线单管理")').count()) > 0, 't3-batch-mgmt-visible-degraded', '「上线单管理」在 meta 加载失败时仍可见（§6.7 断言）');
-            await shotOnFail(page, (await page.locator('button:has-text("值班排班")').count()) > 0, 't3-duty-roster-visible-degraded', '「值班排班」在 meta 加载失败时仍可见（§6.15 登录即可见）');
+            // META_OK 是模块内 let 变量非 window 属性，取不到属正常；改用按钮/菜单项可见性间接验证（更贴近用户视角）。
+            // 2026-08-02 用户裁定二：上线单管理/值班排班/上线日志/删除审计/流程说明五个入口已收进「⚙️ 管理」
+            // 下拉——先开菜单（幂等：即便该角色下拉本体压根没渲染，openSysHeadMenu 也安静跳过，下面
+            // sysHeadMenuItemLocator 的 count() 断言仍如实得到 0，负例断言不因"菜单没打开"而失真）。
+            // 「新建迭代单」「上线编排」不进下拉（前者是独立主按钮，后者是已删除的 legacy 功能，从未进过
+            // 下拉），沿用原始全页面 button 定位。
+            await openSysHeadMenu(page);
+            await shotOnFail(page, (await sysHeadMenuItemLocator(page, '上线单管理').count()) > 0, 't3-batch-mgmt-visible-degraded', '「上线单管理」菜单项在 meta 加载失败时仍可见（§6.7 断言）');
+            await shotOnFail(page, (await sysHeadMenuItemLocator(page, '值班排班').count()) > 0, 't3-duty-roster-visible-degraded', '「值班排班」菜单项在 meta 加载失败时仍可见（§6.15 登录即可见）');
             await shotOnFail(page, (await page.locator('button:has-text("新建迭代单")').count()) === 0, 't3-create-hidden-degraded', '「新建迭代单」在 meta 加载失败时应隐藏（依赖 typeFlows）');
-            await shotOnFail(page, (await page.locator('button:has-text("删除审计")').count()) === 0, 't3-audit-hidden-degraded', '「删除审计」在 meta 加载失败时应隐藏（与 meta 一起降级，非应急路径）');
-            await shotOnFail(page, (await page.locator('button:has-text("上线日志")').count()) === 0, 't3-release-log-hidden-degraded', '「上线日志」（2026-07-31 新增）在 meta 加载失败时应隐藏（与删除审计同门槛，非应急路径）');
+            await shotOnFail(page, (await sysHeadMenuItemLocator(page, '删除审计').count()) === 0, 't3-audit-hidden-degraded', '「删除审计」菜单项在 meta 加载失败时应隐藏（与 meta 一起降级，非应急路径）');
+            await shotOnFail(page, (await sysHeadMenuItemLocator(page, '上线日志').count()) === 0, 't3-release-log-hidden-degraded', '「上线日志」（2026-07-31 新增）菜单项在 meta 加载失败时应隐藏（与删除审计同门槛，非应急路径）');
             await shotOnFail(page, (await page.locator('button:has-text("上线编排")').count()) === 0, 't3-orch-hidden-degraded', '「上线编排」legacy 面板在 meta 加载失败时应隐藏');
-            await shotOnFail(page, (await page.locator('button:has-text("流程说明")').count()) === 0, 't3-guide-hidden-degraded', '「流程说明」在 meta 加载失败时应隐藏');
+            await shotOnFail(page, (await sysHeadMenuItemLocator(page, '流程说明').count()) === 0, 't3-guide-hidden-degraded', '「流程说明」菜单项在 meta 加载失败时应隐藏');
+
+            // codex 232 M 采纳配套断言：菜单开着时触发头部重渲染（角色探测/meta 加载后等多处会调
+            // siRenderHeadActions），重渲染前应收敛下拉状态——否则 siHeadMenuOpen 残留 true，
+            // 下一次点「管理」先走 close 分支表现为首击无效（需点两次）。
+            await openSysHeadMenu(page);
+            await page.evaluate(() => siRenderHeadActions());
+            await page.waitForTimeout(200);
+            await page.locator('.u-head-menu-trigger').click();
+            await page.waitForTimeout(300);
+            const menuOpenAfterRerender = await page.locator('.u-head-menu-list.open').count();
+            await shotOnFail(page, menuOpenAfterRerender === 1, 't3-menu-rerender-single-click', `重渲染后首击「管理」即打开菜单（状态与 DOM 同步·实得 open=${menuOpenAfterRerender}）`);
+            await page.keyboard.press('Escape');
+            await page.waitForTimeout(200);
 
             // 「上线单管理」在此状态下点开仍应可用（不依赖 meta），验证真正"可达"而非只是"可见但点了报错"。
-            await page.click('button:has-text("上线单管理")');
+            await clickSysHeadMenuItem(page, '上线单管理');
             await page.waitForTimeout(400);
             await shotOnFail(page, (await page.locator(`.si-batch-item:has-text("C7冒烟批A-${RUN_TAG}")`).count()) > 0, 't3-batch-mgmt-usable-degraded', '「上线单管理」面板在 meta 加载失败时仍能正常加载列表（真正可达，非仅可见）');
 
@@ -235,7 +266,7 @@ async function main() {
             const page = await loginPage(browser, adminTok);
             await page.goto(`${BASE_URL}/Sys_Iteration.html`);
             await page.waitForLoadState('networkidle');
-            await page.click('button:has-text("上线单管理")');
+            await clickSysHeadMenuItem(page, '上线单管理');
             await page.waitForTimeout(300);
 
             // 列表视图：degraded 角标可见
@@ -252,7 +283,7 @@ async function main() {
             await shotOnFail(page, /不可用/.test(bodyHtml), 't4-unavailable-not-blank', '不可用字段显式渲染「不可用」而非空白（不伪造）');
             await shotOnFail(page, !/undefined|null(?!\w)/.test(bodyHtml.replace(/si-muted|onclick|siOpenDrawer\(null\)/g, '')), 't4-no-raw-null-leak', '页面不泄漏原始 "undefined"/"null" 字面量（应转成中文占位文案）');
 
-            await shotOnFail(page, page._consoleErrors.length === 0, 't4-console-clean', `页面全程无 JS 报错（${page._consoleErrors.length} 个${page._consoleErrors.length ? ': ' + page._consoleErrors.slice(0, 2).join(' | ') : ''}）`);
+            { const errs = unexpectedConsoleErrors(page._consoleErrors); await shotOnFail(page, errs.length === 0, 't4-console-clean', `页面全程无意外 JS 报错（实得=${errs.length}${errs.length ? ': ' + errs.slice(0, 2).join(' | ') : ''}）`); }
             await page.close();
         }
 
@@ -265,7 +296,7 @@ async function main() {
             const page = await loginPage(browser, otherTok);
             await page.goto(`${BASE_URL}/Sys_Iteration.html`);
             await page.waitForLoadState('networkidle');
-            await page.click('button:has-text("值班排班")');
+            await clickSysHeadMenuItem(page, '值班排班');
             await page.waitForTimeout(400);
 
             await shotOnFail(page, (await page.locator('#siDutyRosterBody').textContent()).includes('只读预览'), 't5-readonly-hint', '非对接人视角出现「只读预览」提示文案');
@@ -273,7 +304,7 @@ async function main() {
             await shotOnFail(page, (await page.locator('#siDutyRosterBody button:has-text("批量设置")').count()) === 0, 't5-no-batch-form', '非对接人视角不出现「批量设置」写表单按钮');
             await shotOnFail(page, (await page.locator('#siDutyRosterBody th:has-text("操作")').count()) === 0, 't5-no-action-column', '非对接人视角表格不出现「操作」列（无移除按钮）');
 
-            await shotOnFail(page, page._consoleErrors.length === 0, 't5-console-clean', `页面全程无 JS 报错（${page._consoleErrors.length} 个${page._consoleErrors.length ? ': ' + page._consoleErrors.slice(0, 2).join(' | ') : ''}）`);
+            { const errs = unexpectedConsoleErrors(page._consoleErrors); await shotOnFail(page, errs.length === 0, 't5-console-clean', `页面全程无意外 JS 报错（已豁免既有 intake-liaisons 噪音，实得=${errs.length}${errs.length ? ': ' + errs.slice(0, 2).join(' | ') : ''}）`); }
             await page.close();
         }
     } finally {

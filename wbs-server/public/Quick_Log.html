@@ -1,0 +1,740 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>零星事项台账 - 智数协同平台</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="assets/css/style.css?v=v1.117.0_fabdrag">
+    <link rel="stylesheet" href="assets/css/components.css?v=v1.123.1_unify12b">
+    <style>
+        /* 零星事项台账页 · 页面专属样式
+           2026-08-02 用户验收裁定：原 Sys_Iteration.html 内嵌弹层面板拆成独立页，页面骨架/筛选栏/
+           表格/分页照 Issue_Lite.html 范式（u- 共享组件层，components.css）。以下 ql- 前缀规则是从
+           Sys_Iteration.html 对应 si- 前缀规则整体迁移改名而来（独立页里 si=Sys_Iteration 前缀语义
+           错误）——新建/编辑弹窗内的文件选择预览 + 图片放大 lightbox 是页面专属组件，非
+           components.css 共享层覆盖范围，随迁移一并带走。 */
+        .ql-muted { color: #9ca3af; }
+        .ql-empty { text-align: center; padding: 40px; color: #94a3b8; font-size: 13px; }
+        .ql-att-item { display: flex; align-items: center; gap: 8px; padding: 6px 0; font-size: 12.5px; border-bottom: 1px dashed #f1f5f9; }
+        .ql-att-item:last-child { border-bottom: none; }
+        .ql-att-item a.ql-att-name { color: #2563eb; cursor: pointer; }
+        .ql-att-item .ql-att-del { color: #dc2626; cursor: pointer; font-size: 11px; margin-left: auto; }
+        .ql-note-box { background: #fffbeb; border: 1px solid #fde68a; border-radius: 6px; padding: 8px 11px; color: #92400e; font-size: 12px; line-height: 1.5; margin-bottom: 14px; }
+
+        /* 文件选择预览区（选完即预览缩略图 + 删除 + 追加）—— source: Sys_Iteration.html .si-file-preview 迁移改名 */
+        .ql-file-preview { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 8px; }
+        .ql-file-preview .ql-file-item {
+            position: relative; width: 76px; height: 76px; border: 1px solid #e5e7eb; border-radius: 6px;
+            overflow: hidden; background: #f9fafb; display: flex; align-items: center; justify-content: center;
+            font-size: 11px; color: #6b7280; text-align: center; padding: 4px; box-sizing: border-box;
+        }
+        .ql-file-preview .ql-file-item img { width: 100%; height: 100%; object-fit: cover; }
+        .ql-file-preview .ql-file-item .ql-pdf-icon { font-size: 22px; color: #dc2626; margin-bottom: 4px; }
+        .ql-file-preview .ql-file-item .ql-file-name {
+            font-size: 10px; color: #6b7280; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 64px;
+        }
+        .ql-file-preview .ql-file-item .ql-file-rm {
+            position: absolute; top: 2px; right: 2px; width: 18px; height: 18px; border-radius: 50%;
+            background: rgba(0, 0, 0, 0.6); color: #fff; border: none; cursor: pointer; font-size: 12px;
+            line-height: 1; display: flex; align-items: center; justify-content: center;
+        }
+        .ql-file-preview .ql-file-item .ql-file-rm:hover { background: #dc2626; }
+        .ql-clickable-thumb { cursor: zoom-in; transition: transform 0.15s ease, box-shadow 0.15s ease; }
+        .ql-clickable-thumb:hover { transform: scale(1.03); box-shadow: 0 4px 12px rgba(0, 0, 0, 0.18); }
+        /* 图片放大 lightbox —— source: Sys_Iteration.html .si-img-lightbox 迁移改名（z-index 压过 u-modal-overlay 的 1000） */
+        .ql-img-lightbox {
+            display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0, 0, 0, 0.85);
+            z-index: 3000; cursor: zoom-out; justify-content: center; align-items: center; flex-direction: column;
+            padding: 24px; box-sizing: border-box;
+        }
+        .ql-img-lightbox.show { display: flex; }
+        .ql-img-lightbox img { max-width: 92vw; max-height: 82vh; object-fit: contain; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5); border-radius: 4px; cursor: default; }
+        .ql-img-lightbox-close { position: absolute; top: 16px; right: 24px; color: #fff; font-size: 40px; line-height: 1; cursor: pointer; user-select: none; text-shadow: 0 2px 8px rgba(0, 0, 0, 0.6); }
+        .ql-img-lightbox-close:hover { color: #fca5a5; }
+        .ql-img-lightbox-caption { margin-top: 12px; color: #e5e7eb; font-size: 13px; text-align: center; max-width: 92vw; word-break: break-all; }
+    </style>
+</head>
+
+<body class="unified-page">
+    <!-- 顶部导航栏（复用全站 navbar；本页不在顶层导航项里——入口收在 admin 头像下拉「📋 零星事项」，
+         同「周期取数推送」先例——故无自身高亮项，逐字复制 Issue_Lite.html 的 navbar 结构，仅去掉
+         「数据开发」项的高亮 style） -->
+    <nav class="navbar fixed-header">
+        <div class="nav-left">
+            <div class="nav-logo">
+                <svg viewBox="0 0 24 24" fill="none" stroke="url(#logo-gradient-ql)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <defs><linearGradient id="logo-gradient-ql" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" style="stop-color:#d97706"/><stop offset="100%" style="stop-color:#b45309"/></linearGradient></defs>
+                    <circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>
+                </svg>
+            </div>
+            <div class="nav-title">智数协同平台</div>
+        </div>
+        <div class="nav-right">
+            <a href="/Task_Pool.html" class="nav-item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>数仓任务池</a>
+            <a href="/Data_Collab.html" class="nav-item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>数据协作</a>
+            <a href="/Issue_Lite.html" class="nav-item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>数据开发</a>
+            <a href="/Data_Correction.html" class="nav-item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>数据修正</a>
+            <a href="/Sys_Iteration.html" class="nav-item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>系统迭代</a>
+            <div class="nav-dropdown">
+                <button class="nav-dropdown-trigger"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>数据中心<svg class="arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg></button>
+                <div class="nav-dropdown-menu">
+                    <a href="/Dashboard.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>建设总览</a>
+                    <a href="/Asset_Center.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>资产中心</a>
+                    <a href="/Model_Center.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>模型中心</a>
+                    <a href="/Metrics.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>指标中心</a>
+                </div>
+            </div>
+            <a href="/Statistics.html" class="nav-item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="20" x2="12" y2="10"/><line x1="18" y1="20" x2="18" y2="4"/><line x1="6" y1="20" x2="6" y2="16"/></svg>统计中心</a>
+            <a href="/Doc_Viewer.html" target="_blank" class="nav-item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>文档中心</a>
+            <div class="nav-divider"></div>
+            <div id="userProfileArea"></div>
+        </div>
+    </nav>
+
+    <main class="workbench-container">
+        <div class="u-filter-bar">
+            <span class="u-filter-label">类型</span>
+            <select id="qlFCategory" onchange="qlSetCategory(this.value)">
+                <option value="">全部类型</option>
+                <option value="tool">提效工具</option>
+                <option value="demo">demo</option>
+                <option value="other">其他</option>
+            </select>
+            <input type="text" id="qlFKeyword" placeholder="搜索标题/描述/结果说明/需求方…" oninput="qlDebounceSearch()">
+            <div style="flex:1;"></div>
+            <button class="u-btn-primary" onclick="qlOpenCreate()">+ 新建</button>
+        </div>
+
+        <div class="u-corr-table-wrap">
+            <table class="u-corr-table">
+                <thead><tr>
+                    <th>标题</th><th>类型</th><th>需求方</th><th>开始日期</th><th>结束日期</th><th>附件数</th><th style="width:130px;">操作</th>
+                </tr></thead>
+                <tbody id="qlTbody"><tr><td colspan="7" class="ql-empty">加载中…</td></tr></tbody>
+            </table>
+        </div>
+        <div class="u-pagination" id="qlPagination"></div>
+    </main>
+
+    <!-- 新建/编辑登记弹窗（共用；#qlMHead/#qlMBody/#qlMConfirm 由 qlModal() 动态填充） -->
+    <div class="u-modal-overlay" id="qlModalOverlay">
+        <div class="u-modal-box">
+            <div class="u-modal-header"><h2 id="qlMHead"></h2><button class="u-drawer-close" onclick="qlCloseModal()">&times;</button></div>
+            <div class="u-modal-body" id="qlMBody"></div>
+            <div class="u-modal-footer">
+                <button class="u-btn-secondary" onclick="qlCloseModal()">取消</button>
+                <button class="u-btn-primary" id="qlMConfirm">确定</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 图片放大 lightbox（弹窗内文件预览点击放大用，放弹窗之外，z-index 3000 压过弹窗） -->
+    <div id="qlImgLightbox" class="ql-img-lightbox" onclick="qlCloseLightbox(event)">
+        <span class="ql-img-lightbox-close" onclick="qlCloseLightbox(event)" title="关闭">&times;</span>
+        <img id="qlImgLightboxImg" alt="">
+        <div class="ql-img-lightbox-caption" id="qlImgLightboxCaption"></div>
+    </div>
+
+    <script src="assets/js/app.js?v=v1.134.0_qlpage"></script>
+    <!-- 前端统一 贴图粘贴扩展方案 20260801_v0.1：Ctrl+V 贴图共享层接入。缓存串须与共享层 KIT_VERSION 一致，
+         改共享层本体时须同步 bump 这里 + 所有引用页（含本页）。 -->
+    <script src="assets/js/u-paste.js?v=v1.134.0_upaste2"></script>
+    <script>
+        // ============================================================
+        // 零星事项台账（独立页，2026-08-02 用户验收裁定：由 Sys_Iteration.html 内嵌弹层面板拆出）
+        // admin 自主记录提效工具/demo 类小开发，无状态纯完成留痕。与 sys_issues/issue_lite 状态机/
+        // 端点零交集（后端 routes/quick-log 独立模块，S1 硬边界不变——后端零改动，仍全端点 requireAdmin）。
+        // 本页 JS 是 Sys_Iteration.html 原 siQuickLog* 一节 + 其依赖的页内共享基础设施（siApi/siModal/
+        // fText 系字段构造器/siPicker 文件选择组件族/lightbox/u-paste 接入）整体迁移，si→ql 统一改名
+        // （独立页里 si=Sys_Iteration 前缀语义错误）。逻辑与原实现逐字对齐，仅两处随迁移简化：
+        //   ① 面板 open/close 相关函数（原 siOpenQuickLog/siCloseQuickLog/siQuickLogRenderShell）整体
+        //      删除——原本"打开面板"的职责（渲染筛选栏/表格骨架 + 加载列表）现在就是"打开页面"，骨架
+        //      已是静态 HTML（见上方 DOM），DOMContentLoaded 直接 qlLoadList() 即可，无需每次"开面板"
+        //      重渲一次骨架；qlLoadList/qlDebounceSearch 里原有的"面板是否仍 open"二次防御判断随之一并
+        //      去掉（没有面板可关，只剩 qlGen 令牌这一层防御，与其它已迁移四页的纯页面级异步防串扰
+        //      范式一致）。
+        //   ② 原 siEscapeHtmlAttr（与 esc() 转义字符集逐字相同的复刻函数）不再重复迁移，两处调用点
+        //      直接改用 esc()——避免维护两份功能相同的转义函数。
+        // ============================================================
+        const QL_CATEGORY_LABEL = { tool: '提效工具', demo: 'demo', other: '其他' };
+        const QL_PAGE_SIZE = 20;   // 与后端 GET /quick-logs 默认 pageSize 对齐
+        let qlGen = 0;             // 自增会话令牌：每次重新拉取列表 +1，晚到的响应比对令牌不符即丢弃
+        let qlItems = [];          // 当前页缓存（编辑弹窗预填从此查，免二次请求——本表无单条 GET 端点）
+        let qlTotal = 0;
+        let qlPage = 1;
+        let qlCategory = '';
+        let qlKeyword = '';
+        let qlSearchTimer = null;
+        let qlEditId = null;       // 当前编辑弹窗对应的记录 id（null=未打开编辑弹窗/是新建弹窗）
+        let qlEditAttCache = [];   // 编辑弹窗内已加载的附件清单（供下载时解析 original_name）
+
+        // ---- 通用 API helper（迁自 Sys_Iteration.html siApi/siApiErr，逐字保留） ----
+        async function qlApi(path, { method = 'GET', body = null, isForm = false } = {}) {
+            const opt = { method };
+            if (body != null) {
+                if (isForm) { opt.body = body; }
+                else { opt.headers = { 'Content-Type': 'application/json' }; opt.body = JSON.stringify(body); }
+            }
+            const res = await authFetch('/api' + path, opt);
+            if (!res) return { ok: false, aborted: true };       // 401 已在 authFetch 内 logout
+            let data = null;
+            try { data = await res.json(); } catch (e) { data = null; }
+            if (!res.ok) return { ok: false, status: res.status, data };
+            return { ok: true, data };
+        }
+        function qlApiErr(r, fallback) {
+            if (r && r.aborted) return null;                     // 已登出，不再提示
+            const msg = (r && r.data && (r.data.error || r.data.code)) || fallback || '操作失败';
+            showToast(msg, 'error');
+            return null;
+        }
+
+        // 本页自带的完整转义（转 & < > " '）。刻意不复用 app.js 全局 escapeHtml——它的 textContent 版
+        // 只转 & < >、不转引号，用于属性上下文(value="..." / title="...")会被引号闭合击穿。
+        // 迁自 Sys_Iteration.html esc()，逐字保留。
+        function esc(s) {
+            return String(s == null ? '' : s)
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        }
+        // 内联事件属性（onclick="..." 等）的 JS 字符串参数专用转义——迁自 Sys_Iteration.html
+        // siJsStringAttr，逐字保留。两层顺序不可颠倒：内层 JSON.stringify 先把任意字符串变成合法 JS
+        // 字符串字面量（自带双引号 + 内部转义）；外层 esc() 再把这段 JS 源码当 HTML 属性值转义一次
+        // （防其中的 " 撑破 onclick="..." 的外层双引号）。
+        function qlJsStringAttr(x) {
+            return esc(JSON.stringify(String(x == null ? '' : x)));
+        }
+
+        // ---- 启动 ----
+        document.addEventListener('DOMContentLoaded', async () => {
+            if (typeof checkAuth === 'function') { const ok = await checkAuth(); if (!ok) return; }
+            // 本页仅 admin 可用（后端 quick-log 全部端点均 requireAdmin，前端同步拒绝非 admin 访问，
+            // 纵深防御）——逐字对齐 Periodic_Fetch.html 的 admin-only 独立页守卫范式（同款 alert +
+            // 跳转 Task_Pool.html，非本页自创处置方式）。
+            // ⚠️ 守卫边界收窄声称（codex 231 H 部分采纳）：本守卫先于**本页业务调用**（qlInitUPaste/
+            //   qlLoadList），但 app.js 的全局 DOMContentLoaded 回调注册在先、执行在先——其无条件初始化
+            //   （loadTasks/loadPendingTransfers 等 navbar/任务池预载）在守卫前照常发出。那是全部 12 个
+            //   引用页共有的平台既有行为、普通用户对相应端点本有访问权，不属本页守卫范围；「按页触发全局
+            //   初始化」挂平台级 P3（与 /uploads 未鉴权直连同家族）。Periodic_Fetch 同款守卫同款边界。
+            if (typeof isAdmin !== 'function' || !isAdmin()) {
+                alert('需要管理员权限');
+                window.location.href = '/Task_Pool.html';
+                return;
+            }
+            qlInitUPaste();   // 越早注册越好——文档级监听已在 u-paste.js 加载时自动挂好
+            await qlLoadList();
+        });
+
+        // ---- 列表：筛选/防抖搜索/分页 ----
+        function qlSetCategory(v) {
+            qlCategory = v;
+            qlPage = 1;
+            qlLoadList();
+        }
+        // 搜索防抖（250ms）。原实现（Sys_Iteration 内嵌面板态）在此处还有一层"面板是否仍 open"二次
+        // 防御——面板可以被用户中途关闭，定时器仍可能在关闭后触发一次网络请求。独立页没有"面板可关"
+        // 这个状态，故该层防御随迁移一并去掉；qlGen 令牌仍在 qlLoadList 里挡住晚到响应写脏 DOM。
+        function qlDebounceSearch() {
+            clearTimeout(qlSearchTimer);
+            qlSearchTimer = setTimeout(() => {
+                const el = document.getElementById('qlFKeyword');
+                const v = ((el && el.value) || '').trim();
+                if (v === qlKeyword) return;
+                qlKeyword = v;
+                qlPage = 1;
+                qlLoadList();
+            }, 250);
+        }
+        async function qlLoadList() {
+            qlGen++;
+            const myGen = qlGen;
+            const tbody = document.getElementById('qlTbody');
+            if (tbody) tbody.innerHTML = '<tr><td colspan="7" class="ql-empty">加载中…</td></tr>';
+            const qs = new URLSearchParams({ page: String(qlPage), pageSize: String(QL_PAGE_SIZE) });
+            if (qlCategory) qs.set('category', qlCategory);
+            if (qlKeyword) qs.set('keyword', qlKeyword);
+            let r;
+            try {
+                r = await qlApi('/quick-logs?' + qs.toString());
+            } catch (netErr) {
+                if (myGen !== qlGen) return;
+                const tb = document.getElementById('qlTbody');
+                if (tb) tb.innerHTML = '<tr><td colspan="7" class="ql-empty">加载失败：网络异常，请重试</td></tr>';
+                return;
+            }
+            if (myGen !== qlGen) return;
+            if (!r.ok) {
+                const tb = document.getElementById('qlTbody');
+                if (tb) tb.innerHTML = '<tr><td colspan="7" class="ql-empty">加载失败</td></tr>';
+                qlApiErr(r);
+                return;
+            }
+            qlItems = (r.data && r.data.items) || [];
+            qlTotal = (r.data && r.data.total) || 0;
+            qlRenderRows();
+            qlRenderPager();
+        }
+        function qlRenderRows() {
+            const tbody = document.getElementById('qlTbody');
+            if (!tbody) return;
+            if (!qlItems.length) { tbody.innerHTML = '<tr><td colspan="7" class="ql-empty">暂无数据</td></tr>'; return; }
+            tbody.innerHTML = qlItems.map(it => {
+                // id 数值归一——后端恒返回数值 id，但防御性拒绝把非安全整数直接插进 onclick 内联表达式；
+                // 行文本仍照常渲染，只是不给操作按钮。
+                const rid = Number(it.id);
+                const idOk = Number.isSafeInteger(rid);
+                const catLabel = QL_CATEGORY_LABEL[it.category] || esc(it.category);
+                // 其他类型且有备注 → title 属性悬浮展示
+                const catTitleAttr = (it.category === 'other' && it.category_note) ? ` title="${esc(it.category_note)}"` : '';
+                const requesterHtml = it.requester_name ? esc(it.requester_name) : '<span class="ql-muted">自主发起</span>';
+                const actionsHtml = idOk
+                    ? `<button class="u-btn-secondary u-btn-sm" onclick="qlOpenEdit(${rid})">编辑</button>
+                        <button class="u-btn-secondary u-btn-sm" onclick="qlDelete(${rid})">删除</button>`
+                    : '<span class="ql-muted" title="id 异常，无法操作">-</span>';
+                return `<tr>
+                    <td>${esc(it.title)}</td>
+                    <td><span${catTitleAttr}>${esc(catLabel)}</span></td>
+                    <td>${requesterHtml}</td>
+                    <td>${esc(it.start_date || '-')}</td>
+                    <td>${esc(it.end_date || '-')}</td>
+                    <td>${Number(it.att_count) || 0}</td>
+                    <td>${actionsHtml}</td>
+                </tr>`;
+            }).join('');
+        }
+        function qlRenderPager() {
+            const box = document.getElementById('qlPagination');
+            if (!box) return;
+            const totalPages = Math.max(1, Math.ceil(qlTotal / QL_PAGE_SIZE));
+            if (qlPage > totalPages) qlPage = totalPages;
+            box.innerHTML = `<span class="u-page-info">第 ${qlPage} / ${totalPages} 页 · 共 ${qlTotal} 条</span>
+                <button type="button" class="u-btn-secondary u-page-btn" data-ql-page-nav="prev"${qlPage <= 1 ? ' disabled' : ''}>上一页</button>
+                <button type="button" class="u-btn-secondary u-page-btn" data-ql-page-nav="next"${qlPage >= totalPages ? ' disabled' : ''}>下一页</button>`;
+            const prevBtn = box.querySelector('[data-ql-page-nav="prev"]');
+            const nextBtn = box.querySelector('[data-ql-page-nav="next"]');
+            if (prevBtn) prevBtn.addEventListener('click', () => qlGoToPage(qlPage - 1));
+            if (nextBtn) nextBtn.addEventListener('click', () => qlGoToPage(qlPage + 1));
+        }
+        function qlGoToPage(p) {
+            if (p < 1) return;
+            qlPage = p;
+            qlLoadList();
+        }
+
+        // 两步链附件上传失败提示点名具体文件（超 3 个截断 + 等 N 项），create/edit 两处共用。showToast
+        // 内部已对整条 message 做 escapeHtml，这里传原始文件名即可，不要自己 esc()（否则被二次转义）。
+        function qlFailedFilesText(names) {
+            const shown = names.slice(0, 3);
+            const suffix = names.length > 3 ? ` 等 ${names.length} 项` : '';
+            return shown.join('、') + suffix;
+        }
+        // ---- 类型「其他」联动备注输入显隐（新建/编辑共用；非其他时隐藏并清空） ----
+        function qlToggleCategoryNote() {
+            const sel = document.getElementById('f_category');
+            const wrap = document.getElementById('qlNoteWrap');
+            if (!sel || !wrap) return;
+            const isOther = sel.value === 'other';
+            wrap.style.display = isOther ? '' : 'none';
+            if (!isOther) { const inp = document.getElementById('f_category_note'); if (inp) inp.value = ''; }
+        }
+        // 复用 fText 生成的字段 HTML，外面套一层可显隐的容器（fText 本身不支持包装）。
+        function qlWrappedNoteField(v, visible) {
+            const inner = fText('category_note', '其他类型备注（选填，≤200字）', v || '').html;
+            return { k: 'category_note', html: `<div id="qlNoteWrap" style="${visible ? '' : 'display:none;'}">${inner}</div>` };
+        }
+
+        function qlOpenCreate() {
+            qlEditId = null;
+            qlPickerReset('ql-create');
+            qlModal('新建零星事项', [
+                fSelectMap('category', '类型', ['tool', 'demo', 'other'], 'tool', QL_CATEGORY_LABEL),
+                qlWrappedNoteField('', false),
+                fTextarea('description', '需求描述', '', true, '标题将由描述首行自动生成（超 40 字截断+省略号），无需单独填写标题', '直接粘贴需求/工具用途描述，标题将自动取首行'),
+                fTextarea('result_note', '结果说明', '', true),
+                fText('result_link', '结果链接（选填）', ''),
+                fText('requester_name', '需求方姓名（选填）', ''),
+                fText('requester_dept', '需求方部门（选填）', ''),
+                { k: null, html: `<div class="ql-note-box">需求方姓名/部门均留空则视为"自主发起"，无需额外声明。</div>` },
+                fDate('start_date', '开始日期（选填）', ''),
+                fDate('end_date', '结束日期（选填）', ''),
+                { k: null, html: `<div class="u-form-group"><label>附件（选填）</label>${qlFilePickerHtml('ql-create', '选择文件')}</div>` },
+            ], async v => {
+                const description = v.description.trim();
+                const resultNote = v.result_note.trim();
+                if (!description) { showToast('需求描述必填', 'error'); return false; }
+                if (!resultNote) { showToast('结果说明必填', 'error'); return false; }
+                const body = { category: v.category, description, result_note: resultNote };
+                if (v.category === 'other' && v.category_note.trim()) body.category_note = v.category_note.trim();
+                if (v.result_link.trim()) body.result_link = v.result_link.trim();
+                if (v.requester_name.trim()) body.requester_name = v.requester_name.trim();
+                if (v.requester_dept.trim()) body.requester_dept = v.requester_dept.trim();
+                if (v.start_date) body.start_date = v.start_date;
+                if (v.end_date) body.end_date = v.end_date;
+                const r = await qlApi('/quick-logs', { method: 'POST', body });
+                if (!r.ok) { qlApiErr(r); return false; }
+                const newId = r.data && r.data.item && r.data.item.id;
+                let msg = '已新建';
+                let hasFailure = false;
+                // 两步链范式：建单 JSON → 逐个 FormData 上传（后端单文件逐次接收）。
+                const files = qlPickerFiles('ql-create').slice();
+                if (files.length > 0 && newId) {
+                    const failedNames = [];   // 收集失败文件名，精确提示（非笼统"部分失败"）
+                    for (const f of files) {
+                        const fd = new FormData();
+                        fd.append('files', f);
+                        try {
+                            const ur = await qlApi(`/quick-logs/${newId}/attachments`, { method: 'POST', body: fd, isForm: true });
+                            if (!ur.ok) failedNames.push(f.name);
+                        } catch (e) { failedNames.push(f.name); }
+                    }
+                    if (failedNames.length) {
+                        hasFailure = true;
+                        msg = `已新建，${failedNames.length} 个附件上传失败：${qlFailedFilesText(failedNames)}，可编辑补传`;
+                    }
+                }
+                showToast(msg, hasFailure ? 'warning' : 'success');
+                qlCloseModal();
+                await qlLoadList();
+                return false;   // 已手动关弹窗+刷新，跳过框架默认 keep 分支
+            });
+            const sel = document.getElementById('f_category');
+            if (sel) sel.onchange = qlToggleCategoryNote;
+            qlToggleCategoryNote();
+            qlPickerRender('ql-create');
+        }
+
+        function qlOpenEdit(id) {
+            const row = qlItems.find(x => Number(x.id) === Number(id));
+            if (!row) { showToast('记录不存在，请刷新列表', 'error'); return; }
+            qlEditId = id;
+            qlEditAttCache = [];
+            qlPickerReset('ql-edit');
+            qlModal('编辑零星事项', [
+                fSelectMap('category', '类型', ['tool', 'demo', 'other'], row.category, QL_CATEGORY_LABEL),
+                qlWrappedNoteField(row.category_note || '', row.category === 'other'),
+                fTextarea('description', '需求描述', row.description || '', true, '标题将由描述首行自动生成（超 40 字截断+省略号）'),
+                fTextarea('result_note', '结果说明', row.result_note || '', true),
+                fText('result_link', '结果链接（选填）', row.result_link || ''),
+                fText('requester_name', '需求方姓名（选填，留空即自主发起）', row.requester_name || ''),
+                fText('requester_dept', '需求方部门（选填）', row.requester_dept || ''),
+                fDate('start_date', '开始日期（选填）', row.start_date || ''),
+                fDate('end_date', '结束日期（选填）', row.end_date || ''),
+                { k: null, html: `<div class="u-form-group"><label>附件</label>
+                    <div id="qlEditAttList" style="max-height:160px;overflow-y:auto;border:1px solid #eef2f7;border-radius:6px;padding:2px 10px;margin-bottom:8px;"><div class="ql-empty">加载中…</div></div>
+                    ${qlFilePickerHtml('ql-edit', '追加上传')}</div>` },
+            ], async v => {
+                const description = v.description.trim();
+                const resultNote = v.result_note.trim();
+                if (!description) { showToast('需求描述必填', 'error'); return false; }
+                if (!resultNote) { showToast('结果说明必填', 'error'); return false; }
+                const body = { category: v.category, description, result_note: resultNote };
+                if (v.category === 'other' && v.category_note.trim()) body.category_note = v.category_note.trim();
+                if (v.result_link.trim()) body.result_link = v.result_link.trim();
+                if (v.requester_name.trim()) body.requester_name = v.requester_name.trim();
+                if (v.requester_dept.trim()) body.requester_dept = v.requester_dept.trim();
+                if (v.start_date) body.start_date = v.start_date;
+                if (v.end_date) body.end_date = v.end_date;
+                const r = await qlApi(`/quick-logs/${id}`, { method: 'PUT', body });
+                if (!r.ok) { qlApiErr(r); return false; }
+                let msg = '已保存';
+                let hasFailure = false;
+                const files = qlPickerFiles('ql-edit').slice();
+                if (files.length > 0) {
+                    const failedNames = [];
+                    for (const f of files) {
+                        const fd = new FormData();
+                        fd.append('files', f);
+                        try {
+                            const ur = await qlApi(`/quick-logs/${id}/attachments`, { method: 'POST', body: fd, isForm: true });
+                            if (!ur.ok) failedNames.push(f.name);
+                        } catch (e) { failedNames.push(f.name); }
+                    }
+                    if (failedNames.length) {
+                        hasFailure = true;
+                        msg = `已保存，${failedNames.length} 个新增附件上传失败：${qlFailedFilesText(failedNames)}，可重新编辑补传`;
+                    }
+                }
+                showToast(msg, hasFailure ? 'warning' : 'success');
+                qlCloseModal();
+                await qlLoadList();
+                return false;
+            });
+            const sel = document.getElementById('f_category');
+            if (sel) sel.onchange = qlToggleCategoryNote;
+            qlPickerRender('ql-edit');
+            qlLoadEditAttachments(id);
+        }
+        // 异步填充编辑弹窗内的既有附件清单（qlModal 的 fields 是同步构造，附件清单须开完弹窗后再异步
+        // 拉取）。用 qlEditId 而非局部闭包变量做代际守卫——弹窗关闭/切换到另一条记录编辑时 qlEditId
+        // 会变化，晚到的响应据此丢弃。
+        async function qlLoadEditAttachments(id) {
+            let r;
+            try {
+                r = await qlApi(`/quick-logs/${id}/attachments`);
+            } catch (netErr) {
+                if (qlEditId !== id) return;   // 已关闭编辑弹窗或已切换到其他记录，丢弃
+                const w = document.getElementById('qlEditAttList');
+                if (w) w.innerHTML = '<div class="ql-empty">附件加载失败</div>';
+                return;
+            }
+            if (qlEditId !== id) return;   // 已关闭编辑弹窗或已切换到其他记录，丢弃
+            const wrap = document.getElementById('qlEditAttList');
+            if (!wrap) return;
+            if (!r.ok) { wrap.innerHTML = '<div class="ql-empty">附件加载失败</div>'; return; }
+            const items = (r.data && r.data.items) || [];
+            qlEditAttCache = items;
+            wrap.innerHTML = items.length ? items.map(a => {
+                // 附件 id 数值归一——非安全整数时该行仍展示文件名，只是不给下载/删除操作。
+                const aid = Number(a.id);
+                const aidOk = Number.isSafeInteger(aid);
+                const sizeText = a.file_size ? ' <span class="ql-muted">(' + Math.round(a.file_size / 1024) + 'KB)</span>' : '';
+                const nameHtml = aidOk
+                    ? `<a class="ql-att-name" onclick="qlDownloadAtt(${aid})">${esc(a.original_name)}${sizeText}</a>`
+                    : `<span class="ql-att-name" title="id 异常，无法操作">${esc(a.original_name)}${sizeText}</span>`;
+                const delHtml = aidOk ? `<span class="ql-att-del" onclick="qlDeleteAtt(${aid},${id})">删除</span>` : '';
+                return `<div class="ql-att-item">${nameHtml}${delHtml}</div>`;
+            }).join('') : '<div class="ql-empty">暂无附件</div>';
+        }
+        async function qlDownloadAtt(attId) {
+            if (!Number.isSafeInteger(Number(attId))) return;   // 入口防御
+            let url = null;
+            let revokeScheduled = false;
+            try {
+                const res = await authFetch('/api/quick-logs/attachments/' + attId + '/download');
+                if (!res) return;
+                if (!res.ok) { showToast('下载失败', 'error'); return; }
+                let name = '';
+                const att = (qlEditAttCache || []).find(a => Number(a.id) === Number(attId));
+                if (att) name = att.original_name || '';
+                if (!name) {
+                    const dispo = res.headers.get('Content-Disposition') || '';
+                    let m = /filename\*=(?:UTF-8'')?([^;\r\n]+)/i.exec(dispo);
+                    if (m) { try { name = decodeURIComponent(m[1].trim().replace(/^["']|["']$/g, '')); } catch (e) { name = m[1]; } }
+                    else { m = /filename="?([^";\r\n]+)"?/i.exec(dispo); if (m) name = m[1]; }
+                }
+                if (!name) name = 'attachment';
+                const blob = await res.blob();
+                url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url; a.download = name;
+                document.body.appendChild(a); a.click(); a.remove();
+                revokeScheduled = true;
+                setTimeout(() => URL.revokeObjectURL(url), 1500);
+            } catch (e) {
+                showToast('下载失败', 'error');
+            } finally {
+                if (url && !revokeScheduled) { try { URL.revokeObjectURL(url); } catch (_) { /* ignore */ } }
+            }
+        }
+        async function qlDeleteAtt(attId, id) {
+            if (!Number.isSafeInteger(Number(attId)) || !Number.isSafeInteger(Number(id))) return;
+            if (!confirm('确认删除该附件？此操作不可恢复。')) return;
+            const r = await qlApi('/quick-logs/attachments/' + attId, { method: 'DELETE' });
+            if (!r.ok) { qlApiErr(r, '删除失败'); return; }
+            showToast('已删除', 'success');
+            await qlLoadEditAttachments(id);
+            // 附件删除是即时生效动作，主列表 att_count 须同步刷新——即便用户随后取消本次编辑（不点
+            // 保存），列表也已是最新态。
+            await qlLoadList();
+        }
+        function qlDelete(id) {
+            if (!Number.isSafeInteger(Number(id))) return;   // 入口防御
+            if (!confirm('确认删除该零星事项记录？此操作不可恢复。')) return;
+            (async () => {
+                const r = await qlApi('/quick-logs/' + id, { method: 'DELETE' });
+                if (!r.ok) { qlApiErr(r, '删除失败'); return; }
+                showToast('已删除', 'success');
+                // 本页删空且非第 1 页 → 退一页（避免删完当页最后一条后停留在一个空页面）
+                if (qlItems.length === 1 && qlPage > 1) qlPage -= 1;
+                await qlLoadList();
+            })();
+        }
+
+        // ---- 通用弹窗（迁自 Sys_Iteration.html siModal/siCloseModal，逐字保留；siCloseModal 里原属于
+        //   页面其它功能的清理分支——submit-delivery/modal-spec/modal-delivery/modal-screenshot/
+        //   create-spec 等——不属于本页范围，未带走，只保留 ql-create/ql-edit 两个 key 的 reset） ----
+        let qlModalConfirm = null;       // 当前弹框确认回调
+        function qlModal(title, fields, onConfirm, confirmLabel) {
+            document.getElementById('qlMHead').textContent = title;
+            document.getElementById('qlMBody').innerHTML = fields.map(f => f.html).join('');
+            const btn = document.getElementById('qlMConfirm');
+            btn.textContent = confirmLabel || '确定';
+            btn.disabled = false;
+            qlModalConfirm = async () => {
+                const v = {};
+                fields.forEach(f => { if (f.k) { const el = document.getElementById('f_' + f.k); if (el) v[f.k] = (el.type === 'checkbox') ? el.checked : el.value; } });
+                btn.disabled = true;
+                let keep = false;
+                try { keep = await onConfirm(v); } catch (e) { console.error(e); showToast('操作异常：' + (e && e.message || e), 'error'); }
+                btn.disabled = false;
+                if (keep) qlCloseModal();
+            };
+            btn.onclick = qlModalConfirm;
+            document.getElementById('qlModalOverlay').classList.add('open');
+        }
+        function qlCloseModal() {
+            document.getElementById('qlModalOverlay').classList.remove('open');
+            qlModalConfirm = null;
+            qlEditId = null;
+            qlEditAttCache = [];   // codex 231 L 采纳：与 qlEditId 同语义收尾——关闭编辑态即清旧附件清单，防晚到调用用过期 original_name
+            ['ql-create', 'ql-edit'].forEach(k => qlPickerReset(k));
+        }
+
+        // ---- 字段构造器（迁自 Sys_Iteration.html fText/fTextarea/fDate/fSelectMap，逐字保留；值 v
+        //   均经 esc 转义）----
+        // ⚠️ label（l）与 hint 参数是「原样插入的可信 HTML」通道，不经转义——仅可传源码内静态标记。
+        //    严禁把接口数据/用户输入直接当 label/hint 传入，否则会演变成 XSS。
+        function fText(k, l, v, req, hint) { return { k, html: `<div class="u-form-group"><label>${l}${req ? ' <span class="u-req">*</span>' : ''}</label><input type="text" id="f_${k}" value="${esc(v || '')}">${hint ? `<div class="u-hint">${hint}</div>` : ''}</div>` }; }
+        function fTextarea(k, l, v, req, hint, placeholder) { return { k, html: `<div class="u-form-group"><label>${l}${req ? ' <span class="u-req">*</span>' : ''}</label><textarea id="f_${k}"${placeholder ? ` placeholder="${esc(placeholder)}"` : ''}>${esc(v || '')}</textarea>${hint ? `<div class="u-hint">${hint}</div>` : ''}</div>` }; }
+        function fDate(k, l, v) { return { k, html: `<div class="u-form-group"><label>${l}</label><input type="date" id="f_${k}" value="${esc(v || '')}"></div>` }; }
+        function fSelectMap(k, l, opts, cur, labelMap) { return { k, html: `<div class="u-form-group"><label>${l} <span class="u-req">*</span></label><select id="f_${k}">${opts.map(o => `<option value="${esc(o)}" ${cur === o ? 'selected' : ''}>${esc(labelMap && labelMap[o] || o)}</option>`).join('')}</select></div>` }; }
+
+        // ---- 文件选择预览组件（迁自 Sys_Iteration.html si-前缀 picker 家族，逐字保留核心逻辑：
+        //   收集/去重/预览/删除/重置全按 key 隔离；原 siEscapeHtmlAttr 与 esc() 转义字符集逐字相同，
+        //   迁移时不重复带走，两处调用点直接改用 esc()）----
+        const qlFilePickers = {};                   // key → File[]（各实例独立持有）
+        const QL_MAX_FILES = 5;
+        const QL_MAX_SIZE = 20 * 1024 * 1024;        // 单个 ≤20MB（对齐提示 + 后端）
+        const QL_ALLOWED_EXTS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'pdf', 'xlsx', 'xls', 'docx', 'doc', 'csv', 'txt', 'md'];
+        const QL_IMG_EXTS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'];
+        function qlPickerFiles(key) { if (!qlFilePickers[key]) qlFilePickers[key] = []; return qlFilePickers[key]; }
+        // 重置（打开/关闭/上传成功时调用；revoke 旧 URL 防泄漏）——实例隔离核心
+        function qlPickerReset(key) {
+            (qlFilePickers[key] || []).forEach(f => { if (f._qlObjUrl) { try { URL.revokeObjectURL(f._qlObjUrl); } catch (_) {} } });
+            qlFilePickers[key] = [];
+            if (window.UPaste) UPaste.resetSeq(key);
+        }
+        // 收集（≤5 + 扩展名/大小校验 + 去重）。去重口径=同一物理文件(name+size+lastModified 三者全同
+        // 才判重复)——允许同名同大小但修改时间不同的文件并存（不同版本）。
+        function qlPickerCollect(key, fileList) {
+            const arr = qlPickerFiles(key);
+            for (const f of Array.from(fileList || [])) {
+                if (arr.length >= QL_MAX_FILES) { showToast(`最多 ${QL_MAX_FILES} 个文件`, 'error'); break; }
+                const ext = (f.name.split('.').pop() || '').toLowerCase();
+                if (!QL_ALLOWED_EXTS.includes(ext)) { showToast(`不支持的格式：${f.name}`, 'error'); continue; }
+                if (f.size > QL_MAX_SIZE) { showToast(`${f.name} 超过 20MB`, 'error'); continue; }
+                if (arr.some(x => x.name === f.name && x.size === f.size && x.lastModified === f.lastModified)) {
+                    showToast(`该文件已选：${f.name}`, 'info'); continue;
+                }
+                arr.push(f);
+            }
+        }
+        // change 事件（追加进数组后 e.target.value='' 允许重选同名再次触发）
+        function qlPickerOnChange(key, e) {
+            qlPickerCollect(key, e.target.files);
+            qlPickerRender(key);
+            e.target.value = '';
+        }
+        function qlPickerRemove(key, idx) {
+            const arr = qlPickerFiles(key);
+            const f = arr[idx];
+            if (f && f._qlObjUrl) { try { URL.revokeObjectURL(f._qlObjUrl); } catch (_) {} f._qlObjUrl = null; }
+            arr.splice(idx, 1);
+            qlPickerRender(key);
+        }
+        // 预览渲染（图片缩略图 + lightbox / PDF 及其他 📄 占位 / × 删除）
+        function qlPickerRender(key) {
+            const wrap = document.getElementById('qlPreview_' + key);
+            if (!wrap) return;
+            const arr = qlPickerFiles(key);
+            if (!arr.length) { wrap.innerHTML = ''; return; }
+            const keyAttr = qlJsStringAttr(key);
+            wrap.innerHTML = arr.map((f, idx) => {
+                const safeName = esc(f.name);
+                const ext = (f.name.split('.').pop() || '').toLowerCase();
+                const isImg = QL_IMG_EXTS.includes(ext);
+                if (isImg) {
+                    if (!f._qlObjUrl) f._qlObjUrl = URL.createObjectURL(f);
+                    const urlAttr = esc(f._qlObjUrl);
+                    return `<div class="ql-file-item">
+                        <img class="ql-clickable-thumb" src="${urlAttr}" alt="${safeName}" title="${safeName}（点击放大）" data-ql-lb-url="${urlAttr}" data-ql-lb-cap="${safeName}">
+                        <button class="ql-file-rm" onclick="event.stopPropagation();qlPickerRemove(${keyAttr},${idx})" title="移除">&times;</button>
+                    </div>`;
+                }
+                const icon = ext === 'pdf' ? '📄' : '📎';
+                return `<div class="ql-file-item" title="${safeName}">
+                    <span class="ql-pdf-icon">${icon}</span>
+                    <span class="ql-file-name">${safeName}</span>
+                    <button class="ql-file-rm" onclick="event.stopPropagation();qlPickerRemove(${keyAttr},${idx})" title="移除">&times;</button>
+                </div>`;
+            }).join('');
+            wrap.querySelectorAll('img.ql-clickable-thumb[data-ql-lb-url]').forEach(img => {
+                img.addEventListener('click', () => qlOpenLightbox(img.getAttribute('data-ql-lb-url'), img.getAttribute('data-ql-lb-cap') || ''));
+            });
+        }
+        // 生成一个上传组件的 HTML（隐藏 input + 「＋选择文件」按钮 + 预览容器）
+        function qlFilePickerHtml(key, btnLabel) {
+            const k = esc(key);
+            const accept = QL_ALLOWED_EXTS.map(e => '.' + e).join(',');
+            return `<input type="file" id="qlPickerInput_${k}" multiple accept="${accept}" style="display:none" onchange="qlPickerOnChange('${k}', event)">
+                <button type="button" class="u-btn-secondary u-btn-sm" onclick="document.getElementById('qlPickerInput_${k}').click()">＋ ${esc(btnLabel || '选择文件')}</button>
+                <div id="qlPreview_${k}" class="ql-file-preview"></div>`;
+        }
+
+        // 图片放大 lightbox
+        let qlLbPrevOverflow = '';   // 保存 body 原 overflow，关闭时原样恢复
+        function qlOpenLightbox(url, caption) {
+            const lb = document.getElementById('qlImgLightbox');
+            const img = document.getElementById('qlImgLightboxImg');
+            const cap = document.getElementById('qlImgLightboxCaption');
+            if (!lb || !img) return;
+            img.src = url;
+            if (cap) cap.textContent = caption || '';
+            if (!lb.classList.contains('show')) qlLbPrevOverflow = document.body.style.overflow;   // 仅首次打开时快照，防重复打开覆盖成 hidden
+            lb.classList.add('show');
+            document.body.style.overflow = 'hidden';
+        }
+        function qlCloseLightbox(event) {
+            // 点击 img 本身不关（让用户可看原图）；点 overlay/关闭按钮才关
+            if (event && event.target && event.target.tagName === 'IMG' && event.target.id === 'qlImgLightboxImg') return;
+            const lb = document.getElementById('qlImgLightbox');
+            const img = document.getElementById('qlImgLightboxImg');
+            if (!lb || !lb.classList.contains('show')) return;   // 已关则幂等返回（防冒泡连触发两次）
+            lb.classList.remove('show');
+            if (img) img.src = '';
+            document.body.style.overflow = qlLbPrevOverflow;
+        }
+        document.addEventListener('keydown', function (e) {
+            if (e.key === 'Escape') {
+                const lb = document.getElementById('qlImgLightbox');
+                if (lb && lb.classList.contains('show')) qlCloseLightbox(null);
+            }
+        });
+
+        // ============================================================
+        // Ctrl+V 贴图共享层接入（u-paste.js）：本页只做两件事：① 启动时注册本页两个目标区清单
+        // （ql-create/ql-edit）② 版本印记比对。
+        //   scopeResolver——有打开的弹窗 → 候选池限定 #qlMBody 内；否则回落全文档（共享层默认行为）。
+        //     弹窗开着但容器缺失（理论异常态）时显式返回带 querySelectorAll 的空作用域哨兵对象，不
+        //     返回 null——u-paste.js register() 契约：返回 null 才会回落 document，返回显式空作用域
+        //     对象则保持候选池为空（防止异常态被误判成"没有限定意图"而扩大到弹窗外的可见 picker）。
+        //   selector——[id^="qlPreview_"] 覆盖本页两个 picker 实例（ql-create/ql-edit）。
+        //   keyOf——从 id 去前缀取 key。
+        //   collect——把 File 交还本页既有收集闸门 qlPickerCollect（数量/大小/扩展名/去重校验）+
+        //     触发 qlPickerRender 重渲染预览。
+        // ============================================================
+        const QL_UPASTE_KIT_EXPECTED = 'upaste2';   // 须与 <script src="...u-paste.js?v=..._upaste2"> 缓存串尾部一致，改共享层时两处一起 bump
+        function qlInitUPaste() {
+            // 一次性哨兵：共享层 register() 是裸 push（无去重），若本函数未来被某条路径意外重复调用，
+            // 会造成同一目标重复注册，一次粘贴触发多次 collect（重复入选/重复上传）。
+            if (qlInitUPaste._done) return;
+            qlInitUPaste._done = true;
+            if (!window.UPaste) { console.error('[贴图共享层] u-paste.js 未加载'); return; }
+            UPaste.checkVersion(QL_UPASTE_KIT_EXPECTED, 'Quick_Log.html');
+            UPaste.register({
+                scopeResolver: () => {
+                    const overlay = document.getElementById('qlModalOverlay');
+                    if (!overlay || !overlay.classList.contains('open')) return null;   // 弹窗未开：返回 null，由共享层回落 document
+                    return document.getElementById('qlMBody') || { querySelectorAll: () => [] };
+                },
+                selector: '[id^="qlPreview_"]',
+                keyOf: (el) => el.id.replace(/^qlPreview_/, ''),
+                collect: (key, files) => { qlPickerCollect(key, files); qlPickerRender(key); },
+            });
+        }
+    </script>
+</body>
+
+</html>

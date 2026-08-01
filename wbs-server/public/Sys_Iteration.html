@@ -57,6 +57,22 @@
         /* .si-head-actions（页头动作按钮容器：批次管理/建单/上线编排）位于筛选栏 u-filter-bar 右侧
            flex:1 之后；样式随迁移，选择器去掉 .si-page-head 祖先限定。 */
         .si-head-actions { display: flex; gap: 8px; }
+        /* 页头「⚙️ 管理」下拉（2026-08-02 用户裁定二：筛选栏五个入口——上线单管理/值班排班/上线日志/
+           删除审计/流程说明——收进下拉，不再平铺；「+ 新建迭代单」仍是独立主按钮）。u- 前缀页面专属
+           组件（目前仅本页用，非 components.css 共享层；若未来其它列表页也要同款菜单再上提）。点击
+           开合（非 hover）——操作菜单语义与全局导航 .dropdown 不同，视觉手感参考其圆角/阴影/项内边距，
+           不复用其 hover 触发机制（那是导航菜单手感，本组件是操作菜单，见 siToggleHeadMenu 等 JS）。 */
+        .u-head-menu { position: relative; display: inline-block; }
+        .u-head-menu-trigger { display: inline-flex; align-items: center; gap: 4px; }
+        .u-head-menu-caret { font-size: 10px; transition: transform .15s; }
+        .u-head-menu-trigger[aria-expanded="true"] .u-head-menu-caret { transform: rotate(180deg); }
+        .u-head-menu-list { display: none; position: absolute; top: 100%; left: 0; margin-top: 6px; min-width: 168px;
+            background: #fff; border: 1px solid #e5e7eb; border-radius: 10px; box-shadow: 0 10px 30px rgba(0,0,0,.12);
+            z-index: 20; padding: 6px; flex-direction: column; gap: 2px; }
+        .u-head-menu-list.open { display: flex; }
+        .u-head-menu-item { display: block; width: 100%; text-align: left; padding: 8px 12px; border: none; background: none;
+            border-radius: 6px; font-size: 13px; color: #374151; cursor: pointer; white-space: nowrap; font-family: inherit; }
+        .u-head-menu-item:hover { background: #f3f4f6; color: #111827; }
 
         /* 表格已 harmonize → u-corr-table-wrap/u-corr-table（base 见 components.css）；
            本页跟随共享层默认宽度，和其余列表页保持同一容器/表格骨架。 */
@@ -551,8 +567,13 @@
         </div>
     </div>
 
-    <script src="assets/js/app.js?v=v1.121.0_issuelite"></script>
+    <script src="assets/js/app.js?v=v1.134.0_qlpage"></script>
     <script src="assets/js/unify-helpers.js?v=v1.110.4_unify"></script>
+    <!-- S3（前端统一 贴图粘贴扩展方案 20260801_v0.1）：Ctrl+V 贴图共享层，从本页 v1.133 建单优化批 C4
+         抽取（assets/js/u-paste.js 文件头有完整来源说明）。缓存串尾部 tag 须与该文件 KIT_VERSION 一致，
+         改文件时两处一起 bump——siInitUPaste() 内 UPaste.checkVersion() 会在不一致时 console.error
+         （S5 起版本比对逻辑下沉共享层，见 u-paste.js checkVersion()）。 -->
+    <script src="assets/js/u-paste.js?v=v1.134.0_upaste2"></script>
     <script>
     /* ============================================================
        系统迭代前端 · 纯 meta 驱动（状态机常量来自 GET /api/sys-issues/meta）
@@ -736,6 +757,7 @@
     // ---- 启动 ----
     document.addEventListener('DOMContentLoaded', async () => {
         if (typeof checkAuth === 'function') { const ok = await checkAuth(); if (!ok) return; }
+        siInitUPaste();   // S3：注册本页贴图目标区（不依赖 meta/list，越早注册越好——文档级监听已在 u-paste.js 加载时自动挂好）
         await siLoadMeta();
         await siLoadUsers();
         // 建单优化批 C2 前端：静默尝试（非 admin 会 403，符合预期，不提示）——为详情页「对接人」姓名解析预热缓存；
@@ -812,9 +834,19 @@
     function siReleaseFamily(t) { return t === 'bug' ? 'bug' : (t === 'feature' || t === 'improvement') ? 'change' : null; }
 
     // ---- 页头动作按钮 ----
+    // 2026-08-02 用户裁定二：筛选栏右侧改「[⚙️ 管理▾][+ 新建迭代单]」——「新建迭代单」仍是独立主按钮
+    //   （不进下拉，条件/位置零改动）；其余五个入口（上线单管理/值班排班/上线日志/删除审计/流程说明）
+    //   收进「⚙️ 管理」下拉菜单，菜单项书写顺序=目标显示顺序（与下方六段各自守卫条件所属 if 块在
+    //   函数体内的书写顺序不同——值班排班原在文件末尾、上线日志与删除审计原本内部顺序相反，纯展示
+    //   顺序调整，六段各自的守卫条件本身逐字不改，只把渲染目标从 html 换成 menuItems）。下拉本体
+    //   （触发按钮+菜单面板）仅在 menuItems 非空时才渲染（"至少一个菜单项可见才渲染"，用户裁定硬
+    //   约束）——panel-static 守卫①②③④五条断言按 onclick="siOpenXxx()" 标记文本 + 就近 if 条件定位，
+    //   markers 与各自 if 条件均逐字保留，故守卫无需改文本匹配逻辑；新增③b/③c 两条结构断言锁定
+    //   "五个入口确实挂在下拉里、新建迭代单确实不在下拉里"这条新增的结构不变量（见该守卫文件）。
     function siRenderHeadActions() {
         const box = document.getElementById('siHeadActions');
         let html = '';
+        let menuItems = '';
         if (META_OK && isAdmin() && siTypeKeys().length) html += `<button class="u-btn-primary" onclick="siOpenCreate()">+ 新建迭代单</button>`;
         // 上线体统一重构 C2b（方案 v3.4 §6.7）：「批次管理」入口须与 META_OK 解耦——meta（/sys-issues/meta，
         //   状态机 typeFlows）加载失败只应影响单据状态动作按钮，不能连带把「安排上线」这个应急兜底通道也锁死
@@ -826,31 +858,79 @@
         //   §6.8「撤销上线安排」在生产里会是 0% 可达的死功能。面板内部各按钮各自仍按己方角色门显隐
         //   （+ 加单/发布批次仍 admin-only，见 siOpenBatchDetail 内注释）。
         if (isAdmin() || (currentUser && isSiIntakeLiaison(currentUser.id))) {
-            html += `<button class="u-btn-secondary" onclick="siOpenBatch()">📦 上线单管理</button>`;
-        }
-        if (META_OK && isAdmin()) {
-            // ⭐ 角色权限重构 C4·F9（172 号对抗审）：物删审计查询入口——仅 admin 可见（前端镜像，真闸在后端
-            //   requireAdmin）。C2a 建了审计表但零查询面，本入口补上"看得到"这一步。
-            html += `<button class="u-btn-secondary" onclick="siOpenDeleteAudit()">🗑️ 删除审计</button>`;
-            // 上线日志（2026-07-31 用户拍板）：已发布批次 + 成员清单只读浏览——门槛与显隐条件与「删除审计」
-            //   完全同款（同一 META_OK 降级条件、同一 admin-only），非应急路径，容忍随 meta 一起降级。
-            html += `<button class="u-btn-secondary" onclick="siOpenReleaseLog()">📜 上线日志</button>`;
-        }
-        // [已退场 2026-07-30·用户裁定] 「🚀 上线编排」入口——C7 先隐藏（保留代码过渡），本批随旧家族
-        //   4 端点封禁把面板代码整体删除（见文件下方 C-orch 面板 tombstone）；恢复 = git revert 对应 commit。
-        if (META_OK && currentUser) {
-            html += `<button class="u-btn-secondary" onclick="siOpenFlowGuide()">📖 流程说明</button>`;
+            menuItems += `<button type="button" class="u-head-menu-item" role="menuitem" onclick="siOpenBatch()">📦 上线单管理</button>`;
         }
         // 上线体统一重构 C1（方案 v3.4 §6.15）：值班排班入口——**登录即可见**，故意不挂 META_OK 门（不同于本函数
         // 其余按钮）：排班表是独立资源，不依赖 sys-issues/meta 是否加载成功；对接人可写，其余角色打开为只读预览
         // （甲方也要能看排班），可见性不能收窄到只给对接人。写权限判定在面板内部（isSiIntakeLiaison），本按钮
         // 对任意登录用户可见可点。
         if (currentUser) {
-            html += `<button class="u-btn-secondary" onclick="siOpenDutyRoster()">📅 值班排班</button>`;
+            menuItems += `<button type="button" class="u-head-menu-item" role="menuitem" onclick="siOpenDutyRoster()">📅 值班排班</button>`;
         }
+        if (META_OK && isAdmin()) {
+            // 上线日志（2026-07-31 用户拍板）：已发布批次 + 成员清单只读浏览——门槛与显隐条件与「删除审计」
+            //   完全同款（同一 META_OK 降级条件、同一 admin-only），非应急路径，容忍随 meta 一起降级。
+            menuItems += `<button type="button" class="u-head-menu-item" role="menuitem" onclick="siOpenReleaseLog()">📜 上线日志</button>`;
+            // ⭐ 角色权限重构 C4·F9（172 号对抗审）：物删审计查询入口——仅 admin 可见（前端镜像，真闸在后端
+            //   requireAdmin）。C2a 建了审计表但零查询面，本入口补上"看得到"这一步。
+            menuItems += `<button type="button" class="u-head-menu-item" role="menuitem" onclick="siOpenDeleteAudit()">🗑️ 删除审计</button>`;
+        }
+        // [已退场 2026-07-30·用户裁定] 「🚀 上线编排」入口——C7 先隐藏（保留代码过渡），本批随旧家族
+        //   4 端点封禁把面板代码整体删除（见文件下方 C-orch 面板 tombstone）；恢复 = git revert 对应 commit。
+        if (META_OK && currentUser) {
+            menuItems += `<button type="button" class="u-head-menu-item" role="menuitem" onclick="siOpenFlowGuide()">📖 流程说明</button>`;
+        }
+        // 零星事项台账入口（2026-08-02 用户裁定拆独立页 Quick_Log.html，本页头部按钮随之删除——
+        // 入口仅保留 admin 头像下拉「📋 零星事项」一处，见 app.js updateUserUI()）。
+        if (menuItems) {
+            html = `<div class="u-head-menu" id="siHeadMenu">
+                <button type="button" class="u-btn-secondary u-head-menu-trigger" onclick="siToggleHeadMenu(event)" aria-haspopup="true" aria-expanded="false">⚙️ 管理 <span class="u-head-menu-caret">▾</span></button>
+                <div class="u-head-menu-list" id="siHeadMenuList" role="menu">${menuItems}</div>
+            </div>` + html;
+        }
+        // codex 232 M 采纳：重渲染前收敛下拉状态——菜单开着时触发重渲染（角色探测/meta 加载后等多处会调
+        // 本函数），新 DOM 恒为闭合态但 siHeadMenuOpen 若残留 true，下一次点「管理」会先走 close 分支
+        // 表现为首击无效。写入新 HTML 前显式归位，状态与 DOM 恒同步。
+        siCloseHeadMenu();
         box.innerHTML = html;
         siProbeMyReleasesEntry();
     }
+
+    // 「⚙️ 管理」下拉开合（页面级监听只挂载一次，不放进 siRenderHeadActions——该函数会被多次重渲染 DOM，
+    //   把监听器挂在 document 上、按当前 DOM 现查元素，不受重渲染影响，也不会重复挂多份监听器）。
+    let siHeadMenuOpen = false;
+    function siToggleHeadMenu(event) {
+        if (event) event.stopPropagation();
+        if (siHeadMenuOpen) siCloseHeadMenu(); else siOpenHeadMenu();
+    }
+    function siOpenHeadMenu() {
+        const list = document.getElementById('siHeadMenuList');
+        const trigger = document.querySelector('.u-head-menu-trigger');
+        if (!list) return;
+        list.classList.add('open');
+        if (trigger) trigger.setAttribute('aria-expanded', 'true');
+        siHeadMenuOpen = true;
+    }
+    function siCloseHeadMenu() {
+        const list = document.getElementById('siHeadMenuList');
+        const trigger = document.querySelector('.u-head-menu-trigger');
+        if (list) list.classList.remove('open');
+        if (trigger) trigger.setAttribute('aria-expanded', 'false');
+        siHeadMenuOpen = false;
+    }
+    // 点外关闭 + 菜单项点击后自动收起，合并成一个委托监听（不在每个菜单项 onclick 里各自追加
+    // siCloseHeadMenu()——那样会让 onclick="siOpenBatch()" 等标记文本变长/变化，panel-static 守卫
+    // 按标记文本定位 if 条件的机制没必要为此改，事件委托是更干净的写法，两者刚好都满足）。
+    document.addEventListener('click', (e) => {
+        if (!siHeadMenuOpen) return;
+        const menu = document.getElementById('siHeadMenu');
+        if (!menu) return;
+        const clickedMenuItem = e.target.closest && e.target.closest('.u-head-menu-list button');
+        if (!menu.contains(e.target) || clickedMenuItem) siCloseHeadMenu();
+    });
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && siHeadMenuOpen) siCloseHeadMenu();
+    });
 
     // 执行人入口探测（2026-07-31 用户拍板·v1.130.0 部署首日实测反馈）：执行人入口不能只活在钉钉深链上。
     //   非 admin/对接人的登录用户拉一次 GET /sys-releases（后端 mine 视角只返回"执行人=我"的批次，含历史），
@@ -4400,15 +4480,15 @@
     const SI_SPEC_MAX_SIZE = 20 * 1024 * 1024;  // 单个 ≤20MB（对齐提示 + 后端）
     const SI_SPEC_ALLOWED_EXTS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'pdf', 'xlsx', 'xls', 'docx', 'doc', 'csv', 'txt', 'md'];
     // SI_IMG_EXTS 已在附件融入区（siRenderAttGrid 上方）声明并复用于此（原此处重复声明，附件融入改造时合并）。
-    // 建单优化批 C4（方案 §5.3）：粘贴截图文件名序号——作用域=picker 实例（key），随 siPickerReset 同步清零
-    // （每次组件重新打开视为新一轮，序号从 1 起，不跨会话累积）。
-    const siPasteSeqByKey = {};                  // key → 已用过的最大序号
+    // S3：粘贴截图文件名序号状态已随共享层 assets/js/u-paste.js 抽走（原 siPasteSeqByKey，见该文件
+    // resetSeq）——本页只需在 siPickerReset 里转调 UPaste.resetSeq(key)，语义不变（每次组件重新打开
+    // 视为新一轮，序号从 1 起，不跨会话累积）。
     function siPickerFiles(key) { if (!siFilePickers[key]) siFilePickers[key] = []; return siFilePickers[key]; }
     // 重置（打开/关闭/上传成功时调用；revoke 旧 URL 防泄漏）——实例隔离核心
     function siPickerReset(key) {
         (siFilePickers[key] || []).forEach(f => { if (f._siObjUrl) { try { URL.revokeObjectURL(f._siObjUrl); } catch (_) {} } });
         siFilePickers[key] = [];
-        delete siPasteSeqByKey[key];
+        if (window.UPaste) UPaste.resetSeq(key);
     }
     // 收集（≤5 + 扩展名/大小校验 + 去重，复刻 collectFilesInto）。去重口径=同一物理文件
     //   (name+size+lastModified 三者全同才判重复)——允许同名同大小但修改时间不同的文件并存（不同版本）。
@@ -4487,93 +4567,50 @@
     }
 
     // ============================================================
-    // 建单优化批 C4（方案 20260801_v1.3 §5）：Ctrl+V 贴图直传（通用组件层）
-    //   现状锚点：平台是 HTTP 明文环境，`navigator.clipboard.read()` 需 HTTPS 不可用；但
-    //   `paste` 事件 + `e.clipboardData` 不受安全上下文限制——外部截图工具（Snipaste/钉钉截图/
-    //   Win+Shift+S）落进剪贴板的位图以 image/png File 到达，走这条路径不受影响。
-    //   纯前端改造，粘贴产生的 File 与选择的 File 对 multer 完全同构，后端零改动。
+    // S3（前端统一 贴图粘贴扩展方案 20260801_v0.1）：Ctrl+V 贴图共享层回接
+    //   本页原 v1.133 建单优化批 C4 的贴图直传实现（文本粘贴保护判定链/MIME 映射/文件名合成/
+    //   可见性判定/目标实例判定/document 级 paste 监听）已整体抽到 assets/js/u-paste.js（文件头有
+    //   完整来源说明，语义逐字保留），本页只做两件事：① 启动时注册自己的目标区清单
+    //   ② 版本印记比对（对齐 model-detail-normalize.js 的 KIT_VERSION 范式）。行为零变化——回归证据
+    //   = test-sys-paste-playwright.js（33/33，抽取等价性判据）。
     // ============================================================
-
-    // codex 220 M-3 收口：扩展名按源 MIME 类型映射（不再恒 .png）——不同截图工具/浏览器实现落进
-    //   剪贴板的位图不一定是 png，扩展名与真实内容类型不符会造成误导性命名。映射表覆盖
-    //   SI_SPEC_ALLOWED_EXTS 里已收录的图片类型，其余 image/*（含未知/空 type）兜底回退 png。
-    const SI_PASTE_MIME_EXT_MAP = { 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif', 'image/bmp': 'bmp', 'image/png': 'png' };
-    function siPasteExtFromMime(mimeType) { return SI_PASTE_MIME_EXT_MAP[mimeType] || 'png'; }
-    // §5.3 文件名合成：`粘贴截图_YYYYMMDD_HHMMSS_SSS_N.<按 MIME 映射的扩展名>`（含毫秒 + picker 实例
-    //   作用域序号，序号随 siPickerReset 清零，保证同一实例生命周期内文件名单调不重复，不依赖毫秒
-    //   不撞车的运气）。
-    function siPasteBuildFileName(key, mimeType) {
-        const d = new Date();
-        const p2 = n => String(n).padStart(2, '0');
-        const p3 = n => String(n).padStart(3, '0');
-        const stamp = `${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}_${p2(d.getHours())}${p2(d.getMinutes())}${p2(d.getSeconds())}_${p3(d.getMilliseconds())}`;
-        siPasteSeqByKey[key] = (siPasteSeqByKey[key] || 0) + 1;
-        return `粘贴截图_${stamp}_${siPasteSeqByKey[key]}.${siPasteExtFromMime(mimeType)}`;
+    const SI_UPASTE_KIT_EXPECTED = 'upaste2';   // 须与 <script src="...u-paste.js?v=..._upaste2"> 缓存串尾部一致，改共享层时两处一起 bump
+    // codex S4 复审 LOW-2 采纳（S5 落地）：版本比对逻辑下沉共享层 UPaste.checkVersion()，页面只留
+    // expected 常量 + "未加载"前置判断（这一步天然不能下沉——UPaste 对象都不存在时无法调用它的方法）。
+    // 注册本页贴图目标区（原 siPasteResolveTargetKey 逻辑的参数化版本，逐字保留判定语义）：
+    //   scopeResolver——有打开的弹窗 → 候选池限定 #siMBody 内；否则回落全文档（共享层默认行为）。
+    //     codex S3 复审 M1 采纳（页侧哨兵修法）：原实现"弹窗打开但 #siMBody 缺失（理论异常态）"时
+    //     scope=null → 全局候选池 0 个（安全侧）；抽取后若同样返回 null，会被共享层契约解释成"没有
+    //     限定意图"而回落 document，可能误命中弹窗外的可见 picker 实例——语义漂移。修法：弹窗开着但
+    //     容器缺失时显式返回带 querySelectorAll 的空作用域哨兵对象（u-paste.js register() 文档已注明
+    //     该契约），不返回 null，从而保持"这种异常态下候选池为空"的原始安全行为。
+    //   selector——[id^="siPreview_"] 覆盖本页全部 picker 实例（create-spec/submit-delivery/
+    //     modal-spec/modal-delivery/modal-screenshot）。ql-create/ql-edit 两个零星事项台账实例已随
+    //     2026-08-02 独立页拆分（Quick_Log.html）整体迁走，不再在本页选择器覆盖范围内。
+    //   keyOf——从 id 去前缀取 key，与原实现逐字同规则。
+    //   collect——把 File 交还本页既有收集闸门 siPickerCollect（数量/大小/扩展名/去重校验）+ 触发
+    //     siPickerRender 重渲染预览，与抽取前完全同一收尾动作（原来是 siPickerCollect+siPickerRender
+    //     两行紧邻调用，现在合并进这一个回调）。
+    function siInitUPaste() {
+        // codex S5 复审 M1 采纳：一次性哨兵——共享层 register() 是裸 push（grep 证实无去重），若本函数
+        // 未来被某条路径意外重复调用（如 DOMContentLoaded 多次绑定/热重载），会造成同一目标重复注册，
+        // 一次粘贴触发多次 collect（重复入选/重复上传）。哨兵挂在函数对象自身属性上，不新增模块级变量。
+        if (siInitUPaste._done) return;
+        siInitUPaste._done = true;
+        if (!window.UPaste) { console.error('[贴图共享层] u-paste.js 未加载'); return; }
+        UPaste.checkVersion(SI_UPASTE_KIT_EXPECTED, 'Sys_Iteration.html');
+        UPaste.register({
+            scopeResolver: () => {
+                const overlay = document.getElementById('siModalOverlay');
+                if (!overlay || !overlay.classList.contains('open')) return null;   // 弹窗未开：返回 null，由共享层回落 document（语义不变，codex S5 复审 L2 统一表述）
+                // 弹窗开着：#siMBody 正常应存在；缺失时返回显式空作用域哨兵，不回落 document（M1 修法核心）
+                return document.getElementById('siMBody') || { querySelectorAll: () => [] };
+            },
+            selector: '[id^="siPreview_"]',
+            keyOf: (el) => el.id.replace(/^siPreview_/, ''),
+            collect: (key, files) => { siPickerCollect(key, files); siPickerRender(key); },
+        });
     }
-
-    // codex 220 M-2/L-2 收口：可见性判定统一用 getClientRects().length>0（元素及祖先链均非
-    // display:none 时才有布局盒）——取代 offsetParent!==null。两者对 display:none 判定等价，
-    // 但 offsetParent 对 position:fixed 元素恒为 null（无论是否可见），会把"真实可见的 fixed 定位
-    // 附件区"误判为不可见；getClientRects 不受定位方式影响，只看是否真的参与了布局渲染。
-    function siPasteVisible(el) { return !!(el && el.getClientRects().length > 0); }
-
-    // §5.2 目标实例判定：有打开的弹窗 → 候选池限定在弹窗内（#siMBody 每次开弹窗整体替换内容，
-    //   弹窗态天然是用户当前焦点所在），**同样过可见性过滤**（M-2 收口：弹窗内若同时挂了多个
-    //   picker 实例、其中只有一个当前可见，仍应精确取那一个，不能笼统"弹窗内随便一个都算"）；
-    //   否则取全文档当前可见的实例。可见候选恰 1 个 → 取它；0 个或 ≥2 个 → 无法判定，不猜，
-    //   交调用方处理（提示用户）。
-    //   ⚠️ 现状 UI 里所有 picker 实例（create-spec/submit-delivery/modal-spec/modal-delivery/
-    //   modal-screenshot）在弹窗内都是唯一的一个——"弹窗内多个可见候选"分支在当前页面结构下
-    //   无法构造，属防御性通用实现（为未来若单个弹窗内新增第二个 picker 时仍然正确）。
-    function siPasteResolveTargetKey() {
-        const overlay = document.getElementById('siModalOverlay');
-        const modalOpen = !!(overlay && overlay.classList.contains('open'));
-        const scope = modalOpen ? document.getElementById('siMBody') : document;
-        const pool = scope ? Array.from(scope.querySelectorAll('[id^="siPreview_"]')) : [];
-        const candidates = pool.filter(siPasteVisible);
-        if (candidates.length === 1) return candidates[0].id.replace(/^siPreview_/, '');
-        return null;
-    }
-
-    // §5.1 document 级 paste 监听 + 文本粘贴保护：
-    //   剪贴板仅图片 → 收附件 + preventDefault；图片+文本混合且焦点在可编辑元素 → 放行默认粘贴
-    //   （文本正常进输入框，不拦截）；纯文本 → 永不拦截（不含图片 item 时最早 return）；焦点在
-    //   可编辑元素但剪贴板仅图片时仍收附件（图片贴输入框无原生行为，无冲突面）。
-    document.addEventListener('paste', function (e) {
-        const cd = e.clipboardData;
-        if (!cd || !cd.items) return;
-        const items = Array.from(cd.items);
-        const imageItems = items.filter(it => it.kind === 'file' && it.type && it.type.startsWith('image/'));
-        if (!imageItems.length) return;   // 无图片：纯文本粘贴，永不拦截
-        // codex 220 M-1 收口：任意文本型 item 都算"有文本"（原只认 text/plain，漏掉 text/html/
-        // text/uri-list 等无 text/plain 但确有文本内容的组合——那些场景会被本模块误判为"仅图片"抢先
-        // preventDefault，压制掉本该放行的原生粘贴）。口径：图片+任意文本型项+可编辑焦点=放行。
-        const hasText = items.some(it => it.kind === 'string');
-        const active = document.activeElement;
-        // codex 220 L-1 注明（不修·仅补充说明）：isContentEditable 属性本身覆盖嵌套 contenteditable
-        // 链（子元素未显式设置时会继承祖先的可编辑态，浏览器原生语义已处理）；本页无 shadow DOM、
-        // 无 role="textbox" 一类需要额外判定的第三方富文本控件，故 INPUT/TEXTAREA/isContentEditable
-        // 三项穷举已够用。若未来引入此类控件，这里的可编辑焦点判定需要相应扩展。
-        const editableFocus = !!(active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable));
-        if (hasText && editableFocus) return;   // 图片+文本混合 且 焦点可编辑：放行默认粘贴，不拦截文本
-        // 走到这里：纯图片，或"图片+文本但焦点不在可编辑元素"——按"仅图片"语义收附件，统一 preventDefault
-        // （即便下面判定不出目标实例，也要拦下——防止 contenteditable 场景触发浏览器原生内联插图行为）。
-        e.preventDefault();
-        const targetKey = siPasteResolveTargetKey();
-        if (!targetKey) { showToast('请先点击目标附件区再粘贴', 'error'); return; }
-        // codex 220 M-3：File 重包装时 type 保持源值（f.type），扩展名按该值映射（siPasteExtFromMime），
-        // 不再假定恒为 png。
-        const named = imageItems.map(it => it.getAsFile()).filter(Boolean)
-            .map(f => new File([f], siPasteBuildFileName(targetKey, f.type), { type: f.type || 'image/png', lastModified: Date.now() }));
-        // codex 220 M-4：getAsFile() 理论上可能对个别 item 返回 null（规范未强保证恒非空，见 M-4
-        // 归档）；imageItems.length>0 但全部读取失败时 named 为空——此时不能静默 return（用户会以为
-        // 粘贴成功但附件区什么都没出现，无从得知发生了什么）。剪贴板此时已确认无可用文本（走到这里
-        // 说明纯图片，或图片+文本但焦点不可编辑——都没有需要放行的文本），拦下是安全侧，故
-        // preventDefault 已在上面调用、这里不撤销，只补一条明确的失败提示引导用户改走文件选择器。
-        if (!named.length) { showToast('无法读取剪贴板图片，请用文件选择方式上传', 'error'); return; }
-        siPickerCollect(targetKey, named);
-        siPickerRender(targetKey);
-    });
 
     // ---- datetime-local ↔ 后端 'YYYY-MM-DD HH:MM' ----
     function siToLocalInput(v) {

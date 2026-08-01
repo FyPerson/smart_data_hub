@@ -564,8 +564,11 @@
         </div>
     </div>
 
-    <script src="assets/js/app.js?v=v1.121.0_issuelite"></script>
+    <script src="assets/js/app.js?v=v1.134.0_qlpage"></script>
     <script src="assets/js/unify-helpers.js?v=v1.110.4_unify"></script>
+    <!-- S5（前端统一 贴图粘贴扩展方案 20260801_v0.1）：Ctrl+V 贴图共享层接入。文件本体未改，沿用
+         S5 checkVersion 下沉后的缓存串；改共享层本体时须同步 bump 这里 + 所有引用页。 -->
+    <script src="assets/js/u-paste.js?v=v1.134.0_upaste2"></script>
     <script>
         let allIssues = [];
         let allUsers = [];
@@ -615,6 +618,7 @@
                 const ok = await checkAuth();
                 if (!ok) return;
             }
+            trInitUPaste();   // S5：注册本页贴图目标区
             await loadUsers();
             await loadFilterDropdowns(); // C6c：填充部门/数据域筛选下拉
             syncIssueStatCardsActive();
@@ -1458,6 +1462,47 @@
             document.getElementById('formAttachments').value = '';
             document.getElementById('attachmentPreview').textContent = '';
             document.getElementById('errorTimeGroup').style.display = 'none';
+        }
+
+        // ============================================================
+        // S5（前端统一 贴图粘贴扩展方案 20260801_v0.1）：Ctrl+V 贴图共享层接入
+        //   本页只有 1 个上传点 formAttachments（先行后传：先建需求再逐个上传，见 §录入附件 注释），
+        //   裸 <input type="file" multiple>，无 onchange 收集链——没有 chip 预览渲染（attachmentPreview
+        //   div 全文件扫描确认：仅在建单/编辑重置时被清空过，从未被填充过内容），提交时直接读取
+        //   formAttachments.files（submitIssue 内）。既有校验闸门＝无（前端不做扩展名/大小/去重检查，
+        //   全靠后端），故贴图直接 DataTransfer 重建 files（追加语义，保留已选文件）即可，无需调用任何
+        //   渲染函数——与"照既有链路走"一致：既有链路本就没有渲染这一步。
+        //   目标区就用 formAttachments 输入框本身（原生文件输入有真实渲染尺寸，不是空 chip 容器，无需
+        //   像 Data_Correction 那样借用兄弟 div）。scopeResolver：本页仅 createModal 一个相关弹窗
+        //   （reasonModal 是变更原因输入，与附件无关），比 Data_Correction 的 4 弹窗互斥简单，未开则
+        //   返回 null，由共享层回落 document（codex S5 复审 L2 统一表述）——createModal 关闭时
+        //   formAttachments 深藏 display:none 弹窗内，天然 0 候选。
+        // ============================================================
+        const TR_UPASTE_KIT_EXPECTED = 'upaste2';   // 须与 <script src="...u-paste.js?v=..._upaste2"> 缓存串尾部一致
+        function trAppendFilesToInput(files) {
+            const input = document.getElementById('formAttachments');
+            if (!input) return;
+            const dt = new DataTransfer();
+            Array.from(input.files || []).forEach(f => dt.items.add(f));
+            files.forEach(f => dt.items.add(f));
+            input.files = dt.files;
+        }
+        function trInitUPaste() {
+            // codex S5 复审 M1 采纳：一次性哨兵，防未来重复初始化路径重复 register()（详见 Sys_Iteration
+            // siInitUPaste 同款注释）。
+            if (trInitUPaste._done) return;
+            trInitUPaste._done = true;
+            if (!window.UPaste) { console.error('[贴图共享层] u-paste.js 未加载'); return; }
+            UPaste.checkVersion(TR_UPASTE_KIT_EXPECTED, 'Issue_Tracker.html');
+            UPaste.register({
+                scopeResolver: () => {
+                    const modal = document.getElementById('createModal');
+                    return (modal && modal.classList.contains('open')) ? modal : null;
+                },
+                selector: '#formAttachments',
+                keyOf: () => 'formAttachments',
+                collect: (key, files) => { trAppendFilesToInput(files); },
+            });
         }
 
         async function openCreateModal() {

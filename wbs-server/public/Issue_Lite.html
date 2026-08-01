@@ -218,8 +218,11 @@
 
     <input type="file" id="attachInput" style="display:none;" onchange="onAttachPicked()">
 
-    <script src="assets/js/app.js?v=v1.121.0_issuelite"></script>
+    <script src="assets/js/app.js?v=v1.134.0_qlpage"></script>
     <script src="assets/js/unify-helpers.js?v=v1.110.4_unify"></script>
+    <!-- S4（前端统一 贴图粘贴扩展方案 20260801_v0.1）：Ctrl+V 贴图共享层接入。文件本体未改，沿用
+         S3 抽取时的缓存串；改共享层本体时须同步 bump 这里 + 所有引用页。 -->
+    <script src="assets/js/u-paste.js?v=v1.134.0_upaste2"></script>
     <script>
         let allItems = [];
         let allUsers = [];             // /api/users/active·通知区解析 notify_target_id → 人名
@@ -254,6 +257,7 @@
 
         document.addEventListener('DOMContentLoaded', async () => {
             if (typeof checkAuth === 'function') { const ok = await checkAuth(); if (!ok) return; }
+            ilInitUPaste();   // S4：注册本页贴图目标区
             document.getElementById('btnNew').style.display = canWrite() ? '' : 'none';
             if (isAdminRole()) document.getElementById('voidedFilterWrap').style.display = 'inline-flex'; // 含已作废筛选仅 admin（v0.1 §5.1）
             initDeptSelects();
@@ -667,6 +671,50 @@
                 if (res.ok && j.success) { await loadAttachments(id); }
                 else alert((j && (j.error || j.detail)) || '上传失败');
             } catch (e) { alert('上传失败'); } finally { busy = false; }
+        }
+        // ============================================================
+        // S4（前端统一 贴图粘贴扩展方案 20260801_v0.1）：Ctrl+V 贴图共享层接入
+        //   本页前端本就无预校验（无扩展名/大小/去重闸门，attachInput 也不带 multiple——单文件即选即传）；
+        //   全靠后端 multer 白名单兜底，故 collect 适配器直接调既有上传函数 uploadAttach(id, file)，逐个
+        //   顺序 await（自然复用 busy 串行锁，不新增校验）。
+        //   目标区 = 抽屉内 #attList（附件清单容器，唯一可粘贴区）。scopeResolver 关键点：.u-drawer 用
+        //   position:fixed + right:-620px 做"关闭"（非 display:none——见 components.css .u-drawer），
+        //   getClientRects() 口径的可见性判定不会因为抽屉平移出视口就判"不可见"，若不显式限定作用域，
+        //   抽屉关闭时仍会把 #attList 判成"1 个可见候选"、误收贴图到上一次打开的单据。故未开抽屉时必须
+        //   返回显式空作用域哨兵（u-paste.js register() 文档已注明该契约），不能返回 null 回落 document。
+        //   isImageArea 复刻按钮显隐同款权限判据（canWrite() && 非已归档 && 非已作废）——无权限/终态时
+        //   候选池为空，贴图与"上传附件"按钮同样不可用，口径一致。
+        // ============================================================
+        const IL_UPASTE_KIT_EXPECTED = 'upaste2';   // 须与 <script src="...u-paste.js?v=..._upaste2"> 缓存串尾部一致
+        // codex S4 复审 LOW-2 采纳（S5 落地）：版本比对逻辑下沉共享层 UPaste.checkVersion()（见
+        // ilInitUPaste 内调用），页面只留 expected 常量 + "未加载"前置判断。
+        function ilInitUPaste() {
+            // codex S5 复审 M1 采纳：一次性哨兵，防未来重复初始化路径重复 register()（详见 Sys_Iteration
+            // siInitUPaste 同款注释）。
+            if (ilInitUPaste._done) return;
+            ilInitUPaste._done = true;
+            if (!window.UPaste) { console.error('[贴图共享层] u-paste.js 未加载'); return; }
+            UPaste.checkVersion(IL_UPASTE_KIT_EXPECTED, 'Issue_Lite.html');
+            UPaste.register({
+                scopeResolver: () => {
+                    const drawer = document.getElementById('drawer');
+                    if (drawer && drawer.classList.contains('open')) return drawer;
+                    return { querySelectorAll: () => [] };   // 抽屉未开：显式空作用域，见上方注释
+                },
+                selector: '#attList',
+                keyOf: () => 'attList',
+                isImageArea: () => canWrite() && currentDrawerStatus !== '已归档' && !currentDrawerVoided,
+                collect: (key, files) => {
+                    if (currentDrawerId == null) return;   // 防御：理论不可达（scopeResolver 已保证抽屉打开才会走到这里）
+                    const id = currentDrawerId;
+                    // codex S4 复审 MED-1（误报核实·补充说明防未来同款误判）：一次粘贴多图时，这里是
+                    // `for...of` + `await uploadAttach(...)` 顺序等待——每次 await 等的是 uploadAttach 整个
+                    // async 函数跑完（含 finally busy=false 释放锁），下一轮循环才发起下一张的上传。busy
+                    // 锁的"若已忙碌直接 return"分支在本循环内永远不会被自己的下一次迭代触发（迭代 N+1
+                    // 发起时迭代 N 的 finally 早已执行完毕），故多图不会被 busy 锁吞掉后续几张。
+                    (async () => { for (const f of files) { await uploadAttach(id, f); } })();
+                },
+            });
         }
         async function downloadAttach(aid) {
             // D5-H-1：文件名从缓存查（不从 onclick 传·杜绝文件名注入）

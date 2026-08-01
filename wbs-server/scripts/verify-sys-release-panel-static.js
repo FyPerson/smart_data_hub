@@ -35,6 +35,16 @@
  *
  * 【2026-07-31 变更】原"四入口"（新建迭代单/删除审计/上线编排[已删]/流程说明）反向降级断言组扩为
  * 五入口，新增「上线日志」与「删除审计」同门槛同断言写法（见下方 §④ 新增 check）。
+ *
+ * 【2026-08-02 变更·用户裁定二】筛选栏右侧改「[⚙️ 管理▾][+ 新建迭代单]」——上线单管理/值班排班/
+ * 上线日志/删除审计/流程说明五个入口从平铺按钮收进「⚙️ 管理」下拉菜单；新建迭代单仍是独立主按钮。
+ * ①②③④ 五组断言的 marker 匹配（onclick="siOpenXxx()" 标记文本 + 就近 if 条件）**无需改动就依旧
+ * 成立**——onclick 属性值本身逐字保留（下拉的"点菜单项后自动收起"用事件委托实现，不在每个 onclick
+ * 里追加 siCloseHeadMenu()，故标记文本没变），各按钮自己的 if 块仍是紧邻自身 marker 的最近 if（哪怕
+ * 五个块在函数体内被重新排过序，guardConditionBefore 只认"某个 marker 前最近一个 if"，块内部顺序
+ * 互换不影响各自配对关系）。即便如此，新增 §③ 三条**结构性**断言把"这五个入口真的挂在下拉菜单里、
+ * 新建迭代单真的没被挪进去、下拉本体真的有'至少一个菜单项才渲染'的门控"这三条 2026-08-02 新增的
+ * 结构不变量也钉住——防止未来有人把某个入口从 .u-head-menu-item 挪回裸按钮（或反之）却没人发现。
  */
 'use strict';
 
@@ -134,6 +144,34 @@ check('siOpenBatchDetail 函数体（剥注释后）不含 META_OK（三个动�
     const body = extractFunctionBody(src, 'siOpenBatchDetail');
     const code = stripComments(body);
     assert.ok(!code.includes('META_OK'), 'siOpenBatchDetail 函数体（代码，非注释）内出现了 META_OK，§6.7 不变量被破坏');
+});
+
+console.log('— §③（2026-08-02 用户裁定二新增）「⚙️ 管理」下拉结构不变量 —');
+check('五个入口（上线单管理/值班排班/上线日志/删除审计/流程说明）的 onclick 标记均落在 .u-head-menu-item 菜单项模板内', () => {
+    const body = extractFunctionBody(src, 'siRenderHeadActions');
+    const markers = ['onclick="siOpenBatch()"', 'onclick="siOpenDutyRoster()"', 'onclick="siOpenReleaseLog()"', 'onclick="siOpenDeleteAudit()"', 'onclick="siOpenFlowGuide()"'];
+    for (const marker of markers) {
+        const mi = body.indexOf(marker);
+        assert.ok(mi >= 0, `未找到标记 "${marker}"`);
+        // 就近往前找 u-head-menu-item 类名——五个入口的模板串写法均为
+        // `<button ... class="u-head-menu-item" ... onclick="siOpenXxx()">`，class 在 onclick 之前
+        // 同一开始标签内，lastIndexOf 能命中同一标签内的类名，不会跨到别的无关标签。
+        const classIdx = body.lastIndexOf('u-head-menu-item', mi);
+        assert.ok(classIdx >= 0 && mi - classIdx < 120, `"${marker}" 未挂在 .u-head-menu-item 菜单项模板内（疑似被移出下拉菜单）`);
+    }
+});
+check('「+ 新建迭代单」（siOpenCreate）不带 u-head-menu-item 菜单项类名——保持独立主按钮，不进下拉', () => {
+    const body = extractFunctionBody(src, 'siRenderHeadActions');
+    const mi = body.indexOf('onclick="siOpenCreate()"');
+    assert.ok(mi >= 0, '未找到「新建迭代单」标记');
+    const nearBefore = body.slice(Math.max(0, mi - 200), mi);
+    assert.ok(!nearBefore.includes('u-head-menu-item'), '「新建迭代单」标记附近出现 u-head-menu-item，疑似被误挪进下拉菜单');
+});
+check('下拉本体（触发按钮 u-head-menu-trigger + 面板 u-head-menu-list）仅在 menuItems 非空时才拼进 html（"至少一个菜单项可见才渲染"）', () => {
+    const body = extractFunctionBody(src, 'siRenderHeadActions');
+    const code = stripComments(body);
+    assert.ok(/if\s*\(\s*menuItems\s*\)\s*\{/.test(code), '未找到 `if (menuItems) {` 门控——下拉本体应仅在至少一个菜单项存在时才拼进 html');
+    assert.ok(code.includes('u-head-menu-trigger') && code.includes('u-head-menu-list'), '下拉触发按钮/面板结构缺失');
 });
 
 console.log('— §④ 反向边界：META_OK 异常态下应该降级的入口仍正确挂着门（防守卫被连带误删）—');

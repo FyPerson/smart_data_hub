@@ -1342,8 +1342,11 @@
         <div class="img-lightbox-caption" id="imgLightboxCaption"></div>
     </div>
 
-    <script src="assets/js/app.js?v=v1.121.0_issuelite"></script>
+    <script src="assets/js/app.js?v=v1.134.0_qlpage"></script>
     <script src="assets/js/unify-helpers.js?v=v1.110.4_unify"></script>
+    <!-- S5（前端统一 贴图粘贴扩展方案 20260801_v0.1）：Ctrl+V 贴图共享层接入。文件本体未改，沿用
+         S5 checkVersion 下沉后的缓存串；改共享层本体时须同步 bump 这里 + 所有引用页。 -->
+    <script src="assets/js/u-paste.js?v=v1.134.0_upaste2"></script>
     <script>
         // v1.74.3 纯只读领导账号 id 名单（与后端 server.js READONLY_LEADER_IDS 同步！改动需两处一起改）
         //   示例只读领导A(id=11) / 示例只读领导B(id=6) 为纯只读领导，不参与偏技术类工作，不可被设为协作单数据导出人(exporter)。
@@ -5292,8 +5295,11 @@
             }).join('');
         }
 
-        function onFilesChange(e) {
-            const newFiles = Array.from(e.target.files || []);
+        // S5：校验闸门抽成独立函数（原内联在 onFilesChange 里）——贴图 collect 适配器与文件选择 change
+        //   事件现在共用同一份数量上限/白名单/大小/去重逻辑，零漂移风险（对齐 Data_Correction
+        //   corrAttachCollectFiles 同款抽取手法，原代码逐字未变，只是包了一层函数）。
+        function collectIntoSelectedFiles(fileList) {
+            const newFiles = Array.from(fileList || []);
             for (const f of newFiles) {
                 if (selectedFiles.length >= MAX_FILES) {
                     showToast(`最多上传 ${MAX_FILES} 个文件`, 'error');
@@ -5310,9 +5316,68 @@
                 }
                 selectedFiles.push(f);
             }
+        }
+        function onFilesChange(e) {
+            collectIntoSelectedFiles(e.target.files);
             renderFilePreview();
             // 清空 input 的值，允许下次选同一个文件再次触发 change
             e.target.value = '';
+        }
+
+        // ============================================================
+        // S5（前端统一 贴图粘贴扩展方案 20260801_v0.1）：Ctrl+V 贴图共享层接入
+        //   9 个上传点里只有 2 个是图片类，其余 7 个（f_template/f_data_scope/f_admin_submit_script/
+        //   f_admin_submit_data/f_delivery_script/f_delivery_data/f_export_result_data，均为
+        //   .xlsx/.xls/.sql/.txt 专用区）**一律不注册**——不进候选池就是天然排除，这正是方案 §二
+        //   isImageArea/注册表机制的设计动机，本页是它的第一个真实落地场景：
+        //     ① f_files（原始单据截图，newModal 内，selectedFiles 数组范式）
+        //     ② f_export_screenshot（导出界面截图，exportUploadModal 内，单文件裸 input，无预览容器）
+        //   目标容器：① 用兄弟预览 div #filePreview（复用既有校验闸门 collectIntoSelectedFiles +
+        //   renderFilePreview，去重/数量上限(5)/白名单/大小(10MB) 全部同源）；② 该字段是必填单文件，
+        //   贴图产生新文件时"替换"而非"追加"——单文件槽位本就只能容纳一个文件，与该字段"重选即替换"的
+        //   原生语义一致（不同于 f_files 的多文件"追加"）。
+        //   scopeResolver：newModal / exportUploadModal 两个弹窗互斥，同 Data_Correction corrPasteScopeResolver
+        //   同款收口（codex S4 复审 LOW-1）——恰 1 个 open 用该弹窗限定；0 个返回 null，由共享层回落
+        //   document（codex S5 复审 L2：本页只负责返回 null，不是本页自己"回落"，回落动作在 u-paste.js
+        //   resolveCandidates 里）；>1 个（异常态）显式空作用域，不猜。
+        //   ⚠️ 抽屉排查结论（吸取 Issue_Lite M1 教训，逐条核实非臆断）：本页详情抽屉 #detailDrawer 用
+        //   .u-drawer（position:fixed + right:-620px 位移出屏，非 display:none，C4 手术后常驻 DOM + inert
+        //   属性）——但 f_files/f_export_screenshot 均不在 #detailDrawer 内（newModal/exportUploadModal
+        //   是与 detailDrawer 平级的独立 .u-modal-overlay，走 display:none 开合，见 components.css），
+        //   故本次两个注册目标不受抽屉位移可见性问题影响，无需 Issue_Lite 那样的空作用域哨兵特殊处理；
+        //   若未来把某个上传点挪进抽屉内，需要重新审视这条结论。
+        // ============================================================
+        const COLLAB_UPASTE_KIT_EXPECTED = 'upaste2';   // 须与 <script src="...u-paste.js?v=..._upaste2"> 缓存串尾部一致
+        function collabPasteScopeResolver() {
+            const modalIds = ['newModal', 'exportUploadModal'];
+            const openEls = modalIds.map(id => document.getElementById(id)).filter(el => el && el.classList.contains('open'));
+            if (openEls.length === 1) return openEls[0];
+            if (openEls.length > 1) return { querySelectorAll: () => [] };   // 异常态：不猜顶层
+            return null;   // 均未开：返回 null，由共享层回落 document
+        }
+        function collabSetSingleFileInput(inputId, files) {
+            const input = document.getElementById(inputId);
+            if (!input || !files.length) return;
+            const dt = new DataTransfer();
+            dt.items.add(files[0]);   // 单文件字段：贴图替换（与"重选即替换"的原生语义一致，非追加）
+            input.files = dt.files;
+        }
+        function collabInitUPaste() {
+            // codex S5 复审 M1 采纳：一次性哨兵，防未来重复初始化路径重复 register()（详见 Sys_Iteration
+            // siInitUPaste 同款注释）。
+            if (collabInitUPaste._done) return;
+            collabInitUPaste._done = true;
+            if (!window.UPaste) { console.error('[贴图共享层] u-paste.js 未加载'); return; }
+            UPaste.checkVersion(COLLAB_UPASTE_KIT_EXPECTED, 'Data_Collab.html');
+            UPaste.register({
+                scopeResolver: collabPasteScopeResolver,
+                selector: '#filePreview, #f_export_screenshot',
+                keyOf: (el) => el.id,
+                collect: (key, files) => {
+                    if (key === 'filePreview') { collectIntoSelectedFiles(files); renderFilePreview(); return; }
+                    if (key === 'f_export_screenshot') { collabSetSingleFileInput('f_export_screenshot', files); return; }
+                },
+            });
         }
 
         function removeFile(idx) {
@@ -6098,6 +6163,7 @@
 
         // 页面初始化
         document.addEventListener('DOMContentLoaded', async () => {
+            collabInitUPaste();   // S5：注册本页贴图目标区（仅图片类两点，见该函数定义处注释）
             // C4·ultracode HIGH#2 修复：兜底覆盖未显式调 hide/restore 的 10 个子弹窗 + 动态注入 reassign/fallback。
             //   监听抽屉 + 14 个静态子弹窗的 open class 变化 + body 直接子节点增删（动态弹窗 append/remove），
             //   任一变化都幂等重算抽屉 inert（syncDrawerInert），杜绝"某子弹窗打开时抽屉未锁"的焦点逃逸。

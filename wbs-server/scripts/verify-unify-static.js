@@ -40,7 +40,9 @@ const UNIFY_HELPERS_JS = path.join(PUBLIC_DIR, 'assets', 'js', 'unify-helpers.js
 // ============================================================
 
 // 已完成"前端统一"改造迁移的页面文件名（相对 wbs-server/public/）。C1-C4 每迁一页往这里加一个。
-const MIGRATED_PAGES = ['Data_Correction.html', 'Sys_Iteration.html', 'Issue_Tracker.html', 'Data_Collab.html', 'Statistics.html'];
+// Quick_Log.html（2026-08-02 零星台账独立页）系新建即全程 u- 范式——非"迁移"但纳入同一守卫，
+// 防未来往新页塞裸旧类名漂移（codex 231 轮随批裁定加入）。
+const MIGRATED_PAGES = ['Data_Correction.html', 'Sys_Iteration.html', 'Issue_Tracker.html', 'Data_Collab.html', 'Statistics.html', 'Quick_Log.html'];
 
 // 共享组件根类黑名单（方案 §二"只给根类加 u-"清单，逐字对齐 components.css 定义的组件本体类名）。
 // 不含状态/变体/枚举修饰类（active/open/full/ellip/wide/s-*/t-*/n-*）——这些保留原名，不在黑名单里。

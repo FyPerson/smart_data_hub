@@ -629,8 +629,11 @@
         </div>
     </div>
 
-    <script src="assets/js/app.js?v=v1.121.0_issuelite"></script>
+    <script src="assets/js/app.js?v=v1.134.0_qlpage"></script>
     <script src="assets/js/unify-helpers.js?v=v1.110.4_unify"></script>
+    <!-- S4（前端统一 贴图粘贴扩展方案 20260801_v0.1）：Ctrl+V 贴图共享层接入。文件本体未改，沿用
+         S3 抽取时的缓存串；改共享层本体时须同步 bump 这里 + 所有引用页。 -->
+    <script src="assets/js/u-paste.js?v=v1.134.0_upaste2"></script>
     <!-- U2：图片附件 lightbox（复刻数据协作范式；点 overlay/×/ESC 关，点图本身不关） -->
     <div id="imgLightbox" class="img-lightbox" onclick="closeLightbox(event)">
         <span class="img-lightbox-close" onclick="closeLightbox(event)" title="关闭">×</span>
@@ -672,6 +675,7 @@
         // ================= 初始化 =================
         document.addEventListener('DOMContentLoaded', async () => {
             if (typeof checkAuth === 'function') { const ok = await checkAuth(); if (!ok) return; }
+            corrInitUPaste();   // S4：注册本页贴图目标区（不依赖登录后数据，越早注册越好）
             applyRoleVisibility();
             fillSystemFilter();
             await loadUsers();
@@ -2250,8 +2254,11 @@
         const CORR_ATTACH_EXTS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'pdf', 'xlsx', 'xls'];
         const CORR_IMG_EXTS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'];
 
-        function corrAttachFilesChange(e) {
-            for (const f of Array.from(e.target.files || [])) {
+        // S4：校验闸门抽成独立函数（原内联在 corrAttachFilesChange 里）——贴图 collect 适配器与文件选择
+        //   onchange 现在共用同一份数量上限/白名单/大小/去重逻辑，零漂移风险（对齐 corrAttachCollectFiles
+        //   命名习惯，无行为变化：与原内联代码逐字相同，只是包了一层函数）。
+        function corrAttachCollectFiles(fileList) {
+            for (const f of Array.from(fileList || [])) {
                 if (corrAttachFiles.length >= CORR_ATTACH_MAX) { showToast(`最多 ${CORR_ATTACH_MAX} 个文件`, 'error'); break; }
                 const ext = f.name.split('.').pop().toLowerCase();
                 if (!CORR_ATTACH_EXTS.includes(ext)) { showToast(`不支持的格式：${f.name}`, 'error'); continue; }
@@ -2261,6 +2268,9 @@
                 }
                 corrAttachFiles.push(f);
             }
+        }
+        function corrAttachFilesChange(e) {
+            corrAttachCollectFiles(e.target.files);
             renderCorrAttachPreview();
             e.target.value = '';   // 清 input 允许再次选同一文件触发 change
         }
@@ -2380,6 +2390,78 @@
             wrap.innerHTML = files.map(f =>
                 `<div style="font-size:11px;color:#166534;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:4px;padding:2px 8px;margin-top:2px;display:inline-block;margin-right:4px;">📎 ${escapeHtml(f.name)} <span style="color:#9ca3af;">(${(f.size / 1024).toFixed(1)} KB)</span></div>`
             ).join('') + (max && files.length > max ? `<div style="font-size:11px;color:#dc2626;margin-top:2px;">⚠️ 最多 ${max} 个文件，请重新选择</div>` : '');
+        }
+
+        // ============================================================
+        // S4（前端统一 贴图粘贴扩展方案 20260801_v0.1）：Ctrl+V 贴图共享层接入
+        //   7 个上传点分两类目标：
+        //   ① 裸 input 类（6 个：OA截图/待修复数据/完成×2/重传×2）——"重选即覆盖"是浏览器 <input> 原生
+        //     语义（无 JS 数组状态），既有选择链本就没有扩展名/大小/去重校验闸门（唯一限制是"数量>5 不
+        //     阻止选择，只在 renderPickedChips 里显示警示文案 + 提交时才真正拦截"）。粘贴口径选择"追加"
+        //     （而非贴合"重选覆盖"去替换）——因为全站其余 picker（Sys_Iteration/零星事项）粘贴语义均为
+        //     追加，用户心智统一更重要，且"贴图误删已选文件"比"贴图追加"更容易造成实际损失，是本次编码期
+        //     内在既有校验闸门框架内的合理选择，非新造校验规则。
+        //   ② 数组类（1 个：补充附件 formAttachFiles/attachModal）——已有 corrAttachFiles 数组 + 独立
+        //     校验闸门 corrAttachCollectFiles（S4 抽出，见上）+ renderCorrAttachPreview 预览，贴图直接复用。
+        //   scopeResolver：createModal/completeModal/resubmitModal/attachModal 四个弹窗互斥，逐个查
+        //   classList.contains('open')，命中即返回该弹窗根元素限定候选范围；均未开则返回 null，由
+        //   共享层回落 document（codex S5 复审 L2 统一表述）——届时 7 个目标容器全部深藏在 display:none
+        //   的弹窗内，isVisible() 天然过滤掉，候选恒为 0。
+        // ============================================================
+        const DC_UPASTE_KIT_EXPECTED = 'upaste2';   // 须与 <script src="...u-paste.js?v=..._upaste2"> 缓存串尾部一致
+        // codex S4 复审 LOW-2 采纳（S5 落地）：版本比对逻辑下沉共享层 UPaste.checkVersion()（见
+        // corrInitUPaste 内调用），页面只留 expected 常量 + "未加载"前置判断。
+        // 裸 input 类目标：chip 容器 id → { 对应 input id, 数量上限 }（renderPickedChips 第三参）
+        const CORR_PASTE_RAW_TARGETS = {
+            createOaProofPicked: { inputId: 'formOaProofFiles', max: 5 },
+            createErrProofPicked: { inputId: 'formErrorProofFiles', max: 5 },
+            completeFilesPicked: { inputId: 'formCompleteFiles', max: 5 },
+            completeBatchFilesPicked: { inputId: 'formCompleteBatchFiles', max: 5 },
+            resubmitFilesPicked: { inputId: 'formResubmitFiles', max: 5 },
+            resubmitBatchFilesPicked: { inputId: 'formResubmitBatchFiles', max: 5 },
+        };
+        // 追加文件进裸 input（DataTransfer 重建 FileList，保留已选文件）+ 触发既有 chip 重渲染
+        function corrAppendFilesToInput(inputId, wrapId, max, files) {
+            const input = document.getElementById(inputId);
+            if (!input) return;
+            const dt = new DataTransfer();
+            Array.from(input.files || []).forEach(f => dt.items.add(f));
+            files.forEach(f => dt.items.add(f));
+            input.files = dt.files;
+            renderPickedChips(inputId, wrapId, max);
+        }
+        // codex S4 复审 LOW-1 采纳：原实现"逐个查、第一个命中就返回"在理论异常态（两个弹窗同时带 open
+        //   class——正常操作路径不可达，但防御性不依赖这点）下会武断地只认第一个，把另一个弹窗内其实
+        //   也可见的候选静默漏判。改为先数清楚有几个 open：恰好 1 个→该弹窗；0 个→返回 null，由共享层
+        //   回落 document（codex S5 复审 L2 统一表述；7 个目标届时都在 display:none 弹窗内，天然 0 候选，
+        //   语义不变）；>1 个→显式空作用域哨兵（不回落 document 顶层去猜，对齐 u-paste.js register()
+        //   文档注明的空作用域契约）。
+        function corrPasteScopeResolver() {
+            const modalIds = ['createModal', 'completeModal', 'resubmitModal', 'attachModal'];
+            const openEls = modalIds.map(id => document.getElementById(id)).filter(el => el && el.classList.contains('open'));
+            if (openEls.length === 1) return openEls[0];
+            if (openEls.length > 1) return { querySelectorAll: () => [] };   // 异常态：多个弹窗同开，不猜顶层
+            return null;   // 均未开：返回 null，由共享层回落 document
+        }
+        function corrInitUPaste() {
+            // codex S5 复审 M1 采纳：一次性哨兵，防未来重复初始化路径重复 register()（详见 Sys_Iteration
+            // siInitUPaste 同款注释）。
+            if (corrInitUPaste._done) return;
+            corrInitUPaste._done = true;
+            if (!window.UPaste) { console.error('[贴图共享层] u-paste.js 未加载'); return; }
+            UPaste.checkVersion(DC_UPASTE_KIT_EXPECTED, 'Data_Correction.html');
+            const selector = Object.keys(CORR_PASTE_RAW_TARGETS).map(k => '#' + k).join(',') + ',#corrAttachPreview';
+            UPaste.register({
+                scopeResolver: corrPasteScopeResolver,
+                selector: selector,
+                keyOf: (el) => el.id,
+                collect: (key, files) => {
+                    if (key === 'corrAttachPreview') { corrAttachCollectFiles(files); renderCorrAttachPreview(); return; }
+                    const t = CORR_PASTE_RAW_TARGETS[key];
+                    if (!t) return;
+                    corrAppendFilesToInput(t.inputId, key, t.max, files);
+                },
+            });
         }
 
         // ================= L5 追加关联单（§6.2 / D-9，admin 主单详情触发）=================
