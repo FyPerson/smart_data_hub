@@ -1720,6 +1720,37 @@ module.exports = (deps) => {
     return { ok: true, value: s };
   }
 
+  // ── ② 期望完成精确到时分（四处优化 D2）：deadline **专用** datetime 校验器 ──────────────────
+  //   ⚠️⚠️ 为什么不直接放宽上面的 normalizeDeadline —— 它是**通用纯日期校验器**，本模块共 12 处调用，
+  //     其中 8 处用在 scheduled_start（计划开工日）/ planned_date / duty_date / date_from / date_to 上，
+  //     这些字段的业务口径就是"只到天"。放宽它 = 一次性把 6 个不该带时分的字段一起放开（计划开工日
+  //     能填 14:30、值班日期能填时分），属跨字段污染。故新建专用函数，normalizeDeadline 原样不动。
+  //   接受：'YYYY-MM-DD'（补 00:00）｜'YYYY-MM-DD HH:MM'｜'YYYY-MM-DDTHH:MM'（datetime-local 原样值）
+  //         ｜'YYYY-MM-DD HH:MM:SS'（截到分钟，兼容 API 直调与历史值）
+  //   输出：统一 'YYYY-MM-DD HH:MM'；空/未传 → { ok:true, value:null }（deadline 选填，沿用旧口径）
+  //   ⚠️ 纯日期补 00:00 只发生在**本次确实提交了该字段**时。四个写入端点都是"未传该字段就不进分支"，
+  //     所以存量纯日期行不会被动（锚点 E2：不伪造精度、不批量刷写；用户再次编辑时自行补时分）。
+  function normalizeDeadlineDT(raw) {
+    if (raw === undefined || raw === null) return { ok: true, value: null };
+    const s = String(raw).trim();
+    if (!s) return { ok: true, value: null };   // 纯空格/空串 = 可选未填（同 normalizeDeadline）
+    // codex 248 M-3：秒位必须**捕获后校验**。原写法 `(?::\d{2})?` 不捕获 ⇒ '14:30:99' 被接受并静默截成
+    //   '14:30'，与错误文案里的"真实时间"自相矛盾，也让调用方误以为那个秒是合法的。
+    const m = /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?$/.exec(s);
+    if (!m) return { ok: false, value: null };
+    const y = Number(m[1]), mo = Number(m[2]), d = Number(m[3]);
+    const hh = m[4] === undefined ? 0 : Number(m[4]);
+    const mi = m[5] === undefined ? 0 : Number(m[5]);
+    const ss = m[6] === undefined ? 0 : Number(m[6]);   // 秒只做合法性校验，不落库（deadline 精度到分钟）
+    // 真实日期回比对：挡 2026-02-30 / 2026-13-01 这类"格式对但日期不存在"（同 normalizeDeadline 范式）
+    const dt = new Date(y, mo - 1, d);
+    if (dt.getFullYear() !== y || dt.getMonth() !== mo - 1 || dt.getDate() !== d) return { ok: false, value: null };
+    // 时分秒范围：正则只锁了"两位数字"，25:00 / 12:70 / 14:30:99 都要靠这里挡
+    if (hh > 23 || mi > 59 || ss > 59) return { ok: false, value: null };
+    const pad = (n) => String(n).padStart(2, '0');
+    return { ok: true, value: `${m[1]}-${m[2]}-${m[3]} ${pad(hh)}:${pad(mi)}` };
+  }
+
   // ============================================================
   // 二·四·五、sys 状态机串行化 mutex（C4.5，照 collab collabExporterTransitionMutex 范式 server.js:15203）
   //   背景：生产单 sqlite3 连接 parallel 模式下，并发请求的 BEGIN IMMEDIATE 会交错 → nested-transaction
@@ -2898,9 +2929,10 @@ module.exports = (deps) => {
         return res.status(400).json({ error: '来源必填（业务方/内部/生产故障）', code: 'SOURCE_REQUIRED', allowed: ['业务方', '内部', '生产故障'] });
       }
       const priority = (b.priority && ['P0', 'P1', 'P2', 'P3'].includes(b.priority)) ? b.priority : 'P2';
-      // deadline 校验（codex 14 M-2）
-      const dl = normalizeDeadline(b.deadline);
-      if (!dl.ok) return res.status(400).json({ error: '预期完成日期格式非法（应为 YYYY-MM-DD 真实日期）', code: 'INVALID_DEADLINE' });
+      // deadline 校验（codex 14 M-2；四处优化 D2 起改用 datetime 版——**四个写 deadline 的端点必须同口径**，
+      //   否则会出现"建单能填到分钟、一改范围/一编辑就被拒"的分裂）
+      const dl = normalizeDeadlineDT(b.deadline);
+      if (!dl.ok) return res.status(400).json({ error: '期望完成格式非法（应为 YYYY-MM-DD 或 YYYY-MM-DD HH:MM 的真实时间）', code: 'INVALID_DEADLINE' });
       // ── 角色权限重构 C0（方案 v1.5 §4-C0）：受理门焊死 ──────────────────────────────────────
       //   ⭐ 全类型建单**必经受理**（bug/feature/improvement），intake_required 由服务端恒定为 1，
       //     落态恒「待受理」——不再由 admin 勾选决定（原「需对接人受理」checkbox 随本 commit 从前端移除）。
@@ -4204,7 +4236,50 @@ module.exports = (deps) => {
                 -- 非 NULL（历史事实不会消失）——前端必须叠加 status='已暂缓' 才能渲染，本列本身不做状态门控
                 -- （同 has_current_tech_lead_comment 范式：SQL 只出数，状态语义交给前端/调用方判断）。
                 (SELECT MAX(created_at) FROM sys_issue_timeline
-                   WHERE issue_id = sys_issues.id AND action_code = 'hold') AS last_held_at
+                   WHERE issue_id = sys_issues.id AND action_code = 'hold') AS last_held_at,
+                -- C1（commit号两列 20260803·锚点 D4）：前端/后端 commit 编码聚合。
+                --   ⚠️ 值协议 = JSON 数组字符串（如 '["a3f9c21","1c5d883"]'），非分隔符拼接明文，两条理由：
+                --   ① 前端要显示「首条 + 等 N 条」（D3）必须拿到数组才能算 N，拼好的串算不出；
+                --   ② commit_ref 是 1-200 字符自由文本、无"禁分号"约束，分隔符拼接不可逆——与上方 4177
+                --      注释记录的 89 号审 LOW-1（dev_roster_names 人名含逗号被 split 错拆）是同一个坑。
+                --   内层子查询先 ORDER BY 再聚合（json_group_array 同 GROUP_CONCAT 一样不支持直接 ORDER BY）；
+                --   id ASC = 录入顺序，与发布快照 snapshotReleaseCommitsInTxn 的 ORDER BY id ASC 同源。
+                --   零命中返回合法空数组 '[]'（非 NULL，SQLite 对 json_group_array 空集的既有特例，同 4180 注释）。
+                --   ⚠️ 刻意不关联 sys_issue_dev_assignees：成员被移除（removed_at 非空）后其 commit 仍要显示
+                --   ——commit 是已发生的事实，与快照 §8「查全部现存行（含 removed 实例）」同口径。
+                --   ⚠️ 本段注释禁用反引号——整条 SQL 在 JS 模板字符串内，反引号会提前终止字符串（本次已踩）。
+                --   ⭐ 末次合并审（codex 246 MED-1）补元素级过滤：本查询原样聚合 commit_ref，而 C2 的
+                --   refsByComponent（批次详情侧）只收非空字符串 ⇒ 同一张脏数据单，本端点出 '[null]' /
+                --   '["   "]'，批次详情出 '[]'，**两个后端端点的 raw 契约不一致**；前端 helper 恰好把两者
+                --   过滤成同样显示，所以单页冒烟全绿、问题被掩盖。这是"C2 收口时加了过滤却没回头同步 C1"
+                --   的漏法（同 feedback_pattern_sweep_not_symptom_list：修同类问题要按模式扫全仓，
+                --   不能只修被点名的那一处）。此处与 refsByComponent 的 JS 规则对齐。
+                --   ⚠️ 必须写 trim(X, chars) 的双参形式：SQLite 的单参 trim(X) 只去空格，而 JS 的
+                --   String.trim() 去所有空白（含 Tab/LF/CR）——写成单参会让「Tab+换行+空格」这类值
+                --   在 SQL 侧留下、JS 侧滤掉，两端口径依然不一致（本次实测踩到：X1b 交叉断言在修了
+                --   单参版之后仍然红，才暴露这个语义差异）。char(32/9/10/13)=空格/Tab/LF/CR。
+                --   ⚠️ 口径边界（复审 246-B rec-3 精确化）：本过滤是 **ASCII whitespace 防御**，不是
+                --   "完全等价 JS String.trim()"——后者还覆盖 \v \f NBSP FEFF 及多类 Unicode 空格。
+                --   对 commit 编码这种字段继续扩到完整 Unicode 空白属过度设计，除非产品契约明确要求等同。
+                --   ⚠️ 另注：本表的 CHECK 用的也是**单参 trim**，故 Tab/LF 类空白值**本就能合法写入**
+                --   （length(trim(<Tab><LF><空格>))=3>0）⇒ 这类脏值不限于历史数据，当前写入端即可产生。
+                --   ⚠️ 本段注释禁写反斜杠转义序列（如 反斜杠t、反斜杠n）——整条 SQL 在 JS 模板字符串内，
+                --   它们会被 JS 先转义成真实控制字符，换行会**截断 -- 注释**、后半句落进 SQL 正文
+                --   报 syntax error（本次已踩；与本文件上方"注释禁用反引号"同源，都是模板字符串的坑）。
+                (SELECT json_group_array(commit_ref) FROM (
+                   SELECT commit_ref FROM sys_issue_dev_commits
+                    WHERE issue_id = sys_issues.id AND component = 'frontend'
+                      AND commit_ref IS NOT NULL
+                      AND trim(commit_ref, char(32) || char(9) || char(10) || char(13)) <> ''
+                    ORDER BY id ASC
+                 )) AS frontend_commit_refs,
+                (SELECT json_group_array(commit_ref) FROM (
+                   SELECT commit_ref FROM sys_issue_dev_commits
+                    WHERE issue_id = sys_issues.id AND component = 'backend'
+                      AND commit_ref IS NOT NULL
+                      AND trim(commit_ref, char(32) || char(9) || char(10) || char(13)) <> ''
+                    ORDER BY id ASC
+                 )) AS backend_commit_refs
            FROM sys_issues
           ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
           ORDER BY id DESC`,
@@ -5173,8 +5248,8 @@ module.exports = (deps) => {
             if (!['P0', 'P1', 'P2', 'P3'].includes(b.priority)) { await sysRollback(); return res.status(400).json({ error: '优先级非法（P0-P3）', code: 'INVALID_PRIORITY' }); }
             val = b.priority;
           } else if (f === 'deadline') {
-            const dl = normalizeDeadline(b.deadline);
-            if (!dl.ok) { await sysRollback(); return res.status(400).json({ error: '预期完成日期格式非法（YYYY-MM-DD 真实日期）', code: 'INVALID_DEADLINE' }); }
+            const dl = normalizeDeadlineDT(b.deadline);   // 四处优化 D2：同建单口径（到分钟）
+            if (!dl.ok) { await sysRollback(); return res.status(400).json({ error: '期望完成格式非法（YYYY-MM-DD 或 YYYY-MM-DD HH:MM 的真实时间）', code: 'INVALID_DEADLINE' }); }
             val = dl.value;   // 规范化串或 null
           } else if (f === 'needs_feasibility') {
             // 0/1 + type guard（同建单：仅 feature/improvement 可设 1·L-2 输入收窄）
@@ -6471,8 +6546,8 @@ module.exports = (deps) => {
       const rawDeadline = (req.body || {}).deadline;
       const trimmedDeadline = (rawDeadline === undefined || rawDeadline === null) ? '' : String(rawDeadline).trim();
       if (trimmedDeadline) {
-        const dl = normalizeDeadline(trimmedDeadline);
-        if (!dl.ok) return res.status(400).json({ error: '预期完成日期格式非法（YYYY-MM-DD 真实日期）', code: 'INVALID_DEADLINE' });
+        const dl = normalizeDeadlineDT(trimmedDeadline);   // 四处优化 D2：同建单口径（到分钟）
+        if (!dl.ok) return res.status(400).json({ error: '期望完成格式非法（YYYY-MM-DD 或 YYYY-MM-DD HH:MM 的真实时间）', code: 'INVALID_DEADLINE' });
         dlValue = dl.value;
       }
       const actor = sysActor(req);
@@ -6542,8 +6617,8 @@ module.exports = (deps) => {
       const source = (typeof b.source === 'string' ? b.source.trim() : '');
       if (!['业务方', '内部', '生产故障'].includes(source)) return res.status(400).json({ error: '来源必填（业务方/内部/生产故障）', code: 'SOURCE_REQUIRED' });
       const priority = (b.priority && ['P0', 'P1', 'P2', 'P3'].includes(b.priority)) ? b.priority : 'P2';
-      const dl = normalizeDeadline(b.deadline);
-      if (!dl.ok) return res.status(400).json({ error: '预期完成日期格式非法', code: 'INVALID_DEADLINE' });
+      const dl = normalizeDeadlineDT(b.deadline);   // 四处优化 D2：同建单口径（到分钟）
+      if (!dl.ok) return res.status(400).json({ error: '期望完成格式非法（应为 YYYY-MM-DD 或 YYYY-MM-DD HH:MM 的真实时间）', code: 'INVALID_DEADLINE' });
       // [⑤ §4 双描述·Q2 合并] derive_reason 取代旧 derive_note：既落新单 derive_reason 列、又作 derive timeline summary。
       //   必填范围（Q1）= 仅 bug 语境（origin.type='bug'），feature→feature 派生保持选填——精判在事务内（需 origin.type）。
       const deriveReason = (typeof b.derive_reason === 'string' ? b.derive_reason.trim() : '');
@@ -7576,6 +7651,32 @@ module.exports = (deps) => {
     return { members: degradedMembers, source: 'degraded', degraded: true, unavailable_fields: [...unavailable], duplicate_release_published: dupPubIds, duplicate_release_published_conflict: conflictPubIds };
   }
 
+  // ── C2（commit号两列 20260803·锚点 D1/D5）：从 getReleaseMembers() 的 member.commits 派生单组 commit 编码。
+  //   三分支的 commits 形状（已逐一核实，非推测）：
+  //     live      → 恒数组（`WHERE issue_id IN (...) ORDER BY id ASC` 批量查后按 issue 分组，无匹配为 []）
+  //     snapshot  → 恒数组（入口处 `!Array.isArray(parsed.commits)` 已判 degraded，能走到这里必是数组）
+  //     degraded  → **可能是 null**（载荷整条不可用 :7581 / commits 非数组 :7590，两处都同时把 'commits'
+  //                 加进 unavailable_fields）
+  //   ⚠️ 因此 commits 非数组时**返回 null 而不是 []**：degraded 的「读不出来」与正常的「这单没有 commit」
+  //     是两件事，用同一个 [] 表示会让前端无法区分，等于伪造了"该单确实没提交代码"这个事实——违反
+  //     §6.6a「降级路径不伪造字段」（同 :7430 注释精神）。前端另可查 unavailable_fields 是否含 'commits'。
+  //   ⚠️ 返回**真数组**（非 JSON 字符串）——与列表端点 GET /sys-issues 的 frontend_commit_refs 是字符串
+  //     形态**刻意不同**：那边受 SQL 层限制只能出 JSON 文本，这边是 JS 层派生，再 stringify 让前端 parse
+  //     是无意义的序列化往返。前端共享 helper 统一接受"已解析的数组"，由各调用方负责把自己的形态解析好。
+  //   顺序：commits 本身已按 id ASC（live 的 SQL 排序 / 快照写入时的 ORDER BY id ASC），filter 保序，
+  //     故派生结果天然是录入顺序，与列表端点同源。
+  //   ⚠️ 元素级校验（codex 审 242 risks-2 收口）：只收 commit_ref 为**非空字符串**的元素。degraded 分支的
+  //     commits 来自 timeline 载荷，是脏数据兜底路径——若某元素缺 commit_ref，不加这道过滤会 map 出
+  //     `undefined`、JSON 序列化成 `null`，前端渲染出空白或字面量 "null"。丢弃坏元素而非整组判空：
+  //     同组里的好元素仍是真实事实，不该被一个坏元素连坐（与"不伪造字段"不冲突——那条管的是
+  //     "读不出来别说成空"，这条管的是"别把读不出来的单个元素冒充成一个 ref"）。
+  function refsByComponent(commits, component) {
+    if (!Array.isArray(commits)) return null;
+    return commits
+      .filter(c => c && c.component === component && typeof c.commit_ref === 'string' && c.commit_ref.trim() !== '')
+      .map(c => c.commit_ref);
+  }
+
   // ── §6.9 release_type 类型派生：从 getReleaseMembers() 的返回结果派生，不回落读当前任务表/存量
   //   release_type 列——那一列已"停止作为可写事实"（§6.9，本函数是它的读端替代）。三值：
   //   `{category:'single', type:'bug'|'feature'|'improvement'}` / `{category:'mixed', type:null}` /
@@ -7946,8 +8047,15 @@ module.exports = (deps) => {
       //   前端 siOpenBatchDetail 渲染逻辑（Sys_Iteration.html:~3508-3512）本就只消费 id/type/title/status
       //   四个字段，未读这四列，故删除它们对现有前端**零回归**（已用 grep 核对该渲染函数体，非猜测）。
       const gm = await getReleaseMembers(rel);
+      // C2（commit号两列·锚点 D1）：成员清单补前端/后端 commit 编码两列——执行人上线时需要知道每张待上线
+      //   单该发哪些 commit（本端点判权已含批次执行人，他看到的 issues 天然只有本批成员，无需额外过滤）。
+      //   ⚠️ 已发布批次的值来自**发布快照**（getReleaseMembers 的 snapshot 分支），不回查 live 表——
+      //   发布后开发仍可 add/edit/delete commit，回查会让"这批当时发的是什么"漂移（锚点 D5）。
+      //   degraded 时 refsByComponent 返回 null（不伪造 []），且 gm.unavailable_fields 已含 'commits'。
       const issues = gm.members.map(m => ({
         id: m.issue_id, type: m.type, title: m.title_snapshot, status: m.status_at_publish,
+        frontend_commit_refs: refsByComponent(m.commits, 'frontend'),
+        backend_commit_refs: refsByComponent(m.commits, 'backend'),
       }));
       // [C9 任务C·codex 207 审 MED-3 防御，二次收口新增 duplicate_release_published_conflict] 两个诊断
       //   字段与 unavailable_fields 同级暴露——仅 degraded 源可能非空（脏数据兜底诊断），live/snapshot
@@ -10580,6 +10688,7 @@ module.exports = (deps) => {
     normalizeSysDatetime,
     truncToMinute,
     normalizeDeadline,
+    normalizeDeadlineDT,   // 四处优化 D2②：deadline 专用 datetime 校验器（与上一行**并存**——上一行是纯日期字段的共用校验器，勿合并）
     // C3b：附件基础设施（verify-sys-attachments require 真实逻辑）
     sysPersistAttachments,
     sysRollbackPersisted,

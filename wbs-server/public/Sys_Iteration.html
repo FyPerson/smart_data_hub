@@ -115,6 +115,12 @@
         .si-flag.blocked { color: #b91c1c; }
         .si-flag.lineage { color: #9ca3af; font-weight: 500; }
         .si-muted { color: #9ca3af; }
+        /* commit号两列 C3（20260803·D3/D13）：新增列的宽度约束——列表已 11 列贴着 1920，加 3 列必须省着用。
+           si-commit-cell 用等宽字体（commit 编码是 hash/路径，等宽更好认）+ 不换行省纵向空间；
+           si-col-narrow 给「计划开工」列（D13：大部分为空，不该占显要宽度）。 */
+        .si-commit-cell { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; white-space: nowrap; max-width: 168px; overflow: hidden; text-overflow: ellipsis; }
+        .si-col-narrow { width: 92px; white-space: nowrap; }
+        .si-commit-unfilled { font-style: italic; }
 
         /* 优先级=风险等级 口径说明 icon（C2，20260713）：建单/排期表单 label 后附可聚焦 ? 提示 */
         .si-help { display: inline-flex; align-items: center; justify-content: center; width: 15px; height: 15px; margin-left: 4px; border-radius: 50%; background: #e2e8f0; color: #64748b; font-size: 11px; font-weight: 700; cursor: help; vertical-align: middle; }
@@ -189,8 +195,28 @@
         .si-att-item { display: flex; align-items: center; gap: 8px; padding: 6px 0; font-size: 12.5px; border-bottom: 1px dashed #f1f5f9; }
         .si-att-item:last-child { border-bottom: none; }
         .si-att-item a.si-att-name { color: #2563eb; cursor: pointer; }
-        .si-att-item .si-att-del { color: #dc2626; cursor: pointer; font-size: 11px; margin-left: auto; }
+        .si-att-item .si-att-del { color: #dc2626; cursor: pointer; font-size: 11px;}
         .si-att-meta { color: #9ca3af; font-size: 11px; }
+        /* commit号两列 C5（20260803·D1）：批次详情成员行的前端/后端 commit 编码。
+           行是 flex（.si-att-item），故给固定上限宽度 + 省略号，避免长 ref 把状态徽章挤出可视区；
+           完整清单仍可悬停 title 看（siRenderCommitRefs 两个分支都挂了 title）。 */
+        .si-batch-commit { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.5px; max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 0 1 auto; }
+        .si-batch-commit-k { color: #9ca3af; margin-right: 3px; font-family: inherit; }
+        /* 四处优化 D3（codex 249 MED-1 收口）：把「一个分组 + 它自己的复制按钮」包成不可拆分单元。
+           ⚠️ 诊断修正：codex 担心的是"父容器换行导致按钮与分组分离"——但 .si-att-item 是 flex 且
+           **没有 flex-wrap**（默认 nowrap），换行不会发生，那条具体场景不成立。
+           核实时发现的**真问题是间距均匀**：行级 gap:8px 让前端按钮左右等距，视觉上它属于前端
+           还是后端是模糊的，而 title 要悬停才看得见 —— 这恰恰是 D3 commit 里「位置紧邻各自分组
+           即语义」这一声称的前提，原实现并没有保证它。
+           修法：wrapper 内部 gap 3px、wrapper 之间仍 8px，归属靠**间距差**表达（Playwright 有
+           几何断言锁住"到自己分组的距离 < 到隔壁分组的距离"）；顺带把"未来有人给行加
+           flex-wrap"这个变数一并挡住。 */
+        .si-batch-side { display: inline-flex; align-items: center; gap: 3px; min-width: 0; flex: 0 1 auto; }
+        /* C5b（D10）：一键复制按钮 + 行内就地反馈（不飘旗·对齐 v1.111.0 范式） */
+        .si-batch-copy { cursor: pointer; font-size: 11.5px; color: #6b7280; user-select: none; flex: 0 0 auto; padding: 0 2px; }
+        .si-batch-copy:hover { color: #2563eb; }
+        .si-batch-copied { color: #16a34a; }
+        .si-batch-copyfail { color: #dc2626; }
         .si-upload-box { margin-top: 8px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 
         /* 操作区已 harmonize → u-action-bar（base 见 components.css）；shared .u-action-bar 无 align-items，本页原
@@ -210,6 +236,11 @@
         #siBatchOverlay { z-index: 1100; }
         .si-modal { background: #fff; border-radius: 12px; width: 500px; max-width: 94vw; max-height: 90vh; overflow-y: auto; box-shadow: 0 20px 50px rgba(0,0,0,.25); }
         .si-modal.wide { width: 720px; }
+        /* 四处优化 D4（E7）：只放大上线单管理弹窗，**不改 .si-modal.wide 通用类**（值班排班面板也用它，
+           内容是窄表格，跟着变宽反而空旷）。合同：宽 clamp(720px, 78vw, 1280px)、max-height 92vh。
+           下限 720px = 原 .wide 宽度，防窄视口下反而比改造前更窄（codex 250 MED-1）。
+           验收范围 = PC 桌面 1280/1440/1920 三档，由 [T21] 逐档锁定；决策推理见 codex审查记录 250。 */
+        #siBatchBox { width: clamp(720px, 78vw, 1280px); max-height: 92vh; }
         .si-modal-head { padding: 16px 22px; border-bottom: 1px solid #eef2f7; font-size: 15px; font-weight: 700; display: flex; justify-content: space-between; align-items: center; }
         .si-modal-head .si-close { cursor: pointer; font-size: 22px; color: #94a3b8; line-height: 1; background: none; border: none; }
         .si-modal-body { padding: 18px 22px; }
@@ -466,7 +497,7 @@
                 <select id="siFStatus" onchange="siResetStatFilterAndLoadList()"><option value="">全部状态</option></select>
                 <select id="siFSystem" onchange="siLoadList()"><option value="">全部系统</option></select>
                 <select id="siFPriority" onchange="siLoadList()">
-                    <option value="">全部优先级（风险）</option>
+                    <option value="">全部优先级</option>
                     <option value="P0">P0</option><option value="P1">P1</option>
                     <option value="P2">P2</option><option value="P3">P3</option>
                 </select>
@@ -486,15 +517,27 @@
                         <tr>
                             <th class="u-sortable" data-sort-by="id">ID<span class="u-sort-icon">⇅</span></th>
                             <th class="u-sortable" data-sort-by="type">类型<span class="u-sort-icon">⇅</span></th>
-                            <th class="u-sortable" data-sort-by="priority">优先级（风险）<span class="u-sort-icon">⇅</span></th>
+                            <th class="u-sortable" data-sort-by="priority">优先级<span class="u-sort-icon">⇅</span></th>
                             <th class="u-sortable" data-sort-by="status">状态<span class="u-sort-icon">⇅</span></th>
                             <th class="u-sortable" data-sort-by="title">标题<span class="u-sort-icon">⇅</span></th>
                             <th class="u-sortable" data-sort-by="system_name">系统 · 模块<span class="u-sort-icon">⇅</span></th>
                             <th class="u-sortable" data-sort-by="assigned_to_name">开发<span class="u-sort-icon">⇅</span></th>
                             <th class="u-sortable" data-sort-by="created_by_name">建单人<span class="u-sort-icon">⇅</span></th>
-                            <th class="u-sortable" data-sort-by="scheduled_start">计划开工日<span class="u-sort-icon">⇅</span></th>
-                            <th class="u-sortable" data-sort-by="dev_estimated_at">预计完成时间<span class="u-sort-icon">⇅</span></th>
+                            <!-- D1（四处优化①）：表头文案「预计完成时间」→「预计完成」——与右侧「期望完成」等字长（各 4 字），
+                                 消除相邻两个时间列宽度参差。**只改列表页表头**，详情页 kv-item 的「预计完成时间」不动（锚点 E1）。 -->
+                            <th class="u-sortable" data-sort-by="dev_estimated_at">预计完成<span class="u-sort-icon">⇅</span></th>
+                            <!-- D11：期望完成 = deadline（建单时填的业务方期望），与左侧 dev_estimated_at（开发回填的
+                                 承诺）是两个字段。后端零改动——deadline 早已在列表端点 SELECT 里返回，只是此前无列。 -->
+                            <th class="u-sortable" data-sort-by="deadline">期望完成<span class="u-sort-icon">⇅</span></th>
+                            <!-- D3：commit 编码两列**刻意不挂 u-sortable**——值是 JSON 数组字符串，按串排序得到的
+                                 顺序无任何业务含义（'["b"]' < '["a","c"]' 之类），给用户一个点了没意义的入口反而误导。
+                                 样式上少个 ⇅ 图标是可接受代价，见锚点 §9 待追认。 -->
+                            <th>前端号</th>
+                            <th>后端号</th>
                             <th class="u-sortable" data-sort-by="created_at">创建时间<span class="u-sort-icon">⇅</span></th>
+                            <!-- D13：计划开工日移到末列 + 缩宽——用户业务判断「管理层目前对排期尚无深刻认知，
+                                 该列大部分为空」，占第 9 位的显要位置不合理；顺带给新增列腾出宽度。 -->
+                            <th class="u-sortable si-col-narrow" data-sort-by="scheduled_start">计划开工<span class="u-sort-icon">⇅</span></th>
                         </tr>
                     </thead>
                     <tbody id="siTbody"></tbody>
@@ -1138,6 +1181,21 @@
         created_by_name: 'string',
         scheduled_start: 'date',
         dev_estimated_at: 'date',
+        // ⚠️ deadline **刻意登记为 'string' 而非 'date'**（四处优化 D2②，实测定标，勿"顺手改回 date"）：
+        //   共享层 compareByType 的 'date' 分支用 `new Date(v).getTime()`，而 JS 对 'YYYY-MM-DD' 按 **UTC
+        //   午夜**解析、对 'YYYY-MM-DD HH:MM' 按**本地时区**解析——差 8 小时。② 改造后 deadline 必然新旧
+        //   混存（E2：存量 7 行保持纯日期不刷写；E3：新值一律带时分），实测 `new Date('2026-08-10')` 比
+        //   `new Date('2026-08-10 00:00')` 晚 **8 小时** ⇒ 纯日期会被排到"当天 00:00-08:00 的带时分值"之后。
+        //   改用 'string' 走 localeCompare：对**零填充 + 空格分隔**的 ISO 8601 值，其顺序与时间序一致，
+        //   且纯日期是同日带时分值的**前缀** ⇒ 天然排在前面（"没填时分的当天"早于"当天 14:30"，业务上也对）。
+        //   ⚠️ 这个等价**有前提**（codex 248 LOW-1 修正措辞）：locale collation 并不等同于严格的字符码比较，
+        //   它在此成立依赖「所有值零填充、统一空格分隔」这条不变量 —— 由 normalizeDeadlineDT 单点把守
+        //   （verify 有源码守卫断言写 deadline 的地方都经它）。若将来混进 '2026-8-1' 或 'T' 分隔的值，
+        //   字典序会错位。排序断言已锁同日纯日期/同日早时分/跨日/空值四类顺序。
+        //   为什么不改共享的 unify-helpers.js：它是四页共享静态资源，改它要 bump 缓存串且波及另外三页。
+        deadline: 'string',      // C3（commit号两列 D11）：新增「期望完成」列——⚠️ 漏登记会让该列排序拿不到
+                                 //   类型、退化成非日期序（同下方 SI_STATUS_SORT_ORDER 注释记的同款踩法）。
+                                 //   Playwright [T8] 已加通用守卫：每个 u-sortable 的 data-sort-by 必须在本表里。
         created_at: 'date',
     };
     // 状态业务序（与 siRenderStats 分组方向一致：进行中→待验收→待上线→已完成→暂缓/拒绝；已作废排末尾）
@@ -1230,7 +1288,7 @@
     function renderSysIterationRows(list) {
         const tb = document.getElementById('siTbody');
         if (!list.length) {
-            tb.innerHTML = `<tr><td colspan="11" class="si-empty">${isAdmin() ? '暂无数据' : '暂无指派给你的单据'}</td></tr>`;   // 11 列（加计划开工日列后 +1·codex 审 MED）
+            tb.innerHTML = `<tr><td colspan="14" class="si-empty">${isAdmin() ? '暂无数据' : '暂无指派给你的单据'}</td></tr>`;   // 14 列（11 + 期望完成/前端号/后端号 三列·D11+D3·计划开工日仅移位不增减）
             return;
         }
         tb.innerHTML = list.map(i => {
@@ -1250,11 +1308,118 @@
                 <td>${esc(i.system_name)}<span class="si-muted"> · ${esc(i.module_name || '—')}</span></td>
                 <td>${siDevRosterCellHtml(i)}</td>
                 <td>${esc(i.created_by_name || '—')}</td>
-                <td>${i.scheduled_start ? esc(i.scheduled_start) : '<span class="si-muted">—</span>'}</td>
                 <td>${i.dev_estimated_at ? esc(siFmtDT(i.dev_estimated_at)) : '<span class="si-muted">—</span>'}</td>
+                <td>${i.deadline ? esc(i.deadline) : '<span class="si-muted">—</span>'}</td>
+                <td class="si-commit-cell">${siRenderCommitRefs(i.frontend_commit_refs, i.status)}</td>
+                <td class="si-commit-cell">${siRenderCommitRefs(i.backend_commit_refs, i.status)}</td>
                 <td class="si-muted">${esc(siFmtDT(i.created_at))}</td>
+                <td class="si-col-narrow">${i.scheduled_start ? esc(i.scheduled_start) : '<span class="si-muted">—</span>'}</td>
             </tr>`;
         }).join('');
+    }
+
+    // ── commit 编码渲染（C3·commit号两列 20260803·锚点 D3/D6 + codex 242 rec-3 类型锁）──────────────
+    // ⚠️ 输入形态**刻意有两种**（后端两个端点的产出不同，各自有理由，见 routes/sys-iteration/index.js 注释）：
+    //     GET /sys-issues       → JSON 数组字符串 '["a3f9c21","1c5d883"]'（SQL 层 json_group_array 只能出文本）
+    //     GET /sys-releases/:id → 真数组 ['a3f9c21'] 或 null（JS 层派生，再 stringify 是无意义的序列化往返）
+    //   codex 242 rec-3 提醒：同名字段跨端点类型不同，未来抽通用列表/排序/导出时**容易漏 parse 或重复 parse**
+    //   （代价=渲染空白 / JSON.parse(array) 异常 / 类型判断分支扩散）。故把归一化收敛到这一个入口，
+    //   **签名在此锁死**：`string | array | null | undefined  ->  array | null`
+    //   —— 返回 `null` 专表「读不出来」（degraded），`[]` 专表「确实没有」，两者不得互相冒充。
+    function siNormalizeCommitRefs(raw) {
+        if (raw == null) return null;                    // degraded：后端已显式给 null，不猜
+        const keep = (a) => a.filter(x => typeof x === 'string' && x.trim() !== '');
+        if (Array.isArray(raw)) return keep(raw);
+        if (typeof raw !== 'string') return null;        // 非预期类型 → 当不可用，不静默塌成空
+        const s = raw.trim();
+        // ⭐ codex 审 243 MED-2：空串 → null（不是 []）。契约规定列表端点出的是 **JSON 数组字符串**，
+        //   零命中也是 '[]' 而非空串（SQL json_group_array 的空集特例）；因此空串属**畸形/读不出来**，
+        //   返回 [] 会把它冒充成「确实没有」——正是本 helper 声称要杜绝的两态混淆。
+        if (s === '') return null;
+        try {
+            const parsed = JSON.parse(s);
+            return Array.isArray(parsed) ? keep(parsed) : null;
+        } catch (_) { return null; }                     // 解析失败 → 不可用（不冒充"没有"）
+    }
+
+    // 三态 + 收起渲染（D3/D6）：
+    //   null        → 「不可用」（degraded 读不出来；与「没有」必须可辨——镜像本页既有「（标题不可用）」范式）
+    //   [] + 待上线 → 「未填」（提醒执行人：要么这单不发代码，要么开发忘填了；空白格子传达不了这个）
+    //   [] + 其他   → 「—」
+    //   ≤2 条       → 全量、分号隔开
+    //   >2 条       → 首条 + 「等 N 条」，原生 title 悬停看完整清单（对齐 v1.113.0 优先级 tooltip 纯 title 范式）
+    //   title 里用 join('\n')：esc() 只转 & < > " '，不动换行符，故属性值内保留真实换行，浏览器 tooltip 多行显示。
+    function siRenderCommitRefs(raw, issueStatus) {
+        const arr = siNormalizeCommitRefs(raw);
+        if (arr === null) return '<span class="si-muted" title="降级读源：commit 记录不可用">不可用</span>';
+        if (arr.length === 0) {
+            return issueStatus === '待上线'
+                ? '<span class="si-muted si-commit-unfilled" title="该单待上线但未回填 commit 编码——可能不涉及代码变更，也可能是开发忘填">未填</span>'
+                : '<span class="si-muted">—</span>';
+        }
+        // ⭐ codex 审 243 LOW-1：≤2 条也要挂 title——td 有 `max-width:168px + ellipsis`，完整 SHA/路径式 ref
+        //   会被**视觉截断**且无从查看，那样「≤2 条全量显示」就只是名义上的全量。
+        const full = esc(arr.join('\n'));
+        if (arr.length <= 2) return `<span title="${full}">${esc(arr.join('; '))}</span>`;
+        return `<span title="${full}">${esc(arr[0])} <span class="si-muted">等${arr.length}条</span></span>`;
+    }
+
+    // ── C5b（commit号两列·D10/D10.1/D10.2）：一键复制本单 commit 编码 ──────────────────────
+    //   动机：执行人上线时要把 commit 号抄到部署工具/汇报里；且 D3 的「首条 + 等N条」会收起一部分，
+    //   复制正好补上"拿到完整清单"这一环（title 只能看不能取）。
+    //   ⚠️ 复制内容取自 siNormalizeCommitRefs 的**完整数组**，不是屏幕上被收起/被 ellipsis 截断的文本。
+    //   ⚠️⚠️ 四处优化 D3（E5）改为**单组**签名：原 (feRaw, beRaw) 产出「前端: a; b\n后端: c」两行带前缀，
+    //   而上线现场的动作是——前端 commit 贴进一个窗口、后端贴进另一个，前缀和另一组都得手工删掉。
+    //   现在前端 / 后端各自一个按钮，各复制**纯编号**，多条仍用 '; ' 分隔（如 'fe-1a2b3c4; fe-5d6e7f8'）。
+    //   ⚠️ 入参是**已归一化的数组**（或 null），不是 raw（codex 249 LOW-2 收口）：调用方 batchCommitBlock
+    //   本来就要 siNormalizeCommitRefs 一次来取 title 与条数，再让本函数内部解析第二次，既多余、又给
+    //   "title 显示 N 条而复制出 M 条"留了漂移的口子。改成共用同一份 arr，天然一致。
+    function siBuildCommitCopyText(refs) {
+        return (refs && refs.length) ? refs.join('; ') : '';   // 该组空/不可用 → ''，调用方据此不渲染该侧按钮（D10.1）
+    }
+    // 抄 Model_Center.html:12427 的实现范式（**不是** import——该函数是那个页面的页内私有函数，
+    //   共享层没有；本项目单文件应用范式下页内自持一份，行为与之逐字一致）。
+    //   ⚠️ 生产是 HTTP（192.168.1.100:3000）= **非安全上下文**，navigator.clipboard 不可用，
+    //   实际必走 execCommand 回退分支；localhost 测试环境反而走 Clipboard API 分支（见 §已知限制）。
+    function siCopyToClipboard(text) {
+        if (navigator.clipboard && window.isSecureContext) return navigator.clipboard.writeText(text);
+        return new Promise((resolve, reject) => {
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.style.position = 'fixed'; ta.style.left = '-9999px'; ta.style.top = '-9999px';
+            document.body.appendChild(ta);
+            ta.focus(); ta.select();
+            try {
+                const okc = document.execCommand('copy');
+                document.body.removeChild(ta);
+                okc ? resolve() : reject(new Error('execCommand copy failed'));
+            } catch (err) { document.body.removeChild(ta); reject(err); }
+        });
+    }
+    // 行内就地反馈（不飘旗）——对齐 v1.111.0「查询已读行内就地反馈废飘旗」的项目范式。
+    // ⭐ codex 审 245 LOW-1（latest-wins）：原实现不清前次状态、不取消前一个还原定时器 ⇒ 连点会让
+    //   成功/失败两个 class **并存**（`.si-batch-copyfail` 按 CSS 顺序胜出，于是「✓ 已复制」显示成红色），
+    //   且**旧定时器会提前还原新结果**的反馈窗口。修法用本项目既有范式：自增令牌 + 清理前次状态，
+    //   只让最新一次的定时器有权还原（见 [[feedback_async_callback_session_token]]：条件比对堵竞态是
+    //   打地鼠，令牌把数据/控件/副作用一次圈进同一次会话生命周期）。
+    let siCopySeq = 0;
+    async function siCopyBatchCommits(el, text) {
+        const restore = el.getAttribute('data-label') || '📋';
+        const my = ++siCopySeq;
+        el.__copySeq = my;
+        if (el.__copyTimer) { clearTimeout(el.__copyTimer); el.__copyTimer = null; }
+        el.classList.remove('si-batch-copied', 'si-batch-copyfail');   // 先清干净，杜绝两态并存
+        let okFlag = false;
+        try { await siCopyToClipboard(text); okFlag = true; } catch (_) { okFlag = false; }
+        if (el.__copySeq !== my) return;                                // 已被更新的一次点击接管，本次静默退出
+        el.textContent = okFlag ? '✓ 已复制' : '✗ 复制失败';
+        el.classList.add(okFlag ? 'si-batch-copied' : 'si-batch-copyfail');
+        el.__copyTimer = setTimeout(() => {
+            if (el.__copySeq !== my) return;                            // 只有最新一次有权还原
+            el.textContent = restore;
+            el.classList.remove('si-batch-copied', 'si-batch-copyfail');
+            el.__copyTimer = null;
+        }, 1600);
     }
 
     function siFmtDT(v) {
@@ -2859,7 +3024,7 @@
 
     function siModalEstimate(iss) {
         siModal(iss.dev_estimated_at ? '修改预计完成' : '回填预计完成', [
-            fDateTime('dev_estimated_at', '预计完成时间', siToLocalInput(iss.dev_estimated_at)),
+            fDateTime('dev_estimated_at', '预计完成时间', siToLocalInput(iss.dev_estimated_at), true),   // D2：第 4 参=必填星号（本字段真必填，闸门①）
             note('⚠️ 闸门①：必须先回填预计完成时间才能提交交付；时间不能早于指派时刻。')
         ], async v => {
             if (!v.dev_estimated_at) { showToast('请填写预计完成时间', 'error'); return false; }
@@ -2873,7 +3038,7 @@
         siModal('可行性评估', [
             fSelect('conclusion', '评估结论', ['可行', '有条件可行', '不可行'], '可行'),
             fTextarea('requirement_confirm', '需求确认', '', true, '必填：对需求的理解与确认，≤500'),
-            fDateTime('dev_estimated_at', '预计完成时间', siToLocalInput(iss.dev_estimated_at)),
+            fDateTime('dev_estimated_at', '预计完成时间', siToLocalInput(iss.dev_estimated_at), true),   // D2：第 4 参=必填星号（本字段真必填，闸门①）
             fTextarea('risk', '风险/前置条件', '', false, '「有条件可行 / 不可行」时必填，≤1000'),
             note('⚠️ 本单需可行性评估：评估通过（可行/有条件可行）后方可继续提交交付。')
         ], async v => {
@@ -2899,13 +3064,30 @@
         // B 档按流分档（§6.1·codex C3 审 L-3）：变更流看「开发中」、bug 流看「处理中」——不用无条件 OR
         //   （虽然两态在状态机里互斥，同 or 结果一致，但按流精判更贴合后端 EDIT_TIER_B_CHANGE/EDIT_TIER_B_BUG 的语义，不依赖"两态互斥"这条隐含前提）。
         const isDevTier = isChangeFlow ? (iss.status === '开发中') : (iss.status === '处理中');
+        // ⭐ codex 248 HIGH-1：存量 deadline 是纯日期，预填要补 T00:00（否则控件空着、保存即静默清空原值），
+        //   但**预填 ≠ 该写回库**。保存体若无条件带上 deadline，用户只改标题、根本没碰这个字段，也会把
+        //   库里的 '2026-08-10' 被动改写成 '2026-08-10 00:00' —— 这正是 E2 要防的"伪造精度"。
+        //   故记下预填值，提交时做 dirty 比对：没改就**不传该字段**（后端 `if (!(f in b)) continue` 跳过）。
+        //   ⚠️ 首版的 [D1] 断言测的是"未传 deadline 时后端保留"，可前端编辑路径**永远会传** ——
+        //   等于用测试证明了一条用户走不到的路径，这条 dirty 判断才是把它接到真实路径上。
+        const deadlinePrefill = siDeadlineToLocalInput(iss.deadline);
+        // codex 248-B MED-1：**非空但控件承载不了**的脏值（既非 'YYYY-MM-DD HH:MM' 也非 'YYYY-MM-DD'，
+        //   只可能来自直接 SQL / 迁移，四个端点都被 normalizeDeadlineDT 挡着）会让 prefill 落空 ⇒ 控件是空的。
+        //   此时若照常走 dirty 比对，用户"留空以清除脏值"会被判为未改动而不提交，**脏值永远清不掉**。
+        //   故：不可显示时任何提交（含留空）都放行。⚠️ 注意与"本来就没值"区分——那种情况 prefill 也是 ''，
+        //   但 rawDeadline 为空，留空提交本就该 no-op。
+        const rawDeadline = (iss.deadline == null || String(iss.deadline).trim() === '') ? '' : String(iss.deadline).trim();
+        const deadlineUnrenderable = !!rawDeadline && !deadlinePrefill;
         const fields = [
             fText('title', '标题', iss.title || '', true, '必填'),
             fTextarea('description', '需求描述', iss.description || '', false, ''),
             fSelectMap('system_name', '所属系统', systems, iss.system_name, null),
             fText('module_name', '模块', iss.module_name || '', false, ''),
             fSelect('priority', '优先级', ['P0', 'P1', 'P2', 'P3'], iss.priority || 'P2'),
-            fDate('deadline', '预期完成日期', iss.deadline || ''),
+            // 四处优化 D2②（锚点 E4 编辑窗同步改）：控件升 datetime-local + 预填走 deadline 专用 helper。
+            //   顺带统一叫法——本处原为「预期完成日期」，是与建单「期望完成时间」、列表页「期望完成」
+            //   并存的**第三种叫法**，且改到分钟后"日期"二字与控件自相矛盾。
+            fDateTime('deadline', '期望完成（选填；填则需精确到分钟）', deadlinePrefill),
             fText('requester_dept', '需求方部门', iss.requester_dept || '', false, ''),
             fText('requester_name', '需求方姓名', iss.requester_name || '', false, ''),
             fText('requester_phone', '需求方电话', iss.requester_phone || '', false, ''),
@@ -2918,9 +3100,18 @@
             // 白名单字段·空串后端 trim 归 null（自由文本）；needs_feasibility 转 0/1。deadline 空串=清除。
             const body = {
                 title: v.title.trim(), description: v.description, system_name: v.system_name,
-                module_name: v.module_name, priority: v.priority, deadline: v.deadline,
+                module_name: v.module_name, priority: v.priority,
                 requester_dept: v.requester_dept, requester_name: v.requester_name, requester_phone: v.requester_phone,
             };
+            // ⭐ codex 248 HIGH-1 的 dirty 判断（理由见上方 deadlinePrefill 处注释）：
+            //   与预填值逐字相同 = 用户没碰过 → **整个字段不进 body**，存量纯日期原样留在库里；
+            //   改了（含清空成 '' ）才提交 —— 'T' → 空格由 siFromLocalInput 转，空串仍表示清除（口径未变）。
+            //   `deadlineUnrenderable` 分支见上：脏值不可显示时无条件放行，否则清不掉。
+            //   ⚠️ **已知限制（codex 248-B LOW-1，E13 单控件方案的固有性质，不是缺陷）**：本判断比的是
+            //   「最终值 vs 打开时的预填值」，因此**区分不了"没碰过"与"看了一眼、确认就用 00:00"**——
+            //   两者最终值都等于 prefill，都不提交。结果都是库里保持纯日期，符合 E2「不伪造精度」；
+            //   若将来业务确实需要"显式确认 00:00"，得另加 input/change 事件的 dirty 标记，届时再议。
+            if (deadlineUnrenderable || v.deadline !== deadlinePrefill) body.deadline = siFromLocalInput(v.deadline);
             if (isChangeFlow && !isDevTier) body.needs_feasibility = Number(v.needs_feasibility) === 1 ? 1 : 0;
             const r = await siApi('/sys-issues/' + iss.id + '/edit-in-revision', { method: 'POST', body });
             if (!r.ok) { siApiErr(r); return false; }
@@ -3493,7 +3684,13 @@
             // 建单优化批 C3b（方案 §6c 设计点7）：需求方区提示——三项全部留空时服务端整组固化默认值，
             // 填写任一项则整组按提交值落库（不逐字段混填默认，防"业务方姓名+建单人电话"错配组合）。
             note('需求方部门/姓名/电话：留空默认建单人 / 信息技术部；填写任一项则三项均按你的填写落库。'),
-            fDate('deadline', '期望完成时间（选填）', ''),
+            // 四处优化 D2②：date → datetime-local，业务方说的「10 号下午 3 点前」有地方填了。
+            //   不传第 4 参 = 不渲染必填星号（本字段**选填**，不填就是不填）。
+            //   ⚠️ 文案口径（E13·codex 248 HIGH-2 后用户拍板）：`datetime-local` 要么空、要么完整时分，
+            //   **没有"只选日期"这个中间态**，所以写「填则需精确到分钟」而不是「可精确到分钟」——
+            //   后者会让用户以为能只挑日期，点开发现不行。后端仍接受纯日期，但那是 API 直调 / 旧客户端 /
+            //   存量兼容面，不是本控件的主路径。
+            fDateTime('deadline', '期望完成（选填；填则需精确到分钟）', ''),
             fText('related_correction_no', '关联修正单号（选填，BUG 类用）', '', false, '软引用触发本次迭代的数据修正单（OA号/修正单ID），不联动不跳转，仅留痕'),
             fCheckbox('needs_feasibility', '需要可行性评估（开发进入后先做可行性评估）', false),
             fCheckbox('oa_exempt', '本单无需 OA 号（内部自发/未走 OA 立项流程）', true),
@@ -3523,7 +3720,7 @@
             if (v.requester_dept.trim()) body.requester_dept = v.requester_dept.trim();
             if (v.requester_name.trim()) body.requester_name = v.requester_name.trim();
             if (v.requester_phone.trim()) body.requester_phone = v.requester_phone.trim();
-            if (v.deadline) body.deadline = v.deadline;
+            if (v.deadline) body.deadline = siFromLocalInput(v.deadline);   // D2：'T' → 空格分隔
             if (v.related_correction_no && v.related_correction_no.trim()) body.related_correction_no = v.related_correction_no.trim();   // ④a §7 软关联
             if (v.needs_feasibility) body.needs_feasibility = 1;
             // 建单优化批 C3b（方案 §6c 设计点3）：checkbox 是权威声明，服务端只认提交值——即便未勾选也
@@ -4246,7 +4443,7 @@
                 : `<span class="si-muted" title="降级读源：类型不可用">类型不可用</span>`;
             const titleHtml = i.title != null ? esc(i.title) : '<span class="si-muted">（标题不可用）</span>';
             const statusHtml = i.status
-                ? `<span class="u-status-badge si-s-${siStatusClass(i.status)}" style="margin-left:auto">${esc(siStatusDisplay(i.status))}</span>`
+                ? `<span class="u-status-badge si-s-${siStatusClass(i.status)}" style="margin-right:0;margin-left:auto">${esc(siStatusDisplay(i.status))}</span>`
                 : `<span class="si-muted" style="margin-left:auto" title="降级读源：发布时状态不可用">状态不可用</span>`;
             // [C9 前端块·codex 206 审 MED-1 防御] degraded 分支的 issue_id 来自 timeline 表列（恒非空整数，
             // 已核实 unavailable_fields 只含载荷字段不含 issue_id 本身，`#null` 场景实际不可达）——仍做防御：
@@ -4262,9 +4459,41 @@
             //   替代：admin 分支 reason 可选，执行人分支 reason 必填，故走各自的入口/弹窗，不复用同一个 onclick。
             const executorRemoveBtn = (planning && idOk && uid && Number(rel.release_assignee_id) === uid && ns === 'sent')
                 ? `<button class="u-btn-secondary u-btn-sm" onclick="siRemoveFromBatchExecutorModal(${id},${issueId},${siJsStringAttr(i.title || '')})">移出</button>` : '';
+            // C5（commit号两列·D1）：执行人上线时要知道每张待上线单该发哪些 commit。
+            //   值由后端 refsByComponent 派生：**已发布批次取自发布快照**（不回查 live 表，D5），
+            //   degraded 时为 null → siRenderCommitRefs 显示「不可用」，与"确实没有"可辨。
+            //   放在状态徽章之前——statusHtml 带 margin-left:auto 会把其后元素一并右推。
+            //   ⭐ codex 审 244 MED-1：**title 必须挂在真正被截断的那个元素上**。ellipsis 发生在
+            //   `.si-batch-commit` 外层，而 helper 的 title 在它内部；悬停到「前端」标签等内层非 helper
+            //   区域时就看不到完整清单，与"完整清单仍可悬停 title 看"的注释不符。故外层用
+            //   siNormalizeCommitRefs 再算一次挂上（内层保留，冗余但无害，两处都能命中）。
+            // ⭐ 四处优化 D3（E5/E6）：复制按钮由「整单一个」拆成「前端、后端**各一个**」，且各自只复制
+            //   **编号本身**（不带「前端: 」前缀）——上线现场是把前端 commit 贴进一个窗口、后端贴进另一个，
+            //   原来那份带前缀的两行文本，粘完还得手工删前缀、删另一组。
+            //   按钮跟着各自分组走，因此空态判断也天然按组独立：该组为空 / 不可用 → copyText 为 ''
+            //   → **不渲染该侧按钮**（沿用 D10.1 口径：给个点了没反应的按钮，比没有按钮更糟）。
+            //   两个按钮都用 📋 图标：位置紧邻各自分组即语义，换成两种图标反而多一层记忆负担；
+            //   区分靠 title（「复制前端 commit 编码（N 条）」）与 data-side。
+            const batchCommitBlock = (raw, label) => {
+                const arr = siNormalizeCommitRefs(raw);
+                const t = (arr && arr.length) ? ` title="${esc(arr.join('\n'))}"` : '';
+                //   复制内容取自完整数组，不受「等N条」收起与 ellipsis 影响；**共用同一份 arr**，
+                //   title 的条数与实际复制内容天然一致（codex 249 LOW-2）。
+                const copyText = siBuildCommitCopyText(arr);
+                //   label 当前只由本文件两个调用点传入字面量，非接口数据；但签名长得像通用 helper，
+                //   属性位统一走 esc 免得将来有人传进外部数据（codex 249 LOW-1，防御性而非现存漏洞）。
+                const safeLabel = esc(label);
+                const btn = copyText
+                    ? `<span class="si-batch-copy" data-label="📋" data-side="${safeLabel}" title="复制${safeLabel} commit 编码（${arr.length} 条，含被「等N条」收起的部分）" onclick="event.stopPropagation();siCopyBatchCommits(this,${siJsStringAttr(copyText)})">📋</span>`
+                    : '';
+                //   .si-batch-side 包裹：让「分组 + 它的按钮」成为不可拆分单元，归属靠内外 gap 差表达（见 CSS 注释）
+                return `<span class="si-batch-side"><span class="si-batch-commit"${t}><span class="si-batch-commit-k">${safeLabel}</span>${siRenderCommitRefs(raw, i.status)}</span>${btn}</span>`;
+            };
+            const commitHtml = batchCommitBlock(i.frontend_commit_refs, '前端') + batchCommitBlock(i.backend_commit_refs, '后端');
             return `<div class="si-att-item">
             ${typeHtml}
             ${idLinkHtml}
+            ${commitHtml}
             ${statusHtml}
             ${planning && idOk && isAdmin() ? `<span class="si-att-del" onclick="siRemoveFromBatch(${id},${issueId})">移除</span>` : ''}
             ${executorRemoveBtn}
@@ -4598,7 +4827,12 @@
     //   时不渲染 placeholder 属性，零行为变化（向后兼容追加，非破坏性改动）。
     function fTextarea(k, l, v, req, hint, placeholder) { return { k, html: `<div class="u-form-group"><label>${l}${req ? ' <span class="u-req">*</span>' : ''}</label><textarea id="f_${k}"${placeholder ? ` placeholder="${esc(placeholder)}"` : ''}>${esc(v || '')}</textarea>${hint ? `<div class="u-hint">${hint}</div>` : ''}</div>` }; }
     function fDate(k, l, v) { return { k, html: `<div class="u-form-group"><label>${l}</label><input type="date" id="f_${k}" value="${esc(v || '')}"></div>` }; }
-    function fDateTime(k, l, v) { return { k, html: `<div class="u-form-group"><label>${l} <span class="u-req">*</span></label><input type="datetime-local" id="f_${k}" value="${esc(v || '')}"></div>` }; }
+    // 四处优化 D2：加第 4 参 req（与 fText/fTextarea **同构**——不传 = 不必填）。原实现把必填星号硬编码在
+    //   label 里，而「期望完成」是选填字段，直接复用会给用户一个假的必填标记。
+    //   ⚠️ 刻意**不**设计成 `req = true` 的默认必填（那样零改既有调用点更省事）：同族 helper 的第 4 参语义
+    //     必须一致，否则以后有人照 fText 的直觉调 fDateTime 会静默丢掉星号。既有两处 dev_estimated_at
+    //     调用（真必填）随本次补传 true。
+    function fDateTime(k, l, v, req) { return { k, html: `<div class="u-form-group"><label>${l}${req ? ' <span class="u-req">*</span>' : ''}</label><input type="datetime-local" id="f_${k}" value="${esc(v || '')}"></div>` }; }
     function fSelect(k, l, opts, cur) { return { k, html: `<div class="u-form-group"><label>${l}</label><select id="f_${k}">${opts.map(o => `<option value="${esc(o)}" ${cur === o ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select></div>` }; }
     function fSelectMap(k, l, opts, cur, labelMap) { return { k, html: `<div class="u-form-group"><label>${l} <span class="u-req">*</span></label><select id="f_${k}">${opts.map(o => `<option value="${esc(o)}" ${cur === o ? 'selected' : ''}>${esc(labelMap && labelMap[o] || o)}</option>`).join('')}</select></div>` }; }
     function fUserSelect(k, l, exclude) {
@@ -4801,6 +5035,23 @@
         // 后端存 'YYYY-MM-DD HH:MM' 或 'YYYY-MM-DD HH:MM:SS' → datetime-local 需 'YYYY-MM-DDTHH:MM'
         const m = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})/.exec(String(v));
         return m ? (m[1] + 'T' + m[2]) : '';
+    }
+    // deadline **专用**的预填 helper（四处优化 D2 / codex 248 M-2 收口）。
+    //   为什么单独一个而不是给上面的 siToLocalInput 加分支：`siToLocalInput` 是**通用 datetime helper**，
+    //   `dev_estimated_at`（开发回填的承诺时间）两处回填弹窗也在用。给它加纯日期兼容分支，会让承诺
+    //   时间的脏纯日期值从"控件空着"变成"静默固化为午夜"——把一个不完整的承诺伪装成精确到分钟的承诺。
+    //   ⚠️ 同一条原则后端已经执行过一次：`normalizeDeadline`（纯日期字段共用）不放宽，另建
+    //   `normalizeDeadlineDT`。首版前端却把分支塞进了共用 helper，两边执行不一致，本次对齐。
+    //   deadline 存量是纯日期（E2 不刷写），编辑窗预填必须补 T00:00——否则控件空着，用户没动该字段
+    //   点保存就会静默清空原值。
+    //   ⚠️ 措辞校准（codex 248-B LOW-3）：这里的 00:00 **只是控件的承载值**，不代表库里已有分钟精度，
+    //   也**不等于"用户借这次编辑补了时分"**——只有最终值不同于打开时的预填值才会写回库
+    //   （见 siModalEditInRevision 的 dirty 判断·codex 248 HIGH-1）。
+    function siDeadlineToLocalInput(v) {
+        const dt = siToLocalInput(v);
+        if (dt) return dt;
+        const d = /^(\d{4}-\d{2}-\d{2})$/.exec(String(v || '').trim());
+        return d ? (d[1] + 'T00:00') : '';
     }
     function siFromLocalInput(v) {
         if (!v) return '';
