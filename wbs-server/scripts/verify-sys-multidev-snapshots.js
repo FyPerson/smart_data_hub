@@ -382,7 +382,8 @@ async function main() {
     await mkMember(id, 5, '开发甲', 'no_code');
     let r = await call('POST', `/api/sys-issues/${id}/hold`, adminTok, { reason: '短暂搁置' });
     assert.strictEqual(r.status, 200, `S37：hold 应 200, got ${r.status} ${JSON.stringify(r.body)}`);
-    r = await call('POST', `/api/sys-issues/${id}/resume`, adminTok, {});
+    // ⭐ [bug暂缓方案 20260803 v0.4 口径 #1] resume requiredPayload 从 [] 改 ['reason']，补传 reason
+    r = await call('POST', `/api/sys-issues/${id}/resume`, adminTok, { reason: 'S37：验证 resume 进待上线不产快照' });
     assert.strictEqual(r.status, 200, `S37：resume 应 200, got ${r.status} ${JSON.stringify(r.body)}`);
     assert.strictEqual(r.body.status, '待上线', 'S37：resume 恢复到待上线（roster 满足原门，不降级）');
     const cnt = await get('SELECT COUNT(*) c FROM sys_issue_release_commit_snapshots WHERE issue_id=?', [id]);

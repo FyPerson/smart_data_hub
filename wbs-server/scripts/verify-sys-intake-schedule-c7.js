@@ -32,12 +32,22 @@ const ok = (m) => { passed++; console.log('  ✓ ' + m); };
 const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'Sys_Iteration.html'), 'utf8');
 
 // siDoAction switch 里的 case 列表（含受理排期新增）——从 siDoAction 函数体截取，避免误抓其他 switch。
+//   ⚠️ S4（bug暂缓方案 20260803 v0.4）踩坑记录：窗口原为 4000 字符，resume case 的行为说明注释（codex 238
+//   risk-1 取舍记录）把函数体真实长度推到 ~4333 字符，超出窗口后 `end` 搜不到真实结尾（indexOf 返 -1），
+//   `body` 退化为"整段 4000 字符原样"——'derive' 等位于窗口之外的合法 case 因此被静默漏扫，误报"无
+//   siDoAction case（死按钮）"（实际 case 完好，纯粹是扫描器窗口不够长）。教训：固定字符窗口这类"应该
+//   够用"的魔数会随函数体注释自然增长而失效，且失败姿态是**静默截断**而非报错，很容易被误判成真实
+//   实现缺陷去排查生产代码。修法两层：① 窗口放宽到 20000（当前真实长度的 4倍+ 余量）② 找不到真实结尾
+//   时不再静默回退到"整段截断"，改为显式断言失败，把"窗口需要再调大"变成一条指向本行注释的清晰报错，
+//   而不是下游一个看似无关的 action 名字的误导性断言。
 function extractDoActionCases(src) {
   const start = src.indexOf('function siDoAction(action)');
   assert.ok(start > 0, 'siDoAction 函数存在');
-  const seg = src.slice(start, start + 4000);   // 函数体足够短
+  const WINDOW = 20000;
+  const seg = src.slice(start, start + WINDOW);
   const end = seg.indexOf('\n    }');   // 函数结束
-  const body = seg.slice(0, end > 0 ? end : seg.length);
+  assert.ok(end > 0, `siDoAction 函数体未在 ${WINDOW} 字符窗口内找到结尾——函数体又变长了，请调大本文件 extractDoActionCases 的 WINDOW 常量（勿静默截断，否则窗口外的合法 case 会被误判为死按钮）`);
+  const body = seg.slice(0, end);
   const cases = new Set();
   const re = /case\s+'([^']+)':/g; let m;
   while ((m = re.exec(body))) cases.add(m[1]);

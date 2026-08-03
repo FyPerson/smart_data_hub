@@ -2,10 +2,12 @@
 //   用法：node scripts/verify-sys-bug-transitions.js
 //
 // 覆盖（真实 HTTP 端点 + 常量层双面）：
-//   [M] meta/常量：bug 状态集 10 态（含受理门 + C6 新增「已关闭」终态·§6.5）/ 初始态 / 动作集恰好 22 个
+//   [M] meta/常量：bug 状态集 11 态（含受理门 + C6 新增「已关闭」终态·§6.5 + bug暂缓方案 20260803 v0.4
+//       新增「已暂缓」·§4.1）/ 初始态 / 动作集恰好 24 个
 //       （v1.6 §2.3 退场 set_release_flag/publish/confirm-online-norelease 三条 + 新增 assign-release-dev/
-//       execute-release 两条上线编排 + 受理门 6 条 + set_scheduled_start + C6 新增 close/reopen 两条；
-//       仍无 hold/评估三动作/scope_change/schedule）+ isDevWorkState 单元 +
+//       execute-release 两条上线编排 + 受理门 6 条 + set_scheduled_start + C6 新增 close/reopen 两条 +
+//       bug暂缓方案新增 hold/resume 两条（原"有意省略暂缓"设计已推翻）；
+//       仍无 评估三动作/scope_change/schedule）+ isDevWorkState 单元 +
 //       REQUIRES_ASSIGNEE_STATUSES（含 [C6] 已关闭锁定）+ RELEASABLE_TYPES ② 恢复含 bug 铁证
 //   [E] 端点链路：建单落待处理 → schedule 拒（前段裁剪）→ assign 直达处理中 → submit 闸门（缺 est/空 summary）
 //       → estimate → submit → 待验证 → return（return_count++/清 est）→ 二轮 → accept → 待上线
@@ -178,7 +180,10 @@ async function main() {
     const meta = T.buildMeta();
     // 受理排期改造 §4.1/§4.3：bug 状态集 7→9 态（加「待受理/待修改」受理门·bug 也走受理门·用户拍板）。
     // [C6·方案 v3.4 §6.5] 9→10 态：补「已关闭」归档终态（原"已上线即终态"设计作废）。
-    assert.deepStrictEqual(meta.statusLabels.bug, ['待受理', '待修改', '待处理', '处理中', '待验证', '待上线', '已上线', '已关闭', '已拒绝', '已作废'], 'bug 状态集 10 态（含受理门 + C6 已关闭）');
+    // ⭐ [bug暂缓方案 20260803 v0.4 §4.1] 10→11 态：补「已暂缓」——bug 流原"无暂缓（有意省略）"设计已被本
+    //   方案推翻，兑现 `bug流_方案_20260702_v1.0.md:68` 当年留的预留口子。顺序须与 transitions.js
+    //   BUG_FLOW_STATUSES 实际声明顺序一致（statusLabels 直接透传 ALLOWED_STATUSES，非重排）。
+    assert.deepStrictEqual(meta.statusLabels.bug, ['待受理', '待修改', '待处理', '处理中', '待验证', '待上线', '已上线', '已关闭', '已暂缓', '已拒绝', '已作废'], 'bug 状态集 11 态（含受理门 + C6 已关闭 + bug暂缓方案已暂缓）');
     // 受理排期改造 §9：initialStatusesByType 新形状（bug 受理→待受理·无受理→待处理）。
     assert.strictEqual(meta.initialStatusesByType.bug.with_intake, '待受理', 'bug 受理模式初始态=待受理');
     assert.strictEqual(meta.initialStatusesByType.bug.without_intake, '待处理', 'bug 无受理初始态=待处理');
@@ -186,15 +191,24 @@ async function main() {
     // [v1.6 退场] set_release_flag/publish/confirm-online-norelease 移除，新增 assign-release-dev/execute-release。
     // 受理排期改造 §4.3：bug 也走受理门 → 加 6 个受理门动作（intake_accept/intake_return/resubmit_intake/edit_in_revision/request_tech_consult/change_intake_mode）+ set_scheduled_start（H2 bug 亦支持）→ 13+7=20 个。
     // [C6·方案 v3.4 §6.5] 20→22 个：新增 close/reopen（归档+重开，与变更流同构条目）。
+    // ⭐ [bug暂缓方案 20260803 v0.4 §4.2] 22→24 个：新增 hold/resume（bug 流原"有意省略暂缓"设计已被本
+    //   方案推翻，见下方 banned 清单同步更正）。
     assert.deepStrictEqual(bugActions,
       ['accept', 'assign', 'assign-release-dev', 'change_intake_mode', 'close', 'create', 'derive', 'edit_in_revision', 'estimate', 'execute-release',
-       'intake_accept', 'intake_return', 'issue_reject', 'reactivate', 'reassign', 'reopen', 'request_tech_consult', 'resubmit_intake',
-       'return', 'set_scheduled_start', 'submit', 'void'].sort(),
-      `bug 动作集恰好 22 个（原 20 + C6 新增 close/reopen），实际 ${bugActions.join(',')}`);
+       'hold', 'intake_accept', 'intake_return', 'issue_reject', 'reactivate', 'reassign', 'reopen', 'request_tech_consult', 'resubmit_intake',
+       'resume', 'return', 'set_scheduled_start', 'submit', 'void'].sort(),
+      `bug 动作集恰好 24 个（原 22 + bug暂缓方案新增 hold/resume），实际 ${bugActions.join(',')}`);
     // [C6 改造] close/reopen 已从"永久禁止"改为"合法新增"——banned 清单收窄，移出这两项（§6.5）。
-    for (const banned of ['hold', 'resume', 'feasibility', 'blocked', 'unblock', 'scope_change', 'schedule',
+    // ⭐ [bug暂缓方案 20260803 v0.4 §4.2·断言写错更正] 原断言锁定的是"bug typeFlows 不应含 hold/resume"——
+    //   这条断言锁的是 bug 流"有意省略暂缓"这个已被本方案明确推翻的旧事实（`bug流_方案_20260702_v1.0.md:68`
+    //   当年"有意省略"本就是留了将来补的口子，本方案兑现该口子）。继续断言"不应含"会把方案要新增的功能
+    //   反过来锁死为 bug——故改为**正向断言应含**，与上方 bugActions 24 个的清单互相印证。
+    for (const shouldContain of ['hold', 'resume']) {
+      assert.ok(bugActions.includes(shouldContain), `bug typeFlows 应含 ${shouldContain}（bug暂缓方案 20260803 v0.4 §4.2 新增）`);
+    }
+    for (const banned of ['feasibility', 'blocked', 'unblock', 'scope_change', 'schedule',
       'set_release_flag', 'publish', 'confirm-online-norelease']) {
-      assert.ok(!bugActions.includes(banned), `bug typeFlows 不应含 ${banned}`);   // v1.6 退场三动作 + ⑤ 后 derive 移出 banned；schedule 退场后 bug 亦无；hold/resume 有意省略（§2.2）
+      assert.ok(!bugActions.includes(banned), `bug typeFlows 不应含 ${banned}`);   // v1.6 退场三动作 + ⑤ 后 derive 移出 banned；schedule 退场后 bug 亦无
     }
     const assignReleaseDevEntry = meta.typeFlows.bug.find(t => t.action === 'assign-release-dev');
     assert.strictEqual(assignReleaseDevEntry.kind, 'side_effect', 'assign-release-dev 应标 side_effect（不改 status，SIDE_EFFECT_ACTIONS 白名单）');
@@ -219,7 +233,7 @@ async function main() {
     assert.strictEqual(meta.actions.set_release_flag, '填发版信息', 'set_release_flag 标签保留（历史 timeline 渲染）');
     assert.strictEqual(meta.actions['confirm-online-norelease'], '确认上线（不发版）', 'confirm-online-norelease 标签保留');
     assert.ok(meta.actions['assign-release-dev'] && meta.actions['execute-release'], '新增两动作标签存在');
-    ok('meta：bug 状态集 10 态（含受理门待受理/待修改 + C6 已关闭）+ 初始态新形状（受理→待受理/无受理→待处理）+ 动作集恰好 22（原 20 + C6 新增 close/reopen）+ close/reopen 元数据形状正确（kind=transition/from/to）+ 仍无 hold/评估三动作/scope_change/schedule + 旧标签保留供历史渲染');
+    ok('meta：bug 状态集 11 态（含受理门待受理/待修改 + C6 已关闭 + bug暂缓方案已暂缓）+ 初始态新形状（受理→待受理/无受理→待处理）+ 动作集恰好 24（原 22 + bug暂缓方案新增 hold/resume）+ close/reopen 元数据形状正确（kind=transition/from/to）+ 现含 hold/resume·仍无评估三动作/scope_change/schedule + 旧标签保留供历史渲染');
   }
   {
     assert.strictEqual(T.isDevWorkState('bug', '处理中'), true, 'bug 处理中=开发工作态');
@@ -363,18 +377,19 @@ async function main() {
     ok('验收通过：二轮（扩容协作解除 LAST_ASSIGNEE + remove/re-add 重置完成态实例 + 全员完成 submit）→ accept → 待上线 + accepted_at（T-M1；C3：round_no/旧 timeline 模型断言随退场）');
   }
 
-  // ═══ [D] 待上线态仍无的动作（②/C6 之后依然如此，非本次范围）═══
+  // ═══ [D] 待上线态下三个动作均无有效边（②/C6/bug暂缓方案之后依然如此，非本次范围）═══
   {
-    // hold 对 bug 恒无 transition（有意省略，§2.2）；close/reopen 现已是 bug 的合法动作（C6·§6.5），
-    // 但各自 from 精确限定为 [已上线]/[已关闭]——mainId 当前在「待上线」，三者均不在其 from 内，
-    // 故仍是 400 INVALID_TRANSITION（本节验证的是"待上线态"这一具体前置状态下的拒绝，非"永久无此动作"）。
+    // ⭐ [bug暂缓方案 20260803 v0.4 §4.1/§4.2 更正] hold 现已是 bug 的合法动作（from: ['处理中']），
+    //   "对 bug 恒无 transition（有意省略）"的旧表述已失效——但「待上线」不在 hold.from 内，故本节验证的
+    //   仍是同一个结论（400 INVALID_TRANSITION），只是理由从"动作不存在"变为"当前前置态非法"，与
+    //   close/reopen 的理由（动作存在但 from 不含待上线）现已完全同构。
     for (const [ep, code] of [['close', 'INVALID_TRANSITION'], ['hold', 'INVALID_TRANSITION'], ['reopen', 'INVALID_TRANSITION']]) {
       const rr = await call('POST', `/api/sys-issues/${mainId}/${ep}`, adminTok, { reason: 'x' });
       assert.strictEqual(rr.status, 400, `bug ${ep} 应 400`);
       assert.strictEqual(rr.body.code, code, `bug ${ep} → ${code}`);
     }
     assert.strictEqual(await statusOf(mainId), '待上线', 'mainId 未被本节改动，仍停在 待上线');
-    ok('待上线态：close/hold/reopen 对 bug 均无有效边 → 400（hold 恒无·close/reopen 现已是合法动作但 from 不含待上线，C6 后仍零回归）');
+    ok('待上线态：close/hold/reopen 对 bug 均无有效边 → 400（三者现均是合法动作但各自 from 不含待上线，hold 从"不存在"改为"前置态非法"同构于 close/reopen，C6+bug暂缓方案后仍零回归）');
   }
 
   // ═══ [R] 上线两路径已退场（v1.6 §2.3 [C-1]，通知改造 C3b）——LEGACY gate × bug/变更流双向矩阵 ═══

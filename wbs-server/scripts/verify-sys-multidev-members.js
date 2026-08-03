@@ -354,7 +354,8 @@ async function main() {
     assert.ok(row.gate_deferred_at, 'S10h：⭐ hold 保留 gate_deferred_at（codex 101 号裁断"合理"——resume 消费）');
     // 关键反例：resume 恢复到开发中（DEV 族），同事务消费 deferred——此时 blocked 已清、feasibility/estimate
     //   仍完好，资格已合格，应原子推进待验证（不再是"unblock 因未受阻被拒、submit 因非 pending 被拒"的死锁）
-    r = await call('POST', `/api/sys-issues/${id}/resume`, adminTok, {});
+    // ⭐ [bug暂缓方案 20260803 v0.4 口径 #1] resume requiredPayload 从 [] 改 ['reason']，补传 reason
+    r = await call('POST', `/api/sys-issues/${id}/resume`, adminTok, { reason: 'S10h：验证 deferred 消费' });
     assert.strictEqual(r.status, 200, `S10h：resume 200, got ${r.status} ${JSON.stringify(r.body)}`);
     assert.strictEqual(r.body.status, '待验证', 'S10h：⭐ resume 响应体反映 GATE 消费后的最终状态=待验证');
     row = await get('SELECT status, gate_deferred_at FROM sys_issues WHERE id = ?', [id]);
@@ -389,7 +390,8 @@ async function main() {
     assert.strictEqual(r.body.main_status, '已暂缓', 'S10i：D_PRE 族加人主状态不动，仍已暂缓');
     // 关键反例：resume 恢复到开发中（DEV 族，roster 现含 1 个新 pending，非全完成态）——runWGate 判定
     //   inDev∧!allComplete，自身清标分支处理，不应误进待验证
-    r = await call('POST', `/api/sys-issues/${id}/resume`, adminTok, {});
+    // ⭐ [bug暂缓方案 20260803 v0.4 口径 #1] resume requiredPayload 从 [] 改 ['reason']，补传 reason
+    r = await call('POST', `/api/sys-issues/${id}/resume`, adminTok, { reason: 'S10i：验证新 pending 打破全完成态' });
     assert.strictEqual(r.status, 200, `S10i：resume 200, got ${r.status} ${JSON.stringify(r.body)}`);
     assert.strictEqual(r.body.status, '开发中', 'S10i：⭐ resume 响应体=开发中（新 pending 打破全完成态，未被误进待验证）');
     row = await get('SELECT status, gate_deferred_at FROM sys_issues WHERE id = ?', [id]);
@@ -440,7 +442,10 @@ async function main() {
     r = await call('POST', `/api/sys-issues/${id}/dev-assignees`, adminTok, { user_ids: [6] });
     assert.strictEqual(r.status, 200, `S10k：暂缓期加新成员应 200, got ${r.status} ${JSON.stringify(r.body)}`);
     // 关键：resume 恢复目标本应是「待上线」（RELEASE 族），但当前 roster=[6:pending]（非全完成）→ 自动降级到「开发中」
-    r = await call('POST', `/api/sys-issues/${id}/resume`, adminTok, {});
+    // ⭐ [bug暂缓方案 20260803 v0.4 口径 #1] resume requiredPayload 从 [] 改 ['reason']，补传 reason
+    // ⚠️ [S1b·M-1] reason 文案刻意不含「自动降级」「待上线」等断言要检查的关键词，防子断言巧合命中掩盖真实缺陷。
+    const s10kResumeReason = 'S10k 降级路径审计留痕验证专用原因';
+    r = await call('POST', `/api/sys-issues/${id}/resume`, adminTok, { reason: s10kResumeReason });
     assert.strictEqual(r.status, 200, `S10k：⭐ resume 应 200（自动降级，不再永久 400 卡死）, got ${r.status} ${JSON.stringify(r.body)}`);
     assert.strictEqual(r.body.status, '开发中', 'S10k：⭐ resume 响应体 status=开发中（降级后的实际落点）');
     assert.strictEqual(r.body.degraded, true, 'S10k：⭐ 响应体标记 degraded=true');
@@ -448,7 +453,11 @@ async function main() {
     const row = await get('SELECT status FROM sys_issues WHERE id = ?', [id]);
     assert.strictEqual(row.status, '开发中', 'S10k：sys_issues.status 落库=开发中');
     const tl = await get(`SELECT summary FROM sys_issue_timeline WHERE issue_id=? AND action_code='resume' ORDER BY id DESC LIMIT 1`, [id]);
-    assert.ok(tl && tl.summary && tl.summary.includes('自动降级') && tl.summary.includes('待上线'), `S10k：timeline summary 备注自动降级+原目标，实际：${tl && tl.summary}`);
+    // ⭐ [S1b·M-1 降级路径审计断言·codex 236 MED-1] 此前只断言「自动降级」+ 原目标两个关键词，未证 reason 原文
+    //   也真落库——降级分支的 summary 拼法是 `恢复到「X」（自动降级，原目标「Y」...）｜原因：<reason>`，三者须
+    //   同时出现在同一条 resume timeline 行里，缺任一都判定失败（防止只改了拼接前半段却漏了 reason 尾巴）。
+    assert.ok(tl && tl.summary && tl.summary.includes('自动降级') && tl.summary.includes('待上线') && tl.summary.includes(s10kResumeReason),
+      `S10k：timeline summary 备注自动降级+原目标+reason 原文三者齐全，实际：${tl && tl.summary}`);
     // 新成员可正常走完估时+提交流程（验证降级后不是"死单"，能正常继续干活）
     r = await call('POST', `/api/sys-issues/${id}/estimate`, devTok(6), { dev_estimated_at: futureEst(36) });
     assert.strictEqual(r.status, 200, `S10k：降级后新成员 estimate 应 200, got ${r.status} ${JSON.stringify(r.body)}`);
@@ -470,7 +479,8 @@ async function main() {
     await mkMember(id, 5, '开发甲', 'no_code');   // 全完成态成员，未换血
     let r = await call('POST', `/api/sys-issues/${id}/hold`, adminTok, { reason: '短暂搁置' });
     assert.strictEqual(r.status, 200, `S10l：hold 200, got ${r.status} ${JSON.stringify(r.body)}`);
-    r = await call('POST', `/api/sys-issues/${id}/resume`, adminTok, {});
+    // ⭐ [bug暂缓方案 20260803 v0.4 口径 #1] resume requiredPayload 从 [] 改 ['reason']，补传 reason
+    r = await call('POST', `/api/sys-issues/${id}/resume`, adminTok, { reason: 'S10l：验证全完成态照旧恢复' });
     assert.strictEqual(r.status, 200, `S10l：resume 应 200, got ${r.status} ${JSON.stringify(r.body)}`);
     assert.strictEqual(r.body.status, '待上线', 'S10l：⭐ roster 满足原门（在册≥1∧全完成）→ 照旧恢复到待上线，不降级');
     assert.ok(!r.body.degraded, 'S10l：⭐ 响应体不含 degraded 标记（未降级路径）');
@@ -495,7 +505,10 @@ async function main() {
     const rosterZero = await get(`SELECT COUNT(*) c FROM sys_issue_dev_assignees WHERE issue_id=? AND removed_at IS NULL`, [id]);
     assert.strictEqual(rosterZero.c, 0, 'S10m：确认此刻零在册');
     // 关键反例：resume 降级到「开发中」后仍被 enteringDev 拦（要求在册≥1，零在册不满足）→ 400
-    r = await call('POST', `/api/sys-issues/${id}/resume`, adminTok, {});
+    // ⭐ [bug暂缓方案 20260803 v0.4 口径 #1] resume requiredPayload 从 [] 改 ['reason']——reason 必填校验
+    //   早于 GATE 判定执行，此处仍须传合法 reason，否则会误命中 RESUME_REASON_REQUIRED 而非本例要验证的
+    //   GATE_INVARIANT，把测试意图打偏。
+    r = await call('POST', `/api/sys-issues/${id}/resume`, adminTok, { reason: 'S10m：验证零在册仍被 GATE 拦' });
     assert.strictEqual(r.status, 400, `S10m：⭐ 零在册 resume 应 400（降级后仍被 enteringDev 拦，合理）, got ${r.status} ${JSON.stringify(r.body)}`);
     assert.strictEqual(r.body.code, 'GATE_INVARIANT', 'S10m：错误码 GATE_INVARIANT');
     const rowStillHeld = await get('SELECT status FROM sys_issues WHERE id = ?', [id]);
@@ -503,7 +516,7 @@ async function main() {
     // 逃生口：暂缓期先加至少 1 名成员，再 resume → 降级成功
     r = await call('POST', `/api/sys-issues/${id}/dev-assignees`, adminTok, { user_ids: [6] });
     assert.strictEqual(r.status, 200, `S10m：补加成员应 200, got ${r.status} ${JSON.stringify(r.body)}`);
-    r = await call('POST', `/api/sys-issues/${id}/resume`, adminTok, {});
+    r = await call('POST', `/api/sys-issues/${id}/resume`, adminTok, { reason: 'S10m：补加成员后验证降级成功' });
     assert.strictEqual(r.status, 200, `S10m：⭐ 补加成员后 resume 应 200（降级成功）, got ${r.status} ${JSON.stringify(r.body)}`);
     assert.strictEqual(r.body.status, '开发中', 'S10m：⭐ 降级到开发中，逃生口生效');
     assert.strictEqual(r.body.degraded, true, 'S10m：响应体标记 degraded=true');

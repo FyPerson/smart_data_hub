@@ -221,21 +221,24 @@ async function main() {
   assert.strictEqual(cf.targetEntity, 'current_issue', 'create targetEntity=current_issue');
   ok('findTransition/resolveToStatus：assign(待指派→开发中) / intake 门流转 / schedule 退场返 null / void 通配 / estimate 旁路 / 待受理不可 assign / create.to=null 机器契约');
 
-  // [6] MED-2（92 号审）+ 93 号收口：reassign 条目 from 与后端 assertMemberActionFamilyAllowed 实际放行集合
-  //   "写读同源"——族清单**直接读后端真源 `_internals.MEMBER_ACTION_FAMILY_MATRIX.reassign`**（index.js 导出），
-  //   再经 status-families.js 展开为状态集合比对。93 号审指出：此前这里手写 ['D_PRE','DEV','VERIFY'] 仍是第二份
-  //   清单——若未来矩阵增删族而 transitions.from 未同步，手写版测试照样通过（防漂移落空）；改读真源后矩阵任何
-  //   变化都会立即被本断言暴露。
+  // [6] MED-2（92 号审）+ 93 号收口 + S2 收敛（bug暂缓方案 20260803 v0.4 §4.5b·codex 236 L-1）：reassign
+  //   条目 from 与后端权威放行集合"写读同源"——族清单**直接读后端真源**（index.js 导出），非本测试重复
+  //   维护的第二份清单，矩阵/覆盖表/transitions.from 任何一侧漂移都会立即被本断言暴露。
+  //   ⭐ S2 变更：族粒度做不到"同族内排除单个状态"（D_PRE.bug 现含【待处理,已暂缓】两态，reassign 要保留
+  //   待处理但排除已暂缓·§4.5b），故改读 `_internals.memberActionAuthoritativeStatuses`（族门展开 -
+  //   MEMBER_ACTION_STATUS_EXCLUDE 状态级排除）而非直接 flatMap 族门——单一函数仍是唯一权威，只是计算
+  //   多了一层排除，本测试不重复实现该排除逻辑（避免第三份副本）。
   // C2c·codex115 MED：reassign 族门改 **type 感知**（memberActionFamiliesFor）——bug 保留 D_PRE(待处理可预指派改派)，
-  //   变更流排除 D_PRE(去主次后 D_PRE 无在册开发)。断言逐 type 读真源 memberActionFamiliesFor('reassign',type)，
-  //   任何一侧漂移（矩阵/type 覆盖/transitions.from）都会立即暴露（防写读不同源）。
+  //   变更流排除 D_PRE(去主次后 D_PRE 无在册开发)。断言逐 type 读真源，任何一侧漂移都会立即暴露（防写读不同源）。
   const famFor = mod._internals.memberActionFamiliesFor;
+  const authoritativeStatusesFor = mod._internals.memberActionAuthoritativeStatuses;
   assert.ok(typeof famFor === 'function', '[6] 后端应导出 type 感知 memberActionFamiliesFor');
-  const reassignAuthoritativeStatuses = (type) =>
-    famFor('reassign', type).flatMap(fam => SF.getFamilyStatuses(type, fam));
-  // 附加同源自证：变更流排除 D_PRE、bug 含 D_PRE（type 覆盖真生效，防覆盖表写错静默回落）
+  assert.ok(typeof authoritativeStatusesFor === 'function', '[6] 后端应导出 memberActionAuthoritativeStatuses（§4.5b 族门-状态级排除唯一权威，S2 新增）');
+  const reassignAuthoritativeStatuses = (type) => authoritativeStatusesFor('reassign', type);
+  // 附加同源自证：变更流排除 D_PRE、bug 族门仍含 D_PRE（type 覆盖真生效，防覆盖表写错静默回落）——
+  //   ⚠️ 族门含 D_PRE ≠「已暂缓」进最终权威集合，S2 起两者分离由状态级排除表控制，见下方 [6b] 负向断言。
   assert.ok(!famFor('reassign', 'feature').includes('D_PRE'), '[6] 变更流(feature) reassign 族门应排除 D_PRE');
-  assert.ok(famFor('reassign', 'bug').includes('D_PRE'), '[6] bug reassign 族门应保留 D_PRE（待处理态预指派后可改派）');
+  assert.ok(famFor('reassign', 'bug').includes('D_PRE'), '[6] bug reassign 族门应保留 D_PRE（待处理态预指派后可改派，不受§4.5b状态级排除影响）');
   for (const type of ['feature', 'improvement', 'bug']) {
     // 直接按 action 取条目（不经 findTransition，避免"用待验证的 from 元素去找 from"这种自我耦合的假阳性——
     // 若 from 漏了某个权威态，findTransition(type,'reassign',那个态) 会返 null，反而让本测试提前误判"条目不存在"
@@ -244,9 +247,21 @@ async function main() {
     assert.ok(t, `[6] ${type} reassign 常量应存在`);
     const expected = reassignAuthoritativeStatuses(type).slice().sort();
     const actual = (t.from || []).slice().sort();
-    assert.deepStrictEqual(actual, expected, `[6] ${type} reassign.from 应与后端 memberActionFamiliesFor('reassign',${type}) 展开状态集合完全一致（写读同源·C2c 变更流去 D_PRE/bug 留待处理），实际 from=${JSON.stringify(actual)} 权威=${JSON.stringify(expected)}`);
+    assert.deepStrictEqual(actual, expected, `[6] ${type} reassign.from 应与后端 memberActionAuthoritativeStatuses('reassign',${type}) 展开状态集合完全一致（写读同源·族门展开-状态级排除），实际 from=${JSON.stringify(actual)} 权威=${JSON.stringify(expected)}`);
   }
-  ok('[6] MED-2/C2c：reassign.from（feature/improvement/bug 三份）与后端 memberActionFamiliesFor type 感知放行集合（变更流去 D_PRE=DEV∪VERIFY / bug 留待处理=D_PRE∪DEV∪VERIFY，动态取自 MEMBER_ACTION_FAMILY_MATRIX + TYPE_OVERRIDE + status-families.js）完全一致，写读同源');
+  ok('[6] MED-2/C2c/S2·§4.5b：reassign.from（feature/improvement/bug 三份）与后端 memberActionAuthoritativeStatuses type 感知放行集合（族门展开 - MEMBER_ACTION_STATUS_EXCLUDE 状态级排除，动态取自 MEMBER_ACTION_FAMILY_MATRIX + TYPE_OVERRIDE + status-families.js）完全一致，写读同源');
+
+  // [6b] ⭐ S2（bug暂缓方案 §4.5b·codex 236 L-1·口径已定死）：负向断言——「已暂缓」不出现在 bug reassign
+  //   的 meta/from 中（声明侧）；族门本身仍含 D_PRE（bug 待处理态改派能力不受影响，与上方 [6] 正向互证，
+  //   双向锁死：只改一边会让 [6] 或 [6b] 其中之一红）。
+  {
+    const bugReassignFrom = (T.transitionsForType('bug').find(x => x.action === 'reassign').from || []);
+    assert.ok(!bugReassignFrom.includes('已暂缓'),
+      `[6b] bug reassign.from 不应含「已暂缓」（§4.5b：暂缓期改派冻结，真闸=HOLD_ROSTER_FROZEN），实际 from=${JSON.stringify(bugReassignFrom)}`);
+    assert.ok(bugReassignFrom.includes('待处理'),
+      '[6b] bug reassign.from 应仍含「待处理」（92 号审既有能力，未被 §4.5b 误伤）');
+  }
+  ok('[6b] bug reassign.from 声明侧不含「已暂缓」+ 仍含「待处理」（S2·§4.5b 双向收窄的声明半侧，行为半侧见 verify-sys-multidev-members 的 HOLD_ROSTER_FROZEN 冻结用例）');
 
   // [7] ⭐ [C6·方案 v3.4 §6.5 附录 B「六族双向集合断言」重跑] 每 type 六个基础族（INTAKE/D_PRE/DEV/VERIFY/
   //   RELEASE/NONRELEASE_TERMINAL，status-families.js BASE_FAMILY_NAMES）的并集须与 transitions.js

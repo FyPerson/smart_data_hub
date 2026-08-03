@@ -166,7 +166,8 @@ async function main() {
         const id = ins.lastID;
         await run(`INSERT INTO sys_issue_timeline (issue_id, event_type, from_status, to_status, action_code, operator_id, operator_name)
           VALUES (?, 'status_change', ?, '已暂缓', 'hold', 1, '管理员')`, [id, legacy]);
-        const r = await call('POST', `/api/sys-issues/${id}/resume`, adminTok, {});
+        // ⭐ [bug暂缓方案 20260803 v0.4 口径 #1] resume requiredPayload 从 [] 改 ['reason']，补传 reason
+        const r = await call('POST', `/api/sys-issues/${id}/resume`, adminTok, { reason: `验证存量暂缓单(${type}/${legacy})恢复映射` });
         assert.strictEqual(r.status, 200, `resume 存量(${type}/${legacy}) 200, got ${r.status} ${JSON.stringify(r.body)}`);
         assert.strictEqual(r.body.status, '待指派', `${type} 历史 hold from_status=${legacy} → resume 映射待指派（实际 ${r.body.status}）`);
       }

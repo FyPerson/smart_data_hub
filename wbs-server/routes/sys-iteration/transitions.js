@@ -88,13 +88,16 @@ const CHANGE_FLOW_STATUSES = [
   '待受理', '待修改', '待指派', '开发中', '待验证', '待上线', '已上线', '已关闭',  // 主流程
   '已暂缓', '已拒绝', '已作废',                                                    // 旁路态（§3.4）
 ];
-// bug 流状态集（bug 方案 §2.2 + 受理排期改造 §4.1 + 上线体统一重构 §6.5）：加「待受理/待修改」(受理门·
-//   用户拍板 bug 也走)、无 已暂缓（暂缓有意省略）。
+// bug 流状态集（bug 方案 §2.2 + 受理排期改造 §4.1 + 上线体统一重构 §6.5 + bug暂缓方案 v0.4 §4.1）：加
+//   「待受理/待修改」(受理门·用户拍板 bug 也走)。⭐ [bug暂缓方案 20260803 v0.4 §4.1] bug 流原"无 已暂缓
+//   （暂缓有意省略）"的设计已被推翻——本方案兑现 `bug流_方案_20260702_v1.0.md:68` 当年留的预留口子，
+//   补上「已暂缓」态（见下方 BUG_FLOW_TRANSITIONS 新增 hold/resume 两条目）。
 //   ⭐ [C6·方案 v3.4 §6.5] 补「已关闭」终态——原"bug 已上线即终态、上线后再出问题一律派生新单"的设计
 //   作废：归档改为全类型统一复用 close（已上线→已关闭），BUG_FLOW_TRANSITIONS 新增 close/reopen 两条目
 //   （见下方，reopen 目标态回「处理中」，与 change 流回「开发中」对称）。
 const BUG_FLOW_STATUSES = [
   '待受理', '待修改', '待处理', '处理中', '待验证', '待上线', '已上线', '已关闭',   // 主流程（已关闭=归档终态，§6.5）
+  '已暂缓',                                                              // ← 新增（bug暂缓方案 20260803 v0.4）
   '已拒绝', '已作废',                                                     // 旁路态
 ];
 const ALLOWED_STATUSES = {
@@ -313,7 +316,10 @@ const CHANGE_FLOW_TRANSITIONS = [
     action: 'resume',                       // 暂缓恢复：已暂缓 → 暂缓前活跃态（admin，timeline 可解析，H-1/RC-M2）
     from: ['已暂缓'], to: null,             // to 动态解析（resolveToStatus，从 timeline 取暂缓前 from_status）
     roleGuard: 'admin', ownerGuard: null,
-    requiredPayload: [],
+    // ⚠️ [行为变更] requiredPayload 从 [] 改为 ['reason']（bug暂缓方案 20260803 v0.4 口径 #1：两流 resume
+    //   统一必填理由——bug 流新增的 resume 条目本就理由必填，变更流不能是"同名动作两套契约"）。既有调用方
+    //   （前端弹窗 + verify 脚本）须同步补传 reason，否则 400（方案 §10.3 回归清单）。
+    requiredPayload: ['reason'],
     sideEffects: ['恢复到最近一次进入暂缓前的活跃态（校验属当前 type 合法活跃态，否则 409）'],
     timelineEvent: 'status_change', actionCode: 'resume',
     notifyAfterCommit: null,
@@ -527,6 +533,14 @@ const BUG_FLOW_TRANSITIONS = [
     //   (D_PRE)——bug 待处理态可经 add 预指派/reactivate(已拒绝→待处理)带 roster，reassign 声明式改派是既有合法能力
     //   （92 号审有意保留），**不随变更流去 D_PRE 一并收窄**（矩阵一刀切会误伤 bug）。故 bug from 含待处理，与后端
     //   memberActionFamiliesFor('reassign','bug')=基础矩阵（含 D_PRE）同源；变更流侧才排除 D_PRE（type 覆盖）。
+    // ⭐⭐ [bug暂缓方案 20260803 v0.4 §4.5b·S2 收敛·codex 236 L-1 口径已定死] S1 曾把「已暂缓」补进本
+    //   from（status-families.js 把 bug D_PRE 扩到 ['待处理','已暂缓']后，reassign 族门运行时已覆盖该态，
+    //   S1 阶段不补会让 verify-sys-meta.js [6] 写读同源断言永红）——**S2 落地冻结守卫后已按方案收敛移出**：
+    //   真闸 = index.js assertRosterNotFrozen（bug+已暂缓 → 409 HOLD_ROSTER_FROZEN，§4.5）；声明与运行时
+    //   族门的同步收窄 = index.js MEMBER_ACTION_STATUS_EXCLUDE.reassign.bug=['已暂缓']（族粒度做不到"同族内
+    //   排除单状态"，故加此状态级排除表，叠在 D_PRE 族门之上——族门本身仍含 D_PRE 以保留「待处理」）。
+    //   verify-sys-meta.js [6] 的 authoritative 计算已改为直接消费 memberActionAuthoritativeStatuses，
+    //   与本 from 数组同源，双向锁死（§4.5b 校验清单 3 项）。
     action: 'reassign',
     from: ['待处理', '处理中', '待验证'], to: null,
     // ⭐ 角色权限重构 C1：同 bug assign 改 'intake_liaison'（admin∨[13]）。
@@ -611,6 +625,52 @@ const BUG_FLOW_TRANSITIONS = [
     requiredPayload: ['reason'],
     sideEffects: ['软删除，前端隐藏', '（共享 switch 分支连带清 blocked 三件套——bug 恒 0，零副作用）'],
     timelineEvent: 'status_change', actionCode: 'void',
+    notifyAfterCommit: null,
+  },
+  // ── [bug暂缓方案 20260803 v0.4 §4.2] 暂缓 / 恢复——bug 流补齐 `bug流_方案_20260702_v1.0.md:68`
+  //   当年"有意省略"留下的预留口子（S1 只做常量层，守卫/通知/前端为 S2-S4）──────────
+  {
+    action: 'hold',                         // 暂缓：处理中 → 已暂缓（活跃在册成员 ∨ admin，理由必填）
+    from: ['处理中'], to: '已暂缓',          // ⚠️ 不照抄变更流四态（口径 #5）
+    // ⚠️⚠️ S2 已落地 —— 双 null **不代表无授权**：真实闸门是 index.js 内的 assertBugHoldActor(actor, issue)
+    //   （定义在 sysIssueTransition 上方，call 点见该函数 [3.4] 段），在 findTransition 之后、任何状态 UPDATE
+    //   之前、且是 hold 唯一入口（无专用端点）必经此处。**改动本行务必同步该守卫**——引擎对双 null 是完全
+    //   放行（permitted 初值 true，双 null 时全部 if 分支不命中），若把 assertBugHoldActor 的调用条件
+    //   （action==='hold' && type==='bug'）改掉或删掉守卫本体，会重新打开"任何登录用户可暂缓他人单"的
+    //   授权真空——S1 阶段曾用 roleGuard:'admin' 过一道临时防线（宁过严勿过松），S2 落地 assertBugHoldActor
+    //   后按方案 §5.2 改回本行的 null/null（真实授权语义=任一活跃在册成员 ∨ admin，非仅 admin）。
+    roleGuard: null, ownerGuard: null,
+    requiredPayload: ['reason'],
+    sideEffects: [
+      '进入暂缓前活跃态记入 timeline from_status（resume 解析用）',
+      // ⭐ S3 已落地（index.js SYS_CLEAR_CREATOR_NOTIFY_FIELDS_SQL，随主表状态 UPDATE 同一 setFrags 一并写）：
+      //   重置**主表** sys_issues 的建单人侧通知列组（creator_notify_* 六列）为 not_sent/NULL —— 本轮暂缓
+      //   通知（POST /sys-issues/:id/notify-hold-creator）的锚点，供该端点判断"本轮是否已发送"。
+      '重置建单人侧通知列组（creator_notify_*）为 not_sent —— 本轮通知锚点（方案 §7.4，S3 已落地）',
+    ],
+    timelineEvent: 'status_change', actionCode: 'hold',
+    notifyAfterCommit: null,                 // 通知走手动按钮，不挂自动 marker
+  },
+  {
+    action: 'resume',                       // 恢复：已暂缓 → 处理中（admin，理由必填）
+    from: ['已暂缓'], to: null,              // 动态解析（resolveToStatus；本流恒「处理中」）
+    roleGuard: 'admin', ownerGuard: null,
+    requiredPayload: ['reason'],
+    sideEffects: [
+      '恢复到最近一次进入暂缓前的活跃态',
+      // ⭐ S3 已落地（index.js sysIssueTransition 内 `if (action === 'resume' && type === 'bug') { UPDATE
+      //   sys_issue_dev_assignees ... }`，主 UPDATE 之后、同一事务内的独立语句，非 setFrags——目标是**子表**
+      //   不是主表，setFrags 只作用于主表 UPDATE，装不下跨表写）：重置**子表** sys_issue_dev_assignees
+      //   的通知列组（notify_* 六列）为 not_sent/NULL，范围=该单全部在册行（removed_at IS NULL）—— 本轮
+      //   重启通知（POST /sys-issues/:id/notify-resume-dev）的锚点。§13-8 已核实主表 notify_*（dev 侧）
+      //   服务的自动派发路径恒不可达（isAutoNotifyEnabled 恒 false），重置那套没有意义，故本方案只重置子表。
+      //   ⚠️ S5b·L-1 收口（此前本注释漏了 `&& type === 'bug'` 条件，与实现不符，容易让后续审查者误以为
+      //   变更流 resume 也会重置子表——S3b 已把该重置显式收窄为 bug-only：变更流 resume **不**重置子表
+      //   notify_*，保持既有已上线行为不变（子表 notify_* 同样服务既有的 notify-developer 手动通知场景，
+      //   若不收窄会把变更流单已写入的通知痕迹一并抹掉，见 S3b 裁定与 verify-sys-bug-hold-notify.js [11b]）。
+      '重置开发侧（子表）通知列组为 not_sent —— 本轮通知锚点（方案 §7.4，S3 落地，S3b 收窄为 bug-only）',
+    ],
+    timelineEvent: 'status_change', actionCode: 'resume',
     notifyAfterCommit: null,
   },
   // ── [v1.6 退场] Commit ② 曾追加的两条确认上线路径 + 填发版信息（bug流_方案_20260702_v1.2 §8）──────────

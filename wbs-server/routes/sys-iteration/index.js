@@ -221,6 +221,25 @@ module.exports = (deps) => {
     ...SYS_CLEAR_BLOCKED_FIELDS_SQL,
   ];
 
+  // ── S3（bug暂缓方案 20260803 v0.4 §7.4）：hold 提交时随状态 UPDATE 同事务重置建单人侧通知列组 ──────────
+  //   因复用既有 creator_notify_* 列组（intake_return 等场景也写它），上一轮或其他场景的 'sent' 状态会让
+  //   本轮暂缓通知被误判为已发送——同一事务内重置为 not_sent，把"本轮"锚定在这次 hold 上（§7.4 表格第一行）。
+  //   ⭐⭐ S3b 收窄（codex 复核推翻 S3 首版"不分 type"判断）：**仅 bug 流使用**（调用点 case 'hold' 内
+  //   已加 `type === 'bug'` 条件，见该处）——变更流 hold 从未重置过 creator_notify_*，这是既有已上线行为；
+  //   而该列组被 intake_return（受理退改自动通知建单人）等场景共用，真实可达链路"变更流单 intake_return
+  //   通知成功(sent) → resubmit_intake → intake_accept → hold" 若不收窄会把"曾通知过建单人退改"的审计
+  //   痕迹与 UI 徽章一并抹掉——危害不在"有没有新端点消费"，而在"抹掉了已有场景写入的状态"。同 S2 roster
+  //   冻结守卫的 bug-only 口径（同一任务内同性质改动，处理口径必须一致）。本常量定义本身不含 type 判断
+  //   （纯 SQL 片段列表），仅 bug 单一份"仅 bug 用"的约束在调用点体现，此处仅记一句指引不重复三处判断逻辑。
+  const SYS_CLEAR_CREATOR_NOTIFY_FIELDS_SQL = [
+    "creator_notify_status = 'not_sent'",
+    'creator_notified_at = NULL',
+    'creator_notify_message_key = NULL',
+    'creator_notify_error = NULL',
+    'creator_read_at = NULL',
+    'creator_notify_sent_by = NULL',
+  ];
+
   // ── 角色权限重构 C0：受理门 SQL/DDL 常量统一从 intake-gate-sql.js 取（**单一真相源**）─────────────
   //   曾经把"回受理门"的字段清单在 index.js 与运维脚本各写一份，结果脚本漏清 tech_lead_*/relay_* 十六列，
   //   把违规单修成「表面合法、跨轮次状态仍脏」的半清状态（codex 七轮审 HIGH-1）。故收敛为一处定义、多处引用。
@@ -1889,16 +1908,51 @@ module.exports = (deps) => {
     if (override && Object.prototype.hasOwnProperty.call(override, issueType)) return override[issueType];
     return MEMBER_ACTION_FAMILY_MATRIX[actionKey];
   }
+  // S2（bug暂缓方案 20260803 v0.4 §4.5b·codex 236 L-1）：族粒度做不到"同族内排除单个状态"——
+  //   D_PRE.bug 现含 ['待处理','已暂缓']（S1 §4.1 新增「已暂缓」后），reassign 需要保留「待处理」
+  //   （92 号审既有能力，verify S33 断言锁定）同时排除「已暂缓」（§4.5 暂缓期改派冻结）。加一层状态级
+  //   排除表，叠在族门之上——运行时判定（assertMemberActionFamilyAllowed 消费）与声明校核
+  //   （verify-sys-meta.js [6] authoritative 计算同样消费 memberActionAuthoritativeStatuses）必须
+  //   共读同一份，防止重演 S1→S2 那次"声明与运行时脱节"的漂移（reassign.from 曾因此需要 S1 补态）。
+  const MEMBER_ACTION_STATUS_EXCLUDE = {
+    reassign: { bug: ['已暂缓'] },   // §4.5b：真闸=assertRosterNotFrozen/HOLD_ROSTER_FROZEN（见下方），本表只影响声明的合法态集合
+  };
+  // 某 (actionKey, issueType) 的权威合法状态集合 = 族门展开 - 状态级排除。verify-sys-meta.js [6] 与
+  // assertMemberActionFamilyAllowed 均消费本函数，杜绝两处各自维护副本再度漂移。
+  function memberActionAuthoritativeStatuses(actionKey, issueType) {
+    const families = memberActionFamiliesFor(actionKey, issueType);
+    if (!families) throw new Error(`memberActionAuthoritativeStatuses: 未登记的 actionKey="${actionKey}"`);
+    const excluded = (MEMBER_ACTION_STATUS_EXCLUDE[actionKey] && MEMBER_ACTION_STATUS_EXCLUDE[actionKey][issueType]) || [];
+    return families.flatMap(fam => SF.getFamilyStatuses(issueType, fam)).filter(s => !excluded.includes(s));
+  }
   function assertMemberActionFamilyAllowed(actionKey, issueType, status) {
     const allowedFamilies = memberActionFamiliesFor(actionKey, issueType);
     if (!allowedFamilies) throw new Error(`assertMemberActionFamilyAllowed: 未登记的 actionKey="${actionKey}"`);
     const family = SF.familyOfStatus(issueType, status);
-    if (!family || !allowedFamilies.includes(family)) {
+    // S2：族内单点排除（族门粒度不够时的补丁层，见上方 MEMBER_ACTION_STATUS_EXCLUDE 注释）——当前仅
+    //   reassign×bug×已暂缓 命中，其余 actionKey 排除表为空，本行零影响（含 commit 行编辑三端点）。
+    const excluded = (MEMBER_ACTION_STATUS_EXCLUDE[actionKey] && MEMBER_ACTION_STATUS_EXCLUDE[actionKey][issueType]) || [];
+    if (!family || !allowedFamilies.includes(family) || excluded.includes(status)) {
       // M6（91 号审）：族不满足是"当前主状态/成员动作不匹配"业务语义，改归 INVALID_STATUS（409）——
       //   GATE_INVARIANT 收窄只留主状态非法边/进族 roster 不满足/W-GATE UPDATE changes 冲突三类"守卫内部不变量"。
       throw new SysTransitionError(409, 'INVALID_STATUS', `当前状态「${status}」不允许该成员动作（${actionKey}）`);
     }
     return family;
+  }
+
+  // S2（bug暂缓方案 §4.5·roster 冻结）：bug 单 status='已暂缓' 时，加人/移人（含本人自移除）/改派/
+  //   开脱/开脱恢复五个成员端点全部拒绝，消除"暂缓期成员被移空 → resume 撞 enteringDev 门
+  //   （rosterActiveCount>=1）→ 400 → 单永久卡死，唯一出口只剩不可逆 void"的死锁链（§4.5 原文）。
+  //   ⚠️ 该链不需要任何误操作即可触发：DELETE /dev-assignees/:id 授权是「协调人 ∨ 本人」，开发能把
+  //   自己移出单子（转岗交接时是自然动作）。
+  //   ⚠️ bug-only：变更流「已暂缓」的成员操作是既有已上线行为，本函数只在 issueType==='bug' 时生效，
+  //   不得误伤（§10.4 第 19 条断言锁定）。刻意做成独立函数、在各端点内显式调用（而非塞进
+  //   assertMemberActionFamilyAllowed 内部）——后者被 commit 行编辑三端点共用（MEMBER_ACTION_FAMILY_MATRIX.commit），
+  //   把冻结逻辑写进共享函数会连带影响未在本方案范围内的 commit 编辑端点，故显式收窄到 5 个目标端点各自调用。
+  function assertRosterNotFrozen(issueType, status) {
+    if (issueType === 'bug' && status === '已暂缓') {
+      throw new SysTransitionError(409, 'HOLD_ROSTER_FROZEN', '暂缓期成员名单已冻结，请先恢复（resume）后再调整');
+    }
   }
 
   // 协调人判定（附录B：协调人=对接人∪admin）。
@@ -2182,6 +2236,45 @@ module.exports = (deps) => {
     return t;
   }
 
+  // S2（bug暂缓方案 20260803 v0.4 §5.2）：hold 的授权实现——目标语义（口径 #6）=「任一活跃在册成员 ∨ admin」。
+  //   ⚠️ 本函数是 bug hold **唯一防线**：transitions.js 里 bug 的 hold 条目 roleGuard/ownerGuard 均为 null
+  //   （B 步骤已从 S1 的临时值 roleGuard:'admin' 改回），sysIssueTransition [3] 权限段对双 null 是**完全放行**
+  //   （permitted 初值 true，双 null 时全部 if 分支不命中，见 [3] 段落）——若本函数缺失或未被正确调用，
+  //   任何登录用户（含 viewer）都能暂缓他人的单。查 roster 用同事务内查询（不依赖调用方传入的 issue
+  //   形状——sysIssueTransition 的 SELECT 列表未必含 roster 信息，且不同调用点 SELECT 列可能不同，直接
+  //   查表最稳）。失败语义：403 + 抛错——调用点在 sysIssueTransition 事务内、任何状态 UPDATE 之前，抛出后
+  //   外层 catch 会整体 rollback，状态/timeline/通知列组均不发生任何变化（§10.2 第 11b 条断言）。
+  // S4 补强（codex 239 审 M-1，主会话核实成立）：不抛异常的谓词版本——供下方 assertBugHoldActor（真闸，
+  //   写路径用）与 GET /sys-issues/:id 详情接口下发的 can_bug_hold 能力位（前端按钮显隐依据，读路径用）
+  //   共用同一份判定逻辑，避免两处各写一份 SQL 造成漂移（此前前端用 siCaps.isRosterMember 顶替，那是
+  //   "在册/历史参与成员读可见性"判定，既不判 removed_at IS NULL 也不判 dev_status != 'excused'，是拿
+  //   读权限冒充写权限——已移除/已 excuse 的成员会被前端多显示按钮，点击后端才 403 拦下）。
+  //   type 门限（仅 bug）由调用方在读取 can_bug_hold 前自行判断（本谓词不含 type 检查，因为
+  //   assertBugHoldActor 的调用点已由 `action==='hold' && type==='bug'` 把关，type 判断没必要塞进本谓词）。
+  async function canBugHold(actor, issue) {
+    if (actor && actor.role === 'admin') return true;
+    const actorId = actor && Number(actor.id);
+    if (actorId > 0) {
+      // ⚠️ 与方案 §5.2 给出的示例 SQL 有一处刻意加严：多加 `AND dev_status != 'excused'`。
+      //   §5.2 的"必测角色矩阵"明确要求「失效（已移除**或已 excuse**）的原成员 hold → 403」，但示例 SQL
+      //   只写了 `removed_at IS NULL`——excuse 只改 dev_status 不动 removed_at，若照抄示例 SQL，已被
+      //   开脱（excused）但未移除的成员仍会通过"活跃在册"判定，与必测矩阵的 403 期望矛盾。本函数按
+      //   必测矩阵的业务意图实现（excused=已不再对该单负责，不应有权暂缓），不照搬会导致 verify 测试组
+      //   与实现相悖。⚠️ 仅本函数收紧，不改 assertDevMember（estimate/submit 等 W06 动作沿用既有口径，
+      //   不在本方案改动范围）。
+      const roster = await dbGetAsync(
+        `SELECT 1 FROM sys_issue_dev_assignees WHERE issue_id = ? AND user_id = ? AND removed_at IS NULL AND dev_status != 'excused'`,
+        [issue.id, actorId]
+      );
+      if (roster) return true;
+    }
+    return false;
+  }
+  async function assertBugHoldActor(actor, issue) {
+    if (await canBugHold(actor, issue)) return;
+    throw new SysTransitionError(403, 'NOT_AUTHORIZED_FOR_HOLD', '仅活跃在册开发或管理员可暂缓该单');
+  }
+
   // 唯一允许写 sys_issues.status 的函数（H-2 铁律，照 correctionTransition）：
   //   事务内读真实 status + 流转合法性（查 transitions 常量）+ 双 WHERE（含 expectedFrom）守卫 changes≠1→409 +
   //   权限分流（roleGuard/ownerGuard）+ 闸门校验（requiredPayload）+ sideEffects 写入 + timeline 写入 + COMMIT。
@@ -2330,6 +2423,15 @@ module.exports = (deps) => {
           throw new SysTransitionError(500, 'UNKNOWN_ROLE_GUARD', `未实现的 roleGuard 配置：${transition.roleGuard}（transition 常量错误·fail-closed 拒绝）`);
         }
         if (!permitted) throw new SysTransitionError(403, 'NOT_AUTHORIZED_FOR_TRANSITION', '无权执行此状态流转');
+      }
+
+      // [3.4] ⭐⭐ S2（bug暂缓方案 §5.2·唯一且强制落点）：hold 在 bug 类型下 roleGuard/ownerGuard 均为
+      //   null（见上方 [3]），此处补齐真实授权闸门——assertBugHoldActor（定义于本函数上方）。
+      //   落点严格满足方案要求："findTransition 之后（[1]）、任何状态 UPDATE 之前（[6]）"，且
+      //   sysIssueTransition 是通用 transition 引擎、hold 没有专用端点绕开它，本处即"所有能触发
+      //   hold 的入口的唯一必经之路"。失败 403 + 事务回滚，UPDATE/timeline 均未执行，无任何副作用。
+      if (action === 'hold' && type === 'bug') {
+        await assertBugHoldActor(actor, row);
       }
 
       // [3.5] 受理门不变量（受理排期改造 §5·codex C3 常规审 MED-1·复审 MED 收口）：受理门动作
@@ -2536,16 +2638,33 @@ module.exports = (deps) => {
           summary = reason;
           // F2b 修（ultracode）：暂缓 blocked 单清受阻三件套（§⑥ 暂缓即解除受阻，resume 回开发中不残留 blocked 致卡死；不动评估）
           setFrags.push(...SYS_CLEAR_BLOCKED_FIELDS_SQL);
+          // ⭐⭐ S3b（**主会话抽查**推翻 S3 首版·此时尚未送 codex 审）：随状态 UPDATE 同事务重置建单人侧通知列组——本轮暂缓通知锚点
+          //   （见常量定义处注释）。**必须 bug-only**（`type === 'bug'`）——变更流 hold 从未重置过
+          //   creator_notify_*，是既有已上线行为；该列组被 intake_return（受理退改自动通知建单人）等场景
+          //   共用，真实可达链路"变更流单 intake_return 通知成功(sent) → resubmit_intake → intake_accept
+          //   → hold"若不收窄，会把"曾通知过建单人退改"的审计痕迹与 UI 徽章一并抹掉——这不是"无端点消费
+          //   就无害"的旁路清理，而是**抹掉已有场景写入的状态**，是真实回归。收窄=保持变更流现状=零回归；
+          //   不收窄=给已上线功能引入新副作用。同 S2 roster 冻结守卫 bug-only 口径（assertRosterNotFrozen
+          //   同样只在 issueType==='bug' 时生效），同一任务内同性质改动口径必须一致。
+          if (type === 'bug') {
+            setFrags.push(...SYS_CLEAR_CREATOR_NOTIFY_FIELDS_SQL);
+          }
           break;
         }
         case 'resume': {
+          // ⭐ [bug暂缓方案 20260803 v0.4 §4.2/口径 #1] resume 两流统一 reason 必填——bug 流新增 resume
+          //   条目本就理由必填，变更流侧 transitions.js 的 resume requiredPayload 同步从 [] 改 ['reason']
+          //   （行为变更，见该处注释）。C1 只加必填校验 + 把 reason 拼进 summary，既有 resumeDegradeInfo
+          //   降级留痕逻辑保留不动（不得丢失）。
+          const reason = (typeof payload.reason === 'string' ? payload.reason.trim() : '');
+          if (!reason) throw new SysTransitionError(400, 'RESUME_REASON_REQUIRED', '请填写恢复原因');
           // [codex C3 对抗审 HIGH-A 回填] timeline 如实记录实际恢复到的状态；若 resolveToStatusInTxn 判定
           //   降级（暂缓期在册不满足 VERIFY/RELEASE 进族门），summary 备注"自动降级"+原目标，供审计追溯
           //   （非静默改写历史，实际发生了什么就记什么）。
           const info = opts.resumeDegradeInfo;
           summary = (info && info.degraded)
-            ? `恢复到「${toStatus}」（自动降级，原目标「${info.originalTarget}」因暂缓期在册不满足进族门禁）`
-            : `恢复到「${toStatus}」`;
+            ? `恢复到「${toStatus}」（自动降级，原目标「${info.originalTarget}」因暂缓期在册不满足进族门禁）｜原因：${reason}`
+            : `恢复到「${toStatus}」｜原因：${reason}`;
           break;
         }
         // [v1.6 退场·C3b] 'confirm-online-norelease' switch 分支已删除——随 transitions.js 移除该 meta 条目，
@@ -2596,6 +2715,30 @@ module.exports = (deps) => {
       if (action === 'resume' && row.gate_deferred_at && SF.isInFamily(row.type, toStatus, 'DEV')) {
         const gateResult = await runWGate(issueId, row.type, toStatus, actor);
         if (gateResult.changed) finalToStatus = gateResult.to;
+      }
+
+      // ⭐⭐ S3（bug暂缓方案 §7.4）：resume 提交时同事务重置**子表** sys_issue_dev_assignees 的通知列组——
+      //   注意不是主表！S0 §13-8 核实推翻了方案原假设：开发侧有两套独立通知列组——(A) 主表 sys_issues.notify_*
+      //   服务【自动派发】路径，而 isAutoNotifyEnabled 恒 false ⇒ 该路径不可达，重置它没有意义；(B) 子表
+      //   sys_issue_dev_assignees.notify_* 才是 notify-developer 手动通知（含本方案新增的 notify-resume-dev）
+      //   的实际可达路径 ⇒ 本方案重置的是它。范围限**全部在册行**（removed_at IS NULL）——已移除成员的历史
+      //   通知行保留（软删审计语义，同 :712 注释口径），不随 resume 抹除。
+      // ⭐⭐ S3b（**主会话抽查**推翻 S3 首版"不分 type"判断·此时尚未送 codex 审）：**必须 bug-only**——子表 notify_* 同样是
+      //   notify-developer 端点的实际可达路径，**变更流也在用**（既有已上线功能，非本方案新增）。真实
+      //   可达链路"变更流单 assign 后点过「通知开发」(notify_status='sent') → hold → resume"若不收窄，
+      //   会把这条记录抹掉，且开发可能被 notify-developer 重复通知——同上方 hold 侧 creator_notify_* 的
+      //   理由：危害不在"有没有新端点消费"，而在"抹掉已有场景写入的状态"。收窄=保持变更流现状=零回归。
+      //   同 S2 roster 冻结守卫 bug-only 口径，同一任务内同性质改动处理口径必须一致。
+      // ⚠️ 必须同时显式按 action==='resume' 收窄——本段位于 switch 之后的通用流程区，其余动作（accept/
+      //   return/close/…）都会经过这里，不加判断会把每次任意状态流转都错误地清空开发侧通知列组。
+      if (action === 'resume' && type === 'bug') {
+        await dbRunAsync(
+          `UPDATE sys_issue_dev_assignees
+              SET notify_status = 'not_sent', notified_at = NULL, read_at = NULL,
+                  notify_message_key = NULL, notify_error = NULL, notify_sent_by = NULL
+            WHERE issue_id = ? AND removed_at IS NULL`,
+          [issueId]
+        );
       }
 
       // ⭐⭐ PH-2 挂载点改造（C2.5 撤销·方案 v2.1 §2 矩阵·helper 本体不变）：原挂"离开待商议"两条边
@@ -3220,6 +3363,7 @@ module.exports = (deps) => {
           await sysRollback();
           return res.status(403).json({ error: '仅协调人可改派', code: 'FORBIDDEN' });
         }
+        assertRosterNotFrozen(row.type, row.status);   // S2·§4.5：暂缓期改派冻结（bug-only）
         assertMemberActionFamilyAllowed('reassign', row.type, row.status);
         const family = SF.familyOfStatus(row.type, row.status);
 
@@ -3366,6 +3510,7 @@ module.exports = (deps) => {
         rowStatusAtStart = row.status;
         assertKnownIssueStatus(row.type, row.status);
         if (!isSysCoordinator(actor, row.type)) { await sysRollback(); return res.status(403).json({ error: '仅协调人可操作', code: 'FORBIDDEN' }); }
+        assertRosterNotFrozen(row.type, row.status);   // S2·§4.5：暂缓期加人冻结（bug-only）
         const addFamily = assertMemberActionFamilyAllowed('add', row.type, row.status);
         // R4 下沉：待指派族加成员=投入开发资源，变更流须先有 OA（与 /assign、reassign 同守卫）。
         //   ⚠️ 口径钉死（196 增量审 M2·产品语义裁定）：**D_PRE 族任何加成员请求先过 OA**——含重复加已在册、
@@ -3414,6 +3559,7 @@ module.exports = (deps) => {
         isSelf = Number(target.user_id) === Number(actor.id);
         const isCoordinator = isSysCoordinator(actor, row.type);
         if (!isSelf && !isCoordinator) { await sysRollback(); return res.status(403).json({ error: '仅协调人或本人可移除', code: 'FORBIDDEN' }); }
+        assertRosterNotFrozen(row.type, row.status);   // S2·§4.5：暂缓期移人冻结（bug-only，含本人自移除）
         assertMemberActionFamilyAllowed('remove', row.type, row.status);
 
         const family = SF.familyOfStatus(row.type, row.status);
@@ -3475,6 +3621,7 @@ module.exports = (deps) => {
         rowStatusAtStart = row.status;
         assertKnownIssueStatus(row.type, row.status);
         if (!isSysCoordinator(actor, row.type)) { await sysRollback(); return res.status(403).json({ error: '仅协调人可操作', code: 'FORBIDDEN' }); }
+        assertRosterNotFrozen(row.type, row.status);   // S2·§4.5：暂缓期开脱冻结（bug-only）
         assertMemberActionFamilyAllowed('excuse', row.type, row.status);   // 仅 SYS_DEV
 
         const target = await dbGetAsync('SELECT id, dev_status FROM sys_issue_dev_assignees WHERE id = ? AND issue_id = ? AND removed_at IS NULL', [assigneeId, id]);
@@ -3520,6 +3667,7 @@ module.exports = (deps) => {
         assertKnownIssueStatus(row.type, row.status);
         // 2. 校验（协调人；主状态∈SYS_DEV∪SYS_VERIFY；目标在册∧excused）
         if (!isSysCoordinator(actor, row.type)) { await sysRollback(); return res.status(403).json({ error: '仅协调人可操作', code: 'FORBIDDEN' }); }
+        assertRosterNotFrozen(row.type, row.status);   // S2·§4.5：暂缓期开脱恢复冻结（bug-only）
         assertMemberActionFamilyAllowed('supersede', row.type, row.status);   // SYS_DEV∪SYS_VERIFY
         const target = await dbGetAsync('SELECT id, user_id, user_name, dev_status, removed_at FROM sys_issue_dev_assignees WHERE id = ? AND issue_id = ?', [assigneeId, id]);
         if (!target || target.removed_at !== null || target.dev_status !== 'excused') {
@@ -4050,7 +4198,13 @@ module.exports = (deps) => {
                    SELECT user_name FROM sys_issue_dev_assignees
                     WHERE issue_id = sys_issues.id AND removed_at IS NULL
                     ORDER BY user_id ASC
-                 )) AS dev_roster_names
+                 )) AS dev_roster_names,
+                -- S4（bug暂缓方案 20260803 v0.4 §6.3）：「已暂缓 N 天」徽章取数——取本单**最近一次** hold
+                -- 事件的 created_at（MAX 天然只取最新一轮，多轮暂缓不累加）。⚠️ 该值在 resume/void 后依然
+                -- 非 NULL（历史事实不会消失）——前端必须叠加 status='已暂缓' 才能渲染，本列本身不做状态门控
+                -- （同 has_current_tech_lead_comment 范式：SQL 只出数，状态语义交给前端/调用方判断）。
+                (SELECT MAX(created_at) FROM sys_issue_timeline
+                   WHERE issue_id = sys_issues.id AND action_code = 'hold') AS last_held_at
            FROM sys_issues
           ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
           ORDER BY id DESC`,
@@ -4119,9 +4273,18 @@ module.exports = (deps) => {
       );
       // [codex C3 对抗审 HIGH-B 回填] 在册/历史参与成员读可见性——与列表读端同源（同一 EXISTS 语义，SSOT 依据
       //   同上方列表端点注释：方案 v2.9 line 33"历史参与…只读整单"+ line 88"assigned_to 禁作授权源"）。
+      //   ⚠️ S4 补强（codex 239 审 M-1）：本变量是**读可见性**判定（这个人能不能看这张单），既不判
+      //   removed_at IS NULL 也不判 dev_status != 'excused'——不能拿它当"能否暂缓"的授权依据（那是下面
+      //   can_bug_hold 的职责，两者刻意不同源，不要合并）。
       const isRosterMember = uid > 0 && !!(await dbGetAsync(
         `SELECT 1 FROM sys_issue_dev_assignees WHERE issue_id = ? AND user_id = ? LIMIT 1`, [id, uid]
       ));
+      // S4 补强（codex 239 审 M-1，主会话核实成立）：can_bug_hold 能力位——与写路径真闸 assertBugHoldActor
+      //   共用同一谓词 canBugHold，前端据此判断「暂缓」相关按钮显隐（取代此前误用 isRosterMember/
+      //   siCaps.isRosterMember 顶替的做法——那是读可见性，不含 removed_at/dev_status 收紧，会让已移除/
+      //   已 excuse 的历史成员在前端多看到按钮）。仅 bug 类型计算：变更流 hold 是纯 admin 权限，走既有
+      //   admin 判断分支，不消费这个字段。挂在 row 上直接返回（issue 对象自带，前端无需额外合并一行）。
+      row.can_bug_hold = row.type === 'bug' ? await canBugHold({ id: uid, role }, row) : false;
       // ⭐ C1：受理人加入放行集（全类型·与列表读端同源）
       if (!isAdmin && !isIntakeLiaisonUser && !isAssignee && !isBugLiaison && !isReleaseExecutor && !isRosterMember && !isTechLeadOfIssue) {
         return res.status(403).json({ error: '无权查看此迭代单', code: 'NOT_AUTHORIZED_TO_VIEW' });
@@ -4780,7 +4943,15 @@ module.exports = (deps) => {
   router.post('/sys-issues/:id/accept', authenticateToken, requireSysSchemaReady, requireAdmin, makeTransitionEndpoint('accept'));
   router.post('/sys-issues/:id/return', authenticateToken, requireSysSchemaReady, requireAdmin, makeTransitionEndpoint('return'));
   router.post('/sys-issues/:id/close', authenticateToken, requireSysSchemaReady, requireAdmin, makeTransitionEndpoint('close'));
-  router.post('/sys-issues/:id/hold', authenticateToken, requireSysSchemaReady, requireAdmin, makeTransitionEndpoint('hold'));
+  // ⭐⭐ S2（bug暂缓方案 §5.2·实现错回填）：hold 中间件层 requireAdmin **已移除**——hold 曾经全类型 admin-only
+  //   （变更流 roleGuard:'admin'），S2 后 bug 的授权语义变成「任一活跃在册成员 ∨ admin」（口径 #6），中间件
+  //   在加载 issue 之前不知道 type，无法按 type 分支（同 issue-reject/void 那批"粗筛 + 引擎精判"范式，
+  //   见下方 issue-reject 注释）——若继续挂 requireAdmin，bug 的在册开发会在**到达引擎之前**就被 403 拦下，
+  //   assertBugHoldActor 形同虚设（本条是 S0/S1 遗留的真实实现缺口，S2 集成测试时发现并同批修复）。
+  //   收窄改为**粗筛**：仅 authenticateToken + requireSysSchemaReady（同 estimate/blocked 等"引擎内精判"
+  //   端点范式）——精确授权全交给引擎：变更流仍受 [3] 的 roleGuard:'admin' 拦（非 admin 403，零回归）；
+  //   bug 受 [3.4] 的 assertBugHoldActor 拦（非 admin∧非在册 403，新语义生效）。
+  router.post('/sys-issues/:id/hold', authenticateToken, requireSysSchemaReady, makeTransitionEndpoint('hold'));
   router.post('/sys-issues/:id/reactivate', authenticateToken, requireSysSchemaReady, requireAdmin, makeTransitionEndpoint('reactivate'));
   // ⭐⭐ R2（C2.5 撤销·方案 v2.1 §3·190 号消歧"替换非叠加"）：中间件 requireAdmin **替换为**
   //   requireIntakeLiaison（粗筛 admin∨受理人——受理人要进得来拒变更单，admin 要进得来拒 bug；
@@ -4804,8 +4975,11 @@ module.exports = (deps) => {
     // 191 号审 M（同型第三次·终版口径=受理后全部非终态+已上线·逐状态对照 ALLOWED_STATUSES 核出不手拼）：+待验证
     feature: ['待指派', '开发中', '待验证', '待上线', '已上线', '已暂缓'],
     improvement: ['待指派', '开发中', '待验证', '待上线', '已上线', '已暂缓'],
-    // ⚠️ bug 集合无「已暂缓」（agent 复核抓的方案笔误）：BUG_FLOW_STATUSES 本就没有该态（暂缓有意省略·
-    //   见 transitions.js bug 状态集注释），方案 v2.1 首版把变更流集合照抄给 bug 属契约错误，已收窄。
+    // ⚠️ bug 集合仍无「已暂缓」——但理由已变（bug暂缓方案 20260803 v0.4 §4.4）：BUG_FLOW_STATUSES **现在
+    //   确实有**「已暂缓」态（本方案新增，见 transitions.js bug 状态集注释），旧理由"暂缓有意省略"已失效。
+    //   不纳入的真实理由=**bug 结构性不进 OA 守卫**：assertSysDevCommitmentOaGuard 首行 type guard 对
+    //   bug 直接 return（bug 从不校验该守卫），暂缓期补号对 bug 没有实际用途。数组值本身不动——这是
+    //   §4.4 的负向断言之一，若未来有人把「已暂缓」加进本集合，需先回看方案 §4.4 确认口径未变。
     bug: ['待处理', '处理中', '待验证', '待上线', '已上线'],
   };
   router.post('/sys-issues/:id/set-oa-number', authenticateToken, requireSysSchemaReady, requireAdmin, async (req, res) => {
@@ -6217,7 +6391,13 @@ module.exports = (deps) => {
       // 受理排期改造 §4.2/§B：删「待评估/已排期」→「待指派」。与 hold.from（transitions.js·待指派/开发中/待验证/待上线）同源
       //   （resume 只能回暂缓前活跃态·hold.from 即活跃态权威集·INTAKE 态禁 hold 故不在内）。
       //   ⚠️ 历史兼容（§12.7）：存量 hold timeline from_status=待评估/已排期 的旧单 resume 映射待指派 → 属 C1 迁移范围（C0 阶段生产 sys 空表·无历史 hold）。
-      const ACTIVE_STATES = ['待指派', '开发中', '待验证', '待上线'];   // 变更流活跃态（已上线/已关闭=终态，旁路态/INTAKE 不在内）
+      // ⭐⭐ S2（bug暂缓方案 §4.2·实现错回填）：本常量此前只列变更流活跃态——写这行时 bug 还没有 hold/resume
+      //   （S1 才新增，见 transitions.js bug hold/resume 条目）。bug 的 hold.from 只有 ['处理中']，即 bug
+      //   resume 唯一可能的暂缓前态恒为「处理中」，若不加入本表，resume 会在事务内被下方 `!ACTIVE_STATES.includes(target)`
+      //   拦截，抛 409 RESUME_TARGET_INVALID——**bug hold→resume 全流程此前从未真正跑通过**（S1 只做常量层，
+      //   未做集成测试；S2 集成测试[死锁反证用例]首次实测到本缺口）。下方紧跟 `T.ALLOWED_STATUSES[row.type].includes(target)`
+      //   仍按 type 精确二次校验，加入「处理中」不会让 feature/improvement 误通过（其 ALLOWED_STATUSES 不含处理中）。
+      const ACTIVE_STATES = ['待指派', '开发中', '待验证', '待上线', '处理中'];   // 变更流 + bug 活跃态并集（已上线/已关闭=终态，旁路态/INTAKE 不在内）
       // [codex C3 对抗审 HIGH-A 回填] resume 降级回 DEV 族——暂缓窗口内成员换血/移除完成态成员后，若仍机械
       //   恢复到暂缓前的 VERIFY/RELEASE 态，会被 [2b] 的进族门禁（enteringVerify/enteringRelease 要求
       //   在册≥1∧全完成）永久拒绝，且 resume 目标由 timeline 历史确定性推导、无法绕过（return/reopen/derive
@@ -6261,7 +6441,13 @@ module.exports = (deps) => {
         return target;
       };
       // sysIssueTransition 内 findTransition('resume', '已暂缓') 守前置态；expectedFrom='已暂缓' 双守；动态目标态事务内解析
-      const r = await sysIssueTransition(id, 'resume', '已暂缓', sysActor(req), {}, { resolveToStatusInTxn, resumeDegradeInfo });
+      // ⭐ [bug暂缓方案 20260803 v0.4 口径 #1·实现错回填] 本路由此前硬编码 payload={}（历史遗留——resume
+      //   requiredPayload 原为 []，不需要任何 body 字段，硬编码零成本）。C1 把 resume 的 requiredPayload
+      //   改为 ['reason'] 后，case 'resume' 靠 payload.reason 做必填校验——若此处仍传 {}，客户端无论传什么
+      //   reason 都会被丢弃，必现 400 RESUME_REASON_REQUIRED（本方案 S1 验证阶段实测命中，非本方案有意行为，
+      //   是 makeTransitionEndpoint 通用路径与本专用路由"payload 转发"这一步此前不同源的真实实现缺口，
+      //   随 reason 必填一并补齐——修复对齐 makeTransitionEndpoint 的 `req.body || {}` 范式）。
+      const r = await sysIssueTransition(id, 'resume', '已暂缓', sysActor(req), req.body || {}, { resolveToStatusInTxn, resumeDegradeInfo });
       const respBody = { id, status: r.toStatus };
       if (resumeDegradeInfo.degraded) {
         respBody.degraded = true;
@@ -9068,6 +9254,45 @@ module.exports = (deps) => {
     };
   }
 
+  // 建单人侧·暂缓通知 markdown（S3·bug暂缓方案 20260803 v0.4 §7.1/§7.3）：开发（活跃在册成员）或 admin
+  //   标记暂缓后，手动通知建单人。签名 (issue, reason, baseUrl) 逐字对齐方案任务书；"谁做的"不加第 4 个
+  //   参数——由调用端点把本轮 hold timeline 行的 operator_name 合并进 issue 对象的 `hold_by_name` 字段
+  //   （该行本就是端点为§7.3"本轮锚点"判定读取的同一条，不额外查询）。
+  //   ⚠️ 不带成员清单等敏感内容（v1.132.0 风险备注同族）：只带单号/标题/操作人/理由原文/深链，不内联
+  //   roster 名单，防未来权限变化后经通知内容侧信道泄露团队信息。
+  //   reason 传入的是 timeline.summary——hold 的 summary 就是理由原文本身（无拼接），故此处即"理由原文"。
+  function buildSysHoldCreatorMarkdown(issue, reason, baseUrl) {
+    const title = issueNotify.issueSafeText(issue.title, 80);
+    const safeTitle = sysNotifyTitle(issue.title);
+    const system = issueNotify.issueSafeText(issue.system_name, 40);
+    const link = sysDeepLinkLine(baseUrl, issue.id);
+    const reasonText = issueNotify.issueSafeText(reason, 200);
+    const who = issueNotify.issueSafeText(issue.hold_by_name || '未知', 40);
+    return {
+      title: `⏸ 迭代单已暂缓：${safeTitle}`,
+      md: `### ⏸ 迭代单已暂缓\n\n- **单号**：#${issue.id}\n- **系统**：${system}\n- **标题**：${title}\n- **操作人**：${who}\n- **暂缓原因**：${reasonText}\n\n该单已暂缓，观察期内可重启继续处理，或由管理员作废了结。请登录平台查看详情。${link}`,
+    };
+  }
+
+  // 开发侧·重启通知 markdown（S3·bug暂缓方案 §7.1/§7.3）：admin 重启暂缓单后，手动通知在册开发。
+  //   同上，"谁做的"经 issue.resume_by_name 合并传入（来源=§7.3 算法定位到的本轮 resume timeline 行）。
+  //   ⚠️ reason 传入的是该 resume timeline 行的 summary——resume 的 summary 是拼接串（"恢复到「X」
+  //   （可能带自动降级注记）｜原因：<reason>"，见 index.js case 'resume'），非纯原因文本，故本模板标签用
+  //   "重启说明"而非"重启原因"——如实反映内容形态，不假装是纯净原文（hold 侧因 summary=reason 本就纯净，
+  //   两侧标签故意不同，非疏漏）。
+  function buildSysResumeDevMarkdown(issue, reason, baseUrl) {
+    const title = issueNotify.issueSafeText(issue.title, 80);
+    const safeTitle = sysNotifyTitle(issue.title);
+    const system = issueNotify.issueSafeText(issue.system_name, 40);
+    const link = sysDeepLinkLine(baseUrl, issue.id);
+    const reasonText = issueNotify.issueSafeText(reason, 200);
+    const who = issueNotify.issueSafeText(issue.resume_by_name || '未知', 40);
+    return {
+      title: `▶️ 迭代单已重启：${safeTitle}`,
+      md: `### ▶️ 迭代单已重启\n\n- **单号**：#${issue.id}\n- **系统**：${system}\n- **标题**：${title}\n- **操作人**：${who}\n- **重启说明**：${reasonText}\n\n该单已恢复处理，请登录平台查看详情并继续跟进。${link}`,
+    };
+  }
+
   // 技术负责人侧 markdown（受理排期改造 §6·C5·对接人/admin 请技术负责人做技术评估沟通）。
   //   ⭐ codex Round-A 审 MED（采纳）：措辞去掉"（受理沟通）"——该动作经 sysTechConsultGateStatus 判定开放态
   //   （历史沿革：C3 时期曾按 type 分流，变更流「待商议」/bug「待受理」；v2.1 撤销 C2.5 后全类型归一
@@ -9713,6 +9938,109 @@ module.exports = (deps) => {
     } catch (err) { logger.error('[系统迭代] 手动通知开发失败:', err && err.message); res.status(500).json({ error: (err && err.message) || '通知开发失败' }); }
   });
 
+  // ── S3（bug暂缓方案 20260803 v0.4 §7.3）：POST /sys-issues/:id/notify-resume-dev ──────────────────
+  //   重启通知开发——admin 手动点按钮，批量通知**全部在册开发**（§7.4 resume 事务已把子表 notify_* 整组
+  //   重置为 not_sent，本端点是对应的"发"半边；一次点击尽力发给所有本轮未发送成功的在册成员，语义上与
+  //   §7.4 的"整组重置"对称，不做单人挑选——这与 notify-developer 端点"逐 dev 挑一个发"是两回事，
+  //   刻意不复用同一端点：授权规则不同（本端点固定 admin-only，非 admin∨受理人）、状态判据不同
+  //   （§7.3 专属算法，非 sysNotifyStatusesFor 白名单）、收件人范围不同（批量 vs 单选）。
+  //   requireAdmin 中间件直接放行判定——不像 hold 那样"admin∨在册"两种身份混合，本端点唯一合法调用者
+  //   只有 admin，可以在中间件层拦（同 accept/return/close 等纯 admin 端点范式，无需拖到引擎里精判）。
+  router.post('/sys-issues/:id/notify-resume-dev', authenticateToken, requireSysSchemaReady, requireAdmin, async (req, res) => {
+    const id = parsePositiveId(req.params.id);
+    if (!id) return res.status(400).json({ error: '无效的迭代单 ID', code: 'INVALID_SYS_ISSUE_ID' });
+    try {
+      const issue = await dbGetAsync('SELECT * FROM sys_issues WHERE id = ?', [id]);
+      if (!issue) return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' });
+      // ① type 门限：仅 bug（本通知功能本身是 bug 暂缓机制的配套，变更流没有对应的"暂缓通知建单人"新入口）。
+      if (issue.type !== 'bug') return res.status(409).json({ error: '仅 bug 单支持重启通知', code: 'RESUME_NOTIFY_TYPE_NA' });
+      // ② status 门限：仅「处理中」——重启的落点态（bug hold.from 恒为处理中，resume 恒回处理中）。
+      if (issue.status !== '处理中') return res.status(409).json({ error: `当前状态（${issue.status}）不可发送重启通知`, code: 'STATUS_NOT_NOTIFIABLE' });
+      // ③ ⭐⭐ 方案 §7.3 可执行算法——逐字实现，禁止"优化"回 action_code IN (...) 筛选（见下方长注释）。
+      //   第一步：只用 to_status 筛选主状态入边（结构化字段，所有主状态转移都写；note 类旁路事件 to_status
+      //   为 NULL，天然被排除）。
+      //   第二步：判定该行是否为本轮 resume（仅 resume 的 action_code 非 NULL 且为 'resume' → 放行；否则
+      //   NULL/其他值/无行 → 一律拒绝）。
+      //   ⚠️⚠️ 为什么筛选只能用 to_status、不能用 action_code IN ('resume','return','reopen','assign')：
+      //   已核实的真值表——resume 的 action_code='resume'（非空）；hold='hold'；而 assign/return/reopen
+      //   **全部为 NULL**（return/reopen 走独立 timelineEvent、INSERT 语句里没有 action_code 列；assign 走
+      //   独立写点同样没有该列）。若把这四者 OR 进筛选条件，return/reopen/assign 三类行会因 action_code
+      //   IS NULL 而被 SQL `IN (...)` 判定为不匹配，一条都选不中——"最近入口事件"会错误地落回更早那条
+      //   resume 行，H-1 的防误发修复完全失效（234 H-1 教训）。筛选只用 to_status，action_code 只在拿到
+      //   行之后、第二步里判定，绝不能合并成一个筛选条件。
+      const entryRow = await dbGetAsync(
+        `SELECT id, action_code, summary, operator_name FROM sys_issue_timeline
+          WHERE issue_id = ? AND to_status = '处理中'
+          ORDER BY id DESC LIMIT 1`,
+        [id]
+      );
+      if (!entryRow || entryRow.action_code !== 'resume') {
+        return res.status(409).json({ error: '最近一次进入「处理中」并非通过重启（resume），不可发送重启通知', code: 'RESUME_ANCHOR_NOT_FOUND' });
+      }
+      // ④ 本轮通知列状态非 sent——批量语义：只要还有在册成员本轮未发送成功，就允许触发（发给这些"待发"的人；
+      //   已经 sent 的不重发，天然幂等）。全员皆 sent 时明确拒绝（同轮重复点击的语义，§10.6 第 9 条）。
+      const roster = await dbAllAsync(
+        `SELECT id, user_id, notify_status FROM sys_issue_dev_assignees WHERE issue_id = ? AND removed_at IS NULL`, [id]);
+      if (roster.length === 0) return res.status(409).json({ error: '当前无在册开发，无法发送重启通知', code: 'RESUME_NOTIFY_NO_ROSTER' });
+      const pending = roster.filter(r => r.notify_status !== 'sent');
+      if (pending.length === 0) return res.status(409).json({ error: '本轮重启通知已全部发送', code: 'NOTIFY_ALREADY_SENT' });
+      const actor = sysActor(req);
+      const baseUrl = await getSafePlatformBaseUrl();
+      // "谁做的"取本轮 resume 事件的 operator_name（entryRow 本就是③步查出的同一行，不额外查询）。
+      const { title, md } = buildSysResumeDevMarkdown({ ...issue, resume_by_name: entryRow.operator_name }, entryRow.summary, baseUrl);
+      const results = [];
+      let claimedAny = false;
+      for (const member of pending) {
+        // ⑤ ⭐⭐ S3b2·M-1：逐行原子 claim（CAS）——同 hold 侧同一套机制，子表 notify_message_key 兼作临时
+        //   占位令牌（不引入 sending 态，理由同 hold 侧长注释）。claim 失败（changes!==1）说明该行已被
+        //   并发请求认领或本轮已 sent，跳过不发（这不是这一行的错误，是"这一行这次不归我发"）——批量场景
+        //   下允许部分行认领成功、部分行跳过，不因个别行冲突让整批失败。
+        //   失败释放路径同 hold 侧：recordSysDevAssigneeNotify 既有实现 `notify_message_key = ok ? messageKey : null`，
+        //   发送失败时自动把 message_key 写回 NULL，等价于释放占位，无需额外代码。
+        const claimToken = `claim-${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${member.id}`;
+        const claim = await dbRunAsync(
+          `UPDATE sys_issue_dev_assignees SET notify_message_key = ?
+             WHERE id = ? AND issue_id = ? AND removed_at IS NULL AND notify_status <> 'sent' AND notify_message_key IS NULL`,
+          [claimToken, member.id, id]
+        );
+        if (!claim || claim.changes !== 1) {
+          results.push({ dev_assignee_id: member.id, user_id: member.user_id, ok: false, skipped: true, reason: 'claim_conflict' });
+          continue;
+        }
+        claimedAny = true;
+        const user = await dbGetAsync('SELECT id, display_name, phone, dingtalk_user_id FROM users WHERE id = ?', [member.user_id]);
+        if (!user) {
+          await recordSysDevAssigneeNotify(id, member.id, false, null, 'dev_not_found', actor.id);
+          results.push({ dev_assignee_id: member.id, user_id: member.user_id, ok: false, reason: 'dev_not_found' });
+          continue;
+        }
+        // S5b·M-1 收口（防御性对称，非本轮已知的具体 bug）：sendIssueDingtalkRaw 内部已把已知失败模式
+        //   （无配置/无手机号/token 失败/查用户失败）都归一成 {ok:false,...} 返回值，理论上极少抛出未捕获
+        //   异常；但同构 notify-hold-creator 侧、intake_return 既有范式（index.js:5066-5077），仍整体包一层
+        //   try——万一真抛异常，本行 claim 已占的 notify_message_key 若不归一成 {ok:false} 交给下面
+        //   recordSysDevAssigneeNotify 落库，会永久卡死（同 M-1 那一类问题），且异常会中断整个 for 循环、
+        //   连累其余成员本轮也发不出。
+        let result;
+        try {
+          result = await sendIssueDingtalkRaw(user, title, md);
+        } catch (sendErr) {
+          result = { ok: false, reason: (sendErr && sendErr.message) || 'notify_exception' };
+        }
+        await recordSysDevAssigneeNotify(id, member.id, !!result.ok, result.message_key, result.reason, actor.id);
+        await recordSysNotifyTimeline(id, '开发', `${user.display_name || user.username || ''}(id${member.user_id})`, !!result.ok, result.ok ? result.message_key : result.reason, actor);
+        results.push({ dev_assignee_id: member.id, user_id: member.user_id, ok: !!result.ok });
+      }
+      // 整批全部被并发请求抢先认领（一行都没抢到）→ 明确 409，与 hold 侧同一错误码语义（"这轮不归你发"）；
+      // 部分抢到部分没抢到 → 仍 200，results 里逐行标注 skipped，调用方可读到"哪些行是我发的"。
+      if (!claimedAny) {
+        return res.status(409).json({ error: '本轮重启通知正在发送中或已被其他请求认领，请稍后刷新查看', code: 'NOTIFY_CLAIM_CONFLICT' });
+      }
+      const fresh = await dbAllAsync(
+        `SELECT id, user_id, notify_status, notify_error FROM sys_issue_dev_assignees WHERE issue_id = ? AND removed_at IS NULL`, [id]);
+      res.json({ id, results, dev_assignees: fresh });
+    } catch (err) { logger.error('[系统迭代] 重启通知开发失败:', err && err.message); res.status(500).json({ error: (err && err.message) || '重启通知开发失败' }); }
+  });
+
   //   通知对接人（新，通知改造 C3 G7）：仅 admin（白名单成员亦不可发，§3.1 正交——对接人是通知目标非操作者）；
   //   收件人=relay_notified_user_id（path B 建单写入）；发送前复核仍在白名单（防常量表变更后的历史脏数据）。
   router.post('/sys-issues/:id/notify-relay', authenticateToken, requireSysSchemaReady, requireAdmin, async (req, res) => {
@@ -9800,6 +10128,108 @@ module.exports = (deps) => {
       const fresh = await dbGetAsync('SELECT creator_notify_status, creator_notify_error FROM sys_issues WHERE id = ?', [id]);
       res.json({ id, creator_notify_status: fresh.creator_notify_status, creator_notify_error: fresh.creator_notify_error });
     } catch (err) { logger.error('[系统迭代] 手动通知建单人失败:', err && err.message); res.status(500).json({ error: (err && err.message) || '通知建单人失败' }); }
+  });
+
+  // ── S3（bug暂缓方案 20260803 v0.4 §7.3）：POST /sys-issues/:id/notify-hold-creator ──────────────────
+  //   暂缓通知建单人——活跃在册开发或 admin 手动点按钮。刻意不复用上方通用 notify-creator 端点：授权规则
+  //   不同（本端点=任一活跃在册成员∨admin，通用 creator 通道=admin∨受理人，两者授权主体集合不等价，且本
+  //   端点权限判定需**逐字复用 S2 的 assertBugHoldActor**——同一份判定口径，不重新实现一份易漂移的副本）；
+  //   状态判据不同（本端点=固定"已暂缓"单态 + hold 本轮锚点，非 sysNotifyStatusesFor 的多态白名单）；
+  //   type 门限不同（本端点仅 bug，通用 creator 通道 bug/feature/improvement 皆可）。
+  //   校验顺序严格按方案 §7.3 五步枚举顺序实现（type→status→actor→本轮锚点→self-guard），非套用上面
+  //   notify-creator"self-guard 优先于状态闸门"的旧范式——本端点是方案专门定义的新契约，独立枚举顺序。
+  router.post('/sys-issues/:id/notify-hold-creator', authenticateToken, requireSysSchemaReady, async (req, res) => {
+    const id = parsePositiveId(req.params.id);
+    if (!id) return res.status(400).json({ error: '无效的迭代单 ID', code: 'INVALID_SYS_ISSUE_ID' });
+    try {
+      const issue = await dbGetAsync('SELECT * FROM sys_issues WHERE id = ?', [id]);
+      if (!issue) return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' });
+      // ① type 门限：不得对变更流暂缓单生效（暂缓通知是 bug 暂缓机制的配套，变更流不适用）。
+      if (issue.type !== 'bug') return res.status(409).json({ error: '仅 bug 单支持暂缓通知', code: 'HOLD_NOTIFY_TYPE_NA' });
+      // ② status 门限：仅「已暂缓」。
+      if (issue.status !== '已暂缓') return res.status(409).json({ error: `当前状态（${issue.status}）不可发送暂缓通知`, code: 'STATUS_NOT_NOTIFIABLE' });
+      // ③ 授权：任一活跃在册成员 ∨ admin——**复用 S2 的 assertBugHoldActor**，与"谁能标记暂缓"同一套判定
+      //   口径（含 dev_status != 'excused' 的加严，见该函数定义处注释），不重新实现第二份易漂移的判定。
+      const actor = sysActor(req);
+      try {
+        await assertBugHoldActor(actor, issue);
+      } catch (guardErr) {
+        if (guardErr instanceof SysTransitionError) return res.status(guardErr.httpStatus).json({ error: guardErr.message, code: guardErr.code });
+        throw guardErr;
+      }
+      // ④ ⭐ 本轮锚点（S3b2·L-1 统一判据）：与重启侧（notify-resume-dev）同构算法——先按 to_status 筛选
+      //   主状态入边（结构化字段，所有主状态转移都写），再判该行是否为 hold。原实现直接把
+      //   `action_code = 'hold'` 塞进 WHERE 一起筛选，是比重启侧弱的判据：若将来出现"非 hold 方式进入
+      //   已暂缓"的路径（如某个新动作也能让单据落到已暂缓态），这条 WHERE 会跳过那一行、静默回落到更早
+      //   一条真正的 hold 行，把陈旧事件误判为"本轮"。改成同构写法后，"最近一次进入已暂缓的入边是不是
+      //   hold"这个判定与重启侧"最近一次进入处理中的入边是不是 resume"完全对称，两侧判据强度一致。
+      const holdRow = await dbGetAsync(
+        `SELECT id, action_code, summary, operator_name FROM sys_issue_timeline
+          WHERE issue_id = ? AND to_status = '已暂缓'
+          ORDER BY id DESC LIMIT 1`,
+        [id]
+      );
+      if (!holdRow || holdRow.action_code !== 'hold') {
+        return res.status(409).json({ error: '未找到本轮暂缓事件（最近一次进入已暂缓并非通过 hold）', code: 'HOLD_ANCHOR_NOT_FOUND' });
+      }
+      if (issue.creator_notify_status === 'sent') return res.status(409).json({ error: '本轮暂缓通知已发送', code: 'NOTIFY_ALREADY_SENT' });
+      // ⑤ self-guard：操作者==建单人时跳过发送（复用 intake_return 的 SELF_NOTIFY_SKIPPED 范式），且保持
+      //   not_sent 不写 sent（§7.4 明确要求，避免"跳过"被后续误读为"已发送"）——故此处直接 return，不落
+      //   recordSysCreatorNotify 任何值。
+      if (Number(actor.id) === Number(issue.created_by)) {
+        return res.json({ id, skipped: true, code: 'SELF_NOTIFY_SKIPPED' });
+      }
+      // ⑥ ⭐⭐ S3b2·M-1：原子 claim（CAS）——防并发点击/浏览器重试/代理重放让两个请求都读到 not_sent
+      //   各自发送 → 同轮重复真实发送。用现有列做条件更新，`creator_notify_message_key` 兼作临时占位
+      //   令牌（值域三态 not_sent/sent/failed，**不引入 sending 态**——加态要改 CHECK，SQLite 得 drop+
+      //   重建 37 列表，同时破坏本方案零 schema 变更承诺与项目"不再 drop 重建"规矩）。
+      //   条件：status<>'sent'（真正已发送的不会被抢）且 message_key IS NULL（§7.4 hold/resume 事务已把它
+      //   清 NULL，新一轮从 NULL 起步；已被别的并发请求认领的行此刻 message_key 是对方的令牌，非 NULL，
+      //   抢不到）。changes!==1 → 明确 409，不重试、不静默吞。
+      //   ⚠️ 失败释放路径**不需要额外代码**：recordSysCreatorNotify 的既有实现本就是
+      //   `creator_notify_message_key = ok ? messageKey : null`——发送失败时它会把 message_key 写回
+      //   NULL，等价于"释放占位"，下一次点击（同轮重试）能重新 claim 成功。这是复用既有函数的既有行为，
+      //   不是新写的释放逻辑，两者必须保持同步：若未来改了 recordSysCreatorNotify 的失败分支不再清空
+      //   message_key，这里的 claim 机制会失效（同轮永久卡死，claim 后失败=没人能再发）。
+      // ⑤b S5b·M-1 收口（codex 239 复审，末次合并审确认真缺陷）：建单人用户查询提到 claim **之前**——
+      //   这条查询只依赖 issue.created_by（③步之前已读到），与"是否已 claim"无关，没有理由留在 claim 之后。
+      //   ⚠️ 原实现把它放在 claim 之后：查不到用户时 `return 409 CREATOR_NOT_FOUND`，claim 已占的
+      //   `creator_notify_message_key` 从未被释放——建单人用户不存在（孤儿 created_by／用户表历史清理）
+      //   时会让本轮通知永久卡在 NOTIFY_CLAIM_CONFLICT，直到下一次 hold 才被 §7.4 重置。讽刺之处：本方案
+      //   整节 §4.5 消除的是 resume 死锁，却在通知路径引入了一个同类的小死锁。修法：把"claim 之后还可能
+      //   因缺前置数据而提前 return"的检查一律挪到 claim 之前，claim 之后只留"必然要走完、双归一"的路径
+      //   （见下方 try/catch）。
+      const creator = await dbGetAsync('SELECT id, display_name, phone, dingtalk_user_id FROM users WHERE id = ?', [issue.created_by]);
+      if (!creator) return res.status(409).json({ error: '建单人用户不存在', code: 'CREATOR_NOT_FOUND' });
+      const claimToken = `claim-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const claim = await dbRunAsync(
+        `UPDATE sys_issues SET creator_notify_message_key = ?
+           WHERE id = ? AND creator_notify_status <> 'sent' AND creator_notify_message_key IS NULL`,
+        [claimToken, id]
+      );
+      if (!claim || claim.changes !== 1) {
+        return res.status(409).json({ error: '本轮暂缓通知正在发送中或已被其他请求认领，请稍后刷新查看', code: 'NOTIFY_CLAIM_CONFLICT' });
+      }
+      // S5b·M-1 收口（同构 intake_return 既有范式，index.js:5066-5077 的"整体包一层 try，异常归一 {ok:false}"）：
+      //   claim 之后仅剩"必然要落一个结果"的发送路径——baseUrl 取值/模板构建/实际发送整体包一层 try，
+      //   任一环节抛异常都归一为 {ok:false}，下面 recordSysCreatorNotify 无条件落库（含释放 claim，见该函数
+      //   SET 子句 `ok?messageKey:null`）。不再让"claim 已占、异常直接扔给外层 500"这条路径存在——
+      //   那条路径下 claim 永远不会被释放（同一类缺陷的防御性收口，非仅修已知的 creator 一处）。
+      let result;
+      try {
+        const baseUrl = await getSafePlatformBaseUrl();
+        // "谁做的"取本轮 hold 事件的 operator_name（holdRow 本就是④步查出的同一行，不额外查询）；
+        // reason 传 holdRow.summary——hold 的 summary 就是理由原文本身（无拼接），对齐模板注释。
+        const { title, md } = buildSysHoldCreatorMarkdown({ ...issue, hold_by_name: holdRow.operator_name }, holdRow.summary, baseUrl);
+        result = await sendIssueDingtalkRaw(creator, title, md);
+      } catch (prepOrSendErr) {
+        result = { ok: false, reason: (prepOrSendErr && prepOrSendErr.message) || 'notify_exception' };
+      }
+      await recordSysCreatorNotify(id, !!result.ok, result.message_key, result.reason, actor.id);
+      await recordSysNotifyTimeline(id, '建单人', `${creator.display_name || creator.username || ''}(id${issue.created_by})`, !!result.ok, result.ok ? result.message_key : result.reason, actor);
+      const fresh = await dbGetAsync('SELECT creator_notify_status, creator_notify_error FROM sys_issues WHERE id = ?', [id]);
+      res.json({ id, creator_notify_status: fresh.creator_notify_status, creator_notify_error: fresh.creator_notify_error });
+    } catch (err) { logger.error('[系统迭代] 暂缓通知建单人失败:', err && err.message); res.status(500).json({ error: (err && err.message) || '暂缓通知建单人失败' }); }
   });
 
   // ── [已退场] POST /sys-issues/:id/notify-release-executor：手动通知上线开发（通知改造 follow-up 2026-07-07）──────────
@@ -10182,6 +10612,10 @@ module.exports = (deps) => {
     buildSysDevMarkdown,
     buildSysRequesterMarkdown,
     sysDeepLinkLine,
+    // S3（bug暂缓方案 §7.1/§7.3/§7.4）：两个新模板 + 通知列重置 SQL 常量（verify 直调真实逻辑，RC-L2 防复刻漂移）
+    buildSysHoldCreatorMarkdown,
+    buildSysResumeDevMarkdown,
+    SYS_CLEAR_CREATOR_NOTIFY_FIELDS_SQL,
     // bug 流 Commit ③：真钉钉建群（verify-sys-create-chat require 真实逻辑，防漂移）
     SYS_CHAT_ALLOWED_STATUSES,
     addSysChatMember,
@@ -10215,6 +10649,11 @@ module.exports = (deps) => {
     MEMBER_ACTION_FAMILY_MATRIX,
     MEMBER_ACTION_FAMILY_TYPE_OVERRIDE,   // C2c·codex115 MED：reassign type 级族门覆盖（变更流排除 D_PRE / bug 保留）
     memberActionFamiliesFor,               // type 感知取族门（verify [6] 写读同源断言 + 端点同源读此）
+    // S2（bug暂缓方案 §4.5/§4.5b/§5.2）：hold 授权 + roster 冻结 + reassign 状态级排除（verify 直调真实逻辑，RC-L2 防复刻漂移）
+    assertBugHoldActor,
+    assertRosterNotFrozen,
+    MEMBER_ACTION_STATUS_EXCLUDE,
+    memberActionAuthoritativeStatuses,     // §4.5b：verify-sys-meta.js [6] authoritative 计算改消费此函数（族门-状态级排除，双向同源）
     DEV_ASSIGNEES_SELECT_COLS,
   };
 

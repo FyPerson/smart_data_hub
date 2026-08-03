@@ -225,7 +225,8 @@ async function main() {
     d = await get('SELECT blocked, blocked_reason, blocked_at, feasibility_conclusion FROM sys_issues WHERE id=?', [idHV2]);
     assert.strictEqual(d.blocked, 0, 'hold 清 blocked=0'); assert.strictEqual(d.blocked_reason, null, 'hold 清 blocked_reason'); assert.strictEqual(d.blocked_at, null, 'hold 清 blocked_at');
     assert.strictEqual(d.feasibility_conclusion, '可行', '⭐ hold 不动评估（§⑥ 留作问责对照，只清 blocked 非换轮）');
-    r = await call('POST', `/api/sys-issues/${idHV2}/resume`, adminTok, {});
+    // ⭐ [bug暂缓方案 20260803 v0.4 口径 #1] resume requiredPayload 从 [] 改 ['reason']，补传 reason
+    r = await call('POST', `/api/sys-issues/${idHV2}/resume`, adminTok, { reason: '验证暂缓后恢复到开发中不残留受阻' });
     assert.strictEqual(r.body.status, '开发中', 'resume → 开发中');
     d = await get('SELECT blocked FROM sys_issues WHERE id=?', [idHV2]);
     assert.strictEqual(d.blocked, 0, 'resume 后 blocked=0（不残留受阻致卡死）');

@@ -40,10 +40,15 @@ const SYS_INTAKE_STATUSES = {
 
 // ── 开发前态（D_PRE）：受理通过后、进入开发前的态 ──────────
 //   受理排期改造：变更流删「待评估/已排期」→ 改「待指派」（受理通过落态）；bug D_PRE 保持「待处理」。
+//   ⭐ [bug暂缓方案 20260803 v0.4 §4.1] bug 追加「已暂缓」——归 D_PRE（非终态）而非 TERMINAL/FROZEN，
+//   理由=让 spec 类附件守卫（isInFamily(...,'TERMINAL') 判非终态放行）在暂缓期仍放行附件上传，与变更流
+//   「已暂缓」同构。⚠️ 负向约束（方案 §4.4）：**不得**把「已暂缓」加进 SYS_DEV_STATUSES.bug /
+//   SYS_VERIFY_STATUSES.bug ——那会让 delivery/screenshot 交付附件的状态族守卫（要求 DEV∪VERIFY）意外
+//   对暂缓态放行，是本方案明确要保持关闭的口子（方案 §4.6/§4.6b）。
 const SYS_D_PRE_STATUSES = {
   feature: ['待指派', '已暂缓'],
   improvement: ['待指派', '已暂缓'],
-  bug: ['待处理'],
+  bug: ['待处理', '已暂缓'],
 };
 
 // ── 开发执行态（DEV）：开发正在干活的态 ──────────

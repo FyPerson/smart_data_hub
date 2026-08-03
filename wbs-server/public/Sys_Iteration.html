@@ -648,6 +648,22 @@
     // [codex 110 号 LOW] set_release_flag 已随 v1.6 R1 全链退场（端点对所有 type 无生效路径、siDoAction case 已删），
     //   从开发动作集移除防未来 meta 回归时被当在册动作放出。
     const SI_DEV_ACTIONS = new Set(['estimate', 'submit', 'feasibility', 'blocked']);
+    // S4（bug暂缓方案 20260803 v0.4 §6.1）：hold 在 bug 是开发动作（口径 #6：任一活跃在册成员 ∨ admin）、
+    //   在变更流是纯 admin 动作（roleGuard:'admin'，既有已上线行为）——同一个 action 名两流授权模型不同，
+    //   不能直接把 'hold' 塞进上面这个全局 Set（那样变更流 admin 会看不到暂缓按钮、bug 开发点了必 403，
+    //   本文件旧注释 :647 警告过 unblock 当年就是这么踩的坑）。改用按 type 判定的函数，SI_DEV_ACTIONS
+    //   本身不再是唯一读取口——所有调用点必须经本函数，不得再直接 `.has()` 该 Set。
+    //   ⭐ 234 M-2：运行时硬断言而非"签名不给默认值"——本项目原生 JS 无类型检查，漏传 type 时
+    //   `type === undefined`，若不显式判断，`type === 'bug'` 判 false 会**静默落到变更流分支**（正是要
+    //   避免的失败形态：漏传时理应报错，不该"看起来正常工作"）。
+    function siIsDevAction(action, type) {
+        if (type !== 'feature' && type !== 'improvement' && type !== 'bug') {
+            console.error('[siIsDevAction] type 缺失或非法：', type, 'action=', action);
+            return false;   // fail-closed：不当作开发动作，落到下方 admin/协调人分支判断（更保守，不多显）
+        }
+        if (type === 'bug' && action === 'hold') return true;   // bug 专属：hold 是开发动作
+        return SI_DEV_ACTIONS.has(action);   // 其余动作两流同源，沿用既有全局 Set
+    }
     // 危险按钮样式
     const SI_DANGER_ACTIONS = new Set(['return', 'issue_reject', 'void', 'reopen', 'hold', 'blocked']);
     const SI_SEC_ACTIONS = new Set(['reassign', 'unblock', 'derive', 'close',
@@ -672,7 +688,10 @@
     const SI_CREATOR_ACTIONS = new Set(['resubmit_intake', 'edit_in_revision']);
     // ── 角色权限重构 v2.1 §4：OA 号可填状态集（前端镜像后端 SYS_OA_ALLOWED_STATUSES·真闸在后端 set-oa-number
     //   端点）——⚠️ 两处同步：后端 index.js SYS_OA_ALLOWED_STATUSES + 本常量，改一端必须改另一端（写读同源）。
-    //   ⚠️ bug 集合无「已暂缓」（bug 无该态，见 transitions.js BUG_FLOW_STATUSES 注释），不可照抄变更流集合。
+    //   ⚠️ S4（bug暂缓方案 20260803 v0.4 §4.4）注释更正：bug **现在有**「已暂缓」态（见 transitions.js
+    //   BUG_FLOW_STATUSES），但 bug 集合本行仍不纳入「已暂缓」——原因不是"bug 无该态"（此说法已随本方案
+    //   失效），而是 bug 结构性不进 OA 守卫（`assertSysDevCommitmentOaGuard` 首行 type guard 直接
+    //   return，OA 号填报机制本身只服务变更流）。故本行数组值不变，仅注释理由更正，不可照抄变更流集合。
     // ⚠️ 本表是后端 SYS_OA_ALLOWED_STATUSES 的**镜像**（前端提示非授权源·后端 409 恒兜底）——改后端必同步此处。
     //   镜像漂移风险已登记待追认（服务端返回 oa_fillable 派生字段是根治法·本批不动）。191 号审后+待验证。
     const SI_OA_ALLOWED_STATUSES = {
@@ -1190,6 +1209,24 @@
         if (i.tech_lead_notify_status === 'failed') return `<span class="si-flag" style="color:#dc2626">发送失败</span>`;
         return '';
     }
+    // S4（bug暂缓方案 20260803 v0.4 §6.3）：「已暂缓 N 天」列表徽章——⚠️ 必须叠加 status==='已暂缓' 才渲染：
+    //   last_held_at 取的是**最近一次** hold 事件时间（列表 SQL 侧 MAX 语义），resume/void 之后该列依然
+    //   非 NULL（历史事实不会消失），若不按状态门控，恢复/作废后仍会显示陈旧天数——这是本函数存在的
+    //   唯一理由，不能省略这个判断。多轮暂缓只显最近一轮：SQL 侧 MAX 已只取最新一轮 created_at，本函数
+    //   信任来源不再自己去重。日历日差计算同 siRemainingDaysHtml 范式（本地时区·同日=0 天）。
+    function siHeldDaysHtml(status, lastHeldAt) {
+        if (status !== '已暂缓' || !lastHeldAt) return '';
+        try {
+            const m = String(lastHeldAt).match(/^(\d{4})-(\d{2})-(\d{2})/);
+            if (!m) return '';
+            const held = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+            const now = new Date();
+            const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+            const diff = Math.round((today - held) / 86400000);
+            const days = diff < 0 ? 0 : diff;   // 防御：不显负数（正常不会出现，held 是历史时间点不会晚于今天）
+            return `<span class="si-flag" style="color:#b45309">已暂缓 ${days} 天</span>`;
+        } catch (e) { return ''; }
+    }
     function renderSysIterationRows(list) {
         const tb = document.getElementById('siTbody');
         if (!list.length) {
@@ -1201,7 +1238,8 @@
                 (i.scope_changed ? `<span class="si-flag scope">范围变更</span>` : '') +
                 (i.reopen_count ? `<span class="si-flag reopen">返工×${i.reopen_count}</span>` : '') +
                 (i.blocked ? `<span class="si-flag blocked">受阻</span>` : '') +
-                siTechLeadNotifyBadgeHtml(i);
+                siTechLeadNotifyBadgeHtml(i) +
+                siHeldDaysHtml(i.status, i.last_held_at);
             const lineage = i.origin_issue_id ? `<span class="si-flag lineage">🔁基于#${i.origin_issue_id}</span>` : '';
             return `<tr onclick="siOpenDrawer(${i.id})">
                 <td>#${i.id}</td>
@@ -1247,7 +1285,8 @@
     // ============================================================
     async function siOpenDrawer(id) {
         // P2 迭代（弹窗式）：切单时清空三块上传弹窗组件残留（防上一单未上传的选择串到本单·revoke objectURL）。
-        ['modal-spec', 'modal-delivery', 'modal-screenshot'].forEach(k => siPickerReset(k));
+        // S4：resume-spec（重启弹窗附件）同批纳入——切单同样应清残留，避免上一单的选择串到本单。
+        ['modal-spec', 'modal-delivery', 'modal-screenshot', 'resume-spec'].forEach(k => siPickerReset(k));
         siOpenId = id;
         // codex123 末次审 MED-1：切单起手即失效旧缩略图（在替换 siDBody 前 revoke + 递增代际），
         //   使"切单即失效"而非"渲染成功才失效"——否则 siRenderDrawer 请求挂起/非 403-404 失败时
@@ -1265,7 +1304,7 @@
     }
     function siCloseDrawer() {
         siOpenId = null; siDetail = null;
-        ['modal-spec', 'modal-delivery', 'modal-screenshot'].forEach(k => siPickerReset(k));   // P2 迭代：关闭清理三块上传弹窗组件资源
+        ['modal-spec', 'modal-delivery', 'modal-screenshot', 'resume-spec'].forEach(k => siPickerReset(k));   // P2 迭代：关闭清理三块上传弹窗组件资源（S4 补 resume-spec）
         siRevokeAttThumbs();   // 附件融入：关抽屉 revoke 缩略图 objectURL 防内存泄漏
         document.getElementById('siOverlay').classList.remove('open');
         document.getElementById('siDrawer').classList.remove('open');
@@ -1393,8 +1432,14 @@
         //   通知区——原"非 admin 在变更流无手动能力"的注释停在 C2b 时代，S5 给了受理人技术负责人通知的
         //   发送权、C1 起后端三通道（developer/creator/requester）本就是 admin∨受理人全类型（已核
         //   sysManualNotifyGuard），门不放开=示例对接人整个通知区都看不见。bug 分支的对接人/主开发本人可见不变。
+        // S4（bug暂缓方案 §7.3）：加 `siCaps.isRosterMember`——暂缓通知按钮的授权口径是"任一活跃在册成员
+        //   ∨ admin"（同 assertBugHoldActor，非仅 assigned_to 单人）。原判断只含 `assigned_to===本人`
+        //   这条旧的单人口径（去主次前的遗留写法），非代表的在册开发（不是 assigned_to 但确在 roster）
+        //   会连本区都看不到，更别提区内新增的暂缓通知按钮。加宽后该类用户能看到通知区——区内其余既有行
+        //   （developer/creator/requester）按钮仍各自受 canOperate* 独立门控（admin∨受理人），不因本次
+        //   加宽而多出操作权，只是多了"看得见"，加上新按钮本就该给他们用。
         const canSeeNotify = isAdmin() || (currentUser && isSiIntakeLiaison(currentUser.id))
-            || (iss.type === 'bug' && currentUser && (isSiBugLiaison(currentUser.id) || (Number(iss.assigned_to) === Number(currentUser.id) && currentUser.id > 0)));
+            || (iss.type === 'bug' && currentUser && (isSiBugLiaison(currentUser.id) || (Number(iss.assigned_to) === Number(currentUser.id) && currentUser.id > 0) || (siCaps && siCaps.isRosterMember)));
         const notify = canSeeNotify ? siRenderNotify(iss, r.data.dev_assignees) : '';
 
         // 讨论群（§5 bug 流拉群；已建才展示，留痕：议题 + 拉群时间）
@@ -1927,7 +1972,11 @@
     }
 
     // 建单人侧：权限=admin/白名单/主开发本人（notify-creator handler 内判定）；self-guard 由 siNotifyManual 内识别 skipped 淡提示。
+    // ⚠️ S4：bug 单「已暂缓」态不渲染本行——该状态下建单人通知改由下方专属的 siRenderHoldCreatorNotifyRow
+    //   接管（不同端点/不同授权口径/不同锚点判据，见该函数头注释），两行同显会重复展示同一组
+    //   creator_notify_* 字段、造成视觉混淆。变更流没有对应新行，已暂缓态本就不 sendable（不受影响）。
     function siRenderCreatorNotifyRow(iss, canOperateCreator, canQueryRead) {
+        if (iss.type === 'bug' && iss.status === '已暂缓') return '';
         const label = `建单人 ${esc(iss.created_by_name || ('#' + iss.created_by))}`;
         const sendable = siNotifyStatusesFor(iss.type, 'creator').includes(iss.status);   // C2b：bug/变更流状态门一致（待验证/待上线/已上线）
         let btns = '';
@@ -1939,6 +1988,49 @@
             btns += `<button class="u-btn-secondary u-nb-btn" onclick="siQueryReadStatus('creator')">查询已读</button>`;
         }
         return siNotifyRowHtml(label, iss.creator_notify_status, iss.creator_read_at, iss.creator_notified_at, btns);
+    }
+
+    // S4（bug暂缓方案 20260803 v0.4 §7.3）：暂缓通知建单人行——仅 bug 单「已暂缓」态渲染。权限=任一活跃
+    //   在册成员 ∨ admin（口径 #6，同后端 assertBugHoldActor；不是 admin∨受理人的通用 creator 通道口径，
+    //   两者刻意不同，见后端 notify-hold-creator 端点注释）。复用 creator_notify_* 同一组字段/同一个
+    //   siNotifyRowHtml 展示组件，仅按钮 onclick 与可发条件不同——本行接管上方 siRenderCreatorNotifyRow
+    //   在已暂缓态本就不 sendable 的空当，不重复展示。
+    // ⚠️ S4 补强（codex 239 审 M-1，主会话核实成立）：canOperate 改读后端下发的 iss.can_bug_hold 能力位
+    //   （与写路径真闸 assertBugHoldActor 同一谓词 canBugHold），不再用 siCaps.isRosterMember 顶替——那是
+    //   "在册/历史参与成员"的**读可见性**判定，不含 removed_at IS NULL / dev_status != 'excused' 收紧，会让
+    //   已移除、已 excuse 的历史成员在前端多看到「发送通知」按钮（点击后端会 403，安全无虞，但是拿读权限
+    //   冒充写权限，显隐本身不诚实）。can_bug_hold 已经把 admin 判断也包含在内，不需要再叠 isAdminUser。
+    function siRenderHoldCreatorNotifyRow(iss) {
+        if (iss.type !== 'bug' || iss.status !== '已暂缓') return '';
+        const canOperate = !!iss.can_bug_hold;
+        const label = `暂缓通知建单人 ${esc(iss.created_by_name || ('#' + iss.created_by))}`;
+        let btns = '';
+        if (canOperate && iss.creator_notify_status !== 'sent') {
+            btns += `<button class="u-btn-secondary u-nb-btn" onclick="siNotifyHoldCreatorClick()">发送通知</button>`;
+        }
+        return siNotifyRowHtml(label, iss.creator_notify_status, iss.creator_read_at, iss.creator_notified_at, btns);
+    }
+
+    // S4（bug暂缓方案 §7.3）：重启通知开发行——仅 bug 单「处理中」态候选渲染，是否确为"本轮重启"由后端
+    //   §7.3 锚点算法判定（前端不重复实现该算法，只提供入口；未命中时端点返 409 RESUME_ANCHOR_NOT_FOUND，
+    //   siApiErr 走后端返回的中文 error 文案友好提示，不需要前端额外分支）。权限=仅 admin（镜像后端
+    //   requireAdmin）。批量：一次点击尝试通知全部"本轮未发送成功"的在册开发，与逐 dev 发送通知
+    //   （siRenderDevNotifyRows，处理中态同样 sendable）是两套独立机制——后者随时可逐人补发，前者是
+    //   "刚重启，一键通知全员"的批量入口，不互相替代，UI 上刻意分两行不合并。
+    function siRenderResumeNotifyRow(iss, devAssignees) {
+        if (iss.type !== 'bug' || iss.status !== '处理中') return '';
+        const roster = devAssignees || [];
+        if (!roster.length) return '';
+        const isAdminUser = isAdmin();
+        const allSent = roster.every(d => d.notify_status === 'sent');
+        const statusText = allSent
+            ? `<span style="color:#059669;">✅ 本轮已全部通知</span>`
+            : `<span style="color:#9ca3af;">— 尚有在册开发未通知（若非本轮重启所致，点击会提示无法发送）</span>`;
+        let btns = '';
+        if (isAdminUser && !allSent) {
+            btns += `<button class="u-btn-secondary u-nb-btn" onclick="siNotifyResumeDevClick()">发送通知</button>`;
+        }
+        return `<div class="u-notify-row"><span class="u-nr-label">重启通知开发（批量）</span><span class="u-nr-body">${statusText}${btns}</span></div>`;
     }
 
     // 对接人受理侧（建单优化批 C1 §4 改动点2·前端 C2，方案 v1.2 §4.8）：仅「待受理」态渲染——回受理门
@@ -2099,7 +2191,9 @@
         return `<div class="u-detail-section"><h3>钉钉通知（独立·手动触发）</h3>
             ${siRenderIntakeNotifyRow(iss, isAdminUser, isAdminUser)}
             ${siRenderTechLeadNotifyRow(iss)}
+            ${siRenderHoldCreatorNotifyRow(iss)}
             ${siRenderDevNotifyRows(iss, devAssignees || [], canOperateDev, canQueryRead)}
+            ${siRenderResumeNotifyRow(iss, devAssignees || [])}
             ${siRenderRelayNotifyRow(iss, canOperateRelay, canQueryReadAdminOnly)}
             ${siRenderCreatorNotifyRow(iss, canOperateCreator, canQueryRead)}
             ${siRenderRequesterNotifyRow(iss, canOperateRequester, canQueryRead)}
@@ -2173,7 +2267,8 @@
             if (a === 'request_tech_consult' && siHasActiveConsult(iss) && !siHasTechLeadComment(iss)) continue;
             const hit = (f.from === '*') || (Array.isArray(f.from) && f.from.includes(iss.status));
             if (!hit) continue;
-            const devAction = SI_DEV_ACTIONS.has(a);
+            // S4·§6.1：改用类型感知的 siIsDevAction（bug 的 hold 是开发动作，变更流的 hold 仍归 admin 分支）。
+            const devAction = siIsDevAction(a, iss.type);
             // ⭐ C1 协调人放行契约：受理人可见动作 = action∈{assign,reassign}（**全类型**·不再限 type='bug'）
             //   （动作名硬编码在此处，不依赖 flows 配置——将来加新动作/改 flows 也不会扩大放行范围）
             //   ∧ 状态由共享 hit(from 命中，见上方) 收窄。
@@ -2185,7 +2280,16 @@
                 // 其他成员未完成时，主状态仍留在 SYS_DEV，仅按族状态判会让已提交成员继续看到「提交」按钮，
                 // 点击必 409 INVALID_STATUS；estimate/feasibility/blocked 三个 W06 动作不分 dev_status，
                 // 任一在册成员均可填（§5.3 W06 白名单），故仍用 isRosterMember。
+                // S4：bug 的 hold 口径是「任一活跃在册成员 ∨ admin」（口径 #6，同后端 assertBugHoldActor）——
+                //   本分支其余动作只判 isRosterMember（无 admin 兜底，因为它们本就是纯开发自助动作，admin
+                //   不需要代填），hold 是本分支里唯一需要额外 OR 上 admin 的例外，不能沿用 else 分支的单一判断。
+                // ⚠️ S4 补强（codex 239 审 M-1，主会话核实成立）：hold 改判后端下发的 iss.can_bug_hold 能力位
+                //   （与写路径真闸 assertBugHoldActor 同一谓词 canBugHold），不再用 isRosterMember（siCaps 读
+                //   可见性判定，不含 removed_at IS NULL / dev_status != 'excused' 收紧）∨ isAdminUser 顶替——
+                //   否则已移除/已 excuse 的历史成员会在前端多看到「暂缓」按钮（点击后端 403 拦下，安全无虞，
+                //   但显隐本身是拿读权限冒充写权限）。can_bug_hold 已含 admin 判断，不需要再 OR isAdminUser。
                 if (a === 'submit') { if (!(siCaps && siCaps.canSubmit)) continue; }
+                else if (a === 'hold') { if (!iss.can_bug_hold) continue; }
                 else if (!isRosterMember) continue;
             }
             // 受理排期改造 C7：受理门动作前端权限门（镜像后端 §5.3·前端非授权源·点击被后端 403 兜底）
@@ -2366,7 +2470,16 @@
             case 'return': return siModalReason(iss, 'return', '验收打回', '打回原因', '/return');
             case 'close': return siConfirmSimple(iss, 'close', '确认归档（观察期结束）？', '/close');
             case 'hold': return siModalReason(iss, 'hold', '暂缓', '暂缓原因', '/hold');
-            case 'resume': return siConfirmSimple(iss, 'resume', '确认恢复到暂缓前的状态？', '/resume');
+            // S4（bug暂缓方案 §6.2/§6.3）：resume 改走专用弹窗 siModalResume——不再走 siConfirmSimple。
+            //   ⚠️ codex 238 risk-1：siConfirmSimple（下方定义处）恒传 body:{}，S1 给 resume 加 reason 必填
+            //   后，两流的「恢复」按钮若继续走它会必 400（前端已不可用）。**改法取舍**：siConfirmSimple 被
+            //   accept/close/intake_accept/resubmit_intake 等 5+ 处"确认即走、无需任何输入"的动作复用，
+            //   给它加"可选 payload"能力要改函数签名+触达全部既有调用点（改动面大、且这些调用点本就不需要
+            //   payload，白改）；resume 本就需要理由必填 + 可选附件两步链，这是它独有的复杂表单需求，
+            //   不是"resume 恰好也想传个 body"这种轻量场景。故选**独立弹窗**（siModalResume，同 hold 的
+            //   siModalReason 独立处理同一类问题——本就是既有范式，非新发明），siConfirmSimple 本体不动，
+            //   零回归其余调用点。
+            case 'resume': return siModalResume(iss);
             case 'reactivate': return siModalReason(iss, 'reactivate', '重新激活', '重新激活原因', '/reactivate');
             case 'issue_reject': return siModalReason(iss, 'issue_reject', '拒绝', '拒绝原因', '/issue-reject');
             case 'void': return siModalReason(iss, 'void', '作废', '作废原因', '/void');
@@ -2424,6 +2537,10 @@
     //   与 recordSysIntakeNotify 落库列同名）——标签用"通知对接人受理"而非"通知对接人"，与既有 relay
     //   通道的"通知对接人"（siNotifyRelayClick）区分，防两条 toast 文案混淆成同一件事。
     function siNotifyIntakeClick() { return siNotifyManual('notify-intake', '通知对接人受理', 'intake_notify_status', 'intake_notify_error'); }
+    // S4（bug暂缓方案 §7.3）：暂缓通知建单人——响应体形状（含 skipped 自我保护分支）与既有四通道
+    //   notify-relay/creator/requester/intake 完全一致（同样落 creator_notify_* 列），直接复用 siNotifyManual，
+    //   不另写一份。409（如 NOTIFY_CLAIM_CONFLICT）走 siApiErr 统一友好提示，本函数不需要额外分支。
+    function siNotifyHoldCreatorClick() { return siNotifyManual('notify-hold-creator', '暂缓通知建单人', 'creator_notify_status', 'creator_notify_error'); }
 
     // 开发侧逐 dev 通知（notify-developer 带 dev_user_id，定位子表活动行；同一 inflight 守卫）
     async function siNotifyDevSend(devUserId) {
@@ -2438,6 +2555,28 @@
             if (st === 'sent') showToast('通知开发：钉钉已发送', 'success');
             else if (st === 'failed') showToast('通知开发：发送失败（' + ((r.data && r.data.notify_error) || '未知') + '）', 'error');
             else showToast('通知开发：已触发', 'success');
+            await siAfterAction();
+        } finally { siNotifyInflight = false; }
+    }
+
+    // S4（bug暂缓方案 §7.3）：重启通知开发（批量）——响应体形状 {id, results, dev_assignees} 与逐 dev 通知
+    //   notify-developer（单条 notify_status）不同，不能复用 siNotifyManual，单独实现。results 里
+    //   skipped:true 的行（claim_conflict）不算失败——只是"这次没抢到"（已被并发请求认领或已 sent），
+    //   不单独提示，仅在 ok:false 且非 skipped 时计入失败数。
+    async function siNotifyResumeDevClick() {
+        const iss = siDetail && siDetail.issue;
+        if (!iss) return;
+        if (siNotifyInflight) return;
+        siNotifyInflight = true;
+        try {
+            const r = await siApi('/sys-issues/' + iss.id + '/notify-resume-dev', { method: 'POST' });
+            if (!r.ok) { siApiErr(r); return; }
+            const results = (r.data && r.data.results) || [];
+            const okCount = results.filter(x => x.ok).length;
+            const failCount = results.filter(x => !x.ok && !x.skipped).length;
+            if (failCount > 0) showToast(`重启通知开发：${okCount} 人成功，${failCount} 人失败（可重试）`, 'warning');
+            else if (okCount > 0) showToast(`重启通知开发：${okCount} 人已发送`, 'success');
+            else showToast('重启通知开发：无新增发送（可能已被其他请求认领）', 'info');
             await siAfterAction();
         } finally { siNotifyInflight = false; }
     }
@@ -2514,6 +2653,48 @@
             const r = await siApi('/sys-issues/' + iss.id + path, { method: 'POST', body: {} });
             if (!r.ok) { siApiErr(r); return false; }
             showToast('操作完成', 'success'); return true;
+        }, '确定');
+    }
+
+    // S4（bug暂缓方案 20260803 v0.4 §6.2）：重启弹窗——理由必填 + 附件可选，两步链范式（先 resume JSON
+    //   提交拿结果 → 再 FormData 上传 spec 附件，同 siOpenCreate 的 C5 两步链/siOpenUploadModal 的上传范式，
+    //   非另造一套）。附件类型沿用 spec 既有白名单 SI_SPEC_ALLOWED_EXTS（口径 #8，不收窄为仅图片——证据
+    //   可能是日志/Excel样本/录屏）。上传失败**不回滚** resume（口径 #11·两步链下系统层面本就无法保证
+    //   "重启必有证据"，best-effort，同建单 siOpenCreate 失败只拼提示到 msg 的处理方式）。
+    //   picker key='resume-spec'——关弹窗时的统一 reset 见 siCloseModal（已把该 key 加入批量 reset 数组）。
+    function siModalResume(iss) {
+        const key = 'resume-spec';
+        siPickerReset(key);
+        siModal('重启 #' + iss.id, [
+            fTextarea('reason', '重启原因', '', true, '必填，trim 后非空'),
+            { k: null, html: `<div class="u-form-group"><label>补充证据材料（选填，图片/PDF/Excel/Word/csv/txt/md，单个≤20MB，最多5个）</label>
+                ${siFilePickerHtml(key, '选择文件')}
+                <div class="u-hint">证据非强制：两步链下上传失败不影响重启本身生效，失败会提示到详情页补传。</div></div>`
+            },
+        ], async v => {
+            const reason = (v.reason || '').trim();
+            if (!reason) { showToast('重启原因必填', 'error'); return false; }
+            const selectedFiles = siPickerFiles(key).slice();   // 快照，防 onConfirm 期间数组被并发改动（同 create-spec 范式）
+            const r = await siApi('/sys-issues/' + iss.id + '/resume', { method: 'POST', body: { reason } });
+            if (!r.ok) { siApiErr(r); return false; }   // resume 本身失败：不进第二步，弹窗保留(已选文件不丢)供重试
+            let msg = '重启完成';
+            let hasFailure = false;
+            if (selectedFiles.length > 0) {
+                let uploadOk = false;
+                try {
+                    const fd = new FormData();
+                    fd.append('attachment_type', 'spec');
+                    selectedFiles.forEach(f => fd.append('files', f));
+                    const uploadR = await siApi(`/sys-issues/${iss.id}/attachments`, { method: 'POST', body: fd, isForm: true });
+                    uploadOk = !!(uploadR && uploadR.ok);
+                } catch (e) { console.error('[系统迭代] 重启后上传证据材料异常：', e); uploadOk = false; }
+                if (!uploadOk) {
+                    hasFailure = true;   // resume 本身已生效，上传失败只降级提示，不算整体操作失败（对齐建单两步链的 hasFailure 语义）
+                    msg += `；${selectedFiles.length} 个证据材料上传失败，请到详情页补传`;
+                }
+            }
+            showToast(msg, hasFailure ? 'warning' : 'success');
+            return true;   // siModal 框架统一 siCloseModal()（含 resume-spec picker reset）+ siAfterAction()
         }, '确定');
     }
 
@@ -4397,7 +4578,8 @@
         //   避免 submit 弹窗多次开关未上传时 objectURL 在长会话累积（提交成功已 reset，此处兜取消/×关闭路径）。
         siPickerReset('submit-delivery');
         // P2 迭代（弹窗式上传）：三块上传弹窗组件同样在关弹窗时 reset（取消/×/上传收尾）——防 objectURL 累积。
-        ['modal-spec', 'modal-delivery', 'modal-screenshot'].forEach(k => siPickerReset(k));
+        // S4：resume-spec（重启弹窗附件，siModalResume）同批纳入——理由与上面三块逐字一致。
+        ['modal-spec', 'modal-delivery', 'modal-screenshot', 'resume-spec'].forEach(k => siPickerReset(k));
         // M1：若关闭的是建单弹窗，释放 spec 组件资源（取消/×关闭/建单成功收尾都经此）。提交链已用
         //   siPickerFiles('create-spec').slice() 取快照，此处清空不影响进行中的上传。
         if (siCreateModalOpen) {
@@ -4585,8 +4767,9 @@
     //     容器缺失时显式返回带 querySelectorAll 的空作用域哨兵对象（u-paste.js register() 文档已注明
     //     该契约），不返回 null，从而保持"这种异常态下候选池为空"的原始安全行为。
     //   selector——[id^="siPreview_"] 覆盖本页全部 picker 实例（create-spec/submit-delivery/
-    //     modal-spec/modal-delivery/modal-screenshot）。ql-create/ql-edit 两个零星事项台账实例已随
-    //     2026-08-02 独立页拆分（Quick_Log.html）整体迁走，不再在本页选择器覆盖范围内。
+    //     modal-spec/modal-delivery/modal-screenshot/resume-spec——S4 新增重启弹窗附件，前缀选择器
+    //     天然覆盖，新增本条仅为保持枚举注释与实际实例集一致，非功能变更）。ql-create/ql-edit 两个
+    //     零星事项台账实例已随 2026-08-02 独立页拆分（Quick_Log.html）整体迁走，不再在本页选择器覆盖范围内。
     //   keyOf——从 id 去前缀取 key，与原实现逐字同规则。
     //   collect——把 File 交还本页既有收集闸门 siPickerCollect（数量/大小/扩展名/去重校验）+ 触发
     //     siPickerRender 重渲染预览，与抽取前完全同一收尾动作（原来是 siPickerCollect+siPickerRender

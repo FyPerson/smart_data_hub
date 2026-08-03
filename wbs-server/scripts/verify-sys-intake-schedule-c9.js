@@ -9,8 +9,10 @@
 //       待受理」绕过受理门链的**第一道闸**（hold 本身进不去）。与既有 verify-sys-multidev-members S28c（INTAKE 态
 //       直接成员动作 409）形成双闸——本块验「暂缓侧门」入口断，S28c 验「直接成员动作」断。
 //       ⚠️ 归因用**常量层 + HTTP 行为两层**（codex 145 MED-1）：H-0 直读 transitions 真源锁「hold.from 去 INTAKE /
-//       bug 无 hold」这个 129-H1 具体常量约束，使 H-1/H-2 的 400 不只靠 HTTP、有独立归因（防「另一守卫也返 400
-//       导致归因失真」）。H-3 再用真实 HTTP 路径(intake_return)产生待修改态，证 H-1 拒绝非「UPDATE 夹具不合法」假象。
+//       bug hold 条目存在但 from 不含 INTAKE 态」（bug暂缓方案 20260803 v0.4 §4.2 更正："bug 无 hold" 旧表述已随
+//       该方案推翻——bug 现有 hold，只是 from 不含待受理/待修改）这个常量约束，使 H-1/H-2 的 400 不只靠 HTTP、有
+//       独立归因（防「另一守卫也返 400 导致归因失真」）。H-3 再用真实 HTTP 路径(intake_return)产生待修改态，证
+//       H-1 拒绝非「UPDATE 夹具不合法」假象。
 //   [M] §11 权限回归矩阵「系统 canary」（真 HTTP·四类用户×四能力单点汇总·定位=权限烟雾测试）：
 //       ⚠️ 诚实声明：矩阵多数格 verify-sys-liaison([P]bug assign/变更流越界) + c3([A]intake/[C]resubmit) +
 //       c5([R]被选技术负责人) 已真 HTTP 逐格验过（含落态/无副作用）。本段**不是重新发现**，而是把分散断言收敛成
@@ -147,9 +149,18 @@ async function main() {
           `${type} ${st} findTransition('hold') 应无匹配（hold.from 去 INTAKE·129-H1 常量层归因）`);
       }
     }
-    assert.ok(!T.transitionsForType('bug').some(x => x.action === 'hold'),
-      "bug transitionsForType 不含任何 action='hold' 条目（§2.2 有意省略·H-2 归因锚：bug 是「根本无 hold」非「态不匹配」）");
-    ok("[H-0] 常量层归因：feature/improvement hold.from 有待指派、无待受理/待修改（129-H1 收窄）+ bug 无 hold 条目（§2.2）——H-1/H-2 的 400 有常量层独立归因");
+    // ⭐ [bug暂缓方案 20260803 v0.4 §4.2·断言写错更正] 原断言锁的是"bug 无 hold 条目（§2.2 有意省略）"——
+    //   这个旧事实已被本方案推翻，bug 现有 hold 条目（from: ['处理中']，见 transitions.js BUG_FLOW_TRANSITIONS）。
+    //   但 INTAKE 态（待受理/待修改）本就不在 bug hold.from 内，改用 findTransition 精确验证"bug hold 条目
+    //   确实存在（处理中可用），但不匹配 INTAKE 态"，归因方式与下方 feature/improvement 判定同构
+    //   （"存在但 from 排除 INTAKE"），而非旧版的"动作根本不存在"。
+    assert.ok(T.findTransition('bug', 'hold', '处理中'),
+      "bug 处理中 findTransition('hold') 应存在（bug暂缓方案 20260803 v0.4 §4.2 新增 hold 条目，from=['处理中']）");
+    for (const st of INTAKE_STATES) {
+      assert.ok(!T.findTransition('bug', 'hold', st),
+        `bug ${st} findTransition('hold') 应无匹配（hold.from 不含 INTAKE 态·与 feature/improvement 同一归因方式）`);
+    }
+    ok("[H-0] 常量层归因：feature/improvement hold.from 有待指派、无待受理/待修改（129-H1 收窄）+ bug hold 条目存在但 from 仅含处理中、同样不含待受理/待修改（bug暂缓方案 20260803 v0.4 §4.2）——H-1/H-2 的 400 有常量层独立归因");
 
     // (H-canary) HTTP 侧证 hold 对「有 hold 的 type + 白名单态」正常可用（与 H-0 常量侧互印）。
     for (const type of ['feature', 'improvement']) {
@@ -174,16 +185,19 @@ async function main() {
     }
     ok('[H-1] feature/improvement × 待受理/待修改 hold → 400 INVALID_TRANSITION + 态不变（hold.from 去 INTAKE·堵暂缓侧门·态未进 D_PRE）');
 
-    // (H-2) bug：本无 hold（§2.2）→ 待受理/待修改 hold 同样 400 + 态不变（codex 145 LOW-1：补态不变·与 H-1 对齐）
+    // (H-2) bug：hold 条目存在但 from 不含 INTAKE 态（bug暂缓方案 20260803 v0.4 §4.2）→ 待受理/待修改
+    //   hold 仍 400 + 态不变（codex 145 LOW-1：补态不变·与 H-1 对齐；HTTP 层行为零回归——findTransition
+    //   在"动作不存在"和"动作存在但 from 不匹配"两种情况下同样返回 null → 同一 INVALID_TRANSITION，
+    //   本节只是归因表述随 H-0 更正，断言的状态码/错误码/态不变三项结果本身不变）。
     for (const st of INTAKE_STATES) {
       const id = await seed('bug', { status: st, ir: 1 });
       const r = await call('POST', `/api/sys-issues/${id}/hold`, adminTok, { reason: '尝试暂缓' });
-      assert.strictEqual(r.status, 400, `bug ${st} hold 应 400（bug 无 hold·§2.2）, got ${r.status} ${JSON.stringify(r.body)}`);
+      assert.strictEqual(r.status, 400, `bug ${st} hold 应 400（hold.from 不含 INTAKE 态）, got ${r.status} ${JSON.stringify(r.body)}`);
       assert.strictEqual(r.body.code, 'INVALID_TRANSITION', `bug ${st} hold 400 code=INVALID_TRANSITION`);
       const row = await get('SELECT status FROM sys_issues WHERE id=?', [id]);
       assert.strictEqual(row.status, st, `bug ${st} hold 被拒后态不变`);
     }
-    ok('[H-2] bug × 待受理/待修改 hold → 400 INVALID_TRANSITION + 态不变（bug 无 hold·§2.2·与 H-1 归因区分：由 H-0 锚定「无 hold 条目」非「态不匹配」）');
+    ok('[H-2] bug × 待受理/待修改 hold → 400 INVALID_TRANSITION + 态不变（bug暂缓方案后 hold 条目已存在但 from 不含 INTAKE 态·与 H-1 归因方式统一：由 H-0 锚定「条目存在但态不匹配」，HTTP 层结果零回归）');
 
     // (H-3) 夹具有效性锚（codex 145 MED-2）：待修改态用真实 HTTP 路径产生（seed 待受理 → intake_return），
     //   证 H-1 待修改 hold 拒绝不是「UPDATE 夹具不合法致端点提前 400」的假象。

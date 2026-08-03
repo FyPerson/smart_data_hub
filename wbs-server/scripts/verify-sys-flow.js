@@ -179,16 +179,44 @@ async function main() {
     r = await call('POST', `/api/sys-issues/${id3b}/hold`, adminTok, { reason: '  ' });
     assert.strictEqual(r.status, 400, `[W07 证据·hold] hold 缺 reason 应 400, got ${r.status} ${JSON.stringify(r.body)}`);
     ok('[W07 证据·hold] 非法拒绝：hold 缺 reason（trim 空）→ 400（requiredPayload 校验）');
-    r = await call('POST', `/api/sys-issues/${id3}/resume`, adminTok, {});
+    // ⭐ [bug暂缓方案 20260803 v0.4 口径 #1] resume requiredPayload 从 [] 改 ['reason']，两流统一必填——补传 reason
+    // ⚠️ [S1b·M-1] reason 文案刻意不含「开发中」等状态名词，使下方"summary 同时含目标态字符串 + reason 原文"
+    //   两个子断言互不重叠、各自独立可证伪（防止巧合命中掩盖真实缺陷）。
+    const resumeReason4 = '验证 resume 审计留痕（reason 需真实落库）';
+    r = await call('POST', `/api/sys-issues/${id3}/resume`, adminTok, { reason: resumeReason4 });
     assert.strictEqual(r.status, 200, 'resume 200');
     assert.strictEqual(r.body.status, '开发中', 'resume 回暂缓前态（开发中）');
     ok('⭐ resume：已暂缓 → 开发中（从 timeline 解析暂缓前态 RC-M2，非静默落任意态）');
+    // ⭐ [S1b·M-1 非降级路径审计断言·codex 236 MED-1] reason 只进 timeline summary，此前无断言锁定——
+    //   查该单最近一条 action_code='resume' 的 timeline 行，断言 summary 同时含恢复目标态字符串与 reason 原文
+    //   （index.js case 'resume' 非降级分支拼法：`恢复到「X」｜原因：<reason>`，重构时最容易被顺手改掉的正是这条拼接）。
+    const tl4 = await get(`SELECT summary FROM sys_issue_timeline WHERE issue_id=? AND action_code='resume' ORDER BY id DESC LIMIT 1`, [id3]);
+    assert.ok(tl4 && tl4.summary && tl4.summary.includes('开发中') && tl4.summary.includes(resumeReason4),
+      `resume timeline summary 应同时含目标态「开发中」+ reason 原文，实际：${tl4 && tl4.summary}`);
+    ok('resume：timeline summary 落库同时含恢复目标态 + reason 原文（非降级路径，S1b·M-1）');
     // resume 非暂缓态 → 400 INVALID_TRANSITION（M-1 重构后由 transition findTransition 统一拦截，
-    //   与其他动作"非法前置态"行为一致；非暂缓态没有 resume transition，返 400）
+    //   与其他动作"非法前置态"行为一致；非暂缓态没有 resume transition，返 400；findTransition 早于
+    //   requiredPayload 校验，故此处空 body 不受 reason 必填变更影响，仍应命中 INVALID_TRANSITION）
     r = await call('POST', `/api/sys-issues/${id3}/resume`, adminTok, {});
     assert.strictEqual(r.status, 400, 'resume 非暂缓态 400, got ' + r.status);
     assert.strictEqual(r.body.code, 'INVALID_TRANSITION', 'resume 非暂缓态 INVALID_TRANSITION');
-    ok('resume：非已暂缓态 → 400 INVALID_TRANSITION（M-1 重构后 transition 统一拦截非法前置态）');
+    ok('resume：非已暂缓态 → 400 INVALID_TRANSITION（M-1 重构后 transition 统一拦截非法前置态，S1b·M-2 第二条校验顺序在此覆盖）');
+
+    // ⭐ [S1b·M-2 专用 resume 路由负向断言·codex 236 MED-2] 透传 req.body 是 S1 的实现错回填（index.js:6279），
+    //   但当时没有断言证明"缺 reason 会稳定返回 RESUME_REASON_REQUIRED"——钉确切错误码，不用 status>=400 弱判据。
+    //   覆盖空 body 和纯空白字符串 reason 两种输入（trim 后皆空），且断言拒绝后单仍停在已暂缓（无副作用）。
+    const id3c = await seedToDevInProgress(5);
+    r = await call('POST', `/api/sys-issues/${id3c}/hold`, adminTok, { reason: 'M-2 夹具：先暂缓待测 resume reason 校验' });
+    assert.strictEqual(r.status, 200, 'M-2 夹具：hold 200');
+    r = await call('POST', `/api/sys-issues/${id3c}/resume`, adminTok, {});
+    assert.strictEqual(r.status, 400, `M-2：已暂缓态 resume 空 body 应 400, got ${r.status} ${JSON.stringify(r.body)}`);
+    assert.strictEqual(r.body.code, 'RESUME_REASON_REQUIRED', `M-2：已暂缓态 resume 空 body 应 code=RESUME_REASON_REQUIRED, got ${JSON.stringify(r.body)}`);
+    assert.strictEqual((await get('SELECT status FROM sys_issues WHERE id=?', [id3c])).status, '已暂缓', 'M-2：空 body 拒绝后仍停在已暂缓（无副作用）');
+    r = await call('POST', `/api/sys-issues/${id3c}/resume`, adminTok, { reason: '   ' });
+    assert.strictEqual(r.status, 400, `M-2：已暂缓态 resume 纯空白 reason 应 400, got ${r.status} ${JSON.stringify(r.body)}`);
+    assert.strictEqual(r.body.code, 'RESUME_REASON_REQUIRED', `M-2：已暂缓态 resume 纯空白 reason 应 code=RESUME_REASON_REQUIRED, got ${JSON.stringify(r.body)}`);
+    assert.strictEqual((await get('SELECT status FROM sys_issues WHERE id=?', [id3c])).status, '已暂缓', 'M-2：纯空白 reason 拒绝后仍停在已暂缓（无副作用）');
+    ok('resume：已暂缓态缺 reason（空 body / 纯空白）→ 400 RESUME_REASON_REQUIRED 且态不变（S1b·M-2，专用 resume 路由 payload 透传后的负向验证，钉确切错误码非弱判据）');
 
     // ── [5] reopen（已关闭 → 开发中，reopen_count++）──
     //   推进 id1（待上线）到已上线需批次（C4），这里直接 DB 改到已关闭测 reopen
