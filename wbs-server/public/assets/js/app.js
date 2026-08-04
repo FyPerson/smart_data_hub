@@ -389,7 +389,7 @@ function formatDate(dateInput) {
 /**
  * 统一日期格式化工具（支持 UTC 和本地时间自动转换）
  * @param {string|Date} dateInput - 日期字符串或 Date 对象
- * @param {string} style - 格式样式: 'full' | 'short' | 'dateOnly' | 'timeOnly'
+ * @param {string} style - 格式样式: 'full' | 'short' | 'dateOnly' | 'timeOnly' | 'minute'
  * @returns {string} 格式化后的日期字符串
  */
 function formatDateTimeUnified(dateInput, style = 'full') {
@@ -424,6 +424,13 @@ function formatDateTimeUnified(dateInput, style = 'full') {
     }
     if (style === 'timeOnly') {
         return `${hours}:${minutes}:${seconds}`;
+    }
+    // 'minute'：YYYY-MM-DD HH:mm（不显示秒）——系统迭代页时间格式统一 20260804（锚点 D3/D9）新增。
+    //   ⚠️ 刻意作为**新分支**加入，full / short / dateOnly / timeOnly 四种既有语义原样不动：本文件被四个页面
+    //     共用（Model_Center 16 处 / My_Workspace 4 / admin.js 3 / Sys_Iteration 17），改现有分支会连带改另三页，
+    //     而本次拍板范围只统一系统迭代页（D11）。
+    if (style === 'minute') {
+        return `${year}-${month}-${day} ${hours}:${minutes}`;
     }
 
     return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;

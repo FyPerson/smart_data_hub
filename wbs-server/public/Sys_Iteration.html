@@ -520,7 +520,12 @@
                             <th class="u-sortable" data-sort-by="priority">优先级<span class="u-sort-icon">⇅</span></th>
                             <th class="u-sortable" data-sort-by="status">状态<span class="u-sort-icon">⇅</span></th>
                             <th class="u-sortable" data-sort-by="title">标题<span class="u-sort-icon">⇅</span></th>
-                            <th class="u-sortable" data-sort-by="system_name">系统 · 模块<span class="u-sort-icon">⇅</span></th>
+                            <!-- S1（时间格式统一 20260804·锚点 D1/D2）：表头「系统 · 模块」→「系统」，行内不再拼接
+                                 module_name。理由=该字段建单时本就选填，未填时恒占一个 ` · —` 的宽度却无信息量，
+                                 填了也只是重复详情里已有的信息；且 [T2] 盯 1920 不横滚，省下的宽度是净收益。
+                                 **只收窄列表页显示**——详情抽屉 kv、两个建单入口与编辑表单的模块字段全部保留
+                                 （D2：存量填了的要看得见，删字段不可逆）。 -->
+                            <th class="u-sortable" data-sort-by="system_name">系统<span class="u-sort-icon">⇅</span></th>
                             <th class="u-sortable" data-sort-by="assigned_to_name">开发<span class="u-sort-icon">⇅</span></th>
                             <th class="u-sortable" data-sort-by="created_by_name">建单人<span class="u-sort-icon">⇅</span></th>
                             <!-- D1（四处优化①）：表头文案「预计完成时间」→「预计完成」——与右侧「期望完成」等字长（各 4 字），
@@ -610,7 +615,7 @@
         </div>
     </div>
 
-    <script src="assets/js/app.js?v=v1.134.0_qlpage"></script>
+    <script src="assets/js/app.js?v=v1.137.0_timefmt"></script>
     <script src="assets/js/unify-helpers.js?v=v1.110.4_unify"></script>
     <!-- S3（前端统一 贴图粘贴扩展方案 20260801_v0.1）：Ctrl+V 贴图共享层，从本页 v1.133 建单优化批 C4
          抽取（assets/js/u-paste.js 文件头有完整来源说明）。缓存串尾部 tag 须与该文件 KIT_VERSION 一致，
@@ -1299,17 +1304,22 @@
                 siTechLeadNotifyBadgeHtml(i) +
                 siHeldDaysHtml(i.status, i.last_held_at);
             const lineage = i.origin_issue_id ? `<span class="si-flag lineage">🔁基于#${i.origin_issue_id}</span>` : '';
+            // S1（时间格式统一 20260804·D1/D2）：「系统」列原为 system_name + si-muted 的 ` · module_name||'—'` 拼接，
+            //   本次去掉后半段，只留 system_name。module_name 后端照常返回、详情抽屉 kv 与建单/编辑表单照常读写，
+            //   仅列表行不显示（D2：删字段不可逆，存量填了的要看得见）。
+            // ⚠️ 本注释刻意写在模板字符串**外**（本次落笔时先写进了模板串里，随即自查纠正）：
+            //   HTML 注释拦不住 JS 模板插值——`${...}` 照样求值，结果进入最终 HTML 字符串。
             return `<tr onclick="siOpenDrawer(${i.id})">
                 <td>#${i.id}</td>
                 <td><span class="u-type-tag ${esc(i.type)}">${esc(siTypeLabel(i.type))}</span></td>
                 <td><span class="u-pri ${esc(i.priority)}">${esc(i.priority)}</span></td>
                 <td><span class="u-status-badge si-s-${siStatusClass(i.status)}">${esc(siStatusDisplay(i.status))}</span></td>
                 <td>${esc(i.title)}${lineage}${flags}</td>
-                <td>${esc(i.system_name)}<span class="si-muted"> · ${esc(i.module_name || '—')}</span></td>
+                <td>${esc(i.system_name)}</td>
                 <td>${siDevRosterCellHtml(i)}</td>
                 <td>${esc(i.created_by_name || '—')}</td>
                 <td>${i.dev_estimated_at ? esc(siFmtDT(i.dev_estimated_at)) : '<span class="si-muted">—</span>'}</td>
-                <td>${i.deadline ? esc(i.deadline) : '<span class="si-muted">—</span>'}</td>
+                <td>${i.deadline ? esc(siFmtDeadline(i.deadline)) : '<span class="si-muted">—</span>'}</td>
                 <td class="si-commit-cell">${siRenderCommitRefs(i.frontend_commit_refs, i.status)}</td>
                 <td class="si-commit-cell">${siRenderCommitRefs(i.backend_commit_refs, i.status)}</td>
                 <td class="si-muted">${esc(siFmtDT(i.created_at))}</td>
@@ -1422,11 +1432,63 @@
         }, 1600);
     }
 
+    // ── 时间显示（时间格式统一 20260804·锚点 D3/D9/D13）────────────────────────────
+    // 规则（codex 252 LOW-3：原写"本页所有时间统一到分"，但下面三条例外真实存在，绝对化的总述会被
+    //   后来人当成铁律，反而在看到例外时以为是 bug）：
+    //   ① **正文**时间显示统一到分（YYYY-MM-DD HH:MM）——库里存的仍是秒级，只是不展示；
+    //   ② deadline 的**存量纯日期保持原样**，不补时分（D6/D7）；
+    //   ③ 审计三处的秒级**保留在 title 里**（D13），正文仍到分。
     function siFmtDT(v) {
         if (!v) return '—';
         // 复用 app.js 统一日期格式化（本地时间），失败原样返回
-        try { const s = formatDateTimeUnified(v, 'full'); return s === '无效时间' ? v : s; } catch (e) { return v; }
+        try { const s = formatDateTimeUnified(v, 'minute'); return s === '无效时间' ? v : s; } catch (e) { return v; }
     }
+    // D13：审计类显示（时间轴 / 删除留痕 / 通知已读）正文砍到分，但那几处的**秒有取证价值**
+    //   （谁在哪一秒删的、哪一秒已读），故挂 title 保完整到秒。返回值供 title 属性使用——
+    //   本页 esc() 转引号，属性上下文安全（见文件头 esc 定义处的注释）。
+    function siFmtDTSec(v) {
+        if (!v) return '';
+        try { const s = formatDateTimeUnified(v, 'full'); return s === '无效时间' ? String(v) : s; } catch (e) { return String(v); }
+    }
+    // D6/D7：deadline 专用显示件。库里**混存两种形态**——存量纯日期 'YYYY-MM-DD'（v1.136.0 之前录入，
+    //   生产 5 行）与新值 'YYYY-MM-DD HH:MM'（S3 之后是 'YYYY-MM-DD HH:MM:00'）。
+    //
+    // ⭐ **一律按字符串归一，全程不进 Date 解析**（codex 252 M-2 采纳）。deadline 是用户录入的
+    //   **业务本地时间字符串**，不是时间戳——过一趟 Date 是多余的一跳，且那一跳有两种改变语义的方式：
+    //     ① `new Date('2026-08-10')` 按 **UTC 午夜**解析，东八区渲染成 '2026-08-10 08:00'（凭空 +8h）；
+    //     ② 未来若出现 'T' 分隔或时区后缀，会被静默换算成另一个时刻。
+    //   两者都会把"用户当初写的那个期望完成日"改掉。字符串截断没有这类风险。
+    // ⚠️ 也不给纯日期补 '00:00'：那是赋予它本没有的精度，正是 v1.136.0 D2 dirty 判断要防的伪造；
+    //   D7 明确**显示层也不补**（不做 '--:--' 之类硬凑）。两形态并存是刻意接受的，随新单录入自然稀释。
+    function siFmtDeadline(v) {
+        if (!v) return '—';
+        const s = String(v).trim();
+        //   ⚠️ **职责边界（codex 252-B M-1）**：本函数只做**形态归一**，不做**语义校验**——
+        //     `'2026-99-99 99:99'` 形态合法、语义非法，这里照样归一显示，不负责拦。语义校验在写入端
+        //     （`normalizeDeadlineDT` 强制 `YYYY-MM-DD HH:MM` 并做真实日期回转校验），显示层重复一遍
+        //     没有收益（闰年判断也做不进正则），反而制造"两处规则要同步"的漂移口子。
+        //     ⇒ 下面"原样露出"指的是**形态**认不出，不是语义非法。这个区分写在这里，免得后来人
+        //       看到 '2026-99-99 99:99' 被显示出来以为是 bug（[T24] 有断言把它锁成已知行为）。
+        //   ⚠️ 正则**必须锚定结尾**：不锚定的话 '2026-08-10 14:30garbage' 会被截成 '2026-08-10 14:30'，
+        //     等于把**形态**脏的值化妆成合法值——那才是真矛盾，也会掩盖上游真问题。
+        //     可选段覆盖库里及未来可能出现的合法形态：秒、'T' 分隔、标准双位时区偏移、'Z'。
+        const m = /^(\d{4}-\d{2}-\d{2})(?:[ T](\d{2}:\d{2})(?::\d{2})?(?:Z|[+-]\d{2}:?\d{2})?)?$/.exec(s);
+        if (!m) return s;                                  // **形态**认不出的原样显示——露出来比化妆成 '—' 更有诊断价值
+        return m[2] ? `${m[1]} ${m[2]}` : m[1];            // 有时分则到分（秒被丢弃）；纯日期原样
+    }
+    // D12 配套守卫：只 bump 缓存串挡不住"浏览器仍在用旧 app.js"——旧版没有 'minute' 分支，会 fallthrough
+    //   到默认分支返回**带秒**的串，页面看起来正常、只是秒又回来了，**静默失败无任何报错**。
+    //   开页探一次已知输入，不符就 console.error 把它变可见。照 SI_UPASTE_KIT_EXPECTED 的守卫范式。
+    (function siGuardMinuteStyle() {
+        try {
+            const probe = formatDateTimeUnified('2026-01-02 03:04:05', 'minute');
+            if (probe !== '2026-01-02 03:04') {
+                console.error(`[Sys_Iteration] assets/js/app.js 缓存过旧：formatDateTimeUnified(…,'minute') 返回 "${probe}"，期望 "2026-01-02 03:04"。页面时间会退回显示到秒，请硬刷新（Ctrl+F5）。`);
+            }
+        } catch (e) {
+            console.error('[Sys_Iteration] formatDateTimeUnified 探测失败（app.js 未加载或已改签名）：', e);
+        }
+    })();
     // 受理排期改造 C7（§7.4）：距预计完成的粗略剩余自然日（**本地时区**日历日差·同日=0·过去=告警不拦·纯前端不落库）。
     //   ⚠️ codex C7 MED-2 诚实化：用浏览器本地时区 new Date()·非显式 Asia/Shanghai——内网用户均东八区·本地≡Asia/Shanghai·
     //     纯参考显示（§7.4「粗略」「告警不拦」）不为零收益做 TZ 无关计算。target 取 server 已校验的 dev_estimated_at 日期部分·不会是非法日期。
@@ -1556,7 +1618,7 @@
             <div class="u-kv-item"><label>对接人</label><div class="v">${iss.intake_liaison_id ? esc(siIntakeLiaisonName(iss.intake_liaison_id) || '—') : '—'}</div></div>
             <div class="u-kv-item"><label>预计完成时间</label><div class="v">${iss.dev_estimated_at ? (esc(siFmtDT(iss.dev_estimated_at)) + siRemainingDaysHtml(iss.dev_estimated_at)) : '<span class="si-muted">未回填</span>'}</div></div>
             <div class="u-kv-item"><label>计划开工日</label><div class="v">${iss.scheduled_start ? esc(iss.scheduled_start) : '<span class="si-muted">—</span>'}</div></div>
-            <div class="u-kv-item"><label>期望完成(deadline)</label><div class="v">${iss.deadline ? esc(iss.deadline) : '<span class="si-muted">—</span>'}</div></div>
+            <div class="u-kv-item"><label>期望完成(deadline)</label><div class="v">${iss.deadline ? esc(siFmtDeadline(iss.deadline)) : '<span class="si-muted">—</span>'}</div></div>
             <div class="u-kv-item"><label>需求方</label><div class="v">${siRequesterText(iss)}</div></div>
             <div class="u-kv-item"><label>OA 流程号</label><div class="v">${iss.oa_number ? esc(iss.oa_number) : (Number(iss.oa_exempt) === 1 ? '<span class="si-muted">无需 OA（内部自发）</span>' : ((iss.type !== 'bug' && siOaFillable(iss)) ? (iss.status === '待指派' ? '<span style="color:#b45309;font-weight:600">尚未补填 OA 号，指派开发前必填</span>' : '<span style="color:#b45309">尚未补填 OA 号，请补充台账信息</span>') : '<span class="si-muted">—</span>'))}</div></div>
             <div class="u-kv-item"><label>所属上线单</label><div class="v">${iss.release_id ? (siCanOpenRelease(iss) ? `<a style="cursor:pointer;color:#2563eb" onclick="siGotoBatchDetail(${iss.release_id})">#${iss.release_id}</a>` : ('#' + iss.release_id)) : '<span class="si-muted">—</span>'}</div></div>
@@ -1771,7 +1833,7 @@
                 summaryHtml = e.summary ? esc(e.summary) : '';
             }
             return `<div class="si-tl-item${isReleaseScope ? ' si-tl-release-scope' : ''}"${isReleaseScope && siTlHideReleaseScope ? ' style="display:none"' : ''}>
-                <div class="si-tl-time">${esc(siFmtDT(e.created_at))}</div>
+                <div class="si-tl-time" title="${esc(siFmtDTSec(e.created_at))}">${esc(siFmtDT(e.created_at))}</div>
                 <div class="si-tl-dot"></div>
                 <div class="si-tl-body">
                     <span class="si-tl-evt ${cls}">${esc(label)}${roundTxt}</span>${summaryHtml}${flow}
@@ -2067,15 +2129,18 @@
     // ---- 通知区（通知改造 C4：bug 4 类手动通知+三能力；变更流仍只读三侧自动派发展示） ----
     // 通知状态文字化（对齐 Data_Correction 通知栏色彩语言：✅已通知 / 📖已读 / ⚠️失败 / —未发送）。
     //   通知时刻+已读时刻双显，对齐 Data_Correction 范式；notified_at 缺失时回退只显已读/已通知。
+    //   D13（时间格式统一 20260804）：正文砍到分，整段挂 title 保完整到秒——通知/已读的秒有取证价值
+    //   （"到底哪一秒送达、哪一秒读的"），砍秒不该把它从界面上彻底抹掉。
     function siNotifyStatusText(status, readAt, notifiedAt) {
         if (status === 'sent') {
+            const tipOf = (...vs) => esc(vs.filter(Boolean).map(siFmtDTSec).join(' · '));
             if (readAt) {
                 return notifiedAt
-                    ? `<span style="color:#059669;">📖 已读 · 通知于 ${esc(siFmtDT(notifiedAt))} · 已读于 ${esc(siFmtDT(readAt))}</span>`
-                    : `<span style="color:#059669;">📖 已读 · 于 ${esc(siFmtDT(readAt))}</span>`;
+                    ? `<span style="color:#059669;" title="${tipOf(notifiedAt, readAt)}">📖 已读 · 通知于 ${esc(siFmtDT(notifiedAt))} · 已读于 ${esc(siFmtDT(readAt))}</span>`
+                    : `<span style="color:#059669;" title="${tipOf(readAt)}">📖 已读 · 于 ${esc(siFmtDT(readAt))}</span>`;
             }
             return notifiedAt
-                ? `<span style="color:#059669;">✅ 已于 ${esc(siFmtDT(notifiedAt))} 通知</span>`
+                ? `<span style="color:#059669;" title="${tipOf(notifiedAt)}">✅ 已于 ${esc(siFmtDT(notifiedAt))} 通知</span>`
                 : `<span style="color:#059669;">✅ 已通知</span>`;
         }
         if (status === 'failed') return `<span style="color:#dc2626;">⚠️ 通知失败，可重试</span>`;
@@ -4239,7 +4304,7 @@
                 const reasonShort = reasonRaw.length > 40 ? esc(reasonRaw.slice(0, 40)) + '…' : esc(reasonRaw);
                 return `<div class="si-batch-item" onclick="siOpenDeleteAuditDetail(${it.id})">
                     <div><span class="si-batch-no">#${it.issue_id}</span> ${esc(it.issue_title || '（无标题）')} <span class="si-muted">${esc(siTypeLabel(it.issue_type) || it.issue_type || '')}</span></div>
-                    <div class="si-batch-meta">删除于 ${esc(siFmtDT(it.deleted_at))} · 操作者 ${esc(it.operator_name || ('#' + it.operator_id))} · 原因：${reasonShort}</div>
+                    <div class="si-batch-meta" title="删除于 ${esc(siFmtDTSec(it.deleted_at))}">删除于 ${esc(siFmtDT(it.deleted_at))} · 操作者 ${esc(it.operator_name || ('#' + it.operator_id))} · 原因：${reasonShort}</div>
                 </div>`;
             }).join('');
         document.getElementById('siBatchFoot').innerHTML = `<button class="u-btn-secondary" onclick="siCloseBatch()">关闭</button>` +
@@ -4276,7 +4341,7 @@
             ['release_snapshots_json', '发布冻结快照'],
         ];
         document.getElementById('siBatchBody').innerHTML = `<div class="u-detail-section"><h3>基本信息</h3><div class="u-kv-grid">
-                <div class="u-kv-item"><label>删除时间</label><div class="v">${esc(siFmtDT(d.deleted_at))}</div></div>
+                <div class="u-kv-item"><label>删除时间</label><div class="v" title="${esc(siFmtDTSec(d.deleted_at))}">${esc(siFmtDT(d.deleted_at))}</div></div>
                 <div class="u-kv-item"><label>被删单号</label><div class="v">#${esc(d.issue_id)}</div></div>
                 <div class="u-kv-item"><label>标题</label><div class="v">${esc(d.issue_title || '')}</div></div>
                 <div class="u-kv-item"><label>类型</label><div class="v">${esc(siTypeLabel(d.issue_type) || d.issue_type || '')}</div></div>

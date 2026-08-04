@@ -60,10 +60,13 @@ const RUN_TAG = Date.now();
 const createdIssueIds = [];
 const createdReleaseIds = [];   // ⚠️ 必须在 try 外声明——finally 的清理要访问它（在 try 内声明会 ReferenceError）
 
+// 夹具统一的 system_name。[T1b] 的「系统」列断言直接引用本常量，不再硬编码 'BMS' 字面量——
+// codex 251 L-2：原写法让断言隐式依赖 mkIssue 里 SQL 硬编码的 'BMS'，改 helper 时断言会红得莫名其妙。
+const FIXTURE_SYSTEM = 'BMS';
 async function mkIssue(title, status) {
     const r = await run(
         `INSERT INTO sys_issues (type, status, title, system_name, source, created_by, created_by_name, intake_required)
-         VALUES ('bug', ?, ?, 'BMS', '内部', 1, '管理员', 1)`, [status, title]
+         VALUES ('bug', ?, ?, ?, '内部', 1, '管理员', 1)`, [status, title, FIXTURE_SYSTEM]
     );
     createdIssueIds.push(r.lastID);
     return r.lastID;
@@ -103,6 +106,20 @@ const seedCommit = (issueId, daId, userId, component, ref) =>
         const iOther = await mkIssue(`CC-处理中空-${RUN_TAG}`, '处理中');     // 空态 → 「—」
         await mkMember(iOther, 8);
 
+        // ── S1 夹具（时间格式统一 20260804·D1/D2）：**刻意填上 module_name** ──
+        //   mkIssue 默认不填模块（NULL），那种单原本渲染成 `BMS · —`；拿它断言虽也能红/绿，
+        //   但证不到 D1 真正要改的那一半——「存量填了模块的单，列表里也不再显示模块」。
+        //   要让断言有判别力，夹具必须落在"填了"这一侧。
+        const iMod = await mkIssue(`CC-模块列-${RUN_TAG}`, '处理中');
+        await run(`UPDATE sys_issues SET module_name = ? WHERE id = ?`, ['报价模块', iMod]);
+        //   S2 夹具（时间格式统一 20260804·D13）：补一条时间线记录供 [T25] 验"正文到分 + title 到秒"。
+        //   ⚠️ 必须显式插——mkIssue 是裸 INSERT 进 sys_issues，不走建单端点，**不会产生任何 timeline 事件**
+        //     （首版 [T25] 就是栽在这：`.si-tl-time` 取到 null，红得像"实现坏了"，实则夹具没数据）。
+        //   created_at 走表默认值 datetime('now','localtime') = **真实秒级**，正是本组要的判据源。
+        //   清理由 finally 的 `DELETE FROM sys_issue_timeline WHERE issue_id = ?` 覆盖。
+        await run(`INSERT INTO sys_issue_timeline (issue_id, event_type, summary, operator_id, operator_name)
+                   VALUES (?, 'created', ?, 1, '管理员')`, [iMod, `S2 时间轴夹具-${RUN_TAG}`]);
+
         browser = await chromium.launch();
         const page = await loginPage(browser, adminTok);
         await page.goto(`${BASE_URL}/Sys_Iteration.html`);
@@ -138,6 +155,69 @@ const seedCommit = (issueId, daId, userId, component, ref) =>
             + `——挡住「文案改对了但列被换成别的字段」，实得 ${headCells[idxExpect - 1].sortBy} / ${headCells[idxExpect].sortBy}`);
         must(!headers.includes('预计完成时间'),
             `[T1] ⭐ ①防回退：列表页表头不得再出现旧文案「预计完成时间」，实得 ${JSON.stringify(headers)}`);
+
+        // ── [T1b] S1 模块列收窄（时间格式统一 20260804·D1/D2）─────────────
+        //   ⚠️ headers 采集时已 replace(/[⇅\s]/g, '') 去空白 ⇒ 旧文案「系统 · 模块」在此形态下是「系统·模块」，
+        //     防回退断言必须按去空白后的形态写，照原文写会永远为真（断言自身失效）。
+        const SYS_COL_IDX = 5;   // 0-based：ID/类型/优先级/状态/标题/**系统**/开发/建单人/预计完成/期望完成/前端号/后端号/创建时间/计划开工
+        must(headers[SYS_COL_IDX] === '系统' && headCells[SYS_COL_IDX].sortBy === 'system_name',
+            `[T1b] 第 6 列表头应为「系统」且绑 system_name，实得「${headers[SYS_COL_IDX]}」/ ${headCells[SYS_COL_IDX].sortBy}`);
+        must(!headers.includes('系统·模块'),
+            `[T1b] ⭐ 防回退：表头不得再出现旧文案「系统 · 模块」，实得 ${JSON.stringify(headers)}`);
+        must(headers.length === 14,
+            `[T1b] 收窄只改列内容不改列数，仍应为 14 列，实得 ${headers.length}`);
+        // ⭐ 行内断言（比表头强）：表头改对但行渲染仍拼 module_name，是最可能的半吊子形态。
+        //   夹具 iMod 的 module_name='报价模块'，只有拼接确实拆掉才会得到纯 'BMS'。
+        const modCellText = await page.evaluate(({ id, idx }) => {
+            const rows = [...document.querySelectorAll('#siTbody tr')];
+            const tr = rows.find(r => r.querySelector('td') && r.querySelector('td').textContent.trim() === '#' + id);
+            if (!tr) return null;
+            const tds = [...tr.querySelectorAll('td')];
+            return tds[idx] ? tds[idx].textContent.trim() : null;
+        }, { id: iMod, idx: SYS_COL_IDX });
+        must(modCellText !== null, `[T1b] 夹具单 #${iMod} 应出现在列表里（后续断言的前提），实得 ${modCellText}`);
+        must(modCellText === FIXTURE_SYSTEM,
+            `[T1b] ⭐ 填了 module_name('报价模块') 的单，「系统」列也只显示 system_name（应为 ${FIXTURE_SYSTEM}），实得 "${modCellText}"`);
+        //   ⚠️ 不再补一条「不含 · 且不含 报价模块」——它与上一条**诊断方向相同**（都指向"拼接没拆"），
+        //     且上一条通过时它恒真，属虚增通过数的冗余。上面的 `!== null` 前提断言则不同：它红时指向的是
+        //     "夹具没进列表"这一**另一种失败模式**（循 [T1] codex 247 L-1 的前提断言范式），故保留。
+        //   换成有独立判别力的：锁住 D2 的**另一半**（只收窄列表页，详情抽屉的模块字段必须保留），
+        //   防的是未来有人把"收窄"顺手做成"删字段"。静态源码比对，循 [T8] 的 [A4-static] 合同锁范式。
+        //   ⚠️ 静态锁的取舍（codex 251 L-1 提醒它对排版敏感）：明知它会因无行为变化的排版调整误报，仍选静态锁——
+        //     这三处本次**零改动**，风险是"未来有人顺手删"，此时误报(红)的代价远小于漏报(绿)；且改成运行时断言
+        //     要走"开抽屉→点编辑→读 input"三跳交互，成本超过它锁住的东西。窗口放宽到 120 字符容纳属性微调。
+        const pageSrcT1b = fs.readFileSync(path.join(__dirname, '..', 'public', 'Sys_Iteration.html'), 'utf8');
+        must(/<div class="u-kv-item"><label>模块<\/label>[\s\S]{0,120}?iss\.module_name/.test(pageSrcT1b),
+            '[T1b] ⭐ D2：详情抽屉的「模块」kv 必须保留（收窄只针对列表页，不是删字段）');
+        //   ⚠️ 建单有**两个入口**（3574「派生迭代（基于本单新建）」/ 3681「新建迭代单」），各带一处输入项 + 一处
+        //     payload 组装。这类多点模式先后踩了两层坑，最终按**入口分区**锁：
+        //     ① 存在性断言（`.test()`）挡不住"只删其中一处"——反证实测删掉「新建迭代单」那处仍为 true，锁形同虚设；
+        //     ② 全局计数（`=== 2`）只保证总数，挡不住"删掉入口A、在入口B重复一份"（codex 251-B M-1）。
+        //     故用 siModal 标题把源码切成两段，各段内锁"恰好一处"——这才真正表达 D2 的"两个入口都要保留"。
+        //     输入项两处的第三参数本可靠正则区分（派生预填 iss.module_name / 新建给空串），但 payload 两处字符串
+        //     **完全相同**，只能靠分区；两类统一走分区，口径一致，不留一半强一半弱。
+        const idxDerive = pageSrcT1b.indexOf("siModal('派生迭代（基于本单新建）'");
+        const idxCreate = pageSrcT1b.indexOf("siModal('新建迭代单'");
+        must(idxDerive > 0 && idxCreate > idxDerive,
+            `[T1b] 两个建单入口的 siModal 标题都应可定位且派生在前（分区断言的前提），实得 ${idxDerive} / ${idxCreate}`);
+        const idxAfterCreate = pageSrcT1b.indexOf('siModal(', idxCreate + 10);
+        const segOf = (from, to) => pageSrcT1b.slice(from, to > 0 ? to : pageSrcT1b.length);
+        const lockEntry = (seg, label) => {
+            const nInput = (seg.match(/fText\('module_name',\s*'模块（选填）'/g) || []).length;
+            must(nInput === 1,
+                `[T1b] ⭐ D2：「${label}」入口须保留恰好一处「模块（选填）」输入项，实得 ${nInput} 处`);
+            const nPayload = (seg.match(/body\.module_name\s*=\s*v\.module_name/g) || []).length;
+            must(nPayload === 1,
+                `[T1b] ⭐ D2：「${label}」入口的提交 payload 须恰好装一次 module_name（否则填了存不进去），实得 ${nPayload} 处`);
+        };
+        lockEntry(segOf(idxDerive, idxCreate), '派生迭代');
+        lockEntry(segOf(idxCreate, idxAfterCreate), '新建迭代单');
+        //   codex 251 M-1（采纳）：D2 明确编辑表单也在保留之列，原先只锁了抽屉+建单——
+        //   删掉编辑表单的输入项或从提交 payload 里摘掉 module_name，全套断言仍会绿。补两条堵上：
+        must(/fText\('module_name',\s*'模块',\s*iss\.module_name/.test(pageSrcT1b),
+            '[T1b] ⭐ D2：编辑表单的「模块」输入项必须保留且回填 iss.module_name');
+        must(/module_name:\s*v\.module_name,/.test(pageSrcT1b),
+            '[T1b] ⭐ D2：编辑提交 payload 必须仍含 module_name（否则编辑一次就把模块清空）');
 
         // ── [T2] ⭐ 1920 视口下不横滚（D12 预案触发判据）─────────────────
         const scrollInfo = await page.evaluate(() => {
@@ -706,7 +786,165 @@ const seedCommit = (issueId, daId, userId, component, ref) =>
         must(wideWidth === 720,
             `[T21] ⭐ 通用类 .si-modal.wide 必须仍是 720px（只提权 #siBatchBox 一个 id）——否则值班排班等同类弹窗会被连带改宽，实得 ${wideWidth}px`);
 
+        // ══ 时间格式统一 S2「显示层统一到分」（锚点 D3/D6/D7/D9/D12/D13）════════════════
+        // ── [T22] app.js 'minute' 分支：新增分支正确 + ⭐**既有四种 style 一个字节都不许变** ──
+        //   为什么后半条比前半条重要：app.js 被四个页面共用（Model_Center 16 处 / My_Workspace 4 /
+        //   admin.js 3 / Sys_Iteration 17），而 D11 拍板**本次只统一系统迭代页**。改坏 'full' 不会在
+        //   本页露出任何症状（本页已经不用 'full' 了），却会让另外三页集体丢秒——典型的静默跨页回归。
+        await page.setViewportSize({ width: 1920, height: 1080 });
+        await page.reload({ waitUntil: 'networkidle' });
+        await page.waitForTimeout(400);
+        const fmtProbe = await page.evaluate(() => {
+            const f = window.formatDateTimeUnified;
+            if (typeof f !== 'function') return { __missing: true };
+            const IN = '2026-01-02 03:04:05';
+            return {
+                minute: f(IN, 'minute'),
+                full: f(IN, 'full'),
+                short: f(IN, 'short'),
+                dateOnly: f(IN, 'dateOnly'),
+                timeOnly: f(IN, 'timeOnly'),
+                dflt: f(IN),
+                empty: f(''),
+                bad: f('不是时间', 'minute'),
+            };
+        });
+        must(!fmtProbe.__missing, '[T22] 前置：formatDateTimeUnified 应挂在 window 上可供探测');
+        must(fmtProbe.minute === '2026-01-02 03:04',
+            `[T22] ⭐ 新增 'minute' 分支返回 YYYY-MM-DD HH:mm（无秒），实得 "${fmtProbe.minute}"`);
+        must(fmtProbe.full === '2026-01-02 03:04:05' && fmtProbe.short === '2026-01-02 03:04:05' && fmtProbe.dflt === '2026-01-02 03:04:05',
+            `[T22] ⭐ D9/D11：'full'/'short'/默认三条既有路径必须仍带秒（改坏了另三页集体丢秒且本页看不出来），`
+            + `实得 full="${fmtProbe.full}" short="${fmtProbe.short}" 默认="${fmtProbe.dflt}"`);
+        must(fmtProbe.dateOnly === '2026-01-02' && fmtProbe.timeOnly === '03:04:05',
+            `[T22] D9：'dateOnly'/'timeOnly' 两条既有路径行为不变，实得 "${fmtProbe.dateOnly}" / "${fmtProbe.timeOnly}"`);
+        must(fmtProbe.empty === '-' && fmtProbe.bad === '无效时间',
+            `[T22] 空值与非法值的既有返回约定不变（'-' / '无效时间'，siFmtDT 依赖后者做原样回退），实得 "${fmtProbe.empty}" / "${fmtProbe.bad}"`);
+
+        // ── [T23] 列表页时间列真的砍到分（走真实渲染，不是只测 helper）──────────────
+        //   [T22] 只证明 helper 对，证明不了页面用上了它——siFmtDT 少改一处传参，列表照样显示到秒。
+        //   created_at 库里是 datetime('now','localtime') 的**真实秒级**值，故"渲染出来无秒"是确凿判据。
+        const NO_SEC = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/;
+        const colText = async (issueId, idx) => page.evaluate(({ id, i }) => {
+            const tr = [...document.querySelectorAll('#siTbody tr')]
+                .find(r => r.querySelector('td') && r.querySelector('td').textContent.trim() === '#' + id);
+            if (!tr) return null;
+            const tds = [...tr.querySelectorAll('td')];
+            return tds[i] ? tds[i].textContent.trim() : null;
+        }, { id: issueId, i: idx });
+        const IDX_CREATED = 12;   // 0-based：…/前端号 10/后端号 11/**创建时间 12**/计划开工 13
+        const IDX_DEADLINE = 9;
+        //   取 iSameDayAM 而非更早的 iMod：reload 后列表按 ID 降序，iMod 之后还创建了 7 条夹具，
+        //   拿它取行有被挤出首屏的风险（那会红成"砍秒没生效"，诊断指错方向）。iSameDayAM 同时也是
+        //   [T24] 的对象，必然在首屏。
+        const createdCell = await colText(iSameDayAM, IDX_CREATED);
+        must(createdCell !== null && NO_SEC.test(createdCell),
+            `[T23] ⭐ 「创建时间」列显示到分不带秒（库里是真实秒级值，故本条能确凿证明砍秒生效），实得 "${createdCell}"`);
+
+        // ── [T24] ⭐ deadline 两形态并存（D6/D7）+ 反 UTC 午夜陷阱 ─────────────────────
+        //   复用 [T17] 的两条 2099 夹具：iLegacyDay='2099-12-31'（存量纯日期）/ iSameDayAM='2099-12-31 07:00'。
+        //   ⚠️ 本条守的是两件事：
+        //     ① 纯日期**原样输出**——不补 '00:00'（补零＝赋予它本没有的精度，正是 v1.136.0 D2 dirty 判断防的伪造）
+        //     ② 不过 `new Date()`——`new Date('2099-12-31')` 按 UTC 午夜解析，东八区会渲染成 '2099-12-31 08:00'，
+        //        那既凭空造了时分、又把日期语义整体挪了 8 小时。若 siFmtDeadline 被"顺手简化"成直接调 siFmtDT，本条必红。
+        const legacyCell = await colText(iLegacyDay, IDX_DEADLINE);
+        const earlyCell = await colText(iSameDayAM, IDX_DEADLINE);
+        must(legacyCell === '2099-12-31',
+            `[T24] ⭐ 存量纯日期 deadline 原样显示，不补时分、不过 Date 解析。实得 "${legacyCell}"`
+            + `（若为 "2099-12-31 08:00" ＝ 踩了 UTC 午夜陷阱；若为 "2099-12-31 00:00" ＝ 补了本不存在的精度）`);
+        must(earlyCell === '2099-12-31 07:00',
+            `[T24] 带时分的 deadline 显示到分，实得 "${earlyCell}"`);
+        //   ⭐ codex 252 M-1 采纳：**S3 之后 deadline 会带 ':00' 秒**（写入层补秒），显示层必须仍到分。
+        //     这是真实的覆盖缺口——现在库里还没有那种值，等 S3 落地才出现，届时若显示层漏改就是回归。
+        //     一并锁 'T' 分隔与带时区后缀两种形态：deadline 是**业务本地时间字符串**，时区后缀不该被
+        //     换算成另一个时刻（siFmtDeadline 全程走字符串归一、不进 Date，正是为此）。
+        //   ⭐⭐ **跨层契约**（codex 253 LOW-2）：下面这组输入/期望与后端 `deadlineToMinuteText` 是**同一组向量**
+        //     （见 `scripts/verify-sys-time-precision.js` 的 `CONTRACT` 表）。deadline 的文本规则前后端各有一份
+        //     实现，天然会漂移 ⇒ 同一组向量钉在两侧，改任一侧的规则必须两边一起改，否则一侧红。
+        //     ⚠️ 唯一允许的差异：空值——前端返 '—'（直接进 DOM 的占位符），后端返 null（供拼接判断）。
+        const dlProbe = await page.evaluate(() => {
+            const f = window.siFmtDeadline;
+            if (typeof f !== 'function') return { __missing: true };
+            return {
+                minuteForm: f('2026-08-10 14:30'),
+                s3Form: f('2026-08-10 14:30:00'),
+                tSep: f('2026-08-10T14:30:00'),
+                tz: f('2026-08-10T14:30:00+08:00'),
+                pureDate: f('2026-08-10'),
+                empty: f(''),
+                junk: f('不是时间'),
+                tailJunk: f('2026-08-10 14:30garbage'),   // 部分匹配：不锚定结尾就会被截成合法值
+                zulu: f('2026-08-10T14:30:00Z'),
+                //   形态合法 / 语义非法：本函数**刻意不做**语义校验（codex 252-B M-1 讨论后的定论），
+                //   写死成断言让它成为"已知有意行为"，而不是藏在代码里的矛盾。
+                semanticBad: f('2026-99-99 99:99:99'),
+                //   单位数时区偏移：上游 normalizeDeadlineDT 强制 'YYYY-MM-DD HH:MM'、根本不产时区后缀，
+                //   时区分支本身已是纯防御 ⇒ 不再为"非标准人写格式"扩宽（codex 252-B L-1 不采纳，记理由）。
+                oddTz: f('2026-08-10T14:30:00+8:00'),
+            };
+        });
+        must(!dlProbe.__missing, '[T24] 前置：siFmtDeadline 应挂在 window 上可供探测');
+        must(dlProbe.minuteForm === '2026-08-10 14:30',
+            `[T24] 跨层契约：分钟级原样，实得 "${dlProbe.minuteForm}"`);
+        must(dlProbe.s3Form === '2026-08-10 14:30',
+            `[T24] ⭐ S3 形态 '2026-08-10 14:30:00'（写入层补秒后）显示仍到分，实得 "${dlProbe.s3Form}"`);
+        must(dlProbe.tSep === '2026-08-10 14:30' && dlProbe.tz === '2026-08-10 14:30',
+            `[T24] 'T' 分隔与带时区后缀都归一到同一本地字面量，不做时区换算，实得 "${dlProbe.tSep}" / "${dlProbe.tz}"`);
+        must(dlProbe.pureDate === '2026-08-10' && dlProbe.empty === '—' && dlProbe.junk === '不是时间',
+            `[T24] 纯日期原样 / 空值 '—' / 认不出的形态原样露出（不化妆成 '—'），实得 "${dlProbe.pureDate}" / "${dlProbe.empty}" / "${dlProbe.junk}"`);
+        must(dlProbe.tailJunk === '2026-08-10 14:30garbage',
+            `[T24] ⭐ 带尾部垃圾的脏值必须**原样露出**、不得被截成合法值——正则少个结尾锚点就会把它化妆成`
+            + ` '2026-08-10 14:30'，掩盖真问题且与"原样露出"的声称自相矛盾。实得 "${dlProbe.tailJunk}"`);
+        must(dlProbe.zulu === '2026-08-10 14:30',
+            `[T24] 'Z' 后缀（UTC 标记）同样只取本地字面量、不做换算——deadline 是业务本地时间字符串，实得 "${dlProbe.zulu}"`);
+        must(dlProbe.semanticBad === '2026-99-99 99:99',
+            `[T24] 职责边界：siFmtDeadline 只做**形态**归一、不做**语义**校验（语义校验在写入端 normalizeDeadlineDT，`
+            + `显示层重复一遍只会制造两处规则漂移）。本条把这个已知行为锁死，免得被当成 bug 顺手"修"掉。实得 "${dlProbe.semanticBad}"`);
+        must(dlProbe.oddTz === '2026-08-10T14:30:00+8:00',
+            `[T24] 单位数时区偏移 '+8:00' 不在支持形态内、原样露出——上游根本不产时区后缀，时区分支已是纯防御，`
+            + `不为不存在的输入继续扩宽（codex 252-B L-1 不采纳记理由）。实得 "${dlProbe.oddTz}"`);
+
+        // ── [T25] D13 审计三处：正文到分 + title 保完整到秒 ────────────────────────────
+        //   时间轴走真实渲染（开抽屉即可到达）；删除留痕与通知已读要 admin 面板/通知数据才到得了，
+        //   用源码合同锁覆盖——如实标注这是弱一档的证据，不假装三处都跑了真实渲染。
+        const WITH_SEC = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
+        await page.evaluate((id) => window.siOpenDrawer && window.siOpenDrawer(id), iMod);
+        await page.waitForTimeout(800);
+        const tlTime = await page.evaluate(() => {
+            const el = document.querySelector('.si-tl-time');
+            return el ? { text: el.textContent.trim(), title: el.getAttribute('title') || '' } : null;
+        });
+        must(tlTime !== null, '[T25] 前置：详情抽屉时间轴应至少有一条记录（建单事件），否则本组无对象可验');
+        must(tlTime && NO_SEC.test(tlTime.text),
+            `[T25] ⭐ 时间轴正文显示到分，实得 "${tlTime && tlTime.text}"`);
+        must(tlTime && WITH_SEC.test(tlTime.title),
+            `[T25] ⭐ D13：时间轴 title 保留完整到秒（审计取证能力不因砍秒而丢失），实得 title="${tlTime && tlTime.title}"`);
+        //   ⚠️ 正则**只锁语义**（`title=` + `siFmtDTSec` + 该处的字段名），不锁整段模板文本
+        //     （codex 252-B L-2 采纳）：绑死模板会让无行为变化的重排、换行、抽 helper 都误报，
+        //     而这三条锁真正要守的只有一件事——"这个字段的 title 走的是保秒的那个 helper"。
+        const srcT25 = fs.readFileSync(path.join(__dirname, '..', 'public', 'Sys_Iteration.html'), 'utf8');
+        const titleLock = (field) => new RegExp(`title="[^"]*siFmtDTSec\\(\\s*[A-Za-z_$][\\w$]*\\.${field}\\s*\\)`).test(srcT25);
+        must(titleLock('deleted_at'),
+            '[T25] D13：删除留痕的 title 走 siFmtDTSec(*.deleted_at) 保到秒（源码合同锁·弱一档证据）');
+        must((srcT25.match(/title="[^"]*siFmtDTSec\(\s*[A-Za-z_$][\w$]*\.deleted_at\s*\)/g) || []).length === 2,
+            '[T25] D13：删除留痕**两处**（列表行 + 详情 kv）都挂了 title——只锁存在性会漏掉"删其中一处"');
+        must(/siNotifyStatusText[\s\S]{0,600}?title="\$\{tipOf\(/.test(srcT25)
+            && /tipOf\s*=\s*\([\s\S]{0,80}?siFmtDTSec/.test(srcT25),
+            '[T25] D13：通知已读状态串的 title 经 tipOf 走 siFmtDTSec 保到秒（源码合同锁·弱一档证据）');
+
+        // ── [T26] D12 缓存串 + 配套守卫 ───────────────────────────────────────────────
+        //   改共享静态资源必 bump 缓存串；但 bump 只解决"下次加载"，挡不住浏览器此刻仍持有旧 app.js——
+        //   旧版没有 'minute' 分支会 fallthrough 回带秒的默认分支，**页面看着正常、秒悄悄回来了**。
+        //   守卫把这种静默失败变成 console.error。本条锁"守卫存在且探测串与实现一致"。
+        const bumpedPages = await page.evaluate(() => document.querySelector('script[src*="assets/js/app.js"]').getAttribute('src'));
+        must(/app\.js\?v=v1\.137\.0_timefmt$/.test(bumpedPages),
+            `[T26] ⭐ D12：app.js 缓存串必须已 bump（本次动了共享静态资源），实得 "${bumpedPages}"`);
+        must(/formatDateTimeUnified\('2026-01-02 03:04:05', 'minute'\)/.test(srcT25)
+            && /probe !== '2026-01-02 03:04'/.test(srcT25),
+            '[T26] ⭐ 陈旧缓存守卫存在，且其探测输入/期望输出与 [T22] 用的是同一组值（守卫自身写错就成了永不触发的摆设）');
+
         // ── [T5] 无 console error ────────────────────────────────────────
+        //   ⚠️ 本条同时是 [T26] 守卫的"反向验证"：测试环境加载的是新 app.js，守卫**不该**触发；
+        //     若守卫的探测逻辑写反了，这里会因多出一条 console.error 而红。
         must(page._consoleErrors.length === 0, `[T5] 全程无 console error，实得：${JSON.stringify(page._consoleErrors.slice(0, 3))}`);
 
     } catch (e) {

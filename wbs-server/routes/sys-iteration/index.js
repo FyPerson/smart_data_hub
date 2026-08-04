@@ -1684,18 +1684,30 @@ module.exports = (deps) => {
   //   非法返 null（端点据此返 400）。
   //   codex 15 M-2：口径**分钟级**——只接受 YYYY-MM-DD HH:MM，**带秒判非法**（不再吞秒，避免 10:30:99 被
   //   规范化为 10:30 通过）。与 assigned_at 比较时见 estimate 端点（assigned_at 也归一化到分钟，同分钟视为不早于）。
+  //   ── 时间格式统一 S3（20260804·锚点 D4/D10）：输出补 ':00'，入参接受"无秒"与"秒=00"两种 ──
+  //   D4：库内时间统一到秒。用户填到分，**后端补 :00**（用户拍板；听过"补零≠精确、只是格式对齐"的
+  //     评估后仍选做，理由=库内格式一致本身正当）。
+  //   D10 幂等：秒位只接受**省略**或 **'00'** 两种——不放宽是刻意的最小必要。为什么必须放宽到 '00'：
+  //     补秒后库里存的是 'HH:MM:00'，把这条记录读回来原样重提，会被自己的校验器 400 拒（改前的严格
+  //     正则连 ':00' 都不认）。为什么不放宽到任意合法秒：codex 15 M-2 定的防线是"带秒判非法、不吞秒"，
+  //     放开 '14:30:45' 就等于恢复吞秒，那条防线白立了。
+  //   ⚠️ 与 normalizeDeadlineDT 的入参口径**刻意不同**（那个接受任意合法秒后截断），两者各有拍板出处：
+  //     此处严格源自 codex 15 M-2；那处宽松源自 v1.136.0 D2「兼容 API 直调与历史值」。不是随手不一致。
   function normalizeSysDatetime(raw) {
     if (raw === undefined || raw === null) return null;
     let s = String(raw).trim();
     if (!s) return null;
     s = s.replace('T', ' ');
-    const m = s.match(/^(\d{4})-(\d{2})-(\d{2})[ ](\d{2}):(\d{2})$/);   // 严格分钟级，无可选秒
+    const m = s.match(/^(\d{4})-(\d{2})-(\d{2})[ ](\d{2}):(\d{2})(?::(\d{2}))?$/);   // 秒位可选，捕获后校验
     if (!m) return null;
-    const [, y, mo, d, h, mi] = m.map(Number);
+    if (m[6] !== undefined && m[6] !== '00') return null;   // D10：秒位只认省略或 '00'（'14:30:45'/'10:30:99' 一律非法）
+    // 显式逐个转换捕获组（codex 253-C L-2）：原写法 `m.map(Number)` 会把完整匹配和省略的秒位一并转成
+    //   NaN，靠解构位置恰好避开——读的人容易以为 m 里每项都是有效数字，扩展字段时就会踩到。
+    const y = Number(m[1]), mo = Number(m[2]), d = Number(m[3]), h = Number(m[4]), mi = Number(m[5]);
     const dt = new Date(y, mo - 1, d, h, mi);
     if (dt.getFullYear() !== y || dt.getMonth() !== mo - 1 || dt.getDate() !== d || dt.getHours() !== h || dt.getMinutes() !== mi) return null;
     const pad = (n) => String(n).padStart(2, '0');
-    return `${y}-${pad(mo)}-${pad(d)} ${pad(h)}:${pad(mi)}`;
+    return `${y}-${pad(mo)}-${pad(d)} ${pad(h)}:${pad(mi)}:00`;   // D4：入库到秒
   }
 
   // 把 DB 的 datetime（可能带秒，如 datetime('now','localtime') = 'YYYY-MM-DD HH:MM:SS'）截到分钟，用于 estimate 比较。
@@ -1748,7 +1760,28 @@ module.exports = (deps) => {
     // 时分秒范围：正则只锁了"两位数字"，25:00 / 12:70 / 14:30:99 都要靠这里挡
     if (hh > 23 || mi > 59 || ss > 59) return { ok: false, value: null };
     const pad = (n) => String(n).padStart(2, '0');
-    return { ok: true, value: `${m[1]}-${m[2]}-${m[3]} ${pad(hh)}:${pad(mi)}` };
+    // 时间格式统一 S3（D4）：输出补 ':00' 入库。入参口径**不动**——它本就接受任意合法秒后截断
+    //   （v1.136.0 D2「兼容 API 直调与历史值」），已天然幂等，不需要为 D10 再放宽或收紧。
+    //   ⚠️ 秒仍不落库：deadline 语义精度到分钟，':00' 是格式对齐不是精度声明（同 D4 的自我认知）。
+    return { ok: true, value: `${m[1]}-${m[2]}-${m[3]} ${pad(hh)}:${pad(mi)}:00` };
+  }
+
+  // ── deadline 的**文本**截断件（时间格式统一 S3·D3）────────────────────────────────────
+  //   ⚠️ 不能用 truncToMinute：它匹配 `^(日期) (时:分)`，对**纯日期**返回 null——存量 deadline 正是纯日期，
+  //     拿它拼留痕会把 '2026-08-10' 变成"空"，凭空造出一条"从空改为 X"的假记录。
+  //   与前端 siFmtDeadline 同款语义（[[feedback_same_principle_across_layers]]：前端已经想清楚的事，
+  //     后端不能想当然换个件）：纯日期原样、带时分截到分、认不出的原样露出。
+  //   用途仅限**给人看的文本**（timeline summary / 通知文案）；入库一律用 normalizeDeadlineDT 的带秒值。
+  function deadlineToMinuteText(v) {
+    if (v === undefined || v === null) return null;
+    const s = String(v).trim();
+    if (!s) return null;
+    // ⚠️ 本正则与前端 `siFmtDeadline` 是**同一份契约的两处实现**，必须逐字同源（含时区后缀分支）。
+    //   契约向量表钉在两侧：后端 `scripts/verify-sys-time-precision.js` 的 CONTRACT ↔ 前端 Playwright [T24]
+    //   的 dlProbe。改任一侧的规则必须两边一起改，否则一侧红。（漂移实例见 codex 审 253-B 归档。）
+    const m = /^(\d{4}-\d{2}-\d{2})(?:[ T](\d{2}:\d{2})(?::\d{2})?(?:Z|[+-]\d{2}:?\d{2})?)?$/.exec(s);
+    if (!m) return s;
+    return m[2] ? `${m[1]} ${m[2]}` : m[1];
   }
 
   // ============================================================
@@ -5275,6 +5308,15 @@ module.exports = (deps) => {
           //   needs_feasibility 归 int 比；title/system_name/priority 是非空串直接比；deadline/自由文本 归 null-or-string 比。
           let normOld, normNew;
           if (f === 'needs_feasibility') { normOld = Number(row[f]) === 1 ? 1 : 0; normNew = val; }
+          else if (f === 'deadline') {
+            // ⚠️ S3（D4）：val 现在**带秒**，而 row.deadline 可能是 S3 之前写入的无秒值或存量纯日期。
+            //   逐字比会把**纯格式升级**（'14:30' → '14:30:00'）判成真变更 ⇒ 写库 + 留一条假的"已修改"记录。
+            //   ⇒ 幂等比对归到分（入库仍用带秒的 val，见 setParams.push(val)）。
+            //   前端有 dirty 门（没改就不传该字段）挡着，走不到这条；但 **API 直调传相同值就能走到** ——
+            //   与 scope-change 那处是同一个模式，按模式一起修，不留同款（[[feedback_pattern_sweep_not_symptom_list]]）。
+            normOld = deadlineToMinuteText(row[f]);
+            normNew = deadlineToMinuteText(val);
+          }
           else { normOld = (row[f] === '' || row[f] == null) ? null : row[f]; normNew = (val === '' || val === undefined) ? null : val; }
           if (normOld === normNew) continue;   // 严格相等·未变（幂等零写入）
           setFrags.push(`${f} = ?`);
@@ -6177,6 +6219,13 @@ module.exports = (deps) => {
     try {
       const est = normalizeSysDatetime((req.body || {}).dev_estimated_at);
       if (!est) return res.status(400).json({ error: '预计完成时间格式非法（YYYY-MM-DD HH:MM）', code: 'INVALID_ESTIMATE' });
+      // S3（D3/D4）：est **带秒**用于入库；estMin **到分**用于一切比较与给人看的文本。
+      //   两个变量显式分开，每个使用点自己选——不靠"字符串比较碰巧也对"这种巧合。
+      //   ⚠️ 下面这道守卫拦的是**内部不变量被破坏**（非用户输入错误——非法输入已被 normalizeSysDatetime 挡在前面）：
+      //     estMin 非空依赖"校验器输出形态"这一跨函数隐含约定，一旦被改坏，null 会一路参与比较
+      //     （`null < '2026-...'` 恒 true ⇒ 闸门失效）与文本拼接（留痕里出现 "null"），且一声不吭。
+      const estMin = truncToMinute(est);
+      if (!estMin) return res.status(500).json({ error: '时间规范化内部错误（estMin 为空）', code: 'ESTIMATE_NORMALIZE_INTERNAL' });
       const actor = sysActor(req);
       await sysBeginImmediate();
       try {
@@ -6202,14 +6251,19 @@ module.exports = (deps) => {
           await sysRollback(); return res.status(409).json({ error: '该单缺少指派时间（数据异常），无法回填预计完成', code: 'ASSIGNED_AT_MISSING' });
         }
         // >=assigned_at 校验（§7）：assigned_at 带秒（DB datetime），截到分钟比较（同分钟视为不早于，codex 15 M-2）。
-        //   est 已是分钟级规范化串；两者皆 'YYYY-MM-DD HH:MM' 时字符串比较等价于时间先后比较。
-        if (est < assignedMin) {
+        //   ⚠️ S3 起 est **带秒**（D4），故这里比较必须用 estMin ——两边都是 'YYYY-MM-DD HH:MM' 时
+        //     字符串比较才等价于时间先后比较。直接拿带秒的 est 比也"碰巧"对（前 16 字符相同时较长者更大
+        //     ＝同分钟视为不早于），但那是靠字符串长度的巧合，不是靠语义；换个字段就不成立了。
+        if (estMin < assignedMin) {
           await sysRollback(); return res.status(400).json({ error: '预计完成时间不能早于指派时间', code: 'ESTIMATE_BEFORE_ASSIGN' });
         }
         // §7 M-3 同分钟归一化 unchanged 零写入（复用 collab v1.90.0 范式，ultracode 审 #6）：
         //   新预计 == 现存（截分钟）→ 不写不留 timeline，且后续不触发需求方通知（避免同值重复回填重复推送业务方）。
         const curEstMin = truncToMinute(row.dev_estimated_at);
-        if (curEstMin && curEstMin === est) {
+        // ⭐ S3 必修：est 补秒后与 curEstMin（无秒）**永不相等**，同值 no-op 会整个失效 ⇒ 每次提交同值都
+        //   写库 + 写 timeline + **重复推送业务方钉钉通知**，正是上面这段注释要防的事。两边都归到分再比。
+        //   （[[feedback_write_read_same_semantic]]：改写端的格式一变，读端的比较口径必须跟着看一遍。）
+        if (curEstMin && curEstMin === estMin) {
           await sysRollback();
           return res.json({ id, dev_estimated_at: est, unchanged: true });
         }
@@ -6223,7 +6277,9 @@ module.exports = (deps) => {
         await dbRunAsync(
           `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, operator_id, operator_name)
            VALUES (?, 'estimate', ?, ?, ?)`,
-          [id, est, actor.id, actor.name]
+          //   summary 用 estMin：时间轴上这条 summary 是**纯文本直出**、前端不过格式化件，
+          //   写带秒的值进去，页面上就会冒出一条到秒的时间，直接违反 D3。（D4 管库里的字段，不管留痕文本。）
+          [id, estMin, actor.id, actor.name]
         );
         // [codex 100 号 HIGH-1] 方案 B（无条件重跑 runWGate）已被证伪并撤回——改方案 A（deferred 标记）：
         //   仅当 gate_deferred_at 非空（即此单确曾被 GATE 判定"全完成态但资格未过"，正等待资格修复）才重跑
@@ -6287,6 +6343,8 @@ module.exports = (deps) => {
       }
       const est = normalizeSysDatetime(b.dev_estimated_at);
       if (!est) return res.status(400).json({ error: '预计完成时间格式非法（YYYY-MM-DD HH:MM）', code: 'INVALID_ESTIMATE' });
+      const estMin = truncToMinute(est);   // S3：同 estimate 端点——est 带秒入库、estMin 到分用于比较与文本
+      if (!estMin) return res.status(500).json({ error: '时间规范化内部错误（estMin 为空）', code: 'ESTIMATE_NORMALIZE_INTERNAL' });   // 同 estimate 的 LOW-1 守卫
       const actor = sysActor(req);
       await sysBeginImmediate();
       try {
@@ -6306,7 +6364,7 @@ module.exports = (deps) => {
         // assigned_at 缺失保护 + >=assigned_at（同 estimate，dev_estimated_at 一并写入）
         const assignedMin = truncToMinute(row.assigned_at);
         if (!assignedMin) { await sysRollback(); return res.status(409).json({ error: '该单缺少指派时间（数据异常）', code: 'ASSIGNED_AT_MISSING' }); }
-        if (est < assignedMin) { await sysRollback(); return res.status(400).json({ error: '预计完成时间不能早于指派时间', code: 'ESTIMATE_BEFORE_ASSIGN' }); }
+        if (estMin < assignedMin) { await sysRollback(); return res.status(400).json({ error: '预计完成时间不能早于指派时间', code: 'ESTIMATE_BEFORE_ASSIGN' }); }   // S3：同 estimate，比较用到分值
         // 乐观锁绑 status='开发中'（W06：actor 未必是 assigned_to，去主次不再绑 assigned_to 条件）；
         //   UPDATE 评估字段 + dev_estimated_at
         const upd = await dbRunAsync(
@@ -6317,7 +6375,8 @@ module.exports = (deps) => {
         );
         if (!upd || upd.changes !== 1) { await sysRollback(); return res.status(409).json({ error: '迭代单状态或负责人已变更，请刷新重试', code: 'CONCURRENT_FEASIBILITY' }); }
         // feasibility timeline 快照（append-only 冻结，summary 拼结论/需求理解/风险/预计完成）
-        const snapshot = `结论：${conclusion}｜需求理解：${requirementConfirm}｜风险：${risk || '无'}｜预计完成：${est}`;
+        //   S3：快照文本用 estMin（同 estimate 的 timeline summary 理由——纯文本直出，带秒会显示到秒违反 D3）
+        const snapshot = `结论：${conclusion}｜需求理解：${requirementConfirm}｜风险：${risk || '无'}｜预计完成：${estMin}`;
         await dbRunAsync(
           `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, operator_id, operator_name)
            VALUES (?, 'feasibility', ?, ?, ?)`,
@@ -6572,8 +6631,14 @@ module.exports = (deps) => {
         let evSummary = summary;
         const setFrags = ['scope_changed = 1'];
         const setParams = [];
-        if (dlValue !== undefined && dlValue !== row.deadline) {
-          evSummary += `（deadline ${row.deadline || '空'} → ${dlValue}）`;
+        // ⚠️ S3（D3/D4）：dlValue 现在**带秒**（normalizeDeadlineDT 输出补 ':00'），而 row.deadline 可能是
+        //   S3 之前写入的无秒值或存量纯日期。直接逐字比会把**纯格式升级**（'14:30' → '14:30:00'）判成真变更，
+        //   写库 + 留一条"deadline 从 X 改为 X"的假记录。⇒ 比对与留痕文本都归到分（入库仍用带秒的 dlValue）。
+        //   本端点当前无 type 可达（见上方守卫注释），改在这里是为 config 流放开时不留坑。
+        const dlTextNew = deadlineToMinuteText(dlValue);
+        const dlTextOld = deadlineToMinuteText(row.deadline);
+        if (dlValue !== undefined && dlTextNew !== dlTextOld) {
+          evSummary += `（deadline ${dlTextOld || '空'} → ${dlTextNew}）`;
           setFrags.push('deadline = ?'); setParams.push(dlValue);
         }
         const upd = await dbRunAsync(
@@ -9305,7 +9370,9 @@ module.exports = (deps) => {
     // estimate
     return {
       title: `⏱ 预计完成时间已更新：${safeTitle}`,
-      md: `### ⏱ 开发已回填预计完成时间\n\n- **系统**：${system}\n- **需求**：${title}\n- **预计完成**：${issue.dev_estimated_at || '—'}\n\n开发已着手处理，预计完成时间如上。${link}`,
+      //   S3（D3）：读 DB 原值会带秒（补秒后），但**发给业务方的钉钉消息也是"给人看的文本"**，同样到分。
+      //     这是写读同源的必查点——写端补了秒，所有读端（页面、留痕、外发消息）都得跟着看一遍。
+      md: `### ⏱ 开发已回填预计完成时间\n\n- **系统**：${system}\n- **需求**：${title}\n- **预计完成**：${truncToMinute(issue.dev_estimated_at) || '—'}\n\n开发已着手处理，预计完成时间如上。${link}`,
     };
   }
 
@@ -10689,6 +10756,7 @@ module.exports = (deps) => {
     truncToMinute,
     normalizeDeadline,
     normalizeDeadlineDT,   // 四处优化 D2②：deadline 专用 datetime 校验器（与上一行**并存**——上一行是纯日期字段的共用校验器，勿合并）
+    deadlineToMinuteText,  // 时间格式统一 S3（D3）：deadline 的**文本**截断件（留痕/通知用；truncToMinute 对纯日期返 null 不能替代）
     // C3b：附件基础设施（verify-sys-attachments require 真实逻辑）
     sysPersistAttachments,
     sysRollbackPersisted,

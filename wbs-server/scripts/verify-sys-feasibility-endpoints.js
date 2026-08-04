@@ -111,7 +111,8 @@ async function main() {
     let d = await get('SELECT feasibility_conclusion, feasibility_requirement_confirm, feasibility_risk, dev_estimated_at, status FROM sys_issues WHERE id=?', [idF]);
     assert.strictEqual(d.feasibility_conclusion, '可行', 'conclusion 写入');
     assert.strictEqual(d.feasibility_requirement_confirm, '已理解需求', 'requirement_confirm 写入');
-    assert.strictEqual(d.dev_estimated_at, EST, 'dev_estimated_at 一并写入');
+    // 时间格式统一 S3（D4）：库内到秒——提交分钟级、后端补 ':00'（同 verify-sys-flow 的口径）
+    assert.strictEqual(d.dev_estimated_at, EST + ':00', 'dev_estimated_at 一并写入（D4：补秒到 HH:MM:00）');
     assert.strictEqual(d.status, '开发中', 'feasibility 不改 status');
     ok('[F1] feasibility 可行+需求理解 → 200，评估字段+dev_estimated_at 写入，status 不变');
     // feasibility timeline 快照

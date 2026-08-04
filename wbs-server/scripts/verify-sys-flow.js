@@ -135,7 +135,9 @@ async function main() {
     assert.strictEqual(r.status, 200, 'estimate 合法 200');
     const d1 = await get('SELECT status, dev_estimated_at FROM sys_issues WHERE id=?', [id1]);
     assert.strictEqual(d1.status, '开发中', 'estimate 不改 status');
-    assert.strictEqual(d1.dev_estimated_at, EST, 'dev_estimated_at 规范化入库');
+    // 时间格式统一 S3（D4）：库内到秒——提交的是分钟级 EST，后端补 ':00' 入库。
+    //   期望值显式写成 `EST + ':00'` 而不是直接读实现输出，让"补秒"这件事在断言里可见：漏补就红。
+    assert.strictEqual(d1.dev_estimated_at, EST + ':00', 'dev_estimated_at 规范化入库（D4：补秒到 HH:MM:00）');
     ok('estimate：本人 + 合法时间 → 200，不改 status（仍开发中）+ dev_estimated_at 入库');
     // codex 15b L-1：assigned_at 缺失保护——造一个"开发中但 assigned_at 空"的脏单，estimate 应 409 ASSIGNED_AT_MISSING
     const dirtyId = await seedToDevInProgress(5);
@@ -322,18 +324,24 @@ async function main() {
     ok('⭐ derive 防环（M-1）：blood 链成环（derivedId→id7→derivedId）→ 409 DERIVE_CYCLE');
 
     // ── [10] normalizeSysDatetime 用例表（核实#8 / §6.2 L-2 + codex 15 M-2 分钟级）──
-    assert.strictEqual(I.normalizeSysDatetime('2026-08-01 10:30'), '2026-08-01 10:30', '标准格式');
-    assert.strictEqual(I.normalizeSysDatetime('2026-08-01T10:30'), '2026-08-01 10:30', 'T 分隔（datetime-local）');
-    assert.strictEqual(I.normalizeSysDatetime('  2026-08-01 10:30  '), '2026-08-01 10:30', 'trim');
+    // ⚠️ 期望值自时间格式统一 S3（20260804·D4）起带 ':00'——库内到秒，用户填到分、后端补秒。
+    assert.strictEqual(I.normalizeSysDatetime('2026-08-01 10:30'), '2026-08-01 10:30:00', '标准格式（D4 补秒入库）');
+    assert.strictEqual(I.normalizeSysDatetime('2026-08-01T10:30'), '2026-08-01 10:30:00', 'T 分隔（datetime-local）');
+    assert.strictEqual(I.normalizeSysDatetime('  2026-08-01 10:30  '), '2026-08-01 10:30:00', 'trim');
     assert.strictEqual(I.normalizeSysDatetime(''), null, '空串 null');
     assert.strictEqual(I.normalizeSysDatetime('   '), null, '纯空格 null');
     assert.strictEqual(I.normalizeSysDatetime('2026-13-01 10:00'), null, '非法月份 null');
     assert.strictEqual(I.normalizeSysDatetime('2026-02-30 10:00'), null, '非法日期 null');
     assert.strictEqual(I.normalizeSysDatetime('2026-08-01 25:00'), null, '非法小时 null');
     assert.strictEqual(I.normalizeSysDatetime('随便写'), null, '乱码 null');
-    // codex 15 M-2：分钟级——带秒判非法（不再吞秒），杜绝 10:30:99 被规范化为 10:30 通过
-    assert.strictEqual(I.normalizeSysDatetime('2026-08-01 10:30:00'), null, '带秒（合法秒）也判非法（分钟级口径）');
-    assert.strictEqual(I.normalizeSysDatetime('2026-08-01 10:30:99'), null, '带非法秒判非法（不吞秒）');
+    // ⭐ 秒位口径（codex 15 M-2 的防线 + 时间格式统一 S3 的 D10 幂等，两者并存）：
+    //   D10 把入参从"一律拒秒"放宽到**只认省略或 ':00'**——这是幂等所需的最小必要：补秒后库里存的是
+    //   'HH:MM:00'，把它读回来原样重提不能被自己的校验器 400 拒。
+    //   放宽**仅限 ':00'**：'10:30:45' 这种"合法但非零"的秒同样判非法——放开它就等于恢复吞秒，
+    //   codex 15 M-2 那条防线（不让 10:30:99 被静默截成 10:30 通过）就白立了。
+    assert.strictEqual(I.normalizeSysDatetime('2026-08-01 10:30:00'), '2026-08-01 10:30:00', '⭐ D10 幂等：秒=00 接受且原样返回（自身输出重入不被拒）');
+    assert.strictEqual(I.normalizeSysDatetime('2026-08-01 10:30:45'), null, '⭐ D10：合法但非零的秒仍判非法（放开即恢复吞秒，M-2 防线作废）');
+    assert.strictEqual(I.normalizeSysDatetime('2026-08-01 10:30:99'), null, '带非法秒判非法（不吞秒·M-2 原防线保持）');
     // truncToMinute：DB datetime 截分钟（estimate 比较 assigned_at 用）
     assert.strictEqual(I.truncToMinute('2026-08-01 10:30:59'), '2026-08-01 10:30', 'truncToMinute 截秒');
     assert.strictEqual(I.truncToMinute(null), null, 'truncToMinute null 安全');

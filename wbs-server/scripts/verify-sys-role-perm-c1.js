@@ -516,8 +516,9 @@ async function main() {
     const est31 = futureEst(31);
     const est = await call('POST', `/api/sys-issues/${id}/estimate`, techTok, { dev_estimated_at: est31 });
     assert.strictEqual(est.status, 200, `[M5/开发轴] 示例发布者被指派后 estimate 应放行（ownerGuard=assignee）, got ${est.status} ${JSON.stringify(est.body)}`);
-    assert.strictEqual((await get('SELECT dev_estimated_at FROM sys_issues WHERE id=?', [id])).dev_estimated_at, est31,
-      '[M5/开发轴] estimate 须真落 dev_estimated_at（证明确实以开发身份走通，而非被静默吞）');
+    // 时间格式统一 S3（D4）：库内到秒——提交分钟级 est31、后端补 ':00'
+    assert.strictEqual((await get('SELECT dev_estimated_at FROM sys_issues WHERE id=?', [id])).dev_estimated_at, est31 + ':00',
+      '[M5/开发轴] estimate 须真落 dev_estimated_at（证明确实以开发身份走通，而非被静默吞·D4 补秒到 HH:MM:00）');
 
     // ② 协调人轴：开发身份不得穿透成协调人权
     const otherRow = await get('SELECT id FROM sys_issue_dev_assignees WHERE issue_id=? AND user_id=5 AND removed_at IS NULL', [id]);

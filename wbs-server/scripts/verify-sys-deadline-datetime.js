@@ -115,21 +115,26 @@ async function main() {
     assert.ok(typeof N === 'function', '前置：_internals 应导出 normalizeDeadlineDT');
 
     // ══ [A] 用例表：normalizeDeadlineDT 格式 / 归一化 / 边界 ══════════════════════════
+    // ⚠️ 期望值自时间格式统一 S3（20260804·D4）起**一律带 ':00'**：库内时间统一到秒，用户填到分、后端补秒。
+    //   秒仍不承载精度（deadline 语义就到分钟），':00' 是格式对齐——所以 '14:30:59' 依旧截到分再补 ':00'，
+    //   而不是保留 59。
     const accept = [
-      [`${DAY} 14:30`, `${DAY} 14:30`, '空格分隔的时分原样保留'],
-      [`${DAY}T14:30`, `${DAY} 14:30`, 'datetime-local 的 T 分隔 → 归一为空格分隔'],
-      [DAY, `${DAY} 00:00`, '纯日期 → 补 00:00（E3：控件可只挑日期）'],
-      [`${DAY} 14:30:59`, `${DAY} 14:30`, '带秒 → 截到分钟（API 直调 / 历史值兼容）'],
-      [`  ${DAY} 09:05  `, `${DAY} 09:05`, '首尾空白 trim'],
-      [`${DAY} 00:00`, `${DAY} 00:00`, '零点原样（不被当成空值丢掉）'],
-      [`${DAY} 23:59`, `${DAY} 23:59`, '边界上限 23:59'],
+      [`${DAY} 14:30`, `${DAY} 14:30:00`, '空格分隔的时分 → 补 :00 入库（D4）'],
+      [`${DAY}T14:30`, `${DAY} 14:30:00`, 'datetime-local 的 T 分隔 → 归一为空格分隔 + 补 :00'],
+      [DAY, `${DAY} 00:00:00`, '纯日期 → 补 00:00 再补 :00（E3：控件可只挑日期）'],
+      [`${DAY} 14:30:59`, `${DAY} 14:30:00`, '带秒 → 截到分钟再补 :00（秒不承载精度·API 直调/历史值兼容）'],
+      [`  ${DAY} 09:05  `, `${DAY} 09:05:00`, '首尾空白 trim'],
+      [`${DAY} 00:00`, `${DAY} 00:00:00`, '零点原样（不被当成空值丢掉）'],
+      [`${DAY} 23:59`, `${DAY} 23:59:00`, '边界上限 23:59'],
+      // D10 幂等：把上一行的**输出**再喂回去，必须原样通过——否则从库里读回带秒的值重提会被自己 400 拒。
+      [`${DAY} 14:30:00`, `${DAY} 14:30:00`, '⭐ D10 幂等：自身输出重入原样通过'],
     ];
     for (const [input, expect, why] of accept) {
       const r = N(input);
       assert.ok(r.ok, `[A] 应接受 ${JSON.stringify(input)}（${why}），实得 ok=false`);
       assert.strictEqual(r.value, expect, `[A] ${JSON.stringify(input)} 应归一化为 ${JSON.stringify(expect)}，实得 ${JSON.stringify(r.value)}`);
     }
-    ok(`[A1] 接受口径 7 例逐条归一化正确（T分隔/纯日期补00:00/带秒截分/trim/零点/23:59）`);
+    ok(`[A1] 接受口径 ${accept.length} 例逐条归一化正确（T分隔/纯日期补00:00/带秒截分/trim/零点/23:59/**D10 幂等重入**）`);
 
     for (const empty of [undefined, null, '', '   ']) {
       const r = N(empty);
@@ -181,13 +186,13 @@ async function main() {
     assert.strictEqual(r.status, 201, `[C] 建单带时分应 201，实得 ${r.status} ${JSON.stringify(r.body)}`);
     const idA = r.body.id;
     let row = await get('SELECT deadline FROM sys_issues WHERE id = ?', [idA]);
-    assert.strictEqual(row.deadline, `${DAY} 14:30`, `[C] 建单端点应落库到分钟，实得 ${JSON.stringify(row.deadline)}`);
+    assert.strictEqual(row.deadline, `${DAY} 14:30:00`, `[C] 建单端点应落库到秒（D4：分钟级输入补 :00），实得 ${JSON.stringify(row.deadline)}`);
     ok('[C1] POST /sys-issues 带时分 → 201 且逐字落库 "YYYY-MM-DD HH:MM"（端点确已换用 DT 校验器）');
 
     r = await createIssue({ deadline: DAY });
     assert.strictEqual(r.status, 201, '[C] 建单传纯日期应仍 201（向后兼容旧客户端）');
     row = await get('SELECT deadline FROM sys_issues WHERE id = ?', [r.body.id]);
-    assert.strictEqual(row.deadline, `${DAY} 00:00`, `[C] 纯日期应补 00:00，实得 ${JSON.stringify(row.deadline)}`);
+    assert.strictEqual(row.deadline, `${DAY} 00:00:00`, `[C] 纯日期应补 00:00 再补 :00，实得 ${JSON.stringify(row.deadline)}`);
     ok('[C2] POST /sys-issues 传纯日期 → 仍 201 且补 00:00（旧客户端/API 直调不被打断）');
 
     r = await createIssue({ deadline: `${DAY} 25:00` });
@@ -202,8 +207,8 @@ async function main() {
     });
     assert.strictEqual(r.status, 200, `[C] 编辑端点带时分应 200，实得 ${r.status} ${JSON.stringify(r.body)}`);
     row = await get('SELECT deadline FROM sys_issues WHERE id = ?', [idA]);
-    assert.strictEqual(row.deadline, `${DAY2} 09:15`, `[C] 编辑端点应落库到分钟，实得 ${JSON.stringify(row.deadline)}`);
-    ok('[C4] POST /sys-issues/:id/edit-in-revision 带时分 → 200 且落库到分钟（E4：建单与编辑同口径，不会「建单能填分钟、一编辑就丢」）');
+    assert.strictEqual(row.deadline, `${DAY2} 09:15:00`, `[C] 编辑端点应落库到秒（D4），实得 ${JSON.stringify(row.deadline)}`);
+    ok('[C4] POST /sys-issues/:id/edit-in-revision 带时分 → 200 且落库到秒 HH:MM:00（E4：建单与编辑同口径，不会「建单能填分钟、一编辑就丢」；D4 库内到秒/显示到分）');
 
     r = await call('POST', `/api/sys-issues/${idA}/edit-in-revision`, adminTok, {
       title: 't2', description: 'd', system_name: 'BMS', module_name: '', priority: 'P2',
@@ -225,8 +230,8 @@ async function main() {
     const derivedId = r.body && (r.body.id || r.body.new_id);
     assert.ok(derivedId, `[C] 派生应返回新单 id，实得 ${JSON.stringify(r.body)}`);
     row = await get('SELECT deadline FROM sys_issues WHERE id = ?', [derivedId]);
-    assert.strictEqual(row.deadline, `${DAY2} 16:45`, `[C] 派生新单应落库到分钟，实得 ${JSON.stringify(row.deadline)}`);
-    ok('[C6] POST /sys-issues/:id/derive 带时分 → 2xx 且新单 deadline 落库到分钟（codex 248 M-1 补做）');
+    assert.strictEqual(row.deadline, `${DAY2} 16:45:00`, `[C] 派生新单应落库到秒（D4），实得 ${JSON.stringify(row.deadline)}`);
+    ok('[C6] POST /sys-issues/:id/derive 带时分 → 2xx 且新单 deadline 落库到秒 HH:MM:00（codex 248 M-1 补做；D4 库内到秒/显示到分）');
 
     r = await call('POST', `/api/sys-issues/${originId}/derive`, adminTok, createBody({
       type: 'bug', derive_reason: '上线后发现同款问题', deadline: `${DAY2} 14:30:99`,
