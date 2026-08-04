@@ -259,6 +259,19 @@ if (Test-Path "$MirrorPath\mcp-bms") {
     Write-Host "  [SECURITY] removed mcp-bms/（.gitignore 本地数仓 MCP 目录·防内网 IP 泄漏）" -ForegroundColor Red
 }
 
+# 2026-08-04 清除：本地临时演示/修复脚本（_demo-* / _restore-*）——与 mcp-bms 同根因：
+#   robocopy /MIR 按文件系统镜像、不认主仓 .gitignore 与 git 未跟踪状态，本地临时产物会被连带推进公开仓。
+#   v1.137.0 部署时实际发生：3 个自我标注"临时脚本·用完即删"的演示数据脚本被推上 GitHub。
+#   ⚠️ 刻意**不用 `_*` 通配**——`_sys-attach-test-deps.js` 同样以下划线开头，但它是 verify 脚本
+#   require 的真实依赖（删了公开仓的验证脚本直接跑不起来）。只精确匹配这两类前缀。
+$tmpScriptPatterns = @("_demo-*.js", "_restore-*.js")
+foreach ($pat in $tmpScriptPatterns) {
+    Get-ChildItem "$MirrorPath\wbs-server\scripts" -Filter $pat -File -ErrorAction SilentlyContinue | ForEach-Object {
+        Remove-Item $_.FullName -Force
+        Write-Host "  [OK] removed wbs-server/scripts/$($_.Name)（本地临时脚本·不入公开仓）" -ForegroundColor Green
+    }
+}
+
 # 2026-07-11 安全兜底：unify-baseline 视觉基线截图（与 $excludeDirs 双重防御）——
 #   robocopy 层已排除，这里兜底删（防未来某处漏配），截图含渲染真实姓名/手机号，PNG 绕过文本脱敏。
 Get-ChildItem -Path $MirrorPath -Recurse -Directory -Filter "unify-baseline" -ErrorAction SilentlyContinue | ForEach-Object {
