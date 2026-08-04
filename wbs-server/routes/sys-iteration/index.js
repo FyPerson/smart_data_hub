@@ -745,7 +745,7 @@ module.exports = (deps) => {
       db.run(`CREATE INDEX IF NOT EXISTS idx_dev_assignee_issue_removed ON sys_issue_dev_assignees(issue_id, removed_at)`, recordSysErr('idx_dev_assignee_issue_removed'));
 
       // ── 2.6 sys_issue_dev_commits（C0，多开发协作与 commit 留痕重构 v2.9 §9/附录C）──────────
-      //   commit 留痕行（前端 SVN / 后端 GIT 填 commit_ref）；可编辑（D2，四守卫见方案 §6.3，C4 起接线）。
+      //   commit 留痕行（前端 GIT / 后端 SVN 填 commit_ref；2026-08-04 对调，此前口径全反）；可编辑（D2，四守卫见方案 §6.3，C4 起接线）。
       //   **全新表**——CREATE TABLE IF NOT EXISTS 首次真建，直接带完整 CHECK 上线（同 dev_assignees 首版范式）。
       db.run(`CREATE TABLE IF NOT EXISTS sys_issue_dev_commits (
         id INTEGER PRIMARY KEY,

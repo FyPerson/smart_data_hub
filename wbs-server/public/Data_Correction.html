@@ -324,7 +324,7 @@
                 <!-- B2（建单字段体系优化，OA 截图强制）：填写真实 OA 流程号后必须同步上传截图；留空（信息技术部自发现）免此项，见 toggleOaMode() -->
                 <div class="u-form-group" id="oaProofGroup" style="display:none;">
                     <label>OA 流程截图 <span class="u-req">*</span></label>
-                    <input type="file" id="formOaProofFiles" multiple accept="image/*,.pdf,.xlsx,.xls" onchange="renderPickedChips('formOaProofFiles','createOaProofPicked',5)">
+                    <input type="file" id="formOaProofFiles" multiple accept="image/*,.pdf,.xlsx,.xls" onchange="corrPickerOnPick('createOaProofPicked')">
                     <div id="createOaProofPicked"></div>
                     <div class="u-hint">填写了真实 OA 流程号，须随建单同步上传截图留档（建单后不可补传，事后如需变更请联系信息技术部）。</div>
                 </div>
@@ -421,7 +421,7 @@
                 <div class="u-form-group" id="errProofGroup">
                     <label>待修复数据（可选）</label>
                     <textarea id="formErrorProofNote" rows="2" maxlength="1000" placeholder="可补充说明（如：表格第几列是待改字段），选填"></textarea>
-                    <input type="file" id="formErrorProofFiles" multiple accept="image/*,.pdf,.xlsx,.xls" style="margin-top:6px;" onchange="renderPickedChips('formErrorProofFiles','createErrProofPicked',5)">
+                    <input type="file" id="formErrorProofFiles" multiple accept="image/*,.pdf,.xlsx,.xls" style="margin-top:6px;" onchange="corrPickerOnPick('createErrProofPicked')">
                     <div id="createErrProofPicked"></div>
                     <div class="u-hint" id="errProofFilesHint">待修复数据附件（表格清单为主，图片/PDF/xlsx，≤5 个文件）+ 选填文字备注；建单后两步上传到本单（上传失败不影响建单，详情页可补传）。</div>
                 </div>
@@ -485,7 +485,7 @@
                 <div id="completeReworkHint" style="display:none; font-size:12px; color:#6d28d9; background:#f3e8ff; border:1px solid #ddd0f5; border-radius:6px; padding:8px 10px; margin-bottom:10px;">🔄 返工子单：结果证明截图 + 文字说明（≥5 字）均必填，请补充本次实际改了什么。</div>
                 <div class="u-form-group" id="completeSingleGroup">
                     <label id="completeSingleProofLabel">结果证明截图（选填）</label>
-                    <input type="file" id="formCompleteFiles" multiple accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.pdf,.xlsx,.xls" onchange="renderPickedChips('formCompleteFiles','completeFilesPicked',5)">
+                    <input type="file" id="formCompleteFiles" multiple accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.pdf,.xlsx,.xls" onchange="corrPickerOnPick('completeFilesPicked')">
                     <div id="completeFilesPicked"></div>
                     <label style="margin-top:8px;">完成说明 <span class="u-req">*</span>（必填，至少 5 字）</label>
                     <textarea id="formCompleteSingleNote" rows="3" maxlength="500" placeholder="请说明实际修正了什么（避免「1」「完成」等敷衍）"></textarea>
@@ -494,7 +494,7 @@
                     <label>完成说明 <span class="u-req">*</span>（批量数据修正必填，至少 5 字）</label>
                     <textarea id="formBatchNote" rows="3" maxlength="500" placeholder="请说明实际修正了什么，如：已批量更新 183 人社保基数 / 修正 30 条客户编号映射"></textarea>
                     <div style="font-size:11px; color:#9ca3af; margin-top:2px;">批量可选附结果证明（可不传）</div>
-                    <input type="file" id="formCompleteBatchFiles" multiple accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.pdf,.xlsx,.xls" style="margin-top:6px;" onchange="renderPickedChips('formCompleteBatchFiles','completeBatchFilesPicked',5)">
+                    <input type="file" id="formCompleteBatchFiles" multiple accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.pdf,.xlsx,.xls" style="margin-top:6px;" onchange="corrPickerOnPick('completeBatchFilesPicked')">
                     <div id="completeBatchFilesPicked"></div>
                 </div>
             </div>
@@ -512,7 +512,7 @@
                 <div id="resubmitReworkHint" style="display:none; font-size:12px; color:#6d28d9; background:#f3e8ff; border:1px solid #ddd0f5; border-radius:6px; padding:8px 10px; margin-bottom:10px;">🔄 返工子单：结果证明截图 + 本次说明（≥5 字）均必填。</div>
                 <div class="u-form-group" id="resubmitSingleGroup">
                     <label id="resubmitSingleProofLabel">本次新增结果证明（选填）</label>
-                    <input type="file" id="formResubmitFiles" multiple accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.pdf,.xlsx,.xls" onchange="renderPickedChips('formResubmitFiles','resubmitFilesPicked',5)">
+                    <input type="file" id="formResubmitFiles" multiple accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.pdf,.xlsx,.xls" onchange="corrPickerOnPick('resubmitFilesPicked')">
                     <div id="resubmitFilesPicked"></div>
                     <label style="margin-top:8px;">本次重修说明 <span class="u-req">*</span>（必填）</label>
                     <textarea id="formResubmitSingleNote" rows="3" maxlength="500" placeholder="本次重修做了什么、上次为何没过"></textarea>
@@ -520,7 +520,7 @@
                 <div class="u-form-group" id="resubmitBatchGroup" style="display:none;">
                     <label>本次重修说明 <span class="u-req">*</span>（批量数据修正必填）</label>
                     <textarea id="formResubmitNote" rows="3" maxlength="500" placeholder="本次重修做了什么"></textarea>
-                    <input type="file" id="formResubmitBatchFiles" multiple accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.pdf,.xlsx,.xls" style="margin-top:6px;" onchange="renderPickedChips('formResubmitBatchFiles','resubmitBatchFilesPicked',5)">
+                    <input type="file" id="formResubmitBatchFiles" multiple accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.pdf,.xlsx,.xls" style="margin-top:6px;" onchange="corrPickerOnPick('resubmitBatchFilesPicked')">
                     <div id="resubmitBatchFilesPicked"></div>
                 </div>
             </div>
@@ -1567,9 +1567,11 @@
             document.querySelector('input[name="assignMode"][value="A"]').checked = true;
             ['formSourceSystemOther', 'formLocationInfo', 'formCorrectionCount', 'formOaNumber', 'formProcessType', 'formReason', 'formErrorProofNote',
              'formSourceSystemOther2', 'formLocationInfo2', 'formCorrectionCount2', 'formExpectedDeadline'].forEach(id => document.getElementById(id).value = '');   // L5 含系统2 字段；L-2 codex 57 补 formExpectedDeadline 防连续建单残留
-            document.getElementById('formErrorProofFiles').value = '';   // L3b 清待修复数据附件选择
-            document.getElementById('formOaProofFiles').value = '';   // B2 清 OA 截图附件选择
-            renderPickedChips('formErrorProofFiles', 'createErrProofPicked', 5); renderPickedChips('formOaProofFiles', 'createOaProofPicked', 5);   // U1 清已选 chips 残留
+            // ⭐ 下面这行 createErrProofPicked 的 reset 还额外承担「编辑态不残留」不变量：openEditCorrection
+            //   开头必先调用本函数，隐藏该区的分支因此无需再 reset（见 openEditCorrection 内对应位置注释）。
+            //   改动/移除本行前先回看该处注释。
+            corrPickerReset('createErrProofPicked');   // L3b 清待修复数据附件选择（S1：数组+input+预览一并清空）
+            corrPickerReset('createOaProofPicked');   // B2 清 OA 截图附件选择（S1 同上）
             document.getElementById('formCrossSystem').checked = false;   // L5 重置跨系统开关
             document.getElementById('formSourceSystem2').value = '';
             resetRequesterList();
@@ -1606,6 +1608,10 @@
                 ['oaNumberGroup', 'oaProofGroup', 'corrTypeGroup', 'crossSystemToggleGroup', 'system2Group', 'assignModeGroup', 'assignAGroup', 'assignBGroup'].forEach(hid => { const el = document.getElementById(hid); if (el) el.style.display = 'none'; });
                 // 待修复数据：编辑面只留文字说明（附件增删走详情页「上传待修复数据」/删除按钮）；子单整块隐藏（归主单）
                 ['formErrorProofFiles', 'createErrProofPicked', 'errProofFilesHint'].forEach(hid => { const el = document.getElementById(hid); if (el) el.style.display = 'none'; });
+                // 此处不需要补 corrPickerReset('createErrProofPicked')：本函数开头的 openCreateModal() 调用
+                //   已无条件跑过该 reset，数组/预览/input 三者均已清空——真正的责任方是 openCreateModal()
+                //   内那行 reset（见其旁 ⭐ 注释），此处再清是冗余。
+                //   ⚠️ 若将来把这段「编辑态隐藏字段」逻辑抽出、不再前置 openCreateModal()，必须在此补回 reset。
                 document.getElementById('errProofGroup').style.display = isChild ? 'none' : '';
                 // ── 回填 ──
                 document.getElementById('formProcessType').value = r.process_type || '';
@@ -1915,12 +1921,12 @@
             }
             // L-2（codex 54）：error_proof 文件数建单前预校验——超 5 个直接阻止建单，
             //   避免"单已建、附件未传"半完成态（建单后的 >5 分支保留为防御兜底，正常流走不到）。
-            const epFilesPre = document.getElementById('formErrorProofFiles').files;
+            const epFilesPre = corrPickerFiles('createErrProofPicked');
             if (epFilesPre && epFilesPre.length > 5) {
                 return showToast('待修复数据附件最多 5 个，请减少后再建单', 'error');
             }
             // B2（H-3）：真OA模式必须随建单同步带 ≥1 张 OA 截图；前端早拦，避免"填了真实 OA 号却忘传截图"到后端才 400。
-            const oaProofFiles = document.getElementById('formOaProofFiles').files;
+            const oaProofFiles = corrPickerFiles('createOaProofPicked');
             if (hasOa && (!oaProofFiles || oaProofFiles.length === 0)) {
                 return showToast('填写了真实 OA 流程号，请上传 OA 流程截图', 'error');
             }
@@ -1939,7 +1945,7 @@
                 if (!res.ok) { showToast(data.error || '建单失败', 'error'); return; }
                 showToast('修正单已创建', 'success');
                 // L3b 两步上传 error_proof 附件（§6.7：建单 JSON 成功后传锚点单；上传失败不回滚建单，提示详情页可补传）
-                const epFiles = document.getElementById('formErrorProofFiles').files;
+                const epFiles = corrPickerFiles('createErrProofPicked');
                 if (epFiles && epFiles.length > 0) {
                     const correctionId = Number(data.id);
                     if (!correctionId) {
@@ -2032,11 +2038,10 @@
             const single = type !== 'batch';
             document.getElementById('completeSingleGroup').style.display = single ? 'block' : 'none';
             document.getElementById('completeBatchGroup').style.display = single ? 'none' : 'block';
-            document.getElementById('formCompleteFiles').value = '';
+            corrPickerReset('completeFilesPicked');   // S1：数组+input+预览一并清空
             document.getElementById('formCompleteSingleNote').value = '';
             document.getElementById('formBatchNote').value = '';
-            document.getElementById('formCompleteBatchFiles').value = '';
-            renderPickedChips('formCompleteFiles', 'completeFilesPicked', 5); renderPickedChips('formCompleteBatchFiles', 'completeBatchFilesPicked', 5);   // U1 清已选 chips 残留
+            corrPickerReset('completeBatchFilesPicked');
             document.getElementById('completeReworkHint').style.display = isRework ? 'block' : 'none';   // 返工双必填提示（Commit D §六）
             // 截图要求随返工动态标（v1.97.1）：返工 single 必传 / 普通 single 选填（文字始终必填，标签静态）
             document.getElementById('completeSingleProofLabel').innerHTML = isRework
@@ -2056,11 +2061,11 @@
                 if (!note) return showToast('批量修正须填写完成说明', 'error');
                 if (Array.from(note).length < 5) return showToast('批量修正完成说明至少 5 字，请说明实际修正内容', 'error');   // 与后端 FIXED 闸门同步 5 字口径（Array.from 按字符数，codex 59 L-1），挡「1」等敷衍
                 fd.append('batch_completion_note', note);
-                const bf = document.getElementById('formCompleteBatchFiles').files;
+                const bf = corrPickerFiles('completeBatchFilesPicked');
                 if (isRework && !bf.length) return showToast('返工子单完成须上传结果证明截图（返工双必填）', 'error');   // 返工 batch 额外要截图（普通 batch 截图可选）
                 for (const f of bf) fd.append('files', f);
             } else {
-                const files = document.getElementById('formCompleteFiles').files;
+                const files = corrPickerFiles('completeFilesPicked');
                 const note = document.getElementById('formCompleteSingleNote').value.trim();
                 if (isRework) {
                     // 返工 single：双必填（截图+文字≥5），前置校验防 persist→rollback 丢上传图
@@ -2104,11 +2109,10 @@
             const single = type !== 'batch';
             document.getElementById('resubmitSingleGroup').style.display = single ? 'block' : 'none';
             document.getElementById('resubmitBatchGroup').style.display = single ? 'none' : 'block';
-            document.getElementById('formResubmitFiles').value = '';
+            corrPickerReset('resubmitFilesPicked');   // S1：数组+input+预览一并清空
             document.getElementById('formResubmitSingleNote').value = '';
             document.getElementById('formResubmitNote').value = '';
-            document.getElementById('formResubmitBatchFiles').value = '';
-            renderPickedChips('formResubmitFiles', 'resubmitFilesPicked', 5); renderPickedChips('formResubmitBatchFiles', 'resubmitBatchFilesPicked', 5);   // U1 清已选 chips 残留
+            corrPickerReset('resubmitBatchFilesPicked');
             document.getElementById('resubmitReworkHint').style.display = isRework ? 'block' : 'none';   // 返工双必填提示（Commit D §六）
             // 截图要求随返工动态标（v1.97.1）：返工 single 必传 / 普通 single 选填（重修说明始终必填，标签静态）
             document.getElementById('resubmitSingleProofLabel').innerHTML = isRework
@@ -2128,11 +2132,11 @@
                 if (!note) return showToast('批量重修须填写本次重修说明', 'error');
                 if (isRework && Array.from(note).length < 5) return showToast('返工子单重修说明至少 5 字（返工双必填）', 'error');
                 fd.append('resubmit_note', note);
-                const bf = document.getElementById('formResubmitBatchFiles').files;
+                const bf = corrPickerFiles('resubmitBatchFilesPicked');
                 if (isRework && !bf.length) return showToast('返工子单重修须上传本次结果证明截图（返工双必填）', 'error');
                 for (const f of bf) fd.append('files', f);
             } else {
-                const files = document.getElementById('formResubmitFiles').files;
+                const files = corrPickerFiles('resubmitFilesPicked');
                 const note = document.getElementById('formResubmitSingleNote').value.trim();
                 if (isRework) {
                     // 返工 single：双必填（截图+文字≥5），前置防 persist→rollback 丢图
@@ -2378,29 +2382,139 @@
                 if (session === corrAttachSession) { btn.disabled = false; fileInput.disabled = false; }
             }
         }
-        // U1（2026-07-23 弹窗式统一）：裸 input 已选文件 chip 预览（纯展示 input.files，重选即覆盖）。
-        //   用于完成/重修弹窗与建单表单附件区——这些入口文件随表单一次提交、无独立"上传"步，不引入数组状态；
-        //   主入口 attachModal 走 corrAttachFiles 数组范式。原 renderErrProofPicked/uploadErrorProof（内联两步式）
-        //   已随内联入口退役，error_proof 补传统一走 openAttach(id, 'error_proof') 弹窗。
-        function renderPickedChips(inputId, wrapId, max) {
-            const input = document.getElementById(inputId);
-            const wrap = document.getElementById(wrapId);
-            if (!input || !wrap) return;
-            const files = Array.from(input.files || []);
-            wrap.innerHTML = files.map(f =>
-                `<div style="font-size:11px;color:#166534;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:4px;padding:2px 8px;margin-top:2px;display:inline-block;margin-right:4px;">📎 ${escapeHtml(f.name)} <span style="color:#9ca3af;">(${(f.size / 1024).toFixed(1)} KB)</span></div>`
-            ).join('') + (max && files.length > max ? `<div style="font-size:11px;color:#dc2626;margin-top:2px;">⚠️ 最多 ${max} 个文件，请重新选择</div>` : '');
+        // ============================================================
+        // S1（2026-08-04 附件预览+删除统一，接续 S4 贴图接入）：裸 input 类 6 个上传点从
+        //   "input.files 直接持态"升级为"数组持态 + 缩略图预览 + 单张删除"，对齐补充附件弹窗
+        //   （corrAttachFiles/renderCorrAttachPreview）范式——解决"Ctrl+V 贴图是追加语义，但没有删除
+        //   入口"的痛点（此前贴错一张只能点"选择文件"重选，而重选会把之前已选的全部清空）。
+        //   key 沿用原 chip 容器 id，值=已选 File[]；对应裸 input 只在 onchange 一次性读取后立即清空
+        //   （input 不再是真相源，避免 input.files 与数组两份状态互相打架）。
+        //   不新增任何校验——S4 既有裸 input 链本就没有扩展名/大小/去重校验闸门；数量>max 拦截口径按
+        //   上传点分两档（本次未改，均沿用改造前既有行为）：
+        //   ① 建单路径（createOaProofPicked/createErrProofPicked）：submitCorrection 内有**两道**前端 >5 校验——
+        //      (a) 提交前：待修复数据无条件校验、OA 截图仅 hasOa 真OA模式下校验，超限直接阻止提交；
+        //      (b) 建单成功后、两步上传 error_proof 前再校验一次待修复数据，超限则**单已建但跳过上传**，
+        //          提示去详情页补传（与"上传失败不回滚建单"同一口径）。
+        //      （定位按条件搜 `length > 5`，不写死行号——行号随改动漂移，写死即失效）
+        //   ② 完成/重修 4 个入口（completeFilesPicked/completeBatchFilesPicked/resubmitFilesPicked/
+        //      resubmitBatchFilesPicked）：前端无数量拦截，真正拦截靠后端 multer limits:{files:5}
+        //      （400 由 correctionUploadMw 包装返回）。
+        //   预览层（corrPickerRender）本身对两档一视同仁：只在超 max 时显示警示文案，从不阻止选择——
+        //   拦截职责在提交/后端，不在预览。本次只补预览与删除，扩校验属行为变更、超出本次范围。
+        const CORR_PICKER_FILES = {
+            createOaProofPicked: [],
+            createErrProofPicked: [],
+            completeFilesPicked: [],
+            completeBatchFilesPicked: [],
+            resubmitFilesPicked: [],
+            resubmitBatchFilesPicked: [],
+        };
+        // 每个 key 对应已创建 objectURL 的缓存（与 CORR_PICKER_FILES[key] 下标一一对应，仅图片项非空）——
+        //   重渲染/删除/清空时统一 revoke，防 blob URL 泄漏。不同于 corrAttachPreview（"不 revoke，靠
+        //   弹窗关闭刷新自动 GC"）——这 6 个入口分布在建单/完成/重修弹窗，重渲染频次更高，显式 revoke 更稳妥。
+        const CORR_PICKER_URLS = {
+            createOaProofPicked: [], createErrProofPicked: [], completeFilesPicked: [],
+            completeBatchFilesPicked: [], resubmitFilesPicked: [], resubmitBatchFilesPicked: [],
+        };
+        // key（chip 容器 id）→ 对应裸 input id + 数量上限——取代原 CORR_PASTE_RAW_TARGETS，S1 起
+        //   兼作 picker 渲染/重置/粘贴收集的唯一映射源（原贴图专用映射与 picker 映射本就是同一份数据）。
+        const CORR_PICKER_TARGETS = {
+            createOaProofPicked: { inputId: 'formOaProofFiles', max: 5 },
+            createErrProofPicked: { inputId: 'formErrorProofFiles', max: 5 },
+            completeFilesPicked: { inputId: 'formCompleteFiles', max: 5 },
+            completeBatchFilesPicked: { inputId: 'formCompleteBatchFiles', max: 5 },
+            resubmitFilesPicked: { inputId: 'formResubmitFiles', max: 5 },
+            resubmitBatchFilesPicked: { inputId: 'formResubmitBatchFiles', max: 5 },
+        };
+        // 纯追加，不做任何校验（见上方注释——裸 input 链本无扩展名/大小/去重闸门，此处零新增）
+        function corrPickerCollect(key, files) {
+            const arr = CORR_PICKER_FILES[key];
+            if (!arr) return;
+            for (const f of Array.from(files || [])) arr.push(f);
+        }
+        function corrPickerRevokeUrls(key) {
+            (CORR_PICKER_URLS[key] || []).forEach(u => { if (u) URL.revokeObjectURL(u); });
+            CORR_PICKER_URLS[key] = [];
+        }
+        // 渲染到既有 wrap 容器：图片（CORR_IMG_EXTS）出 blob: 缩略图，非图片出图标+文件名；每项带删除按钮。
+        //   视觉风格/转义写法照抄 renderCorrAttachPreview（上方，safeAttr 引号转义同款处理），仅缩略图尺寸
+        //   略缩小（90x68，适配这 6 个入口普遍更窄的表单区）。
+        function corrPickerRender(key) {
+            const wrap = document.getElementById(key);
+            if (!wrap) return;
+            corrPickerRevokeUrls(key);   // 重渲染前先 revoke 上一轮 objectURL，防泄漏
+            const files = CORR_PICKER_FILES[key] || [];
+            const t = CORR_PICKER_TARGETS[key];
+            const max = t ? t.max : 5;
+            const urls = CORR_PICKER_URLS[key];
+            // codex 审 LOW 采纳：下方两处 onclick="corrPickerRemove('${key}',${idx})" 是内联事件属性的字符串
+            // 拼接，非事件委托。`key` 恒来自调用方传入、且只可能是 CORR_PICKER_TARGETS 里固定的 6 个白名单
+            // 常量之一（非用户输入/非文件名等外部数据），`idx` 是 Array.map 的数组下标（纯数字）——两者都不
+            // 存在属性注入面，保留现有内联写法（未改事件委托，不在本次范围）。
+            wrap.innerHTML = files.map((f, idx) => {
+                const safeName = escapeHtml(f.name);
+                // 属性位加转双引号（app.js escapeHtml 是 textContent→innerHTML 实现，不转义引号——
+                // 文件名含 " 时可逃逸 title/alt 属性边界；文本节点位用 safeName 即可）；同 renderCorrAttachPreview
+                const safeAttr = safeName.replace(/"/g, '&quot;');
+                const ext = f.name.split('.').pop().toLowerCase();
+                const sizeKB = (f.size / 1024).toFixed(1);
+                if (CORR_IMG_EXTS.includes(ext)) {
+                    const urlAttr = URL.createObjectURL(f);
+                    urls[idx] = urlAttr;
+                    return `<div class="corr-picker-item" style="position:relative;display:inline-block;margin:0 6px 6px 0;vertical-align:top;" title="${safeAttr}">
+                        <img src="${urlAttr}" alt="${safeAttr}" style="width:90px;height:68px;object-fit:cover;border-radius:6px;border:1px solid #e5e7eb;display:block;">
+                        <button type="button" onclick="corrPickerRemove('${key}',${idx})" title="移除" style="position:absolute;top:-6px;right:-6px;width:18px;height:18px;line-height:16px;text-align:center;background:#dc2626;color:#fff;border:0;border-radius:50%;cursor:pointer;font-size:11px;padding:0;">×</button>
+                        <div style="max-width:90px;font-size:10px;color:#6b7280;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px;">${safeName}</div>
+                    </div>`;
+                }
+                const icon = ext === 'pdf' ? '📄' : '📊';
+                return `<div class="corr-picker-item" style="position:relative;display:inline-block;margin:0 6px 6px 0;vertical-align:top;" title="${safeAttr}">
+                    <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;width:90px;height:68px;background:#fef3c7;color:#92400e;border-radius:6px;border:1px solid #fde68a;">
+                        <span style="font-size:20px;line-height:1;">${icon}</span>
+                        <span style="font-size:10px;margin-top:2px;max-width:82px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${safeName}</span>
+                        <span style="font-size:9px;color:#b45309;">${sizeKB} KB</span>
+                    </div>
+                    <button type="button" onclick="corrPickerRemove('${key}',${idx})" title="移除" style="position:absolute;top:-6px;right:-6px;width:18px;height:18px;line-height:16px;text-align:center;background:#dc2626;color:#fff;border:0;border-radius:50%;cursor:pointer;font-size:11px;padding:0;">×</button>
+                </div>`;
+            }).join('') + (max && files.length > max ? `<div style="font-size:11px;color:#dc2626;margin-top:2px;">⚠️ 最多 ${max} 个文件，请重新选择</div>` : '');
+        }
+        function corrPickerRemove(key, idx) {
+            const arr = CORR_PICKER_FILES[key];
+            if (!arr || idx < 0 || idx >= arr.length) return;
+            arr.splice(idx, 1);
+            corrPickerRender(key);
+        }
+        // 返回数组快照（供提交链读取，避免调用方直接持有内部数组引用被意外改动）
+        function corrPickerFiles(key) {
+            return (CORR_PICKER_FILES[key] || []).slice();
+        }
+        // 清空数组 + revoke 全部 objectURL + 清对应裸 input 的已选残留 + 重渲染
+        function corrPickerReset(key) {
+            CORR_PICKER_FILES[key] = [];
+            corrPickerRevokeUrls(key);
+            const t = CORR_PICKER_TARGETS[key];
+            if (t) { const input = document.getElementById(t.inputId); if (input) input.value = ''; }
+            corrPickerRender(key);
+        }
+        // 6 个裸 input 共用 onchange：读 input.files → 追加进数组 → 立即清空 input（input 不再是真相源，
+        //   贴图/多次选择/重选统一走数组追加语义）→ 重渲染预览
+        function corrPickerOnPick(key) {
+            const t = CORR_PICKER_TARGETS[key];
+            if (!t) return;
+            const input = document.getElementById(t.inputId);
+            if (!input) return;
+            corrPickerCollect(key, input.files);
+            input.value = '';
+            corrPickerRender(key);
         }
 
         // ============================================================
         // S4（前端统一 贴图粘贴扩展方案 20260801_v0.1）：Ctrl+V 贴图共享层接入
         //   7 个上传点分两类目标：
-        //   ① 裸 input 类（6 个：OA截图/待修复数据/完成×2/重传×2）——"重选即覆盖"是浏览器 <input> 原生
-        //     语义（无 JS 数组状态），既有选择链本就没有扩展名/大小/去重校验闸门（唯一限制是"数量>5 不
-        //     阻止选择，只在 renderPickedChips 里显示警示文案 + 提交时才真正拦截"）。粘贴口径选择"追加"
-        //     （而非贴合"重选覆盖"去替换）——因为全站其余 picker（Sys_Iteration/零星事项）粘贴语义均为
-        //     追加，用户心智统一更重要，且"贴图误删已选文件"比"贴图追加"更容易造成实际损失，是本次编码期
-        //     内在既有校验闸门框架内的合理选择，非新造校验规则。
+        //   ① 裸 input 类（6 个：OA截图/待修复数据/完成×2/重传×2）——S1（2026-08-04）起已升级为数组
+        //     持态 + 预览/删除（见上方 CORR_PICKER_* 系列），粘贴口径仍为"追加"（而非重选覆盖）——全站
+        //     其余 picker（Sys_Iteration/零星事项）粘贴语义均为追加，用户心智统一更重要，且"贴图误删
+        //     已选文件"比"贴图追加"更容易造成实际损失；不新增任何扩展名/大小/去重校验（沿用既有口径）。
         //   ② 数组类（1 个：补充附件 formAttachFiles/attachModal）——已有 corrAttachFiles 数组 + 独立
         //     校验闸门 corrAttachCollectFiles（S4 抽出，见上）+ renderCorrAttachPreview 预览，贴图直接复用。
         //   scopeResolver：createModal/completeModal/resubmitModal/attachModal 四个弹窗互斥，逐个查
@@ -2411,25 +2525,6 @@
         const DC_UPASTE_KIT_EXPECTED = 'upaste2';   // 须与 <script src="...u-paste.js?v=..._upaste2"> 缓存串尾部一致
         // codex S4 复审 LOW-2 采纳（S5 落地）：版本比对逻辑下沉共享层 UPaste.checkVersion()（见
         // corrInitUPaste 内调用），页面只留 expected 常量 + "未加载"前置判断。
-        // 裸 input 类目标：chip 容器 id → { 对应 input id, 数量上限 }（renderPickedChips 第三参）
-        const CORR_PASTE_RAW_TARGETS = {
-            createOaProofPicked: { inputId: 'formOaProofFiles', max: 5 },
-            createErrProofPicked: { inputId: 'formErrorProofFiles', max: 5 },
-            completeFilesPicked: { inputId: 'formCompleteFiles', max: 5 },
-            completeBatchFilesPicked: { inputId: 'formCompleteBatchFiles', max: 5 },
-            resubmitFilesPicked: { inputId: 'formResubmitFiles', max: 5 },
-            resubmitBatchFilesPicked: { inputId: 'formResubmitBatchFiles', max: 5 },
-        };
-        // 追加文件进裸 input（DataTransfer 重建 FileList，保留已选文件）+ 触发既有 chip 重渲染
-        function corrAppendFilesToInput(inputId, wrapId, max, files) {
-            const input = document.getElementById(inputId);
-            if (!input) return;
-            const dt = new DataTransfer();
-            Array.from(input.files || []).forEach(f => dt.items.add(f));
-            files.forEach(f => dt.items.add(f));
-            input.files = dt.files;
-            renderPickedChips(inputId, wrapId, max);
-        }
         // codex S4 复审 LOW-1 采纳：原实现"逐个查、第一个命中就返回"在理论异常态（两个弹窗同时带 open
         //   class——正常操作路径不可达，但防御性不依赖这点）下会武断地只认第一个，把另一个弹窗内其实
         //   也可见的候选静默漏判。改为先数清楚有几个 open：恰好 1 个→该弹窗；0 个→返回 null，由共享层
@@ -2450,16 +2545,16 @@
             corrInitUPaste._done = true;
             if (!window.UPaste) { console.error('[贴图共享层] u-paste.js 未加载'); return; }
             UPaste.checkVersion(DC_UPASTE_KIT_EXPECTED, 'Data_Correction.html');
-            const selector = Object.keys(CORR_PASTE_RAW_TARGETS).map(k => '#' + k).join(',') + ',#corrAttachPreview';
+            const selector = Object.keys(CORR_PICKER_TARGETS).map(k => '#' + k).join(',') + ',#corrAttachPreview';
             UPaste.register({
                 scopeResolver: corrPasteScopeResolver,
                 selector: selector,
                 keyOf: (el) => el.id,
                 collect: (key, files) => {
                     if (key === 'corrAttachPreview') { corrAttachCollectFiles(files); renderCorrAttachPreview(); return; }
-                    const t = CORR_PASTE_RAW_TARGETS[key];
-                    if (!t) return;
-                    corrAppendFilesToInput(t.inputId, key, t.max, files);
+                    if (!CORR_PICKER_TARGETS[key]) return;
+                    corrPickerCollect(key, files);
+                    corrPickerRender(key);
                 },
             });
         }

@@ -88,10 +88,16 @@ async function main() {
         const r1 = await dispatchPaste(page, { withImage: true });
         await shotOnFail(page, r1.defaultPrevented === true, 't1-default-prevented', `T1 defaultPrevented=true（实得=${r1.defaultPrevented}）`);
         await page.waitForTimeout(300);
-        const filesCount1 = await page.evaluate(() => document.getElementById('formCompleteFiles').files.length);
-        await shotOnFail(page, filesCount1 === 1, 't1-file-collected', `T1 formCompleteFiles.files 收入 1 个（实得=${filesCount1}）`);
-        const chip1 = await page.locator('#completeFilesPicked').innerHTML();
-        await shotOnFail(page, chip1.includes('📎') && /^粘贴截图_/.test(chip1.replace(/^[\s\S]*?📎\s*/, '')), 't1-chip-rendered', `T1 chip 预览渲染贴图文件名（实得="${chip1.slice(0, 80)}"）`);
+        // S1（2026-08-04）：裸 input 已升级数组持态——onchange/贴图 collect 后立即清空 input.value
+        //   （input 不再是真相源），改断言 corrPickerFiles('completeFilesPicked') 数组 + 预览渲染。
+        const filesCount1 = await page.evaluate(() => corrPickerFiles('completeFilesPicked').length);
+        await shotOnFail(page, filesCount1 === 1, 't1-file-collected', `T1 completeFilesPicked picker 数组收入 1 个（实得=${filesCount1}）`);
+        const inputCleared1 = await page.evaluate(() => document.getElementById('formCompleteFiles').value === '');
+        await shotOnFail(page, inputCleared1, 't1-input-cleared', 'T1 裸 input.value 贴图后立即清空（数组才是真相源）');
+        const pastedName1 = await page.evaluate(() => { const f = corrPickerFiles('completeFilesPicked'); return f[0] && f[0].name; });
+        await shotOnFail(page, /^粘贴截图_.*\.png$/.test(pastedName1 || ''), 't1-pasted-name', `T1 贴图文件名符合命名规则（实得="${pastedName1}"）`);
+        const previewImgs1 = await page.locator('#completeFilesPicked img').count();
+        await shotOnFail(page, previewImgs1 === 1, 't1-preview-rendered', `T1 预览区渲染贴图缩略图（img 数=${previewImgs1}）`);
         await page.evaluate(() => closeModal('completeModal'));
         await page.waitForTimeout(200);
 

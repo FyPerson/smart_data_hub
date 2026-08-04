@@ -1380,12 +1380,21 @@
     //   ⚠️ 复制内容取自 siNormalizeCommitRefs 的**完整数组**，不是屏幕上被收起/被 ellipsis 截断的文本。
     //   ⚠️⚠️ 四处优化 D3（E5）改为**单组**签名：原 (feRaw, beRaw) 产出「前端: a; b\n后端: c」两行带前缀，
     //   而上线现场的动作是——前端 commit 贴进一个窗口、后端贴进另一个，前缀和另一组都得手工删掉。
-    //   现在前端 / 后端各自一个按钮，各复制**纯编号**，多条仍用 '; ' 分隔（如 'fe-1a2b3c4; fe-5d6e7f8'）。
+    //   现在前端 / 后端各自一个按钮，各复制**纯编号**。
+    //   ⭐ S4（GIT/SVN 对调 + 复制格式差异化，用户 2026-08-04 拍板）：两侧粘贴目的地不同——前端
+    //   （GIT commit）贴代码工具，一行一个更好认；后端（SVN 版本号）贴运维汇报，惯用「,」拼接、
+    //   不留空格。故按 side 差异化分隔符，不再两侧统一 '; '。
     //   ⚠️ 入参是**已归一化的数组**（或 null），不是 raw（codex 249 LOW-2 收口）：调用方 batchCommitBlock
     //   本来就要 siNormalizeCommitRefs 一次来取 title 与条数，再让本函数内部解析第二次，既多余、又给
     //   "title 显示 N 条而复制出 M 条"留了漂移的口子。改成共用同一份 arr，天然一致。
-    function siBuildCommitCopyText(refs) {
-        return (refs && refs.length) ? refs.join('; ') : '';   // 该组空/不可用 → ''，调用方据此不渲染该侧按钮（D10.1）
+    //   side 直接吃调用方传入的中文分组 label（'前端'/'后端'，见 batchCommitBlock），当前只有这两个调用值。
+    //   ⚠️ 未知 side 不静默按后端处理（codex 审 18 LOW）：若将来文案改动/国际化传进 'frontend' 之类，
+    //   静默退化会让前端复制格式悄悄变成逗号拼接且**毫无症状**。这里显式报错暴露，并回落到换行——
+    //   两种格式里换行对人更无害（粘到哪都是一行一个，逗号被误当换行会粘出一坨）。
+    function siBuildCommitCopyText(refs, side) {
+        if (!refs || !refs.length) return '';   // 该组空/不可用 → ''，调用方据此不渲染该侧按钮（D10.1）
+        if (side !== '前端' && side !== '后端') console.error('[sys-iteration] siBuildCommitCopyText 收到未知 side：', side, "—— 应为 '前端' 或 '后端'，已回落换行格式");
+        return side === '后端' ? refs.join(',') : refs.join('\n');
     }
     // 抄 Model_Center.html:12427 的实现范式（**不是** import——该函数是那个页面的页内私有函数，
     //   共享层没有；本项目单文件应用范式下页内自持一份，行为与之逐字一致）。
@@ -3318,16 +3327,16 @@
             </div>
             <div id="siSubmitCommitsBox" class="u-form-group"><label>Commit 记录 <span class="u-req">*</span></label>
                 <div class="si-commit-group">
-                    <div class="si-commit-group-label">前端组（SVN 版本号）</div>
+                    <div class="si-commit-group-label">前端组（GIT commit）</div>
                     <div id="siSubmitRows-frontend"></div>
                     <button type="button" class="u-btn-secondary u-btn-sm" onclick="siSubmitAddRow('frontend')">+ 加一行</button>
                 </div>
                 <div class="si-commit-group">
-                    <div class="si-commit-group-label">后端组（GIT commit）</div>
+                    <div class="si-commit-group-label">后端组（SVN 版本号）</div>
                     <div id="siSubmitRows-backend"></div>
                     <button type="button" class="u-btn-secondary u-btn-sm" onclick="siSubmitAddRow('backend')">+ 加一行</button>
                 </div>
-                <div class="u-hint">前端组填 SVN 版本号，后端组填 GIT commit；每组可加多行，前端组或后端组至少填 1 条即可提交。</div>
+                <div class="u-hint">前端组填 GIT commit，后端组填 SVN 版本号；每组可加多行，前端组或后端组至少填 1 条即可提交。</div>
             </div>
             <div id="siSubmitNoCodeBox" class="u-form-group" style="display:none">
                 <label>无代码交付原因 <span class="u-req">*</span></label>
@@ -3429,19 +3438,25 @@
     // commit 行编辑器（commit 记录改造 2026-07-19）：前端组/后端组两固定分组，组固定 component（无下拉），
     //   组内动态加/删行。每组容器 #siSubmitRows-<component>，行内仅一个 commit_ref 输入 + 删除；组内至少留 1 行
     //   （删到只剩 1 行时删除按钮隐藏，避免整组清空后无入口再加行；真实「至少 1 条」由提交时业务校验兜底）。
-    // 软提示（不拦截）：前端组填了像 GIT commit（7~40 位纯 hex）→ 提示「前端组通常填 SVN 版本号」；
-    //   后端组填了像 SVN 版本号（纯数字 / r 数字）→ 提示「后端组通常填 GIT commit」。分寸=宽松，只对「明显填反」
+    // 软提示（不拦截）：前端组填了像 SVN 版本号（纯数字 / r 数字）→ 提示「前端组通常填 GIT commit」；
+    //   后端组填了像 GIT commit（7~40 位纯 hex）→ 提示「后端组通常填 SVN 版本号」。分寸=宽松，只对「明显填反」
     //   的强特征提示，不误伤分支名/tag/短哈希/带前缀的特殊引用（故 GIT 特征取 ≥7 位纯 hex，SVN 特征取纯数字/r数字）。
+    //   ⭐ S4（GIT/SVN 口径对调，2026-08-04 用户拍板）：正确口径改为「前端组填 GIT commit，后端组填
+    //   SVN 版本号」，此前全反了。SI_GIT_HASH_RE / SI_SVN_REV_RE 两个正则定义本身不变（GIT hash 与
+    //   SVN rev 的形态特征没变），改的是它们应用到哪一组——见下方 siCommitWarnFor。
     const SI_GIT_HASH_RE = /^[0-9a-fA-F]{7,40}$/;     // GIT commit：7~40 位十六进制
     const SI_SVN_REV_RE = /^r?\d+$/;                  // SVN 版本号：纯数字 或 r 前缀数字（如 12345 / r12345）
     // codex LOW（2026-07-19）：纯数字也属于 hex，会同时匹配两个正则——合法的 7 位以上 SVN 版本号（如 1234567）
-    //   若不排除 SVN 特征会被误报「看起来像 GIT」。故前端组的 GIT 判定必须排除 SVN 特征（纯数字/r数字），
-    //   宁可漏掉纯数字 GIT 哈希（罕见），也不误伤正确填入的 SVN 版本号——契合「只提示明显填反」口径。
+    //   若不排除 SVN 特征会被误报「看起来像 GIT」。GIT 判定必须排除 SVN 特征（纯数字/r数字），宁可漏掉
+    //   纯数字 GIT 哈希（罕见），也不误伤正确填入的 SVN 版本号——契合「只提示明显填反」口径。
+    //   ⭐ S4：GIT **误填**判定现在挂在**后端组**——对调后后端组应填 SVN，所以是在后端组检测"是否误填
+    //   了像 GIT 的值"（不是"后端该填 GIT"）。排除子句跟着 GIT 判定一起从 frontend 分支移到 backend
+    //   分支——否则正确填写的 7 位以上纯数字 SVN 版本号会被误报「看起来像 GIT」。
     function siCommitWarnFor(component, ref) {
         const v = (ref || '').trim();
         if (!v) return '';
-        if (component === 'frontend' && SI_GIT_HASH_RE.test(v) && !SI_SVN_REV_RE.test(v)) return '这看起来像 GIT commit；前端组通常填 SVN 版本号（不影响提交）';
-        if (component === 'backend' && SI_SVN_REV_RE.test(v)) return '这看起来像 SVN 版本号；后端组通常填 GIT commit（不影响提交）';
+        if (component === 'frontend' && SI_SVN_REV_RE.test(v)) return '这看起来像 SVN 版本号；前端组通常填 GIT commit（不影响提交）';
+        if (component === 'backend' && SI_GIT_HASH_RE.test(v) && !SI_SVN_REV_RE.test(v)) return '这看起来像 GIT commit；后端组通常填 SVN 版本号（不影响提交）';
         return '';
     }
     // 组内行渲染：为每组按当前行数渲染输入行 + 软提示位；idempotent，按 rows 状态数组重建 DOM。
@@ -3450,7 +3465,7 @@
         const box = document.getElementById('siSubmitRows-' + component);
         if (!box) return;
         const rows = siSubmitRowState[component];
-        const placeholder = component === 'frontend' ? 'SVN 版本号（1~200字）' : 'GIT commit（1~200字）';
+        const placeholder = component === 'frontend' ? 'GIT commit（1~200字）' : 'SVN 版本号（1~200字）';
         box.innerHTML = rows.map((val, i) => {
             const warn = siCommitWarnFor(component, val);
             const delBtn = rows.length > 1 ? `<span class="si-commit-row-del" onclick="siSubmitRemoveRow('${component}',${i})">删除</span>` : '';
@@ -3494,7 +3509,7 @@
         if (!iss) return;
         siModal('补充 commit', [
             fSelectMap('component', '组件', ['frontend', 'backend'], 'frontend', SI_COMMIT_COMPONENT_LABEL),
-            fText('commit_ref', 'commit_ref / SVN 版本号', '', true, 'trim 后 1~200 字'),
+            fText('commit_ref', 'commit_ref（前端 GIT / 后端 SVN）','', true, 'trim 后 1~200 字'),
         ], async v => {
             const ref = (v.commit_ref || '').trim();
             if (!ref || ref.length > 200) { showToast('commit_ref 必填（trim 1~200字）', 'error'); return false; }
@@ -3509,7 +3524,7 @@
         if (!iss || !row) return;
         siModal('编辑 commit', [
             fSelectMap('component', '组件', ['frontend', 'backend'], row.component, SI_COMMIT_COMPONENT_LABEL),
-            fText('commit_ref', 'commit_ref / SVN 版本号', row.commit_ref, true, 'trim 后 1~200 字'),
+            fText('commit_ref', 'commit_ref（前端 GIT / 后端 SVN）',row.commit_ref, true, 'trim 后 1~200 字'),
         ], async v => {
             const ref = (v.commit_ref || '').trim();
             if (!ref || ref.length > 200) { showToast('commit_ref 必填（trim 1~200字）', 'error'); return false; }
@@ -4544,7 +4559,7 @@
                 const t = (arr && arr.length) ? ` title="${esc(arr.join('\n'))}"` : '';
                 //   复制内容取自完整数组，不受「等N条」收起与 ellipsis 影响；**共用同一份 arr**，
                 //   title 的条数与实际复制内容天然一致（codex 249 LOW-2）。
-                const copyText = siBuildCommitCopyText(arr);
+                const copyText = siBuildCommitCopyText(arr, label);   // S4：按 side（label）差异化分隔符
                 //   label 当前只由本文件两个调用点传入字面量，非接口数据；但签名长得像通用 helper，
                 //   属性位统一走 esc 免得将来有人传进外部数据（codex 249 LOW-1，防御性而非现存漏洞）。
                 const safeLabel = esc(label);

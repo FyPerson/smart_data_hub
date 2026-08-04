@@ -85,42 +85,54 @@ async function main() {
         const r1 = await dispatchPaste(page, { withImage: true });
         await shotOnFail(page, r1.defaultPrevented === true, 't1-default-prevented', `T1 defaultPrevented=true（实得=${r1.defaultPrevented}）`);
         await page.waitForTimeout(300);
-        const files1 = await page.evaluate(() => Array.from(document.getElementById('formAttachments').files || []).map(f => f.name));
-        await shotOnFail(page, files1.length === 1 && /^粘贴截图_/.test(files1[0] || ''), 't1-file-collected', `T1 formAttachments.files 收入 1 个粘贴截图（实得=${JSON.stringify(files1)}）`);
+        // S2（2026-08-05）：formAttachments 已升级数组持态——onchange/贴图 collect 后立即清空 input.value
+        //   （input 不再是真相源），改断言 trPickerFiles() 数组。
+        const files1 = await page.evaluate(() => trPickerFiles().map(f => f.name));
+        await shotOnFail(page, files1.length === 1 && /^粘贴截图_/.test(files1[0] || ''), 't1-file-collected', `T1 trPickerFiles() 收入 1 个粘贴截图（实得=${JSON.stringify(files1)}）`);
+        const inputCleared1 = await page.evaluate(() => document.getElementById('formAttachments').value === '');
+        await shotOnFail(page, inputCleared1, 't1-input-cleared', 'T1 裸 input.value 贴图后立即清空（数组才是真相源）');
+        const previewImgs1 = await page.locator('#attachmentPreview img').count();
+        await shotOnFail(page, previewImgs1 === 1, 't1-preview-rendered', `T1 预览区渲染贴图缩略图（img 数=${previewImgs1}）`);
 
         // ═══════════════════════════════════════════════════════════
-        // T1b（codex S5 复审 L3 采纳）：追加语义——先手动放一个"已选文件"进 formAttachments.files
-        // （模拟用户已经通过文件选择器选过一个），贴图后原文件必须还在 + 长度 +1（证明是 DataTransfer
-        // 追加重建，不是整体覆盖）；再贴第二次继续验证单调递增。
+        // T1b（codex S5 复审 L3 采纳，S2 改用 trPickerFiles() 断言）：追加语义——先用 setInputFiles
+        // 模拟用户已经通过文件选择器选过一个（真实触发 onchange/trPickerOnPick，非直接改 input.files
+        // 绕过收集链），贴图后原文件必须还在 + 长度 +1（证明是数组追加，不是整体覆盖）；再贴第二次
+        // 继续验证单调递增。
         // ═══════════════════════════════════════════════════════════
         console.log('\n── T1b：追加语义——预置文件 + 两次贴图均追加，不覆盖已选文件 ──');
-        await page.evaluate(() => {
-            const input = document.getElementById('formAttachments');
-            const dt = new DataTransfer();
-            dt.items.add(new File([new Uint8Array([1, 2, 3])], 'manual-selected.xlsx', { type: 'application/vnd.ms-excel' }));
-            input.files = dt.files;
-        });
-        const preNames1b = await page.evaluate(() => Array.from(document.getElementById('formAttachments').files || []).map(f => f.name));
-        await shotOnFail(page, preNames1b.length === 1 && preNames1b[0] === 'manual-selected.xlsx', 't1b-pre-injected', `T1b 前置：手动预置 1 个已选文件（实得=${JSON.stringify(preNames1b)}）`);
+        await page.setInputFiles('#formAttachments', { name: 'manual-selected.xlsx', mimeType: 'application/vnd.ms-excel', buffer: Buffer.from('a,b\n1,2') });
+        await page.waitForTimeout(150);
+        const preNames1b = await page.evaluate(() => trPickerFiles().map(f => f.name));
+        await shotOnFail(page, preNames1b.length === 2 && preNames1b.includes('manual-selected.xlsx'), 't1b-pre-injected', `T1b 前置：手动预置 1 个已选文件（累计 T1 的贴图，实得=${JSON.stringify(preNames1b)}）`);
         const r1b1 = await dispatchPaste(page, { withImage: true });
         await shotOnFail(page, r1b1.defaultPrevented === true, 't1b-first-paste-prevented', `T1b 第一次贴图 defaultPrevented=true（实得=${r1b1.defaultPrevented}）`);
         await page.waitForTimeout(300);
-        const afterFirst1b = await page.evaluate(() => Array.from(document.getElementById('formAttachments').files || []).map(f => f.name));
-        await shotOnFail(page, afterFirst1b.length === 2 && afterFirst1b.includes('manual-selected.xlsx'), 't1b-append-not-replace', `T1b 第一次贴图：追加而非覆盖，原文件仍在 + 长度=2（实得=${JSON.stringify(afterFirst1b)}）`);
+        const afterFirst1b = await page.evaluate(() => trPickerFiles().map(f => f.name));
+        await shotOnFail(page, afterFirst1b.length === 3 && afterFirst1b.includes('manual-selected.xlsx'), 't1b-append-not-replace', `T1b 第一次贴图：追加而非覆盖，原文件仍在 + 长度=3（实得=${JSON.stringify(afterFirst1b)}）`);
         await dispatchPaste(page, { withImage: true });
         await page.waitForTimeout(300);
-        const afterSecond1b = await page.evaluate(() => Array.from(document.getElementById('formAttachments').files || []).map(f => f.name));
-        await shotOnFail(page, afterSecond1b.length === 3 && afterSecond1b.includes('manual-selected.xlsx'), 't1b-second-append', `T1b 第二次贴图：继续追加，长度=3（实得=${JSON.stringify(afterSecond1b)}）`);
+        const afterSecond1b = await page.evaluate(() => trPickerFiles().map(f => f.name));
+        await shotOnFail(page, afterSecond1b.length === 4 && afterSecond1b.includes('manual-selected.xlsx'), 't1b-second-append', `T1b 第二次贴图：继续追加，长度=4（实得=${JSON.stringify(afterSecond1b)}）`);
+
+        // ═══════════════════════════════════════════════════════════
+        // T1c（S2 新增）：删除单张 → 其余保留
+        // ═══════════════════════════════════════════════════════════
+        console.log('\n── T1c：删除单张 → 其余保留 ──');
+        await page.evaluate(() => trPickerRemove(0));
+        await page.waitForTimeout(100);
+        const afterRemove1c = await page.evaluate(() => trPickerFiles().map(f => f.name));
+        await shotOnFail(page, afterRemove1c.length === 3 && !afterRemove1c.includes(files1[0]) && afterRemove1c.includes('manual-selected.xlsx'), 't1c-remove-first', `T1c 删除第0项（原贴图）→ 剩3项、已删项不在、其余（含 manual-selected.xlsx）保留（实得=${JSON.stringify(afterRemove1c)}）`);
 
         // ═══════════════════════════════════════════════════════════
         // T2：焦点在需求描述 + 图文混合粘贴 → 放行，不收附件
         // ═══════════════════════════════════════════════════════════
         console.log('\n── T2：焦点在需求描述 textarea + 图文混合粘贴 → 放行，不收附件 ──');
-        const beforeCount2 = await page.evaluate(() => document.getElementById('formAttachments').files.length);
+        const beforeCount2 = await page.evaluate(() => trPickerFiles().length);
         const r2 = await dispatchPaste(page, { withImage: true, withText: true, textValue: '需求描述混合粘贴文本', focusSelector: '#formDescription' });
         await shotOnFail(page, r2.defaultPrevented === false, 't2-default-not-prevented', `T2 图片+文本+可编辑焦点 → e.defaultPrevented=false（实得=${r2.defaultPrevented}）`);
         await page.waitForTimeout(300);
-        const afterCount2 = await page.evaluate(() => document.getElementById('formAttachments').files.length);
+        const afterCount2 = await page.evaluate(() => trPickerFiles().length);
         await shotOnFail(page, afterCount2 === beforeCount2, 't2-no-attachment-added', `T2 未收附件（前=${beforeCount2}/后=${afterCount2}）`);
 
         // ═══════════════════════════════════════════════════════════

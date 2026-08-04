@@ -142,6 +142,18 @@
                     <div class="u-hint">建单后可主动钉钉一位对方（示例开发C/示例用户A）；也可稍后在详情里再发。</div>
                 </div>
                 <div class="u-form-group"><label>补充说明</label><textarea id="fDesc" rows="3" maxlength="2000" placeholder="可选：补充背景 / 口径 / 关联表等"></textarea></div>
+                <!-- S3（建单附件）起新建态显示；S5 起编辑态也显示（用户回场推翻 S3 的"编辑隐藏"口径）。
+                     编辑弹窗与详情页均调用 uploadAttach、目标为同一附件端点。显隐由 openCreateModal /
+                     openEditLite 控制（见下方脚本，皆为 'block'），reset 时机不变。 -->
+                <div class="u-form-group" id="ilCreateAttachGroup">
+                    <label>附件</label>
+                    <input type="file" id="ilCreateAttachInput" multiple onchange="ilPickerOnPick()">
+                    <div id="ilCreateAttachPreview" style="margin-top:6px;"></div>
+                    <div style="font-size:11px; color:#9ca3af; margin-top:2px;">可选：报错截图等，建单后逐个上传；也支持 Ctrl+V 粘贴截图</div>
+                    <!-- S5：picker 只代表本次新增、不回填历史附件（照 Issue_Tracker.html 编辑模式 H-2 口径），
+                         不说清楚编辑态用户会以为这里能看到已传附件。 -->
+                    <div style="font-size:11px; color:#9ca3af; margin-top:2px;">仅上传本次新增的附件；已有附件在详情页管理</div>
+                </div>
                 <div class="u-hint" id="createErr" style="display:none; color:#d93025;"></div>
             </div>
             <div class="u-modal-footer">
@@ -662,32 +674,161 @@
             if (!file || !id) return;
             uploadAttach(id, file).finally(() => { inp.value = ''; });
         }
-        async function uploadAttach(id, file) {
-            if (busy) return; busy = true;
+        // codex 审可预期采纳：返回 true/false（原先两条路径都无返回值，undefined 同样是假值——本次
+        //   只是把"假值"坐实成显式 boolean，供 S3 两步提交统计失败数用，不改变任何既有调用方行为
+        //   （pickAttach/onAttachPicked、下方 S4 贴图 collect 均未读返回值）。
+        // 契约（opts 两个开关互相独立；既有调用方不传 ⇒ 行为不变）：
+        //   • reuseBusyLock — **仅供自身已持有 busy 锁的提交链使用**（当前唯一使用者=建单两步提交）。
+        //     不传时本函数自持锁；传了则全程不碰锁，由调用方负责。
+        //   • skipRefresh — 跳过成功后的 loadAttachments(id)。用于抽屉未打开、刷新无意义的场景。
+        //     ⚠️ 必要性不止省一次请求：loadAttachments 抛错会被本函数 catch 吞掉并 return false，
+        //     把**已上传成功**的文件计入失败 ⇒ 用户重复补传产生重复附件。
+        //   • 返回值语义：表示上传 POST 是否成功，**不表示列表刷新是否成功**。
+        async function uploadAttach(id, file, opts) {
+            const reuseBusyLock = !!(opts && opts.reuseBusyLock);
+            const skipRefresh = !!(opts && opts.skipRefresh);
+            // 误用防御（codex 审 17 复审 LOW）：声称复用锁却没人持锁 = 并发入口被悄悄打开，且不会有任何
+            //   症状。这里不改变行为（调用方意图优先），只留可见告警。
+            if (reuseBusyLock && !busy) console.warn('[issue-lite] uploadAttach 传了 reuseBusyLock 但当前 busy=false —— 调用方并未持锁，写操作守卫在本次上传期间是失效的');
+            if (!reuseBusyLock) { if (busy) return false; busy = true; }
             try {
                 const fd = new FormData(); fd.append('files', file);
                 const res = await authFetch('/api/issue-lite/' + id + '/attachments', { method: 'POST', body: fd });
                 const j = await res.json().catch(() => ({}));
-                if (res.ok && j.success) { await loadAttachments(id); }
-                else alert((j && (j.error || j.detail)) || '上传失败');
-            } catch (e) { alert('上传失败'); } finally { busy = false; }
+                if (res.ok && j.success) { if (!skipRefresh) await loadAttachments(id); return true; }
+                else { alert((j && (j.error || j.detail)) || '上传失败'); return false; }
+            } catch (e) { alert('上传失败'); return false; } finally { if (!reuseBusyLock) busy = false; }
         }
         // ============================================================
-        // S4（前端统一 贴图粘贴扩展方案 20260801_v0.1）：Ctrl+V 贴图共享层接入
-        //   本页前端本就无预校验（无扩展名/大小/去重闸门，attachInput 也不带 multiple——单文件即选即传）；
-        //   全靠后端 multer 白名单兜底，故 collect 适配器直接调既有上传函数 uploadAttach(id, file)，逐个
-        //   顺序 await（自然复用 busy 串行锁，不新增校验）。
-        //   目标区 = 抽屉内 #attList（附件清单容器，唯一可粘贴区）。scopeResolver 关键点：.u-drawer 用
-        //   position:fixed + right:-620px 做"关闭"（非 display:none——见 components.css .u-drawer），
-        //   getClientRects() 口径的可见性判定不会因为抽屉平移出视口就判"不可见"，若不显式限定作用域，
-        //   抽屉关闭时仍会把 #attList 判成"1 个可见候选"、误收贴图到上一次打开的单据。故未开抽屉时必须
-        //   返回显式空作用域哨兵（u-paste.js register() 文档已注明该契约），不能返回 null 回落 document。
-        //   isImageArea 复刻按钮显隐同款权限判据（canWrite() && 非已归档 && 非已作废）——无权限/终态时
-        //   候选池为空，贴图与"上传附件"按钮同样不可用，口径一致。
+        // S3（前端统一 附件贴图预览补全，接续 S1 Data_Correction / S2 Issue_Tracker）：建单弹窗新增
+        //   附件区——"先建单再逐个传"（POST /api/issue-lite 只收 JSON，不接 multipart；建单成功拿到 id
+        //   后再逐个 POST /api/issue-lite/:id/attachments，见 submitCreate）。该端点 multer 限单文件一个
+        //   （server.js issueLiteUpload.array('files', 1)），故只能循环单文件传，不能像 Data_Correction
+        //   的 OA 附件那样一次 multipart 带多文件。
+        //   picker 结构照 corrPicker*（Data_Correction）/ trPicker*（Issue_Tracker）范式：本页仅 1 个
+        //   建单时上传点（同 Issue_Tracker），沿用 trPicker* 的扁平数组形状——不用 Data_Correction 那种
+        //   key→数组字典（本页只有 1 个 key，字典是多此一举）。命名换 il 前缀，容器 id 用
+        //   ilCreateAttachPreview（区别于详情抽屉的 #attList，两套上传体系互不干扰）。
+        //   input 只在 onchange 一次性读取后立即清空（input 不再是真相源）；不新增任何数量/大小/扩展名
+        //   预校验——详情抽屉单文件上传本就无这些前端闸门，全靠后端 issueLiteUpload 白名单 + 单据 20 个
+        //   附件数上限兜底，超限文件会在两步提交的上传阶段被服务端拒绝，自然并入下方 fail 列表提示补传，
+        //   不单独加前端预拦（不凭空加校验）。
+        //   ⭐ S5（用户回场推翻 S3 口径）：picker 新建/编辑两态**均显示**——编辑弹窗复用同一个
+        //   createModal，走同一个 uploadAttach/同一个端点，不是两条会漂移的写入路径，S3 当初"编辑隐藏"
+        //   的顾虑过度了；少一步跳转的收益是实的。picker 不回填历史附件（只代表本次新增，见附件区第二条
+        //   提示"仅上传本次新增的附件"），显隐由 openCreateModal/openEditLite 对 #ilCreateAttachGroup
+        //   统一设 'block' 控制，reset 时机不变（两处都在打开时 reset，防上次残留串场）。
+        // ============================================================
+        const IL_IMG_EXTS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'];
+        const IL_CREATE_FILES = [];   // 建单弹窗附件数组（本页仅 1 个新建时上传点，扁平数组，不用 key 字典）
+        const IL_CREATE_URLS = [];    // 与 IL_CREATE_FILES 下标一一对应的 objectURL 缓存（仅图片项非空）
+        // 纯追加，不做任何校验（详情页既有单文件上传本无扩展名/大小/去重闸门，此处零新增）
+        function ilPickerCollect(files) {
+            for (const f of Array.from(files || [])) IL_CREATE_FILES.push(f);
+        }
+        function ilPickerRevokeUrls() {
+            IL_CREATE_URLS.forEach(u => { if (u) URL.revokeObjectURL(u); });
+            IL_CREATE_URLS.length = 0;
+        }
+        // 渲染到 ilCreateAttachPreview 容器：图片出 blob 缩略图，非图片出图标+文件名；每项带删除按钮。
+        //   90x68 尺寸 / safeAttr 引号转义写法对齐 corrPickerRender（Data_Correction）/ trPickerRender（Issue_Tracker）。
+        function ilPickerRender() {
+            const wrap = document.getElementById('ilCreateAttachPreview');
+            if (!wrap) return;
+            ilPickerRevokeUrls();   // 重渲染前先 revoke 上一轮 objectURL，防泄漏
+            wrap.innerHTML = IL_CREATE_FILES.map((f, idx) => {
+                const safeName = escapeHtml(f.name);
+                // 属性位加转双引号（app.js escapeHtml 是 textContent→innerHTML 实现，不转义引号——
+                // 文件名含 " 时可逃逸 title/alt 属性边界；文本节点位用 safeName 即可）
+                const safeAttr = safeName.replace(/"/g, '&quot;');
+                const ext = f.name.split('.').pop().toLowerCase();
+                const sizeKB = (f.size / 1024).toFixed(1);
+                if (IL_IMG_EXTS.includes(ext)) {
+                    const urlAttr = URL.createObjectURL(f);
+                    IL_CREATE_URLS[idx] = urlAttr;
+                    return `<div class="il-picker-item" style="position:relative;display:inline-block;margin:0 6px 6px 0;vertical-align:top;" title="${safeAttr}">
+                        <img src="${urlAttr}" alt="${safeAttr}" style="width:90px;height:68px;object-fit:cover;border-radius:6px;border:1px solid #e5e7eb;display:block;">
+                        <button type="button" onclick="ilPickerRemove(${idx})" title="移除" style="position:absolute;top:-6px;right:-6px;width:18px;height:18px;line-height:16px;text-align:center;background:#dc2626;color:#fff;border:0;border-radius:50%;cursor:pointer;font-size:11px;padding:0;">×</button>
+                        <div style="max-width:90px;font-size:10px;color:#6b7280;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px;">${safeName}</div>
+                    </div>`;
+                }
+                const icon = ext === 'pdf' ? '📄' : '📊';
+                return `<div class="il-picker-item" style="position:relative;display:inline-block;margin:0 6px 6px 0;vertical-align:top;" title="${safeAttr}">
+                    <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;width:90px;height:68px;background:#fef3c7;color:#92400e;border-radius:6px;border:1px solid #fde68a;">
+                        <span style="font-size:20px;line-height:1;">${icon}</span>
+                        <span style="font-size:10px;margin-top:2px;max-width:82px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${safeName}</span>
+                        <span style="font-size:9px;color:#b45309;">${sizeKB} KB</span>
+                    </div>
+                    <button type="button" onclick="ilPickerRemove(${idx})" title="移除" style="position:absolute;top:-6px;right:-6px;width:18px;height:18px;line-height:16px;text-align:center;background:#dc2626;color:#fff;border:0;border-radius:50%;cursor:pointer;font-size:11px;padding:0;">×</button>
+                </div>`;
+            }).join('');
+        }
+        function ilPickerRemove(idx) {
+            if (idx < 0 || idx >= IL_CREATE_FILES.length) return;
+            IL_CREATE_FILES.splice(idx, 1);
+            ilPickerRender();
+        }
+        // 返回数组快照（供提交链读取，避免调用方直接持有内部数组引用被意外改动）
+        function ilPickerFiles() {
+            return IL_CREATE_FILES.slice();
+        }
+        // 清空数组 + revoke 全部 objectURL + 清 ilCreateAttachInput 的已选残留 + 重渲染
+        function ilPickerReset() {
+            IL_CREATE_FILES.length = 0;
+            ilPickerRevokeUrls();
+            const input = document.getElementById('ilCreateAttachInput');
+            if (input) input.value = '';
+            ilPickerRender();
+        }
+        // ilCreateAttachInput 唯一 onchange：读 input.files → 追加进数组 → 立即清空 input（input 不再是
+        //   真相源，贴图/多次选择/重选统一走数组追加语义）→ 重渲染预览
+        function ilPickerOnPick() {
+            const input = document.getElementById('ilCreateAttachInput');
+            if (!input) return;
+            ilPickerCollect(input.files);
+            input.value = '';
+            ilPickerRender();
+        }
+        // ============================================================
+        // S4（前端统一 贴图粘贴扩展方案 20260801_v0.1）：Ctrl+V 贴图共享层接入。
+        //   S3 起本页从 1 个贴图目标区（详情抽屉 #attList）变成 2 个（另加建单弹窗 #ilCreateAttachPreview），
+        //   两者互斥（抽屉/建单弹窗正常不会同开，理论异常态需防）——数清有几个候选容器 open：恰好 1 个→
+        //   返回该容器限定作用域；0 个或 >1 个都返回显式空作用域哨兵（不回落 document，原因见下方）。
+        //   这里与 Data_Correction corrPasteScopeResolver（S1 落地，4 个弹窗全真 display:none）**不同**
+        //   的关键点：本页 0 个分支不能回落 document——
+        //     · 抽屉 #attList：.u-drawer 用 position:fixed + right:-620px 做"关闭"（非 display:none——见
+        //       components.css .u-drawer），getClientRects() 口径不会因为平移出视口就判"不可见"。若 0 个
+        //       分支回落 document，document.querySelectorAll 会把已关闭抽屉里的 #attList 重新找出来、
+        //       且判定为可见——等于抽屉刚关闭那一刻贴图仍会误收进上一次打开的单据（S3 编码期间曾用
+        //       Data_Correction 的"0 个→null"写法复现过这个回归，已改回显式空作用域哨兵，见
+        //       ilPasteScopeResolver）。
+        //     · 建单弹窗 #ilCreateAttachPreview：.u-modal-overlay 关闭态是真 display:none（见
+        //       components.css .u-modal-overlay），本来就不受这个问题影响，但既然 resolver 对两个候选是
+        //       同一个返回值，就统一不回落 document，逻辑更简单也更安全。
+        //   isImageArea 逐候选区分权限判据：#attList 复刻"上传附件"按钮显隐同款判据（canWrite() && 非
+        //   已归档 && 非已作废）；#ilCreateAttachPreview 复刻 picker 区新建/编辑两态均显示同款判据
+        //   （canWrite() && 建单弹窗 open——S5 起编辑态也算，不再额外排除 editLiteId）。collect 按 key 分流：
+        //   'attList' 走既有 uploadAttach 循环
+        //   （逻辑不变，仍是 S4 落地时的 MED-1 分析结论：顺序 await，busy 锁不会吞后续张）；
+        //   'ilCreateAttachPreview' 走新 picker 的 collect + render。
         // ============================================================
         const IL_UPASTE_KIT_EXPECTED = 'upaste2';   // 须与 <script src="...u-paste.js?v=..._upaste2"> 缓存串尾部一致
         // codex S4 复审 LOW-2 采纳（S5 落地）：版本比对逻辑下沉共享层 UPaste.checkVersion()（见
         // ilInitUPaste 内调用），页面只留 expected 常量 + "未加载"前置判断。
+        // S3 新增：抽屉 / 建单弹窗互斥判定（对齐 Data_Correction corrPasteScopeResolver 的计数写法，
+        //   但结论分支不同——见下方 0 个分支的说明）。
+        function ilPasteScopeResolver() {
+            const scopeIds = ['drawer', 'createModal'];
+            const openEls = scopeIds.map(id => document.getElementById(id)).filter(el => el && el.classList.contains('open'));
+            if (openEls.length === 1) return openEls[0];
+            // 0 个（均未开）或 >1 个（异常态同开）都返回显式空作用域哨兵，不回落 document——不同于
+            // Data_Correction 的 4 个弹窗（全部真 display:none），本页 #attList 所在的 .u-drawer 是
+            // position:fixed 平移出视口做"关闭"（非 display:none，见 components.css .u-drawer），关闭态
+            // 仍有非零 getClientRects()。若 0 个分支回落 document，document.querySelectorAll 会把已关闭
+            // 抽屉里的 #attList 重新找出来、且判定为"可见"，等于抽屉刚关闭那一刻贴图仍会误收进上一次
+            // 打开的单据——这正是原单目标 resolver 就已避免的问题（本次改动不能引入回归）。
+            return { querySelectorAll: () => [] };
+        }
         function ilInitUPaste() {
             // codex S5 复审 M1 采纳：一次性哨兵，防未来重复初始化路径重复 register()（详见 Sys_Iteration
             // siInitUPaste 同款注释）。
@@ -696,15 +837,26 @@
             if (!window.UPaste) { console.error('[贴图共享层] u-paste.js 未加载'); return; }
             UPaste.checkVersion(IL_UPASTE_KIT_EXPECTED, 'Issue_Lite.html');
             UPaste.register({
-                scopeResolver: () => {
-                    const drawer = document.getElementById('drawer');
-                    if (drawer && drawer.classList.contains('open')) return drawer;
-                    return { querySelectorAll: () => [] };   // 抽屉未开：显式空作用域，见上方注释
+                scopeResolver: ilPasteScopeResolver,
+                selector: '#attList,#ilCreateAttachPreview',
+                keyOf: (el) => el.id,
+                isImageArea: (key) => {
+                    if (key === 'attList') return canWrite() && currentDrawerStatus !== '已归档' && !currentDrawerVoided;
+                    // codex 审 17 LOW 采纳：补 createModal open 判断。当前 scopeResolver 已保证只在该弹窗
+                    //   open 时命中本 key，此条不改变现有行为；但让本判据**自身自洽**（"仅建单弹窗打开时可贴图"
+                    //   完整表达在条件里），避免将来有人单独复用 isImageArea 或调整 scopeResolver 时踩空。
+                    //   S5（用户回场推翻 S3"编辑隐藏"口径）：编辑弹窗与详情页调同一个 uploadAttach/同一个
+                    //   端点，不是两条会漂移的写入路径，故编辑态不再额外排除——去掉原来的
+                    //   `&& !editLiteId.value` 子句；不去掉的话编辑态贴图会被本判据拦在候选池外。
+                    if (key === 'ilCreateAttachPreview') {
+                        const cm = document.getElementById('createModal');
+                        return canWrite() && !!(cm && cm.classList.contains('open'));
+                    }
+                    return false;
                 },
-                selector: '#attList',
-                keyOf: () => 'attList',
-                isImageArea: () => canWrite() && currentDrawerStatus !== '已归档' && !currentDrawerVoided,
                 collect: (key, files) => {
+                    if (key === 'ilCreateAttachPreview') { ilPickerCollect(files); ilPickerRender(); return; }
+                    if (key !== 'attList') return;
                     if (currentDrawerId == null) return;   // 防御：理论不可达（scopeResolver 已保证抽屉打开才会走到这里）
                     const id = currentDrawerId;
                     // codex S4 复审 MED-1（误报核实·补充说明防未来同款误判）：一次粘贴多图时，这里是
@@ -745,6 +897,8 @@
             document.getElementById('createModalTitle').textContent = '新建数据开发单';
             document.getElementById('btnSubmitCreate').textContent = '提交登记';
             document.getElementById('notifyTargetGroup').style.display = 'block';
+            document.getElementById('ilCreateAttachGroup').style.display = 'block';   // 新建模式显示附件区（S5 起编辑态同样显示，见 openEditLite）
+            ilPickerReset();   // S3：清建单弹窗附件选择（数组+input+预览一并清空）
             const histOpt = document.getElementById('histDeptOpt');
             if (histOpt) histOpt.remove();
             ['fTitle', 'fReqName', 'fReqDept', 'fReqPhone', 'fReqDate', 'fOa', 'fDesc'].forEach(k => document.getElementById(k).value = '');
@@ -774,6 +928,15 @@
                 document.getElementById('createModalTitle').textContent = '编辑数据开发单 #' + id;
                 document.getElementById('btnSubmitCreate').textContent = '保存修改';
                 document.getElementById('notifyTargetGroup').style.display = 'none';
+                // S5（用户回场推翻 S3"编辑隐藏"口径）：编辑态也显示附件区。编辑弹窗与详情页均调用
+                //   uploadAttach、目标为同一附件端点；本 picker 只提交本次新增文件，历史附件仍在详情页
+                //   展示与管理。本行位于上方 `can_edit !== true → return` 之后（can_edit 取自服务端详情响应）。
+                //   ⚠️ 前端这道门只在**弹窗打开那一刻**成立：单据若在弹窗打开后被归档/作废，前端拦不住。
+                //   最终权限由服务端上传端点兜底——`POST /api/issue-lite/:id/attachments` 实时查
+                //   `voided_at` / `status='已归档'` 分别返回 409（VOIDED_LOCKED / ARCHIVED_LOCKED，见
+                //   server.js 该端点），失败走本页既有的"提示到详情页补传"分支。
+                document.getElementById('ilCreateAttachGroup').style.display = 'block';
+                ilPickerReset();   // reset 仍保留：防上次新建选的文件串到编辑态被误传（picker 不回填历史附件）
                 document.getElementById('fTitle').value = it.title || '';
                 document.getElementById('fReqName').value = it.requester_name || '';
                 // M-2（codex E2 审）：历史部门不在现行下拉时临时插 option（防 select 回填为空 → 提交被必填拦）；
@@ -817,14 +980,53 @@
                         req_date: date || null, oa_number: oa, description: desc || null };
                     const res = await authFetch(`/api/issue-lite/${editId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
                     const j = await res.json().catch(() => ({}));
-                    if (res.ok) { closeCreateModal(); await loadList(); openDrawer(Number(editId)); }
+                    if (res.ok) {
+                        // S5（用户回场推翻 S3"编辑隐藏"口径）：保存成功后逐个上传本次新增附件。比新建分支
+                        //   简单——单据 id 已有（editId），不需要"两步提交"、也不需要"响应无有效 id"防御
+                        //   分支；失败处理与新建分支同口径：不回滚保存，统一提示补传。
+                        const ilFilesEdit = ilPickerFiles();
+                        if (ilFilesEdit.length > 0) {
+                            const failNamesEdit = [];
+                            for (const f of ilFilesEdit) {
+                                const ok = await uploadAttach(Number(editId), f, { reuseBusyLock: true, skipRefresh: true });
+                                if (!ok) failNamesEdit.push(f.name);
+                            }
+                            if (failNamesEdit.length > 0) {
+                                showToast(`已保存，附件上传失败（${failNamesEdit.length}/${ilFilesEdit.length}），请到详情页补传`, 'warning', 5000);
+                            }
+                        }
+                        closeCreateModal(); await loadList(); openDrawer(Number(editId));
+                    }
                     else showErr(err, (j && j.error) || '保存失败');
                 } else {
                     const payload = { title, requester_name: rn, requester_dept: rd, requester_phone: rp };
                     if (date) payload.req_date = date; if (oa) payload.oa_number = oa; if (desc) payload.description = desc; if (nt) payload.notify_target_id = Number(nt);
                     const res = await authFetch('/api/issue-lite', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
                     const j = await res.json().catch(() => ({}));
-                    if (res.ok && j.success) { closeCreateModal(); await loadList(); if (j.issue) openDrawer(j.issue.id); }
+                    if (res.ok && j.success) {
+                        // S3 两步上传（照 Data_Correction L3b 范式）：建单 JSON 成功后传附件；
+                        //   上传失败不回滚建单，提示详情页可补传。
+                        const ilFiles = ilPickerFiles();
+                        if (ilFiles.length > 0) {
+                            // 防契约漂移：响应无有效 id 时跳过上传，单已建但需去详情页补传
+                            const newId = (j.issue && Number.isSafeInteger(Number(j.issue.id)) && Number(j.issue.id) > 0) ? Number(j.issue.id) : null;
+                            if (!newId) {
+                                showToast('建单成功，但响应异常未获取到单据 id，附件请到详情页补传', 'warning', 5000);
+                            } else {
+                                // 单文件端点（issueLiteUpload.array('files',1)）只能逐个传，故顺序 await。
+                                //   两个开关的语义见 uploadAttach 函数头契约；此处附件列表交由下方 openDrawer 加载。
+                                const failNames = [];
+                                for (const f of ilFiles) {
+                                    const ok = await uploadAttach(newId, f, { reuseBusyLock: true, skipRefresh: true });
+                                    if (!ok) failNames.push(f.name);
+                                }
+                                if (failNames.length > 0) {
+                                    showToast(`单已创建，附件上传失败（${failNames.length}/${ilFiles.length}），请到详情页补传`, 'warning', 5000);
+                                }
+                            }
+                        }
+                        closeCreateModal(); await loadList(); if (j.issue) openDrawer(j.issue.id);
+                    }
                     else showErr(err, (j && j.error) || '提交失败');
                 }
             } catch (e) { showErr(err, editId ? '保存失败' : '提交失败'); } finally { busy = false; btn.disabled = false; }

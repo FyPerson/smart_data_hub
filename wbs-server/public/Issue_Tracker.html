@@ -512,8 +512,8 @@
                 <!-- 录入附件（先行后传：先建需求再逐个传） -->
                 <div class="u-form-group">
                     <label>录入附件</label>
-                    <input type="file" id="formAttachments" multiple>
-                    <div id="attachmentPreview" style="margin-top:6px; font-size:12px; color:#6b7280;"></div>
+                    <input type="file" id="formAttachments" multiple onchange="trPickerOnPick()">
+                    <div id="attachmentPreview" style="margin-top:6px;"></div>
                     <div style="font-size:11px; color:#9ca3af; margin-top:2px;">支持 Excel/图片/PDF/Word 等；需求创建后逐个上传</div>
                 </div>
                 <!-- 开发态信息（受理后完善）：data_domain/related_table 是开发分析后才能确定的字段，
@@ -1459,33 +1459,94 @@
             document.getElementById('formSource').value = '业务方';
             document.getElementById('formPriority').value = 'P2';
             document.getElementById('formRequesterDept').value = '';
-            document.getElementById('formAttachments').value = '';
-            document.getElementById('attachmentPreview').textContent = '';
+            trPickerReset();   // S2：数组+input+预览一并清空
             document.getElementById('errorTimeGroup').style.display = 'none';
         }
 
         // ============================================================
-        // S5（前端统一 贴图粘贴扩展方案 20260801_v0.1）：Ctrl+V 贴图共享层接入
-        //   本页只有 1 个上传点 formAttachments（先行后传：先建需求再逐个上传，见 §录入附件 注释），
-        //   裸 <input type="file" multiple>，无 onchange 收集链——没有 chip 预览渲染（attachmentPreview
-        //   div 全文件扫描确认：仅在建单/编辑重置时被清空过，从未被填充过内容），提交时直接读取
-        //   formAttachments.files（submitIssue 内）。既有校验闸门＝无（前端不做扩展名/大小/去重检查，
-        //   全靠后端），故贴图直接 DataTransfer 重建 files（追加语义，保留已选文件）即可，无需调用任何
-        //   渲染函数——与"照既有链路走"一致：既有链路本就没有渲染这一步。
-        //   目标区就用 formAttachments 输入框本身（原生文件输入有真实渲染尺寸，不是空 chip 容器，无需
-        //   像 Data_Correction 那样借用兄弟 div）。scopeResolver：本页仅 createModal 一个相关弹窗
-        //   （reasonModal 是变更原因输入，与附件无关），比 Data_Correction 的 4 弹窗互斥简单，未开则
-        //   返回 null，由共享层回落 document（codex S5 复审 L2 统一表述）——createModal 关闭时
-        //   formAttachments 深藏 display:none 弹窗内，天然 0 候选。
+        // S2（附件预览+删除统一，接续 S5 贴图接入）：本页只有 1 个上传点 formAttachments（先行后传：
+        //   先建需求再逐个上传，见 §录入附件 注释）。从"input.files 直接持态、attachmentPreview 从未
+        //   渲染过内容"升级为"数组持态 + 缩略图预览 + 单张删除"，对齐 Data_Correction 的 corrPicker*
+        //   范式（命名换 tr 前缀），但本页只有 1 个上传点，不需要 S1 那种 key→数组字典，直接用一个
+        //   模块级数组即可；也不抽共享 js（新建共享层要改 HTML 引用 + bump 缓存串，扩大本次范围）。
+        //   input 只在 onchange 一次性读取后立即清空（input 不再是真相源，避免两份状态互相打架）。
+        //   不新增任何校验——本页既有校验闸门＝无（前端不做扩展名/大小/去重/数量检查，全靠后端），本次
+        //   只补预览与删除，无 S1 的 max=5 警示（本页无数量上限，不凭空加）。
+        //   scopeResolver：本页仅 createModal 一个相关弹窗（reasonModal 是变更原因输入，与附件无关），
+        //   未开则返回 null，由共享层回落 document；selector 仍用 #formAttachments 本身（原生文件输入
+        //   有真实渲染尺寸，风险最低，不改注册面）。
         // ============================================================
         const TR_UPASTE_KIT_EXPECTED = 'upaste2';   // 须与 <script src="...u-paste.js?v=..._upaste2"> 缓存串尾部一致
-        function trAppendFilesToInput(files) {
+        const TR_ATTACH_FILES = [];   // 单一附件数组（本页仅 1 个上传点，无需 S1 那种 key→数组字典）
+        const TR_ATTACH_URLS = [];    // 与 TR_ATTACH_FILES 下标一一对应的 objectURL 缓存（仅图片项非空）
+        const TR_IMG_EXTS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'];
+        // 纯追加，不做任何校验（本页既有裸 input 链本无扩展名/大小/去重闸门，此处零新增）
+        function trPickerCollect(files) {
+            for (const f of Array.from(files || [])) TR_ATTACH_FILES.push(f);
+        }
+        function trPickerRevokeUrls() {
+            TR_ATTACH_URLS.forEach(u => { if (u) URL.revokeObjectURL(u); });
+            TR_ATTACH_URLS.length = 0;
+        }
+        // 渲染到既有 attachmentPreview 容器：图片（TR_IMG_EXTS）出 blob: 缩略图，非图片出图标+文件名；
+        //   每项带删除按钮。缩略图尺寸（90x68）与 safeAttr 引号转义口径参考 Data_Correction 的
+        //   corrPickerRender 保持两页一致，但非图片分支等实现细节不完全等价，非整体照抄。
+        function trPickerRender() {
+            const wrap = document.getElementById('attachmentPreview');
+            if (!wrap) return;
+            trPickerRevokeUrls();   // 重渲染前先 revoke 上一轮 objectURL，防泄漏
+            wrap.innerHTML = TR_ATTACH_FILES.map((f, idx) => {
+                const safeName = escapeHtml(f.name);
+                // 属性位加转双引号（app.js escapeHtml 是 textContent→innerHTML 实现，不转义引号——
+                // 文件名含 " 时可逃逸 title/alt 属性边界；文本节点位用 safeName 即可）
+                const safeAttr = safeName.replace(/"/g, '&quot;');
+                const ext = f.name.split('.').pop().toLowerCase();
+                const sizeKB = (f.size / 1024).toFixed(1);
+                if (TR_IMG_EXTS.includes(ext)) {
+                    const urlAttr = URL.createObjectURL(f);
+                    TR_ATTACH_URLS[idx] = urlAttr;
+                    return `<div class="tr-picker-item" style="position:relative;display:inline-block;margin:0 6px 6px 0;vertical-align:top;" title="${safeAttr}">
+                        <img src="${urlAttr}" alt="${safeAttr}" style="width:90px;height:68px;object-fit:cover;border-radius:6px;border:1px solid #e5e7eb;display:block;">
+                        <button type="button" onclick="trPickerRemove(${idx})" title="移除" style="position:absolute;top:-6px;right:-6px;width:18px;height:18px;line-height:16px;text-align:center;background:#dc2626;color:#fff;border:0;border-radius:50%;cursor:pointer;font-size:11px;padding:0;">×</button>
+                        <div style="max-width:90px;font-size:10px;color:#6b7280;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px;">${safeName}</div>
+                    </div>`;
+                }
+                const icon = ext === 'pdf' ? '📄' : '📊';
+                return `<div class="tr-picker-item" style="position:relative;display:inline-block;margin:0 6px 6px 0;vertical-align:top;" title="${safeAttr}">
+                    <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;width:90px;height:68px;background:#fef3c7;color:#92400e;border-radius:6px;border:1px solid #fde68a;">
+                        <span style="font-size:20px;line-height:1;">${icon}</span>
+                        <span style="font-size:10px;margin-top:2px;max-width:82px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${safeName}</span>
+                        <span style="font-size:9px;color:#b45309;">${sizeKB} KB</span>
+                    </div>
+                    <button type="button" onclick="trPickerRemove(${idx})" title="移除" style="position:absolute;top:-6px;right:-6px;width:18px;height:18px;line-height:16px;text-align:center;background:#dc2626;color:#fff;border:0;border-radius:50%;cursor:pointer;font-size:11px;padding:0;">×</button>
+                </div>`;
+            }).join('');
+        }
+        function trPickerRemove(idx) {
+            if (idx < 0 || idx >= TR_ATTACH_FILES.length) return;
+            TR_ATTACH_FILES.splice(idx, 1);
+            trPickerRender();
+        }
+        // 返回数组快照（供提交链读取，避免调用方直接持有内部数组引用被意外改动）
+        function trPickerFiles() {
+            return TR_ATTACH_FILES.slice();
+        }
+        // 清空数组 + revoke 全部 objectURL + 清 formAttachments 的已选残留 + 重渲染
+        function trPickerReset() {
+            TR_ATTACH_FILES.length = 0;
+            trPickerRevokeUrls();
+            const input = document.getElementById('formAttachments');
+            if (input) input.value = '';
+            trPickerRender();
+        }
+        // formAttachments 唯一 onchange：读 input.files → 追加进数组 → 立即清空 input（input 不再是
+        //   真相源，贴图/多次选择/重选统一走数组追加语义）→ 重渲染预览
+        function trPickerOnPick() {
             const input = document.getElementById('formAttachments');
             if (!input) return;
-            const dt = new DataTransfer();
-            Array.from(input.files || []).forEach(f => dt.items.add(f));
-            files.forEach(f => dt.items.add(f));
-            input.files = dt.files;
+            trPickerCollect(input.files);
+            input.value = '';
+            trPickerRender();
         }
         function trInitUPaste() {
             // codex S5 复审 M1 采纳：一次性哨兵，防未来重复初始化路径重复 register()（详见 Sys_Iteration
@@ -1501,7 +1562,7 @@
                 },
                 selector: '#formAttachments',
                 keyOf: () => 'formAttachments',
-                collect: (key, files) => { trAppendFilesToInput(files); },
+                collect: (key, files) => { trPickerCollect(files); trPickerRender(); },
             });
         }
 
@@ -1540,8 +1601,7 @@
                 document.getElementById('formPriority').value = issue.priority || 'P2';
                 document.getElementById('formRelatedTable').value = issue.related_table || '';
                 document.getElementById('formErrorTime').value = issue.error_time || '';
-                document.getElementById('formAttachments').value = ''; // H-2：编辑模式 file input 只代表本次新增，不回填历史附件
-                document.getElementById('attachmentPreview').textContent = '';
+                trPickerReset(); // H-2：编辑模式 file input 只代表本次新增，不回填历史附件（S2：数组+input+预览一并清空）
                 document.getElementById('errorTimeGroup').style.display = issue.type === '调度异常' ? 'block' : 'none';
                 applyRoleVisibility(true); // M-3：编辑模式隐藏指派下拉
                 await fillDomainSelect(issue.data_domain || ''); // L-5：先填充再开弹窗
@@ -1613,7 +1673,7 @@
             const errMsg = validateIssueForm(data);
             if (errMsg) { showToast(errMsg, 'error'); return; }
 
-            const files = Array.from(document.getElementById('formAttachments').files || []);
+            const files = trPickerFiles();
             const submitBtn = document.querySelector('#createModal .u-modal-footer .u-btn-primary');
 
             _issueSubmitting = true;

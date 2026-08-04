@@ -56,9 +56,13 @@ function makeTmpFiles() {
     // 属预期噪音。L-3（codex 复审）：豁免仅在 allow409 标志开启的用例段内生效，防全局豁免掩盖
     // 其他接口意外 409 的回归；其他 console error 一律计数。
     let allow409 = false;
+    // U4c（S1 max=5 真实拦截用例）：超5个文件提交触发后端 multer 400，浏览器同样打一条网络层
+    // resource 日志——同上豁免范式，仅在该用例段内生效，防掩盖其他接口意外 400 的回归。
+    let allow400 = false;
     page.on('console', m => {
         if (m.type() !== 'error') return;
         if (allow409 && /Failed to load resource.*409/.test(m.text())) return;
+        if (allow400 && /Failed to load resource.*400/.test(m.text())) return;
         consoleErrors.push(m.text());
     });
     page.on('pageerror', e => consoleErrors.push('pageerror: ' + e.message));
@@ -310,31 +314,188 @@ function makeTmpFiles() {
         allow409 = false;
         await page.evaluate(() => { corrAttachFiles = []; renderCorrAttachPreview(); closeModal('attachModal'); });
 
-        // ===== U4 裸 input chips 预览（完成弹窗 + 建单表单）=====
-        console.log('\nU4. 裸 input 已选 chips 预览');
-        expect(await page.evaluate(() => typeof renderPickedChips === 'function'), 'renderPickedChips 共享渲染器存在');
-        await page.evaluate(() => openComplete(allItems[0] ? allItems[0].id : 1, 'single', false));
-        await page.setInputFiles('#formCompleteFiles', [tmp.png1, tmp.xlsx]);
-        await page.waitForTimeout(150);
-        const chips = await page.evaluate(() => document.getElementById('completeFilesPicked').querySelectorAll('div').length);
-        expect(chips === 2, `完成弹窗选 2 文件 → chips 2（实际 ${chips}）`);
-        await page.evaluate(() => { closeModal('completeModal'); openComplete(allItems[0] ? allItems[0].id : 1, 'single', false); });
-        expect(await page.evaluate(() => document.getElementById('completeFilesPicked').innerHTML === ''), '重开完成弹窗 → chips 清空');
-        await page.evaluate(() => closeModal('completeModal'));
+        // ===== U4 裸 input 类附件 picker（S1 2026-08-04：数组持态 + 缩略图预览 + 单张删除）=====
+        //   取代原"裸 input chips 预览"（renderPickedChips，纯展示 input.files，重选即覆盖、无删除入口）——
+        //   用户痛点：Ctrl+V 贴图是追加语义，但没有删除入口，贴错一张只能重选清空全部。
+        console.log('\nU4. 裸 input 类附件 picker（数组+缩略图预览+单张删除）');
+        expect(await page.evaluate(() => typeof renderPickedChips === 'undefined'), '旧 renderPickedChips 已退役');
+        expect(await page.evaluate(() => typeof corrAppendFilesToInput === 'undefined'), '旧 corrAppendFilesToInput 已退役（S4 贴图追加改走 corrPickerCollect）');
+        expect(await page.evaluate(() => typeof corrPickerOnPick === 'function' && typeof corrPickerRemove === 'function' && typeof corrPickerReset === 'function' && typeof corrPickerFiles === 'function'), 'corrPickerOnPick/Remove/Reset/Files 共享处理器均存在');
+        const anyId = await page.evaluate(() => (window.allItems && allItems[0] && allItems[0].id) || 1);
+
+        // ── U4a 建单表单：OA 截图（图片缩略图分支）+ 待修复数据（非图片图标分支）──
+        //   codex LOW 复审同款隐患自查：oaProofGroup（含 formOaProofFiles/createOaProofPicked）默认
+        //   display:none，仅填写真实 OA 流程号触发 toggleOaMode() 才会显示（见 L1751）——不先填号直接
+        //   setInputFiles 同样是"测隐藏 input"，故这里补上前置步骤，对齐用户真实可达路径。
         await page.evaluate(() => openCreateModal());
+        await page.fill('#formOaNumber', '364265');
+        await page.evaluate(() => toggleOaMode());
+        await page.waitForTimeout(100);
+        const oaGroupVisible = await page.locator('#formOaProofFiles').isVisible();
+        expect(oaGroupVisible, `填真实 OA 流程号后 formOaProofFiles 确实可见（实际 ${oaGroupVisible}）`);
+        await page.setInputFiles('#formOaProofFiles', [tmp.png1]);
+        await page.waitForTimeout(150);
+        let oaArr = await page.evaluate(() => corrPickerFiles('createOaProofPicked').length);
+        let oaItems = await page.evaluate(() => document.querySelectorAll('#createOaProofPicked .corr-picker-item').length);
+        let oaImgs = await page.evaluate(() => document.querySelectorAll('#createOaProofPicked img').length);
+        expect(oaArr === 1 && oaItems === 1, `OA截图选1文件 → picker数组1项+预览1项（实际 ${oaArr}/${oaItems}）`);
+        expect(oaImgs === 1, `OA截图图片渲染缩略图（实际 ${oaImgs}）`);
+
         await page.setInputFiles('#formErrorProofFiles', [tmp.xlsx]);
         await page.waitForTimeout(150);
-        const createChips = await page.evaluate(() => document.getElementById('createErrProofPicked').querySelectorAll('div').length);
-        expect(createChips === 1, `建单表单待修复数据选 1 文件 → chips 1（实际 ${createChips}）`);
+        let epArr = await page.evaluate(() => corrPickerFiles('createErrProofPicked').length);
+        let epItems = await page.evaluate(() => document.querySelectorAll('#createErrProofPicked .corr-picker-item').length);
+        let epIcon = await page.evaluate(() => document.getElementById('createErrProofPicked').innerHTML.includes('📊'));
+        expect(epArr === 1 && epItems === 1, `待修复数据选1文件 → picker数组1项+预览1项（实际 ${epArr}/${epItems}）`);
+        expect(epIcon, '待修复数据 xlsx 渲染 📊 占位图标（非图片分支）');
+
+        // 追加而非覆盖（贴图/重选均走追加语义）+ 单张删除（其余保留）
+        await page.setInputFiles('#formOaProofFiles', [tmp.png2]);
+        await page.waitForTimeout(150);
+        let oaArr2 = await page.evaluate(() => corrPickerFiles('createOaProofPicked').length);
+        expect(oaArr2 === 2, `再次选择 → 追加而非覆盖（实际 ${oaArr2}）`);
+        await page.evaluate(() => corrPickerRemove('createOaProofPicked', 0));
+        await page.waitForTimeout(100);
+        const afterRemove = await page.evaluate(() => {
+            const f = corrPickerFiles('createOaProofPicked');
+            return { len: f.length, name: f[0] && f[0].name };
+        });
+        expect(afterRemove.len === 1 && afterRemove.name === 'proof_b.png', `删除第1项 → 剩1项且保留其余未删项（实际 ${afterRemove.len}/${afterRemove.name}）`);
+
+        // display 切换①：新建态 createErrProofPicked 显示（对齐 L1550）
+        const createDisplay = await page.evaluate(() => document.getElementById('createErrProofPicked').style.display);
+        expect(createDisplay !== 'none', `新建态 createErrProofPicked 显示（实际 display="${createDisplay}"）`);
+
+        // 清理点①：重开建单弹窗 → OA截图+待修复数据两个 picker 数组与预览均清空（corrPickerReset）
+        await page.evaluate(() => { closeCreateModal(); openCreateModal(); });
+        const createReset = await page.evaluate(() => ({
+            oaLen: corrPickerFiles('createOaProofPicked').length,
+            epLen: corrPickerFiles('createErrProofPicked').length,
+            oaHtml: document.getElementById('createOaProofPicked').innerHTML,
+            epHtml: document.getElementById('createErrProofPicked').innerHTML,
+        }));
+        expect(createReset.oaLen === 0 && createReset.epLen === 0 && createReset.oaHtml === '' && createReset.epHtml === '', '重开建单弹窗 → OA截图+待修复数据 picker 数组与预览均清空');
+
+        // display 切换②：编辑态 createErrProofPicked+input 隐藏（mock 详情接口 can_edit=true 进 openEditCorrection）
+        //   先在可见态选1个文件，制造"有文件待清"的前置条件（若不选，数组本就是空，测不出清空是否真发生）。
+        //   ⭐ 本用例验证的是**不变量**「进入编辑态后该 picker 必为空」，而不是某一行代码的必要性。
+        //   codex 审 15 M-2 曾建议在 openEditCorrection 的隐藏分支补 corrPickerReset 防"隐藏态附件仍被提交"；
+        //   实测反证（补上后再注释掉，断言不变红）证明该路径不可达——openEditCorrection 第一步即调
+        //   openCreateModal()，其中的 corrPickerReset('createErrProofPicked') 已先一步清空数组/预览/input。
+        //   故该防御行**已删除**（死代码 + 声称超实现的注释=双重误导），不变量改由 openCreateModal 内那行
+        //   reset 承担，该处已加 ⭐ 注释标明这一依赖。若将来出现绕开 openCreateModal() 直接隐藏该区的路径，
+        //   本断言会变红——那正是它存在的意义。
+        await page.setInputFiles('#formErrorProofFiles', [tmp.xlsx]);
+        await page.waitForTimeout(150);
+        const epBeforeEdit = await page.evaluate(() => corrPickerFiles('createErrProofPicked').length);
+        expect(epBeforeEdit === 1, `进入编辑态前置：待修复数据已选1个文件（实际 ${epBeforeEdit}）`);
+        await page.route(/\/api\/corrections\/\d+$/, route => route.fulfill({
+            status: 200, contentType: 'application/json',
+            body: JSON.stringify({
+                can_edit: true,
+                request: { id: 88888, correction_type: 'single', oa_number: '364265', source_system: '其他', source_system_other: '测试', location_info: 'x', correction_count: null, reason: 'r', error_proof_note: '', expected_deadline: null, requester_dept: '' },
+                requesters: [], group: null,
+            }),
+        }));
+        await page.evaluate(() => openEditCorrection(88888));
+        await page.waitForTimeout(150);
+        const editDisplay = await page.evaluate(() => ({
+            input: document.getElementById('formErrorProofFiles').style.display,
+            wrap: document.getElementById('createErrProofPicked').style.display,
+        }));
+        expect(editDisplay.wrap === 'none' && editDisplay.input === 'none', `编辑态 createErrProofPicked+input 均隐藏（实际 wrap="${editDisplay.wrap}" input="${editDisplay.input}"）`);
+        const epAfterEdit = await page.evaluate(() => corrPickerFiles('createErrProofPicked').length);
+        expect(epAfterEdit === 0, `进入编辑态（隐藏）后 createErrProofPicked picker 数组已清空，防隐藏态仍被提交（实际 ${epAfterEdit}）`);
+        // 切回新建态（重新可见）→ 断言仍为空，不会诈尸复活
+        await page.evaluate(() => { closeCreateModal(); openCreateModal(); });
+        const epAfterBack = await page.evaluate(() => ({
+            len: corrPickerFiles('createErrProofPicked').length,
+            html: document.getElementById('createErrProofPicked').innerHTML,
+        }));
+        expect(epAfterBack.len === 0 && epAfterBack.html === '', `切回新建态（重新可见）→ createErrProofPicked picker 仍为空，不会诈尸复活（实际 ${epAfterBack.len}）`);
+        await page.unroute(/\/api\/corrections\/\d+$/);
         await page.evaluate(() => closeCreateModal());
-        // 重修弹窗 chips 重开清空（M-2 拍板补）
-        await page.evaluate(() => openResubmit(allItems[0] ? allItems[0].id : 1, 'single', false));
+
+        // ── U4b 完成弹窗（single）：图片+非图片混合预览 + 输入即清空 + 删除 + 清理点② ──
+        await page.evaluate((id) => openComplete(id, 'single', false), anyId);
+        await page.setInputFiles('#formCompleteFiles', [tmp.png1, tmp.xlsx]);
+        await page.waitForTimeout(150);
+        const cfLen = await page.evaluate(() => corrPickerFiles('completeFilesPicked').length);
+        const cfItems = await page.evaluate(() => document.querySelectorAll('#completeFilesPicked .corr-picker-item').length);
+        const cfImgs = await page.evaluate(() => document.querySelectorAll('#completeFilesPicked img').length);
+        expect(cfLen === 2 && cfItems === 2, `完成弹窗(single)选2文件 → picker数组2项+预览2项（实际 ${cfLen}/${cfItems}）`);
+        expect(cfImgs === 1, `完成弹窗图片渲染缩略图1个（实际 ${cfImgs}）`);
+        const cfInputCleared = await page.evaluate(() => document.getElementById('formCompleteFiles').value === '');
+        expect(cfInputCleared, '选择后裸 input.value 立即清空（数组才是真相源，防两个真相源打架）');
+
+        await page.evaluate(() => corrPickerRemove('completeFilesPicked', 0));
+        await page.waitForTimeout(100);
+        const afterCfRemove = await page.evaluate(() => {
+            const f = corrPickerFiles('completeFilesPicked');
+            return { len: f.length, name: f[0] && f[0].name };
+        });
+        expect(afterCfRemove.len === 1 && afterCfRemove.name === 'list.xlsx', `完成弹窗删除第1项 → 剩1项且保留其余未删项（实际 ${afterCfRemove.len}/${afterCfRemove.name}）`);
+
+        // 清理点②：重开完成弹窗 → completeFilesPicked 数组与预览均清空
+        await page.evaluate((id) => { closeModal('completeModal'); openComplete(id, 'single', false); }, anyId);
+        const cfReset = await page.evaluate(() => corrPickerFiles('completeFilesPicked').length === 0 && document.getElementById('completeFilesPicked').innerHTML === '');
+        expect(cfReset, '重开完成弹窗 → completeFilesPicked 数组与预览均清空');
+
+        // ── U4c 完成弹窗(batch)：附件点基本选择 + max=5 警示文案 + 提交时后端 multer 真实拦截 ──
+        //   （切到 batch 类型弹窗——formBatchNote/formCompleteBatchFiles 只在 batch 类型下可见/可交互；
+        //   codex LOW 复审要求核实"测隐藏 input"这类问题是否成对出现——本段已用 openComplete(id,'batch',...)
+        //   切模式，先显式断言确实可见，排除"模式切换没生效"的可能，证明这里没有 U4d 那款问题）
+        console.log('\nU4c. 完成弹窗(batch) picker + max=5 警示文案 + 提交时后端真实拦截');
+        await page.evaluate((id) => openComplete(id, 'batch', false), anyId);
+        const cbfVisible = await page.locator('#formCompleteBatchFiles').isVisible();
+        expect(cbfVisible, `完成弹窗切到 batch 模式后 formCompleteBatchFiles 确实可见（实际 ${cbfVisible}）`);
+        await page.setInputFiles('#formCompleteBatchFiles', [tmp.png2]);
+        await page.waitForTimeout(150);
+        const cbfLen = await page.evaluate(() => corrPickerFiles('completeBatchFilesPicked').length);
+        expect(cbfLen === 1, `完成弹窗(batch附件)选1文件 → picker数组1项（实际 ${cbfLen}）`);
+
+        await page.setInputFiles('#formCompleteBatchFiles', [tmp.png1, tmp.xlsx, tmp.png2, tmp.png1, tmp.xlsx]);   // 追加到已有1个，累计6个（无去重/数量前端校验，硬约束3）
+        await page.waitForTimeout(150);
+        const overLen = await page.evaluate(() => corrPickerFiles('completeBatchFilesPicked').length);
+        expect(overLen === 6, `连续选择不做前端去重/数量校验，累计6个（实际 ${overLen}）`);
+        const warnShown = await page.evaluate(() => document.getElementById('completeBatchFilesPicked').innerHTML.includes('最多 5 个文件'));
+        expect(warnShown, '超过 max=5 时预览区显示警示文案（沿用原 renderPickedChips 文案）');
+        await page.fill('#formBatchNote', '测试批量完成说明超过5个字用于触发后端multer拦截');
+        await page.evaluate(() => { const c = document.getElementById('toast-container'); if (c) c.innerHTML = ''; });
+        allow400 = true;   // 本次真实提交预期后端 400（multer limits.files=5），豁免这一条网络层日志
+        await page.evaluate(() => submitComplete());
+        await page.waitForTimeout(600);
+        const toastAfterOver = await page.locator('#toast-container').textContent().catch(() => '');
+        const stillOpen = await page.evaluate(() => document.getElementById('completeModal').classList.contains('open'));
+        expect(toastAfterOver.includes('上传文件失败'), `超5个文件真实提交 → 后端 multer(limits.files=5) 拒绝，toast 报错（实际="${toastAfterOver}"）`);
+        expect(stillOpen, '提交被拒后完成弹窗仍打开（未被误判成功关闭）');
+        await page.waitForTimeout(150);   // 等 400 的 console 日志落地后再关豁免（对齐 allow409 范式）
+        allow400 = false;
+        await page.evaluate(() => closeModal('completeModal'));
+
+        // ── U4d 重修弹窗（single）：选择+预览 + 清理点③ ──
+        await page.evaluate((id) => openResubmit(id, 'single', false), anyId);
         await page.setInputFiles('#formResubmitFiles', [tmp.png1]);
         await page.waitForTimeout(150);
-        const rsChips = await page.evaluate(() => document.getElementById('resubmitFilesPicked').querySelectorAll('div').length);
-        expect(rsChips === 1, `重修弹窗选 1 文件 → chips 1（实际 ${rsChips}）`);
-        await page.evaluate(() => { closeModal('resubmitModal'); openResubmit(allItems[0] ? allItems[0].id : 1, 'single', false); });
-        expect(await page.evaluate(() => document.getElementById('resubmitFilesPicked').innerHTML === ''), '重开重修弹窗 → chips 清空');
+        const rsLen = await page.evaluate(() => corrPickerFiles('resubmitFilesPicked').length);
+        const rsItems = await page.evaluate(() => document.querySelectorAll('#resubmitFilesPicked .corr-picker-item').length);
+        expect(rsLen === 1 && rsItems === 1, `重修弹窗选1文件 → picker数组1项+预览1项（实际 ${rsLen}/${rsItems}）`);
+        await page.evaluate((id) => { closeModal('resubmitModal'); openResubmit(id, 'single', false); }, anyId);
+        const rsReset = await page.evaluate(() => corrPickerFiles('resubmitFilesPicked').length === 0 && document.getElementById('resubmitFilesPicked').innerHTML === '');
+        expect(rsReset, '重开重修弹窗 → resubmitFilesPicked 数组与预览均清空（清理点③）');
+        await page.evaluate(() => closeModal('resubmitModal'));
+
+        // ── U4e 重修弹窗（batch）：codex LOW 复审指出——formResubmitBatchFiles 在 single 模式下位于
+        //   resubmitBatchGroup（display:none）内，用户走不到；必须先切到 batch 模式该 input 才真实可见，
+        //   否则测的是"脚本强行给隐藏 input 赋值"而非真实路径。切模式后先断言确实可见，防"模式切换没生效"
+        //   被误判成"选择成功"。
+        await page.evaluate((id) => openResubmit(id, 'batch', false), anyId);
+        const rbVisible = await page.locator('#formResubmitBatchFiles').isVisible();
+        expect(rbVisible, `重修弹窗切到 batch 模式后 formResubmitBatchFiles 确实可见（实际 ${rbVisible}）`);
+        await page.setInputFiles('#formResubmitBatchFiles', [tmp.xlsx]);
+        await page.waitForTimeout(150);
+        const rbLen = await page.evaluate(() => corrPickerFiles('resubmitBatchFilesPicked').length);
+        expect(rbLen === 1, `重修弹窗(batch附件)选1文件 → picker数组1项（实际 ${rbLen}）`);
         await page.evaluate(() => closeModal('resubmitModal'));
 
         // ===== U5 已上传附件 lightbox 预览（U2 commit）=====

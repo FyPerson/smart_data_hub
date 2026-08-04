@@ -13,6 +13,11 @@
  *   [T3] 渲染三态：≤2 条全显分号隔开 / >2 条「首条 + 等N条」+ title 含完整清单 / 空态
  *   [T4] 「未填」vs「—」两语义按单据状态区分（D6）
  *   [T5] 全程无 console error
+ *
+ * ⭐ S4（2026-08-04）：GIT/SVN 口径对调 + 复制格式按侧差异化（用户拍板：前端 GIT commit 多条 '\n'
+ *   换行，后端 SVN 版本号多条 ',' 拼接无空格）——见 [T13]（siBuildCommitCopyText 纯函数边界 + 前端
+ *   多条真实复制）与新增 [T13b]（后端多条真实复制，新夹具 iManyBe）。本文件头部这份摘要是历次续补
+ *   累积的产物，早已不完整覆盖 T9-T26（未在此逐条补全，非本次范围）。
  */
 'use strict';
 
@@ -47,7 +52,11 @@ async function loginPage(browser, token) {
     const ctx = await browser.newContext({ viewport: { width: 1920, height: 1080 }, permissions: ['clipboard-read', 'clipboard-write'] });
     const page = await ctx.newPage();
     const consoleErrors = [];
-    page.on('console', m => { if (m.type() === 'error') consoleErrors.push(m.text()); });
+    // S4 复审收口：[T13] 的"未知/缺失 side 回落换行"两条断言会**故意**触发产品侧的 console.error
+    //   （siBuildCommitCopyText 对未知 side 显式报错，那正是被测行为本身）。豁免精确到该条消息文本，
+    //   不泛化忽略所有 error——对齐本项目 allow409/allow400 的精确豁免范式。
+    const SI_EXPECTED_CONSOLE_ERR = /siBuildCommitCopyText 收到未知 side/;
+    page.on('console', m => { if (m.type() === 'error' && !SI_EXPECTED_CONSOLE_ERR.test(m.text())) consoleErrors.push(m.text()); });
     page.on('pageerror', e => consoleErrors.push('pageerror: ' + e.message));
     page.on('dialog', d => d.accept());
     await page.goto(`${BASE_URL}/login.html`);
@@ -100,6 +109,12 @@ const seedCommit = (issueId, daId, userId, component, ref) =>
         const iMany = await mkIssue(`CC-五条-${RUN_TAG}`, '处理中');
         const mMany = await mkMember(iMany, 6);
         for (let n = 1; n <= 5; n++) await seedCommit(iMany, mMany, 6, 'frontend', `fe-many-${n}`);
+
+        // S4（复制格式按侧差异化，2026-08-04）：后端多条夹具——[T13] 既有 iMany 只覆盖前端多条复制，
+        //   后端多条（','拼接）此前从无任何夹具能测（iTwo 后端只有 1 条，join 分隔符对单值不可见）。
+        const iManyBe = await mkIssue(`CC-后端多条-${RUN_TAG}`, '处理中');
+        const mManyBe = await mkMember(iManyBe, 6);
+        for (let n = 1; n <= 3; n++) await seedCommit(iManyBe, mManyBe, 6, 'backend', `be-many-${n}`);
 
         const iPending = await mkIssue(`CC-待上线空-${RUN_TAG}`, '待上线');   // 空态 → 「未填」
         await mkMember(iPending, 7);
@@ -447,6 +462,7 @@ const seedCommit = (issueId, daId, userId, component, ref) =>
         const relPlan = await mkRel('计划中');
         await attach(iTwo, relPlan, '待上线');
         await attach(iMany, relPlan, '待上线');
+        await attach(iManyBe, relPlan, '待上线');
         await attach(iPending, relPlan, '待上线');
 
         // 已发布批次 + 只有 timeline 无快照 → degraded（commits=null → 「不可用」）
@@ -526,34 +542,54 @@ const seedCommit = (issueId, daId, userId, component, ref) =>
             `[T12] 被 ellipsis 截断后，**外层** .si-batch-commit 上仍挂着完整 ref 的 title（codex 244 MED-1），实得 "${(bLong && bLong.feTitle || '').slice(0, 40)}..."`);
         await page.evaluate(() => { const o = document.getElementById('siBatchOverlay'); if (o) o.classList.remove('open'); });
 
-        // ── [T13] C5b 一键复制（D10）+ **四处优化 D3**（E5 拆两按钮只复制编号 / E6 空组不渲染）──
+        // ── [T13] C5b 一键复制（D10）+ **四处优化 D3**（E5 拆两按钮只复制编号 / E6 空组不渲染）
+        //   + **S4**（GIT/SVN 对调 + 复制格式按侧差异化，2026-08-04 用户拍板）──
         //   纯函数边界先锁（整页冒烟只走"这批数据恰好长什么样"一条路径）
         const copyFn = await page.evaluate(() => {
             const f = window.siBuildCommitCopyText;
             if (typeof f !== 'function') return { __missing: true };
             //   codex 249 LOW-2 收口后入参是**已归一化数组**（不是 raw）：调用方本就要解析一次取 title 条数，
             //   再让本函数内部解析第二次，会给"title 说 N 条、实际复制 M 条"留漂移口子。
+            //   ⭐ S4：签名升级为 (refs, side)——按 side 差异化分隔符（前端 '\n' 换行 / 后端 ',' 拼接）。
             return {
                 arity: f.length,
-                two: f(['a', 'b']),
-                one: f(['c']),
-                empty: f([]),
-                degraded: f(null),
-                withSemicolon: f(['a;b', 'c']),
+                feTwo: f(['a', 'b'], '前端'),
+                beTwo: f(['a', 'b'], '后端'),
+                one: f(['c'], '前端'),
+                empty: f([], '前端'),
+                degraded: f(null, '后端'),
+                feWithSemicolon: f(['a;b', 'c'], '前端'),
+                beWithSemicolon: f(['a;b', 'c'], '后端'),
+                // codex 审 18 复审建议：锁住未知 side 的回落方向（换行而非逗号），防后续误改回"静默按后端"
+                unknownSide: f(['a', 'b'], 'frontend'),
+                missingSide: f(['a', 'b'], undefined),
             };
         });
         must(!copyFn.__missing, '[T13] siBuildCommitCopyText 应是全局可调函数');
-        must(copyFn.arity === 1,
-            `[T13] D3/E5：签名应为**单组单参**——原 (feRaw, beRaw) 双组版产出的是带前缀两行文本，实得 arity=${copyFn.arity}`);
-        must(copyFn.two === 'a; b',
-            `[T13] ⭐ D3/E5：多条 → 只出**编号本身**、'; ' 分隔，**不带「前端: 」前缀**（上线现场要分别贴进两个窗口，前缀得手工删），实得 ${JSON.stringify(copyFn.two)}`);
-        must(copyFn.one === 'c', `[T13] 单条 → 纯编号，实得 ${JSON.stringify(copyFn.one)}`);
+        // ⭐ S4 复审收口：未知/缺失 side 必须回落**换行**并显式报错，不得静默按后端逗号处理——
+        //   静默退化会让前端复制格式在文案改动/国际化后悄悄变成逗号且毫无症状。换行是两者中对人更
+        //   无害的一侧（粘到哪都是一行一个）。⚠️ 这两条会故意触发产品侧 console.error（那正是被测行为），
+        //   故文件顶部 SI_EXPECTED_CONSOLE_ERR 对该条消息做了**精确文本豁免**，[T5] 仍拦其余所有 error。
+        must(copyFn.unknownSide === 'a\nb',
+            `[T13] ⭐ S4：未知 side（'frontend'）回落换行而非逗号，实得 ${JSON.stringify(copyFn.unknownSide)}`);
+        must(copyFn.missingSide === 'a\nb',
+            `[T13] ⭐ S4：缺失 side（undefined）同样回落换行，实得 ${JSON.stringify(copyFn.missingSide)}`);
+        must(copyFn.arity === 2,
+            `[T13] ⭐ S4：签名升级为 (refs, side) 双参——按 side 差异化分隔符（前端 '\\n' 换行 / 后端 ','`
+            + ` 拼接，用户 2026-08-04 拍板；原 (feRaw, beRaw) 双组版那种"带前缀两行文本"隐患不复现，因 side`
+            + ` 只是分隔符判据、不是把两组数据揉进一次调用），实得 arity=${copyFn.arity}`);
+        must(copyFn.feTwo === 'a\nb',
+            `[T13] ⭐ S4：前端多条 → '\\n' 换行拼接（一行一个，贴代码工具更好认），实得 ${JSON.stringify(copyFn.feTwo)}`);
+        must(copyFn.beTwo === 'a,b',
+            `[T13] ⭐ S4：后端多条 → ',' 拼接、无空格（贴运维汇报的惯用写法），实得 ${JSON.stringify(copyFn.beTwo)}`);
+        must(copyFn.one === 'c', `[T13] 单条 → 纯编号（无分隔符可体现），实得 ${JSON.stringify(copyFn.one)}`);
         must(copyFn.empty === '' && copyFn.degraded === '',
             `[T13] 该组空 / 不可用 → 空串（调用方据此**不渲染该侧按钮**·E6），实得 ${JSON.stringify(copyFn.empty)}/${JSON.stringify(copyFn.degraded)}`);
-        must(!/前端|后端/.test(copyFn.two + copyFn.one),
-            `[T13] ⭐ D3 防回退：复制文本里不得再出现「前端」「后端」字样，实得 ${JSON.stringify(copyFn.two)}`);
-        must(copyFn.withSemicolon === 'a;b; c',
-            `[T13] commit_ref 内部含分号时原样保留、不被错拆（后端 [A5] 的前端侧对照），实得 ${JSON.stringify(copyFn.withSemicolon)}`);
+        must(!/前端|后端/.test(copyFn.feTwo + copyFn.beTwo + copyFn.one),
+            `[T13] ⭐ D3 防回退：复制文本里不得再出现「前端」「后端」字样，实得 ${JSON.stringify(copyFn.feTwo)}/${JSON.stringify(copyFn.beTwo)}`);
+        must(copyFn.feWithSemicolon === 'a;b\nc' && copyFn.beWithSemicolon === 'a;b,c',
+            `[T13] commit_ref 内部含分号时原样保留、不被错拆（两侧口径分别核对，非仅前端侧对照），`
+            + `实得 fe=${JSON.stringify(copyFn.feWithSemicolon)} be=${JSON.stringify(copyFn.beWithSemicolon)}`);
 
         //   ⭐ 按钮渲染按**组**独立判定（E6）：两组都有 → 两个按钮；只有一组有 → 只渲染那一侧；都空 → 0 个
         await batchRowOf(relPlan, iTwo);   // relPlan 同时含 iTwo（前2后1）/ iMany（前5后0）/ iPending（皆空）
@@ -587,8 +623,23 @@ const seedCommit = (issueId, daId, userId, component, ref) =>
             return { text, shown, feedback: btn.textContent, title: btn.getAttribute('title') };
         }, iMany);
         must(!clip.err, `[T13] 应能按 data-side 定位到前端侧复制按钮，实得 ${clip.err || 'ok'}`);
-        must(clip.text === 'fe-many-1; fe-many-2; fe-many-3; fe-many-4; fe-many-5',
-            `[T13] ⭐ 复制内容 = 该组**完整 5 条纯编号**（屏幕上只显示 "${clip.shown}"，收起的部分必须也在剪贴板里；且不含「前端: 」前缀），实得 ${JSON.stringify(clip.text)}`);
+        //   ⭐ S4：前端多条按 '\n' 换行拼接（不再是 '; '）。⚠️ Windows 下 navigator.clipboard 走系统剪贴板，
+        //   写入的 '\n' 读回会被操作系统正规化成 '\r\n'（实测验证过，与 siBuildCommitCopyText 的实现无关，
+        //   是 Chromium clipboard API 在本机的行为）——比较前统一把 '\r\n' 折回 '\n' 再判等，否则会在 Windows
+        //   上误报红（execCommand 回退分支不经过这层系统剪贴板往返，见 [T14]，故那边不需要这个归一化）。
+        const clipTextNorm = (clip.text || '').replace(/\r\n/g, '\n');
+        must(clipTextNorm === 'fe-many-1\nfe-many-2\nfe-many-3\nfe-many-4\nfe-many-5',
+            `[T13] ⭐ S4：复制内容 = 该组**完整 5 条纯编号**、'\\n' 换行拼接（屏幕上只显示 "${clip.shown}"，`
+            + `收起的部分必须也在剪贴板里；不含「前端: 」前缀），实得 ${JSON.stringify(clip.text)}`);
+        const feManyLines = clipTextNorm.split('\n');
+        must(feManyLines.length === 5 && feManyLines.every((s, i) => s === `fe-many-${i + 1}`),
+            `[T13] ⭐ S4 抓退化：按 '\\n' 切分后行数=条数=5 且每行是完整编号（不是被别的分隔符切碎的半截，`
+            + `也不是两侧共用了同一个分隔符），实得 ${JSON.stringify(feManyLines)}`);
+        // ⚠️ 边界（codex 审 18 LOW）：下面这条负断言只对**本夹具**成立（其值 fe-many-N 不含逗号/分号）。
+        //   commit_ref 在产品上是允许包含逗号与分号的（本文件另有用例专门验证"内部含分号原样保留"），
+        //   所以它是**夹具级退化探针**，不可上升为产品语义。真正的强判据是上面那条 split 逐行精确比对。
+        must(!/,|; /.test(clip.text || ''),
+            `[T13] ⭐ S4 抓退化（夹具级探针）：前端复制文本不得混入逗号或旧的 '; '，实得 ${JSON.stringify(clip.text)}`);
         must(/^复制前端 commit 编码（5 条/.test(clip.title || ''),
             `[T13] D3：两个按钮同为 📋，靠 title 区分侧别与条数，实得 ${JSON.stringify(clip.title)}`);
         must(clip.feedback === '✓ 已复制', `[T13] 点击后行内就地反馈「✓ 已复制」（不飘旗），实得 "${clip.feedback}"`);
@@ -611,6 +662,34 @@ const seedCommit = (issueId, daId, userId, component, ref) =>
             `[T13] ⭐ 两侧互不串（这正是 E5 拆按钮的目的：分别贴进两个窗口），实得 ${JSON.stringify(clipBe.text)}`);
         must(/^复制后端 commit 编码（1 条/.test(clipBe.title || ''),
             `[T13] 后端按钮 title 的条数应与实际复制内容一致（共用同一份 arr·LOW-2），实得 ${JSON.stringify(clipBe.title)}`);
+
+        // ── [T13b] S4（复制格式按侧差异化，2026-08-04）：后端多条 → ',' 拼接、无空格 ─────────────
+        //   iTwo 后端只有 1 条，join 分隔符对单值不可见，测不到"两侧用了同一个分隔符"这种退化；
+        //   用新夹具 iManyBe（3 条后端）真点按钮 + 读剪贴板，逐条锁分隔符本身，不止断言"包含某条编号"。
+        await batchRowOf(relPlan, iManyBe);
+        const clipBeMany = await page.evaluate(async (iid) => {
+            const scope = document.querySelector('#siBatchBody') || document;
+            const row = [...scope.querySelectorAll('.si-att-item')].find(el => new RegExp('^#' + iid + '(?!\\d)').test((el.querySelector('.si-att-name') || el).textContent.trim()));
+            const btn = row && row.querySelector('.si-batch-copy[data-side="后端"]');
+            if (!btn) return { err: 'no-backend-button' };
+            const shown = row.querySelector('.si-batch-commit').textContent;
+            btn.click();
+            await new Promise(r => setTimeout(r, 350));
+            return { text: await navigator.clipboard.readText(), shown, title: btn.getAttribute('title') };
+        }, iManyBe);
+        must(!clipBeMany.err, `[T13b] 应能定位到后端侧复制按钮，实得 ${clipBeMany.err || 'ok'}`);
+        must(clipBeMany.text === 'be-many-1,be-many-2,be-many-3',
+            `[T13b] ⭐ S4：后端多条复制按 ',' 拼接、无空格（用户 2026-08-04 原话口径），实得 ${JSON.stringify(clipBeMany.text)}`);
+        const beManyParts = (clipBeMany.text || '').split(',');
+        must(beManyParts.length === 3 && beManyParts.every((s, i) => s === `be-many-${i + 1}`),
+            `[T13b] ⭐ 抓退化：按 ',' 切分后段数=条数=3 且每段是完整编号（不是被别的分隔符切碎的半截，`
+            + `也不是两侧共用了同一个分隔符），实得 ${JSON.stringify(beManyParts)}`);
+        // ⚠️ 边界同 [T13]：本条只对本夹具（be-many-N，不含换行/分号）成立，是夹具级退化探针而非产品语义。
+        must(!/\n|; /.test(clipBeMany.text || ''),
+            `[T13b] ⭐ 抓退化（夹具级探针）：后端复制文本不得混入换行或旧的 '; '（防"两侧用了同一个分隔符"），`
+            + `实得 ${JSON.stringify(clipBeMany.text)}`);
+        must(/^复制后端 commit 编码（3 条/.test(clipBeMany.title || ''),
+            `[T13b] 后端按钮 title 的条数应与实际复制内容一致，实得 ${JSON.stringify(clipBeMany.title)}`);
 
         //   ⭐ codex 249 MED-1：D3 声称「位置紧邻各自分组即语义」，这条几何断言把该前提真正锁住。
         //   诊断修正见 CSS 注释：.si-att-item 是 nowrap，换行不会发生；真问题是**行级 gap 均匀**
