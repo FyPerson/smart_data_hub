@@ -277,7 +277,7 @@ async function main() {
       await setRep(idSub, 5, '开发甲');
       r = await call('POST', `/api/sys-issues/${idSub}/hold`, adminTok, { reason: '[2b-submit] 暂缓准备' });
       assert.strictEqual(r.status, 200, `[2b-submit]：hold 200, got ${r.status}`);
-      r = await call('POST', `/api/sys-issues/${idSub}/submit`, devTok(5), { mode: 'no_code', no_code_reason: '尝试在暂缓期提交' });
+      r = await call('POST', `/api/sys-issues/${idSub}/submit`, devTok(5), { mode: 'no_code', no_code_reason: '尝试在暂缓期提交', self_tested: true, test_env_deployed: true });
       assert.strictEqual(r.status, 409, `[2b-submit]：已暂缓态 submit 应 409, got ${r.status} ${JSON.stringify(r.body)}`);
       assert.strictEqual(r.body.code, 'INVALID_STATUS', '[2b-submit]：错误码 INVALID_STATUS');
 

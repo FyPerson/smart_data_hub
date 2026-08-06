@@ -226,7 +226,9 @@ async function main() {
         await call('POST', `/api/sys-issues/${fid}/set-oa-number`, adminTok, { oa_number: '20260728100' });
         return (await call('POST', `/api/sys-issues/${fid}/assign`, tok, { assigned_to: 6 })).status;
       },
-      intakeAccept: async (tok) => (await call('POST', `/api/sys-issues/${await seed('feature', { status: '待受理', ir: 1 })}/intake-accept`, tok, {})).status,
+      // [工期对接测试与风险等级拆分 方案 v1.1 §3.4·C5] feature 受理必带 risk_level（否则 400，会误伤本组
+      // 期望 200 的两格；403 期望格由 roleGuard 先行拦截不受影响）。
+      intakeAccept: async (tok) => (await call('POST', `/api/sys-issues/${await seed('feature', { status: '待受理', ir: 1 })}/intake-accept`, tok, { risk_level: '二级' })).status,
       resubmitOther: async (tok) => (await call('POST', `/api/sys-issues/${await seed('feature', { status: '待修改', ir: 1, createdBy: 99 })}/resubmit-intake`, tok, {})).status,
     };
     // §11 期望矩阵（真相=各端点权限实现·非方案文字）

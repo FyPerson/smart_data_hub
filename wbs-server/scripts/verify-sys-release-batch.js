@@ -817,7 +817,7 @@ async function main() {
     await run(`UPDATE sys_issue_dev_assignees SET dev_status='pending' WHERE issue_id=? AND user_id=5 AND removed_at IS NULL`, [cycIssue]);
     const rEst = await call('POST', `/api/sys-issues/${cycIssue}/estimate`, dev5Tok, { dev_estimated_at: '2031-02-01 10:00' });
     assert.strictEqual(rEst.status, 200, `⑬estimate 应 200, got ${rEst.status} ${JSON.stringify(rEst.body)}`);
-    const rSubmit = await call('POST', `/api/sys-issues/${cycIssue}/submit`, dev5Tok, { mode: 'no_code', no_code_reason: '重开后修复（占位理由）' });
+    const rSubmit = await call('POST', `/api/sys-issues/${cycIssue}/submit`, dev5Tok, { mode: 'no_code', no_code_reason: '重开后修复（占位理由）', self_tested: true, test_env_deployed: true });
     assert.strictEqual(rSubmit.status, 200, `⑬submit 应 200, got ${rSubmit.status} ${JSON.stringify(rSubmit.body)}`);
     const rAccept = await call('POST', `/api/sys-issues/${cycIssue}/accept`, adminTok, {});
     assert.strictEqual(rAccept.status, 200, `⑬accept 应 200, got ${rAccept.status} ${JSON.stringify(rAccept.body)}`);

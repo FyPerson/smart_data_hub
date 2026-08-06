@@ -96,7 +96,7 @@ async function seedBugToReady(devId = 5) {
   const id = await seedBugToDev(devId);
   let r = await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: EST });
   assert.strictEqual(r.status, 200, `bug estimate 200, got ${r.status} ${JSON.stringify(r.body)}`);
-  r = await call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'no_code', no_code_reason: '修复完成（占位理由）' });
+  r = await call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'no_code', no_code_reason: '修复完成（占位理由）', self_tested: true, test_env_deployed: true });
   assert.strictEqual(r.status, 200, `bug submit 200, got ${r.status} ${JSON.stringify(r.body)}`);
   r = await call('POST', `/api/sys-issues/${id}/accept`, adminTok, {});
   assert.strictEqual(r.status, 200, `bug accept 200, got ${r.status} ${JSON.stringify(r.body)}`);
@@ -120,14 +120,20 @@ async function seedFeatureToReady(devId = 5) {
   const id = r.body.id;
   // ⭐ 角色权限重构 C2.5 撤销（v2.1）：变更流建单直落「待受理」，无需再走预沟通段。
   // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
-  await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, {});
+  // [工期对接测试与风险等级拆分 方案 v1.1 §3.4·C5] feature 受理必带 risk_level。
+  await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, { risk_level: '二级' });
   await call('POST', `/api/sys-issues/${id}/schedule`, adminTok, {});
   // ⭐ 角色权限重构 v2.1 §4：变更流 assign 前置要求 oa_number 通过校验 → 待指派态内先补号。
   r = await call('POST', `/api/sys-issues/${id}/set-oa-number`, adminTok, { oa_number: '2026070001' });
   assert.strictEqual(r.status, 200, `feature 补 OA 号 200, got ${r.status} ${JSON.stringify(r.body)}`);
   await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: devId });
+  // [工期对接测试与风险等级拆分 方案 v1.1 §3.0-⑥·C4a 涟漪修复] 本 helper 只是拿一个"待上线" feature 单
+  // 当 bug 派生（D7 跨类型 bug↔feature）的 origin，与「待对接测试」段本身无关（后者由专门的
+  // verify-sys-liaison-test.js 覆盖）。让对接人在 GATE 判定时失效，触发 §3.0-⑥ 降级路径，使 submit
+  // 仍直落"待验证"→可立即 accept 到"待上线"——本文件其余断言零改动，这也是方案承认的合法真实场景。
+  await run(`UPDATE sys_issues SET intake_liaison_id = 999999 WHERE id = ?`, [id]);
   await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: EST });
-  await call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'no_code', no_code_reason: '交付（占位理由）' });
+  await call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'no_code', no_code_reason: '交付（占位理由）', self_tested: true, test_env_deployed: true });
   r = await call('POST', `/api/sys-issues/${id}/accept`, adminTok, {});
   assert.strictEqual(r.status, 200, `feature accept 200, got ${r.status} ${JSON.stringify(r.body)}`);
   return id;
@@ -240,12 +246,12 @@ async function main() {
     await call('POST', `/api/sys-issues/${newId}/assign`, adminTok, { assigned_to: 5 });
     await call('POST', `/api/sys-issues/${newId}/estimate`, devTok, { dev_estimated_at: EST });
     // 首提缺 fix_gap_note → 400
-    r = await call('POST', `/api/sys-issues/${newId}/submit`, devTok, { mode: 'no_code', no_code_reason: '修好了' });
+    r = await call('POST', `/api/sys-issues/${newId}/submit`, devTok, { mode: 'no_code', no_code_reason: '修好了', self_tested: true, test_env_deployed: true });
     assert.strictEqual(r.status, 400, `派生 bug 首提缺 fix_gap_note 应 400, got ${r.status} ${JSON.stringify(r.body)}`);
     assert.strictEqual(r.body.code, 'FIX_GAP_NOTE_REQUIRED');
     assert.strictEqual((await get('SELECT first_submitted_at FROM sys_issues WHERE id=?', [newId])).first_submitted_at, null, '首提被拒 first_submitted_at 未盖（整事务回滚）');
     // 首提带 fix_gap_note → 200 + 落列 + first_submitted_at 盖章
-    r = await call('POST', `/api/sys-issues/${newId}/submit`, devTok, { mode: 'no_code', no_code_reason: '修好了', fix_gap_note: '上版漏了 join 空指针' });
+    r = await call('POST', `/api/sys-issues/${newId}/submit`, devTok, { mode: 'no_code', no_code_reason: '修好了', fix_gap_note: '上版漏了 join 空指针', self_tested: true, test_env_deployed: true });
     assert.strictEqual(r.status, 200, `带 fix_gap_note 首提应 200, got ${r.status} ${JSON.stringify(r.body)}`);
     const afterFirst = await get('SELECT fix_gap_note, first_submitted_at FROM sys_issues WHERE id=?', [newId]);
     assert.strictEqual(afterFirst.fix_gap_note, '上版漏了 join 空指针', 'fix_gap_note 落列');
@@ -265,7 +271,7 @@ async function main() {
     assert.strictEqual(r.status, 200, 're-add(5) 200, got ' + JSON.stringify(r.body));
     // 协作(6) 仍在册 pending（不影响本节断言，仅验证 5 的 fix_gap_note/first_submitted_at 行为，故不必撤回）
     await call('POST', `/api/sys-issues/${newId}/estimate`, devTok, { dev_estimated_at: EST });
-    r = await call('POST', `/api/sys-issues/${newId}/submit`, devTok, { mode: 'no_code', no_code_reason: '二轮修复' });   // 无 fix_gap_note
+    r = await call('POST', `/api/sys-issues/${newId}/submit`, devTok, { mode: 'no_code', no_code_reason: '二轮修复', self_tested: true, test_env_deployed: true });   // 无 fix_gap_note
     assert.strictEqual(r.status, 200, `返工重提免 fix_gap_note 应 200, got ${r.status} ${JSON.stringify(r.body)}`);
     const afterSecond = await get('SELECT fix_gap_note, first_submitted_at FROM sys_issues WHERE id=?', [newId]);
     assert.strictEqual(afterSecond.fix_gap_note, '上版漏了 join 空指针', '返工重提不覆写首版 fix_gap_note');
@@ -286,14 +292,15 @@ async function main() {
     //   不再需要 pre-discuss-pass 中转。
     // ⭐ 角色权限重构 C0：派生新单恒 intake_required=1 → 先受理（feature → 待指派）才能 assign
     //   （schedule 早已退场，此处调用是历史遗留 no-op，保留不动以免扩大 C0 diff）
-    await call('POST', `/api/sys-issues/${featChild}/intake-accept`, adminTok, {});
+    // [工期对接测试与风险等级拆分 方案 v1.1 §3.4·C5] feature 受理必带 risk_level。
+    await call('POST', `/api/sys-issues/${featChild}/intake-accept`, adminTok, { risk_level: '二级' });
     await call('POST', `/api/sys-issues/${featChild}/schedule`, adminTok, {});
     // ⭐ 角色权限重构 v2.1 §4：变更流 assign 前置要求 oa_number 通过校验 → 待指派态内先补号。
     const oaChild = await call('POST', `/api/sys-issues/${featChild}/set-oa-number`, adminTok, { oa_number: '2026070001' });
     assert.strictEqual(oaChild.status, 200, `派生 feature 子单补 OA 号 200, got ${oaChild.status} ${JSON.stringify(oaChild.body)}`);
     await call('POST', `/api/sys-issues/${featChild}/assign`, adminTok, { assigned_to: 5 });
     await call('POST', `/api/sys-issues/${featChild}/estimate`, devTok, { dev_estimated_at: EST });
-    r = await call('POST', `/api/sys-issues/${featChild}/submit`, devTok, { mode: 'no_code', no_code_reason: '做完了' });   // 无 fix_gap_note
+    r = await call('POST', `/api/sys-issues/${featChild}/submit`, devTok, { mode: 'no_code', no_code_reason: '做完了', self_tested: true, test_env_deployed: true });   // 无 fix_gap_note
     assert.strictEqual(r.status, 200, `bug→feature 派生单首提应免 fix_gap_note 200, got ${r.status} ${JSON.stringify(r.body)}`);
     assert.strictEqual((await get('SELECT fix_gap_note FROM sys_issues WHERE id=?', [featChild])).fix_gap_note, null, '跨类型派生单 fix_gap_note 保持 NULL');
     // feature→bug：新单 bug 但 origin.type=feature，首提亦跳过（谓词要求 origin.type=bug）
@@ -306,7 +313,7 @@ async function main() {
     await call('POST', `/api/sys-issues/${bugChild}/intake-accept`, adminTok, {});
     await call('POST', `/api/sys-issues/${bugChild}/assign`, adminTok, { assigned_to: 5 });
     await call('POST', `/api/sys-issues/${bugChild}/estimate`, devTok, { dev_estimated_at: EST });
-    r = await call('POST', `/api/sys-issues/${bugChild}/submit`, devTok, { mode: 'no_code', no_code_reason: '修好' });   // 无 fix_gap_note
+    r = await call('POST', `/api/sys-issues/${bugChild}/submit`, devTok, { mode: 'no_code', no_code_reason: '修好', self_tested: true, test_env_deployed: true });   // 无 fix_gap_note
     assert.strictEqual(r.status, 200, `feature→bug 派生单首提应免 fix_gap_note（origin.type≠bug）200, got ${r.status} ${JSON.stringify(r.body)}`);
     ok('[D7] 跨类型派生跳过 fix_gap_note（M5）：bug→feature 新单 feature 首提免填；feature→bug 新单 bug 但 origin≠bug 亦免填');
   }
@@ -321,7 +328,7 @@ async function main() {
     await call('POST', `/api/sys-issues/${newId}/intake-accept`, adminTok, {});
     await call('POST', `/api/sys-issues/${newId}/assign`, adminTok, { assigned_to: 5 });
     await call('POST', `/api/sys-issues/${newId}/estimate`, devTok, { dev_estimated_at: EST });
-    await call('POST', `/api/sys-issues/${newId}/submit`, devTok, { mode: 'no_code', no_code_reason: '修复', fix_gap_note: '缺口在边界判断' });
+    await call('POST', `/api/sys-issues/${newId}/submit`, devTok, { mode: 'no_code', no_code_reason: '修复', fix_gap_note: '缺口在边界判断', self_tested: true, test_env_deployed: true });
     r = await call('GET', `/api/sys-issues/${newId}`, adminTok);
     assert.strictEqual(r.status, 200);
     assert.strictEqual(r.body.issue.derive_reason, '读端可见性验证', '详情读端返回 derive_reason');
@@ -357,7 +364,7 @@ async function main() {
     await call('POST', `/api/sys-issues/${newId}/estimate`, devTok, { dev_estimated_at: EST });
     // 手工污染：令 origin_issue_id 指向不存在的行（模拟脏谱系；正常 API 不可达——无硬删除端点）
     await run('UPDATE sys_issues SET origin_issue_id=999999 WHERE id=?', [newId]);
-    r = await call('POST', `/api/sys-issues/${newId}/submit`, devTok, { mode: 'no_code', no_code_reason: '修好了', fix_gap_note: '缺口' });
+    r = await call('POST', `/api/sys-issues/${newId}/submit`, devTok, { mode: 'no_code', no_code_reason: '修好了', fix_gap_note: '缺口', self_tested: true, test_env_deployed: true });
     assert.strictEqual(r.status, 409, `origin 缺失首提应 fail-closed 409, got ${r.status} ${JSON.stringify(r.body)}`);
     assert.strictEqual(r.body.code, 'SYS_ORIGIN_MISSING');
     assert.strictEqual(await statusOf(newId), '处理中', 'fail-closed 后仍停处理中（事务未推进）');

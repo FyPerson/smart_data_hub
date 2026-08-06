@@ -49,14 +49,15 @@ async function seedToReady(type, title, devId, devTok) {
     intake_contract_version: 2, type, title: P + title, system_name: 'BMS', source: '内部',
   }), 201, `建单(${type})`);
   const id = c.id;
-  await call('POST', `/sys-issues/${id}/intake-accept`, ADMIN, {});
+  // [工期对接测试与风险等级拆分 方案 v1.1 §3.4·C5] feature 受理必带 risk_level（否则 400 RISK_LEVEL_REQUIRED）。
+  await call('POST', `/sys-issues/${id}/intake-accept`, ADMIN, (type === 'feature' || type === 'improvement') ? { risk_level: '二级' } : {});
   if (type !== 'bug') {
     await call('POST', `/sys-issues/${id}/schedule`, ADMIN, {});
     await call('POST', `/sys-issues/${id}/set-oa-number`, ADMIN, { oa_number: '2026' + String(3000 + id).slice(-6) });
   }
   await call('POST', `/sys-issues/${id}/assign`, ADMIN, { assigned_to: devId });
   await call('POST', `/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: '2026-08-05 10:00' });
-  await call('POST', `/sys-issues/${id}/submit`, devTok, { mode: 'no_code', no_code_reason: '演示数据（无代码提交）' });
+  await call('POST', `/sys-issues/${id}/submit`, devTok, { mode: 'no_code', no_code_reason: '演示数据（无代码提交）', self_tested: true, test_env_deployed: true });
   await must(await call('POST', `/sys-issues/${id}/accept`, ADMIN, {}), 200, `验收 #${id}`);
   return id;
 }

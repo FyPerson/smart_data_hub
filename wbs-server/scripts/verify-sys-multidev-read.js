@@ -218,7 +218,13 @@ async function main() {
     // P4：详情端在 fetchActiveDevAssignees 基础列集之上**合并**详情专属增强列（work_note/work_note_submitted_at，
     //   由详情端单独补查 dev_events payload_json·mutation 响应无此需求不带）。故断言从「完全相等」放宽为
     //   「detail = mutation ∪ 已知详情专属列」——基础列集仍防漂移（mutation⊆detail 且差集只能是白名单增强列）。
-    const DETAIL_ONLY_KEYS = ['work_note', 'work_note_submitted_at'];   // P4 详情端专属增强（唯一允许的差集）
+    // [C4 合并修复批·read 套件漏网修] C3（提交双勾清单）在同一个 workNoteRows 合并循环里（index.js
+    //   GET /sys-issues/:id 详情端，紧邻 work_note/work_note_submitted_at）新增了 self_tested/
+    //   test_env_deployed 两个详情专属列（同源：都来自 dev_events.payload_json 补查，同一处 for 循环
+    //   写入 d.xxx），但本文件的白名单当时漏跟——C3 涟漪清单遗漏本文件（先于 C4b 就已存在，
+    //   git stash 验证过），本次按写读同源口径把白名单补齐，不放松"mutation⊆detail 且差集只能是
+    //   已知白名单"这条断言的语义强度。
+    const DETAIL_ONLY_KEYS = ['work_note', 'work_note_submitted_at', 'self_tested', 'test_env_deployed'];   // P4+C3 详情端专属增强（唯一允许的差集）
     const detailKeys = Object.keys(rDetail.body.dev_assignees[0]).sort();
     const detailBaseKeys = detailKeys.filter(k => !DETAIL_ONLY_KEYS.includes(k));
     assert.deepStrictEqual(mutationKeys, detailBaseKeys, `${label}：mutation 响应与详情 GET 的 dev_assignees **基础列集**应完全一致（防镜像漂移·排除 P4 详情专属列 ${DETAIL_ONLY_KEYS.join('/')}），mutation=${JSON.stringify(mutationKeys)} detailBase=${JSON.stringify(detailBaseKeys)}`);
@@ -242,7 +248,8 @@ async function main() {
   const issue2 = r.body.id;
   // ⭐ 角色权限重构 C2.5 撤销（v2.1）：变更流建单直落「待受理」，无需再走预沟通段，直接受理。
   // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
-  await call('POST', `/api/sys-issues/${issue2}/intake-accept`, adminTok, {});
+  // [工期对接测试与风险等级拆分 方案 v1.1 §3.4·C5] feature 受理必带 risk_level（否则 400 RISK_LEVEL_REQUIRED）。
+  await call('POST', `/api/sys-issues/${issue2}/intake-accept`, adminTok, { risk_level: '二级' });
   await call('POST', `/api/sys-issues/${issue2}/schedule`, adminTok, {});
   // ⭐ 角色权限重构 v2.1 §4：变更流 assign 前置要求 oa_number 通过校验 → 待指派态内先补号。
   r = await call('POST', `/api/sys-issues/${issue2}/set-oa-number`, adminTok, { oa_number: '2026070001' });
@@ -259,7 +266,8 @@ async function main() {
   const issue4 = r.body.id;
   // ⭐ 角色权限重构 C2.5 撤销（v2.1）：变更流建单直落「待受理」，无需再走预沟通段，直接受理。
   // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
-  await call('POST', `/api/sys-issues/${issue4}/intake-accept`, adminTok, {});
+  // [工期对接测试与风险等级拆分 方案 v1.1 §3.4·C5] feature 受理必带 risk_level（否则 400 RISK_LEVEL_REQUIRED）。
+  await call('POST', `/api/sys-issues/${issue4}/intake-accept`, adminTok, { risk_level: '二级' });
   await call('POST', `/api/sys-issues/${issue4}/schedule`, adminTok, {});
   // ⭐ 角色权限重构 v2.1 §4：变更流 assign 前置要求 oa_number 通过校验 → 待指派态内先补号。
   const oa4 = await call('POST', `/api/sys-issues/${issue4}/set-oa-number`, adminTok, { oa_number: '2026070001' });

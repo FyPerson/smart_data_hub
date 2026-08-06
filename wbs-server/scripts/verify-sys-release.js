@@ -62,6 +62,8 @@ function waitReady() {
 
 const adminTok = jwt.sign({ id: 1, username: 'admin', display_name: '管理员', role: 'admin' }, SECRET);
 const devTok = jwt.sign({ id: 5, username: 'dev', display_name: '开发王', role: 'user' }, SECRET);
+// [C4 合并修复批 275-M5] 示例对接人（受理人白名单）——真实 ⑦ 路径夹具需要它调 liaison-test-pass。
+const liaisonTok = jwt.sign({ id: 13, username: 'wangtaotao', display_name: '示例对接人', role: 'user' }, SECRET);
 
 let server, port;
 function call(method, p, tok, body) {
@@ -93,21 +95,57 @@ async function seedToReady() {
   const id = r.body.id;
   // ⭐ 角色权限重构 C2.5 撤销（v2.1）：建单直落「待受理」，无需再走预沟通段。
   // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
-  await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, {});
+  // [工期对接测试与风险等级拆分 方案 v1.1 §3.4·C5] feature 受理必带 risk_level（否则 400 RISK_LEVEL_REQUIRED）。
+  await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, { risk_level: '二级' });
   await call('POST', `/api/sys-issues/${id}/schedule`, adminTok, {});
   // ⭐ 角色权限重构 v2.1 §4：变更流 assign 前置要求 oa_number 通过校验 → 待指派态内先补号。
   r = await call('POST', `/api/sys-issues/${id}/set-oa-number`, adminTok, { oa_number: '2026070001' });
   assert.strictEqual(r.status, 200, '夹具补 OA 号 200, got ' + r.status + ' ' + JSON.stringify(r.body));
   await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5 });
+  // [工期对接测试与风险等级拆分 方案 v1.1 §3.0-⑥·C4a 涟漪修复] 本文件测上线批次（建/加删单/发布原子性），
+  // 与「待对接测试」段本身无关（后者由专门的 verify-sys-liaison-test.js 覆盖）。让对接人在 GATE 判定时
+  // 失效，触发 §3.0-⑥ 降级路径，使 submit 仍直落"待验证"→可立即 accept 到"待上线"——本文件其余断言
+  // 零改动，这也是方案承认的合法真实场景（非造假绕过）。
+  await run(`UPDATE sys_issues SET intake_liaison_id = 999999 WHERE id = ?`, [id]);
   r = await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: futureEst(30) });
   assert.strictEqual(r.status, 200, 'estimate 200, got ' + r.status + ' ' + JSON.stringify(r.body));
-  r = await call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'no_code', no_code_reason: '交付完成（占位理由）' });
+  r = await call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'no_code', no_code_reason: '交付完成（占位理由）', self_tested: true, test_env_deployed: true });
   assert.strictEqual(r.status, 200, 'submit 200, got ' + r.status + ' ' + JSON.stringify(r.body));
   r = await call('POST', `/api/sys-issues/${id}/accept`, adminTok, {});
   assert.strictEqual(r.status, 200, 'accept 200, got ' + r.status + ' ' + JSON.stringify(r.body));
   const row = await get('SELECT status, release_id FROM sys_issues WHERE id=?', [id]);
   assert.strictEqual(row.status, '待上线', 'seed 后应为待上线');
   assert.strictEqual(row.release_id, null, 'seed 后 release_id NULL');
+  return id;
+}
+// [C4 合并修复批 275-M5] 真实 ⑦ 路径代表夹具——本文件其余场景默认走上方 seedToReady 的 999999 降级(⑥)
+// 简化路径（上线批次机制本身与走⑥/⑦无关，见 seedToReady 注释）。保留有效 intake_liaison_id=13，
+// 走真实 GATE ⑦（待对接测试）+ liaison-test-pass 落到待验证，再照常 accept 到待上线——999999 手法
+// 仍是本文件其余场景的默认，本函数只服务下方跑 1-2 条代表性下游断言的专用场景。
+async function seedToReadyViaRealLiaisonTest() {
+  let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 't-真实⑦路径', system_name: 'BMS', source: '内部', description: '275-M5 真实⑦路径 fixture', intake_liaison_id: 13 });
+  assert.strictEqual(r.status, 201, '建单 201, got ' + r.status + ' ' + JSON.stringify(r.body));
+  const id = r.body.id;
+  // [工期对接测试与风险等级拆分 方案 v1.1 §3.4·C5] feature 受理必带 risk_level。
+  await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, { risk_level: '二级' });
+  await call('POST', `/api/sys-issues/${id}/schedule`, adminTok, {});
+  r = await call('POST', `/api/sys-issues/${id}/set-oa-number`, adminTok, { oa_number: '2026070098' });
+  assert.strictEqual(r.status, 200, '夹具补 OA 号 200, got ' + r.status + ' ' + JSON.stringify(r.body));
+  await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5 });
+  r = await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: futureEst(30) });
+  assert.strictEqual(r.status, 200, 'estimate 200, got ' + r.status + ' ' + JSON.stringify(r.body));
+  r = await call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'no_code', no_code_reason: '交付完成（占位理由）', self_tested: true, test_env_deployed: true });
+  assert.strictEqual(r.status, 200, 'submit 200, got ' + r.status + ' ' + JSON.stringify(r.body));
+  assert.strictEqual(r.body.main_status, '待对接测试', '[275-M5] submit → 待对接测试（真实 ⑦ 路径，非 999999 降级）');
+  // ⭐ D22-④ 批2：pass 现须凭证二选一，本夹具补 test_note。
+  r = await call('POST', `/api/sys-issues/${id}/liaison-test-pass`, liaisonTok, { test_note: '275-M5 夹具测试通过' });
+  assert.strictEqual(r.status, 200, 'liaison-test-pass 200, got ' + r.status + ' ' + JSON.stringify(r.body));
+  assert.strictEqual(r.body.status, '待验证', '[275-M5] liaison-test-pass → 待验证');
+  r = await call('POST', `/api/sys-issues/${id}/accept`, adminTok, {});
+  assert.strictEqual(r.status, 200, 'accept 200, got ' + r.status + ' ' + JSON.stringify(r.body));
+  const row = await get('SELECT status, release_id FROM sys_issues WHERE id=?', [id]);
+  assert.strictEqual(row.status, '待上线', '[275-M5] seed 后应为待上线');
+  assert.strictEqual(row.release_id, null, '[275-M5] seed 后 release_id NULL');
   return id;
 }
 const issueRow = (id) => get('SELECT status, release_id, released_at FROM sys_issues WHERE id=?', [id]);
@@ -623,7 +661,7 @@ async function main() {
     await run(`UPDATE sys_issue_dev_assignees SET dev_status='pending' WHERE issue_id=? AND user_id=5 AND removed_at IS NULL`, [cycId]);
     r13 = await call('POST', `/api/sys-issues/${cycId}/estimate`, devTok, { dev_estimated_at: futureEst(60) });
     assert.strictEqual(r13.status, 200, `[C6回环⑤] estimate 应 200, got ${r13.status}`);
-    r13 = await call('POST', `/api/sys-issues/${cycId}/submit`, devTok, { mode: 'no_code', no_code_reason: '缺陷已修复（占位理由）' });
+    r13 = await call('POST', `/api/sys-issues/${cycId}/submit`, devTok, { mode: 'no_code', no_code_reason: '缺陷已修复（占位理由）', self_tested: true, test_env_deployed: true });
     assert.strictEqual(r13.status, 200, `[C6回环⑤] submit 应 200, got ${r13.status} ${JSON.stringify(r13.body)}`);
     r13 = await call('POST', `/api/sys-issues/${cycId}/accept`, adminTok, {});
     assert.strictEqual(r13.status, 200, `[C6回环⑤] accept 应 200, got ${r13.status} ${JSON.stringify(r13.body)}`);
@@ -712,7 +750,7 @@ async function main() {
     await call('POST', `/api/sys-issues/${bugSeg}/intake-accept`, adminTok, {});
     await call('POST', `/api/sys-issues/${bugSeg}/assign`, adminTok, { assigned_to: 5 });
     await call('POST', `/api/sys-issues/${bugSeg}/estimate`, devTok, { dev_estimated_at: futureEst(30) });
-    await call('POST', `/api/sys-issues/${bugSeg}/submit`, devTok, { mode: 'no_code', no_code_reason: '修复（占位理由）' });
+    await call('POST', `/api/sys-issues/${bugSeg}/submit`, devTok, { mode: 'no_code', no_code_reason: '修复（占位理由）', self_tested: true, test_env_deployed: true });
     await call('POST', `/api/sys-issues/${bugSeg}/accept`, adminTok, {});
     r = await call('POST', `/api/sys-issues/${bugSeg}/hotfix-publish`, adminTok, { release_note: 'seg-bug 应急建单' });
     assert.strictEqual(r.status, 200, `bug hotfix-publish 应 200, got ${r.status} ${JSON.stringify(r.body)}`);
@@ -742,7 +780,8 @@ async function main() {
     const zeroRosterId = r.body.id;
   // ⭐ 角色权限重构 C2.5 撤销（v2.1）：变更流建单直落「待受理」，无需再走预沟通段，直接受理。
   // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
-    await call('POST', `/api/sys-issues/${zeroRosterId}/intake-accept`, adminTok, {});
+  // [工期对接测试与风险等级拆分 方案 v1.1 §3.4·C5] feature 受理必带 risk_level。
+    await call('POST', `/api/sys-issues/${zeroRosterId}/intake-accept`, adminTok, { risk_level: '二级' });
     // 手工快进到"待上线"但不建任何 roster 行（模拟脏数据/历史遗留单，正常业务流程不可达——非 submit 场景准备）。
     await run(`UPDATE sys_issues SET status='待上线' WHERE id=?`, [zeroRosterId]);
     r = await call('POST', '/api/sys-releases', adminTok, { title: '零在册反例批次' });
@@ -766,6 +805,23 @@ async function main() {
   // [codex 102 号 HIGH 回填] 正例回归：既有发布路径（全员完成种子，本文件上方大量既有用例均已走真实 /assign→
   //   estimate→submit→accept 完整流程建立合法 roster）在本轮接线后全部保持通过——已由本文件整体 EXIT:0 证实，
   //   不额外重复断言（守卫对"在册≥1∧无 pending"的合法批次天然放行，零回归）。
+
+  // ── [C4 合并修复批 275-M5] 真实 ⑦ 路径代表夹具——建批次+加单+发布，跑本文件核心代表性下游断言 ──
+  {
+    const idReal = await seedToReadyViaRealLiaisonTest();
+    let r = await call('POST', '/api/sys-releases', adminTok, { title: '275-M5 真实⑦路径批次' });
+    assert.strictEqual(r.status, 201, '[275-M5] 建批次 201, got ' + r.status);
+    const relReal = r.body.id;
+    r = await call('POST', `/api/sys-releases/${relReal}/add-issues`, adminTok, { issue_ids: [idReal] });
+    assert.strictEqual(r.status, 200, '[275-M5] 加单应 200, got ' + r.status + ' ' + JSON.stringify(r.body));
+    assert.strictEqual((await issueRow(idReal)).release_id, relReal, '[275-M5] 加单后 release_id 绑批次');
+    r = await publishRelease(relReal, { release_note: '275-M5 真实⑦路径发布', version_tag: 'v275m5' });
+    assert.strictEqual(r.status, 200, '[275-M5] 发布应 200, got ' + r.status + ' ' + JSON.stringify(r.body));
+    const issueAfterReal = await issueRow(idReal);
+    assert.strictEqual(issueAfterReal.status, '已上线', '[275-M5] 发布后单据状态=已上线');
+    assert.strictEqual(issueAfterReal.release_id, relReal, '[275-M5] release_id 保持绑定');
+    ok('[275-M5] 真实⑦路径代表夹具：submit→待对接测试→liaison-test-pass→待验证→accept→待上线，全走真实链路（非 999999 降级）后，建批次/加单/发布三条本文件核心代表性断言仍成立（防正常主路径跨模块回归被全 ⑥ 化的夹具集合掩盖）');
+  }
 
   console.log(`\n✅ verify-sys-release 全部通过（${passed} 项断言）`);
   server.close();

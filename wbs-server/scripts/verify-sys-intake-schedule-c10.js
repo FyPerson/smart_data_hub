@@ -146,7 +146,8 @@ async function main() {
     let row = await get('SELECT status FROM sys_issues WHERE id=?', [id]);
     // ⭐ v2.1（C2.5 撤销）：变更流建单直落「待受理」（预沟通段整体撤销），受理门是唯一必经关口
     assert.strictEqual(row.status, '待受理', '建单落 待受理（v2.1：C2.5 已撤销）');
-    const acc = await call('POST', `/api/sys-issues/${id}/intake-accept`, liaisonTok, {});
+    // [工期对接测试与风险等级拆分 方案 v1.1 §3.4·C5] feature 受理必带 risk_level。
+    const acc = await call('POST', `/api/sys-issues/${id}/intake-accept`, liaisonTok, { risk_level: '二级' });
     assert.strictEqual(acc.status, 200, `受理人 intake-accept 200, got ${acc.status} ${JSON.stringify(acc.body)}`);
     row = await get('SELECT status FROM sys_issues WHERE id=?', [id]);
     assert.strictEqual(row.status, '待指派', 'intake-accept → 待指派（受理门贯通）');
@@ -237,7 +238,8 @@ async function main() {
       assert.strictEqual(row.intake_required, 1, `${type} 组合 intake_required=1`);
       assert.strictEqual(row.needs_feasibility, 1, `${type} 组合 needs_feasibility=1 独立入库（不被 intake 吞掉）`);
       // 受理通过 → 待指派·needs_feasibility 保留（评估在开发中做·不被受理门跳过）
-      const acc = await call('POST', `/api/sys-issues/${id}/intake-accept`, liaisonTok, {});
+      // [工期对接测试与风险等级拆分 方案 v1.1 §3.4·C5，⭐ 用户拍板批1改造B后订正] feature/improvement 受理必带 risk_level，bug 不带（原"仅 feature 必带、improvement 不带"口径已随改造B废止）。
+      const acc = await call('POST', `/api/sys-issues/${id}/intake-accept`, liaisonTok, (type === 'feature' || type === 'improvement') ? { risk_level: '二级' } : {});
       assert.strictEqual(acc.status, 200, `${type} 组合 intake-accept 200`);
       row = await get('SELECT status, needs_feasibility FROM sys_issues WHERE id=?', [id]);
       assert.strictEqual(row.status, '待指派', `${type} 组合受理通过 → 待指派`);

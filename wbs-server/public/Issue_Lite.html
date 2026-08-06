@@ -29,6 +29,50 @@
         .il-att a { color: #2563eb; text-decoration: none; cursor: pointer; }
         .il-att .del { color: #dc2626; cursor: pointer; margin-left: 10px; }
         .il-chip { display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 10px; background: #eef2ff; color: #4338ca; margin-left: 6px; }
+        /* A3（贴图三症状 S3）：详情抽屉图片附件缩略图 + lightbox 放大（复刻 Data_Correction .img-lightbox
+           范式，CSS/DOM/JS 三段同源；类名/元素 id 换 il- 前缀区分，两页各自独立无复用关系）。 */
+        .il-att-thumb { width: 56px; height: 42px; object-fit: cover; border-radius: 4px; border: 1px solid #e5e7eb; cursor: zoom-in; flex-shrink: 0; }
+        .il-lightbox {
+            display: none;
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0, 0, 0, 0.85);
+            z-index: 2000;
+            cursor: zoom-out;
+            justify-content: center;
+            align-items: center;
+            flex-direction: column;
+            padding: 24px;
+            box-sizing: border-box;
+        }
+        .il-lightbox.show { display: flex; }
+        .il-lightbox img {
+            max-width: 92vw;
+            max-height: 82vh;
+            object-fit: contain;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+            border-radius: 4px;
+            cursor: default;
+        }
+        .il-lightbox-close {
+            position: absolute;
+            top: 16px; right: 24px;
+            color: #fff;
+            font-size: 40px;
+            line-height: 1;
+            cursor: pointer;
+            user-select: none;
+            text-shadow: 0 2px 8px rgba(0, 0, 0, 0.6);
+        }
+        .il-lightbox-close:hover { color: #fca5a5; }
+        .il-lightbox-caption {
+            margin-top: 12px;
+            color: #e5e7eb;
+            font-size: 13px;
+            text-align: center;
+            max-width: 92vw;
+            word-break: break-all;
+        }
     </style>
 </head>
 
@@ -235,6 +279,14 @@
     <!-- S4（前端统一 贴图粘贴扩展方案 20260801_v0.1）：Ctrl+V 贴图共享层接入。文件本体未改，沿用
          S3 抽取时的缓存串；改共享层本体时须同步 bump 这里 + 所有引用页。 -->
     <script src="assets/js/u-paste.js?v=v1.134.0_upaste2"></script>
+    <!-- A3：图片附件 lightbox（复刻 Data_Correction 范式；点 overlay/×/ESC 关，点大图/说明文字不关；
+         codex 256 L-1 补齐 caption 排除） -->
+    <div id="ilLightbox" class="il-lightbox" onclick="ilCloseLightbox(event)">
+        <span class="il-lightbox-close" onclick="ilCloseLightbox(event)" title="关闭">×</span>
+        <img id="ilLightboxImg" alt="">
+        <div class="il-lightbox-caption" id="ilLightboxCaption"></div>
+    </div>
+
     <script>
         let allItems = [];
         let allUsers = [];             // /api/users/active·通知区解析 notify_target_id → 人名
@@ -465,7 +517,16 @@
                 loadAttachments(sid, st, isVoided);
             } catch (e) { console.error(e); }
         }
-        function closeDrawer() { document.getElementById('drawerOverlay').classList.remove('open'); document.getElementById('drawer').classList.remove('open'); currentDrawerId = null; }
+        // codex 256 M-3：抽屉关闭时补回收——①先关 lightbox（若开着）②再 revoke 缩略图 objectURL。
+        //   顺序铁律：lightbox 大图复用缩略图同一 objectURL，先 revoke 会让开着的大图变死图，必须先关
+        //   lightbox（其内部会清空 img.src）再 revoke。closeDrawer 声明在前、引用 ilCloseLightbox/
+        //   ilAttThumbRevokeUrls（后文函数声明）没问题——function 声明整体提升。
+        function closeDrawer() {
+            document.getElementById('drawerOverlay').classList.remove('open'); document.getElementById('drawer').classList.remove('open'); currentDrawerId = null;
+            const lb = document.getElementById('ilLightbox');
+            if (lb && lb.classList.contains('show')) ilCloseLightbox(null);
+            ilAttThumbRevokeUrls();
+        }
 
         async function refreshDrawer(id) { if (currentDrawerId === id) await openDrawer(id); await loadList(); }
 
@@ -643,8 +704,89 @@
 
         // ===== 附件 =====
         let attLoadSeq = 0; // codex 17 复审 E-M-1：同 ID 代际守卫——同一单关闭重开时旧请求 ID 相同仍会过 ID 守卫，加序号丢弃旧代
+        // A3（贴图三症状 S3）：详情抽屉图片附件缩略图预览。/uploads/issue-lite/* 走 403 静态拦截
+        //   （server.js:779 有意设计，不放开），缩略图 src 必须走既有鉴权下载端点取 blob 转 objectURL，
+        //   不能像 Data_Correction 那样直接拼 /uploads/ 路径当 <img src>。
+        let ilAttThumbUrls = [];   // 当前抽屉代际内已创建的缩略图 objectURL（同 ilPickerRevokeUrls 范式，防泄漏）
+        const IL_ATT_IMG_RE = /\.(jpe?g|png|gif|webp|bmp)$/i;   // 附件文件名图片类型判定（独立于建单 picker 的 IL_IMG_EXTS——判定对象不同：一个测已选 File 对象扩展名，一个测已入库文件名）
+        function ilAttThumbRevokeUrls() {
+            ilAttThumbUrls.forEach(u => { if (u) URL.revokeObjectURL(u); });
+            ilAttThumbUrls.length = 0;
+        }
+        // 异步回填单张缩略图：取 blob → 代际守卫复查（抽屉已切走/同单已重开则丢弃，不写 DOM）→ objectURL 填 src。
+        //   与 loadAttachments 的双守卫范式一致；guard 失败时 revoke 刚创建的 objectURL，不留悬空引用。
+        async function ilLoadAttThumb(id, seq, attId) {
+            try {
+                const res2 = await authFetch('/api/issue-lite/attachments/' + attId + '/download');
+                if (!res2 || !res2.ok) return;
+                // codex 256 M-2：blob 解码前先弃旧代（AbortController/并发限流已裁不采纳，勿加）——
+                //   下载耗时期间抽屉可能已切走/同单已重开，解码前先复查一次代际，避免为旧代际多花一次
+                //   blob() 解码开销（下方仍保留 objectURL 创建后的复查，双保险）。
+                if (Number(currentDrawerId) !== Number(id) || seq !== attLoadSeq) return;
+                const blob = await res2.blob();
+                const url = URL.createObjectURL(blob);
+                if (Number(currentDrawerId) !== Number(id) || seq !== attLoadSeq) { URL.revokeObjectURL(url); return; }
+                const imgEl = document.querySelector('#attList img.il-att-thumb[data-att-id="' + attId + '"]');
+                if (!imgEl) { URL.revokeObjectURL(url); return; }
+                ilAttThumbUrls.push(url);
+                imgEl.src = url;
+            } catch (e) { /* 缩略图加载失败静默忽略，文件名下载链接仍可用（downloadAttach 独立请求不受影响） */ }
+        }
+        // A3 lightbox：图片附件缩略图点击放大（复刻 Data_Correction .img-lightbox 范式，CSS/DOM/JS 三段
+        //   同源；类名/元素 id 换 il- 前缀区分，两页各自独立无复用关系）。大图直接复用缩略图已取的
+        //   objectURL（img.src），不再发第二次下载请求。
+        // codex 256 M-4：恢复 body overflow 原值（多层遮罩场景丢原值）——open 时无条件把 overflow
+        //   置 hidden、close 时无条件置空串会丢失打开前的原值（例如页面本就有其他遮罩把 overflow 设为
+        //   非空）。仅在尚未 show 时保存原值，防已开状态下重复 open（理论上不会发生，防御性处理）把
+        //   'hidden' 误存成"原值"。
+        let ilLbPrevOverflow = '';
+        function ilOpenLightbox(url, caption) {
+            if (!url) return;
+            const lb = document.getElementById('ilLightbox');
+            const img = document.getElementById('ilLightboxImg');
+            const cap = document.getElementById('ilLightboxCaption');
+            if (!lb || !img) return;
+            img.src = url;
+            if (cap) cap.textContent = caption || '';
+            if (!lb.classList.contains('show')) ilLbPrevOverflow = document.body.style.overflow;
+            lb.classList.add('show');
+            document.body.style.overflow = 'hidden';
+        }
+        function ilCloseLightbox(event) {
+            // codex 257 M-A：幂等守卫——× 按钮自身 onclick 与父级 overlay onclick 双绑定，点击冒泡连续
+            //   执行两次；第二次会把已恢复的 body overflow 覆盖为已清空的 ilLbPrevOverflow('')，丢原值。
+            //   非 show 态直接返回，ESC/遮罩/×/closeDrawer 四条关闭路径全部幂等化。
+            const lb = document.getElementById('ilLightbox');
+            if (!lb || !lb.classList.contains('show')) return;
+            // codex 256 L-1：点大图/说明文字不关（同 Data_Correction 范式），注释与行为一致
+            if (event && event.target && ((event.target.tagName === 'IMG' && event.target.id === 'ilLightboxImg') || event.target.id === 'ilLightboxCaption')) return;
+            const img = document.getElementById('ilLightboxImg');
+            lb.classList.remove('show');
+            if (img) img.src = '';
+            document.body.style.overflow = ilLbPrevOverflow;
+            ilLbPrevOverflow = '';
+            // [289-M 收口] lightbox 本身也服务详情抽屉缩略图（loadAttachments/ilAttThumbRevokeUrls 管的是
+            //   另一套 objectURL，与 ilZoomUrl 完全独立）——这里只 revoke ilPickerZoom 自己建的那个 URL，
+            //   非 zoom 路径打开时 ilZoomUrl 恒 null，本行天然是 no-op，不误伤详情页缩略图的 URL 生命周期。
+            if (ilZoomUrl) { URL.revokeObjectURL(ilZoomUrl); ilZoomUrl = null; }
+        }
+        document.addEventListener('keydown', function (e) {
+            if (e.key === 'Escape') {
+                const lb = document.getElementById('ilLightbox');
+                if (lb && lb.classList.contains('show')) ilCloseLightbox(null);
+            }
+        });
+        // 缩略图点击委托监听：caption 走属性读回（渲染时已 escapeHtml+转义引号），url 直接读 img.src
+        //   （回填前 src 为空，此时点击无 objectURL 可放大，属可接受的过渡态——网络请求通常先于用户点击完成）。
+        document.addEventListener('click', function (e) {
+            const t = e.target && e.target.closest ? e.target.closest('.il-att-thumb') : null;
+            if (!t) return;
+            e.preventDefault();
+            ilOpenLightbox(t.getAttribute('src'), t.getAttribute('data-lightbox-caption') || '');
+        });
         async function loadAttachments(id, status, voided) {
             const seq = ++attLoadSeq;
+            ilAttThumbRevokeUrls();   // 新代际开始：先 revoke 上一轮全部缩略图 objectURL 再清空容器，防泄漏
             const st = (status !== undefined && status !== null) ? status : currentDrawerStatus; // 复D5-L-1：status 兜底
             // codex 17 E-M-1：isVoided 优先走不可变入参（openDrawer 传入），全局 currentDrawerVoided 仅兜底
             //   （重载调用无参场景）——消除对全局态时序的隐式依赖；stale 响应仍由下方双守卫丢弃
@@ -662,11 +804,32 @@
                 if (!box) return;
                 // D5-M-3(codex 审)：归档单删除仅 admin（与后端一致）；已作废单一律只读（admin 也不例外·v0.1 §9.2）
                 const canDelAtt = canWrite() && (st !== '已归档' || isAdminRole()) && !vd;
-                box.innerHTML = list.length ? list.map(a => `<div class="il-att">
-                    <span>📎 <a onclick="downloadAttach(${Number(a.id)})">${esc(a.original_name)}</a> <span class="il-muted">${a.file_size ? (Math.round(a.file_size/1024) + 'KB') : ''}</span></span>
+                // A3：图片类附件（按文件名扩展名判定）在文字链接前加缩略图；非图片附件渲染不变。
+                //   缩略图先占位（无 src），下方 forEach 逐个异步 fetch blob 回填——不能直接拼 /uploads/
+                //   路径当 src（该路径 403 静态拦截，鉴权只认 authFetch 走的下载端点）。
+                box.innerHTML = list.length ? list.map(a => {
+                    const isImg = IL_ATT_IMG_RE.test(String(a.original_name || ''));
+                    const safeAttr = esc(a.original_name).replace(/"/g, '&quot;'); // 属性位再转双引号（同 ilPickerRender 范式，esc()/escapeHtml 不转义引号）
+                    const nameLink = `📎 <a onclick="downloadAttach(${Number(a.id)})">${esc(a.original_name)}</a> <span class="il-muted">${a.file_size ? (Math.round(a.file_size/1024) + 'KB') : ''}</span>`;
+                    const left = isImg
+                        ? `<span style="display:flex;align-items:center;gap:8px;">
+                               <img class="il-att-thumb" data-att-id="${Number(a.id)}" data-lightbox-caption="${safeAttr}" alt="${safeAttr}" title="${safeAttr}（点击放大）">
+                               <span>${nameLink}</span>
+                           </span>`
+                        : `<span>${nameLink}</span>`;
+                    return `<div class="il-att">
+                    ${left}
                     <span>${esc(a.uploaded_by_name)}${canDelAtt ? ` <span class="del" onclick="delAttach(${Number(a.id)}, ${Number(id)})">删除</span>` : ''}</span>
-                </div>`).join('') : '<span class="il-muted">暂无附件</span>';
-            } catch (e) { const box = document.getElementById('attList'); if (box) box.innerHTML = '<span class="il-muted">附件加载失败</span>'; }
+                </div>`;
+                }).join('') : '<span class="il-muted">暂无附件</span>';
+                // 逐个图片附件异步回填缩略图 blob（代际守卫在 ilLoadAttThumb 内部复查，见函数定义）
+                list.filter(a => IL_ATT_IMG_RE.test(String(a.original_name || ''))).forEach(a => ilLoadAttThumb(id, seq, Number(a.id)));
+            } catch (e) {
+                // codex 256 M-1（既有缺陷）：旧代际请求异常不得把新代际附件区覆盖为「附件加载失败」——
+                //   与 try 内 :769/:772 同款双守卫，抽屉已切走/同单已重开则直接丢弃本次异常，不动 DOM。
+                if (Number(currentDrawerId) !== Number(id) || seq !== attLoadSeq) return;
+                const box = document.getElementById('attList'); if (box) box.innerHTML = '<span class="il-muted">附件加载失败</span>';
+            }
         }
         function pickAttach(id) { document.getElementById('attachInput').dataset.issueId = id; document.getElementById('attachInput').click(); }
         function onAttachPicked() {
@@ -747,7 +910,7 @@
                     const urlAttr = URL.createObjectURL(f);
                     IL_CREATE_URLS[idx] = urlAttr;
                     return `<div class="il-picker-item" style="position:relative;display:inline-block;margin:0 6px 6px 0;vertical-align:top;" title="${safeAttr}">
-                        <img src="${urlAttr}" alt="${safeAttr}" style="width:90px;height:68px;object-fit:cover;border-radius:6px;border:1px solid #e5e7eb;display:block;">
+                        <img src="${urlAttr}" alt="${safeAttr}" onclick="ilPickerZoom(${idx})" style="width:90px;height:68px;object-fit:cover;border-radius:6px;border:1px solid #e5e7eb;display:block;cursor:zoom-in;">
                         <button type="button" onclick="ilPickerRemove(${idx})" title="移除" style="position:absolute;top:-6px;right:-6px;width:18px;height:18px;line-height:16px;text-align:center;background:#dc2626;color:#fff;border:0;border-radius:50%;cursor:pointer;font-size:11px;padding:0;">×</button>
                         <div style="max-width:90px;font-size:10px;color:#6b7280;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px;">${safeName}</div>
                     </div>`;
@@ -762,11 +925,34 @@
                     <button type="button" onclick="ilPickerRemove(${idx})" title="移除" style="position:absolute;top:-6px;right:-6px;width:18px;height:18px;line-height:16px;text-align:center;background:#dc2626;color:#fff;border:0;border-radius:50%;cursor:pointer;font-size:11px;padding:0;">×</button>
                 </div>`;
             }).join('');
+            // A1（贴图三症状 S1）：.u-modal-body 限高 60vh + 附件区在表单最底部，贴图/选图后新增项
+            //   常在可视区外——用户误以为"贴了没反应"。渲染后把最后一项滚入视野；block:'nearest' 不用
+            //   'center'，避免每次贴图都把整个表单跳动式滚动。多处调用方（选图/贴图/删除单项）共用本函数，
+            //   删除单项时也会触发同款滚动，属可接受的无害副作用，不单独区分调用来源。
+            if (IL_CREATE_FILES.length) {
+                const lastItem = wrap.lastElementChild;
+                if (lastItem) lastItem.scrollIntoView({ block: 'nearest' });
+            }
         }
         function ilPickerRemove(idx) {
             if (idx < 0 || idx >= IL_CREATE_FILES.length) return;
             IL_CREATE_FILES.splice(idx, 1);
             ilPickerRender();
+        }
+        // 贴图四件②（hotfix 20260806）：picker 预览图点击放大，对齐详情抽屉缩略图行为（悬停 zoom-in 光标+
+        //   点击 lightbox）。
+        // [289-M 收口] 此前直接复用 IL_CREATE_URLS[idx]（picker 缩略图自身的 objectURL）——生命周期与
+        //   picker 数组耦合：lightbox 开着时若 picker 重渲染/删除该项/重置（ilPickerRevokeUrls 会 revoke
+        //   全部旧 URL），大图会随之失效变黑图，此时 lightbox 仍 show 着。改为每次点击独立
+        //   URL.createObjectURL(file) 建一个专属 URL，存模块变量 ilZoomUrl，与 picker 自身的生命周期
+        //   彻底解耦；在 ilCloseLightbox 里显式 revoke+置空（见下方）。
+        let ilZoomUrl = null;
+        function ilPickerZoom(idx) {
+            const f = IL_CREATE_FILES[idx];
+            if (!f) return;
+            if (ilZoomUrl) { URL.revokeObjectURL(ilZoomUrl); ilZoomUrl = null; }   // 防御：理论不可达（lightbox 遮罩下无法连续点两次缩略图），幂等收口
+            ilZoomUrl = URL.createObjectURL(f);
+            ilOpenLightbox(ilZoomUrl, f.name || '');
         }
         // 返回数组快照（供提交链读取，避免调用方直接持有内部数组引用被意外改动）
         function ilPickerFiles() {

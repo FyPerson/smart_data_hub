@@ -133,7 +133,8 @@ async function main() {
   {
     // admin feature → 200 待指派 + intake_required 不变(仍1·"已过受理门"语义靠 status+intake_required 组合)
     let id = await seedIntakeIssue('feature');
-    let r = await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, {});
+    // [工期对接测试与风险等级拆分 方案 v1.1 §3.4·C5] feature 受理必带 risk_level。
+    let r = await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, { risk_level: '二级' });
     assert.strictEqual(r.status, 200, `admin intake_accept feature 200, got ${r.status} ${JSON.stringify(r.body)}`);
     assert.strictEqual(r.body.status, '待指派', 'feature intake_accept → 待指派');
     let row = await get('SELECT status, intake_required FROM sys_issues WHERE id=?', [id]);
@@ -141,7 +142,7 @@ async function main() {
 
     // 受理人(13) feature → 200
     id = await seedIntakeIssue('feature');
-    r = await call('POST', `/api/sys-issues/${id}/intake-accept`, liaisonTok, {});
+    r = await call('POST', `/api/sys-issues/${id}/intake-accept`, liaisonTok, { risk_level: '二级' });
     assert.strictEqual(r.status, 200, `受理人(13) intake_accept feature 200, got ${r.status} ${JSON.stringify(r.body)}`);
     assert.strictEqual(r.body.status, '待指派', '受理人 intake_accept feature → 待指派');
 
@@ -380,7 +381,8 @@ async function main() {
   //   此处只证串行重放被 findTransition + 双条件 WHERE(status=fromStatus) 双层拒绝（第二次请求已离开待受理）。
   {
     const id = await seedIntakeIssue('feature');
-    let r = await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, {});
+    // [工期对接测试与风险等级拆分 方案 v1.1 §3.4·C5] feature 受理必带 risk_level。
+    let r = await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, { risk_level: '二级' });
     assert.strictEqual(r.status, 200, '首次 intake_accept 200');
     r = await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, {});
     assert.strictEqual(r.status, 400, '重复 intake_accept 400（已非待受理）');

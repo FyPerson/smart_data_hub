@@ -314,6 +314,155 @@ async function main() {
   }
   ok('⭐ 上线体统一重构 C6：sys_issues.needs_release 单列只读残留断言——列仍在 schema 里（唯一写点 set-release-flag 已 410 退场 + add-issues 的 needs_release=1 闸门已随双闸拆除删除，此后本列无任何写路径/读判断消费，纯供历史展示，禁止未来误删）');
 
+  // [9h] ⭐ C1（工期对接测试与风险等级拆分 方案 v1.0 §4/§10）：sys_issues 新增 14 列（新库 CREATE 路径）
+  //   全量存在性 + CHECK 值域探针。C1 是纯 schema commit（族常量+ALTER+CHECK 探针，不接线端点/GATE/
+  //   guard），本组断言只测 DB 层约束是否如期生效，不涉及任何业务端点行为。
+  const LIAISON_TEST_COLS_EXPECT = ['estimated_effort_days', 'risk_level', 'liaison_test_cycle_no',
+    'liaison_test_recipient_id', 'liaison_test_recipient_name', 'liaison_test_notify_status',
+    'liaison_test_notified_at', 'liaison_test_notify_message_key', 'liaison_test_notify_error',
+    'liaison_test_read_at', 'liaison_test_notify_sent_by', 'liaison_test_notify_cycle_no',
+    'liaison_test_attempt_token', 'liaison_test_attempt_started_at',
+    'liaison_test_attachment_watermark'];   // ← [codex 291 号 H-1 收口] 附件周期水位列
+  {
+    const nowCols = (await all('PRAGMA table_info(sys_issues)')).map(r => r.name);
+    const missLiaison = LIAISON_TEST_COLS_EXPECT.filter(c => !nowCols.includes(c));
+    assert.strictEqual(missLiaison.length, 0, `C1 工期对接测试与风险等级拆分新列缺失: ${missLiaison.join(',')}`);
+  }
+  //   默认值：裸插入（不带这 14 列）→ 三个 NOT NULL DEFAULT 列各归位、其余 11 列 NULL。
+  await run(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name) VALUES ('feature', '开发中', 't-liaison-default', 'BMS', 1, 'admin')`);
+  const liaisonDefault = await get(`SELECT estimated_effort_days, risk_level, liaison_test_cycle_no,
+    liaison_test_recipient_id, liaison_test_recipient_name, liaison_test_notify_status, liaison_test_notified_at,
+    liaison_test_notify_message_key, liaison_test_notify_error, liaison_test_read_at, liaison_test_notify_sent_by,
+    liaison_test_notify_cycle_no, liaison_test_attempt_token, liaison_test_attempt_started_at,
+    liaison_test_attachment_watermark
+    FROM sys_issues WHERE title='t-liaison-default'`);
+  assert.strictEqual(liaisonDefault.liaison_test_cycle_no, 0, 'liaison_test_cycle_no 默认应 0');
+  assert.strictEqual(liaisonDefault.liaison_test_notify_status, 'not_sent', 'liaison_test_notify_status 默认应 not_sent');
+  assert.strictEqual(liaisonDefault.liaison_test_notify_cycle_no, 0, 'liaison_test_notify_cycle_no 默认应 0');
+  assert.strictEqual(liaisonDefault.liaison_test_attachment_watermark, 0, '[291 号 H-1] liaison_test_attachment_watermark 默认应 0');
+  for (const k of ['estimated_effort_days', 'risk_level', 'liaison_test_recipient_id', 'liaison_test_recipient_name',
+    'liaison_test_notified_at', 'liaison_test_notify_message_key', 'liaison_test_notify_error',
+    'liaison_test_read_at', 'liaison_test_notify_sent_by', 'liaison_test_attempt_token', 'liaison_test_attempt_started_at']) {
+    assert.strictEqual(liaisonDefault[k], null, `${k} 默认应 NULL`);
+  }
+  ok('⭐ C1 新增 14 列全量存在 + 默认值：三 NOT NULL DEFAULT 列（liaison_test_cycle_no/liaison_test_notify_cycle_no=0，liaison_test_notify_status=not_sent）归位，其余 11 列默认 NULL');
+
+  // [9h-meta] ⭐ [codex 267 号 M-2] PRAGMA table_info 精确元数据钉死——三个 NOT NULL 列的 type/notnull=1/
+  //   dflt_value 逐字断言（不满足于"能插入默认值对"这种间接验证，直接读 schema 元数据钉死声明本身，防未来
+  //   有人手滑改错类型/漏加 DEFAULT/NOT NULL 被拿掉却没人发现——上面 [9h] 的默认值断言测的是"行为"，本组
+  //   测的是"声明"，两者不能互相替代）；三列各配一条显式 INSERT NULL 拒绝用例（NOT NULL 约束最直接的反证
+  //   ——区别于上面"不传列时走 DEFAULT"，这里是"显式传 NULL"的独立输入面，两者可能有不同的失守方式）。
+  //   其余 11 列至少核对声明类型（type 字段）与可空性（notnull=0），防某列被误声明成非预期类型或误加 NOT NULL。
+  const liaisonTestColInfoRows = await all('PRAGMA table_info(sys_issues)');
+  const liaisonTestColInfoByName = new Map(liaisonTestColInfoRows.map(c => [c.name, c]));
+  const LIAISON_NOT_NULL_DEFAULT_COLS_EXPECT = {
+    liaison_test_cycle_no: { type: 'INTEGER', dflt_value: '0' },
+    liaison_test_notify_cycle_no: { type: 'INTEGER', dflt_value: '0' },
+    liaison_test_notify_status: { type: 'TEXT', dflt_value: "'not_sent'" },
+    liaison_test_attachment_watermark: { type: 'INTEGER', dflt_value: '0' },   // ← [291 号 H-1]
+  };
+  for (const [col, expect] of Object.entries(LIAISON_NOT_NULL_DEFAULT_COLS_EXPECT)) {
+    const info = liaisonTestColInfoByName.get(col);
+    assert.ok(info, `PRAGMA table_info 应能读到列 ${col}`);
+    assert.strictEqual(info.type, expect.type, `${col} 声明类型应为 ${expect.type}，实际 ${info.type}`);
+    assert.strictEqual(info.notnull, 1, `${col} 应 notnull=1，实际 ${info.notnull}`);
+    assert.strictEqual(info.dflt_value, expect.dflt_value, `${col} dflt_value 应为 ${expect.dflt_value}，实际 ${info.dflt_value}`);
+  }
+  ok(`⭐ [codex 267 号 M-2] PRAGMA table_info 精确钉死三个 NOT NULL DEFAULT 列元数据：liaison_test_cycle_no(INTEGER/notnull=1/dflt='0') / liaison_test_notify_cycle_no(INTEGER/notnull=1/dflt='0') / liaison_test_notify_status(TEXT/notnull=1/dflt="'not_sent'")`);
+
+  //   三列显式 INSERT NULL 拒绝（NOT NULL 约束反证，独立于"不传列走 DEFAULT"这条输入面）
+  await assert.rejects(
+    run(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name, liaison_test_cycle_no) VALUES ('feature', '开发中', 't-ltcn-null', 'BMS', 1, 'admin', NULL)`),
+    /NOT NULL|constraint/i, 'liaison_test_cycle_no 显式传 NULL 应被 NOT NULL 拒');
+  await assert.rejects(
+    run(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name, liaison_test_notify_cycle_no) VALUES ('feature', '开发中', 't-ltncn-null', 'BMS', 1, 'admin', NULL)`),
+    /NOT NULL|constraint/i, 'liaison_test_notify_cycle_no 显式传 NULL 应被 NOT NULL 拒');
+  await assert.rejects(
+    run(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name, liaison_test_notify_status) VALUES ('feature', '开发中', 't-ltns-null', 'BMS', 1, 'admin', NULL)`),
+    /NOT NULL|constraint/i, 'liaison_test_notify_status 显式传 NULL 应被 NOT NULL 拒');
+  await assert.rejects(
+    run(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name, liaison_test_attachment_watermark) VALUES ('feature', '开发中', 't-ltaw-null', 'BMS', 1, 'admin', NULL)`),
+    /NOT NULL|constraint/i, '[291 号 H-1] liaison_test_attachment_watermark 显式传 NULL 应被 NOT NULL 拒');
+  ok('⭐ [codex 267 号 M-2 + 291 号 H-1] 四个 NOT NULL 列显式 INSERT NULL 均被拒（liaison_test_cycle_no / liaison_test_notify_cycle_no / liaison_test_notify_status / liaison_test_attachment_watermark——区别于"不传列走 DEFAULT"，这是显式传 NULL 的独立输入面）');
+
+  //   其余 11 列（可空列）——至少核对声明类型与可空性（notnull=0）
+  const LIAISON_NULLABLE_COLS_TYPE_EXPECT = {
+    estimated_effort_days: 'REAL',
+    risk_level: 'TEXT',
+    liaison_test_recipient_id: 'INTEGER',
+    liaison_test_recipient_name: 'TEXT',
+    liaison_test_notified_at: 'DATETIME',
+    liaison_test_notify_message_key: 'TEXT',
+    liaison_test_notify_error: 'TEXT',
+    liaison_test_read_at: 'DATETIME',
+    liaison_test_notify_sent_by: 'INTEGER',
+    liaison_test_attempt_token: 'TEXT',
+    liaison_test_attempt_started_at: 'DATETIME',
+  };
+  for (const [col, type] of Object.entries(LIAISON_NULLABLE_COLS_TYPE_EXPECT)) {
+    const info = liaisonTestColInfoByName.get(col);
+    assert.ok(info, `PRAGMA table_info 应能读到列 ${col}`);
+    assert.strictEqual(info.type, type, `${col} 声明类型应为 ${type}，实际 ${info.type}`);
+    assert.strictEqual(info.notnull, 0, `${col} 应可空（notnull=0），实际 ${info.notnull}`);
+  }
+  ok(`⭐ [codex 267 号 M-2] 其余 11 列声明类型 + 可空性核对：${Object.keys(LIAISON_NULLABLE_COLS_TYPE_EXPECT).join('/')} 均 notnull=0 且类型声明匹配（14 列元数据本组+上组合计全覆盖）`);
+
+  //   estimated_effort_days CHECK（§3.2：有限数、0<v≤365、0.5 整数倍）：负例（0/负数/366/0.3 非半整数倍）+ 正例（0.5/1/364.5/365）+ NULL 合法
+  const insEffort = (v) => run(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name, estimated_effort_days) VALUES ('feature', '开发中', ?, 'BMS', 1, 'admin', ?)`, [`t-effort-${v}`, v]);
+  await assert.rejects(insEffort(0), /CHECK|constraint/i, 'estimated_effort_days=0 应被 CHECK(>0) 拒');
+  await assert.rejects(insEffort(-1), /CHECK|constraint/i, 'estimated_effort_days=-1 应被 CHECK(>0) 拒');
+  await assert.rejects(insEffort(366), /CHECK|constraint/i, 'estimated_effort_days=366 应被 CHECK(<=365) 拒');
+  await assert.rejects(insEffort(1.3), /CHECK|constraint/i, 'estimated_effort_days=1.3（非 0.5 整数倍）应被 CHECK 拒');
+  await assert.doesNotReject(insEffort(0.5), 'estimated_effort_days=0.5（下界半整数倍）应合法');
+  await assert.doesNotReject(insEffort(1), 'estimated_effort_days=1（整数）应合法');
+  await assert.doesNotReject(insEffort(364.5), 'estimated_effort_days=364.5 应合法');
+  await assert.doesNotReject(insEffort(365), 'estimated_effort_days=365（上界）应合法');
+  await assert.doesNotReject(insEffort(null), 'estimated_effort_days=NULL 应合法（评估前/improvement 选填未填）');
+  ok('estimated_effort_days CHECK：0/负数/366/1.3 非半整数倍全被拒，0.5/1/364.5/365 全合法，NULL 合法（§3.2 契约）');
+
+  //   risk_level CHECK（§3.4：一级/二级/三级/NULL——⭐ 用户拍板批1改造A值域改名，原「高/中/低」全仓
+  //   改名，语义不变仅文案换）：负例（原值域"gao"拼音残留同样应仍非法/空串）+ 正例（三态 + NULL）
+  const insRisk = (v) => run(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name, risk_level) VALUES ('feature', '待受理', ?, 'BMS', 1, 'admin', ?)`, [`t-risk-${v}`, v]);
+  await assert.rejects(insRisk('gao'), /CHECK|constraint/i, "risk_level='gao' 应被 CHECK 拒");
+  await assert.rejects(insRisk('高'), /CHECK|constraint/i, "risk_level='高'（旧值域残留）应被 CHECK 拒——值域已改名，旧值不再合法");
+  await assert.rejects(insRisk(''), /CHECK|constraint/i, "risk_level='' 应被 CHECK 拒");
+  for (const lvl of ['一级', '二级', '三级']) {
+    await assert.doesNotReject(insRisk(lvl), `risk_level='${lvl}' 应合法`);
+  }
+  // ⭐ 用户拍板批1改造B：risk_level=NULL 合法态现仅覆盖"存量单/bug"（improvement 已改必填，不再恒空）。
+  await assert.doesNotReject(insRisk(null), 'risk_level=NULL 应合法（存量单/bug 恒空的合法态）');
+  ok('risk_level CHECK：非法值/空串/旧值域残留("高")全被拒，一级/二级/三级/NULL 全合法（§3.4 契约+改造A值域改名，NULL=有意义业务态不设占位）');
+
+  //   liaison_test_cycle_no / liaison_test_notify_cycle_no CHECK（typeof=integer AND >=0，两列同款）：
+  //   负例（负数整数 + 非整数小数——typeof 在此落 real）；正例（0/5）
+  for (const col of ['liaison_test_cycle_no', 'liaison_test_notify_cycle_no']) {
+    await assert.rejects(
+      run(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name, ${col}) VALUES ('feature', '开发中', ?, 'BMS', 1, 'admin', -1)`, [`t-${col}-neg`]),
+      /CHECK|constraint/i, `${col}=-1 应被 CHECK(>=0) 拒`);
+    await assert.rejects(
+      run(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name, ${col}) VALUES ('feature', '开发中', ?, 'BMS', 1, 'admin', 1.5)`, [`t-${col}-frac`]),
+      /CHECK|constraint/i, `${col}=1.5（非整数，typeof=real）应被 CHECK(typeof='integer') 拒`);
+    await assert.doesNotReject(
+      run(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name, ${col}) VALUES ('feature', '开发中', ?, 'BMS', 1, 'admin', 5)`, [`t-${col}-ok`]),
+      `${col}=5 应合法`);
+  }
+  ok('liaison_test_cycle_no / liaison_test_notify_cycle_no CHECK：负数与非整数小数（typeof 落 real）均被拒，非负整数合法（只增不清的周期号契约，§4/§8）');
+
+  //   liaison_test_notify_status CHECK（新通道四态 not_sent/sending/sent/failed，不含 release_assignee 那个 stale）：
+  //   负例（三侧通知惯用探针值 pending + release_assignee 专属的 stale——本通道无该态）；正例四态全合法
+  await assert.rejects(
+    run(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name, liaison_test_notify_status) VALUES ('feature', '开发中', 't-lns-pending', 'BMS', 1, 'admin', 'pending')`),
+    /CHECK|constraint/i, "liaison_test_notify_status='pending' 应被 CHECK 拒");
+  await assert.rejects(
+    run(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name, liaison_test_notify_status) VALUES ('feature', '开发中', 't-lns-stale', 'BMS', 1, 'admin', 'stale')`),
+    /CHECK|constraint/i, "liaison_test_notify_status='stale' 应被 CHECK 拒（本通道四态不含 release_assignee 专属的 stale）");
+  for (const st of ['not_sent', 'sending', 'sent', 'failed']) {
+    await assert.doesNotReject(
+      run(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name, liaison_test_notify_status) VALUES ('feature', '开发中', ?, 'BMS', 1, 'admin', ?)`, [`t-lns-${st}`, st]),
+      `liaison_test_notify_status='${st}' 应合法`);
+  }
+  ok("liaison_test_notify_status CHECK：'pending'/'stale' 均被拒，四态 not_sent/sending/sent/failed 全合法（§4/§6 新通道四态，比三侧通知经典三态多一个 sending 支撑预占协议）");
+
   // [10] sys_issues NOT NULL：缺 system_name / created_by / title 被拒
   await assert.rejects(run(`INSERT INTO sys_issues (type, status, title, created_by, created_by_name) VALUES ('feature', '待评估', 't', 1, 'admin')`), /NOT NULL|constraint/i, 'system_name NOT NULL 未生效');
   await assert.rejects(run(`INSERT INTO sys_issues (type, status, system_name, created_by, created_by_name) VALUES ('feature', '待评估', 'BMS', 1, 'admin')`), /NOT NULL|constraint/i, 'title NOT NULL 未生效');
@@ -484,6 +633,29 @@ async function main() {
   await assert.rejects(run(`INSERT INTO sys_issue_timeline (issue_id, event_type, operator_name) VALUES (?, 'note', 'admin')`, [issueId]), /NOT NULL|constraint/i, 'operator_id NOT NULL 未生效');
   ok('sys_issue_timeline：15 event_type（含 reassign 独立 05-H1 + feasibility/blocked/unblock 评估 F1 §2.2）合法，reject 被拒（L-1 打回叫 return），operator_id NOT NULL');
 
+  // [12a] ⭐ [codex 291 号 H-2 收口·292 号 M-4 后注释修实（293-M2）] sys_issue_timeline.payload_json 列——
+  //   TEXT + CHECK(json_valid)（292 号补约束后本注释原「纯 TEXT 无 CHECK」表述已过时），可空
+  //   （目前仅 liaison_test_pass 写值，其余 9 种 event_type 恒 NULL，见该列 DDL 注释）；写读圆整验证
+  //   （非仅列存在性）：写入一段结构化 JSON，读回精确等于原文，无编码/截断损耗。
+  {
+    const timelineCols = (await all('PRAGMA table_info(sys_issue_timeline)')).map(r => r.name);
+    assert.ok(timelineCols.includes('payload_json'), 'sys_issue_timeline 应存在 payload_json 列');
+    await assert.doesNotReject(
+      run(`INSERT INTO sys_issue_timeline (issue_id, event_type, operator_id, operator_name, payload_json) VALUES (?, 'status_change', 1, 'admin', NULL)`, [issueId]),
+      'payload_json 可空（未写值的 9 种 event_type 恒 NULL，NULL 应合法插入）');
+    const payloadSample = JSON.stringify({ evidence: 'both', cycle_no: 1, test_note: '含中文与"引号"的说明', attachment_ids: [10, 11] });
+    await run(`INSERT INTO sys_issue_timeline (issue_id, event_type, operator_id, operator_name, payload_json) VALUES (?, 'status_change', 1, 'admin', ?)`, [issueId, payloadSample]);
+    const readBack = await get(`SELECT payload_json FROM sys_issue_timeline WHERE issue_id = ? AND payload_json IS NOT NULL ORDER BY id DESC LIMIT 1`, [issueId]);
+    assert.strictEqual(readBack.payload_json, payloadSample, 'payload_json 写读圆整：读回字符串与写入原文逐字相等（含中文/引号，无编码损耗）');
+    assert.deepStrictEqual(JSON.parse(readBack.payload_json), JSON.parse(payloadSample), 'payload_json 读回可正确 JSON.parse 还原原对象');
+    // [codex 293 号 M-2 收口] 非法 JSON 负例——json_valid CHECK（292 号 M-4）真的在拦（不只测合法侧）。
+    await assert.rejects(
+      run(`INSERT INTO sys_issue_timeline (issue_id, event_type, operator_id, operator_name, payload_json) VALUES (?, 'status_change', 1, 'admin', ?)`, [issueId, '{broken json']),
+      /CHECK/i,
+      'payload_json 非法 JSON 应被 json_valid CHECK 拒绝（读侧 JSON.parse 不被脏值击穿的 DB 层保证·负例直证）');
+    ok('⭐ [codex 291 号 H-2+292 号 M-4] sys_issue_timeline.payload_json 列存在 + 可空 + 写读圆整 + 非法 JSON 被 CHECK 拒绝（负例）');
+  }
+
   // [12b] ⭐ 上线体统一重构 C0（方案 v3.4 §6.13，2026-07-28）：留痕反查基础设施
   //   action_code 是 sys_issue_timeline 首版原生列（非本 C0 新增），此处显式断言防未来被误删——
   //   idx_sys_timeline_action_ref 正是配它做 `event_type='scope_change' AND action_code IN (...) AND ref_id=?` 反查。
@@ -544,6 +716,9 @@ async function main() {
   // [15c] 集成审收口：readiness 全列锚点 + [1c] guard 同源——缺 removed_at（旧 2 锚点在）→ ready=false（堵坏表放行）；
   //   缺 issue_id + 有 legacy 行 → guard 跳过回填、[2] 给干净 issue_id 缺列诊断（非 [1c] SELECT 撞 da.issue_id 原始报错）
   await verifyDevAssigneesGuardAlignment();
+  // [9i] ⭐ [codex 267 号 M-3] 旧库 ALTER 迁移回归：C1 之前 [9h]/[9h-meta] 只测过 CREATE 新库路径，从未测过
+  //   "已上线旧表补列"这条生产真实会走的 ALTER 路径本身——本函数补齐这一半覆盖。
+  await verifyLiaisonTestAlterMigration();
 
   console.log(`\n[全部通过] ${passed}/${passed} ✓ 系统迭代 sys 六表 schema 验证通过【require 真实 initSchema，非复刻 DDL】`);
   console.log(`  覆盖：6 表（含通知改造 C1a 新表 sys_issue_dev_assignees + 上线体统一重构 C0 新表 sys_release_duty_roster）+ 关键列（含 effected_at/三侧通知 5 列全量/可行性评估 7 列/通知改造 11 新列/上线体统一重构 C0 的 sys_releases 10 新列 + 排班表 11 列）+ 15 索引（含 G12 部分唯一索引 + C0 新增 4 索引）+ type/source/priority/三通知/relay_notify_status/event_type(15)/attachment/release status/release_assignee_notify_status(5态)/release_kind/feasibility_conclusion/needs_feasibility·blocked(0,1)/dev_assignees is_primary·notify_status/排班表 duty_date 与软删成组 CHECK + config release_id 永空 DB CHECK（12-H2）+ NOT NULL + UNIQUE + 部分唯一索引(软删复活/唯一活跃值班) + FK 定义 + readiness 三态（含新表专项）`);
@@ -715,6 +890,121 @@ async function verifyDevAssigneesGuardAlignment() {
     ok(`⭐ 集成审收口 B：dev_assignees 缺 issue_id + 有 legacy 待迁移行 → guard 引用全列锚点跳过回填、[2] 给干净 issue_id 缺列诊断（非原始 SQLITE no-such-column·堵 codex bad-path-1）`);
     dbB.close();
   }
+}
+
+// [9i] ⭐ [codex 267 号 M-3] 旧库 ALTER 迁移回归 fixture：构造一个"缺 C1 新增 14 列"的旧版 sys_issues
+//   （其余列**从当前已完整 initSchema 的真实 sys_issues PRAGMA 反查派生，非手写清单**——同本文件
+//   stubMissingRequiredTables 的单一来源派生哲学，防止未来 sys_issues 再演进新列时本 fixture 与真实 schema
+//   静默漂移），验证 runSysMigration 的 alterAddMissingCols 幂等 ALTER 真能把这 14 列原地补齐到一张"已上线
+//   旧表"上——这正是生产库升级时真实会走的路径；C1 之前 [9h]/[9h-meta] 只测过全新 CREATE TABLE 路径
+//   （表压根不存在、一次建全带 CHECK），从未测过"表已存在、ALTER ADD COLUMN 补列"这条路径本身是否真的
+//   执行成功、元数据是否与 CREATE 路径一致。独立 :memory: 库，同本文件其余全部子测试一致的隔离手法，不
+//   触碰 task_pool.db；db.close() 后 :memory: 库随连接关闭即整体销毁，无需额外文件删除步骤。
+async function verifyLiaisonTestAlterMigration() {
+  const LIAISON_TEST_COLS_EXPECT_LOCAL = ['estimated_effort_days', 'risk_level', 'liaison_test_cycle_no',
+    'liaison_test_recipient_id', 'liaison_test_recipient_name', 'liaison_test_notify_status',
+    'liaison_test_notified_at', 'liaison_test_notify_message_key', 'liaison_test_notify_error',
+    'liaison_test_read_at', 'liaison_test_notify_sent_by', 'liaison_test_notify_cycle_no',
+    'liaison_test_attempt_token', 'liaison_test_attempt_started_at'];
+  const NOT_NULL_DEFAULT_COLS_EXPECT_LOCAL = {
+    liaison_test_cycle_no: { dflt_value: '0' },
+    liaison_test_notify_cycle_no: { dflt_value: '0' },
+    liaison_test_notify_status: { dflt_value: "'not_sent'" },
+  };
+
+  const dbOld = new sqlite3.Database(':memory:');
+  const runOld = (sql, p = []) => new Promise((res, rej) => dbOld.run(sql, p, function (e) { e ? rej(e) : res(this); }));
+  const getOld = (sql, p = []) => new Promise((res, rej) => dbOld.get(sql, p, (e, r) => e ? rej(e) : res(r)));
+  const allOld = (sql, p = []) => new Promise((res, rej) => dbOld.all(sql, p, (e, r) => e ? rej(e) : res(r)));
+  const modOld = require('../routes/sys-iteration')({
+    logger: { info: noop, warn: noop, error: noop, debug: noop },
+    db: dbOld, dbRunAsync: runOld, dbGetAsync: getOld, dbAllAsync: allOld,
+    authenticateToken: mwPass, requireAdmin: mwPass,
+    ...require('./_sys-attach-test-deps'),
+  });
+
+  // 派生"旧表"列定义：从本文件顶层已完整 initSchema 的真实 sys_issues（模块级 `db`/`all`）反查 PRAGMA，
+  //   剔除 C1 新增 14 列。只保留 name+type（不复刻 NOT NULL/DEFAULT/CHECK——本测试焦点是"ALTER 能否补齐
+  //   新列"，不是"旧列约束保不保真"；但 NOT NULL/DEFAULT 仍照抄真实值——大量既有列是 NOT NULL DEFAULT x
+  //   （如 intake_required NOT NULL DEFAULT 1，且有触发器焓死"必须为 1"），若丢掉 DEFAULT 会让下方"旧式
+  //   INSERT 不带新列"这一步在触碰新列之前就先撞别的 NOT NULL/触发器错误，反而测不到本测试真正要测的东西。
+  //   唯独不复刻 CHECK——PRAGMA table_info 本就不暴露逐列 CHECK 表达式，天然只剩 NOT NULL/DEFAULT 两项，
+  //   这恰好是"旧列约束保真度"里对本测试而言唯一相关的两项，其余（CHECK 逐条正确性）已由 [1]-[9h] 覆盖。
+  const realCols = await all('PRAGMA table_info(sys_issues)');
+  const oldColDefs = realCols
+    .filter(c => c.name !== 'id' && !LIAISON_TEST_COLS_EXPECT_LOCAL.includes(c.name))
+    .map(c => {
+      let def = `${c.name} ${c.type || 'TEXT'}`;
+      if (c.notnull) def += ' NOT NULL';
+      // dflt_value 统一包一层括号——PRAGMA table_info 对函数式默认值（如 created_at 的
+      // datetime('now','localtime')）回报时会**丢掉原 DDL 里的外层括号**，直接拼回 CREATE TABLE
+      // 对函数调用类默认值是语法错误（"DEFAULT expr" 里非字面量表达式必须加括号）；对普通字面量
+      // （'0'/"'not_sent'"）额外包一层括号 SQLite 同样接受，故统一处理不用分情况判断是否为函数调用。
+      if (c.dflt_value !== null && c.dflt_value !== undefined) def += ` DEFAULT (${c.dflt_value})`;
+      return def;
+    });
+  await runOld(`CREATE TABLE sys_issues (id INTEGER PRIMARY KEY AUTOINCREMENT, ${oldColDefs.join(', ')})`);
+
+  // 其余表：手写"完整列集"建表（同本文件 verifyDevAssigneesGuardAlignment 的 mkComplete 一贯写法），配合
+  //   stubMissingRequiredTables 补全 SYS_REQUIRED_TABLES 里剩余的表（只需过 [1] 表存在性，本测试焦点在
+  //   sys_issues 的 ALTER 行为，不在其余表）。
+  await runOld(`CREATE TABLE sys_releases (id INTEGER PRIMARY KEY, release_no TEXT, status TEXT, is_hotfix INTEGER, release_note TEXT, version_tag TEXT, release_type TEXT)`);
+  await runOld(`CREATE TABLE sys_issue_timeline (id INTEGER PRIMARY KEY, event_type TEXT, from_status TEXT, to_status TEXT, action_code TEXT, ref_id INTEGER, round_no INTEGER)`);
+  await runOld(`CREATE TABLE sys_issue_attachments (id INTEGER PRIMARY KEY, attachment_type TEXT, round_no INTEGER, status TEXT)`);
+  await runOld(`CREATE TABLE sys_issue_dev_assignees (id INTEGER PRIMARY KEY, issue_id INTEGER, user_id INTEGER, user_name TEXT, is_primary INTEGER, notify_status TEXT, notified_at DATETIME, read_at DATETIME, notify_message_key TEXT, notify_error TEXT, removed_at DATETIME, notify_sent_by INTEGER, dev_status TEXT, resolved_at TEXT, no_code_reason TEXT, superseded_by INTEGER)`);
+  // sys_schema_migrations 须带真实结构（migration_key PRIMARY KEY）——[1a-6] C1 受理与排期改造迁移段会
+  //   SELECT migration_key 判幂等，通用 stubMissingRequiredTables 的最小桩 (id INTEGER PRIMARY KEY) 没有
+  //   这一列，会在迁移中途撞 no such column（同其余 fixture 的 sys_schema_migrations 显式建表先例）。
+  await runOld(`CREATE TABLE sys_schema_migrations (migration_key TEXT PRIMARY KEY, applied_at TEXT NOT NULL)`);
+  // ⚠️ 其余 C0/C2a 表（dev_commits/dev_events/release_commit_snapshots/delete_audit/duty_roster）仍走
+  //   stubMissingRequiredTables 的最小桩（仅 id 列）——本 fixture 焦点是 sys_issues 的 ALTER 行为，不是
+  //   让全库整体 ready=true（那需要手写另外 5 张表的完整列集，纯属无关本测试目的的额外表面，同本文件
+  //   verifyMissingColLib/verifyDevAssigneesGuardAlignment 一贯"只完整化焦点表、其余最小桩"的做法）。
+  await stubMissingRequiredTables(runOld, modOld);
+
+  await modOld._internals.runSysMigration(null);
+  const stOld = modOld._internals.SYS_SCHEMA_STATE;
+  // 不要求整体 ready=true（上面已注明其余表故意留最小桩，必然会在最终 [2] 复查报缺列）；改为更精确的
+  // 断言：若 ready=false，错误信息**不应**指向 sys_issues 或本次新增的任一 liaison_test/estimated_effort_days/
+  // risk_level 列——这样才能确认"我们的 ALTER 没有失败"，而非放过一个被其他表错误掩盖的真回归。
+  if (!stOld.ready) {
+    assert.ok(!/sys_issues 关键列缺失|liaison_test_|estimated_effort_days|risk_level/.test(stOld.error || ''),
+      `旧库整体 ready=false 是预期的（其余表故意最小桩），但错误信息不应指向 sys_issues 或本次新增列，实际 error=${stOld.error}`);
+  }
+
+  // PRAGMA 校验 14 列全到位 + 三 NOT NULL DEFAULT 列元数据（同 [9h-meta] 口径，验证 ALTER 路径元数据与
+  //   CREATE 路径一致——notnull/dflt_value 两条路径必须相同，唯独 CHECK 不同，见下方反向探针）。
+  const afterCols = await allOld('PRAGMA table_info(sys_issues)');
+  const afterColsByName = new Map(afterCols.map(c => [c.name, c]));
+  const missAfterAlter = LIAISON_TEST_COLS_EXPECT_LOCAL.filter(c => !afterColsByName.has(c));
+  assert.strictEqual(missAfterAlter.length, 0, `旧库 ALTER 后仍缺列: ${missAfterAlter.join(',')}`);
+  for (const [col, expect] of Object.entries(NOT_NULL_DEFAULT_COLS_EXPECT_LOCAL)) {
+    const info = afterColsByName.get(col);
+    assert.strictEqual(info.notnull, 1, `ALTER 路径 ${col} 应 notnull=1，实际 ${info.notnull}`);
+    assert.strictEqual(info.dflt_value, expect.dflt_value, `ALTER 路径 ${col} dflt_value 应为 ${expect.dflt_value}，实际 ${info.dflt_value}`);
+  }
+
+  // 一次不带新列的旧式 INSERT 成功且默认值归位（证明 ALTER 补的 NOT NULL DEFAULT 列对"旧式写入口"透明生效，
+  //   旧代码不用改一行就能继续插入）。
+  await runOld(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name) VALUES ('feature', '开发中', 't-old-style', 'BMS', 1, 'admin')`);
+  const oldStyleRow = await getOld(`SELECT liaison_test_cycle_no, liaison_test_notify_cycle_no, liaison_test_notify_status, estimated_effort_days, risk_level FROM sys_issues WHERE title='t-old-style'`);
+  assert.strictEqual(oldStyleRow.liaison_test_cycle_no, 0, '旧式 INSERT（不带新列）liaison_test_cycle_no 应走 ALTER DEFAULT 归位为 0');
+  assert.strictEqual(oldStyleRow.liaison_test_notify_cycle_no, 0, '旧式 INSERT liaison_test_notify_cycle_no 应走 ALTER DEFAULT 归位为 0');
+  assert.strictEqual(oldStyleRow.liaison_test_notify_status, 'not_sent', '旧式 INSERT liaison_test_notify_status 应走 ALTER DEFAULT 归位为 not_sent');
+  assert.strictEqual(oldStyleRow.estimated_effort_days, null, '旧式 INSERT estimated_effort_days 应为 NULL（无 DEFAULT）');
+  assert.strictEqual(oldStyleRow.risk_level, null, '旧式 INSERT risk_level 应为 NULL（无 DEFAULT）');
+
+  // ⚠️ 显式反向探针（**2026-08-06 部署 dry-run 后语义反转**）：原断言=「ALTER 路径无 CHECK 是已知预期
+  //   差异，脏值应插入成功」——c58af0c 给 risk_level ALTER 定义补上与 CREATE 同款 CHECK 后（生产真实
+  //   样本 dry-run 抓获的「两套语义」第三实例），该差异已消除，本探针随之反转：ALTER 路径与 CREATE
+  //   路径**同样拒绝**非法值（两条建列路径约束语义一致=292-M1/dry-run 修复链的最终目标态）。
+  await assert.rejects(
+    runOld(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name, risk_level) VALUES ('feature', '待受理', 't-old-style-no-check', 'BMS', 1, 'admin', 'gao')`),
+    /CHECK/i,
+    '旧库 ALTER 路径插入 risk_level=非法值"gao"应被 CHECK 拒绝（c58af0c 补齐后两路径约束语义一致）');
+
+  ok('⭐ [codex 267 号 M-3+c58af0c 反转] 旧库 ALTER 迁移回归：构造"缺 C1 14 新列"的旧版 sys_issues（其余列从真实 schema PRAGMA 派生，防手写清单漂移）→ runSysMigration 幂等 ALTER 后 14 列全到位 + 三 NOT NULL DEFAULT 列元数据与 CREATE 路径一致 → 旧式 INSERT 默认值正确归位 → 反向探针证实 ALTER 路径与 CREATE 路径**同样拒绝**非法 risk_level（两路径约束语义一致·部署 dry-run 修复后的目标态）');
+  dbOld.close();
 }
 
 main().catch(e => { console.error('\n[失败]', e.message, e.stack); db.close(); process.exit(1); });

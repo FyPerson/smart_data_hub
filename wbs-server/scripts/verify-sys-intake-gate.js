@@ -15,6 +15,8 @@
 //   [R] resubmit-intake 契约：原子恢复 intake=1 + status=待受理 + **tech_lead_* 九列整组归零**
 //       （只清 id/name 会留下"无负责人却有通知记录"，且旧轮次在途通知回写会靠 request_event_id 命中新轮次）
 //   [G] 受理门闭环：待受理 → intake-accept → 待指派/待处理（三类型落态与旧建单落态逐字一致）
+//   [H] 工期对接测试与风险等级拆分 方案 v1.1 §3.4·C5：risk_level 受理闸门——feature 必填闸(必填/非法值/
+//       合法三值) + improvement/bug 传值拒(409)/不传仍放行 + 原子性直证 + 存量单合法空读回
 'use strict';
 const assert = require('assert');
 const fs = require('fs');
@@ -281,7 +283,9 @@ async function main() {
       assert.strictEqual(row.intake_required, 1, `⭐ ${type} derive INSERT 显式落 intake_required=1（列 DEFAULT 0·漏列会造矛盾单）`);
       assert.strictEqual(row.oa_number, null, `${type} derive 新单 oa_number 为 NULL（派生单同样尚未走 OA）`);
       // 矛盾单哨兵：派生单必须真能被受理（若 ir=0 会被受理门不变量 409 卡死）
-      const acc = await call('POST', `/api/sys-issues/${r.body.id}/intake-accept`, liaisonTok, {});
+      // [工期对接测试与风险等级拆分 方案 v1.1 §3.4·C5] feature 受理必带 risk_level（否则 400
+      // RISK_LEVEL_REQUIRED）——本组关心的是"能否受理成功"，非风险等级本身，传合法值即可。
+      const acc = await call('POST', `/api/sys-issues/${r.body.id}/intake-accept`, liaisonTok, (type === 'feature' || type === 'improvement') ? { risk_level: '二级' } : {});
       assert.strictEqual(acc.status, 200, `${type} 派生单可被受理 200, got ${acc.status} ${JSON.stringify(acc.body)}`);
       assert.strictEqual(acc.body.status, want.afterIntake, `${type} 派生单受理后 → ${want.afterIntake}`);
     }
@@ -311,7 +315,9 @@ async function main() {
       assertCleared(row, TECH_LEAD_COLS, 'tech_lead_notify_status', `${label} reactivate 清 tech_lead_*`);
       assertCleared(row, RELAY_COLS, 'relay_notify_status', `${label} reactivate 清 relay_*`);
       // 自愈证明：恢复后能真正走完前段（ir=0 脏单若不置 1 会在受理那步 409）
-      const acc = await call('POST', `/api/sys-issues/${id}/intake-accept`, liaisonTok, {});
+      // [工期对接测试与风险等级拆分 方案 v1.1 §3.4·C5] 本组夹具恒 type='feature'（见上方 INSERT），
+      // 受理必带 risk_level。
+      const acc = await call('POST', `/api/sys-issues/${id}/intake-accept`, liaisonTok, { risk_level: '二级' });
       assert.strictEqual(acc.status, 200, `${label} 恢复后可被受理 200, got ${acc.status} ${JSON.stringify(acc.body)}`);
     }
     ok('[C3] reactivate 变更流恒回「待受理」（v2.1：C2.5 撤销）+ 同事务 intake_required=1 + tech_lead_*九列/relay_*七列 整组清空（ir=0 脏单自愈·恢复后可直接受理）');
@@ -521,11 +527,207 @@ async function main() {
     for (const [type, want] of [['feature', '待指派'], ['improvement', '待指派'], ['bug', '待处理']]) {
       const c = await create({ type });
       // ⭐ v2.1（C2.5 撤销）：三类型建单均直落「待受理」，受理门是唯一必经关口，无需预沟通中转。
-      const acc = await call('POST', `/api/sys-issues/${c.body.id}/intake-accept`, liaisonTok, {});
+      // [工期对接测试与风险等级拆分 方案 v1.1 §3.4·C5] feature 受理必带 risk_level（否则 400 RISK_LEVEL_REQUIRED）。
+      const acc = await call('POST', `/api/sys-issues/${c.body.id}/intake-accept`, liaisonTok, (type === 'feature' || type === 'improvement') ? { risk_level: '二级' } : {});
       assert.strictEqual(acc.status, 200, `${type} 受理 200, got ${acc.status} ${JSON.stringify(acc.body)}`);
       assert.strictEqual(acc.body.status, want, `${type} 受理通过 → ${want}（与 C0 前建单落态逐字一致）`);
     }
     ok('[G] 受理门闭环：三类型 受理通过 → 待指派/待指派/待处理（与 C0 前建单落态一致·下游流程零改动）');
+  }
+
+  // ═══ [H] 工期对接测试与风险等级拆分 方案 v1.1 §3.4·C5：risk_level 受理闸门 ═══
+  //   唯一写点=intake_accept（与 status 同一 UPDATE 原子落库）。⭐ 用户拍板批1改造A+B（2026-08-06）：
+  //   值域「高/中/低」全仓改名为「一级/二级/三级」（语义不变仅文案换）；必填面从"仅 feature"扩到
+  //   "feature+improvement"，bug 恒 NULL 传值即拒；合法空=存量单/bug（受理发生在该列诞生前，或
+  //   bug 类型本不适用）；不做补填端点。
+  {
+    // [H-1] 必填缺失：feature 缺 risk_level → 400 RISK_LEVEL_REQUIRED，零副作用
+    {
+      const c = await create({ type: 'feature', title: 'RISK-必填缺失' });
+      const r = await call('POST', `/api/sys-issues/${c.body.id}/intake-accept`, liaisonTok, {});
+      assert.strictEqual(r.status, 400, `feature 缺 risk_level 应 400，实际 ${r.status} ${JSON.stringify(r.body)}`);
+      assert.strictEqual(r.body.code, 'RISK_LEVEL_REQUIRED', `错误码应 RISK_LEVEL_REQUIRED，实际 ${JSON.stringify(r.body)}`);
+      const row = await get('SELECT status, risk_level FROM sys_issues WHERE id=?', [c.body.id]);
+      assert.strictEqual(row.status, '待受理', '缺 risk_level 拒绝后状态不变（仍待受理）');
+      assert.strictEqual(row.risk_level, null, '缺 risk_level 拒绝后 risk_level 仍 NULL（零副作用）');
+      ok('[H-1] feature 受理缺 risk_level → 400 RISK_LEVEL_REQUIRED，零副作用（status/risk_level 均未变）');
+    }
+    // [H-2] 非法值：feature risk_level='超高'（不在枚举内）→ 400 RISK_LEVEL_INVALID，零副作用
+    {
+      const c = await create({ type: 'feature', title: 'RISK-非法值' });
+      const r = await call('POST', `/api/sys-issues/${c.body.id}/intake-accept`, liaisonTok, { risk_level: '超高' });
+      assert.strictEqual(r.status, 400, `feature 非法 risk_level 应 400，实际 ${r.status} ${JSON.stringify(r.body)}`);
+      assert.strictEqual(r.body.code, 'RISK_LEVEL_INVALID', `错误码应 RISK_LEVEL_INVALID，实际 ${JSON.stringify(r.body)}`);
+      const row = await get('SELECT status, risk_level FROM sys_issues WHERE id=?', [c.body.id]);
+      assert.strictEqual(row.status, '待受理', '非法 risk_level 拒绝后状态不变');
+      assert.strictEqual(row.risk_level, null, '非法 risk_level 拒绝后 risk_level 仍 NULL');
+      ok('[H-2] feature 受理 risk_level 非法值（"超高"不在枚举内）→ 400 RISK_LEVEL_INVALID，零副作用');
+    }
+    // [H-2b·改造A新增] 旧值域残留：feature risk_level='高'（值域改名前的旧合法值，现已非法）→ 400
+    //   RISK_LEVEL_INVALID——防"改名只改了枚举列表没改判定逻辑"这类半成品回归（红→绿证据见交付报告：
+    //   改造A之前本断言应 200，本轮生效后必须 400）。
+    {
+      const c = await create({ type: 'feature', title: 'RISK-旧值域残留' });
+      const r = await call('POST', `/api/sys-issues/${c.body.id}/intake-accept`, liaisonTok, { risk_level: '高' });
+      assert.strictEqual(r.status, 400, `feature 传旧值域"高"应 400（值域已改名），实际 ${r.status} ${JSON.stringify(r.body)}`);
+      assert.strictEqual(r.body.code, 'RISK_LEVEL_INVALID', `错误码应 RISK_LEVEL_INVALID，实际 ${JSON.stringify(r.body)}`);
+      ok('[H-2b] 改造A：旧值域"高"已非法（值域改名为一级/二级/三级后，旧值不再被接受）→ 400 RISK_LEVEL_INVALID');
+    }
+    // [H-3] 合法三值：一级/二级/三级 各一 → 200，落库精确值（改造A：原「高/中/低」全仓改名）
+    {
+      for (const lvl of ['一级', '二级', '三级']) {
+        const c = await create({ type: 'feature', title: `RISK-合法值-${lvl}` });
+        const r = await call('POST', `/api/sys-issues/${c.body.id}/intake-accept`, liaisonTok, { risk_level: lvl });
+        assert.strictEqual(r.status, 200, `risk_level='${lvl}' 应 200，实际 ${r.status} ${JSON.stringify(r.body)}`);
+        const row = await get('SELECT status, risk_level FROM sys_issues WHERE id=?', [c.body.id]);
+        assert.strictEqual(row.status, '待指派', `risk_level='${lvl}' 受理后落待指派`);
+        assert.strictEqual(row.risk_level, lvl, `risk_level='${lvl}' 精确落库`);
+      }
+      ok('[H-3] feature 受理合法三值（一级/二级/三级）各自 200 + 精确落库（改造A值域改名）');
+    }
+    // [H-4·改造B反转] 原口径"improvement/bug 传 risk_level 均 409"已废止——新口径：bug 独占拒绝分支
+    //   （传值 409 RISK_LEVEL_NOT_APPLICABLE，零副作用；不传值仍可正常受理成功，risk_level 恒 NULL，
+    //   回归防线不变）；improvement 与 feature 对齐为必填（缺失 400 RISK_LEVEL_REQUIRED；传合法值 200
+    //   精确落库，同构 H-1/H-3）。红→绿证据见交付报告：改造B之前 improvement 传值段应 409（本轮起
+    //   改为 200 精确落库）、improvement 缺失段此前无此断言（新增，改造B之前该请求本会 200 且
+    //   risk_level 恒 NULL，现在应 400）。
+    {
+      // ① bug：独占"非适用类型拒绝+自愈"路径（原 H-4 逻辑收窄到仅此一个类型）
+      {
+        const c = await create({ type: 'bug', title: 'RISK-非适用拒绝-bug' });
+        const r = await call('POST', `/api/sys-issues/${c.body.id}/intake-accept`, liaisonTok, { risk_level: '一级' });
+        assert.strictEqual(r.status, 409, `bug 传 risk_level 应 409，实际 ${r.status} ${JSON.stringify(r.body)}`);
+        assert.strictEqual(r.body.code, 'RISK_LEVEL_NOT_APPLICABLE', 'bug 错误码应 RISK_LEVEL_NOT_APPLICABLE');
+        const row0 = await get('SELECT status, risk_level FROM sys_issues WHERE id=?', [c.body.id]);
+        assert.strictEqual(row0.status, '待受理', 'bug 传 risk_level 拒绝后状态不变');
+        assert.strictEqual(row0.risk_level, null, 'bug 传 risk_level 拒绝后 risk_level 仍 NULL');
+        const r2 = await call('POST', `/api/sys-issues/${c.body.id}/intake-accept`, liaisonTok, {});
+        assert.strictEqual(r2.status, 200, `bug 不传 risk_level 应正常 200，实际 ${r2.status} ${JSON.stringify(r2.body)}`);
+        const row1 = await get('SELECT status, risk_level FROM sys_issues WHERE id=?', [c.body.id]);
+        assert.strictEqual(row1.status, '待处理', 'bug 受理后落「待处理」');
+        assert.strictEqual(row1.risk_level, null, 'bug 受理后 risk_level 恒 NULL');
+      }
+      // ②【反转】improvement：与 feature 对齐必填——缺失 400 RISK_LEVEL_REQUIRED
+      {
+        const c = await create({ type: 'improvement', title: 'RISK-improvement必填缺失' });
+        const r = await call('POST', `/api/sys-issues/${c.body.id}/intake-accept`, liaisonTok, {});
+        assert.strictEqual(r.status, 400, `【反转】improvement 缺 risk_level 应 400（改造B前本请求应 200），实际 ${r.status} ${JSON.stringify(r.body)}`);
+        assert.strictEqual(r.body.code, 'RISK_LEVEL_REQUIRED', `【反转】错误码应 RISK_LEVEL_REQUIRED，实际 ${JSON.stringify(r.body)}`);
+        const row = await get('SELECT status, risk_level FROM sys_issues WHERE id=?', [c.body.id]);
+        assert.strictEqual(row.status, '待受理', 'improvement 缺 risk_level 拒绝后状态不变（仍待受理）');
+        assert.strictEqual(row.risk_level, null, 'improvement 缺 risk_level 拒绝后 risk_level 仍 NULL');
+      }
+      // ②'【反转】improvement：传合法值 → 200 精确落库（改造B前本请求应 409 RISK_LEVEL_NOT_APPLICABLE）
+      {
+        const c = await create({ type: 'improvement', title: 'RISK-improvement合法值' });
+        const r = await call('POST', `/api/sys-issues/${c.body.id}/intake-accept`, liaisonTok, { risk_level: '二级' });
+        assert.strictEqual(r.status, 200, `【反转】improvement 传合法值应 200（改造B前本请求应 409），实际 ${r.status} ${JSON.stringify(r.body)}`);
+        const row = await get('SELECT status, risk_level FROM sys_issues WHERE id=?', [c.body.id]);
+        assert.strictEqual(row.status, '待指派', 'improvement 受理后落「待指派」');
+        assert.strictEqual(row.risk_level, '二级', '【反转】improvement risk_level 精确落库（不再恒 NULL）');
+      }
+      // ②''【290 号 L2 收口】improvement：null/空串/纯空白三种"看似未填"的输入分类核实——
+      //   riskProvided 判据只精确匹配 `undefined`/`null`/`''` 三个字面量（index.js :2857），纯空白
+      //   字符串（如 '   '）**不匹配空串字面量**，riskProvided 会判 true（"确实传了值"），随后
+      //   riskTrim=''.trim() 不在三个合法值内 → 走 RISK_LEVEL_INVALID 分支，非 REQUIRED。这不是疏漏：
+      //   riskProvided 判的是"请求体这个键是否有意义地出现过"（null/undefined/'' 三态明确表达"未填"），
+      //   纯空白属于"填了但内容非法"，与合法值枚举校验同一分支处理更准确——若归为 REQUIRED 反而会让
+      //   "客户端传了一坨空格"和"客户端压根没传这个字段"在错误码上无法区分，掩盖真实的调用方问题。
+      //   本组先实测锁定该分类，断言文案写明依据（非猜测代码行为）。
+      {
+        for (const [label, val] of [['null', null], ['空串', '']]) {
+          const c = await create({ type: 'improvement', title: `RISK-improvement传${label}` });
+          const r = await call('POST', `/api/sys-issues/${c.body.id}/intake-accept`, liaisonTok, { risk_level: val });
+          assert.strictEqual(r.status, 400, `improvement 传 risk_level=${label} 应 400，实际 ${r.status} ${JSON.stringify(r.body)}`);
+          assert.strictEqual(r.body.code, 'RISK_LEVEL_REQUIRED', `improvement 传 risk_level=${label} 应判"未提供"，错误码 RISK_LEVEL_REQUIRED，实际 ${JSON.stringify(r.body)}`);
+        }
+        const cWs = await create({ type: 'improvement', title: 'RISK-improvement传纯空白' });
+        const rWs = await call('POST', `/api/sys-issues/${cWs.body.id}/intake-accept`, liaisonTok, { risk_level: '   ' });
+        assert.strictEqual(rWs.status, 400, `improvement 传纯空白 risk_level 应 400，实际 ${rWs.status} ${JSON.stringify(rWs.body)}`);
+        assert.strictEqual(rWs.body.code, 'RISK_LEVEL_INVALID', `⭐ improvement 传纯空白 risk_level 判"已提供但非法值"，错误码 RISK_LEVEL_INVALID（非 REQUIRED——riskProvided 只精确匹配 null/undefined/''三态，纯空白不落入"未提供"分支，见上方注释分类依据），实际 ${JSON.stringify(rWs.body)}`);
+        const rowWs = await get('SELECT status, risk_level FROM sys_issues WHERE id=?', [cWs.body.id]);
+        assert.strictEqual(rowWs.status, '待受理', 'improvement 传纯空白拒绝后状态不变');
+        assert.strictEqual(rowWs.risk_level, null, 'improvement 传纯空白拒绝后 risk_level 仍 NULL');
+        ok('[H-4②\'\'] 290 号 L2：improvement 传 null/空串 → 400 RISK_LEVEL_REQUIRED（判"未提供"）；纯空白 → 400 RISK_LEVEL_INVALID（判"已提供但非法值"，非 REQUIRED，已实测锁定该分类并写明依据）');
+      }
+      ok('[H-4 反转] 改造B：bug 传值仍 409 拒绝+不传200/NULL（原逻辑保留）；improvement 与 feature 对齐必填——缺失400 RISK_LEVEL_REQUIRED/合法值200精确落库（原「improvement 传值409」断言已反转为必填通过）');
+    }
+    // [H-5] 原子性直证：同一 UPDATE——注入 timeline 写入失败，risk_level 应随 status 一并回滚（复用文件头
+    //   部 [ATOM] 组同款 injectFailureOnSql/injectFailureFired 机制，dbRunAsync 已全局接管为 runFI）。
+    {
+      const c = await create({ type: 'feature', title: 'RISK-原子性' });
+      injectFailureFired = false;
+      injectFailureOnSql = 'INSERT INTO sys_issue_timeline';
+      const r = await call('POST', `/api/sys-issues/${c.body.id}/intake-accept`, liaisonTok, { risk_level: '一级' });
+      assert.strictEqual(r.status, 500, `注入故障应 500，实际 ${r.status} ${JSON.stringify(r.body)}`);
+      assert.ok(injectFailureFired, '确认故障真实命中（防注入点写错致测试静默失效）');
+      injectFailureOnSql = null; injectFailureFired = false;
+      const row = await get('SELECT status, risk_level FROM sys_issues WHERE id=?', [c.body.id]);
+      assert.strictEqual(row.status, '待受理', '⭐ 原子性：timeline 写入失败 → status 回滚（未提前到待指派）');
+      assert.strictEqual(row.risk_level, null, '⭐ 原子性：risk_level 随 status 同一 UPDATE 回滚（未落半成品）');
+      ok('[H-5] 原子性直证：intake_accept 注入 timeline 写入失败 → status 与 risk_level 一并回滚到受理前值（同一事务，非分两次写）');
+    }
+    // [H-6] 存量单合法空：历史单直接落在受理之后的状态、risk_level=NULL（模拟"受理发生在该列诞生前"），
+    //   读回应保持 NULL 且不因该字段缺失影响其后续正常操作（不做补填端点，方案明确）。
+    {
+      const ins = await run(`INSERT INTO sys_issues (type, status, priority, title, system_name, source, intake_required, created_by, created_by_name, record_source)
+        VALUES ('feature','待指派','P2','RISK-存量单合法空','BMS','内部',1,1,'管理员','native')`);
+      const legacyId = ins.lastID;
+      const row = await get('SELECT status, risk_level FROM sys_issues WHERE id=?', [legacyId]);
+      assert.strictEqual(row.status, '待指派', '存量单前置：status=待指派（已过受理段）');
+      assert.strictEqual(row.risk_level, null, '存量单 risk_level 合法为 NULL（受理发生在该列诞生前，无补填端点·方案明确）');
+      const r = await call('POST', `/api/sys-issues/${legacyId}/set-oa-number`, adminTok, { oa_number: '2026080088' });
+      assert.strictEqual(r.status, 200, `存量单后续操作（补填 OA 号）不受 risk_level=NULL 影响，应 200，实际 ${r.status} ${JSON.stringify(r.body)}`);
+      ok('[H-6] 存量单合法空：risk_level=NULL 的历史单读回正确 + 不影响其后续正常写操作（无补填端点·方案明确）');
+    }
+
+    // [H-7·改造B收窄为仅 bug] 284 号 M-1 自愈版：原覆盖 improvement+bug 两个"非 feature"类型的脏值
+    //   自愈行为，改造B后 improvement 已转为必填存储类型（正常受理即写入用户传的合法值，不再有"自愈
+    //   清零"这回事——脏值场景下 improvement 现在的正确行为是"必须传新的合法值才能受理成功"，与
+    //   feature 完全同构，不再是本组"非适用类型自愈"要验的东西）。自愈行为现唯一适用于 bug——本条与
+    //   下方 H-7b 分别用两个不同的历史脏值（一级/三级）覆盖，非重复。红→绿证据见交付报告（临时改回
+    //   no-op 复现红灯）。
+    {
+      const c = await create({ type: 'bug', title: 'RISK-bug脏值自愈-一' });
+      await run(`UPDATE sys_issues SET risk_level='一级' WHERE id=?`, [c.body.id]);   // 模拟脏写（绕过正常受理写点）
+      const before = await get('SELECT risk_level FROM sys_issues WHERE id=?', [c.body.id]);
+      assert.strictEqual(before.risk_level, '一级', '前置：脏值确已写入（否则下方"自愈"断言无意义）');
+      const r = await call('POST', `/api/sys-issues/${c.body.id}/intake-accept`, liaisonTok, {});
+      assert.strictEqual(r.status, 200, `bug 带脏 risk_level 受理仍应 200，实际 ${r.status} ${JSON.stringify(r.body)}`);
+      const row = await get('SELECT status, risk_level FROM sys_issues WHERE id=?', [c.body.id]);
+      assert.strictEqual(row.status, '待处理', 'bug 受理后落待处理');
+      assert.strictEqual(row.risk_level, null, '⭐ 284 号 A1：受理成功路径自愈——脏值 risk_level 被唯一写点显式清零为 NULL');
+      ok('[H-7] 284 号 A1 自愈版（改造B后收窄为仅 bug）：bug 单带脏 risk_level（模拟历史手工 SQL/导入）受理成功后被唯一写点显式清零');
+    }
+
+    // [H-7b] 284 号 B4：同为 bug 侧但用另一个历史脏值（三级），双例互证自愈行为不依赖具体脏值内容。
+    {
+      const c = await create({ type: 'bug', title: 'RISK-bug脏值自愈-三' });
+      await run(`UPDATE sys_issues SET risk_level='三级' WHERE id=?`, [c.body.id]);   // 模拟脏写
+      const before = await get('SELECT risk_level FROM sys_issues WHERE id=?', [c.body.id]);
+      assert.strictEqual(before.risk_level, '三级', '前置：脏值确已写入（否则下方"自愈"断言无意义）');
+      const r = await call('POST', `/api/sys-issues/${c.body.id}/intake-accept`, liaisonTok, {});
+      assert.strictEqual(r.status, 200, `bug 带脏 risk_level 受理仍应 200，实际 ${r.status} ${JSON.stringify(r.body)}`);
+      const row = await get('SELECT status, risk_level FROM sys_issues WHERE id=?', [c.body.id]);
+      assert.strictEqual(row.status, '待处理', 'bug 受理后落待处理');
+      assert.strictEqual(row.risk_level, null, '⭐ 284 号 B4：bug 侧同样自愈——脏值 risk_level 被唯一写点显式清零为 NULL');
+      ok('[H-7b] 284 号 B4（改造B后与 H-7 同为 bug，换一个脏值互证）：bug 单带脏 risk_level 受理成功后同样被唯一写点显式清零');
+    }
+
+    // [H-8] 284 号 L-1 语义固化：bug 传 null/空串 = 未提供（宽松语义，有意为之），正常受理 200，
+    //   risk_level 仍 NULL——不误判为「传了非法值」而 409。⭐ 改造B后本条宽松语义仅适用于 bug——
+    //   improvement 已转必填，null/空串在 improvement 上会被判"未提供"走 H-4② 的必填缺失分支（400）。
+    {
+      for (const [label, val] of [['null', null], ['空串', '']]) {
+        const c = await create({ type: 'bug', title: `RISK-bug传${label}` });
+        const r = await call('POST', `/api/sys-issues/${c.body.id}/intake-accept`, liaisonTok, { risk_level: val });
+        assert.strictEqual(r.status, 200, `bug 传 risk_level=${label} 应视为未传，正常 200，实际 ${r.status} ${JSON.stringify(r.body)}`);
+        const row = await get('SELECT status, risk_level FROM sys_issues WHERE id=?', [c.body.id]);
+        assert.strictEqual(row.status, '待处理', `bug 传 risk_level=${label} 受理后落待处理`);
+        assert.strictEqual(row.risk_level, null, `bug 传 risk_level=${label} 受理后 risk_level 仍 NULL`);
+      }
+      ok('[H-8] 284 号 A4（改造B后现只适用 bug）：bug 传 risk_level=null/空串 均视为「未提供」（宽松语义）→ 正常 200 受理，非误判为「传了非法值」拒绝');
+    }
   }
 
   // ═══ [SCOPE] 契约版本闸的**适用范围**固化（codex C0 复审 HIGH-1）═══

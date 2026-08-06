@@ -238,7 +238,7 @@ async function main() {
     r = await call('POST', `/api/sys-issues/${id3b}/resume`, adminTok, { reason: '[3b] 真实链路重启' });
     assert.strictEqual(r.status, 200, `[3b]：resume 200, got ${r.status} ${JSON.stringify(r.body)}`);
     assert.strictEqual(r.body.status, '处理中', '[3b]：resume 落处理中');
-    r = await call('POST', `/api/sys-issues/${id3b}/submit`, devTok(5), { mode: 'no_code', no_code_reason: '[3b] 真实链路提交（占位理由）' });
+    r = await call('POST', `/api/sys-issues/${id3b}/submit`, devTok(5), { mode: 'no_code', no_code_reason: '[3b] 真实链路提交（占位理由）', self_tested: true, test_env_deployed: true });
     assert.strictEqual(r.status, 200, `[3b]：submit 应 200, got ${r.status} ${JSON.stringify(r.body)}`);
     assert.strictEqual(r.body.main_status, '待验证', '[3b]：唯一在册开发全完成 → W-GATE 自动转待验证');
     r = await call('POST', `/api/sys-issues/${id3b}/return`, adminTok, { reason: '[3b] 真实链路打回' });

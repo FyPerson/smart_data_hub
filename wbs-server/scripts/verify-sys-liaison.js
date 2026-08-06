@@ -111,7 +111,8 @@ async function createFeatureAssignable() {
   assert.strictEqual(r.status, 201, '建 feature 单 201, got ' + r.status + ' ' + JSON.stringify(r.body));
   const id = r.body.id;
   // ⭐ 角色权限重构 C2.5 撤销（v2.1）：变更流建单直落「待受理」，无需再走预沟通段。
-  const acc = await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, {});
+  // [工期对接测试与风险等级拆分 方案 v1.1 §3.4·C5] feature 受理必带 risk_level。
+  const acc = await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, { risk_level: '二级' });
   assert.strictEqual(acc.status, 200, 'feature 受理 200, got ' + acc.status + ' ' + JSON.stringify(acc.body));
   // ⭐ 角色权限重构 v2.1 §4：变更流 assign 前置要求 oa_number 通过校验 → 待指派态内先补号
   //   （本 helper 名为"可指派"，把 OA 前置一并做进来，使所有调用点的 assign 测的都是"权限/状态"本身，
@@ -232,7 +233,7 @@ async function main() {
     assert.strictEqual(rAssign3.status, 200, `[P3] 夹具 assign 200, got ${rAssign3.status} ${JSON.stringify(rAssign3.body)}`);
     const rEst3 = await call('POST', `/api/sys-issues/${id3}/estimate`, devTok, { dev_estimated_at: EST });
     assert.strictEqual(rEst3.status, 200, `[P3] 夹具 estimate 200, got ${rEst3.status} ${JSON.stringify(rEst3.body)}`);
-    const rSubmit3 = await call('POST', `/api/sys-issues/${id3}/submit`, devTok, { mode: 'no_code', no_code_reason: '修复完成（占位理由）' });   // → 待验证
+    const rSubmit3 = await call('POST', `/api/sys-issues/${id3}/submit`, devTok, { mode: 'no_code', no_code_reason: '修复完成（占位理由）', self_tested: true, test_env_deployed: true });   // → 待验证
     assert.strictEqual(rSubmit3.status, 200, `[P3] 夹具 submit 200, got ${rSubmit3.status} ${JSON.stringify(rSubmit3.body)}`);
     let r3 = await call('POST', `/api/sys-issues/${id3}/accept`, liaison2Tok, {});
     assert.strictEqual(r3.status, 403, '⭐ 受理人(13) accept 应 403（验收仍属 admin·不获泛化写权限）');
@@ -437,13 +438,16 @@ async function main() {
       return r.lastID;
     };
     const actor = (id, role) => ({ id, name: `u${id}`, role });
+    // [工期对接测试与风险等级拆分 方案 v1.1 §3.4·C5] seedIntakeIssue 恒建 feature 单，intake_accept
+    // 受理必带 risk_level（否则 400 RISK_LEVEL_REQUIRED，早于本组要测的 roleGuard 之外不受影响——
+    // roleGuard 在 [3]，risk_level 校验在 [5] switch，成功路径必须两者都过）。
     // admin → 放行（待受理→待指派）
     let iid = await seedIntakeIssue();
-    let res = await I.sysIssueTransition(iid, 'intake_accept', null, actor(1, 'admin'));
+    let res = await I.sysIssueTransition(iid, 'intake_accept', null, actor(1, 'admin'), { risk_level: '二级' });
     assert.strictEqual(res.toStatus, '待指派', 'admin intake_accept → 待指派（roleGuard 放行）');
     // 示例对接人 id13 → 放行（受理人白名单·C2 放开点）
     iid = await seedIntakeIssue();
-    res = await I.sysIssueTransition(iid, 'intake_accept', null, actor(13, 'user'));
+    res = await I.sysIssueTransition(iid, 'intake_accept', null, actor(13, 'user'), { risk_level: '二级' });
     assert.strictEqual(res.toStatus, '待指派', '示例对接人(13) intake_accept → 待指派（受理白名单放行·C2 引擎放开生效）');
     // 示例发布者 id7 → 403（在 bug 名单但不在受理名单·三名单隔离铁证）
     iid = await seedIntakeIssue();

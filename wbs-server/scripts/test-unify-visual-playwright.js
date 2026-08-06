@@ -288,6 +288,10 @@ async function createFixtures(adminToken) {
             source: '内部',
             description: FX_TEXT.sysTitle,
             intake_liaison_id: 13,
+            // S3 视觉基线重拍（2026-08-05）：追平受理契约闸——角色权限重构 C0 起建单须带
+            //   intake_contract_version=2（index.js:328 SYS_INTAKE_CONTRACT_VERSION），本 harness
+            //   上次更新早于该闸上线，缺此字段整个 fixture 链 400 中止、0 张可拍。
+            intake_contract_version: 2,
         };
         const r = await apiRequest(adminToken, 'POST', '/api/sys-issues', body);
         if (r.status !== 201) throw new Error(`建系统迭代单 fixture 失败：status=${r.status} body=${(r.body || '').slice(0, 300)}`);

@@ -86,7 +86,8 @@ async function seedInProgress() {
   //   ⚠️ 本 seed 原先各步均不断言，一旦前置态错就只在最终断言处露出一个**看不懂的**结果
   //     （C2.5 编码期实测：publish 用例报 [409,409]，真因是 seed 早就断在这里）。新增步一律断言。
   // ⭐ 角色权限重构 C0：建单恒落「待受理」→ 补一步受理（→待指派）才能 assign
-  await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, {});
+  // [工期对接测试与风险等级拆分 方案 v1.1 §3.4·C5] feature 受理必带 risk_level。
+  await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, { risk_level: '二级' });
   // ⭐ 角色权限重构 v2.1 §4：变更流 assign 前置要求 oa_number 通过校验 → 待指派态内先补号。
   const oa1 = await call('POST', `/api/sys-issues/${id}/set-oa-number`, adminTok, { oa_number: '2026070001' });
   assert.strictEqual(oa1.status, 200, `夹具补 OA 号 200, got ${oa1.status} ${JSON.stringify(oa1.body)}`);
@@ -103,16 +104,22 @@ async function seedToReady() {
   const id = r.body.id;
   // ⭐ 角色权限重构 C2.5 撤销（v2.1）：变更流建单直落「待受理」，无需再走预沟通段·断言不省
   // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
-  await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, {});
+  // [工期对接测试与风险等级拆分 方案 v1.1 §3.4·C5] feature 受理必带 risk_level。
+  await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, { risk_level: '二级' });
   // ⭐ 角色权限重构 v2.1 §4：变更流 assign 前置要求 oa_number 通过校验 → 待指派态内先补号。
   r = await call('POST', `/api/sys-issues/${id}/set-oa-number`, adminTok, { oa_number: '2026070001' });
   assert.strictEqual(r.status, 200, `夹具补 OA 号 200, got ${r.status} ${JSON.stringify(r.body)}`);
   await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5 });
+  // [工期对接测试与风险等级拆分 方案 v1.1 §3.0-⑥·C4a 涟漪修复] 本文件测并发事务串行化（mutex），与
+  // 「待对接测试」段本身无关（后者由专门的 verify-sys-liaison-test.js 覆盖）。让对接人在 GATE 判定时
+  // 失效，触发 §3.0-⑥ 降级路径，使 submit 仍直落"待验证"→可立即 accept 到"待上线"——本文件其余断言
+  // 零改动，这也是方案承认的合法真实场景（非造假绕过）。
+  await run(`UPDATE sys_issues SET intake_liaison_id = 999999 WHERE id = ?`, [id]);
   // 2026-08-01 修复：同 seedInProgress，补返回值断言（原静默吞 400 会让本函数产出的"待上线"单实际上
   //   卡在开发中，症状要到下游用例才炸出）。
   r = await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: futureEst(30) });
   assert.strictEqual(r.status, 200, `夹具 seedToReady estimate 200, got ${r.status} ${JSON.stringify(r.body)}`);
-  await call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'no_code', no_code_reason: '交付完成（占位理由）' });
+  await call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'no_code', no_code_reason: '交付完成（占位理由）', self_tested: true, test_env_deployed: true });
   await call('POST', `/api/sys-issues/${id}/accept`, adminTok, {});
   return id;
 }
@@ -198,7 +205,8 @@ async function main() {
   //   （assign 前置校验，§4）——三步都串行。
   //   刻意串行：本用例测的是 **assign 并发**不产生 500，前置只是夹具，串行可排除夹具本身的并发噪音。
   for (const d of drafts) {
-    const a = await call('POST', `/api/sys-issues/${d.body.id}/intake-accept`, adminTok, {});
+    // ⭐ 用户拍板批1改造B：improvement 受理必填 risk_level（原空 body 会 400，本组夹具全是 improvement）。
+    const a = await call('POST', `/api/sys-issues/${d.body.id}/intake-accept`, adminTok, { risk_level: '二级' });
     assert.strictEqual(a.status, 200, `夹具受理 200, got ${a.status} ${JSON.stringify(a.body)}`);
     const oa = await call('POST', `/api/sys-issues/${d.body.id}/set-oa-number`, adminTok, { oa_number: '2026070001' });
     assert.strictEqual(oa.status, 200, `夹具补 OA 号 200, got ${oa.status} ${JSON.stringify(oa.body)}`);

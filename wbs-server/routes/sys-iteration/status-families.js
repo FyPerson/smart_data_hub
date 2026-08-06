@@ -58,6 +58,25 @@ const SYS_DEV_STATUSES = {
   bug: ['处理中'],
 };
 
+// ── 对接测试态（LIAISON_TEST）：feature 独有，全员提交+GATE 通过后、对接人测试验收前的态 ──────────
+//   [工期对接测试与风险等级拆分 方案 v1.0 §3.1] 独立基础族（不并入 DEV/VERIFY——花名册七写入口
+//   （add/remove/self-remove/re-add/reassign/excuse/supersede-excuse）矩阵不含 LIAISON_TEST，
+//   受理阶段天然禁成员动作 409，同 INTAKE 独立成族先例的设计动机）。**仅 feature 使用**；
+//   improvement/bug 两 key 显式给空数组（不是"故意留空以后填"——现网两类流无此态，三 key 逐一列出
+//   防遗漏，禁「等」，同 SYS_INTAKE_STATUSES/SYS_D_PRE_STATUSES 三 key 齐列惯例）。
+//   ⚠️ C0 矩阵验证清单 §D 第 2 层已提醒：族值取 `SYS_LIAISON_TEST_STATUSES.feature[0]` 这类单值族首元素
+//   写法，对 improvement/bug 会取到 `undefined`（空数组 [0] 越界）——该问题留给消费方（status-transition-
+//   guard.js 等）按 type 分支处理，是 C4 范围；本文件（C1）仅落族数据快照值，不作消费侧处理。
+//   ✅ [C4 收口] 上面这段"C1/C4 跨 commit 临时不一致"的说明已随 C4 落地过期——transitions.js 已把
+//   FEATURE_FLOW_STATUSES（拆分自原 CHANGE_FLOW_STATUSES）补上「待对接测试」，ALLOWED_STATUSES.feature
+//   与本族的 LIAISON_TEST.feature 已同源一致。verify-sys-meta.js [7] 的豁免条件（原"幽灵态仅 feature
+//   放行「待对接测试」"）已随之删除，恢复为严格相等断言——不再需要临时豁免。
+const SYS_LIAISON_TEST_STATUSES = {
+  feature: ['待对接测试'],
+  improvement: [],
+  bug: [],
+};
+
 // ── 待验证态（VERIFY）：全员完成态、等待验收 ──────────
 const SYS_VERIFY_STATUSES = {
   feature: ['待验证'],
@@ -111,6 +130,7 @@ const FAMILIES = {
   INTAKE: SYS_INTAKE_STATUSES,
   D_PRE: SYS_D_PRE_STATUSES,
   DEV: SYS_DEV_STATUSES,
+  LIAISON_TEST: SYS_LIAISON_TEST_STATUSES,
   VERIFY: SYS_VERIFY_STATUSES,
   RELEASE: SYS_RELEASE_STATUSES,
   NONRELEASE_TERMINAL: SYS_NONRELEASE_TERMINAL_STATUSES,
@@ -148,7 +168,11 @@ function getFamilyStatuses(issueType, familyName) {
 //   查不到（族外/未知 type）→ null（fail-closed，供 assertMainStatusTransition 白名单判断用）。
 //   ⚠️ 受理排期改造 §B：待受理/待修改归 INTAKE（非 null）——成员动作族矩阵不含 INTAKE → 受理阶段成员动作天然 409。
 //   （C2.5 撤销·方案 v2.1）预沟通族已随预沟通段撤销整族删除，不再是本数组成员。
-const BASE_FAMILY_NAMES = ['INTAKE', 'D_PRE', 'DEV', 'VERIFY', 'RELEASE', 'NONRELEASE_TERMINAL'];
+//   ⚠️ [工期对接测试与风险等级拆分 方案 v1.0 §3.1-2] LIAISON_TEST 插入 DEV 与 VERIFY 之间（冻结顺序，
+//   C0 矩阵验证清单 §C 提醒：这是花名册七写入口 409 走"族门"而非"未知族 fail-closed 兜底"的前提）——
+//   仅 feature 落「待对接测试」，improvement/bug 空数组，familyOfStatus 对两者查到本族恒空手继续下一族
+//   （不会误命中，也不影响原有 6 族查找顺序）。
+const BASE_FAMILY_NAMES = ['INTAKE', 'D_PRE', 'DEV', 'LIAISON_TEST', 'VERIFY', 'RELEASE', 'NONRELEASE_TERMINAL'];
 function familyOfStatus(issueType, status) {
   for (const name of BASE_FAMILY_NAMES) {
     if (isInFamily(issueType, status, name)) return name;
@@ -186,6 +210,7 @@ module.exports = {
   SYS_INTAKE_STATUSES,
   SYS_D_PRE_STATUSES,
   SYS_DEV_STATUSES,
+  SYS_LIAISON_TEST_STATUSES,
   SYS_VERIFY_STATUSES,
   SYS_RELEASE_STATUSES,
   SYS_NONRELEASE_TERMINAL_STATUSES,

@@ -92,10 +92,13 @@ function createBody(overrides = {}) {
 }
 // 建单 → 受理通过（intake-accept）→ 落「待指派」（feature/improvement）或「待处理」（bug）
 async function createAndAccept(actorTok, overrides = {}) {
-  const r = await call('POST', '/api/sys-issues', actorTok, createBody(overrides));
+  const body = createBody(overrides);
+  const r = await call('POST', '/api/sys-issues', actorTok, body);
   assert.strictEqual(r.status, 201, `建单 201, got ${r.status} ${JSON.stringify(r.body)}`);
   const id = r.body.id;
-  const acc = await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, {});
+  // [工期对接测试与风险等级拆分 方案 v1.1 §3.4·C5，⭐ 用户拍板批1改造B后订正] feature/improvement 受理必带 risk_level，bug 不带（原"仅 feature 必带、improvement/bug 均不带"口径已随改造B废止）；
+  // createBody 默认 type='feature'，overrides 可覆盖，故按最终合并后的 body.type 判定。
+  const acc = await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, (body.type === 'feature' || body.type === 'improvement') ? { risk_level: '二级' } : {});
   assert.strictEqual(acc.status, 200, `受理通过 200, got ${acc.status} ${JSON.stringify(acc.body)}`);
   return id;
 }

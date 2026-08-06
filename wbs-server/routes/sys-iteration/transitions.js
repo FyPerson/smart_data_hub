@@ -84,8 +84,16 @@ function resolveSysInitialStatusForCreate(type) {
 //   角色权限重构 C2.5：**队首加「待商议」**（预沟通段·OA 之前·仅变更流）——数组顺序即前端状态筛选/流程图展示序，
 //     新态是整条流的真实起点，必须排在「待受理」之前。
 //   角色权限重构 C2.5 撤销（方案 v2.1）：「待商议」从状态集移除——预沟通段废除，建单直落「待受理」。
-const CHANGE_FLOW_STATUSES = [
-  '待受理', '待修改', '待指派', '开发中', '待验证', '待上线', '已上线', '已关闭',  // 主流程
+// [工期对接测试与风险等级拆分 方案 v1.1 §3.1-1·C4] 状态集分裂——feature 独有「待对接测试」（全员提交+GATE
+//   通过后、对接人测试验收前的态，插在「开发中」与「待验证」之间，同 status-families.js LIAISON_TEST 族
+//   顺序），improvement 沿用原状态集不变。C0 矩阵验证清单 §F-3 钉死"拆分必须"，两 key 各自显式列出
+//   （不用共享引用别名）——同 status-families.js 文件头 :19-22 的"独立誊抄范式"，防未来两流分裂时漏改其一。
+const FEATURE_FLOW_STATUSES = [
+  '待受理', '待修改', '待指派', '开发中', '待对接测试', '待验证', '待上线', '已上线', '已关闭',  // 主流程
+  '已暂缓', '已拒绝', '已作废',                                                                  // 旁路态（§3.4）
+];
+const IMPROVEMENT_FLOW_STATUSES = [
+  '待受理', '待修改', '待指派', '开发中', '待验证', '待上线', '已上线', '已关闭',  // 主流程（无对接测试段）
   '已暂缓', '已拒绝', '已作废',                                                    // 旁路态（§3.4）
 ];
 // bug 流状态集（bug 方案 §2.2 + 受理排期改造 §4.1 + 上线体统一重构 §6.5 + bug暂缓方案 v0.4 §4.1）：加
@@ -101,8 +109,8 @@ const BUG_FLOW_STATUSES = [
   '已拒绝', '已作废',                                                     // 旁路态
 ];
 const ALLOWED_STATUSES = {
-  feature: CHANGE_FLOW_STATUSES,
-  improvement: CHANGE_FLOW_STATUSES,
+  feature: FEATURE_FLOW_STATUSES,
+  improvement: IMPROVEMENT_FLOW_STATUSES,
   bug: BUG_FLOW_STATUSES,
   // config: [...],     // TODO 追加 config 流时填（待处理→处理中→待验收→已生效，§18.2）
 };
@@ -118,7 +126,12 @@ const ALLOWED_STATUSES = {
 //   ownerGuard='assignee' 仅用于"开发本人"约束（estimate/submit 校验登录人=assigned_to，RC-M5）。
 // ⚠️ 枚举同步（05-H1 + 12-M4）：下方 timelineEvent / actionCode 必须 ⊆ DDL CHECK 枚举（index.js sys_issue_timeline），
 //   verify-sys-meta.js 加"常量 ⊆ DDL CHECK 且无幽灵值"断言。
-const CHANGE_FLOW_TRANSITIONS = [
+// [工期对接测试与风险等级拆分 方案 v1.1 §3.1-1·C4] 边集分裂——feature/improvement 原共用同一份数组引用
+//   （C0 矩阵验证清单 §F-3："拆分必须"），现各自独立成数组（同上方状态集分裂动机：feature 的 submit 边
+//   目标改为动态 GATE 解析 + 新增 liaison_test_pass/return 两条边，improvement 不受影响、原样保留）。
+//   IMPROVEMENT_FLOW_TRANSITIONS 是原 CHANGE_FLOW_TRANSITIONS 的逐字保留（除下方"新单默认
+//   intake_required=0"过时残留注释订正外，无其余改动）；FEATURE_FLOW_TRANSITIONS 见其后。
+const IMPROVEMENT_FLOW_TRANSITIONS = [
   {
     action: 'create',                       // 建单（端点 POST /sys-issues，不走 transition，单独 INSERT；此条供 meta 完整性）
     // 受理排期改造 §9：create.to 改机器契约——落态由 resolveInitialStatus(type,intake_required) 动态解析（选对接人→待受理 / 未选→待指派），
@@ -133,12 +146,17 @@ const CHANGE_FLOW_TRANSITIONS = [
   // ── （C2.5 撤销·方案 v2.1）"预沟通通过"条目已删除——预沟通段废除，OA 号改为受理后经
   //    set-oa-number 端点补填（§4-R4），变更流指派前守卫必有号 ──────────
   // ── 受理门动作（受理排期改造 §5·intake_required=1 才走）──────────
+  // ⭐ 用户拍板批1改造B（2026-08-06）：risk_level 必填面从"仅 feature"扩到"feature+improvement"——
+  //   本条目属 IMPROVEMENT_FLOW_TRANSITIONS 专属数组，requiredPayload 从 [] 改为 ['risk_level']，
+  //   与 FEATURE_FLOW_TRANSITIONS 的同名条目现已对齐（两个独立对象改一处不影响另一处，同上方数组
+  //   拆分动机注释——此前是"feature 专属能力不泄漏到 improvement"的示例之一，现该示例已不成立，
+  //   两流在 risk_level 必填这件事上重新合流；"待对接测试"段等其余 feature 专属能力不受影响）。
   {
-    action: 'intake_accept',                // 受理通过：待受理 → 待指派（对接人∨admin）
+    action: 'intake_accept',                // 受理通过：待受理 → 待指派（对接人∨admin，风险等级必填）
     from: ['待受理'], to: '待指派',
     roleGuard: 'intake_liaison', ownerGuard: null,   // 引擎侧 intake_liaison∨admin（roleGuard 语义见 index.js requireIntakeLiaison）
-    requiredPayload: [],
-    sideEffects: [],
+    requiredPayload: ['risk_level'],
+    sideEffects: ['risk_level 与 status 同一 UPDATE 原子落库'],
     timelineEvent: 'status_change', actionCode: 'intake_accept',
     notifyAfterCommit: null,
   },
@@ -254,10 +272,16 @@ const CHANGE_FLOW_TRANSITIONS = [
     notifyAfterCommit: null,
   },
   {
-    action: 'submit',                       // 提交：开发中 → 待验证（闸门 交付说明 + dev_estimated_at 非空）—— 端点 C3
+    action: 'submit',                       // 提交：开发中 → 待验证（dev_estimated_at 非空 + 提交双勾）—— 端点 C3
     from: ['开发中'], to: '待验证',
     roleGuard: null, ownerGuard: 'assignee',
-    requiredPayload: ['summary'],           // 交付说明 trim 非空 + dev_estimated_at 非空（transition 内校）
+    // [工期对接测试与风险等级拆分 方案 v1.1 §3.3·C3] 原 ['summary'] 是历史遗留字段——W05 唯一 submit
+    //   收敛（C2/C3，多开发 commit 事件模型）已把请求体收窄为 mode=no_code|commits 二选一，validateSubmitBody
+    //   的 ALLOWED_TOP_KEYS 里从未有过 'summary'，字面发送该键反而会被判"不支持的字段"拒绝——本条目此前
+    //   一直是失真的死数据（无测试锁定其值，顺手一并订正，非本次功能引入的新问题）。改列 §3.3 新增的
+    //   提交双勾（三类型通用、无条件必填，恒等 true 才能提交）；mode/no_code_reason/commits 是条件必填
+    //   （随 mode 分支），沿用 feasibility.requiredPayload 的既有惯例不列条件字段，只列无条件必填项。
+    requiredPayload: ['self_tested', 'test_env_deployed'],
     sideEffects: ['first_submitted_at（首次永不变）', 'round_no 递增 + submit timeline'],
     timelineEvent: 'submit', actionCode: null,
     notifyAfterCommit: 'notifySubmittedToAdmin',  // C5（admin 自身按需精简，feedback_no_self_notify）
@@ -411,12 +435,318 @@ const CHANGE_FLOW_TRANSITIONS = [
   },
   {
     action: 'derive',                       // 派生迭代：原单任意态 → 新建一单（admin，防环，§5.1）
-    // 受理排期改造 §9：derive 不改原单（to:null·kind='side_effect'）但**新单**落态动态解析（resolveInitialStatus·新单默认 intake_required=0）——
-    //   用 createdIssueDynamicTarget（非共用 dynamicTarget·区分目标属当前单还是新单）+ targetEntity='created_issue'。
+    // [工期对接测试与风险等级拆分 方案 v1.1 §2·C4 收口] 订正过时残留注释——原文"新单默认
+    //   intake_required=0"已不准确：受理覆盖面运行时真相核实（resolveSysInitialStatusForCreate
+    //   实现·index.js）显示普通建单/derive 派生/reactivate 复活**三入口全部**恒 INSERT
+    //   intake_required=1（受理门焊死后无绕过路径），derive 新单不例外。to:null·kind='side_effect'
+    //   （不改原单），但**新单**落态用 createdIssueDynamicTarget（非共用 dynamicTarget·区分目标属
+    //   当前单还是新单）+ targetEntity='created_issue' 动态解析——解析结果恒为「待受理」，非"默认 0"。
     from: '*', to: null, createdIssueDynamicTarget: 'initial_status', targetEntity: 'created_issue',
     roleGuard: 'admin', ownerGuard: null,
     requiredPayload: ['type', 'title', 'system_name', 'source'],  // 新单建单字段 + origin_issue_id
-    sideEffects: ['新建单 origin_issue_id=原单 id·新单默认 intake_required=0（不继承·admin 可后续 change_intake_mode）', '先写 created 再写 derive（T-L3）', '防环 M-1'],
+    sideEffects: ['新建单 origin_issue_id=原单 id·新单恒 intake_required=1（三创建入口统一走受理门，非"默认 0 可后续 change_intake_mode 打开"）', '先写 created 再写 derive（T-L3）', '防环 M-1'],
+    timelineEvent: 'derive', actionCode: null,
+    notifyAfterCommit: null,
+  },
+];
+
+// [工期对接测试与风险等级拆分 方案 v1.1 §3.1-1·C4] FEATURE_FLOW_TRANSITIONS——与 IMPROVEMENT_FLOW_TRANSITIONS
+//   逐条相同，仅两处差异：① submit 条目改为 §3.0 决策树的动态 GATE 解析契约（dynamicTarget:'w_gate' +
+//   possibleTargets，冻结·閉 255-F M-2）；② 新增 liaison_test_pass/liaison_test_return 两条边（§3.1 点5，
+//   走 sysIssueTransition 通用引擎）。两数组独立成文本（同 status-families.js"两 key 誊抄"范式），未来若
+//   improvement 也要接对接测试段，需同步补齐本文件两处差异，不会因共享引用而"改一个另一个自动跟着变"
+//   ——这正是拆分的目的：feature 专属能力不静默泄漏到 improvement。
+const FEATURE_FLOW_TRANSITIONS = [
+  {
+    action: 'create',                       // 建单（端点 POST /sys-issues，不走 transition，单独 INSERT；此条供 meta 完整性）
+    // 受理排期改造 §9：create.to 改机器契约——落态由 resolveInitialStatus(type,intake_required) 动态解析（选对接人→待受理 / 未选→待指派），
+    //   不可静态读；to:null + dynamicTarget:'initial_status' + targetEntity:'current_issue'（作用当前单）。buildMeta 原样暴露标记。
+    from: [], to: null, dynamicTarget: 'initial_status', targetEntity: 'current_issue',
+    roleGuard: 'admin', ownerGuard: null,
+    requiredPayload: ['type', 'title', 'system_name', 'source'],
+    sideEffects: ['INSERT 主表 + 写 created timeline'],
+    timelineEvent: 'created', actionCode: null,
+    notifyAfterCommit: null,
+  },
+  {
+    action: 'intake_accept',                // 受理通过：待受理 → 待指派（对接人∨admin）
+    from: ['待受理'], to: '待指派',
+    roleGuard: 'intake_liaison', ownerGuard: null,   // 引擎侧 intake_liaison∨admin（roleGuard 语义见 index.js requireIntakeLiaison）
+    // [工期对接测试与风险等级拆分 方案 v1.1 §3.4·C5] risk_level 与状态流转同一 UPDATE 原子落库（唯一
+    // 写点=sysIssueTransition 的 case 'intake_accept'）——本条目属 FEATURE_FLOW_TRANSITIONS 专属数组，
+    // 与 IMPROVEMENT_FLOW_TRANSITIONS 的同名条目是两个独立对象，改一处不影响另一处（数组拆分动机见
+    // 上方注释）。⭐ 用户拍板批1改造B（2026-08-06）：IMPROVEMENT_FLOW_TRANSITIONS 同名条目已同步改为
+    // requiredPayload:['risk_level']（原为 []）——risk_level 必填不再是 feature 专属能力，两流在这
+    // 一点上重新合流，仅"待对接测试"段等其余能力仍 feature 独有。
+    requiredPayload: ['risk_level'],
+    sideEffects: ['risk_level 与 status 同一 UPDATE 原子落库'],
+    timelineEvent: 'status_change', actionCode: 'intake_accept',
+    notifyAfterCommit: null,
+  },
+  {
+    action: 'intake_return',                // 受理退改：待受理 → 待修改（对接人∨admin，原因必填）
+    from: ['待受理'], to: '待修改',
+    roleGuard: 'intake_liaison', ownerGuard: null,
+    requiredPayload: ['reason'],
+    sideEffects: ['notify 建单人（退改需修改）'],
+    timelineEvent: 'status_change', actionCode: 'intake_return',
+    notifyAfterCommit: null,                // 通知由端点显式发（§8.2 note 不自动触发 notifyAfterCommit）
+  },
+  {
+    action: 'resubmit_intake',              // 修改后重新提交：待修改 → 待受理（建单人∨admin）
+    from: ['待修改'], to: '待受理',
+    roleGuard: 'creator_or_admin', ownerGuard: null,   // 授权=created_by∨admin（§5.3·codex131-H1 修：roleGuard 与意图同源·引擎按 row.created_by 事务内校验）
+    requiredPayload: [],
+    sideEffects: [],
+    timelineEvent: 'status_change', actionCode: 'resubmit_intake',
+    notifyAfterCommit: null,                // 本期不发·待受理列表驱动（§4.5）
+  },
+  {
+    // ⭐ C2.5 撤销（方案 v2.1 §3）：谓词回「待受理」——预沟通段废除，"对接人拿不准转技术负责人"发生在
+    //   待受理阶段（转不转都不改状态·"都是开发团队的评估时长"）。至此与 bug 侧同值（全类型待受理）。
+    action: 'request_tech_consult',         // 发起技术负责人沟通：待受理 → 待受理（对接人∨admin，选技术负责人）
+    from: ['待受理'], to: null,             // 旁路·不改 status（选技术负责人·通知发送 S5 起改手动）
+    roleGuard: 'intake_liaison', ownerGuard: null,
+    requiredPayload: ['tech_lead_id'],
+    sideEffects: ['tech_lead_id/_name 写入', '通知列组重置为 not_sent（S5 手动化：不自动发送·用户点「发送通知」经 resend-tech-consult 发·方案 v2.1 §6）'],
+    timelineEvent: 'note', actionCode: 'request_tech_consult',
+    notifyAfterCommit: null,                // 本动作不发送通知（S5 手动化）；用户后续经 resend-tech-consult 手动发
+  },
+  {
+    // 建单优化批 C3（方案 20260731_v1.2 §6）：编辑窗口两档扩展——from 从单一「待修改」扩至 A 档
+    //   （待受理/待修改/待指派）+ B 档（开发中，剔除 needs_feasibility）；待验证起冻结不变。字段档位
+    //   由端点 handler 事务内按真实 status 判定（§6.2 并发终闸），本 from 仅供前端按钮可见性镜像。
+    action: 'edit_in_revision',             // 编辑内容：指派前/开发期均可编辑（建单人∨admin·旁路）
+    from: ['待受理', '待修改', '待指派', '开发中'], to: null,
+    roleGuard: 'creator_or_admin', ownerGuard: null,   // 授权=created_by∨admin（§5.3·codex131-H1 修·引擎按 row.created_by 校验）
+    requiredPayload: [],
+    sideEffects: ['两档白名单字段更新（建单优化批 C3·方案 §6.1）', 'note timeline 快照改动字段'],
+    timelineEvent: 'note', actionCode: 'edit_in_revision',
+    notifyAfterCommit: null,
+  },
+  {
+    action: 'change_intake_mode',           // 切换受理模式：待受理/待修改/待指派 → §5.4 真值表（admin，原因必填）
+    from: ['待受理', '待修改', '待指派'], to: null,   // 动态·§5.4 真值表（开↔关切换目标态因 status 而异）
+    dynamicTarget: 'intake_mode', targetEntity: 'current_issue',
+    roleGuard: 'admin', ownerGuard: null,
+    requiredPayload: ['reason'],
+    sideEffects: ['intake_required 翻转 + status 同事务切换（§5.4）'],
+    timelineEvent: 'status_change', actionCode: 'change_intake_mode',
+    notifyAfterCommit: null,
+  },
+  {
+    action: 'assign',                       // 指派：待指派 → 开发中（admin ∨ 受理人，被指派人非 viewer）
+    from: ['待指派'], to: '开发中',         // 受理排期改造：from 由「已排期」改「待指派」
+    roleGuard: 'intake_liaison', ownerGuard: null,
+    requiredPayload: ['assigned_to'],
+    sideEffects: ['assigned_to/_name/assigned_at 写入'],   // codex 14 L-1：DDL 无 assigned_by 字段（系统迭代 admin 集中主导，"谁指派"恒 admin 不单记）
+    timelineEvent: 'assign', actionCode: null,
+    notifyAfterCommit: 'notifyAssignedDeveloper',  // C5 落地
+  },
+  {
+    // 重新指派（M3·91 号审 v2.9 重写，MED-2/LOW·92 号审补 from）：改派开发集合（member_ids 声明式差量），
+    //   不走 sysIssueTransition/findTransition（独立事务，端点 POST .../reassign 自行处理）。
+    action: 'reassign',
+    from: ['开发中', '待验证'], to: null,
+    roleGuard: 'intake_liaison', ownerGuard: null,
+    requiredPayload: ['member_ids', 'reason'],
+    sideEffects: ['开发集合差量应用（新增 INSERT pending / 移除软删）', '选举 electRepresentative 重算 assigned_to/_name（assigned_at 仅首次形成时补写）', 'W-GATE 按新 roster 完成态判定主状态是否联动', '仅代表真实变化时才 notifyAssignedDeveloper（不再按 toAdd.length 判定）', 'return_count 不变（05-M2，v2.9 沿用）'],
+    timelineEvent: null, actionCode: null,
+    notifyAfterCommit: 'notifyAssignedDeveloper',  // C5；实际触发条件见端点内 repChanged 判定
+  },
+  {
+    action: 'estimate',                     // 回填预计完成：开发中（不改 status，写 dev_estimated_at）—— 端点 C3
+    from: ['开发中'], to: null,             // to=null 表示不改 status（旁路动作）
+    roleGuard: null, ownerGuard: 'assignee',
+    requiredPayload: ['dev_estimated_at'],
+    sideEffects: ['dev_estimated_at 写入（>=assigned_at 校验，§7）'],
+    timelineEvent: 'estimate', actionCode: null,
+    notifyAfterCommit: 'notifyEstimateToCreatorAndRequester',  // C5（双收件人，T-M3）
+  },
+  {
+    action: 'set_scheduled_start',          // 定计划开工日：开发中（不改 status·须 dev_estimated_at 非空·admin·参考字段）—— 受理排期改造 §7.2
+    from: ['开发中'], to: null,             // 旁路·YYYY-MM-DD·可传 null 清除
+    roleGuard: 'admin', ownerGuard: null,
+    requiredPayload: ['scheduled_start'],   // 端点校 dev_estimated_at 非空 + 日期格式
+    sideEffects: ['scheduled_start 写入/清除（参考字段·非闸门·§7.2）'],
+    timelineEvent: 'note', actionCode: 'set_scheduled_start',
+    notifyAfterCommit: null,
+  },
+  {
+    // [工期对接测试与风险等级拆分 方案 v1.1 §3.1 点1·C4] submit 目标态改**动态 GATE 解析**契约（冻结·
+    //   閉 255-F M-2）——不再是静态 to:'待验证'：全员提交完成后由 runWGate 按 §3.0 决策树判定真实落点
+    //   （开发中=资格不合格暂留原地 / 待对接测试=⑦正常通过 / 待验证=⑥降级跳过测试段）。possibleTargets
+    //   枚举全部可能落点供前端/verify 消费；dynamicTarget:'w_gate' 标记"目标由 W-GATE 解析·不可静态读
+    //   to"——本端点走独立 handler（非 sysIssueTransition 引擎），故 dynamicTarget/possibleTargets 只是
+    //   meta 层的机器契约标记，不参与运行时 status-transition-guard 的 ADMIN_TRANSITION 分支判断
+    //   （那里对本 action 从不会被以 ADMIN_TRANSITION routeKind 调用；GATE routeKind 走自己的边硬编码，
+    //   不读 dynamicTarget 字段——见 status-transition-guard.js）。kind 显式标 'transition'（submit 不在
+    //   SIDE_EFFECT_ACTIONS 白名单，buildMeta 会自然推导 'transition'，此处注明防误读）。
+    action: 'submit',                       // 提交：开发中 → §3.0 决策树动态解析（dev_estimated_at 非空 + 提交双勾）—— 端点 C3/C4
+    from: ['开发中'], to: null,
+    dynamicTarget: 'w_gate', possibleTargets: ['开发中', '待对接测试', '待验证'], kind: 'transition',
+    roleGuard: null, ownerGuard: 'assignee',
+    requiredPayload: ['self_tested', 'test_env_deployed'],
+    sideEffects: ['first_submitted_at（首次永不变）', 'round_no 递增 + submit timeline', 'W-GATE 按 §3.0 决策树落点（开发中/待对接测试/待验证）'],
+    timelineEvent: 'submit', actionCode: null,
+    notifyAfterCommit: 'notifySubmittedToAdmin',  // C5（admin 自身按需精简，feedback_no_self_notify）
+  },
+  {
+    // [工期对接测试与风险等级拆分 方案 v1.1 §3.1 点5·C4 新增] 对接测试通过：待对接测试 → 待验证（对接人
+    //   池∨admin）。走 sysIssueTransition 通用引擎；①b 步骤复查 isRosterCompleteAndEligible∧hasDeliverable
+    //   （不复查 hasValidLiaison——操作者池授权即测试合法性来源，§3.0 末尾"复查组合规则"冻结）。
+    // ⭐ [方案 D22-④·批2 2026-08-06] pass 凭证校验（"至少其一"闸门，见 index.js case 'liaison_test_pass'
+    //   实现）：本轮已上传 delivery/screenshot 附件 或 当场填写 test_note，二者满足其一即可放行——
+    //   requiredPayload **刻意不列 'test_note'**：那个数组表达的是"这个键必须非空传入"的单字段硬性必填
+    //   （如 return 的 'reason'），本闸门是"两个来源任一满足即可"的或逻辑，字段本身在 payload 里可以完全
+    //   不出现（附件满足时）——列进 requiredPayload 会误导成"每次 pass 都必须带 test_note"，与实际口径
+    //   不符，故显式不列，闸门逻辑完全在引擎实现内部判定。
+    action: 'liaison_test_pass',            // 对接测试通过：待对接测试 → 待验证（对接人池∨admin，凭证二选一）
+    from: ['待对接测试'], to: '待验证',
+    roleGuard: 'intake_liaison', ownerGuard: null,
+    requiredPayload: [],
+    sideEffects: ['复查 isRosterCompleteAndEligible∧hasDeliverable（不复查 hasValidLiaison，§3.0）', 'D17：本边落态时刻即 feature last_completed_at 口径（action_code=liaison_test_pass 入白名单）', 'D22-④：凭证二选一闸门（本轮新传附件 delivery/screenshot 或 test_note，皆无→400 LIAISON_TEST_PASS_EVIDENCE_REQUIRED）+ 结构化留痕落 timeline.payload_json（test_note 全文/attachment_ids/evidence 三态/cycle_no·291 号 H-2 加列后），summary 仅 80 字展示摘要'],
+    timelineEvent: 'status_change', actionCode: 'liaison_test_pass',
+    notifyAfterCommit: null,                // D10：测试通过不通知
+  },
+  {
+    // [工期对接测试与风险等级拆分 方案 v1.1 §3.1 点5+§3.1b·C4 新增] 对接测试打回：待对接测试 → 开发中
+    //   （对接人池∨admin，原因必填）。v1.1 D18：不递增 return_count（语义分离于业务验收打回）；
+    //   花名册重置按 §3.1b 映射（code_submitted/no_code → pending，excused 不动）；
+    //   liaison_test_cycle_no 不在本边递增（周期号只在进入测试态时+1，见 runWGate ⑦）。
+    action: 'liaison_test_return',          // 对接测试打回：待对接测试 → 开发中（对接人池∨admin，原因必填）
+    from: ['待对接测试'], to: '开发中',
+    roleGuard: 'intake_liaison', ownerGuard: null,
+    requiredPayload: ['reason'],
+    sideEffects: ['花名册重置（§3.1b：code_submitted/no_code→pending 清 resolved_at/no_code_reason，excused 不动，行数断言≥1）', 'v1.1 D18：不递增 return_count（测试周期打回≠业务验收打回，独立计入 liaison_test_cycle_no 语义）', 'gate_deferred_at 清（§3.6）'],
+    timelineEvent: 'status_change', actionCode: 'liaison_test_return',
+    notifyAfterCommit: null,                // 通知走既有 notify-developer 手动端点（D13/D18，§3.1b）
+  },
+  {
+    action: 'accept',                       // 验收通过：待验证 → 待上线（admin）—— 端点 C3
+    from: ['待验证'], to: '待上线',
+    roleGuard: 'admin', ownerGuard: null,
+    requiredPayload: [],
+    sideEffects: ['accepted_at=now'],
+    timelineEvent: 'status_change', actionCode: 'accept',
+    notifyAfterCommit: null,
+  },
+  {
+    action: 'return',                       // 验收打回：待验证 → 开发中（admin，打回原因必填）—— 端点 C3
+    from: ['待验证'], to: '开发中',
+    roleGuard: 'admin', ownerGuard: null,
+    requiredPayload: ['reason'],            // 打回原因 trim 非空
+    sideEffects: ['return_count++（U-2）', 'dev_estimated_at 清空（T-M2）', 'scheduled_start 清空（受理排期改造 §7.2·预计变则开工日失效）'],
+    timelineEvent: 'return', actionCode: null,
+    notifyAfterCommit: 'notifyReturnedToDeveloper',  // C5
+  },
+  {
+    action: 'close',                        // 关闭：已上线 → 已关闭（admin）—— 端点 C4
+    from: ['已上线'], to: '已关闭',
+    roleGuard: 'admin', ownerGuard: null,
+    requiredPayload: [],
+    sideEffects: ['closed_at=now'],
+    timelineEvent: 'status_change', actionCode: 'close',
+    notifyAfterCommit: null,
+  },
+  {
+    // 暂缓：活跃态 → 已暂缓（admin，原因必填）。⚠️ [工期对接测试与风险等级拆分 方案 v1.1·C4 合并修复批
+    //   275-H1] `from` **刻意不含**「待对接测试」——C0 矩阵验证清单 §C（§3.5 全动作档位矩阵）逐格核实
+    //   过的拍板格值＝该态下 hold 禁止（对接测试是开发↔对接人之间的短周期交接，不进入 admin 暂缓通道；
+    //   需要中断应走 liaison_test_return 打回开发中）。这不是遗漏，未来新增活跃态时不要把「待对接测试」
+    //   顺手塞进这个数组——verify-sys-liaison-test.js 有专门的反向锁死断言防误加边。
+    action: 'hold',
+    from: ['待指派', '开发中', '待验证', '待上线'], to: '已暂缓',
+    roleGuard: 'admin', ownerGuard: null,
+    requiredPayload: ['reason'],
+    sideEffects: ['进入暂缓前活跃态记入 timeline from_status（H-1 恢复用）'],
+    timelineEvent: 'status_change', actionCode: 'hold',
+    notifyAfterCommit: null,
+  },
+  {
+    action: 'resume',                       // 暂缓恢复：已暂缓 → 暂缓前活跃态（admin，timeline 可解析，H-1/RC-M2）
+    from: ['已暂缓'], to: null,             // to 动态解析（resolveToStatus，从 timeline 取暂缓前 from_status）
+    roleGuard: 'admin', ownerGuard: null,
+    requiredPayload: ['reason'],
+    sideEffects: ['恢复到最近一次进入暂缓前的活跃态（校验属当前 type 合法活跃态，否则 409）'],
+    timelineEvent: 'status_change', actionCode: 'resume',
+    notifyAfterCommit: null,
+  },
+  {
+    action: 'reactivate',                   // 重新激活：已拒绝 → 初始态（admin，不计返工，RC-M1）
+    from: ['已拒绝'], to: null, dynamicTarget: 'initial_status', targetEntity: 'current_issue',
+    roleGuard: 'admin', ownerGuard: null,
+    requiredPayload: ['reason'],
+    sideEffects: ['回初始态重走受理/指派流程（reopen_count 不变）'],
+    timelineEvent: 'status_change', actionCode: 'reactivate',
+    notifyAfterCommit: null,
+  },
+  {
+    action: 'issue_reject',                 // 拒绝：待受理 → 已拒绝（**仅受理人**·意见前置·原因必填）
+    from: ['待受理'], to: '已拒绝',
+    roleGuard: 'intake_liaison_only', ownerGuard: null,
+    requiredPayload: ['reason'],
+    sideEffects: ['前置守卫：当前轮已有 tech_lead_comment（引擎执行器·REJECT_REQUIRES_TECH_COMMENT）'],
+    timelineEvent: 'status_change', actionCode: 'issue_reject',
+    notifyAfterCommit: null,
+  },
+  {
+    action: 'void',                         // 作废：任意态 → 已作废（admin，软删除，原因必填，§3.4）
+    from: '*', to: '已作废',                // from='*' 通用旁路（任意非已作废态）
+    roleGuard: 'admin', ownerGuard: null,
+    requiredPayload: ['reason'],
+    sideEffects: ['软删除，前端隐藏'],
+    timelineEvent: 'status_change', actionCode: 'void',
+    notifyAfterCommit: null,
+  },
+  {
+    action: 'reopen',                       // 重开：已关闭 → 开发中（admin，计返工，§3.5，§6.5 收窄）
+    from: ['已关闭'], to: '开发中',
+    roleGuard: 'admin', ownerGuard: null,
+    requiredPayload: ['reason'],
+    sideEffects: ['reopen_count++', 'reopened_at=now', '清 accepted_at/released_at/closed_at/release_id/dev_estimated_at/scheduled_start（first_submitted_at 永不变·受理排期改造 §7.2）'],
+    timelineEvent: 'reopen', actionCode: null,
+    notifyAfterCommit: 'notifyAssignedDeveloper',  // C5
+  },
+  {
+    action: 'feasibility',                  // 填可行性评估（开发本人，不改 status，旁路）—— 端点 F2b
+    from: ['开发中'], to: null,
+    roleGuard: null, ownerGuard: 'assignee',
+    requiredPayload: ['conclusion', 'requirement_confirm', 'dev_estimated_at'],  // 有条件可行/不可行时 risk 必填见端点
+    sideEffects: ['写评估字段 + dev_estimated_at', 'feasibility timeline 快照（冻结）'],
+    timelineEvent: 'feasibility', actionCode: null,
+    notifyAfterCommit: null,
+  },
+  {
+    action: 'blocked',                      // 受阻（开发本人，不改 status，标 blocked=1）—— 端点 F2b
+    from: ['开发中'], to: null,
+    roleGuard: null, ownerGuard: 'assignee',
+    requiredPayload: ['reason'],
+    sideEffects: ['blocked=1 + blocked_reason + blocked_at', 'blocked timeline'],
+    timelineEvent: 'blocked', actionCode: null,
+    notifyAfterCommit: 'notifyBlockedToAdmin',  // C5 落地（F2b 端点先不发，C5 补）
+  },
+  {
+    action: 'unblock',                      // 解除受阻（admin，不改 status，blocked=0）—— 端点 F2b
+    from: ['开发中'], to: null,
+    roleGuard: 'admin', ownerGuard: null,
+    requiredPayload: ['reason'],
+    sideEffects: ['blocked=0', 'unblock timeline'],
+    timelineEvent: 'unblock', actionCode: null,
+    notifyAfterCommit: null,
+  },
+  {
+    action: 'derive',                       // 派生迭代：原单任意态 → 新建一单（admin，防环，§5.1）
+    // [工期对接测试与风险等级拆分 方案 v1.1 §2·C4 收口] 订正过时残留注释——原文"新单默认
+    //   intake_required=0"已不准确：受理覆盖面运行时真相核实（resolveSysInitialStatusForCreate
+    //   实现·index.js）显示普通建单/derive 派生/reactivate 复活**三入口全部**恒 INSERT
+    //   intake_required=1（受理门焊死后无绕过路径），derive 新单不例外。to:null·kind='side_effect'
+    //   （不改原单），但**新单**落态用 createdIssueDynamicTarget（非共用 dynamicTarget·区分目标属
+    //   当前单还是新单）+ targetEntity='created_issue' 动态解析——解析结果恒为「待受理」，非"默认 0"。
+    from: '*', to: null, createdIssueDynamicTarget: 'initial_status', targetEntity: 'created_issue',
+    roleGuard: 'admin', ownerGuard: null,
+    requiredPayload: ['type', 'title', 'system_name', 'source'],  // 新单建单字段 + origin_issue_id
+    sideEffects: ['新建单 origin_issue_id=原单 id·新单恒 intake_required=1（三创建入口统一走受理门，非"默认 0 可后续 change_intake_mode 打开"）', '先写 created 再写 derive（T-L3）', '防环 M-1'],
     timelineEvent: 'derive', actionCode: null,
     notifyAfterCommit: null,
   },
@@ -571,10 +901,11 @@ const BUG_FLOW_TRANSITIONS = [
     notifyAfterCommit: null,
   },
   {
-    action: 'submit',                       // 提交修复：处理中 → 待验证（闸门：交付说明 + dev_estimated_at 非空）
+    action: 'submit',                       // 提交修复：处理中 → 待验证（dev_estimated_at 非空 + 提交双勾）
     from: ['处理中'], to: '待验证',
     roleGuard: null, ownerGuard: 'assignee',
-    requiredPayload: ['summary'],
+    // [v1.1 §3.3·C3] 同上方变更流 submit 条目——'summary' 系历史死数据（同订正理由），改列提交双勾。
+    requiredPayload: ['self_tested', 'test_env_deployed'],
     sideEffects: ['first_submitted_at（首次永不变）', 'round_no 递增 + submit timeline',
       '（⑤ 追加）派生单首次提交 fix_gap_note 闸门（谓词 [审:H3]）'],
     timelineEvent: 'submit', actionCode: null,
@@ -753,9 +1084,11 @@ const BUG_FLOW_TRANSITIONS = [
 ];
 
 // 全部 transitions（按 type 组织；config 追加时 concat）。
+// [工期对接测试与风险等级拆分 方案 v1.1 §3.1-1·C4] feature/improvement 从共享同一数组引用改为
+//   各自独立数组（拆分动机与内容见上方 FEATURE_FLOW_TRANSITIONS/IMPROVEMENT_FLOW_TRANSITIONS 注释）。
 const TRANSITIONS = {
-  feature: CHANGE_FLOW_TRANSITIONS,
-  improvement: CHANGE_FLOW_TRANSITIONS,    // 变更流两类型共用同一份（共享尾段 + 共享前段，§3.3）
+  feature: FEATURE_FLOW_TRANSITIONS,
+  improvement: IMPROVEMENT_FLOW_TRANSITIONS,
   bug: BUG_FLOW_TRANSITIONS,               // bug 流（bug流_方案_20260702_v1.2，Commit ① 起）
   // config: CONFIG_FLOW_TRANSITIONS,      // TODO 追加 config 流
 };
@@ -820,7 +1153,10 @@ function isDevWorkState(type, status) {
 
 // RC-M5 状态级不变量的目标态全集（跨类型 union）：进入这些态必须有 assigned_to（开发负责人）。
 //   状态名跨类型无歧义冲突：待处理/待评估/已排期=未指派前段不在内；处理中(bug)/开发中(变更流) 起必有开发。
-const REQUIRES_ASSIGNEE_STATUSES = ['开发中', '处理中', '待验证', '待上线', '已上线', '已关闭'];
+// [工期对接测试与风险等级拆分 方案 v1.1 §3.1 点3·C4] 补「待对接测试」——仅 feature 落这个态，且落入时
+//   刻已经历「开发中」（必有 assigned_to），本条只是把它也纳入"进入这些态必须有开发负责人"的全集声明，
+//   不改变任何现有行为（结构上不可能出现"进待对接测试但无 assigned_to"的组合）。
+const REQUIRES_ASSIGNEE_STATUSES = ['开发中', '处理中', '待对接测试', '待验证', '待上线', '已上线', '已关闭'];
 
 // ── meta（决策②，buildMeta：从 TRANSITIONS 派生前端只读视图）──────────
 //   M-4：只返前端必需，**不暴露** roleGuard/ownerGuard/sideEffects/notifyAfterCommit。
@@ -856,6 +1192,8 @@ function buildMeta() {
     set_release_flag: '填发版信息', 'confirm-online-norelease': '确认上线（不发版）',
     // 通知改造 v1.6 §2.3 新增：上线编排两动作
     'assign-release-dev': '指定上线开发', 'execute-release': '执行上线',
+    // [工期对接测试与风险等级拆分 方案 v1.1 §3.1 点5·C4 新增] 对接测试段两条边（仅 feature）
+    liaison_test_pass: '对接测试通过', liaison_test_return: '对接测试打回',
   };
 
   for (const type of Object.keys(TRANSITIONS)) {
@@ -867,10 +1205,15 @@ function buildMeta() {
       requiredPayload: t.requiredPayload || [],
       kind: SIDE_EFFECT_ACTIONS.has(t.action) ? 'side_effect' : 'transition',   // codex 17 M-1 + codex 20 L-1：显式白名单判定旁路动作（路由专用端点），新增动作默认 transition；resume 虽 to=null（动态解析 status）但不在白名单 → 正确标 transition
       // 受理排期改造 §9：动态目标标记原样暴露（消费者见即知"目标由 resolver 解析·不可静态读 to"）——
-      //   dynamicTarget='initial_status'/'intake_mode'（作用当前单）｜createdIssueDynamicTarget（作用新单·derive）｜targetEntity 区分实体。
+      //   dynamicTarget='initial_status'/'intake_mode'/'w_gate'（作用当前单）｜createdIssueDynamicTarget（作用新单·derive）｜targetEntity 区分实体。
       ...(t.dynamicTarget ? { dynamicTarget: t.dynamicTarget } : {}),
       ...(t.createdIssueDynamicTarget ? { createdIssueDynamicTarget: t.createdIssueDynamicTarget } : {}),
       ...(t.targetEntity ? { targetEntity: t.targetEntity } : {}),
+      // [工期对接测试与风险等级拆分 方案 v1.1 §3.1 点1·C4·C0 §F-1 收口] possibleTargets 补入白名单 spread——
+      //   此前只在 TRANSITIONS 条目上加这个字段，buildMeta 从不透传，前端/verify 读到的 typeFlows 条目会
+      //   静默丢失该字段（白名单 spread 模式下"忘加白名单键"是结构性丢失，非报错——C0 矩阵验证清单
+      //   §F-1 提前点名的坑，此处补上防止真掉进去）。
+      ...(t.possibleTargets ? { possibleTargets: t.possibleTargets } : {}),
       // 仅暴露"是否需弹窗收集 payload"，不暴露内部 guard/sideEffects（M-4）
     }));
   }

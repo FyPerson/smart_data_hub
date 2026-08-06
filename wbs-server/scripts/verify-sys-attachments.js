@@ -60,6 +60,9 @@ function waitReady() {
 const adminTok = jwt.sign({ id: 1, username: 'admin', display_name: '管理员', role: 'admin' }, SECRET);
 const devTok = jwt.sign({ id: 5, username: 'dev', display_name: '开发王', role: 'user' }, SECRET);
 const dev2Tok = jwt.sign({ id: 6, username: 'dev2', display_name: '开发李', role: 'user' }, SECRET);
+// [C4 合并修复批 275-M5] 示例对接人（受理人白名单，SYS_INTAKE_LIAISON_IDS[13]）——真实 ⑦ 路径夹具需要它
+// 调 liaison-test-pass。
+const liaisonTok = jwt.sign({ id: 13, username: 'wangtaotao', display_name: '示例对接人', role: 'user' }, SECRET);
 
 let server, port;
 const png = Buffer.from('89504e470d0a1a0a', 'hex');
@@ -119,15 +122,48 @@ async function seedDev(assignTo = 5) {
   const id = r.body.id;
   // ⭐ 角色权限重构 C2.5 撤销（v2.1）：建单直落「待受理」，无需再走预沟通段。
   // ⭐ 角色权限重构 C0：受理门仍必经 → 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
-  await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, {});
+  // [工期对接测试与风险等级拆分 方案 v1.1 §3.4·C5] feature 受理必带 risk_level。
+  await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, { risk_level: '二级' });
   await call('POST', `/api/sys-issues/${id}/schedule`, adminTok, {});
   // ⭐ 角色权限重构 v2.1 §4：变更流 assign 前置要求 oa_number 通过校验 → 待指派态内先补号。
   r = await call('POST', `/api/sys-issues/${id}/set-oa-number`, adminTok, { oa_number: '2026070001' });
   assert.strictEqual(r.status, 200, '夹具补 OA 号 200, got ' + r.status + ' ' + JSON.stringify(r.body));
   await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: assignTo });
+  // [工期对接测试与风险等级拆分 方案 v1.1 §3.0-⑥·C4a 涟漪修复] 本文件测附件上传/下载/删除/supersede
+  // 机制（SYS_DEV∪SYS_VERIFY 状态窗口），与「待对接测试」段本身无关（后者由专门的
+  // verify-sys-liaison-test.js 覆盖）。让对接人在 GATE 判定时失效，触发 §3.0-⑥ 降级路径，使 submit
+  // 仍直落"待验证"——本文件其余断言零改动，这也是方案承认的合法真实场景（非造假绕过）。
+  await run(`UPDATE sys_issues SET intake_liaison_id = 999999 WHERE id = ?`, [id]);
   const tok = assignTo === 5 ? devTok : dev2Tok;
   r = await call('POST', `/api/sys-issues/${id}/estimate`, tok, { dev_estimated_at: EST });
   assert.strictEqual(r.status, 200, 'estimate 200, got ' + r.status + ' ' + JSON.stringify(r.body));
+  return id;
+}
+// [C4 合并修复批 275-M5] 真实 ⑦ 路径代表夹具——本文件其余场景默认走上方 seedDev 的 999999 降级(⑥)
+// 简化路径（附件机制本身与走⑥/⑦无关，见 seedDev 注释）。但"全部夹具都 999999 化"意味着「开发中→⑦
+// 待对接测试→liaison_test_pass→待验证」这条真实链路若出现跨模块回归（例如附件在「待对接测试」新增
+// 状态窗口下的可见性/上传权限被意外破坏），本文件全 ⑥ 化的夹具集合完全测不出来。本函数保留有效
+// intake_liaison_id=13，走真实 GATE ⑦，用于下方 [15] 段落跑 1-2 条本文件原有代表性下游断言。
+async function seedDevViaRealLiaisonTest(assignTo = 5) {
+  let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 't-真实⑦路径', system_name: 'BMS', source: '内部', description: '275-M5 真实⑦路径 fixture', intake_liaison_id: 13 });
+  assert.strictEqual(r.status, 201, '建单 201, got ' + r.status + ' ' + JSON.stringify(r.body));
+  const id = r.body.id;
+  // [工期对接测试与风险等级拆分 方案 v1.1 §3.4·C5] feature 受理必带 risk_level。
+  await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, { risk_level: '二级' });
+  await call('POST', `/api/sys-issues/${id}/schedule`, adminTok, {});
+  r = await call('POST', `/api/sys-issues/${id}/set-oa-number`, adminTok, { oa_number: '2026070099' });
+  assert.strictEqual(r.status, 200, '夹具补 OA 号 200, got ' + r.status + ' ' + JSON.stringify(r.body));
+  await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: assignTo });
+  const tok = assignTo === 5 ? devTok : dev2Tok;
+  r = await call('POST', `/api/sys-issues/${id}/estimate`, tok, { dev_estimated_at: EST });
+  assert.strictEqual(r.status, 200, 'estimate 200, got ' + r.status + ' ' + JSON.stringify(r.body));
+  r = await call('POST', `/api/sys-issues/${id}/submit`, tok, { mode: 'no_code', no_code_reason: '完成（占位理由）', self_tested: true, test_env_deployed: true });
+  assert.strictEqual(r.status, 200, 'submit 200, got ' + r.status + ' ' + JSON.stringify(r.body));
+  assert.strictEqual(r.body.main_status, '待对接测试', '[275-M5] submit → 待对接测试（真实 ⑦ 路径，非 999999 降级）');
+  // ⭐ D22-④ 批2：pass 现须凭证二选一，本夹具补 test_note。
+  r = await call('POST', `/api/sys-issues/${id}/liaison-test-pass`, liaisonTok, { test_note: '275-M5 夹具测试通过' });
+  assert.strictEqual(r.status, 200, 'liaison-test-pass 200, got ' + r.status + ' ' + JSON.stringify(r.body));
+  assert.strictEqual(r.body.status, '待验证', '[275-M5] liaison-test-pass → 待验证');
   return id;
 }
 const ATT = (id) => `/api/sys-issues/${id}/attachments`;
@@ -206,7 +242,7 @@ async function main() {
     assert.strictEqual(r.status, 400, 'C3：submit 携 attachment_ids（多余字段）→ 400');
     assert.strictEqual(r.body.code, 'VALIDATION', 'C3：多余字段统一走 VALIDATION（非旧 SUBMIT_ATTACHMENT_INVALID）');
     assert.strictEqual((await attRow(d1)).round_no, null, 'C3：拒绝先于任何绑定，d1 未受影响');
-    r = await call('POST', `/api/sys-issues/${id1}/submit`, devTok, { mode: 'no_code', no_code_reason: '完成（占位理由）' });
+    r = await call('POST', `/api/sys-issues/${id1}/submit`, devTok, { mode: 'no_code', no_code_reason: '完成（占位理由）', self_tested: true, test_env_deployed: true });
     assert.strictEqual(r.status, 200, 'submit 200, got ' + r.status + ' ' + JSON.stringify(r.body));
     assert.strictEqual(r.body.main_status, '待验证', 'submit → 待验证（main_status 字段，C2/C3 惯例）');
     assert.strictEqual((await attRow(d1)).round_no, null, 'C3：submit 不再绑定任何附件，delivery round_no 恒 null');
@@ -345,10 +381,10 @@ async function main() {
     //   INVALID_STATUS 改为 ESTIMATE_REQUIRED——这是对旧行为的更忠实复刻，非新引入的不一致。
     {
       const idR = await seedDev(5);
-      let rr = await call('POST', `/api/sys-issues/${idR}/submit`, devTok, { mode: 'no_code', no_code_reason: '第一轮（占位理由）' });
+      let rr = await call('POST', `/api/sys-issues/${idR}/submit`, devTok, { mode: 'no_code', no_code_reason: '第一轮（占位理由）', self_tested: true, test_env_deployed: true });
       assert.strictEqual(rr.status, 200, '第一轮 submit 200');
       await call('POST', `/api/sys-issues/${idR}/return`, adminTok, { reason: '列不齐' });            // 回开发中，dev_status 不回 pending（§1 不变量1）+ 清 dev_estimated_at（T-M2）
-      rr = await call('POST', `/api/sys-issues/${idR}/submit`, devTok, { mode: 'no_code', no_code_reason: '直接重提（占位理由）' });
+      rr = await call('POST', `/api/sys-issues/${idR}/submit`, devTok, { mode: 'no_code', no_code_reason: '直接重提（占位理由）', self_tested: true, test_env_deployed: true });
       assert.strictEqual(rr.status, 400, 'return 后直接 resubmit → 400（dev_estimated_at 被 return 清空，ESTIMATE_REQUIRED 先于 dev_status 闸触发）');
       assert.strictEqual(rr.body.code, 'ESTIMATE_REQUIRED');
     }
@@ -390,6 +426,44 @@ async function main() {
       assert.strictEqual(r.status, 400, `${fn} → 400`);
     }
     ok('A9：上传 exe/svg/无扩展名 → 400（fileFilter 扩展名白名单防线）');
+
+    // ── [S12 双路审查 Opus-2 MED 收口·方案 §3.5+C0 双登记必做项] delivery/screenshot 附件端点
+    //   新增 LIAISON_TEST 族放行——此前本文件（含下方 [15]）只覆盖 pass 之后的「待验证」态，从未在
+    //   「待对接测试」本身测过上传。不改 seedDevViaRealLiaisonTest 共享 helper（避免影响它原有
+    //   "验证待验证态"职责），单独构造一条走到 submit 即止（落「待对接测试」）的夹具，测完上传后
+    //   不再推进（该夹具生命周期到此为止，与下方 [15] 各自独立）。 ──
+    {
+      let r2 = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 't-待对接测试上传', system_name: 'BMS', source: '内部', description: 'S12-Opus-2 待对接测试态上传 fixture', intake_liaison_id: 13 });
+      assert.strictEqual(r2.status, 201, '[S12-Opus-2] 建单 201, got ' + r2.status);
+      const idLt = r2.body.id;
+      await call('POST', `/api/sys-issues/${idLt}/intake-accept`, adminTok, { risk_level: '二级' });
+      await call('POST', `/api/sys-issues/${idLt}/schedule`, adminTok, {});
+      r2 = await call('POST', `/api/sys-issues/${idLt}/set-oa-number`, adminTok, { oa_number: '2026070098' });
+      assert.strictEqual(r2.status, 200, '[S12-Opus-2] 夹具补 OA 号 200, got ' + r2.status);
+      await call('POST', `/api/sys-issues/${idLt}/assign`, adminTok, { assigned_to: 5 });
+      r2 = await call('POST', `/api/sys-issues/${idLt}/estimate`, devTok, { dev_estimated_at: EST });
+      assert.strictEqual(r2.status, 200, '[S12-Opus-2] estimate 200, got ' + r2.status);
+      r2 = await call('POST', `/api/sys-issues/${idLt}/submit`, devTok, { mode: 'no_code', no_code_reason: '完成（占位理由）', self_tested: true, test_env_deployed: true });
+      assert.strictEqual(r2.status, 200, '[S12-Opus-2] submit 200, got ' + r2.status);
+      assert.strictEqual(r2.body.main_status, '待对接测试', '[S12-Opus-2] 前置：submit → 待对接测试（真实 ⑦ 路径，非 999999 降级）');
+
+      const uploadDelivery = await upload(ATT(idLt), devTok, { attachment_type: 'delivery' }, 'lt-delivery.png');
+      assert.strictEqual(uploadDelivery.status, 200, `[S12-Opus-2] ⭐ 待对接测试态上传 delivery 应 200，实际 ${uploadDelivery.status} ${JSON.stringify(uploadDelivery.body)}`);
+      const uploadScreenshot = await upload(ATT(idLt), devTok, { attachment_type: 'screenshot' }, 'lt-screenshot.png');
+      assert.strictEqual(uploadScreenshot.status, 200, `[S12-Opus-2] ⭐ 待对接测试态上传 screenshot 应 200，实际 ${uploadScreenshot.status} ${JSON.stringify(uploadScreenshot.body)}`);
+      ok('[S12-Opus-2] MED 收口：delivery/screenshot 附件端点在「待对接测试」态上传均 200（LIAISON_TEST 族已加入白名单，此前只覆盖 DEV∪VERIFY 两族，方案 §3.5+C0 双登记必做项补齐）');
+    }
+
+    // ── [15] C4 合并修复批 275-M5：真实 ⑦ 路径代表夹具——跑 1-2 条本文件原有代表性下游断言 ──
+    const idReal = await seedDevViaRealLiaisonTest(5);
+    r = await upload(ATT(idReal), devTok, { attachment_type: 'delivery' }, 'real-path.png');
+    assert.strictEqual(r.status, 200, '[275-M5] 真实⑦路径落「待验证」后上传 delivery 应 200, got ' + r.status + ' ' + JSON.stringify(r.body));
+    const dReal = r.body.attachments[0].id;
+    row = await attRow(dReal);
+    assert.strictEqual(row.status, 'active', '[275-M5] 真实⑦路径夹具的附件行 status=active');
+    dl = await download(dlPath(idReal, dReal), adminTok);
+    assert.strictEqual(dl.status, 200, '[275-M5] 真实⑦路径夹具·admin 下载该附件应 200, got ' + dl.status);
+    ok('[275-M5] 真实⑦路径代表夹具：submit→待对接测试→liaison-test-pass→待验证 全走真实链路（非 999999 降级）后，附件上传/下载两条本文件原有代表性断言仍成立（防正常主路径跨模块回归被全 ⑥ 化的夹具集合掩盖）');
 
     console.log(`\n✅ verify-sys-attachments 全部通过（${passed} 项断言）`);
   } finally {

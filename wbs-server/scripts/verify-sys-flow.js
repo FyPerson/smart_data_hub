@@ -85,7 +85,9 @@ async function seedToDevInProgress(assignTo = 5) {
   // ⭐ 角色权限重构 C2.5 撤销（v2.1）：建单直落「待受理」，无需再走预沟通段。
   // ⭐ 角色权限重构 C0（方案 v1.5 §4-C0）：建单**恒落「待受理」**（受理门焊死·intake_required 恒 1），
   //   夹具补一步 intake_accept 把单推回「待指派」——受理后落态与旧建单落态**逐字相同**，故下游用例断言零改动。
-  r = await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, {});
+  // [工期对接测试与风险等级拆分 方案 v1.1 §3.4·C5] feature 受理必带 risk_level（否则 400 RISK_LEVEL_REQUIRED）——
+  // 本 helper 建的恒是 feature 单，传固定值即可（本文件不测风险等级本身，该覆盖面在 verify-sys-intake-gate.js [H]）。
+  r = await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, { risk_level: '二级' });
   assert.strictEqual(r.status, 200, '夹具受理 200, got ' + r.status + ' ' + JSON.stringify(r.body));
   // ⭐ 角色权限重构 v2.1 §4：变更流 assign 前置要求 oa_number 通过校验 → 待指派态内先补号。
   r = await call('POST', `/api/sys-issues/${id}/set-oa-number`, adminTok, { oa_number: '2026070001' });
@@ -93,6 +95,13 @@ async function seedToDevInProgress(assignTo = 5) {
   // 受理排期改造：schedule 退场——受理通过落「待指派」，直接 assign（待指派→开发中）。
   r = await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: assignTo });
   assert.strictEqual(r.status, 200, 'assign 200, got ' + r.status + ' ' + JSON.stringify(r.body));      // codex 15 L-1
+  // [工期对接测试与风险等级拆分 方案 v1.1 §3.0-⑥·C4a 涟漪修复] 本文件测的是 accept/return/hold/resume/
+  //   reopen/reactivate/issue_reject/void/derive 等既有机制本身，与「待对接测试」段无关（后者由专门的
+  //   verify-sys-liaison-test.js 覆盖）。feature+有效对接人的 submit 现会先落"待对接测试"而非直接
+  //   "待验证"，会让本文件大量 submit→accept/return 断言全部误判。故意让对接人在 GATE 判定时失效
+  //   （模拟"受理人后续停用/移出白名单"），触发 §3.0-⑥ 降级路径——submit 仍直落"待验证"，本文件其余
+  //   断言零改动，且这本身就是方案承认的合法真实场景（非造假绕过）。
+  await run(`UPDATE sys_issues SET intake_liaison_id = 999999 WHERE id = ?`, [id]);
   return id;
 }
 
@@ -148,7 +157,7 @@ async function main() {
     ok('L-1(复)：estimate assigned_at 缺失脏单 → 409 ASSIGNED_AT_MISSING（防绕过 >=assigned_at 闸门）');
 
     // ── [2] submit → accept 全流程 ──
-    r = await call('POST', `/api/sys-issues/${id1}/submit`, devTok, { mode: 'no_code', no_code_reason: '功能 X 完成（占位理由）' });
+    r = await call('POST', `/api/sys-issues/${id1}/submit`, devTok, { mode: 'no_code', no_code_reason: '功能 X 完成（占位理由）', self_tested: true, test_env_deployed: true });
     assert.strictEqual(r.status, 200, 'submit 200');
     // C3：新 submit 响应体字段为 main_status（同 C2 add/reassign 端点惯例），非旧 makeTransitionEndpoint 的 status。
     assert.strictEqual(r.body.main_status, '待验证', 'submit → 待验证（main_status 字段）');
@@ -161,14 +170,18 @@ async function main() {
     // ── [3] return（打回，return_count++）──
     const id2 = await seedToDevInProgress(5);
     await call('POST', `/api/sys-issues/${id2}/estimate`, devTok, { dev_estimated_at: EST });
-    await call('POST', `/api/sys-issues/${id2}/submit`, devTok, { mode: 'no_code', no_code_reason: '交付（占位理由）' });
+    await call('POST', `/api/sys-issues/${id2}/submit`, devTok, { mode: 'no_code', no_code_reason: '交付（占位理由）', self_tested: true, test_env_deployed: true });
     r = await call('POST', `/api/sys-issues/${id2}/return`, adminTok, { reason: '列不齐' });
     assert.strictEqual(r.status, 200, 'return 200');   // L-1
     assert.strictEqual(r.body.status, '开发中', 'return → 开发中');
-    const d2 = await get('SELECT return_count, dev_estimated_at FROM sys_issues WHERE id=?', [id2]);
+    const d2 = await get('SELECT return_count, dev_estimated_at, risk_level FROM sys_issues WHERE id=?', [id2]);
     assert.strictEqual(d2.return_count, 1, 'return_count++ (=1)');
     assert.strictEqual(d2.dev_estimated_at, null, 'return 清 dev_estimated_at（T-M2）');
-    ok('return：admin + reason → 开发中，return_count=1 + 清 dev_estimated_at');
+    // [工期对接测试与风险等级拆分 方案 v1.1 §8·C5] risk_level 换轮不清——SYS_CLEAR_FEASIBILITY_FIELDS_SQL
+    // 不含该列（区别于同批清空的 estimated_effort_days），return 只是新一轮开发，不是重新受理，风险
+    // 等级定性不随之作废。
+    assert.strictEqual(d2.risk_level, '二级', '⭐ return 不清 risk_level（§8 换轮语义表：受理时定级，非评估字段，不随打回重置）');
+    ok('return：admin + reason → 开发中，return_count=1 + 清 dev_estimated_at + risk_level 不清');
 
     // ── [4] hold → resume（RC-M2 暂缓前态解析）──
     const id3 = await seedToDevInProgress(5);   // 开发中
@@ -227,12 +240,14 @@ async function main() {
     r = await call('POST', `/api/sys-issues/${id4}/reopen`, adminTok, { reason: '回归 bug' });
     assert.strictEqual(r.status, 200, 'reopen 200');   // L-1
     assert.strictEqual(r.body.status, '开发中', 'reopen → 开发中');
-    const d4 = await get('SELECT reopen_count, accepted_at, closed_at, reopened_at FROM sys_issues WHERE id=?', [id4]);
+    const d4 = await get('SELECT reopen_count, accepted_at, closed_at, reopened_at, risk_level FROM sys_issues WHERE id=?', [id4]);
     assert.strictEqual(d4.reopen_count, 1, 'reopen_count++ (=1)');
     assert.strictEqual(d4.accepted_at, null, 'reopen 清 accepted_at');
     assert.strictEqual(d4.closed_at, null, 'reopen 清 closed_at');
     assert.ok(d4.reopened_at, 'reopen 盖 reopened_at');
-    ok('reopen：已关闭 → 开发中，reopen_count=1 + 清 accepted_at/closed_at + 盖 reopened_at');
+    // [工期对接测试与风险等级拆分 方案 v1.1 §8·C5] risk_level 换轮不清——同 return，见该处注释。
+    assert.strictEqual(d4.risk_level, '二级', '⭐ reopen 不清 risk_level（§8 换轮语义表）');
+    ok('reopen：已关闭 → 开发中，reopen_count=1 + 清 accepted_at/closed_at + 盖 reopened_at + risk_level 不清');
     // [codex 98 号 MED7① 自检补漏] W07 证据表——reopen 补非法拒绝：from 白名单仅 [已关闭]（C6·§6.5 收窄前
     //   曾是 [已上线,已关闭]），开发中态 reopen → 400。
     const id4b = await seedToDevInProgress(5);

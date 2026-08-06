@@ -591,6 +591,65 @@ function makeTmpFiles() {
         await page.unroute('**/uploads/correction/**');
         await page.evaluate(() => closeDrawer());
 
+        // ===== U6 picker 预览图点击放大（hotfix 20260806·贴图四件②，289-M 收口后更新）=====
+        //   建单/编辑弹窗 picker（corrPickerRender）预览图此前 img 无 onclick/无 zoom 光标，点不开大图；
+        //   cursor/show 两条断言在修复前必红。
+        //   [289-M] lightbox 大图改用独立 URL.createObjectURL(file)（corrZoomUrl），不再复用 picker 缩
+        //   略图自身的 CORR_PICKER_URLS[key][idx]——两者现应是不同的 blob URL，关闭后 corrZoomUrl 应被
+        //   revoke，picker 缩略图自己的 URL 不受影响。
+        console.log('\nU6. picker 预览图点击放大（对齐详情抽屉 lightbox 行为 + 289-M 独立 URL 生命周期）');
+        await page.evaluate(() => openCreateModal());
+        await page.fill('#formOaNumber', '364266');
+        await page.evaluate(() => toggleOaMode());
+        await page.waitForTimeout(100);
+        await page.setInputFiles('#formOaProofFiles', [tmp.png1]);
+        await page.waitForTimeout(150);
+        const u6Before = await page.evaluate(() => {
+            const img = document.querySelector('#createOaProofPicked .corr-picker-item img');
+            return {
+                cursor: img ? getComputedStyle(img).cursor : null,
+                lightboxShowBefore: document.getElementById('imgLightbox').classList.contains('show'),
+                thumbSrcBefore: img ? img.src : null,
+            };
+        });
+        expect(u6Before.cursor === 'zoom-in', `picker 预览图 cursor 为 zoom-in（对齐详情抽屉悬停行为，实际="${u6Before.cursor}"）`);
+        expect(!u6Before.lightboxShowBefore, `前置：点击前 imgLightbox 未 show（实际 ${u6Before.lightboxShowBefore}）`);
+
+        // 打点：hook revokeObjectURL（本文件此前未用过该钩子，全局安装不影响其余用例）
+        await page.evaluate(() => {
+            window.__corrRevokeCalls = [];
+            const orig = URL.revokeObjectURL.bind(URL);
+            URL.revokeObjectURL = function (u) { window.__corrRevokeCalls.push(u); return orig(u); };
+        });
+
+        await page.click('#createOaProofPicked .corr-picker-item img');
+        await page.waitForTimeout(150);
+        const u6After = await page.evaluate(() => {
+            const lb = document.getElementById('imgLightbox');
+            const img = document.getElementById('imgLightboxImg');
+            const thumb = document.querySelector('#createOaProofPicked .corr-picker-item img');
+            return { show: lb.classList.contains('show'), lbSrc: img.src, thumbSrc: thumb.src, caption: document.getElementById('imgLightboxCaption').textContent };
+        });
+        expect(u6After.show, `点击 picker 预览图后 imgLightbox 出现 show 态（改前 img 无 onclick，本断言红→绿，实际 ${u6After.show}）`);
+        expect(u6After.lbSrc.startsWith('blob:'), `lightbox 大图是 blob URL（独立 URL.createObjectURL，实际前缀="${u6After.lbSrc.slice(0, 24)}…"）`);
+        expect(u6After.lbSrc !== u6After.thumbSrc, `【289-M】lightbox 大图与 picker 缩略图是两个不同的 objectURL（各自独立生命周期，实际 lbSrc="${u6After.lbSrc.slice(0, 30)}…" thumbSrc="${u6After.thumbSrc.slice(0, 30)}…"）`);
+        expect(u6After.caption === 'proof_a.png', `lightbox caption 为文件名（实际="${u6After.caption}"）`);
+
+        await page.keyboard.press('Escape');
+        await page.waitForTimeout(100);
+        const u6Closed = await page.evaluate(() => document.getElementById('imgLightbox').classList.contains('show'));
+        expect(!u6Closed, `ESC 关闭 imgLightbox 后恢复（实际 show=${u6Closed}）`);
+
+        const corrRevokeState = await page.evaluate(() => {
+            const thumb = document.querySelector('#createOaProofPicked .corr-picker-item img');
+            return { revokeCalls: window.__corrRevokeCalls, thumbSrcAfterClose: thumb ? thumb.src : null };
+        });
+        expect(corrRevokeState.revokeCalls.includes(u6After.lbSrc), `【289-M】关闭 lightbox 后 URL.revokeObjectURL 被调用且参数恰为 zoom 大图的 URL（实际调用序列=${JSON.stringify(corrRevokeState.revokeCalls)}）`);
+        expect(!corrRevokeState.revokeCalls.includes(u6Before.thumbSrcBefore), `【289-M】关闭 lightbox 未误 revoke picker 缩略图自身的 URL（CORR_PICKER_URLS 生命周期不受影响）`);
+        expect(corrRevokeState.thumbSrcAfterClose === u6Before.thumbSrcBefore, `【289-M】picker 缩略图 src 关闭前后不变（未被牵连 revoke 导致失效）`);
+
+        await page.evaluate(() => closeCreateModal());
+
         // ===== S1 创建人搜索回归 =====
         console.log('\nS1. 创建人搜索（① 改动回归）');
         const s = await page.evaluate(() => {

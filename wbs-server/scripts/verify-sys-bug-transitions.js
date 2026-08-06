@@ -130,7 +130,7 @@ async function seedBugToReady(devId = 5, devTok2 = devTok) {
   const id = await seedBugToDev(devId);
   let r = await call('POST', `/api/sys-issues/${id}/estimate`, devTok2, { dev_estimated_at: EST });
   assert.strictEqual(r.status, 200, `bug estimate 200, got ${r.status} ${JSON.stringify(r.body)}`);
-  r = await call('POST', `/api/sys-issues/${id}/submit`, devTok2, { mode: 'no_code', no_code_reason: '修复完成（占位理由）' });
+  r = await call('POST', `/api/sys-issues/${id}/submit`, devTok2, { mode: 'no_code', no_code_reason: '修复完成（占位理由）', self_tested: true, test_env_deployed: true });
   assert.strictEqual(r.status, 200, `bug submit 200, got ${r.status} ${JSON.stringify(r.body)}`);
   r = await call('POST', `/api/sys-issues/${id}/accept`, adminTok, {});
   assert.strictEqual(r.status, 200, `bug accept 200, got ${r.status} ${JSON.stringify(r.body)}`);
@@ -144,14 +144,22 @@ async function seedChangeToReady(type = 'feature', devId = 5, devTok2 = devTok) 
   // ⭐ 角色权限重构 C2.5 撤销（v2.1）：本 seed 专服务**变更流**（feature/improvement），建单直落「待受理」，
   //   无需再走预沟通段。bug 流的 seed 是 seedBugToReady，不含本步。
   // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
-  await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, {});
+  // [工期对接测试与风险等级拆分 方案 v1.1 §3.4·C5，⭐ 用户拍板批1改造B后订正] feature/improvement 受理必带 risk_level，bug 不带（原"仅 feature 必带、improvement 不带"口径已随改造B废止）。
+  await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, (type === 'feature' || type === 'improvement') ? { risk_level: '二级' } : {});
   // 受理排期改造：schedule 退场——建单直落待指派，直接 assign。
   // ⭐ 角色权限重构 v2.1 §4：变更流 assign 前置要求 oa_number 通过校验 → 待指派态内先补号。
   r = await call('POST', `/api/sys-issues/${id}/set-oa-number`, adminTok, { oa_number: '2026070001' });
   assert.strictEqual(r.status, 200, `${type} 补 OA 号 200, got ${r.status} ${JSON.stringify(r.body)}`);
   await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: devId });
+  // [工期对接测试与风险等级拆分 方案 v1.1 §3.0-⑥·C4a 涟漪修复] 本 helper 服务批次族别/release-batch
+  //   等下游测试（本文件是 bug 流验证，feature/improvement 只是拿来当批次混选 fixture），与「待对接
+  //   测试」段本身无关（后者由专门的 verify-sys-liaison-test.js 覆盖）。让对接人在 GATE 判定时失效
+  //   （模拟受理人后续停用/移出白名单），触发 §3.0-⑥ 降级路径，使 feature submit 仍直落"待验证"→可
+  //   立即 accept 到"待上线"——本 helper 下游全部调用点零改动，这也是方案承认的合法真实场景（非造假）。
+  //   improvement/bug 不受影响（未接决策树），此处统一处理不额外分 type 判断，简化维护。
+  await run(`UPDATE sys_issues SET intake_liaison_id = 999999 WHERE id = ?`, [id]);
   await call('POST', `/api/sys-issues/${id}/estimate`, devTok2, { dev_estimated_at: EST });
-  await call('POST', `/api/sys-issues/${id}/submit`, devTok2, { mode: 'no_code', no_code_reason: '交付（占位理由）' });
+  await call('POST', `/api/sys-issues/${id}/submit`, devTok2, { mode: 'no_code', no_code_reason: '交付（占位理由）', self_tested: true, test_env_deployed: true });
   r = await call('POST', `/api/sys-issues/${id}/accept`, adminTok, {});
   assert.strictEqual(r.status, 200, `${type} accept 200, got ${r.status} ${JSON.stringify(r.body)}`);
   return id;
@@ -333,7 +341,7 @@ async function main() {
   {
     // 合法 submit → 待验证（C3：新 commit 事件模型，无 first_submitted_at/round_no timeline——
     //   这两个字段随旧单人 summary 模型退场，唯一在册开发 no_code 完成 → W-GATE 同事务转待验证）。
-    const r = await call('POST', `/api/sys-issues/${mainId}/submit`, devTok, { mode: 'no_code', no_code_reason: '空指针已修，补了守卫' });
+    const r = await call('POST', `/api/sys-issues/${mainId}/submit`, devTok, { mode: 'no_code', no_code_reason: '空指针已修，补了守卫', self_tested: true, test_env_deployed: true });
     assert.strictEqual(r.status, 200, 'submit 200, got ' + JSON.stringify(r.body));
     assert.strictEqual(r.body.main_status, '待验证', 'submit → 待验证（W-GATE，main_status 字段，非旧 status）');
     const devEv = await get(`SELECT action, payload_json FROM sys_issue_dev_events WHERE issue_id=? AND action='no_code'`, [mainId]);
@@ -365,9 +373,9 @@ async function main() {
     r = await call('POST', `/api/sys-issues/${mainId}/dev-assignees`, adminTok, { user_ids: [5] });
     assert.strictEqual(r.status, 200, 're-add(5) 200, got ' + JSON.stringify(r.body));
     await call('POST', `/api/sys-issues/${mainId}/estimate`, devTok, { dev_estimated_at: EST2 });
-    r = await call('POST', `/api/sys-issues/${mainId}/submit`, devTok, { mode: 'no_code', no_code_reason: '二轮修复' });
+    r = await call('POST', `/api/sys-issues/${mainId}/submit`, devTok, { mode: 'no_code', no_code_reason: '二轮修复', self_tested: true, test_env_deployed: true });
     assert.strictEqual(r.status, 200, '二轮 submit(5) 200, got ' + JSON.stringify(r.body));
-    r = await call('POST', `/api/sys-issues/${mainId}/submit`, dev2Tok, { mode: 'no_code', no_code_reason: '协作二轮完成' });
+    r = await call('POST', `/api/sys-issues/${mainId}/submit`, dev2Tok, { mode: 'no_code', no_code_reason: '协作二轮完成', self_tested: true, test_env_deployed: true });
     assert.strictEqual(r.status, 200, '协作(6) submit 200, got ' + JSON.stringify(r.body));
     assert.strictEqual(r.body.main_status, '待验证', '全员完成 → W-GATE 转待验证');
     r = await call('POST', `/api/sys-issues/${mainId}/accept`, adminTok, {});
@@ -771,9 +779,9 @@ async function main() {
     // 改用本文件顶部已有的 futureEst(30) 动态生成，与本文件其余三处调用同源。
     r = await call('POST', `/api/sys-issues/${c6Bug}/estimate`, devTok, { dev_estimated_at: futureEst(30) });
     assert.strictEqual(r.status, 200, `[C6] estimate 应 200, got ${r.status} ${JSON.stringify(r.body)}`);
-    r = await call('POST', `/api/sys-issues/${c6Bug}/submit`, devTok, { mode: 'no_code', no_code_reason: '缺陷已修复（占位理由）' });
+    r = await call('POST', `/api/sys-issues/${c6Bug}/submit`, devTok, { mode: 'no_code', no_code_reason: '缺陷已修复（占位理由）', self_tested: true, test_env_deployed: true });
     assert.strictEqual(r.status, 200, `[C6] submit(5) 应 200, got ${r.status} ${JSON.stringify(r.body)}`);
-    r = await call('POST', `/api/sys-issues/${c6Bug}/submit`, dev2Tok, { mode: 'no_code', no_code_reason: '协作完成' });
+    r = await call('POST', `/api/sys-issues/${c6Bug}/submit`, dev2Tok, { mode: 'no_code', no_code_reason: '协作完成', self_tested: true, test_env_deployed: true });
     assert.strictEqual(r.status, 200, `[C6] submit(6) 应 200, got ${r.status} ${JSON.stringify(r.body)}`);
     assert.strictEqual(r.body.main_status, '待验证', '[C6] 全员完成 → W-GATE 转待验证');
     r = await call('POST', `/api/sys-issues/${c6Bug}/accept`, adminTok, {});
@@ -819,7 +827,8 @@ async function main() {
     let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 'f', system_name: 'BMS', source: '内部', description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13 });
     const featureId = r.body.id;
   // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
-    await call('POST', `/api/sys-issues/${featureId}/intake-accept`, adminTok, {});
+  // [工期对接测试与风险等级拆分 方案 v1.1 §3.4·C5] feature 受理必带 risk_level。
+    await call('POST', `/api/sys-issues/${featureId}/intake-accept`, adminTok, { risk_level: '二级' });
     r = await call('POST', `/api/sys-issues/${featureId}/derive`, adminTok, { type: 'bug', title: 'd', system_name: 'BMS', source: '内部' });
     assert.strictEqual(r.status, 201, `feature→bug 派生应放开 201, got ${r.status} ${JSON.stringify(r.body)}`);
     assert.notStrictEqual(r.body.code, 'SYS_BUG_DERIVE_PENDING');
@@ -879,7 +888,7 @@ async function main() {
     assert.strictEqual(row.status, '处理中', '同态换人仍 处理中（DEV 族内增减不触发 W-GATE）');
     // 待验证换人 → 回 处理中（W-GATE：新增 pending 成员 5 打破"全员完成"，VERIFY→DEV）
     await call('POST', `/api/sys-issues/${id}/estimate`, dev2Tok, { dev_estimated_at: EST });
-    await call('POST', `/api/sys-issues/${id}/submit`, dev2Tok, { mode: 'no_code', no_code_reason: '修复完成（占位理由）' });
+    await call('POST', `/api/sys-issues/${id}/submit`, dev2Tok, { mode: 'no_code', no_code_reason: '修复完成（占位理由）', self_tested: true, test_env_deployed: true });
     assert.strictEqual(await statusOf(id), '待验证');
     r = await call('POST', `/api/sys-issues/${id}/reassign`, adminTok, { member_ids: [5], reason: '返工换回' });
     assert.strictEqual(r.status, 200, `reassign 200, got ${r.status} ${JSON.stringify(r.body)}`);
@@ -891,9 +900,9 @@ async function main() {
     // roster 内，同样 403（错误码 NOT_ROSTERED，语义与旧 H-1"严格本人"口径一致：无权限即拒）。
     const id = await seedBugToDev(5);
     await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: EST });
-    let r = await call('POST', `/api/sys-issues/${id}/submit`, dev2Tok, { mode: 'no_code', no_code_reason: 'x' });
+    let r = await call('POST', `/api/sys-issues/${id}/submit`, dev2Tok, { mode: 'no_code', no_code_reason: 'x', self_tested: true, test_env_deployed: true });
     assert.strictEqual(r.status, 403, '非在册开发 submit 403');
-    r = await call('POST', `/api/sys-issues/${id}/submit`, adminTok, { mode: 'no_code', no_code_reason: 'x' });
+    r = await call('POST', `/api/sys-issues/${id}/submit`, adminTok, { mode: 'no_code', no_code_reason: 'x', self_tested: true, test_env_deployed: true });
     assert.strictEqual(r.status, 403, 'admin 代提交 403（admin 本身不在册，W06/W05 assertDevMember 统一口径）');
     ok('W05 assertDevMember 严格在册：bug submit 非在册开发/admin 均 403（同构于旧 H-1"严格本人"口径）');
   }
@@ -905,7 +914,8 @@ async function main() {
     // ⭐ 角色权限重构 C0：建单恒 intake_required=1（受理门焊死·全类型）。
     // ⭐ 角色权限重构 C2.5 撤销（v2.1）：变更流建单落态回归「待受理」（预沟通段整体撤销）。
     assert.strictEqual(r.body.status, '待受理', 'v2.1：feature 建单落待受理（C2.5 已撤销）');
-    const canaryIa = await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, {});
+    // [工期对接测试与风险等级拆分 方案 v1.1 §3.4·C5] feature 受理必带 risk_level。
+    const canaryIa = await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, { risk_level: '二级' });
     assert.strictEqual(canaryIa.status, 200, `canary 受理 200, got ${canaryIa.status} ${JSON.stringify(canaryIa.body)}`);
     assert.strictEqual(canaryIa.body.status, '待指派', 'C0：feature 受理通过 → 待指派（与旧建单落态一致）');
     // ⭐ 角色权限重构 v2.1 §4：变更流 assign 前置要求 oa_number 通过校验 → 待指派态内先补号。

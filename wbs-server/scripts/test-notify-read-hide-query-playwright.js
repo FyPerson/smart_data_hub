@@ -57,13 +57,18 @@ async function main() {
   console.log('\n══════ 通知已读态隐藏「查询已读」冒烟 ══════');
 
   // 造数：变更流单 → schedule → assign 示例用户B → estimate → submit(no_code) → accept → 进「待验证」后 dev 可发通知
-  const c = await api(adminTok, 'POST', '/api/sys-issues', { type: 'feature', title: '通知已读隐藏查询冒烟单', system_name: '智数协同', source: '内部', description: 'x', intake_liaison_id: 13 });
+  const c = await api(adminTok, 'POST', '/api/sys-issues', { intake_contract_version: 2, type: 'feature', title: '通知已读隐藏查询冒烟单', system_name: '智数协同', source: '内部', description: 'x', intake_liaison_id: 13 });
   if (c.status !== 200 && c.status !== 201) { console.error('建单失败', c.status, c.j); process.exit(1); }
   issueId = c.j.id;
-  await api(adminTok, 'POST', `/api/sys-issues/${issueId}/schedule`, { priority: 'P2' });
+  // [C3 sweep 时发现的预置漂移·与本任务无关] 同 test-issue-p4-worknote-playwright.js 的三处修法：
+  // schedule 端点已退场改 intake-accept+set-oa-number → assign；硬编码日期已成炸弹改动态未来日期。
+  // [工期对接测试与风险等级拆分 方案 v1.1 §3.4·C5] feature 受理必带 risk_level（否则 400 RISK_LEVEL_REQUIRED）。
+  await api(adminTok, 'POST', `/api/sys-issues/${issueId}/intake-accept`, { risk_level: '二级' });
+  await api(adminTok, 'POST', `/api/sys-issues/${issueId}/set-oa-number`, { oa_number: '2026080002' });
   await api(adminTok, 'POST', `/api/sys-issues/${issueId}/assign`, { assigned_to: DEV_A });
-  await api(devATok, 'POST', `/api/sys-issues/${issueId}/estimate`, { dev_estimated_at: '2026-08-01 10:00' });
-  await api(devATok, 'POST', `/api/sys-issues/${issueId}/submit`, { mode: 'no_code', no_code_reason: '联调无代码' });
+  const futureEst = (days) => { const d = new Date(Date.now() + days * 86400000); const p = n => String(n).padStart(2, '0'); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} 10:00`; };
+  await api(devATok, 'POST', `/api/sys-issues/${issueId}/estimate`, { dev_estimated_at: futureEst(30) });
+  await api(devATok, 'POST', `/api/sys-issues/${issueId}/submit`, { mode: 'no_code', no_code_reason: '联调无代码', self_tested: true, test_env_deployed: true });
   // 此时进「待验证」——dev 侧 sendable（siNotifyStatusesFor feature developer 含待验证）
 
   const browser = await chromium.launch();

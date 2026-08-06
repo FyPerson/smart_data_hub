@@ -1105,6 +1105,10 @@
             lb.classList.remove('show');
             if (img) img.src = '';
             document.body.style.overflow = '';
+            // [289-M 收口] closeLightbox 详情页共用（.corr-att-thumb 委托监听传入的是真实 /uploads/... URL，
+            //   非 blob）——这里只 revoke corrPickerZoom 自己建的那个 objectURL，非 zoom 路径打开时
+            //   corrZoomUrl 恒 null，本行天然是 no-op，不误伤详情页传入的真实 URL。
+            if (corrZoomUrl) { URL.revokeObjectURL(corrZoomUrl); corrZoomUrl = null; }
         }
         // ESC 关闭（沿数据协作 codex 27 #6 拍板：仅 lightbox 用 ESC，无 modal-stack 冲突，不做 stack-aware）
         document.addEventListener('keydown', function (e) {
@@ -2462,7 +2466,7 @@
                     const urlAttr = URL.createObjectURL(f);
                     urls[idx] = urlAttr;
                     return `<div class="corr-picker-item" style="position:relative;display:inline-block;margin:0 6px 6px 0;vertical-align:top;" title="${safeAttr}">
-                        <img src="${urlAttr}" alt="${safeAttr}" style="width:90px;height:68px;object-fit:cover;border-radius:6px;border:1px solid #e5e7eb;display:block;">
+                        <img src="${urlAttr}" alt="${safeAttr}" onclick="corrPickerZoom('${key}',${idx})" style="width:90px;height:68px;object-fit:cover;border-radius:6px;border:1px solid #e5e7eb;display:block;cursor:zoom-in;">
                         <button type="button" onclick="corrPickerRemove('${key}',${idx})" title="移除" style="position:absolute;top:-6px;right:-6px;width:18px;height:18px;line-height:16px;text-align:center;background:#dc2626;color:#fff;border:0;border-radius:50%;cursor:pointer;font-size:11px;padding:0;">×</button>
                         <div style="max-width:90px;font-size:10px;color:#6b7280;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px;">${safeName}</div>
                     </div>`;
@@ -2483,6 +2487,23 @@
             if (!arr || idx < 0 || idx >= arr.length) return;
             arr.splice(idx, 1);
             corrPickerRender(key);
+        }
+        // 贴图四件②（hotfix 20260806）：picker 预览图点击放大，对齐详情抽屉缩略图行为（悬停 zoom-in 光标+
+        //   点击 lightbox）。
+        // [289-M 收口] 此前直接复用 CORR_PICKER_URLS[key][idx]（picker 缩略图自身的 objectURL）——生命
+        //   周期与 picker 数组耦合：lightbox 开着时若该 key 重渲染/删除该项/重置（corrPickerRevokeUrls
+        //   会 revoke 该 key 下全部旧 URL），大图会随之失效变黑图。改为每次点击独立
+        //   URL.createObjectURL(file) 建一个专属 URL，存模块变量 corrZoomUrl，与 picker 自身生命周期
+        //   彻底解耦；在 closeLightbox 里显式 revoke+置空（见下方）。
+        let corrZoomUrl = null;
+        function corrPickerZoom(key, idx) {
+            const files = CORR_PICKER_FILES[key];
+            if (!files) return;
+            const f = files[idx];
+            if (!f) return;
+            if (corrZoomUrl) { URL.revokeObjectURL(corrZoomUrl); corrZoomUrl = null; }   // 防御：理论不可达（lightbox 遮罩下无法连续点两次缩略图），幂等收口
+            corrZoomUrl = URL.createObjectURL(f);
+            openLightbox(corrZoomUrl, f.name || '');
         }
         // 返回数组快照（供提交链读取，避免调用方直接持有内部数组引用被意外改动）
         function corrPickerFiles(key) {

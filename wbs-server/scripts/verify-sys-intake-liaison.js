@@ -471,7 +471,8 @@ async function main() {
   {
     // 非待受理态 → 409 STATUS_NOT_NOTIFIABLE
     const id = await mkLegacyIssue('待受理', { title: '状态闸门单' });
-    const rAccept = await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, {});
+    // [工期对接测试与风险等级拆分 方案 v1.1 §3.4·C5] mkLegacyIssue 默认 type='feature'，受理必带 risk_level。
+    const rAccept = await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, { risk_level: '二级' });
     assert.strictEqual(rAccept.status, 200, `[⑧] 前置受理通过期望 200, got ${rAccept.status} ${JSON.stringify(rAccept.body)}`);
     const afterAccept = await issueRow(id);
     assert.notStrictEqual(afterAccept.status, '待受理', '[⑧] 前置：受理后已离开「待受理」');
@@ -599,6 +600,44 @@ async function main() {
     assert.strictEqual(readWithoutSent.c, 0, '[部署闸门] read_at 非空时必为 sent 态（计数=0 违反项）');
 
     ok('[部署硬闸门] 全表扫描四项：非法值=0 / 越界受理人=0 / sent缺key=0 / read_at非空非sent=0（方案 §7 部署阻断条件）');
+  }
+
+  // ═══ [D22 批2收口·codex 290 号裁定=改] 通知 markdown 状态显示映射——钉钉消息与页面同口径 ═══
+  //   buildSysRequesterMarkdown(kind='progress')/buildSysCreatorMarkdown 两处曾对 issue.status 做运行时
+  //   插值（无字面量硬编码，静态 grep 抓不到），构造 status='待验证' 的单直调模板函数，产出应含
+  //   "待验收"不含"待验证"——不经真实 HTTP/DB，纯函数直调（两函数均已加入 _internals 导出，
+  //   RC-L2 防复刻漂移同既有先例）；issue.status 字面量本身在结果对象里不出现，不额外断言其"不变"
+  //   （那是 sysStatusDisplayName 单元层面的职责，本组测的是两个消费点确实接入了它）。
+  {
+    const displayIssue = { id: 999999, title: 'D22批2状态显示测试单', system_name: 'BMS', status: '待验证' };
+    const reqMd = I.buildSysRequesterMarkdown(displayIssue, 'progress', 'http://127.0.0.1:0');
+    assert.ok(reqMd.md.includes('待验收'), `[D22批2] buildSysRequesterMarkdown(progress) 产出含"待验收"，实际 md=${reqMd.md}`);
+    assert.ok(!reqMd.md.includes('待验证'), `[D22批2] buildSysRequesterMarkdown(progress) 产出不含"待验证"，实际 md=${reqMd.md}`);
+
+    const creatorMd = I.buildSysCreatorMarkdown(displayIssue, 'http://127.0.0.1:0');
+    assert.ok(creatorMd.md.includes('待验收'), `[D22批2] buildSysCreatorMarkdown 产出含"待验收"，实际 md=${creatorMd.md}`);
+    assert.ok(!creatorMd.md.includes('待验证'), `[D22批2] buildSysCreatorMarkdown 产出不含"待验证"，实际 md=${creatorMd.md}`);
+
+    // 对照组：非"待验证"状态原样透传（证 sysStatusDisplayName 只改这一个值，非全局吞掉状态名）。
+    const otherIssue = { id: 999998, title: 'D22批2对照单', system_name: 'BMS', status: '待上线' };
+    const reqMdOther = I.buildSysRequesterMarkdown(otherIssue, 'progress', 'http://127.0.0.1:0');
+    assert.ok(reqMdOther.md.includes('待上线'), `[D22批2] 对照组：非"待验证"状态（"待上线"）原样透传，实际 md=${reqMdOther.md}`);
+
+    // 单元层直证：sysStatusDisplayName 本身的映射行为。
+    assert.strictEqual(I.sysStatusDisplayName('待验证'), '待验收', '[D22批2] sysStatusDisplayName("待验证") === "待验收"');
+    assert.strictEqual(I.sysStatusDisplayName('待上线'), '待上线', '[D22批2] sysStatusDisplayName 对其余状态原样返回（非全局映射表）');
+
+    // [codex 292 号 M-6 收口] 「已关闭→已归档」映射的回归证据补齐（291 修复批实现了同表映射但断言只
+    //   覆盖了待验证一支——声称与差异不符被 292 号抓获，此处补模板级+单元级双证）。
+    assert.strictEqual(I.sysStatusDisplayName('已关闭'), '已归档', '[292-M6] sysStatusDisplayName("已关闭") === "已归档"（与前端 siStatusDisplay 逐项同表）');
+    // title 刻意不含「已关闭」字样——否则 !includes 断言会被 title 误命中（首跑踩过：状态字段已正确
+    // 显示「已归档」，却因 title 带「已关闭」三字而红——断言写错非实现错的红灯诊断实例）。
+    const closedIssue = { id: 999997, title: '292M6状态映射对照单', system_name: 'BMS', status: '已关闭' };
+    const closedMd = I.buildSysCreatorMarkdown(closedIssue, 'http://127.0.0.1:0');
+    assert.ok(closedMd.md.includes('已归档'), `[292-M6] buildSysCreatorMarkdown 已关闭态产出含"已归档"，实际 md=${closedMd.md}`);
+    assert.ok(!closedMd.md.includes('已关闭'), `[292-M6] buildSysCreatorMarkdown 已关闭态产出不含"已关闭"，实际 md=${closedMd.md}`);
+
+    ok('[D22批2] codex 290 号裁定=改：通知 markdown（buildSysRequesterMarkdown progress 分支 + buildSysCreatorMarkdown）已接入 sysStatusDisplayName，钉钉文案与页面同口径显示"待验收"，issue.status 存储值/字面量本身不受影响（对照组非"待验证"状态原样透传验证非全局吞名）');
   }
 
   console.log(`\n✅ verify-sys-intake-liaison 全部通过（${passed} 组）`);

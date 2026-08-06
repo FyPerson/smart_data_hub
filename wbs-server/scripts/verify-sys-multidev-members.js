@@ -137,6 +137,43 @@ async function activeMembers(issueId) {
 async function issueRow(issueId) {
   return get('SELECT type, status, assigned_to, assigned_to_name FROM sys_issues WHERE id = ?', [issueId]);
 }
+// [codex 270 号 M-1] 共享旧闸前置断言——逐条镜像 routes/sys-iteration/index.js 的
+// isGateEligibleForVerify 真实判据集（工期分支之前的部分）。⚠️ 该函数**不读 assigned_at**（已 grep
+// 实测源码确认，270 号复审明确交代"按实际判据集为准，别照抄列出的猜测清单"）——本函数只断言
+// isGateEligibleForVerify 实际会检查的字段，不发明它不检查的字段。S10n/S10o 均调用：在触发
+// excuse 之前证明"唯一缺口是工期"，excuse 之后（S10o）用来证明写脏值那条 UPDATE 没有连带破坏
+// 其余字段，红绿只由工期判据决定。
+async function assertGateOldConditionsAllPass(label, issueId) {
+  const row = await get(
+    `SELECT dev_estimated_at, blocked, needs_feasibility, feasibility_conclusion, feasibility_requirement_confirm, feasibility_risk
+       FROM sys_issues WHERE id = ?`, [issueId]);
+  assert.ok(row, `${label}：assertGateOldConditionsAllPass 应能查到 issue ${issueId}`);
+  assert.ok(row.dev_estimated_at, `${label}：dev_estimated_at 应非空（旧闸条件）`);
+  assert.strictEqual(row.blocked, 0, `${label}：blocked 应为 0（旧闸条件）`);
+  assert.strictEqual(row.needs_feasibility, 1, `${label}：needs_feasibility 应为 1（旧闸条件，工期分支的前提）`);
+  assert.ok(row.feasibility_conclusion, `${label}：feasibility_conclusion 应非空（旧闸条件）`);
+  assert.ok(['可行', '有条件可行', '不可行'].includes(row.feasibility_conclusion), `${label}：feasibility_conclusion 应落在合法枚举内（旧闸条件），实得 ${row.feasibility_conclusion}`);
+  assert.notStrictEqual(row.feasibility_conclusion, '不可行', `${label}：feasibility_conclusion 不应为「不可行」（旧闸条件）`);
+  assert.ok((row.feasibility_requirement_confirm || '').trim(), `${label}：feasibility_requirement_confirm 应非空（旧闸条件）`);
+  if (row.feasibility_conclusion === '有条件可行') {
+    assert.ok((row.feasibility_risk || '').trim(), `${label}：结论「有条件可行」时 feasibility_risk 应非空（旧闸条件）`);
+  }
+  return row;
+}
+// [codex 270 号 L-2] PRAGMA ignore_check_constraints 封装——先读原状态、执行期间临时开启、finally 无条件
+// 恢复到进入前的原状态（非硬编码恢复成 OFF：封装本身不应假设调用者的前置状态，虽然本文件目前恒为 OFF
+// 进入）。本文件走全新 CREATE TABLE 路径带 DDL CHECK，S10o 需要模拟"脏值已经落在没有 CHECK 的 ALTER
+// 旧库路径"这个只在生产旧库才会真实出现的场景，写完立刻恢复，不扩大对其余用例的影响面。
+async function withIgnoredCheckConstraints(fn) {
+  const before = await get('PRAGMA ignore_check_constraints');
+  const beforeOn = !!(before && Number(before.ignore_check_constraints) === 1);
+  await run('PRAGMA ignore_check_constraints = ON');
+  try {
+    return await fn();
+  } finally {
+    await run(`PRAGMA ignore_check_constraints = ${beforeOn ? 'ON' : 'OFF'}`);
+  }
+}
 async function selfCertifyProbes(label) {
   const results = await runProbes(db);
   const failed = results.filter(r => !r.pass);
@@ -251,7 +288,7 @@ async function main() {
   {
     const id = await mkIssue('feature', '开发中');
     const daId = await mkMember(id, 5, '开发甲', 'pending');
-    let r = await call('POST', `/api/sys-issues/${id}/submit`, devTok(5), { mode: 'no_code', no_code_reason: '完成（占位理由）' });
+    let r = await call('POST', `/api/sys-issues/${id}/submit`, devTok(5), { mode: 'no_code', no_code_reason: '完成（占位理由）', self_tested: true, test_env_deployed: true });
     assert.strictEqual(r.status, 200, 'S10e：submit 200');
     assert.strictEqual(r.body.main_status, '待验证', 'S10e：唯一在册开发完成 → 待验证');
     r = await call('POST', `/api/sys-issues/${id}/return`, adminTok, { reason: '列不齐' });
@@ -279,11 +316,12 @@ async function main() {
     const daId = await mkMember(id, 5, '开发甲', 'pending');
     // needs_feasibility=1 单：submit 前需先经 feasibility 端点写 dev_estimated_at（estimate 端点对此类单被
     //   ESTIMATE_REQUIRES_FEASIBILITY 拦截），此处先走一次 feasibility 建立初始合格态
+    // [工期对接测试与风险等级拆分 方案 v1.1 §3.2·C2] feature+nf=1 起工期必填，补 estimated_effort_days。
     let r = await call('POST', `/api/sys-issues/${id}/feasibility`, devTok(5), {
-      conclusion: '可行', requirement_confirm: '已确认', dev_estimated_at: futureEst(32),
+      conclusion: '可行', requirement_confirm: '已确认', dev_estimated_at: futureEst(32), estimated_effort_days: 2,
     });
     assert.strictEqual(r.status, 200, `S10f：首次 feasibility 200, got ${r.status} ${JSON.stringify(r.body)}`);
-    r = await call('POST', `/api/sys-issues/${id}/submit`, devTok(5), { mode: 'no_code', no_code_reason: '完成（占位理由）' });
+    r = await call('POST', `/api/sys-issues/${id}/submit`, devTok(5), { mode: 'no_code', no_code_reason: '完成（占位理由）', self_tested: true, test_env_deployed: true });
     assert.strictEqual(r.status, 200, 'S10f：submit 200');
     assert.strictEqual(r.body.main_status, '待验证', 'S10f：唯一在册开发完成 → 待验证');
     r = await call('POST', `/api/sys-issues/${id}/return`, adminTok, { reason: '评估需重新确认' });
@@ -293,8 +331,9 @@ async function main() {
     assert.strictEqual(row.feasibility_conclusion, null, 'S10f：return 清评估（F2a §六，新一轮重评）');
     assert.strictEqual(row.gate_deferred_at, null, 'S10f：return 清 gate_deferred_at');
     // 关键反例：补 feasibility 后不应被误判为 deferred 消费，应保持开发中
+    // [v1.1 §3.2·C2] return 已清空 estimated_effort_days（§8 换轮清空），二次 feasibility 须重新补填。
     r = await call('POST', `/api/sys-issues/${id}/feasibility`, devTok(5), {
-      conclusion: '可行', requirement_confirm: '重新确认', dev_estimated_at: futureEst(33),
+      conclusion: '可行', requirement_confirm: '重新确认', dev_estimated_at: futureEst(33), estimated_effort_days: 2,
     });
     assert.strictEqual(r.status, 200, `S10f：二次 feasibility 200, got ${r.status} ${JSON.stringify(r.body)}`);
     row = await get('SELECT status FROM sys_issues WHERE id = ?', [id]);
@@ -335,8 +374,9 @@ async function main() {
     const id = await mkIssue('feature', '开发中');
     await run(`UPDATE sys_issues SET needs_feasibility = 1, assigned_at = datetime('now','localtime') WHERE id = ?`, [id]);
     const daId = await mkMember(id, 5, '开发甲', 'pending');
+    // [v1.1 §3.2·C2] feature+nf=1 起工期必填，补 estimated_effort_days（后续 resume 触发 GATE 重判需要它非空）。
     let r = await call('POST', `/api/sys-issues/${id}/feasibility`, devTok(5), {
-      conclusion: '可行', requirement_confirm: '已确认', dev_estimated_at: futureEst(35),
+      conclusion: '可行', requirement_confirm: '已确认', dev_estimated_at: futureEst(35), estimated_effort_days: 2,
     });
     assert.strictEqual(r.status, 200, `S10h：feasibility 200, got ${r.status} ${JSON.stringify(r.body)}`);
     r = await call('POST', `/api/sys-issues/${id}/blocked`, devTok(5), { reason: '等外部接口联调' });
@@ -369,9 +409,13 @@ async function main() {
   //   自身 inDev∧!allComplete 清标分支覆盖，非额外新代码）
   // ══════════════════════════════════════════════════════════════════════
   {
-    // hold 具名边仅定义于 CHANGE_FLOW_TRANSITIONS（feature/improvement），BUG_FLOW_TRANSITIONS 无对应条目
-    // （bug 不支持 hold，逐字核对 transitions.js 确认），故本例改用 feature 型（同 S10h），场景换成"未估时"
-    // 触发 deferred（与 S10h 的"受阻"触发互补，覆盖 isGateEligibleForVerify 的另一维度）。
+    // [S12 双路审查 codex 287 号 C 项收口] 原注释曾写"hold 具名边仅定义于 CHANGE_FLOW_TRANSITIONS
+    // （feature/improvement），BUG_FLOW_TRANSITIONS 无对应条目（bug 不支持 hold）"——两处均已过期订正：
+    // ① CHANGE_FLOW_TRANSITIONS 该数组 C4 起已拆分为 FEATURE_FLOW_TRANSITIONS/IMPROVEMENT_FLOW_TRANSITIONS
+    //   两份独立数组；② bug暂缓方案（20260803 v0.4）已给 BUG_FLOW_TRANSITIONS 补上 hold 条目（见
+    //   transitions.js:951），"bug 不支持 hold"的旧前提不再成立。本例仍延用 feature 型的真实理由改为
+    //   ——与 S10h（同一 HIGH 反例①/②系列，紧邻上方）保持同型延续，场景换成"未估时"触发 deferred
+    //   （与 S10h 的"受阻"触发互补，覆盖 isGateEligibleForVerify 的另一维度），非受制于 bug 缺 hold。
     const id = await mkIssue('feature', '开发中', { devEstimatedAt: null });
     const daId = await mkMember(id, 5, '开发甲', 'pending');
     let r = await call('POST', `/api/sys-issues/${id}/dev-assignees/${daId}/excuse`, adminTok, { reason: '请假' });
@@ -410,7 +454,10 @@ async function main() {
     const daId = await mkMember(id, 5, '开发甲', 'pending');
     await run(`UPDATE sys_issues SET updated_at = '2020-01-01 00:00:00' WHERE id = ?`, [id]);
     injectFailureFired = false;
-    injectFailureOnSql = `VALUES (?, 'status_change', ?, ?, ?, ?, ?)`;   // 命中 runWGate 自身 timeline INSERT（状态+updated_at UPDATE 之后、commit 之前）
+    // [工期对接测试与风险等级拆分 方案 v1.1 §3.0-⑥/D17·C4] runWGate 的 timeline INSERT 新增 action_code 列
+    //   （原恒隐式 NULL，H1 技术根源，C4 已修复），VALUES 占位符从 6 个 ? 变 7 个 ?——旧 marker 字面量已不
+    //   再是新 SQL 的子串，命中不了注入点，故意让本测试静默失去意义（symptom：500 变 200）。同步更新。
+    injectFailureOnSql = `VALUES (?, 'status_change', ?, ?, ?, ?, ?, ?)`;   // 命中 runWGate 自身 timeline INSERT（状态+updated_at UPDATE 之后、commit 之前）
     const r = await call('POST', `/api/sys-issues/${id}/dev-assignees/${daId}/excuse`, adminTok, { reason: '请假一周' });
     assert.strictEqual(r.status, 500, `S10j：故障注入应 500, got ${r.status} ${JSON.stringify(r.body)}`);
     assert.ok(injectFailureFired, 'S10j：确认故障注入真实命中过（防 SQL 片段写错导致测试静默失效）');
@@ -461,7 +508,7 @@ async function main() {
     // 新成员可正常走完估时+提交流程（验证降级后不是"死单"，能正常继续干活）
     r = await call('POST', `/api/sys-issues/${id}/estimate`, devTok(6), { dev_estimated_at: futureEst(36) });
     assert.strictEqual(r.status, 200, `S10k：降级后新成员 estimate 应 200, got ${r.status} ${JSON.stringify(r.body)}`);
-    r = await call('POST', `/api/sys-issues/${id}/submit`, devTok(6), { mode: 'no_code', no_code_reason: '换血后完成（占位理由）' });
+    r = await call('POST', `/api/sys-issues/${id}/submit`, devTok(6), { mode: 'no_code', no_code_reason: '换血后完成（占位理由）', self_tested: true, test_env_deployed: true });
     assert.strictEqual(r.status, 200, `S10k：降级后新成员 submit 应 200, got ${r.status} ${JSON.stringify(r.body)}`);
     assert.strictEqual(r.body.main_status, '待验证', 'S10k：⭐ 降级后正常走完流程，全完成 → W-GATE 转待验证（非死单）');
     ok('S10k：⭐ HIGH-A 反例①——待上线单 hold→换血（移除完成态成员+加新 pending）→resume 自动降级到开发中（200，非永久 400）→新成员正常估时+提交走完流程');
@@ -521,6 +568,94 @@ async function main() {
     assert.strictEqual(r.body.status, '开发中', 'S10m：⭐ 降级到开发中，逃生口生效');
     assert.strictEqual(r.body.degraded, true, 'S10m：响应体标记 degraded=true');
     ok('S10m：⭐ HIGH-A 反例③——零在册 hold→resume 400 GATE_INVARIANT（降级仍不满足 enteringDev，合理）→ add 成员补至少 1 名 → resume 降级成功（暂缓期先加人再 resume 的逃生口验证）');
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // S10n：[工期对接测试与风险等级拆分 方案 v1.1 §3.2·C2] GATE 纵深新增分支——feature+nf=1 单评估已合格
+  //   （conclusion/confirm/dev_estimated_at/assigned_at/blocked 全部合格）但 estimated_effort_days
+  //   仍缺，全员完成态时 GATE 资格过滤应拦下（不推进待验证），同 S10b（blocked=1）/S10d（bug 缺
+  //   dev_estimated_at）的既有 GATE 纵深范式——isGateEligibleForVerify 是与 submit/feasibility 端点
+  //   各自独立的实现（同判据、非共享代码，"两处判定同构、非独立设计"范式），需单独验证其自身分支，
+  //   不能只信任端点层已测过。
+  //   ⚠️ 正常业务路径下"评估已合格但工期未填"不可达（feasibility 端点原子写入两者，缺一即 400 EFFORT_REQUIRED），
+  //   此处直接 SQL 造脏模拟——防御性 fail-safe，同 verify-sys-multidev-submit.js mkFeasIssue 系列的既有测法。
+  //   ⚠️⚠️ [codex 269 号 H-1 收口] 原版只 UPDATE 了 needs_feasibility/conclusion/confirm/effort=NULL 四列，
+  //   隐式依赖 mkIssue 默认会填一个非空的未来 dev_estimated_at——若该默认值将来改变（或被误改成 null），
+  //   本测试会变成"测的是别的缺口"而非"仅测工期缺口"这一件事，却仍可能凑巧通过（假绿）。改为**显式**
+  //   一次性 UPDATE 齐 assigned_at/dev_estimated_at/blocked/conclusion/confirm 到确定合格值，并在触发
+  //   excuse 之前用共享的 assertGateOldConditionsAllPass 断言 isGateEligibleForVerify 真实判据集里除
+  //   工期外的全部条件已合格，只留 estimated_effort_days=NULL 这一个显式缺口——测试意图不再依赖任何
+  //   隐式默认，未来谁改了 mkIssue 默认值本测试也不会被带偏。
+  //   ⚠️⚠️⚠️ [codex 270 号 M-1] assigned_at 不在 assertGateOldConditionsAllPass 断言范围内——已 grep
+  //   isGateEligibleForVerify 源码实测确认该函数从未读取 assigned_at，本处仍显式写入它只是为了让
+  //   dev_estimated_at 的"晚于指派时间"业务语义在夹具层面保持自洽（非 GATE 判据要求）。
+  // ══════════════════════════════════════════════════════════════════════
+  {
+    const id = await mkIssue('feature', '开发中');
+    await run(`UPDATE sys_issues SET assigned_at = datetime('now','localtime'), dev_estimated_at = ?,
+               blocked = 0, needs_feasibility = 1, feasibility_conclusion = '可行',
+               feasibility_requirement_confirm = '已确认', estimated_effort_days = NULL WHERE id = ?`,
+      [futureEst(40), id]);
+    await assertGateOldConditionsAllPass('S10n 前置', id);
+    const preEffort = await get('SELECT estimated_effort_days FROM sys_issues WHERE id = ?', [id]);
+    assert.strictEqual(preEffort.estimated_effort_days, null, 'S10n 前置：estimated_effort_days 确为 NULL（本用例唯一缺口，与上方旧闸条件全格形成对照）');
+    const daId = await mkMember(id, 5, '开发甲', 'pending');
+    const r = await call('POST', `/api/sys-issues/${id}/dev-assignees/${daId}/excuse`, adminTok, { reason: '请假一周' });
+    assert.strictEqual(r.status, 200, `S10n：excuse 本身应仍 200（成员动作不受工期缺失拦截），实际 ${r.status} ${JSON.stringify(r.body)}`);
+    assert.strictEqual(r.body.dev_status, 'excused', 'S10n：目标 dev_status=excused（成员写入不受影响）');
+    // 关键反例：全员完成态已达成，其余旧闸条件（上方前置断言）全部合格，唯独 estimated_effort_days 缺
+    // → GATE 拦下，main_status 仍「开发中」——若把 isGateEligibleForVerify 里新增的工期判据删掉，本例
+    // 会因为其余条件全合格而误判 eligible=true 直接放行，这条断言才是真正钉住新判据存在与否的地方。
+    assert.strictEqual(r.body.main_status, '开发中', 'S10n：⭐ 工期缺失单全员完成态也不应被 GATE 推进——main_status 仍「开发中」（isGateEligibleForVerify 新分支）');
+    const row = await get('SELECT status, gate_deferred_at FROM sys_issues WHERE id = ?', [id]);
+    assert.strictEqual(row.status, '开发中', 'S10n：sys_issues.status 落库仍「开发中」（GATE 未触发状态变更）');
+    assert.ok(row.gate_deferred_at, 'S10n：gate_deferred_at 已置位（等待 feasibility 补工期消费）');
+    // 补工期后应同事务原子推进待验证（同 S10c「补齐条件后重跑消费」范式）
+    const r2 = await call('POST', `/api/sys-issues/${id}/feasibility`, devTok(5), {
+      conclusion: '可行', requirement_confirm: '补填工期', dev_estimated_at: futureEst(36), estimated_effort_days: 5,
+    });
+    assert.strictEqual(r2.status, 200, `S10n：补填工期 feasibility 应 200，实际 ${r2.status} ${JSON.stringify(r2.body)}`);
+    const row2 = await get('SELECT status, gate_deferred_at FROM sys_issues WHERE id = ?', [id]);
+    assert.strictEqual(row2.status, '待验证', 'S10n：⭐ 补填工期后同事务重跑 runWGate，原子推进待验证（不再永久卡死）');
+    assert.strictEqual(row2.gate_deferred_at, null, 'S10n：deferred 标记随进 VERIFY 一并清除');
+    await selfCertifyProbes('S10n');
+    ok('S10n：⭐ [v1.1 §3.2] GATE 纵深新分支——feature+nf=1 评估合格但工期缺失（旧闸四项条件显式钉死合格，非隐式默认），全员完成态被 GATE 拦下（isGateEligibleForVerify 独立实现同判据，非 submit 端点代码）→ 补填工期后同事务原子推进待验证（deferred 消费）');
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // S10o：[codex 269 号 H-1 补充反例 + M-1 存储值复查] GATE 存储值复查——estimated_effort_days 非空但
+  //   归一失败（脏值，如历史直连 SQL/旧 ALTER 路径无 DDL CHECK 写入的非法值 1.3）时，GATE 仍应视同缺失
+  //   不放行——"非 NULL 不等于合法"，同 S10n 但换一种缺口形态（脏值 vs 全空），配合 isGateEligibleForVerify
+  //   新增的 normalizeSysEffortDays 存储值复查分支。旧闸条件同 S10n 用共享断言钉死合格。
+  //   ⚠️ 本文件的 sys_issues 走**全新 CREATE TABLE 路径**（mod.initSchema() 建全新 :memory: 库），该路径
+  //   本就带 DDL CHECK——1.3 直接 UPDATE 会被 SQLite 自身拒绝，测不出"脏值已落库、只能靠服务端 fail-safe"
+  //   这个场景（那只在 ALTER 旧库路径无 CHECK 时才会真实发生，见 C1 既有降级拍板）。用共享封装
+  //   withIgnoredCheckConstraints 临时关闭本连接的 CHECK 强制、写入脏值后 finally 无条件恢复，模拟"这条
+  //   脏数据是通过没有 CHECK 的路径（旧 ALTER 库/历史直连 SQL）进来的"——不影响本文件其余用例仍然享有
+  //   CHECK 保护（仅本用例这一次 UPDATE 期间临时开关）。
+  //   [codex 270 号 M-1] 写脏值那条 UPDATE 与 S10n 是同一条语句（只有 estimated_effort_days 的值不同），
+  //   写完后同样调 assertGateOldConditionsAllPass 复核——证明这条 UPDATE 没有连带把其余旧闸条件写坏，
+  //   本用例红/绿只由 estimated_effort_days 这一个字段的合法性决定，不是巧合命中了别的缺口。
+  {
+    const id = await mkIssue('feature', '开发中');
+    await withIgnoredCheckConstraints(async () => {
+      await run(`UPDATE sys_issues SET assigned_at = datetime('now','localtime'), dev_estimated_at = ?,
+                 blocked = 0, needs_feasibility = 1, feasibility_conclusion = '可行',
+                 feasibility_requirement_confirm = '已确认', estimated_effort_days = 1.3 WHERE id = ?`,
+        [futureEst(41), id]);
+    });
+    const preEffort = await get('SELECT estimated_effort_days FROM sys_issues WHERE id = ?', [id]);
+    assert.strictEqual(preEffort.estimated_effort_days, 1.3, 'S10o 前置：estimated_effort_days=1.3 脏值确已直接落库（ALTER 路径无 DDL CHECK，服务端 fail-safe 前必须先证明脏值真能落库，非白测一个数据库本就会拒绝的场景）');
+    await assertGateOldConditionsAllPass('S10o 前置', id);
+    const daId = await mkMember(id, 5, '开发甲', 'pending');
+    const r = await call('POST', `/api/sys-issues/${id}/dev-assignees/${daId}/excuse`, adminTok, { reason: '请假一周' });
+    assert.strictEqual(r.status, 200, `S10o：excuse 本身应仍 200，实际 ${r.status} ${JSON.stringify(r.body)}`);
+    assert.strictEqual(r.body.main_status, '开发中', 'S10o：⭐ estimated_effort_days=1.3（非 0.5 整数倍脏值）全员完成态也不应被 GATE 推进——main_status 仍「开发中」（存储值复查新分支：非 NULL 不等于合法）');
+    const row = await get('SELECT status, gate_deferred_at FROM sys_issues WHERE id = ?', [id]);
+    assert.strictEqual(row.status, '开发中', 'S10o：sys_issues.status 落库仍「开发中」');
+    assert.ok(row.gate_deferred_at, 'S10o：gate_deferred_at 已置位');
+    await selfCertifyProbes('S10o');
+    ok('S10o：⭐ [codex 269 号 M-1] GATE 存储值复查——estimated_effort_days=1.3 脏值（非 0.5 整数倍，历史/ALTER 路径无 CHECK 写入）视同缺失，全员完成态仍被拦下（非 NULL 不等于合法，读侧闸自防）');
   }
 
   // ══════════════════════════════════════════════════════════════════════
@@ -1280,6 +1415,37 @@ async function main() {
     assert.strictEqual(after.read_at, null, 'M2：代表实变后 read_at 清空（原非空场景专测）');
     await selfCertifyProbes('M2-repChanged');
     ok('M2：reassign 换代表（assigned_to 实变 5→6）→ 同事务原子重置 sys_issues dev 侧 notify 五列（含原 read_at 非空场景清零）');
+  }
+  {
+    // [284 号 B3-①] 方案 v1.1 255-G 七审 5M 项之一「负责人补选 assigned_at COALESCE+排序同源 helper+
+    //   回归场景」——核实结论：前两项（COALESCE 语义/排序同源 helper）electRepresentative（index.js
+    //   :2153-2197）已落地，只是不是字面 SQL COALESCE 关键字，而是等价的 `if (assignedAtIsNull) {...}
+    //   else {...}` 分支（见 :2181-2188，only 在 assigned_at 为 NULL 时才补写 now，否则原样保留）；
+    //   候选排序=`activeRows`（ORDER BY user_id ASC，:2157）供①现任在册②pending 最小③全体最小三级
+    //   选举复用，electRepresentative 是全部 5+ 代表变化路径（add/remove/excuse/supersede/reassign）
+    //   的唯一收敛点，无第二份排序逻辑。**缺的是"回归场景"这一项**——全文 grep 未找到任何测试断言
+    //   "代表真实换人后 assigned_at 保持原值不被推进"，M2 组两个用例都只断言 notify 五列，未选
+    //   assigned_at 入 SELECT。本组补上：DELETE 移除现任代表触发再选举（换一种触发方式，不与上方
+    //   reassign 用例重复），代表实变（5→6），assigned_at 精确保留种子值。
+    //   ⚠️ 自决偏离踩坑记录：本条最初用 excuse 端点触发，红灯——excuse 只改 dev_status='excused'，
+    //   不设 removed_at，activeRows（`WHERE removed_at IS NULL`）仍含现任，electRepresentative 选举
+    //   ①级"现任仍在册"判定只看 removed_at 不看 dev_status，命中后代表原样不变，验证不了"真实换人"
+    //   这条回归线。改用 DELETE 移除接口（真正把人移出在册集合）才能让①级落空、落到②级选出新代表。
+    const idB3 = await mkIssue('feature', '开发中');
+    const da5B3 = await mkMember(idB3, 5, '开发甲', 'pending');
+    await mkMember(idB3, 6, '开发乙', 'pending');
+    const seedAssignedAt = '2026-07-01 09:00:00';
+    await run(`UPDATE sys_issues SET assigned_to = 5, assigned_to_name = '开发甲', assigned_at = ? WHERE id = ?`, [seedAssignedAt, idB3]);
+    const beforeB3 = await get('SELECT assigned_to, assigned_at FROM sys_issues WHERE id = ?', [idB3]);
+    assert.strictEqual(beforeB3.assigned_to, 5, 'B3-① 前置：代表=开发甲(5)');
+    assert.strictEqual(beforeB3.assigned_at, seedAssignedAt, 'B3-① 前置：assigned_at 已种子为固定历史值');
+
+    const rRemoveB3 = await call('DELETE', `/api/sys-issues/${idB3}/dev-assignees/${da5B3}`, adminTok, { reason: 'B3-① 回归：移除现任代表触发再选举' });
+    assert.strictEqual(rRemoveB3.status, 200, `B3-①：移除现任代表应 200，实际 ${rRemoveB3.status} ${JSON.stringify(rRemoveB3.body)}`);
+    const afterB3 = await get('SELECT assigned_to, assigned_at FROM sys_issues WHERE id = ?', [idB3]);
+    assert.strictEqual(afterB3.assigned_to, 6, 'B3-①：代表已实变为开发乙(6)（现任被移出在册集合，①级选举落空，②级 pending 最小 user_id 命中）');
+    assert.strictEqual(afterB3.assigned_at, seedAssignedAt, '⭐ 284 号 B3-①：代表实变后 assigned_at 精确保留原值，不被再选举推进（COALESCE 等价语义落地生效）');
+    ok('284 号 B3-①：负责人补选回归场景——移除现任代表触发再选举、代表实变(5→6)后 assigned_at 精确保留原值不被推进（此前七审收口项漏了这条回归测试，assigned_at COALESCE 等价语义+排序同源 helper electRepresentative 两项本身已在 C4/C2 落地）');
   }
   {
     // 负例（L2·95 号复审：种子五列全非空 + 断言四组前缀列不受影响）：reassign 仅新增协作成员、原代表仍在册

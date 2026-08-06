@@ -131,7 +131,7 @@ async function bugAssignedWithCollab(primaryId, collaboratorIds, extra = {}) {
 async function bugReturned(devId = 5, extra = {}) {
   const id = await bugAssigned(devId, extra);
   await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: EST });
-  await call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'no_code', no_code_reason: '修复（占位理由）' });   // 待验证
+  await call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'no_code', no_code_reason: '修复（占位理由）', self_tested: true, test_env_deployed: true });   // 待验证
   const r = await call('POST', `/api/sys-issues/${id}/return`, adminTok, { reason: '未修好' });   // 打回→处理中 return_count++
   assert.strictEqual(r.status, 200, 'bug return 200');
   return id;
@@ -140,7 +140,7 @@ async function bugReturned(devId = 5, extra = {}) {
 async function bugToVerifying(devId = 5, extra = {}) {
   const id = await bugAssigned(devId, extra);
   await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: EST });
-  const r = await call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'no_code', no_code_reason: '修复（占位理由）' });
+  const r = await call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'no_code', no_code_reason: '修复（占位理由）', self_tested: true, test_env_deployed: true });
   assert.strictEqual(r.status, 200, 'bug submit 200');
   return id;
 }
@@ -554,14 +554,20 @@ async function main() {
   // ⭐ 角色权限重构 C2.5 撤销（v2.1）：本 seed 专服务**变更流**（feature/improvement）→ 建单直落「待受理」，
   //   无需再走预沟通段，直接接既有受理一步。
   // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
-    await call('POST', `/api/sys-issues/${cid}/intake-accept`, adminTok, {});
+  // [工期对接测试与风险等级拆分 方案 v1.1 §3.4·C5，⭐ 用户拍板批1改造B后订正] feature/improvement 受理必带 risk_level，bug 不带（原"仅 feature 必带、improvement 不带"口径已随改造B废止）。
+    await call('POST', `/api/sys-issues/${cid}/intake-accept`, adminTok, (type === 'feature' || type === 'improvement') ? { risk_level: '二级' } : {});
     await call('POST', `/api/sys-issues/${cid}/schedule`, adminTok, {});
   // ⭐ 角色权限重构 v2.1 §4：变更流 assign 前置要求 oa_number 通过校验 → 待指派态内先补号。
     r = await call('POST', `/api/sys-issues/${cid}/set-oa-number`, adminTok, { oa_number: '2026070001' });
     assert.strictEqual(r.status, 200, `${type} 夹具补 OA 号 200, got ${r.status} ${JSON.stringify(r.body)}`);
     await call('POST', `/api/sys-issues/${cid}/assign`, adminTok, { assigned_to: 6 });
+    // [工期对接测试与风险等级拆分 方案 v1.1 §3.0-⑥·C4a 涟漪修复] 本 helper 明确写着"推到待验证"，为的是
+    // 一处覆盖 developer/creator/requester 三通道在「待验证」态的授权矩阵，与「待对接测试」段本身无关
+    // （后者由专门的 verify-sys-liaison-test.js 覆盖）。让对接人在 GATE 判定时失效，触发 §3.0-⑥ 降级
+    // 路径，使 submit 仍直落"待验证"——本文件其余断言零改动，这也是方案承认的合法真实场景。
+    await run(`UPDATE sys_issues SET intake_liaison_id = 999999 WHERE id = ?`, [cid]);
     await call('POST', `/api/sys-issues/${cid}/estimate`, dev2Tok, { dev_estimated_at: EST });   // dev6=dev2Tok 回填
-    await call('POST', `/api/sys-issues/${cid}/submit`, dev2Tok, { mode: 'no_code', no_code_reason: '交付（占位）' });   // →待验证
+    await call('POST', `/api/sys-issues/${cid}/submit`, dev2Tok, { mode: 'no_code', no_code_reason: '交付（占位）', self_tested: true, test_env_deployed: true });   // →待验证
     return cid;
   };
   // 表驱动：feature/improvement × 通道 × (admin 放行 / 对接人拒绝) 逐格
@@ -615,7 +621,8 @@ async function main() {
     const fid = r.body.id;
   // ⭐ 角色权限重构 C2.5 撤销（v2.1）：变更流建单直落「待受理」，无需再走预沟通段，直接受理。
   // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
-    await call('POST', `/api/sys-issues/${fid}/intake-accept`, adminTok, {});
+  // [工期对接测试与风险等级拆分 方案 v1.1 §3.4·C5] feature 受理必带 risk_level。
+    await call('POST', `/api/sys-issues/${fid}/intake-accept`, adminTok, { risk_level: '二级' });
     await call('POST', `/api/sys-issues/${fid}/schedule`, adminTok, {});
   // ⭐ 角色权限重构 v2.1 §4：变更流 assign 前置要求 oa_number 通过校验 → 待指派态内先补号。
     r = await call('POST', `/api/sys-issues/${fid}/set-oa-number`, adminTok, { oa_number: '2026070001' });
@@ -677,7 +684,8 @@ async function main() {
   // ⭐ 角色权限重构 C2.5 撤销（v2.1）：本 seed 专服务**变更流**（feature/improvement）→ 建单直落「待受理」，
   //   无需再走预沟通段。
   // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
-    await call('POST', `/api/sys-issues/${cid}/intake-accept`, adminTok, {});
+  // [工期对接测试与风险等级拆分 方案 v1.1 §3.4·C5，⭐ 用户拍板批1改造B后订正] feature/improvement 受理必带 risk_level，bug 不带（原"仅 feature 必带、improvement 不带"口径已随改造B废止）。
+    await call('POST', `/api/sys-issues/${cid}/intake-accept`, adminTok, (type === 'feature' || type === 'improvement') ? { risk_level: '二级' } : {});
     await call('POST', `/api/sys-issues/${cid}/schedule`, adminTok, {});
   // ⭐ 角色权限重构 v2.1 §4：变更流 assign 前置要求 oa_number 通过校验 → 待指派态内先补号。
     const oa = await call('POST', `/api/sys-issues/${cid}/set-oa-number`, adminTok, { oa_number: '2026070001' });
@@ -702,7 +710,7 @@ async function main() {
     // feature return→dev 不再 auto
     const fid3 = await seedChangeAssigned('feature', 5);
     await call('POST', `/api/sys-issues/${fid3}/estimate`, devTok, { dev_estimated_at: EST });
-    await call('POST', `/api/sys-issues/${fid3}/submit`, devTok, { mode: 'no_code', no_code_reason: '交付（占位理由）' });   // 待验证
+    await call('POST', `/api/sys-issues/${fid3}/submit`, devTok, { mode: 'no_code', no_code_reason: '交付（占位理由）', self_tested: true, test_env_deployed: true });   // 待验证
     await call('POST', `/api/sys-issues/${fid3}/return`, adminTok, { reason: '打回' });   // 开发中
     assert.strictEqual(await nStatus(fid3), 'not_sent', '[C] feature return 不再自动发开发（C2a 全手动）');
     ok('[C] C2a 全手动 canary：feature+improvement × assign/estimate/reassign/return 全部 not_sent（isAutoNotifyEnabled 恒 false·改手动触发）');

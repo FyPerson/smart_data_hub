@@ -53,7 +53,12 @@ const ALLOWED_TARGET_FAMILIES = {
   //   只可能是 INTAKE，D_PRE/DEV 已不可达。①层虽已拦住、留着不构成绕过，
   //   但白名单是"这个 routeKind 允许写进哪些族"的**声明**，与实现不符就会误导下一个人以为 CREATE 还能进开发态。
   CREATE: ['INTAKE'],
-  GATE: ['DEV', 'VERIFY'],
+  // [工期对接测试与风险等级拆分 方案 v1.1 §3.0/C0 §D 层2·C4] 加 LIAISON_TEST——runWGate 现会把 feature
+  //   单从 DEV 送进 LIAISON_TEST（⑦ 正常通过测试段准入）或从 LIAISON_TEST 弹回 DEV（脏数据防御分支，
+  //   §3.1 点4）。improvement/bug 的 LIAISON_TEST 族恒空数组（status-families.js），afterFamily 永远不
+  //   会对它们解析出 'LIAISON_TEST'，故本条加宽对 improvement/bug 零副作用——白名单只是"允许写入"，
+  //   不代表"一定会用到"。
+  GATE: ['DEV', 'LIAISON_TEST', 'VERIFY'],
   ADMIN_TRANSITION: ['INTAKE', 'D_PRE', 'DEV', 'VERIFY', 'NONRELEASE_TERMINAL', 'RELEASE'],
   RELEASE: ['RELEASE'],
 };
@@ -134,6 +139,13 @@ function assertMainStatusTransition(p) {
   let afterFamily = null;
   const devStatus = SF.SYS_DEV_STATUSES[issueType][0];       // 单值族（v2.9 §4.0 快照，每 type 恰一个 DEV 态）
   const verifyStatus = SF.SYS_VERIFY_STATUSES[issueType][0]; // 单值族，恒'待验证'
+  // [工期对接测试与风险等级拆分 方案 v1.1 §3.0/C0 §D 层2 提醒·C4] LIAISON_TEST 对 improvement/bug 是空数组
+  //   （status-families.js），`[0]` 越界会取到 `undefined`——若不显式处理，improvement/bug 的 GATE 边校验
+  //   会把 `undefined` 当成一个合法比较目标参与 `before === liaisonTestStatus` 判断，恰好因为真实 status
+  //   字符串永不等于 `undefined` 而"侥幸不出错"，但语义含混、容易在未来重构时被误用。显式收窄为 `null`
+  //   （非法状态值，不会与任何真实 status 字符串相等），意图更清楚。
+  const liaisonTestStatuses = SF.SYS_LIAISON_TEST_STATUSES[issueType] || [];
+  const liaisonTestStatus = liaisonTestStatuses.length > 0 ? liaisonTestStatuses[0] : null;
 
   if (routeKind === 'CREATE') {
     if (before !== null && before !== undefined) reject409('CREATE 边要求 before=null（before=null 只校验 after）');
@@ -162,9 +174,22 @@ function assertMainStatusTransition(p) {
     else reject409(`CREATE 边非法：${issueType} null→${after}（唯一合法落态：${initialForCreate}）`);
 
   } else if (routeKind === 'GATE') {
+    // [工期对接测试与风险等级拆分 方案 v1.1 §3.0/C0 §D 层2·C4] 硬编码边扩至 4 条（原只认 dev↔verify 两条，
+    //   不改这里 runWGate 一旦要把 feature 单送进「待对接测试」就会在此被 409 拦死）：
+    //   · devStatus→verifyStatus：improvement/bug 全员完成正常路径；feature ⑥ 降级跳过测试段直落待验证。
+    //   · verifyStatus→devStatus：弹回（全类型，新 pending 成员打破全完成态）。
+    //   · devStatus→liaisonTestStatus：feature ⑦ 正常进入待对接测试（liaisonTestStatus 对 improvement/bug
+    //     恒为 null，故这两个分支对它们结构性不可达，不会误放行）。
+    //   · liaisonTestStatus→devStatus：feature 测试段弹回（§3.1 点4"脏数据防御分支"——正常业务流程走
+    //     花名册七写入口 409 挡住新增 pending，此边只在写入口被绕过/直接改库等异常情形下兜底）。
     if (before === devStatus && after === verifyStatus) afterFamily = 'VERIFY';
     else if (before === verifyStatus && after === devStatus) afterFamily = 'DEV';
-    else reject409(`GATE 边非法：${before}→${after}（仅允许 ${devStatus}→${verifyStatus} 或 ${verifyStatus}→${devStatus}）`);
+    else if (liaisonTestStatus && before === devStatus && after === liaisonTestStatus) afterFamily = 'LIAISON_TEST';
+    else if (liaisonTestStatus && before === liaisonTestStatus && after === devStatus) afterFamily = 'DEV';
+    else {
+      const extra = liaisonTestStatus ? ` 或 ${devStatus}↔${liaisonTestStatus}` : '';
+      reject409(`GATE 边非法：${before}→${after}（仅允许 ${devStatus}↔${verifyStatus}${extra}）`);
+    }
 
   } else if (routeKind === 'ADMIN_TRANSITION') {
     // H1（91 号审）：resume 是 transitions.js 里 to:null 的动态转换（暂缓前活跃态由调用方查 timeline 解析），
@@ -265,12 +290,21 @@ function assertMainStatusTransition(p) {
   const beforeFamily = (before === null || before === undefined) ? null : SF.familyOfStatus(issueType, before);
   const enteringDev = afterFamily === 'DEV' && beforeFamily !== 'DEV';
   const enteringVerify = afterFamily === 'VERIFY' && beforeFamily !== 'VERIFY';
+  // [工期对接测试与风险等级拆分 方案 v1.1 §3.0-⑦·C4] 进 LIAISON_TEST 门禁——与进 VERIFY 同等要求（在册
+  //   ≥1 且全员完成态）：⑦ 正常通过测试段准入的前提正是 isRosterCompleteAndEligible 已经成立，本层是
+  //   runWGate 调用前置检查之外的独立防御层（③ 层惯例——不信任调用方一定算对，guard 自己再核一遍）。
+  const enteringLiaisonTest = afterFamily === 'LIAISON_TEST' && beforeFamily !== 'LIAISON_TEST';
   if (enteringDev) {
     if (!(Number(rosterActiveCount) >= 1)) reject400('进入开发执行态（SYS_DEV）要求在册成员数≥1');
   }
   if (enteringVerify) {
     if (!(Number(rosterActiveCount) >= 1 && rosterAllComplete === true)) {
       reject400('进入待验证态（SYS_VERIFY）要求在册成员数≥1 且全员完成态（无 pending）');
+    }
+  }
+  if (enteringLiaisonTest) {
+    if (!(Number(rosterActiveCount) >= 1 && rosterAllComplete === true)) {
+      reject400('进入对接测试态（SYS_LIAISON_TEST）要求在册成员数≥1 且全员完成态（无 pending）');
     }
   }
 

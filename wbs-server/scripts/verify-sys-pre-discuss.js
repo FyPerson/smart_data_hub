@@ -127,7 +127,10 @@ const comment = async (id, tok, text, expectedEventId) => call('POST', `/api/sys
   { comment: text, expected_request_event_id: expectedEventId !== undefined ? expectedEventId : await currentRound(id) });
 const cancelConsult = (id, tok = liaisonTok) => call('POST', `/api/sys-issues/${id}/cancel-consult`, tok, {});
 const reject = (id, tok, reason) => call('POST', `/api/sys-issues/${id}/issue-reject`, tok, reason === undefined ? {} : { reason });
-const intakeAccept = (id, tok = liaisonTok) => call('POST', `/api/sys-issues/${id}/intake-accept`, tok, {});
+// [工期对接测试与风险等级拆分 方案 v1.1 §3.4·C5] feature 受理必带 risk_level（否则 400 RISK_LEVEL_REQUIRED）——
+// extra 第 3 参可选传 { risk_level: '...' }，各调用点按其 issue 的真实 type 决定是否需要传（不改默认行为，
+// 不传时 body 恒 {}，与本次改动前一致；本文件里"预期 200 且 issue=feature"的调用点须补传）。
+const intakeAccept = (id, tok = liaisonTok, extra = {}) => call('POST', `/api/sys-issues/${id}/intake-accept`, tok, extra);
 const intakeReturn = (id, tok = liaisonTok, reason = '材料不全') => call('POST', `/api/sys-issues/${id}/intake-return`, tok, { reason });
 const voidIssue = (id, tok = adminTok, reason = '误建') => call('POST', `/api/sys-issues/${id}/void`, tok, { reason });
 const setOa = (id, tok, oa_number) => call('POST', `/api/sys-issues/${id}/set-oa-number`, tok, { oa_number });
@@ -295,7 +298,7 @@ async function main() {
     const f2 = await create('feature');
     const rq2 = await consult(f2.body.id);
     await comment(f2.body.id, techTok, '已回复，受理可继续', rq2.body.request_event_id);
-    const r2 = await intakeAccept(f2.body.id);
+    const r2 = await intakeAccept(f2.body.id, liaisonTok, { risk_level: '二级' });
     assert.strictEqual(r2.status, 200, `[BA] 已回复咨询受理应 200, got ${r2.status} ${JSON.stringify(r2.body)}`);
     assert.strictEqual(r2.body.status, '待指派', '[BA] 受理通过 → 待指派');
 
@@ -304,7 +307,7 @@ async function main() {
     await consult(f3.body.id);
     const rc3 = await cancelConsult(f3.body.id);
     assert.strictEqual(rc3.status, 200, `[BA] 取消咨询应 200, got ${rc3.status} ${JSON.stringify(rc3.body)}`);
-    const r3 = await intakeAccept(f3.body.id);
+    const r3 = await intakeAccept(f3.body.id, liaisonTok, { risk_level: '二级' });
     assert.strictEqual(r3.status, 200, `[BA] 已取消咨询受理应 200, got ${r3.status} ${JSON.stringify(r3.body)}`);
 
     ok('[BA] intake_accept 受理阻断：未回复 409 INTAKE_BLOCKED_BY_PENDING_CONSULT（feature/bug 均验）·已回复 200·已取消 200');
@@ -440,7 +443,7 @@ async function main() {
 
       // 集内正例：受理通过后的首个态（feature=待指派 / bug=待处理）
       const cIn = await create(type);
-      const accIn = await intakeAccept(cIn.body.id);
+      const accIn = await intakeAccept(cIn.body.id, liaisonTok, (type === 'feature' || type === 'improvement') ? { risk_level: '二级' } : {});
       assert.strictEqual(accIn.status, 200, `[OA/${type}] 夹具受理 200, got ${accIn.status} ${JSON.stringify(accIn.body)}`);
       assert.strictEqual(accIn.body.status, allowedProbe, `[OA/${type}] 夹具受理落态应为 ${allowedProbe}`);
 
@@ -471,7 +474,7 @@ async function main() {
     //   全绿，而未授权补号会直接满足变更流指派门槛（这正是该 HIGH 的攻击面）。
     {
       const cP = await create('feature');
-      await intakeAccept(cP.body.id);   // 进「待指派」（允许集内·排除"状态不对"干扰，只测权限维）
+      await intakeAccept(cP.body.id, liaisonTok, { risk_level: '二级' });   // 进「待指派」（允许集内·排除"状态不对"干扰，只测权限维）
       for (const [who, tok] of [['受理人13', liaisonTok], ['技术负责人7', techTok], ['普通用户5', devTok]]) {
         const before = await get('SELECT oa_number FROM sys_issues WHERE id=?', [cP.body.id]);
         const tlB = (await get(`SELECT COUNT(*) c FROM sys_issue_timeline WHERE issue_id=? AND action_code='set_oa_number'`, [cP.body.id])).c;
@@ -504,7 +507,7 @@ async function main() {
   {
     // 变更流：无号（NULL）→ 409
     const f1 = await create('feature');
-    await intakeAccept(f1.body.id);   // → 待指派，oa_number 仍 NULL
+    await intakeAccept(f1.body.id, liaisonTok, { risk_level: '二级' });   // → 待指派，oa_number 仍 NULL
     const r1 = await assignCall(f1.body.id, adminTok, 5);
     assert.strictEqual(r1.status, 409, `[AS] 变更流无 OA 号 assign 应 409, got ${r1.status} ${JSON.stringify(r1.body)}`);
     assert.strictEqual(r1.body.code, 'ASSIGN_REQUIRES_OA_NUMBER', '[AS] 应为 ASSIGN_REQUIRES_OA_NUMBER');
@@ -512,7 +515,7 @@ async function main() {
 
     // 变更流：空串（原子 SQL 造脏值，绕过 set-oa-number 自身的校验）→ 409
     const f2 = await create('feature');
-    await intakeAccept(f2.body.id);
+    await intakeAccept(f2.body.id, liaisonTok, { risk_level: '二级' });
     await run(`UPDATE sys_issues SET oa_number='' WHERE id=?`, [f2.body.id]);
     const r2 = await assignCall(f2.body.id, adminTok, 5);
     assert.strictEqual(r2.status, 409, `[AS] 变更流空串 OA 号 assign 应 409, got ${r2.status} ${JSON.stringify(r2.body)}`);
@@ -520,7 +523,7 @@ async function main() {
 
     // 变更流：非法值（原子 SQL 造脏值）→ 409
     const f3 = await create('feature');
-    await intakeAccept(f3.body.id);
+    await intakeAccept(f3.body.id, liaisonTok, { risk_level: '二级' });
     await run(`UPDATE sys_issues SET oa_number='OA-bad' WHERE id=?`, [f3.body.id]);
     const r3 = await assignCall(f3.body.id, adminTok, 5);
     assert.strictEqual(r3.status, 409, `[AS] 变更流非法 OA 号 assign 应 409, got ${r3.status} ${JSON.stringify(r3.body)}`);
@@ -528,7 +531,7 @@ async function main() {
 
     // 变更流：有效号 → 200
     const f4 = await create('feature');
-    await intakeAccept(f4.body.id);
+    await intakeAccept(f4.body.id, liaisonTok, { risk_level: '二级' });
     const oa4 = await setOa(f4.body.id, adminTok, '2026070201');
     assert.strictEqual(oa4.status, 200, `[AS] 夹具补 OA 号 200, got ${oa4.status} ${JSON.stringify(oa4.body)}`);
     const r4 = await assignCall(f4.body.id, adminTok, 5);
@@ -546,7 +549,7 @@ async function main() {
     //   /assign 之外，dev-assignees POST 加成员与 reassign 批量新增在待指派族同样必须被拦。
     {
       const cD = await create('feature');
-      await intakeAccept(cD.body.id);   // 待指派·无 OA
+      await intakeAccept(cD.body.id, liaisonTok, { risk_level: '二级' });   // 待指派·无 OA
       const rAdd = await call('POST', `/api/sys-issues/${cD.body.id}/dev-assignees`, adminTok, { user_ids: [5] });
       assert.strictEqual(rAdd.status, 409, `[AS/加成员] 待指派无 OA 加成员应 409, got ${rAdd.status} ${JSON.stringify(rAdd.body)}`);
       assert.strictEqual(rAdd.body.code, 'ASSIGN_REQUIRES_OA_NUMBER', '[AS/加成员] 确切码');

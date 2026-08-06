@@ -39,7 +39,12 @@ const { chromium } = require('playwright');
 
 require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 
-const BASE_URL = 'http://localhost:3000';
+// [S12b hotfix批1 收口·2026-08-06] 补 TEST_BASE_URL 覆盖（对齐 probe-s1-paste-thumb.js / test-corr-
+//   upload-preview-playwright.js 等既有兄弟套件同款约定）——本次改造涉及后端 intake_accept 逻辑
+//   （routes/sys-iteration/index.js/transitions.js），需要一个已加载最新后端代码的 server 实例；
+//   用户正在观察的 3000 端口 server 全程不可重启/杀，故验证时改指向临时 3100 副本实例，默认值仍是
+//   3000（不影响其余不传该环境变量的调用方）。
+const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3000';
 const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
 const JWT_SECRET = process.env.JWT_SECRET || 'default_secret_key_change_me';
 // codex 220 L-4：原硬编码指向某次会话的临时目录，会话结束即失效——失败截图会静默写失败（目录不存在）
@@ -98,6 +103,8 @@ async function main() {
     const descFull = `${descFirstLine}\n第二行不应影响标题（仅首行截取）`;
     let createdIssueId = null;
     let oaExemptIssueId = null;   // T1.5（建单优化批 C3b）独立夹具，finally 里与 createdIssueId 一并清理
+    let t6FeatureId = null, t6BugId = null, t6ImprovementId = null;   // T6（工期对接测试与风险等级拆分 v1.1 §3.4/§7/§6b·C5，⭐ 用户拍板批1改造B新增 improvement 分支）独立夹具
+    let t7DisplayId = null;   // T7（D22 批2 状态显示改名·2026-08-06）独立夹具
 
     const browser = await chromium.launch();
     try {
@@ -316,6 +323,294 @@ async function main() {
             await shotOnFail(page, page._consoleErrors.length === 0, 't4-console-clean', `T4 全程无 JS 报错（${page._consoleErrors.length} 个${page._consoleErrors.length ? ': ' + page._consoleErrors.slice(0, 2).join(' | ') : ''}）`);
             await page.close();
         }
+
+        // ═══════════════════════════════════════════════════════════════
+        // T6（工期对接测试与风险等级拆分 方案 v1.1 §3.4/§7/§6b·C5·长任务 S10=C5）：
+        //   受理弹窗风险等级必选控件 + 详情页「风险等级」kv 展示（未受理「未定级」/受理后具体值）+ D15
+        //   intake 通知行常驻化（单已过受理段后行仍渲染，发送按钮消失/查询已读仍可用）。
+        //   ⭐ 用户拍板批1改造A+B（2026-08-06）：① 值域「高/中/低」全仓改名「一级/二级/三级」；
+        //   ② 风险等级控件覆盖面从"仅 feature"扩到"feature+improvement"（原「feature 有/bug 无」两分
+        //   已反转为「feature/improvement 有·默认选中三级/bug 无」三分——本组新增独立 improvement 分支，
+        //   下方 bug 分支相应改为"唯一无控件类型"的收窄表述）。
+        //   独立夹具（不复用 T1-T4 的 createdIssueId，避免状态耦合），走 API 直接建单（本组焦点是受理
+        //   弹窗与详情展示，非建单表单本身，建单表单已由 T1/T2 覆盖）。
+        // ═══════════════════════════════════════════════════════════════
+        {
+            console.log('\n── T6：受理弹窗风险等级必选控件（feature/improvement 有默认三级·bug 无）+ 详情页展示 + D15 intake 行常驻化 ──');
+            const featRes = await fetch(`${BASE_URL}/api/sys-issues`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminTok}` },
+                body: JSON.stringify({ intake_contract_version: 2, type: 'feature', title: 't6', system_name: 'BMS', source: '内部', description: `T6-feature-${RUN_TAG}`, intake_liaison_id: LIAISON_ID })
+            });
+            const featBody = await featRes.json();
+            if (featRes.status !== 201) throw new Error(`T6 前置失败：feature 建单未 201，实得 ${featRes.status} ${JSON.stringify(featBody)}`);
+            t6FeatureId = featBody.id;
+
+            const bugRes = await fetch(`${BASE_URL}/api/sys-issues`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminTok}` },
+                body: JSON.stringify({ intake_contract_version: 2, type: 'bug', title: 't6-bug', system_name: 'BMS', source: '内部', description: `T6-bug-${RUN_TAG}`, intake_liaison_id: LIAISON_ID })
+            });
+            const bugBody = await bugRes.json();
+            if (bugRes.status !== 201) throw new Error(`T6 前置失败：bug 建单未 201，实得 ${bugRes.status} ${JSON.stringify(bugBody)}`);
+            t6BugId = bugBody.id;
+
+            // ⭐【反转】改造B新增：improvement 独立夹具——用于下方新增的 improvement 分支（原口径下
+            //   improvement 与 bug 同属"无风险等级控件"，本轮起 improvement 转投 feature 一侧）。
+            const impRes = await fetch(`${BASE_URL}/api/sys-issues`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminTok}` },
+                body: JSON.stringify({ intake_contract_version: 2, type: 'improvement', title: 't6-improvement', system_name: 'BMS', source: '内部', description: `T6-improvement-${RUN_TAG}`, intake_liaison_id: LIAISON_ID })
+            });
+            const impBody = await impRes.json();
+            if (impRes.status !== 201) throw new Error(`T6 前置失败：improvement 建单未 201，实得 ${impRes.status} ${JSON.stringify(impBody)}`);
+            t6ImprovementId = impBody.id;
+
+            const page = await loginPage(browser, adminTok);
+            await page.goto(`${BASE_URL}/Sys_Iteration.html?issue=${t6FeatureId}`);
+            await page.waitForLoadState('networkidle');
+            await page.waitForTimeout(600);
+
+            // 未受理前：详情页「风险等级」kv 显示「未定级」
+            const riskKvBefore = await page.locator('.u-kv-item:has-text("风险等级")').first().textContent().catch(() => '');
+            await shotOnFail(page, riskKvBefore.includes('未定级'), 't6-risk-kv-undefined-before-accept', `未受理前详情页「风险等级」显示「未定级」（实得："${riskKvBefore.trim()}"）`);
+
+            // 受理弹窗：feature 单必选风险等级控件（改造A：值域一级/二级/三级；用户拍板默认选中"三级"）
+            await page.click('#siDActions button:has-text("受理通过")');
+            await page.waitForSelector('#siModalOverlay.open', { timeout: 5000 });
+            await page.waitForTimeout(200);
+            const riskSel = page.locator('#f_risk_level');
+            await shotOnFail(page, (await riskSel.count()) === 1, 't6-risk-select-exists', 'feature 受理弹窗存在 #f_risk_level 风险等级下拉');
+            const riskOptions = await riskSel.locator('option').allTextContents();
+            await shotOnFail(page, JSON.stringify(riskOptions) === JSON.stringify(['请选择', '一级', '二级', '三级']), 't6-risk-select-options', `风险等级下拉选项恰为 请选择/一级/二级/三级（实得：${JSON.stringify(riskOptions)}）`);
+            const riskDefault = await riskSel.inputValue();
+            await shotOnFail(page, riskDefault === '三级', 't6-risk-select-default-value', `风险等级下拉默认选中"三级"（用户拍板默认体验，服务端必填闸不变），实得="${riskDefault}"`);
+
+            // 手动清空选择（模拟用户改回"请选择"）→ 点确定 → 前端仍拦截（必选闸门未因默认值放松）
+            await riskSel.selectOption('');
+            await page.click('#siMConfirm');
+            await page.waitForTimeout(400);
+            const riskEmptyToast = await page.locator('#toast-container').textContent().catch(() => '');
+            await shotOnFail(page, riskEmptyToast.includes('请选择风险等级'), 't6-risk-empty-toast', `清空风险等级点确定 → toast「请选择风险等级」（实得："${riskEmptyToast}"）`);
+            const riskModalStillOpen = await page.locator('#siModalOverlay.open').count();
+            await shotOnFail(page, riskModalStillOpen === 1, 't6-risk-modal-stays-open', '清空风险等级点确定后弹窗仍打开（前端必选拦截，默认值不代替真实选择）');
+
+            // 选「一级」提交 → 成功（选非默认值，验证真选择被采纳，非靠默认值蒙混过关）
+            await riskSel.selectOption('一级');
+            await page.click('#siMConfirm');
+            await page.waitForTimeout(800);
+            const riskModalClosed = await page.locator('#siModalOverlay.open').count();
+            await shotOnFail(page, riskModalClosed === 0, 't6-risk-submit-success', '选定风险等级后点确定 → 受理成功，弹窗关闭');
+            const riskRow = await dbGet('SELECT status, risk_level FROM sys_issues WHERE id=?', [t6FeatureId]);
+            await shotOnFail(page, !!riskRow && riskRow.status === '待指派', 't6-risk-db-status', `受理后落库 status=待指派，实得=${riskRow && riskRow.status}`);
+            await shotOnFail(page, !!riskRow && riskRow.risk_level === '一级', 't6-risk-db-value', `受理后落库 risk_level=一级，实得=${riskRow && riskRow.risk_level}`);
+
+            // 受理后：详情页「风险等级」kv 显示具体值
+            await page.waitForTimeout(300);
+            const riskKvAfter = await page.locator('.u-kv-item:has-text("风险等级")').first().textContent().catch(() => '');
+            await shotOnFail(page, riskKvAfter.includes('一级') && !riskKvAfter.includes('未定级'), 't6-risk-kv-value-after-accept', `受理后详情页「风险等级」显示"一级"（实得："${riskKvAfter.trim()}"）`);
+
+            // D15：单已过受理段（status=待指派）——intake 通知行仍可见（常驻化），但发送按钮不再出现
+            const intakeRowAfter = page.locator('.u-notify-row:has-text("对接人受理")');
+            await shotOnFail(page, (await intakeRowAfter.count()) > 0, 't6-d15-row-still-visible', 'D15：单已过受理段后，对接人受理通知行仍渲染（常驻化，非 ghost 行消失）');
+            const intakeRowAfterSendCount = await intakeRowAfter.locator('button:has-text("发送通知")').count();
+            await shotOnFail(page, intakeRowAfterSendCount === 0, 't6-d15-no-send-btn-after-accept', 'D15：已过受理段后「发送通知」按钮不再出现（发送仍仅受理段可点，机制未动）');
+
+            // [284 号 A3] 非 admin 角色视角：intake 通知行"可见"（展示面）与"可操作"（授权面）是两套独立判据——
+            //   canSeeNotify（是否渲染整个"钉钉通知"区块）在"admin∨受理人∨(feature/improvement 在册开发)"
+            //   三选一命中即真；canOperateIntake/canQueryReadIntake（发送/重发/查已读按钮）固定只认
+            //   isAdminUser（siRenderNotify 调用点显式传 isAdminUser 而非 canOperate，见 :2614 附近注释
+            //   "权限=仅 admin……受理人是通知对象本人，不给自己发"）。两套判据独立生效，故要证真的分离，
+            //   须构造"能看见但不能操作"的组合：把示例开发A(id8，本地真实 active user 角色账号)加为
+            //   t6FeatureId 的在册开发（命中 canSeeNotify 的 isRosterMember 分支），同时把 intake 通知
+            //   模拟成 sent 态（SQL 直接模拟，不经真实外呼，同 T4/T6 既有手法）——sent 态下 admin 本该
+            //   看到「查询已读」按钮，若非 admin 也看到，说明 admin 门失守。
+            await dbRun(`UPDATE sys_issues SET intake_notify_status='sent', intake_notify_message_key='t6-a3-mk', intake_read_at=NULL WHERE id=?`, [t6FeatureId]);
+            const oaA3 = await fetch(`${BASE_URL}/api/sys-issues/${t6FeatureId}/set-oa-number`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminTok}` },
+                body: JSON.stringify({ oa_number: '2026080077' })
+            });
+            if (oaA3.status !== 200) throw new Error(`T6/A3 前置失败：补 OA 号未 200，实得 ${oaA3.status} ${await oaA3.text().catch(() => '')}`);
+            const assignA3 = await fetch(`${BASE_URL}/api/sys-issues/${t6FeatureId}/assign`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminTok}` },
+                body: JSON.stringify({ assigned_to: 8 })
+            });
+            if (assignA3.status !== 200) throw new Error(`T6/A3 前置失败：assign(示例开发A id8) 未 200，实得 ${assignA3.status} ${await assignA3.text().catch(() => '')}`);
+
+            const dev8Tok = await signAs(8);
+            const pageDev8 = await loginPage(browser, dev8Tok);
+            await pageDev8.goto(`${BASE_URL}/Sys_Iteration.html?issue=${t6FeatureId}`);
+            await pageDev8.waitForLoadState('networkidle');
+            await pageDev8.waitForTimeout(600);
+            const dev8IntakeRow = pageDev8.locator('.u-notify-row:has-text("对接人受理")');
+            await shotOnFail(pageDev8, (await dev8IntakeRow.count()) > 0, 't6-a3-nonadmin-row-visible', '[284 A3] 非 admin 在册开发视角：intake 通知行可见（展示面——canSeeNotify 命中 isRosterMember 分支，detail DTO 字段面对在册开发未收窄）');
+            const dev8SendCount = await dev8IntakeRow.locator('button:has-text("发送通知"), button:has-text("重发")').count();
+            await shotOnFail(pageDev8, dev8SendCount === 0, 't6-a3-nonadmin-no-send-btn', '[284 A3] 非 admin：无发送/重发按钮（授权面——canOperateIntake 固定只认 isAdminUser，在册身份不豁免）');
+            const dev8QueryReadCount = await dev8IntakeRow.locator('button:has-text("查询已读")').count();
+            await shotOnFail(pageDev8, dev8QueryReadCount === 0, 't6-a3-nonadmin-no-query-read-btn', '[284 A3] 非 admin：无查询已读按钮（admin 门——canQueryReadIntake 固定只认 isAdminUser；此刻已是 sent 态，admin 视角本该出现该按钮，对照见上方 T4 sent+未读态断言）');
+            // ⚠️ 本文件 T1-T4 全程用 adminTok，这是本文件首次以非 admin 身份打开详情页——首次实测即撞出
+            // 已知背景噪音：siLoadIntakeLiaisons 对任意登录用户无条件调 GET intake-liaisons（requireAdmin
+            // 门控，:685-687 注释"非 admin 会 403，siLoadIntakeLiaisons 对此静默容错"），JS 层已优雅吞掉，
+            // 但浏览器对失败的 fetch 仍会原生打一条「Failed to load resource...403」console.error，与
+            // JS 是否捕获无关，非本次改动引入（同项目 test-sys-liaison-test-frontend-playwright.js 的
+            // allow403 机制、多处既有 playwright 套件均对此类噪音显式豁免）。
+            const dev8UnexpectedErrors = pageDev8._consoleErrors.filter(e => !/Failed to load resource.*403/.test(e));
+            await shotOnFail(pageDev8, dev8UnexpectedErrors.length === 0, 't6-a3-console-clean', `[284 A3] 非 admin 视角全程无非预期 JS 报错（intake-liaisons 403 已知背景噪音已豁免）——实得 ${dev8UnexpectedErrors.length} 个${dev8UnexpectedErrors.length ? ': ' + dev8UnexpectedErrors.slice(0, 3).join(' | ') : ''}（原始 ${pageDev8._consoleErrors.length} 个）`);
+            await pageDev8.close();
+
+            // ═══════════════════════════════════════════════════════════
+            // ⭐【反转·改造B新增】improvement 单：受理弹窗**同 feature 一样有**风险等级必选控件，默认
+            //   选中「三级」——原口径下 improvement 与 bug 同属"无控件"一侧，本轮起 improvement 转投
+            //   feature 一侧，仅 bug 仍是唯一无控件类型（下方 bug 分支断言随之收窄措辞）。
+            // ═══════════════════════════════════════════════════════════
+            await page.goto(`${BASE_URL}/Sys_Iteration.html?issue=${t6ImprovementId}`);
+            await page.waitForLoadState('networkidle');
+            await page.waitForTimeout(600);
+            const impKvBefore = await page.locator('.u-kv-item:has-text("风险等级")').first().textContent().catch(() => '');
+            await shotOnFail(page, impKvBefore.includes('未定级'), 't6-imp-risk-kv-undefined-before-accept', `【反转】未受理前 improvement 详情页「风险等级」显示「未定级」（实得："${impKvBefore.trim()}"）`);
+
+            await page.click('#siDActions button:has-text("受理通过")');
+            await page.waitForSelector('#siModalOverlay.open', { timeout: 5000 });
+            await page.waitForTimeout(200);
+            const impRiskSel = page.locator('#f_risk_level');
+            await shotOnFail(page, (await impRiskSel.count()) === 1, 't6-imp-risk-select-exists', '【反转】improvement 受理弹窗存在 #f_risk_level 风险等级下拉（改造B前 improvement 本无此控件）');
+            const impRiskOptions = await impRiskSel.locator('option').allTextContents();
+            await shotOnFail(page, JSON.stringify(impRiskOptions) === JSON.stringify(['请选择', '一级', '二级', '三级']), 't6-imp-risk-select-options', `improvement 风险等级下拉选项恰为 请选择/一级/二级/三级（实得：${JSON.stringify(impRiskOptions)}）`);
+            const impRiskDefault = await impRiskSel.inputValue();
+            await shotOnFail(page, impRiskDefault === '三级', 't6-imp-risk-select-default-value', `improvement 风险等级下拉默认选中"三级"（同 feature，实得="${impRiskDefault}"）`);
+
+            // 选「二级」提交 → 成功
+            await impRiskSel.selectOption('二级');
+            await page.click('#siMConfirm');
+            await page.waitForTimeout(800);
+            const impModalClosed = await page.locator('#siModalOverlay.open').count();
+            await shotOnFail(page, impModalClosed === 0, 't6-imp-risk-submit-success', 'improvement 选定风险等级后点确定 → 受理成功，弹窗关闭');
+            const impRiskRow = await dbGet('SELECT status, risk_level FROM sys_issues WHERE id=?', [t6ImprovementId]);
+            await shotOnFail(page, !!impRiskRow && impRiskRow.status === '待指派', 't6-imp-risk-db-status', `【反转】improvement 受理后落库 status=待指派，实得=${impRiskRow && impRiskRow.status}`);
+            await shotOnFail(page, !!impRiskRow && impRiskRow.risk_level === '二级', 't6-imp-risk-db-value', `【反转】improvement 受理后落库 risk_level=二级（改造B前恒 NULL），实得=${impRiskRow && impRiskRow.risk_level}`);
+
+            await page.waitForTimeout(300);
+            const impKvAfter = await page.locator('.u-kv-item:has-text("风险等级")').first().textContent().catch(() => '');
+            await shotOnFail(page, impKvAfter.includes('二级') && !impKvAfter.includes('未定级'), 't6-imp-risk-kv-value-after-accept', `【反转】受理后 improvement 详情页「风险等级」显示"二级"（实得："${impKvAfter.trim()}"）`);
+
+            // bug 单：受理弹窗无风险等级控件（改造B后 bug 是唯一无此控件的类型，走既有零输入确认）
+            await page.goto(`${BASE_URL}/Sys_Iteration.html?issue=${t6BugId}`);
+            await page.waitForLoadState('networkidle');
+            await page.waitForTimeout(600);
+            await page.click('#siDActions button:has-text("受理通过")');
+            await page.waitForSelector('#siModalOverlay.open', { timeout: 5000 });
+            await page.waitForTimeout(200);
+            const bugRiskSelCount = await page.locator('#f_risk_level').count();
+            await shotOnFail(page, bugRiskSelCount === 0, 't6-bug-no-risk-select', 'bug 单受理弹窗无 #f_risk_level 控件（改造B后 bug 是唯一不涉及风险等级的类型）');
+            await page.click('#siMConfirm');
+            await page.waitForTimeout(800);
+            const bugModalClosed = await page.locator('#siModalOverlay.open').count();
+            await shotOnFail(page, bugModalClosed === 0, 't6-bug-confirm-success', 'bug 单确认受理 → 成功，弹窗关闭（既有零输入确认路径不受影响）');
+            const bugRow = await dbGet('SELECT status, risk_level FROM sys_issues WHERE id=?', [t6BugId]);
+            await shotOnFail(page, !!bugRow && bugRow.status === '待处理', 't6-bug-db-status', `bug 受理后落库 status=待处理，实得=${bugRow && bugRow.status}`);
+            await shotOnFail(page, !!bugRow && bugRow.risk_level === null, 't6-bug-db-risk-null', `bug 受理后 risk_level 恒 NULL，实得=${bugRow && bugRow.risk_level}`);
+
+            // D15 查询已读：SQL 模拟已过受理段仍 sent+未读态（不经真实外呼，同 T4 手法），查询已读按钮应可用
+            await dbRun(`UPDATE sys_issues SET intake_notify_status='sent', intake_notify_message_key='t6-d15-mk', intake_read_at=NULL WHERE id=?`, [t6BugId]);
+            await page.goto(`${BASE_URL}/Sys_Iteration.html?issue=${t6BugId}`);
+            await page.waitForLoadState('networkidle');
+            await page.waitForTimeout(600);
+            const bugIntakeRow = page.locator('.u-notify-row:has-text("对接人受理")');
+            await shotOnFail(page, (await bugIntakeRow.count()) > 0, 't6-d15-bug-row-visible', 'D15：bug 单已过受理段（待处理）后，对接人受理通知行仍渲染');
+            const bugQueryReadBtnText = await bugIntakeRow.locator('button').first().textContent().catch(() => '');
+            await shotOnFail(page, bugQueryReadBtnText.includes('查询已读'), 't6-d15-query-read-available', `D15：已过受理段仍可用「查询已读」按钮（实得："${bugQueryReadBtnText}"）`);
+
+            await shotOnFail(page, page._consoleErrors.length === 0, 't6-console-clean', `T6 全程无 JS 报错（${page._consoleErrors.length} 个${page._consoleErrors.length ? ': ' + page._consoleErrors.slice(0, 2).join(' | ') : ''}）`);
+            await page.close();
+        }
+
+        // ═══════════════════════════════════════════════════════════════
+        // T7（D22 批2·2026-08-06）：状态显示改名「待验证」→「待验收」——纯展示映射回归。
+        //   存储值/API/筛选器 value 恒不变，仅列表徽章文字 + 筛选器选项文字改「待验收」（siStatusDisplay
+        //   统一映射口，见 Sys_Iteration.html 同函数注释）。SQL 直推状态（不走真实 submit 链路，本组只
+        //   测"给定 status='待验证' 的单，渲染出来的文字是什么"这一件事）。
+        // ═══════════════════════════════════════════════════════════════
+        {
+            console.log('\n── T7：状态显示改名「待验证」→「待验收」（列表徽章 + 筛选器，存储值不变） ──');
+            const t7Res = await fetch(`${BASE_URL}/api/sys-issues`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminTok}` },
+                body: JSON.stringify({ intake_contract_version: 2, type: 'feature', title: 't7-display', system_name: 'BMS', source: '内部', description: `T7-display-${RUN_TAG}`, intake_liaison_id: LIAISON_ID })
+            });
+            const t7Body = await t7Res.json();
+            if (t7Res.status !== 201) throw new Error(`T7 前置失败：建单未 201，实得 ${t7Res.status} ${JSON.stringify(t7Body)}`);
+            t7DisplayId = t7Body.id;
+            // 直推 status='待验证'（本组只测显示映射，不测如何到达该态——到达路径已由 verify-sys-liaison-test
+            // 等套件覆盖）。
+            await dbRun(`UPDATE sys_issues SET status='待验证' WHERE id=?`, [t7DisplayId]);
+
+            const page = await loginPage(browser, adminTok);
+            await page.goto(`${BASE_URL}/Sys_Iteration.html`);
+            await page.waitForLoadState('networkidle');
+            await page.waitForTimeout(600);
+
+            // ① 列表徽章：本单所在行的状态徽章文字应显示「待验收」（非「待验证」）。
+            const row = page.locator(`tr:has-text("t7-display")`).first();
+            await shotOnFail(page, (await row.count()) > 0, 't7-list-row-exists', '列表存在本单所在行');
+            const badgeText = await row.locator('.u-status-badge').first().textContent().catch(() => '');
+            await shotOnFail(page, badgeText.trim() === '待验收', 't7-list-badge-display', `列表状态徽章显示「待验收」（非存储值「待验证」），实得："${badgeText.trim()}"`);
+
+            // ② 详情页同一改名（复用同一 siStatusDisplay 口，[1637] 详情 header 徽章）。
+            await page.evaluate((id) => window.siOpenDrawer && window.siOpenDrawer(id), t7DisplayId);
+            await page.waitForTimeout(500);
+            const detailBadgeText = await page.locator('#siDMeta .u-status-badge').first().textContent().catch(() => '');
+            await shotOnFail(page, detailBadgeText.trim() === '待验收', 't7-detail-badge-display', `详情页状态徽章显示「待验收」，实得："${detailBadgeText.trim()}"`);
+            await page.evaluate(() => window.siCloseDrawer && window.siCloseDrawer());
+            await page.waitForTimeout(300);
+
+            // ③ 筛选器：option value 仍是存储值「待验证」，仅 option 文字显示「待验收」——value≠text 分离生效。
+            const filterOpt = await page.evaluate(() => {
+                const sel = document.getElementById('siFStatus');
+                const opt = sel ? [...sel.options].find(o => o.value === '待验证') : null;
+                return opt ? { value: opt.value, text: opt.textContent } : null;
+            });
+            await shotOnFail(page, !!filterOpt, 't7-filter-option-exists', '筛选器存在 value="待验证" 的选项（存储值未变）');
+            await shotOnFail(page, !!filterOpt && filterOpt.text === '待验收', 't7-filter-option-text', `筛选器该选项显示文字为「待验收」，实得："${filterOpt && filterOpt.text}"`);
+
+            // ④ 筛选器仍按存储值查询：选中该 option 后，本单（真实 status='待验证'）应仍出现在筛选结果里
+            //   （证 value 真的是「待验证」在驱动查询，非误把显示文字"待验收"当成了查询参数）。
+            await page.selectOption('#siFStatus', '待验证');
+            await page.waitForTimeout(600);
+            const rowAfterFilter = page.locator(`tr:has-text("t7-display")`).first();
+            await shotOnFail(page, (await rowAfterFilter.count()) > 0, 't7-filter-query-by-storage-value', '按「待验收」选项筛选后（实际传参值="待验证"），本单仍在结果集内——筛选器查询确实按存储值而非显示文字');
+            const badgeAfterFilter = await rowAfterFilter.locator('.u-status-badge').first().textContent().catch(() => '');
+            await shotOnFail(page, badgeAfterFilter.trim() === '待验收', 't7-filter-result-badge-display', `筛选结果内该行徽章仍显示「待验收」，实得："${badgeAfterFilter.trim()}"`);
+            await page.selectOption('#siFStatus', '');
+            await page.waitForTimeout(300);
+
+            // ⑤ [290 号 L3 最小版] 提交弹窗"提交前确认"双勾布局回归——纯前端渲染，不依赖真实单据（同批1
+            //   checkbox+width:100% 根因诊断范式，siModalSubmit 只需一个形状合法的 iss 对象即可渲染）：
+            //   ① 两个 checkbox 尺寸未被共享层 `.u-form-group input{width:100%}` 放大（<40px 级判定，
+            //   原 bug 表现为 checkbox 撑满整行）；② 点击对应 <label> 能切换 checkbox 勾选态（label
+            //   for= 正确关联，非仅视觉对齐、实际点击目标对不上）。
+            await page.evaluate(() => { window.siModalSubmit({ id: 999999, type: 'feature', origin_issue_id: null, first_submitted_at: 'x' }); });
+            await page.waitForSelector('#siModalOverlay.open', { timeout: 5000 });
+            await page.waitForTimeout(200);
+            const cbBox1 = await page.locator('#siSubmitSelfTested').boundingBox();
+            const cbBox2 = await page.locator('#siSubmitTestEnvDeployed').boundingBox();
+            await shotOnFail(page, !!cbBox1 && cbBox1.width < 40, 't7-checkbox-width-self-tested', `「已完成自测」checkbox 宽度未被共享层 width:100% 放大（<40px 判定），实得宽度=${cbBox1 && cbBox1.width}`);
+            await shotOnFail(page, !!cbBox2 && cbBox2.width < 40, 't7-checkbox-width-test-env', `「已上测试库」checkbox 宽度未被共享层 width:100% 放大（<40px 判定），实得宽度=${cbBox2 && cbBox2.width}`);
+
+            const beforeCheck = await page.evaluate(() => ({
+                selfTested: document.getElementById('siSubmitSelfTested').checked,
+                testEnv: document.getElementById('siSubmitTestEnvDeployed').checked,
+            }));
+            await shotOnFail(page, beforeCheck.selfTested === false && beforeCheck.testEnv === false, 't7-checkbox-default-unchecked', `两个 checkbox 默认均未勾选（确认清单式，按人留痕），实得=${JSON.stringify(beforeCheck)}`);
+            await page.click('label[for="siSubmitSelfTested"]');
+            await page.waitForTimeout(100);
+            const afterLabel1 = await page.evaluate(() => document.getElementById('siSubmitSelfTested').checked);
+            await shotOnFail(page, afterLabel1 === true, 't7-checkbox-label-toggle-1', `点击「已完成自测」label 后对应 checkbox 切换为已勾选（label for= 关联生效，非仅视觉对齐），实得 checked=${afterLabel1}`);
+            await page.click('label[for="siSubmitTestEnvDeployed"]');
+            await page.waitForTimeout(100);
+            const afterLabel2 = await page.evaluate(() => document.getElementById('siSubmitTestEnvDeployed').checked);
+            await shotOnFail(page, afterLabel2 === true, 't7-checkbox-label-toggle-2', `点击「已上测试库」label 后对应 checkbox 切换为已勾选，实得 checked=${afterLabel2}`);
+            await page.evaluate(() => { window.siCloseModal && window.siCloseModal(); });
+            await page.waitForTimeout(200);
+
+            await shotOnFail(page, page._consoleErrors.length === 0, 't7-console-clean', `T7 全程无 JS 报错（${page._consoleErrors.length} 个${page._consoleErrors.length ? ': ' + page._consoleErrors.slice(0, 2).join(' | ') : ''}）`);
+            await page.close();
+        }
     } finally {
         // 🧹 清理测试夹具（不依赖存量数据，自建自清）
         if (createdIssueId) {
@@ -329,6 +624,34 @@ async function main() {
             await dbRun(`DELETE FROM sys_issue_dev_assignees WHERE issue_id=?`, [oaExemptIssueId]);
             await dbRun(`DELETE FROM sys_issues WHERE id=?`, [oaExemptIssueId]);
             console.log(`  🧹 T1.5 测试夹具已清理（issue #${oaExemptIssueId}）`);
+        }
+        // [284 号 M-3 必修] T6 两夹具此前漏清——finally 是唯一收口点，任一断言中途失败也须走到这里
+        // （与上两组同一 try/finally 结构，天然覆盖失败路径，非额外新增的容错分支）。
+        if (t6FeatureId) {
+            await dbRun(`DELETE FROM sys_issue_timeline WHERE issue_id=?`, [t6FeatureId]);
+            await dbRun(`DELETE FROM sys_issue_dev_assignees WHERE issue_id=?`, [t6FeatureId]);
+            await dbRun(`DELETE FROM sys_issues WHERE id=?`, [t6FeatureId]);
+            console.log(`  🧹 T6 feature 测试夹具已清理（issue #${t6FeatureId}）`);
+        }
+        if (t6BugId) {
+            await dbRun(`DELETE FROM sys_issue_timeline WHERE issue_id=?`, [t6BugId]);
+            await dbRun(`DELETE FROM sys_issue_dev_assignees WHERE issue_id=?`, [t6BugId]);
+            await dbRun(`DELETE FROM sys_issues WHERE id=?`, [t6BugId]);
+            console.log(`  🧹 T6 bug 测试夹具已清理（issue #${t6BugId}）`);
+        }
+        // ⭐ 改造B新增：improvement 夹具同 feature/bug 一并在 finally 兜底清理。
+        if (t6ImprovementId) {
+            await dbRun(`DELETE FROM sys_issue_timeline WHERE issue_id=?`, [t6ImprovementId]);
+            await dbRun(`DELETE FROM sys_issue_dev_assignees WHERE issue_id=?`, [t6ImprovementId]);
+            await dbRun(`DELETE FROM sys_issues WHERE id=?`, [t6ImprovementId]);
+            console.log(`  🧹 T6 improvement 测试夹具已清理（issue #${t6ImprovementId}）`);
+        }
+        // ⭐ D22 批2新增：T7 状态显示改名夹具。
+        if (t7DisplayId) {
+            await dbRun(`DELETE FROM sys_issue_timeline WHERE issue_id=?`, [t7DisplayId]);
+            await dbRun(`DELETE FROM sys_issue_dev_assignees WHERE issue_id=?`, [t7DisplayId]);
+            await dbRun(`DELETE FROM sys_issues WHERE id=?`, [t7DisplayId]);
+            console.log(`  🧹 T7 测试夹具已清理（issue #${t7DisplayId}）`);
         }
         await browser.close();
         db.close();

@@ -152,7 +152,8 @@ async function main() {
   let mainId;
   {
     mainId = await seedIssue({ status: '待受理' });
-    let r = await I.sysIssueTransition(mainId, 'intake_accept', '待受理', ADMIN, {});
+    // [工期对接测试与风险等级拆分 方案 v1.1 §3.4·C5] seedIssue 默认 type='feature'，intake_accept 受理必带 risk_level。
+    let r = await I.sysIssueTransition(mainId, 'intake_accept', '待受理', ADMIN, { risk_level: '二级' });
     assert.strictEqual(r.toStatus, '待指派', 'intake_accept 待受理 → 待指派');
     assert.strictEqual(await statusOf(mainId), '待指派');
 

@@ -79,21 +79,30 @@ async function seedToDev(needsFeasibility = 0, assignTo = 5) {
   const id = r.body.id;
   // ⭐ 角色权限重构 C2.5 撤销（v2.1）：建单直落「待受理」，无需再走预沟通段。
   // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
-  await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, {});
+  // [工期对接测试与风险等级拆分 方案 v1.1 §3.4·C5] feature 受理必带 risk_level（否则 400 RISK_LEVEL_REQUIRED）。
+  await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, { risk_level: '二级' });
   // ⭐ 角色权限重构 v2.1 §4：变更流 assign 前置要求 oa_number 通过校验 → 待指派态内先补号。
   r = await call('POST', `/api/sys-issues/${id}/set-oa-number`, adminTok, { oa_number: '2026070001' });
   assert.strictEqual(r.status, 200, '夹具补 OA 号 200, got ' + r.status + ' ' + JSON.stringify(r.body));
   r = await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: assignTo });
   assert.strictEqual(r.status, 200, 'assign 200, got ' + r.status);
+  // [工期对接测试与风险等级拆分 方案 v1.1 §3.0-⑥·C4a 涟漪修复] 本文件测的是可行性评估闸门/换轮清字段，
+  //   与「待对接测试」段无关（后者由专门的 verify-sys-liaison-test.js 覆盖）。让对接人在 GATE 判定时
+  //   失效（模拟受理人后续停用/移出白名单），触发 §3.0-⑥ 降级路径，使 submit 仍直落"待验证"——本文件
+  //   其余断言零改动，这也是方案承认的合法真实场景（非造假绕过）。
+  await run(`UPDATE sys_issues SET intake_liaison_id = 999999 WHERE id = ?`, [id]);
   return id;
 }
 
 // 模拟 F2b /feasibility 端点写入（F2a 阶段端点未实现，直接改库注入评估/受阻字段）
+// [工期对接测试与风险等级拆分 方案 v1.1 §3.2·C2] 新增 estimated_effort_days 参数（默认 3——非零默认值，
+//   同 dev_estimated_at 默认 EST 一惯做法：submit 现要求 feature+nf=1 单必填工期，本 helper 不补默认值的话
+//   现有调用点会在 submit 时撞新增的 400 EFFORT_REQUIRED，与本文件测试意图（验证换轮清字段等）无关。
 async function fillFeasibility(id, { conclusion = null, requirement_confirm = null, risk = null,
-  dev_estimated_at = EST, blocked = 0, blocked_reason = null, blocked_at = null } = {}) {
+  dev_estimated_at = EST, estimated_effort_days = 3, blocked = 0, blocked_reason = null, blocked_at = null } = {}) {
   await run(`UPDATE sys_issues SET feasibility_conclusion=?, feasibility_requirement_confirm=?, feasibility_risk=?,
-                dev_estimated_at=?, blocked=?, blocked_reason=?, blocked_at=? WHERE id=?`,
-    [conclusion, requirement_confirm, risk, dev_estimated_at, blocked, blocked_reason, blocked_at, id]);
+                dev_estimated_at=?, estimated_effort_days=?, blocked=?, blocked_reason=?, blocked_at=? WHERE id=?`,
+    [conclusion, requirement_confirm, risk, dev_estimated_at, estimated_effort_days, blocked, blocked_reason, blocked_at, id]);
 }
 
 async function main() {
@@ -143,7 +152,7 @@ async function main() {
     const idC = await seedToDev(0);
     r = await call('POST', `/api/sys-issues/${idC}/estimate`, devTok, { dev_estimated_at: EST });
     assert.strictEqual(r.status, 200, 'needs_feasibility=0 estimate 200, got ' + r.status);
-    r = await call('POST', `/api/sys-issues/${idC}/submit`, devTok, { mode: 'no_code', no_code_reason: 'feasibility 测试占位理由' });
+    r = await call('POST', `/api/sys-issues/${idC}/submit`, devTok, { mode: 'no_code', no_code_reason: 'feasibility 测试占位理由', self_tested: true, test_env_deployed: true });
     assert.strictEqual(r.status, 200, 'needs_feasibility=0 submit 放行, got ' + r.status + ' ' + JSON.stringify(r.body));
     ok('[C1] needs_feasibility=0 → estimate 正常 + submit 放行（新模型不查 feasibility，C3 起恒放行）');
 
@@ -172,20 +181,23 @@ async function main() {
     // F-return：完整评估 → submit → 造 blocked → return → 清
     const idF2 = await seedToDev(1, 5);
     await fillFeasibility(idF2, { dev_estimated_at: EST, conclusion: '可行', requirement_confirm: '懂了' });
-    r = await call('POST', `/api/sys-issues/${idF2}/submit`, devTok, { mode: 'no_code', no_code_reason: 'feasibility 测试占位理由' });
+    r = await call('POST', `/api/sys-issues/${idF2}/submit`, devTok, { mode: 'no_code', no_code_reason: 'feasibility 测试占位理由', self_tested: true, test_env_deployed: true });
     assert.strictEqual(r.status, 200, 'F2 submit 200, got ' + r.status + ' ' + JSON.stringify(r.body));
     await run(`UPDATE sys_issues SET blocked=1, blocked_reason='x' WHERE id=?`, [idF2]);   // 造受阻残留测 return 清理覆盖
     r = await call('POST', `/api/sys-issues/${idF2}/return`, adminTok, { reason: '列不齐' });
     assert.strictEqual(r.status, 200, 'return 200, got ' + r.status);
     assert.strictEqual(r.body.status, '开发中', 'return → 开发中');
-    d = await get('SELECT feasibility_conclusion, feasibility_requirement_confirm, blocked, blocked_reason, dev_estimated_at, return_count FROM sys_issues WHERE id=?', [idF2]);
+    d = await get('SELECT feasibility_conclusion, feasibility_requirement_confirm, blocked, blocked_reason, dev_estimated_at, estimated_effort_days, return_count FROM sys_issues WHERE id=?', [idF2]);
     assert.strictEqual(d.feasibility_conclusion, null, 'return 清 conclusion');
     assert.strictEqual(d.feasibility_requirement_confirm, null, 'return 清 requirement_confirm');
     assert.strictEqual(d.blocked, 0, 'return 清 blocked');
     assert.strictEqual(d.blocked_reason, null, 'return 清 blocked_reason');
     assert.strictEqual(d.dev_estimated_at, null, 'return 清 dev_estimated_at');
+    // [v1.1 §3.2/§8·C2] estimated_effort_days 加入 SYS_CLEAR_FEASIBILITY_FIELDS_SQL 常量本体后，return 应
+    // 随评估三字段一并清空（fillFeasibility 已写入 3，此处验证其被换轮清空，非从未写入的伪阳性）。
+    assert.strictEqual(d.estimated_effort_days, null, 'return 清 estimated_effort_days（v1.1 §8 新增）');
     assert.strictEqual(d.return_count, 1, 'return_count++ 仍生效（既有逻辑不回归）');
-    ok('[F-return] 打回（待验证→开发中）清评估+blocked+dev_est，return_count++ 不回归');
+    ok('[F-return] 打回（待验证→开发中）清评估+blocked+dev_est+工期，return_count++ 不回归');
 
     // F-reopen：开发中→已关闭+填评估 → reopen → 清
     const idF3 = await seedToDev(1, 5);
@@ -194,13 +206,38 @@ async function main() {
     r = await call('POST', `/api/sys-issues/${idF3}/reopen`, adminTok, { reason: '回归' });
     assert.strictEqual(r.status, 200, 'reopen 200, got ' + r.status);
     assert.strictEqual(r.body.status, '开发中', 'reopen → 开发中');
-    d = await get('SELECT feasibility_conclusion, blocked, blocked_reason, dev_estimated_at, reopen_count FROM sys_issues WHERE id=?', [idF3]);
+    d = await get('SELECT feasibility_conclusion, blocked, blocked_reason, dev_estimated_at, estimated_effort_days, reopen_count FROM sys_issues WHERE id=?', [idF3]);
     assert.strictEqual(d.feasibility_conclusion, null, 'reopen 清 conclusion');
     assert.strictEqual(d.blocked, 0, 'reopen 清 blocked');
     assert.strictEqual(d.blocked_reason, null, 'reopen 清 blocked_reason');
     assert.strictEqual(d.dev_estimated_at, null, 'reopen 清 dev_estimated_at');
+    // [v1.1 §3.2/§8·C2] 同 F-return，reopen 也复用 SYS_CLEAR_FEASIBILITY_FIELDS_SQL，一并验证清空。
+    assert.strictEqual(d.estimated_effort_days, null, 'reopen 清 estimated_effort_days（v1.1 §8 新增）');
     assert.strictEqual(d.reopen_count, 1, 'reopen_count++ 仍生效（既有逻辑不回归）');
-    ok('[F-reopen] 重开（已关闭→开发中）清评估+blocked+dev_est，reopen_count++ 不回归');
+    ok('[F-reopen] 重开（已关闭→开发中）清评估+blocked+dev_est+工期，reopen_count++ 不回归');
+
+    // ── [FC] 源码断言锁调用点（工期对接测试与风险等级拆分 方案 v1.1 §3.2/§8·C2/C4；C0 矩阵验证清单 §F-5）──
+    //   SYS_CLEAR_FEASIBILITY_FIELDS_SQL 常量本体已含 estimated_effort_days，本组锁定其消费点数，防未来
+    //   新增 ADMIN_TRANSITION 分支忘记复用本常量（各自另起 SQL 片段导致工期字段清空口径与评估三字段/
+    //   blocked 三件套不同步漂移）——同本文件 verify-sys-pre-discuss.js 的"源码存在性哨兵"写法：直接读
+    //   index.js 源码文本断言引用次数，非仅靠行为断言（那类断言只能证明"现有几处生效"，证明不了"没有
+    //   遗漏没复用常量的手写清空"）。
+    //   [方案 v1.1 §3.1b·C4 收口] 消费点从 2 处（return/reopen）增至 **3 处**——liaison_test_return 新增
+    //   引用（C0 §F-5 登记项："SYS_CLEAR_FEASIBILITY_FIELDS_SQL 现两调用点...liaison_test_return 新 case
+    //   引用+源码断言锁调用点"），本条随 C4 落地同批更新为 3。
+    {
+      const fs2 = require('fs');
+      const path2 = require('path');
+      const src = fs2.readFileSync(path2.join(__dirname, '../routes/sys-iteration/index.js'), 'utf8');
+      const constDeclMatch = src.match(/const SYS_CLEAR_FEASIBILITY_FIELDS_SQL = \[([\s\S]*?)\];/);
+      assert.ok(constDeclMatch, '[FC] 源码应能定位 SYS_CLEAR_FEASIBILITY_FIELDS_SQL 常量声明');
+      assert.ok(/estimated_effort_days\s*=\s*NULL/.test(constDeclMatch[1]),
+        '[FC] SYS_CLEAR_FEASIBILITY_FIELDS_SQL 常量体应含 estimated_effort_days = NULL（v1.1 §8 新增）');
+      const usageMatches = src.match(/\.\.\.SYS_CLEAR_FEASIBILITY_FIELDS_SQL/g) || [];
+      assert.strictEqual(usageMatches.length, 3,
+        `[FC] SYS_CLEAR_FEASIBILITY_FIELDS_SQL 消费点应恰 3 处（return/reopen/liaison_test_return，C4 新增第 3 处），实际 ${usageMatches.length} 处——新增/减少均需回头核实工期清空口径是否随之同步`);
+      ok('[FC] 源码断言锁调用点：SYS_CLEAR_FEASIBILITY_FIELDS_SQL 常量体含 estimated_effort_days=NULL + 消费点恰 3 处（return/reopen/liaison_test_return，C4 新增），防第 4 处遗漏复用（C0 §F-5）');
+    }
 
     // ── [G] 防御性死代码注记（H-1 + 建单 FEASIBILITY_NOT_APPLICABLE，ultracode 对抗审补全）──
     //   两处为 bug/config 流预埋、F2a 内不可达、无法端到端测：
@@ -209,6 +246,27 @@ async function main() {
     //   ② 建单 FEASIBILITY_NOT_APPLICABLE（非 feature/improvement 传 needs_feasibility=1 拒）——config/bug 建单先被 TYPE_NOT_SUPPORTED 拦，到不了该守卫。
     //   两处 type 维度断言待 bug/config 流追加（C 系列后续）补端到端；needs_feasibility 维度已由 [B]/[C] 全覆盖。
     ok('[G] H-1 submit type 过滤 + 建单 FEASIBILITY_NOT_APPLICABLE 均为防御性死代码（无 bug/config 流不可达）；needs_feasibility 维度 [A]/[C] 已覆盖');
+
+    // [284 号 B4] 补齐上方注释标记的历史缺口——「两处 type 维度断言待 bug/config 流追加（C 系列后续）
+    //   补端到端」此前从未真正落地。C2 已实现"bug 无工期"（/feasibility 端点 type 检查早于
+    //   needs_feasibility/字段级校验，见 index.js :6854 一带），但此前从未有测试真调用过该端点验证——
+    //   只靠"bug 单结构上到不了这里"的推导代替了实测。这里直接 raw SQL 构造一张 needs_feasibility=1
+    //   的 bug 单（绕过建单时的 TYPE_NOT_SUPPORTED 早期拦截，模拟"万一有脏数据/未来某条口子松动"场景），
+    //   真调用 /feasibility 端点携带 estimated_effort_days，验证类型闸门在字段闸门之前生效 + 零副作用。
+    {
+      const rBug = await run(
+        `INSERT INTO sys_issues (type, status, title, system_name, source, created_by, created_by_name, assigned_at, needs_feasibility)
+         VALUES ('bug', '处理中', 'B4-bug无工期', 'BMS', '内部', 1, '管理员', datetime('now','localtime'), 1)`
+      );
+      const bugId = rBug.lastID;
+      const rFeasBug = await call('POST', `/api/sys-issues/${bugId}/feasibility`, devTok,
+        { conclusion: '可行', requirement_confirm: 'x', dev_estimated_at: futureEst(30), estimated_effort_days: 5 });
+      assert.strictEqual(rFeasBug.status, 409, `[G-bug] bug 单调 /feasibility 应 409，实际 ${rFeasBug.status} ${JSON.stringify(rFeasBug.body)}`);
+      assert.strictEqual(rFeasBug.body.code, 'FEASIBILITY_NOT_APPLICABLE', '[G-bug] 错误码 FEASIBILITY_NOT_APPLICABLE（类型闸门先于字段闸门）');
+      const rowBug = await get('SELECT estimated_effort_days FROM sys_issues WHERE id=?', [bugId]);
+      assert.strictEqual(rowBug.estimated_effort_days, null, '[G-bug] ⭐ 284 号 B4：bug 单 estimated_effort_days 零副作用，仍 NULL（未被半写入）');
+      ok('[G-bug] 284 号 B4 补齐：bug 单真调 /feasibility 端点（此前仅靠"结构不可达"推导，未实测）→ 409 FEASIBILITY_NOT_APPLICABLE + estimated_effort_days 保持 NULL（type 闸门先于字段闸门生效，历史缺口补齐）');
+    }
 
     // [C3 退场] 原 [H]（"跳过评估直接 submit 撞 ESTIMATE_REQUIRED 死锁约束"）随旧 submit 的 ESTIMATE_REQUIRED
     //   闸门一并移除——新 submit 不再校验 dev_estimated_at，"F2a 不可单独部署、必须 F2a+F2b 同批"这条约束

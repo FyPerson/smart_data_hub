@@ -105,7 +105,7 @@ async function seedBugToReady(devId = 5, devTokFor = devTok) {
   assert.strictEqual(r.status, 200, 'bug assign 200');
   r = await call('POST', `/api/sys-issues/${id}/estimate`, devTokFor, { dev_estimated_at: EST });
   assert.strictEqual(r.status, 200, 'bug estimate 200, got ' + JSON.stringify(r.body));
-  r = await call('POST', `/api/sys-issues/${id}/submit`, devTokFor, { mode: 'no_code', no_code_reason: '修复完成（占位理由）' });
+  r = await call('POST', `/api/sys-issues/${id}/submit`, devTokFor, { mode: 'no_code', no_code_reason: '修复完成（占位理由）', self_tested: true, test_env_deployed: true });
   assert.strictEqual(r.status, 200, 'bug submit 200, got ' + JSON.stringify(r.body));
   r = await call('POST', `/api/sys-issues/${id}/accept`, adminTok, {});
   assert.strictEqual(r.status, 200, 'bug accept 200, got ' + JSON.stringify(r.body));

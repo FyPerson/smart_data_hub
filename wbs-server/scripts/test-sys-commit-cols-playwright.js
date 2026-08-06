@@ -18,6 +18,77 @@
  *   换行，后端 SVN 版本号多条 ',' 拼接无空格）——见 [T13]（siBuildCommitCopyText 纯函数边界 + 前端
  *   多条真实复制）与新增 [T13b]（后端多条真实复制，新夹具 iManyBe）。本文件头部这份摘要是历次续补
  *   累积的产物，早已不完整覆盖 T9-T26（未在此逐条补全，非本次范围）。
+ *
+ * ⭐ S2（贴图四件与工期测试段·三列一体设计，2026-08-05）：列表页新增需求方/需求部门/实际完成三列
+ *   （零 schema，routes/sys-iteration/index.js GET /sys-issues 加输出）+ 1366×768 消横滚。
+ *   [T1]/[T1b] 表头列数基线 14→16（**非 17**——需求方/需求部门拆两列时 1366×768 实测挂
+ *   u-table-compact 后 wrap 级仍横滚 47px，按预案合并为一列「需求方」双行 cell，data-sort-by 保
+ *   requester_name）。cellOf/colText 涉及的列位常量（fe/be、IDX_CREATED、IDX_DEADLINE）随列序整体
+ *   右移同步更新。新增 [T2c]（1366×768 wrap+页面级不横滚，有数据行时量）/ [T27]（需求方/实际完成
+ *   表头↔data-sort-by 配对+相邻性）/ [T28]（需求方值正确性，含合并单列双行渲染）/ [T29]（实际完成
+ *   值正确性，末次「待验证」时刻 + 从未完成→'—'）/ [T30]（实际完成列排序点击冒烟）/ [T31]（finally
+ *   夹具清理 SQL 错误不吞，同 S1b cleanup 纪律）。S2 消横滚裁定：commit号两列（v1.136）的
+ *   .si-commit-cell max-width 168px→134px（已记锚点 §9 待追认）。
+ *   ⚠️ L-1（codex 264 号末次合并审采纳）：134px 是已替代的中间值——主会话后续两轮裁定进一步收到
+ *   130px（见下方"S4 段1收口·主会话两轮裁定"条目），[L-3]/[T2d] 现行断言值均为 130px，本条历史
+ *   记录原样保留不改写（134 在当时确实是交付值），只在此处补一行指向后续变更，避免读者以为 134
+ *   是最终态。
+ *
+ * ⭐ codex 259 号审查 0-HIGH/5M/3L 采纳批（2026-08-05）：
+ *   L-1（Sys_Iteration.html）：requester_name/requester_dept 渲染前 trim 空白串防御。
+ *   M-2 → 新增 [T29b]：last_completed_at 真实流转版（submit→W-GATE→timeline→return→submit，走真实
+ *     端点非手工插桩），[T29] 原 SQL 插桩版保留不删，两组互补。
+ *   M-3 → [T30] 补行序断言：两个有值夹具 + 一个 NULL 夹具，asc/desc 各点一次交叉验证行序 + NULL 恒
+ *     末尾（先实测再断言，不凭源码猜）。
+ *   M-4 → [T2c] 堵空态假绿：排除 colspan 空态行 + 显式核对长内容夹具（iMany/iManyBe）确实渲染出预期
+ *     内容后再量 scrollWidth（cellOf 因此提前到 [T2c] 之前定义）。
+ *   M-5 → [T31] 残留计数从只打印改为真实 must() 断言。
+ *   L-3 → 新增 .si-commit-cell computed max-width===134px 合同锁（同 250 号 D4 范式）。
+ *   index.js 本批不动；性能项 M-1 由主会话自行验证，不在本文件覆盖范围。
+ *
+ * ⭐ codex 260 号复审 0-HIGH/2M 修复批（2026-08-05）：
+ *   M-A → [T29b] 补同秒假绿口：二次 submit 前轮询数据库时钟严格跨过 tl1.created_at（50ms/3s 超时），
+ *     新增 tl2.created_at > tl1.created_at 严格断言。
+ *   M-B → [T30] 补 NULL 缺席假绿口：用 `#siFSearch` 搜索框（siMatchSearch 按 title 子串匹配）收窄到
+ *     本轮夹具 PREFIX，三张判别单必然同屏，ixOther 改为强制 >=0 且严格排在两个有值夹具之后。
+ *
+ * ⭐ S3（贴图四件与工期测试段·四件①+④，2026-08-05）：详情抽屉六时间点展示 + 无代码交付原因
+ *   title→正文块。routes/sys-iteration/index.js 详情端点补 last_completed_at 子查询（与列表端点
+ *   完全同一 SQL）。新增 [T32]（六时间点 kv + 打回/重开行，复用 [T29b] 的 iFlow 夹具）/ [T33]
+ *   （无代码交付正文块 + XSS 防护，新夹具 iNoCode）。
+ *
+ * ⭐ codex 262 号复审 0-HIGH/3M/2L 修复批（2026-08-05·实现层正面确认，缺口在断言）：
+ *   M-1 → [T32] 「实际完成」补原始值层：先断言详情接口原始 last_completed_at 与 tl2.created_at
+ *     秒级精确相等，再断言 UI 文本等于 siFmtDT(该原始值)，不做跨分钟等待。
+ *   M-2 → 新增 [T32b]：专用夹具给六个时间字段互不相同的已知值 + return_count=1≠reopen_count=2，
+ *     逐项精确配对断言，堵"字段错接到另一同为空/同为 0 的字段仍绿"的漏判。
+ *   M-3 → [T33] 容器锁定：先按标题「无代码交付说明」精确定位 .si-worknote-block，块内断言姓名/
+ *     siFmtDT(resolved_at)/原因正文三项；正常单断言容器本身不存在（非仅文本缺席）；补「工作说明」
+ *     块不受影响的断言（防原因误入工作说明块）。
+ *   L-1（Sys_Iteration.html）→ ncItems 过滤与渲染统一 trim；写入端 validateSubmitBody 已 trim+拒
+ *     空白，此处是双保险，未改写入端行为。
+ *   L-2 → 全文件"五时间点"措辞改"六时间点"。
+ *
+ * ⭐ S4 段1收口·Opus 预筛发现·主会话亲核成立（2026-08-05）：resume 语义洞——变更流 hold 允许
+ *   from='待验证'（transitions.js:308-309），resume 回解后写一条 event_type='status_change'/
+ *   to_status='待验证'/action_code='resume' 的 timeline 行（transitions.js:324），会被原
+ *   last_completed_at 子查询的 MAX 误采纳，把"恢复时刻"冒充"完成时刻"。routes/sys-iteration/
+ *   index.js 列表+详情两处子查询均加 `AND action_code IS NULL`（W-GATE mirror 是唯一 NULL 写者）。
+ *   新增 [T29c]：SQL 直插伪 resume 行（晚于 tl2.created_at 的已知未来值），断言两处 API 的
+ *   last_completed_at 不被带跑——已实测修复前 2 条必红（MAX 选中伪行）、修复后转绿，红→绿证据见
+ *   session 报告。同批新增 [T2d]（134px 上限顶格内容闭环，200 字符 commit_ref 实测渲染宽度+wrap
+ *   不重滚）+ [T33] 末段正面锚点（切换抽屉后先断言 siDTitle 确已指向目标单，防抽屉未开的假绿）+
+ *   [T31] 补 sys_issue_timeline 残留断言（覆盖 [T29c] 新插入的伪行）。Sys_Iteration.html:121-127
+ *   的 134px 数学注释同批订正（原"134×2 最坏总宽 1237px"等算式有误，改为按每列收窄 34px 计算）。
+ *
+ * ⭐ S4 段1收口·主会话两轮裁定（2026-08-05，非 codex 编号审查，特此注明防与下方"codex 264 号
+ *   末次合并审"混淆）：第一轮裁定"计划开工列 92→84px 吸收 ID 位数增长"，经 A/B 实测证伪——
+ *   table-layout:auto 下该列声明 92px 与 84px 渲染结果恒为 81px，声明值不绑定实际渲染，改动零效果
+ *   （已如实报告，未虚报绿灯）。第二轮裁定改用唯一证实生效的杠杆：.si-commit-cell max-width
+ *   134px→130px（nowrap+max-width+overflow:hidden 三者叠加，是唯一被 [T2d] 实测证明"声明值=
+ *   渲染值"的属性）；.si-col-narrow 回滚 92px（84px 是无效果的改动不留，避免误导后人）。[L-3]
+ *   合同锁与 [T2d] 期望值同步改为 130px/≤132px；Sys_Iteration.html:121 起的整段预算注释改写为
+ *   "实测口径模型"（放弃声明值推导，只认渲染实测数字）。
  */
 'use strict';
 
@@ -41,6 +112,14 @@ const run = (sql, p = []) => new Promise((res, rej) => db.run(sql, p, function (
 const get = (sql, p = []) => new Promise((res, rej) => db.get(sql, p, (e, r) => e ? rej(e) : res(r)));
 
 let passed = 0, failed = 0;
+// codex 264 号末次合并审 HIGH-1 采纳后，codex 265 号复审磁盘查证（git show 上下文）判明：旧 catch
+//   本来就有 `failed++`——264 号"顶层 catch 只打印异常、不计入 failed，会被报成全绿"这句描述失实，
+//   已删除。fatalError 补的是三件旧写法没有的东西：①在汇总行里把"致命异常"与"普通断言失败"分开
+//   标注，读日志时一眼能看出是哪一类；②防未来重构时有人把 failed++ 从 catch 里移走，退出闸失去
+//   独立信号来源；③配合下方 IIFE 末尾新挂的外层 `.catch()`，把 finally 段自身抛错（例如
+//   browser.close()/cleanup() 失败）也纳入同一条非零退出保证——finally 段异常发生在原 catch 块
+//   之外，光靠 catch 里的 failed++ 盖不到这条路径。
+let fatalError = null;
 function must(cond, msg) {
     if (cond) { passed++; console.log('  ✅ ' + msg); return true; }
     failed++; console.log('  ❌ ' + msg); return false;
@@ -98,6 +177,20 @@ const seedCommit = (issueId, daId, userId, component, ref) =>
         const admin = await get(`SELECT id, username, display_name, role FROM users WHERE role = 'admin' AND status = 'active' ORDER BY id LIMIT 1`);
         if (!admin) throw new Error('库中无 active admin 用户，无法造 token');
         const adminTok = jwt.sign({ id: admin.id, username: admin.username, display_name: admin.display_name, role: admin.role }, JWT_SECRET, { expiresIn: '1h' });
+        // codex 259 M-2：[T29b] 需要走真实 submit/return 端点——本文件此前所有 mkMember(issueId, 5/6/7…)
+        //   都是纯 SQL 造的假 user_id（不对应 users 表真实行），够用于"admin 查看列表"场景，但 submit/
+        //   return 端点跑在**真实运行中的 server**（非本文件其余大量 verify-sys-*.js 那种自建 in-process
+        //   express app + 任意 SECRET），authenticateToken 会按 JWT 里的 id 走真实鉴权路径——需要一个
+        //   real、active 的 role='user' 账号来签发可用的 dev token。
+        const devUser = await get(`SELECT id, username, display_name, role FROM users WHERE role = 'user' AND status = 'active' ORDER BY id LIMIT 1`);
+        if (!devUser) throw new Error('库中无 active 普通用户（role=user），无法造 [T29b] 的 dev token');
+        const devTokFlow = jwt.sign({ id: devUser.id, username: devUser.username, display_name: devUser.display_name, role: devUser.role }, JWT_SECRET, { expiresIn: '1h' });
+        // codex 264 号末次合并审 [T33b]：DELETE dev-assignees 端点对 gated 家族（DEV/VERIFY）有
+        //   LAST_ASSIGNEE 硬闸——"不能移除在册最后一名开发"（index.js:3633-3636，activeCount===1 即拒），
+        //   要真实移除 devUser 就必须先有第二名在册开发把 activeCount 顶到 2。查一个不同于 devUser 的
+        //   第二个 real、active 普通用户。
+        const devUser2 = await get(`SELECT id, username, display_name, role FROM users WHERE role = 'user' AND status = 'active' AND id != ? ORDER BY id LIMIT 1`, [devUser.id]);
+        if (!devUser2) throw new Error('库中无第二个 active 普通用户（role=user），无法造 [T33b] 的移除前置');
 
         // ── 夹具：三种 commit 数量形态 + 两种空态 ──────────────────────────
         const iTwo = await mkIssue(`CC-两条-${RUN_TAG}`, '处理中');
@@ -142,7 +235,12 @@ const seedCommit = (issueId, daId, userId, component, ref) =>
         await page.waitForLoadState('networkidle');
         await page.waitForTimeout(600);
 
-        // ── [T1] 表头 14 列 + 列序 ───────────────────────────────────────
+        // ── [T1] 表头 16 列 + 列序 ───────────────────────────────────────
+        // S2（贴图四件与工期测试段·三列一体设计，2026-08-05）：14→16（非 17）——原计划新增
+        //   需求方/需求部门/实际完成三列，但需求方/需求部门拆两列时 1366×768 实测 wrap 级仍横滚
+        //   （挂 u-table-compact 后 scrollWidth 1351 > clientWidth 1304，超 47px），按预案合并为
+        //   一列「需求方」双行 cell，故净增两列（需求方含部门子行 + 实际完成）。下方 14 相关断言
+        //   均按 16 更新，updated 的判据取消息里注明「原14→新16，理由=xxx」，非静默改值。
         // ⚠️ locator 精确到列表表格 id（codex 247 M-1「确认表头 locator 只覆盖列表表格」→ 补做实查发现的真缺陷）：
         //   原写法首选择器 `#siTable` **在本页根本不存在**（真实 id 是 sysIterationListTable），一直靠兜底的
         //   `table thead th` 生效。本页另有两个动态拼接的表格（`.si-commit-table` 上线单 commit 表 / 值班排班表），
@@ -153,7 +251,9 @@ const seedCommit = (issueId, daId, userId, component, ref) =>
         const headCells = await page.$$eval('#sysIterationListTable thead th',
             ths => ths.map(t => ({ text: t.textContent.replace(/[⇅\s]/g, ''), sortBy: t.getAttribute('data-sort-by') || null })));
         const headers = headCells.map(h => h.text);
-        must(headers.length === 14, `[T1] 列表表头应为 14 列，实得 ${headers.length}：${JSON.stringify(headers)}`);
+        must(headers.length === 16,
+            `[T1] ⭐ S2：列表表头应为 16 列（原 14→新 16，理由=新增需求方〔含需求部门二级行，合并单列〕`
+            + `+ 实际完成 两列），实得 ${headers.length}：${JSON.stringify(headers)}`);
         must(headers.includes('期望完成'), '[T1] 表头含「期望完成」列（D11）');
         must(headers.includes('前端号') && headers.includes('后端号'), '[T1] 表头含「前端号」「后端号」两列');
         must(headers[headers.length - 1] === '计划开工', `[T1] 「计划开工」应在**末列**（D13），实得末列=${headers[headers.length - 1]}`);
@@ -174,13 +274,14 @@ const seedCommit = (issueId, daId, userId, component, ref) =>
         // ── [T1b] S1 模块列收窄（时间格式统一 20260804·D1/D2）─────────────
         //   ⚠️ headers 采集时已 replace(/[⇅\s]/g, '') 去空白 ⇒ 旧文案「系统 · 模块」在此形态下是「系统·模块」，
         //     防回退断言必须按去空白后的形态写，照原文写会永远为真（断言自身失效）。
-        const SYS_COL_IDX = 5;   // 0-based：ID/类型/优先级/状态/标题/**系统**/开发/建单人/预计完成/期望完成/前端号/后端号/创建时间/计划开工
+        // S2：列序更新——ID/类型/优先级/状态/标题/**系统**/开发/建单人/需求方/预计完成/期望完成/实际完成/前端号/后端号/创建时间/计划开工
+        const SYS_COL_IDX = 5;   // 「系统」列位置在需求方/实际完成两次插入中均不受影响，仍为第 6 列（0-based 5）
         must(headers[SYS_COL_IDX] === '系统' && headCells[SYS_COL_IDX].sortBy === 'system_name',
             `[T1b] 第 6 列表头应为「系统」且绑 system_name，实得「${headers[SYS_COL_IDX]}」/ ${headCells[SYS_COL_IDX].sortBy}`);
         must(!headers.includes('系统·模块'),
             `[T1b] ⭐ 防回退：表头不得再出现旧文案「系统 · 模块」，实得 ${JSON.stringify(headers)}`);
-        must(headers.length === 14,
-            `[T1b] 收窄只改列内容不改列数，仍应为 14 列，实得 ${headers.length}`);
+        must(headers.length === 16,
+            `[T1b] ⭐ S2：收窄只改列内容不改列数，本组断言基线随 S2 从 14 同步更新为 16（理由同 [T1]），实得 ${headers.length}`);
         // ⭐ 行内断言（比表头强）：表头改对但行渲染仍拼 module_name，是最可能的半吊子形态。
         //   夹具 iMod 的 module_name='报价模块'，只有拼接确实拆掉才会得到纯 'BMS'。
         const modCellText = await page.evaluate(({ id, idx }) => {
@@ -263,18 +364,125 @@ const seedCommit = (issueId, daId, userId, component, ref) =>
             console.log(`     📸 横滚证据截图: ${p}`);
         }
 
-        // ── [T3] 渲染三态 ────────────────────────────────────────────────
+        // codex 259 M-4：cellOf 提前到 [T2c] 之前定义（原在 [T3] 段），供 [T2c] 前置校验"长 commit 行
+        //   确实在页面上"复用，不重复定义一份取巧逻辑。
         const cellOf = async (issueId, which) => page.evaluate(({ id, which }) => {
             const rows = [...document.querySelectorAll('#siTbody tr')];
             // ID 列渲染为 `#123`（带 # 前缀），不是纯数字——按 '#'+id 精确匹配，不用 includes（防 #12 命中 #123）
             const tr = rows.find(r => r.querySelector('td') && r.querySelector('td').textContent.trim() === '#' + id);
             if (!tr) return null;
             const tds = [...tr.querySelectorAll('td')];
-            const idx = which === 'fe' ? 10 : 11;   // 0-based：前端号=第 11 列、后端号=第 12 列
+            // S2：列序变化后前端号/后端号右移两位（新增需求方+实际完成两列在其左侧插入）
+            const idx = which === 'fe' ? 12 : 13;   // 0-based：前端号=第 13 列、后端号=第 14 列
             const td = tds[idx];
             return { text: td.textContent.trim(), html: td.innerHTML, title: (td.querySelector('[title]') || {}).title || '' };
         }, { id: issueId, which });
 
+        // ── [T2c]（S2·三列一体设计）⭐ 1366×768 视口下不横滚（有数据行时量·实测定标）────────────
+        //   1920 视口余量大，14→16 列后未必露头；1366×768 是内网常见笔记本分辨率，是本组三列改造
+        //   的真实触发判据。实测过程（不复述，见 Sys_Iteration.html #sysIterationListTable 处注释）：
+        //   需求方/需求部门原拆两列时，17 列 + u-table-compact 后 wrap 仍横滚 47px（scrollWidth 1351
+        //   vs clientWidth 1304）→ 触发预案合并为一列「需求方」双行 cell → 16 列 + compact 后 wrap
+        //   恰好 0 横滚（1304 vs 1304）。这里断言的是**最终交付形态**，不是中间态。
+        console.log('\n── [T2c] 1366×768 视口下不横滚（有数据行·实测定标） ──');
+        await page.setViewportSize({ width: 1366, height: 768 });
+        await page.waitForTimeout(250);
+        // codex 259 M-4：堵空态假绿——① rowCountBeforeT2c>0 本身挡不住"只剩空态单行 colspan 也算 >0 行"
+        //   的退化（colspan 空态行本身就是 1 个 <tr>）；② 即便有真实数据行，若分页/筛选/时序问题让
+        //   "长 commit 行"未落在可视首屏，本组会测出一个比真实最坏态更宽松的场景，得到假绿的"不横滚"。
+        //   故显式排除 colspan 空态行 + 用夹具 ID 定位 iMany（前端 5 条）/iManyBe（后端 3 条）两行、
+        //   确认其 commit 单元格确实渲染出预期的长内容（与 [T3]/[T3b] 同款断言值），再量 scrollWidth。
+        const dataRowInfo = await page.evaluate(() => {
+            const trs = [...document.querySelectorAll('#siTbody tr')];
+            const nonEmptyRows = trs.filter(tr => !tr.querySelector('td[colspan]'));
+            return { total: trs.length, nonEmpty: nonEmptyRows.length };
+        });
+        must(dataRowInfo.nonEmpty > 0,
+            `[T2c] 前置：1366×768 量测时表格应有真实数据行（排除 colspan 空态行后仍 >0），实得 total=${dataRowInfo.total} nonEmpty=${dataRowInfo.nonEmpty}`);
+        const manyFeAtT2c = await cellOf(iMany, 'fe');
+        must(manyFeAtT2c && /^fe-many-1\s+等5条$/.test(manyFeAtT2c.text),
+            `[T2c] 前置：长内容夹具 iMany 的前端号列在量测前确实渲染出预期长内容（防"长内容行未落入首屏"的假绿），实得 "${manyFeAtT2c && manyFeAtT2c.text}"`);
+        const manyBeAtT2c = await cellOf(iManyBe, 'be');
+        must(manyBeAtT2c && /^be-many-1\s+等3条$/.test(manyBeAtT2c.text),
+            `[T2c] 前置：长内容夹具 iManyBe 的后端号列在量测前确实渲染出预期长内容（同上，防假绿），实得 "${manyBeAtT2c && manyBeAtT2c.text}"`);
+        const scroll1366 = await page.evaluate(() => {
+            const tbl = document.querySelector('#sysIterationListTable');
+            const wrap = tbl.closest('.u-corr-table-wrap') || tbl.parentElement;
+            return {
+                docScrollW: document.documentElement.scrollWidth,
+                docClientW: document.documentElement.clientWidth,
+                wrapScrollW: wrap.scrollWidth,
+                wrapClientW: wrap.clientWidth,
+                hasCompact: tbl.classList.contains('u-table-compact'),
+            };
+        });
+        must(scroll1366.hasCompact, '[T2c] 前置：列表表格应已挂 u-table-compact 变体类（消横滚的手段本身要在，不是巧合般不滚）');
+        const noPageHScroll1366 = scroll1366.docScrollW <= scroll1366.docClientW + 1;
+        must(noPageHScroll1366,
+            `[T2c] ⭐ 1366×768 下页面**不应横滚**：documentElement scrollWidth=${scroll1366.docScrollW} vs clientWidth=${scroll1366.docClientW}`);
+        const noWrapHScroll1366 = scroll1366.wrapScrollW <= scroll1366.wrapClientW + 1;
+        must(noWrapHScroll1366,
+            `[T2c] ⭐ 1366×768 下表格容器自身也不应横滚：wrap scrollWidth=${scroll1366.wrapScrollW} vs clientWidth=${scroll1366.wrapClientW}（页面级不滚但容器滚同样算横滚）`);
+        if (!noPageHScroll1366 || !noWrapHScroll1366) {
+            fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
+            const p = path.join(SCREENSHOT_DIR, `commitcols-1366-hscroll-${RUN_TAG}.png`);
+            await page.screenshot({ path: p, fullPage: false });
+            console.log(`     📸 1366×768 横滚证据截图: ${p}`);
+        }
+
+        // ── [L-3]（codex 259，值更新于 S4 段1收口·主会话第二轮裁定）130px 合同锁——同 250 号 D4 的 ==92vh 合同锁范式 ──
+        //   防后续无声改回 168px/134px 或继续缩窄不被察觉；若用户在 §9 待追认时否决改回，本条会红灯
+        //   提示"断言也要同步改"，不会让代码与断言各说各话。computed style 取值不受当前数据多少影响
+        //   （与 [T21] max-height 合同锁同一理由）。
+        const commitCellMaxWidth = await page.evaluate(() => {
+            const cell = document.querySelector('#sysIterationListTable .si-commit-cell');
+            return cell ? getComputedStyle(cell).maxWidth : null;
+        });
+        must(commitCellMaxWidth === '130px',
+            `[L-3] ⭐ .si-commit-cell computed max-width 合同锁：应恰为 130px（主会话第二轮裁定值，实测得出非推导），实得 "${commitCellMaxWidth}" —— 若为 168px/134px 说明改动被无声回退，若为其他值说明又被继续缩窄，两者都需回头同步本断言`);
+
+        // ── [T2d]（S4 段1收口，期望值更新于主会话第二轮裁定）：130px 上限顶格内容实测闭环 ──
+        //   130px 上限的效果需被顶格内容实测——造一张夹具，前端号/后端号各塞 1 条 200 字符
+        //   commit_ref（字段上限，见 index.js 注释"commit_ref 是 1-200 字符自由文本"），仍在 1366×768
+        //   视口下（承接 [T2c]/[L-3] 未复位前的视口）断言该行两个 .si-commit-cell 渲染宽度 ≤130px+2px
+        //   缓冲，且 wrap 不因此重新横滚——S2/S4 消横滚裁定收窄 168→130px 的全部理由在此闭环验证。
+        console.log('\n── [T2d] 130px 上限顶格内容实测闭环 ──');
+        const LONG_REF_200 = 'x'.repeat(200);
+        const iMaxWidth = await mkIssue(`CC-顶格宽度-${RUN_TAG}`, '处理中');
+        const mMaxWidth = await mkMember(iMaxWidth, 30);
+        await seedCommit(iMaxWidth, mMaxWidth, 30, 'frontend', LONG_REF_200);
+        await seedCommit(iMaxWidth, mMaxWidth, 30, 'backend', LONG_REF_200);
+        await page.reload({ waitUntil: 'networkidle' });
+        await page.waitForTimeout(400);
+        const maxWidthProbe = await page.evaluate((issueId) => {
+            const rows = [...document.querySelectorAll('#siTbody tr')];
+            const tr = rows.find(r => r.querySelector('td') && r.querySelector('td').textContent.trim() === '#' + issueId);
+            if (!tr) return { found: false };
+            const cells = [...tr.querySelectorAll('.si-commit-cell')];
+            const tbl = document.querySelector('#sysIterationListTable');
+            const wrap = tbl.closest('.u-corr-table-wrap') || tbl.parentElement;
+            return {
+                found: true,
+                widths: cells.map(c => Math.round(c.getBoundingClientRect().width)),
+                wrapScrollW: wrap.scrollWidth,
+                wrapClientW: wrap.clientWidth,
+            };
+        }, iMaxWidth);
+        must(maxWidthProbe.found,
+            `[T2d] 前置：顶格宽度夹具应出现在当前页（新单按 id desc 排最前，1366 下分页 25 条应必中），实得 ${JSON.stringify(maxWidthProbe)}`);
+        must(!!maxWidthProbe.widths && maxWidthProbe.widths.length === 2,
+            `[T2d] 前置：该行应有 2 个 .si-commit-cell（前端号+后端号各一条 200 字符 commit_ref），实得 ${maxWidthProbe.widths ? maxWidthProbe.widths.length : 'N/A'}`);
+        must(!!maxWidthProbe.widths && maxWidthProbe.widths.every(w => w <= 132),
+            `[T2d] ⭐ M-3：200 字符顶格 commit_ref 渲染宽度应 ≤130px+2px 缓冲，实得 ${JSON.stringify(maxWidthProbe.widths)}`);
+        must(maxWidthProbe.wrapScrollW <= maxWidthProbe.wrapClientW + 1,
+            `[T2d] ⭐ M-3：顶格内容不应致 wrap 重新横滚（S2/S4 消横滚裁定收窄 168→130px 的全部理由在此闭环），实得 wrapScrollW=${maxWidthProbe.wrapScrollW} wrapClientW=${maxWidthProbe.wrapClientW}`);
+
+        // 复位视口，避免污染下方默认假设 1920×1080 的断言（下方几处显式 setViewportSize 的用例除外）
+        await page.setViewportSize({ width: 1920, height: 1080 });
+        await page.waitForTimeout(200);
+
+        // ── [T3] 渲染三态 ────────────────────────────────────────────────
+        // （cellOf 已上移至 [T2c] 之前定义，见 codex 259 M-4 注释，此处直接复用）
         const twoFe = await cellOf(iTwo, 'fe');
         must(twoFe && twoFe.text === 'fe-aaa111; fe-bbb222', `[T3] ≤2 条全量显示且分号隔开，实得 "${twoFe && twoFe.text}"`);
         const twoBe = await cellOf(iTwo, 'be');
@@ -910,8 +1118,10 @@ const seedCommit = (issueId, daId, userId, component, ref) =>
             const tds = [...tr.querySelectorAll('td')];
             return tds[i] ? tds[i].textContent.trim() : null;
         }, { id: issueId, i: idx });
-        const IDX_CREATED = 12;   // 0-based：…/前端号 10/后端号 11/**创建时间 12**/计划开工 13
-        const IDX_DEADLINE = 9;
+        // S2：列序变化后两者均右移（IDX_CREATED 原 12→14；IDX_DEADLINE〔期望完成〕原 9→10，
+        //   需求方单列插在建单人之后使预计完成/期望完成各 +1，实际完成不影响其左侧的期望完成）
+        const IDX_CREATED = 14;  // 0-based：…/前端号 12/后端号 13/**创建时间 14**/计划开工 15
+        const IDX_DEADLINE = 10;
         //   取 iSameDayAM 而非更早的 iMod：reload 后列表按 ID 降序，iMod 之后还创建了 7 条夹具，
         //   拿它取行有被挤出首屏的风险（那会红成"砍秒没生效"，诊断指错方向）。iSameDayAM 同时也是
         //   [T24] 的对象，必然在首屏。
@@ -1021,6 +1231,618 @@ const seedCommit = (issueId, daId, userId, component, ref) =>
             && /probe !== '2026-01-02 03:04'/.test(srcT25),
             '[T26] ⭐ 陈旧缓存守卫存在，且其探测输入/期望输出与 [T22] 用的是同一组值（守卫自身写错就成了永不触发的摆设）');
 
+        // ══ S2（贴图四件与工期测试段·三列一体设计，2026-08-05）══════════════════════════════
+        // ── [T27] 需求方/实际完成表头↔data-sort-by 配对 + 相邻性（同 codex 247 M-2 范式）──────
+        const headCells27 = await page.$$eval('#sysIterationListTable thead th',
+            ths => ths.map(t => ({ text: t.textContent.replace(/[⇅\s]/g, ''), sortBy: t.getAttribute('data-sort-by') || null })));
+        const headers27 = headCells27.map(h => h.text);
+        const idxReq = headers27.indexOf('需求方');
+        const idxCompleted = headers27.indexOf('实际完成');
+        must(idxReq > 0, `[T27] 前置：「需求方」表头应存在且不在首列，实得 index=${idxReq}`);
+        must(idxCompleted > 0, `[T27] 前置：「实际完成」表头应存在且不在首列，实得 index=${idxCompleted}`);
+        must(idxReq >= 0 && headCells27[idxReq].sortBy === 'requester_name',
+            `[T27] ⭐ 文案↔字段键绑定：「需求方」须绑 data-sort-by="requester_name"，实得 ${idxReq >= 0 ? headCells27[idxReq].sortBy : '(未找到)'}`);
+        must(idxCompleted >= 0 && headCells27[idxCompleted].sortBy === 'last_completed_at',
+            `[T27] ⭐ 文案↔字段键绑定：「实际完成」须绑 data-sort-by="last_completed_at"，实得 ${idxCompleted >= 0 ? headCells27[idxCompleted].sortBy : '(未找到)'}`);
+        must(!headers27.includes('需求部门'),
+            `[T27] ⭐ 实测定标：表头不应再出现独立的「需求部门」列（1366×768 实测横滚后按预案合并进「需求方」双行 cell），实得 ${JSON.stringify(headers27)}`);
+        must(idxReq > 0 && headers27[idxReq - 1] === '建单人',
+            `[T27] 「需求方」左邻应为「建单人」（人员簇相邻，口径拍板），实得「${idxReq > 0 ? headers27[idxReq - 1] : '(N/A)'}」`);
+        must(idxCompleted > 0 && headers27[idxCompleted - 1] === '期望完成',
+            `[T27] 「实际完成」左邻应为「期望完成」（三个"完成"列相邻，口径拍板），实得「${idxCompleted > 0 ? headers27[idxCompleted - 1] : '(N/A)'}」`);
+
+        // ── [T28] 需求方/需求部门值正确性（合并单列双行 cell：姓名第一行、部门第二行小号 muted）───
+        const iReqFixture = await mkIssue(`CC-需求方-${RUN_TAG}`, '处理中');
+        await run(`UPDATE sys_issues SET requester_name = ?, requester_dept = ? WHERE id = ?`, ['张三', '市场部', iReqFixture]);
+        const iReqNoDept = await mkIssue(`CC-需求方无部门-${RUN_TAG}`, '处理中');
+        await run(`UPDATE sys_issues SET requester_name = ? WHERE id = ?`, ['李四', iReqNoDept]);
+        // ── [T29] 实际完成值正确性（已知时刻 + 从未完成→'—'）前置夹具：同批插好，一次 reload 摊两组断言 ──
+        const iCompletedFixture = await mkIssue(`CC-实际完成-${RUN_TAG}`, '待上线');
+        await run(`INSERT INTO sys_issue_timeline (issue_id, event_type, from_status, to_status, summary, operator_id, operator_name, created_at)
+                   VALUES (?, 'status_change', '开发中', '待验证', ?, ?, '管理员', ?)`,
+            [iCompletedFixture, `S2 实际完成夹具-${RUN_TAG}`, admin.id, '2026-08-01 10:22:33']);
+        await page.reload({ waitUntil: 'networkidle' });
+        await page.waitForTimeout(400);
+        const rowCellOf = async (issueId, idx) => page.evaluate(({ id, idx }) => {
+            const rows = [...document.querySelectorAll('#siTbody tr')];
+            const tr = rows.find(r => r.querySelector('td') && r.querySelector('td').textContent.trim() === '#' + id);
+            if (!tr) return null;
+            const tds = [...tr.querySelectorAll('td')];
+            const td = tds[idx];
+            return td ? { html: td.innerHTML, text: td.textContent.trim() } : null;
+        }, { id: issueId, idx });
+        const IDX_REQ = 8;   // 0-based：…/建单人 7/**需求方 8**/预计完成 9
+        const reqCell = await rowCellOf(iReqFixture, IDX_REQ);
+        must(reqCell && reqCell.text.includes('张三') && reqCell.text.includes('市场部'),
+            `[T28] ⭐ 需求方=张三/需求部门=市场部的单，列表行需求方列应同时显示两者，实得 "${reqCell && reqCell.text}"`);
+        must(reqCell && /<div>张三<\/div>/.test(reqCell.html) && /si-muted[^>]*>市场部/.test(reqCell.html),
+            `[T28] ⭐ 姓名在第一行、部门在第二行（小号 muted），非拼接进同一行文本，实得 html="${reqCell && reqCell.html}"`);
+        const reqCellNoDept = await rowCellOf(iReqNoDept, IDX_REQ);
+        must(reqCellNoDept && reqCellNoDept.text === '李四',
+            `[T28] 只填姓名未填部门的单，需求方列只显示姓名、不留空第二行占位，实得 "${reqCellNoDept && reqCellNoDept.text}"`);
+        const emptyReqCell = await rowCellOf(iOther, IDX_REQ);   // iOther 建单时未填 requester_name/dept
+        must(emptyReqCell && emptyReqCell.text === '—',
+            `[T28] 未填需求方的单，该列显示「—」，实得 "${emptyReqCell && emptyReqCell.text}"`);
+
+        const IDX_COMPLETED = 11;   // 0-based：…/期望完成 10/**实际完成 11**/前端号 12
+        const completedCell = await rowCellOf(iCompletedFixture, IDX_COMPLETED);
+        must(completedCell && completedCell.text === '2026-08-01 10:22',
+            `[T29] ⭐ 末次进入「待验证」于 2026-08-01 10:22:33 的单，实际完成列应显示到分「2026-08-01 10:22」，实得 "${completedCell && completedCell.text}"`);
+        const neverCompletedCell = await rowCellOf(iOther, IDX_COMPLETED);   // iOther 从未产生过 timeline 事件
+        must(neverCompletedCell && neverCompletedCell.text === '—',
+            `[T29] 从未进入过「待验证」的单，实际完成列显示「—」，实得 "${neverCompletedCell && neverCompletedCell.text}"`);
+
+        // ── [T29b]（codex 259 M-2）：last_completed_at 真实流转版 ─────────────────────────
+        //   [T29] 只 SQL 插一条 timeline 记录验渲染，未验 MAX/过滤/真实迁移路径；本组升级为走真实
+        //   submit→W-GATE→timeline→return→submit 完整链路。[T29] 保留不删，两组互补：[T29] 证"渲染层
+        //   读到某个值会正确显示"，[T29b] 证"这个值真的来自真实转移引擎，MAX/末次语义在真实路径下也成立"。
+        //   no_code 路径与多开发场景不另做——同一 transition 引擎、同一 W-GATE 落点写同一条
+        //   event_type='status_change' 镜像行（routes/sys-iteration/index.js W-GATE 分支），commits/
+        //   no_code 只是 submit 内部 targetDevStatus 的取值分支，不影响 W-GATE 是否触发/写什么；多开发
+        //   只是"全员完成才触发 W-GATE"，触发后走的是同一条 status_change 镜像逻辑，故单一 mode='commits'
+        //   + 单一在册开发即可代表。submit/return 端点真实调用范式照抄
+        //   scripts/verify-sys-multidev-submit.js:233-236（POST .../submit, mode:'commits'）与
+        //   scripts/verify-sys-bug-transitions.js:345-348（POST .../return, {reason}）。
+        console.log('\n── [T29b] last_completed_at 真实流转版：submit→return→submit ──');
+        const apiCall = async (method, url, tok, body) => page.evaluate(async ({ method, url, tok, body }) => {
+            const opts = { method, headers: { Authorization: 'Bearer ' + tok } };
+            if (body !== undefined) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
+            const r = await fetch(url, opts);
+            const j = await r.json().catch(() => ({}));
+            return { ok: r.ok, status: r.status, body: j };
+        }, { method, url, tok, body });
+        const apiListRowOf = async (issueId) => {
+            const r = await apiCall('GET', '/api/sys-issues', adminTok);
+            return (r.body && Array.isArray(r.body.items)) ? r.body.items.find(x => x.id === issueId) : undefined;
+        };
+
+        const iFlow = await mkIssue(`CC-实际完成流转-${RUN_TAG}`, '处理中');
+        const daFlow = await mkMember(iFlow, devUser.id);
+        await run(`UPDATE sys_issues SET dev_estimated_at = ? WHERE id = ?`, ['2099-12-31 10:00', iFlow]);
+
+        // 第一次真实 submit（唯一在册开发完成 → W-GATE 同事务转「待验证」）
+        const submit1 = await apiCall('POST', `/api/sys-issues/${iFlow}/submit`, devTokFlow, { mode: 'commits', commits: [{ component: 'frontend', commit_ref: 't29b-round1' }], self_tested: true, test_env_deployed: true });
+        must(submit1.ok && submit1.status === 200 && submit1.body.main_status === '待验证',
+            `[T29b] 前置：真实 submit #1（唯一在册开发）应 200 + W-GATE 转「待验证」，实得 status=${submit1.status} body=${JSON.stringify(submit1.body)}`);
+
+        const tl1 = await get(`SELECT id, event_type, to_status, created_at FROM sys_issue_timeline WHERE issue_id = ? AND event_type = 'status_change' AND to_status = '待验证' ORDER BY id DESC LIMIT 1`, [iFlow]);
+        must(!!tl1, `[T29b] ⭐ 真实 submit 后确实产生 event_type='status_change' AND to_status='待验证' 的 timeline 行（非手工插桩，验证 W-GATE 真实写入形状与列表 SQL 子查询的假设一致），实得 ${JSON.stringify(tl1)}`);
+
+        const apiRow1 = await apiListRowOf(iFlow);
+        must(!!apiRow1 && apiRow1.last_completed_at === tl1.created_at,
+            `[T29b] ⭐ 列表接口 last_completed_at 应等于刚产生的 timeline 记录 created_at，实得 api="${apiRow1 && apiRow1.last_completed_at}" tl1="${tl1 && tl1.created_at}"`);
+
+        await page.reload({ waitUntil: 'networkidle' });
+        await page.waitForTimeout(400);
+        const firstCompletedCell = await rowCellOf(iFlow, IDX_COMPLETED);
+        const expectedMinute1 = tl1.created_at.slice(0, 16);   // 'YYYY-MM-DD HH:MM:SS' → 到分（siFmtDT 同款截断口径）
+        must(firstCompletedCell && firstCompletedCell.text === expectedMinute1,
+            `[T29b] ⭐ 列表页真实渲染的实际完成列应到分显示 tl1 时刻，期望="${expectedMinute1}"，实得 "${firstCompletedCell && firstCompletedCell.text}"`);
+
+        // admin 打回（return，真实端点）——last_completed_at 是历史事实，不因打回而改变（Q5 口径实证）
+        const returnResp = await apiCall('POST', `/api/sys-issues/${iFlow}/return`, adminTok, { reason: 'M-2 打回验证 last_completed_at 不变' });
+        must(returnResp.ok && returnResp.status === 200 && returnResp.body.status === '处理中',
+            `[T29b] 前置：真实 return 应 200 + 回到「处理中」，实得 status=${returnResp.status} body=${JSON.stringify(returnResp.body)}`);
+
+        const apiRow2 = await apiListRowOf(iFlow);
+        must(!!apiRow2 && apiRow2.last_completed_at === tl1.created_at,
+            `[T29b] ⭐ 打回后 last_completed_at 不变（返工中仍显示上次完成时刻），实得 api="${apiRow2 && apiRow2.last_completed_at}"，期望仍="${tl1.created_at}"`);
+
+        await page.reload({ waitUntil: 'networkidle' });
+        await page.waitForTimeout(400);
+        const afterReturnCell = await rowCellOf(iFlow, IDX_COMPLETED);
+        must(afterReturnCell && afterReturnCell.text === expectedMinute1,
+            `[T29b] 打回后页面渲染的实际完成列文本也不变，期望仍="${expectedMinute1}"，实得 "${afterReturnCell && afterReturnCell.text}"`);
+
+        // 二次提交前置：return 只清主表 dev_estimated_at，不碰 dev_assignees 子表（"完成态不回 pending"
+        //   是独立产品不变量，非 bug）。⚠️ 生产的真实返工路径 = 打回后 admin 通过成员 API remove+re-add
+        //   开**新的 pending 实例行**（index.js:1076 既有测试口径），旧 submitted 行保留作轮次历史——
+        //   本探针不走成员 API，用 SQL 把这唯一在册实例重置回 'pending' 是**等效捷径**：两条路最终都从
+        //   "最后一个 pending 被 resolve" 走同一 W-GATE → status_change 镜像（本组被测对象是镜像与
+        //   MAX/末次语义，非 roster 机制；roster 返工机制由 verify-sys-multidev-* 系列覆盖）。捷径只为
+        //   满足 submit 端点双条件 UPDATE 守卫（WHERE dev_status='pending' AND removed_at IS NULL，
+        //   index.js:4743-4746），不绕过 W-GATE/timeline 写入——那两处仍走全新一次真实 POST /submit。
+        await run(`UPDATE sys_issue_dev_assignees SET dev_status = 'pending', resolved_at = NULL WHERE id = ?`, [daFlow]);
+        await run(`UPDATE sys_issues SET dev_estimated_at = ? WHERE id = ?`, ['2099-12-31 11:00', iFlow]);
+
+        // codex 260 M-A：同秒假绿口——SQLite created_at 是**秒级**精度（datetime('now','localtime')），
+        //   若两次 submit 落在同一秒，tl2.created_at 会与 tl1.created_at 逐字相等，此时 MAX 相等分不清
+        //   "确实取到了更新的一条"还是"两条其实是同一时刻的假象"（id 更大能证明是新行，但证不了 MAX 语义
+        //   本身在真实跨时刻场景下成立）。故二次 submit 前轮询数据库时钟直到严格跨过 tl1.created_at 再发，
+        //   把"两次完成时刻不同"从运气变成前提条件，不是单纯的计时巧合。
+        const waitStart260 = Date.now();
+        let dbNow260 = null;
+        while (Date.now() - waitStart260 < 3000) {
+            const nowRow260 = await get(`SELECT datetime('now','localtime') AS now`);
+            dbNow260 = nowRow260 && nowRow260.now;
+            if (dbNow260 && dbNow260 > tl1.created_at) break;
+            await new Promise(r => setTimeout(r, 50));
+        }
+        must(!!dbNow260 && dbNow260 > tl1.created_at,
+            `[T29b] 前置：轮询等待数据库时钟严格跨过 tl1.created_at（50ms 间隔，3s 超时上限）——超时说明系统时钟/DB 连接异常需人工排查，非继续跑，实得 dbNow="${dbNow260}" tl1="${tl1.created_at}"`);
+
+        const submit2 = await apiCall('POST', `/api/sys-issues/${iFlow}/submit`, devTokFlow, { mode: 'commits', commits: [{ component: 'frontend', commit_ref: 't29b-round2' }], self_tested: true, test_env_deployed: true });
+        must(submit2.ok && submit2.status === 200 && submit2.body.main_status === '待验证',
+            `[T29b] 前置：真实 submit #2 应 200 + W-GATE 再次转「待验证」，实得 status=${submit2.status} body=${JSON.stringify(submit2.body)}`);
+
+        const tl2 = await get(`SELECT id, event_type, to_status, created_at FROM sys_issue_timeline WHERE issue_id = ? AND event_type = 'status_change' AND to_status = '待验证' ORDER BY id DESC LIMIT 1`, [iFlow]);
+        must(!!tl2 && tl2.id > tl1.id,
+            `[T29b] ⭐ 第二次 submit 产生了全新一条 timeline 行（id 更大，非复用第一条），实得 tl1.id=${tl1 && tl1.id} tl2.id=${tl2 && tl2.id}`);
+        must(!!tl2 && tl2.created_at > tl1.created_at,
+            `[T29b] ⭐ codex 260 M-A：tl2.created_at 应严格大于 tl1.created_at（字符串比较，两值定长零填充空格分隔·与排序层同款可比性前提），实得 tl1="${tl1 && tl1.created_at}" tl2="${tl2 && tl2.created_at}"`);
+
+        const apiRow3 = await apiListRowOf(iFlow);
+        must(!!apiRow3 && apiRow3.last_completed_at === tl2.created_at,
+            `[T29b] ⭐ MAX/末次语义：第二次 submit 后列表接口 last_completed_at 应等于最新（第二条）timeline 记录，实得 api="${apiRow3 && apiRow3.last_completed_at}" tl2="${tl2 && tl2.created_at}"`);
+
+        await page.reload({ waitUntil: 'networkidle' });
+        await page.waitForTimeout(400);
+        const secondCompletedCell = await rowCellOf(iFlow, IDX_COMPLETED);
+        const expectedMinute2 = tl2.created_at.slice(0, 16);
+        must(secondCompletedCell && secondCompletedCell.text === expectedMinute2,
+            `[T29b] ⭐ 第二次真实完成后页面渲染更新为最新时刻，期望="${expectedMinute2}"，实得 "${secondCompletedCell && secondCompletedCell.text}"`);
+
+        // ── [T29c]（S4 段1收口·Opus 预筛发现·主会话亲核成立 M-1）：resume 语义洞判别 ─────────────
+        //   变更流 hold 允许 from 待验证（transitions.js:308-309 的 from 数组含 '待验证'），resume 回解
+        //   后引擎写一条 event_type='status_change'、to_status='待验证'、**action_code='resume'**
+        //   （transitions.js:324 timelineEvent/actionCode 声明）的 timeline 行——两处 last_completed_at
+        //   子查询修复前的 MAX 不分辨 action_code，会把这条「恢复时刻」冒充「完成时刻」。而 W-GATE 完成
+        //   mirror 行（index.js 约 :2206-2209 的 INSERT）列清单不含 action_code，恒 NULL，是唯一真完成
+        //   落点。行形态来源=transitions.js:324 声明 + 主会话亲核确认；此处 SQL 直插伪行而非走真实
+        //   hold→resume 流转——受理全链（intake→schedule→assign→hold→resume）夹具过重，被测对象是
+        //   SQL 谓词本身（AND action_code IS NULL 是否生效），不是转移引擎本身（那是 verify-sys-bug-
+        //   transitions.js 等的职责）。created_at 取远晚于 tl2.created_at 的已知未来值，制造"伪行若被
+        //   误采纳，MAX 必然选中它"的可判别场景。
+        console.log('\n── [T29c] resume 语义洞：伪 resume 行不得冒充完成时刻 ──');
+        const FAKE_RESUME_AT = '2099-06-15 09:00:00';   // 远晚于 tl2.created_at（本次真实流转发生在 2026 年），字符串比较必为最大
+        await run(`INSERT INTO sys_issue_timeline (issue_id, event_type, from_status, to_status, summary, action_code, operator_id, operator_name, created_at)
+                   VALUES (?, 'status_change', '已暂缓', '待验证', ?, 'resume', ?, '管理员', ?)`,
+            [iFlow, `S4 M-1 判别夹具·伪 resume 行-${RUN_TAG}`, admin.id, FAKE_RESUME_AT]);
+        const apiRowAfterFakeResume = await apiListRowOf(iFlow);
+        must(!!apiRowAfterFakeResume && apiRowAfterFakeResume.last_completed_at === tl2.created_at,
+            `[T29c] ⭐ M-1：列表接口 last_completed_at 不应被伪 resume 行带跑，应仍=tl2（真完成时刻），实得 api="${apiRowAfterFakeResume && apiRowAfterFakeResume.last_completed_at}" tl2="${tl2.created_at}" 伪行="${FAKE_RESUME_AT}"（修复前本条必红：MAX 会选中伪行）`);
+        const detailRowAfterFakeResume = await apiCall('GET', `/api/sys-issues/${iFlow}`, adminTok);
+        const detailLastCompletedAfterFakeResume = detailRowAfterFakeResume.body && detailRowAfterFakeResume.body.issue && detailRowAfterFakeResume.body.issue.last_completed_at;
+        must(detailRowAfterFakeResume.ok && detailLastCompletedAfterFakeResume === tl2.created_at,
+            `[T29c] ⭐ M-1：详情接口 last_completed_at 同样不应被伪 resume 行带跑，应仍=tl2，实得 detail="${detailLastCompletedAfterFakeResume}" tl2="${tl2.created_at}"（修复前本条必红）`);
+
+        // ── [T30]（含 codex 259 M-3 行序断言 + codex 260 M-B 搜索收窄）排序点击冒烟 + 行序判定 ──────
+        //   三个判别夹具：iCompletedFixture（2026-08-01，早）/ iFlow（[T29b] 真实流转后的墙钟时间，晚）/
+        //   iOther（NULL，从未完成）。NULL 处理按 unify-helpers.js compareRow 源码读出的既有行为
+        //   （L67-77：aEmpty/bEmpty 分支的 return 值不乘 dir 的 mult）：null 恒排末尾、与 asc/desc 无关——
+        //   这里仍按"先实测再断言"落地，不是凭源码读到就直接写死；实测结果与源码预期一致。
+        // codex 260 M-B：NULL 缺席假绿口——原来 ixOther===-1 被当"通过"，若分页把 NULL 夹具挤出当前页，
+        //   排序逻辑真回归（比如误把 NULL 排到中间）也测不出来。用列表搜索框收窄可见集：siMatchSearch
+        //   按 title 子串匹配（Sys_Iteration.html:1090-1097，`siFSearch` 输入框 oninput="siDebounceSearch()"
+        //   250ms 防抖，见同文件:515/1080-1088），本轮全部夹具标题都嵌入 RUN_TAG（如 `CC-两条-${RUN_TAG}`），
+        //   搜它可把可见集收窄到本轮约 17 条夹具（远小于 25/页分页上限），三张判别单必然同屏，NULL
+        //   不再有"被分页挤走"这条侥幸退路。
+        await page.fill('#siFSearch', String(RUN_TAG));
+        await page.waitForTimeout(400);   // siDebounceSearch 250ms 防抖 + siRenderTable 渲染
+
+        const consoleErrBeforeT30 = page._consoleErrors.length;
+        await page.click('#sysIterationListTable thead th[data-sort-by="last_completed_at"]');
+        await page.waitForTimeout(300);
+        const dirT30a = await page.$eval('#sysIterationListTable thead th[data-sort-by="last_completed_at"]',
+            th => th.textContent.includes('↑') ? 'asc' : (th.textContent.includes('↓') ? 'desc' : 'none'));
+        must(page._consoleErrors.length === consoleErrBeforeT30,
+            `[T30] 点击「实际完成」表头排序不产生新 console error（前=${consoleErrBeforeT30}，后=${page._consoleErrors.length}）`);
+        must(['asc', 'desc'].includes(dirT30a), `[T30] 点击后表头出现合法排序方向标记（↑/↓），实得 ${dirT30a}`);
+
+        const idsInOrder = async () => page.$$eval('#siTbody tr', trs => trs.map(tr => {
+            const t = tr.querySelector('td') && tr.querySelector('td').textContent.trim();
+            const m = t && /^#(\d+)$/.exec(t);
+            return m ? Number(m[1]) : null;
+        }).filter(v => v !== null));
+
+        const order1 = await idsInOrder();
+        const ixCompletedFixture1 = order1.indexOf(iCompletedFixture);
+        const ixFlow1 = order1.indexOf(iFlow);
+        const ixOther1 = order1.indexOf(iOther);
+        must(ixCompletedFixture1 >= 0 && ixFlow1 >= 0 && ixOther1 >= 0,
+            `[T30] 前置：搜索收窄后三张判别单（两值+一 NULL）都应出现在当前页（实测判别行序的前提，NULL 不再允许"不在本页"这条侥幸退路），实得 idx iCompletedFixture=${ixCompletedFixture1} iFlow=${ixFlow1} iOther=${ixOther1}`);
+        if (dirT30a === 'desc') {
+            must(ixFlow1 < ixCompletedFixture1,
+                `[T30] ⭐ 降序：iFlow（真实流转刚完成，晚）应排在 iCompletedFixture（2026-08-01，早）之前，实得 idx iFlow=${ixFlow1} iCompletedFixture=${ixCompletedFixture1}`);
+        } else {
+            must(ixCompletedFixture1 < ixFlow1,
+                `[T30] ⭐ 升序：iCompletedFixture（早）应排在 iFlow（晚）之前，实得 idx iCompletedFixture=${ixCompletedFixture1} iFlow=${ixFlow1}`);
+        }
+        must(ixOther1 > ixCompletedFixture1 && ixOther1 > ixFlow1,
+            `[T30] ⭐ NULL（iOther 从未完成）应严格排在两个有值夹具之后（末尾），实测方向=${dirT30a}，实得 idx iOther=${ixOther1} iCompletedFixture=${ixCompletedFixture1} iFlow=${ixFlow1}`);
+
+        // 再点一次切到另一方向，交叉验证同一结论在两个方向都成立（不是只测了一个方向就断言"NULL 恒末尾"）
+        await page.click('#sysIterationListTable thead th[data-sort-by="last_completed_at"]');
+        await page.waitForTimeout(300);
+        const dirT30b = await page.$eval('#sysIterationListTable thead th[data-sort-by="last_completed_at"]',
+            th => th.textContent.includes('↑') ? 'asc' : (th.textContent.includes('↓') ? 'desc' : 'none'));
+        must(dirT30b !== dirT30a && ['asc', 'desc'].includes(dirT30b),
+            `[T30] 再次点击应切到相反的合法排序方向，实得 前=${dirT30a} 后=${dirT30b}`);
+        const order2 = await idsInOrder();
+        const ixCompletedFixture2 = order2.indexOf(iCompletedFixture);
+        const ixFlow2 = order2.indexOf(iFlow);
+        const ixOther2 = order2.indexOf(iOther);
+        must(ixCompletedFixture2 >= 0 && ixFlow2 >= 0 && ixOther2 >= 0,
+            `[T30] 前置：切换方向后三张判别单仍应都出现在当前页，实得 idx iCompletedFixture=${ixCompletedFixture2} iFlow=${ixFlow2} iOther=${ixOther2}`);
+        if (dirT30b === 'desc') {
+            must(ixFlow2 < ixCompletedFixture2,
+                `[T30] ⭐ 降序：iFlow 应排在 iCompletedFixture 之前，实得 idx iFlow=${ixFlow2} iCompletedFixture=${ixCompletedFixture2}`);
+        } else {
+            must(ixCompletedFixture2 < ixFlow2,
+                `[T30] ⭐ 升序：iCompletedFixture 应排在 iFlow 之前，实得 idx iCompletedFixture=${ixCompletedFixture2} iFlow=${ixFlow2}`);
+        }
+        must(ixOther2 > ixCompletedFixture2 && ixOther2 > ixFlow2,
+            `[T30] ⭐ 另一方向下 NULL 仍应严格排在两个有值夹具之后，实测印证"NULL 恒末尾与方向无关"，实得 idx iOther=${ixOther2} iCompletedFixture=${ixCompletedFixture2} iFlow=${ixFlow2}`);
+
+        // 复位搜索框，不把过滤态残留带进后续用例
+        await page.fill('#siFSearch', '');
+        await page.waitForTimeout(400);
+
+        // ── [T32]（S3 四件①）：详情抽屉六时间点 + 打回/重开行 ─────────────────────────────
+        //   复用 [T29b] 的真实流转夹具 iFlow：assigned_at 从未走真实 assign 流程（本文件全部 mkMember
+        //   都是纯 SQL 造 roster，不经过 electRepresentative 的 assign 逻辑）→ 应为空；
+        //   first_submitted_at/last_completed_at 是真实 submit 产生的值 → 应有值；accepted_at/
+        //   released_at/closed_at 从未触发对应端点 → 应为空；return_count=1（[T29b] 真实 return 一次）、
+        //   reopen_count=0 → 打回/重开行应出现且文案精确为「打回 1 次 · 重开 0 次」。
+        console.log('\n── [T32] 详情抽屉六时间点 + 打回/重开行 ──');
+        const iFlowRow = await get(`SELECT first_submitted_at, assigned_at, accepted_at, released_at, closed_at, return_count, reopen_count FROM sys_issues WHERE id = ?`, [iFlow]);
+        must(!!iFlowRow, '[T32] 前置：应能读到 iFlow 主表行（后续断言的数据源）');
+        must(Number(iFlowRow.return_count) === 1, `[T32] 前置：iFlow.return_count 应恰为 1（[T29b] 真实 return 一次），实得 ${iFlowRow && iFlowRow.return_count}`);
+
+        await page.evaluate((id) => window.siOpenDrawer && window.siOpenDrawer(id), iFlow);
+        await page.waitForTimeout(600);
+        const kvOf = async (label) => page.evaluate((lbl) => {
+            const items = [...document.querySelectorAll('#siDBody .u-kv-item')];
+            const item = items.find(el => {
+                const l = el.querySelector('label');
+                return l && l.textContent.trim() === lbl;
+            });
+            if (!item) return null;
+            const v = item.querySelector('.v');
+            return v ? v.textContent.trim() : null;
+        }, label);
+
+        // ⚠️ 实测澄清（非假设）：iFlow.assigned_at 并非本单从未指派而恒空——真实 submit 内部会调用
+        //   electRepresentative（index.js:4794 前后）选举代表，该函数在 assigned_at 为 NULL 时会顺带
+        //   补写为 now（index.js:2083-2089「assigned_at=roster 首次形成时间」拍板注释）。故 iFlow 走过
+        //   真实 submit 后 assigned_at 必有值——用实测 DB 值核对渲染层，"无值显示'—'"的负例挪到 iOther
+        //   （从未进入任何真实 submit/electRepresentative 路径，assigned_at 确为 NULL）身上验证。
+        const assignedKv = await kvOf('指派');
+        const expectAssignedFlow = iFlowRow.assigned_at ? iFlowRow.assigned_at.slice(0, 16) : '—';
+        must(assignedKv === expectAssignedFlow,
+            `[T32] 「指派」kv 应到分显示 assigned_at 真实值（真实 submit 触发 electRepresentative 首次选举顺带补写），期望="${expectAssignedFlow}"，实得 "${assignedKv}"`);
+        const expectFirstSubmit = iFlowRow.first_submitted_at ? iFlowRow.first_submitted_at.slice(0, 16) : null;
+        must(!!expectFirstSubmit, '[T32] 前置：iFlow.first_submitted_at 应有真实值（真实 submit #1 应已写入）');
+        const firstSubmitKv = await kvOf('首次交付');
+        must(firstSubmitKv === expectFirstSubmit,
+            `[T32] ⭐ 「首次交付」kv 应到分显示 first_submitted_at，期望="${expectFirstSubmit}"，实得 "${firstSubmitKv}"`);
+        // codex 262 M-1：显示层只到分钟，若两轮真好巧落在同一分钟，仅比对分钟级文本分不清"取到的是
+        //   哪一轮"——先用详情接口的**原始**（秒级）last_completed_at 与 tl2.created_at 做精确字符串
+        //   相等（这层能分清首末），再用"siFmtDT(该原始值)"反推期望的 UI 分钟文本去核对渲染层，
+        //   两层各自证一半，合起来才是完整链路。不做跨分钟等待（选择"补断言层"而非"等时间"这条更省成本
+        //   且判别力更强的路）。
+        const detailResp1 = await apiCall('GET', `/api/sys-issues/${iFlow}`, adminTok);
+        must(detailResp1.ok && detailResp1.status === 200 && !!detailResp1.body.issue,
+            `[T32] 前置：详情接口应能读取 iFlow，实得 status=${detailResp1.status}`);
+        const detailLastCompleted = detailResp1.body && detailResp1.body.issue && detailResp1.body.issue.last_completed_at;
+        must(detailLastCompleted === tl2.created_at,
+            `[T32] ⭐ M-1：详情接口原始 last_completed_at 应与 tl2.created_at 秒级精确字符串相等（同分钟两轮场景下，只有这层原始值能分清首末；到分钟层面对比可能同分钟碰撞而失去判别力），实得 detail="${detailLastCompleted}" tl2="${tl2.created_at}"`);
+        // codex 263 M-1 澄清（组合闭合·勿重复报）：tl1≠tl2 已由上方 [T29b] 的「轮询等待 DB 时钟严格跨过
+        //   tl1.created_at（超时硬红）+ tl2.created_at > tl1.created_at 严格断言」结构性保证（:1293-1317），
+        //   本处复用同一 iFlow 夹具跑在其后——同秒碰撞在到达本断言前已被上游排除，原始值相等断言因此有判别力。
+        // codex 263 L：期望值刻意锁定当前 'YYYY-MM-DD HH:MM' 展示格式（slice(0,16)，与 siFmtDT 分钟级输出等价），
+        //   非真调 siFmtDT——格式若变更此断言红灯即为预期提示，文案不再声称"siFmtDT 生成"。
+        const expectCompletedKv = detailLastCompleted ? detailLastCompleted.slice(0, 16) : null;
+        const completedKv = await kvOf('实际完成');
+        must(completedKv === expectCompletedKv,
+            `[T32] ⭐ 「实际完成」kv（Q5 首次+末次并列的"末次"一侧）应等于详情接口原始值锁定到 YYYY-MM-DD HH:MM（与 siFmtDT 分钟级输出等价），期望="${expectCompletedKv}"，实得 "${completedKv}"`);
+        const acceptedKv = await kvOf('验收');
+        must(acceptedKv === '—', `[T32] 「验收」kv：从未 accept，应显示「—」，实得 "${acceptedKv}"`);
+        const releasedKv = await kvOf('上线');
+        must(releasedKv === '—', `[T32] 「上线」kv：从未上线，应显示「—」，实得 "${releasedKv}"`);
+        const closedKv = await kvOf('关闭');
+        must(closedKv === '—', `[T32] 「关闭」kv：从未关闭，应显示「—」，实得 "${closedKv}"`);
+        const reworkKv = await kvOf('返工');
+        must(reworkKv === '打回 1 次 · 重开 0 次',
+            `[T32] ⭐ 打回/重开行应出现且文案精确，实得 "${reworkKv}"`);
+
+        // 反例（iOther：从未进入任何真实 submit/assign 流程，全字段确应为空）：
+        //   ① 「指派」kv 应显示「—」（assigned_at 确为 NULL，佐证上面「指派」的正例判据不是巧合）
+        //   ② return_count=reopen_count=0 → 不应渲染「返工」行
+        await page.evaluate((id) => window.siOpenDrawer && window.siOpenDrawer(id), iOther);
+        await page.waitForTimeout(600);
+        const assignedKvOther = await kvOf('指派');
+        must(assignedKvOther === '—',
+            `[T32] ⭐ 「指派」kv 反例：iOther 从未走真实 assign/submit 流程，assigned_at 确为 NULL，应显示「—」，实得 "${assignedKvOther}"`);
+        const reworkKvOther = await kvOf('返工');
+        must(reworkKvOther === null,
+            `[T32] ⭐ 无返工记录的单（return_count=reopen_count=0）不应渲染「返工」行（噪音行不出），实得 ${JSON.stringify(reworkKvOther)}`);
+
+        // ── [T32b]（codex 262 M-2）：六时间点字段接线锁定 ─────────────────────────────────
+        //   之前用 iFlow/iOther 验证的空值场景里，验收/上线/关闭全是 '—'、reopen 全是 0——若字段被
+        //   错接到另一个恰好同样为空/同样是 0 的字段，断言照样绿，测不出接线错误。造一张专用夹具，
+        //   六个时间字段各给互不相同的已知值 + return_count=1（≠reopen_count=2），逐项精确配对断言，
+        //   任何"字段 A 被渲染成字段 B 的值"都会在此处产生精确的不匹配而露出。
+        console.log('\n── [T32b] 六时间点字段接线锁定 ──');
+        const iFieldLock = await mkIssue(`CC-字段接线锁定-${RUN_TAG}`, '处理中');
+        const FL = {
+            assigned: '2026-07-01 10:11:00',
+            firstSubmit: '2026-07-02 11:22:00',
+            completed: '2026-07-03 12:33:00',
+            accepted: '2026-07-04 13:44:00',
+            released: '2026-07-05 14:55:00',
+            closed: '2026-07-06 15:06:00',
+        };
+        await run(`UPDATE sys_issues SET assigned_at = ?, first_submitted_at = ?, accepted_at = ?, released_at = ?, closed_at = ?, return_count = ?, reopen_count = ? WHERE id = ?`,
+            [FL.assigned, FL.firstSubmit, FL.accepted, FL.released, FL.closed, 1, 2, iFieldLock]);
+        await run(`INSERT INTO sys_issue_timeline (issue_id, event_type, from_status, to_status, summary, operator_id, operator_name, created_at)
+                   VALUES (?, 'status_change', '开发中', '待验证', ?, ?, '管理员', ?)`,
+            [iFieldLock, `S3 字段接线锁定夹具-${RUN_TAG}`, admin.id, FL.completed]);
+
+        await page.evaluate((id) => window.siOpenDrawer && window.siOpenDrawer(id), iFieldLock);
+        await page.waitForTimeout(600);
+        // codex 263 L：锁定当前 'YYYY-MM-DD HH:MM' 展示格式（与 siFmtDT 分钟级输出等价·非真调 siFmtDT）
+        const fl2min = (s) => s.slice(0, 16);
+        const flAssignedKv = await kvOf('指派');
+        must(flAssignedKv === fl2min(FL.assigned),
+            `[T32b] ⭐ 「指派」kv 应精确等于 assigned_at，期望="${fl2min(FL.assigned)}"，实得 "${flAssignedKv}"`);
+        const flFirstSubmitKv = await kvOf('首次交付');
+        must(flFirstSubmitKv === fl2min(FL.firstSubmit),
+            `[T32b] ⭐ 「首次交付」kv 应精确等于 first_submitted_at，期望="${fl2min(FL.firstSubmit)}"，实得 "${flFirstSubmitKv}"`);
+        const flCompletedKv = await kvOf('实际完成');
+        must(flCompletedKv === fl2min(FL.completed),
+            `[T32b] ⭐ 「实际完成」kv 应精确等于 timeline 完成时刻，期望="${fl2min(FL.completed)}"，实得 "${flCompletedKv}"`);
+        const flAcceptedKv = await kvOf('验收');
+        must(flAcceptedKv === fl2min(FL.accepted),
+            `[T32b] ⭐ 「验收」kv 应精确等于 accepted_at，期望="${fl2min(FL.accepted)}"，实得 "${flAcceptedKv}"`);
+        const flReleasedKv = await kvOf('上线');
+        must(flReleasedKv === fl2min(FL.released),
+            `[T32b] ⭐ 「上线」kv 应精确等于 released_at，期望="${fl2min(FL.released)}"，实得 "${flReleasedKv}"`);
+        const flClosedKv = await kvOf('关闭');
+        must(flClosedKv === fl2min(FL.closed),
+            `[T32b] ⭐ 「关闭」kv 应精确等于 closed_at，期望="${fl2min(FL.closed)}"，实得 "${flClosedKv}"`);
+        const flReworkKv = await kvOf('返工');
+        must(flReworkKv === '打回 1 次 · 重开 2 次',
+            `[T32b] ⭐ 返工行文案精确=「打回 1 次 · 重开 2 次」（return_count=1≠reopen_count=2，两数互不相同防"两个数顺序错位仍读着像对"），实得 "${flReworkKv}"`);
+
+        // ── [T33]（S3 四件④）：无代码交付原因正文块 + XSS 防护 ────────────────────────────
+        //   造一单走 no_code 提交——真实端点调用范式照抄 scripts/verify-sys-bug-transitions.js:336
+        //   （`{ mode: 'no_code', no_code_reason }`）与 scripts/verify-sys-multidev-submit.js S3 段
+        //   （no_code_reason 缺失→400/成功→200+dev_status='no_code'）。XSS 探针范式同本文件 [T7]。
+        console.log('\n── [T33] 无代码交付原因正文块 + XSS 防护 ──');
+        const XSS_NO_CODE_REASON = `本轮无需编码"><img src=x onerror="window.__t33xss=1">&<'`;
+        const iNoCode = await mkIssue(`CC-无代码交付-${RUN_TAG}`, '处理中');
+        await mkMember(iNoCode, devUser.id);
+        await run(`UPDATE sys_issues SET dev_estimated_at = ? WHERE id = ?`, ['2099-12-31 12:00', iNoCode]);
+        const submitNoCode = await apiCall('POST', `/api/sys-issues/${iNoCode}/submit`, devTokFlow, { mode: 'no_code', no_code_reason: XSS_NO_CODE_REASON, self_tested: true, test_env_deployed: true });
+        must(submitNoCode.ok && submitNoCode.status === 200 && submitNoCode.body.dev_status === 'no_code',
+            `[T33] 前置：真实 no_code submit 应 200 + dev_status=no_code，实得 status=${submitNoCode.status} body=${JSON.stringify(submitNoCode.body)}`);
+
+        // codex 262 M-3：容器锁定——先按标题文本「无代码交付说明」精确定位那个 .si-worknote-block
+        //   （而非松散地在整个 #siDBody 内找第一个 .si-worknote-text，那样若页面上同时存在「工作说明」
+        //   块也可能因选择器不够精确而误配对到别的块），再在该块内部核对姓名/时刻/原因三项。
+        //   同时核对「工作说明」块（同函数、同兄弟结构）不应因本次 no_code_reason 而被误渲染——两块
+        //   相互独立，原因文本不该跑错地方。
+        const devName1 = submitNoCode.body && submitNoCode.body.dev_assignees && submitNoCode.body.dev_assignees[0] && submitNoCode.body.dev_assignees[0].user_name;
+        const resolvedAt1 = submitNoCode.body && submitNoCode.body.dev_assignees && submitNoCode.body.dev_assignees[0] && submitNoCode.body.dev_assignees[0].resolved_at;
+        must(!!devName1 && !!resolvedAt1, `[T33] 前置：submit 响应应带回 dev_assignees[0].user_name/resolved_at（后续容器内断言的期望值来源），实得 name="${devName1}" resolved_at="${resolvedAt1}"`);
+
+        await page.evaluate((id) => window.siOpenDrawer && window.siOpenDrawer(id), iNoCode);
+        await page.waitForTimeout(600);
+        const noCodeProbe = await page.evaluate(() => {
+            const blocks = [...document.querySelectorAll('#siDBody .si-worknote-block')];
+            const findByTitle = (title) => blocks.find(b => {
+                const t = b.querySelector('.si-worknote-title');
+                return t && t.textContent.trim() === title;
+            });
+            const ncBlock = findByTitle('无代码交付说明');
+            const wnBlock = findByTitle('工作说明');
+            const base = {
+                fired: !!window.__t33xss,
+                imgCount: document.querySelectorAll('#siDBody img[src="x"]').length,
+                hasNcBlock: !!ncBlock,
+                hasWnBlock: !!wnBlock,
+            };
+            if (!ncBlock) return base;
+            const item = ncBlock.querySelector('.si-worknote-item');
+            const who = item ? item.querySelector('.si-worknote-who') : null;
+            const timeEl = item ? item.querySelector('.si-muted') : null;
+            const textEl = item ? item.querySelector('.si-worknote-text') : null;
+            return {
+                ...base,
+                who: who ? who.textContent.trim() : null,
+                timeText: timeEl ? timeEl.textContent.trim() : null,
+                reasonText: textEl ? textEl.textContent : null,
+            };
+        });
+        must(noCodeProbe.fired !== true, `[T33] ⭐ 恶意 no_code_reason 未触发脚本执行（window.__t33xss 未被置位），实得 ${JSON.stringify(noCodeProbe)}`);
+        must(noCodeProbe.imgCount === 0, `[T33] 恶意 payload 未产出真实 DOM img 元素，实得 ${noCodeProbe.imgCount}`);
+        must(noCodeProbe.hasNcBlock === true, '[T33] ⭐ M-3：应能按标题「无代码交付说明」精确定位到该 .si-worknote-block 容器（非 title 悬浮，是正文可见块）');
+        must(noCodeProbe.who === devName1,
+            `[T33] ⭐ M-3：容器内姓名应等于该 dev 的 user_name，期望="${devName1}"，实得 "${noCodeProbe.who}"`);
+        const expectResolvedMinute = resolvedAt1 ? resolvedAt1.slice(0, 16) : null;   // codex 263 L：锁定当前格式（同 fl2min 说明）
+        must(noCodeProbe.timeText === expectResolvedMinute,
+            `[T33] ⭐ M-3：容器内时刻应等于 resolved_at 锁定到 YYYY-MM-DD HH:MM（与 siFmtDT 分钟级输出等价），期望="${expectResolvedMinute}"，实得 "${noCodeProbe.timeText}"`);
+        must(noCodeProbe.reasonText === XSS_NO_CODE_REASON,
+            `[T33] ⭐ 容器内原因正文应原样等于 no_code_reason（esc 转义生效但内容不失真，文本节点非 title 属性），实得 "${noCodeProbe.reasonText}"`);
+        must(noCodeProbe.hasWnBlock === false,
+            '[T33] ⭐ M-3：「工作说明」块不应因本单只有 no_code_reason 而被误渲染（两块独立，原因未误入工作说明块）');
+
+        // 有真实 commit 的正常单（iTwo：全体成员非 no_code 态）不应存在「无代码交付说明」容器
+        //   （M-3：断言容器本身不存在，而非只查文本缺席——容器若因结构变化仍在但文本被清空，旧断言测不出）
+        await page.evaluate((id) => window.siOpenDrawer && window.siOpenDrawer(id), iTwo);
+        await page.waitForTimeout(600);
+        // codex 263 号 M-末：正面锚点——先确认抽屉真的切到了 iTwo（防抽屉没打开/切换失败时，
+        //   下面的纯否定断言"容器不存在"照样会绿，那种绿证明不了任何东西）。
+        const drawerTitleText = await page.evaluate(() => {
+            const el = document.getElementById('siDTitle');
+            return el ? el.textContent.trim() : null;
+        });
+        must(!!drawerTitleText && new RegExp(`^#${iTwo}(?!\\d)`).test(drawerTitleText),
+            `[T33] 前置：抽屉确已切到 #${iTwo}（siDTitle 应以该编号开头），实得 "${drawerTitleText}"`);
+        const hasNoCodeContainer = await page.evaluate(() =>
+            [...document.querySelectorAll('#siDBody .si-worknote-block')].some(b => {
+                const t = b.querySelector('.si-worknote-title');
+                return t && t.textContent.trim() === '无代码交付说明';
+            }));
+        must(hasNoCodeContainer === false, '[T33] ⭐ M-3：有真实 commit 的正常单不应存在「无代码交付说明」容器（非仅文本缺席，容器本身也不出现）');
+
+        // ── [T33b]（codex 264 号末次合并审 M-2）：no_code 历史凭证——成员被移出后仍应可见 ──────────
+        //   四件④拍板精神：无代码交付=没有 commit 可追溯，那段说明文字是唯一交付凭证。此前 ncItems
+        //   只从在册（removed_at IS NULL）成员取数，返工 remove+re-add 后旧一轮的凭证会从详情彻底
+        //   消失。真实流程：两名开发在册（devUser 单独 no_code、devUser2 留作在册占位，满足下方移除时
+        //   的 LAST_ASSIGNEE 门槛）→ devUser 真实 no_code 提交（真实端点，产生带 no_code_reason 的
+        //   dev_assignees 行）→ admin 走真实 DELETE 成员端点移除 devUser（调用范式照抄
+        //   scripts/verify-sys-multidev-members.js:440 等：`DELETE /api/sys-issues/:id/dev-assignees/
+        //   :daId`，body {reason}）→ 重新打开详情，断言无代码块仍渲染原因文本 + 该成员姓名带
+        //   「（已移出）」标注。
+        console.log('\n── [T33b] no_code 历史凭证：成员移出后详情仍可见 ──');
+        const HIST_NO_CODE_REASON = `S4 历史凭证夹具-${RUN_TAG}：本轮无需编码`;
+        const iNoCodeHist = await mkIssue(`CC-无代码历史凭证-${RUN_TAG}`, '处理中');
+        const daHistA = await mkMember(iNoCodeHist, devUser.id);
+        await mkMember(iNoCodeHist, devUser2.id);   // 仅占位，撑住 LAST_ASSIGNEE 门槛（activeCount 需 ≥2 才能移除 devUser）
+        await run(`UPDATE sys_issues SET dev_estimated_at = ? WHERE id = ?`, ['2099-12-31 13:00', iNoCodeHist]);
+
+        const submitHist = await apiCall('POST', `/api/sys-issues/${iNoCodeHist}/submit`, devTokFlow, { mode: 'no_code', no_code_reason: HIST_NO_CODE_REASON, self_tested: true, test_env_deployed: true });
+        must(submitHist.ok && submitHist.status === 200 && submitHist.body.dev_status === 'no_code',
+            `[T33b] 前置：真实 no_code submit 应 200 + dev_status=no_code，实得 status=${submitHist.status} body=${JSON.stringify(submitHist.body)}`);
+        const daHistAId = submitHist.body && submitHist.body.dev_assignee_id;
+        must(!!daHistAId && daHistAId === daHistA,
+            `[T33b] 前置：submit 响应的 dev_assignee_id 应与 mkMember 造的实例一致，期望=${daHistA}，实得=${daHistAId}`);
+        const statusBeforeRemove = await get(`SELECT status FROM sys_issues WHERE id = ?`, [iNoCodeHist]);
+        must(!!statusBeforeRemove && statusBeforeRemove.status === '处理中',
+            `[T33b] 前置：devUser2 仍 pending，全员未完成，W-GATE 不应触发，issue 应仍在「处理中」，实得 "${statusBeforeRemove && statusBeforeRemove.status}"`);
+
+        // 真实移除——调用范式照抄 scripts/verify-sys-multidev-members.js:440
+        //   （`DELETE /api/sys-issues/:id/dev-assignees/:daId`，body {reason}，admin 身份）
+        const removeResp = await apiCall('DELETE', `/api/sys-issues/${iNoCodeHist}/dev-assignees/${daHistAId}`, adminTok, { reason: 'S4 [T33b] 历史凭证判别：移出该成员' });
+        must(removeResp.ok && removeResp.status === 200,
+            `[T33b] 前置：真实 DELETE 移除成员应 200，实得 status=${removeResp.status} body=${JSON.stringify(removeResp.body)}`);
+        const rowAfterRemove = await get(`SELECT removed_at, no_code_reason, user_name FROM sys_issue_dev_assignees WHERE id = ?`, [daHistAId]);
+        must(!!rowAfterRemove && !!rowAfterRemove.removed_at,
+            `[T33b] ⭐ 移除后该实例 removed_at 应非空（真实软删，非物理删除），实得 ${JSON.stringify(rowAfterRemove)}`);
+        must(!!rowAfterRemove && rowAfterRemove.no_code_reason === HIST_NO_CODE_REASON,
+            `[T33b] ⭐ 移除后 no_code_reason 原样保留（不因移出而被清空），期望="${HIST_NO_CODE_REASON}"，实得="${rowAfterRemove && rowAfterRemove.no_code_reason}"`);
+
+        const detailAfterRemove = await apiCall('GET', `/api/sys-issues/${iNoCodeHist}`, adminTok);
+        const noCodeRecordsAfterRemove = (detailAfterRemove.body && Array.isArray(detailAfterRemove.body.no_code_records)) ? detailAfterRemove.body.no_code_records : [];
+        const histRecord = noCodeRecordsAfterRemove.find(r => r.id === daHistAId);
+        must(detailAfterRemove.ok && !!histRecord,
+            `[T33b] ⭐ M-2：详情接口 no_code_records 应仍含该已移出实例（含 removed 实例，同 commit 记录先例"已发生的事实"口径），实得 no_code_records=${JSON.stringify(noCodeRecordsAfterRemove)}`);
+        must(!!histRecord && histRecord.no_code_reason === HIST_NO_CODE_REASON && !!histRecord.removed_at,
+            `[T33b] ⭐ 该记录的 no_code_reason/removed_at 均应正确回填，实得 ${JSON.stringify(histRecord)}`);
+
+        await page.evaluate((id) => window.siOpenDrawer && window.siOpenDrawer(id), iNoCodeHist);
+        await page.waitForTimeout(600);
+        const histProbe = await page.evaluate(() => {
+            const blocks = [...document.querySelectorAll('#siDBody .si-worknote-block')];
+            const ncBlock = blocks.find(b => {
+                const t = b.querySelector('.si-worknote-title');
+                return t && t.textContent.trim() === '无代码交付说明';
+            });
+            if (!ncBlock) return { hasBlock: false };
+            const item = ncBlock.querySelector('.si-worknote-item');
+            const who = item ? item.querySelector('.si-worknote-who') : null;
+            const textEl = item ? item.querySelector('.si-worknote-text') : null;
+            return {
+                hasBlock: true,
+                whoText: who ? who.textContent.trim() : null,
+                reasonText: textEl ? textEl.textContent : null,
+            };
+        });
+        must(histProbe.hasBlock === true,
+            `[T33b] ⭐ 成员移出后详情页仍应渲染「无代码交付说明」容器（唯一交付凭证不因移出而消失），实得 ${JSON.stringify(histProbe)}`);
+        must(!!histProbe.whoText && histProbe.whoText.includes('（已移出）'),
+            `[T33b] ⭐ M-2：已移出成员的姓名应带「（已移出）」标注，实得 "${histProbe.whoText}"`);
+        must(histProbe.reasonText === HIST_NO_CODE_REASON,
+            `[T33b] ⭐ 原因正文应仍原样显示（esc 转义但内容不失真），期望="${HIST_NO_CODE_REASON}"，实得 "${histProbe.reasonText}"`);
+
+        // ── L-2（codex 265 号复审）：re-add 多实例语义——同一开发被移出后又重新加入，产生新实例行 ──
+        //   ⚠️ 指令原文写"把同一 devUser2 重新加入"，但本文件里 devUser2 从未被移除过（它是纯占位、
+        //   全程 pending，用来撑住 LAST_ASSIGNEE 门槛）——真正被移除、需要 re-add 验证的是上面已移出
+        //   的 devUser（daHistAId）。按指令意图（"同一个人被移出后又加回来，产生新实例"）执行，非
+        //   照字面变量名，此处存疑记录，供回看确认。
+        //   M-2 修复的核心承诺是"多实例都算数"，不是"只多留一条"——这里真实造出"旧实例(removed)+
+        //   新实例(在册)"并存局面，逐项核对顺序/标注/文本互不串位，防"两条记录互相覆盖/顺序错位/
+        //   标注错挂到新实例"这类比"单条 removed 记录"更隐蔽的回归。
+        console.log('\n── [T33b] L-2：re-add 多实例——旧实例(已移出)与新实例(在册)并存 ──');
+        const RE_ADD_REASON = `S4 历史凭证夹具-${RUN_TAG}：第二轮说明（re-add 后新实例）`;
+        const readdResp = await apiCall('POST', `/api/sys-issues/${iNoCodeHist}/dev-assignees`, adminTok, { user_ids: [devUser.id] });
+        must(readdResp.ok && readdResp.status === 200,
+            `[T33b] L-2 前置：真实 re-add（既有成员 API）应 200，实得 status=${readdResp.status} body=${JSON.stringify(readdResp.body)}`);
+        const newInstance = (readdResp.body && Array.isArray(readdResp.body.dev_assignees))
+            ? readdResp.body.dev_assignees.find(d => Number(d.user_id) === Number(devUser.id) && !d.removed_at)
+            : null;
+        must(!!newInstance && newInstance.id !== daHistAId,
+            `[T33b] L-2 前置：re-add 应产生一条全新在册实例（id 不同于旧的已移出实例 ${daHistAId}），实得 ${JSON.stringify(newInstance)}`);
+        const daHistBId = newInstance && newInstance.id;
+
+        const submitHist2 = await apiCall('POST', `/api/sys-issues/${iNoCodeHist}/submit`, devTokFlow, { mode: 'no_code', no_code_reason: RE_ADD_REASON, self_tested: true, test_env_deployed: true });
+        must(submitHist2.ok && submitHist2.status === 200 && submitHist2.body.dev_status === 'no_code' && submitHist2.body.dev_assignee_id === daHistBId,
+            `[T33b] L-2 前置：新实例真实 no_code submit 应 200 + 命中新实例 id=${daHistBId}，实得 status=${submitHist2.status} body=${JSON.stringify(submitHist2.body)}`);
+
+        const detailAfterReadd = await apiCall('GET', `/api/sys-issues/${iNoCodeHist}`, adminTok);
+        const recordsAfterReadd = (detailAfterReadd.body && Array.isArray(detailAfterReadd.body.no_code_records)) ? detailAfterReadd.body.no_code_records : [];
+        must(detailAfterReadd.ok && recordsAfterReadd.length === 2,
+            `[T33b] ⭐ L-2：re-add + 二次提交后 no_code_records 应恰有 2 条（旧实例 removed + 新实例在册），实得 ${JSON.stringify(recordsAfterReadd)}`);
+        must(recordsAfterReadd.length === 2 && recordsAfterReadd[0].id < recordsAfterReadd[1].id,
+            `[T33b] ⭐ L-2：两条记录应按 id 升序排列，实得 ids=${recordsAfterReadd.map(r => r.id)}`);
+        const oldRec = recordsAfterReadd.find(r => r.id === daHistAId);
+        const newRec = recordsAfterReadd.find(r => r.id === daHistBId);
+        must(!!oldRec && !!oldRec.removed_at && oldRec.no_code_reason === HIST_NO_CODE_REASON,
+            `[T33b] ⭐ L-2：旧实例（id=${daHistAId}）应 removed_at 非空、说明文本仍是第一轮原文，实得 ${JSON.stringify(oldRec)}`);
+        must(!!newRec && !newRec.removed_at && newRec.no_code_reason === RE_ADD_REASON,
+            `[T33b] ⭐ L-2：新实例（id=${daHistBId}）应 removed_at 为空、说明文本是第二轮原文（非旧文本串位），实得 ${JSON.stringify(newRec)}`);
+
+        await page.evaluate((id) => window.siOpenDrawer && window.siOpenDrawer(id), iNoCodeHist);
+        await page.waitForTimeout(600);
+        const histProbe2 = await page.evaluate(() => {
+            const blocks = [...document.querySelectorAll('#siDBody .si-worknote-block')];
+            const ncBlock = blocks.find(b => {
+                const t = b.querySelector('.si-worknote-title');
+                return t && t.textContent.trim() === '无代码交付说明';
+            });
+            if (!ncBlock) return { hasBlock: false };
+            const items = [...ncBlock.querySelectorAll('.si-worknote-item')];
+            return {
+                hasBlock: true,
+                count: items.length,
+                rows: items.map(item => {
+                    const who = item.querySelector('.si-worknote-who');
+                    const textEl = item.querySelector('.si-worknote-text');
+                    return { whoText: who ? who.textContent.trim() : null, reasonText: textEl ? textEl.textContent : null };
+                }),
+            };
+        });
+        must(histProbe2.hasBlock === true && histProbe2.count === 2,
+            `[T33b] ⭐ L-2：详情页「无代码交付说明」容器应渲染 2 条（新旧实例都出现），实得 ${JSON.stringify(histProbe2)}`);
+        const oldRow = histProbe2.rows && histProbe2.rows.find(r => r.reasonText === HIST_NO_CODE_REASON);
+        const newRow = histProbe2.rows && histProbe2.rows.find(r => r.reasonText === RE_ADD_REASON);
+        must(!!oldRow && oldRow.whoText.includes('（已移出）'),
+            `[T33b] ⭐ L-2：旧实例那一行应带「（已移出）」标注，实得 ${JSON.stringify(oldRow)}`);
+        must(!!newRow && !newRow.whoText.includes('（已移出）'),
+            `[T33b] ⭐ L-2：新实例（当前在册）那一行不应带「（已移出）」标注，实得 ${JSON.stringify(newRow)}`);
+
         // ── [T5] 无 console error ────────────────────────────────────────
         //   ⚠️ 本条同时是 [T26] 守卫的"反向验证"：测试环境加载的是新 app.js，守卫**不该**触发；
         //     若守卫的探测逻辑写反了，这里会因多出一条 console.error 而红。
@@ -1028,25 +1850,61 @@ const seedCommit = (issueId, daId, userId, component, ref) =>
 
     } catch (e) {
         failed++;
-        console.error('\n[异常]', e && e.message);
+        fatalError = e;
+        console.error('\n[异常] 套件中途抛出未捕获异常（完整堆栈，非仅 message）：\n', e && (e.stack || e));
     } finally {
         if (browser) await browser.close();
-        // 清理夹具（含子表）
+        // 清理夹具（含子表）——S2（同 S1b cleanup 纪律）：SQL 清理错误不吞，收集后统一断言，
+        //   不再用 `.catch(() => {})` 静默丢弃（那样即便 DELETE 真失败，日志和退出码都看不出来）。
+        const cleanupErrs = [];
+        const safeDelete = async (sql, params, step) => {
+            try { await run(sql, params); } catch (e) { cleanupErrs.push({ step, message: e && e.message }); }
+        };
         for (const id of createdIssueIds) {
-            await run('DELETE FROM sys_issue_dev_commits WHERE issue_id = ?', [id]).catch(() => {});
-            await run('DELETE FROM sys_issue_dev_assignees WHERE issue_id = ?', [id]).catch(() => {});
-            await run('DELETE FROM sys_issue_timeline WHERE issue_id = ?', [id]).catch(() => {});
-            await run('DELETE FROM sys_issues WHERE id = ?', [id]).catch(() => {});
+            await safeDelete('DELETE FROM sys_issue_dev_commits WHERE issue_id = ?', [id], `dev_commits#${id}`);
+            await safeDelete('DELETE FROM sys_issue_dev_assignees WHERE issue_id = ?', [id], `dev_assignees#${id}`);
+            await safeDelete('DELETE FROM sys_issue_timeline WHERE issue_id = ?', [id], `timeline#${id}`);
+            await safeDelete('DELETE FROM sys_issues WHERE id = ?', [id], `issues#${id}`);
         }
         for (const rid of createdReleaseIds) {
-            await run('DELETE FROM sys_issue_release_commit_snapshots WHERE release_id = ?', [rid]).catch(() => {});
-            await run('DELETE FROM sys_releases WHERE id = ?', [rid]).catch(() => {});
+            await safeDelete('DELETE FROM sys_issue_release_commit_snapshots WHERE release_id = ?', [rid], `snapshots#${rid}`);
+            await safeDelete('DELETE FROM sys_releases WHERE id = ?', [rid], `releases#${rid}`);
         }
         const left = await get(`SELECT COUNT(*) AS c FROM sys_issues WHERE title LIKE ?`, [`CC-%-${RUN_TAG}`]);
         const leftRel = await get(`SELECT COUNT(*) AS c FROM sys_releases WHERE release_no LIKE ?`, [`RCC-${RUN_TAG}-%`]);
         console.log(`\n  🧹 夹具已清理（残留 issue ${left ? left.c : '?'} 条 / release ${leftRel ? leftRel.c : '?'} 条，均应为 0）`);
+        must(cleanupErrs.length === 0,
+            `[T31] S2：夹具清理 SQL 全部无错误，实得 errs=${JSON.stringify(cleanupErrs)}`);
+        // codex 259 M-5：残留计数此前只打印不断言（红字看着吓人但不影响退出码/PASS-FAIL 统计，
+        //   容易被忽略）——改为真实 must() 断言，且必须在 db.close()/process.exit() 之前执行完。
+        must(!!left && left.c === 0, `[T31] S2：夹具清理后 sys_issues 残留应为 0，实得 ${left ? left.c : '(查询失败)'}`);
+        must(!!leftRel && leftRel.c === 0, `[T31] S2：夹具清理后 sys_releases 残留应为 0，实得 ${leftRel ? leftRel.c : '(查询失败)'}`);
+        // S4（[T29c] 判别要求）：按 issue_id 删 timeline 的清理循环上方已存在（`DELETE FROM
+        //   sys_issue_timeline WHERE issue_id = ?`，本 finally 块靠前几行），本条只是把它显式纳入
+        //   [T31] 残留断言范围——用 createdIssueIds 这份 JS 数组直接查（不依赖 sys_issues 父行此刻是否
+        //   还在，父行已在上面几行被删掉），覆盖 [T29c] 新插入的伪 resume 行等所有本轮 timeline 写入。
+        let timelineLeftCount = null;
+        if (createdIssueIds.length) {
+            const timelineLeft = await get(
+                `SELECT COUNT(*) AS c FROM sys_issue_timeline WHERE issue_id IN (${createdIssueIds.map(() => '?').join(',')})`,
+                createdIssueIds
+            );
+            timelineLeftCount = timelineLeft ? timelineLeft.c : null;
+        }
+        must(createdIssueIds.length === 0 || timelineLeftCount === 0,
+            `[T31] S4：夹具清理后 sys_issue_timeline 残留应为 0（含 [T29c] 插入的伪 resume 行），实得 ${timelineLeftCount === null ? '(查询失败)' : timelineLeftCount}`);
         db.close();
-        console.log(`\n  合计 ${passed} PASS / ${failed} FAIL`);
-        process.exit(failed === 0 ? 0 : 1);
+        console.log(`\n  合计 ${passed} PASS / ${failed} FAIL${fatalError ? '  ⚠️ FATAL：套件中途抛出未捕获异常，见上方完整堆栈（此次结果不可信赖为"仅这些用例失败"）' : ''}`);
+        // codex 265 号复审磁盘查证后改写：旧 catch 本来就有 failed++，断言失败与 catch 到的异常原本
+        //   就都会走 exit(1)——这里判 `failed === 0 && !fatalError` 不是在补一个"会报全绿"的窟窿，
+        //   而是让 fatalError 在汇总行里独立可见（见上方 let fatalError 声明处的三点价值说明）。
+        process.exit(failed === 0 && !fatalError ? 0 : 1);
     }
-})();
+})().catch(e => {
+    // codex 265 号 M-1：外层 rejection 兜底——封住"finally 段自身抛错（例如 browser.close()/
+    //   cleanup() 内部 await 失败）导致 IIFE 整体 rejected、绕过上面的汇总打印与 process.exit 调用"
+    //   这条路径。Node 现代版本对未处理的 rejection 默认也会以非零码退出（那是运行时环境的安全网），
+    //   但退出码的正确性不应该依赖运行时兜底，代码自身要把这条路径显式封死。
+    console.error('[顶层兜底] finally 段或未捕获 rejection：\n', e && (e.stack || e));
+    process.exit(1);
+});

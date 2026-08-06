@@ -96,7 +96,8 @@ async function setupAssignedIssue(title, oaNumber) {
   });
   assert.strictEqual(r.status, 201, `[夹具] 建单应 201，实得 ${r.status} ${JSON.stringify(r.body)}`);
   const id = r.body.id;
-  r = await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, {});
+  // [工期对接测试与风险等级拆分 方案 v1.1 §3.4·C5] feature 受理必带 risk_level。
+  r = await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, { risk_level: '二级' });
   assert.strictEqual(r.status, 200, `[夹具] 受理应 200，实得 ${r.status} ${JSON.stringify(r.body)}`);
   r = await call('POST', `/api/sys-issues/${id}/set-oa-number`, adminTok, { oa_number: oaNumber });
   assert.strictEqual(r.status, 200, `[夹具] 补 OA 号应 200，实得 ${r.status} ${JSON.stringify(r.body)}`);

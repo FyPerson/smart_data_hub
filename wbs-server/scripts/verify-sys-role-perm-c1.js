@@ -147,7 +147,8 @@ async function mkAssignable(type) {
       description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13 });
   assert.strictEqual(r.status, 201, `建 ${type} 单 201, got ${r.status} ${JSON.stringify(r.body)}`);
   // ⭐ 角色权限重构 C2.5 撤销（v2.1）：三类型建单均直落「待受理」，预沟通段整体撤销，无需按 type 分支中转。
-  const acc = await call('POST', `/api/sys-issues/${r.body.id}/intake-accept`, adminTok, {});
+  // [工期对接测试与风险等级拆分 方案 v1.1 §3.4·C5] feature 受理必带 risk_level（否则 400 RISK_LEVEL_REQUIRED）。
+  const acc = await call('POST', `/api/sys-issues/${r.body.id}/intake-accept`, adminTok, (type === 'feature' || type === 'improvement') ? { risk_level: '二级' } : {});
   assert.strictEqual(acc.status, 200, `${type} 受理 200, got ${acc.status} ${JSON.stringify(acc.body)}`);
   assert.strictEqual(await statusOf(r.body.id), ASSIGNABLE_STATUS[type],
     `夹具 mkAssignable(${type})：受理后须真落「${ASSIGNABLE_STATUS[type]}」`);
@@ -167,6 +168,11 @@ async function mkInDev(type) {
   const r = await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5 });
   assert.strictEqual(r.status, 200, `${type} assign 200, got ${r.status} ${JSON.stringify(r.body)}`);
   assert.strictEqual(await statusOf(id), DEV_STATUS[type], `夹具 mkInDev(${type})：指派后须真落「${DEV_STATUS[type]}」`);
+  // [工期对接测试与风险等级拆分 方案 v1.1 §3.0-⑥·C4a 涟漪修复] 本文件测角色权限收敛（C1），下游
+  // mkVerifying/mkPendingRelease 靠"submit 直落待验证"这一前提做后续断言，与「待对接测试」段本身无关
+  // （后者由专门的 verify-sys-liaison-test.js 覆盖）。让对接人在 GATE 判定时失效，触发 §3.0-⑥ 降级
+  // 路径——improvement/bug 未接决策树不受影响，此处统一处理零副作用，是方案承认的合法真实场景。
+  await run(`UPDATE sys_issues SET intake_liaison_id = 999999 WHERE id = ?`, [id]);
   return id;
 }
 // 推进到「待验证」（开发本人回填预计完成 + 提交）——accept 的合法前置态，也是 creator/requester 通道的可发状态
@@ -174,7 +180,7 @@ async function mkVerifying(type) {
   const id = await mkInDev(type);
   const e = await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: futureEst(30) });
   assert.strictEqual(e.status, 200, `夹具 mkVerifying(${type}) estimate 200, got ${e.status} ${JSON.stringify(e.body)}`);
-  const s = await call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'no_code', no_code_reason: '完成（占位理由）' });
+  const s = await call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'no_code', no_code_reason: '完成（占位理由）', self_tested: true, test_env_deployed: true });
   assert.strictEqual(s.status, 200, `夹具 mkVerifying(${type}) submit 200, got ${s.status} ${JSON.stringify(s.body)}`);
   assert.strictEqual(await statusOf(id), '待验证', `夹具 mkVerifying(${type})：提交后须真落「待验证」`);
   return id;
@@ -198,6 +204,27 @@ async function mkOnline(type) {
   const id = await mkPendingRelease(type);
   await run(`UPDATE sys_issues SET status='已上线', released_at=datetime('now','localtime') WHERE id=?`, [id]);
   assert.strictEqual(await statusOf(id), '已上线', `夹具 mkOnline(${type})：直造后须真落「已上线」`);
+  return id;
+}
+// [C4 合并修复批 275-M5] 真实 ⑦ 路径代表夹具（仅 feature——LIAISON_TEST 对 improvement/bug 恒空）——
+// 本文件其余全部走 mkInDev 的 999999 降级(⑥) 简化路径（角色权限矩阵本身与走⑥/⑦无关，见 mkInDev
+// 注释）。保留有效 intake_liaison_id=13，走真实 GATE ⑦（待对接测试）+ liaison-test-pass 落到待验证，
+// 供下方跑 [M2/accept] 同款角色矩阵代表断言，防真实⑦链路本身与角色权限矩阵的交互回归被全 ⑥ 化的
+// 夹具集合掩盖。
+async function mkVerifyingViaRealLiaisonTest() {
+  const id = await mkAssignable('feature');
+  const a = await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5 });
+  assert.strictEqual(a.status, 200, `[275-M5] feature assign 200, got ${a.status} ${JSON.stringify(a.body)}`);
+  assert.strictEqual(await statusOf(id), '开发中', '[275-M5] 指派后须真落「开发中」');
+  const e = await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: futureEst(30) });
+  assert.strictEqual(e.status, 200, `[275-M5] estimate 200, got ${e.status} ${JSON.stringify(e.body)}`);
+  const s = await call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'no_code', no_code_reason: '完成（占位理由）', self_tested: true, test_env_deployed: true });
+  assert.strictEqual(s.status, 200, `[275-M5] submit 200, got ${s.status} ${JSON.stringify(s.body)}`);
+  assert.strictEqual(s.body.main_status, '待对接测试', '[275-M5] submit → 待对接测试（真实 ⑦ 路径，非 999999 降级）');
+  // ⭐ D22-④ 批2：pass 现须凭证二选一，本夹具补 test_note。
+  const p = await call('POST', `/api/sys-issues/${id}/liaison-test-pass`, intakeTok, { test_note: '275-M5 夹具测试通过' });
+  assert.strictEqual(p.status, 200, `[275-M5] liaison-test-pass 200, got ${p.status} ${JSON.stringify(p.body)}`);
+  assert.strictEqual(p.body.status, '待验证', '[275-M5] liaison-test-pass → 待验证');
   return id;
 }
 
@@ -569,7 +596,7 @@ async function main() {
       assert.strictEqual(a2.status, 200, '[M5/开发轴] 夹具：admin 指派 improvement 给示例发布者(7) 须 200');
       const e2 = await call('POST', `/api/sys-issues/${sid}/estimate`, techTok, { dev_estimated_at: futureEst(32) });
       assert.strictEqual(e2.status, 200, `[M5/开发轴] 示例发布者 estimate 应放行, got ${e2.status} ${JSON.stringify(e2.body)}`);
-      const s2 = await call('POST', `/api/sys-issues/${sid}/submit`, techTok, { mode: 'no_code', no_code_reason: '示例发布者以开发身份提交' });
+      const s2 = await call('POST', `/api/sys-issues/${sid}/submit`, techTok, { mode: 'no_code', no_code_reason: '示例发布者以开发身份提交', self_tested: true, test_env_deployed: true });
       assert.strictEqual(s2.status, 200, `⭐ [M5/开发轴] 示例发布者 submit 应放行（ownerGuard=assignee 本人门）, got ${s2.status} ${JSON.stringify(s2.body)}`);
       assert.strictEqual(await statusOf(sid), '待验证', '[M5/开发轴] 示例发布者提交后须真落「待验证」（证明确实走通提交链，非被静默吞）');
     }
@@ -620,6 +647,20 @@ async function main() {
     const r3 = I.sysManualNotifyGuard(issue, 'whatever_new_channel', actorIntake);
     assert.ok(r3 && r3.status === 400 && r3.body.code === 'MANUAL_NOTIFY_CHANNEL_UNKNOWN', '[G] 任意未知通道同样 400');
     ok('[G] 通知守卫 fail-closed：未知/未纳入白名单的通道一律 400 MANUAL_NOTIFY_CHANNEL_UNKNOWN（防未来加通道时静默放行）');
+  }
+
+  // ═══ [C4 合并修复批 275-M5] 真实 ⑦ 路径代表夹具：跑 [M2/accept] 同款角色矩阵代表断言（2 格即可）═══
+  {
+    const idAdmin = await mkVerifyingViaRealLiaisonTest();
+    let r = await call('POST', `/api/sys-issues/${idAdmin}/accept`, adminTok, {});
+    assert.strictEqual(r.status, 200, `[275-M5/accept] admin × feature（真实⑦路径）期望 200, got ${r.status} ${JSON.stringify(r.body)}`);
+    assert.strictEqual(await statusOf(idAdmin), '待上线', '[275-M5/accept] admin 验收后须真落「待上线」');
+
+    const idDev = await mkVerifyingViaRealLiaisonTest();
+    r = await call('POST', `/api/sys-issues/${idDev}/accept`, devTok, {});
+    assert.strictEqual(r.status, 403, `[275-M5/accept] dev(5) × feature（真实⑦路径）期望 403（验收仅 admin）, got ${r.status} ${JSON.stringify(r.body)}`);
+    assert.strictEqual(await statusOf(idDev), '待验证', '[275-M5/accept] dev 403 后状态须原样（仍待验证）');
+    ok('[275-M5] 真实⑦路径代表夹具：submit→待对接测试→liaison-test-pass→待验证 全走真实链路（非 999999 降级）后，[M2/accept] 角色矩阵代表断言（admin 200/dev 403）仍成立（防真实⑦链路与角色权限矩阵交互回归被全 ⑥ 化的夹具集合掩盖）');
   }
 
   console.log(`\n✅ verify-sys-role-perm-c1 全部通过（${passed} 组·角色权限重构 C1 权限收敛）`);

@@ -150,6 +150,25 @@ module.exports = (deps) => {
     //   （主建单按提交值/衍生入口恒 0）+ assertSysDevCommitmentOaGuard 的 SELECT 读它做放行判定，
     //   mid-migration 崩溃（列未补）会让这些语句撞 no such column → 500（同 oa_number/intake_liaison_id 先例）。
     'oa_exempt',
+    // ← C1（工期对接测试与风险等级拆分 方案 v1.0 §4/§10）锚点：**本 commit 是纯 schema commit**
+    //   （族常量+ALTER+CHECK 探针，C1 范围声明不接线端点/GATE/guard），本组列此刻尚无消费者——整组
+    //   预锚点入 readiness（同 SYS_RELEASES_KEY_COLS「上线体统一重构 C0」/release_assignee_notify_* 先例：
+    //   "纯 schema commit 仍先整组入锚，避免后续接线 commit 忘记补锚点"）。liaison_test_cycle_no=§3.0
+    //   决策树⑦周期自增核心锚点、estimated_effort_days/risk_level=评估/受理闸门核心锚点（C2/C4 接线）；
+    //   liaison_test_notify_* 通知列组（除 notify_sent_by）整组入锚——§6 预占协议的 status/token/
+    //   started_at/cycle_no/recipient 是同一条 CAS 的原子写入单元，缺任一列会让该 CAS 编译期撞
+    //   no such column，采 release_assignee_notify_*/SYS_RELEASES_KEY_COLS「整组」口径（而非 relay/
+    //   intake「只锚 status」口径——那两侧无 token 预占协议，语义更简单）；notify_sent_by 不入锚点，
+    //   同 notify_sent_by/intake_notify_sent_by/release_assignee_notify_sent_by 先例（sent_by 类列
+    //   历来只由 verify-sys-schema 全量保障，不进 readiness 抽样锚点）。
+    'estimated_effort_days', 'risk_level', 'liaison_test_cycle_no',
+    'liaison_test_recipient_id', 'liaison_test_recipient_name', 'liaison_test_notify_status',
+    'liaison_test_notified_at', 'liaison_test_notify_message_key', 'liaison_test_notify_error',
+    'liaison_test_read_at', 'liaison_test_notify_cycle_no', 'liaison_test_attempt_token',
+    'liaison_test_attempt_started_at',
+    // ← [codex 291 号 H-1 收口] liaison_test_attachment_watermark：runWGate ⑦ 同一 CAS 原子写入、pass
+    //   凭证判定热读，同组其余 liaison_test_* 列一样"被消费的热路径列"，须入锚点（同 §156 整组入锚说明）。
+    'liaison_test_attachment_watermark',
   ];
   const SYS_RELEASES_KEY_COLS = ['release_no', 'status', 'is_hotfix', 'release_note', 'version_tag',
     'release_type',   // ← bug 流 Commit ① 批次类型隔离锚点（[codex三审:L] 值域非空由 ② 服务端守卫强制，readiness 只查列在）
@@ -160,7 +179,8 @@ module.exports = (deps) => {
     'release_assignee_notify_started_at', 'release_assignee_notified_at',
     'release_assignee_notify_message_key', 'release_assignee_notify_error',
     'release_assignee_notify_token', 'release_assignee_read_at', 'release_kind'];
-  const SYS_TIMELINE_KEY_COLS = ['event_type', 'from_status', 'to_status', 'action_code', 'ref_id', 'round_no'];
+  const SYS_TIMELINE_KEY_COLS = ['event_type', 'from_status', 'to_status', 'action_code', 'ref_id', 'round_no',
+    'payload_json'];   // ← [codex 291 号 H-2 收口] liaison_test_pass 写点热读列，同 §156 一带"整组入锚"哲学
   const SYS_ATTACHMENTS_KEY_COLS = ['attachment_type', 'round_no', 'status'];
   // ← 通知改造 C1a 新表锚点（bug流通知改造_方案_20260703_v1.5.md §4.1）。sys_issue_dev_assignees 是**一次性
   //   CREATE TABLE（无 ALTER 路径）**——要么整表建全要么不存在，故 readiness 用"结构全列在"模型（非 sys_issues 那种
@@ -214,10 +234,14 @@ module.exports = (deps) => {
   //   ⚠️ dev_estimated_at 不在本片段——三路径各自原有逻辑已清（均含 dev_estimated_at=NULL），本 helper 仅管评估3+blocked3，
   //     不动既有 dev_estimated_at 清理路径（最小回归）。抽片段供三路径复用，防字段清单漂移（codex 17b rec）。
   //   ⚠️ 与 SYS_CLEAR_BLOCKED_FIELDS_SQL 的区别：换轮连评估一起清（新一轮重评）；hold/void/unblock 只清 blocked、留评估（§⑥「不动原评估」作问责对照）。
+  // [工期对接测试与风险等级拆分 方案 v1.1 §3.2/§8·C2] estimated_effort_days 加入本常量本体——换轮
+  //   （return/reopen，见下方两处消费本常量的调用点）连工期一起清（新一轮重评，旧工期不跨轮带过去，
+  //   同评估三字段"当前轮"语义一致，§8 换轮清空语义汇总表逐字冻结）。
   const SYS_CLEAR_FEASIBILITY_FIELDS_SQL = [
     'feasibility_conclusion = NULL',
     'feasibility_requirement_confirm = NULL',
     'feasibility_risk = NULL',
+    'estimated_effort_days = NULL',
     ...SYS_CLEAR_BLOCKED_FIELDS_SQL,
   ];
 
@@ -651,6 +675,58 @@ module.exports = (deps) => {
         intake_read_at DATETIME,
         intake_notify_sent_by INTEGER,
 
+        -- ── C1（工期对接测试与风险等级拆分 方案 v1.0 §4/§10）：工期 + 风险等级 + 测试段周期号 ──────────
+        --   置于表尾（同惯例，与旧库 ALTER ADD COLUMN 追加序一致）。estimated_effort_days=评估环节人日
+        --   （feasibility payload 写入，§3.2；契约=有限数、0<v≤365、0.5 整数倍，CAST 双倍取整技巧同
+        --   SQLite 无 MOD 运算符环境下的惯用写法）；risk_level=对接人受理时技术风险定级（intake_accept
+        --   同一 UPDATE 原子落库，§3.4；⭐ 用户拍板批1改造B：feature+improvement 均必填，bug 恒 NULL，
+        --   合法空=仅存量单，NULL 是有意义业务态不设占位，同 oa_number 先例）；值域=一级/二级/三级
+        --   （⭐ 用户拍板批1改造A：原「高/中/低」全仓改名，语义不变，仅文案换）；liaison_test_cycle_no=
+        --   独立测试周期号（§3.0-⑦ 进入「待对接测试」的同一 CAS 内自增，只增不清，与 return_count/
+        --   reopen_count 语义分离，§3.1b）。三列 CHECK 仅新库带（旧库 ALTER 不补 CHECK，见下方
+        --   runSysMigration 说明）。
+        estimated_effort_days REAL CHECK (estimated_effort_days IS NULL OR (
+          typeof(estimated_effort_days) IN ('integer','real') AND estimated_effort_days > 0
+          AND estimated_effort_days <= 365
+          AND (estimated_effort_days * 2) = CAST(estimated_effort_days * 2 AS INTEGER)
+        )),
+        risk_level TEXT CHECK (risk_level IS NULL OR risk_level IN ('一级','二级','三级')),
+        liaison_test_cycle_no INTEGER NOT NULL DEFAULT 0 CHECK (typeof(liaison_test_cycle_no) = 'integer' AND liaison_test_cycle_no >= 0),
+
+        -- ── C1：对接测试通知列组（§6 预占协议·逐列镜像 intake_notify_* 六列范式 + recipient 快照 + 周期令牌）──
+        --   逐字镜像 intake_notify_* 六列范式（status/message_key/error/read_at/sent_by），**补
+        --   liaison_test_notified_at**（C0 矩阵验证清单 §A 附注核实：现网 intake 组本就没有 notified_at，
+        --   属明显正确的补全，非镜像偏离）；recipient_id/recipient_name=通知目标快照（本通道无持久
+        --   "测试人"指派列——测试授权来自 SYS_INTAKE_LIAISON_IDS 池，非某个固定字段——收件人只在预占
+        --   发送时按池落定并快照，同 relay_notified_user_id/relay_notified_user_name 快照先例，非
+        --   intake_liaison_id 那种"指派兼收件人合一"模式）；liaison_test_notify_cycle_no/attempt_token/
+        --   attempt_started_at=§6 预占协议三件套（token 预占并发互斥 + 独立时间源支持超窗恢复 + 通知
+        --   周期与主周期防串号）。**跨列不变量**（sending⇔token∧started_at 非空、notify_cycle_no≤主
+        --   周期）不是 DB CHECK 能表达的（单列约束语法，SQLite ALTER 补的多列条件更加受限）——服务端
+        --   每次写入维护 + verify 探针扫非法组合（§4 落库策略拍板，C4 接线）。status 四态
+        --   not_sent/sending/sent/failed（新通道新 CHECK，区别于三侧通知经典三态 not_sent/sent/failed
+        --   ——本通道多一个 sending 因需要预占协议，同 release_assignee_notify_status 5 态先例，唯一
+        --   区别是本通道不需要 release_assignee 那个"stale"超窗态，超窗直接判定复用 sending+时间源）。
+        liaison_test_recipient_id INTEGER,
+        liaison_test_recipient_name TEXT,
+        liaison_test_notify_status TEXT NOT NULL DEFAULT 'not_sent' CHECK (liaison_test_notify_status IN ('not_sent','sending','sent','failed')),
+        liaison_test_notified_at DATETIME,
+        liaison_test_notify_message_key TEXT,
+        liaison_test_notify_error TEXT,
+        liaison_test_read_at DATETIME,
+        liaison_test_notify_sent_by INTEGER,
+        liaison_test_notify_cycle_no INTEGER NOT NULL DEFAULT 0 CHECK (typeof(liaison_test_notify_cycle_no) = 'integer' AND liaison_test_notify_cycle_no >= 0),
+        liaison_test_attempt_token TEXT,
+        liaison_test_attempt_started_at DATETIME,
+        -- [codex 291 号 H-1 收口·2026-08-06] pass 凭证"本轮附件"判定改 id 水位模型（原 created_at 时间比较
+        --   在同一事务/同一秒内插入多行时精度不足，见 verify-sys-liaison-test.js [6h] 反证）。语义＝"进入
+        --   本轮待对接测试那一刻，附件表里已存在的最大 id"——runWGate ⑦ 同一 CAS 原子写入
+        --   COALESCE(MAX(该单 delivery/screenshot 附件 id), 0)；pass 凭证判定改"附件.id > watermark"
+        --   （严格大于，watermark 本身是"旧"附件，不算本轮）。NOT NULL DEFAULT 0：存量单/从未进入过
+        --   测试段的单，水位=0，语义上"任何 id>0 的附件都算新"（不会误判，因为 sys_issue_attachments.id
+        --   是 AUTOINCREMENT 恒 >=1）。
+        liaison_test_attachment_watermark INTEGER NOT NULL DEFAULT 0 CHECK (typeof(liaison_test_attachment_watermark) = 'integer' AND liaison_test_attachment_watermark >= 0),
+
         CHECK (type <> 'config' OR release_id IS NULL)
       )`, recordSysErr('sys_issues'));
       db.run(`CREATE INDEX IF NOT EXISTS idx_sys_issues_status   ON sys_issues(status)`, recordSysErr('idx_sys_issues_status'));
@@ -679,6 +755,12 @@ module.exports = (deps) => {
         operator_id INTEGER NOT NULL,
         operator_name TEXT NOT NULL,
         created_at DATETIME DEFAULT (datetime('now','localtime')),
+        -- [codex 291 号 H-2 收口·2026-08-06] 结构化留痕列——恢复方案 D22-④ 拍板原意（"留痕进 pass 事件
+        --   payload"）。批2曾因发现本表当时无此列，退而求其次落 summary 文本；291 号裁定=改，本列到位后
+        --   summary 收窄为 80 字展示摘要，完整凭证（test_note 全文/attachment_ids/evidence/cycle_no）
+        --   走本列，键名 schema 冻结见 index.js case 'liaison_test_pass' 写入处注释。目前仅 liaison_test_pass
+        --   一个写点消费；本表其余 9 种 event_type 不写此列（保持 NULL），非本次范围扩张。
+        payload_json TEXT CHECK (payload_json IS NULL OR json_valid(payload_json)),
         FOREIGN KEY (issue_id) REFERENCES sys_issues(id) ON DELETE CASCADE
       )`, recordSysErr('sys_issue_timeline'));
       db.run(`CREATE INDEX IF NOT EXISTS idx_sys_timeline_issue ON sys_issue_timeline(issue_id, created_at)`, recordSysErr('idx_sys_timeline_issue'));
@@ -1385,6 +1467,72 @@ module.exports = (deps) => {
         ['oa_exempt', 'INTEGER NOT NULL DEFAULT 0'],
       ];
       await alterAddMissingCols('sys_issues', SYS_OA_EXEMPT_ISSUE_COLS, '建单优化批 C3b·免 OA 声明标志');
+
+      // [1a-13] ⭐ 系统迭代 评估工期+对接测试段+优先级/风险等级拆分 方案 v1.0（C1·§4/§10）：sys_issues 补
+      //   工期/风险等级/测试周期 3 列 + 对接测试通知列组 11 列（§6 预占协议，逐字镜像 intake_notify_* +
+      //   recipient 快照 + 周期令牌三件套，含 notify_sent_by——该列本身**不入 SYS_ISSUES_KEY_COLS 锚点**
+      //   （同 intake_notify_sent_by/release_assignee_notify_sent_by 先例，sent_by 类列历来只由
+      //   verify-sys-schema 全量保障），但仍在本次 ALTER 一并建列（同一新通道一次到位，不为它单独拆
+      //   ALTER 调用）。ALTER 不带 CHECK（SQLite ALTER 补约束受限，同 needs_release/relay_notify_status/
+      //   intake_notify_status 先例）——值域由服务层守卫（C2-C5 接线）+ verify-sys-schema.js 断言兜底，
+      //   两路径不变量等效；跨列不变量（sending⇔token∧started_at 非空、notify_cycle_no≤主周期）本就不是
+      //   单列 DB CHECK 能表达的，全靠服务端维护+verify 探针，与 ALTER/CREATE 路径是否带 CHECK 无关。
+      //   NOT NULL DEFAULT 常量列（liaison_test_cycle_no/liaison_test_notify_cycle_no/
+      //   liaison_test_notify_status）可通过 ALTER 回填旧行（同 intake_notify_status 先例，无需额外
+      //   半迁移 backfill UPDATE）。⚠️ 顺序铁律同 [1a]：本组列已入 SYS_ISSUES_KEY_COLS——ALTER 必须在
+      //   下方 [2] 关键列复查之前完成（本 ALTER 段落全程在 [2] 之前，天然满足）。
+      const LIAISON_TEST_ISSUE_COLS = [
+        ['estimated_effort_days', 'REAL'],
+        // [部署 dry-run 2026-08-06 抓获·「两套语义」第三实例] C1 原定义无 CHECK（292-M1 只补了两根新列
+        // 漏了这根老列）——生产真实样本 dry-run 发现迁移库 risk_level 无值域约束，补与新建表 DDL 同款。
+        ['risk_level', "TEXT CHECK (risk_level IS NULL OR risk_level IN ('一级','二级','三级'))"],
+        ['liaison_test_cycle_no', 'INTEGER NOT NULL DEFAULT 0'],
+        ['liaison_test_recipient_id', 'INTEGER'],
+        ['liaison_test_recipient_name', 'TEXT'],
+        ['liaison_test_notify_status', "TEXT NOT NULL DEFAULT 'not_sent'"],
+        ['liaison_test_notified_at', 'DATETIME'],
+        ['liaison_test_notify_message_key', 'TEXT'],
+        ['liaison_test_notify_error', 'TEXT'],
+        ['liaison_test_read_at', 'DATETIME'],
+        ['liaison_test_notify_sent_by', 'INTEGER'],
+        ['liaison_test_notify_cycle_no', 'INTEGER NOT NULL DEFAULT 0'],
+        ['liaison_test_attempt_token', 'TEXT'],
+        ['liaison_test_attempt_started_at', 'DATETIME'],
+        // [codex 291 号 H-1 收口] 附件周期水位——ALTER 支持 NOT NULL + 常量 DEFAULT 回填旧行（同
+        //   liaison_test_cycle_no/relay_notify_status 先例），CHECK 仅新库 CREATE 带。
+        // [codex 292 号 M-1 收口] ALTER 版与新建表 DDL 同款列级 CHECK——两条建列路径约束语义一致，
+        // 迁移库同样拒绝负数/非整数水位（负水位会把历史附件误判为本轮凭证）。
+        ['liaison_test_attachment_watermark', "INTEGER NOT NULL DEFAULT 0 CHECK (typeof(liaison_test_attachment_watermark) = 'integer' AND liaison_test_attachment_watermark >= 0)"],
+      ];
+      await alterAddMissingCols('sys_issues', LIAISON_TEST_ISSUE_COLS, 'C1 工期对接测试与风险等级拆分 方案 v1.0 §4');
+      // [codex 291 号 H-2 收口] sys_issue_timeline 首次经 alterAddMissingCols 补列（此前该表无 ALTER 路径，
+      //   旧库靠 CREATE TABLE IF NOT EXISTS no-op 停在原 12 列——TEXT 列无 CHECK 语义损失，ALTER 补列本身低风险）。
+      await alterAddMissingCols('sys_issue_timeline', [['payload_json', "TEXT CHECK (payload_json IS NULL OR json_valid(payload_json))"]], 'D22 pass 凭证结构化留痕（291 号 H-2·292 号 M-4 补 json_valid 约束与 DDL 同款——读侧 JSON.parse/json_extract 不被脏值击穿的 DB 层保证）');
+      // [codex 293 号 H·294 号裁定=报警级登记（阻断不采纳）] 无 CHECK 存量列检测——**有意不阻断启动**：
+      //   本检测手段（DDL 文本 includes）是尽力而为的可观测性辅助非精确 oracle（294-M1 自认脆弱可假阳），
+      //   脆弱检测+硬阻断=假阳性可瘫痪生产启动，误杀面大于防护收益；「无约束存量列」不存在是**部署
+      //   盘点结论**（295 号措辞降格：唯一已知实例=本地已重建修复·生产列不存在走含 CHECK 定义·测试库
+      //   每次新建——由盘点证据而非代码结构保证，维护脚本/直接 SQL 等旁路写入不在覆盖内），且应用层校验枚举
+      //   （intake_accept/pass 写点）本就拦非法值——CHECK 是纵深第二层非唯一防线。按登记接受归类
+      //   （对齐 282-N3 范式：风险接受诚实归类不宣称机制闭合），部署清单含「生产无两列」前置核验项。
+      // [codex 293 号 H 原始语境] alterAddMissingCols 只在缺列时建列，
+      //   「291 中间版本迁移过（列在但无 CHECK）」的库不会被自动补约束。该形态的库已知仅本地 dev 库
+      //   曾出现（2026-08-06 已 DROP+重建修复）；生产两列不存在将走上方含 CHECK 定义（发布前置条件之一）。
+      //   本断言把「不该存在的形态」变可观测：SQLite 的 ALTER ADD COLUMN 会把新列全文（含列级 CHECK）
+      //   拼进 sqlite_master 的表 DDL 文本，故列名在而 CHECK 片段不在 ⇒ 无约束存量列，大声报警。
+      for (const [tbl, col, checkFrag] of [
+        ['sys_issues', 'liaison_test_attachment_watermark', "typeof(liaison_test_attachment_watermark) = 'integer'"],
+        ['sys_issue_timeline', 'payload_json', 'json_valid(payload_json)'],
+        ['sys_issues', 'risk_level', "risk_level IN ('一级','二级','三级')"],   // dry-run 抓获后补入检测面
+      ]) {
+        const ddlRow = await new Promise((resolve, reject) => {
+          db.get(`SELECT sql FROM sqlite_master WHERE type='table' AND name=?`, [tbl], (err, r) => err ? reject(err) : resolve(r));
+        });
+        const ddl = (ddlRow && ddlRow.sql) || '';
+        if (ddl.includes(col) && !ddl.includes(checkFrag)) {
+          logger.error(`[系统迭代迁移][293-H 检测] ${tbl}.${col} 存在但缺 CHECK 约束（无约束存量列·需按 292 号 M-1 同款 DROP+重建修复），当前 DDL 片段核对失败`);
+        }
+      }
 
       // [1b] release_type **族别**回填（D-A：bug vs 非bug，用户 2026-07-03 拍板）：按成员族别回填非空批次——
       //   含 bug 成员 → 'bug'，否则（feature/improvement）→ 'change'；空批次留 NULL（② 建批次/加单时写值）。
@@ -2117,7 +2265,7 @@ module.exports = (deps) => {
   //   不入此列），故与 blocked/feasibility 同等并入 GATE 纵深，不视为"仅 submit 动作前置"而排除在外。
   async function isGateEligibleForVerify(issueId, issueType) {
     const row = await dbGetAsync(
-      `SELECT dev_estimated_at, blocked, needs_feasibility, feasibility_conclusion, feasibility_requirement_confirm, feasibility_risk
+      `SELECT dev_estimated_at, blocked, needs_feasibility, feasibility_conclusion, feasibility_requirement_confirm, feasibility_risk, estimated_effort_days
          FROM sys_issues WHERE id = ?`,
       [issueId]
     );
@@ -2131,6 +2279,19 @@ module.exports = (deps) => {
       if (row.feasibility_conclusion === '不可行') return false;
       if (!(row.feasibility_requirement_confirm || '').trim()) return false;
       if (row.feasibility_conclusion === '有条件可行' && !(row.feasibility_risk || '').trim()) return false;
+      // [工期对接测试与风险等级拆分 方案 v1.1 §3.2·C2] 工期检查并入统一 GATE 资格函数——仅 feature 必填
+      // （improvement 选填，§3.2 逐字："必填=仅 nf=1 的 feature；improvement=仅 nf=1 时选填"，故此处不对
+      // improvement 加约束）；excuse/remove/reassign 等一切经 runWGate 的 W-GATE 触发路径共享本函数，
+      // 天然同享本判据，无需逐个端点单独补（同 dev_estimated_at/blocked/feasibility 三者已确立的范式）。
+      // [codex 269 号 M-1 存储值复查]：不能只判"非 NULL"就等于合法——DDL CHECK 仅新库 CREATE 路径带，
+      // 旧库 ALTER 路径没有（C1 既有降级拍板，见 alterAddMissingCols 调用处注释），脏值（历史直连 SQL/
+      // 迁移写入的 1.3、字符串等非法值）可以合法落库到已上线旧表。GATE 是读侧最终防线，必须复用
+      // normalizeSysEffortDays 重新验一遍存量值，ok=false（格式非法）或 value=null（未填）两种情况
+      // 一视同仁视为"资格未过"——与写入口（feasibility/submit）同一套判定函数，非各自独立实现。
+      if (issueType === 'feature') {
+        const effortCheck = normalizeSysEffortDays(row.estimated_effort_days);
+        if (!effortCheck.ok || effortCheck.value === null) return false;
+      }
     }
     return true;
   }
@@ -2150,36 +2311,173 @@ module.exports = (deps) => {
   //   assign（D_PRE→DEV）不经过本函数（结构上不可能携带陈旧 deferred，D_PRE 态从未进过 DEV 家族）；
   //   return/reopen 不经过本函数（ADMIN_TRANSITION 走 sysIssueTransition，非 GATE）——两者对 gate_deferred_at
   //   的清除各自在自身 UPDATE 内直接处理（见 §6.2/return/reopen 落点注释），不依赖本函数覆盖。
+  // [工期对接测试与风险等级拆分 方案 v1.1 §6/D20·C4] hasValidLiaison——判该单当前 intake_liaison_id 是否
+  //   仍指向一个 active 受理人（§3.0 决策树 ⑥ 判据）。返回解析出的 {id,name}（直接可用于通知列组写入，
+  //   免重复查 users 表）；查不到/未在池内 → null（fail-closed，⑥ 分支据此判定降级）。
+  async function hasValidLiaison(issueId) {
+    const row = await dbGetAsync('SELECT intake_liaison_id FROM sys_issues WHERE id = ?', [issueId]);
+    if (!row || !row.intake_liaison_id) return null;
+    const activeLiaisons = await resolveActiveSysIntakeLiaisons();
+    return activeLiaisons.find(l => l.id === row.intake_liaison_id) || null;
+  }
+
+  // [工期对接测试与风险等级拆分 方案 v1.1 §3.0·C4 合并修复批 275-M1] 统一花名册"完成度/资格"分析——
+  //   此前 runWGate 的 ②③④ 三层防线、liaison_test_pass ①b 复查、以及 sysIssueTransition [2b] 通用守卫/
+  //   assign/resume-degrade/release-publish 四处 guard 调用点，各自手写一份 `rows.length` +
+  //   `filter/every(dev_status...)` 的等价逻辑（同一判断散落 5+ 处，逐字相同——典型漂移温床）。收敛为
+  //   单一纯函数：输入=(dev_status) 行数组（形如 `[{dev_status:'pending'}, ...]`），输出五个计数/派生量。
+  //   ⚠️ 275-M1 指出的真实缺口：liaison_test_pass ①b 此前只数 pendingCount（=0 即判"全完成"），未检查
+  //   unknownCount——若花名册出现"合法交付行(code_submitted/no_code) + 未知 dev_status 脏值行"并存，
+  //   unknown 行既非 pending 也非合法交付，allComplete 判定会被它绕过（不算 pending，被当"已处理"）而
+  //   放行 pass，与 runWGate ② 层"未知 dev_status 一律阻断"的 fail-closed 精神矛盾。现在两处共用同一份
+  //   分析结果，pass 复查显式检查 unknownCount>0 直接拒绝。
+  //   KNOWN_DEV_STATUSES 与原 runWGate ② 层定义逐字一致，未新增/删减任何合法值。
+  const KNOWN_DEV_STATUSES = ['pending', 'code_submitted', 'no_code', 'excused'];
+  function analyzeRosterForGate(rows) {
+    const list = rows || [];
+    const activeCount = list.length;
+    const pendingCount = list.filter(r => r.dev_status === 'pending').length;
+    const deliverableCount = list.filter(r => r.dev_status === 'code_submitted' || r.dev_status === 'no_code').length;
+    const unknownCount = list.filter(r => !KNOWN_DEV_STATUSES.includes(r.dev_status)).length;
+    return {
+      activeCount, pendingCount, deliverableCount, unknownCount,
+      allComplete: activeCount > 0 && pendingCount === 0,
+      hasDeliverable: deliverableCount > 0,
+    };
+  }
+
+  // [工期对接测试与风险等级拆分 方案 v1.1 §3.0·C4] runWGate 改造——feature 类型走新的 ①②③④⑥⑦ 分型
+  //   决策树（⑤ 已删，D21：electRepresentative 结构性保证全员 excused 场景不可达，见方案 §3.0 详述），
+  //   improvement/bug 维持原有 DEV↔VERIFY 二元判定不变（本次改造范围严格收窄为 feature-only，不触碰
+  //   两者既有稳定路径）。
   async function runWGate(issueId, issueType, currentStatus, actor) {
     const inDev = SF.isInFamily(issueType, currentStatus, 'DEV');
     const inVerify = SF.isInFamily(issueType, currentStatus, 'VERIFY');
-    if (!inDev && !inVerify) return { changed: false };
+    // LIAISON_TEST 对 improvement/bug 恒空数组（status-families.js）→ isInFamily 恒 false，两者不受影响。
+    const inLiaisonTest = SF.isInFamily(issueType, currentStatus, 'LIAISON_TEST');
+    if (!inDev && !inVerify && !inLiaisonTest) return { changed: false };
 
     const rosterRows = await dbAllAsync(`SELECT dev_status FROM sys_issue_dev_assignees WHERE issue_id = ? AND removed_at IS NULL`, [issueId]);
-    const activeCount = rosterRows.length;
-    const pendingCount = rosterRows.filter(r => r.dev_status === 'pending').length;
-    const allComplete = activeCount > 0 && pendingCount === 0;
+    // [方案 §3.0-②③④·C4·275-M1 收敛] 花名册计数统一走 analyzeRosterForGate（定义见上方，含未知
+    //   dev_status 防御性校验——DDL 无 CHECK 约束，理论上恒 ∈ 已知 4 态但缺 DB 层强制，fail-closed
+    //   兜底：出现未知值一律阻断，不推进任何方向）。仅 feature 决策树消费 unknownCount 这层新防御——
+    //   improvement/bug 维持原二元逻辑不引入，范围收窄不波及既有稳定路径。
+    const { activeCount, pendingCount, allComplete, deliverableCount, unknownCount: invalidStatusCount } = analyzeRosterForGate(rosterRows);
 
     let targetStatus = null;
-    if (inDev && allComplete) {
-      // GATE 纵深：全员完成态只是必要条件，还需资格过滤（blocked/feasibility/dev_estimated_at，见上方 isGateEligibleForVerify）
-      const eligible = await isGateEligibleForVerify(issueId, issueType);
-      if (eligible) {
-        targetStatus = SF.SYS_VERIFY_STATUSES[issueType][0];
-      } else {
-        // 方案 A（deferred 标记）：置位等待资格修复端点（estimate/feasibility/unblock）消费
-        await dbRunAsync(
-          `UPDATE sys_issues SET gate_deferred_at = COALESCE(gate_deferred_at, datetime('now','localtime')) WHERE id = ?`,
-          [issueId]
-        );
+    let mirrorActionCode = null;   // 仅 ⑥ 降级路径写专用 actionCode，其余 GATE 转移恒 null（既有行为不变）
+    let extraCasSql = '';          // ⑦ 进入待对接测试：周期号自增 + 通知列组重置，同一 CAS 内原子写入
+    let extraCasParams = [];
+
+    if (issueType === 'feature') {
+      if (invalidStatusCount > 0) {
+        // ② 阻断：保持不动，不推进任何方向，留可观测错误供人工核查/verify 报警
+        logger.error(`[系统迭代][W-GATE] issue=${issueId} 花名册出现未知 dev_status（${invalidStatusCount}/${activeCount} 行，非 pending/code_submitted/no_code/excused），已阻断本次 GATE 判定`);
+        return { changed: false };
       }
-    } else if (inVerify && pendingCount > 0) {
-      targetStatus = SF.SYS_DEV_STATUSES[issueType][0];
+      if (inDev) {
+        if (activeCount === 0 || pendingCount > 0) {
+          // ③ 保持开发中（现状行为，未全完成）——不做任何事，落到下方"清 deferred"分支
+        } else {
+          // activeCount>0 且 pendingCount===0：资格判定
+          const eligible = await isGateEligibleForVerify(issueId, issueType);
+          if (!eligible) {
+            // ④ 落 gate_deferred_at（全员完成但资格不足，等待 estimate/feasibility/unblock 消费）
+            await dbRunAsync(
+              `UPDATE sys_issues SET gate_deferred_at = COALESCE(gate_deferred_at, datetime('now','localtime')) WHERE id = ?`,
+              [issueId]
+            );
+          } else if (deliverableCount === 0) {
+            // [S12 双路审查 Opus-1 HIGH 收口] 全员 excused（activeCount>0 ∧ pendingCount===0 ∧
+            //   deliverableCount===0）——花名册里没有任何一名成员真正交付过（code_submitted/no_code），
+            //   全部是 excused。此前 ⑦ 分支准入不查 deliverableCount，这类单会被判定"全部通过"直接
+            //   进「待对接测试」，但该态之后的每一条出口都假设"至少有 1 份交付物"：liaison_test_pass
+            //   的 ①b 复查会因 hasDeliverable=false 而 409（LIAISON_TEST_PASS_INVARIANT）；
+            //   liaison_test_return 的花名册重置 UPDATE（本文件 :3141 一带，WHERE dev_status IN
+            //   ('code_submitted','no_code')）天然 0 行命中，触发 500 LIAISON_TEST_RETURN_RESET_INVARIANT；
+            //   待对接测试态的花名册七写入口矩阵全部 409（族矩阵不含 LIAISON_TEST）；hold 同样被状态
+            //   矩阵拒绝——单据落进一个只剩 void 能救的死胡同。
+            //   修法：deliverableCount===0 时走与 ⑥ 同款的降级形态，直落待验证，但用专属 actionCode
+            //   `liaison_test_skip_excused` 区分（该码在 last_completed_at 白名单 :4642/:4714 两处
+            //   早已在位——D21 撤销决策树⑤分支后曾判定为"死值"，本次修复令其重新可达，勿动白名单本身，
+            //   只更新其旁注释，见该处）。业务含义与 D11/方案 §2 一致："现网全员 excused 天然进待验证"，
+            //   本质是⑥降级的姊妹分支：⑥ 是"对接人失效"导致测试段跳过，本分支是"没有交付物可测"
+            //   导致测试段跳过，两者共享同一落点（待验证）与同一降级语义，仅原因不同。
+            targetStatus = SF.SYS_VERIFY_STATUSES[issueType][0];
+            mirrorActionCode = 'liaison_test_skip_excused';
+          } else {
+            const liaison = await hasValidLiaison(issueId);
+            if (!liaison) {
+              // ⑥ 降级：GATE 时刻无有效对接人（创建时刻恒有效，运行时可能因停用/移出白名单失效，
+              //   §3.0 前提修正）——直落待验证，跳过测试段，专用 actionCode 留痕防常态化。
+              targetStatus = SF.SYS_VERIFY_STATUSES[issueType][0];
+              mirrorActionCode = 'liaison_test_skip_liaison';
+            } else {
+              // ⑦ 全部通过：进入待对接测试。周期号自增（liaison_test_cycle_no/notify_cycle_no 同得旧值+1，
+              //   SQL 内自增引用旧值、不先读后写）+ 通知列组原子重置（recipient 落刚解析出的有效对接人，
+              //   status='not_sent'，其余通知字段清空迎接本轮新周期，§4/§6 表）。⭐ 走到这里已隐含
+              //   deliverableCount>0（上方分支已把 =0 的情形拦截并分流），是本行"⑦ 真的有交付物可测"
+              //   这条不变量成立的唯一保证来源。
+              targetStatus = SF.SYS_LIAISON_TEST_STATUSES[issueType][0];
+              // [codex 291 号 H-1 收口] 附件周期水位——同一 CAS 原子写入 correlated 子查询取值（实测确认
+              // SQLite UPDATE ... SET 里子查询可引用被更新表自身的列名做关联，无需 FROM 别名）：语义＝
+              // "进入本轮那一刻，这张单已存在的最新一条 delivery/screenshot 附件 id"，pass 凭证判定据此
+              // 与之后新传的附件 id 比较（见 case 'liaison_test_pass'）。COALESCE(...,0)：从未传过附件时
+              // MAX 为 NULL，归零（列 DEFAULT 也是 0，两者语义一致，不留 NULL 水位）。
+              // [codex 292 号 M-3 前提写实] 水位快照的线性化保证=下方 correlated 子查询与状态 CAS 同一条
+              //   UPDATE 语句（SQLite 语句级原子）；跨语句并发前提=生产 sqlite3 单连接串行化+本转移事务
+              //   BEGIN IMMEDIATE（全库 BEGIN 互斥域=已知 P3 挂账，非本列独有前提）。「进入测试段之后上传
+              //   的附件 id 必大于水位」依赖 id 单调性——附件表为软删（status 列）不物理删行，ROWID 不复用，
+              //   单调性成立。SQL 注释刻意不放模板串内（模板串 SQL 注释三类陷阱·MEMORY 在案）。
+              //   [293 号 M-1 前提补实] 「已软删附件恢复为 active 绕过水位」结构性不可达——附件表唯一
+              //   UPDATE 写点=置 superseded（本文件 :7734 一带·单向软删），无任何恢复端点/写路径；若未来
+              //   新增附件恢复功能，须同步重审水位语义（恢复的旧附件 id>当轮水位会被计为本轮凭证）。
+              extraCasSql = `, liaison_test_cycle_no = liaison_test_cycle_no + 1,
+                liaison_test_notify_cycle_no = liaison_test_cycle_no + 1,
+                liaison_test_recipient_id = ?, liaison_test_recipient_name = ?,
+                liaison_test_notify_status = 'not_sent', liaison_test_notified_at = NULL,
+                liaison_test_notify_message_key = NULL, liaison_test_notify_error = NULL,
+                liaison_test_read_at = NULL, liaison_test_notify_sent_by = NULL,
+                liaison_test_attempt_token = NULL, liaison_test_attempt_started_at = NULL,
+                liaison_test_attachment_watermark = (
+                  SELECT COALESCE(MAX(a.id), 0) FROM sys_issue_attachments a
+                   WHERE a.issue_id = sys_issues.id AND a.attachment_type IN ('delivery','screenshot') AND a.status = 'active'
+                )`;
+              extraCasParams = [liaison.id, liaison.name];
+            }
+          }
+        }
+      } else if (inLiaisonTest || inVerify) {
+        // 弹回（§3.1 点4"脏数据防御分支"）：新 pending 成员打破全完成态 → 回开发中。LIAISON_TEST 侧
+        //   正常业务路径下花名册七写入口在该态已 409（族矩阵不含 LIAISON_TEST），理论不可达，此处仅兜底；
+        //   VERIFY 侧同既有行为（弹回逻辑不变）。
+        if (pendingCount > 0) {
+          targetStatus = SF.SYS_DEV_STATUSES[issueType][0];
+        }
+      }
+      if (inDev && !(activeCount > 0 && pendingCount === 0)) {
+        await dbRunAsync(`UPDATE sys_issues SET gate_deferred_at = NULL WHERE id = ? AND gate_deferred_at IS NOT NULL`, [issueId]);
+      }
+    } else {
+      // improvement/bug：原有二元逻辑逐字保留，本次改造不触碰。
+      if (inDev && allComplete) {
+        const eligible = await isGateEligibleForVerify(issueId, issueType);
+        if (eligible) {
+          targetStatus = SF.SYS_VERIFY_STATUSES[issueType][0];
+        } else {
+          await dbRunAsync(
+            `UPDATE sys_issues SET gate_deferred_at = COALESCE(gate_deferred_at, datetime('now','localtime')) WHERE id = ?`,
+            [issueId]
+          );
+        }
+      } else if (inVerify && pendingCount > 0) {
+        targetStatus = SF.SYS_DEV_STATUSES[issueType][0];
+      }
+      if (inDev && !allComplete) {
+        await dbRunAsync(`UPDATE sys_issues SET gate_deferred_at = NULL WHERE id = ? AND gate_deferred_at IS NOT NULL`, [issueId]);
+      }
     }
-    if (inDev && !allComplete) {
-      // roster 未（再）达全完成态（含新 pending 打破先前 allComplete）——陈旧 deferred 标记语义已失效，清除
-      await dbRunAsync(`UPDATE sys_issues SET gate_deferred_at = NULL WHERE id = ? AND gate_deferred_at IS NOT NULL`, [issueId]);
-    }
+
     if (!targetStatus || targetStatus === currentStatus) return { changed: false };
 
     assertMainStatusTransition({
@@ -2188,13 +2486,21 @@ module.exports = (deps) => {
       rosterActiveCount: activeCount, rosterAllComplete: allComplete,
     });
 
-    // 进 VERIFY 时随状态转移原子清除 gate_deferred_at（消费完成，同一 UPDATE 内完成，非分两步）
+    // 进 VERIFY 或 LIAISON_TEST（两者都是"决策树往前走通过 GATE"的方向）时原子清除 gate_deferred_at；
+    // 弹回 DEV 不清（弹回≠"资格问题已解决"，是"新增未完成成员"，与 deferred 语义无关，沿用既有口径）。
+    const liaisonTestStatusForType = (SF.SYS_LIAISON_TEST_STATUSES[issueType] || [])[0];
+    const enteringForward = targetStatus === SF.SYS_VERIFY_STATUSES[issueType][0]
+      || (!!liaisonTestStatusForType && targetStatus === liaisonTestStatusForType);
+    const clearDeferredSql = enteringForward ? ', gate_deferred_at = NULL' : '';
+
     // [codex 101 号 MED 回填] updated_at——旧版 assign/submit 公共 UPDATE 都刷 updated_at，本处（W-GATE 状态
-    //   转移）是旧版对应逻辑在新模型的落点之一，SSOT 未废除该行为，补回（范围严格限定此三处，不动
-    //   electRepresentative 通用选举 UPDATE——94 号 L1 裁定对暂缓/拒绝/作废终态场景"反伤效率统计终止时刻
-    //   语义"仍有效，不在本次范围内）。
-    const clearDeferredSql = targetStatus === SF.SYS_VERIFY_STATUSES[issueType][0] ? ', gate_deferred_at = NULL' : '';
-    const upd = await dbRunAsync(`UPDATE sys_issues SET status = ?, updated_at = datetime('now','localtime')${clearDeferredSql} WHERE id = ? AND status = ?`, [targetStatus, issueId, currentStatus]);
+    // 转移）是旧版对应逻辑在新模型的落点之一，SSOT 未废除该行为，补回（范围严格限定此三处，不动
+    // electRepresentative 通用选举 UPDATE——94 号 L1 裁定对暂缓/拒绝/作废终态场景"反伤效率统计终止时刻
+    // 语义"仍有效，不在本次范围内）。
+    const upd = await dbRunAsync(
+      `UPDATE sys_issues SET status = ?, updated_at = datetime('now','localtime')${clearDeferredSql}${extraCasSql} WHERE id = ? AND status = ?`,
+      [targetStatus, ...extraCasParams, issueId, currentStatus]
+    );
     if (!upd || upd.changes !== 1) {
       throw new SysTransitionError(409, 'GATE_INVARIANT', '主状态已被并发修改，门禁转移失败（changes≠1）');
     }
@@ -2203,10 +2509,13 @@ module.exports = (deps) => {
     //   转移若不落一行，会在时间线上凭空断档。成员动作本身（add/remove/excuse/...）不写 timeline，只落
     //   sys_issue_dev_events——"codex 裁断 b"：两条审计轨迹分工明确，timeline 只记"主状态变化"，dev_events 只记
     //   "成员/roster 变化"，W-GATE 是两者的交汇点，故只在此处补一行。
+    //   [方案 v1.1 §3.0-⑥/D17·C4] action_code 新增写入——此前恒 NULL（隐式），⑥ 降级路径现写专用值
+    //   'liaison_test_skip_liaison'（其余转移仍是 NULL，未改变既有行为），供 last_completed_at 白名单
+    //   （§3.1 点7 D17）与 verify 探针识别"这条 W-GATE 转移是否降级路径"。
     await dbRunAsync(
-      `INSERT INTO sys_issue_timeline (issue_id, event_type, from_status, to_status, summary, operator_id, operator_name)
-       VALUES (?, 'status_change', ?, ?, ?, ?, ?)`,
-      [issueId, currentStatus, targetStatus, 'W-GATE 自动门禁转移（成员在册完成态变化）', actor ? actor.id : null, actor ? actor.name : 'system']
+      `INSERT INTO sys_issue_timeline (issue_id, event_type, from_status, to_status, summary, operator_id, operator_name, action_code)
+       VALUES (?, 'status_change', ?, ?, ?, ?, ?, ?)`,
+      [issueId, currentStatus, targetStatus, 'W-GATE 自动门禁转移（成员在册完成态变化）', actor ? actor.id : null, actor ? actor.name : 'system', mirrorActionCode]
     );
     return { changed: true, from: currentStatus, to: targetStatus };
   }
@@ -2339,6 +2648,26 @@ module.exports = (deps) => {
     throw new SysTransitionError(403, 'NOT_AUTHORIZED_FOR_HOLD', '仅活跃在册开发或管理员可暂缓该单');
   }
 
+  // [工期对接测试与风险等级拆分 方案 v1.1 §6·D19·C4b] 对接测试通知触发者授权——**本单在册开发 ∨ admin**。
+  //   刻意不用 sysManualNotifyGuard（那套=admin∨SYS_INTAKE_LIAISON_IDS 池，服务 developer/creator/requester/
+  //   relay/intake 五通道）：本通道的触发主体语义完全不同——是"开发完成交付后主动喊对接人来测"，天然应由
+  //   开发本人触发，而非受理人池（让对接人自己触发通知自己，语义倒置，C0 矩阵验证清单 §A-H3 已定位为冲突）。
+  //   判定口径= assertDevMember 类判定（`removed_at IS NULL`，不排除 excused——与 assertBugHoldActor 的
+  //   canBugHold 刻意加严 `dev_status != 'excused'` 不同：暂缓是"谁还对本单负责"，本处只是"谁有资格喊一声
+  //   对接人"，excused 成员喊一声无害，不必收紧）。admin 兜底（现网五通道 + hold 通知统一惯例）。
+  async function assertLiaisonTestNotifyActor(actor, issueId) {
+    if (actor && actor.role === 'admin') return;
+    const actorId = actor && Number(actor.id);
+    if (actorId > 0) {
+      const roster = await dbGetAsync(
+        `SELECT 1 FROM sys_issue_dev_assignees WHERE issue_id = ? AND user_id = ? AND removed_at IS NULL`,
+        [issueId, actorId]
+      );
+      if (roster) return;
+    }
+    throw new SysTransitionError(403, 'NOT_AUTHORIZED_FOR_NOTIFY', '仅本单在册开发或管理员可发送对接测试通知');
+  }
+
   // 唯一允许写 sys_issues.status 的函数（H-2 铁律，照 correctionTransition）：
   //   事务内读真实 status + 流转合法性（查 transitions 常量）+ 双 WHERE（含 expectedFrom）守卫 changes≠1→409 +
   //   权限分流（roleGuard/ownerGuard）+ 闸门校验（requiredPayload）+ sideEffects 写入 + timeline 写入 + COMMIT。
@@ -2355,7 +2684,8 @@ module.exports = (deps) => {
                 needs_feasibility, feasibility_conclusion, feasibility_requirement_confirm,
                 feasibility_risk, blocked, release_id, needs_release, gate_deferred_at,
                 intake_required,
-                oa_number
+                oa_number,
+                liaison_test_cycle_no, liaison_test_attachment_watermark
            FROM sys_issues WHERE id = ?`,
         [issueId]
       );
@@ -2437,8 +2767,8 @@ module.exports = (deps) => {
       //   零在册拒绝），漏查会让 fail-closed 因 rosterActiveCount=undefined 误拒本该合法的转移。
       {
         const rosterRows = await dbAllAsync(`SELECT dev_status FROM sys_issue_dev_assignees WHERE issue_id = ? AND removed_at IS NULL`, [issueId]);
-        const rosterActiveCount = rosterRows.length;
-        const rosterAllComplete = rosterActiveCount > 0 && rosterRows.every(r => r.dev_status !== 'pending');
+        // [275-M1 收口] 同一份 analyzeRosterForGate（见 hasValidLiaison 之后定义），不再各自手写 filter/every。
+        const { activeCount: rosterActiveCount, allComplete: rosterAllComplete } = analyzeRosterForGate(rosterRows);
         assertMainStatusTransition({
           routeKind: 'ADMIN_TRANSITION', action, actionKind: null, issueType: type,
           before: fromStatus, after: toStatus, rosterActiveCount, rosterAllComplete,
@@ -2555,6 +2885,7 @@ module.exports = (deps) => {
       const setParams = [];
       let summary = null;
       let timelineRoundNo = null;   // C3b：submit 写本轮交付轮次到 timeline.round_no（其余动作 NULL）
+      let timelinePayloadJson = null;   // [codex 291 号 H-2] 结构化留痕，目前仅 case 'liaison_test_pass' 写值，其余动作恒 NULL
       // bug 流 Commit ②：多数 transition 无需额外 WHERE（通用 id+status 双条件已够），仅
       //   confirm-online-norelease 需要 release_id/needs_release 双 WHERE 守卫（[审:H1]），故留空数组
       //   给个别 action 按需追加，不影响其余 transition 的既有 WHERE 语义。
@@ -2579,9 +2910,56 @@ module.exports = (deps) => {
         //   fix_gap_note（bug 派生单修复缺口说明）与可行性评估闸门同样只服务旧单人 submit 流程，随之退场；
         //   新 handleDevSubmit 不复刻这两项（同一取舍，非各自独立决定）。
         // ── 受理门动作（受理排期改造 §5·C3 接线）──────────────────────
-        //   intake_accept（待受理→待指派/待处理）：无 payload、无额外 SET，走通用 UPDATE（default 语义），
-        //     不列 case（summary 恒 null·timeline actionCode='intake_accept' 已由常量给）。故此处只处理需 reason 的 intake_return。
+        //   intake_accept（待受理→待指派/待处理）：[工期对接测试与风险等级拆分 方案 v1.1 §3.4·C5 新增]
+        //     risk_level 现与状态流转同一 UPDATE 原子落库（唯一写点，见下方 case）。
+        //     ⭐ 用户拍板批1改造B（2026-08-06）：新口径=feature+improvement 均必填 ∈ {一级,二级,三级}；
+        //     bug 恒 NULL（传值即拒绝，对称 §3.2/C2 feasibility 端点"bug 无工期"EFFORT_REQUIRED/
+        //     EFFORT_INVALID 的处理形态）——原「仅 feature 必填、improvement 与 bug 同拒绝」口径已废止，
+        //     "非 feature 拒绝+自愈清零"的分支现只剩 bug 一个类型（改造前 improvement/bug 两个类型共用
+        //     同一分支，故此处判据从 `type === 'feature'` 扩为 `type === 'feature' || type === 'improvement'`，
+        //     bug 独占 else 分支）。⭐ 用户拍板批1改造A：值域「高/中/低」全仓改名为「一级/二级/三级」，
+        //     语义不变仅文案换。summary 仍恒 null·timeline actionCode='intake_accept' 已由常量给。
         //   resubmit_intake（待修改→待受理）：⭐ 角色权限重构 C0 起**改为有额外 SET**（见下方 case·原为"无额外 SET 不列 case"）。
+        case 'intake_accept': {
+          const riskRaw = payload.risk_level;
+          // [284 号 L-1 固化] null/空串 = 未提供（宽松语义，有意为之）——前端正常不会给非适用类型
+          // 发这个字段，但 API 调用者显式传 null 的意图约等于"未传"，不该被当成"传了个非法值"处理；
+          // 只有非空非 null 的具体字符串才算"真的传了值"。改造B后本宽松语义仅对 bug 生效（唯一还会
+          // 落到 else 分支的类型）。
+          const riskProvided = riskRaw !== undefined && riskRaw !== null && riskRaw !== '';
+          if (type === 'feature' || type === 'improvement') {
+            const riskTrim = (typeof riskRaw === 'string') ? riskRaw.trim() : '';
+            if (!riskProvided) {
+              throw new SysTransitionError(400, 'RISK_LEVEL_REQUIRED', '请选择风险等级');
+            }
+            if (!['一级', '二级', '三级'].includes(riskTrim)) {
+              throw new SysTransitionError(400, 'RISK_LEVEL_INVALID', '风险等级仅支持"一级/二级/三级"');
+            }
+            setFrags.push('risk_level = ?');
+            setParams.push(riskTrim);
+          } else {
+            if (riskProvided) {
+              // bug：risk_level 恒 NULL（对接人受理时仅对 feature/improvement 定级）——bug 传
+              // 具体值是语义错误，显式拒绝（不静默丢弃：静默丢弃会让调用方误以为传了就生效，掩盖真实的
+              // 调用方 bug）。null/空串已在上面 riskProvided 判定里被当"未传"，不会走到这里。
+              throw new SysTransitionError(409, 'RISK_LEVEL_NOT_APPLICABLE', `「${type}」类型不支持风险等级`);
+            }
+            // [284 号 M-1 自愈版，285 号 M-1 注释修正，改造B后收窄为 bug 独占] 受理成功路径显式清零——
+            // 不依赖"列默认/既有值恒 NULL"的假设（那只在从未被脏写过的前提下成立）。手工 SQL/历史导入等
+            // 旁路仍可能给 bug 行写入过非空 risk_level；受理是该类型单在本列上唯一还会执行的
+            // 写路径，借这次唯一写点把脏值原子归零，比另开一条运维清洗脚本更可靠。
+            // ⚠️ SQLite 表级 CHECK 可以表达 `CHECK (risk_level IS NULL OR type IN ('feature','improvement'))`
+            // （跨列条件，SQLite CHECK 支持引用同表其他列，技术上并非表达不了）；但对既有 37 列大表追加
+            // 表级 CHECK 须重建整表（本项目"换壳禁令"，见既有踩坑记录），成本远超本条不变量的价值；触发器
+            // 可以不重建表就追加，但会引入新的迁移面/维护面，本期不做。故本不变量的承诺范围明确限定为：
+            // 服务层唯一写点自愈（本处）+ [H-7] 探针检测（verify-sys-intake-gate.js）——DB 旁路
+            // （运维手工 SQL/数据导入）产生的脏写，在"脏写发生"到"下一次该单据受理"之间存在一段窗口期
+            // 该行确实带着非法 risk_level（DB 层不拦），由下一次受理自愈或探针扫描暴露，不是"从不可能
+            // 出现脏值"，是"脏值不会在服务层留存超过一次受理周期"——这条区别已明确登记接受，非遗漏。
+            setFrags.push('risk_level = NULL');
+          }
+          break;
+        }
         case 'resubmit_intake': {
           // ⭐ 角色权限重构 C0（方案 v1.5 §4-C0）：重新提交 = **开启新一轮受理**，须把上一轮咨询痕迹整组清干净。
           //   ① intake_required=1：方案要求的"原子恢复"。C0 后此处结构上恒已为 1（[3.5] 受理门不变量先行拒了 ≠1 的单），
@@ -2614,6 +2992,89 @@ module.exports = (deps) => {
           setFrags.push("accepted_at = datetime('now','localtime')");
           break;
         }
+        // [工期对接测试与风险等级拆分 方案 v1.1 §3.1 点5·C4 新增] 对接测试通过：待对接测试 → 待验证。
+        //   ①b 复查（同事务内重新查询，防 GATE 判定→操作者点击 pass 之间 roster 被并发改动）：
+        //   isRosterCompleteAndEligible ∧ hasDeliverable——**不复查 hasValidLiaison**（操作者本身就是
+        //   池内受理人，其授权即测试合法性来源，§3.0 末尾"复查组合规则"冻结）。任一不满足 → 409
+        //   LIAISON_TEST_PASS_INVARIANT，整事务回滚（早于 [6] 主表 UPDATE，不产生任何副作用）。
+        //   [275-M1 收口] 计数改走 analyzeRosterForGate（与 runWGate 同一份实现）——此前本处只手写
+        //   pendingCount 一项，遗漏了 unknownCount 检查：花名册若同时存在"合法交付行(code_submitted/
+        //   no_code) + 未知 dev_status 脏值行"，未知行既非 pending 也非法交付，旧写法会把它当"已处理"
+        //   放过 passRosterComplete 判定，与 runWGate ②层"未知 dev_status 一律阻断"精神矛盾。现在显式
+        //   检查 unknownCount>0 单独 409（早于组合判定，文案区分"脏数据"与"未全完成/资格/无交付"）。
+        // [S12 双路审查 codex 287 号 M-1 收口] 本 case 刻意不读 liaison_test_notify_status——sending
+        //   期间也放行通过，是登记过的既有语义（非漏查），完整推导见 writebackLiaisonTestNotify 函数
+        //   下方注释（:11273 起）。
+        case 'liaison_test_pass': {
+          const passRosterRows = await dbAllAsync(
+            `SELECT dev_status FROM sys_issue_dev_assignees WHERE issue_id = ? AND removed_at IS NULL`,
+            [issueId]
+          );
+          const passAnalysis = analyzeRosterForGate(passRosterRows);
+          if (passAnalysis.unknownCount > 0) {
+            throw new SysTransitionError(409, 'LIAISON_TEST_PASS_INVARIANT', '当前不满足对接测试通过前置条件（在册出现未知 dev_status 脏值，需人工核查数据完整性）');
+          }
+          const passEligible = passAnalysis.allComplete ? await isGateEligibleForVerify(issueId, type) : false;
+          if (!(passAnalysis.allComplete && passEligible && passAnalysis.hasDeliverable)) {
+            throw new SysTransitionError(409, 'LIAISON_TEST_PASS_INVARIANT', '当前不满足对接测试通过前置条件（在册未全完成态/资格未过/无交付记录）');
+          }
+          // [方案 D22-④·2026-08-06 批2·codex 291 号 H-1/H-2/M-1 收口] pass 凭证校验：口径="进入本轮待
+          //   对接测试之后新上传的附件" 或 "pass 当场填写的测试说明文字"，至少其一。置于①b 复查**之后**——
+          //   评估是否放行 pass 这件事，roster/资格/交付完整性是更根本的前置条件，评估顺序上应先判定
+          //   "这次 pass 在业务上是否成立"，evidence 是在此基础上追加的"操作者本人是否真的验证过"的补充
+          //   约束；也让 [6b]/[6c]/[6d] 等既有 roster/资格反例测试继续精确命中 LIAISON_TEST_PASS_INVARIANT
+          //   （不因未带凭证被错误分类到新码）。
+          const testNoteRaw = payload.test_note;
+          if (testNoteRaw !== undefined && testNoteRaw !== null && typeof testNoteRaw !== 'string') {
+            throw new SysTransitionError(400, 'LIAISON_TEST_NOTE_INVALID', '测试说明格式错误（须为字符串）');
+          }
+          const testNoteTrim = (typeof testNoteRaw === 'string') ? testNoteRaw.trim() : '';
+          if (testNoteTrim.length > 500) {
+            throw new SysTransitionError(400, 'LIAISON_TEST_NOTE_TOO_LONG', '测试说明不超过 500 字');
+          }
+          const hasNote = testNoteTrim.length > 0;
+          // [291 号 H-1] "本轮附件"判定改 id 水位模型——不再比较 created_at（同一事务/同一秒插入多行时
+          //   精度不足，见 verify-sys-liaison-test.js [6h] 反证）。水位＝进入本轮那一刻 runWGate ⑦ 原子
+          //   写入的 liaison_test_attachment_watermark（"旧"附件的最大 id，见该列 DDL 注释）；凭证附件
+          //   须严格 id > watermark。[291 号 M-1] 不再因 hasNote=true 短路——无条件查询，拿到真实
+          //   attachment_ids 供下方 payload_json 留痕（"说明+附件同时都有"时 evidence='both' 需要两者
+          //   都确实成立，短路会让"有说明但其实也传了新附件"这一真三态永远测不到）。
+          const passAttRows = await dbAllAsync(
+            `SELECT id FROM sys_issue_attachments
+               WHERE issue_id = ? AND attachment_type IN ('delivery','screenshot') AND status = 'active'
+                 AND id > ?
+               ORDER BY id ASC`,
+            [issueId, row.liaison_test_attachment_watermark || 0]
+          );
+          const attachmentIds = passAttRows.map(r => r.id);
+          const hasAttachment = attachmentIds.length > 0;
+          if (!hasNote && !hasAttachment) {
+            throw new SysTransitionError(400, 'LIAISON_TEST_PASS_EVIDENCE_REQUIRED', '请上传测试截图或填写测试说明');
+          }
+          const evidence = hasNote && hasAttachment ? 'both' : (hasNote ? 'note' : 'attachment');
+          // [291 号 H-2] 结构化留痕——恢复方案 D22-④ 拍板原意，落 sys_issue_timeline.payload_json（该列
+          // 291 号新补，批2曾因当时无此列退而求其次落 summary 全文，现收口）。键名 schema 冻结（供未来
+          // 读侧 json_extract，同 submit 事件 payload_json 的 self_tested/test_env_deployed/work_note 写读
+          // 同源范式，见 SUBMIT_SELF_TESTED_KEY 一带注释）：
+          //   test_note      —— 仅 hasNote 时出现，测试说明全文（未截断，≤500 字，"仅有值时加键"同 work_note 惯例）
+          //   attachment_ids —— 仅 hasAttachment 时出现，本轮新传附件 id 数组（升序）
+          //   evidence       —— 恒出现，'note'|'attachment'|'both'
+          //   cycle_no       —— 恒出现，本次 pass 所属的 liaison_test_cycle_no（落库时的当前值，非 pass 后递增值——
+          //                      pass 边不改周期号，见 transitions.js 该条目 sideEffects 注释）
+          const payloadObj = { evidence, cycle_no: row.liaison_test_cycle_no };
+          if (hasNote) payloadObj.test_note = testNoteTrim;
+          if (hasAttachment) payloadObj.attachment_ids = attachmentIds;
+          timelinePayloadJson = JSON.stringify(payloadObj);
+          // summary 收窄为 80 字展示摘要（列表/时间线一览用，不再是唯一凭证载体——完整凭证在 payload_json）。
+          // ⚠️ XSS 核实：前端时间线渲染 summary 走 `esc(e.summary)`（Sys_Iteration.html siRenderTimeline，
+          // 见 :esc() 调用点），非裸插值——test_note 若含 <script>/引号等字符，落 summary 预览时同样经
+          // esc() 转义安全展示；payload_json 本身不直接渲染进 DOM（无消费方，见列注释），无额外转义面。
+          const notePreview = testNoteTrim.length > 80 ? testNoteTrim.slice(0, 80) + '…' : testNoteTrim;
+          summary = hasNote
+            ? `对接测试通过｜测试说明：${notePreview}${hasAttachment ? '（另有本轮测试附件）' : ''}`
+            : '对接测试通过｜凭证：本轮测试附件';
+          break;
+        }
         case 'return': {
           // 验收打回（U-2 return_count++ + T-M2 清 dev_estimated_at）
           const reason = (typeof payload.reason === 'string' ? payload.reason.trim() : '');
@@ -2623,6 +3084,28 @@ module.exports = (deps) => {
             'scheduled_start = NULL',    // 受理排期改造 §7.2（C6·补声明未实现缺口）：打回=预计完成失效→计划开工日随之失效（transitions.js return sideEffects 已声明·此前引擎未实现）
             'gate_deferred_at = NULL',   // [codex 100 号 HIGH-1] 打回=新一轮，roster 完成态保留但需求重新提交，清陈旧 deferred 标记（不该被后续 estimate/feasibility 误消费弹回 VERIFY）
             ...SYS_CLEAR_FEASIBILITY_FIELDS_SQL);   // F2a §六：打回=新一轮，清评估+blocked
+          break;
+        }
+        // [工期对接测试与风险等级拆分 方案 v1.1 §3.1 点5+§3.1b/D18·C4 新增] 对接测试打回：待对接测试 →
+        //   开发中（原因必填）。§3.1b 逐字："复用现网 return 字段清理部分"——即 return case 的 setFrags
+        //   除 return_count++ 外全部照搬：dev_estimated_at/scheduled_start/gate_deferred_at 清空 +
+        //   SYS_CLEAR_FEASIBILITY_FIELDS_SQL（feasibility 三字段+estimated_effort_days+blocked 三件套）。
+        //   返工轮逐步状态表印证此设计意图（§3.1b："打回（重置≥1人 pending·清资格）→ 重填资格 → 逐人
+        //   re-submit"）——"清资格"就是这里的评估字段清空，逼迫测试打回后必须重新走一遍评估+估时才能
+        //   再次提交，与业务验收打回（return）对开发的要求完全一致，唯一差异=不计入 return_count（D18）。
+        //   ⚠️ v1.1 D18 钉死：**不递增 return_count**（测试段内打回是"对接测试的一个环节"，非"业务验收
+        //   打回"，两者统计口径语义分离，独立计入 liaison_test_cycle_no）。花名册重置（③层）放在下方 [7]
+        //   timeline 写入之后的既有"post-processing 内联块"区（同 resume bug-only 收窄先例，同一事务内，
+        //   是否放在 timeline 写入前后不影响 all-or-nothing 语义）。
+        // [S12 双路审查 codex 287 号 M-1 收口] 同上——本 case 同样刻意不读 liaison_test_notify_status，
+        //   sending 期间打回同样放行，理由与 liaison_test_pass 一致（见 writebackLiaisonTestNotify 下方
+        //   注释 :11273 起）。
+        case 'liaison_test_return': {
+          const reason = (typeof payload.reason === 'string' ? payload.reason.trim() : '');
+          if (!reason) throw new SysTransitionError(400, 'LIAISON_TEST_RETURN_REASON_REQUIRED', '请填写打回原因');
+          summary = reason;
+          setFrags.push('dev_estimated_at = NULL', 'scheduled_start = NULL', 'gate_deferred_at = NULL',
+            ...SYS_CLEAR_FEASIBILITY_FIELDS_SQL);
           break;
         }
         case 'close': {
@@ -2754,13 +3237,14 @@ module.exports = (deps) => {
         throw new SysTransitionError(409, 'CONCURRENT_STATE_CHANGE', '迭代单状态已变更，请刷新重试');
       }
 
-      // [7] timeline 写入（event_type + action_code 按 transition 常量，summary 按动作，round_no 仅 submit 非空 C3b）
+      // [7] timeline 写入（event_type + action_code 按 transition 常量，summary 按动作，round_no 仅 submit 非空 C3b，
+      //   payload_json 仅 liaison_test_pass 非空 C4/291 号 H-2·其余动作恒 NULL）
       await dbRunAsync(
         `INSERT INTO sys_issue_timeline
-           (issue_id, event_type, from_status, to_status, summary, action_code, round_no, operator_id, operator_name)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           (issue_id, event_type, from_status, to_status, summary, action_code, round_no, operator_id, operator_name, payload_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [issueId, transition.timelineEvent, fromStatus, toStatus, summary, transition.actionCode || null, timelineRoundNo,
-         Number(actor.id) || null, actor.name || null]
+         Number(actor.id) || null, actor.name || null, timelinePayloadJson]
       );
 
       // [codex 101 号 HIGH 回填] resume 跨族死锁——resume 是唯一"离开 D_PRE 族恢复回任意活跃族"的动作，恢复
@@ -2803,6 +3287,29 @@ module.exports = (deps) => {
             WHERE issue_id = ? AND removed_at IS NULL`,
           [issueId]
         );
+      }
+
+      // [工期对接测试与风险等级拆分 方案 v1.1 §3.1b·C4 新增] liaison_test_return 花名册重置——③层，
+      //   同一事务内、[6] 主表 UPDATE 已成功之后执行。逐状态映射（冻结）：code_submitted/no_code →
+      //   pending（清 resolved_at/no_code_reason，令这些成员重新出现在"待提交"视图里）；excused 不动
+      //   （保留豁免语义，不因打回而被拉回开发队列）。[S12 双路审查 Opus-1 收口·注释写实] 行数断言
+      //   ≥1——runWGate ⑦ 分支准入前已显式检查 deliverableCount（见该函数 :2335 一带
+      //   `else if (deliverableCount === 0)` 分支：零交付单会被分流到 liaison_test_skip_excused
+      //   降级路径，根本不会进入「待对接测试」），故能走到本条 liaison_test_return 的单据结构上必然
+      //   带着≥1 名 code_submitted/no_code 成员，本次重置理论上必然命中≥1 行；0 行说明 GATE 判定与
+      //   本次重置之间数据不一致，throw 触发整事务回滚（同 [[feedback_state_machine_update_invariant]]：
+      //   changes 检查 + 失败阻断，不用 .catch(warn) 静默吞）。
+      if (action === 'liaison_test_return') {
+        const ltResetResult = await dbRunAsync(
+          `UPDATE sys_issue_dev_assignees
+              SET dev_status = 'pending', resolved_at = NULL, no_code_reason = NULL
+            WHERE issue_id = ? AND removed_at IS NULL AND dev_status IN ('code_submitted', 'no_code')`,
+          [issueId]
+        );
+        if (!ltResetResult || ltResetResult.changes < 1) {
+          throw new SysTransitionError(500, 'LIAISON_TEST_RETURN_RESET_INVARIANT',
+            `对接测试打回花名册重置行数应≥1，实际=${ltResetResult ? ltResetResult.changes : 0}（issue ${issueId}，数据不一致需人工核查）`);
+        }
       }
 
       // ⭐⭐ PH-2 挂载点改造（C2.5 撤销·方案 v2.1 §2 矩阵·helper 本体不变）：原挂"离开待商议"两条边
@@ -3352,8 +3859,8 @@ module.exports = (deps) => {
         await electRepresentative(id);
 
         const rosterRows = await dbAllAsync(`SELECT dev_status FROM sys_issue_dev_assignees WHERE issue_id = ? AND removed_at IS NULL`, [id]);
-        const rosterActiveCount = rosterRows.length;
-        const rosterAllComplete = rosterActiveCount > 0 && rosterRows.every(r => r.dev_status !== 'pending');
+        // [275-M1 收口] 同上，消费共用 analyzeRosterForGate。
+        const { activeCount: rosterActiveCount, allComplete: rosterAllComplete } = analyzeRosterForGate(rosterRows);
         targetStatus = SF.SYS_DEV_STATUSES[row.type][0];
         assertMainStatusTransition({
           routeKind: 'ADMIN_TRANSITION', action: 'assign', actionKind: null, issueType: row.type,
@@ -4249,7 +4756,8 @@ module.exports = (deps) => {
       const rows = await dbAllAsync(
         `SELECT id, type, status, priority, title, system_name, module_name, source,
                 assigned_to, assigned_to_name, scheduled_start, dev_estimated_at, deadline,
-                created_by, created_by_name, origin_issue_id, release_id, needs_release,
+                created_by, created_by_name, requester_name, requester_dept,
+                origin_issue_id, release_id, needs_release,
                 release_assignee_id, release_assignee_name, release_assignee_notify_status,
                 reopen_count, return_count, scope_changed, created_at, updated_at,
                 tech_lead_id, tech_lead_notify_status,   -- S5 手动化：列表通知徽章消费（193 复审：oa_number 已撤——
@@ -4270,6 +4778,44 @@ module.exports = (deps) => {
                 -- （同 has_current_tech_lead_comment 范式：SQL 只出数，状态语义交给前端/调用方判断）。
                 (SELECT MAX(created_at) FROM sys_issue_timeline
                    WHERE issue_id = sys_issues.id AND action_code = 'hold') AS last_held_at,
+                -- S2（贴图四件与工期测试段 20260805·三列一体设计）：末次进入「待验证」的单据级完成时刻
+                -- （Q5 拍板：列表只取末次，打回次数不进列表）。⚠️ 刻意不用 sys_issue_dev_events 的
+                -- submit/no_code MAX——多开发部分提交时那个 MAX 会把"还没好"的单误报出完成时间，
+                -- timeline status_change 才是整单完成的权威落点。返工进行中（打回回到开发中）时
+                -- 本列照常显示上次完成时刻，同行状态列可见真实状态，详情页另有首末+次数全貌。
+                -- 无记录（老单早于 timeline 镜像/从未完成）返回 NULL 属诚实缺失。SQL 只出数不做
+                -- 状态门控（同 has_current_tech_lead_comment/last_held_at 范式）。
+                -- ⚠️ S4 段1收口（codex 263 号 M-1·Opus 预筛发现·主会话亲核成立）：必须加
+                -- action_code 条件——变更流 hold 允许 from='待验证'（transitions.js:308-309），
+                -- resume 回解后会写一条同样 event_type='status_change'/to_status='待验证' 但
+                -- action_code='resume' 的 timeline 行（transitions.js:324），若不排除，MAX 会把
+                -- 「恢复时刻」冒充「完成时刻」。恢复后的单保留原完成时刻不变，正合 Q5「什么时候真的
+                -- 好了」的语义。
+                -- [S12 双路审查 Opus-4 LOW 收口] 以下合并改写自两段曾并存但字面互斥的旧注释（一段说
+                -- "W-GATE mirror 行是唯一真完成落点"，另一段说"完成落点已挪到引擎 transition"），
+                -- 读者会不知道信哪句。真相是完成落点按 type 分岔，不是"整体挪走"：
+                --   · improvement/bug：仍走原 DEV↔VERIFY 二元判定，唯一完成写点是 W-GATE 门禁转移的
+                --     timeline mirror INSERT（本文件 runWGate 函数体内 :2443-2447，该 INSERT 的列清单
+                --     本就含 action_code 这一列——只是其值取自 mirrorActionCode 变量，这两个 type 走的
+                --     分支该变量恒为 null，故这两个 type 落库的 action_code 恒 NULL，未受 v1.1 触碰）。
+                --   · feature（[工期对接测试与风险等级拆分 方案 v1.1 §3.1 点7/D17·C4 收口]）：走测试段
+                --     后完成落点从"mirrorActionCode 恒 null"的默认路径，挪到该 INSERT 同一列写入三个
+                --     具名 actionCode 之一——liaison_test_pass 恒写（liaison-test-pass 端点独立事务）、
+                --     liaison_test_skip_liaison / liaison_test_skip_excused 两条降级路径由 runWGate
+                --     本体写（mirrorActionCode 变量在这两条分支被赋具名值）。若不跟着改，所有 feature
+                --     单实际完成时刻恒 NULL（C0 矩阵验证清单 §A-H1 静默回归）。"实际完成"=
+                --     liaison_test_pass 正常通过、或 ⑥ liaison_test_skip_liaison（对接人失效降级）、
+                --     或 liaison_test_skip_excused（S12 双路审查 Opus-1 HIGH 修复新增：全员 excused
+                --     无交付物可测，同款降级），三者业务含义相同——"不再需要开发继续动，进入验收侧
+                --     视野"，只是触发原因不同。
+                -- liaison_test_skip_excused 曾在 v1.1 D21 撤销决策树⑤分支后一度成死值（无代码路径写
+                -- 它）；随 S12-Opus-1 修复"全员 excused 直落待验证"复活——现在是真实可达的写者，
+                -- 非"宽松匹配富余项"，白名单本身未改动（含义随实现变化，字面数组不变）。
+                (SELECT MAX(created_at) FROM sys_issue_timeline
+                   WHERE issue_id = sys_issues.id AND event_type = 'status_change'
+                     AND to_status = '待验证'
+                     AND (action_code IS NULL OR action_code IN ('liaison_test_pass', 'liaison_test_skip_excused', 'liaison_test_skip_liaison'))
+                ) AS last_completed_at,
                 -- C1（commit号两列 20260803·锚点 D4）：前端/后端 commit 编码聚合。
                 --   ⚠️ 值协议 = JSON 数组字符串（如 '["a3f9c21","1c5d883"]'），非分隔符拼接明文，两条理由：
                 --   ① 前端要显示「首条 + 等 N 条」（D3）必须拿到数组才能算 N，拼好的串算不出；
@@ -4330,7 +4876,21 @@ module.exports = (deps) => {
     const id = parsePositiveId(req.params.id);
     if (!id) return res.status(400).json({ error: '无效的迭代单 ID', code: 'INVALID_SYS_ISSUE_ID' });
     try {
-      const row = await dbGetAsync('SELECT * FROM sys_issues WHERE id = ?', [id]);
+      // S3（四件①，2026-08-05）：详情补 last_completed_at——与列表端点 GET /sys-issues 完全同一 SQL
+      // （见该端点完整注释：末次进入「待验证」的单据级完成时刻 + action_code 白名单排除 resume 语义洞
+      //   的完整推导；本处不复制全文，避免两处注释各自漂移）。sys_issues.* 与该计算列混用属合法 SQL。
+      //   ⚠️ 两处子查询须逐字符一致（S4 段1收口 codex 263 M-1）。[方案 v1.1 §3.1 点7/D17·C4] 同批改
+      //   IN 白名单——见列表端点处完整注释，理由不重复。
+      const row = await dbGetAsync(
+        `SELECT sys_issues.*,
+                (SELECT MAX(created_at) FROM sys_issue_timeline
+                   WHERE issue_id = sys_issues.id AND event_type = 'status_change'
+                     AND to_status = '待验证'
+                     AND (action_code IS NULL OR action_code IN ('liaison_test_pass', 'liaison_test_skip_excused', 'liaison_test_skip_liaison'))
+                ) AS last_completed_at
+           FROM sys_issues WHERE id = ?`,
+        [id]
+      );
       if (!row) return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' });
       // [codex 101 号 LOW 回填] gate_deferred_at 是 GATE 纵深方案 A 的内部实现标记（服务端消费，见方案
       //   §16 补丁五置/清/消费规则表），非读模型字段——`SELECT *` 会连带把它塞进 `row` 一并 res.json 出去，
@@ -4432,9 +4992,18 @@ module.exports = (deps) => {
       //   写读同源：写侧落 submit/no_code 事件 payload_json.work_note（上方 eventPayload），读侧此处提取回填。
       //   多开发各自 work_note 不覆盖（各 dev_assignee 行独立取自己的事件）。合并进 devAssignees 供开发成员区展示。
       if (devAssignees && devAssignees.length) {
+        // [v1.1 §3.3·C3] 同一查询顺带提取 self_tested/test_env_deployed（写读同源：写侧见上方 submit
+        //   handler 的 eventPayload，本批次之后新写入的行恒为 true）——不复用 work_note 那条"note 非空
+        //   才给 submitted_at"的耦合逻辑（两者是独立字段，self_tested/test_env_deployed 的有无只取决于
+        //   "这个 dev 有没有提交过"，与有没有填 work_note 无关，不能借用同一个 note 变量做判断）。
+        //   [codex 272 号 M-1] ⚠️ 不能想当然认为"读到非 null 就必然是 true"——这条只对本批次校验上线
+        //   之后的新写入成立，历史脏数据（迁移遗留/手工改库/未来某次校验放宽期间侥幸落库的行）不受此
+        //   约束，详情端是审计读取口，必须按下方 strictBoolFromJsonExtract 老实映射，不能替写侧背书。
         const workNoteRows = await dbAllAsync(
           `SELECT e.dev_assignee_id AS da_id,
                   json_extract(e.payload_json, '$.work_note') AS work_note,
+                  json_extract(e.payload_json, '$.${SUBMIT_SELF_TESTED_KEY}') AS ${SUBMIT_SELF_TESTED_KEY},
+                  json_extract(e.payload_json, '$.${SUBMIT_TEST_ENV_DEPLOYED_KEY}') AS ${SUBMIT_TEST_ENV_DEPLOYED_KEY},
                   e.created_at AS submitted_at
              FROM sys_issue_dev_events e
              JOIN (
@@ -4448,14 +5017,31 @@ module.exports = (deps) => {
         );
         // codex P4 审 LOW-1：work_note 与 work_note_submitted_at 成对——某 dev 提交了但没填 work_note 时（事件存在但
         //   payload 无 work_note 键→json_extract 返 null），submitted_at 也置 null，避免"有时刻无内容"的脏字段语义。
+        // [codex 272 号 M-1 收口] 严格布尔映射，不用 !! 强转——!! 会把任何"非空/非零"值都化妆成 true，
+        //   包括脏历史 payload 里的字符串 'false'、非空数组 []、对象等（这些在 JS 里都是 truthy）。审计
+        //   字段的语义是"读到了什么就是什么"，读不出明确布尔就该显式 null（不可读≠false，更不能被误判
+        //   成已确认=true）。SQLite json_extract 对 JSON true/false 分别返回 INTEGER 1/0（无原生布尔类型），
+        //   故只认严格 ===1/===0 两个值；除此之外的任何返回（NULL、其余数字、字符串、数组序列化文本等）
+        //   一律映射 null——不可读，非"读到了 false"，更非"读到了 true"。
+        function strictBoolFromJsonExtract(v) {
+          if (v === 1) return true;
+          if (v === 0) return false;
+          return null;
+        }
         const wnMap = new Map(workNoteRows.map(r => {
           const note = r.work_note || null;
-          return [r.da_id, { work_note: note, submitted_at: note ? r.submitted_at : null }];
+          return [r.da_id, {
+            work_note: note, submitted_at: note ? r.submitted_at : null,
+            [SUBMIT_SELF_TESTED_KEY]: strictBoolFromJsonExtract(r[SUBMIT_SELF_TESTED_KEY]),
+            [SUBMIT_TEST_ENV_DEPLOYED_KEY]: strictBoolFromJsonExtract(r[SUBMIT_TEST_ENV_DEPLOYED_KEY]),
+          }];
         }));
         for (const d of devAssignees) {
           const wn = wnMap.get(d.id);
           d.work_note = wn ? wn.work_note : null;
           d.work_note_submitted_at = wn ? wn.submitted_at : null;
+          d[SUBMIT_SELF_TESTED_KEY] = wn ? wn[SUBMIT_SELF_TESTED_KEY] : null;
+          d[SUBMIT_TEST_ENV_DEPLOYED_KEY] = wn ? wn[SUBMIT_TEST_ENV_DEPLOYED_KEY] : null;
         }
       }
       // C1（新增）：commit 留痕行（方案 §13 S1「各自 commit 行」+ §8 快照口径同源——含 removed 实例的行，
@@ -4469,6 +5055,21 @@ module.exports = (deps) => {
            JOIN sys_issue_dev_assignees da ON da.id = c.dev_assignee_id
           WHERE c.issue_id = ?
           ORDER BY c.id ASC`,
+        [id]
+      );
+      // S4 段1收口（codex 264 号末次合并审 M-2 采纳）：无代码交付历史凭证——此前 ncItems 只从
+      //   fetchActiveDevAssignees（removed_at IS NULL 在册行）取数，返工场景下 remove+re-add 旧成员
+      //   实例后，旧一轮的 no_code_reason 唯一交付凭证从详情里彻底消失，违背四件④"无代码交付=没有
+      //   commit 可追溯，那段文字是唯一交付凭证"的拍板精神。口径对齐上面 devCommits 的先例（本文件
+      //   :4300 附近注释："commit 是已发生的事实，与快照 §8『查全部现存行（含 removed 实例）』同口径"）：
+      //   查该单**全部**历史实例（不限 removed_at），只要 dev_status='no_code' 且 no_code_reason
+      //   非空白就算数——无代码说明同样是已发生的事实，不因成员被移出而消失。
+      const noCodeRecords = await dbAllAsync(
+        `SELECT id, user_id, user_name, no_code_reason, resolved_at, removed_at
+           FROM sys_issue_dev_assignees
+          WHERE issue_id = ? AND dev_status = 'no_code'
+            AND no_code_reason IS NOT NULL AND trim(no_code_reason) <> ''
+          ORDER BY id ASC`,
         [id]
       );
       // 血缘：正向（本单来源 origin_issue_id）+ 反向（已衍生出哪些单，M-2 反查）
@@ -4529,7 +5130,7 @@ module.exports = (deps) => {
       //   （admin ∨ 对接人 ∨ 本批次执行人），其余读者拿 null。前端 siCanOpenRelease 以"brief 非空"为唯一
       //   判据（数据即权限，前端不复算三分支），写读同源单点在此。
       const canSeeReleaseBrief = isAdmin || isIntakeLiaisonUser || isReleaseExecutor;
-      res.json({ issue: row, timeline, attachments: outAttachments, specAttachments: outSpecAttachments, hasSpecAttachment: outSpecAttachments.length > 0, origin_issue: originIssue, derived_issues: derivedIssues, related_correction: relatedCorrection, dev_assignees: devAssignees, dev_commits: devCommits, release_brief: canSeeReleaseBrief ? releaseBrief : null });
+      res.json({ issue: row, timeline, attachments: outAttachments, specAttachments: outSpecAttachments, hasSpecAttachment: outSpecAttachments.length > 0, origin_issue: originIssue, derived_issues: derivedIssues, related_correction: relatedCorrection, dev_assignees: devAssignees, dev_commits: devCommits, no_code_records: noCodeRecords, release_brief: canSeeReleaseBrief ? releaseBrief : null });
     } catch (err) {
       logger.error('[系统迭代] 详情查询失败:', err && err.message);
       res.status(500).json({ error: (err && err.message) || '详情查询失败' });
@@ -4568,19 +5169,53 @@ module.exports = (deps) => {
   //   'submit' switch 分支退场注释）。独立事务，按 §6.2 五步固定序执行。
   // ============================================================
 
+  // [codex 272 号 L-3] 提交双勾两键名集中定义——写侧本 handler 的 eventPayload 构造 + 读侧上方 GET
+  // 详情端点 workNoteRows 的 json_extract 路径/结果字段名，三处共用同一常量（非各自重复写字面量
+  // 'self_tested'/'test_env_deployed'），防止未来改名/重构时只改一端、写读悄悄漂移出同源。两处
+  // handler 同处 module.exports 工厂函数体（本文件 39 行起）的同一层闭包作用域，声明顺序不影响
+  // 引用——请求处理时工厂函数早已整体执行完毕，所有顶层 const 均已就绪。
+  const SUBMIT_SELF_TESTED_KEY = 'self_tested';
+  const SUBMIT_TEST_ENV_DEPLOYED_KEY = 'test_env_deployed';
+
   const COMMIT_COMPONENTS = ['frontend', 'backend'];   // 与 sys_issue_dev_commits.component 的 DDL CHECK 同源（附录C）
 
   // §6.1 body 结构校验（写库前拒绝，纯函数不接 db）：mode='no_code'|'commits' 互斥，多余字段/null→VALIDATION。
   //   返回 { ok:true, mode, noCodeReason, commits:[{component,commit_ref}] } 或 { ok:false, message }。
+  // [工期对接测试与风险等级拆分 方案 v1.1 §3.3·C3] 提交双勾恒等 true 校验——三类型通用（feature/
+  //   improvement/bug 均适用，不像 §3.2 工期仅 feature，§1 拍板"必勾才能提交"无 type 限定）。
+  //   缺失/显式 false 视为"未勾选"（_REQUIRED，同 EFFORT_REQUIRED 语义——"你还没做这件事"）；非
+  //   undefined/null/false/true 的其余类型或值视为"畸形输入"（_INVALID，同 EFFORT_INVALID 语义——
+  //   "你传了什么东西但不是我们要的布尔值"）。错误码语义化对齐 §3.2 EFFORT_REQUIRED/EFFORT_INVALID 先例。
+  function assertSubmitChecklistFlag(raw, label, requiredCode, invalidCode) {
+    if (raw === undefined || raw === null || raw === false) {
+      return { ok: false, message: `请先勾选"${label}"再提交`, code: requiredCode };
+    }
+    if (raw !== true) {
+      return { ok: false, message: `${label}对应字段须为布尔值 true`, code: invalidCode };
+    }
+    return { ok: true };
+  }
   function validateSubmitBody(body) {
     const b = body || {};
     // [codex 100 号 HIGH-2 回填] fix_gap_note 纳入 §6.1 body 契约的"条件字段"——是否必填取决于事务内 row 状态
     //   （派生自 bug 的 bug 单首次提交），此处只做类型层放行（同旧代码 non-string→视为未填，不在此报错），
     //   必填判定与真正校验在事务内进行（见 submit handler 内 [codex 100 号 HIGH-2 回填] 注释）。
-    const ALLOWED_TOP_KEYS = ['mode', 'no_code_reason', 'commits', 'fix_gap_note', 'work_note'];   // P4：+work_note（选填工作说明）
+    // [v1.1 §3.3·C3] +self_tested/test_env_deployed（提交双勾，恒等 true 校验）。
+    const ALLOWED_TOP_KEYS = ['mode', 'no_code_reason', 'commits', 'fix_gap_note', 'work_note', SUBMIT_SELF_TESTED_KEY, SUBMIT_TEST_ENV_DEPLOYED_KEY];   // P4：+work_note（选填工作说明）
     const extraTop = Object.keys(b).filter(k => !ALLOWED_TOP_KEYS.includes(k));
     if (extraTop.length > 0) return { ok: false, message: `不支持的字段：${extraTop.join(',')}` };
+    // [codex 272 号 L-1 锁定] mode-first 既有顺序保持不变——结构校验（mode 是否合法）先于字段校验
+    // （双勾是否勾选），故 {} 空 body 或非法 mode 命中的是 VALIDATION（下一行），不会是
+    // SELF_TESTED_REQUIRED（即便这类请求也同样缺失双勾字段）。这是本文件既有契约（同 no_code_reason/
+    // commits 等字段校验一贯排在 mode 校验之后的次序惯例），非本次新引入，verify 用一条测试锁定。
     if (b.mode !== 'no_code' && b.mode !== 'commits') return { ok: false, message: 'mode 仅支持 no_code/commits' };
+    // [v1.1 §3.3·C3] 双勾校验放在 mode 校验之后、其余字段之前——与 mode/commits/no_code_reason 无关，
+    // 两个独立字段各自判定，任一未过即整请求拒绝（写库前拒绝，不进入事务）。self_tested 先判、
+    // test_env_deployed 后判——顺序无业务含义，纯粹按 payload 里两个键的自然顺序排。
+    const selfTestedCheck = assertSubmitChecklistFlag(b[SUBMIT_SELF_TESTED_KEY], '已完成自测', 'SELF_TESTED_REQUIRED', 'SELF_TESTED_INVALID');
+    if (!selfTestedCheck.ok) return selfTestedCheck;
+    const testEnvCheck = assertSubmitChecklistFlag(b[SUBMIT_TEST_ENV_DEPLOYED_KEY], '已上测试库', 'TEST_ENV_DEPLOYED_REQUIRED', 'TEST_ENV_DEPLOYED_INVALID');
+    if (!testEnvCheck.ok) return testEnvCheck;
     const fixGapNote = typeof b.fix_gap_note === 'string' ? b.fix_gap_note : null;
     // P4 work_note（选填·两模式均可带）：非 string 且非 undefined/null → 400（不静默吞·方案 §4.3 H-MED）；
     //   trim 上限 1000 字符（Unicode 码点 [...str].length 计·防中文/emoji 组合字符按字节误判）；空白落 null（统一）。
@@ -4599,7 +5234,10 @@ module.exports = (deps) => {
         if (!Array.isArray(b.commits)) return { ok: false, message: 'commits 须为数组' };
         if (b.commits.length > 0) return { ok: false, message: 'no_code 模式不应携带非空 commits' };
       }
-      return { ok: true, mode: 'no_code', noCodeReason: reason, commits: [], fixGapNote, workNote };
+      // [codex 272 号 L-3·273 号 M 修正] 把双勾的**请求体原始值**随 parsed 带出（camelCase，同 noCodeReason
+      // 风格）——不硬编码 true：写前不变量断言的是"请求里真的传了 true"这个现实，硬编码会让断言恒真、
+      // 未来校验被误放宽时照样把假 true 写进审计（273 号抓的恒真断言变体）。
+      return { ok: true, mode: 'no_code', noCodeReason: reason, commits: [], fixGapNote, workNote, selfTested: b[SUBMIT_SELF_TESTED_KEY], testEnvDeployed: b[SUBMIT_TEST_ENV_DEPLOYED_KEY] };
     }
 
     // mode === 'commits'
@@ -4619,14 +5257,16 @@ module.exports = (deps) => {
       if (!ref || ref.length > 200) return { ok: false, message: 'commit_ref 必填（trim 长度 1..200）' };
       commits.push({ component: raw.component, commit_ref: ref });
     }
-    return { ok: true, mode: 'commits', noCodeReason: null, commits, fixGapNote, workNote };
+    return { ok: true, mode: 'commits', noCodeReason: null, commits, fixGapNote, workNote, selfTested: b[SUBMIT_SELF_TESTED_KEY], testEnvDeployed: b[SUBMIT_TEST_ENV_DEPLOYED_KEY] };   // 273 号 M：带原始值非硬编码（同上方 no_code 分支注释）
   }
 
   router.post('/sys-issues/:id/submit', authenticateToken, requireSysSchemaReady, async (req, res) => {
     const id = parsePositiveId(req.params.id);
     if (!id) return res.status(400).json({ error: '无效的迭代单 ID', code: 'INVALID_SYS_ISSUE_ID' });
     const parsed = validateSubmitBody(req.body);
-    if (!parsed.ok) return res.status(400).json({ error: parsed.message, code: 'VALIDATION' });
+    // [v1.1 §3.3·C3] validateSubmitBody 现会为提交双勾返回语义化 code（SELF_TESTED_REQUIRED 等）——
+    // 优先用它，其余既有校验分支未带 code（一直是裸 message）时兜底回落通用 VALIDATION，不破坏既有行为。
+    if (!parsed.ok) return res.status(400).json({ error: parsed.message, code: parsed.code || 'VALIDATION' });
 
     const actor = sysActor(req);
     try {
@@ -4636,7 +5276,7 @@ module.exports = (deps) => {
         // §6.2 步骤1：assertKnownIssueStatus → 解析在册实例（0 行→403 NOT_ROSTERED）
         const row = await dbGetAsync(
           `SELECT id, type, status, blocked, needs_feasibility, feasibility_conclusion,
-                  feasibility_requirement_confirm, feasibility_risk, dev_estimated_at,
+                  feasibility_requirement_confirm, feasibility_risk, dev_estimated_at, estimated_effort_days,
                   first_submitted_at, origin_issue_id
              FROM sys_issues WHERE id = ?`,
           [id]
@@ -4724,6 +5364,25 @@ module.exports = (deps) => {
               await sysRollback();
               return res.status(400).json({ error: '有条件可行需填写风险与依赖', code: 'FEASIBILITY_RISK_REQUIRED' });
             }
+            // [工期对接测试与风险等级拆分 方案 v1.1 §3.2·C2] feature 工期必填（improvement 选填，不在此拦）：
+            // submit 侧友好 400 快速失败层——即便 feasibility 评估已通过，若 estimated_effort_days 仍未填
+            // （理论上不该发生，feasibility 端点已挡；此处是 submit 自身独立不变量，同 dev_estimated_at 的
+            // "两处判定同构、非独立设计"范式，GATE 侧 isGateEligibleForVerify 是非 submit 路径的深层兜底）。
+            // [codex 269 号 M-1 存储值复查]：同 isGateEligibleForVerify 理由（ALTER 旧库路径无 DDL CHECK，
+            // 脏值可合法落库）——复用 normalizeSysEffortDays 重新验存量值，区分两种错误语义：真缺失
+            // （从未填过）报 EFFORT_REQUIRED 引导去填；非空但归一失败（历史脏值/数据异常）报独立码
+            // EFFORT_INVALID 引导去改，运维排查时能分清"没填"与"填了但是坏数据"两类问题。
+            if (row.type === 'feature') {
+              const effortCheck = normalizeSysEffortDays(row.estimated_effort_days);
+              if (!effortCheck.ok) {
+                await sysRollback();
+                return res.status(400).json({ error: `工期数据异常（${effortCheck.error}），请重新在可行性评估中填写`, code: 'EFFORT_INVALID' });
+              }
+              if (effortCheck.value === null) {
+                await sysRollback();
+                return res.status(400).json({ error: '请先在可行性评估中填写工期（人日）', code: 'EFFORT_REQUIRED' });
+              }
+            }
           }
         }
 
@@ -4761,9 +5420,22 @@ module.exports = (deps) => {
         //   → electRepresentative → 门禁：全完成态→主状态待验证（W-GATE 内，同事务，不变量 8）
         // P4：work_note（选填工作说明）落进本条 submit/no_code 事件的 payload_json——每个 dev 各自的 submit 事件行
         //   独立承载，多开发各自 work_note 不覆盖（方案 §4.3 H1：不落主表/不落可变 dev_assignees 行）。仅有值时加键。
+        // [v1.1 §3.3·C3] self_tested/test_env_deployed 恒为 true 才能走到这里（validateSubmitBody 已挡），
+        //   两键无条件写入（不像 work_note 那样"仅有值时加键"——这两个键在通过校验的每一条 submit/no_code
+        //   事件里恒定存在且恒为 true，是"事件 JSON 键名 schema 冻结"的一部分，供 verify 稳定读取断言）。
+        // [codex 272 号 L-3 写前不变量] 不直接信任"能走到这里就必然过了校验"这个隐含假设——显式断言
+        // parsed.selfTested/testEnvDeployed 确为 true 才落笔硬编码 true。这条断言此刻看起来是废话（本
+        // 函数 validateSubmitBody 确实保证了这一点），但它的价值在未来：如果哪次重构不小心放宽了
+        // assertSubmitChecklistFlag（比如误改成允许 undefined 透传/漏掉某个分支的 return），下面这行
+        // 硬编码 true 会在不知情的情况下悄悄写入一条"看起来双勾已确认但实际从未真正校验过"的假记录——
+        // 这类审计假阳性一旦落库就很难事后甄别。加上这条断言后，同样的疏漏会在写入前就直接 throw 炸穿，
+        // 而不是留下一条无法追溯的脏数据。
+        if (parsed.selfTested !== true || parsed.testEnvDeployed !== true) {
+          throw new Error(`[写前不变量违反] submit 双勾应恒为 true 才能到达 eventPayload 构造，实得 selfTested=${parsed.selfTested} testEnvDeployed=${parsed.testEnvDeployed}（validateSubmitBody 校验被绕过或被弱化，需立即排查，非静默写假 true）`);
+        }
         const eventPayload = parsed.mode === 'no_code'
-          ? { mode: 'no_code', no_code_reason: parsed.noCodeReason, ...(parsed.workNote ? { work_note: parsed.workNote } : {}) }
-          : { mode: 'commits', commits: insertedCommits, dev_assignee_id: memberRow.id, ...(parsed.workNote ? { work_note: parsed.workNote } : {}) };
+          ? { mode: 'no_code', no_code_reason: parsed.noCodeReason, [SUBMIT_SELF_TESTED_KEY]: true, [SUBMIT_TEST_ENV_DEPLOYED_KEY]: true, ...(parsed.workNote ? { work_note: parsed.workNote } : {}) }
+          : { mode: 'commits', commits: insertedCommits, dev_assignee_id: memberRow.id, [SUBMIT_SELF_TESTED_KEY]: true, [SUBMIT_TEST_ENV_DEPLOYED_KEY]: true, ...(parsed.workNote ? { work_note: parsed.workNote } : {}) };
         await insertDevEvent({
           issueId: id, devAssigneeId: memberRow.id,
           action: parsed.mode === 'no_code' ? 'no_code' : 'submit',
@@ -5050,6 +5722,12 @@ module.exports = (deps) => {
   // admin 动作
   router.post('/sys-issues/:id/accept', authenticateToken, requireSysSchemaReady, requireAdmin, makeTransitionEndpoint('accept'));
   router.post('/sys-issues/:id/return', authenticateToken, requireSysSchemaReady, requireAdmin, makeTransitionEndpoint('return'));
+  // [工期对接测试与风险等级拆分 方案 v1.1 §3.1 点5·C4 新增] 对接测试通过/打回——roleGuard='intake_liaison'
+  //   （对接人池∨admin），中间件用 requireIntakeLiaison 粗筛（同 intake-accept 既有范式），引擎 [3] 再精判
+  //   一次（写读同源，非重复劳动：中间件挡多数非法请求早退，引擎是不变量最后一道防线）。走通用
+  //   makeTransitionEndpoint（同 accept/return 等具名边），不新起专用 handler。
+  router.post('/sys-issues/:id/liaison-test-pass', authenticateToken, requireSysSchemaReady, requireIntakeLiaison, makeTransitionEndpoint('liaison_test_pass'));
+  router.post('/sys-issues/:id/liaison-test-return', authenticateToken, requireSysSchemaReady, requireIntakeLiaison, makeTransitionEndpoint('liaison_test_return'));
   router.post('/sys-issues/:id/close', authenticateToken, requireSysSchemaReady, requireAdmin, makeTransitionEndpoint('close'));
   // ⭐⭐ S2（bug暂缓方案 §5.2·实现错回填）：hold 中间件层 requireAdmin **已移除**——hold 曾经全类型 admin-only
   //   （变更流 roleGuard:'admin'），S2 后 bug 的授权语义变成「任一活跃在册成员 ∨ admin」（口径 #6），中间件
@@ -5079,8 +5757,16 @@ module.exports = (deps) => {
   //   具体集合**以下方常量为准，注释不再重复枚举**（191 复审 L：注释枚举已漂移过一次）。
   //   bug 的 OA 可选（D2·填了同样校验格式）；指派后仍可改=纠错窗口（timeline 留痕可审计）。
   //   服务端比对制（[[feedback_server_side_diff_for_audit]]）：同值 no-op（200·不写 timeline 不留痕）。
+  //   [S12 双路审查 codex 287 号 D 项收口] ⚠️ 上一句"受理之后的全部非终态"是概括性表述，非逐态字面
+  //   相等——feature/improvement 下方数组刻意不含「待对接测试」，该测试段窗口内 set-oa-number 返回
+  //   409 是 **C0 矩阵验证清单登记确认过的预期缺格**，非本次巡查漏改：OA 号在指派开发前置守卫
+  //   （assertSysDevCommitmentOaGuard）已强制必填在先，进入测试段时不存在"还没号"的场景，且与
+  //   C0 附注登记的另一同族设计取向一致（测试段内 notify-developer/creator/requester 三通道同样
+  //   因状态白名单不含「待对接测试」而全哑 409，是同一批"测试段专属、非常态操作全部收紧"的取舍，
+  //   不是逐处独立决定）。若未来发现测试段确有改号真实需求，需走方案新增，非本处直接放宽。
   const SYS_OA_ALLOWED_STATUSES = {
     // 191 号审 M（同型第三次·终版口径=受理后全部非终态+已上线·逐状态对照 ALLOWED_STATUSES 核出不手拼）：+待验证
+    // ⚠️ 「待对接测试」不在集合内——见上方 [S12...D 项收口] 注释，刻意排除非遗漏。
     feature: ['待指派', '开发中', '待验证', '待上线', '已上线', '已暂缓'],
     improvement: ['待指派', '开发中', '待验证', '待上线', '已上线', '已暂缓'],
     // ⚠️ bug 集合仍无「已暂缓」——但理由已变（bug暂缓方案 20260803 v0.4 §4.4）：BUG_FLOW_STATUSES **现在
@@ -6319,10 +7005,44 @@ module.exports = (deps) => {
     });
   });
 
+  // [工期对接测试与风险等级拆分 方案 v1.1 §3.2·C2] 工期字段归一化+校验：与 DDL CHECK 同口径（有限数、
+  //   0<v≤365、0.5 整数倍）——错误码语义化（区别于裸 400），供 feasibility 端点消费。纯函数不抛异常，
+  //   返回 { ok, value } 或 { ok:false, error, code }，与本文件 feasibility 端点其余校验一贯的直接
+  //   res.status(400) 写法配合（不套 assertSysOaNumber 那种抛 SysTransitionError 的风格——那是给
+  //   sysIssueTransition 引擎内部消费的，本端点是独立旁路事务，历来自己直接 return res）。
+  //   raw 未填（undefined/null/''）→ value:null 合法（改进类选填/尚未评估）；由调用方按 type 决定是否必填。
+  //   [codex 269 号 M-2 类型收紧]：裸用 `Number(raw)` 会把一整类"看起来不像数字却被 JS 隐式转换成合法
+  //   数字"的输入静默放行——`Number(true)===1`、`Number([1])===1`（单元素数组走 toString 再转数字）、
+  //   `Number('0x10')===16`（十六进制字面量）——这些类型压根不该被认作"填了工期"。改为：仅接受
+  //   `typeof number` 或 trim 后**完全匹配纯十进制格式**（`^\d+(\.\d+)?$`，不含科学计数法/正负号/千分位）
+  //   的字符串；其余类型（布尔/数组/对象等）一律拒绝。字符串 trim 后为空 → 视同未填（value:null，与前端
+  //   "留空不传该字段"语义一致，不报错）。刻意不支持科学计数法（如 '5e-1'）——"人日"业务语义下从没有
+  //   自然产生这种写法的场景，从严拒绝优先于兼容更多格式，缩小歧义面。
+  function normalizeSysEffortDays(raw) {
+    if (raw === undefined || raw === null) return { ok: true, value: null };
+    if (typeof raw === 'string' && raw.trim() === '') return { ok: true, value: null };
+    let n;
+    if (typeof raw === 'number') {
+      n = raw;
+    } else if (typeof raw === 'string') {
+      const t = raw.trim();
+      if (!/^\d+(\.\d+)?$/.test(t)) return { ok: false, error: '工期须为数字（人日）', code: 'INVALID_EFFORT_DAYS' };
+      n = Number(t);
+    } else {
+      return { ok: false, error: '工期须为数字（人日）', code: 'INVALID_EFFORT_DAYS' };
+    }
+    if (!Number.isFinite(n)) return { ok: false, error: '工期须为数字（人日）', code: 'INVALID_EFFORT_DAYS' };
+    if (n <= 0 || n > 365) return { ok: false, error: '工期须在 (0, 365] 范围内', code: 'INVALID_EFFORT_DAYS' };
+    if (Math.round(n * 2) !== n * 2) return { ok: false, error: '工期须为 0.5 的整数倍', code: 'INVALID_EFFORT_DAYS' };
+    return { ok: true, value: n };
+  }
+
   // ── POST /sys-issues/:id/feasibility：填可行性评估（在册开发，不改 status，旁路独立事务，F2b §4.1 / v1.7 §十九）──────────
   //   闸门：conclusion 枚举 + requirement_confirm 非空 + dev_estimated_at 格式(>=assigned_at) + 有条件可行/不可行时 risk 必填；
   //   type 仅 feature/improvement；needs_feasibility=1（未勾选 409）；status=W06 白名单固化（M-3）；blocked=1 禁改（M-3' 409 ISSUE_BLOCKED）。
   //   C3 交付物：W06 切换——权限从 ownerGuard 改 assertDevMember（在册），去主次后任一在册开发均可填。
+  //   [v1.1 §3.2·C2] 工期字段（estimated_effort_days）写点=本端点 payload——feature 必填/improvement 选填，
+  //   见下方 row.type 分支判定；resubmission 全量覆盖（含清空，同既有 risk 字段"未传即清"语义一致）。
   router.post('/sys-issues/:id/feasibility', authenticateToken, requireSysSchemaReady, async (req, res) => {
     const id = parsePositiveId(req.params.id);
     if (!id) return res.status(400).json({ error: '无效的迭代单 ID', code: 'INVALID_SYS_ISSUE_ID' });
@@ -6345,6 +7065,11 @@ module.exports = (deps) => {
       if (!est) return res.status(400).json({ error: '预计完成时间格式非法（YYYY-MM-DD HH:MM）', code: 'INVALID_ESTIMATE' });
       const estMin = truncToMinute(est);   // S3：同 estimate 端点——est 带秒入库、estMin 到分用于比较与文本
       if (!estMin) return res.status(500).json({ error: '时间规范化内部错误（estMin 为空）', code: 'ESTIMATE_NORMALIZE_INTERNAL' });   // 同 estimate 的 LOW-1 守卫
+      // [v1.1 §3.2·C2] 工期格式/值域先归一（不依赖 row.type，纯格式层）；是否"必填"要等下方拿到 row.type
+      // 才能判定（feature 必填/improvement 选填），故此处只做格式校验，必填判定挪到事务内 row 查询之后。
+      const effortParse = normalizeSysEffortDays(b.estimated_effort_days);
+      if (!effortParse.ok) return res.status(400).json({ error: effortParse.error, code: effortParse.code });
+      const effortValue = effortParse.value;   // null=未填（合法与否由下方按 row.type 判定）
       const actor = sysActor(req);
       await sysBeginImmediate();
       try {
@@ -6361,22 +7086,32 @@ module.exports = (deps) => {
         await assertDevMember(id, actor.id);
         // blocked=1 禁改评估（codex 17b M-3，受阻要继续须先 unblock，保流程线性）
         if (row.blocked === 1) { await sysRollback(); return res.status(409).json({ error: '该单已受阻，请先解除受阻再填评估', code: 'ISSUE_BLOCKED' }); }
+        // [工期对接测试与风险等级拆分 方案 v1.1 §3.2·C2] feature 工期必填（improvement 选填）——刻意放在
+        // 状态/权限/受阻三道闸**之后**（同 assigned_at 缺失保护紧邻，都是"通过前置闸后才检查的负载完整性"）：
+        // 授权（NOT_ROSTERED）/状态（FEASIBILITY_STATUS_INVALID）/受阻（ISSUE_BLOCKED）三类问题应优先于
+        // "表单填完整没"报出，防止未在册/态不对的调用者从错误码里探知"只要把工期填上就行"这类误导信息。
+        if (row.type === 'feature' && effortValue === null) {
+          await sysRollback(); return res.status(400).json({ error: '请填写工期（人日）', code: 'EFFORT_REQUIRED' });
+        }
         // assigned_at 缺失保护 + >=assigned_at（同 estimate，dev_estimated_at 一并写入）
         const assignedMin = truncToMinute(row.assigned_at);
         if (!assignedMin) { await sysRollback(); return res.status(409).json({ error: '该单缺少指派时间（数据异常）', code: 'ASSIGNED_AT_MISSING' }); }
         if (estMin < assignedMin) { await sysRollback(); return res.status(400).json({ error: '预计完成时间不能早于指派时间', code: 'ESTIMATE_BEFORE_ASSIGN' }); }   // S3：同 estimate，比较用到分值
         // 乐观锁绑 status='开发中'（W06：actor 未必是 assigned_to，去主次不再绑 assigned_to 条件）；
-        //   UPDATE 评估字段 + dev_estimated_at
+        //   UPDATE 评估字段 + dev_estimated_at + estimated_effort_days（v1.1 §3.2·C2 新增；resubmission
+        //   全量覆盖含清空，同既有 risk 字段"未传即清"语义一致，非部分 PATCH）
         const upd = await dbRunAsync(
           `UPDATE sys_issues SET feasibility_conclusion = ?, feasibility_requirement_confirm = ?, feasibility_risk = ?,
-                  dev_estimated_at = ?, updated_at = datetime('now','localtime')
+                  dev_estimated_at = ?, estimated_effort_days = ?, updated_at = datetime('now','localtime')
             WHERE id = ? AND status = '开发中'`,
-          [conclusion, requirementConfirm, risk || null, est, id]
+          [conclusion, requirementConfirm, risk || null, est, effortValue, id]
         );
         if (!upd || upd.changes !== 1) { await sysRollback(); return res.status(409).json({ error: '迭代单状态或负责人已变更，请刷新重试', code: 'CONCURRENT_FEASIBILITY' }); }
-        // feasibility timeline 快照（append-only 冻结，summary 拼结论/需求理解/风险/预计完成）
-        //   S3：快照文本用 estMin（同 estimate 的 timeline summary 理由——纯文本直出，带秒会显示到秒违反 D3）
-        const snapshot = `结论：${conclusion}｜需求理解：${requirementConfirm}｜风险：${risk || '无'}｜预计完成：${estMin}`;
+        // feasibility timeline 快照（append-only 冻结，summary 拼结论/需求理解/风险/预计完成/工期）
+        //   S3：快照文本用 estMin（同 estimate 的 timeline summary 理由——纯文本直出，带秒会显示到秒违反 D3）；
+        //   工期是数字非时间字段，不涉及秒/分精度问题，同一原则下仍是"写入时就定成给人看的最终文本"。
+        const effortText = effortValue !== null ? `${effortValue}人日` : '未填';
+        const snapshot = `结论：${conclusion}｜需求理解：${requirementConfirm}｜风险：${risk || '无'}｜预计完成：${estMin}｜工期：${effortText}`;
         await dbRunAsync(
           `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, operator_id, operator_name)
            VALUES (?, 'feasibility', ?, ?, ?)`,
@@ -6564,8 +7299,8 @@ module.exports = (deps) => {
         const targetFamily = SF.familyOfStatus(row.type, target);
         if (targetFamily === 'VERIFY' || targetFamily === 'RELEASE') {
           const rosterRows = await dbAllAsync(`SELECT dev_status FROM sys_issue_dev_assignees WHERE issue_id = ? AND removed_at IS NULL`, [row.id]);
-          const rosterActiveCount = rosterRows.length;
-          const rosterAllComplete = rosterActiveCount > 0 && rosterRows.every(r => r.dev_status !== 'pending');
+          // [275-M1 收口] 同上，消费共用 analyzeRosterForGate。
+          const { activeCount: rosterActiveCount, allComplete: rosterAllComplete } = analyzeRosterForGate(rosterRows);
           if (!(rosterActiveCount >= 1 && rosterAllComplete)) {
             resumeDegradeInfo.degraded = true;
             resumeDegradeInfo.originalTarget = target;
@@ -7054,16 +7789,21 @@ module.exports = (deps) => {
       //   截图的落库时刻，无待绑语义（下方 logger.info 措辞同步更正）。
       //   状态门原仅 isDevWorkState（=SYS_DEV 单族），本次按 §5.4 拓宽到 SYS_DEV∪SYS_VERIFY（待验证阶段在册
       //   仍可补传交付物/截图，属真实行为放宽，非误改——旧口径只允许"开发中/处理中"，验收阶段被误拦）。
+      //   [S12 双路审查 Opus-2 MED 收口·方案 §3.5「待对接测试」矩阵+C0 双登记必做项] 再拓宽到含
+      //   LIAISON_TEST——待对接测试段仍是开发/对接人协作补证据的窗口（如对接人测出问题需要开发追加
+      //   截图佐证、或开发继续补交付材料），"仅 DEV∪VERIFY 两族"会把这条协作路径挡在测试段外。
+      //   LIAISON_TEST 对 improvement/bug 恒空数组（status-families.js），isInFamily 对这两个 type
+      //   恒 false，不影响其既有行为范围，只是给 feature 多开一扇门。
       const roster = await sysAttachmentRosterState(id, actor.id);
       if (!isCoordinator && !roster.active) { sysCleanupOrphanFiles(req, id); return res.status(403).json({ error: '交付附件仅在册开发/协调人可上传', code: 'NOT_AUTHORIZED_FOR_ATTACHMENT' }); }
-      const inDevOrVerify = SF.isInFamily(row.type, row.status, 'DEV') || SF.isInFamily(row.type, row.status, 'VERIFY');
-      if (!inDevOrVerify) { sysCleanupOrphanFiles(req, id); return res.status(409).json({ error: '仅开发进行态（开发中/处理中/待验证）可上传交付附件', code: 'INVALID_STATE_FOR_ATTACHMENT' }); }
+      const inDevOrVerify = SF.isInFamily(row.type, row.status, 'DEV') || SF.isInFamily(row.type, row.status, 'VERIFY') || SF.isInFamily(row.type, row.status, 'LIAISON_TEST');
+      if (!inDevOrVerify) { sysCleanupOrphanFiles(req, id); return res.status(409).json({ error: '仅开发进行态（开发中/处理中/待验证/待对接测试）可上传交付附件', code: 'INVALID_STATE_FOR_ATTACHMENT' }); }
       if (files.length === 0) { sysCleanupOrphanFiles(req, id); return res.status(400).json({ error: '未收到上传文件（field 名应为 files）', code: 'NO_FILE' }); }
       persisted = await sysPersistAttachments(id, files, attachmentType, null, actor);
       // TOCTOU 二次守卫：persist 后重读仍处 SYS_DEV∪SYS_VERIFY 态 且 授权仍成立（type 不可变用首读值；协调人身份
       //   不受事务影响故不重查，仅"在册"路径需重查——校验→INSERT 间被 remove/打回/作废则回滚）。
       const recheck = await dbGetAsync('SELECT status FROM sys_issues WHERE id = ?', [id]);
-      const recheckStatusOk = !!recheck && (SF.isInFamily(row.type, recheck.status, 'DEV') || SF.isInFamily(row.type, recheck.status, 'VERIFY'));
+      const recheckStatusOk = !!recheck && (SF.isInFamily(row.type, recheck.status, 'DEV') || SF.isInFamily(row.type, recheck.status, 'VERIFY') || SF.isInFamily(row.type, recheck.status, 'LIAISON_TEST'));
       const recheckAuthOk = isCoordinator || (await sysAttachmentRosterState(id, actor.id)).active;
       if (!recheckStatusOk || !recheckAuthOk) {
         const failedIds = persisted.map(a => a.id);
@@ -7457,11 +8197,11 @@ module.exports = (deps) => {
       );
       const rosterByIssue = new Map();
       for (const id of memberIds) rosterByIssue.set(id, []);
-      for (const r of rosterRows) rosterByIssue.get(r.issue_id).push(r.dev_status);
+      // [275-M1 收口] 行内保留 {dev_status} 对象形状（而非裸字符串），与 analyzeRosterForGate 的输入契约
+      //   一致，四处 guard 调用点同一份分析函数，不再各自维护一份 filter/every。
+      for (const r of rosterRows) rosterByIssue.get(r.issue_id).push({ dev_status: r.dev_status });
       for (const m of members) {
-        const statuses = rosterByIssue.get(m.id) || [];
-        const rosterActiveCount = statuses.length;
-        const rosterAllComplete = rosterActiveCount > 0 && statuses.every(s => s !== 'pending');
+        const { activeCount: rosterActiveCount, allComplete: rosterAllComplete } = analyzeRosterForGate(rosterByIssue.get(m.id) || []);
         assertMainStatusTransition({
           routeKind: 'RELEASE', action, actionKind, issueType: m.type,
           before: m.status, after: '已上线', rosterActiveCount, rosterAllComplete,
@@ -9298,6 +10038,19 @@ module.exports = (deps) => {
 
   const SYS_TYPE_LABELS = { feature: '新功能', improvement: '优化', bug: 'BUG', config: '配置变更' };
 
+  // [D22 批2收口·codex 290 号裁定=改·291 号 M-4 补齐] 状态显示名——纯展示映射，与前端
+  //   Sys_Iteration.html 的 siStatusDisplay **逐项同表**（"待验证"→"待验收"、"已关闭"→"已归档"，其余
+  //   原样；291 号 M-4 前本函数漏了"已关闭→已归档"这一项，与前端不同表，已补齐并加下方对照断言锁定
+  //   "逐项同表"这条不变量，非仅覆盖"待验证"一个值）；**只用于外发文案渲染**，绝不写回 DB/绝不作为
+  //   查询条件/绝不影响 status 列本身——存储值/状态机/API 响应体 issue.status 字面量恒不变，仅本函数
+  //   的返回值可能与 issue.status 不同。钉钉通知也是用户可见显示面，状态名理应与页面一致，否则页面
+  //   看到"待验收"/"已归档"、钉钉消息却收到"待验证"/"已关闭"，对业务方/建单人是两套口径的割裂体验。
+  function sysStatusDisplayName(status) {
+    if (status === '待验证') return '待验收';
+    if (status === '已关闭') return '已归档';
+    return status;
+  }
+
   // 深链行（baseUrl 已 sanitize；为空则省略，对齐 issue-tracker buildIssueDeepLink 范式）。
   //   URL 约定：Sys_Iteration.html?issue=<id>（C6 前端须按此 query 参数定位详情，整数 id 无注入面）。
   function sysDeepLinkLine(baseUrl, issueId) {
@@ -9364,7 +10117,7 @@ module.exports = (deps) => {
       // ④b-1 bug 手动通知报障人·进展卡片（非已上线态；已上线走 released 分支）——当前状态告知，best-effort 手动触发
       return {
         title: `📣 您反馈的问题有进展：${safeTitle}`,
-        md: `### 📣 问题处理进展\n\n- **系统**：${system}\n- **问题**：${title}\n- **当前状态**：${issueNotify.issueSafeText(issue.status, 20)}\n\n信息技术部正在跟进处理，感谢您的反馈。${link}`,
+        md: `### 📣 问题处理进展\n\n- **系统**：${system}\n- **问题**：${title}\n- **当前状态**：${issueNotify.issueSafeText(sysStatusDisplayName(issue.status), 20)}\n\n信息技术部正在跟进处理，感谢您的反馈。${link}`,
       };
     }
     // estimate
@@ -9394,7 +10147,7 @@ module.exports = (deps) => {
     const safeTitle = sysNotifyTitle(issue.title);
     const system = issueNotify.issueSafeText(issue.system_name, 40);
     const link = sysDeepLinkLine(baseUrl, issue.id);
-    const statusLine = issueNotify.issueSafeText(issue.status, 20);
+    const statusLine = issueNotify.issueSafeText(sysStatusDisplayName(issue.status), 20);   // [D22 批2] 显示映射，issue.status 本身不变
     return {
       title: `📬 迭代单状态更新：${safeTitle}`,
       md: `### 📬 迭代单状态更新\n\n- **单号**：#${issue.id}\n- **系统**：${system}\n- **标题**：${title}\n- **当前状态**：${statusLine}\n\n请登录平台查看详情。${link}`,
@@ -9412,6 +10165,20 @@ module.exports = (deps) => {
     return {
       title: `📥 新迭代单待受理：${safeTitle}`,
       md: `### 📥 新迭代单待受理\n\n- **单号**：#${issue.id}\n- **标题**：${title}\n\n请登录平台受理该单。${link}`,
+    };
+  }
+
+  // 对接测试侧 markdown（工期对接测试与风险等级拆分 方案 v1.1 §6·C4b）：开发点击"通知对接人测试"，
+  //   收件人=liaison_test_recipient_*（D20 claim 自愈后的当前值）。同 buildSysIntakeMarkdown 口径，
+  //   仅带单号+标题+深链，不内联可变字段。
+  function buildSysLiaisonTestMarkdown(issue, baseUrl) {
+    const title = issueNotify.issueSafeText(issue.title, 80);
+    const safeTitle = sysNotifyTitle(issue.title);
+    const system = issueNotify.issueSafeText(issue.system_name, 40);
+    const link = sysDeepLinkLine(baseUrl, issue.id);
+    return {
+      title: `🧪 迭代单待对接测试：${safeTitle}`,
+      md: `### 🧪 迭代单已进入对接测试\n\n- **单号**：#${issue.id}\n- **系统**：${system}\n- **标题**：${title}\n\n开发已完成交付，请登录平台对接测试该单。${link}`,
     };
   }
 
@@ -10548,6 +11315,375 @@ module.exports = (deps) => {
     } catch (err) { logger.error('[系统迭代] 手动通知对接人受理失败:', err && err.message); res.status(500).json({ error: (err && err.message) || '通知对接人受理失败' }); }
   });
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // 对接测试通知（工期对接测试与风险等级拆分 方案 v1.1 §6·C4b·D16/D19/D20）——预占协议两段式：
+  //   preemptLiaisonTestNotifySend(id, expectedCycle)：短事务①，CAS 抢占 sending（不 begin/commit 暴露给
+  //     调用方——本函数自成一个独立短事务，调用方按返回的 outcome 分流，never throws（底层 DB 异常除外）。
+  //   writebackLiaisonTestNotify(id, token, ok, messageKey, error, sentBy)：短事务②，按 attempt_token 精确
+  //     CAS 回写——token 不匹配（换代/被新预占覆盖）则 changes=0，调用方据此走"并发变更"分支，不静默覆盖。
+  //   两函数之间（事务外）才允许调 sendIssueDingtalkRaw——与 release-executor §7b 现网范式（:9219/:9308）
+  //   同构，唯一差异：本通道无独立 'stale' 枚举值（liaison_test_notify_status CHECK 仅 4 态），
+  //   "sending 超窗恢复"改为方案 §6 冻结写法，直接内联进抢占 CAS 的 WHERE（非 release 那种独立惰性转换
+  //   前置 pass），恢复窗口=10 分钟（方案逐字冻结，非 release 侧 5 分钟）。
+  // ═══════════════════════════════════════════════════════════════════════════
+  // [codex 276 号审 M-1] 外呼超时围栏——8 分钟 < 10 分钟 stale 恢复窗口：进程仍存活但外呼异常挂起时，
+  //   主动判超时比等 10 分钟 stale 窗口被下一次点击顺带恢复更快、更可观测。
+  // [codex 277 号审 H-1 收口] ⭐ 超时 ≠ 失败——这是本类判定的核心二分法（4 态 CHECK 已冻结，不新增第 5
+  //   态区分"确定失败"与"结果未知"，改走这条 JS 层判别式）：
+  //     · **确定失败**（send 函数同步/异步 reject 抛出真实错误，如钉钉侧返回明确失败）：这次调用**没有
+  //       实际发出过消息**，回写 failed 允许立即重试是安全的。
+  //     · **结果未知**（withTimeout 超时）：底层 sendIssueDingtalkRaw 这个 Promise **可能仍在飞**（进程
+  //       没崩，只是我们等不及了主动放弃等待）——它随时可能在超时之后才真正成功。此时若回写 failed，
+  //       用户会立即重试，一旦"迟到的成功"恰好发生在重试窗口内，就是**真实双发**（两条钉钉消息都送达）。
+  //       故超时分支**不回写、保持 sending 不动**——10 分钟 stale 窗口是唯一合法的重试许可来源（等到那
+  //       时原调用早该有结果了，晚成功大概率落在这 10 分钟窗内不会被覆盖；stale 窗口之后仍可能有极小
+  //       概率的"超晚成功+窗后重试"双发残留，这是**下游无幂等键情况下的结构性极限**——彻底杜绝双发需要
+  //       给 sendIssueDingtalkRaw 接一层幂等键或补一个异步对账任务核对钉钉侧实际投递记录，这是方案级的
+  //       后续工作，本轮不做，仅挂账并在此注释披露）。
+  //   用一个专用 Error 子类标记"这个 reject 来自超时包装器本身"，与"被包装的 promise 自己 reject"精确
+  //   区分（不能用 message 文本匹配，那样太脆弱）。
+  class NotifyTimeoutError extends Error {}
+  function withTimeout(promise, ms, message) {
+    let timer;
+    const timeoutPromise = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new NotifyTimeoutError(message || `操作超时（${ms}ms）`)), ms);
+    });
+    return Promise.race([promise, timeoutPromise]).finally(() => clearTimeout(timer));
+  }
+  // [codex 278 号审 M-4] 超时时长提为可注入的模块级变量（非 const）——生产默认 8 分钟；verify 测试通过
+  // `_internals.setNotifyLiaisonTestTimeoutMsForTest(ms)`（见文件底部 _internals 导出）改成几十毫秒，
+  // 使"超时命中"这条高风险分支能被自动化断言覆盖，不必真等 8 分钟。刻意不做成端点 body/query 可传参
+  // （那样客户端就能自己决定超时时长，是一个不必要的滥用面——超时策略是服务端内部配置，不应由请求方
+  // 控制）。
+  let NOTIFY_SEND_TIMEOUT_MS = 8 * 60 * 1000;
+  // [codex 276 号审 H-1 收口] 增参 expectedRecipientId——CAS WHERE 绑定当前请求解析出的收件人快照，
+  //   杜绝"预占前解析出收件人 A，预占这一刻库里已被并发改成收件人 B，但 CAS 只判 cycle/status 未判
+  //   recipient 而误把消息发给 A"的错发风险（收件人 A 已不是库内权威值，A 收到的通知与库内实际记录的
+  //   收件人不一致）。claim 自愈仍发生在调用方解析阶段（预占前），语义不变——本函数只负责"预占时收件人
+  //   是否仍等于解析时那一个"的围栏。
+  async function preemptLiaisonTestNotifySend(id, expectedCycle, expectedRecipientId) {
+    const newToken = crypto.randomBytes(16).toString('hex');
+    await sysBeginImmediate();
+    let cas;
+    try {
+      cas = await dbRunAsync(
+        `UPDATE sys_issues SET liaison_test_notify_status = 'sending',
+                liaison_test_attempt_token = ?, liaison_test_attempt_started_at = datetime('now','localtime')
+          WHERE id = ? AND type = 'feature' AND status = '待对接测试'
+            AND liaison_test_recipient_id = ?
+            AND (liaison_test_notify_status IN ('not_sent','failed')
+                 OR (liaison_test_notify_status = 'sending' AND (liaison_test_attempt_started_at IS NULL
+                      OR liaison_test_attempt_started_at <= datetime('now','localtime','-10 minutes'))))
+            AND liaison_test_notify_cycle_no = ? AND liaison_test_cycle_no = ?`,
+        [newToken, id, expectedRecipientId, expectedCycle, expectedCycle]
+      );
+      if (cas && cas.changes === 1) await sysCommit(); else await sysRollback();
+    } catch (e) { try { await sysRollback(); } catch (_) { /* ignore */ } throw e; }
+    if (!cas || cas.changes !== 1) {
+      // 诊断性重读（同 release-executor §7b①失败分支范式，:9294-9298）——细分失败原因，不笼统一个 409。
+      const fresh = await dbGetAsync(
+        `SELECT status, type, liaison_test_notify_status AS ns, liaison_test_recipient_id AS rid,
+                liaison_test_notify_cycle_no AS ncn, liaison_test_cycle_no AS mcn, liaison_test_attempt_started_at AS sat
+           FROM sys_issues WHERE id = ?`, [id]
+      );
+      if (!fresh) return { outcome: 'not_found' };
+      if (fresh.type !== 'feature' || fresh.status !== '待对接测试') return { outcome: 'status_invalid', status: fresh.status };
+      if (!fresh.rid) return { outcome: 'recipient_unavailable' };
+      // [H-1] 现值 recipient≠本次请求解析时的快照——收件人已被并发改动（claim 自愈/换单等），
+      //   本次预占绝不能沿用旧收件人发送，提示调用方刷新后按新收件人重新走一遍解析+预占。
+      if (fresh.rid !== expectedRecipientId) return { outcome: 'recipient_changed' };
+      if (fresh.ncn !== expectedCycle || fresh.mcn !== expectedCycle) return { outcome: 'cycle_mismatch' };
+      if (fresh.ns === 'sent') return { outcome: 'already_sent' };
+      if (fresh.ns === 'sending') return { outcome: 'sending_in_progress' };
+      return { outcome: 'cas_conflict' };
+    }
+    return { outcome: 'preempted', token: newToken };
+  }
+  async function writebackLiaisonTestNotify(id, token, ok, messageKey, error, sentBy) {
+    const sb = assertNotifySentBy('writebackLiaisonTestNotify', sentBy);
+    const nowRow = ok ? await dbGetAsync(`SELECT datetime('now','localtime') AS n`) : null;
+    const notifiedAt = ok ? (nowRow && nowRow.n) : null;
+    await sysBeginImmediate();
+    let w;
+    try {
+      w = await dbRunAsync(
+        `UPDATE sys_issues SET liaison_test_notify_status = ?, liaison_test_attempt_token = NULL, liaison_test_attempt_started_at = NULL,
+                liaison_test_notified_at = ?, liaison_test_notify_message_key = ?, liaison_test_notify_error = ?,
+                liaison_test_read_at = NULL, liaison_test_notify_sent_by = ?
+          WHERE id = ? AND liaison_test_notify_status = 'sending' AND liaison_test_attempt_token = ?`,
+        [ok ? 'sent' : 'failed', notifiedAt, ok ? messageKey : null, ok ? null : (error || 'other'), sb, id, token]
+      );
+      if (w && w.changes === 1) await sysCommit(); else await sysRollback();
+    } catch (e) { try { await sysRollback(); } catch (_) { /* ignore */ } throw e; }
+    return w;
+  }
+  // [S12 双路审查 codex 287 号 M-1 收口] ⭐ 已接受的既有语义（登记，非缺陷）——liaison_test_pass/
+  //   liaison_test_return/void 与上面这套预占/回写协议之间**从无任何互斥闸门**：sending 态的通知仍在飞
+  //   （preempt 已抢占 attempt_token，sendIssueDingtalkRaw 尚未返回）时若恰好有人点了「通过」/「打回」/
+  //   「作废」，主状态照常原子推进（下方 case 'liaison_test_pass'/'liaison_test_return' 从不读取
+  //   liaison_test_notify_status），sending 态会被留在主表上，直到这次 send 真正 resolve 才由
+  //   writebackLiaisonTestNotify 收尾——届时主状态可能早已不是「待对接测试」。这不是漏做互斥，是三点
+  //   合起来认定"没必要做"：
+  //   ① 上面 writebackLiaisonTestNotify 的 CAS WHERE 只认 liaison_test_notify_status='sending' AND
+  //     liaison_test_attempt_token=?（:11260），完全不校验 status/type——主状态早走远了，迟到的回写
+  //     照样精确落到自己那一行（token 是唯一凭证，不会因主状态变了就 changes=0，不会误伤/不会落空）；
+  //   ② liaison_test_notify_* 整组列是审计/展示信息，从不是任何闸门的前置条件（没有代码读它来决定
+  //     能不能 pass/return/void），主状态推进与通知记录本就允许"错峰"、互不阻塞；
+  //   ③ 真要加互斥，得在 pass/return/void 每条边前插一次额外 SELECT+可能的 409，换来的是"必须等通知
+  //     发完才能操作"这种真实业务里没人要的强绑定——用户点了通过就该立刻通过，不该被一条正在飞的
+  //     钉钉消息卡住。三条合起来=纯粹的信息滞后（等 send 真正 resolve 后 sending 行自己会翻正确终态：
+  //     sent/failed），非状态腐化、非数据不一致、非需要补的闸门。
+  //   verify-sys-liaison-test.js 有专门契约测试（标记 [E-race]）实测：sending 中途 pass/return 均 200
+  //   成功不被阻塞，且晚到的 writeback 仍能精确落回那条已"过时"的通知记录，与已推进的主状态互不干扰、
+  //   互不覆盖（dormant sent 数据与 advanced 主状态共存，非冲突）。
+
+  // ── POST /sys-issues/:id/notify-liaison-test（新，方案 v1.1 §6·C4b）：开发/admin 手动通知对接人来测 ──
+  //   D19：触发者=本单在册开发∨admin（assertLiaisonTestNotifyActor，非 sysManualNotifyGuard 的池∨admin
+  //   口径）；收件人=操作者本人 → 403 SELF_NOTIFY_FORBIDDEN（对齐 developer 通道既有先例 :10138）。
+  //   D20：预占前先做 recipient 快照失效自愈（复用 codex 221a claim 范式，逐字同构 notify-intake :10982+
+  //   仅列名替换 intake_liaison_id→liaison_test_recipient_id）。
+  //   D16：dry-run——system_configs.sys_notify_dry_run='on' 时完整走 CAS+留痕，唯独跳过真实
+  //   sendIssueDingtalkRaw 调用（message_key 写 'dryrun-'+时间戳标记）。⚠️ 本地/生产观察期共用同一
+  //   开关——生产若临时开启做观察，观察结束务必手动清空/写回非 'on' 值，否则会静默吞掉该通道全部真实钉钉通知
+  //   （无独立的"生产禁用"硬闸，纯约定，用户已知悉此风险）。响应/行内展示带演练标记（dry_run 字段+
+  //   message_key 前缀），供前端与运维一眼区分本次是否真实发出。
+  router.post('/sys-issues/:id/notify-liaison-test', authenticateToken, requireSysSchemaReady, async (req, res) => {
+    const id = parsePositiveId(req.params.id);
+    if (!id) return res.status(400).json({ error: '无效的迭代单 ID', code: 'INVALID_SYS_ISSUE_ID' });
+    try {
+      const issue = await dbGetAsync('SELECT * FROM sys_issues WHERE id = ?', [id]);
+      if (!issue) return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' });
+      if (issue.type !== 'feature') return res.status(409).json({ error: '仅变更流(feature)支持对接测试通知', code: 'LIAISON_TEST_NOTIFY_TYPE_NA' });
+      if (!SF.isInFamily(issue.type, issue.status, 'LIAISON_TEST')) {
+        return res.status(409).json({ error: `当前状态（${issue.status}）不可通知对接人测试`, code: 'STATUS_NOT_NOTIFIABLE' });
+      }
+      const actor = sysActor(req);
+      // [282 号复审 N3 登记] 授权检查与预占 CAS 之间存在毫秒级 TOCTOU 窗口（成员被移出后已过检的
+      // 请求仍可完成预占）——明确接受的遗留中风险：窗口极短、消息内容与操作者身份无关、audit sent_by
+      // 实名可追、与现网其他通道（无 CAS）同水位；机制闭合需 CAS 加 EXISTS 在册子查询，热路径复杂度不值。
+      try {
+        await assertLiaisonTestNotifyActor(actor, id);
+      } catch (guardErr) {
+        if (guardErr instanceof SysTransitionError) return res.status(guardErr.httpStatus).json({ error: guardErr.message, code: guardErr.code });
+        throw guardErr;
+      }
+      const expectedCycle = parsePositiveId((req.body || {}).expected_cycle);
+      if (!expectedCycle) return res.status(400).json({ error: '缺少 expected_cycle', code: 'EXPECTED_CYCLE_REQUIRED' });
+
+      // D20 claim 自愈：与 notify-intake :10982-11024 逐字同构（仅列名换成 liaison_test_recipient_*）。
+      const activeLiaisons = await resolveActiveSysIntakeLiaisons();
+      let targetRecipientId = issue.liaison_test_recipient_id;
+      const targetIsUsable = !!(targetRecipientId && activeLiaisons.some(l => l.id === targetRecipientId));
+      if (!targetIsUsable) {
+        if (activeLiaisons.length === 0) {
+          return res.status(409).json({ error: '受理人配置异常，请联系管理员核查受理人账号状态', code: 'LIAISON_TEST_RECIPIENT_CONFIG_ERROR' });
+        }
+        if (activeLiaisons.length > 1) {
+          return res.status(409).json({ error: '对接测试收件人不唯一，请联系管理员核查受理人白名单', code: 'LIAISON_TEST_RECIPIENT_AMBIGUOUS' });
+        }
+        const staleRecipientId = targetRecipientId;
+        targetRecipientId = activeLiaisons[0].id;
+        // [codex 277/278 号审 M-1] sending 期间收件人锁定——`AND liaison_test_notify_status IS NOT
+        //   'sending'`：若此刻已有另一请求持有预占权（正在外呼/等待回写），claim 自愈不得在半途把收件人
+        //   换掉——那样"正在飞的那条消息是发给谁"与"库内最新收件人"就对不上了。锁定期间本守卫式 UPDATE
+        //   直接 changes=0（不生效），走下方既有的"claim 未成功→重读判定"分支；并发的另一请求自己的
+        //   preempt CAS 也会因 liaison_test_notify_status='sending' 未超窗而正常拿到 409
+        //   SENDING_IN_PROGRESS，两边行为自洽。⭐ 278 号收口：`!=` 改 `IS NOT`——该列有
+        //   `NOT NULL DEFAULT 'not_sent'` 约束，NULL 结构性不可达，两种写法在本列上行为逐字等价，
+        //   改用 `IS NOT` 纯粹是更稳的 SQL 惯用法（NULL 语义天然正确，零功能变化、零成本）。
+        const claimRes = await dbRunAsync(
+          `UPDATE sys_issues SET liaison_test_recipient_id = ?, liaison_test_recipient_name = ? WHERE id = ? AND liaison_test_recipient_id IS ? AND liaison_test_notify_status IS NOT 'sending'`,
+          [targetRecipientId, activeLiaisons[0].name, id, staleRecipientId]
+        );
+        if (!claimRes || claimRes.changes === 0) {
+          const claimed = await dbGetAsync('SELECT liaison_test_recipient_id FROM sys_issues WHERE id = ?', [id]);
+          if (claimed && claimed.liaison_test_recipient_id && activeLiaisons.some(l => l.id === claimed.liaison_test_recipient_id)) {
+            targetRecipientId = claimed.liaison_test_recipient_id;
+          } else {
+            return res.status(409).json({ error: '对接测试收件人状态刚发生变化，请刷新后重试', code: 'LIAISON_TEST_RECIPIENT_CHANGED' });
+          }
+        }
+      }
+      // D19 自指硬守卫：收件人解析确定后才判——顺序对齐 notify-developer :10557（先确认目标有效，再判自指）。
+      if (Number(targetRecipientId) === Number(actor.id)) {
+        return res.status(403).json({ error: '不能给自己发送通知', code: 'SELF_NOTIFY_FORBIDDEN' });
+      }
+      const recipientUser = await dbGetAsync('SELECT id, display_name, phone, dingtalk_user_id FROM users WHERE id = ?', [targetRecipientId]);
+      if (!recipientUser) return res.status(409).json({ error: '对接测试收件人不存在', code: 'LIAISON_TEST_RECIPIENT_NOT_FOUND' });
+
+      // [codex 276 号审 H-1] CAS 绑定本次请求解析出的收件人快照（targetRecipientId）——预占成功后
+      //   发送沿用同一份 recipientUser（已在上方解析，不二次读库）；预占时若库内现值已不是这个收件人
+      //   （并发被 claim/换单改动），CAS 直接落空，诊断分支细分出 'recipient_changed'。
+      const preempt = await preemptLiaisonTestNotifySend(id, expectedCycle, targetRecipientId);
+      switch (preempt.outcome) {
+        case 'not_found': return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' });
+        case 'status_invalid': return res.status(409).json({ error: `当前状态（${preempt.status}）不可通知对接人测试`, code: 'STATUS_NOT_NOTIFIABLE' });
+        case 'recipient_unavailable': return res.status(409).json({ error: '对接测试收件人暂不可用，请重试', code: 'LIAISON_TEST_RECIPIENT_UNAVAILABLE' });
+        case 'recipient_changed': return res.status(409).json({ error: '对接测试收件人状态刚发生变化，请刷新后重试', code: 'LIAISON_TEST_RECIPIENT_CHANGED' });
+        case 'cycle_mismatch': return res.status(409).json({ error: '测试周期已变化，请刷新后重试', code: 'LIAISON_TEST_CYCLE_MISMATCH' });
+        case 'already_sent': return res.status(409).json({ error: '本轮通知已发送', code: 'LIAISON_TEST_NOTIFY_ALREADY_SENT' });
+        case 'sending_in_progress': return res.status(409).json({ error: '已有发送在途，请稍候', code: 'LIAISON_TEST_NOTIFY_SENDING_IN_PROGRESS' });
+        case 'cas_conflict': return res.status(409).json({ error: '通知状态已并发变更，请重试', code: 'LIAISON_TEST_NOTIFY_CAS_CONFLICT' });
+        default: break;   // 'preempted' → 往下走事务外通知
+      }
+
+      // [codex 276 号审 M-1] 预占成功到回写之间（readSystemConfig/getSafePlatformBaseUrl/buildMarkdown/
+      //   外呼本身）整段包专用 try/catch——进程仍存活时没理由让这次尝试悬在 'sending' 里等 10 分钟
+      //   stale 窗口才被下一次点击顺带恢复（用户会在这 10 分钟内反复撞「已有发送在途」的死按钮）。
+      // [codex 278 号审 H-1 分类结论] 复核 sendIssueDingtalkRaw 实现（server.js:11937-11990）：其内部对
+      //   全部"下游明确拒绝"场景（钉钉配置缺失/收件人无手机号/getAccessToken 失败/getUserIdByMobile
+      //   失败/sendIssueMarkdown 返回 success=false/message_key 缺失）统统走返回值协议
+      //   `{ok:false, reason}`（各自已有内部 try/catch，从不因这些确定性失败 throw）——这些场景走
+      //   `sendResult.ok===false` 分支（下方 writebackLiaisonTestNotify 正常传 ok=false，非本 catch
+      //   块职责）。会真正落进本 catch 块的只有两类，且**均无法证明消息未曾送达**：
+      //     ① withTimeout 自己的超时（NotifyTimeoutError）；
+      //     ② server.js:11966 首次 `issueNotify.sendIssueMarkdown()` 调用本身抛出——这是
+      //        sendIssueDingtalkRaw 全函数体内唯一未包 try/catch 的外呼点，统一 throw、不带"钉钉是否
+      //        已收到"的分类信息。
+      //   故用 `reachedExternalCall` 标记精确区分两类异常源头：外呼开始前（dry-run 判断/baseUrl 读取/
+      //   markdown 构建，均为本地操作，无网络副作用）的异常 = **确定失败**，回写 failed 允许立即重试；
+      //   外呼过程中（含上述①②两种情形）的异常 = **结果未知**，不回写、保持 sending，10 分钟 stale
+      //   窗口是唯一合法重试许可来源。
+      // [codex 278 号审 H-2 定性封口] 本通道投递语义正式定性为**至少一次**——与全平台既有六个钉钉通知
+      //   通道同一水位（业务代价=收件人偶尔收到重复提醒，可接受，非本通道独有的新风险）。stale 窗口后
+      //   的"超晚成功+窗后重试"极小概率双发残留，按此定性**不再挂账等待另立机制**——恰好一次投递需要
+      //   下游接一层幂等键或补一个异步对账任务核对钉钉侧实际送达记录，这是独立的方案级工作，与本通道
+      //   当前"至少一次"的既定水位无关，不在此实现。
+      let sendResult;
+      let reachedExternalCall = false;
+      try {
+        // D16 dry-run：仅跳过真实外呼，CAS+留痕全走。
+        const dryRunRaw = await readSystemConfig('sys_notify_dry_run');
+        const dryRunNorm = String(dryRunRaw || '').trim().toLowerCase();
+        // [281 号对抗审 R7 部分采纳，282 号复审 LOW 修正措辞] 配置值非空但既不是 'on' 也不是 'off'
+        // （已 trim().toLowerCase() 归一化后仍非法，如误填 'y'/'true'/'onn'）——fail-open 语义本身
+        // 不改（缺键/怪值一律按真发处理，方向对齐生产预期），只在日志侧留痕提醒，便于运维发现疑似
+        // 笔误，别真以为开着 dry-run 观察结果发现全是真实钉钉。
+        if (dryRunRaw && !['on', 'off', ''].includes(dryRunNorm)) {
+          logger.warn(`[系统迭代] notify-liaison-test: sys_notify_dry_run 配置值疑似笔误（实际值=${JSON.stringify(dryRunRaw)}，非 on/off/空），本次按真发处理：issue=${id}`);
+        }
+        const isDryRun = dryRunNorm === 'on';
+        if (isDryRun) {
+          sendResult = { ok: true, dry_run: true, message_key: `dryrun-${Date.now()}` };
+        } else {
+          const baseUrl = await getSafePlatformBaseUrl();
+          const { title, md } = buildSysLiaisonTestMarkdown(issue, baseUrl);
+          reachedExternalCall = true;
+          sendResult = await withTimeout(sendIssueDingtalkRaw(recipientUser, title, md), NOTIFY_SEND_TIMEOUT_MS, '钉钉发送超时');
+        }
+      } catch (sendErr) {
+        if (reachedExternalCall) {
+          // 结果未知（超时 或 sendIssueDingtalkRaw 唯一未分类的裸抛）——不回写，保持 sending。
+          const isTimeout = sendErr instanceof NotifyTimeoutError;
+          const kind = isTimeout ? '超时' : '未分类异常（sendIssueDingtalkRaw 内部裸抛，server.js:11966 未包裹）';
+          logger.error(`[系统迭代] notify-liaison-test 外呼${kind}（结果未知，保持 sending 不回写）：issue=${id} token=${preempt.token} err=${sendErr && sendErr.message}`);
+          // [codex 278 号审 M-2] stale_at：本次预占的 attempt_started_at + 10 分钟——直接读回 DB 刚落的
+          // 权威值（而非 JS 侧 Date.now() 近似），避免与 SQLite datetime('now','localtime') 的潜在毫秒级
+          // 误差；纯提示用途，权威判定仍在后端 CAS。
+          // [codex 279 号审 M-1 收口] 这段查询+日期换算是**辅助信息**，它自己失败绝不能连累核心响应语义
+          // （504 + 结果未知码这件事本身必须照常发生）——单独包 try/catch，失败只 log，staleAt 留 null。
+          let staleAt = null;
+          try {
+            const staleRow = await dbGetAsync('SELECT liaison_test_attempt_started_at AS sat FROM sys_issues WHERE id = ?', [id]);
+            if (staleRow && staleRow.sat) {
+              const d = new Date(String(staleRow.sat).replace(' ', 'T'));
+              if (!isNaN(d.getTime())) {
+                d.setMinutes(d.getMinutes() + 10);
+                const p = n => String(n).padStart(2, '0');
+                staleAt = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+              }
+            }
+          } catch (staleErr) {
+            logger.error(`[系统迭代] notify-liaison-test 计算 stale_at 失败（不影响主响应，照常返回 504）：issue=${id} err=${staleErr && staleErr.message}`);
+          }
+          // [codex 279 号审 L-1] 独立错误码——超时命中 vs 外呼函数本身裸抛，响应语义/重试策略完全相同
+          // （同 504、同「10 分钟后可重试」文案），仅 code 不同，便于前端/运维日志区分两种触发源。
+          return res.status(504).json({
+            error: '通知发送结果未知（外呼异常），自本次发送开始满 10 分钟后可重试',
+            code: isTimeout ? 'LIAISON_TEST_NOTIFY_TIMEOUT' : 'LIAISON_TEST_NOTIFY_RESULT_UNKNOWN',
+            stale_at: staleAt,
+          });
+        }
+        // 确定失败（还未触达外呼这一步就已异常——dry-run 判断/baseUrl 读取/markdown 构建阶段的本地
+        // 异常，均无网络副作用）：这次调用 100% 没有实际发出过消息，回写 failed 允许立即重试是安全的。
+        const truncatedMsg = String((sendErr && sendErr.message) || sendErr || 'unknown').slice(0, 200);
+        try {
+          await writebackLiaisonTestNotify(id, preempt.token, false, null, truncatedMsg, actor.id);
+        } catch (writebackErr) {
+          logger.error(`[系统迭代] notify-liaison-test 异常回写 failed 也失败：issue=${id} writebackErr=${writebackErr && writebackErr.message}`);
+        }
+        throw sendErr;
+      }
+
+      // [codex 277 号审 H-2] 最终回写保护——此刻 sendResult 已是既成事实（sendResult.ok===true 时钉钉
+      //   消息确实已经发出）。writebackLiaisonTestNotify 内部自身的 try/catch 只处理"CAS no-op"
+      //   （changes!==1，下方已有 concurrent_changed 分支），但如果它**直接抛出真实异常**（DB 连接抖动/
+      //   busy 超时等瞬时故障），绝不能让这个异常原样冒泡到外层变成"通知失败"的 500——那会诱导用户看到
+      //   报错后重新点击发送，而这次外呼其实已经成功，重发=真实双发。策略：失败重试一次（多数瞬时故障
+      //   重试即可恢复）；仍失败则**响应 200 + writeback_failed:true 警示**（绝不能诱导重发），完整 error
+      //   log 供运维核实。
+      // [codex 278 号审 H-2 定性封口] ⚠️ 两次都失败后，该行会残留在 'sending' 态，只能靠 10 分钟 stale
+      //   窗口或人工介入恢复——stale 窗口重发若与"迟到的原始成功"重叠，会产生极小概率的重复投递。
+      //   **本通道投递语义已正式定性为至少一次**（与全平台既有六个钉钉通知通道同一水位：收件人偶尔
+      //   收到重复提醒，业务代价可接受，非本通道独有的新风险）。恰好一次投递需要下游幂等键/投递账本
+      //   （对账任务核对钉钉侧实际送达记录），这是独立于本通道的方案级工作——按既定"至少一次"水位，
+      //   不再为这条 stale 窗后残留路径新增机制，到此封口。
+      let writeback;
+      try {
+        writeback = await writebackLiaisonTestNotify(id, preempt.token, !!sendResult.ok, sendResult.message_key, sendResult.reason, actor.id);
+      } catch (writebackErr1) {
+        logger.error(`[系统迭代] notify-liaison-test 结果回写异常（第 1 次），重试一次：issue=${id} sendOk=${!!sendResult.ok} err=${writebackErr1 && writebackErr1.message}`);
+        try {
+          writeback = await writebackLiaisonTestNotify(id, preempt.token, !!sendResult.ok, sendResult.message_key, sendResult.reason, actor.id);
+        } catch (writebackErr2) {
+          logger.error(`[系统迭代] notify-liaison-test 结果回写连续两次异常，判定回写失败（该行将残留 sending，需人工核实/等 stale 窗恢复）：issue=${id} sendOk=${!!sendResult.ok} messageKey=${sendResult.message_key || ''} err1=${writebackErr1 && writebackErr1.message} err2=${writebackErr2 && writebackErr2.message}`);
+          try {
+            // [282 号复审 HIGH·N1 收口] channel 按 dry_run 分叉——timeline summary 因此变成「发送
+            // 对接测试演练通知 → 谁：成功（message_key=dryrun-...）」，审计读者不会把"成功"误读成
+            // 真实外呼成功。action_code 仍保持 'notify_sent' 不动（无 DDL CHECK，但不新增枚举值，
+            // 避免下游消费者面）。
+            await recordSysNotifyTimeline(id, sendResult.dry_run ? '对接测试演练' : '对接测试',
+              `${recipientUser.display_name || recipientUser.username || ''}(id${targetRecipientId})`,
+              !!sendResult.ok, sendResult.ok ? sendResult.message_key : sendResult.reason, actor);
+          } catch (tlErr) { logger.warn(`[系统迭代] notify-liaison-test 回写失败后补 timeline 也失败：issue=${id} err=${tlErr && tlErr.message}`); }
+          return res.json({
+            // [281 号对抗审 N1 采纳，282 号复审 MED 补净] dry-run 下从未真实外呼钉钉——sent_externally
+            // 必须落 false，否则违反 279 号已定的契约（true=已真实发出）。dry_run 字段同时回传供前端
+            // 区分文案；error 文案本身也按 dry_run 分叉，不再出现"可能已发出"这类对演练场景失实的措辞。
+            id, writeback_failed: true, sent_externally: !!sendResult.ok && !sendResult.dry_run,
+            dry_run: !!sendResult.dry_run,
+            error: sendResult.dry_run
+              ? '演练回写失败（未真实外呼钉钉），发送状态将于约 10 分钟后自动恢复，届时可重试或联系管理员'
+              : '通知可能已发出，但结果回写失败，请勿重复点击发送，请联系管理员核实',
+          });
+        }
+      }
+      await recordSysNotifyTimeline(id, sendResult.dry_run ? '对接测试演练' : '对接测试',
+        `${recipientUser.display_name || recipientUser.username || ''}(id${targetRecipientId})`,
+        !!sendResult.ok, sendResult.ok ? sendResult.message_key : sendResult.reason, actor);
+      if (!writeback || writeback.changes !== 1) {
+        logger.warn(`[系统迭代] notify-liaison-test 结果回写被 CAS 拒绝（并发变更）：issue=${id}`);
+        const fresh = await dbGetAsync('SELECT liaison_test_notify_status AS ns FROM sys_issues WHERE id = ?', [id]);
+        // [282 号复审 MED 补净] 补 dry_run 字段——与其余响应形状一致，前端/运维不必靠猜测判断这一次
+        // 并发冲突发生在演练态还是真发态。
+        return res.json({ id, concurrent_changed: true, liaison_test_notify_status: fresh ? fresh.ns : null, dry_run: !!sendResult.dry_run });
+      }
+      const fresh = await dbGetAsync(
+        `SELECT liaison_test_notify_status, liaison_test_notify_error, liaison_test_recipient_id, liaison_test_recipient_name
+           FROM sys_issues WHERE id = ?`, [id]
+      );
+      res.json({
+        id, liaison_test_notify_status: fresh.liaison_test_notify_status, liaison_test_notify_error: fresh.liaison_test_notify_error,
+        liaison_test_recipient_id: fresh.liaison_test_recipient_id, liaison_test_recipient_name: fresh.liaison_test_recipient_name,
+        dry_run: !!sendResult.dry_run,
+      });
+    } catch (err) {
+      if (err instanceof SysTransitionError) return res.status(err.httpStatus).json({ error: err.message, code: err.code });
+      logger.error('[系统迭代] 通知对接测试失败:', err && err.message);
+      res.status(500).json({ error: (err && err.message) || '通知对接测试失败' });
+    }
+  });
+
   // ── GET /sys-issues/:id/notify-read-status（新，通知改造 C3 G11）：byId(dev/relay/creator)+byPhone(requester) 双寻址 ──
   //   复刻 issue-tracker /api/issues/:id/notify-read-status 范式（server.js:11552，token 重试+已读固化写回）。
   //   dev 定位子表活动行（?dev_user_id=）；relay/creator 走 sys_issues 反规范化列；requester 走收件人快照反查。
@@ -10709,6 +11845,10 @@ module.exports = (deps) => {
   // ============================================================
   const _internals = {
     SYS_SCHEMA_STATE,
+    // [codex 278 号审 M-4] notify-liaison-test 外呼超时时长——生产默认 8 分钟（NOTIFY_SEND_TIMEOUT_MS
+    //   闭包变量），仅供 verify 测试改成几十毫秒以自动化覆盖"超时命中"这条高风险分支；不暴露为端点
+    //   可传参（超时策略是服务端配置，不应由请求方控制）。
+    setNotifyLiaisonTestTimeoutMsForTest: (ms) => { NOTIFY_SEND_TIMEOUT_MS = ms; },
     // 角色权限重构 C0：受理态一致性触发器（供 verify 临时摘除后按原样重建·防两处 DDL 漂移）
     SYS_INTAKE_GATE_TRIGGERS_SQL,
     SYS_INTAKE_GATE_TRIGGER_NAMES,
@@ -10788,6 +11928,8 @@ module.exports = (deps) => {
     dispatchSysNotify,
     buildSysDevMarkdown,
     buildSysRequesterMarkdown,
+    buildSysCreatorMarkdown,   // [D22 批2·codex 290 号裁定] 状态显示映射 verify 直调覆盖，同 buildSysRequesterMarkdown 既有导出理由
+    sysStatusDisplayName,      // [D22 批2] 纯展示映射 helper，verify 直调断言产出含"待验收"不含"待验证"
     sysDeepLinkLine,
     // S3（bug暂缓方案 §7.1/§7.3/§7.4）：两个新模板 + 通知列重置 SQL 常量（verify 直调真实逻辑，RC-L2 防复刻漂移）
     buildSysHoldCreatorMarkdown,

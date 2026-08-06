@@ -99,6 +99,9 @@
         .si-s-intake { background: #e0e7ff; color: #4338ca; }      /* 待受理（对接人受理门·待办感） */
         .si-s-revision { background: #fef3c7; color: #92400e; }    /* 待修改（退改需建单人改·提醒色） */
         .si-s-dev { background: #dbeafe; color: #1d4ed8; }
+        /* [工期对接测试与风险等级拆分 方案 v1.1 §7·C4b] 待对接测试——feature 独有新态，插在开发中(蓝)
+           与待验证(黄)之间，取紫色系区分（不复用 prerelease 的青色，避免与"待上线"混淆）。 */
+        .si-s-liaisontest { background: #ede9fe; color: #6d28d9; }
         .si-s-review { background: #fef3c7; color: #92400e; }
         .si-s-prerelease { background: #ccfbf1; color: #0f766e; }
         .si-s-released { background: #d1fae5; color: #065f46; }
@@ -118,11 +121,37 @@
         /* commit号两列 C3（20260803·D3/D13）：新增列的宽度约束——列表已 11 列贴着 1920，加 3 列必须省着用。
            si-commit-cell 用等宽字体（commit 编码是 hash/路径，等宽更好认）+ 不换行省纵向空间；
            si-col-narrow 给「计划开工」列（D13：大部分为空，不该占显要宽度）。 */
-        .si-commit-cell { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; white-space: nowrap; max-width: 168px; overflow: hidden; text-overflow: ellipsis; }
+        /* S2/S4 消横滚裁定（贴图四件与工期测试段，2026-08-05，S4 预筛终修·改用实测口径模型，
+           放弃声明值推导）：
+           模型：本表 table-layout:auto（默认）+ width:100%——可压缩列会被浏览器压到各自内容的自然
+           下限，**声明的 width 不绑定实际渲染宽度**（A/B 实测实证：.si-col-narrow「计划开工」列
+           声明 92px 与声明 84px，两次实测渲染宽度恒为 81px，改声明值对渲染结果零效果——故 S4 首轮
+           "84px 吸收 ID 列增长"的主会话裁定已被证伪作废，.si-col-narrow 回滚 92px，无效果改动不留）。
+           唯一被证实可控的硬约束＝commit 两列（前端号/后端号）的 .si-commit-cell max-width——因为
+           它是 white-space:nowrap + max-width + overflow:hidden 三者叠加，nowrap 令内容不可换行，
+           max-width 才是真正卡住渲染宽度的天花板（[T2d] 实测：200 字符顶格内容下两列精确渲染
+           130px/130px，与声明值逐像素相等，证明这个、也只有这个属性对渲染结果生效）。
+           实测数据（16 列 compact 布局，1366×768 视口，wrap 预算=clientWidth=1304px；4 位数 id 时代，
+           测试库 id 已达 #1074+，生产工单数跨 #999 后同样会发生）：
+             cap=134px 时，两个顶格 commit 单元格各精确 134px，wrap scrollWidth 实测 1310px > 1304px
+             预算，超 6px 横滚；
+             cap=130px 时，两列各收窄 4px、合计省 8px，内容最小宽降为 1302px ≤ 1304px 预算 ⇒
+             **wrap scrollWidth 实测=clientWidth=1304px（width:100% 表格的 scrollWidth 地板即容器宽），
+             0 横滚，内容侧余量 2px**（[T2d] 三连实测，非公式推导）。
+           收窄 168→130px 动了 commit 号两列（v1.136）的展示上限，已记锚点 §9 待追认；commit_ref 是
+           1-200 字符自由文本，长内容是合法未来生产态；全文仍可从 title 悬浮与批次详情弹窗完整获取，
+           只是列表行内截断阈值收紧。
+           ④ 长期因素（S4 首轮"计划开工列吸收"裁定被 A/B 实测证伪后改写）：ID 列宽随位数增长，
+           每进一位约 +6px（3→4 位实测如此）。本次 130px 换来的 2px 余量在 5 位数 id 时代（id 破万）
+           会不够用，届时需结构性方案（如标题列弹性化截断腾出空间），不能再无止境地压 commit 列——
+           已接近纯 hash/路径类内容的可读性下限，本次是最后一次靠像素预算硬扛，非常规做法，下一次
+           必须走结构解，属另行拍板项。 */
+        .si-commit-cell { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; white-space: nowrap; max-width: 130px; overflow: hidden; text-overflow: ellipsis; }
         .si-col-narrow { width: 92px; white-space: nowrap; }
         .si-commit-unfilled { font-style: italic; }
 
-        /* 优先级=风险等级 口径说明 icon（C2，20260713）：建单/排期表单 label 后附可聚焦 ? 提示 */
+        /* 优先级=业务紧急度 口径说明 icon（C2，20260713；v1.1 §3.4·C5 拆分后措辞改写，见下方 JS 常量
+           SI_PRIORITY_HELP_TEXT/SI_PRIORITY_LABEL 注释）：建单/排期表单 label 后附可聚焦 ? 提示 */
         .si-help { display: inline-flex; align-items: center; justify-content: center; width: 15px; height: 15px; margin-left: 4px; border-radius: 50%; background: #e2e8f0; color: #64748b; font-size: 11px; font-weight: 700; cursor: help; vertical-align: middle; }
         .si-help:hover { background: #cbd5e1; color: #334155; }
         .si-help:focus { outline: 2px solid #93c5fd; outline-offset: 1px; }
@@ -510,9 +539,13 @@
                 <div class="si-head-actions" id="siHeadActions"></div>
             </div>
 
-            <!-- 表格（前端统一：表头挂 u-sortable 接 UnifyHelpers.attachTableSort） -->
+            <!-- 表格（前端统一：表头挂 u-sortable 接 UnifyHelpers.attachTableSort；
+                 S2（贴图四件与工期测试段·三列一体设计）：挂 u-table-compact 收紧字号/padding，
+                 消 16 列在 1366×768 下的横向滚动条（需求方/需求部门合并单列后的最终列数）——
+                 components.css:126-130 既有变体，
+                 Data_Collab.html 已在用同款挂法，未改共享层。 -->
             <div class="u-corr-table-wrap">
-                <table class="u-corr-table" id="sysIterationListTable">
+                <table class="u-corr-table u-table-compact" id="sysIterationListTable">
                     <thead>
                         <tr>
                             <th class="u-sortable" data-sort-by="id">ID<span class="u-sort-icon">⇅</span></th>
@@ -528,12 +561,22 @@
                             <th class="u-sortable" data-sort-by="system_name">系统<span class="u-sort-icon">⇅</span></th>
                             <th class="u-sortable" data-sort-by="assigned_to_name">开发<span class="u-sort-icon">⇅</span></th>
                             <th class="u-sortable" data-sort-by="created_by_name">建单人<span class="u-sort-icon">⇅</span></th>
+                            <!-- S2（贴图四件与工期测试段·三列一体设计）：需求方插在「建单人」之后（人员簇相邻）。
+                                 ⚠️ 实测定标：需求方/需求部门原拆两列，1366×768 下即使挂 u-table-compact 后
+                                 wrap 级仍横滚（scrollWidth 1351 > clientWidth 1304，超 47px）——按预案合并为
+                                 一列「需求方」双行 cell（第一行姓名、第二行小号 muted 部门），17→16 列，
+                                 data-sort-by 仍绑 requester_name（部门子行不参与排序键，SI_SORT_FIELD_TYPES
+                                 仍登记 requester_dept 供未来复用/文档完整性，非死代码——后端字段仍在返回）。 -->
+                            <th class="u-sortable" data-sort-by="requester_name">需求方<span class="u-sort-icon">⇅</span></th>
                             <!-- D1（四处优化①）：表头文案「预计完成时间」→「预计完成」——与右侧「期望完成」等字长（各 4 字），
                                  消除相邻两个时间列宽度参差。**只改列表页表头**，详情页 kv-item 的「预计完成时间」不动（锚点 E1）。 -->
                             <th class="u-sortable" data-sort-by="dev_estimated_at">预计完成<span class="u-sort-icon">⇅</span></th>
                             <!-- D11：期望完成 = deadline（建单时填的业务方期望），与左侧 dev_estimated_at（开发回填的
                                  承诺）是两个字段。后端零改动——deadline 早已在列表端点 SELECT 里返回，只是此前无列。 -->
                             <th class="u-sortable" data-sort-by="deadline">期望完成<span class="u-sort-icon">⇅</span></th>
+                            <!-- S2：实际完成插在「期望完成」之后（三个"完成"列相邻）——末次进入「待验证」的单据级
+                                 完成时刻（Q5 拍板：列表只取末次，打回次数不进列表）。表头 4 字对齐 D1 等字长先例。 -->
+                            <th class="u-sortable" data-sort-by="last_completed_at">实际完成<span class="u-sort-icon">⇅</span></th>
                             <!-- D3：commit 编码两列**刻意不挂 u-sortable**——值是 JSON 数组字符串，按串排序得到的
                                  顺序无任何业务含义（'["b"]' < '["a","c"]' 之类），给用户一个点了没意义的入口反而误导。
                                  样式上少个 ⇅ 图标是可接受代价，见锚点 §9 待追认。 -->
@@ -648,13 +691,18 @@
     // 类型中文 label（meta 不返 type label，前端映射；仅展示 meta.typeFlows 里存在的类型）
     const SI_TYPE_LABEL = { bug: 'BUG', feature: '新功能', improvement: '优化', config: '配置变更' };
 
-    // 优先级=风险等级 口径说明（C2，20260713·方案 v1.2 项3）。
+    // [工期对接测试与风险等级拆分 方案 v1.1 §3.4·C5] 优先级=业务紧急度 口径说明（原 C2/20260713·方案
+    //   v1.2 项3 的"优先级=风险等级"表述已随 v1.1 §3.4 拆分废止——风险等级现是独立字段 risk_level
+    //   （对接人受理 feature 单时判定的技术风险，见 siModalIntakeAccept/详情页「风险等级」kv），
+    //   优先级改回其本义：建单人视角的业务紧急度，写入人/编辑权/服务端授权全部维持既有 priority
+    //   字段现状（本次只改语义文案，不新增授权约束，方案 §3.4 明文冻结）。
     //   SI_PRIORITY_HELP_TEXT = 纯文本口径（单一事实源）：建单/排期表单 label 的 title + aria-label + 详情徽章 title 三处共用，
     //   避免文案多副本漂移（codex60 M-2）。文案为纯中文/全角标点、无英文双引号/&/尖括号，可安全内联进 title 属性。
     //   若未来文案加入这些字符，需改为 HTML 属性转义后再插入。
-    const SI_PRIORITY_HELP_TEXT = '优先级即风险等级（按改动风险/影响面，命中多条取最高）：P0 高风险改动核心逻辑、可能引发生产事故/数据错误；P1 影响核心业务流程；P2 一般功能改动；P3 优化项/低风险。';
+    const SI_PRIORITY_HELP_TEXT = '优先级即业务紧急度（建单人视角，反映业务方期望的处理紧迫程度，与技术风险无关，技术风险另由风险等级判定）：P0 业务紧急，需尽快安排；P1 近期业务计划所需；P2 常规排期即可；P3 不紧急，可延后处理。';
     // fSelect label 复用（建单表单+排期表单）：可聚焦 ? 图标；title 给鼠标、aria-label 给屏幕阅读器/键盘（codex60 L-2）。
-    const SI_PRIORITY_LABEL = `优先级（风险等级） <span class="si-help" tabindex="0" role="img" aria-label="${SI_PRIORITY_HELP_TEXT}" title="${SI_PRIORITY_HELP_TEXT}">?</span>`;
+    //   [v1.1 §3.4·C5] label 去「（风险等级）」旧混用后缀——风险等级已是独立字段/独立 UI，不再与优先级同名混显。
+    const SI_PRIORITY_LABEL = `优先级 <span class="si-help" tabindex="0" role="img" aria-label="${SI_PRIORITY_HELP_TEXT}" title="${SI_PRIORITY_HELP_TEXT}">?</span>`;
 
     // 状态 → CSS 语义 key（避免中文类名；含 config 未来态前向兼容）
     // （C2.5 撤销·方案 v2.1）'待商议': 'prediscuss' 映射已删——预沟通段废除，该状态不再产生。
@@ -663,6 +711,8 @@
         '待受理': 'intake', '待修改': 'revision',
         '待指派': 'pending', '待处理': 'pending',
         '开发中': 'dev', '处理中': 'dev',
+        // [工期对接测试与风险等级拆分 方案 v1.1 §7·C4b] 待对接测试——仅 feature，插在开发中与待验证之间。
+        '待对接测试': 'liaisontest',
         '待验证': 'review', '待验收': 'review',
         '待上线': 'prerelease',
         '已上线': 'released', '已生效': 'released',
@@ -676,13 +726,17 @@
     //   value 全部不变，写读同源不因展示改名而破坏——见 index.js/transitions.js），仅**用户可见文案**改
     //   显示为「已归档」（bug 补此终态后，"关闭"对甲方语境显生硬，"归档"更贴合"上线后观察期结束、留痕
     //   封存"的业务语义）。集中一处映射，所有渲染状态文字的地方统一调用本函数，不逐处硬编码替换字符串。
-    function siStatusDisplay(s) { return s === '已关闭' ? '已归档' : s; }
+    // [D22 批2·2026-08-06] 「待验证」→「待验收」纯展示映射——存储值/API/筛选器 value 恒不变（同「已关闭→
+    //   已归档」先例，本函数是全站唯一改名口，所有渲染状态文字的地方统一走它，不逐处硬编码替换字符串）。
+    function siStatusDisplay(s) { return s === '已关闭' ? '已归档' : (s === '待验证' ? '待验收' : s); }
     const SI_STATUS_GROUPS = {
         // 受理排期改造：删「已排期/待评估」→「待受理/待修改/待指派」（受理门+待派均属"进行中"前段·归 active）。
         // （C2.5 撤销·方案 v2.1）「待商议」归 active 一项已删——预沟通段废除，该状态不再产生。
         //   漏归组会让这些单在"全部"计数内、点任一分组卡后消失（siRenderStats 的组全集守卫会 console.warn）。
         active: ['待受理', '待修改', '待指派', '开发中', '处理中', '待处理'],
-        acceptance: ['待验证', '待验收'],
+        // [工期对接测试与风险等级拆分 方案 v1.1 §7·C4b] 待对接测试并入"待验收"统计卡——语义上都是
+        // "开发已交付、等某方判定通过/打回"，与待验证/待验收同一心智模型（仅判定方不同：对接人 vs 业务方）。
+        acceptance: ['待对接测试', '待验证', '待验收'],
         release: ['待上线'],
         done: ['已上线', '已关闭', '已生效'],
         // codex API 审 MED-1（2026-07-10）：后端状态机含合法旁路态 已暂缓/已拒绝（transitions.js
@@ -713,7 +767,9 @@
         return SI_DEV_ACTIONS.has(action);   // 其余动作两流同源，沿用既有全局 Set
     }
     // 危险按钮样式
-    const SI_DANGER_ACTIONS = new Set(['return', 'issue_reject', 'void', 'reopen', 'hold', 'blocked']);
+    // [工期对接测试与风险等级拆分 方案 v1.1 §7·C4b] liaison_test_return 加入危险色——同 return/reopen 语义
+    //   （打回/重开都是"退回重做"一族），liaison_test_pass 不入本集合（默认 primary，同 accept 口径）。
+    const SI_DANGER_ACTIONS = new Set(['return', 'issue_reject', 'void', 'reopen', 'hold', 'blocked', 'liaison_test_return']);
     const SI_SEC_ACTIONS = new Set(['reassign', 'unblock', 'derive', 'close',
         // 受理排期改造 C7：受理门/排期旁路动作用 secondary 样式（intake_accept/resubmit_intake 用 primary·见下不加入）
         'intake_return', 'change_intake_mode', 'request_tech_consult', 'edit_in_revision', 'set_scheduled_start']);   // schedule 退场（动作已从 meta.typeFlows 移除·前端不再渲染排期按钮）
@@ -732,7 +788,10 @@
     function isSiTechLead(uid) { return Number(uid) > 0 && SI_TECH_LEAD_IDS.includes(Number(uid)); }
     // 受理门动作前端权限门（镜像 §5.3 逐动作授权表·前端非授权源·后端精判兜底）：
     //   intake_accept/intake_return/request_tech_consult = admin∨受理人；resubmit_intake/edit_in_revision = admin∨建单人；change_intake_mode = 仅 admin（落通用 admin 分支）。
-    const SI_INTAKE_LIAISON_ACTIONS = new Set(['intake_accept', 'intake_return', 'request_tech_consult']);
+    //   [工期对接测试与风险等级拆分 方案 v1.1 §7·C4b] liaison_test_pass/liaison_test_return 加入——两动作
+    //   后端挂 requireIntakeLiaison（admin∨SYS_INTAKE_LIAISON_IDS，index.js :5466-5467），与本集合既有三项
+    //   同一授权模型，不新开分支。
+    const SI_INTAKE_LIAISON_ACTIONS = new Set(['intake_accept', 'intake_return', 'request_tech_consult', 'liaison_test_pass', 'liaison_test_return']);
     const SI_CREATOR_ACTIONS = new Set(['resubmit_intake', 'edit_in_revision']);
     // ── 角色权限重构 v2.1 §4：OA 号可填状态集（前端镜像后端 SYS_OA_ALLOWED_STATUSES·真闸在后端 set-oa-number
     //   端点）——⚠️ 两处同步：后端 index.js SYS_OA_ALLOWED_STATUSES + 本常量，改一端必须改另一端（写读同源）。
@@ -1184,6 +1243,8 @@
         status: 'statusOrder',
         assigned_to_name: 'string',
         created_by_name: 'string',
+        requester_name: 'string',    // S2（贴图四件与工期测试段·三列一体设计）：新增「需求方」列
+        requester_dept: 'string',    // 同上：新增「需求部门」列
         scheduled_start: 'date',
         dev_estimated_at: 'date',
         // ⚠️ deadline **刻意登记为 'string' 而非 'date'**（四处优化 D2②，实测定标，勿"顺手改回 date"）：
@@ -1202,6 +1263,10 @@
                                  //   类型、退化成非日期序（同下方 SI_STATUS_SORT_ORDER 注释记的同款踩法）。
                                  //   Playwright [T8] 已加通用守卫：每个 u-sortable 的 data-sort-by 必须在本表里。
         created_at: 'date',
+        // S2（贴图四件与工期测试段·三列一体设计）：新增「实际完成」列——与 created_at 同款 'date' 类型
+        //   （非 deadline 的 'string' 特例：last_completed_at 恒为 timeline created_at 的 datetime('now',
+        //   'localtime') 全量值，不存在纯日期/带时分混存的形态漂移，不踩上面 deadline 注释记的 UTC 陷阱）。
+        last_completed_at: 'date',
     };
     // 状态业务序（与 siRenderStats 分组方向一致：进行中→待验收→待上线→已完成→暂缓/拒绝；已作废排末尾）
     // codex API 审 MED-2（2026-07-10）：补 已暂缓/已拒绝 显式序——共享排序对未知状态给 99 会
@@ -1212,11 +1277,14 @@
         // （C2.5 撤销·方案 v2.1）「待商议」曾排最前（序号 0）——预沟通段废除，该状态不再产生，条目已删，
         //   其余各态序号相应前移。
         // 受理排期改造：删「待评估/已排期」→ 前段序=待受理→待修改→待指派/待处理（受理门在最前·待派开发次之）。
-        待受理: 0, 待修改: 1, 待指派: 2, 待处理: 2, 开发中: 3, 处理中: 4,
-        待验证: 5, 待验收: 6, 待上线: 7,
-        已上线: 8, 已关闭: 9, 已生效: 10,
-        已暂缓: 11, 已拒绝: 12,
-        已作废: 13,
+        // [工期对接测试与风险等级拆分 方案 v1.1 §7·C4b] 插入「待对接测试」（序 4，开发中之后/处理中之前）
+        // ——其后所有序号统一 +1（原 处理中4/待验证5/待验收6/待上线7/已上线8/已关闭9/已生效10/已暂缓11/已拒绝12/已作废13）。
+        待受理: 0, 待修改: 1, 待指派: 2, 待处理: 2, 开发中: 3,
+        待对接测试: 4, 处理中: 5,
+        待验证: 6, 待验收: 7, 待上线: 8,
+        已上线: 9, 已关闭: 10, 已生效: 11,
+        已暂缓: 12, 已拒绝: 13,
+        已作废: 14,
     };
     const sysIterationSorter = UnifyHelpers.attachTableSort({
         tableSelector: '#sysIterationListTable',
@@ -1293,7 +1361,7 @@
     function renderSysIterationRows(list) {
         const tb = document.getElementById('siTbody');
         if (!list.length) {
-            tb.innerHTML = `<tr><td colspan="14" class="si-empty">${isAdmin() ? '暂无数据' : '暂无指派给你的单据'}</td></tr>`;   // 14 列（11 + 期望完成/前端号/后端号 三列·D11+D3·计划开工日仅移位不增减）
+            tb.innerHTML = `<tr><td colspan="16" class="si-empty">${isAdmin() ? '暂无数据' : '暂无指派给你的单据'}</td></tr>`;   // 16 列（14 + 需求方（含需求部门二级行）/实际完成 两列·S2 三列一体设计合并需求方/需求部门后的实测定标）
             return;
         }
         tb.innerHTML = list.map(i => {
@@ -1304,6 +1372,11 @@
                 siTechLeadNotifyBadgeHtml(i) +
                 siHeldDaysHtml(i.status, i.last_held_at);
             const lineage = i.origin_issue_id ? `<span class="si-flag lineage">🔁基于#${i.origin_issue_id}</span>` : '';
+            // codex 259 L-1：空白串防御（写入端归一属另层，此处渲染端兜底）——requester_name/requester_dept
+            //   若为纯空格/全空白字符串（非 NULL），trim 后才判空，防止渲染出「看着有值实则空白」的姓名/
+            //   部门行（例如 requester_name=' ' 会被 `|| '—'` 的假值判断放过，因非空字符串真值）。
+            const reqNameTrimmed = (i.requester_name || '').trim();
+            const reqDeptTrimmed = (i.requester_dept || '').trim();
             // S1（时间格式统一 20260804·D1/D2）：「系统」列原为 system_name + si-muted 的 ` · module_name||'—'` 拼接，
             //   本次去掉后半段，只留 system_name。module_name 后端照常返回、详情抽屉 kv 与建单/编辑表单照常读写，
             //   仅列表行不显示（D2：删字段不可逆，存量填了的要看得见）。
@@ -1318,8 +1391,12 @@
                 <td>${esc(i.system_name)}</td>
                 <td>${siDevRosterCellHtml(i)}</td>
                 <td>${esc(i.created_by_name || '—')}</td>
+                <!-- S2 实测定标：需求方/需求部门合并单列双行 cell（第一行姓名、第二行小号 muted 部门），
+                     部门为空时不渲染第二行（不留空行占高）。 -->
+                <td><div>${esc(reqNameTrimmed || '—')}</div>${reqDeptTrimmed ? `<div class="si-muted" style="font-size:11px;">${esc(reqDeptTrimmed)}</div>` : ''}</td>
                 <td>${i.dev_estimated_at ? esc(siFmtDT(i.dev_estimated_at)) : '<span class="si-muted">—</span>'}</td>
                 <td>${i.deadline ? esc(siFmtDeadline(i.deadline)) : '<span class="si-muted">—</span>'}</td>
+                <td>${i.last_completed_at ? esc(siFmtDT(i.last_completed_at)) : '<span class="si-muted">—</span>'}</td>
                 <td class="si-commit-cell">${siRenderCommitRefs(i.frontend_commit_refs, i.status)}</td>
                 <td class="si-commit-cell">${siRenderCommitRefs(i.backend_commit_refs, i.status)}</td>
                 <td class="si-muted">${esc(siFmtDT(i.created_at))}</td>
@@ -1602,6 +1679,8 @@
         if (iss.needs_feasibility) {
             feas =
                 `<div class="u-kv-item"><label>可行性结论</label><div class="v">${iss.feasibility_conclusion ? esc(iss.feasibility_conclusion) : '<span class="si-muted">待评估</span>'}</div></div>` +
+                // [工期对接测试与风险等级拆分 方案 v1.1 §3.2/§3.4] 详情页评估块新增工期展示（不进列表页，§3.2 逐字口径）。
+                `<div class="u-kv-item"><label>工期（人日）</label><div class="v">${iss.estimated_effort_days != null ? esc(String(iss.estimated_effort_days)) : '<span class="si-muted">未填</span>'}</div></div>` +
                 `<div class="u-kv-item"><label>受阻</label><div class="v">${iss.blocked ? '<span style="color:#b91c1c;font-weight:600">是</span>' : '否'}</div></div>` +
                 (iss.feasibility_requirement_confirm ? `<div class="u-kv-item full"><label>需求确认</label><div class="v">${esc(iss.feasibility_requirement_confirm)}</div></div>` : '') +
                 (iss.feasibility_risk ? `<div class="u-kv-item full"><label>风险/条件</label><div class="v">${esc(iss.feasibility_risk)}</div></div>` : '') +
@@ -1625,6 +1704,7 @@
             <div class="u-kv-item"><label>来源</label><div class="v">${esc(iss.source || '—')}</div></div>
             <div class="u-kv-item"><label>建单人</label><div class="v">${esc(iss.created_by_name || '—')}</div></div>
             <div class="u-kv-item"><label>对接人</label><div class="v">${iss.intake_liaison_id ? esc(siIntakeLiaisonName(iss.intake_liaison_id) || '—') : '—'}</div></div>
+            ${(iss.type === 'feature' || iss.type === 'improvement') ? `<div class="u-kv-item"><label>风险等级</label><div class="v">${iss.risk_level ? esc(iss.risk_level) : '<span class="si-muted">未定级</span>'}</div></div>` : ''}
             <div class="u-kv-item"><label>预计完成时间</label><div class="v">${iss.dev_estimated_at ? (esc(siFmtDT(iss.dev_estimated_at)) + siRemainingDaysHtml(iss.dev_estimated_at)) : '<span class="si-muted">未回填</span>'}</div></div>
             <div class="u-kv-item"><label>计划开工日</label><div class="v">${iss.scheduled_start ? esc(iss.scheduled_start) : '<span class="si-muted">—</span>'}</div></div>
             <div class="u-kv-item"><label>期望完成(deadline)</label><div class="v">${iss.deadline ? esc(siFmtDeadline(iss.deadline)) : '<span class="si-muted">—</span>'}</div></div>
@@ -1633,6 +1713,20 @@
             <div class="u-kv-item"><label>所属上线单</label><div class="v">${iss.release_id ? (siCanOpenRelease(iss) ? `<a style="cursor:pointer;color:#2563eb" onclick="siGotoBatchDetail(${iss.release_id})">#${iss.release_id}</a>` : ('#' + iss.release_id)) : '<span class="si-muted">—</span>'}</div></div>
             ${iss.type === 'bug' ? `<div class="u-kv-item"><label>上线执行人</label><div class="v">${iss.release_assignee_name ? esc(iss.release_assignee_name) : '<span class="si-muted">未指定</span>'}</div></div>` : ''}
             <div class="u-kv-item"><label>创建时间</label><div class="v">${esc(siFmtDT(iss.created_at))}</div></div>
+            <!-- S3（四件①，2026-08-05·Q5 详情口径）：六时间点展示簇——label 对齐既有 SI_TL_LABEL 时间线
+                 叫法（本文件上方 SI_TL_LABEL 常量：assign='指派'/submit='交付'/accept='验收通过'/
+                 release='上线'/close='关闭'），非新造词；accepted_at 刻意不写"受理"（受理是 intake 语义，
+                 accept 端点在本模块是"验收通过"，见 siRenderActions 的 accept 确认文案「确认验收通过？」）。
+                 首次交付(first_submitted_at)+实际完成·末次(last_completed_at)并列＝ Q5 拍板：两值回答
+                 两个问题（首次＝第一次交付花了多久，末次＝什么时候真好了）；"实际完成"文案与列表页
+                 S2 已建立的同名列对齐，不再另造。空值一律显示 '—'（时间点清单要看全貌，不隐藏空行）。 -->
+            <div class="u-kv-item"><label>指派</label><div class="v">${iss.assigned_at ? esc(siFmtDT(iss.assigned_at)) : '—'}</div></div>
+            <div class="u-kv-item"><label>首次交付</label><div class="v">${iss.first_submitted_at ? esc(siFmtDT(iss.first_submitted_at)) : '—'}</div></div>
+            <div class="u-kv-item"><label>实际完成</label><div class="v">${iss.last_completed_at ? esc(siFmtDT(iss.last_completed_at)) : '—'}</div></div>
+            <div class="u-kv-item"><label>验收</label><div class="v">${iss.accepted_at ? esc(siFmtDT(iss.accepted_at)) : '—'}</div></div>
+            <div class="u-kv-item"><label>上线</label><div class="v">${iss.released_at ? esc(siFmtDT(iss.released_at)) : '—'}</div></div>
+            <div class="u-kv-item"><label>关闭</label><div class="v">${iss.closed_at ? esc(siFmtDT(iss.closed_at)) : '—'}</div></div>
+            ${(Number(iss.return_count) > 0 || Number(iss.reopen_count) > 0) ? `<div class="u-kv-item"><label>返工</label><div class="v">打回 ${Number(iss.return_count) || 0} 次 · 重开 ${Number(iss.reopen_count) || 0} 次</div></div>` : ''}
             ${feas}
             ${relCorrRow}
             <div class="u-kv-item full"><label>描述</label><div class="v">${iss.description ? esc(iss.description) : '—'}</div></div>
@@ -1643,7 +1737,7 @@
         //   无「主开发」字样，is_primary 仅作只读小标记「代表」）+ 各自 dev_status 徽标 + commit 记录小表。
         //   C7 起按四布尔升级为读写（siCaps 本次刷新，siRenderActions 复用同一份，不重复计算）。
         siCaps = siComputeCaps(iss, r.data.dev_assignees, r.data.dev_commits);
-        const devMembers = `<div class="u-detail-section"><h3>开发成员</h3>${siRenderDevMemberChips(r.data.dev_assignees, siCaps, iss)}</div>`;
+        const devMembers = `<div class="u-detail-section"><h3>开发成员</h3>${siRenderDevMemberChips(r.data.dev_assignees, siCaps, iss, r.data.no_code_records)}</div>`;
         const devCommitsBlock = `<div class="u-detail-section"><h3>Commit 记录</h3>${siRenderDevCommits(r.data.dev_commits, siCaps)}</div>`;
 
         // 演进时间线——上线体统一重构 C2b（199 审 MED-3「过滤」半）：release_add/remove/date_change/
@@ -1674,8 +1768,19 @@
         //   会连本区都看不到，更别提区内新增的暂缓通知按钮。加宽后该类用户能看到通知区——区内其余既有行
         //   （developer/creator/requester）按钮仍各自受 canOperate* 独立门控（admin∨受理人），不因本次
         //   加宽而多出操作权，只是多了"看得见"，加上新按钮本就该给他们用。
+        // [工期对接测试与风险等级拆分 方案 v1.1 §7·C4b] 变更流(feature/improvement) 加宽在册开发可见——
+        //   [S12 双路审查 codex 287 号 D 项收口] 原注释曾写"D19 整个设计落空"覆盖 feature/improvement
+        //   两 type、"与 bug 分支既有加宽逐字同一模式"——收窄订正：D19「对接测试通知」是「待对接测试」
+        //   （liaison test）状态下的按钮，而该状态**仅 feature 拥有**（SYS_LIAISON_TEST_STATUSES.
+        //   improvement 恒为空数组，status-families.js:57/173），故 D19 的"若不放开会落空"这条**理由
+        //   只对 feature 成立**。improvement 一并加宽的真实理由是**与 bug 分支同款+按钮独立门控**——
+        //   在册开发同样应"看得见通知区"（即便 improvement 当前没有 D19 那颗按钮可点，通知区里其余
+        //   既有行如 developer/creator/requester 对在册开发仍有可见价值），不是因为它也踩了 D19 那个坑。
+        //   加宽后其余既有行（intake/dev/creator/requester）按钮仍各自受 canOperate* 独立门控（admin∨
+        //   受理人），不因本次加宽而多出操作权，只是多了"看得见"。
         const canSeeNotify = isAdmin() || (currentUser && isSiIntakeLiaison(currentUser.id))
-            || (iss.type === 'bug' && currentUser && (isSiBugLiaison(currentUser.id) || (Number(iss.assigned_to) === Number(currentUser.id) && currentUser.id > 0) || (siCaps && siCaps.isRosterMember)));
+            || (iss.type === 'bug' && currentUser && (isSiBugLiaison(currentUser.id) || (Number(iss.assigned_to) === Number(currentUser.id) && currentUser.id > 0) || (siCaps && siCaps.isRosterMember)))
+            || ((iss.type === 'feature' || iss.type === 'improvement') && currentUser && (siCaps && siCaps.isRosterMember));
         const notify = canSeeNotify ? siRenderNotify(iss, r.data.dev_assignees) : '';
 
         // 讨论群（§5 bug 流拉群；已建才展示，留痕：议题 + 拉群时间）
@@ -1907,16 +2012,21 @@
     }
 
     // 全在册 chip：user_name + dev_status 徽标；is_primary 仅作只读小标记「代表」（不得有任何授权暗示文案，
-    //   方案 §11 前端骨架——去主次，禁「主开发」字样）；no_code 的 chip 用 title 属性挂 no_code_reason（悬浮可见，
-    //   不占用可视空间）。C7：协调人（canCoordinateMember）在 pending 成员 chip 上加「开脱」、excused 成员 chip
+    //   方案 §11 前端骨架——去主次，禁「主开发」字样）。
+    //   ⚠️ S3（四件①+④，2026-08-05）：no_code_reason 原设计"用 title 属性挂（悬浮可见，不占用可视空间）"
+    //   已被用户 2026-08-05 明确推翻——无代码交付=没有 commit 可追溯，那段文字是唯一交付凭证，藏在
+    //   tooltip 里等于实质没留痕。现改为正文块（见下方 noCodeBlock，同 work_note 范式），title 属性
+    //   保留但降级为冗余展示（正文块才是主载体，title 只是顺手的悬浮速览，不再是唯一可见途径）。
+    //   C7：协调人（canCoordinateMember）在 pending 成员 chip 上加「开脱」、excused 成员 chip
     //   上加「恢复」小按钮；chip 列表下方非冻结态显示「管理开发成员」入口（复用 siModalReassign 的 member_ids
     //   全集编辑器，声明式一个入口覆盖 add/remove，不逐个调 dev-assignees 端点）。
-    function siRenderDevMemberChips(devAssignees, caps, iss) {
+    function siRenderDevMemberChips(devAssignees, caps, iss, noCodeRecords) {
         const list = (!devAssignees || !devAssignees.length)
             ? '<div class="si-muted">暂无指派开发</div>'
             : '<div class="si-dev-chip-list">' + devAssignees.map(d => {
                 const statusKey = d.dev_status || 'pending';
                 const statusLabel = SI_DEV_STATUS_LABEL[statusKey] || esc(statusKey);
+                // title 仅冗余（正文块 noCodeBlock 才是主载体，见上方函数头注释）
                 const titleAttr = (statusKey === 'no_code' && d.no_code_reason) ? ` title="${esc(d.no_code_reason)}"` : '';
                 const primaryMark = '';   // 「代表」小标记按用户要求移除（后端 electRepresentative 仍自动选代表·仅前端不展示）
                 let act = '';
@@ -1934,6 +2044,28 @@
             .join('');
         const workNotesBlock = wnItems
             ? `<div class="si-worknote-block" style="margin-top:10px"><div class="si-worknote-title" style="font-size:12px;color:#6b7280;margin-bottom:4px">工作说明</div>${wnItems}</div>` : '';
+        // S3（四件①+④）：无代码交付原因正文块——同上方 work_note 范式（姓名+时刻+文本），无值整块不出。
+        //   时刻取 resolved_at（submit 端点 no_code 分支与 code_submitted 分支共用同一列写入，见
+        //   routes/sys-iteration/index.js 的 submit 处理）。贴着开发成员条目、与工作说明同区展示。
+        //   codex 262 L-1：过滤条件与渲染值统一走 trim 后的字符串——写入端 validateSubmitBody 的
+        //   no_code 分支已 trim+拒绝空白（`reason = b.no_code_reason.trim()`、`!reason` 则 400），
+        //   本处 trim 是双保险，防历史脏数据或未来新写入路径遗漏该校验时，纯空白值被 `&&` 的真值判断
+        //   放过、渲染出一个看着有块实则空白的正文行。
+        //   ⚠️ S4 段1收口（codex 264 号末次合并审 M-2）：数据源从 devAssignees（仅在册·removed_at IS
+        //   NULL）改为 noCodeRecords（后端查该单**全部**历史实例，含已移出的）——返工场景下 remove+
+        //   re-add 旧成员后，旧一轮的无代码交付说明不该跟着消失（四件④拍板：这是唯一交付凭证）。
+        //   removed_at 非空的历史实例加「（已移出）」muted 后缀，让读者知道这是历史轮次的凭证而非
+        //   当前在册成员；在册未移除的（removed_at 为空）照常不带后缀。
+        const ncItems = (noCodeRecords || [])
+            .map(d => {
+                const reasonTrimmed = String(d.no_code_reason || '').trim();
+                if (!reasonTrimmed) return '';   // 双保险（后端已过滤非空白，此处防御性兜底不新增行为）
+                const removedTag = d.removed_at ? `<span class="si-muted">（已移出）</span>` : '';
+                return `<div class="si-worknote-item"><span class="si-worknote-who">${esc(d.user_name || ('#' + d.user_id))}${removedTag}</span>${d.resolved_at ? `<span class="si-muted" style="font-size:11px;margin-left:6px">${esc(siFmtDT(d.resolved_at))}</span>` : ''}<div class="si-worknote-text">${esc(reasonTrimmed)}</div></div>`;
+            })
+            .join('');
+        const noCodeBlock = ncItems
+            ? `<div class="si-worknote-block" style="margin-top:10px"><div class="si-worknote-title" style="font-size:12px;color:#6b7280;margin-bottom:4px">无代码交付说明</div>${ncItems}</div>` : '';
         // C2c·对抗审 A（HIGH·2026-07-18）：manageBtn 是 reassign 的**第二个前端入口**（复用 siModalReassign→POST /reassign），
         //   显隐必须镜像 reassign.from（否则变更流 D_PRE 态显按钮但后端已去 D_PRE→点击必 409 死按钮）。原 !SI_FROZEN_STATUSES
         //   只排冻结态、不含变更流 D_PRE 三态，是与操作区入口①(transitions reassign.from)不同源的漏网。改为直接读
@@ -1943,7 +2075,7 @@
         const reassignHitsStatus = !!(reassignFlow && Array.isArray(reassignFlow.from) && reassignFlow.from.includes(iss.status));
         const manageBtn = (caps && caps.canCoordinateMember && reassignHitsStatus)
             ? `<div style="margin-top:8px"><button class="u-btn-secondary u-btn-sm" onclick="siModalReassign(siDetail.issue)">管理开发成员</button></div>` : '';
-        return list + workNotesBlock + manageBtn;
+        return list + workNotesBlock + noCodeBlock + manageBtn;
     }
     // commit 记录小表：开发/component（前端/后端）/commit_ref/时间；含 removed 实例的行（方案 §8 快照口径同源，
     //   后端 GET 已按 id 升序返回，前端不再排序）。C7：本人行按 canEditCommits 加「编辑/删除」，表下按
@@ -1989,7 +2121,10 @@
     //   展示层近似判断——扁平字符串集合，非按 type 精确索引族常量（后端 status-families.js 才是权威，按 type
     //   精确索引）；用于按钮可见性/删除按钮显隐，误差后果仅"按钮多显/少显"，无安全含义，真拒绝以后端 403/409 为准。
     const SI_ATT_TERMINAL_STATUSES = ['已上线', '已关闭', '已拒绝', '已作废'];   // 对齐 SYS_TERMINAL_STATUSES（不含"待上线"）
-    const SI_ATT_DEV_OR_VERIFY_STATUSES = ['开发中', '处理中', '待验证'];        // 对齐 SYS_DEV∪SYS_VERIFY
+    // [S12 双路审查 Opus-2 MED 收口] 加「待对接测试」——对齐后端 index.js delivery/screenshot 附件
+    // 端点的 DEV∪VERIFY∪LIAISON_TEST 三族放行（该端点两处 isInFamily 判断，首检+TOCTOU 复检逐字
+    // 同步改，见其注释）；LIAISON_TEST 只对 feature 非空，improvement/bug 该态永不出现，不影响其余展示。
+    const SI_ATT_DEV_OR_VERIFY_STATUSES = ['开发中', '处理中', '待验证', '待对接测试'];        // 对齐 SYS_DEV∪SYS_VERIFY∪LIAISON_TEST
 
     // ============================================================
     // 附件融入各模块（2026-07-19 用户诉求）：取消独立「附件」区，spec 融入基本信息、delivery+screenshot 合并为
@@ -2154,6 +2289,9 @@
         }
         if (status === 'failed') return `<span style="color:#dc2626;">⚠️ 通知失败，可重试</span>`;
         if (status === 'no_phone') return `<span style="color:#b45309;">— 无手机号，无法通知</span>`;
+        // [工期对接测试与风险等级拆分 方案 v1.1 §6·C4b] 'sending'——目前仅对接测试通道会产生该值（预占
+        // 协议中间态，其余四通道同步发送无此态），补分支避免落到下方 default 文案误显示"未发送"。
+        if (status === 'sending') return `<span style="color:#2563eb;">⏳ 发送中…</span>`;
         return `<span style="color:#9ca3af;">— 未发送钉钉通知</span>`;   // not_sent / null
     }
     // 单行组装（对齐 Data_Correction .notify-row）：左标签 si-nr-label + 右内容 si-nr-body（文字状态 + 操作按钮）+ 可选提示行
@@ -2281,8 +2419,13 @@
     //   姓名解析：intake_liaison_id 非空但缓存查不到（非 admin/未加载/id 不在 active 集合等）显式回退
     //   「#<id>」而非静默显示「—」——区别于详情页基本信息区的「—」（那里 NULL 与查不到都可以显示「—」，
     //   这里已有 id 值，若吞成「—」会让 admin 误以为对接人未设，此行不能弱化 id 的可见性）。
+    // [D15·工期对接测试与风险等级拆分 方案 v1.1 §6b·C5] 常驻化——原设计仅「待受理」态渲染（"不留 ghost
+    //   行"），但 intake 是全类型必经的第一段（intake_required 全表恒 1，DB 触发器焊死，见
+    //   intake-gate-sql.js SYS_INTAKE_GATE_TRIGGERS_SQL），每张单结构上都经过「待受理」，历史通知态
+    //   本身就是审计留痕，不该随流转推进从详情页消失（与 dev/creator/requester/liaison_test 四侧既有
+    //   常驻通知行口径对齐）。发送按钮维持仅受理段可点（过段再发"请受理"语义已失效，后端状态守卫本就
+    //   只在「待受理」放行，未动）；查询已读全状态可用（条件不变：sent+message_key+未读）。
     function siRenderIntakeNotifyRow(iss, canOperateIntake, canQueryReadIntake) {
-        if (iss.status !== '待受理') return '';
         const nameResolved = siIntakeLiaisonName(iss.intake_liaison_id);
         const label = `对接人受理 ${esc(nameResolved || (iss.intake_liaison_id ? ('#' + iss.intake_liaison_id) : '（存量单·发送时自动选定）'))}`;
         let btns = '';
@@ -2290,7 +2433,9 @@
         // codex 217 MED：可发条件由 `!== 'sent'` 收窄为显式枚举——原写法对未知脏值过宽，任何非 'sent' 的
         //   异常值都会被误判为可操作态。现仅 not_sent/falsy（初始态）与 failed（可重发）两类命中；
         //   sent 与其余任何未知值均不渲染操作按钮（未知值只展示状态文本，不当作可操作态处理）。
-        if (canOperateIntake && (intakeStatus === 'not_sent' || intakeStatus === 'failed' || !intakeStatus)) {
+        //   [D15] 新增 status==='待受理' 前置门——常驻化后本行会在任意状态渲染，发送/重发按钮必须收窄回
+        //   仅受理段可点（此前靠外层 early return 隐式保证，现需显式判断）。
+        if (iss.status === '待受理' && canOperateIntake && (intakeStatus === 'not_sent' || intakeStatus === 'failed' || !intakeStatus)) {
             // 方案 §4.8：sent 态只可查已读、不提供重发（仅 failed 可重发）——回受理门归零（待追认 P1 已追认）
             //   是恢复可发的唯一途径；sent 即本轮终态，与 P1 拍板时的语义前提一致。
             const btnLabel = intakeStatus === 'failed' ? '重发' : '发送通知';
@@ -2303,6 +2448,121 @@
         // intake 通道无 notified_at 列（方案 §4 列清单明列 5 列：status/message_key/error/read_at/sent_by，
         //   不含 notified_at）——siNotifyStatusText 的 notifiedAt 传 null 时天然回退「✅ 已通知」（无时刻）文案。
         return siNotifyRowHtml(label, iss.intake_notify_status, iss.intake_read_at, null, btns);
+    }
+
+    // 对接测试侧（工期对接测试与风险等级拆分 方案 v1.1 §6/§7·C4b）：D19 触发主体=开发视角——权限=本单
+    //   在册开发∨admin（镜像后端 assertLiaisonTestNotifyActor，非 canOperateIntake 那套 admin-only 池口径）。
+    //   仅 feature 有该态；liaison_test_cycle_no=0（该单从未进入过待对接测试）不渲染本行——避免给直落
+    //   验证/尚未走到该段的单挂一条永远空白的行；cycle_no>=1 后持续渲染（跨轮次留痕可见，同 dev/creator
+    //   等既有通知行"持续展示、按态收发送按钮"范式，不因流转到「待验证」之后就消失）。
+    //   D19 自指硬守卫：收件人=当前用户本人时前端也隐藏发送按钮（后端 403 SELF_NOTIFY_FORBIDDEN 是真闸，
+    //   这里只是不给一个必 403 的死按钮）。
+    // [codex 276 号审 M-2] sending 超窗判定——与后端 preemptLiaisonTestNotifySend 的 CAS 恢复窗口
+    //   （index.js，10 分钟）同值，纯 UI 提示用途，不是权威判定——权威判定恒在后端 CAS；前端这里算错
+    //   或算不了，最多是按钮可用性体验差一点（比如该能点的时候还是灰的），绝不会导致越权发送，因为
+    //   即便前端误判成"可点"，真正拦截双发的是后端那条 CAS WHERE，不是这个函数。
+    // [codex 277 号审 L-1 收口] 边界方向与后端对齐：后端 CAS 用 `attempt_started_at <=
+    //   datetime('now','localtime','-10 minutes')`（即"已流逝时间 >= 10 分钟"才判定超窗允许抢占，
+    //   `<=` 是闭区间，10:00 整这一刻本身就算超窗）；此前前端用严格 `>`（即"已流逝时间 > 10 分钟"，
+    //   `10:00.000` 整这一刻还判"未超窗"），在 10 分钟整的极小窗口内会出现"后端已允许抢占、前端仍显示
+    //   禁用"的方向不一致（button 态偏保守一侧，不是误放行，安全上无害，但体验上会让用户在那一瞬间
+    //   看不到本该出现的按钮）。改 `>=` 与后端方向一致。⚠️ 本函数按浏览器本地时间解析（不处理时区/
+    //   跨时区场景），前端与服务端假定同一时区（同项目既有惯例，见上）——若两端时钟/时区不一致导致本
+    //   函数判断有误差，后端 CAS 仍是唯一权威闸门，不影响正确性，只影响这一颗按钮"看起来"该不该可点。
+    // [281 号对抗审 N7 采纳] NULL started_at 方向修正：后端 preemptLiaisonTestNotifySend CAS
+    //   （index.js :11132）把 `liaison_test_attempt_started_at IS NULL` 视为**立即可抢占**（与"已超 10
+    //   分钟"同一 OR 分支），语义是"这行处于 sending 但没有留下有效的尝试起始时间，说明这次尝试本身
+    //   不完整/已失去追踪依据，不该继续拿它当挡箭牌"。此前前端 !startedAt 时返回 false（=判定"未超窗"
+    //   → 按钮永久禁用），方向与后端正相反：一旦真出现这种脏数据，用户会撞上一颗再也点不开的死按钮，
+    //   只能等人工介入，而后端其实随时愿意放行。改为返回 true，方向对齐后端。
+    function siLiaisonTestNotifySendingIsStale(startedAt) {
+        if (!startedAt) return true;
+        let s = String(startedAt);
+        if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(s)) s = s.replace(' ', 'T');
+        const d = new Date(s);
+        if (isNaN(d.getTime())) return false;
+        return (Date.now() - d.getTime()) >= 10 * 60 * 1000;
+    }
+    // [codex 278 号审 M-3] writeback_failed:true 会话级持续警示——该响应字段不落库（后端仍卡在 sending，
+    //   没有专门的 DB 列记"回写失败过"），若不在前端记一笔，siAfterAction 重渲染后这条警示就随 toast
+    //   消失、用户看不到任何解释，容易在按钮变灰后忍不住重新点击（=真实双发）。用一个会话内 Set 记录
+    //   命中过的单号，siRenderLiaisonTestNotifyRow 重渲染时持续显示红字。
+    // [codex 279 号审 M-2 收口] 键从裸 issue.id 改为 `${id}:${cycle_no}`——同一张单换轮（liaison_test_pass
+    //   打回重开→重新进入待对接测试，cycle_no 递增）后，旧警示不该在新周期继续显示（新周期是全新的一次
+    //   发送尝试，与上一轮的回写失败无关）。渲染时若当前状态已不是 sending，主动删掉该键（防 Set 无限
+    //   增长，也让"同一单同一周期真的走出了 sending"之后不再有任何残留判断依据）。
+    let siLiaisonTestWritebackFailedIds = new Set();
+    function siLiaisonTestWarnKey(issueId, cycleNo) { return `${issueId}:${cycleNo}`; }
+    function siRenderLiaisonTestNotifyRow(iss) {
+        if (iss.type !== 'feature' || !(Number(iss.liaison_test_cycle_no) > 0)) return '';
+        const isAdminUser = isAdmin();
+        const isRosterDev = !!(siCaps && siCaps.isRosterMember);
+        const canOperate = isAdminUser || isRosterDev;
+        const recipientId = iss.liaison_test_recipient_id;
+        const recipientName = iss.liaison_test_recipient_name || (recipientId ? ('#' + recipientId) : '（发送时自动选定）');
+        const ns = iss.liaison_test_notify_status;
+        // [281 号对抗审 N1+R8 采纳] 演练标记——message_key 以 'dryrun-' 开头即为 dry-run 场景下的发送
+        // 记录，行内追加「（演练）」，避免用户把演练态误读成真实已送达（detail 读镜像白名单已含
+        // liaison_test_notify_message_key 列，直接可用，无需另补接口）。
+        const isDryRunSent = ns === 'sent' && String(iss.liaison_test_notify_message_key || '').indexOf('dryrun-') === 0;
+        const label = `对接测试 ${esc(recipientName)}${isDryRunSent ? '（演练）' : ''}`;
+        // [S12 双路审查 codex 287 号 M-2 收口] 本行读回执诚实占位——下方通知区共享文案（siRenderNotify
+        // 底部"「查已读」查询钉钉已读回执"，:2653）是对整块 6 行通知的统一说明，但本通道**没有** ①
+        // 「查询已读」按钮（上方 btns 只拼 发送/重发，从不拼查已读）② notify-read-status 端点的对应
+        // channel 分支（liaison_test_read_at 全仓只有清空写点，无任何非 NULL 写入路径，见 index.js
+        // writebackLiaisonTestNotify 与 runWGate ⑦ 两处，均只置 NULL）——D16 已记录"liaison 通道无查
+        // 已读功能（read_at 列为列组对称）"。sent 时若不额外说明，用户读到共享文案会误以为本行迟早能
+        // 查到"已读"，但这是结构性不可能，永远不会发生，不是"暂未查询"。故 sent 态下本行自带一句诚实
+        // 占位（不依赖读者去关联底部共享文案的隐含例外），非编造新按钮/新查询能力（那是另一条独立
+        // 工作量更大的改造，本次不做，codex 287 号建议原话"若明确不支持，则删除该通道的 read_at 契约
+        // 或将通知区统一文案改为按通道显示"——本处取后一种更小侵入的做法）。
+        const noReadQueryNote = (ns === 'sent')
+            ? `<div class="u-hint" style="margin:-2px 0 6px">— 本通道不支持查询已读（非"尚未读"，结构性无法查询）</div>` : '';
+        const selfUid = Number(currentUser && currentUser.id);
+        const isSelf = Number.isFinite(selfUid) && selfUid > 0 && Number(recipientId) === selfUid;
+        let btns = '';
+        const sendable = iss.status === '待对接测试';
+        // 可发条件同 intake 行显式枚举口径：not_sent/falsy/failed/sending（sending 允许再点——命中超窗
+        //   恢复时后端会正常抢占；未超窗则后端 409「已有发送在途」）。
+        if (canOperate && sendable && !isSelf && (ns === 'not_sent' || ns === 'failed' || ns === 'sending' || !ns)) {
+            const btnLabel = (ns === 'failed' || ns === 'sending') ? '重发' : '发送通知';
+            // [codex 276 号审 M-2] sending 且未超 10 分钟 stale 窗口（与后端 M-1 恢复窗口同值）时前端禁用
+            //   按钮——纯 UI 友好（真正的并发/超窗判定权威仍在后端 CAS，这里只是不给用户一个大概率会撞
+            //   409「已有发送在途」的可点按钮）。can_notify 这类后端计算字段的完整重构不做（挂账，403
+            //   兜底已在：即便前端判断有误差，点击后端仍会正确拒绝/放行）。
+            if (ns === 'sending' && !siLiaisonTestNotifySendingIsStale(iss.liaison_test_attempt_started_at)) {
+                btns += `<button class="u-btn-secondary u-nb-btn" disabled title="发送中，稍后可重试">${btnLabel}</button>`;
+            } else {
+                btns += `<button class="u-btn-secondary u-nb-btn" onclick="siNotifyLiaisonTestClick()">${btnLabel}</button>`;
+            }
+        }
+        const rowHtml = siNotifyRowHtml(label, ns, iss.liaison_test_read_at, iss.liaison_test_notified_at, btns);
+        // [281 号对抗审 N1 采纳] 离态限定——sending 态但单据已离开「待对接测试」（如被打回/继续推进），
+        // 说明这次发送的最终结果不会再由本页刷新自然解决（发送按钮已随 sendable=false 隐藏）。
+        // 纯展示提醒，不加按钮、不改任何机制。
+        const staleAwayHint = (ns === 'sending' && iss.status !== '待对接测试')
+            ? `<div class="u-hint" style="margin:-2px 0 6px">发送结果未知（单据已离开测试段）</div>` : '';
+        // [codex 278/279 号审 M-3/M-2] 持续性警示——仅当该单**当前周期**仍卡在 sending 且命中过
+        //   writeback_failed 时显示。状态一旦走出 sending（本轮真正恢复，或换新周期后 not_sent 起步），
+        //   主动删掉旧键——不满足显示条件时顺手清理，不必另设一个专门的清理时机。
+        const warnKey = siLiaisonTestWarnKey(iss.id, iss.liaison_test_cycle_no);
+        // [284 号 B2 核实收口] 279-M2 的清理只覆盖"当前渲染这一个 (id,cycle) 组合"——若单据在上一周期
+        // 命中过 writeback_failed（键已入 Set），随后换轮进入新周期，本函数往后每次渲染算出的 warnKey
+        // 都是"新周期"这一个，旧周期键此后再没有任何代码路径会引用到它，天然滞留在 Set 里直到会话
+        // 结束。核实结论：这是真实存在、此前未被覆盖的残留路径（非"已覆盖只是没写注释"），但危害面极
+        // 低——没有代码会再读到旧键，纯粹是内存里的死数据，量级=会话内曾命中过 writeback_failed 的
+        // (issue,cycle) 组合数，实践中很小。按裁定"确有残留路径则加一行按 cycle 清理"处理：每次渲染
+        // 时顺手扫掉"同一单据、周期号≠当前"的旧键（不论本次 ns 是否 sending），把清理范围从"当前周期"
+        // 扩大到"同单据全部旧周期"。
+        for (const k of siLiaisonTestWritebackFailedIds) {
+            if (k !== warnKey && k.startsWith(`${iss.id}:`)) siLiaisonTestWritebackFailedIds.delete(k);
+        }
+        if (ns !== 'sending') {
+            siLiaisonTestWritebackFailedIds.delete(warnKey);
+        } else if (siLiaisonTestWritebackFailedIds.has(warnKey)) {
+            return rowHtml + `<div class="u-hint" style="color:#dc2626;margin:-2px 0 6px">⚠️ 通知已发出但留痕失败，请勿重发，联系管理员核对</div>` + staleAwayHint + noReadQueryNote;
+        }
+        return rowHtml + staleAwayHint + noReadQueryNote;
     }
 
     // 上线执行开发侧（release_assignee，旧上线编排残留列）：[2026-07-30 用户裁定·家族 4 端点封禁] 本行转
@@ -2401,6 +2661,7 @@
                 ${siRenderIntakeNotifyRow(iss, isAdminUser, isAdminUser)}
                 ${siRenderTechLeadNotifyRow(iss)}
                 ${siRenderDevNotifyRows(iss, devAssignees || [], canOperate, canOperate)}
+                ${siRenderLiaisonTestNotifyRow(iss)}
                 ${siRenderCreatorNotifyRow(iss, canOperate, canOperate)}
                 ${siRenderRequesterNotifyRow(iss, canOperate, canOperate)}
                 <div style="font-size:11px;color:#9ca3af;margin-top:6px">变更流通知均<b>手动触发</b>——指派/改派后在此点「发送通知」；「查已读」查询钉钉已读回执。<br>
@@ -2599,6 +2860,11 @@
         } else if (iss.status === '待修改') {
             if (isAdminUser || isCreatorUser) gate = `<div class="si-gate-hint">✏️ 本单已退回修改：请「编辑内容」修改后「重新提交受理」。</div>`;
             else gate = `<div class="si-gate-hint">⏳ 本单已退回，等待建单人修改后重新提交受理。</div>`;
+        } else if (iss.status === '待对接测试') {
+            // [工期对接测试与风险等级拆分 方案 v1.1 §7·C4b] 两视角引导：开发侧提醒去通知区喊人来测；
+            //   对接人/admin 侧提示测试后的两条出路。
+            if (isAdminUser || isIntakeLiaisonUser) gate = `<div class="si-gate-hint">🧪 本单待对接测试：请验证开发交付内容。<b>通过</b> → 「对接测试通过」进入待验收；<b>有问题</b> → 「对接测试打回」注明原因，退回开发返工。</div>`;
+            else if (isOwnerDev) gate = `<div class="si-gate-hint">🧪 本单待对接测试：开发已完成交付，请到下方「钉钉通知」区点击「发送通知」提醒对接人测试。</div>`;
         }
         // C-orch bug 待上线态的四个引导分支（指定/等待/可执行）已随上线编排一起移入 siRenderReleaseOrchBlock，本操作区不再重复。
 
@@ -2687,7 +2953,9 @@
             // （C2.5 撤销·方案 v2.1）"预沟通通过"这一 case 已删（meta 无该 action·c7 孤儿守卫锚点）——
             //   OA 号回填改经独立入口 siOpenSetOaNumber（受理通过后，见详情页「补填 OA 号」按钮）。
             // 受理排期改造 C7：受理门 + 排期动作分发
-            case 'intake_accept': return siConfirmSimple(iss, 'intake_accept', '确认受理通过？受理后单据进入指派/处理阶段。', '/intake-accept');
+            // [工期对接测试与风险等级拆分 方案 v1.1 §3.4/§7·C5] feature 单受理须同时判定风险等级——
+            //   改走专用弹窗 siModalIntakeAccept；improvement/bug 仍走既有零输入确认（siConfirmSimple）。
+            case 'intake_accept': return siModalIntakeAccept(iss);
             // ⭐ C2.5b（方案 §3 受理门语义重定义）：退回弹窗写明本动作的边界——"不该做"应在「待受理」态用「拒绝」，
             //   两道门的判断标准不写清就会混用（方案原文点名要求此提示）。
             case 'intake_return': return siModalReason(iss, 'intake_return', '退回修改', '退改原因', '/intake-return',
@@ -2707,6 +2975,12 @@
             case 'submit': return siModalSubmit(iss);
             case 'accept': return siConfirmSimple(iss, 'accept', '确认验收通过？', '/accept');
             case 'return': return siModalReason(iss, 'return', '验收打回', '打回原因', '/return');
+            // [工期对接测试与风险等级拆分 方案 v1.1 §7·C4b] 对接测试通过/打回——对接人视角两按钮。
+            //   [方案 D22-④·批2 2026-08-06] pass 改带测试说明文本框（凭证二选一：本轮已传附件可留空，
+            //   否则须填）——见 siModalLiaisonTestPass；return 原因必填不变（同 return/reopen 等既有
+            //   "打回类"动作复用 siModalReason，不新写一套弹窗）。
+            case 'liaison_test_pass': return siModalLiaisonTestPass(iss);
+            case 'liaison_test_return': return siModalReason(iss, 'liaison_test_return', '对接测试打回', '打回原因', '/liaison-test-return');
             case 'close': return siConfirmSimple(iss, 'close', '确认归档（观察期结束）？', '/close');
             case 'hold': return siModalReason(iss, 'hold', '暂缓', '暂缓原因', '/hold');
             // S4（bug暂缓方案 §6.2/§6.3）：resume 改走专用弹窗 siModalResume——不再走 siConfirmSimple。
@@ -2776,6 +3050,59 @@
     //   与 recordSysIntakeNotify 落库列同名）——标签用"通知对接人受理"而非"通知对接人"，与既有 relay
     //   通道的"通知对接人"（siNotifyRelayClick）区分，防两条 toast 文案混淆成同一件事。
     function siNotifyIntakeClick() { return siNotifyManual('notify-intake', '通知对接人受理', 'intake_notify_status', 'intake_notify_error'); }
+    // 对接测试通知（工期对接测试与风险等级拆分 方案 v1.1 §6/§7·C4b）：不能复用 siNotifyManual——① 需在
+    //   body 携带 expected_cycle（详情 DTO liaison_test_cycle_no，方案 §6"DTO 契约"唯一来源，周期令牌防
+    //   reopen-ABA）；② 响应多一个 concurrent_changed 分支（写回 CAS 被并发覆盖，外部消息可能已送达但
+    //   本次未计入库内状态，同 relay 通道 superseded 分支的姊妹语义，文案分开写以免混淆两种不同的并发情形）。
+    async function siNotifyLiaisonTestClick() {
+        const iss = siDetail && siDetail.issue;
+        if (!iss) return;
+        if (siNotifyInflight) return;
+        siNotifyInflight = true;
+        try {
+            const r = await siApi('/sys-issues/' + iss.id + '/notify-liaison-test', { method: 'POST', body: { expected_cycle: iss.liaison_test_cycle_no } });
+            // [281 号对抗审 R10+N1 采纳] 原先 !r.ok 直接 return，按钮态停留在旧渲染上——504/409 这类
+            // "结果未知/并发冲突"响应后端状态其实已经变了（如 sending 未超窗、或已被别的请求抢占），
+            // 不刷新会让用户对着一颗过期的按钮反复点击、反复撞同一个错误。统一 siApiErr 提示后补一次
+            // siAfterAction() 刷新详情，按钮态随后端真实态重算。
+            if (!r.ok) { siApiErr(r); await siAfterAction(); return; }
+            if (r.data && r.data.concurrent_changed === true) {
+                showToast('通知对接测试：该单状态已并发变化，请查看当前通知状态', 'warning');
+                await siAfterAction();
+                return;
+            }
+            // [codex 278/279 号审 M-3/H-1] writeback_failed:true——结果回写失败，但"外部是否真的发出去了"
+            // 分两种，前端提示与是否劝阻重发必须分叉，不能一刀切：
+            //   sent_externally===true：钉钉消息已确认发出，只是回写失败——绝不能诱导用户重新点击
+            //   （=真实双发），记入会话级 Set 供行内持续显示「请勿重发」红字。
+            //   sent_externally===false：外部发送本就明确失败（同时回写也失败）——**不该劝阻重发**，
+            //   这次确定没送达，用户理应能补发；只做独立提示，不记入持续警示 Set。
+            if (r.data && r.data.writeback_failed === true) {
+                if (r.data.sent_externally === true) {
+                    siLiaisonTestWritebackFailedIds.add(siLiaisonTestWarnKey(iss.id, iss.liaison_test_cycle_no));
+                    showToast('通知已发出但留痕失败，请勿重发，联系管理员核对', 'error');
+                } else if (r.data.dry_run === true) {
+                    // [281 号对抗审 N1] dry-run 下 sent_externally 恒为 false（未真实外呼），不属于上面
+                    // "确定没送达可补发"的常规语义，措辞单独区分，避免用户误以为这是一次真实发送失败。
+                    showToast('演练回写失败（未真实发送钉钉），约 10 分钟后可重试', 'error');
+                } else {
+                    showToast('发送失败且留痕失败，可稍后重试或联系管理员', 'error');
+                }
+                await siAfterAction();
+                return;
+            }
+            const st = r.data && r.data.liaison_test_notify_status;
+            if (st === 'sent') {
+                // [281 号对抗审 N1] dry-run 演练不应让用户误以为钉钉真的发出去了。
+                showToast(r.data && r.data.dry_run === true
+                    ? '通知对接测试：演练已记录（未真实发送钉钉）'
+                    : '通知对接测试：钉钉已发送', 'success');
+            }
+            else if (st === 'failed') showToast('通知对接测试：发送失败（' + ((r.data && r.data.liaison_test_notify_error) || '未知') + '）', 'error');
+            else showToast('通知对接测试：已触发', 'success');
+            await siAfterAction();
+        } finally { siNotifyInflight = false; }
+    }
     // S4（bug暂缓方案 §7.3）：暂缓通知建单人——响应体形状（含 skipped 自我保护分支）与既有四通道
     //   notify-relay/creator/requester/intake 完全一致（同样落 creator_notify_* 列），直接复用 siNotifyManual，
     //   不另写一份。409（如 NOTIFY_CLAIM_CONFLICT）走 siApiErr 统一友好提示，本函数不需要额外分支。
@@ -2892,6 +3219,50 @@
             const r = await siApi('/sys-issues/' + iss.id + path, { method: 'POST', body: {} });
             if (!r.ok) { siApiErr(r); return false; }
             showToast('操作完成', 'success'); return true;
+        }, '确定');
+    }
+    // [工期对接测试与风险等级拆分 方案 v1.1 §3.4/§7·C5] 受理通过——feature/improvement 单需同时判定
+    //   风险等级（技术风险，对接人视角，一级/二级/三级），与端点 intake-accept 的 risk_level 必填闸同源
+    //   （服务端才是真闸，前端仅体验层拦截）。⭐ 用户拍板批1改造B（2026-08-06）：判据从"仅 feature"
+    //   扩到"feature∨improvement"——原「非 feature 不涉及风险等级」表述已废止，现只有 bug 沿用既有
+    //   零输入确认弹窗（siConfirmSimple，行为完全不变，body 恒 {}），不把风险等级控件泄漏给 bug。
+    //   ⭐ 用户拍板批1改造A：值域「高/中/低」全仓改名为「一级/二级/三级」。默认选中「三级」（用户拍板=
+    //   前端默认体验，服务端必填闸不变，仍可手动切回「请选择」触发必选拦截，见下方 T6 回归覆盖）。
+    //   ⚠️ [codex 290 号 M-1 收口] 默认值不是"人工评估过"的证据：必填闸门只能证明请求确实携带了一个
+    //   合法 risk_level 值，无法区分"用户看过三个选项、判断后主动选三级"与"用户没细看，留用默认值直接
+    //   点了确定"——这两种情况在服务端/审计留痕层面完全无法区分。若未来需要"是否经人工评估"这一信号
+    //   （如统计口径/责任认定），须另设机制（例如去掉预选默认值、强制用户显式点选），本次不做，仅如实
+    //   标注这条局限，不在注释里声称"必填=已确认人工评估"。
+    function siModalIntakeAccept(iss) {
+        if (iss.type !== 'feature' && iss.type !== 'improvement') {
+            return siConfirmSimple(iss, 'intake_accept', '确认受理通过？受理后单据进入指派/处理阶段。', '/intake-accept');
+        }
+        siModal('受理通过 #' + iss.id, [
+            note('受理后单据进入指派阶段。请同时判定本单风险等级（技术风险，对接人视角）。'),
+            { k: 'risk_level', html: `<div class="u-form-group"><label>风险等级 <span class="u-req">*</span></label><select id="f_risk_level"><option value="">请选择</option><option value="一级">一级</option><option value="二级">二级</option><option value="三级" selected>三级</option></select></div>` }
+        ], async v => {
+            const riskLevel = (v.risk_level || '').trim();
+            if (!riskLevel) { showToast('请选择风险等级', 'error'); return false; }
+            const r = await siApi('/sys-issues/' + iss.id + '/intake-accept', { method: 'POST', body: { risk_level: riskLevel } });
+            if (!r.ok) { siApiErr(r); return false; }
+            showToast('受理通过', 'success'); return true;
+        }, '确定');
+    }
+    // [方案 D22-④·批2 2026-08-06] 对接测试通过——凭证二选一：本轮（进入本轮待对接测试之后）新上传的
+    //   附件 或 当场填写的测试说明，至少其一，服务端才是真闸（LIAISON_TEST_PASS_EVIDENCE_REQUIRED）。
+    //   前端不预判"本轮是否已有合格附件"（需要额外查询、且与后端判定口径重复维护两份），只给占位提示 +
+    //   把服务端拒绝时的文案透传给用户（siApiErr 已读 r.data.error，自动带出"请上传测试截图或填写测试
+    //   说明"）。test_note 留空且服务端判定本轮无凭证附件时会被拒，用户据提示回来补填或先去传附件。
+    function siModalLiaisonTestPass(iss) {
+        siModal('对接测试通过 #' + iss.id, [
+            note('确认对接测试通过？通过后单据进入「待验收」。'),
+            fTextarea('test_note', '测试说明', '', false, '本轮已传测试截图可留空；若本轮尚未上传测试附件，请填写测试说明作为凭证。', '本轮已传测试截图可留空'),
+        ], async v => {
+            const testNote = (v.test_note || '').trim();
+            const body = testNote ? { test_note: testNote } : {};
+            const r = await siApi('/sys-issues/' + iss.id + '/liaison-test-pass', { method: 'POST', body });
+            if (!r.ok) { siApiErr(r); return false; }
+            showToast('对接测试通过', 'success'); return true;
         }, '确定');
     }
 
@@ -3109,10 +3480,15 @@
     }
 
     function siModalFeasibility(iss) {
+        // [工期对接测试与风险等级拆分 方案 v1.1 §3.2·C2] feature 必填、improvement 选填（needs_feasibility=1
+        // 时——本弹窗只在该前提下打开，见调用点 needs_feasibility 门控）。
+        const effortRequired = iss.type === 'feature';
         siModal('可行性评估', [
             fSelect('conclusion', '评估结论', ['可行', '有条件可行', '不可行'], '可行'),
             fTextarea('requirement_confirm', '需求确认', '', true, '必填：对需求的理解与确认，≤500'),
             fDateTime('dev_estimated_at', '预计完成时间', siToLocalInput(iss.dev_estimated_at), true),   // D2：第 4 参=必填星号（本字段真必填，闸门①）
+            fNumber('estimated_effort_days', '工期（人日）', iss.estimated_effort_days,
+                effortRequired, (effortRequired ? '必填' : '选填') + '：0.5 的整数倍，(0, 365]', { step: '0.5', min: '0.5', max: '365' }),
             fTextarea('risk', '风险/前置条件', '', false, '「有条件可行 / 不可行」时必填，≤1000'),
             note('⚠️ 本单需可行性评估：评估通过（可行/有条件可行）后方可继续提交交付。')
         ], async v => {
@@ -3120,8 +3496,22 @@
             if (!v.requirement_confirm.trim()) { showToast('需求确认必填', 'error'); return false; }
             if (!v.dev_estimated_at) { showToast('预计完成时间必填', 'error'); return false; }
             if ((v.conclusion === '有条件可行' || v.conclusion === '不可行') && !v.risk.trim()) { showToast('该结论下风险/前置条件必填', 'error'); return false; }
+            // [v1.1 §3.2·C2] 工期校验：与后端 normalizeSysEffortDays/DDL CHECK 同口径——有限数、0<v≤365、
+            // 0.5 整数倍；feature 必填、improvement 选填（前端先拦一道，服务端仍是权威校验，不因此省略）。
+            const effortRaw = (v.estimated_effort_days || '').trim();
+            let effortValue = null;
+            if (effortRaw === '') {
+                if (effortRequired) { showToast('请填写工期（人日）', 'error'); return false; }
+            } else {
+                const n = Number(effortRaw);
+                if (!Number.isFinite(n) || n <= 0 || n > 365 || Math.round(n * 2) !== n * 2) {
+                    showToast('工期须为 0.5 的整数倍，且在 (0, 365] 范围内', 'error'); return false;
+                }
+                effortValue = n;
+            }
             const body = { conclusion: v.conclusion, requirement_confirm: v.requirement_confirm.trim(), dev_estimated_at: siFromLocalInput(v.dev_estimated_at) };
             if (v.risk.trim()) body.risk = v.risk.trim();
+            if (effortValue !== null) body.estimated_effort_days = effortValue;
             const r = await siApi('/sys-issues/' + iss.id + '/feasibility', { method: 'POST', body });
             if (!r.ok) { siApiErr(r); return false; }
             showToast('已提交可行性评估', 'success'); return true;
@@ -3351,16 +3741,39 @@
                 <label>佐证附件（选填·交付物）</label>
                 ${siFilePickerHtml('submit-delivery', '选择文件')}
                 <div class="u-hint">选填，图片/PDF/Excel/Word 等，单个≤20MB，最多5个；随本次提交作为交付物上传。</div>
+            </div>
+            <div class="u-form-group">
+                <label>提交前确认 <span class="u-req">*</span></label>
+                <div class="u-form-group inline-chk" style="margin-bottom:6px"><input type="checkbox" id="siSubmitSelfTested"><label for="siSubmitSelfTested">已完成自测</label></div>
+                <div class="u-form-group inline-chk" style="margin-bottom:0"><input type="checkbox" id="siSubmitTestEnvDeployed"><label for="siSubmitTestEnvDeployed">已上测试库</label></div>
+                <div class="u-hint">两项均须勾选才能提交（默认不勾·确认清单式，按人留痕）。</div>
             </div>`;
 
         // P4：去主次多开发说明——本操作仅标记「你本人」的开发项完成，全部在册开发都完成后主状态才进「待验证」。
-        const fields = [{ k: null, html: '<div class="u-hint" style="margin-bottom:8px">仅标记<b>你本人</b>的开发项完成；全部在册开发都完成后，本单才自动进入「待验证」。</div>' }, { k: null, html: modeHtml }];
+        // [codex 291 号 M-2 收口] 原固定文案"…自动进入「待验收」"对 feature 失实——feature 主路径先进
+        // 「待对接测试」（W-GATE §3.0-⑦），对接人测试通过（liaison_test_pass）后才到「待验收」；仅
+        // improvement/bug 才是"全部完成→直接待验收"。⭐ feature 还存在 ⑥ 降级分支（对接人当前失效等
+        // 情形会跳过测试段直落「待验收」，见 runWGate ⑥），落点在提交那一刻不确定，故用"通常/或"的
+        // 诚实表述，不承诺唯一确定结果。
+        const submitCompleteHint = iss.type === 'feature'
+            ? '仅标记<b>你本人</b>的开发项完成；全部在册开发都完成后，本单通常进入「待对接测试」（若对接人当前不可用等情形会直接跳至「待验收」，视对接人状态而定），对接测试通过后再进入「待验收」。'
+            : '仅标记<b>你本人</b>的开发项完成；全部在册开发都完成后，本单才自动进入「待验收」。';
+        const fields = [{ k: null, html: `<div class="u-hint" style="margin-bottom:8px">${submitCompleteHint}</div>` }, { k: null, html: modeHtml }];
         if (needGap) fields.push(fTextarea('fix_gap_note', '修复缺口说明', '', true, '必填：上一版修复缺口在哪（复盘素材，不作考核）'));
         if (needGap) fields.push(note('⚠️ 派生自 bug 的修复单首次提交需额外填写「修复缺口说明」。'));
 
         siModal('标记我的开发完成', fields, async v => {
             const mode = document.querySelector('input[name="si-submit-mode"]:checked').value;
             const body = { mode };
+            // [工期对接测试与风险等级拆分 方案 v1.1 §3.3·C3] 提交双勾——三类型通用，必勾才能提交（服务端
+            // 硬闸兜底 SELF_TESTED_REQUIRED/TEST_ENV_DEPLOYED_REQUIRED，前端先拦一道给及时反馈）。放在
+            // mode 无关的最前面校验，与后端 validateSubmitBody 的检查顺序一致。
+            const selfTestedChecked = !!(document.getElementById('siSubmitSelfTested') && document.getElementById('siSubmitSelfTested').checked);
+            if (!selfTestedChecked) { showToast('请先勾选"已完成自测"', 'error'); return false; }
+            const testEnvDeployedChecked = !!(document.getElementById('siSubmitTestEnvDeployed') && document.getElementById('siSubmitTestEnvDeployed').checked);
+            if (!testEnvDeployedChecked) { showToast('请先勾选"已上测试库"', 'error'); return false; }
+            body.self_tested = true;
+            body.test_env_deployed = true;
             if (needGap) {
                 const gap = (v.fix_gap_note || '').trim();
                 if (!gap) { showToast('修复缺口说明必填', 'error'); return false; }
@@ -3419,7 +3832,9 @@
                 if (ar.ok) { siPickerReset('submit-delivery'); attMsg = '，附件已上传'; }
                 else { attMsg = '，但附件上传失败（可到附件区重传）'; }
             }
-            showToast((toMain === '待验证' ? '已标记完成，全部开发完成 → 转「待验证」' : '已标记你的开发完成（等待其他开发完成）') + attMsg, submitFiles.length && attMsg.includes('失败') ? 'info' : 'success');
+            showToast((toMain === '待验证' ? '已标记完成，全部开发完成 → 转「待验收」'
+                : (toMain === '待对接测试' ? '已标记完成，全部开发完成 → 转「待对接测试」（对接人测试通过后进入待验收）'
+                : '已标记你的开发完成（等待其他开发完成）')) + attMsg, submitFiles.length && attMsg.includes('失败') ? 'info' : 'success');
             return true;
         });
         // commit 记录改造：siModal 已同步渲染 modeHtml（含两组容器），此处按 siSubmitRowState 铺初始行（前端组/后端组各 1 空行）。
@@ -4913,6 +5328,14 @@
     //     必须一致，否则以后有人照 fText 的直觉调 fDateTime 会静默丢掉星号。既有两处 dev_estimated_at
     //     调用（真必填）随本次补传 true。
     function fDateTime(k, l, v, req) { return { k, html: `<div class="u-form-group"><label>${l}${req ? ' <span class="u-req">*</span>' : ''}</label><input type="datetime-local" id="f_${k}" value="${esc(v || '')}"></div>` }; }
+    // [工期对接测试与风险等级拆分 方案 v1.1 §3.2·C2] 数字输入字段（工期人日等）——同族 helper 一贯的
+    //   req 语义（不传=不必填）；attrs 可选传 step/min/max（本字段用 0.5/0.5/365，与后端 DDL CHECK 同口径，
+    //   仅做输入时的浏览器原生提示，真正的校验仍在提交回调 + 服务端双重把关，不依赖它单独生效）。
+    function fNumber(k, l, v, req, hint, attrs) {
+        const a = attrs || {};
+        const attrStr = ['step', 'min', 'max'].map(ak => a[ak] !== undefined ? ` ${ak}="${esc(String(a[ak]))}"` : '').join('');
+        return { k, html: `<div class="u-form-group"><label>${l}${req ? ' <span class="u-req">*</span>' : ''}</label><input type="number" id="f_${k}" value="${v == null ? '' : esc(String(v))}"${attrStr}>${hint ? `<div class="u-hint">${hint}</div>` : ''}</div>` };
+    }
     function fSelect(k, l, opts, cur) { return { k, html: `<div class="u-form-group"><label>${l}</label><select id="f_${k}">${opts.map(o => `<option value="${esc(o)}" ${cur === o ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select></div>` }; }
     function fSelectMap(k, l, opts, cur, labelMap) { return { k, html: `<div class="u-form-group"><label>${l} <span class="u-req">*</span></label><select id="f_${k}">${opts.map(o => `<option value="${esc(o)}" ${cur === o ? 'selected' : ''}>${esc(labelMap && labelMap[o] || o)}</option>`).join('')}</select></div>` }; }
     function fUserSelect(k, l, exclude) {
