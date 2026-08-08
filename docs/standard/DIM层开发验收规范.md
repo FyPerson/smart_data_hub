@@ -55,7 +55,7 @@ DIM 层开发完成后，必须提交以下 **4 类脚本**：
 ### 3.2 目录结构示例
 
 ```
-docs/local/数仓开发/sql/dim_xxx/
+E:\projects\data-warehouse\docs\dim_xxx\        （数仓线独立仓·2026-08-08 迁出）
 ├── 01_dim_ddl_xxx表建表.sql
 ├── 02_dim_etl_init_全量初始化.sql
 ├── 03_dim_etl_incr_ssms_增量ETL手动执行.sql   # SSMS 手动执行版
@@ -254,8 +254,8 @@ name, customer_line_id, org_id
 
 ## 七、参考文档
 
-- [审计日志表 DDL](../local/数仓开发/sql/common/01_dw_audit_log_ddl_审计日志表建表_v2.sql)
-- [dim_official_customer 示例](../local/数仓开发/sql/dim_official_customer/)
+- 审计日志表 DDL：`E:\projects\data-warehouse\docs\_common\01_dw_audit_log_ddl_审计日志表建表_v2.sql`（数仓线独立仓·2026-08-08 迁出）
+- dim_official_customer 示例：`E:\projects\data-warehouse\docs\dim_official_customer\`（同上）
 - [DWD 开发验收流程](../local/DWD开发验收流程.md)
 
 ---

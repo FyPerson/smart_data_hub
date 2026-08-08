@@ -6,8 +6,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>系统迭代 - 智数协同平台</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="assets/css/style.css?v=v1.117.0_fabdrag">
-    <link rel="stylesheet" href="assets/css/components.css?v=v1.123.1_unify12b">
+    <link rel="stylesheet" href="assets/css/style.css?v=v1.141.0_badge2">
+    <link rel="stylesheet" href="assets/css/components.css?v=v1.141.0_badge1">
     <style>
         /* ============================================================
            系统迭代页 · 页面专属残留（共享组件层已迁移至 assets/css/components.css）
@@ -77,15 +77,20 @@
         /* 表格已 harmonize → u-corr-table-wrap/u-corr-table（base 见 components.css）；
            本页跟随共享层默认宽度，和其余列表页保持同一容器/表格骨架。 */
 
-        /* 类型标签修饰色（base 已 harmonize → components.css .u-type-tag，本页保留四类颜色，选择器改名对齐 Data_Correction .type-tag.t-X 惯例） */
-        .u-type-tag.bug { background: #fee2e2; color: #b91c1c; }
-        .u-type-tag.feature { background: #dbeafe; color: #1d4ed8; }
-        .u-type-tag.improvement { background: #d1fae5; color: #047857; }
-        .u-type-tag.config { background: #ede9fe; color: #6d28d9; }
+        /* 类型标签修饰色（base 已 harmonize → components.css .u-type-tag）
+           〔状态徽章统一 S5a·口径二〕前缀改 `t-*`，与 Data_Correction 的 `.u-type-tag.t-single/t-batch`
+           和 Issue_Tracker 的 `typeClass()` 产出 `t-{类型}` 对齐——本页是三页里最后一个还在用裸类型名的。
+           ⚠️ **色值有意保留原值、不做 token 化**：这四条是**分类色**（BUG/新功能/优化/配置变更），
+           不是状态色。语义色板的 13 层表达的是"这条记录处在什么状态"，把分类硬塞进去会让
+           "红色=失败"这类既有认知在类型标签上失效。口径二统一的是**前缀命名**，不是分类配色。 */
+        .u-type-tag.t-bug { background: #fee2e2; color: #b91c1c; }
+        .u-type-tag.t-feature { background: #dbeafe; color: #1d4ed8; }
+        .u-type-tag.t-improvement { background: #d1fae5; color: #047857; }
+        .u-type-tag.t-config { background: #ede9fe; color: #6d28d9; }
         /* 优先级徽章已升共享层 components.css .u-pri（状态列/优先级列统一轮 2026-07-10：本页原
            si-prio 即共享版蓝本，原样上移后本地删除；数据开发页同步从圆点迁入同款） */
 
-        /* style污染根治 B 方案（20260709 v1.1）：本条原为对抗 style.css 裸 `.status-badge`（L1166，早年遗留
+        /* style污染根治 B 方案（20260709 v1.1）：本条原为对抗 style.css 的全局 `.status-badge` base（早年遗留
            全局徽章样式）透传 box-shadow/letter-spacing/text-transform/flex-shrink 四条的"泄漏收回"补丁
            （13 条之一），改名 .u-status-badge 后不再与 style.css 碰撞，整体删除。 */
 
@@ -93,24 +98,44 @@
            .u-status-badge。⭐ 角色权限重构 C4·184 号预审 PL-2 去基数化：此前写"十态"，但状态集持续
            演进（C2.5 待商议/受理排期改造已排期退场等），写死数字会静默过期，改为不带数字的描述——
            具体状态清单请数下方规则条数或读 status-families.js/transitions.js 的状态常量数组。 */
-        .si-s-pending { background: #f3f4f6; color: #6b7280; }
-        .si-s-scheduled { background: #e0e7ff; color: #4338ca; }   /* 受理排期改造：已排期态退场·类保留供历史徽章兜底 */
+        /* —— 状态徽章统一 v1.2 §2.2/§2.4 S2 接线 ——
+           色值全部改引 components.css :root 语义色板，本页不再写具体色值；别名替换原 direct 声明
+           禁双存（复审 M-1）；六值齐设、一律 var() 引用。class 片段来源受控：SI_STATUS_CLASS
+           + siStatusClass()(:778) 兜底 'pending'——本页是全站唯一原本就有 key→class 白名单的页。
+           下方各条保留原有的业务缘由注释（它们记录的是"为什么这个状态该是这种观感"，仍然有效）。 */
+        .si-s-pending { --sb-bg: var(--sem-wait-bg); --sb-fg: var(--sem-wait-fg); --sb-bd: var(--sem-wait-bd); --sb-bds: var(--sem-wait-bds); --sb-dot: var(--sem-wait-dot); --sb-deco: var(--sem-wait-deco); }
+        /* 受理排期改造：已排期态退场·类保留供历史徽章兜底。S0 双矩阵实测：SI_STATUS_CLASS 的 value 集
+           已无 'scheduled'（13 条 CSS / 12 条可达），故映射 legacy 层（历史旧态·淡灰**无删除线**——
+           方案 D3：旧态是"早年流转态"非"作废"，删除线会误示记录无效）。 */
+        .si-s-scheduled { --sb-bg: var(--sem-legacy-bg); --sb-fg: var(--sem-legacy-fg); --sb-bd: var(--sem-legacy-bd); --sb-bds: var(--sem-legacy-bds); --sb-dot: var(--sem-legacy-dot); --sb-deco: var(--sem-legacy-deco); }
         /* （C2.5 撤销·方案 v2.1）.si-s-prediscuss「待商议」徽章色已删——预沟通段废除，该状态不再产生。 */
-        .si-s-intake { background: #e0e7ff; color: #4338ca; }      /* 待受理（对接人受理门·待办感） */
-        .si-s-revision { background: #fef3c7; color: #92400e; }    /* 待修改（退改需建单人改·提醒色） */
-        .si-s-dev { background: #dbeafe; color: #1d4ed8; }
+        .si-s-intake { --sb-bg: var(--sem-intake-bg); --sb-fg: var(--sem-intake-fg); --sb-bd: var(--sem-intake-bd); --sb-bds: var(--sem-intake-bds); --sb-dot: var(--sem-intake-dot); --sb-deco: var(--sem-intake-deco); }      /* 待受理（对接人受理门·待办感） */
+        .si-s-revision { --sb-bg: var(--sem-review-bg); --sb-fg: var(--sem-review-fg); --sb-bd: var(--sem-review-bd); --sb-bds: var(--sem-review-bds); --sb-dot: var(--sem-review-dot); --sb-deco: var(--sem-review-deco); }    /* 待修改（退改需建单人改·提醒色·对齐 review 层"待验收/待修改"语义） */
+        .si-s-dev { --sb-bg: var(--sem-active-bg); --sb-fg: var(--sem-active-fg); --sb-bd: var(--sem-active-bd); --sb-bds: var(--sem-active-bds); --sb-dot: var(--sem-active-dot); --sb-deco: var(--sem-active-deco); }
         /* [工期对接测试与风险等级拆分 方案 v1.1 §7·C4b] 待对接测试——feature 独有新态，插在开发中(蓝)
-           与待验证(黄)之间，取紫色系区分（不复用 prerelease 的青色，避免与"待上线"混淆）。 */
-        .si-s-liaisontest { background: #ede9fe; color: #6d28d9; }
-        .si-s-review { background: #fef3c7; color: #92400e; }
-        .si-s-prerelease { background: #ccfbf1; color: #0f766e; }
-        .si-s-released { background: #d1fae5; color: #065f46; }
-        .si-s-closed { background: #e2e8f0; color: #475569; }
+           与待验证(黄)之间，取紫色系区分（不复用 prerelease 的青色，避免与"待上线"混淆）。
+           统一后落 special 层——该层在方案 §1 的语义定义正是"对接测试"，紫色系逐字延续。 */
+        .si-s-liaisontest { --sb-bg: var(--sem-special-bg); --sb-fg: var(--sem-special-fg); --sb-bd: var(--sem-special-bd); --sb-bds: var(--sem-special-bds); --sb-dot: var(--sem-special-dot); --sb-deco: var(--sem-special-deco); }
+        .si-s-review { --sb-bg: var(--sem-review-bg); --sb-fg: var(--sem-review-fg); --sb-bd: var(--sem-review-bd); --sb-bds: var(--sem-review-bds); --sb-dot: var(--sem-review-dot); --sb-deco: var(--sem-review-deco); }
+        .si-s-prerelease { --sb-bg: var(--sem-staging-bg); --sb-fg: var(--sem-staging-fg); --sb-bd: var(--sem-staging-bd); --sb-bds: var(--sem-staging-bds); --sb-dot: var(--sem-staging-dot); --sb-deco: var(--sem-staging-deco); }
+        .si-s-released { --sb-bg: var(--sem-done-bg); --sb-fg: var(--sem-done-fg); --sb-bd: var(--sem-done-bd); --sb-bds: var(--sem-done-bds); --sb-dot: var(--sem-done-dot); --sb-deco: var(--sem-done-deco); }
+        /* 〔S2 接线·映射依据〕closed 对应状态原值「已关闭」，而 siStatusDisplay() 把它的**用户可见
+           文案**改显为「已归档」——即方案 §2.4「已归档 灰蓝→archived」说的就是本条（原色 #e2e8f0/#475569
+           正是"灰蓝"）。故映射 archived（绿系虚线框）而非 done：done 已由 si-s-released「已上线」占据，
+           closed 是上线后观察期结束的封存态，语义上就是归档。 */
+        .si-s-closed { --sb-bg: var(--sem-archived-bg); --sb-fg: var(--sem-archived-fg); --sb-bd: var(--sem-archived-bd); --sb-bds: var(--sem-archived-bds); --sb-dot: var(--sem-archived-dot); --sb-deco: var(--sem-archived-deco); }
         /* 状态色语义统一轮（2026-07-10）：hold 文字色对齐数据开发"已暂缓"（#a16207→#854d0e）、
-           rejected 底色对齐修正/数据开发"拒绝=灰底红字"（#fae8e8→#f3f4f6） */
-        .si-s-hold { background: #fef9c3; color: #854d0e; }
-        .si-s-rejected { background: #f3f4f6; color: #991b1b; }
-        .si-s-void { background: #e5e7eb; color: #9ca3af; text-decoration: line-through; }
+           rejected 底色对齐修正/数据开发"拒绝=灰底红字"（#fae8e8→#f3f4f6）。
+           〔S2 如实修订〕统一后两条并非"色值逐字延续"：
+             · hold —— fg #854d0e 延续，bg 由 #fef9c3 微调为 hold 层 #fefce8（同黄系，肉眼几乎无差）；
+             · rejected —— fg 延续 #991b1b 系，**bg 由灰 #f3f4f6 改为 rejected 层浅红 #fef2f2**，
+               即 2026-07-10 定的"拒绝=灰底红字"跨页约定**由本次全站统一取代**（改为浅红底红字，
+               与数据修正/数据开发同步换新，三页仍然一致，只是一致到了新口径上）。
+           这不是回归，是有意的口径更替；写在这里免得后人看到灰底没了以为改坏。 */
+        .si-s-hold { --sb-bg: var(--sem-hold-bg); --sb-fg: var(--sem-hold-fg); --sb-bd: var(--sem-hold-bd); --sb-bds: var(--sem-hold-bds); --sb-dot: var(--sem-hold-dot); --sb-deco: var(--sem-hold-deco); }
+        .si-s-rejected { --sb-bg: var(--sem-rejected-bg); --sb-fg: var(--sem-rejected-fg); --sb-bd: var(--sem-rejected-bd); --sb-bds: var(--sem-rejected-bds); --sb-dot: var(--sem-rejected-dot); --sb-deco: var(--sem-rejected-deco); }
+        /* 删除线由 voided 层的 --sem-voided-deco 提供（原本写死 text-decoration，现随 token 继承）。 */
+        .si-s-void { --sb-bg: var(--sem-voided-bg); --sb-fg: var(--sem-voided-fg); --sb-bd: var(--sem-voided-bd); --sb-bds: var(--sem-voided-bds); --sb-dot: var(--sem-voided-dot); --sb-deco: var(--sem-voided-deco); }
 
         .si-flag { font-size: 11px; font-weight: 700; margin-left: 6px; white-space: nowrap; }
         .si-flag.scope { color: #d97706; }
@@ -304,12 +329,25 @@
         .si-batch-item .si-batch-no { font-weight: 700; color: #1e293b; }
         .si-batch-item .si-batch-meta { font-size: 12px; color: #6b7280; margin-top: 4px; }
         .si-release-badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
-        .si-release-badge.plan { background: #e0e7ff; color: #4338ca; }
-        .si-release-badge.done { background: #d1fae5; color: #065f46; }
+        /* 〔状态徽章统一 S5a·口径二·次级族色值 token 化〕class 不动，只换色值引用。
+           plan→wait（"计划中/未开始"；原色 indigo 恰是 intake 的 fg，但 intake 语义是"待受理/待回应"，
+           批次计划不涉及等谁回应，故按语义优先取 wait，色相由 indigo 转中性灰）。 */
+        .si-release-badge.plan { background: var(--sem-wait-bg); color: var(--sem-wait-fg); }
+        .si-release-badge.done { background: var(--sem-done-bg); color: var(--sem-done-fg); }
         /* 上线体统一重构 C2b（方案 v3.4 §6.4）：新面板通知状态徽标——warn=sending/stale（发送中/需重发关注），
            fail=failed（发送失败）。不复用 plan/done（那两个是"批次状态"，与"通知状态"是两个不同维度）。 */
-        .si-release-badge.warn { background: #fef3c7; color: #92400e; }
-        .si-release-badge.fail { background: #fee2e2; color: #b91c1c; }
+        /* ⚠️【提案·待主会话裁定】warn→**review**（预判给的是 hold，未采）。
+           理由：本条注释自陈 warn 用于 sending（发送中）/ stale（需重发关注）——那是"要人来看一眼"，
+           而 hold 层的语义是"暂缓"，与之不符；review（待验收/待修改）才是"等人处理"的那一层，
+           且原色 #fef3c7/#92400e 与 review 的 #fffbeb/#b45309 同为琥珀系，色相验证也一致。
+           若主会话仍要 hold，改这一行的两个 token 即可（hold 同为黄系，观感差异很小）。
+           ⚠️〔S5a-fix2 M9 登记〕`warn` 这一个类**混载两种语义**：sending（发送中·进行中）与
+             stale/partial（需重发关注·要人处理）。映射到任何单一语义层都只能覆盖一半——
+             review 覆盖的是后者。**这是既有设计的遗留，不在本任务范围内改**：
+             拆成两个类（如 `sending` / `attention`）会牵动上线体面板的渲染逻辑与文案，
+             属独立优化项。此处登记明确，免得后人把"只覆盖一半"读成映射选错了。 */
+        .si-release-badge.warn { background: var(--sem-review-bg); color: var(--sem-review-fg); }
+        .si-release-badge.fail { background: var(--sem-failed-bg); color: var(--sem-failed-fg); }
         /* 排班面板表格收窄（2026-07-31 用户实测反馈）：共享 .u-corr-table 的 min-width:1100px 面向多列
            列表页设计，排班面板只有 3-4 列且套在弹窗里，必出横向滚动条——页内作用域覆盖归零（仅此
            overlay，不动共享 components.css，四页列表不受影响，无需 bump 缓存串）。 */
@@ -325,10 +363,22 @@
         .si-dev-chip { display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; border-radius: 14px; background: #f1f5f9; font-size: 12px; color: #334155; }
         /* .si-dev-primary-mark（is_primary「代表」小标记）随文案移除删除·后端 electRepresentative 仍选代表 */
         .si-dev-status-badge { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 11px; font-weight: 600; }
-        .si-dev-status-badge.pending { background: #e2e8f0; color: #475569; }
-        .si-dev-status-badge.code_submitted { background: #d1fae5; color: #065f46; }
-        .si-dev-status-badge.no_code { background: #fef3c7; color: #92400e; }
-        .si-dev-status-badge.excused { background: #e0e7ff; color: #4338ca; }
+        /* 〔状态徽章统一 S5a·口径二·次级族色值 token 化〕class 不动，只换色值引用。
+           no_code→hold：**借的是 hold 的色不是它的语义**（与 S2 的 aborted→wait 同款处理）——
+             "本次无代码提交"不是"暂缓"，但四态里没有更贴的层，而原色琥珀与 hold 同系，
+             语义由 label 文字承载（方案 §1「不靠色单独传义」）。
+           ⚠️〔S5a-fix HIGH-1〕excused 原提案 voided，已改 **intake（借色制）**：
+             **次级族禁用豁免层**（主会话新立原则）——voided/legacy 的 4.5:1 豁免建立在
+             「line-through + 文案冗余」上，而次级族按终审 L 不继承 deco，豁免前提被掏空。
+             借色理由（两条硬约束的交集）：① 必须是达标层（≥4.5:1）；② 必须与同一行里的
+             pending（wait 灰）拉得开——两者常并排出现，同为灰就分不清"待提交"和"已开脱"。
+             intake 的靛蓝同时满足，且恰是这条规则的原色（#e0e7ff/#4338ca）。
+             **借的是色不是语义**：excused=本次免除此人提交，与 intake 的"待受理/待回应"无关，
+             语义由 label 文字承载（与 S2 的 aborted→wait 同构，那次也是借色不借义）。 */
+        .si-dev-status-badge.pending { background: var(--sem-wait-bg); color: var(--sem-wait-fg); }
+        .si-dev-status-badge.code_submitted { background: var(--sem-done-bg); color: var(--sem-done-fg); }
+        .si-dev-status-badge.no_code { background: var(--sem-hold-bg); color: var(--sem-hold-fg); }
+        .si-dev-status-badge.excused { background: var(--sem-intake-bg); color: var(--sem-intake-fg); }
         .si-commit-table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 12px; }
         .si-commit-table th { text-align: left; padding: 6px 8px; background: #f8fafc; color: #64748b; font-weight: 600; border-bottom: 1px solid #e2e8f0; }
         .si-commit-table td { padding: 6px 8px; border-bottom: 1px solid #f1f5f9; color: #374151; }
@@ -669,8 +719,8 @@
         </div>
     </div>
 
-    <script src="assets/js/app.js?v=v1.137.0_timefmt"></script>
-    <script src="assets/js/unify-helpers.js?v=v1.110.4_unify"></script>
+    <script src="assets/js/app.js?v=v1.141.0_badge2"></script>
+    <script src="assets/js/unify-helpers.js?v=v1.141.0_badge1"></script>
     <!-- S3（前端统一 贴图粘贴扩展方案 20260801_v0.1）：Ctrl+V 贴图共享层，从本页 v1.133 建单优化批 C4
          抽取（assets/js/u-paste.js 文件头有完整来源说明）。缓存串尾部 tag 须与该文件 KIT_VERSION 一致，
          改文件时两处一起 bump——siInitUPaste() 内 UPaste.checkVersion() 会在不一致时 console.error
@@ -701,6 +751,21 @@
 
     // 类型中文 label（meta 不返 type label，前端映射；仅展示 meta.typeFlows 里存在的类型）
     const SI_TYPE_LABEL = { bug: 'BUG', feature: '新功能', improvement: '优化', config: '配置变更' };
+    // 〔状态徽章统一 S5a·口径二〕类型标签的 class 片段白名单。
+    //   S0 甲5 记录：本页五个输出点原本都是 `u-type-tag ${esc(i.type)}` 的 raw 拼接，
+    //   而方案 §2.7 曾以为存在一个 `SI_TYPE_CLASS`——实测不存在（S0 乙2），这里才是新建。
+    const SI_TYPE_CLASS = Object.freeze({ bug: 't-bug', feature: 't-feature', improvement: 't-improvement', config: 't-config' });
+    // 〔S5a-fix2 M8〕优先级 class 片段白名单 + gate（S0 甲9 收口·与 Issue_Tracker 的 itPriClass 同构）。
+    //   三处输出点原为 `u-pri ${esc(x.priority)}`：esc 防注入，但产不出规则的 class 它管不着。
+    //   ⚠️ 可见文本仍用 `esc(原值)`（不换成规范值）：Sys 的优先级是列表页排序/筛选的依据，
+    //   显示原值能在数据脏时被人看见；与 My_Workspace 的取舍不同，那边文本随 class 一起规范化
+    //   （H1）是因为它三处曾各说一套，先统一再谈显示什么。此处差异是有意的，不是漏改。
+    const SI_PRI_CLASS = Object.freeze({ P0: 'P0', P1: 'P1', P2: 'P2', P3: 'P3' });
+    function siPriClass(p) {
+        if (Object.prototype.hasOwnProperty.call(SI_PRI_CLASS, p)) return SI_PRI_CLASS[p];
+        UnifyHelpers.warnBadgeOnce('Sys_Iteration.siPriClass', p);
+        return 'P2';
+    }
 
     // [工期对接测试与风险等级拆分 方案 v1.1 §3.4·C5] 优先级=业务紧急度 口径说明（原 C2/20260713·方案
     //   v1.2 项3 的"优先级=风险等级"表述已随 v1.1 §3.4 拆分废止——风险等级现是独立字段 risk_level
@@ -749,7 +814,7 @@
     //     ——双行叠放是列表页"不加列"约束下的视觉妥协，不是数据模型；导出无横滚约束，没有理由继承它。
     //     bug 行的风险展示值为**空串**（不是"未定级"），导出时同样应落空而非占位文本。
     function siPriRiskCellHtml(i) {
-        const pri = `<span class="u-pri ${esc(i.priority)}">${esc(i.priority)}</span>`;
+        const pri = `<span class="u-pri ${siPriClass(i.priority)}">${esc(i.priority)}</span>`;
         const riskApplicable = i && (i.type === 'feature' || i.type === 'improvement');
         if (!riskApplicable) return `<div class="si-pri-risk">${pri}</div>`;
         const riskText = i.risk_level
@@ -1035,6 +1100,12 @@
         return Object.keys(META.typeFlows);
     }
     function siTypeLabel(t) { return SI_TYPE_LABEL[t] || t; }
+    // class 片段 gate：类型值变成 class 的唯一出口（未登记类型降级为无修饰类的裸 base）
+    function siTypeClass(t) {
+        if (Object.prototype.hasOwnProperty.call(SI_TYPE_CLASS, t)) return SI_TYPE_CLASS[t];
+        UnifyHelpers.warnBadgeOnce('Sys_Iteration.siTypeClass', t);
+        return '';
+    }
     // D-A：批次族别（bug vs 非bug）——与后端 releaseFamilyOf 同源，供加单候选过滤（config 不进批次返 null）
     function siReleaseFamily(t) { return t === 'bug' ? 'bug' : (t === 'feature' || t === 'improvement') ? 'change' : null; }
 
@@ -1473,7 +1544,7 @@
             //   HTML 注释拦不住 JS 模板插值——`${...}` 照样求值，结果进入最终 HTML 字符串。
             return `<tr onclick="siOpenDrawer(${i.id})">
                 <td>#${i.id}</td>
-                <td><span class="u-type-tag ${esc(i.type)}">${esc(siTypeLabel(i.type))}</span></td>
+                <td><span class="u-type-tag ${siTypeClass(i.type)}">${esc(siTypeLabel(i.type))}</span></td>
                 <td>${siPriRiskCellHtml(i)}</td>
                 <td><span class="u-status-badge si-s-${siStatusClass(i.status)}">${esc(siStatusDisplay(i.status))}</span></td>
                 <td>${esc(i.title)}${lineage}${flags}</td>
@@ -1724,9 +1795,9 @@
 
         document.getElementById('siDTitle').innerHTML = `#${iss.id} ${esc(iss.title)}`;
         document.getElementById('siDMeta').innerHTML =
-            `<span class="u-type-tag ${esc(iss.type)}">${esc(siTypeLabel(iss.type))}</span>` +
+            `<span class="u-type-tag ${siTypeClass(iss.type)}">${esc(siTypeLabel(iss.type))}</span>` +
             `<span class="u-status-badge si-s-${siStatusClass(iss.status)}">${esc(siStatusDisplay(iss.status))}</span>` +
-            `<span class="u-pri ${esc(iss.priority)}" title="${SI_PRIORITY_HELP_TEXT}">${esc(iss.priority)}</span>` +
+            `<span class="u-pri ${siPriClass(iss.priority)}" title="${SI_PRIORITY_HELP_TEXT}">${esc(iss.priority)}</span>` +
             (iss.scope_changed ? `<span class="si-flag scope">· 经历范围变更</span>` : '') +
             (iss.reopen_count ? `<span class="si-flag reopen">· 返工×${iss.reopen_count}</span>` : '') +
             (iss.blocked ? `<span class="si-flag blocked">· 受阻中</span>` : '');
@@ -1841,7 +1912,7 @@
                  与**编辑表单**里有优先级，基本信息块反而没有——用户想核对"这单是 P 几"得去看徽章或点开编辑，
                  与风险等级 kv 就在下一行形成了不对称。两者是同层的判定维度（业务紧急度 / 技术风险），应当
                  并排出现。title 挂既有 SI_PRIORITY_HELP_TEXT（与 siDMeta 徽章同一事实源，不新增副本）。 -->
-            <div class="u-kv-item"><label>优先级</label><div class="v"><span class="u-pri ${esc(iss.priority)}" title="${SI_PRIORITY_HELP_TEXT}">${esc(iss.priority)}</span></div></div>
+            <div class="u-kv-item"><label>优先级</label><div class="v"><span class="u-pri ${siPriClass(iss.priority)}" title="${SI_PRIORITY_HELP_TEXT}">${esc(iss.priority)}</span></div></div>
             ${(iss.type === 'feature' || iss.type === 'improvement') ? `<div class="u-kv-item"><label>风险等级</label><div class="v"><span title="${SI_RISK_LEVEL_HELP_TEXT}" style="cursor:help">${iss.risk_level ? esc(iss.risk_level) : '<span class="si-muted">未定级</span>'}</span></div></div>` : ''}
             ${effortKv}
             <div class="u-kv-item"><label>预计完成时间</label><div class="v">${iss.dev_estimated_at ? (esc(siFmtDT(iss.dev_estimated_at)) + siRemainingDaysHtml(iss.dev_estimated_at)) : '<span class="si-muted">未回填</span>'}</div></div>
@@ -2124,6 +2195,17 @@
     //   C7：由纯读升级为读写——协调人 chip 级操作（开脱/恢复）+ commit 小表行内编辑（编辑/删除/补充），
     //   均按 §11 四布尔门禁，纯 UI 镜像，真闸在后端。
     const SI_DEV_STATUS_LABEL = { pending: '待提交', code_submitted: '已提交', no_code: '无代码', excused: '已开脱' };
+    // 〔S5a-fix MED-6〕开发成员态的 class 片段白名单 + gate（S0 甲8 收口）。
+    //   原写法 `${esc(statusKey)}` 里 statusKey 来自 `d.dev_status || 'pending'`（后端原值），
+    //   esc 只防注入不防"产出没有规则的 class"；与 siTypeClass / siStatusClass 同款范式。
+    const SI_DEV_STATUS_CLASS = Object.freeze({
+        pending: 'pending', code_submitted: 'code_submitted', no_code: 'no_code', excused: 'excused',
+    });
+    function siDevStatusClass(k) {
+        if (Object.prototype.hasOwnProperty.call(SI_DEV_STATUS_CLASS, k)) return SI_DEV_STATUS_CLASS[k];
+        UnifyHelpers.warnBadgeOnce('Sys_Iteration.siDevStatusClass', k);
+        return '';
+    }
     const SI_COMMIT_COMPONENT_LABEL = { frontend: '前端', backend: '后端' };
     // SYS_DEV 族状态快照（feature/improvement=开发中；bug=处理中）——SYS_DEV∪SYS_VERIFY 复用既有
     // SI_ATT_DEV_OR_VERIFY_STATUSES（附件区先定义，函数体内引用不受声明顺序影响，脚本整体先解析完再在
@@ -2177,7 +2259,15 @@
             ? '<div class="si-muted">暂无指派开发</div>'
             : '<div class="si-dev-chip-list">' + devAssignees.map(d => {
                 const statusKey = d.dev_status || 'pending';
-                const statusLabel = SI_DEV_STATUS_LABEL[statusKey] || esc(statusKey);
+                // 〔S5a-fix2 H2〕文案侧与 class 侧配对保护，一处 esc 罩住两条路径。
+                //   原写法 `SI_DEV_STATUS_LABEL[statusKey] || esc(statusKey)` 有两个洞：
+                //     ① 取值走**原型链** —— statusKey='constructor'/'toString' 会拿到继承来的函数，
+                //        它是真值，于是 `||` 右边的 esc 分支根本不执行，函数源码被原样插进 innerHTML；
+                //     ② 已知态的 label 虽是字面量（安全），但"安全"依赖读者去核对 map 内容，
+                //        不如让转义成为无条件的出口。
+                //   hasOwnProperty 关掉原型链，外层 esc 让未知态原值必然被转义。
+                const statusLabel = esc(Object.prototype.hasOwnProperty.call(SI_DEV_STATUS_LABEL, statusKey)
+                    ? SI_DEV_STATUS_LABEL[statusKey] : statusKey);
                 // title 仅冗余（正文块 noCodeBlock 才是主载体，见上方函数头注释）
                 const titleAttr = (statusKey === 'no_code' && d.no_code_reason) ? ` title="${esc(d.no_code_reason)}"` : '';
                 const primaryMark = '';   // 「代表」小标记按用户要求移除（后端 electRepresentative 仍自动选代表·仅前端不展示）
@@ -2186,7 +2276,7 @@
                     if (statusKey === 'pending') act = `<span class="si-dev-chip-act" onclick="siModalExcuseMember(${d.id})">开脱</span>`;
                     else if (statusKey === 'excused') act = `<span class="si-dev-chip-act" onclick="siModalSupersedeExcuse(${d.id})">恢复</span>`;
                 }
-                return `<span class="si-dev-chip"${titleAttr}>${esc(d.user_name || ('#' + d.user_id))}${primaryMark}<span class="si-dev-status-badge ${esc(statusKey)}">${statusLabel}</span>${act}</span>`;
+                return `<span class="si-dev-chip"${titleAttr}>${esc(d.user_name || ('#' + d.user_id))}${primaryMark}<span class="si-dev-status-badge ${siDevStatusClass(statusKey)}">${statusLabel}</span>${act}</span>`;
             }).join('') + '</div>';
         // P4：开发成员工作说明展示——每个提交时填了 work_note 的 dev 一行「姓名：说明（提交时刻）」。多开发各自独立
         //   （后端详情端按 dev_assignee 各取自己最近 submit 事件的 work_note·不覆盖）。仅有值的 dev 才渲染，无则整块不出。
@@ -5156,7 +5246,7 @@
             const versionMeta = b.version_tag ? ' · ' + esc(b.version_tag) : '';
             const degradedNote = b.degraded ? ' <span style="color:#b91c1c">（成员清单为降级重建，可能不准）</span>' : '';
             const members = (b.members || []).map(m => {
-                const typeHtml = m.type ? `<span class="u-type-tag ${esc(m.type)}">${esc(siTypeLabel(m.type))}</span>` : '<span class="si-muted">类型不可用</span>';
+                const typeHtml = m.type ? `<span class="u-type-tag ${siTypeClass(m.type)}">${esc(siTypeLabel(m.type))}</span>` : '<span class="si-muted">类型不可用</span>';
                 const titleHtml = m.title != null ? esc(m.title) : '<span class="si-muted">（标题不可用）</span>';
                 return `<div style="font-size:12px;padding:2px 0">${typeHtml} #${esc(m.id)} ${titleHtml}</div>`;
             }).join('') || '<div class="si-muted" style="font-size:12px">（无成员）</div>';
@@ -5252,7 +5342,7 @@
         // 误以为"这单标题本来就是空的"，与"这单标题读不到"是完全不同的两回事，必须可辨）。
         const rows = issues.length ? issues.map(i => {
             const typeHtml = i.type
-                ? `<span class="u-type-tag ${esc(i.type)}">${esc(siTypeLabel(i.type))}</span>`
+                ? `<span class="u-type-tag ${siTypeClass(i.type)}">${esc(siTypeLabel(i.type))}</span>`
                 : `<span class="si-muted" title="降级读源：类型不可用">类型不可用</span>`;
             const titleHtml = i.title != null ? esc(i.title) : '<span class="si-muted">（标题不可用）</span>';
             const statusHtml = i.status
@@ -5392,7 +5482,7 @@
     // 逐人明细见 siExecutorSectionHtml。C5（方案 §4.5 第4条·v1.3 M-c）：**none 是新增第 6 态，必须显式
     // 处理**，不能落进未知态的兜底分支（那会让"尚未安排执行人"显示成一个看不懂的裸字符串）。
     const SI_EXEC_SUMMARY_LABEL = { none: '尚未安排执行人', not_sent: '未通知', sending: '发送中…', sent: '已全部通知', partial: '部分已通知', failed: '发送失败/待处理' };
-    const SI_EXEC_SUMMARY_CLS = { none: 'plan', not_sent: 'plan', sending: 'warn', sent: 'done', partial: 'warn', failed: 'fail' };
+    const SI_EXEC_SUMMARY_CLS = Object.freeze({ none: 'plan', not_sent: 'plan', sending: 'warn', sent: 'done', partial: 'warn', failed: 'fail' });
     function siExecSummaryBadgeHtml(summary) {
         const cls = SI_EXEC_SUMMARY_CLS[summary] || 'plan';
         const label = SI_EXEC_SUMMARY_LABEL[summary] || summary;
@@ -5405,7 +5495,7 @@
     // EXECUTOR_ALREADY_DONE）。none 态（summary==='none' 或空数组）显式空态引导，不落进任何"未通知"式渲染
     // （v1.3·M-c：不能让 none 渲染出一个点了必然 404 的发送按钮）。
     const SI_EXECUTOR_NOTIFY_LABEL = { not_sent: '未通知', sending: '发送中…', sent: '已通知', failed: '发送失败', stale: '已过期（需重发）' };
-    const SI_EXECUTOR_NOTIFY_CLS = { not_sent: 'plan', sending: 'warn', sent: 'done', failed: 'fail', stale: 'warn' };
+    const SI_EXECUTOR_NOTIFY_CLS = Object.freeze({ not_sent: 'plan', sending: 'warn', sent: 'done', failed: 'fail', stale: 'warn' });
     function siExecutorSectionHtml(releaseId, executors, summary, planning) {
         if (summary === 'none' || !executors || !executors.length) {
             return '<div class="u-detail-section"><h3>执行人</h3><div class="si-muted">尚未安排执行人</div></div>';
@@ -5757,7 +5847,7 @@
             !i.release_id && i.type !== 'config'
             && (!bf || siReleaseFamily(i.type) === bf));
         if (!cands.length) { showToast(bf ? `没有可加入本上线单（${bf === 'bug' ? 'bug' : '功能/优化'}）的「待上线」单据` : '没有可加入的「待上线」单据', 'warning'); return; }
-        const opts = cands.map(i => `<label class="si-chk-row si-chk-row-wide"><input type="checkbox" class="si-add-chk" value="${i.id}"> #${i.id} <span class="u-type-tag ${esc(i.type)}">${esc(siTypeLabel(i.type))}</span> ${esc(i.title)}</label>`).join('');
+        const opts = cands.map(i => `<label class="si-chk-row si-chk-row-wide"><input type="checkbox" class="si-add-chk" value="${i.id}"> #${i.id} <span class="u-type-tag ${siTypeClass(i.type)}">${esc(siTypeLabel(i.type))}</span> ${esc(i.title)}</label>`).join('');
         siModal('加入上线单', [{ k: null, html: `<div class="u-form-group"><label>选择待上线单据</label><div style="max-height:320px;overflow-y:auto">${opts}</div></div>` }], async () => {
             const ids = [...document.querySelectorAll('.si-add-chk:checked')].map(c => parseInt(c.value, 10));
             if (!ids.length) { showToast('请至少选择一个单据', 'error'); return false; }

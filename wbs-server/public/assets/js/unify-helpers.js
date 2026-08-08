@@ -14,6 +14,50 @@
     return '<span class="u-status-badge s-' + statusKey + '">' + w.escapeHtml(label) + '</span>';
   }
 
+  // 状态徽章·白名单 map 变体（状态徽章统一 v1.2 §2.2 复审 H-1 / 终审 M）
+  //   statusBadge() 直接把 statusKey 拼进 class，要求调用方自己保证 key 受控。S0 双矩阵实测发现
+  //   Statistics(:757)/Issue_Tracker(:720)/Data_Collab(:1863)/Periodic_Fetch(:496) 四页是后端原值
+  //   直拼 class（非受控），故补本变体：class 片段只可能来自 map 的 value，map 外的状态值一律拿不到
+  //   修饰类（落 base 的 wait fallback）并留 console.warn 痕迹——便于发现"后端新增了状态但前端忘了
+  //   加 map 条目"。终审 M 钉死：后端 CHECK 枚举只证明"输入受控"，不替代前端这层 class 白名单。
+  //   参数：status=后端状态原值；map={ 状态原值: 'class 片段' }（如 { ARCHIVED: 's-ARCHIVED' }）；
+  //         label=展示文案（一律 escapeHtml）。
+  //   片段形状校验：只接受**主状态族四前缀**开头的单个 class token——`s-` / `si-s-` / `status-` / `sem-`
+  //   （S0 双矩阵实测：现网主状态徽章合法片段全集就这四种，如 s-PENDING_ASSIGN、s-待处理、
+  //   si-s-dev、status-DONE、sem-done）。除形状外还挡住一整类误用面：调用方把 `open`/`active`/`P0`/
+  //   `badge-open` 这类**既有的非状态类**塞进 map value，从而借徽章元素蹭到别的组件样式。
+  //   token 内部字符集：字母/数字/下划线/连字符/中文（中文来自 Issue_Lite/Issue_Tracker 的中文状态值）。
+  //   形状不合法一律按未命中处理（降级 + warn），防"map 的 value 本身是从数据拼出来的"把白名单架空。
+  //   ⚠️ 交替项里 `si-s-` 写在 `s-` 之前只为可读性：两种顺序实测行为一致（`si-s-dev` 均全串命中、
+  //   捕获组均为 `si-s-`）——因为正则锚定 `^`，`s-` 在 `si-s-dev` 的位置 0 根本匹配不上。
+  //   ⚠️ `status-` 分支带负向前瞻排掉 `status-badge`：那是 style.css 的**遗留全局徽章类**
+  //   （渐变底 + 白字 + uppercase + 投影，Task_Pool/My_Workspace 仍在用）。若允许它通过，
+  //   调用方一句 `{ X: 'status-badge' }` 就能让徽章同时挂上新旧两套 base，蹭到那层渐变——
+  //   本函数的白名单是防"蹭已有类"的，遗留 base 恰恰是最该防的那个。
+  const BADGE_CLASS_FRAGMENT_RE = /^(si-s-|s-|status-(?!badge\b)|sem-)[A-Za-z0-9_一-龥-]+$/;
+
+  // 降级告警去重（A-L1）：列表一次渲染几十行，同一个未知状态会把控制台刷屏，真正有用的信息
+  //   （"出现了哪个没接线的状态"）反而被淹没。按「来源 + 状态值」记一次即可——重复出现不携带新信息。
+  //   模块级 Set，页面生命周期内有效；刷新页面重新计数（新会话理应再提醒一次）。
+  const warnedBadgeKeys = new Set();
+  function warnBadgeOnce(source, status) {
+    const key = source + '::' + String(status);
+    if (warnedBadgeKeys.has(key)) return;
+    warnedBadgeKeys.add(key);
+    if (w.console && typeof w.console.warn === 'function') {
+      w.console.warn('[' + source + '] 状态值不在白名单 map 内（或片段形状非法），徽章降级为默认等待态：', status);
+    }
+  }
+
+  function statusBadgeByMap(status, map, label) {
+    const frag = (map && Object.prototype.hasOwnProperty.call(map, status)) ? map[status] : null;
+    if (typeof frag !== 'string' || !BADGE_CLASS_FRAGMENT_RE.test(frag)) {
+      warnBadgeOnce('UnifyHelpers.statusBadgeByMap', status);
+      return '<span class="u-status-badge">' + w.escapeHtml(label) + '</span>';
+    }
+    return '<span class="u-status-badge ' + frag + '">' + w.escapeHtml(label) + '</span>';
+  }
+
   // 类型标签（base class 见 components.css .u-type-tag；各页 t-* 修饰色页面自带）
   // 与基准页（Data_Correction.html）renderTable 原内联模板串逐字节一致（除根类加 u- 前缀）
   // （原字面量"批量"/"单"未 escape，escapeHtml 对无特殊字符的字面量输出不变，故安全）。
@@ -287,6 +331,10 @@
 
   w.UnifyHelpers = w.UnifyHelpers || {};
   w.UnifyHelpers.statusBadge = statusBadge;
+  w.UnifyHelpers.statusBadgeByMap = statusBadgeByMap;
+  // 供页内自建 gate（Issue_Tracker.itStatusClass / Data_Collab.collabStatusClass）复用同一套去重逻辑，
+  // 免得三处各刷各的屏、也免得三处各写一份 Set。
+  w.UnifyHelpers.warnBadgeOnce = warnBadgeOnce;
   w.UnifyHelpers.typeTag = typeTag;
   w.UnifyHelpers.sortByField = sortByField;
   w.UnifyHelpers.attachTableSort = attachTableSort;

@@ -6,8 +6,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>数据协作 - 智数协同平台</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="assets/css/style.css?v=v1.117.0_fabdrag">
-    <link rel="stylesheet" href="assets/css/components.css?v=v1.123.1_unify12b">
+    <link rel="stylesheet" href="assets/css/style.css?v=v1.141.0_badge2">
+    <link rel="stylesheet" href="assets/css/components.css?v=v1.141.0_badge1">
     <style>
         /* 筛选栏 base/select/input/label 已并入共享层 components.css .u-filter-bar（前端统一 C4 Commit 3
            harmonize；本页 filter-bar 无自由文本搜索框，共享层 input[type=text] 宽度差异对本页无影响）。
@@ -103,24 +103,48 @@
            两边值逐字相同 padding:3px 10px/radius:12px/11px/600/nowrap = 零漂移）。
            下方 .status-* 为本页状态枚举配色，residual 保留不动。 */
         /* 状态色语义统一轮（2026-07-10）：待指派 橙→灰（对齐四页"待指派/待处理=灰"语义色；超时
-           警示由列内 timeoutMark 承担不靠底色）；PENDING/EXPORTING 文字色对齐数据修正同语义色值 */
-        .status-PENDING_ASSIGN { background: #f3f4f6; color: #6b7280; }
-        .status-PENDING { background: #dbeafe; color: #1d4ed8; }
-        .status-EXPORTING { background: #ccfbf1; color: #0f766e; }  /* v1.72.6 修复：v1.71.0 引入 EXPORTING 状态时漏加 CSS 导致白底白字 */
-        .status-SUBMITTED { background: #fef3c7; color: #92400e; }
-        .status-DONE { background: #ddd6fe; color: #5b21b6; }
-        .status-ARCHIVED { background: #d1fae5; color: #065f46; }
-        /* 旧状态值兼容（D1 残留数据可能存在） */
-        .status-CONFIRMED { background: #e5e7eb; color: #4b5563; }
-        .status-CLAIMED { background: #e5e7eb; color: #4b5563; }
+           警示由列内 timeoutMark 承担不靠底色）；PENDING/EXPORTING 文字色对齐数据修正同语义色值
+           —— 状态徽章统一 v1.2 §2.2/§2.4 S2 接线：色值全部改引 components.css :root 语义色板，
+           本页不再写具体色值；别名替换原 direct 声明禁双存（复审 M-1）；六值齐设、一律 var() 引用。
+           语义变化点（方案 §2.4 已列）：DONE 紫→done（绿）、ARCHIVED 绿→archived（虚线）、
+           CONFIRMED/CLAIMED 旧态→legacy（淡灰无删除线，方案 D3：旧态≠作废）。 */
+        .status-PENDING_ASSIGN { --sb-bg: var(--sem-wait-bg); --sb-fg: var(--sem-wait-fg); --sb-bd: var(--sem-wait-bd); --sb-bds: var(--sem-wait-bds); --sb-dot: var(--sem-wait-dot); --sb-deco: var(--sem-wait-deco); }
+        /* 〔S2-fix2·A-M2〕PENDING「待开发」落 **wait** 层而非 intake——核实依据（server.js 实证）：
+             · 指派端点 /api/collab/requests/:id/assign 由**对接人/admin** 发起，UPDATE 直接置
+               status='PENDING'，开发方不参与这一步；
+             · 全量 collab 端点清单里**没有**开发方的受理/接单/领取端点：PENDING 下开发方能做的是
+               reply-estimate（回预计·不改 status）与 submit（PENDING→SUBMITTED）；
+             · CLAIMED 是 D1 旧机制（已废，仅兼容残留数据），不构成受理门。
+           ⇒ PENDING 没有"待某人受理/回应"的动作缺口，它就是"已派活、等开发产出"= wait 语义。
+           intake 层留给真有受理门的场景（如系统迭代「待受理」，对接人必须点受理才推进）。 */
+        .status-PENDING { --sb-bg: var(--sem-wait-bg); --sb-fg: var(--sem-wait-fg); --sb-bd: var(--sem-wait-bd); --sb-bds: var(--sem-wait-bds); --sb-dot: var(--sem-wait-dot); --sb-deco: var(--sem-wait-deco); }
+        .status-EXPORTING { --sb-bg: var(--sem-staging-bg); --sb-fg: var(--sem-staging-fg); --sb-bd: var(--sem-staging-bd); --sb-bds: var(--sem-staging-bds); --sb-dot: var(--sem-staging-dot); --sb-deco: var(--sem-staging-deco); }  /* v1.72.6 修复：v1.71.0 引入 EXPORTING 状态时漏加 CSS 导致白底白字。统一后落 staging 层（"交付/传输"语义 + 原青色 fg 逐字相同） */
+        .status-SUBMITTED { --sb-bg: var(--sem-review-bg); --sb-fg: var(--sem-review-fg); --sb-bd: var(--sem-review-bd); --sb-bds: var(--sem-review-bds); --sb-dot: var(--sem-review-dot); --sb-deco: var(--sem-review-deco); }
+        .status-DONE { --sb-bg: var(--sem-done-bg); --sb-fg: var(--sem-done-fg); --sb-bd: var(--sem-done-bd); --sb-bds: var(--sem-done-bds); --sb-dot: var(--sem-done-dot); --sb-deco: var(--sem-done-deco); }
+        .status-ARCHIVED { --sb-bg: var(--sem-archived-bg); --sb-fg: var(--sem-archived-fg); --sb-bd: var(--sem-archived-bd); --sb-bds: var(--sem-archived-bds); --sb-dot: var(--sem-archived-dot); --sb-deco: var(--sem-archived-deco); }
+        /* 旧状态值兼容（D1 残留数据可能存在）——统一后落 legacy 层（历史旧态·**无删除线**） */
+        .status-CONFIRMED { --sb-bg: var(--sem-legacy-bg); --sb-fg: var(--sem-legacy-fg); --sb-bd: var(--sem-legacy-bd); --sb-bds: var(--sem-legacy-bds); --sb-dot: var(--sem-legacy-dot); --sb-deco: var(--sem-legacy-deco); }
+        .status-CLAIMED { --sb-bg: var(--sem-legacy-bg); --sb-fg: var(--sem-legacy-fg); --sb-bd: var(--sem-legacy-bd); --sb-bds: var(--sem-legacy-bds); --sb-dot: var(--sem-legacy-dot); --sb-deco: var(--sem-legacy-deco); }
 
         /* 验收状态色块 */
         .val-badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px; white-space: nowrap; }
-        .val-pending  { color: #9ca3af; }
-        .val-passed   { background: #d1fae5; color: #065f46; }
-        .val-failed   { background: #fee2e2; color: #991b1b; }
-        .val-running  { background: #fef3c7; color: #92400e; }
-        .val-bypassed { background: #fde68a; color: #78350f; }
+        /* 〔状态徽章统一 S5a·口径二·次级族色值 token 化〕class 名不动，只把色值换成语义色板引用。
+           映射（原色最近层 + label 语义双重验证）：
+             pending→wait ／ passed→done ／ failed→failed ／ running→active ／ bypassed→voided
+           两处**原色巧合**如实报备，按语义优先未采信色相：
+             · `.val-pending` 原 fg `#9ca3af` 恰是 voided 层的 fg，但它的语义是"尚未校验"不是"作废"；
+             · `.val-failed` 原 fg `#991b1b` 恰是 rejected 层的 fg，但它是"校验失败"不是"被拒绝"。
+           ⚠️〔S5a-fix HIGH-1·主会话新立原则：**次级族禁用豁免层**〕bypassed 原定 voided，已改 **review**。
+             voided/legacy 之所以能豁免 4.5:1 对比度硬线，成文前提是「line-through + 文案冗余保底」——
+             而终审 L 又规定次级族**不继承 deco**。两条合起来，次级族用豁免层等于：既拿了豁免，
+             又把豁免赖以成立的那道冗余通道拆掉了。这不是配色偏好问题，是**可访问性缺口**。
+             review（⚠️旁路放行的警示语义）既回到该规则原本的琥珀设计意图，也是达标层。
+           只改已有的 background/color 声明，不新增 border（加边框会改盒子尺寸=观感重构，超出口径二）。 */
+        .val-pending  { color: var(--sem-wait-fg); }
+        .val-passed   { background: var(--sem-done-bg); color: var(--sem-done-fg); }
+        .val-failed   { background: var(--sem-failed-bg); color: var(--sem-failed-fg); }
+        .val-running  { background: var(--sem-active-bg); color: var(--sem-active-fg); }
+        .val-bypassed { background: var(--sem-review-bg); color: var(--sem-review-fg); }
         .friction-mark { color: #b91c1c; font-size: 16px; }
         /* 阶段2 盯效率：超时未回填标记（橙=刚超 / 红=严重超） */
         .unreplied-timeout-mark { font-size: 12px; margin-left: 6px; padding: 1px 6px; border-radius: 4px; white-space: nowrap; }
@@ -373,11 +397,18 @@
             border-radius: 6px;
             font-size: 13px;
         }
-        .val-passed-bg   { background: #d1fae5; color: #065f46; }
-        .val-failed-bg   { background: #fee2e2; color: #991b1b; }
-        .val-bypassed-bg { background: #fef3c7; color: #78350f; }
-        .val-admin-closed-bg { background: #dbeafe; color: #1e40af; }  /* v1.70.4 ③ 行政闭环：蓝色，与 bypass 黄色区分 */
-        .val-running-bg  { background: #e0e7ff; color: #3730a3; }
+        /* 〔S5a-fix MED-5〕`.val-*-bg` 是同一套验收状态的**平行族**（详情大块底色，徽章是小胶囊），
+           两者同源同层——只 token 化徽章那一套会让"同一个状态两处不同色"，故一并收编。
+           ⚠️【提案·待主会话裁定】admin_closed→**special 借色**：语义是"行政闭环（管理员直接关单）"，
+             与 special 层原义（对接测试）无关，借的是它的**色位**：本族其余四色是绿/红/琥珀/蓝，
+             紫是唯一能与它们全部拉开的层，而原注释明确要求「与 bypass 黄色区分」。
+             不用 intake/active：两者都是蓝系，会与同族 running（active）撞车；
+             不用 archived：它与 done 的 bg 完全相同（#f0fdf4），本族无边框、区分只能靠底色。 */
+        .val-passed-bg   { background: var(--sem-done-bg); color: var(--sem-done-fg); }
+        .val-failed-bg   { background: var(--sem-failed-bg); color: var(--sem-failed-fg); }
+        .val-bypassed-bg { background: var(--sem-review-bg); color: var(--sem-review-fg); }
+        .val-admin-closed-bg { background: var(--sem-special-bg); color: var(--sem-special-fg); }
+        .val-running-bg  { background: var(--sem-active-bg); color: var(--sem-active-fg); }
         .val-title { font-weight: 600; font-size: 14px; margin-bottom: 6px; }
         .val-meta  { color: #6b7280; font-size: 12px; margin-bottom: 4px; }
         .val-reason {
@@ -1342,8 +1373,8 @@
         <div class="img-lightbox-caption" id="imgLightboxCaption"></div>
     </div>
 
-    <script src="assets/js/app.js?v=v1.137.0_timefmt"></script>
-    <script src="assets/js/unify-helpers.js?v=v1.110.4_unify"></script>
+    <script src="assets/js/app.js?v=v1.141.0_badge2"></script>
+    <script src="assets/js/unify-helpers.js?v=v1.141.0_badge1"></script>
     <!-- S5（前端统一 贴图粘贴扩展方案 20260801_v0.1）：Ctrl+V 贴图共享层接入。文件本体未改，沿用
          S5 checkVersion 下沉后的缓存串；改共享层本体时须同步 bump 这里 + 所有引用页。 -->
     <script src="assets/js/u-paste.js?v=v1.134.0_upaste2"></script>
@@ -1402,13 +1433,42 @@
             'CLAIMED': '进行中(旧)'
         };
 
+        // 状态 → 徽章 class 片段白名单（状态徽章统一 v1.2 §2.2 复审 H-1 / 终审 M）。
+        //   S0 双矩阵实测：本页两个渲染点原本把 r.status / d.status **后端原值直拼** class
+        //   （`status-${r.status}`），且本页受控度全站最弱——requests 表**无 DB CHECK**，
+        //   server.js:13703 的 COLLAB_STATUSES 只在 :14299 一个 PUT 端点做 includes 校验。
+        //   故补本表 frozen：class 片段只可能来自这里，脏数据/新状态拿不到修饰类而落 wait fallback。
+        const COLLAB_STATUS_CLASS = Object.freeze({
+            'PENDING_ASSIGN': 'status-PENDING_ASSIGN',
+            'PENDING': 'status-PENDING',
+            'EXPORTING': 'status-EXPORTING',
+            'SUBMITTED': 'status-SUBMITTED',
+            'DONE': 'status-DONE',
+            'ARCHIVED': 'status-ARCHIVED',
+            'CONFIRMED': 'status-CONFIRMED',
+            'CLAIMED': 'status-CLAIMED',
+        });
+
+        // 徽章 gate：命中白名单才给修饰类；未命中输出无修饰类的 base（落 wait fallback）并 warn 留痕。
+        //   与 UnifyHelpers.statusBadgeByMap 同款契约——本页模板是内联字符串拼接（不走 UnifyHelpers），
+        //   故在此实现同语义的 gate，保证两个渲染点的"class 片段只可能来自固定枚举"不变量一致。
+        function collabStatusClass(status) {
+            if (Object.prototype.hasOwnProperty.call(COLLAB_STATUS_CLASS, status)) return COLLAB_STATUS_CLASS[status];
+            // 去重告警（A-L1）：列表一次渲染几十行，同一未知状态刷屏会淹没真正有用的那一条。
+            UnifyHelpers.warnBadgeOnce('Data_Collab.collabStatusClass', status);
+            return '';
+        }
+
         // 验收状态文案（方案 §9.2）
-        const SQL_VALIDATION_LABELS = {
-            'passed':   { text: '✅ 已通过', cls: 'val-passed' },
-            'failed':   { text: '❌ 待重传', cls: 'val-failed' },
-            'running':  { text: '🕐 验收中', cls: 'val-running' },
-            'bypassed': { text: '⚠️ 旁路放行', cls: 'val-bypassed' }
-        };
+        const SQL_VALIDATION_LABELS = Object.freeze({
+            // 〔S5a-fix4 深冻结〕内层对象各自 freeze：外层 Object.freeze 只挡住"增删键"，
+            //   挡不住 `SQL_VALIDATION_LABELS.passed.cls = 'x'` 这种**改一格**——而 cls 正是
+            //   进 class 属性的那一格，它才是白名单真正要护住的东西。
+            'passed':   Object.freeze({ text: '✅ 已通过', cls: 'val-passed' }),
+            'failed':   Object.freeze({ text: '❌ 待重传', cls: 'val-failed' }),
+            'running':  Object.freeze({ text: '🕐 验收中', cls: 'val-running' }),
+            'bypassed': Object.freeze({ text: '⚠️ 旁路放行', cls: 'val-bypassed' })
+        });
 
         // 摩擦归因文案（方案 §6.6）
         const FRICTION_CAUSE_LABELS = {
@@ -1818,7 +1878,7 @@
                 let valCell = '<span class="val-pending">—</span>';
                 if (r.bypass_validation === 1 || r.sql_validation_status === 'bypassed') {
                     valCell = `<span class="val-badge val-bypassed">${SQL_VALIDATION_LABELS.bypassed.text}</span>`;
-                } else if (r.sql_validation_status && SQL_VALIDATION_LABELS[r.sql_validation_status]) {
+                } else if (r.sql_validation_status && Object.prototype.hasOwnProperty.call(SQL_VALIDATION_LABELS, r.sql_validation_status)) {
                     const v = SQL_VALIDATION_LABELS[r.sql_validation_status];
                     valCell = `<span class="val-badge ${v.cls}">${v.text}</span>`;
                 }
@@ -1860,7 +1920,7 @@
                     <td class="col-id">#${r.id}</td>
                     <td>${oa}</td>
                     <td>${escapeHtml(r.requester_dept)}</td>
-                    <td><span class="u-status-badge status-${r.status}">${STATUS_LABELS[r.status] || r.status}</span>${timeoutMark}</td>
+                    <td><span class="u-status-badge ${collabStatusClass(r.status)}">${escapeHtml(STATUS_LABELS[r.status] || r.status)}</span>${timeoutMark}</td>
                     <td>${escapeHtml(r.requester_name)}</td>
                     <td>${targetDb}</td>
                     <td class="col-desc" title="${escapeHtml(r.description)}">${escapeHtml(desc)}</td>
@@ -2819,7 +2879,7 @@
                             <div class="detail-kv-label">录入人</div>
                             <div class="detail-kv-value">${escapeHtml(d.created_by_name)} · ${fmtDate(d.created_at)}</div>
                             <div class="detail-kv-label">当前状态</div>
-                            <div class="detail-kv-value"><span class="u-status-badge status-${d.status}">${STATUS_LABELS[d.status] || d.status}</span></div>
+                            <div class="detail-kv-value"><span class="u-status-badge ${collabStatusClass(d.status)}">${escapeHtml(STATUS_LABELS[d.status] || d.status)}</span></div>
                             ${renderExporterFieldRow(d)}
                         </div>
                     </div>

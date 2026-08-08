@@ -1621,13 +1621,102 @@ function filterArchivedTable(keyword) {
     updateArchivedTableView();
 }
 
+// ==================== 任务状态徽章（状态徽章统一 S4·方案 v1.2 §2.6）====================
+// M-1 硬约束：状态值只经**白名单 map** 映射到固定 sem-* class 与固定 label，label 一律 escapeHtml，
+//   未知状态兜底 sem-wait + console.warn 留痕——禁止把后端状态原值直接拼进 class / HTML。
+// 语义映射（方案 v1.2 §2.6 明文）：OPEN→wait／CLAIMED→active／ON_HOLD→hold／TRANSFERRING→staging／
+//   DONE「待确认」→review／ARCHIVED→archived。色值一律来自 components.css 的 --sem-* 语义色板，
+//   本文件与 style.css 都不再出现**任务徽章族**的色值（原卡片 TRANSFERRING 内联渐变、ARCHIVED
+//   内联灰随此退场）；style.css 里仍保留一条 `.status-badge` base——那是 Asset_Center /
+//   Domain_Manager 两页仍在依赖的遗留形态属性，与任务徽章无关，退场口径见该处注释与锚点 §9 P1。
+// 〔可见变化的口径·别读窄了〕**六态观感统一本身**就是方案拍板色板的全量可见变化（六种状态的
+//   底色/描边/色点/字号全部换成语义色板），不是"只有两处变了"。这里额外记的只是
+//   **相对方案映射表的差异两处**：① 抽屉 TRANSFERRING 原为 class 空串 → 裸 base 琥珀底白字，
+//   与「已提交」无从区分，现接 sem-staging；② 卡片 TRANSFERRING 内联渐变与 ARCHIVED 内联灰退场。
+//   面向用户的完整可见变化清单由 S5b 上线通知逐项列，不在本注释里替它下结论。
+// 文案取**现网各分支实际文案**（S0 双矩阵实测），本次零文案变更——卡片侧 DONE 显示「待确认」、
+//   抽屉侧 DONE 显示「已提交」，两处历史上就不同，故分 label / drawerLabel 两个字段各自钉死；
+//   把它们统一成一个说法属产品文案变更，不在"展示层重构"的范围内，不趁机夹带。
+// ⚠️ 本常量声明在 createCard() 之上：createCard 只在运行时被调用，理论上 TDZ 无碍，
+//   但"声明在使用点之前"是能一眼看出来的安全，不必让人去推断调用时机。
+//   ⚠️ 外层 + 每个 value 都 freeze：只 freeze 外层挡得住"加/删状态"，挡不住
+//   `TASK_STATUS_BADGE.DONE.cls = 'sem-done'` 这种**改一格**的写法——那正是白名单最该防的形态。
+const TASK_STATUS_BADGE = Object.freeze({
+    OPEN: Object.freeze({ cls: 'sem-wait', label: '待认领', drawerLabel: '待认领' }),
+    CLAIMED: Object.freeze({ cls: 'sem-active', label: '进行中', drawerLabel: '进行中' }),
+    ON_HOLD: Object.freeze({ cls: 'sem-hold', label: '存疑', drawerLabel: '存疑' }),
+    TRANSFERRING: Object.freeze({ cls: 'sem-staging', label: '转发中', drawerLabel: '转发中' }),
+    DONE: Object.freeze({ cls: 'sem-review', label: '待确认', drawerLabel: '已提交' }),
+    ARCHIVED: Object.freeze({ cls: 'sem-archived', label: '已归档', drawerLabel: '已归档' })
+});
+
+// 未知状态告警去重：一屏几十张卡都是同一个未知状态时，不去重会把这条真正有用的信息刷没。
+const _taskStatusWarned = new Set();
+function warnTaskStatusOnce(status) {
+    const key = String(status);
+    if (_taskStatusWarned.has(key)) return;
+    _taskStatusWarned.add(key);
+    console.warn(`[任务状态徽章] 未登记状态 "${key}" —— 已降级为中性等待观感（sem-wait）。`
+        + '后端新增状态时需同步 TASK_STATUS_BADGE 与 scripts/verify-badge-alias.js 的 spec。');
+}
+
+// class 片段 gate：状态变成 class 的**唯一**出口（守卫按调用次数恰等锁死，绕过即红）。
+//   写法刻意与 pfStatusClass / mdcStatusClass / itStatusClass 一致——hasOwnProperty 守门 + 直接从
+//   frozen map 取值 + 字面量兜底：两条 return 的形态都能被守卫静态判定（map 成员取值 / 登记字面量），
+//   任何"拼一个类名出来"的写法（如 `return 'sem-' + status`）会立刻判红。
+function taskStatusClass(status) {
+    if (Object.prototype.hasOwnProperty.call(TASK_STATUS_BADGE, status)) return TASK_STATUS_BADGE[status].cls;
+    warnTaskStatusOnce(status);
+    return 'sem-wait';
+}
+
+// 文案 gate：variant==='drawer' 取抽屉文案，其余取卡片文案。
+function taskStatusLabel(status, variant) {
+    if (Object.prototype.hasOwnProperty.call(TASK_STATUS_BADGE, status)) {
+        return variant === 'drawer' ? TASK_STATUS_BADGE[status].drawerLabel : TASK_STATUS_BADGE[status].label;
+    }
+    // 未登记状态**显示转义后的原值**（而不是"未知"之类的占位）：这是有意的排障可见性——
+    //   后端加了状态而前端没跟上时，页面上直接看得见那个陌生状态字符串，配合 console.warn
+    //   能一眼定位；换成占位文案反而把线索藏起来。非遗漏，改动前先看这条。
+    //   安全性由调用方 taskStatusBadge 的 escapeHtml 兜底，原值不进 class（class 只来自上面的 map）。
+    // 〔A-M2〕但"空"不属于可排障的信息：null/undefined/纯空白都会渲染成一枚**没有文字的徽章**，
+    //   用户看到一个空胶囊，既不知道是坏了还是就长这样。这类给固定文案「状态缺失」——
+    //   它同样是异常信号，只是可读。非空的未知值仍照上面显示原值 + warn。
+    const raw = (status === null || status === undefined) ? '' : String(status);
+    if (raw.trim() === '') return '状态缺失';
+    // 〔A-L1〕超长原值截断：状态值理论上不该很长，但真出现一个几百字符的脏值时，
+    //   整行布局会被撑爆。截断只影响**显示**，console.warn 里始终是完整原值，排障不丢信息。
+    //   有意不加 title 属性——本页存量的 title 拼接未统一处理引号，加一处就多一处引号面。
+    //   ⚠️ 按**码点**截断（Array.from）而不是 `.slice()`：后者按 UTF-16 码元切，
+    //   在代理对（emoji、部分生僻字）中间下刀会切出半个字符，渲染成乱码方块。
+    //   〔24D 残余·登记接受〕码点 ≠ 字素簇：ZWJ 序列（👨‍👩‍👧）或带变体选择符的 emoji 仍可能被
+    //   从中间拆开，视觉上碎成几个字符。要完全对齐"20 个可见字符"得上 Intl.Segmenter。
+    //   不做的理由：这条路径的输入是**后端状态值**（英文枚举或中文短词），出现 ZWJ emoji
+    //   本身就已经是需要 warn 的异常数据，截断得好不好看不是这里要解的问题。
+    const cps = Array.from(raw);
+    return cps.length > 20 ? cps.slice(0, 20).join('') + '…' : raw;
+}
+
+// 徽章 HTML 的唯一出口。
+// ⚠️ escapeHtml 说明：本文件有两处同名顶层函数声明（:363 与文件末尾那处），函数声明后者胜出——
+//    胜出的实现走 textContent→innerHTML，转义 & < >，**不转义引号**。这里的插值落在 <span> 的
+//    **文本节点**位置（不是属性值内），引号无需转义，该实现足够；class 一侧根本不经它——
+//    class 片段只可能来自 frozen map 里的固定字符串，原值没有进 class 的通道。
+function taskStatusBadge(status, variant) {
+    return `<span class="u-status-badge ${taskStatusClass(status)}">${escapeHtml(taskStatusLabel(status, variant))}</span>`;
+}
+
 function createCard(task) {
     const div = document.createElement('div');
     div.className = 'task-card';
     div.id = `task-card-${task.id}`;
 
     let actionBtn = '';
-    let statusBadge = '';
+    // 状态徽章统一 S4：六个分支原先各自硬编码一段 `<span class="status-badge badge-*">`（两处还是内联色），
+    //   现统一由白名单 gate 出，分支只保留真正随状态变化的东西（actionBtn / dateStr）。
+    //   顺带的正向变化：未登记状态原本六个分支全不命中 → 徽章为空串**什么都不显示**，
+    //   现在退化为 sem-wait 中性观感 + console.warn 留痕（方案 §2.6 M-1 要求的兜底，原实现够不着）。
+    const statusBadge = taskStatusBadge(task.status);
     let dateStr = formatDateTimeUnified(task.created_at);
     // 对 JS 回调使用纯净字符串，移除可能破坏语法的所有符号
     const jsSafeTitle = (task.title || '').replace(/['"\\]/g, ' ').replace(/\n/g, ' ');
@@ -1635,7 +1724,6 @@ function createCard(task) {
 
     // OPEN 状态由表格处理,但保留回退逻辑以防万一
     if (task.status === 'OPEN') {
-        statusBadge = '<span class="status-badge badge-open">待认领</span>';
         // 管理员和发布者可以分配，普通用户可以认领
         if (isAdmin() || isPublisher()) {
             actionBtn = `
@@ -1648,7 +1736,6 @@ function createCard(task) {
         }
     } else if (task.status === 'ON_HOLD') {
         div.classList.add('card-hold');
-        statusBadge = '<span class="status-badge badge-hold">存疑</span>';
         let reasonHtml = `
             <div style="flex:1; margin-bottom:12px;">
                 <div class="hold-reason" style="margin-bottom:6px;">
@@ -1678,7 +1765,6 @@ function createCard(task) {
                 </div>`;
         }
     } else if (task.status === 'CLAIMED') {
-        statusBadge = '<span class="status-badge badge-claimed">进行中</span>';
         let transferBtn = '';
         if (isOwner(task)) {
             transferBtn = `<button class="btn-claim" style="background:#ed8936;color:white;" onclick="openTransferModal(${task.id}, '${jsSafeTitle}')" title="转发给他人，需对方确认后生效">🔀 转发</button>`;
@@ -1746,7 +1832,6 @@ function createCard(task) {
         dateStr = `<span title="认领时间" style="font-size:0.85em;color:#718096;">认领于: ${formatDateTimeUnified(task.claimed_at)}</span>`;
     } else if (task.status === 'TRANSFERRING') {
         // 转发中状态
-        statusBadge = '<span class="status-badge" style="background:linear-gradient(135deg, #ed8936, #dd6b20);color:white;">转发中</span>';
         const receiverName = task.transfer_to_name || '接收者';
         if (isOwner(task)) {
             // 转发者可以撤回
@@ -1760,7 +1845,6 @@ function createCard(task) {
         }
         dateStr = `<span title="认领时间" style="font-size:0.85em;color:#718096;">认领于: ${formatDateTimeUnified(task.claimed_at)}</span>`;
     } else if (task.status === 'DONE') {
-        statusBadge = '<span class="status-badge badge-done">待确认</span>';
         const isDimDwd = ['DIM_DEV', 'DWD_DEV'].includes(task.category);
         // 权限控制: 管理员/发布者可归档所有层级; ODS owner可自行归档; DIM/DWD owner需等待管理员
         if (isAdmin() || isPublisher()) {
@@ -1793,7 +1877,6 @@ function createCard(task) {
         }
         dateStr = `<span style="font-size:0.85em;color:#718096;">提交于: ${formatDateTimeUnified(task.done_at)}</span>`;
     } else if (task.status === 'ARCHIVED') {
-        statusBadge = '<span class="status-badge" style="background:#cbd5e0; color:#4a5568;">已归档</span>';
         // 精简版：操作按钮移至抽屉，卡片仅显示状态文字
         actionBtn = `<span style="color:#a0aec0;font-size:0.85em;">已完成</span>`;
 
@@ -4289,14 +4372,16 @@ async function saveRemark() {
 // ==================== 任务详情抽屉功能 ====================
 let currentDrawerTaskId = null;
 
-const DRAWER_STATUS_MAP = {
-    'OPEN': { text: '待认领', class: 'badge-open' },
-    'CLAIMED': { text: '进行中', class: 'badge-claimed' },
-    'ON_HOLD': { text: '存疑', class: 'badge-hold' },
-    'DONE': { text: '已提交', class: 'badge-done' },
-    'ARCHIVED': { text: '已归档', class: 'badge-archived' },
-    'TRANSFERRING': { text: '转发中', class: '' }
-};
+// 〔状态徽章统一 S4〕原 DRAWER_STATUS_MAP 已整体退场，抽屉与卡片共用同一个白名单 TASK_STATUS_BADGE
+//   （定义见 createCard 上方）：
+//     · 旧 map 六键齐全，但 TRANSFERRING 的 class 是**空串**——转发中的单据打开抽屉，
+//       徽章只有裸 `.status-badge`（抽屉段 base 的 --color-accent 琥珀底白字），
+//       与「已提交」的观感完全一样，看不出是转发中。新表给它 sem-staging，这是一处**真实的语义变化**。
+//       ⚠️ S0 双矩阵 §1.3 把本 map 记为「5 键·无 TRANSFERRING」，系读取行范围 :4292-4297 截断所致
+//       （TRANSFERRING 在第 :4298 行），实测六键——以代码为准，矩阵该处需订正。
+//     · 旧兜底 `{ text: task.status, class: '' }` 把后端原值未转义拼进 innerHTML，一并修掉；
+//     · 抽屉侧文案差异（DONE 显「已提交」）由 TASK_STATUS_BADGE 的 drawerLabel 字段承接，文案零变更。
+//   My_Workspace.html 页内那份抽屉副本原本复用本常量，已同步改为调用 taskStatusBadge()。
 
 const DRAWER_CATEGORY_MAP = {
     'ODS_SYNC': { text: 'ODS同步', color: '#3182ce' },
@@ -4326,8 +4411,7 @@ function openTaskDetailDrawer(taskId) {
     document.getElementById('drawerTaskTitle').textContent = task.title || '任务详情';
 
     // 状态
-    const status = DRAWER_STATUS_MAP[task.status] || { text: task.status, class: '' };
-    document.getElementById('drawerStatus').innerHTML = `<span class="status-badge ${status.class}">${status.text}</span>`;
+    document.getElementById('drawerStatus').innerHTML = taskStatusBadge(task.status, 'drawer');
 
     // 优先级
     const priority = DRAWER_PRIORITY_MAP[task.priority] || { text: task.priority || '-', color: '#a0aec0' };

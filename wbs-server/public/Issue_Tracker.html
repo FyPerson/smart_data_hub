@@ -6,8 +6,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>数据开发 - 智数协同平台</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="assets/css/style.css?v=v1.117.0_fabdrag">
-    <link rel="stylesheet" href="assets/css/components.css?v=v1.123.1_unify12b">
+    <link rel="stylesheet" href="assets/css/style.css?v=v1.141.0_badge2">
+    <link rel="stylesheet" href="assets/css/components.css?v=v1.141.0_badge1">
     <style>
         /* ============================================================
            需求跟踪页 · 页面专属残留（共享组件层已迁移至 assets/css/components.css）
@@ -34,18 +34,34 @@
         .u-type-tag.t-源系统变更 { background: #fce7f3; color: #9d174d; }
         .u-type-tag.t-调度异常 { background: #fecaca; color: #991b1b; }
 
-        /* 状态徽章修饰色（base 已 harmonize → components.css .u-status-badge；6 态） */
-        .u-status-badge.s-待处理 { background: #f3f4f6; color: #6b7280; }
-        .u-status-badge.s-处理中 { background: #dbeafe; color: #1d4ed8; }
-        .u-status-badge.s-待验证 { background: #fef3c7; color: #92400e; }
-        .u-status-badge.s-已关闭 { background: #d1fae5; color: #065f46; }
-        .u-status-badge.s-已暂缓 { background: #fef9c3; color: #854d0e; }
-        .u-status-badge.s-已拒绝 { background: #f3f4f6; color: #991b1b; }
+        /* 状态徽章语义别名（6 态·class 用中文状态值；—— 状态徽章统一 v1.2 §2.2 S2 接线 ——）
+           色值全部来自 components.css :root 语义色板，本页不再写具体色值；别名替换原 direct 声明
+           禁双存（复审 M-1）；六值齐设、一律 var() 引用。
+           本页无语义变化（方案 §2.4：仅 C 观感）——各态映射到与原色最近的语义层。
+           注意「已关闭」的用户可见文案由 statusDisplayLabel()(:1792) 改显「已完成」，故映射 done（绿）；
+           class 片段仍是 s-已关闭（数据值不变，写读同源）。 */
+        .u-status-badge.s-待处理 { --sb-bg: var(--sem-wait-bg); --sb-fg: var(--sem-wait-fg); --sb-bd: var(--sem-wait-bd); --sb-bds: var(--sem-wait-bds); --sb-dot: var(--sem-wait-dot); --sb-deco: var(--sem-wait-deco); }
+        .u-status-badge.s-处理中 { --sb-bg: var(--sem-active-bg); --sb-fg: var(--sem-active-fg); --sb-bd: var(--sem-active-bd); --sb-bds: var(--sem-active-bds); --sb-dot: var(--sem-active-dot); --sb-deco: var(--sem-active-deco); }
+        .u-status-badge.s-待验证 { --sb-bg: var(--sem-review-bg); --sb-fg: var(--sem-review-fg); --sb-bd: var(--sem-review-bd); --sb-bds: var(--sem-review-bds); --sb-dot: var(--sem-review-dot); --sb-deco: var(--sem-review-deco); }
+        .u-status-badge.s-已关闭 { --sb-bg: var(--sem-done-bg); --sb-fg: var(--sem-done-fg); --sb-bd: var(--sem-done-bd); --sb-bds: var(--sem-done-bds); --sb-dot: var(--sem-done-dot); --sb-deco: var(--sem-done-deco); }
+        .u-status-badge.s-已暂缓 { --sb-bg: var(--sem-hold-bg); --sb-fg: var(--sem-hold-fg); --sb-bd: var(--sem-hold-bd); --sb-bds: var(--sem-hold-bds); --sb-dot: var(--sem-hold-dot); --sb-deco: var(--sem-hold-deco); }
+        .u-status-badge.s-已拒绝 { --sb-bg: var(--sem-rejected-bg); --sb-fg: var(--sem-rejected-fg); --sb-bd: var(--sem-rejected-bd); --sb-bds: var(--sem-rejected-bds); --sb-dot: var(--sem-rejected-dot); --sb-deco: var(--sem-rejected-deco); }
 
-        /* 通知状态徽章修饰色（base 已 harmonize → components.css .u-notify-badge；C6c：notify_status 配色 H-4） */
-        .u-notify-badge.notify-sent { background: #ecfdf5; color: #059669; }
-        .u-notify-badge.notify-failed { background: #fef2f2; color: #dc2626; cursor: help; }
-        .u-notify-badge.notify-not_sent { background: #f3f4f6; color: #6b7280; }
+        /* 通知状态徽章修饰色（base 已 harmonize → components.css .u-notify-badge；C6c：notify_status 配色 H-4）
+           〔状态徽章统一 S5a·口径二〕两处改动：
+             ① 前缀 `notify-*` → `n-*`，与 Data_Correction 的 `t-*` / Issue_Tracker 的 `t-*` 同款短前缀对齐；
+             ② 色值改语义色板 token 引用（sent→done / failed→failed / not_sent→wait）。
+           **deco 不继承**（终审 L）：通知族不是主状态徽章族，映射到某层时只取色，不带删除线等文字修饰。
+           `no_phone` 一态方案里写了"若有"——S0 实测本页 CHECK 只有三值、全仓 grep 零命中，故不建规则。
+           次级/通知族**只把已有的 background/color 换成 token**，不新增 border 声明：
+           加边框会改盒子尺寸，那是观感重构不是"色值 token 化"，超出口径二范围。 */
+        .u-notify-badge.n-sent { background: var(--sem-done-bg); color: var(--sem-done-fg); }
+        .u-notify-badge.n-failed { background: var(--sem-failed-bg); color: var(--sem-failed-fg); cursor: help; }
+        .u-notify-badge.n-not_sent { background: var(--sem-wait-bg); color: var(--sem-wait-fg); }
+        /* 〔S5a-fix MED-7〕原此处有三条 `notify-*` 旧类兼容别名，**已删**。
+           删除理由：兼容别名的成文前提是「可能还有页面在渲染旧类名」——而这里 CSS 与产出 class 的
+           JS **同在一个 HTML 文件里、同一版发布**，浏览器不可能拿到"新 CSS + 旧 JS"的组合；
+           那个前提在本项目的单文件页面结构下根本不可达。留着只会变成第二份要维护的色值来源。 */
 
         /* ===== 详情网格（页面专属，未并入共享层）===== */
         .detail-grid {
@@ -564,8 +580,8 @@
         </div>
     </div>
 
-    <script src="assets/js/app.js?v=v1.137.0_timefmt"></script>
-    <script src="assets/js/unify-helpers.js?v=v1.110.4_unify"></script>
+    <script src="assets/js/app.js?v=v1.141.0_badge2"></script>
+    <script src="assets/js/unify-helpers.js?v=v1.141.0_badge1"></script>
     <!-- S5（前端统一 贴图粘贴扩展方案 20260801_v0.1）：Ctrl+V 贴图共享层接入。文件本体未改，沿用
          S5 checkVersion 下沉后的缓存串；改共享层本体时须同步 bump 这里 + 所有引用页。 -->
     <script src="assets/js/u-paste.js?v=v1.134.0_upaste2"></script>
@@ -715,9 +731,9 @@
             tbody.innerHTML = sorted.map(issue => `
                 <tr onclick="openDrawer(${issue.id})">
                     <td style="color:#9ca3af; font-size:12px;">#${issue.id}</td>
-                    <td><span class="u-pri ${escapeHtml(issue.priority)}">${escapeHtml(issue.priority)}</span></td>
+                    <td><span class="u-pri ${itPriClass(issue.priority)}">${escapeHtml(issue.priority)}</span></td>
                     <td><span class="u-type-tag ${typeClass(issue.type)}">${escapeHtml(issue.type)}</span></td>
-                    <td><span class="u-status-badge s-${issue.status}">${escapeHtml(statusDisplayLabel(issue.status))}</span></td>
+                    <td><span class="u-status-badge ${itStatusClass(issue.status)}">${escapeHtml(statusDisplayLabel(issue.status))}</span></td>
                     <td>${notifyBadge(issue)}</td>
                     <td style="font-weight:500; max-width:320px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">
                         ${escapeHtml(issue.title)}
@@ -931,8 +947,8 @@
             // 详情网格（C6c：加业务方信息/OA/数据域；H-1 所有后端文本走 escapeHtml）
             html += `<div class="detail-grid">
                 <div class="detail-item"><label>类型</label><div class="detail-value"><span class="u-type-tag ${typeClass(issue.type)}">${escapeHtml(issue.type)}</span></div></div>
-                <div class="detail-item"><label>优先级</label><div class="detail-value"><span class="u-pri ${escapeHtml(issue.priority)}">${escapeHtml(issue.priority)}</span></div></div>
-                <div class="detail-item"><label>状态</label><div class="detail-value"><span class="u-status-badge s-${issue.status}">${escapeHtml(statusDisplayLabel(issue.status))}</span></div></div>
+                <div class="detail-item"><label>优先级</label><div class="detail-value"><span class="u-pri ${itPriClass(issue.priority)}">${escapeHtml(issue.priority)}</span></div></div>
+                <div class="detail-item"><label>状态</label><div class="detail-value"><span class="u-status-badge ${itStatusClass(issue.status)}">${escapeHtml(statusDisplayLabel(issue.status))}</span></div></div>
                 <div class="detail-item"><label>来源</label><div class="detail-value">${escapeHtml(issue.source || '')}</div></div>
                 <div class="detail-item"><label>通知状态</label><div class="detail-value">${notifyBadge(issue)}</div></div>
                 <div class="detail-item"><label>业务方部门</label><div class="detail-value">${escapeHtml(issue.requester_dept || '-')}</div></div>
@@ -1005,7 +1021,7 @@
                 hist.forEach(h => {
                     const flow = h.from_status ? `${escapeHtml(statusDisplayLabel(h.from_status))} → ${escapeHtml(statusDisplayLabel(h.to_status))}` : `创建 → ${escapeHtml(statusDisplayLabel(h.to_status))}`;
                     html += `<div style="margin-bottom:10px;">
-                        <div style="font-size:12px; color:#374151;"><span class="u-status-badge s-${h.to_status}" style="font-size:10px;">${escapeHtml(statusDisplayLabel(h.to_status))}</span> <span style="color:#6b7280;">${flow}</span></div>
+                        <div style="font-size:12px; color:#374151;"><span class="u-status-badge ${itStatusClass(h.to_status)}" style="font-size:10px;">${escapeHtml(statusDisplayLabel(h.to_status))}</span> <span style="color:#6b7280;">${flow}</span></div>
                         <div style="font-size:11px; color:#9ca3af; margin-top:2px;">${escapeHtml(h.operator_name || '系统')} · ${escapeHtml(h.created_at || '')}</div>
                         ${h.reason ? `<div style="font-size:12px; color:#4b5563; margin-top:2px;">原因：${escapeHtml(h.reason)}</div>` : ''}
                     </div>`;
@@ -1738,11 +1754,30 @@
 
         // 通知状态徽章（C6c：notify_status 配色 + failed 时 hover notify_error）
         //   notify_status 取值 not_sent/sent/failed；H-1：notify_error 入 title 属性前转义
+        // 〔状态徽章统一 S5a·口径二〕通知徽章的 class 片段改经 frozen 白名单 map + gate 输出。
+        //   原写法 `notify-${escapeHtml(st)}` 是 S0 甲6 记录的**非受控 raw 拼接**：st 来自后端
+        //   notify_status，虽有 CHECK 三值兜底，但终审 M 的口径是"后端 CHECK 只证明输入受控，
+        //   不替代前端 class 白名单"——与主状态族同一条规矩，通知族一并补齐。
+        const IT_NOTIFY_CLASS = Object.freeze({ sent: 'n-sent', failed: 'n-failed', not_sent: 'n-not_sent' });
+        // 〔S5a-fix2 M8〕优先级 class 片段白名单 + gate（S0 甲9 收口）。
+        //   本页两处原为 `u-pri ${escapeHtml(issue.priority)}`——esc 只防注入，不防"产出一个
+        //   没有对应规则的 class"（后端 CHECK 是 P0-P3，但终审 M 的口径是后端 CHECK 不替代前端白名单）。
+        const IT_PRI_CLASS = Object.freeze({ P0: 'P0', P1: 'P1', P2: 'P2', P3: 'P3' });
+        function itPriClass(p) {
+            if (Object.prototype.hasOwnProperty.call(IT_PRI_CLASS, p)) return IT_PRI_CLASS[p];
+            UnifyHelpers.warnBadgeOnce('Issue_Tracker.itPriClass', p);
+            return 'P2';
+        }
+        function itNotifyClass(st) {
+            if (Object.prototype.hasOwnProperty.call(IT_NOTIFY_CLASS, st)) return IT_NOTIFY_CLASS[st];
+            UnifyHelpers.warnBadgeOnce('Issue_Tracker.itNotifyClass', st);
+            return '';   // 未登记态降级为无修饰类的裸 base（与 itStatusClass 同款兜底形态）
+        }
         function notifyBadge(issue) {
             const st = issue.notify_status || 'not_sent';
             const label = st === 'sent' ? '已通知' : (st === 'failed' ? '失败' : '未通知');
             const titleAttr = (st === 'failed' && issue.notify_error) ? ` title="${escapeHtml(issue.notify_error)}"` : '';
-            return `<span class="u-notify-badge notify-${escapeHtml(st)}"${titleAttr}>${label}</span>`;
+            return `<span class="u-notify-badge ${itNotifyClass(st)}"${titleAttr}>${label}</span>`;
         }
         // 数据域展示（COALESCE 空→未分类）
         function domainText(d) { return (d && String(d).trim()) ? escapeHtml(d) : '<span style="color:#d1d5db;">未分类</span>'; }
@@ -1791,6 +1826,32 @@
         //   仅"给人看的文字"映射为「已完成」。徽章必须 class 用原 status、文字用本函数，两者分离。
         function statusDisplayLabel(status) {
             return status === '已关闭' ? '已完成' : status;
+        }
+
+        // 状态 → 徽章 class 片段白名单（状态徽章统一 v1.2 §2.2 复审 H-1 / 终审 M）。
+        //   S0 双矩阵实测：本页三个渲染点原本把 issue.status / h.to_status **后端原值直拼** class
+        //   （`s-${issue.status}`），前端零 map。后端 server.js:1569 有 CHECK 六值 = 输入受控，
+        //   但终审 M 钉死「后端 CHECK 只证明输入受控，不替代前端 class 白名单」——落库值受控 ≠
+        //   历史脏数据/未来加状态时前端安全，故补本表 frozen。
+        //   key = 落库状态原值（不是展示文案：'已关闭' 展示为「已完成」但数据值与 class 片段均不变，
+        //   写读同源不因展示改名而破坏）。
+        const IT_STATUS_CLASS = Object.freeze({
+            '待处理': 's-待处理',
+            '处理中': 's-处理中',
+            '待验证': 's-待验证',
+            '已关闭': 's-已关闭',
+            '已暂缓': 's-已暂缓',
+            '已拒绝': 's-已拒绝',
+        });
+
+        // 徽章 gate：命中白名单才给修饰类；未命中输出无修饰类的 base（落 wait fallback）并 warn 留痕。
+        //   与 UnifyHelpers.statusBadgeByMap 同款契约——本页模板是内联字符串拼接（不走 UnifyHelpers），
+        //   故在此实现同语义的 gate，保证"class 片段只可能来自固定枚举"这条不变量三个渲染点一致。
+        function itStatusClass(status) {
+            if (Object.prototype.hasOwnProperty.call(IT_STATUS_CLASS, status)) return IT_STATUS_CLASS[status];
+            // 去重告警（A-L1）：列表一次渲染几十行，同一未知状态刷屏会淹没真正有用的那一条。
+            UnifyHelpers.warnBadgeOnce('Issue_Tracker.itStatusClass', status);
+            return '';
         }
 
         // 状态推进按钮文案（v1.75.3）：把"状态机内部术语"翻译成开发/管理员能直觉理解的动作文案。

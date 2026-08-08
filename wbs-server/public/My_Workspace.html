@@ -6,7 +6,13 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>我的工作台 - 智数协同平台</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="assets/css/style.css?v=v1.117.0_fabdrag">
+    <link rel="stylesheet" href="assets/css/style.css?v=v1.141.0_badge2">
+    <!-- 状态徽章统一 S4：引入共享组件层（本页只用其中的 .u-status-badge + .sem-* 语义类）。
+         引入安全性由 S0 双矩阵第三节的**结构性保证**背书，不是"看着没冲突"：
+         components.css 全部规则的根选择器只有三种——`.u-*`（本页 DOM 零个 u- 前缀 class）、
+         `.unified-page`（本页 <body> 为裸标签，且**不得**加这个 class，加了交集判定即作废）、
+         `:root`（只声明自定义属性，对未引用它的元素纯惰性）。⇒ 只有新写的 u-status-badge 会生效。 -->
+    <link rel="stylesheet" href="assets/css/components.css?v=v1.141.0_badge1">
     <style>
         /* 工作台专用样式 */
         .workspace-container {
@@ -173,11 +179,10 @@
             background: #edf2f7;
         }
 
-        .stats-detail-item .priority-badge {
-            padding: 2px 8px;
-            border-radius: 4px;
-            font-size: 0.75em;
-            font-weight: 600;
+        /* 〔状态徽章统一 S5a·口径二〕原 `.stats-detail-item .priority-badge` 形态规则已删——
+           形态改由共享层 `.u-pri` 提供。此处只保留**版面间距**（徽章与右侧内容的距离），
+           那是本页布局的事、不是组件的事，故留在页内而不上移共享层。 */
+        .stats-detail-item .u-pri {
             margin-right: 12px;
         }
 
@@ -289,27 +294,13 @@
             border-left-color: #f59e0b;
         }
 
-        .task-item .task-priority {
-            font-size: 0.75em;
-            padding: 2px 6px;
-            border-radius: 4px;
+        /* 〔状态徽章统一 S5a·口径二·§9 待追认 P2 已裁定纳入〕原 `.task-item .task-priority`
+           形态 + P0/P1/P2 三条色值规则整组删除——本页曾有**两套**优先级族并存
+           （`.priority-badge` 与 `.task-priority`，色值还不一样，S0 乙5 记录）。
+           只切其中一套的话，「优先级 u-pri 单源」这个目标只达成一半，故两套一并迁走。
+           同上，仅保留版面间距。 */
+        .task-item .u-pri {
             margin-right: 10px;
-            font-weight: 600;
-        }
-
-        .task-item .task-priority.P0 {
-            background: #fecaca;
-            color: #b91c1c;
-        }
-
-        .task-item .task-priority.P1 {
-            background: #fed7aa;
-            color: #c2410c;
-        }
-
-        .task-item .task-priority.P2 {
-            background: #e2e8f0;
-            color: #64748b;
         }
 
         .task-item .task-info {
@@ -869,7 +860,7 @@
         </div>
     </div>
 
-    <script src="assets/js/app.js?v=v1.137.0_timefmt"></script>
+    <script src="assets/js/app.js?v=v1.141.0_badge2"></script>
     <script>
         // SERVER_URL, API_URL, currentUser, CATEGORY_MAP 已在 app.js 中定义
 
@@ -1132,7 +1123,11 @@
         function renderTaskItem(task, type) {
             const categoryLabel = CATEGORY_MAP[task.category] || task.category;
             const isOverdue = task.is_overdue;
-            const priorityClass = task.priority || 'P2';
+            // 〔S5a-fix2 H1〕优先级**规范值单源**：class 位、外层容器类、可见文本三处必须是同一个值。
+            //   原来外层容器类用的是原值、徽章 class 走 gate 规范值、可见文本又是原值——
+            //   一个未知优先级会同时产出三种东西（外层挂个野类名 / 徽章落 P2 / 文本显示野值）。
+            //   现在三处统一取 gate 的规范值；原值只进 warn（gate 内部），不进 DOM。
+            const priorityKey = mwPriClass(task.priority);
 
             let timeInfo = '';
             if (task.elapsed_hours > 0) {
@@ -1182,8 +1177,8 @@
             }
 
             return `
-                <div class="task-item ${priorityClass} ${isOverdue ? 'overdue' : ''}">
-                    <span class="task-priority ${priorityClass}">${priorityClass}</span>
+                <div class="task-item ${priorityKey} ${isOverdue ? 'overdue' : ''}">
+                    <span class="u-pri ${priorityKey}">${escapeHtml(priorityKey)}</span>
                     <div class="task-info">
                         <div class="task-title" style="cursor:pointer;" onclick="openTaskDetailDrawer(${task.id})" title="点击查看详情">${escapeHtml(task.title)}</div>
                         <div class="task-meta">
@@ -1282,7 +1277,8 @@
 
         // 工作台任务缓存
         let workspaceTasksCache = [];
-        // currentDrawerTaskId, DRAWER_STATUS_MAP, DRAWER_PRIORITY_MAP, DRAWER_CATEGORY_MAP 已在 app.js 中定义
+        // currentDrawerTaskId, DRAWER_PRIORITY_MAP, DRAWER_CATEGORY_MAP 已在 app.js 中定义
+        // 状态徽章走 app.js 的 taskStatusBadge()（TASK_STATUS_BADGE 白名单·S4 起 DRAWER_STATUS_MAP 已退场）
 
         // 打开任务详情抽屉
         async function openTaskDetailDrawer(taskId) {
@@ -1312,8 +1308,9 @@
             document.getElementById('drawerTaskTitle').textContent = task.title || '任务详情';
 
             // 状态
-            const status = DRAWER_STATUS_MAP[task.status] || { text: task.status, class: '' };
-            document.getElementById('drawerStatus').innerHTML = `<span class="status-badge ${status.class}">${status.text}</span>`;
+            // 〔状态徽章统一 S4〕与 app.js 抽屉同源：走白名单 gate taskStatusBadge()（定义在 app.js），
+            //   本页这份抽屉副本原来复用 DRAWER_STATUS_MAP + 自己拼 HTML，只改 app.js 覆盖不到它。
+            document.getElementById('drawerStatus').innerHTML = taskStatusBadge(task.status, 'drawer');
 
             // 优先级
             const priority = DRAWER_PRIORITY_MAP[task.priority] || { text: task.priority || '-', color: '#a0aec0' };
@@ -1591,7 +1588,8 @@
                 }
 
                 bodyEl.innerHTML = tasks.map(task => {
-                    const priorityClass = task.priority || 'P2';
+                    // 〔S5a-fix2 H1〕同上：统计明细也走规范值单源
+                    const priorityKey = mwPriClass(task.priority);
                     const categoryLabel = CATEGORY_MAP[task.category] || task.category;
                     const doneDate = task.done_at ? formatDate(task.done_at) : '';
 
@@ -1606,7 +1604,7 @@
 
                     return `
                         <div class="stats-detail-item" onclick="goToTask(${task.id})">
-                            <span class="priority-badge ${priorityClass}" style="background:${getPriorityColor(priorityClass)}">${priorityClass}</span>
+                            <span class="u-pri ${priorityKey}">${escapeHtml(priorityKey)}</span>
                             <div class="task-info">
                                 <div class="task-title">${escapeHtml(task.title)}</div>
                                 <div class="task-meta">
@@ -1631,14 +1629,22 @@
         }
 
         // 获取优先级颜色
-        function getPriorityColor(priority) {
-            const colors = {
-                'P0': '#fee2e2',
-                'P1': '#fef3c7',
-                'P2': '#e0e7ff'
-            };
-            return colors[priority] || '#e2e8f0';
+        // 〔S5a-fix MED-3〕优先级 class 片段的 frozen 白名单 + gate。
+        //   与 IT / Sys 的五处 `u-pri ${esc(x.priority)}` 对齐——那五处虽有 esc 但仍是 raw 拼接，
+        //   本页两处此前连 esc 都没有（priorityClass 来自 `task.priority || 'P2'`，靠兜底"大概率安全"）。
+        //   终审 M 的口径不看"大概率"：class 片段必须经前端白名单出。
+        const MW_PRI_CLASS = Object.freeze({ P0: 'P0', P1: 'P1', P2: 'P2', P3: 'P3' });
+        function mwPriClass(p) {
+            if (Object.prototype.hasOwnProperty.call(MW_PRI_CLASS, p)) return MW_PRI_CLASS[p];
+            UnifyHelpers.warnBadgeOnce('My_Workspace.mwPriClass', p);
+            return 'P2';   // 与页内既有的 `|| 'P2'` 兜底口径保持一致
         }
+
+        // 〔状态徽章统一 S5a·口径二〕`getPriorityColor()` 已整体退场：
+        //   两处优先级徽章都改用共享层 components.css 的 `.u-pri` + P0-P3 修饰类，
+        //   色值不再由本页内联 style 决定（内联 style 的优先级最高，是"共享层说了不算"的典型来源）。
+        //   顺带正向补全：本页原来两套优先级族**都没有 P3 规则**，P3 单据只能落兜底灰；
+        //   共享 `.u-pri` 有 P3，迁移后 P3 第一次有了自己的样式。
 
         // 格式化日期
         function formatDate(dateStr) {

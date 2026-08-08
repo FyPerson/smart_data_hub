@@ -6,17 +6,22 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>数据开发 - 智数协同平台</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="assets/css/style.css?v=v1.117.0_fabdrag">
-    <link rel="stylesheet" href="assets/css/components.css?v=v1.123.1_unify12b">
+    <link rel="stylesheet" href="assets/css/style.css?v=v1.141.0_badge2">
+    <link rel="stylesheet" href="assets/css/components.css?v=v1.141.0_badge1">
     <style>
         /* 数据开发·轻量协作台账页（issue_lite 换壳 v0.2·D5）· 页面专属
            复用共享 u- 组件层（筛选栏/按钮/表格/徽章/抽屉/弹窗/表单/空状态）；补 4 态徽章 + 详情网格 + 附件区。 */
         .unified-page .u-corr-table { min-width: 1080px; }
-        .u-status-badge.s-待处理 { background: #f3f4f6; color: #6b7280; }
-        .u-status-badge.s-处理中 { background: #dbeafe; color: #1d4ed8; }
-        .u-status-badge.s-已完成 { background: #d1fae5; color: #065f46; }
-        .u-status-badge.s-已归档 { background: #ede9fe; color: #6d28d9; }
-        .u-status-badge.s-已作废 { background: #fee2e2; color: #991b1b; }
+        /* 状态徽章语义别名（5 态·class 用中文状态值；—— 状态徽章统一 v1.2 §2.2/§2.4 S2 接线 ——）
+           色值全部来自 components.css :root 语义色板，本页不再写具体色值；别名替换原 direct 声明
+           禁双存（复审 M-1：页内级联晚于外链会赢）；六值齐设、一律 var() 引用。
+           class 片段来源受控：顶层 ISSUE_LITE_STATES 白名单（frozen·列表与详情共用同一份）+ 字面量 '已作废'。
+           语义变化点（方案 §2.4 已列）：已归档 紫→archived（虚线绿）、已作废 红→voided（灰+删除线）。 */
+        .u-status-badge.s-待处理 { --sb-bg: var(--sem-wait-bg); --sb-fg: var(--sem-wait-fg); --sb-bd: var(--sem-wait-bd); --sb-bds: var(--sem-wait-bds); --sb-dot: var(--sem-wait-dot); --sb-deco: var(--sem-wait-deco); }
+        .u-status-badge.s-处理中 { --sb-bg: var(--sem-active-bg); --sb-fg: var(--sem-active-fg); --sb-bd: var(--sem-active-bd); --sb-bds: var(--sem-active-bds); --sb-dot: var(--sem-active-dot); --sb-deco: var(--sem-active-deco); }
+        .u-status-badge.s-已完成 { --sb-bg: var(--sem-done-bg); --sb-fg: var(--sem-done-fg); --sb-bd: var(--sem-done-bd); --sb-bds: var(--sem-done-bds); --sb-dot: var(--sem-done-dot); --sb-deco: var(--sem-done-deco); }
+        .u-status-badge.s-已归档 { --sb-bg: var(--sem-archived-bg); --sb-fg: var(--sem-archived-fg); --sb-bd: var(--sem-archived-bd); --sb-bds: var(--sem-archived-bds); --sb-dot: var(--sem-archived-dot); --sb-deco: var(--sem-archived-deco); }
+        .u-status-badge.s-已作废 { --sb-bg: var(--sem-voided-bg); --sb-fg: var(--sem-voided-fg); --sb-bd: var(--sem-voided-bd); --sb-bds: var(--sem-voided-bds); --sb-dot: var(--sem-voided-dot); --sb-deco: var(--sem-voided-deco); }
         .il-detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 20px; margin-bottom: 16px; }
         .il-detail-item label { display: block; font-size: 11px; color: #6b7280; margin-bottom: 4px; font-weight: 500; }
         .il-detail-item .val { font-size: 13px; color: #111827; word-break: break-word; }
@@ -274,8 +279,8 @@
 
     <input type="file" id="attachInput" style="display:none;" onchange="onAttachPicked()">
 
-    <script src="assets/js/app.js?v=v1.137.0_timefmt"></script>
-    <script src="assets/js/unify-helpers.js?v=v1.110.4_unify"></script>
+    <script src="assets/js/app.js?v=v1.141.0_badge2"></script>
+    <script src="assets/js/unify-helpers.js?v=v1.141.0_badge1"></script>
     <!-- S4（前端统一 贴图粘贴扩展方案 20260801_v0.1）：Ctrl+V 贴图共享层接入。文件本体未改，沿用
          S3 抽取时的缓存串；改共享层本体时须同步 bump 这里 + 所有引用页。 -->
     <script src="assets/js/u-paste.js?v=v1.134.0_upaste2"></script>
@@ -288,6 +293,14 @@
     </div>
 
     <script>
+        // 状态白名单（issue_lite 落库四态，与 server.js 建表 CHECK 同源）。
+        //   〔S2-fix2·A-M3〕原本在 renderList / openDrawer 两个函数体里**各写一份同名 const STATES**——
+        //   两份靠人肉保持同步，改一处漏一处就会出现"列表认得这个状态、详情不认"的分叉，而且守卫
+        //   得靠 minOccurrences=2 去数份数才能发现有人删了其中一份。升为顶层唯一常量 + freeze，
+        //   两处引用同一个数组，分叉通道从根上消失。
+        //   ⚠️ 第 5 个展示态「已作废」由 voided_at 派生，不是落库 status，故不在本数组内。
+        const ISSUE_LITE_STATES = Object.freeze(['待处理', '处理中', '已完成', '已归档']);
+
         let allItems = [];
         let allUsers = [];             // /api/users/active·通知区解析 notify_target_id → 人名
         let busy = false;              // 写操作 in-flight 守卫（呼应后端并发 P3）
@@ -391,11 +404,10 @@
             const body = document.getElementById('ilTableBody'), empty = document.getElementById('emptyState');
             if (!list.length) { body.innerHTML = ''; empty.style.display = ''; return; }
             empty.style.display = 'none';
-            const STATES = ['待处理', '处理中', '已完成', '已归档'];
             const dash = '<span class="il-muted">—</span>';
             body.innerHTML = list.map(it => {
                 const sid = Number.isSafeInteger(Number(it.id)) ? Number(it.id) : 0;
-                const st = STATES.includes(it.status) ? it.status : '待处理';
+                const st = ISSUE_LITE_STATES.includes(it.status) ? it.status : '待处理';
                 // v0.1 §3.1：voided_at 展示优先级高于原 status——列表统一显示「已作废」（详情保留原状态供追溯）
                 const stDisp = it.voided_at ? '已作废' : st;
                 return `<tr style="cursor:pointer;" onclick="openDrawer(${sid})">
@@ -422,8 +434,7 @@
                 const it = await res.json();
                 if (Number(currentDrawerId) !== Number(id)) return; // refine-L-1(codex 审)：抽屉已切走·丢弃这次渲染
                 // 复D5-M-1(codex 审)：st 归一到 4 态、id 强转数字再拼进 HTML/onclick（防后端异常值注入）
-                const STATES = ['待处理', '处理中', '已完成', '已归档'];
-                const st = STATES.includes(it.status) ? it.status : '待处理';
+                const st = ISSUE_LITE_STATES.includes(it.status) ? it.status : '待处理';
                 const sid = Number.isSafeInteger(Number(it.id)) ? Number(it.id) : 0;
                 const canDo = canWrite();
                 // v0.1 §9.2：已作废详情=只读留痕——隐藏全部写入口（流转/通知发送/拉群/附件写/后补对象）

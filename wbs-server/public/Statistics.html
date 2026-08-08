@@ -8,8 +8,8 @@
     <link rel="icon" href="data:,">
     <!-- ECharts 图表库 -->
     <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
-    <link rel="stylesheet" href="assets/css/style.css?v=v1.117.0_fabdrag">
-    <link rel="stylesheet" href="assets/css/components.css?v=v1.123.1_unify12b">
+    <link rel="stylesheet" href="assets/css/style.css?v=v1.141.0_badge2">
+    <link rel="stylesheet" href="assets/css/components.css?v=v1.141.0_badge1">
     <style>
         /* ============================================================
            统计中心·效率统计页 · 页面专属残留（共享组件层见 assets/css/components.css）
@@ -222,10 +222,27 @@
         .eff-type-breakdown-table .eff-type-name { font-weight: 600; color: #2d3748; }
 
         /* 明细表状态徽章（status_group 三态配色，非逐状态码——detail 表跨 4 模块共 20+ 种原始状态码，
-           用统一的"完成/在途/异常终止"三态配色比逐码上色更利于快速扫描瓶颈单，颜色语义与计数卡一致） */
-        .u-status-badge.s-done { background: #d1fae5; color: #065f46; }
-        .u-status-badge.s-inflight { background: #dbeafe; color: #1d4ed8; }
-        .u-status-badge.s-aborted { background: #f3f4f6; color: #6b7280; }
+           用统一的"完成/在途/异常终止"三态配色比逐码上色更利于快速扫描瓶颈单，颜色语义与计数卡一致）
+           —— 状态徽章统一 v1.2 §2.2 S2 接线：色值改引 components.css :root 语义色板，本页不写色值；
+           别名替换原 direct 声明禁双存（复审 M-1）；六值齐设、一律 var() 引用。
+           ⚠️ aborted 映射 wait 层（非 voided·codex 21 号后 S2 提案 1 主会话裁定）：它是"异常终止"的
+           统计归并标签，用途是扫瓶颈单，需要被看见——voided 是"作废记录刻意弱化"层（对比度 2.43 豁免档），
+           继承弱化会伤本页功能；且原 direct 色 #6b7280 本就最接近 wait 层 fg #64748b（4.55 达标），
+           灰→灰无语义变化。
+           ⚠️⚠️ **借的是 wait 层的色值，不是它的语义**：aborted 的真实语义是「聚合负终态」（单据已终止、
+           不会再推进），**不是**"等待中/未开始"。语义由 label 文字（"异常终止（原状态）"）承载，
+           色只作辅助——这正是方案 §1「不靠色单独传义」的用法。看到 aborted 与 wait 同色时不要据此
+           推断二者语义相同，也不要因为"统一"就把它们合并成一层。
+           aborted 的实际归并口径（真相源 utils/efficiency-stats.js，四个 loader 各自定义）：
+             · correction —— CORRECTION_ABORTED_STATUSES = ['REJECTED', 'VOIDED']
+             · issue（需求跟踪）—— ISSUE_ABORTED_STATUSES = ['已拒绝', '已暂缓']
+             · collab（数据协作）—— 无状态清单，判据是 archived_at 非空（行政归档/中止留痕）
+             · sys（系统迭代）—— SYS_ABORTED_STATUSES = ['已暂缓', '已拒绝', '已作废']
+           注意"已暂缓"在 issue/sys 两条线里都算 aborted——它在本页统计口径下是"停住不再推进"，
+           与各自模块详情页把「已暂缓」渲染成 hold 层（黄）并不矛盾：两处是不同粒度的口径。 */
+        .u-status-badge.s-done { --sb-bg: var(--sem-done-bg); --sb-fg: var(--sem-done-fg); --sb-bd: var(--sem-done-bd); --sb-bds: var(--sem-done-bds); --sb-dot: var(--sem-done-dot); --sb-deco: var(--sem-done-deco); }
+        .u-status-badge.s-inflight { --sb-bg: var(--sem-active-bg); --sb-fg: var(--sem-active-fg); --sb-bd: var(--sem-active-bd); --sb-bds: var(--sem-active-bds); --sb-dot: var(--sem-active-dot); --sb-deco: var(--sem-active-deco); }
+        .u-status-badge.s-aborted { --sb-bg: var(--sem-wait-bg); --sb-fg: var(--sem-wait-fg); --sb-bd: var(--sem-wait-bd); --sb-bds: var(--sem-wait-bds); --sb-dot: var(--sem-wait-dot); --sb-deco: var(--sem-wait-deco); }
 
         .unified-page .u-corr-table tbody tr { cursor: default; }
         .eff-empty-cell { color: #cbd5e0; }
@@ -444,8 +461,8 @@
         </div>
     </main>
 
-    <script src="assets/js/app.js?v=v1.137.0_timefmt"></script>
-    <script src="assets/js/unify-helpers.js?v=v1.110.4_unify"></script>
+    <script src="assets/js/app.js?v=v1.141.0_badge2"></script>
+    <script src="assets/js/unify-helpers.js?v=v1.141.0_badge1"></script>
     <script>
         // ============================================
         // 全局状态
@@ -454,6 +471,14 @@
         const MODULE_LABELS = { correction: '数据修正', issue: '数据开发', collab: '数据协作', sys: '系统迭代' };
         const STAGE_COLORS = ['#3182ce', '#d69e2e', '#38a169', '#805ad5'];
         const STATUS_GROUP_LABEL = { done: '完成', inflight: '在途', aborted: '异常终止' };
+
+        // 状态分组 → 徽章 class 片段白名单（状态徽章统一 v1.2 §2.2 复审 H-1 / 终审 M）。
+        //   status_group 由后端 utils/efficiency-stats.js 的三元表达式产出（done/inflight/aborted），
+        //   值域闭合但**既无 DB CHECK 也无前端 map**——S0 双矩阵把本页列为非受控来源之一。
+        //   终审 M 钉死：后端受控不替代前端 class 白名单，最终 class 片段必须经前端 map 输出。
+        //   故本表 frozen，配 UnifyHelpers.statusBadgeByMap 使用：map 外的值拿不到修饰类，
+        //   落 base 的 wait fallback 并 console.warn（后端新增分组而前端漏加时能被发现，不静默）。
+        const ST_STATUS_CLASS = Object.freeze({ done: 's-done', inflight: 's-inflight', aborted: 's-aborted' });
 
         // 类型码 → 中文标签（各模块用自己的受控枚举字段：issues.type 本身已是中文，无需转换）。
         // correction_type 只有 2 值（单条/批量，procedural 粒度粗于 issue/sys 的业务分类，见方案报告）。
@@ -754,7 +779,7 @@
                         <td class="ellip" title="${escapeHtml(r.title || '')}">${escapeHtml(r.title || '')}</td>
                         <td>${escapeHtml(typeLabel(currentModule, r.type))}</td>
                         <td>${escapeHtml(r.created_at || '')}</td>
-                        <td>${UnifyHelpers.statusBadge(r.status_group, `${groupLabel}（${escapeHtml(r.status)}）`)}</td>
+                        <td>${UnifyHelpers.statusBadgeByMap(r.status_group, ST_STATUS_CLASS, `${groupLabel}（${escapeHtml(r.status)}）`)}</td>
                         ${stageCells}
                         <td><strong>${r.total_hours === null || r.total_hours === undefined ? '-' : escapeHtml(formatHours(r.total_hours))}</strong></td>
                     </tr>`;

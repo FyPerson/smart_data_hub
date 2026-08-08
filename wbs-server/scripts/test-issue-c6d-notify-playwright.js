@@ -129,11 +129,48 @@ async function main() {
         await p2.waitForTimeout(400);
         await p2.evaluate(id => openDrawer(id), idNoPhone);
         await p2.waitForTimeout(500);
+        // 〔状态徽章统一 S5a-fix MED-9〕两处选择器/正则随通知徽章改名同步：
+        //   `.notify-badge` → `.u-notify-badge`（前端统一 C 轮 base 加 u- 前缀，本断言当时漏改，
+        //   一直选不到元素、badge 恒为 null——测试是"红着的"还是"绿着的"取决于 must 的写法，
+        //   这类断言必须跟着渲染改动一起改，否则它保护的东西早就没了）；
+        //   `notify-failed` → `n-failed`（S5a 口径二前缀统一）。
         const badge = await p2.evaluate(() => {
-            const b = document.querySelector('#drawerBody .notify-badge');
+            const b = document.querySelector('#drawerBody .u-notify-badge');
             return b ? { cls: b.className, text: b.textContent.trim(), title: b.getAttribute('title') } : null;
         });
-        must(badge && /notify-failed/.test(badge.cls) && badge.text === '失败', `D2d 详情页通知徽章真变「失败」（实际 ${JSON.stringify(badge)}）`);
+        must(badge && /(?<![\w-])n-failed(?![\w-])/.test(badge.cls) && badge.text === '失败', `D2d 详情页通知徽章真变「失败」（实际 ${JSON.stringify(badge)}）`);
+        // 〔S5a-fix2 L〕补三态渲染断言 + class token 集精确断言。
+        //   原来只验 failed 一态，而 S5a 把 class 前缀与色值全换了一遍——
+        //   sent / not_sent 两态换错了名字或漏了规则，这个套件一样是绿的。
+        //   token 集精确断言（恰好 base + 一个修饰类）另防"旧类名与新类名同时挂上"这种半迁移状态。
+        // 〔S5a-fix3 项 4〕三态走**真实渲染路径**：调生产用的 notifyBadge() 产出 HTML、
+        //   插进真 DOM、再从 DOM 读回 class token 集与可见文案。
+        //   上一版是直接拼 `'u-notify-badge ' + itNotifyClass(st)`——那验的是 gate，
+        //   验不到 notifyBadge 自己拼 class 时有没有漏 base、有没有多挂一个类、文案对不对。
+        const notifyRendered = await p2.evaluate(() => {
+            const out = {};
+            const host = document.createElement('div');
+            host.id = '__notifyProbeHost';
+            document.body.appendChild(host);
+            for (const st of ['sent', 'not_sent', 'failed']) {
+                host.innerHTML = notifyBadge({ notify_status: st, notify_error: st === 'failed' ? 'probe-err' : null });
+                const el = host.querySelector('.u-notify-badge');
+                out[st] = el
+                    ? { tokens: [...el.classList].sort().join(' '), text: el.textContent.trim(), title: el.getAttribute('title') }
+                    : null;
+            }
+            // 未登记态保留 gate 单测（notifyBadge 的 label 三元只认三态，走不到"未知 label"）
+            out.__gateUnknown = typeof itNotifyClass === 'function' ? itNotifyClass('__nope__') : 'NO_GATE';
+            host.remove();
+            return out;
+        });
+        must(notifyRendered.sent && notifyRendered.sent.tokens === 'n-sent u-notify-badge' && notifyRendered.sent.text === '已通知',
+            `D2f sent 态真实渲染：token 集 [n-sent u-notify-badge] + 文案「已通知」（实际 ${JSON.stringify(notifyRendered.sent)}）`);
+        must(notifyRendered.not_sent && notifyRendered.not_sent.tokens === 'n-not_sent u-notify-badge' && notifyRendered.not_sent.text === '未通知',
+            `D2g not_sent 态真实渲染：token 集 [n-not_sent u-notify-badge] + 文案「未通知」（实际 ${JSON.stringify(notifyRendered.not_sent)}）`);
+        must(notifyRendered.failed && notifyRendered.failed.tokens === 'n-failed u-notify-badge' && notifyRendered.failed.text === '失败' && notifyRendered.failed.title === 'probe-err',
+            `D2h failed 态真实渲染：token 集 + 文案「失败」+ title 带错误详情（实际 ${JSON.stringify(notifyRendered.failed)}）`);
+        must(notifyRendered.__gateUnknown === '', `D2i 未登记态 gate 返回空串（降级为无修饰类的裸 base·实际 ${JSON.stringify(notifyRendered.__gateUnknown)}）`);
         must(badge && badge.title === 'no_phone', `D2e 失败徽章 hover title=notify_error(no_phone)（实际 ${badge && badge.title}）`);
         allErrs = allErrs.concat(p2._errs);
         await p2.close();

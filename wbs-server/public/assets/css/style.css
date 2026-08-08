@@ -795,34 +795,11 @@
             font-weight: 500;
         }
 
-        .drawer-info-item .info-value .status-badge {
-            color: white !important;
-            font-size: 0.85em;
-            padding: 4px 12px;
-            background: var(--color-accent);
-        }
-
-        .drawer-info-item .info-value .status-badge.badge-open {
-            background: linear-gradient(135deg, #48bb78, #38a169);
-        }
-
-        .drawer-info-item .info-value .status-badge.badge-claimed {
-            background: linear-gradient(135deg, #ecc94b, #d69e2e);
-            color: #744210 !important;
-        }
-
-        .drawer-info-item .info-value .status-badge.badge-done {
-            background: var(--color-accent);
-        }
-
-        .drawer-info-item .info-value .status-badge.badge-hold {
-            background: #e53e3e;
-        }
-
-        .drawer-info-item .info-value .status-badge.badge-archived {
-            background: #cbd5e0;
-            color: var(--color-text-secondary) !important;
-        }
+        /* 〔状态徽章统一 S4·2026-08-08〕原此处有抽屉作用域的徽章覆盖段（`.drawer-info-item
+           .info-value .status-badge` base + badge-open/claimed/done/hold/archived 五条修饰，
+           其中 badge-archived 是全站唯一一条）。消费方实测**仅 Task_Pool 与 My_Workspace**
+           （`.drawer-info-item` 全仓只这两页用），两页抽屉已改输出 `u-status-badge sem-*`，
+           整段随之退场，色值统一回 components.css 的 --sem-* 语义色板。 */
 
         .drawer-model-info {
             background: var(--color-bg-page);
@@ -1162,7 +1139,20 @@
             font-size: 0.72em;
         }
 
-        /* ========== 状态徽章 ========== */
+        /* ========== 状态徽章（遗留层·**保留中**）==========
+           〔状态徽章统一 S4·2026-08-08〕本段只剩下面这条 base，`.badge-open/claimed/done/hold`
+           四条修饰已退场（它们实测仅 Task_Pool / My_Workspace 消费，两页已迁到
+           components.css 的 `.u-status-badge` + `.sem-*`）。
+
+           ⚠️ **base 有意保留，不要顺手删**（S0 双矩阵附录 A.2 举证）：
+             · Asset_Center.html（页内重定义 + 输出 `status-badge {模型态}`）
+             · Domain_Manager.html（页内重定义 + assets/js/domain_manager.js 输出）
+           这两页只重定义了 display/padding/radius/font-size/font-weight，
+           **未**重定义 box-shadow / letter-spacing / text-transform / white-space / flex-shrink，
+           删掉这条 base 会让两页徽章观感当场变形。方案里"先证仅两页消费"的前置在实测中不成立，
+           证不出就不退——这是最小侵入，不是遗漏。
+           完全退场 = 后续独立事项（先把两页页内 base 补自足再删），已记入任务锚点 §9 待追认 P1。
+           （Metrics.html 也有同名页内重定义，但零输出点＝死 CSS，与本条去留无关。） */
         .status-badge {
             padding: 3px 10px;
             border-radius: 16px;
@@ -1175,24 +1165,6 @@
             white-space: nowrap;
             flex-shrink: 0;
             display: inline-block;
-        }
-
-        .badge-open {
-            background: linear-gradient(135deg, #48bb78, #38a169);
-        }
-
-        .badge-claimed {
-            background: linear-gradient(135deg, #ecc94b, #d69e2e);
-            color: #744210;
-        }
-
-        .badge-done {
-            background: var(--color-accent);
-        }
-
-        .badge-hold {
-            background: #e53e3e;
-            color: white;
         }
 
         .card-hold {

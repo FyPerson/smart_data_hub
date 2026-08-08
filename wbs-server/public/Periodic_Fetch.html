@@ -6,7 +6,15 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>周期取数推送 - 智数协同平台</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="assets/css/style.css?v=v1.117.0_fabdrag">
+    <link rel="stylesheet" href="assets/css/style.css?v=v1.141.0_badge2">
+    <!-- 状态徽章统一 S3：引入共享组件层（本页只用其中的 .u-status-badge + .sem-* 语义类）。
+         引入安全性论证（22 号审已背书·数字为 S3-fix 实测复核值）：components.css 现有 **124 条**规则，
+         根选择器只有三种——`.u-*` 121 条、`.unified-page` 2 条、`:root` 1 条。
+         本页 DOM 里零个 u- 前缀 class、<body> 也不带 unified-page，故前两种**结构上不可能命中**
+         本页任何现有元素；`:root` 那条只声明 --sem-* 自定义属性，未被 var() 引用时零视觉效果，
+         对本页同样是惰性的。⇒ 引入是安全的，只有新写的 u-status-badge 会生效。
+         （这三个数字由 verify-unify-static.js 的断言⓪b 持续守着，改动会红。） -->
+    <link rel="stylesheet" href="assets/css/components.css?v=v1.141.0_badge1">
     <style>
         /* ============================================================
            周期取数推送页 · 页面私有样式（全部 pf- 前缀，避免与 style.css 碰撞）
@@ -59,13 +67,11 @@
         .pf-lastrun { text-align: right; flex-shrink: 0; font-size: 12px; color: #94a3b8; }
         .pf-lastrun .pf-rt { color: #64748b; margin-top: 3px; }
 
-        .pf-badge { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; white-space: nowrap; }
-        .pf-badge.success { background: #d1fae5; color: #047857; }
-        .pf-badge.failed { background: #fee2e2; color: #b91c1c; }
-        .pf-badge.empty_result { background: #fef3c7; color: #b45309; }
-        .pf-badge.running, .pf-badge.queued { background: #dbeafe; color: #1d4ed8; }
-        .pf-badge.disabled { background: #f1f5f9; color: #94a3b8; }
-        .pf-badge.active { background: #d1fae5; color: #047857; }
+        /* 〔状态徽章统一 S3〕原此处是本页自建的 .pf-badge base + 6 条修饰色（12px 字号 teal 系）。
+           已整体退场 → 改用共享层 components.css 的 .u-status-badge + .sem-* 语义类（字号随 base 12→11，
+           方案 §2.5）。色值不再落本页，全部来自 :root 语义色板；映射见下方 PF_STATUS_CLASS 注释。
+           顺带清掉一条死 CSS：`.pf-badge.active`——任务态 active 从来不渲染徽章（pfRenderTaskCard 里
+           只在 status==='disabled' 时输出「已禁用」标），S0 判为死 CSS 候选，本次全文核实零产出方后删除。 */
 
         .pf-body { display: none; padding: 4px 20px 22px; }
         .pf-card.open .pf-body { display: block; }
@@ -121,14 +127,35 @@
         .pf-recip-info .name { font-weight: 600; color: #0f172a; }
         .pf-recip-info .dept { color: #94a3b8; font-size: 12px; margin-left: 6px; }
         .pf-recip-status { font-size: 12px; padding: 3px 10px; border-radius: 12px; font-weight: 600; white-space: nowrap; }
-        .pf-recip-status.matched { background: #d1fae5; color: #047857; }
-        .pf-recip-status.blocked { background: #fee2e2; color: #b91c1c; }
-        .pf-recip-status.pushed_success { background: #d1fae5; color: #047857; }
-        .pf-recip-status.pushed_failed { background: #fee2e2; color: #b91c1c; }
-        .pf-recip-status.pushed_skipped { background: #f1f5f9; color: #94a3b8; }
-        .pf-recip-status.pushed_pending { background: #dbeafe; color: #1d4ed8; }
-        /* superseded=人为强制重发替代的技术终态，中性灰蓝，非红色"失败"（避免误读为真实发送失败） */
-        .pf-recip-status.pushed_superseded { background: #e2e8f0; color: #475569; }
+        /* 〔状态徽章统一 S5a·口径二·次级族色值 token 化〕class 不动，只换色值引用。七值逐条验证：
+             ⚠️【提案·待主会话裁定】matched→**done**（预判给的是 active，未采）：原色是绿系（与 done 一致），
+               语义"号码已匹配到人"是一个**已完成的前置结果**，不是"进行中"；active 的蓝会把一个
+               静态事实画成动态过程，且与同族的 pushed_success（也是绿）失去呼应。
+             blocked→rejected：语义"被拦截/不予推送"＝已拒绝；原 fg #b91c1c 恰是 failed 的 fg，
+               但 failed 是"尝试了没成功"，blocked 是"根本不给推"，按语义优先取 rejected（同为深红，肉眼几无差）。
+             pushed_success→done ／ pushed_failed→failed（两者色相语义双验证一致）。
+             pushed_skipped→**wait**〔S5a-fix HIGH-1：原定 voided，因**次级族禁用豁免层**改判〕——
+               voided/legacy 的对比度豁免建立在「line-through + 文案冗余」上，而次级族按终审 L
+               不继承 deco，等于拿了豁免又拆掉豁免赖以成立的冗余通道；wait 是达标的中性灰，语义也对。
+             pushed_pending→**active**〔S5a-fix MED-2 订正〕——
+               ⚠️ 本行 S5a 初版写的是"语义『待推送』故映射 wait"，**那个语义是我杜撰的**：
+               页内 `pfPushStatusMeta()` 的 LABELS 白纸黑字写着 `pending: '处理中'`（:1017）。
+               「处理中」＝进行中 → active，且恰与原色 #dbeafe/#1d4ed8 同为蓝系，两条验证都对上。
+               以此为鉴：语义论据必须引真相源的行号级证据，不能凭 key 的字面印象推。 */
+        .pf-recip-status.matched { background: var(--sem-done-bg); color: var(--sem-done-fg); }
+        .pf-recip-status.blocked { background: var(--sem-rejected-bg); color: var(--sem-rejected-fg); }
+        .pf-recip-status.pushed_success { background: var(--sem-done-bg); color: var(--sem-done-fg); }
+        .pf-recip-status.pushed_failed { background: var(--sem-failed-bg); color: var(--sem-failed-fg); }
+        .pf-recip-status.pushed_skipped { background: var(--sem-wait-bg); color: var(--sem-wait-fg); }
+        .pf-recip-status.pushed_pending { background: var(--sem-active-bg); color: var(--sem-active-fg); }
+        /* superseded=人为强制重发替代的技术终态，中性灰蓝，非红色"失败"（避免误读为真实发送失败）
+           〔S5a-fix HIGH-1〕原定 legacy（语义最贴：legacy=历史旧态，而"被后续推送取代"正是这个意思），
+           因**次级族禁用豁免层**改判 **intake（借色制）**：legacy 与 voided 一样是靠
+           「文案冗余」换来的对比度豁免层，次级族不继承 deco，用它就是在没有冗余通道的地方
+           把文字压到 4.5:1 以下。借色理由（两条硬约束的交集）：① 达标层；② 与同族的
+           pushed_skipped（wait 灰）拉得开——两者都是"没真正发出去"的终态，同为灰会分不清。
+           **借的是色不是语义**：superseded 不是"待受理"，语义由 label「已被强制重发替代」承载。 */
+        .pf-recip-status.pushed_superseded { background: var(--sem-intake-bg); color: var(--sem-intake-fg); }
         .pf-drift { color: #b45309; font-size: 11px; margin-left: 6px; }
 
         .pf-push-target { font-size: 12.5px; color: #475569; background: #f0fdfa; border: 1px solid #ccfbf1; border-radius: 8px; padding: 10px 14px; margin-bottom: 16px; }
@@ -353,7 +380,7 @@
         </div>
     </div>
 
-    <script src="assets/js/app.js?v=v1.137.0_timefmt"></script>
+    <script src="assets/js/app.js?v=v1.141.0_badge2"></script>
     <script>
     /* ============================================================
        周期取数推送前端 · 仅 admin 可用
@@ -361,6 +388,66 @@
        ============================================================ */
 
     // ---- 全局状态 ----
+    // ── 状态徽章 class 片段白名单（状态徽章统一 S3·与 IT/DC 同范式）────────────────────
+    //   本页走**新语义模式**（方案 §2.2 双模式契约）：直接输出 `u-status-badge sem-*`，
+    //   页内不写任何别名规则、不写任何色值——sem-* 的样式只在共享层 components.css。
+    //   不引 unify-helpers.js（保持本页最小引用面），故 gate 在页内自实现，契约与
+    //   UnifyHelpers.statusBadgeByMap 一致：命中才给修饰类，未命中落 base 的 wait fallback + warn。
+    //
+    //   来源受控度：**两张表都有 CHECK**（routes/periodic-fetch/index.js 建表处）——
+    //     periodic_task_runs.status CHECK IN ('queued','running','success','failed','empty_result')
+    //     periodic_tasks.status      CHECK IN ('active','disabled')
+    //   ⚠️ 更正 S0 双矩阵：S0 把本页记为"无 CHECK"，那是因为只扫了 server.js；PF 的建表在
+    //   routes/periodic-fetch/index.js 里。但按终审 M，后端 CHECK 只证明输入受控，
+    //   **不替代前端 class 白名单**——本 map 仍是 class 片段的唯一出口。
+    //
+    //   映射依据（语义 + 原 direct 色最近层 双重验证）：
+    //     success     → done     绿·跑成功
+    //     failed      → failed   红（原 fg #b91c1c 与 failed 层逐字相同）
+    //     running     → active   蓝·执行中（原 fg #1d4ed8 与 active 层逐字相同）
+    //     queued      → wait     排队中=尚未开始。⚠️ 原本 queued 与 running **共用一条 CSS 规则**
+    //                            （同蓝），统一后分色（灰/蓝）= 正向语义细化，非回归。
+    //     empty_result→ review   跑通但零行、需人工显式确认才可推送（见页内说明区）=「待确认」。
+    //                            原 fg #b45309 与 review 层逐字相同。
+    //     disabled    → voided   任务已停用。**不可逆**：PF 路由只有 /disable，无 enable/恢复端点，
+    //                            `status='active'` 在整个 PF 路由零回写点 ⇒ 是终态不是可恢复暂停。
+    const PF_STATUS_CLASS = Object.freeze({
+        success: 'sem-done',
+        failed: 'sem-failed',
+        running: 'sem-active',
+        queued: 'sem-wait',
+        empty_result: 'sem-review',
+        disabled: 'sem-voided',
+    });
+
+    // ── 状态中文文案单源（S3-fix MED-5）────────────────────────────────────────────
+    //   原先「上次运行」区（pfRenderTaskCard）用一串三元、历史表（pfRenderRunRow）用另一张行内对象，
+    //   两处各写一份、各自演进 —— 实际已经分叉：三元把 running 与 queued 一起兜成"进行中"，
+    //   而历史表把 queued 正确显示为"排队中"。合并成本表后该分叉自动消失。
+    const PF_STATUS_LABEL = Object.freeze({
+        success: '成功', failed: '失败', empty_result: '空结果', running: '进行中', queued: '排队中',
+    });
+    // 仍在跑/待跑的两态不加「上次」前缀——"上次进行中"读不通，它描述的是**当下**而非上一轮结果。
+    //   这与原三元的行为一致（原来也是把这两态显示成不带前缀的"进行中"），只是 queued 从
+    //   被兜进"进行中"变成如实显示"排队中"= 顺带修掉的文案精度问题。
+    const PF_INFLIGHT_STATUSES = Object.freeze(['running', 'queued']);
+    function pfStatusLabel(status) { return PF_STATUS_LABEL[status] || status; }
+    function pfLastRunLabel(status) {
+        return PF_INFLIGHT_STATUSES.includes(status) ? pfStatusLabel(status) : '上次' + pfStatusLabel(status);
+    }
+
+    // 降级告警去重（对齐 A-L1：列表几十行同一未知状态刷屏会淹掉真正有用的那条）
+    const pfWarnedStatuses = new Set();
+    function pfStatusClass(status) {
+        if (Object.prototype.hasOwnProperty.call(PF_STATUS_CLASS, status)) return PF_STATUS_CLASS[status];
+        const key = String(status);
+        if (!pfWarnedStatuses.has(key)) {
+            pfWarnedStatuses.add(key);
+            console.warn('[Periodic_Fetch.pfStatusClass] 状态值不在徽章白名单内，徽章降级为默认等待态：', status);
+        }
+        return '';
+    }
+
     let pfReady = false;
     let pfTasks = [];
     let pfSourceConns = [];
@@ -492,12 +579,12 @@
         let lastRunHtml = '<span style="color:#94a3b8;">点击展开查看</span>';
         if (Array.isArray(runs) && runs.length) {
             const last = runs[0];
-            const label = last.status === 'success' ? '上次成功' : (last.status === 'empty_result' ? '上次空结果' : (last.status === 'failed' ? '上次失败' : '进行中'));
-            lastRunHtml = `<span class="pf-badge ${esc(last.status)}">${label}</span><div class="pf-rt">${esc(last.started_at || '')}${last.row_count != null ? ' · ' + last.row_count + ' 行' : ''}</div>`;
+            const label = pfLastRunLabel(last.status);
+            lastRunHtml = `<span class="u-status-badge ${pfStatusClass(last.status)}">${esc(label)}</span><div class="pf-rt">${esc(last.started_at || '')}${last.row_count != null ? ' · ' + last.row_count + ' 行' : ''}</div>`;
         } else if (Array.isArray(runs)) {
             lastRunHtml = '<span style="color:#94a3b8;">尚未跑过</span>';
         }
-        const disabledTag = task.status === 'disabled' ? ' <span class="pf-badge disabled">已禁用</span>' : '';
+        const disabledTag = task.status === 'disabled' ? ` <span class="u-status-badge ${pfStatusClass('disabled')}">已禁用</span>` : '';
         const body = isOpen ? pfRenderCardBody(task) : '';
         return `
         <div class="pf-card ${isOpen ? 'open' : ''}" id="pfCard_${task.id}">
@@ -660,11 +747,11 @@
                 <tbody>${rows}</tbody>
             </table>
         </div>
-        <div class="pf-note"><b>硬约束</b>：全量跑但设<span class="kw">最大 10 万行 + 60s 超时</span>，超限直接失败不隐式截断。<br><b>可推送前置</b>：仅<span class="kw">成功+文件存在+校验通过</span>可推送；<span class="pf-badge empty_result" style="font-size:11px;">空结果</span>需显式确认；<span class="pf-badge failed" style="font-size:11px;">失败</span>不可推送、不复用旧文件。</div>`;
+        <div class="pf-note"><b>硬约束</b>：全量跑但设<span class="kw">最大 10 万行 + 60s 超时</span>，超限直接失败不隐式截断。<br><b>可推送前置</b>：仅<span class="kw">成功+文件存在+校验通过</span>可推送；<span class="u-status-badge ${PF_STATUS_CLASS.empty_result}">${pfStatusLabel('empty_result')}</span>需显式确认；<span class="u-status-badge ${PF_STATUS_CLASS.failed}">${pfStatusLabel('failed')}</span>不可推送、不复用旧文件。</div>`;
     }
 
     function pfRenderRunRow(task, run) {
-        const statusLabel = { success: '成功', failed: '失败', empty_result: '空结果', running: '进行中', queued: '排队中' }[run.status] || run.status;
+        const statusLabel = pfStatusLabel(run.status);
         const canDownload = (run.status === 'success' || run.status === 'empty_result') && run.file_status === 'present';
         const canPush = (run.status === 'success' || run.status === 'empty_result') && run.file_status === 'present';
         const durationText = run.duration_ms != null ? (run.duration_ms / 1000).toFixed(1) + 's' : '—';
@@ -681,7 +768,7 @@
             <td>${pfFmtDateRange(run.date_range_start, run.date_range_end)}</td>
             <td>${run.row_count != null ? run.row_count : '—'}</td>
             <td>${durationText}</td>
-            <td><span class="pf-badge ${esc(run.status)}">${statusLabel}</span>${errNote}</td>
+            <td><span class="u-status-badge ${pfStatusClass(run.status)}">${esc(statusLabel)}</span>${errNote}</td>
             <td>${actionCell}</td>
         </tr>`;
     }
@@ -938,6 +1025,18 @@
         const LABELS = { success: '成功', failed: '失败', skipped: '跳过', pending: '处理中' };
         return { key: p.push_status, label: LABELS[p.push_status] || p.push_status };
     }
+    // 〔S5a-fix MED-6〕收件人推送态的 class 片段白名单 + gate（S0 甲7 收口）。
+    //   原写法 `pushed_${esc(meta.key)}` 里 meta.key 直接来自 `p.push_status`（后端原值），
+    //   esc 只防 HTML 注入、不防"产出一个没有规则的 class"——终审 M 要的是白名单，不是转义。
+    const PF_RECIP_CLASS = Object.freeze({
+        success: 'pushed_success', failed: 'pushed_failed', skipped: 'pushed_skipped',
+        pending: 'pushed_pending', superseded: 'pushed_superseded',
+    });
+    function pfRecipClass(k) {
+        if (Object.prototype.hasOwnProperty.call(PF_RECIP_CLASS, k)) return PF_RECIP_CLASS[k];
+        console.warn('[Periodic_Fetch.pfRecipClass] 推送态不在徽章白名单内，降级为无修饰类：', k);
+        return '';
+    }
     function pfRenderPushHistoryRow(p) {
         const meta = pfPushStatusMeta(p);
         // L-2（⑤e，codex 09 收口）：① superseded 行隐藏内部哨兵串（SUPERSEDED_BY_FORCE），改固定中文说明；
@@ -950,7 +1049,7 @@
             errNote = `<div style="font-size:11px;color:${errColor};">${esc(p.push_error)}</div>`;
         }
         return `<tr><td>${esc(p.phone_snapshot)}</td><td>${esc(p.recipient_name_snapshot || '—')}</td>`
-            + `<td><span class="pf-recip-status pushed_${esc(meta.key)}">${esc(meta.label)}</span>${errNote}</td>`
+            + `<td><span class="pf-recip-status ${pfRecipClass(meta.key)}">${esc(meta.label)}</span>${errNote}</td>`
             + `<td>${esc(p.pushed_at)}</td></tr>`;
     }
 

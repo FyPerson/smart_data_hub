@@ -132,8 +132,80 @@
 /* 类型标签 base（修饰色 .t-single/.t-batch 等各页专属枚举颜色留页面内联） */
 .u-type-tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 500; white-space: nowrap; }
 
-/* 状态徽章 base（修饰色 .s-* 各页状态枚举颜色留页面内联） */
-.u-status-badge { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: 600; white-space: nowrap; }
+/* ===== 状态语义色板（13 层 × 6 token）· 全站状态颜色唯一真相源 =====
+   —— 状态徽章统一（全徽章族）方案 20260808 v1.2 §1 定稿值，逐值照抄，禁止在别处复写具体色值 ——
+
+   六 token 契约（复审 H-2）：bg/fg/bd 三色 + bds 边框形态 + dot 色点 + deco 文字修饰。
+   形态（bds/deco）也进 token 而非硬编码在语义类上，是为了让「别名规则只设变量」就能完整继承
+   虚线/删除线——否则别名页会出现「只变色不变形」的半吊子继承（首审 H-1）。
+
+   层间区分靠「色 + 形」双通道，不靠色单独传义：done 与 archived 同为绿系，靠实线 vs 虚线 +
+   深浅区分；voided 靠 line-through 兜底。回退阀：archived 若需换牛皮纸棕，只改本块三色即可全站生效。
+
+   ⚠️ 改任一色值必须重跑 scripts/verify-unify-static.js 的 WCAG 对比度断言（fg/bg ≥4.5:1 硬线，
+   dot/bg ≥3:1 警示级）。voided/legacy 两层是**产品层可访问性例外**（刻意弱化的作废态/历史旧态徽章·
+   用户 2026-08-08 拍板·line-through 与文字本身冗余保底），已在该脚本豁免表内显式登记并附理由。 */
+:root {
+    --sem-wait-bg: #f8fafc;     --sem-wait-fg: #64748b;     --sem-wait-bd: #e2e8f0;     --sem-wait-bds: solid;  --sem-wait-dot: #94a3b8;     --sem-wait-deco: none;
+    --sem-intake-bg: #eef2ff;   --sem-intake-fg: #4338ca;   --sem-intake-bd: #c7d2fe;   --sem-intake-bds: solid;  --sem-intake-dot: #6366f1;   --sem-intake-deco: none;
+    --sem-active-bg: #eff6ff;   --sem-active-fg: #1d4ed8;   --sem-active-bd: #bfdbfe;   --sem-active-bds: solid;  --sem-active-dot: #3b82f6;   --sem-active-deco: none;
+    --sem-review-bg: #fffbeb;   --sem-review-fg: #b45309;   --sem-review-bd: #fde68a;   --sem-review-bds: solid;  --sem-review-dot: #f59e0b;   --sem-review-deco: none;
+    --sem-special-bg: #f5f3ff;  --sem-special-fg: #6d28d9;  --sem-special-bd: #ddd6fe;  --sem-special-bds: solid;  --sem-special-dot: #8b5cf6;  --sem-special-deco: none;
+    --sem-staging-bg: #f0fdfa;  --sem-staging-fg: #0f766e;  --sem-staging-bd: #99f6e4;  --sem-staging-bds: solid;  --sem-staging-dot: #14b8a6;  --sem-staging-deco: none;
+    --sem-done-bg: #f0fdf4;     --sem-done-fg: #15803d;     --sem-done-bd: #bbf7d0;     --sem-done-bds: solid;  --sem-done-dot: #22c55e;     --sem-done-deco: none;
+    --sem-hold-bg: #fefce8;     --sem-hold-fg: #854d0e;     --sem-hold-bd: #fef08a;     --sem-hold-bds: solid;  --sem-hold-dot: #eab308;     --sem-hold-deco: none;
+    --sem-rejected-bg: #fef2f2; --sem-rejected-fg: #991b1b; --sem-rejected-bd: #fecaca; --sem-rejected-bds: solid;  --sem-rejected-dot: #ef4444; --sem-rejected-deco: none;
+    --sem-failed-bg: #fef2f2;   --sem-failed-fg: #b91c1c;   --sem-failed-bd: #fca5a5;   --sem-failed-bds: solid;  --sem-failed-dot: #dc2626;   --sem-failed-deco: none;
+    --sem-archived-bg: #f0fdf4; --sem-archived-fg: #15803d; --sem-archived-bd: #86efac; --sem-archived-bds: dashed; --sem-archived-dot: #4ade80; --sem-archived-deco: none;
+    --sem-voided-bg: #f8fafc;   --sem-voided-fg: #9ca3af;   --sem-voided-bd: #e5e7eb;   --sem-voided-bds: solid;  --sem-voided-dot: #d1d5db;   --sem-voided-deco: line-through;
+    --sem-legacy-bg: #f8fafc;   --sem-legacy-fg: #94a3b8;   --sem-legacy-bd: #e2e8f0;   --sem-legacy-bds: solid;  --sem-legacy-dot: #cbd5e1;   --sem-legacy-deco: none;
+}
+
+/* 状态徽章 base（形态共享层；颜色一律走上方 --sem-* 语义色板）
+   —— 状态徽章统一 v1.2 §2.1 ——
+
+   ⚠️ 策略变更留痕：旧注释为「修饰色 .s-* 各页状态枚举颜色留页面内联」，该策略已废止。
+   各页状态枚举类（.s-* / .si-s-* / .status-* / .sem-*）改写为「只设 --sb-* 变量指向某一语义层」
+   的别名规则，具体色值不再落在页面内联 <style> 里。别名替换页内原 direct 色值声明，不得双存
+   （复审 M-1：页内样式级联晚于外链，旧 direct 声明会赢得级联，让 token 看似接入实际无效）。
+
+   六变量全部带 wait 层 fallback（首审 H-2）：未接线/漏网状态退化为中性等待观感而非裸奔——
+   但这是运行时最后一道网，不是验收条件；守卫仍按「零漏网」逐状态断言别名连通。
+
+   色点走 ::before 伪元素不进 textContent，既有 Playwright 文本断言零破坏；
+   padding 3px 10px → 2px 9px 是给 1px 描边让位，徽章总高不变。 */
+.u-status-badge {
+    display: inline-block; padding: 2px 9px; border-radius: 12px; font-size: 11px; font-weight: 600;
+    white-space: nowrap;
+    background: var(--sb-bg, var(--sem-wait-bg));
+    color: var(--sb-fg, var(--sem-wait-fg));
+    border: 1px var(--sb-bds, var(--sem-wait-bds)) var(--sb-bd, var(--sem-wait-bd));
+    text-decoration: var(--sb-deco, var(--sem-wait-deco));
+}
+.u-status-badge::before {
+    content: ''; display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--sb-dot, var(--sem-wait-dot)); margin-right: 5px; vertical-align: 1px;
+}
+
+/* 语义类（新模式·双模式契约 v1.2 §2.2）：任务池改造 / 周期取数 / 模型中心 / 未来新页直接输出
+   `u-status-badge sem-*`；六别名页维持旧模式输出 `u-status-badge s-*`，由页内别名规则接线。
+   每条六值齐设（复审 H-2），不省略"默认值"——守卫按六值齐设断言，缺一即红灯。
+   六值**一律 var(--sem-<层>-*) 引用，禁止写字面量**（含 solid/none 这类"看起来就是默认值"的）：
+   字面量会让上方色板的 bds/deco token 变成无人引用的死数据，改 token 不生效、而注释还声称
+   "形态也进 token"——声称超实现。守卫逐层断言层名对应，写错层（如 sem-done 引 --sem-hold-bds）同样红灯。 */
+.u-status-badge.sem-wait     { --sb-bg: var(--sem-wait-bg);      --sb-fg: var(--sem-wait-fg);      --sb-bd: var(--sem-wait-bd);      --sb-bds: var(--sem-wait-bds);      --sb-dot: var(--sem-wait-dot);      --sb-deco: var(--sem-wait-deco); }
+.u-status-badge.sem-intake   { --sb-bg: var(--sem-intake-bg);    --sb-fg: var(--sem-intake-fg);    --sb-bd: var(--sem-intake-bd);    --sb-bds: var(--sem-intake-bds);    --sb-dot: var(--sem-intake-dot);    --sb-deco: var(--sem-intake-deco); }
+.u-status-badge.sem-active   { --sb-bg: var(--sem-active-bg);    --sb-fg: var(--sem-active-fg);    --sb-bd: var(--sem-active-bd);    --sb-bds: var(--sem-active-bds);    --sb-dot: var(--sem-active-dot);    --sb-deco: var(--sem-active-deco); }
+.u-status-badge.sem-review   { --sb-bg: var(--sem-review-bg);    --sb-fg: var(--sem-review-fg);    --sb-bd: var(--sem-review-bd);    --sb-bds: var(--sem-review-bds);    --sb-dot: var(--sem-review-dot);    --sb-deco: var(--sem-review-deco); }
+.u-status-badge.sem-special  { --sb-bg: var(--sem-special-bg);   --sb-fg: var(--sem-special-fg);   --sb-bd: var(--sem-special-bd);   --sb-bds: var(--sem-special-bds);   --sb-dot: var(--sem-special-dot);   --sb-deco: var(--sem-special-deco); }
+.u-status-badge.sem-staging  { --sb-bg: var(--sem-staging-bg);   --sb-fg: var(--sem-staging-fg);   --sb-bd: var(--sem-staging-bd);   --sb-bds: var(--sem-staging-bds);   --sb-dot: var(--sem-staging-dot);   --sb-deco: var(--sem-staging-deco); }
+.u-status-badge.sem-done     { --sb-bg: var(--sem-done-bg);      --sb-fg: var(--sem-done-fg);      --sb-bd: var(--sem-done-bd);      --sb-bds: var(--sem-done-bds);      --sb-dot: var(--sem-done-dot);      --sb-deco: var(--sem-done-deco); }
+.u-status-badge.sem-hold     { --sb-bg: var(--sem-hold-bg);      --sb-fg: var(--sem-hold-fg);      --sb-bd: var(--sem-hold-bd);      --sb-bds: var(--sem-hold-bds);      --sb-dot: var(--sem-hold-dot);      --sb-deco: var(--sem-hold-deco); }
+.u-status-badge.sem-rejected { --sb-bg: var(--sem-rejected-bg);  --sb-fg: var(--sem-rejected-fg);  --sb-bd: var(--sem-rejected-bd);  --sb-bds: var(--sem-rejected-bds);  --sb-dot: var(--sem-rejected-dot);  --sb-deco: var(--sem-rejected-deco); }
+.u-status-badge.sem-failed   { --sb-bg: var(--sem-failed-bg);    --sb-fg: var(--sem-failed-fg);    --sb-bd: var(--sem-failed-bd);    --sb-bds: var(--sem-failed-bds);    --sb-dot: var(--sem-failed-dot);    --sb-deco: var(--sem-failed-deco); }
+.u-status-badge.sem-archived { --sb-bg: var(--sem-archived-bg);  --sb-fg: var(--sem-archived-fg);  --sb-bd: var(--sem-archived-bd);  --sb-bds: var(--sem-archived-bds);  --sb-dot: var(--sem-archived-dot);  --sb-deco: var(--sem-archived-deco); }
+.u-status-badge.sem-voided   { --sb-bg: var(--sem-voided-bg);    --sb-fg: var(--sem-voided-fg);    --sb-bd: var(--sem-voided-bd);    --sb-bds: var(--sem-voided-bds);    --sb-dot: var(--sem-voided-dot);    --sb-deco: var(--sem-voided-deco); }
+.u-status-badge.sem-legacy   { --sb-bg: var(--sem-legacy-bg);    --sb-fg: var(--sem-legacy-fg);    --sb-bd: var(--sem-legacy-bd);    --sb-bds: var(--sem-legacy-bds);    --sb-dot: var(--sem-legacy-dot);    --sb-deco: var(--sem-legacy-deco); }
 
 /* 优先级徽章（状态列/优先级列样式统一轮 2026-07-10）：P0-P3 是全站唯一语义枚举（数据开发/系统迭代
    同一套），颜色直接进共享层——与状态徽章"颜色留页面"策略不同，因状态枚举各页状态机不同而优先级

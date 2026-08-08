@@ -6,9 +6,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>智数模型中心 (Model Center)</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="assets/css/style.css?v=v1.117.0_fabdrag">
+    <link rel="stylesheet" href="assets/css/style.css?v=v1.141.0_badge2">
     <!-- 模型详情抽屉 C3：引入共享组件层（u-drawer 骨架；全 .u- 前缀无污染面）-->
-    <link rel="stylesheet" href="assets/css/components.css?v=v1.123.1_unify12b">
+    <link rel="stylesheet" href="assets/css/components.css?v=v1.141.0_badge1">
     <style>
         /* 加载动画 */
         @keyframes spin {
@@ -188,8 +188,15 @@
         #modelDrawerBody .b-layer-ods { background: #dbeafe; color: #1d4ed8; }
         #modelDrawerBody .b-layer-dim { background: #fef3c7; color: #b45309; }
         #modelDrawerBody .b-domain { background: #f1f5f9; color: #475569; }
-        #modelDrawerBody .b-status { background: #d1fae5; color: #047857; }
-        #modelDrawerBody .b-status-off { background: #f1f5f9; color: #6b7280; }
+        /* 〔状态徽章统一 S3·主会话裁定〕原此处还有 `.b-status`（绿）/`.b-status-off`（灰）两条——
+           那是模型**状态**徽章的二值配色，已随状态徽章迁到共享层（u-status-badge + sem-*，五值），
+           故删除。
+           ⚠️ **mdc-badge base 与 b-layer* / b-domain 修饰保留**：方案 §2.5 初盘写的是「mdc-badge 退场」，
+           但 S0 双矩阵实测本页 mdc-badge 承载三类徽章——分层（ODS/DIM/其他）、数据域、状态，
+           其中只有**状态**属于状态徽章族。分层与域是**分类标签**不是状态，收编进状态语义层会张冠李戴
+           （它们没有"等待/进行中/完成"这种流转语义）。故按 S0 为准：只迁状态徽章，base 与另两族原地保留。
+           〔范围外遗留〕分层/域标签的视觉统一不在本次范围——若将来要统一，应归到「类型标签族」
+           （方案 §2.7 的 u-type-tag 方向），不是状态徽章族。 */
         #modelDrawerBody .kv { display: grid; grid-template-columns: 88px 1fr; gap: 8px 12px; font-size: 12.5px; align-items: baseline; }
         #modelDrawerBody .kv .k { color: #9ca3af; text-align: right; }
         #modelDrawerBody .kv .v { color: #111827; word-break: break-all; }
@@ -2035,7 +2042,7 @@ OUTER APPLY (
 
     <!-- SheetJS Library: 按需加载（仅批量导入时使用） -->
 
-    <script src="assets/js/app.js?v=v1.137.0_timefmt"></script>
+    <script src="assets/js/app.js?v=v1.141.0_badge2"></script>
     <!-- 模型详情抽屉 C2：normalize 适配层 + 安全渲染工具（方案 v1.4 §5.1/§5.2），C3 起消费 -->
     <script src="assets/js/model-detail-normalize.js?v=v1.125.0_mdc4"></script>
     <script>
@@ -12616,6 +12623,32 @@ ${window.generatedScripts.incremental}`;
 
         // ==================== 模型详情抽屉 C3（方案 v1.4 §5.3 双层 controller / §5.5 焦点）====================
         // 状态中文映射（原 renderModelsPage 局部 statusMap 提升为模块级，抽屉 identity 区复用）
+        // ── 模型状态 → 徽章 class 片段白名单（状态徽章统一 S3·方案 §2.5 明文五值）──────────
+        //   本页走**新语义模式**（方案 §2.2 双模式契约）：直接输出 `u-status-badge sem-*`，
+        //   页内不写任何 sem-* 规则、不写色值——样式只在共享层 components.css。
+        //   ⚠️ 与其余页不同，本页徽章走 **DOM API**（mdcEl 的 className 字符串拼接）而非模板串，
+        //   守卫的模板串扫描覆盖不到，故 renderGate 按 `mdcStatusClass(` 调用形态锁定。
+        //   映射为方案 §2.5 直接拍板（原实现只有绿/灰二值，无法做"原色最近层"验证——如实记录）：
+        //     CREATED 规划中→wait／DEVELOPING 开发中→active／REVIEWING 待验收→review／
+        //     ONLINE 已上线→done／OFFLINE 已下线→archived
+        const MDC_STATUS_CLASS = Object.freeze({
+            CREATED: 'sem-wait',
+            DEVELOPING: 'sem-active',
+            REVIEWING: 'sem-review',
+            ONLINE: 'sem-done',
+            OFFLINE: 'sem-archived',
+        });
+        const mdcWarnedStatuses = new Set();
+        function mdcStatusClass(status) {
+            if (Object.prototype.hasOwnProperty.call(MDC_STATUS_CLASS, status)) return MDC_STATUS_CLASS[status];
+            const key = String(status);
+            if (!mdcWarnedStatuses.has(key)) {
+                mdcWarnedStatuses.add(key);
+                console.warn('[Model_Center.mdcStatusClass] 状态值不在徽章白名单内，徽章降级为默认等待态：', status);
+            }
+            return '';
+        }
+
         const MODEL_STATUS_MAP = {
             'CREATED': '规划中',
             'DEVELOPING': '开发中',
@@ -12801,8 +12834,11 @@ ${window.generatedScripts.incremental}`;
             wrap.appendChild(mdcEl('span', { className: 'mdc-badge ' + layerCls, text: layer || '-' }));
             if (detail.identity.domain) { wrap.appendChild(mdcEl('span', { className: 'mdc-badge b-domain', text: detail.identity.domain + ' 域' })); }
             const stText = MODEL_STATUS_MAP[detail.identity.status] || detail.identity.status || '-';
-            const stCls = detail.identity.status === 'ONLINE' ? 'b-status' : 'b-status-off';
-            wrap.appendChild(mdcEl('span', { className: 'mdc-badge ' + stCls, text: '● ' + stText }));
+            // 状态徽章统一 S3：二值（ONLINE / 非 ONLINE）升五值语义层——这是方案 §2.5 拍板的
+            //   **正向行为变更**，用户可感知：抽屉里的状态徽章从"绿/灰两种"变成按真实状态分色。
+            //   〔S3-fix HIGH-1〕文案去掉原来的 '● ' 前缀：共享层 .u-status-badge::before 已自带 6px
+            //   圆点，再拼一个 ● 字符会出现**双点**。全仓核实无任何测试/断言依赖该字符。
+            wrap.appendChild(mdcEl('span', { className: 'u-status-badge ' + mdcStatusClass(detail.identity.status), text: stText }));
             return wrap;
         }
 
@@ -13961,8 +13997,8 @@ ${window.generatedScripts.incremental}`;
                     <td style="padding:10px 8px; white-space:nowrap;">
                          <div style="font-size:0.85em; color:#4a5568;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 2px;"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/></svg>${escapeHtml(m.biz_owner) || '-'}</div>
                     </td>
-                    <td style="padding:10px 8px; white-space:nowrap;"><span class="category-badge" style="background:#feebc8; color:#c05621; font-size:0.8em;">${m.update_cycle}</span></td>
-                    <td style="padding:10px 8px; font-size:0.85em; white-space:nowrap;">${statusMap[m.status] || m.status}</td>
+                    <td style="padding:10px 8px; white-space:nowrap;"><span class="category-badge" style="background:#feebc8; color:#c05621; font-size:0.8em;">${escapeHtml(m.update_cycle)}</span></td>
+                    <td style="padding:10px 8px; font-size:0.85em; white-space:nowrap;">${escapeHtml(statusMap[m.status] || m.status)}</td>
                     <td style="padding:10px 8px; white-space:nowrap;">${iterBadge}</td>
                     <td style="padding:10px 8px; font-size:0.8em; color:#64748b; white-space:nowrap;">${updatedAt}</td>
                     ${actionButtons}

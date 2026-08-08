@@ -6,8 +6,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>数据修正 - 智数协同平台</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="assets/css/style.css?v=v1.117.0_fabdrag">
-    <link rel="stylesheet" href="assets/css/components.css?v=v1.123.1_unify12b">
+    <link rel="stylesheet" href="assets/css/style.css?v=v1.141.0_badge2">
+    <link rel="stylesheet" href="assets/css/components.css?v=v1.141.0_badge1">
     <style>
         /* ===== 页面专属残留（共享组件层已迁移至 assets/css/components.css；style污染根治 B 方案
            20260709 v1.1 后共享根类均带 u- 前缀，不再依赖 .unified-page 作用域门控，仅作迁移标记/覆盖钩子）===== */
@@ -16,15 +16,22 @@
         .u-type-tag.t-single { background: #dbeafe; color: #1d4ed8; }
         .u-type-tag.t-batch { background: #fef3c7; color: #92400e; }
 
-        /* 状态徽章修饰色（8 态，class 用原 status key；base 见 components.css .u-status-badge） */
-        .u-status-badge.s-PENDING_ASSIGN { background: #f3f4f6; color: #6b7280; }
-        .u-status-badge.s-ASSIGNED_PENDING_ESTIMATE { background: #e0e7ff; color: #4338ca; }
-        .u-status-badge.s-IN_PROGRESS { background: #dbeafe; color: #1d4ed8; }
-        .u-status-badge.s-FIXED { background: #fef3c7; color: #92400e; }
-        .u-status-badge.s-REFIXED { background: #ccfbf1; color: #0f766e; }
-        .u-status-badge.s-ARCHIVED { background: #d1fae5; color: #065f46; }
-        .u-status-badge.s-REJECTED { background: #f3f4f6; color: #991b1b; }
-        .u-status-badge.s-VOIDED { background: #e5e7eb; color: #9ca3af; }
+        /* 状态徽章语义别名（8 态·class 仍用原 status key；—— 状态徽章统一 v1.2 §2.2/§2.4 S2 接线 ——）
+           色值全部来自 components.css :root 语义色板，本页不再写任何具体色值。
+           ⚠️ 复审 M-1：别名**替换**原 direct 声明，禁止双存——页内 <style> 级联晚于外链，
+           留一条 `background:#xxx` 就会赢过 token，让接线"看似生效实际无效"。
+           六值齐设、一律 var() 引用（与共享层 .sem-* 同款纪律，守卫逐条断言）。
+           映射依据：S0 双矩阵实测「STATUS_LABELS 语义 + 原 direct 色最近层」双重验证。
+           语义变化点（方案 §2.4 已列）：FIXED 琥珀→done、REFIXED 青→done、ARCHIVED 绿→archived 虚线。
+           statusClass() 未命中时输出 s-UNKNOWN——**有意不为其写规则**，让它落 base 的 wait fallback。 */
+        .u-status-badge.s-PENDING_ASSIGN { --sb-bg: var(--sem-wait-bg); --sb-fg: var(--sem-wait-fg); --sb-bd: var(--sem-wait-bd); --sb-bds: var(--sem-wait-bds); --sb-dot: var(--sem-wait-dot); --sb-deco: var(--sem-wait-deco); }
+        .u-status-badge.s-ASSIGNED_PENDING_ESTIMATE { --sb-bg: var(--sem-intake-bg); --sb-fg: var(--sem-intake-fg); --sb-bd: var(--sem-intake-bd); --sb-bds: var(--sem-intake-bds); --sb-dot: var(--sem-intake-dot); --sb-deco: var(--sem-intake-deco); }
+        .u-status-badge.s-IN_PROGRESS { --sb-bg: var(--sem-active-bg); --sb-fg: var(--sem-active-fg); --sb-bd: var(--sem-active-bd); --sb-bds: var(--sem-active-bds); --sb-dot: var(--sem-active-dot); --sb-deco: var(--sem-active-deco); }
+        .u-status-badge.s-FIXED { --sb-bg: var(--sem-done-bg); --sb-fg: var(--sem-done-fg); --sb-bd: var(--sem-done-bd); --sb-bds: var(--sem-done-bds); --sb-dot: var(--sem-done-dot); --sb-deco: var(--sem-done-deco); }
+        .u-status-badge.s-REFIXED { --sb-bg: var(--sem-done-bg); --sb-fg: var(--sem-done-fg); --sb-bd: var(--sem-done-bd); --sb-bds: var(--sem-done-bds); --sb-dot: var(--sem-done-dot); --sb-deco: var(--sem-done-deco); }
+        .u-status-badge.s-ARCHIVED { --sb-bg: var(--sem-archived-bg); --sb-fg: var(--sem-archived-fg); --sb-bd: var(--sem-archived-bd); --sb-bds: var(--sem-archived-bds); --sb-dot: var(--sem-archived-dot); --sb-deco: var(--sem-archived-deco); }
+        .u-status-badge.s-REJECTED { --sb-bg: var(--sem-rejected-bg); --sb-fg: var(--sem-rejected-fg); --sb-bd: var(--sem-rejected-bd); --sb-bds: var(--sem-rejected-bds); --sb-dot: var(--sem-rejected-dot); --sb-deco: var(--sem-rejected-deco); }
+        .u-status-badge.s-VOIDED { --sb-bg: var(--sem-voided-bg); --sb-fg: var(--sem-voided-fg); --sb-bd: var(--sem-voided-bd); --sb-bds: var(--sem-voided-bds); --sb-dot: var(--sem-voided-dot); --sb-deco: var(--sem-voided-deco); }
 
         /* 超期/积压高亮标记 */
         .flag-overdue { display: inline-block; margin-left: 6px; font-size: 11px; color: #dc2626; font-weight: 600; }
@@ -35,6 +42,10 @@
         .corr-group-badge.g-primary { background: #e0edff; color: #1d4ed8; border: 1px solid #c3dafe; }   /* 主单：蓝 */
         .corr-group-badge.g-child { background: #f0e9fb; color: #6d28d9; border: 1px solid #ddd0f5; }      /* 子单：紫 */
         .corr-group-badge .grp-num { font-variant-numeric: tabular-nums; }
+        /* 状态历史"操作"标记（同态记录 from===to 时用）：非状态语义，不挂 u-status-badge 状态族根类
+           （挂了会随 S1 base 得到色点+描边，误示等待态——codex 21 号审 LOW-4·S2 方案 A 裁定）。
+           观感照搬原内联（紫小标签），无色点无描边。 */
+        .corr-op-tag { display: inline-block; padding: 1px 6px; border-radius: 8px; font-size: 10px; font-weight: 600; background: #ede9fe; color: #6d28d9; white-space: nowrap; }
         /* 返工子单徽章：详情抽屉返工链/banner 仍用颜色梯度（1黄/2橙/3+红）；列表 v2 改红色 99_1 编号，不再用此徽章 */
         .rework-badge { display: inline-block; margin-top: 3px; padding: 1px 5px; border-radius: 4px; font-size: 10px; font-weight: 600; line-height: 1.6; white-space: nowrap; }
         .rework-badge.rw-1 { background: #fef9c3; color: #854d0e; border: 1px solid #fde68a; }   /* 第1次：黄 */
@@ -66,11 +77,12 @@
         /* ID 列序号+徽章同行不换行（v1.97.1）：td 默认可换行，子单树缩进(padding-left:30px)+序号+徽章挤不下会断行；nowrap 让列按 table-auto 稍微加宽到恰好容纳，子单与主单一致同行 */
         .unified-page .u-corr-table td:first-child { white-space: nowrap; }
 
-        /* 通知徽章修饰色（base 见 components.css .u-notify-badge） */
-        .u-notify-badge.n-sent { background: #ecfdf5; color: #059669; }
-        .u-notify-badge.n-failed { background: #fef2f2; color: #dc2626; }
-        .u-notify-badge.n-not_sent { background: #f3f4f6; color: #6b7280; }
-        .u-notify-badge.n-no_phone { background: #fffbeb; color: #b45309; }
+        /* 〔状态徽章统一 S5a·2026-08-08〕原此处有四条 `.u-notify-badge.n-sent/n-failed/n-not_sent/n-no_phone`
+           修饰色规则，**整组删除**：本页全文零输出点（S0 双矩阵乙7 已举证——通知态实际渲染成
+           `u-notify-row` 内的内联 style 文本，走的根本不是徽章），四条规则是早年留下的死 CSS。
+           删除的直接动因：口径二把 Issue_Tracker 的通知徽章从 `notify-*` 改名到 `n-*`，
+           两页共用 `.u-notify-badge` 这一个 base，不先清掉这批死规则就会与新命名撞名，
+           变成"两页同名类不同色"的隐形分叉。 */
         /* 查询已读结果框：在 u-nr-body(flex-wrap) 内换行独占一行、右对齐通知按钮列；空时不占位（不覆盖通知时间/按钮，三模块统一未读态） */
         .u-nr-read-result { flex-basis: 100%; text-align: right; }
         .u-nr-read-result:empty { display: none; }
@@ -85,12 +97,11 @@
            这条泄漏；两页对同一共享类需要不同 display，故只能各自页面覆盖，不能收编进共享层）。 */
         .unified-page .u-form-group { display: flex; flex-direction: column; gap: 8px; }
 
-        /* 同上机制（复审新发现）：状态徽章的柔和投影+字距改名前由 style.css 裸 `.status-badge { box-shadow:
-           0 2px 8px rgba(0,0,0,.15); letter-spacing:0.5px; text-transform:uppercase; color:white }`
-           （L1166）搭便车提供——color 因各 .s-* 修饰色更高特异性不受影响，text-transform 对中文字符无
-           可见效果故不补；box-shadow/letter-spacing 无人认领，u- 改名后丢失。Sys_Iteration 相反：si-sbadge
-           原设计无投影/常规字距，Sys 曾靠真前缀主动收回过这条泄漏，故同样不能收编进共享层。 */
-        .unified-page .u-status-badge { box-shadow: 0 2px 8px rgba(0,0,0,.15); letter-spacing: 0.5px; }
+        /* 〔状态徽章统一 S2·主会话裁定〕原此处有一条 `.unified-page .u-status-badge { box-shadow:
+           0 2px 8px rgba(0,0,0,.15); letter-spacing: 0.5px; }`——那是 u- 改名前从 style.css 的
+           全局 `.status-badge` base 搭便车继承来的投影+字距，改名后无人认领，仅本页补回，Sys_Iteration
+           反而主动收回过同款泄漏 = 页间观感本就不一致的遗物。状态徽章统一改用描边+色点体系后，
+           投影与描边叠加显脏且与其余五页不一致，故整条删除（不迁入共享层）。 */
 
         /* 拉群成员勾选弹窗 */
         .member-base-list { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 10px 12px; font-size: 13px; color: #374151; margin-bottom: 12px; }
@@ -629,8 +640,8 @@
         </div>
     </div>
 
-    <script src="assets/js/app.js?v=v1.137.0_timefmt"></script>
-    <script src="assets/js/unify-helpers.js?v=v1.110.4_unify"></script>
+    <script src="assets/js/app.js?v=v1.141.0_badge2"></script>
+    <script src="assets/js/unify-helpers.js?v=v1.141.0_badge1"></script>
     <!-- S4（前端统一 贴图粘贴扩展方案 20260801_v0.1）：Ctrl+V 贴图共享层接入。文件本体未改，沿用
          S3 抽取时的缓存串；改共享层本体时须同步 bump 这里 + 所有引用页。 -->
     <script src="assets/js/u-paste.js?v=v1.134.0_upaste2"></script>
@@ -766,7 +777,15 @@
             return base && (Date.now() - base.getTime()) > days * 86400000;
         }
         // 状态 class 白名单归一（L-2）：非 8 态 → UNKNOWN，防脏数据 DOM 注入
-        function statusClass(s) { return STATUS_LABELS[s] ? s : 'UNKNOWN'; }
+        // 〔状态徽章统一 S4-fix3·B5〕守门从「取值真值」改「键存在性」。
+        //   原写法 `STATUS_LABELS[s] ? s : 'UNKNOWN'` 读的是**对象取值**，会走原型链：
+        //   `statusClass('constructor')` / `'toString'` / `'__proto__'` 拿到的是继承来的函数（真值），
+        //   于是这些名字被**原样输出**成 class 片段，而它们根本不是本页的状态。
+        //   hasOwnProperty 只认自有键，上述输入一律落 'UNKNOWN' 兜底 —— 这是**正向收紧**：
+        //   正常数据（八个状态值）行为完全不变，只把原型链这条谁都没想过的入口关上。
+        //   ⚠️ 这条推翻了 S2 时「受控页 gate 不动」的口径：当时判断基于"本页已有 gate 守门"，
+        //   而复审指出该 gate 的守门谓词本身有漏（真值 ≠ 键存在），属有据推翻，非无故扩范围。
+        function statusClass(s) { return Object.prototype.hasOwnProperty.call(STATUS_LABELS, s) ? s : 'UNKNOWN'; }
         function parseLocalTime(s) {
             if (!s) return null;
             const m = String(s).trim().match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/);
@@ -1357,7 +1376,7 @@
             let hist = history.length ? history.map(h => {
                 const sameStatus = h.from_status && h.to_status && h.from_status === h.to_status;
                 const head = sameStatus
-                    ? `<span class="u-status-badge" style="font-size:10px; background:#ede9fe; color:#6d28d9;">操作</span><span style="color:#9ca3af;"> · ${escapeHtml(STATUS_LABELS[h.to_status] || h.to_status)}</span>`
+                    ? `<span class="corr-op-tag">操作</span><span style="color:#9ca3af;"> · ${escapeHtml(STATUS_LABELS[h.to_status] || h.to_status)}</span>`
                     : `<span class="u-status-badge s-${statusClass(h.to_status)}" style="font-size:10px;">${escapeHtml(STATUS_LABELS[h.to_status] || h.to_status)}</span><span style="color:#9ca3af;"> ← ${h.from_status ? escapeHtml(STATUS_LABELS[h.from_status] || h.from_status) : '建单'}</span>`;
                 return `
                 <div class="u-history-item">
