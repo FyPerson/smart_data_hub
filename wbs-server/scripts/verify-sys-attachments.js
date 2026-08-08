@@ -135,7 +135,7 @@ async function seedDev(assignTo = 5) {
   // 仍直落"待验证"——本文件其余断言零改动，这也是方案承认的合法真实场景（非造假绕过）。
   await run(`UPDATE sys_issues SET intake_liaison_id = 999999 WHERE id = ?`, [id]);
   const tok = assignTo === 5 ? devTok : dev2Tok;
-  r = await call('POST', `/api/sys-issues/${id}/estimate`, tok, { dev_estimated_at: EST });
+  r = await call('POST', `/api/sys-issues/${id}/estimate`, tok, { dev_estimated_at: EST, estimated_effort_days: 1 });
   assert.strictEqual(r.status, 200, 'estimate 200, got ' + r.status + ' ' + JSON.stringify(r.body));
   return id;
 }
@@ -155,7 +155,7 @@ async function seedDevViaRealLiaisonTest(assignTo = 5) {
   assert.strictEqual(r.status, 200, '夹具补 OA 号 200, got ' + r.status + ' ' + JSON.stringify(r.body));
   await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: assignTo });
   const tok = assignTo === 5 ? devTok : dev2Tok;
-  r = await call('POST', `/api/sys-issues/${id}/estimate`, tok, { dev_estimated_at: EST });
+  r = await call('POST', `/api/sys-issues/${id}/estimate`, tok, { dev_estimated_at: EST, estimated_effort_days: 1 });
   assert.strictEqual(r.status, 200, 'estimate 200, got ' + r.status + ' ' + JSON.stringify(r.body));
   r = await call('POST', `/api/sys-issues/${id}/submit`, tok, { mode: 'no_code', no_code_reason: '完成（占位理由）', self_tested: true, test_env_deployed: true });
   assert.strictEqual(r.status, 200, 'submit 200, got ' + r.status + ' ' + JSON.stringify(r.body));
@@ -441,7 +441,7 @@ async function main() {
       r2 = await call('POST', `/api/sys-issues/${idLt}/set-oa-number`, adminTok, { oa_number: '2026070098' });
       assert.strictEqual(r2.status, 200, '[S12-Opus-2] 夹具补 OA 号 200, got ' + r2.status);
       await call('POST', `/api/sys-issues/${idLt}/assign`, adminTok, { assigned_to: 5 });
-      r2 = await call('POST', `/api/sys-issues/${idLt}/estimate`, devTok, { dev_estimated_at: EST });
+      r2 = await call('POST', `/api/sys-issues/${idLt}/estimate`, devTok, { dev_estimated_at: EST, estimated_effort_days: 1 });
       assert.strictEqual(r2.status, 200, '[S12-Opus-2] estimate 200, got ' + r2.status);
       r2 = await call('POST', `/api/sys-issues/${idLt}/submit`, devTok, { mode: 'no_code', no_code_reason: '完成（占位理由）', self_tested: true, test_env_deployed: true });
       assert.strictEqual(r2.status, 200, '[S12-Opus-2] submit 200, got ' + r2.status);

@@ -89,6 +89,9 @@ function waitReady() {
 const adminTok = jwt.sign({ id: 1, username: 'admin', display_name: '管理员', role: 'admin' }, SECRET);
 const admin2Tok = jwt.sign({ id: 2, username: 'admin2', display_name: '第二管理员', role: 'admin' }, SECRET);
 const liaisonTok = jwt.sign({ id: 13, username: 'wangtaotao', display_name: '示例对接人', role: 'user' }, SECRET);
+// [C10-fix2 LOW-1②] 非绑定 eligible actor（role=user·非本单绑定对接人 13·非 admin）——验证 notify-creator/
+//   requester 的 enforceBinding 绑单精判：粗筛放行（user 是候选 allowlist），但 handler 内因非该单对接人拒 403。
+const dev5Tok = jwt.sign({ id: 5, username: 'dev', display_name: '开发王', role: 'user' }, SECRET);
 
 let server, port;
 function call(method, p, tok, body) {
@@ -244,6 +247,29 @@ async function main() {
     assert.strictEqual(sub.notify_sent_by, 13, '⭐ 子表 notify_sent_by=13（受理人触发）');
     await assertInvariant('[N] 后');
     ok('[N] 四通道手动端点：creator（admin2=2 / 受理人=13 **两人分得开**）+ requester（sent 与 **failed 都记**）+ dev 子表，sent_by 逐格正确');
+  }
+
+  // ═══ [NB] ⭐ C10-fix2 LOW-1②：非绑定 eligible 在 notify-creator/requester 上被绑单精判拒（enforceBinding 负例）═══
+  //   dev5（role=user·过 requireIntakeLiaison 粗筛·但非本单绑定对接人 13·非 admin）→ handler 内
+  //   sysManualNotifyGuard({enforceBinding:true}) → isBoundLiaisonOrAdmin 拒 → 403 NOT_BOUND_LIAISON + 零副作用。
+  //   （补 notify-developer[c10 套件已覆盖]/两 resend[intake-schedule-c5/tech-lead-comment 已覆盖] 之外的两通道空白）
+  {
+    const cc = await createBug({ title: 'NB-creator-非绑定' });
+    await setStatus(cc.body.id, '待验证');
+    const rc = await call('POST', `/api/sys-issues/${cc.body.id}/notify-creator`, dev5Tok);
+    assert.strictEqual(rc.status, 403, `[NB①] 非绑定 eligible(dev5) 发 notify-creator 应 403, got ${rc.status} ${JSON.stringify(rc.body)}`);
+    assert.strictEqual(rc.body.code, 'NOT_BOUND_LIAISON', `[NB①] 确切码 NOT_BOUND_LIAISON（enforceBinding 绑单精判·非该单对接人拒），实得 ${rc.body && rc.body.code}`);
+    const ccRow = await get(`SELECT creator_notify_status FROM sys_issues WHERE id=?`, [cc.body.id]);
+    assert.strictEqual(ccRow.creator_notify_status, 'not_sent', '[NB①] 零副作用：creator_notify_status 未变');
+
+    const qq = await createBug({ title: 'NB-requester-非绑定' });
+    await setStatus(qq.body.id, '待验证');
+    const rq = await call('POST', `/api/sys-issues/${qq.body.id}/notify-requester`, dev5Tok);
+    assert.strictEqual(rq.status, 403, `[NB②] 非绑定 eligible(dev5) 发 notify-requester 应 403, got ${rq.status} ${JSON.stringify(rq.body)}`);
+    assert.strictEqual(rq.body.code, 'NOT_BOUND_LIAISON', `[NB②] 确切码 NOT_BOUND_LIAISON，实得 ${rq.body && rq.body.code}`);
+    const qqRow = await get(`SELECT requester_notify_status FROM sys_issues WHERE id=?`, [qq.body.id]);
+    assert.strictEqual(qqRow.requester_notify_status, 'not_sent', '[NB②] 零副作用：requester_notify_status 未变');
+    ok('[NB] ⭐ C10-fix2 LOW-1②：非绑定 eligible(dev5·过粗筛) 在 notify-creator/requester 上被 enforceBinding 绑单精判拒 403 NOT_BOUND_LIAISON + 零副作用（补两通道非绑定负例空白）');
   }
 
   // ═══ [B]（已随旧上线编排家族封禁退场，2026-07-30）═══

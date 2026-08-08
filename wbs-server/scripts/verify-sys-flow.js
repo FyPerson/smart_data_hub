@@ -126,21 +126,21 @@ async function main() {
     // ── [1] estimate（回填预计）──
     const id1 = await seedToDevInProgress(5);   // 指派给 dev5，开发中
     // estimate 缺/非法格式 → 400
-    let r = await call('POST', `/api/sys-issues/${id1}/estimate`, devTok, { dev_estimated_at: '随便' });
+    let r = await call('POST', `/api/sys-issues/${id1}/estimate`, devTok, { dev_estimated_at: '随便', estimated_effort_days: 1 });
     assert.strictEqual(r.status, 400, 'estimate 非法格式 400');
     assert.strictEqual(r.body.code, 'INVALID_ESTIMATE');
     ok('estimate：非法时间格式「随便」→ 400 INVALID_ESTIMATE');
     // 非本人开发 estimate → 403
-    r = await call('POST', `/api/sys-issues/${id1}/estimate`, dev2Tok, { dev_estimated_at: EST });
+    r = await call('POST', `/api/sys-issues/${id1}/estimate`, dev2Tok, { dev_estimated_at: EST, estimated_effort_days: 1 });
     assert.strictEqual(r.status, 403, 'estimate 非本人 403');
     ok('estimate：非本人开发（dev6≠assignee）→ 403 NOT_AUTHORIZED_FOR_TRANSITION');
     // 早于 assigned_at → 400（assigned_at 是 datetime now，传 2020 必早）
-    r = await call('POST', `/api/sys-issues/${id1}/estimate`, devTok, { dev_estimated_at: '2020-01-01 10:00' });
+    r = await call('POST', `/api/sys-issues/${id1}/estimate`, devTok, { dev_estimated_at: '2020-01-01 10:00', estimated_effort_days: 1 });
     assert.strictEqual(r.status, 400, 'estimate 早于指派 400');
     assert.strictEqual(r.body.code, 'ESTIMATE_BEFORE_ASSIGN');
     ok('estimate：早于 assigned_at（2020）→ 400 ESTIMATE_BEFORE_ASSIGN');
     // 合法 estimate（本人）→ 200，不改 status（仍开发中）
-    r = await call('POST', `/api/sys-issues/${id1}/estimate`, devTok, { dev_estimated_at: EST });
+    r = await call('POST', `/api/sys-issues/${id1}/estimate`, devTok, { dev_estimated_at: EST, estimated_effort_days: 1 });
     assert.strictEqual(r.status, 200, 'estimate 合法 200');
     const d1 = await get('SELECT status, dev_estimated_at FROM sys_issues WHERE id=?', [id1]);
     assert.strictEqual(d1.status, '开发中', 'estimate 不改 status');
@@ -151,17 +151,21 @@ async function main() {
     // codex 15b L-1：assigned_at 缺失保护——造一个"开发中但 assigned_at 空"的脏单，estimate 应 409 ASSIGNED_AT_MISSING
     const dirtyId = await seedToDevInProgress(5);
     await run('UPDATE sys_issues SET assigned_at = NULL WHERE id=?', [dirtyId]);   // 模拟 import/人工修库脏单
-    r = await call('POST', `/api/sys-issues/${dirtyId}/estimate`, devTok, { dev_estimated_at: EST });
+    r = await call('POST', `/api/sys-issues/${dirtyId}/estimate`, devTok, { dev_estimated_at: EST, estimated_effort_days: 1 });
     assert.strictEqual(r.status, 409, 'assigned_at 空脏单 estimate 409, got ' + r.status);
     assert.strictEqual(r.body.code, 'ASSIGNED_AT_MISSING', 'assigned_at 空应 ASSIGNED_AT_MISSING');
     ok('L-1(复)：estimate assigned_at 缺失脏单 → 409 ASSIGNED_AT_MISSING（防绕过 >=assigned_at 闸门）');
 
     // ── [2] submit → accept 全流程 ──
-    r = await call('POST', `/api/sys-issues/${id1}/submit`, devTok, { mode: 'no_code', no_code_reason: '功能 X 完成（占位理由）', self_tested: true, test_env_deployed: true });
+    r = await call('POST', `/api/sys-issues/${id1}/submit`, devTok, { mode: 'commits', commits: [{ component: 'backend', commit_ref: 'c9-keep-batch-20' }], self_tested: true, test_env_deployed: true });
     assert.strictEqual(r.status, 200, 'submit 200');
     // C3：新 submit 响应体字段为 main_status（同 C2 add/reassign 端点惯例），非旧 makeTransitionEndpoint 的 status。
     assert.strictEqual(r.body.main_status, '待验证', 'submit → 待验证（main_status 字段）');
-    ok('submit：在册开发 + no_code → 待验证（W05 唯一 submit，C3 多开发 commit 事件模型）');
+    // [C9-fix H2 普查·顺带订正] 原文案写「no_code」——C9 那轮把本处夹具改成 mode:'commits'（因为下一行
+    //   就要 accept，零 commit 会命中免上线直翻落「已上线」而非「待上线」）时漏改这句 ok() 文案，留下
+    //   "断言说明与实际被测输入不符"。同族问题见 [[feedback_comment_is_review_input]]：ok() 文案是读者
+    //   判断"这条到底覆盖了什么"的唯一线索，说错等于给覆盖面记了一笔假账。
+    ok('submit：在册开发 + commits 模式 → 待验证（W05 唯一 submit，C3 多开发 commit 事件模型）');
     r = await call('POST', `/api/sys-issues/${id1}/accept`, adminTok, {});
     assert.strictEqual(r.status, 200, 'accept 200');   // L-1
     assert.strictEqual(r.body.status, '待上线', 'accept → 待上线');
@@ -169,8 +173,8 @@ async function main() {
 
     // ── [3] return（打回，return_count++）──
     const id2 = await seedToDevInProgress(5);
-    await call('POST', `/api/sys-issues/${id2}/estimate`, devTok, { dev_estimated_at: EST });
-    await call('POST', `/api/sys-issues/${id2}/submit`, devTok, { mode: 'no_code', no_code_reason: '交付（占位理由）', self_tested: true, test_env_deployed: true });
+    await call('POST', `/api/sys-issues/${id2}/estimate`, devTok, { dev_estimated_at: EST, estimated_effort_days: 1 });
+    await call('POST', `/api/sys-issues/${id2}/submit`, devTok, { mode: 'commits', commits: [{ component: 'backend', commit_ref: 'c9-keep-batch-21' }], self_tested: true, test_env_deployed: true });
     r = await call('POST', `/api/sys-issues/${id2}/return`, adminTok, { reason: '列不齐' });
     assert.strictEqual(r.status, 200, 'return 200');   // L-1
     assert.strictEqual(r.body.status, '开发中', 'return → 开发中');

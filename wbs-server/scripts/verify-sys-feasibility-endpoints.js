@@ -157,11 +157,26 @@ async function main() {
     r = await call('POST', `/api/sys-issues/${idF0}/feasibility`, devTok, { conclusion: '可行', requirement_confirm: 'x', dev_estimated_at: EST });
     assert.strictEqual(r.status, 409, 'needs_feasibility=0 → 409'); assert.strictEqual(r.body.code, 'FEASIBILITY_NOT_REQUIRED');
     ok('[F8] needs_feasibility=0 单填评估 → 409 FEASIBILITY_NOT_REQUIRED');
-    // F9 非开发态（受理排期改造：建单落待指派·非开发态·填评估仍应拒）
+    // F9 非开发态填评估仍应拒 → 409 FEASIBILITY_STATUS_INVALID
+    // ⭐⭐ [C8-fix2 H·夹具订正] 原夹具用的是"刚建单、从未指派"的待指派单 + dev5。C8-fix2 把 assertDevMember
+    //   提到状态闸**之前**后，那个单据上 dev5 **根本不在册**（从未 assign ⇒ 无 roster 行），于是先撞 403
+    //   NOT_ROSTERED——本条实测由 409 变 403。诊断：**实现按 316-C 表态一正确重排，是夹具把两个变量（"非开发态"
+    //   与"非在册"）混在了一条用例里**，它此前能测到状态闸纯粹因为鉴权排在状态闸后面。
+    //   订正=把"在册"这个前提补上，让本条只剩"状态不对"一个变量：seedToDev 拿到在册的 dev5 + 开发中，
+    //   再直连 SQL 把状态推到非 W06 白名单态（'待验证'，见 status-families.js:197 feasibility 仅 from=['开发中']）。
+    const idF9 = await seedToDev(1);
+    await run(`UPDATE sys_issues SET status = '待验证' WHERE id = ?`, [idF9]);
+    r = await call('POST', `/api/sys-issues/${idF9}/feasibility`, devTok, { conclusion: '可行', requirement_confirm: 'x', dev_estimated_at: EST, estimated_effort_days: 1 });
+    assert.strictEqual(r.status, 409, '[F9] 在册成员 + 非开发态 → 409, got ' + r.status + ' ' + JSON.stringify(r.body));
+    assert.strictEqual(r.body.code, 'FEASIBILITY_STATUS_INVALID', '[F9] 确切码 FEASIBILITY_STATUS_INVALID，实得 ' + r.body.code);
+    ok('[F9] **在册成员** + 非开发态（待验证）填评估 → 409 FEASIBILITY_STATUS_INVALID（夹具补上"在册"前提，使本条只测状态闸这一个变量）');
+    // F9b ⭐ [C8-fix2 H 新行为] 同一形态但**非在册**（从未指派的待指派单）→ 现在先撞鉴权，恒 403 NOT_ROSTERED。
+    //   这正是本次重排要的效果：未授权者不再能从「409 状态码」里读出"这单存在且是 nf=1 的变更类"。
     let rr = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: '待指派', system_name: 'BMS', source: '内部', description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13, needs_feasibility: 1 });
     r = await call('POST', `/api/sys-issues/${rr.body.id}/feasibility`, devTok, { conclusion: '可行', requirement_confirm: 'x', dev_estimated_at: EST });
-    assert.strictEqual(r.status, 409, '非开发态 409'); assert.strictEqual(r.body.code, 'FEASIBILITY_STATUS_INVALID');
-    ok('[F9] 待指派态（非开发态）填评估 → 409 FEASIBILITY_STATUS_INVALID');
+    assert.strictEqual(r.status, 403, '[F9b] 非在册 + 非开发态 → 403（鉴权先于状态闸）, got ' + r.status + ' ' + JSON.stringify(r.body));
+    assert.strictEqual(r.body.code, 'NOT_ROSTERED', '[F9b] 确切码 NOT_ROSTERED，实得 ' + r.body.code);
+    ok('[F9b] ⭐ [C8-fix2 H] 非在册 + 非开发态 → 403 NOT_ROSTERED（**鉴权先于状态闸**·重排前此处报 409 FEASIBILITY_STATUS_INVALID，等于把单据存在性与属性漏给未授权者）');
     // F10 早于 assigned_at（补 estimated_effort_days，否则会先撞新增的 EFFORT_REQUIRED 而非本测试要测的
     //   ESTIMATE_BEFORE_ASSIGN——EFFORT_REQUIRED 检查在 assigned_at 校验之前，v1.1 §3.2 C2 新增顺序）
     r = await call('POST', `/api/sys-issues/${idF}/feasibility`, devTok, { conclusion: '可行', requirement_confirm: 'x', dev_estimated_at: '2020-01-01 10:00', estimated_effort_days: 3 });
@@ -203,7 +218,12 @@ async function main() {
     d = await get('SELECT estimated_effort_days FROM sys_issues WHERE id=?', [idEF]);
     assert.strictEqual(d.estimated_effort_days, 365, '字符串"365"归一化为数字 365 落库（上界同时验证）');
     ok('[EF6] estimated_effort_days="365"（字符串数字，上界 365）→ 200，归一化为数字落库');
-    // EF7 improvement+nf=1 选填对照：不传 estimated_effort_days 仍应 200（feature 必填 vs improvement 选填）
+    // EF7【C7 语义反转·断言随实现同步改判，非实现错】improvement+nf=1 **必填**：不传 estimated_effort_days
+    //   → 400 EFFORT_REQUIRED，与 feature 完全同构。
+    //   原断言（C2 口径）是"improvement 选填 → 200 且落 NULL"，C7 工时评估补全按方案 v1.7 §9.1 把工期必填面
+    //   从 feature-only 扩到 feature+improvement（对齐 risk_level 批1改造B 的同款扩围，两个字段自此在变更类
+    //   单据上口径一致）。本组由此从"必填 vs 选填对照组"翻转为"两类型同构组"——**旧断言不是被绕过，是它
+    //   描述的业务口径已被用户拍板废止**，故整组连注释重写而非注掉了事。
     let rImp = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'improvement', title: 'imp-ef', system_name: 'BMS', source: '内部', description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13, needs_feasibility: 1 });
     assert.strictEqual(rImp.status, 201, 'improvement 建单 201, got ' + rImp.status);
     const idImp = rImp.body.id;
@@ -215,10 +235,19 @@ async function main() {
     await call('POST', `/api/sys-issues/${idImp}/set-oa-number`, adminTok, { oa_number: '2026070099' });
     await call('POST', `/api/sys-issues/${idImp}/assign`, adminTok, { assigned_to: 5 });
     r = await call('POST', `/api/sys-issues/${idImp}/feasibility`, devTok, { conclusion: '可行', requirement_confirm: 'x', dev_estimated_at: EST });
-    assert.strictEqual(r.status, 200, 'improvement 不传工期应 200（选填）, got ' + r.status + ' ' + JSON.stringify(r.body));
+    assert.strictEqual(r.status, 400, 'C7：improvement 不传工期应 400（已改必填）, got ' + r.status + ' ' + JSON.stringify(r.body));
+    assert.strictEqual(r.body.code, 'EFFORT_REQUIRED', `C7：improvement 缺工期确切码应为 EFFORT_REQUIRED（与 feature 同码），实得 ${r.body && r.body.code}`);
     d = await get('SELECT estimated_effort_days FROM sys_issues WHERE id=?', [idImp]);
-    assert.strictEqual(d.estimated_effort_days, null, 'improvement 未传工期应落 NULL（选填，非静默默认值）');
-    ok('[EF7] improvement+nf=1 不传 estimated_effort_days → 200（选填，与 EF1-6 的 feature 必填对照）');
+    assert.strictEqual(d.estimated_effort_days, null, 'C7：400 被拒后零副作用——工期列仍 NULL（整个 feasibility 事务应回滚，不留半份评估）');
+    const dImpFeas = await get('SELECT feasibility_conclusion, dev_estimated_at FROM sys_issues WHERE id=?', [idImp]);
+    assert.strictEqual(dImpFeas.feasibility_conclusion, null, 'C7：400 被拒后零副作用——评估结论未落库（证明 EFFORT_REQUIRED 是在写入前拦下的，不是写完再报错）');
+    assert.strictEqual(dImpFeas.dev_estimated_at, null, 'C7：400 被拒后零副作用——预计完成时间未落库');
+    // 补齐正例：同一张单补上工期后应放行并落库，证明拦截可解除（防"只测拦得住、没测填了能过"的半向验证）
+    r = await call('POST', `/api/sys-issues/${idImp}/feasibility`, devTok, { conclusion: '可行', requirement_confirm: 'x', dev_estimated_at: EST, estimated_effort_days: 2.5 });
+    assert.strictEqual(r.status, 200, 'C7：improvement 补上工期后应 200, got ' + r.status + ' ' + JSON.stringify(r.body));
+    d = await get('SELECT estimated_effort_days FROM sys_issues WHERE id=?', [idImp]);
+    assert.strictEqual(d.estimated_effort_days, 2.5, 'C7：improvement 工期 2.5 归一化后落库');
+    ok('[EF7·C7 反转] improvement+nf=1 工期**必填**：不传 → 400 EFFORT_REQUIRED + 三项零副作用断言（工期/结论/预计完成均未落库）；补填 2.5 → 200 且落库——与 EF1-6 的 feature 完全同构（C2 的"improvement 选填"口径已废止）');
 
     // ── [codex 269 号 M-2] normalizeSysEffortDays 类型收紧补用例——裸 Number(raw) 会把布尔/单元素数组/
     //   十六进制字符串都静默转成合法数字，这批用例专门锁死"仅接受 number 或纯十进制格式字符串"这条收窄。
@@ -346,6 +375,76 @@ async function main() {
     d = await get('SELECT blocked, blocked_reason FROM sys_issues WHERE id=?', [idHV3]);
     assert.strictEqual(d.blocked, 0, 'void 清 blocked=0'); assert.strictEqual(d.blocked_reason, null, 'void 清 blocked_reason');
     ok('[BL9] 受阻单 void → blocked 三件套归零（无残留脏数据，ultracode 对抗审）');
+
+    // ── [BL-NR] ⭐⭐ [C7-fix3 补批 ①②·/blocked 防探知矩阵] 非在册 × 五形态 → 恒 403 NOT_ROSTERED ──
+    //   本端点是 W06 族**第三个**同款侧漏（前两个：/feasibility C8-fix2 H、/estimate C7-fix3 H），
+    //   由「按模式而非名单」的普查判定表抓出（[[feedback_pattern_sweep_not_symptom_list]]）。
+    //   ⭐ 侧漏面**以修前/修后对照探针实测为准**（非推断）——重排前 assertDevMember 位于
+    //     BLOCKED_NOT_APPLICABLE / BLOCKED_STATUS_INVALID **之后**、ISSUE_ALREADY_BLOCKED **之前**，故：
+    //       · bug 单   → 409 BLOCKED_NOT_APPLICABLE  ← 泄露 type
+    //       · nf=0 单  → 409 BLOCKED_NOT_APPLICABLE  ← 泄露 needs_feasibility
+    //       · 状态不对 → 409 BLOCKED_STATUS_INVALID  ← 泄露状态，且**文案里直接带着状态名**
+    //                    （实测原文：「当前状态「待验证」不可标记受阻」）
+    //       · 已受阻   → 403 NOT_ROSTERED  ← **修前就没漏**（该闸本就排在鉴权之后）
+    //       · 全合法   → 403 NOT_ROSTERED  ← 修前即 403
+    //     即真实泄露面是**前三格**，不是"五格全漏"。后两格保留在本组里作**回归看守**（证明重排没把
+    //     原本就正确的两格改坏），不充当"本次修好了什么"的证据。
+    //   重排后：五种形态一律 403 NOT_ROSTERED。
+    //   ⚠️ 逐形态断**确切码**——只断 403 的话，中间件层的别的 403 也能让它绿。
+    {
+      const BL_NR_BODY = { reason: 'C7-fix3 补批：非在册探针' };
+      const snapBL = async (iid) => ({
+        row: await get('SELECT blocked, blocked_reason, blocked_at, status FROM sys_issues WHERE id=?', [iid]),
+        tl: Number((await get('SELECT COUNT(*) c FROM sys_issue_timeline WHERE issue_id=?', [iid])).c)
+      });
+      // 五形态：bug 单 / nf=0 单 / 状态不对 / 已受阻 / 全合法（后者=重排前唯一已经 403 的那格）
+      const idNrBug = await seedToDev(1);
+      // ⚠️ type 与 status 必须**成对**改：assertKnownIssueStatus（排在鉴权之前，属"数据完整性自检"层）会拒绝
+      //   「bug + 开发中」这种族外组合并抛 409 GATE_INVARIANT——首版只改 type 不改 status，实测撞到该异常，
+      //   属**夹具造了一张现实中不存在的脏单**，不是实现错。bug 流的开发态是「处理中」。
+      await run(`UPDATE sys_issues SET type='bug', status='处理中' WHERE id=?`, [idNrBug]);
+      const idNrNf0 = await seedToDev(0);
+      const idNrBadStatus = await seedToDev(1);
+      await run(`UPDATE sys_issues SET status='待验证' WHERE id=?`, [idNrBadStatus]);
+      const idNrBlocked = await seedToDev(1);
+      let rb = await call('POST', `/api/sys-issues/${idNrBlocked}/blocked`, devTok, { reason: '先由在册开发标记受阻' });
+      assert.strictEqual(rb.status, 200, `[BL-NR 前置] 在册 dev 标记受阻应 200, got ${rb.status} ${JSON.stringify(rb.body)}`);
+      const idNrOk = await seedToDev(1);
+
+      for (const [label, iid, leakCode] of [
+        ['bug 单', idNrBug, 'BLOCKED_NOT_APPLICABLE（修前实测：泄露 type）'],
+        ['nf=0 单', idNrNf0, 'BLOCKED_NOT_APPLICABLE（修前实测：泄露 needs_feasibility）'],
+        ['状态不对', idNrBadStatus, 'BLOCKED_STATUS_INVALID（修前实测：泄露状态，文案带状态名）'],
+        ['已受阻', idNrBlocked, '任何 409（本格**修前即 403**，此处为回归看守而非修复证据）'],
+        ['全合法', idNrOk, '任何 409（本格修前即 403，回归看守）']
+      ]) {
+        const before = await snapBL(iid);
+        const r2 = await call('POST', `/api/sys-issues/${iid}/blocked`, dev2Tok, BL_NR_BODY);
+        assert.strictEqual(r2.status, 403, `[BL-NR-${label}] 非在册期望 403, got ${r2.status} ${JSON.stringify(r2.body)}`);
+        assert.strictEqual(r2.body.code, 'NOT_ROSTERED',
+          `[BL-NR-${label}] ⭐ 确切码必须是 NOT_ROSTERED，而不是 ${leakCode}，实得 ${r2.body.code}`);
+        // 零副作用四查
+        const after = await snapBL(iid);
+        assert.strictEqual(after.row.blocked, before.row.blocked, `[BL-NR-${label}] 零副作用：blocked 未变`);
+        assert.strictEqual(after.row.blocked_reason, before.row.blocked_reason, `[BL-NR-${label}] 零副作用：blocked_reason 未被写入`);
+        assert.strictEqual(after.row.blocked_at, before.row.blocked_at, `[BL-NR-${label}] 零副作用：blocked_at 未被写入`);
+        assert.strictEqual(after.row.status, before.row.status, `[BL-NR-${label}] 零副作用：状态未变`);
+        assert.strictEqual(after.tl, before.tl, `[BL-NR-${label}] 零副作用：timeline 零新增`);
+      }
+      ok('[BL-NR] ⭐⭐ [C7-fix3 补批] /blocked 非在册 × 五形态（bug/nf=0/状态不对/已受阻/全合法）→ **恒 403 NOT_ROSTERED** + 逐形态零副作用五查——修前/修后对照探针实测：前三格原本分别回 BLOCKED_NOT_APPLICABLE×2 与 BLOCKED_STATUS_INVALID（后者文案里带状态名），后两格原本即 403（保留作回归看守）');
+
+      // 配对正例（双向证明：403 只对非在册者生效，三道闸本身逐字未改坏）
+      let rp = await call('POST', `/api/sys-issues/${idNrBadStatus}/blocked`, devTok, BL_NR_BODY);
+      assert.strictEqual(rp.status, 409, `[BL-NR 配对①] 在册 + 状态不对应 409, got ${rp.status} ${JSON.stringify(rp.body)}`);
+      assert.strictEqual(rp.body.code, 'BLOCKED_STATUS_INVALID', `[BL-NR 配对①] 确切码 BLOCKED_STATUS_INVALID，实得 ${rp.body.code}`);
+      rp = await call('POST', `/api/sys-issues/${idNrBug}/blocked`, devTok, BL_NR_BODY);
+      assert.strictEqual(rp.status, 409, `[BL-NR 配对②] 在册 + bug 单应 409, got ${rp.status} ${JSON.stringify(rp.body)}`);
+      assert.strictEqual(rp.body.code, 'BLOCKED_NOT_APPLICABLE', `[BL-NR 配对②] 确切码 BLOCKED_NOT_APPLICABLE，实得 ${rp.body.code}`);
+      rp = await call('POST', `/api/sys-issues/${idNrBlocked}/blocked`, devTok, BL_NR_BODY);
+      assert.strictEqual(rp.status, 409, `[BL-NR 配对③] 在册 + 已受阻应 409, got ${rp.status} ${JSON.stringify(rp.body)}`);
+      assert.strictEqual(rp.body.code, 'ISSUE_ALREADY_BLOCKED', `[BL-NR 配对③] 确切码 ISSUE_ALREADY_BLOCKED，实得 ${rp.body.code}`);
+      ok('[BL-NR 配对] ⭐ 双向证明：**在册** dev 打同三张单仍分别拿到 BLOCKED_STATUS_INVALID / BLOCKED_NOT_APPLICABLE / ISSUE_ALREADY_BLOCKED——三道闸相对序与错误码逐字未变，403 只对非在册者生效（非"dev2 恒被拒"的单向观察）');
+    }
 
     // ── [E2E] F2a 闸门 + F2b 端点真实联动闭环 ⭐ ──
     // E1 建单评估→submit 放行（真实链路，验证 F2a 闸门读 F2b 写入）

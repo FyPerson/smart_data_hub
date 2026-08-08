@@ -253,11 +253,18 @@ async function main() {
     const r6b = await reject(f6, devTok, '普通用户尝试拒变更单');
     assert.strictEqual(r6b.status, 403, `[RJ⑥b] 普通用户拒变更单应 403（即便前置守卫已满足）, got ${r6b.status} ${JSON.stringify(r6b.body)}`);
 
-    // ⑦ 双身份（uid∈受理人白名单 且 role=admin）拒变更单 → 200（判定只看 uid∈白名单，不看 role）
+    // ⑦ 双身份（uid∈受理人白名单 且 JWT role=admin）拒变更单（issue-reject·roleGuard=intake_liaison_only 排 admin）
+    //   ⭐ [C10-fix6·codex 322-R MED-2 行为变更·断言更新] 旧断言=200（190 号语义「只看 uid∈白名单不看 role」）——
+    //     **已随 C10 废白名单 + MED-2 intake_liaison_only 显式 !isAdmin 作废**。C10 后 intake_liaison_only 判据=
+    //     「绑定本人 ∧ 当前 eligible ∧ **非 admin（按登录 JWT role）**」。双身份用 dualTok（JWT role=admin）登录 →
+    //     isAdmin=true → intake_liaison_only 排 admin → **403 NOT_BOUND_LIAISON**（符合「issue_reject 仅对接人·排 admin」
+    //     §2/190 契约·按登录身份判权：同一人若用受理人 token〔JWT role=user〕登录则放行，见 [RJ①-④] liaisonTok 组）。
+    //   属 C10 夹具债漏网第 10（C10 主批时 eligible 查 DB role=user 恰放行→碰巧绿·fix6 MED-2 的 !isAdmin〔JWT 源〕
+    //     暴露此 190 号旧假设·非实现错·实现符合 MED-2「intake_liaison_only 严格排 admin」）。
     const f7 = await seedFeatureWithComment();
     const r7 = await reject(f7, dualTok, '双身份用户拒绝');
-    assert.strictEqual(r7.status, 200, `[RJ⑦] 双身份(uid13∈白名单·role=admin) 拒变更单应 200, got ${r7.status} ${JSON.stringify(r7.body)}`);
-    assert.strictEqual(r7.body.status, '已拒绝', '[RJ⑦] 双身份拒绝 → 已拒绝');
+    assert.strictEqual(r7.status, 403, `[RJ⑦] 双身份(JWT role=admin) 用 admin token 走 issue-reject(intake_liaison_only 排 admin) 应 403, got ${r7.status} ${JSON.stringify(r7.body)}`);
+    assert.strictEqual(r7.body.code, 'NOT_BOUND_LIAISON', '[RJ⑦] 双身份 admin token 被 intake_liaison_only 排 → NOT_BOUND_LIAISON');
 
     // 前置守卫三态补全：未咨询（⑤已覆盖）/ 咨询未回复 / 已回复（④已覆盖）
     const f8 = await create('feature');

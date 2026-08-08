@@ -139,29 +139,59 @@ async function mkReleaseWithIssues(issueIds, extra = {}) {
   assert.strictEqual(r2.status, 200, `加单 200, got ${r2.status} ${JSON.stringify(r2.body)}`);
   return relId;
 }
-// C3（上线体统一重构）后端批改造：legacy /sys-releases/:id/publish 现全类型 409（LEGACY_RELEASE_FLOW_DISABLED），
-//   唯一合法发布入口收窄为 /sys-releases/:id/execute（中心守卫要求 notify_status='sent' ∧
-//   release_assignee_id===actor.id ∧ 实时资格）。本文件关注的是 _publishReleaseCoreInTxn 内核本身
-//   的快照写入行为（S21/S25/S26/S37/Lz-1），不关心"怎么走到可执行态"这段——直接 SQL 把中心守卫三前提
-//   钉好（同 verify-sys-mutex.js 并发 execute 用例同款手法），再调真实 /execute，内核校验/写入逻辑
-//   逐字未变，验证目标不受影响。
+// C3（方案 §4.3 全文）：publish 唯一合法入口收窄为 /sys-releases/:id/execute，语义整体切换为「确认我
+//   这一份」+ R-GATE（多人各自确认、在册人数≥1 ∧ 全员 done 才真正翻已发布，决策 7 三修下限 2→1）。
+//   本文件关注的是
+//   _publishReleaseCoreInTxn 内核本身的快照写入行为（S21/S25/S26/S37/Lz-1），不关心"怎么走到可执行态"
+//   这段——**301-M3 过渡夹具标注兑现**（同款改法见 verify-sys-release.js 的 publishRelease 定义处
+//   完整论述，此处不重复）。**通用化处理两种起点**：① 批次尚无在册执行人（helper 自建 executorId+
+//   固定"影子搭档" SHADOW_EXECUTOR_ID 两人）② 批次已有在册执行人（如 S21b 经 hotfix-publish 建单，
+//   本身已带 2 人）——两种情形统一走：把所有 not_sent 的在册行置 sent → 除 executorId 外逐个确认
+//   （已 done 的跳过）→ executorId 最后确认，触发 R-GATE 真正发布。外部契约不变，调用方仍只传
+//   relId+body（+可选 executorId）。
+const SHADOW_EXECUTOR_ID = 999901;
 async function publishRelease(relId, body, executorId = 5, executorName = '开发甲') {
-  await run(
-    `UPDATE sys_releases SET release_assignee_id=?, release_assignee_name=?, release_assignee_notify_status='sent'
-       WHERE id=?`,
-    [executorId, executorName, relId]
-  );
-  return call('POST', `/api/sys-releases/${relId}/execute`, devTok(executorId), body);
+  let rows = await all(`SELECT id, user_id, notify_status, exec_status FROM sys_release_executors WHERE release_id=? AND removed_at IS NULL`, [relId]);
+  if (rows.length === 0) {
+    await run(`INSERT OR IGNORE INTO users (id, username, display_name, role, status) VALUES (?, 'shadow-partner', '影子搭档', 'user', 'active')`, [SHADOW_EXECUTOR_ID]);
+    const rSet = await call('PUT', `/api/sys-releases/${relId}/executors`, adminTok, { user_ids: [executorId, SHADOW_EXECUTOR_ID] });
+    if (rSet.status !== 200) return rSet;
+    rows = await all(`SELECT id, user_id, notify_status, exec_status FROM sys_release_executors WHERE release_id=? AND removed_at IS NULL`, [relId]);
+  }
+  const myRow = rows.find(r => r.user_id === executorId);
+  if (!myRow) throw new Error(`publishRelease helper: executorId=${executorId} 不在 release ${relId} 的在册执行人子表中`);
+  // 确保全部在册行 notify_status='sent'——不论是本 helper 刚建的，还是调用方经别的路径（如
+  // hotfix-publish）已建好的 not_sent/pending 行。CHECK 要求 notified_at 同步非空。
+  const notSentIds = rows.filter(r => r.notify_status !== 'sent').map(r => r.id);
+  if (notSentIds.length > 0) {
+    const ph = notSentIds.map(() => '?').join(',');
+    await run(`UPDATE sys_release_executors SET notify_status='sent', notified_at=datetime('now','localtime') WHERE id IN (${ph})`, notSentIds);
+  }
+  // 除 executorId 外逐个先确认（已 done 的跳过——幂等感知，同一 relId 可能被多次调用）。
+  for (const r of rows) {
+    if (r.user_id === executorId || r.exec_status === 'done') continue;
+    // 303-M2（Opus 对抗审）：中间预确认不许静默吞——断言真成功且未提前触发发布（executorId 自己那行
+    //   仍 pending，R-GATE 不可能在这里被满足，released 恒 false），失败带上下文抛错方便定位。
+    const rPre = await call('POST', `/api/sys-releases/${relId}/execute`, devTok(r.user_id), { executor_row_id: r.id });
+    if (rPre.status !== 200 || rPre.body.released !== false) {
+      throw new Error(`publishRelease helper: 预确认异常，relId=${relId} user_id=${r.user_id} row=${r.id} status=${rPre.status} body=${JSON.stringify(rPre.body)}`);
+    }
+  }
+  return call('POST', `/api/sys-releases/${relId}/execute`, devTok(executorId), { ...body, executor_row_id: myRow.id });
 }
 
 async function main() {
   mod.initSchema();
   await waitReady();
   // status 列：C3 后端批 publishRelease() 改走 /execute，其中心守卫要走 hasReleaseEligibility(userId)
-  //   （SELECT status, role FROM users），补列（DEFAULT 'active'，本文件所有夹具用户天然在职有资格）。
-  // phone/dingtalk_user_id 列：[C3 裁定修正 2026-07-29] S21b 补了真实排班后 hotfix-publish 会真走到
-  //   preempt 成功 → sendReleaseNotifyAndWriteback（SELECT id, display_name, phone, dingtalk_user_id
-  //   FROM users），缺列即报错，此前该分支从未在本文件被触发过（无排班时抢占早早短路，见 S21b 处注释）。
+  //   （SELECT status, role FROM users），补列（DEFAULT 'active'，本文件所有夹具用户天然在职有资格）；
+  //   S21b 的 hotfix-publish 执行人闸门②③（C2b 起）同样消费本函数。
+  // phone/dingtalk_user_id 列：⭐ MED-1（Opus 预筛）注释写实——原注释描述的路径（S21b 走 hotfix-publish
+  //   preempt 成功 → sendReleaseNotifyAndWriteback）已随 C2b 作废：hotfix-publish 自 C2b 起不再复用该
+  //   服务（去自动定人，改走独立闸门+子表写入，见 index.js 路由头部注释），本文件也无其它路径真调
+  //   sendReleaseNotifyAndWriteback。L1 订正：该函数本体现已随 C4b H1 退场从生产代码整体删除，"本文件
+  //   无路径真调"这句话依然成立且更彻底（全项目已无处可调，不只是本文件绕开）。两列现已是历史遗留
+  //   （无消费方），继续保留 CREATE TABLE 原样未做清理（不在本次改造范围）。
   await run(`CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT, status TEXT DEFAULT 'active', phone TEXT, dingtalk_user_id TEXT)`);
   await run(`INSERT INTO users (id, username, display_name, role, status) VALUES
     (1,'admin','管理员','admin','active'),(5,'dev5','开发甲','user','active'),(6,'dev6','开发乙','user','active'),(8,'dev8','开发戊','user','active')`);
@@ -237,7 +267,7 @@ async function main() {
     // [C3 裁定修正 2026-07-29] 抢占失败（当日无在册值班人）现回滚+409——本用例验证目标是快照写入，
     //   非抢占分支，先补今日排班让 hotfix-publish 走通①全链（幂等：本文件仅这一处调用，不会重复 INSERT）。
     await run(`INSERT INTO sys_release_duty_roster (duty_date, user_id, user_name, created_by, created_by_name) VALUES (date('now','localtime'), 5, '开发甲', 1, '管理员')`);
-    const rHf = await call('POST', `/api/sys-issues/${id}/hotfix-publish`, adminTok, { release_note: 'bug批次发布' });
+    const rHf = await call('POST', `/api/sys-issues/${id}/hotfix-publish`, adminTok, { release_note: 'bug批次发布', executors: [5, 6] });
     assert.strictEqual(rHf.status, 200, `S21b：bug hotfix-publish 建单应 200, got ${rHf.status} ${JSON.stringify(rHf.body)}`);
     const relId = rHf.body.release_id;
     assert.ok(relId, 'S21b：hotfix-publish 建单后 release_id 非空');
@@ -365,7 +395,18 @@ async function main() {
     const id = await mkIssue('feature', '待验证');
     // RC-M5：accept 进「待上线」（REQUIRES_ASSIGNEE_STATUSES 内）须有 assigned_to，同下方 resume 用例治具范式
     await run(`UPDATE sys_issues SET assigned_at = datetime('now','localtime'), assigned_to = 5, assigned_to_name = '开发甲' WHERE id = ?`, [id]);
-    await mkMember(id, 5, '开发甲', 'no_code');
+    // ⭐ [C9-fix H2①] 夹具从 'no_code' 改 'code_submitted'（mkMember 会自动种一条 commit 行）——**为的是
+    //   保住本组原本要测的那件事**。C9（无 commit 单验收直翻）上线后，零 commit 单 accept 会直接翻到
+    //   「已上线」而不是「待上线」；本组用 no_code 建的单恰好零 commit，于是 accept 后主状态变成已上线，
+    //   下面那条 `status === '待上线'` 断言直接红——但红的原因不是"快照逻辑坏了"，而是**夹具已经不再
+    //   构造出本组要测的那个场景**。本组的被测语义是「accept 进待上线**这条路径**不产快照」，前提就是
+    //   单据得真能走到待上线，所以正确的修法是让夹具带上 commit（走非直翻路径），而不是把断言改成已上线。
+    //   ⚠️ 本处是 C9 那轮"7 套件 30 处 no_code 夹具改 commits 模式"普查的**漏网**（那轮只 grep 了
+    //     `mode: 'no_code'` 这种走 submit 端点的写法，本文件用的是 mkMember 直连 SQL 写 dev_status，
+    //     模式不同故未被命中）——判定标准应是"accept 时该单是否零 commit"，不是"夹具长什么样"。
+    await mkMember(id, 5, '开发甲', 'code_submitted');
+    assert.strictEqual((await get('SELECT COUNT(*) c FROM sys_issue_dev_commits WHERE issue_id=?', [id])).c, 1,
+      'S37 前置：夹具须带 1 条 active commit——否则会命中 C9 免上线直翻，accept 落「已上线」，本组测的"进待上线"路径根本没被走到（防夹具自己变假）');
     const r = await call('POST', `/api/sys-issues/${id}/accept`, adminTok, {});
     assert.strictEqual(r.status, 200, `S37：accept 应 200, got ${r.status} ${JSON.stringify(r.body)}`);
     const row = await issueRow(id);

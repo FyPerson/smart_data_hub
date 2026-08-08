@@ -372,6 +372,14 @@ async function loadSysEfficiencyRecords(dbAllAsync, startDate, endDate, nowIso) 
 
     return rows.map((r) => {
         const isAborted = SYS_ABORTED_STATUSES.includes(r.status);
+        // ⭐ [C9 读点标注·方案 v1.7 §10.1 逐点标注要求] **本读点显式声明：不区分「已上线」的来源。**
+        //   C9 起「已上线」有两条明示入口——批次发布（release_publish）与免上线直翻（no_commit_acceptance，
+        //   零 commit 单验收通过当场翻牌）。本处 t3（归档终态）只问"这单什么时候算交付完成"，两条路径
+        //   写的都是同一根 released_at 列、语义都是"业务上已生效"，故**有意合并统计、不按 online_source 分流**。
+        //   理由：交付效率看的是"从建单到用户能用上花了多久"，一个配置类需求不需要走批次并不让它交付得
+        //   "更不算数"；真按来源拆开反而会让免上线单凭空少掉一段本就不存在的批次等待时间，制造两套不可比的口径。
+        //   ⚠️ 若将来要按来源做分组统计，改这里之前先回 deriveOnlineSourceKind（唯一权威派生函数）取 kind，
+        //     不要在本文件重新判 release_id/online_source——那会是第二份判据。
         const releasedish = r.closed_at || r.released_at;
         const isDone = !isAborted && !!releasedish;
         const statusGroup = isAborted ? 'aborted' : (isDone ? 'done' : 'inflight');

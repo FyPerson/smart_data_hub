@@ -150,7 +150,7 @@ async function main() {
 
     // ── [C] needs_feasibility=0 场景下 estimate 正常 + submit 结构性放行（新模型已不查 feasibility，恒放行）──
     const idC = await seedToDev(0);
-    r = await call('POST', `/api/sys-issues/${idC}/estimate`, devTok, { dev_estimated_at: EST });
+    r = await call('POST', `/api/sys-issues/${idC}/estimate`, devTok, { dev_estimated_at: EST, estimated_effort_days: 1 });
     assert.strictEqual(r.status, 200, 'needs_feasibility=0 estimate 200, got ' + r.status);
     r = await call('POST', `/api/sys-issues/${idC}/submit`, devTok, { mode: 'no_code', no_code_reason: 'feasibility 测试占位理由', self_tested: true, test_env_deployed: true });
     assert.strictEqual(r.status, 200, 'needs_feasibility=0 submit 放行, got ' + r.status + ' ' + JSON.stringify(r.body));
@@ -259,6 +259,17 @@ async function main() {
          VALUES ('bug', '处理中', 'B4-bug无工期', 'BMS', '内部', 1, '管理员', datetime('now','localtime'), 1)`
       );
       const bugId = rBug.lastID;
+      // ⭐⭐ [C8-fix2 H·夹具订正] C8-fix2 把 assertDevMember 提到**全部业务属性闸之前**（防探知：非在册者
+      //   不得从错误码里读出单据 type / needs_feasibility）。原夹具只 INSERT 了 sys_issues 一行、**没有建
+      //   roster 行**，于是 dev5 在这张 bug 单上不在册 ⇒ 现在先撞 403 NOT_ROSTERED，本条由 409 变 403。
+      //   诊断：**实现按 316-C 表态一正确重排；是夹具把"非在册"这个无关变量混进了一条本该只测"type 闸门
+      //   先于字段闸门"的用例**（它此前能测到 type 闸纯粹因为鉴权当时排在后面）。
+      //   订正=补一条在册行，让 actor 通过鉴权，本条恢复为只测 type 闸这一个变量。
+      //   （"非在册 × bug 单 → 403 NOT_ROSTERED" 这一新行为另由 verify-sys-effort-c7 [6d-②] 专门覆盖。）
+      await run(
+        `INSERT INTO sys_issue_dev_assignees (issue_id, user_id, user_name) VALUES (?, 5, '开发王')`,
+        [bugId]
+      );
       const rFeasBug = await call('POST', `/api/sys-issues/${bugId}/feasibility`, devTok,
         { conclusion: '可行', requirement_confirm: 'x', dev_estimated_at: futureEst(30), estimated_effort_days: 5 });
       assert.strictEqual(rFeasBug.status, 409, `[G-bug] bug 单调 /feasibility 应 409，实际 ${rFeasBug.status} ${JSON.stringify(rFeasBug.body)}`);

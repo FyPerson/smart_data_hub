@@ -155,6 +155,13 @@
         .si-help { display: inline-flex; align-items: center; justify-content: center; width: 15px; height: 15px; margin-left: 4px; border-radius: 50%; background: #e2e8f0; color: #64748b; font-size: 11px; font-weight: 700; cursor: help; vertical-align: middle; }
         .si-help:hover { background: #cbd5e1; color: #334155; }
         .si-help:focus { outline: 2px solid #93c5fd; outline-offset: 1px; }
+        /* [C8 风险/优先级双显·方案 v1.7 §9.2] 列表页「优先级/风险」列的上下双行容器。
+           不加新列是本次硬约束（列表已 20+ 列，加列必触发横滚），故复用优先级列做纵向叠放。
+           下行用 11px 小字 + 2px 上间距，视觉上明确从属于上行徽章而非并列信息。 */
+        .si-pri-risk { display: inline-block; line-height: 1.25; }
+        .si-risk-line { margin-top: 2px; }
+        .si-risk-sub { font-size: 11px; color: #475569; cursor: help; }
+        .si-risk-sub.si-muted { cursor: default; }
 
         /* checkbox 多选行（C3，20260713）：承接原 inline display:flex 声明；checkbox 加 flex:0 0 auto+width:auto
            覆盖共享层 .u-form-group input{width:100%} 的污染（该污染实测命中 checkbox，导致多选竖排塌陷）。
@@ -550,7 +557,11 @@
                         <tr>
                             <th class="u-sortable" data-sort-by="id">ID<span class="u-sort-icon">⇅</span></th>
                             <th class="u-sortable" data-sort-by="type">类型<span class="u-sort-icon">⇅</span></th>
-                            <th class="u-sortable" data-sort-by="priority">优先级<span class="u-sort-icon">⇅</span></th>
+                            <!-- [C8 风险/优先级双显·方案 v1.7 §9.2] 本列改上下双行（上=优先级徽章·下=风险等级小字），
+                                 故列头改「优先级/风险」。data-sort-by 仍是 priority：**排序只按优先级**，下行不参与
+                                 （风险等级是另一个维度，混排会让"点一次列头"的语义含糊；且不加新列是本次的硬约束
+                                 ——列表已有 20+ 列，加列必然触发横滚）。 -->
+                            <th class="u-sortable" data-sort-by="priority">优先级/风险<span class="u-sort-icon">⇅</span></th>
                             <th class="u-sortable" data-sort-by="status">状态<span class="u-sort-icon">⇅</span></th>
                             <th class="u-sortable" data-sort-by="title">标题<span class="u-sort-icon">⇅</span></th>
                             <!-- S1（时间格式统一 20260804·锚点 D1/D2）：表头「系统 · 模块」→「系统」，行内不再拼接
@@ -704,6 +715,49 @@
     //   [v1.1 §3.4·C5] label 去「（风险等级）」旧混用后缀——风险等级已是独立字段/独立 UI，不再与优先级同名混显。
     const SI_PRIORITY_LABEL = `优先级 <span class="si-help" tabindex="0" role="img" aria-label="${SI_PRIORITY_HELP_TEXT}" title="${SI_PRIORITY_HELP_TEXT}">?</span>`;
 
+    // [C8 风险/优先级双显·方案 v1.7 §9.2 末条·2026-08-07 启动门增补] 风险等级三级口径说明。
+    //   ⚠️ 三级定义**逐字**取自方案 §9.2 末条，不转述、不概括、不改标点——这段是业务方（对接人）判定
+    //     风险等级时的唯一裁量依据，任何"顺手润色"都会让它与方案原文分岔，后续争议时无从对账。
+    //   与 SI_PRIORITY_HELP_TEXT 完全同款：纯文本单一事实源 → si-help 徽章的 title + aria-label 共用；
+    //   文案为纯中文/全角标点、无英文双引号/&/尖括号，可安全内联进 title 属性（若未来加入这些字符，
+    //   须改为 HTML 属性转义后再插入，同 :700-701 既有约束）。
+    const SI_RISK_LEVEL_HELP_TEXT = '风险等级（对接人受理时判定的技术风险，与业务紧急度无关，业务紧急度另由优先级判定）：一级＝出款相关需求、优化，或实际代码改动涉及出款部分的需求、优化。二级＝影响关键业务流程（立项、开票、结算、领款）无法正常进行的需求。三级＝页面显示优化调整、报表、查询等不影响主要业务流程的需求。';
+    // fSelect label 复用（建单/编辑/受理等一切渲染风险等级选择的表单）——照搬 SI_PRIORITY_LABEL 范式。
+    const SI_RISK_LEVEL_LABEL = `风险等级 <span class="si-help" tabindex="0" role="img" aria-label="${SI_RISK_LEVEL_HELP_TEXT}" title="${SI_RISK_LEVEL_HELP_TEXT}">?</span>`;
+
+    // ⭐ [C9-fix M3] 「已上线」来源三分支的展示文案——**判定在后端**（deriveOnlineSourceKind 是唯一权威，
+    //   index.js:2310），前端只做 kind→中文 的字典映射，不自己看 release_id/online_source 推断（否则又是
+    //   两份判据必然漂移）。三个 key 与后端返回的 `issue.online_source_kind` 逐字对齐：
+    //     · release_publish        → 批次发布（走 sys_releases 批次 / hotfix / execute 的既有主路径）
+    //     · no_commit_acceptance   → 免上线直翻（C9 新增：零 commit 单验收通过当场翻牌）
+    //     · unknown_legacy         → 历史存量（C9 之前就已在「已上线」的单，无来源标签可考；**刻意不伪装成
+    //                                 免上线**，297-B M-a 正是为此保留了物理列）
+    //   ⚠️ 未在字典内的值（后端将来加第四分支而前端未同步）走 `|| kind` 兜底显示原始 key——宁可露出一个
+    //     英文标识让人发现漏改，也不静默显示成空白或错误分类。
+    const SI_ONLINE_SOURCE_LABEL = { release_publish: '批次发布', no_commit_acceptance: '免上线直翻', unknown_legacy: '历史存量' };
+
+    // [C8] 列表页「优先级/风险」单元格：上行=优先级徽章（.u-pri 共享层，与改造前逐字相同），
+    //   下行=风险等级小字。三种下行形态：
+    //     · bug：**留空**——bug 单结构上没有风险等级维度（受理门只对 feature/improvement 判定
+    //       risk_level，bug 恒 NULL，见 index.js case 'intake_accept'），显示"未定级"会把"不适用"
+    //       误说成"该定没定"。与详情页 :1748 kv 的既有 type 门控口径一致。
+    //     · feature/improvement 已定级：显示等级文本（title 挂三级口径，鼠标悬浮即可看判定依据）。
+    //     · feature/improvement 未定级：灰字「未定级」——与详情页 kv 的 `si-muted 未定级` 逐字同口径。
+    //   下行不参与排序（列头 data-sort-by 仍为 priority）。
+    //   导出口径（297-L2）：**本页当前无导出功能**（全文 grep `siExport`/`exportToCsv`/`downloadCsv` 零命中），
+    //     故本次没有导出列头要同步。将来若加导出，风险等级应作为**独立列**导出而不是拼进优先级列
+    //     ——双行叠放是列表页"不加列"约束下的视觉妥协，不是数据模型；导出无横滚约束，没有理由继承它。
+    //     bug 行的风险展示值为**空串**（不是"未定级"），导出时同样应落空而非占位文本。
+    function siPriRiskCellHtml(i) {
+        const pri = `<span class="u-pri ${esc(i.priority)}">${esc(i.priority)}</span>`;
+        const riskApplicable = i && (i.type === 'feature' || i.type === 'improvement');
+        if (!riskApplicable) return `<div class="si-pri-risk">${pri}</div>`;
+        const riskText = i.risk_level
+            ? `<span class="si-risk-sub" title="${SI_RISK_LEVEL_HELP_TEXT}">${esc(i.risk_level)}</span>`
+            : `<span class="si-risk-sub si-muted">未定级</span>`;
+        return `<div class="si-pri-risk">${pri}<div class="si-risk-line">${riskText}</div></div>`;
+    }
+
     // 状态 → CSS 语义 key（避免中文类名；含 config 未来态前向兼容）
     // （C2.5 撤销·方案 v2.1）'待商议': 'prediscuss' 映射已删——预沟通段废除，该状态不再产生。
     const SI_STATUS_CLASS = {
@@ -784,6 +838,31 @@
     //   （issue 级旧列，两张表同名不同列，C4/C5 多次踩过）。
     function siCanOpenRelease(iss) {
         return !!(iss && iss.release_id && iss.release_brief);
+    }
+    // [C7 工时评估补全·C7-fix MED-3] submit 的工期闸前端镜像：与后端 handleDevSubmit 内那段
+    //   （index.js「[C7 工时评估补全] 工期硬闸」）**同判据**——仅 feature/improvement 受检（bug/config 无
+    //   工期维度），nf 两值都查，判定复用后端 normalizeSysEffortDays 的三条：有限数、(0, 365]、0.5 整数倍。
+    //   ⚠️ 前端非授权源，后端仍是权威校验；本函数只用于"该不该显示 submit 按钮 + 给什么引导"，不参与提交。
+    //   两类失败合并成一个布尔（缺失 / 存量脏值），调用点再按 `estimated_effort_days != null` 分开措辞。
+    //   [C7-fix2 L2] "缺失"判定须先 trim：后端 normalizeSysEffortDays 把纯空白串（'  '）归一为 value:null
+    //   ＝**未填**（非格式错，verify-sys-effort-c7 [2b] 已钉死），前端若只判 `v === ''` 就会把纯空白归进
+    //   "存量脏值"那一格，gate 文案变成"当前值 '  ' 不合法，须为 0.5 的整数倍"——对着一串空格说格式不对，
+    //   既没信息量又和后端口径打架。两端对"什么算没填"必须同一口径（[[feedback_write_read_same_semantic]]）。
+    function siEffortGateBlocked(iss) {
+        if (!iss || (iss.type !== 'feature' && iss.type !== 'improvement')) return false;
+        const v = iss.estimated_effort_days;
+        if (v == null) return true;                                              // 从未填过（null/undefined）
+        if (typeof v === 'string' && v.trim() === '') return true;               // 空串/纯空白 → 同归"从未填过"
+        const n = Number(v);
+        return !Number.isFinite(n) || n <= 0 || n > 365 || Math.round(n * 2) !== n * 2;   // 存量脏值
+    }
+    // gate 文案要区分"没填过"与"填了但值非法"，判据须与上面 siEffortGateBlocked 的第一段完全同源，
+    //   否则会出现"按 A 的口径判定拦截、按 B 的口径措辞"这种自相矛盾。抽成独立函数供调用点复用。
+    function siEffortIsDirty(iss) {
+        const v = iss && iss.estimated_effort_days;
+        if (v == null) return false;
+        if (typeof v === 'string' && v.trim() === '') return false;
+        return true;   // 非空且未通过上面的数值校验 ⇒ 存量脏值
     }
     function isSiTechLead(uid) { return Number(uid) > 0 && SI_TECH_LEAD_IDS.includes(Number(uid)); }
     // 受理门动作前端权限门（镜像 §5.3 逐动作授权表·前端非授权源·后端精判兜底）：
@@ -1076,10 +1155,20 @@
             try {
                 const r = await siApi('/sys-releases');
                 const items = (r.ok && r.data && Array.isArray(r.data.items)) ? r.data.items : [];
+                // C5（方案 §4.5 登记清单⑤·:1082）：待执行计数改读新 DTO 聚合——旧批次级单列
+                // release_assignee_notify_status 已随 C4b H1 退场冻结在 DDL 默认值 not_sent，永久算出 0。
+                // executor_notify_summary 六态里 sent（全体已通知）与 partial（部分已通知）都算"有事要做"：
+                // 列表已按 mine 视角过滤（EXISTS 子表在册），summary=sent/partial 意味着这批里至少有人被
+                // 通知了，值得亮出徽标提醒查看；none/not_sent（还没人被通知）与 failed（发送失败，需 admin
+                // 处理不是本人）不计入。
                 siMyReleasesEntryData = {
                     userId: Number(currentUser.id),
                     show: items.length > 0,
-                    pending: items.filter(x => x.status === '计划中' && x.release_assignee_notify_status === 'sent').length,
+                    // L7（待执行徽标精度）：入口计数同样叠「本人行未 done」——本人已确认完成的批次不再计入
+                    //   "待执行"数（后端 mine 视角 DTO 下发 my_executor_done）。本入口只在 mine 视角出现
+                    //   （siProbeMyReleasesEntry 顶部已 return admin/对接人），故此处 x.my_executor_done 恒存在，
+                    //   直接读；本人 done 后该批不计入，与列表行徽标口径一致。
+                    pending: items.filter(x => x.status === '计划中' && ['sent', 'partial'].includes(x.executor_notify_summary) && x.my_executor_done !== true).length,
                 };
             } catch (_) { siMyReleasesEntryData = { userId: Number(currentUser.id), show: false, pending: 0 }; return; }
         }
@@ -1385,7 +1474,7 @@
             return `<tr onclick="siOpenDrawer(${i.id})">
                 <td>#${i.id}</td>
                 <td><span class="u-type-tag ${esc(i.type)}">${esc(siTypeLabel(i.type))}</span></td>
-                <td><span class="u-pri ${esc(i.priority)}">${esc(i.priority)}</span></td>
+                <td>${siPriRiskCellHtml(i)}</td>
                 <td><span class="u-status-badge si-s-${siStatusClass(i.status)}">${esc(siStatusDisplay(i.status))}</span></td>
                 <td>${esc(i.title)}${lineage}${flags}</td>
                 <td>${esc(i.system_name)}</td>
@@ -1675,12 +1764,56 @@
         if (iss.fix_gap_note) lineageHtml += `<div class="si-lineage">🔧 修复缺口说明：${esc(iss.fix_gap_note)}</div>`;
 
         // 基本信息
+        // [C8·MED-4] 工期 kv 提到基本信息块，条件从 `needs_feasibility` 改为 **type 适用面**：
+        //   feature/improvement 有值即显示（nf 两值都可能有工期——nf=1 在评估弹窗填、nf=0 在估时弹窗填，
+        //   C7 已把两条写路径都打通）；bug/config 结构上无工期维度，整项不渲染（与风险等级 kv 同款 type
+        //   门控口径，不显示"未填"以免把"不适用"说成"该填没填"）。
+        // ⭐ [C8-fix K3] 三态门控（type 适用面 × 值有无 × 状态）——判断标准与列表页 bug 行「留空≠未定级」
+        //   **完全同一条**：只有"该填而没填"才说「未填」，"还轮不到填"一律整行不渲染。
+        //     · 值非空 → 显示值（任何状态都显示，含已上线后回看）
+        //     · 值空 ∧ status==='开发中' → 灰字「未填」（工期写入口 estimate/feasibility 的 W06 白名单只开
+        //       「开发中」，此刻确实是"该填没填"）
+        //     · 其余状态值空 → **整行不渲染**（待受理/待指派阶段根本没有填工期的入口，标「未填」是在指责
+        //       用户漏做一件他此刻做不了的事；已上线/已关闭的历史空值同理，那是存量事实不是待办）
+        // ⚠️ [C7-C9 收口批 L4·登记设计推论，非 bug] 上面三态叠在一起，会推出一个**唯一的"信息从有到无"形态**：
+        //   同一张单据、同一个 kv，值恒为空而状态从「开发中」往后走时，这一行会从灰字「未填」**整行消失**。
+        //   典型载体是**存量单**（C7 之前落库的 nf=1 / nf=0 变更类单，工期列恒 NULL）——它在「开发中」时
+        //   显示「未填」，一旦离开「开发中」就不再渲染这一格。这是三态门控的直接推论，不是渲染缺陷：
+        //     · 判据自洽——「未填」表达的是"此刻该填而没填"，离开写入态后这句话本身就不成立了，继续显示
+        //       等于把一件已经无法补做的事挂在用户眼前（这正是 K3 三态要消除的那种指责）；
+        //     · 触发面很窄——C7 起 submit 有 EFFORT_REQUIRED 硬闸（工期不填过不了提交），正常提交流根本
+        //       走不到"空工期推进到后置态"，能看到这一幕的只有存量单与不经 submit 离开开发态的单据；
+        //     · **不要**顺手加"已上线单也显示未填"来"修"它——那会把存量事实重新说成待办，与 K3 裁定反向。
+        //   写下这条是因为它在页面上表现为"字段莫名消失"，最容易被当成 bug 提回来（[[feedback_comment_is_review_input]]：
+        //   把推论写在实现旁边，比让下一个人重新推一遍可靠）。
+        //   ⚠️ [收口批预筛 LOW-6 登记] 同块的风险等级 kv 与预计完成时间 kv 目前仍是「值空恒显灰字、任何状态
+        //     不消失」的老做法——那是**尚未按 K3 三态改造的未对齐项**，不是本条判据的反证；改造它们属独立
+        //     批次（各有自己的写入口白名单要核），勿以它们为先例回改本 kv，也勿以本条为由顺手去改它们。
+        const effortApplicableType = (iss.type === 'feature' || iss.type === 'improvement');
+        const effortKvValue = iss.estimated_effort_days;
+        // ⭐ [C8-fix2 L1'] 「有值」判据从 `!= null` 收紧为「非 null ∧ trim 后非空」。原写法把空白串（`''`/`'  '`）
+        //   判成"有值"，于是详情页会渲染出一格**空白的工期**——用户看到的是一个有标签没内容的格子，既不是
+        //   "未填"也不是"不适用"，纯粹是渲染噪音。空白串按**缺失**处理才与同仓口径一致：后端
+        //   normalizeSysEffortDays 对 `raw.trim()===''` 返回 `{ok:true, value:null}`（视同未填 → EFFORT_REQUIRED），
+        //   前端 siEffortIsDirty 也已按 trim 归一。收紧后空白串走三态门控——「开发中」显示灰字「未填」、
+        //   其余状态整行不渲染，与真正的 NULL 完全同路。
+        const effortKvHasValue = effortKvValue != null && String(effortKvValue).trim() !== '';
+        let effortKv = '';
+        if (effortApplicableType) {
+            if (effortKvHasValue) {
+                effortKv = `<div class="u-kv-item"><label>工期（人日）</label><div class="v">${esc(String(effortKvValue))}</div></div>`;
+            } else if (iss.status === '开发中') {
+                effortKv = `<div class="u-kv-item"><label>工期（人日）</label><div class="v"><span class="si-muted">未填</span></div></div>`;
+            }
+        }
         let feas = '';
         if (iss.needs_feasibility) {
             feas =
                 `<div class="u-kv-item"><label>可行性结论</label><div class="v">${iss.feasibility_conclusion ? esc(iss.feasibility_conclusion) : '<span class="si-muted">待评估</span>'}</div></div>` +
-                // [工期对接测试与风险等级拆分 方案 v1.1 §3.2/§3.4] 详情页评估块新增工期展示（不进列表页，§3.2 逐字口径）。
-                `<div class="u-kv-item"><label>工期（人日）</label><div class="v">${iss.estimated_effort_days != null ? esc(String(iss.estimated_effort_days)) : '<span class="si-muted">未填</span>'}</div></div>` +
+                // [C8·MED-4（C7 预筛移入）] 工期 kv **已移出本块**——见下方 `effortKv`。原先嵌在
+                //   `if (iss.needs_feasibility)` 的评估块里，是 C2 时代"工期只有 nf=1 的 feature 才有"
+                //   的遗留假设；C7 起 nf=0 的 feature/improvement 也在估时弹窗填工期，可它们的详情页
+                //   **根本不渲染这个评估块**，于是填了也看不见（用户唯一能确认自己填没填的地方就是这里）。
                 `<div class="u-kv-item"><label>受阻</label><div class="v">${iss.blocked ? '<span style="color:#b91c1c;font-weight:600">是</span>' : '否'}</div></div>` +
                 (iss.feasibility_requirement_confirm ? `<div class="u-kv-item full"><label>需求确认</label><div class="v">${esc(iss.feasibility_requirement_confirm)}</div></div>` : '') +
                 (iss.feasibility_risk ? `<div class="u-kv-item full"><label>风险/条件</label><div class="v">${esc(iss.feasibility_risk)}</div></div>` : '') +
@@ -1704,13 +1837,25 @@
             <div class="u-kv-item"><label>来源</label><div class="v">${esc(iss.source || '—')}</div></div>
             <div class="u-kv-item"><label>建单人</label><div class="v">${esc(iss.created_by_name || '—')}</div></div>
             <div class="u-kv-item"><label>对接人</label><div class="v">${iss.intake_liaison_id ? esc(siIntakeLiaisonName(iss.intake_liaison_id) || '—') : '—'}</div></div>
-            ${(iss.type === 'feature' || iss.type === 'improvement') ? `<div class="u-kv-item"><label>风险等级</label><div class="v">${iss.risk_level ? esc(iss.risk_level) : '<span class="si-muted">未定级</span>'}</div></div>` : ''}
+            <!-- [C8 风险/优先级双显·方案 v1.7 §9.2] 优先级补进基本信息 kv：此前详情页只有顶部 siDMeta 徽章
+                 与**编辑表单**里有优先级，基本信息块反而没有——用户想核对"这单是 P 几"得去看徽章或点开编辑，
+                 与风险等级 kv 就在下一行形成了不对称。两者是同层的判定维度（业务紧急度 / 技术风险），应当
+                 并排出现。title 挂既有 SI_PRIORITY_HELP_TEXT（与 siDMeta 徽章同一事实源，不新增副本）。 -->
+            <div class="u-kv-item"><label>优先级</label><div class="v"><span class="u-pri ${esc(iss.priority)}" title="${SI_PRIORITY_HELP_TEXT}">${esc(iss.priority)}</span></div></div>
+            ${(iss.type === 'feature' || iss.type === 'improvement') ? `<div class="u-kv-item"><label>风险等级</label><div class="v"><span title="${SI_RISK_LEVEL_HELP_TEXT}" style="cursor:help">${iss.risk_level ? esc(iss.risk_level) : '<span class="si-muted">未定级</span>'}</span></div></div>` : ''}
+            ${effortKv}
             <div class="u-kv-item"><label>预计完成时间</label><div class="v">${iss.dev_estimated_at ? (esc(siFmtDT(iss.dev_estimated_at)) + siRemainingDaysHtml(iss.dev_estimated_at)) : '<span class="si-muted">未回填</span>'}</div></div>
             <div class="u-kv-item"><label>计划开工日</label><div class="v">${iss.scheduled_start ? esc(iss.scheduled_start) : '<span class="si-muted">—</span>'}</div></div>
             <div class="u-kv-item"><label>期望完成(deadline)</label><div class="v">${iss.deadline ? esc(siFmtDeadline(iss.deadline)) : '<span class="si-muted">—</span>'}</div></div>
             <div class="u-kv-item"><label>需求方</label><div class="v">${siRequesterText(iss)}</div></div>
             <div class="u-kv-item"><label>OA 流程号</label><div class="v">${iss.oa_number ? esc(iss.oa_number) : (Number(iss.oa_exempt) === 1 ? '<span class="si-muted">无需 OA（内部自发）</span>' : ((iss.type !== 'bug' && siOaFillable(iss)) ? (iss.status === '待指派' ? '<span style="color:#b45309;font-weight:600">尚未补填 OA 号，指派开发前必填</span>' : '<span style="color:#b45309">尚未补填 OA 号，请补充台账信息</span>') : '<span class="si-muted">—</span>'))}</div></div>
             <div class="u-kv-item"><label>所属上线单</label><div class="v">${iss.release_id ? (siCanOpenRelease(iss) ? `<a style="cursor:pointer;color:#2563eb" onclick="siGotoBatchDetail(${iss.release_id})">#${iss.release_id}</a>` : ('#' + iss.release_id)) : '<span class="si-muted">—</span>'}</div></div>
+            <!-- ⭐ [C9-fix M3] 「上线方式」——**仅「已上线」单渲染**：后端 deriveOnlineSourceKind 对非已上线单
+                 恒返 null（index.js:2311 第一行就 return），这一格对它们不是"未知"而是"这个维度还不存在"，
+                 与工期 kv 的 K3 三态门控、列表页 bug 行「留空≠未定级」是同一条判断标准（不适用一律整行不渲染，
+                 不说成"未知/—"）。判据只看 online_source_kind 非空，不另外判 status——后端已经把"是不是已上线"
+                 折进这个字段的 null 语义里了，前端再判一次就是第二份判据。 -->
+            ${iss.online_source_kind ? `<div class="u-kv-item"><label>上线方式</label><div class="v">${esc(SI_ONLINE_SOURCE_LABEL[iss.online_source_kind] || iss.online_source_kind)}</div></div>` : ''}
             ${iss.type === 'bug' ? `<div class="u-kv-item"><label>上线执行人</label><div class="v">${iss.release_assignee_name ? esc(iss.release_assignee_name) : '<span class="si-muted">未指定</span>'}</div></div>` : ''}
             <div class="u-kv-item"><label>创建时间</label><div class="v">${esc(siFmtDT(iss.created_at))}</div></div>
             <!-- S3（四件①，2026-08-05·Q5 详情口径）：六时间点展示簇——label 对齐既有 SI_TL_LABEL 时间线
@@ -1891,13 +2036,20 @@
     //   event_type 本身 → 五类语义在时间线上全部显示同一个「范围变更」标签，不可区分。镜像 release 分支写法，
     //   给这五个 action_code 各自独立标签/配色；release_published 额外要处理"summary 是结构化 JSON 不是人话"
     //   （见下方 siFormatReleasePublishedSummary + siRenderTimeline 内的 details 折叠分支）。
+    // C5（方案 §4.5 登记清单①·MED-2/C1 预筛登记）：多人执行人机制的四个 action_code 补进标签表——
+    //   之前只在这里注册了批次级五个旧 action_code，行级/hotfix 四个新码此前落时间线但没有专属标签，
+    //   会掉进 siRenderTimeline 的 key 兜底分支（key 本身当标签直出，显示成裸英文 action_code，不可读）。
     const SI_TL_RELEASE_SCOPE_LABEL = {
         release_add: '加入上线单', release_remove: '移出上线单', release_date_change: '上线单改期',
         release_schedule_cancel: '撤销上线安排', release_published: '发布留痕',
+        release_executors_set: '设置执行人', release_executor_notify: '通知执行人',
+        release_executor_done: '执行确认', release_hotfix_create: '应急建单',
     };
     const SI_TL_RELEASE_SCOPE_CLS = {
         release_add: 'si-tl-indigo', release_remove: 'si-tl-red', release_date_change: 'si-tl-indigo',
         release_schedule_cancel: 'si-tl-red', release_published: 'si-tl-green',
+        release_executors_set: 'si-tl-indigo', release_executor_notify: 'si-tl-blue',
+        release_executor_done: 'si-tl-green', release_hotfix_create: 'si-tl-amber',
     };
     // release_published 的 summary = §6.6a 结构化 JSON（{issue_id,schema_version,type,title_snapshot,
     //   status_at_publish,commits}），直接 esc() 裸展示会在时间线里甩一坨技术 JSON（commits 多时很长）。
@@ -2082,23 +2234,30 @@
     //   canAddCommit（独立判定，不复用 canEditCommits）加「补充 commit」按钮。
     function siRenderDevCommits(devCommits, caps) {
         const uid = currentUser ? Number(currentUser.id) : null;
+        // [C11·§10.3] 命中「不分前后端系统」→ 组件列一律显示 group_label（「版本号」），不显示 frontend/backend
+        //   原始 component（含历史 frontend 行也合并进版本号组展示·不迁移数据）。判据取后端 DTO（唯一权威·
+        //   前端不自行判定），非命中系统照旧显示「前端/后端」。列头随之切换「组件/版本号」。
+        const single = !!(siDetail && siDetail.issue && siDetail.issue.single_commit_group);
+        const groupLabel = (siDetail && siDetail.issue && siDetail.issue.group_label) || '版本号';
+        const compHeader = single ? groupLabel : '组件';
         const rows = (devCommits || []).map(c => {
             const isMine = !!(uid && Number(c.dev_user_id) === uid);
             const canEditThis = !!(caps && caps.canEditCommits && isMine);
             const acts = canEditThis
                 ? `<span class="si-commit-act" onclick="siModalEditCommit(${c.id})">编辑</span><span class="si-commit-act danger" onclick="siModalDeleteCommit(${c.id})">删除</span>`
                 : '';
+            const compCell = single ? esc(groupLabel) : (SI_COMMIT_COMPONENT_LABEL[c.component] || esc(c.component));
             return `<tr>
                 <td>${esc(c.dev_user_name || ('#' + c.dev_user_id))}</td>
-                <td>${SI_COMMIT_COMPONENT_LABEL[c.component] || esc(c.component)}</td>
+                <td>${compCell}</td>
                 <td>${esc(c.commit_ref)}</td>
                 <td>${esc(siFmtDT(c.created_at))}</td>
                 <td>${acts}</td>
             </tr>`;
         }).join('');
-        const addBtn = (caps && caps.canAddCommit) ? `<div style="margin-top:8px"><button class="u-btn-secondary u-btn-sm" onclick="siModalAddCommit()">+ 补充 commit</button></div>` : '';
+        const addBtn = (caps && caps.canAddCommit) ? `<div style="margin-top:8px"><button class="u-btn-secondary u-btn-sm" onclick="siModalAddCommit()">+ 补充 ${single ? esc(groupLabel) : 'commit'}</button></div>` : '';
         if (!devCommits || !devCommits.length) return '<div class="si-muted">暂无 commit 记录</div>' + addBtn;
-        return `<div class="u-corr-table-wrap"><table class="si-commit-table"><thead><tr><th>开发</th><th>组件</th><th>commit_ref</th><th>时间</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>${addBtn}`;
+        return `<div class="u-corr-table-wrap"><table class="si-commit-table"><thead><tr><th>开发</th><th>${esc(compHeader)}</th><th>commit_ref</th><th>时间</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>${addBtn}`;
     }
 
     // 统一自定义错误文案（commit 行编辑三端点，§10 错误码集合 = COMMIT_SCOPE/INVALID_STATUS/VALIDATION/
@@ -2825,6 +2984,12 @@
                 if (!iss.dev_estimated_at) continue;                            // 闸门①
                 // B：需评估单，结论未出或为"不可行"都不能提交（后端 400 FEASIBILITY_NOT_FEASIBLE）
                 if (iss.needs_feasibility && (!iss.feasibility_conclusion || iss.feasibility_conclusion === '不可行')) continue;
+                // [C7-fix MED-3] 工期闸：C7 起 submit 对 feature/improvement × nf 两值全查工期
+                //   （后端 index.js handleDevSubmit 的 EFFORT_REQUIRED / EFFORT_INVALID 两码）。前端不镜像
+                //   这条判据就会留一个**必然 400 的死按钮**——本单最典型的受害者正是本地 5 张 nf=0 存量
+                //   在途单（有预计完成、无工期），它们点下去只会吃一个报错。遵循本文件既有「条件性死按钮
+                //   一律隐藏 + gate 提示引导」范式（同 :2822 set_scheduled_start 的处置）。
+                if (siEffortGateBlocked(iss)) continue;
             }
             acts.push(a);
         }
@@ -2836,6 +3001,19 @@
             else if (iss.needs_feasibility && iss.feasibility_conclusion === '不可行') gate = `<div class="si-gate-hint">⛔ 评估结论「不可行」，请联系建单人处置（作废 / 派生），暂不能提交交付。</div>`;  // B
             else if (iss.needs_feasibility && !iss.feasibility_conclusion) gate = `<div class="si-gate-hint">⚠️ 闸门：本单需先完成「可行性评估」（含预计完成时间），才能标记开发完成。</div>`;
             else if (!iss.dev_estimated_at) gate = `<div class="si-gate-hint">📋 两步完成开发：<b>第 1 步</b> 先「回填预计完成时间」 → <b>第 2 步</b> 回填后即可「标记我的开发完成」。（当前在第 1 步）</div>`;
+            // [C7-fix MED-3] 工期缺失/异常的引导：排在 dev_estimated_at 之后——nf=0 时两个字段同在估时弹窗
+            //   填，缺时间必然也缺工期，上一条已覆盖；本条真正服务的是"时间已填、工期还空"的**存量在途单**
+            //   （C7 上线时本地 5 张就是这个形态）。文案入口与后端 :5525 的 effortEntry 分岔逐字一致：
+            //   nf=1 → 可行性评估；nf=0 → 估时。
+            else if (siEffortGateBlocked(iss)) {
+                const entry = iss.needs_feasibility ? '可行性评估' : '回填预计完成（估时）';
+                const isDirty = siEffortIsDirty(iss);   // [C7-fix2 L2] 判据与 siEffortGateBlocked 的"缺失"段同源（纯空白不算脏值）
+                // [C8-fix K2] 原文案对脏值场景说"本单还缺「工期（人日）」（当前值 X 不合法…）"——**自相矛盾**：
+                //   既说"缺"又说"当前值是 X"，读者不知道到底填没填。两种成因文案整句分开写，不共用开头。
+                gate = isDirty
+                    ? `<div class="si-gate-hint">⚠️ 闸门：本单「工期（人日）」值不合法（当前值 ${esc(String(iss.estimated_effort_days))}，须为 0.5 的整数倍且在 (0, 365]），请在「${entry}」中改正后再标记开发完成。</div>`
+                    : `<div class="si-gate-hint">⚠️ 闸门：本单还缺「工期（人日）」，请在「${entry}」中补填后再标记开发完成。</div>`;
+            }
         } else if (isAdminUser && iss.status === '待上线' && iss.release_id) {
             // 上线体统一重构 C3 第2批（⑨）：旧文案"请在批次管理中发布"是单阶段旧语义遗留——C3 收窄后本步骤
             //   只完成"建单/加单"，真正发布要等被通知的值班执行人调用 /execute（两阶段，§6.7）。改为准确指向
@@ -2973,7 +3151,7 @@
             case 'blocked': return siModalReason(iss, 'blocked', '标记受阻', '受阻原因', '/blocked');
             case 'unblock': return siModalReason(iss, 'unblock', '解除受阻', '解除说明', '/unblock');
             case 'submit': return siModalSubmit(iss);
-            case 'accept': return siConfirmSimple(iss, 'accept', '确认验收通过？', '/accept');
+            case 'accept': return siModalAccept(iss);
             case 'return': return siModalReason(iss, 'return', '验收打回', '打回原因', '/return');
             // [工期对接测试与风险等级拆分 方案 v1.1 §7·C4b] 对接测试通过/打回——对接人视角两按钮。
             //   [方案 D22-④·批2 2026-08-06] pass 改带测试说明文本框（凭证二选一：本轮已传附件可留空，
@@ -3214,6 +3392,61 @@
         if (!iss) return;
         siModalSetOaNumber(iss);
     }
+    // ⭐ [C9 无 commit 单验收直翻·方案 v1.7 §10.1] 验收通过专用弹窗——从通用 siConfirmSimple 分出来，
+    //   只为两件事：① 事前告知"这单会直接上线"（无 commit 单 accept 后不再经批次，验收人得先知道）；
+    //   ② 事后如实回显 deleted_commit_count（N>0 时）。
+    //   ⚠️ **前端不判定直翻**：是否直翻由后端准入四条件在写事务内决定（DB 为准，297-M1），前端拿到响应
+    //     才知道结果。事前提示用的是"可能"的措辞，不是承诺——单据在你点确认的这一刻可能刚被人补了 commit。
+    function siModalAccept(iss) {
+        // 事前预告只在"前端已知信息足以判断很可能直翻"时才出：详情响应的 dev_commits 为空 ∧ 本单未挂批次。
+        //   ⚠️ **数据取自 `siDetail.dev_commits` 不是 `iss.dev_commits`**（[C9-fix H1]）：详情端点响应体里
+        //     `issue` 与 `dev_commits` 是**兄弟键**（`{ issue: {...}, dev_commits: [...], dev_assignees: [...] }`，
+        //     见 siOpenDetail 的 `siDetail = r.data; const iss = r.data.issue;` 与 siRenderDevCommits 的取值），
+        //     `iss.dev_commits` 恒 undefined ⇒ 原写法的 `Array.isArray(undefined)` 恒 false ⇒ 预告**从未出现过**
+        //     （死代码）。`release_id` 则确实在 issue 上（同文件多处 `iss.release_id`），故仍从 iss 取。
+        //   ⚠️ 注释写实（[C9-fix H1] 订正，原写"判据故意宽松（宁可少提示也不误报）"与实际相反）：
+        //     · **不宽松**——修好后本判据（零 commit ∧ 无 release_id）与后端准入条件①②**等价**
+        //       （evaluateNoCommitDirectOnline：commits 行数=0 ∧ 无 active 批次关联）。唯一比后端严的情形是
+        //       "release_id 指向一条已被删除/非 active 的批次行"：后端 NOT EXISTS 判定为可直翻、前端不提示
+        //       ⇒ 这一格是"少提示"，无害。
+        //     · **存在 stale 误报窗口**——判据读的是打开详情那一刻的快照。详情打开后、点确认前，若他人给本单
+        //       补了 commit（或把它加进批次），后端会在写事务内按最新 DB 判定为不直翻、落「待上线」，
+        //       而前端这条提示是照旧要弹的。成功回调**只按响应体 online_source 判断**实际结果（见下方 if），
+        //       不复用本变量——真判定永远在服务端（297-M1「只信数据库」）。
+        //   ⭐⭐ [C9-fix2 M3·文案改条件式] 原提示写「验收通过后将直接标记为「已上线」」，并在上面这段注释里
+        //     声称"措辞用『将』而非承诺"——**这两句是矛盾的**（codex 316 M3 实证）：中文里"验收通过后将 X"
+        //     就是承诺句式，读者不会把"将"读成"可能"。而它恰恰会在上述 stale 窗口里说错话：用户看到"将直接
+        //     上线"、点了确认、结果单据落到「待上线」，提示与结果对不上，且用户无从知道中间发生了什么。
+        //     现改为**显式条件式**——把提示的前提（"若确认时仍无 commit 且未挂 active 批次"）和另一种结局
+        //     （"否则进入待上线"）都写在句子里。这样无论后端最终怎么判，这句话都是真的，stale 窗口不再是
+        //     "会说错话的窗口"而只是"两个分支里走了另一个"。声称与实现对齐，注释也随之改写（[[feedback_comment_is_review_input]]）。
+        const likelyDirect = Array.isArray(siDetail && siDetail.dev_commits) && siDetail.dev_commits.length === 0 && !iss.release_id;
+        const notes = [note('确认验收通过？')];
+        if (likelyDirect) {
+            notes.push(note('ℹ️ 本单当前没有任何 commit 提交记录，也未挂上线批次。<b>若确认时该单仍无在案 commit 且未挂 active 上线批次</b>，验收通过后将<b>直接标记为「已上线」</b>（无提交免上线），不再需要安排上线批次；<b>否则</b>照常进入「待上线」等待安排批次。最终以服务端判定为准。'));
+        }
+        siModal('确认验收通过？', notes, async () => {
+            const r = await siApi('/sys-issues/' + iss.id + '/accept', { method: 'POST', body: {} });
+            if (!r.ok) { siApiErr(r); return false; }
+            const d = r.data || {};
+            if (d.online_source === 'no_commit_acceptance') {
+                // N=0 不显示（§10.1 逐字）——只有真发生过删除提交动作才提示，避免给正常单加噪音
+                // ⭐ [C9 对抗审 codex 317·M2] 文案用「发生过 N 次删除提交动作」而非「N 条已删提交记录」：
+                //   deleted_commit_count 是 delete-commit **动作次数**（同一 commit 反复删会累计），
+                //   "N 条记录/N 条提交"会被读成"有 N 条不同的提交"，与后端语义（见 index.js:2388）不符。
+                const n = Number(d.deleted_commit_count) || 0;
+                showToast(
+                    n > 0
+                        ? `已验收并直接标记「已上线」（无提交免上线）。该单曾发生过 ${n} 次删除提交动作，本次按无 active commit 免上线。`
+                        : '已验收并直接标记「已上线」（无提交免上线）',
+                    'success'
+                );
+            } else {
+                showToast('操作完成', 'success');
+            }
+            return true;
+        }, '确定');
+    }
     function siConfirmSimple(iss, action, prompt, path) {
         siModal(prompt, [note(prompt)], async () => {
             const r = await siApi('/sys-issues/' + iss.id + path, { method: 'POST', body: {} });
@@ -3239,7 +3472,10 @@
         }
         siModal('受理通过 #' + iss.id, [
             note('受理后单据进入指派阶段。请同时判定本单风险等级（技术风险，对接人视角）。'),
-            { k: 'risk_level', html: `<div class="u-form-group"><label>风险等级 <span class="u-req">*</span></label><select id="f_risk_level"><option value="">请选择</option><option value="一级">一级</option><option value="二级">二级</option><option value="三级" selected>三级</option></select></div>` }
+            // [C8·方案 v1.7 §9.2 末条] label 挂三级口径问号徽章（SI_RISK_LEVEL_LABEL 内含 si-help）——
+            //   本弹窗是全站**唯一**渲染"风险等级选择"的表单（建单/编辑表单均无该字段，风险等级由受理门
+            //   判定，见 :3288 注释），故徽章只此一处即全覆盖。范式与 SI_PRIORITY_LABEL 完全一致。
+            { k: 'risk_level', html: `<div class="u-form-group"><label>${SI_RISK_LEVEL_LABEL} <span class="u-req">*</span></label><select id="f_risk_level"><option value="">请选择</option><option value="一级">一级</option><option value="二级">二级</option><option value="三级" selected>三级</option></select></div>` }
         ], async v => {
             const riskLevel = (v.risk_level || '').trim();
             if (!riskLevel) { showToast('请选择风险等级', 'error'); return false; }
@@ -3468,27 +3704,67 @@
     }
 
     function siModalEstimate(iss) {
-        siModal(iss.dev_estimated_at ? '修改预计完成' : '回填预计完成', [
+        // [C7 工时评估补全·方案 v1.7 §9.1] 工期字段在本弹窗只对 feature/improvement 显示且必填。
+        //   本弹窗的调用点已由 needs_feasibility 门控（见动作可见性 `if (a === 'estimate' && iss.needs_feasibility) continue;`）
+        //   ——能打开这个弹窗的 feature/improvement 必然是 nf=0，正是 C7 给 estimate 端点新开的工期写点面。
+        //   bug/config 不显示该字段也不提交该键（后端适用面闸对这两类"传值即拒" 400 EFFORT_NOT_APPLICABLE，
+        //   前端多传一个 null 都会被拒，故必须是"不带这个键"而不是"带 null"）。
+        const effortApplicable = iss.type === 'feature' || iss.type === 'improvement';
+        const fields = [
             fDateTime('dev_estimated_at', '预计完成时间', siToLocalInput(iss.dev_estimated_at), true),   // D2：第 4 参=必填星号（本字段真必填，闸门①）
-            note('⚠️ 闸门①：必须先回填预计完成时间才能提交交付；时间不能早于指派时刻。')
-        ], async v => {
+        ];
+        if (effortApplicable) {
+            // 文案/校验/控件参数与可行性评估弹窗（siModalFeasibility）逐字一致——同一个字段在两个入口
+            // 必须长一样，否则用户会以为是两回事。
+            // ⚠️ C7-fix H1 订正：C7 落地时这句"逐字一致"是**声称超实现**——那时 siModalFeasibility 的
+            //   hint 还在按 `iss.type === 'feature'` 输出"必填/选填"，improvement 走进去看到的是"选填"。
+            //   H1 把那边也改成恒必填后，这句话才真正成立（两处 hint 均为「必填：0.5 的整数倍，(0, 365]」，
+            //   空值校验与数值校验也已同形）。留此注为记：注释是审查输入，声称与实现必须同批对齐。
+            fields.push(fNumber('estimated_effort_days', '工期（人日）', iss.estimated_effort_days,
+                true, '必填：0.5 的整数倍，(0, 365]', { step: '0.5', min: '0.5', max: '365' }));
+        }
+        fields.push(note('⚠️ 闸门①：必须先回填预计完成时间' + (effortApplicable ? '与工期（人日）' : '') + '才能提交交付；时间不能早于指派时刻。'));
+        siModal(iss.dev_estimated_at ? '修改预计完成' : '回填预计完成', fields, async v => {
             if (!v.dev_estimated_at) { showToast('请填写预计完成时间', 'error'); return false; }
-            const r = await siApi('/sys-issues/' + iss.id + '/estimate', { method: 'POST', body: { dev_estimated_at: siFromLocalInput(v.dev_estimated_at) } });
+            const body = { dev_estimated_at: siFromLocalInput(v.dev_estimated_at) };
+            if (effortApplicable) {
+                // 校验口径与后端 normalizeSysEffortDays/DDL CHECK 同源（有限数、0<v≤365、0.5 整数倍），
+                // 与 siModalFeasibility 内同款分支逐字对齐；前端先拦一道，服务端仍是权威校验。
+                const effortRaw = (v.estimated_effort_days || '').trim();
+                if (effortRaw === '') { showToast('请填写工期（人日）', 'error'); return false; }
+                const n = Number(effortRaw);
+                if (!Number.isFinite(n) || n <= 0 || n > 365 || Math.round(n * 2) !== n * 2) {
+                    showToast('工期须为 0.5 的整数倍，且在 (0, 365] 范围内', 'error'); return false;
+                }
+                body.estimated_effort_days = n;
+            }
+            const r = await siApi('/sys-issues/' + iss.id + '/estimate', { method: 'POST', body });
             if (!r.ok) { siApiErr(r); return false; }
-            showToast(r.data && r.data.unchanged ? '时间未变（同分钟归一化）' : '已回填，钉钉已通知需求方', 'success'); return true;
+            // [C7-fix LOW-6] unchanged 文案按 effortApplicable 分岔：bug/config 本就没有工期字段，
+            //   对他们说"且工期未变"是无中生有的信息（后端对这两类连该键都不回带，见 index.js effortApplicable）。
+            showToast(
+                r.data && r.data.unchanged
+                    ? (effortApplicable ? '未变更（同分钟归一化且工期未变）' : '时间未变（同分钟归一化）')
+                    : '已回填，钉钉已通知需求方',
+                'success'
+            );
+            return true;
         });
     }
 
     function siModalFeasibility(iss) {
-        // [工期对接测试与风险等级拆分 方案 v1.1 §3.2·C2] feature 必填、improvement 选填（needs_feasibility=1
-        // 时——本弹窗只在该前提下打开，见调用点 needs_feasibility 门控）。
-        const effortRequired = iss.type === 'feature';
+        // [C7 工时评估补全·方案 v1.7 §9.1·C7-fix H1] 工期在本弹窗**恒必填**——本弹窗只对
+        //   needs_feasibility=1 的 feature/improvement 打开（见调用点门控），而 C7 起这两类在 nf=1 下都必填
+        //   （后端判据 index.js `['feature','improvement'].includes(row.type) && effortValue === null`）。
+        //   C2 的「feature 必填 / improvement 选填」口径已随 C7 废止，前端不再按 type 分岔：留着
+        //   `iss.type === 'feature'` 会让 improvement 的用户看到"选填"、留空提交、再被后端 400 打回——
+        //   前端校验比后端**松**是最坏的一种不一致（拦不住还骗人）。
         siModal('可行性评估', [
             fSelect('conclusion', '评估结论', ['可行', '有条件可行', '不可行'], '可行'),
             fTextarea('requirement_confirm', '需求确认', '', true, '必填：对需求的理解与确认，≤500'),
             fDateTime('dev_estimated_at', '预计完成时间', siToLocalInput(iss.dev_estimated_at), true),   // D2：第 4 参=必填星号（本字段真必填，闸门①）
             fNumber('estimated_effort_days', '工期（人日）', iss.estimated_effort_days,
-                effortRequired, (effortRequired ? '必填' : '选填') + '：0.5 的整数倍，(0, 365]', { step: '0.5', min: '0.5', max: '365' }),
+                true, '必填：0.5 的整数倍，(0, 365]', { step: '0.5', min: '0.5', max: '365' }),
             fTextarea('risk', '风险/前置条件', '', false, '「有条件可行 / 不可行」时必填，≤1000'),
             note('⚠️ 本单需可行性评估：评估通过（可行/有条件可行）后方可继续提交交付。')
         ], async v => {
@@ -3496,22 +3772,18 @@
             if (!v.requirement_confirm.trim()) { showToast('需求确认必填', 'error'); return false; }
             if (!v.dev_estimated_at) { showToast('预计完成时间必填', 'error'); return false; }
             if ((v.conclusion === '有条件可行' || v.conclusion === '不可行') && !v.risk.trim()) { showToast('该结论下风险/前置条件必填', 'error'); return false; }
-            // [v1.1 §3.2·C2] 工期校验：与后端 normalizeSysEffortDays/DDL CHECK 同口径——有限数、0<v≤365、
-            // 0.5 整数倍；feature 必填、improvement 选填（前端先拦一道，服务端仍是权威校验，不因此省略）。
+            // [C7-fix H1] 工期校验：与后端 normalizeSysEffortDays/DDL CHECK 同口径——有限数、0<v≤365、
+            // 0.5 整数倍；恒必填（前端先拦一道，服务端仍是权威校验，不因此省略）。与 siModalEstimate 的
+            // 同款分支现已**逐字一致**（同一字段两个入口不该长得不一样）。
             const effortRaw = (v.estimated_effort_days || '').trim();
-            let effortValue = null;
-            if (effortRaw === '') {
-                if (effortRequired) { showToast('请填写工期（人日）', 'error'); return false; }
-            } else {
-                const n = Number(effortRaw);
-                if (!Number.isFinite(n) || n <= 0 || n > 365 || Math.round(n * 2) !== n * 2) {
-                    showToast('工期须为 0.5 的整数倍，且在 (0, 365] 范围内', 'error'); return false;
-                }
-                effortValue = n;
+            if (effortRaw === '') { showToast('请填写工期（人日）', 'error'); return false; }
+            const effortValue = Number(effortRaw);
+            if (!Number.isFinite(effortValue) || effortValue <= 0 || effortValue > 365 || Math.round(effortValue * 2) !== effortValue * 2) {
+                showToast('工期须为 0.5 的整数倍，且在 (0, 365] 范围内', 'error'); return false;
             }
             const body = { conclusion: v.conclusion, requirement_confirm: v.requirement_confirm.trim(), dev_estimated_at: siFromLocalInput(v.dev_estimated_at) };
             if (v.risk.trim()) body.risk = v.risk.trim();
-            if (effortValue !== null) body.estimated_effort_days = effortValue;
+            body.estimated_effort_days = effortValue;
             const r = await siApi('/sys-issues/' + iss.id + '/feasibility', { method: 'POST', body });
             if (!r.ok) { siApiErr(r); return false; }
             showToast('已提交可行性评估', 'success'); return true;
@@ -3699,8 +3971,16 @@
     //   去掉 component 下拉与「同 component 至多 1 条」限制（前后端去重均已删，后端仅保留自然键查重防完全重复行）；
     //   前端预校验为镜像，后端 §6.2 步骤2/2b/2c 才是真闸。
     function siModalSubmit(iss) {
-        // commit 记录改造：每次打开重置分组行状态（前端组默认 1 行、后端组默认 0 行；siModal 渲染后 siRenderSubmitRows 铺行）。
-        siSubmitRowState = { frontend: [''], backend: [''] };
+        // [C11·§10.3] 命中「不分前后端系统」→ 单组「版本号」（allowed_components=['backend']·后端 DTO 唯一权威）；
+        //   非命中系统照旧「前端组/后端组」两组。分组、行状态、提交收集、软提示全部按 groups 数据驱动。
+        const submitGroups = (iss && Array.isArray(iss.allowed_components) && iss.allowed_components.length)
+            ? iss.allowed_components : ['frontend', 'backend'];
+        const submitSingleGroup = !!(iss && iss.single_commit_group);
+        const submitGroupLabel = (iss && iss.group_label) || '版本号';
+        // commit 记录改造：每次打开重置分组行状态（每组默认 1 空行；siModal 渲染后 siRenderSubmitRows 铺行）。
+        //   命中单组系统只建 backend 一组（前端不再渲染前端组）。
+        siSubmitRowState = {};
+        for (const g of submitGroups) siSubmitRowState[g] = [''];
         // P2：打开提交弹窗时清空佐证附件组件残留（防上次未提交的选择串·revoke objectURL）。
         siPickerReset('submit-delivery');
         // ⑤ 双描述·fix_gap_note：派生自 bug（origin.type=bug）+ 新单也是 bug + 首次提交 → 需填「修复缺口说明」
@@ -3716,17 +3996,18 @@
                 </div>
             </div>
             <div id="siSubmitCommitsBox" class="u-form-group"><label>Commit 记录 <span class="u-req">*</span></label>
-                <div class="si-commit-group">
-                    <div class="si-commit-group-label">前端组（GIT commit）</div>
-                    <div id="siSubmitRows-frontend"></div>
-                    <button type="button" class="u-btn-secondary u-btn-sm" onclick="siSubmitAddRow('frontend')">+ 加一行</button>
-                </div>
-                <div class="si-commit-group">
-                    <div class="si-commit-group-label">后端组（SVN 版本号）</div>
-                    <div id="siSubmitRows-backend"></div>
-                    <button type="button" class="u-btn-secondary u-btn-sm" onclick="siSubmitAddRow('backend')">+ 加一行</button>
-                </div>
-                <div class="u-hint">前端组填 GIT commit，后端组填 SVN 版本号；每组可加多行，前端组或后端组至少填 1 条即可提交。</div>
+                ${submitGroups.map(g => {
+                    const glabel = submitSingleGroup ? `${submitGroupLabel}（SVN 版本号）`
+                        : (g === 'frontend' ? '前端组（GIT commit）' : '后端组（SVN 版本号）');
+                    return `<div class="si-commit-group">
+                    <div class="si-commit-group-label">${esc(glabel)}</div>
+                    <div id="siSubmitRows-${g}"></div>
+                    <button type="button" class="u-btn-secondary u-btn-sm" onclick="siSubmitAddRow('${g}')">+ 加一行</button>
+                </div>`;
+                }).join('')}
+                <div class="u-hint">${submitSingleGroup
+                    ? `填「${esc(submitGroupLabel)}」（SVN 版本号），可加多行，至少填 1 条即可提交。`
+                    : '前端组填 GIT commit，后端组填 SVN 版本号；每组可加多行，前端组或后端组至少填 1 条即可提交。'}</div>
             </div>
             <div id="siSubmitNoCodeBox" class="u-form-group" style="display:none">
                 <label>无代码交付原因 <span class="u-req">*</span></label>
@@ -3788,7 +4069,9 @@
                 //   收集两组所有非空行 → commits 数组（后端天然支持多行，同 component 去重限制已一并从前后端删除，
                 //   仅保留后端自然键查重防「同实例+component+ref」完全重复行）。空白行静默跳过。
                 const commits = [];
-                for (const component of ['frontend', 'backend']) {
+                // [C11·§10.3] 只遍历本单实际渲染的分组（命中单组系统=['backend']·非命中=['frontend','backend']）。
+                //   单组系统提交的 component=backend，与后端 allowed_components / 服务端强制归一一致（服务端仍会兜底归一）。
+                for (const component of submitGroups) {
                     const inputs = document.querySelectorAll('#siSubmitRows-' + component + ' .si-commit-row input[type="text"]');
                     for (const inp of inputs) {
                         const ref = (inp.value || '').trim();
@@ -3797,8 +4080,8 @@
                         commits.push({ component, commit_ref: ref });
                     }
                 }
-                // 「至少一行」约束延续到分组模型：前端组或后端组至少一条有效数据才允许提交（用户 2026-07-19 补充）。
-                if (!commits.length) { showToast('请在前端组或后端组至少填写 1 条 commit 记录', 'error'); return false; }
+                // 「至少一行」约束延续到分组模型：至少一条有效数据才允许提交（用户 2026-07-19 补充）。
+                if (!commits.length) { showToast(submitSingleGroup ? `请至少填写 1 条「${submitGroupLabel}」` : '请在前端组或后端组至少填写 1 条 commit 记录', 'error'); return false; }
                 body.commits = commits;
             }
             // P4 工作说明（选填·两模式均可）：trim 后 ≤1000 字（Unicode 码点计·与后端 validateSubmitBody 一致）；
@@ -3837,9 +4120,9 @@
                 : '已标记你的开发完成（等待其他开发完成）')) + attMsg, submitFiles.length && attMsg.includes('失败') ? 'info' : 'success');
             return true;
         });
-        // commit 记录改造：siModal 已同步渲染 modeHtml（含两组容器），此处按 siSubmitRowState 铺初始行（前端组/后端组各 1 空行）。
-        siRenderSubmitRows('frontend');
-        siRenderSubmitRows('backend');
+        // commit 记录改造：siModal 已同步渲染 modeHtml（含分组容器），此处按 siSubmitRowState 铺初始行。
+        //   [C11] 按实际分组铺行（命中单组系统只有 backend 一组）。
+        for (const g of submitGroups) siRenderSubmitRows(g);
     }
     // 提交方式切换：commits/no_code 两块显隐互斥
     function siSubmitModeChanged() {
@@ -3922,13 +4205,18 @@
     function siModalAddCommit() {
         const iss = siDetail && siDetail.issue;
         if (!iss) return;
-        siModal('补充 commit', [
-            fSelectMap('component', '组件', ['frontend', 'backend'], 'frontend', SI_COMMIT_COMPONENT_LABEL),
-            fText('commit_ref', 'commit_ref（前端 GIT / 后端 SVN）','', true, 'trim 后 1~200 字'),
-        ], async v => {
+        // [C11·§10.3] 命中单组系统：不出组件下拉，component 固定 backend（服务端仍会兜底归一）；commit_ref 标签用 group_label。
+        const single = !!(iss && iss.single_commit_group);
+        const groupLabel = (iss && iss.group_label) || '版本号';
+        const fields = single
+            ? [fText('commit_ref', groupLabel + '（SVN·trim 1~200 字）', '', true, '')]
+            : [fSelectMap('component', '组件', ['frontend', 'backend'], 'frontend', SI_COMMIT_COMPONENT_LABEL),
+               fText('commit_ref', 'commit_ref（前端 GIT / 后端 SVN）','', true, 'trim 后 1~200 字')];
+        siModal(single ? ('补充' + groupLabel) : '补充 commit', fields, async v => {
             const ref = (v.commit_ref || '').trim();
             if (!ref || ref.length > 200) { showToast('commit_ref 必填（trim 1~200字）', 'error'); return false; }
-            const r = await siApi('/sys-issues/' + iss.id + '/dev/commits', { method: 'POST', body: { component: v.component, commit_ref: ref } });
+            const component = single ? 'backend' : v.component;
+            const r = await siApi('/sys-issues/' + iss.id + '/dev/commits', { method: 'POST', body: { component, commit_ref: ref } });
             if (!r.ok) { siCommitApiErr(r); return false; }
             showToast('已补充', 'success'); return true;
         });
@@ -3937,13 +4225,18 @@
         const iss = siDetail && siDetail.issue;
         const row = siDetail && (siDetail.dev_commits || []).find(c => c.id === commitId);
         if (!iss || !row) return;
-        siModal('编辑 commit', [
-            fSelectMap('component', '组件', ['frontend', 'backend'], row.component, SI_COMMIT_COMPONENT_LABEL),
-            fText('commit_ref', 'commit_ref（前端 GIT / 后端 SVN）',row.commit_ref, true, 'trim 后 1~200 字'),
-        ], async v => {
+        // [C11·§10.3] 命中单组系统：不出组件下拉，component 固定 backend（含把历史 frontend 行归一为 backend，服务端兜底）。
+        const single = !!(iss && iss.single_commit_group);
+        const groupLabel = (iss && iss.group_label) || '版本号';
+        const fields = single
+            ? [fText('commit_ref', groupLabel + '（SVN·trim 1~200 字）', row.commit_ref, true, '')]
+            : [fSelectMap('component', '组件', ['frontend', 'backend'], row.component, SI_COMMIT_COMPONENT_LABEL),
+               fText('commit_ref', 'commit_ref（前端 GIT / 后端 SVN）',row.commit_ref, true, 'trim 后 1~200 字')];
+        siModal(single ? ('编辑' + groupLabel) : '编辑 commit', fields, async v => {
             const ref = (v.commit_ref || '').trim();
             if (!ref || ref.length > 200) { showToast('commit_ref 必填（trim 1~200字）', 'error'); return false; }
-            const r = await siApi('/sys-issues/' + iss.id + '/dev/commits/' + commitId, { method: 'PUT', body: { component: v.component, commit_ref: ref } });
+            const component = single ? 'backend' : v.component;
+            const r = await siApi('/sys-issues/' + iss.id + '/dev/commits/' + commitId, { method: 'PUT', body: { component, commit_ref: ref } });
             if (!r.ok) { siCommitApiErr(r); return false; }
             showToast('已更新', 'success'); return true;
         });
@@ -4009,36 +4302,56 @@
     //   开发"，真正翻「已上线」要等被通知的值班开发调用 /execute（两阶段）。标题/note/toast 三处同步改写为
     //   "返回即已安排"口径；术语按方案 §6.7 标题「应急通道」+ 建单人语境统一为「应急上线」（原「单条上线
     //   （hotfix）」易与「批次发布」混淆，且"hotfix"内部黑话不该露在按钮上）。
+    // 应急上线（hotfix-publish，C5 重写方案 §4.5 第1条·登记清单②）：两步——①填上线说明 ②选执行人（复用
+    //   选人弹窗组件，releaseId 传 null——hotfix 尚未建批次，候选端点按当日排班取默认值）。C2b 起本端点
+    //   内部不再自动定人/自动发通知，通知整体移出，建完批次后到批次详情逐人发送。
     function siModalHotfix(iss) {
-        siModal('应急上线', [
+        siModal('应急上线（第 1 步·上线说明）', [
             fTextarea('release_note', '上线说明', '', true, '必填，≤1000'),
             fText('version_tag', '版本号（选填）', '', false, '选填，≤100'),
-            note('⚠️ 闸门③：应急上线需填说明（版本号选填，C6 已去必填）。提交后建应急上线单并安排值班开发——'
+            note('⚠️ 闸门③：应急上线需填说明（版本号选填，C6 已去必填）。下一步选择执行人后建应急上线单——'
                 + '发布仍由值班开发本人确认执行，非本次操作直接完成。批量/非应急上线请用「上线单管理」。')
         ], async v => {
-            if (!v.release_note.trim()) { showToast('上线说明必填', 'error'); return false; }
-            const r = await siApi('/sys-issues/' + iss.id + '/hotfix-publish', { method: 'POST', body: { release_note: v.release_note.trim(), version_tag: v.version_tag.trim() } });
-            // C3 第2批任务C：409（含抢占失败 NO_ELIGIBLE_DUTY_ROSTER/DUTY_NOT_ELIGIBLE、已发布、混用应急口等）
-            //   后端 error 已是完整可读文案，siApiErr 直出即可，不再前端重复分支。
-            if (!r.ok) { siApiErr(r); return false; }
-            const d = r.data || {};
-            const who = d.release_assignee_name ? '「' + d.release_assignee_name + '」' : '';
-            if (d.idempotent) {
-                showToast('该单已在应急上线单中' + (who ? '，执行人' + who : '') + '，无需重复发起', 'warning');
-            } else if (d.hint) {
-                // failed / stale / not_sent 重复调用：后端给的 hint 本身就是"请用「安排上线」重（新）发送/重试"。
-                showToast(d.hint, 'warning');
-            } else if (d.created_new && d.notification_attempted && d.notify_status === 'sent') {
-                showToast('已建应急上线单，钉钉已通知执行人' + who + '，等待其确认上线', 'success');
-            } else if (d.created_new && d.notification_attempted) {
-                // notify_status='failed'：抢占成功但外呼失败——建单已落地，需到批次管理重新安排（不在本端点自动重试）。
-                showToast('已建应急上线单，但通知发送失败（' + (d.notify_error || '原因未知') + '），请到「上线单管理」重新安排上线', 'warning');
-            } else {
-                // created_new=true 且 notification_attempted=false：仅 concurrent_changed 罕见并发分支（提交后到
-                // 外呼前被 cancel-schedule 等抢先改动）——如实展示现状，不假装已通知。
-                showToast('已建应急上线单（通知状态：' + (d.notify_status || '未知') + '），请到「上线单管理」查看并处理', 'warning');
-            }
-            return true;
+            const releaseNote = v.release_note.trim();
+            if (!releaseNote) { showToast('上线说明必填', 'error'); return false; }
+            const versionTag = v.version_tag.trim();
+            // C5 预筛 MED-1+L3：先 await 取候选清单，再关第 1 步弹窗——若先关弹窗再取，请求失败时用户刚填
+            // 的说明/版本号就白丢了，还要重填一遍。取失败：toast 提示 + return false（siModal 既有约定：
+            // onConfirm 返回 false 不关弹窗，字段值原样保留）。
+            const cr = await siApi('/sys-releases/executor-candidates');
+            if (!cr.ok) { siApiErr(cr, '加载执行人候选清单失败'); return false; }
+            siCloseModal();
+            // 栈外（setTimeout 0）打开选人弹窗——避开 siModal 包装器的收尾动作：本次 siModal() 调用的
+            // onConfirm resolve 后，包装器会**同步**把确认按钮 `btn.disabled = false` 复位；若在同一轮
+            // 事件循环里立刻同步打开下一个 siModal()（选人弹窗），两次调用共享同一个 #siMConfirm 元素，
+            // 新弹窗里 siExecPickerUpdateHint() 刚设好的"人数不足置灰"状态会被旧调用收尾时那行复位覆盖
+            // 掉。setTimeout(...,0) 把"打开下一个弹窗"推到下一个宏任务，等旧调用栈（含那行复位）跑完。
+            setTimeout(() => {
+                siExecutorPickerRender(cr.data || {}, async (ids) => {
+                    const r = await siApi('/sys-issues/' + iss.id + '/hotfix-publish', { method: 'POST', body: { release_note: releaseNote, version_tag: versionTag, executors: ids } });
+                    // C3 第2批任务C：409（已发布、混用应急口等）后端 error 已是完整可读文案，siApiErr 直出即可。
+                    if (!r.ok) { siApiErr(r); return false; }
+                    const d = r.data || {};
+                    if (d.idempotent) {
+                        // idempotent 分支（后端：某行 sending/sent）没有 hint 字段，本地给一句通用文案即可。
+                        showToast('该单已在应急上线单 ' + (d.release_no || ('#' + d.release_id)) + ' 中，通知已在处理中，无需重复发起', 'warning');
+                    } else if (d.hint) {
+                        // C2b 裁定项①后果（登记清单③）：hint 分支直用后端文案（子表聚合语义算出的提示，如"请
+                        // 到批次详情逐人发通知"），不再本地拼"安排上线重新发送"这类恒错误指引的旧话术。
+                        showToast(d.hint, 'warning');
+                    } else if (d.created_new) {
+                        // C2b：通知整体移出本端点，首次调用只落执行人子表，不发任何通知（无"全部发送"这回事）。
+                        showToast('已建应急上线单 ' + (d.release_no || '') + '，请到批次详情逐人发送通知', 'success');
+                    } else {
+                        showToast('已处理，请到「上线单管理」查看', 'warning');
+                    }
+                    siCloseModal();
+                    await siLoadList();
+                    if (d.release_id) siGotoBatchDetail(d.release_id);
+                    return false;
+                });
+            }, 0);
+            return false;
         });
     }
 
@@ -4661,10 +4974,20 @@
             const degradedBadge = b.degraded ? ' · <span style="color:#b91c1c;font-weight:600" title="成员历史记录不完整，快照缺失或损坏，已回落时间线重建">🔴 历史记录不完整</span>' : '';
             // 执行人入口批（2026-07-31）：待执行徽章——「计划中 ∧ 已通知」即"等执行人动手"态，mine 视角
             //   置醒目提示（这正是执行人打开面板要找的东西）；all 视角同一判据顺带展示（admin 一眼扫出
-            //   哪些批次已通知待执行）。执行人名列表补显（列表 SELECT 本批新增 3 列）。
-            const awaitingExec = b.status === '计划中' && b.release_assignee_notify_status === 'sent';
+            //   哪些批次已通知待执行）。C5 订正：旧批次级单列 release_assignee_notify_status/name 已随
+            //   C4b H1 退场冻结（恒 not_sent/NULL），改读列表端点已有的 executor_notify_summary 聚合——
+            //   sent（全体已通知）/partial（部分已通知）都算"有事要看"。执行人姓名列表**不再展示**——
+            //   列表端点未返回逐人姓名（多人场景一行装不下，且加这个字段超出本批"后端改动仅限详情端点"
+            //   的纪律范围），要看具体是谁、通知到哪一步，点进详情页的执行人区块（唯一权威展示位）。
+            // L7（待执行徽标精度）：mine 视角再叠「本人行未 done」——本人确认上线完成后其个人「待执行」徽标
+            //   熄灭，即使同批其他执行人未完成（各执行人各自视角）。后端 mine 视角 DTO 下发 my_executor_done
+            //   （见 index.js GET /sys-releases，唯一 done 语义源=本人在册行 exec_status='done'）。all 视角 myDone
+            //   恒 false（后端不下发该字段 + 此处 isMine 门控双保险），维持批次级聚合徽标不变，admin/对接人
+            //   全局 oversight 不受影响。
+            const myDone = isMine && b.my_executor_done === true;
+            const awaitingExec = b.status === '计划中' && ['sent', 'partial'].includes(b.executor_notify_summary) && !myDone;
             const execBadge = awaitingExec ? ' · <span style="color:#b45309;font-weight:600">⏳ 待执行</span>' : '';
-            const assigneeMeta = b.release_assignee_name ? ' · 执行人：' + esc(b.release_assignee_name) : '';
+            const assigneeMeta = '';
             return `<div class="si-batch-item" onclick="siOpenBatchDetail(${b.id})">
                 <div><span class="si-batch-no">${esc(b.release_no)}</span> ${badge}${hot}${execBadge}${degradedBadge}</div>
                 <div class="si-batch-meta">${esc(b.title || '（无标题）')}${b.version_tag ? ' · ' + esc(b.version_tag) : ''} · 含 ${b.issue_count || 0} 单${assigneeMeta}${b.released_at ? ' · 发布于 ' + esc(siFmtDT(b.released_at)) : ''}</div>
@@ -4823,7 +5146,13 @@
         if (!items.length) { document.getElementById('siBatchBody').innerHTML = '<div class="si-empty">暂无已发布批次</div>'; return; }
         document.getElementById('siBatchBody').innerHTML = items.map(b => {
             const hot = b.is_hotfix ? ' · <span style="color:#b45309">应急</span>' : '';
-            const assigneeMeta = '执行人：' + (b.release_assignee_name ? esc(b.release_assignee_name) : '（未记录）');
+            // C5 订正：release_assignee_name 是旧批次级单列，随 C4b H1 退场冻结（新批次恒 NULL，本视图
+            // 也未取 executors 数组——后端改动仅限详情端点，本列表端点未扩字段）。L1（codex 预筛）：该列
+            // 对 **C4b 之前** 建的历史批次仍有真实姓名（冻结前写入过、之后再不会被改动），不该一律说成
+            // "不展示"——非空时如实显示为历史记录；只有新批次（该列恒 NULL）才落回通用说明文案。
+            const assigneeMeta = b.release_assignee_name
+                ? ('执行人：' + esc(b.release_assignee_name) + '（历史记录）')
+                : '执行人：多人机制下不在本面板展示（见「上线单管理」批次详情）';
             const versionMeta = b.version_tag ? ' · ' + esc(b.version_tag) : '';
             const degradedNote = b.degraded ? ' <span style="color:#b91c1c">（成员清单为降级重建，可能不准）</span>' : '';
             const members = (b.members || []).map(m => {
@@ -4864,9 +5193,13 @@
     }
 
     // 上线体统一重构 C2b-前端（方案 v3.4 §6.4/§6.4a/§6.7/§6.14）：批次详情当前渲染的 rel 整行——供
-    //   siReleaseNotifyExecutor/siReleaseExecuteModal/siReleaseCancelScheduleModal 三个新动作函数读取
+    //   siReleaseSetExecutorsModal/siReleaseExecuteModal/siReleaseCancelScheduleModal 等动作函数读取
     //   （不走 onclick 内联序列化 JSON 传参，避免大对象过 HTML 属性转义的脆弱写法；同 siDetail 既有范式）。
     let siBatchDetailRel = null;
+    // C5（方案 §4.5）：批次详情当前渲染的 executors 数组（GET /sys-releases/:id 新增字段）——
+    //   siReleaseExecuteModal 用它找"本人那一行"的行 id（§4.1a 代次语义，必须传行 id），siOpenBatchDetail
+    //   每次渲染都会重新赋值，与 siBatchDetailRel 同生命周期。
+    let siBatchDetailExecutors = [];
     // [C7·方案 §6.6b] 后端 getReleaseMembers 三源统一字段集里 unavailable_fields 用的是内部字段名
     // （issue_id/type/title_snapshot/status_at_publish/commits），这里翻成用户看得懂的中文——集中一处，
     // 详情页横幅与其余未来消费者（如导出）都应复用本表，不各自硬编码一份译名防漂移。
@@ -4901,34 +5234,19 @@
         if (!r.ok) { siApiErr(r); siRenderBatchList(); return; }
         const rel = r.data.release; const issues = r.data.issues || [];
         siBatchDetailRel = rel;
+        // C5（方案 §4.5）：多人执行人机制——详情端点新增 executors 数组 + executor_notify_summary 聚合
+        //   （唯一后端改动点，见 index.js GET /sys-releases/:id 头部注释）。旧单人字段 release_assignee_*
+        //   已随 C4b H1 退场冻结（恒 NULL/not_sent），本批彻底改读新字段，不再有任何地方读旧列。
+        //   siBatchDetailExecutors 存到模块级变量供 siReleaseExecuteModal 等函数按 releaseId 复用，不必
+        //   每个动作都重新请求一次详情（对齐既有 siBatchDetailRel 同款范式）。
+        siBatchDetailExecutors = r.data.executors || [];
+        const execSummary = r.data.executor_notify_summary || 'none';
         document.getElementById('siBatchHead').textContent = '上线单 ' + rel.release_no;
         const planning = rel.status === '计划中';
         // 提前到成员行渲染之前（原先声明在下方 footer 区块，成员行「移出」按钮的可见条件同样需要）：
-        // ns=通知状态；uid=当前登录用户 id（未登录为 null）。
-        const ns = rel.release_assignee_notify_status || 'not_sent';
+        // uid=当前登录用户 id（未登录为 null）；myExecRow=本人在本批执行人子表的在册行（不存在=null）。
         const uid = currentUser ? Number(currentUser.id) : null;
-        // 值班预览（2026-07-30 用户提出）：not_sent 态此前「上线执行人」恒显示「—」，admin 点「安排上线」前看不到
-        //   会通知谁。这里按 planned_date 只读预取当天排班做**展示性预览**（执行人格 + 确认弹窗带名）——真定人仍在
-        //   后端 notify-executor 事务内查排班 CAS 写入（§6.4a），预览不参与任何门限判断；点击前排班变更以发送时为准
-        //   （文案已标注）。预取走既有 GET（登录即可见），失败/无排班不阻塞详情渲染；await 后按本函数既有纪律做
-        //   令牌+overlay 双检查再继续。
-        siBatchDutyPreview = null;
-        if (planning && (rel.release_assignee_notify_status || 'not_sent') === 'not_sent' && rel.planned_date) {
-            // [codex 209 审 MED-1] 令牌/overlay 双检查放在 try/catch **之后**统一执行——异常路径同样经过了一次
-            //   await 挂起，若只在成功分支检查，网络异常时会带着过期 rel 继续渲染（正是 207 审 MED-2 在本函数
-            //   加固过的那类"异常跳过令牌检查"缺口）。任何 await 出口都必须走同一纪律。
-            let dr = null;
-            try {
-                dr = await siApi(`/sys-duty-roster?from=${encodeURIComponent(rel.planned_date)}&to=${encodeURIComponent(rel.planned_date)}`);
-            } catch (netErr) { /* dr 保持 null → 下方标记 unavailable（codex 209 审 LOW-1：失败不再无声回落「—」） */ }
-            if (myGen !== siAuditGen || !document.getElementById('siBatchOverlay').classList.contains('open')) return;
-            if (dr && dr.ok) {
-                const day = (dr.data.items || [])[0];
-                siBatchDutyPreview = { releaseId: Number(rel.id), state: day ? 'found' : 'none', name: day ? day.user_name : null };
-            } else {
-                siBatchDutyPreview = { releaseId: Number(rel.id), state: 'unavailable', name: null };
-            }
-        }
+        const myExecRow = uid ? (siBatchDetailExecutors.find(e => Number(e.user_id) === uid) || null) : null;
         // [C7·方案 §6.6b 降级契约] degraded=true 时后端对不可用字段返回 null（不伪造/不占位）——本行按
         // 值是否为 null 逐字段判断，null 显式渲染「不可用」而非让 esc(null) 静默塌成空字符串（那会让用户
         // 误以为"这单标题本来就是空的"，与"这单标题读不到"是完全不同的两回事，必须可辨）。
@@ -4949,10 +5267,11 @@
             const idLinkHtml = idOk
                 ? `<a class="si-att-name" onclick="siCloseBatch();siOpenDrawer(${issueId})">#${issueId} ${titleHtml}</a>`
                 : `<span class="si-att-name si-muted" title="单据编号异常，无法定位">单据编号不可用 ${titleHtml}</span>`;
-            // 执行人移单（2026-07-31 用户拍板）：可见条件镜像下方「执行上线」按钮同款（本人+已通知+计划中），
-            //   独立于 admin 既有「移除」（siRemoveFromBatch，无需原因，条件见下方 isAdmin() 门）——两者互不
-            //   替代：admin 分支 reason 可选，执行人分支 reason 必填，故走各自的入口/弹窗，不复用同一个 onclick。
-            const executorRemoveBtn = (planning && idOk && uid && Number(rel.release_assignee_id) === uid && ns === 'sent')
+            // 执行人移单（2026-07-31 用户拍板）：可见条件镜像下方「确认上线完成」按钮同款（本人在册+已通知+
+            //   计划中），独立于 admin 既有「移除」（siRemoveFromBatch，无需原因，条件见下方 isAdmin() 门）——
+            //   两者互不替代：admin 分支 reason 可选，执行人分支 reason 必填，故走各自的入口/弹窗，不复用同一个
+            //   onclick。C5：判据从旧单列 release_assignee_id 改读 myExecRow（本人在 executors 子表的在册行）。
+            const executorRemoveBtn = (planning && idOk && myExecRow && myExecRow.notify_status === 'sent')
                 ? `<button class="u-btn-secondary u-btn-sm" onclick="siRemoveFromBatchExecutorModal(${id},${issueId},${siJsStringAttr(i.title || '')})">移出</button>` : '';
             // C5（commit号两列·D1）：执行人上线时要知道每张待上线单该发哪些 commit。
             //   值由后端 refsByComponent 派生：**已发布批次取自发布快照**（不回查 live 表，D5），
@@ -5006,10 +5325,12 @@
               }</div>`
             : '';
 
-        // 上线体统一重构 C2b（方案 v3.4 §6.4/§6.14）：新增「计划上线日期」+「上线执行人」+「通知状态」三格——
+        // 上线体统一重构 C2b（方案 v3.4 §6.4/§6.14）：新增「计划上线日期」+「执行人通知状态」两格——
         //   C2a 已在 sys_releases 落了这些列（10 列 ALTER，C0），此前详情页零展示。本区块**不挂 META_OK 门**
         //   （§6.7 断言：安排上线通道须始终可达，不受 /sys-issues/meta 加载成败影响，见页头按钮同款处理）。
         //   「改期」按钮（第2批新增）接已有 update-planned-date 端点——admin·仅 planning 可见，权限门镜像后端 requireAdmin。
+        //   C5（方案 §4.5）：「上线执行人」单行格 + 「通知状态」单行格 → 合并成一格聚合徽标（executor_notify_summary
+        //   六态），逐人明细挪到下方独立的「执行人」区块（siExecutorSectionHtml）——单格已装不下多人。
         const plannedDateEditBtn = (planning && isAdmin())
             ? `<button class="u-btn-secondary u-btn-sm" style="margin-left:8px" onclick="siReleaseUpdatePlannedDateModal(${id})">改期</button>` : '';
         document.getElementById('siBatchBody').innerHTML =
@@ -5018,10 +5339,10 @@
                 <div class="u-kv-item"><label>状态</label><div class="v">${planning ? '<span class="si-release-badge plan">计划中</span>' : '<span class="si-release-badge done">已发布</span>'}</div></div>
                 <div class="u-kv-item"><label>版本号</label><div class="v">${rel.version_tag ? esc(rel.version_tag) : '—'}</div></div>
                 <div class="u-kv-item"><label>计划上线日期</label><div class="v">${rel.planned_date ? esc(rel.planned_date) : '<span class="si-muted">未设置</span>'}${plannedDateEditBtn}</div></div>
-                <div class="u-kv-item"><label>上线执行人</label><div class="v">${rel.release_assignee_name ? esc(rel.release_assignee_name) : siDutyPreviewHtml(rel)}</div></div>
-                <div class="u-kv-item"><label>通知状态</label><div class="v">${siReleaseNotifyBadge(rel)}${siReleaseNotifyBtns(rel, planning)}</div></div>
+                <div class="u-kv-item"><label>执行人通知状态</label><div class="v">${siExecSummaryBadgeHtml(execSummary)}</div></div>
                 <div class="u-kv-item full"><label>上线说明</label><div class="v">${rel.release_note ? esc(rel.release_note) : '—'}</div></div>
             </div>
+            ${siExecutorSectionHtml(id, siBatchDetailExecutors, execSummary, planning)}
             <div class="u-detail-section"><h3>上线单成员（${issues.length}）</h3>${rows}</div>`;
 
         let foot = `<button class="u-btn-secondary" onclick="siRenderBatchList()">← 返回</button>`;
@@ -5037,177 +5358,381 @@
 
             // 上线体统一重构 C3 第2批（Task B-①）：旧「发布批次（旧流程）」按钮（走 legacy /publish，C3 后端已
             //   整体 409 退场，见 index.js 该路由处注释）+ 其唯一调用方 siModalPublishBatch 一并删除——
-            //   §6.15「C3 同提交隐藏旧执行按钮」在本批（前端）落地。「安排上线」+「执行上线」是现在唯一的
-            //   发布路径（两阶段，§6.7/§6.14），各自独立权限门，均**不挂 META_OK**（与本面板整体一致）。
-            // 安排上线：admin·通知态 ∈ (not_sent/failed/stale)。成员非空的门槛后端 notify-executor 暂未强制
-            //   （只有 _publishReleaseCoreInTxn/execute 强制 RELEASE_EMPTY），前端仍防呆收窄——对空批次发起
-            //   通知没有实际意义，属于纯 UX 加固，见完成报告「遗留问题」。
-            if (isAdmin() && ['not_sent', 'failed', 'stale'].includes(ns) && issues.length > 0) {
-                const btnLabel = ns === 'not_sent' ? '📣 安排上线' : '📣 重新安排上线';
-                foot += `<button class="u-btn-secondary" onclick="siReleaseNotifyExecutor(${id})">${btnLabel}</button>`;
+            //   §6.15「C3 同提交隐藏旧执行按钮」在本批（前端）落地。
+            // C5（方案 §4.5 第1条）：「安排上线」改为**只设置执行人集合**（PUT executors，不发任何通知）——
+            //   决策 4"没有群发按钮"在这里的落点：admin 点这个按钮只是选人/改选人，逐人发通知是下方执行人
+            //   区块每行各自的「📣 发通知」按钮。可见条件对齐后端 PUT executors 闸①（"存在执行人已进入
+            //   通知/确认流程"即 409 EXECUTORS_LOCKED）——summary ∈ (none, not_sent) 时集合必然还没被动过，
+            //   PUT executors 打得通；sending/sent/partial/failed 任一态都意味着有行已脱离"从未通知"，
+            //   须先「撤销上线安排」解锁才能重新选人（R6 解锁通道），本按钮此时不渲染。
+            if (isAdmin() && ['none', 'not_sent'].includes(execSummary) && issues.length > 0) {
+                const btnLabel = execSummary === 'none' ? '📣 安排上线' : '📣 重新选择执行人';
+                foot += `<button class="u-btn-secondary" onclick="siReleaseSetExecutorsModal(${id})">${btnLabel}</button>`;
             }
-            // 撤销上线安排：仅对接人（镜像后端 requireLiaisonOnly，admin 不可用，§6.8）。
-            if (currentUser && isSiIntakeLiaison(currentUser.id) && ['sent', 'stale', 'failed'].includes(ns)) {
+            // 撤销上线安排：仅对接人（镜像后端 requireLiaisonOnly，admin 不可用，§6.8）。C5：后端已删除
+            // "仅 sent/stale/failed 才可撤销"的旧聚合闸（v1.2 H1）——任何「计划中」批次都可撤销，前端可见
+            // 条件收窄到 summary!=='none'（没有执行人可撤销 = 没有意义渲染这个按钮，非后端强制）。
+            // 309-L2（codex 回卷）：局部条件补 planning &&——本身已嵌在外层 if(planning){...} 块内，这里
+            // 属于自洽冗余，不是修一个当前会命中的 bug；防的是"以后有人把这段代码挪出外层 planning 判断"
+            // 这类代码移动场景，若挪动时没意识到隐性依赖了外层门，会在已发布批次上误开撤销按钮。
+            if (planning && currentUser && isSiIntakeLiaison(currentUser.id) && execSummary !== 'none') {
                 foot += `<button class="u-btn-secondary" onclick="siReleaseCancelScheduleModal(${id})">撤销上线安排</button>`;
             }
-            // 执行上线：仅被通知的值班执行人本人（后端事务内实时资格复核，前端仅镜像 id 匹配 + 通知态显隐）。
-            if (uid && Number(rel.release_assignee_id) === uid && ns === 'sent') {
-                foot += `<button class="u-btn-primary" onclick="siReleaseExecuteModal(${id})">✅ 执行上线</button>`;
+            // 确认上线完成（我这部分）：仅本人在册且 exec_status=pending（后端事务内实时资格复核，前端仅
+            // 镜像子表在册行状态显隐）。notify_status='sent' 才展示——not_sent/failed/stale 时点了会撞
+            // 409 NOTIFY_NOT_SENT，防呆收窄。
+            if (myExecRow && myExecRow.exec_status === 'pending' && myExecRow.notify_status === 'sent') {
+                foot += `<button class="u-btn-primary" onclick="siReleaseExecuteModal(${id})">✅ 确认上线完成（我这部分）</button>`;
             }
         }
         document.getElementById('siBatchFoot').innerHTML = foot;
     }
 
-    // 通知状态徽标 + 补充说明行（失败原因 / 已通知时间与已读时间）——三态之外的 sending 也走 warn 配色。
-    const SI_RELEASE_NOTIFY_LABEL = { not_sent: '未通知', sending: '发送中…', sent: '已通知', failed: '发送失败', stale: '已过期（需重发）' };
-    const SI_RELEASE_NOTIFY_CLS = { not_sent: 'plan', sending: 'warn', sent: 'done', failed: 'fail', stale: 'warn' };
-    function siReleaseNotifyBadge(rel) {
-        const st = rel.release_assignee_notify_status || 'not_sent';
-        const cls = SI_RELEASE_NOTIFY_CLS[st] || 'plan';
-        const label = SI_RELEASE_NOTIFY_LABEL[st] || st;
-        let extra = '';
-        if (st === 'failed' && rel.release_assignee_notify_error) {
-            extra = `<div class="si-muted" style="margin-top:2px">${esc(rel.release_assignee_notify_error)}</div>`;
-        } else if (st === 'sent' && rel.release_assignee_notified_at) {
-            extra = `<div class="si-muted" style="margin-top:2px">通知于 ${esc(siFmtDT(rel.release_assignee_notified_at))}${rel.release_assignee_read_at ? '，已读 ' + esc(siFmtDT(rel.release_assignee_read_at)) : ''}</div>`;
-        }
-        return `<span class="si-release-badge ${cls}">${esc(label)}</span>${extra}`;
+    // 执行人聚合态徽标（六态：none/sending/sent/not_sent/partial/failed，方案 §4.3）——KV 格里的一格摘要，
+    // 逐人明细见 siExecutorSectionHtml。C5（方案 §4.5 第4条·v1.3 M-c）：**none 是新增第 6 态，必须显式
+    // 处理**，不能落进未知态的兜底分支（那会让"尚未安排执行人"显示成一个看不懂的裸字符串）。
+    const SI_EXEC_SUMMARY_LABEL = { none: '尚未安排执行人', not_sent: '未通知', sending: '发送中…', sent: '已全部通知', partial: '部分已通知', failed: '发送失败/待处理' };
+    const SI_EXEC_SUMMARY_CLS = { none: 'plan', not_sent: 'plan', sending: 'warn', sent: 'done', partial: 'warn', failed: 'fail' };
+    function siExecSummaryBadgeHtml(summary) {
+        const cls = SI_EXEC_SUMMARY_CLS[summary] || 'plan';
+        const label = SI_EXEC_SUMMARY_LABEL[summary] || summary;
+        return `<span class="si-release-badge ${cls}">${esc(label)}</span>`;
     }
 
-    // 批次执行人通知操作按钮（2026-07-30 用户提出：对齐单据通知区「重新通知/查询已读」习惯）：仅 admin+计划中。
-    //   sent → 「重新通知」（notify-executor {resend:true}，保留原执行人重发、已读重置）+ 未读且有 message_key
-    //   → 「查询已读」（admin-only，镜像单据级 release_executor 通道权限）。failed/stale 的重发入口维持底部
-    //   「重新安排上线」按钮（走同一端点不带 resend），not_sent 走「安排上线」——三态入口不重复不冲突。
-    function siReleaseNotifyBtns(rel, planning) {
-        if (!planning || !isAdmin()) return '';
-        const ns = rel.release_assignee_notify_status || 'not_sent';
-        let btns = '';
-        if (ns === 'sent') {
-            btns += ` <button class="u-btn-secondary u-nb-btn" onclick="siReleaseResendExecutor(${rel.id})">重新通知</button>`;
-            if (rel.release_assignee_notify_message_key && !rel.release_assignee_read_at) {
-                btns += ` <button class="u-btn-secondary u-nb-btn" onclick="siReleaseQueryExecutorRead(${rel.id})">查询已读</button>`;
-            }
+    // 执行人区块（方案 §4.5 第2条）：多人列表，每行姓名+通知态徽章+已读+确认态+「📣 发通知」按钮（not_sent
+    // 显示"发通知"、sent 显示"重新通知"、failed/stale 显示"重试"）。**没有"全部发送"按钮**（决策 4）——
+    // admin 想什么时候发给谁就点哪一行。已 done 的行不渲染发送按钮（v1.3·M-b 防呆，后端同步拒绝
+    // EXECUTOR_ALREADY_DONE）。none 态（summary==='none' 或空数组）显式空态引导，不落进任何"未通知"式渲染
+    // （v1.3·M-c：不能让 none 渲染出一个点了必然 404 的发送按钮）。
+    const SI_EXECUTOR_NOTIFY_LABEL = { not_sent: '未通知', sending: '发送中…', sent: '已通知', failed: '发送失败', stale: '已过期（需重发）' };
+    const SI_EXECUTOR_NOTIFY_CLS = { not_sent: 'plan', sending: 'warn', sent: 'done', failed: 'fail', stale: 'warn' };
+    function siExecutorSectionHtml(releaseId, executors, summary, planning) {
+        if (summary === 'none' || !executors || !executors.length) {
+            return '<div class="u-detail-section"><h3>执行人</h3><div class="si-muted">尚未安排执行人</div></div>';
         }
-        return btns;
+        const rowsHtml = executors.map(e => {
+            const ns = e.notify_status || 'not_sent';
+            const cls = SI_EXECUTOR_NOTIFY_CLS[ns] || 'plan';
+            const label = SI_EXECUTOR_NOTIFY_LABEL[ns] || ns;
+            const isDone = e.exec_status === 'done';
+            const doneTag = isDone ? ' <span class="si-release-badge done">已确认</span>' : '';
+            const readTag = e.read_at ? `<span class="si-muted" style="margin-left:6px">已读 ${esc(siFmtDT(e.read_at))}</span>` : '';
+            // L8（codex 预筛）：user_id 防御对齐 :4963 先例（issueId/idOk 同款范式）——本行数据来自后端直查
+            // sys_release_executors（非 issues 数组那种会走 degraded 重建的读源），正常路径 e.user_id 必是
+            // 合法整数，此处是防御性一致而非现存漏洞：万一未来某个读源变化混进脏值，不会静默拼出
+            // onclick="siExecutorRowNotify(1,NaN)" 这类点了没反应的死链接。
+            const uidNum = Number(e.user_id);
+            const uidOk = Number.isSafeInteger(uidNum);
+            let btns = '';
+            if (planning && isAdmin() && !isDone) {
+                if (ns === 'sending') {
+                    btns += ' <button class="u-btn-secondary u-btn-sm" disabled title="发送在途，请稍候">发送中…</button>';
+                } else if (uidOk) {
+                    const btnLabel = ns === 'not_sent' ? '📣 发通知' : (ns === 'sent' ? '📣 重新通知' : '📣 重试');
+                    btns += ` <button class="u-btn-secondary u-btn-sm" onclick="siExecutorRowNotify(${releaseId},${uidNum})">${btnLabel}</button>`;
+                }
+            }
+            // 309-M1（codex 回卷·裁定=收窄）：查已读按钮补 !isDone——确认完成后不再有"通知过程"这回事，
+            // 该行已固化的 read_at 徽标（readTag，上方已渲染）照常显示，但不再提供可点的查询动作。
+            if (planning && isAdmin() && !isDone && ns !== 'not_sent' && ns !== 'sending' && uidOk) {
+                btns += ` <button class="u-btn-secondary u-btn-sm" id="siExecReadBtn${releaseId}_${uidNum}" onclick="siExecutorRowReadStatus(${releaseId},${uidNum})">查询已读</button>`;
+            }
+            return `<div class="si-att-item">
+                <span class="si-att-name">${esc(e.user_name || ('用户#' + e.user_id))}</span>
+                <span class="si-release-badge ${cls}">${esc(label)}</span>${doneTag}${readTag}
+                ${btns}
+            </div>`;
+        }).join('');
+        return `<div class="u-detail-section"><h3>执行人（${executors.length}）</h3>${rowsHtml}</div>`;
     }
-    // 重新通知（sent 态重发，保留原执行人——换人唯一路径仍是对接人「撤销上线安排」后重新安排）。
-    async function siReleaseResendExecutor(releaseId) {
-        const rel = siBatchDetailRel;
-        const name = (rel && Number(rel.id) === Number(releaseId)) ? (rel.release_assignee_name || '') : '';
-        if (!confirm(`确认重新通知？将向「${name}」重发钉钉执行通知（已读状态将重置，以重发结果为准）。`)) return;
-        const r = await siApi('/sys-releases/' + releaseId + '/notify-executor', { method: 'POST', body: { resend: true } });
-        if (!r.ok) { siApiErr(r, '重新通知失败'); return; }
+    // 行级发通知（C2，行级唯一发送入口：首发/重发/失败重试同端点按行状态分支，无群发）。L2（codex 预筛）：
+    // timeline_failed===true 时成功 toast 附加留痕失败提示——发送这个动作本身成功了（notify_status 已落库），
+    // 只是账面留痕这步单独失败，不该假装什么都没发生，也不该让整次操作因此报错（事实已发生，账面描述另算，
+    // 同 MED-3/300-L1 一脉相承的既有设计）。L5：并发变更（NOTIFY_CONCURRENT_CHANGED）也刷新详情——这条
+    // 分支恰恰意味着"这一行的状态已经变了"，最该刷新的就是它，此前遗漏刷新会让页面继续显示旧状态。
+    async function siExecutorRowNotify(releaseId, userId) {
+        if (!confirm('确认发送钉钉执行通知？')) return;
+        const r = await siApi('/sys-releases/' + releaseId + '/executors/' + userId + '/notify', { method: 'POST' });
+        if (!r.ok) {
+            if (r.data && r.data.code === 'NOTIFY_CONCURRENT_CHANGED') { siApiErr(r, '通知失败'); await siOpenBatchDetail(releaseId); return; }
+            siApiErr(r, '通知失败'); return;
+        }
         const d = r.data || {};
-        if (d.concurrent_changed) showToast('通知状态已并发变更，请刷新后重试', 'warning');
-        else if (d.notify_status === 'sent') showToast('已重新通知执行人：' + (d.release_assignee_name || ''), 'success');
-        else if (d.notify_status === 'failed') showToast('重发失败：' + (d.notify_error || '未知原因'), 'error');
+        const tlSuffix = d.timeline_failed ? '（留痕写入失败，已记录日志）' : '';
+        if (d.concurrent_changed) showToast('通知状态已并发变更，请刷新后重试' + tlSuffix, 'warning');
+        else if (d.notify_status === 'sent') showToast('已通知' + (d.dry_run ? '（演练模式，未真实外呼）' : '') + tlSuffix, 'success');
+        else if (d.notify_status === 'failed') showToast('发送失败：' + (d.notify_error || '未知原因') + tlSuffix, 'error');
+        else showToast('已处理' + tlSuffix, 'success');
         await siOpenBatchDetail(releaseId);
     }
-    // 查询已读（钉钉已读回执，已读则后端固化 read_at 并在徽标补充行展示）。
-    async function siReleaseQueryExecutorRead(releaseId) {
-        const r = await siApi('/sys-releases/' + releaseId + '/executor-read-status');
-        if (!r.ok) { siApiErr(r, '查询已读失败'); return; }
-        const d = r.data || {};
-        if (d.read) { showToast('执行人已读（' + (d.read_at || '') + '）', 'success'); await siOpenBatchDetail(releaseId); }
-        else if (d.read_status === 'recipient_unresolved') showToast('无法解析执行人钉钉账号，无法查询已读', 'warning');
-        else showToast('执行人尚未读该通知', 'warning');
-    }
-
-    // 值班预览状态（2026-07-30）：siOpenBatchDetail 渲染时按 planned_date 预取当天排班写入；仅 not_sent 且
-    //   已设日期时非空。releaseId 绑定防串单（详情间切换由 siAuditGen 令牌保证渲染序，本变量随每次渲染重置）。
-    let siBatchDutyPreview = null;
-    // 「上线执行人」占位渲染（not_sent 无执行人时）：found→预计人；none→引导先排班；unavailable→预览暂不可用
-    //   （codex 209 审 LOW-1：查询失败与"无字段"可辨，不无声回落「—」）；未设日期→提示设置后带出。
-    function siDutyPreviewHtml(rel) {
-        if (rel.status !== '计划中') return '<span class="si-muted">—</span>';
-        if (!rel.planned_date) return '<span class="si-muted">—（设置计划上线日期后按排班带出）</span>';
-        if (siBatchDutyPreview && siBatchDutyPreview.releaseId === Number(rel.id)) {
-            if (siBatchDutyPreview.state === 'found') {
-                return `<span class="si-muted">预计：<b>${esc(siBatchDutyPreview.name)}</b>（按当前排班，以「安排上线」发送时为准）</span>`;
+    // 行级查已读（read_status 五值枚举单套判定，方案 §4.5 第2条尾注·登记清单④）：no_message_key/dry_run/
+    // recipient_unresolved/read/unread——不再有旧批次级"未发送即 400"这条独立错误码语义需要兼容。
+    // L4（codex 预筛）：点击即禁用按钮至请求返回（finally 恢复）——钉钉已读查询是真实外呼（同步远程接口），
+    // 连点会打出多次不必要的外呼，与"发通知"按钮防重复点击同一顾虑。
+    async function siExecutorRowReadStatus(releaseId, userId) {
+        const btnEl = document.getElementById('siExecReadBtn' + releaseId + '_' + userId);
+        if (btnEl) btnEl.disabled = true;
+        try {
+            const r = await siApi('/sys-releases/' + releaseId + '/executors/' + userId + '/read-status');
+            if (!r.ok) { siApiErr(r, '查询已读失败'); return; }
+            const d = r.data || {};
+            switch (d.read_status) {
+                // L6（codex 预筛）：read_at 来自后端 SQL-side datetime('now','localtime') 计算的原始时间字符串，
+                // 展示前须走 siFmtDT 归一格式 + esc 转义（同批次内其余时间字段展示范式一致，读接口这里之前漏了）。
+                case 'read': showToast('执行人已读（' + esc(siFmtDT(d.read_at)) + '）', 'success'); await siOpenBatchDetail(releaseId); break;
+                case 'unread': showToast('执行人尚未读该通知', 'warning'); break;
+                case 'no_message_key': showToast('尚无有效发送记录，无法查询已读', 'warning'); break;
+                case 'dry_run': showToast('该消息是演练发送，不可查真实已读', 'warning'); break;
+                case 'recipient_unresolved': showToast('无法解析该执行人钉钉账号，无法查询已读', 'warning'); break;
+                default: showToast('已读状态未知', 'warning');
             }
-            if (siBatchDutyPreview.state === 'none') {
-                return `<span style="color:#b45309">当天（${esc(rel.planned_date)}）无排班——「安排上线」将无法定人，请先到「值班排班」设置</span>`;
-            }
-            return '<span class="si-muted">排班预览暂不可用（不影响操作，以「安排上线」发送时为准）</span>';
+        } finally {
+            // 若期间发生刷新（read 分支的 siOpenBatchDetail 会重绘整个区块），旧按钮元素已从 DOM 摘除，
+            // 这里的 disabled=false 落在一个孤儿节点上是无害的空操作，不需要额外判断。
+            if (btnEl) btnEl.disabled = false;
         }
-        return '<span class="si-muted">—</span>';
     }
 
-    // 安排上线（notify-executor，§6.4a 两段 CAS）：not_sent 态由后端按当日排班自动定人，failed/stale 态
-    //   保留原执行人重发——真闸与真结果全由后端事务内判定，本函数只负责发起 + 按响应结构展示结果
-    //   （幂等 / 并发冲突 / 成功 / 失败四类响应，§6.4a②）。确认弹窗里的"将通知谁"来自渲染时的展示性
-    //   预览（siBatchDutyPreview，2026-07-30）——不参与门限，点击与发送之间排班若变更以后端发送时为准。
-    async function siReleaseNotifyExecutor(releaseId) {
-        const pv = (siBatchDutyPreview && siBatchDutyPreview.releaseId === Number(releaseId) && siBatchDutyPreview.name) ? siBatchDutyPreview.name : null;
-        if (!confirm(pv
-            ? `确认安排上线？将按排班向「${pv}」发送钉钉执行通知（以发送时排班为准）。`
-            : '确认安排上线？系统将按当日排班（或原执行人）发送钉钉通知。')) return;
-        const r = await siApi('/sys-releases/' + releaseId + '/notify-executor', { method: 'POST' });
-        if (!r.ok) { siApiErr(r, '安排上线失败'); return; }
-        const d = r.data || {};
-        if (d.idempotent) {
-            showToast('执行人已锁定（' + (d.release_assignee_name || '') + '），无需重复安排', 'warning');
-        } else if (d.concurrent_changed) {
-            showToast('通知状态已并发变更，请刷新后重试', 'warning');
-        } else if (d.notify_status === 'sent') {
-            showToast('已通知执行人：' + (d.release_assignee_name || ''), 'success');
-        } else if (d.notify_status === 'failed') {
-            showToast('通知发送失败：' + (d.notify_error || '未知原因') + '（可重试）', 'error');
+    // ============================================================
+    // 执行人选人弹窗（C5 新组件·方案 §4.5 第1条）：两处复用——「安排上线」siReleaseSetExecutorsModal
+    // 与应急一键 siModalHotfix，不写两份。releaseId 为 null 时（hotfix 尚未建批次前）候选端点不带
+    // ?release_id=，按当日排班取默认值（方案 §4.5 第1条·后端端点 1 注释）。
+    // C5 预筛 MED-1+L3+L9：拆成"取候选"（siExecutorPickerModal，fetch+render 一步到位，供
+    // siReleaseSetExecutorsModal 在批次面板上下文里调用）与"纯渲染"（siExecutorPickerRender，不发请求）
+    // 两段——siModalHotfix 自己先 fetch（第 1 步弹窗仍开着时探路，失败保留用户已填内容不关弹窗），成功后
+    // 才调用渲染段，不重复请求同一份候选数据。
+    // ============================================================
+    async function siExecutorPickerModal(releaseId, onConfirmIds) {
+        const myGen = siAuditGen;
+        const qs = releaseId ? ('?release_id=' + encodeURIComponent(releaseId)) : '';
+        const r = await siApi('/sys-releases/executor-candidates' + qs);
+        // L9（codex 预筛）：await 后补 siAuditGen/overlay 双检查（同 :4914 一带 siOpenBatchDetail 先例纪律）
+        // ——本函数固定由批次详情面板内的 siReleaseSetExecutorsModal 调用，releaseId 恒非空、siBatchOverlay
+        // 恒应处于打开态，故直接检查这枚共享令牌；若未来出现不依赖该 overlay 的新调用方，需重新评估。
+        if (myGen !== siAuditGen || !document.getElementById('siBatchOverlay').classList.contains('open')) return;
+        if (!r.ok) { siApiErr(r, '加载执行人候选清单失败'); return; }
+        siExecutorPickerRender(r.data || {}, onConfirmIds);
+    }
+    // 纯渲染段：候选数据由调用方备好（siExecutorPickerModal 或 siModalHotfix 各自 fetch 后传入），本函数
+    // 本身不发请求，可在任意上下文（含无 siBatchOverlay 的抽屉/独立流程）安全调用。
+    function siExecutorPickerRender(candidatesData, onConfirmIds) {
+        const d = candidatesData || {};
+        // L10（codex 预筛）：候选清单缓存降为函数内局部变量——原模块级 let 从未被 siExecPickerFilter 等
+        // 其他函数读取（过滤走 DOM data-name 属性），没有跨函数共享状态的必要。
+        const candidates = d.items || [];
+        const defaultSet = new Set((d.selected_by_default || []).map(Number));
+        const skipped = d.skipped_defaults || [];
+        // v1.4（codex 254-C LOW-3）：跳过不再静默——非阻断提示条，展示后端给的具体原因，不自行推断资格。
+        const skippedHtml = skipped.length
+            ? `<div class="si-gate-hint" style="margin-bottom:8px">${skipped.map(s => esc(s.reason)).join('；')}</div>`
+            : '';
+        const rowsHtml = candidates.map(u => {
+            // L8（codex 预筛）：候选 id 防御对齐 :4963 先例——正常路径 users.id 恒合法整数，此处是防御性
+            // 一致（万一候选数据源未来混进脏值，不产出 value="NaN" 的勾选框）。
+            const uidNum = Number(u.id);
+            if (!Number.isSafeInteger(uidNum)) return '';
+            // 309-M2（codex 回卷）：默认勾选补 u.eligible 联合判据——后端 selected_by_default[] 本身已过
+            // hasReleaseEligibility 筛过（resolveDefaultCandidate 不合格者进 skipped_defaults 不进这个
+            // 数组），这里是防御性双保险，不依赖"后端这份契约永远不会有别的路径污染"这个单点假设：disabled
+            // 行绝不允许同时带 checked（disabled+checked 的 checkbox 在 DOM 层面仍会被 :checked 选择器
+            // 命中，若真出现会在下方确认收集阶段被 !c.disabled 兜底过滤，但显示层先自己把关更直接）。
+            const checked = (u.eligible && defaultSet.has(uidNum)) ? 'checked' : '';
+            const disabled = u.eligible ? '' : 'disabled';
+            const reasonHtml = u.eligible ? '' : `<span class="si-muted" style="margin-left:6px">（${esc(u.disabled_reason || '无上线执行资格')}）</span>`;
+            return `<label class="si-chk-row si-chk-row-wide si-exec-pick-row" data-name="${esc((u.display_name || '').toLowerCase())}">
+                <input type="checkbox" class="si-exec-pick-chk" value="${uidNum}" ${checked} ${disabled} onchange="siExecPickerUpdateHint()">
+                <span class="si-chk-text">${esc(u.display_name || ('用户#' + uidNum))}</span>${reasonHtml}
+            </label>`;
+        }).join('');
+        siModal('选择上线执行人', [
+            { k: null, html: `<div class="u-form-group">
+                <label>执行人（至少选择 1 名）</label>
+                <input type="text" id="siExecPickSearch" placeholder="按姓名搜索" oninput="siExecPickerFilter()" style="margin-bottom:8px">
+                ${skippedHtml}
+                <div id="siExecPickList" style="max-height:320px;overflow-y:auto">${rowsHtml || '<span class="si-muted">无候选人员</span>'}</div>
+                <div id="siExecPickHint" class="u-hint" style="margin-top:6px"></div>
+            </div>` }
+        ], async () => {
+            // 309-M2：收集时叠加 !c.disabled 过滤——disabled 的 checkbox 理论上不该带 checked，但
+            // querySelectorAll('.si-exec-pick-chk:checked') 在 DOM 层面并不因 disabled 而排除匹配（disabled
+            // 只影响用户交互/表单提交，不影响 :checked 这个纯属性选择器），这里是收集侧的第二道防线。
+            const ids = [...document.querySelectorAll('.si-exec-pick-chk:checked')].filter(c => !c.disabled).map(c => parseInt(c.value, 10));
+            if (ids.length < 1) { showToast('至少选择 1 名执行人', 'error'); return false; }
+            return await onConfirmIds(ids);
+        }, '确认');
+        siExecPickerUpdateHint();
+    }
+    function siExecPickerFilter() {
+        const el = document.getElementById('siExecPickSearch');
+        const kw = el ? (el.value || '').trim().toLowerCase() : '';
+        document.querySelectorAll('.si-exec-pick-row').forEach(row => {
+            row.style.display = (!kw || (row.dataset.name || '').includes(kw)) ? '' : 'none';
+        });
+    }
+    // 选不足 1 人时确认按钮置灰 +「至少选择 1 名执行人」提示（用户拍板决策 7 第三次修正·方案 v1.7 二订：
+    // 执行人下限 2→1）。⚠️ v1.3 改口径：不写"上线需前后端
+    // 各一人"——系统并不校验职能组合（决策 3 终局），说"各一人"是承诺了做不到的事；三修后下限本身也
+    // 降到 1 人，这条既有告诫依然成立，不受影响。
+    function siExecPickerUpdateHint() {
+        // 312-M1（codex 合并前建议）：计数口径须与提交时收集逻辑（下方 siModal onConfirm 回调，
+        // `[...querySelectorAll('.si-exec-pick-chk:checked')].filter(c => !c.disabled)`）完全一致——
+        // 门禁判定用的是"过滤掉 disabled 后"的计数，不能只数 :checked。正常路径下 disabled 行不会带
+        // checked（309-M2 双重防御已堵住渲染层与收集层），本处口径不一致此前不会被真实触发，属于
+        // 防御性一致而非现存漏洞，但两处判据不同源本身是隐患——万一防御层失效，这里的置灰/提示会
+        // 基于错误计数，与提交时真正收集到的人数对不上。
+        const n = [...document.querySelectorAll('.si-exec-pick-chk:checked')].filter(c => !c.disabled).length;
+        const hint = document.getElementById('siExecPickHint');
+        const btn = document.getElementById('siMConfirm');
+        if (!hint || !btn) return;
+        if (n < 1) {
+            hint.textContent = `已选 ${n} 人——至少选择 1 名执行人`;
+            hint.style.color = '#b45309';
+            btn.disabled = true;
         } else {
-            showToast('已处理', 'success');
+            hint.textContent = `已选 ${n} 人`;
+            hint.style.color = '';
+            btn.disabled = false;
         }
-        await siOpenBatchDetail(releaseId);
     }
 
-    // 撤销上线安排（cancel-schedule，§6.8）：仅对接人，admin 不可用（按钮显隐已镜像，真闸后端 requireLiaisonOnly）。
+    // 安排上线（C5 重写，方案 §4.5 第1条）：先弹选人 → 确认后**只调 PUT executors 保存集合，不发任何
+    // 通知**（决策 4/v1.2 修正——上一版方案曾写"确认后 PUT+notify 两步"，与"无群发按钮"矛盾，已订正）。
+    async function siReleaseSetExecutorsModal(releaseId) {
+        await siExecutorPickerModal(releaseId, async (ids) => {
+            const r = await siApi('/sys-releases/' + releaseId + '/executors', { method: 'PUT', body: { user_ids: ids } });
+            if (!r.ok) { siApiErr(r, '设置执行人失败'); return false; }
+            const d = r.data || {};
+            showToast(d.changed === false ? '执行人未变化' : '已设置执行人，请到下方逐人发送通知', d.changed === false ? 'warning' : 'success');
+            siCloseModal(); await siOpenBatchDetail(releaseId); return false;
+        });
+    }
+
+    // 撤销上线安排（cancel-schedule，§6.8）：C5 后端已删除"仅 sent/stale/failed 才可撤销"旧聚合闸——任何
+    //   「计划中」批次都可撤销（R6 解锁通道），子表全体软删，不回带旧代次。在册已有 done 行时后端 409
+    //   CONFIRM_DISCARD_DONE_REQUIRED + done_executor_names，前端补弹二次确认框带 confirm_discard_done:true
+    //   重试（不静默丢弃已完成确认这件事）。
     function siReleaseCancelScheduleModal(releaseId) {
         siModal('撤销上线安排', [
             fTextarea('reason', '撤销原因', '', true, '必填，trim 后 1-200 字'),
-            note('撤销后通知状态重置为「未通知」、原执行人清空；甲方随后可重新「安排上线」（§6.8）。')
+            note('撤销后当前全部执行人的通知与确认状态将整体重置；需由<b>管理员</b>重新「安排上线」选人（该按钮仅 admin 可见，对接人自己没有这个权限）。')
         ], async v => {
             const reason = v.reason.trim();
             if (!reason) { showToast('撤销原因必填', 'error'); return false; }
             if (reason.length > 200) { showToast('撤销原因超长（≤200）', 'error'); return false; }
             const r = await siApi('/sys-releases/' + releaseId + '/cancel-schedule', { method: 'POST', body: { reason } });
-            if (!r.ok) { siApiErr(r, '撤销上线安排失败'); return false; }
+            if (!r.ok) {
+                if (r.data && r.data.code === 'CONFIRM_DISCARD_DONE_REQUIRED') {
+                    siCloseModal();
+                    siReleaseCancelScheduleDiscardModal(releaseId, reason, (r.data.done_executor_names || []));
+                    return false;
+                }
+                siApiErr(r, '撤销上线安排失败'); return false;
+            }
             showToast('已撤销上线安排' + (r.data && r.data.old_assignee_name ? '（原执行人：' + r.data.old_assignee_name + '）' : ''), 'success');
             siCloseModal(); await siOpenBatchDetail(releaseId); return false;
         });
     }
+    function siReleaseCancelScheduleDiscardModal(releaseId, reason, doneNames) {
+        siModal('确认丢弃已完成确认', [
+            note('以下执行人已确认完成上线，撤销将丢弃其确认结果：' + doneNames.map(n => esc(n)).join('、') + '。此操作会在时间线留痕，不可撤回。')
+        ], async () => {
+            const r = await siApi('/sys-releases/' + releaseId + '/cancel-schedule', { method: 'POST', body: { reason, confirm_discard_done: true } });
+            if (!r.ok) { siApiErr(r, '撤销上线安排失败'); return false; }
+            const d = r.data || {};
+            showToast('已撤销上线安排（已丢弃 ' + (d.discarded_done_count != null ? d.discarded_done_count : doneNames.length) + ' 条完成确认）', 'warning');
+            siCloseModal(); await siOpenBatchDetail(releaseId); return false;
+        }, '确认丢弃并撤销');
+    }
 
-    // 执行上线（execute，§6.4/§6.10）：仅被通知的值班执行人本人可见可点，事务内实时资格复核（403 兜底）。
-    //   release_note 若批次已填可留空沿用；未填则前端必填（镜像 _publishReleaseCoreInTxn 的 RELEASE_NOTE_REQUIRED）。
+    // 确认上线完成（我这部分）（execute，§6.4/§6.10，C5 重写方案 §4.5 第3条）：仅本人在册执行人可见可点，
+    //   事务内实时资格复核（403 兜底）。executor_row_id 取自 siBatchDetailExecutors 里本人那一行的行 id
+    //   （§4.1a 代次语义——必须传行 id，不许服务端自己查一行，否则代次保证会丢）。最后一人
+    //   （pending_count===1）二次确认文案 + 同弹窗内上线说明必填框（M4）；收到 RELEASE_NOTE_REQUIRED
+    //   （并发导致前端误判自己不是最后一人）时补弹专填说明的弹窗再重试，不报死错。
     function siReleaseExecuteModal(releaseId) {
         const rel = siBatchDetailRel || {};
+        const executors = siBatchDetailExecutors || [];
+        const uid = currentUser ? Number(currentUser.id) : null;
+        const myRow = uid ? executors.find(e => Number(e.user_id) === uid) : null;
+        if (!myRow) { showToast('你不是本批次在册执行人，或页面已过期，请刷新', 'error'); return; }
+        const pendingCount = executors.filter(e => e.exec_status === 'pending').length;
+        const isLast = pendingCount === 1;
         const hasNote = !!(rel.release_note && rel.release_note.trim());
-        siModal('执行上线（' + esc(rel.release_no || '') + '）', [
-            fTextarea('release_note', hasNote ? '上线说明（留空沿用上线单已填）' : '上线说明', '', !hasNote, hasNote ? '留空则用上线单已填值' : '必填，≤1000'),
-            fText('version_tag', '版本号（选填，留空沿用上线单已填）', ''),
-            note('执行后上线单内单据全部转「已上线」；仅被通知的值班执行人本人可操作，后端会实时复核你的上线资格。')
-        ], async v => {
-            const noteVal = v.release_note.trim();
-            if (!hasNote && !noteVal) { showToast('上线说明必填', 'error'); return false; }
-            const body = {};
-            if (noteVal) body.release_note = noteVal;
-            if (v.version_tag.trim()) body.version_tag = v.version_tag.trim();
+        const fields = [];
+        if (isLast) {
+            fields.push(note('你是最后一个确认人，点击后批次将翻「已上线」。'));
+            fields.push(fTextarea('release_note', hasNote ? '上线说明（留空沿用上线单已填）' : '上线说明', '', !hasNote, hasNote ? '留空则用上线单已填值' : '必填，≤1000'));
+            fields.push(fText('version_tag', '版本号（选填，留空沿用上线单已填）', ''));
+        } else {
+            fields.push(note('确认后还差 ' + (pendingCount - 1) + ' 人，批次仍「计划中」。'));
+        }
+        siModal('✅ 确认上线完成（我这部分）', fields, async v => {
+            const body = { executor_row_id: myRow.id };
+            if (isLast) {
+                const noteVal = (v.release_note || '').trim();
+                if (!hasNote && !noteVal) { showToast('上线说明必填', 'error'); return false; }
+                if (noteVal) body.release_note = noteVal;
+                if (v.version_tag && v.version_tag.trim()) body.version_tag = v.version_tag.trim();
+            }
             const r = await siApi('/sys-releases/' + releaseId + '/execute', { method: 'POST', body });
-            if (!r.ok) { siApiErr(r, '执行上线失败'); return false; }
-            showToast('已上线 ' + ((r.data && r.data.count) || '') + ' 单', 'success');
+            if (!r.ok) {
+                if (r.data && r.data.code === 'RELEASE_NOTE_REQUIRED') {
+                    siCloseModal();
+                    siReleaseExecuteRetryNoteModal(releaseId, myRow.id);
+                    return false;
+                }
+                siApiErr(r, '确认上线失败'); return false;
+            }
+            siExecuteApplyResult(r.data || {});
             siCloseModal(); await siLoadList(); await siOpenBatchDetail(releaseId); return false;
         });
+    }
+    // 并发导致前端误判自己不是最后一人的补救弹窗（方案 §4.5 第3条）：单独出一个只要求填上线说明的弹窗，
+    //   不报死错、不需要用户重新走一遍完整确认流程。
+    function siReleaseExecuteRetryNoteModal(releaseId, executorRowId) {
+        siModal('填写上线说明（你已成为最后一个确认人）', [
+            note('并发导致你成为了最后一个确认人，需先填写上线说明才能完成上线。'),
+            fTextarea('release_note', '上线说明', '', true, '必填，≤1000'),
+            fText('version_tag', '版本号（选填）', ''),
+        ], async v => {
+            const noteVal = v.release_note.trim();
+            if (!noteVal) { showToast('上线说明必填', 'error'); return false; }
+            const body = { executor_row_id: executorRowId, release_note: noteVal };
+            if (v.version_tag.trim()) body.version_tag = v.version_tag.trim();
+            const r = await siApi('/sys-releases/' + releaseId + '/execute', { method: 'POST', body });
+            if (!r.ok) { siApiErr(r, '确认上线失败'); return false; }
+            siExecuteApplyResult(r.data || {});
+            siCloseModal(); await siLoadList(); await siOpenBatchDetail(releaseId); return false;
+        });
+    }
+    // execute 响应形状（C3）：released 统一布尔（是否因本次确认触发发布），released_issue_ids 另挂新键
+    //   （不复用裸 released 当数组）。三分支互斥判序：already（幂等回显，响应无 count 字段）优先于
+    //   released（本次真触发发布，才有 count）——原判序若先判 released 会把"已 done 的人对着已发布批次
+    //   重复点"错吞进"已上线 N 单"分支却拿不到 count（该响应形状没有这个字段，只会显示空白），已订正。
+    function siExecuteApplyResult(d) {
+        // L2（codex 预筛）：timeline_failed===true 时附加留痕失败提示——只有"非最后一人"分支的响应会带
+        // 这个字段（已上线/已幂等两分支各自走不同留痕路径，未透出该字段），本人这次确认这个动作本身已经
+        // 成功落库（exec_status=done），只是账面 timeline 这步单独失败，同 siExecutorRowNotify 处一致的
+        // "事实已发生，账面描述另算"处理原则。
+        const tlSuffix = d.timeline_failed ? '（留痕写入失败，已记录日志）' : '';
+        if (d.already) showToast('你已确认过（幂等），' + (d.released ? '批次已发布' : '批次仍待其余人确认'), 'warning');
+        else if (d.released) showToast('已上线 ' + (d.count != null ? d.count : '') + ' 单', 'success');
+        else showToast('已确认，还差 ' + (d.pending_count != null ? d.pending_count : '') + ' 人' + tlSuffix, 'success');
     }
 
     // 改计划上线日期（update-planned-date，§6.11 原语④，C2b 第2批新增前端入口）：admin，仅 planning 可见。
     //   ⚠️ 文案据后端真实行为写死（先读 index.js update-planned-date + applyReleaseChange 源码确认，非猜测）：
-    //   实际改变日期（含清除/重填）时，后端 applyReleaseChange 在非 skipReset 分支会把通知状态**直接重置为
-    //   「未通知」（not_sent）**并清空当前执行人（release_assignee_id/name=NULL）——不是"变 stale"，是完全重置，
-    //   需要重新走一遍「安排上线」（届时会按新日期重新查排班）。日期不变（含都为空）= 差量空，后端 applyReleaseChange
-    //   直接跳过（不清通知、不写 timeline），前端弹窗文案与此逐字对齐，不写"将失效/变为过期"这类不实断言。
+    //   实际改变日期（含清除/重填）时，后端 applyReleaseChange 在非 skipReset 分支会把**执行人子表全体
+    //   软删**（C5 订正：旧批次级单列 release_assignee_id/name 已随 C4b 退场冻结，实际重置对象是子表，
+    //   非那两个死列）——需要重新经「安排上线」选人弹窗重新指定执行人（不再是"系统按新日期自动查排班
+    //   定人"，选人本身已前移到弹窗环节，见方案 §4.5 第1条）。日期不变（含都为空）= 差量空，后端
+    //   applyReleaseChange 直接跳过（不清通知、不写 timeline），前端弹窗文案与此逐字对齐，不写"将失效/
+    //   变为过期"这类不实断言。
     function siReleaseUpdatePlannedDateModal(releaseId) {
         const rel = siBatchDetailRel || {};
         siModal('改计划上线日期', [
             fDate('planned_date', '计划上线日期（留空=清除）', rel.planned_date || ''),
-            note('若实际改变日期（含清除或重填），会把当前执行人清空、通知状态重置为「未通知」，需重新「安排上线」（按新日期重新查排班）；日期与现有值相同则不做任何改动。')
+            note('若实际改变日期（含清除或重填），会把当前全部执行人清空、通知与确认状态一并重置，需重新「安排上线」选人；日期与现有值相同则不做任何改动。')
         ], async v => {
             const r = await siApi('/sys-releases/' + releaseId + '/update-planned-date', { method: 'POST', body: { planned_date: v.planned_date || '' } });
             if (!r.ok) { siApiErr(r, '改期失败'); return false; }

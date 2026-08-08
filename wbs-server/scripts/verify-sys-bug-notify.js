@@ -137,10 +137,22 @@ async function bugReturned(devId = 5, extra = {}) {
   return id;
 }
 // bug 走到待验证（accept 前）
-async function bugToVerifying(devId = 5, extra = {}) {
+// ⭐ [C9-fix H2 普查] `withCommit` 选项：**只有下游还要 accept 的调用方**才需要传 true。
+//   C9（无 commit 单验收直翻）之后，零 commit 单 accept 会直接翻到「已上线」而不是「待上线」——本 helper
+//   的两个下游（bugOnlineNoRelease / bugToPrereleaseWithExecutor）都在 accept 之后按「待上线」做文章，
+//   继续用 no_code 会让它们拿到与注释不符的状态（**测试仍绿**：前者随后硬 UPDATE 成已上线覆盖掉，后者
+//   被端点级封禁 409 在状态判定之前拦下——两条都属"侥幸绿"，正是 [[feedback_pattern_sweep_not_symptom_list]]
+//   说的"静默存活的同款"）。
+//   ⚠️ 刻意**不把默认值改成 commits**：本 helper 另有三处只用到「待验证」态、根本不 accept 的调用方
+//   （[RS] 查已读 / [G] 闸门 / [F3] 收窄验证），它们用 no_code 交付是合法且更贴近 bug 流常态的场景，
+//   没有理由被这次修改波及。差异化的地方恰恰是"要不要 accept"，参数名与注释就把这条判据写在明面上。
+async function bugToVerifying(devId = 5, extra = {}, { withCommit = false } = {}) {
   const id = await bugAssigned(devId, extra);
   await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: EST });
-  const r = await call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'no_code', no_code_reason: '修复（占位理由）', self_tested: true, test_env_deployed: true });
+  const submitBody = withCommit
+    ? { mode: 'commits', commits: [{ component: 'backend', commit_ref: `fix/c9keep-${id}` }], self_tested: true, test_env_deployed: true }
+    : { mode: 'no_code', no_code_reason: '修复（占位理由）', self_tested: true, test_env_deployed: true };
+  const r = await call('POST', `/api/sys-issues/${id}/submit`, devTok, submitBody);
   assert.strictEqual(r.status, 200, 'bug submit 200');
   return id;
 }
@@ -150,7 +162,7 @@ async function bugToVerifying(devId = 5, extra = {}) {
 //   仍需一个「已上线」态样本 —— 改走 accept→hotfix-publish 前的最短路径已随 C3b 退场，故改造为直接 DB 打状态构造样本，
 //   不依赖已退场的端点（避免本文件在 C3b commit 后失败）。
 async function bugOnlineNoRelease(devId = 5, extra = {}) {
-  const id = await bugToVerifying(devId, extra);
+  const id = await bugToVerifying(devId, extra, { withCommit: true });   // [C9-fix H2 普查] 下游要 accept → 必须带 commit，否则直翻已上线
   await call('POST', `/api/sys-issues/${id}/accept`, adminTok, {});   // 待上线
   // 直接构造「已上线·不发版」终态样本（release_id 保持 NULL），不经过已退场的 set-release-flag/confirm-online-norelease——
   //   本文件只关心通知侧行为（released 文案/sendable 门），已上线路径本身由 verify-sys-release-orchestration 覆盖。
@@ -160,8 +172,14 @@ async function bugOnlineNoRelease(devId = 5, extra = {}) {
 // bug 到待上线 + 指定上线执行开发（release_assignee，follow-up 2026-07-07）——直接 DB 指定 release_assignee
 //   （assign-release-dev 端点本身由 verify-sys-release-orchestration 覆盖，本文件聚焦「通知上线开发」侧行为）。
 async function bugToPrereleaseWithExecutor(devId = 5, execId = 6, extra = {}) {
-  const id = await bugToVerifying(devId, extra);
+  const id = await bugToVerifying(devId, extra, { withCommit: true });   // [C9-fix H2 普查] 同上：不带 commit 会直翻已上线
   await call('POST', `/api/sys-issues/${id}/accept`, adminTok, {});   // 待上线
+  // [C9-fix H2 普查] 前置自证本 helper 的契约（函数名与唯一调用方的注释都写着「待上线」）——原先此处
+  //   一个状态断言都没有，单据实际停在哪个态全靠注释声称。下游那组封禁契约用例的设计意图是"**这条单
+  //   若在封禁前调用会 200 sent**，封禁闸门也须先拦下"；单据若不在待上线，旧逻辑本就会因状态门 409，
+  //   那组用例就从"封禁抢在成功场景之前"退化成"封禁抢在另一个 409 之前"，强度骤降且无人察觉。
+  const st = await get('SELECT status FROM sys_issues WHERE id=?', [id]);
+  assert.strictEqual(st.status, '待上线', `bugToPrereleaseWithExecutor 契约：accept 后须停在「待上线」，实际 ${st.status}`);
   await run('UPDATE sys_issues SET release_assignee_id=?, release_assignee_name=? WHERE id=?', [execId, '开发李', id]);
   return id;
 }
@@ -409,7 +427,7 @@ async function main() {
     //     与 notify-developer / notify-requester 两通道口径一致（它们本就有中间件）。放行面完全不变。
     r = await call('POST', `/api/sys-issues/${id}/notify-creator`, devTok);
     assert.strictEqual(r.status, 403, '[Creator·H3] 主开发本人触发 → 403（不再放权）');
-    assert.strictEqual(r.body.code, 'NOT_ADMIN_OR_INTAKE_LIAISON', '[Creator·H3] code=NOT_ADMIN_OR_INTAKE_LIAISON（C1 复审补挂中间件后由中间件层拒）');
+    assert.strictEqual(r.body.code, 'NOT_BOUND_LIAISON', '[Creator·H3] code=NOT_BOUND_LIAISON（C10 写路径 enforceBinding·dev5 过粗筛后 handler 绑单精判拒·单绑 13）');
     assert.strictEqual((await get('SELECT creator_notify_status FROM sys_issues WHERE id=?', [id])).creator_notify_status, 'not_sent', '[Creator·H3] 主开发被拒后 creator_notify_status 仍 not_sent');
     // 受理人[13] 触发 → 能发（C1 起 creator 通道 = 全类型 admin∨受理人）
     const id2 = await bugToVerifying(5);
@@ -419,7 +437,7 @@ async function main() {
     // 未授权（dev2 非受理人/非 admin）→ 403（同上：C1 复审后由中间件层拒）
     const id3 = await bugToVerifying(5);
     r = await call('POST', `/api/sys-issues/${id3}/notify-creator`, dev2Tok);
-    assert.strictEqual(r.status, 403); assert.strictEqual(r.body.code, 'NOT_ADMIN_OR_INTAKE_LIAISON');
+    assert.strictEqual(r.status, 403); assert.strictEqual(r.body.code, 'NOT_BOUND_LIAISON');   // C10 绑单精判（dev2 非该单对接人[13]）
     // 状态门：处理中态不可通知建单人（sendable={待验证,待上线,已上线}）——用受理人触发（过授权、卡状态门）
     const idMid = await bugAssigned(5);
     r = await call('POST', `/api/sys-issues/${idMid}/notify-creator`, liaisonTok);
@@ -566,13 +584,18 @@ async function main() {
     // （后者由专门的 verify-sys-liaison-test.js 覆盖）。让对接人在 GATE 判定时失效，触发 §3.0-⑥ 降级
     // 路径，使 submit 仍直落"待验证"——本文件其余断言零改动，这也是方案承认的合法真实场景。
     await run(`UPDATE sys_issues SET intake_liaison_id = 999999 WHERE id = ?`, [cid]);
-    await call('POST', `/api/sys-issues/${cid}/estimate`, dev2Tok, { dev_estimated_at: EST });   // dev6=dev2Tok 回填
+    await call('POST', `/api/sys-issues/${cid}/estimate`, dev2Tok, { dev_estimated_at: EST, ...(type === 'bug' ? {} : { estimated_effort_days: 1 }) });   // dev6=dev2Tok 回填
     await call('POST', `/api/sys-issues/${cid}/submit`, dev2Tok, { mode: 'no_code', no_code_reason: '交付（占位）', self_tested: true, test_env_deployed: true });   // →待验证
     return cid;
   };
   // 表驱动：feature/improvement × 通道 × (admin 放行 / 对接人拒绝) 逐格
   for (const type of ['feature', 'improvement']) {
     const vid = await seedChangeToVerifying(type);
+    // ⭐ [C10 涟漪修复] seedChangeToVerifying 把 intake_liaison_id 置 999999（为触发 GATE 降级使 submit 落
+    //   「待验证」）——但 C10 通知写路径改绑单精判（enforceBinding），该单需绑到被测的受理人[13]，否则
+    //   liaisonTok(13) 会被判「非该单对接人」而 403。submit 降级已完成（单已在待验证），此处复位绑定为 13，
+    //   使下方 developer/creator/requester 三通道按「受理人=本单对接人」正确判权限。
+    await run(`UPDATE sys_issues SET intake_liaison_id = 13 WHERE id = ?`, [vid]);
     // developer：待验证在变更流 dev 白名单（开发中/待验证）——admin 发 dev6（非自己）→ 200 sent
     let r = await call('POST', `/api/sys-issues/${vid}/notify-developer`, adminTok, { dev_user_id: 6 });
     assert.strictEqual(r.status, 200, `[T] ${type} developer admin 放行 200 ` + JSON.stringify(r.body));
@@ -582,7 +605,7 @@ async function main() {
     assert.strictEqual(r.status, 200, `[T] ⭐ ${type} developer 受理人(13) → 200（C1 全类型统一）, got ${r.status} ${JSON.stringify(r.body)}`);
     r = await call('POST', `/api/sys-issues/${vid}/notify-developer`, techLeadTok, { dev_user_id: 6 });
     assert.strictEqual(r.status, 403, `[T] ⭐ ${type} developer 示例发布者(7) → 403（转纯技术负责人）`);
-    assert.strictEqual(r.body.code, 'NOT_ADMIN_OR_INTAKE_LIAISON', `[T] ${type} developer 示例发布者被中间件拒`);
+    assert.strictEqual(r.body.code, 'NOT_BOUND_LIAISON', `[T] ${type} developer 示例发布者(7) 过粗筛后 handler 绑单精判拒（单绑 13 非示例发布者·NOT_BOUND_LIAISON）`);
     // creator：admin=created_by → self-guard skipped 200 + creator_notify_status 仍 not_sent
     r = await call('POST', `/api/sys-issues/${vid}/notify-creator`, adminTok);
     assert.strictEqual(r.status, 200, `[T] ${type} creator admin self-guard 200`);
@@ -660,9 +683,9 @@ async function main() {
   // ═══ [P] 权限 ═══
   {
     const id = await bugAssigned(5);
-    let r = await call('POST', `/api/sys-issues/${id}/notify-developer`, devTok, { dev_user_id: 5 });   // dev(5) 非白名单非 admin
+    let r = await call('POST', `/api/sys-issues/${id}/notify-developer`, devTok, { dev_user_id: 5 });   // dev(5) 过粗筛后 handler 绑单精判拒
     assert.strictEqual(r.status, 403, '[P] 非白名单非 admin notify-developer → 403');
-    assert.strictEqual(r.body.code, 'NOT_ADMIN_OR_INTAKE_LIAISON', '[P] code=NOT_ADMIN_OR_INTAKE_LIAISON');
+    assert.strictEqual(r.body.code, 'NOT_BOUND_LIAISON', '[P] code=NOT_BOUND_LIAISON（C10 绑单精判·dev5 非该单对接人[13]）');
     // relay：仅 admin，白名单成员（对接人）不可发（G7 §3.1：对接人不能发 notify-relay 给自己）
     let r2 = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'relay-p', system_name: 'BMS', source: '内部', description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13, assign_mode: 'B', relay_user_id: 7 });
     const idB = r2.body.id;
@@ -697,7 +720,7 @@ async function main() {
     // feature assign→dev 不再 auto + estimate→requester 不再 auto
     const fid = await seedChangeAssigned('feature', 5, { requester_dept: '市场部', requester_name: '李四', requester_phone: PHONE });
     assert.strictEqual(await nStatus(fid), 'not_sent', '[C] ⭐feature assign 不再自动发开发（C2a 全手动）');
-    await call('POST', `/api/sys-issues/${fid}/estimate`, devTok, { dev_estimated_at: EST });
+    await call('POST', `/api/sys-issues/${fid}/estimate`, devTok, { dev_estimated_at: EST, estimated_effort_days: 1 });
     assert.strictEqual(await rStatus(fid), 'not_sent', '[C] ⭐feature estimate 不再自动发需求方（C2a 全手动）');
     // improvement assign→dev 不再 auto
     const iid = await seedChangeAssigned('improvement', 5);
@@ -709,7 +732,7 @@ async function main() {
     assert.strictEqual(await nStatus(fid2), 'not_sent', '[C] feature reassign 不再自动发新开发（C2a 全手动）');
     // feature return→dev 不再 auto
     const fid3 = await seedChangeAssigned('feature', 5);
-    await call('POST', `/api/sys-issues/${fid3}/estimate`, devTok, { dev_estimated_at: EST });
+    await call('POST', `/api/sys-issues/${fid3}/estimate`, devTok, { dev_estimated_at: EST, estimated_effort_days: 1 });
     await call('POST', `/api/sys-issues/${fid3}/submit`, devTok, { mode: 'no_code', no_code_reason: '交付（占位理由）', self_tested: true, test_env_deployed: true });   // 待验证
     await call('POST', `/api/sys-issues/${fid3}/return`, adminTok, { reason: '打回' });   // 开发中
     assert.strictEqual(await nStatus(fid3), 'not_sent', '[C] feature return 不再自动发开发（C2a 全手动）');

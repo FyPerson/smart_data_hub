@@ -71,6 +71,11 @@ let sendCallCount = 0;          // [11d] dry-run 打桩计数：断言开启时 
 let sendShouldThrow = null;
 let sendDelayMs = 0;
 let recipientRaceInject = null;   // { issueId, newRecipientId }
+// ⭐ [C10-fix3 HIGH·codex 319-R 纵深] bindingRaceInject：同款一次性拦截——命中"notify-liaison-test 端点读
+//   主行"那次 dbGetAsync（读出 boundId 快照）后，同步补一刀 UPDATE 改写 intake_liaison_id，模拟"读绑定→
+//   取锁"之间对接人被并发改绑（防 L2 换对接人端点未来上线后的 TOCTOU；本模块当前**无该端点**，本注入是
+//   构造未来场景以证明纵深闸门就位，非复现现网可触发 bug）。
+let bindingRaceInject = null;   // { issueId, newLiaisonId }
 // [codex 278 号审 H-1 新增] readSystemConfig 是 notify-liaison-test 端点"触达外呼之前"最先调用的一步——
 // 用它模拟一次纯本地异常（无网络副作用），验证"确定失败"分支（区别于 sendShouldThrow 现在落在"结果
 // 未知"分支，见下方 [13b] 改写）。
@@ -123,6 +128,13 @@ async function getWithRaceHook(sql, params) {
     const inject = recipientRaceInject;
     recipientRaceInject = null;   // 一次性
     await run(`UPDATE sys_issues SET liaison_test_recipient_id = ? WHERE id = ?`, [inject.newRecipientId, inject.issueId]);
+  }
+  // ⭐ [C10-fix3 HIGH·纵深] 改绑注入：读主行快照后改写 intake_liaison_id（一次性·SQL 文本+issueId 双精确匹配·
+  //   与 recipientRaceInject 互不干扰，两个开关同时置空时本 hook 纯透传）。
+  if (bindingRaceInject && sql === 'SELECT * FROM sys_issues WHERE id = ?' && params && params[0] === bindingRaceInject.issueId) {
+    const inject = bindingRaceInject;
+    bindingRaceInject = null;   // 一次性
+    await run(`UPDATE sys_issues SET intake_liaison_id = ? WHERE id = ?`, [inject.newLiaisonId, inject.issueId]);
   }
   return row;
 }
@@ -197,7 +209,13 @@ async function mkIssue(type, status, extra = {}) {
     [type, status, extra.title || `${type}-${status}-单`, est, extra.oaNumber === null ? null : (extra.oaNumber || '20260728300'),
      intakeLiaisonId,
      extra.needsFeasibility || 0, extra.feasibilityConclusion || null, extra.feasibilityRequirementConfirm || null,
-     extra.estimatedEffortDays === undefined ? null : extra.estimatedEffortDays,
+     // [C7 工时评估补全·方案 v1.7 §9.1] 工期资格从「nf=1 ∧ feature」扩到「feature/improvement × nf 两值」
+     //   ——本文件夹具默认 needsFeasibility=0，C7 前从不过工期资格，C7 后 GATE 会因工期为空静默 defer，
+     //   [1] 等"excuse 触发 W-GATE → 待对接测试"的断言会全线失守（失守形态是"状态没动"这种不报错的静默
+     //   症状）。同 dev_estimated_at/oaNumber 既有处置：feature/improvement 默认种合法占位值；显式传
+     //   null 可造"未填工期"态测该闸本身；bug/config 无工期维度恒不种。
+     extra.estimatedEffortDays !== undefined ? extra.estimatedEffortDays
+       : (['feature', 'improvement'].includes(type) ? 1 : null),
      extra.returnCount || 0]
   );
   return r.lastID;
@@ -686,7 +704,10 @@ async function main() {
       const rReturn = await call('POST', `/api/sys-issues/${id}/return`, adminTok, { reason: '[6h] 验收打回，走第二轮对接测试' });
       assert.strictEqual(rReturn.status, 200, `[6h] 前置：业务 return 应 200，实际 ${rReturn.status} ${JSON.stringify(rReturn.body)}`);
       assert.strictEqual(await statusOf(id), '开发中', '[6h] 前置：打回后回开发中');
-      await run(`UPDATE sys_issues SET dev_estimated_at=? WHERE id=?`, [futureEst(30), id]);
+      // [C7] return 的换轮清字段套餐把 dev_estimated_at **与 estimated_effort_days** 一起清了（见 [7] 组断言），
+      //   C7 起 GATE 对 feature/improvement 两 nf 值都查工期 → 只补预计完成、不补工期，第二轮仍会卡在
+      //   gate_deferred_at 走不到 ⑦。两个字段必须一起补，才是返工后重填资格的完整模拟。
+      await run(`UPDATE sys_issues SET dev_estimated_at=?, estimated_effort_days=1 WHERE id=?`, [futureEst(30), id]);
       // ⚠️ 不复用 user_id=6（历史在册，DDL UNIQUE(issue_id,user_id) 不因软删/excused 放行重插）——
       //   新一轮新增成员须用一个尚未在本单出现过的 user_id（同批2既有范式）。
       const daSecond2 = await mkMember(id, 8, '开发丁', 'pending');
@@ -923,7 +944,10 @@ async function main() {
     // isGateEligibleForVerify 无条件要求它非空——不重新填写会在 ④ 落 gate_deferred_at 卡住，
     // 走不到 ⑦（本文件踩坑实测）。补一次 estimate 模拟"返工后重新回填预计完成"这一真实必经步骤。
     await run(`UPDATE sys_issue_dev_assignees SET dev_status='code_submitted' WHERE id=?`, [daId3a]);
-    await run(`UPDATE sys_issues SET dev_estimated_at=? WHERE id=?`, [futureEst(30), id3]);
+    // [C7] return 的换轮清字段套餐把 dev_estimated_at **与 estimated_effort_days** 一起清了（见 [7] 组断言），
+    //   C7 起 GATE 对 feature/improvement 两 nf 值都查工期 → 只补预计完成、不补工期，第二轮仍会卡在
+    //   gate_deferred_at 走不到 ⑦。两个字段必须一起补，才是返工后重填资格的完整模拟。
+    await run(`UPDATE sys_issues SET dev_estimated_at=?, estimated_effort_days=1 WHERE id=?`, [futureEst(30), id3]);
     const daId3c = await mkMember(id3, 7, '开发丙', 'pending');
     // 轮询数据库时钟直到严格跨过第一次 pass 的 created_at，避免同秒精度下 MAX 无法区分两轮先后
     // （SQLite created_at 为秒级精度，同 codex 260 号 M-A 范式）。
@@ -997,7 +1021,10 @@ async function main() {
     assert.strictEqual(await statusOf(idCyc), '开发中', '[9e] 前置：打回后回开发中');
     // §3.1b 打回=新一轮，清评估三字段+工期+受阻——重新回填工期才能再次通过 GATE 资格判定（同 [9c] 范式）。
     await run(`UPDATE sys_issue_dev_assignees SET dev_status='code_submitted' WHERE id=?`, [daCycA]);
-    await run(`UPDATE sys_issues SET dev_estimated_at=? WHERE id=?`, [futureEst(30), idCyc]);
+    // [C7] return 的换轮清字段套餐把 dev_estimated_at **与 estimated_effort_days** 一起清了（见 [7] 组断言），
+    //   C7 起 GATE 对 feature/improvement 两 nf 值都查工期 → 只补预计完成、不补工期，第二轮仍会卡在
+    //   gate_deferred_at 走不到 ⑦。两个字段必须一起补，才是返工后重填资格的完整模拟。
+    await run(`UPDATE sys_issues SET dev_estimated_at=?, estimated_effort_days=1 WHERE id=?`, [futureEst(30), idCyc]);
     const daCycC = await mkMember(idCyc, 7, '开发丙', 'pending');
     await triggerGateViaExcuse(idCyc, daCycC, '[9e] 第二轮进入测试段');
     assert.strictEqual(await statusOf(idCyc), '待对接测试', '[9e] 第二轮：再次进入待对接测试');
@@ -1153,33 +1180,34 @@ async function main() {
       await run(`UPDATE sys_issues SET liaison_test_recipient_id=999999, liaison_test_recipient_name='已失效旧对接人' WHERE id=?`, [id]);
       const r = await call('POST', `/api/sys-issues/${id}/notify-liaison-test`, adminTok, { expected_cycle: cycle });
       assert.strictEqual(r.status, 200, `[11c-1] recipient 失效应自愈成功 200，实际 ${r.status} ${JSON.stringify(r.body)}`);
-      assert.strictEqual(r.body.liaison_test_recipient_id, 13, '[11c-1] ⭐ claim 自愈：recipient 回收敛到唯一 active 候选(13)');
-      ok('[11c-1] D20 claim 自愈：recipient 失效（不在当前 active 池，模拟对接人停用/移出白名单后）→ 自动 claim 唯一候选(13)成功后继续预占发送');
+      assert.strictEqual(r.body.liaison_test_recipient_id, 13, '[11c-1] ⭐ claim 自愈：recipient 回收敛到该单绑定对接人(intake_liaison_id=13·C10)');
+      ok('[11c-1] D20 claim 自愈：recipient 失效（不在当前 active 池，模拟对接人停用/移出白名单后）→ 自动 claim 到该单绑定对接人(13)成功后继续预占发送');
     }
     {
       const { id, cycle } = await mkFreshLiaisonTestIssue();
       await run(`UPDATE sys_issues SET liaison_test_recipient_id=NULL, liaison_test_recipient_name=NULL WHERE id=?`, [id]);
       const r = await call('POST', `/api/sys-issues/${id}/notify-liaison-test`, adminTok, { expected_cycle: cycle });
       assert.strictEqual(r.status, 200, `[11c-2] recipient NULL 应自愈成功 200，实际 ${r.status} ${JSON.stringify(r.body)}`);
-      assert.strictEqual(r.body.liaison_test_recipient_id, 13, '[11c-2] recipient NULL（存量/异常）→ claim 自愈到 13');
-      ok('[11c-2] D20 claim 自愈：recipient NULL → 自动 claim 唯一候选(13)成功');
+      assert.strictEqual(r.body.liaison_test_recipient_id, 13, '[11c-2] recipient NULL（存量/异常）→ claim 自愈到该单绑定对接人(13)');
+      ok('[11c-2] D20 claim 自愈：recipient NULL → 自动 claim 到该单绑定对接人(13)成功');
     }
     {
-      // 候选为 0（示例对接人被临时停用）→ 409 CONFIG_ERROR；finally 恢复 active，防污染其余依赖 13 的用例
+      // ⭐ [C10] 该单绑定对接人(intake_liaison_id=13)被停用 → 绑定对接人不在 active 候选池 → 409 UNBOUND；
+      //   finally 恢复 active，防污染其余依赖 13 的用例。
+      //   （C10 self-heal 目标=该单 intake_liaison_id，非"候选池唯一成员"；13 停用后 boundLiaison 解析为空
+      //    → LIAISON_TEST_RECIPIENT_UNBOUND，取代旧「候选池 0 人 → CONFIG_ERROR」判据。此时池内其余 user
+      //    5/6/7/8 仍 active，但本单绑的是 13、不回退候选池，故仍 UNBOUND。）
       const { id, cycle } = await mkFreshLiaisonTestIssue();
       await run(`UPDATE sys_issues SET liaison_test_recipient_id=999999 WHERE id=?`, [id]);
       await run(`UPDATE users SET status='inactive' WHERE id=13`);
       try {
         const r = await call('POST', `/api/sys-issues/${id}/notify-liaison-test`, adminTok, { expected_cycle: cycle });
-        assert.strictEqual(r.status, 409, `[11c-3] 候选0人应 409，实际 ${r.status} ${JSON.stringify(r.body)}`);
-        assert.strictEqual(r.body.code, 'LIAISON_TEST_RECIPIENT_CONFIG_ERROR', '[11c-3] 错误码 CONFIG_ERROR');
+        assert.strictEqual(r.status, 409, `[11c-3] 绑定对接人失效应 409，实际 ${r.status} ${JSON.stringify(r.body)}`);
+        assert.strictEqual(r.body.code, 'LIAISON_TEST_RECIPIENT_UNBOUND', '[11c-3] 错误码 UNBOUND（C10：绑定对接人 13 停用·不在 active 池·不回退候选池）');
       } finally {
         await run(`UPDATE users SET status='active' WHERE id=13`);
       }
-      ok('[11c-3] D20 claim：active 候选池为 0（受理人被停用）→ 409 LIAISON_TEST_RECIPIENT_CONFIG_ERROR（测后已恢复 13=active，不留污染）');
-      // ⚠️ 候选不唯一（池内 ≥2 人）分支未覆盖：SYS_INTAKE_LIAISON_IDS 硬编码为 [13] 单元素常量，
-      //   在不改动生产常量的前提下无法在本文件内构造出 >1 候选的运行时状态——与 notify-intake 端点
-      //   的对应分支（codex 221a 同款代码）现状同一限制，非本轮新增缺口，详见完成报告"自决偏离"。
+      ok('[11c-3] ⭐ C10 D20 claim：该单绑定对接人(13)被停用 → 409 LIAISON_TEST_RECIPIENT_UNBOUND（self-heal 目标=本单 intake_liaison_id·不回退候选池·测后已恢复 13=active，不留污染）');
     }
 
     // ── [11d] dry-run（D16）：完整走 CAS+留痕，唯独不调真实发送函数 ──────────
@@ -1229,29 +1257,21 @@ async function main() {
       ok('[11g] 282 号复审 MED 补净·源码断言（弱证据，运行时不可达）：writeback 连续两次异常分支 sent_externally 契约式 + error 文案 dry_run 分叉，concurrent_changed 响应体含 dry_run 字段，均与当前 index.js 源码结构一致');
     }
 
-    // ── [11e] 281 号对抗审 C2 采纳：D20 claim 候选 ≥2 人 → 409 LIAISON_TEST_RECIPIENT_AMBIGUOUS ──
-    //   [11c-3] 尾注记录过：SYS_INTAKE_LIAISON_IDS 硬编码为 [13] 单元素常量，"不改动生产常量前提下"
-    //   无法在本文件内构造 >1 候选。但该常量本身是**导出的同一数组引用**（I.SYS_INTAKE_LIAISON_IDS，
-    //   I=mod._internals，见文件头 `const I = mod._internals;`），verify-sys-intake-liaison.js
-    //   [④]/[⑤]/[⑩] 已有先例：测试期临时 push 第二候选、finally 立即 pop 复原——不改动生产常量的值
-    //   本身，只在单条用例的生命周期内借用同一引用做临时扰动，用完即复原，不留污染（deepStrictEqual
-    //   收口验证）。本条据此把 [11c-3] 尾注的"未覆盖"补上。
+    // ── [11e] ⭐ C10：候选池 ≥2 也不再 AMBIGUOUS——self-heal 恒 claim 到该单绑定对接人(intake_liaison_id) ──
+    //   原 D20「候选不唯一 → AMBIGUOUS」是 SYS_INTAKE_LIAISON_IDS 单例池时代的产物；C10 裁定1/决策1 废白名单、
+    //   self-heal 目标改为**该单 intake_liaison_id**（本单绑定对接人），与候选池大小无关、无歧义可言，
+    //   AMBIGUOUS 分支整体删除。本文件 users 表本就有 5 个 active user（5/6/7/8/13）→ 候选池天然 ≥2，
+    //   无需再借 SYS_INTAKE_LIAISON_IDS push 构造；直接验「≥2 候选下仍精确 claim 到绑定的 13」。
     {
-      const { id, cycle } = await mkFreshLiaisonTestIssue();
+      const { id, cycle } = await mkFreshLiaisonTestIssue();   // 绑定 intake_liaison_id=13
       await run(`UPDATE sys_issues SET liaison_test_recipient_id=999999 WHERE id=?`, [id]);   // 失效旧值，逼进 claim 分支
-      I.SYS_INTAKE_LIAISON_IDS.push(8);   // 8=dev8/开发丁，本文件既有 active 种子用户，无角色冲突
-      try {
-        const r = await call('POST', `/api/sys-issues/${id}/notify-liaison-test`, adminTok, { expected_cycle: cycle });
-        assert.strictEqual(r.status, 409, `[11e] 候选≥2人应 409，实际 ${r.status} ${JSON.stringify(r.body)}`);
-        assert.strictEqual(r.body.code, 'LIAISON_TEST_RECIPIENT_AMBIGUOUS', '[11e] 错误码 LIAISON_TEST_RECIPIENT_AMBIGUOUS');
-        const row = await issueRow(id);
-        assert.strictEqual(row.liaison_test_recipient_id, 999999, '[11e] 零副作用：候选不唯一时 claim 分支直接拒绝，不误落任一候选，recipient_id 原样保留失效旧值');
-        assert.strictEqual(row.liaison_test_notify_status, 'not_sent', '[11e] 零副作用：候选歧义未触达预占，notify_status 仍 not_sent');
-      } finally {
-        I.SYS_INTAKE_LIAISON_IDS.pop();
-      }
-      assert.deepStrictEqual(I.SYS_INTAKE_LIAISON_IDS, [13], '[11e] 复原后 SYS_INTAKE_LIAISON_IDS=[13]，不污染后续用例');
-      ok('[11e] D20 claim 候选不唯一（借用导出数组引用临时纳入用户8构造 2 个 active 候选，finally 已 pop 复原）→ 409 LIAISON_TEST_RECIPIENT_AMBIGUOUS，且零副作用（失效 recipient_id 原样保留，not_sent 不变）');
+      const r = await call('POST', `/api/sys-issues/${id}/notify-liaison-test`, adminTok, { expected_cycle: cycle });
+      assert.strictEqual(r.status, 200, `[11e] 候选≥2 仍 self-heal 到绑定对接人，应 200，实际 ${r.status} ${JSON.stringify(r.body)}`);
+      assert.strictEqual(r.body.liaison_test_recipient_id, 13, '[11e] ⭐ C10：候选池 ≥2（种子 5 人 user）时 self-heal 恒指向该单绑定对接人(intake_liaison_id=13)，非歧义拒绝');
+      const row = await issueRow(id);
+      assert.strictEqual(row.liaison_test_recipient_id, 13, '[11e] claim 落库 recipient=13（绑定对接人）');
+      assert.strictEqual(row.liaison_test_notify_status, 'sent', '[11e] 发送成功落 sent（stub·非歧义拒绝）');
+      ok('[11e] ⭐ C10 self-heal 无歧义：active 候选池 ≥2（种子本就 5 人 user）时，claim 自愈仍精确指向该单 intake_liaison_id=13，AMBIGUOUS 分支已随白名单废止删除');
     }
 
     // ── [11f] 281 号对抗审 C3 采纳：自指守卫 ID 类型归一化——:11242 `Number(targetRecipientId) ===
@@ -1276,13 +1296,46 @@ async function main() {
       assert.strictEqual(r.body.code, 'SELF_NOTIFY_FORBIDDEN', '[11f] 错误码 SELF_NOTIFY_FORBIDDEN');
       ok('[11f] D19 自指守卫 ID 类型归一化（回归防线，非当前活跃 bug 复现——见上方自决偏离披露）：JWT actor.id 为字符串 \'13\'（示例对接人既是唯一受理人也在册）→ 端到端仍正确判定自指 → 403 SELF_NOTIFY_FORBIDDEN');
     }
+
+    // ── [11h] ⭐⭐⭐ C10-fix2 HIGH-1：收件人可用判据加"等于当前绑定人"——改绑后不发旧对接人（越权知悉修复）──
+    //   触发路径：单原绑对接人并把 liaison_test_recipient_id 写成 u5（仍 active eligible），随后改绑
+    //   intake_liaison_id → u6（u5/u6 均 active）。修复前 targetIsUsable 只看"u5 仍在 active 候选池"→ true →
+    //   跳过自愈 → 继续发 u5 = 通知发给已失去该单对接资格的旧对接人（越权知悉）。修复后判据加
+    //   `recipient===当前 intake_liaison_id` → u5≠u6 → 进自愈 CAS 把收件人改为 u6。
+    {
+      // [11h-1] not_sent 态：改绑后自愈到当前绑定人 u6（非旧对接人 u5）
+      const { id, cycle } = await mkFreshLiaisonTestIssue();   // 绑定 intake_liaison_id=13·进入时 recipient=13
+      // 构造"收件人=旧对接人 u5(仍 active) + 已改绑到 u6"：直连 SQL 写 recipient=5，intake_liaison_id 改 6
+      await run(`UPDATE sys_issues SET liaison_test_recipient_id=5, liaison_test_recipient_name='开发甲', intake_liaison_id=6 WHERE id=?`, [id]);
+      const r = await call('POST', `/api/sys-issues/${id}/notify-liaison-test`, adminTok, { expected_cycle: cycle });
+      assert.strictEqual(r.status, 200, `[11h-1] 改绑后 notify 应自愈到新对接人并发送 200，实际 ${r.status} ${JSON.stringify(r.body)}`);
+      assert.strictEqual(r.body.liaison_test_recipient_id, 6, '[11h-1] ⭐⭐⭐ 收件人自愈到当前绑定人 u6（非旧对接人 u5）——越权知悉修复');
+      const row = await issueRow(id);
+      assert.strictEqual(row.liaison_test_recipient_id, 6, '[11h-1] claim 落库 recipient=6（当前 intake_liaison_id）');
+      assert.notStrictEqual(row.liaison_test_recipient_id, 5, '[11h-1] 旧对接人 u5 未被沿用');
+      ok('[11h-1] ⭐⭐⭐ C10-fix2 HIGH-1：recipient=u5(旧对接人·仍 active) + intake_liaison_id 改绑 u6 → notify 自愈把收件人改为 u6（当前绑定人），不再发给失去该单权限的 u5（越权知悉修复·收件人可用判据加"等于当前绑定人"）');
+    }
+    {
+      // [11h-2] sending 态：改绑后 CAS 因 sending 锁 no-op → 重读采信收窄（claimed≠当前绑定人）→ 409 CHANGED
+      //   （不把 stale 旧收件人 u5 重新采信发送——re-read 采信从"在 active 池即采信"收窄为"等于当前绑定人"）
+      const { id, cycle } = await mkFreshLiaisonTestIssue();
+      await run(`UPDATE sys_issues SET liaison_test_recipient_id=5, liaison_test_recipient_name='开发甲', intake_liaison_id=6,
+        liaison_test_notify_status='sending', liaison_test_attempt_token='concurrent-tok-11h', liaison_test_attempt_started_at=datetime('now','localtime') WHERE id=?`, [id]);
+      const r = await call('POST', `/api/sys-issues/${id}/notify-liaison-test`, adminTok, { expected_cycle: cycle });
+      assert.strictEqual(r.status, 409, `[11h-2] sending 期间改绑 → 应 409 CHANGED，实际 ${r.status} ${JSON.stringify(r.body)}`);
+      assert.strictEqual(r.body.code, 'LIAISON_TEST_RECIPIENT_CHANGED', '[11h-2] 错误码 LIAISON_TEST_RECIPIENT_CHANGED（re-read 采信收窄：stale u5≠当前绑定人 u6·fail-closed 不沿用旧收件人）');
+      const row = await issueRow(id);
+      assert.strictEqual(row.liaison_test_recipient_id, 5, '[11h-2] sending 锁生效：收件人未被改动（CAS no-op），但也未被采信发送（409）');
+      ok('[11h-2] ⭐ C10-fix2 HIGH-1（re-read 收窄）：sending 期间 recipient=u5(stale)+改绑 u6 → CAS 因 sending 锁 no-op → 重读采信判 u5≠当前绑定人 u6 → 409 CHANGED（不把 stale 旧收件人重新采信·不越权发 u5）');
+    }
   }
 
   // ══════════════════════════════════════════════════════════════════════
-  // [12] pass/return 新端点授权负例（C4 合并修复批 275-M6）——两端点均挂 requireIntakeLiaison
-  //   中间件（admin ∨ SYS_INTAKE_LIAISON_IDS[13]，index.js:5466-5467），授权判定与 roster 成员身份
-  //   **完全正交**（isSysIntakeLiaison 只查静态白名单，不查 sys_issue_dev_assignees）——下面两组反例
-  //   刻意验证"在本单在册"这个身份不构成任何后门。
+  // [12] pass/return 新端点授权负例（C4 合并修复批 275-M6·⭐ C10 更新）——两端点挂 requireIntakeLiaison
+  //   中间件（C10 后=admin ∨ role∈候选 allowlist·粗筛）+ 引擎 roleGuard='intake_liaison' 绑单精判（handler 层）。
+  //   授权判定与 roster 成员身份**完全正交**（不查 sys_issue_dev_assignees）——下面两组反例刻意验证
+  //   "在本单在册"这个身份不构成任何后门。⚠️ C10 后普通开发(user)**过粗筛**，真正拦截来自引擎绑单精判
+  //   （单绑 13·非该单对接人）→ 拒绝码由中间件 NOT_ADMIN_OR_INTAKE_LIAISON 变为引擎 NOT_BOUND_LIAISON。
   // ══════════════════════════════════════════════════════════════════════
   {
     for (const action of ['liaison-test-pass', 'liaison-test-return']) {
@@ -1295,9 +1348,9 @@ async function main() {
         const { id } = await mkFreshLiaisonTestIssue();   // user5=主开发在册、user6=已 excuse 在册
         const r = await call('POST', `/api/sys-issues/${id}/${action}`, devTok(5), body);
         assert.strictEqual(r.status, 403, `[12-${action}-roster] 普通在册开发应 403，实际 ${r.status} ${JSON.stringify(r.body)}`);
-        assert.strictEqual(r.body.code, 'NOT_ADMIN_OR_INTAKE_LIAISON', `[12-${action}-roster] 错误码 NOT_ADMIN_OR_INTAKE_LIAISON`);
+        assert.strictEqual(r.body.code, 'NOT_BOUND_LIAISON', `[12-${action}-roster] 错误码 NOT_BOUND_LIAISON（C10：user 过粗筛·引擎绑单精判拒·单绑 13 非 dev5）`);
         assert.strictEqual(await statusOf(id), '待对接测试', `[12-${action}-roster] 拒绝后状态不变`);
-        ok(`[12-${action}-roster] 普通在册开发（本单在册·非池·非admin）→ 403 NOT_ADMIN_OR_INTAKE_LIAISON（在册身份不构成后门）`);
+        ok(`[12-${action}-roster] 普通在册开发（本单在册·非池·非admin）→ 403 NOT_BOUND_LIAISON（在册身份不构成后门·C10 引擎绑单精判）`);
       }
 
       // 非池非本单用户（与本单毫无关联）→ 403：证与"是否在本单出现过"无关，纯白名单判定。
@@ -1305,8 +1358,8 @@ async function main() {
         const { id } = await mkFreshLiaisonTestIssue();
         const r = await call('POST', `/api/sys-issues/${id}/${action}`, devTok(9999), body);
         assert.strictEqual(r.status, 403, `[12-${action}-stranger] 非池非本单用户应 403，实际 ${r.status} ${JSON.stringify(r.body)}`);
-        assert.strictEqual(r.body.code, 'NOT_ADMIN_OR_INTAKE_LIAISON', `[12-${action}-stranger] 错误码 NOT_ADMIN_OR_INTAKE_LIAISON`);
-        ok(`[12-${action}-stranger] 非池非本单用户（与本单毫无关联）→ 403 NOT_ADMIN_OR_INTAKE_LIAISON`);
+        assert.strictEqual(r.body.code, 'NOT_BOUND_LIAISON', `[12-${action}-stranger] 错误码 NOT_BOUND_LIAISON（C10：user 过粗筛·引擎绑单精判拒·非该单对接人）`);
+        ok(`[12-${action}-stranger] 非池非本单用户（与本单毫无关联）→ 403 NOT_BOUND_LIAISON（C10 引擎绑单精判）`);
       }
 
       // admin → 200：兜底放行（roleGuard='intake_liaison' 语义=池∨admin）。
@@ -1327,21 +1380,30 @@ async function main() {
     //   白名单∩active"的双轨设计（本模块层面成立）之外，还有认证层这道全局闸门兜底停用场景——两层合起来
     //   才是完整答案，非本模块存在权限口径缺口。
     //   ⚠️ 本测试栈的 authenticateToken 是**本文件顶部自建的 stub**（:41-45，仅 `jwt.verify` 验签，
-    //   不接 db 查 status），与生产中间件不同源——下方断言里 `status=inactive 后仍 200` 是**stub 环境
-    //   行为**（stub 没有生产那道实时查库闸门），不代表生产行为。保留本断言是为了**本模块层面**锁定
-    //   "纯白名单判定、不叠加 status 检查"这条契约本身（若未来有人在 requireIntakeLiaison 里悄悄加一层
-    //   status 检查，这里会变红提醒——属地判定变了，需要同步更新本注释和上方说明），不是在断言生产端到
-    //   端的停用行为（那需要另一个接了真实 authenticateToken 的测试栈才能覆盖，非本文件职责）。
+    //   不接 db 查 status），与生产中间件不同源。
+    //   ⭐⭐⭐ [C10-fix5 HIGH·断言翻转·codex 322 末次审] 语义已变更：liaison-test-pass 走 makeTransitionEndpoint
+    //     → 引擎 roleGuard='intake_liaison' 分支（transitions.js:606），该分支的 isBoundLiaison 精判**已叠加实时
+    //     `isIntakeLiaisonEligible`（active ∧ role∈候选 allowlist）**——即"撤销候选资格同步撤销存量绑单操作权"（与
+    //     直连 handler / 通知端 resolveValidBoundLiaisonForNotify 同口径·fail-closed）。故本模块层**自身**现在就会
+    //     实时查库拒停用/移出候选的绑定人，**不再单独依赖生产认证层兜底**（防御纵深）：id=13 是本单绑定对接人，
+    //     status='inactive' ⇒ isIntakeLiaisonEligible=false ⇒ isBoundLiaison=false ⇒ 引擎 403 NOT_BOUND_LIAISON。
+    //     此前（C10-fix5 前）本处 assert 200 记录的"模块纯白名单判定、不叠加 status 检查"契约**已被本批有意推翻**
+    //     （原契约的 fail-open 残留正是 322 HIGH 要闭合的对象）。**注意**：这同时覆盖 role→viewer（仍 active·移出
+    //     候选）与 status→inactive 两种撤销资格路径——isIntakeLiaisonEligible 对两者皆 false。
+    //     ⚠️ 生产认证层那道 SELECT status 全局闸门（server.js:4035-4058）依然在、仍会更早 403 停用账号——两道闸
+    //     互为纵深，本模块闸的价值在 role→viewer（认证层放行·仍 active）这条认证层拦不住的路径上。
     {
       const { id, cycle } = await mkFreshLiaisonTestIssue();
       await run(`UPDATE users SET status='inactive' WHERE id=13`);
       try {
         const r = await call('POST', `/api/sys-issues/${id}/liaison-test-pass`, liaisonTok, { test_note: '停用账号测试前置' });
-        assert.strictEqual(r.status, 200, `[12-pass-deactivated] stub 环境行为：本文件 authenticateToken stub 不查库，故 status=inactive 后仍 200（生产认证层会在到达本模块前 403，见上方长注释），实际 ${r.status} ${JSON.stringify(r.body)}`);
+        assert.strictEqual(r.status, 403, `[12-pass-deactivated] ⭐ C10-fix5 HIGH：停用（撤销资格）的绑定对接人 liaison-test-pass 应被引擎绑单精判 403（模块层自查 eligibility·fail-closed·不再仅靠认证层兜底），实际 ${r.status} ${JSON.stringify(r.body)}`);
+        assert.strictEqual(r.body && r.body.code, 'NOT_BOUND_LIAISON', `[12-pass-deactivated] 确切码 NOT_BOUND_LIAISON，实得 ${r.body && r.body.code}`);
+        assert.strictEqual(await statusOf(id), '待对接测试', '[12-pass-deactivated] 零副作用：403 后主状态仍「待对接测试」（未推进待验证）');
       } finally {
         await run(`UPDATE users SET status='active' WHERE id=13`);
       }
-      ok('[12-pass-deactivated] 本模块层面契约：requireIntakeLiaison 纯白名单判定、不叠加 users.status 检查（stub 环境下 200 是 stub 行为非生产行为——生产 authenticateToken 会实时查库 403 拦停用账号，server.js:4035-4058）；测后已恢复 13=active');
+      ok('[12-pass-deactivated] ⭐ C10-fix5 HIGH 断言翻转：liaison-test-pass 经引擎 roleGuard=intake_liaison 绑单精判现叠加实时 isIntakeLiaisonEligible——停用/移出候选的绑定对接人 403 NOT_BOUND_LIAISON（模块层自查资格·防御纵深·零副作用），此前"模块纯白名单不叠 status 检查"的 fail-open 契约已由本批有意闭合；测后已恢复 13=active');
     }
   }
 
@@ -1364,6 +1426,40 @@ async function main() {
       const row = await issueRow(id);
       assert.strictEqual(row.liaison_test_notify_status, 'not_sent', '[13a] 通知列组未被污染（CAS 失败=no-op，仍是 ⑦ 进入时的初始态）');
       ok('[13a] ⭐ H-1 收件人竞态绑定：预占前 recipient 被并发改动 → CAS 因 liaison_test_recipient_id 不匹配而拒绝，409 LIAISON_TEST_RECIPIENT_CHANGED + 零外呼（非"读到旧快照就发给旧收件人"）');
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // [13-binding] ⭐ HIGH（codex 319-R·纵深防御）：预占前（读主行快照后、CAS 之前）intake_liaison_id 被
+    //   并发改绑 → 预占 CAS 因新增 `AND intake_liaison_id = ?` 落空（changes=0）→ 409
+    //   LIAISON_TEST_RECIPIENT_CHANGED + 零外呼。⚠️ 纵深性质如实标注：本模块当前**无 u5→u6 换对接人端点**
+    //   （L2 缺口），此 TOCTOU 现网触发路径为空——保留本闸 + 本测是**防将来 L2 上线**（见 index.js
+    //   preemptLiaisonTestNotifySend 注释）。双向证明：负例改绑→CAS 落空零外呼；正例不改→约束不误伤照常 200 sent。
+    // ══════════════════════════════════════════════════════════════════
+    {
+      // 负例：读主行后改绑 → CAS 必落空、零外呼、通知列组不污染
+      const { id, cycle } = await mkFreshLiaisonTestIssue();
+      assert.strictEqual(Number((await issueRow(id)).intake_liaison_id), 13, '[13-binding前置] 新鲜单 intake_liaison_id=13（绑定人=收件人=13）');
+      sendCallCount = 0;
+      bindingRaceInject = { issueId: id, newLiaisonId: 999999 };   // 读主行后把绑定改到别人（模拟未来 L2 换对接人）
+      const r = await call('POST', `/api/sys-issues/${id}/notify-liaison-test`, adminTok, { expected_cycle: cycle });
+      assert.strictEqual(bindingRaceInject, null, '[13-binding] 前置：改绑注入已按一次性消费（否则请求根本没读到那一行，夹具有问题）');
+      assert.strictEqual(r.status, 409, `[13-binding] 改绑后应 409，实际 ${r.status} ${JSON.stringify(r.body)}`);
+      assert.strictEqual(r.body.code, 'LIAISON_TEST_RECIPIENT_CHANGED', '[13-binding] 错误码 LIAISON_TEST_RECIPIENT_CHANGED（binding_changed 归入既有 CHANGED 分支）');
+      assert.strictEqual(sendCallCount, 0, '[13-binding] ⭐⭐ 零外呼：预占 CAS 的 intake_liaison_id 约束在发送前挡下，绝不把消息发给改绑前的旧对接人');
+      const row = await issueRow(id);
+      assert.strictEqual(row.liaison_test_notify_status, 'not_sent', '[13-binding] 通知列组未污染（CAS no-op=仍是 ⑦ 进入时初始态）');
+      assert.strictEqual(Number(row.intake_liaison_id), 999999, '[13-binding] 前置确认：注入确已改绑（现值=注入值），证明 TOCTOU 窗口真实存在而 CAS 恰因此落空');
+      ok('[13-binding] ⭐ HIGH 纵深：读主行后 intake_liaison_id 被并发改绑 → 预占 CAS 因 AND intake_liaison_id=? 落空 → 409 CHANGED + 零外呼（防 L2 换对接人端点上线后把消息错发给改绑前旧对接人·越权知悉）');
+    }
+    {
+      // 正例对照（绿）：无并发改绑 → 新增约束不误伤 happy path，正常 200 sent + 恰 1 次外呼
+      const { id, cycle } = await mkFreshLiaisonTestIssue();
+      sendCallCount = 0;
+      const r = await call('POST', `/api/sys-issues/${id}/notify-liaison-test`, adminTok, { expected_cycle: cycle });
+      assert.strictEqual(r.status, 200, `[13-binding-ctrl] 无改绑应正常 200，实际 ${r.status} ${JSON.stringify(r.body)}`);
+      assert.strictEqual(r.body.liaison_test_notify_status, 'sent', '[13-binding-ctrl] 正常发送 sent');
+      assert.strictEqual(sendCallCount, 1, '[13-binding-ctrl] 恰 1 次外呼（约束匹配当前绑定=13·happy path 不回归）');
+      ok('[13-binding-ctrl] ⭐ 双向证明对照组：binding 未变时预占 CAS 的 intake_liaison_id 约束正常放行 → 200 sent + 恰 1 次外呼（新增约束只挡真改绑·不误伤 happy path）');
     }
 
     // [13b] codex 278 号审 H-1 改写 + codex 279 号审 L-1 改码：sendIssueDingtalkRaw 本身对全部"下游明确

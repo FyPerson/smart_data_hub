@@ -268,17 +268,17 @@ async function main() {
       assert.strictEqual(after.status, '开发中', 'C1：变更流 assign 落态 开发中（证真走了引擎写路径·非仅放行状态码）');
       assert.strictEqual(Number(after.assigned_to), 6, 'C1：assigned_to 落 6（选举结果）');
 
-      // 示例发布者同格负例：中间件层就拒（他不在受理人白名单）
+      // 示例发布者同格负例（C10 绑单精判）：7 过粗筛[publisher eligible]后由 handler 拒——单绑 13 非示例发布者
       const featId2 = await seed('feature', { status: '待指派' });
       const before2 = await get('SELECT status, assigned_to FROM sys_issues WHERE id=?', [featId2]);
       const r2 = await call('POST', `/api/sys-issues/${featId2}/assign`, techLeadTok, { assigned_to: 6 });
       assert.strictEqual(r2.status, 403, `⭐ 示例发布者7 变更流 assign → 403, got ${r2.status} ${JSON.stringify(r2.body)}`);
-      assert.strictEqual(r2.body && r2.body.code, 'NOT_ADMIN_OR_INTAKE_LIAISON',
-        '示例发布者 403 来自中间件层 requireIntakeLiaison（精确归因·非无关校验）');
+      assert.strictEqual(r2.body && r2.body.code, 'NOT_BOUND_LIAISON',
+        '示例发布者 403 来自 handler 绑单精判 isBoundLiaisonOrAdmin（单绑 13·示例发布者非该单对接人·C10 后精确归因）');
       const after2 = await get('SELECT status, assigned_to FROM sys_issues WHERE id=?', [featId2]);
       assert.strictEqual(after2.status, before2.status, '拒绝后主状态不变（无部分写入）');
       assert.strictEqual(after2.assigned_to, before2.assigned_to, '拒绝后 assigned_to 不变（无部分写入）');
-      ok('[M-1b] ⭐ C1 反转格强化：示例对接人13 变更流 assign → 200 且真落「开发中」+assigned_to（证走通引擎写路径）；示例发布者7 同格 403 且来自中间件层 + 零副作用');
+      ok('[M-1b] ⭐ C1 反转格强化：示例对接人13 变更流 assign → 200 且真落「开发中」+assigned_to（证走通引擎写路径）；示例发布者7 同格 403 且来自 handler 绑单精判(NOT_BOUND_LIAISON) + 零副作用');
     }
 
     // (M-2) 被选技术负责人白名单（tech_lead_id 白名单·与操作者无关·c5[R] 已验·此处汇总为矩阵 canary）

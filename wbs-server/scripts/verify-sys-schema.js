@@ -53,6 +53,10 @@ const EXPECTED_INDEXES = [
   'idx_sys_duty_roster_active',      // 排班表：部分唯一索引（duty_date, WHERE removed_at IS NULL）
   'idx_sys_duty_roster_user',        // 排班表：(user_id, duty_date)
   'idx_sys_timeline_action_ref',     // sys_issue_timeline(ref_id, action_code)，配 §6.13 反查双条件
+  // ── 上线执行人多选与多人双确认（方案 20260806 v1.7 §4.1，C0）新增 3 索引 ──────────
+  'idx_sys_release_exec_active',     // sys_release_executors：部分唯一索引 (release_id,user_id) WHERE removed_at IS NULL（代次语义闸）
+  'idx_sys_release_exec_release',    // sys_release_executors：(release_id, removed_at)
+  'idx_sys_release_exec_user',       // sys_release_executors：(user_id, exec_status)
 ];
 
 let passed = 0;
@@ -139,7 +143,7 @@ async function main() {
   const idxRows = (await all("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_sys%'")).map(r => r.name);
   const missingIdx = EXPECTED_INDEXES.filter(i => !idxRows.includes(i));
   assert.strictEqual(missingIdx.length, 0, `索引缺失: ${missingIdx.join(',')}`);
-  ok(`${EXPECTED_INDEXES.length} 索引齐全（releases ×1 + issues ×6 + timeline ×1 + attach ×1 + dev_assignees ×2[含部分唯一索引] + 上线体统一重构 C0 新增 4[releases_assignee/duty_roster×2/timeline_action_ref]）`);
+  ok(`${EXPECTED_INDEXES.length} 索引齐全（releases ×1 + issues ×6 + timeline ×1 + attach ×1 + dev_assignees ×2[含部分唯一索引] + 上线体统一重构 C0 新增 4[releases_assignee/duty_roster×2/timeline_action_ref] + 上线执行人多选 C0 新增 3[release_exec_active(部分唯一)/release/user]）`);
 
   // ── 各表合法插入需要的最小列工具 ──
   const insIssue = (extra = '', cols = '', vals = []) =>
@@ -433,6 +437,41 @@ async function main() {
   await assert.doesNotReject(insRisk(null), 'risk_level=NULL 应合法（存量单/bug 恒空的合法态）');
   ok('risk_level CHECK：非法值/空串/旧值域残留("高")全被拒，一级/二级/三级/NULL 全合法（§3.4 契约+改造A值域改名，NULL=有意义业务态不设占位）');
 
+  // [9h-c9] ⭐ [C9-fix M2②] sys_issues.online_source（C9 无 commit 直翻·方案 v1.7 §10.1 字段契约）——
+  //   新库 CREATE 路径的存在性 + 元数据 + "无 CHECK 是有意为之"的**双向**证明。
+  //   ⚠️ 本组存在的理由：C9 建列时只有 verify-sys-c9-direct-online 从**业务行为**侧覆盖（accept 后列里
+  //     有值），schema 侧一个字都没有——列被误删/误改类型/被人"顺手补个 CHECK"时，业务套件要么照绿
+  //     （TEXT→其他类型对 SQLite 动态类型多半无感），要么在别处报一个看不出根因的错。schema 断言是
+  //     独立于业务行为的第二层（同 [9h]/[9h-meta] 对 C1 十四列的分工）。
+  {
+    const c9ColInfo = (await all('PRAGMA table_info(sys_issues)')).find(c => c.name === 'online_source');
+    assert.ok(c9ColInfo, 'C9 新列 online_source 应存在于新库 CREATE 路径（缺失=CREATE TABLE 定义被误删）');
+    assert.strictEqual(c9ColInfo.type, 'TEXT', `online_source 声明类型应为 TEXT，实际 ${c9ColInfo.type}`);
+    assert.strictEqual(c9ColInfo.notnull, 0, `online_source 应可空（NULL=批次发布路径/存量历史的合法态，是三分支派生的输入之一），实际 notnull=${c9ColInfo.notnull}`);
+    assert.strictEqual(c9ColInfo.dflt_value, null, `online_source 不应有 DEFAULT（默认 NULL 即"未标记来源"），实际 dflt_value=${c9ColInfo.dflt_value}`);
+    // 列序钉死：[C9-fix M2③] 本列必须在**表尾**（与旧库 ALTER ADD COLUMN 追加序一致，两路径列序不漂移，
+    //   同本表 bug 流/通知改造/C1 各组"置于表尾"惯例）。用"是最后一列"而非硬编码 cid 数字——将来再加新列
+    //   时本断言会红，提醒新列同样要排在它后面、并把这一行的期望更新为新的末列。
+    const allColsForOrder = await all('PRAGMA table_info(sys_issues)');
+    assert.strictEqual(allColsForOrder[allColsForOrder.length - 1].name, 'online_source',
+      `[M2③] online_source 应是 sys_issues 的最后一列（新增列一律排表尾=本表惯例），实际末列=${allColsForOrder[allColsForOrder.length - 1].name}`);
+    // 默认值行为：裸插入 → NULL
+    await run(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name) VALUES ('feature', '开发中', 't-online-source-default', 'BMS', 1, 'admin')`);
+    const osDefault = await get(`SELECT online_source FROM sys_issues WHERE title='t-online-source-default'`);
+    assert.strictEqual(osDefault.online_source, null, 'online_source 默认应 NULL');
+    // ⭐ **无 CHECK 的双向证明**（[[feedback_probe_test_bidirectional_proof]]）：正向=合法字面量能写；
+    //   反向=任意字符串**也**能写。第二条不是"漏测"，恰恰是把"本列刻意不加 CHECK"这个设计决定钉成
+    //   可执行断言——若将来有人给它补上 CHECK（哪怕出于好意），这一条会立刻红，逼迫重新走一次
+    //   index.js 侧那段"不加 CHECK 三条理由"的决策，而不是静默改变列语义。
+    await assert.doesNotReject(
+      run(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name, online_source) VALUES ('feature', '开发中', 't-os-legit', 'BMS', 1, 'admin', 'no_commit_acceptance')`),
+      'online_source 写入唯一合法字面量 no_commit_acceptance 应成功');
+    await assert.doesNotReject(
+      run(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name, online_source) VALUES ('feature', '开发中', 't-os-open', 'BMS', 1, 'admin', 'whatever_future_kind')`),
+      '⭐ online_source 写入任意字符串**也应成功**——本列刻意无 CHECK（值域开放/只读不判/唯一写入点是源码常量，三条理由见 index.js C9_ONLINE_SOURCE_ISSUE_COLS 注释）。本条一旦红=有人给本列加了 CHECK，须回去重走那段决策');
+  }
+  ok('⭐ [C9-fix M2②] sys_issues.online_source 新库 CREATE 路径：列存在 + TEXT/可空/无 DEFAULT 元数据钉死 + 位于表尾（M2③ 列序惯例）+ 裸插入默认 NULL + 无 CHECK 双向证明（合法字面量与任意字符串都能写入=刻意开放值域，加 CHECK 会让本组红）');
+
   //   liaison_test_cycle_no / liaison_test_notify_cycle_no CHECK（typeof=integer AND >=0，两列同款）：
   //   负例（负数整数 + 非整数小数——typeof 在此落 real）；正例（0/5）
   for (const col of ['liaison_test_cycle_no', 'liaison_test_notify_cycle_no']) {
@@ -624,6 +663,150 @@ async function main() {
     '软删第一条后，同 duty_date 再插 active 行应成功（部分索引只约束 removed_at IS NULL 的在册行）');
   ok('排班表唯一活跃索引：同 duty_date 两条 active 冲突被拒（跨 user_id 仍拒——约束落在 duty_date 不在 user_id）+ 软删旧行后同日可再插新值班人');
 
+  // [11g] ⭐ 上线执行人多选与多人双确认（方案 20260806 v1.7 §4.1，C0）：sys_release_executors 结构 + 3 索引存在
+  //   双向证明纪律（[[feedback_probe_test_bidirectional_proof]]）：本组既证"能检出"（负例全被拒）又证"终态零残留"
+  //   （每类负例清理后回查库内 COUNT=0，非只信内存变量；本脚本连的是 :memory: 库，"库内"而非"磁盘"是准确措辞）。
+  const relId1 = (await run(`INSERT INTO sys_releases (release_no, created_by, created_by_name) VALUES ('R-EXEC-SCHEMA-1', 1, 'admin')`)).lastID;
+
+  const execCols = (await all('PRAGMA table_info(sys_release_executors)')).map(r => r.name);
+  const RELEASE_EXEC_COLS_EXPECT = ['id', 'release_id', 'user_id', 'user_name',
+    'notify_status', 'notify_started_at', 'notified_at', 'notify_message_key', 'notify_error', 'notify_token', 'read_at',
+    'exec_status', 'executed_at',
+    'added_by', 'added_by_name', 'created_at', 'removed_at', 'removed_by', 'removed_by_name'];
+  {
+    const missExec = RELEASE_EXEC_COLS_EXPECT.filter(c => !execCols.includes(c));
+    assert.strictEqual(missExec.length, 0, `sys_release_executors 列缺失: ${missExec.join(',')}`);
+    assert.strictEqual(execCols.length, RELEASE_EXEC_COLS_EXPECT.length, `sys_release_executors 列数应=${RELEASE_EXEC_COLS_EXPECT.length}，实际=${execCols.length}：${execCols.join(',')}`);
+  }
+  const execIdx = (await all("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='sys_release_executors'")).map(r => r.name);
+  assert.ok(execIdx.includes('idx_sys_release_exec_active'), 'idx_sys_release_exec_active 应存在');
+  assert.ok(execIdx.includes('idx_sys_release_exec_release'), 'idx_sys_release_exec_release 应存在');
+  assert.ok(execIdx.includes('idx_sys_release_exec_user'), 'idx_sys_release_exec_user 应存在');
+  ok('sys_release_executors：19 列齐全 + 3 索引（idx_sys_release_exec_active 部分唯一 + release/user 两组合索引）存在');
+
+  // [11h] 负例：逐条被 CHECK 拒（方案 §4.1 定稿的每一条 CHECK 分支，构造违例；Opus 预筛 MED-3 补强至
+  //   与排班表 [11d]/[11f] 同等密度——覆盖 user_id/user_name/added_by/added_by_name/两枚举值域/通知态四
+  //   分支各自的必填字段/执行态/软删组三字段/垃圾日期串，逐条独立隔离变量）
+  await assert.rejects(
+    run(`INSERT INTO sys_release_executors (release_id, user_id, user_name, added_by, added_by_name) VALUES (?, 0, '张三', 1, 'admin')`, [relId1]),
+    /CHECK|constraint/i, 'user_id=0 应被 CHECK (user_id > 0) 拒');
+  await assert.rejects(
+    run(`INSERT INTO sys_release_executors (release_id, user_id, user_name, added_by, added_by_name) VALUES (?, -1, '张三', 1, 'admin')`, [relId1]),
+    /CHECK|constraint/i, 'user_id=-1 应被 CHECK (user_id > 0) 拒');
+  await assert.rejects(
+    run(`INSERT INTO sys_release_executors (release_id, user_id, user_name, added_by, added_by_name) VALUES (?, 5, char(9)||char(9), 1, 'admin')`, [relId1]),
+    /CHECK|constraint/i, 'user_name 全 Tab 应被拒（双参 trim 命中，非单参 trim 缺口——[[sqlite_date_check_gotcha]] 第②条）');
+  await assert.rejects(
+    run(`INSERT INTO sys_release_executors (release_id, user_id, user_name, added_by, added_by_name) VALUES (?, 60, '', 1, 'admin')`, [relId1]),
+    /CHECK|constraint/i, 'user_name 空串应被拒');
+  await assert.rejects(
+    run(`INSERT INTO sys_release_executors (release_id, user_id, user_name, added_by, added_by_name) VALUES (?, 61, '   ', 1, 'admin')`, [relId1]),
+    /CHECK|constraint/i, 'user_name 纯空格应被拒（trim 后长度 0）');
+  await assert.rejects(
+    run(`INSERT INTO sys_release_executors (release_id, user_id, user_name, added_by, added_by_name) VALUES (?, 62, '负例甲', 0, 'admin')`, [relId1]),
+    /CHECK|constraint/i, 'added_by=0 应被 CHECK (added_by > 0) 拒');
+  await assert.rejects(
+    run(`INSERT INTO sys_release_executors (release_id, user_id, user_name, added_by, added_by_name) VALUES (?, 63, '负例乙', 1, char(10)||char(13))`, [relId1]),
+    /CHECK|constraint/i, 'added_by_name 仅 LF+CR（双参 trim 后长度 0）应被拒');
+  await assert.rejects(
+    run(`INSERT INTO sys_release_executors (release_id, user_id, user_name, notify_status, added_by, added_by_name) VALUES (?, 64, '负例丙', 'bogus', 1, 'admin')`, [relId1]),
+    /CHECK|constraint/i, "notify_status='bogus'（值域外）应被拒");
+  await assert.rejects(
+    run(`INSERT INTO sys_release_executors (release_id, user_id, user_name, exec_status, added_by, added_by_name) VALUES (?, 65, '负例丁', 'bogus', 1, 'admin')`, [relId1]),
+    /CHECK|constraint/i, "exec_status='bogus'（值域外）应被拒");
+  await assert.rejects(
+    run(`INSERT INTO sys_release_executors (release_id, user_id, user_name, notify_status, notify_started_at, added_by, added_by_name) VALUES (?, 66, '负例戊', 'sending', datetime('now'), 1, 'admin')`, [relId1]),
+    /CHECK|constraint/i, "notify_status='sending' 缺 notify_token 应被拒（通知态成组 CHECK）");
+  await assert.rejects(
+    run(`INSERT INTO sys_release_executors (release_id, user_id, user_name, notify_status, notify_token, added_by, added_by_name) VALUES (?, 67, '负例己', 'sending', 'tok-neg', 1, 'admin')`, [relId1]),
+    /CHECK|constraint/i, "notify_status='sending' 缺 notify_started_at 应被拒（通知态成组 CHECK）");
+  await assert.rejects(
+    run(`INSERT INTO sys_release_executors (release_id, user_id, user_name, exec_status, added_by, added_by_name) VALUES (?, 68, '负例庚', 'done', 1, 'admin')`, [relId1]),
+    /CHECK|constraint/i, "exec_status='done' 无 executed_at 应被拒（执行态成组 CHECK）");
+  await assert.rejects(
+    run(`INSERT INTO sys_release_executors (release_id, user_id, user_name, notify_status, added_by, added_by_name) VALUES (?, 69, '负例辛', 'sent', 1, 'admin')`, [relId1]),
+    /CHECK|constraint/i, "notify_status='sent' 无 notified_at 应被拒（通知态成组 CHECK）");
+  await assert.rejects(
+    run(`INSERT INTO sys_release_executors (release_id, user_id, user_name, notify_status, notified_at, added_by, added_by_name) VALUES (?, 70, '负例壬', 'sent', '2026-99-99', 1, 'admin')`, [relId1]),
+    /CHECK|constraint/i, "notify_status='sent' 的 notified_at='2026-99-99'（非法日期串）应被拒");
+  await assert.rejects(
+    run(`INSERT INTO sys_release_executors (release_id, user_id, user_name, notify_status, notified_at, added_by, added_by_name) VALUES (?, 71, '负例癸', 'not_sent', datetime('now'), 1, 'admin')`, [relId1]),
+    /CHECK|constraint/i, "notify_status='not_sent' 带 notified_at 应被拒（not_sent 分支要求 notified_at IS NULL）");
+  await assert.rejects(
+    run(`INSERT INTO sys_release_executors (release_id, user_id, user_name, notify_status, notify_error, added_by, added_by_name) VALUES (?, 72, '负例子', 'not_sent', '误报错误', 1, 'admin')`, [relId1]),
+    /CHECK|constraint/i, "notify_status='not_sent' 带 notify_error 应被拒（not_sent 分支要求 notify_error IS NULL）");
+  await assert.rejects(
+    run(`INSERT INTO sys_release_executors (release_id, user_id, user_name, notify_status, added_by, added_by_name) VALUES (?, 73, '负例丑', 'failed', 1, 'admin')`, [relId1]),
+    /CHECK|constraint/i, "notify_status='failed' 无 notify_error 应被拒（通知态成组 CHECK）");
+  await assert.rejects(
+    run(`INSERT INTO sys_release_executors (release_id, user_id, user_name, removed_at, added_by, added_by_name) VALUES (?, 5, '张三', datetime('now'), 1, 'admin')`, [relId1]),
+    /CHECK|constraint/i, '半软删（仅 removed_at 非空，removed_by/removed_by_name 均 NULL）应被拒（软删成组 CHECK，同排班表 [11d] 教训）');
+  await assert.rejects(
+    run(`INSERT INTO sys_release_executors (release_id, user_id, user_name, removed_at, removed_by, removed_by_name, added_by, added_by_name) VALUES (?, 74, '负例寅', datetime('now'), 0, 'admin', 1, 'admin')`, [relId1]),
+    /CHECK|constraint/i, '软删组 removed_by=0 应被拒（CHECK removed_by > 0）');
+  await assert.rejects(
+    run(`INSERT INTO sys_release_executors (release_id, user_id, user_name, removed_at, removed_by, removed_by_name, added_by, added_by_name) VALUES (?, 75, '负例卯', datetime('now'), 1, '   ', 1, 'admin')`, [relId1]),
+    /CHECK|constraint/i, '软删组 removed_by_name 纯空格应被拒（trim 后长度 0）');
+  await assert.rejects(
+    run(`INSERT INTO sys_release_executors (release_id, user_id, user_name, removed_at, removed_by, removed_by_name, added_by, added_by_name) VALUES (?, 76, '负例辰', 'garbage', 1, 'admin', 1, 'admin')`, [relId1]),
+    /CHECK|constraint/i, "软删组 removed_at='garbage'（垃圾串）应被拒（datetime(removed_at) IS NOT NULL）");
+  await assert.rejects(
+    run(`INSERT INTO sys_release_executors (release_id, user_id, user_name, exec_status, executed_at, added_by, added_by_name) VALUES (?, 5, '张三', 'done', '2026-99-99', 1, 'admin')`, [relId1]),
+    /CHECK|constraint/i, "executed_at='2026-99-99'（非法日期串）应被 datetime(executed_at) IS NOT NULL 拒");
+  ok('sys_release_executors 负例覆盖 22 项（逐条被 CHECK 拒，列举写实非"全覆盖"笼统措辞）：user_id≤0(×2)／user_name 全Tab／空串／纯空格／added_by=0／added_by_name 仅LF+CR／notify_status 值域外(bogus)／exec_status 值域外(bogus)／sending 缺 notify_token／sending 缺 notify_started_at／done 无 executed_at／sent 无 notified_at／sent 的 notified_at 非法日期串／not_sent 带 notified_at／not_sent 带 notify_error／failed 无 notify_error／半软删／removed_by=0／removed_by_name 纯空格／removed_at 垃圾串／executed_at 非法日期串');
+
+  // 双向证明：负例清理后终态零残留（断言到库内查证，不只信内存；本脚本连的是 :memory: 库）——
+  //   放在全部负例之后、任何正例之前，确保这里的 COUNT 真的只统计"应被拒绝却侥幸落库"的行。
+  {
+    const leftover = await get(`SELECT COUNT(*) AS c FROM sys_release_executors WHERE release_id = ?`, [relId1]);
+    assert.strictEqual(leftover.c, 0, `负例应全部被 CHECK 拒绝、零落库，实际残留 ${leftover.c} 行`);
+  }
+  ok('sys_release_executors 负例终态复核：库内回查 release_id 下残留行数=0（负例确实全部被拒绝，非仅内存断言通过）');
+
+  // [11i] 正例：能过（方案 §4.1 CHECK 允许的合法形态）+ 默认值断言（MED-3 补强）
+  const execIns = (userId, userName, extraCols, extraVals) =>
+    run(`INSERT INTO sys_release_executors (release_id, user_id, user_name, added_by, added_by_name${extraCols ? ', ' + extraCols : ''})
+         VALUES (?, ?, ?, 1, 'admin'${extraVals ? ', ' + extraVals : ''})`, [relId1, userId, userName]);
+  await assert.doesNotReject(execIns(30, '李四', null, null), 'not_sent 最小行应可插入');
+  await run(`INSERT INTO sys_release_executors (release_id, user_id, user_name, notify_status, notified_at, added_by, added_by_name)
+             VALUES (?, 31, '王五', 'sent', datetime('now'), 1, 'admin')`, [relId1]);
+  const rSending = await run(`INSERT INTO sys_release_executors (release_id, user_id, user_name, notify_status, notify_started_at, notify_token, added_by, added_by_name)
+             VALUES (?, 32, '赵六', 'sending', datetime('now'), 'tok-verify-1', 1, 'admin')`, [relId1]);
+  await run(`UPDATE sys_release_executors SET notify_status = 'stale' WHERE id = ?`, [rSending.lastID]);
+  await assert.doesNotReject(
+    run(`INSERT INTO sys_release_executors (release_id, user_id, user_name, notify_status, notify_error, added_by, added_by_name)
+         VALUES (?, 33, '孙七', 'failed', '钉钉超时', 1, 'admin')`, [relId1]),
+    'failed+notify_error 形态应可插入');
+  ok('sys_release_executors 正例覆盖 5 种合法形态：not_sent 最小行 / sent+notified_at / sending+token+started_at / sending→stale 裸转换（UPDATE 只改 status）/ failed+notify_error —— 均成功');
+
+  // 默认值断言：裸插最小行（只给必填 4 列）后回查三处默认值
+  {
+    const rDefault = await run(`INSERT INTO sys_release_executors (release_id, user_id, user_name, added_by, added_by_name) VALUES (?, 34, '默认值甲', 1, 'admin')`, [relId1]);
+    const defRow = await get(`SELECT notify_status, exec_status, created_at, datetime(created_at) AS created_at_valid FROM sys_release_executors WHERE id = ?`, [rDefault.lastID]);
+    assert.strictEqual(defRow.notify_status, 'not_sent', 'notify_status 默认应为 not_sent');
+    assert.strictEqual(defRow.exec_status, 'pending', 'exec_status 默认应为 pending');
+    assert.ok(defRow.created_at, 'created_at 应非空（DEFAULT datetime(\'now\',\'localtime\') 生效）');
+    assert.ok(defRow.created_at_valid !== null, `created_at="${defRow.created_at}" 应是合法 datetime`);
+  }
+  ok('sys_release_executors 默认值：裸插最小行后回查 notify_status=not_sent / exec_status=pending / created_at 非空且合法 datetime');
+
+  // [11j] 部分唯一索引：同 release+user 在册重复插被拒；软删旧行后同 user 再插新行必须成功（代次语义 §4.1a）
+  await assert.rejects(
+    run(`INSERT INTO sys_release_executors (release_id, user_id, user_name, added_by, added_by_name) VALUES (?, 30, '李四', 1, 'admin')`, [relId1]),
+    /UNIQUE|constraint/i, '同 release_id+user_id 在册重复插入应被 idx_sys_release_exec_active 部分唯一索引拒');
+  const rowId30 = (await get(`SELECT id FROM sys_release_executors WHERE release_id = ? AND user_id = 30`, [relId1])).id;
+  await run(`UPDATE sys_release_executors SET removed_at = datetime('now'), removed_by = 1, removed_by_name = 'admin' WHERE id = ?`, [rowId30]);
+  await assert.doesNotReject(
+    run(`INSERT INTO sys_release_executors (release_id, user_id, user_name, added_by, added_by_name) VALUES (?, 30, '李四', 1, 'admin')`, [relId1]),
+    '代次语义（§4.1a）：软删旧行（行 id 即代次）后，同 release_id+user_id 再插新行（新 id）必须成功——部分索引只约束 removed_at IS NULL 的在册行');
+  ok('sys_release_executors 部分唯一索引：同 release+user 在册重复插被拒 + 软删旧行后同 user 再插新行成功（代次语义，行 id 即代次，§4.1a）');
+
+  // [11k] FK 定义正确性（测试期 FK ON）：release_id 引用不存在的 release 被拒
+  await assert.rejects(
+    run(`INSERT INTO sys_release_executors (release_id, user_id, user_name, added_by, added_by_name) VALUES (999999, 5, '张三', 1, 'admin')`),
+    /FOREIGN KEY|constraint/i, 'sys_release_executors FK 未拦截孤儿 release_id 引用');
+  ok('sys_release_executors FK 定义正确（测试期）：release_id 引用不存在的 release 被拒（生产未启用 FK，仅结构声明）');
+
   // [12] sys_issue_timeline：event_type CHECK（含 reassign 独立枚举 05-H1）+ NOT NULL
   const issueId = (await get(`SELECT id FROM sys_issues WHERE type='feature' LIMIT 1`)).id;
   for (const ev of ['created', 'assign', 'reassign', 'estimate', 'status_change', 'scope_change', 'submit', 'return', 'release', 'reopen', 'derive', 'note', 'feasibility', 'blocked', 'unblock']) {
@@ -720,8 +903,8 @@ async function main() {
   //   "已上线旧表补列"这条生产真实会走的 ALTER 路径本身——本函数补齐这一半覆盖。
   await verifyLiaisonTestAlterMigration();
 
-  console.log(`\n[全部通过] ${passed}/${passed} ✓ 系统迭代 sys 六表 schema 验证通过【require 真实 initSchema，非复刻 DDL】`);
-  console.log(`  覆盖：6 表（含通知改造 C1a 新表 sys_issue_dev_assignees + 上线体统一重构 C0 新表 sys_release_duty_roster）+ 关键列（含 effected_at/三侧通知 5 列全量/可行性评估 7 列/通知改造 11 新列/上线体统一重构 C0 的 sys_releases 10 新列 + 排班表 11 列）+ 15 索引（含 G12 部分唯一索引 + C0 新增 4 索引）+ type/source/priority/三通知/relay_notify_status/event_type(15)/attachment/release status/release_assignee_notify_status(5态)/release_kind/feasibility_conclusion/needs_feasibility·blocked(0,1)/dev_assignees is_primary·notify_status/排班表 duty_date 与软删成组 CHECK + config release_id 永空 DB CHECK（12-H2）+ NOT NULL + UNIQUE + 部分唯一索引(软删复活/唯一活跃值班) + FK 定义 + readiness 三态（含新表专项）`);
+  console.log(`\n[全部通过] ${passed}/${passed} ✓ 系统迭代 sys 七表 schema 验证通过【require 真实 initSchema，非复刻 DDL】`);
+  console.log(`  覆盖：7 表（含通知改造 C1a 新表 sys_issue_dev_assignees + 上线体统一重构 C0 新表 sys_release_duty_roster + 上线执行人多选与多人双确认新表 sys_release_executors）+ 关键列（含 effected_at/三侧通知 5 列全量/可行性评估 7 列/通知改造 11 新列/上线体统一重构 C0 的 sys_releases 10 新列 + 排班表 11 列 + 执行人子表 19 列）+ 18 索引（含 G12 部分唯一索引 + C0 新增 4 索引 + 执行人多选 C0 新增 3 索引[含部分唯一索引/代次语义闸]）+ type/source/priority/三通知/relay_notify_status/event_type(15)/attachment/release status/release_assignee_notify_status(5态)/release_kind/feasibility_conclusion/needs_feasibility·blocked(0,1)/dev_assignees is_primary·notify_status/排班表 duty_date 与软删成组 CHECK/执行人子表通知态·执行态·软删三组 CHECK + config release_id 永空 DB CHECK（12-H2）+ NOT NULL + UNIQUE + 部分唯一索引(软删复活/唯一活跃值班/执行人代次) + FK 定义 + readiness 三态（含新表专项）`);
   db.close();
 }
 
@@ -906,6 +1089,13 @@ async function verifyLiaisonTestAlterMigration() {
     'liaison_test_notified_at', 'liaison_test_notify_message_key', 'liaison_test_notify_error',
     'liaison_test_read_at', 'liaison_test_notify_sent_by', 'liaison_test_notify_cycle_no',
     'liaison_test_attempt_token', 'liaison_test_attempt_started_at'];
+  // ⭐ [C9-fix M2②] C9 组独立列出（不并进上面的 LIAISON_TEST_* 名字，与 index.js 侧
+  //   `C9_ONLINE_SOURCE_ISSUE_COLS` 独立成组同一意图：迁移归属别混）。加入下方"旧表排除名单"后，
+  //   本 fixture 建出的旧表就**真的缺这一列**，runSysMigration 的 ALTER 分支才会**真跑**到它——
+  //   否则旧表从真实 schema 派生时会把 online_source 一起复制进去，ALTER 判定"列已存在"直接跳过，
+  //   本 fixture 对这根列的覆盖率是 0（而我们要测的恰恰是"生产旧库升级时这条 ALTER 走不走得通"）。
+  const C9_COLS_EXPECT_LOCAL = ['online_source'];
+  const OLD_TABLE_EXCLUDE_COLS = [...LIAISON_TEST_COLS_EXPECT_LOCAL, ...C9_COLS_EXPECT_LOCAL];
   const NOT_NULL_DEFAULT_COLS_EXPECT_LOCAL = {
     liaison_test_cycle_no: { dflt_value: '0' },
     liaison_test_notify_cycle_no: { dflt_value: '0' },
@@ -932,7 +1122,7 @@ async function verifyLiaisonTestAlterMigration() {
   //   这恰好是"旧列约束保真度"里对本测试而言唯一相关的两项，其余（CHECK 逐条正确性）已由 [1]-[9h] 覆盖。
   const realCols = await all('PRAGMA table_info(sys_issues)');
   const oldColDefs = realCols
-    .filter(c => c.name !== 'id' && !LIAISON_TEST_COLS_EXPECT_LOCAL.includes(c.name))
+    .filter(c => c.name !== 'id' && !OLD_TABLE_EXCLUDE_COLS.includes(c.name))
     .map(c => {
       let def = `${c.name} ${c.type || 'TEXT'}`;
       if (c.notnull) def += ' NOT NULL';
@@ -968,7 +1158,9 @@ async function verifyLiaisonTestAlterMigration() {
   // 断言：若 ready=false，错误信息**不应**指向 sys_issues 或本次新增的任一 liaison_test/estimated_effort_days/
   // risk_level 列——这样才能确认"我们的 ALTER 没有失败"，而非放过一个被其他表错误掩盖的真回归。
   if (!stOld.ready) {
-    assert.ok(!/sys_issues 关键列缺失|liaison_test_|estimated_effort_days|risk_level/.test(stOld.error || ''),
+    // [C9-fix M2②] 关键词加 online_source——本列已随本次改动进入 SYS_ISSUES_KEY_COLS（readiness 锚点），
+    //   若 ALTER 没补上它，[2] 复查会明确报「sys_issues 关键列缺失: online_source」，本断言须能识别。
+    assert.ok(!/sys_issues 关键列缺失|liaison_test_|estimated_effort_days|risk_level|online_source/.test(stOld.error || ''),
       `旧库整体 ready=false 是预期的（其余表故意最小桩），但错误信息不应指向 sys_issues 或本次新增列，实际 error=${stOld.error}`);
   }
 
@@ -976,8 +1168,18 @@ async function verifyLiaisonTestAlterMigration() {
   //   CREATE 路径一致——notnull/dflt_value 两条路径必须相同，唯独 CHECK 不同，见下方反向探针）。
   const afterCols = await allOld('PRAGMA table_info(sys_issues)');
   const afterColsByName = new Map(afterCols.map(c => [c.name, c]));
-  const missAfterAlter = LIAISON_TEST_COLS_EXPECT_LOCAL.filter(c => !afterColsByName.has(c));
+  const missAfterAlter = OLD_TABLE_EXCLUDE_COLS.filter(c => !afterColsByName.has(c));
   assert.strictEqual(missAfterAlter.length, 0, `旧库 ALTER 后仍缺列: ${missAfterAlter.join(',')}`);
+  // ⭐ [C9-fix M2②] online_source 的 ALTER 路径元数据——与新库 CREATE 路径逐项一致（TEXT/可空/无 DEFAULT）。
+  //   本列是 C9 迁移面里唯一一根，单独钉：ALTER 定义写错类型/误加 NOT NULL 时，业务套件不会红（列在、能写），
+  //   只有 schema 元数据比对能抓到。
+  {
+    const osInfo = afterColsByName.get('online_source');
+    assert.ok(osInfo, '[C9-fix M2②] ALTER 路径应把 online_source 补进旧表（本 fixture 的旧表刻意不含该列，这一条红=C9 迁移分组没跑）');
+    assert.strictEqual(osInfo.type, 'TEXT', `ALTER 路径 online_source 类型应为 TEXT，实际 ${osInfo.type}`);
+    assert.strictEqual(osInfo.notnull, 0, `ALTER 路径 online_source 应可空，实际 notnull=${osInfo.notnull}`);
+    assert.strictEqual(osInfo.dflt_value, null, `ALTER 路径 online_source 不应有 DEFAULT，实际 ${osInfo.dflt_value}`);
+  }
   for (const [col, expect] of Object.entries(NOT_NULL_DEFAULT_COLS_EXPECT_LOCAL)) {
     const info = afterColsByName.get(col);
     assert.strictEqual(info.notnull, 1, `ALTER 路径 ${col} 应 notnull=1，实际 ${info.notnull}`);
@@ -987,12 +1189,13 @@ async function verifyLiaisonTestAlterMigration() {
   // 一次不带新列的旧式 INSERT 成功且默认值归位（证明 ALTER 补的 NOT NULL DEFAULT 列对"旧式写入口"透明生效，
   //   旧代码不用改一行就能继续插入）。
   await runOld(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name) VALUES ('feature', '开发中', 't-old-style', 'BMS', 1, 'admin')`);
-  const oldStyleRow = await getOld(`SELECT liaison_test_cycle_no, liaison_test_notify_cycle_no, liaison_test_notify_status, estimated_effort_days, risk_level FROM sys_issues WHERE title='t-old-style'`);
+  const oldStyleRow = await getOld(`SELECT liaison_test_cycle_no, liaison_test_notify_cycle_no, liaison_test_notify_status, estimated_effort_days, risk_level, online_source FROM sys_issues WHERE title='t-old-style'`);
   assert.strictEqual(oldStyleRow.liaison_test_cycle_no, 0, '旧式 INSERT（不带新列）liaison_test_cycle_no 应走 ALTER DEFAULT 归位为 0');
   assert.strictEqual(oldStyleRow.liaison_test_notify_cycle_no, 0, '旧式 INSERT liaison_test_notify_cycle_no 应走 ALTER DEFAULT 归位为 0');
   assert.strictEqual(oldStyleRow.liaison_test_notify_status, 'not_sent', '旧式 INSERT liaison_test_notify_status 应走 ALTER DEFAULT 归位为 not_sent');
   assert.strictEqual(oldStyleRow.estimated_effort_days, null, '旧式 INSERT estimated_effort_days 应为 NULL（无 DEFAULT）');
   assert.strictEqual(oldStyleRow.risk_level, null, '旧式 INSERT risk_level 应为 NULL（无 DEFAULT）');
+  assert.strictEqual(oldStyleRow.online_source, null, '[C9-fix M2②] 旧式 INSERT online_source 应为 NULL（无 DEFAULT）——存量行天然 NULL，正是 DTO 三分支里 unknown_legacy 的来源');
 
   // ⚠️ 显式反向探针（**2026-08-06 部署 dry-run 后语义反转**）：原断言=「ALTER 路径无 CHECK 是已知预期
   //   差异，脏值应插入成功」——c58af0c 给 risk_level ALTER 定义补上与 CREATE 同款 CHECK 后（生产真实
@@ -1003,7 +1206,15 @@ async function verifyLiaisonTestAlterMigration() {
     /CHECK/i,
     '旧库 ALTER 路径插入 risk_level=非法值"gao"应被 CHECK 拒绝（c58af0c 补齐后两路径约束语义一致）');
 
-  ok('⭐ [codex 267 号 M-3+c58af0c 反转] 旧库 ALTER 迁移回归：构造"缺 C1 14 新列"的旧版 sys_issues（其余列从真实 schema PRAGMA 派生，防手写清单漂移）→ runSysMigration 幂等 ALTER 后 14 列全到位 + 三 NOT NULL DEFAULT 列元数据与 CREATE 路径一致 → 旧式 INSERT 默认值正确归位 → 反向探针证实 ALTER 路径与 CREATE 路径**同样拒绝**非法 risk_level（两路径约束语义一致·部署 dry-run 修复后的目标态）');
+  // [C9-fix M2②] online_source 的两路径一致性同样要证——但它的"一致"是**两边都不设 CHECK**（刻意开放
+  //   值域，三条理由见 index.js C9_ONLINE_SOURCE_ISSUE_COLS 注释），故这里是 doesNotReject 而非 rejects。
+  //   与上面 risk_level 的 rejects 并排放，正是为了让读者一眼看出两根列的处置**不同且都是有意的**——
+  //   不是"C9 忘了加 CHECK"。
+  await assert.doesNotReject(
+    runOld(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name, online_source) VALUES ('feature', '待受理', 't-old-style-os-open', 'BMS', 1, 'admin', 'whatever_future_kind')`),
+    '[C9-fix M2②] 旧库 ALTER 路径的 online_source 同样无 CHECK（与 CREATE 路径一致=两路径语义相同）——本条一旦红=有人只给其中一条路径加了 CHECK，那才是真正的"两套语义"缺口');
+
+  ok('⭐ [codex 267 号 M-3+c58af0c 反转+C9-fix M2②] 旧库 ALTER 迁移回归：构造"缺 C1 14 新列 + C9 online_source"的旧版 sys_issues（其余列从真实 schema PRAGMA 派生，防手写清单漂移）→ runSysMigration 幂等 ALTER 后 15 列全到位 + 三 NOT NULL DEFAULT 列元数据与 CREATE 路径一致 + online_source 元数据（TEXT/可空/无 DEFAULT）两路径一致 → 旧式 INSERT 默认值正确归位（含 online_source=NULL） → 反向探针证实 ALTER 与 CREATE 两路径对 risk_level **同样拒绝**非法值、对 online_source **同样放行**任意值（各自有意为之，非漏配）');
   dbOld.close();
 }
 

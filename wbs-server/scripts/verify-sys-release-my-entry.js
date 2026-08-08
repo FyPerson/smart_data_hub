@@ -106,6 +106,15 @@ async function main() {
   await run(`INSERT INTO sys_releases (release_no, title, status, is_hotfix, created_by, created_by_name, created_at)
              VALUES ('R-T-4', '批次4·未指定', '计划中', 0, 1, '管理员', datetime('now'))`);
 
+  // C4a（方案 §4.4 #8）：mine 过滤 + isReleaseExecutor 均已从批次级单列（release_assignee_id，上方
+  //   INSERT 里仍带着，保留供 [2]/[4] 断言"旧列历史读路径"）改子表 EXISTS——本文件其余断言要继续测到
+  //   真实生效的新判据，需给 R-T-1/R-T-2 补上子表在册行（用户 8，与旧列同一人，代表同一件业务事实）。
+  //   R-T-3（执行人=9）刻意不补 8 的子表行，保证"用户 8 的 mine 视角看不到 R-T-3"这条负例依然成立。
+  await run(`INSERT INTO sys_release_executors (release_id, user_id, user_name, notify_status, notified_at, added_by, added_by_name)
+             VALUES (?, 8, '示例开发A', 'sent', datetime('now','localtime'), 1, '管理员')`, [rel1]);
+  await run(`INSERT INTO sys_release_executors (release_id, user_id, user_name, notify_status, notified_at, added_by, added_by_name)
+             VALUES (?, 8, '示例开发A', 'sent', datetime('now','localtime'), 1, '管理员')`, [rel2]);
+
   // 成员单：feature·挂批次 R1·issue 级 release_assignee_id 恒 NULL（新机制不回写）
   await run(`INSERT INTO sys_issues (id, type, title, status, system_name, source, created_by, created_by_name,
               release_id, intake_required, created_at)

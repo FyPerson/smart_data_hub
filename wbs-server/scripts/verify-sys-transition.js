@@ -84,7 +84,15 @@ async function fastForwardSubmit(id) {
 async function main() {
   mod.initSchema();
   await waitReady();
-  ok('readiness ready=true（真实 initSchema）');
+  // [C10] users 表：intake_accept 引擎侧「空单 eligible 受理兜底」判据会**无条件**求值
+  //   isIntakeLiaisonEligible(actor.id)（读 users 表判 active∧role∈{user,publisher}）——即便 actor=admin
+  //   该表达式也被 eager 计算（isUnboundAcceptClaim 常量在 if 前先算），故本 harness 必须建 users 表，
+  //   否则任何空单 intake_accept 会因缺表抛「no such table: users」。seed 关键角色即可。
+  await run(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT, status TEXT DEFAULT 'active', phone TEXT, dingtalk_user_id TEXT)`);
+  await run(`INSERT INTO users (id, username, display_name, role, status) VALUES
+    (1,'admin','admin','admin','active'),(5,'dev','开发王','user','active'),(6,'dev2','开发李','user','active'),
+    (9,'other','路人','user','active'),(13,'liaison','对接人','user','active')`);
+  ok('readiness ready=true（真实 initSchema）+ users 表 seed（C10 空单受理兜底判据需读库）');
 
   // 受理排期改造：schedule 退场·引擎白盒测的具名边改用 intake_accept（待受理→待指派·仍走 sysIssueTransition）。
   // [1] 流转合法性：待受理 → assign（assign 需「待指派」前置·受理门未过不能直派）应拒
@@ -107,14 +115,18 @@ async function main() {
     ok('expectedFrom 比对：实际待受理 + 传 expectedFrom=待修改 → 拒（陈旧前置态）');
   }
 
-  // [3] 权限：intake_accept roleGuard=intake_liaison∨admin，非受理人（开发）执行应 403
+  // [3] 权限：intake_accept roleGuard=intake_liaison（C10 绑单精判：admin ∨ 该单绑定对接人 ∨ 空单 eligible 受理）。
+  //   本用例把单绑到 13（非 DEV），使「空单受理兜底」分支短路（row.intake_liaison_id != null → 不触发
+  //   isIntakeLiaisonEligible 读库·本 harness 无 users 表，否则会因缺表抛错）——DEV 非 admin、非绑定人 →
+  //   403 NOT_BOUND_LIAISON（C10 后拒绝码由 NOT_AUTHORIZED_FOR_TRANSITION 收窄为 NOT_BOUND_LIAISON）。
   {
     const id = await seedIssue({ status: '待受理' });
+    await run(`UPDATE sys_issues SET intake_liaison_id = 13 WHERE id = ?`, [id]);   // 绑非 DEV 的对接人
     await assert.rejects(
       I.sysIssueTransition(id, 'intake_accept', '待受理', DEV, {}),
-      e => e instanceof I.SysTransitionError && e.code === 'NOT_AUTHORIZED_FOR_TRANSITION',
-      'intake_accept 非受理人/admin 应 403');
-    ok('权限 roleGuard：intake_accept（受理人/admin 动作）由开发执行 → 403 NOT_AUTHORIZED_FOR_TRANSITION');
+      e => e instanceof I.SysTransitionError && e.code === 'NOT_BOUND_LIAISON',
+      'intake_accept 非受理人/admin 应 403 NOT_BOUND_LIAISON');
+    ok('权限 roleGuard：intake_accept（受理人/admin 动作）由非绑定开发执行 → 403 NOT_BOUND_LIAISON（C10 绑单精判·已绑单非绑定人拒）');
   }
 
   // [3b] 受理排期改造 codex131-H1：roleGuard='creator_or_admin'（resubmit_intake）——建单人∨admin·引擎按事务内 row.created_by 校验

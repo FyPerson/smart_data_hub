@@ -176,7 +176,7 @@ async function main() {
     let row = await get('SELECT status, assigned_at FROM sys_issues WHERE id=?', [id]);
     assert.ok(row.assigned_at, `[C] 前置：指派后 assigned_at 应非空（estimate 闸门依赖），实得 ${JSON.stringify(row.assigned_at)}`);
 
-    let r = await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: EST });
+    let r = await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: EST, estimated_effort_days: 1 });
     assert.strictEqual(r.status, 200, `[C] estimate 分钟级输入应 200，实得 ${r.status} ${JSON.stringify(r.body)}`);
     row = await get('SELECT dev_estimated_at FROM sys_issues WHERE id=?', [id]);
     assert.strictEqual(row.dev_estimated_at, EST_SEC, `[C] ⭐ D4：库内应到秒，实得 ${JSON.stringify(row.dev_estimated_at)}`);
@@ -184,7 +184,7 @@ async function main() {
 
     // ⭐ 幂等的**端到端**证明：把库里读回来的带秒值原样重提，必须 200 而不是 400。
     //   这正是 D10 存在的理由——校验器不幂等的话，前端「读回来再提交」的路径会被自己的后端拒掉。
-    r = await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: row.dev_estimated_at });
+    r = await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: row.dev_estimated_at, estimated_effort_days: 1 });
     assert.strictEqual(r.status, 200, `[C] ⭐ D10 端到端幂等：库内带秒值原样重提应 200（不是 400），实得 ${r.status} ${JSON.stringify(r.body)}`);
     ok('[C2] ⭐ D10 端到端幂等：从库里读回的带秒值重提不被自己的校验器拒');
 
@@ -192,10 +192,10 @@ async function main() {
     //   est 补秒后与 truncToMinute(现值) 永不相等 ⇒ 同值判断失效 ⇒ 每次重提都写库 + 写 timeline
     //   + 重复推送业务方钉钉。**数 timeline 行数**，不信返回值里的 unchanged 标记。
     const tlBefore = (await get(`SELECT COUNT(*) AS c FROM sys_issue_timeline WHERE issue_id=? AND event_type='estimate'`, [id])).c;
-    r = await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: EST });        // 分钟级重提
+    r = await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: EST, estimated_effort_days: 1 });        // 分钟级重提
     assert.strictEqual(r.status, 200, '[D] 同值重提应 200');
     assert.strictEqual(r.body && r.body.unchanged, true, `[D] 同值重提应返回 unchanged:true，实得 ${JSON.stringify(r.body)}`);
-    r = await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: EST_SEC });    // 带秒重提
+    r = await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: EST_SEC, estimated_effort_days: 1 });    // 带秒重提
     assert.strictEqual(r.body && r.body.unchanged, true, `[D] 带秒同值重提也应 unchanged:true，实得 ${JSON.stringify(r.body)}`);
     const tlAfter = (await get(`SELECT COUNT(*) AS c FROM sys_issue_timeline WHERE issue_id=? AND event_type='estimate'`, [id])).c;
     assert.strictEqual(tlAfter, tlBefore,
@@ -212,7 +212,7 @@ async function main() {
 
     // ── [D3] 真变更仍照常写（防"为了 no-op 把正常写入也堵了"）────────────────────────────
     const EST2 = futureEst(31);
-    r = await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: EST2 });
+    r = await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: EST2, estimated_effort_days: 1 });
     assert.strictEqual(r.status, 200, '[D3] 真变更应 200');
     assert.ok(!(r.body && r.body.unchanged), `[D3] 真变更不应返回 unchanged，实得 ${JSON.stringify(r.body)}`);
     row = await get('SELECT dev_estimated_at FROM sys_issues WHERE id=?', [id]);

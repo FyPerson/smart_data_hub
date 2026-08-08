@@ -17,17 +17,21 @@
  *   **实测核验：本地 task_pool.db 的 system_configs 表 dingtalk_app_key/app_secret/robot_code 三项均已
  *   SET（非空）**——sendIssueDingtalkRaw() 不会走 no_config 快速失败分支，而是会真实发起
  *   dingtalkNotify.getAccessToken() 外呼。这与本仓库其余 Playwright 脚本已反复实测确认的结论完全一致：
- *     - test-sys-release-panel-c2b2-playwright.js:13 "（均 SET），点击会真实外呼——本脚本只断言该按钮的
- *       可见性/文案，绝不点击"
  *     - test-periodic-fetch-playwright.js:14 "本地 db 副本含生产系统真实凭证，避免任何真实外部副作用"
  *     - test-sys-release-c7-playwright.js:15-20 明确列出"走 sendIssueDingtalkRaw 直连会真实外呼"的按钮
  *       一律不点击
+ *   [LOW-4 同步修正·2026-08-07] test-sys-release-panel-c2b2-playwright.js 已整体重写（C6 收口），其
+ *   notify-executor 相关用例改走 `system_configs.sys_notify_dry_run='on'` 开关闸下的**真实点击**（该开关
+ *   会让 CAS+留痕正常走、唯独跳过真实外呼，见该文件头部"钉钉安全边界"段），不再是"点击即真实外呼故只
+ *   断言可见性不点击"的旧策略——不再适合作本条"真实外呼风险"的同类精确引用，故移除该条引用，仅保留
+ *   仍然成立的另外两条。
  *   notify-intake 端点同样直连 sendIssueDingtalkRaw（S1 后端实现，见 index.js notify-intake 路由），与
- *   上述被规避的通道属同一风险类别。**本脚本据此不点击真实「发送通知」/「重发」按钮**，改用与
- *   c2b2 脚本 :217/:271 完全同源的「直接 SQL 模拟通知态」手法验证三态渲染逻辑（not_sent 初始态用真实
- *   建单产出的自然状态；failed 态用 SQL UPDATE 模拟，不经真实外呼）——这是本仓库对"零真实外呼"纪律的
- *   既定、可验证、可复用解法，非本脚本新发明，也不是回避测试深度（UI 渲染逻辑与真实点击后的渲染逻辑
- *   完全一致，siRenderIntakeNotifyRow 只读 iss.intake_notify_status 三态字段，不关心状态如何产生）。
+ *   上述被规避的通道属同一风险类别。**本脚本据此不点击真实「发送通知」/「重发」按钮**，改用「直接 SQL
+ *   模拟通知态」手法验证三态渲染逻辑（not_sent 初始态用真实建单产出的自然状态；failed 态用 SQL UPDATE
+ *   模拟，不经真实外呼）——这是本仓库对"零真实外呼"纪律的既定、可验证解法之一（另一种解法见上条 c2b2
+ *   现行的 dry-run 开关闸+真实点击，两种手法效果等价，本脚本未跟随改造，独立成立不依赖 c2b2 具体实现），
+ *   非本脚本新发明，也不是回避测试深度（UI 渲染逻辑与真实点击后的渲染逻辑完全一致，siRenderIntakeNotifyRow
+ *   只读 iss.intake_notify_status 三态字段，不关心状态如何产生）。
  */
 'use strict';
 const path = require('path');

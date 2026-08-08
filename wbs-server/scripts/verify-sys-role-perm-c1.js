@@ -163,26 +163,30 @@ async function mkAssignable(type) {
   return r.body.id;
 }
 // 推进到开发态（已指派 dev5）
+//   ⚠️ [C10 涟漪修复] 本 helper 产物**保持 intake_liaison_id=13（绑定受理人）**——原实现在此置 999999
+//   使 GATE 降级（供 mkVerifying 的 submit 直落待验证），但 C10 绑单精判后，[M1]/[M3] 的协调人/通知矩阵
+//   要按「受理人=13 本人」判权限，若产物是 999999（未绑 13）则示例对接人(13) 会被判「非该单对接人」而 403，
+//   矩阵全塌。故把 999999 失效窗口收窄到「仅 submit 期间」（下移进 mkVerifying），mkInDev 产物恒绑 13。
 async function mkInDev(type) {
   const id = await mkAssignable(type);
   const r = await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5 });
   assert.strictEqual(r.status, 200, `${type} assign 200, got ${r.status} ${JSON.stringify(r.body)}`);
   assert.strictEqual(await statusOf(id), DEV_STATUS[type], `夹具 mkInDev(${type})：指派后须真落「${DEV_STATUS[type]}」`);
-  // [工期对接测试与风险等级拆分 方案 v1.1 §3.0-⑥·C4a 涟漪修复] 本文件测角色权限收敛（C1），下游
-  // mkVerifying/mkPendingRelease 靠"submit 直落待验证"这一前提做后续断言，与「待对接测试」段本身无关
-  // （后者由专门的 verify-sys-liaison-test.js 覆盖）。让对接人在 GATE 判定时失效，触发 §3.0-⑥ 降级
-  // 路径——improvement/bug 未接决策树不受影响，此处统一处理零副作用，是方案承认的合法真实场景。
-  await run(`UPDATE sys_issues SET intake_liaison_id = 999999 WHERE id = ?`, [id]);
   return id;
 }
 // 推进到「待验证」（开发本人回填预计完成 + 提交）——accept 的合法前置态，也是 creator/requester 通道的可发状态
 async function mkVerifying(type) {
   const id = await mkInDev(type);
-  const e = await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: futureEst(30) });
+  // [工期对接测试与风险等级拆分 方案 v1.1 §3.0-⑥·C4a 涟漪修复] feature 的 submit 走 §3.0-⑥ 降级路径直落
+  //   「待验证」（跳过「待对接测试」）需 submit 时 intake_liaison_id 失效——**仅 submit 期间置 999999**，
+  //   submit 后立即复位为 13（bound），使下游 [M1]/[M3] 断言按真实绑定态（受理人=13 本人）判权限（C10 绑单精判）。
+  await run(`UPDATE sys_issues SET intake_liaison_id = 999999 WHERE id = ?`, [id]);
+  const e = await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: futureEst(30), ...(type === 'bug' ? {} : { estimated_effort_days: 1 }) });
   assert.strictEqual(e.status, 200, `夹具 mkVerifying(${type}) estimate 200, got ${e.status} ${JSON.stringify(e.body)}`);
-  const s = await call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'no_code', no_code_reason: '完成（占位理由）', self_tested: true, test_env_deployed: true });
+  const s = await call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'commits', commits: [{ component: 'backend', commit_ref: 'c9-keep-batch-28' }], self_tested: true, test_env_deployed: true });
   assert.strictEqual(s.status, 200, `夹具 mkVerifying(${type}) submit 200, got ${s.status} ${JSON.stringify(s.body)}`);
   assert.strictEqual(await statusOf(id), '待验证', `夹具 mkVerifying(${type})：提交后须真落「待验证」`);
+  await run(`UPDATE sys_issues SET intake_liaison_id = 13 WHERE id = ?`, [id]);   // 复位绑定为受理人 13（submit 降级已完成）
   return id;
 }
 // 推进到「待上线」（admin 验收）——close / assign-release-dev 的前置
@@ -216,9 +220,9 @@ async function mkVerifyingViaRealLiaisonTest() {
   const a = await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5 });
   assert.strictEqual(a.status, 200, `[275-M5] feature assign 200, got ${a.status} ${JSON.stringify(a.body)}`);
   assert.strictEqual(await statusOf(id), '开发中', '[275-M5] 指派后须真落「开发中」');
-  const e = await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: futureEst(30) });
+  const e = await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: futureEst(30), estimated_effort_days: 1 });
   assert.strictEqual(e.status, 200, `[275-M5] estimate 200, got ${e.status} ${JSON.stringify(e.body)}`);
-  const s = await call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'no_code', no_code_reason: '完成（占位理由）', self_tested: true, test_env_deployed: true });
+  const s = await call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'commits', commits: [{ component: 'backend', commit_ref: 'c9-keep-batch-29' }], self_tested: true, test_env_deployed: true });
   assert.strictEqual(s.status, 200, `[275-M5] submit 200, got ${s.status} ${JSON.stringify(s.body)}`);
   assert.strictEqual(s.body.main_status, '待对接测试', '[275-M5] submit → 待对接测试（真实 ⑦ 路径，非 999999 降级）');
   // ⭐ D22-④ 批2：pass 现须凭证二选一，本夹具补 test_note。
@@ -541,7 +545,7 @@ async function main() {
 
     // ① 开发轴：示例发布者以 assignee 身份可 estimate（态内旁路动作）
     const est31 = futureEst(31);
-    const est = await call('POST', `/api/sys-issues/${id}/estimate`, techTok, { dev_estimated_at: est31 });
+    const est = await call('POST', `/api/sys-issues/${id}/estimate`, techTok, { dev_estimated_at: est31, estimated_effort_days: 1 });
     assert.strictEqual(est.status, 200, `[M5/开发轴] 示例发布者被指派后 estimate 应放行（ownerGuard=assignee）, got ${est.status} ${JSON.stringify(est.body)}`);
     // 时间格式统一 S3（D4）：库内到秒——提交分钟级 est31、后端补 ':00'
     assert.strictEqual((await get('SELECT dev_estimated_at FROM sys_issues WHERE id=?', [id])).dev_estimated_at, est31 + ':00',
@@ -594,9 +598,9 @@ async function main() {
       const sid = await mkAssignable('improvement');
       const a2 = await call('POST', `/api/sys-issues/${sid}/assign`, adminTok, { assigned_to: 7 });
       assert.strictEqual(a2.status, 200, '[M5/开发轴] 夹具：admin 指派 improvement 给示例发布者(7) 须 200');
-      const e2 = await call('POST', `/api/sys-issues/${sid}/estimate`, techTok, { dev_estimated_at: futureEst(32) });
+      const e2 = await call('POST', `/api/sys-issues/${sid}/estimate`, techTok, { dev_estimated_at: futureEst(32), estimated_effort_days: 1 });
       assert.strictEqual(e2.status, 200, `[M5/开发轴] 示例发布者 estimate 应放行, got ${e2.status} ${JSON.stringify(e2.body)}`);
-      const s2 = await call('POST', `/api/sys-issues/${sid}/submit`, techTok, { mode: 'no_code', no_code_reason: '示例发布者以开发身份提交', self_tested: true, test_env_deployed: true });
+      const s2 = await call('POST', `/api/sys-issues/${sid}/submit`, techTok, { mode: 'commits', commits: [{ component: 'backend', commit_ref: 'c9-keep-batch-30' }], self_tested: true, test_env_deployed: true });
       assert.strictEqual(s2.status, 200, `⭐ [M5/开发轴] 示例发布者 submit 应放行（ownerGuard=assignee 本人门）, got ${s2.status} ${JSON.stringify(s2.body)}`);
       assert.strictEqual(await statusOf(sid), '待验证', '[M5/开发轴] 示例发布者提交后须真落「待验证」（证明确实走通提交链，非被静默吞）');
     }

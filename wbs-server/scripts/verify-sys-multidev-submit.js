@@ -93,10 +93,18 @@ async function mkIssue(type, status, extra = {}) {
   //   测的是 submit S2-S9 系列（在册/dev_status/commit/事件模型），非 estimate 本身，默认种一个占位值避免
   //   每个用例都被新闸拦下；devEstimatedAt: null 显式传空可测 ESTIMATE_REQUIRED 本身（见 S1b）。
   const est = extra.devEstimatedAt === null ? null : (extra.devEstimatedAt || futureEst(30));
+  // [C7 工时评估补全·方案 v1.7 §9.1] submit 硬闸的工期检查从「nf=1 ∧ feature」扩到「feature/improvement ×
+  //   nf 两值」——本文件绝大多数夹具是 **nf=0 的 feature**（DDL 默认 needs_feasibility=0），C7 前它们从不
+  //   经过工期闸，C7 后每一个都要过。同 dev_estimated_at 的既有处置（见上一段注释）：默认种一个合法占位值，
+  //   让本文件继续测它真正要测的 S2-S9（在册/dev_status/commit/事件模型），不被新闸拦成一片红；
+  //   effortDays: null 显式传空可单独测 EFFORT_REQUIRED 本身。bug/config 无工期维度，恒不种（种了反而制造
+  //   一个"设计上不该存在"的脏值）。
+  const effortApplicable = ['feature', 'improvement'].includes(type);
+  const effort = !effortApplicable ? null : (extra.effortDays === null ? null : (extra.effortDays || 1));
   const r = await run(
-    `INSERT INTO sys_issues (type, status, title, system_name, source, created_by, created_by_name, dev_estimated_at)
-     VALUES (?, ?, ?, 'BMS', '内部', 1, '管理员', ?)`,
-    [type, status, extra.title || `${type}-${status}-单`, est]
+    `INSERT INTO sys_issues (type, status, title, system_name, source, created_by, created_by_name, dev_estimated_at, estimated_effort_days)
+     VALUES (?, ?, ?, 'BMS', '内部', 1, '管理员', ?, ?)`,
+    [type, status, extra.title || `${type}-${status}-单`, est, effort]
   );
   return r.lastID;
 }
@@ -172,6 +180,25 @@ async function main() {
     assert.strictEqual(r.status, 400, `S1b：bug 流同受 ESTIMATE_REQUIRED 约束, got ${r.status} ${JSON.stringify(r.body)}`);
     assert.strictEqual(r.body.code, 'ESTIMATE_REQUIRED', 'S1b：bug 流错误码同为 ESTIMATE_REQUIRED（无 type 限定，逐字核对旧代码）');
     ok('S1b：submit 缺 dev_estimated_at → 400 ESTIMATE_REQUIRED（feature/bug 均受理，旧单人 case 无 type 限定，e39e65b 版 index.js:1376 逐字复刻）');
+
+    // S1b-effort（C7-fix LOW-4）：把 mkIssue 的 `effortDays: null` 逃生舱**真用一次**。
+    //   C7 给 mkIssue 加这个开关时注释写着"可单独测 EFFORT_REQUIRED 本身"，但全文件从没有一处调用它——
+    //   那就是一句没有实现背书的声称（[[feedback_comment_is_review_input]]：注释里写"支持 X"却零用例，
+    //   等于把"这条路能走"记进了审查输入，实际上没人验过它走不走得通）。本组同时坐实两件事：
+    //     ① 逃生舱真能造出"nf=0 且工期为空"的夹具（不会被默认值 1 悄悄兜住）；
+    //     ② C7 新增的 nf=0 工期硬闸在本套件的直连 SQL 夹具路径下同样生效（不只在 verify-sys-effort-c7 的
+    //        真实建单路径下生效）。
+    const idNoEffort = await mkIssue('improvement', '开发中', { effortDays: null });
+    assert.strictEqual((await get('SELECT estimated_effort_days FROM sys_issues WHERE id=?', [idNoEffort])).estimated_effort_days, null,
+      'S1b-effort 前置：effortDays:null 逃生舱应真造出空工期（若这里非 null，说明逃生舱被默认值覆盖，后面的红灯就测不到点子上）');
+    await mkMember(idNoEffort, 5, '开发甲', 'pending');
+    r = await call('POST', `/api/sys-issues/${idNoEffort}/submit`, devTok(5), { mode: 'no_code', no_code_reason: '工期未填（占位理由）', self_tested: true, test_env_deployed: true });
+    assert.strictEqual(r.status, 400, `S1b-effort：nf=0 improvement 缺工期 submit 应 400, got ${r.status} ${JSON.stringify(r.body)}`);
+    assert.strictEqual(r.body.code, 'EFFORT_REQUIRED', `S1b-effort：确切码 EFFORT_REQUIRED，实得 ${r.body && r.body.code}`);
+    assert.strictEqual(r.body.error, '请先在估时中填写工期（人日）', `S1b-effort：nf=0 文案指路「估时」，实得 ${JSON.stringify(r.body.error)}`);
+    const noEffortMember = await get('SELECT dev_status FROM sys_issue_dev_assignees WHERE issue_id = ?', [idNoEffort]);
+    assert.strictEqual(noEffortMember.dev_status, 'pending', 'S1b-effort：零副作用——拒绝先于 dev_status UPDATE，仍 pending（整事务回滚）');
+    ok('S1b-effort（LOW-4）：mkIssue 的 effortDays:null 逃生舱真用一次——nf=0 improvement 缺工期 submit → 400 EFFORT_REQUIRED + 文案指路「估时」+ roster 零副作用（逃生舱不再是无用例背书的注释声称）');
   }
 
   // ══════════════════════════════════════════════════════════════════════

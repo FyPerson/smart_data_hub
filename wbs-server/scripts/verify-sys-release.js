@@ -42,9 +42,30 @@ const authenticateToken = (req, res, next) => {
 };
 const requireAdmin = (req, res, next) => (req.user && req.user.role === 'admin') ? next() : res.status(403).json({ error: '需要 admin' });
 
+// [7-⑨]（C2b 事务原子性）用：dbRunAsync 可控故障注入——按 SQL 文本匹配，跳过前 DB_RUN_FAIL_SKIP 次命中
+// （放行照常执行），第 DB_RUN_FAIL_SKIP+1 次命中才拒绝并自动清空标志（单发）。⭐ MED-2（Opus 预筛）：
+// 跳过次数可调是为了真打「已有部分写入成功、后续写入才失败」这条更强的部分回滚不变量——若第一次命中
+// 就拒绝，只证明"INSERT 本身失败不留痕"，证不到"前面已经成功写入的兄弟行也会被一并回滚"（[7-⑨] 用
+// executors=[5,13] 两人，跳过 1 次=放行第一人 INSERT 成功、拒绝第二人 INSERT，验证的正是后者）。
+// 调用方仍应在 finally 里把两个标志一并兜底复位，防止"本该触发但没触发"漏留误伤后续用例。⚠️ 只影响经
+// 模块内部 dbRunAsync 发出的写入（route handler 内部逻辑），本文件测试自身用的 run(...) 直调不受影响。
+let DB_RUN_FAIL_ON = null;
+let DB_RUN_FAIL_SKIP = 0;
+const runTestable = (sql, params = []) => {
+  if (DB_RUN_FAIL_ON && sql.includes(DB_RUN_FAIL_ON)) {
+    if (DB_RUN_FAIL_SKIP > 0) {
+      DB_RUN_FAIL_SKIP--;
+      return run(sql, params);   // 放行本次命中，继续正常执行（供后续命中真正触发拒绝）
+    }
+    DB_RUN_FAIL_ON = null;
+    return Promise.reject(new Error('[7-⑨]注入故障：模拟写入失败'));
+  }
+  return run(sql, params);
+};
+
 const mod = require('../routes/sys-iteration')({
   logger: { info: noop, warn: noop, error: noop, debug: noop },
-  db, dbRunAsync: run, dbGetAsync: get, dbAllAsync: all,
+  db, dbRunAsync: runTestable, dbGetAsync: get, dbAllAsync: all,
   authenticateToken, requireAdmin,
   ...require('./_sys-attach-test-deps'),   // C3b 起 REQUIRED_DEPS 含附件 4 项，stub 注入过工厂校验
 });
@@ -64,6 +85,8 @@ const adminTok = jwt.sign({ id: 1, username: 'admin', display_name: '管理员',
 const devTok = jwt.sign({ id: 5, username: 'dev', display_name: '开发王', role: 'user' }, SECRET);
 // [C4 合并修复批 275-M5] 示例对接人（受理人白名单）——真实 ⑦ 路径夹具需要它调 liaison-test-pass。
 const liaisonTok = jwt.sign({ id: 13, username: 'wangtaotao', display_name: '示例对接人', role: 'user' }, SECRET);
+// C3：§7 hotfix-publish 系列用户第三个合格执行人（id=20，[7-⑤e] PUT executors 换人后的目标集合成员）。
+const dev20Tok = jwt.sign({ id: 20, username: 'dev20', display_name: '开发丙', role: 'user' }, SECRET);
 
 let server, port;
 function call(method, p, tok, body) {
@@ -107,9 +130,9 @@ async function seedToReady() {
   // 失效，触发 §3.0-⑥ 降级路径，使 submit 仍直落"待验证"→可立即 accept 到"待上线"——本文件其余断言
   // 零改动，这也是方案承认的合法真实场景（非造假绕过）。
   await run(`UPDATE sys_issues SET intake_liaison_id = 999999 WHERE id = ?`, [id]);
-  r = await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: futureEst(30) });
+  r = await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: futureEst(30), estimated_effort_days: 1 });
   assert.strictEqual(r.status, 200, 'estimate 200, got ' + r.status + ' ' + JSON.stringify(r.body));
-  r = await call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'no_code', no_code_reason: '交付完成（占位理由）', self_tested: true, test_env_deployed: true });
+  r = await call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'commits', commits: [{ component: 'backend', commit_ref: 'c9-keep-batch-23' }], self_tested: true, test_env_deployed: true });
   assert.strictEqual(r.status, 200, 'submit 200, got ' + r.status + ' ' + JSON.stringify(r.body));
   r = await call('POST', `/api/sys-issues/${id}/accept`, adminTok, {});
   assert.strictEqual(r.status, 200, 'accept 200, got ' + r.status + ' ' + JSON.stringify(r.body));
@@ -132,9 +155,9 @@ async function seedToReadyViaRealLiaisonTest() {
   r = await call('POST', `/api/sys-issues/${id}/set-oa-number`, adminTok, { oa_number: '2026070098' });
   assert.strictEqual(r.status, 200, '夹具补 OA 号 200, got ' + r.status + ' ' + JSON.stringify(r.body));
   await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5 });
-  r = await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: futureEst(30) });
+  r = await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: futureEst(30), estimated_effort_days: 1 });
   assert.strictEqual(r.status, 200, 'estimate 200, got ' + r.status + ' ' + JSON.stringify(r.body));
-  r = await call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'no_code', no_code_reason: '交付完成（占位理由）', self_tested: true, test_env_deployed: true });
+  r = await call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'commits', commits: [{ component: 'backend', commit_ref: 'c9-keep-batch-24' }], self_tested: true, test_env_deployed: true });
   assert.strictEqual(r.status, 200, 'submit 200, got ' + r.status + ' ' + JSON.stringify(r.body));
   assert.strictEqual(r.body.main_status, '待对接测试', '[275-M5] submit → 待对接测试（真实 ⑦ 路径，非 999999 降级）');
   // ⭐ D22-④ 批2：pass 现须凭证二选一，本夹具补 test_note。
@@ -151,30 +174,73 @@ async function seedToReadyViaRealLiaisonTest() {
 const issueRow = (id) => get('SELECT status, release_id, released_at FROM sys_issues WHERE id=?', [id]);
 const relRow = (id) => get('SELECT status, release_no, is_hotfix, release_note, version_tag, released_at FROM sys_releases WHERE id=?', [id]);
 
-// C3（上线体统一重构）后端批改造：legacy /sys-releases/:id/publish 现全类型 409（LEGACY_RELEASE_FLOW_DISABLED，
-//   见 index.js 路由处注释），唯一合法发布入口收窄为 /sys-releases/:id/execute（中心守卫要求
-//   notify_status='sent' ∧ release_assignee_id===actor.id ∧ 实时资格）。本文件 §4-6/§9/§12 关注的是
-//   _publishReleaseCoreInTxn 内核本身的校验/原子性行为（release_note 闸门/成员非空/全待上线/roster 门/
-//   timeline/批次翻已发布），不关心"怎么走到可执行态"这段——直接 SQL 把中心守卫三前提钉好（同
-//   verify-sys-mutex.js 并发 execute 用例同款手法），再调真实 /execute，内核校验/写入逻辑逐字未变，
-//   验证目标不受影响。默认执行人=dev(5)，与本文件既有 devTok 常量一致。
+// C3（方案 §4.3 全文）：publish 唯一合法入口收窄为 /sys-releases/:id/execute，语义整体切换为「确认我
+//   这一份」+ R-GATE（多人各自确认、在册人数≥1 ∧ 全员 done 才真正翻已发布，决策 7 三修下限 2→1）。本文件 §4-6/§9/§12 关注
+//   的是 _publishReleaseCoreInTxn 内核本身的校验/原子性行为（release_note 闸门/成员非空/全待上线/
+//   roster 门/timeline/批次翻已发布），不关心"怎么走到可执行态"这段——**301-M3 过渡夹具标注兑现**：
+//   旧版本直写批次级 release_assignee_* 单列钉三前提，C3 落地后单列已不驱动中心守卫，本 helper 改为
+//   走真实两段子表流：PUT executors 设两人（executorId + 固定"影子搭档" SHADOW_EXECUTOR_ID）→ SQL
+//   把两行 notify_status 置 sent（等价"已安排上线"，跳过行级通知外呼这段与本文件验证目标无关的
+//   环节）→ 影子搭档先真实调用 /execute 确认完（幂等跳过，见下方"若已 done"分支）→ 调用方指定的
+//   executorId 最后调用 /execute（带 body），R-GATE 在这次调用里被满足，真正触发发布。
+//   **幂等感知**：本 helper 可能在同一 relId 上被多次调用（本文件多处先用坏 body 验证 400/409，最后
+//   一次才用合法 body 验证 200 真发布——同一批次多次尝试）——每次调用先查当前在册行状态，已存在则跳
+//   过重复 PUT（避免撞 PUT executors 闸①EXECUTORS_LOCKED）、影子搭档已 done 则跳过重复确认（避免打
+//   在一个已经 done 的行上撞回幂等分支，浪费一次无意义的往返）。
+//   外部契约不变：调用方仍只传 relId+body（+可选 executorId/executorTok/executorName），拿到的仍是
+//   "这次确认"的 HTTP 响应——只是现在这个响应就是触发发布的那一次真实行级确认。
+//   本文件全部经由本 helper 调用 execute() 的用例（§1/2/4-6/9/9b/10-12 等约 15+ 处）均因此自动获得新
+//   模型支持，不必逐个调用点单独重写（唯二例外：line 373 一带"已发布批次再发布→409"与 line 335 一带
+//   `.released` 字段读法，语义/契约本身在新模型下变了，需单独改，见完成报告"测试分诊清单"）。
+const SHADOW_EXECUTOR_ID = 999901;
+const shadowExecutorTok = jwt.sign({ id: SHADOW_EXECUTOR_ID, username: 'shadow-partner', display_name: '影子搭档', role: 'user' }, SECRET);
 async function publishRelease(relId, body, executorId = 5, executorTok = devTok, executorName = '开发王') {
-  await run(
-    `UPDATE sys_releases SET release_assignee_id=?, release_assignee_name=?, release_assignee_notify_status='sent'
-       WHERE id=?`,
-    [executorId, executorName, relId]
-  );
-  return call('POST', `/api/sys-releases/${relId}/execute`, executorTok, body);
+  await run(`INSERT OR IGNORE INTO users (id, username, display_name, role, status) VALUES (?, 'shadow-partner', '影子搭档', 'user', 'active')`, [SHADOW_EXECUTOR_ID]);
+  let rows = await all(`SELECT id, user_id, notify_status, exec_status FROM sys_release_executors WHERE release_id=? AND removed_at IS NULL`, [relId]);
+  if (rows.length === 0) {
+    const rSet = await call('PUT', `/api/sys-releases/${relId}/executors`, adminTok, { user_ids: [executorId, SHADOW_EXECUTOR_ID] });
+    if (rSet.status !== 200) return rSet;   // 调用方自行断言这个失败响应（罕见路径，正常用例不会走到）
+    rows = await all(`SELECT id, user_id, notify_status, exec_status FROM sys_release_executors WHERE release_id=? AND removed_at IS NULL`, [relId]);
+  }
+  const myRow = rows.find(r => r.user_id === executorId);
+  if (!myRow) throw new Error(`publishRelease helper: executorId=${executorId} 不在 release ${relId} 的在册执行人子表中`);
+  // LOW-6（Opus 预筛）：markSent 挪到"rows.length===0"分支外——统一覆盖"本 helper 刚建的两行"与"调用方
+  //   经别的路径（如先前失败的 PUT/别的 helper）已建好的 not_sent/pending 行"两种起点，对齐
+  //   verify-sys-multidev-snapshots.js / verify-sys-bug-transitions.js 两份姊妹 helper 同款写法（三份
+  //   口径统一，不再是本文件独有的"只在刚建时置 sent"窄口径）。CHECK 要求 notified_at 同步非空（单列
+  //   UPDATE 会撞 sys_release_executors 值域约束）。
+  const notSentIds = rows.filter(r => r.notify_status !== 'sent').map(r => r.id);
+  if (notSentIds.length > 0) {
+    const ph = notSentIds.map(() => '?').join(',');
+    await run(`UPDATE sys_release_executors SET notify_status='sent', notified_at=datetime('now','localtime') WHERE id IN (${ph})`, notSentIds);
+    rows = await all(`SELECT id, user_id, notify_status, exec_status FROM sys_release_executors WHERE release_id=? AND removed_at IS NULL`, [relId]);
+  }
+  const shadowRow = rows.find(r => r.user_id === SHADOW_EXECUTOR_ID);
+  if (shadowRow && shadowRow.exec_status === 'pending') {
+    // 303-M2（Opus 对抗审）：中间预确认调用不许静默吞——断言真成功且未提前触发发布（released===false，
+    //   两人批次里影子搭档必非最后一人），失败带上下文抛错方便定位。
+    const rShadow = await call('POST', `/api/sys-releases/${relId}/execute`, shadowExecutorTok, { executor_row_id: shadowRow.id });
+    if (rShadow.status !== 200 || rShadow.body.released !== false) {
+      throw new Error(`publishRelease helper: 影子搭档(row ${shadowRow.id}) 预确认异常，relId=${relId} status=${rShadow.status} body=${JSON.stringify(rShadow.body)}`);
+    }
+  }
+  return call('POST', `/api/sys-releases/${relId}/execute`, executorTok, { ...body, executor_row_id: myRow.id });
 }
 
 async function main() {
   mod.initSchema();
   await waitReady();
   // status/phone/dingtalk_user_id 列：C3 后端批改造后大量用例改走 /sys-releases/:id/execute（中心守卫要走
-  //   hasReleaseEligibility(userId)：SELECT status, role）+ §7 hotfix-publish 首次调用真走 notify-executor
-  //   同款抢占+外呼服务（sendReleaseNotifyAndWriteback：SELECT id, display_name, phone, dingtalk_user_id）。
+  //   hasReleaseEligibility(userId)：SELECT status, role——本文件 §7 hotfix-publish 闸门②③正是这个函数）。
+  //   ⭐ MED-1（Opus 预筛）注释写实：本文件不再有任何路径真调 sendReleaseNotifyAndWriteback（C2b 起
+  //   hotfix-publish 已不再复用该服务，本文件也从未直接调用 /sys-releases/:id/notify-executor 路由）——
+  //   L1 订正：这两者现已随 C4b H1 退场从生产代码整体删除，"从未调用"这句话依然成立且更彻底（不是本文件
+  //   刻意不调，是全项目已无处可调），phone/dingtalk_user_id 两列在本文件现已是历史遗留（无消费方），
+  //   status 列仍被 hasReleaseEligibility 真实消费，继续保留 CREATE TABLE 原样未做清理（不在本次改造范围）。
   await run(`CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT, status TEXT DEFAULT 'active', phone TEXT, dingtalk_user_id TEXT)`);
-  await run(`INSERT INTO users (id, username, display_name, role, status) VALUES (1,'admin','管理员','admin','active'),(5,'dev','开发王','user','active'),(13,'wangtaotao','示例对接人','user','active')`);
+  // id=20：C2b hotfix-publish 执行人闸门测试用第三个合格用户（子表聚合/软删行不出现场景需要 ≥3 名合格
+  //   执行人轮换，5/13 两个不够构造"移除一人换一人"的场景）。
+  await run(`INSERT INTO users (id, username, display_name, role, status) VALUES (1,'admin','管理员','admin','active'),(5,'dev','开发王','user','active'),(13,'wangtaotao','示例对接人','user','active'),(20,'dev20','开发丙','user','active')`);
   await new Promise((res) => { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = app.listen(0, () => { port = server.address().port; res(); }); });
 
   // 当天号前缀（与后端 strftime 同源）
@@ -271,7 +337,10 @@ async function main() {
   // relA 当前只有 i1。先把 i2 加回（验收回 relA 多单发布）
   await call('POST', `/api/sys-releases/${relA}/add-issues`, adminTok, { issue_ids: [i2] });
   // 闸门：批次无 release_note/version_tag，直接 publish 不带 → 400（C3 改走 /execute，publishRelease
-  //   helper 已同步把中心守卫三前提钉好，测试目标——release_note 闸门本身——不受影响）
+  //   helper 已同步走真实两段子表流把中心守卫执行人闸（actor 在册∧在册人数≥1∧全员 exec_status=done，
+  //   决策 7 三修下限 2→1）钉好，测试目标——release_note 闸门本身（_publishReleaseCoreInTxn 内部闸门
+  //   ③）——不受影响，LOW-5 订正：
+  //   旧措辞"三前提"是改造前单列比对时代的说法，新模型不再是三个平行前提，已随口径更新）
   r = await publishRelease(relA, {});
   assert.strictEqual(r.status, 400); assert.strictEqual(r.body.code, 'RELEASE_NOTE_REQUIRED');
   ok('发布缺上线说明 → 400 RELEASE_NOTE_REQUIRED');
@@ -300,7 +369,9 @@ async function main() {
   //   i1/i2 均由 seedToReady() 走真实 assign→estimate→submit→accept 全流程，roster 天然满足，见函数定义）
   r = await publishRelease(relA, { release_note: '6月版上线A', version_tag: 'v2.0.0' });
   assert.strictEqual(r.status, 200, '发布 200, got ' + r.status + ' ' + JSON.stringify(r.body));
-  assert.strictEqual(r.body.count, 2); assert.deepStrictEqual(r.body.released.sort(), [i1, i2].sort());
+  // C3：released 字段改为布尔（是否因本次确认触发发布），issue_id 数组挪到 released_issue_ids。
+  assert.strictEqual(r.body.released, true, '发布响应 released=true（布尔，C3 新契约）');
+  assert.strictEqual(r.body.count, 2); assert.deepStrictEqual(r.body.released_issue_ids.sort(), [i1, i2].sort());
   const ra = await relRow(relA);
   assert.strictEqual(ra.status, '已发布'); assert.ok(ra.released_at, '批次 released_at 落');
   assert.strictEqual(ra.release_note, '6月版上线A'); assert.strictEqual(ra.version_tag, 'v2.0.0');
@@ -338,9 +409,23 @@ async function main() {
   }
 
   // ── 6. 已发布批次再操作 ──────────
+  // ⭐ 断言过时→改写（C3，测试分诊）：旧版本"已发布批次再发布 → 409 RELEASE_NOT_PLANNING"建立在"单人
+  //   一次性发布"的旧模型上——新模型下"再次点确认"是同一个人对同一行的重复请求，命中的是幂等三分诊
+  //   ②（done 优先于通知态，v1.3·M-b），返回 200 幂等成功而非报错；已发布批次真正的"不能再动"体现在
+  //   add-issues/remove-issues 这类批次级写操作上（下方两条断言不变，那两个端点自身的 RELEASE_NOT_PLANNING
+  //   闸门未受本次改造影响）。改为断言新的正确行为：已发布批次的原执行人再次调用 execute() → 200 幂等
+  //   （my_status='done'/already=true/released=true/pending_count=0），零副作用（不产生新的 timeline/
+  //   不改变批次状态）。
+  const relATlCountBefore = (await get(`SELECT COUNT(*) AS c FROM sys_issue_timeline WHERE ref_id=? AND action_code='release_executor_done'`, [relA])).c;
   r = await publishRelease(relA, { release_note: 'x', version_tag: 'y' });
-  assert.strictEqual(r.status, 409); assert.strictEqual(r.body.code, 'RELEASE_NOT_PLANNING');
-  ok('已发布批次再发布 → 409 RELEASE_NOT_PLANNING');
+  assert.strictEqual(r.status, 200, `已发布批次再次确认应 200(幂等), got ${r.status} ${JSON.stringify(r.body)}`);
+  assert.strictEqual(r.body.my_status, 'done', '已发布批次再次确认 my_status=done');
+  assert.strictEqual(r.body.already, true, '已发布批次再次确认 already=true（幂等，非新动作）');
+  assert.strictEqual(r.body.released, true, '已发布批次再次确认 released=true（如实反映批次已发布）');
+  assert.strictEqual(r.body.pending_count, 0, '已发布批次再次确认 pending_count=0（全员早已 done）');
+  const relATlCountAfter = (await get(`SELECT COUNT(*) AS c FROM sys_issue_timeline WHERE ref_id=? AND action_code='release_executor_done'`, [relA])).c;
+  assert.strictEqual(relATlCountAfter, relATlCountBefore, '幂等确认零副作用：不新增"确认完成"timeline（该分支是纯读回滚，不写入）');
+  ok('已发布批次再次确认（原执行人重复点）→ 200 幂等成功（my_status=done/already=true/released=true），零副作用（C3 新模型：批次级"不能再动"体现在 add-issues/remove-issues 端点自身闸门，非 execute 端点，见下方两条）');
   const iNew = await seedToReady();
   r = await call('POST', `/api/sys-releases/${relA}/add-issues`, adminTok, { issue_ids: [iNew] });
   assert.strictEqual(r.status, 409); assert.strictEqual(r.body.code, 'RELEASE_NOT_PLANNING');
@@ -354,147 +439,277 @@ async function main() {
   assert.strictEqual(r.status, 409); assert.strictEqual(r.body.code, 'RELEASE_EMPTY');
   ok('空批次发布 → 409 RELEASE_EMPTY');
 
-  // ── 7. hotfix-publish（C3 重写：§6.7 两阶段语义 + 7 态响应表 + 并发首次调用）──────────
-  //   ⚠️ 断言反转（收窄后"返回即已安排"语义）：hotfix-publish 不再直接翻已上线（那是第①阶段建单+加单+
-  //   抢占发送权，真正发布要等被通知的值班执行人调用 /execute）——响应 200（非 201）+ 统一字段
-  //   release_id/notify_status/created_new/notification_attempted。
+  // ── 7. hotfix-publish（C3 重写 + C2b 改造：方案 v1.7 §4.4 改造 2b/10——去自动定人+子表聚合响应）─────
+  //   ⚠️ 断言全面重写（C2b）：本端点不再复用批次级 preemptReleaseNotifySend（L1 订正：该函数已随 C4b
+  //   H1 退场整体删除，此处是历史设计记录）查排班自动定人，改收
+  //   `executors[]`（admin 选人弹窗产出）→「建单+加单+写执行人子表」单事务原子提交；**通知整体移出
+  //   本端点**（不再有②事务外通知阶段），响应不含 notify_status/notification_attempted/notify_error
+  //   等"已通知"暗示字段，只带子表聚合 executors 数组（同 PUT executors 响应形状）。旧版本节测试的
+  //   NO_ELIGIBLE_DUTY_ROSTER/sending/sent/failed/stale/not_sent 五态幂等分支全部建立在"自动查排班+
+  //   自动外呼"这条已被移除的路径上——**断言过时（非实现错）**：验证目标本身（排班自动定人/自动外呼）
+  //   已被本次改造字面移除，不是这次改动把它测挂了，故全部改写为 C2b 新行为断言，不保留旧夹具。
+  //   "重复调用"分支的 idempotent/hint 判定逻辑本身**未改**（仍读 rel.ns 批次级旧列，见 index.js 路由
+  //   头部注释"改造10"段的flagged决策），故 [7-②]～[7-④] 沿用相同的 SQL 直改 notify_status 构造五态
+  //   手法，只是给每次调用体加上 executors[] 字段（输入面校验统一发生在最前，重复调用分支虽不消费该
+  //   字段但仍须通过形状校验），并新增对 executors 子表聚合数组的断言（改造10 的正面验证）。
+
+  // [7-①] hotfix 正常链：executors=[5,13] 两人首次调用 → 200·建单+加单+写执行人子表原子提交（决策 7
+  //   三修后 1 人亦合法，本用例选 2 人纯粹是覆盖多人形态，非闸门强制下限——见下方 [7-②负]/[7-②正]
+  //   对人数闸本身的精确判定），响应不含任何
+  //   "已通知"暗示；批次级 10 列（release_assignee_*）除 notify_status 保持 DDL 默认 'not_sent' 外全 NULL
+  //   （C2b 反模式禁双写：本端点绝不写批次级列）；子表 N 行均 not_sent/pending。
+  // ⭐ LOW-6（Opus 预筛）断言补回：planned_date 这一列仍由本端点写入（date('now','localtime')，C2b 未
+  // 动这段——虽已不再驱动自动查排班，但展示/统计口径仍需要它），删掉排班相关断言时被连带误删，此处补回。
   const todayRow = await get("SELECT date('now','localtime') AS d");
   const today = todayRow.d;
-
-  // [7-前置·抢占失败回滚·C3 裁定修正 2026-07-29] 方案 §6.7 首段字面：①阶段"建单+加单+抢占发送权"是
-  //   原子提交——抢占失败（当日无在册值班人）= ①整体失败，须回滚本次新建的批次+绑单，409，不留
-  //   not_sent 悬单（"不回滚建单"字面只限定②外部通知失败，不覆盖①阶段内的抢占失败）。此刻尚未插入
-  //   今日排班行，天然满足"无在册值班人"这一抢占失败前提，验证目标=库内零残留（真回滚发生）。
-  const noRosterCountBefore = await get(`SELECT COUNT(*) AS c FROM sys_releases`);
-  const hfNoRoster = await seedToReady();
-  r = await call('POST', `/api/sys-issues/${hfNoRoster}/hotfix-publish`, adminTok, { release_note: '紧急修复（无排班）', version_tag: 'v2.0.0-noroster' });
-  assert.strictEqual(r.status, 409, `[7-前置] 无排班应 409, got ${r.status} ${JSON.stringify(r.body)}`);
-  assert.strictEqual(r.body.code, 'NO_ELIGIBLE_DUTY_ROSTER', '[7-前置] code=NO_ELIGIBLE_DUTY_ROSTER');
-  assert.strictEqual(r.body.release_id, null, '[7-前置] 响应字段完整但置空：release_id=null');
-  assert.strictEqual(r.body.notify_status, null, '[7-前置] notify_status=null');
-  assert.strictEqual(r.body.created_new, false, '[7-前置] created_new=false');
-  assert.strictEqual(r.body.notification_attempted, false, '[7-前置] notification_attempted=false');
-  const noRosterCountAfter = await get(`SELECT COUNT(*) AS c FROM sys_releases`);
-  assert.strictEqual(noRosterCountAfter.c, noRosterCountBefore.c, '[7-前置] 库内零残留：sys_releases 未新增行（①阶段整体回滚，真回滚发生）');
-  const hfNoRosterIssueRow = await get('SELECT status, release_id FROM sys_issues WHERE id=?', [hfNoRoster]);
-  assert.strictEqual(hfNoRosterIssueRow.status, '待上线', '[7-前置] issue 状态未变（仍待上线）');
-  assert.strictEqual(hfNoRosterIssueRow.release_id, null, '[7-前置] issue release_id 仍 NULL（未绑单，回滚生效）');
-  ok('[7-前置] 抢占失败（当日无在册值班人）：409 NO_ELIGIBLE_DUTY_ROSTER，库内零残留（sys_releases 无新增 + issue 状态/release_id 未变，①阶段原子回滚，不留 not_sent 悬单）');
-
-  // 补排班后重试同一 issue：验证 409 后幂等可重来（issue 未被"报废"，回滚彻底可重新发起）。
-  await run(
-    `INSERT INTO sys_release_duty_roster (duty_date, user_id, user_name, created_by, created_by_name) VALUES (?, 5, '开发王', 1, '管理员')`,
-    [today]
-  );
-  r = await call('POST', `/api/sys-issues/${hfNoRoster}/hotfix-publish`, adminTok, { release_note: '紧急修复（补排班重试）', version_tag: 'v2.0.0-retry' });
-  assert.strictEqual(r.status, 200, `[7-前置-重试] 补排班后重试应 200, got ${r.status} ${JSON.stringify(r.body)}`);
-  assert.strictEqual(r.body.created_new, true, '[7-前置-重试] created_new=true（同一 issue 重新真建单）');
-  assert.strictEqual(r.body.notification_attempted, true, '[7-前置-重试] notification_attempted=true（排班已补，抢占+外呼真走通）');
-  assert.strictEqual(r.body.notify_status, 'sent', '[7-前置-重试] notify_status=sent');
-  ok('[7-前置-重试] 补排班后重试同一 issue：200 created_new=true 全链走通（验证 409 回滚彻底，issue 可重新发起应急上线，非报废态）');
-
-  // [7-①] 无 release_id：200·新建单+抢占+发通知（当日有排班·stub sendIssueDingtalkRaw 恒成功）
   const hf = await seedToReady();
-  r = await call('POST', `/api/sys-issues/${hf}/hotfix-publish`, adminTok, { release_note: '紧急修复', version_tag: 'v2.0.1' });
-  assert.strictEqual(r.status, 200, `[7-①] hotfix 应 200（C3 收窄，非 201）, got ${r.status} ${JSON.stringify(r.body)}`);
+  r = await call('POST', `/api/sys-issues/${hf}/hotfix-publish`, adminTok, { release_note: '紧急修复', version_tag: 'v2.0.1', executors: [5, 13] });
+  assert.strictEqual(r.status, 200, `[7-①] hotfix 应 200, got ${r.status} ${JSON.stringify(r.body)}`);
   assert.strictEqual(r.body.created_new, true, '[7-①] created_new=true');
-  assert.strictEqual(r.body.notification_attempted, true, '[7-①] notification_attempted=true（当日有排班，真走了抢占+外呼）');
-  assert.strictEqual(r.body.notify_status, 'sent', '[7-①] notify_status=sent（stub 发送恒成功）');
+  assert.strictEqual(r.body.notify_status, undefined, '[7-①] 响应不含 notify_status（C2b：通知已整体移出本端点，不留"已通知"暗示字段）');
+  assert.strictEqual(r.body.notification_attempted, undefined, '[7-①] 响应不含 notification_attempted');
+  assert.strictEqual(r.body.notify_error, undefined, '[7-①] 响应不含 notify_error');
+  assert.ok(Array.isArray(r.body.executors), '[7-①] 响应含 executors 数组');
+  assert.strictEqual(r.body.executors.length, 2, `[7-①] executors 数组含 2 行, 实际 ${r.body.executors.length}`);
+  assert.ok(r.body.executors.every(e => e.notify_status === 'not_sent' && e.exec_status === 'pending'), '[7-①] 每行均 not_sent/pending（DDL 默认值，未被通知触碰）');
   const hfIssue = await issueRow(hf);
-  assert.strictEqual(hfIssue.status, '待上线', '[7-①] 单仍停在待上线（两阶段语义，未直接翻已上线）');
+  assert.strictEqual(hfIssue.status, '待上线', '[7-①] 单仍停在待上线（原子建单不直接翻已上线）');
   assert.ok(hfIssue.release_id, '[7-①] hotfix issue 挂上自动批次');
-  const hfRel = await get('SELECT is_hotfix, release_kind, status, release_note, release_assignee_id, release_assignee_notify_status AS ns, planned_date FROM sys_releases WHERE id=?', [hfIssue.release_id]);
+  const hfRel = await get(
+    `SELECT is_hotfix, release_kind, status, release_note, planned_date,
+            release_assignee_id, release_assignee_name, release_assignee_notify_status AS ns,
+            release_assignee_notify_started_at, release_assignee_notified_at, release_assignee_notify_message_key,
+            release_assignee_notify_error, release_assignee_notify_token, release_assignee_read_at
+       FROM sys_releases WHERE id=?`,
+    [hfIssue.release_id]);
   assert.strictEqual(hfRel.is_hotfix, 1, '[7-①] hotfix 批次 is_hotfix=1');
-  assert.strictEqual(hfRel.release_kind, 'emergency', '[7-①] release_kind=emergency（§6.12 emergency_display 口径）');
+  assert.strictEqual(hfRel.release_kind, 'emergency', '[7-①] release_kind=emergency（§6.12 emergency_display 口径，10 列之一但非"通知/执行人"字段，本身就该被设为 emergency，不参与下面的 NULL 断言组）');
   assert.strictEqual(hfRel.status, '计划中', '[7-①] 批次仍计划中（未发布）');
+  assert.strictEqual(hfRel.planned_date, today, '[7-①] planned_date=建单当日（该列仍由本端点写入，C2b 未动，此处需要看守断言）');
   assert.strictEqual(hfRel.release_note, '紧急修复');
-  assert.strictEqual(hfRel.release_assignee_id, 5, '[7-①] 抢占成功，执行人=当日排班 dev5');
-  assert.strictEqual(hfRel.ns, 'sent');
-  assert.strictEqual(hfRel.planned_date, today, '[7-①] planned_date=建单当日（供抢占查排班）');
-  ok('[7-①] 无 release_id：200·新建单+加单+抢占发送权+外呼成功（created_new=true/notification_attempted=true/notify_status=sent），单仍待上线（两阶段，真正发布要等 /execute）');
+  // 批次级 10 列（方案 §4.2「release_assignee_* 10 列」= 上方 9 个 release_assignee_ 前缀列 + release_kind）：
+  //   C2b 反模式禁双写——本端点全程不碰这 9 列（release_kind 是第 10 列，但它是批次类型标记非通知/
+  //   执行人字段，本端点仍需要合法写它=emergency，已在上面单独断言，不入本组 NULL 断言）。⚠️ sys_issues
+  //   另有一个同名前缀的 `release_assignee_notify_sent_by` 列（角色权限重构 C2b ALTER 补的，在 issue 主表，
+  //   非批次表 sys_releases，两者字面撞名极易混淆——本组特意不查它，因为它根本不属于"批次级 10 列"）。
+  assert.strictEqual(hfRel.release_assignee_id, null, '[7-①] 批次级 release_assignee_id 仍 NULL');
+  assert.strictEqual(hfRel.release_assignee_name, null, '[7-①] 批次级 release_assignee_name 仍 NULL');
+  assert.strictEqual(hfRel.ns, 'not_sent', "[7-①] 批次级 notify_status 仍是 DDL 默认值 'not_sent'（该列 NOT NULL DEFAULT，非 NULL 但同样未被本端点写过，与其余 8 列的空态同一件事）");
+  assert.strictEqual(hfRel.release_assignee_notify_started_at, null, '[7-①] release_assignee_notify_started_at 仍 NULL');
+  assert.strictEqual(hfRel.release_assignee_notified_at, null, '[7-①] release_assignee_notified_at 仍 NULL');
+  assert.strictEqual(hfRel.release_assignee_notify_message_key, null, '[7-①] release_assignee_notify_message_key 仍 NULL');
+  assert.strictEqual(hfRel.release_assignee_notify_error, null, '[7-①] release_assignee_notify_error 仍 NULL');
+  assert.strictEqual(hfRel.release_assignee_notify_token, null, '[7-①] release_assignee_notify_token 仍 NULL');
+  assert.strictEqual(hfRel.release_assignee_read_at, null, '[7-①] release_assignee_read_at 仍 NULL');
+  const hfExecRows = await all(`SELECT user_id, user_name, notify_status, exec_status, added_by FROM sys_release_executors WHERE release_id=? ORDER BY user_id`, [hfIssue.release_id]);
+  assert.strictEqual(hfExecRows.length, 2, '[7-①] 子表恰 2 行');
+  assert.deepStrictEqual(hfExecRows.map(x => x.user_id).sort((a, b) => a - b), [5, 13], '[7-①] 子表 user_id 与 executors[] 输入一致');
+  assert.ok(hfExecRows.every(x => x.notify_status === 'not_sent' && x.exec_status === 'pending' && x.added_by === 1), '[7-①] 子表每行 not_sent/pending/added_by=actor(admin=1)');
+  ok('[7-①] hotfix 正常链：executors[5,13] 首次调用 → 200 原子建单+加单+写执行人子表（2 行 not_sent/pending），响应不含任何"已通知"暗示（notify_status/notification_attempted/notify_error 均 undefined，只带 executors 数组），批次级 10 列除 notify_status 保持 DDL 默认外全 NULL（C2b 反模式禁双写坐实）');
 
-  // [7-②] 应急单 sending/sent：200 幂等·不重发
-  r = await call('POST', `/api/sys-issues/${hf}/hotfix-publish`, adminTok, { release_note: '重复调用', version_tag: 'v9' });
-  assert.strictEqual(r.status, 200, `[7-②] sent 重复调用应 200, got ${r.status} ${JSON.stringify(r.body)}`);
-  assert.strictEqual(r.body.created_new, false, '[7-②] created_new=false');
-  assert.strictEqual(r.body.notification_attempted, false, '[7-②] notification_attempted=false（本端点不重发）');
-  assert.strictEqual(r.body.idempotent, true, '[7-②] idempotent=true');
-  assert.strictEqual(r.body.release_id, hfIssue.release_id, '[7-②] release_id 与首次一致（未建新批次）');
-  await run(`UPDATE sys_releases SET release_assignee_notify_status='sending' WHERE id=?`, [hfIssue.release_id]);
-  r = await call('POST', `/api/sys-issues/${hf}/hotfix-publish`, adminTok, { release_note: '重复调用2' });
-  assert.strictEqual(r.status, 200, `[7-②] sending 重复调用应 200, got ${r.status} ${JSON.stringify(r.body)}`);
-  assert.strictEqual(r.body.idempotent, true, '[7-②] sending 态同样幂等标记');
-  await run(`UPDATE sys_releases SET release_assignee_notify_status='sent' WHERE id=?`, [hfIssue.release_id]);   // 复原
-  ok('[7-②] 应急单 sending/sent：200 幂等·返回现状·不重发（created_new=false/notification_attempted=false）');
+  // [7-②负]（反转·用户拍板决策 7 第三次修正，方案 v1.7 二订）：原断言"executors 去重后<2 → 400
+  // EXECUTORS_TOO_FEW"（用 [5,5] 去重后仅 1 人来构造）钉的是三修前的旧下限——下限降到 1 人后，
+  // 去重后 1 人不再是负例（见下方 [7-②正]），红灯诊断=断言过时非实现错（[[feedback_test_assertion_
+  // self_error]]）。人数闸真正的负例收窄到去重后 0 人（空数组），同 verify-sys-release-executors.js
+  // [2-②负] 同款反转口径。
+  const hfEmpty = await seedToReady();
+  const emptyCountBefore = (await get(`SELECT COUNT(*) AS c FROM sys_releases`)).c;
+  r = await call('POST', `/api/sys-issues/${hfEmpty}/hotfix-publish`, adminTok, { release_note: '空集合', executors: [] });
+  assert.strictEqual(r.status, 400, `[7-②负] 期望 400, got ${r.status} ${JSON.stringify(r.body)}`);
+  assert.strictEqual(r.body.code, 'EXECUTORS_TOO_FEW', `[7-②负] code 应为 EXECUTORS_TOO_FEW，实际 ${r.body.code}`);
+  const emptyCountAfter = (await get(`SELECT COUNT(*) AS c FROM sys_releases`)).c;
+  assert.strictEqual(emptyCountAfter, emptyCountBefore, '[7-②负] 库内零残留：sys_releases 未新增行（人数闸在建批次之前拦截，不占用批次号）');
+  const hfEmptyRow = await issueRow(hfEmpty);
+  assert.strictEqual(hfEmptyRow.status, '待上线', '[7-②负] issue 状态未变');
+  assert.strictEqual(hfEmptyRow.release_id, null, '[7-②负] issue release_id 仍 NULL（未绑单）');
+  ok('[7-②负]（反转：原"去重后1人→400"已过时，人数闸负例收窄到空数组）executors=[] → 400 EXECUTORS_TOO_FEW，库内零残留');
 
-  // [7-③] 应急单 failed/stale：200·返回现状 + 提示「请用『安排上线』重试」
-  await run(`UPDATE sys_releases SET release_assignee_notify_status='failed', release_assignee_notify_error='模拟失败' WHERE id=?`, [hfIssue.release_id]);
-  r = await call('POST', `/api/sys-issues/${hf}/hotfix-publish`, adminTok, { release_note: '重复调用3' });
-  assert.strictEqual(r.status, 200, `[7-③] failed 重复调用应 200, got ${r.status} ${JSON.stringify(r.body)}`);
-  assert.strictEqual(r.body.notify_status, 'failed', '[7-③] 返回现状 notify_status=failed');
-  assert.strictEqual(r.body.notification_attempted, false, '[7-③] 不重发');
-  assert.ok(/安排上线/.test(r.body.hint || '') && /重试/.test(r.body.hint || ''), '[7-③] hint 提示走「安排上线」重试');
-  ok('[7-③] 应急单 failed：200·返回现状 + hint 提示「安排上线」重试，本端点不重发');
+  // [7-②正]（新增·决策 7 三修）：executors **去重后**恰 1 人 → 200 成功建单，子表新增 1 行。沿用
+  // LOW-5①原本的真去重输入 [5,5]（原始长度 2，去重后仅 1 人）——同一份输入，此刻验证的是"去重后 1 人
+  // 应放行"而非"应拦截"，两个方向共用同一个能证伪"闸门判的是原始长度还是去重后集合大小"的输入构造。
+  const hfSingle = await seedToReady();
+  r = await call('POST', `/api/sys-issues/${hfSingle}/hotfix-publish`, adminTok, { release_note: '单人成功', executors: [5, 5] });
+  assert.strictEqual(r.status, 200, `[7-②正] 期望 200, got ${r.status} ${JSON.stringify(r.body)}`);
+  assert.strictEqual(r.body.created_new, true, '[7-②正] created_new=true');
+  const hfSingleExecRows = await all(`SELECT user_id, notify_status, exec_status FROM sys_release_executors WHERE release_id=?`, [r.body.release_id]);
+  assert.strictEqual(hfSingleExecRows.length, 1, '[7-②正] 子表恰 1 行（[5,5] 去重后仅 1 人，非 2 行）');
+  assert.strictEqual(hfSingleExecRows[0].user_id, 5, '[7-②正] 子表行 user_id=5');
+  assert.ok(hfSingleExecRows[0].notify_status === 'not_sent' && hfSingleExecRows[0].exec_status === 'pending', '[7-②正] 子表行 not_sent/pending（DDL 默认值）');
+  ok('[7-②正]（新增·决策 7 三修）人数闸正例：executors=[5,5]（去重后仅 1 人）→ 200，子表新增 1 行（单人批次本身合法，同 PUT executors 闸②同码同"去重后"口径）');
 
-  // [7-③b·对抗审"假绿猎手"视角裁定必修 D] 应急单 stale：独立真实调用验证——不满足于"stale 在代码里与
-  //   failed 走同一 ternary 分支"这一静态读代码推断，必须真实调一次 hotfix-publish 验证响应确实如此。
-  //   stale 本身如何产生（sending 悬挂超阈值的惰性转换）已在 verify-sys-release-batch.js ⑪「崩溃恢复链」
-  //   组真实覆盖，此处不重复造"时间流逝"夹具，直接 SQL 落 stale 结果态，只关心 hotfix-publish 面对这个
-  //   状态的响应本身。
-  await run(`UPDATE sys_releases SET release_assignee_notify_status='stale', release_assignee_notify_error=NULL WHERE id=?`, [hfIssue.release_id]);
-  r = await call('POST', `/api/sys-issues/${hf}/hotfix-publish`, adminTok, { release_note: '重复调用3b' });
-  assert.strictEqual(r.status, 200, `[7-③b] stale 重复调用应 200, got ${r.status} ${JSON.stringify(r.body)}`);
-  assert.strictEqual(r.body.release_id, hfIssue.release_id, '[7-③b] release_id 不变（仍指向同一应急单，未误建新单）');
-  assert.strictEqual(r.body.notify_status, 'stale', '[7-③b] 返回现状 notify_status=stale');
-  assert.strictEqual(r.body.created_new, false, '[7-③b] created_new=false（重复调用非首次）');
-  assert.strictEqual(r.body.notification_attempted, false, '[7-③b] 不重发（本端点一律不自动重发）');
-  assert.ok(/安排上线/.test(r.body.hint || '') && /重试/.test(r.body.hint || ''), '[7-③b] hint 提示走「安排上线」重试');
-  ok('[7-③b] 应急单 stale：200·release_id 不变/notify_status=stale/created_new=false/notification_attempted=false + hint「安排上线」重试——独立真实调用验证（此前仅测 failed，stale 只能靠"代码同分支"推断，未有真实调用逐项断言）');
+  // [7-③] 资格闸负例：executors 含无资格用户（admin id=1）→ 400 EXECUTOR_NOT_ELIGIBLE，库内零残留。
+  const hfIneligible = await seedToReady();
+  const ineligibleCountBefore = (await get(`SELECT COUNT(*) AS c FROM sys_releases`)).c;
+  r = await call('POST', `/api/sys-issues/${hfIneligible}/hotfix-publish`, adminTok, { release_note: '资格不符', executors: [5, 1] });
+  assert.strictEqual(r.status, 400, `[7-③] 期望 400, got ${r.status} ${JSON.stringify(r.body)}`);
+  assert.strictEqual(r.body.code, 'EXECUTOR_NOT_ELIGIBLE', `[7-③] code 应为 EXECUTOR_NOT_ELIGIBLE，实际 ${r.body.code}`);
+  const ineligibleCountAfter = (await get(`SELECT COUNT(*) AS c FROM sys_releases`)).c;
+  assert.strictEqual(ineligibleCountAfter, ineligibleCountBefore, '[7-③] 库内零残留：sys_releases 未新增行');
+  const hfIneligibleRow = await issueRow(hfIneligible);
+  assert.strictEqual(hfIneligibleRow.release_id, null, '[7-③] issue release_id 仍 NULL（未绑单，含合格的 5 也未单独落库——整体拒绝同 PUT 闸③精神）');
+  ok('[7-③] 资格闸负例：executors=[5,1]（1=admin 无资格，同 PUT executors 闸③同函数 hasReleaseEligibility）→ 400 EXECUTOR_NOT_ELIGIBLE，库内零残留');
 
-  // [7-④·v3.4 新增] 应急单 not_sent（cancel-schedule/加单/移单/改日期均会重置到此态，此处用 SQL 模拟）：
-  //   200·返回现状 + 提示「请用『安排上线』重新发送」
-  await run(`UPDATE sys_releases SET release_assignee_id=NULL, release_assignee_name=NULL, release_assignee_notify_status='not_sent', release_assignee_notify_error=NULL WHERE id=?`, [hfIssue.release_id]);
-  r = await call('POST', `/api/sys-issues/${hf}/hotfix-publish`, adminTok, { release_note: '重复调用4' });
-  assert.strictEqual(r.status, 200, `[7-④] not_sent 重复调用应 200, got ${r.status} ${JSON.stringify(r.body)}`);
-  assert.strictEqual(r.body.notify_status, 'not_sent', '[7-④] 返回现状 notify_status=not_sent');
-  assert.strictEqual(r.body.notification_attempted, false, '[7-④] 不自动重发');
-  assert.ok(/安排上线/.test(r.body.hint || '') && /重新发送/.test(r.body.hint || ''), '[7-④] hint 提示走「安排上线」重新发送');
-  ok('[7-④·v3.4新增] 应急单 not_sent：200·返回现状 + hint 提示「安排上线」重新发送（可达：cancel-schedule/加单/移单/改期均会重置到此态）');
+  // [7-④] executors 缺失/畸形 → 400 INVALID_USER_IDS（三变体：缺字段/非数组/元素非法），均于任何 DB 访问
+  //   之前的纯输入面校验拦下，零残留。
+  const hfBad = await seedToReady();
+  const badCountBefore = (await get(`SELECT COUNT(*) AS c FROM sys_releases`)).c;
+  r = await call('POST', `/api/sys-issues/${hfBad}/hotfix-publish`, adminTok, { release_note: '缺executors' });
+  assert.strictEqual(r.status, 400, `[7-④a] 期望 400, got ${r.status} ${JSON.stringify(r.body)}`);
+  assert.strictEqual(r.body.code, 'INVALID_USER_IDS', `[7-④a] code 应为 INVALID_USER_IDS，实际 ${r.body.code}`);
+  r = await call('POST', `/api/sys-issues/${hfBad}/hotfix-publish`, adminTok, { release_note: '非数组', executors: 'not-an-array' });
+  assert.strictEqual(r.status, 400, `[7-④b] 期望 400, got ${r.status} ${JSON.stringify(r.body)}`);
+  assert.strictEqual(r.body.code, 'INVALID_USER_IDS', `[7-④b] code 应为 INVALID_USER_IDS，实际 ${r.body.code}`);
+  r = await call('POST', `/api/sys-issues/${hfBad}/hotfix-publish`, adminTok, { release_note: '含非法元素', executors: [5, 0] });
+  assert.strictEqual(r.status, 400, `[7-④c] 期望 400, got ${r.status} ${JSON.stringify(r.body)}`);
+  assert.strictEqual(r.body.code, 'INVALID_USER_IDS', `[7-④c] code 应为 INVALID_USER_IDS，实际 ${r.body.code}`);
+  const badCountAfter = (await get(`SELECT COUNT(*) AS c FROM sys_releases`)).c;
+  assert.strictEqual(badCountAfter, badCountBefore, '[7-④] 三变体均库内零残留（纯输入面校验，早于任何 DB 访问）');
+  const hfBadRow = await issueRow(hfBad);
+  assert.strictEqual(hfBadRow.release_id, null, '[7-④] issue release_id 仍 NULL');
+  ok('[7-④] executors 缺失（未传字段）/畸形（非数组/元素非法 0）→ 均 400 INVALID_USER_IDS（同 PUT executors 输入面同码），库内零残留');
 
-  // [7-⑤] 应急单已发布：409（真正走完 execute 发布，需先恢复 sent 态并补在册开发行满足 RELEASE 中心守卫）
-  await run(`UPDATE sys_releases SET release_assignee_id=5, release_assignee_name='开发王', release_assignee_notify_status='sent' WHERE id=?`, [hfIssue.release_id]);
-  const rExecHf = await call('POST', `/api/sys-releases/${hfIssue.release_id}/execute`, devTok, { release_note: '紧急修复真发布' });
-  assert.strictEqual(rExecHf.status, 200, `[7-⑤前置] execute 真发布应 200, got ${rExecHf.status} ${JSON.stringify(rExecHf.body)}`);
-  r = await call('POST', `/api/sys-issues/${hf}/hotfix-publish`, adminTok, { release_note: '已发布后重试' });
-  assert.strictEqual(r.status, 409, `[7-⑤] 应急单已发布应 409, got ${r.status} ${JSON.stringify(r.body)}`);
-  assert.strictEqual(r.body.code, 'ISSUE_ALREADY_RELEASED', '[7-⑤] code=ISSUE_ALREADY_RELEASED');
-  ok('[7-⑤] 应急单已发布：409 ISSUE_ALREADY_RELEASED（任务已上线，不可再建应急单）');
+  // [7-⑤] 重复调用五态：C4a（方案 §4.4 登记①）收口——notify_status/idempotent/hint 判定改子表聚合语义，
+  //   不再读批次级旧列 rel.ns（该列 C2b 后无人写，出厂即 DDL 默认 'not_sent'，本组不再对它做任何 SQL 构造）。
+  //   五态改为直接 UPDATE 子表两行（[7-①] 落库的 5/13）的 notify_status（+ CHECK 要求的配套列），每次调用体
+  //   仍需带 executors[] 字段通过输入面校验（该字段在重复调用分支不被消费）。hint 统一改为"请到批次详情逐人
+  //   发通知"（新 UI 范式无"重新发送"单点动作），idempotent 判据="在册行至少一行 sent/sending"。
+  await run(`UPDATE sys_release_executors SET notify_status='sent', notified_at=datetime('now','localtime') WHERE release_id=? AND removed_at IS NULL`, [hfIssue.release_id]);
+  r = await call('POST', `/api/sys-issues/${hf}/hotfix-publish`, adminTok, { release_note: '重复调用', version_tag: 'v9', executors: [5, 13] });
+  assert.strictEqual(r.status, 200, `[7-⑤a] sent 重复调用应 200, got ${r.status} ${JSON.stringify(r.body)}`);
+  assert.strictEqual(r.body.created_new, false, '[7-⑤a] created_new=false');
+  assert.strictEqual(r.body.notification_attempted, false, '[7-⑤a] notification_attempted=false（本端点不重发，字段本身仍保留——未在此响应形状里一并去除，见 index.js 头部注释）');
+  assert.strictEqual(r.body.idempotent, true, '[7-⑤a] idempotent=true（子表两行均 sent）');
+  assert.strictEqual(r.body.notify_status, 'sent', '[7-⑤a] notify_status=子表聚合"sent"（在册全 sent）');
+  assert.strictEqual(r.body.release_id, hfIssue.release_id, '[7-⑤a] release_id 与首次一致（未建新批次）');
+  assert.ok(Array.isArray(r.body.executors), '[7-⑤a] 改造10：响应含 executors 数组（子表聚合，替代旧列 release_assignee_id/name）');
+  assert.strictEqual(r.body.executors.length, 2, '[7-⑤a] executors 数组含在册 2 行');
+  assert.strictEqual(r.body.release_assignee_id, undefined, '[7-⑤a] 改造10：响应不再含旧列 release_assignee_id（已被 executors 数组取代）');
+  assert.strictEqual(r.body.release_assignee_name, undefined, '[7-⑤a] 改造10：响应不再含旧列 release_assignee_name');
+  // 其中一行转 sending（CHECK 要求 notify_started_at/notify_token 非空）——聚合优先级"存在 sending"命中。
+  await run(`UPDATE sys_release_executors SET notify_status='sending', notify_started_at=datetime('now','localtime'), notify_token='tok-7-5a' WHERE release_id=? AND user_id=5`, [hfIssue.release_id]);
+  r = await call('POST', `/api/sys-issues/${hf}/hotfix-publish`, adminTok, { release_note: '重复调用2', executors: [5, 13] });
+  assert.strictEqual(r.status, 200, `[7-⑤a] sending 重复调用应 200, got ${r.status} ${JSON.stringify(r.body)}`);
+  assert.strictEqual(r.body.idempotent, true, '[7-⑤a] sending 态同样幂等标记（有 sent/sending 即 idempotent）');
+  assert.strictEqual(r.body.notify_status, 'sending', '[7-⑤a] notify_status=子表聚合"sending"（优先级最高，5 号在途）');
+  await run(`UPDATE sys_release_executors SET notify_status='sent', notify_started_at=NULL, notify_token=NULL WHERE release_id=? AND user_id=5`, [hfIssue.release_id]);   // 复原
+  ok('[7-⑤a] 应急单 sending/sent：200 幂等·返回现状·不重发；notify_status/idempotent 改子表聚合语义（登记①），响应改带 executors 子表聚合数组（2 行在册），不再含旧列 release_assignee_id/name');
 
-  // [7-⑥] 非应急上线单（普通单，即已挂入 relB 这种 admin 建的常规批次）：409（请勿混用应急口）
+  await run(`UPDATE sys_release_executors SET notify_status='failed', notify_error='模拟失败', notified_at=NULL WHERE release_id=? AND removed_at IS NULL`, [hfIssue.release_id]);
+  r = await call('POST', `/api/sys-issues/${hf}/hotfix-publish`, adminTok, { release_note: '重复调用3', executors: [5, 13] });
+  assert.strictEqual(r.status, 200, `[7-⑤b] failed 重复调用应 200, got ${r.status} ${JSON.stringify(r.body)}`);
+  assert.strictEqual(r.body.notify_status, 'failed', '[7-⑤b] 返回现状 notify_status=子表聚合"failed"（在册全 failed，无 sent/sending）');
+  assert.strictEqual(r.body.idempotent, undefined, '[7-⑤b] 无 sent/sending → 不是 idempotent（响应无该字段）');
+  assert.strictEqual(r.body.notification_attempted, false, '[7-⑤b] 不重发');
+  assert.strictEqual(r.body.hint, '请到批次详情逐人发通知', '[7-⑤b] hint 改子表聚合语义写实提示（登记①，不再指旧"安排上线"入口）');
+  ok('[7-⑤b] 应急单 failed：200·返回现状 + hint「请到批次详情逐人发通知」，本端点不重发');
+
+  await run(`UPDATE sys_release_executors SET notify_status='stale', notify_error=NULL WHERE release_id=? AND removed_at IS NULL`, [hfIssue.release_id]);
+  r = await call('POST', `/api/sys-issues/${hf}/hotfix-publish`, adminTok, { release_note: '重复调用3b', executors: [5, 13] });
+  assert.strictEqual(r.status, 200, `[7-⑤c] stale 重复调用应 200, got ${r.status} ${JSON.stringify(r.body)}`);
+  assert.strictEqual(r.body.release_id, hfIssue.release_id, '[7-⑤c] release_id 不变（仍指向同一应急单，未误建新单）');
+  // 方案 §4.3："stale 归入 failed 是刻意归并"（对 admin 而言两者动作相同——重试那一行）——聚合值不是 'stale'。
+  assert.strictEqual(r.body.notify_status, 'failed', "[7-⑤c] notify_status=子表聚合'failed'（stale 刻意归并入 failed，非 'stale' 本身，方案 §4.3 明文）");
+  assert.strictEqual(r.body.created_new, false, '[7-⑤c] created_new=false（重复调用非首次）');
+  assert.strictEqual(r.body.hint, '请到批次详情逐人发通知', '[7-⑤c] hint 改子表聚合语义写实提示（登记①）');
+  ok('[7-⑤c] 应急单 stale：200·release_id 不变/notify_status 聚合归并为 failed/created_new=false + hint「请到批次详情逐人发通知」');
+
+  await run(`UPDATE sys_release_executors SET notify_status='not_sent', notify_error=NULL, notified_at=NULL WHERE release_id=? AND removed_at IS NULL`, [hfIssue.release_id]);
+  r = await call('POST', `/api/sys-issues/${hf}/hotfix-publish`, adminTok, { release_note: '重复调用4', executors: [5, 13] });
+  assert.strictEqual(r.status, 200, `[7-⑤d] not_sent 重复调用应 200, got ${r.status} ${JSON.stringify(r.body)}`);
+  assert.strictEqual(r.body.notify_status, 'not_sent', '[7-⑤d] notify_status=子表聚合"not_sent"（在册全 not_sent）');
+  assert.strictEqual(r.body.hint, '请到批次详情逐人发通知', '[7-⑤d] hint 改子表聚合语义写实提示（登记①，不再区分"重新发送"文案）');
+  ok('[7-⑤d] 应急单 not_sent：200·返回现状 + hint「请到批次详情逐人发通知」（可达：cancel-schedule/加单/移单/改期均会重置到此态）');
+
+  // [7-⑤e] 重复调用分支子表聚合正确性专项（改造10 核心）：软删行不出现——把 hf 批次的执行人集合从
+  //   [5,13] 换成 [13,20]（PUT executors，5 被软删），再调一次 hotfix-publish（重复调用分支），响应
+  //   executors 数组应只含当前在册的 [13,20] 两行，被软删的 5 不出现。
+  const putReplace = await call('PUT', `/api/sys-releases/${hfIssue.release_id}/executors`, adminTok, { user_ids: [13, 20] });
+  assert.strictEqual(putReplace.status, 200, `[7-⑤e-fixture] PUT executors 换人应 200, got ${putReplace.status} ${JSON.stringify(putReplace.body)}`);
+  const removedRow5 = await get(`SELECT removed_at FROM sys_release_executors WHERE release_id=? AND user_id=5 ORDER BY id DESC LIMIT 1`, [hfIssue.release_id]);
+  assert.ok(removedRow5 && removedRow5.removed_at, '[7-⑤e-fixture] 用户 5 的行已软删（换人生效）');
+  r = await call('POST', `/api/sys-issues/${hf}/hotfix-publish`, adminTok, { release_note: '重复调用5', executors: [5, 13] });
+  assert.strictEqual(r.status, 200, `[7-⑤e] 期望 200, got ${r.status} ${JSON.stringify(r.body)}`);
+  assert.strictEqual(r.body.executors.length, 2, `[7-⑤e] executors 数组应恰 2 行（当前在册），实际 ${r.body.executors.length}`);
+  const execIds5e = r.body.executors.map(x => x.user_id).sort((a, b) => a - b);
+  assert.deepStrictEqual(execIds5e, [13, 20], `[7-⑤e] executors 数组应为当前在册 [13,20]，软删的 5 不出现，实际 ${JSON.stringify(execIds5e)}`);
+  ok('[7-⑤e] 重复调用分支子表聚合正确性（改造10 核心）：PUT executors 换人后（5 软删/20 新增），重复调用响应的 executors 数组只含当前在册 [13,20]，软删行不出现');
+
+  // [7-⑥] 应急单已发布：409（真正走完 execute 发布——C3 新模型：execute() 中心守卫已改口径为行级子表
+  //   多人确认，与 hotfix-publish 本身的 C2b 改造相互独立。本批次此刻在册执行人是 [13,20]（[7-⑤e]
+  //   PUT executors 换过），把两行都置 sent 后各自真实调用 execute 确认，第二人（20）触发真正发布。
+  await run(`UPDATE sys_release_executors SET notify_status='sent', notified_at=datetime('now','localtime') WHERE release_id=? AND removed_at IS NULL`, [hfIssue.release_id]);
+  const hfExecRowsFor6 = await all(`SELECT id, user_id FROM sys_release_executors WHERE release_id=? AND removed_at IS NULL`, [hfIssue.release_id]);
+  const row13For6 = hfExecRowsFor6.find(x => x.user_id === 13);
+  const row20For6 = hfExecRowsFor6.find(x => x.user_id === 20);
+  const rExec13 = await call('POST', `/api/sys-releases/${hfIssue.release_id}/execute`, liaisonTok, { executor_row_id: row13For6.id });
+  assert.strictEqual(rExec13.status, 200, `[7-⑥前置a] 13 确认应 200(还差1人), got ${rExec13.status} ${JSON.stringify(rExec13.body)}`);
+  assert.strictEqual(rExec13.body.released, false, '[7-⑥前置a] 13 确认后 released=false（20 尚未确认）');
+  const rExecHf = await call('POST', `/api/sys-releases/${hfIssue.release_id}/execute`, dev20Tok, { release_note: '紧急修复真发布', executor_row_id: row20For6.id });
+  assert.strictEqual(rExecHf.status, 200, `[7-⑥前置b] execute 真发布应 200, got ${rExecHf.status} ${JSON.stringify(rExecHf.body)}`);
+  assert.strictEqual(rExecHf.body.released, true, '[7-⑥前置b] 20 确认（最后一人）触发真正发布');
+  r = await call('POST', `/api/sys-issues/${hf}/hotfix-publish`, adminTok, { release_note: '已发布后重试', executors: [5, 13] });
+  assert.strictEqual(r.status, 409, `[7-⑥] 应急单已发布应 409, got ${r.status} ${JSON.stringify(r.body)}`);
+  assert.strictEqual(r.body.code, 'ISSUE_ALREADY_RELEASED', '[7-⑥] code=ISSUE_ALREADY_RELEASED');
+  ok('[7-⑥] 应急单已发布：409 ISSUE_ALREADY_RELEASED（任务已上线，不可再建应急单）');
+
+  // [7-⑦] 非应急上线单（普通单，即已挂入 relB 这种 admin 建的常规批次）：409（请勿混用应急口）
   const normalMember = await seedToReady();
   await call('POST', '/api/sys-releases', adminTok, { title: '普通批次-混用测试' });
   const relNormal = (await get("SELECT id FROM sys_releases WHERE title='普通批次-混用测试'")).id;
   await call('POST', `/api/sys-releases/${relNormal}/add-issues`, adminTok, { issue_ids: [normalMember] });
-  r = await call('POST', `/api/sys-issues/${normalMember}/hotfix-publish`, adminTok, { release_note: '混用测试' });
-  assert.strictEqual(r.status, 409, `[7-⑥] 混用应急口应 409, got ${r.status} ${JSON.stringify(r.body)}`);
-  assert.strictEqual(r.body.code, 'ISSUE_IN_NON_EMERGENCY_RELEASE', '[7-⑥] code=ISSUE_IN_NON_EMERGENCY_RELEASE');
-  ok('[7-⑥] 任务已在非应急（普通）上线单中：409 ISSUE_IN_NON_EMERGENCY_RELEASE（请勿混用应急口）');
+  r = await call('POST', `/api/sys-issues/${normalMember}/hotfix-publish`, adminTok, { release_note: '混用测试', executors: [5, 13] });
+  assert.strictEqual(r.status, 409, `[7-⑦] 混用应急口应 409, got ${r.status} ${JSON.stringify(r.body)}`);
+  assert.strictEqual(r.body.code, 'ISSUE_IN_NON_EMERGENCY_RELEASE', '[7-⑦] code=ISSUE_IN_NON_EMERGENCY_RELEASE');
+  ok('[7-⑦] 任务已在非应急（普通）上线单中：409 ISSUE_IN_NON_EMERGENCY_RELEASE（请勿混用应急口）');
 
-  // [7-⑦] 并发首次调用：仅一方建单；败方回滚并返回赢家 release_id（同响应形状，created_new=false）
+  // [7-⑧] 并发首次调用：仅一方建单；败方回滚并返回赢家 release_id + executors 子表聚合（同响应形状，created_new=false）
   const concurId = await seedToReady();
   const [c1, c2] = await Promise.all([
-    call('POST', `/api/sys-issues/${concurId}/hotfix-publish`, adminTok, { release_note: '并发A' }),
-    call('POST', `/api/sys-issues/${concurId}/hotfix-publish`, adminTok, { release_note: '并发B' }),
+    call('POST', `/api/sys-issues/${concurId}/hotfix-publish`, adminTok, { release_note: '并发A', executors: [5, 13] }),
+    call('POST', `/api/sys-issues/${concurId}/hotfix-publish`, adminTok, { release_note: '并发B', executors: [5, 13] }),
   ]);
   assert.strictEqual(c1.status, 200); assert.strictEqual(c2.status, 200, `并发双方应均 200, got ${c1.status}/${c2.status}`);
   const winners = [c1, c2].filter(r2 => r2.body.created_new === true);
   const losers = [c1, c2].filter(r2 => r2.body.created_new === false);
-  assert.strictEqual(winners.length, 1, `[7-⑦] 恰一方 created_new=true，实际 ${winners.length}`);
-  assert.strictEqual(losers.length, 1, `[7-⑦] 恰一方 created_new=false（败方），实际 ${losers.length}`);
-  assert.strictEqual(losers[0].body.release_id, winners[0].body.release_id, '[7-⑦] 败方返回赢家的 release_id');
+  assert.strictEqual(winners.length, 1, `[7-⑧] 恰一方 created_new=true，实际 ${winners.length}`);
+  assert.strictEqual(losers.length, 1, `[7-⑧] 恰一方 created_new=false（败方），实际 ${losers.length}`);
+  assert.strictEqual(losers[0].body.release_id, winners[0].body.release_id, '[7-⑧] 败方返回赢家的 release_id');
+  assert.ok(Array.isArray(losers[0].body.executors), '[7-⑧] 败方响应含 executors 数组（赢家批次的子表聚合，改造10 覆盖并发败方分支）');
+  assert.strictEqual(losers[0].body.executors.length, 2, '[7-⑧] 败方 executors 数组反映赢家真实建的 2 行');
   const concurReleases = await all("SELECT id FROM sys_releases WHERE title=?", [`hotfix #${concurId}`]);
-  assert.strictEqual(concurReleases.length, 1, '[7-⑦] 库内仅 1 条应急批次（败方新建的已回滚，无残留）');
-  ok('[7-⑦] 并发首次调用：仅一方 created_new=true 真建单，败方 created_new=false 返回赢家 release_id，库内零残留（BEGIN IMMEDIATE 重读抢占）');
+  assert.strictEqual(concurReleases.length, 1, '[7-⑧] 库内仅 1 条应急批次（败方新建的已回滚，无残留）');
+  const concurExecRows = await all(`SELECT user_id FROM sys_release_executors WHERE release_id=?`, [winners[0].body.release_id]);
+  assert.strictEqual(concurExecRows.length, 2, '[7-⑧] 库内执行人子表仅赢家那 2 行（败方新建的子表行随批次回滚一并消失，无残留）');
+  ok('[7-⑧] 并发首次调用：仅一方 created_new=true 真建单+写子表，败方 created_new=false 返回赢家 release_id+executors 聚合，库内零残留（BEGIN IMMEDIATE 重读抢占）');
+
+  // [7-⑨] 事务原子性：注入第 2 个执行人的 sys_release_executors INSERT 失败（跳过第 1 个，放行成功）→
+  //   批次单 + issue 绑定 + **已成功写入的第一人行**全部回滚零残留（C2b 核心不变量：①"建单+加单+写执行
+  //   人子表"是单事务原子提交，任一环节失败都不留部分产物）。⭐ MED-2（Opus 预筛）：跳过第 1 次命中放行
+  //   是为了真打"部分回滚"这条更强的不变量——若第 1 次命中就拒绝（旧版本写法），子表 INSERT 从未真正
+  //   成功过一次，测不出"已经成功写入的兄弟行会不会被一并回滚"，只能测到"INSERT 本身失败不留痕"这条
+  //   较弱的结论；executors=[5,13] 两人，跳过 1 次=放行 user_id=5 那行 INSERT 真成功、拒绝 user_id=13
+  //   那行，验证的正是"第一人行已经成功写入，第二人炸→连同第一人行一并回滚"。
+  const hfAtomic = await seedToReady();
+  const atomicRelCountBefore = (await get(`SELECT COUNT(*) AS c FROM sys_releases`)).c;
+  const atomicExecCountBefore = (await get(`SELECT COUNT(*) AS c FROM sys_release_executors`)).c;
+  DB_RUN_FAIL_ON = 'INSERT INTO sys_release_executors';
+  DB_RUN_FAIL_SKIP = 1;   // 放行第 1 次命中（user_id=5 那行真成功），第 2 次命中（user_id=13）才拒绝
+  let rAtomic;
+  try {
+    rAtomic = await call('POST', `/api/sys-issues/${hfAtomic}/hotfix-publish`, adminTok, { release_note: '原子性注入故障', executors: [5, 13] });
+  } finally {
+    DB_RUN_FAIL_ON = null;   // 兜底复位：防止万一没触发而误伤后续用例
+    DB_RUN_FAIL_SKIP = 0;
+  }
+  assert.strictEqual(rAtomic.status, 500, `[7-⑨] 注入故障应 500（未预期错误走 sendSysTransitionError 兜底）, got ${rAtomic.status} ${JSON.stringify(rAtomic.body)}`);
+  const atomicRelCountAfter = (await get(`SELECT COUNT(*) AS c FROM sys_releases`)).c;
+  const atomicExecCountAfter = (await get(`SELECT COUNT(*) AS c FROM sys_release_executors`)).c;
+  assert.strictEqual(atomicRelCountAfter, atomicRelCountBefore, '[7-⑨] sys_releases 零残留（批次 INSERT 已回滚）');
+  assert.strictEqual(atomicExecCountAfter, atomicExecCountBefore, '[7-⑨] sys_release_executors 零残留（第 1 人行已经写入成功，也随事务一并回滚——非"INSERT 本身没发生过"，是"发生过但被撤销"，部分回滚不变量坐实）');
+  const hfAtomicRow = await issueRow(hfAtomic);
+  assert.strictEqual(hfAtomicRow.release_id, null, '[7-⑨] issue release_id 仍 NULL（绑单一并回滚，非"建单成功但子表写失败"的半原子态）');
+  assert.strictEqual(hfAtomicRow.status, '待上线', '[7-⑨] issue 状态未变');
+  ok('[7-⑨] 事务原子性：注入第 2 个执行人 INSERT 失败（放行第 1 个真成功）→ 500，批次单/issue 绑定/子表（含已成功写入的第一人行）全部零残留（单事务原子回滚，坐实部分回滚不变量，非仅"注入点本身不留痕"）');
 
   // hotfix 负向：缺说明（不因 release_id/type 分支提前拦截而漏测）
   // [对抗审"假绿猎手"视角裁定必修 F] 补库内零残留断言——此前只测了状态码/code，未证明"400 拒绝时真的
@@ -506,7 +721,7 @@ async function main() {
   //   timeline 行（assign/estimate/submit/accept 等）——"零残留"指的是"这次 400 调用没有新增"，不是"这单
   //   从来没有过 timeline"，故用调用前后的计数差而非绝对值 0 来断言。
   const hf2TimelineCountBefore = (await get(`SELECT COUNT(*) AS c FROM sys_issue_timeline WHERE issue_id=?`, [hf2])).c;
-  r = await call('POST', `/api/sys-issues/${hf2}/hotfix-publish`, adminTok, { version_tag: 'v1' });
+  r = await call('POST', `/api/sys-issues/${hf2}/hotfix-publish`, adminTok, { version_tag: 'v1' });   // 缺 release_note，先于 executors 校验命中
   assert.strictEqual(r.status, 400); assert.strictEqual(r.body.code, 'RELEASE_NOTE_REQUIRED');
   const releasesCountAfter1 = (await get(`SELECT COUNT(*) AS c FROM sys_releases`)).c;
   assert.strictEqual(releasesCountAfter1, releasesCountBefore1, '缺说明 400 后 sys_releases 计数不变（未建任何批次）');
@@ -516,10 +731,10 @@ async function main() {
   const hf2TimelineCountAfter = (await get(`SELECT COUNT(*) AS c FROM sys_issue_timeline WHERE issue_id=?`, [hf2])).c;
   assert.strictEqual(hf2TimelineCountAfter, hf2TimelineCountBefore, '缺说明 400 后该单 timeline 计数不变（无新增，零副作用；本身已有的 assign/estimate/submit/accept 等历史行不受影响）');
   ok('hotfix 缺上线说明 → 400，库内零残留（sys_releases 计数不变 + issue 状态/release_id 未动 + timeline 计数不变）');
-  // hotfix config → CONFIG_NO_RELEASE（用上面 cfgId，状态待上线）
+  // hotfix config → CONFIG_NO_RELEASE（用上面 cfgId，状态待上线；C2b：须带合法 executors[] 才能通过输入面校验走到类型闸）
   const releasesCountBefore2 = (await get(`SELECT COUNT(*) AS c FROM sys_releases`)).c;
   const cfgTimelineCountBefore = (await get(`SELECT COUNT(*) AS c FROM sys_issue_timeline WHERE issue_id=?`, [cfgId])).c;
-  r = await call('POST', `/api/sys-issues/${cfgId}/hotfix-publish`, adminTok, { release_note: 'a', version_tag: 'b' });
+  r = await call('POST', `/api/sys-issues/${cfgId}/hotfix-publish`, adminTok, { release_note: 'a', version_tag: 'b', executors: [5, 13] });
   assert.strictEqual(r.status, 409); assert.strictEqual(r.body.code, 'CONFIG_NO_RELEASE');
   const releasesCountAfter2 = (await get(`SELECT COUNT(*) AS c FROM sys_releases`)).c;
   assert.strictEqual(releasesCountAfter2, releasesCountBefore2, 'config 类 409 后 sys_releases 计数不变（未建任何批次）');
@@ -547,13 +762,34 @@ async function main() {
   await run(`INSERT INTO sys_releases (release_no, title, status, is_hotfix, release_assignee_id, release_assignee_name,
               release_assignee_notify_status, created_by, created_by_name, created_at)
              VALUES ('R-MINE-5', 'mine 过滤正例·执行人5', '计划中', 0, 5, '开发王', 'sent', 1, '管理员', datetime('now'))`);
+  const mine5RelId = (await get(`SELECT id FROM sys_releases WHERE release_no='R-MINE-5'`)).id;
+  // C4a（方案 §4.4 #8）：mine 过滤已从批次级单列（release_assignee_id）改子表 EXISTS——上方 INSERT 里的
+  //   旧列仍保留（历史读路径/[2]类断言兼容），但可见性真正生效的判据现在是子表在册行，补一条同一人的行。
+  await run(`INSERT INTO sys_release_executors (release_id, user_id, user_name, notify_status, notified_at, added_by, added_by_name)
+             VALUES (?, 5, '开发王', 'sent', datetime('now','localtime'), 1, '管理员')`, [mine5RelId]);
+  // C4a：本文件此处之前 publishRelease() helper（含 relB 的"空批次发布→409"用例）会在子表为空时自动
+  // PUT executors [5,影子搭档] 铺垫——relB 早已不是"从未指定执行人"的干净反例。改为现造一条全新、从未
+  // 被任何 helper 碰过的批次，保证反例真实成立（子表零行）。
+  const relNoExecR = await call('POST', '/api/sys-releases', adminTok, { title: 'mine 反例·从未指定执行人' });
+  const relNoExec = relNoExecR.body.id;
+  const relNoExecRows = await all(`SELECT 1 FROM sys_release_executors WHERE release_id=?`, [relNoExec]);
+  assert.strictEqual(relNoExecRows.length, 0, '前提：relNoExec 子表确实零行（防夹具自己变假）');
+
   r = await call('GET', '/api/sys-releases', devTok, null);
   assert.strictEqual(r.status, 200, `非 admin 看批次列表 → 200 mine 视角, got ${r.status}`);
   assert.strictEqual(r.body.scope, 'mine', '普通用户 scope=mine');
   assert.ok(r.body.items.length >= 1, 'mine 视角至少含刚插入的本人批次（非空数组，every 真实咬合）');
-  assert.ok(r.body.items.every(x => Number(x.release_assignee_id) === 5), 'mine 视角只含"执行人=我"的行（夹具中另有多条他人/无执行人批次被过滤掉）');
-  assert.ok(r.body.items.some(x => x.release_no === 'R-MINE-5'), '本人批次真实返回');
-  ok('非 admin 看批次列表 → 200 mine 过滤（正例非空 + 他人批次被滤·执行人入口批新契约）');
+  // C4a（方案 §4.4 #8）：mine 过滤已从批次级单列改子表 EXISTS——正例=R-MINE-5 真出现；反例=relNoExec
+  // （子表零行的纯 admin 批次）不出现。⚠️ 不再用"every 全部是 R-MINE-5"（旧单列世界的假设）——用户 5
+  // 经本文件此前 [7-⑧]/publishRelease 等 helper 已合法成为**多个**批次的在册执行人，不止一条。
+  assert.ok(r.body.items.some(x => x.release_no === 'R-MINE-5'), '本人批次真实返回（正例：子表在册命中）');
+  assert.ok(r.body.items.every(x => x.id !== relNoExec), 'mine 视角不含 relNoExec（子表零行的纯 admin 批次，反例：子表无该行）');
+  // MED-5（Opus 预筛）断言升级：逐行反查子表在册，返回集里每一条都必须真有 5 号的在册行，全体命中才算过。
+  for (const item of r.body.items) {
+    const rosterHit = await get(`SELECT 1 FROM sys_release_executors WHERE release_id=? AND user_id=5 AND removed_at IS NULL`, [item.id]);
+    assert.ok(rosterHit, `MED-5 逐行反查：返回集中批次 #${item.id}（${item.release_no}）必须有 5 号的在册行，未命中即判定过滤条件泄漏`);
+  }
+  ok('非 admin 看批次列表 → 200 mine 过滤（正例非空 + 他人批次被滤 + MED-5 返回集逐行反查子表在册全命中·执行人入口批新契约）');
 
   r = await call('GET', '/api/sys-releases', adminTok, null);
   assert.strictEqual(r.status, 200); assert.ok(r.body.total >= 3, '列表含多批次');
@@ -659,9 +895,9 @@ async function main() {
     //   系列全覆盖），故直接 SQL 把该行重置回 'pending'——只影响本测试无关注的 roster 完成态字段，不影响
     //   本用例真正验证的 release/snapshot/timeline 隔离逻辑。
     await run(`UPDATE sys_issue_dev_assignees SET dev_status='pending' WHERE issue_id=? AND user_id=5 AND removed_at IS NULL`, [cycId]);
-    r13 = await call('POST', `/api/sys-issues/${cycId}/estimate`, devTok, { dev_estimated_at: futureEst(60) });
+    r13 = await call('POST', `/api/sys-issues/${cycId}/estimate`, devTok, { dev_estimated_at: futureEst(60), estimated_effort_days: 1 });
     assert.strictEqual(r13.status, 200, `[C6回环⑤] estimate 应 200, got ${r13.status}`);
-    r13 = await call('POST', `/api/sys-issues/${cycId}/submit`, devTok, { mode: 'no_code', no_code_reason: '缺陷已修复（占位理由）', self_tested: true, test_env_deployed: true });
+    r13 = await call('POST', `/api/sys-issues/${cycId}/submit`, devTok, { mode: 'commits', commits: [{ component: 'backend', commit_ref: 'c9-keep-batch-25' }], self_tested: true, test_env_deployed: true });
     assert.strictEqual(r13.status, 200, `[C6回环⑤] submit 应 200, got ${r13.status} ${JSON.stringify(r13.body)}`);
     r13 = await call('POST', `/api/sys-issues/${cycId}/accept`, adminTok, {});
     assert.strictEqual(r13.status, 200, `[C6回环⑤] accept 应 200, got ${r13.status} ${JSON.stringify(r13.body)}`);
@@ -750,17 +986,26 @@ async function main() {
     await call('POST', `/api/sys-issues/${bugSeg}/intake-accept`, adminTok, {});
     await call('POST', `/api/sys-issues/${bugSeg}/assign`, adminTok, { assigned_to: 5 });
     await call('POST', `/api/sys-issues/${bugSeg}/estimate`, devTok, { dev_estimated_at: futureEst(30) });
-    await call('POST', `/api/sys-issues/${bugSeg}/submit`, devTok, { mode: 'no_code', no_code_reason: '修复（占位理由）', self_tested: true, test_env_deployed: true });
+    await call('POST', `/api/sys-issues/${bugSeg}/submit`, devTok, { mode: 'commits', commits: [{ component: 'backend', commit_ref: 'c9-keep-batch-26' }], self_tested: true, test_env_deployed: true });
     await call('POST', `/api/sys-issues/${bugSeg}/accept`, adminTok, {});
-    r = await call('POST', `/api/sys-issues/${bugSeg}/hotfix-publish`, adminTok, { release_note: 'seg-bug 应急建单' });
+    r = await call('POST', `/api/sys-issues/${bugSeg}/hotfix-publish`, adminTok, { release_note: 'seg-bug 应急建单', executors: [5, 13] });
     assert.strictEqual(r.status, 200, `bug hotfix-publish 应 200, got ${r.status} ${JSON.stringify(r.body)}`);
     assert.strictEqual(r.body.created_new, true, 'bug hotfix-publish created_new=true');
     const bugSegRelId = r.body.release_id;
     assert.ok(bugSegRelId, '三段断言②③合并：bug hotfix-publish 建单后 release_id 非空（恒建批次，无"不建批次"分支）');
-    // 真正发布（execute）：直接 SQL 满足中心守卫三前提（同本文件 publishRelease 手法），验证 bug 走到已上线后 version_tag 落库。
-    await run(`UPDATE sys_releases SET release_assignee_id=5, release_assignee_name='开发王', release_assignee_notify_status='sent' WHERE id=?`, [bugSegRelId]);
-    const rExecSeg = await call('POST', `/api/sys-releases/${bugSegRelId}/execute`, devTok, { release_note: 'seg-bug 真发布', version_tag: 'vseg-bug' });
+    // 真正发布（execute）：C3 新模型——本批次在册执行人是 hotfix-publish 建单时写入的 [5,13]，把两行
+    //   置 sent 后各自真实调用 execute 确认，验证 bug 走到已上线后 version_tag 落库。
+    await run(`UPDATE sys_release_executors SET notify_status='sent', notified_at=datetime('now','localtime') WHERE release_id=? AND removed_at IS NULL`, [bugSegRelId]);
+    const bugSegExecRows = await all(`SELECT id, user_id FROM sys_release_executors WHERE release_id=? AND removed_at IS NULL`, [bugSegRelId]);
+    const bugSegRow13 = bugSegExecRows.find(x => x.user_id === 13);
+    const bugSegRow5 = bugSegExecRows.find(x => x.user_id === 5);
+    // 303-M2（Opus 对抗审·全文扫描收口）：中间预确认不许静默吞——断言 13 号真成功且未提前触发发布。
+    const rBugSegPre13 = await call('POST', `/api/sys-releases/${bugSegRelId}/execute`, liaisonTok, { executor_row_id: bugSegRow13.id });
+    assert.strictEqual(rBugSegPre13.status, 200, `[bugSeg-pre]13号预确认期望 200, got ${rBugSegPre13.status} ${JSON.stringify(rBugSegPre13.body)}`);
+    assert.strictEqual(rBugSegPre13.body.released, false, '[bugSeg-pre]13号预确认不该提前触发发布');
+    const rExecSeg = await call('POST', `/api/sys-releases/${bugSegRelId}/execute`, devTok, { release_note: 'seg-bug 真发布', version_tag: 'vseg-bug', executor_row_id: bugSegRow5.id });
     assert.strictEqual(rExecSeg.status, 200, `bug execute 应 200, got ${rExecSeg.status} ${JSON.stringify(rExecSeg.body)}`);
+    assert.strictEqual(rExecSeg.body.released, true, 'bug execute 最后一人确认触发真正发布');
     const rowSeg = await issueRow(bugSeg);
     assert.strictEqual(rowSeg.status, '已上线');
     assert.strictEqual(rowSeg.release_id, bugSegRelId, '三段断言②③合并：bug 已上线 ⟹ release_id 非空且=hotfix-publish 建的批次');
@@ -772,9 +1017,18 @@ async function main() {
 
   // [codex 102 号 HIGH 回填 + C3 改造] RELEASE 守卫接线——真实路由负例①：零在册待上线单走真实发布入口
   //   /execute（legacy /publish 已 409 退场，改走中心守卫收窄后的唯一合法入口）→ 400 GATE_INVARIANT，
-  //   且状态/批次/快照均未落库（早于批量 UPDATE 拦下，H-3 原子性精神）。中心守卫三前提（notify_status=
-  //   sent ∧ 执行人本人 ∧ 资格）用 publishRelease() 直接 SQL 钉好在先，故本用例命中的必然是"三前提之后"
-  //   的 roster 门，而非被中心守卫提前挡下——与改造前 legacy /publish 直达 roster 门的验证目标一致。
+  //   且状态/批次/快照均未落库（早于批量 UPDATE 拦下，H-3 原子性精神）。[LOW-5 订正] 旧注释"中心守卫
+  //   三前提（notify_status=sent ∧ 执行人本人 ∧ 资格）用 publishRelease() 直接 SQL 钉好在先"是改造前
+  //   单列比对时代的描述，已过时——新模型下 publishRelease() 走的是真实两段子表流：PUT executors 真实
+  //   建两人（executorId + 影子搭档）→ SQL 把两行 notify_status 置 sent（唯一保留的 SQL 捷径，跳过通知
+  //   外呼这段与本用例无关的环节）→ 两人各自真实调用 /execute 确认到底，行级 CAS 五条件随之一并真实
+  //   走过。[决策 7 三修同步更正引用] 原提及的"MED-1 在册人数闸（≥2）"已随执行人下限 2→1 整体删除
+  //   （该闸不再存在，不是"变成≥1"，是这一步判序彻底没了——见 execute 路由头部注释），本用例的两人
+  //   夹具与验证目标不受影响（两人本身仍是合法批次，只是不再依赖那道已删除的闸来"顺带"验证它）。
+  //   故本用例命中的必然是"执行人闸全部通过之后"、
+  //   `_publishReleaseCoreInTxn` 内部更深一层的 issue 级开发 roster 门禁（zeroRosterId 自己没有
+  //   `sys_issue_dev_assignees` 行），而非被执行人闸提前挡下——与改造前 legacy /publish 直达 roster 门
+  //   的验证目标一致。
   {
     let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: '零在册待上线单', system_name: 'BMS', source: '内部', description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13 });
     const zeroRosterId = r.body.id;

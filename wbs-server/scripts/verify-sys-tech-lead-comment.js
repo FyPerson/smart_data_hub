@@ -509,15 +509,19 @@ async function main() {
     await comment(id3, techTok, '意见');
     const r3 = await resendNotify(id3, devTok);
     assert.strictEqual(r3.status, 403, `无关用户补发应 403, got ${r3.status} ${JSON.stringify(r3.body)}`);
-    assert.strictEqual(r3.body.code, 'NOT_AUTHORIZED_FOR_TECH_LEAD_COMMENT_RESEND', '应为 NOT_AUTHORIZED_FOR_TECH_LEAD_COMMENT_RESEND');
+    // ⭐ [C10-fix2 MED-3·统一拒绝码] 非 self 非绑定统一 NOT_BOUND_LIAISON（原 NOT_AUTHORIZED_FOR_TECH_LEAD_COMMENT_RESEND 已废）
+    assert.strictEqual(r3.body.code, 'NOT_BOUND_LIAISON', '非 self 非绑定应统一为 NOT_BOUND_LIAISON（MED-3 消除本端点独有拒绝语义）');
 
     // ④ 技术负责人本人 / admin / 受理人 均 200（三方 OR）
+    //   ⭐ [C10-fix2 MED-3·selfTechLead 例外正式登记] r4a=技术负责人本人 resend 自己的评估通知 → 200 = §10.2
+    //     「通知重发绑单精判」的唯一显式例外（自服务合理·与"谁是本单对接人"权限轴正交）；与上方 ③ 的
+    //     "非 self 非绑定 → 403 NOT_BOUND_LIAISON" 合起来钉死 MED-3 两侧。
     const c4 = await create('feature');
     const id4 = c4.body.id;
     await consult(id4);
     await comment(id4, techTok, '意见');
     const r4a = await resendNotify(id4, techTok);
-    assert.strictEqual(r4a.status, 200, `技术负责人本人补发应 200, got ${r4a.status} ${JSON.stringify(r4a.body)}`);
+    assert.strictEqual(r4a.status, 200, `技术负责人本人补发应 200（selfTechLead 例外）, got ${r4a.status} ${JSON.stringify(r4a.body)}`);
     const r4b = await resendNotify(id4, adminTok);
     assert.strictEqual(r4b.status, 200, `admin 补发应 200, got ${r4b.status} ${JSON.stringify(r4b.body)}`);
     const r4c = await resendNotify(id4, liaisonTok);
@@ -550,7 +554,50 @@ async function main() {
     const r6b = await resendNotify(id6, liaisonTok);
     assert.strictEqual(r6b.status, 200, `新轮回复后补发应恢复 200, got ${r6b.status} ${JSON.stringify(r6b.body)}`);
 
-    ok('[RS] resend-notify：有意见 200+timeline+1(sent_by=本次操作者)·无意见 409 NO_TECH_LEAD_COMMENT_TO_NOTIFY·无关用户 403·本人/admin/受理人 200·离开待受理 409 RESEND_LATE·换轮后新轮无意见 409 NO_TECH_LEAD_COMMENT_TO_NOTIFY（不因旧轮意见误判）+新轮回复后恢复 200');
+    ok('[RS] resend-notify：有意见 200+timeline+1(sent_by=本次操作者)·无意见 409 NO_TECH_LEAD_COMMENT_TO_NOTIFY·无关用户 403 NOT_BOUND_LIAISON·本人/admin/受理人 200·离开待受理 409 RESEND_LATE·换轮后新轮无意见 409 NO_TECH_LEAD_COMMENT_TO_NOTIFY（不因旧轮意见误判）+新轮回复后恢复 200');
+  }
+
+  // ═══ [RV] ⭐⭐ C10-fix2 MED-2：绑定对接人「发通知」有效性统一校验——停用/角色移出候选后不发（两路径各一条）═══
+  //   两条通知路径（tech-lead-comment 首发 :6924 一带 / resend-notify :7126 一带）共用
+  //   resolveValidBoundLiaisonForNotify——绑定对接人停用或被移出候选 allowlist 后视为"无有效收件人"（同
+  //   liaison-test「停用即无有效收件人」口径），不发 + warn。用桩计数器直接观测 sendIssueDingtalkRaw 零调用
+  //   （行数不变证明不了没发·186 号 LOW 教训），并断言 notify_status=failed。
+  {
+    // ① 绑定对接人(13)被**停用** → tech-lead-comment 首发路径降级不发（覆盖首发 call site）
+    const c1 = await create('feature');
+    const id1 = c1.body.id;
+    await consult(id1);
+    await run(`UPDATE users SET status='inactive' WHERE id=13`);
+    const before1 = dingtalkSendCount;
+    let r1;
+    try {
+      r1 = await comment(id1, techTok, '绑定对接人已停用场景的意见');
+    } finally {
+      await run(`UPDATE users SET status='active' WHERE id=13`);   // 立即恢复防污染后续用例
+    }
+    assert.strictEqual(r1.status, 200, `[RV①] 意见提交本身仍 200（通知降级不回滚意见）, got ${r1.status} ${JSON.stringify(r1.body)}`);
+    assert.strictEqual(r1.body.notify_status, 'failed', '[RV①] 绑定对接人停用 → notify_status=failed（有效性校验拦在发送前·降级不发）');
+    assert.strictEqual(dingtalkSendCount, before1, '[RV①] ⭐ 绑定对接人停用 → sendIssueDingtalkRaw 零调用（不发给已停用的历史绑定人·直接观测调用本身）');
+    ok('[RV①] C10-fix2 MED-2（tech-lead-comment 首发路径）：绑定对接人(13)停用 → 意见照常落库(200) 但「评估已回」通知降级不发（sendIssueDingtalkRaw 零调用·notify_status=failed）');
+  }
+  {
+    // ② 绑定对接人(13)角色被**移出候选 allowlist**（user→viewer） → resend-notify 路径降级不发（覆盖补发 call site）
+    const c2 = await create('feature');
+    const id2 = c2.body.id;
+    await consult(id2);
+    await comment(id2, techTok, '意见');   // 先正常提交一条意见（此刻 13 仍 user·首发正常发送）
+    await run(`UPDATE users SET role='viewer' WHERE id=13`);
+    const before2 = dingtalkSendCount;
+    let r2;
+    try {
+      r2 = await resendNotify(id2, adminTok);   // admin 触发补发（授权不依赖绑定人有效性）
+    } finally {
+      await run(`UPDATE users SET role='user' WHERE id=13`);   // 恢复
+    }
+    assert.strictEqual(r2.status, 200, `[RV②] 补发端点本身仍 200（best-effort）, got ${r2.status} ${JSON.stringify(r2.body)}`);
+    assert.strictEqual(r2.body.notify_status, 'failed', '[RV②] 绑定对接人角色移出候选 → notify_status=failed（降级不发）');
+    assert.strictEqual(dingtalkSendCount, before2, '[RV②] ⭐ 角色移出候选 allowlist → sendIssueDingtalkRaw 零调用（同一 helper·resend-notify 路径同口径）');
+    ok('[RV②] C10-fix2 MED-2（resend-notify 补发路径）：绑定对接人(13)角色移出候选 allowlist(user→viewer) → 补发降级不发（sendIssueDingtalkRaw 零调用·notify_status=failed·两路径共用 resolveValidBoundLiaisonForNotify）');
   }
 
   // ═══ [TC] 换轮组（角色权限重构 C4·184 号预审 HIGH·PH-1 用户裁定，原"咨询已终局收口"组整体重写）═══
@@ -1009,7 +1056,7 @@ async function main() {
     ok('[V] 技术负责人读权（写读同源）：未咨询前不可见/403 · 被咨询后列表可见+详情200 · 从未咨询的单始终不可见（精确放行）· **历史回过意见即使 tech_lead_id 已清仍可见**（选项A·已排除 assigned_to/release_assignee/roster 替代读权）· 无关开发越权面未放宽 · ⭐**普通分支（非 bug 对接人白名单用户）两段读权正向覆盖 + 无关第三人仍拒**');
   }
 
-  console.log(`\n✅ verify-sys-tech-lead-comment 全部通过（${passed} 组·C3+C4 技术负责人评估留言：权限/谓词边界/一条唯一/输入面/取消咨询/通知留痕/类型分流回归/补发通知/换轮组/类型分流fail-closed/换轮围栏/reactivate全链/PH-2自动清理留痕/提交侧轮次围栏/补发二次确认）`);
+  console.log(`\n✅ verify-sys-tech-lead-comment 全部通过（${passed} 组·C3+C4 技术负责人评估留言：权限/谓词边界/一条唯一/输入面/取消咨询/通知留痕/类型分流回归/补发通知/换轮组/类型分流fail-closed/换轮围栏/reactivate全链/PH-2自动清理留痕/提交侧轮次围栏/补发二次确认/C10-fix2 绑定对接人有效性校验[RV]）`);
   server.close(); db.close();
 }
 

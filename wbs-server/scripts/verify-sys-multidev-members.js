@@ -106,10 +106,17 @@ async function mkIssue(type, status, extra = {}) {
   //   无号态（测守卫本身用）；bug 恒不带（D2 可选）。
   const oa = (type === 'feature' || type === 'improvement')
     ? (extra.oaNumber === null ? null : (extra.oaNumber || '20260728300')) : null;
+  // [C7 工时评估补全·方案 v1.7 §9.1] GATE 的工期资格从「nf=1 ∧ feature」扩到「feature/improvement × nf
+  //   两值」——本文件大量夹具是 nf=0 的 feature/improvement，C7 前从不经过工期资格，C7 后 GATE 会因工期
+  //   为空而静默 defer（S10 一类"excuse 触发 GATE 转待验证"的断言会全线失守，且失守形态是"状态没动"这种
+  //   不报错的静默症状）。同 dev_estimated_at/oa_number 既有处置：默认种合法占位值；effortDays: null 可
+  //   显式造"未填工期"态测该闸本身；bug/config 无工期维度恒不种。
+  const effort = (type === 'feature' || type === 'improvement')
+    ? (extra.effortDays === null ? null : (extra.effortDays || 1)) : null;
   const r = await run(
-    `INSERT INTO sys_issues (type, status, title, system_name, source, created_by, created_by_name, dev_estimated_at, oa_number)
-     VALUES (?, ?, ?, 'BMS', '内部', 1, '管理员', ?, ?)`,
-    [type, status, extra.title || `${type}-${status}-单`, est, oa]
+    `INSERT INTO sys_issues (type, status, title, system_name, source, created_by, created_by_name, dev_estimated_at, oa_number, estimated_effort_days)
+     VALUES (?, ?, ?, 'BMS', '内部', 1, '管理员', ?, ?, ?)`,
+    [type, status, extra.title || `${type}-${status}-单`, est, oa, effort]
   );
   return r.lastID;
 }
@@ -271,6 +278,9 @@ async function main() {
     let row = await get('SELECT status FROM sys_issues WHERE id = ?', [id]);
     assert.strictEqual(row.status, '处理中', 'S10d：sys_issues.status 落库仍处理中（GATE 未推进）');
     // 修复前：estimate 只写 dev_estimated_at，GATE 永不重跑，工单卡死；修复后：estimate 事务尾部重跑 runWGate
+    // [C7] 本组夹具是 **bug** 单（mkIssue('bug', ...)）——bug 无工期维度，estimate 端点对其"传值即拒"
+    //   400 EFFORT_NOT_APPLICABLE，故这里刻意不带 estimated_effort_days（与本文件 feature 夹具的 estimate
+    //   调用不同源，不是漏加）。
     r = await call('POST', `/api/sys-issues/${id}/estimate`, devTok(5), { dev_estimated_at: futureEst(30) });
     assert.strictEqual(r.status, 200, `S10d：补填 estimate 应 200，实际 ${r.status} ${JSON.stringify(r.body)}`);
     row = await get('SELECT status, dev_estimated_at FROM sys_issues WHERE id = ?', [id]);
@@ -300,7 +310,7 @@ async function main() {
     const memberRow = await get('SELECT dev_status FROM sys_issue_dev_assignees WHERE id = ?', [daId]);
     assert.strictEqual(memberRow.dev_status, 'no_code', 'S10e：roster 完成态保留（§1 不变量1「完成态不回 pending」，return 不重置）');
     // 关键反例：补 estimate 后不应被误判为 deferred 消费，应保持开发中（非弹回待验证）
-    r = await call('POST', `/api/sys-issues/${id}/estimate`, devTok(5), { dev_estimated_at: futureEst(31) });
+    r = await call('POST', `/api/sys-issues/${id}/estimate`, devTok(5), { dev_estimated_at: futureEst(31), estimated_effort_days: 1 });
     assert.strictEqual(r.status, 200, `S10e：estimate 200, got ${r.status} ${JSON.stringify(r.body)}`);
     row = await get('SELECT status FROM sys_issues WHERE id = ?', [id]);
     assert.strictEqual(row.status, '开发中', 'S10e：⭐ estimate 后仍开发中（未被误弹回待验证——gate_deferred_at 为空，estimate 不重跑 runWGate）');
@@ -359,7 +369,7 @@ async function main() {
     const memberRow = await get('SELECT dev_status FROM sys_issue_dev_assignees WHERE id = ?', [daId]);
     assert.strictEqual(memberRow.dev_status, 'no_code', 'S10g：roster 完成态保留（reopen 不重置 dev_status，同 return）');
     // 关键反例：补 estimate 后不应被误判为 deferred 消费，应保持开发中
-    r = await call('POST', `/api/sys-issues/${id}/estimate`, devTok(5), { dev_estimated_at: futureEst(34) });
+    r = await call('POST', `/api/sys-issues/${id}/estimate`, devTok(5), { dev_estimated_at: futureEst(34), estimated_effort_days: 1 });
     assert.strictEqual(r.status, 200, `S10g：estimate 200, got ${r.status} ${JSON.stringify(r.body)}`);
     row = await get('SELECT status FROM sys_issues WHERE id = ?', [id]);
     assert.strictEqual(row.status, '开发中', 'S10g：⭐ estimate 后仍开发中（未被误弹回待验证）');
@@ -506,7 +516,7 @@ async function main() {
     assert.ok(tl && tl.summary && tl.summary.includes('自动降级') && tl.summary.includes('待上线') && tl.summary.includes(s10kResumeReason),
       `S10k：timeline summary 备注自动降级+原目标+reason 原文三者齐全，实际：${tl && tl.summary}`);
     // 新成员可正常走完估时+提交流程（验证降级后不是"死单"，能正常继续干活）
-    r = await call('POST', `/api/sys-issues/${id}/estimate`, devTok(6), { dev_estimated_at: futureEst(36) });
+    r = await call('POST', `/api/sys-issues/${id}/estimate`, devTok(6), { dev_estimated_at: futureEst(36), estimated_effort_days: 1 });
     assert.strictEqual(r.status, 200, `S10k：降级后新成员 estimate 应 200, got ${r.status} ${JSON.stringify(r.body)}`);
     r = await call('POST', `/api/sys-issues/${id}/submit`, devTok(6), { mode: 'no_code', no_code_reason: '换血后完成（占位理由）', self_tested: true, test_env_deployed: true });
     assert.strictEqual(r.status, 200, `S10k：降级后新成员 submit 应 200, got ${r.status} ${JSON.stringify(r.body)}`);

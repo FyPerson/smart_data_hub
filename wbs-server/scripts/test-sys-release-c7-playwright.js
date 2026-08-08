@@ -1,6 +1,11 @@
 /**
- * 上线体统一重构 C7（前端收尾）Playwright 冒烟——本批新增 UI 行为的真浏览器验证，与既有
- * test-sys-release-panel-c2b2-playwright.js 互补（后者覆盖 C2b/C3 既有面板，本脚本只测 C7 新增/变更点）：
+ * 上线体统一重构 C7（前端收尾）Playwright 冒烟——本批新增 UI 行为的真浏览器验证，与
+ * test-sys-release-panel-c2b2-playwright.js 互补。[LOW-4 同步修正·2026-08-07] c2b2 已随「上线执行人
+ * 多选+多人双确认」C6 收口整体重写，不再覆盖本行原描述的"C2b/C3 既有面板"（那批断言随 C4b/C5 批次级
+ * 单人机制退场已同步移除），现聚焦 C5/C6 多执行人流程（选人弹窗/多人徽标矩阵/最后一人确认/done行按钮
+ * 矩阵/RELEASE_NOTE_REQUIRED 补弹重试等，含子表流夹具重建的 T3b 权限镜像 + timeline 折叠渲染两件从旧
+ * 版接管的断言，见该文件头部"旧版用例接管清单"）。本脚本仍只测 C7 新增/变更点，两文件关系不变，仅
+ * 上一句对 c2b2 覆盖范围的旧描述已过期：
  *   T1 术语「已归档」：close 归档后状态徽标显示「已归档」（数据值仍是「已关闭」，siStatusDisplay 展示层映射）
  *   T2 归档 + 重开真实全链路（feature）：关闭按钮可见可点 → 徽标「已归档」→「重开」按钮出现可点 → 回「开发中」
  *       + 重开后 release_id 清空、旧上线单的 getReleaseMembers 仍 snapshot（红线，API 层核对，非 UI 断言）

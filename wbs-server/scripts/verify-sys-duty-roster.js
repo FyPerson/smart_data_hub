@@ -103,10 +103,13 @@ async function main() {
   {
     const ROLES = [
       { who: 'admin(1)',          tok: adminTok,     allow: false, code: 'INTAKE_LIAISON_ONLY' },
-      { who: 'dev(5,非白名单)',    tok: devTok,       allow: false, code: 'INTAKE_LIAISON_ONLY' },
-      { who: '示例发布者(7,publisher非白名单)', tok: publisherTok, allow: false, code: 'INTAKE_LIAISON_ONLY' },
+      // ⭐ [C10-fix M1·收回权限放宽] requireLiaisonOnly 收回**窄集合[13]**（isSysIntakeLiaison）——release/roster 级
+      //   授权不随候选池扩大：dev(5,role=user)/示例发布者(7,publisher) 虽在 candidate 口径内，但非[13]，此处仍 403（守边界）。
+      { who: 'dev(5,role=user·非[13])', tok: devTok, allow: false, code: 'INTAKE_LIAISON_ONLY' },
+      { who: '示例发布者(7,publisher·非[13])', tok: publisherTok, allow: false, code: 'INTAKE_LIAISON_ONLY' },
+      // viewer 角色不在候选池内，403（既有真负例）。
       { who: 'viewer(8)',         tok: viewerTok,    allow: false, code: 'INTAKE_LIAISON_ONLY' },
-      { who: '示例对接人(13,受理人)', tok: liaisonTok,    allow: true },
+      { who: '示例对接人(13,受理人·窄集合)', tok: liaisonTok,    allow: true },
     ];
     for (const [i, role] of ROLES.entries()) {
       const d = `2030-01-${String(i + 1).padStart(2, '0')}`;
@@ -121,7 +124,7 @@ async function main() {
         assert.strictEqual(row, undefined, `[写权/POST] ${role.who} 403 后不应产生排班行（负例落库副作用核对）`);
       }
     }
-    ok('[1] 写权矩阵 POST：仅示例对接人(13,受理人)放行 201；admin(1)/dev(5)/示例发布者(7,publisher)/viewer(8) 均 403 INTAKE_LIAISON_ONLY 且无落库副作用（admin 亦被拒——不能复用 requireIntakeLiaison 的证明）');
+    ok('[C10-fix M1][1] 写权矩阵 POST：收回窄集合[13] 后仅示例对接人(13) 201 放行；admin(1)/dev(5,user)/示例发布者(7,publisher)/viewer(8) 均 403 INTAKE_LIAISON_ONLY 且无落库副作用（release/roster 级授权不随候选池扩大·守边界——dev/示例发布者 虽属 candidate 口径但非[13]）');
   }
 
   // ═══ [1] 写权矩阵：DELETE（同矩阵，针对同一行）═══
@@ -129,11 +132,13 @@ async function main() {
     const mk = await call('POST', '/api/sys-duty-roster', liaisonTok, { duty_date: '2030-01-20', user_id: 5 });
     assert.strictEqual(mk.status, 201, `夹具建行失败: ${JSON.stringify(mk.body)}`);
     const rowId = mk.body.id;
+    // ⭐ [C10-fix M1·收回权限放宽] 收回窄集合[13] 后 dev(5)/示例发布者(7) 重新成为负例——真负例=admin(天然排除)/
+    //   viewer(角色不在候选池)/dev(5,user·非[13])/示例发布者(7,publisher·非[13])，仅示例对接人(13) 可删（release/roster 级守边界）。
     const DENY_ROLES = [
       { who: 'admin(1)', tok: adminTok },
-      { who: 'dev(5,非白名单)', tok: devTok },
-      { who: '示例发布者(7,publisher非白名单)', tok: publisherTok },
       { who: 'viewer(8)', tok: viewerTok },
+      { who: 'dev(5,role=user·非[13])', tok: devTok },
+      { who: '示例发布者(7,publisher·非[13])', tok: publisherTok },
     ];
     for (const role of DENY_ROLES) {
       const r = await call('DELETE', `/api/sys-duty-roster/${rowId}`, role.tok);
@@ -141,11 +146,11 @@ async function main() {
       assert.strictEqual(r.body.code, 'INTAKE_LIAISON_ONLY', `[写权/DELETE] ${role.who} 期望确切码`);
     }
     const stillActive = await get('SELECT removed_at FROM sys_release_duty_roster WHERE id = ?', [rowId]);
-    assert.strictEqual(stillActive.removed_at, null, '[写权/DELETE] 四个非白名单角色 403 后该行应仍活跃（未被误删）');
+    assert.strictEqual(stillActive.removed_at, null, '[写权/DELETE] admin/viewer/dev/示例发布者 403 后该行应仍活跃（未被误删）');
     const delOk = await call('DELETE', `/api/sys-duty-roster/${rowId}`, liaisonTok);
     assert.strictEqual(delOk.status, 200, `[写权/DELETE] 示例对接人 期望 200, got ${delOk.status} ${JSON.stringify(delOk.body)}`);
     assert.strictEqual(delOk.body.removed, true, '[写权/DELETE] 示例对接人 应真删除（removed:true）');
-    ok('[1] 写权矩阵 DELETE：同矩阵——admin/dev/示例发布者/viewer 均 403 且行未被误删，示例对接人(受理人) 200 真删除');
+    ok('[C10-fix M1][1] 写权矩阵 DELETE：收回窄集合[13] 后真负例扩回——admin/viewer/dev(5,user)/示例发布者(7,publisher) 均 403 且行未被误删，仅示例对接人(13,窄集合) 200 真删除（release/roster 级授权不随候选池扩大）');
   }
 
   // ═══ [2] 资格闸：排入无资格 user_id → 400 DUTY_USER_NOT_ELIGIBLE ═══
@@ -388,13 +393,15 @@ async function main() {
     assert.strictEqual(activeRows62.length, 62, `[6c] 恰 62 天区间活跃行应恰 62 条，实得 ${activeRows62.length}`);
     ok(`[6c] 区间上限：63 天（2031-04-01~${to63}）400 DUTY_BATCH_RANGE_TOO_LONG 零写入；恰 62 天（2031-06-01~${to62}）201 放行且精确落 62 行（动态计算边界，非手数）`);
 
-    // [6d] 负例·非对接人资格闸：admin/dev(非白名单)/示例发布者(publisher非白名单)/viewer 均 403 INTAKE_LIAISON_ONLY，零写入
+    // [6d] 负例·非对接人资格闸：admin/viewer/dev(5,user)/示例发布者(7,publisher) 均 403 INTAKE_LIAISON_ONLY，零写入
+    //   ⭐ [C10-fix M1·收回权限放宽] 收回窄集合[13] 后 dev(5)/示例发布者(7) 重新成为负例——release/roster 级授权不随
+    //     候选池扩大，仅示例对接人(13) 可写（batch 与单日端点同判据·守边界）。
     //   ⚠️ 日期段用 2031-12（远离 [6c] 恰 62 天正例区间 2031-06-01~2031-08-01，避免与其活跃行重叠导致零写入断言假失败）。
     const DENY6 = [
       { who: 'admin(1)', tok: adminTok },
-      { who: 'dev(5,非白名单)', tok: devTok },
-      { who: '示例发布者(7,publisher非白名单)', tok: publisherTok },
       { who: 'viewer(8)', tok: viewerTok },
+      { who: 'dev(5,role=user·非[13])', tok: devTok },
+      { who: '示例发布者(7,publisher·非[13])', tok: publisherTok },
     ];
     for (const role of DENY6) {
       const r = await call('POST', '/api/sys-duty-roster-batch', role.tok, { date_from: '2031-12-01', date_to: '2031-12-03', user_id: 5 });
@@ -402,8 +409,14 @@ async function main() {
       assert.strictEqual(r.body.code, 'INTAKE_LIAISON_ONLY', `[6d] ${role.who} 期望确切码 INTAKE_LIAISON_ONLY`);
     }
     const zeroRows6d = await all(`SELECT id FROM sys_release_duty_roster WHERE duty_date BETWEEN '2031-12-01' AND '2031-12-03' AND removed_at IS NULL`);
-    assert.strictEqual(zeroRows6d.length, 0, '[6d] 四个非对接人角色 403 后该区间应零写入（admin 亦被拒，与单日端点同判据）');
-    ok('[6d] 写权矩阵（同单日端点判据）：admin/dev/示例发布者/viewer 均 403 INTAKE_LIAISON_ONLY 且零写入');
+    assert.strictEqual(zeroRows6d.length, 0, '[6d] admin/viewer/dev/示例发布者 403 后该区间应零写入（admin 亦被拒，与单日端点同判据）');
+    ok('[C10-fix M1][6d] 写权矩阵（同单日端点判据·收回窄集合[13]）：真负例扩回——admin/viewer/dev(5,user)/示例发布者(7,publisher) 均 403 INTAKE_LIAISON_ONLY 且零写入（release/roster 级不随候选池扩大）');
+
+    // ⭐ [C10-fix M1] 正例：仅示例对接人(13,窄集合) 可批量写排班——用独立日期段验证 201 + count 精确落库。
+    const liaisonBatch = await call('POST', '/api/sys-duty-roster-batch', liaisonTok, { date_from: '2031-12-11', date_to: '2031-12-12', user_id: 5 });
+    assert.strictEqual(liaisonBatch.status, 201, `[C10-fix M1][6d+] 示例对接人(13) 期望 201, got ${liaisonBatch.status} ${JSON.stringify(liaisonBatch.body)}`);
+    assert.strictEqual(liaisonBatch.body.count, 2, `[C10-fix M1][6d+] 示例对接人(13) 批量 count 应为 2，实得 ${liaisonBatch.body.count}`);
+    ok('[C10-fix M1][6d+] 写权矩阵正例：仅示例对接人(13,窄集合) 可 201 批量写排班（release/roster 级授权保持窄集合·候选扩大不延伸）');
 
     // [6e] 负例·区间边界本身含非法日期（date_from/date_to 任一非真实日历日）→ 400 INVALID_DUTY_DATE，零写入
     //   （区间内部逐日日期由服务端 Date.UTC 步进生成，不会出现"边界合法但内部某天非法"，故本组只测边界本身）。

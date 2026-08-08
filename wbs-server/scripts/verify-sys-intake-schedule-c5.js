@@ -17,7 +17,7 @@
 //   [V] 请求版本 + 结果归属（§6·codex 128-M/130-H）：换人/同人连发生成新 request_event_id + 重置投递字段（sent_by/read_at/error 清·
 //       落 not_sent 非 failed）；resend 触发失败注入 → failed + sent_by 非空（§8.3 failed⟹sent_by）；sent⟹notified_at+message_key+sent_by
 //   [S] 拒过期回写（条件 request_event_id）：直测 recordSysTechLeadNotify 旧 request_event_id → changes=0（不覆盖新版本投递态，S5 下该态是 not_sent）
-//   [RS] resend-tech-consult（admin∨受理人∨建单人·expected_request_event_id）：
+//   [RS] resend-tech-consult（⭐ C10-fix M2：admin∨该单对接人·expected_request_event_id·建单人分支已移除）：
 //       admin/受理人/建单人 200 / 非授权(dev6) 403 / expected 不一致 409 VERSION_CONFLICT / 未发起 409 NO_TECH_CONSULT / 缺 expected 400
 'use strict';
 const assert = require('assert');
@@ -178,10 +178,10 @@ async function main() {
     // 缺 tech_lead_id → 400
     r = await call('POST', `/api/sys-issues/${id}/request-tech-consult`, liaisonTok, {});
     assert.strictEqual(r.body.code, 'TECH_LEAD_ID_REQUIRED', '缺 tech_lead_id 400');
-    // 非受理人(dev5) → 403 中间件
+    // 非受理人(dev5) → 403（C10 绑单精判：dev5 过粗筛[user eligible]后 handler 拒·单绑 13 非 dev5）
     r = await call('POST', `/api/sys-issues/${id}/request-tech-consult`, devTok, { tech_lead_id: 7 });
     assert.strictEqual(r.status, 403, '非受理人 403');
-    assert.strictEqual(r.body.code, 'NOT_ADMIN_OR_INTAKE_LIAISON', '403 中间件层');
+    assert.strictEqual(r.body.code, 'NOT_BOUND_LIAISON', '403 handler 绑单精判 NOT_BOUND_LIAISON（request-tech-consult 不给空单兜底·非绑定人一律拒）');
     // 非开放态(待指派) → 409（显式强制落态到「待指派」——v2.1 起 feature 裸建单直落「待受理」
     //   与开放态谓词相同，必须显式 seedIntake 到别的态才能测"离开开放态"这条语义）
     id = await createIssue('feature'); await seedIntake(id, { status: '待指派' });
@@ -282,10 +282,11 @@ async function main() {
     ok('[S] 拒过期回写：旧 request_event_id → changes=0(不污染) / 当前 → changes=1 / sentBy 非正整数 → 抛契约错(HIGH-3)');
   }
 
-  // ═══ [RS] resend-tech-consult（admin∨受理人∨建单人·expected_request_event_id）═══
+  // ═══ [RS] resend-tech-consult（⭐ C10-fix M2：admin∨该单对接人·expected_request_event_id·建单人分支已移除）═══
   {
     sendBehavior = { mode: 'ok' };
-    // 建单人(dev5) resend（seed created_by=5）：先 request，再 resend with 正确 expected
+    // ⭐ [C10-fix M2·绑单精判] 权限收紧为 admin ∨ 该单 intake_liaison_id 本人（createIssue 绑 13）——建单人分支已移除。
+    //   seed created_by=5 现仅用于证「created_by 不再授权」：dev5(建单人) 应 403 NOT_BOUND_LIAISON。
     let id = await createIssue('feature'); await seedIntake(id, { created_by: 5 });
     let r = await call('POST', `/api/sys-issues/${id}/request-tech-consult`, adminTok, { tech_lead_id: 7 });
     const ev = r.body.request_event_id;
@@ -293,16 +294,17 @@ async function main() {
     r = await call('POST', `/api/sys-issues/${id}/resend-tech-consult`, adminTok, { expected_request_event_id: ev });
     assert.strictEqual(r.status, 200, `admin resend 200, got ${r.status} ${JSON.stringify(r.body)}`);
     assert.strictEqual(r.body.tech_lead_notify_status, 'sent', 'resend 成功 sent');
-    // 受理人 resend → 200
+    // 该单对接人(13·intake_liaison_id 本人) resend → 200
     r = await call('POST', `/api/sys-issues/${id}/resend-tech-consult`, liaisonTok, { expected_request_event_id: ev });
-    assert.strictEqual(r.status, 200, '受理人 resend 200');
-    // 建单人(dev5) resend → 200（created_by=5）
+    assert.strictEqual(r.status, 200, '该单对接人(13) resend 200');
+    // ⭐ [C10-fix M2] 建单人(dev5·created_by=5·非 admin·非绑定对接人) resend → 403 NOT_BOUND_LIAISON（created_by 分支已移除）
     r = await call('POST', `/api/sys-issues/${id}/resend-tech-consult`, devTok, { expected_request_event_id: ev });
-    assert.strictEqual(r.status, 200, '建单人 resend 200');
-    // 非授权(dev6·非建单人非受理人非admin) → 403
+    assert.strictEqual(r.status, 403, '建单人 resend 现应 403（M2 收紧·非绑定对接人）');
+    assert.strictEqual(r.body.code, 'NOT_BOUND_LIAISON', '建单人 403 code=NOT_BOUND_LIAISON');
+    // 非授权(dev6·非建单人非对接人非admin) → 403 NOT_BOUND_LIAISON
     r = await call('POST', `/api/sys-issues/${id}/resend-tech-consult`, dev2Tok, { expected_request_event_id: ev });
     assert.strictEqual(r.status, 403, '非授权 resend 403');
-    assert.strictEqual(r.body.code, 'NOT_AUTHORIZED_FOR_TECH_CONSULT_RESEND', '403 code');
+    assert.strictEqual(r.body.code, 'NOT_BOUND_LIAISON', '403 code=NOT_BOUND_LIAISON');
     // expected 不一致 → 409 VERSION_CONFLICT
     r = await call('POST', `/api/sys-issues/${id}/resend-tech-consult`, adminTok, { expected_request_event_id: ev - 1 });
     assert.strictEqual(r.status, 409, 'expected 不一致 409');
@@ -334,7 +336,7 @@ async function main() {
     const errRow = await get('SELECT tech_lead_notify_error FROM sys_issues WHERE id=?', [id]);
     assert.ok(['no_phone', 'no_config', 'notify_exception', 'other'].includes(errRow.tech_lead_notify_error), 'MED-6：error 是安全码集(no_phone)·不含 raw 内部信息');
     sendBehavior = { mode: 'ok' };
-    ok('[RS] resend：admin/受理人/建单人 200 + 非授权 403 + expected 不一致 409 + 缺 expected 400 + 未发起 409 + MED-5 非白名单 409 + MED-6 error 安全码');
+    ok('[RS] resend（⭐ C10-fix M2 绑单精判）：admin/该单对接人(13) 200 + 建单人(dev5)/非授权(dev6) 均 403 NOT_BOUND_LIAISON（建单人分支已移除）+ expected 不一致 409 + 缺 expected 400 + 未发起 409 + MED-5 非白名单 409 + MED-6 error 安全码');
   }
 
   console.log(`\n✅ verify-sys-intake-schedule-c5 全部通过（${passed} 组）`);

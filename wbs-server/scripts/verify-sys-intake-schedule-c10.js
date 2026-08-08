@@ -204,13 +204,14 @@ async function main() {
       assert.strictEqual(rFar.status, 409, `[远态=${farStatus}] resend 应 409, got ${rFar.status} ${JSON.stringify(rFar.body)}`);
       assert.strictEqual(rFar.body.code, 'TECH_CONSULT_RESEND_LATE', `[远态=${farStatus}] code 应为 TECH_CONSULT_RESEND_LATE，实际 ${rFar.body.code}`);
     }
-    // 收口审 LOW（codex149-B）：权限先于状态门——无权限用户(dev5·非admin/受理人/建单人)对非开放态单 resend 仍先得 403（不借状态码侧信道泄露单据态）
+    // 收口审 LOW（codex149-B）：权限先于状态门——无权限用户(dev5·非admin·非该单对接人)对非开放态单 resend 仍先得 403（不借状态码侧信道泄露单据态）
     // ⭐ v2.1：开放态本身已改「待受理」，本组要造的是"非开放态"夹具 → 改用「待指派」（不能再用「待受理」，
     //   那现在恰是开放态本身，达不到"非开放态"这个前提）。
     await run(`UPDATE sys_issues SET status='待指派' WHERE id=?`, [id]);
     const r403 = await call('POST', `/api/sys-issues/${id}/resend-tech-consult`, devTok, { expected_request_event_id: eid });
     assert.strictEqual(r403.status, 403, `无权限 resend 403（权限先于状态门）, got ${r403.status} ${JSON.stringify(r403.body)}`);
-    assert.strictEqual(r403.body.code, 'NOT_AUTHORIZED_FOR_TECH_CONSULT_RESEND', 'code=NOT_AUTHORIZED_FOR_TECH_CONSULT_RESEND（权限校验先执行）');
+    // ⭐ [C10-fix M2·绑单精判] 码从 NOT_AUTHORIZED_FOR_TECH_CONSULT_RESEND 收敛为 NOT_BOUND_LIAISON（与 request/cancel-consult 对称）
+    assert.strictEqual(r403.body.code, 'NOT_BOUND_LIAISON', 'code=NOT_BOUND_LIAISON（M2 绑单精判·权限校验先执行）');
     // bug 侧不受本次撤销影响：仍锚定「待受理」（bug 从未走过预沟通段，§3）——回归哨兵防日后误把 bug 挪走。
     const crb = await create({ type: 'bug' });
     const idb = crb.body.id;

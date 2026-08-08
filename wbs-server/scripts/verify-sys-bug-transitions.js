@@ -75,6 +75,39 @@ function waitReady() {
 const adminTok = jwt.sign({ id: 1, username: 'admin', display_name: '管理员', role: 'admin' }, SECRET);
 const devTok = jwt.sign({ id: 5, username: 'dev', display_name: '开发王', role: 'user' }, SECRET);
 const dev2Tok = jwt.sign({ id: 6, username: 'dev2', display_name: '开发李', role: 'user' }, SECRET);
+const TOK_BY_USER_ID = { 5: devTok, 6: dev2Tok };
+
+// C3（方案 §4.3 全文，301-M3 过渡夹具标注兑现）：本文件三处"驱动 execute 真发布"的过渡夹具统一改走
+//   真实子表流——通用化处理两种起点：① 批次已有在册执行人（hotfix-publish 建单自带 [5,6]，本文件多
+//   数场景）② 批次尚无在册执行人（普通 add-issues 建的批次，需先 PUT executors）。统一把所有 not_sent
+//   在册行置 sent → 除 executorId 外逐个确认 → executorId 最后确认触发 R-GATE 真正发布。同款完整论述
+//   见 verify-sys-release.js 的 publishRelease 定义处，此处不重复。
+async function confirmAndPublish(relId, body, executorId = 5) {
+  let rows = await all(`SELECT id, user_id, notify_status, exec_status FROM sys_release_executors WHERE release_id=? AND removed_at IS NULL`, [relId]);
+  if (rows.length === 0) {
+    const rSet = await call('PUT', `/api/sys-releases/${relId}/executors`, adminTok, { user_ids: [executorId, executorId === 5 ? 6 : 5] });
+    if (rSet.status !== 200) return rSet;
+    rows = await all(`SELECT id, user_id, notify_status, exec_status FROM sys_release_executors WHERE release_id=? AND removed_at IS NULL`, [relId]);
+  }
+  const myRow = rows.find(r => r.user_id === executorId);
+  if (!myRow) throw new Error(`confirmAndPublish helper: executorId=${executorId} 不在 release ${relId} 的在册执行人子表中`);
+  const notSentIds = rows.filter(r => r.notify_status !== 'sent').map(r => r.id);
+  if (notSentIds.length > 0) {
+    const ph = notSentIds.map(() => '?').join(',');
+    await run(`UPDATE sys_release_executors SET notify_status='sent', notified_at=datetime('now','localtime') WHERE id IN (${ph})`, notSentIds);
+  }
+  for (const r of rows) {
+    if (r.user_id === executorId || r.exec_status === 'done') continue;
+    const tok = TOK_BY_USER_ID[r.user_id] || jwt.sign({ id: r.user_id, username: `u${r.user_id}`, display_name: `占位${r.user_id}`, role: 'user' }, SECRET);
+    // 303-M2（Opus 对抗审）：中间预确认不许静默吞——断言真成功且未提前触发发布，失败带上下文抛错。
+    const rPre = await call('POST', `/api/sys-releases/${relId}/execute`, tok, { executor_row_id: r.id });
+    if (rPre.status !== 200 || rPre.body.released !== false) {
+      throw new Error(`confirmAndPublish helper: 预确认异常，relId=${relId} user_id=${r.user_id} row=${r.id} status=${rPre.status} body=${JSON.stringify(rPre.body)}`);
+    }
+  }
+  const myTok = TOK_BY_USER_ID[executorId] || jwt.sign({ id: executorId, username: `u${executorId}`, display_name: `占位${executorId}`, role: 'user' }, SECRET);
+  return call('POST', `/api/sys-releases/${relId}/execute`, myTok, { ...body, executor_row_id: myRow.id });
+}
 
 let server, port;
 function call(method, path, tok, body) {
@@ -130,7 +163,7 @@ async function seedBugToReady(devId = 5, devTok2 = devTok) {
   const id = await seedBugToDev(devId);
   let r = await call('POST', `/api/sys-issues/${id}/estimate`, devTok2, { dev_estimated_at: EST });
   assert.strictEqual(r.status, 200, `bug estimate 200, got ${r.status} ${JSON.stringify(r.body)}`);
-  r = await call('POST', `/api/sys-issues/${id}/submit`, devTok2, { mode: 'no_code', no_code_reason: '修复完成（占位理由）', self_tested: true, test_env_deployed: true });
+  r = await call('POST', `/api/sys-issues/${id}/submit`, devTok2, { mode: 'commits', commits: [{ component: 'backend', commit_ref: 'c9-keep-batch-10' }], self_tested: true, test_env_deployed: true });
   assert.strictEqual(r.status, 200, `bug submit 200, got ${r.status} ${JSON.stringify(r.body)}`);
   r = await call('POST', `/api/sys-issues/${id}/accept`, adminTok, {});
   assert.strictEqual(r.status, 200, `bug accept 200, got ${r.status} ${JSON.stringify(r.body)}`);
@@ -158,8 +191,8 @@ async function seedChangeToReady(type = 'feature', devId = 5, devTok2 = devTok) 
   //   立即 accept 到"待上线"——本 helper 下游全部调用点零改动，这也是方案承认的合法真实场景（非造假）。
   //   improvement/bug 不受影响（未接决策树），此处统一处理不额外分 type 判断，简化维护。
   await run(`UPDATE sys_issues SET intake_liaison_id = 999999 WHERE id = ?`, [id]);
-  await call('POST', `/api/sys-issues/${id}/estimate`, devTok2, { dev_estimated_at: EST });
-  await call('POST', `/api/sys-issues/${id}/submit`, devTok2, { mode: 'no_code', no_code_reason: '交付（占位理由）', self_tested: true, test_env_deployed: true });
+  await call('POST', `/api/sys-issues/${id}/estimate`, devTok2, { dev_estimated_at: EST, estimated_effort_days: 1 });
+  await call('POST', `/api/sys-issues/${id}/submit`, devTok2, { mode: 'commits', commits: [{ component: 'backend', commit_ref: 'c9-keep-batch-11' }], self_tested: true, test_env_deployed: true });
   r = await call('POST', `/api/sys-issues/${id}/accept`, adminTok, {});
   assert.strictEqual(r.status, 200, `${type} accept 200, got ${r.status} ${JSON.stringify(r.body)}`);
   return id;
@@ -341,7 +374,7 @@ async function main() {
   {
     // 合法 submit → 待验证（C3：新 commit 事件模型，无 first_submitted_at/round_no timeline——
     //   这两个字段随旧单人 summary 模型退场，唯一在册开发 no_code 完成 → W-GATE 同事务转待验证）。
-    const r = await call('POST', `/api/sys-issues/${mainId}/submit`, devTok, { mode: 'no_code', no_code_reason: '空指针已修，补了守卫', self_tested: true, test_env_deployed: true });
+    const r = await call('POST', `/api/sys-issues/${mainId}/submit`, devTok, { mode: 'no_code', no_code_reason: '缺陷已修复（占位理由）', self_tested: true, test_env_deployed: true });
     assert.strictEqual(r.status, 200, 'submit 200, got ' + JSON.stringify(r.body));
     assert.strictEqual(r.body.main_status, '待验证', 'submit → 待验证（W-GATE，main_status 字段，非旧 status）');
     const devEv = await get(`SELECT action, payload_json FROM sys_issue_dev_events WHERE issue_id=? AND action='no_code'`, [mainId]);
@@ -373,9 +406,9 @@ async function main() {
     r = await call('POST', `/api/sys-issues/${mainId}/dev-assignees`, adminTok, { user_ids: [5] });
     assert.strictEqual(r.status, 200, 're-add(5) 200, got ' + JSON.stringify(r.body));
     await call('POST', `/api/sys-issues/${mainId}/estimate`, devTok, { dev_estimated_at: EST2 });
-    r = await call('POST', `/api/sys-issues/${mainId}/submit`, devTok, { mode: 'no_code', no_code_reason: '二轮修复', self_tested: true, test_env_deployed: true });
+    r = await call('POST', `/api/sys-issues/${mainId}/submit`, devTok, { mode: 'commits', commits: [{ component: 'backend', commit_ref: 'c9-keep-batch-13' }], self_tested: true, test_env_deployed: true });
     assert.strictEqual(r.status, 200, '二轮 submit(5) 200, got ' + JSON.stringify(r.body));
-    r = await call('POST', `/api/sys-issues/${mainId}/submit`, dev2Tok, { mode: 'no_code', no_code_reason: '协作二轮完成', self_tested: true, test_env_deployed: true });
+    r = await call('POST', `/api/sys-issues/${mainId}/submit`, dev2Tok, { mode: 'commits', commits: [{ component: 'backend', commit_ref: 'c9-keep-batch-14' }], self_tested: true, test_env_deployed: true });
     assert.strictEqual(r.status, 200, '协作(6) submit 200, got ' + JSON.stringify(r.body));
     assert.strictEqual(r.body.main_status, '待验证', '全员完成 → W-GATE 转待验证');
     r = await call('POST', `/api/sys-issues/${mainId}/accept`, adminTok, {});
@@ -435,9 +468,11 @@ async function main() {
     //   翻已上线要等被通知的值班执行人调用 /execute，两阶段语义，见方案 §6.7）。
     const r3 = await seedBugToReady(5, devTok);
     // [C3 裁定修正 2026-07-29] 抢占失败（当日无在册值班人）现回滚+409（不再是"200+not_sent 悬单"），
-    //   本用例验证目标是"bug 类型放行"本身，非抢占失败分支——先补今日排班，让 hotfix-publish 走通①全链。
+    //   本用例验证目标是"bug 类型放行"本身，非闸门分支——[C2b] 排班表已与本端点脱钩（不再自动查排班定
+    //   人），下方 INSERT 保留仅作历史遗留 no-op（不影响本用例，未删是因为不属于本次改造范围内的清理项）；
+    //   走通①全链改靠传 executors[5,6]（同 PUT executors 闸②③同码）。
     await run(`INSERT INTO sys_release_duty_roster (duty_date, user_id, user_name, created_by, created_by_name) VALUES (date('now','localtime'), 5, '开发王', 1, '管理员')`);
-    r = await call('POST', `/api/sys-issues/${r3}/hotfix-publish`, adminTok, { release_note: '修复上线', version_tag: 'v9.9' });
+    r = await call('POST', `/api/sys-issues/${r3}/hotfix-publish`, adminTok, { release_note: '修复上线', version_tag: 'v9.9', executors: [5, 6] });
     assert.strictEqual(r.status, 200, `[R3反向] bug hotfix-publish 应 200, got ${r.status} ${JSON.stringify(r.body)}`);
     assert.strictEqual(r.body.created_new, true, '[R3反向] created_new=true（首次调用真建单）');
     assert.ok(r.body.release_id, '[R3反向] release_id 非空（已建应急单）');
@@ -472,10 +507,13 @@ async function main() {
     assert.strictEqual((await issueRowRelease(r5MixFeature)), relMix2, '[R5①放行] feature 已挂入');
     ok('[R5①放行] add-issues 混选 [bug,feature]：整批 200 一次性挂入（双闸拆除后 bug 不再被单独摘出拒绝，原子性不变——全成而非全败）');
 
-    // ═══ [R5①放行·端到端] bug（不再需要 needs_release）经 add-issues 进普通批次 → notify-executor →
-    //   execute → 已上线；与 feature 走**同一条统一路径**，断言两者结果同构（Task C 核对结论：
-    //   notify-executor/execute/getReleaseMembers/deriveReleaseType 均不读 sys_issues.type 做任何 bug
-    //   专属分支，故本用例并列驱动 bug/feature 两条批次，逐项比对响应形状与终态，而非只测 bug 单独过 ═══
+    // ═══ [R5①放行·端到端] bug（不再需要 needs_release）经 add-issues 进普通批次 → PUT executors + 行级
+    //   通知 → execute → 已上线；与 feature 走**同一条统一路径**，断言两者结果同构（Task C 核对结论：
+    //   行级通知/execute/getReleaseMembers/deriveReleaseType 均不读 sys_issues.type 做任何 bug 专属
+    //   分支，故本用例并列驱动 bug/feature 两条批次，逐项比对响应形状与终态，而非只测 bug 单独过。
+    //   [C4b 退场改写] 原批次级 POST .../notify-executor 端点已随批次级单执行人通知机制整体退场删除
+    //   （H1 根治）——改用 PUT executors + 行级通知端点 POST .../executors/:userId/notify，两批次各自
+    //   走同一套行级实现，比对响应字段集合的核心断言意图不变。 ═══
     {
       const e2eBug = await seedBugToReady(5, devTok);
       const e2eFeat = await seedFeatureToReady(5, devTok);
@@ -486,30 +524,28 @@ async function main() {
       rAdd = await call('POST', `/api/sys-releases/${relFeatE2E}/add-issues`, adminTok, { issue_ids: [e2eFeat] });
       assert.strictEqual(rAdd.status, 200, `端到端：feature add-issues 应 200, got ${rAdd.status} ${JSON.stringify(rAdd.body)}`);
 
-      // 计划上线日期设为今日（复用本文件 R3反向 已建的今日排班 duty_date=today/user_id=5，不重复 INSERT——
-      //   idx_sys_duty_roster_active 对同一 duty_date 只允许一条在册行，重复插入会撞唯一索引）。
-      const today = (await get("SELECT date('now','localtime') AS d")).d;
-      let rPd = await call('POST', `/api/sys-releases/${relBugE2E}/update-planned-date`, adminTok, { planned_date: today });
-      assert.strictEqual(rPd.status, 200, `端到端：bug 批次改期应 200, got ${rPd.status}`);
-      rPd = await call('POST', `/api/sys-releases/${relFeatE2E}/update-planned-date`, adminTok, { planned_date: today });
-      assert.strictEqual(rPd.status, 200, `端到端：feature 批次改期应 200, got ${rPd.status}`);
+      // 执行人选定（PUT executors，新权威路径——不再需要计划上线日期/排班表，那是已删除的批次级
+      //   notify-executor 才有的"查排班自动定人"语义，行级机制下执行人由 admin 显式指定）。
+      let rSetBug = await call('PUT', `/api/sys-releases/${relBugE2E}/executors`, adminTok, { user_ids: [5, 6] });
+      assert.strictEqual(rSetBug.status, 200, `端到端：bug PUT executors 应 200, got ${rSetBug.status} ${JSON.stringify(rSetBug.body)}`);
+      let rSetFeat = await call('PUT', `/api/sys-releases/${relFeatE2E}/executors`, adminTok, { user_ids: [5, 6] });
+      assert.strictEqual(rSetFeat.status, 200, `端到端：feature PUT executors 应 200, got ${rSetFeat.status} ${JSON.stringify(rSetFeat.body)}`);
 
-      // 安排上线（notify-executor，真实 HTTP 端点，非 raw SQL 抢占捷径）：两批次各自独立走同一内部服务
-      //   （preemptReleaseNotifySend + sendReleaseNotifyAndWriteback），同日排班抢占同一执行人(5)。
-      let rNotifyBug = await call('POST', `/api/sys-releases/${relBugE2E}/notify-executor`, adminTok, {});
-      assert.strictEqual(rNotifyBug.status, 200, `端到端：bug 安排上线应 200, got ${rNotifyBug.status} ${JSON.stringify(rNotifyBug.body)}`);
-      assert.strictEqual(rNotifyBug.body.notify_status, 'sent', '端到端：bug 批次通知状态=sent');
-      assert.strictEqual(rNotifyBug.body.release_assignee_id, 5, '端到端：bug 批次执行人=值班开发(5)');
-      let rNotifyFeat = await call('POST', `/api/sys-releases/${relFeatE2E}/notify-executor`, adminTok, {});
-      assert.strictEqual(rNotifyFeat.status, 200, `端到端：feature 安排上线应 200, got ${rNotifyFeat.status} ${JSON.stringify(rNotifyFeat.body)}`);
-      assert.strictEqual(rNotifyFeat.body.notify_status, 'sent', '端到端：feature 批次通知状态=sent');
-      assert.strictEqual(rNotifyFeat.body.release_assignee_id, 5, '端到端：feature 批次执行人=值班开发(5)');
-      assert.deepStrictEqual(Object.keys(rNotifyBug.body).sort(), Object.keys(rNotifyFeat.body).sort(), '端到端：notify-executor 响应字段集合 bug/feature 完全一致（同一实现，零 type 分支）');
+      // 行级通知（真实 HTTP 端点，非 raw SQL 抢占捷径）：两批次各自独立走同一内部服务
+      //   （preemptReleaseExecutorNotifySend + sendReleaseExecutorNotifyAndWriteback），对 5 号发送。
+      let rNotifyBug = await call('POST', `/api/sys-releases/${relBugE2E}/executors/5/notify`, adminTok, {});
+      assert.strictEqual(rNotifyBug.status, 200, `端到端：bug 行级通知应 200, got ${rNotifyBug.status} ${JSON.stringify(rNotifyBug.body)}`);
+      assert.strictEqual(rNotifyBug.body.notify_status, 'sent', '端到端：bug 5 号行通知状态=sent');
+      let rNotifyFeat = await call('POST', `/api/sys-releases/${relFeatE2E}/executors/5/notify`, adminTok, {});
+      assert.strictEqual(rNotifyFeat.status, 200, `端到端：feature 行级通知应 200, got ${rNotifyFeat.status} ${JSON.stringify(rNotifyFeat.body)}`);
+      assert.strictEqual(rNotifyFeat.body.notify_status, 'sent', '端到端：feature 5 号行通知状态=sent');
+      assert.deepStrictEqual(Object.keys(rNotifyBug.body).sort(), Object.keys(rNotifyFeat.body).sort(), '端到端：行级通知响应字段集合 bug/feature 完全一致（同一实现，零 type 分支）');
 
-      // 执行上线（execute）：值班开发本人（devTok=5）执行，两批次各自真实翻已上线。
-      let rExecBug = await call('POST', `/api/sys-releases/${relBugE2E}/execute`, devTok, { release_note: '端到端 bug 真发布', version_tag: 've2e-bug' });
+      // 执行上线（execute）：两批次已有在册执行人子表（5 号已 sent），confirmAndPublish 内部据此跳过
+      //   自建 PUT executors，把 6 号标记 sent 后各自确认（301-M3 过渡夹具兑现）。
+      let rExecBug = await confirmAndPublish(relBugE2E, { release_note: '端到端 bug 真发布', version_tag: 've2e-bug' });
       assert.strictEqual(rExecBug.status, 200, `端到端：bug execute 应 200, got ${rExecBug.status} ${JSON.stringify(rExecBug.body)}`);
-      let rExecFeat = await call('POST', `/api/sys-releases/${relFeatE2E}/execute`, devTok, { release_note: '端到端 feature 真发布', version_tag: 've2e-feat' });
+      let rExecFeat = await confirmAndPublish(relFeatE2E, { release_note: '端到端 feature 真发布', version_tag: 've2e-feat' });
       assert.strictEqual(rExecFeat.status, 200, `端到端：feature execute 应 200, got ${rExecFeat.status} ${JSON.stringify(rExecFeat.body)}`);
       assert.deepStrictEqual(Object.keys(rExecBug.body).sort(), Object.keys(rExecFeat.body).sort(), '端到端：execute 响应字段集合 bug/feature 完全一致（同一实现，零 type 分支）');
 
@@ -530,7 +566,7 @@ async function main() {
       assert.strictEqual(I.deriveReleaseType(gmFeat).category, 'single', '端到端：feature 批次 deriveReleaseType=single');
       assert.strictEqual(I.deriveReleaseType(gmFeat).type, 'feature', '端到端：feature 批次 type=feature');
 
-      ok('⭐ [R5①放行·端到端] bug（不再需要 needs_release）经 add-issues 进普通批次 → notify-executor → execute → 已上线，与 feature 走同一条统一路径产生完全同构的结果（notify-executor/execute 响应字段集合相同 + 批次终态相同 + deriveReleaseType 均为 single，零 bug 专属分支）');
+      ok('⭐ [R5①放行·端到端] bug（不再需要 needs_release）经 add-issues 进普通批次 → PUT executors + 行级通知 → execute → 已上线，与 feature 走同一条统一路径产生完全同构的结果（行级通知/execute 响应字段集合相同 + 批次终态相同 + deriveReleaseType 均为 single，零 bug 专属分支）');
     }
 
     // [C5 收口批·C3 遗留补做] ⭐ R5d 改造：feature + improvement 同批仍应成功（这条本就与"混批守卫"无关，
@@ -589,7 +625,7 @@ async function main() {
     //   本身的行为（release_kind=emergency）。
     {
       const mixBug = await seedBugToReady(5, devTok);
-      const rHf = await call('POST', `/api/sys-issues/${mixBug}/hotfix-publish`, adminTok, { release_note: '混批测试建单' });
+      const rHf = await call('POST', `/api/sys-issues/${mixBug}/hotfix-publish`, adminTok, { release_note: '混批测试建单', executors: [5, 6] });
       assert.strictEqual(rHf.status, 200, `混批测试：hotfix-publish 建单应 200, got ${rHf.status} ${JSON.stringify(rHf.body)}`);
       const mixRelId = rHf.body.release_id;
       assert.ok(mixRelId, '混批测试：release_id 非空（hotfix-publish 恒建批次）');
@@ -608,9 +644,9 @@ async function main() {
       assert.strictEqual(derivedMix.category, 'mixed', `[混批放行端到端] deriveReleaseType 应返回 mixed，实得 ${JSON.stringify(derivedMix)}`);
       assert.strictEqual(derivedMix.type, null, '[混批放行端到端] mixed 态 type=null');
 
-      // execute 真发布：混批也能真实发布（复用本文件早前已插入的今日排班 duty_date=today, user_id=5）。
-      await run(`UPDATE sys_releases SET release_assignee_id=5, release_assignee_name='开发王', release_assignee_notify_status='sent' WHERE id=?`, [mixRelId]);
-      const rExecMix = await call('POST', `/api/sys-releases/${mixRelId}/execute`, devTok, { release_note: '混批真发布' });
+      // execute 真发布：混批也能真实发布——C3 新模型，本批次在册执行人是 hotfix-publish 建单时写入的
+      //   [5,6]，confirmAndPublish 统一走真实子表流（301-M3 过渡夹具兑现）。
+      const rExecMix = await confirmAndPublish(mixRelId, { release_note: '混批真发布' });
       assert.strictEqual(rExecMix.status, 200, `[混批放行端到端] execute 真发布应 200（发布事务内族别一致性检查已拆除，不再因混批被拦）, got ${rExecMix.status} ${JSON.stringify(rExecMix.body)}`);
       assert.strictEqual(await statusOf(mixBug), '已上线', '混批测试：bug 单真实翻已上线');
       assert.strictEqual(await statusOf(mixFeature), '已上线', '混批测试：feature 单真实翻已上线');
@@ -667,7 +703,7 @@ async function main() {
     //   （非 DB 强改模拟）验证翻转：bug → hotfix-publish 建应急批次（复用 [R3反向] 已建今日排班）→
     //   remove-issues 200 + release_id 清空 + 单仍待上线 + 批次移空 F-4 复位 release_type=NULL。
     const rmBug = await seedBugToReady(5, devTok);
-    r = await call('POST', `/api/sys-issues/${rmBug}/hotfix-publish`, adminTok, { release_note: '待移除夹具', version_tag: 'vrm' });
+    r = await call('POST', `/api/sys-issues/${rmBug}/hotfix-publish`, adminTok, { release_note: '待移除夹具', version_tag: 'vrm', executors: [5, 6] });
     assert.strictEqual(r.status, 200, `[R5⑤翻转] 夹具 hotfix-publish 应 200, got ${r.status} ${JSON.stringify(r.body)}`);
     const rmRelId = r.body.release_id;
     assert.strictEqual((await get('SELECT release_type FROM sys_releases WHERE id=?', [rmRelId])).release_type, 'bug',
@@ -684,7 +720,7 @@ async function main() {
     //   非空保持 'bug'。该残值无准入/发布分流依赖：schema 注释已钉死"展示用途，禁止恢复准入判断"，execute 按
     //   成员实际族别 derive（deriveReleaseType 不读本列）、legacy /publish 全类型恒 409。本组把非空语义锁进断言。
     const rmBug2 = await seedBugToReady(5, devTok);
-    r = await call('POST', `/api/sys-issues/${rmBug2}/hotfix-publish`, adminTok, { release_note: '非空夹具', version_tag: 'vrm2' });
+    r = await call('POST', `/api/sys-issues/${rmBug2}/hotfix-publish`, adminTok, { release_note: '非空夹具', version_tag: 'vrm2', executors: [5, 6] });
     assert.strictEqual(r.status, 200, `[R5⑤翻转·非空] 夹具 hotfix-publish 应 200, got ${r.status} ${JSON.stringify(r.body)}`);
     const rmRelId2 = r.body.release_id;
     const rmBug3 = await seedBugToReady(5, devTok);
@@ -707,11 +743,12 @@ async function main() {
     // 走真实发布链路（hotfix-publish + execute，复用本文件 R3反向 已建的今日排班 duty_date=today/user_id=5，
     //   不重复 INSERT——idx_sys_duty_roster_active 对同一 duty_date 只允许一条在册行）拿到一个真实「已上线」bug。
     const c6Bug = await seedBugToReady(5, devTok);
-    const rHf = await call('POST', `/api/sys-issues/${c6Bug}/hotfix-publish`, adminTok, { release_note: 'C6归档重开测试' });
+    const rHf = await call('POST', `/api/sys-issues/${c6Bug}/hotfix-publish`, adminTok, { release_note: 'C6归档重开测试', executors: [5, 6] });
     assert.strictEqual(rHf.status, 200, `[C6] hotfix-publish 建单应 200, got ${rHf.status} ${JSON.stringify(rHf.body)}`);
     const c6RelId = rHf.body.release_id;
-    await run(`UPDATE sys_releases SET release_assignee_id=5, release_assignee_name='开发王', release_assignee_notify_status='sent' WHERE id=?`, [c6RelId]);
-    const rExec = await call('POST', `/api/sys-releases/${c6RelId}/execute`, devTok, { release_note: 'C6真发布' });
+    // C3 新模型：本批次在册执行人是 hotfix-publish 建单时写入的 [5,6]，confirmAndPublish 统一走真实
+    //   子表流（301-M3 过渡夹具兑现，定义处完整论述）。
+    const rExec = await confirmAndPublish(c6RelId, { release_note: 'C6真发布' });
     assert.strictEqual(rExec.status, 200, `[C6] execute 应 200, got ${rExec.status} ${JSON.stringify(rExec.body)}`);
     assert.strictEqual(await statusOf(c6Bug), '已上线', '[C6] 前置：bug 真实翻已上线');
 
@@ -779,9 +816,9 @@ async function main() {
     // 改用本文件顶部已有的 futureEst(30) 动态生成，与本文件其余三处调用同源。
     r = await call('POST', `/api/sys-issues/${c6Bug}/estimate`, devTok, { dev_estimated_at: futureEst(30) });
     assert.strictEqual(r.status, 200, `[C6] estimate 应 200, got ${r.status} ${JSON.stringify(r.body)}`);
-    r = await call('POST', `/api/sys-issues/${c6Bug}/submit`, devTok, { mode: 'no_code', no_code_reason: '缺陷已修复（占位理由）', self_tested: true, test_env_deployed: true });
+    r = await call('POST', `/api/sys-issues/${c6Bug}/submit`, devTok, { mode: 'commits', commits: [{ component: 'backend', commit_ref: 'c9-keep-batch-15' }], self_tested: true, test_env_deployed: true });
     assert.strictEqual(r.status, 200, `[C6] submit(5) 应 200, got ${r.status} ${JSON.stringify(r.body)}`);
-    r = await call('POST', `/api/sys-issues/${c6Bug}/submit`, dev2Tok, { mode: 'no_code', no_code_reason: '协作完成', self_tested: true, test_env_deployed: true });
+    r = await call('POST', `/api/sys-issues/${c6Bug}/submit`, dev2Tok, { mode: 'commits', commits: [{ component: 'backend', commit_ref: 'c9-keep-batch-16' }], self_tested: true, test_env_deployed: true });
     assert.strictEqual(r.status, 200, `[C6] submit(6) 应 200, got ${r.status} ${JSON.stringify(r.body)}`);
     assert.strictEqual(r.body.main_status, '待验证', '[C6] 全员完成 → W-GATE 转待验证');
     r = await call('POST', `/api/sys-issues/${c6Bug}/accept`, adminTok, {});
@@ -794,8 +831,9 @@ async function main() {
     r = await call('POST', `/api/sys-releases/${c6RelId2}/add-issues`, adminTok, { issue_ids: [c6Bug] });
     assert.strictEqual(r.status, 200, `[C6] 加入新批次应 200, got ${r.status} ${JSON.stringify(r.body)}`);
     assert.strictEqual((await issueRowRelease(c6Bug)), c6RelId2, '[C6] 已挂新批次（非旧批次）');
-    await run(`UPDATE sys_releases SET release_assignee_id=5, release_assignee_name='开发王', release_assignee_notify_status='sent' WHERE id=?`, [c6RelId2]);
-    r = await call('POST', `/api/sys-releases/${c6RelId2}/execute`, devTok, { release_note: 'C6二次发布', version_tag: 'v-c6-2' });
+    // C3 新模型：c6RelId2 是纯 add-issues 建的批次，尚无在册执行人——confirmAndPublish 自动 PUT
+    //   executors [5,6] 后走真实子表流（301-M3 过渡夹具兑现）。
+    r = await confirmAndPublish(c6RelId2, { release_note: 'C6二次发布', version_tag: 'v-c6-2' });
     assert.strictEqual(r.status, 200, `[C6] 再发布应 200, got ${r.status} ${JSON.stringify(r.body)}`);
     assert.strictEqual(await statusOf(c6Bug), '已上线', '[C6] 二次发布后再次翻已上线');
     row = await rowOf(c6Bug);
@@ -888,7 +926,7 @@ async function main() {
     assert.strictEqual(row.status, '处理中', '同态换人仍 处理中（DEV 族内增减不触发 W-GATE）');
     // 待验证换人 → 回 处理中（W-GATE：新增 pending 成员 5 打破"全员完成"，VERIFY→DEV）
     await call('POST', `/api/sys-issues/${id}/estimate`, dev2Tok, { dev_estimated_at: EST });
-    await call('POST', `/api/sys-issues/${id}/submit`, dev2Tok, { mode: 'no_code', no_code_reason: '修复完成（占位理由）', self_tested: true, test_env_deployed: true });
+    await call('POST', `/api/sys-issues/${id}/submit`, dev2Tok, { mode: 'commits', commits: [{ component: 'backend', commit_ref: 'c9-keep-batch-17' }], self_tested: true, test_env_deployed: true });
     assert.strictEqual(await statusOf(id), '待验证');
     r = await call('POST', `/api/sys-issues/${id}/reassign`, adminTok, { member_ids: [5], reason: '返工换回' });
     assert.strictEqual(r.status, 200, `reassign 200, got ${r.status} ${JSON.stringify(r.body)}`);
@@ -900,9 +938,9 @@ async function main() {
     // roster 内，同样 403（错误码 NOT_ROSTERED，语义与旧 H-1"严格本人"口径一致：无权限即拒）。
     const id = await seedBugToDev(5);
     await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: EST });
-    let r = await call('POST', `/api/sys-issues/${id}/submit`, dev2Tok, { mode: 'no_code', no_code_reason: 'x', self_tested: true, test_env_deployed: true });
+    let r = await call('POST', `/api/sys-issues/${id}/submit`, dev2Tok, { mode: 'commits', commits: [{ component: 'backend', commit_ref: 'c9-keep-batch-18' }], self_tested: true, test_env_deployed: true });
     assert.strictEqual(r.status, 403, '非在册开发 submit 403');
-    r = await call('POST', `/api/sys-issues/${id}/submit`, adminTok, { mode: 'no_code', no_code_reason: 'x', self_tested: true, test_env_deployed: true });
+    r = await call('POST', `/api/sys-issues/${id}/submit`, adminTok, { mode: 'commits', commits: [{ component: 'backend', commit_ref: 'c9-keep-batch-19' }], self_tested: true, test_env_deployed: true });
     assert.strictEqual(r.status, 403, 'admin 代提交 403（admin 本身不在册，W06/W05 assertDevMember 统一口径）');
     ok('W05 assertDevMember 严格在册：bug submit 非在册开发/admin 均 403（同构于旧 H-1"严格本人"口径）');
   }

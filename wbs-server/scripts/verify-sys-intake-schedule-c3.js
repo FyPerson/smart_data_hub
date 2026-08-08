@@ -152,24 +152,24 @@ async function main() {
     assert.strictEqual(r.status, 200, `受理人 intake_accept bug 200, got ${r.status} ${JSON.stringify(r.body)}`);
     assert.strictEqual(r.body.status, '待处理', 'bug intake_accept → 待处理');
 
-    // 非 admin 非受理人(dev5) → 403 中间件
+    // 非 admin 非受理人(dev5) → 403（C10 绑单精判：单已绑 13·dev5 过粗筛后 handler 拒 NOT_BOUND_LIAISON）
     id = await seedIntakeIssue('feature');
     r = await call('POST', `/api/sys-issues/${id}/intake-accept`, devTok, {});
     assert.strictEqual(r.status, 403, 'dev5 intake_accept 403');
-    assert.strictEqual(r.body.code, 'NOT_ADMIN_OR_INTAKE_LIAISON', '403 中间件层 NOT_ADMIN_OR_INTAKE_LIAISON');
+    assert.strictEqual(r.body.code, 'NOT_BOUND_LIAISON', '403 handler 绑单精判 NOT_BOUND_LIAISON（seedIntakeIssue 绑 13·dev5 非绑定人·空单兜底不适用于已绑单）');
 
-    // 技术负责人(示例发布者 7·非受理人) → 403（三名单隔离：7 是技术负责人/bug 对接人，但不是受理人[13]）
+    // 技术负责人(示例发布者 7·非受理人) → 403（C10：7 过粗筛[publisher eligible]但非该单绑定对接人[13]·handler 拒）
     id = await seedIntakeIssue('feature');
     r = await call('POST', `/api/sys-issues/${id}/intake-accept`, techLeadTok, {});
-    assert.strictEqual(r.status, 403, '技术负责人(7) intake_accept 403（非受理人）');
-    assert.strictEqual(r.body.code, 'NOT_ADMIN_OR_INTAKE_LIAISON', '三名单隔离：示例发布者(7) 不获受理权');
+    assert.strictEqual(r.status, 403, '技术负责人(7) intake_accept 403（非绑定对接人）');
+    assert.strictEqual(r.body.code, 'NOT_BOUND_LIAISON', '绑单精判：示例发布者(7) 非该单绑定对接人[13]·NOT_BOUND_LIAISON');
 
     // 非待受理态(待指派) intake_accept → 400 INVALID_TRANSITION（状态机拒·findTransition null）
     id = await seedIntakeIssue('feature', { status: '待指派' });
     r = await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, {});
     assert.strictEqual(r.status, 400, '待指派态 intake_accept 400（非待受理·状态机拒）');
     assert.strictEqual(r.body.code, 'INVALID_TRANSITION', '400 code=INVALID_TRANSITION');
-    ok('[A] intake_accept：admin/受理人 200(feature→待指派·bug→待处理) + intake_required 不变 + dev5/技术负责人 403(三名单隔离) + 非待受理 400');
+    ok('[A] intake_accept：admin/受理人 200(feature→待指派·bug→待处理) + intake_required 不变 + dev5/技术负责人 403(绑单精判 NOT_BOUND_LIAISON) + 非待受理 400');
   }
 
   // ═══ [B] intake_return（待受理→待修改·原因必填 + 自动通知建单人 + self-guard）═══
@@ -206,11 +206,11 @@ async function main() {
     r = await call('POST', `/api/sys-issues/${id}/intake-return`, liaisonTok, { reason: '   ' });
     assert.strictEqual(r.status, 400, '空白 reason 也 400');
 
-    // 非 admin 非受理人(dev5) → 403 中间件
+    // 非 admin 非受理人(dev5) → 403（C10 绑单精判：单已绑 13·dev5 过粗筛后 handler 拒 NOT_BOUND_LIAISON）
     id = await seedIntakeIssue('feature');
     r = await call('POST', `/api/sys-issues/${id}/intake-return`, devTok, { reason: 'x' });
     assert.strictEqual(r.status, 403, 'dev5 intake_return 403');
-    assert.strictEqual(r.body.code, 'NOT_ADMIN_OR_INTAKE_LIAISON', 'intake_return 403 中间件层');
+    assert.strictEqual(r.body.code, 'NOT_BOUND_LIAISON', 'intake_return 403 handler 绑单精判 NOT_BOUND_LIAISON');
 
     // self-guard：admin(建单人本人·created_by=1) intake_return 自己单 → 200 但不发通知（creator_notify_status 仍 not_sent）
     id = await seedIntakeIssue('feature');   // created_by=admin(1)

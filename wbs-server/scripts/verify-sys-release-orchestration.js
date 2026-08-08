@@ -94,7 +94,14 @@ const EST = futureEst(30);
 
 async function issueRow(id) { return await get('SELECT * FROM sys_issues WHERE id=?', [id]); }
 
-// 建 bug 单 → 指派 devId → estimate → submit → accept，返回 id（待上线态）
+// 建 bug 单 → 指派 devId → estimate → submit(**带 1 条 commit**) → accept，返回 id（待上线态）
+// ⭐ [C9-fix H2②] submit 从 mode:'no_code' 改 mode:'commits'——函数名与注释里的「待上线态」这个**契约
+//   不变，变的是让它重新成立所需的夹具**。C9（无 commit 单验收直翻）上线后，零 commit 单 accept 会直接
+//   翻到「已上线」，本 seed 产出的单再也不是"待上线态"，下游全部用例的前提整体塌掉（baseline 实测：
+//   本套件在 :137 就撞 `'已上线' !== '待上线'` 红灯）。
+//   ⚠️ 这是 C9 那轮 no_code 普查的**漏网之一**：那轮改了 7 个套件 30 处，本处因为藏在一个 helper 函数里、
+//     且套件名与"上线编排"而非"提交模式"相关而被跳过。判定标准始终是"accept 那一刻该单有没有 active
+//     commit"，不是"这个套件看起来跟 commit 有没有关系"。
 async function seedBugToReady(devId = 5, devTokFor = devTok) {
   let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'bug单', system_name: 'BMS', source: '内部', description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13 });
   assert.strictEqual(r.status, 201, '建 bug 201, got ' + r.status + ' ' + JSON.stringify(r.body));
@@ -105,10 +112,21 @@ async function seedBugToReady(devId = 5, devTokFor = devTok) {
   assert.strictEqual(r.status, 200, 'bug assign 200');
   r = await call('POST', `/api/sys-issues/${id}/estimate`, devTokFor, { dev_estimated_at: EST });
   assert.strictEqual(r.status, 200, 'bug estimate 200, got ' + JSON.stringify(r.body));
-  r = await call('POST', `/api/sys-issues/${id}/submit`, devTokFor, { mode: 'no_code', no_code_reason: '修复完成（占位理由）', self_tested: true, test_env_deployed: true });
+  r = await call('POST', `/api/sys-issues/${id}/submit`, devTokFor, { mode: 'commits', commits: [{ component: 'backend', commit_ref: `fix/seed-ready-${id}` }], self_tested: true, test_env_deployed: true });
   assert.strictEqual(r.status, 200, 'bug submit 200, got ' + JSON.stringify(r.body));
+  // [C9-fix H2②] 前置自证：accept 之前该单确有 active commit——不满足就会命中 C9 免上线直翻，本 seed 的
+  //   「待上线态」契约当场失效（防夹具自己变假，同 c9 套件 [1-前置] 范式）。
+  const cCnt = await get('SELECT COUNT(*) c FROM sys_issue_dev_commits WHERE issue_id=?', [id]);
+  assert.strictEqual(cCnt.c, 1, `seedBugToReady 前置：accept 前须有 1 条 active commit（否则命中 C9 直翻落已上线），实际 ${cCnt.c}`);
   r = await call('POST', `/api/sys-issues/${id}/accept`, adminTok, {});
   assert.strictEqual(r.status, 200, 'bug accept 200, got ' + JSON.stringify(r.body));
+  // ⭐ [C9-fix H2②] 原先此处**只断 200**——弱断言：accept 返回 200 但落到「已上线」（C9 直翻）同样满足它，
+  //   于是 seed 悄悄产出一个错误状态的单，错误要等到下游某条业务断言才爆、且爆出来的现场离真凶很远
+  //   （baseline 里就是隔了 26 行才在 :137 报"'已上线' !== '待上线'"）。补断状态=把"这个 seed 到底
+  //   产出了什么"就地钉死，让夹具失效在夹具里报错。
+  assert.strictEqual(r.body.status, '待上线', `seedBugToReady 契约：accept 后须落「待上线」（本 seed 的函数名与全部下游用例都以此为前提），实际 ${r.body.status}`);
+  const seeded = await issueRow(id);
+  assert.strictEqual(seeded.status, '待上线', `seedBugToReady 契约：落库 status 须为「待上线」，实际 ${seeded.status}`);
   return id;
 }
 

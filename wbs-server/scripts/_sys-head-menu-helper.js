@@ -6,8 +6,11 @@
  * 平铺按钮；「+ 新建迭代单」仍是独立主按钮，不受影响，不需要经这个 helper）。
  *
  * 供所有需要点击这五个入口、或断言其可见性的 Playwright 套件共用（如
- * test-sys-release-c7-playwright.js / test-sys-release-panel-c2b2-playwright.js），避免每个文件
- * 各自复制粘贴"开菜单"逻辑。前缀 `_` 表示这是内部共用模块，非独立可执行的测试入口。
+ * test-sys-release-c7-playwright.js），避免每个文件各自复制粘贴"开菜单"逻辑。前缀 `_` 表示这是内部
+ * 共用模块，非独立可执行的测试入口。
+ * [LOW-4 同步修正·2026-08-07] test-sys-release-panel-c2b2-playwright.js 已随 C6 收口整体重写，改为
+ * 统一走 `?release=`/`?issue=` 深链直达目标页（不再走「⚙️ 管理」下拉菜单导航），不再引入/消费本
+ * helper——上一句原列举的两个消费方已减至一个，如实同步。
  *
  * 用法：
  *   const { openSysHeadMenu, clickSysHeadMenuItem, sysHeadMenuItemLocator } = require('./_sys-head-menu-helper');

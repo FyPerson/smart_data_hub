@@ -185,18 +185,18 @@ async function main() {
       id = await mk();
       r = await call('POST', `/api/sys-issues/${id}/assign`, liaison2Tok, { assigned_to: 6 });
       assert.strictEqual(r.status, 200, `⭐ 受理人(示例对接人13) assign ${label} 应 200（C1 全类型放开）, got ${r.status} ${JSON.stringify(r.body)}`);
-      // ⭐ 示例发布者[7]：C1 起失去指派权（原先 bug 可以）
+      // ⭐ 示例发布者[7]：C1 起失去指派权（原先 bug 可以）——C10 后 7(publisher)过粗筛，由 handler 绑单精判拒（单绑 13）
       id = await mk();
       r = await call('POST', `/api/sys-issues/${id}/assign`, liaison1Tok, { assigned_to: 5 });
       assert.strictEqual(r.status, 403, `⭐ 示例发布者(7) assign ${label} 应 403（C1 转纯技术负责人）, got ${r.status} ${JSON.stringify(r.body)}`);
-      assert.strictEqual(r.body.code, 'NOT_ADMIN_OR_INTAKE_LIAISON', `示例发布者 assign ${label} 被中间件拒（NOT_ADMIN_OR_INTAKE_LIAISON）`);
-      // 普通开发
+      assert.strictEqual(r.body.code, 'NOT_BOUND_LIAISON', `示例发布者 assign ${label} 被 handler 绑单精判拒（NOT_BOUND_LIAISON·单绑 13 非示例发布者）`);
+      // 普通开发（C10 后 dev5 过粗筛[user eligible]，由 handler 绑单精判拒）
       id = await mk();
       r = await call('POST', `/api/sys-issues/${id}/assign`, devTok, { assigned_to: 6 });
       assert.strictEqual(r.status, 403, `普通开发 assign ${label} 403`);
-      assert.strictEqual(r.body.code, 'NOT_ADMIN_OR_INTAKE_LIAISON', '中间件层 code 已随 C1 改名');
+      assert.strictEqual(r.body.code, 'NOT_BOUND_LIAISON', 'handler 绑单精判 NOT_BOUND_LIAISON（dev5 非该单对接人）');
     }
-    ok('[P1] assign 全类型矩阵：admin/受理人(13) bug+feature 均 200（⭐ feature 是 C1 新放开）；示例发布者(7)/普通开发一律 403 NOT_ADMIN_OR_INTAKE_LIAISON');
+    ok('[P1] assign 全类型矩阵：admin/受理人(13) bug+feature 均 200（⭐ feature 是 C1 新放开）；示例发布者(7)/普通开发一律 403 NOT_BOUND_LIAISON（C10 绑单精判·单绑 13）');
 
     // ── [P2] reassign：同一矩阵（走独立事务·中间件 + handler isSysCoordinator 双层）──
     for (const [label, mk] of [['bug', createBug], ['feature', createFeatureAssignable]]) {
@@ -403,8 +403,11 @@ async function main() {
     assert.strictEqual(typeof I.requireIntakeLiaison, 'function', 'requireIntakeLiaison 中间件已导出');
     ok('⭐ [W2] 三白名单：SYS_INTAKE_LIAISON=[13]/SYS_TECH_LEAD=[7]/SYS_BUG_LIAISON=[7,13](零回归)·独立不共享引用 + isSysIntakeLiaison/isSysTechLead 单元(归属/字符串/非法) + 中间件导出');
 
-    // [MW] requireIntakeLiaison 中间件行为（codex C2 MED-1→LOW·mock req/res/next 五组输入·C2 阶段端点未挂→单测保护）
-    //   ⚠️ 复刻 requireAdminOrBugLiaison 但白名单是新的（SYS_INTAKE_LIAISON_IDS）·须独立验行为·防 C3 挂路由时被改坏发现不了。
+    // [MW] requireIntakeLiaison 中间件行为（C10 重写·mock req/res/next·粗筛判据 = admin ∨ role∈{user,publisher}）
+    //   ⚠️ C10 裁定2：中间件从「admin ∨ 白名单[13]」放宽为「admin ∨ 候选 allowlist（role eligible）」——
+    //     粗筛只挡明显越权（viewer/未知 role），跨单**绑单精判**在 handler/引擎内实时读库完成（见 [E]/[P1]）。
+    //     故示例发布者7(publisher)/普通开发5(user) C10 后**过粗筛**（原三名单隔离时代它们被中间件拒的断言已失效），
+    //     真正的越权拦截下沉到 handler；中间件只拦 viewer/无身份。
     const runMw = (user) => {
       let nextCalled = false, statusCode = null, jsonBody = null;
       const req = { user };
@@ -415,19 +418,22 @@ async function main() {
     // admin → next
     let mw = runMw({ id: 1, role: 'admin' });
     assert.ok(mw.nextCalled && mw.statusCode === null, 'admin → next()（放行·不返 403）');
-    // 示例对接人 13 → next（受理白名单）
+    // 示例对接人 13 (user·eligible) → next
     mw = runMw({ id: 13, role: 'user' });
-    assert.ok(mw.nextCalled && mw.statusCode === null, '示例对接人(13) → next()（受理白名单放行）');
-    // 示例发布者 7 → 403（bug 名单但非受理名单·三名单隔离）
+    assert.ok(mw.nextCalled && mw.statusCode === null, '示例对接人(13,user) → next()（候选 allowlist 放行）');
+    // ⭐ 示例发布者 7 (publisher·eligible) → C10 后 next（原三名单隔离时代拒·候选池扩大后过粗筛，绑单精判在 handler）
     mw = runMw({ id: 7, role: 'publisher' });
-    assert.ok(!mw.nextCalled && mw.statusCode === 403 && mw.jsonBody.code === 'NOT_ADMIN_OR_INTAKE_LIAISON', '示例发布者(7) → 403 NOT_ADMIN_OR_INTAKE_LIAISON（三名单隔离·不放行）');
-    // 普通开发 5 → 403
+    assert.ok(mw.nextCalled && mw.statusCode === null, '⭐ 示例发布者(7,publisher) → next()（C10 候选 allowlist 放行·跨单拦截下沉 handler）');
+    // ⭐ 普通开发 5 (user·eligible) → C10 后 next
     mw = runMw({ id: 5, role: 'user' });
-    assert.ok(!mw.nextCalled && mw.statusCode === 403 && mw.jsonBody.code === 'NOT_ADMIN_OR_INTAKE_LIAISON', '普通开发(5) → 403');
+    assert.ok(mw.nextCalled && mw.statusCode === null, '⭐ 普通开发(5,user) → next()（C10 候选 allowlist 放行）');
+    // viewer → 403（ineligible role·粗筛拦下·fail-closed allowlist）
+    mw = runMw({ id: 9, role: 'viewer' });
+    assert.ok(!mw.nextCalled && mw.statusCode === 403 && mw.jsonBody.code === 'NOT_ADMIN_OR_INTAKE_LIAISON', 'viewer(9) → 403 NOT_ADMIN_OR_INTAKE_LIAISON（role 不 eligible·粗筛拦）');
     // 无身份（req.user 缺失）→ 403（fail-closed·不 crash）
     mw = runMw(undefined);
     assert.ok(!mw.nextCalled && mw.statusCode === 403, '无身份(req.user 缺失) → 403（fail-closed·不 crash）');
-    ok('⭐ [MW] requireIntakeLiaison 中间件行为（mock req/res/next 五组）：admin✅next / 示例对接人13✅next / 示例发布者7❌403 / 普通5❌403 / 无身份❌403(fail-closed)');
+    ok('⭐ [MW] requireIntakeLiaison 中间件行为（C10 候选 allowlist 粗筛）：admin✅next / 示例对接人13✅next / ⭐示例发布者7(publisher)✅next / ⭐普通5(user)✅next / viewer9❌403 / 无身份❌403(fail-closed)——绑单精判下沉 handler');
 
     // [E] 引擎 intake_liaison roleGuard 单元级（直调 sysIssueTransition·绕过 HTTP·C3 端点未建）
     //   种一条 feature 待受理单（intake_required=1），用不同 actor 执行 intake_accept，验引擎放行/拒。
@@ -438,30 +444,35 @@ async function main() {
       return r.lastID;
     };
     const actor = (id, role) => ({ id, name: `u${id}`, role });
-    // [工期对接测试与风险等级拆分 方案 v1.1 §3.4·C5] seedIntakeIssue 恒建 feature 单，intake_accept
-    // 受理必带 risk_level（否则 400 RISK_LEVEL_REQUIRED，早于本组要测的 roleGuard 之外不受影响——
-    // roleGuard 在 [3]，risk_level 校验在 [5] switch，成功路径必须两者都过）。
+    // [工期对接测试与风险等级拆分 方案 v1.1 §3.4·C5] seedIntakeIssue 恒建 feature **空单**（intake_liaison_id
+    // NULL），intake_accept 受理必带 risk_level（否则 400 RISK_LEVEL_REQUIRED·roleGuard 在 [3.x]、risk_level
+    // 在 [5] switch·成功路径两者都过）。
+    // ⭐ C10 裁定2：空单（intake_liaison_id NULL）受理时，任一 **eligible**（active∧role∈{user,publisher}）
+    //   候选可 CAS 绑自己受理——故 admin/示例对接人13(user)/示例发布者7(publisher)/普通开发5(user) **全部放行**
+    //   （原三名单隔离时代「7/5 拒」的断言已随候选池扩大失效）；只有 ineligible（viewer）被空单兜底拒。
     // admin → 放行（待受理→待指派）
     let iid = await seedIntakeIssue();
     let res = await I.sysIssueTransition(iid, 'intake_accept', null, actor(1, 'admin'), { risk_level: '二级' });
-    assert.strictEqual(res.toStatus, '待指派', 'admin intake_accept → 待指派（roleGuard 放行）');
-    // 示例对接人 id13 → 放行（受理人白名单·C2 放开点）
+    assert.strictEqual(res.toStatus, '待指派', 'admin intake_accept 空单 → 待指派');
+    // 示例对接人 id13 (user·eligible) → 空单受理兜底放行
     iid = await seedIntakeIssue();
     res = await I.sysIssueTransition(iid, 'intake_accept', null, actor(13, 'user'), { risk_level: '二级' });
-    assert.strictEqual(res.toStatus, '待指派', '示例对接人(13) intake_accept → 待指派（受理白名单放行·C2 引擎放开生效）');
-    // 示例发布者 id7 → 403（在 bug 名单但不在受理名单·三名单隔离铁证）
+    assert.strictEqual(res.toStatus, '待指派', '示例对接人(13,user) intake_accept 空单 → 待指派（eligible 兜底）');
+    // ⭐ 示例发布者 id7 (publisher·eligible) → C10 后可受理空单（候选池含 publisher·原三名单隔离拒已失效）
+    iid = await seedIntakeIssue();
+    res = await I.sysIssueTransition(iid, 'intake_accept', null, actor(7, 'publisher'), { risk_level: '二级' });
+    assert.strictEqual(res.toStatus, '待指派', '⭐ 示例发布者(7,publisher) intake_accept 空单 → 待指派（C10 候选池扩大·eligible 可受理空单）');
+    // ⭐ 普通开发 id5 (user·eligible) → 同样可受理空单
+    iid = await seedIntakeIssue();
+    res = await I.sysIssueTransition(iid, 'intake_accept', null, actor(5, 'user'), { risk_level: '二级' });
+    assert.strictEqual(res.toStatus, '待指派', '⭐ 普通开发(5,user) intake_accept 空单 → 待指派（eligible 兜底）');
+    // ⭐ viewer id9 (ineligible) → 403 NOT_BOUND_LIAISON（空单兜底只对 eligible·viewer 被拒）
     iid = await seedIntakeIssue();
     await assert.rejects(
-      () => I.sysIssueTransition(iid, 'intake_accept', null, actor(7, 'publisher')),
-      (e) => e && e.httpStatus === 403 && e.code === 'NOT_AUTHORIZED_FOR_TRANSITION',
-      '示例发布者(7) intake_accept → 403（在 bug 白名单但不在受理白名单·三名单隔离·非泛化）');
-    // 普通开发 id5 → 403
-    iid = await seedIntakeIssue();
-    await assert.rejects(
-      () => I.sysIssueTransition(iid, 'intake_accept', null, actor(5, 'user')),
-      (e) => e && e.httpStatus === 403 && e.code === 'NOT_AUTHORIZED_FOR_TRANSITION',
-      '普通开发(5) intake_accept → 403');
-    ok('⭐ [E] 引擎 intake_liaison roleGuard 放开生效（单元级·直调 sysIssueTransition）：admin✅ / 示例对接人13✅ / 示例发布者7❌403(三名单隔离) / 普通5❌403');
+      () => I.sysIssueTransition(iid, 'intake_accept', null, actor(9, 'viewer'), { risk_level: '二级' }),
+      (e) => e && e.httpStatus === 403 && e.code === 'NOT_BOUND_LIAISON',
+      'viewer(9) intake_accept 空单 → 403 NOT_BOUND_LIAISON（ineligible·空单兜底不适用）');
+    ok('⭐ [E] 引擎 intake_liaison roleGuard（C10 空单受理兜底·单元级直调 sysIssueTransition）：admin✅ / 示例对接人13(user)✅ / ⭐示例发布者7(publisher)✅ / ⭐普通5(user)✅（eligible 均可受理空单）/ viewer9❌403 NOT_BOUND_LIAISON（ineligible 拒）');
   }
 
   server.close();

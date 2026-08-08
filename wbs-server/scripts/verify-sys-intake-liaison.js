@@ -46,15 +46,33 @@ const requireAdmin = (req, res, next) => (req.user && req.user.role === 'admin')
 
 // 钉钉发送 stub：默认成功（每次生成唯一 message_key，便于区分"新旧 key"）；置 dingtalkFailNext 造一次失败。
 let dingtalkFailNext = false;
+let intakeSendCount = 0;   // [C10-fix3 MED-1] 外呼计数（各用例前手动 reset）——断言 fail-closed 分支零真实发送
 async function mockSendIssueDingtalkRaw() {
+  intakeSendCount++;
   if (dingtalkFailNext) { dingtalkFailNext = false; return { ok: false, message_key: null, reason: 'network' }; }
   return { ok: true, message_key: 'stub-key-' + Math.random().toString(36).slice(2, 8) };
 }
 async function mockBaseUrl() { return ''; }
 
+// ⭐ [C10-fix3 MED-1·codex 319-R 并发] intakeBindRaceInject：一次性拦截——命中 notify-intake 端点"读主行"
+//   那次 dbGetAsync（读出 intake_liaison_id 快照）后，同步补一刀 UPDATE 改写 intake_liaison_id，模拟"读绑定
+//   →claim CAS"之间被并发绑定（另一请求先一步指派）。用于证明 claim 守卫式 CAS（WHERE intake_liaison_id
+//   IS 旧值）在并发下 no-op → 重读采信当前 DB 绑定（active 校验 fail-closed·不双写·通知即指派一致）。
+//   默认 null 时纯透传，不影响其余用例。SQL 文本+issueId 双精确匹配（issueRow 用 `id=?` 无空格·不误伤）。
+let intakeBindRaceInject = null;   // { issueId, newLiaisonId }
+async function getWithIntakeRaceHook(sql, params) {
+  const row = await get(sql, params);
+  if (intakeBindRaceInject && sql === 'SELECT * FROM sys_issues WHERE id = ?' && params && params[0] === intakeBindRaceInject.issueId) {
+    const inject = intakeBindRaceInject;
+    intakeBindRaceInject = null;   // 一次性
+    await run(`UPDATE sys_issues SET intake_liaison_id = ? WHERE id = ?`, [inject.newLiaisonId, inject.issueId]);
+  }
+  return row;
+}
+
 const mod = require('../routes/sys-iteration')({
   logger: { info: noop, warn: noop, error: noop, debug: noop },
-  db, dbRunAsync: run, dbGetAsync: get, dbAllAsync: all,
+  db, dbRunAsync: run, dbGetAsync: getWithIntakeRaceHook, dbAllAsync: all,
   authenticateToken, requireAdmin,
   ...require('./_sys-attach-test-deps'),
   sendIssueDingtalkRaw: mockSendIssueDingtalkRaw,
@@ -116,13 +134,18 @@ async function mkLegacyIssue(status, extra = {}) {
 async function main() {
   mod.initSchema();
   await waitReady();
+  // ⭐ [C10 裁定1] 候选池判据从「id∈SYS_INTAKE_LIAISON_IDS[13]」改为「status='active' ∧ role∈{user,publisher}」
+  //   （resolveActiveSysIntakeLiaisons 已不再消费 SYS_INTAKE_LIAISON_IDS）。本文件历史夹具靠该常量 push/pop
+  //   控制"候选数"，C10 后失效——改为**用 DB role 控制候选池**：默认只 13 一人 eligible（5/14/7 播种为 viewer=
+  //   ineligible），使多数组（=1 降级/正例建单/[②]非受理人拒）保持单候选语义**零改**；需要 0/多候选的组
+  //   （[⑤多人]/[⑩]）临时把 14/7 role 切 user、用完 finally 复原 viewer。13 恒 user（受理人本尊）。
   await run(`CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT, status TEXT DEFAULT 'active', phone TEXT, dingtalk_user_id TEXT)`);
   await run(`INSERT INTO users (id, username, display_name, role, status) VALUES
     (1,'admin','管理员','admin','active'),
     (13,'wangtaotao','示例对接人','user','active'),
-    (5,'dev','开发王','user','active'),
-    (14,'liaison2','受理人乙','user','active'),
-    (7,'shenjun','示例发布者','publisher','active')`);
+    (5,'dev','开发王','viewer','active'),
+    (14,'liaison2','受理人乙','viewer','active'),
+    (7,'shenjun','示例发布者','viewer','active')`);
   await new Promise(res => { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = app.listen(0, '127.0.0.1', res); });
   port = server.address().port;
   ok('readiness ready + HTTP harness（admin1 / 示例对接人13 / dev5 / 受理人乙14[非受理人常量，测多人场景时临时入组] / 技术负责人示例发布者7[⑨reactivate前置评估意见]）');
@@ -217,40 +240,26 @@ async function main() {
     ok('[③边界] 派生算法四组：多空行开头 / emoji 40 code point 边界(恰好40不截断+41截断不拆半) / 超长单行截断+省略号 / 有title沿用(行2已证)');
   }
 
-  // ═══ [④] 衍生入口自动填：=1 自动填成功；0 人/2 人 → 409 INTAKE_LIAISON_AUTO_FILL_FAILED ═══
+  // ═══ [④] ⭐ C10 决策1：衍生入口对接人=**继承 origin 的 intake_liaison_id**（原「唯一候选 auto-fill」单例门已删）═══
+  //   候选池扩大后，原实现「active 受理人恰 1 人才自动填」的单例假设恒破裂（≥2 人一律 409），故 C10 改为
+  //   派生单继承 origin 的 intake_liaison_id：origin 绑定 → 派生继承同一对接人；origin 存量空单(NULL) →
+  //   派生也落 NULL（走 accept CAS 兜底）。INTAKE_LIAISON_AUTO_FILL_FAILED 码随单例门整块删除。
   {
-    const originR = await call('POST', '/api/sys-issues', adminTok, createBody({ title: '派生源单' }));
+    // origin 绑 13（createBody 默认 intake_liaison_id=13）→ 派生继承 13
+    const originR = await call('POST', '/api/sys-issues', adminTok, createBody({ title: '派生源单-绑13' }));
     const originId = originR.body.id;
+    const rDerive = await call('POST', `/api/sys-issues/${originId}/derive`, adminTok, { type: 'feature', title: '派生新单-继承13', system_name: 'BMS', source: '内部' });
+    assert.strictEqual(rDerive.status, 201, `[④继承] 期望 201, got ${rDerive.status} ${JSON.stringify(rDerive.body)}`);
+    assert.strictEqual((await issueRow(rDerive.body.id)).intake_liaison_id, 13, '[④继承] 派生单继承 origin 的 intake_liaison_id=13');
 
-    // =1（默认态，仅 13 一人 active）：自动填 13
-    const rDerive = await call('POST', `/api/sys-issues/${originId}/derive`, adminTok, { type: 'feature', title: '派生新单-自动填', system_name: 'BMS', source: '内部' });
-    assert.strictEqual(rDerive.status, 201, `[④=1] 期望 201, got ${rDerive.status} ${JSON.stringify(rDerive.body)}`);
-    const derivedRow = await issueRow(rDerive.body.id);
-    assert.strictEqual(derivedRow.intake_liaison_id, 13, '[④=1] 派生单自动填 intake_liaison_id=13（唯一 active 受理人）');
+    // origin 是存量空单（intake_liaison_id NULL）→ 派生继承 NULL（走 accept CAS 兜底·与空单模型一致）
+    const orphanOriginR = await call('POST', '/api/sys-issues', adminTok, createBody({ title: '派生源单-存量空单' }));
+    await run(`UPDATE sys_issues SET intake_liaison_id = NULL WHERE id = ?`, [orphanOriginR.body.id]);   // 模拟存量空单
+    const rDeriveOrphan = await call('POST', `/api/sys-issues/${orphanOriginR.body.id}/derive`, adminTok, { type: 'feature', title: '派生新单-继承NULL', system_name: 'BMS', source: '内部' });
+    assert.strictEqual(rDeriveOrphan.status, 201, `[④继承] 空单派生期望 201, got ${rDeriveOrphan.status} ${JSON.stringify(rDeriveOrphan.body)}`);
+    assert.strictEqual((await issueRow(rDeriveOrphan.body.id)).intake_liaison_id, null, '[④继承] origin 存量空单 → 派生继承 NULL（accept CAS 兜底目标）');
 
-    // 0 人：临时禁用 13
-    await run(`UPDATE users SET status='disabled' WHERE id=13`);
-    const r0 = await call('POST', `/api/sys-issues/${originId}/derive`, adminTok, { type: 'feature', title: '派生新单-0人', system_name: 'BMS', source: '内部' });
-    assert.strictEqual(r0.status, 409, `[④0人] 期望 409, got ${r0.status} ${JSON.stringify(r0.body)}`);
-    assert.strictEqual(r0.body.code, 'INTAKE_LIAISON_AUTO_FILL_FAILED', '[④0人] 确切码 INTAKE_LIAISON_AUTO_FILL_FAILED');
-    const countBefore0 = (await get(`SELECT COUNT(*) c FROM sys_issues WHERE title='派生新单-0人'`)).c;
-    assert.strictEqual(countBefore0, 0, '[④0人] 零副作用：未建出任何行');
-    await run(`UPDATE users SET status='active' WHERE id=13`);   // 复原
-
-    // 2 人：临时把 14 也纳入 SYS_INTAKE_LIAISON_IDS（用户 14 已在 users 表且 active）
-    I.SYS_INTAKE_LIAISON_IDS.push(14);
-    try {
-      const r2 = await call('POST', `/api/sys-issues/${originId}/derive`, adminTok, { type: 'feature', title: '派生新单-2人', system_name: 'BMS', source: '内部' });
-      assert.strictEqual(r2.status, 409, `[④2人] 期望 409, got ${r2.status} ${JSON.stringify(r2.body)}`);
-      assert.strictEqual(r2.body.code, 'INTAKE_LIAISON_AUTO_FILL_FAILED', '[④2人] 确切码同 INTAKE_LIAISON_AUTO_FILL_FAILED（0人/2人共用同一码，文案由 handler 统一给）');
-      const countBefore2 = (await get(`SELECT COUNT(*) c FROM sys_issues WHERE title='派生新单-2人'`)).c;
-      assert.strictEqual(countBefore2, 0, '[④2人] 零副作用：未建出任何行');
-    } finally {
-      I.SYS_INTAKE_LIAISON_IDS.pop();   // 复原（务必 finally，防上面断言失败导致常量污染后续分组）
-    }
-    assert.deepStrictEqual(I.SYS_INTAKE_LIAISON_IDS, [13], '[④] 复原后 SYS_INTAKE_LIAISON_IDS 恢复为 [13]，不污染后续分组');
-
-    ok('[④] 衍生入口自动填：=1 自动填 13 成功 / 0 人(临时禁用) 409 / 2 人(临时改常量) 409，均确切码 INTAKE_LIAISON_AUTO_FILL_FAILED 且零副作用');
+    ok('[④] ⭐ C10 决策1：衍生入口对接人=继承 origin 的 intake_liaison_id（origin 绑13→派生继承13 / origin 存量空单NULL→派生继承NULL）——原「唯一候选 auto-fill」单例门 + INTAKE_LIAISON_AUTO_FILL_FAILED 码随候选池扩大整块删除');
   }
 
   // ═══ [⑤] NULL 单收件人降级（notify-intake 端点）：=1 发送成功 / 0 人 409 / 多人 409 ═══
@@ -292,9 +301,9 @@ async function main() {
     assert.strictEqual(rowAfter0.intake_notify_status, 'not_sent', '[⑤0人] 零副作用：intake_notify_status 仍 not_sent');
     await run(`UPDATE users SET status='active' WHERE id=13`);
 
-    // 多人：临时把 14 纳入常量
+    // 多人：⭐ C10 用 DB role 控制候选池——临时把 14 role 切 user（active）→ 候选池 [13,14] 多人（原 push 常量已失效）
     const idMulti = await mkLegacyIssue('待受理', { title: '存量单-多人需补录' });
-    I.SYS_INTAKE_LIAISON_IDS.push(14);
+    await run(`UPDATE users SET role='user' WHERE id=14`);   // 14 临时 eligible
     try {
       const rSendMulti = await call('POST', `/api/sys-issues/${idMulti}/notify-intake`, adminTok, {});
       assert.strictEqual(rSendMulti.status, 409, `[⑤多人] 期望 409, got ${rSendMulti.status} ${JSON.stringify(rSendMulti.body)}`);
@@ -302,11 +311,12 @@ async function main() {
       const rowAfterMulti = await issueRow(idMulti);
       assert.strictEqual(rowAfterMulti.intake_notify_status, 'not_sent', '[⑤多人] 零副作用：intake_notify_status 仍 not_sent');
     } finally {
-      I.SYS_INTAKE_LIAISON_IDS.pop();
+      await run(`UPDATE users SET role='viewer' WHERE id=14`);   // 复原 14 → ineligible（防污染后续依赖单候选池的组）
     }
-    assert.deepStrictEqual(I.SYS_INTAKE_LIAISON_IDS, [13], '[⑤] 复原后 SYS_INTAKE_LIAISON_IDS=[13]');
+    const eligibleAfter5 = await all(`SELECT id FROM users WHERE status='active' AND role IN ('user','publisher') ORDER BY id`);
+    assert.deepStrictEqual(eligibleAfter5.map(r => r.id), [13], '[⑤] 复原后候选池恢复单人[13]，不污染后续分组');
 
-    ok('[⑤] NULL 单收件人降级：=1 发送成功(200 sent) / 0 人 409 INTAKE_LIAISON_CONFIG_ERROR / 多人 409 INTAKE_LIAISON_MISSING，两个 409 分文案且零副作用');
+    ok('[⑤] NULL 单收件人降级：=1 发送成功(200 sent) / 0 人 409 INTAKE_LIAISON_CONFIG_ERROR / 多人 409 INTAKE_LIAISON_MISSING（⭐ C10 用 DB role 切换构造多候选，finally 复原 14→viewer），两个 409 分文案且零副作用');
   }
 
   // ═══ [⑩] codex 221a HIGH 收口：inactive 对接人死局修复——与 NULL 分支同一降级路径 ═══
@@ -322,7 +332,7 @@ async function main() {
     const id1 = rCreate1.body.id;
     assert.strictEqual((await issueRow(id1)).intake_liaison_id, 13, '[⑩①] 前置：intake_liaison_id=13（常规路径落库）');
     await run(`UPDATE users SET status='disabled' WHERE id=13`);
-    I.SYS_INTAKE_LIAISON_IDS.push(14);
+    await run(`UPDATE users SET role='user' WHERE id=14`);   // ⭐ C10：14 临时 eligible → 13 停用后候选池恰 {14}
     try {
       const r1 = await call('POST', `/api/sys-issues/${id1}/notify-intake`, adminTok, {});
       assert.strictEqual(r1.status, 200, `[⑩①] inactive+恰1替代者 期望 200, got ${r1.status} ${JSON.stringify(r1.body)}`);
@@ -330,12 +340,10 @@ async function main() {
       const rowAfter1 = await issueRow(id1);
       assert.strictEqual(rowAfter1.intake_liaison_id, 14, '[⑩①] 回写覆盖旧 id：13(已失效) → 14（通知即指派，非仅补 NULL）');
     } finally {
-      I.SYS_INTAKE_LIAISON_IDS.pop();
+      await run(`UPDATE users SET role='viewer' WHERE id=14`);   // 复原 14 → ineligible
       await run(`UPDATE users SET status='active' WHERE id=13`);
-      // 清理本条夹具：14 只是"临时入组测试用"，本行落库后仍指向 14——SYS_INTAKE_LIAISON_IDS 复原为
-      // [13] 后，文末"部署硬闸门"会全表扫描"intake_liaison_id 是否都在当前受理人集合内"，14 已不在
-      // 集合内会被误判为越界数据（假阳性，非真实生产风险——若 14 真被永久列为受理人则不会有此问题）。
-      // 不清理会让本条夹具残留污染后面的全表扫描断言，故用完即删。
+      // 清理本条夹具：14 只是"临时入组测试用"，本行落库后仍指向 14——文末"部署硬闸门"全表扫描
+      // "intake_liaison_id 是否都在受理人集合[13]内"，14 不在会被误判为越界（假阳性）。用完即删。
       await run(`DELETE FROM sys_issue_timeline WHERE issue_id=?`, [id1]);
       await run(`DELETE FROM sys_issues WHERE id=?`, [id1]);
     }
@@ -359,7 +367,7 @@ async function main() {
     assert.strictEqual(rCreate2b.status, 201, `[⑩②b] 前置建单期望 201, got ${rCreate2b.status}`);
     const id2b = rCreate2b.body.id;
     await run(`UPDATE users SET status='disabled' WHERE id=13`);
-    I.SYS_INTAKE_LIAISON_IDS.push(14, 7);
+    await run(`UPDATE users SET role='user' WHERE id IN (14,7)`);   // ⭐ C10：14/7 临时 eligible → 13 停用后候选池 {14,7} 多人
     try {
       const r2b = await call('POST', `/api/sys-issues/${id2b}/notify-intake`, adminTok, {});
       assert.strictEqual(r2b.status, 409, `[⑩②b] inactive+多人 期望 409, got ${r2b.status} ${JSON.stringify(r2b.body)}`);
@@ -367,12 +375,50 @@ async function main() {
       const rowAfter2b = await issueRow(id2b);
       assert.strictEqual(rowAfter2b.intake_liaison_id, 13, '[⑩②b] 零副作用：intake_liaison_id 未被篡改');
     } finally {
-      I.SYS_INTAKE_LIAISON_IDS.pop(); I.SYS_INTAKE_LIAISON_IDS.pop();
+      await run(`UPDATE users SET role='viewer' WHERE id IN (14,7)`);   // 复原 14/7 → ineligible
       await run(`UPDATE users SET status='active' WHERE id=13`);
     }
-    assert.deepStrictEqual(I.SYS_INTAKE_LIAISON_IDS, [13], '[⑩] 复原后 SYS_INTAKE_LIAISON_IDS=[13]');
+    const eligibleAfter10 = await all(`SELECT id FROM users WHERE status='active' AND role IN ('user','publisher') ORDER BY id`);
+    assert.deepStrictEqual(eligibleAfter10.map(r => r.id), [13], '[⑩] 复原后候选池恢复单人[13]');
 
-    ok('[⑩] codex 221a：inactive 对接人死局修复——恰1替代者 active → 200 降级发送+回写覆盖旧id(13→14) / 0人 → 409 CONFIG_ERROR / 多人 → 409 MISSING（原 INTAKE_LIAISON_INACTIVE 码已废除，②两分支零副作用，已恢复现场）');
+    ok('[⑩] codex 221a：inactive 对接人死局修复——恰1替代者 active → 200 降级发送+回写覆盖旧id(13→14) / 0人 → 409 CONFIG_ERROR / 多人 → 409 MISSING（⭐ C10 用 DB role 切换构造候选数，finally 复原 14/7→viewer，②两分支零副作用，已恢复现场）');
+  }
+
+  // ═══ [⑪] ⭐ MED-1（codex 319-R 并发）：notify-intake「读主行→claim CAS」间被并发绑定 ═══
+  //   核实结论=**已收敛·勿过度改**（主会话论证）：① claim 守卫式 CAS（WHERE intake_liaison_id IS 读取时原值）
+  //   在并发下天然 no-op → 既有"重读当前 DB 绑定 + active 集合校验"分支采信/fail-closed，非"盲发本地候选"；
+  //   ② claim 成功/no-op 到实际外呼之间**无"绑成另一 active 值"的窗口**——现网无换对接人端点（L2 缺口），
+  //   待受理态 intake_liaison_id 的唯一并发变更是"受理通过/退回流转走"，通知行仅待受理态渲染 ⇒ 自愈（既有
+  //   codex 221a M-1 变体裁定已登记该残余窗口=与其余 5 类手动通知 helper 同水位的既定契约）。故**不加"发送
+  //   前最后核对"**（那会引入与其余 helper 不一致的独有强绑）。本组构造两向并发证据验证既有收敛逻辑：
+  {
+    // A：读主行后并发绑成**合法 active 值(13)** → claim `IS NULL` no-op → 重读采信 13（在池）→ 200 sent 给 13·不双写。
+    const idA = await mkLegacyIssue('待受理', { title: 'MED-1 读后并发绑成 active 值' });
+    assert.strictEqual((await issueRow(idA)).intake_liaison_id, null, '[⑪A前置] NULL 存量单');
+    intakeSendCount = 0;
+    intakeBindRaceInject = { issueId: idA, newLiaisonId: 13 };   // 读主行后并发绑成唯一 active 受理人 13
+    const rA = await call('POST', `/api/sys-issues/${idA}/notify-intake`, adminTok, {});
+    assert.strictEqual(intakeBindRaceInject, null, '[⑪A] 前置：并发绑定注入已一次性消费（确认走到了主行读那一步）');
+    assert.strictEqual(rA.status, 200, `[⑪A] 并发绑成 active 值应 200 sent, got ${rA.status} ${JSON.stringify(rA.body)}`);
+    assert.strictEqual(rA.body.intake_notify_status, 'sent', '[⑪A] 发送成功（发给 DB 权威绑定 13·非本地候选空转）');
+    assert.strictEqual((await issueRow(idA)).intake_liaison_id, 13, '[⑪A] ⭐ claim CAS no-op 未覆盖并发写入值——绑定=13（通知即指派一致·非双写）');
+    assert.strictEqual(intakeSendCount, 1, '[⑪A] 恰 1 次外呼（发给当前绑定 13）');
+    ok('[⑪A] ⭐ MED-1：读主行后并发绑成 active 值(13) → claim `WHERE intake_liaison_id IS NULL` no-op → 重读采信当前 DB 绑定 13（在 active 池）→ 200 sent 给 13 + 恰 1 外呼（通知即指派一致·claim 不盲写覆盖并发值）');
+
+    // B：读主行后并发绑成**非 active 值(14=viewer·ineligible)** → claim no-op → 重读 14 不在池 → fail-closed
+    //   409 INTAKE_LIAISON_CHANGED + 零外呼（证 no-op 重读采信是 active 校验闸·不把通知发给并发写入的非受理人）。
+    const idB = await mkLegacyIssue('待受理', { title: 'MED-1 读后并发绑成非 active 值' });
+    intakeSendCount = 0;
+    intakeBindRaceInject = { issueId: idB, newLiaisonId: 14 };   // 14=viewer=ineligible（非 active 候选·真实存在的 users 行）
+    const rB = await call('POST', `/api/sys-issues/${idB}/notify-intake`, adminTok, {});
+    assert.strictEqual(intakeBindRaceInject, null, '[⑪B] 前置：并发绑定注入已一次性消费');
+    assert.strictEqual(rB.status, 409, `[⑪B] 并发绑成非 active 值应 fail-closed 409, got ${rB.status} ${JSON.stringify(rB.body)}`);
+    assert.strictEqual(rB.body.code, 'INTAKE_LIAISON_CHANGED', `[⑪B] 确切码 INTAKE_LIAISON_CHANGED（no-op 重读 active 校验不命中·不静默替换），实得 ${rB.body.code}`);
+    assert.strictEqual(intakeSendCount, 0, '[⑪B] ⭐⭐ 零外呼：并发写入的非 active 值(14)不被采信·绝不把通知发给非受理人');
+    const rowB = await issueRow(idB);
+    assert.strictEqual(rowB.intake_notify_status, 'not_sent', '[⑪B] 零副作用：intake_notify_status 仍 not_sent');
+    assert.strictEqual(rowB.intake_liaison_id, 14, '[⑪B] claim CAS 未触碰绑定（IS NULL 不匹配现值 14）·并发写入值原样保留（14 是真实 users 行·不触部署闸门悬空引用）');
+    ok('[⑪B] ⭐ MED-1 fail-closed：读主行后并发绑成非 active 值(14 viewer) → claim no-op → 重读 14 不在 active 池 → 409 INTAKE_LIAISON_CHANGED + 零外呼（no-op 重读采信有 active 校验闸·防旁路把通知发给非受理人）');
   }
 
   // ═══ [⑥] 通知三态流转 + 重发（含 failed 后重发）无条件清 intake_read_at ═══
@@ -585,13 +631,17 @@ async function main() {
     const badStatus = await get(`SELECT COUNT(*) c FROM sys_issues WHERE intake_notify_status NOT IN ('not_sent','sent','failed')`);
     assert.strictEqual(badStatus.c, 0, '[部署闸门] intake_notify_status 非法值计数=0');
 
+    // ⭐ [C10 更新·C10-fix2 MED-1 订正] 原判据「intake_liaison_id ∈ SYS_INTAKE_LIAISON_IDS[13]」已随白名单废止
+    //   失效——C10 后合法的绑定值来源有二：① 建单校验（intake_liaison_id ∈ 当前 eligible 候选池）② 存量空单受理
+    //   CAS 绑 actor.id——**仅 eligible 成员**（C10-fix2 MED-1：admin 代办受理空单**不再绑自己**·intake_liaison_id
+    //   保持 NULL=合法态·[⑧] 的「状态闸门单」现由 admin 受理后该列仍为 NULL·被本闸门 IS NOT NULL 前置排除·
+    //   不再产出 admin id=1 的绑定值）。故 C10 的数据完整性不变量收窄为「非 NULL 值引用真实存在的 users 行」
+    //   （拦悬空引用如 999999·不叠加 active/role 条件——离职/降级历史单仍合法引用真实用户）。
     const badLiaison = await get(`
       SELECT COUNT(*) c FROM sys_issues
        WHERE intake_liaison_id IS NOT NULL
-         AND intake_liaison_id NOT IN (SELECT id FROM users WHERE id IN (${I.SYS_INTAKE_LIAISON_IDS.map(() => '?').join(',')}))`,
-      I.SYS_INTAKE_LIAISON_IDS
-    );
-    assert.strictEqual(badLiaison.c, 0, '[部署闸门] 非 NULL intake_liaison_id 不在受理人集合计数=0（不叠加 active 条件——离职受理人历史单仍合法引用）');
+         AND intake_liaison_id NOT IN (SELECT id FROM users)`);
+    assert.strictEqual(badLiaison.c, 0, '[部署闸门] 非 NULL intake_liaison_id 必引用真实 users 行（C10：建单 eligible 校验 + 空单受理 CAS 绑 eligible actor.id·admin 代办受理空单不绑[C10-fix2 MED-1]·仅拦悬空引用）');
 
     const sentNoKey = await get(`SELECT COUNT(*) c FROM sys_issues WHERE intake_notify_status='sent' AND (intake_notify_message_key IS NULL OR intake_notify_message_key='')`);
     assert.strictEqual(sentNoKey.c, 0, '[部署闸门] sent 态必有 message_key（计数=0 违反项）');
