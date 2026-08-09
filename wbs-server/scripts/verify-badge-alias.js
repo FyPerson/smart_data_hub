@@ -7,6 +7,12 @@
 //                              S0 双矩阵的状态 key 全集逐个连通、是否已彻底去掉 direct 色值）
 //   拆成两个文件的理由：① 关注点不同（共享层封版 vs 页面层逐页接线），混在一起会让本就 ~700 行的
 //   守卫继续膨胀；② 本文件带一张按页组织的大配置表（PAGE_ALIAS_SPECS），独立成文更易逐页核对。
+//   ⚠️ **分工扩权登记（通知统一 N1·2026-08-09）**：本文件自 N1 起**兼管一部分共享层断言**——
+//     通知文本 7 槽 u-nt-*（components.css）/ u-nr-read-result 上提 / J13 操作栏特异性补丁 /
+//     showToast 全站单源（见文件末 runNotifyUnifyN1Assertions）。按上面的分工本该落 verify-unify-static.js，
+//     放这里的理由：这批断言与"通知族"强绑（借色登记要与 BORROWED_TIERS 同款口径、u-nt-* 与通知徽章族
+//     共用一套语义层），拆开会让通知这条线的判据散在两个文件。**显式登记＝承认这是扩权，不是默默漂移**；
+//     若日后共享层断言在本文件继续增厚，应整体回迁 verify-unify-static.js 而不是再加特例。
 //   ⚠️ 但项目里没有聚合 runner（package.json 无 test 脚本），独立文件有"没人跑"的风险——
 //   故本文件同时导出 runBadgeAliasAssertions(check)，由 verify-unify-static.js require 后并入
 //   它的断言流程，保证**跑一条命令就全跑到**；单独 `node verify-badge-alias.js` 亦可独立运行。
@@ -3150,7 +3156,10 @@ function assertGateReturnShapes(check, spec, sources) {
 function assertNoDomApiBypass(check, spec, html, extraTexts) {
     const hits = [];
     const apiRe = /(?:classList\s*\.\s*(?:add|toggle|replace)|\.className\s*=|className\s*:|setAttribute\s*\(\s*['"]class['"])([^;\n]*)/g;
-    for (const text of [html, ...(extraTexts || [])]) {
+    // 〔N5-fix·pattern-sweep〕**剥注释先行**——与 emoji 守卫、verify-unify-static 的②b/②c 同款纪律。
+    //   本条与那两条是同一形态（文本扫描类断言把注释当代码），一次扫干净不留第四次：注释里演示/复盘
+    //   一段旧的 classList 写法，不该被判成"真的有人在用这条旁路"。
+    for (const text of [html, ...(extraTexts || [])].map((t) => stripJsComments(String(t || '')))) {
         apiRe.lastIndex = 0;
         let m;
         while ((m = apiRe.exec(text)) !== null) {
@@ -3615,6 +3624,785 @@ function assertBorrowedTiersRegistry(check) {
     console.log(`  借色站点：${BORROWED_TIERS.map((b) => `${b.cls}→${b.tier}`).join(' | ')}`);
 }
 
+// ══════════ 〔通知统一 N1·2026-08-09〕通知状态文本 7 槽（u-nt-*）+ showToast 单源 ══════════
+//   为什么不塞进 SECONDARY_FAMILY_SPECS：那套 spec 描述的是**徽章族**（bg/fg/bd/dot/deco 五面 +
+//   mapConst/gate「class 由受控 map 产出」结构）。u-nt-* 是**纯文本槽**——7 条只设 color 的规则，
+//   没有 map 也没有 gate。硬套过去会让断言"说的"和"保的"对不上（假绿的常见来源），故单列一节。
+const NT_SLOT_SPECS = Object.freeze([
+    { cls: 'u-nt-ok',    tier: 'done',   why: '成功/已读文本' },
+    { cls: 'u-nt-fail',  tier: 'failed', why: '失败文本' },
+    { cls: 'u-nt-warn',  tier: 'review', why: '警示/前置缺失文本' },
+    { cls: 'u-nt-wait',  tier: 'wait',   why: '待发送（可发）文本' },
+    { cls: 'u-nt-run',   tier: 'active', why: '发送中文本' },
+    { cls: 'u-nt-muted', tier: 'voided', why: '弱化（不可发/留痕缺省）文本【借色】' },
+    { cls: 'u-nt-idle',  tier: 'legacy', why: '查询中占位文本【借色】' },
+]);
+
+//   借色登记（与 BORROWED_TIERS 同款口径，但对象是文本槽不是徽章族，故单表）：
+//   **借的是色值，不是豁免资格**——voided 层在徽章族带 line-through 的对比度豁免，那条豁免的成文前提是
+//   "line-through + 文案冗余"，属徽章族约束；纯文本槽不在徽章豁免表管辖，也不继承该豁免。
+const NT_BORROWED_TIERS = Object.freeze([
+    { cls: 'u-nt-muted', tier: 'voided', why: '借 #9ca3af 做普通弱化文本；不继承 voided 的 line-through 豁免语义。该值恰为五页现状已在用的弱化灰＝同值收编非降级' },
+    { cls: 'u-nt-idle',  tier: 'legacy', why: '借 #94a3b8 做查询中占位；同上不继承豁免。同为现状在用色值' },
+]);
+
+function readComponentsCss() {
+    const p = path.join(PUBLIC_DIR, 'assets', 'css', 'components.css');
+    return fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : null;
+}
+
+//   取"单类独占选择器"的声明块：只认 `.cls {`，不吃 `.a .cls {` / `.cls.b {` 这类组合选择器
+//   （前者是共享层定义，后者可能是别处的修饰规则——混在一起数会让"定义唯一"这条断言失真）。
+//   〔N1-fix〕**改为复用既有 ruleBodiesFor(:621)**，不再自写正则：初版正则
+//   `(?:^|\})\s*\.cls\s*\{([^}]*)\}` 会把规则尾部的 `}` 一并吃掉，于是**相邻同名规则的第二条
+//   永远匹配不到**（`.u-nt-ok{…}.u-nt-ok{…}` 只数出 1）——"定义唯一"这条断言恰恰是要抓这种双写，
+//   却对最典型的双写形态盲。顺带消掉"同一件事两套实现"（本文件已有 ruleBodiesFor 做同款切分）。
+function soleClassRuleBodies(cssText, cls) {
+    return ruleBodiesFor(cssText, '.' + cls).map((b) => b.trim());
+}
+
+//   〔N1-fix·对照组自证〕CSS 侧检测器也要先证明"能数对"，才有资格给"定义唯一/只设 color"背书。
+//   语料刻意含**相邻重复**形态——那正是初版正则漏检的那一种。
+function assertCssRuleDetectorSelfTest(check) {
+    const adjacent = '.u-nt-ok { color: red; }.u-nt-ok { color: blue; }';
+    const spacedDup = '.u-nt-ok { color: red; }\n\n.u-nt-ok { color: blue; }';
+    const single = '.u-nt-ok { color: var(--sem-done-fg); }';
+    const decoy = '.u-notify-row .u-nt-ok { color: red; }\n.u-nt-ok.is-x { color: red; }\n.u-nt-okay { color: red; }';
+    const rAdj = soleClassRuleBodies(adjacent, 'u-nt-ok').length;
+    const rSpaced = soleClassRuleBodies(spacedDup, 'u-nt-ok').length;
+    const rOne = soleClassRuleBodies(single, 'u-nt-ok').length;
+    const rDecoy = soleClassRuleBodies(decoy, 'u-nt-ok').length;
+    const ok = rAdj === 2 && rSpaced === 2 && rOne === 1 && rDecoy === 0;
+    check(ok, 'CSS 规则检测器·对照组自证（相邻双写→2 / 空行双写→2 / 单条→1 / 后代·复合·近名→0）',
+        ok ? '' : `检测器失效：相邻双写=${rAdj}(期望 2) 空行双写=${rSpaced}(期望 2) 单条=${rOne}(期望 1) 诱饵=${rDecoy}(期望 0)`
+            + ` —— 数不准时"7 槽定义唯一"和"页内无重定义"两条断言都是空的`);
+
+    // 〔N1-fix2〕属性级检测器的对照组：**改一个属性值就必须能红**，否则"原样上提"这句承诺没人守。
+    //   三份坏语料对应三种真实抄错法：左对齐 / 丢 flex-basis / :empty 写成 block。
+    const good = '.u-nr-read-result { flex-basis: 100%; text-align: right; }\n.u-nr-read-result:empty { display: none; }';
+    const leftAlign = good.replace('text-align: right', 'text-align: left');
+    const noBasis = '.u-nr-read-result { text-align: right; }\n.u-nr-read-result:empty { display: none; }';
+    const emptyBlock = good.replace('display: none', 'display: block');
+    const fGood = readResultRuleFacts(good);
+    const fLeft = readResultRuleFacts(leftAlign);
+    const fNoBasis = readResultRuleFacts(noBasis);
+    const fEmptyBlock = readResultRuleFacts(emptyBlock);
+    const okAttr = fGood.hasFlexBasis && fGood.hasTextAlign && fGood.emptyHasDisplayNone
+        && fLeft.hasTextAlign === false && fLeft.hasFlexBasis === true
+        && fNoBasis.hasFlexBasis === false
+        && fEmptyBlock.emptyHasDisplayNone === false;
+    check(okAttr, 'u-nr-read-result 属性级检测器·对照组自证（左对齐→红 / 丢 flex-basis→红 / :empty 改 block→红 / 正确语料→绿）',
+        okAttr ? '' : `检测器失效：good=${JSON.stringify(fGood)} left.hasTextAlign=${fLeft.hasTextAlign}(期望 false)`
+            + ` noBasis.hasFlexBasis=${fNoBasis.hasFlexBasis}(期望 false) emptyBlock.emptyHasDisplayNone=${fEmptyBlock.emptyHasDisplayNone}(期望 false)`
+            + ` —— 只数规则条数的旧断言对这三种抄错法全绿（上提时把 right 抄成 left，条数照样是 1）`);
+}
+
+//   〔N1-fix2〕声明级判定：把规则体拆成声明逐条比，容忍空格差异，不做子串匹配
+//   （子串匹配会让 `text-align: right-ish` / 注释残留这类脏值蒙混过关）。
+function hasDecl(body, prop, value) {
+    return String(body || '').split(';').map((d) => d.trim().replace(/\s+/g, ' ').toLowerCase())
+        .filter(Boolean)
+        .includes(`${prop}: ${value}`.toLowerCase());
+}
+
+//   〔N1-fix2·codex MED〕u-nr-read-result 的属性级事实（供断言与对照组共用同一套口径）。
+function readResultRuleFacts(cssText) {
+    const main = soleClassRuleBodies(cssText, 'u-nr-read-result');
+    const empty = ruleBodiesFor(cssText, '.u-nr-read-result:empty').map((b) => b.trim());
+    return {
+        mainCount: main.length,
+        mainBody: main[0] || '',
+        hasFlexBasis: main.length === 1 && hasDecl(main[0], 'flex-basis', '100%'),
+        hasTextAlign: main.length === 1 && hasDecl(main[0], 'text-align', 'right'),
+        emptyCount: empty.length,
+        emptyBody: empty[0] || '',
+        emptyHasDisplayNone: empty.length === 1 && hasDecl(empty[0], 'display', 'none'),
+    };
+}
+
+//   〔N1-fix·J13〕操作栏通知按钮补丁的**形态**检测（不只是"存在一条规则"）：
+//   返回 has030=(0,3,0) 复合类形态在位；has020=遗留的 (0,2,0) 弱形态还在（与 :283 同分、赢不赢全看位置）。
+function detectActionBarNbBtnPatch(cssText) {
+    return {
+        has030: /\.u-action-bar\s+\.u-btn-secondary\.u-nb-btn\s*\{/.test(cssText),
+        has020: /\.u-action-bar\s+\.u-nb-btn\s*\{/.test(cssText),
+    };
+}
+
+//   〔N1-fix·对照组自证〕**源码文本≠运行时生效**：初版补丁 `.u-action-bar .u-nb-btn` 源码里明明白白写着，
+//   守卫也能 grep 到，浏览器里却被同特异性、位置更靠后的 `.u-action-bar .u-btn-secondary`(:283) 反杀——
+//   "有这条规则"根本不等于"这条规则赢"。所以断言必须锁**特异性形态**而不是"有没有这么一条"。
+//   对照组：喂初版 (0,2,0) 语料必须判定为"未打补丁"（能红），喂 (0,3,0) 语料才算在位。
+function assertJ13PatchDetectorSelfTest(check) {
+    const weak = '.u-action-bar .u-nb-btn { font-size: 11px; padding: 3px 10px; }';
+    const strong = '.u-action-bar .u-btn-secondary.u-nb-btn { font-size: 11px; padding: 3px 10px; }';
+    const none = '.u-nb-btn { font-size: 11px; }';
+    const w = detectActionBarNbBtnPatch(weak);
+    const s = detectActionBarNbBtnPatch(strong);
+    const n = detectActionBarNbBtnPatch(none);
+    const ok = w.has030 === false && w.has020 === true
+        && s.has030 === true && s.has020 === false
+        && n.has030 === false && n.has020 === false;
+    check(ok, 'J13 补丁形态检测器·对照组自证（初版 0,2,0 语料→判未打补丁 / 0,3,0→在位 / 无→无）',
+        ok ? '' : `检测器失效：weak=${JSON.stringify(w)} strong=${JSON.stringify(s)} none=${JSON.stringify(n)}`
+            + ` —— 只查"有没有这条规则"会把被反杀的死规则judge成绿的（源码文本≠运行时生效）`);
+}
+
+//   showToast 定义检测（**AST 级**，不是正则）：
+//   必须走 AST 的直接原因——Data_Collab.html 的防回潮注释里逐字写着 `function showToast`，
+//   正则版会把**注释**当成第二处定义直接判红（假红）。AST 天然不含注释节点，从根上免疫。
+//   覆盖三种定义形态：函数声明 / 变量声明（含箭头与函数表达式）/ 成员赋值（window.showToast = …）。
+//   注意只认**赋值**不认调用：`w.showToast(msg,'error')`（u-paste.js 的共享层调用）不是定义。
+//   〔N1-fix2·口径显式化〕两条边界写在这里，省得下一个人靠猜：
+//     ① **偏严是有意的**：成员赋值不限于 window——`任意对象.showToast = …`（含 `UI.showToast=`、
+//        `w.showToast=`）一律计入。理由是防回潮：页面完全可以挂到别的命名空间上再在页内引用，
+//        那和当年 Data_Collab 页内版盖掉共享版是同一件事。误伤面（真有第三方对象恰好叫 showToast）
+//        目前全站零命中；真出现时应显式登记豁免，而不是把检测面缩窄。
+//     ② **已声明的检测边界**：computed 成员里只认字面量 key（`o['showToast']`）；
+//        拼接/变量 key（如 `globalThis['show'+'Toast']`、`o[k]`）**不在覆盖范围**——静态分析到此为止，
+//        要拦得靠 code review。写明它，是为了让"绿"的含义准确，而不是让人以为这条断言滴水不漏。
+function countShowToastDefs(jsSource) {
+    const parsed = parseJs(jsSource);
+    if (!parsed.ok) return { ok: false, error: parsed.error, count: 0, shapes: [] };
+    const shapes = [];
+    walkAst(parsed.ast, (n) => {
+        if (n.type === 'FunctionDeclaration' && n.id && n.id.name === 'showToast') shapes.push('function showToast(…)');
+        else if (n.type === 'VariableDeclarator' && n.id && n.id.name === 'showToast') shapes.push('var/let/const showToast = …');
+        // 〔N1-fix〕成员赋值两面都要认：点号 `window.showToast = fn`（computed=false，看 property.name）
+        //   与方括号 `window['showToast'] = fn`（computed=true，name 是 undefined，须看 Literal 的 value）。
+        //   初版只看 property.name → 方括号写法整条漏检，等于给回潮留了个后门。
+        else if (n.type === 'AssignmentExpression' && n.left && n.left.type === 'MemberExpression' && n.left.property) {
+            const p = n.left.property;
+            const hit = n.left.computed
+                ? (p.type === 'Literal' && p.value === 'showToast')
+                : p.name === 'showToast';
+            if (hit) shapes.push(`<obj>${n.left.computed ? "['showToast']" : '.showToast'} = …`);
+        }
+    });
+    return { ok: true, count: shapes.length, shapes };
+}
+
+//   〔对照组证明·guard_static_analysis_gotchas「探针必须双向证明」〕
+//   只断言"终态是 1"证明不了探针在工作（一个永远返回 1 的函数也能全绿）。这里当场喂三份合成语料：
+//     ① 两处真定义 → 必须数出 2（证明能检出回潮）
+//     ② 只有调用 + 注释里写着 `function showToast` → 必须数出 0（证明不吃注释/调用，即上面那个假红不会发生）
+//     ③ window.showToast 赋值 → 必须数出 1（证明覆盖第三种形态，不是只认 function 关键字）
+function assertShowToastDetectorSelfTest(check) {
+    // ⚠️ 合成语料本身必须是**合法 JS**：初版把 `function showToast(){}` 与 `const showToast = …` 放同一份，
+    //   触发 redeclaration SyntaxError → 解析失败 → 计数 0，对照组当场判红把这个自造 bug 抓了出来。
+    //   （这正是对照组存在的意义：它先证明了自己能红，才有资格给"终态唯一"背书。）
+    //   同名函数声明重复在 sloppy script 里是**合法**的，正是"页内又写一份"回潮时的真实形态。
+    const twoFns = 'function showToast(a){}\nfunction showToast(b){}';
+    const varForm = 'const showToast = (b) => {};';
+    const zeroDecoy = '// 禁止重新定义 showToast（守卫有"全站 function showToast 定义唯一"断言）\n'
+        + '/* function showToast(x){} 这行在块注释里 */\n'
+        + 'w.showToast(MSG, "error");\nshowToast("hi");';
+    const oneMember = 'window.showToast = function (m) {};';
+    // 〔N1-fix〕第四形态：方括号成员赋值（computed member）——初版只认点号，这种写法能整条绕过。
+    const oneComputed = "window['showToast'] = function (m) {};";
+    const r2 = countShowToastDefs(twoFns);
+    const rv = countShowToastDefs(varForm);
+    const r0 = countShowToastDefs(zeroDecoy);
+    const r1 = countShowToastDefs(oneMember);
+    const rc = countShowToastDefs(oneComputed);
+    const allParsed = r2.ok && rv.ok && r0.ok && r1.ok && rc.ok;
+    const ok = allParsed && r2.count === 2 && rv.count === 1 && r0.count === 0 && r1.count === 1 && rc.count === 1;
+    check(ok, 'showToast 单源探针·对照组自证（双声明→2 / 变量式→1 / 注释+调用→0 / 点号成员→1 / 方括号成员→1）',
+        ok ? '' : `探针失效：twoFns=${r2.count}(期望 2) varForm=${rv.count}(期望 1) decoy=${r0.count}(期望 0) member=${r1.count}(期望 1) computed=${rc.count}(期望 1)`
+            + `${allParsed ? '' : '；有语料解析失败（合成语料必须是合法 JS）'}`
+            + ` —— 探针数不对时"全站唯一"那条断言是空的（[[feedback_probe_test_bidirectional_proof]]）`);
+}
+
+function assertNotifyTextSlots(check) {
+    const rawCss = readComponentsCss();
+    if (rawCss === null) { check(false, 'components.css 可读', '文件不存在'); return; }
+    const css = stripCssComments(rawCss);
+
+    // ① 7 槽逐条：定义唯一 + 只设 color 一条属性 + 值必须是对应层的 fg token（零字面色值）
+    const problems = [];
+    for (const s of NT_SLOT_SPECS) {
+        const bodies = soleClassRuleBodies(css, s.cls);
+        if (bodies.length !== 1) { problems.push(`.${s.cls} 在共享层有 ${bodies.length} 条独占规则（应恰好 1 条）`); continue; }
+        const decls = bodies[0].split(';').map((d) => d.trim()).filter(Boolean);
+        if (decls.length !== 1) { problems.push(`.${s.cls} 含 ${decls.length} 条声明（文本槽只允许 color 一条，带 bg/border 就成徽章了）：${bodies[0]}`); continue; }
+        const want = `color: var(--sem-${s.tier}-fg)`;
+        const got = decls[0].replace(/\s+/g, ' ');
+        if (got !== want) problems.push(`.${s.cls} 实为 \`${got}\`，应为 \`${want}\`（零新色值＝只借 13 层 token 的 fg 面）`);
+    }
+    check(problems.length === 0, `通知文本 7 槽 u-nt-* 覆盖声明表一致（共享层定义唯一 + 只设 color + 全 token 化）`,
+        problems.length ? `${problems.length} 处：${problems.join('；')}` : '');
+
+    // ② 零字面色值：7 条规则里不得出现 hex/rgb（防"顺手写个近似色"绕过 token）
+    const litRe = /#[0-9a-fA-F]{3,8}\b|\brgba?\(/;
+    const literal = NT_SLOT_SPECS.filter((s) => soleClassRuleBodies(css, s.cls).some((b) => litRe.test(b)));
+    check(literal.length === 0, '通知文本 7 槽零字面色值（只允许 var(--sem-*-fg)）',
+        literal.length ? `${literal.map((s) => '.' + s.cls).join(' | ')} 内出现 hex/rgb 字面量` : '');
+
+    // ③ 页面侧不得重定义 u-nt-*（共享层是唯一住址；页内覆盖＝又一次"同名双实现"）
+    const redefined = [];
+    for (const spec of PAGE_ALIAS_SPECS) {
+        const html = readPage(spec.file);
+        if (!html) continue;
+        const styleTxt = pageStyleText(html);
+        for (const s of NT_SLOT_SPECS) {
+            if (soleClassRuleBodies(styleTxt, s.cls).length > 0) redefined.push(`${spec.file}:.${s.cls}`);
+        }
+    }
+    check(redefined.length === 0, '通知文本 7 槽无页内重定义（样式单一住址＝components.css）',
+        redefined.length ? `${redefined.join(' | ')} —— 页内覆盖会让共享层调 token 对这些页失效` : '');
+
+    // ④ 借色登记表 ↔ spec 对账（同 BORROWED_TIERS 的用意：改 token 前先看谁在借）
+    const drift = NT_BORROWED_TIERS.filter((b) => {
+        const s = NT_SLOT_SPECS.find((x) => x.cls === b.cls);
+        return !s || s.tier !== b.tier;
+    });
+    check(drift.length === 0, `通知文本槽借色登记与实际映射一致（${NT_BORROWED_TIERS.length} 处借色·借色值不借豁免资格）`,
+        drift.length ? `${drift.map((d) => d.cls).join(' | ')} 登记层与实际层不符` : '');
+    console.log(`  借色站点（文本槽）：${NT_BORROWED_TIERS.map((b) => `${b.cls}→${b.tier}`).join(' | ')}`);
+
+    // ⑤ u-nr-read-result 上提**属性级**校验（N1-fix2·codex MED 采纳）
+    //   原断言只数"有一条规则"——上提时把 `text-align: right` 抄成 `left`、或 `flex-basis` 掉了，
+    //   规则条数照样是 1，断言照样绿，而结果框会紧贴按钮/左对齐（"原样上提"的承诺无人守）。
+    //   现在逐属性对账：主规则两条声明齐全，`:empty` 变体单独存在且确实 display:none。
+    const rr = readResultRuleFacts(css);
+    check(rr.mainCount === 1 && rr.hasFlexBasis && rr.hasTextAlign,
+        'u-nr-read-result 已上提 components.css 且属性完整（flex-basis:100% + text-align:right）',
+        (rr.mainCount === 1 && rr.hasFlexBasis && rr.hasTextAlign) ? ''
+            : `主规则 ${rr.mainCount} 条 / flex-basis:100%=${rr.hasFlexBasis} / text-align:right=${rr.hasTextAlign}`
+              + ` —— 缺 flex-basis 结果框不换行会紧贴按钮，缺/错 text-align 则与通知按钮列不对齐（body 实测：${rr.mainBody || '(无)'}）`);
+    check(rr.emptyCount === 1 && rr.emptyHasDisplayNone,
+        'u-nr-read-result:empty 变体唯一且为 display:none（空时不占位）',
+        (rr.emptyCount === 1 && rr.emptyHasDisplayNone) ? ''
+            : `:empty 规则 ${rr.emptyCount} 条 / display:none=${rr.emptyHasDisplayNone}`
+              + ` —— 丢了这条，未查已读时空 span 会顶掉一行、把通知时间与按钮挤位（body 实测：${rr.emptyBody || '(无)'}）`);
+    const dcHtml = readPage('Data_Correction.html');
+    const dcLeft = dcHtml ? soleClassRuleBodies(pageStyleText(dcHtml), 'u-nr-read-result').length : 0;
+    check(dcLeft === 0, 'u-nr-read-result 页内定义已随上提删除（无双定义）',
+        dcLeft ? `Data_Correction.html 页内仍有 ${dcLeft} 条 —— 双定义会在未来改共享层时产生"改了没生效"` : '');
+
+    // ⑤b 〔通知统一 N3-fix·S6〕**结果框的页内容器侧覆盖声明表**
+    //   上面 ⑤ 锁的是"共享层长什么样"，但没人管"谁在页内又把它改了一遍"。u-nr-read-result 的两条属性
+    //   （flex-basis:100% / text-align:right）都是**依赖宿主容器**的：宿主得允许换行、宿主得是通知行那种
+    //   窄栏，右对齐才成立。宿主形态不同的页面必然要覆盖——不登记的话，下次有人改共享层的对齐方式，
+    //   根本不知道有一页在偷偷反着来（"样式单一住址"这条在容器适配面上是管不住的，只能靠登记表）。
+    //   规则：**允许**带宿主前缀的容器侧覆盖（选择器不是裸 `.u-nr-read-result`），但必须在这张表里报到；
+    //        **禁止**裸类覆盖（那才是抢共享层的住址，由 ⑤ 的 dcLeft 同款口径各页兜住）。
+    const NR_CONTAINER_OVERRIDES = [
+        {
+            file: 'Sys_Iteration.html',
+            selector: '.si-att-item.si-exec-row > .u-nr-read-result',
+            decl: 'text-align: left',
+            why: '批次执行人行宿主是 .si-att-item（nowrap flex·非 u-nr-body），且宽度是整块 siBatchOverlay：'
+                + '共享层的 text-align:right 会把结果甩到离按钮很远的右边缘；同组还有 .si-att-item.si-exec-row{flex-wrap:wrap} '
+                + '给 flex-basis:100% 补上换行前提。属容器侧适配，不动共享层。〔矩阵 S16「容器需单独设计」〕',
+        },
+    ];
+    const ovProblems = [];
+    for (const spec of PAGE_ALIAS_SPECS) {
+        const html = readPage(spec.file);
+        if (!html) continue;
+        const styleTxt = pageStyleText(html);
+        // ① 裸类覆盖一律判红（抢共享层住址）
+        if (soleClassRuleBodies(styleTxt, 'u-nr-read-result').length > 0 && spec.file !== 'Data_Correction.html') {
+            ovProblems.push(`${spec.file}：出现裸 .u-nr-read-result 覆盖（应改成带宿主前缀的容器侧写法并登记）`);
+        }
+        // ② 带前缀的覆盖必须已登记（按"选择器里出现 u-nr-read-result 且不是裸类"扫）
+        for (const chunk of styleTxt.split('}')) {
+            const bi = chunk.indexOf('{');
+            if (bi === -1) continue;
+            for (const sel of chunk.slice(0, bi).split(',')) {
+                const s = sel.trim();
+                if (!s.includes('u-nr-read-result') || s === '.u-nr-read-result' || s === '.u-nr-read-result:empty') continue;
+                if (!NR_CONTAINER_OVERRIDES.some((o) => o.file === spec.file && o.selector === s)) {
+                    ovProblems.push(`${spec.file}：容器侧覆盖 \`${s}\` 未登记进 NR_CONTAINER_OVERRIDES`);
+                }
+            }
+        }
+    }
+    // ③ 反向：登记了却查无此条（登记表烂尾＝下一个人照着一份假清单做判断）
+    for (const o of NR_CONTAINER_OVERRIDES) {
+        const html = readPage(o.file);
+        const bodies = html ? ruleBodiesFor(pageStyleText(html), o.selector) : [];
+        if (bodies.length !== 1) { ovProblems.push(`登记项 ${o.file} \`${o.selector}\` 实测 ${bodies.length} 条（应为 1）`); continue; }
+        const want = o.decl.split(':').map((x) => x.trim());
+        if (!hasDecl(bodies[0], want[0], want[1])) ovProblems.push(`登记项 ${o.file} \`${o.selector}\` 缺声明 ${o.decl}（实测：${bodies[0].trim()}）`);
+    }
+    check(ovProblems.length === 0,
+        `u-nr-read-result 页内容器侧覆盖登记齐全（${NR_CONTAINER_OVERRIDES.length} 处已登记·裸类覆盖零容忍）`,
+        ovProblems.length ? ovProblems.join(' | ') : '');
+    for (const o of NR_CONTAINER_OVERRIDES) console.log(`  容器侧覆盖登记：${o.file} → ${o.selector} { ${o.decl} }`);
+
+    // ⑥ J13 特异性补丁**形态**在位（N1-fix 升级：不只查"有这条规则"，要查它赢不赢）
+    //   初版断言查的是 `.u-action-bar .u-nb-btn`(0,2,0)——那条规则与 :283 的
+    //   `.u-action-bar .u-btn-secondary`(0,2,0) 同分，写在它上面就被反杀，源码有、运行时无。
+    //   现锁 (0,3,0) 复合类形态，并**反向禁止**弱形态残留（两者同时存在＝又一条死规则）。
+    const j13 = detectActionBarNbBtnPatch(css);
+    check(j13.has030, 'J13：.u-action-bar .u-btn-secondary.u-nb-btn (0,3,0) 特异性补丁在位（赢在特异性不赢在位置）',
+        j13.has030 ? '' : '缺 (0,3,0) 形态补丁 → .u-action-bar .u-btn-secondary(0,2,0) 继续压制 .u-nb-btn(0,1,0)，'
+            + 'Issue_Tracker 操作栏三个通知按钮的 u-nb-btn 仍是死类（守卫看得见类名、浏览器看不见效果）');
+    check(!j13.has020, 'J13：无 (0,2,0) 弱形态残留（`.u-action-bar .u-nb-btn`）',
+        j13.has020 ? '仍存在 `.u-action-bar .u-nb-btn` 规则 —— 它与 :283 同特异性，赢不赢全看谁写在后面，'
+            + '属"看起来打了补丁其实随时退化"的死规则，应改写成 (0,3,0) 复合类形态' : '');
+}
+
+function assertShowToastSingleSource(check) {
+    // 扫描面：**public 下全部 HTML 的内联脚本（现 19 个，非 PAGE_ALIAS_SPECS 的受管页子集）+ 共享 JS 目录**
+    //   〔N1-fix 注释纠偏〕原写"13 个受管页"与实现不符：下面是 readdirSync(PUBLIC_DIR) 全量扫，
+    //   这对本断言是**有意为之**——showToast 的回潮可能发生在任何一页（含不在别名受管名单里的
+    //   admin/login 等），扫描面窄一格就等于给回潮留缝。注释按实现写，不按印象写。
+    const defs = [];
+    const parseFails = [];
+    const jsDir = path.join(PUBLIC_DIR, 'assets', 'js');
+    const jsFiles = fs.existsSync(jsDir) ? fs.readdirSync(jsDir).filter((f) => f.endsWith('.js')) : [];
+    for (const f of jsFiles) {
+        const r = countShowToastDefs(fs.readFileSync(path.join(jsDir, f), 'utf8'));
+        if (!r.ok) { parseFails.push(`assets/js/${f}: ${r.error}`); continue; }
+        r.shapes.forEach((sh) => defs.push(`assets/js/${f} → ${sh}`));
+    }
+    for (const f of fs.readdirSync(PUBLIC_DIR).filter((x) => x.endsWith('.html'))) {
+        const html = fs.readFileSync(path.join(PUBLIC_DIR, f), 'utf8');
+        const src = inlineScriptSource(html);
+        if (!src.trim()) continue;
+        const r = countShowToastDefs(src);
+        if (!r.ok) { parseFails.push(`${f}(内联): ${r.error}`); continue; }
+        r.shapes.forEach((sh) => defs.push(`${f} → ${sh}`));
+    }
+    check(parseFails.length === 0, 'showToast 单源扫描面全部可解析（解析失败=盲区，不能当通过）',
+        parseFails.length ? parseFails.join(' | ') : '');
+    const onlyApp = defs.length === 1 && defs[0].startsWith('assets/js/app.js');
+    check(onlyApp, `全站 showToast 定义唯一（实测 ${defs.length} 处·口径：函数声明/变量声明/任意对象属性赋值）`,
+        onlyApp ? '' : `定义点：${defs.join(' | ') || '(零处——共享版被删了？)'} —— 同名双实现会按加载顺序静默覆盖`
+            + `（D7 之前 Data_Collab 页内版就是这样盖掉共享版的：单例顶替/2.4s/不可点/info 映琥珀四处行为分叉）。`
+            + `本断言口径**偏严**：不限 window，任意对象的 showToast 属性赋值都算定义（防换个命名空间回潮）；`
+            + `**检测边界**：computed key 只认字面量，拼接/变量 key（globalThis['show'+'Toast'] 之类）静态分析拦不住，属已声明盲区`);
+    console.log(`  showToast 定义点：${defs.join(' | ') || '(无)'}`);
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 〔通知统一 N5-5a〕守卫终扩（六项 + 两条通用口径）
+//   真相源＝锚点 §6 N5 守卫/断言清单 + 改动点矩阵 §6.5 函数名单 + 冻结映射表 §1。
+//   每一项都配**对照组自证**：光证"现在是绿的"没有意义，必须证"坏成什么样这条会红"。
+// ══════════════════════════════════════════════════════════════════════════════
+
+// 五页通知域函数名单（矩阵 §6.5·J24 按函数圈不按类名圈——u-notify-row 在 DCorr:1468 被非通知区复用）
+const NOTIFY_DOMAIN_FNS = Object.freeze({
+    'Sys_Iteration.html': ['siNotifyStatusText', 'siNotifyRowHtml', 'siRenderDevNotifyRows', 'siRenderRelayNotifyRow',
+        'siRenderCreatorNotifyRow', 'siRenderHoldCreatorNotifyRow', 'siRenderResumeNotifyRow', 'siRenderIntakeNotifyRow',
+        'siRenderLiaisonTestNotifyRow', 'siRenderReleaseExecutorNotifyRow', 'siRenderRequesterNotifyRow',
+        'siRenderTechLeadNotifyRow', 'siRenderNotify', 'siExecutorSectionHtml', 'siQueryReadStatus',
+        'siExecutorRowReadStatus', 'siTechLeadNotifyBadgeHtml'],
+    'Data_Collab.html': ['renderContactNotifySubsection', 'renderDeveloperNotifySubsection', 'renderExpectedEstimateSection',
+        'renderRequesterDoneNotifySection', 'renderAdminDirectActionsSection', 'triggerNotify', 'notifyRequesterDone',
+        'notifyExpected', 'checkReadStatus'],
+    'Data_Correction.html': ['buildNotifyRow', 'queryReadStatus', 'notifySend', 'notifyReasonText'],
+    'Issue_Lite.html': ['buildNotifyRow', 'notifyRead', 'notifySend'],
+    'Issue_Tracker.html': ['checkIssueReadStatus', 'notifyAction', 'notifyRequesterDone', 'itNotifyReadSection'],
+});
+
+// 页内 <script>（无 src）正文；stripJsComments 用于所有"数代码里的东西"的场景。
+function pageScriptText(html) {
+    return [...String(html).matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/gi)].map((m) => m[1]).join('\n');
+}
+//   ⚠️ 先剥块注释再剥行注释；`//` 判定要求前面不是 `:`（躲开 `https://`）也不在字符串里的粗判——
+//   本文件所有 emoji/透传/内联色断言都必须走它，"注释里写了个 ❌ 就判红"是上一轮真实踩过的假阳性。
+function stripJsComments(src) {
+    return String(src).replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:"'`\\])\/\/[^\n]*/g, '$1');
+}
+// 取某个具名函数的函数体（按缩进收尾，与各页写法一致：顶层函数的收尾 `}` 缩进 4 或 8 空格）
+function grabFnBody(src, fnName) {
+    const re = new RegExp('(?:async\\s+)?function\\s+' + fnName + '\\s*\\(', 'g');
+    const m = re.exec(src);
+    if (!m) return null;
+    const start = m.index;
+    const openIdx = src.indexOf('{', re.lastIndex - 1);
+    if (openIdx < 0) return null;
+    const indent = (src.slice(0, start).match(/[^\n]*$/) || [''])[0];
+    const closer = '\n' + indent + '}';
+    const end = src.indexOf(closer, openIdx);
+    return end < 0 ? src.slice(start) : src.slice(start, end + closer.length);
+}
+
+// 〔N5-5a·通用口径一〕**调用点计数必须排除定义**。
+//   固化动因：本轮 agent 在 siNotifyErr / siRefreshQuiet / anomalyNoteRO 上**连踩三次**同一个坑——
+//   `src.match(/fn\(/g).length` 把 `function fn(` 也数了进去，而"定义 1 + 调用点 N-1"往往恰好凑成
+//   期望值 N ⇒ **断言为错误的理由而绿**（[[feedback_test_assertion_self_error]] 里最难发现的一种）。
+//   本文件此后一切"数调用点"一律走本函数，禁止再手写正则计数（下方有守卫盯着）。
+function countCallSites(src, fnName) {
+    const re = new RegExp('(?:^|[^\\w.$])' + fnName + '\\s*\\(', 'g');
+    let cnt = 0, m;
+    while ((m = re.exec(src)) !== null) {
+        const before = src.slice(Math.max(0, m.index - 40), m.index + (m[0].length - fnName.length - 1));
+        if (/\bfunction\s+$/.test(before)) continue;           // function fn(
+        if (new RegExp('\\b(const|let|var)\\s+' + fnName + '\\s*=\\s*$').test(before)) continue;  // const fn = (
+        cnt++;
+    }
+    return cnt;
+}
+function assertCountCallSitesSelfTest(check) {
+    const sample = 'function foo(a){}\nconst bar = (x)=>foo(x);\nfoo(1); await foo(2); obj.foo(3); notfoo(4);';
+    const got = countCallSites(sample, 'foo');
+    check(got === 3, '★通用口径一·检测器对照组：countCallSites 排除定义、排除同名成员/前缀词（语料含 1 定义 + 3 真调用 + obj.foo + notfoo）',
+        `实测 ${got}（期望 3：foo(x)/foo(1)/foo(2)；obj.foo 与 notfoo 不算）`);
+    const naive = (sample.match(/foo\(/g) || []).length;
+    check(naive !== got, '★通用口径一·反向对照：朴素正则计数与本函数结果**必须不同**（相同说明语料没覆盖到定义/成员那两类，断言等于没测）',
+        `朴素=${naive} / 守卫=${got}`);
+}
+
+// 〔N5-5a·②〕选择器 × 渲染串双向对拍
+//   五页把"按钮选择器"和"onclick 渲染串"分写两处，改一处忘另一处＝B1/J23/R3 三条防线一起静默失效
+//   （DCorr notifySend 前缀匹配、Collab triggerNotify、SI 九个通知按钮都踩在这条线上）。
+//   三页三种写法（**实测，不是照印象写**）：SI 用 `[onclick="fn()"]` 全等；DCorr 用 `[onclick^=` 前缀；
+//   Collab 用 `[onclick*=` 包含。后两种都属"非全等"⇒ 必须验右界符。
+const SELECTOR_PAIRS = Object.freeze([
+    { file: 'Sys_Iteration.html', sel: /\.u-nb-btn\[onclick="(si[A-Za-z]+)\(/g, exact: true },
+    { file: 'Data_Correction.html', sel: /\.u-nb-btn\[onclick\^="(notifySend)\(/g, exact: false },
+    { file: 'Data_Collab.html', sel: /\[onclick\*="(triggerNotify|notifyRequesterDone|notifyExpected)\(/g, exact: false },
+]);
+function assertSelectorRenderPairs(check) {
+    const problems = [];
+    let pairs = 0, prefixSels = 0;
+    for (const spec of SELECTOR_PAIRS) {
+        const html = readPage(spec.file);
+        if (!html) { problems.push(`${spec.file} 缺失`); continue; }
+        const js = pageScriptText(html);
+        const code = stripJsComments(js);
+        const re = new RegExp(spec.sel.source, 'g');
+        let m, seen = 0;
+        while ((m = re.exec(code)) !== null) {
+            seen++; pairs++;
+            const fn = m[1];
+            // ① 反向：选择器指向的函数，渲染侧必须真有 `onclick="fn(` 的输出串
+            if (!code.includes('onclick="' + fn + '(')) problems.push(`${spec.file}：选择器指向 ${fn}，但渲染侧无 onclick="${fn}(" 输出串`);
+            // ② 前缀型选择器必须带**右界符**（`,` 或 `)`）——`siNotifyDevSend(1` 是 `…(12)` 的前缀，
+            //    无右界符会一次锁两行（DCorr 多业务方 done 行的原始事故形态）
+            if (!spec.exact) {
+                const tail = code.slice(m.index, m.index + 220);
+                const q = tail.indexOf('"]');
+                const body = q > 0 ? tail.slice(0, q) : tail;
+                if (!/[,)]\s*"\]/.test(tail.slice(0, q + 2)) && !/[,)]$/.test(body)) {
+                    problems.push(`${spec.file}：前缀选择器 \`${body.slice(0, 60)}\` 未以 , 或 ) 收尾（会误匹更长的 id/参数）`);
+                }
+                prefixSels++;
+            }
+        }
+        if (seen === 0) problems.push(`${spec.file}：一个按钮选择器都没抓到（扫描面落空＝守卫失效，不能当通过）`);
+    }
+    check(problems.length === 0, `②选择器×渲染串双向对拍（${pairs} 对·其中前缀型 ${prefixSels} 个逐个验右界符）`,
+        problems.length ? problems.join(' | ') : '');
+}
+function assertSelectorPairDetectorSelfTest(check) {
+    // 对照组：无右界符的前缀选择器必须被判出来
+    const badSample = 'const s = `.u-nb-btn[onclick^="notifySend(${id}, \'${r}\'"]`;\nconst h = `<button onclick="notifySend(1)">x</button>`;';
+    const hit = /[,)]\s*"\]/.test(badSample);
+    check(!hit, '★②检测器对照组：缺右界符的前缀选择器语料**不**满足右界符判据（判据真在工作，不是恒真）');
+    const goodSample = 'const s = `.u-nb-btn[onclick^="notifySend(${id}, \'${r}\', ${f},"]`;';
+    check(/[,)]\s*"\]/.test(goodSample), '★②检测器对照组：带右界符的语料满足判据');
+}
+
+// 〔N5-5a·①〕onclick 实参个数与函数签名对齐
+//   B1 事故：DCorr 渲染串是 `notifySend(1, 'dev', false, {fromDrawer:true})`＝4 实参，而签名是
+//   `(id, recipient, force, requesterId, opts)` ⇒ opts 落在 requesterId 位、`o.fromDrawer` 恒假
+//   ⇒ 五个通道里四个的 A 类删除**静默没生效**。判据分两类：静态实参串直接数；含 `${…}` 可展开成
+//   多个实参的（DCorr 的 ridArg）无法静态定长 ⇒ 必须有**归一化行**兜住，登记在册。
+const ARITY_SPECS = Object.freeze([
+    { file: 'Data_Correction.html', fn: 'notifySend', params: 5,
+      normalizer: /if \(requesterId && typeof requesterId === 'object'\) \{ opts = requesterId; requesterId = undefined; \}/,
+      why: '渲染侧 ridArg 只在 done 通道非空 ⇒ 实参个数在 4/5 之间浮动，靠函数体首行按类型归一（B1 修法）' },
+]);
+function assertOnclickArity(check) {
+    const problems = [];
+    for (const spec of ARITY_SPECS) {
+        const html = readPage(spec.file);
+        if (!html) { problems.push(`${spec.file} 缺失`); continue; }
+        const code = stripJsComments(pageScriptText(html));
+        const decl = new RegExp('(?:async\\s+)?function\\s+' + spec.fn + '\\s*\\(([^)]*)\\)').exec(code);
+        if (!decl) { problems.push(`${spec.file}：找不到 ${spec.fn} 声明`); continue; }
+        const declared = decl[1].split(',').map((s) => s.trim()).filter(Boolean).length;
+        if (declared !== spec.params) problems.push(`${spec.file}：${spec.fn} 形参 ${declared} 个，登记表写 ${spec.params} 个（签名变了就得回来改登记）`);
+        if (!spec.normalizer.test(code)) problems.push(`${spec.file}：${spec.fn} 的实参归一化行不在了（B1 会复活：opts 落进 requesterId 位、A 类删除静默失效）`);
+        // 渲染侧 onclick 串的**最少**实参数：静态逗号计数（模板占位不拆）
+        const calls = [...code.matchAll(new RegExp('onclick="' + spec.fn + '\\(([^"]*)\\)"', 'g'))];
+        if (calls.length === 0) problems.push(`${spec.file}：抓不到 ${spec.fn} 的 onclick 渲染串（扫描面落空）`);
+        for (const c of calls) {
+            const argc = c[1].split(',').length;
+            if (argc > declared) problems.push(`${spec.file}：onclick 实参 ${argc} 个 > 形参 ${declared} 个（多出来的会被静默丢弃）`);
+        }
+    }
+    check(problems.length === 0, `①onclick 实参个数与签名对齐（${ARITY_SPECS.length} 个浮动实参函数逐个验归一化行 + 渲染串实参上界）`,
+        problems.length ? problems.join(' | ') : '');
+}
+
+// 〔N5-5a·③〕跨页共享码文案逐字对账（冻结映射表 §1 十六码 × 四页常量）
+const SHARED_CODE_TEXT = Object.freeze({
+    REQUESTER_PHONE_EMPTY: '业务方未填手机号', REQUESTER_INVALID: '业务方手机号查不到企业钉钉号',
+    REQUESTER_LOOKUP_FAILED: '业务方钉钉号查询失败', DINGTALK_NOT_CONFIGURED: '钉钉配置未填写',
+    NO_DINGTALK_CONFIG: '钉钉配置未填写', DINGTALK_TOKEN_FAILED: '钉钉鉴权失败',
+    NOTIFY_SENT_BUT_DB_UPDATE_FAILED: '已发送但留痕失败（请勿重发）',
+    RECIPIENT_CHANGED_DURING_SEND: '发送期间收件人手机号已变更，状态未记录',
+    PATH_VIOLATION: '附件路径非法', STATUS_NOT_NOTIFIABLE: '当前状态不可通知',
+    INVALID_STATE_FOR_NOTIFY: '当前状态不可通知', NOT_AUTHORIZED_TO_NOTIFY: '无权发送该通知',
+    INVALID_RECIPIENT: '收件人参数无效', NOT_NOTIFIED: '尚未成功通知', NO_MESSAGE_KEY: '缺少消息标识',
+});
+//   `NOTIFY_PARTIAL_FAILURE` 不入本表：§1 对它只写「按 failed_step 取」、从不给基值 ⇒ 任何页出现基值
+//   都是自创文案（N4-fix·D-9 已按此把 Collab 那条删掉），下面单列一条反向断言盯着它不要复活。
+const REASON_SHARED_TEXT = Object.freeze({
+    requester_invalid: '业务方手机号查不到企业钉钉号',   // §7.2·N4-fix 起 Collab 也消费
+    lookup_failed: '钉钉号查询失败', token_failed: '钉钉鉴权失败',
+    send_failed: '钉钉发送失败', send_exception: '发送异常',
+});
+const ERR_CONST_NAMES = Object.freeze({
+    'Data_Collab.html': ['COLLAB_ERR_TEXT', 'COLLAB_REASON_TEXT'],
+    'Data_Correction.html': ['CORRECTION_ERR_TEXT', 'CORRECTION_REASON_TEXT'],
+    'Issue_Lite.html': ['IL_ERR_TEXT', 'IL_REASON_TEXT'],
+    'Issue_Tracker.html': ['IT_ERR_TEXT', 'IT_REASON_TEXT'],
+    'Sys_Iteration.html': ['SI_ERR_TEXT', 'SI_REASON_TEXT'],
+});
+function grabConstBody(code, name) {
+    const i = code.indexOf('const ' + name + ' = Object.freeze({');
+    if (i < 0) return null;
+    const j = code.indexOf('});', i);
+    return j < 0 ? null : code.slice(i, j);
+}
+function parseMapEntries(body) {
+    const out = {};
+    if (!body) return out;
+    for (const m of body.matchAll(/(?:^|[{,\s])([A-Za-z_][A-Za-z0-9_]*)\s*:\s*'([^']*)'/g)) out[m[1]] = m[2];
+    return out;
+}
+function assertSharedCodeTexts(check) {
+    const problems = [];
+    let checked = 0, pagesSeen = 0;
+    for (const [file, names] of Object.entries(ERR_CONST_NAMES)) {
+        const html = readPage(file);
+        if (!html) { problems.push(`${file} 缺失`); continue; }
+        const code = stripJsComments(pageScriptText(html));
+        let anyConst = false;
+        for (const cn of names) {
+            const body = grabConstBody(code, cn);
+            if (!body) continue;
+            anyConst = true;
+            const entries = parseMapEntries(body);
+            const table = cn.endsWith('REASON_TEXT') ? REASON_SHARED_TEXT : SHARED_CODE_TEXT;
+            for (const [k, want] of Object.entries(table)) {
+                if (!(k in entries)) continue;              // 该页不消费这个码＝允许（§1「使用页面」列）
+                checked++;
+                if (entries[k] !== want) problems.push(`${file}·${cn}.${k}＝「${entries[k]}」≠ 冻结表「${want}」`);
+            }
+            if (cn.endsWith('ERR_TEXT') && 'NOTIFY_PARTIAL_FAILURE' in entries) {
+                problems.push(`${file}·${cn} 出现 NOTIFY_PARTIAL_FAILURE 基值「${entries.NOTIFY_PARTIAL_FAILURE}」——§1 只写「按 failed_step 取」，基值属自创文案（D-9 已删过一次，别复活）`);
+            }
+        }
+        if (anyConst) pagesSeen++; else problems.push(`${file}：一个 *_ERR_TEXT/*_REASON_TEXT 常量都没抓到（扫描面落空）`);
+    }
+    check(problems.length === 0, `③跨页共享码文案逐字对账（${pagesSeen} 页 × 命中 ${checked} 条·含 requester_invalid 跨页同文案）`,
+        problems.length ? problems.join(' | ') : '');
+    return checked;
+}
+
+// 〔N5-5a·④〕后端原文透传：判红面**收窄为通知域函数名单**（裁定 3③）
+//   全站判红会把 60+ 个非通知 CRUD 的 `data.error` 直出一并打红——那些端点的码不在冻结表内，
+//   接表反而信息倒退。故只在通知域函数体内禁。
+const PASSTHROUGH_PAT = /\b(?:data|d|r\.data)\.(?:detail|errmsg)\b|\berr\.message\b/;
+const PASSTHROUGH_EXEMPT = Object.freeze({
+    // 白名单唯一出口：Collab notify-error-box 四字段（J8/H2 冻结口径）——它在 triggerNotify 内，
+    //   走 collabWhitelistField（转义 + Unicode 截 200 + 裁定⑬ 来源过滤），是**登记在册的例外**。
+    'Data_Collab.html::triggerNotify': 'notify-error-box 四字段白名单（§9.4）',
+});
+function assertNotifyDomainNoPassthrough(check) {
+    const problems = [];
+    let scanned = 0;
+    for (const [file, fns] of Object.entries(NOTIFY_DOMAIN_FNS)) {
+        const html = readPage(file);
+        if (!html) continue;
+        const code = stripJsComments(pageScriptText(html));
+        for (const fn of fns) {
+            const body = grabFnBody(code, fn);
+            if (!body) continue;
+            scanned++;
+            if (PASSTHROUGH_EXEMPT[`${file}::${fn}`]) continue;
+            if (PASSTHROUGH_PAT.test(body)) problems.push(`${file}·${fn} 内出现后端原文透传（detail/errmsg/err.message）`);
+        }
+    }
+    check(problems.length === 0, `④「detail 判红」收窄为通知域（扫 ${scanned} 个函数体·白名单例外 ${Object.keys(PASSTHROUGH_EXEMPT).length} 处登记在册）`,
+        problems.length ? problems.join(' | ') : '');
+    check(scanned >= 30, `④扫描面非空校验：通知域函数体实抓 ${scanned} 个（抓不到＝守卫空转，不能当通过）`);
+}
+
+// 〔N5-5a·⑤〕emoji 收编守卫：**先剥注释**，逐字符串 includes，**禁正则字符类**
+//   两条教训都在这：① 注释里的 👀/⏰/❌ 是解释文字不是 UI 文案，扫全文会假阳性（本轮真踩过）；
+//   ② 正则字符类 `[👀⏰❌]` 会把 astral 字符拆成代理对，`[👀…]` 之间互相组合出假命中。
+const BANNED_EMOJI = Object.freeze(['👀', '⏰', '❌', '📣']);
+function assertNotifyEmoji(check) {
+    const problems = [];
+    let scanned = 0;
+    for (const [file, fns] of Object.entries(NOTIFY_DOMAIN_FNS)) {
+        const html = readPage(file);
+        if (!html) continue;
+        const code = stripJsComments(pageScriptText(html));
+        for (const fn of fns) {
+            const body = grabFnBody(code, fn);
+            if (!body) continue;
+            scanned++;
+            for (const e of BANNED_EMOJI) {
+                if (body.includes(e)) problems.push(`${file}·${fn} 内残留 ${e}`);
+            }
+        }
+    }
+    check(problems.length === 0, `⑤通知域 emoji 收编（扫 ${scanned} 个函数体 × ${BANNED_EMOJI.length} 个禁用符·剥注释先行·字符串 includes）`,
+        problems.length ? problems.join(' | ') : '');
+}
+function assertEmojiDetectorSelfTest(check) {
+    const withComment = "// 这里解释一下 👀 的收编\nconst s = '⏳ 尚未读取';";
+    const stripped = stripJsComments(withComment);
+    check(!stripped.includes('👀') && stripped.includes('⏳ 尚未读取'),
+        '★⑤检测器对照组：剥注释后注释里的 👀 消失、代码里的文案保留（防"注释提了一嘴就判红"的假阳性）');
+    const live = "const s = '👀 尚未读取';";
+    check(stripJsComments(live).includes('👀'), '★⑤检测器对照组：真代码里的 👀 剥注释后**仍在**（判据没被剥过头）');
+    // 禁正则字符类：证明字符类写法会产生假命中
+    const classRe = new RegExp('[👀⏰]');
+    check(classRe.test('💡'), '★⑤检测器对照组：正则字符类对 astral 字符会**假命中**（此处用一个完全无关的 💡 触发）——故本守卫一律用字符串 includes');
+}
+
+// 〔N5-5a·⑥〕J24：通知渲染函数内禁**新增**内联色值
+//   基线口径＝当前实测值登记在册，只允许降不允许升（新增一处即红）；显式排除项单列理由。
+//   基线**逐函数逐色值登记**，不是一个总数——总数式基线挡不住"换掉一个合法项、塞进一个违规项"
+//   （数目不变、守卫照绿）。下表每一格都要说得出"这个色为什么可以留"，说不出的就是该改的。
+//   ⚠️ 表里的数字全部**现场实测得来**（初版凭印象写了 Collab=4/IT=0，一跑就红——
+//     [[feedback_verify_absolute_claims]]：绝对数字是论据不是描述，落笔前必须回真相源量）。
+const INLINE_COLOR_BASELINE = Object.freeze({
+    'Sys_Iteration.html': {},
+    'Data_Collab.html': {
+        renderContactNotifySubsection: { n: 1, why: '区标签「对接人通知」#64748b —— 矩阵 C9 明列不换' },
+        renderDeveloperNotifySubsection: { n: 1, why: '区标签「开发通知」#64748b —— C9' },
+        renderExpectedEstimateSection: { n: 2, why: '区标签「开发回填」「通知需求方·预计完成」#64748b —— C9' },
+        renderRequesterDoneNotifySection: { n: 2, why: '<h4> 区标题 #374151 ×2 —— 区块标题非状态文本' },
+        renderAdminDirectActionsSection: { n: 1, why: '改派历史折叠区 #888 —— 非通知状态文本' },
+        triggerNotify: { n: 2, why: 'notify-error-box **结构配色** #92400e/#b91c1c —— §6.5 显式排除（错误框自身配色，不是 7 槽状态文本）' },
+    },
+    'Data_Correction.html': {},
+    'Issue_Lite.html': {},
+    'Issue_Tracker.html': {
+        itNotifyReadSection: { n: 1, why: '区块 label「通知已读状态」#6b7280 —— Q7 登记（区块标签非状态文本）' },
+    },
+});
+function assertJ24NoInlineColor(check) {
+    const problems = [];
+    let total = 0, registered = 0;
+    for (const [file, fns] of Object.entries(NOTIFY_DOMAIN_FNS)) {
+        const html = readPage(file);
+        if (!html) continue;
+        const code = stripJsComments(pageScriptText(html));
+        const base = INLINE_COLOR_BASELINE[file] || {};
+        registered += Object.values(base).reduce((a, b) => a + b.n, 0);
+        for (const fn of fns) {
+            const body = grabFnBody(code, fn);
+            if (!body) continue;
+            const n = (body.match(/color\s*:\s*#[0-9a-fA-F]{3,8}/g) || []).length;
+            total += n;
+            const want = base[fn] ? base[fn].n : 0;
+            if (n > want) problems.push(`${file}·${fn}：内联色 ${n} 处 > 登记 ${want} 处（J24 禁新增；要留就把理由写进基线表）`);
+            if (n < want) problems.push(`${file}·${fn}：实测 ${n} < 登记 ${want} —— 少了是好事，但**基线表要同步下调**，否则守卫从此松一格`);
+        }
+    }
+    check(problems.length === 0, `⑥J24 通知渲染函数禁新增内联色（实测 ${total} 处 / 登记豁免 ${registered} 处·逐函数逐条带理由）`,
+        problems.length ? problems.join(' | ') : '');
+    check(total === registered, `⑥总量对账：实测 ${total} ≡ 登记 ${registered}（逐函数已比对，此条防"基线表漏了某个函数"）`);
+}
+
+// 〔N5-5a·通用口径二〕共享槽类「**真生效**」断言（死类家族两例的机制固化）
+//   已发生两例："源码有类名、浏览器不认" —— ① IT `.u-action-bar .u-btn-secondary`(0,2,0) 压死
+//   `.u-nb-btn`(0,1,0)（J13，已单独打补丁）；② Collab `.notify-status-text`(0,1,0) 与 `.u-nt-*`(0,1,0)
+//   **同特异性**，而页内 <style> 写在 components.css link **之后** ⇒ 靠源序页内胜出，11 处槽类集体失效
+//   （N4-fix·D-2 才挖出来）。本断言把②那条机制固化：
+//   凡与 `u-nt-*` **同挂在一个 class 属性上**的其他类，页内不得有"单类选择器 + 设 color"的规则。
+function assertSharedSlotEffective(check) {
+    const problems = [];
+    let mounts = 0, pagesWithMounts = 0;
+    for (const file of Object.keys(NOTIFY_DOMAIN_FNS)) {
+        const html = readPage(file);
+        if (!html) continue;
+        const styleTxt = pageStyleText(html);
+        // 前提复核：页内 <style> 确实在 components.css link 之后（同特异性时页内胜出的前提）
+        const linkIdx = html.search(/<link[^>]+components\.css/i);
+        const styleIdx = html.search(/<style\b/i);
+        const pageWinsOnTie = linkIdx >= 0 && styleIdx > linkIdx;
+        const co = new Set();
+        for (const m of html.matchAll(/class="([^"]*\bu-nt-[a-z]+\b[^"]*)"/g)) {
+            mounts++;
+            for (const cls of m[1].split(/\s+/)) {
+                if (!cls || /^u-nt-/.test(cls) || cls.includes('${')) continue;
+                co.add(cls);
+            }
+        }
+        if (co.size) pagesWithMounts++;
+        for (const cls of co) {
+            const bodies = soleClassRuleBodies(styleTxt, cls);
+            for (const b of bodies) {
+                if (/(^|;)\s*color\s*:/.test(b)) {
+                    problems.push(`${file}：页内单类规则 \`.${cls}\` 设了 color，且与它同挂一个 class 属性的 u-nt-* 同特异性` +
+                        `${pageWinsOnTie ? '、页内 <style> 又在 components.css 之后 ⇒ **槽类是死类**' : ''}（规则体：${b.trim().slice(0, 60)}）`);
+                }
+            }
+        }
+    }
+    check(problems.length === 0, `⑧共享槽类真生效（扫 ${mounts} 个 u-nt-* 挂载点 / ${pagesWithMounts} 页有同属性共挂类·禁同特异性页内 color 覆盖）`,
+        problems.length ? problems.join(' | ') : '');
+    check(mounts >= 40, `⑧扫描面非空校验：u-nt-* 挂载点实抓 ${mounts} 个`);
+}
+function assertSharedSlotDetectorSelfTest(check) {
+    // 对照组：还原 N4-fix 之前的形态（.notify-status-text 带 color）必须被判红
+    const fakeStyle = '.notify-status-text { font-size: 13px; color: #4b5563; margin-right: 12px; }';
+    const bodies = soleClassRuleBodies(fakeStyle, 'notify-status-text');
+    check(bodies.length === 1 && /(^|;)\s*color\s*:/.test(bodies[0]),
+        '★⑧检测器对照组（修前形态）：`.notify-status-text{…color…}` 语料被判据命中 ⇒ 这条守卫真能抓到 D-2 那个死类家族');
+    const fixed = '.notify-status-text { font-size: 13px; margin-right: 12px; }';
+    const b2 = soleClassRuleBodies(fixed, 'notify-status-text');
+    check(b2.length === 1 && !/(^|;)\s*color\s*:/.test(b2[0]), '★⑧检测器对照组（修后形态）：去掉 color 后不再命中（判据不是恒真）');
+}
+
+// 通用口径一的**落地校验**：本文件 N5 段自己不许手写朴素计数正则
+function assertNoNaiveCallCount(check) {
+    const self = fs.readFileSync(__filename, 'utf8');
+    const seg = self.slice(self.indexOf('通知统一 N5-5a〕守卫终扩'));
+    const naive = [...seg.matchAll(/\.match\(new RegExp\('[a-zA-Z]+\\\(/g)].length
+        + [...seg.matchAll(/\.match\(\/[a-zA-Z]{4,}\\\(\/g\)/g)].length;
+    check(naive === 0, '★通用口径一·落地：N5 段内零"朴素函数名计数正则"（数调用点一律走 countCallSites）',
+        naive ? `发现 ${naive} 处手写计数` : '');
+}
+
+function runNotifyUnifyN5Assertions(check) {
+    console.log('--- N5-5a：检测器对照组自证（先证判据会红，再谈它绿）---');
+    assertCountCallSitesSelfTest(check);
+    assertSelectorPairDetectorSelfTest(check);
+    assertEmojiDetectorSelfTest(check);
+    assertSharedSlotDetectorSelfTest(check);
+    console.log('');
+    console.log('--- N5-5a：六项守卫 + 两条通用口径 ---');
+    assertOnclickArity(check);
+    assertSelectorRenderPairs(check);
+    assertSharedCodeTexts(check);
+    assertNotifyDomainNoPassthrough(check);
+    assertNotifyEmoji(check);
+    assertJ24NoInlineColor(check);
+    assertNoNaiveCallCount(check);
+    assertSharedSlotEffective(check);
+    console.log('');
+}
+
+function runNotifyUnifyN1Assertions(check) {
+    console.log('--- 通知统一 N1：检测器对照组自证（CSS 侧 / J13 形态）---');
+    assertCssRuleDetectorSelfTest(check);
+    assertJ13PatchDetectorSelfTest(check);
+    console.log('');
+    console.log('--- 通知统一 N1：文本 7 槽 + 结果框上提 + J13 补丁 ---');
+    assertNotifyTextSlots(check);
+    console.log('');
+    console.log('--- 通知统一 N1：showToast 单源（含对照组自证）---');
+    assertShowToastDetectorSelfTest(check);
+    assertShowToastSingleSource(check);
+    console.log('');
+}
+
 function runSecondaryFamilyAssertions(check) {
     for (const spec of SECONDARY_FAMILY_SPECS) {
         console.log(`--- ${spec.family} ---`);
@@ -3636,6 +4424,10 @@ function runBadgeAliasAssertions(check) {
     }
     console.log(String.fromCharCode(10) + '=== 口径二·族级断言（S5a：通知/类型/次级族）===' + String.fromCharCode(10));
     runSecondaryFamilyAssertions(check);
+    console.log(String.fromCharCode(10) + '=== 通知统一 N1·共享层断言（u-nt-* 七槽 / 结果框上提 / J13 / showToast 单源）===' + String.fromCharCode(10));
+    runNotifyUnifyN1Assertions(check);
+    console.log(String.fromCharCode(10) + '=== 通知统一 N5-5a·守卫终扩（六项 + 两条通用口径·全部带对照组）===' + String.fromCharCode(10));
+    runNotifyUnifyN5Assertions(check);
 }
 
 // 〔B9〕给 verify-unify-static.js 用：判定某个源里有没有"真的输出某个 class"的证据。

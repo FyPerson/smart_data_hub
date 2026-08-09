@@ -7,7 +7,7 @@
     <title>数据开发 - 智数协同平台</title>
     <link rel="icon" href="data:,">
     <link rel="stylesheet" href="assets/css/style.css?v=v1.141.0_badge2">
-    <link rel="stylesheet" href="assets/css/components.css?v=v1.141.0_badge1">
+    <link rel="stylesheet" href="assets/css/components.css?v=v1.142.0_notify1">
     <style>
         /* 数据开发·轻量协作台账页（issue_lite 换壳 v0.2·D5）· 页面专属
            复用共享 u- 组件层（筛选栏/按钮/表格/徽章/抽屉/弹窗/表单/空状态）；补 4 态徽章 + 详情网格 + 附件区。 */
@@ -279,7 +279,7 @@
 
     <input type="file" id="attachInput" style="display:none;" onchange="onAttachPicked()">
 
-    <script src="assets/js/app.js?v=v1.141.0_badge2"></script>
+    <script src="assets/js/app.js?v=v1.142.0_notify1"></script>
     <script src="assets/js/unify-helpers.js?v=v1.141.0_badge1"></script>
     <!-- S4（前端统一 贴图粘贴扩展方案 20260801_v0.1）：Ctrl+V 贴图共享层接入。文件本体未改，沿用
          S3 抽取时的缓存串；改共享层本体时须同步 bump 这里 + 所有引用页。 -->
@@ -321,6 +321,101 @@
             if (typeof escapeHtml === 'function') return escapeHtml(s);
             return s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
         }
+
+        // ===== 通知失败原因文案（通知统一 N2b·2026-08-09）=====
+        //   ⚠️ 唯一文案源＝**已冻结的错误码映射表** `docs/local/前端统一/通知统一_错误码映射_20260809_v1.0.md`
+        //   （§1 共享码 / §3 Issue_Lite 专属码 / §7 reason 枚举 / §8 中文字面量 / §9.3 HTTP 兜底）。
+        //   **禁止自创文案**；跨页同码逐字一致（与 Data_Correction / Issue_Tracker / Data_Collab 四页对齐）。
+        //   〔映射表 §9.6 登记〕本页 `issue_lite` 表**无 `*_notify_error` 列**（`persistIssueLiteNotifyResult`
+        //   server.js:13369 失败分支只写 status/at/key/read_at）⇒ **行内失败句取不到原因**（裁定⑩ 显式闭口），
+        //   映射表在本页只有两个消费点：① 发送失败 toast（矩阵 L8·A' 保留）② 查已读结果框「查询失败」态（P12）。
+        const IL_REASON_TEXT = Object.freeze({
+            // classifyError 八值（§7.1）——`other:{errcode}` 是动态拼接形态，走前缀匹配不入表
+            network: '网络异常', server_5xx: '钉钉服务异常', invalid_response: '钉钉返回异常',
+            token_expired: '钉钉凭证已过期', user_invalid: '收件人钉钉账号失效或已离职',
+            no_scope: '钉钉接口权限不足', rate_limit: '钉钉发送被限流',
+            // 各链路自产（§7.2 中标注「IL」的行）
+            no_config: '钉钉配置未填写', no_phone: '收件人未填手机号', message_key_missing: '缺少消息标识',
+            requester_phone_empty: '业务方未填手机号', requester_invalid: '业务方手机号查不到企业钉钉号',
+            other: '未知原因',
+        });
+        // 已知中文字面量（§8·第 3 级专用；与 reason 表分表——键形态不同源，混用会让英文枚举参与中文匹配）
+        //   ⚠️ 只收**逐字全等**能命中的静态串（§0.2/M4 硬约束：禁模糊/包含/正则匹配）。
+        //   `${name} 未绑定手机号，无法推送钉钉`（server.js:11945）与 `业务方钉钉号查询失败：${hint}`（12122）
+        //   是拼接串，全等永远匹配不到 ⇒ **不入表**，由 HTTP 502 档「钉钉服务异常」兜住。
+        //   这两条的 `reason` 也接不住——`persistIssueLiteNotifyResult` 只 spread `result.body`，
+        //   `result.reason` 被丢在外面（server.js:13375 `res.status(502).json({success:false, ...result.body})`）⇒ 第 2 级同样落空。
+        //   **已登记：映射表 §10.2 第 4 条**（维持现状·解冻条件＝生产反馈粗，且优先改后端把 reason 进响应体，
+        //   而不是放宽字面量匹配——放宽正是 M4 明令要禁的"形似中文就当已知"）。代码与映射表同源，勿单方补。
+        const IL_LITERAL_TEXT = Object.freeze({
+            '钉钉配置未填写，请管理员先到系统配置填写凭证': '钉钉配置未填写',
+            '业务方手机号查不到钉钉号（非企业成员/未绑定/离职），请线下转达': '业务方手机号查不到企业钉钉号',
+            '钉钉已发送但未返回消息标识，无法跟踪已读，请重试': '缺少消息标识',
+            // §8 该行标「按 reason 取（§7）」，但 `sendIssueMarkdown` 的 bad_args 分支返回的 reason 是拼接中文
+            //   （utils/issue-notify.js:172 `缺少参数：…`）落不进 reason 档 ⇒ 本档是它的真实兜底位，非死条目
+            '钉钉推送失败': '钉钉发送失败',
+        });
+        // 结构化 code（§1 共享码中标 IL 的 6 个 + §3 IL 专属码）
+        const IL_ERR_TEXT = Object.freeze({
+            REQUESTER_PHONE_EMPTY: '业务方未填手机号', NO_DINGTALK_CONFIG: '钉钉配置未填写',
+            RECIPIENT_CHANGED_DURING_SEND: '发送期间收件人手机号已变更，状态未记录',
+            INVALID_RECIPIENT: '收件人参数无效', NOT_NOTIFIED: '尚未成功通知', NO_MESSAGE_KEY: '缺少消息标识',
+            VOIDED_LOCKED: '该单已作废', ARCHIVED_LOCKED: '该单已归档',
+            NO_NOTIFY_TARGET: '未指定通知对象', TARGET_UNAVAILABLE: '通知对象账号不可用',
+            NOT_COMPLETED: '该单尚未完成', NOT_ACTUALLY_COMPLETED: '该单未走完成流程',
+            NO_ESTIMATE: '尚未回填预计完成时间',
+            NOTIFY_SENT_STATE_NOT_SAVED: '已发送但状态未记录（请勿重发）',
+            NOTIFY_TARGET_INVALID: '通知对象无效', NOTIFY_TARGET_NOT_ALLOWED: '该对象不在可通知名单',
+            TARGET_ALREADY_SET: '通知对象已设置，不可修改', SELF_NOTIFY_TARGET: '不能把自己设为通知对象',
+            STATE_CHANGED: '状态已并发变化，请刷新后重试',
+        });
+        const IL_HTTP_ERR_TEXT = Object.freeze({ 401: '登录已过期或无权限', 403: '登录已过期或无权限', 404: '单据不存在', 409: '状态已变化，请刷新后重试', 500: '未知原因', 502: '钉钉服务异常', 504: '发送超时，结果未知' });
+        // 查表用自有属性判定（§0.2 实现建议原文：`Object.prototype.hasOwnProperty.call(MAP, …)`）。
+        //   裸 `MAP[k]` 会让 `constructor`/`toString` 这类原型链键"命中"并返回函数对象，
+        //   后端只要吐出这几个词就能把函数体渲染进 UI；再加 typeof 断言，非字符串一律当未命中。
+        function ilMapText(map, key) {
+            if (key == null) return '';
+            const k = String(key);
+            if (!Object.prototype.hasOwnProperty.call(map, k)) return '';
+            const v = map[k];
+            return (typeof v === 'string') ? v : '';
+        }
+        // 五级回退（映射表 §0.2）：code → reason → 已知中文字面量 → HTTP status → 未知原因
+        //   · 本页**无 `NOTIFY_PARTIAL_FAILURE`**（§1 该码只在 DC/DCorr 产出）⇒ **不搬 `failed_step` 子映射**，
+        //     搬了就是本页凭空多一条死分支（同 P13「超窗态不补」的口径）。
+        //   · HTTP 500 且无 code/reason 时**跳过字面量档**：那档的 `error` 是 `err.message` 原始异常文本
+        //     （server.js:13397/13476/13497/13562 四处端点 catch 的 `res.status(500).json({error: err.message})`），
+        //     含堆栈/SQL/路径风险 ⇒ 一律「未知原因」。
+        function ilErrText(res, data) {
+            const d = data || {};
+            const byCode = ilMapText(IL_ERR_TEXT, d.code);
+            if (byCode) return byCode;
+            const byReason = ilMapText(IL_REASON_TEXT, d.reason);
+            if (byReason) return byReason;
+            if (d.reason && String(d.reason).startsWith('other:')) return '未知原因';
+            const status = res ? res.status : 0;
+            const literal = String(d.error || d.message || '').trim();
+            if (status !== 500 && literal) { const byLiteral = ilMapText(IL_LITERAL_TEXT, literal); if (byLiteral) return byLiteral; }
+            return ilMapText(IL_HTTP_ERR_TEXT, status) || '未知原因';
+        }
+        // 时间格式归一（矩阵 §4.3 标注的真缺陷）：`*notify_at` 是 ISO 串（server.js:13381/13461/13483
+        //   `new Date().toISOString()`），`*notify_read_at` 是 `toLocaleString('zh-CN')`（server.js:13551）
+        //   ⇒ 同一行状态句会并排渲染 `2026-08-09T03:12:45.123Z` 与 `2026/8/9 11:12:45` 两种格式。
+        //   统一归一到 `YYYY-MM-DD HH:mm:ss`，范式照搬 Data_Correction `formatFullTime`（:3133）：
+        //   无时区标记的 `YYYY-MM-DD HH:mm(:ss)` 原样保留**不做时区平移**，其余交 Date 解析取本地时刻，
+        //   解析不出的脏值原样兜回去（不炸、不吞）。
+        function ilFmtTime(v) {
+            if (!v) return '—';
+            const s = String(v).trim();
+            const m = s.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?$/);
+            if (m && !/[zZ]|[+\-]\d{2}:?\d{2}$/.test(s)) { const [, Y, M, D, h, mi, sec] = m; return `${Y}-${M}-${D} ${h}:${mi}:${sec || '00'}`; }
+            const d = new Date(s);
+            if (isNaN(d.getTime())) return s;
+            const p = n => String(n).padStart(2, '0');
+            return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+        }
+        // 通知行标签单源：`buildNotifyRow` 的行标签与 R3 兜底 toast 的 `{行标签}` 同取一处，防两处措辞漂移
+        const IL_NOTIFY_LABELS = Object.freeze({ peer: '通知对方', estimate: '通知业务方·预计', requester: '通知业务方·完成' });
 
         const IL_SORT_TYPES = { id: 'number', title: 'string', requester_dept: 'string', requester_name: 'string', oa_number: 'string', status: 'statusOrder', created_at: 'date', req_date: 'date', estimated_at: 'date', completed_at: 'date' };
         const ilSorter = UnifyHelpers.attachTableSort({
@@ -463,21 +558,21 @@
                     // 通知对象若就是当前登录人 → 不通知自己（隐藏发送/重发/查已读，仅信息展示）
                     const selfTarget = typeof currentUser !== 'undefined' && currentUser && Number(currentUser.id) === Number(it.notify_target_id);
                     notifyTypes.push({
-                        key: 'peer', label: '通知对方', recipient: userName(it.notify_target_id),
+                        key: 'peer', label: IL_NOTIFY_LABELS.peer, recipient: userName(it.notify_target_id),
                         status: it.notify_status, notifiedAt: it.notify_at, readAt: it.notify_read_at,
                         sendable: (st !== '已归档') && !selfTarget && !isVoided, canSend: canDo && !selfTarget && !isVoided, byPhone: false, noPhone: false, needDone: false, selfTarget,
                         voidedLock: isVoided, // 末次审 M-4：锁定文案优先，不显示「可重试/需先XX」类误导提示
                     });
                 }
                 notifyTypes.push({
-                    key: 'estimate', label: '通知业务方·预计', recipient: it.requester_name || '业务方',
+                    key: 'estimate', label: IL_NOTIFY_LABELS.estimate, recipient: it.requester_name || '业务方',
                     status: it.est_notify_status, notifiedAt: it.est_notify_at, readAt: it.est_notify_read_at,
                     sendable: (!!it.estimated_at && st !== '已归档' && !isVoided), canSend: canDo && !isVoided,
                     byPhone: true, noPhone: !String(it.requester_phone || '').trim(), needDone: false, needEst: true,
                     voidedLock: isVoided,
                 });
                 notifyTypes.push({
-                    key: 'requester', label: '通知业务方·完成', recipient: it.requester_name || '业务方',
+                    key: 'requester', label: IL_NOTIFY_LABELS.requester, recipient: it.requester_name || '业务方',
                     status: it.req_notify_status, notifiedAt: it.req_notify_at, readAt: it.req_notify_read_at,
                     sendable: ((st === '已完成' || st === '已归档') && !!it.completed_at && !isVoided), canSend: canDo && !isVoided,
                     byPhone: true, noPhone: !String(it.requester_phone || '').trim(), needDone: true,
@@ -488,7 +583,8 @@
                 if (!it.notify_target_id) {
                     const canPickTarget = canDo && !isVoided && st !== '已归档'
                         && (isAdminRole() || (typeof currentUser !== 'undefined' && currentUser && Number(currentUser.id) === Number(it.created_by)));
-                    notifyHtml = `<div class="u-notify-row"><span class="u-nr-label">通知对方</span><span class="u-nr-body"><span class="il-muted">建单时未选择通知对象</span>${canPickTarget ? `<button class="u-btn-secondary u-nb-btn" onclick="openTargetModal(${sid})">选择通知对象</button>` : ''}</span></div>` + notifyHtml;
+                    // 〔P5〕通知区 `.il-muted` 4 处之一 → `u-nt-muted` 槽（`.il-muted` 是全页共用类 20+ 处，只换通知区枚举到的这几处，不全页收编）
+                    notifyHtml = `<div class="u-notify-row"><span class="u-nr-label">${IL_NOTIFY_LABELS.peer}</span><span class="u-nr-body"><span class="u-nt-muted">建单时未选择通知对象</span>${canPickTarget ? `<button class="u-btn-secondary u-nb-btn" onclick="openTargetModal(${sid})">选择通知对象</button>` : ''}</span></div>` + notifyHtml;
                 }
 
                 document.getElementById('drawerBody').innerHTML = `
@@ -547,8 +643,10 @@
             try {
                 const res = await authFetch('/api/issue-lite/' + id + '/status', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status }) });
                 const j = await res.json().catch(() => ({}));
-                if (res.ok) await refreshDrawer(id); else alert(j.error || '操作失败');
-            } catch (e) { alert('操作失败'); } finally { busy = false; }
+                // 〔矩阵 L1·C 换 toast + J8〕失败分支不 refreshDrawer（行内零变化）⇒ toast 是唯一通道；
+                //   原因走冻结映射表，不再透传后端 `j.error`
+                if (res.ok) await refreshDrawer(id); else showToast(`操作失败（${ilErrText(res, j)}）`, 'error');
+            } catch (e) { showToast('操作失败', 'error'); } finally { busy = false; }   // 〔矩阵 L2·C 换 toast〕
         }
         // 回填预计完成时间（待处理→自动进处理中·取代旧"开始处理"）
         function openEstimateModal(id, estimatedAt) {
@@ -561,15 +659,17 @@
             if (busy) return;
             const id = Number(document.getElementById('estimateIssueId').value);
             const el = document.getElementById('ilEtaInput'); const v = el ? el.value : '';
-            if (!Number.isSafeInteger(id) || id <= 0) { alert('单据编号无效，请关闭弹窗后重试'); return; }
-            if (!v) { alert('请选择预计完成时间'); return; }
+            // 〔矩阵 L3/L4·C 换 toast〕`estimateModal` 无 `u-hint id=*Err` 位（四个兄弟弹窗都有，唯它没有）⇒ 无行可挂，toast 是唯一通道
+            if (!Number.isSafeInteger(id) || id <= 0) { showToast('单据编号无效，请关闭弹窗后重试', 'error'); return; }
+            if (!v) { showToast('请选择预计完成时间', 'error'); return; }
             if (!confirm('保存预计完成时间？（待处理单将自动进入"处理中"）')) return;
             busy = true; const btn = document.getElementById('btnSubmitEstimate'); btn.disabled = true;
             try {
                 const res = await authFetch('/api/issue-lite/' + id + '/estimate', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ estimated_at: v }) });
                 const j = await res.json().catch(() => ({}));
-                if (res.ok) { closeEstimateModal(); await refreshDrawer(id); } else alert(j.error || '保存失败');
-            } catch (e) { alert('保存失败'); } finally { busy = false; btn.disabled = false; }
+                // 〔矩阵 L5·C 换 toast + J8〕原因走冻结映射表，不透传后端 `j.error`
+                if (res.ok) { closeEstimateModal(); await refreshDrawer(id); } else showToast(`保存失败（${ilErrText(res, j)}）`, 'error');
+            } catch (e) { showToast('保存失败', 'error'); } finally { busy = false; btn.disabled = false; }   // 〔矩阵 L6·C 换 toast〕
         }
         function openCompleteModal(id) { completingId = id; document.getElementById('cNote').value = ''; document.getElementById('cBoard').value = ''; document.getElementById('completeErr').style.display = 'none'; document.getElementById('completeModal').classList.add('open'); }
         function closeCompleteModal() { document.getElementById('completeModal').classList.remove('open'); }
@@ -639,36 +739,47 @@
         }
 
         // ===== 通知区（照数据修正 buildNotifyRow 范式：人名 + 发送/查已读/重发 + 独立已读结果框）=====
+        // 〔通知统一 N2b·J24 守卫圈内函数〕本函数与 notifyRead 内**禁新增内联色值**：状态文本一律挂
+        //   `u-nt-*` 7 槽（components.css:241-247）。逐处对应矩阵 §4.4：P1/P2/P3/P4/P5 换槽、P7 按钮文案、
+        //   P9 语序、§4.3 时间归一。
         function buildNotifyRow(t, sid) {
             const rname = esc(t.recipient);
             // 通知对象=当前登录人本人：不通知自己——仅信息展示，无任何按钮
             if (t.selfTarget) {
                 const l = (t.status === 'sent')
-                    ? `<span style="color:#059669;">✅ 通知对象是你本人${t.notifiedAt ? '（已于 ' + esc(t.notifiedAt) + '）' : ''}</span>`
-                    : `<span class="il-muted">通知对象是你本人，无需通知</span>`;
+                    ? `<span class="u-nt-ok">✅ 通知对象是你本人${t.notifiedAt ? '（已于 ' + esc(ilFmtTime(t.notifiedAt)) + '）' : ''}</span>`
+                    : `<span class="u-nt-muted">通知对象是你本人，无需通知</span>`;
                 return `<div class="u-notify-row"><span class="u-nr-label">${esc(t.label)}</span><span class="u-nr-body">${l}</span></div>`;
             }
             const sendBtn = (force, text) => (t.canSend && t.sendable) ? `<button class="u-btn-secondary u-nb-btn" onclick="notifySend(${sid}, '${t.key}', ${force})">${text}</button>` : '';
             const readBtn = t.canSend ? `<button class="u-btn-secondary u-nb-btn" onclick="notifyRead(${sid}, '${t.key}')">查询已读</button>` : '';
             let line = '', btns = '';
             if (t.byPhone && t.noPhone && t.status !== 'sent') {
-                line = `<span style="color:#b45309;">— 业务方未填手机号，无法通知</span>`;
+                line = `<span class="u-nt-warn">— 业务方未填手机号，无法通知</span>`;
             } else if (t.status === 'sent') {
                 if (t.readAt) {
-                    line = `<span style="color:#059669;">📖 ${rname} 已读${t.notifiedAt ? ' · 通知于 ' + esc(t.notifiedAt) : ''} · 已读于 ${esc(t.readAt)}</span>`;
+                    // 〔0b-3〕行标签只有角色（通知对方/通知业务方·预计/通知业务方·完成）不含人名 ⇒ **对象槽保留**
+                    line = `<span class="u-nt-ok">📖 ${rname} 已读${t.notifiedAt ? ' · 通知于 ' + esc(ilFmtTime(t.notifiedAt)) : ''} · 已读于 ${esc(ilFmtTime(t.readAt))}</span>`;
                     btns = sendBtn(true, '重新通知');
                 } else {
-                    line = `<span style="color:#059669;">✅ 已通知 ${rname}${t.notifiedAt ? ' · ' + esc(t.notifiedAt) : ''}</span>`;
+                    // 〔P9〕语序统一 DC 版：`✅ 已通知 {人} · {时间}` → `✅ 已于 {时间} 通知 {人}`。
+                    //   `notifiedAt` 缺失（脏数据）时退回无时刻句，不编造「—」时刻（0b-4 降级态沿现状措辞）
+                    line = t.notifiedAt
+                        ? `<span class="u-nt-ok">✅ 已于 ${esc(ilFmtTime(t.notifiedAt))} 通知 ${rname}</span>`
+                        : `<span class="u-nt-ok">✅ 已通知 ${rname}</span>`;
                     btns = readBtn + sendBtn(true, '重新通知');
                 }
             } else if (t.status === 'failed') {
                 // 末次审 M-4：已作废单锁定文案优先——不显示「可重试/需先XX」类暗示仍可写入的提示
-                line = t.voidedLock ? `<span class="il-muted">⚠️ 曾通知失败 · 已作废，不可发送</span>` : `<span style="color:#dc2626;">⚠️ 通知失败，可重试</span>`;
-                btns = sendBtn(true, '重新通知');
+                // 〔裁定⑩〕失败句**不补 `（{原因}）`**：issue_lite 表无 `*_notify_error` 列（server.js:13369
+                //   失败分支只写 status/at/key/read_at）⇒ 行内取不到原因，原因由保留的失败 toast 承担（矩阵 L8）。
+                //   这是显式闭口不是遗漏——补了只能显「未知原因」，比不显更差。
+                line = t.voidedLock ? `<span class="u-nt-muted">⚠️ 曾通知失败 · 已作废，不可发送</span>` : `<span class="u-nt-fail">⚠️ 通知失败，可重试</span>`;
+                btns = sendBtn(true, '重试');   // 〔P7〕failed 后按钮＝「重试」，与失败句「可重试」呼应
             } else {
-                if (t.sendable) { line = `<span style="color:#6b7280;">⏳ 尚未通知 ${rname}</span>`; btns = sendBtn(false, '发送通知'); }
-                else if (t.voidedLock) { line = `<span class="il-muted">— 已作废，不可发送</span>`; }
-                else { line = `<span style="color:#9ca3af;">— 未发送${t.needDone ? '（需先标记完成）' : t.needEst ? '（需先回填预计完成时间）' : ''}</span>`; }
+                if (t.sendable) { line = `<span class="u-nt-wait">⏳ 尚未通知 ${rname}</span>`; btns = sendBtn(false, '发送通知'); }
+                else if (t.voidedLock) { line = `<span class="u-nt-muted">— 已作废，不可发送</span>`; }
+                else { line = `<span class="u-nt-muted">— 未发送${t.needDone ? '（需先标记完成）' : t.needEst ? '（需先回填预计完成时间）' : ''}</span>`; }
             }
             return `<div class="u-notify-row"><span class="u-nr-label">${esc(t.label)}</span><span class="u-nr-body">${line}${btns}<span class="u-nr-read-result" id="ilReadBox_${t.key}"></span></span></div>`;
         }
@@ -676,41 +787,159 @@
             if (busy) return;
             const url = key === 'peer' ? `/api/issue-lite/${id}/notify` : key === 'estimate' ? `/api/issue-lite/${id}/notify-estimate` : `/api/issue-lite/${id}/notify-requester`;
             const who = key === 'peer' ? '对方' : key === 'estimate' ? '业务方（预计完成时间）' : '业务方（完成）';
-            if (!confirm(`确认${force ? '重新' : ''}通知${who}（钉钉）？`)) return;
+            // 〔D2 + 矩阵 §4.2〕confirm 只统一措辞不新增：首发沿用现状短句；**重发升长句**——后端
+            //   `persistIssueLiteNotifyResult`（server.js:13348）三通道共用 `{rc}=NULL` 清已读，
+            //   「旧已读记录清除」这句承诺经核实成立（J4 判定：有重置→长句）。
+            //   登记：本页 `force` **不进请求体**（下方 body 恒 '{}'），它只是 confirm 文案开关，
+            //   首发与重发打的是同一个端点——改这里不会改变后端行为。
+            if (!confirm(force
+                ? `确认重新通知${who}？将以本次为最新一次通知，旧已读记录清除。`
+                : `确认通知${who}（钉钉）？`)) return;
             busy = true;
+            // 〔J23〕发送中态：本页原先只有 busy 布尔，按钮既不 disabled 也不改文案，用户无任何"正在发"的反馈。
+            //   选择器带完整右界符 `)`：`notifySend(5, 'peer', true)` 是渲染串全文（buildNotifyRow sendBtn），
+            //   不写无右界前缀（`notifySend(5` 会把 `notifySend(53…` 一并匹中）。
+            const btns = Array.from(document.querySelectorAll(`.u-nb-btn[onclick^="notifySend(${id}, '${key}', ${!!force})"]`));
+            btns.forEach(b => { b.dataset.originalText = b.textContent; b.disabled = true; b.textContent = '发送中…'; });
+            const restoreBtns = () => btns.forEach(b => {
+                if (!b.isConnected) return;   // 刷新成功后按钮已被重渲染，无需（也不能）还原
+                b.disabled = false;
+                if (b.dataset.originalText) { b.textContent = b.dataset.originalText; delete b.dataset.originalText; }
+            });
             try {
-                const res = await authFetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
-                const j = await res.json().catch(() => ({}));
-                if (res.ok && j.success) { alert(j.partial_success ? ('⚠️ ' + (j.warning || '已发送，请勿重复')) : '已发送'); await refreshDrawer(id); }
-                else {
-                    // 六审 M-1：消费后端 message——含 RECIPIENT_CHANGED_DURING_SEND 的「旧号已发送/请核实新号重发」
-                    //   人工处置信息（对齐数据修正页 error||message 口径）；该 code 下通知态已被编辑重置，刷新抽屉展示真实态
-                    alert((j && (j.error || j.message)) || '通知失败');
-                    if (j && j.code === 'RECIPIENT_CHANGED_DURING_SEND') await refreshDrawer(id);
+                let sentOk = false, reqDone = false;
+                try {
+                    const res = await authFetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+                    const j = await res.json().catch(() => ({}));
+                    // 〔映射表 §0.6〕本端点两个 HTTP 200 响应的 success 语义**相反**：
+                    //   · NOTIFY_SENT_STATE_NOT_SAVED → 200 + success:**true**（已发出但没落库，要拦重发）
+                    //   · RECIPIENT_CHANGED_DURING_SEND → 200 + success:**false**（已发出但状态保持未发送）
+                    //   ⇒ 按 res.ok 或 success 判成败都会误判，**必须先读 code**。
+                    const code = j && j.code;
+                    if (code === 'NOTIFY_SENT_STATE_NOT_SAVED') {
+                        // 〔矩阵 L7b·A' 留〕后端没写成 sent，刷新后行内仍是「⏳ 尚未通知」＝行内零变化 ⇒ toast 是唯一通道。
+                        //   文案读 `warning` 字段（§0.6 明列的读法，不是 error/message），级别 warning。
+                        showToast('⚠️ ' + (j.warning || '已发送，请勿重复'), 'warning');
+                    } else if (code === 'RECIPIENT_CHANGED_DURING_SEND') {
+                        // 〔矩阵 L8·J8〕原实现在这里透传后端 `message`（含「请核实新手机号后重新通知」的人工处置语），
+                        //   现按 J8 收编走冻结映射表——判据从"后端文案长什么样"换成"code 是什么"。
+                        showToast(`通知失败（${ilErrText(res, j)}）`, 'error');
+                    } else if (res.ok && j && j.success === true) {
+                        // 〔矩阵 L7a·A 删〕成功 toast 删除：刷新后行内变「✅ 已于 X 通知 Y」+ 按钮变「重新通知」+ 出「查询已读」，
+                        //   同抽屉同区可见 ⇒ 行内即反馈。R3 兜底见下方独立刷新段（删除前提已落地）。
+                        sentOk = true;
+                    } else {
+                        // 〔矩阵 L8·A' 留·记原因〕行内失败句取不到原因（本页无 `*_notify_error` 列·裁定⑩），
+                        //   删 toast 就等于把原因整个丢掉 ⇒ 保留，原因走冻结映射表五级回退。
+                        showToast(`通知失败（${ilErrText(res, j)}）`, 'error');
+                    }
+                    reqDone = true;
+                } catch (e) {
+                    // 〔矩阵 L9·C 留〕本 catch 现在只覆盖 fetch/解析失败（真·没发出去）——刷新段已移出去
+                    showToast('通知失败', 'error');
                 }
-            } catch (e) { alert('通知失败'); } finally { busy = false; }
+                // 〔R3·独立刷新段·0b-7①〕刷新与发送判定拆开：**所有已完成的请求都刷新**（原来只有
+                //   RECIPIENT_CHANGED_DURING_SEND 一条分支刷新，后端已落 `failed` 的行内失败句用户当场看不见＝静默）。
+                //   ⚠️〔J11〕`openDrawer` 末行 `catch(e){console.error(e)}` **自吞不外抛** ⇒
+                //   `try{await refreshDrawer()}catch{}` 永远捕不到，那样写出来的是一条能通过所有自查的死代码。
+                //   判定改用 **DOM 哨兵**：刷新成功 ⇒ drawerBody 整体重渲染、刚抓到的按钮节点被替换掉
+                //   （isConnected=false）；节点还挂在文档上 ⇒ 这次刷新没生效。
+                if (reqDone) { try { await refreshDrawer(id); } catch (e) { /* openDrawer/loadList 自吞，此处只兜意外 */ } }
+                const staleDom = sentOk && btns.length > 0 && btns.every(b => b.isConnected);
+                restoreBtns();
+                if (staleDom) showToast(`${IL_NOTIFY_LABELS[key] || '通知'}：已发送，详情刷新失败，可重开抽屉查看`, 'error');
+            } finally { busy = false; }
         }
+        // 〔通知统一 N2b·J24 守卫圈内函数〕查已读结果框六态（方案 §3.3）：结果框＝查询动作的即时回执，
+        //   行状态文本＝已读固化后的权威显示。本页此前是 `textContent` 纯文本零色值，现改 `innerHTML` + 槽类
+        //   ⇒ 所有动态字段（read_at / 映射后的原因）**必须过 esc()**，这是本次新增的 XSS 面。
         async function notifyRead(id, key) {
             const recipient = key === 'peer' ? 'peer' : key === 'estimate' ? 'estimate' : 'requester';
-            const box = document.getElementById('ilReadBox_' + key);
-            if (box) box.textContent = '查询中…';
+            const boxId = 'ilReadBox_' + key;
+            const box = document.getElementById(boxId);
+            if (box) box.innerHTML = '<span class="u-nt-idle">查询中…</span>';
             try {
                 const res = await authFetch(`/api/issue-lite/${id}/notify-read-status?recipient=${recipient}`);
                 const j = await res.json().catch(() => ({}));
                 if (Number(currentDrawerId) !== Number(id)) return; // refine-M-1(codex 审)：抽屉已切走·不写旧结果到当前框
-                if (box) box.textContent = res.ok ? (j.read ? ('✅ 已读' + (j.read_at ? ' ' + j.read_at : '')) : '⏳ 尚未读') : ('查询失败：' + ((j && j.error) || ''));
-            } catch (e) { if (Number(currentDrawerId) === Number(id) && box) box.textContent = '查询失败'; }
+                if (res.ok) {
+                    if (j.read) {
+                        // §3.3「已读」态 +〔0b-7②〕固化链路：后端 server.js:13553 已 CAS 写 `*_notify_read_at`，
+                        //   刷新抽屉让行内渲染双时刻句、查已读按钮随条件失效而隐藏，结果框因 `:empty` 收起。
+                        //   先把结论写进框再刷新——哨兵靠"框里还留着我们写的已读文案"判定刷新是否生效。
+                        const readLine = `📖 已读 · 于 ${esc(ilFmtTime(j.read_at))}`;
+                        if (box) box.innerHTML = `<span class="u-nt-ok">${readLine}</span>`;
+                        try { await refreshDrawer(id); } catch (e) { /* openDrawer 自吞，此处只兜意外 */ }
+                        // 哨兵：刷新成功 ⇒ 结果框被重渲染成空框（查已读按钮也已隐藏）；仍带「已读」字样 ⇒ 刷新没生效，
+                        //   保底句留在框里，保证这次查询结果不丢（Data_Collab :5301 / DCorr :2952 同款范式）。
+                        const boxAfter = document.getElementById(boxId);
+                        if (boxAfter && boxAfter.textContent.indexOf('已读') >= 0) {
+                            boxAfter.innerHTML = `<span class="u-nt-ok">${readLine}（详情刷新失败，可重开抽屉）</span>`;
+                        }
+                        return;
+                    }
+                    if (!box) return;
+                    if (j.superseded) {
+                        // 〔矩阵 P21·N2b-fix 补行〕**可达分支**（区别于 P13 的死分支超窗态）：查已读期间该通道被
+                        //   重发换了 message_key，后端 CAS 固化落空（server.js:13556 返 200 `{superseded:true}`）
+                        //   ⇒ 这次查询的是**上一轮**的消息，结论不能记到当前轮次头上。
+                        //   文案取冻结映射表 §3 原文；A' 类（结果框是唯一通道，行内不会因这次查询而变）。
+                        //   槽选 **muted 不选 idle**：idle 的语义是「查询中占位」（还在转），此处查询已结束、
+                        //   只是结果作废 —— 是「留痕缺省/失效」语义，与 muted（借 voided-fg）同族。
+                        //   `—` 前缀是 muted 档的既有形态约定（§3.3「超窗口未读」态 `— 未读（…）`同款），非新增措辞。
+                        box.innerHTML = '<span class="u-nt-muted">— 该单已进入新一轮，本次结果未计入</span>';
+                    } else if (j.read_status === 'recipient_unresolved') {
+                        // §3.3「无法查询」态。〔J7·P14〕本分支是**真缺陷修复**：后端 server.js:13540 真会返
+                        //   HTTP 200 `{read:false, read_status:'recipient_unresolved'}`，而原实现只判 `j.read`
+                        //   ⇒ 收件人根本没解析出钉钉号时误显「尚未读」，把"查不了"说成了"对方没看"。
+                        box.innerHTML = '<span class="u-nt-warn">⚠️ 收件人未解析，无法查询已读</span>';
+                    } else {
+                        // §3.3「窗口内未读」态：措辞补一个「取」字对齐五页（本页现状无待收编 emoji，
+                        //   §3.2 收编清单里的那几个本页零命中——此处只统一措辞，不做符号替换）。
+                        // 〔J7·P13〕**超窗态不补**：本页后端（server.js:13503 起）没有 24h 窗口判定，
+                        //   `unread_expired` 全站唯一产出点是 Data_Collab 的查已读端点 ⇒ 在本页补就是造第三条死分支。
+                        box.innerHTML = '<span class="u-nt-warn">⏳ 尚未读取</span>';
+                    }
+                } else {
+                    // §3.3「查询失败」态：原实现 `查询失败：{j.error}` 是后端原文透传，现走冻结映射表（J8·P12）
+                    if (box) box.innerHTML = `<span class="u-nt-fail">⚠️ 查询失败（${esc(ilErrText(res, j))}）</span>`;
+                }
+            } catch (e) { if (Number(currentDrawerId) === Number(id) && box) box.innerHTML = '<span class="u-nt-fail">⚠️ 查询失败（网络异常）</span>'; }
         }
 
         // ===== 拉群 =====
         async function createChat(id) {
             if (busy) return; if (!confirm('拉起钉钉讨论群？成员=业务方+示例开发C+示例用户A（示例用户A为群主），会真实建群。')) return; busy = true;
+            // 〔J16〕拉群的**语义文案与按钮不动**（§4 未纳入拉群），本次只按 D2 把反馈通道从 alert 分拣掉。
+            //   哨兵取本按钮节点：建群成功刷新后讨论群行改渲染「💬 已建群「X」」、本按钮整个消失
+            //   ⇒ 节点被替换（isConnected=false）；节点还在＝刷新没生效（openDrawer 自吞异常，捕不到，见 J11）。
+            const btns = Array.from(document.querySelectorAll(`.u-nb-btn[onclick^="createChat(${id})"]`));
             try {
-                const res = await authFetch('/api/issue-lite/' + id + '/create-chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
-                const j = await res.json().catch(() => ({}));
-                if (res.ok) { alert(j.idempotent ? (j.message || '该单已有讨论群') : ('讨论群已建：' + (j.chat_name || ''))); await refreshDrawer(id); }
-                else alert((j && j.error) || '拉群失败');
-            } catch (e) { alert('拉群失败'); } finally { busy = false; }
+                let createdOk = false, reqDone = false;
+                try {
+                    const res = await authFetch('/api/issue-lite/' + id + '/create-chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+                    const j = await res.json().catch(() => ({}));
+                    if (res.ok) {
+                        // 〔矩阵 L10b·A' 留〕幂等分支：行会刷但语义是"本来就有"，行内变化不对应本次动作 ⇒ toast 保留（info）
+                        if (j.idempotent) showToast(j.message || '该单已有讨论群', 'info');
+                        // 〔矩阵 L10a·A 删〕非幂等成功：讨论群行变「💬 已建群「X」」，同抽屉可见 ⇒ 行内即反馈
+                        else createdOk = true;
+                    // 〔矩阵 L11·C 留 + **裁定⑰·500 来源过滤**（N5-fix·裁定⑬ 同族延伸）〕
+                    //   本行按裁定 3③ **维持不接冻结映射表**（拉群不是通知语义，后端 error 是面向用户的
+                    //   结构化中文，接表会把「群成员不足 3 人」这类精确提示压成「未知原因」＝信息倒退）。
+                    //   但 **HTTP 500 这一档必须过滤**：那时的 `j.error` 是 catch 里的 `err.message`
+                    //   原始异常文本（可能含堆栈/SQL/路径），与裁定⑬ 在白名单路径上堵的是同一个口子。
+                    //   ⇒ 500 退固定文案；非 500 的结构化中文照旧原样展示。
+                    } else showToast((res.status !== 500 && j && j.error) || '拉群失败', 'error');
+                    reqDone = true;
+                } catch (e) { showToast('拉群失败', 'error'); }                 // 〔矩阵 L12·C 留〕
+                if (reqDone) { try { await refreshDrawer(id); } catch (e) { /* openDrawer/loadList 自吞，此处只兜意外 */ } }
+                const staleDom = createdOk && btns.length > 0 && btns.every(b => b.isConnected);
+                // 〔J12·抽屉版兜底〕**登记一处措辞偏差**：模板原文是「{行标签}：已发送，详情刷新失败，可重开抽屉查看」，
+                //   本处动词改「已建群」——拉群语境下说"已发送"是**错误信息**（没有任何东西被发出）。
+                //   J12「不得临场判断」管的是选哪个版本（抽屉/弹层/页面），此处仍是抽屉版，只把动词对齐真实动作。
+                if (staleDom) showToast('钉钉群：已建群，详情刷新失败，可重开抽屉查看', 'error');
+            } finally { busy = false; }
         }
 
         // ===== 附件 =====
@@ -858,9 +1087,18 @@
         //     ⚠️ 必要性不止省一次请求：loadAttachments 抛错会被本函数 catch 吞掉并 return false，
         //     把**已上传成功**的文件计入失败 ⇒ 用户重复补传产生重复附件。
         //   • 返回值语义：表示上传 POST 是否成功，**不表示列表刷新是否成功**。
+        //   • silent —〔通知统一 0b-8 终裁·矩阵 L13b/L14b〕**只抑制单张失败 toast，不抑制失败事实**：
+        //     两步提交（建单/编辑后逐张传）里每张失败都弹一条 toast，会把循环外那条聚合 warning
+        //     （`{N}/{M}` 计数）淹掉——R1 规定聚合结果是这条链路的**独家反馈**，散条会稀释它。
+        //     M6 四条实现约束（缺一不可，逐条对应下方代码）：
+        //       ① silent 失败仍**统一累加失败计数**——本函数照常 `return false`，调用方 `failNames.push` 不变（只吞提示不吞事实）
+        //       ② 循环结束**仅发一条**聚合 warning（两个调用方＝submitCreate 的编辑分支与新建分支，现状形态不动）
+        //       ③ **不得与单张失败 toast 并存**——silent 与聚合二选一，故本函数在 silent 下一条都不弹
+        //       ④ **全失败与部分失败都要有可见反馈**——调用方判据是 `failNames.length > 0`，`N===M` 同样命中，不存在"全失败反而静默"
         async function uploadAttach(id, file, opts) {
             const reuseBusyLock = !!(opts && opts.reuseBusyLock);
             const skipRefresh = !!(opts && opts.skipRefresh);
+            const silent = !!(opts && opts.silent);
             // 误用防御（codex 审 17 复审 LOW）：声称复用锁却没人持锁 = 并发入口被悄悄打开，且不会有任何
             //   症状。这里不改变行为（调用方意图优先），只留可见告警。
             if (reuseBusyLock && !busy) console.warn('[issue-lite] uploadAttach 传了 reuseBusyLock 但当前 busy=false —— 调用方并未持锁，写操作守卫在本次上传期间是失效的');
@@ -870,8 +1108,10 @@
                 const res = await authFetch('/api/issue-lite/' + id + '/attachments', { method: 'POST', body: fd });
                 const j = await res.json().catch(() => ({}));
                 if (res.ok && j.success) { if (!skipRefresh) await loadAttachments(id); return true; }
-                else { alert((j && (j.error || j.detail)) || '上传失败'); return false; }
-            } catch (e) { alert('上传失败'); return false; } finally { if (!reuseBusyLock) busy = false; }
+                // 〔矩阵 L13a·C 换 toast〕单传/贴图循环语境：这条是用户唯一反馈，必须弹
+                // 〔矩阵 L13b·A'(R1 聚合)〕两步提交语境：silent 吞掉单条，由循环外聚合 toast 独家反馈（M6 ③）
+                else { if (!silent) showToast((j && (j.error || j.detail)) || '上传失败', 'error'); return false; }   // M6 ①：无论 silent 与否都 return false，失败计数不受影响
+            } catch (e) { if (!silent) showToast('上传失败', 'error'); return false; } finally { if (!reuseBusyLock) busy = false; }   // 〔矩阵 L14a/L14b〕同上分流
         }
         // ============================================================
         // S3（前端统一 附件贴图预览补全，接续 S1 Data_Correction / S2 Issue_Tracker）：建单弹窗新增
@@ -1071,18 +1311,20 @@
             const name = (att && att.original_name) ? att.original_name : ('attachment_' + aid);
             try {
                 const res = await authFetch('/api/issue-lite/attachments/' + aid + '/download');
-                if (!res || !res.ok) { alert('下载失败'); return; }
+                if (!res || !res.ok) { showToast('下载失败', 'error'); return; }   // 〔矩阵 L15·C 换 toast〕纯读操作，行内零变化
                 const blob = await res.blob(); const url = URL.createObjectURL(blob);
                 const a = document.createElement('a'); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 2000);
-            } catch (e) { alert('下载失败'); }
+            } catch (e) { showToast('下载失败', 'error'); }   // 〔矩阵 L16·C 换 toast〕
         }
         async function delAttach(aid, id) {
             if (busy) return; if (!confirm('删除该附件？')) return; busy = true;
             try {
                 const res = await authFetch('/api/issue-lite/attachments/' + aid, { method: 'DELETE' });
                 const j = await res.json().catch(() => ({}));
-                if (res.ok) await loadAttachments(id); else alert((j && j.error) || '删除失败');
-            } catch (e) { alert('删除失败'); } finally { busy = false; }
+                // 〔矩阵 L17·C 换 toast + **裁定⑰ 同款 500 过滤**〕理由同 createChat L11：
+                //   非 500 的结构化中文原样展示（信息更精确），500 档退固定文案（那是 err.message 原始异常）。
+                if (res.ok) await loadAttachments(id); else showToast((res.status !== 500 && j && j.error) || '删除失败', 'error');
+            } catch (e) { showToast('删除失败', 'error'); } finally { busy = false; }   // 〔矩阵 L18·C 换 toast〕
         }
 
         // ===== 新建登记 =====
@@ -1185,7 +1427,8 @@
                         if (ilFilesEdit.length > 0) {
                             const failNamesEdit = [];
                             for (const f of ilFilesEdit) {
-                                const ok = await uploadAttach(Number(editId), f, { reuseBusyLock: true, skipRefresh: true });
+                                // 〔0b-8·矩阵 L13b/L14b〕silent：单张失败不弹 toast，交下方聚合 warning 独家反馈（M6 ②③）
+                                const ok = await uploadAttach(Number(editId), f, { reuseBusyLock: true, skipRefresh: true, silent: true });
                                 if (!ok) failNamesEdit.push(f.name);
                             }
                             if (failNamesEdit.length > 0) {
@@ -1214,7 +1457,8 @@
                                 //   两个开关的语义见 uploadAttach 函数头契约；此处附件列表交由下方 openDrawer 加载。
                                 const failNames = [];
                                 for (const f of ilFiles) {
-                                    const ok = await uploadAttach(newId, f, { reuseBusyLock: true, skipRefresh: true });
+                                    // 〔0b-8·矩阵 L13b/L14b〕silent：同编辑分支，逐张失败静默、循环外聚合一条（M6 ②③）
+                                    const ok = await uploadAttach(newId, f, { reuseBusyLock: true, skipRefresh: true, silent: true });
                                     if (!ok) failNames.push(f.name);
                                 }
                                 if (failNames.length > 0) {

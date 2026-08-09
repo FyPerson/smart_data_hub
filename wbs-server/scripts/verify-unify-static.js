@@ -306,6 +306,20 @@ function stripCssComments(css) {
     return css.replace(/\/\*[\s\S]*?\*\//g, '');
 }
 
+// 〔N5-fix·守卫口径统一·2026-08-09〕**扫描前先剥注释**——与 emoji 守卫（verify-badge-alias.js
+//   stripJsComments）同款纪律，本轮已是第三次栽在同一个坑上（① emoji 守卫把注释里的 👀 判红
+//   ② 计数审计把"解释旧写法"的注释判红 ③ 断言②c 把注释里提到的裸类名判红），按 pattern-sweep
+//   原则一次扫干净，不留第四次。
+//   剥三类：HTML 注释 / JS 块注释 / JS 行注释。行注释的 `//` 要求前一个字符不是 `:"'\`\\`，
+//   以躲开 `https://`、`"//foo"` 这类**不是注释**的双斜杠（CSS 里的 `/* */` 由块注释规则一并吃掉）。
+//   ⚠️ 只作用于"找裸类名"这类**文本扫描**断言；需要看注释内容的断言（如覆盖声明表登记）不得用它。
+function stripCommentsForScan(text) {
+    return String(text)
+        .replace(/<!--[\s\S]*?-->/g, '')
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/(^|[^:"'`\\])\/\/[^\n]*/g, '$1');
+}
+
 function escapeRegExp(s) {
     return s.replace(/[.*+?^${}()|[\]\\-]/g, '\\$&');
 }
@@ -323,7 +337,8 @@ function findBareOldNames(text) {
 
 // 从 class="..." / class='...' 属性值（含 JS 模板串内联写法）与 .className = '...' 赋值里
 // 抽取空白分隔的 token，检查是否命中 OLD_NAMES（整词精确匹配，比正则子串扫描更贴合"属性值语义"）。
-function findBareOldNamesInClassAttrs(html) {
+function findBareOldNamesInClassAttrs(rawHtml) {
+    const html = stripCommentsForScan(rawHtml);   // 〔N5-fix〕剥注释先行：注释里写的类名不是渲染出去的类名
     const hits = new Set();
     const attrRe = /class=(["'])([\s\S]*?)\1/g;
     const classNameRe = /\.className\s*=\s*(["'])([^"']*)\1/g;
@@ -341,12 +356,47 @@ function findBareOldNamesInClassAttrs(html) {
     return [...hits];
 }
 
+// 〔N5-fix〕剥注释检测器的**两向**对照组：只证"注释不判红"是不够的——万一剥过头把真代码也吃了，
+//   守卫会从此静默放行（比误报危险得多）。故两向都要证：注释里的裸类名**不**判红 ∧ 真代码里的**仍**判红。
+//   语料取一个真实存在于 OLD_NAMES 的根类，避免用编的名字导致判据恒空。
+function assertStripCommentsSelfTest(check) {
+    const name = OLD_NAMES.find((n) => /-/.test(n)) || OLD_NAMES[0];
+    if (!name) { check(false, '剥注释对照组：OLD_NAMES 为空，语料无从构造（守卫空转）'); return; }
+
+    // ① 注释形态（行注释 / 块注释 / HTML 注释）——都不该判红
+    const inComment = [
+        `<script>\n// 历史写法演示：document.querySelector('.${name}') 已废弃\n</script>`,
+        `<script>\n/* 旧代码：el.classList.add('${name}') */\n</script>`,
+        `<!-- 迁移前是 class="${name}" -->`,
+    ];
+    const commentHits = inComment.flatMap((s) => findBareOldNamesInJsDomApis(s).concat(findBareOldNamesInClassAttrs(s)));
+    check(commentHits.length === 0,
+        `剥注释对照组·向一：注释里的裸共享根类**不判红**（行/块/HTML 三种注释各一条语料·用真名 ${name}）`,
+        commentHits.length ? `误报 ${commentHits.join(' | ')}` : '');
+
+    // ② 真代码形态——必须仍判红（防"剥过头"把判定力一起剥没了）
+    const liveApi = `<script>\ndocument.querySelector('.${name}');\n</script>`;
+    const liveAttr = `<div class="${name}"></div>`;
+    const apiHit = findBareOldNamesInJsDomApis(liveApi);
+    const attrHit = findBareOldNamesInClassAttrs(liveAttr);
+    check(apiHit.includes(name), `剥注释对照组·向二a：真代码里的 DOM API 裸类名**仍判红**（剥注释没剥过头）`,
+        apiHit.length ? '' : `期望命中 ${name}，实得空`);
+    check(attrHit.includes(name), `剥注释对照组·向二b：真代码里的 class 属性裸类名**仍判红**`,
+        attrHit.length ? '' : `期望命中 ${name}，实得空`);
+
+    // ③ 边界：`https://` 这类非注释双斜杠不得被当行注释吃掉（吃掉会让其后整行判定失效）
+    const urlLine = `<script>\nconst u = "https://x.test/a"; document.querySelector('.${name}');\n</script>`;
+    check(findBareOldNamesInJsDomApis(urlLine).includes(name),
+        '剥注释对照组·向三：同一行里有 `https://` 时，其后的真代码仍被扫到（`//` 判据带前置字符约束）');
+}
+
 // 断言②c（codex B 代码审 LOW-2 补）：JS DOM API 里对旧共享根类的引用。
 // class=/className= 只覆盖"写 class 字符串"，抓不到 classList.add/remove/toggle/contains/replace、
 // setAttribute('class', ...)、querySelector(All)/closest/matches('.x')、getElementsByClassName('x')
 // 这些"按类名操作 DOM"的写法。只扫 OLD_NAMES（根类黑名单）token——修饰类（open/active/s-*/t-*）
 // 不在黑名单里，天然豁免，故对 classList.add('open') 之类零误报（第十人视角前置约束）。
-function findBareOldNamesInJsDomApis(html) {
+function findBareOldNamesInJsDomApis(rawHtml) {
+    const html = stripCommentsForScan(rawHtml);   // 〔N5-fix〕剥注释先行：注释里演示/复盘一段旧写法不该判红
     const apiRe = /(?:classList\s*\.\s*(?:add|remove|toggle|contains|replace)|getElementsByClassName|querySelectorAll|querySelector|closest|matches|setAttribute)\s*\(([^)]*)\)/g;
     const argChunks = [];
     let m;
@@ -1130,6 +1180,11 @@ function assertStatusBadgeByMapShape(helperJs) {
     console.log('');
 
     console.log(`待校验迁移页（${MIGRATED_PAGES.length} 个）：${MIGRATED_PAGES.join('、')}\n`);
+
+    // ── 〔N5-fix〕剥注释检测器·**两向对照组自证**（先证判据两边都真在动，再谈它绿）──────────
+    console.log('--- 剥注释先行：检测器两向对照组 ---');
+    assertStripCommentsSelfTest(check);
+    console.log('');
 
     for (const pageFile of MIGRATED_PAGES) {
         console.log(`--- ${pageFile} ---`);

@@ -265,8 +265,12 @@ if (Test-Path "$MirrorPath\mcp-bms") {
 #   robocopy /MIR 按文件系统镜像、不认主仓 .gitignore 与 git 未跟踪状态，本地临时产物会被连带推进公开仓。
 #   v1.137.0 部署时实际发生：3 个自我标注"临时脚本·用完即删"的演示数据脚本被推上 GitHub。
 #   ⚠️ 刻意**不用 `_*` 通配**——`_sys-attach-test-deps.js` 同样以下划线开头，但它是 verify 脚本
-#   require 的真实依赖（删了公开仓的验证脚本直接跑不起来）。只精确匹配这两类前缀。
-$tmpScriptPatterns = @("_demo-*.js", "_restore-*.js")
+#   require 的真实依赖（删了公开仓的验证脚本直接跑不起来）。只精确匹配这几类前缀。
+#   2026-08-09 补 `_seed-*.js`（主仓无已跟踪 _seed 脚本，通配安全）+ `_set-sys-notify-dry-run.js`
+#   （必须精确名——`_set-*` 通配会误删已跟踪的 `_set-sys-single-commit-group.js`）：
+#   两者 2026-08-06 出现后因黑名单没补条目漏进公开仓（2026-08-09 已从公开仓 HEAD 删除）。
+#   黑名单模式必然再漏，fail-closed 改造（删除镜像内所有主仓未跟踪文件+白名单放行）已登记 PROJECT_STATUS 未了项。
+$tmpScriptPatterns = @("_demo-*.js", "_restore-*.js", "_seed-*.js", "_set-sys-notify-dry-run.js")
 foreach ($pat in $tmpScriptPatterns) {
     Get-ChildItem "$MirrorPath\wbs-server\scripts" -Filter $pat -File -ErrorAction SilentlyContinue | ForEach-Object {
         Remove-Item $_.FullName -Force

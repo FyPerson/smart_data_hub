@@ -11942,14 +11942,21 @@ async function sendIssueDingtalkRaw(targetUser, title, markdown) {
         return { ok: false, reason: 'no_config', body: { error: '钉钉配置未填写，请管理员先到系统配置填写凭证' } };
     }
     if (!targetUser.phone) {
-        return { ok: false, reason: 'no_phone', body: { error: `${targetUser.display_name || 'user#' + targetUser.id} 未绑定手机号，无法推送钉钉` } };
+        // 〔P6-A·2026-08-09 用户裁定选项 A〕`reason` 同时放进 body：本函数的 reason 原先只作**函数返回值**
+        //   （调用方 :12028 只 `...result.body` 展开），前端拿不到 ⇒ itErrText 第 2 级（reason 档）落空、
+        //   一路下探到 HTTP 502 档显「钉钉服务异常」——**归因错**（不是钉钉故障，是这个人没填手机号）
+        //   且丢了人名。本行只加一个字段，**发送逻辑与响应其余字段零改动**。
+        //   ⚠️ 本分支的 reason 是**字面量** 'no_phone'（其余三处取 cls.reason），逐分支核实过再写。
+        //   与下方 :11982/:11987 两处**既有**「reason 入 body」写法一致，本批是把其余四处补齐到同一形态。
+        return { ok: false, reason: 'no_phone', body: { error: `${targetUser.display_name || 'user#' + targetUser.id} 未绑定手机号，无法推送钉钉`, reason: 'no_phone' } };
     }
     let token;
     try {
         token = await dingtalkNotify.getAccessToken(appKey, appSecret);
     } catch (err) {
         const cls = dingtalkNotify.classifyError(err);
-        return { ok: false, reason: cls.reason, body: { error: cls.hint } };
+        // 〔P6-A〕reason 入 body（取 cls.reason＝classifyError 八值枚举）——理由同上方 no_phone 分支
+        return { ok: false, reason: cls.reason, body: { error: cls.hint, reason: cls.reason } };
     }
     // 反查 dingtalk_user_id（缺失则按手机号查 + 回写 users，对齐 collab）
     let dingUserId = targetUser.dingtalk_user_id;
@@ -11959,7 +11966,8 @@ async function sendIssueDingtalkRaw(targetUser, title, markdown) {
             await dbRunAsync('UPDATE users SET dingtalk_user_id = ? WHERE id = ? AND (dingtalk_user_id IS NULL OR dingtalk_user_id = \'\')', [dingUserId, targetUser.id]);
         } catch (err) {
             const cls = dingtalkNotify.classifyError(err);
-            return { ok: false, reason: cls.reason, body: { error: '钉钉用户查询失败：' + cls.hint } };
+            // 〔P6-A〕reason 入 body（取 cls.reason）
+            return { ok: false, reason: cls.reason, body: { error: '钉钉用户查询失败：' + cls.hint, reason: cls.reason } };
         }
     }
     // 发送（调 C2 helper）；token_expired 伪重试一次
@@ -11971,7 +11979,8 @@ async function sendIssueDingtalkRaw(targetUser, title, markdown) {
             r = await issueNotify.sendIssueMarkdown({ token: freshToken, robotCode, dingUserId: String(dingUserId).trim(), title, markdown });
         } catch (retryErr) {
             const cls = dingtalkNotify.classifyError(retryErr);
-            return { ok: false, reason: cls.reason, body: { error: '重试取 token 失败：' + cls.hint } };
+            // 〔P6-A〕reason 入 body（取 cls.reason）
+            return { ok: false, reason: cls.reason, body: { error: '重试取 token 失败：' + cls.hint, reason: cls.reason } };
         }
     }
     if (!r.success) {
@@ -12098,7 +12107,12 @@ app.post('/api/issues/:id/notify-reassign', authenticateToken, requireIssueSchem
 //   对齐 create-chat 的 getUserIdByMobile(requester_phone) 反查链路（server.js:11575），非 collab notify-done 的 contact_person_id 路径。
 //   返回 { ok, message_key, reason, body }；reason='requester_invalid' = 手机号查不到钉钉号（非企业成员/未绑定/离职）。
 async function sendIssueDingtalkToRequester(requesterPhone, title, markdown) {
-    if (!requesterPhone) return { ok: false, reason: 'requester_phone_empty', body: { error: '业务方手机号为空，无法发送完成通知' } };
+    // 〔P6-A 家族扩收·2026-08-09〕本 helper 与 sendIssueDingtalkRaw **同族同病**：reason 只作函数返回值，
+    //   调用方（:12216 等）只 `...result.body` 展开 ⇒ 前端 itErrText 第 2 级落空、下探 HTTP 档显「钉钉服务异常」。
+    //   按 pattern-sweep 铁律与那批同解释处置：缺 reason 的失败分支逐个把 reason 放进 body。
+    //   ⚠️ 逐分支核实过取值：本行是**字面量** 'requester_phone_empty'（IT_REASON_TEXT 已登记＝业务方未填手机号）。
+    //   `no_config` 分支（下方）**有意不加**：它的 error 是冻结表 §8 已登记字面量，走第 3 级即可，与前批同裁。
+    if (!requesterPhone) return { ok: false, reason: 'requester_phone_empty', body: { error: '业务方手机号为空，无法发送完成通知', reason: 'requester_phone_empty' } };
     const [appKey, appSecret, robotCode] = await Promise.all(
         ['dingtalk_app_key', 'dingtalk_app_secret', 'dingtalk_robot_code'].map(readSystemConfig)
     );
@@ -12110,7 +12124,8 @@ async function sendIssueDingtalkToRequester(requesterPhone, title, markdown) {
         token = await dingtalkNotify.getAccessToken(appKey, appSecret);
     } catch (err) {
         const cls = dingtalkNotify.classifyError(err);
-        return { ok: false, reason: cls.reason, body: { error: cls.hint } };
+        // 〔P6-A 家族扩收〕reason 入 body（取 cls.reason＝classifyError 八值枚举）
+        return { ok: false, reason: cls.reason, body: { error: cls.hint, reason: cls.reason } };
     }
     // requester_phone 反查钉钉 user_id（业务方可能非企业成员/未绑定 → 查不到）
     let dingUserId;
@@ -12119,10 +12134,15 @@ async function sendIssueDingtalkToRequester(requesterPhone, title, markdown) {
         dingUserId = raw != null ? String(raw).trim() : '';
     } catch (err) {
         const cls = dingtalkNotify.classifyError(err);
-        return { ok: false, reason: cls.reason === 'user_invalid' ? 'requester_invalid' : cls.reason, body: { error: '业务方钉钉号查询失败：' + cls.hint } };
+        // 〔P6-A 家族扩收〕本分支 reason 是**三元改写**（user_invalid 在业务方语境改叫 requester_invalid）——
+        //   先抽成变量再两处共用，避免把同一个三元表达式抄两遍（抄两遍＝将来只改一处的漂移源）。
+        const rsn = cls.reason === 'user_invalid' ? 'requester_invalid' : cls.reason;
+        return { ok: false, reason: rsn, body: { error: '业务方钉钉号查询失败：' + cls.hint, reason: rsn } };
     }
     if (!dingUserId) {
-        return { ok: false, reason: 'requester_invalid', body: { error: '业务方手机号查不到钉钉号（非企业成员/未绑定/离职），请线下转达' } };
+        // 〔P6-A 家族扩收〕字面量 'requester_invalid'。本行 error 其实已是冻结表 §8 登记字面量（第 3 级也能命中），
+        //   仍补 reason＝让它在**第 2 级**就命中：同族统一形态，也少一层对"字面量一个字都不能改"的依赖。
+        return { ok: false, reason: 'requester_invalid', body: { error: '业务方手机号查不到钉钉号（非企业成员/未绑定/离职），请线下转达', reason: 'requester_invalid' } };
     }
     // 发送（调 C2 helper）；token_expired 伪重试一次
     let r = await issueNotify.sendIssueMarkdown({ token, robotCode, dingUserId, title, markdown });
@@ -12133,7 +12153,8 @@ async function sendIssueDingtalkToRequester(requesterPhone, title, markdown) {
             r = await issueNotify.sendIssueMarkdown({ token: freshToken, robotCode, dingUserId, title, markdown });
         } catch (retryErr) {
             const cls = dingtalkNotify.classifyError(retryErr);
-            return { ok: false, reason: cls.reason, body: { error: '重试取 token 失败：' + cls.hint } };
+            // 〔P6-A 家族扩收〕reason 入 body（取 cls.reason）
+            return { ok: false, reason: cls.reason, body: { error: '重试取 token 失败：' + cls.hint, reason: cls.reason } };
         }
     }
     if (!r.success) {

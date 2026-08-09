@@ -7,7 +7,7 @@
     <title>数据修正 - 智数协同平台</title>
     <link rel="icon" href="data:,">
     <link rel="stylesheet" href="assets/css/style.css?v=v1.141.0_badge2">
-    <link rel="stylesheet" href="assets/css/components.css?v=v1.141.0_badge1">
+    <link rel="stylesheet" href="assets/css/components.css?v=v1.142.0_notify1">
     <style>
         /* ===== 页面专属残留（共享组件层已迁移至 assets/css/components.css；style污染根治 B 方案
            20260709 v1.1 后共享根类均带 u- 前缀，不再依赖 .unified-page 作用域门控，仅作迁移标记/覆盖钩子）===== */
@@ -83,9 +83,10 @@
            删除的直接动因：口径二把 Issue_Tracker 的通知徽章从 `notify-*` 改名到 `n-*`，
            两页共用 `.u-notify-badge` 这一个 base，不先清掉这批死规则就会与新命名撞名，
            变成"两页同名类不同色"的隐形分叉。 */
-        /* 查询已读结果框：在 u-nr-body(flex-wrap) 内换行独占一行、右对齐通知按钮列；空时不占位（不覆盖通知时间/按钮，三模块统一未读态） */
-        .u-nr-read-result { flex-basis: 100%; text-align: right; }
-        .u-nr-read-result:empty { display: none; }
+        /* 〔通知统一 N1·2026-08-09〕原此处的 `.u-nr-read-result` + `:empty` 两条规则**已上提共享层**
+           （assets/css/components.css，紧随 u-nb-btn 之后），页内定义同步删除避免双定义漂移。
+           上提动因：Sys_Iteration（D6 查已读切行内结果框）与 Issue_Lite 都要用这个类，而它此前只活在
+           本页内——Issue_Lite.html:673 早就在用却拿不到样式。本页渲染行为零变化（同一份规则换了住址）。 */
 
         /* style污染根治 B 方案（20260709 v1.1，复审新发现）：本页所有表单字段纵向间距（label→input/
            hint 间的视觉留白）改名前一直由 style.css 裸 `.form-group { display:flex; flex-direction:column;
@@ -640,7 +641,7 @@
         </div>
     </div>
 
-    <script src="assets/js/app.js?v=v1.141.0_badge2"></script>
+    <script src="assets/js/app.js?v=v1.142.0_notify1"></script>
     <script src="assets/js/unify-helpers.js?v=v1.141.0_badge1"></script>
     <!-- S4（前端统一 贴图粘贴扩展方案 20260801_v0.1）：Ctrl+V 贴图共享层接入。文件本体未改，沿用
          S3 抽取时的缓存串；改共享层本体时须同步 bump 这里 + 所有引用页。 -->
@@ -1345,6 +1346,9 @@
                 doneRows = requesters.map(req => ({
                     key: 'done', cid: Number(r.id), requesterId: Number(req.id),
                     label: multiReq ? `通知业务方·完成 · ${req.requester_name || '业务方'}${Number(req.is_primary) === 1 ? '（主）' : ''}` : '通知业务方·完成',
+                    // 〔通知统一 N2a·0b-3〕labelHasName＝行标签里已经带了收件人名 ⇒ 状态句省略对象槽，
+                    //   避免「通知业务方·完成 · 张三（主）」行里再出现一遍「通知 张三」。多业务方分支才为真。
+                    labelHasName: !!multiReq,
                     recipient: req.requester_name || '业务方', applicable: true,
                     status: req.completion_notify_status, notifiedAt: req.completion_notified_at, readAt: req.completion_read_at, error: req.completion_notify_error,
                     sendable: ['FIXED', 'REFIXED'], canSend: isAdmin || isCreator, byPhone: true, noPhone: !String(req.requester_phone || '').trim(),
@@ -1366,7 +1370,7 @@
             //   不造假主表 done 行（L2b length===0 → REQUESTER_ROWS_MISSING，假按钮点了必失败）。正常数据 L1 回填+readiness 保证非空。
             //   对抗审 LOW-3：返工子单组主单无主业务方（reworkDoneMissing）也要 surface 异常警告——否则返工 isChild=true 被 !isChild 闸住，误显「未填手机号」。
             const doneWarn = (isAdmin && ((!isChild && requesters.length === 0) || reworkDoneMissing))
-                ? `<div class="u-notify-row"><span class="u-nr-label">${isReworkChild ? '通知业务方·二次修复' : '通知业务方·完成'}</span><span class="u-nr-body"><span style="color:#dc2626;">⚠️ ${isReworkChild ? '组主单无主业务方记录' : '本单无业务方记录'}（数据异常，请联系管理员）</span></span></div>`
+                ? `<div class="u-notify-row"><span class="u-nr-label">${isReworkChild ? '通知业务方·二次修复' : '通知业务方·完成'}</span><span class="u-nr-body"><span class="u-nt-fail">⚠️ ${isReworkChild ? '组主单无主业务方记录' : '本单无业务方记录'}（数据异常，请联系管理员）</span></span></div>`
                 : '';
             const notify = [...visibleTypes.filter(t => t.applicable), ...visibleDone].map(t => buildNotifyRow(t, s)).join('') + doneWarn;
 
@@ -2122,6 +2126,10 @@
             // 自通知防护：操作人就是创建人则不弹（admin 标自己建的单，自己通知自己无意义；详情页仍可手动发）
             if (Number(item.created_by) === Number(me.id) && Number(me.id) > 0) return false;
             if (!confirm('该修正单已完成，是否通知信息技术部（单据创建人）？')) return false;
+            // 〔通知统一 N2a·矩阵 M2b·R2 命中〕**刻意不传 `{fromDrawer:true}`**：本语境从完成弹窗触发，
+            //   此刻抽屉已关（靠 notifySend 内部的 openDrawer 才重新打开），行内回显不在当前视口 ⇒
+            //   成功 toast 按 B 类**必须保留**。谁要"顺手统一"给这里补上 fromDrawer，就会让
+            //   「标完成 → 通知创建人」这条链路在抽屉打开前完全没有反馈。
             await notifySend(Number(id), 'creator', false);   // 复用详情发送逻辑（POST notify-creator + toast + 内部刷新详情）
             return true;
         }
@@ -2665,14 +2673,124 @@
         const CORRECTION_NOTIFY_ENDPOINTS = { dev: 'notify-developer', relay: 'notify-relay', estimate: 'notify-estimate', done: 'notify-done', creator: 'notify-creator' };
         const CORRECTION_NOTIFY_NAMES = { dev: '开发', relay: '对接人', estimate: '业务方（预计完成）', done: '业务方（完成）', creator: '创建人' };
 
-        // 通知失败 reason → 友好文案（§2.4 failed 态展示）
+        // ===== 通知失败原因文案（通知统一 N2a·2026-08-09）=====
+        //   ⚠️ 唯一文案源＝**已冻结的错误码映射表** `docs/local/前端统一/通知统一_错误码映射_20260809_v1.0.md`
+        //   （§1 跨页共享码 / §5 Data_Correction 专属码 / §7 发送层 reason 枚举）。
+        //   **禁止在此自创原因文案**：跨页同码必同文案，改文案先改映射表再同步这里（冻结后须走待追认）。
+        //   文案形态＝**原因短语**（不带句尾结论），由 §3.2 模板包裹成
+        //   「⚠️ 通知失败（{原因}），可重试」/「⚠️ 查询失败（{原因}）」等。
+
+        // 发送层 reason → 原因短语（落库在 *_notify_error 列，failed 态行内展示）
+        //   原 10 条只覆盖 corrections.js 自产的一半，dingtalk-notify.js 的 classifyError 八值与
+        //   no_config/send_failed/resolve_failed/message_key_missing 全部漏网，回落 `map[reason] || reason`
+        //   把 `token_expired` / `other:33012` 这种英文短枚举**原样显给用户**（违反「不透传后端原文」）。
+        const CORRECTION_REASON_TEXT = Object.freeze({
+            // —— corrections.js 自产（server.md §7.2）——
+            not_found: '收件人不存在或未绑定钉钉', exception: '发送异常',
+            no_phone: '收件人未填手机号', lookup_failed: '钉钉号查询失败',
+            requester_invalid: '业务方手机号查不到企业钉钉号', recipient_unresolved: '收件人未解析',
+            resolve_failed: '收件人解析失败', send_failed: '钉钉发送失败', no_config: '钉钉配置未填写',
+            media_upload: '附件上传失败', file_send: '文件发送失败', markdown_send: '消息发送失败',
+            message_key_missing: '缺少消息标识',
+            // —— dingtalk-notify.js classifyError 八值（映射表 §7.1）——
+            network: '网络异常', server_5xx: '钉钉服务异常', invalid_response: '钉钉返回异常',
+            token_expired: '钉钉凭证已过期', user_invalid: '收件人钉钉账号失效或已离职',
+            no_scope: '钉钉接口权限不足', rate_limit: '钉钉发送被限流',
+            other: '未知原因',
+        });
+        // 已知**中文字面量** → 原因短语（映射表 §8·第 3 级回退专用）。
+        //   与 reason 表分开的理由（N2a-fix S1）：两张表键的**形态不同源**——这张是后端直出的中文串，
+        //   那张是 `no_phone` 这类英文枚举。混用会让英文枚举参与 `error` 文本匹配，属错配面。
+        const CORRECTION_LITERAL_TEXT = Object.freeze({
+            'created_by 无效': '建单人账号异常',                    // corrections.js:3240 直落 notify_error 列
+            '修正单不存在': '修正单不存在',
+            '钉钉配置未填写，请管理员先到系统配置填写凭证': '钉钉配置未填写',
+            '钉钉推送失败': '钉钉发送失败',
+            '钉钉已发送但未返回消息标识，无法跟踪已读，请重试': '缺少消息标识',
+        });
+        // 〔N2b-fix·跨页硬化·2026-08-09〕表查值统一走 hasOwnProperty + typeof 双判
+        //   （＝映射表 §0.2「实现上建议…用 `Object.prototype.hasOwnProperty.call(MAP, …)` 判定」的原文口径）。
+        //   动因：裸 `MAP[k]` 会让 `constructor` / `toString` / `valueOf` 这类**原型链键**"命中"并返回函数对象，
+        //   后端只要吐出这几个词，函数体就被当成中文原因渲染进 UI；typeof 断言再兜住取到非字符串值的情况。
+        //   四页（DC/DCorr/IT/IL）同批硬化，范式一致。
+        function corrMapText(map, key) {
+            if (key == null) return '';
+            const k = String(key);
+            if (!Object.prototype.hasOwnProperty.call(map, k)) return '';
+            const v = map[k];
+            return (typeof v === 'string') ? v : '';
+        }
         function notifyReasonText(reason) {
-            const map = {
-                not_found: '收件人不存在或未绑定钉钉', exception: '发送异常', no_phone: '业务方未填手机号',
-                lookup_failed: '钉钉号查询失败', requester_invalid: '手机号查不到企业钉钉号', recipient_unresolved: '收件人未解析',
-                media_upload: '附件上传失败', file_send: '文件发送失败', markdown_send: '消息发送失败', other: '未知原因'
-            };
-            return map[reason] || reason || '未知原因';
+            const key = String(reason == null ? '' : reason);
+            const byReason = corrMapText(CORRECTION_REASON_TEXT, key);
+            if (byReason) return byReason;
+            // `other:{errcode}` 是**动态形态**（dingtalk-notify.js 拼 errcode），按前缀归「未知原因」
+            if (key.startsWith('other:')) return '未知原因';
+            return '未知原因';   // 回落**固定**——绝不 `|| reason` 把后端码原样显给用户
+        }
+
+        // 结构化 code → 原因短语（映射表 §1 共享码 + §5 DCorr 专属码）
+        const CORRECTION_ERR_TEXT = Object.freeze({
+            // §1 跨页共享码
+            REQUESTER_PHONE_EMPTY: '业务方未填手机号', REQUESTER_INVALID: '业务方手机号查不到企业钉钉号',
+            REQUESTER_LOOKUP_FAILED: '业务方钉钉号查询失败', DINGTALK_NOT_CONFIGURED: '钉钉配置未填写',
+            DINGTALK_TOKEN_FAILED: '钉钉鉴权失败', NOTIFY_SENT_BUT_DB_UPDATE_FAILED: '已发送但留痕失败（请勿重发）',
+            RECIPIENT_CHANGED_DURING_SEND: '发送期间收件人手机号已变更，状态未记录',
+            PATH_VIOLATION: '附件路径非法', STATUS_NOT_NOTIFIABLE: '当前状态不可通知',
+            INVALID_STATE_FOR_NOTIFY: '当前状态不可通知', NOT_AUTHORIZED_TO_NOTIFY: '无权发送该通知',
+            INVALID_RECIPIENT: '收件人参数无效', NOT_NOTIFIED: '尚未成功通知', NO_MESSAGE_KEY: '缺少消息标识',
+            // §5 DCorr 专属码
+            CORRECTION_NOT_FOUND: '修正单不存在', REWORK_GROUP_INVARIANT_BROKEN: '返工组数据异常',
+            REQUESTER_ROWS_MISSING: '本单无业务方记录', FIX_PROOF_NOT_SENDABLE: '结果证明文件格式不支持',
+            FIX_PROOF_FILE_MISSING: '结果证明文件已丢失', NOTIFY_DONE_ON_MASTER_ONLY: '请在关联组主单上操作',
+            INVALID_REQUESTER_ID: '业务方参数无效', REQUESTER_ID_REQUIRED: '多业务方需指定通知对象',
+            REQUESTER_NOT_IN_GROUP: '该业务方不在本单', GROUP_NOT_ALL_DONE: '关联组尚未全部完成',
+            NOTIFY_DONE_FAILED: '未知原因', NOT_ASSIGNED: '尚未指派开发', NO_RELAY_USER: '未指定对接人',
+            CREATOR_INVALID: '建单人账号异常', ESTIMATE_REQUIRED: '尚未回填预计完成时间',
+            NOT_AUTHORIZED: '无权查询该已读状态', REQUESTER_NOTIFY_NOT_SENT: '尚未成功通知',
+        });
+        // HTTP 兜底（映射表 §9.3）
+        const CORRECTION_HTTP_ERR_TEXT = Object.freeze({ 401: '登录已过期或无权限', 403: '登录已过期或无权限', 404: '单据不存在', 409: '状态已变化，请刷新后重试', 500: '未知原因', 502: '钉钉服务异常', 504: '发送超时，结果未知' });
+        // 五级回退（映射表 §0.2）：code → reason → 已知中文字面量 → HTTP status → 未知原因。
+        //   ⚠️ 第 3 级只接受**逐字全等**命中已登记字面量，禁模糊/包含匹配；且 HTTP 500 无 code/reason 时
+        //   **跳过第 3 级**——那一档的 `error` 是 err.message 原始异常文本（可能含堆栈/SQL/路径），一律「未知原因」。
+        function corrErrText(res, data) {
+            const d = data || {};
+            // 〔N2a-fix B2〕`NOTIFY_PARTIAL_FAILURE` 的**真正原因在 `failed_step` 里**（media_upload /
+            //   file_send / markdown_send，映射表 §7.3 子映射）。三条中文文案本就在 CORRECTION_REASON_TEXT 里，
+            //   只是没人去读那个字段 —— 不特判就会落到 code 表的通用文案，把"附件传失败还是消息发失败"这层
+            //   信息丢掉。故 code 档内优先按 failed_step 细化。
+            // 〔N2b-fix2·S4②〕改「**命中才 return**」，与 Collab 版同款不等式思路（裁定⑯ 的下探精神
+            //   在 code 档内的一致化）：未登记的 `failed_step` 不再被 `notifyReasonText` 的固定回落吞掉，
+            //   而是继续下探后面各档。**行为面等价**（本页 `CORRECTION_ERR_TEXT` 无 `NOTIFY_PARTIAL_FAILURE` 键，
+            //   该响应也不带 reason，最终仍落「未知原因」），改的是**结构一致性**——防下次有人给某档加了键
+            //   却发现这条分支根本走不到。
+            if (d.code === 'NOTIFY_PARTIAL_FAILURE' && d.failed_step) {
+                const byStep = corrMapText(CORRECTION_REASON_TEXT, d.failed_step);
+                if (byStep) return byStep;
+            }
+            const byCode = corrMapText(CORRECTION_ERR_TEXT, d.code);
+            if (byCode) return byCode;
+            // 〔裁定⑯·N2b-fix·2026-08-09〕reason 档改「**命中才 return，未命中继续下探**」，与 §0.2
+            //   「逐级下探，命中即停」对齐（此前是 `if (d.reason) return notifyReasonText(...)`＝只要字段存在
+            //   就吃掉整条回退链，未登记的 reason 直接落「未知原因」，把后面的字面量档/HTTP 档全跳过了）。
+            //   ⚠️ **路径分界是本裁定的关键，改这里而不改 notifyReasonText 本体**：
+            //     · **HTTP 响应路径**（本函数）——手上有 `res.status`，未登记 reason 还能靠 HTTP 档给出
+            //       「钉钉服务异常」这类**更笼统但不错**的原因 ⇒ 应下探。
+            //     · **存储列路径**（`notifyReasonText` 被行内失败句 / IT 徽章 title 直接调用）——入参是
+            //       库里存的 `*_notify_error` 值，**根本没有 HTTP 上下文**可下探 ⇒ 固定回落「未知原因」
+            //       才是正确语义。故 `notifyReasonText` 保持原样，两条路径各用各的回落策略。
+            const byReason = corrMapText(CORRECTION_REASON_TEXT, d.reason);
+            if (byReason) return byReason;
+            // `other:{errcode}` 动态形态按前缀归一（与 Collab/IL 同款，**不下探**：它是"已识别的未知"）
+            if (d.reason && String(d.reason).startsWith('other:')) return '未知原因';
+            const status = res ? res.status : 0;
+            // 〔N2a-fix S1〕第 3 级**只查中文字面量表**（映射表 §8），不再拿 reason 表当字面量表用——
+            //   后者的键是 `no_phone` 这类**英文枚举**，让它参与 `error` 文本匹配等于给"英文枚举当中文字面量
+            //   命中"开了口子（形态不同源，命中即错配）。两张表职责就此分清。
+            const literal = String(d.error || d.message || '').trim();
+            if (status !== 500 && literal) { const byLiteral = corrMapText(CORRECTION_LITERAL_TEXT, literal); if (byLiteral) return byLiteral; }
+            return corrMapText(CORRECTION_HTTP_ERR_TEXT, status) || '未知原因';
         }
 
         // 单类通知行渲染（§2.4）。curStatus = 单当前 8 态机状态，决定该类是否处于可发态（canSendNow）。
@@ -2681,61 +2799,73 @@
         function buildNotifyRow(t, curStatus) {
             const esc = escapeHtml;
             const rname = esc(t.recipient);
+            // 〔通知统一 N2a·0b-3 可选对象槽〕状态句模板 `✅ 已于 {时间} 通知{对象?}` / `📖 {对象?}已读 · …`：
+            //   **行标签已含对象 → 省略；不含 → 保留人名**（信息不丢红线优先于"对象不重复"审美）。
+            //   本页常规 5 通道行标签是「通知开发/通知对接人/通知业务方·预计/通知创建人/通知业务方·完成」——
+            //   **不含人名 ⇒ 保留**（现状即符合，零观感变化）；唯 done 多业务方子行标签已是
+            //   「通知业务方·完成 · 张三（主）」（:1348 multiReq 分支）⇒ **省略**，否则行标签与句内人名重复两遍。
+            const objPre = t.labelHasName ? '' : rname + ' ';   // 对象在前：`📖 {对象}已读 · …`
+            const objSuf = t.labelHasName ? '' : ' ' + rname;   // 对象在后：`… 通知{对象}` / `⏳ 尚未通知{对象}`
             // ⭐ 子单只读 done 行（P2 2026-06-26）：子单承接显示主单完成通知状态，但不能发/不能查（后端 409）→ 纯展示无按钮。
             //   已发送/已读 → 与主单同口径承接（通知/已读时间）；未发送 → 按主单是否终态分流（非终态=等待主单发送 / 终态=与主单一致）。
             //   ⚠️ 判断顺序（codex 改动点4 审 M-1）：sent/failed【优先】于 noPhone——"承接展示"语义下已发/已读是既成事实，
             //     须忠实反映；noPhone 只对"还没发"的未发送态有意义（避免主单已发后手机号被清空时遮蔽真实 done 状态）。
             if (t.key === 'done' && t.doneReadonly) {
-                const fromMaster = `<span style="color:#9ca3af; font-size:11px;">（来自关联组主单 #${esc(String(t.doneMasterId))}）</span>`;
+                const fromMaster = `<span class="u-nt-muted" style="font-size:11px;">（来自关联组主单 #${esc(String(t.doneMasterId))}）</span>`;
                 let l;
                 if (t.status === 'sent') {
                     l = t.readAt
                         ? (t.notifiedAt
-                            ? `<span style="color:#059669;">📖 ${rname} 已读 · 通知于 ${esc(formatFullTime(t.notifiedAt))} · 已读于 ${esc(formatFullTime(t.readAt))}</span>`
-                            : `<span style="color:#059669;">📖 ${rname} 最近一次已读 · 于 ${esc(formatFullTime(t.readAt))}</span>`)
-                        : `<span style="color:#059669;">✅ 已于 ${esc(formatFullTime(t.notifiedAt))} 通知 ${rname}</span>`;
+                            ? `<span class="u-nt-ok">📖 ${objPre}已读 · 通知于 ${esc(formatFullTime(t.notifiedAt))} · 已读于 ${esc(formatFullTime(t.readAt))}</span>`
+                            : `<span class="u-nt-ok">📖 ${objPre}最近一次已读 · 于 ${esc(formatFullTime(t.readAt))}</span>`)
+                        : `<span class="u-nt-ok">✅ 已于 ${esc(formatFullTime(t.notifiedAt))} 通知${objSuf}</span>`;
                 } else if (t.status === 'failed') {
-                    l = `<span style="color:#dc2626;">⚠️ 主单通知失败（${esc(notifyReasonText(t.error))}）</span>`;
+                    l = `<span class="u-nt-fail">⚠️ 主单通知失败（${esc(notifyReasonText(t.error))}）</span>`;
                 } else if (t.byPhone && t.noPhone) {
                     // 未发送且业务方无手机号 → 主单本就无法发（noPhone 只对未发送态有意义，故排在 sent/failed 之后）
-                    l = `<span style="color:#b45309;">— 业务方未填手机号，主单无法通知</span>`;
+                    l = `<span class="u-nt-warn">— 业务方未填手机号，主单无法通知</span>`;
                 } else if (t.doneMasterTerminal) {
                     // 主单已终态（归档/拒绝/作废）且从未发 → 与主单一致（已无机会发）
-                    l = `<span style="color:#9ca3af;">— 未发送钉钉通知</span>`;
+                    l = `<span class="u-nt-muted">— 未发送钉钉通知</span>`;
                 } else {
                     // 主单未终态、尚未发 → 子单干等主单发
-                    l = `<span style="color:#6b7280;">⏳ 等待主单发送</span>`;
+                    l = `<span class="u-nt-wait">⏳ 等待主单发送</span>`;
                 }
                 return `<div class="u-notify-row"><span class="u-nr-label">${esc(t.label)}</span><span class="u-nr-body">${l} ${fromMaster}</span></div>`;
             }
             const canSendNow = t.sendable.includes(curStatus);
             const ridArg = (t.key === 'done' && t.requesterId) ? `, ${t.requesterId}` : '';   // L3a：done 携带 requester_id（多业务方逐个发/查）
-            const sendBtn = (force, text) => (t.canSend && canSendNow) ? `<button class="u-btn-secondary u-nb-btn" onclick="notifySend(${t.cid}, '${t.key}', ${force}${ridArg})">${text}</button>` : '';
+            // 〔N2a〕按钮多带两样东西：`{fromDrawer:true}` 让 notifySend 知道这是抽屉内语境（A 类删成功 toast）；
+            //   `data-nr-label` 把**行标签**原样带给 R3 兜底文案用（走 esc，不受人名里的引号影响；
+            //   多业务方 done 行靠它区分是哪一位，比用通道名精确）。
+            const sendBtn = (force, text) => (t.canSend && canSendNow) ? `<button class="u-btn-secondary u-nb-btn" data-nr-label="${esc(t.label)}" onclick="notifySend(${t.cid}, '${t.key}', ${force}${ridArg}, {fromDrawer:true})">${text}</button>` : '';
             const readBtn = t.canSend ? `<button class="u-btn-secondary u-nb-btn" onclick="queryReadStatus(${t.cid}, '${t.key}'${ridArg})">查询已读</button>` : '';
             let line = '', btns = '';
             if (t.byPhone && t.noPhone) {
-                line = `<span style="color:#b45309;">— 业务方未填手机号，无法通知</span>`;
+                line = `<span class="u-nt-warn">— 业务方未填手机号，无法通知</span>`;
             } else if (t.status === 'sent') {
                 if (t.readAt) {
                     // 已读：同时展示「通知时间 + 已读时间」（P2 2026-06-26，原仅显已读时间丢了通知时刻）。notifiedAt 异常缺失时回退只显已读。
+                    //   〔0b-4〕`最近一次已读 · 于` 这条降级措辞**保留现状不改**（现状即"单时刻正式模板"在本页的实现），只换槽类。
                     line = t.notifiedAt
-                        ? `<span style="color:#059669;">📖 ${rname} 已读 · 通知于 ${esc(formatFullTime(t.notifiedAt))} · 已读于 ${esc(formatFullTime(t.readAt))}</span>`
-                        : `<span style="color:#059669;">📖 ${rname} 最近一次已读 · 于 ${esc(formatFullTime(t.readAt))}</span>`;
+                        ? `<span class="u-nt-ok">📖 ${objPre}已读 · 通知于 ${esc(formatFullTime(t.notifiedAt))} · 已读于 ${esc(formatFullTime(t.readAt))}</span>`
+                        : `<span class="u-nt-ok">📖 ${objPre}最近一次已读 · 于 ${esc(formatFullTime(t.readAt))}</span>`;
                     btns = sendBtn(true, '重新通知');
                 } else {
-                    line = `<span style="color:#059669;">✅ 已于 ${esc(formatFullTime(t.notifiedAt))} 通知 ${rname}</span>`;
+                    line = `<span class="u-nt-ok">✅ 已于 ${esc(formatFullTime(t.notifiedAt))} 通知${objSuf}</span>`;
                     btns = readBtn + sendBtn(true, '重新通知');
                 }
             } else if (t.status === 'failed') {
-                line = `<span style="color:#dc2626;">⚠️ 通知失败（${esc(notifyReasonText(t.error))}），可重试</span>`;
-                btns = sendBtn(true, '重新通知');
+                line = `<span class="u-nt-fail">⚠️ 通知失败（${esc(notifyReasonText(t.error))}），可重试</span>`;
+                // 〔§3.2〕failed 态按钮文案 `重新通知` → **`重试`**（与失败句「可重试」呼应）
+                btns = sendBtn(true, '重试');
             } else {
                 // 未发（not_sent / null / no_phone 但手机号已补填）
                 if (canSendNow) {
-                    line = `<span style="color:#6b7280;">⏳ 尚未通知 ${rname}</span>`;
+                    line = `<span class="u-nt-wait">⏳ 尚未通知${objSuf}</span>`;
                     btns = sendBtn(false, '发送通知');
                 } else {
-                    line = `<span style="color:#9ca3af;">— 未发送钉钉通知</span>`;
+                    line = `<span class="u-nt-muted">— 未发送钉钉通知</span>`;
                 }
             }
             // 已读显示统一（2026-07-10；2026-07-13 修覆盖 bug）：boxId 挂在 u-nr-body 内的独立结果 span(.u-nr-read-result)，
@@ -2747,27 +2877,91 @@
         }
 
         // 发送 / 重发某类钉钉通知（force=true 走重发契约 force_resend，后端清对应 read_at）
-        async function notifySend(id, recipient, force, requesterId) {
+        //   〔通知统一 N2a〕本函数一次改三件事，逐条对应矩阵行：
+        //   ① **R3 兜底方向修反**（矩阵 M2a）：原来 `await loadList(); openDrawer(id);` 写在**同一个 try 内**，
+        //      刷新抛错会掉进 :2771 的 catch 弹「发送失败」——**钉钉其实已发成功，界面却在撒谎**。
+        //      现拆成两段：发送段判定完先落地，刷新段独立执行；且因 `openDrawer` 自吞异常不外抛，
+        //      catch 捕不到 → 用同页 queryReadStatus 的**探测哨兵**范式（刷新后复查行内是否已变），
+        //      仍是旧态才补发抽屉版兜底 toast `{行标签}：已发送，详情刷新失败，可重开抽屉查看`。
+        //   ② **发送中 disabled 态**（J23）：原来全程不碰按钮，重复点击面裸奔（同页归档/建群早就有这防线）。
+        //   ③ **失败文案走冻结映射表**（M5·J8）：原来 `data.error || data.message` 直透后端原文。
+        //   〔M2b·R2 双语境〕本函数有两个调用语境：抽屉内通知行按钮（回显同容器）＋「标完成/重修完成」弹窗
+        //      关闭后的 promptNotifyCreatorAfterComplete（**此时抽屉已关**，靠下面的 openDrawer 才打开）。
+        //      后者 R2 命中 ⇒ 成功 toast 归 B 类**必须保留**，否则该链路在抽屉打开前零反馈。
+        //      故用 opts.fromDrawer 区分：仅抽屉内语境删成功 toast（A 类），弹窗语境照常提示。
+        async function notifySend(id, recipient, force, requesterId, opts) {
+            // 〔N2a-fix B1·实参归一化〕**必须放在函数体最前**。成因：渲染侧 `sendBtn` 拼 onclick 时
+            //   `ridArg` **只有 done 通道非空**（:2791 `const ridArg = (t.key === 'done' && t.requesterId) ? …`），
+            //   于是 dev/relay/estimate/creator 四通道产出的是 `notifySend(1, 'dev', false, {fromDrawer:true})`
+            //   —— `{fromDrawer:true}` 落在了 **requesterId 形参位**，opts 恒 undefined。
+            //   后果：`o.fromDrawer` 恒假 ⇒ A 类删成功 toast **5 个通道里 4 个没生效**（只有 done 对）；
+            //   且 `recipient === 'done'` 不成立时 requesterId 不入 body，没造成脏请求，所以静默到肉眼看不出来。
+            //   这里按类型把错位的实参掰回来（对象 ⇒ 它是 opts）。
+            //   ⚠️ 渲染串与按钮选择器**刻意不动**：选择器前缀依赖 `ridArg` 的现有形态，改渲染要连带改选择器，
+            //   徒增两处漂移面；归一化一行即可覆盖。「onclick 实参个数与签名对齐」的静态守卫记入 N5 清单。
+            if (requesterId && typeof requesterId === 'object') { opts = requesterId; requesterId = undefined; }
             const ep = CORRECTION_NOTIFY_ENDPOINTS[recipient];
             if (!ep) return;
             if (force && !confirm(`确认重新通知${CORRECTION_NOTIFY_NAMES[recipient] || ''}？\n将以本次为最新一次通知，旧已读记录清除。`)) return;
+            const o = opts || {};
+            // ② 发送中态：按 onclick 特征锁定**本行**按钮。
+            //   ⚠️ 前缀必须一路带到 requesterId 且**以逗号收尾**，否则两处翻车：
+            //     · 只匹到 force 为止 → 多业务方 done 行（同 id 同 recipient 同 force）会**一次禁用整组按钮**；
+            //     · 带了 rid 却不收尾 → `, 4` 是 `, 42` 的前缀，`^=` 会把 rid=42 那行一起匹进来。
+            //   收尾逗号来自其后恒定存在的 opts 实参（渲染侧 sendBtn 固定拼 `, {fromDrawer:true}`）。
+            const ridPart = (recipient === 'done' && requesterId) ? `, ${requesterId}` : '';
+            const btnSel = `.u-nb-btn[onclick^="notifySend(${id}, '${recipient}', ${!!force}${ridPart},"]`;
+            const btns = Array.from(document.querySelectorAll(btnSel));
+            // R3 兜底文案里的 `{行标签}`：优先取按钮上的 data-nr-label（多业务方 done 行靠它区分是哪一位），
+            //   取不到（弹窗语境无按钮）退到通道名。
+            const label = o.label || (btns[0] && btns[0].dataset.nrLabel) || CORRECTION_NOTIFY_NAMES[recipient] || '通知';
+            btns.forEach(b => { b.dataset.originalText = b.textContent; b.disabled = true; b.textContent = '发送中…'; });
+            const restoreBtns = () => btns.forEach(b => {
+                if (!b.isConnected) return;   // 刷新后按钮已被重渲染，无需（也不能）还原
+                b.disabled = false;
+                if (b.dataset.originalText) b.textContent = b.dataset.originalText;
+            });
+            let sentOk = false;
             try {
                 const body = { force_resend: !!force };
                 if (recipient === 'done' && requesterId) body.requester_id = requesterId;   // L3a 多业务方逐个发
                 const res = await authFetch(`/api/corrections/${id}/${ep}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
                 const data = await res.json().catch(() => ({}));
                 if (res.ok && (data.success || data.ok)) {
-                    if (data.already_sent) showToast(data.message || '已通知过，未重复发送', 'success');
-                    else showToast(data.has_attachment ? '已发送通知（含结果证明）' : '已发送通知', 'success');
+                    sentOk = true;
+                    // A' 幂等·留。〔N2a-fix S5①〕去掉 `data.message` 透传：那是后端原文
+                    //   （`已通知过业务方，未重复发送（如需重发传 force_resend）` 之类，含面向开发者的参数名），
+                    //   与 J8「不透传后端原文」同一条纪律 ⇒ 固定前端文案。
+                    if (data.already_sent) showToast('已通知过，未重复发送', 'success');
+                    // A 类：抽屉内语境的成功 toast 删除（行内 `✅ 已于 X 通知 Y` 就是反馈）；
+                    //   弹窗语境（R2 命中）保留，否则抽屉打开前零反馈。
+                    else if (!o.fromDrawer) showToast(data.has_attachment ? '已发送通知（含结果证明）' : '已发送通知', 'success');
                 } else if (data.code === 'REQUESTER_PHONE_EMPTY') {
+                    // A'·留（记原因）：toast 含行内没有的处置建议「请用其他方式交付」
                     showToast('业务方未填手机号，请用其他方式交付', 'warning');
                 } else if (data.code === 'REQUESTER_INVALID') {
+                    // A'·留（记原因）：同上，含「请线下转达」
                     showToast('业务方手机号查不到企业钉钉号，请线下转达', 'warning');
                 } else {
-                    showToast(data.error || data.message || '发送失败', 'error');
+                    // C·留：③ 原因走冻结映射表五级回退，不透传后端原文
+                    showToast(`发送失败（${corrErrText(res, data)}）`, 'error');
                 }
-                await loadList(); openDrawer(id);
-            } catch (e) { showToast('发送失败', 'error'); }
+            } catch (e) {
+                // ① 拆分后本 catch 只覆盖 **fetch/解析失败**（真·没发出去），不再吞刷新异常
+                showToast('发送失败（网络异常）', 'error');
+                restoreBtns();
+                return;
+            }
+            // ① 刷新段：独立于发送段之外。`openDrawer` 自吞异常（末行 catch 只 console.error），
+            //   写 `try{await openDrawer()}catch{}` 永远捕不到 ⇒ **靠 DOM 哨兵判定，不靠 catch**
+            //   （同页 queryReadStatus :2795 的「box 是否仍停在『查询中』」是同一套范式）。
+            try { await loadList(); await openDrawer(id); } catch (e) { /* 两者均自吞，此处只兜意外 */ }
+            // 哨兵：刷新成功 ⇒ openDrawer 重渲染整个抽屉体，我们刚抓到的按钮节点被替换掉（isConnected=false）；
+            //   若节点**还挂在文档上**，说明这次刷新没生效。btns 为空时（弹窗语境抽屉未开、按钮不存在）
+            //   无从判定，跳过——该语境本就保留成功 toast，不存在静默。
+            const staleDom = btns.length > 0 && btns.every(b => b.isConnected);
+            restoreBtns();
+            if (sentOk && staleDom) showToast(`${label}：已发送，详情刷新失败，可重开抽屉查看`, 'error');
         }
 
         // 查询某类通知的钉钉已读状态（§2.5；查到已读会固化 read_at，刷新详情显示 📖）
@@ -2777,7 +2971,7 @@
         async function queryReadStatus(id, recipient, requesterId) {
             const boxId = `corrReadBox_${recipient}${requesterId ? '_' + requesterId : ''}`;
             const box = document.getElementById(boxId);
-            if (box) box.innerHTML = '<span style="color:#94a3b8">查询中…</span>';
+            if (box) box.innerHTML = '<span class="u-nt-idle">查询中…</span>';
             try {
                 let url = `/api/corrections/${id}/notify-read-status?recipient=${encodeURIComponent(recipient)}`;
                 if (recipient === 'done' && requesterId) url += `&requester_id=${requesterId}`;   // L3a 多业务方按人查已读
@@ -2791,22 +2985,33 @@
                         try { await openDrawer(id); } catch (e) { /* openDrawer 自吞，防御性保留 */ }
                         const boxAfter = document.getElementById(boxId);
                         if (boxAfter && boxAfter.textContent.includes('查询中')) {
-                            boxAfter.innerHTML = `<span style="color:#059669">📖 已读 · 于 ${escapeHtml(data.read_at || '—')}（详情刷新失败，可重开抽屉）</span>`;
+                            // 〔N2a-fix S5②〕时间过 formatFullTime 归一：后端 read_at 是手工 pad 的
+                            //   `2026-08-09 10:00:00`，但同页所有时间展示都走 formatFullTime，这里漏了会成为
+                            //   全页唯一一处未归一的时间（脏值也由该函数原样兜住，不会炸）。
+                            boxAfter.innerHTML = `<span class="u-nt-ok">📖 已读 · 于 ${escapeHtml(data.read_at ? formatFullTime(data.read_at) : '—')}（详情刷新失败，可重开抽屉）</span>`;
                         }
                         return;
                     }
                     if (!box) return;
                     if (data.read_status === 'recipient_unresolved') {
-                        box.innerHTML = '<span style="color:#b45309">⚠️ 收件人钉钉号未解析，暂无法确认已读</span>';
+                        // §3.3「无法查询」态：模板化为 `⚠️ {原因}，无法查询已读`
+                        box.innerHTML = '<span class="u-nt-warn">⚠️ 收件人未解析，无法查询已读</span>';
                     } else if (data.read_status === 'unread_expired') {
-                        box.innerHTML = '<span style="color:#9ca3af">⏰ 未读（已超过钉钉可查询时间）</span>';
+                        // §3.3「超窗口未读」态：`⏰` 收编为 `—`，槽 muted。
+                        // ⚠️〔J7·mock-only〕**本分支在 DCorr 是死代码**：`unread_expired` 全仓唯一产出点是
+                        //   server.js:15760（Data_Collab 查已读，唯一有 24h 窗口判定的端点），
+                        //   routes/corrections.js 的 read-status **从不返回该值**。保留分支＝零行为变更（J7 裁定
+                        //   「死分支保留换槽」），但**验收时本态只能 route mock 造**，不得当成"本页已有超窗态"。
+                        box.innerHTML = '<span class="u-nt-muted">— 未读（已超过钉钉可查询时间）</span>';
                     } else {
-                        box.innerHTML = '<span style="color:#d97706">👀 尚未读取</span>';
+                        // §3.3「窗口内未读」态：`👀` 收编为 `⏳`
+                        box.innerHTML = '<span class="u-nt-warn">⏳ 尚未读取</span>';
                     }
                 } else if (box) {
-                    box.innerHTML = `<span style="color:#b91c1c">❌ ${escapeHtml(data.error || '查询已读失败')}</span>`;
+                    // §3.3「查询失败」态：`❌` 收编为 `⚠️`；原因走**冻结映射表**五级回退，不再透传后端 error 原文
+                    box.innerHTML = `<span class="u-nt-fail">⚠️ 查询失败（${escapeHtml(corrErrText(res, data))}）</span>`;
                 }
-            } catch (e) { if (box) box.innerHTML = '<span style="color:#b91c1c">网络错误，请检查后端</span>'; }
+            } catch (e) { if (box) box.innerHTML = '<span class="u-nt-fail">⚠️ 查询失败（网络异常）</span>'; }
         }
 
         // ================= 归档 =================

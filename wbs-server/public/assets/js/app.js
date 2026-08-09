@@ -48,11 +48,15 @@ function showToast(message, type = 'info', duration = 3000) {
     }
 
     // 图标和颜色映射 (SVG图标)
+    // 〔通知统一 N1·D8·2026-08-09〕四色由 500 系升 600 系：#10b981→#059669 / #ef4444→#dc2626 /
+    //   #f59e0b→#d97706 / #3b82f6→#2563eb。动因＝反馈原则收敛后保留下来的 toast 全是错误/幂等/引导类，
+    //   恰恰最需要读得清，而原 warning 白字对比度仅 2.15（升后四色白字对比度 3.19-5.17）。
+    //   属明度级变化，contract 其余部分（SVG 图标/实底白字/堆叠/点击可关/默认 3000ms/escapeHtml）不动。
     const config = {
-        success: { icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>', bg: '#10b981', color: '#fff' },
-        error: { icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>', bg: '#ef4444', color: '#fff' },
-        warning: { icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>', bg: '#f59e0b', color: '#fff' },
-        info: { icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>', bg: '#3b82f6', color: '#fff' }
+        success: { icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>', bg: '#059669', color: '#fff' },
+        error: { icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>', bg: '#dc2626', color: '#fff' },
+        warning: { icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>', bg: '#d97706', color: '#fff' },
+        info: { icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>', bg: '#2563eb', color: '#fff' }
     };
     const { icon, bg, color } = config[type] || config.info;
 

@@ -7,7 +7,7 @@
     <title>系统迭代 - 智数协同平台</title>
     <link rel="icon" href="data:,">
     <link rel="stylesheet" href="assets/css/style.css?v=v1.141.0_badge2">
-    <link rel="stylesheet" href="assets/css/components.css?v=v1.141.0_badge1">
+    <link rel="stylesheet" href="assets/css/components.css?v=v1.142.0_notify1">
     <style>
         /* ============================================================
            系统迭代页 · 页面专属残留（共享组件层已迁移至 assets/css/components.css）
@@ -258,6 +258,18 @@
         .si-att-item a.si-att-name { color: #2563eb; cursor: pointer; }
         .si-att-item .si-att-del { color: #dc2626; cursor: pointer; font-size: 11px;}
         .si-att-meta { color: #9ca3af; font-size: 11px; }
+        /* 〔通知统一 N3-2·D6/S16〕批次执行人行的**查已读结果框容器适配**（矩阵 S16 明写"批次执行人行是
+           si-att-item 非 u-notify-row，容器需单独设计"）。
+           共享层 `.u-nr-read-result{flex-basis:100%}` 的换行前提是宿主 flex 容器允许换行——u-nr-body 有
+           flex-wrap:wrap（components.css:227），而上面的 .si-att-item 是**默认 nowrap**（:256）：直接把
+           结果框塞进去，flex-basis:100% 会参与收缩把姓名/徽章挤扁，而不是另起一行。
+           故只给**执行人行**加一个 wrap 修饰类（该行没有 commit 分组，不受 D3「分组不可拆」那条几何断言
+           约束——commit 两列在的是 issues 行不是执行人行）；同时把右对齐改左对齐：批次是整块 overlay 宽度，
+           行内元素又全部左排，右对齐会让结果飘到离按钮很远的右边缘，读起来不像同一行的反馈。
+           ⚠️ **不重定义 `.u-nr-read-result` 本体**（守卫「样式单一住址＝components.css」）：这里两条都带宿主
+              前缀，是容器侧适配不是槽本体覆盖。 */
+        .si-att-item.si-exec-row { flex-wrap: wrap; }
+        .si-att-item.si-exec-row > .u-nr-read-result { text-align: left; }
         /* commit号两列 C5（20260803·D1）：批次详情成员行的前端/后端 commit 编码。
            行是 flex（.si-att-item），故给固定上限宽度 + 省略号，避免长 ref 把状态徽章挤出可视区；
            完整清单仍可悬停 title 看（siRenderCommitRefs 两个分支都挂了 title）。 */
@@ -719,7 +731,7 @@
         </div>
     </div>
 
-    <script src="assets/js/app.js?v=v1.141.0_badge2"></script>
+    <script src="assets/js/app.js?v=v1.142.0_notify1"></script>
     <script src="assets/js/unify-helpers.js?v=v1.141.0_badge1"></script>
     <!-- S3（前端统一 贴图粘贴扩展方案 20260801_v0.1）：Ctrl+V 贴图共享层，从本页 v1.133 建单优化批 C4
          抽取（assets/js/u-paste.js 文件头有完整来源说明）。缓存串尾部 tag 须与该文件 KIT_VERSION 一致，
@@ -1003,6 +1015,107 @@
         const msg = (r && r.data && (r.data.error || r.data.code)) || fallback || '操作失败';
         showToast(msg, 'error');
         return null;
+    }
+
+    // ===== 通知失败原因文案（通知统一 N3·2026-08-09）=====
+    //   ⚠️ 唯一文案源＝**已冻结的错误码映射表** `docs/local/前端统一/通知统一_错误码映射_20260809_v1.0.md`
+    //   （§1 共享码 / §6 Sys_Iteration 专属码 ≈59 / §7 reason 枚举 / §8 中文字面量 / §9.3 HTTP 兜底）。
+    //   **禁止自创文案**；跨页同码逐字一致（与 DCorr / IT / DC / IL 五页对齐）。
+    const SI_REASON_TEXT = Object.freeze({
+        // classifyError 八值（§7.1）——`other:{errcode}` 动态形态走前缀匹配不入表
+        network: '网络异常', server_5xx: '钉钉服务异常', invalid_response: '钉钉返回异常',
+        token_expired: '钉钉凭证已过期', user_invalid: '收件人钉钉账号失效或已离职',
+        no_scope: '钉钉接口权限不足', rate_limit: '钉钉发送被限流',
+        // 各链路自产（§7.2 中标注「SI」的行）
+        no_config: '钉钉配置未填写', no_phone: '收件人未填手机号', message_key_missing: '缺少消息标识',
+        bad_args: '参数非法', notify_exception: '发送异常', dev_not_found: '开发账号不存在',
+        no_assignee: '无可通知对象', claim_conflict: '已被其他请求认领',
+        other: '未知原因',
+    });
+    // 已知中文字面量（§8·第 3 级专用；与 reason 表分表——键形态不同源，混用会让英文枚举参与中文匹配）
+    //   ⚠️ 只收**逐字全等**能命中的静态串（§0.2/M4：禁模糊/包含/正则）。
+    //   两条 hotfix `hint`（index.js:11892/11970 三元·值域封闭为两条）按 §8 **原文保留**——它们是引导语不是失败原因。
+    const SI_LITERAL_TEXT = Object.freeze({
+        '钉钉配置未填写，请管理员先到系统配置填写凭证': '钉钉配置未填写',
+        '该应急批次当前无在册执行人，请先重新选择执行人': '该应急批次当前无在册执行人，请先重新选择执行人',
+        '请到批次详情逐人发通知': '请到批次详情逐人发通知',
+    });
+    // 结构化 code（§1 共享码中标 SI 的 + §6.1-6.7 SI 专属码）
+    const SI_ERR_TEXT = Object.freeze({
+        // §1 共享
+        NO_DINGTALK_CONFIG: '钉钉配置未填写', STATUS_NOT_NOTIFIABLE: '当前状态不可通知',
+        // §6.1 通用 / 授权
+        INVALID_SYS_ISSUE_ID: '单据编号无效', SYS_ISSUE_NOT_FOUND: '单据不存在',
+        MANUAL_NOTIFY_CHANNEL_UNKNOWN: '通知通道未知', MANUAL_NOTIFY_CHANNEL_NA: '该通道当前不可用',
+        MANUAL_NOTIFY_TYPE_NA: '该单类型不支持此通知', NOT_AUTHORIZED_FOR_NOTIFY: '无权发送该通知',
+        NOT_BOUND_LIAISON: '未绑定对接人', INTERNAL_ERROR: '未知原因',
+        // §6.2 developer / resume-dev
+        DEV_USER_ID_REQUIRED: '缺少开发人员参数', DEV_ASSIGNEE_NOT_FOUND: '该开发不在当前指派名单',
+        SELF_NOTIFY_FORBIDDEN: '不能通知自己', RESUME_NOTIFY_TYPE_NA: '该单类型不支持重启通知',
+        RESUME_ANCHOR_NOT_FOUND: '未找到重启锚点', RESUME_NOTIFY_NO_ROSTER: '当前无在册开发',
+        NOTIFY_ALREADY_SENT: '已通知过，未重复发送', NOTIFY_CLAIM_CONFLICT: '该通知已被其他请求认领',
+        // §6.3 relay / creator / hold-creator / requester / intake
+        NO_RELAY_USER_TO_NOTIFY: '未指定对接人', RELAY_USER_NOT_WHITELISTED: '对接人不在可通知名单',
+        RELAY_USER_NOT_FOUND: '对接人账号不存在', CREATOR_NOT_FOUND: '建单人账号不存在',
+        HOLD_NOTIFY_TYPE_NA: '该单类型不支持暂缓通知', HOLD_ANCHOR_NOT_FOUND: '未找到暂缓锚点',
+        NO_REQUESTER_PHONE: '报障人未填手机号', INTAKE_LIAISON_CONFIG_ERROR: '对接人配置异常',
+        INTAKE_LIAISON_MISSING: '未配置对接人', INTAKE_LIAISON_CHANGED: '对接人已变更，请刷新后重试',
+        INTAKE_LIAISON_NOT_FOUND: '对接人账号不存在',
+        SELF_NOTIFY_SKIPPED: '无需通知自己',
+        // §6.4 liaison-test
+        LIAISON_TEST_NOTIFY_TYPE_NA: '该单类型不支持对接测试通知', EXPECTED_CYCLE_REQUIRED: '缺少测试轮次参数',
+        LIAISON_TEST_RECIPIENT_UNBOUND: '对接测试收件人未绑定', LIAISON_TEST_RECIPIENT_CHANGED: '对接测试收件人已变更',
+        LIAISON_TEST_RECIPIENT_NOT_FOUND: '对接测试收件人账号不存在',
+        LIAISON_TEST_RECIPIENT_UNAVAILABLE: '对接测试收件人账号不可用',
+        LIAISON_TEST_CYCLE_MISMATCH: '测试轮次已变化', LIAISON_TEST_NOTIFY_ALREADY_SENT: '本轮已通知过',
+        LIAISON_TEST_NOTIFY_SENDING_IN_PROGRESS: '发送在途，请稍候', LIAISON_TEST_NOTIFY_CAS_CONFLICT: '通知状态并发变更',
+        LIAISON_TEST_NOTIFY_TIMEOUT: '发送超时，结果未知', LIAISON_TEST_NOTIFY_RESULT_UNKNOWN: '发送结果未知',
+        // §6.5 release executor
+        INVALID_RELEASE_ID: '上线单编号无效', INVALID_USER_ID: '用户编号无效',
+        EXECUTOR_NOT_ACTIVE: '该执行人已不在名单', RELEASE_NOT_PLANNING: '上线单不在计划态',
+        RELEASE_EMPTY: '上线单无内容', EXECUTOR_ALREADY_DONE: '该执行人已完成',
+        NOTIFY_IN_FLIGHT: '发送在途，请稍候', NOTIFY_CONCURRENT_CHANGED: '通知状态并发变更',
+        // §6.6 tech consult / tech-lead-comment
+        TECH_LEAD_ID_REQUIRED: '缺少技术负责人参数', TECH_LEAD_NOT_WHITELISTED: '技术负责人不在可通知名单',
+        TECH_LEAD_NOT_FOUND: '技术负责人账号不存在', REQUEST_TECH_CONSULT_TYPE_INVALID: '该单类型不支持技术咨询',
+        REQUEST_TECH_CONSULT_STATUS_INVALID: '当前状态不可发起技术咨询',
+        CONCURRENT_STATE_CHANGE: '状态已并发变化，请刷新后重试',
+        EXPECTED_REQUEST_EVENT_ID_REQUIRED: '缺少咨询轮次标识', TECH_CONSULT_RESEND_LATE: '咨询已进入新一轮，本次重发未生效',
+        NO_TECH_CONSULT_TO_RESEND: '无可重发的咨询通知', TECH_CONSULT_ALREADY_COMMENTED: '技术负责人已回复',
+        TECH_CONSULT_VERSION_CONFLICT: '版本冲突，请刷新后重试', NO_TECH_LEAD_COMMENT_TO_NOTIFY: '无可通知的评估意见',
+        TECH_LEAD_COMMENT_NOTIFY_RESEND_LATE: '评估通知已过期', TECH_LEAD_COMMENT_NOTIFY_ROUND_CHANGED: '评估轮次已变化',
+        // §6.7 查已读 / 退场
+        INVALID_NOTIFY_TYPE: '通知类型无效', NOTIFY_NOT_SENT: '尚未成功通知',
+        HISTORICAL_SNAPSHOT_MISSING: '历史记录无快照', LEGACY_RELEASE_FLOW_DISABLED: '旧上线流程已停用',
+    });
+    const SI_HTTP_ERR_TEXT = Object.freeze({ 401: '登录已过期或无权限', 403: '登录已过期或无权限', 404: '单据不存在', 409: '状态已变化，请刷新后重试', 500: '未知原因', 502: '钉钉服务异常', 504: '发送超时，结果未知' });
+    // 查表用自有属性判定（§0.2 实现建议原文）——裸 `MAP[k]` 会让 `constructor`/`toString` 这类原型链键
+    //   "命中"并返回函数对象；typeof 断言再兜住非字符串值。四页同批硬化后本页照同款范式。
+    function siMapText(map, key) {
+        if (key == null) return '';
+        const k = String(key);
+        if (!Object.prototype.hasOwnProperty.call(map, k)) return '';
+        const v = map[k];
+        return (typeof v === 'string') ? v : '';
+    }
+    // 五级回退（映射表 §0.2）：code → reason → 已知中文字面量 → HTTP status → 未知原因
+    //   · 〔裁定⑯〕reason 档「**命中才 return，未命中继续下探**」——「命中」＝查到文案，不是「字段存在」。
+    //   · `other:{errcode}` 前缀归一后**直接 return 不下探**（那是"已识别的未知"）。
+    //   · HTTP 500 且无 code/reason 时**跳过字面量档**：那档的 `error` 是 `err.message` 原始异常文本
+    //     （index.js:6966/7036/7397 等 catch），含堆栈/SQL/路径风险 ⇒ 一律「未知原因」。
+    //   · 本页**不搬 `failed_step` 子映射**：`NOTIFY_PARTIAL_FAILURE` 只在 DC/DCorr 产出（映射表 §1），
+    //     SI 端点从不返回 ⇒ 搬来即死分支（同 P13/S3 口径）。
+    function siErrText(res, data) {
+        const d = data || {};
+        const byCode = siMapText(SI_ERR_TEXT, d.code);
+        if (byCode) return byCode;
+        const byReason = siMapText(SI_REASON_TEXT, d.reason);
+        if (byReason) return byReason;
+        if (d.reason && String(d.reason).startsWith('other:')) return '未知原因';
+        const status = res ? res.status : 0;
+        const literal = String(d.error || d.message || '').trim();
+        if (status !== 500 && literal) { const byLiteral = siMapText(SI_LITERAL_TEXT, literal); if (byLiteral) return byLiteral; }
+        return siMapText(SI_HTTP_ERR_TEXT, status) || '未知原因';
     }
 
     // 本页自带的完整转义（转 & < > " '）。刻意不复用 app.js 全局 escapeHtml——它有两处同名声明，
@@ -1496,8 +1609,8 @@
         // 193 复审 M 收口：已留言收口与详情红条同口径——当前轮已回复则不再提示发送（通知目的已达成）。
         //   判定消费后端派生字段 has_current_tech_lead_comment（列表 SELECT EXISTS·前端零自推导防漂移）。
         if (Number(i.has_current_tech_lead_comment) === 1) return '';
-        if (i.tech_lead_notify_status === 'not_sent') return `<span class="si-flag" style="color:#b45309">待发送</span>`;
-        if (i.tech_lead_notify_status === 'failed') return `<span class="si-flag" style="color:#dc2626">发送失败</span>`;
+        if (i.tech_lead_notify_status === 'not_sent') return `<span class="si-flag u-nt-warn">待发送</span>`;
+        if (i.tech_lead_notify_status === 'failed') return `<span class="si-flag u-nt-fail">发送失败</span>`;
         return '';
     }
     // S4（bug暂缓方案 20260803 v0.4 §6.3）：「已暂缓 N 天」列表徽章——⚠️ 必须叠加 status==='已暂缓' 才渲染：
@@ -2524,28 +2637,45 @@
     //   通知时刻+已读时刻双显，对齐 Data_Correction 范式；notified_at 缺失时回退只显已读/已通知。
     //   D13（时间格式统一 20260804）：正文砍到分，整段挂 title 保完整到秒——通知/已读的秒有取证价值
     //   （"到底哪一秒送达、哪一秒读的"），砍秒不该把它从界面上彻底抹掉。
-    function siNotifyStatusText(status, readAt, notifiedAt) {
+    function siNotifyStatusText(status, readAt, notifiedAt, error) {
         if (status === 'sent') {
             const tipOf = (...vs) => esc(vs.filter(Boolean).map(siFmtDTSec).join(' · '));
             if (readAt) {
                 return notifiedAt
-                    ? `<span style="color:#059669;" title="${tipOf(notifiedAt, readAt)}">📖 已读 · 通知于 ${esc(siFmtDT(notifiedAt))} · 已读于 ${esc(siFmtDT(readAt))}</span>`
-                    : `<span style="color:#059669;" title="${tipOf(readAt)}">📖 已读 · 于 ${esc(siFmtDT(readAt))}</span>`;
+                    ? `<span class="u-nt-ok" title="${tipOf(notifiedAt, readAt)}">📖 已读 · 通知于 ${esc(siFmtDT(notifiedAt))} · 已读于 ${esc(siFmtDT(readAt))}</span>`
+                    : `<span class="u-nt-ok" title="${tipOf(readAt)}">📖 已读 · 于 ${esc(siFmtDT(readAt))}</span>`;
             }
             return notifiedAt
-                ? `<span style="color:#059669;" title="${tipOf(notifiedAt)}">✅ 已于 ${esc(siFmtDT(notifiedAt))} 通知</span>`
-                : `<span style="color:#059669;">✅ 已通知</span>`;
+                ? `<span class="u-nt-ok" title="${tipOf(notifiedAt)}">✅ 已于 ${esc(siFmtDT(notifiedAt))} 通知</span>`
+                : `<span class="u-nt-ok">✅ 已通知</span>`;
         }
-        if (status === 'failed') return `<span style="color:#dc2626;">⚠️ 通知失败，可重试</span>`;
-        if (status === 'no_phone') return `<span style="color:#b45309;">— 无手机号，无法通知</span>`;
+        // 〔S2·槽类部分〕`（{原因}）` 的接入需要把 `*_notify_error` 从各 siRender*NotifyRow 一路传进来
+        //   （§1.1b 已落死 8 通道该列可取），属**实参链改造**，随下一批「透传收编」一起做——
+        //   B1 教训在先：函数先加形参、渲染侧不传，就是"函数支持但没人传参"的假落地。本批只换槽，零行为变更。
+        if (status === 'failed') {
+            // 〔S2·J8〕失败句接原因：`*_notify_error` 列存的是**发送层 reason 枚举**（§7.1/§7.2），
+            //   故按 `{reason: error}` 喂 siErrText——code 档必然落空、reason 档命中；未登记值走 `other:`
+            //   前缀或最终「未知原因」，绝不把后端码原样显给用户。error 为空（老数据/未落列）时退回无原因版。
+            const why = error ? siErrText(null, { reason: error }) : '';
+            return `<span class="u-nt-fail">⚠️ 通知失败${why ? '（' + esc(why) + '）' : ''}，可重试</span>`;
+        }
+        // 〔S3〕`— 无手机号，无法通知` → 补对象名。**对象槽这里填的是固定名词「业务方」不是人名**
+        //   （0b-3/S20 省的是人名重复；§3.2 模板 `— {对象}未填手机号，无法通知` 的 {对象} 本就是角色名词），
+        //   与 DCorr/IL 该句**逐字一致**。本状态只由 requester 通道产出（§6.3 NO_REQUESTER_PHONE）。
+        if (status === 'no_phone') return `<span class="u-nt-warn">— 业务方未填手机号，无法通知</span>`;
         // [工期对接测试与风险等级拆分 方案 v1.1 §6·C4b] 'sending'——目前仅对接测试通道会产生该值（预占
         // 协议中间态，其余四通道同步发送无此态），补分支避免落到下方 default 文案误显示"未发送"。
-        if (status === 'sending') return `<span style="color:#2563eb;">⏳ 发送中…</span>`;
-        return `<span style="color:#9ca3af;">— 未发送钉钉通知</span>`;   // not_sent / null
+        if (status === 'sending') return `<span class="u-nt-run">⏳ 发送中…</span>`;
+        return `<span class="u-nt-muted">— 未发送钉钉通知</span>`;   // not_sent / null
     }
     // 单行组装（对齐 Data_Correction .notify-row）：左标签 si-nr-label + 右内容 si-nr-body（文字状态 + 操作按钮）+ 可选提示行
-    function siNotifyRowHtml(label, status, readAt, notifiedAt, buttonsHtml, extraNote) {
-        return `<div class="u-notify-row"><span class="u-nr-label">${label}</span><span class="u-nr-body">${siNotifyStatusText(status, readAt, notifiedAt)}${buttonsHtml || ''}</span></div>` +
+    // 〔D6·S16〕第 8 参 readBoxId：非空则在 u-nr-body 末尾挂查已读结果框（`.u-nr-read-result`，
+    //   共享层 flex-basis:100% ⇒ 在 u-nr-body 的 flex-wrap 容器内独占一行、右对齐按钮列；:empty 时 display:none
+    //   不占位）。**只有渲染了「查询已读」按钮的行才传**，与 DCorr 的"每行都挂"不同——本页 6 个通道的查已读
+    //   按钮各有显隐条件（已读后隐藏），空挂容器会给没有查询动作的行留一个永远用不上的锚点。
+    function siNotifyRowHtml(label, status, readAt, notifiedAt, buttonsHtml, extraNote, error, readBoxId) {
+        const readBox = readBoxId ? `<span class="u-nr-read-result" id="${readBoxId}"></span>` : '';
+        return `<div class="u-notify-row"><span class="u-nr-label">${label}</span><span class="u-nr-body">${siNotifyStatusText(status, readAt, notifiedAt, error)}${buttonsHtml || ''}${readBox}</span></div>` +
             (extraNote ? `<div class="u-hint" style="margin:-2px 0 6px">${extraNote}</div>` : '');
     }
 
@@ -2554,7 +2684,8 @@
     //   can_query_read=admin/白名单/主开发本人（read-status handler 内判定，四侧统一，不看工单状态）。
     function siRenderDevNotifyRows(iss, devAssignees, canOperateDev, canQueryRead) {
         if (!devAssignees || !devAssignees.length) {
-            return `<div class="u-notify-row"><span>开发</span><span class="si-muted">暂无指派开发</span></div>`;
+            // 〔S19〕空态原走裸 `<span>`（全页唯一一处不挂 u-nr-label 的通知行标签）→ 补类，结构一致性·零行为变更
+            return `<div class="u-notify-row"><span class="u-nr-label">开发</span><span class="si-muted">暂无指派开发</span></div>`;
         }
         // C2b：状态门按 type 取（bug=处理中 / 变更流=开发中·待验证）——镜像后端 sysNotifyStatusesFor。
         const sendable = siNotifyStatusesFor(iss.type, 'developer').includes(iss.status);
@@ -2569,15 +2700,17 @@
             // C2b 本人行隐藏发送按钮（对齐后端自指守卫 SELF_NOTIFY_FORBIDDEN·仅 developer 通道）；查已读不受限。
             //   身份未就绪(selfReady=false)→ isSelf=true 保守隐藏；就绪→按 user_id 精确比对。
             const isSelf = !selfReady || Number(d.user_id) === selfUid;
-            let btns = '';
+            let btns = '', readBoxId = '';
             if (canOperateDev && sendable && !isSelf) {
-                btns += `<button class="u-btn-secondary u-nb-btn" onclick="siNotifyDevSend(${d.user_id})">${d.notify_status === 'sent' ? '重新通知' : '发送通知'}</button>`;
+                // 〔R3〕data-nr-label：兜底 toast 的 `{行标签}` 从按钮上取（含人名，逐 dev 行可区分是哪一位）
+                btns += `<button class="u-btn-secondary u-nb-btn" data-nr-label="${label}" onclick="siNotifyDevSend(${d.user_id})">${d.notify_status === 'sent' ? '重新通知' : '发送通知'}</button>`;
             }
             // 已读态隐藏「查询已读」（用户 2026-07-19：已读了不必再查·此时重发入口=上方「重新通知」按钮·受 sendable 状态门）。
             if (canQueryRead && d.notify_status === 'sent' && d.notify_message_key && !d.read_at) {
                 btns += `<button class="u-btn-secondary u-nb-btn" onclick="siQueryReadStatus('dev', ${d.user_id})">查询已读</button>`;
+                readBoxId = siReadBoxId('dev', d.user_id);   // 〔D6·S16〕
             }
-            return siNotifyRowHtml(label, d.notify_status, d.read_at, d.notified_at, btns);
+            return siNotifyRowHtml(label, d.notify_status, d.read_at, d.notified_at, btns, undefined, d.notify_error, readBoxId);   // dev：子表列（DEV_ASSIGNEES_SELECT_COLS 显式含）
         }).join('');
     }
 
@@ -2586,15 +2719,16 @@
         if (!iss.relay_notified_user_id) return '';
         const label = `对接人 ${esc(iss.relay_notified_user_name || ('#' + iss.relay_notified_user_id))}`;
         const sendable = SI_NOTIFY_RELAY_STATUSES.includes(iss.status);
-        let btns = '';
+        let btns = '', readBoxId = '';
         if (canOperateRelay && sendable) {
-            btns += `<button class="u-btn-secondary u-nb-btn" onclick="siNotifyRelayClick()">${iss.relay_notify_status === 'sent' ? '重新通知' : '发送通知'}</button>`;
+            btns += `<button class="u-btn-secondary u-nb-btn" data-nr-label="${label}" onclick="siNotifyRelayClick()">${iss.relay_notify_status === 'sent' ? '重新通知' : '发送通知'}</button>`;
         }
         // 已读态隐藏「查询已读」（用户 2026-07-19·同 dev 侧口径）。
         if (canQueryRead && iss.relay_notify_status === 'sent' && iss.relay_notify_message_key && !iss.relay_read_at) {
             btns += `<button class="u-btn-secondary u-nb-btn" onclick="siQueryReadStatus('relay')">查询已读</button>`;
+            readBoxId = siReadBoxId('relay');   // 〔D6·S16〕
         }
-        return siNotifyRowHtml(label, iss.relay_notify_status, iss.relay_read_at, iss.relay_notified_at, btns);
+        return siNotifyRowHtml(label, iss.relay_notify_status, iss.relay_read_at, iss.relay_notified_at, btns, undefined, iss.relay_notify_error, readBoxId);
     }
 
     // 建单人侧：权限=admin/白名单/主开发本人（notify-creator handler 内判定）；self-guard 由 siNotifyManual 内识别 skipped 淡提示。
@@ -2605,15 +2739,16 @@
         if (iss.type === 'bug' && iss.status === '已暂缓') return '';
         const label = `建单人 ${esc(iss.created_by_name || ('#' + iss.created_by))}`;
         const sendable = siNotifyStatusesFor(iss.type, 'creator').includes(iss.status);   // C2b：bug/变更流状态门一致（待验证/待上线/已上线）
-        let btns = '';
+        let btns = '', readBoxId = '';
         if (canOperateCreator && sendable) {
-            btns += `<button class="u-btn-secondary u-nb-btn" onclick="siNotifyCreatorClick()">${iss.creator_notify_status === 'sent' ? '重新通知' : '发送通知'}</button>`;
+            btns += `<button class="u-btn-secondary u-nb-btn" data-nr-label="${label}" onclick="siNotifyCreatorClick()">${iss.creator_notify_status === 'sent' ? '重新通知' : '发送通知'}</button>`;
         }
         // 已读态隐藏「查询已读」（用户 2026-07-19·同 dev 侧口径）。
         if (canQueryRead && iss.creator_notify_status === 'sent' && iss.creator_notify_message_key && !iss.creator_read_at) {
             btns += `<button class="u-btn-secondary u-nb-btn" onclick="siQueryReadStatus('creator')">查询已读</button>`;
+            readBoxId = siReadBoxId('creator');   // 〔D6·S16〕
         }
-        return siNotifyRowHtml(label, iss.creator_notify_status, iss.creator_read_at, iss.creator_notified_at, btns);
+        return siNotifyRowHtml(label, iss.creator_notify_status, iss.creator_read_at, iss.creator_notified_at, btns, undefined, iss.creator_notify_error, readBoxId);
     }
 
     // S4（bug暂缓方案 20260803 v0.4 §7.3）：暂缓通知建单人行——仅 bug 单「已暂缓」态渲染。权限=任一活跃
@@ -2632,9 +2767,10 @@
         const label = `暂缓通知建单人 ${esc(iss.created_by_name || ('#' + iss.created_by))}`;
         let btns = '';
         if (canOperate && iss.creator_notify_status !== 'sent') {
-            btns += `<button class="u-btn-secondary u-nb-btn" onclick="siNotifyHoldCreatorClick()">发送通知</button>`;
+            btns += `<button class="u-btn-secondary u-nb-btn" data-nr-label="${label}" onclick="siNotifyHoldCreatorClick()">发送通知</button>`;
         }
-        return siNotifyRowHtml(label, iss.creator_notify_status, iss.creator_read_at, iss.creator_notified_at, btns);
+        // 本行**不挂查已读结果框**：暂缓通道从不渲染「查询已读」按钮（上面 btns 只拼发送），S16 的 6 个容器不含它。
+        return siNotifyRowHtml(label, iss.creator_notify_status, iss.creator_read_at, iss.creator_notified_at, btns, undefined, iss.creator_notify_error);
     }
 
     // S4（bug暂缓方案 §7.3）：重启通知开发行——仅 bug 单「处理中」态候选渲染，是否确为"本轮重启"由后端
@@ -2650,11 +2786,11 @@
         const isAdminUser = isAdmin();
         const allSent = roster.every(d => d.notify_status === 'sent');
         const statusText = allSent
-            ? `<span style="color:#059669;">✅ 本轮已全部通知</span>`
-            : `<span style="color:#9ca3af;">— 尚有在册开发未通知（若非本轮重启所致，点击会提示无法发送）</span>`;
+            ? `<span class="u-nt-ok">✅ 本轮已全部通知</span>`
+            : `<span class="u-nt-muted">— 尚有在册开发未通知（若非本轮重启所致，点击会提示无法发送）</span>`;
         let btns = '';
         if (isAdminUser && !allSent) {
-            btns += `<button class="u-btn-secondary u-nb-btn" onclick="siNotifyResumeDevClick()">发送通知</button>`;
+            btns += `<button class="u-btn-secondary u-nb-btn" data-nr-label="重启通知开发（批量）" onclick="siNotifyResumeDevClick()">发送通知</button>`;
         }
         return `<div class="u-notify-row"><span class="u-nr-label">重启通知开发（批量）</span><span class="u-nr-body">${statusText}${btns}</span></div>`;
     }
@@ -2677,7 +2813,7 @@
     function siRenderIntakeNotifyRow(iss, canOperateIntake, canQueryReadIntake) {
         const nameResolved = siIntakeLiaisonName(iss.intake_liaison_id);
         const label = `对接人受理 ${esc(nameResolved || (iss.intake_liaison_id ? ('#' + iss.intake_liaison_id) : '（存量单·发送时自动选定）'))}`;
-        let btns = '';
+        let btns = '', readBoxId = '';
         const intakeStatus = iss.intake_notify_status;
         // codex 217 MED：可发条件由 `!== 'sent'` 收窄为显式枚举——原写法对未知脏值过宽，任何非 'sent' 的
         //   异常值都会被误判为可操作态。现仅 not_sent/falsy（初始态）与 failed（可重发）两类命中；
@@ -2687,16 +2823,18 @@
         if (iss.status === '待受理' && canOperateIntake && (intakeStatus === 'not_sent' || intakeStatus === 'failed' || !intakeStatus)) {
             // 方案 §4.8：sent 态只可查已读、不提供重发（仅 failed 可重发）——回受理门归零（待追认 P1 已追认）
             //   是恢复可发的唯一途径；sent 即本轮终态，与 P1 拍板时的语义前提一致。
-            const btnLabel = intakeStatus === 'failed' ? '重发' : '发送通知';
-            btns += `<button class="u-btn-secondary u-nb-btn" onclick="siNotifyIntakeClick()">${btnLabel}</button>`;
+            const btnLabel = intakeStatus === 'failed' ? '重试' : '发送通知';   // 〔S10〕failed 后＝「重试」
+            btns += `<button class="u-btn-secondary u-nb-btn" data-nr-label="${label}" onclick="siNotifyIntakeClick()">${btnLabel}</button>`;
         }
         // 已读态隐藏「查询已读」（同其余通道口径，用户 2026-07-19）。
         if (canQueryReadIntake && iss.intake_notify_status === 'sent' && iss.intake_notify_message_key && !iss.intake_read_at) {
             btns += `<button class="u-btn-secondary u-nb-btn" onclick="siQueryReadStatus('intake')">查询已读</button>`;
+            readBoxId = siReadBoxId('intake');   // 〔D6·S16〕
         }
         // intake 通道无 notified_at 列（方案 §4 列清单明列 5 列：status/message_key/error/read_at/sent_by，
         //   不含 notified_at）——siNotifyStatusText 的 notifiedAt 传 null 时天然回退「✅ 已通知」（无时刻）文案。
-        return siNotifyRowHtml(label, iss.intake_notify_status, iss.intake_read_at, null, btns);
+        //   〔J18·§1.3〕故本通道**只能出单时刻**：查已读命中已读后行内是 `📖 已读 · 于 {已读时间}`，不得宣称双时刻。
+        return siNotifyRowHtml(label, iss.intake_notify_status, iss.intake_read_at, null, btns, undefined, iss.intake_notify_error, readBoxId);   // intake 无 notified_at 列（J18 单时刻）
     }
 
     // 对接测试侧（工期对接测试与风险等级拆分 方案 v1.1 §6/§7·C4b）：D19 触发主体=开发视角——权限=本单
@@ -2754,7 +2892,8 @@
         // 记录，行内追加「（演练）」，避免用户把演练态误读成真实已送达（detail 读镜像白名单已含
         // liaison_test_notify_message_key 列，直接可用，无需另补接口）。
         const isDryRunSent = ns === 'sent' && String(iss.liaison_test_notify_message_key || '').indexOf('dryrun-') === 0;
-        const label = `对接测试 ${esc(recipientName)}${isDryRunSent ? '（演练）' : ''}`;
+        // 〔J20·D-1〕dry-run 后缀全站统一为「（演练·未真实发送）」——收敛现状三种写法
+        const label = `对接测试 ${esc(recipientName)}${isDryRunSent ? '（演练·未真实发送）' : ''}`;
         // [S12 双路审查 codex 287 号 M-2 收口] 本行读回执诚实占位——下方通知区共享文案（siRenderNotify
         // 底部"「查已读」查询钉钉已读回执"，:2653）是对整块 6 行通知的统一说明，但本通道**没有** ①
         // 「查询已读」按钮（上方 btns 只拼 发送/重发，从不拼查已读）② notify-read-status 端点的对应
@@ -2765,8 +2904,10 @@
         // 占位（不依赖读者去关联底部共享文案的隐含例外），非编造新按钮/新查询能力（那是另一条独立
         // 工作量更大的改造，本次不做，codex 287 号建议原话"若明确不支持，则删除该通道的 read_at 契约
         // 或将通知区统一文案改为按通道显示"——本处取后一种更小侵入的做法）。
+        // 〔J17·§6.4-16〕本句**保留**（J17 原写"移除该行查已读按钮"，现场复核该按钮本就不存在 ⇒ 落为
+        //   "保留这句 u-hint + 换 muted 槽 + 该通道永不出已读句"），只补 u-nt-muted 槽类，措辞零改动。
         const noReadQueryNote = (ns === 'sent')
-            ? `<div class="u-hint" style="margin:-2px 0 6px">— 本通道不支持查询已读（非"尚未读"，结构性无法查询）</div>` : '';
+            ? `<div class="u-hint u-nt-muted" style="margin:-2px 0 6px">— 本通道不支持查询已读（非"尚未读"，结构性无法查询）</div>` : '';
         const selfUid = Number(currentUser && currentUser.id);
         const isSelf = Number.isFinite(selfUid) && selfUid > 0 && Number(recipientId) === selfUid;
         let btns = '';
@@ -2774,18 +2915,25 @@
         // 可发条件同 intake 行显式枚举口径：not_sent/falsy/failed/sending（sending 允许再点——命中超窗
         //   恢复时后端会正常抢占；未超窗则后端 409「已有发送在途」）。
         if (canOperate && sendable && !isSelf && (ns === 'not_sent' || ns === 'failed' || ns === 'sending' || !ns)) {
-            const btnLabel = (ns === 'failed' || ns === 'sending') ? '重发' : '发送通知';
+            const btnLabel = (ns === 'failed' || ns === 'sending') ? '重试' : '发送通知';   // 〔S10〕同 intake
             // [codex 276 号审 M-2] sending 且未超 10 分钟 stale 窗口（与后端 M-1 恢复窗口同值）时前端禁用
             //   按钮——纯 UI 友好（真正的并发/超窗判定权威仍在后端 CAS，这里只是不给用户一个大概率会撞
             //   409「已有发送在途」的可点按钮）。can_notify 这类后端计算字段的完整重构不做（挂账，403
             //   兜底已在：即便前端判断有误差，点击后端仍会正确拒绝/放行）。
             if (ns === 'sending' && !siLiaisonTestNotifySendingIsStale(iss.liaison_test_attempt_started_at)) {
-                btns += `<button class="u-btn-secondary u-nb-btn" disabled title="发送中，稍后可重试">${btnLabel}</button>`;
+                // 〔S10·§3.2〕disabled 分支不再沿用 btnLabel（原显「重试」＝一颗写着"重试"却点不动的按钮），
+                //   改统一的发送中态文案；title 保留原措辞不动。
+                btns += `<button class="u-btn-secondary u-nb-btn" disabled title="发送中，稍后可重试">发送中…</button>`;
             } else {
-                btns += `<button class="u-btn-secondary u-nb-btn" onclick="siNotifyLiaisonTestClick()">${btnLabel}</button>`;
+                btns += `<button class="u-btn-secondary u-nb-btn" data-nr-label="${label}" onclick="siNotifyLiaisonTestClick()">${btnLabel}</button>`;
             }
         }
-        const rowHtml = siNotifyRowHtml(label, ns, iss.liaison_test_read_at, iss.liaison_test_notified_at, btns);
+        // 〔J17·§1.3〕readAt 位**显式传 null 不传 liaison_test_read_at**：该列是死列（全仓只有两处写 NULL、
+        //   查已读端点 :13851 的 type 白名单也不含 liaison_test），本通道结构性永远查不到已读 ⇒ 行内
+        //   **永不出已读句**，只有「✅ 已于 {时间} 通知 / ⚠️ 通知失败（{原因}） / — 未发送」三形态。
+        //   写死而不是"反正它恒 NULL"：脏数据或将来误写一次，就会出现一句本通道根本无法产生的「📖 已读」，
+        //   那是对用户的虚假承诺（同 J17 判"死按钮=虚假承诺"的口径）。
+        const rowHtml = siNotifyRowHtml(label, ns, null, iss.liaison_test_notified_at, btns, undefined, iss.liaison_test_notify_error);
         // [281 号对抗审 N1 采纳] 离态限定——sending 态但单据已离开「待对接测试」（如被打回/继续推进），
         // 说明这次发送的最终结果不会再由本页刷新自然解决（发送按钮已随 sendable=false 隐藏）。
         // 纯展示提醒，不加按钮、不改任何机制。
@@ -2809,7 +2957,7 @@
         if (ns !== 'sending') {
             siLiaisonTestWritebackFailedIds.delete(warnKey);
         } else if (siLiaisonTestWritebackFailedIds.has(warnKey)) {
-            return rowHtml + `<div class="u-hint" style="color:#dc2626;margin:-2px 0 6px">⚠️ 通知已发出但留痕失败，请勿重发，联系管理员核对</div>` + staleAwayHint + noReadQueryNote;
+            return rowHtml + `<div class="u-hint u-nt-fail" style="margin:-2px 0 6px">⚠️ 通知已发出但留痕失败，请勿重发，联系管理员核对</div>` + staleAwayHint + noReadQueryNote;
         }
         return rowHtml + staleAwayHint + noReadQueryNote;
     }
@@ -2820,6 +2968,7 @@
     function siRenderReleaseExecutorNotifyRow(iss) {
         if (!iss.release_assignee_id) return '';
         const label = `上线开发 ${esc(iss.release_assignee_name || ('#' + iss.release_assignee_id))}`;
+        // 上线开发（issue 级）：**纯只读无按钮**且 §1.1b 未列 error 列 ⇒ 不传（显式登记，非遗漏）
         return siNotifyRowHtml(label, iss.release_assignee_notify_status, iss.release_assignee_read_at, iss.release_assignee_notified_at, '');
     }
 
@@ -2835,14 +2984,14 @@
         //   message_key_missing 边界会落 status='failed' 但快照已固化、后端仍能按快照重发（原按 sent 判会在
         //   随后清空当前手机号时把可重发场景误藏成「无手机号」）。有快照→按快照重发（不看当前号）；无快照→首发依赖当前号。
         const historicalNoSnapshot = iss.requester_notify_status === 'sent' && !hasSnapshot;   // 迁移前旧数据（生产 0 行），无快照不支持重发/查已读
-        let btns = '', extraNote = '';
+        let btns = '', extraNote = '', readBoxId = '';
         if (canOperateRequester && sendableStatus) {
             if (hasSnapshot) {
-                btns += `<button class="u-btn-secondary u-nb-btn" onclick="siNotifyRequesterClick()">重新通知</button>`;
+                btns += `<button class="u-btn-secondary u-nb-btn" data-nr-label="${label}" onclick="siNotifyRequesterClick()">重新通知</button>`;
             } else if (historicalNoSnapshot) {
                 extraNote = '<span class="si-muted">历史记录无快照，不支持重发/查已读</span>';
             } else if (hasCurrentPhone) {
-                btns += `<button class="u-btn-secondary u-nb-btn" onclick="siNotifyRequesterClick()">发送通知</button>`;
+                btns += `<button class="u-btn-secondary u-nb-btn" data-nr-label="${label}" onclick="siNotifyRequesterClick()">发送通知</button>`;
             } else {
                 extraNote = '<span class="si-muted">无手机号，无法通知</span>';
             }
@@ -2850,8 +2999,9 @@
         // 已读态隐藏「查询已读」（用户 2026-07-19·同 dev 侧口径）。
         if (canQueryRead && iss.requester_notify_status === 'sent' && iss.requester_notify_message_key && hasSnapshot && !iss.requester_read_at) {
             btns += `<button class="u-btn-secondary u-nb-btn" onclick="siQueryReadStatus('requester')">查询已读</button>`;
+            readBoxId = siReadBoxId('requester');   // 〔D6·S16〕
         }
-        return siNotifyRowHtml(label, iss.requester_notify_status, iss.requester_read_at, iss.requester_notified_at, btns, extraNote);
+        return siNotifyRowHtml(label, iss.requester_notify_status, iss.requester_read_at, iss.requester_notified_at, btns, extraNote, iss.requester_notify_error, readBoxId);
     }
 
     // 受理排期改造 C7：技术负责人通知行（§6）——tech_lead_id 已发起才渲染。重发权限=admin∨受理人∨建单人（§6·前端镜像·后端兜底）。
@@ -2873,27 +3023,37 @@
         let btns = '';
         // 发送/重发须有 request_event_id（正常与 tech_lead_id 原子同设·防脏数据/裁剪导致无版本锚点时发不出）
         if (canSend && iss.tech_lead_notify_request_event_id && iss.tech_lead_notify_status === 'not_sent' && !hasComment) {
-            btns += `<button class="u-btn-primary u-nb-btn" onclick="siResendTechConsult()">发送通知</button>`;
+            // 〔S12·D4〕全站唯一 primary 通知按钮 → secondary（通知是伴随动作非主流程；
+            //   卡点强调已由详情页红条 si-notify-alert 承担，红条驻留比按钮层级更强）
+            btns += `<button class="u-btn-secondary u-nb-btn" data-nr-label="${label}" onclick="siResendTechConsult()">发送通知</button>`;
         } else if (canSend && iss.tech_lead_notify_request_event_id) {
-            btns += `<button class="u-btn-secondary u-nb-btn" onclick="siResendTechConsult()">${iss.tech_lead_notify_status === 'sent' ? '重发' : '重发通知'}</button>`;
+            // 〔S11〕sent 态＝「重新通知」／其余（failed 等）＝「重试」，对齐 §3.2 按钮模板
+            btns += `<button class="u-btn-secondary u-nb-btn" data-nr-label="${label}" onclick="siResendTechConsult()">${iss.tech_lead_notify_status === 'sent' ? '重新通知' : '重试'}</button>`;
         }
-        return siNotifyRowHtml(label, iss.tech_lead_notify_status, iss.tech_lead_read_at, iss.tech_lead_notified_at, btns);
+        // 本行**不挂查已读结果框**：技术负责人通道从不渲染「查询已读」按钮（读状态端点 type 白名单不含 tech_lead）。
+        return siNotifyRowHtml(label, iss.tech_lead_notify_status, iss.tech_lead_read_at, iss.tech_lead_notified_at, btns, undefined, iss.tech_lead_notify_error);
     }
     async function siResendTechConsult() {
         const iss = siDetail && siDetail.issue;
         if (!iss || !iss.tech_lead_notify_request_event_id) return;
         if (siNotifyInflight) return;
         siNotifyInflight = true;
+        // 〔S15·J23〕发送中 disabled；同一集合复用作 R3 哨兵（见 siRefreshAfterNotify 注释）
+        let lock = null;
         try {
+            lock = siLockNotifyBtns('.u-nb-btn[onclick="siResendTechConsult()"]');   // 放 try 内：抛了也能复位 inflight
             // 携带 expected_request_event_id（§6·版本一致·期间又换人/连发→后端 409 VERSION_CONFLICT）
             const r = await siApi('/sys-issues/' + iss.id + '/resend-tech-consult', { method: 'POST', body: { expected_request_event_id: iss.tech_lead_notify_request_event_id } });
-            if (!r.ok) { siApiErr(r); return; }
+            if (!r.ok) { siNotifyErr(r); lock.restore(); return; }   // 〔S1〕非 ok 不刷新（沿现状）⇒ 必须自己把按钮放回来
+            // 〔矩阵 T1·A 类删〕原五分支 toast（已发送／已重发／发送失败／重发失败／已触发发送）**整体删除**：
+            //   五分支的结果在行内技术负责人行都会可见地变化（not_sent→sent／failed 各自换状态句，
+            //   failed 还带 `（{原因}）`），toast 是纯重复反馈。失败绝不静默这条红线由行内失败句 + R3 兜底承担。
+            //   （P10 那条"首发说已发送、再点才叫重发"的措辞分流随之退场——行内状态句本就带时刻，
+            //     不需要再用动词区分是第几次。）
+            // 〔B1〕两分支（sent / failed·外加"已触发"兜底态）读回 status 只为定兜底动词：
+            //   原实现无差别用「已发送」，会在"发送失败 + 刷新失败"时谎报成功。
             const st = r.data && r.data.tech_lead_notify_status;
-            // P10（用户裁定尾巴）：首发/重发文案分流——发起后手动首发（原 not_sent）说"已发送"，再次点才是"重发"
-            const wasFirst = iss.tech_lead_notify_status === 'not_sent';
-            showToast(st === 'sent' ? (wasFirst ? '技术负责人通知已发送' : '技术负责人通知已重发')
-                : (st === 'failed' ? (wasFirst ? '发送失败（可稍后再试）' : '重发失败（可稍后再试）') : '已触发发送'), st === 'failed' ? 'error' : 'success');
-            await siAfterAction();
+            await siRefreshAfterNotify(lock, lock.label('技术负责人'), { sentOk: st === 'sent' });
         } finally { siNotifyInflight = false; }
     }
 
@@ -2913,7 +3073,7 @@
                 ${siRenderLiaisonTestNotifyRow(iss)}
                 ${siRenderCreatorNotifyRow(iss, canOperate, canOperate)}
                 ${siRenderRequesterNotifyRow(iss, canOperate, canOperate)}
-                <div style="font-size:11px;color:#9ca3af;margin-top:6px">变更流通知均<b>手动触发</b>——指派/改派后在此点「发送通知」；「查已读」查询钉钉已读回执。<br>
+                <div class="u-nt-muted" style="font-size:11px;margin-top:6px">变更流通知均<b>手动触发</b>——指派/改派后在此点「发送通知」；「查已读」查询钉钉已读回执。<br>
                     通知行显示的时间与状态是<b>最近一次发送</b>的记录；若期间发生过改派/打回，旧「已通知」不代表已就当前动作重新通知，请按需重发。</div>
             </div>`;
         }
@@ -2947,7 +3107,7 @@
             ${siRenderCreatorNotifyRow(iss, canOperateCreator, canQueryRead)}
             ${siRenderRequesterNotifyRow(iss, canOperateRequester, canQueryRead)}
             ${siRenderReleaseExecutorNotifyRow(iss)}
-            <div style="font-size:11px;color:#9ca3af;margin-top:6px">bug 通知均<b>手动触发</b>——点对应「发送/重发」按钮；「查已读」查询钉钉已读回执。</div>
+            <div class="u-nt-muted" style="font-size:11px;margin-top:6px">bug 通知均<b>手动触发</b>——点对应「发送/重发」按钮；「查已读」查询钉钉已读回执。</div>
         </div>`;
     }
 
@@ -3280,19 +3440,139 @@
     // 刷新详情 + 列表
     async function siAfterAction() { await siLoadList(); if (siOpenId) await siRenderDrawer(siOpenId); }
 
+    // ===== 〔通知统一 N3-2〕R3 兜底 + S15 发送中 disabled 的两个共享件 =====
+    //   为什么抽出来：A 类删 toast 的 11 个调用点（T1/T4/T5/T6/T8/T11/T12/T13/T14/T15/T16）走的是同一套
+    //   「锁按钮 → 发送判定 → 独立刷新段 → 哨兵判定 → 抽屉版兜底」流程，逐点手写必然漂移（Collab 的 B1
+    //   静默就是"六个调用点里有一条链路的哨兵集合算错"造出来的）。
+    //
+    // ① siLockNotifyBtns(sel)：〔S15·J23〕点击即禁用并改「发送中…」，返回按钮集合与还原闭包。
+    //    选择器一律**限定在 #siDBody 内**——通知按钮全部由 siRenderDrawer 渲进抽屉体（现场已逐个核对：
+    //    siNotifyRelayClick/CreatorClick/RequesterClick/IntakeClick/HoldCreatorClick/LiaisonTestClick/
+    //    DevSend/ResumeDevClick/siResendTechConsult 共 11 个渲染点全在 siRender*NotifyRow 里，弹窗/操作栏
+    //    零命中），限定域是防将来有人把同名 onclick 复制进 siModal 时把弹窗按钮误锁进来。
+    //    ⚠️ 五个调用点一律把它写在 `try` **里面**：本函数走 querySelectorAll，选择器写错会抛
+    //    SyntaxError；若在 `siNotifyInflight = true` 之后、`try` 之前抛，finally 不会执行 ⇒ inflight
+    //    永久卡 true ⇒ **全页通知按钮点了都没反应**，还得刷新页面才恢复。放进 try 里，抛了也能复位。
+    function siLockNotifyBtns(sel) {
+        const btns = Array.from(document.querySelectorAll('#siDBody ' + sel));
+        btns.forEach(b => { b.dataset.originalText = b.textContent; b.disabled = true; b.textContent = '发送中…'; });
+        return {
+            btns,
+            // 刷新成功时按钮节点已被整体重渲染替换（isConnected=false），此时既不需要也不能还原；
+            //   只有"刷新没生效/失败提前 return"的路径才需要把按钮从「发送中…」放回原文案。
+            restore() {
+                btns.forEach(b => {
+                    if (!b.isConnected) return;
+                    b.disabled = false;
+                    if (b.dataset.originalText) { b.textContent = b.dataset.originalText; delete b.dataset.originalText; }
+                });
+            },
+            // 兜底文案里的 `{行标签}`：优先取按钮上的 data-nr-label（渲染时就写死了「开发 张三」这类含人名的
+            //   行标签，比在这里按 siDetail 重算一遍标签逻辑可靠——重算＝同一份标签规则写两遍必漂移）。
+            label(fallback) { return (btns[0] && btns[0].dataset.nrLabel) || fallback; },
+        };
+    }
+
+    // ② siRefreshAfterNotify(lock, label, opts)：〔R3·J11/J12〕**独立刷新段**——与"发送结果判定段"分离。
+    //    本页 R3 形态（矩阵 §1 页级事实）：siAfterAction 无 try/catch、siApi/authFetch 也没有 ⇒ 异常一路
+    //    冒泡；但**光靠 catch 判不全**——siLoadList(!r.ok) 与 siRenderDrawer(!r.ok / siOpenId!==id) 都是
+    //    **静默 return 不抛**，那两条路径下 catch 永远捕不到而行内确实没刷新。故判定主源＝**DOM 哨兵**
+    //    （siRenderDrawer 末尾 `siDBody.innerHTML = …` 是整体替换 :2133 ⇒ 刷新成功则捕获到的按钮节点
+    //    必然 isConnected=false），try/catch 只负责把冒泡异常止在这里、不打断后续判定。
+    //    〔哨兵集合与自摘节点〕Collab 的 B1 教训是"哨兵集合里混进了会被 remove() 摘掉的节点 ⇒ every 恒假
+    //      ⇒ 兜底永不触发"。本页现场核对结论：**通知按钮无任何自摘路径**（无 Collab 那种 `oldErr.remove()`
+    //      的错误框、无按钮级 DOM 删除），故 lock.btns 可整体用作哨兵集合，无需过滤——这条是**登记的核对
+    //      结论**不是"没想过"；将来若给本页加错误框/重试按钮之类会被 remove 的节点，必须在这里补 filter。
+    //    〔空集合退锚点·S3 修正〕按钮集合为空时（按钮被上一次渲染隐藏、或选择器漏改）退锚点判定。
+    //      ⚠️ **锚点不能取 `#siDBody` 本身**——那是个**恒真常量不是哨兵**：siRenderDrawer 改的是它的
+    //      `innerHTML`，容器元素本体从不被替换，`isConnected` 永远 true ⇒ 一律判 stale ⇒ 按钮集合一空就
+    //      必弹兜底（初版就是这么写的，属"看起来在判定、其实没判"的假哨兵）。
+    //      现改**捕它的第一个子节点**：`innerHTML = …` 会把旧子节点整批摘出文档 ⇒ 旧 firstElementChild
+    //      的 isConnected 由 true 变 false，是**真会变的信号**。子节点也取不到（body 空）时才落
+    //      显式 `stale = true` 的 fail-loud 常量——那一条是**有意的常量**，注释里就这么写，不冒充哨兵。
+    //    〔sentOk＝动词槽·B1 修正〕原实现把 sentOk 当"要不要发兜底"的开关，于是 `st==='failed'` 走默认
+    //      true ⇒ **发送失败 + 刷新失败会弹「已发送，详情刷新失败」＝谎报成功**（Collab B2' 同款形态，
+    //      本页四个 A 删点全中）。现在 sentOk **只决定动词**，兜底本身**恒发**：
+    //        sentOk=true  → `{行标签}：已发送，详情刷新失败，可重开抽屉查看`
+    //        sentOk=false → `{行标签}：发送未成功，详情刷新失败，可重开抽屉查看`（动词对齐真实动作·Collab 先例）
+    //      "失败不静默"红线两头都要守：既不能把失败说成成功，也不能因为失败就什么都不说。
+    //      **本函数没有"消音"选项**——已有独家 toast 的 A' 分支走下面的 siRefreshQuiet，不从这里开口子。
+    //    返回值＝刷新是否生效（true=行内已是新态）。
+    async function siRefreshAfterNotify(lock, label, opts) {
+        const o = opts || {};
+        const sentOk = o.sentOk !== false;
+        const stale = await siRefreshAndDetectStale(lock);
+        //   〔J12·§6.6 ①〕本页 11 个 A 类调用点全部宿主在**抽屉**（siDrawer）⇒ 一律**抽屉版**兜底文案；
+        //   批次执行人两行（T32/T34）宿主是 siBatchOverlay 弹层，走弹层版、不经本函数（见 siExecutorRowNotify）。
+        if (stale) showToast(`${label}：${sentOk ? '已发送' : '发送未成功'}，详情刷新失败，可重开抽屉查看`, 'error');
+        return !stale;
+    }
+
+    // ③ siRefreshQuiet(lock)：**A' 分支专用**——该分支已经弹过自己的独家 toast（幂等提示/并发变更/聚合计数
+    //    /siApiErr 失败提示），只需要"刷新 + 还原按钮"，不能再叠一条兜底（叠了不是重复就是自相矛盾：
+    //    「3 人已发送」后面跟一句「发送未成功」）。
+    //    ⚠️ **它不是 siRefreshAfterNotify 的消音开关**：允许用它的前提是**这条分支上确实已经 showToast 过**。
+    //    现有调用点（改动时请同步这份清单）——**6 个调用点覆盖 7 条分支**（数字刻意分开写：writeback 的
+    //    dry_run 与"发送+留痕双失败"两条分支落在同一句 `else await siRefreshQuiet(lock)` 上，是 1 个调用点）：
+    //      ① siNotifyManual · skipped          ② siNotifyManual · superseded
+    //      ③ siNotifyLiaisonTestClick · !r.ok（siNotifyErr 已提示）   ④ 同 · concurrent_changed
+    //      ⑤ 同 · writeback 非 sent_externally（dry_run／双失败两分支共用）
+    //      ⑥ siNotifyResumeDevClick · 聚合五态
+    //    每处上文都有它自己的 showToast（③ 是 siNotifyErr 内部必发）——**这是准用 quiet 的前提，有静态断言守着**。
+    async function siRefreshQuiet(lock) { return !(await siRefreshAndDetectStale(lock)); }
+
+    // 刷新 + 哨兵判定的共同体（两个出口共用，避免判定逻辑写两份漂移）。返回 true＝刷新**没生效**。
+    async function siRefreshAndDetectStale(lock) {
+        const body = document.getElementById('siDBody');
+        const anchorChild = body ? body.firstElementChild : null;   // S3：捕**会被 innerHTML 换掉的子节点**
+        const sentinel = (lock && lock.btns.length) ? lock.btns : (anchorChild ? [anchorChild] : []);
+        try { await siAfterAction(); } catch (e) { /* 冒泡异常止于此；成败判定交给下面的哨兵 */ }
+        const stale = sentinel.length ? sentinel.every(n => n.isConnected) : true;   // 空集合＝判不了＝fail-loud 常量
+        if (lock) lock.restore();
+        return stale;
+    }
+
+    // 〔S1〕通知域专用错误出口——非 ok 响应的原因走**冻结映射表**（J8），不再 siApiErr 直出后端 `error` 原文。
+    //   ⚠️ **只接通知域 7 个调用点**（siNotifyManual／siNotifyLiaisonTestClick／siNotifyDevSend／
+    //   siNotifyResumeDevClick／siResendTechConsult 各 1 + siExecutorRowNotify 2）：`siApiErr` 本体维持不动，
+    //   它还服务本页**另外 54 个**非通知 CRUD 调用点（现场计数，非估数），那些端点的错误码根本不在本次冻结
+    //   的映射表里，硬接会把「变更流单据 OA 流程号必填」这类精确提示统统压成「未知原因」＝信息倒退
+    //   （裁定 3③ 口径）。两个出口并存**是有意的口径差，不是遗漏**：
+    //   通知域＝文案受冻结表管辖、禁透传；非通知域＝沿用后端原文。矩阵 T42 已按此登记。
+    function siNotifyErr(r) {
+        if (r && r.aborted) return null;   // 401 已在 authFetch 内 logout，不再叠提示（同 siApiErr 首行）
+        showToast('通知失败（' + siErrText(r, r.data) + '）', 'error');
+        return null;
+    }
+
+    // 〔D6·S16〕查已读结果框 id —— 命名规则对齐 Data_Correction 的 `corrReadBox_{key}[_{rid}]`（矩阵 S16）。
+    //   只在**渲染了「查询已读」按钮的那一行**才拼容器（矩阵："6 处查已读按钮旁新增结果框 span"）：
+    //   已读固化后按钮随行隐藏、容器也一并消失，正好让 siQueryReadStatus 的"刷新后 box 还在不在"成为
+    //   判定刷新是否生效的第二重信号（详见该函数注释）。
+    function siReadBoxId(type, devUserId) { return 'siReadBox_' + type + (devUserId != null ? '_' + devUserId : ''); }
+
     // C4 bug 流手动通知（POST notify-relay/notify-creator/notify-requester；按后端回的落库状态 toast + 刷新详情看通知区）。
     //   iss 不作参数——一律读 siDetail.issue（本区按钮全部内联在通知区行内，onclick 字符串里传不了对象引用，
     //   与 siDoAction 系列一致的「读全局 siDetail」范式）。
     let siNotifyInflight = false;   // codex31 M-3/ultracode txn：inflight 守卫防双击/重复点导致重复钉钉推送 + read_at 重复重置
-    async function siNotifyManual(endpoint, label, statusKey, errKey) {
+    // 〔N3-2〕签名新增第 5 参 btnSel（本行发送按钮的选择器）：S15 的发送中 disabled 与 R3 的哨兵集合都要它。
+    //   label 形参此后只作**兜底名**——真正用于 toast/兜底的是按钮上的 `data-nr-label`（含人名的行标签），
+    //   取不到才退回这个静态通道名（S17：静态名也已从「通知报障人」等动词式改成行标签措辞）。
+    async function siNotifyManual(endpoint, label, statusKey, errKey, btnSel) {
         const iss = siDetail && siDetail.issue;
         if (!iss) return;
         if (siNotifyInflight) return;
         siNotifyInflight = true;
+        let lock = null, rowLabel = label;
         try {
+            lock = siLockNotifyBtns(btnSel);   // 放 try 内：抛了也能复位 inflight
+            rowLabel = lock.label(label);
             const r = await siApi('/sys-issues/' + iss.id + '/' + endpoint, { method: 'POST' });
-            if (!r.ok) { siApiErr(r); return; }
-            if (r.data && r.data.skipped) { showToast(label + '：无需通知自己', 'info'); await siAfterAction(); return; }   // self-guard（notify-creator，M-2）
+            if (!r.ok) { siNotifyErr(r); lock.restore(); return; }   // 〔S1〕非 ok 沿现状不刷新 ⇒ 须自行把按钮放回原文案
+            // 〔矩阵 T2·A' 留〕自指跳过：后端什么也没发、行内零变化 ⇒ toast 是唯一反馈通道，保留。
+            //   刷新照跑（现状行为·低优先不动），但走 **siRefreshQuiet**：本分支上一行刚弹过独家 toast，
+            //   再叠一句「发送未成功，详情刷新失败」既重复又误导（压根没发起过发送，也没有什么可刷新的）。
+            if (r.data && r.data.skipped) { showToast(rowLabel + '：无需通知自己', 'info'); await siRefreshQuiet(lock); return; }   // self-guard（notify-creator，M-2）
             const st = r.data && r.data[statusKey];
             // ⭐ 角色权限重构 C0（codex 四轮审 MED-2）：superseded = 后端回写被"收件人围栏"拒绝，
             //   即单据在发送期间已进入新一轮（通知目标被清/换人），本次投递**未计入当前轮次**。
@@ -3301,23 +3581,40 @@
             //   ⚠️ 严格 === true（codex 五轮审 LOW）：本函数被四个通知端点共用，将来任一端点若返回
             //     字符串 "false" 或同名异义字段，truthy 判断会误入本分支给出不匹配文案。
             if (r.data && r.data.superseded === true) {
-                showToast(label + '：' + ((r.data && r.data.message) || '该单已进入新一轮，本次通知未计入当前轮次'), 'warning');
-                await siAfterAction();
+                // 〔矩阵 T3·A' 留〕行会刷但语义不对应（行内显示的是当前轮的状态，不是本次投递的结果）⇒ toast 保留。
+                //   〔J8〕删掉 `r.data.message` 后端原文透传：改用**冻结映射表 §5 已登记的固定文案**
+                //   （`superseded` → 「该单已进入新一轮，本次通知未计入当前轮次」，与后端现文案逐字一致）。
+                //   sentOk:false 同 skipped——"未计入当前轮次"不能被兜底句改口成"已发送"。
+                showToast(rowLabel + '：该单已进入新一轮，本次通知未计入当前轮次', 'warning');
+                await siRefreshQuiet(lock);   // 上一行已是独家 toast，不叠兜底
                 return;
             }
-            if (st === 'sent') showToast(label + '：钉钉已发送', 'success');
-            else if (st === 'failed') showToast(label + '：发送失败（' + ((r.data && r.data[errKey]) || '未知') + '）', 'error');
-            else showToast(label + '：已触发', 'success');
-            await siAfterAction();
+            // 〔矩阵 T4/T5/T6·A 类删〕三分支 toast 全删——行内对应通道行的状态句就是反馈：
+            //   sent → `✅ 已于 {时间} 通知`／failed → `⚠️ 通知失败（{原因}），可重试`（S2 已把
+            //   `*_notify_error` 一路传进 siNotifyStatusText，§1.1b 落死四列后端必写、详情 SELECT * 必带）／
+            //   其余 status → 状态句照刷。**T5 的后端原文透传（`r.data[errKey]` 直出）随本次删除一并消失**
+            //   （J8 五处透传之一），原因文案统一由行内失败句走冻结映射表产出。
+            //   ⚠️ **errKey 形参自本批起无任何消费点**（如实登记，不是漏改）：它随 T5 的透传一起失去了唯一
+            //     读点。保留的理由只有一个——五个调用点因此仍是一张完整的**通道契约表**
+            //     （端点 / 行标签 / status 字段 / error 字段 / 按钮选择器），加第 6 个通道时照着填即可；
+            //     删掉它，"这个通道的失败原因落在哪一列"这条信息就只剩注释里有。**若审查认为死参数应删，
+            //     删它是安全的**（五个调用点去掉第 4 个实参即可，无其他连带）。
+            // 〔B1·sentOk 动词门控〕`st` 在这里**复活**（原本删完三分支后成了未消费变量）：
+            //   它只有 `'sent'` 才算真发成功。`failed`／其余 status 走「发送未成功」版兜底——
+            //   否则"发送失败 + 刷新失败"会弹出「已发送，详情刷新失败」＝谎报成功（B2' 同族）。
+            await siRefreshAfterNotify(lock, rowLabel, { sentOk: st === 'sent' });
         } finally { siNotifyInflight = false; }
     }
-    function siNotifyRelayClick() { return siNotifyManual('notify-relay', '通知对接人', 'relay_notify_status', 'relay_notify_error'); }
-    function siNotifyCreatorClick() { return siNotifyManual('notify-creator', '通知建单人', 'creator_notify_status', 'creator_notify_error'); }
-    function siNotifyRequesterClick() { return siNotifyManual('notify-requester', '通知报障人', 'requester_notify_status', 'requester_notify_error'); }
+    // 〔S17〕静态兜底名从动词式（通知对接人/通知报障人…）改为**行标签措辞**——运行时优先取按钮
+    //   data-nr-label（`对接人 张三` 这类含人名的完整行标签），这里的值只在按钮取不到时兜底。
+    //   尤其 requester：原 toast 说「通知报障人」而行标签是「业务方 …」，同一件事两种叫法（S17 点名项）。
+    function siNotifyRelayClick() { return siNotifyManual('notify-relay', '对接人', 'relay_notify_status', 'relay_notify_error', '.u-nb-btn[onclick="siNotifyRelayClick()"]'); }
+    function siNotifyCreatorClick() { return siNotifyManual('notify-creator', '建单人', 'creator_notify_status', 'creator_notify_error', '.u-nb-btn[onclick="siNotifyCreatorClick()"]'); }
+    function siNotifyRequesterClick() { return siNotifyManual('notify-requester', '业务方', 'requester_notify_status', 'requester_notify_error', '.u-nb-btn[onclick="siNotifyRequesterClick()"]'); }
     // 建单优化批 C1 §4 改动点2·前端 C2：通知对接人受理（响应体字段 intake_notify_status/intake_notify_error，
     //   与 recordSysIntakeNotify 落库列同名）——标签用"通知对接人受理"而非"通知对接人"，与既有 relay
     //   通道的"通知对接人"（siNotifyRelayClick）区分，防两条 toast 文案混淆成同一件事。
-    function siNotifyIntakeClick() { return siNotifyManual('notify-intake', '通知对接人受理', 'intake_notify_status', 'intake_notify_error'); }
+    function siNotifyIntakeClick() { return siNotifyManual('notify-intake', '对接人受理', 'intake_notify_status', 'intake_notify_error', '.u-nb-btn[onclick="siNotifyIntakeClick()"]'); }
     // 对接测试通知（工期对接测试与风险等级拆分 方案 v1.1 §6/§7·C4b）：不能复用 siNotifyManual——① 需在
     //   body 携带 expected_cycle（详情 DTO liaison_test_cycle_no，方案 §6"DTO 契约"唯一来源，周期令牌防
     //   reopen-ABA）；② 响应多一个 concurrent_changed 分支（写回 CAS 被并发覆盖，外部消息可能已送达但
@@ -3327,16 +3624,23 @@
         if (!iss) return;
         if (siNotifyInflight) return;
         siNotifyInflight = true;
+        let lock = null, rowLabel = '对接测试';
         try {
+            lock = siLockNotifyBtns('.u-nb-btn[onclick="siNotifyLiaisonTestClick()"]');   // 放 try 内：抛了也能复位 inflight
+            rowLabel = lock.label('对接测试');
             const r = await siApi('/sys-issues/' + iss.id + '/notify-liaison-test', { method: 'POST', body: { expected_cycle: iss.liaison_test_cycle_no } });
             // [281 号对抗审 R10+N1 采纳] 原先 !r.ok 直接 return，按钮态停留在旧渲染上——504/409 这类
             // "结果未知/并发冲突"响应后端状态其实已经变了（如 sending 未超窗、或已被别的请求抢占），
             // 不刷新会让用户对着一颗过期的按钮反复点击、反复撞同一个错误。统一 siApiErr 提示后补一次
             // siAfterAction() 刷新详情，按钮态随后端真实态重算。
-            if (!r.ok) { siApiErr(r); await siAfterAction(); return; }
+            //   ⚠️〔N3-2 登记·不得"顺手统一"成 return 不刷新〕本行与其余通道的 `!r.ok → return` **刻意不同**，
+            //     是 281 号对抗审 R10 的采纳项：该端点 504/409 后端状态已变，刷新是收益不是负收益。
+            //     sentOk:false ——这条路径没发成功，兜底句不得说"已发送"（siApiErr 已给出失败提示）。
+            if (!r.ok) { siNotifyErr(r); await siRefreshQuiet(lock); return; }   // 〔S1〕siNotifyErr 已提示 ⇒ 刷新走 quiet 不叠兜底
             if (r.data && r.data.concurrent_changed === true) {
-                showToast('通知对接测试：该单状态已并发变化，请查看当前通知状态', 'warning');
-                await siAfterAction();
+                // 〔矩阵 T7·A' 留〕行会刷但语义不对应（显示的是当前落库态，不是本次投递结果）
+                showToast(rowLabel + '：该单状态已并发变化，请查看当前通知状态', 'warning');
+                await siRefreshQuiet(lock);   // 上一行已是独家 toast
                 return;
             }
             // [codex 278/279 号审 M-3/H-1] writeback_failed:true——结果回写失败，但"外部是否真的发出去了"
@@ -3346,35 +3650,46 @@
             //   sent_externally===false：外部发送本就明确失败（同时回写也失败）——**不该劝阻重发**，
             //   这次确定没送达，用户理应能补发；只做独立提示，不记入持续警示 Set。
             if (r.data && r.data.writeback_failed === true) {
+                let wbDeletedToast = false;   // 本支是否属于「A 类删了 toast」⇒ 决定走 AfterNotify 还是 Quiet
                 if (r.data.sent_externally === true) {
                     siLiaisonTestWritebackFailedIds.add(siLiaisonTestWarnKey(iss.id, iss.liaison_test_cycle_no));
-                    showToast('通知已发出但留痕失败，请勿重发，联系管理员核对', 'error');
+                    // 〔矩阵 T8·A 类删〕这条 toast 删除：同一句话已由**行内驻留红字**承担
+                    //   （siRenderLiaisonTestNotifyRow 的 siLiaisonTestWritebackFailedIds 分支，逐字同文案且
+                    //   **持续驻留**，比 3 秒 toast 强）。上面那行 add() 正是这条驻留红字的开关，必须留。
+                    //   注意：本分支后端状态其实**停在 sending**（回写失败），行内会变化 ⇒ 满足 A 类判据；
+                    //   刷新失败时 sentOk:true 的抽屉版兜底能兜住"发出去了但界面没动静"
+                    //   （本支 `sent_externally===true` ＝钉钉确认已发出，说「已发送」属实）。
+                    wbDeletedToast = true;
                 } else if (r.data.dry_run === true) {
                     // [281 号对抗审 N1] dry-run 下 sent_externally 恒为 false（未真实外呼），不属于上面
                     // "确定没送达可补发"的常规语义，措辞单独区分，避免用户误以为这是一次真实发送失败。
-                    showToast('演练回写失败（未真实发送钉钉），约 10 分钟后可重试', 'error');
+                    // 〔矩阵 T9·A' 留〕行内无该分支表达（行内只有"沿用旧态"）⇒ toast 是唯一反馈。
+                    showToast('演练回写失败（演练·未真实发送），约 10 分钟后可重试', 'error');   // 〔J20·D-2〕
                 } else {
+                    // 〔矩阵 T10·A' 留〕同上，行内无"发送+留痕双失败"的表达
                     showToast('发送失败且留痕失败，可稍后重试或联系管理员', 'error');
                 }
-                await siAfterAction();
+                // A 支（sent_externally）toast 已删 ⇒ 必须有兜底；另两支是 A' 留（上面刚弹过独家 toast）⇒ quiet
+                if (wbDeletedToast) await siRefreshAfterNotify(lock, rowLabel, { sentOk: true });
+                else await siRefreshQuiet(lock);
                 return;
             }
+            // 〔矩阵 T11/T12/T13·A 类删〕三分支 toast 全删——行内对接测试行即反馈：
+            //   sent → 状态句 `✅ 已于 {时间} 通知`，且 dry-run 由**行标签后缀**「（演练·未真实发送）」
+            //          承担（D-1 判据 message_key 前缀 `dryrun-`，刷新后必然带上）⇒ 演练信息不丢；
+            //   failed → 行内 `⚠️ 通知失败（{原因}），可重试`（S2 已接 liaison_test_notify_error·§1.1b 落死）
+            //          ⇒ 原 toast 里 `liaison_test_notify_error` 的**后端原文透传**随之消失（J8 五处之一）；
+            //   其余 status → 状态句照刷。
+            // 〔B1〕把被删分支的 status 读回来只为**定兜底动词**：failed/其余态刷新失败时说「发送未成功」，
+            //   不能沿用「已发送」（本页四个 A 删点同款修法）。
             const st = r.data && r.data.liaison_test_notify_status;
-            if (st === 'sent') {
-                // [281 号对抗审 N1] dry-run 演练不应让用户误以为钉钉真的发出去了。
-                showToast(r.data && r.data.dry_run === true
-                    ? '通知对接测试：演练已记录（未真实发送钉钉）'
-                    : '通知对接测试：钉钉已发送', 'success');
-            }
-            else if (st === 'failed') showToast('通知对接测试：发送失败（' + ((r.data && r.data.liaison_test_notify_error) || '未知') + '）', 'error');
-            else showToast('通知对接测试：已触发', 'success');
-            await siAfterAction();
+            await siRefreshAfterNotify(lock, rowLabel, { sentOk: st === 'sent' });
         } finally { siNotifyInflight = false; }
     }
     // S4（bug暂缓方案 §7.3）：暂缓通知建单人——响应体形状（含 skipped 自我保护分支）与既有四通道
     //   notify-relay/creator/requester/intake 完全一致（同样落 creator_notify_* 列），直接复用 siNotifyManual，
     //   不另写一份。409（如 NOTIFY_CLAIM_CONFLICT）走 siApiErr 统一友好提示，本函数不需要额外分支。
-    function siNotifyHoldCreatorClick() { return siNotifyManual('notify-hold-creator', '暂缓通知建单人', 'creator_notify_status', 'creator_notify_error'); }
+    function siNotifyHoldCreatorClick() { return siNotifyManual('notify-hold-creator', '暂缓通知建单人', 'creator_notify_status', 'creator_notify_error', '.u-nb-btn[onclick="siNotifyHoldCreatorClick()"]'); }
 
     // 开发侧逐 dev 通知（notify-developer 带 dev_user_id，定位子表活动行；同一 inflight 守卫）
     async function siNotifyDevSend(devUserId) {
@@ -3382,14 +3697,19 @@
         if (!iss) return;
         if (siNotifyInflight) return;
         siNotifyInflight = true;
+        // 逐 dev 行按钮：onclick 实参就是 user_id，**用全等属性选择器**不用 `^=` 前缀——
+        //   `siNotifyDevSend(1` 是 `siNotifyDevSend(12)` 的前缀，前缀匹配会一次锁住两行（同 DCorr 的右界符教训）。
+        let lock = null, rowLabel = '开发';
         try {
+            lock = siLockNotifyBtns(`.u-nb-btn[onclick="siNotifyDevSend(${devUserId})"]`);   // 放 try 内：抛了也能复位 inflight
+            rowLabel = lock.label('开发');
             const r = await siApi('/sys-issues/' + iss.id + '/notify-developer', { method: 'POST', body: { dev_user_id: devUserId } });
-            if (!r.ok) { siApiErr(r); return; }
-            const st = r.data && r.data.notify_status;
-            if (st === 'sent') showToast('通知开发：钉钉已发送', 'success');
-            else if (st === 'failed') showToast('通知开发：发送失败（' + ((r.data && r.data.notify_error) || '未知') + '）', 'error');
-            else showToast('通知开发：已触发', 'success');
-            await siAfterAction();
+            if (!r.ok) { siNotifyErr(r); lock.restore(); return; }   // 〔S1〕沿现状：非 ok 不刷新
+            // 〔矩阵 T14/T15/T16·A 类删〕三分支 toast 全删——该 dev 行状态句即反馈（failed 带 `（{原因}）`，
+            //   S2 已把子表 `notify_error` 传进渲染，DEV_ASSIGNEES_SELECT_COLS 显式含该列）。
+            //   T15 原来的 `r.data.notify_error` 直出（J8 五处透传之一）随删除消失。
+            const st = r.data && r.data.notify_status;   // 〔B1〕读回来只为定兜底动词
+            await siRefreshAfterNotify(lock, rowLabel, { sentOk: st === 'sent' });
         } finally { siNotifyInflight = false; }
     }
 
@@ -3402,37 +3722,121 @@
         if (!iss) return;
         if (siNotifyInflight) return;
         siNotifyInflight = true;
+        let lock = null, rowLabel = '重启通知开发（批量）';
         try {
+            lock = siLockNotifyBtns('.u-nb-btn[onclick="siNotifyResumeDevClick()"]');   // 放 try 内：抛了也能复位 inflight
+            rowLabel = lock.label('重启通知开发（批量）');
             const r = await siApi('/sys-issues/' + iss.id + '/notify-resume-dev', { method: 'POST' });
-            if (!r.ok) { siApiErr(r); return; }
+            if (!r.ok) { siNotifyErr(r); lock.restore(); return; }   // 〔S1〕
             const results = (r.data && r.data.results) || [];
             const okCount = results.filter(x => x.ok).length;
             const failCount = results.filter(x => !x.ok && !x.skipped).length;
-            if (failCount > 0) showToast(`重启通知开发：${okCount} 人成功，${failCount} 人失败（可重试）`, 'warning');
-            else if (okCount > 0) showToast(`重启通知开发：${okCount} 人已发送`, 'success');
-            else showToast('重启通知开发：无新增发送（可能已被其他请求认领）', 'info');
-            await siAfterAction();
+            // 〔矩阵 T17/T18/T19·A'（R1 聚合）留 + J10 五态改造〕批量聚合 toast 一律保留——聚合计数
+            //   （N/M）在行内无处显示（重启行只有"全部已通知/尚有未通知"两句），逐人状态另在各 dev 行更新。
+            //   **J10 是非零行为变更**：原三分支把"全失败"也落在第一分支，显 `0 人成功，N 人失败` + warning；
+            //   方案 §2.1 R1 表要求全失败单列一态、文案 `{N} 人均发送失败（可重试）`、级别 **error**
+            //   （方案里"与 SI 现状语义一致、聚合面零行为变更"那句注记已被 J10 明文作废）。
+            if (failCount > 0 && okCount === 0) showToast(`${rowLabel}：${failCount} 人均发送失败（可重试）`, 'error');
+            else if (failCount > 0) showToast(`${rowLabel}：${okCount} 人成功，${failCount} 人失败（可重试）`, 'warning');
+            else if (okCount > 0) showToast(`${rowLabel}：${okCount} 人已发送`, 'success');
+            // R1 表第 4 态「无新增（幂等）」：okCount=failCount=0，全部 results 都是 skipped（claim_conflict/已 sent）。
+            // R1 表第 5 态「空目标 `没有可通知的对象`」**本页前端不可达 ⇒ 不实现**（矩阵 J10 标 mock-only）：
+            //   重启行在 roster 为空时整行不渲染（siRenderResumeNotifyRow 的 `if (!roster.length) return ''`），
+            //   按钮根本不存在；且后端 roster 空走 409 RESUME_NOTIFY_NO_ROSTER 从 !r.ok 出去。
+            //   若真收到空 results（后端契约变化），会落进下面这条 info——那是"没发出去任何一条"的诚实描述，
+            //   不是把空目标当成功。**不新建一条永远走不到的 `没有可通知的对象` 分支**（同 S3/P13 死分支口径）。
+            else showToast(`${rowLabel}：无新增发送（可能已被其他请求认领）`, 'info');
+            // 聚合 toast 已是独家反馈 ⇒ 走 quiet，不再叠一句兜底
+            //   （聚合语义下无论「已发送」还是「发送未成功」都指代不明：N 个人里成了几个？说不清就不说；
+            //    "失败不静默"由上面那条**必发**的五态聚合 toast 承担，不存在静默口）。
+            await siRefreshQuiet(lock);
         } finally { siNotifyInflight = false; }
     }
 
     // 查已读（GET notify-read-status?type=dev|relay|creator|requester|release_executor[&dev_user_id=]）——共用一个查询函数
     //   （release_executor 通道 2026-07-30 起前端已无触发点——该行转纯只读展示；后端查询通道保留）。
-    //   历史无快照（HISTORICAL_SNAPSHOT_MISSING）按契约出提示非报错；其余错误走通用 siApiErr。
+    //
+    // ===== 〔D6 · 矩阵 T20-T23/T43 · 方案 §3.3〕结果从 toast 切**行内驻留结果框** =====
+    //   为什么：查已读是"看状态"不是"做动作"，结果应当能对照着行内的通知时间反复看，而不是飘 3 秒就没。
+    //   与其余四页（DCorr/DC/IL/IT）对齐，用同一个 `.u-nr-read-result` 容器与同一套六态文案。
+    //
+    // ⚠️⚠️ 本次改造的**头号陷阱**（与 Data_Collab 已修的那条 HIGH 完全同构，必须写在这里）：
+    //   原实现在函数末尾**无条件** `await siAfterAction()`。一旦把结果写进行内结果框，这个无条件刷新
+    //   就变成"结果框写进去 → siRenderDrawer 整体重渲染 `siDBody.innerHTML` → 刚写的结果框被连根摘掉"，
+    //   症状是**查一次已读，结果闪一下就没了**，且因为要卡在渲染时序上、极难复现（Collab 那条是
+    //   "红框挂上 → openDetail 摘掉"，同一个模子）。
+    //   ⇒ 铁律：**只有「已读」态才刷新**（该态后端刚 UPDATE 固化了 read_at，刷新是把行内换成权威固化
+    //     显示 `📖 已读 · …`，是真收益）；查询中/未读/无法查询/查询失败四态**后端零状态变化，刷新纯负收益**，
+    //     一律只写结果框、**不得调 siAfterAction**。改动这里前先想清楚这条。
+    //
+    //   持久化边界（J18·§1.3）：本函数覆盖的 5 个通道里 **intake 无 `intake_notified_at` 列** ⇒ 该通道
+    //     行内固化后只能出**单时刻** `📖 已读 · 于 {已读时间}`（由 siRenderIntakeNotifyRow 传 null 保证）；
+    //     结果框本身按 §3.3 就是"即时回执·单时刻简式"，五通道同一句，不区分。
+    //   闭口（J7）：本端点**从不产出 `unread_expired`**（全仓唯一产出点是 Data_Collab 查已读），故
+    //     不实现「超窗口未读」态——不是遗漏，是**显式闭口**，补了就是又一条死分支。
+    //   登记（S15 边界）：抽屉侧 5 颗「查询已读」按钮**有意不做点击禁用**——S15/J23 管的是"发送中"
+    //     （发送有真实副作用，连点＝多条钉钉推送），而查已读是只读查询、固化 read_at 幂等，连点最多多打
+    //     一次远程读；且结果框立刻显示「查询中…」已是在途反馈。与四页基准实现 Data_Correction
+    //     `queryReadStatus` 保持一致（那边同样不禁用）——本任务的目的就是让五页同款，不在这里单开特例。
+    //     批次执行人侧那颗有禁用，是它自己的 L4 既有防线，保留不动。
     async function siQueryReadStatus(type, devUserId) {
         const iss = siDetail && siDetail.issue;
         if (!iss) return;
+        const boxId = siReadBoxId(type, type === 'dev' ? devUserId : undefined);
+        const box = document.getElementById(boxId);
+        if (box) box.innerHTML = '<span class="u-nt-idle">查询中…</span>';   // §3.3 态①
         let path = '/sys-issues/' + iss.id + '/notify-read-status?type=' + type;
         if (type === 'dev') path += '&dev_user_id=' + devUserId;
-        const r = await siApi(path);
+        let r;
+        try { r = await siApi(path); }
+        catch (e) { if (box) box.innerHTML = '<span class="u-nt-fail">⚠️ 查询失败（网络异常）</span>'; return; }
         if (!r.ok) {
-            if (r.data && r.data.code === 'HISTORICAL_SNAPSHOT_MISSING') { showToast('历史记录无快照，不支持查已读', 'info'); return; }
-            siApiErr(r, '查已读失败'); return;
+            // 〔T20〕历史无快照＝契约内的"查不了"，不是报错 → §3.3 态⑤「无法查询」；
+            // 〔T43〕其余非 ok → §3.3 态⑥「查询失败（{原因}）」，原因走**冻结映射表五级回退**，
+            //        不再 siApiErr 直出后端 `error` 原文（J8）。
+            // 结果框挂不上时回落 toast，绝不静默。〔S1/J8〕文案与结果框态⑥同源，原因走冻结映射表——
+            //   这里也属**通知域**，不能退回 siApiErr 直出后端 error 原文。
+            if (!box) { showToast('查询失败（' + siErrText(r, r.data) + '）', 'error'); return; }
+            if (r.data && r.data.code === 'HISTORICAL_SNAPSHOT_MISSING') {
+                box.innerHTML = '<span class="u-nt-warn">⚠️ 历史记录无快照，无法查询已读</span>';
+            } else {
+                box.innerHTML = `<span class="u-nt-fail">⚠️ 查询失败（${esc(siErrText(r, r.data))}）</span>`;
+            }
+            return;
         }
         const d = r.data || {};
-        if (d.read) showToast('已读' + (d.read_at ? '（' + esc(d.read_at) + '）' : ''), 'success');
-        else if (d.read_status === 'recipient_unresolved') showToast('收件人钉钉号未解析，暂无法判断已读', 'warning');
-        else showToast('尚未读', 'info');
-        await siAfterAction();
+        if (d.read) {
+            // §3.3 态②「已读」——**唯一触发固化刷新的分支**（后端本次请求已 UPDATE read_at 落库）。
+            //   先把结论写进结果框（刷新失败时它就是保底），再刷新。
+            //   时间过 siFmtDT 归一（后端 read_at 是 `toLocaleString('zh-CN')` 原始串，同页所有时间展示都归一）。
+            const readTxt = d.read_at ? esc(siFmtDT(d.read_at)) : '—';
+            if (box) box.innerHTML = `<span class="u-nt-ok">📖 已读 · 于 ${readTxt}</span>`;
+            // 结果框挂不上（DOM 与预期不符）⇒ 回落 toast，与下面两处 `!box` 同一条纪律：宁可飘一条，也不静默。
+            else showToast(`📖 已读 · 于 ${d.read_at ? siFmtDT(d.read_at) : '—'}`, 'success');
+            // 〔§6.6 ②·DCorr :2788-2795 探测范式〕**靠 DOM 哨兵不靠 catch**：siRenderDrawer 的失败路径
+            //   （!r.ok / siOpenId 变了）是静默 return 不抛，catch 捕不到。判据＝刷新后**这个 box 还在不在、
+            //   还是不是我刚写的那句**：
+            //     · 刷新成功 ⇒ siDBody 整体重渲染；且 read_at 已固化 ⇒ 该行「查询已读」按钮随之隐藏、
+            //       结果框容器一并不再渲染 ⇒ 重新 getElementById 必为 null；
+            //     · 刷新没生效 ⇒ 旧 box 节点原样挂着、文本仍是我刚写的「📖 已读 · 于 …」
+            //       ⇒ 追加保底尾巴，让"查询结果 + 刷新失败"两件事都留在用户眼前（§6.6 ② 明确**不发 toast**：
+            //         宿主是抽屉、结果框就在眼前，且 siRenderDrawer 失败路径自己已经弹过 siApiErr）。
+            try { await siAfterAction(); } catch (e) { /* 冒泡异常止于此，判定交给下面的哨兵 */ }
+            const boxAfter = document.getElementById(boxId);
+            if (boxAfter && boxAfter.textContent.indexOf('📖 已读') === 0) {
+                boxAfter.innerHTML = `<span class="u-nt-ok">📖 已读 · 于 ${readTxt}（详情刷新失败，可重开抽屉）</span>`;
+            }
+            return;
+        }
+        if (!box) {   // 非已读态且结果框挂不上 ⇒ 回落 toast（同上：宁可飘一条，也不静默）
+            showToast(d.read_status === 'recipient_unresolved' ? '收件人未解析，无法查询已读' : '尚未读取', 'warning');
+            return;
+        }
+        if (d.read_status === 'recipient_unresolved') {
+            box.innerHTML = '<span class="u-nt-warn">⚠️ 收件人未解析，无法查询已读</span>';   // §3.3 态⑤
+        } else {
+            box.innerHTML = '<span class="u-nt-warn">⏳ 尚未读取</span>';   // §3.3 态③（`👀` 收编为 `⏳`）
+        }
     }
 
     // ---- 通用「原因」弹框 ----
@@ -5297,6 +5701,12 @@
         issue_id: '单据编号', type: '类型', title_snapshot: '标题', status_at_publish: '发布时状态', commits: '提交记录',
     };
     function siUnavailableFieldLabel(f) { return SI_UNAVAILABLE_FIELD_LABEL[f] || f; }
+    // 〔通知统一 N3-2·R3〕**返回值＝本次是否真的把批次详情重渲染出来了**（true=渲染完成 / false=任一提前
+    //   退出：网络异常、非 ok、令牌过期、面板已关）。既有调用点全部忽略返回值，零影响；新增消费者是
+    //   siExecutorRowNotify——T32/T34 删掉成功 toast 后，它需要一个可靠信号来判断"该发弹层版兜底吗"。
+    //   为什么不像抽屉那样用 DOM 哨兵：本函数**开头第一件事就是把 siBatchBody 写成「加载中…」**（下面
+    //   :5639），捕获到的按钮节点在 await 之前就已经离开文档 ⇒ isConnected 恒 false ⇒ 哨兵恒判"刷新成功"，
+    //   是个天生失效的判据。返回值是这里唯一说得清的信号。
     async function siOpenBatchDetail(id) {
         // [C9 前端块·codex 206 审 MED-4] 接入 siAuditGen——本函数与 siRenderBatchList 共享 siBatchOverlay
         // 同一套 DOM（siBatchHead/siBatchBody/siBatchFoot），此前只有删除审计子面板（siOpenDeleteAuditDetail/
@@ -5313,15 +5723,15 @@
         try {
             r = await siApi('/sys-releases/' + id);
         } catch (netErr) {
-            if (myGen !== siAuditGen || !document.getElementById('siBatchOverlay').classList.contains('open')) return;
+            if (myGen !== siAuditGen || !document.getElementById('siBatchOverlay').classList.contains('open')) return false;
             showToast('网络异常，请重试', 'error');
             siRenderBatchList();
-            return;
+            return false;
         }
         // 响应回来后：面板已关闭（siCloseBatch 已令牌+1）或已切到其他视图（列表/删除审计）→ 丢弃，
         // 连失败分支的「siRenderBatchList()」跳转也不能做——那本身就是一次 DOM 写入，对过期响应同样禁止。
-        if (myGen !== siAuditGen || !document.getElementById('siBatchOverlay').classList.contains('open')) return;
-        if (!r.ok) { siApiErr(r); siRenderBatchList(); return; }
+        if (myGen !== siAuditGen || !document.getElementById('siBatchOverlay').classList.contains('open')) return false;
+        if (!r.ok) { siApiErr(r); siRenderBatchList(); return false; }
         const rel = r.data.release; const issues = r.data.issues || [];
         siBatchDetailRel = rel;
         // C5（方案 §4.5）：多人执行人机制——详情端点新增 executors 数组 + executor_notify_summary 聚合
@@ -5451,7 +5861,7 @@
             //   §6.15「C3 同提交隐藏旧执行按钮」在本批（前端）落地。
             // C5（方案 §4.5 第1条）：「安排上线」改为**只设置执行人集合**（PUT executors，不发任何通知）——
             //   决策 4"没有群发按钮"在这里的落点：admin 点这个按钮只是选人/改选人，逐人发通知是下方执行人
-            //   区块每行各自的「📣 发通知」按钮。可见条件对齐后端 PUT executors 闸①（"存在执行人已进入
+            //   区块每行各自的「发送通知」按钮。可见条件对齐后端 PUT executors 闸①（"存在执行人已进入
             //   通知/确认流程"即 409 EXECUTORS_LOCKED）——summary ∈ (none, not_sent) 时集合必然还没被动过，
             //   PUT executors 打得通；sending/sent/partial/failed 任一态都意味着有行已脱离"从未通知"，
             //   须先「撤销上线安排」解锁才能重新选人（R6 解锁通道），本按钮此时不渲染。
@@ -5476,6 +5886,7 @@
             }
         }
         document.getElementById('siBatchFoot').innerHTML = foot;
+        return true;   // 〔N3-2·R3〕走到这里＝详情三块（head/body/foot）都已重渲染完成
     }
 
     // 执行人聚合态徽标（六态：none/sending/sent/not_sent/partial/failed，方案 §4.3）——KV 格里的一格摘要，
@@ -5489,7 +5900,7 @@
         return `<span class="si-release-badge ${cls}">${esc(label)}</span>`;
     }
 
-    // 执行人区块（方案 §4.5 第2条）：多人列表，每行姓名+通知态徽章+已读+确认态+「📣 发通知」按钮（not_sent
+    // 执行人区块（方案 §4.5 第2条）：多人列表，每行姓名+通知态徽章+已读+确认态+「发送通知」按钮（not_sent
     // 显示"发通知"、sent 显示"重新通知"、failed/stale 显示"重试"）。**没有"全部发送"按钮**（决策 4）——
     // admin 想什么时候发给谁就点哪一行。已 done 的行不渲染发送按钮（v1.3·M-b 防呆，后端同步拒绝
     // EXECUTOR_ALREADY_DONE）。none 态（summary==='none' 或空数组）显式空态引导，不落进任何"未通知"式渲染
@@ -5513,24 +5924,50 @@
             // onclick="siExecutorRowNotify(1,NaN)" 这类点了没反应的死链接。
             const uidNum = Number(e.user_id);
             const uidOk = Number.isSafeInteger(uidNum);
-            let btns = '';
+            // 〔R3〕兜底文案的 `{行标签}`＝执行人姓名（本区块的"行"就是一个人），随按钮走 data-nr-label
+            const rowLabel = esc(e.user_name || ('用户#' + e.user_id));
+            // 〔S13·D5〕去 📣 + 套 §3.2 三态模板（首发/重发/重试）。选人按钮（上方 '安排上线'）按 J15 保留 📣 不动——它不是通知动作。
+            //   ⚠️ 这行**刻意提到 if 外面**：verify-sys-release-panel-static.js:338 的 L13 断言要求
+            //   `!isDone` 与 `siExecutorRowNotify(` 落在 **400 字符邻域**内（防呆条件须紧邻它守卫的按钮）。
+            //   本批给按钮加 data-nr-label 后邻域超了一点点，把这句纯取值的三元挪出来即可——挪出去反而让
+            //   条件与按钮更近，与该断言的用意同向，不是绕过它。
+            const btnLabel = ns === 'not_sent' ? '发送通知' : (ns === 'sent' ? '重新通知' : '重试');
+            let btns = '', readBoxId = '';
             if (planning && isAdmin() && !isDone) {
                 if (ns === 'sending') {
                     btns += ' <button class="u-btn-secondary u-btn-sm" disabled title="发送在途，请稍候">发送中…</button>';
                 } else if (uidOk) {
-                    const btnLabel = ns === 'not_sent' ? '📣 发通知' : (ns === 'sent' ? '📣 重新通知' : '📣 重试');
-                    btns += ` <button class="u-btn-secondary u-btn-sm" onclick="siExecutorRowNotify(${releaseId},${uidNum})">${btnLabel}</button>`;
+                    btns += ` <button class="u-btn-secondary u-btn-sm" data-nr-label="${rowLabel}" onclick="siExecutorRowNotify(${releaseId},${uidNum})">${btnLabel}</button>`;
                 }
             }
             // 309-M1（codex 回卷·裁定=收窄）：查已读按钮补 !isDone——确认完成后不再有"通知过程"这回事，
             // 该行已固化的 read_at 徽标（readTag，上方已渲染）照常显示，但不再提供可点的查询动作。
+            // 〔N3-fix2·MED-2·显隐契约已核实·结论=维持现状不收窄，登记与抽屉侧的口径差〕
+            //   核实对象＝后端 `GET /sys-releases/:id/executors/:userId/read-status`（index.js:11470 一带）：
+            //   ① **failed / 无 message_key 的行是"有意允许查"的**，不是漏防：端点首个分支
+            //      `if (!row.mk) return res.json({read_status:'no_message_key'})` 是 **200 正常态**，其上方
+            //      注释明写"这是刻意的设计选择，不是历史遗留……'还没发/发了没人读/读了'是同一枚举维度上的
+            //      三种正常态，不该有一种单独被 400 特殊对待"。D6 之后这条正常态在结果框里渲染成
+            //      「⚠️ 尚无有效发送记录，无法查询已读」，正是该设计想要的诚实回答。
+            //   ② **stale 行查询有真实意义**：它是"发过、后来过期需重发"，message_key 还在，端点会真去钉钉
+            //      活查，能查回旧消息是否被读过——收成 `ns==='sent'` 会把这条真能力砍掉。
+            //   ③ 建议里的 `e.notify_message_key` 判据**在本页根本取不到**：批次详情 payload 的 executors
+            //      SELECT 只有 `id, user_id, user_name, notify_status, exec_status, read_at`（index.js:10388），
+            //      不含 message_key ⇒ 要加这个条件必须改后端，而本任务对后端**只核对不修改**。
+            //   ⇒ 维持 `ns !== 'not_sent' && ns !== 'sending'`。**登记一处与抽屉侧的口径差**：抽屉侧五通道
+            //      都带 `!read_at`（已读后隐藏查询按钮·用户 2026-07-19 拍板），本行没有 —— 已读行仍显示按钮，
+            //      点了走后端 `cached` 快路径返回同一时刻，无害但多一次点击。**本批不改**（属显隐行为变更、
+            //      矩阵未列），留作观察项；要改只需在本条件补 `&& !e.read_at`（read_at 在 payload 里，可实现）。
             if (planning && isAdmin() && !isDone && ns !== 'not_sent' && ns !== 'sending' && uidOk) {
                 btns += ` <button class="u-btn-secondary u-btn-sm" id="siExecReadBtn${releaseId}_${uidNum}" onclick="siExecutorRowReadStatus(${releaseId},${uidNum})">查询已读</button>`;
+                readBoxId = `siExecReadBox_${releaseId}_${uidNum}`;   // 〔D6·S16〕命名规则同 corrReadBox_{key}_{rid}
             }
-            return `<div class="si-att-item">
-                <span class="si-att-name">${esc(e.user_name || ('用户#' + e.user_id))}</span>
+            // 〔D6·S16〕本行是 si-att-item（nowrap flex）不是 u-notify-row ⇒ 加 si-exec-row 修饰类让结果框
+            //   能独占一行（容器适配见页内 CSS 注释）；结果框只在渲染了查已读按钮时才挂。
+            return `<div class="si-att-item si-exec-row">
+                <span class="si-att-name">${rowLabel}</span>
                 <span class="si-release-badge ${cls}">${esc(label)}</span>${doneTag}${readTag}
-                ${btns}
+                ${btns}${readBoxId ? `<span class="u-nr-read-result" id="${readBoxId}"></span>` : ''}
             </div>`;
         }).join('');
         return `<div class="u-detail-section"><h3>执行人（${executors.length}）</h3>${rowsHtml}</div>`;
@@ -5541,41 +5978,130 @@
     // 同 MED-3/300-L1 一脉相承的既有设计）。L5：并发变更（NOTIFY_CONCURRENT_CHANGED）也刷新详情——这条
     // 分支恰恰意味着"这一行的状态已经变了"，最该刷新的就是它，此前遗漏刷新会让页面继续显示旧状态。
     async function siExecutorRowNotify(releaseId, userId) {
-        if (!confirm('确认发送钉钉执行通知？')) return;
+        // 〔矩阵 §1.2·J4 长句〕本 confirm 首发/重发/重试**共用一颗按钮**，0b-1 终裁"保留现状语义、不拆两句、
+        //   只把文案套模板" ⇒ 前半句保留现状（对首发也说得通），后半句补长句模板的承诺部分。
+        //   长句前提**已核实**：本通道后端 preempt CAS 抢占时即 `read_at = NULL`（index.js:11083），
+        //   承诺"旧已读记录清除"属实（不是未经核实的行为承诺）。
+        if (!confirm('确认发送钉钉执行通知？\n将以本次为最新一次通知，旧已读记录清除。')) return;
+        // 全等属性选择器（不用 `^=` 前缀）：`siExecutorRowNotify(9,1` 是 `…(9,12)` 的前缀，前缀匹配会一次锁两行。
+        const btnEl = document.querySelector(`#siBatchBody .u-btn-sm[onclick="siExecutorRowNotify(${releaseId},${userId})"]`);
+        const rowLabel = (btnEl && btnEl.dataset.nrLabel) || ('执行人#' + userId);
+        // 〔S15·J23〕本按钮此前**全程不禁用**（同页 siExecutorRowReadStatus 的 L4 早有这道防线，发送侧漏了）——
+        //   钉钉外呼是真实副作用，连点＝多条重复推送。恢复用 isConnected 守卫：read 分支刷新后节点已是孤儿。
+        const btnOrigText = btnEl ? btnEl.textContent : '';
+        if (btnEl) { btnEl.disabled = true; btnEl.textContent = '发送中…'; }
+        const restoreExecBtn = () => { if (btnEl && btnEl.isConnected) { btnEl.disabled = false; btnEl.textContent = btnOrigText; } };
         const r = await siApi('/sys-releases/' + releaseId + '/executors/' + userId + '/notify', { method: 'POST' });
         if (!r.ok) {
-            if (r.data && r.data.code === 'NOTIFY_CONCURRENT_CHANGED') { siApiErr(r, '通知失败'); await siOpenBatchDetail(releaseId); return; }
-            siApiErr(r, '通知失败'); return;
+            // 〔S1〕两处非 ok 出口改通知域专用出口（原因走冻结映射表，不再直出后端 `error` 原文）
+            if (r.data && r.data.code === 'NOTIFY_CONCURRENT_CHANGED') { siNotifyErr(r); await siOpenBatchDetail(releaseId); restoreExecBtn(); return; }
+            siNotifyErr(r); restoreExecBtn(); return;
         }
         const d = r.data || {};
         const tlSuffix = d.timeline_failed ? '（留痕写入失败，已记录日志）' : '';
-        if (d.concurrent_changed) showToast('通知状态已并发变更，请刷新后重试' + tlSuffix, 'warning');
-        else if (d.notify_status === 'sent') showToast('已通知' + (d.dry_run ? '（演练模式，未真实外呼）' : '') + tlSuffix, 'success');
-        else if (d.notify_status === 'failed') showToast('发送失败：' + (d.notify_error || '未知原因') + tlSuffix, 'error');
-        else showToast('已处理' + tlSuffix, 'success');
-        await siOpenBatchDetail(releaseId);
+        // 〔N3-fix2·MED-1〕批次侧兜底口径**对齐抽屉侧 B1**：兜底不再由 sentOk 决定发不发（那正是抽屉侧
+        //   被拦下的谎报形态），改成 `sentOk` 定动词、`quiet` 定发不发；quiet 只给**兜底句会说谎或自相
+        //   矛盾**的分支，且每处都在下面逐条写明理由（quiet 清单）。
+        let sentOk = false, quiet = false;
+        if (d.concurrent_changed) {
+            // 〔矩阵 T31·A' 留〕行会刷但语义不对应（显示的是被别人改成的态，不是本次结果）
+            showToast('通知状态已并发变更，请刷新后重试' + tlSuffix, 'warning');
+            // 〔quiet 清单·**不列入**〕这条 toast 的内容是"请刷新后重试"，而紧接着的自动刷新恰好失败了 ⇒
+            //   兜底句「发送未成功，批次详情刷新失败」与它**互补且直接可执行**，不是重复也不矛盾。
+        } else if (d.notify_status === 'sent') {
+            // 〔矩阵 T32·A 类删〕成功 toast 删除——行内徽标 not_sent→「已通知」即反馈。
+            // ⚠️〔N3-2 现场裁定·待主会话追认〕**两个附加信号例外保留**：`dry_run` 与 `timeline_failed`
+            //    在本行的行内表达里**无处安放**——执行人行的状态位是 `si-release-badge` 徽章族，§3.2 对它
+            //    显式闭口（文案与样式沿现状不动），六个 label 里既没有"演练"也没有"留痕失败"。按矩阵自己的
+            //    A/A' 分界判据（「toast 含行内无处安放的额外信息 → A' 留」）+ M7 拆行口径（同一调用点分支
+            //    处置不同即拆行），把 T32 拆成两支：**普通 sent 删**（本条）／**带附加信号的 sent 留**。
+            //    矩阵 T32 行只写了"删"、未处理这两个 payload——若整条删掉，dry-run 演练下用户将**完全看不到
+            //    "这次没真发"**（工单侧对接测试行有行标签后缀 D-1 兜着，执行人行没有任何等价物）。
+            //    文案零新造：沿用现状串 + J20/D-4 冻结后缀。主会话若裁定"矩阵优先、整条删"，删掉这两行 if 即可。
+            if (d.dry_run || d.timeline_failed) showToast('已通知' + (d.dry_run ? '（演练·未真实发送）' : '') + tlSuffix, 'success');   // 〔J20·D-4〕
+            // 〔S2 + MED-1·quiet 清单第 1 条〕**演练走 quiet**：这条分支上「已发送」和「发送未成功」
+            //   **两个动词都是谎**——钉钉根本没外呼（不能说已发送），但演练记录确实成功落库、行内徽标真的
+            //   变成了「已通知」（也不能说发送未成功）。上面那条例外 toast 已经如实说了
+            //   「已通知（演练·未真实发送）」，是本分支的独家反馈 ⇒ 不静默，只是不叠一句必错的兜底。
+            quiet = !!d.dry_run;
+            // sentOk 仍按 S2 置 false 作**降级防线**：万一将来有人把 quiet 拿掉，退化成「发送未成功」
+            //   （较轻的错），而不是退回 S2 拦下的「已发送」（对着演练宣布真发了＝较重的错）。
+            sentOk = !d.dry_run;
+        } else if (d.notify_status === 'failed') {
+            // 〔矩阵 T33·A' 留·记原因〕徽标只会变成「发送失败」四个字，徽章族闭口 ⇒ 行内没有位置显示原因，
+            //   删了就丢信息。〔J8〕原来 `d.notify_error` 直出后端英文枚举（no_phone/token_expired/…），
+            //   现走冻结映射表 §7 reason 档译成中文；未登记值落「未知原因」，绝不外显后端码。
+            showToast('发送失败（' + siErrText(null, { reason: d.notify_error }) + '）' + tlSuffix, 'error');
+            // 〔MED-1·quiet 清单·**不列入**〕sentOk 保持 false ⇒ 兜底走「发送未成功」版。与这条失败 toast
+            //   **互补不重复**：一条说"为什么没发成"，一条说"界面还没刷新到最新态"，且两句动词一致不矛盾。
+        } else {
+            // 〔矩阵 T34·A 类删〕「已处理」删除——徽标照刷即反馈；tlSuffix 同 T32 例外保留（无行内位置）
+            if (d.timeline_failed) showToast('已处理' + tlSuffix, 'success');
+            sentOk = true;
+        }
+        // 〔R3·§6.6 ①弹层版〕宿主是 siBatchOverlay（overlay 弹层不是抽屉）⇒ 用**弹层版**兜底文案。
+        //   判据用 siOpenBatchDetail 的返回值不用 DOM 哨兵（原因见该函数头注释：body 在 await 前就被清空）。
+        const refreshed = await siOpenBatchDetail(releaseId);
+        restoreExecBtn();   // 刷新成功时节点已是孤儿（守卫内 isConnected 直接跳过），失败时把按钮从「发送中…」放回来
+        // 〔MED-1〕与抽屉侧 siRefreshAfterNotify 同一口径：**刷新失败即出兜底**（quiet 清单除外），
+        //   sentOk 只选动词。四支归属：普通 sent→已发送／其他 status→已发送／failed→发送未成功／
+        //   concurrent→发送未成功；唯一 quiet＝dry_run（理由见上）。
+        if (!refreshed && !quiet) showToast(`${rowLabel}：${sentOk ? '已发送' : '发送未成功'}，批次详情刷新失败，可重新打开批次详情查看`, 'error');
     }
     // 行级查已读（read_status 五值枚举单套判定，方案 §4.5 第2条尾注·登记清单④）：no_message_key/dry_run/
     // recipient_unresolved/read/unread——不再有旧批次级"未发送即 400"这条独立错误码语义需要兼容。
     // L4（codex 预筛）：点击即禁用按钮至请求返回（finally 恢复）——钉钉已读查询是真实外呼（同步远程接口），
     // 连点会打出多次不必要的外呼，与"发通知"按钮防重复点击同一顾虑。
+    // ===== 〔D6 · 矩阵 T35-T40/T44 · 方案 §3.3〕结果同样从 toast 切**行内驻留结果框** =====
+    //   六态文案与 siQueryReadStatus / 其余四页逐字同源（原因短语取自冻结映射表 §6.5 read_status 段）。
+    //   ⚠️ 同一条铁律：**只有「已读」态才 siOpenBatchDetail 刷新**（后端刚固化 read_at ⇒ 行内 readTag 换成
+    //     权威显示）；unread/no_message_key/dry_run/recipient_unresolved/未知/查询失败六条**后端零状态变化**，
+    //     只写结果框、不刷新——刷新会把刚写进去的结果连容器一起冲掉（本函数原本就没在这几支刷新，此处是
+    //     把"为什么不能顺手补上"写死，防后人"统一一下"）。
+    //   〔J18·§1.3〕本通道前端不展示 notified_at ⇒ **单时刻正式模板**，结果框只出 `📖 已读 · 于 {已读时间}`。
     async function siExecutorRowReadStatus(releaseId, userId) {
         const btnEl = document.getElementById('siExecReadBtn' + releaseId + '_' + userId);
+        const boxId = `siExecReadBox_${releaseId}_${userId}`;
+        const box = document.getElementById(boxId);
+        if (box) box.innerHTML = '<span class="u-nt-idle">查询中…</span>';   // §3.3 态①
         if (btnEl) btnEl.disabled = true;
+        // 结果框写入统一走这里：挂不上（DOM 与预期不符）就回落 toast，绝不静默。
+        const put = (html, toastMsg, toastLvl) => { if (box) box.innerHTML = html; else showToast(toastMsg, toastLvl || 'warning'); };
         try {
             const r = await siApi('/sys-releases/' + releaseId + '/executors/' + userId + '/read-status');
-            if (!r.ok) { siApiErr(r, '查询已读失败'); return; }
+            // 〔T44〕非 ok → §3.3 态⑥「查询失败（{原因}）」，原因走冻结映射表五级回退（J8·不再 siApiErr 直出原文）
+            if (!r.ok) { put(`<span class="u-nt-fail">⚠️ 查询失败（${esc(siErrText(r, r.data))}）</span>`, '查询已读失败', 'error'); return; }
             const d = r.data || {};
             switch (d.read_status) {
                 // L6（codex 预筛）：read_at 来自后端 SQL-side datetime('now','localtime') 计算的原始时间字符串，
                 // 展示前须走 siFmtDT 归一格式 + esc 转义（同批次内其余时间字段展示范式一致，读接口这里之前漏了）。
-                case 'read': showToast('执行人已读（' + esc(siFmtDT(d.read_at)) + '）', 'success'); await siOpenBatchDetail(releaseId); break;
-                case 'unread': showToast('执行人尚未读该通知', 'warning'); break;
-                case 'no_message_key': showToast('尚无有效发送记录，无法查询已读', 'warning'); break;
-                case 'dry_run': showToast('该消息是演练发送，不可查真实已读', 'warning'); break;
-                case 'recipient_unresolved': showToast('无法解析该执行人钉钉账号，无法查询已读', 'warning'); break;
-                default: showToast('已读状态未知', 'warning');
+                case 'read': {   // §3.3 态②「已读」——唯一触发刷新的分支
+                    const readTxt = d.read_at ? esc(siFmtDT(d.read_at)) : '—';
+                    put(`<span class="u-nt-ok">📖 已读 · 于 ${readTxt}</span>`, `📖 已读 · 于 ${d.read_at ? siFmtDT(d.read_at) : '—'}`, 'success');
+                    // 〔§6.6 ②〕刷新失败时结果框保底。本面板的 box **一定活不过刷新**（siOpenBatchDetail 开头
+                    //   就把 siBatchBody 清成「加载中…」）⇒ 下面这段在当前实现里是**防御性**的：只有将来
+                    //   siOpenBatchDetail 改成不清空 body 时才会命中。§6.6 ② 明确本行**不发 toast**——
+                    //   刷新的三条失败路径（网络异常 / !r.ok / 令牌过期）siOpenBatchDetail 自己都已给出提示，
+                    //   且 read_at 已固化在后端，重开批次详情就能看到「已读 {时间}」徽标，结果并没有丢。
+                    await siOpenBatchDetail(releaseId);
+                    const boxAfter = document.getElementById(boxId);
+                    if (boxAfter && boxAfter.textContent.indexOf('📖 已读') === 0) {
+                        boxAfter.innerHTML = `<span class="u-nt-ok">📖 已读 · 于 ${readTxt}（批次详情刷新失败，可重新打开批次详情）</span>`;
+                    }
+                    break;
+                }
+                // §3.3 态③「窗口内未读」（`👀` 收编为 `⏳`）。超窗态 unread_expired 本端点无产出（J7）⇒ 不实现。
+                case 'unread': put('<span class="u-nt-warn">⏳ 尚未读取</span>', '尚未读取'); break;
+                // §3.3 态⑤「无法查询」＝ `⚠️ {原因}，无法查询已读`，原因短语取自冻结映射表 §6.5：
+                //   no_message_key→尚无有效发送记录 / dry_run→演练发送（未真实外呼）/ recipient_unresolved→收件人未解析
+                case 'no_message_key': put('<span class="u-nt-warn">⚠️ 尚无有效发送记录，无法查询已读</span>', '尚无有效发送记录，无法查询已读'); break;
+                case 'dry_run': put('<span class="u-nt-warn">⚠️ 演练发送（未真实外呼），无法查询已读</span>', '演练发送（未真实外呼），无法查询已读'); break;   // 〔D-5〕属"无法查询原因"非发送后缀
+                case 'recipient_unresolved': put('<span class="u-nt-warn">⚠️ 收件人未解析，无法查询已读</span>', '收件人未解析，无法查询已读'); break;
+                // 枚举外的值＝契约漂移，按 §3.3 态⑥「查询失败」处理（原因落映射表兜底「未知原因」）
+                default: put('<span class="u-nt-fail">⚠️ 查询失败（未知原因）</span>', '查询失败（未知原因）', 'error');
             }
+        } catch (e) {
+            put('<span class="u-nt-fail">⚠️ 查询失败（网络异常）</span>', '查询失败（网络异常）', 'error');
         } finally {
             // 若期间发生刷新（read 分支的 siOpenBatchDetail 会重绘整个区块），旧按钮元素已从 DOM 摘除，
             // 这里的 disabled=false 落在一个孤儿节点上是无害的空操作，不需要额外判断。

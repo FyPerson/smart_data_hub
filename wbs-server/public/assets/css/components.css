@@ -229,6 +229,48 @@
    历史区块结构无 u-notify-row 容器），尺寸全站一致；原行内 13 处按钮计算值不变，行外按钮从常规收紧对齐 */
 .u-nb-btn { font-size: 11px; padding: 3px 10px; }
 
+/* ===== 通知状态文本 7 槽（通知统一 N1·2026-08-09·方案 §3.1）=====
+   收编五页通知区的内联色值（现状成功绿 4 值 / 失败红 3 值 / 警示橙 3 值 / 中性灰 3 值，全内联硬编码）。
+   **零新色值**：7 槽全部借 13 层语义 token 的 fg 面；且**只设 color 一条属性**——这是纯文本槽不是徽章，
+   背景/边框/圆点/删除线一律不带（徽章族走 .u-status-badge / .u-notify-badge，两族不得互相借形态）。
+   借色登记（**借色值不借豁免资格**，与 verify-badge-alias.js 的 BORROWED_TIERS 同款口径）：
+     · u-nt-muted 借 --sem-voided-fg、u-nt-idle 借 --sem-legacy-fg —— 借的只是**色值**，
+       不继承 voided 层的 line-through 豁免语义（豁免的成文前提是 line-through+文案冗余，属徽章族约束，
+       纯文本不在徽章豁免表管辖）；且这两个色值恰为五页现状已在用的弱化灰（#9ca3af / #94a3b8），
+       属**同值收编不是降级**。调这两层 token 前请先看这里。 */
+.u-nt-ok    { color: var(--sem-done-fg); }
+.u-nt-fail  { color: var(--sem-failed-fg); }
+.u-nt-warn  { color: var(--sem-review-fg); }
+.u-nt-wait  { color: var(--sem-wait-fg); }
+.u-nt-run   { color: var(--sem-active-fg); }
+.u-nt-muted { color: var(--sem-voided-fg); }
+.u-nt-idle  { color: var(--sem-legacy-fg); }
+
+/* 查询已读结果框（通知统一 N1·从 Data_Correction.html:86-88 **原样上提**，页内定义同步删除）：
+   在 u-nr-body(flex-wrap) 内换行独占一行、右对齐通知按钮列；空时不占位（不覆盖通知时间/按钮）。
+   上提原因：Sys_Iteration（D6 查已读从 toast 切行内结果框）与 Issue_Lite 都要用它，而此前它只活在
+   DC 页内——Issue_Lite.html:673 早就在用这个类却拿不到样式（既有隐性缺陷，随本次上提一并修复）。 */
+.u-nr-read-result { flex-basis: 100%; text-align: right; }
+.u-nr-read-result:empty { display: none; }
+
+/* 〔J13〕操作栏内通知按钮特异性补丁（通知统一 N1·N1-fix 改选择器形态）：
+   下方 :283 的 `.u-action-bar .u-btn-secondary`(0,2,0) 压过 `.u-nb-btn`(0,1,0)，导致 Issue_Tracker
+   操作栏三个通知按钮上挂的 u-nb-btn 是**死类**——宣称 11px/3px 10px，实际生效的是操作栏的
+   12px/5px 12px（"守卫看得见类名、浏览器看不见效果"的假绿形态）。
+   **选择器写成 (0,3,0) 而不是同分靠位置压**：初版用 `.u-action-bar .u-nb-btn`(0,2,0)，与 :283 同特异性、
+   又写在它**上面**，按后来者胜出规则反而被 :283 反杀——补丁本身成了第二条死规则。改为
+   `.u-action-bar .u-btn-secondary.u-nb-btn`(0,3,0) 后**赢在特异性不赢在位置**：与本规则写在文件哪一段
+   无关，将来有人重排/抽段/合并文件都不会静默退化。
+   （为什么不用"把规则挪到 :283 下面"的省事解法：那让正确性依赖**源码顺序**这一不可见前提，读代码的人
+   和静态守卫都看不出来，属于下一次重构时必然踩的坑。特异性写死是自解释的。）
+   影响面已逐页复核：本组合选择器**全站唯一命中 Issue_Tracker 操作栏三按钮**（它们是
+   `class="u-btn-secondary u-nb-btn"`）；Data_Correction/Issue_Lite/Sys_Iteration 的通知按钮在
+   u-notify-row 内、Data_Collab 的在详情区块内，均不在 u-action-bar 内。同栏的普通
+   `u-btn-secondary`（编辑/删除/转为X 等）**不带 u-nb-btn，不被本规则命中**，仍走 :283 的 12px/5px 12px。
+   登记：若将来操作栏内出现 `u-btn-primary`/`u-btn-danger` + `u-nb-btn` 的组合，需按同款补对应
+   (0,3,0) 选择器（当前全站零命中，故不预写）。 */
+.u-action-bar .u-btn-secondary.u-nb-btn { font-size: 11px; padding: 3px 10px; }
+
 /* ===== 详情区块 ===== */
 .u-detail-section { margin-bottom: 18px; }
 .u-detail-section h3 { font-size: 13px; font-weight: 600; color: #374151; margin: 0 0 8px; padding-bottom: 6px; border-bottom: 1px solid #f1f5f9; }

@@ -448,7 +448,14 @@ check('列表单元格走 siPriRiskCellHtml 双行结构（上=u-pri 徽章 / �
     assert.ok(/<td>\$\{siPriRiskCellHtml\(i\)\}<\/td>/.test(src), '列表行的优先级单元格应改调 siPriRiskCellHtml(i)');
     const fn = extractFunctionBody(src, 'siPriRiskCellHtml');
     assert.ok(fn, 'siPriRiskCellHtml 函数体应能被提取（防改名后本组静默失效）');
-    assert.ok(/class="u-pri \$\{esc\(i\.priority\)\}"/.test(fn), '上行仍是既有 .u-pri 优先级徽章（复用共享层，不自造样式）');
+    // 〔断言同步·2026-08-09〕原断言写死 `class="u-pri ${esc(i.priority)}"`，被**状态徽章统一 v1.142.0**
+    //   打红：那一批把三处输出点的 class 片段从 `esc(原值)` 改成白名单 map `siPriClass()`
+    //   （Sys_Iteration.html:770-780 有成文理由：esc 防注入，但"产不出规则的 class"它管不着）。
+    //   ⇒ 属**断言该改**不是实现错——本断言的原意「复用共享层 .u-pri，不自造样式」现在依然成立，
+    //   变的只是 class 片段的来源。顺手把断言**加强**成徽章批的真实不变量：class 片段必须来自
+    //   受控 map，可见文本仍是 esc(原值)（该页刻意保留显示原值，见 :772-774 的取舍说明）。
+    assert.ok(/class="u-pri \$\{siPriClass\(i\.priority\)\}"/.test(fn), '上行仍是既有 .u-pri 徽章，且 class 片段走 siPriClass 白名单（不再 raw 拼 esc(原值)）');
+    assert.ok(/>\$\{esc\(i\.priority\)\}</.test(fn), '可见文本仍用 esc(原值)（脏数据要能被人看见，与 class 规范化是两回事）');
     assert.ok(/si-pri-risk/.test(fn) && /si-risk-line/.test(fn), '应输出 si-pri-risk 容器 + si-risk-line 下行包裹');
     assert.ok(/\.si-pri-risk\s*\{/.test(src) && /\.si-risk-sub\s*\{/.test(src), 'si-pri-risk / si-risk-sub 样式应已定义（否则双行塌成一行）');
 });
@@ -489,8 +496,9 @@ check('列表端点 DTO 已含 risk_level 只读字段（前端双行下行的�
     assert.ok(!/addEq\('risk_level'/.test(indexJsSrc), 'C8 是纯展示扩字段，不应新增 risk_level 筛选');
 });
 check('详情页基本信息块补优先级 kv（与风险等级 kv 并排）', () => {
-    assert.ok(/<label>优先级<\/label><div class="v"><span class="u-pri \$\{esc\(iss\.priority\)\}" title="\$\{SI_PRIORITY_HELP_TEXT\}"/.test(src),
-        '基本信息 kv 应含优先级项，徽章复用 .u-pri 且 title 复用既有 SI_PRIORITY_HELP_TEXT（不新增文案副本）');
+    // 〔断言同步·2026-08-09〕同上：class 片段随状态徽章统一 v1.142.0 改走 siPriClass 白名单。
+    assert.ok(/<label>优先级<\/label><div class="v"><span class="u-pri \$\{siPriClass\(iss\.priority\)\}" title="\$\{SI_PRIORITY_HELP_TEXT\}"/.test(src),
+        '基本信息 kv 应含优先级项，徽章复用 .u-pri（class 走 siPriClass 白名单）且 title 复用既有 SI_PRIORITY_HELP_TEXT（不新增文案副本）');
 });
 check('MED-4：详情页工期 kv 移出 needs_feasibility 条件，改按 type 适用面', () => {
     assert.ok(/const effortApplicableType = \(iss\.type === 'feature' \|\| iss\.type === 'improvement'\)/.test(src),

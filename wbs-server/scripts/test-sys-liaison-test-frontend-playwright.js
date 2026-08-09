@@ -229,7 +229,14 @@ async function seedLiaisonTestIssue(title, devUserId, devUserName, extraMembers 
     await pageDev.waitForTimeout(600);
     const d1 = await pageDev.evaluate(() => {
       const notifyRow = [...document.querySelectorAll('#siDBody .u-notify-row')].find(r => r.textContent.includes('对接测试'));
-      const btn = notifyRow ? [...notifyRow.querySelectorAll('button')].find(b => /发送通知|重发/.test(b.textContent)) : null;
+      // 〔断言同步·通知统一 S10 改名连带·2026-08-09〕原正则只认 `发送通知|重发`。S10（N3-1·commit 9dbcf98）
+      //   把 failed/sending 态的按钮文案由「重发」统一改成「**重试**」（§3.2 三态模板：首发=发送通知 /
+      //   sent=重新通知 / failed=重试），本用例的夹具恰是 sending 态 ⇒ 渲染出的按钮写着「重试」，
+      //   旧正则匹配不到，`hasBtn:false` 让本组两条断言级联红。
+      //   ⚠️ 排查留痕：红的是**选择器老化**，不是行为回归——N7 要的"NULL 视为可立即抢占、按钮不禁用"完好：
+      //   siLiaisonTestNotifySendingIsStale(null) 首行 `if (!startedAt) return true` ⇒ 判 stale ⇒ 走 else
+      //   分支渲染**可点击**按钮（disabled 分支只在 sending 且未超窗时才走，那支现在显「发送中…」）。
+      const btn = notifyRow ? [...notifyRow.querySelectorAll('button')].find(b => /发送通知|重新通知|重试|重发/.test(b.textContent)) : null;
       return { hasBtn: !!btn, disabled: btn ? btn.disabled : null };
     });
     must(d1.hasBtn === true, `[LT-D1] 前置：sending+started_at=NULL 场景仍渲染发送/重发按钮，实得=${JSON.stringify(d1)}`);
@@ -262,7 +269,14 @@ async function seedLiaisonTestIssue(title, devUserId, devUserName, extraMembers 
       const warnEl = notifyRow ? notifyRow.nextElementSibling : null;
       return { toastText, warnText: warnEl ? warnEl.textContent : null };
     });
-    must(t8a.toastText.includes('留痕失败'), `[LT-T8a] toast 显示留痕失败警示，实得="${t8a.toastText}"`);
+    // 〔断言同步·通知统一 矩阵 T8·A 类删·2026-08-09〕这条 toast **已按 A 类删除**：同一句话由
+    //   `siRenderLiaisonTestNotifyRow` 的 siLiaisonTestWritebackFailedIds 分支以**行内驻留红字**承担，
+    //   逐字同文案且**持续驻留**（比 3 秒就飘走的 toast 强）。删除前提不是推理——本套件下一条断言
+    //   （[LT-T8a] 通知区红字）已实测到 "⚠️ 通知已发出但留痕失败，请勿重发，联系管理员核对" 在场，
+    //   即"失败绝不静默"红线由行内那条守住。故本条从"必须有 toast"改为"**必须没有**重复的 toast"，
+    //   把 A 类删除的成果反向钉死（将来谁把 toast 加回来＝重复反馈，这里会红）。
+    must(!t8a.toastText.includes('留痕失败'),
+        `[LT-T8a] 留痕失败 toast 已按矩阵 T8 删除（反馈迁到行内驻留红字·下一条断言实测其在场），实得toast="${t8a.toastText}"`);
     must(!!t8a.warnText && t8a.warnText.includes('请勿重发'), `[LT-T8a] 通知区出现「请勿重发」持续性红字警示（非仅一闪而过的 toast），实得="${t8a.warnText}"`);
     await pageDev.unroute('**/api/sys-issues/*/notify-liaison-test');
 
@@ -326,7 +340,10 @@ async function seedLiaisonTestIssue(title, devUserId, devUserName, extraMembers 
       const notifyRow = [...document.querySelectorAll('#siDBody .u-notify-row')].find(r => r.textContent.includes('对接测试'));
       return { rowText: notifyRow ? notifyRow.textContent : null };
     });
-    must(!!d2.rowText && d2.rowText.includes('（演练）'), `[LT-D2] ⭐ N1+R8 采纳：dry-run 已发送记录（message_key=dryrun-前缀）行内出现「（演练）」标记，实得="${d2.rowText}"`);
+    // 〔断言同步·通知统一 J20/D-1·2026-08-09〕dry-run 后缀全站统一为「（演练·未真实发送）」——
+    //   收敛此前三种写法（`（演练）`/`（演练模式，未真实外呼）`/`（未真实发送钉钉）`）。语义不变、更明确，
+    //   属**断言该改**。仍断言"行内有 dry-run 标记"这一原意，只把期望串换成统一后的那一个。
+    must(!!d2.rowText && d2.rowText.includes('（演练·未真实发送）'), `[LT-D2] ⭐ N1+R8 采纳：dry-run 已发送记录（message_key=dryrun-前缀）行内出现「（演练·未真实发送）」标记（J20 后缀统一），实得="${d2.rowText}"`);
 
     trackDev.assertNoUnexpectedConsoleErrors('dev', true);   // dev 打开建单弹窗缓存会背景触发 intake-liaisons 403（既有噪音，非本次改动引入）
     await ctxDev.close();
