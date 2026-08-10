@@ -163,7 +163,8 @@ async function seedBugToReady(devId = 5, devTok2 = devTok) {
   const id = await seedBugToDev(devId);
   let r = await call('POST', `/api/sys-issues/${id}/estimate`, devTok2, { dev_estimated_at: EST });
   assert.strictEqual(r.status, 200, `bug estimate 200, got ${r.status} ${JSON.stringify(r.body)}`);
-  r = await call('POST', `/api/sys-issues/${id}/submit`, devTok2, { mode: 'commits', commits: [{ component: 'backend', commit_ref: 'c9-keep-batch-10' }], self_tested: true, test_env_deployed: true });
+  // [B4b 全仓扫净] bug 单必填 bug_cause_note（C6 拍板生效后）——seedBugToReady 建的是 bug 单，会真过必填闸。
+  r = await call('POST', `/api/sys-issues/${id}/submit`, devTok2, { mode: 'commits', commits: [{ component: 'backend', commit_ref: 'c9-keep-batch-10' }], self_tested: true, test_env_deployed: true, bug_cause_note: 'verify 夹具：bug 产生原因（bug-transitions）' });
   assert.strictEqual(r.status, 200, `bug submit 200, got ${r.status} ${JSON.stringify(r.body)}`);
   r = await call('POST', `/api/sys-issues/${id}/accept`, adminTok, {});
   assert.strictEqual(r.status, 200, `bug accept 200, got ${r.status} ${JSON.stringify(r.body)}`);
@@ -374,7 +375,8 @@ async function main() {
   {
     // 合法 submit → 待验证（C3：新 commit 事件模型，无 first_submitted_at/round_no timeline——
     //   这两个字段随旧单人 summary 模型退场，唯一在册开发 no_code 完成 → W-GATE 同事务转待验证）。
-    const r = await call('POST', `/api/sys-issues/${mainId}/submit`, devTok, { mode: 'no_code', no_code_reason: '缺陷已修复（占位理由）', self_tested: true, test_env_deployed: true });
+    // [B4b 全仓扫净] mainId 是 bug 单，bug 单必填 bug_cause_note（C6 拍板生效后）。
+    const r = await call('POST', `/api/sys-issues/${mainId}/submit`, devTok, { mode: 'no_code', no_code_reason: '缺陷已修复（占位理由）', self_tested: true, test_env_deployed: true, bug_cause_note: 'verify 夹具：bug 产生原因（bug-transitions）' });
     assert.strictEqual(r.status, 200, 'submit 200, got ' + JSON.stringify(r.body));
     assert.strictEqual(r.body.main_status, '待验证', 'submit → 待验证（W-GATE，main_status 字段，非旧 status）');
     const devEv = await get(`SELECT action, payload_json FROM sys_issue_dev_events WHERE issue_id=? AND action='no_code'`, [mainId]);
@@ -406,9 +408,10 @@ async function main() {
     r = await call('POST', `/api/sys-issues/${mainId}/dev-assignees`, adminTok, { user_ids: [5] });
     assert.strictEqual(r.status, 200, 're-add(5) 200, got ' + JSON.stringify(r.body));
     await call('POST', `/api/sys-issues/${mainId}/estimate`, devTok, { dev_estimated_at: EST2 });
-    r = await call('POST', `/api/sys-issues/${mainId}/submit`, devTok, { mode: 'commits', commits: [{ component: 'backend', commit_ref: 'c9-keep-batch-13' }], self_tested: true, test_env_deployed: true });
+    // [B4b 全仓扫净] 二轮两名在册开发各自提交，bug 单逐人填 bug_cause_note（C6 拍板生效后）。
+    r = await call('POST', `/api/sys-issues/${mainId}/submit`, devTok, { mode: 'commits', commits: [{ component: 'backend', commit_ref: 'c9-keep-batch-13' }], self_tested: true, test_env_deployed: true, bug_cause_note: 'verify 夹具：bug 产生原因（bug-transitions·二轮-5）' });
     assert.strictEqual(r.status, 200, '二轮 submit(5) 200, got ' + JSON.stringify(r.body));
-    r = await call('POST', `/api/sys-issues/${mainId}/submit`, dev2Tok, { mode: 'commits', commits: [{ component: 'backend', commit_ref: 'c9-keep-batch-14' }], self_tested: true, test_env_deployed: true });
+    r = await call('POST', `/api/sys-issues/${mainId}/submit`, dev2Tok, { mode: 'commits', commits: [{ component: 'backend', commit_ref: 'c9-keep-batch-14' }], self_tested: true, test_env_deployed: true, bug_cause_note: 'verify 夹具：bug 产生原因（bug-transitions·二轮-6）' });
     assert.strictEqual(r.status, 200, '协作(6) submit 200, got ' + JSON.stringify(r.body));
     assert.strictEqual(r.body.main_status, '待验证', '全员完成 → W-GATE 转待验证');
     r = await call('POST', `/api/sys-issues/${mainId}/accept`, adminTok, {});
@@ -816,9 +819,10 @@ async function main() {
     // 改用本文件顶部已有的 futureEst(30) 动态生成，与本文件其余三处调用同源。
     r = await call('POST', `/api/sys-issues/${c6Bug}/estimate`, devTok, { dev_estimated_at: futureEst(30) });
     assert.strictEqual(r.status, 200, `[C6] estimate 应 200, got ${r.status} ${JSON.stringify(r.body)}`);
-    r = await call('POST', `/api/sys-issues/${c6Bug}/submit`, devTok, { mode: 'commits', commits: [{ component: 'backend', commit_ref: 'c9-keep-batch-15' }], self_tested: true, test_env_deployed: true });
+    // [B4b 全仓扫净] c6Bug 重开后二轮两名在册开发各自提交，bug 单逐人填 bug_cause_note（C6 拍板生效后）。
+    r = await call('POST', `/api/sys-issues/${c6Bug}/submit`, devTok, { mode: 'commits', commits: [{ component: 'backend', commit_ref: 'c9-keep-batch-15' }], self_tested: true, test_env_deployed: true, bug_cause_note: 'verify 夹具：bug 产生原因（bug-transitions·C6-5）' });
     assert.strictEqual(r.status, 200, `[C6] submit(5) 应 200, got ${r.status} ${JSON.stringify(r.body)}`);
-    r = await call('POST', `/api/sys-issues/${c6Bug}/submit`, dev2Tok, { mode: 'commits', commits: [{ component: 'backend', commit_ref: 'c9-keep-batch-16' }], self_tested: true, test_env_deployed: true });
+    r = await call('POST', `/api/sys-issues/${c6Bug}/submit`, dev2Tok, { mode: 'commits', commits: [{ component: 'backend', commit_ref: 'c9-keep-batch-16' }], self_tested: true, test_env_deployed: true, bug_cause_note: 'verify 夹具：bug 产生原因（bug-transitions·C6-6）' });
     assert.strictEqual(r.status, 200, `[C6] submit(6) 应 200, got ${r.status} ${JSON.stringify(r.body)}`);
     assert.strictEqual(r.body.main_status, '待验证', '[C6] 全员完成 → W-GATE 转待验证');
     r = await call('POST', `/api/sys-issues/${c6Bug}/accept`, adminTok, {});
@@ -926,7 +930,8 @@ async function main() {
     assert.strictEqual(row.status, '处理中', '同态换人仍 处理中（DEV 族内增减不触发 W-GATE）');
     // 待验证换人 → 回 处理中（W-GATE：新增 pending 成员 5 打破"全员完成"，VERIFY→DEV）
     await call('POST', `/api/sys-issues/${id}/estimate`, dev2Tok, { dev_estimated_at: EST });
-    await call('POST', `/api/sys-issues/${id}/submit`, dev2Tok, { mode: 'commits', commits: [{ component: 'backend', commit_ref: 'c9-keep-batch-17' }], self_tested: true, test_env_deployed: true });
+    // [B4b 全仓扫净] bug 单必填 bug_cause_note（C6 拍板生效后）。
+    await call('POST', `/api/sys-issues/${id}/submit`, dev2Tok, { mode: 'commits', commits: [{ component: 'backend', commit_ref: 'c9-keep-batch-17' }], self_tested: true, test_env_deployed: true, bug_cause_note: 'verify 夹具：bug 产生原因（bug-transitions）' });
     assert.strictEqual(await statusOf(id), '待验证');
     r = await call('POST', `/api/sys-issues/${id}/reassign`, adminTok, { member_ids: [5], reason: '返工换回' });
     assert.strictEqual(r.status, 200, `reassign 200, got ${r.status} ${JSON.stringify(r.body)}`);

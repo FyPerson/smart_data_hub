@@ -233,7 +233,8 @@ async function main() {
     assert.strictEqual(rAssign3.status, 200, `[P3] 夹具 assign 200, got ${rAssign3.status} ${JSON.stringify(rAssign3.body)}`);
     const rEst3 = await call('POST', `/api/sys-issues/${id3}/estimate`, devTok, { dev_estimated_at: EST });
     assert.strictEqual(rEst3.status, 200, `[P3] 夹具 estimate 200, got ${rEst3.status} ${JSON.stringify(rEst3.body)}`);
-    const rSubmit3 = await call('POST', `/api/sys-issues/${id3}/submit`, devTok, { mode: 'no_code', no_code_reason: '修复完成（占位理由）', self_tested: true, test_env_deployed: true });   // → 待验证
+    // [B4b 全仓扫净] id3 是 createBug() 建的 bug 单，bug 单必填 bug_cause_note（C6 拍板生效后）。
+    const rSubmit3 = await call('POST', `/api/sys-issues/${id3}/submit`, devTok, { mode: 'no_code', no_code_reason: '修复完成（占位理由）', self_tested: true, test_env_deployed: true, bug_cause_note: 'verify 夹具：bug 产生原因（liaison）' });   // → 待验证
     assert.strictEqual(rSubmit3.status, 200, `[P3] 夹具 submit 200, got ${rSubmit3.status} ${JSON.stringify(rSubmit3.body)}`);
     let r3 = await call('POST', `/api/sys-issues/${id3}/accept`, liaison2Tok, {});
     assert.strictEqual(r3.status, 403, '⭐ 受理人(13) accept 应 403（验收仍属 admin·不获泛化写权限）');

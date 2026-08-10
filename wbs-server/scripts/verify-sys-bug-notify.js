@@ -131,7 +131,8 @@ async function bugAssignedWithCollab(primaryId, collaboratorIds, extra = {}) {
 async function bugReturned(devId = 5, extra = {}) {
   const id = await bugAssigned(devId, extra);
   await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: EST });
-  await call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'no_code', no_code_reason: '修复（占位理由）', self_tested: true, test_env_deployed: true });   // 待验证
+  // [B4b 全仓扫净] bugReturned 建的是 bug 单，bug 单必填 bug_cause_note（C6 拍板生效后）。
+  await call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'no_code', no_code_reason: '修复（占位理由）', self_tested: true, test_env_deployed: true, bug_cause_note: 'verify 夹具：bug 产生原因（bug-notify）' });   // 待验证
   const r = await call('POST', `/api/sys-issues/${id}/return`, adminTok, { reason: '未修好' });   // 打回→处理中 return_count++
   assert.strictEqual(r.status, 200, 'bug return 200');
   return id;
@@ -149,9 +150,10 @@ async function bugReturned(devId = 5, extra = {}) {
 async function bugToVerifying(devId = 5, extra = {}, { withCommit = false } = {}) {
   const id = await bugAssigned(devId, extra);
   await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: EST });
+  // [B4b 全仓扫净] bugToVerifying 建的是 bug 单，bug 单必填 bug_cause_note（C6 拍板生效后），两分支都要加。
   const submitBody = withCommit
-    ? { mode: 'commits', commits: [{ component: 'backend', commit_ref: `fix/c9keep-${id}` }], self_tested: true, test_env_deployed: true }
-    : { mode: 'no_code', no_code_reason: '修复（占位理由）', self_tested: true, test_env_deployed: true };
+    ? { mode: 'commits', commits: [{ component: 'backend', commit_ref: `fix/c9keep-${id}` }], self_tested: true, test_env_deployed: true, bug_cause_note: 'verify 夹具：bug 产生原因（bug-notify）' }
+    : { mode: 'no_code', no_code_reason: '修复（占位理由）', self_tested: true, test_env_deployed: true, bug_cause_note: 'verify 夹具：bug 产生原因（bug-notify）' };
   const r = await call('POST', `/api/sys-issues/${id}/submit`, devTok, submitBody);
   assert.strictEqual(r.status, 200, 'bug submit 200');
   return id;

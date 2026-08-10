@@ -106,6 +106,10 @@ const BASE_URL = 'http://localhost:3000';
 const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
 const JWT_SECRET = process.env.JWT_SECRET || 'default_secret_key_change_me';
 const SCREENSHOT_DIR = path.join(__dirname, '..', 'test-screenshots');
+// D12 缓存串现役值——唯一定义处，[T26] 的断言与探测输入均引用本常量，不再是散落在正则字面量里的
+// 拷贝。每次生产代码 bump app.js 缓存串，改这一个常量即可同步，不用去 [T26] 内部找字面量改；
+// 忘记同步 = 断言假绿（锁住的是旧串，测不出"生产已 bump 但测试没跟上"这种不一致）。
+const SI_ACTIVE_CACHE_QUERY = 'v1.142.0_notify1';
 
 const db = new sqlite3.Database(DB_PATH);
 const run = (sql, p = []) => new Promise((res, rej) => db.run(sql, p, function (e) { e ? rej(e) : res(this); }));
@@ -1225,8 +1229,12 @@ const seedCommit = (issueId, daId, userId, component, ref) =>
         //   旧版没有 'minute' 分支会 fallthrough 回带秒的默认分支，**页面看着正常、秒悄悄回来了**。
         //   守卫把这种静默失败变成 console.error。本条锁"守卫存在且探测串与实现一致"。
         const bumpedPages = await page.evaluate(() => document.querySelector('script[src*="assets/js/app.js"]').getAttribute('src'));
-        must(/app\.js\?v=v1\.137\.0_timefmt$/.test(bumpedPages),
-            `[T26] ⭐ D12：app.js 缓存串必须已 bump（本次动了共享静态资源），实得 "${bumpedPages}"`);
+        // ⚠️ 现役值＝文件头部 SI_ACTIVE_CACHE_QUERY 常量（唯一定义处，本断言引用它而非另写字面量）——
+        //   每次生产代码 bump 缓存串，同步改那一个常量即可，不用在本文件里逐处找字面量改；忘记同步会
+        //   让本断言假绿（锁的是旧串，测不出生产已 bump 但测试没跟上这种漂移）。用 endsWith 做精确尾部
+        //   匹配（非 RegExp）——常量本身含字面量 `.`，塞进正则会被解释成通配符，字符串比较更安全直接。
+        must(bumpedPages.endsWith(`app.js?v=${SI_ACTIVE_CACHE_QUERY}`),
+            `[T26] ⭐ D12：app.js 缓存串应为当前现役串 ${SI_ACTIVE_CACHE_QUERY}（bump 时本常量须同步），实得 "${bumpedPages}"`);
         must(/formatDateTimeUnified\('2026-01-02 03:04:05', 'minute'\)/.test(srcT25)
             && /probe !== '2026-01-02 03:04'/.test(srcT25),
             '[T26] ⭐ 陈旧缓存守卫存在，且其探测输入/期望输出与 [T22] 用的是同一组值（守卫自身写错就成了永不触发的摆设）');
@@ -1321,7 +1329,8 @@ const seedCommit = (issueId, daId, userId, component, ref) =>
         await run(`UPDATE sys_issues SET dev_estimated_at = ? WHERE id = ?`, ['2099-12-31 10:00', iFlow]);
 
         // 第一次真实 submit（唯一在册开发完成 → W-GATE 同事务转「待验证」）
-        const submit1 = await apiCall('POST', `/api/sys-issues/${iFlow}/submit`, devTokFlow, { mode: 'commits', commits: [{ component: 'frontend', commit_ref: 't29b-round1' }], self_tested: true, test_env_deployed: true });
+        // [B4b 全仓扫净] mkIssue（本文件 :154）type 恒 'bug'，bug 单必填 bug_cause_note（C6 拍板生效后）。
+        const submit1 = await apiCall('POST', `/api/sys-issues/${iFlow}/submit`, devTokFlow, { mode: 'commits', commits: [{ component: 'frontend', commit_ref: 't29b-round1' }], self_tested: true, test_env_deployed: true, bug_cause_note: 'verify 夹具：bug 产生原因（commit-cols-playwright·T29b-r1）' });
         must(submit1.ok && submit1.status === 200 && submit1.body.main_status === '待验证',
             `[T29b] 前置：真实 submit #1（唯一在册开发）应 200 + W-GATE 转「待验证」，实得 status=${submit1.status} body=${JSON.stringify(submit1.body)}`);
 
@@ -1381,7 +1390,8 @@ const seedCommit = (issueId, daId, userId, component, ref) =>
         must(!!dbNow260 && dbNow260 > tl1.created_at,
             `[T29b] 前置：轮询等待数据库时钟严格跨过 tl1.created_at（50ms 间隔，3s 超时上限）——超时说明系统时钟/DB 连接异常需人工排查，非继续跑，实得 dbNow="${dbNow260}" tl1="${tl1.created_at}"`);
 
-        const submit2 = await apiCall('POST', `/api/sys-issues/${iFlow}/submit`, devTokFlow, { mode: 'commits', commits: [{ component: 'frontend', commit_ref: 't29b-round2' }], self_tested: true, test_env_deployed: true });
+        // [B4b] 每轮必填 bug_cause_note（二轮仍要带）。
+        const submit2 = await apiCall('POST', `/api/sys-issues/${iFlow}/submit`, devTokFlow, { mode: 'commits', commits: [{ component: 'frontend', commit_ref: 't29b-round2' }], self_tested: true, test_env_deployed: true, bug_cause_note: 'verify 夹具：bug 产生原因（commit-cols-playwright·T29b-r2）' });
         must(submit2.ok && submit2.status === 200 && submit2.body.main_status === '待验证',
             `[T29b] 前置：真实 submit #2 应 200 + W-GATE 再次转「待验证」，实得 status=${submit2.status} body=${JSON.stringify(submit2.body)}`);
 
@@ -1634,7 +1644,8 @@ const seedCommit = (issueId, daId, userId, component, ref) =>
         const iNoCode = await mkIssue(`CC-无代码交付-${RUN_TAG}`, '处理中');
         await mkMember(iNoCode, devUser.id);
         await run(`UPDATE sys_issues SET dev_estimated_at = ? WHERE id = ?`, ['2099-12-31 12:00', iNoCode]);
-        const submitNoCode = await apiCall('POST', `/api/sys-issues/${iNoCode}/submit`, devTokFlow, { mode: 'no_code', no_code_reason: XSS_NO_CODE_REASON, self_tested: true, test_env_deployed: true });
+        // [B4b] mkIssue 恒 bug 类型，必填 bug_cause_note。
+        const submitNoCode = await apiCall('POST', `/api/sys-issues/${iNoCode}/submit`, devTokFlow, { mode: 'no_code', no_code_reason: XSS_NO_CODE_REASON, self_tested: true, test_env_deployed: true, bug_cause_note: 'verify 夹具：bug 产生原因（commit-cols-playwright·T33）' });
         must(submitNoCode.ok && submitNoCode.status === 200 && submitNoCode.body.dev_status === 'no_code',
             `[T33] 前置：真实 no_code submit 应 200 + dev_status=no_code，实得 status=${submitNoCode.status} body=${JSON.stringify(submitNoCode.body)}`);
 
@@ -1723,7 +1734,8 @@ const seedCommit = (issueId, daId, userId, component, ref) =>
         await mkMember(iNoCodeHist, devUser2.id);   // 仅占位，撑住 LAST_ASSIGNEE 门槛（activeCount 需 ≥2 才能移除 devUser）
         await run(`UPDATE sys_issues SET dev_estimated_at = ? WHERE id = ?`, ['2099-12-31 13:00', iNoCodeHist]);
 
-        const submitHist = await apiCall('POST', `/api/sys-issues/${iNoCodeHist}/submit`, devTokFlow, { mode: 'no_code', no_code_reason: HIST_NO_CODE_REASON, self_tested: true, test_env_deployed: true });
+        // [B4b] mkIssue 恒 bug 类型，必填 bug_cause_note。
+        const submitHist = await apiCall('POST', `/api/sys-issues/${iNoCodeHist}/submit`, devTokFlow, { mode: 'no_code', no_code_reason: HIST_NO_CODE_REASON, self_tested: true, test_env_deployed: true, bug_cause_note: 'verify 夹具：bug 产生原因（commit-cols-playwright·T33b-r1）' });
         must(submitHist.ok && submitHist.status === 200 && submitHist.body.dev_status === 'no_code',
             `[T33b] 前置：真实 no_code submit 应 200 + dev_status=no_code，实得 status=${submitHist.status} body=${JSON.stringify(submitHist.body)}`);
         const daHistAId = submitHist.body && submitHist.body.dev_assignee_id;
@@ -1797,7 +1809,8 @@ const seedCommit = (issueId, daId, userId, component, ref) =>
             `[T33b] L-2 前置：re-add 应产生一条全新在册实例（id 不同于旧的已移出实例 ${daHistAId}），实得 ${JSON.stringify(newInstance)}`);
         const daHistBId = newInstance && newInstance.id;
 
-        const submitHist2 = await apiCall('POST', `/api/sys-issues/${iNoCodeHist}/submit`, devTokFlow, { mode: 'no_code', no_code_reason: RE_ADD_REASON, self_tested: true, test_env_deployed: true });
+        // [B4b] re-add 后新实例第二轮提交，每轮必填 bug_cause_note。
+        const submitHist2 = await apiCall('POST', `/api/sys-issues/${iNoCodeHist}/submit`, devTokFlow, { mode: 'no_code', no_code_reason: RE_ADD_REASON, self_tested: true, test_env_deployed: true, bug_cause_note: 'verify 夹具：bug 产生原因（commit-cols-playwright·T33b-r2）' });
         must(submitHist2.ok && submitHist2.status === 200 && submitHist2.body.dev_status === 'no_code' && submitHist2.body.dev_assignee_id === daHistBId,
             `[T33b] L-2 前置：新实例真实 no_code submit 应 200 + 命中新实例 id=${daHistBId}，实得 status=${submitHist2.status} body=${JSON.stringify(submitHist2.body)}`);
 

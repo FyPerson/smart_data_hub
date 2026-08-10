@@ -112,7 +112,8 @@ async function seedBugToReady(devId = 5, devTokFor = devTok) {
   assert.strictEqual(r.status, 200, 'bug assign 200');
   r = await call('POST', `/api/sys-issues/${id}/estimate`, devTokFor, { dev_estimated_at: EST });
   assert.strictEqual(r.status, 200, 'bug estimate 200, got ' + JSON.stringify(r.body));
-  r = await call('POST', `/api/sys-issues/${id}/submit`, devTokFor, { mode: 'commits', commits: [{ component: 'backend', commit_ref: `fix/seed-ready-${id}` }], self_tested: true, test_env_deployed: true });
+  // [B4b 全仓扫净] bug 单必填 bug_cause_note（C6 拍板生效后）。
+  r = await call('POST', `/api/sys-issues/${id}/submit`, devTokFor, { mode: 'commits', commits: [{ component: 'backend', commit_ref: `fix/seed-ready-${id}` }], self_tested: true, test_env_deployed: true, bug_cause_note: 'verify 夹具：bug 产生原因（release-orchestration）' });
   assert.strictEqual(r.status, 200, 'bug submit 200, got ' + JSON.stringify(r.body));
   // [C9-fix H2②] 前置自证：accept 之前该单确有 active commit——不满足就会命中 C9 免上线直翻，本 seed 的
   //   「待上线态」契约当场失效（防夹具自己变假，同 c9 套件 [1-前置] 范式）。

@@ -183,7 +183,9 @@ async function mkVerifying(type) {
   await run(`UPDATE sys_issues SET intake_liaison_id = 999999 WHERE id = ?`, [id]);
   const e = await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: futureEst(30), ...(type === 'bug' ? {} : { estimated_effort_days: 1 }) });
   assert.strictEqual(e.status, 200, `夹具 mkVerifying(${type}) estimate 200, got ${e.status} ${JSON.stringify(e.body)}`);
-  const s = await call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'commits', commits: [{ component: 'backend', commit_ref: 'c9-keep-batch-28' }], self_tested: true, test_env_deployed: true });
+  // [B4b 全仓扫净] mkVerifying(type) 是跨三类型共用的通用夹具（TYPES=['bug','feature','improvement']）——
+  //   type==='bug' 时必填 bug_cause_note（C6 拍板生效后），其余类型不加（加了会撞 NOT_APPLICABLE）。
+  const s = await call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'commits', commits: [{ component: 'backend', commit_ref: 'c9-keep-batch-28' }], self_tested: true, test_env_deployed: true, ...(type === 'bug' ? { bug_cause_note: 'verify 夹具：bug 产生原因（role-perm-c1）' } : {}) });
   assert.strictEqual(s.status, 200, `夹具 mkVerifying(${type}) submit 200, got ${s.status} ${JSON.stringify(s.body)}`);
   assert.strictEqual(await statusOf(id), '待验证', `夹具 mkVerifying(${type})：提交后须真落「待验证」`);
   await run(`UPDATE sys_issues SET intake_liaison_id = 13 WHERE id = ?`, [id]);   // 复位绑定为受理人 13（submit 降级已完成）

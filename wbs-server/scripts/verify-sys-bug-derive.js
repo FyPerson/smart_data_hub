@@ -96,7 +96,8 @@ async function seedBugToReady(devId = 5) {
   const id = await seedBugToDev(devId);
   let r = await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: EST });
   assert.strictEqual(r.status, 200, `bug estimate 200, got ${r.status} ${JSON.stringify(r.body)}`);
-  r = await call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'commits', commits: [{ component: 'backend', commit_ref: 'c9-keep-batch-1' }], self_tested: true, test_env_deployed: true });
+  // [B4b 全仓扫净] bug 单必填 bug_cause_note（C6 拍板生效后）。
+  r = await call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'commits', commits: [{ component: 'backend', commit_ref: 'c9-keep-batch-1' }], self_tested: true, test_env_deployed: true, bug_cause_note: 'verify 夹具：bug 产生原因（bug-derive）' });
   assert.strictEqual(r.status, 200, `bug submit 200, got ${r.status} ${JSON.stringify(r.body)}`);
   r = await call('POST', `/api/sys-issues/${id}/accept`, adminTok, {});
   assert.strictEqual(r.status, 200, `bug accept 200, got ${r.status} ${JSON.stringify(r.body)}`);
@@ -245,8 +246,9 @@ async function main() {
     await call('POST', `/api/sys-issues/${newId}/intake-accept`, adminTok, {});
     await call('POST', `/api/sys-issues/${newId}/assign`, adminTok, { assigned_to: 5 });
     await call('POST', `/api/sys-issues/${newId}/estimate`, devTok, { dev_estimated_at: EST });
-    // 首提缺 fix_gap_note → 400
-    r = await call('POST', `/api/sys-issues/${newId}/submit`, devTok, { mode: 'commits', commits: [{ component: 'backend', commit_ref: 'c9-keep-batch-3' }], self_tested: true, test_env_deployed: true });
+    // 首提缺 fix_gap_note → 400（[B4b 全仓扫净] 必须带 bug_cause_note，否则会先撞更早的 BUG_CAUSE_REQUIRED
+    //   闸而测不到这里要测的 FIX_GAP_NOTE_REQUIRED——本组就是要单独测 fix_gap_note 这道闸，不是测 bug_cause_note）
+    r = await call('POST', `/api/sys-issues/${newId}/submit`, devTok, { mode: 'commits', commits: [{ component: 'backend', commit_ref: 'c9-keep-batch-3' }], self_tested: true, test_env_deployed: true, bug_cause_note: 'verify 夹具：bug 产生原因（bug-derive）' });
     assert.strictEqual(r.status, 400, `派生 bug 首提缺 fix_gap_note 应 400, got ${r.status} ${JSON.stringify(r.body)}`);
     assert.strictEqual(r.body.code, 'FIX_GAP_NOTE_REQUIRED');
     assert.strictEqual((await get('SELECT first_submitted_at FROM sys_issues WHERE id=?', [newId])).first_submitted_at, null, '首提被拒 first_submitted_at 未盖（整事务回滚）');
@@ -259,8 +261,8 @@ async function main() {
     assert.strictEqual(
       Number((await get('SELECT COUNT(*) c FROM sys_issue_dev_commits WHERE issue_id=?', [newId])).c), 0,
       '首提被拒 → commit 行零残留（请求 body 带 commits，整事务回滚须连它一起回，否则残留行会永久剥夺该单的 C9 免上线直翻资格）');
-    // 首提带 fix_gap_note → 200 + 落列 + first_submitted_at 盖章
-    r = await call('POST', `/api/sys-issues/${newId}/submit`, devTok, { mode: 'commits', commits: [{ component: 'backend', commit_ref: 'c9-keep-batch-4' }], fix_gap_note: '上版漏了 join 空指针', self_tested: true, test_env_deployed: true });
+    // 首提带 fix_gap_note → 200 + 落列 + first_submitted_at 盖章（[B4b] 同时带 bug_cause_note）
+    r = await call('POST', `/api/sys-issues/${newId}/submit`, devTok, { mode: 'commits', commits: [{ component: 'backend', commit_ref: 'c9-keep-batch-4' }], fix_gap_note: '上版漏了 join 空指针', self_tested: true, test_env_deployed: true, bug_cause_note: 'verify 夹具：bug 产生原因（bug-derive）' });
     assert.strictEqual(r.status, 200, `带 fix_gap_note 首提应 200, got ${r.status} ${JSON.stringify(r.body)}`);
     const afterFirst = await get('SELECT fix_gap_note, first_submitted_at FROM sys_issues WHERE id=?', [newId]);
     assert.strictEqual(afterFirst.fix_gap_note, '上版漏了 join 空指针', 'fix_gap_note 落列');
@@ -280,7 +282,8 @@ async function main() {
     assert.strictEqual(r.status, 200, 're-add(5) 200, got ' + JSON.stringify(r.body));
     // 协作(6) 仍在册 pending（不影响本节断言，仅验证 5 的 fix_gap_note/first_submitted_at 行为，故不必撤回）
     await call('POST', `/api/sys-issues/${newId}/estimate`, devTok, { dev_estimated_at: EST });
-    r = await call('POST', `/api/sys-issues/${newId}/submit`, devTok, { mode: 'commits', commits: [{ component: 'backend', commit_ref: 'c9-keep-batch-5' }], self_tested: true, test_env_deployed: true });   // 无 fix_gap_note
+    // [B4b] 每轮必填 bug_cause_note（与 fix_gap_note"仅首提"不同——二轮仍要带）
+    r = await call('POST', `/api/sys-issues/${newId}/submit`, devTok, { mode: 'commits', commits: [{ component: 'backend', commit_ref: 'c9-keep-batch-5' }], self_tested: true, test_env_deployed: true, bug_cause_note: 'verify 夹具：bug 产生原因（bug-derive·二轮）' });   // 无 fix_gap_note
     assert.strictEqual(r.status, 200, `返工重提免 fix_gap_note 应 200, got ${r.status} ${JSON.stringify(r.body)}`);
     const afterSecond = await get('SELECT fix_gap_note, first_submitted_at FROM sys_issues WHERE id=?', [newId]);
     assert.strictEqual(afterSecond.fix_gap_note, '上版漏了 join 空指针', '返工重提不覆写首版 fix_gap_note');
@@ -322,7 +325,8 @@ async function main() {
     await call('POST', `/api/sys-issues/${bugChild}/intake-accept`, adminTok, {});
     await call('POST', `/api/sys-issues/${bugChild}/assign`, adminTok, { assigned_to: 5 });
     await call('POST', `/api/sys-issues/${bugChild}/estimate`, devTok, { dev_estimated_at: EST });
-    r = await call('POST', `/api/sys-issues/${bugChild}/submit`, devTok, { mode: 'commits', commits: [{ component: 'backend', commit_ref: 'c9-keep-batch-7' }], self_tested: true, test_env_deployed: true });   // 无 fix_gap_note
+    // [B4b] bugChild 本身 type='bug'，无论 origin 是不是 bug 都必填 bug_cause_note（免的只是 fix_gap_note）
+    r = await call('POST', `/api/sys-issues/${bugChild}/submit`, devTok, { mode: 'commits', commits: [{ component: 'backend', commit_ref: 'c9-keep-batch-7' }], self_tested: true, test_env_deployed: true, bug_cause_note: 'verify 夹具：bug 产生原因（bug-derive）' });   // 无 fix_gap_note
     assert.strictEqual(r.status, 200, `feature→bug 派生单首提应免 fix_gap_note（origin.type≠bug）200, got ${r.status} ${JSON.stringify(r.body)}`);
     ok('[D7] 跨类型派生跳过 fix_gap_note（M5）：bug→feature 新单 feature 首提免填；feature→bug 新单 bug 但 origin≠bug 亦免填');
   }
@@ -337,7 +341,8 @@ async function main() {
     await call('POST', `/api/sys-issues/${newId}/intake-accept`, adminTok, {});
     await call('POST', `/api/sys-issues/${newId}/assign`, adminTok, { assigned_to: 5 });
     await call('POST', `/api/sys-issues/${newId}/estimate`, devTok, { dev_estimated_at: EST });
-    await call('POST', `/api/sys-issues/${newId}/submit`, devTok, { mode: 'commits', commits: [{ component: 'backend', commit_ref: 'c9-keep-batch-8' }], fix_gap_note: '缺口在边界判断', self_tested: true, test_env_deployed: true });
+    // [B4b] bug 单必填 bug_cause_note（C6 拍板生效后）
+    await call('POST', `/api/sys-issues/${newId}/submit`, devTok, { mode: 'commits', commits: [{ component: 'backend', commit_ref: 'c9-keep-batch-8' }], fix_gap_note: '缺口在边界判断', self_tested: true, test_env_deployed: true, bug_cause_note: 'verify 夹具：bug 产生原因（bug-derive）' });
     r = await call('GET', `/api/sys-issues/${newId}`, adminTok);
     assert.strictEqual(r.status, 200);
     assert.strictEqual(r.body.issue.derive_reason, '读端可见性验证', '详情读端返回 derive_reason');
@@ -373,7 +378,9 @@ async function main() {
     await call('POST', `/api/sys-issues/${newId}/estimate`, devTok, { dev_estimated_at: EST });
     // 手工污染：令 origin_issue_id 指向不存在的行（模拟脏谱系；正常 API 不可达——无硬删除端点）
     await run('UPDATE sys_issues SET origin_issue_id=999999 WHERE id=?', [newId]);
-    r = await call('POST', `/api/sys-issues/${newId}/submit`, devTok, { mode: 'commits', commits: [{ component: 'backend', commit_ref: 'c9-keep-batch-9' }], fix_gap_note: '缺口', self_tested: true, test_env_deployed: true });
+    // [B4b] 必须带 bug_cause_note，否则会先撞更早的 BUG_CAUSE_REQUIRED 闸而测不到本组要测的
+    //   SYS_ORIGIN_MISSING fail-closed 分支（bug_cause_note 闸在 fix_gap_note 区块之前，早于本闸）。
+    r = await call('POST', `/api/sys-issues/${newId}/submit`, devTok, { mode: 'commits', commits: [{ component: 'backend', commit_ref: 'c9-keep-batch-9' }], fix_gap_note: '缺口', self_tested: true, test_env_deployed: true, bug_cause_note: 'verify 夹具：bug 产生原因（bug-derive）' });
     assert.strictEqual(r.status, 409, `origin 缺失首提应 fail-closed 409, got ${r.status} ${JSON.stringify(r.body)}`);
     assert.strictEqual(r.body.code, 'SYS_ORIGIN_MISSING');
     assert.strictEqual(await statusOf(newId), '处理中', 'fail-closed 后仍停处理中（事务未推进）');

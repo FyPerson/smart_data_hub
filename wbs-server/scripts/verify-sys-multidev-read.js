@@ -224,7 +224,9 @@ async function main() {
     //   写入 d.xxx），但本文件的白名单当时漏跟——C3 涟漪清单遗漏本文件（先于 C4b 就已存在，
     //   git stash 验证过），本次按写读同源口径把白名单补齐，不放松"mutation⊆detail 且差集只能是
     //   已知白名单"这条断言的语义强度。
-    const DETAIL_ONLY_KEYS = ['work_note', 'work_note_submitted_at', 'self_tested', 'test_env_deployed'];   // P4+C3 详情端专属增强（唯一允许的差集）
+    // [B4·C6 涟漪] bug_cause_note 与 work_note 同源（详情端同一 workNoteRows 补查循环挂载）——与上方 C3
+    //   涟漪同款形态：读侧新增详情专属列，本白名单必须同步跟随（详情页体验优化批全量回归抓获，2026-08-10）。
+    const DETAIL_ONLY_KEYS = ['work_note', 'work_note_submitted_at', 'self_tested', 'test_env_deployed', 'bug_cause_note'];   // P4+C3+C6 详情端专属增强（唯一允许的差集）
     const detailKeys = Object.keys(rDetail.body.dev_assignees[0]).sort();
     const detailBaseKeys = detailKeys.filter(k => !DETAIL_ONLY_KEYS.includes(k));
     assert.deepStrictEqual(mutationKeys, detailBaseKeys, `${label}：mutation 响应与详情 GET 的 dev_assignees **基础列集**应完全一致（防镜像漂移·排除 P4 详情专属列 ${DETAIL_ONLY_KEYS.join('/')}），mutation=${JSON.stringify(mutationKeys)} detailBase=${JSON.stringify(detailBaseKeys)}`);

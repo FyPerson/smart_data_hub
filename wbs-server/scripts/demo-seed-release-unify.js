@@ -57,7 +57,8 @@ async function seedToReady(type, title, devId, devTok) {
   }
   await call('POST', `/sys-issues/${id}/assign`, ADMIN, { assigned_to: devId });
   await call('POST', `/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: '2026-08-05 10:00' });
-  await call('POST', `/sys-issues/${id}/submit`, devTok, { mode: 'no_code', no_code_reason: '演示数据（无代码提交）', self_tested: true, test_env_deployed: true });
+  // [B4b 全仓扫净] type==='bug' 时必填 bug_cause_note（C6 拍板生效后）；其余类型不加（加了会撞 NOT_APPLICABLE）。
+  await call('POST', `/sys-issues/${id}/submit`, devTok, { mode: 'no_code', no_code_reason: '演示数据（无代码提交）', self_tested: true, test_env_deployed: true, ...(type === 'bug' ? { bug_cause_note: '演示数据（bug 产生原因）' } : {}) });
   await must(await call('POST', `/sys-issues/${id}/accept`, ADMIN, {}), 200, `验收 #${id}`);
   return id;
 }

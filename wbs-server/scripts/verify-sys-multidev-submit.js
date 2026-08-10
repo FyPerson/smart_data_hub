@@ -580,7 +580,10 @@ async function main() {
   {
     const id = await mkIssue('bug', '处理中');
     await mkMember(id, 5, '开发甲', 'pending');
-    const r = await call('POST', `/api/sys-issues/${id}/submit`, devTok(5), { mode: 'no_code', no_code_reason: 'bug 修复无需额外代码提交', self_tested: true, test_env_deployed: true });
+    // [B4b 全仓扫净] bug 单必填 bug_cause_note（C6 拍板生效后）——本组 mkIssue 默认种 dev_estimated_at，
+    //   会真过 ESTIMATE_REQUIRED 闸走到 bug_cause_note 闸，不像 S1b 那条 devEstimatedAt:null 反例在更早
+    //   的闸就被拦下（无需补值）。
+    const r = await call('POST', `/api/sys-issues/${id}/submit`, devTok(5), { mode: 'no_code', no_code_reason: 'bug 修复无需额外代码提交', self_tested: true, test_env_deployed: true, bug_cause_note: 'verify 夹具：bug 产生原因（multidev-submit）' });
     assert.strictEqual(r.status, 200, `bug submit 应 200，实际 ${r.status} ${JSON.stringify(r.body)}`);
     assert.strictEqual(r.body.main_status, '待验证', 'bug 流唯一在册完成 → 待验证（SF.isInFamily 按 type 取值正确）');
     await selfCertifyProbes('bug-submit');

@@ -121,9 +121,11 @@ async function seedToVerify({ type = 'feature', withCommit = false } = {}) {
     r = await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: EST });
     assert.strictEqual(r.status, 200, `bug estimate 200, got ${r.status} ${JSON.stringify(r.body)}`);
   }
+  // [B4b 全仓扫净] type==='bug' 时必填 bug_cause_note（C6 拍板生效后）；其余类型不加（加了会撞 NOT_APPLICABLE）。
+  const bugCauseExtra = type === 'bug' ? { bug_cause_note: 'verify 夹具：bug 产生原因（c9-direct-online）' } : {};
   const submitBody = withCommit
-    ? { mode: 'commits', commits: [{ component: 'backend', commit_ref: `c9-ref-${oaSeq}` }], self_tested: true, test_env_deployed: true }
-    : { mode: 'no_code', no_code_reason: 'C9 无提交交付（配置类工作）', self_tested: true, test_env_deployed: true };
+    ? { mode: 'commits', commits: [{ component: 'backend', commit_ref: `c9-ref-${oaSeq}` }], self_tested: true, test_env_deployed: true, ...bugCauseExtra }
+    : { mode: 'no_code', no_code_reason: 'C9 无提交交付（配置类工作）', self_tested: true, test_env_deployed: true, ...bugCauseExtra };
   r = await call('POST', `/api/sys-issues/${id}/submit`, devTok, submitBody);
   assert.strictEqual(r.status, 200, `submit 200, got ${r.status} ${JSON.stringify(r.body)}`);
   assert.strictEqual(r.body.main_status, '待验证', `submit 后应落待验证，实得 ${r.body.main_status}`);

@@ -986,7 +986,8 @@ async function main() {
     await call('POST', `/api/sys-issues/${bugSeg}/intake-accept`, adminTok, {});
     await call('POST', `/api/sys-issues/${bugSeg}/assign`, adminTok, { assigned_to: 5 });
     await call('POST', `/api/sys-issues/${bugSeg}/estimate`, devTok, { dev_estimated_at: futureEst(30) });
-    await call('POST', `/api/sys-issues/${bugSeg}/submit`, devTok, { mode: 'commits', commits: [{ component: 'backend', commit_ref: 'c9-keep-batch-26' }], self_tested: true, test_env_deployed: true });
+    // [B4b 全仓扫净] bugSeg 是 bug 单，bug 单必填 bug_cause_note（C6 拍板生效后）。
+    await call('POST', `/api/sys-issues/${bugSeg}/submit`, devTok, { mode: 'commits', commits: [{ component: 'backend', commit_ref: 'c9-keep-batch-26' }], self_tested: true, test_env_deployed: true, bug_cause_note: 'verify 夹具：bug 产生原因（release）' });
     await call('POST', `/api/sys-issues/${bugSeg}/accept`, adminTok, {});
     r = await call('POST', `/api/sys-issues/${bugSeg}/hotfix-publish`, adminTok, { release_note: 'seg-bug 应急建单', executors: [5, 13] });
     assert.strictEqual(r.status, 200, `bug hotfix-publish 应 200, got ${r.status} ${JSON.stringify(r.body)}`);

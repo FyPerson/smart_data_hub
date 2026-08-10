@@ -402,6 +402,8 @@
            小表行内操作（编辑/删除）——视觉语言对齐既有 .si-att-del（红字小链接）。 */
         .si-dev-chip-act { font-size: 10px; color: #d97706; cursor: pointer; border: 1px solid #fcd34d; border-radius: 5px; padding: 0 5px; line-height: 15px; }
         .si-dev-chip-act:hover { background: #fffbeb; }
+        /* 逐人完成时刻（resolved_at）——muted 灰对齐既有 .si-muted（#9ca3af），11px，左侧小间距与徽章分隔 */
+        .si-dev-chip-time { font-size: 11px; color: #9ca3af; margin-left: 3px; }
         /* P4：开发成员工作说明块（每人一条·submit 时填的 work_note） */
         .si-worknote-item { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 6px 10px; margin-bottom: 6px; }
         .si-worknote-who { font-size: 12px; font-weight: 600; color: #334155; }
@@ -632,7 +634,14 @@
                                  **只收窄列表页显示**——详情抽屉 kv、两个建单入口与编辑表单的模块字段全部保留
                                  （D2：存量填了的要看得见，删字段不可逆）。 -->
                             <th class="u-sortable" data-sort-by="system_name">系统<span class="u-sort-icon">⇅</span></th>
-                            <th class="u-sortable" data-sort-by="assigned_to_name">开发<span class="u-sort-icon">⇅</span></th>
+                            <!-- F3（详情页体验优化批）：排序键改 dev_roster_sort（与显示同源，见 SI_SORT_FIELD_TYPES
+                                 该键处注释 + siDevRosterSortValue 定义处注释）——旧键 assigned_to_name 是单人字段，
+                                 与本列已改的多人 roster 显示不同源，2026-08-10 用户拍板推翻 C1 红线的"排序"半边。
+                                 〔预筛 LOW-4〕"同源"指显示（siDevRosterCellHtml，截断前 2 名+"等+N"）与排序
+                                 （siDevRosterSortValue，全量 join('、')）共用同一份解析，非逐字相同的文本——
+                                 ≥3 人在册时排序键字面上比显示文本长，前两名相同的行排序位置按第 3 名起的差异
+                                 定，从显示文本看不出依据但结果稳定（详见 siDevRosterSortValue 定义处注释）。 -->
+                            <th class="u-sortable" data-sort-by="dev_roster_sort">开发<span class="u-sort-icon">⇅</span></th>
                             <th class="u-sortable" data-sort-by="created_by_name">建单人<span class="u-sort-icon">⇅</span></th>
                             <!-- S2（贴图四件与工期测试段·三列一体设计）：需求方插在「建单人」之后（人员簇相邻）。
                                  ⚠️ 实测定标：需求方/需求部门原拆两列，1366×768 下即使挂 u-table-compact 后
@@ -755,6 +764,11 @@
     let siDetail = null;             // 当前详情对象
     let siModalConfirm = null;       // 当前弹框确认回调
     let siCaps = null;               // C7：当前详情的四布尔能力（siComputeCaps 产出，siRenderDrawer 内刷新）
+    // F2（估时/可行性弹窗回填提示）：当前详情单的 timeline 全量镜像，供 siModalEstimate/siModalFeasibility
+    //   在弹窗内查"当前 dev_estimated_at 是谁、何时填的"（详情端点 ORDER BY id 升序返回，即数组末尾最新）。
+    //   〔F3b·F2-LOW-2〕与 siDetail 同源同期原子赋值——siRenderDrawer 顶部紧邻 `siDetail = r.data` 那行
+    //   一并写（同一批次原子成立，不隔着中段渲染逻辑），同按会话级共享（不按 issue 隔离，抽屉关闭不重置）。
+    let siCurTimeline = null;
     // 建单优化批 C2 前端（方案 v1.2 §3.6）：对接人候选缓存（GET /sys-issues/intake-liaisons 结果，[{id,name}]）。
     //   ⚠️ 该端点**仅 admin**可调（后端 requireAdmin，见 index.js 该端点注释：将来开放业务方建单时权限同步放宽）——
     //   非 admin 用户（如受理人本人查看自己的单）调用会 403，siLoadIntakeLiaisons 对此静默容错（不清空/不报错），
@@ -1475,6 +1489,10 @@
         if (seq !== siListSeq) return;                           // J：已有更新的请求发出，丢弃过时结果
         if (!r.ok) { siApiErr(r, '加载列表失败'); return; }
         siList = (r.data && r.data.items) || [];
+        // F3：进排序前补派生字段——共享排序层（unify-helpers.js compareRow）只读 `item[field]`，无 accessor
+        //   机制，必须是真实挂在行对象上的字段（见 siDevRosterSortValue 定义处注释）。逐行补一次，非渲染期
+        //   现算，避免每次点表头排序都重新 JSON.parse 全表。
+        siList.forEach(i => { i.dev_roster_sort = siDevRosterSortValue(i); });
         siRenderStats();
         siRenderTable();
     }
@@ -1514,6 +1532,14 @@
         system_name: 'string',
         priority: 'statusOrder',
         status: 'statusOrder',
+        // F3（详情页体验优化批·排序键与显示同源）：「开发」列表头绑的排序键——siLoadList 拉完列表后
+        //   逐行补的派生字段（siDevRosterSortValue 产出：与显示 siDevRosterCellHtml 同源解析
+        //   dev_roster_names，回退 assigned_to_name，再回退空串）。取 'string' 类型走 compareByType
+        //   的 localeCompare('zh-Hans-CN')，多人名单按 join('、') 后的整串比较。
+        dev_roster_sort: 'string',
+        // 不再是任何表头的 data-sort-by（F3 改绑 dev_roster_sort，见该键处注释）——保留登记非死代码：
+        //   后端字段仍在返回、item.assigned_to_name 仍用作 siDevRosterCellHtml/siDevRosterSortValue
+        //   的无 roster 回退值（同 requester_dept 处的"未直接绑排序键但仍登记"先例）。
         assigned_to_name: 'string',
         created_by_name: 'string',
         requester_name: 'string',    // S2（贴图四件与工期测试段·三列一体设计）：新增「需求方」列
@@ -1577,17 +1603,28 @@
     // C1（多开发协作与 commit 留痕重构 v2.9 §13 S1）：列表负责人列多人展示——item.dev_roster_names 是后端
     //   json_group_array 的 JSON 数组字符串（按 user_id 升序在册成员名，如 '["张三","李四"]'）；无在册成员
     //   （旧数据/D_PRE 阶段未指派）回退 assigned_to_name（兼容不动）。人多截断显前 2 名 + "等+N"，悬浮 title
-    //   显全量，不做排序/筛选增强（C1 红线）。
+    //   显全量，不做排序/筛选增强（C1 红线）——当年红线是圈 C1 批次范围边界（多开发协作改造聚焦数据模型
+    //   与留痕，不顺带扩列表交互面），非永久禁令。
+    //   ⭐ F3（详情页体验优化批）2026-08-10 用户拍板推翻其中"排序"半边：表头排序键与本函数改同源取值
+    //   （siDevRosterNamesResolved，见下），"筛选增强"半边仍不在本次范围，维持原状不做。
     //   ⚠️ LOW-1（89 号审）：字段值协议是 JSON 数组，非逗号拼接明文——display_name 无"禁逗号"约束，人名可能
     //   本身含英文逗号，split(',') 会把单个含逗号的名字错拆成两截，故用 JSON.parse；解析失败（脏数据/协议
     //   变更）时防御性回退 assigned_to_name，不抛错。
     const SI_DEV_ROSTER_MAX_SHOW = 2;
-    function siDevRosterCellHtml(item) {
+    // 单源取值（F3）：dev_roster_names JSON → 已 trim 的姓名数组，显示（siDevRosterCellHtml）与排序派生字段
+    // （siDevRosterSortValue）共用同一份解析——防"改一处漏改另一处"两处分叉（同 F2 siEstimateFilledHint
+    // 单源取舍）。返回值均为**未转义**纯文本，解析失败返回空数组（调用方各自决定回退）。
+    function siDevRosterNamesResolved(item) {
         let names = [];
         try {
             const parsed = item.dev_roster_names ? JSON.parse(item.dev_roster_names) : [];
             if (Array.isArray(parsed)) names = parsed.filter(s => typeof s === 'string' && s.trim()).map(s => s.trim());
-        } catch (_) { names = []; }   // 解析失败防御性回退 assigned_to_name，不抛错
+        } catch (_) { names = []; }   // 〔F3b 注释订正〕解析失败返回空数组，不抛错；回退 assigned_to_name
+        //   已上移到调用方（siDevRosterCellHtml/siDevRosterSortValue 各自决定），本函数不再知道"回退"这回事。
+        return names;
+    }
+    function siDevRosterCellHtml(item) {
+        const names = siDevRosterNamesResolved(item);
         if (!names.length) {
             return item.assigned_to_name ? esc(item.assigned_to_name) : '<span class="si-muted">—</span>';
         }
@@ -1595,6 +1632,22 @@
         const shown = names.slice(0, SI_DEV_ROSTER_MAX_SHOW).join('、');
         const rest = names.slice(SI_DEV_ROSTER_MAX_SHOW);
         return `${esc(shown)}<span class="si-dev-roster-more" title="${esc(rest.join('、'))}">等+${rest.length}</span>`;
+    }
+    // 排序派生字段（F3）：与显示同源（siDevRosterNamesResolved），在册名单 join('、')；无在册成员回退
+    // assigned_to_name；再无则空串（共享层 unify-helpers.js compareRow 把空字符串排末尾，不论 asc/desc，
+    // 语义与「—」占位一致）。siLoadList 每次拉完列表逐行写进 item.dev_roster_sort（见该处调用点注释），
+    // 共享排序层 compareRow 直接读 `a[field]`，不支持逐项 accessor（已读 unify-helpers.js attachTableSort/
+    // compareByType 源码核实——排序取值只有 `a[field]`/`b[field]` 一条路，无 getter 机制），故必须是
+    // 真实挂在行对象上的字段，不能只在渲染时算。
+    // 〔预筛 LOW-4〕"同源"限定语：指显示与排序**共用同一份解析**（siDevRosterNamesResolved），
+    // 不等于"排序键=显示文本"逐字相同——siDevRosterCellHtml 显示时截断前 2 名+"等+N"，本函数排序时用
+    // **全量** join('、') 串（不截断）。≥3 人在册时两者字面不同（显示三省略、排序仍是完整名单参与比较），
+    // 但取值链路同源、无二次分叉。副作用：前两名相同、第 3 名及以后不同的两行，显示文本看起来一样，
+    // 排序位置却按全量串有稳定但不直观的先后（不是随机/不稳定，只是从截断后的显示文本上看不出排序依据）。
+    function siDevRosterSortValue(item) {
+        const names = siDevRosterNamesResolved(item);
+        if (names.length) return names.join('、');
+        return item.assigned_to_name || '';
     }
 
     // ⭐ 角色权限重构 v2.1 §6（S5 通知手动化）：列表行技术负责人通知徽章——tech_lead_id 非空时按
@@ -1796,13 +1849,17 @@
     //   后来人当成铁律，反而在看到例外时以为是 bug）：
     //   ① **正文**时间显示统一到分（YYYY-MM-DD HH:MM）——库里存的仍是秒级，只是不展示；
     //   ② deadline 的**存量纯日期保持原样**，不补时分（D6/D7）；
-    //   ③ 审计三处的秒级**保留在 title 里**（D13），正文仍到分。
+    //   ③ 审计类显示的秒级**保留在 title 里**（D13），正文仍到分——具体是哪几处见下方 siFmtDTSec
+    //      注释（〔F3b·F1-LOW-3.1〕不在此处枚举，枚举会过期，已有过一次：写死"三处"后新增的 chip
+    //      完成时刻/估时提示两处都没有回来更新这句）。
     function siFmtDT(v) {
         if (!v) return '—';
         // 复用 app.js 统一日期格式化（本地时间），失败原样返回
         try { const s = formatDateTimeUnified(v, 'minute'); return s === '无效时间' ? v : s; } catch (e) { return v; }
     }
-    // D13：审计类显示（时间轴 / 删除留痕 / 通知已读）正文砍到分，但那几处的**秒有取证价值**
+    // D13：审计类显示（时间轴 / 删除留痕 / 通知已读 / chip 完成时刻 / 估时提示 等——〔F3b·F1-LOW-3.1〕
+    //   本表述刻意开放不做穷举，上一版写死"三处"，后续新增的 chip 完成时刻〔F1〕/估时提示〔F2〕两处
+    //   落地时都没人回来更新这句，枚举会过期，原则不会）正文砍到分，但那几处的**秒有取证价值**
     //   （谁在哪一秒删的、哪一秒已读），故挂 title 保完整到秒。返回值供 title 属性使用——
     //   本页 esc() 转引号，属性上下文安全（见文件头 esc 定义处的注释）。
     function siFmtDTSec(v) {
@@ -1901,6 +1958,11 @@
         if (!r.ok) { siApiErr(r, '加载详情失败'); if (r.status === 404 || r.status === 403) siCloseDrawer(); return; }
         if (siOpenId !== id) return;                          // 快速切单防错位
         siDetail = r.data;
+        // 〔F3b·F2-LOW-2〕与 siDetail 同源同期原子赋值——同一行紧邻写，不隔着中段其余渲染逻辑：
+        //   原写法把这行放在本函数中段（演进时间线渲染处），"siCurTimeline 与 siDetail 同源"这条不变量
+        //   要靠"中间 N 行代码没人在 return 前抛异常"才成立，是隐式的；挪到这里后是结构性成立
+        //   （赋值紧跟在一起，没有中间路径能让两者不同步）。
+        siCurTimeline = r.data.timeline || [];
         const iss = r.data.issue;
         // 执行人入口批（2026-07-31）：批次简要信息挂到 iss 上，供 siCanOpenRelease（「前往上线单」按钮判权）
         //   与各渲染函数直接消费——批次级执行人字段在 sys_releases，issue 级同名列是旧机制只读残留不可用。
@@ -2066,14 +2128,16 @@
         //   无「主开发」字样，is_primary 仅作只读小标记「代表」）+ 各自 dev_status 徽标 + commit 记录小表。
         //   C7 起按四布尔升级为读写（siCaps 本次刷新，siRenderActions 复用同一份，不重复计算）。
         siCaps = siComputeCaps(iss, r.data.dev_assignees, r.data.dev_commits);
-        const devMembers = `<div class="u-detail-section"><h3>开发成员</h3>${siRenderDevMemberChips(r.data.dev_assignees, siCaps, iss, r.data.no_code_records)}</div>`;
+        const devMembers = `<div class="u-detail-section"><h3>开发成员</h3>${siRenderDevMemberChips(r.data.dev_assignees, siCaps, iss, r.data.no_code_records, r.data.bug_cause_records)}</div>`;
         const devCommitsBlock = `<div class="u-detail-section"><h3>Commit 记录</h3>${siRenderDevCommits(r.data.dev_commits, siCaps)}</div>`;
 
         // 演进时间线——上线体统一重构 C2b（199 审 MED-3「过滤」半）：release_add/remove/date_change/
         //   schedule_cancel/published 五类批次调整事件可能在 reopen+多轮再发布后累积不少条，加一个可选
         //   过滤开关按需隐藏（默认不勾选=全部照常显示，不默默丢信息）；仅当本单确有此类事件才渲染开关，
         //   避免给绝大多数没有这类事件的单子平添一个永远无效的控件。
-        const tlEvents = r.data.timeline || [];
+        // 〔F3b·F2-LOW-2〕siCurTimeline 已在函数顶部与 siDetail 同期原子赋值（见该处注释），此处直接读，
+        //   不重复赋值。
+        const tlEvents = siCurTimeline;
         const hasReleaseScopeTl = tlEvents.some(e => e.event_type === 'scope_change' && SI_TL_RELEASE_SCOPE_LABEL[e.action_code]);
         const tlFilterHtml = hasReleaseScopeTl
             ? `<label style="font-weight:normal;font-size:11px;color:#6b7280;margin-left:12px;cursor:pointer">
@@ -2203,7 +2267,15 @@
         schedule: '排期', accept: '验收通过', close: '关闭', hold: '暂缓', resume: '恢复',
         reactivate: '重新激活', issue_reject: '拒绝', void: '作废', effected: '已生效',
         set_release_flag: '填发版信息',   // F-3：set-release-flag 写 status_change+action_code，补前端标签防裸英文
-        confirm_online_norelease: '确认上线（不发版）'   // L-1：release 事件带此 action_code 时区分「不发版直接上线」（批次/hotfix 发版仍显「上线」）
+        confirm_online_norelease: '确认上线（不发版）',   // L-1：release 事件带此 action_code 时区分「不发版直接上线」（批次/hotfix 发版仍显「上线」）
+        // C5a（详情页体验优化批·时间线渲染层三合一）：补 9 码，来源=docs/local/系统迭代/时间线写入点码表_20260810.md
+        // 「缺映射清单」（B2 静态对账守卫 KNOWN_GAPS 逐条对应）。中文标签取值与码表建议逐字一致。
+        intake_accept: '受理', intake_return: '受理退改', resubmit_intake: '重新提交受理',
+        liaison_test_pass: '对接测试通过', liaison_test_return: '对接测试打回',
+        liaison_test_skip_excused: '跳过对接测试（全员开脱）', liaison_test_skip_liaison: '跳过对接测试（对接人失效）',
+        status_change: '状态流转',   // 通用兜底——裸 status_change（action_code=null，index.js:2876 默认路径）的正名；
+        //   W-GATE 那三种 mirrorActionCode 变体走各自更具体的码（本条只兜底真正裸的 status_change 行）
+        change_intake_mode: '受理模式变更'   // 仅存量兜底：路由已恒 409（非当前代码可达写点），但库里历史行仍可能带此码
     };
     const SI_TL_CLS = {
         created: 'si-tl-amber', derive: 'si-tl-amber',
@@ -2212,7 +2284,23 @@
         return: 'si-tl-red', reopen: 'si-tl-red', issue_reject: 'si-tl-red', blocked: 'si-tl-red',
         accept: 'si-tl-green', release: 'si-tl-green', effected: 'si-tl-green', close: 'si-tl-green', unblock: 'si-tl-green', confirm_online_norelease: 'si-tl-green',
         scope_change: 'si-tl-orange',
-        hold: 'si-tl-gray', resume: 'si-tl-gray', void: 'si-tl-gray', reactivate: 'si-tl-gray', note: 'si-tl-gray'
+        hold: 'si-tl-gray', resume: 'si-tl-gray', void: 'si-tl-gray', reactivate: 'si-tl-gray', note: 'si-tl-gray',
+        // C5a 配色（按既有四族语义就近归类，非新族）：
+        //   受理类（intake_accept 通过态·resubmit_intake 受理程序内的后续步骤·change_intake_mode 管理性开关）
+        //   归 indigo，与既有 schedule/assign/set_release_flag 等"程序性/准备性动作"同族；
+        intake_accept: 'si-tl-indigo', resubmit_intake: 'si-tl-indigo', change_intake_mode: 'si-tl-indigo',
+        //   intake_return 语义是"退改"=打回，归 red（与既有 return/reopen/issue_reject 同族），不归受理类的
+        //   indigo——按业务含义（拒绝/需返工）分类，不按"带 intake 前缀"分类；
+        intake_return: 'si-tl-red',
+        //   通过类（对接测试通过）归 green，与既有 accept/release 同族；
+        liaison_test_pass: 'si-tl-green',
+        //   打回类（对接测试打回）归 red；
+        liaison_test_return: 'si-tl-red',
+        //   跳过类两码选 amber（非 gray）——两者都是"系统因例外情况自动代走一步"（全员开脱/对接人失效），
+        //   语义上更接近既有 created/derive 的"值得留意的自动事件"，非 hold/void 那种中性静默态；
+        liaison_test_skip_excused: 'si-tl-amber', liaison_test_skip_liaison: 'si-tl-amber',
+        // 通用兜底 status_change 归 gray（中性，未归类到任何具体语义族的裸状态流转）
+        status_change: 'si-tl-gray'
     };
     // 上线体统一重构 C2b（199 审 MED-3）：release_add/release_remove/release_date_change/release_schedule_cancel/
     //   release_published 五个 action_code 全部落 event_type='scope_change'（§6.13），此前 siRenderTimeline 的
@@ -2244,13 +2332,55 @@
         try { parsed = JSON.parse(summaryRaw); } catch (_) { parsed = null; }
         if (!parsed || typeof parsed !== 'object') {
             const short = String(summaryRaw == null ? '' : summaryRaw).slice(0, 80);
-            return { ok: false, brief: '原始记录（解析失败）' + (short ? '：' + short : ''), raw: String(summaryRaw == null ? '' : summaryRaw) };
+            // C5c：解析失败分支维持现状不动——commits/statusAtPublish 恒 null，调用方据此判断不渲染结构化区。
+            return { ok: false, brief: '原始记录（解析失败）' + (short ? '：' + short : ''), raw: String(summaryRaw == null ? '' : summaryRaw), commits: null, statusAtPublish: null };
         }
         const typeLabel = (parsed.type && siTypeLabel(parsed.type)) || parsed.type || '未知类型';
         const title = parsed.title_snapshot || '（无标题快照）';
-        const commitCount = Array.isArray(parsed.commits) ? parsed.commits.length : 0;
-        return { ok: true, brief: `${typeLabel} · ${title} · ${commitCount} 条 commit`, raw: JSON.stringify(parsed, null, 2) };
+        // C5c（详情页体验优化批·发布留痕展开视图结构化）：commits 数组与快照级字段 status_at_publish
+        // 一并透出，供 siRenderReleasePublishedCommits 渲小表 + summaryHtml 拼「发布时状态」行——
+        // issue_id/schema_version/title_snapshot 三个快照级字段不透出（摘要行已含类型·标题，
+        // schema_version/issue_id 对读者无展示价值，只在下方二级折叠的原始 JSON 里保留）。
+        const commits = Array.isArray(parsed.commits) ? parsed.commits : [];
+        return {
+            ok: true, brief: `${typeLabel} · ${title} · ${commits.length} 条 commit`,
+            raw: JSON.stringify(parsed, null, 2), commits, statusAtPublish: parsed.status_at_publish || null,
+        };
     }
+    // C5c：dev_user_id → 姓名——快照 payload 冻结 schema（§6.6a 三源统一字段集）只含 dev_user_id，
+    //   无姓名字段；用页面已加载的 siUsers（DOMContentLoaded 时 siLoadUsers() 拉取，早于任何抽屉打开，
+    //   见该函数调用点）按 id 查。映射不到（用户已删除/never 在 active 列表里）回退显 `#id`，不伪造
+    //   姓名（同 §6.6b「不伪造」降级契约精神，与 siRenderDevCommits 的 `c.dev_user_name || ('#' + c.dev_user_id)`
+    //   同款兜底写法——那处直接吃后端已 JOIN 好的 dev_user_name，这里没有该字段，改本地查表）。
+    function siUserNameById(id) {
+        const u = (siUsers || []).find(x => Number(x.id) === Number(id));
+        const name = u && (u.display_name || u.username);
+        return name || ('#' + id);
+    }
+    // C5c：发布留痕展开视图——commits 小表（开发/组件/commit_ref 三列，只读，无编辑/删除——这是历史快照，
+    //   不是当前 sys_issue_dev_commits 活动行，编辑没有意义）。组件列复用既有 SI_COMMIT_COMPONENT_LABEL
+    //   （前端/后端），commit_ref 列复用既有 .si-commit-cell（等宽字体+CSS max-width:130px 溢出省略号，
+    //   与列表页 commit 两列同一套视觉语言，不新造截断逻辑），title 挂全文。
+    function siRenderReleasePublishedCommits(commits) {
+        if (!commits || !commits.length) return '<div class="si-muted" style="font-size:12px">无 commit 记录</div>';
+        const rows = commits.map(c => {
+            const devName = siUserNameById(c.dev_user_id);
+            const compLabel = SI_COMMIT_COMPONENT_LABEL[c.component] || esc(c.component);
+            const refText = String(c.commit_ref == null ? '' : c.commit_ref);
+            return `<tr>
+                <td>${esc(devName)}</td>
+                <td>${compLabel}</td>
+                <td class="si-commit-cell" title="${esc(refText)}">${esc(refText)}</td>
+            </tr>`;
+        }).join('');
+        return `<table class="si-commit-table"><thead><tr><th>开发</th><th>组件</th><th>commit_ref</th></tr></thead><tbody>${rows}</tbody></table>`;
+    }
+    // C5d（详情页体验优化批·时间线渲染层三合一）：W-GATE 存量转译白名单——B3 上线（commit a75e9ea）前
+    //   写入的历史行，summary 唯一硬编码定值无变量（精确等值匹配，非 LIKE；出处 docs/local/系统迭代/
+    //   时间线写入点码表_20260810.md §W-GATE 存量转译白名单，逐字核对自 git 历史版本 index.js 该行字面量）。
+    //   B3 之后新写入的行 summary 已是人话（写入端 mirrorSummary 计算，见 index.js :2873-2879），不会再
+    //   产出这个值，故本判断只对存量行生效，不影响新行（新行走后面 else 兜底分支原样 esc 显示）。
+    const SI_TL_WGATE_LEGACY_SUMMARY = 'W-GATE 自动门禁转移（成员在册完成态变化）';
     function siRenderTimeline(list, atts) {
         if (!list.length) return '<div class="si-muted">暂无演进记录</div>';
         return '<div class="si-timeline">' + list.map(e => {
@@ -2273,12 +2403,64 @@
             }
             const flow = (e.from_status && e.to_status && e.from_status !== e.to_status)
                 ? `<span class="si-tl-to"> →${esc(siStatusDisplay(e.to_status))}</span>` : '';
-            // release_published：折叠——原生 <details> 默认收起，摘要行只给三个人读得懂的字段，点开才看完整 JSON
+            // release_published：折叠——原生 <details> 默认收起，摘要行只给三个人读得懂的字段。
+            //   C5c（详情页体验优化批·发布留痕展开视图结构化）：点开后不再是裸 JSON——commits 渲染成
+            //   开发/组件/commit_ref 小表，顶部一行「发布时状态」，原始 JSON 降为小表下方的二级折叠
+            //   （审计原文不丢，只是不再是展开区第一眼看到的东西）。解析失败（info.ok===false）分支
+            //   维持现状不动——那种情况下 info.commits/statusAtPublish 恒 null，走不到结构化这条路径。
             //   （esc() 后再拼进 <pre>，不走 innerHTML 之外的第二次 DOM 赋值，字符串已按 HTML 语境转义，无 XSS 风险）。
             let summaryHtml;
             if (key === 'release_published' && e.summary) {
                 const info = siFormatReleasePublishedSummary(e.summary);
-                summaryHtml = `<details class="si-tl-release-json"><summary>${esc(info.brief)}</summary><pre>${esc(info.raw)}</pre></details>`;
+                if (info.ok) {
+                    const statusLine = info.statusAtPublish
+                        ? `<div class="si-muted" style="font-size:11px;margin:4px 0">发布时状态：${esc(info.statusAtPublish)}</div>` : '';
+                    const commitsTable = siRenderReleasePublishedCommits(info.commits);
+                    summaryHtml = `<details class="si-tl-release-json"><summary>${esc(info.brief)}</summary>${statusLine}${commitsTable}<details class="si-tl-release-json" style="display:block;margin-top:6px"><summary>查看原始快照</summary><pre>${esc(info.raw)}</pre></details></details>`;
+                } else {
+                    summaryHtml = `<details class="si-tl-release-json"><summary>${esc(info.brief)}</summary><pre>${esc(info.raw)}</pre></details>`;
+                }
+            } else if (e.summary === SI_TL_WGATE_LEGACY_SUMMARY) {
+                // C5d 存量转译（写入端半见 index.js :2873-2879 B3 commit a75e9ea）：本判断只服务 B3 上线前写入的
+                // 存量行——新行 summary 已是人话，走不到这条精确等值分支。方向感知、译文与写入端 W_GATE_SKIP_SUMMARY/
+                // mirrorSummary 逐字一致，不重新发明措辞：
+                //   ① mirrorActionCode 非空（两个 skip 码）优先——同写入端"①②优先于③④"判定顺序；
+                //   ② 否则按 to_status 是否落在 DEV 族（SI_DEV_FAMILY_STATUSES，出处见该常量声明处——
+                //      查证 routes/sys-iteration/status-families.js:55-59 SYS_DEV_STATUSES）判方向：DEV 族=回弹
+                //      （新 pending 成员打破全完成态），否则（VERIFY/LIAISON_TEST）=前进（全部完成）。
+                //      该判据不依赖 issue.type——enteringForward=false 分支穷尽只剩 DEV[0] 一种可能
+                //      （同 index.js :2866-2869 注释），故 DEV 族并集足够判向。
+                let translated;
+                if (e.action_code === 'liaison_test_skip_excused') translated = '在册开发全员开脱，跳过对接测试自动流转';
+                else if (e.action_code === 'liaison_test_skip_liaison') translated = '对接人不可用，跳过对接测试自动流转';
+                else if (SI_DEV_FAMILY_STATUSES.includes(e.to_status)) translated = '出现新的待提交成员，自动退回开发中';
+                else translated = '全部在册开发已完成，自动流转';
+                // title 挂原文——机制名"W-GATE 自动门禁转移"不丢，悬浮可查（审计要求）。
+                summaryHtml = `<span title="${esc(e.summary)}">${esc(translated)}</span>`;
+            } else if (e.event_type === 'note' && e.action_code === 'notify_sent' && e.summary) {
+                // C5b 噪音折叠①：message_key/(idN) 对人类读者是噪音，凭证价值走 title 悬浮保留（不丢，只挪）。
+                //   正则依据（码表§message_key/(idN) 噪音写入点·index.js :12454 recordSysNotifyTimeline）：
+                //   成功形态含「（message_key=…）」（全角括号，唯一模板）；失败形态是「（失败=…）」——不含
+                //   字面量"message_key="，正则天然不命中，失败原因原样留在正文（当场要看到，不折叠）。
+                const folded = e.summary.replace(/（message_key=[^）]*）/, '').replace(/\(id\d+\)/, '');
+                summaryHtml = `<span title="${esc(e.summary)}">${esc(folded)}</span>`;
+            } else if (e.event_type === 'note' && (e.action_code === 'request_tech_consult' || e.action_code === 'cancel_consult') && e.summary) {
+                // C5b 噪音折叠②：同样摘除 (id数字)，title 挂原文。两个 action_code 的 summary 模板不完全相同
+                //   （cancel_consult 的两个写点未必含 (idN)），正则不命中时是安全 no-op，非本条断言范围。
+                const folded = e.summary.replace(/\(id\d+\)/, '');
+                summaryHtml = `<span title="${esc(e.summary)}">${esc(folded)}</span>`;
+            } else if (e.event_type === 'estimate' && e.summary) {
+                // C5b 噪音折叠③：estimate 行 summary 是裸值（index.js :8022 estMin，无标签），加前缀让读者知道
+                // 这是"预计完成"时刻而非其它时间字段——存量与新行同渲染路径，一并受益，无需回填历史数据。
+                summaryHtml = esc('预计完成：' + e.summary);
+            } else if (e.event_type === 'created' && e.summary && [...e.summary].length > 60) {
+                // C5b 噪音折叠④：建单描述原文可能很长，时间线正文只给前 60 字摘要，title 挂全文。
+                //   ≤60 字符不动（下面 else 分支覆盖，不重复判断）。
+                //   〔F8·LOW-3〕码点口径而非 UTF-16 码元：裸 `.length`/`.slice()` 按 UTF-16 码元计数，
+                //   代理对字符（多数 emoji）占 2 个码元，从中间切开会劈开代理对，渲染出 U+FFFD 替换
+                //   字符——改用 `[...e.summary]` 展开成码点数组再判长/切片/join，对齐全仓其余长度口径
+                //   （work_note 上限 1000、bug_cause_note 上限 500 均按 `[...s].length` 码点计数）。
+                summaryHtml = `<span title="${esc(e.summary)}">${esc([...e.summary].slice(0, 60).join('') + '…')}</span>`;
             } else {
                 summaryHtml = e.summary ? esc(e.summary) : '';
             }
@@ -2324,6 +2506,9 @@
     // SI_ATT_DEV_OR_VERIFY_STATUSES（附件区先定义，函数体内引用不受声明顺序影响，脚本整体先解析完再在
     // DOMContentLoaded 后执行）。冻结族=非 D_PRE/DEV/VERIFY 的其余状态，复用既有 SI_ATT_TERMINAL_STATUSES
     // 叠加「待上线」（对齐方案 §4.0 SYS_FROZEN_STATUSES=RELEASE∪非发布终态）。
+    // 〔C5d 复用〕siRenderTimeline 的 W-GATE 存量转译方向判据也读这个常量（同一份并集字面量，不重复定义）——
+    // 二次核实出处 routes/sys-iteration/status-families.js:55-59 `SYS_DEV_STATUSES = { feature:['开发中'],
+    // improvement:['开发中'], bug:['处理中'] }`，并集恰为 ['开发中','处理中']，与此处字面量一致。
     const SI_DEV_FAMILY_STATUSES = ['开发中', '处理中'];
     const SI_FROZEN_STATUSES = ['已上线', '已关闭', '已拒绝', '已作废', '待上线'];
 
@@ -2367,7 +2552,7 @@
     //   C7：协调人（canCoordinateMember）在 pending 成员 chip 上加「开脱」、excused 成员 chip
     //   上加「恢复」小按钮；chip 列表下方非冻结态显示「管理开发成员」入口（复用 siModalReassign 的 member_ids
     //   全集编辑器，声明式一个入口覆盖 add/remove，不逐个调 dev-assignees 端点）。
-    function siRenderDevMemberChips(devAssignees, caps, iss, noCodeRecords) {
+    function siRenderDevMemberChips(devAssignees, caps, iss, noCodeRecords, bugCauseRecords) {
         const list = (!devAssignees || !devAssignees.length)
             ? '<div class="si-muted">暂无指派开发</div>'
             : '<div class="si-dev-chip-list">' + devAssignees.map(d => {
@@ -2384,12 +2569,17 @@
                 // title 仅冗余（正文块 noCodeBlock 才是主载体，见上方函数头注释）
                 const titleAttr = (statusKey === 'no_code' && d.no_code_reason) ? ` title="${esc(d.no_code_reason)}"` : '';
                 const primaryMark = '';   // 「代表」小标记按用户要求移除（后端 electRepresentative 仍自动选代表·仅前端不展示）
+                // 逐人完成时刻：仅 code_submitted/no_code 两态展示（pending 未完成；excused 语义是「被开脱」
+                //   非「已完成」，即便 resolved_at 有值也不展示）；resolved_at 空则整个 span 不渲染，不留占位。
+                //   title 到秒（siFmtDTSec）、正文到分（siFmtDT），同 D13 审计类显示口径。
+                const timeSpan = ((statusKey === 'code_submitted' || statusKey === 'no_code') && d.resolved_at)
+                    ? `<span class="si-dev-chip-time" title="${esc(siFmtDTSec(d.resolved_at))}">·${esc(siFmtDT(d.resolved_at))}</span>` : '';
                 let act = '';
                 if (caps && caps.canCoordinateMember) {
                     if (statusKey === 'pending') act = `<span class="si-dev-chip-act" onclick="siModalExcuseMember(${d.id})">开脱</span>`;
                     else if (statusKey === 'excused') act = `<span class="si-dev-chip-act" onclick="siModalSupersedeExcuse(${d.id})">恢复</span>`;
                 }
-                return `<span class="si-dev-chip"${titleAttr}>${esc(d.user_name || ('#' + d.user_id))}${primaryMark}<span class="si-dev-status-badge ${siDevStatusClass(statusKey)}">${statusLabel}</span>${act}</span>`;
+                return `<span class="si-dev-chip"${titleAttr}>${esc(d.user_name || ('#' + d.user_id))}${primaryMark}<span class="si-dev-status-badge ${siDevStatusClass(statusKey)}">${statusLabel}</span>${timeSpan}${act}</span>`;
             }).join('') + '</div>';
         // P4：开发成员工作说明展示——每个提交时填了 work_note 的 dev 一行「姓名：说明（提交时刻）」。多开发各自独立
         //   （后端详情端按 dev_assignee 各取自己最近 submit 事件的 work_note·不覆盖）。仅有值的 dev 才渲染，无则整块不出。
@@ -2421,6 +2611,28 @@
             .join('');
         const noCodeBlock = ncItems
             ? `<div class="si-worknote-block" style="margin-top:10px"><div class="si-worknote-title" style="font-size:12px;color:#6b7280;margin-bottom:4px">无代码交付说明</div>${ncItems}</div>` : '';
+        // [B4·C6·F8 MED-1 订正] bug 产生原因逐人展示——同 work_note 范式（姓名+文本一行，无时刻列，
+        //   本次改动范围不含此项）。仅 iss.type==='bug' 且该记录有值时渲染；非 bug 单/无值——整块不出。
+        //   数据源=bug_cause_records（详情 GET 顶层新增，后端查该单**全部**历史实例，含已移出的）。
+        //   ⚠️ F7 首版曾用 devAssignees（仅在册）过滤，给的理由是"bug_cause_note 非 no_code 专属字段，
+        //   不需要 noCodeRecords 扩展视角"——这是一句**非因果推理**（"是否只有 no_code 模式才写这个
+        //   字段"与"要不要看得到历史轮次的记录"是两件不相关的事，前者为真不能推出后者不需要）。
+        //   真实理由应对齐 noCodeRecords 同款裁定（codex 264 号末次合并审 M-2）：返工场景下 remove+
+        //   re-add 旧成员后，旧一轮的 bug 产生原因同样不该跟着消失（唯一交付凭证，与 no_code_reason
+        //   的裁定精神一致），故改用专属的 bug_cause_records 查询而非仅在册的 devAssignees。
+        //   removed=true 的历史实例加「（已移出）」muted 后缀（同下方 ncItems 既有写法，本注释挪到这里
+        //   之前 ncItems 已在上文定义），在册未移除的（removed=false）不带后缀。复用 .si-worknote-item
+        //   族既有样式类，非另造。
+        const bcItems = iss.type === 'bug' ? (bugCauseRecords || [])
+            .map(d => {
+                const noteTrimmed = String(d.bug_cause_note || '').trim();
+                if (!noteTrimmed) return '';   // 双保险（后端已保证非空白，此处防御性兜底不新增行为，同 ncItems）
+                const removedTag = d.removed ? `<span class="si-muted">（已移出）</span>` : '';
+                return `<div class="si-worknote-item"><span class="si-worknote-who">${esc(d.user_name || ('#' + d.user_id))}${removedTag}</span><div class="si-worknote-text">${esc(noteTrimmed)}</div></div>`;
+            })
+            .join('') : '';
+        const bugCauseBlock = bcItems
+            ? `<div class="si-worknote-block" style="margin-top:10px"><div class="si-worknote-title" style="font-size:12px;color:#6b7280;margin-bottom:4px">bug 产生原因</div>${bcItems}</div>` : '';
         // C2c·对抗审 A（HIGH·2026-07-18）：manageBtn 是 reassign 的**第二个前端入口**（复用 siModalReassign→POST /reassign），
         //   显隐必须镜像 reassign.from（否则变更流 D_PRE 态显按钮但后端已去 D_PRE→点击必 409 死按钮）。原 !SI_FROZEN_STATUSES
         //   只排冻结态、不含变更流 D_PRE 三态，是与操作区入口①(transitions reassign.from)不同源的漏网。改为直接读
@@ -2430,7 +2642,7 @@
         const reassignHitsStatus = !!(reassignFlow && Array.isArray(reassignFlow.from) && reassignFlow.from.includes(iss.status));
         const manageBtn = (caps && caps.canCoordinateMember && reassignHitsStatus)
             ? `<div style="margin-top:8px"><button class="u-btn-secondary u-btn-sm" onclick="siModalReassign(siDetail.issue)">管理开发成员</button></div>` : '';
-        return list + workNotesBlock + noCodeBlock + manageBtn;
+        return list + workNotesBlock + noCodeBlock + bugCauseBlock + manageBtn;
     }
     // commit 记录小表：开发/component（前端/后端）/commit_ref/时间；含 removed 实例的行（方案 §8 快照口径同源，
     //   后端 GET 已按 id 升序返回，前端不再排序）。C7：本人行按 canEditCommits 加「编辑/删除」，表下按
@@ -2659,10 +2871,9 @@
             const why = error ? siErrText(null, { reason: error }) : '';
             return `<span class="u-nt-fail">⚠️ 通知失败${why ? '（' + esc(why) + '）' : ''}，可重试</span>`;
         }
-        // 〔S3〕`— 无手机号，无法通知` → 补对象名。**对象槽这里填的是固定名词「业务方」不是人名**
-        //   （0b-3/S20 省的是人名重复；§3.2 模板 `— {对象}未填手机号，无法通知` 的 {对象} 本就是角色名词），
-        //   与 DCorr/IL 该句**逐字一致**。本状态只由 requester 通道产出（§6.3 NO_REQUESTER_PHONE）。
-        if (status === 'no_phone') return `<span class="u-nt-warn">— 业务方未填手机号，无法通知</span>`;
+        // 〔P9 裁定 2026-08-09〕原 no_phone 分支（S3）已删：SI 域所有传入本函数的 *_notify_status 状态列
+        //   （sys_issues 主表+各通道子表）CHECK 均无 'no_phone' 值域（NO_REQUESTER_PHONE 是响应码非状态列值），
+        //   该态结构性不可达。DCorr（状态列含 no_phone）/IL（前端 noPhone 旗标）同句真可达，不受影响，勿对照回补。
         // [工期对接测试与风险等级拆分 方案 v1.1 §6·C4b] 'sending'——目前仅对接测试通道会产生该值（预占
         // 协议中间态，其余四通道同步发送无此态），补分支避免落到下方 default 文案误显示"未发送"。
         if (status === 'sending') return `<span class="u-nt-run">⏳ 发送中…</span>`;
@@ -4197,6 +4408,30 @@
         });
     }
 
+    // F2（估时/可行性弹窗回填提示）：dev_estimated_at 是整单单值，任一在册开发可填、后填覆盖先填——
+    //   弹窗打开时先告诉填写者"当前值是谁、何时填的"，帮其判断是否要覆盖。事件源=siCurTimeline
+    //   （详情端点原样 ORDER BY id 升序返回，见 index.js 详情查询处），从数组末尾往前找第一条
+    //   event_type 为 'estimate' 或 'feasibility' 的事件即为最新一条。
+    //   ⚠️〔F3b·F2-LOW-1〕本函数**依赖**该顺序、不自行排序——若将来对 timeline 先过滤/重排（如按
+    //   event_type 分组、按其它键排序），"数组末尾=最新"这条假设会失效，须同步改本函数的取值方向。
+    //   iss.dev_estimated_at 为空，或 timeline 里找不到匹配事件（异常存量：如直接 SQL 写入未经过
+    //   这两个端点），均不显示——不伪造。
+    //   返回值供 siModal fields 数组的 `{ k: null, html }` 占位项直接使用（同 note() 范式，siModal
+    //   的 onConfirm 收集器按 `if (f.k)` 跳过 k=null 的项，见 note() 定义处）。
+    function siEstimateFilledHint(iss) {
+        if (!iss || !iss.dev_estimated_at) return '';
+        const list = siCurTimeline || [];
+        let ev = null;
+        for (let i = list.length - 1; i >= 0; i--) {
+            if (list[i].event_type === 'estimate' || list[i].event_type === 'feasibility') { ev = list[i]; break; }
+        }
+        if (!ev) return '';
+        // 〔codex 329 终判条件①·归因降级〕文案不写「当前值由谁填写」——timeline 事件与现值之间无逐值校验
+        //   （人工修库/数据修复等场景最新事件未必是现值真实来源），改为「最近一次估时/评估」的事实表述，
+        //   信息量不减（正常路径两者恒一致）但不做因果归因声称。
+        return `<div class="u-hint" style="margin-bottom:10px">最近一次估时/评估由 ${esc(ev.operator_name || '—')} 于 ${esc(siFmtDT(ev.created_at))} 填写</div>`;
+    }
+
     function siModalEstimate(iss) {
         // [C7 工时评估补全·方案 v1.7 §9.1] 工期字段在本弹窗只对 feature/improvement 显示且必填。
         //   本弹窗的调用点已由 needs_feasibility 门控（见动作可见性 `if (a === 'estimate' && iss.needs_feasibility) continue;`）
@@ -4204,9 +4439,19 @@
         //   bug/config 不显示该字段也不提交该键（后端适用面闸对这两类"传值即拒" 400 EFFORT_NOT_APPLICABLE，
         //   前端多传一个 null 都会被拒，故必须是"不带这个键"而不是"带 null"）。
         const effortApplicable = iss.type === 'feature' || iss.type === 'improvement';
-        const fields = [
-            fDateTime('dev_estimated_at', '预计完成时间', siToLocalInput(iss.dev_estimated_at), true),   // D2：第 4 参=必填星号（本字段真必填，闸门①）
-        ];
+        // F6（估时并发乐观锁前端接线·B1 后端 e7ecffd）：expected 只能取详情 GET 原文，打开弹窗这一刻
+        // 闭包捕获——onConfirm 是异步回调，用户可能盯着弹窗看半天才点确定，其间 siDetail 可能已被别的
+        // 操作（甚至本页其它抽屉刷新）整体重新赋值；若 onConfirm 里现读 `siDetail.issue.dev_estimated_at`
+        // 而不是这里捕获的值，等于拿"提交那一刻的值"当"打开那一刻的值"送去比对，乐观锁语义整个失效。
+        // 字节级严格等值（后端同款口径，见 index.js /estimate 端点 :8072 注释）——不经 siToLocalInput/
+        // siFmtDT/timeline summary 等任何转手，就是这里原样存的 GET 响应字段值。空值传 null（后端
+        // null↔null 相等，未指派/存量清空场景不会误判 stale）。
+        const expectedAtOpen = iss.dev_estimated_at || null;
+        const fields = [];
+        // F2：字段上方插入"最近一次估时/评估由谁于何时填写"提示（无匹配 timeline 事件或 dev_estimated_at 为空则不插）
+        const estimateHintHtml = siEstimateFilledHint(iss);
+        if (estimateHintHtml) fields.push({ k: null, html: estimateHintHtml });
+        fields.push(fDateTime('dev_estimated_at', '预计完成时间', siToLocalInput(iss.dev_estimated_at), true));   // D2：第 4 参=必填星号（本字段真必填，闸门①）
         if (effortApplicable) {
             // 文案/校验/控件参数与可行性评估弹窗（siModalFeasibility）逐字一致——同一个字段在两个入口
             // 必须长一样，否则用户会以为是两回事。
@@ -4220,7 +4465,7 @@
         fields.push(note('⚠️ 闸门①：必须先回填预计完成时间' + (effortApplicable ? '与工期（人日）' : '') + '才能提交交付；时间不能早于指派时刻。'));
         siModal(iss.dev_estimated_at ? '修改预计完成' : '回填预计完成', fields, async v => {
             if (!v.dev_estimated_at) { showToast('请填写预计完成时间', 'error'); return false; }
-            const body = { dev_estimated_at: siFromLocalInput(v.dev_estimated_at) };
+            const body = { dev_estimated_at: siFromLocalInput(v.dev_estimated_at), expected_dev_estimated_at: expectedAtOpen };
             if (effortApplicable) {
                 // 校验口径与后端 normalizeSysEffortDays/DDL CHECK 同源（有限数、0<v≤365、0.5 整数倍），
                 // 与 siModalFeasibility 内同款分支逐字对齐；前端先拦一道，服务端仍是权威校验。
@@ -4233,7 +4478,22 @@
                 body.estimated_effort_days = n;
             }
             const r = await siApi('/sys-issues/' + iss.id + '/estimate', { method: 'POST', body });
-            if (!r.ok) { siApiErr(r); return false; }
+            if (!r.ok) {
+                // F6：ESTIMATE_STALE 专门分支——不能走下面通用 siApiErr(r)+return false 那条路：弹窗留着、
+                // expected 值不变 ⇒ 用户什么都不改直接重点确定，还是同一个过期 expected，还是 409，死循环。
+                // 必须主动关弹窗+刷新，让用户带着最新值重新走一遍（同既有 siModalReassign 的 REASSIGN_STALE
+                // 分支范式，:4328-4333——手动 siCloseModal()+siAfterAction() 后 return false，防 siModal
+                // 包装层的 `if(keep){siCloseModal();await siAfterAction();}` 再重复一遍关闭+刷新）。
+                // ⚠️ 故意不走 siApiErr(r)——那会优先显示后端 r.data.error 原文「...请刷新后重试」，盖过这里
+                // 要传达的"已经帮你刷新了"这层信息，故直接 showToast 指定文案。
+                if (r.data && r.data.code === 'ESTIMATE_STALE') {
+                    showToast('预计完成时间已被他人更新，已刷新为最新值，请重新确认', 'error');
+                    siCloseModal();
+                    await siAfterAction();
+                    return false;
+                }
+                siApiErr(r); return false;
+            }
             // [C7-fix LOW-6] unchanged 文案按 effortApplicable 分岔：bug/config 本就没有工期字段，
             //   对他们说"且工期未变"是无中生有的信息（后端对这两类连该键都不回带，见 index.js effortApplicable）。
             showToast(
@@ -4253,7 +4513,14 @@
         //   C2 的「feature 必填 / improvement 选填」口径已随 C7 废止，前端不再按 type 分岔：留着
         //   `iss.type === 'feature'` 会让 improvement 的用户看到"选填"、留空提交、再被后端 400 打回——
         //   前端校验比后端**松**是最坏的一种不一致（拦不住还骗人）。
-        siModal('可行性评估', [
+        // F6（估时并发乐观锁前端接线）：同 siModalEstimate 同款闭包捕获，理由/口径逐字一致（该函数定义处
+        // 已有完整注释，不重复）。
+        const expectedAtOpen = iss.dev_estimated_at || null;
+        // F2：字段上方插入"最近一次估时/评估由谁于何时填写"提示（无匹配 timeline 事件或 dev_estimated_at 为空则不插）
+        const feasibilityHintHtml = siEstimateFilledHint(iss);
+        const feasibilityFields = [];
+        if (feasibilityHintHtml) feasibilityFields.push({ k: null, html: feasibilityHintHtml });
+        feasibilityFields.push(
             fSelect('conclusion', '评估结论', ['可行', '有条件可行', '不可行'], '可行'),
             fTextarea('requirement_confirm', '需求确认', '', true, '必填：对需求的理解与确认，≤500'),
             fDateTime('dev_estimated_at', '预计完成时间', siToLocalInput(iss.dev_estimated_at), true),   // D2：第 4 参=必填星号（本字段真必填，闸门①）
@@ -4261,7 +4528,8 @@
                 true, '必填：0.5 的整数倍，(0, 365]', { step: '0.5', min: '0.5', max: '365' }),
             fTextarea('risk', '风险/前置条件', '', false, '「有条件可行 / 不可行」时必填，≤1000'),
             note('⚠️ 本单需可行性评估：评估通过（可行/有条件可行）后方可继续提交交付。')
-        ], async v => {
+        );
+        siModal('可行性评估', feasibilityFields, async v => {
             if (!v.conclusion) { showToast('请选择评估结论', 'error'); return false; }
             if (!v.requirement_confirm.trim()) { showToast('需求确认必填', 'error'); return false; }
             if (!v.dev_estimated_at) { showToast('预计完成时间必填', 'error'); return false; }
@@ -4275,11 +4543,21 @@
             if (!Number.isFinite(effortValue) || effortValue <= 0 || effortValue > 365 || Math.round(effortValue * 2) !== effortValue * 2) {
                 showToast('工期须为 0.5 的整数倍，且在 (0, 365] 范围内', 'error'); return false;
             }
-            const body = { conclusion: v.conclusion, requirement_confirm: v.requirement_confirm.trim(), dev_estimated_at: siFromLocalInput(v.dev_estimated_at) };
+            const body = { conclusion: v.conclusion, requirement_confirm: v.requirement_confirm.trim(), dev_estimated_at: siFromLocalInput(v.dev_estimated_at), expected_dev_estimated_at: expectedAtOpen };
             if (v.risk.trim()) body.risk = v.risk.trim();
             body.estimated_effort_days = effortValue;
             const r = await siApi('/sys-issues/' + iss.id + '/feasibility', { method: 'POST', body });
-            if (!r.ok) { siApiErr(r); return false; }
+            if (!r.ok) {
+                // F6：ESTIMATE_STALE 专门分支——同 siModalEstimate 同款范式（该函数定义处有完整理由注释，
+                // 不重复）：故意不走 siApiErr(r)，主动关弹窗+刷新+return false 防死循环与包装层重复处理。
+                if (r.data && r.data.code === 'ESTIMATE_STALE') {
+                    showToast('预计完成时间已被他人更新，已刷新为最新值，请重新确认', 'error');
+                    siCloseModal();
+                    await siAfterAction();
+                    return false;
+                }
+                siApiErr(r); return false;
+            }
             showToast('已提交可行性评估', 'success'); return true;
         });
     }
@@ -4507,6 +4785,9 @@
                 <label>无代码交付原因 <span class="u-req">*</span></label>
                 <textarea id="siSubmitNoCodeReason" placeholder="trim 后 1~500 字：为何本次无需代码提交"></textarea>
             </div>
+            ${iss.type === 'bug' ? `<div class="u-form-group"><label>bug 产生原因 <span class="u-req">*</span></label>
+                <textarea id="siSubmitBugCauseNote" placeholder="必填：这个 bug 为什么会产生（trim 后 1~500 字·每轮提交都需填写）"></textarea>
+            </div>` : ''}
             <div class="u-form-group">
                 <label>工作说明（选填）</label>
                 <textarea id="siSubmitWorkNote" placeholder="本次开发做了什么、注意事项等（选填·trim 后 ≤1000 字）"></textarea>
@@ -4549,6 +4830,16 @@
             if (!testEnvDeployedChecked) { showToast('请先勾选"已上测试库"', 'error'); return false; }
             body.self_tested = true;
             body.test_env_deployed = true;
+            // [B4·C6] bug 产生原因——mode 无关字段（两种提交方式都必填，字段区恒显不随 mode 隐藏，见上方
+            //   modeHtml）。校验口径与后端 validateSubmitBody 逐字对齐（trim 后非空 + Unicode 码点数 ≤500）；
+            //   非 bug 单不渲染该字段、body 不带该键——带了会撞后端 BUG_CAUSE_NOT_APPLICABLE 400（适用面闸
+            //   与本字段的"传了就报错"对称，同 fix_gap_note/effort 等既有字段的"不适用不传"惯例）。
+            if (iss.type === 'bug') {
+                const bugCauseNote = (document.getElementById('siSubmitBugCauseNote') && document.getElementById('siSubmitBugCauseNote').value || '').trim();
+                if (!bugCauseNote) { showToast('请填写 bug 产生原因', 'error'); return false; }
+                if ([...bugCauseNote].length > 500) { showToast('bug 产生原因不能超过 500 字', 'error'); return false; }
+                body.bug_cause_note = bugCauseNote;
+            }
             if (needGap) {
                 const gap = (v.fix_gap_note || '').trim();
                 if (!gap) { showToast('修复缺口说明必填', 'error'); return false; }

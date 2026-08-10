@@ -2853,6 +2853,31 @@ module.exports = (deps) => {
       || (!!liaisonTestStatusForType && targetStatus === liaisonTestStatusForType);
     const clearDeferredSql = enteringForward ? ', gate_deferred_at = NULL' : '';
 
+    // [B3·C5d 写入端半] mirror timeline 行的人话 summary——按方向选择文案，不新增 action_code（既有
+    //   liaison_test_skip_excused/liaison_test_skip_liaison 两码保留不动，方向语义靠 summary+from/to 列
+    //   已足够承载，跨线协调新码的前端标签/守卫 allowlist 过渡态没有必要）。
+    //   四类方向穷尽本函数全部会走到本 INSERT 的分支（feature 决策树 + improvement/bug 二元逻辑共用同一
+    //   段尾部代码，见函数体）：
+    //     ① mirrorActionCode='liaison_test_skip_excused'（feature ⑦ 分支变体·全员 excused）
+    //     ② mirrorActionCode='liaison_test_skip_liaison'（feature ⑥ 降级·对接人失效）
+    //     ③ mirrorActionCode=null 且 enteringForward=true（feature ⑦ 正常/improvement·bug 二元逻辑的
+    //        "全完成→VERIFY" 分支，进 VERIFY 或 LIAISON_TEST 两个目的地共用同一句——不重复状态名，前端已用
+    //        from/to 渲染 →状态 后缀）
+    //     ④ mirrorActionCode=null 且 enteringForward=false（"回弹"——feature 的 inLiaisonTest||inVerify
+    //        分支与 improvement/bug 的 inVerify 分支，pendingCount>0 时新 pending 成员打破全完成态退回 DEV；
+    //        targetStatus 走到这里只可能是 VERIFY[0]/LIAISON_TEST[0]/DEV[0] 三者之一，enteringForward=false
+    //        时穷尽只剩 DEV[0] 这一种，故此分支等价于"回弹"、无需额外判空 targetStatus===DEV[0]）。
+    //   ⚠️ ①②优先于③④判定——两个 skip 码只在 targetStatus=VERIFY 时被置（不可能与"回弹"同时成立），
+    //   但作为方向信号它们比"是否 enteringForward"更具体（明确点出"跳过对接测试"这层业务含义），故取值时
+    //   mirrorActionCode 非空优先读它，为空才退到 enteringForward 的二分方向判断。
+    const W_GATE_SKIP_SUMMARY = {
+      liaison_test_skip_excused: '在册开发全员开脱，跳过对接测试自动流转',
+      liaison_test_skip_liaison: '对接人不可用，跳过对接测试自动流转',
+    };
+    const mirrorSummary = mirrorActionCode
+      ? (W_GATE_SKIP_SUMMARY[mirrorActionCode] || '成员在册完成态变化，自动流转')   // 兜底：结构上不可达（mirrorActionCode 仅 3 种取值，另一种是 null），防御性保留
+      : (enteringForward ? '全部在册开发已完成，自动流转' : '出现新的待提交成员，自动退回开发中');
+
     // [codex 101 号 MED 回填] updated_at——旧版 assign/submit 公共 UPDATE 都刷 updated_at，本处（W-GATE 状态
     // 转移）是旧版对应逻辑在新模型的落点之一，SSOT 未废除该行为，补回（范围严格限定此三处，不动
     // electRepresentative 通用选举 UPDATE——94 号 L1 裁定对暂缓/拒绝/作废终态场景"反伤效率统计终止时刻
@@ -2872,10 +2897,12 @@ module.exports = (deps) => {
     //   [方案 v1.1 §3.0-⑥/D17·C4] action_code 新增写入——此前恒 NULL（隐式），⑥ 降级路径现写专用值
     //   'liaison_test_skip_liaison'（其余转移仍是 NULL，未改变既有行为），供 last_completed_at 白名单
     //   （§3.1 点7 D17）与 verify 探针识别"这条 W-GATE 转移是否降级路径"。
+    //   [B3·C5d 写入端半] summary 改人话（见上方 mirrorSummary 计算块及其注释）——不再落内部机制名
+    //   "W-GATE 自动门禁转移"，按方向选四选一文案；action_code 三值维持不变（不新增码，见上方注释）。
     await dbRunAsync(
       `INSERT INTO sys_issue_timeline (issue_id, event_type, from_status, to_status, summary, operator_id, operator_name, action_code)
        VALUES (?, 'status_change', ?, ?, ?, ?, ?, ?)`,
-      [issueId, currentStatus, targetStatus, 'W-GATE 自动门禁转移（成员在册完成态变化）', actor ? actor.id : null, actor ? actor.name : 'system', mirrorActionCode]
+      [issueId, currentStatus, targetStatus, mirrorSummary, actor ? actor.id : null, actor ? actor.name : 'system', mirrorActionCode]
     );
     return { changed: true, from: currentStatus, to: targetStatus };
   }
@@ -5676,9 +5703,13 @@ module.exports = (deps) => {
         //   [codex 272 号 M-1] ⚠️ 不能想当然认为"读到非 null 就必然是 true"——这条只对本批次校验上线
         //   之后的新写入成立，历史脏数据（迁移遗留/手工改库/未来某次校验放宽期间侥幸落库的行）不受此
         //   约束，详情端是审计读取口，必须按下方 strictBoolFromJsonExtract 老实映射，不能替写侧背书。
+        // [B4·C6] 同一查询顺带提取 bug_cause_note（写读同源：写侧见上方 submit handler 的 eventPayload）——
+        //   与 work_note 同一存储范式（各 dev 各自最近一次 submit/no_code 事件独立承载），故复用本条查询、
+        //   不另开一次查询。bug 单每轮必填故非 bug 单历史行、bug 单迁移前旧行读到 null 是预期形态。
         const workNoteRows = await dbAllAsync(
           `SELECT e.dev_assignee_id AS da_id,
                   json_extract(e.payload_json, '$.work_note') AS work_note,
+                  json_extract(e.payload_json, '$.bug_cause_note') AS bug_cause_note,
                   json_extract(e.payload_json, '$.${SUBMIT_SELF_TESTED_KEY}') AS ${SUBMIT_SELF_TESTED_KEY},
                   json_extract(e.payload_json, '$.${SUBMIT_TEST_ENV_DEPLOYED_KEY}') AS ${SUBMIT_TEST_ENV_DEPLOYED_KEY},
                   e.created_at AS submitted_at
@@ -5709,6 +5740,7 @@ module.exports = (deps) => {
           const note = r.work_note || null;
           return [r.da_id, {
             work_note: note, submitted_at: note ? r.submitted_at : null,
+            bug_cause_note: r.bug_cause_note || null,   // [B4·C6] 无值（非 bug 单/历史行）→ null，同 work_note 的 || null 归一写法
             [SUBMIT_SELF_TESTED_KEY]: strictBoolFromJsonExtract(r[SUBMIT_SELF_TESTED_KEY]),
             [SUBMIT_TEST_ENV_DEPLOYED_KEY]: strictBoolFromJsonExtract(r[SUBMIT_TEST_ENV_DEPLOYED_KEY]),
           }];
@@ -5717,6 +5749,7 @@ module.exports = (deps) => {
           const wn = wnMap.get(d.id);
           d.work_note = wn ? wn.work_note : null;
           d.work_note_submitted_at = wn ? wn.submitted_at : null;
+          d.bug_cause_note = wn ? wn.bug_cause_note : null;   // [B4·C6]
           d[SUBMIT_SELF_TESTED_KEY] = wn ? wn[SUBMIT_SELF_TESTED_KEY] : null;
           d[SUBMIT_TEST_ENV_DEPLOYED_KEY] = wn ? wn[SUBMIT_TEST_ENV_DEPLOYED_KEY] : null;
         }
@@ -5749,6 +5782,47 @@ module.exports = (deps) => {
           ORDER BY id ASC`,
         [id]
       );
+      // [B6·MED-1] bug_cause_records：详情端 bug_cause_note 历史轮次可见性对齐 noCodeRecords 先例——
+      //   现挂在 devAssignees 行上的 bug_cause_note（上方 work_note 同款补查块）只反映**在册视角**（仅
+      //   当前有效实例），而返工的标准重置路径 remove+re-add（B4b「完成态不回 pending」约束下唯一可行
+      //   路径）会让首轮原因随旧实例被移出而从 UI 消失。codex 264 M-2 对 no_code_reason 判过同一件事，
+      //   裁定=查全部历史实例，本次对齐该先例（主会话已裁定）。
+      //   仅 type='bug' 查询——非 bug 恒 []：bug_cause_note 结构上只会出现在 bug 单的 submit/no_code 事件
+      //   payload_json 里（B4 写入端已按 type 门控），显式按 type 判定比隐式依赖"其它类型数据天然为空"
+      //   更清楚，也少一次无意义查询。
+      //   数据源：与上方 workNoteRows 同款"MAX(id) per dev_assignee_id 取该实例最近一次提交事件"，但那
+      //   条查询没有 JOIN dev_assignees（不需要 user_name/removed_at，只服务在册 devAssignees 合并），
+      //   这里需要单独一条 JOIN 版本——JOIN 手法与 noCodeRecords 完全一致（拿 user_name/removed_at·不限
+      //   removed_at）。按**事件 id** 升序（非 dev_assignee_id 升序）：事件 id 天然是提交发生的时间序，
+      //   同一 dev 跨轮的两次提交必然对应两个不同的 dev_assignee_id（remove+re-add 产生新实例），事件 id
+      //   顺序即轮次顺序。
+      //   [codex 327 M-2 口径固化] MAX(id) per 实例的聚合**实际无损**：dev_status CAS 单向（pending→
+      //   code_submitted/no_code 后不回 pending，重做恒走 remove+re-add=新实例），同一实例结构上至多产生
+      //   一条 submit/no_code 事件，聚合只是防御性写法。若未来放开「同实例重复提交」，本查询须改为全事件
+      //   列出（含 submitted_at 逐条展示），否则会静默丢弃早期原因。
+      let bugCauseRecords = [];
+      if (row.type === 'bug') {
+        const bcRows = await dbAllAsync(
+          `SELECT e.dev_assignee_id AS dev_assignee_id, da.user_id AS user_id, da.user_name AS user_name,
+                  json_extract(e.payload_json, '$.bug_cause_note') AS bug_cause_note,
+                  e.created_at AS submitted_at, da.removed_at AS removed_at
+             FROM sys_issue_dev_events e
+             JOIN sys_issue_dev_assignees da ON da.id = e.dev_assignee_id
+             JOIN (
+               SELECT dev_assignee_id, MAX(id) AS max_id
+                 FROM sys_issue_dev_events
+                WHERE issue_id = ? AND action IN ('submit','no_code')
+                GROUP BY dev_assignee_id
+             ) latest ON latest.dev_assignee_id = e.dev_assignee_id AND latest.max_id = e.id
+            WHERE e.issue_id = ? AND json_extract(e.payload_json, '$.bug_cause_note') IS NOT NULL
+            ORDER BY e.id ASC`,
+          [id, id]
+        );
+        bugCauseRecords = bcRows.map(r => ({
+          dev_assignee_id: r.dev_assignee_id, user_id: r.user_id, user_name: r.user_name,
+          bug_cause_note: r.bug_cause_note, submitted_at: r.submitted_at, removed: !!r.removed_at,
+        }));
+      }
       // 血缘：正向（本单来源 origin_issue_id）+ 反向（已衍生出哪些单，M-2 反查）
       let originIssue = null;
       if (row.origin_issue_id) {
@@ -5807,7 +5881,7 @@ module.exports = (deps) => {
       //   （admin ∨ 对接人 ∨ 本批次执行人），其余读者拿 null。前端 siCanOpenRelease 以"brief 非空"为唯一
       //   判据（数据即权限，前端不复算三分支），写读同源单点在此。
       const canSeeReleaseBrief = isAdmin || isIntakeLiaisonUser || isReleaseExecutor;
-      res.json({ issue: row, timeline, attachments: outAttachments, specAttachments: outSpecAttachments, hasSpecAttachment: outSpecAttachments.length > 0, origin_issue: originIssue, derived_issues: derivedIssues, related_correction: relatedCorrection, dev_assignees: devAssignees, dev_commits: devCommits, no_code_records: noCodeRecords, release_brief: canSeeReleaseBrief ? releaseBrief : null });
+      res.json({ issue: row, timeline, attachments: outAttachments, specAttachments: outSpecAttachments, hasSpecAttachment: outSpecAttachments.length > 0, origin_issue: originIssue, derived_issues: derivedIssues, related_correction: relatedCorrection, dev_assignees: devAssignees, dev_commits: devCommits, no_code_records: noCodeRecords, bug_cause_records: bugCauseRecords, release_brief: canSeeReleaseBrief ? releaseBrief : null });
     } catch (err) {
       logger.error('[系统迭代] 详情查询失败:', err && err.message);
       res.status(500).json({ error: (err && err.message) || '详情查询失败' });
@@ -5954,7 +6028,7 @@ module.exports = (deps) => {
     //   （派生自 bug 的 bug 单首次提交），此处只做类型层放行（同旧代码 non-string→视为未填，不在此报错），
     //   必填判定与真正校验在事务内进行（见 submit handler 内 [codex 100 号 HIGH-2 回填] 注释）。
     // [v1.1 §3.3·C3] +self_tested/test_env_deployed（提交双勾，恒等 true 校验）。
-    const ALLOWED_TOP_KEYS = ['mode', 'no_code_reason', 'commits', 'fix_gap_note', 'work_note', SUBMIT_SELF_TESTED_KEY, SUBMIT_TEST_ENV_DEPLOYED_KEY];   // P4：+work_note（选填工作说明）
+    const ALLOWED_TOP_KEYS = ['mode', 'no_code_reason', 'commits', 'fix_gap_note', 'work_note', 'bug_cause_note', SUBMIT_SELF_TESTED_KEY, SUBMIT_TEST_ENV_DEPLOYED_KEY];   // P4：+work_note（选填工作说明）；C6：+bug_cause_note（bug 单必填「产生原因」，形状校验型无关，适用面/必填闸见 handler）
     const extraTop = Object.keys(b).filter(k => !ALLOWED_TOP_KEYS.includes(k));
     if (extraTop.length > 0) return { ok: false, message: `不支持的字段：${extraTop.join(',')}` };
     // [codex 272 号 L-1 锁定] mode-first 既有顺序保持不变——结构校验（mode 是否合法）先于字段校验
@@ -5979,6 +6053,17 @@ module.exports = (deps) => {
     if ([...workNoteRaw].length > 1000) return { ok: false, message: 'work_note 过长（上限 1000 字）' };
     const workNote = workNoteRaw || null;
 
+    // [B4·C6] bug_cause_note 形状校验（类型无关，同 work_note 写法）：非 string 且非 undefined/null → 400；
+    //   trim 后 Unicode 码点数上限 500（对齐用户拍板口径）。是否必填/是否适用（仅 type='bug'）依赖 row.type，
+    //   validateSubmitBody 是纯函数拿不到 row，必填/适用面闸门下沉到 handler（见该处 BUG_CAUSE_REQUIRED/
+    //   BUG_CAUSE_NOT_APPLICABLE）——本函数只保证"传了就必须是合法字符串"这一层，与业务语义无关。
+    if (b.bug_cause_note !== undefined && b.bug_cause_note !== null && typeof b.bug_cause_note !== 'string') {
+      return { ok: false, message: 'bug_cause_note 须为字符串' };
+    }
+    const bugCauseNoteRaw = typeof b.bug_cause_note === 'string' ? b.bug_cause_note.trim() : '';
+    if ([...bugCauseNoteRaw].length > 500) return { ok: false, message: 'bug_cause_note 过长（上限 500 字）' };
+    const bugCauseNote = bugCauseNoteRaw || null;
+
     if (b.mode === 'no_code') {
       if (b.no_code_reason === null) return { ok: false, message: 'no_code_reason 不能为 null' };
       const reason = (typeof b.no_code_reason === 'string' ? b.no_code_reason.trim() : '');
@@ -5990,7 +6075,7 @@ module.exports = (deps) => {
       // [codex 272 号 L-3·273 号 M 修正] 把双勾的**请求体原始值**随 parsed 带出（camelCase，同 noCodeReason
       // 风格）——不硬编码 true：写前不变量断言的是"请求里真的传了 true"这个现实，硬编码会让断言恒真、
       // 未来校验被误放宽时照样把假 true 写进审计（273 号抓的恒真断言变体）。
-      return { ok: true, mode: 'no_code', noCodeReason: reason, commits: [], fixGapNote, workNote, selfTested: b[SUBMIT_SELF_TESTED_KEY], testEnvDeployed: b[SUBMIT_TEST_ENV_DEPLOYED_KEY] };
+      return { ok: true, mode: 'no_code', noCodeReason: reason, commits: [], fixGapNote, workNote, bugCauseNote, selfTested: b[SUBMIT_SELF_TESTED_KEY], testEnvDeployed: b[SUBMIT_TEST_ENV_DEPLOYED_KEY] };
     }
 
     // mode === 'commits'
@@ -6010,7 +6095,7 @@ module.exports = (deps) => {
       if (!ref || ref.length > 200) return { ok: false, message: 'commit_ref 必填（trim 长度 1..200）' };
       commits.push({ component: raw.component, commit_ref: ref });
     }
-    return { ok: true, mode: 'commits', noCodeReason: null, commits, fixGapNote, workNote, selfTested: b[SUBMIT_SELF_TESTED_KEY], testEnvDeployed: b[SUBMIT_TEST_ENV_DEPLOYED_KEY] };   // 273 号 M：带原始值非硬编码（同上方 no_code 分支注释）
+    return { ok: true, mode: 'commits', noCodeReason: null, commits, fixGapNote, workNote, bugCauseNote, selfTested: b[SUBMIT_SELF_TESTED_KEY], testEnvDeployed: b[SUBMIT_TEST_ENV_DEPLOYED_KEY] };   // 273 号 M：带原始值非硬编码（同上方 no_code 分支注释）
   }
 
   router.post('/sys-issues/:id/submit', authenticateToken, requireSysSchemaReady, async (req, res) => {
@@ -6054,6 +6139,31 @@ module.exports = (deps) => {
         if (!row.dev_estimated_at) {
           await sysRollback();
           return res.status(400).json({ error: '请先回填预计完成时间', code: 'ESTIMATE_REQUIRED' });
+        }
+
+        // [B4·C6] bug 单必填「产生原因」（用户拍板三条口径：逐人填/每轮必填/no_code 与 commits 两 mode
+        //   同样要求，不做首轮豁免）——仅 type='bug' 适用，其余类型误传即拒（错误码命名与判据结构对齐 C7
+        //   的 EFFORT_NOT_APPLICABLE 范式：适用类型缺值 → REQUIRED；不适用类型带值 → NOT_APPLICABLE）。
+        //   位置刻意放在 ESTIMATE_REQUIRED 之后、fix_gap_note 首提闸门之前：本闸判据只需 row.type 与
+        //   parsed.bugCauseNote（均已就绪，零额外查询/写入），是本区段里最"轻"的一道；而紧随其后的
+        //   fix_gap_note 分支要多查一次 origin 单且可能落两个 UPDATE（first_submitted_at/fix_gap_note）
+        //   ——把不依赖任何额外副作用的判定尽量前置，同 ESTIMATE_REQUIRED 紧邻本身也是这个道理（虽然本
+        //   区段全部分支失败都走 sysRollback 回滚，事务原子性下顺序不影响数据正确性，这里纯粹是"轻判定
+        //   靠前、有副作用的判定靠后"的既有排序惯例，不是安全边界）。
+        //   ⚠️ 与 C7"不适用优先于格式"先例的对齐说明（如实记录查证结果，非照搬）：C7 的格式校验
+        //   （INVALID_EFFORT_DAYS）与适用面校验（EFFORT_NOT_APPLICABLE）同处一层——都在事务内、row 已知
+        //   之后——故存在真实的先后取舍，C7 选择"先适用面后格式"。bug_cause_note 的**形状**校验（是否为
+        //   string、trim 后 ≤500 字）已按方案要求上移到 validateSubmitBody（路由层，早于本行、早于 row
+        //   加载），与"适用面"根本不在同一层——形状必然先于适用面判定（架构决定，非本处可取舍的先后关系）。
+        //   能对齐 C7 精神的只有"适用面判定本身在同层里尽量靠前"这一点，已体现在上面的插入位置里。
+        if (row.type === 'bug') {
+          if (!parsed.bugCauseNote) {
+            await sysRollback();
+            return res.status(400).json({ error: '请填写 bug 产生原因', code: 'BUG_CAUSE_REQUIRED' });
+          }
+        } else if (parsed.bugCauseNote) {
+          await sysRollback();
+          return res.status(400).json({ error: '该类型单据无「bug 产生原因」字段', code: 'BUG_CAUSE_NOT_APPLICABLE' });
         }
 
         // [codex 100 号 HIGH-2 回填] first_submitted_at 首次原子盖章 + 派生 bug 首提 fix_gap_note 闸门——
@@ -6182,6 +6292,9 @@ module.exports = (deps) => {
         //   → electRepresentative → 门禁：全完成态→主状态待验证（W-GATE 内，同事务，不变量 8）
         // P4：work_note（选填工作说明）落进本条 submit/no_code 事件的 payload_json——每个 dev 各自的 submit 事件行
         //   独立承载，多开发各自 work_note 不覆盖（方案 §4.3 H1：不落主表/不落可变 dev_assignees 行）。仅有值时加键。
+        // [B4·C6] bug_cause_note 同样落本条事件 payload_json（逐人填口径①：每个 dev 各自 submit/no_code 事件
+        //   独立承载，不覆盖、不落主表/dev_assignees 行——与 work_note 同一存储范式）。"仅有值时加键"写法
+        //   与 work_note 对齐；上方闸门已保证 bug 单必有值、非 bug 单恒无值，故 bug 单此键恒在、非 bug 单恒无。
         // [v1.1 §3.3·C3] self_tested/test_env_deployed 恒为 true 才能走到这里（validateSubmitBody 已挡），
         //   两键无条件写入（不像 work_note 那样"仅有值时加键"——这两个键在通过校验的每一条 submit/no_code
         //   事件里恒定存在且恒为 true，是"事件 JSON 键名 schema 冻结"的一部分，供 verify 稳定读取断言）。
@@ -6196,8 +6309,8 @@ module.exports = (deps) => {
           throw new Error(`[写前不变量违反] submit 双勾应恒为 true 才能到达 eventPayload 构造，实得 selfTested=${parsed.selfTested} testEnvDeployed=${parsed.testEnvDeployed}（validateSubmitBody 校验被绕过或被弱化，需立即排查，非静默写假 true）`);
         }
         const eventPayload = parsed.mode === 'no_code'
-          ? { mode: 'no_code', no_code_reason: parsed.noCodeReason, [SUBMIT_SELF_TESTED_KEY]: true, [SUBMIT_TEST_ENV_DEPLOYED_KEY]: true, ...(parsed.workNote ? { work_note: parsed.workNote } : {}) }
-          : { mode: 'commits', commits: insertedCommits, dev_assignee_id: memberRow.id, [SUBMIT_SELF_TESTED_KEY]: true, [SUBMIT_TEST_ENV_DEPLOYED_KEY]: true, ...(parsed.workNote ? { work_note: parsed.workNote } : {}) };
+          ? { mode: 'no_code', no_code_reason: parsed.noCodeReason, [SUBMIT_SELF_TESTED_KEY]: true, [SUBMIT_TEST_ENV_DEPLOYED_KEY]: true, ...(parsed.workNote ? { work_note: parsed.workNote } : {}), ...(parsed.bugCauseNote ? { bug_cause_note: parsed.bugCauseNote } : {}) }
+          : { mode: 'commits', commits: insertedCommits, dev_assignee_id: memberRow.id, [SUBMIT_SELF_TESTED_KEY]: true, [SUBMIT_TEST_ENV_DEPLOYED_KEY]: true, ...(parsed.workNote ? { work_note: parsed.workNote } : {}), ...(parsed.bugCauseNote ? { bug_cause_note: parsed.bugCauseNote } : {}) };
         await insertDevEvent({
           issueId: id, devAssigneeId: memberRow.id,
           action: parsed.mode === 'no_code' ? 'no_code' : 'submit',
@@ -7982,6 +8095,31 @@ module.exports = (deps) => {
         if (estMin < assignedMin) {
           await sysRollback(); return res.status(400).json({ error: '预计完成时间不能早于指派时间', code: 'ESTIMATE_BEFORE_ASSIGN' });
         }
+        // ⭐ [并发乐观锁·expected_dev_estimated_at] 可选字段：调用方声明"打开弹窗时看到的现值"，用于探测
+        //   "我读之后、我写之前，这行是否已被另一个在册开发覆盖"——两个在册开发先后填写时，当前乐观锁只绑
+        //   status（本行下方 UPDATE 的 WHERE），同状态内二次填写测不出，后填的会直接覆盖先填的且无感知。
+        //   与 /reassign 端点的 expected_member_ids 同一手法（见 :4504 一带原注释）：键不存在（undefined）→
+        //   整段跳过，旧前端零行为变化；键存在必须是 string 或 null（打开弹窗时若现值为空即传 null）。
+        //   ⭐ 位置刻意放在**既有状态/格式/必填闸之后、同值 no-op 判定之前**——并发真相优先于"值有没有变"：
+        //   若判定顺序反过来，"expected 已过期但恰好与最新库值同值"这类巧合会被下方 no-op 短路掉，看似无害
+        //   实则掩盖了一次真实的并发覆盖（no-op 分支不写库不留痕，谁覆盖了谁无从查起）。
+        //   错误码 ESTIMATE_STALE 为本批新增（命名与既有 REASSIGN_STALE 同构·estimate/feasibility 两端点共用同一码）。
+        const rawExpectedEstimate = (req.body || {}).expected_dev_estimated_at;
+        if (rawExpectedEstimate !== undefined) {
+          if (rawExpectedEstimate !== null && typeof rawExpectedEstimate !== 'string') {
+            await sysRollback();
+            return res.status(400).json({ error: 'expected_dev_estimated_at 须为字符串或 null（可选，并发乐观锁）', code: 'VALIDATION' });
+          }
+          // 字节级严格等值：expected 就是详情 GET 的原文回传，不做分钟归一（同 reassign 集合乐观锁精确相等口径）。
+          //   [codex 327 M-1 口径固化] 本字段语义=**不透明版本值**（opaque version token），契约是「原样回传
+          //   详情 GET 的 dev_estimated_at」，不是「等价时间比较」——调用方自行构造同一时刻的不同字符串形态
+          //   （补秒/T/时区等）会得到 ESTIMATE_STALE，属约定内行为（前端是唯一调用方且照约定接线，见 F6）。
+          const curDevEstimatedAt = (row.dev_estimated_at === undefined || row.dev_estimated_at === null) ? null : row.dev_estimated_at;
+          if (rawExpectedEstimate !== curDevEstimatedAt) {
+            await sysRollback();
+            return res.status(409).json({ error: '预计完成时间已被他人更新，请刷新后重试', code: 'ESTIMATE_STALE' });
+          }
+        }
         // §7 M-3 同分钟归一化 unchanged 零写入（复用 collab v1.90.0 范式，ultracode 审 #6）：
         //   新预计 == 现存（截分钟）→ 不写不留 timeline，且后续不触发需求方通知（避免同值重复回填重复推送业务方）。
         const curEstMin = truncToMinute(row.dev_estimated_at);
@@ -8004,7 +8142,11 @@ module.exports = (deps) => {
           await sysRollback();
           return res.json({ id, dev_estimated_at: est, ...(effortApplicable ? { estimated_effort_days: effortValue } : {}), unchanged: true });
         }
-        // 旁路 UPDATE（不改 status）+ 乐观锁绑 status（W06：actor 未必是 assigned_to，去主次不再绑 assigned_to 条件）
+        // 旁路 UPDATE（不改 status）+ 乐观锁绑 status（W06：actor 未必是 assigned_to，去主次不再绑 assigned_to 条件）；
+        //   ⭐ 上方 expected_dev_estimated_at 一致时才会走到这一行——两把锁互补：本行的 status 锁防"单据状态
+        //   已被换"，上方的值锁防"**dev_estimated_at** 在同状态内被另一在册开发二次覆盖"（status 不变时本行的锁
+        //   对此完全无感）。⚠️ 值锁只比对 dev_estimated_at 单字段——同一条 UPDATE 里的 estimated_effort_days 不在
+        //   锁内（"日期不动只改工期"的并发覆盖不设防·残留缺口登记见任务锚点待追认 P1，Opus 预筛 MED-1 收窄）。
         // [C7] estimated_effort_days 并入**同一条 UPDATE** 原子落库（与 dev_estimated_at 同事务同语句，不新
         //   开独立写点）。SET 片段按 effortApplicable 条件拼接而非恒写：bug/config 走到这里 effortValue 恒为
         //   null（适用面闸已拒绝一切传值），若恒写就会把这类单据的存量列值抹成 NULL——虽然"bug 恒 NULL"是
@@ -8155,7 +8297,7 @@ module.exports = (deps) => {
       let conclusion = null;
       await sysBeginImmediate();
       try {
-        const row = await dbGetAsync('SELECT id, type, status, assigned_at, needs_feasibility, blocked, gate_deferred_at FROM sys_issues WHERE id = ?', [id]);
+        const row = await dbGetAsync('SELECT id, type, status, assigned_at, needs_feasibility, blocked, gate_deferred_at, dev_estimated_at FROM sys_issues WHERE id = ?', [id]);
         if (!row) { await sysRollback(); return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' }); }
         assertKnownIssueStatus(row.type, row.status);
         // ⭐ [C8-fix Q1·315 表态=端点适用面优先·整体重排] **端点适用面两闸先于全部 payload 字段校验**。
@@ -8258,9 +8400,30 @@ module.exports = (deps) => {
         const assignedMin = truncToMinute(row.assigned_at);
         if (!assignedMin) { await sysRollback(); return res.status(409).json({ error: '该单缺少指派时间（数据异常）', code: 'ASSIGNED_AT_MISSING' }); }
         if (estMin < assignedMin) { await sysRollback(); return res.status(400).json({ error: '预计完成时间不能早于指派时间', code: 'ESTIMATE_BEFORE_ASSIGN' }); }   // S3：同 estimate，比较用到分值
+        // ⭐ [并发乐观锁·expected_dev_estimated_at] 同 /estimate 端点同款机制（详见该端点 :7982 一带完整
+        //   注释）：调用方可选声明"打开弹窗时看到的现值"，用于探测两个在册开发先后填评估表单时的静默覆盖。
+        //   位置刻意放在 UPDATE 之前、既有状态/受阻/payload/必填/assigned_at 诸闸之后——并发真相优先于
+        //   "值有没有变"；本端点本无同值 no-op 判定（resubmission 全量覆盖，含清空），故此处即"UPDATE 前
+        //   最后一道闸"。键不存在（undefined）→ 整段跳过，旧前端零行为变化。
+        const rawExpectedEstimate = (req.body || {}).expected_dev_estimated_at;
+        if (rawExpectedEstimate !== undefined) {
+          if (rawExpectedEstimate !== null && typeof rawExpectedEstimate !== 'string') {
+            await sysRollback();
+            return res.status(400).json({ error: 'expected_dev_estimated_at 须为字符串或 null（可选，并发乐观锁）', code: 'VALIDATION' });
+          }
+          const curDevEstimatedAt = (row.dev_estimated_at === undefined || row.dev_estimated_at === null) ? null : row.dev_estimated_at;   // 字节级严格等值，同 /estimate
+          if (rawExpectedEstimate !== curDevEstimatedAt) {
+            await sysRollback();
+            return res.status(409).json({ error: '预计完成时间已被他人更新，请刷新后重试', code: 'ESTIMATE_STALE' });
+          }
+        }
         // 乐观锁绑 status='开发中'（W06：actor 未必是 assigned_to，去主次不再绑 assigned_to 条件）；
         //   UPDATE 评估字段 + dev_estimated_at + estimated_effort_days（v1.1 §3.2·C2 新增；resubmission
         //   全量覆盖含清空，同既有 risk 字段"未传即清"语义一致，非部分 PATCH）
+        //   ⭐ 上方 expected_dev_estimated_at 一致时才会走到这一行——两把锁互补：本行的 status 锁防"单据
+        //   状态已被换"，上方的值锁防"**dev_estimated_at** 在同开发中态内被另一在册开发二次覆盖"。⚠️ 值锁只比对
+        //   dev_estimated_at 单字段——resubmission 全量覆盖的其余四个评估字段（结论/需求确认/风险/工期）不在锁内，
+        //   "日期不动只改结论"的并发覆盖不设防（残留缺口登记见任务锚点待追认 P1，Opus 预筛 MED-1 收窄）。
         const upd = await dbRunAsync(
           `UPDATE sys_issues SET feasibility_conclusion = ?, feasibility_requirement_confirm = ?, feasibility_risk = ?,
                   dev_estimated_at = ?, estimated_effort_days = ?, updated_at = datetime('now','localtime')
