@@ -463,8 +463,9 @@ module.exports = (deps) => {
   //     · 受理 3：intake-accept / intake-return / request-tech-consult
   //     · 协调人族 5：assign / reassign / dev-assignees(POST 加人) / dev-assignees/:id/excuse / …/supersede-excuse
   //     · 通知 3：notify-developer / notify-creator（C1 三轮审 MED-1 补挂）/ notify-requester
-  //   ⚠️ **DELETE /dev-assignees/:assigneeId 有意不挂**：它的授权是「协调人 ∨ **本人**」（成员可自移除），
-  //     挂上会把自移除一并挡掉；该端点在 handler 内用 isSysCoordinator 精判非本人的情形。
+  //   ⚠️ **DELETE /dev-assignees/:assigneeId 有意不挂**：它的授权是「绑定对接人/admin ∨ **本人**」（成员可自
+  //     移除），挂上会把自移除一并挡掉；该端点在 handler 内用 isBoundLiaisonEligibleOrAdmin 精判非本人的情形
+  //     （[2026-08-10 注释订正] 原写 isSysCoordinator——C10 已换绑单精判，注释未跟上，如实更正）。
   //   此前"建而未挂"的阶段性说明已作废。
   // ⭐ [C10·裁定2] 粗筛判据从「admin ∨ SYS_INTAKE_LIAISON_IDS[13]」放宽为「admin ∨ role∈候选 allowlist」——
   //   候选池扩大到全 eligible 成员（用 JWT role 同步判，粗筛足够；跨单**绑单精判**在引擎 roleGuard / handler 内
@@ -2530,6 +2531,10 @@ module.exports = (deps) => {
   //       "对接人仅可操作 bug 单"隔离是 bug 流白名单时代的产物。
   //   ⚠️ issueType 参数保留但不再参与判定：6 类消费点（指派族 3 + 附件族 3）的调用签名不动，
   //     避免为一次语义收敛去改 12 处调用点；下一次若确认无人需要该参数，由 C5 末次审一并清理。
+  //   ⭐⭐ [对接人绑单收口 2026-08-10] 消费面**收窄为 2 处读路径**（详情附件可见性 :5877 / 附件下载 :9194，
+  //     均为「[13] 保留 ∨ 绑定本人」增量式）——附件上传/删除两写路径已改 isBoundLiaisonEligibleOrAdmin
+  //     绑单精判，指派族 C10 时已改。本函数自此**仅读路径可见性语义**（与 sysManualNotifyGuard 读分支
+  //     的 isIntakeLiaison 保留同一决策4 口径），新写端点禁止再引用它作授权源。
   function isSysCoordinator(actor, issueType) {
     void issueType;
     return actor.role === 'admin' || isSysIntakeLiaison(actor.id);
@@ -5870,8 +5875,11 @@ module.exports = (deps) => {
       //   示例发布者若同时兼任本单开发（方案 §3 明确允许兼任），会命中 roster 分支，附件照常可见。
       //   187 号审 LOW（采纳）：先判角色再查库——admin/受理人（详情请求的大多数）本就有权，无条件先跑
       //   roster 查询等于给热路径白加一次 DB 往返和一个失败点；短路后语义不变（角色不满足才落到 roster）。
+      //   ⭐ [对接人绑单收口 2026-08-10] 可见性=读路径**增量放行**该单绑定对接人（isBoundLiaisonOrAdmin 同步判·
+      //     不读库·不叠 eligibility——与决策4 读路径宽松口径对称；[13] 保留不收窄）。row 为详情主 SELECT 行，
+      //     含 intake_liaison_id（前端 iss.intake_liaison_id 即出自它）。
       const attActor = sysActor(req);
-      const attIsCoordinator = attActor.role === 'admin' || isSysCoordinator(attActor, row.type);
+      const attIsCoordinator = attActor.role === 'admin' || isSysCoordinator(attActor, row.type) || isBoundLiaisonOrAdmin(attActor, row);
       const attRoster = attIsCoordinator ? null : await sysAttachmentRosterState(id, attActor.id);
       const canSeeAttachmentList = attIsCoordinator || !!(attRoster && (attRoster.active || attRoster.historical));
       const outAttachments = canSeeAttachmentList ? attachments : [];
@@ -9052,19 +9060,23 @@ module.exports = (deps) => {
         sysCleanupOrphanFiles(req, id);
         return res.status(400).json({ error: 'attachment_type 非法（仅 delivery|screenshot|spec）', code: 'INVALID_ATTACHMENT_TYPE' });
       }
-      const row = await dbGetAsync('SELECT id, type, status FROM sys_issues WHERE id = ?', [id]);
+      const row = await dbGetAsync('SELECT id, type, status, intake_liaison_id FROM sys_issues WHERE id = ?', [id]);
       if (!row) { sysCleanupOrphanFiles(req, id); return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' }); }
       // C5（§5.4 前置）：附件写先过 assertKnownIssueStatus——族外/未知 status 直接拒绝（防脏 status 绕过后续族判断）
       assertKnownIssueStatus(row.type, row.status);
       const actor = sysActor(req);
       const isAdmin = actor.role === 'admin';
-      const isCoordinator = isSysCoordinator(actor, row.type);   // 协调人=对接人∪admin（§0），bug 精判已内置于函数
+      // ⭐⭐ [对接人绑单收口 2026-08-10·用户拍板] 上传=**写路径**，协调人段从 isSysCoordinator（admin∨白名单[13]·
+      //   全局任意单）改绑单精判 isBoundLiaisonEligibleOrAdmin（admin ∨ 该单 intake_liaison_id 本人 ∧ eligible·
+      //   fail-closed）——与 C10 指派/换人/通知写路径同一方向（**行为变更**：示例对接人在非名下单不再可传/删附件，
+      //   与其指派权同批收窄口径一致）。SELECT 补 intake_liaison_id 供判据（isBoundLiaisonEligibleOrAdmin 读 row 该列）。
+      const isCoordinator = await isBoundLiaisonEligibleOrAdmin(actor, row);
       const files = Array.isArray(req.files) ? req.files : [];
 
       if (attachmentType === 'spec') {
         // C5（§5.4）：需求材料上传 = 协调人（对接人∨admin）∧ 状态∉SYS_TERMINAL——原仅 admin+非作废两处均按
         //   唯一权威表拓宽/改用终态族（TERMINAL=已上线∪非发布终态，不含待上线，§4.0）。
-        if (!isCoordinator) { sysCleanupOrphanFiles(req, id); return res.status(403).json({ error: '需求材料仅协调人（对接人/admin）可上传', code: 'NOT_AUTHORIZED_FOR_ATTACHMENT' }); }
+        if (!isCoordinator) { sysCleanupOrphanFiles(req, id); return res.status(403).json({ error: '需求材料仅该单对接人或管理员可上传', code: 'NOT_AUTHORIZED_FOR_ATTACHMENT' }); }
         if (SF.isInFamily(row.type, row.status, 'TERMINAL')) { sysCleanupOrphanFiles(req, id); return res.status(409).json({ error: '终态单不可上传需求材料', code: 'INVALID_STATE_FOR_ATTACHMENT' }); }
         if (files.length === 0) { sysCleanupOrphanFiles(req, id); return res.status(400).json({ error: '未收到上传文件（field 名应为 files）', code: 'NO_FILE' }); }
         const supersedeId = parsePositiveId((req.body || {}).supersede_id);   // 可选替换（10-M1 supersede 留痕）
@@ -9138,7 +9150,7 @@ module.exports = (deps) => {
       //   LIAISON_TEST 对 improvement/bug 恒空数组（status-families.js），isInFamily 对这两个 type
       //   恒 false，不影响其既有行为范围，只是给 feature 多开一扇门。
       const roster = await sysAttachmentRosterState(id, actor.id);
-      if (!isCoordinator && !roster.active) { sysCleanupOrphanFiles(req, id); return res.status(403).json({ error: '交付附件仅在册开发/协调人可上传', code: 'NOT_AUTHORIZED_FOR_ATTACHMENT' }); }
+      if (!isCoordinator && !roster.active) { sysCleanupOrphanFiles(req, id); return res.status(403).json({ error: '交付附件仅在册开发/该单对接人/管理员可上传', code: 'NOT_AUTHORIZED_FOR_ATTACHMENT' }); }
       const inDevOrVerify = SF.isInFamily(row.type, row.status, 'DEV') || SF.isInFamily(row.type, row.status, 'VERIFY') || SF.isInFamily(row.type, row.status, 'LIAISON_TEST');
       if (!inDevOrVerify) { sysCleanupOrphanFiles(req, id); return res.status(409).json({ error: '仅开发进行态（开发中/处理中/待验证/待对接测试）可上传交付附件', code: 'INVALID_STATE_FOR_ATTACHMENT' }); }
       if (files.length === 0) { sysCleanupOrphanFiles(req, id); return res.status(400).json({ error: '未收到上传文件（field 名应为 files）', code: 'NO_FILE' }); }
@@ -9178,11 +9190,13 @@ module.exports = (deps) => {
     const attId = parsePositiveId(req.params.attId);
     if (!id || !attId) return res.status(400).json({ error: '无效的 ID', code: 'INVALID_SYS_ISSUE_ID' });
     try {
-      const row = await dbGetAsync('SELECT id, type, status FROM sys_issues WHERE id = ?', [id]);
+      const row = await dbGetAsync('SELECT id, type, status, intake_liaison_id FROM sys_issues WHERE id = ?', [id]);
       if (!row) return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' });
       const actor = sysActor(req);
       const isAdmin = actor.role === 'admin';
-      const isCoordinator = isSysCoordinator(actor, row.type);
+      // ⭐ [对接人绑单收口 2026-08-10] 下载=读路径**增量放行**绑定对接人（[13] 保留·决策4 宽松口径·同详情
+      //   附件列表可见性判据方向，两读端不长出"列表能看见、下载 403"的不一致）。SELECT 补 intake_liaison_id。
+      const isCoordinator = isSysCoordinator(actor, row.type) || isBoundLiaisonOrAdmin(actor, row);
       const roster = await sysAttachmentRosterState(id, actor.id);
       if (!isAdmin && !isCoordinator && !roster.active && !roster.historical) {
         return res.status(403).json({ error: '无权下载此附件', code: 'NOT_AUTHORIZED_TO_VIEW' });
@@ -9222,7 +9236,7 @@ module.exports = (deps) => {
     const attId = parsePositiveId(req.params.attId);
     if (!id || !attId) return res.status(400).json({ error: '无效的 ID', code: 'INVALID_SYS_ISSUE_ID' });
     try {
-      const row = await dbGetAsync('SELECT id, type, status FROM sys_issues WHERE id = ?', [id]);
+      const row = await dbGetAsync('SELECT id, type, status, intake_liaison_id FROM sys_issues WHERE id = ?', [id]);
       if (!row) return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' });
       // C5（§5.4 前置）：附件写先过 assertKnownIssueStatus
       assertKnownIssueStatus(row.type, row.status);
@@ -9233,7 +9247,9 @@ module.exports = (deps) => {
       if (!att) return res.status(404).json({ error: '附件不存在或已失效', code: 'SYS_ATTACHMENT_NOT_FOUND' });
       const actor = sysActor(req);
       const isAdmin = actor.role === 'admin';
-      const isCoordinator = isSysCoordinator(actor, row.type);
+      // ⭐⭐ [对接人绑单收口 2026-08-10·用户拍板] 删除=**写路径**，同上传端点改绑单精判（admin ∨ 该单绑定
+      //   对接人本人 ∧ eligible·fail-closed；**行为变更**：示例对接人在非名下单不再可删附件）。SELECT 补 intake_liaison_id。
+      const isCoordinator = await isBoundLiaisonEligibleOrAdmin(actor, row);
       // §0 line33："历史参与…无任何写权"——优先于"上传者可删"，本次裁定点：历史参与者即便是本人上传也排除
       //   （见完成报告"契约裁定点"清单）。上传者本人若从未进过 dev_assignees（如 admin/协调人上传的 spec），
       //   roster.historical 恒 false，不受本裁定影响。
@@ -13077,7 +13093,11 @@ module.exports = (deps) => {
         const granted = isBoundLiaisonOrAdmin(actor, issue) && (isAdmin || opts.actorEligible === true);
         return granted ? null : { status: 403, body: { error: '仅管理员或该单对接人可发送该通知', code: 'NOT_BOUND_LIAISON' } };
       }
-      return (isAdmin || isIntakeLiaison) ? null : { status: 403, body: { error: '仅管理员/受理人可发送该通知', code: 'NOT_AUTHORIZED_FOR_NOTIFY' } };
+      // ⭐ [对接人绑单收口 2026-08-10·用户拍板] 读路径（notify-read-status）**增量放行**该单绑定对接人本人：
+      //   admin ∨ 候选[13]（决策4 保留·不收窄示例对接人既有可见面）∨ isBoundLiaisonOrAdmin（同步判·不读库；
+      //   读路径不叠 eligibility——与决策4 对 [13] 的宽松口径对称，写路径 enforceBinding 的 fail-closed 收紧不变）。
+      //   动机：C10 后非[13] 对接人能发通知（写路径绑单放行）却查不了自己发的已读——同一角色半边可用。
+      return (isAdmin || isIntakeLiaison || isBoundLiaisonOrAdmin(actor, issue)) ? null : { status: 403, body: { error: '仅管理员/受理人可发送该通知', code: 'NOT_AUTHORIZED_FOR_NOTIFY' } };
     }
     return { status: 400, body: { error: '该类型暂不支持手动通知', code: 'MANUAL_NOTIFY_TYPE_NA' } };   // 未知 type 默认拒绝
   }
@@ -14018,14 +14038,20 @@ module.exports = (deps) => {
     //   这里前置一道**静态角色粗筛**：它只用 JWT 身份 + query 通道，不需要 issue 上下文，因此能放到查库之前，
     //   让"存在"与"不存在"对未授权者一律 403。
     //   ⚠️ 放行面必须与下方 sysManualNotifyGuard / release_executor 分支**逐通道等价**（改一处必同步另一处）：
-    //     dev / creator / requester = admin ∨ 受理人[13]；relay / release_executor / intake = 仅 admin
-    //     （建单优化批 C1：intake 通道镜像 relay/release_executor，同为仅 admin）。
+    //     dev / creator / requester = admin ∨ 受理人[13] ∨ eligible 候选粗筛（[对接人绑单收口 2026-08-10]：
+    //       读路径放行绑定本人后，粗筛须让候选进得来——本层无 issue 上下文判不了绑定，按 C10 requireIntakeLiaison
+    //       「粗筛放宽 + 精判收紧」同款范式用 JWT role 粗筛，绑单精判由下方 guard 读分支承担。
+    //       ⚠️ 防枚举不变量**保持**（verify-sys-role-perm-c1 [M4] 钉住·本次首版实现曾打破被当场跑红抓获）：
+    //       viewer 等非候选角色仍在本层无差别 403；eligible 候选过粗筛后由两道补偿闭合预言机——
+    //       ① !issue 时对非（admin∨[13]）降级 403（不返 404）② guard 403 文案归一为查看措辞，
+    //       两者与"存在但未绑定"的拒绝响应逐字相同，存在性不可区分（见下方 try 块两处补偿注释））；
+    //     relay / release_executor / intake = 仅 admin（建单优化批 C1：intake 通道镜像 relay/release_executor）。
     //   精判（issue.type 门限 / 通道 NA / 状态 / 收件人快照）仍由 issue 加载后的 guard 承担——本层只回答
     //   "这个角色连这个通道都碰不到吗"，不回答"这张单此刻能不能查"。错误码沿用 NOT_AUTHORIZED_FOR_NOTIFY 不变。
     {
       const preActor = sysActor(req);
       const preAdminOnly = (type === 'relay' || type === 'release_executor' || type === 'intake');
-      const prePermitted = preActor.role === 'admin' || (!preAdminOnly && isSysIntakeLiaison(preActor.id));
+      const prePermitted = preActor.role === 'admin' || (!preAdminOnly && (isSysIntakeLiaison(preActor.id) || isRoleIntakeEligible(preActor.role)));
       if (!prePermitted) {
         return res.status(403).json({
           error: preAdminOnly ? '仅管理员可查看该通知已读状态' : '仅管理员/受理人可查看通知已读状态',
@@ -14035,7 +14061,18 @@ module.exports = (deps) => {
     }
     try {
       const issue = await dbGetAsync('SELECT * FROM sys_issues WHERE id = ?', [id]);
-      if (!issue) return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' });
+      if (!issue) {
+        // ⭐⭐ [对接人绑单收口 2026-08-10·防枚举补偿] 粗筛放宽到 eligible 候选后，若对他们如实返 404，
+        //   「存在→403（未绑定）/ 不存在→404」就成了单号预言机——正是 C1 三轮审 MED-1 引入、
+        //   verify-sys-role-perm-c1 [M4] 钉住的不变量（本次跑红当场抓获）。处置：**旧放行面**（admin∨[13]）
+        //   保持 404 不变（既有行为零变化）；**新增放行面**（eligible 候选）一律 403，与其在存量单上被
+        //   guard 读分支拒绝时**同码同文案**（NOT_AUTHORIZED_FOR_NOTIFY），存在性不可区分。
+        const nfActor = sysActor(req);
+        if (!(nfActor.role === 'admin' || isSysIntakeLiaison(nfActor.id))) {
+          return res.status(403).json({ error: '仅管理员/受理人可查看通知已读状态', code: 'NOT_AUTHORIZED_FOR_NOTIFY' });
+        }
+        return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' });
+      }
       // C2a·codex L1：未知 issue.type 统一先拒（400 MANUAL_NOTIFY_TYPE_NA，与发送端点错误码一致；不再用"变更流"文案误标）。
       if (!['bug', 'feature', 'improvement'].includes(issue.type)) {
         return res.status(400).json({ error: '该类型暂不支持通知查已读', code: 'MANUAL_NOTIFY_TYPE_NA' });
@@ -14051,6 +14088,13 @@ module.exports = (deps) => {
         rsAuthErr = (rsActor.role === 'admin') ? null : { status: 403, body: { error: '仅管理员可查看上线开发通知已读状态', code: 'NOT_AUTHORIZED_FOR_NOTIFY' } };
       } else {
         rsAuthErr = sysManualNotifyGuard(issue, rsChannelMap[type], rsActor);
+        // ⭐ [对接人绑单收口 2026-08-10·防枚举补偿②·文案归一] guard 是发送/查已读共用件，其 403 文案带
+        //   「发送」字样——若原样透传，eligible 候选打「存在但未绑定的单」得"可发送该通知"、打「不存在的单」
+        //   得"可查看已读状态"（上方 !issue 分支），**同码不同文案仍是预言机**。此处把 guard 的角色拒绝
+        //   文案归一为查看措辞（仅本读端点，发送端点不受影响），与 !issue 分支逐字相同、不可区分。
+        if (rsAuthErr && rsAuthErr.status === 403 && rsAuthErr.body && rsAuthErr.body.code === 'NOT_AUTHORIZED_FOR_NOTIFY') {
+          rsAuthErr = { status: 403, body: { error: '仅管理员/受理人可查看通知已读状态', code: 'NOT_AUTHORIZED_FOR_NOTIFY' } };
+        }
       }
       if (rsAuthErr) return res.status(rsAuthErr.status).json(rsAuthErr.body);
 

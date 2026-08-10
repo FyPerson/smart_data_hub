@@ -112,10 +112,11 @@ function futureEst(days) {
 
 // ── DB 直接 seed（同 verify-sys-multidev-commits.js 范式，跳过 API 链路直接摆好 roster 场景）──────────
 async function mkIssue(type, status, extra = {}) {
+  // [对接人绑单收口 2026-08-10] extra.liaison=intake_liaison_id（绑定对接人正例场景用；缺省 NULL=未绑定）
   const r = await run(
-    `INSERT INTO sys_issues (type, status, title, system_name, source, created_by, created_by_name, dev_estimated_at, release_assignee_id)
-     VALUES (?, ?, ?, 'BMS', '内部', 1, '管理员', ?, ?)`,
-    [type, status, extra.title || `${type}-${status}-单`, extra.devEstimatedAt || futureEst(30), extra.releaseAssigneeId || null]
+    `INSERT INTO sys_issues (type, status, title, system_name, source, created_by, created_by_name, dev_estimated_at, release_assignee_id, intake_liaison_id)
+     VALUES (?, ?, ?, 'BMS', '内部', 1, '管理员', ?, ?, ?)`,
+    [type, status, extra.title || `${type}-${status}-单`, extra.devEstimatedAt || futureEst(30), extra.releaseAssigneeId || null, extra.liaison || null]
   );
   return r.lastID;
 }
@@ -149,9 +150,12 @@ const dlPath = (id, attId) => `/api/sys-issues/${id}/attachments/${attId}/downlo
 async function main() {
   mod.initSchema();
   await waitReady();
-  await run(`CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT)`);
-  await run(`INSERT INTO users (id, username, display_name, role) VALUES
-    (1,'admin','管理员','admin'),(5,'dev5','开发甲','user'),(6,'dev6','开发乙','user'),(7,'liaison7','对接人柒','user'),(8,'dev8','开发戊','user')`);
+  // [对接人绑单收口 2026-08-10] users 表补 status 列 + 13 号行——附件写路径改 isBoundLiaisonEligibleOrAdmin
+  //   后，绑定正例会走 isIntakeLiaisonEligible 实时读库（SELECT status, role），无该列/无该行会 500/拒。
+  await run(`CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT, status TEXT NOT NULL DEFAULT 'active')`);
+  await run(`INSERT INTO users (id, username, display_name, role, status) VALUES
+    (1,'admin','管理员','admin','active'),(5,'dev5','开发甲','user','active'),(6,'dev6','开发乙','user','active'),
+    (7,'liaison7','对接人柒','user','active'),(8,'dev8','开发戊','user','active'),(13,'wangtaotao','示例对接人','user','active')`);
   await new Promise((resolve) => { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = app.listen(0, () => { port = server.address().port; resolve(); }); });
   ok('readiness ready + HTTP harness 起服务（seed admin/dev5/dev6/liaison7(=SYS_BUG_LIAISON_USER_IDS白名单)/dev8）');
 
@@ -217,25 +221,37 @@ async function main() {
   }
 
   // ══════════════════════════════════════════════════════════════════════
-  // ⭐ 角色权限重构 C1：协调人 = admin ∨ 受理人[13]·**全类型**（原为 bug 对接人[7,13] 且仅 bug）
-  //   本组由"type 精判：bug 能、变更流不能"反转为"全类型都能；而原白名单里的示例发布者(7) 全类型都不能"。
+  // ⭐⭐ [对接人绑单收口 2026-08-10·用户拍板] 附件上传/删除=写路径绑单：判据从「admin∨白名单[13]·全局任意单」
+  //   改 isBoundLiaisonEligibleOrAdmin（admin ∨ 该单 intake_liaison_id 本人 ∧ eligible）。原 [C1] 组
+  //   「受理人(13) 全类型任意单可传/删」断言随之作废——那正是本批要收回的全局写权（**行为变更**，与 C10
+  //   指派/通知写路径同方向）。本组重写为：负例（13 未绑定拒）+ 正例（绑定对接人可操作名下单·含非[13] 候选）。
   // ══════════════════════════════════════════════════════════════════════
   {
-    // ① 受理人(13)：bug 与变更流**都**可上传/删除（全类型放开）
+    // ① 负例：13 在**未绑定**单（intake_liaison_id=NULL）上传 delivery/spec → 403（全局白名单写权已收回）
     for (const [type, st] of [['bug', '处理中'], ['feature', '开发中']]) {
       const id = await mkIssue(type, st);
       let r = await upload(ATT(id), intakeTok, { attachment_type: 'delivery' }, `d-${type}.png`);
-      assert.strictEqual(r.status, 200, `⭐ 协调人(13) 在 ${type} 单上传 delivery 应 200，实际 ${r.status} ${JSON.stringify(r.body)}`);
-      const attId = r.body.attachments[0].id;
-      const del = await call('DELETE', `/api/sys-issues/${id}/attachments/${attId}`, intakeTok);
-      assert.strictEqual(del.status, 200, `⭐ 协调人(13) 在 ${type} 单删除应 200，实际 ${del.status} ${JSON.stringify(del.body)}`);
-      // spec 通道同样放开
+      assert.strictEqual(r.status, 403, `⭐ 示例对接人(13) 在未绑定 ${type} 单上传 delivery 应 403（绑单收口），实际 ${r.status} ${JSON.stringify(r.body)}`);
       r = await upload(ATT(id), intakeTok, { attachment_type: 'spec' }, `s-${type}.pdf`);
-      assert.strictEqual(r.status, 200, `⭐ 协调人(13) 在 ${type} 单上传 spec 应 200，实际 ${r.status} ${JSON.stringify(r.body)}`);
+      assert.strictEqual(r.status, 403, `⭐ 示例对接人(13) 在未绑定 ${type} 单上传 spec 应 403（绑单收口），实际 ${r.status} ${JSON.stringify(r.body)}`);
     }
-    ok('⭐ [C1] 协调人全类型放开：受理人(13) 在 bug 与 feature 单上传/删除 delivery + 上传 spec 均 200（原先仅 bug 可用）');
+    ok('⭐ [绑单收口·负例] 示例对接人(13) 在未绑定单上传 delivery/spec 全 403——白名单身份不再是附件写权来源');
 
-    // ② 示例发布者(7)：C1 后不再是协调人，全类型均拒（他既不在册开发、也不再有协调人身份）
+    // ② 正例：**该单绑定对接人**上传/删除 delivery + 上传 spec 均 200——分别用 13（原白名单成员）与
+    //   dev5（普通 eligible 候选·非白名单）各测一遍，后者正是本批放开的核心行为（非示例对接人的对接人同权）。
+    for (const [uid, tok, who] of [[13, intakeTok, '示例对接人13'], [5, devTok(5), '普通候选dev5']]) {
+      const id = await mkIssue('feature', '开发中', { liaison: uid });
+      let r = await upload(ATT(id), tok, { attachment_type: 'delivery' }, `b-${uid}.png`);
+      assert.strictEqual(r.status, 200, `⭐ 绑定对接人(${who}) 在名下单上传 delivery 应 200，实际 ${r.status} ${JSON.stringify(r.body)}`);
+      const attId = r.body.attachments[0].id;
+      const del = await call('DELETE', `/api/sys-issues/${id}/attachments/${attId}`, tok);
+      assert.strictEqual(del.status, 200, `⭐ 绑定对接人(${who}) 在名下单删除应 200，实际 ${del.status} ${JSON.stringify(del.body)}`);
+      r = await upload(ATT(id), tok, { attachment_type: 'spec' }, `b-${uid}.pdf`);
+      assert.strictEqual(r.status, 200, `⭐ 绑定对接人(${who}) 在名下单上传 spec 应 200，实际 ${r.status} ${JSON.stringify(r.body)}`);
+    }
+    ok('⭐ [绑单收口·正例] 绑定对接人在名下单上传/删除 delivery + 上传 spec 均 200（13 与非白名单 dev5 同权——非示例对接人对接人可用是本批核心行为）');
+
+    // ③ 示例发布者(7)：未绑定则全类型均拒（C1 失权负例保留，判据换绑单后依然成立——他不在任何单的绑定位上）
     for (const [type, st] of [['bug', '处理中'], ['feature', '开发中']]) {
       const id = await mkIssue(type, st);
       let r = await upload(ATT(id), liaisonTok, { attachment_type: 'delivery' }, `x-${type}.png`);
@@ -243,7 +259,7 @@ async function main() {
       r = await upload(ATT(id), liaisonTok, { attachment_type: 'spec' }, `y-${type}.pdf`);
       assert.strictEqual(r.status, 403, `⭐ 示例发布者(7) 在 ${type} 单上传 spec 应 403，实际 ${r.status} ${JSON.stringify(r.body)}`);
     }
-    ok('⭐ [C1] 技术负责人无附件权：示例发布者(7) 在 bug 与 feature 单上传 delivery/spec 全部 403（方案 v1.5 §3「不看附件」）');
+    ok('⭐ [C1 保留] 技术负责人无附件权：示例发布者(7) 未绑定单上传 delivery/spec 全部 403（方案 v1.5 §3「不看附件」）');
   }
 
   // ══════════════════════════════════════════════════════════════════════

@@ -180,11 +180,13 @@
         .si-help { display: inline-flex; align-items: center; justify-content: center; width: 15px; height: 15px; margin-left: 4px; border-radius: 50%; background: #e2e8f0; color: #64748b; font-size: 11px; font-weight: 700; cursor: help; vertical-align: middle; }
         .si-help:hover { background: #cbd5e1; color: #334155; }
         .si-help:focus { outline: 2px solid #93c5fd; outline-offset: 1px; }
-        /* [C8 风险/优先级双显·方案 v1.7 §9.2] 列表页「优先级/风险」列的上下双行容器。
-           不加新列是本次硬约束（列表已 20+ 列，加列必触发横滚），故复用优先级列做纵向叠放。
-           下行用 11px 小字 + 2px 上间距，视觉上明确从属于上行徽章而非并列信息。 */
-        .si-pri-risk { display: inline-block; line-height: 1.25; }
-        .si-risk-line { margin-top: 2px; }
+        /* [C8 风险/优先级双显·方案 v1.7 §9.2 → 2026-08-10 用户拍板改左右并排] 列表页「优先级/风险」列容器。
+           不加新列仍是硬约束（复用优先级列）；原上下叠放改 inline-flex 左右并排（左=优先级徽章·右=风险
+           等级 11px 小字）。.si-risk-line 包裹 div 保留（守卫锚定的结构钩子），仅不再承担换行/上间距职责。
+           flex-wrap（codex M2 采纳）：risk_level 值域正常恒 2 字（DDL CHECK 一级/二级/三级）放得下一行；
+           万一脏长值（生产列经 ALTER 补列，CHECK 是否在产有先例存疑，v1.139 曾抓过 ALTER 漏 CHECK）则
+           折行回双行优雅降级，不把「优先级/风险」列撑宽（不加列/防横滚是 C8 硬约束）。 */
+        .si-pri-risk { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; line-height: 1.25; }
         .si-risk-sub { font-size: 11px; color: #475569; cursor: help; }
         .si-risk-sub.si-muted { cursor: default; }
 
@@ -621,18 +623,19 @@
                         <tr>
                             <th class="u-sortable" data-sort-by="id">ID<span class="u-sort-icon">⇅</span></th>
                             <th class="u-sortable" data-sort-by="type">类型<span class="u-sort-icon">⇅</span></th>
-                            <!-- [C8 风险/优先级双显·方案 v1.7 §9.2] 本列改上下双行（上=优先级徽章·下=风险等级小字），
-                                 故列头改「优先级/风险」。data-sort-by 仍是 priority：**排序只按优先级**，下行不参与
-                                 （风险等级是另一个维度，混排会让"点一次列头"的语义含糊；且不加新列是本次的硬约束
-                                 ——列表已有 20+ 列，加列必然触发横滚）。 -->
+                            <!-- [C8 风险/优先级双显·方案 v1.7 §9.2] 本列优先级徽章与风险等级小字同格显示（C8 原为
+                                 上下双行，2026-08-10 用户拍板改左右并排，见 .si-pri-risk 样式注释），故列头「优先级/风险」。
+                                 data-sort-by 仍是 priority：**排序只按优先级**，风险小字不参与
+                                 （风险等级是另一个维度，混排会让"点一次列头"的语义含糊；且不加新列是硬约束
+                                 ——列表已有 16 列，加列必然触发横滚）。 -->
                             <th class="u-sortable" data-sort-by="priority">优先级/风险<span class="u-sort-icon">⇅</span></th>
                             <th class="u-sortable" data-sort-by="status">状态<span class="u-sort-icon">⇅</span></th>
                             <th class="u-sortable" data-sort-by="title">标题<span class="u-sort-icon">⇅</span></th>
                             <!-- S1（时间格式统一 20260804·锚点 D1/D2）：表头「系统 · 模块」→「系统」，行内不再拼接
-                                 module_name。理由=该字段建单时本就选填，未填时恒占一个 ` · —` 的宽度却无信息量，
-                                 填了也只是重复详情里已有的信息；且 [T2] 盯 1920 不横滚，省下的宽度是净收益。
-                                 **只收窄列表页显示**——详情抽屉 kv、两个建单入口与编辑表单的模块字段全部保留
-                                 （D2：存量填了的要看得见，删字段不可逆）。 -->
+                                 module_name（未填恒占 ` · —` 宽度无信息量）。[2026-08-10 用户拍板] module_name 以
+                                 下行小字回归行内（siSystemCellHtml 双行 cell，参考需求方列范式，未填占位「—」、
+                                 超 4 字截断+title），表头文案不变、排序仍只绑 system_name（模块子行不参与排序键，
+                                 同需求方列部门子行口径）。 -->
                             <th class="u-sortable" data-sort-by="system_name">系统<span class="u-sort-icon">⇅</span></th>
                             <!-- F3（详情页体验优化批）：排序键改 dev_roster_sort（与显示同源，见 SI_SORT_FIELD_TYPES
                                  该键处注释 + siDevRosterSortValue 定义处注释）——旧键 assigned_to_name 是单人字段，
@@ -827,17 +830,19 @@
     //     英文标识让人发现漏改，也不静默显示成空白或错误分类。
     const SI_ONLINE_SOURCE_LABEL = { release_publish: '批次发布', no_commit_acceptance: '免上线直翻', unknown_legacy: '历史存量' };
 
-    // [C8] 列表页「优先级/风险」单元格：上行=优先级徽章（.u-pri 共享层，与改造前逐字相同），
-    //   下行=风险等级小字。三种下行形态：
+    // [C8] 列表页「优先级/风险」单元格：左=优先级徽章（.u-pri 共享层，与改造前逐字相同），
+    //   右=风险等级小字（C8 原为上下双行，2026-08-10 用户拍板改左右并排——纯 CSS 换排布，
+    //   HTML 结构与 si-risk-line 类名保留不动，守卫锚定见 verify-sys-release-panel-static §⑥）。
+    //   风险小字三种形态：
     //     · bug：**留空**——bug 单结构上没有风险等级维度（受理门只对 feature/improvement 判定
     //       risk_level，bug 恒 NULL，见 index.js case 'intake_accept'），显示"未定级"会把"不适用"
     //       误说成"该定没定"。与详情页 :1748 kv 的既有 type 门控口径一致。
     //     · feature/improvement 已定级：显示等级文本（title 挂三级口径，鼠标悬浮即可看判定依据）。
     //     · feature/improvement 未定级：灰字「未定级」——与详情页 kv 的 `si-muted 未定级` 逐字同口径。
-    //   下行不参与排序（列头 data-sort-by 仍为 priority）。
+    //   风险小字不参与排序（列头 data-sort-by 仍为 priority）。
     //   导出口径（297-L2）：**本页当前无导出功能**（全文 grep `siExport`/`exportToCsv`/`downloadCsv` 零命中），
     //     故本次没有导出列头要同步。将来若加导出，风险等级应作为**独立列**导出而不是拼进优先级列
-    //     ——双行叠放是列表页"不加列"约束下的视觉妥协，不是数据模型；导出无横滚约束，没有理由继承它。
+    //     ——同格并显是列表页"不加列"约束下的视觉妥协，不是数据模型；导出无横滚约束，没有理由继承它。
     //     bug 行的风险展示值为**空串**（不是"未定级"），导出时同样应落空而非占位文本。
     function siPriRiskCellHtml(i) {
         const pri = `<span class="u-pri ${siPriClass(i.priority)}">${esc(i.priority)}</span>`;
@@ -847,6 +852,26 @@
             ? `<span class="si-risk-sub" title="${SI_RISK_LEVEL_HELP_TEXT}">${esc(i.risk_level)}</span>`
             : `<span class="si-risk-sub si-muted">未定级</span>`;
         return `<div class="si-pri-risk">${pri}<div class="si-risk-line">${riskText}</div></div>`;
+    }
+
+    // [2026-08-10 用户拍板] 列表页「系统」单元格改双行：上=system_name，下=module_name 小字——参考
+    //   需求方列双行范式（同款 si-muted + 11px 内联样式）。与需求方列"部门空则不渲染第二行"不同，
+    //   模块未填**占位「—」**（用户点名要占位；同页空值占位符统一用全角 —，见预计完成/期望完成列）。
+    //   模块名超 4 字截前 4 字 + '...'，原生 title 悬停看全名（对齐 commit 列/优先级列纯 title 范式）；
+    //   截断按码点计（Array.from），防 BMP 外字符被 slice 劈成半个代理对。trim 后判空同 codex 259 L-1
+    //   渲染端兜底口径（纯空白串不该渲染成"看着有值实则空白"）。
+    //   注：S1（时间格式统一 20260804·D1）曾把列表行的「 · module_name」拼接删掉，本次以下行小字形态
+    //   回归——S1 革掉的是横向拼接占宽（未填恒占 ` · —` 宽度），下行形态不加宽列，不与 S1 理由冲突。
+    function siSystemCellHtml(i) {
+        const mod = (i.module_name || '').trim();
+        let sub = '—';
+        if (mod) {
+            const chars = Array.from(mod);
+            sub = chars.length > 4
+                ? `<span title="${esc(mod)}" style="cursor:help">${esc(chars.slice(0, 4).join(''))}...</span>`
+                : esc(mod);
+        }
+        return `<div>${esc(i.system_name)}</div><div class="si-muted" style="font-size:11px;">${sub}</div>`;
     }
 
     // 状态 → CSS 语义 key（避免中文类名；含 config 未来态前向兼容）
@@ -920,9 +945,26 @@
         'intake_return', 'change_intake_mode', 'request_tech_consult', 'edit_in_revision', 'set_scheduled_start']);   // schedule 退场（动作已从 meta.typeFlows 移除·前端不再渲染排期按钮）
     // ── 受理排期改造 C7：受理人/技术负责人白名单（前端镜像后端·真闸在后端 requireIntakeLiaison/roleGuard/isSysTechLead）──
     //   ⚠️ 三处同步：后端 index.js SYS_INTAKE_LIAISON_IDS[13]/SYS_TECH_LEAD_IDS[7] + 本常量 + verify（卡字面量一致防漂移）。
-    const SI_INTAKE_LIAISON_IDS = [13];   // 示例对接人：受理动作（intake_accept/intake_return/request_tech_consult）
+    //   ⭐⭐ [对接人绑单收口 2026-08-10·用户拍板] isSiIntakeLiaison([13]) 的语义**收窄为两类残留**：
+    //     ① release 级入口/写权（上线单管理入口/排班表写/批次执行摘要——P6 裁定保持窄集合，批次含多单无绑单可判）
+    //     ② 读路径可见性的增量保留（通知区可见/查已读——后端决策4 不收窄，[13] 保留 + 新增绑定本人）
+    //   per-issue **操作权**显隐一律改走 isSiBoundLiaison（下方）——C10（v1.141）后端已绑单化（引擎 isBoundLiaison/
+    //   sysManualNotifyGuard(enforceBinding)/isBoundLiaisonEligibleOrAdmin），前端显隐一直停在白名单[13]，
+    //   其他 eligible 成员被绑为对接人后按钮不渲染（后端能过、前端看不见）——本次对齐。
+    const SI_INTAKE_LIAISON_IDS = [13];   // 示例对接人：release 级窄集合 + 读路径可见性保留（per-issue 操作权已改绑单，见上）
     const SI_TECH_LEAD_IDS = [7];         // 示例发布者：技术负责人（request_tech_consult 下拉候选 + 被通知）
     function isSiIntakeLiaison(uid) { return Number(uid) > 0 && SI_INTAKE_LIAISON_IDS.includes(Number(uid)); }
+    // ⭐ [对接人绑单收口 2026-08-10] per-issue 绑单判据：本单绑定对接人本人。前端**不判 eligibility**（active∧
+    //   role∈候选——那要读库，UI 镜像非授权源，真闸在后端叠加 fail-closed eligibility，见 C10-fix5）。
+    function isSiBoundLiaison(iss) {
+        return !!(currentUser && iss && iss.intake_liaison_id != null
+            && Number(iss.intake_liaison_id) === Number(currentUser.id) && Number(currentUser.id) > 0);
+    }
+    // 空单认领镜像（引擎 isUnboundAcceptClaim：intake_accept ∧ 无绑定对接人 ∧ eligible——任一候选可受理存量空单；
+    //   前端用 JWT role 粗筛镜像，与后端 INTAKE_LIAISON_ELIGIBLE_ROLES 同两值）。
+    //   ⚠️ [codex 332 L2·登记接受] 仅 role 粗筛、不镜像 active——JWT 不含 status，被停用用户持旧 token 会看到
+    //   空单受理按钮（点击被后端 eligibility fail-closed 403）。生产存量空单=0（C10 时已核），死按钮面≈0，接受。
+    function isSiEligibleLiaisonRole() { return !!(currentUser && ['user', 'publisher'].includes(currentUser.role)); }
     // 执行人入口批（2026-07-31 用户拍板·codex 审 MED-1 收口后简化）：「前往上线单」按钮判权=数据即权限——
     //   后端详情端点只对 admin ∨ 对接人 ∨ 本批次执行人下发 release_brief（与 GET /sys-releases/:id 放行集
     //   同源，见 index.js 该响应处注释），前端不复算三分支，brief 非空即有权。不用 iss.release_assignee_id
@@ -1704,8 +1746,9 @@
             const reqNameTrimmed = (i.requester_name || '').trim();
             const reqDeptTrimmed = (i.requester_dept || '').trim();
             // S1（时间格式统一 20260804·D1/D2）：「系统」列原为 system_name + si-muted 的 ` · module_name||'—'` 拼接，
-            //   本次去掉后半段，只留 system_name。module_name 后端照常返回、详情抽屉 kv 与建单/编辑表单照常读写，
-            //   仅列表行不显示（D2：删字段不可逆，存量填了的要看得见）。
+            //   S1 去掉后半段只留 system_name；[2026-08-10 用户拍板] module_name 以**下行小字**回归列表
+            //   （siSystemCellHtml：上=系统名·下=模块名，未填占位「—」，超 4 字截断+title 悬停，
+            //   参考需求方列双行范式）——形态与 S1 革掉的横向拼接不同，不与其占宽理由冲突。
             // ⚠️ 本注释刻意写在模板字符串**外**（本次落笔时先写进了模板串里，随即自查纠正）：
             //   HTML 注释拦不住 JS 模板插值——`${...}` 照样求值，结果进入最终 HTML 字符串。
             return `<tr onclick="siOpenDrawer(${i.id})">
@@ -1714,7 +1757,7 @@
                 <td>${siPriRiskCellHtml(i)}</td>
                 <td><span class="u-status-badge si-s-${siStatusClass(i.status)}">${esc(siStatusDisplay(i.status))}</span></td>
                 <td>${esc(i.title)}${lineage}${flags}</td>
-                <td>${esc(i.system_name)}</td>
+                <td>${siSystemCellHtml(i)}</td>
                 <td>${siDevRosterCellHtml(i)}</td>
                 <td>${esc(i.created_by_name || '—')}</td>
                 <!-- S2 实测定标：需求方/需求部门合并单列双行 cell（第一行姓名、第二行小号 muted 部门），
@@ -2171,7 +2214,8 @@
         //   既有行如 developer/creator/requester 对在册开发仍有可见价值），不是因为它也踩了 D19 那个坑。
         //   加宽后其余既有行（intake/dev/creator/requester）按钮仍各自受 canOperate* 独立门控（admin∨
         //   受理人），不因本次加宽而多出操作权，只是多了"看得见"。
-        const canSeeNotify = isAdmin() || (currentUser && isSiIntakeLiaison(currentUser.id))
+        // [对接人绑单收口 2026-08-10] 可见性=读路径：候选[13] 保留（决策4 不收窄）+ 增量放行本单绑定对接人
+        const canSeeNotify = isAdmin() || (currentUser && isSiIntakeLiaison(currentUser.id)) || isSiBoundLiaison(iss)
             || (iss.type === 'bug' && currentUser && (isSiBugLiaison(currentUser.id) || (Number(iss.assigned_to) === Number(currentUser.id) && currentUser.id > 0) || (siCaps && siCaps.isRosterMember)))
             || ((iss.type === 'feature' || iss.type === 'improvement') && currentUser && (siCaps && siCaps.isRosterMember));
         const notify = canSeeNotify ? siRenderNotify(iss, r.data.dev_assignees) : '';
@@ -2523,12 +2567,13 @@
     //   前端这份拷贝没跟上，导致受理人在变更流单上看不到「开脱/恢复」「管理开发成员」按钮——不是没权限，
     //   是前端没显示（点了会 200，因为压根显示不出来）。
     function siComputeCaps(iss, devAssignees, devCommits) {
-        // ⚠️ iss.type 不再参与 isCoordinator 判断（全类型统一），但 iss 本身仍用于下方 inDevFamily 等——
-        //   与后端 isSysCoordinator(actor, issueType) 同款处理：形参保留、issueType 不参与判断。
+        // ⭐ [对接人绑单收口 2026-08-10] isCoordinator（→canCoordinateMember=开脱/恢复/管理成员按钮，**写路径**）
+        //   由「admin∨白名单[13]」改绑单镜像「admin∨本单绑定对接人」——后端 dev-assignees 族 C10 起已是
+        //   isBoundLiaisonEligibleOrAdmin，旧判据会给示例对接人在非名下单渲染死按钮（点击 403 NOT_BOUND_LIAISON）。
         const uid = currentUser ? Number(currentUser.id) : null;
         const list = devAssignees || [];
         const myRow = (uid && uid > 0) ? (list.find(d => Number(d.user_id) === uid) || null) : null;
-        const isCoordinator = isAdmin() || !!(currentUser && isSiIntakeLiaison(currentUser.id));
+        const isCoordinator = isAdmin() || isSiBoundLiaison(iss);
         const inDevFamily = SI_DEV_FAMILY_STATUSES.includes(iss.status);
         const inDevOrVerifyFamily = SI_ATT_DEV_OR_VERIFY_STATUSES.includes(iss.status);
         const hasMyCommitRow = !!(uid && (devCommits || []).some(c => Number(c.dev_user_id) === uid));
@@ -2788,13 +2833,12 @@
         const devAssignees = data.dev_assignees || [];
         // C5（§5.4）：在册 = 当前用户出现在（后端已过滤 removed_at IS NULL 的）dev_assignees 列表。
         const isOwnerDev = !!(currentUser && devAssignees.some(d => Number(d.user_id) === currentUser.id));
-        // ⭐ 角色权限重构 C4（方案 §4-C4 残余核实·2026-07-27）：协调人=受理人∨admin（全类型），与后端
-        //   isSysCoordinator（routes/sys-iteration/index.js，spec/delivery/screenshot 三处附件端点在用）
-        //   同构（行号会随改动漂移，故不在此列具体行号）。原「type==='bug' 且
-        //   isSiBugLiaison」是 C1 前遗留——C1 已把后端附件授权改成全类型 admin∨isSysIntakeLiaison，
-        //   前端这份拷贝没跟上，导致受理人在变更流单上传/删附件按钮不显示（isSiBugLiaison 常量仍保留，
-        //   服务另一处正交语义——path B relay 收件人，见文件顶部定义处注释）。
-        const isCoordinator = isAdmin() || !!(currentUser && isSiIntakeLiaison(currentUser.id));
+        // ⭐ [对接人绑单收口 2026-08-10] isCoordinator（→canUpload/canDel，附件**写路径**按钮）改绑单镜像
+        //   「admin∨本单绑定对接人」——后端附件上传/删除端点同批从 isSysCoordinator（admin∨白名单[13]）改
+        //   isBoundLiaisonEligibleOrAdmin（写路径绑单，与 C10 指派/通知同一方向）。附件**可见性/下载**是读路径，
+        //   后端保留 [13] 增量（决策4 口径），由 DTO 裁剪决定，前端不复算。（历史沿革：C4 残余核实时曾从
+        //   「type==='bug' 且 isSiBugLiaison」修到全类型 [13]；isSiBugLiaison 常量仍服务 path B relay 收件人正交语义。）
+        const isCoordinator = isAdmin() || isSiBoundLiaison(iss);
         return { iss, isOwnerDev, isCoordinator };
     }
     // 上传按钮 HTML（弹窗式·对齐数据协作 submitDeliveryModal）。canUpload=false 时不出。
@@ -3225,11 +3269,11 @@
         if (!iss.tech_lead_id) return '';   // codex C7 LOW-3：行只看 tech_lead_id（已发起即显状态）；重发另 gate request_event_id
         const label = `技术负责人 ${esc(iss.tech_lead_name || ('#' + iss.tech_lead_id))}`;
         const uid = currentUser && currentUser.id;
-        // 193 复审 H1 收口：首发与重发**同权**（admin∨受理人∨建单人·与后端 resend-tech-consult 既有三方
-        //   逐字同源）。原"首发仅 admin/受理人"是前端注释虚构的规则（无用户拍板依据），且实践中建单人≡admin
-        //   （建单 requireAdmin）——两个显隐集不一致只会制造"建单人被 canSendFirst 拒又落进 canResend"的
-        //   自相矛盾（193 号审抓的正是这个），统一后矛盾消除。后端恒为授权权威，前端仅显隐。
-        const canSend = isAdmin() || isSiIntakeLiaison(uid) || (Number(iss.created_by) === Number(uid) && Number(uid) > 0);
+        // ⭐ [对接人绑单收口 2026-08-10] 与后端 /resend-tech-consult 现役授权逐字同源=**admin∨本单绑定对接人**
+        //   （C10-fix M2 收紧：原「admin∨白名单[13]∨建单人」三方收敛，created_by 分支已随收紧移除——旧前端
+        //   还挂着 [13]+建单人两个死分支：示例对接人在非名下单/建单人点击均 403 NOT_BOUND_LIAISON）。
+        //   （历史沿革：193 复审 H1 时曾统一为三方同权，C10-fix M2 已在后端推翻该口径，本次前端跟上。）
+        const canSend = isAdmin() || isSiBoundLiaison(iss);
         const hasComment = siHasTechLeadComment(iss);
         let btns = '';
         // 发送/重发须有 request_event_id（正常与 tech_lead_id 原子同设·防脏数据/裁剪导致无版本锚点时发不出）
@@ -3276,14 +3320,17 @@
         //   权限=admin∨受理人（**2026-07-28 修正过期镜像**：C1 起后端 sysManualNotifyGuard 三通道
         //   全类型=admin∨受理人，前端此处一直停在"仅 admin"——受理人缺合法按钮·写读不同源）。
         if (iss.type === 'feature' || iss.type === 'improvement') {
-            const canOperate = isAdminUser || (currentUser && isSiIntakeLiaison(uid));   // 镜像后端三通道
+            // ⭐ [对接人绑单收口 2026-08-10] 发送（写路径）镜像 sysManualNotifyGuard(enforceBinding)=admin∨绑定本人；
+            //   查已读（读路径）镜像 guard 读分支=admin∨候选[13]（决策4 保留）∨绑定本人（本批增量）——两口径自此分离。
+            const canOperate = isAdminUser || isSiBoundLiaison(iss);
+            const canQueryReadChange = isAdminUser || (currentUser && isSiIntakeLiaison(uid)) || isSiBoundLiaison(iss);
             return `<div class="u-detail-section"><h3>钉钉通知（手动触发）</h3>
                 ${siRenderIntakeNotifyRow(iss, isAdminUser, isAdminUser)}
                 ${siRenderTechLeadNotifyRow(iss)}
-                ${siRenderDevNotifyRows(iss, devAssignees || [], canOperate, canOperate)}
+                ${siRenderDevNotifyRows(iss, devAssignees || [], canOperate, canQueryReadChange)}
                 ${siRenderLiaisonTestNotifyRow(iss)}
-                ${siRenderCreatorNotifyRow(iss, canOperate, canOperate)}
-                ${siRenderRequesterNotifyRow(iss, canOperate, canOperate)}
+                ${siRenderCreatorNotifyRow(iss, canOperate, canQueryReadChange)}
+                ${siRenderRequesterNotifyRow(iss, canOperate, canQueryReadChange)}
                 <div class="u-nt-muted" style="font-size:11px;margin-top:6px">变更流通知均<b>手动触发</b>——指派/改派后在此点「发送通知」；「查已读」查询钉钉已读回执。<br>
                     通知行显示的时间与状态是<b>最近一次发送</b>的记录；若期间发生过改派/打回，旧「已通知」不代表已就当前动作重新通知，请按需重发。</div>
             </div>`;
@@ -3296,16 +3343,19 @@
         //   ⭐ 角色权限重构 C1：通知权由「bug 对接人白名单[7,13]」收敛为「admin ∨ 受理人[13]」，
         //     且 developer/creator/requester 三通道**全类型统一**（后端 sysManualNotifyGuard 已删"变更流仅 admin"特判）。
         //     示例发布者[7] 随之在前端也看不到这些按钮——他转纯技术负责人。
-        const isIntakeLiaisonForNotify = !!(currentUser && isSiIntakeLiaison(uid));
-        const canOperateDev = isAdminUser || isIntakeLiaisonForNotify;          // notify-developer: requireIntakeLiaison
+        // ⭐ [对接人绑单收口 2026-08-10] 发送（写路径）镜像 sysManualNotifyGuard(enforceBinding)=admin∨本单绑定
+        //   对接人（C10 决策2·白名单[13] 在非名下单上点击本就 403=死按钮，本次一并消除）；查已读（读路径）
+        //   =admin∨候选[13]（决策4 保留）∨绑定本人（本批增量）。
+        const isBoundLiaisonForNotify = isSiBoundLiaison(iss);
+        const canOperateDev = isAdminUser || isBoundLiaisonForNotify;           // notify-developer: enforceBinding 绑单
         const canOperateRelay = isAdminUser;                                     // notify-relay: 仍仅 admin（该通道随 path B 退场·不扩权）
-        const canOperateCreator = isAdminUser || isIntakeLiaisonForNotify;      // notify-creator: sysManualNotifyGuard(admin∨受理人)
-        const canOperateRequester = isAdminUser || isIntakeLiaisonForNotify;    // notify-requester: requireIntakeLiaison
+        const canOperateCreator = isAdminUser || isBoundLiaisonForNotify;       // notify-creator: sysManualNotifyGuard(enforceBinding)
+        const canOperateRequester = isAdminUser || isBoundLiaisonForNotify;     // notify-requester: enforceBinding 绑单
         // ⚠️ 查已读必须**逐通道**镜像后端（codex C1 审 HIGH-1）：后端 notify-read-status 对 relay 走的是
-        //   admin-only 分支，只有 dev/creator/requester 三通道是 admin∨受理人。用一个全局 canQueryRead 会让
-        //   受理人在 relay 行看到「查已读」按钮，点击必 403 —— 死按钮。（release_executor 行 2026-07-30 起转
-        //   纯只读展示无任何按钮，不再参与本组判定。）
-        const canQueryRead = isAdminUser || isIntakeLiaisonForNotify;           // dev / creator / requester 三通道
+        //   admin-only 分支，只有 dev/creator/requester 三通道是 admin∨候选[13]∨绑定本人（读路径增量，同上）。
+        //   用一个全局 canQueryRead 会让受理人在 relay 行看到「查已读」按钮，点击必 403 —— 死按钮。
+        //   （release_executor 行 2026-07-30 起转纯只读展示无任何按钮，不再参与本组判定。）
+        const canQueryRead = isAdminUser || (currentUser && isSiIntakeLiaison(uid)) || isBoundLiaisonForNotify;   // dev / creator / requester 三通道
         const canQueryReadAdminOnly = isAdminUser;                              // relay 通道
 
         return `<div class="u-detail-section"><h3>钉钉通知（独立·手动触发）</h3>
@@ -3357,13 +3407,14 @@
         // 变量名沿用（下方 gate 提示/chatBtn 既有引用），语义已升级为"在册成员"而非"单一代表"。
         const isRosterMember = !!(siCaps && siCaps.isRosterMember);
         const isOwnerDev = isRosterMember;
-        // ⭐ 角色权限重构 C1：协调人动作（assign/reassign）的前端门由「bug 对接人白名单 ∧ type=bug」
-        //   改为「受理人[13] ∧ 全类型」——与后端 requireIntakeLiaison + roleGuard='intake_liaison' 同源。
-        //   示例发布者[7] 随之在前端也看不到这两个按钮（他转纯技术负责人）。
-        //   ⚠️ isSiBugLiaison 常量保留未删：它还服务 path B relay 收件人语义（该白名单是"通知发给谁"，
-        //     与操作权正交）；C1 只切操作权这一条线。
-        // 受理排期改造 C7：受理人 / 建单人身份（前端权限门·镜像后端 §5.3）
-        const isIntakeLiaisonUser = !!(currentUser && isSiIntakeLiaison(currentUser.id));
+        // ⭐⭐ [对接人绑单收口 2026-08-10·用户拍板] 操作权身份从「受理人白名单[13]」改**本单绑定对接人**——
+        //   与后端 C10 绑单精判同源（引擎 isBoundLiaison / assign·reassign handler isBoundLiaisonEligibleOrAdmin）。
+        //   旧判据两面都错：非[13] 的绑定对接人看不到按钮（后端能过·前端不渲染），示例对接人在非名下单上
+        //   看得到按钮（点击 403 NOT_BOUND_LIAISON=死按钮）。
+        //   （历史沿革：C1 曾从「bug 白名单∧type=bug」改「[13]∧全类型」；isSiBugLiaison 常量仍服务
+        //     path B relay 收件人正交语义，与操作权无关。）
+        // 受理排期改造 C7：绑定对接人 / 建单人身份（前端权限门·镜像后端 §5.3）
+        const isBoundLiaisonUser = isSiBoundLiaison(iss);
         const isCreatorUser = !!(currentUser && Number(iss.created_by) === Number(currentUser.id) && Number(currentUser.id) > 0);
         // C-orch 上线编排（待上线态双角色按钮 + gate）已于 2026-07-07 样式统一拆到独立区块 siRenderReleaseOrchBlock，
         //   本操作区不再涉及 release_assignee，故原 isReleaseExecutor 声明一并移除。
@@ -3392,9 +3443,9 @@
             // ⭐ C1 协调人放行契约：受理人可见动作 = action∈{assign,reassign}（**全类型**·不再限 type='bug'）
             //   （动作名硬编码在此处，不依赖 flows 配置——将来加新动作/改 flows 也不会扩大放行范围）
             //   ∧ 状态由共享 hit(from 命中，见上方) 收窄。
-            //   ⚠️ 前端是 UI 镜像**非授权源**：真闸在后端 requireIntakeLiaison + roleGuard='intake_liaison'
-            //     + handler 的 isSysCoordinator 精判；即便前端误显，点击也会被后端 403。
-            const liaisonAction = isIntakeLiaisonUser && (a === 'assign' || a === 'reassign');
+            //   ⚠️ 前端是 UI 镜像**非授权源**：真闸在后端 requireIntakeLiaison 粗筛 + handler 的
+            //     isBoundLiaisonEligibleOrAdmin 绑单精判；即便前端误显，点击也会被后端 403。
+            const liaisonAction = isBoundLiaisonUser && (a === 'assign' || a === 'reassign');
             if (devAction) {
                 // submit 专属再叠 canSubmit（本人 dev_status=pending 逐人判定）——多开发场景下本人已提交但
                 // 其他成员未完成时，主状态仍留在 SYS_DEV，仅按族状态判会让已提交成员继续看到「提交」按钮，
@@ -3413,7 +3464,12 @@
                 else if (!isRosterMember) continue;
             }
             // 受理排期改造 C7：受理门动作前端权限门（镜像后端 §5.3·前端非授权源·点击被后端 403 兜底）
-            else if (SI_INTAKE_LIAISON_ACTIONS.has(a)) { if (!(isAdminUser || isIntakeLiaisonUser)) continue; }   // intake_accept/return/request_tech_consult = admin∨受理人
+            // [对接人绑单收口 2026-08-10] admin∨绑定本人；另镜像引擎 isUnboundAcceptClaim——存量空单（无绑定
+            //   对接人）的 intake_accept 对任一 eligible 候选放行（受理即认领/代管，C10 P7-A）。
+            else if (SI_INTAKE_LIAISON_ACTIONS.has(a)) {
+                const unboundClaim = a === 'intake_accept' && iss.intake_liaison_id == null && isSiEligibleLiaisonRole();
+                if (!(isAdminUser || isBoundLiaisonUser || unboundClaim)) continue;
+            }
             else if (SI_CREATOR_ACTIONS.has(a)) { if (!(isAdminUser || isCreatorUser)) continue; }               // resubmit_intake/edit_in_revision = admin∨建单人
             else if (!isAdminUser && !liaisonAction) continue;   // change_intake_mode + 其余 admin 动作 = 仅 admin
 
@@ -3491,7 +3547,7 @@
             const isTechLeadForThisGate = !!(currentUser && isSiTechLead(currentUser.id) && Number(iss.tech_lead_id) === Number(currentUser.id));
             if (isTechLeadForThisGate && !hasTechLeadComment) {
                 gate = `<div class="si-gate-hint">💬 本单已就你发起技术负责人沟通，请在下方「回复评估意见」提交你的最终判断（一条不可变）。</div>`;
-            } else if (isAdminUser || isIntakeLiaisonUser) {
+            } else if (isAdminUser || isBoundLiaisonUser || (iss.intake_liaison_id == null && isSiEligibleLiaisonRole())) {
                 const rejectHint = iss.type === 'bug' ? '「拒绝」写明原因' : '「拒绝」（须已有技术负责人评估意见，原因必填）';
                 gate = `<div class="si-gate-hint">📥 本单待受理：请判断需求合理性/可行性，可视需要「发起技术负责人沟通」协助判断。<b>可做</b> → 「受理通过」进入指派（变更流指派前需先补填 OA 号）；<b>不该做 / 做不了</b> → ${rejectHint}；<b>信息不全</b> → 「退回修改」。</div>`;
             }
@@ -3502,7 +3558,7 @@
         } else if (iss.status === '待对接测试') {
             // [工期对接测试与风险等级拆分 方案 v1.1 §7·C4b] 两视角引导：开发侧提醒去通知区喊人来测；
             //   对接人/admin 侧提示测试后的两条出路。
-            if (isAdminUser || isIntakeLiaisonUser) gate = `<div class="si-gate-hint">🧪 本单待对接测试：请验证开发交付内容。<b>通过</b> → 「对接测试通过」进入待验收；<b>有问题</b> → 「对接测试打回」注明原因，退回开发返工。</div>`;
+            if (isAdminUser || isBoundLiaisonUser) gate = `<div class="si-gate-hint">🧪 本单待对接测试：请验证开发交付内容。<b>通过</b> → 「对接测试通过」进入待验收；<b>有问题</b> → 「对接测试打回」注明原因，退回开发返工。</div>`;
             else if (isOwnerDev) gate = `<div class="si-gate-hint">🧪 本单待对接测试：开发已完成交付，请到下方「钉钉通知」区点击「发送通知」提醒对接人测试。</div>`;
         }
         // C-orch bug 待上线态的四个引导分支（指定/等待/可执行）已随上线编排一起移入 siRenderReleaseOrchBlock，本操作区不再重复。
@@ -3561,11 +3617,12 @@
         const isTechLeadForThis = !!(currentUser && isSiTechLead(currentUser.id) && Number(iss.tech_lead_id) === Number(currentUser.id));
         if (iss.status === '待受理' && iss.tech_lead_id && !hasTechLeadComment) {
             if (isTechLeadForThis) techLeadBtns += `<button class="u-btn-primary u-btn-sm" onclick="siModalTechLeadComment()">回复评估意见</button>`;
-            if (isAdminUser || isIntakeLiaisonUser) techLeadBtns += `<button class="u-btn-secondary u-btn-sm" onclick="siCancelConsult()">取消咨询</button>`;
+            if (isAdminUser || isBoundLiaisonUser) techLeadBtns += `<button class="u-btn-secondary u-btn-sm" onclick="siCancelConsult()">取消咨询</button>`;
         }
         // ⭐ 角色权限重构 C3 补丁（方案 §4-C3"失败可重试补发入口"）：已有评估意见 + 仍在待受理 →
-        //   admin/受理人/本单技术负责人 均可点「重发评估通知」（镜像后端 admin∨受理人∨本单技术负责人 三方 OR）。
-        if (iss.status === '待受理' && hasTechLeadComment && (isAdminUser || isIntakeLiaisonUser || isTechLeadForThis)) {
+        //   admin/该单绑定对接人/本单技术负责人 均可点「重发评估通知」（镜像后端 tech-lead-comment/resend-notify
+        //   的 isBoundLiaisonEligibleOrAdmin∨selfTechLead，C10-fix M2 起绑单）。
+        if (iss.status === '待受理' && hasTechLeadComment && (isAdminUser || isBoundLiaisonUser || isTechLeadForThis)) {
             techLeadBtns += `<button class="u-btn-secondary u-btn-sm" onclick="siResendTechLeadCommentNotify()">重发评估通知</button>`;
         }
         // ⭐ 角色权限重构 v2.1 §4（OA 号补填入口）：仅 admin 可见（只有 admin/建单人能进 OA 系统，对接人与

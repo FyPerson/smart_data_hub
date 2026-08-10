@@ -444,7 +444,7 @@ check('列表列头改「优先级/风险」且排序仍绑 priority（下行不
     assert.ok(!/data-sort-by="risk_level"/.test(src),
         '风险等级不应成为独立可排序列——C8 明确"不加列"（列表已 20+ 列，加列必触发横滚）');
 });
-check('列表单元格走 siPriRiskCellHtml 双行结构（上=u-pri 徽章 / 下=风险小字）', () => {
+check('列表单元格走 siPriRiskCellHtml 同格结构（左=u-pri 徽章 / 右=风险小字·2026-08-10 由上下双行改左右并排，结构断言不变）', () => {
     assert.ok(/<td>\$\{siPriRiskCellHtml\(i\)\}<\/td>/.test(src), '列表行的优先级单元格应改调 siPriRiskCellHtml(i)');
     const fn = extractFunctionBody(src, 'siPriRiskCellHtml');
     assert.ok(fn, 'siPriRiskCellHtml 函数体应能被提取（防改名后本组静默失效）');
@@ -456,8 +456,8 @@ check('列表单元格走 siPriRiskCellHtml 双行结构（上=u-pri 徽章 / �
     //   受控 map，可见文本仍是 esc(原值)（该页刻意保留显示原值，见 :772-774 的取舍说明）。
     assert.ok(/class="u-pri \$\{siPriClass\(i\.priority\)\}"/.test(fn), '上行仍是既有 .u-pri 徽章，且 class 片段走 siPriClass 白名单（不再 raw 拼 esc(原值)）');
     assert.ok(/>\$\{esc\(i\.priority\)\}</.test(fn), '可见文本仍用 esc(原值)（脏数据要能被人看见，与 class 规范化是两回事）');
-    assert.ok(/si-pri-risk/.test(fn) && /si-risk-line/.test(fn), '应输出 si-pri-risk 容器 + si-risk-line 下行包裹');
-    assert.ok(/\.si-pri-risk\s*\{/.test(src) && /\.si-risk-sub\s*\{/.test(src), 'si-pri-risk / si-risk-sub 样式应已定义（否则双行塌成一行）');
+    assert.ok(/si-pri-risk/.test(fn) && /si-risk-line/.test(fn), '应输出 si-pri-risk 容器 + si-risk-line 风险包裹（2026-08-10 起 CSS 层左右并排，类名结构不变）');
+    assert.ok(/\.si-pri-risk\s*\{/.test(src) && /\.si-risk-sub\s*\{/.test(src), 'si-pri-risk / si-risk-sub 样式应已定义（否则并排排布失效、风险小字失去从属视觉）');
 });
 check('bug 行风险下行留空（不适用≠未定级）；feature/improvement 未定级显示灰字「未定级」', () => {
     const fn = extractFunctionBody(src, 'siPriRiskCellHtml');
@@ -657,6 +657,52 @@ check('[M3] 后端契约：deriveOnlineSourceKind 对非「已上线」单恒返
     assert.ok(/function deriveOnlineSourceKind\(row\) \{\s*\n\s*if \(!row \|\| row\.status !== SYS_ONLINE_STATUS\) return null;/.test(indexJsSrc),
         '[M3] deriveOnlineSourceKind 首行须对非「已上线」单 return null——前端「上线方式」kv 只判该字段非空、不另判 status，这一行就是"仅已上线单渲染"的唯一保证');
     assert.ok(/online_source_kind/.test(indexJsSrc), '[M3] 后端须以 online_source_kind 键名下发（前端按此键读取）');
+});
+
+console.log('— §⑫ 列表页「系统」列双行（2026-08-10 用户拍板·codex M4 补守卫）—');
+check('列表行系统单元格走 siSystemCellHtml 双行结构，排序仍只绑 system_name', () => {
+    assert.ok(/<td>\$\{siSystemCellHtml\(i\)\}<\/td>/.test(src), '列表行的系统单元格应调 siSystemCellHtml(i)（单行 esc(i.system_name) 已被 2026-08-10 双行改造取代）');
+    assert.ok(/data-sort-by="system_name">系统</.test(src), '表头应保持「系统」+ data-sort-by=system_name（模块子行不参与排序键，同需求方列部门子行口径）');
+    assert.ok(!/data-sort-by="module_name"/.test(src), 'module_name 不得成为排序键——它是下行小字展示，不是独立列');
+});
+check('siSystemCellHtml：trim 判空、未填占位「—」、超 4 字码点截断 + title 悬停全名', () => {
+    const fn = extractFunctionBody(src, 'siSystemCellHtml');
+    assert.ok(fn, 'siSystemCellHtml 函数体应能被提取（防改名后本组静默失效）');
+    assert.ok(/\(i\.module_name \|\| ''\)\.trim\(\)/.test(fn), '模块名须 trim 后判空（codex 259 L-1 渲染端兜底口径：纯空白串不得渲染成"看着有值实则空白"）');
+    assert.ok(/let sub = '—';/.test(fn), '未填模块须占位全角「—」（同页空值占位统一口径，见预计完成/期望完成列）');
+    assert.ok(/Array\.from\(mod\)/.test(fn), '截断须按码点计（Array.from），防 BMP 外字符被 slice 劈成半个代理对');
+    assert.ok(/chars\.length > 4/.test(fn) && /chars\.slice\(0, 4\)/.test(fn), '超 4 字须截前 4 字（用户 2026-08-10 拍板口径）');
+    assert.ok(/title="\$\{esc\(mod\)\}"/.test(fn), '截断分支须挂 title=esc(全名)（悬停看完整模块名，对齐 commit 列纯 title 范式）');
+    assert.ok(/<div class="si-muted" style="font-size:11px;">/.test(fn), '下行须为 si-muted 11px 小字（与需求方列部门子行同款范式）');
+    assert.ok(/\$\{esc\(i\.system_name\)\}/.test(fn), '上行 system_name 须经 esc 转义');
+});
+
+console.log('— §⑬ 对接人绑单收口（2026-08-10·isSysCoordinator 消费面钉死）—');
+check('后端 isSysCoordinator 仅存 2 个读路径调用点（防新写端点误引重新引入 [13] 全局写权）', () => {
+    const indexJsPath = path.join(__dirname, '..', 'routes', 'sys-iteration', 'index.js');
+    const indexJsSrc = fs.readFileSync(indexJsPath, 'utf8');
+    // 消费面登记表（codex 332 risks 建议落地）：定义 1 + 调用 2 = 恰 3 处 `isSysCoordinator(`。
+    //   两个合法调用点均为**读路径可见性**（详情附件列表可见 / 附件下载），且都叠加了 isBoundLiaisonOrAdmin
+    //   增量；附件上传/删除两写路径已改 isBoundLiaisonEligibleOrAdmin 绑单精判（指派族 C10 已改）。
+    //   本断言红了 = 有人新增/删除了 isSysCoordinator 调用——新增写端点引用它会静默复活「白名单[13] 全局
+    //   写权」，先来这里对齐口径再动。
+    const calls = (indexJsSrc.match(/isSysCoordinator\(/g) || []).length;
+    assert.strictEqual(calls, 3, `isSysCoordinator( 出现次数应恰 3（定义1+读路径调用2），实得 ${calls}——新增调用须先核对绑单收口口径（写路径禁用本函数）`);
+    assert.ok(/isSysCoordinator\(attActor, row\.type\) \|\| isBoundLiaisonOrAdmin\(attActor, row\)/.test(indexJsSrc),
+        '详情附件可见性应为「isSysCoordinator ∨ isBoundLiaisonOrAdmin」增量式（读路径保留[13]+绑定本人）');
+    assert.ok(/isSysCoordinator\(actor, row\.type\) \|\| isBoundLiaisonOrAdmin\(actor, row\)/.test(indexJsSrc),
+        '附件下载应为「isSysCoordinator ∨ isBoundLiaisonOrAdmin」增量式（同上）');
+});
+check('前端 isSiBoundLiaison 判据存在且 per-issue 操作权已断开白名单（isSiIntakeLiaison 仅存 release 级+读路径 7 消费点）', () => {
+    assert.ok(/function isSiBoundLiaison\(iss\)/.test(src), '应定义 isSiBoundLiaison(iss) per-issue 绑单镜像判据');
+    assert.ok(/iss\.intake_liaison_id != null\s*\n?\s*&& Number\(iss\.intake_liaison_id\) === Number\(currentUser\.id\)/.test(src),
+        'isSiBoundLiaison 应比对本单 intake_liaison_id 与当前用户（null 安全）');
+    // 消费面钉死：isSiIntakeLiaison( 文本恰 9 处 = 常量区注释提及 1（`isSiIntakeLiaison([13]) 的语义…`）+
+    //   定义 1 + release 级调用 4（上线单管理入口/我的批次探测早退/排班表写权/批次执行摘要）+ 读路径增量
+    //   调用 3（通知区可见/变更流查已读/bug 流查已读）。红了=有人把白名单判据接回了 per-issue 操作权
+    //   （或删了刻意保留项），先对齐绑单收口口径再改本数。
+    const siCalls = (src.match(/isSiIntakeLiaison\(/g) || []).length;
+    assert.strictEqual(siCalls, 9, `isSiIntakeLiaison( 出现次数应恰 9（注释1+定义1+release级4+读路径3），实得 ${siCalls}`);
 });
 
 console.log('— §⑤ HTML 内联 <script> 语法有效 —');
