@@ -5210,8 +5210,16 @@
         if (!chk) return;
         let touched = false;
         chk.addEventListener('change', () => { touched = true; });
+        const typeEl = document.getElementById('f_type');
         const syncDefault = () => {
             if (touched) return;
+            // [OA 豁免默认·improvement 覆盖联动·2026-08-10 用户拍板（#20 触发）] 优化类单默认勾选「本单
+            //   无需 OA 号」，需求方三字段是否填写不再取消勾——生产实证 8 张 improvement 里 7 张豁免；
+            //   唯一反例 #19（走了 OA 立项的优化）靠建单人手动取消勾（touched 后联动即停，机制不变）。
+            //   两条已知代价（拍板时如实摆过）：①反例型单漏取消勾 → 详情显示「无需 OA」且无补号琥珀提醒
+            //   （兜底=admin 补号入口不因豁免隐藏 :3575 + 后端号与豁免正交放行）②exempt=1 不再恒等于
+            //   「主动声明」（默认勾与主动勾在数据上不可分）。bug/feature 维持原三字段联动。
+            if (typeEl && typeEl.value === 'improvement') { chk.checked = true; return; }
             // codex 219 L-1：deptEl.value 补 .trim()，与 name/phone 口径统一（select 空占位项值本恒为
             // ''，此处统一处理只为消除三字段判空逻辑的形式不一致，非修复已知可复现 bug）。
             const allEmpty = !(deptEl && deptEl.value.trim()) && !(nameEl && nameEl.value.trim()) && !(phoneEl && phoneEl.value.trim());
@@ -5220,7 +5228,10 @@
         if (deptEl) deptEl.addEventListener('change', syncDefault);
         if (nameEl) nameEl.addEventListener('input', syncDefault);
         if (phoneEl) phoneEl.addEventListener('input', syncDefault);
-        syncDefault();   // 弹窗打开时需求方三字段恒空 → 初始必勾选
+        // type 切换也要重算默认（addEventListener 与既有 onchange=siToggleCreateTypeFields 属性赋值共存，
+        //   互不覆盖）——improvement↔其他类型来回切换时，未触碰态下勾选默认随之切换。
+        if (typeEl) typeEl.addEventListener('change', syncDefault);
+        syncDefault();   // 弹窗打开时按当前 type 与需求方三字段（恒空）定初始态
     }
     // C4（20260714）：需求方部门下拉字段构造（共享常量 window.PLATFORM_REQUESTER_DEPTS）。
     // 不用 fSelect：其 opts 数组假设 value===label，无法表达"（不指定）"文案与空串 value 分离。

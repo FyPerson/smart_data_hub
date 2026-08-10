@@ -1183,6 +1183,69 @@ async function mkMember(issueId, userId, userName, devStatus, resolvedAt, noCode
         await page.evaluate(() => { if (window.siCloseModal) siCloseModal(); if (window.siCloseDrawer) siCloseDrawer(); });
         await page.waitForTimeout(200);
 
+        // ── [T10] OA 豁免默认勾选联动（2026-08-10 用户拍板·improvement 覆盖需求方联动·hotfix）────────
+        //   规则终态：type=improvement → 未触碰态恒勾（需求方填不填都不取消）；bug/feature → 维持原
+        //   「需求方三字段任一非空→取消勾」联动；用户手动点过勾选框（touched）→ 联动整体停止。
+        //   纯 DOM 交互断言（不真提交建单——建单链路由既有套件覆盖，本组只测勾选框默认逻辑本身）。
+        console.log('\n── [T10] OA 豁免默认勾选联动 ──');
+        await page.evaluate(() => siOpenCreate());
+        await page.waitForSelector('#f_oa_exempt', { state: 'attached', timeout: 3000 });
+        const t10a = await page.evaluate(() => ({
+            type: document.getElementById('f_type').value,
+            checked: document.getElementById('f_oa_exempt').checked,
+        }));
+        must(t10a.checked === true,
+            `[T10]① 弹窗初开（需求方三字段恒空）勾选应为 true（既有初始态），实得 type=${t10a.type} checked=${t10a.checked}`);
+        // ② 切 improvement + 填需求方姓名 → 勾选仍 true（本次新规则的核心判别断言：旧联动在此会取消勾）
+        const t10b = await page.evaluate(() => {
+            const typeEl = document.getElementById('f_type');
+            typeEl.value = 'improvement'; typeEl.dispatchEvent(new Event('change'));
+            const nameEl = document.getElementById('f_requester_name');
+            nameEl.value = '联动探针姓名'; nameEl.dispatchEvent(new Event('input'));
+            return document.getElementById('f_oa_exempt').checked;
+        });
+        must(t10b === true,
+            `[T10]② ⭐ improvement+需求方已填 → 勾选仍应为 true（improvement 覆盖联动·旧规则此处会取消勾），实得 ${t10b}`);
+        // ③ 切回 feature（需求方仍非空）→ 勾选变 false（原联动对非 improvement 类型仍然生效，未被误杀）
+        const t10c = await page.evaluate(() => {
+            const typeEl = document.getElementById('f_type');
+            typeEl.value = 'feature'; typeEl.dispatchEvent(new Event('change'));
+            return document.getElementById('f_oa_exempt').checked;
+        });
+        must(t10c === false,
+            `[T10]③ ⭐ 切回 feature（需求方仍非空）→ 勾选应变 false（三字段联动对 bug/feature 仍活·对照组），实得 ${t10c}`);
+        // ④ 手动点勾选框（touched）后再切 improvement → 联动不得再覆盖用户的手动状态（停锁不因新规则回归）
+        const t10d = await page.evaluate(() => {
+            const chk = document.getElementById('f_oa_exempt');
+            chk.checked = true; chk.dispatchEvent(new Event('change'));   // 手动勾上 → touched
+            chk.checked = false; chk.dispatchEvent(new Event('change'));  // 再手动取消 → 最终手动态=false
+            const typeEl = document.getElementById('f_type');
+            typeEl.value = 'improvement'; typeEl.dispatchEvent(new Event('change'));
+            return document.getElementById('f_oa_exempt').checked;
+        });
+        must(t10d === false,
+            `[T10]④ ⭐ touched 后切 improvement → 联动不得覆盖手动取消态（停锁优先于新规则），实得 ${t10d}`);
+        // ⑤〔codex 330 LOW-2〕三维组合补漏：未触碰态下 improvement→清空需求方→切回 feature → 应恢复勾选
+        //   （证明 improvement 短路分支没有破坏旧规则的「三字段全空→勾」半边——②③只测了非空侧）。
+        //   需重开弹窗取未触碰态（④已 touched·touched 是弹窗实例级闭包变量，重开即重置）。
+        await page.evaluate(() => { if (window.siCloseModal) siCloseModal(); });
+        await page.waitForTimeout(200);
+        await page.evaluate(() => siOpenCreate());
+        await page.waitForSelector('#f_oa_exempt', { state: 'attached', timeout: 3000 });
+        const t10e = await page.evaluate(() => {
+            const typeEl = document.getElementById('f_type');
+            typeEl.value = 'improvement'; typeEl.dispatchEvent(new Event('change'));
+            const nameEl = document.getElementById('f_requester_name');
+            nameEl.value = '组合探针'; nameEl.dispatchEvent(new Event('input'));   // improvement 态下填入
+            nameEl.value = ''; nameEl.dispatchEvent(new Event('input'));           // 再清空
+            typeEl.value = 'feature'; typeEl.dispatchEvent(new Event('change'));   // 切回 feature（三字段全空）
+            return document.getElementById('f_oa_exempt').checked;
+        });
+        must(t10e === true,
+            `[T10]⑤ ⭐ 未触碰态 improvement→清空需求方→切回 feature → 应恢复勾选（旧规则空字段半边未被短路破坏），实得 ${t10e}`);
+        await page.evaluate(() => { if (window.siCloseModal) siCloseModal(); if (window.siCloseDrawer) siCloseDrawer(); });
+        await page.waitForTimeout(200);
+
         // ── [T3] 全程无 console error（[T8]② 故意触发的 /estimate 409 按观测精确条数豁免，见
         //   siConsoleErrorsExcludingKnown409 定义处注释；非本次范围的 409/其它 error 不豁免）──────────
         const t3Errs = siConsoleErrorsExcludingKnown409(page);

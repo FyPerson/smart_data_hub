@@ -195,7 +195,12 @@ $excludeDirs = @(
     #   截图用本地生产库数据渲染，页面上真实姓名/手机号可见；PNG 是二进制，步骤 3 文本脱敏
     #   无法覆盖 → 一旦进公开镜像即原样泄漏 PII。⚠️ 通则：任何"渲染了真实数据的图片/二进制"
     #   都绕过文本脱敏，必须在 robocopy 层排除（不能靠步骤 3/4）。
-    "unify-baseline"
+    "unify-baseline",
+    # 2026-08-10 加入（v1.144.0 同步事故第五例·同上通则）：Playwright 套件失败/证据截图目录——
+    #   test-screenshots/（commit-cols 横滚证据等）与 __screenshots__/（v1.143 第四例已实锤 21 张）
+    #   均为「渲染了本地库数据的二进制」，robocopy 层排除；本例 6 张已推送后即时摘除（faed96b），
+    #   历史提交残留并入速览区 #14/#20 待拍。fail-closed 整体改造仍是 #20 正解，本条只是止血补丁。
+    "test-screenshots", "__screenshots__"
 )
 $excludeFiles = @(
     "task_pool.db", "task_pool.db-journal",
