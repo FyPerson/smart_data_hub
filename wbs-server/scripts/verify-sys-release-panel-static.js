@@ -444,7 +444,7 @@ check('列表列头改「优先级/风险」且排序仍绑 priority（下行不
     assert.ok(!/data-sort-by="risk_level"/.test(src),
         '风险等级不应成为独立可排序列——C8 明确"不加列"（列表已 20+ 列，加列必触发横滚）');
 });
-check('列表单元格走 siPriRiskCellHtml 同格结构（左=u-pri 徽章 / 右=风险小字·2026-08-10 由上下双行改左右并排，结构断言不变）', () => {
+check('列表单元格走 siPriRiskCellHtml 同格结构（徽章+"/"+风险文本·2026-08-10 二拍「P2/三级」斜杠合并形态）', () => {
     assert.ok(/<td>\$\{siPriRiskCellHtml\(i\)\}<\/td>/.test(src), '列表行的优先级单元格应改调 siPriRiskCellHtml(i)');
     const fn = extractFunctionBody(src, 'siPriRiskCellHtml');
     assert.ok(fn, 'siPriRiskCellHtml 函数体应能被提取（防改名后本组静默失效）');
@@ -456,16 +456,36 @@ check('列表单元格走 siPriRiskCellHtml 同格结构（左=u-pri 徽章 / �
     //   受控 map，可见文本仍是 esc(原值)（该页刻意保留显示原值，见 :772-774 的取舍说明）。
     assert.ok(/class="u-pri \$\{siPriClass\(i\.priority\)\}"/.test(fn), '上行仍是既有 .u-pri 徽章，且 class 片段走 siPriClass 白名单（不再 raw 拼 esc(原值)）');
     assert.ok(/>\$\{esc\(i\.priority\)\}</.test(fn), '可见文本仍用 esc(原值)（脏数据要能被人看见，与 class 规范化是两回事）');
-    assert.ok(/si-pri-risk/.test(fn) && /si-risk-line/.test(fn), '应输出 si-pri-risk 容器 + si-risk-line 风险包裹（2026-08-10 起 CSS 层左右并排，类名结构不变）');
+    assert.ok(/si-pri-risk/.test(fn) && /si-risk-line/.test(fn), '应输出 si-pri-risk 容器 + si-risk-line 风险包裹（类名结构钩子保留不动）');
     assert.ok(/\.si-pri-risk\s*\{/.test(src) && /\.si-risk-sub\s*\{/.test(src), 'si-pri-risk / si-risk-sub 样式应已定义（否则并排排布失效、风险小字失去从属视觉）');
+    // 〔2026-08-10 二拍「P2/三级」〕徽章与风险文本之间恒有半角 "/" 分隔符——镜像列头「优先级/风险」。
+    //   codex M2（本轮采纳）：断言最终模板的**顺序与嵌套**，不只查"分隔符存在"——否则 sep 挪到
+    //   riskText 之后（读成「P2三级/」）字符串断言仍全绿。
+    assert.ok(/return `<div class="si-pri-risk">\$\{pri\}<div class="si-risk-line"><span class="si-risk-sep">\/<\/span>\$\{riskText\}<\/div><\/div>`/.test(fn),
+        '最终模板必须是 徽章→si-risk-line(sep→风险文本) 的顺序与嵌套（防分隔符挪位/结构重排假绿）');
+    // codex L1（本轮采纳）：断言文案声称"裸奔继承 13px"，就必须真查字号——只查选择器存在=声称超检查面
+    assert.ok(/\.si-risk-sep\s*\{[^}]*font-size:\s*11px/.test(src), '.si-risk-sep 应定义 11px 字号（分隔符裸奔会继承单元格 13px，与 11px 风险小字失配）');
+    // codex M1（本轮采纳）：脏长值防线——flex-wrap 只管子项间换行，管不住单项内连续长串撑大 min-content
+    assert.ok(/\.si-risk-line\s*\{[^}]*min-width:\s*0/.test(src) && /\.si-risk-sub\s*\{[^}]*overflow-wrap:\s*anywhere/.test(src),
+        '脏长值防线应齐两件：.si-risk-line min-width:0 + .si-risk-sub overflow-wrap:anywhere（否则注释声称的"折行不撑宽列"不成立，防横滚是 C8 硬约束）');
 });
-check('bug 行风险下行留空（不适用≠未定级）；feature/improvement 未定级显示灰字「未定级」', () => {
+check('bug/config 行风险段显示 "-" 占位（不适用≠未定级）；feature/improvement 未定级显示灰字「未定级」', () => {
     const fn = extractFunctionBody(src, 'siPriRiskCellHtml');
     assert.ok(/i\.type === 'feature' \|\| i\.type === 'improvement'/.test(fn),
-        '应按 type 门控风险下行（与详情页 risk_level kv 的既有 type 判据同口径）');
-    // 不适用分支必须返回"只有徽章"的结构，且不含任何"未定级"文本
-    const notApplicableBranch = /if \(!riskApplicable\) return `<div class="si-pri-risk">\$\{pri\}<\/div>`;/.test(fn);
-    assert.ok(notApplicableBranch, 'bug/config 分支应只渲染优先级徽章、不追加任何风险文本（留空=结构上无该维度）');
+        '应按 type 门控风险文本（与详情页 risk_level kv 的既有 type 判据同口径）');
+    // 〔断言同步·2026-08-10〕原断言写死"不适用分支提前 return 孤徽章"（留空口径）——同日用户二拍升级为
+    //   「P2/-」占位形态：三值三形态（"-"=不适用／「未定级」=该定没定／空白=歧义），属**断言该改**不是
+    //   实现错（feedback_test_assertion_self_error 口径）。"不适用禁用『未定级』文本"这条原不变量不变，
+    //   只是"不适用"的表达从空白升级为 "-"。
+    assert.ok(!/if \(!riskApplicable\) return/.test(fn),
+        '不适用分支不应再提前 return 孤徽章（三形态统一渲染"徽章+/+风险文本"两段结构）');
+    // codex M2（本轮采纳）：绑定**分支归属**——"-" 占位必须挂在 !riskApplicable 的真分支上。
+    //   只查"na span 存在于函数体"时，三元两分支互换（bug 行显风险/feature 行显 "-"）仍全绿。
+    assert.ok(/const riskText = !riskApplicable\s*\?\s*`<span class="si-risk-sub si-muted si-risk-na" title="\$\{SI_RISK_NA_TITLE\}">-<\/span>`/.test(fn),
+        '"-" 占位必须绑在 !riskApplicable 真分支（防三元分支互换后字符串存在性断言仍假绿）');
+    assert.ok(/const SI_RISK_NA_TITLE = /.test(src), '应定义 SI_RISK_NA_TITLE 单一事实源常量（"-" 的悬浮说明文案）');
+    assert.ok(/\.si-risk-sub\.si-muted\.si-risk-na\s*\{[^}]*cursor:\s*help/.test(src),
+        '.si-risk-na 应以三类叠加选择器把 cursor 翻回 help（"-" 挂了 title；不靠同特异性源序压 si-muted 的 default）');
     assert.ok(/si-risk-sub si-muted">未定级</.test(fn), 'feature/improvement 未定级应显示灰字「未定级」（与详情页 kv 逐字同口径）');
 });
 check('风险等级三级口径常量存在且文案逐字对齐方案 §9.2 末条', () => {

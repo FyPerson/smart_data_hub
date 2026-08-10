@@ -303,6 +303,23 @@ foreach ($p in $prodBackupsToRemove) {
     }
 }
 
+# 2026-08-10 兜底清除：docs 本地三目录（与 $excludeDirs 双重防御·同步漏网第六例止血）
+# robocopy /XD 的相对多级路径排除不可靠——docs\local 在 $excludeDirs 里却仍被复制进镜像。
+# 镜像仓自身 .gitignore（docs/local|review|archive）挡住了 push（历史上从未泄漏），但步骤 4
+# 残留敏感词扫描扫的是工作树，会被其中的内网 IP 绊住 fail-fast 中止整个同步
+# （2026-08-10 v1.147.0 部署被 docs/local/信息化资产 demo 内网 IP 中止实证）。
+$localDocsToRemove = @(
+    "$MirrorPath\docs\local",
+    "$MirrorPath\docs\review",
+    "$MirrorPath\docs\archive"
+)
+foreach ($p in $localDocsToRemove) {
+    if (Test-Path $p) {
+        Remove-Item $p -Recurse -Force
+        Write-Host "  [SECURITY] removed $($p.Replace($MirrorPath + '\', ''))（本地文档目录·robocopy /XD 兜底）" -ForegroundColor Red
+    }
+}
+
 # === 步骤 2.5: 脱敏完整性预检（系统梳理兜底报警） ===
 # 读 users 表全量真名 + 真实手机号，任一未在 $nameMap/$phoneMap 配置脱敏规则 → fail-fast。
 # 根治「新员工入职 → 真名/手机号硬编码进代码 → 漏脱敏泄漏」反复（2026-06-17）。

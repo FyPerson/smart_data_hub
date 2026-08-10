@@ -180,15 +180,25 @@
         .si-help { display: inline-flex; align-items: center; justify-content: center; width: 15px; height: 15px; margin-left: 4px; border-radius: 50%; background: #e2e8f0; color: #64748b; font-size: 11px; font-weight: 700; cursor: help; vertical-align: middle; }
         .si-help:hover { background: #cbd5e1; color: #334155; }
         .si-help:focus { outline: 2px solid #93c5fd; outline-offset: 1px; }
-        /* [C8 风险/优先级双显·方案 v1.7 §9.2 → 2026-08-10 用户拍板改左右并排] 列表页「优先级/风险」列容器。
-           不加新列仍是硬约束（复用优先级列）；原上下叠放改 inline-flex 左右并排（左=优先级徽章·右=风险
-           等级 11px 小字）。.si-risk-line 包裹 div 保留（守卫锚定的结构钩子），仅不再承担换行/上间距职责。
+        /* [C8 风险/优先级双显·方案 v1.7 §9.2 → 2026-08-10 用户拍板改左右并排 → 同日二拍改「P2/三级」
+           斜杠合并形态] 列表页「优先级/风险」列容器。不加新列仍是硬约束（复用优先级列）；徽章与风险文本
+           之间插半角 "/" 分隔符（.si-risk-sep），gap 6px→3px 收紧让三段读成一个 token，镜像列头
+           「优先级/风险」的斜杠语义。.si-risk-line 包裹 div 保留（守卫锚定的结构钩子）。
            flex-wrap（codex M2 采纳）：risk_level 值域正常恒 2 字（DDL CHECK 一级/二级/三级）放得下一行；
            万一脏长值（生产列经 ALTER 补列，CHECK 是否在产有先例存疑，v1.139 曾抓过 ALTER 漏 CHECK）则
-           折行回双行优雅降级，不把「优先级/风险」列撑宽（不加列/防横滚是 C8 硬约束）。 */
-        .si-pri-risk { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; line-height: 1.25; }
-        .si-risk-sub { font-size: 11px; color: #475569; cursor: help; }
+           折行优雅降级且不撑宽列——但 flex-wrap 只管两个 flex 子项**之间**换行，管不住单项内连续长串把
+           min-content 撑大（本轮 codex M1 指出原声称不完整）：补 .si-risk-line min-width:0 +
+           .si-risk-sub overflow-wrap:anywhere 才真兜住（长串可任意断字，min-content 缩到单字宽，
+           正常值恒 2-3 字不受影响）。不把「优先级/风险」列撑宽（不加列/防横滚是 C8 硬约束）。 */
+        .si-pri-risk { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 3px; line-height: 1.25; }
+        .si-risk-line { min-width: 0; }
+        .si-risk-sub { font-size: 11px; color: #475569; cursor: help; overflow-wrap: anywhere; }
         .si-risk-sub.si-muted { cursor: default; }
+        /* 分隔符淡灰不抢徽章；.si-risk-na = bug/config 行的 "-" 占位——挂了 SI_RISK_NA_TITLE 悬浮说明，
+           cursor 要从 si-muted 的 default 翻回 help。用三类叠加选择器（0,3,0）压过 .si-risk-sub.si-muted
+           （0,2,0），不靠同特异性源序（死类家族教训，见 guard_static_analysis_gotchas）。 */
+        .si-risk-sep { font-size: 11px; color: #94a3b8; }
+        .si-risk-sub.si-muted.si-risk-na { cursor: help; }
 
         /* checkbox 多选行（C3，20260713）：承接原 inline display:flex 声明；checkbox 加 flex:0 0 auto+width:auto
            覆盖共享层 .u-form-group input{width:100%} 的污染（该污染实测命中 checkbox，导致多选竖排塌陷）。
@@ -819,6 +829,12 @@
     // fSelect label 复用（建单/编辑/受理等一切渲染风险等级选择的表单）——照搬 SI_PRIORITY_LABEL 范式。
     const SI_RISK_LEVEL_LABEL = `风险等级 <span class="si-help" tabindex="0" role="img" aria-label="${SI_RISK_LEVEL_HELP_TEXT}" title="${SI_RISK_LEVEL_HELP_TEXT}">?</span>`;
 
+    // [2026-08-10 用户拍板·「P2/三级」合并形态口径③] 列表页 bug/config 行风险段 "-" 占位的悬浮说明。
+    //   不适用集合=bug/config 两类，逐状态对照过权威源 DDL CHECK (type IN ('bug','feature','improvement','config'))
+    //   （routes/sys-iteration/index.js 建表段）——非 feature/improvement 一律 "-"（口径①），将来加第五 type
+    //   时此文案与 siPriRiskCellHtml 的门控须同步核对。
+    const SI_RISK_NA_TITLE = 'bug/config 单不适用风险等级（风险等级仅在受理 feature/improvement 单时判定）';
+
     // ⭐ [C9-fix M3] 「已上线」来源三分支的展示文案——**判定在后端**（deriveOnlineSourceKind 是唯一权威，
     //   index.js:2310），前端只做 kind→中文 的字典映射，不自己看 release_id/online_source 推断（否则又是
     //   两份判据必然漂移）。三个 key 与后端返回的 `issue.online_source_kind` 逐字对齐：
@@ -830,28 +846,33 @@
     //     英文标识让人发现漏改，也不静默显示成空白或错误分类。
     const SI_ONLINE_SOURCE_LABEL = { release_publish: '批次发布', no_commit_acceptance: '免上线直翻', unknown_legacy: '历史存量' };
 
-    // [C8] 列表页「优先级/风险」单元格：左=优先级徽章（.u-pri 共享层，与改造前逐字相同），
-    //   右=风险等级小字（C8 原为上下双行，2026-08-10 用户拍板改左右并排——纯 CSS 换排布，
-    //   HTML 结构与 si-risk-line 类名保留不动，守卫锚定见 verify-sys-release-panel-static §⑥）。
-    //   风险小字三种形态：
-    //     · bug：**留空**——bug 单结构上没有风险等级维度（受理门只对 feature/improvement 判定
-    //       risk_level，bug 恒 NULL，见 index.js case 'intake_accept'），显示"未定级"会把"不适用"
-    //       误说成"该定没定"。与详情页 :1748 kv 的既有 type 门控口径一致。
+    // [C8] 列表页「优先级/风险」单元格：徽章 + "/" + 风险文本，读作「P2/三级」（2026-08-10 用户二拍
+    //   斜杠合并形态，取代同日早前的左右并排；镜像列头「优先级/风险」的斜杠语义。守卫锚定见
+    //   verify-sys-release-panel-static §⑥）。左=优先级徽章（.u-pri 共享层，与改造前逐字相同），
+    //   右=si-risk-line（"/" 分隔符 + 风险文本），**三种 type 形态统一渲染两段结构**，不再有
+    //   bug 行"孤徽章"的参差。风险文本三种形态：
+    //     · bug/config：半角 "-"（口径①②）——结构上没有风险等级维度（受理门只对 feature/improvement
+    //       判定 risk_level，bug/config 恒 NULL，见 index.js case 'intake_accept'）。原「留空」口径
+    //       升级为 "-" 占位：三值三形态（"-"=不适用／「未定级」=该定没定／空白=歧义——列头写着
+    //       「优先级/风险」时右侧空白会被读成数据缺失）。挂 SI_RISK_NA_TITLE 悬浮说明（口径③）。
+    //       与详情页 :2134 kv 的口径差是**刻意的**：详情页 bug/config 整行不渲染风险 kv（无列头
+    //       对齐压力，不渲染即最准确），列表页因列头恒在才需要 "-" 占位，两处不是漂移。
     //     · feature/improvement 已定级：显示等级文本（title 挂三级口径，鼠标悬浮即可看判定依据）。
     //     · feature/improvement 未定级：灰字「未定级」——与详情页 kv 的 `si-muted 未定级` 逐字同口径。
-    //   风险小字不参与排序（列头 data-sort-by 仍为 priority）。
+    //   风险文本不参与排序（列头 data-sort-by 仍为 priority）。
     //   导出口径（297-L2）：**本页当前无导出功能**（全文 grep `siExport`/`exportToCsv`/`downloadCsv` 零命中），
     //     故本次没有导出列头要同步。将来若加导出，风险等级应作为**独立列**导出而不是拼进优先级列
     //     ——同格并显是列表页"不加列"约束下的视觉妥协，不是数据模型；导出无横滚约束，没有理由继承它。
-    //     bug 行的风险展示值为**空串**（不是"未定级"），导出时同样应落空而非占位文本。
+    //     bug/config 行的风险导出值仍应落**空**（"-" 只是列表展示层占位，不是数据，导出禁带占位文本）。
     function siPriRiskCellHtml(i) {
         const pri = `<span class="u-pri ${siPriClass(i.priority)}">${esc(i.priority)}</span>`;
         const riskApplicable = i && (i.type === 'feature' || i.type === 'improvement');
-        if (!riskApplicable) return `<div class="si-pri-risk">${pri}</div>`;
-        const riskText = i.risk_level
-            ? `<span class="si-risk-sub" title="${SI_RISK_LEVEL_HELP_TEXT}">${esc(i.risk_level)}</span>`
-            : `<span class="si-risk-sub si-muted">未定级</span>`;
-        return `<div class="si-pri-risk">${pri}<div class="si-risk-line">${riskText}</div></div>`;
+        const riskText = !riskApplicable
+            ? `<span class="si-risk-sub si-muted si-risk-na" title="${SI_RISK_NA_TITLE}">-</span>`
+            : (i.risk_level
+                ? `<span class="si-risk-sub" title="${SI_RISK_LEVEL_HELP_TEXT}">${esc(i.risk_level)}</span>`
+                : `<span class="si-risk-sub si-muted">未定级</span>`);
+        return `<div class="si-pri-risk">${pri}<div class="si-risk-line"><span class="si-risk-sep">/</span>${riskText}</div></div>`;
     }
 
     // [2026-08-10 用户拍板] 列表页「系统」单元格改双行：上=system_name，下=module_name 小字——参考
