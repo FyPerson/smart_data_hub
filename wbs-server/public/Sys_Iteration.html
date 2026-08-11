@@ -139,6 +139,9 @@
 
         .si-flag { font-size: 11px; font-weight: 700; margin-left: 6px; white-space: nowrap; }
         .si-flag.scope { color: #d97706; }
+        /* 打回徽章（2026-08-11 用户拍板）：验收打回=事前发现、重开=事后发现，同属回炉族共用红系，
+           靠文案区分个体；「返工」一词留给 reopen（用户口径：重开实际上就是返工，改叫「重开」反不合适）。 */
+        .si-flag.returned { color: #dc2626; }
         .si-flag.reopen { color: #dc2626; }
         .si-flag.blocked { color: #b91c1c; }
         .si-flag.lineage { color: #9ca3af; font-weight: 500; }
@@ -1756,6 +1759,14 @@
         tb.innerHTML = list.map(i => {
             const flags =
                 (i.scope_changed ? `<span class="si-flag scope">范围变更</span>` : '') +
+                // 打回徽章（2026-08-11 用户拍板）：return_count=验收打回（事前发现），恒显不做状态门控——
+                //   打回是历史事实不陈旧（与 reopen「返工×N」同范式；已暂缓徽章门控是因「天数」会陈旧，
+                //   本徽章无此问题）；返工后再进待验收时验收人正需要「二进宫」提示。列表 SELECT 一直
+                //   返回 return_count（此前仅详情页 kv 行消费）。对接测试打回不计入（D18 语义分离）。
+                //   Q5「打回次数不进列表」拍的是完成时刻列不复合展示，独立徽章不属其辖域。Number() 严格
+                //   写法对齐详情 kv「返工」行既有先例（codex 338 LOW-2：防类型漂移成 '0' 时显「打回×0」；
+                //   相邻 reopen 徽章为存量行为不随改）。
+                (Number(i.return_count) > 0 ? `<span class="si-flag returned">打回×${Number(i.return_count)}</span>` : '') +
                 (i.reopen_count ? `<span class="si-flag reopen">返工×${i.reopen_count}</span>` : '') +
                 (i.blocked ? `<span class="si-flag blocked">受阻</span>` : '') +
                 siTechLeadNotifyBadgeHtml(i) +
@@ -2038,6 +2049,9 @@
             `<span class="u-status-badge si-s-${siStatusClass(iss.status)}">${esc(siStatusDisplay(iss.status))}</span>` +
             `<span class="u-pri ${siPriClass(iss.priority)}" title="${SI_PRIORITY_HELP_TEXT}">${esc(iss.priority)}</span>` +
             (iss.scope_changed ? `<span class="si-flag scope">· 经历范围变更</span>` : '') +
+            // 打回徽章（2026-08-11）：与列表行 flags 同源同口径（恒显·return_count 消费面第三处，
+            //   前两处=列表行/详情 kv「返工」行），列表有徽章而抽屉头没有会造成点进即消失的观感断层。
+            (Number(iss.return_count) > 0 ? `<span class="si-flag returned">· 打回×${Number(iss.return_count)}</span>` : '') +
             (iss.reopen_count ? `<span class="si-flag reopen">· 返工×${iss.reopen_count}</span>` : '') +
             (iss.blocked ? `<span class="si-flag blocked">· 受阻中</span>` : '');
 
