@@ -2640,12 +2640,21 @@
                 //   title 到秒（siFmtDTSec）、正文到分（siFmtDT），同 D13 审计类显示口径。
                 const timeSpan = ((statusKey === 'code_submitted' || statusKey === 'no_code') && d.resolved_at)
                     ? `<span class="si-dev-chip-time" title="${esc(siFmtDTSec(d.resolved_at))}">·${esc(siFmtDT(d.resolved_at))}</span>` : '';
+                // 提交双勾留痕回显（写侧=submit 弹窗「提交前确认」双必勾·v1.139.0 C3 落事件 payload_json；
+                //   读侧=详情端 strictBoolFromJsonExtract 严格布尔）：仅 code_submitted/no_code 两态且两键均严格
+                //   === true 才显示——历史行（v1.139 前无此键）/脏数据读 null 不显示，不替写侧背书；态门同
+                //   timeSpan 的两态（codex 337 LOW-1：timeSpan 另有 resolved_at 非空条件、本处刻意不加——留痕
+                //   锚定「事件里勾了」非「有提交时间」，脏行缺时间不连带隐藏承诺），防打回后残留事件把
+                //   「已自测」错挂到 pending 成员。恒真信息不进时间线
+                //   （每条 submit 必双 true，进时间线是纯重复），只按人挂 chip 供验收打回时回看承诺留痕。
+                const checklistSpan = ((statusKey === 'code_submitted' || statusKey === 'no_code') && d.self_tested === true && d.test_env_deployed === true)
+                    ? `<span class="si-dev-chip-time" title="提交前确认留痕：该成员最近一次提交时勾选「已完成自测」「已上测试库」">·已自测·已上测试库</span>` : '';
                 let act = '';
                 if (caps && caps.canCoordinateMember) {
                     if (statusKey === 'pending') act = `<span class="si-dev-chip-act" onclick="siModalExcuseMember(${d.id})">开脱</span>`;
                     else if (statusKey === 'excused') act = `<span class="si-dev-chip-act" onclick="siModalSupersedeExcuse(${d.id})">恢复</span>`;
                 }
-                return `<span class="si-dev-chip"${titleAttr}>${esc(d.user_name || ('#' + d.user_id))}${primaryMark}<span class="si-dev-status-badge ${siDevStatusClass(statusKey)}">${statusLabel}</span>${timeSpan}${act}</span>`;
+                return `<span class="si-dev-chip"${titleAttr}>${esc(d.user_name || ('#' + d.user_id))}${primaryMark}<span class="si-dev-status-badge ${siDevStatusClass(statusKey)}">${statusLabel}</span>${timeSpan}${checklistSpan}${act}</span>`;
             }).join('') + '</div>';
         // P4：开发成员工作说明展示——每个提交时填了 work_note 的 dev 一行「姓名：说明（提交时刻）」。多开发各自独立
         //   （后端详情端按 dev_assignee 各取自己最近 submit 事件的 work_note·不覆盖）。仅有值的 dev 才渲染，无则整块不出。
