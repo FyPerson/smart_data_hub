@@ -1571,6 +1571,20 @@
         //   防未来后端新增状态时重现"点组卡后该单消失"缺口（不阻断渲染，未知态仍计入"全部"）
         const grouped = new Set(Object.values(SI_STATUS_GROUPS).flat());
         vis.forEach(i => { if (!grouped.has(i.status)) console.warn(`[siRenderStats] 状态「${i.status}」未归入任何统计组（SI_STATUS_GROUPS），点组卡后该单不可见，请补组`); });
+        // [2026-08-11 用户拍板口径] 「返工累计」= 打回 + 重开 **合计**。两者都是返工，差别只在发现时点
+        //   （打回=验收环节退回·事前发现／重开=已上线后重新打开·事后发现；用户原话"重开实际上就是返工，
+        //   无非是事后发现而已"）。原实现只累计 reopen_count 是口径缺口——与 v1.149.0 列表「打回×N」徽章
+        //   并排后会出现"卡说返工 0、行上挂着打回×1"的直观矛盾（生产实况即如此：#23 打回 1、重开 0）。
+        // ⚠️ 拆解走 title 不进 label：label 加长会撑宽本卡，.u-stat-card 是 flex:1/min-width:130px 且
+        //   .u-stats-row 带 flex-wrap，长 label 会把 7 卡一行挤成两行（观感回退）。主数字本身已是完整
+        //   答案，title 只作结构补充——与 S3「无代码交付原因是唯一凭证不能藏 tooltip」的场景不同（那里
+        //   tooltip 是唯一载体，这里不是；详情页 kv「返工」行另有逐项全貌）。
+        // ⚠️ Number() 包住两个累加值：`a + (i.x || 0)` 在 x 为字符串时会退化成**字符串拼接**（0 + '1'
+        //   得 '01'，再加就一路错下去），求和场景比 v1.149.0 徽章的显示条件更脆——故此处连存量 reopen
+        //   一并加固（徽章那次"相邻 reopen 存量不随改"是因为那只是真值判断，不会算错数，两处口径不同源
+        //   但各自成立）。
+        const siReturnedSum = vis.reduce((a, i) => a + (Number(i.return_count) || 0), 0);
+        const siReopenSum = vis.reduce((a, i) => a + (Number(i.reopen_count) || 0), 0);
         const stats = [
             { key: '', bg: '#f3f4f6', icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#6b7280" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/></svg>', label: '全部', n: vis.length },
             { key: 'active', bg: '#dbeafe', icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#1d4ed8" stroke-width="2"><path d="M12 2v4"/><path d="M12 18v4"/><path d="M4.93 4.93l2.83 2.83"/><path d="M16.24 16.24l2.83 2.83"/></svg>', label: '进行中', n: vis.filter(i => SI_STATUS_GROUPS.active.includes(i.status)).length },
@@ -1578,7 +1592,7 @@
             { key: 'release', bg: '#ccfbf1', icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#0f766e" stroke-width="2"><path d="M12 2v12"/><path d="M5 9l7-7 7 7"/><path d="M5 20h14"/></svg>', label: '待上线', n: vis.filter(i => SI_STATUS_GROUPS.release.includes(i.status)).length },
             { key: 'done', bg: '#d1fae5', icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#065f46" stroke-width="2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>', label: '已完成', n: vis.filter(i => SI_STATUS_GROUPS.done.includes(i.status)).length },
             { key: 'paused', bg: '#fef9c3', icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#854d0e" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="10" y1="9" x2="10" y2="15"/><line x1="14" y1="9" x2="14" y2="15"/></svg>', label: '暂缓/拒绝', n: vis.filter(i => SI_STATUS_GROUPS.paused.includes(i.status)).length },
-            { key: null, bg: '#fee2e2', icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>', label: '返工累计', n: vis.reduce((a, i) => a + (i.reopen_count || 0), 0) },
+            { key: null, bg: '#fee2e2', icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>', label: '返工累计', n: siReturnedSum + siReopenSum, title: `打回 ${siReturnedSum} 次（验收环节退回·事前发现）· 重开 ${siReopenSum} 次（已上线后重新打开·事后发现）` },
         ];
         document.getElementById('siStatsRow').innerHTML = stats.map((s) => {
             const classes = ['u-stat-card'];
@@ -1586,7 +1600,16 @@
             if (s.key !== null && s.key === siActiveStat) classes.push('active');
             if (s.key === '' && siActiveStat === '') classes.push('active');
             const onClick = s.key === null ? '' : ` onclick="siSetStatFilter('${s.key}')"`
-            return `<div class="${classes.join(' ')}"${onClick}><div class="u-stat-icon" style="background:${s.bg};">${s.icon}</div><div class="u-stat-info"><div class="u-stat-num">${s.n}</div><div class="u-stat-label">${s.label}</div></div></div>`;
+            // 拆解信息可选（当前仅「返工累计」用），无 title 的卡不渲染这些属性、不留空 title=""。
+            //   ⚠️ title 与 aria-label **成对**——照搬本页 SI_PRIORITY_LABEL / SI_RISK_LEVEL_LABEL 既有范式
+            //   （codex60 L-2 沉淀："title 给鼠标、aria-label 给屏幕阅读器/键盘"）：title 只在桌面悬停可见，
+            //   移动端/键盘/读屏全都拿不到，而本卡主数字改成合计后，"这个 1 是打回还是重开"只能靠拆解回答
+            //   （codex 339 MED-1）。role="img" 让读屏读 aria-label 整句、不逐个念内部数字与标签节点，
+            //   故 aria-label 必须自带标签+数字（不能只写拆解，否则读屏用户丢失主信息）。
+            const infoAttr = s.title
+                ? ` role="img" title="${esc(s.title)}" aria-label="${esc(`${s.label} ${s.n} 次：${s.title}`)}"`
+                : '';
+            return `<div class="${classes.join(' ')}"${onClick}${infoAttr}><div class="u-stat-icon" style="background:${s.bg};">${s.icon}</div><div class="u-stat-info"><div class="u-stat-num">${s.n}</div><div class="u-stat-label">${s.label}</div></div></div>`;
         }).join('');
     }
 
