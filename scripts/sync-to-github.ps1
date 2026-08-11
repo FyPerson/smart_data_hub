@@ -200,7 +200,12 @@ $excludeDirs = @(
     #   test-screenshots/（commit-cols 横滚证据等）与 __screenshots__/（v1.143 第四例已实锤 21 张）
     #   均为「渲染了本地库数据的二进制」，robocopy 层排除；本例 6 张已推送后即时摘除（faed96b），
     #   历史提交残留并入速览区 #14/#20 待拍。fail-closed 整体改造仍是 #20 正解，本条只是止血补丁。
-    "test-screenshots", "__screenshots__"
+    "test-screenshots", "__screenshots__",
+    # 2026-08-12 加入（同族又一例）：临时脚本**产出的截图目录**此前无任何模式覆盖——排除规则只盯着
+    #   `_demo-*.js` 脚本本身，没人管它们写出来的目录（_demo-badges-shots/ 即本次漏网者，21 张观察单
+    #   渲染自本地库）。robocopy /XD 收目录名（非路径），此处按名精确列；.gitignore 侧同批改为
+    #   `_demo-*/` 目录通配双保险。⚠️ 通则重申：脚本被排除 ≠ 它的产物被排除，两者要分别登记。
+    "_demo-badges-shots"
 )
 $excludeFiles = @(
     "task_pool.db", "task_pool.db-journal",

@@ -1742,10 +1742,9 @@
     // ⭐ 角色权限重构 v2.1 §6（S5 通知手动化）：列表行技术负责人通知徽章——tech_lead_id 非空时按
     //   notify_status 显「待发送」(amber)/「发送失败」(red)；sent 不显（漏发才需要在列表层就能看到，
     //   已发送是正常态不占视觉噪音）。
-    //   ⚠️⚠️ **前端待生效·依赖列表端点补列**：GET /sys-issues 当前显式列投影（index.js 约 3654 行 SELECT）
-    //   不含 tech_lead_id / tech_lead_notify_status，本函数在字段缺失时读到 undefined、静默不显示徽章
-    //   （零回归，不会因缺字段报错）——但也意味着在后端补列之前，本徽章**实际不会出现**。需要另一批
-    //   在允许改 routes/ 时给该 SELECT 追加这两列。
+    //   契约：依赖列表响应提供 tech_lead_id / tech_lead_notify_status / has_current_tech_lead_comment
+    //   三字段；缺任一则本函数读到 undefined、静默不显示徽章（不报错）。两端由
+    //   `scripts/verify-sys-list-badge-fields.js` 自动对拍，漏列即判红。
     function siTechLeadNotifyBadgeHtml(i) {
         if (!i.tech_lead_id) return '';
         // 193 复审 M 收口：已留言收口与详情红条同口径——当前轮已回复则不再提示发送（通知目的已达成）。

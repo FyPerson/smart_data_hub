@@ -5373,8 +5373,13 @@ module.exports = (deps) => {
         // [C8 风险/优先级双显·方案 v1.7 §9.2] risk_level 加入列表 SELECT——**只读扩字段**，纯展示用途
         //   （列表页优先级列改上下双行：上=优先级徽章、下=风险等级小字）。不加筛选、不加排序、不进任何
         //   写路径；C5 受理门 intake_accept 仍是该列唯一写点，本次零改动。
+        // ⚠️ 契约：本 SELECT 是列表页**唯一供数查询**，前端 renderSysIterationRows 消费的每个 `i.<字段>`
+        //   都必须在此列出——显式列投影下漏列不会报错，只会让对应渲染分支静默失效（`i.x` 恒 undefined）。
+        //   新增/改动列表徽章时同步补列；`scripts/verify-sys-list-badge-fields.js` 自动对拍两端并在漏列时判红。
+        //   blocked 属只读展示字段（唯一写点仍是 block/unblock 端点），不参与筛选/排序/写路径。
         `SELECT id, type, status, priority, risk_level, title, system_name, module_name, source,
                 assigned_to, assigned_to_name, scheduled_start, dev_estimated_at, deadline,
+                blocked,
                 created_by, created_by_name, requester_name, requester_dept,
                 origin_issue_id, release_id, needs_release, online_source,   -- ← [C9] deriveOnlineSourceKind 的输入之一（另两列 status/release_id 本就在）
                 release_assignee_id, release_assignee_name, release_assignee_notify_status,
