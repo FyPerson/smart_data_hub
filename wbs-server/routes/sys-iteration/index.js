@@ -5510,6 +5510,75 @@ module.exports = (deps) => {
                 -- （同 has_current_tech_lead_comment 范式：SQL 只出数，状态语义交给前端/调用方判断）。
                 (SELECT MAX(created_at) FROM sys_issue_timeline
                    WHERE issue_id = sys_issues.id AND action_code = 'hold') AS last_held_at,
+                -- [待上线可见性 20260812 v1.0·§3.1/D2] 「已移出」flag 判定 + 悬停三要素。
+                --   业务缺口：执行人移单只清 release_id、**status 保持「待上线」不变**（见 applyReleaseChange
+                --   移除分支），单据落入"显示待上线、实际不在任何批次"的悬空态；而"从未进过批次"的单在
+                --   列表里长得一模一样，建单人无从区分、更不知道自己的单已被人拿下来。两种悬空态靠本列
+                --   的 EXISTS 分开：有 release_remove 事件 = 被移出，无 = 从未排期。
+                --   ⚠️ 本列不做状态门控（同 has_current_tech_lead_comment/last_held_at 范式：SQL 只出数，
+                --   "待上线 ∧ release_id 为空"这两个条件由前端叠加）。
+                --   ⭐ [codex 348 号 MED 采纳·轮次锚点] 必须限定"**本轮待上线期间**发生的移出"，不能取
+                --   历史任意一次：单据走完 移出→加回→已上线→已关闭→reopen 重开→再流转回「待上线」之后，
+                --   历史那条 release_remove 依然在表里，若不按轮次过滤，这张**本轮从未进过批次**的单会被
+                --   错标成「已移出」（reopen 是真实高频动作，sys_issues 有 reopen_count 列即为证）。
+                --   锚点取"最近一次**验收通过进入**待上线"的 status_change 事件 id——移出必然发生在进入
+                --   待上线之后，故 "release_remove.id 大于锚点 id" 恰好圈出本轮。
+                --   ⭐⭐ [codex 349 号 HIGH 收口] 锚点**必须按 action_code 收窄**，不能取所有
+                --   to_status='待上线' 的 status_change 行：「待上线」态可以 hold（transitions.js 的 hold
+                --   条目 from 含「待上线」），而 resume 的目标态是动态解析回暂缓前活跃态，也会写一条
+                --   event_type='status_change' + to_status='待上线' 的行（三个流的 resume 条目 actionCode
+                --   均为 'resume'）。于是序列「进待上线 → 被移出 → 暂缓 → 恢复」会把锚点推到 resume 事件上、
+                --   落在 release_remove 之后 ⇒ EXISTS 判 0 ⇒ 真被移出的单错标成「未排期」。
+                --   收窄口径：只认 accept（真正开启新一轮待上线的唯一动作——全项目 to:'待上线' 的边仅
+                --   三个流的 accept 各一条，from 均为「待验证」）+ action_code IS NULL 的历史行
+                --   （早于 action_code 落库的老单，计入属保守兼容，宁可锚点偏早也不漏标）。
+                --   判定用 id 不用 created_at：id 是
+                --   AUTOINCREMENT 严格递增，created_at 只有 DEFAULT 没有 NOT NULL（本表 DDL）。
+                --   ⚠️ 该"当前轮"范式与本 SELECT 里 has_current_tech_lead_comment 的
+                --   "tl2.id 大于 sys_issues.tech_lead_notify_request_event_id" 同源，不是新发明。
+                --   ⚠️ 本段注释禁用反引号（整条 SQL 在 JS 模板字符串内，反引号会提前终止字符串——
+                --   本文件下方 commit 聚合列注释早写过这条禁令，本次落笔仍踩了一次，server 直接起不来）。
+                --   ⚠️ COALESCE 0 是**有意的向后兼容**：老单据的 timeline 若无 to_status='待上线' 的镜像行
+                --   （早于 timeline 全量镜像的历史单），锚点退化为 0 ⇒ 回到"历史任意移出即算"的旧口径。
+                --   这个方向是安全的（宁可多显一次「已移出」让人去看时间线，也不漏显真被移出的单）。
+                (SELECT EXISTS(SELECT 1 FROM sys_issue_timeline tlr WHERE tlr.issue_id = sys_issues.id
+                    AND tlr.action_code = 'release_remove'
+                    AND tlr.id > COALESCE((SELECT MAX(tla.id) FROM sys_issue_timeline tla
+                          WHERE tla.issue_id = sys_issues.id
+                            AND tla.event_type = 'status_change' AND tla.to_status = '待上线'
+                            AND (tla.action_code = 'accept' OR tla.action_code IS NULL)), 0)
+                )) AS has_release_remove,
+                -- 悬停三要素取**本轮最近一次**移出（同一轮内反复移出/加回时以末次为准）。
+                --   ⭐ [codex 349 号 MED 收口] 这三列带**与 has_release_remove 逐字相同**的轮次锚点谓词。
+                --   改前它们是"全历史 ORDER BY id DESC LIMIT 1"，靠一条推理保证一致（flag 显示时本轮那条
+                --   必是 id 最大）——推理本身成立，但"是否显示"与"显示什么"用两个不同谓词，属写读不同源：
+                --   判定谓词将来一改（本轮就改了一次），展示侧不会跟着报错，只会悄悄显示另一条记录。
+                --   宁可多写三遍谓词，也不让两列靠注释里的推理绑在一起。
+                --   ⚠️ 排序用 id DESC 不用 created_at DESC：id 是 AUTOINCREMENT 严格递增，而 created_at
+                --   只有 DEFAULT 没有 NOT NULL（本表 DDL），同秒多条或被显式写入时按时间排序不稳定；
+                --   与 commit 聚合列 ORDER BY id ASC 是同一条理由（录入顺序即真序）。
+                --   summary 为可空列，取到 NULL 时前端降级只显示操作人/时刻，不拼出"（原因：null）"。
+                (SELECT tlr.summary FROM sys_issue_timeline tlr WHERE tlr.issue_id = sys_issues.id
+                    AND tlr.action_code = 'release_remove'
+                    AND tlr.id > COALESCE((SELECT MAX(tla.id) FROM sys_issue_timeline tla
+                          WHERE tla.issue_id = sys_issues.id
+                            AND tla.event_type = 'status_change' AND tla.to_status = '待上线'
+                            AND (tla.action_code = 'accept' OR tla.action_code IS NULL)), 0)
+                    ORDER BY tlr.id DESC LIMIT 1) AS last_release_remove_summary,
+                (SELECT tlr.operator_name FROM sys_issue_timeline tlr WHERE tlr.issue_id = sys_issues.id
+                    AND tlr.action_code = 'release_remove'
+                    AND tlr.id > COALESCE((SELECT MAX(tla.id) FROM sys_issue_timeline tla
+                          WHERE tla.issue_id = sys_issues.id
+                            AND tla.event_type = 'status_change' AND tla.to_status = '待上线'
+                            AND (tla.action_code = 'accept' OR tla.action_code IS NULL)), 0)
+                    ORDER BY tlr.id DESC LIMIT 1) AS last_release_remove_by,
+                (SELECT tlr.created_at FROM sys_issue_timeline tlr WHERE tlr.issue_id = sys_issues.id
+                    AND tlr.action_code = 'release_remove'
+                    AND tlr.id > COALESCE((SELECT MAX(tla.id) FROM sys_issue_timeline tla
+                          WHERE tla.issue_id = sys_issues.id
+                            AND tla.event_type = 'status_change' AND tla.to_status = '待上线'
+                            AND (tla.action_code = 'accept' OR tla.action_code IS NULL)), 0)
+                    ORDER BY tlr.id DESC LIMIT 1) AS last_release_remove_at,
                 -- S2（贴图四件与工期测试段 20260805·三列一体设计）：末次进入「待验证」的单据级完成时刻
                 -- （Q5 拍板：列表只取末次，打回次数不进列表）。⚠️ 刻意不用 sys_issue_dev_events 的
                 -- submit/no_code MAX——多开发部分提交时那个 MAX 会把"还没好"的单误报出完成时间，

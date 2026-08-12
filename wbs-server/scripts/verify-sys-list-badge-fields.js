@@ -52,11 +52,15 @@ function stripComments(s) {
 
 const rowBody = extractFunctionBody(HTML, 'renderSysIterationRows');
 const tlBody = extractFunctionBody(HTML, 'siTechLeadNotifyBadgeHtml');
+// [待上线可见性 20260812] 新徽章 helper 必须**同时**进扫描面——否则它消费的新字段（has_release_remove
+//   等）对本守卫不可见，守卫照常全绿却什么也没覆盖（正是本守卫要防的 blocked 死分支的同款漏法）。
+const preBody = extractFunctionBody(HTML, 'siPrereleaseFlagHtml');
 must(!!rowBody, 'renderSysIterationRows 函数体可提取（提不到=守卫空转，不能当通过）');
 must(!!tlBody, 'siTechLeadNotifyBadgeHtml 函数体可提取');
-if (!rowBody || !tlBody) { console.log('\n=== FAIL：扫描面缺失 ==='); process.exit(1); }
+must(!!preBody, 'siPrereleaseFlagHtml 函数体可提取（待上线两 flag 的唯一判定出口）');
+if (!rowBody || !tlBody || !preBody) { console.log('\n=== FAIL：扫描面缺失 ==='); process.exit(1); }
 
-const consumeSrc = stripComments(rowBody + '\n' + tlBody);
+const consumeSrc = stripComments(rowBody + '\n' + tlBody + '\n' + preBody);
 const consumed = new Set();
 for (const m of consumeSrc.matchAll(/\bi\.([a-z_][a-z0-9_]*)\b/g)) consumed.add(m[1]);
 must(consumed.size >= 15, `前端消费字段实抓 ${consumed.size} 个（过少=正则失配，扫描面须非空）`);
@@ -100,6 +104,10 @@ const BADGE_FIELDS = [
   ['blocked', '受阻'], ['tech_lead_id', '技术负责人通知'], ['tech_lead_notify_status', '待发送/发送失败'],
   ['has_current_tech_lead_comment', '通知徽章收口判定'], ['last_held_at', '已暂缓 N 天'],
   ['origin_issue_id', '血缘 🔁基于#N'], ['risk_level', '风险等级'], ['priority', '优先级'], ['status', '状态徽章'],
+  // [待上线可见性 20260812] 两 flag 的判定与悬停三要素
+  ['release_id', '已移出/未排期（批次归属判定）'], ['has_release_remove', '已移出 vs 未排期 的区分依据'],
+  ['last_release_remove_summary', '已移出·悬停原因'], ['last_release_remove_by', '已移出·悬停操作人'],
+  ['last_release_remove_at', '已移出·悬停时刻'],
 ];
 for (const [f, label] of BADGE_FIELDS) {
   must(selected.has(f), `徽章「${label}」依赖字段 ${f} 在列表 SELECT 中`);

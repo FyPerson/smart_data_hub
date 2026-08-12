@@ -132,7 +132,7 @@
 /* 类型标签 base（修饰色 .t-single/.t-batch 等各页专属枚举颜色留页面内联） */
 .u-type-tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 500; white-space: nowrap; }
 
-/* ===== 状态语义色板（13 层 × 6 token）· 全站状态颜色唯一真相源 =====
+/* ===== 状态语义色板（14 层 × 6 token）· 全站状态颜色唯一真相源 =====
    —— 状态徽章统一（全徽章族）方案 20260808 v1.2 §1 定稿值，逐值照抄，禁止在别处复写具体色值 ——
 
    六 token 契约（复审 H-2）：bg/fg/bd 三色 + bds 边框形态 + dot 色点 + deco 文字修饰。
@@ -152,6 +152,15 @@
     --sem-review-bg: #fffbeb;   --sem-review-fg: #b45309;   --sem-review-bd: #fde68a;   --sem-review-bds: solid;  --sem-review-dot: #f59e0b;   --sem-review-deco: none;
     --sem-special-bg: #f5f3ff;  --sem-special-fg: #6d28d9;  --sem-special-bd: #ddd6fe;  --sem-special-bds: solid;  --sem-special-dot: #8b5cf6;  --sem-special-deco: none;
     --sem-staging-bg: #f0fdfa;  --sem-staging-fg: #0f766e;  --sem-staging-bd: #99f6e4;  --sem-staging-bds: solid;  --sem-staging-dot: #14b8a6;  --sem-staging-deco: none;
+    /* 第 14 层（待上线可见性方案 20260812 v1.0·D1/D1b）：「待上线」专属橙色相。
+       ⚠️ 新增而不是改 staging——staging 是「交付/传输」语义层，还被数据协作的 EXPORTING（导出中）/
+       TRANSFERRING（转发中）共用（Data_Collab.html:121 注释写明），改它会让那两个**进行中**状态一起变橙、
+       看着像警告。两个语义本就该分层，此前挤在一起是历史遗留。
+       换色相而非加深亮度的根因：旧值 #f0fdfa 与 archived 层 #f0fdf4 的 R/G 完全相同、B 仅差 6/255，
+       在肉眼分辨阈值外，「待上线」与「已归档」在列表里区分全靠 1px 边框和 6px 圆点——加深只能缓解。
+       层名 prerelease 与前端既有类名 .si-s-prerelease 对齐。dot/bg 对比 ≈2.6:1 落警示档不阻断
+       （同 review 层既有 2.07:1）；fg/bg ≈4.9:1 过 4.5 硬线。 */
+    --sem-prerelease-bg: #fff7ed; --sem-prerelease-fg: #c2410c; --sem-prerelease-bd: #fdba74; --sem-prerelease-bds: solid; --sem-prerelease-dot: #f97316; --sem-prerelease-deco: none;
     --sem-done-bg: #f0fdf4;     --sem-done-fg: #15803d;     --sem-done-bd: #bbf7d0;     --sem-done-bds: solid;  --sem-done-dot: #22c55e;     --sem-done-deco: none;
     --sem-hold-bg: #fefce8;     --sem-hold-fg: #854d0e;     --sem-hold-bd: #fef08a;     --sem-hold-bds: solid;  --sem-hold-dot: #eab308;     --sem-hold-deco: none;
     --sem-rejected-bg: #fef2f2; --sem-rejected-fg: #991b1b; --sem-rejected-bd: #fecaca; --sem-rejected-bds: solid;  --sem-rejected-dot: #ef4444; --sem-rejected-deco: none;
@@ -199,6 +208,7 @@
 .u-status-badge.sem-review   { --sb-bg: var(--sem-review-bg);    --sb-fg: var(--sem-review-fg);    --sb-bd: var(--sem-review-bd);    --sb-bds: var(--sem-review-bds);    --sb-dot: var(--sem-review-dot);    --sb-deco: var(--sem-review-deco); }
 .u-status-badge.sem-special  { --sb-bg: var(--sem-special-bg);   --sb-fg: var(--sem-special-fg);   --sb-bd: var(--sem-special-bd);   --sb-bds: var(--sem-special-bds);   --sb-dot: var(--sem-special-dot);   --sb-deco: var(--sem-special-deco); }
 .u-status-badge.sem-staging  { --sb-bg: var(--sem-staging-bg);   --sb-fg: var(--sem-staging-fg);   --sb-bd: var(--sem-staging-bd);   --sb-bds: var(--sem-staging-bds);   --sb-dot: var(--sem-staging-dot);   --sb-deco: var(--sem-staging-deco); }
+.u-status-badge.sem-prerelease { --sb-bg: var(--sem-prerelease-bg); --sb-fg: var(--sem-prerelease-fg); --sb-bd: var(--sem-prerelease-bd); --sb-bds: var(--sem-prerelease-bds); --sb-dot: var(--sem-prerelease-dot); --sb-deco: var(--sem-prerelease-deco); }
 .u-status-badge.sem-done     { --sb-bg: var(--sem-done-bg);      --sb-fg: var(--sem-done-fg);      --sb-bd: var(--sem-done-bd);      --sb-bds: var(--sem-done-bds);      --sb-dot: var(--sem-done-dot);      --sb-deco: var(--sem-done-deco); }
 .u-status-badge.sem-hold     { --sb-bg: var(--sem-hold-bg);      --sb-fg: var(--sem-hold-fg);      --sb-bd: var(--sem-hold-bd);      --sb-bds: var(--sem-hold-bds);      --sb-dot: var(--sem-hold-dot);      --sb-deco: var(--sem-hold-deco); }
 .u-status-badge.sem-rejected { --sb-bg: var(--sem-rejected-bg);  --sb-fg: var(--sem-rejected-fg);  --sb-bd: var(--sem-rejected-bd);  --sb-bds: var(--sem-rejected-bds);  --sb-dot: var(--sem-rejected-dot);  --sb-deco: var(--sem-rejected-deco); }
@@ -231,7 +241,7 @@
 
 /* ===== 通知状态文本 7 槽（通知统一 N1·2026-08-09·方案 §3.1）=====
    收编五页通知区的内联色值（现状成功绿 4 值 / 失败红 3 值 / 警示橙 3 值 / 中性灰 3 值，全内联硬编码）。
-   **零新色值**：7 槽全部借 13 层语义 token 的 fg 面；且**只设 color 一条属性**——这是纯文本槽不是徽章，
+   **零新色值**：7 槽全部借 14 层语义 token 的 fg 面；且**只设 color 一条属性**——这是纯文本槽不是徽章，
    背景/边框/圆点/删除线一律不带（徽章族走 .u-status-badge / .u-notify-badge，两族不得互相借形态）。
    借色登记（**借色值不借豁免资格**，与 verify-badge-alias.js 的 BORROWED_TIERS 同款口径）：
      · u-nt-muted 借 --sem-voided-fg、u-nt-idle 借 --sem-legacy-fg —— 借的只是**色值**，

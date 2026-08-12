@@ -28,13 +28,13 @@
 //      （`u-status-badge`/`u-type-tag`），不得残留裸 `status-badge`/`type-tag`。
 //
 //   ── 状态徽章统一 S1 新增（方案 20260808 v1.2 §1/§2.1/§2.2/§4-S1）─────────────────────
-//   ④ 语义色板：:root 唯一 + token 键集合与 13 层 × 6 后缀的笛卡尔积**精确相等**（多一个未知层/
-//      未知后缀/游离 token 都红）+ 声明条数恰为 78 + 每键仅定义一次（重复定义会静默覆盖）。
-//   ⑤ `.u-status-badge.sem-*` 13 条齐全；选择器必须**精确等于** `.u-status-badge.sem-<层>`
+//   ④ 语义色板：:root 唯一 + token 键集合与 14 层 × 6 后缀的笛卡尔积**精确相等**（多一个未知层/
+//      未知后缀/游离 token 都红）+ 声明条数恰为 84 + 每键仅定义一次（重复定义会静默覆盖）。
+//   ⑤ `.u-status-badge.sem-*` 14 条齐全；选择器必须**精确等于** `.u-status-badge.sem-<层>`
 //      （拒作用域前缀/组合选择器/同层重复——它们会造成"守卫读一条、浏览器级联用另一条"的分叉假绿）；
 //      每条六个 --sb-* 各**出现且仅出现一次**（漏写会退回 base fallback 变成半吊子继承，首审 H-1 成因；
 //      重复写则后者覆盖前者而断言取首个 = 又一处分叉）。
-//   ⑥ 语义类 → token 链路：13 层 × 6 键**逐项**严格等于 `var(--sem-<本层>-<本键>)`（引错层、写字面量
+//   ⑥ 语义类 → token 链路：14 层 × 6 键**逐项**严格等于 `var(--sem-<本层>-<本键>)`（引错层、写字面量
 //      色值都红）+ token 侧特殊值钉死（archived-bds=dashed / voided-deco=line-through，二者是"色之外
 //      的第二传义通道"，丢一个就退化为纯色区分）+ `--sem-*` **定义**不得出现在 components.css 之外
 //      （页面内联 <style> 重定义会以更高优先级覆盖共享层而守卫看不见；引用 var(--sem-*) 不算）。
@@ -115,14 +115,14 @@ function listPagesRecursive(dir, relBase) {
 const ALL_PAGES = listPagesRecursive(PUBLIC_DIR, '').sort();
 
 // 共享徽章体系的"符号面"——逐字对齐 components.css 里实际定义的类（不是凭印象列的）：
-//   .u-status-badge / .u-pri / .u-type-tag / .u-notify-badge 四个组件根类 + 13 个 .sem-* 语义层。
+//   .u-status-badge / .u-pri / .u-type-tag / .u-notify-badge 四个组件根类 + 14 个 .sem-* 语义层。
 //   未引 components.css 的页面写了这些 class，浏览器一条规则也匹配不到 —— 徽章退化成纯文本，
 //   而任何静态断言、任何 computed 抽样都不会去看那一页，缺陷可以一直活着。
 const SHARED_BADGE_CLASS_RE_SRC = '\\b(u-status-badge|u-pri|u-type-tag|u-notify-badge)\\b';
 const SEM_VAR_REF_RE_SRC = 'var\\(\\s*--sem-[\\w-]+';
 // ⚠️ 语义层类的正则**必须惰性构造**：SEM_TIERS 声明在本段之后（TDZ），在模块顶层求值会
 //   直接 ReferenceError。宁可每次现拼一个小正则，也不为省这点开销去挪 SEM_TIERS 的位置
-//   —— 那会让「13 层色板」这个真相源离它的一堆消费方更远。
+//   —— 那会让「14 层色板」这个真相源离它的一堆消费方更远。
 //   `(?<!-)` 是必需的：`--sem-done-bg` 里也含 `sem-done`，而 `-` 是非词字符 ⇒ `\bsem-done\b` 会命中它。
 //   不排掉的话，一处 token **定义/引用**会被同时报成"用了语义层类"，两条断言各红一次、其中一条
 //   说的还不是实情。token 面本来就有 SEM_VAR_REF_RE 和 ⑥c 两条各管一段，这里排掉不丢任何覆盖。
@@ -240,10 +240,12 @@ const OLD_NAMES = [
 ];
 
 // ── 状态徽章统一 S1 配置区 ────────────────────────────────────────────────
-// 语义层清单（13 层）。与 components.css :root 块、方案 v1.2 §1 色板表三方同源——
+// 语义层清单（14 层）。与 components.css :root 块、方案 v1.2 §1 色板表三方同源——
 // 加层/改层名必须三处同步，否则断言④⑤会立刻红灯（这正是它存在的意义）。
+// prerelease = 第 14 层（待上线可见性 20260812 v1.0·D1b），「待上线」专属橙色相，
+//   与 staging（交付/传输·数据协作 EXPORTING/TRANSFERRING 共用）分层而非改它。
 const SEM_TIERS = [
-    'wait', 'intake', 'active', 'review', 'special', 'staging',
+    'wait', 'intake', 'active', 'review', 'special', 'staging', 'prerelease',
     'done', 'hold', 'rejected', 'failed', 'archived', 'voided', 'legacy',
 ];
 
@@ -764,7 +766,8 @@ function extractSemRules(componentsCss) {
 // ── 断言④ token 集合精确相等 + 无重复定义（预筛 L1 收紧）──────────
 // 原版只查"该有的都在"（缺一报红），查不出三类问题：多出未知层（--sem-foo-bg）、
 // 多出未知后缀（--sem-done-shadow）、同一 key 定义两次（后者悄悄覆盖前者）。
-// 收紧为三问：总数恰为 78 / 键集合与 SEM_TIERS×SUFFIXES 笛卡尔积完全相等 / 每键仅定义一次。
+// 收紧为三问：总数恰为 84（14 层 × 6 后缀·加层时随 SEM_TIERS 自动重算，本行只是说明）/
+//   键集合与 SEM_TIERS×SUFFIXES 笛卡尔积完全相等 / 每键仅定义一次。
 function assertSemTokensComplete(decls) {
     if (decls === null) {
         check(false, 'components.css：存在 :root 语义色板块', '未找到 `:root { ... }` 块');
@@ -798,7 +801,7 @@ function assertSemTokensComplete(decls) {
         dupes.length ? `${dupes.length} 个 token 重复定义（后写的静默覆盖先写的）：${dupes.map((k) => '--sem-' + k).join(' | ')}` : '');
 }
 
-// ── 断言⑤ sem-* 13 条齐全 + 选择器形态合法 + 每变量出现且仅出现一次 ──────────
+// ── 断言⑤ sem-* 14 条齐全 + 选择器形态合法 + 每变量出现且仅出现一次 ──────────
 function assertSemClassesComplete(rules, anomalies) {
     // ⑤a 选择器形态（预筛 M2/M3）：作用域前缀、组合选择器、同层重复，都在提取阶段进 anomalies。
     check(anomalies.length === 0, 'components.css：sem-* 规则选择器形态合法（精确 .u-status-badge.sem-<层>·无重复·无合并书写）',
@@ -830,7 +833,7 @@ function assertSemClassesComplete(rules, anomalies) {
 
 // ── 断言⑥ 语义类 → token 链路（预筛 M2/M3 升级：2 键 → 六键全覆盖）──────────
 // 分两问，缺一不可：
-//   ⑥a 类侧——13 层 × **六个** --sb-* 是否**逐项恰好**引用本层同名 token（var(--sem-<本层>-<后缀>)）？
+//   ⑥a 类侧——14 层 × **六个** --sb-* 是否**逐项恰好**引用本层同名 token（var(--sem-<本层>-<后缀>)）？
 //       上一版只校 bds/deco 两键，bg/fg/bd/dot 只要是 var() 甚至直接写死色值都能过——而"写死色值"
 //       正是本次重构要消灭的东西（色板将不再是唯一真相源），"引错层"（sem-done 的 --sb-fg 引
 //       --sem-hold-fg）更是肉眼极难发现的错配。故六键全校、且严格比对整串。

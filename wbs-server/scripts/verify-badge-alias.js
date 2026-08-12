@@ -21,7 +21,7 @@
 //   ⑨  状态 key 全集 → 别名规则**逐个连通**：S0 矩阵实测的每个 key 都存在恰一条别名规则
 //       （少一条 = 该状态掉进 base 的 wait fallback 变中性灰，用户看不出是"没接线"还是"真的在等待"）。
 //   ⑩  每条别名规则**封闭**：规则体内只允许出现六个 `--sb-*` 声明，各一次，且逐项严格等于
-//       `var(--sem-<层>-<键>)`（层名须在 13 层集合内）。多出任何其他属性（border/text-decoration/
+//       `var(--sem-<层>-<键>)`（层名须在 14 层集合内）。多出任何其他属性（border/text-decoration/
 //       padding…）即红——别名规则的职责就是"指向哪一层"，一旦夹带具体样式，共享层就不再是单一
 //       真相源，且那些属性会绕过 token 直接生效（与 direct 色值双存同一类病）。
 //   ⑪  **白名单式**收口（22B·B-H5 方向反转）：页内 <style> 里凡是选择器沾到 `.u-status-badge`
@@ -115,9 +115,11 @@ const path = require('path');
 
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 
-// 13 个语义层（与 components.css :root、verify-unify-static.js 的 SEM_TIERS 三方同源）
+// 14 个语义层（与 components.css :root、verify-unify-static.js 的 SEM_TIERS 三方同源）
+//   prerelease = 第 14 层（待上线可见性 20260812 v1.0·D1b）：「待上线」专属橙色相，与 staging
+//   （交付/传输语义·数据协作 EXPORTING/TRANSFERRING 共用）分层，不是改 staging。
 const SEM_TIERS = [
-    'wait', 'intake', 'active', 'review', 'special', 'staging',
+    'wait', 'intake', 'active', 'review', 'special', 'staging', 'prerelease',
     'done', 'hold', 'rejected', 'failed', 'archived', 'voided', 'legacy',
 ];
 const SEM_TOKEN_SUFFIXES = ['bg', 'fg', 'bd', 'bds', 'dot', 'deco'];
@@ -326,7 +328,9 @@ const PAGE_ALIAS_SPECS = [
         // S0 矩阵：13 条 CSS / 12 条可达（scheduled 已无产出方，保留供历史徽章兜底 → legacy 层）
         tiers: {
             pending: 'wait', scheduled: 'legacy', intake: 'intake', revision: 'review',
-            dev: 'active', liaisontest: 'special', review: 'review', prerelease: 'staging',
+            // [待上线可见性 20260812·D1b] prerelease 由 staging 改指第 14 层同名 prerelease 层
+            //   （橙）——CSS 侧 .si-s-prerelease 已同步改引；这条映射不跟着改会当场红。
+            dev: 'active', liaisontest: 'special', review: 'review', prerelease: 'prerelease',
             released: 'done', closed: 'archived', hold: 'hold', rejected: 'rejected', void: 'voided',
         },
         // 本页是全站唯一原本就有 key→class 白名单的页：SI_STATUS_CLASS 的 **value 集**就是 class 片段
@@ -417,7 +421,7 @@ const PAGE_ALIAS_SPECS = [
     //   **页内没有、也不该有任何别名规则**——sem-* 的样式只在共享层 components.css。
     //   故断言形态相应改变：不校"每个 key 有别名规则"，改校
     //     ① frozen map 存在且键集与 expectStatuses 全等
-    //     ② map 的 value 必须是 13 层里的 `sem-<层>`
+    //     ② map 的 value 必须是 14 层里的 `sem-<层>`
     //     ③ 渲染点走 gate + 次数恰等
     //     ④ 页内不残留旧类输出（pf-badge / b-status）
     //     ⑤ 页内 <style> 里不得出现任何 sem-* 规则（写了就是把共享层的定义又抄了一份）
@@ -1368,9 +1372,9 @@ function assertSemModePage(check, spec) {
         check(diffs.length === 0, `${spec.file}：${spec.mapConst} 与期望映射逐对一致（${Object.keys(expected).length} 对）`,
             diffs.length ? `${diffs.length} 处：${diffs.join('；')}` : '');
 
-        // value 必须是 13 层之一的 sem-<层>——写错层名会静默落 base fallback
+        // value 必须是 14 层之一的 sem-<层>——写错层名会静默落 base fallback
         const badTier = [...actual.entries()].filter(([, v]) => !/^sem-([a-z]+)$/.test(v) || !SEM_TIERS.includes(v.slice(4)));
-        check(badTier.length === 0, `${spec.file}：${spec.mapConst} 的 value 均为合法 sem-<13 层之一>`,
+        check(badTier.length === 0, `${spec.file}：${spec.mapConst} 的 value 均为合法 sem-<14 层之一>`,
             badTier.length ? `${badTier.length} 处非法：${badTier.map(([k, v]) => `${k}=${v}`).join(' | ')}` : '');
     }
 
@@ -1541,7 +1545,7 @@ function assertPageAliases(check, spec) {
         const body = bodies[0];
         const tier = spec.tiers[k];
         if (!SEM_TIERS.includes(tier)) {
-            broken.push(`${spec.selector(k)} 配置的层 \`${tier}\` 不在 13 层集合内（守卫配置本身写错）`);
+            broken.push(`${spec.selector(k)} 配置的层 \`${tier}\` 不在 14 层集合内（守卫配置本身写错）`);
             continue;
         }
         const decls = declarationsOf(body);
@@ -2009,7 +2013,7 @@ function resolveValueSources(idNode, ctx) {
 //   ——片段前缀在**gate 的返回值里**，不在模板静态文本里，所以 sem 页上这条 `sem-` 分支当前**不可达**。
 //   即便将来有人写成 `u-status-badge sem-${x}`，也会先被该页的 rawConcatForbidden 负向前瞻拦下
 //   （它只放行 `${gate(` 开头）。此处保留 `sem-` 分支是为形态完整、不是当前生效的防线；
-//   真正管住 sem 页字面量层名的是「map value 均为合法 sem-<13 层之一>」那条断言。
+//   真正管住 sem 页字面量层名的是「map value 均为合法 sem-<14 层之一>」那条断言。
 //   语义偏差登记：该分支若真被触发，会用**状态键集**去校验一个**层名**字面量（两者不同集合），
 //   判据会失真 —— 触发前需先把校验集合换成 SEM_TIERS。当前不可达故不改，改了反而多一处没人验证的分支。
 const FRAGMENT_PREFIX_RE = /(?:^|\s)(?:si-s-|s-|status-|sem-)$/;
@@ -3285,7 +3289,7 @@ const SECONDARY_FAMILY_SPECS = [
         // 分类色不是状态色：口径二统一的是**前缀命名**，不是配色。故本族不做 token 化断言，
         //   改为断言"旧的裸类型名不得再有规则"（前缀确实换掉了）。
         tokenized: false,
-        tokenizedWhy: '四条是分类色（BUG/新功能/优化/配置变更），塞进 13 层状态语义会让"红=失败"这类既有认知在类型标签上失效',
+        tokenizedWhy: '四条是分类色（BUG/新功能/优化/配置变更），塞进 14 层状态语义会让"红=失败"这类既有认知在类型标签上失效',
         retiredClasses: ['bug', 'feature', 'improvement', 'config'],
         mapConst: 'SI_TYPE_CLASS',
         expectedMap: { bug: 't-bug', feature: 't-feature', improvement: 't-improvement', config: 't-config' },
@@ -3827,7 +3831,7 @@ function assertNotifyTextSlots(check) {
         if (decls.length !== 1) { problems.push(`.${s.cls} 含 ${decls.length} 条声明（文本槽只允许 color 一条，带 bg/border 就成徽章了）：${bodies[0]}`); continue; }
         const want = `color: var(--sem-${s.tier}-fg)`;
         const got = decls[0].replace(/\s+/g, ' ');
-        if (got !== want) problems.push(`.${s.cls} 实为 \`${got}\`，应为 \`${want}\`（零新色值＝只借 13 层 token 的 fg 面）`);
+        if (got !== want) problems.push(`.${s.cls} 实为 \`${got}\`，应为 \`${want}\`（零新色值＝只借 14 层 token 的 fg 面）`);
     }
     check(problems.length === 0, `通知文本 7 槽 u-nt-* 覆盖声明表一致（共享层定义唯一 + 只设 color + 全 token 化）`,
         problems.length ? `${problems.length} 处：${problems.join('；')}` : '');

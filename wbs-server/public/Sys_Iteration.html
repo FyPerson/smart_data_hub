@@ -7,7 +7,7 @@
     <title>系统迭代 - 智数协同平台</title>
     <link rel="icon" href="data:,">
     <link rel="stylesheet" href="assets/css/style.css?v=v1.141.0_badge2">
-    <link rel="stylesheet" href="assets/css/components.css?v=v1.142.0_notify1">
+    <link rel="stylesheet" href="assets/css/components.css?v=v1.152.0_prereleasetier1">
     <style>
         /* ============================================================
            系统迭代页 · 页面专属残留（共享组件层已迁移至 assets/css/components.css）
@@ -81,7 +81,7 @@
            〔状态徽章统一 S5a·口径二〕前缀改 `t-*`，与 Data_Correction 的 `.u-type-tag.t-single/t-batch`
            和 Issue_Tracker 的 `typeClass()` 产出 `t-{类型}` 对齐——本页是三页里最后一个还在用裸类型名的。
            ⚠️ **色值有意保留原值、不做 token 化**：这四条是**分类色**（BUG/新功能/优化/配置变更），
-           不是状态色。语义色板的 13 层表达的是"这条记录处在什么状态"，把分类硬塞进去会让
+           不是状态色。语义色板的 14 层表达的是"这条记录处在什么状态"，把分类硬塞进去会让
            "红色=失败"这类既有认知在类型标签上失效。口径二统一的是**前缀命名**，不是分类配色。 */
         .u-type-tag.t-bug { background: #fee2e2; color: #b91c1c; }
         .u-type-tag.t-feature { background: #dbeafe; color: #1d4ed8; }
@@ -113,11 +113,17 @@
         .si-s-revision { --sb-bg: var(--sem-review-bg); --sb-fg: var(--sem-review-fg); --sb-bd: var(--sem-review-bd); --sb-bds: var(--sem-review-bds); --sb-dot: var(--sem-review-dot); --sb-deco: var(--sem-review-deco); }    /* 待修改（退改需建单人改·提醒色·对齐 review 层"待验收/待修改"语义） */
         .si-s-dev { --sb-bg: var(--sem-active-bg); --sb-fg: var(--sem-active-fg); --sb-bd: var(--sem-active-bd); --sb-bds: var(--sem-active-bds); --sb-dot: var(--sem-active-dot); --sb-deco: var(--sem-active-deco); }
         /* [工期对接测试与风险等级拆分 方案 v1.1 §7·C4b] 待对接测试——feature 独有新态，插在开发中(蓝)
-           与待验证(黄)之间，取紫色系区分（不复用 prerelease 的青色，避免与"待上线"混淆）。
+           与待验证(黄)之间，取紫色系区分（不复用 prerelease 的色相，避免与"待上线"混淆）。
+           ⚠️ 原注写"prerelease 的青色"，2026-08-12 该层已换橙（第 14 层），此处只保留"不复用其色相"
+           这层仍成立的意思——避免注释停留在过期事实上。
            统一后落 special 层——该层在方案 §1 的语义定义正是"对接测试"，紫色系逐字延续。 */
         .si-s-liaisontest { --sb-bg: var(--sem-special-bg); --sb-fg: var(--sem-special-fg); --sb-bd: var(--sem-special-bd); --sb-bds: var(--sem-special-bds); --sb-dot: var(--sem-special-dot); --sb-deco: var(--sem-special-deco); }
         .si-s-review { --sb-bg: var(--sem-review-bg); --sb-fg: var(--sem-review-fg); --sb-bd: var(--sem-review-bd); --sb-bds: var(--sem-review-bds); --sb-dot: var(--sem-review-dot); --sb-deco: var(--sem-review-deco); }
-        .si-s-prerelease { --sb-bg: var(--sem-staging-bg); --sb-fg: var(--sem-staging-fg); --sb-bd: var(--sem-staging-bd); --sb-bds: var(--sem-staging-bds); --sb-dot: var(--sem-staging-dot); --sb-deco: var(--sem-staging-deco); }
+        /* [待上线可见性 20260812 v1.0·D1/D1b] 由 staging（青）改引 **第 14 层 prerelease（橙）**——
+           根因是与「已归档」(archived) 撞底色（#f0fdfa vs #f0fdf4，B 仅差 6/255，肉眼分辨阈值外），
+           换色相才根除。⚠️ 是**新增层**不是改 staging：staging 仍被数据协作 EXPORTING/TRANSFERRING
+           共用，改它会让那两个进行中状态一起变橙（详见 components.css 该层注释）。 */
+        .si-s-prerelease { --sb-bg: var(--sem-prerelease-bg); --sb-fg: var(--sem-prerelease-fg); --sb-bd: var(--sem-prerelease-bd); --sb-bds: var(--sem-prerelease-bds); --sb-dot: var(--sem-prerelease-dot); --sb-deco: var(--sem-prerelease-deco); }
         .si-s-released { --sb-bg: var(--sem-done-bg); --sb-fg: var(--sem-done-fg); --sb-bd: var(--sem-done-bd); --sb-bds: var(--sem-done-bds); --sb-dot: var(--sem-done-dot); --sb-deco: var(--sem-done-deco); }
         /* 〔S2 接线·映射依据〕closed 对应状态原值「已关闭」，而 siStatusDisplay() 把它的**用户可见
            文案**改显为「已归档」——即方案 §2.4「已归档 灰蓝→archived」说的就是本条（原色 #e2e8f0/#475569
@@ -144,6 +150,15 @@
         .si-flag.returned { color: #dc2626; }
         .si-flag.reopen { color: #dc2626; }
         .si-flag.blocked { color: #b91c1c; }
+        /* [待上线可见性 20260812 v1.0·D2/D3] 「待上线」单的批次归属两态（互斥，见 siPrereleaseFlagHtml）：
+           · removed「已移出」——红 #dc2626，与 returned/reopen 同色：有人**主动**把单拿下来了，
+             是需要建单人追问的异常（带 title 悬停显示原因/操作人/时刻）。
+           · unsched「未排期」——slate #64748b。刻意**否决琥珀** #d97706（会与新的橙色「待上线」状态
+             徽章撞，重蹈本次刚解决的撞色）、也**否决浅灰** #9ca3af（那是 lineage 血缘派生档，纯信息、
+             不需行动，压得太轻）。判据：状态徽章负责抓眼、flag 负责解释；且红色须是行内唯一醒目物，
+             否则「已移出」失去警报意义。 */
+        .si-flag.removed { color: #dc2626; }
+        .si-flag.unsched { color: #64748b; }
         .si-flag.lineage { color: #9ca3af; font-weight: 500; }
         .si-muted { color: #9ca3af; }
         /* commit号两列 C3（20260803·D3/D13）：新增列的宽度约束——列表已 11 列贴着 1920，加 3 列必须省着用。
@@ -1772,6 +1787,54 @@
             return `<span class="si-flag" style="color:#b45309">已暂缓 ${days} 天</span>`;
         } catch (e) { return ''; }
     }
+    // [待上线可见性 20260812 v1.0·§3.1/D2/D3/D4] 「待上线」单的批次归属 flag——两态**互斥**，单函数出口。
+    //   业务缺口：执行人移单只清 release_id、status 保持「待上线」不变，于是"被移出"和"从未排期"两种
+    //   单在列表里长得一模一样，建单人看不出自己的单已被人拿下来（生产 #12/#22 正是这两种成因）。
+    //   ⚠️ 三个判断一个都不能省：
+    //     ① status 门控——开发中/待处理的单 release_id 同样为 NULL，不门控会被误标成「未排期」；
+    //     ② release_id 非空即返回空串——这一条同时天然满足 D4「重新加回后两个 flag 都消失」。
+    //        ⚠️ 口径边界（codex 348 号 HIGH 收窄·如实写明不夸大）：本判断只能证明**字段非空**，
+    //        证明不了那个 release_id 指向的批次行还存在。「悬垂 release_id」（批次行被物理删除、指针
+    //        留着）这一形态在本平台当前**生产路径不可产生**——全项目 grep 核实 routes/ 目录零
+    //        `DELETE FROM sys_releases`（仅 scripts/ 里的测试夹具自造自删），且本库恒 foreign_keys=OFF
+    //        故 DB 也不会自动清指针。刻意不加"批次是否真实存在"的逐行子查询：这与同文件
+    //        deriveOnlineSourceKind 的既有权衡逐字同源（"读点是热路径（列表逐行），为一个展示标签
+    //        逐行发子查询不划算"）。⚠️ 将来若真给 sys_releases 开出删除端点，这里和那个函数必须同批改。
+    //     ③ has_release_remove 区分两态——它是后端 EXISTS 派生列，前端零自推导（防写读口径漂移）。
+    //        ⚠️ 显式三态（codex 348 号 MED 采纳）：只有明确的 1/true 才显「已移出」、明确的 0/false 才显
+    //        「未排期」；字段缺失或值不可识别 = **写读契约断裂**，此时两个 flag 都不显示并 console.error
+    //        一条，而不是默默落到「未排期」——那会把"后端漏列"这种自己人的 bug 显示成一句对建单人
+    //        言之凿凿的业务结论（对照组实测已证明旧写法就是这么错标的）。同
+    //        [feedback_single_flag_dual_semantic]「单标志双语义→谎报家族」的口径。
+    //   反复移出/加回（同一轮内）：末态 release_id 为 NULL + 本轮有 remove 记录 → 仍标「已移出」，正确。
+    //   跨轮次（归档后 reopen 再回到待上线）不会被历史移出污染——后端派生列已按"最近一次进入待上线"
+    //   的事件 id 做轮次锚点过滤，见该列注释。
+    //   契约：依赖列表响应提供 status / release_id / has_release_remove 三字段，悬停另需
+    //   last_release_remove_summary / _by / _at 三字段；两端由 scripts/verify-sys-list-badge-fields.js
+    //   自动对拍，漏列即判红（本函数已列入该守卫的扫描面）。
+    function siPrereleaseFlagHtml(i) {
+        if (i.status !== '待上线') return '';
+        if (i.release_id != null) return '';
+        const hasRemove = i.has_release_remove;
+        const isRemoved = (hasRemove === 1 || hasRemove === '1' || hasRemove === true);
+        const isNotRemoved = (hasRemove === 0 || hasRemove === '0' || hasRemove === false);
+        if (!isRemoved && !isNotRemoved) {
+            console.error('[系统迭代] 列表字段契约断裂：has_release_remove 缺失或不可识别（实得 '
+                + JSON.stringify(hasRemove) + '），单 #' + i.id + ' 的待上线 flag 已跳过渲染');
+            return '';
+        }
+        if (isNotRemoved) return `<span class="si-flag unsched">未排期</span>`;
+        // 悬停三要素：原因（可空，缺失时不拼"（原因：null）"）+ 操作人 + 时刻。summary 已是完整
+        //   中文句（如「执行人移出上线批次（原因：xxx）」），直接展示不再二次拼装，避免与后端文案分叉。
+        // 三要素一律先 String() 再拼（codex 350 号 MED）：模板串对非字符串值会隐式转换，
+        //   数字/Date 这类"能用但没约定过"的类型不该靠隐式行为，显式转换成本为零。
+        const parts = [];
+        if (i.last_release_remove_summary) parts.push(String(i.last_release_remove_summary));
+        if (i.last_release_remove_by) parts.push(`操作人：${String(i.last_release_remove_by)}`);
+        if (i.last_release_remove_at) parts.push(`时间：${String(i.last_release_remove_at)}`);
+        const title = parts.length ? parts.join('\n') : '该单曾被移出上线批次（原因未留痕）';
+        return `<span class="si-flag removed" title="${esc(title)}">已移出</span>`;
+    }
     function renderSysIterationRows(list) {
         const tb = document.getElementById('siTbody');
         if (!list.length) {
@@ -1791,6 +1854,7 @@
                 (Number(i.return_count) > 0 ? `<span class="si-flag returned">打回×${Number(i.return_count)}</span>` : '') +
                 (i.reopen_count ? `<span class="si-flag reopen">返工×${i.reopen_count}</span>` : '') +
                 (i.blocked ? `<span class="si-flag blocked">受阻</span>` : '') +
+                siPrereleaseFlagHtml(i) +
                 siTechLeadNotifyBadgeHtml(i) +
                 siHeldDaysHtml(i.status, i.last_held_at);
             const lineage = i.origin_issue_id ? `<span class="si-flag lineage">🔁基于#${i.origin_issue_id}</span>` : '';

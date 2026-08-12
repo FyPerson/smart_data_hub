@@ -33,7 +33,7 @@ const BASE_URL = `http://localhost:${PORT}`;
 const JWT_SECRET = process.env.JWT_SECRET;
 const DB_PATH = process.env.BADGE_DB_PATH || path.join(__dirname, '..', 'task_pool.db');
 
-// ── 13 层语义色板期望值（与 components.css :root 同源；改色值需同步这里）──────────
+// ── 14 层语义色板期望值（与 components.css :root 同源；改色值需同步这里）──────────
 // rgb() 形态用于与 getComputedStyle 返回值直接比对（浏览器统一把 hex 归一化成 rgb()）。
 const SEM = {
     wait: { bg: '#f8fafc', fg: '#64748b', bd: '#e2e8f0', bds: 'solid', dot: '#94a3b8', deco: 'none' },
@@ -42,6 +42,8 @@ const SEM = {
     review: { bg: '#fffbeb', fg: '#b45309', bd: '#fde68a', bds: 'solid', dot: '#f59e0b', deco: 'none' },
     special: { bg: '#f5f3ff', fg: '#6d28d9', bd: '#ddd6fe', bds: 'solid', dot: '#8b5cf6', deco: 'none' },
     staging: { bg: '#f0fdfa', fg: '#0f766e', bd: '#99f6e4', bds: 'solid', dot: '#14b8a6', deco: 'none' },
+    // 第 14 层（待上线可见性 20260812 v1.0·D1b）：「待上线」专属橙色相，与 staging 分层不改它
+    prerelease: { bg: '#fff7ed', fg: '#c2410c', bd: '#fdba74', bds: 'solid', dot: '#f97316', deco: 'none' },
     done: { bg: '#f0fdf4', fg: '#15803d', bd: '#bbf7d0', bds: 'solid', dot: '#22c55e', deco: 'none' },
     hold: { bg: '#fefce8', fg: '#854d0e', bd: '#fef08a', bds: 'solid', dot: '#eab308', deco: 'none' },
     rejected: { bg: '#fef2f2', fg: '#991b1b', bd: '#fecaca', bds: 'solid', dot: '#ef4444', deco: 'none' },
@@ -109,7 +111,8 @@ const PAGES = [
         badgeSelector: '.u-corr-table tbody .u-status-badge',
         classToTier: {
             'si-s-pending': 'wait', 'si-s-scheduled': 'legacy', 'si-s-intake': 'intake', 'si-s-revision': 'review',
-            'si-s-dev': 'active', 'si-s-liaisontest': 'special', 'si-s-review': 'review', 'si-s-prerelease': 'staging',
+            // [待上线可见性 20260812·D1b] si-s-prerelease 期望层由 staging 改为第 14 层 prerelease（橙）
+            'si-s-dev': 'active', 'si-s-liaisontest': 'special', 'si-s-review': 'review', 'si-s-prerelease': 'prerelease',
             'si-s-released': 'done', 'si-s-closed': 'archived', 'si-s-hold': 'hold', 'si-s-rejected': 'rejected',
             'si-s-void': 'voided',
         },
