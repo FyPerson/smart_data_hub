@@ -59,7 +59,7 @@ async function main() {
   for (const k of ['statusLabels', 'typeFlows', 'actions', 'bizSystems', 'initialStatusesByType']) {
     assert.ok(meta[k] !== undefined, `meta 缺字段 ${k}`);
   }
-  assert.deepStrictEqual(meta.bizSystems, ['BMS', 'HRD', 'OA', '智数协同', '其他'], 'bizSystems 应为 BIZ_SYSTEMS');
+  assert.deepStrictEqual(meta.bizSystems, ['BMS', 'HRD', 'OA', '智数协同', '电子签', '其他'], 'bizSystems 应为 BIZ_SYSTEMS');
   // 受理排期改造 §9：initialStatusesByType 新形状（{with_intake,without_intake} 每 type）——建单落态两分支权威。
   assert.strictEqual(meta.initialStatusesByType.feature.with_intake, '待受理', 'feature 受理模式初始态=待受理');
   assert.strictEqual(meta.initialStatusesByType.feature.without_intake, '待指派', 'feature 无受理初始态=待指派');

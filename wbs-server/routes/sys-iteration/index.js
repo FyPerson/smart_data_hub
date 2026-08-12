@@ -5956,7 +5956,11 @@ module.exports = (deps) => {
   //   生效（readSystemConfig 无法从本模块 seed·无 writeSystemConfig 注入，且部署日手工写库有遗漏风险）。
   //   config 一旦写入即以 config 为准（replace 语义·admin 若要保留 HRD 须在 config 里显式含 HRD）——
   //   清单是「配置化」的，默认只兜「从未配置过」这一档。
-  const DEFAULT_SINGLE_COMMIT_GROUP_SYSTEMS = ['HRD'];
+  // 2026-08-12 追加「电子签」（用户拍板·随 BIZ_SYSTEMS 新增电子签同批）：外采系统无自研前后端之分，
+  //   与 HRD 同档走单组「版本号」。**落代码默认而非写 config** 的理由同上行注释——本清单至今无任何写入
+  //   端点（仅一次性脚本 _set-sys-single-commit-group.js），本地/生产 config 均为空走本默认，随部署自动
+  //   一致，不必在部署日清单里加"记得写库"。若将来确需 config 覆盖，务必显式含 HRD+电子签（replace 语义）。
+  const DEFAULT_SINGLE_COMMIT_GROUP_SYSTEMS = ['HRD', '电子签'];
 
   // 读配置一次 → 命中系统 Set（批量场景复用·避免逐行 readSystemConfig 的 N 次 DB 往返）。格式照搬
   //   sys_release_default_executor_ids：**逗号串或 JSON 数组**皆可。畸形/空 → 回落 DEFAULT（不猜、不静默塌成空集）。

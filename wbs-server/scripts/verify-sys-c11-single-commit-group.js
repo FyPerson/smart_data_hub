@@ -178,6 +178,39 @@ async function selfCertifyProbes(label) {
     const rBms = await listRow(bms);
     assert.strictEqual(rBms.single_commit_group, false, 'A3：列表 BMS single_commit_group=false');
     ok('A3：列表 DTO 契约逐行下发（HRD 命中/BMS 非命中）+ 内部合并列 all_commit_refs 不外泄');
+
+    // A4（2026-08-12·随 BIZ_SYSTEMS 新增「电子签」同批·codex 341 MED 收口后升级为全集交叉断言）：
+    //   代码默认清单 × BIZ_SYSTEMS 全集**逐系统钉死命中/不命中两态**。
+    //   ⚠️ 本组存在的理由：E4 只断言「回落默认后 HRD 命中」，**没断言默认集合恰好=哪些系统**——
+    //   往 DEFAULT_SINGLE_COMMIT_GROUP_SYSTEMS 增删非 HRD 项，E4 照样全绿（改默认值时实测确认）。
+    //   ⚠️ 首版 A4 只断言「电子签命中」，同样只覆盖单点：**误加**第三个系统进默认清单仍全绿（codex 341
+    //   MED-1 打回）。故改为遍历 BIZ_SYSTEMS 全集，期望命中集之外的系统逐个断言**不命中**——
+    //   误删（期望命中的没命中）/误加（期望不命中的命中了）双向都判红。
+    //   ⚠️ 将来往 BIZ_SYSTEMS 加新系统时，本组会强制作者显式决定它进不进单组清单：新系统默认落在
+    //   EXPECTED_DEFAULT_SINGLE 之外，若实现里让它命中了，这里立刻红。**这是有意的摩擦，勿删。**
+    //   判定源同源：BIZ_SYSTEMS 走 I.transitions（=mod._internals.transitions，后端唯一权威），
+    //   不在测试里另抄一份清单（抄一份的话 BIZ_SYSTEMS 改了这里不会红，退化成永真守卫）。
+    const EXPECTED_DEFAULT_SINGLE = new Set(['HRD', '电子签']);
+    const allSystems = I.transitions.BIZ_SYSTEMS;
+    assert.ok(Array.isArray(allSystems) && allSystems.length >= 2, 'A4：BIZ_SYSTEMS 应为非空数组（判定源同源自检）');
+    for (const sysName of EXPECTED_DEFAULT_SINGLE) {
+      assert.ok(allSystems.includes(sysName), `A4：期望命中的「${sysName}」必须在 BIZ_SYSTEMS 内（否则本断言恒不生效=永真守卫）`);
+    }
+    for (const sysName of allSystems) {
+      const shouldHit = EXPECTED_DEFAULT_SINGLE.has(sysName);
+      const iss = await mkIssue('improvement', '开发中', { system_name: sysName, title: `A4-${sysName} 单` });
+      await mkMember(iss, 5, '开发甲', 'pending');
+      const d = await detailIssue(iss);
+      assert.strictEqual(d.issue.single_commit_group, shouldHit, `A4：${sysName} 详情 single_commit_group 应=${shouldHit}`);
+      assert.strictEqual(d.issue.group_label, shouldHit ? '版本号' : null, `A4：${sysName} 详情 group_label 应=${shouldHit ? '版本号' : 'null'}`);
+      assert.deepStrictEqual(d.issue.allowed_components, shouldHit ? ['backend'] : ['frontend', 'backend'],
+        `A4：${sysName} 详情 allowed_components 应=${shouldHit ? '[backend]' : '[frontend,backend]'}`);
+      const r = await listRow(iss);
+      assert.strictEqual(r.single_commit_group, shouldHit, `A4：${sysName} 列表 single_commit_group 应=${shouldHit}`);
+      assert.deepStrictEqual(r.allowed_components, shouldHit ? ['backend'] : ['frontend', 'backend'],
+        `A4：${sysName} 列表 allowed_components 应=${shouldHit ? '[backend]' : '[frontend,backend]'}`);
+    }
+    ok(`A4：代码默认清单 × BIZ_SYSTEMS 全集交叉钉死（${allSystems.length} 系统逐个验命中/不命中两态·命中集=${[...EXPECTED_DEFAULT_SINGLE].join('+')}）——误删/误加双向判红`);
   }
 
   // ══════════════════════════════════════════════════════════════════════
@@ -351,6 +384,23 @@ async function selfCertifyProbes(label) {
     assert.strictEqual((await detailIssue(hrd)).issue.single_commit_group, true, 'E3：config=JSON ["HRD"] → HRD 命中');
     assert.strictEqual((await detailIssue(oa)).issue.single_commit_group, false, 'E3：config=JSON ["HRD"] → OA 不命中');
     ok('E3：config JSON 数组形态——["HRD"] 命中 HRD');
+
+    // E3b（2026-08-12·随「电子签」同批·codex 342 LOW 收口）：**非 ASCII 系统名**走 config 分支。
+    //   ⚠️ 存在理由：E1-E3 的系统名全是 ASCII（HRD/OA），而「电子签」是中文——config 解析链
+    //   （split(',') / JSON.parse / trim / Set.has 比对 / 与 system_name 列值等值判定）对多字节
+    //   字符串从未被任何用例证明过。A4 只走 config 缺省分支，覆盖不到这里。
+    //   注：本组验的是**解析链**；config 值的 AES 加解密往返不在此（E 组用 readSystemConfig 桩，
+    //   不经 encrypt/decrypt）。加解密往返另经一次性探针实测确认（中文 hex 往返无损）。
+    const esignE = await mkIssue('improvement', '开发中', { system_name: '电子签', title: 'E3b-电子签' });
+    await mkMember(esignE, 5, '开发甲', 'pending');
+    configValue = 'HRD,电子签';
+    assert.strictEqual((await detailIssue(esignE)).issue.single_commit_group, true, 'E3b：config 逗号串含中文 → 电子签命中');
+    assert.strictEqual((await detailIssue(hrd)).issue.single_commit_group, true, 'E3b：config=HRD,电子签 → HRD 同时命中');
+    assert.strictEqual((await detailIssue(oa)).issue.single_commit_group, false, 'E3b：config=HRD,电子签 → OA 不命中（对照组）');
+    configValue = '["电子签"]';
+    assert.strictEqual((await detailIssue(esignE)).issue.single_commit_group, true, 'E3b：config=JSON ["电子签"] → 电子签命中');
+    assert.strictEqual((await detailIssue(hrd)).issue.single_commit_group, false, 'E3b：config=JSON ["电子签"] → HRD 掉出（replace 语义对中文同样成立）');
+    ok('E3b：非 ASCII 系统名走 config——逗号串/JSON 两形态均命中电子签 + replace 语义对中文成立（对照组 OA/HRD 不命中）');
 
     // E4：config 空串 / 畸形 JSON → 回落代码默认 HRD
     configValue = '   ';
