@@ -329,21 +329,31 @@ async function main() {
     });
     assert.strictEqual(r.status, 200, `[⑦ 前置] 首轮 submit（带原因）应 200，实得 ${r.status} ${JSON.stringify(r.body)}`);
     assert.strictEqual(r.body.main_status, '待验证', '[⑦ 前置] 单人 bug 单首轮完成 → W-GATE 同事务转「待验证」');
+    // [codex 344 LOW-2 收口] **在 return 之前**捕获 dev5 当前在册实例 id，后面按这个 id 断言它被归档。
+    //   比"查已归档实例并要求恰有一条"更准：后者在本就支持多轮的夹具里，一旦将来多打回一次就会有
+    //   多条历史实例而失败，且它锁定的是"某条历史实例"而非"本次 return 前的那一条"。
+    const da5BeforeReturn = (await get(
+      `SELECT id FROM sys_issue_dev_assignees WHERE issue_id=? AND user_id=5 AND removed_at IS NULL`, [id7])).id;
     r = await call('POST', `/api/sys-issues/${id7}/return`, adminTok, { reason: '验收发现遗漏场景，打回重做' });
     assert.strictEqual(r.status, 200, `[⑦ 前置] return 应 200，实得 ${r.status} ${JSON.stringify(r.body)}`);
     assert.strictEqual(r.body.status, '处理中', '[⑦ 前置] return 后回「处理中」');
-    // 「完成态不回 pending」不变量（verify-sys-bug-transitions.js 既有"二轮"范式逐字照抄）：return 只清
-    //   sys_issues 主表字段，不碰 dev_assignees 子表——dev 5 的旧行仍是 code_submitted，必须先扩容(临时加
-    //   dev6)才能绕开 LAST_ASSIGNEE 移除旧完成态实例，再 re-add dev5 拿一个全新 pending 实例。
-    r = await call('POST', `/api/sys-issues/${id7}/dev-assignees`, adminTok, { user_ids: [6] });
-    assert.strictEqual(r.status, 200, `[⑦ 前置] 临时加协作(6) 应 200，实得 ${r.status} ${JSON.stringify(r.body)}`);
-    const oldDa7 = r.body.dev_assignees.find(d => d.user_id === 5);
-    assert.ok(oldDa7, '[⑦ 前置] 应能定位 dev5 的旧完成态实例');
-    assert.strictEqual(oldDa7.dev_status, 'code_submitted', '[⑦ 前置] dev5 旧实例 dev_status 仍是 code_submitted（return 不碰子表，验证不变量本身）');
-    r = await call('DELETE', `/api/sys-issues/${id7}/dev-assignees/${oldDa7.id}`, adminTok, { reason: '二轮重置旧完成态实例' });
-    assert.strictEqual(r.status, 200, `[⑦ 前置] remove 旧完成态实例应 200，实得 ${r.status} ${JSON.stringify(r.body)}`);
-    r = await call('POST', `/api/sys-issues/${id7}/dev-assignees`, adminTok, { user_ids: [5] });
-    assert.strictEqual(r.status, 200, `[⑦ 前置] re-add dev5 应 200，实得 ${r.status} ${JSON.stringify(r.body)}`);
+    // [2026-08-12 打回自动重开一轮] 本段原先手工执行"标准重置路径"（临时加 dev6 绕开 LAST_ASSIGNEE →
+    //   remove dev5 旧完成态实例 → re-add dev5），因为当时 return 只清主表、不碰子表。现在 return 在引擎
+    //   内**自动**完成同一套 remove+re-add，手工三步已无必要（且会失败：此刻 dev5 在册行已是新 pending 实例）。
+    //   ⚠️ 「完成态不回 pending」(§1 不变量1/B4b) **依然成立且必须在此验证**——变的是"谁来执行重置路径"，
+    //   不是"完成态可以原地回退"。故改为双向断言：旧实例被软删且 dev_status 原样保持 code_submitted
+    //   （分轮留痕的载体，:5849 的 MAX(id) per 实例聚合依赖它），新实例是全新 pending 行。
+    //   按 return 前捕获的那条实例 id 精确断言（不依赖"历史实例总数=1"这个会随夹具演进失效的假设）。
+    const oldDa7Row = await get(
+      `SELECT id, dev_status, removed_at FROM sys_issue_dev_assignees WHERE id = ?`, [da5BeforeReturn]);
+    assert.ok(oldDa7Row && oldDa7Row.removed_at, '[⑦ 前置] return 应把 dev5 首轮完成态实例软删归档');
+    assert.strictEqual(oldDa7Row.dev_status, 'code_submitted', '[⑦ 前置] ⭐ B4b：旧实例 dev_status 原样保持 code_submitted（未被原地改回 pending，首轮 bug_cause_note 的载体不被覆盖）');
+    const newDa7Row = await get(
+      `SELECT id, dev_status FROM sys_issue_dev_assignees
+        WHERE issue_id = ? AND user_id = 5 AND removed_at IS NULL`, [id7]);
+    assert.ok(newDa7Row, '[⑦ 前置] return 应为 dev5 开出新的在册实例');
+    assert.strictEqual(newDa7Row.dev_status, 'pending', '[⑦ 前置] ⭐ 新实例为 pending（开发可自助走第二轮，无需 admin 手工 remove+re-add）');
+    assert.ok(newDa7Row.id > oldDa7Row.id, '[⑦ 前置] 新实例 id 必大于旧实例（事件 id 序=轮次序的前提）');
     // return 清了 dev_estimated_at（issue 级字段），二轮需重新回填才能过 ESTIMATE_REQUIRED 闸。
     r = await call('POST', `/api/sys-issues/${id7}/estimate`, devTok, { dev_estimated_at: futureEst(11) });
     assert.strictEqual(r.status, 200, `[⑦ 前置] 二轮重新 estimate 应 200，实得 ${r.status} ${JSON.stringify(r.body)}`);
@@ -376,7 +386,7 @@ async function main() {
     const records7 = detail7.body.bug_cause_records;
     assert.ok(Array.isArray(records7), '[⑦ bug_cause_records] 应为数组');
     assert.strictEqual(records7.length, 2, `[⑦ bug_cause_records] ⭐ 应恰含两轮记录（首轮 removed 实例 + 二轮在册实例），实得 ${JSON.stringify(records7)}`);
-    const rec7Round1 = records7.find(r => r.dev_assignee_id === oldDa7.id);
+    const rec7Round1 = records7.find(r => r.dev_assignee_id === oldDa7Row.id);
     const rec7Round2 = records7.find(r => r.dev_assignee_id === before7.daId);
     assert.ok(rec7Round1, '[⑦ bug_cause_records] 应含首轮（旧 dev_assignee_id）记录');
     assert.ok(rec7Round2, '[⑦ bug_cause_records] 应含二轮（新 dev_assignee_id）记录');

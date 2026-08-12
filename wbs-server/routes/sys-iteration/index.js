@@ -3879,6 +3879,86 @@ module.exports = (deps) => {
         }
       }
 
+      // [验收打回/重开自动重开一轮·2026-08-12 用户拍板] return/reopen 对完成态成员执行 remove + re-add。
+      //   ⚠️ **不是**照搬上方 liaison_test_return 的原地重置——那样会打破 §1 不变量1「完成态不回 pending」
+      //   （B4b）。该不变量不是历史包袱，是 :5849 那套分轮留痕的前提：`bug_cause_records`/`noCodeRecords`/
+      //   `workNoteRows` 都按 **MAX(id) per dev_assignee_id** 取"该实例最近一次提交事件"，其无损性恰恰
+      //   依赖"dev_status CAS 单向 ⇒ 同一实例至多一条 submit/no_code 事件"。原地把 code_submitted 改回
+      //   pending 就等于放开「同实例重复提交」，第二轮事件的 id 更大 ⇒ **第一轮的 bug 产生原因/无代码说明
+      //   被静默丢弃**（:5851 注释已预告这个后果）。故本实现走系统自己认定的"标准重置路径 remove+re-add"
+      //   （:5837），旧实例连同其 dev_status 与全部留痕原样封存，新实例开新一轮。
+      //   ⚠️ **顺序与 reassign 的"先插新再移旧"相反**：那里 toAdd/toRemove 是不同的人，本处是同一个人，
+      //   受 partial unique index `idx_sys_dev_assignee_active (issue_id,user_id) WHERE removed_at IS NULL`
+      //   约束，必须先软删旧行让出在册位、再插新行，颠倒即撞唯一约束。
+      //   ⚠️ 逐状态口径与 liaison_test_return 一致：只处理 code_submitted/no_code；excused 不动（豁免
+      //   语义不因打回被拉回队列）；pending 不动（本就能提交，重开会白白丢掉其既有实例 id 与关联事件）。
+      //   ⚠️ 不复用 addOrReaddMembers：该 helper 会查 users 表并对「用户不存在 / 已降为 viewer」抛 400——
+      //   那是 admin 主动加人时的正确行为，但本处是**打回的自动连带动作**，开发账号事后被停用/降权不应
+      //   反过来让 admin 打不回单子。user_name 改为"能重算就重算、否则沿用旧行快照"，不引入任何失败面。
+      //   （既有先例：reassign 同样因"语义不同不该硬复用"而内联，见 :2915 注释。）
+      if (action === 'return' || action === 'reopen') {
+        const finishedRows = await dbAllAsync(
+          `SELECT id, user_id, user_name FROM sys_issue_dev_assignees
+            WHERE issue_id = ? AND removed_at IS NULL AND dev_status IN ('code_submitted', 'no_code')
+            ORDER BY id ASC`,
+          [issueId]
+        );
+        let reopenedCount = 0;
+        for (const oldRow of finishedRows) {
+          // ⓪ 账号资格前置判定（codex 343 HIGH-1 收口）——**必须在软删之前**，否则会出现"软删了却没
+          //   新建"⇒ 成员凭空消失。判据逐字照抄本文件既有同款场景 :5168（`!u || status!=='active' ||
+          //   role==='viewer'` → 跳过并记录），不自创口径。
+          //   ⚠️ 为什么"跳过"而不是"照旧 re-add"：无条件 re-add 会给已停用/已降为 viewer 的账号造出一个
+          //   **不可行动的 pending 成员**——他在前端看不到提交按钮、后端也不放行，死锁只是从「无 pending」
+          //   换形态成「有 pending 但没人能动」，反而更难诊断（codex 343 HIGH-1 原话）。
+          //   ⚠️ 为什么不整体报错阻断打回：账号事后被停用/降权是人事侧的正常变动，不应反过来让 admin
+          //   打不回单子。跳过的成员保持完成态在册（数据不动），admin 可用改派把单子交给在岗的人——
+          //   这条路本来就存在，且此时死锁的真实根因是"人已不可用"而非本机制。
+          const u = await dbGetAsync('SELECT display_name, username, role, status FROM users WHERE id = ?', [oldRow.user_id]);
+          if (!u || u.status !== 'active' || u.role === 'viewer') {
+            logger.warn(`[系统迭代] ${action} 重开一轮跳过不可参与账号：issue=${issueId} user_id=${oldRow.user_id}(${oldRow.user_name}) ` +
+              `原因=${!u ? '用户不存在' : (u.status !== 'active' ? `账号状态 ${u.status}` : '角色为 viewer')}；` +
+              `该成员保持完成态在册，如需继续开发请改派给在岗成员`);
+            continue;
+          }
+          // ① 软删旧实例——状态机三件套（双条件守卫含 removed_at IS NULL + changes===1 + 失败阻断）。
+          //   刻意**不动** dev_status：旧实例必须保持 code_submitted/no_code，这正是 B4b 与分轮留痕的载体。
+          const rmUpd = await dbRunAsync(
+            `UPDATE sys_issue_dev_assignees SET removed_at = datetime('now','localtime')
+              WHERE id = ? AND issue_id = ? AND removed_at IS NULL`,
+            [oldRow.id, issueId]
+          );
+          if (!rmUpd || rmUpd.changes !== 1) {
+            throw new SysTransitionError(409, 'GATE_INVARIANT',
+              `${action} 重开一轮失败：旧实例(id=${oldRow.id})软删异常（changes=${rmUpd && rmUpd.changes}）`);
+          }
+          // ② 插新 pending 实例（同一 user_id 的新一轮）。user_name 取 ⓪ 已查到的行重算，回退旧快照。
+          const userName = u.display_name || u.username || oldRow.user_name;
+          const insRes = await dbRunAsync(
+            `INSERT INTO sys_issue_dev_assignees (issue_id, user_id, user_name, is_primary, dev_status) VALUES (?, ?, ?, 0, 'pending')`,
+            [issueId, oldRow.user_id, userName]
+          );
+          // action='re-add' 是 DDL CHECK 既有枚举（:972），语义正是"曾有历史行的同一人重新入册"。
+          //   ⚠️ 旧实例 id 走 **payload** 而非 relatedDevAssigneeId：恒真探针 P10 是**双向**约束
+          //   （supersede-excuse ⇒ related 必非空；其它 action ⇒ 必空，见 lib/sys-multidev-probes.js:205）。
+          //   本处初版挂了 related，被 S10n 的 P10 当场判红——related 是 supersede-excuse 的专属链路字段，
+          //   不是通用"关联实例"槽。放宽 P10 会削弱一条恒真不变量去迁就一个新场景，不划算；payload 同样
+          //   能让"新一轮承接自哪个旧实例"可追，且不动任何既有约束。
+          await insertDevEvent({
+            issueId, devAssigneeId: insRes.lastID,
+            action: 're-add', reason: `${action === 'return' ? '验收打回' : '重开'}自动重开一轮`,
+            operatorId: actor.id,
+            payload: { superseded_dev_assignee_id: oldRow.id, trigger: action },
+          });
+          reopenedCount++;
+        }
+        // 与其余所有成员变动点一致收尾。判据用**实际重开数**而非 finishedRows.length——全部成员都被 ⓪
+        //   跳过时花名册一行未动，此时调 electRepresentative 是纯多余（与"零可重开成员"分支同口径）。
+        //   本场景 user_id 集合不变、现任代表必仍在册（判据①命中），故 assigned_to 恒不变、M2 的
+        //   notify 五列重置不会触发；调用是为与既有范式统一 + 防判据演进。
+        if (reopenedCount > 0) await electRepresentative(issueId);
+      }
+
       // ⭐⭐ PH-2 挂载点改造（C2.5 撤销·方案 v2.1 §2 矩阵·helper 本体不变）：原挂"离开待商议"两条边
       //   （随预沟通段废除退场）。新挂三条边——离开「待受理」且可能带着"未回复"咨询的路径：
       //   ① bug 的 issue_reject（from=待受理·admin·无 R2 意见前置守卫→可能带未回复咨询·188 号审 H2）

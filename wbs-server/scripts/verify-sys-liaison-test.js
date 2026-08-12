@@ -678,7 +678,8 @@ async function main() {
 
     // [6h] ⭐ 跨周期反证（codex 291 号 M-3 收口重写）：第一轮进入之后新传的附件在本轮 pass 有效（正面）
     //   → 业务验收打回（return：待验证→开发中，非 liaison_test_return——本单已离开「待对接测试」进
-    //   「待验证」，只有业务打回适用，且该 case 不重置花名册③层，primary 仍是 code_submitted）→ 补填
+    //   「待验证」，只有业务打回适用；⚠️ 2026-08-12 起 return **会自动 remove+re-add**，primary 的完成态
+    //   实例被软删归档、另开新 pending 实例，故下方前置须让他重新提交，详见该处夹具注释）→ 补填
     //   预计完成 + 新增一名待处理成员触发 GATE 重新进入第二轮 → 第二轮新水位=当前 max 附件 id（已把
     //   第一轮那个"旧"附件圈进水位内）→ 该旧附件 id ≤ 新水位，不再计入第二轮凭证，无新凭证 pass 仍
     //   400（真正证明"跨轮不可复用"，而非停留在"打回前"这种较弱证明力）。⭐ 同秒场景在 id 水位模型下
@@ -708,9 +709,22 @@ async function main() {
       //   C7 起 GATE 对 feature/improvement 两 nf 值都查工期 → 只补预计完成、不补工期，第二轮仍会卡在
       //   gate_deferred_at 走不到 ⑦。两个字段必须一起补，才是返工后重填资格的完整模拟。
       await run(`UPDATE sys_issues SET dev_estimated_at=?, estimated_effort_days=1 WHERE id=?`, [futureEst(30), id]);
-      // ⚠️ 不复用 user_id=6（历史在册，DDL UNIQUE(issue_id,user_id) 不因软删/excused 放行重插）——
-      //   新一轮新增成员须用一个尚未在本单出现过的 user_id（同批2既有范式）。
+      // ⚠️ 不复用 user_id=6（历史在册且为 excused=removed_at IS NULL，partial unique index
+      //   `(issue_id,user_id) WHERE removed_at IS NULL` 仍占位，不放行重插）——新一轮新增成员须用一个
+      //   尚未在本单出现过的 user_id（同批2既有范式）。
       const daSecond2 = await mkMember(id, 8, '开发丁', 'pending');
+      // [2026-08-12 打回自动重开一轮·夹具适配] 上方注释原写「该 case 不重置花名册③层，primary 仍是
+      //   code_submitted」——那是 return 自动 remove+re-add 上线**前**的行为（注释同批订正见该处）。
+      //   现在 return 会把开发甲的完成态实例软删归档、另开一个新 pending 实例，故必须让他**重新提交**
+      //   才能重新凑齐全完成态，否则 excuse 开发丁后 roster 仍有一名 pending，GATE 不进 ⑦。
+      //   ⚠️ **三步顺序不可调换**：必须「先加开发丁 pending → 再让开发甲提交 → 最后 excuse 开发丁」。
+      //   若先让开发甲提交（此刻他是单人 roster），会立即凑齐全完成态触发一次 GATE 进入待对接测试，
+      //   cycle_no 先 +1；随后加人弹回、excuse 再进又 +1 ⇒ 终值 3，下方 `cycle_no=2` 断言假红。
+      //   本顺序下每一步都不满足全完成态，GATE 只在最后 excuse 那一下触发一次。
+      const resubmit6h = await call('POST', `/api/sys-issues/${id}/submit`,
+        jwt.sign({ id: 5, username: 'dev5', display_name: '开发甲', role: 'user' }, SECRET),
+        { mode: 'no_code', no_code_reason: '[6h] 打回后重新提交（占位理由）', self_tested: true, test_env_deployed: true });
+      assert.strictEqual(resubmit6h.status, 200, `[6h] 前置：打回重开一轮后开发甲重新提交应 200，实际 ${resubmit6h.status} ${JSON.stringify(resubmit6h.body)}`);
       await triggerGateViaExcuse(id, daSecond2, '[6h] 第二轮进入测试段');
       assert.strictEqual(await statusOf(id), '待对接测试', '[6h] 前置：第二轮再次进入待对接测试');
       const row2 = await issueRow(id);
@@ -796,6 +810,158 @@ async function main() {
     assert.strictEqual(tl.action_code, 'liaison_test_return', '[7] timeline action_code=liaison_test_return');
     assert.strictEqual(tl.summary, '测试发现三处问题，需返工', '[7] timeline summary=reason 原文');
     ok('[7] liaison_test_return 正例：原因必填(400 反例) + 花名册重置(code_submitted/no_code→pending·excused 不动) + 字段清理套餐(dev_estimated_at/工期/评估/gate_deferred_at) + ⭐ D18 return_count 恒定不变(既不清零也不递增) + 周期号不动');
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // [7b] ⭐ 验收打回(return)/重开(reopen) 自动重开一轮——2026-08-12 用户拍板
+  //   与 [7] 并列放置是有意的：两条打回边解决**同一个问题**（让开发能重新提交）却走**不同机制**——
+  //   liaison_test_return 原地重置 dev_status，return/reopen 走 remove + re-add。差异不是随意的：
+  //   §1 不变量1「完成态不回 pending」(B4b) 是 index.js:5849 那套分轮留痕的前提（bug_cause_records /
+  //   noCodeRecords / workNoteRows 均按 MAX(id) per dev_assignee_id 取"该实例最近一次提交事件"，
+  //   其无损性依赖"同一实例至多一条 submit 事件"）。原地重置=放开「同实例重复提交」⇒ 第一轮的 bug
+  //   产生原因被静默丢弃（:5851 已预告该后果）。故本边改走系统自己认定的"标准重置路径"(:5837)：
+  //   旧实例连同 dev_status 与全部留痕封存，新实例开新一轮。
+  //   ⚠️ 修复前的真实症状（生产 #23·bug·验收打回 1 次）：打回清空 dev_estimated_at（期待重走一轮），
+  //   却把完成态实例留在册 ⇒ 前端 canSubmit（本人 dev_status==='pending'）恒 false ⇒「标记完成」按钮
+  //   消失；而 estimate 属 W06 动作不分 dev_status ⇒ 开发**能填预计完成时间却不能提交**，界面无提示。
+  //   补救路径 remove+re-add 当时只能由 admin 手工执行，且无任何入口引导。
+  // ══════════════════════════════════════════════════════════════════════
+  {
+    const devTok5 = jwt.sign({ id: 5, username: 'dev5', display_name: '开发甲', role: 'user' }, SECRET);
+
+    // ── [7b-1] bug 验收打回：旧实例封存 + 新实例 pending + 端到端"打回→回填→提交"（复现生产 #23 全链路）──
+    const id = await mkIssue('bug', '待验证', { intakeLiaisonId: 13 });
+    const b1 = await mkMember(id, 5, '开发甲', 'code_submitted');
+    const b2 = await mkMember(id, 6, '开发乙', 'no_code');
+    const b3 = await mkMember(id, 7, '开发丙', 'excused');
+    // assigned_at 必须种：本组端到端要真调 /estimate，该端点有「预计完成不得早于指派时刻」闸门，
+    //   缺值直接 409 ASSIGNED_AT_MISSING（[7] 组不调 estimate 故无此需求，勿照抄它的夹具）。
+    await run(`UPDATE sys_issues SET assigned_to=5, assigned_to_name='开发甲', assigned_at='2026-07-16 10:00:00' WHERE id=?`, [id]);
+
+    const retR = await call('POST', `/api/sys-issues/${id}/return`, adminTok, { reason: '验收发现导出仍未按筛选条件过滤' });
+    assert.strictEqual(retR.status, 200, `[7b-1] return 应 200，实际 ${retR.status} ${JSON.stringify(retR.body)}`);
+    assert.strictEqual(await statusOf(id), '处理中', '[7b-1] bug return → 处理中');
+    assert.strictEqual((await issueRow(id)).return_count, 1, '[7b-1] return_count++（与 [7] 的 D18 恒定形成对照）');
+
+    // ⭐ B4b：旧实例软删归档，dev_status **原样保持**——这是分轮留痕的载体，绝不能被改回 pending
+    const oldB1 = await memberRow(b1);
+    assert.ok(oldB1.removed_at, '[7b-1] ⭐ 旧完成态实例被软删归档（remove 半步）');
+    assert.strictEqual(oldB1.dev_status, 'code_submitted', '[7b-1] ⭐⭐ B4b：旧实例 dev_status 原样保持 code_submitted（未原地回退 ⇒ 首轮 bug_cause_note/no_code_reason 的 MAX(id) 载体不被覆盖）');
+    const oldB2 = await memberRow(b2);
+    assert.ok(oldB2.removed_at, '[7b-1] no_code 实例同样软删归档');
+    assert.strictEqual(oldB2.dev_status, 'no_code', '[7b-1] ⭐ no_code 旧实例 dev_status 亦原样保持');
+    assert.strictEqual(oldB2.no_code_reason, '占位原因，测试用', '[7b-1] ⭐ no_code_reason 原样保留（原地重置方案会把它清空 ⇒ 无代码交付的唯一凭证消失）');
+    // excused 不动（豁免语义不因打回被拉回队列，与 [7] 逐字同源）
+    assert.strictEqual((await memberRow(b3)).dev_status, 'excused', '[7b-1] ⭐ excused 不动');
+    assert.strictEqual((await memberRow(b3)).removed_at, null, '[7b-1] excused 成员不被软删（不参与重开一轮）');
+
+    // ⭐ re-add 半步：同一 user 各开出一个新 pending 在册实例，且 id 严格大于旧实例
+    const newRows = await all(
+      `SELECT id, user_id, dev_status FROM sys_issue_dev_assignees WHERE issue_id=? AND removed_at IS NULL ORDER BY user_id`, [id]);
+    const newB1 = newRows.find(r => Number(r.user_id) === 5);
+    const newB2 = newRows.find(r => Number(r.user_id) === 6);
+    assert.ok(newB1 && newB1.dev_status === 'pending', '[7b-1] ⭐ 开发甲获得全新 pending 在册实例');
+    assert.ok(newB2 && newB2.dev_status === 'pending', '[7b-1] ⭐ 开发乙获得全新 pending 在册实例');
+    assert.ok(newB1.id > b1 && newB2.id > b2, '[7b-1] 新实例 id 严格大于旧实例（事件 id 序=轮次序的前提）');
+    // re-add 事件写入，且 related 必须为空——P10 是双向恒真约束（related 仅限 supersede-excuse）
+    const readdEvents = await all(
+      `SELECT dev_assignee_id, action, related_dev_assignee_id, payload_json FROM sys_issue_dev_events
+        WHERE issue_id=? AND action='re-add' ORDER BY id`, [id]);
+    assert.strictEqual(readdEvents.length, 2, '[7b-1] 两名完成态成员各写一条 re-add 事件');
+    assert.ok(readdEvents.every(e => e.related_dev_assignee_id === null), '[7b-1] ⭐ re-add 事件 related_dev_assignee_id 必为空（P10 双向恒真：related 是 supersede-excuse 专属槽，旧实例 id 走 payload）');
+    assert.strictEqual(JSON.parse(readdEvents[0].payload_json).superseded_dev_assignee_id, b1, '[7b-1] payload 记录承接自哪个旧实例（可追轮次血缘）');
+    assert.strictEqual(JSON.parse(readdEvents[0].payload_json).trigger, 'return', '[7b-1] payload 记录触发边');
+
+    // ⭐ 端到端闭环：打回后开发**自助**走完"回填预计完成 → 标记完成"，无需 admin 介入。
+    //   修复前此处必 409（canSubmit 后端真闸要求本人 dev_status='pending'），即生产 #23 的死锁。
+    const estR = await call('POST', `/api/sys-issues/${id}/estimate`, devTok5, { dev_estimated_at: futureEst(20) });
+    assert.strictEqual(estR.status, 200, `[7b-1] 打回后开发回填预计完成时间应 200，实际 ${estR.status} ${JSON.stringify(estR.body)}`);
+    const subR = await call('POST', `/api/sys-issues/${id}/submit`, devTok5,
+      { mode: 'no_code', no_code_reason: '已修复并重新提交（占位理由）', bug_cause_note: '导出未继承筛选条件（占位原因）', self_tested: true, test_env_deployed: true });
+    assert.strictEqual(subR.status, 200, `[7b-1] ⭐⭐ 打回后开发重新提交应 200（修复前恒 409=流程死锁），实际 ${subR.status} ${JSON.stringify(subR.body)}`);
+    assert.strictEqual((await memberRow(newB1.id)).dev_status, 'no_code', '[7b-1] 二轮提交落在**新实例**上（旧实例不受影响）');
+    assert.strictEqual((await memberRow(b1)).dev_status, 'code_submitted', '[7b-1] ⭐ 二轮提交后旧实例仍是 code_submitted（两轮各自独立，留痕不互相覆盖）');
+    // ⭐ [codex 343 MED-2 收口] 跨表回归：remove+re-add 是否让旧一轮的留痕/通知状态出问题。
+    //   三张关联表各查一次——只断言字段值不够，必须走**详情端点**看聚合后的真实呈现。
+    const detail7b = await call('GET', `/api/sys-issues/${id}`, adminTok);
+    assert.strictEqual(detail7b.status, 200, '[7b-1] 详情读取应 200');
+    // ① commit 留痕：旧实例的 commit 行不因软删而消失（详情端 devCommits 刻意不限 removed_at）
+    const commitsOfOld = (detail7b.body.dev_commits || []).filter(c => c.dev_assignee_id === b1);
+    assert.strictEqual(commitsOfOld.length, 1, `[7b-1] ⭐ 旧实例的 commit 留痕仍可见（软删不撤回历史 commit），实得 ${JSON.stringify(detail7b.body.dev_commits)}`);
+    assert.strictEqual(commitsOfOld[0].dev_user_name, '开发甲', '[7b-1] 旧 commit 行仍能取到开发姓名（JOIN 历史行而非在册集合）');
+    // ② 无代码交付凭证：旧实例的 no_code_reason 在详情聚合里仍在（原地重置方案会把它清空）
+    // 注：no_code_records 的实例主键字段名是 `id`（不是 dev_assignee_id——那是 bug_cause_records 的形状），
+    //   两个聚合的字段命名不同源，按各自实际形状取值。
+    const ncOld = (detail7b.body.no_code_records || []).find(r => r.id === b2);
+    assert.ok(ncOld && ncOld.no_code_reason === '占位原因，测试用', `[7b-1] ⭐ 旧实例 no_code_reason 在详情里仍可追溯，实得 ${JSON.stringify(detail7b.body.no_code_records)}`);
+    // ③ 通知列：新实例是全新未通知态，不继承旧实例的已发送状态（否则"打回后重新指派"会被误判为已通知过）
+    const newB1Row = await memberRow(newB1.id);
+    assert.strictEqual(newB1Row.notify_status, 'not_sent', '[7b-1] ⭐ 新实例通知态=not_sent（新一轮需重新通知，不继承上一轮"已发送"）');
+    assert.strictEqual(newB1Row.notified_at, null, '[7b-1] 新实例 notified_at 为空');
+    assert.strictEqual(newB1Row.read_at, null, '[7b-1] 新实例 read_at 为空（不继承上一轮已读）');
+    ok('[7b-1] ⭐ bug 验收打回自动重开一轮：旧实例软删归档且 dev_status/no_code_reason 原样封存(B4b) + 同人新开 pending 实例 + excused 不动 + re-add 事件(related 空·P10 合规·payload 记血缘) + **端到端闭环「打回→回填→重新提交」全 200** + **跨表回归**(旧 commit 留痕可见/旧 no_code 凭证可追溯/新实例通知态归零不继承)（复现并锁死生产 #23 的流程死锁）');
+
+    // ── [7b-2] feature 重开(reopen)：另一 type + 另一 to（已关闭→开发中），同一套机制 ──
+    const id2 = await mkIssue('feature', '已关闭', { intakeLiaisonId: 13, needsFeasibility: 0, estimatedEffortDays: 2 });
+    const f1 = await mkMember(id2, 5, '开发甲', 'code_submitted');
+    const f2 = await mkMember(id2, 7, '开发丙', 'excused');
+    await run(`UPDATE sys_issues SET assigned_to=5, assigned_to_name='开发甲' WHERE id=?`, [id2]);
+    const reopenR = await call('POST', `/api/sys-issues/${id2}/reopen`, adminTok, { reason: '上线后发现同一问题复现' });
+    assert.strictEqual(reopenR.status, 200, `[7b-2] reopen 应 200，实际 ${reopenR.status} ${JSON.stringify(reopenR.body)}`);
+    assert.strictEqual(await statusOf(id2), '开发中', '[7b-2] feature reopen → 开发中');
+    assert.ok((await memberRow(f1)).removed_at, '[7b-2] ⭐ reopen 同样走 remove+re-add（同族第二条边，不留"修了 return 漏了 reopen"的缺口）');
+    assert.strictEqual((await memberRow(f1)).dev_status, 'code_submitted', '[7b-2] reopen 旧实例 dev_status 亦原样封存');
+    const newF1 = await get(`SELECT dev_status FROM sys_issue_dev_assignees WHERE issue_id=? AND user_id=5 AND removed_at IS NULL`, [id2]);
+    assert.strictEqual(newF1.dev_status, 'pending', '[7b-2] reopen 后同人新 pending 实例');
+    assert.strictEqual((await memberRow(f2)).dev_status, 'excused', '[7b-2] reopen 同样保留 excused');
+    ok('[7b-2] feature 重开(reopen)：跨 type、跨目标态(已关闭→开发中) 复用同一套 remove+re-add——同族两条边一并收口');
+
+    // ── [7b-3] ⭐ 零可重置成员边界：全 excused 单打回必须放行（不得因"没有可重开的成员"而报错）──
+    //   全 excused 单走 index.js:2755 降级路径（liaison_test_skip_excused）同样能进「待验证」，
+    //   此时被打回，finishedRows 为空 ⇒ 整段 for 循环零次、electRepresentative 也不调用。
+    //   若实现里写死"必须重开≥1 名"（照搬 [7] 的 ≥1 硬断言），这条**合法链路会被打成 500**。
+    const id3 = await mkIssue('bug', '待验证', { intakeLiaisonId: 13 });
+    const e1 = await mkMember(id3, 6, '开发乙', 'excused');
+    await run(`UPDATE sys_issues SET assigned_to=6, assigned_to_name='开发乙' WHERE id=?`, [id3]);
+    const retR3 = await call('POST', `/api/sys-issues/${id3}/return`, adminTok, { reason: '全豁免单打回（边界用例）' });
+    assert.strictEqual(retR3.status, 200, `[7b-3] ⭐ 全 excused 单打回应 200（若照抄 [7] 的 ≥1 断言会在此判死），实际 ${retR3.status} ${JSON.stringify(retR3.body)}`);
+    assert.strictEqual(await statusOf(id3), '处理中', '[7b-3] 全 excused 单打回后状态正常流转');
+    assert.strictEqual((await memberRow(e1)).dev_status, 'excused', '[7b-3] excused 原样不动');
+    assert.strictEqual((await memberRow(e1)).removed_at, null, '[7b-3] excused 不被软删');
+    const noReadd = await all(`SELECT id FROM sys_issue_dev_events WHERE issue_id=? AND action='re-add'`, [id3]);
+    assert.strictEqual(noReadd.length, 0, '[7b-3] 零可重开成员 ⇒ 不写任何 re-add 事件（不为凑数造空事件）');
+    ok('[7b-3] ⭐ 零可重开成员边界：全 excused 单打回放行不报错、不写空事件（与 [7] 的 ≥1 硬断言口径分岔点——那边有 GATE 保证交付数≥1，本边没有）');
+
+    // ── [7b-4] ⭐ 账号资格闸（codex 343 HIGH-1）：停用/降 viewer/已删除账号**不得**被 re-add ──
+    //   无条件 re-add 会给不可参与的账号造出一个**不可行动的 pending 成员**——他在前端看不到提交按钮、
+    //   后端也不放行，死锁只是从「无 pending」换形态成「有 pending 但没人能动」，且更难诊断。
+    //   正确行为=跳过该成员（数据一行不动，保持完成态在册），打回本身照常成功——账号事后被停用/降权
+    //   是人事侧的正常变动，不该反过来让 admin 打不回单子；此时应由 admin 改派给在岗成员。
+    await run(`INSERT INTO users (id, username, display_name, role, status, phone) VALUES
+      (91,'dev91','离职开发','user','inactive','13900000091'),(92,'dev92','降权开发','viewer','active','13900000092')`);
+    const id4 = await mkIssue('bug', '待验证', { intakeLiaisonId: 13 });
+    const q1 = await mkMember(id4, 91, '离职开发', 'code_submitted');   // 账号已停用
+    const q2 = await mkMember(id4, 92, '降权开发', 'no_code');          // 已降为 viewer
+    const q3 = await mkMember(id4, 5, '开发甲', 'code_submitted');      // 正常账号（对照组）
+    await run(`UPDATE sys_issues SET assigned_to=5, assigned_to_name='开发甲' WHERE id=?`, [id4]);
+    const retR4 = await call('POST', `/api/sys-issues/${id4}/return`, adminTok, { reason: '混合账号状态打回' });
+    assert.strictEqual(retR4.status, 200, `[7b-4] ⭐ 含不可参与账号时打回仍应 200（不因人事变动阻断流转），实际 ${retR4.status} ${JSON.stringify(retR4.body)}`);
+    // 停用账号：一行不动
+    assert.strictEqual((await memberRow(q1)).removed_at, null, '[7b-4] ⭐ 停用账号成员**不被软删**（跳过=数据一行不动，非"软删了却不新建"导致成员消失）');
+    assert.strictEqual((await memberRow(q1)).dev_status, 'code_submitted', '[7b-4] 停用账号成员 dev_status 不变');
+    const noNewQ1 = await all(`SELECT id FROM sys_issue_dev_assignees WHERE issue_id=? AND user_id=91 AND removed_at IS NULL`, [id4]);
+    assert.strictEqual(noNewQ1.length, 1, '[7b-4] ⭐ 停用账号**不获得**新 pending 实例（否则=不可行动的 pending，死锁换形态）');
+    assert.strictEqual(noNewQ1[0].id, q1, '[7b-4] 在册的仍是原实例本身');
+    // viewer：同样一行不动
+    assert.strictEqual((await memberRow(q2)).removed_at, null, '[7b-4] ⭐ viewer 成员不被软删');
+    assert.strictEqual((await memberRow(q2)).dev_status, 'no_code', '[7b-4] viewer 成员 dev_status 不变');
+    // 对照组：同一单里的正常账号照常重开一轮（证明闸门是**逐成员**判定，不是"一票否决整单"）
+    assert.ok((await memberRow(q3)).removed_at, '[7b-4] ⭐ 对照组：同单内正常账号照常软删归档（逐成员判定，非整单跳过）');
+    const newQ3 = await get(`SELECT dev_status FROM sys_issue_dev_assignees WHERE issue_id=? AND user_id=5 AND removed_at IS NULL`, [id4]);
+    assert.strictEqual(newQ3.dev_status, 'pending', '[7b-4] 对照组：正常账号获得新 pending 实例');
+    const readd4 = await all(`SELECT dev_assignee_id FROM sys_issue_dev_events WHERE issue_id=? AND action='re-add'`, [id4]);
+    assert.strictEqual(readd4.length, 1, '[7b-4] 仅为正常账号写 1 条 re-add 事件（跳过者不写）');
+    ok('[7b-4] ⭐ 账号资格闸：停用/viewer 账号跳过不动（不造"不可行动的 pending"）+ 打回本身不被阻断 + **逐成员判定**（同单正常账号照常重开一轮）——判据与引擎 :5168 既有范式同源');
   }
 
   // ══════════════════════════════════════════════════════════════════════
@@ -939,11 +1105,18 @@ async function main() {
     // 打回（模拟验收发现问题，走 return 走回开发中——用业务验收 return 而非 liaison_test_return，均属"回开发中"）
     await call('POST', `/api/sys-issues/${id3}/return`, adminTok, { reason: '验收不通过，需返工' });
     assert.strictEqual(await statusOf(id3), '开发中', '[9c] 前置：return 后回开发中');
-    // 重新提交交付（roster 完成态不会自动重置——直接改回 code_submitted 模拟"重新提交"，非本组测试重点）。
+    // 重新提交交付（直接改 dev_status 模拟"重新提交"，不走完整 submit 流程——非本组测试重点）。
+    // ⚠️ [2026-08-12 打回自动重开一轮] 原写法是 `WHERE id = daId3a`，依赖"return 不重置 roster、旧实例
+    //   仍在册"。现在 return 会把 daId3a 软删归档并另开新 pending 实例，改旧实例已影响不到在册视图
+    //   （GATE 只看 removed_at IS NULL 的行），故改为**按 user_id 定位当前在册实例**。
     // ⚠️ return 的 setFrags 会清空 dev_estimated_at（§3.1b"打回=新一轮，须重填资格"），而
     // isGateEligibleForVerify 无条件要求它非空——不重新填写会在 ④ 落 gate_deferred_at 卡住，
     // 走不到 ⑦（本文件踩坑实测）。补一次 estimate 模拟"返工后重新回填预计完成"这一真实必经步骤。
-    await run(`UPDATE sys_issue_dev_assignees SET dev_status='code_submitted' WHERE id=?`, [daId3a]);
+    const da3aUser = (await get(`SELECT user_id FROM sys_issue_dev_assignees WHERE id=?`, [daId3a])).user_id;
+    const upd9c = await run(
+      `UPDATE sys_issue_dev_assignees SET dev_status='code_submitted', resolved_at=datetime('now','localtime')
+        WHERE issue_id=? AND user_id=? AND removed_at IS NULL`, [id3, da3aUser]);
+    assert.strictEqual(upd9c.changes, 1, '[9c] 前置：应恰好命中 1 行在册实例（打回后由 return 自动开出的新 pending 行）');
     // [C7] return 的换轮清字段套餐把 dev_estimated_at **与 estimated_effort_days** 一起清了（见 [7] 组断言），
     //   C7 起 GATE 对 feature/improvement 两 nf 值都查工期 → 只补预计完成、不补工期，第二轮仍会卡在
     //   gate_deferred_at 走不到 ⑦。两个字段必须一起补，才是返工后重填资格的完整模拟。

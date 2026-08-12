@@ -4619,10 +4619,19 @@
             }
             // [C7-fix LOW-6] unchanged 文案按 effortApplicable 分岔：bug/config 本就没有工期字段，
             //   对他们说"且工期未变"是无中生有的信息（后端对这两类连该键都不回带，见 index.js effortApplicable）。
+            // [2026-08-12 用户拍板·谎报修复] 原文案 '已回填，钉钉已通知需求方' 是**恒定谎报**：
+            //   自动派发总闸 isAutoNotifyEnabled() 恒 false（index.js «本期全关»），estimate 的
+            //   dispatchSysNotify 走到闸门即早返回，需求方通知**从未发送**（生产 #23 实证
+            //   requester_notify_status='not_sent'、requester_notified_at=null），前端却无条件宣称已通知。
+            //   改为如实告知 + 指明手动入口，与同页既有正面样本同范式（发起咨询：'已发起咨询（通知未发送，
+            //   请在详情页点「发送通知」）'）；同页 siModalFeasibility 走**同一后端 marker**，文案本就
+            //   不宣称通知（'已提交可行性评估'）——本处是全页孤例，非同族批量问题。
+            //   ⚠️ 文案不写死"钉钉"通道，也不承诺发送结果：本处只负责回填这一件事的反馈，
+            //   通知是否送达由通知区行内状态（带时刻+四态）表达，不由业务动作 toast 代言。
             showToast(
                 r.data && r.data.unchanged
                     ? (effortApplicable ? '未变更（同分钟归一化且工期未变）' : '时间未变（同分钟归一化）')
-                    : '已回填，钉钉已通知需求方',
+                    : '已回填，如需告知需求方请在详情页点「发送通知」',
                 'success'
             );
             return true;
