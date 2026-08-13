@@ -82,6 +82,16 @@ async function seedToDev(needsFeasibility = 1, assignTo = 5) {
   //   让对接人在 GATE 判定时失效（模拟受理人后续停用/移出白名单），触发 §3.0-⑥ 降级路径，使 submit
   //   仍直落"待验证"——本文件其余断言零改动，这也是方案承认的合法真实场景（非造假绕过）。
   await run(`UPDATE sys_issues SET intake_liaison_id = 999999 WHERE id = ?`, [id]);
+  // [组A·2026-08-12] intake-accept 现会按默认 SLA 自动生成 dev_estimated_at（受理时刻通常远未超时，
+  //   走"为空×SLA未超"分支）——本文件测的是 /feasibility、/estimate 等端点自身对 dev_estimated_at
+  //   的写入/校验语义，需要一个干净的 null 基线才测得出"这些端点自己写了什么"，故 fixture 收尾显式
+  //   清空（Group A 自身的自动生成行为由 verify-sys-eta-generation.js 专门覆盖，不在本文件重复验证）。
+  // [组A·HIGH-1 登记] 本清空模拟的"第 1 轮受理刚完成、尚未回填任何 ETA"这一状态，在生产真实链路下
+  //   已不可达（新受理单受理即自动生成，第 1 轮 dev_estimated_at 恒非空——部署前已在 DEV 族且 ETA
+  //   为空的存量单不适用，那些单没有"受理"这一步可触发自动生成）——本文件的 null 基线断言实际只覆盖
+  //   "return/reopen 清空后的第 2 轮"语义，与生产第 1 轮的 GATE 恒满足新行为不冲突（该新行为见
+  //   verify-sys-eta-generation.js [H1] 成对断言）。
+  await run(`UPDATE sys_issues SET dev_estimated_at = NULL WHERE id = ?`, [id]);
   return id;
 }
 // 2026-08-01：硬编码未来日期到期（ESTIMATE_BEFORE_ASSIGN 时限炸弹），改动态生成——远期字面量迟早到期，勿回退此写法
@@ -234,6 +244,12 @@ async function main() {
     assert.strictEqual(accImp.status, 200, `EF7 前置：improvement 受理应 200，实得 ${accImp.status} ${JSON.stringify(accImp.body)}`);
     await call('POST', `/api/sys-issues/${idImp}/set-oa-number`, adminTok, { oa_number: '2026070099' });
     await call('POST', `/api/sys-issues/${idImp}/assign`, adminTok, { assigned_to: 5 });
+    // [组A·2026-08-12] 同 seedToDev 处已注：intake-accept 现会自动生成 dev_estimated_at，本组断言的是
+    //   "EFFORT_REQUIRED 拒绝零副作用（含 dev_estimated_at 未落库）"，需要干净 null 基线才测得出，故清空。
+    // [组A·HIGH-1 登记] 生产第 1 轮已不可达（新受理单受理即自动生成，恒非空——部署前已在 DEV 族且
+    //   ETA 为空的存量单不适用，那些单没有"受理"这一步可触发自动生成），本清空只模拟"return/reopen
+    //   清空后的第 2 轮"状态，断言只覆盖第 2 轮语义（第 1 轮 GATE 恒满足新行为见 verify-sys-eta-generation.js [H1]）。
+    await run(`UPDATE sys_issues SET dev_estimated_at = NULL WHERE id = ?`, [idImp]);
     r = await call('POST', `/api/sys-issues/${idImp}/feasibility`, devTok, { conclusion: '可行', requirement_confirm: 'x', dev_estimated_at: EST });
     assert.strictEqual(r.status, 400, 'C7：improvement 不传工期应 400（已改必填）, got ' + r.status + ' ' + JSON.stringify(r.body));
     assert.strictEqual(r.body.code, 'EFFORT_REQUIRED', `C7：improvement 缺工期确切码应为 EFFORT_REQUIRED（与 feature 同码），实得 ${r.body && r.body.code}`);

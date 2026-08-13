@@ -99,6 +99,12 @@ async function setupEstimateIssue(title, oaNumber) {
   assert.strictEqual(r.status, 200, `[夹具-S] 补 OA 号应 200，实得 ${r.status} ${JSON.stringify(r.body)}`);
   r = await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5 });
   assert.strictEqual(r.status, 200, `[夹具-S] 指派应 200，实得 ${r.status} ${JSON.stringify(r.body)}`);
+  // [组A·2026-08-12] intake-accept 现会按默认 SLA 自动生成 dev_estimated_at——本文件测的是并发乐观锁
+  //   （expected_dev_estimated_at）语义，需要干净 null 基线做起点，故 fixture 收尾显式清空。
+  // [组A·HIGH-1 登记] 生产第 1 轮已不可达（新受理单受理即自动生成，恒非空——部署前已在 DEV 族且
+  //   ETA 为空的存量单不适用，那些单没有"受理"这一步可触发自动生成），本清空只模拟"return/reopen
+  //   清空后的第 2 轮"状态，断言只覆盖第 2 轮语义（第 1 轮 GATE 恒满足新行为见 verify-sys-eta-generation.js [H1]）。
+  await run(`UPDATE sys_issues SET dev_estimated_at = NULL WHERE id = ?`, [id]);
   return id;
 }
 
@@ -117,6 +123,11 @@ async function setupFeasibilityIssue(title, oaNumber) {
   assert.strictEqual(r.status, 200, `[夹具-F] 补 OA 号应 200，实得 ${r.status} ${JSON.stringify(r.body)}`);
   r = await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5 });
   assert.strictEqual(r.status, 200, `[夹具-F] 指派应 200，实得 ${r.status} ${JSON.stringify(r.body)}`);
+  // [组A·2026-08-12] 同上（setupEstimateIssue 处已注）：清空自动生成的 dev_estimated_at，还原干净基线。
+  // [组A·HIGH-1 登记] 生产第 1 轮已不可达（新受理单受理即自动生成，恒非空——部署前已在 DEV 族且
+  //   ETA 为空的存量单不适用，那些单没有"受理"这一步可触发自动生成），本清空只模拟"return/reopen
+  //   清空后的第 2 轮"状态，断言只覆盖第 2 轮语义（第 1 轮 GATE 恒满足新行为见 verify-sys-eta-generation.js [H1]）。
+  await run(`UPDATE sys_issues SET dev_estimated_at = NULL WHERE id = ?`, [id]);
   return id;
 }
 

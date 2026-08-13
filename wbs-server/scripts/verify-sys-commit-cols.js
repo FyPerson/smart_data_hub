@@ -11,6 +11,12 @@
 //        本条必红（同 89 号审 dev_roster_names 人名含逗号被 split 错拆的同款坑）
 //   [A6] 成员已 removed（removed_at 非空）其 commit 仍出现——与快照 §8「含 removed 实例」同口径
 //   [A7] 多单据互不串（子查询按 issue_id 正确隔离）
+//
+// [Y] 件②（2026-08-12）commit 记录展示层去重——后端契约 + 前端实现 双向验证：
+//   [Y1] 后端聚合查询源码不含去重关键字（DISTINCT/GROUP BY）——raw 层必须保留跨轮重复
+//   [Y2] 前端 siNormalizeCommitRefs 真实具备保序首现去重能力（直接 eval 页面源码里的函数体调用）
+//   [Y3] 对照组：证明 [Y1]/[Y2] 判据不是恒真——分别构造"注入了去重关键字的假源码"与
+//        "改动前未去重的旧实现"，证明两条判据在这些反例上确实会判红
 'use strict';
 
 const assert = require('assert');
@@ -437,9 +443,362 @@ function parseArr(val, label) {
     `⭐ 后端组同理：列表 ${JSON.stringify(listBe)} vs 批次详情 ${JSON.stringify(dirtyMember.backend_commit_refs)}`);
   ok('[X1b] ⭐ 跨端点一致性：同一张脏单在 GET /sys-issues 与 GET /sys-releases/:id 的结果逐字相同（本条即末次合并审 MED-1 的回归锁）');
 
+  // ═══════════════════════════════════════════════════════════════════
+  // [Y] 件②（2026-08-12）commit 记录展示层去重：后端契约 + 前端实现 双向验证
+  //   起因：v1.151.1「打回自动重开一轮」会让同一开发在两轮各写一条同值 commit_ref（如同一版本号
+  //   22853），raw 层保留全量重复是**有意行为**（分轮事实不能丢），去重只应发生在展示层，且只应
+  //   有 siNormalizeCommitRefs 这一处实现。本组守两条：①后端不得偷偷去重 ②前端确实去重。
+  // ═══════════════════════════════════════════════════════════════════
+  console.log('\n── [Y] 件②：commit 记录展示层去重 契约与实现验证 ──');
+
+  // ── [Y1] 后端聚合查询源码不含去重关键字（DISTINCT/GROUP BY/UNION）──────────
+  //   [SD1 预筛 LOW-1 收口] 剥注释先行：防**未来**在扫描区间（commitAggSeg）内新增/改写注释时写出
+  //   DISTINCT/GROUP BY 这类字面量（哪怕只是解释"不得用它们"），若不剥注释直接对整段原文做关键字
+  //   匹配，注释自身会把 [Y1] 点成假红——是纵深防御，不是在修复本次已发生的问题（当前契约注释落在
+  //   扫描区间**之外**、且不含这两个关键字字面量，见 index.js :5698-5706 一带）。这正是 [Y3] ★对照
+  //   组①要证明的反例之一。
+  // [SD1 预筛 LOW-5·仅注释] 已知局限：不识别字符串字面量内的 `--`（若 SQL 正文出现字符串常量里含
+  //   `--` 会被误当注释起点截断）。本文件扫描的 SQL 片段无此类字面量，失败方向朝红（把该行整体当注释
+  //   吞掉，顶多让后续关键字判据"漏检"而非"误报"）+ 上层 assert 兜底，属可接受技术债，非本次需修的缺口。
+  function stripSqlLineComments(sqlText) {
+    return sqlText.split('\n').map((line) => {
+      const i = line.indexOf('--');
+      return i >= 0 ? line.slice(0, i) : line;
+    }).join('\n');
+  }
+  // [SD1 预筛 LOW-2① 收口] 补 UNION（不含 UNION ALL）——SQLite 的裸 UNION 会对结果集去重，
+  //   是"等效偷偷去重"的另一种写法（不靠 DISTINCT/GROUP BY 关键字也能做到同样的事），必须一并拦；
+  //   UNION ALL 保留全部行（含重复），不去重，放行不判红。
+  function hasRawDedupKeyword(sqlText) {
+    const stripped = stripSqlLineComments(sqlText);
+    return /\bDISTINCT\b/i.test(stripped) || /\bGROUP\s+BY\b/i.test(stripped) || /\bUNION\b(?!\s+ALL)/i.test(stripped);
+  }
+  const idxFeSub = src.indexOf('json_group_array(commit_ref)');
+  assert.ok(idxFeSub > 0, '[Y1] 前置：源码中应能定位 frontend_commit_refs 子查询锚点 "json_group_array(commit_ref)"');
+  const idxAllEnd = src.indexOf('AS all_commit_refs', idxFeSub);
+  assert.ok(idxAllEnd > idxFeSub, '[Y1] 前置：源码中应能定位 all_commit_refs 子查询结束锚点');
+  const commitAggSeg = src.slice(idxFeSub, idxAllEnd + 'AS all_commit_refs'.length);
+  assert.ok(!hasRawDedupKeyword(commitAggSeg),
+    '[Y1] ⭐ frontend_commit_refs/backend_commit_refs/all_commit_refs 三个子查询源码（剥注释后）不得含 DISTINCT/GROUP BY/裸UNION——raw 层必须保留跨轮重复，去重只应发生在展示层');
+  ok('[Y1] 列表 SELECT 的三个 commit 聚合子查询源码（剥注释后）不含去重关键字（DISTINCT/GROUP BY/裸UNION）——raw 契约未被破坏');
+
+  // [SD1 预筛 LOW-2② 收口] 第二段扫描：GET /sys-releases/:id 的 refsByComponent（发布快照聚合，live
+  //   分支的过滤链）——:5698-5706 的契约注释点名了它（"与 GET /sys-releases/:id 的发布快照聚合口径
+  //   同样不去重"），但 [Y1] 此前只守了列表端点这一侧，另一侧毫无守卫，正是 246 号 MED-1 曾经真实
+  //   出现过的双端漂移形状（一端加了处理、另一端没同步）。锚点定位显式非空校验——抓不到就 assert.ok
+  //   失败，不会因为定位落空而让下面的判据"空转判过"。
+  const idxRefsByComponent = src.indexOf('function refsByComponent');
+  assert.ok(idxRefsByComponent > 0,
+    '[Y1] 前置：源码中应能定位 refsByComponent 函数锚点 "function refsByComponent"（找不到说明函数已改名/挪位，本条守卫需同步更新，不能静默跳过）');
+  // refsByComponent 是 JS 函数（非 SQL），去重风险点在于是否用了 Set/filter+indexOf 之类做"去重"、
+  //   或对聚合来源的 SQL 查询本身加了 DISTINCT/GROUP BY/UNION——函数体本身用同一套关键字判据足够
+  //   （JS 里出现 DISTINCT/GROUP BY 字面量的唯一可能就是内嵌 SQL 字符串；UNION 同理）。
+  const refsByComponentBraceStart = src.indexOf('{', idxRefsByComponent);
+  assert.ok(refsByComponentBraceStart > idxRefsByComponent,
+    '[Y1] 前置：应能定位 refsByComponent 函数体起始花括号');
+  let rbcDepth = 0, rbcEnd = -1;
+  for (let i = refsByComponentBraceStart; i < src.length; i++) {
+    if (src[i] === '{') rbcDepth++;
+    else if (src[i] === '}') { rbcDepth--; if (rbcDepth === 0) { rbcEnd = i + 1; break; } }
+  }
+  assert.ok(rbcEnd > 0, '[Y1] 前置：未能定位 refsByComponent 函数体结束花括号（括号计数失衡，说明抽取范围有误）');
+  const refsByComponentSeg = src.slice(idxRefsByComponent, rbcEnd);
+  assert.ok(!hasRawDedupKeyword(refsByComponentSeg),
+    '[Y1b] ⭐ refsByComponent（GET /sys-releases/:id 发布快照聚合，:5698-5706 契约注释点名的另一端）源码（剥注释后）同样不得含 DISTINCT/GROUP BY/裸UNION——两端漂移正是 246 号 MED-1 的教训形状');
+  ok('[Y1b] refsByComponent（批次详情 live 分支过滤链）源码（剥注释后）同样不含去重关键字——契约注释点名的另一端补上守卫');
+
+  // [SD1 二轮预筛 MED-4 收口] Y1b 覆盖收口——选**方案 A**（扩判据覆盖 JS 去重形状），非退路方案。
+  //   理由：refsByComponentSeg 现有真实内容（见上方 :493-495 一带函数体）不含 `new Set(`/`.indexOf(`
+  //   字面量，扩判据不会对当前代码产生误报（已用下方对照组④/⑤实证：正常源码判据为 false，注入后
+  //   才判 true），故没有"既有合法命中导致误报"这个退路触发条件，直接采用更强的方案。
+  //   DISTINCT/GROUP BY/UNION 是 **SQL 层**去重关键字，只覆盖"聚合来源查询本身用 SQL 去重"这一种
+  //   违反契约的写法；refsByComponent 是纯 JS 函数，若有人改成用 `new Set()`（去重容器）或
+  //   `.indexOf(x) === i`（"已出现过就跳过"的经典手法）在 JS 层去重，SQL 关键字扫描完全抓不到——
+  //   这是 [Y1b] 此前的真实盲区（不是假设性的，是"守卫覆盖面≠实现覆盖面"的具体缺口）。
+  function hasJsDedupShape(jsText) {
+    return /\bnew\s+Set\s*\(/.test(jsText) || /\.indexOf\s*\(/.test(jsText);
+  }
+  assert.ok(!hasJsDedupShape(refsByComponentSeg),
+    '[Y1b] ⭐ refsByComponent 源码不得含 JS 层去重形状（new Set()/.indexOf()）——SQL 关键字扫描覆盖不到这类实现方式，需单独判据补齐盲区');
+  ok('[Y1b] refsByComponent 源码同时不含 JS 层去重形状（new Set()/.indexOf()）——SQL 关键字 + JS 去重手法双维度覆盖，Y1b 盲区已补');
+
+  // ── [Y2] 前端 siNormalizeCommitRefs 真实具备保序首现去重能力 ─────────────
+  //   不满足于正则关键字扫描（那只能证明"有没有出现某个词"，证不了函数行为对不对）——直接从页面
+  //   源码里把整个函数体抠出来、在 Node 里 eval 成真函数、传真实带重复的输入验证输出，比静态关键字
+  //   扫描强得多（等价于把浏览器里的 [T6] 契约测试搬一份到后端守卫里）。
+  const pageSrcPath = path.join(__dirname, '..', 'public', 'Sys_Iteration.html');
+  const pageSrc = fs.readFileSync(pageSrcPath, 'utf8');
+  // [SD1 预筛 LOW-5·仅注释] 已知局限：花括号计数不识别字符串/模板字符串字面量内的 `{`/`}`（若函数体内
+  //   出现含花括号的字符串常量会数错深度）。本文件抽取的两个函数（siNormalizeCommitRefs/refsByComponent）
+  //   均无此类字面量，失败方向朝红（`end` 定不到正确位置多半直接越界或提前收尾，被下方 assert 拦住而
+  //   非静默抽出半截函数体），属可接受技术债，非本次需修的缺口。
+  function extractJsFunctionSource(jsSrc, fnName) {
+    const startIdx = jsSrc.indexOf(`function ${fnName}(`);
+    assert.ok(startIdx >= 0, `[Y2] 前置：页面源码中应能找到 "function ${fnName}("`);
+    const braceStart = jsSrc.indexOf('{', startIdx);
+    assert.ok(braceStart > startIdx, `[Y2] 前置：应能定位 ${fnName} 函数体起始花括号`);
+    let depth = 0, end = -1;
+    for (let i = braceStart; i < jsSrc.length; i++) {
+      if (jsSrc[i] === '{') depth++;
+      else if (jsSrc[i] === '}') { depth--; if (depth === 0) { end = i + 1; break; } }
+    }
+    assert.ok(end > 0, `[Y2] 前置：未能定位 ${fnName} 函数体结束花括号（括号计数失衡，说明抽取范围有误）`);
+    return jsSrc.slice(startIdx, end);
+  }
+  const normalizeFnSrc = extractJsFunctionSource(pageSrc, 'siNormalizeCommitRefs');
+  // eslint-disable-next-line no-new-func
+  const siNormalizeCommitRefs = new Function(`return (${normalizeFnSrc});`)();
+  assert.strictEqual(typeof siNormalizeCommitRefs, 'function', '[Y2] 前置：抽取并 eval 后应得到一个真函数');
+
+  const dupInput = ['22853', '22853', 'x', '22853', 'y', 'x'];
+  const dedupResult = siNormalizeCommitRefs(dupInput);
+  assert.deepStrictEqual(dedupResult, ['22853', 'x', 'y'],
+    `[Y2] ⭐⭐ siNormalizeCommitRefs 对含重复输入 ${JSON.stringify(dupInput)} 应保序首现去重为 ['22853','x','y']，实得 ${JSON.stringify(dedupResult)}`);
+  // JSON 字符串入参路径同样要去重（列表端点出的是 JSON 数组字符串，非真数组）
+  const dedupFromJson = siNormalizeCommitRefs(JSON.stringify(dupInput));
+  assert.deepStrictEqual(dedupFromJson, ['22853', 'x', 'y'],
+    `[Y2] JSON 字符串入参路径同样应去重，实得 ${JSON.stringify(dedupFromJson)}`);
+  // 无重复输入应原样保留（不误伤干净数据、不改变既有元素顺序/内容）
+  const cleanInput = ['a', 'b', 'c'];
+  assert.deepStrictEqual(siNormalizeCommitRefs(cleanInput), ['a', 'b', 'c'],
+    '[Y2] 无重复输入应原样保留，去重实现不得误伤干净数据');
+  // [SD1 预筛 LOW-4 收口] 判等口径改按 trim 后——正例：'22853' 与 '22853\t' 肉眼相同，trim 后判等
+  //   应去重为 1 条；对照：'22853' 与 '22853b' trim 后仍不同，应正常保留 2 条（证明改动没有变成"只要
+  //   前缀相同就并"这类过度宽松的误实现）。
+  //   [codex 355 三轮插入批 L1 收口·业务已拍板"清洁优先于原值审计"] 期望值改为**trim 后的 canonical
+  //   值**（`out.push(x)`→`out.push(key)`，展示/复制链路不许携带隐形字符）——不再断言"保留原值"。
+  const tabDupResult = siNormalizeCommitRefs(['22853', '22853\t']);
+  assert.deepStrictEqual(tabDupResult, ['22853'],
+    `[Y2] ⭐⭐ D组件①随行·L1：['22853','22853\\t'] trim 后判等应去重为 1 条 canonical 值 '22853'，实得 ${JSON.stringify(tabDupResult)}`);
+  const notDupResult = siNormalizeCommitRefs(['22853', '22853b']);
+  assert.deepStrictEqual(notDupResult, ['22853', '22853b'],
+    `[Y2] ⭐ 对照：['22853','22853b'] trim 后仍不同，不应被误判为重复，应保留 2 条，实得 ${JSON.stringify(notDupResult)}`);
+  // [codex 355 三轮插入批 L1 收口] 首个为脏值对照——若实现仍是"保留首次出现的原值"（未真正改用
+  //   push(key)），当**第一条恰好带隐形字符**时会漏网：['  22853\t','22853'] 若还是 push(x)，输出会是
+  //   ['  22853\t']（带前导空格与 Tab，肉眼看不出但会污染复制到部署工具的内容）；改对后应恰好输出
+  //   trim 后的 canonical 值 ['22853']，与"首个是干净值"的场景（上方 tabDupResult）结果一致，证明
+  //   canonical 化不依赖"谁先出现"这个偶然顺序。
+  const dirtyFirstResult = siNormalizeCommitRefs(['  22853\t', '22853']);
+  assert.deepStrictEqual(dirtyFirstResult, ['22853'],
+    `[Y2] ⭐⭐ L1 对照·首个为脏值：['  22853\\t','22853'] 应去重为 1 条 canonical 值 '22853'（非带隐形字符的原值），实得 ${JSON.stringify(dirtyFirstResult)}`);
+  // 既有契约不得被破坏：null/undefined→null，[]/'[]'→[]（回归，同页面 [T6] 但落在后端守卫里再钉一次）
+  assert.strictEqual(siNormalizeCommitRefs(null), null, '[Y2] 回归：null 仍应返回 null（不因本次改动被误改）');
+  assert.deepStrictEqual(siNormalizeCommitRefs([]), [], "[Y2] 回归：空数组仍应返回 []（不因本次改动被误改）");
+  ok('[Y2] ⭐⭐ 前端 siNormalizeCommitRefs 真实执行验证：含重复输入保序首现去重、JSON 字符串入参同理、干净数据不受影响、既有 null/[] 契约不变');
+
+  // ── [Y3] 对照组：证明 [Y1]/[Y2] 判据不是恒真 ─────────────────────────────
+  console.log('  -- [Y3] 对照组 --');
+  // ★对照组①：注释里提到去重关键字不应被误判——证明 stripSqlLineComments 确实生效，
+  //   不会让本次新写的契约注释（含"不得 DISTINCT"这类措辞）把 [Y1] 拖成假红。
+  const commentOnlyFake = `
+                (SELECT json_group_array(commit_ref) FROM (
+                   -- 本行注释提到 DISTINCT/GROUP BY 只是解释不能用，不是真的用了
+                   SELECT commit_ref FROM sys_issue_dev_commits
+                    WHERE issue_id = sys_issues.id
+                 )) AS all_commit_refs`;
+  assert.ok(!hasRawDedupKeyword(commentOnlyFake),
+    '[Y3] ★对照组①：注释里提到去重关键字不应被误判为真去重（剥注释逻辑生效），若这条断言本身失败说明剥注释坏了');
+  ok('[Y3] ★对照组①：注释文本提及去重关键字不会误触发 [Y1]（剥注释逻辑证实有效，不会让本次新写的契约注释把自己拖成假红）');
+  // ★对照组②：真的注入 DISTINCT/GROUP BY 到 SQL 正文时，[Y1] 的判据必须能抓到——分别造两种注入
+  const distinctInjectedFake = commitAggSeg.replace('SELECT commit_ref FROM sys_issue_dev_commits', 'SELECT DISTINCT commit_ref FROM sys_issue_dev_commits');
+  assert.ok(hasRawDedupKeyword(distinctInjectedFake),
+    '[Y3] ★对照组②a：真实注入 SELECT DISTINCT 后，判据必须判定为「含去重关键字」（若这条断言失败，说明 [Y1] 的检测逻辑形同虚设）');
+  const groupByInjectedFake = commitAggSeg + '\n GROUP BY commit_ref';
+  assert.ok(hasRawDedupKeyword(groupByInjectedFake),
+    '[Y3] ★对照组②b：真实注入 GROUP BY 后，判据同样必须判红');
+  // [SD1 二轮预筛 MED-3 收口] UNION 双向对照——②a/②b 只验证了 DISTINCT/GROUP BY 两个关键字，UNION
+  //   是判据里新加的第三个分支（LOW-2①），必须单独证明：裸 UNION 判红、UNION ALL 不判红（不是随手
+  //   加了正则就当完事，两个方向都要有反例）。
+  const unionInjectedFake = commitAggSeg + '\nUNION SELECT 1';
+  assert.ok(hasRawDedupKeyword(unionInjectedFake),
+    '[Y3] ★对照组②c：真实注入裸 UNION 后，判据必须判定为「含去重关键字」（UNION 默认对结果集去重，是 DISTINCT/GROUP BY 之外的第三种偷偷去重手法）');
+  const unionAllInjectedFake = commitAggSeg + '\nUNION ALL SELECT 1';
+  assert.ok(!hasRawDedupKeyword(unionAllInjectedFake),
+    '[Y3] ★对照组②d：真实注入 UNION ALL 后，判据不应判红——UNION ALL 保留全部行（含重复），不去重，若判据把它也拦下就是过度收紧，会拦住合法写法');
+  ok('[Y3] ★对照组②：真实注入 DISTINCT / GROUP BY / 裸UNION 到 SQL 正文时，[Y1] 判据均能正确判红；UNION ALL 不误判——三正一反四个方向全覆盖（证明不是恒真通过的假守卫）');
+  // ★对照组③：改动前的旧实现（只过滤空白、不去重）在同一份重复输入上，与新实现结果不同——
+  //   证明 [Y2] 的期望值确实是"改动后才成立"的行为，不是巧合般恒真。
+  const OLD_KEEP_ONLY_SRC = `function siNormalizeCommitRefs(raw) {
+      if (raw == null) return null;
+      const keep = (a) => a.filter(x => typeof x === 'string' && x.trim() !== '');
+      if (Array.isArray(raw)) return keep(raw);
+      if (typeof raw !== 'string') return null;
+      const s = raw.trim();
+      if (s === '') return null;
+      try { const parsed = JSON.parse(s); return Array.isArray(parsed) ? keep(parsed) : null; } catch (_) { return null; }
+    }`;
+  // eslint-disable-next-line no-new-func
+  const oldImplFn = new Function(`return (${OLD_KEEP_ONLY_SRC});`)();
+  const oldResult = oldImplFn(dupInput);
+  assert.deepStrictEqual(oldResult, dupInput.filter((x) => x.trim() !== ''),
+    '[Y3] ★对照组③ 前置：旧实现（改动前的样子）应原样保留重复（不去重），验证反例本身构造正确');
+  assert.notDeepStrictEqual(oldResult, dedupResult,
+    `[Y3] ★对照组③：旧实现（未去重）在同一输入 ${JSON.stringify(dupInput)} 上的结果 ${JSON.stringify(oldResult)} 应与新实现的去重结果 ${JSON.stringify(dedupResult)} 不同——证明 [Y2] 的期望值不是恒真，若把当前实现换回旧版，[Y2] 会真的判红`);
+  ok('[Y3] ★对照组③：改动前的旧实现（只过滤空白不去重）在同一份重复输入上产出与新实现不同的结果，证明 [Y2] 判据具备判别力，不是形同虚设的恒真检查');
+
+  // [SD1 二轮预筛 LOW-7 收口] ★对照组④：正向注入证明 refsByComponentSeg 真参与判定——[Y1b] 此前
+  //   只断言"抽取出的段落不含关键字"，没有反证"这段抽取确实被判据检查过"（万一 idxRefsByComponent/
+  //   rbcEnd 抽偏了、抽出一段空字符串或无关文本，`!hasRawDedupKeyword('')` 一样恒真通过，[Y1b] 会
+  //   变成形同虚设的假绿）。直接在抽取出的真实段落后面注入 SQL DISTINCT，若判据仍不判红，说明抽取
+  //   或判据其中一环出了问题。
+  const refsByComponentDistinctInjected = refsByComponentSeg + '\n// SELECT DISTINCT 1';
+  assert.ok(hasRawDedupKeyword(refsByComponentDistinctInjected),
+    '[Y3] ★对照组④：refsByComponentSeg 注入 SELECT DISTINCT 后，[Y1b] 的 SQL 关键字判据必须判红——证明抽取出的段落是真实参与判定的文本，不是抽偏了的空转判据');
+  ok('[Y3] ★对照组④：refsByComponentSeg 抽取段真实参与 [Y1b] 判定（正向注入 DISTINCT 后判据能命中，非抽偏了的空转假绿）');
+
+  // [SD1 二轮预筛 MED-4 收口] ★对照组⑤：JS 去重形状判据的注入反证——分别注入 new Set()/.indexOf()，
+  //   证明 hasJsDedupShape 不是恒假的摆设。
+  const refsByComponentSetInjected = refsByComponentSeg.replace('return commits', 'const seen = new Set(); return commits');
+  assert.ok(hasJsDedupShape(refsByComponentSetInjected),
+    '[Y3] ★对照组⑤a：refsByComponentSeg 注入 new Set() 后，JS 去重形状判据必须判红');
+  const refsByComponentIndexOfInjected = refsByComponentSeg.replace('.map(c => c.commit_ref)', '.filter((x, i, a) => a.indexOf(x) === i).map(c => c.commit_ref)');
+  assert.ok(hasJsDedupShape(refsByComponentIndexOfInjected),
+    '[Y3] ★对照组⑤b：refsByComponentSeg 注入 .indexOf() 去重手法后，JS 去重形状判据必须判红');
+  ok('[Y3] ★对照组⑤：真实注入 new Set() / .indexOf() 两种 JS 去重手法后，[Y1b] 的 JS 去重形状判据均能正确判红（证明不是恒假通过的假守卫）');
+
+  // [SD1 二轮预筛 LOW-1② 收口] ★守卫：全仓扫描 INSERT INTO sys_issue_dev_assignees，每处列清单必须
+  //   含 round_no（D 组件①·round_no 单据级轮次·2026-08-12）——防未来新增/复制粘贴写点漏带该列，
+  //   悄悄产生"表里多一行 round_no 恒 NULL"的半成品写点。扫描面非空校验：抓到 0 处 INSERT 本身就是
+  //   守卫空转（比如以后 SQL 写法整体重构成 ORM/公共仓储函数，正则再也抓不到字面量），必须先判红
+  //   逼人来更新本守卫，不能悄悄通过。
+  {
+    const ROOT_DA = path.join(__dirname, '..');
+    // ⚠️ 扫描范围刻意**不是**"routes/ 全量 + 排除 scripts/"（verify-sys-intake-gate.js [I] 那种排除
+    //   全部 scripts/ 的写法在这里不适用）：LOW-1① 修的 backfill-sys-deadlock-reopen-round.js 本身就
+    //   在 scripts/ 下、且真实写生产 sys_issue_dev_assignees 表（打回死锁存量修复，会被人在生产库上
+    //   实跑 --apply）——若照抄"排除整个 scripts/"，本守卫会连它一起排除掉，[Y4] 就防不住"LOW-1① 这条
+    //   修复被后人改回去漏 round_no"这个最直接的回归场景，等于守卫没守住它本该守的那个点。
+    //   scripts/ 下其余 test-*/verify-*/_demo-* 文件是测试夹具（如 mkMember 系列 helper），故意用与
+    //   生产写点不同的精简列集是正常设计，不该被本守卫误判——故 scripts/ 只白名单式收录这一个真实
+    //   生产写点脚本，不做目录级全排除或全收录。
+    const SCAN_TARGETS_DA = [
+      path.join(ROOT_DA, 'routes'),
+      path.join(ROOT_DA, 'scripts', 'backfill-sys-deadlock-reopen-round.js'),
+    ];
+    const walkDA = (p) => {
+      const st = fs.statSync(p);
+      if (st.isFile()) return p.endsWith('.js') ? [p] : [];
+      return fs.readdirSync(p, { withFileTypes: true })
+        .flatMap(e => e.isDirectory() ? walkDA(path.join(p, e.name)) : (e.name.endsWith('.js') ? [path.join(p, e.name)] : []));
+    };
+    const daSrcs = SCAN_TARGETS_DA.flatMap(walkDA).map(f => ({ f, s: fs.readFileSync(f, 'utf8') }));
+    // 匹配 "INSERT INTO sys_issue_dev_assignees (列清单)"——列清单跨行常见（本仓大量写点都换行排列），
+    // 用 [^)]* 抓到右括号为止（sys_issue_dev_assignees 表列清单里没有函数调用，不会有内嵌括号）。
+    const DA_INSERT_RE = /insert\s+(?:or\s+\w+\s+)?into\s+sys_issue_dev_assignees\s*\(([^)]*)\)/gi;
+    const daInserts = [];
+    for (const { f, s } of daSrcs) {
+      let m;
+      DA_INSERT_RE.lastIndex = 0;
+      while ((m = DA_INSERT_RE.exec(s))) {
+        daInserts.push({ file: path.relative(ROOT_DA, f), cols: m[1] });
+      }
+    }
+    assert.ok(daInserts.length > 0,
+      '[Y4] 前置：扫描面非空校验——全仓应能扫到 ≥1 处 "INSERT INTO sys_issue_dev_assignees(...)"，抓到 0 处说明写法已变（如改用 ORM/公共仓储函数），正则失效不能静默通过，需人工更新本守卫的扫描方式');
+    for (const ins of daInserts) {
+      assert.ok(/round_no/i.test(ins.cols),
+        `[Y4] ⭐ ${ins.file} 的 INSERT INTO sys_issue_dev_assignees 列清单未含 round_no（D 组件①写侧物化契约要求全部写点同步写入）：(${ins.cols.trim()})`);
+    }
+    ok(`[Y4] 全仓 INSERT INTO sys_issue_dev_assignees 共 ${daInserts.length} 处（跨 ${new Set(daInserts.map(x => x.file)).size} 个文件），列清单均含 round_no——D 组件①写侧物化契约全仓一致`);
+
+    // ★对照组：注入一处"漏带 round_no"的假写点，判据必须能抓到（证明不是恒真通过的假守卫）
+    const missingRoundNoSample = daInserts[0];
+    const strippedCols = missingRoundNoSample.cols.replace(/,?\s*round_no/i, '');
+    assert.ok(!/round_no/i.test(strippedCols),
+      '[Y4] ★对照组 前置：构造"去掉 round_no"的假列清单应确实不含 round_no（验证反例本身构造正确）');
+    assert.ok(/round_no/i.test(missingRoundNoSample.cols) && !/round_no/i.test(strippedCols),
+      `[Y4] ★对照组：真实源列清单含 round_no、人为去掉后的假列清单不含——两者对照证明判据具备判别力，若把任一真实写点的 round_no 删掉，[Y4] 会真的判红`);
+
+    // [codex 355 三轮插入批 L2·仅注释｜D-fix2 MED-3② 收窄措辞] [Y4] 是正则字符串匹配的静态扫描，如实
+    //   登记局限：若未来 index.js 内 INSERT INTO sys_issue_dev_assignees 的 7 个写点被重构成动态拼接
+    //   SQL（如按条件数组拼列名）或收敛进一个公共仓储函数（如 insertDevAssignee(cols)），本条正则会
+    //   失配——要么抓不到（daInserts 为空，[Y4] 前置的"扫描面非空校验"会先判红逼人来更新）、要么抓到
+    //   的是拼接模板而非最终列清单（列清单检查可能误判）。这类"对动态 SQL/公共 helper 重构"的脆弱性，
+    //   本条静态守卫**不打算**用更复杂的正则/AST 解析去堵——真正兜住这类重构后回归的是**行为级**防线，
+    //   但两类写点的兜底组合**不同**（[Y4] 本身只扫 index.js，覆盖范围不含 scripts/ 下的独立进程脚本，
+    //   下面按写点位置分开写，不再笼统声称"每个写点"）：
+    //     · **index.js 内的 7 个写点**：M2a（index.js `assertValidRoundNo`，挂在每个写点入口/computed
+    //       处，与这 7 个写点同进程同函数可 require）——即使 INSERT 语句本身被重构到扫描面之外，只要
+    //       写入路径仍会算出 round_no 并落库，运行时断言依然拦得住非法值。
+    //     · **scripts/ 下的独立写点**（backfill-sys-dev-assignee-round.js 的 UPDATE、
+    //       backfill-sys-deadlock-reopen-round.js 的 INSERT）：这两个脚本是独立 Node 进程直连
+    //       sqlite3，不 require index.js、够不着 M2a——**不受 M2a 覆盖**。防线换成脚本自己内联的合法性
+    //       校验（backfill-sys-deadlock-reopen-round.js 已在 INSERT 前内联同款正整数判据，见该文件
+    //       [D-fix2 MED-3①]；backfill-sys-dev-assignee-round.js 有 M2b 写后探针，见该文件 COMMIT 前
+    //       的 scanIllegalRoundNo 复验）。
+    //     · **两类写点共同兜底**：M2c（下方 [Y5]）数据探针 + 端到端套件
+    //       （test-sys-commit-cols-playwright.js/test-sys-detail-ux-playwright.js 的 round_no 相关
+    //       用例）——直接断言"数据库里躺着的值"和"页面真实渲染出的文案"，不关心中间写法怎么变、也不
+    //       关心写点在哪个进程，重构后若真的漏写 round_no，这两层会在"结果不对"层面抓到，而不必依赖
+    //       "源码文本长得像不像我认识的样子"。
+    //   ——静态扫描（[Y4]）+ index.js 运行时断言（M2a）+ scripts/ 脚本内联校验（各脚本自身）+ 数据探针
+    //   （M2c/[Y5]）+ 端到端套件，合起来才是完整防线，任何单一层都不该被当成唯一防线来加固。
+  }
+
+  // ═══ [Y5]（codex 355 三轮插入批 M2c）round_no 合法性数据探针 ═══
+  //   双向证明：① 先在本文件既有内存测试库注入一条非法值，证明判据本身能判红（不是恒 0 的摆设）；
+  //   ② 再对真实本地库（task_pool.db）跑同一条查询，断言非法非 NULL round_no 计数=0——这是对 M2a
+  //   （写点运行时断言）+ M2b（回填脚本写后探针）两层防线的实际验收：若那两层真的堵住了缺口，本地
+  //   库现在不该有任何非法值。
+  console.log('\n── [Y5]（M2c）round_no 合法性数据探针 ──');
+  let y5EnvSkipped = false;   // [D-fix2 LOW-6] 真实库断言是否因环境原因（无 task_pool.db / round_no 列未就绪）被跳过
+  {
+    const ILLEGAL_ROUND_NO_SQL = `SELECT COUNT(*) AS c FROM sys_issue_dev_assignees
+       WHERE round_no IS NOT NULL AND (typeof(round_no) != 'integer' OR round_no < 1)`;
+
+    // ★对照组：内存库注入一条非法值（round_no=0，<1 非法），证明查询判据具备判别力
+    // [D-fix2 LOW-7] issue 行改直接调 mkIssue（本文件头部已有的同一份 INSERT），不再另写一份同源副本——
+    //   两处一旦漂移（如 mkIssue 加了新必填列而这里没同步），本处会先于 mkIssue 的调用方悄悄产出一行
+    //   字段不全的夹具，且没人会想到来这里比对。dev_assignees 行仍手写：mkMember 不支持传 round_no
+    //   （它的 INSERT 列清单里根本没有这一列），本探针恰恰需要显式注入非法值 0，两者诉求不同不能复用。
+    const injectIssueId = await mkIssue('Y5-探针注入对照');
+    const injectDaId = (await run(`INSERT INTO sys_issue_dev_assignees (issue_id, user_id, user_name, is_primary, dev_status, round_no)
+       VALUES (?, 99, 'Y5探针注入', 0, 'pending', 0)`, [injectIssueId])).lastID;
+    const injectedCount = (await get(ILLEGAL_ROUND_NO_SQL)).c;
+    assert.ok(injectedCount > 0,
+      `[Y5] ★对照组：内存库注入 round_no=0（非法值）后，判据应能判红（计数>0），实得 ${injectedCount}——若这条断言本身失败，说明判据 SQL 有问题，下面对真实库的"计数=0"断言不可信`);
+    ok(`[Y5] ★对照组：内存库注入 1 条 round_no=0 的非法行后，判据正确判红（计数=${injectedCount}），证明判据具备判别力`);
+    // 清理注入行，不污染本文件后续任何断言
+    await run(`DELETE FROM sys_issue_dev_assignees WHERE id = ?`, [injectDaId]);
+    await run(`DELETE FROM sys_issues WHERE id = ?`, [injectIssueId]);
+    const cleanedCount = (await get(ILLEGAL_ROUND_NO_SQL)).c;
+    assert.strictEqual(cleanedCount, 0, `[Y5] 前置：清理注入行后内存库应恢复 0，实得 ${cleanedCount}（清理本身失败会污染后续断言）`);
+
+    // 真实本地库（task_pool.db）——独立只读连接，用完即关，不与本文件其余测试共用连接
+    // [D-fix2 LOW-6] 环境相关的跳过分支不许悄悄同绿——两处 console.log 改 ⚠️ 前缀，并用 y5EnvSkipped
+    //   标记供末尾总结行读取，在"全部通过"横幅之外再单独喊一句「该条环境相关」，防止有人扫一眼绿色
+    //   summary 就以为 [Y5] 的真实库断言真的跑过了。
+    const realDbPath = path.join(__dirname, '..', 'task_pool.db');
+    if (fs.existsSync(realDbPath)) {
+      const realDb = new sqlite3.Database(realDbPath, sqlite3.OPEN_READONLY);
+      const realGet = (sql) => new Promise((resolve, reject) => realDb.get(sql, (e, r) => e ? reject(e) : resolve(r)));
+      const realAll = (sql) => new Promise((resolve, reject) => realDb.all(sql, (e, r) => e ? reject(e) : resolve(r)));
+      const realCols = await realAll(`PRAGMA table_info(sys_issue_dev_assignees)`);
+      if (realCols.some(c => c.name === 'round_no')) {
+        const realIllegalCount = (await realGet(ILLEGAL_ROUND_NO_SQL)).c;
+        assert.strictEqual(realIllegalCount, 0,
+          `[Y5] ⭐⭐ 真实本地库 sys_issue_dev_assignees 非法非 NULL round_no 计数应为 0（M2a 写点运行时断言 + M2b 回填脚本写后探针共同兜底），实得 ${realIllegalCount}`);
+        ok('[Y5] ⭐⭐ 真实本地库（task_pool.db）round_no 合法性探针：非法非 NULL 计数=0（M2a/M2b 防线验收通过）');
+      } else {
+        y5EnvSkipped = true;
+        console.log('  ⚠️ [Y5] （跳过真实库断言：round_no 列尚不存在，服务从未启动过完成 ALTER）');
+      }
+      await new Promise((resolve) => realDb.close(resolve));
+    } else {
+      y5EnvSkipped = true;
+      console.log('  ⚠️ [Y5] （跳过真实库断言：本地未找到 task_pool.db）');
+    }
+  }
+
   server.close();
-  console.log(`\n[全部通过] ${passed}/${passed} ✓ commit 编码两列 后端契约验证通过（C1 列表端点 + C2 批次成员列表 + X1 跨端点一致性）`);
+  console.log(`\n[全部通过] ${passed}/${passed} ✓ commit 编码两列 后端契约验证通过（C1 列表端点 + C2 批次成员列表 + X1 跨端点一致性 + Y 展示层去重 + Y4 round_no 全仓写点守卫 + Y5 round_no 数据探针）`);
+  // [D-fix2 LOW-6] "全部通过"横幅本身不区分"真的跑过"与"环境原因被跳过"——[Y5] 真实库那半条断言若被
+  //   跳过，单独喊一句，不许它被绿色 summary 悄悄盖过去。
+  if (y5EnvSkipped) {
+    console.log('  ⚠️ 注意：[Y5] 真实本地库（task_pool.db）round_no 合法性断言本次未执行（该条环境相关——本地无 task_pool.db 或 round_no 列尚未就绪），以上"全部通过"不含这半条覆盖，请勿据此断言真实库已验收。');
+  }
   console.log('  C1：A1 值协议(JSON数组) + A2 零命中[] + A3 前后端分流 + A4 录入顺序(+static 合同锁) + A5 ⭐含分号不错拆 + A6 含removed实例 + A7 多单隔离 + 既有字段回归');
   console.log('  C2：B1 live 分支 + B2 ⭐snapshot 防漂移(不回查 live) + B3 degraded 返回 null 不伪造 + B4 零 commit 返回 [] 对照 + B5 既有契约');
+  console.log('  Y：Y1 后端不含去重关键字(含UNION) + Y1b 另一端覆盖(SQL关键字+JS去重形状) + Y2 ⭐⭐前端真实去重（eval 执行验证，含 L1 canonical 值+首个脏值对照）+ Y3 五组对照（剥注释不误判/真注入必判红含UNION双向/新旧实现结果不同/Y1b抽取真参与判定/JS去重形状注入必判红）+ Y4 round_no 全仓写点守卫（登记动态SQL重构脆弱性，兜底=M2a+M2c+端到端）+ Y5 round_no 数据探针（内存库注入判红对照 + 真实本地库计数=0）');
   process.exit(0);
 })().catch(e => { console.error('\n[失败]', e && e.message); if (server) server.close(); process.exit(1); });

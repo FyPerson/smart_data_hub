@@ -643,31 +643,73 @@ check('[C9-fix2 M3] 验收弹窗直翻预告改**条件式**文案（不再是"�
     assert.ok(condIdx >= 0 && condIdx < promiseIdx,
         `[M3] 承诺分句必须位于条件前提之后（前提被删只剩承诺=回退到原句式），前提位置=${condIdx} 承诺位置=${promiseIdx}`);
 });
-check('[M3] 详情页「上线方式」kv：三分支字典 + 仅已上线单渲染 + 前端不自行判定来源', () => {
-    // ① 字典常量存在且三个 key/文案逐字对齐后端 deriveOnlineSourceKind 的三分支
+check('[M3] 详情页「上线方式」kv：四分支字典 + 仅已上线单渲染 + 前端不自行判定来源', () => {
+    // ① 字典常量存在且四个 key/文案逐字对齐后端 deriveOnlineSourceKind 的四分支
+    //   [SB2·2026-08-13] 3→4：组 B 直上新增 authorized_fastlane→「先行上线」（后端 ②b 分支与前端词条
+    //   同 commit 落地，本守卫的"两边对账"职责由计数+逐 key 枚举共同承载——计数基线随分支演进更新）。
     assert.ok(/const SI_ONLINE_SOURCE_LABEL = \{/.test(src), '应定义 SI_ONLINE_SOURCE_LABEL 单一事实源字典');
-    for (const [k, label] of [['release_publish', '批次发布'], ['no_commit_acceptance', '免上线直翻'], ['unknown_legacy', '历史存量']]) {
-        assert.ok(new RegExp(`${k}:\\s*'${label}'`).test(src), `SI_ONLINE_SOURCE_LABEL 应含 ${k} → 「${label}」（key 与后端 deriveOnlineSourceKind 三分支逐字对齐）`);
+    for (const [k, label] of [['release_publish', '批次发布'], ['no_commit_acceptance', '免上线直翻'], ['authorized_fastlane', '先行上线'], ['unknown_legacy', '历史存量']]) {
+        assert.ok(new RegExp(`${k}:\\s*'${label}'`).test(src), `SI_ONLINE_SOURCE_LABEL 应含 ${k} → 「${label}」（key 与后端 deriveOnlineSourceKind 四分支逐字对齐）`);
     }
     const dictMatch = src.match(/const SI_ONLINE_SOURCE_LABEL = \{([^}]*)\}/);
     assert.ok(dictMatch, 'SI_ONLINE_SOURCE_LABEL 字典字面量应能被切出（锚点漂移时先红，不静默按 0 个分支判定）');
     const dictKeys = dictMatch[1].split(',').filter(s => s.trim()).length;
-    assert.strictEqual(dictKeys, 3, `SI_ONLINE_SOURCE_LABEL 应恰 3 个分支（与后端三分支一一对应；多出第 4 个说明后端加了分支而两边未对账），实际 ${dictKeys}`);
+    assert.strictEqual(dictKeys, 4, `SI_ONLINE_SOURCE_LABEL 应恰 4 个分支（与后端四分支一一对应；多出第 5 个说明后端加了分支而两边未对账），实际 ${dictKeys}`);
     // ② kv 渲染：以 online_source_kind 非空为门（后端对非已上线单恒返 null ⇒ 等价于"仅已上线单渲染"）
     assert.ok(/\$\{iss\.online_source_kind \? `<div class="u-kv-item"><label>上线方式<\/label>/.test(src),
         '「上线方式」kv 应由 iss.online_source_kind 非空门控——不适用时整行不渲染（同工期 kv K3 三态门控 / 列表页 bug 行「留空≠未定级」同一判断标准）');
     assert.ok(/SI_ONLINE_SOURCE_LABEL\[iss\.online_source_kind\] \|\| iss\.online_source_kind/.test(src),
         '未知 kind 应兜底显示原始 key（宁可露出英文标识让人发现漏改，也不静默显示空白/错误分类）');
-    // ③ ⭐ 前端**不得自行判定来源**：全站不得出现读原始 online_source 列或重算三分支的写法
-    //    （判定权威唯一在后端 deriveOnlineSourceKind，两份判据必然漂移——297-M6 已裁定）。
-    //    注意排除 siModalAccept 里对 **accept 响应体** d.online_source 的消费：那是端点返回值不是 issue DTO 列。
+    // ③ ⭐ 前端**不得自行判定「上线方式」展示来源**：不得把原始 online_source 列**值比较到 kind 字面量**重算三/四分支
+    //    （展示 kind 判定权威唯一在后端 deriveOnlineSourceKind，两份判据必然漂移——297-M6 已裁定）。
+    //    [SB3·2026-08-13 精修] 守卫从"禁一切 iss.online_source 读取"收窄为"禁与 kind 字面量的**值比较**
+    //    （=== / !== '字面量'）"——原 blanket 禁误伤组 B 授权按钮可见性的 `iss.online_source == null`
+    //    **未上线门控**（与后端活跃授权谓词 `online_source IS NULL` 同款·非重算展示 kind）。null 检查=粗粒度
+    //    "是否已上线"闸，不产生与 deriveOnlineSourceKind 竞争的 kind 判定，故放行；值比较仍禁（那才是重算）。
+    //    [追加批·codex 363 号 M4 泛化] 上一版正则 `\b(iss|i)\.online_source` 是**变量名白名单**——codex
+    //    363 指出 row./item./x. 等任意其它变量名会漏检（既不误报也不误放行，是纯粹的扫描盲区：换个变量名
+    //    写同样的重算代码，守卫看不见）。改为**通用成员访问扫描**：任意标识符 `.online_source` 后跟值比较
+    //    运算符，不再枚举变量名白名单。
+    //    但通用化后会连坐两处**响应体**消费（非 issue DTO 列，是端点返回值，语义与"重算展示来源"无关）：
+    //    · siModalAccept 里的 `d.online_source === 'no_commit_acceptance'`（accept 端点响应体）——用既有
+    //      extractFunctionBody 整段函数体剥除处理（下方 srcSansAccept，先例未变）。
+    //    · siModalSubmit 里的 `r.data.online_source === 'authorized_fastlane'`（submit 端点 direct_release
+    //      成功响应体，组 B·SB3 新增）——**不整段剥 siModalSubmit**（该函数体量大，整段剥除会连带遮蔽
+    //      函数内未来任何真实违规），改为精确剥除这一个字面量子串本身（同 siModalAccept 剥除范式的
+    //      "剥最小必要单元"精神，只是单元从"整个函数体"收窄到"这一条字面量表达式"）：扫描前把
+    //      `r.data.online_source` 替换成一个不含 `.online_source` 的中性占位串，通用正则天然扫不到它。
+    //    ⚠️ 全文核实：除这两处外，全仓 `.online_source` 仅余两条 `== null`（siHasActiveFastReleaseAuth
+    //    定义处 + fastReleaseBtns 门控），均是 null 检查（无引号跟在运算符后），正则天然不命中，无需额外剥除。
     const acceptBody = extractFunctionBody(src, 'siModalAccept') || '';
-    const srcSansAccept = src.replace(acceptBody, '');
-    assert.ok(!/\biss\.online_source\b/.test(srcSansAccept),
-        '[M3] 前端不得读 issue 的原始 online_source 列（那是后端派生的输入，不是展示字段）——只认后端给的 online_source_kind');
+    const srcSansAccept = src.replace(acceptBody, '')
+        .replace(/r\.data\.online_source/g, '__SUBMIT_RESPONSE_BODY_ONLINE_SOURCE__');
+    // [codex 364 L1 登记接受] 本正则覆盖**单层成员访问** `<标识符>.online_source === '…'`（含 row./item./任意变量名）。
+    //   已知未覆盖形态（前瞻·当前代码库全无此写法）：多级链 `row.issue.online_source ===`、函数返回 `getIssue().online_source ===`、
+    //   括号访问 `row['online_source'] ===`——若未来出现须升级到 AST（MemberExpression.property.name==='online_source' 且参与字符串字面量比较）。
+    //   现阶段单层正则 + 通用标识符前缀已覆盖全部现有 issue DTO 读点，AST 化属独立守卫工程，本期不做。
+    assert.ok(!/\b[\w$]+\.online_source\s*[=!]==?\s*'/.test(srcSansAccept),
+        '[M3·M4 泛化] 前端不得把 issue.online_source 值比较到 kind 字面量重算「上线方式」展示（=== / !== \'…\'·任意标识符前缀，不再限定变量名白名单）——展示 kind 只认后端 online_source_kind；null 检查（未上线门控）不在此禁列；accept/submit 两处响应体消费已剥除不算违例。');
     // ④ 纯展示扩字段：不得因此新增来源筛选（同 C8 risk_level 的既定口径）
     assert.ok(!/online_source_kind[^\n]*(filter|筛选|addEq)/.test(src) && !/\?online_source=/.test(src),
         '[M3] C9 是纯展示扩字段，不应新增按上线来源筛选（加筛选属独立需求，须另行立项）');
+});
+// [追加批·codex 363 号 M4 泛化] 两条独立对照组——证明上面这条"通用成员访问扫描"判据既不是空炮（能真判红），
+//   也没有在剥除响应体读点时顺手把整条正则削断（各自重算 srcSansAccept，不依赖外层 check 的闭包变量，
+//   与本文件其余 check 一贯的"自包含"写法对齐，不引入跨 check 共享状态）。
+check('[M4] ★对照组：把剥除后的中性占位串还原成真实响应体读点前缀，判据不应误报（证明剥除只掐掉这一处，不是把整条正则关掉）', () => {
+    const acceptBody = extractFunctionBody(src, 'siModalAccept') || '';
+    const srcSansAccept = src.replace(acceptBody, '')
+        .replace(/r\.data\.online_source/g, '__SUBMIT_RESPONSE_BODY_ONLINE_SOURCE__');
+    assert.ok(/\b[\w$]+\.online_source\s*[=!]==?\s*'/.test(srcSansAccept.replace(/__SUBMIT_RESPONSE_BODY_ONLINE_SOURCE__/g, 'r.data.online_source')),
+        '还原占位串后正则应重新命中该行（若不命中，说明上面的 assert.ok 是恒真式，剥除逻辑把正则本身削断了而非精确排除了目标子串）');
+});
+check('[M4] ★对照组：注入一个用未白名单变量名（如 row.）写的重算分支，通用正则应判红（证明不再是变量名白名单）', () => {
+    const acceptBody = extractFunctionBody(src, 'siModalAccept') || '';
+    const srcSansAccept = src.replace(acceptBody, '')
+        .replace(/r\.data\.online_source/g, '__SUBMIT_RESPONSE_BODY_ONLINE_SOURCE__');
+    const injected = srcSansAccept + "\nconst fake = row.online_source === 'authorized_fastlane';\n";
+    assert.ok(/\b[\w$]+\.online_source\s*[=!]==?\s*'/.test(injected),
+        '注入 row.online_source === \'…\' 后正则应命中（旧版 (iss|i) 变量名白名单对 row. 前缀是扫描盲区，本条证明泛化后已堵住）');
 });
 check('[M3] 后端契约：deriveOnlineSourceKind 对非「已上线」单恒返 null（前端 kv 门控的前提）', () => {
     const indexJsPath = path.join(__dirname, '..', 'routes', 'sys-iteration', 'index.js');

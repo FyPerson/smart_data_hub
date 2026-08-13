@@ -393,7 +393,7 @@ const IMPROVEMENT_FLOW_TRANSITIONS = [
     from: ['已关闭'], to: '开发中',
     roleGuard: 'admin', ownerGuard: null,
     requiredPayload: ['reason'],
-    sideEffects: ['reopen_count++', 'reopened_at=now', '清 accepted_at/released_at/closed_at/release_id/dev_estimated_at/scheduled_start（first_submitted_at 永不变·受理排期改造 §7.2）'],
+    sideEffects: ['reopen_count++', 'reopened_at=now', '清 accepted_at/released_at/closed_at/release_id/dev_estimated_at/scheduled_start/online_source/post_release_acceptance/post_accepted_at/post_derive_issue_id（first_submitted_at 永不变·受理排期改造 §7.2；online_source 三件套=组 B·SB2 预筛 HIGH-1，重开=新一轮，上一轮"怎么上线的+补验收进度"一并作废，见 index.js case \'reopen\'）'],
     timelineEvent: 'reopen', actionCode: null,
     notifyAfterCommit: 'notifyAssignedDeveloper',  // C5
   },
@@ -704,7 +704,7 @@ const FEATURE_FLOW_TRANSITIONS = [
     from: ['已关闭'], to: '开发中',
     roleGuard: 'admin', ownerGuard: null,
     requiredPayload: ['reason'],
-    sideEffects: ['reopen_count++', 'reopened_at=now', '清 accepted_at/released_at/closed_at/release_id/dev_estimated_at/scheduled_start（first_submitted_at 永不变·受理排期改造 §7.2）'],
+    sideEffects: ['reopen_count++', 'reopened_at=now', '清 accepted_at/released_at/closed_at/release_id/dev_estimated_at/scheduled_start/online_source/post_release_acceptance/post_accepted_at/post_derive_issue_id（first_submitted_at 永不变·受理排期改造 §7.2；online_source 三件套=组 B·SB2 预筛 HIGH-1，重开=新一轮，上一轮"怎么上线的+补验收进度"一并作废，见 index.js case \'reopen\'）'],
     timelineEvent: 'reopen', actionCode: null,
     notifyAfterCommit: 'notifyAssignedDeveloper',  // C5
   },
@@ -1059,7 +1059,7 @@ const BUG_FLOW_TRANSITIONS = [
     from: ['已关闭'], to: '处理中',
     roleGuard: 'admin', ownerGuard: null,
     requiredPayload: ['reason'],
-    sideEffects: ['reopen_count++', 'reopened_at=now', '清 accepted_at/released_at/closed_at/release_id/dev_estimated_at/scheduled_start（first_submitted_at 永不变）'],
+    sideEffects: ['reopen_count++', 'reopened_at=now', '清 accepted_at/released_at/closed_at/release_id/dev_estimated_at/scheduled_start/online_source/post_release_acceptance/post_accepted_at/post_derive_issue_id（first_submitted_at 永不变；online_source 三件套=组 B·SB2 预筛 HIGH-1，重开=新一轮，上一轮"怎么上线的+补验收进度"一并作废——bug 流是本三列唯一活跃消费方，见 index.js case \'reopen\'）'],
     timelineEvent: 'reopen', actionCode: null,
     notifyAfterCommit: 'notifyAssignedDeveloper',
   },

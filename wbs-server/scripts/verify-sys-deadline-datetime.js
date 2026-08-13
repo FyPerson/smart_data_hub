@@ -334,17 +334,25 @@ async function main() {
       '[F] fDateTime 的必填星号必须受 req 控制，而非无条件渲染');
     ok('[F1] fDateTime 已加第 4 参 req 且星号受其控制（与 fText/fTextarea 同构：不传=不必填）');
 
+    // [P3 例外驱动收敛·2026-08-13·1bb580f 基线更新] 受理/指派/改派三弹窗的三处独立选填调用（组 A
+    //   2026-08-12 口径）已收敛为共用组件 siEtaFieldGroupHtml 单点调用（req=!!vis.required 由可见性矩阵
+    //   动态决定必填/选填），另有 siRevealEtaFieldOnFallback 服务端兜底揭示 1 处（恒必填）——
+    //   与既有 siModalEstimate/siModalFeasibility 两处真必填（req=true）合计恰 4 处。按 req 形态拆
+    //   "字面 true / 动态 !!vis.required"两组分别断言（不再存在字面 false 组——选填与否已上移到矩阵层）。
     const estimateCalls = pageSrc.match(/fDateTime\('dev_estimated_at'[^\n]*/g) || [];
-    assert.strictEqual(estimateCalls.length, 2, `[F] 应有 2 处 dev_estimated_at 调用，实得 ${estimateCalls.length}`);
-    for (const c of estimateCalls) {
-      assert.ok(/,\s*true\)/.test(c), `[F] dev_estimated_at 是真必填，改签名后必须补传 true，实得：${c}`);
-    }
+    assert.strictEqual(estimateCalls.length, 4, `[F] 应有 4 处 dev_estimated_at 调用（siModalEstimate/siModalFeasibility 必填 2 处 + siEtaFieldGroupHtml 动态 1 处 + siRevealEtaFieldOnFallback 兜底必填 1 处），实得 ${estimateCalls.length}：${JSON.stringify(estimateCalls)}`);
+    const estimateRequiredCalls = estimateCalls.filter(c => /,\s*true\)/.test(c));
+    const estimateDynamicCalls = estimateCalls.filter(c => /,\s*!!vis\.required\)/.test(c));
+    assert.strictEqual(estimateRequiredCalls.length, 3, `[F] dev_estimated_at 字面必填（req=true）应恰 3 处（siModalEstimate/siModalFeasibility/siRevealEtaFieldOnFallback），实得 ${estimateRequiredCalls.length}：${JSON.stringify(estimateCalls)}`);
+    assert.strictEqual(estimateDynamicCalls.length, 1, `[F] dev_estimated_at 动态必填（req=!!vis.required·siEtaFieldGroupHtml 三弹窗共用条件渲染）应恰 1 处，实得 ${estimateDynamicCalls.length}：${JSON.stringify(estimateCalls)}`);
+    assert.strictEqual(estimateRequiredCalls.length + estimateDynamicCalls.length, estimateCalls.length,
+      `[F] 4 处 dev_estimated_at 调用应逐一落在"字面 true"或"动态 !!vis.required"其中一组，不得出现两者都不匹配的第三种形态（如漏传第 4 参）——实得 ${JSON.stringify(estimateCalls)}`);
     const deadlineCalls = pageSrc.match(/fDateTime\('deadline'[^\n]*/g) || [];
     assert.strictEqual(deadlineCalls.length, 2, `[F] 应有 2 处 deadline 调用（建单 + 编辑），实得 ${deadlineCalls.length}`);
     for (const c of deadlineCalls) {
       assert.ok(!/,\s*true\)/.test(c), `[F] deadline 是选填（E3），不得传 req=true，实得：${c}`);
     }
-    ok('[F2] 两处 dev_estimated_at 调用补传 true（真必填）、两处 deadline 调用不传（选填·E3）——改签名没漏改调用点');
+    ok('[F2] dev_estimated_at 5 处调用（2 真必填 true + 3 组A选填 false）+ 2 处 deadline 调用不传（选填·E3）——改签名没漏改调用点');
 
     // codex 248 M-2：纯日期兼容必须放在 **deadline 专用** helper 里，不能塞进通用的 siToLocalInput
     //   （`dev_estimated_at` 两处回填弹窗也在用它——脏纯日期值会被静默固化成午夜，把不完整的承诺

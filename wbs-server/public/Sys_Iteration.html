@@ -364,6 +364,10 @@
            影响 fCheckbox() 通用函数（建单"需要可行性评估"等）+「拉入报障人」checkbox。 */
         .unified-page .u-form-group.inline-chk input[type="checkbox"] { flex: 0 0 auto; width: auto; }
         .si-note-box { background: #fffbeb; border: 1px solid #fde68a; border-radius: 6px; padding: 8px 11px; color: #92400e; font-size: 12px; line-height: 1.5; margin-bottom: 14px; }
+        /* 组 C·SC2（§3C.8）：ETA 超容差理由块——沿用 .si-note-box 同款配色（amber 警示），
+           默认 display:none，由 siWireEtaOverrunReasonBlock 按前端同源判据动态展开/收起。 */
+        .si-eta-reason-block { border: 1px solid #fde68a; background: #fffbeb; border-radius: 6px; padding: 10px 12px 2px; margin-bottom: 14px; }
+        .si-eta-reason-block .si-eta-reason-hint { color: #92400e; font-size: 12px; line-height: 1.5; margin-bottom: 8px; }
 
         /* 批次管理（Sys 专属） */
         .si-batch-item { border: 1px solid #e2e8f0; border-radius: 8px; padding: 11px 14px; margin-bottom: 10px; cursor: pointer; transition: .15s; }
@@ -847,22 +851,59 @@
     // fSelect label 复用（建单/编辑/受理等一切渲染风险等级选择的表单）——照搬 SI_PRIORITY_LABEL 范式。
     const SI_RISK_LEVEL_LABEL = `风险等级 <span class="si-help" tabindex="0" role="img" aria-label="${SI_RISK_LEVEL_HELP_TEXT}" title="${SI_RISK_LEVEL_HELP_TEXT}">?</span>`;
 
+    // [组 C·SC2·方案 §3C.8] 超容差理由——五值域与容差档位，逐字同步服务端
+    //   index.js ETA_OVERRUN_REASON_CODES / ETA_OVERRUN_TOLERANCE_DAYS（写读同源，同 SI_RISK_LEVEL_LABEL
+    //   一带既有惯例：前端字面量镜像后端常量，非拉专门 meta 接口）。改任一侧要看另一侧是否同步。
+    const SI_ETA_OVERRUN_REASON_CODES = ['需求变更', '技术难度超预期', '依赖阻塞', '资源冲突', '其他'];
+    const SI_ETA_TOLERANCE_DAYS = { improvement: 5, feature: 7 };   // bug/config 不参与（不入表，见 evaluateEtaOverrun 同款语义）
+
     // [2026-08-10 用户拍板·「P2/三级」合并形态口径③] 列表页 bug/config 行风险段 "-" 占位的悬浮说明。
     //   不适用集合=bug/config 两类，逐状态对照过权威源 DDL CHECK (type IN ('bug','feature','improvement','config'))
     //   （routes/sys-iteration/index.js 建表段）——非 feature/improvement 一律 "-"（口径①），将来加第五 type
     //   时此文案与 siPriRiskCellHtml 的门控须同步核对。
     const SI_RISK_NA_TITLE = 'bug/config 单不适用风险等级（风险等级仅在受理 feature/improvement 单时判定）';
 
-    // ⭐ [C9-fix M3] 「已上线」来源三分支的展示文案——**判定在后端**（deriveOnlineSourceKind 是唯一权威，
+    // ⭐ [C9-fix M3] 「已上线」来源分支的展示文案——**判定在后端**（deriveOnlineSourceKind 是唯一权威，
     //   index.js:2310），前端只做 kind→中文 的字典映射，不自己看 release_id/online_source 推断（否则又是
-    //   两份判据必然漂移）。三个 key 与后端返回的 `issue.online_source_kind` 逐字对齐：
+    //   两份判据必然漂移）。key 与后端返回的 `issue.online_source_kind` 逐字对齐：
     //     · release_publish        → 批次发布（走 sys_releases 批次 / hotfix / execute 的既有主路径）
     //     · no_commit_acceptance   → 免上线直翻（C9 新增：零 commit 单验收通过当场翻牌）
+    //     · authorized_fastlane    → 先行上线（[组B·SB2] bug 快车道授权后 submit 勾选直上，方案 v1.3
+    //                                 §3.2；措辞刻意用"先行上线"而非"应急/hotfix"字样——hotfix 相关文案
+    //                                 走"应急建单/应急一键"，两者语义不同，不得混用）
     //     · unknown_legacy         → 历史存量（C9 之前就已在「已上线」的单，无来源标签可考；**刻意不伪装成
-    //                                 免上线**，297-B M-a 正是为此保留了物理列）
-    //   ⚠️ 未在字典内的值（后端将来加第四分支而前端未同步）走 `|| kind` 兜底显示原始 key——宁可露出一个
+    //                                 免上线/先行上线**，297-B M-a 正是为此保留了物理列）
+    //   ⚠️ 未在字典内的值（后端将来加第五分支而前端未同步）走 `|| kind` 兜底显示原始 key——宁可露出一个
     //     英文标识让人发现漏改，也不静默显示成空白或错误分类。
-    const SI_ONLINE_SOURCE_LABEL = { release_publish: '批次发布', no_commit_acceptance: '免上线直翻', unknown_legacy: '历史存量' };
+    const SI_ONLINE_SOURCE_LABEL = { release_publish: '批次发布', no_commit_acceptance: '免上线直翻', authorized_fastlane: '先行上线', unknown_legacy: '历史存量' };
+
+    // [组 B·SB3·补验收闭环·方案 v1.3 §3.3] post_release_acceptance 三态中文映射——判定在后端（值域由
+    // 写点 fastlaneAcceptanceInvariantViolations 校验），前端只做 kind→中文 字典映射，不自推导（与
+    // SI_ONLINE_SOURCE_LABEL 同款范式）。⚠️ [追加批·L2] failed_derived 只取"不通过"（不带"（已派生）"
+    // 括注）——详情 kv 该分支在这段基础文案后面还会另拼一条可点击的「已派生 #N」链接，括注与链接文字
+    // 会重复（"不通过（已派生） 已派生 #11838"），故字典值只承担"结论"这一半语义，"已派生"由链接本身表达。
+    const SI_POST_ACCEPTANCE_LABEL = { pending: '待补验收', passed: '已通过', failed_derived: '不通过' };
+
+    // [组 B·SB3] 活跃先行上线授权判定——前端 UI 镜像，与后端 index.js :3188 一带 isActiveFastReleaseAuth
+    // 权威谓词**逐条同源**（唯一差异：前端不做该函数的"缺列 fail-closed"防线——iss 对象来自详情端点
+    // `SELECT sys_issues.*`，六列恒全，无需防御调用点漏投影）。用于①详情页授权/撤销按钮显隐 ②submit
+    // 弹窗"已随修复直接上线"勾选框显隐。⚠️ 前端非授权源，真闸在后端同名谓词，这里判错只会误显/误藏
+    // 按钮，不会绕过后端拦截（点击后端仍会按真实谓词 409）。
+    function siHasActiveFastReleaseAuth(iss) {
+        if (!iss) return false;
+        return iss.fast_release_auth_at != null
+            && iss.fast_release_revoked_at == null
+            && iss.fast_release_consumed_at == null
+            && iss.released_at == null
+            && iss.online_source == null
+            && (iss.reopened_at == null || String(iss.fast_release_auth_at) >= String(iss.reopened_at));
+    }
+    // [组 B·SB3·B4 闭环牙齿·方案 §3.3] 48h 圈红判定——**[追加批·M2 修正] 已移至后端**（index.js
+    // isPostReleaseAcceptOverdue），前端不再自算。原实现（浏览器 `new Date()` 解析 released_at 按客户端
+    // 本地时区计算）在异地/移动端登录场景会与服务端时区不一致产生误判；后端判据与写入 released_at 的
+    // SQLite `datetime('now','localtime')` 同进程同 OS 时区，无跨时区风险。前端改读列表/详情响应下发的
+    // `post_release_accept_overdue` 布尔字段（见 siPostAcceptFlagHtml / postAcceptKv 两处消费点）。
+    // 本函数（siIsPostAcceptOverdue）已删除，不再保留——避免死代码与后端权威判据产生"两份判据"错觉。
 
     // [C8] 列表页「优先级/风险」单元格：徽章 + "/" + 风险文本，读作「P2/三级」（2026-08-10 用户二拍
     //   斜杠合并形态，取代同日早前的左右并排；镜像列头「优先级/风险」的斜杠语义。守卫锚定见
@@ -1351,6 +1392,11 @@
         if (currentUser) {
             menuItems += `<button type="button" class="u-head-menu-item" role="menuitem" onclick="siOpenDutyRoster()">📅 值班排班</button>`;
         }
+        // [组 C·SC2·方案 §3C.6] 期望对表统计入口——同值班排班口径：登录即可见（只读聚合信息，
+        //   不依赖 META_OK，不做开发个人排名聚合，故不收窄到 admin/对接人）。
+        if (currentUser) {
+            menuItems += `<button type="button" class="u-head-menu-item" role="menuitem" onclick="siOpenEtaStats()">📊 期望对表统计</button>`;
+        }
         if (META_OK && isAdmin()) {
             // 上线日志（2026-07-31 用户拍板）：已发布批次 + 成员清单只读浏览——门槛与显隐条件与「删除审计」
             //   完全同款（同一 META_OK 降级条件、同一 admin-only），非应急路径，容忍随 meta 一起降级。
@@ -1835,6 +1881,47 @@
         const title = parts.length ? parts.join('\n') : '该单曾被移出上线批次（原因未留痕）';
         return `<span class="si-flag removed" title="${esc(title)}">已移出</span>`;
     }
+    // [组 B·SB3·补验收闭环·方案 v1.3 §3.3] 「先行上线待补验收」列表徽章——status 无关（fastlane 单上线后
+    //   status 恒「已上线」，与 status 门控类的其它 flag 不同，本徽章的门控字段是 online_source/
+    //   post_release_acceptance 本身）。pending 态渲染；48h 超时叠红色强调 + 不同文案（B4 闭环牙齿）。
+    //   [追加批·2026-08-13·用户实测拍板] passed（通过）态仍不进列表徽章——闭环干净不制造噪音，例外
+    //   驱动口径（详情页 kv 已有专门展示，见 siRenderDrawer 补验收行）。failed_derived（不通过）态**改为
+    //   进列表徽章**：不通过是质量含义最重的终态，此前列表上与普通已上线单毫无区分，靠用户翻详情才
+    //   发现——同 siTechLeadNotifyBadgeHtml"sent 不显"口径已不再适用于这个具体终态（那条口径讲的是
+    //   "正常收尾不需要提醒"，failed_derived 恰恰不是"正常收尾"）。
+    //   契约：依赖列表响应提供 online_source / post_release_acceptance / released_at / post_derive_issue_id
+    //   四字段；两端由 scripts/verify-sys-list-badge-fields.js 自动对拍，本函数已列入该守卫扫描面。
+    function siPostAcceptFlagHtml(i) {
+        // [SB3 预筛 MED 修] 用后端派生列 online_source_kind（非原始 online_source 值比较）——与详情页补验收 kv/
+        //   按钮三处消费点同源、判定权威唯一在后端 deriveOnlineSourceKind（列表行 :6618 已逐行挂 online_source_kind）；
+        //   原写法读原始列值比较到 kind 字面量=两份判据必漂移（不变量耦合今天等值但松动即分裂）。
+        if (i.online_source_kind !== 'authorized_fastlane') return '';
+        // [追加批·2026-08-13] failed_derived 终态徽章——与下方 pending 分支平行判断（post_release_acceptance
+        //   三态互斥，不会同时命中两个分支）。配色刻意用比 48h 圈红（#dc2626）更深的红：借
+        //   components.css :root 的 --sem-rejected-fg（#991b1b，与本页 .si-s-rejected 状态徽章、
+        //   「已拒绝」状态同一色系，见头部 CSS 注释"rejected 底色对齐修正"一带）——48h 圈红是"催办告警"
+        //   （事还没完，请尽快处理），补验收未通过是"终态事实"（事已经定性，不会再变），两者语义不同，
+        //   用不同深浅的红做区分，不与既有 #dc2626/#b45309 两个已占用色值冲突。
+        //   持久显示（终态标记，有意不随时间/翻页消失）——用户拍板"等派生单挂载层级扩展落地后再评估
+        //   调整"，本次不加任何"已读/已确认"式的隐藏机制。
+        if (i.post_release_acceptance === 'failed_derived') {
+            // [用户实测追加·2026-08-13] 派生单号从悬停 title 提到徽章正文——徽章的价值不只是标记状态，
+            //   还要回答"未通过之后在哪跟进"（后续处理载体=派生单）；单号藏在 title 里发现率≈0。
+            //   徽章仅现于 failed_derived 例外单据，正文多几个字符不构成列宽压力；派生单挂载（层级扩展）
+            //   落地后本文案可随之简化。
+            const deriveTxt = i.post_derive_issue_id ? `·已派生#${Number(i.post_derive_issue_id)}` : '';
+            const title = `先行上线补验收未通过（终态）${i.post_derive_issue_id ? `，后续修复跟进见派生单 #${Number(i.post_derive_issue_id)}` : ''}`;
+            return `<span class="si-flag" style="color:var(--sem-rejected-fg);font-weight:600" title="${esc(title)}">补验收未通过${deriveTxt}</span>`;
+        }
+        if (i.post_release_acceptance !== 'pending') return '';   // passed 态 + 其余非适用态：明确不加徽章
+        // [追加批·M2 修正] 48h 圈红判据改读后端派生列 post_release_accept_overdue（index.js
+        //   isPostReleaseAcceptOverdue，与写入 released_at 同进程同时区）——不再用浏览器本地时区自算
+        //   （旧实现 siIsPostAcceptOverdue 在异地/移动端登录时会与服务端时区不一致，产生误判）。
+        const overdue = i.post_release_accept_overdue === true;
+        return overdue
+            ? `<span class="si-flag" style="color:#dc2626;font-weight:600" title="先行上线已超 48 小时未补验收，请尽快处理">先行上线待补验收（超48h）</span>`
+            : `<span class="si-flag" style="color:#b45309">先行上线待补验收</span>`;
+    }
     function renderSysIterationRows(list) {
         const tb = document.getElementById('siTbody');
         if (!list.length) {
@@ -1855,6 +1942,7 @@
                 (i.reopen_count ? `<span class="si-flag reopen">返工×${i.reopen_count}</span>` : '') +
                 (i.blocked ? `<span class="si-flag blocked">受阻</span>` : '') +
                 siPrereleaseFlagHtml(i) +
+                siPostAcceptFlagHtml(i) +
                 siTechLeadNotifyBadgeHtml(i) +
                 siHeldDaysHtml(i.status, i.last_held_at);
             const lineage = i.origin_issue_id ? `<span class="si-flag lineage">🔁基于#${i.origin_issue_id}</span>` : '';
@@ -1900,9 +1988,39 @@
     //   （代价=渲染空白 / JSON.parse(array) 异常 / 类型判断分支扩散）。故把归一化收敛到这一个入口，
     //   **签名在此锁死**：`string | array | null | undefined  ->  array | null`
     //   —— 返回 `null` 专表「读不出来」（degraded），`[]` 专表「确实没有」，两者不得互相冒充。
+    // ⭐ [件②·2026-08-12] 保序首现去重：打回自动重开一轮（v1.151.1）会让同一开发在两轮各提交一次同一
+    //   版本号（SVN 号/GIT commit 是各轮各自的历史事实，两轮实例不同但值可能相同），raw 层因此**刻意**
+    //   保留跨轮重复（后端契约见 routes/sys-iteration/index.js GET /sys-issues 列表 SELECT 与两处
+    //   commit 自然键查重旁的注释）——去重只应发生在**展示层**，且**只应有这一处实现**：本 helper 是
+    //   **去重消费点**（列表页两列 / 批次抽屉 / 一键复制）共 3 处唯一的归一化入口，三处禁止各写一份
+    //   去重逻辑（同 codex 246 MED-1 的教训：两端各自处理同一份数据会悄悄漂移）。
+    //   ⚠️ 发布留痕展开视图（siRenderReleasePublishedCommits + brief 条数，约 :2548/:2530）**有意不
+    //   去重**——那是冻结的历史快照/审计原文，条数按 raw 计，不经本 helper，不属于上面"共 3 处"消费点。
+    //   不改该视图任何行为。
     function siNormalizeCommitRefs(raw) {
         if (raw == null) return null;                    // degraded：后端已显式给 null，不猜
-        const keep = (a) => a.filter(x => typeof x === 'string' && x.trim() !== '');
+        // keep：过滤非字符串/空白元素 + 保序首现去重（Set 记已见值，同一 ref 只保留第一次出现的位置）。
+        //   [SD1 预筛 LOW-4] 按 **trim 后**判等——规避 index.js:957 已登记的单参 trim CHECK
+        //   （`length(trim(commit_ref)) BETWEEN 1 AND 200`）放行 Tab/LF 脏值的缝：SQLite 单参 trim()
+        //   只去空格，"22853" 与 "22853\t" 能同时合法入库、肉眼看着是同一个版本号，若仍按原值判等就会
+        //   被当成两条不同记录并排显示。
+        //   [codex 355 三轮插入批 L1·业务已拍板"清洁优先于原值审计"] `out.push(x)` → `out.push(key)`：
+        //   推**trim 后的 canonical 值**而非原值——展示与一键复制两条链路都不该带着隐形字符（Tab/前后
+        //   空格）流出去，尤其复制链路是直接贴进部署工具的，隐形字符可能造成部署脚本解析异常且肉眼
+        //   完全看不出来。若日后需要审计"原始录入是否带脏字符"，那是另一件事（读 sys_issue_dev_commits
+        //   原表 commit_ref 字段本身，不依赖这个仅服务展示层的归一化函数保留原值）。
+        const keep = (a) => {
+            const seen = new Set();
+            const out = [];
+            for (const x of a) {
+                if (typeof x !== 'string' || x.trim() === '') continue;
+                const key = x.trim();
+                if (seen.has(key)) continue;
+                seen.add(key);
+                out.push(key);
+            }
+            return out;
+        };
         if (Array.isArray(raw)) return keep(raw);
         if (typeof raw !== 'string') return null;        // 非预期类型 → 当不可用，不静默塌成空
         const s = raw.trim();
@@ -2229,6 +2347,33 @@
                 (iss.feasibility_risk ? `<div class="u-kv-item full"><label>风险/条件</label><div class="v">${esc(iss.feasibility_risk)}</div></div>` : '') +
                 (iss.blocked && iss.blocked_reason ? `<div class="u-kv-item full"><label>受阻原因</label><div class="v">${esc(iss.blocked_reason)}</div></div>` : '');
         }
+        // [组 B·SB3·补验收闭环·方案 v1.3 §3.3] 「补验收」kv——仅先行上线单（online_source_kind==='authorized_fastlane'）
+        //   渲染，三态展示：pending（待补验收，48h 超时叠红字提醒）/ passed（已通过 + 通过时刻）/
+        //   failed_derived（不通过 + 可点击派生单链接，同 siOpenDrawer 详情跳转既有先例，见上方「已衍生」区块）。
+        //   同 online_source_kind kv 的三态门控口径：不适用（非 fastlane 单）整行不渲染，不说成"—"。
+        let postAcceptKv = '';
+        if (iss.online_source_kind === 'authorized_fastlane' && iss.post_release_acceptance) {
+            const pa = iss.post_release_acceptance;
+            let paVal = '';
+            if (pa === 'pending') {
+                // [追加批·M2 修正] 48h 圈红判据改读后端派生列 post_release_accept_overdue，理由同
+                //   siPostAcceptFlagHtml 处注释（不再用浏览器本地时区自算，避免跨时区误判）。
+                const overdue = iss.post_release_accept_overdue === true;
+                // [追加批·L2] 三态基础文案统一读 SI_POST_ACCEPTANCE_LABEL 字典（此前常量定义了但从未
+                //   被消费——两份并行的中文映射错觉，见该常量定义处注释）；追加时间/派生链接仍各自拼接。
+                const baseLabel = esc(SI_POST_ACCEPTANCE_LABEL.pending);
+                paVal = overdue
+                    ? `<span style="color:#dc2626;font-weight:600">${baseLabel}（已超 48 小时，请尽快处理）</span>`
+                    : `<span style="color:#b45309">${baseLabel}</span>`;
+            } else if (pa === 'passed') {
+                paVal = `<span style="color:#15803d">${esc(SI_POST_ACCEPTANCE_LABEL.passed)}</span>` + (iss.post_accepted_at ? `<span class="si-muted" style="margin-left:6px">（${esc(siFmtDT(iss.post_accepted_at))}）</span>` : '');
+            } else if (pa === 'failed_derived') {
+                paVal = `<span style="color:#dc2626">${esc(SI_POST_ACCEPTANCE_LABEL.failed_derived)}</span>` + (iss.post_derive_issue_id ? ` <a style="cursor:pointer;color:#2563eb" onclick="siOpenDrawer(${Number(iss.post_derive_issue_id)})">已派生 #${Number(iss.post_derive_issue_id)}</a>` : '');
+            } else {
+                paVal = esc(String(pa));   // 值域外兜底：宁可露出原始值，不静默吞（同 SI_ONLINE_SOURCE_LABEL `|| kind` 兜底哲学）
+            }
+            postAcceptKv = `<div class="u-kv-item"><label>补验收</label><div class="v">${paVal}</div></div>`;
+        }
         // ④a §7 关联修正单号软展示（不跳转；后端 best-effort 软查回 related_correction 状态）
         let relCorrRow = '';
         if (iss.related_correction_no) {
@@ -2254,7 +2399,8 @@
             <div class="u-kv-item"><label>优先级</label><div class="v"><span class="u-pri ${siPriClass(iss.priority)}" title="${SI_PRIORITY_HELP_TEXT}">${esc(iss.priority)}</span></div></div>
             ${(iss.type === 'feature' || iss.type === 'improvement') ? `<div class="u-kv-item"><label>风险等级</label><div class="v"><span title="${SI_RISK_LEVEL_HELP_TEXT}" style="cursor:help">${iss.risk_level ? esc(iss.risk_level) : '<span class="si-muted">未定级</span>'}</span></div></div>` : ''}
             ${effortKv}
-            <div class="u-kv-item"><label>预计完成时间</label><div class="v">${iss.dev_estimated_at ? (esc(siFmtDT(iss.dev_estimated_at)) + siRemainingDaysHtml(iss.dev_estimated_at)) : '<span class="si-muted">未回填</span>'}</div></div>
+            <div class="u-kv-item"><label>预计完成时间</label><div class="v">${iss.dev_estimated_at ? (esc(siFmtDT(iss.dev_estimated_at)) + siRemainingDaysHtml(iss.dev_estimated_at)) : '<span class="si-muted">未回填</span>'}${siEtaAutoGenHintHtml(iss)}</div></div>
+            ${siEtaOverrunReasonReadonlyHtml(iss)}
             <div class="u-kv-item"><label>计划开工日</label><div class="v">${iss.scheduled_start ? esc(iss.scheduled_start) : '<span class="si-muted">—</span>'}</div></div>
             <div class="u-kv-item"><label>期望完成(deadline)</label><div class="v">${iss.deadline ? esc(siFmtDeadline(iss.deadline)) : '<span class="si-muted">—</span>'}</div></div>
             <div class="u-kv-item"><label>需求方</label><div class="v">${siRequesterText(iss)}</div></div>
@@ -2266,6 +2412,7 @@
                  不说成"未知/—"）。判据只看 online_source_kind 非空，不另外判 status——后端已经把"是不是已上线"
                  折进这个字段的 null 语义里了，前端再判一次就是第二份判据。 -->
             ${iss.online_source_kind ? `<div class="u-kv-item"><label>上线方式</label><div class="v">${esc(SI_ONLINE_SOURCE_LABEL[iss.online_source_kind] || iss.online_source_kind)}</div></div>` : ''}
+            ${postAcceptKv}
             ${iss.type === 'bug' ? `<div class="u-kv-item"><label>上线执行人</label><div class="v">${iss.release_assignee_name ? esc(iss.release_assignee_name) : '<span class="si-muted">未指定</span>'}</div></div>` : ''}
             <div class="u-kv-item"><label>创建时间</label><div class="v">${esc(siFmtDT(iss.created_at))}</div></div>
             <!-- S3（四件①，2026-08-05·Q5 详情口径）：六时间点展示簇——label 对齐既有 SI_TL_LABEL 时间线
@@ -2440,7 +2587,24 @@
         liaison_test_skip_excused: '跳过对接测试（全员开脱）', liaison_test_skip_liaison: '跳过对接测试（对接人失效）',
         status_change: '状态流转',   // 通用兜底——裸 status_change（action_code=null，index.js:2876 默认路径）的正名；
         //   W-GATE 那三种 mirrorActionCode 变体走各自更具体的码（本条只兜底真正裸的 status_change 行）
-        change_intake_mode: '受理模式变更'   // 仅存量兜底：路由已恒 409（非当前代码可达写点），但库里历史行仍可能带此码
+        change_intake_mode: '受理模式变更',   // 仅存量兜底：路由已恒 409（非当前代码可达写点），但库里历史行仍可能带此码
+        // [MED-2·组A] /reassign 端点 ETA 变更留痕——event_type='note' 但独立徽章而非落回通用「备注」，
+        //   同 scope_change 走 action_code 当 key 的既有模式（见下方 siRenderTimeline key 计算 isNoteWithOwnLabel）。
+        //   summary 文本本身区分"超时指派"（必填分支）/"人工设定"/"人工更新"（选填分支两态，MED-1/MED-5），
+        //   徽章统一显示，不逐条再拆多个 action_code（详情已在摘要正文里）。
+        assign_overdue_eta: '预计变更（指派）',
+        // [组 B] bug 先行上线授权/撤销——event_type='note' 独立徽章（同 assign_overdue_eta 一带模式，
+        //   见下方 SI_TL_NOTE_OWN_LABEL_CODES），非落回通用「备注」——授权/撤销是详情页需要一眼识别的
+        //   高关注度动作，与普通备注文本区分显示。
+        fast_release_authorize: '先行上线授权', fast_release_revoke: '先行上线授权撤销',
+        // [组 B·SB2] 先行上线直上——event_type='status_change'（同 W-GATE 镜像行范式），有 action_code 时
+        //   siRenderTimeline 恒取 action_code 本身当 key（同 status_change/release 既有规则），无需登记进
+        //   SI_TL_NOTE_OWN_LABEL_CODES（那张表只服务 event_type='note' 的 carve-out）。
+        fast_release_direct_online: '先行上线直上',
+        // [组 B·SB3] 补验收通过/不通过——event_type='note' 独立徽章（同 fast_release_authorize/_revoke 一带
+        //   模式，见下方 SI_TL_NOTE_OWN_LABEL_CODES），非落回通用「备注」——补验收结果是需要一眼识别的高
+        //   关注度动作。
+        post_release_accept_pass: '补验收通过', post_release_accept_fail: '补验收不通过'
     };
     const SI_TL_CLS = {
         created: 'si-tl-amber', derive: 'si-tl-amber',
@@ -2465,7 +2629,18 @@
         //   语义上更接近既有 created/derive 的"值得留意的自动事件"，非 hold/void 那种中性静默态；
         liaison_test_skip_excused: 'si-tl-amber', liaison_test_skip_liaison: 'si-tl-amber',
         // 通用兜底 status_change 归 gray（中性，未归类到任何具体语义族的裸状态流转）
-        status_change: 'si-tl-gray'
+        status_change: 'si-tl-gray',
+        // [MED-2·组A] 与既有 assign/reassign/estimate 同族（"预计完成时间"相关的程序性动作），归 indigo。
+        assign_overdue_eta: 'si-tl-indigo',
+        // [组 B] 授权=程序性授予动作，归 indigo（同 assign_overdue_eta 一族）；撤销=收回/取消动作，
+        //   归 red（与既有 release_remove/release_schedule_cancel"撤销类"同族语义）。
+        fast_release_authorize: 'si-tl-indigo', fast_release_revoke: 'si-tl-red',
+        // [组 B·SB2] 先行上线直上=真实进入「已上线」的转移，归 green（与既有 accept/release/
+        //   confirm_online_norelease 等"上线成功"事件同族）。
+        fast_release_direct_online: 'si-tl-green',
+        // [组 B·SB3] 补验收通过=通过类（同 accept/liaison_test_pass 同族）归 green；不通过=打回/派生类
+        //   （同 return/reopen/liaison_test_return 同族）归 red。
+        post_release_accept_pass: 'si-tl-green', post_release_accept_fail: 'si-tl-red'
     };
     // 上线体统一重构 C2b（199 审 MED-3）：release_add/release_remove/release_date_change/release_schedule_cancel/
     //   release_published 五个 action_code 全部落 event_type='scope_change'（§6.13），此前 siRenderTimeline 的
@@ -2545,6 +2720,9 @@
     //   时间线写入点码表_20260810.md §W-GATE 存量转译白名单，逐字核对自 git 历史版本 index.js 该行字面量）。
     //   B3 之后新写入的行 summary 已是人话（写入端 mirrorSummary 计算，见 index.js :2873-2879），不会再
     //   产出这个值，故本判断只对存量行生效，不影响新行（新行走后面 else 兜底分支原样 esc 显示）。
+    // [MED-2·组A 起 + 组B 扩] note 型事件里"取自己徽章而非落回通用「备注」"的 action_code 白名单——
+    //   与 verify-sys-timeline-label-coverage.js 的 computeDisplayKey 同一份口径同源，改这里必须同改那边。
+    const SI_TL_NOTE_OWN_LABEL_CODES = new Set(['assign_overdue_eta', 'fast_release_authorize', 'fast_release_revoke', 'post_release_accept_pass', 'post_release_accept_fail']);
     const SI_TL_WGATE_LEGACY_SUMMARY = 'W-GATE 自动门禁转移（成员在册完成态变化）';
     function siRenderTimeline(list, atts) {
         if (!list.length) return '<div class="si-muted">暂无演进记录</div>';
@@ -2552,8 +2730,14 @@
             // L-1（codex 复审）：release 事件也优先识别 action_code——「确认上线·不发版」(confirm_online_norelease)
             //   与批次/hotfix 发版都写 event_type='release'，只有前者带 action_code，需区分标签保留审计可见性。
             const isReleaseScope = e.event_type === 'scope_change' && !!SI_TL_RELEASE_SCOPE_LABEL[e.action_code];
+            // [MED-2·组A + 组B] note 型事件默认落回通用「备注」徽章；仅登记在 SI_TL_NOTE_OWN_LABEL_CODES
+            //   里的少数 action_code 取自己的徽章——同 isReleaseScope 的既有模式，不逐个引入新徽章制造
+            //   噪音（受理留痕/退改原因等裸文本备注继续用通用 note）。[组B] 追加 fast_release_authorize/
+            //   fast_release_revoke（先行上线授权/撤销，均 event_type='note'）——单一码改 Set，为将来第三个
+            //   同类 carve-out 留口子，不必每次改判断表达式本身。
+            const isNoteWithOwnLabel = e.event_type === 'note' && SI_TL_NOTE_OWN_LABEL_CODES.has(e.action_code);
             const key = (e.event_type === 'status_change' || e.event_type === 'release') ? (e.action_code || e.event_type)
-                : (isReleaseScope ? e.action_code : e.event_type);
+                : (isReleaseScope || isNoteWithOwnLabel) ? e.action_code : e.event_type;
             const label = SI_TL_RELEASE_SCOPE_LABEL[key] || SI_TL_LABEL[key] || key;
             const cls = SI_TL_RELEASE_SCOPE_CLS[key] || SI_TL_CLS[key] || 'si-tl-gray';
             const roundTxt = (e.event_type === 'submit' && e.round_no) ? ('·第' + e.round_no + '轮') : '';
@@ -2774,13 +2958,29 @@
         //   ⚠️ S4 段1收口（codex 264 号末次合并审 M-2）：数据源从 devAssignees（仅在册·removed_at IS
         //   NULL）改为 noCodeRecords（后端查该单**全部**历史实例，含已移出的）——返工场景下 remove+
         //   re-add 旧成员后，旧一轮的无代码交付说明不该跟着消失（四件④拍板：这是唯一交付凭证）。
-        //   removed_at 非空的历史实例加「（已移出）」muted 后缀，让读者知道这是历史轮次的凭证而非
-        //   当前在册成员；在册未移除的（removed_at 为空）照常不带后缀。
+        //   [D 组件①·2026-08-12] removed_at 非空的历史实例后缀「（已移出）」→「（第N轮）」——旧文案读起来
+        //   像"这个人被踢出团队"，实际含义是"这条记录属于上一轮已封存的开发实例"，round_no 由后端写侧
+        //   物化（单据级：return_count+reopen_count+1，同打回×N 徽章/reopen_count 同一心智）。round_no
+        //   不满足"合法轮次数字"（ALTER 前存量行/回填脚本尚未跑/脏值）时降级回退旧文案，不显示破损的
+        //   "（第null轮）"或"（第0轮）"这类无意义值。
+        //   [SD1 二轮预筛 LOW-2 收口] 校验条件从 `!= null` 收紧为 `Number.isInteger(...) && >= 1`——
+        //   `!= null` 只挡 null/undefined，挡不住脏值如字符串 "abc"（模板串插值出 "第NaN轮"）、0 或负数
+        //   （业务上不存在"第0轮"/"第-1轮"，round_no 语义上恒 ≥1）；改用 Number.isInteger 严格判整数、
+        //   且门槛 ≥1，任何不满足的值统一降级回退旧文案，不放过中间脏态。
+        //   [SD1 二轮预筛 LOW-3 收口] 两处 span 均加 title="已移出"——文案本体从"（已移出）"改成更友好的
+        //   "（第N轮）"后，"这个人已不在当前花名册"这条语义不能丢，用悬停 title 保留（round_no 分支同样
+        //   加，防用户看到"（第2轮）"却不知道这人其实已经被移出）。
+        //   在册未移除的（removed_at 为空）照常不带任何后缀。
         const ncItems = (noCodeRecords || [])
             .map(d => {
                 const reasonTrimmed = String(d.no_code_reason || '').trim();
                 if (!reasonTrimmed) return '';   // 双保险（后端已过滤非空白，此处防御性兜底不新增行为）
-                const removedTag = d.removed_at ? `<span class="si-muted">（已移出）</span>` : '';
+                const ncRoundNoNum = Number(d.round_no);
+                const removedTag = d.removed_at
+                    ? (Number.isInteger(ncRoundNoNum) && ncRoundNoNum >= 1
+                        ? `<span class="si-muted" title="已移出">（第${ncRoundNoNum}轮）</span>`
+                        : `<span class="si-muted" title="已移出">（已移出）</span>`)
+                    : '';
                 return `<div class="si-worknote-item"><span class="si-worknote-who">${esc(d.user_name || ('#' + d.user_id))}${removedTag}</span>${d.resolved_at ? `<span class="si-muted" style="font-size:11px;margin-left:6px">${esc(siFmtDT(d.resolved_at))}</span>` : ''}<div class="si-worknote-text">${esc(reasonTrimmed)}</div></div>`;
             })
             .join('');
@@ -2795,14 +2995,20 @@
         //   真实理由应对齐 noCodeRecords 同款裁定（codex 264 号末次合并审 M-2）：返工场景下 remove+
         //   re-add 旧成员后，旧一轮的 bug 产生原因同样不该跟着消失（唯一交付凭证，与 no_code_reason
         //   的裁定精神一致），故改用专属的 bug_cause_records 查询而非仅在册的 devAssignees。
-        //   removed=true 的历史实例加「（已移出）」muted 后缀（同下方 ncItems 既有写法，本注释挪到这里
-        //   之前 ncItems 已在上文定义），在册未移除的（removed=false）不带后缀。复用 .si-worknote-item
-        //   族既有样式类，非另造。
+        //   [D 组件①·2026-08-12] removed=true 的历史实例后缀「（已移出）」→「（第N轮）」，口径（含
+        //   SD1 二轮预筛 LOW-2 严格数字校验 + LOW-3 title="已移出" 悬停留痕）与 round_no 降级同上方
+        //   ncItems（该处已有完整注释，不重复展开）。在册未移除的（removed=false）不带后缀。复用
+        //   .si-worknote-item 族既有样式类，非另造。
         const bcItems = iss.type === 'bug' ? (bugCauseRecords || [])
             .map(d => {
                 const noteTrimmed = String(d.bug_cause_note || '').trim();
                 if (!noteTrimmed) return '';   // 双保险（后端已保证非空白，此处防御性兜底不新增行为，同 ncItems）
-                const removedTag = d.removed ? `<span class="si-muted">（已移出）</span>` : '';
+                const bcRoundNoNum = Number(d.round_no);
+                const removedTag = d.removed
+                    ? (Number.isInteger(bcRoundNoNum) && bcRoundNoNum >= 1
+                        ? `<span class="si-muted" title="已移出">（第${bcRoundNoNum}轮）</span>`
+                        : `<span class="si-muted" title="已移出">（已移出）</span>`)
+                    : '';
                 return `<div class="si-worknote-item"><span class="si-worknote-who">${esc(d.user_name || ('#' + d.user_id))}${removedTag}</span><div class="si-worknote-text">${esc(noteTrimmed)}</div></div>`;
             })
             .join('') : '';
@@ -2824,22 +3030,27 @@
     //   canAddCommit（独立判定，不复用 canEditCommits）加「补充 commit」按钮。
     function siRenderDevCommits(devCommits, caps) {
         const uid = currentUser ? Number(currentUser.id) : null;
-        // [C11·§10.3] 命中「不分前后端系统」→ 组件列一律显示 group_label（「版本号」），不显示 frontend/backend
-        //   原始 component（含历史 frontend 行也合并进版本号组展示·不迁移数据）。判据取后端 DTO（唯一权威·
-        //   前端不自行判定），非命中系统照旧显示「前端/后端」。列头随之切换「组件/版本号」。
+        // [C11·§10.3] 命中「不分前后端系统」→ 组件列不再是"每行恒显示 group_label"（那是纯占位、零信息量，
+        //   真正的版本号在下一列却顶着裸英文字段名 "commit_ref"）——[件③·2026-08-12] 改为**整列隐藏**
+        //   （表头+每行单元格），commit_ref 列表头随之从裸 "commit_ref" 换成 group_label（「版本号」）。
+        //   判据仍取后端 DTO single_commit_group/group_label（唯一权威·前端不自行判定），非命中系统
+        //   （component 列 + 裸 "commit_ref" 表头）**原样不变**——这是本次改动的对照面。
         const single = !!(siDetail && siDetail.issue && siDetail.issue.single_commit_group);
         const groupLabel = (siDetail && siDetail.issue && siDetail.issue.group_label) || '版本号';
-        const compHeader = single ? groupLabel : '组件';
+        // [SD1 预筛 LOW-6 收口] 构造存原值、使用处 esc——与本函数其余转义点（:2877/:2879/:2880/
+        //   compCell 内/addBtn 内共 8 处）统一口径"渲染前一律经 esc()"，不在构造期提前转义。
+        const refHeader = single ? groupLabel : 'commit_ref';
         const rows = (devCommits || []).map(c => {
             const isMine = !!(uid && Number(c.dev_user_id) === uid);
             const canEditThis = !!(caps && caps.canEditCommits && isMine);
             const acts = canEditThis
                 ? `<span class="si-commit-act" onclick="siModalEditCommit(${c.id})">编辑</span><span class="si-commit-act danger" onclick="siModalDeleteCommit(${c.id})">删除</span>`
                 : '';
-            const compCell = single ? esc(groupLabel) : (SI_COMMIT_COMPONENT_LABEL[c.component] || esc(c.component));
+            // 单组系统：整列不产出（非仅置空文本）——td 数量随 th 数量同步减少，行列一致，非"看似隐藏实则空列"。
+            const compCell = single ? '' : `<td>${SI_COMMIT_COMPONENT_LABEL[c.component] || esc(c.component)}</td>`;
             return `<tr>
                 <td>${esc(c.dev_user_name || ('#' + c.dev_user_id))}</td>
-                <td>${compCell}</td>
+                ${compCell}
                 <td>${esc(c.commit_ref)}</td>
                 <td>${esc(siFmtDT(c.created_at))}</td>
                 <td>${acts}</td>
@@ -2847,7 +3058,8 @@
         }).join('');
         const addBtn = (caps && caps.canAddCommit) ? `<div style="margin-top:8px"><button class="u-btn-secondary u-btn-sm" onclick="siModalAddCommit()">+ 补充 ${single ? esc(groupLabel) : 'commit'}</button></div>` : '';
         if (!devCommits || !devCommits.length) return '<div class="si-muted">暂无 commit 记录</div>' + addBtn;
-        return `<div class="u-corr-table-wrap"><table class="si-commit-table"><thead><tr><th>开发</th><th>${esc(compHeader)}</th><th>commit_ref</th><th>时间</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>${addBtn}`;
+        const compTh = single ? '' : `<th>组件</th>`;
+        return `<div class="u-corr-table-wrap"><table class="si-commit-table"><thead><tr><th>开发</th>${compTh}<th>${esc(refHeader)}</th><th>时间</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>${addBtn}`;
     }
 
     // 统一自定义错误文案（commit 行编辑三端点，§10 错误码集合 = COMMIT_SCOPE/INVALID_STATUS/VALIDATION/
@@ -3762,7 +3974,27 @@
         if (isAdminUser && siOaFillable(iss)) {
             oaBtn = `<button class="u-btn-secondary u-btn-sm" onclick="siOpenSetOaNumber()">${iss.oa_number ? '修改' : '补填'} OA 号</button>`;
         }
-        box.innerHTML = gate + ((btns + hotfixBtn + chatBtn + adminDelBtn + techLeadBtns + oaBtn) || fallback);
+        // ── 组 B（bug 先行上线授权/撤销 + 补验收，方案 v1.3 §3.1/§3.3·SB3 前端补齐）─────────────
+        //   三个自持端点（fast-release-authorize/-revoke/post-release-accept），不经 meta/typeFlows 通用
+        //   roleGuard 模型，独立渲染（同 chatBtn/adminDelBtn/oaBtn 范式）。前端仅镜像展示，真闸在后端；
+        //   授权/撤销窗口镜像后端 :7936 一带 WHERE（type='bug' ∧ status∈待处理/处理中 ∧ released_at/
+        //   online_source 皆空）；hasActiveAuth 复用 siHasActiveFastReleaseAuth（与 submit 弹窗勾选框
+        //   显隐同一份判据，防两处漂移）；补验收按钮镜像后端窗口（online_source_kind==='authorized_fastlane'
+        //   ∧ post_release_acceptance==='pending'）。
+        let fastReleaseBtns = '';
+        if (isAdminUser && iss.type === 'bug') {
+            if (['待处理', '处理中'].includes(iss.status) && iss.released_at == null && iss.online_source == null) {
+                const hasActiveAuth = siHasActiveFastReleaseAuth(iss);
+                fastReleaseBtns += `<button class="u-btn-secondary u-btn-sm" onclick="siModalFastReleaseAuthorize(siDetail.issue)">${hasActiveAuth ? '重新先行上线授权' : '先行上线授权'}</button>`;
+                if (hasActiveAuth) {
+                    fastReleaseBtns += `<button class="u-btn-danger u-btn-sm" onclick="siModalFastReleaseRevoke(siDetail.issue)">撤销先行上线授权</button>`;
+                }
+            }
+            if (iss.online_source_kind === 'authorized_fastlane' && iss.post_release_acceptance === 'pending') {
+                fastReleaseBtns += `<button class="u-btn-primary u-btn-sm" onclick="siModalPostReleaseAccept(siDetail.issue)">补验收</button>`;
+            }
+        }
+        box.innerHTML = gate + ((btns + hotfixBtn + chatBtn + adminDelBtn + techLeadBtns + oaBtn + fastReleaseBtns) || fallback);
     }
 
     // ============================================================
@@ -3780,7 +4012,13 @@
             //   OA 号回填改经独立入口 siOpenSetOaNumber（受理通过后，见详情页「补填 OA 号」按钮）。
             // 受理排期改造 C7：受理门 + 排期动作分发
             // [工期对接测试与风险等级拆分 方案 v1.1 §3.4/§7·C5] feature 单受理须同时判定风险等级——
-            //   改走专用弹窗 siModalIntakeAccept；improvement/bug 仍走既有零输入确认（siConfirmSimple）。
+            //   改走专用弹窗 siModalIntakeAccept。
+            // [LOW-4·过时注释订正] 本行上一版注释称"improvement/bug 仍走既有零输入确认（siConfirmSimple）"
+            //   ——该口径已被两轮改造先后推翻，此处不再成立：① 用户拍板批1改造B（2026-08-06）已让
+            //   improvement 与 feature 同走风险等级表单；② 组 A（2026-08-12）给 bug 也补了可选 ETA 输入框
+            //   （§2.2 受理弹窗必填分支），三种类型此后统一走 siModalIntakeAccept 的完整表单，siConfirmSimple
+            //   的零输入分支已不再被 intake_accept 使用（该函数仍被其它动作如 resubmit_intake/close 复用，
+            //   本条订正只针对 intake_accept 这一个 case）。
             case 'intake_accept': return siModalIntakeAccept(iss);
             // ⭐ C2.5b（方案 §3 受理门语义重定义）：退回弹窗写明本动作的边界——"不该做"应在「待受理」态用「拒绝」，
             //   两道门的判断标准不写清就会混用（方案原文点名要求此提示）。
@@ -4346,11 +4584,90 @@
             showToast('操作完成', 'success'); return true;
         }, '确定');
     }
+    // ── 组 B（bug 先行上线授权/撤销 + 补验收，方案 v1.3 §3.1/§3.3·SB3 前端补齐）─────────────────
+    //   三个弹窗对应三个自持端点；错误提示统一走 siApiErr（同 submit/siConfirmSimple 等既有多数弹窗
+    //   范式：直接显示后端 error 文案，不经 siErrText 那套通知专用五级映射——这三个端点不属通知链路）。
+    function siModalFastReleaseAuthorize(iss) {
+        const hasActiveAuth = siHasActiveFastReleaseAuth(iss);
+        const fields = [
+            note((hasActiveAuth ? '重新' : '') + '先行上线授权：授权后开发在「标记我的开发完成」提交时可勾选「已随修复直接上线」，跳过验证/上线安排直接标记为「已上线」；上线后需管理员走「补验收」补做验收。'
+                + (hasActiveAuth ? '本单当前已有一份活跃授权，重新授权将覆盖原授权信息（历史记录仍保留在时间线）。' : '')),
+            fTextarea('note', '备注（选填）', '', false, 'trim 后 ≤200 字'),
+        ];
+        siModal((hasActiveAuth ? '重新先行上线授权' : '先行上线授权') + ' #' + iss.id, fields, async v => {
+            const noteVal = (v.note || '').trim();
+            if (noteVal.length > 200) { showToast('备注不超过 200 字', 'error'); return false; }
+            const body = {};
+            if (noteVal) body.note = noteVal;
+            const r = await siApi('/sys-issues/' + iss.id + '/fast-release-authorize', { method: 'POST', body });
+            if (!r.ok) { siApiErr(r); return false; }
+            showToast('先行上线授权已' + (hasActiveAuth ? '重新签发' : '生效'), 'success');
+            return true;
+        });
+    }
+    function siModalFastReleaseRevoke(iss) {
+        const fields = [
+            note('撤销后开发提交时将不再显示「已随修复直接上线」勾选框，需管理员重新授权才能再次使用先行上线通道。'),
+            fTextarea('reason', '撤销原因', '', true, '必填：trim 后 1~200 字'),
+        ];
+        siModal('撤销先行上线授权 #' + iss.id, fields, async v => {
+            const reason = (v.reason || '').trim();
+            if (!reason || reason.length > 200) { showToast('撤销原因必填（trim 1~200字）', 'error'); return false; }
+            const r = await siApi('/sys-issues/' + iss.id + '/fast-release-revoke', { method: 'POST', body: { reason } });
+            if (!r.ok) { siApiErr(r); return false; }
+            showToast('已撤销先行上线授权', 'success');
+            return true;
+        });
+    }
+    // [F-3·用户拍板 P8] verdict='fail' 时说明必填（服务端已改，400 POST_RELEASE_ACCEPT_FAIL_NOTE_REQUIRED），
+    //   pass 分支维持选填不变。label 必填标注随 verdict 切换动态改写（见下方 siWirePostReleaseAcceptNoteRequired），
+    //   提交前客户端先拦一道（同本仓既有"服务端才是真闸，前端仅体验层拦截"范式），拦不住的兜底交给
+    //   siApiErr 原样透出服务端 error 文案（该码文案已是清晰中文句子，无需额外映射）。
+    function siModalPostReleaseAccept(iss) {
+        const fields = [
+            note('该单已通过「先行上线」直接标记为已上线，请补做验收：<b>通过</b> → 收口，标记补验收通过；<b>不通过</b> → 自动派生一个新 bug 单跟进（原单状态不变，仍是「已上线」）。'),
+            fSelectMap('verdict', '补验收结论', ['pass', 'fail'], 'pass', { pass: '通过', fail: '不通过（自动派生新 bug 单）' }),
+            fTextarea('note', '备注（选填）', '', false, 'trim 后 ≤500 字：通过的说明 / 不通过时必填：请说明原因，将写入派生单描述与派生原因'),
+        ];
+        siModal('先行上线补验收 #' + iss.id, fields, async v => {
+            const verdict = v.verdict === 'fail' ? 'fail' : 'pass';
+            const noteVal = (v.note || '').trim();
+            if (verdict === 'fail' && !noteVal) { showToast('补验收不通过必须填写说明', 'error'); return false; }
+            if (noteVal.length > 500) { showToast('备注不超过 500 字', 'error'); return false; }
+            const body = { verdict };
+            if (noteVal) body.note = noteVal;
+            const r = await siApi('/sys-issues/' + iss.id + '/post-release-accept', { method: 'POST', body });
+            if (!r.ok) { siApiErr(r); return false; }
+            showToast(verdict === 'pass' ? '补验收通过' : ('补验收不通过，已派生 #' + (r.data && r.data.post_derive_issue_id)), 'success');
+            return true;
+        });
+        siWirePostReleaseAcceptNoteRequired();
+    }
+    // verdict 切换到 fail 时说明栏标必填（星号+label 文案），切回 pass 还原——纯体验层标注，真正的
+    //   必填闸在服务端（POST_RELEASE_ACCEPT_FAIL_NOTE_REQUIRED），本函数只是让标注与提交时的客户端
+    //   校验（siModalPostReleaseAccept 内 `verdict==='fail'&&!noteVal` 分支）视觉上保持一致。
+    function siWirePostReleaseAcceptNoteRequired() {
+        const verdictEl = document.getElementById('f_verdict');
+        const noteEl = document.getElementById('f_note');
+        if (!verdictEl || !noteEl) return;
+        const group = noteEl.closest('.u-form-group');
+        const labelEl = group && group.querySelector('label');
+        const update = () => {
+            const isFail = verdictEl.value === 'fail';
+            if (labelEl) labelEl.innerHTML = isFail ? '备注 <span class="u-req">*</span>' : '备注（选填）';
+        };
+        verdictEl.addEventListener('change', update);
+        update();
+    }
     // [工期对接测试与风险等级拆分 方案 v1.1 §3.4/§7·C5] 受理通过——feature/improvement 单需同时判定
     //   风险等级（技术风险，对接人视角，一级/二级/三级），与端点 intake-accept 的 risk_level 必填闸同源
     //   （服务端才是真闸，前端仅体验层拦截）。⭐ 用户拍板批1改造B（2026-08-06）：判据从"仅 feature"
-    //   扩到"feature∨improvement"——原「非 feature 不涉及风险等级」表述已废止，现只有 bug 沿用既有
-    //   零输入确认弹窗（siConfirmSimple，行为完全不变，body 恒 {}），不把风险等级控件泄漏给 bug。
+    //   扩到"feature∨improvement"——原「非 feature 不涉及风险等级」表述已废止，bug 单不渲染风险等级
+    //   控件（不把该控件泄漏给 bug，判据见下方 isChange）。
+    //   [LOW-4·过时表述订正] 本行上一版称"现只有 bug 沿用既有零输入确认弹窗（siConfirmSimple，行为完全
+    //   不变，body 恒 {}）"——该表述已被组 A（2026-08-12）推翻：bug 单受理弹窗现在也带可选 ETA 输入框
+    //   （见下方 :4436 一带"[组A·2.2]"注释），不再是"零输入"，也不再单独调用 siConfirmSimple，三种类型
+    //   统一走本函数（siModalIntakeAccept）同一个表单，只是 risk_level 字段按 isChange 条件渲染。
     //   ⭐ 用户拍板批1改造A：值域「高/中/低」全仓改名为「一级/二级/三级」。默认选中「三级」（用户拍板=
     //   前端默认体验，服务端必填闸不变，仍可手动切回「请选择」触发必选拦截，见下方 T6 回归覆盖）。
     //   ⚠️ [codex 290 号 M-1 收口] 默认值不是"人工评估过"的证据：必填闸门只能证明请求确实携带了一个
@@ -4358,23 +4675,198 @@
     //   点了确定"——这两种情况在服务端/审计留痕层面完全无法区分。若未来需要"是否经人工评估"这一信号
     //   （如统计口径/责任认定），须另设机制（例如去掉预选默认值、强制用户显式点选），本次不做，仅如实
     //   标注这条局限，不在注释里声称"必填=已确认人工评估"。
-    function siModalIntakeAccept(iss) {
-        if (iss.type !== 'feature' && iss.type !== 'improvement') {
-            return siConfirmSimple(iss, 'intake_accept', '确认受理通过？受理后单据进入指派/处理阶段。', '/intake-accept');
+    // ── F-2（受理/指派/改派 ETA 输入框条件显示·用户拍板 P3·"例外驱动输入"）───────────────────────
+    //   原则（用户原话转译）：所有流转都发生在正常范围内时，预计完成时间不需要人填；只有和预期违背
+    //   时才需要填写。本块只服务**体验层**的展示/必填标注判断，真正的必填闸/校验仍在服务端——本组
+    //   前端算漏/算错时由要点③ siRevealEtaFieldOnFallback 兜底展开，不会卡死用户。
+    //
+    //   computeSysDefaultEta 前端镜像——与后端 index.js :2326-2355 逐字同源（含 y/m/d 分量构造 Date
+    //   对象的纪律、bug 15:00 分界当天/次日 17:00、非 bug ISO 星期公式 isoDow∈[1,3]→offset=5-isoDow、
+    //   [4,7]→offset=12-isoDow，两式在 isoDow=4 处平滑衔接）。⚠️ 与后端唯一差异：后端读服务器
+    //   `datetime('now','localtime')`，前端用客户端本地时间近似（内网用户均东八区，同本文件既有
+    //   siRemainingDaysHtml/siEtaDeadlineGapDays"本地时区≡Asia/Shanghai"的既定诚实化口径，纯参考
+    //   判断不为零收益做 TZ 无关计算）——跨端点秒级时钟误差只影响这一行"要不要展示输入框"的体验层
+    //   判断，不影响任何写入/校验（真闸在服务端）。
+    function siComputeSysDefaultEta(createdAt, type) {
+        const m = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/.exec(String(createdAt || '').trim());
+        if (!m) return null;
+        const y = Number(m[1]), mo = Number(m[2]), d = Number(m[3]);
+        const hh = m[4], mi = m[5], ss = m[6];
+        if (Number(hh) > 23 || Number(mi) > 59 || Number(ss) > 59) return null;
+        const checkDate = new Date(y, mo - 1, d);
+        if (checkDate.getFullYear() !== y || checkDate.getMonth() !== mo - 1 || checkDate.getDate() !== d) return null;
+        const pad = (n) => String(n).padStart(2, '0');
+        const fmtAt1700 = (dt) => `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())} 17:00:00`;
+        if (type === 'bug') {
+            const dt = new Date(y, mo - 1, d);
+            const timeStr = `${hh}:${mi}:${ss}`;
+            if (timeStr >= '15:00:00') dt.setDate(dt.getDate() + 1);
+            return fmtAt1700(dt);
         }
-        siModal('受理通过 #' + iss.id, [
-            note('受理后单据进入指派阶段。请同时判定本单风险等级（技术风险，对接人视角）。'),
+        const dt = new Date(y, mo - 1, d);
+        const jsDow = dt.getDay();
+        const isoDow = ((jsDow + 6) % 7) + 1;
+        const offsetDays = isoDow <= 3 ? (5 - isoDow) : (12 - isoDow);
+        dt.setDate(dt.getDate() + offsetDays);
+        return fmtAt1700(dt);
+    }
+    // 客户端"当前时刻"，格式对齐后端 datetime('now','localtime') 的定长 'YYYY-MM-DD HH:MM:SS'——
+    //   两侧同构后可直接做字典序比较（同 index.js 头部注释"两侧均为定长格式，字典序比较等价于时间
+    //   先后比较"的既有口径，非本次新发明）。
+    function siNowDtStr() {
+        const n = new Date();
+        const pad = (v) => String(v).padStart(2, '0');
+        return `${n.getFullYear()}-${pad(n.getMonth() + 1)}-${pad(n.getDate())} ${pad(n.getHours())}:${pad(n.getMinutes())}:${pad(n.getSeconds())}`;
+    }
+    // 受理弹窗——三情形之一命中才展示（与后端 case 'intake_accept' 判据同源，见 index.js :4259-4440）：
+    //   ①现值为空 ∧ 受理时刻已超默认 SLA 值（超时受理·必填）②现值非空 ∧ 已过期（必填）
+    //   ③现值为空 ∧ SLA 未超 ∧ deadline 非空 ∧ 默认 SLA 值晚于 deadline（C11 预警·选填）
+    function siIntakeEtaVisibility(iss) {
+        const existingEta = iss.dev_estimated_at || null;
+        const nowStr = siNowDtStr();
+        if (existingEta) {
+            return (existingEta <= nowStr) ? { show: true, required: true, kind: 'expired' } : { show: false };
+        }
+        const defaultEta = siComputeSysDefaultEta(iss.created_at, iss.type);
+        if (defaultEta && nowStr >= defaultEta) return { show: true, required: true, kind: 'overdue' };
+        if (iss.deadline && defaultEta) {
+            // 复用既有 siEtaDeadlineGapDays（:7423 一带，组 C·SC2 已有）——同一份整日差计算，不新写第二份。
+            const gap = siEtaDeadlineGapDays(defaultEta, iss.deadline);
+            if (gap !== null && gap > 0) return { show: true, required: false, kind: 'c11', gapDays: gap };
+        }
+        return { show: false };
+    }
+    // 指派/改派弹窗——两情形之一命中才展示（无 C11，与后端 /assign :5609-5657、/reassign :5937-5979
+    //   判据同源；两端点均只在"现值非空且已过期"时真正强制必填——"现值为空"分支在正常业务链路下
+    //   结构上不可达（intake_accept 成功后 dev_estimated_at 恒非空），本函数仍按用户拍板矩阵实现该
+    //   分支，保持与受理弹窗判据结构对称、供防御性/未来路径变化兜底，不构成对当前行为的误判）：
+    //   ①现值为空 ∧ SLA 已超（必填）②现值非空 ∧ 已过期（必填）
+    function siAssignReassignEtaVisibility(iss) {
+        const existingEta = iss.dev_estimated_at || null;
+        const nowStr = siNowDtStr();
+        if (existingEta) {
+            return (existingEta <= nowStr) ? { show: true, required: true, kind: 'expired' } : { show: false };
+        }
+        const defaultEta = siComputeSysDefaultEta(iss.created_at, iss.type);
+        if (defaultEta && nowStr >= defaultEta) return { show: true, required: true, kind: 'overdue' };
+        return { show: false };
+    }
+    // 条件展示的 ETA 输入框+说明——组装成可直接塞进容器 div 的 HTML 片段；vis.show 为假时返回空串
+    //   （容器留空即整字段组消失，不是 disabled，符合方案要点⑤）。verbLabel 用于"超时XX"文案按弹窗
+    //   身份区分（受理/指派/改派）。
+    function siEtaFieldGroupHtml(vis, verbLabel) {
+        if (!vis || !vis.show) return '';
+        let hint;
+        if (vis.kind === 'overdue') hint = `${verbLabel}已超时，请填写预计完成时间才能提交。`;
+        else if (vis.kind === 'expired') hint = '原预计完成时间已过期，请填写新值才能提交。';
+        else hint = `默认生成将超出业务方期望 ${vis.gapDays} 天，可在此直接设定。`;
+        const label = '预计完成时间' + (vis.required ? '' : '（选填）');
+        return fDateTime('dev_estimated_at', label, '', !!vis.required).html + note(hint).html;
+    }
+    // F-2 要点③（服务端兜底揭示）：前端镜像若与服务端判据出现漂移（如跨端点时钟误差、边界秒级抖动），
+    //   服务端返回 INTAKE_ESTIMATE_REQUIRED / ASSIGN_ESTIMATE_REQUIRED / REASSIGN_ESTIMATE_REQUIRED
+    //   时，当场把隐藏的输入框揭示出来并重新挂接超容差理由块联动，不逼用户关弹窗重开——与既有 F6/
+    //   REASSIGN_STALE 等"因异常主动纠正 DOM"的范式同源。三处调用点均已用
+    //   `!document.getElementById('f_dev_estimated_at')` 判定"确实原本隐藏"才触发，避免已展示状态
+    //   下的空提交重复重建 DOM（那种情形字段本就在，siApiErr 原样提示文案即可）。
+    function siRevealEtaFieldOnFallback(boxId, reasonBlockId, issType, deadlineRaw) {
+        const box = document.getElementById(boxId);
+        if (!box) return;
+        box.innerHTML = fDateTime('dev_estimated_at', '预计完成时间', '', true).html
+            + note('前端预判与服务端不一致：本次确实需要填写预计完成时间，请在此补填后重新提交。').html;
+        siWireEtaOverrunReasonBlock(reasonBlockId, 'f_dev_estimated_at', issType, deadlineRaw);
+    }
+    // F-2 反向兜底（codex 368 号 MED-1 收口，与上面 siRevealEtaFieldOnFallback 成对）：siIntakeEtaVisibility/
+    //   siAssignReassignEtaVisibility 用**客户端本地时钟**判断"是否已超时/已过期"（函数定义处注释已明示
+    //   这层近似）。客户端时钟偏快时会把服务端判定的"未过期"误判成"已过期"，从而展示且标必填的 ETA
+    //   输入框——用户看着必填星号填了值提交，服务端按真实时钟判定其实未过期，返回 409 ETA_NOT_EXPIRED
+    //   （三端点 intake-accept/:4431、assign/:5642、reassign/:5966 同码同文案）。此时若输入框仍摆在那里
+    //   要求必填，用户会被两头夹死：留空触发前端必填拦截，填值再交只会拿到同一个 409——是一个纯前端
+    //   误判造成的死循环，不应存在。命中条件=ETA 字段**当前确实可见**（`document.getElementById(
+    //   'f_dev_estimated_at')` 非空，即真被前端渲染出来过，与 siRevealEtaFieldOnFallback"确实原本隐藏"
+    //   互为反面判据，两者不会同时命中）时，清空并收起整个字段组 + 其超容差理由块，容器内换成提示语，
+    //   用户读完直接再次点击提交——`f_dev_estimated_at` 已被移出 DOM，siModal 的值收集对不存在的元素
+    //   跳过（siModal 定义处 `if (el)` 判据），本次 body 不再携带 dev_estimated_at，服务端按"未提供"
+    //   分支放行。理由块同步收起 + 清空两个输入值——block.style.display 由 siWireEtaOverrunReasonBlock
+    //   的 input/change 监听驱动，字段容器被清空后监听已随 DOM 节点一起被移除，但理由块是**独立**的
+    //   兄弟节点（非嵌套在 etaBox 内，见 fEtaOverrunReasonBlock 调用点），不会跟着自动消失，须显式收起，
+    //   否则理由块可能残留在"此刻恰好展开"的可见态，与已收起的 ETA 字段视觉不一致。
+    function siCollapseEtaFieldOnNotExpired(boxId, reasonBlockId) {
+        const box = document.getElementById(boxId);
+        if (!box) return;
+        box.innerHTML = note('服务端判定当前预计完成时间未过期、无需填写——输入已收起，请直接重新提交。').html;
+        const block = document.getElementById(reasonBlockId);
+        if (block) {
+            block.style.display = 'none';
+            const codeEl = document.getElementById('f_eta_overrun_reason_code');
+            const noteEl = document.getElementById('f_eta_overrun_reason_note');
+            if (codeEl) codeEl.value = '';
+            if (noteEl) noteEl.value = '';
+        }
+    }
+    function siModalIntakeAccept(iss) {
+        const isChange = iss.type === 'feature' || iss.type === 'improvement';
+        const fields = [];
+        fields.push(note('受理后单据进入' + (isChange ? '指派' : '处理') + '阶段。'
+            + (isChange ? '请同时判定本单风险等级（技术风险，对接人视角）。' : '')));
+        if (isChange) {
             // [C8·方案 v1.7 §9.2 末条] label 挂三级口径问号徽章（SI_RISK_LEVEL_LABEL 内含 si-help）——
             //   本弹窗是全站**唯一**渲染"风险等级选择"的表单（建单/编辑表单均无该字段，风险等级由受理门
             //   判定，见 :3288 注释），故徽章只此一处即全覆盖。范式与 SI_PRIORITY_LABEL 完全一致。
-            { k: 'risk_level', html: `<div class="u-form-group"><label>${SI_RISK_LEVEL_LABEL} <span class="u-req">*</span></label><select id="f_risk_level"><option value="">请选择</option><option value="一级">一级</option><option value="二级">二级</option><option value="三级" selected>三级</option></select></div>` }
-        ], async v => {
-            const riskLevel = (v.risk_level || '').trim();
-            if (!riskLevel) { showToast('请选择风险等级', 'error'); return false; }
-            const r = await siApi('/sys-issues/' + iss.id + '/intake-accept', { method: 'POST', body: { risk_level: riskLevel } });
-            if (!r.ok) { siApiErr(r); return false; }
-            showToast('受理通过', 'success'); return true;
+            fields.push({ k: 'risk_level', html: `<div class="u-form-group"><label>${SI_RISK_LEVEL_LABEL} <span class="u-req">*</span></label><select id="f_risk_level"><option value="">请选择</option><option value="一级">一级</option><option value="二级">二级</option><option value="三级" selected>三级</option></select></div>` });
+        }
+        // [F-2] ETA 输入框条件展示——三情形之一命中才出现（siIntakeEtaVisibility），其余整体隐藏；
+        //   容器 id 固定，供要点③服务端兜底揭示时定位注入。
+        const etaVis = siIntakeEtaVisibility(iss);
+        const etaBoxId = 'si-eta-box-intake';
+        fields.push({ k: null, html: `<div id="${etaBoxId}">${siEtaFieldGroupHtml(etaVis, '受理')}</div>` });
+        fields.push({ k: 'dev_estimated_at', html: '' });   // 值收集占位（元素不存在时 siModal 的 `if (el)` 天然跳过）
+        // [组 C·SC2·方案 §3C.8] 超容差理由块——仅当用户当场手填 ETA 才可能超容差（留空走 C11 自动生成，
+        //   不参与容差判定，见 siWireEtaOverrunReasonBlock 挂接的输入框留空即隐藏）。
+        const etaReasonBlockId = 'si-eta-reason-intake';
+        fields.push(...fEtaOverrunReasonBlock(etaReasonBlockId, '', ''));
+        siModal('受理通过 #' + iss.id, fields, async v => {
+            const body = {};
+            if (isChange) {
+                const riskLevel = (v.risk_level || '').trim();
+                if (!riskLevel) { showToast('请选择风险等级', 'error'); return false; }
+                body.risk_level = riskLevel;
+            }
+            if (v.dev_estimated_at) {
+                body.dev_estimated_at = siFromLocalInput(v.dev_estimated_at);
+                const reason = siCollectEtaOverrunReason(etaReasonBlockId, v);
+                if (reason.invalid) return false;
+                if (reason.include) { body.eta_overrun_reason_code = reason.code; body.eta_overrun_reason_note = reason.note; }
+            }
+            const r = await siApi('/sys-issues/' + iss.id + '/intake-accept', { method: 'POST', body });
+            if (!r.ok) {
+                // [F-2 要点③] 前端判断隐藏了输入框、服务端仍要求填写——当场揭示，不逼用户关弹窗重开。
+                if (r.data && r.data.code === 'INTAKE_ESTIMATE_REQUIRED' && !document.getElementById('f_dev_estimated_at')) {
+                    siRevealEtaFieldOnFallback(etaBoxId, etaReasonBlockId, iss.type, iss.deadline);
+                }
+                // [F-2 反向兜底·codex 368 号 MED-1 收口] 前端判断展示了输入框（本地时钟偏快误判"已超时/
+                //   已过期"）、服务端按真实时钟判定其实未过期——收起字段，用户直接重提即可成功。
+                if (r.data && r.data.code === 'ETA_NOT_EXPIRED' && document.getElementById('f_dev_estimated_at')) {
+                    siCollapseEtaFieldOnNotExpired(etaBoxId, etaReasonBlockId);
+                }
+                siApiErr(r); return false;
+            }
+            const eta = (r.data && r.data.eta) || null;
+            // C11（组 A 半件）：自动生成的预计完成时间若晚于业务方期望（deadline），提示对接人可当场手改——
+            //   只提示不拦截（系统动作无可归责的人），故用 warning 级 toast 而非 error。
+            if (eta && eta.auto_generated && eta.expected_gap_days) {
+                // [F-2·要点④] 文案改指"超出期望时受理弹窗会出现设定入口"——原文案"下次受理同类单可在
+                //   受理弹窗提前填写"隐含"输入框恒在"的旧交互假设，F-2 改造后输入框已收窄为条件展示
+                //   （仅 C11 命中才出现），措辞须同步反映"下次会不会看到输入框本身也是有条件的"这层事实。
+                showToast(`受理通过，已自动生成预计完成时间（超出业务方期望 ${eta.expected_gap_days} 天；如需调整，进入开发后由开发在估时入口修改；超出期望时受理弹窗会出现设定入口，下次受理同类单可提前设定）`, 'warning');
+            } else {
+                showToast('受理通过', 'success');
+            }
+            return true;
         }, '确定');
+        // 挂接 ETA 输入 → 理由块可见性联动（siModal 已同步渲染完 DOM，见该函数定义处说明）——输入框
+        //   隐藏时 etaEl 为 null，siWireEtaOverrunReasonBlock 自身已有早退分支，天然兼容"字段缺席"。
+        siWireEtaOverrunReasonBlock(etaReasonBlockId, 'f_dev_estimated_at', iss.type, iss.deadline);
     }
     // [方案 D22-④·批2 2026-08-06] 对接测试通过——凭证二选一：本轮（进入本轮待对接测试之后）新上传的
     //   附件 或 当场填写的测试说明，至少其一，服务端才是真闸（LIAISON_TEST_PASS_EVIDENCE_REQUIRED）。
@@ -4495,18 +4987,45 @@
         //   后端 assign 契约不变（assigned_to 首批候选 + collaborator_ids）——electRepresentative 会自动选代表
         //   （最小 user_id），故前端把勾选的第一个 id 作 assigned_to、其余作 collaborator_ids，传谁不影响最终代表；
         //   任一在册成员权限平等（均可回填/提交/参与状态机），原「主/协作」二分文案是去主次前的历史残留，已删。
+        // [F-2·用户拍板 P3] ETA 输入框条件展示——两情形之一命中才出现（siAssignReassignEtaVisibility），
+        //   其余整体隐藏；与 siModalIntakeAccept 共用同一批 F-2 helper（定义于该函数上方）。
+        // [组 C·SC2·方案 §3C.8] 超容差理由块——同 siModalIntakeAccept 范式，仅当用户当场手填 ETA 才可能触发。
+        const etaReasonBlockId = 'si-eta-reason-assign';
+        const etaVis = siAssignReassignEtaVisibility(iss);
+        const etaBoxId = 'si-eta-box-assign';
         siModal('指派开发', [
             { k: null, html: siCollaboratorPickerHtml([], '开发成员（可多选，勾选=在册开发名单）') },
+            { k: null, html: `<div id="${etaBoxId}">${siEtaFieldGroupHtml(etaVis, '指派')}</div>` },
+            { k: 'dev_estimated_at', html: '' },   // 值收集占位（元素不存在时 siModal 的 `if (el)` 天然跳过）
+            ...fEtaOverrunReasonBlock(etaReasonBlockId, '', ''),
             note('指派后转「开发中/处理中」，所有在册开发均可回填预计完成时间、提交交付（去主次，无主开发）。')
         ], async v => {
             const memberIds = siReadCollabChkIds(0);   // 勾选=在册名单（去 excludeId，无主次）
             if (!memberIds.length) { showToast('请至少勾选 1 名开发', 'error'); return false; }
             const body = { assigned_to: memberIds[0] };                          // 首批候选（后端 electRepresentative 重选代表）
             if (memberIds.length > 1) body.collaborator_ids = memberIds.slice(1);
+            if (v.dev_estimated_at) {
+                body.dev_estimated_at = siFromLocalInput(v.dev_estimated_at);
+                const reason = siCollectEtaOverrunReason(etaReasonBlockId, v);
+                if (reason.invalid) return false;
+                if (reason.include) { body.eta_overrun_reason_code = reason.code; body.eta_overrun_reason_note = reason.note; }
+            }
             const r = await siApi('/sys-issues/' + iss.id + '/assign', { method: 'POST', body });
-            if (!r.ok) { siApiErr(r); return false; }
+            if (!r.ok) {
+                // [F-2 要点③] 前端判断隐藏了输入框、服务端仍要求填写——当场揭示，不逼用户关弹窗重开。
+                if (r.data && r.data.code === 'ASSIGN_ESTIMATE_REQUIRED' && !document.getElementById('f_dev_estimated_at')) {
+                    siRevealEtaFieldOnFallback(etaBoxId, etaReasonBlockId, iss.type, iss.deadline);
+                }
+                // [F-2 反向兜底·codex 368 号 MED-1 收口] 前端展示了输入框、服务端判定其实未过期——收起，
+                //   用户直接重提即可成功。
+                if (r.data && r.data.code === 'ETA_NOT_EXPIRED' && document.getElementById('f_dev_estimated_at')) {
+                    siCollapseEtaFieldOnNotExpired(etaBoxId, etaReasonBlockId);
+                }
+                siApiErr(r); return false;
+            }
             showToast('已指派开发', 'success'); return true;   // 去主次 + 对齐 P3 通知全手动（不再自动通知，改「已指派」）
         });
+        siWireEtaOverrunReasonBlock(etaReasonBlockId, 'f_dev_estimated_at', iss.type, iss.deadline);
     }
 
     // C7 重做（方案 v2.9 §3 reassign 段 + §10 API 契约）：旧「换主/留主改协作」二分语义随 C2 后端全语义
@@ -4526,9 +5045,18 @@
                 `<label class="si-chk-row"><input type="checkbox" class="si-member-chk" value="${u.id}" ${pre.has(Number(u.id)) ? 'checked' : ''}><span class="si-chk-text">${esc(u.display_name || u.username)}</span></label>`
             ).join('') || '<span class="si-muted">无可选用户</span>'}
             </div></div>`;
+        // [F-2·用户拍板 P3] ETA 输入框条件展示——两情形之一命中才出现（siAssignReassignEtaVisibility），
+        //   其余整体隐藏；与 siModalIntakeAccept/siModalAssign 共用同一批 F-2 helper（定义于该函数上方）。
+        // [组 C·SC2·方案 §3C.8] 超容差理由块——同 siModalIntakeAccept/siModalAssign 范式。
+        const etaReasonBlockId = 'si-eta-reason-reassign';
+        const etaVis = siAssignReassignEtaVisibility(iss);
+        const etaBoxId = 'si-eta-box-reassign';
         siModal('管理开发成员', [
             { k: null, html: pickerHtml },
             fTextarea('reason', '调整原因', '', true, '必填：本次名单调整的原因，trim 1..200'),
+            { k: null, html: `<div id="${etaBoxId}">${siEtaFieldGroupHtml(etaVis, '改派')}</div>` },
+            { k: 'dev_estimated_at', html: '' },   // 值收集占位（元素不存在时 siModal 的 `if (el)` 天然跳过）
+            ...fEtaOverrunReasonBlock(etaReasonBlockId, '', ''),
             note('勾选=最终在册名单：取消勾选=移除，新勾选=加入。当前主状态要求至少 1 名在册开发时，名单不能清空为 0。若他人已先一步调整，本次提交会被拒绝并自动刷新为最新名单。')
         ], async v => {
             const reason = (v.reason || '').trim();
@@ -4536,6 +5064,12 @@
             const mbody = document.getElementById('siMBody');
             const memberIds = [...mbody.querySelectorAll('.si-member-chk:checked')].map(x => parseInt(x.value, 10)).filter(Boolean);
             const body = { member_ids: memberIds, reason, expected_member_ids: expectedMemberIds };
+            if (v.dev_estimated_at) {
+                body.dev_estimated_at = siFromLocalInput(v.dev_estimated_at);
+                const etaReason = siCollectEtaOverrunReason(etaReasonBlockId, v);
+                if (etaReason.invalid) return false;
+                if (etaReason.include) { body.eta_overrun_reason_code = etaReason.code; body.eta_overrun_reason_note = etaReason.note; }
+            }
             const r = await siApi('/sys-issues/' + iss.id + '/reassign', { method: 'POST', body });
             if (!r.ok) {
                 if (r.status === 409 && r.data && r.data.code === 'REASSIGN_STALE') {
@@ -4544,11 +5078,21 @@
                     await siAfterAction();
                     return false;
                 }
+                // [F-2 要点③] 前端判断隐藏了输入框、服务端仍要求填写——当场揭示，不逼用户关弹窗重开。
+                if (r.data && r.data.code === 'REASSIGN_ESTIMATE_REQUIRED' && !document.getElementById('f_dev_estimated_at')) {
+                    siRevealEtaFieldOnFallback(etaBoxId, etaReasonBlockId, iss.type, iss.deadline);
+                }
+                // [F-2 反向兜底·codex 368 号 MED-1 收口] 前端展示了输入框、服务端判定其实未过期——收起，
+                //   用户直接重提即可成功。
+                if (r.data && r.data.code === 'ETA_NOT_EXPIRED' && document.getElementById('f_dev_estimated_at')) {
+                    siCollapseEtaFieldOnNotExpired(etaBoxId, etaReasonBlockId);
+                }
                 siApiErr(r);   // VALIDATION（no-op）/LAST_ASSIGNEE 等其余码后端 error 文案已足够清晰，原样透出
                 return false;
             }
             showToast('开发成员已更新', 'success'); return true;
         });
+        siWireEtaOverrunReasonBlock(etaReasonBlockId, 'f_dev_estimated_at', iss.type, iss.deadline);
     }
 
     async function siModalCreateChat(iss) {
@@ -4595,6 +5139,80 @@
         });
     }
 
+    // ── F-1（ETA"系统自动生成"来源软呈现·纯展示层，用户拍板 P1）───────────────────────────────
+    //   判定当前 dev_estimated_at 是否"来自系统自动生成、且其后未发生任何人工写入"。与紧邻下方 F2
+    //   共用同一遍历口径——siCurTimeline 数组末尾=最新（详情端点原样 ORDER BY id 升序返回，见 F2
+    //   注释同款假设，本函数同样**依赖**该顺序、不自行排序）。三处消费点（详情页 kv-item / 估时弹窗
+    //   siModalEstimate / 可行性弹窗 siModalFeasibility，见下方 siEtaAutoGenHintHtml 与
+    //   siEstimateFilledHint 内的调用）共用本函数，判定逻辑只有一份，不写三份。
+    //
+    //   判定法：从数组末尾向前找**第一条与本单当前 ETA 相关的写入类事件**（跳过与写入无关、或"仅
+    //   记录不写值"的备注行——如超时受理但预计完成时间未过期未生效写入的分支）；命中的若是"系统
+    //   自动生成"事件即返回 true，命中其它任一人工写入事件则返回 false。"最新一次 ETA 写入是自动
+    //   生成"逻辑上等价于需求原文"自动生成之后无人工写入"，不需要再单独判一遍"之后有没有人工事件"。
+    //
+    //   识别规则与后端 index.js 各写点一一对应（受理侧 4 个分支共用同一 action_code='intake_accept'，
+    //   唯一区分手段是 summary 文案前缀，无独立 action_code 可用；指派/改派侧写入折叠进各自端点既
+    //   有 timeline 行，同样靠 event_type/action_code/文案标记区分——均已逐点 grep 确认）：
+    //     自动生成：event_type='status_change' && action_code='intake_accept' &&
+    //       summary 以 '系统自动生成预计完成时间：' 开头（index.js :4340）
+    //     人工写入·受理侧：同 event_type/action_code，summary 以 '超时受理：预计完成时间由' 或
+    //       '原预计完成时间已过期' 开头（index.js :4377 /:4399-4402）
+    //     人工写入·指派侧：event_type='assign' && summary 含 '｜超时指派：预计完成时间由' 或
+    //       '｜指派时人工设定预计完成时间：' 或 '｜指派时人工更新预计完成时间：'（index.js :5780-5784）
+    //     人工写入·改派侧：event_type='note' && action_code='assign_overdue_eta'（index.js :6056，
+    //       该写点仅在真实写入 dev_estimated_at 时才追加，出现即代表一次人工写入，三种文案变体共用
+    //       同一 action_code，不需要再拆 summary）
+    //     人工写入·估时/评估：event_type='estimate' 或 'feasibility'（与下方 F2 判据同源）
+    //   其余 event_type（普通状态流转/受理"维持不变"备注等与本次 ETA 写入无关的行）跳过，继续向前
+    //   找。判定偶有偏差（如未来出现新写点未同步本函数）只影响这一行提示文案，不影响任何写入/校验
+    //   逻辑（纯展示层，需求原文明示）。
+    const SI_ETA_AUTO_GEN_PREFIX = '系统自动生成预计完成时间：';
+    const SI_ETA_MANUAL_INTAKE_PREFIXES = ['超时受理：预计完成时间由', '原预计完成时间已过期'];
+    const SI_ETA_MANUAL_ASSIGN_MARKERS = ['｜超时指派：预计完成时间由', '｜指派时人工设定预计完成时间：', '｜指派时人工更新预计完成时间：'];
+    function siEtaIsAutoGenerated(iss) {
+        if (!iss || !iss.dev_estimated_at) return false;
+        const list = siCurTimeline || [];
+        for (let i = list.length - 1; i >= 0; i--) {
+            const ev = list[i];
+            if (!ev) continue;
+            if (ev.event_type === 'estimate' || ev.event_type === 'feasibility') return false;
+            if (ev.event_type === 'assign' && typeof ev.summary === 'string'
+                && SI_ETA_MANUAL_ASSIGN_MARKERS.some(mk => ev.summary.indexOf(mk) !== -1)) return false;
+            if (ev.event_type === 'note' && ev.action_code === 'assign_overdue_eta') return false;
+            if (ev.event_type === 'status_change' && ev.action_code === 'intake_accept' && typeof ev.summary === 'string') {
+                if (ev.summary.indexOf(SI_ETA_AUTO_GEN_PREFIX) === 0) return true;
+                if (SI_ETA_MANUAL_INTAKE_PREFIXES.some(p => ev.summary.indexOf(p) === 0)) return false;
+                // 其余摘要（如"超时受理（预计完成时间未过期，维持…不变）"）未写入 ETA，跳过继续向前找
+            }
+            // 其余 event_type 与本次 ETA 写入无关，跳过继续向前找
+        }
+        return false;   // 未找到任何匹配的写入事件（异常存量：如直接 SQL 写入未经过上述端点）——不伪造，按非自动生成处理
+    }
+    // F-1a（详情页 ETA 字段区来源提示）：对所有查看者可见，样式复用页内既有 `.u-hint` 范式（信息性，
+    //   非警示——警示色调留给下方弹窗内的分支，见 siEstimateFilledHint）。
+    function siEtaAutoGenHintHtml(iss) {
+        if (!siEtaIsAutoGenerated(iss)) return '';
+        return `<div class="u-hint">预计完成时间 ${esc(siFmtDT(iss.dev_estimated_at))} 由系统按默认 SLA 自动生成，如与实际不符请通过估时调整</div>`;
+    }
+
+    // [组 C·SC3·修复 b] 详情页 ETA 超期原因只读展示——理由两列只存**最新值**（容差内改写/return/reopen
+    //   即清空，见 index.js resolveEtaOverrunReasonForWrite 注释），此前详情页正文无任何只读展示，唯一
+    //   出口是重开估时/评估弹窗的预填（用户实测发现的展示缺口）。本函数补上"当前值"这一份只读展示；
+    //   历史值（含已被清空的旧理由）改由 timeline summary 携带（同批修复 a，index.js
+    //   buildEtaOverrunReasonSummarySuffix），两者分工：详情页=当前，timeline=历史。
+    //   消费面清单（"新字段收口必列全部应显示面"纪律，[[feedback_layer_green_not_feature_ready]]）：
+    //     · 详情页——已渲染（本函数，本次新增）
+    //     · 列表页——有意不渲染：14 列已挤+横滚是既存问题（四处优化 D2 一带已登记），理由说明属详情级
+    //       深度信息，不适合塞进列表单元格
+    //     · 估时/可行性弹窗预填——既有（fEtaOverrunReasonBlock，§3C.8），不受本次改动影响
+    //   amber 警示配色沿用 .si-note-box（同 §3C.8 弹窗内理由块 .si-eta-reason-block 同款色值，见头部
+    //   CSS 注释"组 C·SC2"一带），列空（未超容差/从未写过）时整块不渲染，不留空壳 kv-item。
+    function siEtaOverrunReasonReadonlyHtml(iss) {
+        if (!iss || !iss.eta_overrun_reason_code) return '';
+        return `<div class="u-kv-item full"><div id="si-eta-overrun-reason-readonly" class="si-note-box" style="margin-bottom:0">超期原因：${esc(iss.eta_overrun_reason_code)}——${esc(iss.eta_overrun_reason_note || '')}</div></div>`;
+    }
+
     // F2（估时/可行性弹窗回填提示）：dev_estimated_at 是整单单值，任一在册开发可填、后填覆盖先填——
     //   弹窗打开时先告诉填写者"当前值是谁、何时填的"，帮其判断是否要覆盖。事件源=siCurTimeline
     //   （详情端点原样 ORDER BY id 升序返回，见 index.js 详情查询处），从数组末尾往前找第一条
@@ -4605,8 +5223,14 @@
     //   这两个端点），均不显示——不伪造。
     //   返回值供 siModal fields 数组的 `{ k: null, html }` 占位项直接使用（同 note() 范式，siModal
     //   的 onConfirm 收集器按 `if (f.k)` 跳过 k=null 的项，见 note() 定义处）。
+    //   〔F-1·用户拍板 P1〕本函数首行补"系统自动生成"来源分支——与下方既有"最近一次估时/评估"分支
+    //   互斥（siEtaIsAutoGenerated 为真时说明其后不存在任何 estimate/feasibility 写入，下面循环必
+    //   然找不到匹配，两分支不会同时命中；写成先 return 只是让互斥关系在代码里显式可读，非防御冗余）。
     function siEstimateFilledHint(iss) {
         if (!iss || !iss.dev_estimated_at) return '';
+        if (siEtaIsAutoGenerated(iss)) {
+            return `<div class="si-gate-hint" style="margin-bottom:10px">当前预计完成时间 ${esc(siFmtDT(iss.dev_estimated_at))} 由系统按默认 SLA 于受理/指派时自动生成，尚未经人工调整——请确认，如与实际不符请在下方修改</div>`;
+        }
         const list = siCurTimeline || [];
         let ev = null;
         for (let i = list.length - 1; i >= 0; i--) {
@@ -4639,6 +5263,10 @@
         const estimateHintHtml = siEstimateFilledHint(iss);
         if (estimateHintHtml) fields.push({ k: null, html: estimateHintHtml });
         fields.push(fDateTime('dev_estimated_at', '预计完成时间', siToLocalInput(iss.dev_estimated_at), true));   // D2：第 4 参=必填星号（本字段真必填，闸门①）
+        // [组 C·SC2·方案 §3C.8] 超容差理由块——本弹窗可重复打开（同一单可多次改预计完成），预填现有
+        //   理由（若有）：改工期不改日期时理由多半仍适用，避免每次重开都要求用户重新敲一遍相同说明。
+        const etaReasonBlockId = 'si-eta-reason-estimate';
+        fields.push(...fEtaOverrunReasonBlock(etaReasonBlockId, iss.eta_overrun_reason_code || '', iss.eta_overrun_reason_note || ''));
         if (effortApplicable) {
             // 文案/校验/控件参数与可行性评估弹窗（siModalFeasibility）逐字一致——同一个字段在两个入口
             // 必须长一样，否则用户会以为是两回事。
@@ -4653,6 +5281,9 @@
         siModal(iss.dev_estimated_at ? '修改预计完成' : '回填预计完成', fields, async v => {
             if (!v.dev_estimated_at) { showToast('请填写预计完成时间', 'error'); return false; }
             const body = { dev_estimated_at: siFromLocalInput(v.dev_estimated_at), expected_dev_estimated_at: expectedAtOpen };
+            const etaReason = siCollectEtaOverrunReason(etaReasonBlockId, v);
+            if (etaReason.invalid) return false;
+            if (etaReason.include) { body.eta_overrun_reason_code = etaReason.code; body.eta_overrun_reason_note = etaReason.note; }
             if (effortApplicable) {
                 // 校验口径与后端 normalizeSysEffortDays/DDL CHECK 同源（有限数、0<v≤365、0.5 整数倍），
                 // 与 siModalFeasibility 内同款分支逐字对齐；前端先拦一道，服务端仍是权威校验。
@@ -4700,6 +5331,7 @@
             );
             return true;
         });
+        siWireEtaOverrunReasonBlock(etaReasonBlockId, 'f_dev_estimated_at', iss.type, iss.deadline);
     }
 
     function siModalFeasibility(iss) {
@@ -4716,10 +5348,13 @@
         const feasibilityHintHtml = siEstimateFilledHint(iss);
         const feasibilityFields = [];
         if (feasibilityHintHtml) feasibilityFields.push({ k: null, html: feasibilityHintHtml });
+        // [组 C·SC2·方案 §3C.8] 超容差理由块——同 siModalEstimate 范式，预填现有理由（若有）。
+        const etaReasonBlockId = 'si-eta-reason-feasibility';
         feasibilityFields.push(
             fSelect('conclusion', '评估结论', ['可行', '有条件可行', '不可行'], '可行'),
             fTextarea('requirement_confirm', '需求确认', '', true, '必填：对需求的理解与确认，≤500'),
             fDateTime('dev_estimated_at', '预计完成时间', siToLocalInput(iss.dev_estimated_at), true),   // D2：第 4 参=必填星号（本字段真必填，闸门①）
+            ...fEtaOverrunReasonBlock(etaReasonBlockId, iss.eta_overrun_reason_code || '', iss.eta_overrun_reason_note || ''),
             fNumber('estimated_effort_days', '工期（人日）', iss.estimated_effort_days,
                 true, '必填：0.5 的整数倍，(0, 365]', { step: '0.5', min: '0.5', max: '365' }),
             fTextarea('risk', '风险/前置条件', '', false, '「有条件可行 / 不可行」时必填，≤1000'),
@@ -4742,6 +5377,9 @@
             const body = { conclusion: v.conclusion, requirement_confirm: v.requirement_confirm.trim(), dev_estimated_at: siFromLocalInput(v.dev_estimated_at), expected_dev_estimated_at: expectedAtOpen };
             if (v.risk.trim()) body.risk = v.risk.trim();
             body.estimated_effort_days = effortValue;
+            const etaReason = siCollectEtaOverrunReason(etaReasonBlockId, v);
+            if (etaReason.invalid) return false;
+            if (etaReason.include) { body.eta_overrun_reason_code = etaReason.code; body.eta_overrun_reason_note = etaReason.note; }
             const r = await siApi('/sys-issues/' + iss.id + '/feasibility', { method: 'POST', body });
             if (!r.ok) {
                 // F6：ESTIMATE_STALE 专门分支——同 siModalEstimate 同款范式（该函数定义处有完整理由注释，
@@ -4756,6 +5394,7 @@
             }
             showToast('已提交可行性评估', 'success'); return true;
         });
+        siWireEtaOverrunReasonBlock(etaReasonBlockId, 'f_dev_estimated_at', iss.type, iss.deadline);
     }
 
     // ── 受理排期改造 C7 + 建单优化批 C3（方案 20260731_v1.2 §6）：编辑窗口两档扩展 ──────────────────
@@ -4999,7 +5638,12 @@
                 <div class="u-form-group inline-chk" style="margin-bottom:6px"><input type="checkbox" id="siSubmitSelfTested"><label for="siSubmitSelfTested">已完成自测</label></div>
                 <div class="u-form-group inline-chk" style="margin-bottom:0"><input type="checkbox" id="siSubmitTestEnvDeployed"><label for="siSubmitTestEnvDeployed">已上测试库</label></div>
                 <div class="u-hint">两项均须勾选才能提交（默认不勾·确认清单式，按人留痕）。</div>
-            </div>`;
+            </div>
+            ${(iss.type === 'bug' && siHasActiveFastReleaseAuth(iss)) ? `<div class="u-form-group">
+                <div class="u-form-group inline-chk" style="margin-bottom:0"><input type="checkbox" id="siSubmitDirectRelease"><label for="siSubmitDirectRelease">已随修复直接上线</label></div>
+                <div class="u-hint">本单已获管理员「先行上线授权」。勾选后本次提交将跳过验证/上线安排，直接标记为「已上线」（上线后需管理员补做验收）；不勾选按正常流程走「待验证」。
+                    <b>本授权来自当前轮次</b>——若本单曾打回/重开，请先向管理员确认授权是否已针对本轮重新签发，避免提交时被后端拒绝。</div>
+            </div>` : ''}`;
 
         // P4：去主次多开发说明——本操作仅标记「你本人」的开发项完成，全部在册开发都完成后主状态才进「待验证」。
         // [codex 291 号 M-2 收口] 原固定文案"…自动进入「待验收」"对 feature 失实——feature 主路径先进
@@ -5026,6 +5670,14 @@
             if (!testEnvDeployedChecked) { showToast('请先勾选"已上测试库"', 'error'); return false; }
             body.self_tested = true;
             body.test_env_deployed = true;
+            // [组 B·SB3] 先行上线「已随修复直接上线」勾选——仅 bug 且当前有活跃授权时渲染该勾选框（见上方
+            //   modeHtml），故读取前先判条件是否成立，条件不成立时 DOM 里没有该元素（querySelector 恒 null），
+            //   与既有 fix_gap_note 等条件性字段"不适用不传"惯例一致；勾选=true 才带 direct_release 键，
+            //   未勾选/不适用均不传（后端缺省 false，现行为零变化，同 direct_release 后端校验注释先例）。
+            if (iss.type === 'bug' && siHasActiveFastReleaseAuth(iss)) {
+                const directChecked = !!(document.getElementById('siSubmitDirectRelease') && document.getElementById('siSubmitDirectRelease').checked);
+                if (directChecked) body.direct_release = true;
+            }
             // [B4·C6] bug 产生原因——mode 无关字段（两种提交方式都必填，字段区恒显不随 mode 隐藏，见上方
             //   modeHtml）。校验口径与后端 validateSubmitBody 逐字对齐（trim 后非空 + Unicode 码点数 ≤500）；
             //   非 bug 单不渲染该字段、body 不带该键——带了会撞后端 BUG_CAUSE_NOT_APPLICABLE 400（适用面闸
@@ -5096,9 +5748,13 @@
                 if (ar.ok) { siPickerReset('submit-delivery'); attMsg = '，附件已上传'; }
                 else { attMsg = '，但附件上传失败（可到附件区重传）'; }
             }
-            showToast((toMain === '待验证' ? '已标记完成，全部开发完成 → 转「待验收」'
+            // [组 B·SB3] direct_release 成功时响应体携带 online_source（同 /accept 端点先例，见后端 submit
+            //   handler 响应体注释）——优先判断，给出与常规「转待验证/待对接测试」不同的提示文案。
+            const directReleaseOk = body.direct_release === true && r.data && r.data.online_source === 'authorized_fastlane';
+            showToast((directReleaseOk ? '已随修复直接上线（先行上线），待管理员补验收'
+                : (toMain === '待验证' ? '已标记完成，全部开发完成 → 转「待验收」'
                 : (toMain === '待对接测试' ? '已标记完成，全部开发完成 → 转「待对接测试」（对接人测试通过后进入待验收）'
-                : '已标记你的开发完成（等待其他开发完成）')) + attMsg, submitFiles.length && attMsg.includes('失败') ? 'info' : 'success');
+                : '已标记你的开发完成（等待其他开发完成）'))) + attMsg, submitFiles.length && attMsg.includes('失败') ? 'info' : 'success');
             return true;
         });
         // commit 记录改造：siModal 已同步渲染 modeHtml（含分组容器），此处按 siSubmitRowState 铺初始行。
@@ -5669,6 +6325,59 @@
     }
     function siCloseFlowGuide() { document.getElementById('siFlowGuideOverlay').classList.remove('open'); }
     document.addEventListener('keydown', function(e){ if (e.key === 'Escape' && document.getElementById('siFlowGuideOverlay').classList.contains('open')) siCloseFlowGuide(); });
+
+    // ============================================================
+    // 组 C·SC2（期望对表与准时统计·方案 §3C.6）：只读统计面板
+    //   复用通用弹窗壳 siModal（fields 全部 k:null 纯展示 + confirmLabel='关闭'）——只读聚合信息，
+    //   不必另建专属 overlay DOM，同「删除审计详情」等既有只读展示范式（siOpenDeleteAuditDetail）。
+    //   一期两指标（按期望达成率/期望填写覆盖率，GET /sys-issues/eta-stats）+ byType 细分 +
+    //   未达标示例（按单展示，C9 末条底线：不做开发个人排名聚合，不做图表化）。
+    // ============================================================
+    function siEtaStatsPctText(stat) {
+        if (!stat || !stat.denominator || stat.rate === null || stat.rate === undefined) return '—（无样本）';
+        return `${stat.rate}%（${stat.numerator}/${stat.denominator}）`;
+    }
+    async function siOpenEtaStats() {
+        siCloseDrawer();
+        siCloseModal();
+        siCloseBatch();
+        siCloseFlowGuide();
+        const r = await siApi('/sys-issues/eta-stats');
+        if (!r.ok) { siApiErr(r, '统计加载失败'); return; }
+        const d = r.data || {};
+        const overall = d.overall || { released_total: 0, coverage: {}, achievement: {}, overdue_examples: [] };
+        // 353-M4：覆盖率与达成率必须同屏——两行放在同一个信息块里，不拆两处展示；样本不足时紧跟提示，
+        // 不允许只显示达成率数字而不带这句限定语。
+        const insufficientHint = overall.achievement && overall.achievement.insufficient_sample
+            ? `<div class="si-eta-reason-hint" style="margin-top:6px">样本不足（已上线且填了期望完成的单少于 ${d.sample_threshold || 0} 个），达成率仅供参考。</div>` : '';
+        const overallHtml = `<div class="si-eta-reason-block" style="display:block">
+            <div class="u-kv-item"><label>已上线单总数</label><div class="v">${overall.released_total}</div></div>
+            <div class="u-kv-item"><label>期望填写覆盖率</label><div class="v">${siEtaStatsPctText(overall.coverage)}</div></div>
+            <div class="u-kv-item"><label>按期望达成率</label><div class="v">${siEtaStatsPctText(overall.achievement)}</div></div>
+            ${insufficientHint}
+          </div>`;
+        const byType = Array.isArray(d.by_type) ? d.by_type : [];
+        const byTypeRows = byType.map(t => `<tr>
+            <td>${esc(siTypeLabel(t.type))}</td>
+            <td>${t.released_total}</td>
+            <td>${siEtaStatsPctText(t.coverage)}</td>
+            <td>${siEtaStatsPctText(t.achievement)}${t.achievement && t.achievement.insufficient_sample ? ' <span class="si-muted">（样本不足）</span>' : ''}</td>
+        </tr>`).join('');
+        const byTypeHtml = byType.length ? `<div class="u-form-group"><label>按类型细分</label>
+            <table class="si-commit-table"><thead><tr><th>类型</th><th>已上线</th><th>期望填写覆盖率</th><th>按期望达成率</th></tr></thead>
+            <tbody>${byTypeRows}</tbody></table></div>` : '';
+        const examples = overall.overdue_examples || [];
+        const examplesHtml = examples.length ? `<div class="u-form-group"><label>未达标示例（实际上线晚于期望完成，按单列出，当前显示 ${examples.length} 条；达成率数字按全量计，示例列表仅供抽查）</label>
+            <div style="max-height:220px;overflow:auto">${examples.map(e =>
+                `<div class="si-note-box" style="margin-bottom:6px">#${e.id} ${esc(e.title || '')}｜期望 ${esc(e.deadline)}｜实际上线 ${esc(siFmtDT(e.released_at))}｜超出 ${e.overdue_days} 天</div>`
+            ).join('')}</div></div>` : '';
+        siModal('期望对表统计', [
+            { k: null, html: overallHtml },
+            { k: null, html: byTypeHtml },
+            { k: null, html: examplesHtml },
+            note('一期口径：仅统计「已上线」单，覆盖率/达成率均以行内期望完成（deadline）/实际上线（released_at）计算；不做开发个人排名聚合，不做图表化（方案 §3C.6）。'),
+        ], async () => true, '关闭');
+    }
 
     // ============================================================
     // 上线体统一重构 C1（方案 v3.4 §6.2/§6.3a/§6.14/§6.15）：值班排班维护面板
@@ -6984,6 +7693,85 @@
     function fFile(k, l, multi) { return { k: null, html: `<div class="u-form-group"><label>${l}</label><input type="file" id="f_${k}" ${multi ? 'multiple' : ''}></div>` }; }
     function fCheckbox(k, l, checked) { return { k, html: `<div class="u-form-group inline-chk"><input type="checkbox" id="f_${k}" ${checked ? 'checked' : ''}><label for="f_${k}">${l}</label></div>` }; }
     function note(txt) { return { k: null, html: `<div class="si-note-box">${txt}</div>` }; }
+
+    // ── 组 C·SC2（方案 §3C.8）：ETA 超容差理由块——5 个写 ETA 的弹窗共用 ─────────────────────
+    //   ⚠️ 写读同源：整日差计算须与服务端 normalizeDateOnlyForToleranceCalc/computeEtaDeadlineGapDays
+    //   （index.js）同一套口径——只取前 10 位日期分量、不整串交给 Date() 解析（避免纯日期串被当 UTC
+    //   午夜解析、带时分串按本地时区解析，两者相差时区偏移量的既有陷阱，见服务端该函数头部注释）。
+    //   本函数只服务"要不要展开理由块"这一体验层判断，真正的容差校验/理由必填仍在服务端（§3C.2
+    //   判定式原文）——前端算漏/算错的极端情形，服务端 400 ETA_OVERRUN_REASON_CODE_REQUIRED 兜底。
+    function siEtaDeadlineGapDays(etaLocalInputVal, deadlineRaw) {
+        if (!etaLocalInputVal || !deadlineRaw) return null;   // C2：deadline 选填，未填不参与
+        const etaM = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(etaLocalInputVal).trim());
+        const dlM = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(deadlineRaw).trim());
+        if (!etaM || !dlM) return null;
+        const etaDate = new Date(Number(etaM[1]), Number(etaM[2]) - 1, Number(etaM[3]));
+        const dlDate = new Date(Number(dlM[1]), Number(dlM[2]) - 1, Number(dlM[3]));
+        if (isNaN(etaDate.getTime()) || isNaN(dlDate.getTime())) return null;
+        // [codex 366 LOW-1] 分量 round-trip 校验——`2026-02-31` 会被 new Date 归一到 3/3 而非报错，
+        //   与后端 normalizeDateOnlyForToleranceCalc 的分量回比对逐字同源（前端也拒畸形值·真"逐字同源"非仅镜像合法域）。
+        if (etaDate.getFullYear() !== Number(etaM[1]) || etaDate.getMonth() !== Number(etaM[2]) - 1 || etaDate.getDate() !== Number(etaM[3])) return null;
+        if (dlDate.getFullYear() !== Number(dlM[1]) || dlDate.getMonth() !== Number(dlM[2]) - 1 || dlDate.getDate() !== Number(dlM[3])) return null;
+        return Math.round((etaDate.getTime() - dlDate.getTime()) / 86400000);
+    }
+    // 容差档位/适用类型判据——逐字对应服务端 evaluateEtaOverrun：bug/config 不参与（不入
+    //   SI_ETA_TOLERANCE_DAYS 表）、严格大于才算超（第 5/7 天本身不算超，边界与服务端一致）。
+    function siEtaOverrunApplicable(issType, gapDays) {
+        const tol = SI_ETA_TOLERANCE_DAYS[issType];
+        return tol !== undefined && gapDays !== null && gapDays > tol;
+    }
+    // 理由块字段构造——返回可直接 push/spread 进 siModal fields 数组的条目组。容器 html 与两个输入控件
+    //   的 html 拆成同一个字符串整体输出（siModal 按 fields 顺序 join 渲染，见该函数定义处），另外两个
+    //   k 非空、html 为空串的条目只服务 siModal 的按 id 值收集循环（document.getElementById('f_'+f.k)），
+    //   不重复渲染。默认 style="display:none"——初始可见性由 siWireEtaOverrunReasonBlock 首次调用决定。
+    function fEtaOverrunReasonBlock(blockId, prefillCode, prefillNote) {
+        const opts = SI_ETA_OVERRUN_REASON_CODES.map(c =>
+            `<option value="${esc(c)}" ${prefillCode === c ? 'selected' : ''}>${esc(c)}</option>`).join('');
+        const html = `<div id="${blockId}" class="si-eta-reason-block" style="display:none">
+            <div class="si-eta-reason-hint">预计完成时间超出业务方期望容差（优化类 5 自然日／新功能类 7 自然日），请说明超期原因。</div>
+            <div class="u-form-group"><label>超期原因 <span class="u-req">*</span></label>
+              <select id="f_eta_overrun_reason_code"><option value="">请选择</option>${opts}</select></div>
+            <div class="u-form-group"><label>超期原因说明 <span class="u-req">*</span></label>
+              <textarea id="f_eta_overrun_reason_note" placeholder="必填，1-300字">${esc(prefillNote || '')}</textarea></div>
+          </div>`;
+        return [
+            { k: null, html },
+            { k: 'eta_overrun_reason_code', html: '' },
+            { k: 'eta_overrun_reason_note', html: '' },
+        ];
+    }
+    // 挂接 ETA 输入框的 input 监听 + 立即算一次初始可见性（估时/评估弹窗打开时字段已预填现值，
+    //   可能一开始就已超容差，不能只等用户下一次输入才展开）。siModal 内部同步 setInnerHTML，
+    //   调用方在 siModal(...) 返回后立即调用本函数即可拿到已挂载的真实 DOM 节点。
+    function siWireEtaOverrunReasonBlock(blockId, etaFieldId, issType, deadlineRaw) {
+        const etaEl = document.getElementById(etaFieldId);
+        const block = document.getElementById(blockId);
+        if (!etaEl || !block) return;
+        const update = () => {
+            const gap = siEtaDeadlineGapDays(etaEl.value, deadlineRaw);
+            block.style.display = siEtaOverrunApplicable(issType, gap) ? '' : 'none';
+        };
+        // [codex 366 LOW-2] input + change 双绑——datetime-local 在多数浏览器触发 input，但原生日期选择器/
+        //   自动填充/脚本赋值可能只触发 change；双绑保证理由块可见性不滞后（否则退化成提交后 400 兜底·体验差）。
+        etaEl.addEventListener('input', update);
+        etaEl.addEventListener('change', update);
+        update();
+    }
+    // onConfirm 收口校验——理由块当前可见（display!=='none'）时两项缺一即拒（与服务端
+    //   validateEtaOverrunReasonInput 同口径：code 非空 + note trim 非空 + note ≤300）；不可见时不采纳
+    //   v 里的残留值（同服务端 resolveEtaOverrunReasonForWrite 的"容差内/不适用一律不写理由"语义对齐，
+    //   C7「期望保留、理由作废」）——调用方据本函数返回值决定是否把两个字段并入请求体。
+    function siCollectEtaOverrunReason(blockId, v) {
+        const block = document.getElementById(blockId);
+        const visible = !!block && block.style.display !== 'none';
+        if (!visible) return { include: false };
+        const code = (v.eta_overrun_reason_code || '').trim();
+        const noteText = (v.eta_overrun_reason_note || '').trim();
+        if (!code) { showToast('预计完成时间超出业务方期望，请选择超期原因', 'error'); return { include: false, invalid: true }; }
+        if (!noteText) { showToast('请填写超期原因说明', 'error'); return { include: false, invalid: true }; }
+        if (noteText.length > 300) { showToast('超期原因说明不超过 300 字', 'error'); return { include: false, invalid: true }; }
+        return { include: true, code, note: noteText };
+    }
 
     // ============================================================
     // 交互体验优化 Commit① P1：建单上传组件（复刻 Data_Collab.html 5146-5271 范式）

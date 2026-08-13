@@ -117,6 +117,14 @@ async function seedToDev(type, needsFeasibility, opts = {}) {
   r = await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: opts.assignTo || 5 });
   assert.strictEqual(r.status, 200, `assign 200, got ${r.status} ${JSON.stringify(r.body)}`);
   await run(`UPDATE sys_issues SET intake_liaison_id = 999999 WHERE id = ?`, [id]);
+  // [组A·2026-08-12] intake-accept 现会按默认 SLA 自动生成 dev_estimated_at（受理时刻通常远未超时，
+  //   走"为空×SLA未超"分支）——本文件测的是 /estimate 工期写点自身语义，需要干净 null 基线才测得出
+  //   "这个端点自己写了什么"，故 fixture 收尾显式清空（Group A 自身行为由 verify-sys-eta-generation.js
+  //   专门覆盖，不在本文件重复验证）。
+  // [组A·HIGH-1 登记] 生产第 1 轮已不可达（新受理单受理即自动生成，恒非空——部署前已在 DEV 族且
+  //   ETA 为空的存量单不适用，那些单没有"受理"这一步可触发自动生成），本清空只模拟"return/reopen
+  //   清空后的第 2 轮"状态，断言只覆盖第 2 轮语义（第 1 轮 GATE 恒满足新行为见 verify-sys-eta-generation.js [H1]）。
+  await run(`UPDATE sys_issues SET dev_estimated_at = NULL WHERE id = ?`, [id]);
   return id;
 }
 const SUBMIT_BODY = { mode: 'no_code', no_code_reason: 'C7 验证占位交付理由', self_tested: true, test_env_deployed: true };

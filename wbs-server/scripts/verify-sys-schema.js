@@ -449,12 +449,23 @@ async function main() {
     assert.strictEqual(c9ColInfo.type, 'TEXT', `online_source 声明类型应为 TEXT，实际 ${c9ColInfo.type}`);
     assert.strictEqual(c9ColInfo.notnull, 0, `online_source 应可空（NULL=批次发布路径/存量历史的合法态，是三分支派生的输入之一），实际 notnull=${c9ColInfo.notnull}`);
     assert.strictEqual(c9ColInfo.dflt_value, null, `online_source 不应有 DEFAULT（默认 NULL 即"未标记来源"），实际 dflt_value=${c9ColInfo.dflt_value}`);
-    // 列序钉死：[C9-fix M2③] 本列必须在**表尾**（与旧库 ALTER ADD COLUMN 追加序一致，两路径列序不漂移，
-    //   同本表 bug 流/通知改造/C1 各组"置于表尾"惯例）。用"是最后一列"而非硬编码 cid 数字——将来再加新列
-    //   时本断言会红，提醒新列同样要排在它后面、并把这一行的期望更新为新的末列。
+    // 列序钉死：[C9-fix M2③·预筛 MED-6 恢复精度] online_source 之后的列**必须恰好**是 [组B·2026-08-12]
+    //   新增的 fast_release_* 六列（按 alterAddMissingCols [1a-14] 声明顺序）+ [组B·SB2·2026-08-13]
+    //   随后新增的 post_release_acceptance/post_accepted_at/post_derive_issue_id 三列（[1a-15]）+
+    //   [组C·SC1·2026-08-13] 随后新增的 eta_overrun_reason_code/_note/dev_estimated_first_at/
+    //   dev_estimated_at_on_release 四列（[1a-16]），不多不少不错序——用显式列表 deepStrictEqual 而非
+    //   "只要排在它之前"这种宽松判断，保留原断言（"online_source 必须是表尾往下的固定序列起点"）的精确
+    //   追责能力：若将来再有新列插进这十三列之间、或表尾又新增了别的列组，这里会先于下方
+    //   [9h-fastrelease]/[9h-fastrelease-acceptance]/[9h-eta-overrun-snapshot] 三组报错，逼着显式更新
+    //   这份列表（同时提醒同步该组的表尾断言）。
     const allColsForOrder = await all('PRAGMA table_info(sys_issues)');
-    assert.strictEqual(allColsForOrder[allColsForOrder.length - 1].name, 'online_source',
-      `[M2③] online_source 应是 sys_issues 的最后一列（新增列一律排表尾=本表惯例），实际末列=${allColsForOrder[allColsForOrder.length - 1].name}`);
+    const colsAfterOnlineSource = allColsForOrder.slice(c9ColInfo.cid + 1).map(c => c.name);
+    assert.deepStrictEqual(colsAfterOnlineSource,
+      ['fast_release_auth_by', 'fast_release_auth_by_name', 'fast_release_auth_at', 'fast_release_auth_note',
+        'fast_release_revoked_at', 'fast_release_consumed_at',
+        'post_release_acceptance', 'post_accepted_at', 'post_derive_issue_id',
+        'eta_overrun_reason_code', 'eta_overrun_reason_note', 'dev_estimated_first_at', 'dev_estimated_at_on_release'],
+      `[M2③] online_source 之后应恰好是 fast_release_* 六列 + post_release_acceptance/post_accepted_at/post_derive_issue_id 三列 + eta_overrun_reason_code/_note/dev_estimated_first_at/dev_estimated_at_on_release 四列（顺序不漂移），实得 ${JSON.stringify(colsAfterOnlineSource)}`);
     // 默认值行为：裸插入 → NULL
     await run(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name) VALUES ('feature', '开发中', 't-online-source-default', 'BMS', 1, 'admin')`);
     const osDefault = await get(`SELECT online_source FROM sys_issues WHERE title='t-online-source-default'`);
@@ -471,6 +482,148 @@ async function main() {
       '⭐ online_source 写入任意字符串**也应成功**——本列刻意无 CHECK（值域开放/只读不判/唯一写入点是源码常量，三条理由见 index.js C9_ONLINE_SOURCE_ISSUE_COLS 注释）。本条一旦红=有人给本列加了 CHECK，须回去重走那段决策');
   }
   ok('⭐ [C9-fix M2②] sys_issues.online_source 新库 CREATE 路径：列存在 + TEXT/可空/无 DEFAULT 元数据钉死 + 位于表尾（M2③ 列序惯例）+ 裸插入默认 NULL + 无 CHECK 双向证明（合法字面量与任意字符串都能写入=刻意开放值域，加 CHECK 会让本组红）');
+
+  // [9h-fastrelease] ⭐ 组B（bug 先行上线授权·方案 v1.3 §3.1/§3.4）：sys_issues.fast_release_* 六列——
+  //   存在性 + 元数据 + 表尾位置 + "无 CHECK 是有意为之"的**双向**证明。同 [9h-c9] 一带理由：本组新列
+  //   只有 verify-sys-fastrelease-auth 从**业务行为**侧覆盖（授权/撤销端点调用后列里有值），schema 侧
+  //   独立断言防"列被误删/误改类型/被人顺手补个 CHECK"这类业务套件测不出根因的漂移。
+  {
+    const frCols = await all('PRAGMA table_info(sys_issues)');
+    const byInfo = frCols.find(c => c.name === 'fast_release_auth_by');
+    const byNameInfo = frCols.find(c => c.name === 'fast_release_auth_by_name');
+    const atInfo = frCols.find(c => c.name === 'fast_release_auth_at');
+    const noteInfo = frCols.find(c => c.name === 'fast_release_auth_note');
+    const revokedInfo = frCols.find(c => c.name === 'fast_release_revoked_at');
+    const consumedInfo = frCols.find(c => c.name === 'fast_release_consumed_at');
+    for (const [name, info] of [
+      ['fast_release_auth_by', byInfo], ['fast_release_auth_by_name', byNameInfo], ['fast_release_auth_at', atInfo],
+      ['fast_release_auth_note', noteInfo], ['fast_release_revoked_at', revokedInfo], ['fast_release_consumed_at', consumedInfo],
+    ]) {
+      assert.ok(info, `组B 新列 ${name} 应存在于新库 CREATE 路径（缺失=alterAddMissingCols [1a-14] 定义被误删）`);
+      assert.strictEqual(info.notnull, 0, `${name} 应可空（六列均为"未发生"时的合法 NULL 态），实际 notnull=${info.notnull}`);
+      assert.strictEqual(info.dflt_value, null, `${name} 不应有 DEFAULT，实际 dflt_value=${info.dflt_value}`);
+    }
+    assert.strictEqual(byInfo.type, 'INTEGER', `fast_release_auth_by 声明类型应为 INTEGER，实际 ${byInfo.type}`);
+    assert.strictEqual(byNameInfo.type, 'TEXT', `fast_release_auth_by_name 声明类型应为 TEXT，实际 ${byNameInfo.type}`);
+    assert.strictEqual(atInfo.type, 'DATETIME', `fast_release_auth_at 声明类型应为 DATETIME，实际 ${atInfo.type}`);
+    assert.strictEqual(noteInfo.type, 'TEXT', `fast_release_auth_note 声明类型应为 TEXT，实际 ${noteInfo.type}`);
+    assert.strictEqual(revokedInfo.type, 'DATETIME', `fast_release_revoked_at 声明类型应为 DATETIME，实际 ${revokedInfo.type}`);
+    assert.strictEqual(consumedInfo.type, 'DATETIME', `fast_release_consumed_at 声明类型应为 DATETIME，实际 ${consumedInfo.type}`);
+    // 列序：六列须按 alterAddMissingCols 内声明顺序连续排在表尾（by→by_name→at→note→revoked_at→consumed_at）。
+    //   [组B·SB2] 表尾断言已随 [1a-15] 新增三列后移——不再是 consumed_at，改在下方
+    //   [9h-fastrelease-acceptance] 组断言 post_derive_issue_id 才是当前真正表尾。
+    assert.ok(byInfo.cid < byNameInfo.cid && byNameInfo.cid < atInfo.cid && atInfo.cid < noteInfo.cid
+      && noteInfo.cid < revokedInfo.cid && revokedInfo.cid < consumedInfo.cid,
+      `组B 六列 cid 应严格递增（声明顺序不漂移），实得 by=${byInfo.cid}/by_name=${byNameInfo.cid}/at=${atInfo.cid}/note=${noteInfo.cid}/revoked=${revokedInfo.cid}/consumed=${consumedInfo.cid}`);
+    // 默认值行为：裸插入 → 六列全 NULL
+    await run(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name) VALUES ('bug', '待受理', 't-fastrelease-default', 'BMS', 1, 'admin')`);
+    const frDefault = await get(`SELECT fast_release_auth_by, fast_release_auth_by_name, fast_release_auth_at, fast_release_auth_note, fast_release_revoked_at, fast_release_consumed_at FROM sys_issues WHERE title='t-fastrelease-default'`);
+    for (const k of Object.keys(frDefault)) {
+      assert.strictEqual(frDefault[k], null, `裸插入后 ${k} 默认应 NULL，实际 ${JSON.stringify(frDefault[k])}`);
+    }
+    // ⭐ 无 CHECK 的双向证明（同 online_source 组理由）：正向=正常值能写；反向=任意字符串（含超长）也能写——
+    //   成组约束（三件套同空同非空等）刻意不靠 DB CHECK 承载，全部由服务层 assertFastReleaseGroupInvariant
+    //   守卫（登记接受，见 index.js [1a-14] 注释）。若将来有人给这几列补上 CHECK，本条会立刻红。
+    await assert.doesNotReject(
+      run(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name, fast_release_auth_by, fast_release_auth_by_name, fast_release_auth_at) VALUES ('bug', '处理中', 't-fr-legit', 'BMS', 1, 'admin', 1, '管理员', '2026-08-12 10:00:00')`),
+      'fast_release_* 三件套写入正常值应成功');
+    await assert.doesNotReject(
+      run(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name, fast_release_auth_by, fast_release_auth_by_name, fast_release_auth_at, fast_release_revoked_at, fast_release_consumed_at) VALUES ('bug', '处理中', 't-fr-open', 'BMS', 1, 'admin', 1, '管理员', '2026-08-12 10:00:00', '2026-08-12 09:00:00', '2026-08-12 09:00:00')`),
+      '⭐ fast_release_* 写入"破坏成组约束"的组合（revoked_at 早于 auth_at 且与 consumed_at 同时非空）DB 层也应成功——本组无 CHECK，成组约束是服务层职责，本条一旦红=有人给这几列加了 CHECK，须回去重走 index.js [1a-14] 那段"登记接受"决策');
+  }
+  ok('⭐ 组B（bug 先行上线授权·方案 v1.3）sys_issues.fast_release_* 六列：类型/可空/无 DEFAULT 元数据钉死 + 声明序连续 + 裸插入默认全 NULL + 无 CHECK 双向证明（成组约束交由服务层守卫，DB 层刻意开放）');
+
+  // [9h-fastrelease-acceptance] ⭐ 组B（bug 先行上线直上·SB2·方案 v1.3 §3.2/§3.3）：
+  //   sys_issues.post_release_acceptance/post_accepted_at/post_derive_issue_id 三列——存在性 + 元数据 +
+  //   表尾位置 + "无 CHECK 是有意为之"的双向证明。同 [9h-c9]/[9h-fastrelease] 一带理由：本组新列只有
+  //   verify-sys-fastlane-submit 从**业务行为**侧覆盖（submit direct_release=true 后列里有值），schema 侧
+  //   独立断言防"列被误删/误改类型/被人顺手补个 CHECK"这类业务套件测不出根因的漂移。
+  {
+    const paCols = await all('PRAGMA table_info(sys_issues)');
+    const acceptanceInfo = paCols.find(c => c.name === 'post_release_acceptance');
+    const acceptedAtInfo = paCols.find(c => c.name === 'post_accepted_at');
+    const deriveIdInfo = paCols.find(c => c.name === 'post_derive_issue_id');
+    for (const [name, info] of [
+      ['post_release_acceptance', acceptanceInfo], ['post_accepted_at', acceptedAtInfo], ['post_derive_issue_id', deriveIdInfo],
+    ]) {
+      assert.ok(info, `组B SB2 新列 ${name} 应存在于新库 CREATE 路径（缺失=alterAddMissingCols [1a-15] 定义被误删）`);
+      assert.strictEqual(info.notnull, 0, `${name} 应可空（三列均为"补验收未发生"时的合法 NULL 态），实际 notnull=${info.notnull}`);
+      assert.strictEqual(info.dflt_value, null, `${name} 不应有 DEFAULT，实际 dflt_value=${info.dflt_value}`);
+    }
+    assert.strictEqual(acceptanceInfo.type, 'TEXT', `post_release_acceptance 声明类型应为 TEXT，实际 ${acceptanceInfo.type}`);
+    assert.strictEqual(acceptedAtInfo.type, 'DATETIME', `post_accepted_at 声明类型应为 DATETIME，实际 ${acceptedAtInfo.type}`);
+    assert.strictEqual(deriveIdInfo.type, 'INTEGER', `post_derive_issue_id 声明类型应为 INTEGER，实际 ${deriveIdInfo.type}`);
+    // 列序：三列须按 alterAddMissingCols [1a-15] 内声明顺序连续排在表尾。
+    //   ⚠️ [组C·SC1] post_derive_issue_id **已不再是**当前表尾——[1a-16] 随后新增了 4 列，真正的表尾
+    //   断言已下移到 [9h-eta-overrun-snapshot] 组（见该组"[表尾钉死]"标记），此处不再重复断言末列。
+    assert.ok(acceptanceInfo.cid < acceptedAtInfo.cid && acceptedAtInfo.cid < deriveIdInfo.cid,
+      `组B SB2 三列 cid 应严格递增（声明顺序不漂移），实得 acceptance=${acceptanceInfo.cid}/accepted_at=${acceptedAtInfo.cid}/derive_id=${deriveIdInfo.cid}`);
+    // 默认值行为：裸插入 → 三列全 NULL
+    await run(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name) VALUES ('bug', '待受理', 't-fastrelease-acceptance-default', 'BMS', 1, 'admin')`);
+    const paDefault = await get(`SELECT post_release_acceptance, post_accepted_at, post_derive_issue_id FROM sys_issues WHERE title='t-fastrelease-acceptance-default'`);
+    for (const k of Object.keys(paDefault)) {
+      assert.strictEqual(paDefault[k], null, `裸插入后 ${k} 默认应 NULL，实际 ${JSON.stringify(paDefault[k])}`);
+    }
+    // ⭐ 无 CHECK 的双向证明（同 fast_release_* 六列组理由）：正向='pending' 唯一当前合法写入值能写；
+    //   反向=任意字符串（SB3 尚未落地的 passed/failed_derived 甚至垃圾值）也能写——值域校验交由服务层，
+    //   DB 层刻意开放（同一登记接受口径）。若将来有人给本列补上 CHECK，本条会立刻红。
+    await assert.doesNotReject(
+      run(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name, post_release_acceptance) VALUES ('bug', '已上线', 't-pra-legit', 'BMS', 1, 'admin', 'pending')`),
+      "post_release_acceptance 写入唯一当前合法字面量 'pending' 应成功");
+    await assert.doesNotReject(
+      run(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name, post_release_acceptance) VALUES ('bug', '已上线', 't-pra-open', 'BMS', 1, 'admin', 'whatever_future_kind')`),
+      '⭐ post_release_acceptance 写入任意字符串**也应成功**——本列刻意无 CHECK（SB3 才会补 passed/failed_derived 分支，本轮只写 pending 字面量），本条一旦红=有人给本列加了 CHECK，须回去重走 index.js [1a-15] 那段"登记接受"决策');
+  }
+  ok('⭐ 组B（bug 先行上线直上·SB2·方案 v1.3）sys_issues.post_release_acceptance/post_accepted_at/post_derive_issue_id 三列：类型/可空/无 DEFAULT 元数据钉死 + 声明序连续 + 裸插入默认全 NULL + 无 CHECK 双向证明（值域校验交由服务层，DB 层刻意开放）');
+
+  // [9h-eta-overrun-snapshot] ⭐ 组C（期望对表与准时统计·SC1·方案 v1.3 §3C.2/§3C.4/§3C.5/§3C.8）：
+  //   sys_issues.eta_overrun_reason_code/_note/dev_estimated_first_at/dev_estimated_at_on_release 四列——
+  //   存在性 + 元数据 + 表尾位置 + "无 CHECK 是有意为之"的双向证明。同 [9h-fastrelease-acceptance] 一带
+  //   理由：本组新列只有 verify-sys-eta-overrun-snapshot 从**业务行为**侧覆盖，schema 侧独立断言防
+  //   "列被误删/误改类型/被人顺手补个 CHECK"这类业务套件测不出根因的漂移。
+  {
+    const etaCols = await all('PRAGMA table_info(sys_issues)');
+    const reasonCodeInfo = etaCols.find(c => c.name === 'eta_overrun_reason_code');
+    const reasonNoteInfo = etaCols.find(c => c.name === 'eta_overrun_reason_note');
+    const firstAtInfo = etaCols.find(c => c.name === 'dev_estimated_first_at');
+    const onReleaseInfo = etaCols.find(c => c.name === 'dev_estimated_at_on_release');
+    for (const [name, info] of [
+      ['eta_overrun_reason_code', reasonCodeInfo], ['eta_overrun_reason_note', reasonNoteInfo],
+      ['dev_estimated_first_at', firstAtInfo], ['dev_estimated_at_on_release', onReleaseInfo],
+    ]) {
+      assert.ok(info, `组C 新列 ${name} 应存在于新库 CREATE 路径（缺失=alterAddMissingCols [1a-16] 定义被误删）`);
+      assert.strictEqual(info.notnull, 0, `${name} 应可空（四列均为"未发生/未适用"时的合法 NULL 态），实际 notnull=${info.notnull}`);
+      assert.strictEqual(info.dflt_value, null, `${name} 不应有 DEFAULT，实际 dflt_value=${info.dflt_value}`);
+    }
+    assert.strictEqual(reasonCodeInfo.type, 'TEXT', `eta_overrun_reason_code 声明类型应为 TEXT，实际 ${reasonCodeInfo.type}`);
+    assert.strictEqual(reasonNoteInfo.type, 'TEXT', `eta_overrun_reason_note 声明类型应为 TEXT，实际 ${reasonNoteInfo.type}`);
+    assert.strictEqual(firstAtInfo.type, 'DATETIME', `dev_estimated_first_at 声明类型应为 DATETIME，实际 ${firstAtInfo.type}`);
+    assert.strictEqual(onReleaseInfo.type, 'DATETIME', `dev_estimated_at_on_release 声明类型应为 DATETIME，实际 ${onReleaseInfo.type}`);
+    // 列序：四列须按 alterAddMissingCols [1a-16] 内声明顺序连续排在表尾，且 dev_estimated_at_on_release
+    //   就是当前真正的表尾（呼应上方 [M2③] 断言"改动后表尾在这里"）。
+    assert.ok(reasonCodeInfo.cid < reasonNoteInfo.cid && reasonNoteInfo.cid < firstAtInfo.cid && firstAtInfo.cid < onReleaseInfo.cid,
+      `组C 四列 cid 应严格递增（声明顺序不漂移），实得 code=${reasonCodeInfo.cid}/note=${reasonNoteInfo.cid}/first_at=${firstAtInfo.cid}/on_release=${onReleaseInfo.cid}`);
+    const lastColEta = etaCols[etaCols.length - 1];
+    assert.strictEqual(lastColEta.name, 'dev_estimated_at_on_release',
+      `[表尾钉死] dev_estimated_at_on_release 应是 sys_issues 当前最后一列（新增列一律排表尾），实际末列=${lastColEta.name}——将来再加新列时本断言会红，提醒把这一行的期望更新为新的末列`);
+    // 默认值行为：裸插入 → 四列全 NULL
+    await run(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name) VALUES ('improvement', '待受理', 't-eta-overrun-default', 'BMS', 1, 'admin')`);
+    const etaDefault = await get(`SELECT eta_overrun_reason_code, eta_overrun_reason_note, dev_estimated_first_at, dev_estimated_at_on_release FROM sys_issues WHERE title='t-eta-overrun-default'`);
+    for (const k of Object.keys(etaDefault)) {
+      assert.strictEqual(etaDefault[k], null, `裸插入后 ${k} 默认应 NULL，实际 ${JSON.stringify(etaDefault[k])}`);
+    }
+    // ⭐ 无 CHECK 的双向证明（同 fast_release_*/post_release_acceptance 组理由）：正向=值域内正常值能写；
+    //   反向=不在值域内的任意字符串也能写——值域校验（ETA_OVERRUN_REASON_CODES 五值枚举）交由服务层
+    //   resolveEtaOverrunReasonForWrite，DB 层刻意开放（同一登记接受口径）。若将来有人给这四列补上
+    //   CHECK，本条会立刻红，须回去重走 index.js [1a-16] 那段"登记接受"决策。
+    await assert.doesNotReject(
+      run(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name, eta_overrun_reason_code, eta_overrun_reason_note) VALUES ('improvement', '开发中', 't-eta-legit', 'BMS', 1, 'admin', '需求变更', '正常理由')`),
+      'eta_overrun_reason_code/_note 写入合法值域内的值应成功');
+    await assert.doesNotReject(
+      run(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name, eta_overrun_reason_code) VALUES ('improvement', '开发中', 't-eta-open', 'BMS', 1, 'admin', 'whatever_not_in_domain')`),
+      '⭐ eta_overrun_reason_code 写入值域外的任意字符串**也应成功**——本列刻意无 CHECK，值域校验是服务层职责');
+  }
+  ok('⭐ 组C（期望对表与准时统计·SC1·方案 v1.3）sys_issues.eta_overrun_reason_code/_note/dev_estimated_first_at/dev_estimated_at_on_release 四列：类型/可空/无 DEFAULT 元数据钉死 + 声明序连续 + dev_estimated_at_on_release 为当前表尾 + 裸插入默认全 NULL + 无 CHECK 双向证明（值域校验交由服务层，DB 层刻意开放）');
 
   //   liaison_test_cycle_no / liaison_test_notify_cycle_no CHECK（typeof=integer AND >=0，两列同款）：
   //   负例（负数整数 + 非整数小数——typeof 在此落 real）；正例（0/5）
@@ -940,7 +1093,12 @@ async function verifyMissingColLib() {
   await run2(`CREATE TABLE sys_issues (id INTEGER PRIMARY KEY, type TEXT, status TEXT, priority TEXT, system_name TEXT, source TEXT, record_source TEXT, import_batch_id TEXT, origin_issue_id INTEGER, release_id INTEGER, created_by INTEGER, assigned_to INTEGER, assigned_to_name TEXT, dev_estimated_at TEXT, deadline TEXT, assigned_at TEXT, first_submitted_at TEXT, accepted_at TEXT, released_at TEXT, closed_at TEXT, reopened_at TEXT, reopen_count INTEGER, return_count INTEGER, scope_changed INTEGER, notify_status TEXT, notified_at TEXT, notify_message_key TEXT, notify_error TEXT, read_at TEXT, requester_notify_status TEXT)`);
   await run2(`CREATE TABLE sys_issue_timeline (id INTEGER PRIMARY KEY, event_type TEXT, from_status TEXT, to_status TEXT, action_code TEXT, ref_id INTEGER, round_no INTEGER)`);
   await run2(`CREATE TABLE sys_issue_attachments (id INTEGER PRIMARY KEY, attachment_type TEXT, round_no INTEGER, status TEXT)`);
-  await run2(`CREATE TABLE sys_issue_dev_assignees (id INTEGER PRIMARY KEY, issue_id INTEGER, user_id INTEGER, user_name TEXT, is_primary INTEGER, notify_status TEXT, notified_at DATETIME, read_at DATETIME, notify_message_key TEXT, notify_error TEXT, removed_at DATETIME, dev_status TEXT, resolved_at TEXT, no_code_reason TEXT, superseded_by INTEGER)`);   // 全列建全（对齐扩全列后的 SYS_DEV_ASSIGNEES_KEY_COLS，含 C0 4 列；本测试焦点是 sys_issues 缺列先命中）
+  await run2(`CREATE TABLE sys_issue_dev_assignees (id INTEGER PRIMARY KEY, issue_id INTEGER, user_id INTEGER, user_name TEXT, is_primary INTEGER, notify_status TEXT, notified_at DATETIME, read_at DATETIME, notify_message_key TEXT, notify_error TEXT, removed_at DATETIME, dev_status TEXT, resolved_at TEXT, no_code_reason TEXT, superseded_by INTEGER)`);   // [SD1 二轮预筛 LOW-6 收口·注释如实] 本桩表列清单**不是**全列建全——它固定停在 C0 收口时的列集（不含
+  //   D 组件①（2026-08-12）新增的 round_no），且往后每次 SYS_DEV_ASSIGNEES_KEY_COLS 再扩列本处都不会
+  //   同步更新（本测试焦点是 sys_issues 缺列先命中，见下方 [2] 复查顺序，dev_assignees 列全不全对本
+  //   测试用例结果无影响，故不必手工同步）。真正让这张残缺桩表"结构补全"的是 runSysMigration 的
+  //   alterAddMissingCols 幂等 ALTER（事后补列，非本处一次性建全）——round_no 缺失时同样会被它正常
+  //   补上，不会导致本测试用例失败（75 件 verify-sys-*.js 含本文件已实测验证）。
   // C0（多开发协作与 commit 留痕重构 v2.9）3 新表：本测试焦点在 sys_issues 缺列（[2] 排第一命中即 return），
   //   3 新表只需满足 [1] 表存在性即可，故建最小桩表（仅 id 列）。
   await run2(`CREATE TABLE sys_issue_dev_commits (id INTEGER PRIMARY KEY)`);

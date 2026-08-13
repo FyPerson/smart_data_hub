@@ -22,8 +22,11 @@
 //   [4] 挂 active 批次的单 → 不直翻（条件②）
 //   [5] 删光单 → 直翻 + timeline 附记 N + 响应体 deleted_commit_count
 //   [6] 并发竞态：验收通过 vs 补 commit —— CAS 抢一
-//   [7] DTO 三分支各现形（release_publish / no_commit_acceptance / unknown_legacy）
-//   [8] 守卫负例：NO_COMMIT_ONLINE 之外的边进「已上线」被拒（红线=进已上线只有两条明示入口）
+//   [7] DTO 分支各现形（release_publish / no_commit_acceptance / unknown_legacy——本文件覆盖范围，
+//       [预筛 LOW-3] 第四分支 authorized_fastlane 归 verify-sys-fastlane-submit.js [7a] 覆盖，不在此文件重复）
+//   [8] 守卫负例：NO_COMMIT_ONLINE 之外的边进「已上线」被拒（[预筛 LOW-3] 红线已更新=进已上线现有三条明示
+//       入口 RELEASE/NO_COMMIT_ONLINE/FAST_RELEASE_DIRECT，本组仅覆盖前二者的边界，FAST_RELEASE_DIRECT
+//       routeKind 单元覆盖归 verify-sys-fastlane-submit.js [8] 组，不在此文件重复）
 //   [9] 读点分支断言：列表 DTO 与详情 DTO 同源派生
 //
 // 断言纪律：精确状态码 + 精确 error code；负例断言"零副作用"（状态/列值/timeline 三查）。

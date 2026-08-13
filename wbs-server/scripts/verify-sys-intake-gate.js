@@ -169,9 +169,13 @@ async function main() {
 
     const idx = srcs.find(x => x.f.endsWith(path.join('sys-iteration', 'index.js'))).s;
 
-    // ② 三创建入口全部调用统一函数（建单 / derive / reactivate 的动态落态解析）
+    // ② 四创建入口全部调用统一函数（建单 / derive / reactivate / 组B补验收fail派生 的动态落态解析）
+    //   [SB3·2026-08-13] 3→4：组 B 补验收 fail 分支（POST /post-release-accept）计算 initialStatus 后
+    //   传入共享内核 insertDerivedSysIssue（内核本身不解析状态·与 /derive 同款模式），INSERT 仍恰 2 处
+    //   （见上方 ① 断言绿=未新增 INSERT，补验收 fail 复用 insertDerivedSysIssue 唯一那处）、intake_required=1
+    //   由共享内核落·过受理门不卡死。新增合法受控创建路径，非绕过——基线随之更新。
     const unifiedCalls = (idx.match(/T\.resolveSysInitialStatusForCreate\(/g) || []).length;
-    assert.strictEqual(unifiedCalls, 3, `index.js 应恰 3 处调用 resolveSysInitialStatusForCreate（建单/derive/reactivate），实际 ${unifiedCalls}`);
+    assert.strictEqual(unifiedCalls, 4, `index.js 应恰 4 处调用 resolveSysInitialStatusForCreate（建单/derive/reactivate/组B补验收fail派生），实际 ${unifiedCalls}`);
 
     // ③ ⭐ index.js **完全不再直调** resolveInitialStatus（原 2 处属 change_intake_mode 的开/关目标态解析，
     //   随该端点实现体删除而消失·codex 审 MED-1）。落态解析的唯一对外入口就是统一函数——

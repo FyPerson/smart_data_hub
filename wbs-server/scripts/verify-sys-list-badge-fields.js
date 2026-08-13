@@ -26,9 +26,17 @@ const ok = (m) => { pass++; console.log(`  [OK] ${m}`); };
 const bad = (m) => { fail++; console.log(`  [FAIL] ${m}`); };
 const must = (cond, m) => cond ? ok(m) : bad(m);
 
-// 前端自算派生字段：不该出现在 SELECT 里，逐项带理由
+// 派生字段：不出现在 SELECT 列集里，但随响应体供给前端（前端自算 or 后端逐行 computed），逐项带理由。
+//   守卫口径="前端读的字段必须真到得了前端"，SELECT 列与派生字段都算供给，此白名单收后者。
 const FRONTEND_DERIVED = {
   dev_roster_sort: 'siLoadList 拉完列表后逐行补的排序派生值（共享排序层只读 item[field]，非后端字段）',
+  // [组 B·SB3 预筛 MED 修] 后端列表端点逐行 computed（index.js:6618 `r.online_source_kind = deriveOnlineSourceKind(r)`）——
+  //   非 SELECT 列但随响应体下发；徽章 siPostAcceptFlagHtml 改读它（不再原始 online_source 值比较·两份判据必漂移）。
+  //   原始 online_source 列仍在 SELECT（见下方 BADGE_FIELDS）=deriveOnlineSourceKind 的计算输入，两者并存不冲突。
+  online_source_kind: '后端列表端点逐行 deriveOnlineSourceKind(r) 派生（index.js:6618），随响应下发；徽章展示 kind 只认此派生列',
+  // [追加批·M2] 48h 圈红判据收归后端——同 online_source_kind 一样是列表端点逐行 computed（非 SELECT
+  //   原始列），随响应体下发；前端 siPostAcceptFlagHtml 改读此字段，不再自算浏览器本地时区。
+  post_release_accept_overdue: '后端列表端点逐行 isPostReleaseAcceptOverdue(r) 派生，随响应下发；48h 圈红判据权威在后端（与写入 released_at 同进程同时区，避免前端跨时区误判）',
 };
 
 // ── 取前端列表行渲染路径消费的字段 ──────────────────────────────
@@ -55,12 +63,17 @@ const tlBody = extractFunctionBody(HTML, 'siTechLeadNotifyBadgeHtml');
 // [待上线可见性 20260812] 新徽章 helper 必须**同时**进扫描面——否则它消费的新字段（has_release_remove
 //   等）对本守卫不可见，守卫照常全绿却什么也没覆盖（正是本守卫要防的 blocked 死分支的同款漏法）。
 const preBody = extractFunctionBody(HTML, 'siPrereleaseFlagHtml');
+// [组 B·SB3·补验收闭环 20260813] 同上理由——「先行上线待补验收」徽章 helper 消费 online_source/
+//   post_release_acceptance/released_at/post_derive_issue_id 四字段（末者为追加批 failed_derived
+//   分支新引入），必须同批进扫描面。
+const paBody = extractFunctionBody(HTML, 'siPostAcceptFlagHtml');
 must(!!rowBody, 'renderSysIterationRows 函数体可提取（提不到=守卫空转，不能当通过）');
 must(!!tlBody, 'siTechLeadNotifyBadgeHtml 函数体可提取');
 must(!!preBody, 'siPrereleaseFlagHtml 函数体可提取（待上线两 flag 的唯一判定出口）');
-if (!rowBody || !tlBody || !preBody) { console.log('\n=== FAIL：扫描面缺失 ==='); process.exit(1); }
+must(!!paBody, 'siPostAcceptFlagHtml 函数体可提取（先行上线待补验收徽章的唯一判定出口）');
+if (!rowBody || !tlBody || !preBody || !paBody) { console.log('\n=== FAIL：扫描面缺失 ==='); process.exit(1); }
 
-const consumeSrc = stripComments(rowBody + '\n' + tlBody + '\n' + preBody);
+const consumeSrc = stripComments(rowBody + '\n' + tlBody + '\n' + preBody + '\n' + paBody);
 const consumed = new Set();
 for (const m of consumeSrc.matchAll(/\bi\.([a-z_][a-z0-9_]*)\b/g)) consumed.add(m[1]);
 must(consumed.size >= 15, `前端消费字段实抓 ${consumed.size} 个（过少=正则失配，扫描面须非空）`);
@@ -108,6 +121,20 @@ const BADGE_FIELDS = [
   ['release_id', '已移出/未排期（批次归属判定）'], ['has_release_remove', '已移出 vs 未排期 的区分依据'],
   ['last_release_remove_summary', '已移出·悬停原因'], ['last_release_remove_by', '已移出·悬停操作人'],
   ['last_release_remove_at', '已移出·悬停时刻'],
+  // [组 B·SB3·补验收闭环 20260813] 「先行上线待补验收」徽章 + 48h 圈红判据。
+  //   ⚠️ [追加批·M2 订正] online_source/released_at 两列**前端不再直接读**——前端徽章改读后端逐行
+  //   computed 的 online_source_kind/post_release_accept_overdue（见上方 FRONTEND_DERIVED 白名单）；
+  //   这两列仍须留在 SELECT，是**后端** deriveOnlineSourceKind(r)/isPostReleaseAcceptOverdue(r) 两个
+  //   计算的输入（供数链路：SELECT 列 → 后端 JS 计算 → 派生字段 → 前端读派生字段），故仍点名钉住，
+  //   只是理由从"前端徽章直接依赖"改为"供后端计算依赖"。post_release_acceptance 是唯一前端直接读的
+  //   原始列（pending 门控判断）。
+  ['online_source', '「已上线」来源派生 deriveOnlineSourceKind(r) 的计算输入（供 online_source_kind）'],
+  ['post_release_acceptance', '先行上线待补验收（pending 门控·前端直接读）'],
+  ['released_at', '48h 圈红判据 isPostReleaseAcceptOverdue(r) 的计算输入（供 post_release_accept_overdue）'],
+  // [追加批·2026-08-13·用户实测拍板] 「补验收未通过」终态徽章——failed_derived 门控 + title 内嵌
+  //   "已派生 #N"链接文案的取数列，此前列表 SELECT 从未投影过（只有详情端点 `SELECT sys_issues.*`
+  //   隐式带上），是本批新补的列，本条目即为该补列动作的守卫锚点。
+  ['post_derive_issue_id', '补验收未通过·悬停"已派生 #N"'],
 ];
 for (const [f, label] of BADGE_FIELDS) {
   must(selected.has(f), `徽章「${label}」依赖字段 ${f} 在列表 SELECT 中`);

@@ -225,6 +225,20 @@ async function evaluateIssue(issueId) {
         console.log(`\n#${issueId} ⏭️  跳过：${ev.reason}（扫描后状态已变，未做任何写入）`);
         skippedIssues++; continue;
       }
+      // [D 组件①·SD2 二轮预筛 LOW-1① 收口] round_no：本脚本插的新 pending 实例与引擎 return/reopen
+      //   内部自动 remove+re-add（index.js :3918 一带）**语义等价**——本脚本要补的正是"return_count/
+      //   reopen_count 早已被旧版 return/reopen 递增过，只是花名册没跟着重开一轮"这个存量缺口，即
+      //   ev.iss.return_count/reopen_count 此刻已经是"补写后应生效"的值（不是本脚本自己在递增它们，
+      //   本脚本从不碰这两列），故直接取**当前**值 +1，不像引擎内部那样需要额外 +1 补偿"UPDATE 尚未
+      //   落库"的时序差（本脚本没有那个时序差——它只 UPDATE dev_assignees，不 UPDATE sys_issues 计数列）。
+      const backfillRoundNo = (Number(ev.iss.return_count) || 0) + (Number(ev.iss.reopen_count) || 0) + 1;
+      // [D-fix2 MED-3①] round_no 合法性内联校验——与 index.js assertValidRoundNo 同款判据（正整数），
+      //   复制而非 require：本脚本是独立进程直连 sqlite3，不经 server 的模块装配（同本文件
+      //   electRepresentativeInline"复刻而非复用"的既有原则，见该函数头部注释）。INSERT 前拦截，防脏
+      //   return_count/reopen_count 算出非法 round_no 却悄悄落库——本单一旦命中即在事务内 throw→ROLLBACK。
+      if (!Number.isInteger(backfillRoundNo) || backfillRoundNo < 1) {
+        throw new Error(`#${issueId} round_no 计算异常：期望正整数，实得 ${JSON.stringify(backfillRoundNo)}（return_count=${ev.iss.return_count}, reopen_count=${ev.iss.reopen_count}）`);
+      }
       let reopenedHere = 0; const reopened = [];
       for (const m of ev.members) {
         const u = await get('SELECT display_name, username, role, status FROM users WHERE id = ?', [m.user_id]);
@@ -234,8 +248,8 @@ async function evaluateIssue(issueId) {
             WHERE id = ? AND issue_id = ? AND removed_at IS NULL`, [m.id, issueId]);
         if (rm.changes !== 1) throw new Error(`#${issueId} 旧实例 id=${m.id} 软删 changes=${rm.changes}（期望 1）`);
         const ins = await run(
-          `INSERT INTO sys_issue_dev_assignees (issue_id, user_id, user_name, is_primary, dev_status)
-           VALUES (?, ?, ?, 0, 'pending')`, [issueId, m.user_id, u.display_name || u.username || m.user_name]);
+          `INSERT INTO sys_issue_dev_assignees (issue_id, user_id, user_name, is_primary, dev_status, round_no)
+           VALUES (?, ?, ?, 0, 'pending', ?)`, [issueId, m.user_id, u.display_name || u.username || m.user_name, backfillRoundNo]);
         await run(
           `INSERT INTO sys_issue_dev_events (issue_id, dev_assignee_id, related_dev_assignee_id, action, reason, operator_id, payload_json, created_at)
            VALUES (?, ?, NULL, 're-add', ?, ?, ?, datetime('now','localtime'))`,

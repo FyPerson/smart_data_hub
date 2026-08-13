@@ -20393,6 +20393,11 @@ const sysIterModule = require('./routes/sys-iteration')({
   sendIssueDingtalkRaw, sendIssueDingtalkToRequester, getSafePlatformBaseUrl,
   // bug 流 Commit ③ 真钉钉建群（复刻 correction create-chat 范式，§5 [审:#7]）；4 项均已在实例化点作用域内（对齐 18506 correction 注入）
   readSystemConfig, COLLAB_CHAT_ADMIN_ID, callDingtalkWithTokenRetry, maskPhone,
+  // [部署闸·2026-08-13 用户终裁「组B先行上线暂时不部署」] 先行上线授权入口开关——生产 .env 不设
+  //   SYS_FASTLANE_ENABLE ⇒ false ⇒ 授权端点 403，整条快速通道结构性惰性（详见 index.js 端点处注释）。
+  //   verify 体系进程内自建 app 不传本字段 ⇒ 模块内缺省启用（测试生态零改动）；生产由本行显式注入，
+  //   忘配 env 的失败方向=禁用（对"暂不上线"诉求 fail-closed）。两步化上线时生产 .env 置 1 开启。
+  fastlaneAuthorizeEnabled: process.env.SYS_FASTLANE_ENABLE === '1',
 });
 app.use('/api', sysIterModule.router);
 

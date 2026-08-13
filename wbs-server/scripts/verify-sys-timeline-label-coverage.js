@@ -13,6 +13,8 @@
 //   对账规则（与 public/Sys_Iteration.html 的 siRenderTimeline 显示 key 计算逐字同源，见该函数 ~2254 行）：
 //     status_change/release → key = action_code || event_type
 //     scope_change          → key = action_code（仅当 action_code ∈ SI_TL_RELEASE_SCOPE_LABEL）否则 'scope_change'
+//     note + action_code='assign_overdue_eta' → key = action_code（[MED-2·组A] /reassign 端点 ETA
+//       变更留痕的独立徽章 carve-out，同 scope_change 一个模式，不逐个引入新徽章制造噪音）
 //     其余 event_type       → key = event_type 自身
 //
 //   KNOWN_GAPS：见下方常量定义处（当前应为空数组，F4 已清零）。
@@ -829,11 +831,49 @@ function extractObjectKeys(text, constName) {
   return keys;
 }
 
+// ── ②b 前端侧：解析 `const NAME = new Set([...]);` 字符串字面量成员集合 ───────────────────
+//   [预筛 MED-5] 消灭 NOTE_OWN_LABEL_ACTION_CODES 的"第二份硬编码"风险——本文件（下方 §③）与
+//   Sys_Iteration.html 的 SI_TL_NOTE_OWN_LABEL_CODES 各自独立维护同一份"note 型事件独立徽章白名单"，
+//   此前只靠人工同步的注释提醒对方"改一处必须同改另一处"，没有可执行断言兜底——两处一旦漂移，
+//   静态守卫看不见（producedKeys 是从后端源码算出来的 display key，只要那个 key 恰好也在 labelKeys
+//   里就会绿，不管前端是否真把它当"独立徽章"渲染），只能等真人在页面上肉眼发现"这条本该有专属徽章却
+//   显示成裸备注"。本函数把前端那份 Set 字面量解析出来，主流程与本文件的 NOTE_OWN_LABEL_ACTION_CODES
+//   做集合相等断言，堵死这类静默漂移。
+//   解析骨架复用 extractObjectKeys 同款纪律：skipBalanced 定位 `[...]` 边界、splitTopLevel 按顶层逗号
+//   切分、stripComments 剥注释、非字符串字面量成员一律 throw（不静默丢弃）、解析到 0 个成员同样 throw
+//   （fail-closed——本函数存在的意义就是"能读到真值才能比对"，读不到不能悄悄放行当作"集合为空即相等"）。
+function extractSetLiteralStrings(text, constName) {
+  const declNeedle = `const ${constName} = new Set([`;
+  const declIdx = text.indexOf(declNeedle);
+  if (declIdx === -1) throw new Error(`extractSetLiteralStrings(${constName}): 未找到 "const ${constName} = new Set([...])" 声明（声明写法可能已变，需要人工核实并扩展解析器）`);
+  const bracketIdx = declIdx + declNeedle.length - 1;   // 指向开中括号 '['
+  const end = skipBalanced(text, bracketIdx);
+  const inner = text.slice(bracketIdx + 1, end - 1);
+  const items = [];
+  for (const t of splitTopLevel(inner)) {
+    const cleaned = stripComments(t.text).trim();
+    if (!cleaned) continue;   // 尾逗号/纯注释残留造成的空 token，非"无法识别的成员"
+    const m = cleaned.match(/^'([^']*)'$/) || cleaned.match(/^"([^"]*)"$/);
+    if (!m) throw new Error(`extractSetLiteralStrings(${constName}): 无法识别的顶层 token "${cleaned.slice(0, 60)}"（既非单引号也非双引号字符串字面量）——需要人工核实并扩展解析器，不能静默丢弃`);
+    if (m[1].trim() === '') throw new Error(`extractSetLiteralStrings(${constName}): 出现空字符串成员——action_code 不应为空，可能是数据错误`);
+    items.push(m[1]);
+  }
+  if (items.length === 0) throw new Error(`extractSetLiteralStrings(${constName}): 解析到 0 个成员——声明可能已变为空 Set 或解析失败，拒绝在空数据上继续判断`);
+  return items;
+}
+
 // ── ③ 对账规则：与 Sys_Iteration.html siRenderTimeline 的 key 计算逐字同源 ────────────────
+//   [MED-2·组A + 组B 扩] note 型事件的独立徽章 carve-out——action_code ∈ NOTE_OWN_LABEL_ACTION_CODES
+//   时取自己的 key，其余 note 仍落回通用 'note'。与 scope_change 的 isReleaseScope carve-out 同一模式，
+//   前端 SI_TL_NOTE_OWN_LABEL_CODES / isNoteWithOwnLabel 逐字同构（改一处必须同改另一处）。
+//   集合成员：assign_overdue_eta（/reassign 端点 ETA 变更留痕，见 index.js "[MED-2·收口]" 注释）+
+//   [组B] fast_release_authorize / fast_release_revoke（bug 先行上线授权/撤销，方案 v1.3 §3.1）。
+const NOTE_OWN_LABEL_ACTION_CODES = new Set(['assign_overdue_eta', 'fast_release_authorize', 'fast_release_revoke', 'post_release_accept_pass', 'post_release_accept_fail']);
 function computeDisplayKey(eventType, actionCode, releaseScopeKeySet) {
   const hasActionCode = actionCode !== null && actionCode !== undefined && actionCode !== '';
   if (eventType === 'status_change' || eventType === 'release') return hasActionCode ? actionCode : eventType;
   if (eventType === 'scope_change') return (hasActionCode && releaseScopeKeySet.has(actionCode)) ? actionCode : 'scope_change';
+  if (eventType === 'note' && hasActionCode && NOTE_OWN_LABEL_ACTION_CODES.has(actionCode)) return actionCode;
   return eventType;
 }
 
@@ -855,11 +895,70 @@ ok(`SI_TL_LABEL 解析到 ${labelKeys.size} 个 key（\u2265 20 下限）`);
 if (releaseScopeKeys.size < 8) fail(`SI_TL_RELEASE_SCOPE_LABEL 只解析到 ${releaseScopeKeys.size} 个 key，低于下限 8`);
 ok(`SI_TL_RELEASE_SCOPE_LABEL 解析到 ${releaseScopeKeys.size} 个 key（\u2265 8 下限）`);
 
+// [预筛 MED-5] 前端 SI_TL_NOTE_OWN_LABEL_CODES 与本文件 NOTE_OWN_LABEL_ACTION_CODES 集合相等（双向）——
+//   与上方 computeDisplayKey 用的同一个常量对账，任何一侧漏改/多改都会在此翻红，消灭"第二份硬编码"
+//   静默漂移的风险（两处各自独立维护同一份 note carve-out 白名单，此前只靠人工同步注释）。
+{
+  const htmlNoteOwnLabelCodes = new Set(extractSetLiteralStrings(htmlSrc, 'SI_TL_NOTE_OWN_LABEL_CODES'));
+  const backendSet = [...NOTE_OWN_LABEL_ACTION_CODES].sort();
+  const frontendSet = [...htmlNoteOwnLabelCodes].sort();
+  const mismatched = backendSet.length !== frontendSet.length || backendSet.some((v, i) => v !== frontendSet[i]);
+  if (mismatched) {
+    fail(`SI_TL_NOTE_OWN_LABEL_CODES（前端 Sys_Iteration.html）与 NOTE_OWN_LABEL_ACTION_CODES（本文件）集合不相等——两处必须逐字同步，实得 前端=${JSON.stringify(frontendSet)} 本文件=${JSON.stringify(backendSet)}`);
+  }
+  ok(`SI_TL_NOTE_OWN_LABEL_CODES 前端 Set 字面量解析成功（${frontendSet.length} 个成员）且与本文件 NOTE_OWN_LABEL_ACTION_CODES 集合相等：${JSON.stringify(frontendSet)}`);
+}
+
 // [后端] 直写站点数——[B7·328a 回卷] 改为显式基线，不再只设下限：下限检查只挡得住"少了"（漏检），挡不住
 //   "多了"（新增站点悄悄溜过去没人看一眼语义）——两个方向都该有人工介入，不是本脚本能替你判断新站点该
 //   不该纳入覆盖检查。数量漂移（无论增减）一律翻红，逼着改动者显式更新这个常量、同时读一遍新增/减少
 //   站点的 event_type/action_code 语义。
-const EXPECTED_INSERT_SITE_COUNT = 29;
+// [组A·2.3] 29 → 30：/reassign 端点新增 1 个 sys_issue_timeline INSERT 站点（超时指派/人工设定命中
+//   时才写）。[LOW-1·组A预筛修复批2 订正] 该站点实际写入 event_type='note'、action_code=
+//   'assign_overdue_eta'——独立徽章 key（本文件 computeDisplayKey 对 note+assign_overdue_eta 直接
+//   返回 action_code 本身，非复用既有 'estimate' 展示），见 index.js /sys-issues/:id/reassign 内
+//   "[HIGH-1]"/"[MED-2·收口]" 注释块（该站点最初设计为 event_type='estimate'，落地时因与前端
+//   siRenderTimeline 对 'estimate' 的"裸值契约"冲突改为 'note'，此处旧注释此前一直写着已废弃的
+//   'estimate' 描述，未同步更新——本次一并订正）。intake_accept（折叠进既有引擎写点 summary）与
+//   /assign（折叠进既有 assign timeline 行 summary）均未新增站点。
+// [组B·2026-08-12] 30 → 32：新增两个自定义端点 POST /sys-issues/:id/fast-release-authorize 与
+//   POST /sys-issues/:id/fast-release-revoke（方案 v1.3 §3.1），各自一条直写 INSERT（event_type=
+//   'note'、action_code='fast_release_authorize'/'fast_release_revoke'），同 set_oa_number/
+//   set_scheduled_start 既有"自定义端点直写 timeline"范式，非引擎写点。两个 action_code 均已登记进
+//   NOTE_OWN_LABEL_ACTION_CODES（独立徽章，见上方 computeDisplayKey）+ Sys_Iteration.html 的
+//   SI_TL_LABEL/SI_TL_NOTE_OWN_LABEL_CODES，主覆盖断言自然通过，不落入 KNOWN_GAPS。
+// [组B·SB2·2026-08-13] 32 → 33：submit 端点 direct_release=true 分支新增 1 条直写 INSERT（event_type=
+//   'status_change'、action_code='fast_release_direct_online'，方案 v1.3 §3.2）——同 runWGate 的 W-GATE
+//   镜像行范式（event_type='status_change'），但本条不经 runWGate（direct_release 路径自成一路，不调用
+//   runWGate，见 index.js submit 端点内 [组B·SB2] 注释），是独立于引擎写点（sysIssueTransition 内那条
+//   `event_type: transition.timelineEvent` 参数化写点）与 W-GATE 写点（:3049 一带 `event_type: 'status_change',
+//   ...action_code: mirrorActionCode`）之外的**第三处** status_change 直写站点。event_type/action_code
+//   均为 SQL 内字面量（不经变量绑定，理由见 index.js SYS_FAST_RELEASE_DIRECT_ONLINE_SUMMARY 定义处注释），
+//   按 computeDisplayKey 规则（status_change 有 action_code 时取 action_code 本身）不落入 note 型 carve-out
+//   （NOTE_OWN_LABEL_ACTION_CODES 无需登记本码），已登记进 Sys_Iteration.html 的 SI_TL_LABEL（独立词条
+//   '先行上线直上'），主覆盖断言自然通过，不落入 KNOWN_GAPS。
+// [组B·SB3·2026-08-13] 33 → 35：新增 POST /sys-issues/:id/post-release-accept 端点，pass/fail 两分支
+//   各自一条直写 INSERT（event_type='note'，action_code 分别为 'post_release_accept_pass'/
+//   'post_release_accept_fail'，方案 v1.3 §3.3），同 fast-release-authorize/-revoke 既有"自定义端点直写
+//   timeline"范式（非引擎写点）。derive 端点的原有 2 条 INSERT（'created'+'derive'）被抽成共享函数
+//   insertDerivedSysIssue 供本端点 fail 分支复用——**源码文本层面仍各只出现一次**（函数体只写一遍，
+//   被两个调用点共同调用），故这次重构本身对本文件的"静态源码位置计数"零净变化，真正新增的只有上述
+//   2 条 note 型 INSERT。两个新 action_code 均已登记进 NOTE_OWN_LABEL_ACTION_CODES（独立徽章，见上方
+//   computeDisplayKey）+ Sys_Iteration.html 的 SI_TL_LABEL/SI_TL_NOTE_OWN_LABEL_CODES，主覆盖断言自然
+//   通过，不落入 KNOWN_GAPS。
+// [组B·B1·授权终结事件制·2026-08-13] 35 → 37：三事件（验收通过/验收打回/上线翻牌）终结活跃先行上线
+//   授权新增 2 条直写 INSERT（均 event_type='note'，action_code='fast_release_auth_terminated'）——
+//   ① sysIssueTransition 引擎内 case 'accept'/'return' 共用的 post-processing 追加写点（[7] 主 timeline
+//   写入之后，命中时补一条，见 index.js "fastReleaseTerminationSummary" 一带）；② _publishReleaseCoreInTxn
+//   批次发布内新增的 H-3 步骤2.5，覆盖"批内成员携带未消费活跃授权、随批量翻牌一并终结"这条边。两处均
+//   非引擎主写点（引擎主写点是既有那条 event_type=transition.timelineEvent 的参数化站点，未改动），
+//   是独立于 fast-release-authorize/-revoke/post_release_accept_pass/_fail 之外的**第五个**"自定义端点
+//   /引擎内按需追加直写 timeline"站点。⚠️ 本 action_code **刻意不登记进** NOTE_OWN_LABEL_ACTION_CODES
+//   （与前四个既有 note 型独立徽章码不同）——落回 event_type='note' 的通用标签即可（summary 本身已是
+//   完整可读文案），不为一条新徽章改动 public/Sys_Iteration.html（本批不碰前端静态资产），故不影响
+//   SI_TL_LABEL/SI_TL_NOTE_OWN_LABEL_CODES 两张前端表，主覆盖断言按 computeDisplayKey 规则自然落回
+//   'note' 这个已在表内的既有 key，不落入 KNOWN_GAPS。
+const EXPECTED_INSERT_SITE_COUNT = 37;
 const sites = locateRealInsertSites(indexSrc);
 if (sites.length !== EXPECTED_INSERT_SITE_COUNT) {
   fail(
@@ -896,7 +995,11 @@ for (const site of sites) {
     }
   }
 }
-if (!engineSiteLabel) fail('未在 29 个写入点中找到引擎写点（event_type=transition.timelineEvent 的那一条）——源码结构可能已变');
+// [LOW-1·组A预筛修复批2 订正] 原硬编码"29"是 EXPECTED_INSERT_SITE_COUNT 早期基线遗留字面量——
+//   常量已在 :872 一带随 [组A·2.3] 由 29 bump 到 30，这条失败文案当时未同步改，与常量本身脱节
+//   （两处各写一份数字，改一处忘改另一处的典型漂移）；改用变量引用后天然同步，未来常量再变不会
+//   重蹈覆辙。
+if (!engineSiteLabel) fail(`未在 ${EXPECTED_INSERT_SITE_COUNT} 个写入点中找到引擎写点（event_type=transition.timelineEvent 的那一条）——源码结构可能已变`);
 ok(`${directSiteCount} 个非引擎写入点解析完成，引擎写点定位于 ${engineSiteLabel}`);
 
 // [后端] 引擎可达动作

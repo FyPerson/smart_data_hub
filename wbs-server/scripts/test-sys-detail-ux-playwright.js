@@ -1151,6 +1151,51 @@ async function mkMember(issueId, userId, userName, devStatus, resolvedAt, noCode
         must(!!activeItem && !activeItem.whoText.includes('（已移出）'),
             `[T9]③b ⭐ 对照：在册（未移除）成员那行不应带「（已移出）」后缀，实得 whoText="${activeItem && activeItem.whoText}"`);
 
+        // ── ③c（D 组件①·2026-08-12）round_no 有值时显示「（第N轮）」，非旧文案「（已移出）」──────
+        //   daBug9Removed（上方③b 夹具）round_no 从未赋值，天然为 NULL——③b 那两条既有断言未改动
+        //   （仍断言旧文案「（已移出）」），恰好充当"NULL 降级对照"（见文件头 F 线注释：round_no 为
+        //   NULL 时前端优雅降级，不显示破损的「（第null轮）」）。本组另插一条 round_no=2 的历史实例，
+        //   证明"有值时显示新文案"这一半，且与③b 的 NULL 行同屏并存互不干扰。
+        const daBug9Round2 = await mkMember(iBug9, 9302, `F7bug原因测试丁第2轮-${RUN_TAG}`, 'pending', null);
+        await run(`UPDATE sys_issue_dev_assignees SET removed_at = ?, round_no = 2 WHERE id = ?`,
+            ['2026-08-05 13:00:00', daBug9Round2]);
+        const ROUND2_BUG_CAUSE_TEXT = `第2轮已移出成员的历史原因-${RUN_TAG}`;
+        await run(
+            `INSERT INTO sys_issue_dev_events (issue_id, dev_assignee_id, action, operator_id, payload_json, created_at)
+             VALUES (?, ?, 'submit', 1, ?, '2026-08-05 12:55:00')`,
+            [iBug9, daBug9Round2, JSON.stringify({ mode: 'no_code', bug_cause_note: ROUND2_BUG_CAUSE_TEXT })]
+        );
+        await page.evaluate((id) => window.siOpenDrawer && window.siOpenDrawer(id), iBug9);
+        await page.waitForTimeout(600);
+        const bugCauseDisplay3 = await page.evaluate(() => {
+            const blocks = [...document.querySelectorAll('#siDBody .si-worknote-block')];
+            const block = blocks.find(b => {
+                const t = b.querySelector('.si-worknote-title');
+                return t && t.textContent.trim() === 'bug 产生原因';
+            });
+            if (!block) return { hasBlock: false, items: [] };
+            const items = [...block.querySelectorAll('.si-worknote-item')].map(item => {
+                const who = item.querySelector('.si-worknote-who');
+                const text = item.querySelector('.si-worknote-text');
+                return { whoText: who ? who.textContent.trim() : null, text: text ? text.textContent : null };
+            });
+            return { hasBlock: true, items };
+        });
+        must(!!bugCauseDisplay3 && bugCauseDisplay3.hasBlock === true,
+            `[T9]③c 前置：应能定位到「bug 产生原因」区块，实得 ${JSON.stringify(bugCauseDisplay3)}`);
+        const round2Item = bugCauseDisplay3.items.find(it => it.text === ROUND2_BUG_CAUSE_TEXT);
+        must(!!round2Item, `[T9]③c 应能按文本定位到 round_no=2 的历史记录，实得 ${JSON.stringify(bugCauseDisplay3.items)}`);
+        must(!!round2Item && round2Item.whoText.includes('（第2轮）'),
+            `[T9]③c ⭐⭐ D组件①：round_no=2 的已移出成员应显示「（第2轮）」轮次后缀，实得 whoText="${round2Item && round2Item.whoText}"`);
+        must(!!round2Item && !round2Item.whoText.includes('（已移出）'),
+            `[T9]③c ⭐ 不应残留旧文案「（已移出）」，实得 whoText="${round2Item && round2Item.whoText}"`);
+        // 对照：同屏内③b 的 round_no=NULL 行应仍显示旧文案（互不干扰，防"改坏了全局替换成一种文案"）
+        const removedItemStill = bugCauseDisplay3.items.find(it => it.text === REMOVED_BUG_CAUSE_TEXT);
+        must(!!removedItemStill && removedItemStill.whoText.includes('（已移出）'),
+            `[T9]③c ⭐⭐ 对照：round_no 为 NULL 的历史记录（③b 夹具）应仍显示旧文案「（已移出）」（同屏两种形态互不干扰），实得 whoText="${removedItemStill && removedItemStill.whoText}"`);
+        must(!!removedItemStill && !removedItemStill.whoText.includes('（第'),
+            `[T9]③c ⭐ 对照：NULL round_no 不应显示破损的「（第null轮）」类文本，实得 whoText="${removedItemStill && removedItemStill.whoText}"`);
+
         await page.evaluate(() => { if (window.siCloseModal) siCloseModal(); if (window.siCloseDrawer) siCloseDrawer(); });
         await page.waitForTimeout(200);
 

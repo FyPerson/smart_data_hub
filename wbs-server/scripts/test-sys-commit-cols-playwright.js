@@ -114,6 +114,7 @@ const SI_ACTIVE_CACHE_QUERY = 'v1.142.0_notify1';
 const db = new sqlite3.Database(DB_PATH);
 const run = (sql, p = []) => new Promise((res, rej) => db.run(sql, p, function (e) { e ? rej(e) : res(this); }));
 const get = (sql, p = []) => new Promise((res, rej) => db.get(sql, p, (e, r) => e ? rej(e) : res(r)));
+const all = (sql, p = []) => new Promise((res, rej) => db.all(sql, p, (e, r) => e ? rej(e) : res(r)));   // [D 组件①·T33c] 多行查询
 
 let passed = 0, failed = 0;
 // codex 264 号末次合并审 HIGH-1 采纳后，codex 265 号复审磁盘查证（git show 上下文）判明：旧 catch
@@ -1731,6 +1732,11 @@ const seedCommit = (issueId, daId, userId, component, ref) =>
         const HIST_NO_CODE_REASON = `S4 历史凭证夹具-${RUN_TAG}：本轮无需编码`;
         const iNoCodeHist = await mkIssue(`CC-无代码历史凭证-${RUN_TAG}`, '处理中');
         const daHistA = await mkMember(iNoCodeHist, devUser.id);
+        // [D 组件①·2026-08-12] mkMember 是直插夹具（不经生产 INSERT 写点），round_no 默认 NULL；
+        //   本行显式回填 round_no=1——它是该单唯一在册主开发的首轮实例（issue 全程未打回/重开），
+        //   等价于若真经生产 /assign 写点会拿到的值（return_count=reopen_count=0 ⇒ 0+0+1=1）。
+        //   这让下方 histProbe/histProbe2 断言能验证「（第1轮）」新文案；NULL 降级对照见下方独立小节。
+        await run(`UPDATE sys_issue_dev_assignees SET round_no = 1 WHERE id = ?`, [daHistA]);
         await mkMember(iNoCodeHist, devUser2.id);   // 仅占位，撑住 LAST_ASSIGNEE 门槛（activeCount 需 ≥2 才能移除 devUser）
         await run(`UPDATE sys_issues SET dev_estimated_at = ? WHERE id = ?`, ['2099-12-31 13:00', iNoCodeHist]);
 
@@ -1784,10 +1790,53 @@ const seedCommit = (issueId, daId, userId, component, ref) =>
         });
         must(histProbe.hasBlock === true,
             `[T33b] ⭐ 成员移出后详情页仍应渲染「无代码交付说明」容器（唯一交付凭证不因移出而消失），实得 ${JSON.stringify(histProbe)}`);
-        must(!!histProbe.whoText && histProbe.whoText.includes('（已移出）'),
-            `[T33b] ⭐ M-2：已移出成员的姓名应带「（已移出）」标注，实得 "${histProbe.whoText}"`);
+        // [D 组件①·2026-08-12] 「（已移出）」→「（第1轮）」——daHistA 已显式回填 round_no=1（见上方夹具注释）。
+        must(!!histProbe.whoText && histProbe.whoText.includes('（第1轮）'),
+            `[T33b] ⭐ M-2·D组件①：已移出成员（round_no=1）的姓名应带「（第1轮）」轮次后缀，实得 "${histProbe.whoText}"`);
+        must(!!histProbe.whoText && !histProbe.whoText.includes('（已移出）'),
+            `[T33b] ⭐ D组件①：不应残留旧文案「（已移出）」，实得 "${histProbe.whoText}"`);
         must(histProbe.reasonText === HIST_NO_CODE_REASON,
             `[T33b] ⭐ 原因正文应仍原样显示（esc 转义但内容不失真），期望="${HIST_NO_CODE_REASON}"，实得 "${histProbe.reasonText}"`);
+
+        // ── [T33b-null]（D 组件①对照）：round_no 为 NULL 的历史行仍显示旧文案「（已移出）」──────
+        //   降级对照：round_no 是本次新增列，存量数据/任何遗漏写入点都会让该列保持 NULL；前端必须对
+        //   这种情况优雅降级到旧文案，而非显示破损的「（第null轮）」。⚠️ **独立造一张新单**而非复用
+        //   iNoCodeHist——下方 L-2 段对该单的 no_code_records/DOM 条数有精确的"恰 2 条"断言
+        //   （:1866/:1897），若在同一张单上再插一条记录会把那两条断言从 2 顶成 3，制造假红；隔离到
+        //   独立单据既避免这个副作用，也让「NULL 降级」这条对照信号更干净（不与 L-2 的"多实例并存"
+        //   语义混在一起）。
+        const NULL_ROUND_REASON = `D组件①-round_no为NULL降级对照-${RUN_TAG}`;
+        const iNullRoundIso = await mkIssue(`CC-round_no为NULL降级对照-${RUN_TAG}`, '处理中');
+        const daNullRound = await mkMember(iNullRoundIso, 9401);   // mkMember 本文件版仅 2 参（user_name 固定'开发'+userId），够用
+        await run(`UPDATE sys_issue_dev_assignees SET removed_at = ?, no_code_reason = ?, dev_status = 'no_code' WHERE id = ?`,
+            ['2026-08-05 09:00:00', NULL_ROUND_REASON, daNullRound]);
+        const dbNullRoundRow = await get(`SELECT round_no FROM sys_issue_dev_assignees WHERE id = ?`, [daNullRound]);
+        must(!!dbNullRoundRow && dbNullRoundRow.round_no === null,
+            `[T33b-null] 前置：夹具行 round_no 应确实为 NULL（未显式赋值），实得 ${JSON.stringify(dbNullRoundRow)}`);
+        await page.evaluate((id) => window.siOpenDrawer && window.siOpenDrawer(id), iNullRoundIso);
+        await page.waitForTimeout(600);
+        const nullRoundProbe = await page.evaluate(() => {
+            const blocks = [...document.querySelectorAll('#siDBody .si-worknote-block')];
+            const ncBlock = blocks.find(b => {
+                const t = b.querySelector('.si-worknote-title');
+                return t && t.textContent.trim() === '无代码交付说明';
+            });
+            if (!ncBlock) return { hasBlock: false, items: [] };
+            const items = [...ncBlock.querySelectorAll('.si-worknote-item')].map(item => {
+                const who = item.querySelector('.si-worknote-who');
+                const text = item.querySelector('.si-worknote-text');
+                return { whoText: who ? who.textContent.trim() : null, text: text ? text.textContent : null };
+            });
+            return { hasBlock: true, items };
+        });
+        must(nullRoundProbe.hasBlock === true && nullRoundProbe.items.length === 1,
+            `[T33b-null] 前置：应能定位到「无代码交付说明」容器且恰 1 条，实得 ${JSON.stringify(nullRoundProbe)}`);
+        const nullRoundItem = nullRoundProbe.items.find(it => it.text === NULL_ROUND_REASON);
+        must(!!nullRoundItem, `[T33b-null] 应能按文本定位到 round_no=NULL 的记录，实得 ${JSON.stringify(nullRoundProbe.items)}`);
+        must(!!nullRoundItem && nullRoundItem.whoText.includes('（已移出）'),
+            `[T33b-null] ⭐ D组件①对照：round_no 为 NULL 的移出行应降级显示旧文案「（已移出）」，实得 whoText="${nullRoundItem && nullRoundItem.whoText}"`);
+        must(!!nullRoundItem && !nullRoundItem.whoText.includes('（第'),
+            `[T33b-null] ⭐ 不应显示破损的「（第null轮）」类文本，实得 whoText="${nullRoundItem && nullRoundItem.whoText}"`);
 
         // ── L-2（codex 265 号复审）：re-add 多实例语义——同一开发被移出后又重新加入，产生新实例行 ──
         //   ⚠️ 指令原文写"把同一 devUser2 重新加入"，但本文件里 devUser2 从未被移除过（它是纯占位、
@@ -1851,10 +1900,251 @@ const seedCommit = (issueId, daId, userId, component, ref) =>
             `[T33b] ⭐ L-2：详情页「无代码交付说明」容器应渲染 2 条（新旧实例都出现），实得 ${JSON.stringify(histProbe2)}`);
         const oldRow = histProbe2.rows && histProbe2.rows.find(r => r.reasonText === HIST_NO_CODE_REASON);
         const newRow = histProbe2.rows && histProbe2.rows.find(r => r.reasonText === RE_ADD_REASON);
-        must(!!oldRow && oldRow.whoText.includes('（已移出）'),
-            `[T33b] ⭐ L-2：旧实例那一行应带「（已移出）」标注，实得 ${JSON.stringify(oldRow)}`);
-        must(!!newRow && !newRow.whoText.includes('（已移出）'),
-            `[T33b] ⭐ L-2：新实例（当前在册）那一行不应带「（已移出）」标注，实得 ${JSON.stringify(newRow)}`);
+        // [D 组件①·2026-08-12] 旧文案「（已移出）」→「（第N轮）」：旧实例 daHistAId 已显式回填 round_no=1；
+        //   新实例 daHistBId 经真实 POST .../dev-assignees（命中 addOrReaddMembers 写点）产生，该端点按
+        //   issue 当前 return_count(0)+reopen_count(0)+1 现算 round_no=1（iNoCodeHist 全程未打回/重开），
+        //   但新实例当前在册（未 removed），removedTag 恒为空串——不显示任何后缀，与 round_no 具体值无关。
+        must(!!oldRow && oldRow.whoText.includes('（第1轮）'),
+            `[T33b] ⭐ L-2·D组件①：旧实例（round_no=1）那一行应带「（第1轮）」标注，实得 ${JSON.stringify(oldRow)}`);
+        must(!!oldRow && !oldRow.whoText.includes('（已移出）'),
+            `[T33b] ⭐ L-2·D组件①：旧实例不应残留旧文案「（已移出）」，实得 ${JSON.stringify(oldRow)}`);
+        must(!!newRow && !newRow.whoText.includes('（已移出）') && !newRow.whoText.includes('（第'),
+            `[T33b] ⭐ L-2：新实例（当前在册，非 removed）那一行不应带任何轮次/移出后缀，实得 ${JSON.stringify(newRow)}`);
+
+        // ══════════════════════════════════════════════════════════════════
+        // [T33c]（D 组件①·2026-08-12）round_no 单据级轮次：打回两次后封存实例分别显示第1/第2轮
+        //   单据级语义的直接证明——round_no = 写入当时 issue 的 return_count+reopen_count+1（与打回×N
+        //   徽章/reopen_count 同一心智），非按每人自己的实例序计数。走真实 /submit + /return 端点两轮，
+        //   命中生产 return/reopen 引擎内的自动 remove+re-add 写点（index.js :3918 一带），round_no 必须
+        //   是生产写点当场算出来的值，不手工插桩 dev_status/round_no。
+        // ══════════════════════════════════════════════════════════════════
+        console.log('\n── [T33c] round_no 单据级轮次：打回两次后封存实例分别显示第1/第2轮 ──');
+        const iRoundFlow = await mkIssue(`CC-round_no两轮打回-${RUN_TAG}`, '处理中');
+        const daRoundFlow = await mkMember(iRoundFlow, devUser.id);
+        // 同 T33b 先例：daRoundFlow 是直插夹具（非经生产 INSERT），显式回填 round_no=1 模拟"若真经生产
+        //   /assign 写点会拿到的值"（issue 全新、return_count=reopen_count=0 ⇒ 0+0+1=1）。
+        await run(`UPDATE sys_issue_dev_assignees SET round_no = 1 WHERE id = ?`, [daRoundFlow]);
+        await run(`UPDATE sys_issues SET dev_estimated_at = ? WHERE id = ?`, ['2099-12-31 12:00', iRoundFlow]);
+
+        const ROUND1_REASON = `round_no轮次夹具第1轮-${RUN_TAG}`;
+        const roundSubmit1 = await apiCall('POST', `/api/sys-issues/${iRoundFlow}/submit`, devTokFlow,
+            { mode: 'no_code', no_code_reason: ROUND1_REASON, self_tested: true, test_env_deployed: true,
+              bug_cause_note: 'verify 夹具：bug 产生原因（commit-cols-playwright·T33c-r1）' });
+        must(roundSubmit1.ok && roundSubmit1.status === 200 && roundSubmit1.body.main_status === '待验证',
+            `[T33c] 前置：首轮 submit 应 200 + 转「待验证」，实得 status=${roundSubmit1.status} body=${JSON.stringify(roundSubmit1.body)}`);
+
+        const return1 = await apiCall('POST', `/api/sys-issues/${iRoundFlow}/return`, adminTok, { reason: 'T33c 第一次打回' });
+        must(return1.ok && return1.status === 200 && return1.body.status === '处理中',
+            `[T33c] 前置：第一次 return 应 200 + 回「处理中」，实得 status=${return1.status} body=${JSON.stringify(return1.body)}`);
+
+        const roundRow2 = await get(
+            `SELECT id, round_no FROM sys_issue_dev_assignees WHERE issue_id = ? AND user_id = ? AND removed_at IS NULL`,
+            [iRoundFlow, devUser.id]);
+        must(!!roundRow2 && roundRow2.round_no === 2,
+            `[T33c] ⭐⭐ 第一次打回后自动 re-add 的新在册实例 round_no 应为 2（return_count=1+reopen_count=0+1），实得 ${JSON.stringify(roundRow2)}`);
+
+        await run(`UPDATE sys_issues SET dev_estimated_at = ? WHERE id = ?`, ['2099-12-31 13:00', iRoundFlow]);
+        const ROUND2_REASON = `round_no轮次夹具第2轮-${RUN_TAG}`;
+        const roundSubmit2 = await apiCall('POST', `/api/sys-issues/${iRoundFlow}/submit`, devTokFlow,
+            { mode: 'no_code', no_code_reason: ROUND2_REASON, self_tested: true, test_env_deployed: true,
+              bug_cause_note: 'verify 夹具：bug 产生原因（commit-cols-playwright·T33c-r2）' });
+        must(roundSubmit2.ok && roundSubmit2.status === 200 && roundSubmit2.body.main_status === '待验证',
+            `[T33c] 前置：第二轮 submit 应 200 + 转「待验证」，实得 status=${roundSubmit2.status} body=${JSON.stringify(roundSubmit2.body)}`);
+
+        const return2 = await apiCall('POST', `/api/sys-issues/${iRoundFlow}/return`, adminTok, { reason: 'T33c 第二次打回' });
+        must(return2.ok && return2.status === 200 && return2.body.status === '处理中',
+            `[T33c] 前置：第二次 return 应 200 + 回「处理中」，实得 status=${return2.status} body=${JSON.stringify(return2.body)}`);
+
+        const roundRow3 = await get(
+            `SELECT id, round_no FROM sys_issue_dev_assignees WHERE issue_id = ? AND user_id = ? AND removed_at IS NULL`,
+            [iRoundFlow, devUser.id]);
+        must(!!roundRow3 && roundRow3.round_no === 3,
+            `[T33c] ⭐⭐ 第二次打回后自动 re-add 的新在册实例 round_no 应为 3（return_count=2+reopen_count=0+1），实得 ${JSON.stringify(roundRow3)}`);
+
+        const removedRoundRows = await all(
+            `SELECT id, round_no FROM sys_issue_dev_assignees WHERE issue_id = ? AND user_id = ? AND removed_at IS NOT NULL ORDER BY id ASC`,
+            [iRoundFlow, devUser.id]);
+        must(removedRoundRows.length === 2 && removedRoundRows[0].round_no === 1 && removedRoundRows[1].round_no === 2,
+            `[T33c] ⭐⭐ 单据级语义直接证明：两条封存（已移出）实例应分别是第1轮、第2轮（id 升序=创建先后序=轮次升序），实得 ${JSON.stringify(removedRoundRows)}`);
+
+        // DB 层证毕后，回看真实渲染 DOM（同「blocked 死分支」教训：DB 值对不代表前端真的这样显示）。
+        await page.evaluate((id) => window.siOpenDrawer && window.siOpenDrawer(id), iRoundFlow);
+        await page.waitForTimeout(600);
+        const roundDomProbe = await page.evaluate(() => {
+            const blocks = [...document.querySelectorAll('#siDBody .si-worknote-block')];
+            const ncBlock = blocks.find(b => {
+                const t = b.querySelector('.si-worknote-title');
+                return t && t.textContent.trim() === '无代码交付说明';
+            });
+            if (!ncBlock) return { hasBlock: false, items: [] };
+            const items = [...ncBlock.querySelectorAll('.si-worknote-item')].map(item => {
+                const who = item.querySelector('.si-worknote-who');
+                const text = item.querySelector('.si-worknote-text');
+                return { whoText: who ? who.textContent.trim() : null, text: text ? text.textContent : null };
+            });
+            return { hasBlock: true, items };
+        });
+        must(roundDomProbe.hasBlock === true && roundDomProbe.items.length === 2,
+            `[T33c] ⭐ 详情页「无代码交付说明」应渲染 2 条历史实例（两轮均已 no_code 提交且都被打回封存，第三轮仍 pending 未提交不出现），实得 ${JSON.stringify(roundDomProbe)}`);
+        const domRound1 = roundDomProbe.items.find(it => it.text === ROUND1_REASON);
+        const domRound2 = roundDomProbe.items.find(it => it.text === ROUND2_REASON);
+        must(!!domRound1 && domRound1.whoText.includes('（第1轮）'),
+            `[T33c] ⭐⭐ 第一次打回封存的历史实例应显示「（第1轮）」，实得 ${JSON.stringify(domRound1)}`);
+        must(!!domRound2 && domRound2.whoText.includes('（第2轮）'),
+            `[T33c] ⭐⭐ 第二次打回封存的历史实例应显示「（第2轮）」，实得 ${JSON.stringify(domRound2)}`);
+        must(roundDomProbe.items.every(it => !it.whoText.includes('已移出')),
+            `[T33c] ⭐ 两条记录均不应残留旧文案「已移出」，实得 ${JSON.stringify(roundDomProbe.items)}`);
+
+        // ══════════════════════════════════════════════════════════════════
+        // [T34]（件②·2026-08-12）commit 记录展示层去重：成对用例
+        //   起因：v1.151.1「打回自动重开一轮」会让同一开发在两轮各写一条同值 commit_ref（如同一版本号
+        //   22853），raw 层保留全量重复是有意行为，去重只应发生在展示层（siNormalizeCommitRefs 单点
+        //   实现）。既有夹具 fe-many-1..5/be-many-1..3（[T3]/[T9]/[T13] 等）均是唯一值，测不出去重，
+        //   本组新造含重复夹具。
+        //   (a) 前端组：5 条 raw、3 个唯一值（fe-dup-a/fe-dup-b 各重复一次）→ 去重后 3 条 >2 条 →
+        //       走「首条+等N条」分支；
+        //   (b) 后端组：⭐ 最强判别设计——3 条 raw、2 个唯一值（be-dup-x 重复一次）→ raw 层若未去重会
+        //       走「首条+等3条」分支，去重后应=2 条 ≤2 走「全量」分支——两种失败态渲染文本完全不同，
+        //       肉眼可辨、断言必红，不是只断言"不报错"。
+        //   (c) 对照：既有 iTwo（无重复）在本组末尾原样复核一次，证明去重实现未误伤干净数据。
+        // ══════════════════════════════════════════════════════════════════
+        console.log('\n── [T34]（件②）commit 记录展示层去重：成对用例 ──');
+        const iDup = await mkIssue(`CC-去重-${RUN_TAG}`, '处理中');
+        const mDup = await mkMember(iDup, 40);
+        await seedCommit(iDup, mDup, 40, 'frontend', 'fe-dup-a');
+        await seedCommit(iDup, mDup, 40, 'frontend', 'fe-dup-b');
+        await seedCommit(iDup, mDup, 40, 'frontend', 'fe-dup-a');   // 重复
+        await seedCommit(iDup, mDup, 40, 'frontend', 'fe-dup-c');
+        await seedCommit(iDup, mDup, 40, 'frontend', 'fe-dup-b');   // 重复
+        await seedCommit(iDup, mDup, 40, 'backend', 'be-dup-x');
+        await seedCommit(iDup, mDup, 40, 'backend', 'be-dup-y');
+        await seedCommit(iDup, mDup, 40, 'backend', 'be-dup-x');   // 重复
+        await page.reload({ waitUntil: 'networkidle' });
+        await page.waitForTimeout(500);
+
+        // (a) 列表页「等 N 条」按去重后计数 + title 完整清单不含重复、保序首现——前端组
+        const dupFe = await cellOf(iDup, 'fe');
+        must(dupFe && /^fe-dup-a\s+等3条$/.test(dupFe.text),
+            `[T34] ⭐ (a) 前端组 raw 5 条含 2 条重复，去重后 3 个唯一值 >2 条 → 「首条+等3条」，实得 "${dupFe && dupFe.text}"`);
+        const dupFeTitleList = (dupFe && dupFe.title || '').split('\n');
+        must(JSON.stringify(dupFeTitleList) === JSON.stringify(['fe-dup-a', 'fe-dup-b', 'fe-dup-c']),
+            `[T34] ⭐ (a) title 完整清单应恰 3 条、按保序首现排列且互不重复，实得 ${JSON.stringify(dupFeTitleList)}`);
+
+        // (b) 列表页——后端组
+        const dupBe = await cellOf(iDup, 'be');
+        must(dupBe && dupBe.text === 'be-dup-x; be-dup-y',
+            `[T34] ⭐⭐ (b) 后端组 raw 3 条（2 唯一值）去重后应=2 条 ≤2 走「全量」分支（'be-dup-x; be-dup-y'）——`
+            + `若去重失效会显示"be-dup-x 等3条"，两种失败态可清楚区分，实得 "${dupBe && dupBe.text}"`);
+
+        // (a) 批次抽屉——前端组同理：整单去重后的条数/文本应与列表页一致
+        await attach(iDup, relPlan, '待上线');
+        const bDup = await batchRowOf(relPlan, iDup);
+        must(bDup && bDup.fe === '前端fe-dup-a 等3条',
+            `[T34] ⭐ (a) 批次抽屉前端组同样按去重后 3 条渲染「等3条」，实得 "${bDup && bDup.fe}"`);
+        const bDupFeTitleCount = ((bDup && bDup.feTitle) || '').split('\n').filter(Boolean).length;
+        must(bDup && bDup.feTitle.includes('fe-dup-a') && bDup.feTitle.includes('fe-dup-b') && bDup.feTitle.includes('fe-dup-c') && bDupFeTitleCount === 3,
+            `[T34] ⭐ (a) 批次抽屉 title 完整清单应恰 3 条唯一值（非 5 条原始记录），实得 "${bDup && bDup.feTitle}"`);
+
+        // (b) 批次抽屉——后端组
+        must(bDup && bDup.be === '后端be-dup-x; be-dup-y',
+            `[T34] ⭐⭐ (b) 批次抽屉后端组去重后 2 条走全量分支（同列表页一致），实得 "${bDup && bDup.be}"`);
+
+        // (a) 复制按钮——前端组：剪贴板内容应=去重后的清单，不含重复
+        const copyRow = (sel) => page.evaluate(async ({ iid, sel }) => {
+            const scope = document.querySelector('#siBatchBody') || document;
+            const row = [...scope.querySelectorAll('.si-att-item')].find(el => new RegExp('^#' + iid + '(?!\\d)').test((el.querySelector('.si-att-name') || el).textContent.trim()));
+            const btn = row && row.querySelector(`.si-batch-copy[data-side="${sel}"]`);
+            if (!btn) return { err: 'no-button' };
+            btn.click();
+            await new Promise(r => setTimeout(r, 350));
+            return { text: await navigator.clipboard.readText() };
+        }, { iid: iDup, sel });
+        const clipDupFe = await copyRow('前端');
+        must(!clipDupFe.err, `[T34] 应能定位到前端侧复制按钮，实得 ${clipDupFe.err || 'ok'}`);
+        const clipDupFeNorm = (clipDupFe.text || '').replace(/\r\n/g, '\n');
+        must(clipDupFeNorm === 'fe-dup-a\nfe-dup-b\nfe-dup-c',
+            `[T34] ⭐⭐ (a) 复制到剪贴板的前端内容应=去重后 3 条纯编号（不含重复的 fe-dup-a/fe-dup-b 第二次出现），实得 ${JSON.stringify(clipDupFe.text)}`);
+        // (b) 复制按钮——后端组
+        const clipDupBe = await copyRow('后端');
+        must(!clipDupBe.err, `[T34] 应能定位到后端侧复制按钮，实得 ${clipDupBe.err || 'ok'}`);
+        must(clipDupBe.text === 'be-dup-x,be-dup-y',
+            `[T34] ⭐⭐ (b) 复制到剪贴板的后端内容应=去重后 2 条（去掉重复的 be-dup-x 第二次出现，逗号拼接），实得 ${JSON.stringify(clipDupBe.text)}`);
+
+        // (c) 对照：既有无重复夹具 iTwo 的渲染结果不应被去重实现误伤（与 [T3] 断言值一致，此处显式复核）
+        const twoFeRecheck = await cellOf(iTwo, 'fe');
+        must(twoFeRecheck && twoFeRecheck.text === 'fe-aaa111; fe-bbb222',
+            `[T34] ⭐ (c) 对照：无重复夹具 iTwo 的列表页渲染结果应与 [T3] 一致、未被去重实现误伤，实得 "${twoFeRecheck && twoFeRecheck.text}"`);
+        const bTwoRecheck = await batchRowOf(relPlan, iTwo);
+        must(bTwoRecheck && bTwoRecheck.fe === '前端fe-aaa111; fe-bbb222' && bTwoRecheck.be === '后端be-ccc333',
+            `[T34] ⭐ (c) 对照：无重复夹具 iTwo 的批次抽屉渲染结果应与 [T9] 一致，实得 fe="${bTwoRecheck && bTwoRecheck.fe}" be="${bTwoRecheck && bTwoRecheck.be}"`);
+
+        // ══════════════════════════════════════════════════════════════════
+        // [T35]（件③·2026-08-12）单组版本号系统详情页隐藏 component 列
+        //   命中「单组版本号」系统（默认清单 HRD/电子签）时，详情页 commit 表的 component 列整列隐藏
+        //   （表头+每行单元格），下一列表头从裸 "commit_ref" 换成 group_label（「版本号」）；
+        //   非单组系统（本文件既有夹具 system_name 均为 FIXTURE_SYSTEM='BMS'）表格完全不变——用 iTwo
+        //   作对照。本文件此前从无覆盖详情页 commit 表（`.si-commit-table` 的另一处用法是发布留痕展开
+        //   视图，[T7] 在 test-sys-detail-ux-playwright.js 里覆盖，与此处 siRenderDevCommits 是两个
+        //   不同函数、不同表——本组新增的是从零覆盖，不是修补既有断言）。
+        // ══════════════════════════════════════════════════════════════════
+        console.log('\n── [T35]（件③）单组版本号系统详情页隐藏 component 列 ──');
+        const readCommitTable = () => page.evaluate(() => {
+            const table = document.querySelector('#siDBody table.si-commit-table');
+            if (!table) return null;
+            const ths = [...table.querySelectorAll('thead th')].map(t => t.textContent.trim());
+            const rows = [...table.querySelectorAll('tbody tr')].map(tr => [...tr.querySelectorAll('td')].map(td => td.textContent.trim()));
+            return { ths, rows };
+        });
+
+        // 对照组：非单组系统（iTwo，system_name=BMS）——表格应保持原样（5 列：开发/组件/commit_ref/时间/操作）
+        await page.evaluate((id) => window.siOpenDrawer && window.siOpenDrawer(id), iTwo);
+        await page.waitForTimeout(500);
+        // [SD1 预筛 LOW-3 收口] 前置正面锚点——防 siOpenDrawer 静默失败沿用上一抽屉（假绿：读到的是上一个
+        //   仍开着的 iSingle/其他单的表格，"5 列/组件/commit_ref"这些断言碰巧也成立），与 iSingle 分支
+        //   （下方 :2121 一带）同款写法对齐。
+        const drawerTitleTwo = await page.evaluate(() => {
+            const el = document.getElementById('siDTitle');
+            return el ? el.textContent.trim() : null;
+        });
+        must(!!drawerTitleTwo && new RegExp(`^#${iTwo}(?!\\d)`).test(drawerTitleTwo),
+            `[T35] 前置：抽屉确已切到 #${iTwo}（siDTitle 应以该编号开头），实得 "${drawerTitleTwo}"`);
+        const nonSingleTable = await readCommitTable();
+        must(!!nonSingleTable, `[T35] 前置：非单组单（iTwo）应能定位到详情 commit 表，实得 ${JSON.stringify(nonSingleTable)}`);
+        must(nonSingleTable && nonSingleTable.ths.length === 5,
+            `[T35] ⭐ (对照) 非单组系统 commit 表头应仍为 5 列（开发/组件/commit_ref/时间/操作），实得 ${JSON.stringify(nonSingleTable && nonSingleTable.ths)}`);
+        must(nonSingleTable && nonSingleTable.ths[1] === '组件' && nonSingleTable.ths[2] === 'commit_ref',
+            `[T35] ⭐ (对照) 非单组系统第二列表头仍为「组件」、第三列仍为裸 "commit_ref"（本批不改这一侧），实得 ${JSON.stringify(nonSingleTable && nonSingleTable.ths)}`);
+        // [SD1 预筛 LOW-3 收口] 行单元格数断言——与命中组（下方 :2131 一带 singleTable.rows[0].length===4）
+        //   对称：iTwo 共 3 条 commit（fe-aaa111/fe-bbb222/be-ccc333，见 :203-205 夹具），每行应仍是 5 格
+        //   （本批不改这一侧的行结构，只改单组系统那一侧）。
+        must(nonSingleTable && nonSingleTable.rows.length === 3 && nonSingleTable.rows[0].length === 5,
+            `[T35] ⭐ (对照) 非单组系统每行单元格数应仍为 5（与命中组行结构对称验证），实得 ${JSON.stringify(nonSingleTable && nonSingleTable.rows)}`);
+
+        // 命中组：单组系统（system_name='HRD'，DEFAULT_SINGLE_COMMIT_GROUP_SYSTEMS 默认清单成员之一）
+        const iSingle = await mkIssue(`CC-单组-${RUN_TAG}`, '处理中');
+        await run(`UPDATE sys_issues SET system_name = 'HRD' WHERE id = ?`, [iSingle]);
+        const mSingle = await mkMember(iSingle, 41);
+        await seedCommit(iSingle, mSingle, 41, 'backend', 'hrd-ver-2026081201');
+        await page.evaluate((id) => window.siOpenDrawer && window.siOpenDrawer(id), iSingle);
+        await page.waitForTimeout(500);
+        const drawerTitleSingle = await page.evaluate(() => {
+            const el = document.getElementById('siDTitle');
+            return el ? el.textContent.trim() : null;
+        });
+        must(!!drawerTitleSingle && new RegExp(`^#${iSingle}(?!\\d)`).test(drawerTitleSingle),
+            `[T35] 前置：抽屉确已切到 #${iSingle}（siDTitle 应以该编号开头），实得 "${drawerTitleSingle}"`);
+        const singleTable = await readCommitTable();
+        must(!!singleTable, `[T35] 前置：单组单（HRD）应能定位到详情 commit 表，实得 ${JSON.stringify(singleTable)}`);
+        must(singleTable && singleTable.ths.length === 4,
+            `[T35] ⭐⭐ 单组系统 component 列整列隐藏：表头应从 5 列减为 4 列（开发/版本号/时间/操作），实得 ${JSON.stringify(singleTable && singleTable.ths)}`);
+        must(singleTable && singleTable.ths[1] === '版本号',
+            `[T35] ⭐⭐ 单组系统第二列表头（原裸 "commit_ref"）应改为 group_label「版本号」，实得 ${JSON.stringify(singleTable && singleTable.ths)}`);
+        must(singleTable && !singleTable.ths.includes('组件') && !singleTable.ths.includes('commit_ref'),
+            `[T35] ⭐ 防回退：单组系统表头不应再出现「组件」或裸 "commit_ref"，实得 ${JSON.stringify(singleTable && singleTable.ths)}`);
+        must(singleTable && singleTable.rows.length === 1 && singleTable.rows[0].length === 4,
+            `[T35] ⭐⭐ 单组系统每行单元格数应同步从 5 减为 4（与表头列数一致，非只改表头未改行），实得 ${JSON.stringify(singleTable && singleTable.rows)}`);
+        must(singleTable && singleTable.rows[0][1] === 'hrd-ver-2026081201',
+            `[T35] ⭐ 隐藏 component 列后第二列（原第三列 commit_ref）应显示真实版本号值，实得 ${JSON.stringify(singleTable && singleTable.rows)}`);
 
         // ── [T5] 无 console error ────────────────────────────────────────
         //   ⚠️ 本条同时是 [T26] 守卫的"反向验证"：测试环境加载的是新 app.js，守卫**不该**触发；

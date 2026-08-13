@@ -21,6 +21,18 @@
  *        sys        = sys_issue_timeline MIN(created_at) WHERE event_type IN ('estimate','feasibility')
  *                     （核实发现：needs_feasibility 单回填走 feasibility 事件不写 estimate，
  *                      单查 estimate 漏 4/10 单，双源后与 dev_estimated_at populated 数精确对上）
+ *                     [组A预筛修复批2·MED-3 登记，2026-08-12] 系统迭代"组 A"上线后两条口径变化，均已
+ *                     核实但暂不改动本文件公式，登记待统计期重新核定（锚点 P6 已登记）：
+ *                     ① /reassign 端点的超时指派留痕行已改 event_type='note'、action_code=
+ *                        'assign_overdue_eta'（不再是 'estimate'），本条 WHERE 子句不含 'note'，
+ *                        故该行**有意不计入** t1 响应源——它是"改派时补填/更正 ETA"的留痕，语义上不
+ *                        代表"开发首次响应"，与 t1 的定义（回填预计动作时刻）不是同一件事，非遗漏。
+ *                     ② 组 A 起 intake_accept（受理）会自动生成/强制 dev_estimated_at，第 1 轮闸门
+ *                        （submit/set-scheduled-start 等）恒满足，开发因此可能全程不再主动调用
+ *                        /estimate 端点——该单本文件的 t1 会读不到 'estimate'/'feasibility' 事件，
+ *                        走 fallback 链吸收（响应段并入提交时刻、开发段=0），不代表"响应耗时为 0"这
+ *                        件事真的发生了，只是数据源缺失时的既有兜底行为。此二条均为 2026-08-12 之后
+ *                        新单据才会命中，存量单据不受影响。
  *   t2 提交 = correction=首次进入 FIXED / issue=首次进入 待验证 / collab=首次 submitted_at /
  *        sys=sys_issue_timeline 首次 event_type='status_change' AND to_status='待验证' 的时刻
  *        （= GATE 时刻：多开发单以「在册全完成」为准，非"首个人提交"；与 issue 模块"首次进入
@@ -373,9 +385,12 @@ async function loadSysEfficiencyRecords(dbAllAsync, startDate, endDate, nowIso) 
     return rows.map((r) => {
         const isAborted = SYS_ABORTED_STATUSES.includes(r.status);
         // ⭐ [C9 读点标注·方案 v1.7 §10.1 逐点标注要求] **本读点显式声明：不区分「已上线」的来源。**
-        //   C9 起「已上线」有两条明示入口——批次发布（release_publish）与免上线直翻（no_commit_acceptance，
-        //   零 commit 单验收通过当场翻牌）。本处 t3（归档终态）只问"这单什么时候算交付完成"，两条路径
-        //   写的都是同一根 released_at 列、语义都是"业务上已生效"，故**有意合并统计、不按 online_source 分流**。
+        //   C9 起「已上线」有三条明示入口（[预筛 LOW-3] 组 B·SB2 新增第三条后由两条订正为三条）——批次发布
+        //   （release_publish）、免上线直翻（no_commit_acceptance，零 commit 单验收通过当场翻牌）、先行上线
+        //   直上（authorized_fastlane，bug 快车道授权后 submit 勾选直上）。本处 t3（归档终态）只问"这单
+        //   什么时候算交付完成"，三条路径写的都是同一根 released_at 列、语义都是"业务上已生效"，故**有意
+        //   合并统计、不按 online_source 分流**（authorized_fastlane 沿用同一豁免，不需要为它单独改代码，
+        //   见 verify-sys-fastlane-submit.js [7e] 静态断言）。
         //   理由：交付效率看的是"从建单到用户能用上花了多久"，一个配置类需求不需要走批次并不让它交付得
         //   "更不算数"；真按来源拆开反而会让免上线单凭空少掉一段本就不存在的批次等待时间，制造两套不可比的口径。
         //   ⚠️ 若将来要按来源做分组统计，改这里之前先回 deriveOnlineSourceKind（唯一权威派生函数）取 kind，
