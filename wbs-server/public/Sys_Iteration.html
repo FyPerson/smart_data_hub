@@ -650,6 +650,9 @@
 
             <!-- 统计卡（前端统一：换皮为共享 u-stat-card 结构，统计口径/点击行为不变，见 siRenderStats()） -->
             <div class="u-stats-row" id="siStatsRow"></div>
+            <!-- [值班筛选与类型卡·S3] 类型卡第二排——复用共享 .u-stats-row class 第二实例（不新增共享 CSS），
+                 渲染见 siRenderTypeCards()，由 siRenderStats() 末尾统一钩子调用，两排卡永不失步。 -->
+            <div class="u-stats-row" id="siTypeCardsRow"></div>
 
             <!-- 筛选栏（对齐数据修正/数据协作 u-filter-bar 白卡片：类型下拉[原 tab 改此]+状态+系统+优先级+搜索框；siHeadActions 动作按钮居右） -->
             <div class="u-filter-bar">
@@ -842,6 +845,18 @@
     //   S0 甲5 记录：本页五个输出点原本都是 `u-type-tag ${esc(i.type)}` 的 raw 拼接，
     //   而方案 §2.7 曾以为存在一个 `SI_TYPE_CLASS`——实测不存在（S0 乙2），这里才是新建。
     const SI_TYPE_CLASS = Object.freeze({ bug: 't-bug', feature: 't-feature', improvement: 't-improvement', config: 't-config' });
+    // [值班筛选与类型卡·S3] 类型卡第二排图标配色——逐字照抄本文件头部 `.u-type-tag.t-*` 四条规则的
+    //   bg/color 值（页内内联，非共享 CSS，不动共享资源）。未登记类型（future META.typeFlows 新键）
+    //   降级到 __default__ 中性灰，同 siTypeClass 的"未登记降级+不炸整页"既有防御哲学同源，但本处不需要
+    //   warnBadgeOnce（siTypeKeys() 派生的卡本就只会出现已登记在 META.typeFlows 里的键，颜色缺档属于
+    //   "四类色板暂未跟上第五类"的已知滞后，非脏数据误判，控制台噪声价值不大）。
+    const SI_TYPE_CARD_COLOR = Object.freeze({
+        bug: { bg: '#fee2e2', fg: '#b91c1c' },
+        feature: { bg: '#dbeafe', fg: '#1d4ed8' },
+        improvement: { bg: '#d1fae5', fg: '#047857' },
+        config: { bg: '#ede9fe', fg: '#6d28d9' },
+        __default__: { bg: '#f3f4f6', fg: '#6b7280' },
+    });
     // 〔S5a-fix2 M8〕优先级 class 片段白名单 + gate（S0 甲9 收口·与 Issue_Tracker 的 itPriClass 同构）。
     //   三处输出点原为 `u-pri ${esc(x.priority)}`：esc 防注入，但产不出规则的 class 它管不着。
     //   ⚠️ 可见文本仍用 `esc(原值)`（不换成规范值）：Sys 的优先级是列表页排序/筛选的依据，
@@ -1611,11 +1626,25 @@
         const opts = [['all', '全部类型']].concat(validKeys.map(t => [t, siTypeLabel(t)]));
         sel.innerHTML = opts.map(([k, l]) => `<option value="${esc(k)}" ${cur === k ? 'selected' : ''}>${esc(l)}</option>`).join('');
     }
+    // [值班筛选与类型卡·S3] 单一事实源 setter——下拉 onchange（`siSetType(this.value)`）与类型卡第二排
+    //   onclick（siSetTypeFilter）都路由到本函数，禁两条各自维护重渲染序列。显式同步下拉 DOM 的 value：
+    //   下拉自身触发这条路径时浏览器已内置同步，此处对该路径是无害幂等 no-op；卡片触发时这行是唯一让
+    //   下拉视觉状态跟着变的地方——否则会出现"点卡筛选已生效但下拉还显示旧值"的写读不同源。k 恒为
+    //   'all' 或 siTypeKeys() 当前有效键（两条调用路径均如此保证），不会把下拉的 value 同步成一个不存在
+    //   的 <option>。
     function siSetType(k) {
         // type 客户端过滤——切类型只重渲染（siList 已含全类型），不重拉，其余筛选保持不变
+        const sel = document.getElementById('siFType');
+        if (sel) sel.value = k;
         siActiveType = k;
         siRenderStats();
         siRenderTable();
+    }
+    // [值班筛选与类型卡·S3] 类型卡第二排点击 toggle——已激活的卡再点一次回「全部」（第二排本身无独立
+    //   「全部类型」卡，不 toggle 就没有从卡片路径退回全部的入口，只能靠下拉）。不自己维护渲染/DOM
+    //   同步，全部委派 siSetType（唯一 setter，见其定义处注释）。
+    function siSetTypeFilter(t) {
+        siSetType(siActiveType === t ? 'all' : t);
     }
     // ---- 搜索（客户端·标题/系统名/单号·debounce·对齐 Correction/Data_Collab 的 debounceSearch） ----
     let siActiveSearch = '';
@@ -1675,6 +1704,11 @@
     }
     function siMatchStatFilter(item, filterKey) {
         if (!filterKey) return true;
+        // [值班筛选与类型卡·S2] 横切维度特殊 key——必须在 SI_STATUS_GROUPS 查找**之前**判断：'my_fastlane'
+        //   不是状态组 key，SI_STATUS_GROUPS['my_fastlane'] 结构上恒 undefined，若放在下面按现状"未知 key
+        //   走 `: true` 兜底放行"的逻辑处理，会让这个横切筛选对所有单据放行而非按谓词筛选。判据与统计卡
+        //   计数共用同一函数 siIsMyFastlanePending（禁两处各写一份），不读 SI_STATUS_GROUPS。
+        if (filterKey === 'my_fastlane') return siIsMyFastlanePending(item);
         const statuses = SI_STATUS_GROUPS[filterKey];
         return Array.isArray(statuses) ? statuses.includes(item.status) : true;
     }
@@ -1794,6 +1828,12 @@
         siRenderTable();
     }
 
+    // [S-fix4·codex 414/415 MED-1] 可点统计卡键盘语义共享处理器——Enter/Space 触发该卡既有 onclick
+    //   （复用 currentTarget.click()，不在 keydown 里复制各卡的处理调用=单一事实源），其余键不拦不吞。
+    //   两排卡（状态/待我确认/类型）通用；静态卡不挂本处理器。
+    function siCardKeydown(ev) {
+        if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); ev.currentTarget.click(); }
+    }
     // 前端统一补齐：顶部统计卡与其他列表页一致，提供"全部 + 4 组状态"筛选，默认选中"全部"；
     //   "返工累计"保留纯指标，不参与筛选，避免把 reopen_count（累计次数）误装成状态维度。
     function siRenderStats() {
@@ -1825,22 +1865,94 @@
             { key: 'paused', bg: '#fef9c3', icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#854d0e" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="10" y1="9" x2="10" y2="15"/><line x1="14" y1="9" x2="14" y2="15"/></svg>', label: '暂缓/拒绝', n: vis.filter(i => SI_STATUS_GROUPS.paused.includes(i.status)).length },
             { key: null, bg: '#fee2e2', icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>', label: '返工累计', n: siReturnedSum + siReopenSum, title: `打回 ${siReturnedSum} 次（验收环节退回·事前发现）· 重开 ${siReopenSum} 次（已上线后重新打开·事后发现）` },
         ];
+        // [值班筛选与类型卡·S2·锚点 §3 技术自决] 「待我确认」统计卡——值班执行人一键筛出"等我确认部署"的
+        //   先行上线单。count 基数与其余卡一致（vis=siVisibleTypeList 去已作废），过 siIsMyFastlanePending
+        //   （统计卡计数与 siMatchStatFilter 筛选共用同一谓词，禁两处各写一份）。末尾追加、条件渲染
+        //   （siShouldRenderMyFastlaneCard：count>0 或本卡正被激活为筛选条件时才显示——后者堵陷阱：筛选
+        //   激活时确认完最后一单，卡若随 count 归零而消失，用户会被困在空筛选结果里找不到"全部"退出）。
+        const myFastlaneCount = vis.filter(siIsMyFastlanePending).length;
+        if (siShouldRenderMyFastlaneCard(myFastlaneCount, siActiveStat)) {
+            stats.push({
+                key: 'my_fastlane', bg: '#e0e7ff',
+                icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#4338ca" stroke-width="2"><path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z"/><path d="m12 15-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z"/><path d="M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0"/><path d="M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5"/></svg>',
+                label: '待我确认', n: myFastlaneCount,
+                title: `先行上线单等待我做部署确认：${myFastlaneCount} 单`,
+            });
+        }
         document.getElementById('siStatsRow').innerHTML = stats.map((s) => {
             const classes = ['u-stat-card'];
             if (s.key === null) classes.push('static');
             if (s.key !== null && s.key === siActiveStat) classes.push('active');
             if (s.key === '' && siActiveStat === '') classes.push('active');
             const onClick = s.key === null ? '' : ` onclick="siSetStatFilter('${s.key}')"`
-            // 拆解信息可选（当前仅「返工累计」用），无 title 的卡不渲染这些属性、不留空 title=""。
+            // [S-fix4·codex 414/415 MED-1] 可点卡补全交互语义四件（role="button"/tabindex=0/Enter·Space
+            //   键盘触发/aria-pressed）——415 裁断「新增交互面不得继续复制既有无障碍缺陷」采纳；本页全部
+            //   卡由本循环+siRenderTypeCards 两个循环渲染 ⇒ 循环级统一、本页 10 张可点卡一次到位，无
+            //   「只修新卡致同页两套行为」问题（跨页统计卡 a11y 统一仍在前端统一 backlog）。aria-pressed
+            //   与视觉 active class 同源（classes.includes('active')·单一事实源）；静态卡（返工累计）
+            //   不挂交互语义、维持 role="img" 分支。
+            const interactive = s.key === null ? '' : ` role="button" tabindex="0" onkeydown="siCardKeydown(event)" aria-pressed="${classes.includes('active')}"`;
+            // 拆解信息可选（返工累计静态卡 + 值班筛选与类型卡·S2 的「待我确认」可点卡两处用），无 title
+            //   的卡不渲染这些属性、不留空 title=""。
             //   ⚠️ title 与 aria-label **成对**——照搬本页 SI_PRIORITY_LABEL / SI_RISK_LEVEL_LABEL 既有范式
             //   （codex60 L-2 沉淀："title 给鼠标、aria-label 给屏幕阅读器/键盘"）：title 只在桌面悬停可见，
             //   移动端/键盘/读屏全都拿不到，而本卡主数字改成合计后，"这个 1 是打回还是重开"只能靠拆解回答
             //   （codex 339 MED-1）。role="img" 让读屏读 aria-label 整句、不逐个念内部数字与标签节点，
             //   故 aria-label 必须自带标签+数字（不能只写拆解，否则读屏用户丢失主信息）。
+            //   ⚠️ [S-fix 修复批·2026-08-15·5a] role="img" 只应加在**不可点**的静态卡（返工累计，
+            //   s.key===null，onClick 恒空串）——role="img" 会把元素的语义角色改判成"图片"，可点的
+            //   「待我确认」卡（有 onclick，本是可交互的筛选按钮）若也套上这个角色，读屏会把它播报成
+            //   一张图，可点击这件事本身对读屏用户变得不可发现。有 onclick 时不加 role，title/aria-label
+            //   两项照旧保留（读屏仍能读到完整拆解文案，只是不再被误标成"图片"）。
             const infoAttr = s.title
-                ? ` role="img" title="${esc(s.title)}" aria-label="${esc(`${s.label} ${s.n} 次：${s.title}`)}"`
+                ? ` ${onClick ? '' : 'role="img" '}title="${esc(s.title)}" aria-label="${esc(`${s.label} ${s.n} 次：${s.title}`)}"`
                 : '';
-            return `<div class="${classes.join(' ')}"${onClick}${infoAttr}><div class="u-stat-icon" style="background:${s.bg};">${s.icon}</div><div class="u-stat-info"><div class="u-stat-num">${s.n}</div><div class="u-stat-label">${s.label}</div></div></div>`;
+            return `<div class="${classes.join(' ')}"${onClick}${interactive}${infoAttr}><div class="u-stat-icon" style="background:${s.bg};">${s.icon}</div><div class="u-stat-info"><div class="u-stat-num">${s.n}</div><div class="u-stat-label">${s.label}</div></div></div>`;
+        }).join('');
+        // [值班筛选与类型卡·S3] 末尾统一钩子——所有既有 siRenderStats() 调用点（siSetType/siDebounceSearch/
+        //   siSetStatFilter/siLoadList 共 4 处）自动带上第二排类型卡刷新，不需要逐点补调用；两排卡永远
+        //   同一次渲染周期内一起更新，不会失步。
+        siRenderTypeCards();
+    }
+
+    // [值班筛选与类型卡·S3·锚点 §3] 类型卡第二排——BUG/新功能/优化（config 是未激活预留位，卡集合按
+    //   siTypeKeys()（=Object.keys(META.typeFlows)）派生，**禁硬编码三类**：config 项将来在后端
+    //   激活后，META.typeFlows 会多出这把键，本函数自动多渲染第四张卡，不需要改这段代码。
+    //   计数基数=**跨全类型**：siList 去已作废 + 搜索 + 状态组筛选（siMatchStatFilter），刻意**不**叠
+    //   siActiveType/不用 siVisibleTypeList()——那个函数本身已经按 siActiveType 过滤过，拿来给类型卡
+    //   计数是自指（选中"BUG"后其余类型卡数会被腰斩到 0，用户切到别的类型看起来像"这个类型下没有任何
+    //   其它类型的单"，语义损坏）。与状态卡"在所选类型内计状态"（siVisibleTypeList 内部按 siActiveType
+    //   过滤后再分状态）形成 AND 对称：状态卡答"选定类型∧该状态有几单"，类型卡答"选定状态∧该类型有
+    //   几单"，两排卡各自对另一维度不设限，才能同时反映"切换任一维度后另一维度会怎样变化"。
+    function siRenderTypeCards() {
+        const box = document.getElementById('siTypeCardsRow');
+        if (!box) return;
+        const keys = siTypeKeys();
+        // [S-fix2·预筛三轮 LOW-2] 空键集时隐藏容器——.u-stats-row 自带 margin-bottom，只清 innerHTML 会
+        //   残留 16px 空白条（META 加载前一瞬/typeFlows 为空时常驻）。
+        box.style.display = keys.length ? '' : 'none';
+        if (!keys.length) { box.innerHTML = ''; return; }
+        const base = siList.filter(i => i.status !== '已作废')
+            .filter(siMatchSearch)
+            .filter(i => siMatchStatFilter(i, siActiveStat));
+        box.innerHTML = keys.map((t) => {
+            // [S-fix2·预筛三轮 LOW-1] hasOwnProperty 守门（同 siTypeClass :1459 既有范式）——裸方括号对
+            //   原型键（constructor/toString）会取到函数、color.bg 渲染出 background:undefined。
+            const color = Object.prototype.hasOwnProperty.call(SI_TYPE_CARD_COLOR, t) ? SI_TYPE_CARD_COLOR[t] : SI_TYPE_CARD_COLOR.__default__;
+            const n = base.filter(i => i.type === t).length;
+            const classes = ['u-stat-card'].concat(siActiveType === t ? ['active'] : []);
+            // 图标——统一「标签」轮廓（呼应"类型=标签"这一概念），仅按类型换 stroke/bg 色（同 u-type-tag
+            //   四条分类色，见 SI_TYPE_CARD_COLOR 定义处注释），不为四类各设计一套不同形状图标。
+            const icon = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="${color.fg}" stroke-width="2"><path d="M12.586 2.586A2 2 0 0 0 11.172 2H4a2 2 0 0 0-2 2v7.172a2 2 0 0 0 .586 1.414l8.704 8.704a2.426 2.426 0 0 0 3.42 0l6.29-6.29a2.426 2.426 0 0 0 0-3.42z"/><circle cx="7.5" cy="7.5" r="1"/></svg>`;
+            // ⚠️ [Opus 预筛 S2-M4 同款陷阱防线] onclick 里的 type 实参 `t` 与卡计数/图标色用的是同一个
+            //   循环变量、同一个 siTypeKeys() 来源——禁在此手写字面量类型名（那样一旦拼错，断言若只查
+            //   "onclick 调用了 siSetTypeFilter" 这类存在性文本会全绿放过，函数真按错的类型筛选）。
+            //   [S-fix2·预筛三轮 MED-1] 转义走 siJsStringAttr（:1378 helper·JSON.stringify 先成合法 JS
+            //   字面量再 esc 成 HTML 属性值）——`'${esc(x)}'` 是本文件 :1370 注释明令禁止的坏写法（esc 是
+            //   HTML 转义非 JS 字符串转义，值里的引号会撑破实参边界）；t 当前虽为服务端硬编码流程键不可
+            //   达攻击面，模式违规照修，不给"为什么这里不用自家 helper"留必答题。
+            // [S-fix4] 交互语义四件与状态卡循环同款（aria-pressed 与 active class 同一判据 siActiveType===t）
+            return `<div class="${classes.join(' ')}" onclick="siSetTypeFilter(${siJsStringAttr(t)})" role="button" tabindex="0" onkeydown="siCardKeydown(event)" aria-pressed="${siActiveType === t}"><div class="u-stat-icon" style="background:${color.bg};">${icon}</div><div class="u-stat-info"><div class="u-stat-num">${n}</div><div class="u-stat-label">${esc(siTypeLabel(t))}</div></div></div>`;
         }).join('');
     }
 
@@ -2305,6 +2417,9 @@
     //   契约：依赖列表响应提供 type / status / fast_release_active_auth / fast_release_exec_total_count /
     //   fast_release_exec_done_count 五字段（前三已是既有列，后两为 S6 新增）；两端由
     //   scripts/verify-sys-list-badge-fields.js 自动对拍，本函数已列入该守卫扫描面。
+    //   ⚠️ [S-fix 修复批·2026-08-15·5b] fast_release_my_pending（值班筛选与类型卡·S1 新增）不在本
+    //   契约内——本函数徽章本体不读它，实际消费点是下方 siIsMyFastlanePending，契约行随之登记在那
+    //   个函数自己的头部注释（各函数声明各自读的字段，不挂在不消费它的邻居函数上）。
     function siFastlaneFlagHtml(i) {
         if (i.type !== 'bug' || i.status !== '待验证') return '';
         // 严格 ===1（非真值判断）：与本文件其余"后端 SQL 布尔值只认 1/0"惯例同源（如 has_release_remove
@@ -2326,6 +2441,34 @@
         //   :7171 状态徽章 `style="margin-right:0;margin-left:auto"`），本页对这类一次性间距需求的惯用
         //   解法本就是内联 style，非新增修饰类。
         return `<span class="u-status-badge sem-fastlane" style="margin-left:6px" title="${esc(title)}">待先行部署 ${done}/${total}${suffix}</span>`;
+    }
+    // [值班筛选与类型卡·S1/S2·锚点 §3 技术自决] 「待我确认」统计卡 + 点卡筛选**共用的唯一判据**——
+    //   徽章前置三条件（type==='bug' ∧ status==='待验证' ∧ fast_release_active_auth）AND 后端新字段
+    //   fast_release_my_pending（S1 交付报告"原始信号不掺闸，前端消费须 AND"的消费端落点）。siRenderStats
+    //   统计卡计数与 siMatchStatFilter 的筛选路由必须调用**同一个**本函数，禁两处各写一份判据（同族
+    //   漂移先例见上方 siFastlaneFlagHtml 契约注释一贯的单点维护纪律）。严格 ===1（非真值判断）：与
+    //   siFastlaneFlagHtml/has_release_remove 等"后端 SQL 布尔值只认 1/0"既有惯例同源，防脏值/字符串
+    //   '0' 被 JS 真值判断误判为真。⚠️ 不读 fast_release_exec_total_count/done_count（那两列服务徽章
+    //   x/N 展示，与"我是否在集合里且未确认"是两件事，混读会让本谓词对非当前用户的集合状态敏感）。
+    //   契约：依赖列表响应提供 fast_release_my_pending 字段（值班筛选与类型卡·S1 新增，本函数是该字段
+    //   在前端唯一的消费点——上方 siFastlaneFlagHtml 徽章本体不读它，契约行不挂在那个函数头上，S-fix
+    //   修复批·2026-08-15 从那里移到这里）；两端由 scripts/verify-sys-list-badge-fields.js 的 BADGE_FIELDS
+    //   点名清单登记（同 derive_seq 先例：本函数不在该守卫的五个扫描函数体名单内，字面量消费抓不到，
+    //   靠点名兜底防漏投影）。
+    function siIsMyFastlanePending(i) {
+        return i.type === 'bug' && i.status === '待验证'
+            && Number(i.fast_release_active_auth) === 1
+            && Number(i.fast_release_my_pending) === 1;
+    }
+    // [值班筛选与类型卡·S2] 「待我确认」统计卡渲染条件——count>0 时天然可见；count=0 但本卡当前正是
+    //   激活筛选（siActiveStat==='my_fastlane'）时**仍渲染**（堵陷阱：筛选激活时确认完最后一单，卡若
+    //   随 count 归零而消失，用户会被困在一个空筛选结果里，找不到入口点"全部"退出——见锚点 §3 技术
+    //   自决原文）。拆成独立纯函数（不内联进 siRenderStats 的 if）纯为可测——siRenderStats 本体重度
+    //   依赖 DOM（document.getElementById），render 条件这个布尔判断单独拎出才能被 verify 沙箱真执行
+    //   覆盖三态，同 siIsMyFastlanePending 一并归入本页"判据抽成纯函数，两处只调用不重复实现"的既有
+    //   惯例（siIsDevAction 即同款范式）。
+    function siShouldRenderMyFastlaneCard(count, activeStat) {
+        return count > 0 || activeStat === 'my_fastlane';
     }
     // [S13·§15.4] 入参从"平铺 item 数组"改为"族聚类后的行描述数组"（{item, role, isContext, isLast,
     //   rooted}，见 siClusterFamilyBlocks/siPackFamilyPages）——解构时把 item 仍绑到变量名 `i`，本函数

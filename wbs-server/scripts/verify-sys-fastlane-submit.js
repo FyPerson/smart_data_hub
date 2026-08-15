@@ -174,6 +174,23 @@
 //       admin 视角一致，HIGH-1 修复点=列表 WHERE 补 fastReleaseExecVisibilitySql 析取 + 详情补
 //       isFastReleaseExecutor 放行分支）；58b 移出集合（软删退出当前代次）后列表不可见+详情恢复
 //       403（口径="只认当前代次未软删行"，与撤销/终结/重授权失去可见性同一语义）
+// [值班筛选与类型卡·S1·2026-08-15 新增以下一组·SSOT=docs/local/系统迭代/
+//   任务_值班筛选与类型卡_长任务锚点_20260815.md §3 技术自决]
+//   [59] fast_release_my_pending 列表投影成对用例（当前用户在当前代次执行人集合中且未确认=1，
+//       不掺 fast_release_active_auth 门控）：59a 正例（本人在集合且 pending=1）；59b 反例②（不在
+//       集合的用户 admin=0）；59c 反例①（本人所在行 exec_status 已翻为 done=0，集合行按方案 §5b
+//       第 7 行保留不软删，可见性不受影响）；59d 反例③（被移出当前代次的非活跃成员=0，用已是
+//       assigned_to 的用户加人再移人，移除后仍经 assigned_to 通道可见，隔离出"在集合但已软删"这条
+//       单独失效维度，不与 [58b] 那种"移出后连可见性都一并失去"的形态混淆——59-前置3 移人前补中间
+//       断言核实 devTok 移除前确实在活跃集合恰 1 行，堵"加人静默 no-op 则本反例恒成立"这条假绿路径）；
+//       59e 字段存在性（无任何 fastlane 数据的普通单，字段仍下发为 number 0，非 undefined 缺省）
+// [S-fix 修复批·2026-08-15 追加以下三处，随 [59] 组同批]
+//   59-绑定顺序：带 query 参数（type=bug）的两条列表调用（值班人身份 my_pending=1／admin 身份=0），
+//       把"my_pending 子查询占位符与 addEq 参数不错位"钉进本套件自身断言，不再靠外套件偶然兜底。
+//   59f 不掺闸对照：SQL 造态构造"fast_release_consumed_at 非空但集合行仍 pending、主状态仍待验证"这一
+//       真实端点原子事务下不可达的组合，核心断言 fast_release_active_auth=0 ∧ fast_release_my_pending=1
+//       同时成立——钉死"原始信号不掺 active_auth 这道授权闸"的契约，未来若子查询被人补一句 AND
+//       active_auth，本条立即判红。
 'use strict';
 
 const assert = require('assert');
@@ -3301,8 +3318,137 @@ async function main() {
     ok('[58]（Opus 预筛 S6-HIGH-1+MED-2）值班执行人可见性成对用例：在册时列表可见+详情200+三列/DTO附块值正确（值班人与admin视角一致）；移出集合（软删退出当前代次）后列表不可见+详情恢复403（口径="只认当前代次未软删行"，与撤销/终结/重授权失去可见性同一语义）');
   }
 
+  // ══════════════════════════ [59]（值班筛选与类型卡·S1）fast_release_my_pending 列表投影成对用例 ══════════════════════════
+  //   SSOT = docs/local/系统迭代/任务_值班筛选与类型卡_长任务锚点_20260815.md §3 技术自决——当前登录
+  //   用户在本单当前代次执行人集合中且尚未确认（exec_status<>'done'）时为 1，否则 0；**不掺**
+  //   fast_release_active_auth（前端消费「待我确认」入口时才 AND，本列只回答"我在不在集合里且没
+  //   确认"这一件事，与既有 total/done 两列同族，不做 type/status 门控）。
+  {
+    // [59-前置1][59a][59b] 正例 + 反例②——当日值班（user20）挂牌单，唯一执行人尚未确认。
+    const id1 = await bugAtChulizhong();
+    await estimateFuture(id1);
+    await authorize(id1, adminTok, '59-值班待我确认');
+    const sub1 = await call('POST', `/api/sys-issues/${id1}/submit`, devTok, submitBody({ mode: 'commits' }));
+    assert.strictEqual(sub1.status, 200, `[59-前置1] submit 应 200，实得 ${sub1.status} ${JSON.stringify(sub1.body)}`);
+    const feRows1 = await fastExecRows(id1);
+    assert.strictEqual(feRows1.length, 1, `[59-前置1] 挂牌应恰 1 行（当日值班=user20），实得 ${feRows1.length}`);
+    assert.strictEqual(feRows1[0].user_id, 20, '[59-前置1] 唯一执行人应为当日值班人（user20）');
+    assert.strictEqual(feRows1[0].exec_status, 'pending', '[59-前置1] 确认前应仍 pending');
+
+    // [59a] 正例：值班人（dutyTok）在当前代次执行人集合中且未确认 ⇒ 1。
+    const list59a = await call('GET', '/api/sys-issues', dutyTok);
+    assert.strictEqual(list59a.status, 200, `[59a] 值班人列表请求应 200，实得 ${list59a.status}`);
+    const hit59a = (list59a.body.items || []).find(x => x.id === id1);
+    assert.ok(hit59a, `[59a] 值班人列表应可见该单 id=${id1}`);
+    assert.strictEqual(typeof hit59a.fast_release_my_pending, 'number', '[59a] fast_release_my_pending 应为 number 类型');
+    assert.strictEqual(hit59a.fast_release_my_pending, 1, `[59a] 正例：本人在当前代次执行人集合且未确认，应为 1，实得 ${hit59a.fast_release_my_pending}`);
+
+    // [59b] 反例②：不在集合的用户（admin，uid=1）请求同一单 ⇒ 0（admin 从未加入过该单执行人集合，
+    //   全局可见性与本列的"我是否在集合里"是两件事——admin 看得到单不代表本列该为 1）。
+    const list59b = await call('GET', '/api/sys-issues', adminTok);
+    assert.strictEqual(list59b.status, 200, `[59b] admin 列表请求应 200，实得 ${list59b.status}`);
+    const hit59b = (list59b.body.items || []).find(x => x.id === id1);
+    assert.ok(hit59b, `[59b] admin 列表应可见该单 id=${id1}`);
+    assert.strictEqual(hit59b.fast_release_my_pending, 0, `[59b] 反例②：admin（uid=1）不在该单执行人集合中，应为 0，实得 ${hit59b.fast_release_my_pending}`);
+
+    // [59-绑定顺序] S-fix 2c：把「SELECT 占位符×addEq 参数不错位」钉进本套件自己的断言，不再靠外套件
+    //   （如 verify-sys-fastrelease-auth.js）偶然兜底。my_pending 子查询的 uid 走 selectParams 段、
+    //   执行点按 [...selectParams, ...params] 段序拼接（S-fix3 结构化·见 index.js 声明处注释），带 query 参数（type=bug，addEq 追加在
+    //   params 数组末尾）时若两者顺序被谁不小心挪动，uid 会被错绑成 type 值（或反之），下面两条断言会
+    //   立刻失真（值班人本应 1 的位置读到别的东西/admin 本应 0 的位置读到别的东西）。
+    const list59q1 = await call('GET', '/api/sys-issues?type=bug', dutyTok);
+    assert.strictEqual(list59q1.status, 200, `[59-绑定顺序] 值班人带 type=bug 查询应 200，实得 ${list59q1.status}`);
+    const hit59q1 = (list59q1.body.items || []).find(x => x.id === id1);
+    assert.ok(hit59q1, `[59-绑定顺序] 值班人带 type=bug 查询应仍可见该单 id=${id1}`);
+    assert.strictEqual(hit59q1.fast_release_my_pending, 1, `[59-绑定顺序] 值班人带 query 请求 my_pending 应为 1（参数绑定未错位），实得 ${hit59q1.fast_release_my_pending}`);
+    const list59q2 = await call('GET', '/api/sys-issues?type=bug', adminTok);
+    assert.strictEqual(list59q2.status, 200, `[59-绑定顺序] admin 带 type=bug 查询应 200，实得 ${list59q2.status}`);
+    const hit59q2 = (list59q2.body.items || []).find(x => x.id === id1);
+    assert.ok(hit59q2, `[59-绑定顺序] admin 带 type=bug 查询应仍可见该单 id=${id1}`);
+    assert.strictEqual(hit59q2.fast_release_my_pending, 0, `[59-绑定顺序] admin 带 query 请求 my_pending 应为 0（参数绑定未错位），实得 ${hit59q2.fast_release_my_pending}`);
+
+    // [59-前置2][59c] 反例①：唯一执行人确认后 exec_status 变 done（本单同时触发末位翻牌，集合行按
+    //   方案 §5b 第 7 行保留不软删——sysFastReleaseExecActiveWhere 只判 issue_id/removed_at，值班人
+    //   对该单的可见性 fastReleaseExecVisibilitySql 翻牌后依然成立，故可继续用同一用户 dutyTok 复核
+    //   done 分支，不需要换人）。
+    const rc59 = await confirm(id1, dutyTok);
+    assert.strictEqual(rc59.status, 200, `[59-前置2] confirm 应 200，实得 ${rc59.status} ${JSON.stringify(rc59.body)}`);
+    assert.strictEqual(rc59.body.flipped, true, '[59-前置2] 唯一执行人=末位，确认应触发翻牌');
+    const list59c = await call('GET', '/api/sys-issues', dutyTok);
+    assert.strictEqual(list59c.status, 200, `[59c] 值班人列表请求应 200，实得 ${list59c.status}`);
+    const hit59c = (list59c.body.items || []).find(x => x.id === id1);
+    assert.ok(hit59c, `[59c] 值班人对已翻牌单仍应可见（集合行未软删，部署留痕）id=${id1}`);
+    assert.strictEqual(hit59c.fast_release_my_pending, 0, `[59c] 反例①：exec_status 已为 done，应为 0，实得 ${hit59c.fast_release_my_pending}`);
+
+    // [59-前置3][59d] 反例③：非活跃成员（被移出当前代次，removed_at 非空）——用已是 assigned_to 的
+    //   devTok 加为第二执行人再移除；移除后 devTok 仍经 assigned_to 通道可见该单（不像 dutyTok 那样
+    //   依赖 fastReleaseExecVisibilitySql，会随软删一并失去可见性，见 [58b]），从而能在同一单上单独
+    //   复核"在集合但已软删"这一条失效维度，不与 [58b] 那种"移出后连可见性都一并失去"的形态混淆。
+    const id2 = await bugAtChulizhong();
+    await estimateFuture(id2);
+    await authorize(id2, adminTok, '59-非活跃成员');
+    const sub2 = await call('POST', `/api/sys-issues/${id2}/submit`, devTok, submitBody({ mode: 'commits' }));
+    assert.strictEqual(sub2.status, 200, `[59-前置3] submit 应 200，实得 ${sub2.status} ${JSON.stringify(sub2.body)}`);
+    const addR = await addExecutor(id2, 5, adminTok);
+    assert.strictEqual(addR.status, 200, `[59-前置3] 加人（devTok）应 200，实得 ${addR.status} ${JSON.stringify(addR.body)}`);
+    // [59-前置3·S-fix 2b] 移人前中间断言：确认 devTok(user5) 此刻确实在活跃集合恰 1 行——堵"addExecutor
+    //   端点静默 no-op（如加人 200 但实际未 INSERT）时 [59d] 断言仍会恒成立"这条假绿路径（若 devTok 从未
+    //   真正进过集合，后面移除它也不会改变任何东西，[59d] 的"移出后应为 0"本就一直是 0，无法证明本列
+    //   真的响应了"移出"这个动作）。
+    const feRowsBeforeRemove = await fastExecRows(id2);
+    const activeUser5Rows = feRowsBeforeRemove.filter((r) => r.user_id === 5 && !r.removed_at);
+    assert.strictEqual(activeUser5Rows.length, 1, `[59-前置3] 移人前应确认 devTok(user5) 在活跃集合恰 1 行，实得 ${activeUser5Rows.length}`);
+    const rmR = await removeExecutor(id2, 5, adminTok);
+    assert.strictEqual(rmR.status, 200, `[59-前置3] 移人（devTok）应 200，实得 ${rmR.status} ${JSON.stringify(rmR.body)}`);
+    assert.strictEqual(rmR.body.flipped, false, '[59-前置3] 剩余仍含值班人 pending，不应翻牌');
+    const list59d = await call('GET', '/api/sys-issues', devTok);
+    assert.strictEqual(list59d.status, 200, `[59d] devTok 列表请求应 200，实得 ${list59d.status}`);
+    const hit59d = (list59d.body.items || []).find(x => x.id === id2);
+    assert.ok(hit59d, `[59d] devTok 仍应经 assigned_to 通道可见该单 id=${id2}`);
+    assert.strictEqual(hit59d.fast_release_my_pending, 0, `[59d] 反例③：devTok 已被移出当前代次（removed_at 非空），应为 0，实得 ${hit59d.fast_release_my_pending}`);
+
+    // [59e] 字段存在性：无任何 fastlane 数据的普通单，字段仍下发且为 0（非 undefined 缺省）——同族列
+    //   has_release_remove/last_held_at 既有"SQL 只出数不做门控"范式的同款存在性核验。
+    const id3 = await bugAtChulizhong();
+    const list59e = await call('GET', '/api/sys-issues', adminTok);
+    assert.strictEqual(list59e.status, 200, `[59e] admin 列表请求应 200，实得 ${list59e.status}`);
+    const hit59e = (list59e.body.items || []).find(x => x.id === id3);
+    assert.ok(hit59e, `[59e] admin 列表应可见该单 id=${id3}`);
+    assert.strictEqual(typeof hit59e.fast_release_my_pending, 'number', `[59e] 无 fastlane 数据的普通单字段仍应下发为 number（非 undefined），实得 ${typeof hit59e.fast_release_my_pending}`);
+    assert.strictEqual(hit59e.fast_release_my_pending, 0, `[59e] 无 fastlane 数据的普通单应为 0，实得 ${hit59e.fast_release_my_pending}`);
+
+    // [59f] S-fix 2a·不掺闸对照：SQL 造态构造"消费态叠加集合仍未软删"这一真实端点不可达的组合——真实
+    //   末位确认翻牌是单事务原子完成（consumed_at 落值 + 集合行转 done + 主状态推到已上线三件事同一
+    //   事务内一起发生，见 attemptFastReleaseFlipInTxn 契约注释），永远不会出现"consumed_at 已落值但
+    //   集合行仍 pending、主状态仍待验证"这种半吊子态；本组直接绕过端点用 SQL 精确造出这个组合，专门
+    //   用来钉死"fast_release_my_pending 原始信号不掺 fast_release_active_auth 这道授权闸"的契约——
+    //   若未来有人在子查询里补一句 AND fast_release_active_auth（或等价的六列判据）想让两列看起来更
+    //   "一致"，active_auth 归零的同时 my_pending 会被连带压到 0，本条断言立即由 1 变 0 判红。
+    const id4 = await bugAtChulizhong();
+    await estimateFuture(id4);
+    await authorize(id4, adminTok, '59f-不掺闸对照');
+    const sub4 = await call('POST', `/api/sys-issues/${id4}/submit`, devTok, submitBody({ mode: 'commits' }));
+    assert.strictEqual(sub4.status, 200, `[59f-前置] submit 应 200，实得 ${sub4.status} ${JSON.stringify(sub4.body)}`);
+    const feRows4 = await fastExecRows(id4);
+    assert.strictEqual(feRows4.length, 1, `[59f-前置] 挂牌应恰 1 行（当日值班=user20），实得 ${feRows4.length}`);
+    assert.strictEqual(feRows4[0].exec_status, 'pending', '[59f-前置] SQL 造态前应仍 pending（真实链路不可达组合的起点须是真实可达态）');
+    await run(`UPDATE sys_issues SET fast_release_consumed_at = datetime('now','localtime') WHERE id = ?`, [id4]);
+    const list59f = await call('GET', '/api/sys-issues', dutyTok);
+    assert.strictEqual(list59f.status, 200, `[59f] 值班人列表请求应 200，实得 ${list59f.status}`);
+    const hit59f = (list59f.body.items || []).find((x) => x.id === id4);
+    assert.ok(hit59f, `[59f] 值班人对该单仍应可见（fastReleaseExecVisibilitySql 只判 issue_id/removed_at，与 consumed_at 无关）id=${id4}`);
+    assert.strictEqual(hit59f.fast_release_active_auth, 0, `[59f-前置] fast_release_consumed_at 非空应使授权闸（FAST_RELEASE_ACTIVE_AUTH_WHERE_SQL 六列判据之一）归零，实得 ${hit59f.fast_release_active_auth}（造态前提不成立，下面核心断言的对比基准就不存在）`);
+    assert.strictEqual(hit59f.fast_release_my_pending, 1, `[59f] 不掺闸对照核心断言：授权闸已归零（fast_release_active_auth=0）不应连带压低 my_pending——本人仍在当前代次集合且未确认，原始信号应仍为 1，实得 ${hit59f.fast_release_my_pending}（若为 0，说明子查询被人补了 AND active_auth 之类的闸，"原始信号不掺闸、消费端才 AND"的契约在后端就被破坏了）`);
+    // [S-fix2·预筛三轮 LOW-2] 造态清理恢复（同 [S5] 不变量探针「SQL 造态反证+清理恢复」范式）：
+    //   consumed 非空∧集合仍 pending 是声明为不可达的非法组合，原样留库会误伤未来在本组之后追加的
+    //   终态不变量扫描——断言完毕即复原。
+    await run(`UPDATE sys_issues SET fast_release_consumed_at = NULL WHERE id = ?`, [id4]);
+
+    ok('[59]（值班筛选与类型卡·S1）fast_release_my_pending 列表投影：正例(本人在集合未确认=1)+反例①(exec_status=done→0)+反例②(不在集合的用户admin→0)+反例③(被移出当前代次的非活跃成员→0，assigned_to通道保持可见，[59-前置3]补移除前活跃集合恰1行中间断言堵addExecutor静默no-op假绿)+字段存在性(无fastlane数据的普通单仍下发0非undefined)+绑定顺序(带type=bug查询双身份对照钉进本套件自身)+不掺闸对照(SQL造态consumed_at非空使active_auth归零但my_pending仍1)');
+  }
+
   console.log(`\n[全部通过] ${passed}/${passed} ✓ verify-sys-fastlane-submit 全绿`);
-  console.log('  覆盖：schema 就绪 + 兼容负例(direct_release=true 零效果) + 挂牌正例(无值班0/0·有值班1行) + 无授权零挂牌对照组 + 挂牌只发生在状态真翻转路径(多开发) + 挂牌资格复核(停用/降权) + 挂牌闸type钳制 + last_completed_at正常路径 + 不变量①②③⑦探针 + online_source消费面(造态) + FAST_RELEASE_CONFIRM routeKind单元覆盖(S3改名·真实调用方) + reopen清补验收字段组(造态起点) + 授权早于reopen纵深防御(挂牌闸重定义) + isActiveFastReleaseAuth唯一判据fail-closed + [S3] 确认端点单人末位/多人非末位/负例族/空集合/代次干扰/弹回×done闸门/原子性/§3.3副作用/翻牌UPDATE全仓唯一 + [S4] 加人正例+user_name来源断言/重复加人409/首done后FROZEN成对/非挂牌态加人409成对/无资格三态/移人pending正例/移done行409/移人后同事务翻牌正例(真实端点,含因果顺序断言)/移空后不翻+解冻/非挂牌态移人409/移不存在的人409/confirm×remove竞争串行化成对 + [Opus385预筛收口] 软删后重加同user_id反向一对/user_name归一化级联三态(目标一级/目标两级/操作者)/两新端点403权限负例 + [codex387回卷] 加人x确认并发终态枚举法(add_first/confirm_first两方向均真实观测)/双加人同user_id并发(partial UNIQUE竞态互斥) + [S5] revoke成对(无done核心价值·重挂牌不撞UNIQUE/有done409)/accept成对(无done清集合/有done409+续走翻牌)/return成对(无done清集合/有done409)/void含done终极出口/reject零行照常/不变量⑪⑫双向探针(终态零违例+SQL造态反证判红+清理恢复) + [Opus S5=BLOCK 预筛 H1/L1] 重新授权清集合三变体(同人值班跨轮不再500/换值班人跨轮accept·return·revoke均不再409/无值班跨轮0-0照挂+加人解冻)/C9直翻非空集合cause=上线翻牌正例 + [codex389二批] revoke闸序修正(已消费单不再误报DEPLOY_IN_PROGRESS)/重新授权原子性故障注入(触发器阻断清集合UPDATE四面全回滚+恢复对照) + [S6] 详情DTO(挂牌混合态数组+进度/代次干扰过滤/非挂牌单空数组/consumed单留痕保留)+列表投影(x/N计数·代次干扰不计分母·空集合0/0·消费后active_auth归零·非fastlane单三列确定性归零) + [Opus预筛S6-HIGH-1/MED-2] 值班执行人可见性成对(在册列表可见+详情200+三列/DTO附块值正确/移出集合后列表不可见+详情恢复403)');
+  console.log('  覆盖：schema 就绪 + 兼容负例(direct_release=true 零效果) + 挂牌正例(无值班0/0·有值班1行) + 无授权零挂牌对照组 + 挂牌只发生在状态真翻转路径(多开发) + 挂牌资格复核(停用/降权) + 挂牌闸type钳制 + last_completed_at正常路径 + 不变量①②③⑦探针 + online_source消费面(造态) + FAST_RELEASE_CONFIRM routeKind单元覆盖(S3改名·真实调用方) + reopen清补验收字段组(造态起点) + 授权早于reopen纵深防御(挂牌闸重定义) + isActiveFastReleaseAuth唯一判据fail-closed + [S3] 确认端点单人末位/多人非末位/负例族/空集合/代次干扰/弹回×done闸门/原子性/§3.3副作用/翻牌UPDATE全仓唯一 + [S4] 加人正例+user_name来源断言/重复加人409/首done后FROZEN成对/非挂牌态加人409成对/无资格三态/移人pending正例/移done行409/移人后同事务翻牌正例(真实端点,含因果顺序断言)/移空后不翻+解冻/非挂牌态移人409/移不存在的人409/confirm×remove竞争串行化成对 + [Opus385预筛收口] 软删后重加同user_id反向一对/user_name归一化级联三态(目标一级/目标两级/操作者)/两新端点403权限负例 + [codex387回卷] 加人x确认并发终态枚举法(add_first/confirm_first两方向均真实观测)/双加人同user_id并发(partial UNIQUE竞态互斥) + [S5] revoke成对(无done核心价值·重挂牌不撞UNIQUE/有done409)/accept成对(无done清集合/有done409+续走翻牌)/return成对(无done清集合/有done409)/void含done终极出口/reject零行照常/不变量⑪⑫双向探针(终态零违例+SQL造态反证判红+清理恢复) + [Opus S5=BLOCK 预筛 H1/L1] 重新授权清集合三变体(同人值班跨轮不再500/换值班人跨轮accept·return·revoke均不再409/无值班跨轮0-0照挂+加人解冻)/C9直翻非空集合cause=上线翻牌正例 + [codex389二批] revoke闸序修正(已消费单不再误报DEPLOY_IN_PROGRESS)/重新授权原子性故障注入(触发器阻断清集合UPDATE四面全回滚+恢复对照) + [S6] 详情DTO(挂牌混合态数组+进度/代次干扰过滤/非挂牌单空数组/consumed单留痕保留)+列表投影(x/N计数·代次干扰不计分母·空集合0/0·消费后active_auth归零·非fastlane单三列确定性归零) + [Opus预筛S6-HIGH-1/MED-2] 值班执行人可见性成对(在册列表可见+详情200+三列/DTO附块值正确/移出集合后列表不可见+详情恢复403) + [值班筛选与类型卡S1] fast_release_my_pending列表投影(正例本人在集合未确认=1/反例①exec_status=done→0/反例②不在集合的用户admin→0/反例③被移出当前代次的非活跃成员→0/字段存在性无fastlane数据普通单仍下发0非undefined) + [S-fix] 绑定顺序双身份带query对照钉进本套件自身/不掺闸对照(SQL造态consumed_at非空使active_auth归零但my_pending仍1)/59d移除前活跃集合中间断言堵addExecutor静默no-op假绿');
   server.close();
 }
 

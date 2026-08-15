@@ -32,6 +32,30 @@
  *      机制覆盖，这里只加一道"本文件改动确实命中了那套机制"的显式证据，不重复其详尽断言）。
  *   ⑪ HTML 内联 <script> 语法有效（new Function 编译不执行，等价 node -c）。
  *
+ * [值班筛选与类型卡·S2·2026-08-15 追加·SSOT=docs/local/系统迭代/
+ * 任务_值班筛选与类型卡_长任务锚点_20260815.md §3 技术自决] 新增：
+ *   ⑫ siIsMyFastlanePending/siMatchStatFilter/siShouldRenderMyFastlaneCard **沙箱真执行**（非静态
+ *      文本匹配——照 verify-sys-eta-generation.js [A1]/[R6] 先例，提取函数全文用 new Function 编译为
+ *      真可调用函数，喂真实输入向量真执行断言，能证明"四条件逐一翻转会不会正确翻转判定"这类行为，
+ *      纯文本 .includes()/正则做不到）：谓词四条件逐一翻转→false + 全真→true（反向一对）；
+ *      siMatchStatFilter 的 'my_fastlane' 横切 key 路由到谓词（真/假各一）+ 既有状态组 key 行为不变
+ *      + 未知 key 仍放行（现状兜底语义未被改坏）；siShouldRenderMyFastlaneCard 卡渲染条件三态
+ *      （count>0 渲染／count=0 非激活不渲染／count=0 但激活仍渲染）。
+ *
+ * [S-fix 修复批·2026-08-15 追加] 预筛两轮意见收口：
+ *   ⑫ 组补 siRenderStats 接线四条（预筛 M4-M7 四破法各对一条，②③两条依赖同一段 if 分支文本提取，
+ *      互不替代——②证"push 真在条件内"，③证"分支内的 key 与筛选路由的 key 逐字相同"）：①确实调用
+ *      siIsMyFastlanePending（非内联另一份判据）②stats.push 确实挂在 siShouldRenderMyFastlaneCard
+ *      条件内（非无条件 push）③卡 key 字面量与 siMatchStatFilter 路由字面量提取真实值逐字比对（S2-M4
+ *      同款陷阱：存在性文本检查测不出"两处各自拼错但都存在"这种漂移）④计数基数确实来自 vis（同其余
+ *      状态卡口径，非另开一份）。
+ *   [⑫前置] 提取/编译步骤（此前是裸 assert.ok/new Function，抛错会终止整个进程、不计入 check() 计数）
+ *      改包进 check()；SI_STATUS_GROUPS 提取物新增键集 deepStrictEqual 核验（防括号计数被字面量骗偏
+ *      导致静默截断成半个对象）。
+ *   本文件此前两处各自手写的裸括号扫描器（旧的 body-only extractFunctionBody + S2 新增的
+ *      extractFullFunctionText）均改为委派 scripts/lib/extract-function-body.js（S3 断言套件
+ *      verify-sys-type-cards.js 已在用的同一份四轮硬化实现），不再各自维护一份扫描逻辑。
+ *
  * [Opus 合并预筛 LOW-1 修复·2026-08-14] 全部断言面统一改走 bodyOf()（extractFunctionBody 结果先
  * stripComments 剥注释再扫描，照 verify-sys-list-badge-fields.js:57-59 同款范式）——本文件与
  * 姊妹文件的注释里大量出现被检查的函数名/字段名字面量（解释"为什么不该调用 X"之类），不剥注释会让
@@ -43,6 +67,12 @@
 const fs = require('fs');
 const path = require('path');
 const assert = require('assert');
+// [S-fix 修复批·2026-08-15·4b] 全文函数提取统一走 scripts/lib/extract-function-body.js（406/407/408
+//   四轮硬化的单点实现——有限状态词法扫描剥注释/字符串/正则字面量后再做括号深度计数，比本文件此前
+//   两处各自手写的裸括号扫描器更抗"字符串/正则字面量里的假花括号"这类误判）。该模块返回**含函数签名**
+//   的全文；下方 extractFunctionBody（本文件既有 body-only 契约，从首个 `{` 切）与 ⑫ 组的
+//   extractFullFunctionText（S2 手写的裸括号扫描器）均改为薄包装，委派给它，不再各自维护一份扫描逻辑。
+const { extractFunctionBody: extractFunctionFullText } = require('./lib/extract-function-body');
 
 let passed = 0, failed = 0;
 const failures = [];
@@ -61,22 +91,14 @@ const src = fs.readFileSync(htmlPath, 'utf8');
 const cssPath = path.join(__dirname, '..', 'public', 'assets', 'css', 'components.css');
 const css = fs.readFileSync(cssPath, 'utf8');
 
-// 同姊妹文件 verify-sys-post-release-panel-static.js 的 balanced-brace 函数体提取范式。
+// [S-fix 4b] 本文件既有 body-only 契约（返回从首个 `{` 到匹配收尾 `}`，不含 "function name(...)"
+//   签名文本）——全部既有 bodyOf() 调用点按此契约做 .includes()/正则匹配，故只切签名、不改其余行为，
+//   对下游断言零影响。内部委派 scripts/lib/extract-function-body.js 的硬化实现，不再手写裸括号扫描器。
 function extractFunctionBody(source, fnName) {
-    const startRe = new RegExp(`function\\s+${fnName}\\s*\\([^)]*\\)\\s*\\{`);
-    const m = startRe.exec(source);
-    if (!m) return null;
-    let depth = 0;
-    let i = m.index + m[0].length - 1;
-    const start = i;
-    for (; i < source.length; i++) {
-        if (source[i] === '{') depth++;
-        else if (source[i] === '}') {
-            depth--;
-            if (depth === 0) return source.slice(start, i + 1);
-        }
-    }
-    return null;
+    const full = extractFunctionFullText(source, fnName);
+    if (!full) return null;
+    const braceIdx = full.indexOf('{');
+    return braceIdx < 0 ? null : full.slice(braceIdx);
 }
 // [Opus 合并预筛 LOW-1 修复·2026-08-14] 剥行注释与块注释（照 verify-sys-list-badge-fields.js:57-59
 // 同款范式）——本文件全部断言都在拿 extractFunctionBody 提取出的原始函数体做 .includes()/正则匹配，
@@ -275,6 +297,181 @@ check('Sys_Iteration.html 内联脚本可编译（new Function，不执行）', 
         new Function(s);
     }
 });
+
+console.log('— ⑫ [值班筛选与类型卡·S2] siIsMyFastlanePending/siMatchStatFilter/siShouldRenderMyFastlaneCard 沙箱真执行 —');
+{
+    // 真执行范式（照 verify-sys-eta-generation.js [A1]/[R6] 先例）：静态 .includes()/正则只能证明
+    //   "字符串出现过"，证不了"四条件逐一翻转会不会正确翻转判定"这类行为——本组从 HTML 提取函数
+    //   全文（含签名，非 bodyOf() 剥壳后的纯体，需要签名才能 new Function 后按名取出），编译为真
+    //   可调用函数，喂真实输入向量真执行断言。
+    // [S-fix 4b] 单参数写法委派模块顶部已引入的 extractFunctionFullText（隐式绑定 src）——保持下方
+    //   调用点 extractFullFunctionText('fnName') 的既有书写形态不变，不再手写裸括号扫描器。
+    const extractFullFunctionText = (fnName) => extractFunctionFullText(src, fnName);
+    // SI_STATUS_GROUPS 是 `const X = { ... };` 常量声明（非函数），shared 模块的 extractFunctionBody
+    //   只支持 `function name(...) {` 形态，故此处仍保留本地裸括号扫描器（无共用替代品可用）；
+    //   siMatchStatFilter 真执行时需要真实值——从源码提取而非在本文件手抄一份，避免两份状态组定义
+    //   各自维护、后续新增状态组时漂移。[S-fix 4c] 提取物额外过键集完整性核验（见下方 check），防
+    //   括号计数被字面量骗偏导致静默截断成半个对象却不报错。
+    function extractConstObjectText(constName) {
+        const startIdx = src.indexOf(`const ${constName} = {`);
+        if (startIdx < 0) return null;
+        const braceStart = src.indexOf('{', startIdx);
+        let depth = 0, i = braceStart;
+        for (; i < src.length; i++) {
+            if (src[i] === '{') depth++;
+            else if (src[i] === '}') { depth--; if (depth === 0) return src.slice(startIdx, i + 1) + ';'; }
+        }
+        return null;
+    }
+
+    const fnIsMyFastlanePending = extractFullFunctionText('siIsMyFastlanePending');
+    const fnShouldRenderCard = extractFullFunctionText('siShouldRenderMyFastlaneCard');
+    const fnMatchStatFilter = extractFullFunctionText('siMatchStatFilter');
+    const statusGroupsText = extractConstObjectText('SI_STATUS_GROUPS');
+
+    // [S-fix 4c] 提取前置全部包进 check() 计数体系——此前 4 条 assert.ok 与下方 3 个 new Function 编译
+    //   调用均是裸调用，提取失败/编译失败会抛出未捕获异常直接终止整个进程（该组之前/之后的全部断言
+    //   都不会被计数，只留一条与本组无关的堆栈），而非像其余断言一样被记成一条可读的红色失败行。
+    check('[⑫前置] 三函数+一常量全部提取成功（提不到=守卫空转，不能当通过）', () => {
+        assert.ok(fnIsMyFastlanePending, '未提取到 siIsMyFastlanePending 函数全文');
+        assert.ok(fnShouldRenderCard, '未提取到 siShouldRenderMyFastlaneCard 函数全文');
+        assert.ok(fnMatchStatFilter, '未提取到 siMatchStatFilter 函数全文');
+        assert.ok(statusGroupsText, '未提取到 SI_STATUS_GROUPS 常量全文');
+    });
+    check('[⑫前置] SI_STATUS_GROUPS 提取物键集完整（防提取静默截断——括号计数一旦被字面量骗偏，可能只切到半个对象却不报错，仍会 new Function 成功但少几个组）', () => {
+        // eslint-disable-next-line no-new-func
+        const statusGroupsObj = new Function(`${statusGroupsText}\nreturn SI_STATUS_GROUPS;`)();
+        assert.deepStrictEqual(Object.keys(statusGroupsObj).sort(), ['acceptance', 'active', 'done', 'paused', 'release'],
+            `SI_STATUS_GROUPS 提取物键集应恰为这 5 个（排序后比对），实得 ${JSON.stringify(Object.keys(statusGroupsObj).sort())}`);
+    });
+
+    let isMyFastlanePending, shouldRenderCard, matchStatFilter;
+    check('[⑫前置] 三函数提取物均可编译为可调用函数', () => {
+        // eslint-disable-next-line no-new-func
+        isMyFastlanePending = new Function(`${fnIsMyFastlanePending}\nreturn siIsMyFastlanePending;`)();
+        // eslint-disable-next-line no-new-func
+        shouldRenderCard = new Function(`${fnShouldRenderCard}\nreturn siShouldRenderMyFastlaneCard;`)();
+        // siMatchStatFilter 依赖 SI_STATUS_GROUPS 常量与 siIsMyFastlanePending 函数两个外部符号——一并
+        //   注入同一份编译文本（函数声明具名提升，siMatchStatFilter 体内可直接引用），同 [A1] 组
+        //   "siDeadlineToLocalInput 依赖 siToLocalInput，两函数体一并注入"同一手法。
+        // eslint-disable-next-line no-new-func
+        matchStatFilter = new Function(`${statusGroupsText}\n${fnIsMyFastlanePending}\n${fnMatchStatFilter}\nreturn siMatchStatFilter;`)();
+        assert.strictEqual(typeof isMyFastlanePending, 'function', 'siIsMyFastlanePending 应可编译为函数');
+        assert.strictEqual(typeof shouldRenderCard, 'function', 'siShouldRenderMyFastlaneCard 应可编译为函数');
+        assert.strictEqual(typeof matchStatFilter, 'function', 'siMatchStatFilter 应可编译为函数');
+    });
+
+    console.log('  — siIsMyFastlanePending：四条件逐一翻转 + 全真（反向一对） —');
+    const BASE = { type: 'bug', status: '待验证', fast_release_active_auth: 1, fast_release_my_pending: 1 };
+    check('全真 ⇒ true（实现坏成什么样这条会红：任一条件判据被误删会立即由下面四条反例现形）', () => {
+        assert.strictEqual(isMyFastlanePending(BASE), true, '四条件全真应判 true');
+    });
+    check('type 翻转（非 bug）⇒ false', () => {
+        assert.strictEqual(isMyFastlanePending({ ...BASE, type: 'feature' }), false);
+    });
+    check('status 翻转（非待验证）⇒ false', () => {
+        assert.strictEqual(isMyFastlanePending({ ...BASE, status: '处理中' }), false);
+    });
+    check('fast_release_active_auth 翻转（0）⇒ false（原始信号不掺闸的消费端必须真的 AND 了它）', () => {
+        assert.strictEqual(isMyFastlanePending({ ...BASE, fast_release_active_auth: 0 }), false);
+    });
+    check('fast_release_my_pending 翻转（0）⇒ false', () => {
+        assert.strictEqual(isMyFastlanePending({ ...BASE, fast_release_my_pending: 0 }), false);
+    });
+    check('字符串型合法值（\'1\'）经 Number() 强制转换仍判 true（防止用严格 === 裸比较误杀后端下发的合法数值）', () => {
+        assert.strictEqual(isMyFastlanePending({ ...BASE, fast_release_active_auth: '1', fast_release_my_pending: '1' }), true);
+    });
+    check('字符串脏值（\'0\'）经 Number() 转换判 false（防真值判断把非空字符串 \'0\' 误判为真，与 siFastlaneFlagHtml 既有惯例同源）', () => {
+        assert.strictEqual(isMyFastlanePending({ ...BASE, fast_release_my_pending: '0' }), false);
+    });
+
+    console.log('  — siMatchStatFilter：my_fastlane 横切 key 路由 + 既有状态组 key 行为不变 + 未知 key 仍放行 —');
+    check('my_fastlane 路由到谓词·真例', () => {
+        assert.strictEqual(matchStatFilter(BASE, 'my_fastlane'), true);
+    });
+    check('my_fastlane 路由到谓词·假例', () => {
+        assert.strictEqual(matchStatFilter({ ...BASE, fast_release_my_pending: 0 }, 'my_fastlane'), false);
+    });
+    check('既有状态组 key（active）行为不变·命中', () => {
+        assert.strictEqual(matchStatFilter({ status: '开发中' }, 'active'), true);
+    });
+    check('既有状态组 key（active）行为不变·不命中', () => {
+        assert.strictEqual(matchStatFilter({ status: '已上线' }, 'active'), false);
+    });
+    check('未知 key 仍放行（现状既有兜底语义未被本次改动破坏）', () => {
+        assert.strictEqual(matchStatFilter({ status: '随便什么状态' }, 'no_such_key_xyz'), true);
+    });
+    check('空 filterKey 仍放行（现状既有兜底语义未被本次改动破坏）', () => {
+        assert.strictEqual(matchStatFilter({ status: '随便什么状态' }, ''), true);
+    });
+
+    console.log('  — siShouldRenderMyFastlaneCard：卡渲染条件三态 —');
+    check('count>0 时渲染（不论是否激活）', () => {
+        assert.strictEqual(shouldRenderCard(3, ''), true);
+    });
+    check('count=0 且非激活不渲染（若实现退化成恒 true，本条会红）', () => {
+        assert.strictEqual(shouldRenderCard(0, ''), false);
+    });
+    check('count=0 但 siActiveStat===my_fastlane 仍渲染（堵陷阱：筛选激活时确认完最后一单，卡若消失用户被困在空筛选里出不来）', () => {
+        assert.strictEqual(shouldRenderCard(0, 'my_fastlane'), true);
+    });
+
+    console.log('  — siRenderStats 接线四条（S-fix 4a，预筛 M4-M7 四破法各对一条）—');
+    // M4 破法：siRenderStats 计数改成内联另一份判据（不再调用 siIsMyFastlanePending）——上面①-⑪的沙箱
+    //   真执行只验证了"siIsMyFastlanePending 这个函数自己对不对"，没验证 siRenderStats 是否真的调用了
+    //   它，这条正是补上这个缺口。
+    check('接线①：siRenderStats 内确实调用了 siIsMyFastlanePending（非内联另一份判据）', () => {
+        const body = bodyOf('siRenderStats');
+        assert.ok(/\bsiIsMyFastlanePending\b/.test(body), '未见 siIsMyFastlanePending 调用——统计卡计数应复用唯一谓词函数，不应另写一份判据（禁双实现）');
+    });
+    // M5 破法：stats.push(key: my_fastlane, ...) 被挪到 siShouldRenderMyFastlaneCard(...) 判断之外
+    //   （变成无条件 push），三态渲染函数本身测得再对，接不上线也白测。
+    check('接线②：stats.push(key:\'my_fastlane\',...) 确实挂在 siShouldRenderMyFastlaneCard(...) 条件分支内部（非无条件 push）', () => {
+        const body = bodyOf('siRenderStats');
+        const ifIdx = body.indexOf('if (siShouldRenderMyFastlaneCard(');
+        assert.ok(ifIdx >= 0, '未见 if (siShouldRenderMyFastlaneCard(...)) 条件分支');
+        const closeIdx = body.indexOf('\n        }', ifIdx);
+        assert.ok(closeIdx > ifIdx, '未能定位该 if 分支收尾（8 空格缩进假设可能与实现不符，需人工核实）');
+        const ifBlock = body.slice(ifIdx, closeIdx);
+        assert.ok(/stats\.push\(/.test(ifBlock), `stats.push(...) 应在 siShouldRenderMyFastlaneCard(...) 条件分支内部，实得该分支内容：${ifBlock}`);
+    });
+    // M6 破法（S2-M4 同款陷阱）：卡对象字面量 key: 'my_fastlane' 与 siMatchStatFilter 里路由判断的
+    //   'my_fastlane' 分开维护，一处改了拼写另一处忘改——"两处都出现这串字符"这类存在性文本检查测不出
+    //   这种漂移（改错的那一处照样"存在一个字符串"），必须提取两处**各自真实值**做相等比对，值不同才
+    //   判红（非"匹配不到预设的固定字面量"这种弱信号）。
+    check('接线③：卡 key 字面量与 siMatchStatFilter 路由到 siIsMyFastlanePending 的 key 字面量同串比对（提取两处真实值逐字比对，一处改另一处不改即判红）', () => {
+        const rsBody = bodyOf('siRenderStats');
+        const ifIdx = rsBody.indexOf('if (siShouldRenderMyFastlaneCard(');
+        assert.ok(ifIdx >= 0, '未见 siShouldRenderMyFastlaneCard 条件分支（若接线②已红，此处连带红属预期，非独立缺陷）');
+        const closeIdx = rsBody.indexOf('\n        }', ifIdx);
+        const ifBlock = rsBody.slice(ifIdx, closeIdx > ifIdx ? closeIdx : rsBody.length);
+        const cardKeyMatch = ifBlock.match(/key:\s*'([^']*)'/);
+        assert.ok(cardKeyMatch, '未在该 if 分支内提取到 key: \'...\' 字面量');
+
+        const msfBody = bodyOf('siMatchStatFilter');
+        const routeLineMatch = msfBody.match(/filterKey === '([^']*)'\)\s*return\s*siIsMyFastlanePending\(item\)/);
+        assert.ok(routeLineMatch, 'siMatchStatFilter 内未提取到路由到 siIsMyFastlanePending 的 filterKey === \'...\' 判断行');
+
+        assert.strictEqual(cardKeyMatch[1], routeLineMatch[1], `卡 key 字面量（${cardKeyMatch[1]}）应与筛选路由字面量（${routeLineMatch[1]}）逐字相同——一处改动另一处未同步会在此判红`);
+    });
+    // M7 破法：计数基数改用别的变量/别的过滤链（如误用已按 siActiveType 过滤过的集合），既有断言组
+    //   （S2 遗留的四条件真执行断言）测不到"基数变量选对了没有"，本条直接钉住字面量。
+    check('接线④：「待我确认」计数基数确实来自 vis（与其余状态卡同一基数变量，非另开一份口径）', () => {
+        const body = bodyOf('siRenderStats');
+        assert.ok(/myFastlaneCount\s*=\s*vis\.filter\(/.test(body), '未见 myFastlaneCount = vis.filter(...) —— 计数基数应用与其余卡相同的 vis 变量');
+    });
+    // [S-fix4·codex 414/415 MED-1] 可点卡交互语义静态钉扎（真执行两态断言在 verify-sys-type-cards ⑤ 组，
+    //   本文件按自身文本级定位补状态卡循环侧）：
+    check('接线⑤a：状态卡循环对可点卡输出 role="button"+tabindex+onkeydown 三件套且与 s.key===null 静态卡互斥', () => {
+        const body = bodyOf('siRenderStats');
+        assert.ok(/const interactive = s\.key === null \? '' : ` role="button" tabindex="0" onkeydown="siCardKeydown\(event\)" aria-pressed=/.test(body), '未见 interactive 属性三件套的静态卡互斥三元（s.key===null 不挂）');
+        assert.ok(/\$\{onClick\}\$\{interactive\}/.test(body), 'interactive 应紧随 onClick 拼进卡模板（漏拼=属性算了没上卡）');
+    });
+    check('接线⑤b：aria-pressed 与视觉 active class 同源（classes.includes(\'active\')·非另写一份激活判据）', () => {
+        const body = bodyOf('siRenderStats');
+        assert.ok(/aria-pressed="\$\{classes\.includes\('active'\)\}"/.test(body), 'aria-pressed 应取 classes.includes(\'active\')——另写判据会与视觉激活态漂移');
+    });
+}
 
 console.log(`\n${failed === 0 ? '[全部通过]' : '[失败]'} ${passed}/${passed + failed} 项断言${failed ? `，${failed} 项失败` : ''}`);
 if (failed) {

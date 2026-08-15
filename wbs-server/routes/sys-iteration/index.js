@@ -7963,6 +7963,16 @@ module.exports = (deps) => {
       const isAdmin = role === 'admin';
       const where = [];
       const params = [];
+      // [值班筛选与类型卡·S-fix3·codex 414 MED-2] 绑定协议结构化：SELECT 投影段参数与 WHERE/addEq 段
+      //   参数**分离声明**，执行点按 SQL 段文本顺序拼接 [...selectParams, ...params]——废止原「params.push(uid)
+      //   必须排数组最前」的隐式跨段时序协议（sqlite3 按 ? 在最终 SQL 文本出现顺序 positional 绑定；靠
+      //   push 时序对齐文本顺序是脆弱约定：将来 WHERE 拼接重排/params 构造拆分/投影区再加占位符都可能
+      //   静默错绑 addEq 的筛选值）。selectParams 只服务 SELECT 投影区占位符（当前恒 1 个=
+      //   fast_release_my_pending 的 uid），投影区将来新增占位符时按投影内文本顺序追加于此，与 WHERE
+      //   参数结构隔离；verify-sys-list-badge-fields「SELECT 恰 1 占位符」守卫仍在（两层互补：结构隔离
+      //   防跨段错位、守卫防投影区占位符数与本数组长度漂移）。uid 可能为 NaN（脏 token）：NaN 传给
+      //   sqlite3 会被转成 NULL，NULL 与 fe.user_id 比较恒不成立，安全退化为"不在任何执行人集合"，不需额外判空。
+      const selectParams = [uid];
 
       // 可见性（M-6）：admin 全部 / 开发只看 assigned_to=本人 / 其他登录用户不可见（返空，非 403——列表给空集）
       // [codex C3 对抗审 HIGH-B 回填] 在册成员读可见性——SSOT §0（方案 v2.9 line 33）明定角色读权：
@@ -8152,7 +8162,8 @@ module.exports = (deps) => {
                    WHEN (SELECT COUNT(*) FROM sys_release_executors e WHERE e.release_id = sys_issues.release_id AND e.removed_at IS NULL AND e.notify_status = 'sent') > 0 THEN 'partial'
                    ELSE 'failed'
                  END) AS executor_notify_summary,
-                -- [先行上线两步化 S6·方案 v1.8 §4-8] 徽章「待先行部署 x/N」派生输入三列：
+                -- [先行上线两步化 S6·方案 v1.8 §4-8 + 值班筛选与类型卡·S1] 徽章「待先行部署 x/N」+ 值班
+                --   「待我确认」筛选的派生输入四列：
                 --   ① fast_release_active_auth——复用 FAST_RELEASE_ACTIVE_AUTH_WHERE_SQL 同一份字面量
                 --      常量（非另拼一份，与 :3805 一带 UPDATE WHERE 层纵深复核同源），非新增状态标志列，
                 --      方案 §2 末段"徽章条件是纯派生"要求的活跃授权布尔即由本列承担；
@@ -8164,11 +8175,33 @@ module.exports = (deps) => {
                 --   "SQL 只出数，状态语义交给前端判断"既有范式，非本条新发明。当日无值班挂牌⇒两计数皆
                 --   0，前端渲染「0/0 待配置执行人」（方案 §4-1）——本三列不做 type/status 门控，与其余
                 --   同族列一致。
+                --   ④ fast_release_my_pending（值班筛选与类型卡·S1 锚点 §3 技术自决）——当前登录用户
+                --      在当前代次执行人集合中且尚未确认为 1，否则为 0。「原始信号不掺闸·前端消费须自行
+                --      AND fast_release_active_auth」的完整口径**只写在下方子查询本体注释一处**（本处不
+                --      复制全文，避免两处注释各自漂移——同详情端点 last_completed_at 注释先例）。
                 (CASE WHEN ${FAST_RELEASE_ACTIVE_AUTH_WHERE_SQL} THEN 1 ELSE 0 END) AS fast_release_active_auth,
                 (SELECT COUNT(*) FROM sys_fast_release_executors fe
                    WHERE ${sysFastReleaseExecActiveWhere('fe', 'sys_issues.id')}) AS fast_release_exec_total_count,
                 (SELECT COUNT(*) FROM sys_fast_release_executors fe
                    WHERE ${sysFastReleaseExecActiveWhere('fe', 'sys_issues.id')} AND fe.exec_status = 'done') AS fast_release_exec_done_count,
+                --   ④ fast_release_my_pending——[值班筛选与类型卡·S1·锚点 §3 技术自决] 当前登录用户在
+                --      本单当前代次执行人集合中且尚未确认（fe.exec_status <> 'done'）时为 1，否则 0；
+                --      同源谓词（不另写一份 issue_id/removed_at 字面量），唯一新增的占位符绑当前 uid
+                --      （见本路由函数体最上方 selectParams 声明处的分段绑定说明·S-fix3 起 SELECT 段与
+                --      WHERE 段参数分离声明、执行点按 SQL 段文本顺序拼接）。**原始信号不掺闸**：
+                --      本列不 AND fast_release_active_auth——前端消费「待我确认」统计卡/筛选时必须自行
+                --      与 fast_release_active_auth=1 AND（沿用徽章既有前置三条件：type='bug' AND
+                --      status='待验证' AND fast_release_active_auth），本列只回答"我在不在集合里且没确认"
+                --      这一件事，不重复判定授权/挂牌是否仍然有效，与 fast_release_active_auth 各管各的
+                --      语义、由消费端组合，同族列一致（同上 SQL 只出数、状态语义交给前端判断的既有范式）。
+                --      比较刻意取否定式 <> 'done'（与同 SELECT 块 305-M2「改正向计数」口径**有意不同源**：
+                --      exec_status 值域被 NOT NULL+CHECK 封闭为 {pending,done} 二值、NULL 结构性不可达，
+                --      两写法当前等价；选否定式是 fail-closed 方向——万一出现脏值应算「待确认」进值班视野，
+                --      而非被正向等值静默排除）。
+                (SELECT EXISTS(SELECT 1 FROM sys_fast_release_executors fe
+                   WHERE ${sysFastReleaseExecActiveWhere('fe', 'sys_issues.id')}
+                     AND fe.user_id = ? AND fe.exec_status <> 'done')
+                ) AS fast_release_my_pending,
                 reopen_count, return_count, scope_changed, created_at, updated_at,
                 tech_lead_id, tech_lead_notify_status,   -- S5 手动化：列表通知徽章消费（193 复审：oa_number 已撤——
                 --   "顺带"加列=未经 187 读权契约证明的扩面；徽章不消费它，列表不需要它）
@@ -8389,7 +8422,7 @@ module.exports = (deps) => {
            FROM sys_issues
           ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
           ORDER BY id DESC`,
-        params
+        [...selectParams, ...params]   // [S-fix3] SELECT 投影段参数在前、WHERE/addEq 段在后——与 SQL 段文本顺序一致（声明处注释详述）
       );
       // ⭐ [C9·§10.1 + 组 B·SB2] 列表逐行派生「已上线」来源四分支——与详情端点走**同一个** deriveOnlineSourceKind，
       //   不在这里重写一份判据（读点分散是 §10.1"所有已上线读点逐点标注"要防的事）。

@@ -822,7 +822,7 @@ async function main() {
       { anchorLine: 5970, reachable: true, gateKind: 'exempt', desc: 'sysIssueTransition 通用引擎唯一 UPDATE——toStatus 变量，服务全部声明式 transition；feature 流里能落到目标两态的边只有①核实的 liaison_test_pass 一条，该边已撤闸（显式豁免，见下方子断言核实其代码块不引用理由闸函数）' },
       { anchorLine: 6676, reachable: false, desc: '建单 path A 占位状态 UPDATE：finalStatus 恒为受理门初始态（resolveSysInitialStatusForCreate 落态）或「开发中」，结构上不可能是待对接测试/待验证' },
       { anchorLine: 6937, reachable: false, desc: '/assign 端点 UPDATE：targetStatus 恒为 SF.SYS_DEV_STATUSES[type][0]（开发中），结构上不可能是待对接测试/待验证' },
-      { anchorLine: 13943, reachable: false, desc: '批量发布执行 UPDATE：字面量写「已上线」（行号随本批 B1/B3+S13 收口 LOW-3 改动插入在其前方整体下移，同一写点，flip UPDATE 语句本体未变）' },
+      { anchorLine: 13976, reachable: false, desc: '批量发布执行 UPDATE：字面量写「已上线」（行号随本批 B1/B3+S13 收口 LOW-3 改动插入在其前方整体下移，同一写点，flip UPDATE 语句本体未变；三段位移实测 13943→13971→13976——① S1 值班筛选在 :7966/:8185 两处净插 28 行推移 13943→13971（57a9741 追平）；② S2/S3 前端批（Sys_Iteration.html/verify 脚本）不改 index.js，本条本应零位移，但同批另有主会话在 index.js 落的三处未提交注释修正净插 5 行，13971→13976（本次一并 grep 实测追平，随本 commit 一起提交）；8 锚点仅本条在两次插入点之后，其余 7 条零位移与套件单红自洽，同一写点人工核对。⚠️ 纪律：本行号一律 grep 实测取值（如按本条 UPDATE 语句字面量 grep index.js 定位真实行号），禁用「旧锚点+估算净插行数」的 diff 推算——推算值与实测值即便凑巧一致也不能免验，历次漂移都在证明净插行数本身容易漏算插入点前后的其它并发改动）' },
     ];
     assert.strictEqual(EXPECTED_STATUS_WRITE_SITES.length, writeSites.length, '[S③前置] 白名单登记条目数应与②实测写点数一致（防清单本身漂移出真相）');
     writeSites.forEach((site, i) => {

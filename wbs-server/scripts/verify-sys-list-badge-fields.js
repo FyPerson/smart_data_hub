@@ -146,6 +146,29 @@ const selected = new Set();
 }
 must(selected.size >= 25, `列表 SELECT 列集合实抓 ${selected.size} 个（过少=解析失败）`);
 
+// [值班筛选与类型卡 S1·S-fix 3a] selectBlock（WHERE 子句之前的列表部分）恰含 1 个 ? 占位符——该唯一
+//   ? 是 fast_release_my_pending 子查询的 uid 占位符，S1 落地时特意排在 params 数组最前（它是整条
+//   SELECT 文本里位置最早的 ?，sqlite3 driver 按 ? 在最终 SQL 文本出现顺序做 positional 绑定，见
+//   index.js 该处"绑定顺序说明"注释）。若未来有人在 SELECT 列表里再加一个 ? 却忘了同步调整 params
+//   数组顺序，全部可见性筛选/addEq 参数都会集体错位一位——本条把"selectBlock 里恒只有这一个 ?"钉成
+//   显式不变量，不再只靠运行时行为侧面推断。
+const selectBlockQMarks = (selectBlock.match(/\?/g) || []).length;
+must(selectBlockQMarks === 1, `列表 SELECT 列表部分（WHERE 之前）应恰含 1 个 ? 占位符（fast_release_my_pending 子查询的 uid），实得 ${selectBlockQMarks}——多出的 ? 会与 params 数组顺序错位`);
+// 对照组（[S-fix2] 管线级重写·预筛三轮 S-fix LOW-1：原「selectBlock 副本拼接后 (N+1)!==1」是构造上的
+//   恒真式且不经被测管线——对照组槽位上出现"断言永远成立"正是 guard-gotchas 要防的形态）：把带 ? 的
+//   注入体前置到 ROUTES 切片副本后**重跑同一条提取管线**（stripSqlLineComments→stripComments→
+//   findOuterBoundary→切块→计数），断言得 2——同时注入体里另藏一个**注释内的 ?**（/* ? */），若管线的
+//   注释剥离失效会计得 3 同样判红，一组对照双向证明"计数经真实管线且注释不计入"。
+{
+  const mutatedSlice = '/* ? */ (?) ' + ROUTES.slice(listSelStart, listSelStart + SELECT_SCAN_UPPER_BOUND);
+  const stripped2 = stripComments(stripSqlLineComments(mutatedSlice));
+  const boundary2 = findOuterBoundary(stripped2, 'FROM sys_issues');
+  must(!boundary2.wentNegative && boundary2.index > 0, '★对照组前置：注入后管线边界扫描仍应可定位且深度非负（注入体 (?) 括号自平衡）');
+  const block2 = stripped2.slice(0, boundary2.index);
+  const fakeQMarks = (block2.match(/\?/g) || []).length;
+  must(fakeQMarks === 2, `★对照组（管线级）：注入 1 个真 ?（注释内另藏 1 个假 ?）后重跑同一条提取管线应恰计 2 个，实得 ${fakeQMarks}——≠2 说明判据恒真、管线未被经过、或注释剥离失效`);
+}
+
 // ── 对拍 ────────────────────────────────────────────────────────
 const missing = [...consumed].filter(f => !selected.has(f) && !FRONTEND_DERIVED[f]);
 must(missing.length === 0,
@@ -194,6 +217,15 @@ const BADGE_FIELDS = [
   //   出可读定位）。
   ['post_derive_root_id', '补验收未通过·已派生子编号——目标派生单 derive_root_id 标量子查询投影'],
   ['post_derive_seq', '补验收未通过·已派生子编号——目标派生单 derive_seq 标量子查询投影'],
+  // [值班筛选与类型卡 S1/S2·S-fix 3b] fast_release_my_pending——同 derive_seq 先例：本列被
+  //   siIsMyFastlanePending(i)（Sys_Iteration.html 内定义，非本文件五个扫描函数体
+  //   renderSysIterationRows/siTechLeadNotifyBadgeHtml/siPrereleaseFlagHtml/siPostAcceptFlagHtml/
+  //   siFastlaneFlagHtml 之一——统计卡/筛选路径在"列表行渲染"之外，超出本守卫头部注释明写的
+  //   "只覆盖列表行渲染路径"扫描面）以 i.fast_release_my_pending 字面量消费，本文件的 \bi\. 扫描器
+  //   天然抓不到这条消费。若不点名登记，后端未来一旦漏投影/误删该列，本守卫会全绿放过——「待我
+  //   确认」统计卡与 my_fastlane 横切筛选会静默恒读到 undefined（卡恒 0、点卡筛选恒空结果集），
+  //   却没有任何断言会报红。
+  ['fast_release_my_pending', '值班「待我确认」统计卡计数 + siMatchStatFilter my_fastlane 横切筛选（siIsMyFastlanePending 消费，本守卫扫描面之外，点名登记兜底）'],
 ];
 for (const [f, label] of BADGE_FIELDS) {
   must(selected.has(f), `徽章「${label}」依赖字段 ${f} 在列表 SELECT 中`);
