@@ -42,6 +42,13 @@ class MainStatusGuardError extends Error {
 //   「进已上线」现为**三条明示入口**：RELEASE + NO_COMMIT_ONLINE + FAST_RELEASE_DIRECT（先行上线直上）。
 //   不回改上一句原文（保留沿革记录本身的准确性——那句在写下时确实是对的），只在此追记当前事实，避免
 //   读者以为"两条"是最新状态。
+//   [codex 384 预筛 LOW-1 追记] 上面这条追记本身也已过期——本文件下方第 7 种 routeKind 已从
+//   FAST_RELEASE_DIRECT 原地改名为 **FAST_RELEASE_CONFIRM**（S3·§4-4b，边形状同步重写：before 从 DEV 态
+//   改为待验证，action 从 'submit' 改为 'fast_release_exec_confirm'——不再是"直上"，是"两步化确认翻牌"，
+//   见该 routeKind 定义处完整改名论证）。「进已上线」仍是三条明示入口，只是第三条的名字和走法已换：
+//   RELEASE + NO_COMMIT_ONLINE + FAST_RELEASE_CONFIRM（先行上线执行确认翻牌）。同样不回改上面两句
+//   （各自在写下时均准确），本段落存在的目的就是持续追记"当前事实"，这次连自己上一条追记都需要更新，
+//   如实记录，不因"这段本来就是干这个的"而特殊豁免自查。
 //   ⚠️ 红线核对：方案 §10.1 点名的 `_publishReleaseCoreInTxn` 与 R-GATE **零触碰**——本改动只在守卫里
 //     多认一条边的形状，不进批次链路任何一行（红线澄清见方案 v1.7 四订修订记录）。
 //   ⚠️ **分工边界（本文件是静态形状层）**：守卫只校验"边的形状"——谁（routeKind）、什么动作（action）、
@@ -49,14 +56,26 @@ class MainStatusGuardError extends Error {
 //     无 active 批次关联 / 状态 CAS / 删光留痕）全部是**活体数据判定**，在引擎的 sysBeginImmediate 事务内
 //     由 `evaluateNoCommitDirectOnline` 完成，**不在本文件**。本文件拿不到也不该拿 commits/releases 表——
 //     混进来会让守卫从"形状约束"退化成"业务逻辑第二实现"，两处判据必然漂移。
-// ⭐ [组 B·SB2·先行上线 submit 直上·方案 v1.3 §3.2] 新增第 7 种 routeKind：FAST_RELEASE_DIRECT。
-//   背景与 NO_COMMIT_ONLINE 同款（C9 那次的先例直接复用）：submit 端点 direct_release=true 时，一条
-//   已获快车道授权的 bug 单从「处理中」（DEV 族）**跳过待验证/待上线**直接进「已上线」——这是"进已上线"
-//   的第三条明示入口。与 NO_COMMIT_ONLINE 的本质差别是 before 不同：NO_COMMIT_ONLINE 是"待验证→已上线"
-//   （验收阶段判定无需批次），FAST_RELEASE_DIRECT 是"处理中→已上线"（开发阶段本身即被授权跳过整个
-//   验证+上线安排两个阶段）。与 C9 同一裁定精神（用户 2026-08-07·选项 A）：新增一条边就显式登记一个
-//   routeKind，不悄悄放宽 ADMIN_TRANSITION 的"进已上线"限制、也不让调用方端点自持事务绕开守卫。
-const ROUTE_KINDS = ['CREATE', 'ADMIN_TRANSITION', 'GATE', 'RELEASE', 'RESET', 'NO_COMMIT_ONLINE', 'FAST_RELEASE_DIRECT'];
+// ⭐ [组 B·SB2·先行上线 submit 直上·方案 v1.3 §3.2·**已随 S2 拆直上分支废弃**] 曾新增第 7 种 routeKind：
+//   FAST_RELEASE_DIRECT（submit direct_release=true 时「处理中」DEV 族跳过验证/上线安排直接进「已上线」）。
+//   该分支已随两步化方案 §4-2「整体替代」拆除（S2-2），FAST_RELEASE_DIRECT 曾一度是零调用点的死代码。
+// ⭐⭐ [S3·§4-4b·codex 384 论证=改名/复用] 现场调查结论：`FAST_RELEASE_DIRECT` 与本批新增的 confirm
+//   翻牌边**形状不同**（旧 before=DEV 态，新 before=待验证）但**血缘/立法精神完全同源**——都是"先行上线"
+//   这同一条业务功能线在「进已上线」这件事上的专属入口，都遵循 C9 那次的裁定精神（新增一条边就显式登记
+//   一个 routeKind，不悄悄放宽 ADMIN_TRANSITION、不让端点自持事务绕开守卫）。三个候选方案比较：
+//     ①扩 NO_COMMIT_ONLINE 兼容第二个 action——**否决**：NO_COMMIT_ONLINE 与 FAST_RELEASE_DIRECT 建立
+//       之初就各自"只服务一条边"（两处头部注释原话），是本文件既定的"一 routeKind = 一边 = 一 action"
+//       设计原则；C9 的 accept×待验证→已上线 与两步化的 confirm×待验证→已上线 虽 SHAPE 相同，业务准入
+//       判据/引擎实现完全独立（C9 靠 evaluateNoCommitDirectOnline 四条件、两步化靠先行上线执行人集合
+//       全员 done），混进同一 routeKind 会让"这条边到底服务谁"变得依赖 action 值二次分支，破坏该原则；
+//     ②整体删除 FAST_RELEASE_DIRECT + 新增第 8 种 routeKind——可行但舍近求远：这条"先行上线专属入口"
+//       槽位血缘对得上，删了再造一个新名字反而丢失"进已上线共几条边"的沿革记录连续性；
+//     ③**采纳：原地改名 + 重写边校验/action 约束**——槽位保留（仍是"第 7 种"），旧边（DEV 态→已上线，
+//       action='submit'）已死、新边（待验证→已上线，action='fast_release_exec_confirm'）接管同一槽位，
+//       ROUTE_KINDS 数组条目数不变，"进已上线入口计数"的沿革记录得以延续（只是这一条入口换了具体走法）。
+//   新名 `FAST_RELEASE_CONFIRM`：不再叫"DIRECT"（不再是"直接跳过"语义，两步化的核心正是"不再直接"——
+//   先挂牌再由值班执行人确认），改叫"CONFIRM"精确对应新机制的动作本质（执行人确认后触发翻牌）。
+const ROUTE_KINDS = ['CREATE', 'ADMIN_TRANSITION', 'GATE', 'RELEASE', 'RESET', 'NO_COMMIT_ONLINE', 'FAST_RELEASE_CONFIRM'];
 const RELEASE_ACTION_KINDS = ['publish', 'hotfix', 'execute'];
 
 // 白名单外 / 边非法 / 未知状态 → 409（状态机排他冲突，方案 §10）。
@@ -89,9 +108,11 @@ const ALLOWED_TARGET_FAMILIES = {
   //   SYS_RELEASE_STATUSES=['待上线','已上线']）——故目标族白名单与 RELEASE 相同。族相同不等于边相同：
   //   两者的 before 不同（RELEASE=待上线 / NO_COMMIT_ONLINE=待验证），由 ① 层各自的边校验分开钉死。
   NO_COMMIT_ONLINE: ['RELEASE'],
-  // [组 B·SB2] 先行上线直上同样只写「已上线」，同归 RELEASE 族——与 NO_COMMIT_ONLINE 族相同、边不同
-  //   （FAST_RELEASE_DIRECT 的 before 是该 issueType 的 DEV 态，非「待验证」），由 ① 层单独钉死。
-  FAST_RELEASE_DIRECT: ['RELEASE'],
+  // [S3·改名自 FAST_RELEASE_DIRECT] 先行上线执行确认翻牌同样只写「已上线」，同归 RELEASE 族——与
+  //   NO_COMMIT_ONLINE 族相同、边不同：before 现为「待验证」（与 NO_COMMIT_ONLINE 相同），区分点在于
+  //   action 名与业务准入判据（本 routeKind 靠先行上线执行人集合全员 done，非 evaluateNoCommitDirectOnline
+  //   四条件），由 ① 层单独钉死。
+  FAST_RELEASE_CONFIRM: ['RELEASE'],
 };
 
 // H1（91 号审）：RELEASE 的 action×actionKind 合法配对（开发计划 §2.5——publish=变更流 publish 动作／
@@ -105,7 +126,7 @@ const RELEASE_ACTION_ACTIONKIND_PAIRS = {
 /**
  * assertMainStatusTransition —— 不变量 7 三层组合的统一入口。
  * @param {object} p
- * @param {'CREATE'|'ADMIN_TRANSITION'|'GATE'|'RELEASE'|'RESET'|'NO_COMMIT_ONLINE'|'FAST_RELEASE_DIRECT'} p.routeKind
+ * @param {'CREATE'|'ADMIN_TRANSITION'|'GATE'|'RELEASE'|'RESET'|'NO_COMMIT_ONLINE'|'FAST_RELEASE_CONFIRM'} p.routeKind
  * @param {string|null} p.action - CREATE 固定 'create'；ADMIN_TRANSITION 传 findTransition 解析出的具名 action
  *   （accept/resume/schedule/close/...）；RELEASE 传实际 action（publish/execute-release，供上层记录，本函数
  *   校验用 actionKind 不用这个字段）；GATE 恒 null，本函数强制校验其为 null（合成边，无统一动作码）。
@@ -151,9 +172,10 @@ function assertMainStatusTransition(p) {
     // [C9] 本 routeKind 只服务一条边，action 恒为 'accept'——传别的一律拒（fail-closed，防调用方误用本
     //   入口给其它动作开后门；"只允许一条边"这条限制在下方 ① 层还会再校一次 before→after，两层都不放松）。
     if (action !== 'accept') reject409(`NO_COMMIT_ONLINE routeKind 的 action 必须固定为 'accept'（本入口只服务"无提交免上线直翻"这一条边），实际=${action}`);
-  } else if (routeKind === 'FAST_RELEASE_DIRECT') {
-    // [组 B·SB2] 同 NO_COMMIT_ONLINE 先例，本 routeKind 只服务一条边，action 恒为 'submit'——传别的一律拒。
-    if (action !== 'submit') reject409(`FAST_RELEASE_DIRECT routeKind 的 action 必须固定为 'submit'（本入口只服务"bug 先行上线直上"这一条边），实际=${action}`);
+  } else if (routeKind === 'FAST_RELEASE_CONFIRM') {
+    // [S3·改名自 FAST_RELEASE_DIRECT] 同 NO_COMMIT_ONLINE 先例，本 routeKind 只服务一条边，action 恒为
+    //   'fast_release_exec_confirm'——传别的一律拒（旧边 action='submit' 已随 S2 拆直上分支失效，不再放行）。
+    if (action !== 'fast_release_exec_confirm') reject409(`FAST_RELEASE_CONFIRM routeKind 的 action 必须固定为 'fast_release_exec_confirm'（本入口只服务"先行上线执行确认翻牌"这一条边），实际=${action}`);
   } else if (routeKind === 'RELEASE') {
     if (!RELEASE_ACTION_KINDS.includes(actionKind)) {
       reject409(`RELEASE routeKind 必须传合法 actionKind∈{${RELEASE_ACTION_KINDS.join(',')}}，实际=${actionKind}`);
@@ -313,15 +335,18 @@ function assertMainStatusTransition(p) {
       reject409(`NO_COMMIT_ONLINE 边非法：${before}→${after}（仅允许 ${verifyStatus}→已上线·无提交免上线直翻）`);
     }
     afterFamily = 'RELEASE';
-  } else if (routeKind === 'FAST_RELEASE_DIRECT') {
-    // [组 B·SB2·先行上线直上·方案 v1.3 §3.2] 唯一合法边：该 issueType 的 DEV 态 → 已上线。
-    //   before 是 DEV 态（非验证态）——这是本 routeKind 与 NO_COMMIT_ONLINE（before=待验证）的本质差别：
-    //   C9 是"验收阶段发现无提交，直接结单"，本路径是"开发阶段本身即被授权跳过整个验证+上线安排"。
-    //   调用方（submit 端点）已在事务内独立校验 type='bug'（B1 拍板仅 bug 类），本文件是"形状层"不重复
-    //   业务类型判定（同 NO_COMMIT_ONLINE 文件头"业务逻辑不在本文件"的分工声明）——devStatus 取自
-    //   SF.SYS_DEV_STATUSES[issueType][0]，对任意已知 issueType 通用，非硬编码 bug 专属字符串。
-    if (!(before === devStatus && after === '已上线')) {
-      reject409(`FAST_RELEASE_DIRECT 边非法：${before}→${after}（仅允许 ${devStatus}→已上线·先行上线直上）`);
+  } else if (routeKind === 'FAST_RELEASE_CONFIRM') {
+    // [S3·§4-4b·改名自 FAST_RELEASE_DIRECT] 唯一合法边：该 issueType 的「待验证」→ 已上线。
+    //   ⚠️ 边形状已变更（旧版 before=DEV 态，本条已随改名同步重写）：两步化的确认翻牌发生在**验证阶段
+    //   结束之后**（花名册全完成→进「待验证」→挂牌→值班执行人全员确认→翻牌），不再是"开发阶段本身
+    //   跳过整个验证+上线安排"（那是已死的旧机制）。本条边的 before 现与 NO_COMMIT_ONLINE 相同（均为
+    //   verifyStatus），区别是准入判据完全独立（C9 靠 evaluateNoCommitDirectOnline 四条件、本路径靠
+    //   先行上线执行人集合全员 done，见共享翻牌内核）——两条边"形状相同、判据不同"，仍需各自 routeKind
+    //   独立钉死，不可合并（见文件头本 routeKind 改名论证①"否决扩 NO_COMMIT_ONLINE"）。
+    //   调用方（确认端点/共享翻牌内核）已在事务内独立校验 type='bug'（先行上线仅 bug 类，B1 既有拍板），
+    //   本文件是"形状层"不重复业务类型判定（同 NO_COMMIT_ONLINE 文件头"业务逻辑不在本文件"的分工声明）。
+    if (!(before === verifyStatus && after === '已上线')) {
+      reject409(`FAST_RELEASE_CONFIRM 边非法：${before}→${after}（仅允许 ${verifyStatus}→已上线·先行上线执行确认翻牌）`);
     }
     afterFamily = 'RELEASE';
   } else if (routeKind === 'RELEASE') {
@@ -392,21 +417,27 @@ function assertMainStatusTransition(p) {
   //   routeKind 的 before 恒为「待上线」（①层已强校验），`familyOfStatus('待上线')` 本就返回 'RELEASE'——若照抄
   //   `beforeFamily !== 'RELEASE'` 会让 publish/hotfix/execute 永远判定为"未跨出该族"而漏判，此门形同虚设。
   //   实际只需 `afterFamily === 'RELEASE'`：②层白名单（ALLOWED_TARGET_FAMILIES）已保证只有
-  //   ADMIN_TRANSITION / RELEASE / NO_COMMIT_ONLINE / **FAST_RELEASE_DIRECT** 四个 routeKind 能让
+  //   ADMIN_TRANSITION / RELEASE / NO_COMMIT_ONLINE / **FAST_RELEASE_CONFIRM** 四个 routeKind 能让
   //   afterFamily 落在 'RELEASE'（⭐ [C9-fix L1] 原注释写"两个 routeKind"并只枚举三条边，是 C9 新增第三个
   //   routeKind 时漏更的陈述——注释是审查输入，少列一条边会让读者以为本门只覆盖两个入口，从而误判某条边
-  //   有没有过 roster 门；[组 B·SB2] 同理补第四个 routeKind），且各自的边校验已强制 before 只能是下列
-  //   **五条边**之一：
+  //   有没有过 roster 门；[组 B·SB2] 同理补第四个 routeKind，[S3] 该 routeKind 改名但槽位延续），且各自的
+  //   边校验已强制 before 只能是下列**五条边**之一：
   //     · ADMIN_TRANSITION + accept  ：待验证 → 待上线
   //     · ADMIN_TRANSITION + resume  ：已暂缓 → 待上线（hold.from 含待上线时）
   //     · RELEASE（publish/hotfix/execute）：待上线 → 已上线
   //     · NO_COMMIT_ONLINE + accept  ：待验证 → 已上线（C9 免上线直翻）
-  //     · FAST_RELEASE_DIRECT + submit：DEV 态 → 已上线（组 B 先行上线直上，方案 v1.3 §3.2）
+  //     · FAST_RELEASE_CONFIRM + fast_release_exec_confirm：待验证 → 已上线（两步化先行上线执行确认
+  //       翻牌，S3·§4-4b——旧边"DEV 态→已上线·action=submit"已随 S2 拆直上分支废弃，边形状已变更）
   //   五者都是"产出/进入"该具体目标态的真实转移，不存在同态空转的可能，故不需要再判 beforeFamily。
-  //   ⚠️ NO_COMMIT_ONLINE / FAST_RELEASE_DIRECT 同样**受本门约束**（在册≥1 ∧ 全员完成态）——免上线/先行
-  //     上线均不等于免 roster 门："已上线态不应存在未完成开发"这条业务直觉与来路无关，两条直翻边同样要满足
-  //     （FAST_RELEASE_DIRECT 的调用方 submit 端点在调本函数前已自行核验并传入 rosterAllComplete，本门是
-  //     纵深第二层，不信任调用方一定算对）。
+  //   ⚠️ NO_COMMIT_ONLINE / FAST_RELEASE_CONFIRM 同样**受本门约束**（在册≥1 ∧ 全员完成态）——免上线/先行
+  //     上线均不等于免 roster 门："已上线态不应存在未完成开发"这条业务直觉与来路无关，两条直翻边同样要满足。
+  //     [S3 订正] 这里的 roster 特指**开发花名册**（sys_issue_dev_assignees），非先行上线执行人集合
+  //     （sys_fast_release_executors，S1 新表，不受本门约束——那是另一层独立的"执行人全员确认"判定，
+  //     在共享翻牌内核里单独查，不复用本参数）。FAST_RELEASE_CONFIRM 的 before 恒为「待验证」，此刻开发
+  //     花名册按定义必然满足「在册≥1∧全完成」（这正是 GATE 把单据送进「待验证」的前提条件本身），本门在
+  //     这条边上事实上恒放行——但调用方（确认端点/共享翻牌内核）仍应同事务内查询开发花名册并如实传入
+  //     rosterActiveCount/rosterAllComplete（同 NO_COMMIT_ONLINE 既有先例"调用方在调本函数前已自行核验
+  //     并传入"，本门是纵深第二层，不信任调用方一定算对、也不因"理论恒真"就传硬编码的 true）。
   const enteringRelease = afterFamily === 'RELEASE';
   if (enteringRelease) {
     if (!(Number(rosterActiveCount) >= 1 && rosterAllComplete === true)) {

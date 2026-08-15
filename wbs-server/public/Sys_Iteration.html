@@ -7,7 +7,7 @@
     <title>系统迭代 - 智数协同平台</title>
     <link rel="icon" href="data:,">
     <link rel="stylesheet" href="assets/css/style.css?v=v1.141.0_badge2">
-    <link rel="stylesheet" href="assets/css/components.css?v=v1.152.0_prereleasetier1">
+    <link rel="stylesheet" href="assets/css/components.css?v=v1.153.0_fastlanetier15">
     <style>
         /* ============================================================
            系统迭代页 · 页面专属残留（共享组件层已迁移至 assets/css/components.css）
@@ -160,6 +160,21 @@
         .si-flag.removed { color: #dc2626; }
         .si-flag.unsched { color: #64748b; }
         .si-flag.lineage { color: #9ca3af; font-weight: 500; }
+        /* [S13·§15.3/§15.4 派生单子编号树形聚类] 缩进树枝 + 连接线——页专属渲染逻辑，不进共享层
+           unify-helpers.js（其头注"最小抽象原则"明文禁止把各页专属派生逻辑塞进共享层），本页独立复刻
+           Data_Correction.html 同款范式（.corr-row-child/.corr-row-last/.corr-rework-num），选字符/配色
+           刻意与其一致（红色系子行·├/└ 连接线），保持两处派生单/返工子单的视觉语言统一，非巧合雷同。 */
+        .si-derive-num { color: #b91c1c; font-weight: 600; font-variant-numeric: tabular-nums; }
+        #sysIterationListTable tbody tr.si-row-child td:first-child { padding-left: 30px; position: relative; }
+        #sysIterationListTable tbody tr.si-row-child td:first-child::before { content: '\251c'; position: absolute; left: 12px; top: 11px; color: #cbd5e1; font-size: 12px; line-height: 1; }   /* ├ */
+        #sysIterationListTable tbody tr.si-row-child.si-row-last td:first-child::before { content: '\2514'; }   /* └ */
+        /* 缺根降级补显：族根不在当前筛选可见集合但仍在已加载 siList 内时，灰显补上（结构完整优先），
+           与 Data_Correction .corr-row-context 同款语义（信息性上下文，非用户主动筛出的正常业务行）。 */
+        #sysIterationListTable tbody tr.si-row-context td { color: #9ca3af; font-style: italic; }
+        /* 搜索命中高亮（§15.4 决策表默认④"命中族内任一成员整族带出+命中行高亮"——本类只加在真正命中
+           搜索词的那一行，家族广播带出的非命中同族成员不加，保持"高亮=精确匹配"的可读性）。 */
+        #sysIterationListTable tbody tr.si-row-search-hit { background: #fef9c3; }
+        #sysIterationListTable tbody tr.si-row-search-hit:hover { background: #fef08a; }
         .si-muted { color: #9ca3af; }
         /* commit号两列 C3（20260803·D3/D13）：新增列的宽度约束——列表已 11 列贴着 1920，加 3 列必须省着用。
            si-commit-cell 用等宽字体（commit 编码是 hash/路径，等宽更好认）+ 不换行省纵向空间；
@@ -246,6 +261,17 @@
 
         .si-lineage { background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px; padding: 9px 13px; font-size: 12px; color: #92400e; margin-bottom: 14px; }
         .si-lineage a { color: #b45309; font-weight: 600; cursor: pointer; text-decoration: underline; }
+        /* [S13-b·B2·矩阵行5] 派生链区块——原「📌 基于 #N 迭代而来」「🔁 已衍生 N 个迭代需求」两行升级为此
+           区块（版式思路参考 demo_派生单子编号_对比_20260813_v1.0.html 方案B「详情页派生链」，class 命名
+           沿用本页 si- 前缀 + 页专属 CSS，不引入 demo 的无关样式）。 */
+        .si-chain { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 10px 14px; margin-bottom: 14px; }
+        .si-chain h4 { font-size: 13px; margin: 0 0 8px; color: #374151; }
+        .si-chain-row { display: flex; gap: 8px; align-items: center; padding: 6px 8px; border-radius: 6px; font-size: 12px; flex-wrap: wrap; }
+        .si-chain-row.cur { background: #f5f3ff; }
+        .si-chain-pill { background: #f1f5f9; color: #475569; border-radius: 4px; padding: 1px 6px; font-size: 11px; white-space: nowrap; }
+        .si-chain-reason { color: #9ca3af; font-size: 11px; flex-basis: 100%; padding-left: 8px; }
+        .si-chain-go { color: #2563eb; cursor: pointer; font-size: 11px; }
+        .si-chain-cur-mark { color: #7c3aed; font-size: 11px; font-weight: 600; }
         /* 角色权限重构 v2.1 §6（S5 通知手动化·D4）：技术负责人通知未发送/失败红条——独立于 si-gate-hint（那是
            动作引导，此处是"漏发不能只靠详情页被发现"这条不变量的可见信号），红色区分优先级。 */
         .si-notify-alert { background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 9px 13px; font-size: 12px; color: #b91c1c; font-weight: 600; margin-bottom: 14px; }
@@ -886,9 +912,10 @@
 
     // [组 B·SB3] 活跃先行上线授权判定——前端 UI 镜像，与后端 index.js :3188 一带 isActiveFastReleaseAuth
     // 权威谓词**逐条同源**（唯一差异：前端不做该函数的"缺列 fail-closed"防线——iss 对象来自详情端点
-    // `SELECT sys_issues.*`，六列恒全，无需防御调用点漏投影）。用于①详情页授权/撤销按钮显隐 ②submit
-    // 弹窗"已随修复直接上线"勾选框显隐。⚠️ 前端非授权源，真闸在后端同名谓词，这里判错只会误显/误藏
-    // 按钮，不会绕过后端拦截（点击后端仍会按真实谓词 409）。
+    // `SELECT sys_issues.*`，六列恒全，无需防御调用点漏投影）。用于详情页授权/撤销按钮显隐。
+    // [组B·S2-2 订正] 原第二用途"submit 弹窗「已随修复直接上线」勾选框显隐"已随该勾选框整块拆除（方案
+    // §4-2「整体替代」拍板）——本函数现仅服务授权/撤销按钮这一处，不再是"两处共用同一判据"的双消费点。
+    // ⚠️ 前端非授权源，真闸在后端同名谓词，这里判错只会误显/误藏按钮，不会绕过后端拦截。
     function siHasActiveFastReleaseAuth(iss) {
         if (!iss) return false;
         return iss.fast_release_auth_at != null
@@ -979,6 +1006,70 @@
     // [D22 批2·2026-08-06] 「待验证」→「待验收」纯展示映射——存储值/API/筛选器 value 恒不变（同「已关闭→
     //   已归档」先例，本函数是全站唯一改名口，所有渲染状态文字的地方统一走它，不逐处硬编码替换字符串）。
     function siStatusDisplay(s) { return s === '已关闭' ? '已归档' : (s === '待验证' ? '待验收' : s); }
+    // [S13·§15.3 helper 契约] 派生单展示号「#根_序」前端单点——与后端 utils/sys-derive-numbering.js
+    //   #sysIssueDisplayNo 字节级同规则（同规则禁双实现：前后端各一单点，一致性由共用 fixture 钉，见
+    //   utils/sys-issue-display-no.fixtures.js 头注"S13 接线提示"）：derive_root_id 与 derive_seq
+    //   **两列都严格 != null**（同时排除 null/undefined，非真值判断——seq=0 不应误回退，虽非真实业务值
+    //   但职责边界是"只格式化不校验"，与后端同款克制）才拼 `#根_序`；任一缺省（含整个 row 本身缺省）
+    //   回退 `#${row.id}`——根单自身 root/seq 恒 NULL，回退 #id 正是它的正常展示形态，非异常兜底。
+    //   全前端后续显示面（列表单号列/血缘徽章/已派生徽章/搜索/未来弹窗收口）一律经此单点，禁止第二处
+    //   拼 `#根_序`（同规则禁双实现——本页内除本函数外不得再出现 `#${...root...}_${...seq...}` 字面量）。
+    function siIssueDisplayNo(row) {
+        if (!row) return '';
+        const hasRoot = row.derive_root_id !== null && row.derive_root_id !== undefined;
+        const hasSeq = row.derive_seq !== null && row.derive_seq !== undefined;
+        if (hasRoot && hasSeq) return `#${row.derive_root_id}_${row.derive_seq}`;
+        return `#${row.id}`;
+    }
+    // [406-L1] XSS 纵深防御（轻量版）：插进 HTML 属性（title=）与 onclick 实参的编号值（i.id/
+    //   i.derive_root_id/m.id 等）必须先过本函数——只有安全整数才原样插值，否则返回空串（占位，不
+    //   产出可能断开属性引号/JS 字符串边界的任意字符）。这些值理论上恒为 SQLite INTEGER 列取值，本
+    //   函数不是"假设数据库会脏"的悲观新增，是纵深防御的下一层：迁移链九类熔断/alloc typeof 闸/主键
+    //   来源等既有防线管的是"业务写入路径能不能把脏值写进去"，不管"万一某行已经是脏值（历史遗留/未来
+    //   旁路写入/运维直连 SQL）该怎么渲染"这一层——两者互补，不是同一件事的重复。
+    //   [407-L1 收紧] 首版裸 `Number(v)` 转换过于宽松——JS 的 `Number()` 强转对多种"看起来不像整数"
+    //   的输入会静默产出一个安全整数，被首版判定误放行成"合法编号"插值：`Number('')===0`（空字符串
+    //   转成 0，插出一个不存在的编号）、`Number(true)===1`（布尔值转成 1）、`Number('0x10')===16`
+    //   （十六进制字符串被解析成十进制值，插出的编号与源字符串字面意思对不上）。这类值不是"字符串型
+    //   注入 payload"（那类已被本函数首版正确挡住），是"类型本身就不该被当成编号"——只有真正表示
+    //   十进制整数的输入才该被信任插值。改为白名单穷举：
+    //   ① v 本身是 number 类型 → 走 Number.isSafeInteger 判定（数字字面量安全整数，如 5、-3）
+    //   ② v 是 string 类型 → trim 后必须整串匹配 `/^-?\d+$/`（纯十进制数字，可选前导负号，不接受
+    //      空串/十六进制前缀/科学计数法/千分位逗号等任何变体）才转换判定，其余字符串一律空串
+    //   ③ 其余类型（boolean/object/undefined/null 等）一律空串——不给 `Number()` 强转的机会
+    function siSafeIdAttr(v) {
+        if (typeof v === 'number') {
+            return Number.isSafeInteger(v) ? String(v) : '';
+        }
+        if (typeof v === 'string') {
+            const t = v.trim();
+            if (!/^-?\d+$/.test(t)) return '';
+            const n = Number(t);
+            return Number.isSafeInteger(n) ? String(n) : '';
+        }
+        return '';
+    }
+    // [S13-b·B3·矩阵行6] 弹窗标题子编号收口的按 id 取号入口——多数弹窗操作的是当前抽屉打开的这张单
+    //   （siDetail.issue 现成含 derive_root_id/derive_seq，命中即最权威、零额外查找）；少数弹窗（先行
+    //   上线执行人添加/确认、上线单成员移出）只带 issueId 参数、不保证抽屉里开的就是它，退化查 siList
+    //   （已加载则命中，未加载/不在结果集则回退真实 id——不新增后端投影、不硬造数据，同 B1/B2「已加载
+    //   列表内查找」降级口径一致）。
+    function siIssueDisplayNoById(id) {
+        if (siDetail && siDetail.issue && Number(siDetail.issue.id) === Number(id)) return siIssueDisplayNo(siDetail.issue);
+        const found = (siList || []).find((x) => Number(x.id) === Number(id));
+        return siIssueDisplayNo(found || { id });
+    }
+    // [S13-b·B3·矩阵行12] 删除审计双记——矩阵唯一例外：子编号+括号真实 id 都显示（用户 2026-08-13 裁定：
+    //   删除是子编号失去反查能力的唯一场景，审计须留真实锚点）。row 需含 {issue_id, issue_derive_root_id,
+    //   issue_derive_seq} 三字段（列表/详情两端点字段名一致，直接传整行即可，见 index.js 该两端点注释）。
+    //   仅当确有子编号（真派生单）才追加括号真实 id——根单/独立单的子编号本就回退成 #id，再括注一次是
+    //   纯冗余重复（"#123（#123）"），siIssueDisplayNo 内部判空逻辑不重复实现，这里只做"是否追加"分支。
+    function siDeleteAuditDualNo(row) {
+        const dispNo = siIssueDisplayNo({ id: row.issue_id, derive_root_id: row.issue_derive_root_id, derive_seq: row.issue_derive_seq });
+        const isDerived = row.issue_derive_root_id !== null && row.issue_derive_root_id !== undefined
+            && row.issue_derive_seq !== null && row.issue_derive_seq !== undefined;
+        return isDerived ? `${dispNo}（#${row.issue_id}）` : dispNo;
+    }
     const SI_STATUS_GROUPS = {
         // 受理排期改造：删「已排期/待评估」→「待受理/待修改/待指派」（受理门+待派均属"进行中"前段·归 active）。
         // （C2.5 撤销·方案 v2.1）「待商议」归 active 一项已删——预沟通段废除，该状态不再产生。
@@ -1539,14 +1630,43 @@
             siRenderTable();
         }, 250);
     }
+    // [S13·§15.3 矩阵行10/378-L1] 子编号搜索——完整输入锚定解析 `^#?(\d+)_(\d+)$` 成 root+seq 后按
+    //   **精确等值**匹配（禁 LIKE 式模糊：SQL LIKE 的 `_` 是单字符通配，这里虽是前端内存匹配非 SQL，
+    //   仍延续同一纪律——不做子串/通配包含，只做严格 === 比对）；解析失败（不完整匹配整个输入）则不
+    //   参与子编号判定，落回下方既有真实 id/标题/系统名子串匹配（真实 id 匹配维持不变）。
+    const SI_DISPLAY_NO_SEARCH_RE = /^#?(\d+)_(\d+)$/;
+    // [S13 收口 LOW-1] siMatchSearch 与 siIsExactSearchMatch 原各自逐字维护一份"子编号解析+等值比对"
+    // 四行判定——抽成本函数单点复用（两处调用点行为不变，仅消除重复实现，改一处漏另一处的风险归零）。
+    // [预筛 LOW-1(原)·同根陷阱修复] 两列必须**都非 null/undefined** 才参与等值比对——否则 `Number(null)===0`
+    // 会让 derive_root_id/derive_seq 皆空的非派生单被 "0_0" 假匹配、半缺行（仅一列有值）被 "201_0"
+    // 这类查询误中（如 derive_root_id=201∧derive_seq=null 会被误判命中 "201_0"）。
+    function siMatchDisplayNoEqual(item, q) {
+        const dn = SI_DISPLAY_NO_SEARCH_RE.exec(q);
+        return !!(dn && item.derive_root_id != null && item.derive_seq != null
+            && Number(item.derive_root_id) === Number(dn[1]) && Number(item.derive_seq) === Number(dn[2]));
+    }
     function siMatchSearch(item) {
         if (!siActiveSearch) return true;
         const q = siActiveSearch;
         const idText = item.id == null ? '' : String(item.id);   // null 安全（防 '#undefined' 伪匹配·codex 审 MED）
+        if (siMatchDisplayNoEqual(item, q)) return true;
         return (item.title || '').toLowerCase().includes(q)
             || (item.system_name || '').toLowerCase().includes(q)
             || (idText && idText.includes(q))
             || (idText && q !== '#' && ('#' + idText).includes(q));   // 单独 '#' 不匹配全部
+    }
+    // [S13-b·B4·378-L1 细则] 精确命中 vs 模糊命中——搜索词若通过"子编号等值"或"真实 id 完全等值"命中
+    // 一行，视为**精确命中**（用户明确知道自己在找哪一单）；仅通过标题/系统名子串或真实 id 部分包含
+    // 命中的，视为**模糊命中**。两者可能对同一次搜索的不同行同时成立（如搜 "201_1"：精确命中族根
+    // 201 的第 1 张派生单，同时可能模糊命中某张标题里恰好含"201_1"字样的无关单）——排序时精确命中
+    // 所在的族块整体排在模糊命中族块之前（siClusterFamilyBlocks 消费），族内/同优先级内排序不变。
+    // 行为定义到此为止（用户指示：断言留 S13-c）。
+    function siIsExactSearchMatch(item) {
+        if (!siActiveSearch) return false;
+        const q = siActiveSearch;
+        if (siMatchDisplayNoEqual(item, q)) return true;
+        const idText = item.id == null ? '' : String(item.id);
+        return !!idText && (idText === q || ('#' + idText) === q);
     }
     // 当前类型 + 搜索下的可见单（统计卡基数 + 列表基数共用；再叠统计卡组过滤见 siVisibleList）
     function siVisibleTypeList() {
@@ -1567,9 +1687,59 @@
         siActiveStat = '';
         siLoadList();
     }
-    // 当前列表可见单：先按 type tab 客户端过滤，再按顶部统计卡筛选过滤。
+    // [S13·§15.4 族键] 家族根解析——优先直接用后端已回填的 derive_root_id（S12 迁移覆盖全库，正常路径
+    //   应当直接命中，取号权威在后端）；derive_root_id 缺列时才兜底走 origin_issue_id 递归求根（**传递
+    //   闭包**——需要一路走到链顶而非只看直接父，故与数据修正模块「扁平组 id 分桶」〔Data_Correction.
+    //   html clusterItems，correction_group_id 天然就是族根本身〕不同构，本页无此天然字段只能递归）；
+    //   两者不一致时以 derive_root_id 为准（378-M5 契约原文）。环/深度防御——异常个体返回 null 降级
+    //   平铺，不炸整页（同 utils/sys-derive-numbering.js#walkDeriveChainRoot 的防御哲学，前端独立复刻，
+    //   不 require 后端模块）。byId：查找用的行索引（调用方按需传 siList 全量或筛选后子集，见调用点）。
+    //   返回：族根 id（Number）｜null（本单非派生单，或求根失败/断链/超深/成环）。
+    const SI_FAMILY_MAX_DEPTH = 50;
+    function siFamilyRootId(item, byId) {
+        if (item.derive_root_id !== null && item.derive_root_id !== undefined) return Number(item.derive_root_id);
+        if (item.origin_issue_id === null || item.origin_issue_id === undefined) return null;   // 非派生单，无族
+        const path = new Set([Number(item.id)]);
+        let cursor = Number(item.origin_issue_id);
+        let depth = 0;
+        // eslint-disable-next-line no-constant-condition
+        while (true) {
+            if (path.has(cursor)) return null;                     // 成环——降级平铺
+            path.add(cursor);
+            depth++;
+            if (depth > SI_FAMILY_MAX_DEPTH) return null;          // 超深链——降级平铺
+            const parent = byId.get(cursor);
+            if (!parent) return null;                              // 断链/母单不在当前索引集合内——降级平铺
+            if (parent.derive_root_id !== null && parent.derive_root_id !== undefined) return Number(parent.derive_root_id);
+            if (parent.origin_issue_id === null || parent.origin_issue_id === undefined) return cursor;   // parent 本身即族根
+            cursor = Number(parent.origin_issue_id);
+        }
+    }
+    // 当前列表可见单：先按 type tab 客户端过滤，再按顶部统计卡筛选过滤。搜索激活时额外做家族广播——
+    //   [S13·§15.4 搜索命中] 命中族内任一成员 ⇒ 整族带出（树形完整性优先，命中行由渲染层高亮）。广播
+    //   范围限定在「当前 type+stat 筛选口径」的候选池内（不跨类型 tab 泄漏、不搬服务端筛选，同「不把
+    //   筛选搬客户端」克制口径）——candidatePool 是"若无搜索时本应可见"的集合，matched 是其中真正命中
+    //   搜索词的子集，两者一起交给 siBroadenBySearchFamily 补齐同族成员。
+    function siBroadenBySearchFamily(matchedItems, candidatePool) {
+        const byId = new Map(candidatePool.map((it) => [Number(it.id), it]));
+        const rootsToKeep = new Set();
+        matchedItems.forEach((it) => {
+            const rid = siFamilyRootId(it, byId);
+            rootsToKeep.add(rid !== null ? rid : Number(it.id));   // 无族=以自身 id 占位（自己就是唯一该保留的成员）
+        });
+        return candidatePool.filter((it) => {
+            const id = Number(it.id);
+            if (rootsToKeep.has(id)) return true;                  // 自己是族根，或本就是无族的匹配项自身
+            const rid = siFamilyRootId(it, byId);
+            return rid !== null && rootsToKeep.has(rid);
+        });
+    }
     function siVisibleList() {
-        return siVisibleTypeList().filter(i => siMatchStatFilter(i, siActiveStat));
+        const matched = siVisibleTypeList().filter((i) => siMatchStatFilter(i, siActiveStat));
+        if (!siActiveSearch) return matched;
+        const candidatePool = (siActiveType === 'all' ? siList : siList.filter((i) => i.type === siActiveType))
+            .filter((i) => siMatchStatFilter(i, siActiveStat));
+        return siBroadenBySearchFamily(matched, candidatePool);
     }
 
     // ---- 筛选器 ----
@@ -1735,19 +1905,194 @@
         已暂缓: 12, 已拒绝: 13,
         已作废: 14,
     };
+    // [S13·§15.4 分页改造] attachTableSort 的一体 pagination 路径（config.pagination）不透传 packPages
+    //   （unify-helpers.js:254-260 组合处只传 containerSelector/pageSize/render 三项，硬切片不认块边界）
+    //   ——族要求「不拆页」是块级装箱语义，与该一体路径的硬切片不兼容。改法：sysIterationSorter 只借它
+    //   的表头点击状态机 + 图标同步（不传 pagination），render 回调忽略拿到的 flat 排序结果，改用
+    //   sysIterationSorter.getState() 读当前排序字段/方向喂给 siClusterFamilyBlocks 做族级重排，块数组
+    //   交给独立的 siFamilyPager（siPackFamilyPages 装箱）——共享层零改动，接线形状照搬
+    //   Data_Correction.html:943-985（correctionSorter/correctionPager 同构）。
+    // codex 审 LOW-1 先例同款理由：defaultSort 显式传 null——本页默认序在族聚类下也不是任何单列（族块
+    //   按「根单在现有排序中的位置」整体就位，未点表头时退化为 id 降序块序，非逐行 ID 排序），继续显式
+    //   点亮「ID ↓」是失真（同 Data_Correction :941 注释）。
     const sysIterationSorter = UnifyHelpers.attachTableSort({
         tableSelector: '#sysIterationListTable',
         fieldTypes: SI_SORT_FIELD_TYPES,
         statusOrder: { priority: { P0: 0, P1: 1, P2: 2, P3: 3 }, status: SI_STATUS_SORT_ORDER },
         getList: () => siVisibleList(),
+        render: siBuildFamilyBlocks,
+        defaultSort: null,
+    });
+
+    // [S13·§15.4 决策表默认②] 族不拆页装箱——以块（族/单行）为最小分页单位累计装箱：装入下一块会超
+    //   pageSize 行时该块整体进下一页（每页实际行数可低于标称）；单块自身 >pageSize 行时该块独占一页、
+    //   允许超页（超大族独占一页允许超页，决策表默认③）。返回页数组，每页已 flatten 为最终渲染行数组
+    //   （attachPagination packPages 契约）——逐字同构 Data_Correction.html:956-965 packCorrectionPages，
+    //   页边界只落块间，块内 root/子行渲染语义单元不拆页。纯函数、不读闭包外状态，独立可测（S13-c）。
+    function siPackFamilyPages(blocks, pageSize) {
+        const pages = [];
+        let cur = [];
+        blocks.forEach((rows) => {
+            if (cur.length > 0 && cur.length + rows.length > pageSize) { pages.push(cur); cur = []; }
+            cur = cur.concat(rows);
+        });
+        if (cur.length || !pages.length) pages.push(cur);
+        return pages;
+    }
+    const siFamilyPager = UnifyHelpers.attachPagination({
+        containerSelector: '#sysIterationPagination',
         render: renderSysIterationRows,
-        defaultSort: { field: 'id', dir: 'desc' },
-        pagination: { containerSelector: '#sysIterationPagination' },
+        packPages: siPackFamilyPages,
+        // [预筛 LOW-2 落字] 页码条"共 N 条"按行数计，非块数——且这个"行数"**含**灰显补根行（isContext:true，
+        //   被 type/stat 筛掉但仍在 siList 里补显成树的族根）与搜索家族广播带出的非命中同族成员，与顶部
+        //   统计卡（siRenderStats 用 siVisibleTypeList，真命中口径、不含广播/补显）刻意不同源——这是决策表
+        //   默认②"按行数装箱"+默认④"命中族整族带出"叠加的必然结果（树形完整性优先于计数精确一致），非
+        //   遗漏对齐；未来若有人觉得"页码条数字和统计卡对不上"是 bug，先看这条注释。
+        countTotal: (blocks) => blocks.reduce((a, rows) => a + rows.length, 0),
     });
 
     // 外部入口保持原名 siRenderTable()，零改动既有调用点（siSetType/siLoadList）
     function siRenderTable() {
         sysIterationSorter.render();
+    }
+
+    // [S13·§15.4 族内排序] 派生单按 seq 升序（决策表默认①"族内根前、派生单按 seq 升序"）；seq 缺省
+    //   （异常态兜底，正常路径不应出现）排最后，同 seq/无 seq 时按 id 升序兜底确定性。
+    // [预筛 MED-3 修复] 判空必须**前置**且用 == null（非 !Number.isFinite(Number(x))）——`Number(null)`
+    //   求值为 `0`、是有限数，若先转数字再判 isFinite，null/undefined 会被误当"有效值 0"排到最前，
+    //   与本函数注释声称的"缺省排最后"正好相反（防御名存实亡）。判空后仍非法（如字符串 'abc'）的值
+    //   同样兜底 Infinity，不放过第二种非法输入形态。
+    function siDeriveSeqSortValue(item) {
+        if (item.derive_seq === null || item.derive_seq === undefined) return Infinity;
+        const n = Number(item.derive_seq);
+        return Number.isFinite(n) ? n : Infinity;
+    }
+    function siSortFamilyChildren(kids) {
+        return kids.slice().sort((a, b) => {
+            const va = siDeriveSeqSortValue(a), vb = siDeriveSeqSortValue(b);
+            if (va !== vb) return va - vb;
+            return Number(a.id) - Number(b.id);
+        });
+    }
+    // 标记族块内最后一个「子行」（渲染层据此画 └ 收尾连接线，非最后一行画 ├）。
+    function siMarkLastChild(rows) {
+        let lastChildIdx = -1;
+        rows.forEach((r, i) => { if (r.role === 'child') lastChildIdx = i; });
+        rows.forEach((r, i) => { r.isLast = (i === lastChildIdx); });
+    }
+    // [S13·§15.4 树形聚类主体] 把「筛选后可见的平铺行」按族键（siFamilyRootId）分组成块——族内根在前、
+    //   派生单按 seq 升序；无法关联到任何族的行各自成独立单行块。
+    //   allItems（=siList 全量，服务端 WHERE 已筛过）用于两件事：① 递归求根时穿越可能被客户端 type/
+    //   stat/搜索筛掉的中间行（siFamilyRootId 的 byId 入参）② 缺根降级判定——"结果集"取的是服务端响应
+    //   口径：母单若在 allItems 里（只是被客户端筛掉），仍可补显灰根成树；母单彻底不在 allItems（服务端
+    //   WHERE 排除）才判 rooted:false 平铺降级（同 Data_Correction.html:884 rooted 变量同款先例，不把
+    //   筛选搬客户端——服务端过滤维持服务端语义，客户端过滤不因聚类而绕过）。
+    //   返回：块数组，每块已 flatten 为行对象数组（{item, role, isContext?, isLast?, rooted?}）。
+    function siClusterFamilyBlocks(items, allItems, sortField, sortDir) {
+        const byId = new Map(allItems.map((it) => [Number(it.id), it]));
+        const standalone = [];
+        const childrenByRoot = new Map();
+        items.forEach((it) => {
+            const rid = siFamilyRootId(it, byId);
+            if (rid === null) { standalone.push(it); return; }
+            if (!childrenByRoot.has(rid)) childrenByRoot.set(rid, []);
+            childrenByRoot.get(rid).push(it);
+        });
+        // maxId：块内成员 id 最大值（含根/子/独立单一律看 rows 里的真实 item.id）——供默认块序用。
+        // [S13 收口 LOW-2] 照 Data_Correction.html:898 先例补全：非有限 id（NaN/undefined/Infinity 等脏值）
+        //   先过滤掉，rows 全部非有限时兜底 -Infinity（Math.max() 空参数会返回 -Infinity，这里显式写出
+        //   同 Data_Correction 同款理由——块序排序时该块会自然沉底，不会因为 NaN 污染让比较结果恒 NaN
+        //   导致 sort 比较器失真）。
+        const blockMaxId = (rows) => {
+            const ids = rows.map((r) => Number(r.item.id)).filter(Number.isFinite);
+            return ids.length ? Math.max(...ids) : -Infinity;
+        };
+        let blocks = [];
+        const consumedStandaloneIds = new Set();
+        // ① 族根恰好在当前可见集合里（非灰显）
+        standalone.forEach((it) => {
+            const rid = Number(it.id);
+            if (childrenByRoot.has(rid)) {
+                const kids = siSortFamilyChildren(childrenByRoot.get(rid));
+                const rows = [{ item: it, role: 'root', isContext: false }]
+                    .concat(kids.map((c) => ({ item: c, role: 'child', rooted: true })));
+                siMarkLastChild(rows);
+                blocks.push({ rows, repItem: it, rootId: rid, maxId: blockMaxId(rows) });
+                childrenByRoot.delete(rid);
+                consumedStandaloneIds.add(rid);
+            }
+        });
+        // ② 剩余族：根不在当前可见集合——查 allItems 补显灰根；彻底查不到（服务端 WHERE 排除）才平铺降级
+        childrenByRoot.forEach((kids, rid) => {
+            const sortedKids = siSortFamilyChildren(kids);
+            const rootRow = byId.get(rid);
+            if (rootRow) {
+                const rows = [{ item: rootRow, role: 'root', isContext: true }]
+                    .concat(sortedKids.map((c) => ({ item: c, role: 'child', rooted: true })));
+                siMarkLastChild(rows);
+                blocks.push({ rows, repItem: rootRow, rootId: rid, maxId: blockMaxId(rows) });
+            } else {
+                sortedKids.forEach((c) => {
+                    const rows = [{ item: c, role: 'child', rooted: false }];
+                    blocks.push({ rows, repItem: c, rootId: null, maxId: blockMaxId(rows) });
+                });
+            }
+        });
+        // ③ 真正孤立单（既非任何族的根也非任何族成员）
+        standalone.forEach((it) => {
+            if (consumedStandaloneIds.has(Number(it.id))) return;
+            const rows = [{ item: it, role: 'standalone' }];
+            blocks.push({ rows, repItem: it, rootId: null, maxId: blockMaxId(rows) });
+        });
+        // 排序：族以「根单/代表行在现有排序中的位置」整体就位（决策表默认①）；未选表头列时退化为
+        // **块内成员最大 id 降序**（[预筛 MED-1 订正] 此前误写成"同 Data_Correction :906-908 同构"——
+        // 该先例本就是按 maxId 排非按根 id，原注释是事实性错误，已订正；用 maxId 而非根 id 的理由：新
+        // 派生一个子单会让整族因这个新单被顶到列表前排，而根本身的 id 从不变化——若按根 id 排，新单落地
+        // 后族块位置纹丝不动，用户在"默认无排序"视图里看不出"刚发生了新派生"，maxId 序修正这一点）。
+        // [预筛 LOW-3 修复] 排序侧不用对象引用当 Map 键（origin 递归兜底激活时，理论上可能出现同一
+        // repItem 对象被两个不同 rid 的族分别引用——虽当前实现路径下 rootRow/it 均来自 byId 的一次性
+        // Map.get，结构上不应重复，但对象恒等比较本身就是脆弱契约，不依赖它）；改用**数组下标**做 join
+        // key：把 repItem 的可比较字段连同 __blockIdx 一起打包成新对象参与排序，排序结果按 __blockIdx
+        // 直接下标取回原 block，零对象恒等假设。
+        if (sortField) {
+            const wrapped = blocks.map((b, i) => Object.assign({}, b.repItem, { __blockIdx: i }));
+            const sortedWrapped = UnifyHelpers.sortByField(wrapped, sortField, sortDir, {
+                fieldTypes: SI_SORT_FIELD_TYPES,
+                statusOrder: { priority: { P0: 0, P1: 1, P2: 2, P3: 3 }, status: SI_STATUS_SORT_ORDER },
+            });
+            const orderedBlocks = blocks;   // 保留原数组引用供下标取回
+            blocks = sortedWrapped.map((w) => orderedBlocks[w.__blockIdx]);
+            // [S13 收口 MED-3] 用户已显式选择表头列排序——决策表默认①要求块序服从这个排序意图，搜索
+            // 精确命中 tier 不得覆盖它（此前 tier 排序是无条件二次排序，会把列排序的结果又推翻一次）。
+        } else {
+            blocks.sort((a, b) => b.maxId - a.maxId);
+            // [S13-b·B4·378-L1 细则] 搜索精确命中优先——稳定二次排序（Array.sort 现代引擎恒稳定）：精确
+            // 命中（siIsExactSearchMatch，子编号/真实 id 完全等值）所在族块整体排到模糊命中（标题/系统名/
+            // id 部分包含）族块之前，同一优先级内维持上面已算出的 maxId 降序不变——只加一层"相关性"分组，
+            // 不推翻既有排序意图。搜索未激活时 siIsExactSearchMatch 恒 false，两侧优先级相同，sort 是
+            // no-op（稳定排序对全等 key 不改变顺序）。[S13 收口 MED-3] 仅在此"未选表头列"分支内生效——
+            // 用户一旦显式选了列排序，服从列排序优先于"相关性"提示（见上方 if 分支内注释）。
+            if (siActiveSearch) {
+                // [预筛附带性能点] 精确命中判定预计算成数组再排，不在比较器里对每个块重复调用 exactTier
+                //   （原写法比较器内联调用会被 sort 多次触发，O(n log n) 次 .rows.some() 扫描；块数不大
+                //   时差异可忽略，但既然要收窄改动就顺手把这处也改掉，不留一个"看着像 O(n²)"的写法）。
+                //   稳定性不依赖引擎的 Array.sort 隐式保证——显式携带原下标 i 做二级比较键兜底。
+                const exactTiers = blocks.map((b) => (b.rows.some((r) => siIsExactSearchMatch(r.item)) ? 0 : 1));
+                blocks = blocks
+                    .map((b, i) => ({ b, tier: exactTiers[i], i }))
+                    .sort((x, y) => (x.tier - y.tier) || (x.i - y.i))
+                    .map((w) => w.b);
+            }
+        }
+        return blocks.map((b) => b.rows);
+    }
+    // attachTableSort 的 render 回调：忽略参数（generic flat 排序结果对家族树无效——族块序固定按代表行
+    //   排序，与"整表 flat 排序后按顺序切片"不是一回事），读排序态做族级聚类，再把块数组交给独立分页器。
+    function siBuildFamilyBlocks() {
+        const items = siVisibleList();
+        const state = sysIterationSorter.getState();
+        const blocks = siClusterFamilyBlocks(items, siList, state.sortBy, state.sortDir);
+        siFamilyPager.render(blocks);
     }
 
     // C1（多开发协作与 commit 留痕重构 v2.9 §13 S1）：列表负责人列多人展示——item.dev_roster_names 是后端
@@ -1909,8 +2254,29 @@
             //   还要回答"未通过之后在哪跟进"（后续处理载体=派生单）；单号藏在 title 里发现率≈0。
             //   徽章仅现于 failed_derived 例外单据，正文多几个字符不构成列宽压力；派生单挂载（层级扩展）
             //   落地后本文案可随之简化。
-            const deriveTxt = i.post_derive_issue_id ? `·已派生#${Number(i.post_derive_issue_id)}` : '';
-            const title = `先行上线补验收未通过（终态）${i.post_derive_issue_id ? `，后续修复跟进见派生单 #${Number(i.post_derive_issue_id)}` : ''}`;
+            // [S13-b·B1] post_derive_issue_id 携带的是**真实 id（整数）**，不是行对象——它指向的派生单不
+            //   在 `i`（当前 origin 行）身上。取号三层优先级：
+            //   ① 权威——列表 SELECT 已对目标单做标量子查询投影 post_derive_root_id/post_derive_seq（本批
+            //      新增，见 index.js 该 SELECT 注释），两列都非 undefined 时视为"投影已到位"，直接拼伪行
+            //      {id, derive_root_id, derive_seq} 经 siIssueDisplayNo——SQL 算出的 NULL（目标本身是非
+            //      派生单/根单）与"投影缺失"不同义：NULL 是权威结论（目标没有子编号，siIssueDisplayNo 对
+            //      NULL 天然回退 #id 正是它的正常展示形态），不因此降级去查 siList。
+            //   ② 降级——两列均 undefined（响应里根本没这两个字段，理论上不该发生，防御旧版后端/中间层
+            //      裁字段）——退回 S13-a 的"已加载列表内查找"客户端方案。
+            //   ③ 兜底——查不到（siList 尚未加载完/目标单极端边界不在响应内）→ siIssueDisplayNo 内部对
+            //      { id } 天然回退真实 id。
+            const hasPostDeriveProjection = i.post_derive_root_id !== undefined && i.post_derive_seq !== undefined;
+            let deriveDisp = '';
+            if (i.post_derive_issue_id) {
+                if (hasPostDeriveProjection) {
+                    deriveDisp = siIssueDisplayNo({ id: i.post_derive_issue_id, derive_root_id: i.post_derive_root_id, derive_seq: i.post_derive_seq });
+                } else {
+                    const derivedRow = siList.find((x) => Number(x.id) === Number(i.post_derive_issue_id));
+                    deriveDisp = siIssueDisplayNo(derivedRow || { id: i.post_derive_issue_id });
+                }
+            }
+            const deriveTxt = i.post_derive_issue_id ? `·已派生${deriveDisp}` : '';
+            const title = `先行上线补验收未通过（终态）${i.post_derive_issue_id ? `，后续修复跟进见派生单 ${deriveDisp}` : ''}`;
             return `<span class="si-flag" style="color:var(--sem-rejected-fg);font-weight:600" title="${esc(title)}">补验收未通过${deriveTxt}</span>`;
         }
         if (i.post_release_acceptance !== 'pending') return '';   // passed 态 + 其余非适用态：明确不加徽章
@@ -1922,13 +2288,59 @@
             ? `<span class="si-flag" style="color:#dc2626;font-weight:600" title="先行上线已超 48 小时未补验收，请尽快处理">先行上线待补验收（超48h）</span>`
             : `<span class="si-flag" style="color:#b45309">先行上线待补验收</span>`;
     }
-    function renderSysIterationRows(list) {
+    // [S7·先行上线两步化 方案 v1.8 §6/§2 末段] 「待先行部署 x/N」列表徽章——徽章条件是**纯派生**：
+    //   type='bug' ∧ status='待验证' ∧ fast_release_active_auth（S6 三列前端直接 AND，禁自拼授权
+    //   判据）。活跃授权的权威判定在后端 isActiveFastReleaseAuth，列表端点（S6）已把结果算成布尔值
+    //   fast_release_active_auth 随行下发，本函数不读六列原始授权字段自行判断——那会与详情页既有
+    //   siHasActiveFastReleaseAuth（读六列原始字段的前端镜像判据，服务授权/撤销按钮）长出第二份
+    //   判据，两处随后端演进必然漂移。列表这条走"后端算好布尔、前端只 AND 组合"路线，是刻意的不同
+    //   设计（列表端点本就无法暴露六列原始授权字段——SELECT 是显式列投影，加六列=扩大不必要的
+    //   API 面），非与详情页判据矛盾。
+    //   0/0（当日无值班挂牌）**仍需可见**——方案 §4-1：徽章是 admin 发现"这单已挂牌但当日无人配置
+    //   执行人"的唯一入口，若 0/0 时隐藏徽章，这条兜底路径会失效（挂牌了却无人知道要去配置）。
+    //   ⚠️ 徽章配色走第 15 层专属 token `sem-fastlane`（靛紫，与第 14 层 prerelease 橙区分，见
+    //   components.css 该层注释）——渲染走**新模式**直出 `u-status-badge sem-fastlane`（非本页
+    //   主状态列沿用的旧模式 `si-s-*` 别名类），双模式契约本就允许同页并存（components.css 头部
+    //   注释：新页/新徽章可直出 sem-*，不强制先走一次页面本地别名）。
+    //   契约：依赖列表响应提供 type / status / fast_release_active_auth / fast_release_exec_total_count /
+    //   fast_release_exec_done_count 五字段（前三已是既有列，后两为 S6 新增）；两端由
+    //   scripts/verify-sys-list-badge-fields.js 自动对拍，本函数已列入该守卫扫描面。
+    function siFastlaneFlagHtml(i) {
+        if (i.type !== 'bug' || i.status !== '待验证') return '';
+        // 严格 ===1（非真值判断）：与本文件其余"后端 SQL 布尔值只认 1/0"惯例同源（如 has_release_remove
+        //   三态判定处注释），防脏值/字符串'0'被 JS 真值判断误判为真。
+        if (Number(i.fast_release_active_auth) !== 1) return '';
+        const done = Number(i.fast_release_exec_done_count) || 0;
+        const total = Number(i.fast_release_exec_total_count) || 0;
+        const suffix = total === 0 ? '·待配置执行人' : '';
+        const title = total === 0
+            ? '该单已挂牌先行上线，当日无值班执行人，请管理员到详情页添加执行人'
+            : `先行上线执行进度：${done}/${total} 人已确认`;
+        // [Opus 合并预筛 MED-1 修复·2026-08-14] 间距取舍：本徽章挂在同一格的标题/前序 flag 之后，
+        //   零间距会与标题文字或上一个 flag 贴靠。**不能直接加 si-flag 类**（预筛明示：.si-flag 的
+        //   font-weight:700 与 .u-status-badge 自身 600 同选择器特异性，源序更晚会反杀改掉徽章字重，
+        //   ".si-flag u-status-badge" 组合类同理仍会踩这个坑）；也不新开一条只服务本徽章的专属 CSS 类
+        //   （components.css 头部注释"改共享静态资源必 bump 缓存串"——为单一消费点新增页内类不值得再
+        //   走一次三件套流程）。改用内联 `style="margin-left:6px"`——与本文件 8+ 处同类"徽章/标签紧邻
+        //   前序内容需要间距"场景的既有写法同源（如 :2646 一带 timeTag `style="margin-left:6px"`、
+        //   :7171 状态徽章 `style="margin-right:0;margin-left:auto"`），本页对这类一次性间距需求的惯用
+        //   解法本就是内联 style，非新增修饰类。
+        return `<span class="u-status-badge sem-fastlane" style="margin-left:6px" title="${esc(title)}">待先行部署 ${done}/${total}${suffix}</span>`;
+    }
+    // [S13·§15.4] 入参从"平铺 item 数组"改为"族聚类后的行描述数组"（{item, role, isContext, isLast,
+    //   rooted}，见 siClusterFamilyBlocks/siPackFamilyPages）——解构时把 item 仍绑到变量名 `i`，本函数
+    //   体内其余逐字段渲染代码零改动（`i.xxx` 访问形态照旧，verify-sys-list-badge-fields.js 的字段消费
+    //   扫描按 `\bi\.` 抓取，改变量名会让该守卫扫描面塌缩为 0，故刻意保留 `i` 这个名字不是随手为之）。
+    function renderSysIterationRows(pageRows) {
         const tb = document.getElementById('siTbody');
-        if (!list.length) {
+        if (!pageRows.length) {
             tb.innerHTML = `<tr><td colspan="16" class="si-empty">${isAdmin() ? '暂无数据' : '暂无指派给你的单据'}</td></tr>`;   // 16 列（14 + 需求方（含需求部门二级行）/实际完成 两列·S2 三列一体设计合并需求方/需求部门后的实测定标）
             return;
         }
-        tb.innerHTML = list.map(i => {
+        // 血缘徽章「🔁基于#N」查直接父行用（矩阵行2：指向对象是派生单时用其子编号，根用 #根）——
+        //   同 siPostAcceptFlagHtml 同款"已加载列表内查找"口径，查不到（siList 尚未含该行）原样回退真实 id。
+        const byIdFull = new Map(siList.map((x) => [Number(x.id), x]));
+        tb.innerHTML = pageRows.map(({ item: i, role, isContext, isLast, rooted }) => {
             const flags =
                 (i.scope_changed ? `<span class="si-flag scope">范围变更</span>` : '') +
                 // 打回徽章（2026-08-11 用户拍板）：return_count=验收打回（事前发现），恒显不做状态门控——
@@ -1943,9 +2355,16 @@
                 (i.blocked ? `<span class="si-flag blocked">受阻</span>` : '') +
                 siPrereleaseFlagHtml(i) +
                 siPostAcceptFlagHtml(i) +
+                siFastlaneFlagHtml(i) +
                 siTechLeadNotifyBadgeHtml(i) +
                 siHeldDaysHtml(i.status, i.last_held_at);
-            const lineage = i.origin_issue_id ? `<span class="si-flag lineage">🔁基于#${i.origin_issue_id}</span>` : '';
+            // [S13·§15.3 矩阵行2] 血缘徽章子编号——origin_issue_id 是直接父的真实 id（非族根），查得到父行
+            //   就经 siIssueDisplayNo 取它自己的展示号（父若本身是派生单→子编号；父是根单→#根，两者
+            //   都由 siIssueDisplayNo 一处判断，本处不重复分叉）；查不到原样回退真实 id（缺根降级同款克制）。
+            const originParent = i.origin_issue_id != null ? byIdFull.get(Number(i.origin_issue_id)) : null;
+            const lineage = i.origin_issue_id
+                ? `<span class="si-flag lineage">🔁基于${esc(originParent ? siIssueDisplayNo(originParent) : ('#' + i.origin_issue_id))}</span>`
+                : '';
             // codex 259 L-1：空白串防御（写入端归一属另层，此处渲染端兜底）——requester_name/requester_dept
             //   若为纯空格/全空白字符串（非 NULL），trim 后才判空，防止渲染出「看着有值实则空白」的姓名/
             //   部门行（例如 requester_name=' ' 会被 `|| '—'` 的假值判断放过，因非空字符串真值）。
@@ -1957,8 +2376,23 @@
             //   参考需求方列双行范式）——形态与 S1 革掉的横向拼接不同，不与其占宽理由冲突。
             // ⚠️ 本注释刻意写在模板字符串**外**（本次落笔时先写进了模板串里，随即自查纠正）：
             //   HTML 注释拦不住 JS 模板插值——`${...}` 照样求值，结果进入最终 HTML 字符串。
-            return `<tr onclick="siOpenDrawer(${i.id})">
-                <td>#${i.id}</td>
+            // [S13·§15.3 矩阵行1] 单号列——派生单（role==='child'）红色子编号+缩进树枝（rooted 时才成树，
+            //   同 Data_Correction 「无根不画孤儿枝」先例）；根/独立/灰显补根行仍是真实 #id（根单自身
+            //   siIssueDisplayNo 天然回退 #id，不特殊分叉）。悬停 title 带真实 id + 链根，供技术定位。
+            const isDerivedChild = role === 'child';
+            const rootIdForTitle = i.derive_root_id != null ? i.derive_root_id : i.id;
+            const idCell = isDerivedChild
+                ? `<span class="si-derive-num" title="真实编号 #${siSafeIdAttr(i.id)}·链根 #${siSafeIdAttr(rootIdForTitle)}">${esc(siIssueDisplayNo(i))}</span>`
+                : esc(siIssueDisplayNo(i));   // 根/独立/context 行同经 helper（siIssueDisplayNo 对无 root/seq 的行天然回退 #id，不另写字面量）
+            const trClasses = [];
+            if (isDerivedChild && rooted) trClasses.push('si-row-child');
+            if (isLast && rooted) trClasses.push('si-row-last');
+            if (isContext) trClasses.push('si-row-context');
+            // [S13·§15.4 搜索命中高亮] 命中行加高亮类；家族广播带出的非命中同族成员不加（树形完整性优先
+            // 展示、但只有真正命中搜索词的那一行才高亮，siMatchSearch 无搜索词时恒 true 不会误标全表）。
+            if (siActiveSearch && siMatchSearch(i)) trClasses.push('si-row-search-hit');
+            return `<tr onclick="siOpenDrawer(${siSafeIdAttr(i.id)})"${trClasses.length ? ` class="${trClasses.join(' ')}"` : ''}>
+                <td>${idCell}</td>
                 <td><span class="u-type-tag ${siTypeClass(i.type)}">${esc(siTypeLabel(i.type))}</span></td>
                 <td>${siPriRiskCellHtml(i)}</td>
                 <td><span class="u-status-badge si-s-${siStatusClass(i.status)}">${esc(siStatusDisplay(i.status))}</span></td>
@@ -2232,6 +2666,37 @@
         document.getElementById('siDrawer').classList.remove('open');
     }
 
+    // [S13-b·B2·矩阵行5] 派生链区块——版式思路参考 demo_派生单子编号_对比_20260813_v1.0.html 方案B
+    //   「详情页派生链」（只取版式思想：链根标题+逐行 role pill+子编号+状态+原因+跳转+当前高亮，class
+    //   命名/样式沿用本页 si- 前缀独立复刻，不引入 demo 无关样式）。family：详情端点新投影
+    //   r.data.derive_family（一次查询取全族，长度<2 时后端已判"不算家族"回退空数组，此处 !family.length
+    //   直接返回空串，不额外降级——若未来数据源改造导致这里拿不到 family，同一份"空则不渲染"逻辑天然
+    //   兜底为"只显示当前单的派生原因/缺口说明两行"（siRenderDrawer 里紧跟着的两行不依赖 family)）。
+    function siDeriveFamilyBlockHtml(family, currentId) {
+        if (!family || family.length < 2) return '';
+        // [S13 收口 LOW-7] 找不到真正的根成员（derive_root_id 为 null/undefined 那一个）时**不**再退回
+        // family[0]——family[0] 大概率是某个子单，把子单的子编号当"链根"渲染出来会误导（子单被当成链根
+        // 展示，而它自己其实也该显示成子编号）。结构上这不该发生（后端查询天然带出根，见该端点注释），
+        // 但防御性地不伪造一个看似合理实则错误的号，改标「链根缺失」——比一个错误但"看起来正常"的号更安全。
+        const rootMember = family.find((m) => m.derive_root_id === null || m.derive_root_id === undefined) || null;
+        const rootDisp = rootMember ? esc(siIssueDisplayNo(rootMember)) : '链根缺失';
+        const rows = family.map((m) => {
+            const isRoot = m.derive_root_id === null || m.derive_root_id === undefined;
+            const isCur = Number(m.id) === Number(currentId);
+            const dispNo = esc(siIssueDisplayNo(m));
+            const roleLabel = isRoot ? '原单' : `派生·第${m.derive_seq}张`;
+            const statusBadge = `<span class="u-status-badge si-s-${siStatusClass(m.status)}">${esc(siStatusDisplay(m.status))}</span>`;
+            const idPart = isRoot
+                ? `<b title="真实编号 #${siSafeIdAttr(m.id)}">${dispNo}</b>`
+                : `<b class="si-derive-num" title="真实编号 #${siSafeIdAttr(m.id)}·链根 ${rootDisp}">${dispNo}</b>`;
+            const tail = isCur
+                ? `<span class="si-chain-cur-mark">（当前单）</span>`
+                : `<a class="si-chain-go" onclick="siOpenDrawer(${siSafeIdAttr(m.id)})">查看 →</a>`;
+            const reasonTxt = m.derive_reason ? `<span class="si-chain-reason">派生原因：${esc(m.derive_reason)}</span>` : '';
+            return `<div class="si-chain-row${isCur ? ' cur' : ''}"><span class="si-chain-pill">${esc(roleLabel)}</span> ${idPart} ${esc(m.title || '')} ${statusBadge} ${tail}${reasonTxt}</div>`;
+        }).join('');
+        return `<div class="si-chain"><h4>🔗 派生链（链根 ${rootDisp} · 共 ${family.length - 1} 张派生单）</h4>${rows}</div>`;
+    }
     async function siRenderDrawer(id) {
         const r = await siApi('/sys-issues/' + id);
         if (!r.ok) { siApiErr(r, '加载详情失败'); if (r.status === 404 || r.status === 403) siCloseDrawer(); return; }
@@ -2247,7 +2712,10 @@
         //   与各渲染函数直接消费——批次级执行人字段在 sys_releases，issue 级同名列是旧机制只读残留不可用。
         iss.release_brief = r.data.release_brief || null;
 
-        document.getElementById('siDTitle').innerHTML = `#${iss.id} ${esc(iss.title)}`;
+        // [S13-b·B2·矩阵行4] 派生单标题用子编号（siIssueDisplayNo·根单天然回退 #id）；title 属性悬停给真实 id，
+        //   与列表页单号列同款"文字用子编号、悬停给技术锚点"口径（矩阵行11 深链/API/路由维持真实 id 不受影响，
+        //   本行只改**显示文案**）。
+        document.getElementById('siDTitle').innerHTML = `<span title="真实编号 #${iss.id}">${esc(siIssueDisplayNo(iss))}</span> ${esc(iss.title)}`;
         document.getElementById('siDMeta').innerHTML =
             `<span class="u-type-tag ${siTypeClass(iss.type)}">${esc(siTypeLabel(iss.type))}</span>` +
             `<span class="u-status-badge si-s-${siStatusClass(iss.status)}">${esc(siStatusDisplay(iss.status))}</span>` +
@@ -2277,17 +2745,14 @@
             //   read_at 是钉钉已读回执（可能取不到），回复才是可靠的业务信号。
             notifyAlertHtml = `<div class="si-notify-alert" style="background:#fffbeb;border-color:#f59e0b;color:#92400e">🟡 已通知技术负责人，尚未回复；可视情况点「重发通知」提醒</div>`;
         }
-        // 血缘
-        let lineageHtml = '';
-        if (r.data.origin_issue) {
-            const o = r.data.origin_issue;
-            lineageHtml += `<div class="si-lineage">📌 基于 <a onclick="siOpenDrawer(${o.id})">#${o.id}《${esc(o.title)}》</a> 迭代而来</div>`;
-        }
-        if (r.data.derived_issues && r.data.derived_issues.length) {
-            const links = r.data.derived_issues.map(d => `<a onclick="siOpenDrawer(${d.id})">#${d.id}</a>`).join('、');
-            lineageHtml += `<div class="si-lineage">🔁 已衍生 ${r.data.derived_issues.length} 个迭代需求（${links}）</div>`;
-        }
+        // [S13-b·B2·矩阵行5] 血缘——原「📌 基于 #N 迭代而来」「🔁 已衍生 N 个迭代需求」两行升级为派生链
+        //   区块（siDeriveFamilyBlockHtml，数据源=详情端点新投影 r.data.derive_family，一次查询取全族，
+        //   见 index.js 该端点注释）。r.data.origin_issue/derived_issues 两个旧字段后端仍保留投影（未删，
+        //   未增负担），只是前端不再消费它们拼这两行——本次改动范围只动展示，不动数据契约。
+        let lineageHtml = siDeriveFamilyBlockHtml(r.data.derive_family, iss.id);
         // ⑤ 双描述展示（写读同源）：派生原因（建单人派生时填）+ 修复缺口说明（开发首提填）——仅有值时显示，纯复盘素材
+        //   ⚠️ 与派生链区块内每行的 reason 小字不是一回事：区块内 reason 是**每个成员各自**的派生原因（供
+        //   横向比较整条链"每一次为什么派生"），这两行是**当前单自己**的原因/缺口说明，独立信息，都保留。
         if (iss.derive_reason) lineageHtml += `<div class="si-lineage">📝 派生原因：${esc(iss.derive_reason)}</div>`;
         if (iss.fix_gap_note) lineageHtml += `<div class="si-lineage">🔧 修复缺口说明：${esc(iss.fix_gap_note)}</div>`;
 
@@ -2368,7 +2833,15 @@
             } else if (pa === 'passed') {
                 paVal = `<span style="color:#15803d">${esc(SI_POST_ACCEPTANCE_LABEL.passed)}</span>` + (iss.post_accepted_at ? `<span class="si-muted" style="margin-left:6px">（${esc(siFmtDT(iss.post_accepted_at))}）</span>` : '');
             } else if (pa === 'failed_derived') {
-                paVal = `<span style="color:#dc2626">${esc(SI_POST_ACCEPTANCE_LABEL.failed_derived)}</span>` + (iss.post_derive_issue_id ? ` <a style="cursor:pointer;color:#2563eb" onclick="siOpenDrawer(${Number(iss.post_derive_issue_id)})">已派生 #${Number(iss.post_derive_issue_id)}</a>` : '');
+                // [S13-b·B2] "已派生 #N" 改子编号——目标派生单必然在 r.data.derive_family 里（index.js
+                //   该端点注释：post-release-accept(fail) 新派生单的 derive_root_id 结构上等于本单的
+                //   resolvedFamilyRootId，与本单同族）；查不到（后端数据源未来改造等极端边界）原样回退
+                //   真实 id，不硬造。
+                const postDeriveRow = iss.post_derive_issue_id
+                    ? (r.data.derive_family || []).find((m) => Number(m.id) === Number(iss.post_derive_issue_id))
+                    : null;
+                const postDeriveDisp = iss.post_derive_issue_id ? esc(siIssueDisplayNo(postDeriveRow || { id: iss.post_derive_issue_id })) : '';
+                paVal = `<span style="color:#dc2626">${esc(SI_POST_ACCEPTANCE_LABEL.failed_derived)}</span>` + (iss.post_derive_issue_id ? ` <a style="cursor:pointer;color:#2563eb" onclick="siOpenDrawer(${Number(iss.post_derive_issue_id)})">已派生 ${postDeriveDisp}</a>` : '');
             } else {
                 paVal = esc(String(pa));   // 值域外兜底：宁可露出原始值，不静默吞（同 SI_ONLINE_SOURCE_LABEL `|| kind` 兜底哲学）
             }
@@ -2401,6 +2874,7 @@
             ${effortKv}
             <div class="u-kv-item"><label>预计完成时间</label><div class="v">${iss.dev_estimated_at ? (esc(siFmtDT(iss.dev_estimated_at)) + siRemainingDaysHtml(iss.dev_estimated_at)) : '<span class="si-muted">未回填</span>'}${siEtaAutoGenHintHtml(iss)}</div></div>
             ${siEtaOverrunReasonReadonlyHtml(iss)}
+            ${siCompletionOverrunReasonReadonlyHtml(iss)}
             <div class="u-kv-item"><label>计划开工日</label><div class="v">${iss.scheduled_start ? esc(iss.scheduled_start) : '<span class="si-muted">—</span>'}</div></div>
             <div class="u-kv-item"><label>期望完成(deadline)</label><div class="v">${iss.deadline ? esc(siFmtDeadline(iss.deadline)) : '<span class="si-muted">—</span>'}</div></div>
             <div class="u-kv-item"><label>需求方</label><div class="v">${siRequesterText(iss)}</div></div>
@@ -2500,14 +2974,19 @@
 
         // C-orch：上线编排独立区块（2026-07-07 样式统一：从底部操作区拆出，置于「基本信息」与「通知」之间）。
         const orchBlock = siRenderReleaseOrchBlock(iss);
+        // [S7·先行上线两步化 方案 v1.8 §6] 先行上线执行区——与上线编排同一带（两者都是"上线现场"性质
+        //   的区块，只是分属两条不同的上线路径：orchBlock=批次发布路径，本区块=先行上线快车道路径，
+        //   结构上互斥不会同时非空——orchBlock 仅 bug+待上线态出现，本区块仅 bug+待验证态挂牌或
+        //   consumed 部署留痕态出现，两者所需 status 不同）。置于 orchBlock 之后、通知之前。
+        const fastlaneBlock = siFastlaneExecSectionHtml(iss, r.data.fast_release_executors, r.data.fast_release_exec_progress);
 
         // 抽屉 body 顺序（对齐 Data_Correction 抽屉范式；附件融入 2026-07-19：spec 融入基本信息、delivery+screenshot
         //   合并为「开发交付」区置于 Commit 记录后，独立「附件」区已取消）：
-        //   血缘 → 操作栏(顶) → 基本信息(含需求材料) → 开发成员 → Commit 记录 → 开发交付 → 上线编排 → 通知 → 讨论群 → 时间线
+        //   血缘 → 操作栏(顶) → 基本信息(含需求材料) → 开发成员 → Commit 记录 → 开发交付 → 上线编排 → 先行上线执行区 → 通知 → 讨论群 → 时间线
         //   ⭐ S5：通知未发送红条置最顶（先于血缘），attention 优先级高于血缘展示。
         siRevokeAttThumbs();   // 重渲前先 revoke 上次缩略图 objectURL，防内存泄漏
         document.getElementById('siDBody').innerHTML =
-            notifyAlertHtml + lineageHtml + '<div class="u-action-bar u-action-bar-sticky" id="siDActions"></div>' + info + devMembers + devCommitsBlock + deliverySection + orchBlock + notify + chat + tl;
+            notifyAlertHtml + lineageHtml + '<div class="u-action-bar u-action-bar-sticky" id="siDActions"></div>' + info + devMembers + devCommitsBlock + deliverySection + orchBlock + fastlaneBlock + notify + chat + tl;
 
         // 操作区（填充 body 顶部的 #siDActions 占位）
         siRenderActions(iss);
@@ -2562,6 +3041,83 @@
         </div>`;
     }
 
+    // [S7·先行上线两步化 方案 v1.8 §6] 详情页「先行上线执行区」——照搬批次执行人面板范式
+    //   （siExecutorSectionHtml，批次详情侧姊妹函数：名单+状态徽章+确认时刻+admin 加/移人入口），
+    //   落到本单据详情抽屉里。
+    //   ⚠️ [Opus 预筛 S6-MED-1·判官归一·2026-08-14] 徽章条件判活跃授权改读**后端 DTO 布尔字段**
+    //   `iss.fast_release_active_auth`（详情端点已同步补齐，与列表端点 S6 已下发的同名字段逐字同源，
+    //   同一份 isActiveFastReleaseAuth 判据）——**不再**调用前端镜像谓词 siHasActiveFastReleaseAuth。
+    //   归一动机：本区块首版曾直接调用该镜像谓词（读六列原始字段自行判断），与列表端"后端算好布尔、
+    //   前端只读"的路线不一致，虽然两份判据当时逐字同源不会立刻出错，但属于"能收敛成单一权威却没
+    //   收敛"的隐患。siHasActiveFastReleaseAuth **未删**——授权/撤销按钮（siRenderActions）与授权
+    //   弹窗标题措辞（siModalFastReleaseAuthorize）两处语境仍在用它（那两处不消费 fast_release_
+    //   executors/fast_release_exec_progress，没有对应的 DTO 布尔字段可读，继续保留前端镜像判据），
+    //   本次只切执行区这一个消费点，非全删（grep 消费面见交付报告）。
+    //   区块整体渲染条件 = 徽章条件成立（type='bug' ∧ status='待验证' ∧ fast_release_active_auth）
+    //   **或** executors 集合非空（呼应 S6 详情 DTO 的 existence-gated 语义：非空意味着"仍在挂牌进行
+    //     中"或"已消费的部署留痕"，见 index.js GET /sys-issues/:id 详情端点 fastReleaseExecutors 查询
+    //     块注释）。两者析取覆盖 S6 DTO 会产出非空数组或非零进度的**全部**场景——只判前者会漏掉
+    //     consumed 单的部署留痕展示（消费后 status 已非「待验证」，badgeCond 结构性为 false）；只判
+    //     后者会漏掉"当日无值班挂牌"的 0/0 场景（此时 executors=[]，但 admin 恰恰需要看到这个区块
+    //     才能点「添加执行人」补人，方案 §4-1）。
+    function siFastlaneExecHasContent(iss, executors) {
+        const badgeCond = iss.type === 'bug' && iss.status === '待验证' && Number(iss.fast_release_active_auth) === 1;
+        return badgeCond || !!(executors && executors.length);
+    }
+    function siFastlaneExecSectionHtml(iss, executors, progress) {
+        if (!siFastlaneExecHasContent(iss, executors)) return '';
+        const rows = executors || [];
+        const doneCount = progress ? (Number(progress.done_count) || 0) : rows.filter(e => e.exec_status === 'done').length;
+        const totalCount = progress ? (Number(progress.total_count) || 0) : rows.length;
+        const isAdminUser = isAdmin();
+        // 是否仍处于挂牌活跃态——决定加/移人入口是否渲染，与上面 badgeCond 同一组条件（同为
+        //   iss.fast_release_active_auth 判官归一后的读点，见本区块头部注释）。已消费（consumed）单
+        //   该条件结构性为 false（released_at/online_source 已写、status 已非「待验证」，翻牌内核同
+        //   事务写入 fast_release_consumed_at 后 isActiveFastReleaseAuth 六列判据自然转 false），集合
+        //   行此时只读展示，不出任何调整入口——镜像后端 FASTLANE_ROSTER_NOT_STAGED 闸（加/移人两端点
+        //   均要求"仍在挂牌态"）。
+        const isStaged = iss.type === 'bug' && iss.status === '待验证' && Number(iss.fast_release_active_auth) === 1;
+        const uid = currentUser ? Number(currentUser.id) : null;
+        const myRow = uid ? rows.find(e => Number(e.user_id) === uid) : null;
+
+        const rowsHtml = rows.length ? rows.map(e => {
+            const isDone = e.exec_status === 'done';
+            const badge = isDone
+                ? `<span class="si-release-badge done">已确认</span>`
+                : `<span class="si-release-badge plan">待确认</span>`;
+            const timeTag = (isDone && e.executed_at) ? `<span class="si-muted" style="margin-left:6px">${esc(siFmtDT(e.executed_at))}</span>` : '';
+            const uidNum = Number(e.user_id);
+            const uidOk = Number.isSafeInteger(uidNum);
+            // 仅 pending 行 + 仍挂牌活跃态 + admin 才出「移除」——已 done 行结构性移不掉（方案 §5-⑨），
+            //   后端会 409 FASTLANE_ROSTER_REMOVE_INVALID，前端不渲染点了必错的按钮。
+            const removeBtn = (isAdminUser && isStaged && !isDone && uidOk)
+                ? ` <span class="si-att-del" onclick="siFastlaneRemoveExecutor(${iss.id},${uidNum},${siJsStringAttr(e.user_name || '')})">移除</span>` : '';
+            return `<div class="si-att-item">
+                <span class="si-att-name">${esc(e.user_name || ('用户#' + e.user_id))}</span>
+                ${badge}${timeTag}${removeBtn}
+            </div>`;
+        }).join('') : '<div class="si-muted" style="font-size:12px">当日无值班执行人，请管理员添加</div>';
+
+        // admin 加人入口——done_count>0 后冻结（372-H1'，方案 §11 明确不做"首 done 后加人"：部署已
+        //   开始不再扩大部署留痕面），前端置灰 + title 提示而非直接隐藏：置灰让 admin 明确看到"这个
+        //   操作现在不可用"，隐藏会让人误以为"没有这个功能"（同 committed executor 行范式，镜像后端
+        //   409 FASTLANE_ROSTER_FROZEN）。
+        let addBtn = '';
+        if (isAdminUser && isStaged) {
+            const frozen = doneCount > 0;
+            addBtn = frozen
+                ? ` <button class="u-btn-secondary u-btn-sm" disabled title="部署已开始不可加人（已有执行人确认执行）">+ 添加执行人</button>`
+                : ` <button class="u-btn-secondary u-btn-sm" onclick="siFastlaneAddExecutorModal(${iss.id})">+ 添加执行人</button>`;
+        }
+
+        // 本人「执行先行上线」按钮——仅本人在册且 pending（后端事务内实时资格复核，前端仅镜像子表
+        //   在册行状态显隐，同批次面板「确认上线完成」按钮范式）。
+        const myBtn = (myRow && myRow.exec_status === 'pending')
+            ? `<button class="u-btn-primary u-btn-sm" onclick="siFastlaneExecConfirm(${iss.id})">✅ 执行先行上线</button>` : '';
+
+        return `<div class="u-detail-section"><h3>先行上线执行人（${doneCount}/${totalCount}）${addBtn}</h3>${rowsHtml}${myBtn ? `<div class="u-action-bar" style="margin-top:8px;padding:0">${myBtn}</div>` : ''}</div>`;
+    }
+
     function siRequesterText(iss) {
         const parts = [];
         if (iss.requester_dept) parts.push(esc(iss.requester_dept));
@@ -2597,14 +3153,39 @@
         //   见下方 SI_TL_NOTE_OWN_LABEL_CODES），非落回通用「备注」——授权/撤销是详情页需要一眼识别的
         //   高关注度动作，与普通备注文本区分显示。
         fast_release_authorize: '先行上线授权', fast_release_revoke: '先行上线授权撤销',
-        // [组 B·SB2] 先行上线直上——event_type='status_change'（同 W-GATE 镜像行范式），有 action_code 时
-        //   siRenderTimeline 恒取 action_code 本身当 key（同 status_change/release 既有规则），无需登记进
-        //   SI_TL_NOTE_OWN_LABEL_CODES（那张表只服务 event_type='note' 的 carve-out）。
-        fast_release_direct_online: '先行上线直上',
+        // [组B·S2-2] 先行上线直上——原 event_type='status_change'（同 W-GATE 镜像行范式）词条已随写入点
+        //   （submit direct_release=true 分支）拆除删除，零存量死词条不留。
+        // [组B·S2-1] 先行上线两步化·挂牌——event_type='note' 独立徽章（同 fast_release_authorize/_revoke
+        //   一带模式，见下方 SI_TL_NOTE_OWN_LABEL_CODES），非落回通用「备注」——挂牌是详情页需要一眼识别
+        //   的高关注度动作（标志着"该单已进入执行确认待办"）。
+        fast_release_staged: '先行上线挂牌',
+        // [S3·§5] 先行上线执行确认（非末位）+ 翻牌上线（末位）——两码语义不同不能共用一句文案：
+        //   fast_release_exec_confirm 是"某一位执行人确认了自己那一份"（event_type='note'，可能同单
+        //   出现多条，一人一条），fast_release_exec_online 是"全员确认达成，主状态真正翻牌"（同
+        //   W-GATE 完成态镜像范式，event_type='status_change'，一单唯一一条）。
+        fast_release_exec_confirm: '先行上线执行确认', fast_release_exec_online: '先行上线翻牌上线',
+        // [S4·§4-4a/4b] 执行人集合调整（admin）——event_type='note' 独立徽章（同 fast_release_staged/
+        //   _exec_confirm 一带模式，见下方 SI_TL_NOTE_OWN_LABEL_CODES），非落回通用「备注」——加人/移人是
+        //   详情页需要一眼识别的高关注度动作（谁被谁加入/移出了执行确认待办）。
+        fast_release_roster_added: '先行上线加入执行人', fast_release_roster_removed: '先行上线移除执行人',
+        // [S5·§4-5/§4-6/§4-7] 六码族第六码——执行人集合清空（撤销授权/验收通过/验收打回/已拒绝/作废/
+        //   批次发布任一成因触发）——event_type='note' 独立徽章（同 roster_added/_removed 一带模式，见
+        //   下方 SI_TL_NOTE_OWN_LABEL_CODES），非落回通用「备注」——集合整体清空是需要一眼识别的高关注度
+        //   动作（徽章/详情执行区随之同步消失，本条 timeline 行是唯一留痕）。⚠️ 与既有
+        //   fast_release_auth_terminated（授权终结，另一枚旧码）刻意不同族——那个码服务"授权本身"的
+        //   留痕，本码服务"集合"的留痕，两件事各自独立成因措辞，不合并成一条。
+        fast_release_roster_cleared: '先行上线执行人集合清空',
         // [组 B·SB3] 补验收通过/不通过——event_type='note' 独立徽章（同 fast_release_authorize/_revoke 一带
         //   模式，见下方 SI_TL_NOTE_OWN_LABEL_CODES），非落回通用「备注」——补验收结果是需要一眼识别的高
         //   关注度动作。
-        post_release_accept_pass: '补验收通过', post_release_accept_fail: '补验收不通过'
+        post_release_accept_pass: '补验收通过', post_release_accept_fail: '补验收不通过',
+        // [方案 §13·13.1] feature ETA 直取——独立徽章而非落回通用「备注」（同 fast_release_authorize/
+        //   post_release_accept_pass 一带模式，见下方 SI_TL_NOTE_OWN_LABEL_CODES）——服务§13.1"对接人
+        //   知情"诉求，尤其"已过期回退"分支需要一眼看到"期望已过期"这件事，落回通用备注会削弱可见性。
+        eta_auto_from_deadline: '预计取自期望完成', eta_auto_sla: '预计按默认规则生成',
+        // [方案 §14·S11] feature 超期完成理由——独立徽章而非落回通用「备注」（同 §13 两码一带模式，见
+        //   下方 SI_TL_NOTE_OWN_LABEL_CODES）——完成超期是需要一眼识别的高关注度事件。
+        completion_overrun_reason: '完成超期'
     };
     const SI_TL_CLS = {
         created: 'si-tl-amber', derive: 'si-tl-amber',
@@ -2635,12 +3216,35 @@
         // [组 B] 授权=程序性授予动作，归 indigo（同 assign_overdue_eta 一族）；撤销=收回/取消动作，
         //   归 red（与既有 release_remove/release_schedule_cancel"撤销类"同族语义）。
         fast_release_authorize: 'si-tl-indigo', fast_release_revoke: 'si-tl-red',
-        // [组 B·SB2] 先行上线直上=真实进入「已上线」的转移，归 green（与既有 accept/release/
-        //   confirm_online_norelease 等"上线成功"事件同族）。
-        fast_release_direct_online: 'si-tl-green',
+        // [组B·S2-2] 先行上线直上配色词条已随写入点拆除删除，零存量死词条不留。
+        // [组B·S2-1] 先行上线两步化·挂牌=程序性/准备性动作（"等待值班执行人确认"，尚未真正翻牌上线），
+        //   归 indigo，与既有 fast_release_authorize/assign_overdue_eta 等"程序性动作"同族——不用 green
+        //   （green 留给真正的"上线成功"事件，挂牌只是走到这一步的中间态，翻牌镜像行落地时再归 green）。
+        fast_release_staged: 'si-tl-indigo',
+        // [S3·§5] confirm 类比"确认动作色"——但不用绿（绿留给全单真正翻牌成功那一刻），归 blue：
+        //   语义上更接近 submit（"某一位成员确认了自己那一份工作"，同样是"个人贡献完成"而非"整单成功"），
+        //   与既有 submit 同一族色。online 是真正的翻牌上线事件（同 W-GATE 完成态镜像范式的落点），
+        //   归 green，与既有 accept/release/effected/confirm_online_norelease 等"上线成功"事件同族——
+        //   与 fast_release_staged 头部注释预告的"翻牌镜像行落地时再归 green"一致。
+        fast_release_exec_confirm: 'si-tl-blue', fast_release_exec_online: 'si-tl-green',
+        // [S4·§4-4a/4b] 加人=程序性/准备性动作（新增一名待确认执行人，同 fast_release_staged/
+        //   assign_overdue_eta 等"程序性动作"同族），归 indigo；移人=移除/收回类动作（同既有
+        //   fast_release_revoke/release_remove"撤销类"同族语义），归 red。
+        fast_release_roster_added: 'si-tl-indigo', fast_release_roster_removed: 'si-tl-red',
+        // [S5] 集合清空——同 fast_release_roster_removed/fast_release_revoke"移除/收回类动作"同族语义，
+        //   归 red（不论触发成因是验收通过这类正面事件，徽章色反映的是"集合本身被清空"这个动作性质，
+        //   非底层业务结果的正负）。
+        fast_release_roster_cleared: 'si-tl-red',
         // [组 B·SB3] 补验收通过=通过类（同 accept/liaison_test_pass 同族）归 green；不通过=打回/派生类
         //   （同 return/reopen/liaison_test_return 同族）归 red。
-        post_release_accept_pass: 'si-tl-green', post_release_accept_fail: 'si-tl-red'
+        post_release_accept_pass: 'si-tl-green', post_release_accept_fail: 'si-tl-red',
+        // [方案 §13·13.1] 两码均是"系统按规则决定了 ETA 值"的程序性/信息性标记（非成功/失败语义），
+        //   归 indigo，与既有 intake_accept/assign_overdue_eta/schedule 等"程序性动作"同族。
+        eta_auto_from_deadline: 'si-tl-indigo', eta_auto_sla: 'si-tl-indigo',
+        // [方案 §14·S11] 完成超期归 amber（同既有 created/derive/liaison_test_skip_* "值得留意的事件"
+        //   同族）——非程序性routine标记（§13 两码"系统决定了取值"的性质），是"完成事实晚于业务方期望"
+        //   这一需要引起注意的信号，但也非 return/revoke 那种"拒绝/收回"负面动作，故不归 red。
+        completion_overrun_reason: 'si-tl-amber'
     };
     // 上线体统一重构 C2b（199 审 MED-3）：release_add/release_remove/release_date_change/release_schedule_cancel/
     //   release_published 五个 action_code 全部落 event_type='scope_change'（§6.13），此前 siRenderTimeline 的
@@ -2722,7 +3326,10 @@
     //   产出这个值，故本判断只对存量行生效，不影响新行（新行走后面 else 兜底分支原样 esc 显示）。
     // [MED-2·组A 起 + 组B 扩] note 型事件里"取自己徽章而非落回通用「备注」"的 action_code 白名单——
     //   与 verify-sys-timeline-label-coverage.js 的 computeDisplayKey 同一份口径同源，改这里必须同改那边。
-    const SI_TL_NOTE_OWN_LABEL_CODES = new Set(['assign_overdue_eta', 'fast_release_authorize', 'fast_release_revoke', 'post_release_accept_pass', 'post_release_accept_fail']);
+    const SI_TL_NOTE_OWN_LABEL_CODES = new Set(['assign_overdue_eta', 'fast_release_authorize', 'fast_release_revoke', 'fast_release_staged', 'fast_release_exec_confirm', 'fast_release_roster_added', 'fast_release_roster_removed', 'fast_release_roster_cleared', 'post_release_accept_pass', 'post_release_accept_fail', 'eta_auto_from_deadline', 'eta_auto_sla', 'completion_overrun_reason']);
+    // [S3·§5] fast_release_exec_online **不进本 Set**——event_type='status_change'（同 accept/release/
+    //   liaison_test_pass 等既有 status_change 事件同款），走的是另一条渲染路径（直接用 action_code 查
+    //   SI_TL_LABEL，不经本 Set 判定），加进来不生效，反而误导读者以为它是 note 型事件。
     const SI_TL_WGATE_LEGACY_SUMMARY = 'W-GATE 自动门禁转移（成员在册完成态变化）';
     function siRenderTimeline(list, atts) {
         if (!list.length) return '<div class="si-muted">暂无演进记录</div>';
@@ -4499,7 +5106,7 @@
     //   ⚠️ 校验与后端 assertSysOaNumber **逐字同源**（1-20 位纯数字）：前端先挡省一次往返，
     //     但真闸在后端（前端非授权源）。两处若哪天要改口径，必须同批改（写读同源）。
     function siModalSetOaNumber(iss) {
-        siModal('补填 OA 号 #' + iss.id, [
+        siModal('补填 OA 号 ' + siIssueDisplayNoById(iss.id), [
             note('受理通过后回填 OA 立项流程号。<br>' + (iss.type === 'bug' ? 'bug 单 OA 号可选，仅供台账关联使用。' : '变更流单据<b>指派开发前必填</b>，否则「指派」会被后端拒绝。') + '<br>已有号时可覆盖（覆盖会留痕）；填入相同号不产生变更。'),
             fText('oa_number', 'OA 流程号', iss.oa_number || '', iss.type !== 'bug', '1-20 位纯数字（业务方 OA 需求流程的单号）' + (iss.type === 'bug' ? '，可留空' : '，必填'))
         ], async v => {
@@ -4590,11 +5197,11 @@
     function siModalFastReleaseAuthorize(iss) {
         const hasActiveAuth = siHasActiveFastReleaseAuth(iss);
         const fields = [
-            note((hasActiveAuth ? '重新' : '') + '先行上线授权：授权后开发在「标记我的开发完成」提交时可勾选「已随修复直接上线」，跳过验证/上线安排直接标记为「已上线」；上线后需管理员走「补验收」补做验收。'
+            note((hasActiveAuth ? '重新' : '') + '先行上线授权：授权后，开发全部提交完成（花名册全完成、主状态转入「待验证」）时将自动挂牌，等待当日值班执行人确认后翻牌上线；上线后需管理员走「补验收」补做验收。'
                 + (hasActiveAuth ? '本单当前已有一份活跃授权，重新授权将覆盖原授权信息（历史记录仍保留在时间线）。' : '')),
             fTextarea('note', '备注（选填）', '', false, 'trim 后 ≤200 字'),
         ];
-        siModal((hasActiveAuth ? '重新先行上线授权' : '先行上线授权') + ' #' + iss.id, fields, async v => {
+        siModal((hasActiveAuth ? '重新先行上线授权' : '先行上线授权') + ' ' + siIssueDisplayNoById(iss.id), fields, async v => {
             const noteVal = (v.note || '').trim();
             if (noteVal.length > 200) { showToast('备注不超过 200 字', 'error'); return false; }
             const body = {};
@@ -4607,10 +5214,10 @@
     }
     function siModalFastReleaseRevoke(iss) {
         const fields = [
-            note('撤销后开发提交时将不再显示「已随修复直接上线」勾选框，需管理员重新授权才能再次使用先行上线通道。'),
+            note('撤销后开发提交将不再触发先行上线挂牌，需管理员重新授权才能再次使用先行上线通道。'),
             fTextarea('reason', '撤销原因', '', true, '必填：trim 后 1~200 字'),
         ];
-        siModal('撤销先行上线授权 #' + iss.id, fields, async v => {
+        siModal('撤销先行上线授权 ' + siIssueDisplayNoById(iss.id), fields, async v => {
             const reason = (v.reason || '').trim();
             if (!reason || reason.length > 200) { showToast('撤销原因必填（trim 1~200字）', 'error'); return false; }
             const r = await siApi('/sys-issues/' + iss.id + '/fast-release-revoke', { method: 'POST', body: { reason } });
@@ -4629,7 +5236,7 @@
             fSelectMap('verdict', '补验收结论', ['pass', 'fail'], 'pass', { pass: '通过', fail: '不通过（自动派生新 bug 单）' }),
             fTextarea('note', '备注（选填）', '', false, 'trim 后 ≤500 字：通过的说明 / 不通过时必填：请说明原因，将写入派生单描述与派生原因'),
         ];
-        siModal('先行上线补验收 #' + iss.id, fields, async v => {
+        siModal('先行上线补验收 ' + siIssueDisplayNoById(iss.id), fields, async v => {
             const verdict = v.verdict === 'fail' ? 'fail' : 'pass';
             const noteVal = (v.note || '').trim();
             if (verdict === 'fail' && !noteVal) { showToast('补验收不通过必须填写说明', 'error'); return false; }
@@ -4638,7 +5245,12 @@
             if (noteVal) body.note = noteVal;
             const r = await siApi('/sys-issues/' + iss.id + '/post-release-accept', { method: 'POST', body });
             if (!r.ok) { siApiErr(r); return false; }
-            showToast(verdict === 'pass' ? '补验收通过' : ('补验收不通过，已派生 #' + (r.data && r.data.post_derive_issue_id)), 'success');
+            // [S13-b·B3·矩阵行7] 子编号——后端刚创建的新单此刻还不在 siList 里，siIssueDisplayNoById 的
+            // siList 兜底会落回裸 id；改走响应体已直传的权威值（post_derive_root_id/post_derive_seq），
+            // 拼一个符合 siIssueDisplayNo 入参契约的伪行传入即可，不必新造 by-id 变体。
+            // [S13 收口 LOW-5] r.data 缺失/不含预期字段时 siIssueDisplayNo 会静默回退空字符串（!row 分支），
+            //   Toast 会显示成"补验收不通过，已派生 "这种看着像截断的半句——补显式兜底文案，好过空字符串。
+            showToast(verdict === 'pass' ? '补验收通过' : ('补验收不通过，已派生 ' + (siIssueDisplayNo(r.data && { id: r.data.post_derive_issue_id, derive_root_id: r.data.post_derive_root_id, derive_seq: r.data.post_derive_seq }) || '（编号获取失败，请刷新列表）')), 'success');
             return true;
         });
         siWirePostReleaseAcceptNoteRequired();
@@ -4659,6 +5271,63 @@
         verdictEl.addEventListener('change', update);
         update();
     }
+
+    // ── S7（先行上线两步化 方案 v1.8 §6）：详情页执行区三动作——加人/移人/本人确认 ─────────────
+    //   错误提示统一走 siApiErr（同上方 siModalFastReleaseAuthorize/Revoke/PostReleaseAccept 三个
+    //   端点既定范式：直接显示后端 error 文案，不经 siErrText 那套通知专用五级映射——这几个端点同
+    //   不属通知链路，且后端已对每个 fastlane 错误码给出完整中文句子，见 index.js 各端点 error 字段，
+    //   前端重新映射一遍反而是第二份可能漂移的翻译）。
+    //   加人候选清单复用 `/sys-releases/executor-candidates`（不带 release_id 时返回全体资格判定结果，
+    //   与批次执行人候选同一份 hasReleaseEligibility 判据同源——本页历史已有该用法：
+    //   siExecutorPickerModal releaseId=null 分支同款先例，见 siModalHotfix 调用点），不新开候选端点。
+    //   单选（非批次那种多选复选框列表），已在册用户从候选清单剔除（客户端过滤，纯 UX 提示，真正
+    //   拒绝仍在后端 FASTLANE_ROSTER_ALREADY_ADDED）。
+    async function siFastlaneAddExecutorModal(issueId) {
+        const r = await siApi('/sys-releases/executor-candidates');
+        if (!r.ok) { siApiErr(r, '加载候选清单失败'); return; }
+        const existingIds = new Set((siDetail && siDetail.fast_release_executors || []).map(e => Number(e.user_id)));
+        const candidates = ((r.data && r.data.items) || []).filter(u => u.eligible && !existingIds.has(Number(u.id)));
+        if (!candidates.length) { showToast('无可添加的候选人员（均已在册，或均无先行上线执行资格）', 'warning'); return; }
+        const ids = candidates.map(u => String(u.id));
+        const labelMap = {};
+        candidates.forEach(u => { labelMap[String(u.id)] = u.display_name || ('用户#' + u.id); });
+        siModal('添加先行上线执行人 ' + siIssueDisplayNoById(issueId), [
+            fSelectMap('user_id', '执行人', ids, ids[0], labelMap),
+        ], async v => {
+            const userId = parseInt(v.user_id, 10);
+            if (!Number.isSafeInteger(userId) || userId <= 0) { showToast('请选择执行人', 'error'); return false; }
+            const rr = await siApi('/sys-issues/' + issueId + '/fast-release-executors', { method: 'POST', body: { user_id: userId } });
+            if (!rr.ok) { siApiErr(rr); return false; }
+            showToast('已添加执行人：' + ((rr.data && rr.data.user_name) || ''), 'success');
+            return true;
+        });
+    }
+    // 移除执行人（admin，仅 pending 行）——原生 confirm 二次确认（同批次面板 siRemoveFromBatch 范式：
+    //   这个动作无额外输入，一句确认已够，不必走完整 siModal 表单）。成功后走 siLoadList+siRenderDrawer
+    //   刷新（非 siModal 流程，本函数自行调用 siAfterAction，不依赖 siModalConfirm 的 keep 返回值链路）。
+    async function siFastlaneRemoveExecutor(issueId, userId, userName) {
+        if (!confirm('确认将「' + userName + '」移出先行上线执行人集合？')) return;
+        const r = await siApi('/sys-issues/' + issueId + '/fast-release-executors/' + userId, { method: 'DELETE' });
+        if (!r.ok) { siApiErr(r); return; }
+        // 移人后剩余全 done 会触发同事务翻牌（372-H1'核心）——响应 flipped=true 时提示用户"这一移，单
+        //   据翻牌了"，避免用户以为只是普通移人。
+        showToast('已移除执行人' + ((r.data && r.data.flipped) ? '，剩余执行人已全部确认，单据已翻牌上线！' : ''), 'success');
+        await siAfterAction();
+    }
+    // 本人确认执行——零输入，走 siModal 包裹的 note 二次确认（同 siConfirmSimple 范式），仅按响应
+    //   flipped 字段区分成功文案（末位确认会同时触发翻牌，需要让用户明确知道"你点完这单就上线了"）。
+    function siFastlaneExecConfirm(issueId) {
+        siModal('执行先行上线 ' + siIssueDisplayNoById(issueId), [
+            note('确认后将标记你已完成本单的先行上线部署。若你是最后一位待确认的执行人，单据将同时翻转为「已上线」。'),
+        ], async () => {
+            const r = await siApi('/sys-issues/' + issueId + '/fast-release-exec-confirm', { method: 'POST', body: {} });
+            if (!r.ok) { siApiErr(r); return false; }
+            const d = r.data || {};
+            showToast(d.flipped ? '已确认执行，全部执行人已确认，单据已翻牌上线！' : '已确认执行，等待其他执行人确认', 'success');
+            return true;
+        }, '确认执行');
+    }
+
     // [工期对接测试与风险等级拆分 方案 v1.1 §3.4/§7·C5] 受理通过——feature/improvement 单需同时判定
     //   风险等级（技术风险，对接人视角，一级/二级/三级），与端点 intake-accept 的 risk_level 必填闸同源
     //   （服务端才是真闸，前端仅体验层拦截）。⭐ 用户拍板批1改造B（2026-08-06）：判据从"仅 feature"
@@ -4718,7 +5387,31 @@
         const pad = (v) => String(v).padStart(2, '0');
         return `${n.getFullYear()}-${pad(n.getMonth() + 1)}-${pad(n.getDate())} ${pad(n.getHours())}:${pad(n.getMinutes())}:${pad(n.getSeconds())}`;
     }
-    // 受理弹窗——三情形之一命中才展示（与后端 case 'intake_accept' 判据同源，见 index.js :4259-4440）：
+    // [S8-S10 合并收口批 S10-UX·13] feature ETA 直取——前端镜像判据，与后端 resolveFeatureDeadlineDirectTake
+    //   （index.js 该函数定义处，方案 §13·13.1）逐字同源：trim 后正则前 10 位起步、不整串交给 Date() 解析、
+    //   年月日分量回比对真实日期、纯日期补 17:00:00（与 SLA 默认时刻一致）、等于受理时刻归"已过期"（保守
+    //   向）。⚠️ 前端只用本函数**判定要不要隐藏输入框+展示信息行**，真正落库值仍由后端权威计算——两侧
+    //   一旦漂移（如跨端时钟误差），后端仍是唯一真相源，前端展示只是体验层的"提前告知"。
+    function siResolveFeatureDeadlineDirectTake(deadlineRaw, nowStr) {
+        if (deadlineRaw === undefined || deadlineRaw === null) return { present: false };
+        const s = String(deadlineRaw).trim();
+        if (!s) return { present: false };
+        const m = /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?$/.exec(s);
+        if (!m) return { present: false };
+        const y = Number(m[1]), mo = Number(m[2]), d = Number(m[3]);
+        const dt = new Date(y, mo - 1, d);
+        if (dt.getFullYear() !== y || dt.getMonth() !== mo - 1 || dt.getDate() !== d) return { present: false };
+        const hasTime = m[4] !== undefined;
+        if (hasTime && (Number(m[4]) > 23 || Number(m[5]) > 59 || (m[6] !== undefined && Number(m[6]) > 59))) return { present: false };
+        const pad = (n) => String(n).padStart(2, '0');
+        const candidateValue = hasTime
+            ? `${m[1]}-${m[2]}-${m[3]} ${pad(Number(m[4]))}:${pad(Number(m[5]))}:${m[6] !== undefined ? pad(Number(m[6])) : '00'}`
+            : `${m[1]}-${m[2]}-${m[3]} 17:00:00`;
+        const expired = candidateValue <= nowStr;
+        return { present: true, valid: !expired, expired, candidateValue };
+    }
+    // 受理弹窗——四情形之一命中才展示（与后端 case 'intake_accept' 判据同源，见 index.js :4259-4440 一带
+    //   + 方案 §13 直取分支）：⓪ feature∧deadline 有效 → 直取（不展示输入框，展示信息行，见下方 directTake）
     //   ①现值为空 ∧ 受理时刻已超默认 SLA 值（超时受理·必填）②现值非空 ∧ 已过期（必填）
     //   ③现值为空 ∧ SLA 未超 ∧ deadline 非空 ∧ 默认 SLA 值晚于 deadline（C11 预警·选填）
     function siIntakeEtaVisibility(iss) {
@@ -4726,6 +5419,14 @@
         const nowStr = siNowDtStr();
         if (existingEta) {
             return (existingEta <= nowStr) ? { show: true, required: true, kind: 'expired' } : { show: false };
+        }
+        // ⓪ feature 直取——existingEta 为空的前提下（同后端 `if (!existingEta)` 分支范围），命中即完全
+        //   替代下方 SLA 矩阵判断，不与 ①③ 共存（互斥，同后端"SLA 维度不参与"）。
+        if (iss.type === 'feature') {
+            const directTake = siResolveFeatureDeadlineDirectTake(iss.deadline, nowStr);
+            if (directTake && directTake.present && directTake.valid) {
+                return { show: false, directTake: true, directTakeValue: directTake.candidateValue };
+            }
         }
         const defaultEta = siComputeSysDefaultEta(iss.created_at, iss.type);
         if (defaultEta && nowStr >= defaultEta) return { show: true, required: true, kind: 'overdue' };
@@ -4755,7 +5456,14 @@
     //   （容器留空即整字段组消失，不是 disabled，符合方案要点⑤）。verbLabel 用于"超时XX"文案按弹窗
     //   身份区分（受理/指派/改派）。
     function siEtaFieldGroupHtml(vis, verbLabel) {
-        if (!vis || !vis.show) return '';
+        if (!vis) return '';
+        // [S8-S10 合并收口批 S10-UX·13] 直取分支——不渲染输入框，换成信息行，告知对接人本单预计完成
+        //   时间将直接取自期望完成时间，不受 SLA 默认公式约束（与后端 §13.1"不弹窗"一致：没有可填的
+        //   输入框，只有一句知情文案）。
+        if (vis.directTake) {
+            return note(`新功能类将直接采用期望完成时间：${esc(vis.directTakeValue.slice(0, 16))}`).html;
+        }
+        if (!vis.show) return '';
         let hint;
         if (vis.kind === 'overdue') hint = `${verbLabel}已超时，请填写预计完成时间才能提交。`;
         else if (vis.kind === 'expired') hint = '原预计完成时间已过期，请填写新值才能提交。';
@@ -4825,7 +5533,7 @@
         //   不参与容差判定，见 siWireEtaOverrunReasonBlock 挂接的输入框留空即隐藏）。
         const etaReasonBlockId = 'si-eta-reason-intake';
         fields.push(...fEtaOverrunReasonBlock(etaReasonBlockId, '', ''));
-        siModal('受理通过 #' + iss.id, fields, async v => {
+        siModal('受理通过 ' + siIssueDisplayNoById(iss.id), fields, async v => {
             const body = {};
             if (isChange) {
                 const riskLevel = (v.risk_level || '').trim();
@@ -4874,7 +5582,7 @@
     //   把服务端拒绝时的文案透传给用户（siApiErr 已读 r.data.error，自动带出"请上传测试截图或填写测试
     //   说明"）。test_note 留空且服务端判定本轮无凭证附件时会被拒，用户据提示回来补填或先去传附件。
     function siModalLiaisonTestPass(iss) {
-        siModal('对接测试通过 #' + iss.id, [
+        siModal('对接测试通过 ' + siIssueDisplayNoById(iss.id), [
             note('确认对接测试通过？通过后单据进入「待验收」。'),
             fTextarea('test_note', '测试说明', '', false, '本轮已传测试截图可留空；若本轮尚未上传测试附件，请填写测试说明作为凭证。', '本轮已传测试截图可留空'),
         ], async v => {
@@ -4895,7 +5603,7 @@
     function siModalResume(iss) {
         const key = 'resume-spec';
         siPickerReset(key);
-        siModal('重启 #' + iss.id, [
+        siModal('重启 ' + siIssueDisplayNoById(iss.id), [
             fTextarea('reason', '重启原因', '', true, '必填，trim 后非空'),
             { k: null, html: `<div class="u-form-group"><label>补充证据材料（选填，图片/PDF/Excel/Word/csv/txt/md，单个≤20MB，最多5个）</label>
                 ${siFilePickerHtml(key, '选择文件')}
@@ -4939,10 +5647,13 @@
         if (!iss) return;
         const hasDerived = siDetail && siDetail.derived_issues && siDetail.derived_issues.length > 0;
         if (hasDerived) { showToast('该单已派生出子单，不可删除（请先处理派生链）', 'error'); return; }
+        // [S13-b·B3·矩阵行6] 弹窗标题/确认文案改子编号——本处是**删除前**的实时确认弹窗，非"删除审计"
+        // 记录（矩阵行12 双记例外只适用于事后可查的持久审计面），走普通单记子编号，与其余 14 处弹窗标题
+        // 同一口径；真实 id 仍留在下方 note() 括注（不可逆操作前多给一个技术锚点方便核对，不算例外二次开洞）。
         siModal(
-            '删除任务 #' + iss.id,
+            '删除任务 ' + siIssueDisplayNo(iss),
             [
-                note(`确认物理删除迭代单 #${iss.id}「${esc(iss.title || '')}」？<br><br>此操作<b>不可恢复</b>，将一并清除该单的：状态历史、附件（含文件）、协作开发名册、commit 留痕、开发事件记录、各方通知记录。<br>删除动作本身会留审计记录（含操作人、时间、原因，以及上述全部内容的快照）。`),
+                note(`确认物理删除迭代单 ${esc(siIssueDisplayNo(iss))}（真实编号 #${iss.id}）「${esc(iss.title || '')}」？<br><br>此操作<b>不可恢复</b>，将一并清除该单的：状态历史、附件（含文件）、协作开发名册、commit 留痕、开发事件记录、各方通知记录。<br>删除动作本身会留审计记录（含操作人、时间、原因，以及上述全部内容的快照）。`),
                 fTextarea('reason', '删除原因', '', true, '必填：trim 1..200')
             ],
             async v => {
@@ -5212,6 +5923,50 @@
         if (!iss || !iss.eta_overrun_reason_code) return '';
         return `<div class="u-kv-item full"><div id="si-eta-overrun-reason-readonly" class="si-note-box" style="margin-bottom:0">超期原因：${esc(iss.eta_overrun_reason_code)}——${esc(iss.eta_overrun_reason_note || '')}</div></div>`;
     }
+    // 【2026-08-14 S11 预筛订正·MED-口径修复】gap 天数从"last_completed_at 与 deadline 重算"改为
+    //   "读判定时刻记录值"——闸边迁移后（见 index.js runWGate 订正注释），gate 在「开发中→待对接测试」
+    //   （⑦ 正常路径）这一刻就已判定并落库，但 last_completed_at 的 SQL 只统计 `to_status='待验证'`
+    //   的行（本文件 index.js:8077 一带白名单）——⑦ 路径此时 to_status 是「待对接测试」，last_completed_at
+    //   在对接测试通过前恒为 NULL/或指向更早一轮的旧值，用它重算 gap 会得到 NULL 或与判定时刻不一致
+    //   的错误天数，是典型的"口径漂移"（判定时刻≠last_completed_at 锚定的时刻）。改为从最新一条
+    //   action_code='completion_overrun_reason' 的 timeline 行 summary 里解析出判定时刻已经算好、已经
+    //   落库的 N（summary 形如"完成超期（超出期望完成 N 天）——<code>：<note>"，见 buildCompletionOverrun
+    //   ReasonSummarySuffix），不重算、不依赖 last_completed_at——与"判定时刻记录值"完全同源，不可能漂移。
+    // [codex 395 预筛 NEW-3] 优先读结构化 payload_json（{gap_days,reason_code,reason_note}，本批新增列
+    //   投影+写入，见 index.js runWGate 两处 completion_overrun_reason INSERT）；该列为空/解析失败的
+    //   旧数据（本批之前产出的历史行）兜底走 summary 正则解析（原实现，逻辑不删——两分支并存，非替换）。
+    function siCompletionOverrunGapFromTimeline() {
+        const rows = Array.isArray(siCurTimeline) ? siCurTimeline : [];
+        for (let i = rows.length - 1; i >= 0; i--) {
+            const row = rows[i];
+            if (!row || row.action_code !== 'completion_overrun_reason') continue;
+            // 分支①：结构化字段优先——payload_json 非空且能解析出 gap_days 数字，直接用，不碰 summary。
+            if (row.payload_json) {
+                try {
+                    const parsed = JSON.parse(row.payload_json);
+                    if (parsed && typeof parsed.gap_days === 'number') return parsed.gap_days;
+                } catch (_) { /* 解析失败落到分支②兜底 */ }
+            }
+            // 分支②：旧数据兜底——本批之前产出的历史行没有 payload_json 列（该列本次新增写入），
+            //   仍用 summary 正则解析出 gap 数字，不因升级导致存量行的 kv 回显"退化成空"。
+            if (typeof row.summary === 'string') {
+                const m = /超出期望完成\s*(\d+)\s*天/.exec(row.summary);
+                if (m) return Number(m[1]);
+            }
+        }
+        return null;   // 未找到（异常存量/理由已被后续打回清空但列值残留等边界）——不伪造，不渲染 gap 短语
+    }
+    // [方案 §14·S11] 完成超期理由——只读展示，同上函数一带范式（列存最新值，历史值由 timeline
+    //   completion_overrun_reason 独立行携带）。
+    //   消费面清单：详情页（本函数，已渲染）／timeline 后缀（已渲染，走既有 siRenderTimeline 通道，
+    //   action_code='completion_overrun_reason' 已登记 SI_TL_LABEL/SI_TL_CLS/SI_TL_NOTE_OWN_LABEL_CODES）／
+    //   列表页——有意不渲染（方案 §14.3 明文"列表不加超期徽章"，超期事实已由「实际完成」列+ETA统计承载）。
+    function siCompletionOverrunReasonReadonlyHtml(iss) {
+        if (!iss || !iss.completion_overrun_reason_code) return '';
+        const gap = siCompletionOverrunGapFromTimeline();
+        const gapText = (gap !== null && gap > 0) ? `（超出期望完成 ${gap} 天）` : '';
+        return `<div class="u-kv-item full"><div id="si-completion-overrun-reason-readonly" class="si-note-box" style="margin-bottom:0">完成超期原因${esc(gapText)}：${esc(iss.completion_overrun_reason_code)}——${esc(iss.completion_overrun_reason_note || '')}</div></div>`;
+    }
 
     // F2（估时/可行性弹窗回填提示）：dev_estimated_at 是整单单值，任一在册开发可填、后填覆盖先填——
     //   弹窗打开时先告诉填写者"当前值是谁、何时填的"，帮其判断是否要覆盖。事件源=siCurTimeline
@@ -5403,6 +6158,9 @@
     //   EDIT_NEEDS_FEASIBILITY_LOCKED_IN_TIER_B 400，属可预期的前后端口径一致，非 bug，但体验上应提前不显示）。
     function siModalEditInRevision(iss) {
         const systems = (META && META.bizSystems) || [];
+        // [P3 补齐] 来源三值枚举同 system_name 走 META 派生（GET meta 已下发 sources:SYS_SOURCES，单一收口
+        //   与后端同源，不再前端硬编码三字面量副本，防漂移）。
+        const sources = (META && META.sources) || [];
         const isChangeFlow = (iss.type === 'feature' || iss.type === 'improvement');
         // B 档按流分档（§6.1·codex C3 审 L-3）：变更流看「开发中」、bug 流看「处理中」——不用无条件 OR
         //   （虽然两态在状态机里互斥，同 or 结果一致，但按流精判更贴合后端 EDIT_TIER_B_CHANGE/EDIT_TIER_B_BUG 的语义，不依赖"两态互斥"这条隐含前提）。
@@ -5427,10 +6185,18 @@
             fSelectMap('system_name', '所属系统', systems, iss.system_name, null),
             fText('module_name', '模块', iss.module_name || '', false, ''),
             fSelect('priority', '优先级', ['P0', 'P1', 'P2', 'P3'], iss.priority || 'P2'),
+            // S9 方案 §12：source/related_correction_no 纳入两档可编辑集（EDIT_TIER_A_FIELDS 已含），补前端
+            //   控件——比照建单弹窗同款控件写法（:6357 fSelect('source',...) / :6371 fText('related_correction_no',...)），
+            //   此前后端已接受这两字段但前端未提供入口，属"能力有但用户够不到"的缺口，本批（S8-S10 合并
+            //   收口批 F1）补齐。
+            // [P6 补齐] 兜底默认由 '业务方' 改 '内部'，对齐 DDL `source DEFAULT '内部'`（后端列真实默认值，
+            //   兜底本就该反映"未填时系统实际会落什么"，非任意挑一个枚举值）。
+            fSelect('source', '来源', sources, iss.source || '内部'),
             // 四处优化 D2②（锚点 E4 编辑窗同步改）：控件升 datetime-local + 预填走 deadline 专用 helper。
             //   顺带统一叫法——本处原为「预期完成日期」，是与建单「期望完成时间」、列表页「期望完成」
             //   并存的**第三种叫法**，且改到分钟后"日期"二字与控件自相矛盾。
             fDateTime('deadline', '期望完成（选填；填则需精确到分钟）', deadlinePrefill),
+            fText('related_correction_no', '关联修正单号（选填，BUG 类用）', iss.related_correction_no || '', false, '软引用触发本次迭代的数据修正单（OA号/修正单ID），不联动不跳转，仅留痕'),
             fText('requester_dept', '需求方部门', iss.requester_dept || '', false, ''),
             fText('requester_name', '需求方姓名', iss.requester_name || '', false, ''),
             fText('requester_phone', '需求方电话', iss.requester_phone || '', false, ''),
@@ -5438,13 +6204,14 @@
         if (isChangeFlow && !isDevTier) fields.push(fSelectMap('needs_feasibility', '需可行性评估', ['0', '1'], String(Number(iss.needs_feasibility) === 1 ? 1 : 0), { '0': '否', '1': '是' }));
         if (iss.status === '待修改') fields.push(note('修改后仍需「重新提交受理」才回到待受理。'));
         else if (isDevTier) fields.push(note('开发中/处理中阶段不可修改"需可行性评估"（开发完成判定条件不得在开发期变更）。'));
-        siModal('编辑内容 #' + iss.id, fields, async v => {
+        siModal('编辑内容 ' + siIssueDisplayNoById(iss.id), fields, async v => {
             if (!v.title.trim()) { showToast('标题必填', 'error'); return false; }
             // 白名单字段·空串后端 trim 归 null（自由文本）；needs_feasibility 转 0/1。deadline 空串=清除。
             const body = {
                 title: v.title.trim(), description: v.description, system_name: v.system_name,
-                module_name: v.module_name, priority: v.priority,
+                module_name: v.module_name, priority: v.priority, source: v.source,
                 requester_dept: v.requester_dept, requester_name: v.requester_name, requester_phone: v.requester_phone,
+                related_correction_no: v.related_correction_no,
             };
             // ⭐ codex 248 HIGH-1 的 dirty 判断（理由见上方 deadlinePrefill 处注释）：
             //   与预填值逐字相同 = 用户没碰过 → **整个字段不进 body**，存量纯日期原样留在库里；
@@ -5469,7 +6236,7 @@
         const dirNote = target === 1
             ? '开启后：本单进入「待受理」，由对接人受理确认。'
             : '关闭后：本单跳过受理，直接进入指派/处理阶段。';
-        siModal(dirLabel + ' #' + iss.id, [
+        siModal(dirLabel + ' ' + siIssueDisplayNoById(iss.id), [
             note(dirNote),
             fTextarea('reason', '切换原因', '', true, '必填')
         ], async v => {
@@ -5486,7 +6253,7 @@
         const opts = cands.map(u => String(u.id));
         const labelMap = {}; cands.forEach(u => { labelMap[String(u.id)] = u.display_name || u.username || ('#' + u.id); });
         // ⭐ 角色权限重构 v2.1 §6（S5 通知手动化·D4）：发起不再自动发钉钉——文案改为引导手动发送。
-        siModal('发起技术负责人沟通 #' + iss.id, [
+        siModal('发起技术负责人沟通 ' + siIssueDisplayNoById(iss.id), [
             fSelectMap('tech_lead_id', '技术负责人', opts, opts[0], labelMap),
             note('发起后<b>不会自动</b>推送钉钉，请在通知区点「发送通知」手动发出。')
         ], async v => {
@@ -5512,7 +6279,7 @@
         //   避免走到后端拿一个对用户无意义的 400 EXPECTED_REQUEST_EVENT_ID_REQUIRED。
         if (!iss.tech_lead_notify_request_event_id) { showToast('本单当前没有进行中的技术咨询，请刷新后重试', 'error'); return; }
         const roundEventId = iss.tech_lead_notify_request_event_id;
-        siModal('回复评估意见 #' + iss.id, [
+        siModal('回复评估意见 ' + siIssueDisplayNoById(iss.id), [
             fTextarea('comment', '评估意见', '', true, '必填：本单最终技术评估意见，≤2000 字，提交后不可修改'),
             note('提交后为本单唯一一条最终意见，<b>不可修改或补充</b>，请确认内容完整后再提交。')
         ], async v => {
@@ -5560,7 +6327,7 @@
     }
     //   set_scheduled_start（定计划开工日·§7.2·admin·可清除）：fDate 空=清除（显式传 null）。
     function siModalSetScheduledStart(iss) {
-        siModal((iss.scheduled_start ? '修改' : '定') + '计划开工日 #' + iss.id, [
+        siModal((iss.scheduled_start ? '修改' : '定') + '计划开工日 ' + siIssueDisplayNoById(iss.id), [
             fDate('scheduled_start', '计划开工日', iss.scheduled_start || ''),
             note('计划开工日为参考字段（非闸门）。清空日期即清除。打回/重开会自动清除。')
         ], async v => {
@@ -5639,11 +6406,11 @@
                 <div class="u-form-group inline-chk" style="margin-bottom:0"><input type="checkbox" id="siSubmitTestEnvDeployed"><label for="siSubmitTestEnvDeployed">已上测试库</label></div>
                 <div class="u-hint">两项均须勾选才能提交（默认不勾·确认清单式，按人留痕）。</div>
             </div>
-            ${(iss.type === 'bug' && siHasActiveFastReleaseAuth(iss)) ? `<div class="u-form-group">
-                <div class="u-form-group inline-chk" style="margin-bottom:0"><input type="checkbox" id="siSubmitDirectRelease"><label for="siSubmitDirectRelease">已随修复直接上线</label></div>
-                <div class="u-hint">本单已获管理员「先行上线授权」。勾选后本次提交将跳过验证/上线安排，直接标记为「已上线」（上线后需管理员补做验收）；不勾选按正常流程走「待验证」。
-                    <b>本授权来自当前轮次</b>——若本单曾打回/重开，请先向管理员确认授权是否已针对本轮重新签发，避免提交时被后端拒绝。</div>
-            </div>` : ''}`;
+            `;
+        // [组B·S2-2·拆直上分支] submit 弹窗「已随修复直接上线」勾选框整块拆除——方案 §4-2「整体替代」
+        //   拍板：submit 不再支持勾选直上，两步化改用「挂牌 + 值班执行人全员确认才翻牌」，翻牌动作移到
+        //   后续子阶段的独立执行确认入口，不再挂在 submit 弹窗里。走正常验收路的唯一开关是 admin 撤销
+        //   先行上线授权（K1 拍板：单一开关，不留两条路径并存）。
 
         // P4：去主次多开发说明——本操作仅标记「你本人」的开发项完成，全部在册开发都完成后主状态才进「待验证」。
         // [codex 291 号 M-2 收口] 原固定文案"…自动进入「待验收」"对 feature 失实——feature 主路径先进
@@ -5657,6 +6424,11 @@
         const fields = [{ k: null, html: `<div class="u-hint" style="margin-bottom:8px">${submitCompleteHint}</div>` }, { k: null, html: modeHtml }];
         if (needGap) fields.push(fTextarea('fix_gap_note', '修复缺口说明', '', true, '必填：上一版修复缺口在哪（复盘素材，不作考核）'));
         if (needGap) fields.push(note('⚠️ 派生自 bug 的修复单首次提交需额外填写「修复缺口说明」。'));
+        // [§14·S11] feature 超期完成理由闸——独立理由块（默认隐藏，前端按 deadline 与今天日期差预判
+        //   展开，服务端为准）。放在弹窗末尾（确认清单勾选框之后），与"标记完成"这个最终动作视觉上
+        //   靠近，同时不打断上方 commit/说明等常规填写流程。
+        const SI_COMPLETION_OVERRUN_BLOCK_ID = 'si-completion-overrun-reason';
+        fields.push(...fCompletionOverrunReasonBlock(SI_COMPLETION_OVERRUN_BLOCK_ID, iss.type, iss.deadline));
 
         siModal('标记我的开发完成', fields, async v => {
             const mode = document.querySelector('input[name="si-submit-mode"]:checked').value;
@@ -5670,14 +6442,8 @@
             if (!testEnvDeployedChecked) { showToast('请先勾选"已上测试库"', 'error'); return false; }
             body.self_tested = true;
             body.test_env_deployed = true;
-            // [组 B·SB3] 先行上线「已随修复直接上线」勾选——仅 bug 且当前有活跃授权时渲染该勾选框（见上方
-            //   modeHtml），故读取前先判条件是否成立，条件不成立时 DOM 里没有该元素（querySelector 恒 null），
-            //   与既有 fix_gap_note 等条件性字段"不适用不传"惯例一致；勾选=true 才带 direct_release 键，
-            //   未勾选/不适用均不传（后端缺省 false，现行为零变化，同 direct_release 后端校验注释先例）。
-            if (iss.type === 'bug' && siHasActiveFastReleaseAuth(iss)) {
-                const directChecked = !!(document.getElementById('siSubmitDirectRelease') && document.getElementById('siSubmitDirectRelease').checked);
-                if (directChecked) body.direct_release = true;
-            }
+            // [组B·S2-2·拆直上分支] 先行上线「已随修复直接上线」勾选的读取与 direct_release 键拼装已随
+            //   勾选框整块拆除（见上方弹窗字段区注释）——body 不再携带该键。
             // [B4·C6] bug 产生原因——mode 无关字段（两种提交方式都必填，字段区恒显不随 mode 隐藏，见上方
             //   modeHtml）。校验口径与后端 validateSubmitBody 逐字对齐（trim 后非空 + Unicode 码点数 ≤500）；
             //   非 bug 单不渲染该字段、body 不带该键——带了会撞后端 BUG_CAUSE_NOT_APPLICABLE 400（适用面闸
@@ -5722,6 +6488,13 @@
             const workNote = (document.getElementById('siSubmitWorkNote') && document.getElementById('siSubmitWorkNote').value || '').trim();
             if ([...workNote].length > 1000) { showToast('工作说明不能超过 1000 字', 'error'); return false; }
             if (workNote) body.work_note = workNote;
+            // [§14·S11] feature 超期完成理由——块可见时缺一即拒（前端体验层拦截，服务端 400 兜底）。
+            const completionReason = siCollectCompletionOverrunReason(SI_COMPLETION_OVERRUN_BLOCK_ID, v);
+            if (completionReason.invalid) return false;
+            if (completionReason.include) {
+                body.completion_overrun_reason_code = completionReason.code;
+                body.completion_overrun_reason_note = completionReason.note;
+            }
             const r = await siApi('/sys-issues/' + iss.id + '/submit', { method: 'POST', body });
             if (!r.ok) {
                 if (r.status === 409) {
@@ -5731,9 +6504,27 @@
                     siCloseModal();
                     await siAfterAction();
                 } else {
+                    // [§14·S11 MED-2] reveal 兜底——前端预判隐藏了理由块、服务端判定确实需要（need_reason:
+                    //   true，同 400 响应体见 [MED-1]）——当场展开，不逼用户关弹窗重开。仅当块**确实原本
+                    //   隐藏**（display==='none'）才触发，防已展示态下的空提交重复重建。
+                    if (r.data && r.data.code === 'COMPLETION_OVERRUN_REASON_CODE_REQUIRED' && r.data.need_reason) {
+                        const block = document.getElementById(SI_COMPLETION_OVERRUN_BLOCK_ID);
+                        if (block && block.style.display === 'none') {
+                            siRevealCompletionOverrunReasonOnFallback(SI_COMPLETION_OVERRUN_BLOCK_ID, r.data.gap_days);
+                        }
+                    }
                     siApiErr(r);
                 }
                 return false;
+            }
+            // [§14·S11 MED-2] collapse 反向兜底——前端预判展示了理由块（要求必填），服务端 200 判定其实
+            //   不需要（need_reason:false，同 200 响应体见 [MED-1]）——收起，防止一个已知与服务端权威判定
+            //   相悖的必填态继续留在界面上（本次提交已成功，纯防御性 DOM 收敛，非阻断性修复）。
+            if (r.data && r.data.completion_overrun && r.data.completion_overrun.need_reason === false) {
+                const block = document.getElementById(SI_COMPLETION_OVERRUN_BLOCK_ID);
+                if (block && block.style.display !== 'none') {
+                    siCollapseCompletionOverrunReasonOnNotNeeded(SI_COMPLETION_OVERRUN_BLOCK_ID);
+                }
             }
             const toMain = r.data && r.data.main_status;
             // P2（务实简化·无暂存批次）：submit 成功后，若选了佐证附件则顺带上传为 delivery（复用现有 POST /attachments·
@@ -5748,13 +6539,16 @@
                 if (ar.ok) { siPickerReset('submit-delivery'); attMsg = '，附件已上传'; }
                 else { attMsg = '，但附件上传失败（可到附件区重传）'; }
             }
-            // [组 B·SB3] direct_release 成功时响应体携带 online_source（同 /accept 端点先例，见后端 submit
-            //   handler 响应体注释）——优先判断，给出与常规「转待验证/待对接测试」不同的提示文案。
-            const directReleaseOk = body.direct_release === true && r.data && r.data.online_source === 'authorized_fastlane';
-            showToast((directReleaseOk ? '已随修复直接上线（先行上线），待管理员补验收'
-                : (toMain === '待验证' ? '已标记完成，全部开发完成 → 转「待验收」'
-                : (toMain === '待对接测试' ? '已标记完成，全部开发完成 → 转「待对接测试」（对接人测试通过后进入待验收）'
-                : '已标记你的开发完成（等待其他开发完成）'))) + attMsg, submitFiles.length && attMsg.includes('失败') ? 'info' : 'success');
+            // [组B·S2-2·拆直上分支] direct_release 成功分支的差异化提示文案已随勾选框拆除删除——submit
+            //   响应不再带 online_source 键，toast 恒走常规「转待验证/待对接测试」三选一文案。
+            // [codex 383-L4 收口] 此前两处硬编码字面量「待验收」——平台确有统一状态显示字典 siStatusDisplay
+            //   （:982，「待验证」纯展示映射为「待验收」，存储值/API/筛选器 value 恒不变，D22 批2·2026-08-06
+            //   既定约定），故按该字典函数派生而非再手写一份字面量，防止字典未来改口径时本处独立漂移；
+            //   注意先行上线授权弹窗（:4598「主状态转入「待验证」」）刻意使用内部状态原名描述转移动作本身，
+            //   与本处"描述用户将看到的展示态"语境不同，不属于同款误写，未动。
+            showToast((toMain === '待验证' ? `已标记完成，全部开发完成 → 转「${siStatusDisplay(toMain)}」`
+                : (toMain === '待对接测试' ? `已标记完成，全部开发完成 → 转「待对接测试」（对接人测试通过后进入${siStatusDisplay('待验证')}）`
+                : '已标记你的开发完成（等待其他开发完成）')) + attMsg, submitFiles.length && attMsg.includes('失败') ? 'info' : 'success');
             return true;
         });
         // commit 记录改造：siModal 已同步渲染 modeHtml（含分组容器），此处按 siSubmitRowState 铺初始行。
@@ -6010,7 +6804,8 @@
             fSelectMap('type', '新单类型', typeOpts, defType, SI_TYPE_LABEL),
             fText('title', '新单标题', iss.title + '（迭代）', true),
             fSelectMap('system_name', '所属系统', (META && META.bizSystems) || [], iss.system_name, null),
-            fSelect('source', '来源', ['业务方', '内部', '生产故障'], iss.source || '业务方'),
+            // [P3/P6 补齐] 来源同 system_name 走 META 派生；兜底默认 '内部' 对齐 DDL DEFAULT（同编辑弹窗 :5718 一带）。
+            fSelect('source', '来源', (META && META.sources) || [], iss.source || '内部'),
             fText('module_name', '模块（选填）', iss.module_name || ''),
             // ⑤ Q2：derive_reason 取代旧 derive_note（既落新单 derive_reason 列、又作 derive 时间线说明）
             fTextarea('derive_reason', reasonRequired ? '派生原因' : '派生原因（选填）', '', reasonRequired,
@@ -6023,7 +6818,11 @@
             if (v.derive_reason.trim()) body.derive_reason = v.derive_reason.trim();
             const r = await siApi('/sys-issues/' + iss.id + '/derive', { method: 'POST', body });
             if (!r.ok) { siApiErr(r); return false; }
-            showToast('已派生新单 #' + (r.data && r.data.id), 'success');
+            // [S13-b·B3·矩阵行7] 子编号——同 post-release-accept 分支同款理由：新单刚创建还不在 siList
+            // 里，改走响应体已直传的 derive_root_id/derive_seq（index.js 该端点 `id` 主键本身仍是矩阵行
+            // 11 深链/API 技术锚点未变，本次只追加两个展示用字段，不改 id 语义）。
+            // [S13 收口 LOW-5] 同上：r.data 缺失时补显式兜底文案，不留静默空字符串。
+            showToast('已派生新单 ' + (siIssueDisplayNo(r.data) || '（编号获取失败，请刷新列表）'), 'success');
             if (r.data && r.data.id) { siCloseModal(); await siLoadList(); siOpenDrawer(r.data.id); return false; }
             return true;
         });
@@ -6133,7 +6932,9 @@
             fSelectMap('system_name', '所属系统', (META && META.bizSystems) || [], (META && META.bizSystems && META.bizSystems[0]) || '', null),
             fText('module_name', '模块（选填）', ''),
             fSelect('priority', SI_PRIORITY_LABEL, ['P0', 'P1', 'P2', 'P3'], 'P2'),
-            fSelect('source', '来源', ['业务方', '内部', '生产故障'], '业务方'),
+            // [P3 补齐] 来源同 system_name 走 META 派生（单一收口对齐后端）；默认值不在 P6 改动范围内，
+            //   原样保留 '业务方'（建单弹窗无 iss 可读，是独立的表单初值选择，非"兜底"语义，未拍板变更）。
+            fSelect('source', '来源', (META && META.sources) || [], '业务方'),
             siRequesterDeptFieldHtml(),
             fText('requester_name', '需求方姓名（选填）', ''),
             fText('requester_phone', '需求方手机（选填，通知用）', ''),
@@ -6369,7 +7170,8 @@
         const examples = overall.overdue_examples || [];
         const examplesHtml = examples.length ? `<div class="u-form-group"><label>未达标示例（实际上线晚于期望完成，按单列出，当前显示 ${examples.length} 条；达成率数字按全量计，示例列表仅供抽查）</label>
             <div style="max-height:220px;overflow:auto">${examples.map(e =>
-                `<div class="si-note-box" style="margin-bottom:6px">#${e.id} ${esc(e.title || '')}｜期望 ${esc(e.deadline)}｜实际上线 ${esc(siFmtDT(e.released_at))}｜超出 ${e.overdue_days} 天</div>`
+                // [S13-b·B3·矩阵行13] 子编号——e 已含 derive_root_id/derive_seq（后端补投影）。
+                `<div class="si-note-box" style="margin-bottom:6px">${esc(siIssueDisplayNo(e))} ${esc(e.title || '')}｜期望 ${esc(e.deadline)}｜实际上线 ${esc(siFmtDT(e.released_at))}｜超出 ${e.overdue_days} 天</div>`
             ).join('')}</div></div>` : '';
         siModal('期望对表统计', [
             { k: null, html: overallHtml },
@@ -6757,7 +7559,7 @@
                 const reasonRaw = it.reason || '';
                 const reasonShort = reasonRaw.length > 40 ? esc(reasonRaw.slice(0, 40)) + '…' : esc(reasonRaw);
                 return `<div class="si-batch-item" onclick="siOpenDeleteAuditDetail(${it.id})">
-                    <div><span class="si-batch-no">#${it.issue_id}</span> ${esc(it.issue_title || '（无标题）')} <span class="si-muted">${esc(siTypeLabel(it.issue_type) || it.issue_type || '')}</span></div>
+                    <div><span class="si-batch-no">${esc(siDeleteAuditDualNo(it))}</span> ${esc(it.issue_title || '（无标题）')} <span class="si-muted">${esc(siTypeLabel(it.issue_type) || it.issue_type || '')}</span></div>
                     <div class="si-batch-meta" title="删除于 ${esc(siFmtDTSec(it.deleted_at))}">删除于 ${esc(siFmtDT(it.deleted_at))} · 操作者 ${esc(it.operator_name || ('#' + it.operator_id))} · 原因：${reasonShort}</div>
                 </div>`;
             }).join('');
@@ -6796,7 +7598,7 @@
         ];
         document.getElementById('siBatchBody').innerHTML = `<div class="u-detail-section"><h3>基本信息</h3><div class="u-kv-grid">
                 <div class="u-kv-item"><label>删除时间</label><div class="v" title="${esc(siFmtDTSec(d.deleted_at))}">${esc(siFmtDT(d.deleted_at))}</div></div>
-                <div class="u-kv-item"><label>被删单号</label><div class="v">#${esc(d.issue_id)}</div></div>
+                <div class="u-kv-item"><label>被删单号</label><div class="v">${esc(siDeleteAuditDualNo(d))}</div></div>
                 <div class="u-kv-item"><label>标题</label><div class="v">${esc(d.issue_title || '')}</div></div>
                 <div class="u-kv-item"><label>类型</label><div class="v">${esc(siTypeLabel(d.issue_type) || d.issue_type || '')}</div></div>
                 <div class="u-kv-item"><label>删除时状态</label><div class="v">${esc(d.issue_status || '')}</div></div>
@@ -6859,7 +7661,10 @@
             const members = (b.members || []).map(m => {
                 const typeHtml = m.type ? `<span class="u-type-tag ${siTypeClass(m.type)}">${esc(siTypeLabel(m.type))}</span>` : '<span class="si-muted">类型不可用</span>';
                 const titleHtml = m.title != null ? esc(m.title) : '<span class="si-muted">（标题不可用）</span>';
-                return `<div style="font-size:12px;padding:2px 0">${typeHtml} #${esc(m.id)} ${titleHtml}</div>`;
+                // [S13-b·B3·矩阵行13·如实降级] 同批次详情成员行（siOpenBatchDetail 附近）同款处置——
+                // m 来自 getReleaseMembers 三态输出，历史/降级两态不含 derive_root_id/derive_seq，改走
+                // siIssueDisplayNoById 兜底（siList 命中出子编号，未命中原样回退真实 id）。
+                return `<div style="font-size:12px;padding:2px 0">${typeHtml} ${esc(siIssueDisplayNoById(m.id))} ${titleHtml}</div>`;
             }).join('') || '<div class="si-muted" style="font-size:12px">（无成员）</div>';
             const noteRaw = b.release_note || '';
             const noteHtml = noteRaw ? `<div class="si-muted" style="margin-top:4px">${esc(noteRaw.length > 80 ? noteRaw.slice(0, 80) + '…' : noteRaw)}</div>` : '';
@@ -6971,8 +7776,14 @@
             // 出现 onclick="siOpenDrawer(NaN)" 这类静默失败的死链接，"移除"按钮同理一并禁用）。
             const issueId = Number(i.id);
             const idOk = Number.isSafeInteger(issueId);
+            // [S13-b·B3·矩阵行13·如实降级] 本行数据源=getReleaseMembers 三态（live/snapshot/degraded）
+            // 之一——snapshot 是发布时刻冻结的历史 JSON、degraded 是从 timeline 载荷重建，两者均不含
+            // derive_root_id/derive_seq（历史快照早于 S12 迁移、timeline 载荷本就不携带这两列，追加需要
+            // 改造快照写入契约，超出本批范围）；live 态本可加投影，但三态共用同一段渲染代码、不值得为
+            // 一态单独分叉。改走 siIssueDisplayNoById（siList 命中则子编号，未命中原样回退真实 id——不
+            // 假装有数据，如实降级）。
             const idLinkHtml = idOk
-                ? `<a class="si-att-name" onclick="siCloseBatch();siOpenDrawer(${issueId})">#${issueId} ${titleHtml}</a>`
+                ? `<a class="si-att-name" onclick="siCloseBatch();siOpenDrawer(${issueId})">${esc(siIssueDisplayNoById(issueId))} ${titleHtml}</a>`
                 : `<span class="si-att-name si-muted" title="单据编号异常，无法定位">单据编号不可用 ${titleHtml}</span>`;
             // 执行人移单（2026-07-31 用户拍板）：可见条件镜像下方「确认上线完成」按钮同款（本人在册+已通知+
             //   计划中），独立于 admin 既有「移除」（siRemoveFromBatch，无需原因，条件见下方 isAdmin() 门）——
@@ -7580,7 +8391,9 @@
             !i.release_id && i.type !== 'config'
             && (!bf || siReleaseFamily(i.type) === bf));
         if (!cands.length) { showToast(bf ? `没有可加入本上线单（${bf === 'bug' ? 'bug' : '功能/优化'}）的「待上线」单据` : '没有可加入的「待上线」单据', 'warning'); return; }
-        const opts = cands.map(i => `<label class="si-chk-row si-chk-row-wide"><input type="checkbox" class="si-add-chk" value="${i.id}"> #${i.id} <span class="u-type-tag ${siTypeClass(i.type)}">${esc(siTypeLabel(i.type))}</span> ${esc(i.title)}</label>`).join('');
+        // [S13-b·B3·矩阵行13] 子编号——cands 来自 GET /sys-issues 列表端点，早已投影 derive_root_id/
+        // derive_seq（S12-b/S13-a），siIssueDisplayNo 零额外数据依赖直接消费。
+        const opts = cands.map(i => `<label class="si-chk-row si-chk-row-wide"><input type="checkbox" class="si-add-chk" value="${i.id}"> ${esc(siIssueDisplayNo(i))} <span class="u-type-tag ${siTypeClass(i.type)}">${esc(siTypeLabel(i.type))}</span> ${esc(i.title)}</label>`).join('');
         siModal('加入上线单', [{ k: null, html: `<div class="u-form-group"><label>选择待上线单据</label><div style="max-height:320px;overflow-y:auto">${opts}</div></div>` }], async () => {
             const ids = [...document.querySelectorAll('.si-add-chk:checked')].map(c => parseInt(c.value, 10));
             if (!ids.length) { showToast('请至少选择一个单据', 'error'); return false; }
@@ -7603,7 +8416,7 @@
     //   剩余成员数=0（移空）时后端 executor_kept=false 并把通知/执行人一并重置，与「保留身份」态措辞不同，
     //   前端按响应字段分别提示，不猜测。
     function siRemoveFromBatchExecutorModal(releaseId, issueId, title) {
-        siModal('移出上线单（#' + issueId + (title ? ' ' + esc(title) : '') + '）', [
+        siModal('移出上线单（' + siIssueDisplayNoById(issueId) + (title ? ' ' + esc(title) : '') + '）', [
             fTextarea('reason', '移出原因', '', true, '必填，trim 后 1-200 字'),
             note('移出后该单回到「待上线」，可重新安排上线；若移出后本批次仍有其他成员，你的执行人身份与已通知状态将保留，无需重新通知。')
         ], async v => {
@@ -7771,6 +8584,84 @@
         if (!noteText) { showToast('请填写超期原因说明', 'error'); return { include: false, invalid: true }; }
         if (noteText.length > 300) { showToast('超期原因说明不超过 300 字', 'error'); return { include: false, invalid: true }; }
         return { include: true, code, note: noteText };
+    }
+
+    // ── §14（S11·方案 v1.8）：feature 超期完成理由闸——submit 弹窗专用实例 ─────────────────
+    //   照搬 fEtaOverrunReasonBlock 范式**另建专用实例**（独立 DOM id：f_completion_overrun_reason_code/
+    //   _note，不与 f_eta_overrun_reason_* 混用）——前端按 deadline 与"今天"日期分量差预判展开，纯 UX，
+    //   服务端判定为准（双层）。⚠️ 不做跨轮预填（378-M3：清列点会清掉最新值，预填要么无源要么解析
+    //   summary 文本——脆弱，取消），故本组不接受 prefillCode/prefillNote 参数，恒空白打开。
+    //   gap 算法与后端 evaluateCompletionOverrun 同族镜像（前 10 位正则/不进 Date() 整串解析/年月日
+    //   分量回比对），比较对象="今天"（客户端本地日期）而非某个 ETA 值——与 siEtaDeadlineGapDays（比较
+    //   两个都是"值"）语义不同，故不复用该函数，另写一个轻量版。
+    function siCompletionOverrunGapDays(deadlineRaw) {
+        if (!deadlineRaw) return null;
+        const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(deadlineRaw).trim());
+        if (!m) return null;
+        const y = Number(m[1]), mo = Number(m[2]), d = Number(m[3]);
+        const dl = new Date(y, mo - 1, d);
+        if (dl.getFullYear() !== y || dl.getMonth() !== mo - 1 || dl.getDate() !== d) return null;
+        const now = new Date();
+        const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        return Math.round((today.getTime() - dl.getTime()) / 86400000);
+    }
+    // 展开条件镜像后端 resolveCompletionOverrunReasonForWrite：type==='feature' ∧ deadline 有效 ∧
+    // gapDays≥3（达到即触发，同 index.js 该函数头部注释同款阈值口径）。
+    function fCompletionOverrunReasonBlock(blockId, issType, deadlineRaw) {
+        const gap = siCompletionOverrunGapDays(deadlineRaw);
+        const show = issType === 'feature' && gap !== null && gap >= 3;
+        const opts = SI_ETA_OVERRUN_REASON_CODES.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('');
+        const html = `<div id="${blockId}" class="si-eta-reason-block" style="display:${show ? '' : 'none'}">
+            <div id="${blockId}-hint" class="si-eta-reason-hint">本次报完工晚于业务方期望完成时间 3 天及以上，请说明超期原因。</div>
+            <div class="u-form-group"><label>完成超期原因 <span class="u-req">*</span></label>
+              <select id="f_completion_overrun_reason_code"><option value="">请选择</option>${opts}</select></div>
+            <div class="u-form-group"><label>完成超期原因说明 <span class="u-req">*</span></label>
+              <textarea id="f_completion_overrun_reason_note" placeholder="必填，1-300字"></textarea></div>
+          </div>`;
+        return [
+            { k: null, html },
+            { k: 'completion_overrun_reason_code', html: '' },
+            { k: 'completion_overrun_reason_note', html: '' },
+        ];
+    }
+    // 收集口径与 siCollectEtaOverrunReason 同构：块可见时缺一即拒（前端体验层）；块不可见时不采纳
+    // 残留值（服务端才是唯一真相源，前端展不展开只影响 UX，不影响"提交了什么"）。
+    function siCollectCompletionOverrunReason(blockId, v) {
+        const block = document.getElementById(blockId);
+        const visible = !!block && block.style.display !== 'none';
+        if (!visible) return { include: false };
+        const code = (v.completion_overrun_reason_code || '').trim();
+        const noteText = (v.completion_overrun_reason_note || '').trim();
+        if (!code) { showToast('本次报完工晚于业务方期望，请选择超期原因', 'error'); return { include: false, invalid: true }; }
+        if (!noteText) { showToast('请填写完成超期原因说明', 'error'); return { include: false, invalid: true }; }
+        if (noteText.length > 300) { showToast('完成超期原因说明不超过 300 字', 'error'); return { include: false, invalid: true }; }
+        return { include: true, code, note: noteText };
+    }
+    // [§14·S11 MED-2] reveal/collapse 双向回补——照 siRevealEtaFieldOnFallback/siCollapseEtaFieldOnNotExpired
+    // 先例（:5043/:5065），响应体信息载体不同：ETA 走 code 判别（INTAKE_ESTIMATE_REQUIRED/ETA_NOT_EXPIRED），
+    // 本块走 [§14·S11 MED-1] 新增的 need_reason/gap_days 结构化字段（400/200 两侧均带），故两个函数直接
+    // 消费传入的 gapDays 渲染提示句，不必反查 code 字符串。
+    //   reveal：服务端 400 说要（need_reason:true）而前端预判隐藏了块——当场展开，hint 用响应体真实
+    //   gapDays（而非硬编码"3 天"）渲染，用户读完直接补填重新提交，不逼其关弹窗重开。
+    function siRevealCompletionOverrunReasonOnFallback(blockId, gapDays) {
+        const block = document.getElementById(blockId);
+        if (!block) return;
+        block.style.display = '';
+        const hint = document.getElementById(blockId + '-hint');
+        if (hint) hint.textContent = `本次报完工晚于业务方期望完成时间 ${gapDays} 天，请说明超期原因。`;
+    }
+    //   collapse：前端预判显示了块（要求必填）而服务端 200 说不要（need_reason:false）——收起并清空两
+    //   个输入，防止块在同一弹窗后续重开/重试场景里继续误导性地要求一个服务端已判定不需要的字段
+    //   （同 ETA 先例的"前端误判造成死循环"精神，此处是"前端误判造成不必要的必填"而非死循环，程度更
+    //   轻，但收起同样是正确姿态——不留一个已知与服务端权威判定相悖的必填态在界面上）。
+    function siCollapseCompletionOverrunReasonOnNotNeeded(blockId) {
+        const block = document.getElementById(blockId);
+        if (!block) return;
+        block.style.display = 'none';
+        const codeEl = document.getElementById('f_completion_overrun_reason_code');
+        const noteEl = document.getElementById('f_completion_overrun_reason_note');
+        if (codeEl) codeEl.value = '';
+        if (noteEl) noteEl.value = '';
     }
 
     // ============================================================
@@ -7981,7 +8872,14 @@
         const dt = siToLocalInput(v);
         if (dt) return dt;
         const d = /^(\d{4}-\d{2}-\d{2})$/.exec(String(v || '').trim());
-        return d ? (d[1] + 'T00:00') : '';
+        // [精度 A 案·2026-08-15 用户裁定] 存量纯日期回填预填 17:00（原 T00:00）——00:00 是用户从未选择
+        //   过的时刻（编辑窗只改日期不碰时间格时会被固化落库，看似精确实为伪造），17:00 与三方心智模型
+        //   一致（SLA 公式默认时刻 / §13 ETA 直取纯日期补 17:00 / 协作模块智能默认），用户只改日期时落库
+        //   17:00:00 恰等于直取分支本会补的值=语义闭环。dirty 闸交互不变：没碰控件时 v===prefill 不提交，
+        //   存量纯日期保持纯日期不被静默固化。四案对比与裁定：docs/local/系统迭代/deadline精度歧义_设计
+        //   对比_20260815_v1.0.md（A=预填改 17:00·B 精度标记/C 不预填/D 文案缓解均未采）。API 面
+        //   normalizeDeadlineDT 纯日期补 00:00 维持不动（对比材料 §五子项·用户未裁定按保守不改）。
+        return d ? (d[1] + 'T17:00') : '';
     }
     function siFromLocalInput(v) {
         if (!v) return '';

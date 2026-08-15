@@ -361,11 +361,17 @@ async function main() {
       '[F] 应存在 deadline 专用预填 helper siDeadlineToLocalInput');
     const genericBody = (pageSrc.match(/function siToLocalInput\(v\)\s*\{[\s\S]*?\n    \}/) || [''])[0];
     assert.ok(genericBody, '[F] 前置：应能解析出 siToLocalInput 函数体');
-    assert.ok(!/T00:00/.test(genericBody),
-      `[F] ⭐ 通用 siToLocalInput 必须保持严格（不得含 T00:00 补齐分支），否则 dev_estimated_at 的脏纯日期会被静默补成午夜。实得函数体：${genericBody.slice(0, 300)}`);
-    assert.ok(/function siDeadlineToLocalInput\(v\)\s*\{[\s\S]{0,400}?T00:00/.test(pageSrc),
-      '[F] 纯日期补齐分支应在 siDeadlineToLocalInput 内');
-    ok('[F3] ⭐ 纯日期兼容拆进 deadline 专用 helper，通用 siToLocalInput 保持严格（与后端「不污染共用校验器」同一原则，两边执行一致）');
+    assert.ok(!/T00:00/.test(genericBody) && !/T17:00/.test(genericBody),
+      `[F] ⭐ 通用 siToLocalInput 必须保持严格（不得含 T00:00/T17:00 任何补齐分支——精度 A 案后补齐时刻改 17:00，"不污染共用件"原则对新时刻同样成立），否则 dev_estimated_at 的脏纯日期会被静默补时刻。实得函数体：${genericBody.slice(0, 300)}`);
+    // [精度 A 案·2026-08-15] 补齐分支断言改钉**代码字面量** `d[1] + 'T17:00'` 而非裸 /T00:00/ 子串——
+    //   ⚠️ 假绿自纠：A 案落地时本断言原形（裸 T00:00 子串匹配）被实现处新注释里的"（原 T00:00）"字样
+    //   碰巧续绿，真实代码已是 T17:00 而断言未红——文本子串匹配会被注释文字骗过（同「文本扫描剥注释
+    //   先行」教训在断言侧的形态），钉代码拼接形状后注释匹配不上。
+    assert.ok(/function siDeadlineToLocalInput\(v\)\s*\{[\s\S]{0,900}?d\[1\] \+ 'T17:00'/.test(pageSrc),
+      '[F] 纯日期补齐分支应在 siDeadlineToLocalInput 内且补齐时刻=T17:00（精度 A 案·2026-08-15 用户裁定·改回 T00:00 或删分支本条立红）');
+    assert.ok(!/d\[1\] \+ 'T00:00'/.test(pageSrc),
+      '[F] 全页不得残留 T00:00 补齐代码（A 案后唯一补齐点=专用 helper 的 T17:00）');
+    ok('[F3] ⭐ 纯日期兼容拆进 deadline 专用 helper（A 案后补齐=T17:00 钉代码字面量防注释假绿），通用 siToLocalInput 保持严格（与后端「不污染共用校验器」同一原则，两边执行一致）');
 
     // codex 248 HIGH-1：编辑窗必须做 dirty 比对——预填 ≠ 该写回库。
     assert.ok(/const deadlinePrefill = siDeadlineToLocalInput\(iss\.deadline\);/.test(pageSrc),

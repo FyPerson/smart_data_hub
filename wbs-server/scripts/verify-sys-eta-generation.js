@@ -33,9 +33,18 @@
 //       安全比较）——旧写法在既有值为 NULL 时（打回/liaison_test_return/reopen 均会清空 ETA）恒不
 //       匹配，误报 409 CONCURRENT_STATE_CHANGE，堵死"打回后改派填值=合法人工设定"路径；用真实
 //       /return 而非 DB 直接置空来触发，证明的是真实业务链路而非纯造态。
+//   [F1]-[F7] 方案 §13 feature ETA 直取——决策表逐行正负例 + 边界钉子 + improvement/bug 对照组
+//       （详见各组自身注释）。
+//   [FE] 【S8-S10 合并收口批 S10-UX·13】受理弹窗前端镜像判据静态核对（纯源码扫描，同
+//       verify-sys-fastlane-panel-static.js 风格，不起浏览器）：siIntakeEtaVisibility/
+//       siEtaFieldGroupHtml 含 feature 直取分支（directTake）+ 信息行文案；显隐断言成对
+//       （feature∧有效deadline→隐藏/improvement 或 deadline 无效→仍走原三情形展示逻辑，源码结构层面
+//       两条判断分支均存在，非活体断言）。
 'use strict';
 
 const assert = require('assert');
+const fs = require('fs');
+const path = require('path');
 const http = require('http');
 const express = require('express');
 const sqlite3 = require('sqlite3');
@@ -196,6 +205,33 @@ async function main() {
     assert.strictEqual(wedEta, `${sameFriday.getFullYear()}-${pad2(sameFriday.getMonth() + 1)}-${pad2(sameFriday.getDate())} 17:00:00`, '[P2-对照] 周三→当周五');
     assert.strictEqual(thuEta, `${nextFriday.getFullYear()}-${pad2(nextFriday.getMonth() + 1)}-${pad2(nextFriday.getDate())} 17:00:00`, '[P2-对照] 周四→下周五（与周三差 7 天，非当周）');
     ok('[P2-对照] 周三/周四边界独立复算：两天目标相差恰好 7 天（当周五 vs 下周五），非"当周五"重复值');
+  }
+
+  // [P3-直取边界]【P4 补齐】resolveFeatureDeadlineDirectTake 纯函数确定性边界——nowStr 恰等/−1s/+1s
+  //   三点判定（同 [P1]/[P2] 对 computeSysDefaultEta 的纯函数直调范式，不依赖 HTTP/DB）。此前该判定
+  //   仅通过 [F1]-[F7] 端到端矩阵间接覆盖（真实受理时刻由 DB now() 决定，无法精确摆放到秒级边界两侧）；
+  //   [F5] 仍保留作集成层证据（DB 真实 now 场景），但不再是"秒级边界正确性"唯一举证。
+  {
+    const deadlineWithTime = '2026-08-20 12:00:00';
+    // 恰等 → expired=true（等于归已过期，保守向边界，§13.1 决策表原话）
+    let r = I.resolveFeatureDeadlineDirectTake(deadlineWithTime, '2026-08-20 12:00:00');
+    assert.strictEqual(r.present, true, '[P3-恰等] present=true');
+    assert.strictEqual(r.expired, true, '[P3-恰等] ⭐ nowStr 恰等于 candidateValue → 归"已过期"（<=，非 <）');
+    assert.strictEqual(r.valid, false, '[P3-恰等] valid=!expired=false');
+    assert.strictEqual(r.candidateValue, deadlineWithTime, '[P3-恰等] candidateValue=带秒原样值');
+    // −1s（nowStr 比 candidateValue 早 1 秒，即 candidateValue 晚于当前时刻）→ 有效，未过期
+    r = I.resolveFeatureDeadlineDirectTake(deadlineWithTime, '2026-08-20 11:59:59');
+    assert.strictEqual(r.expired, false, '[P3-邻界早1秒] nowStr 早 candidateValue 1 秒 → 未过期');
+    assert.strictEqual(r.valid, true, '[P3-邻界早1秒] valid=true');
+    // +1s（nowStr 比 candidateValue 晚 1 秒，即 candidateValue 已早于当前时刻）→ 已过期
+    r = I.resolveFeatureDeadlineDirectTake(deadlineWithTime, '2026-08-20 12:00:01');
+    assert.strictEqual(r.expired, true, '[P3-邻界晚1秒] nowStr 晚 candidateValue 1 秒 → 已过期');
+    assert.strictEqual(r.valid, false, '[P3-邻界晚1秒] valid=false');
+    // present=false 三态：未传/null/纯空白——"当空处理"契约（present:false 时上游整体不进入直取分支）
+    assert.strictEqual(I.resolveFeatureDeadlineDirectTake(undefined, '2026-08-20 12:00:00').present, false, '[P3-空] undefined → present=false');
+    assert.strictEqual(I.resolveFeatureDeadlineDirectTake(null, '2026-08-20 12:00:00').present, false, '[P3-空] null → present=false');
+    assert.strictEqual(I.resolveFeatureDeadlineDirectTake('  ', '2026-08-20 12:00:00').present, false, '[P3-空] 纯空白 → present=false（trim 后判空）');
+    ok('[P3-直取边界] resolveFeatureDeadlineDirectTake 纯函数确定性——nowStr 恰等/−1s/+1s 三点边界钉死（恰等归已过期），present=false 三态（未传/null/纯空白）；[F5] 集成层 DB 真实 now 场景保留但不再独担秒级判别力');
   }
 
   // ══════════════════════════ [M] §2.2 受理分支双维度矩阵六格（真实 HTTP，bug 类型）══════════════════════════
@@ -751,6 +787,365 @@ async function main() {
     assert.strictEqual(r.status, 400, `[H1-第2轮] 未重填 ETA 时 submit 应仍 400，实得 ${r.status} ${JSON.stringify(r.body)}`);
     assert.strictEqual(r.body.code, 'ESTIMATE_REQUIRED', `[H1-第2轮] code 应为 ESTIMATE_REQUIRED（闸恢复原语义），实得 ${r.body.code}`);
     ok('[H1-第2轮] ⭐ return 清空 ETA 后，未重填即 submit 仍 400 ESTIMATE_REQUIRED（第 2 轮闸恢复原语义，与第 1 轮成对）');
+  }
+
+  // ══════════════════════════ [F] 方案 §13·13.1 feature ETA 直取决策表 ══════════════════════════
+  //   SSOT = docs/local/系统迭代/先行上线两步化_方案_20260813_v1.8.md §13
+  //   覆盖矩阵：feature 三态（有效/为空/已过期）× 关键边界（等于受理时刻/纯日期补17:00/带时分原样/跨天）
+  //   + improvement/bug 对照组（同样构造有效 deadline，验证零受影响）+ §13.2 四件事契约（首诺快照=deadline/
+  //   容差分支级跳过/理由列 NULL/通知谓词不动）+ 独立 timeline 行（action_code 双向覆盖：eta_auto_from_deadline
+  //   仅"有效"行出现／eta_auto_sla 仅"为空/已过期"两行的系统自动生成子分支出现，人工填写/强制填写两个
+  //   既有子分支均不产出新码，行为与改动前逐字相同——只在"系统自动生成"这一件事有没有人在旁边看着"的判断
+  //   上分叉）。
+  async function timelineByActionCode(id, actionCode) {
+    return get(`SELECT summary, event_type FROM sys_issue_timeline WHERE issue_id=? AND action_code=?`, [id, actionCode]);
+  }
+  async function intakeAcceptRow(id) {
+    return get(`SELECT summary FROM sys_issue_timeline WHERE issue_id=? AND action_code='intake_accept' ORDER BY id DESC LIMIT 1`, [id]);
+  }
+
+  // [F1] feature × deadline 有效（带时分，未来）→ ETA 直接=deadline（原样落库，补秒）
+  {
+    const id = await mkIssue('feature', nowStrForFixture(), { deadline: fmtLocalNoSec(addDays(new Date(), 10)) });
+    const row0 = await issueRow(id);
+    const r = await call('POST', `/api/sys-issues/${id}/intake-accept`, liaisonTok, { risk_level: '二级' });
+    assert.strictEqual(r.status, 200, `[F1] 应 200，实得 ${r.status} ${JSON.stringify(r.body)}`);
+    const eta = r.body.eta;
+    // ⚠️ row0.deadline 已是 normalizeDeadlineDT 出库的带秒值（'YYYY-MM-DD HH:MM:00'），直接比对，不再追加 ':00'
+    assert.strictEqual(eta.dev_estimated_at, row0.deadline, `[F1] ⭐ ETA 应精确=deadline（带秒），实得 ${JSON.stringify(eta)}，deadline=${row0.deadline}`);
+    assert.strictEqual(eta.auto_generated, true, '[F1] 系统据规则决定值（复用既有语义位）');
+    assert.strictEqual(eta.notify_estimate, false, '[F1] §13.2④通知沿用原谓词不动——同"系统自动生成"不通知');
+    assert.strictEqual(eta.expected_gap_days, null, '[F1] §13.1「有效」行 C11 结构性不触发——expected_gap_days 恒 null（非算出 0）');
+    const row = await issueRow(id);
+    assert.strictEqual(row.dev_estimated_at, row0.deadline, '[F1] 库内值精确=deadline');
+    // §13.2①首诺快照=deadline值
+    const snap = await get('SELECT dev_estimated_first_at, eta_overrun_reason_code, eta_overrun_reason_note FROM sys_issues WHERE id=?', [id]);
+    assert.strictEqual(snap.dev_estimated_first_at, row0.deadline, '[F1] §13.2①首诺快照=deadline 值（C6 跨轮锁死起点）');
+    // §13.2③理由列保持 NULL（不写"豁免原因"占位文案）
+    assert.strictEqual(snap.eta_overrun_reason_code, null, '[F1] §13.2③理由码列保持 NULL（豁免=无理由语义，非占位文案）');
+    assert.strictEqual(snap.eta_overrun_reason_note, null, '[F1] §13.2③理由文本列保持 NULL');
+    // timeline 双行：主"受理"行 + 独立 eta_auto_from_deadline 行
+    const mainRow = await intakeAcceptRow(id);
+    assert.ok(mainRow && mainRow.summary && mainRow.summary.includes('直取'), `[F1] 主受理行 summary 应含"直取"字样，实得 ${JSON.stringify(mainRow)}`);
+    const marker = await timelineByActionCode(id, 'eta_auto_from_deadline');
+    assert.ok(marker, '[F1] ⭐ 应产出独立 action_code=eta_auto_from_deadline 留痕行');
+    assert.strictEqual(marker.event_type, 'note', '[F1] 独立留痕行 event_type=note（无 DDL CHECK 白名单新增码，376-H 闭合证据）');
+    const slaMarkerAbsent = await timelineByActionCode(id, 'eta_auto_sla');
+    assert.strictEqual(slaMarkerAbsent, undefined, '[F1] 不应同时产出 eta_auto_sla 行（两码互斥，同一次至多一条）');
+    ok(`[F1] feature×deadline有效（带时分）→ ETA 直取=${row.dev_estimated_at}，首诺快照同值，理由列 NULL，独立 eta_auto_from_deadline 留痕，C11 不触发，不通知`);
+  }
+
+  // [F1-SLA已超]【P2 补齐】feature × deadline 有效 × SLA已超 → 仍直取=deadline（值不受 SLA 影响），但
+  //   overdue_intake=true 且主受理行 summary 叠加"超时受理"事实（P1 修复标的：direct-take 此前恒漏记
+  //   该事实位，overdue_intake 恒 false）——与 eta_auto_from_deadline 独立留痕行两行各自语义、互不排斥
+  //   （§13.1 决策表"SLA 已超时另记既有'超时受理'事实行，受理迟的留痕与 ETA 来源无关，保留"原话）。
+  {
+    const id = await mkIssue('feature', FAR_PAST_CREATED, { deadline: fmtLocalNoSec(addDays(new Date(), 10)) });
+    const row0 = await issueRow(id);
+    const r = await call('POST', `/api/sys-issues/${id}/intake-accept`, liaisonTok, { risk_level: '二级' });
+    assert.strictEqual(r.status, 200, `[F1-SLA已超] 应 200，实得 ${r.status} ${JSON.stringify(r.body)}`);
+    const eta = r.body.eta;
+    assert.strictEqual(eta.dev_estimated_at, row0.deadline, `[F1-SLA已超] ⭐ ETA 仍精确=deadline（SLA 维度不参与取值），实得 ${JSON.stringify(eta)}`);
+    assert.strictEqual(eta.overdue_intake, true, '[F1-SLA已超] ⭐【P1 修复标的】SLA 已超时 overdue_intake 应置 true（此前恒 false）');
+    assert.strictEqual(eta.auto_generated, true, '[F1-SLA已超] 系统据规则决定值，与 SLA 未超一致');
+    const row = await issueRow(id);
+    assert.strictEqual(row.dev_estimated_at, row0.deadline, '[F1-SLA已超] 库内值精确=deadline（不受 SLA 已超影响）');
+    const mainRow = await intakeAcceptRow(id);
+    assert.ok(mainRow && mainRow.summary && mainRow.summary.includes('超时受理'), `[F1-SLA已超] ⭐ 主受理行 summary 应含"超时受理"事实，实得 ${JSON.stringify(mainRow)}`);
+    assert.ok(mainRow.summary.includes('直取'), `[F1-SLA已超] 主受理行 summary 应仍含"直取"字样（两件事同一行文案共存），实得 ${JSON.stringify(mainRow)}`);
+    const marker = await timelineByActionCode(id, 'eta_auto_from_deadline');
+    assert.ok(marker, '[F1-SLA已超] ⭐ 仍应产出独立 eta_auto_from_deadline 行（ETA 来源事实与受理迟事实两行各自独立，互不排斥）');
+    assert.ok(!marker.summary.includes('超时受理'), `[F1-SLA已超] ⭐ eta_auto_from_deadline 行不应带"超时受理"字样（两行各自语义，不混记），实得 "${marker.summary}"`);
+    ok('[F1-SLA已超] feature×deadline有效×SLA已超 → ETA 仍直取=deadline，overdue_intake=true，主受理行叠加"超时受理"事实，eta_auto_from_deadline 行保持纯 ETA 来源语义不混记');
+  }
+
+  // [F2] feature × deadline 有效（纯日期形态，无时间分量）→ 落库值补 17:00（与 SLA 默认时刻一致）
+  //   ⚠️ 建单端点自身的 normalizeDeadlineDT 会把"只传日期"的输入补 00:00 落库（非本函数要处理的 17:00），
+  //   故 DB 里的"纯日期"只可能来自 D2（deadline 精确到时分改造）之前的存量数据——本用例改走直接 DB
+  //   UPDATE 构造这类存量形态（同 [F5] 造精确边界态范式），不经建单端点，才能真正测到"纯日期分支"。
+  {
+    const futureDate = addDays(new Date(), 15);
+    const dateOnly = `${futureDate.getFullYear()}-${pad2(futureDate.getMonth() + 1)}-${pad2(futureDate.getDate())}`;
+    const id = await mkIssue('feature', nowStrForFixture());
+    await run(`UPDATE sys_issues SET deadline = ? WHERE id = ?`, [dateOnly, id]);
+    const r = await call('POST', `/api/sys-issues/${id}/intake-accept`, liaisonTok, { risk_level: '二级' });
+    assert.strictEqual(r.status, 200, `[F2] 应 200，实得 ${r.status} ${JSON.stringify(r.body)}`);
+    assert.strictEqual(r.body.eta.dev_estimated_at, `${dateOnly} 17:00:00`, `[F2] ⭐ 存量纯日期 deadline 直取值应补 17:00:00，实得 ${r.body.eta.dev_estimated_at}`);
+    ok(`[F2] feature×deadline有效（存量纯日期 ${dateOnly}）→ 直取值补 17:00:00（与 SLA 默认时刻一致）`);
+  }
+
+  // [F3] feature × deadline 为空 → 回退 SLA 自动生成（同 [M1] 断言口径）+ 独立 eta_auto_sla 行（不含"已过期"）
+  {
+    const id = await mkIssue('feature', nowStrForFixture());   // 未传 deadline
+    const r = await call('POST', `/api/sys-issues/${id}/intake-accept`, liaisonTok, { risk_level: '二级' });
+    assert.strictEqual(r.status, 200, `[F3] 应 200，实得 ${r.status} ${JSON.stringify(r.body)}`);
+    const eta = r.body.eta;
+    assert.strictEqual(eta.auto_generated, true, '[F3] 回退 SLA 自动生成');
+    const row = await issueRow(id);
+    const defaultEta = I.computeSysDefaultEta(row.created_at, 'feature');
+    assert.strictEqual(row.dev_estimated_at, defaultEta, `[F3] ⭐ deadline 为空 → 库内值=SLA 默认公式算出的值（非 deadline，本单根本没有 deadline），实得 ${row.dev_estimated_at}`);
+    assert.strictEqual(eta.expected_gap_days, null, '[F3] 无 deadline 可比，C11 天然不触发');
+    const marker = await timelineByActionCode(id, 'eta_auto_sla');
+    assert.ok(marker, '[F3] ⭐ 应产出独立 action_code=eta_auto_sla 留痕行（"为空"行同样回退 SLA）');
+    assert.ok(!marker.summary.includes('已过期'), `[F3] "为空"（而非"已过期"）不应带"期望已过期"短语，实得 "${marker.summary}"`);
+    const fromDeadlineAbsent = await timelineByActionCode(id, 'eta_auto_from_deadline');
+    assert.strictEqual(fromDeadlineAbsent, undefined, '[F3] 不应产出 eta_auto_from_deadline 行');
+    ok('[F3] feature×deadline为空 → 回退 SLA 自动生成（值=SLA 公式非 deadline），独立 eta_auto_sla 留痕（不含"已过期"字样），C11 不触发');
+  }
+
+  // [F3-SLA已超]【P2 补齐】feature × deadline 为空 × SLA已超 → featureDirectTake.present=false（无 deadline
+  //   可比），代码结构层面直接落入既有"为空×SLA已超"外层 else 分支（同 [M2] bug 同款矩阵格），§13 不介入
+  //   ——弹窗必填照旧，行为与改动前逐字相同。
+  {
+    const id = await mkIssue('feature', FAR_PAST_CREATED);   // 未传 deadline
+    // feature 类型 risk_level 恒必填（RISK_LEVEL_REQUIRED 闸在 ETA 分支之前，与 §13/§14 无关——同 [F3]/[F4]
+    // 原样每次调用都带，防"未填 ETA"负例被这道不相关的闸抢先拦截、断言错闸未真正测到目标分支）。
+    let r = await call('POST', `/api/sys-issues/${id}/intake-accept`, liaisonTok, { risk_level: '二级' });
+    assert.strictEqual(r.status, 400, `[F3-SLA已超-反] 不填应 400，实得 ${r.status} ${JSON.stringify(r.body)}`);
+    assert.strictEqual(r.body.code, 'INTAKE_ESTIMATE_REQUIRED', `[F3-SLA已超-反] code 应为 INTAKE_ESTIMATE_REQUIRED（与 bug 同款矩阵格行为一致），实得 ${r.body.code}`);
+    let row = await issueRow(id);
+    assert.strictEqual(row.dev_estimated_at, null, '[F3-SLA已超-反] 零副作用：未落库');
+    const futureVal = fmtLocalNoSec(addDays(new Date(), 3));
+    r = await call('POST', `/api/sys-issues/${id}/intake-accept`, liaisonTok, { risk_level: '二级', dev_estimated_at: futureVal });
+    assert.strictEqual(r.status, 200, `[F3-SLA已超-正] 填未来值应 200，实得 ${r.status} ${JSON.stringify(r.body)}`);
+    assert.strictEqual(r.body.eta.overdue_intake, true, '[F3-SLA已超-正] 超时受理标记（既有分支行为，feature 未变化）');
+    const fromDeadline = await timelineByActionCode(id, 'eta_auto_from_deadline');
+    assert.strictEqual(fromDeadline, undefined, '[F3-SLA已超] ⭐ 无 deadline 可比，不应产出 eta_auto_from_deadline 行（featureDirectTake.present=false 结构性不触发）');
+    ok('[F3-SLA已超] feature×deadline为空×SLA已超 → 无 deadline 可比，走既有"为空×SLA已超"分支（400 必填照旧，同 bug 行为），不产出 eta_auto_from_deadline 行');
+  }
+
+  // [F4] feature × deadline 已过期（非空∧≤受理时刻）→ 回退 SLA + summary 注明"期望已过期" + C11 触发
+  {
+    const pastDeadline = fmt(addDays(new Date(), -3));   // 3 天前，已过期
+    const id = await mkIssue('feature', nowStrForFixture(), { deadline: pastDeadline });
+    const r = await call('POST', `/api/sys-issues/${id}/intake-accept`, liaisonTok, { risk_level: '二级' });
+    assert.strictEqual(r.status, 200, `[F4] 应 200，实得 ${r.status} ${JSON.stringify(r.body)}`);
+    const eta = r.body.eta;
+    const row = await issueRow(id);
+    const defaultEta = I.computeSysDefaultEta(row.created_at, 'feature');
+    assert.strictEqual(row.dev_estimated_at, defaultEta, `[F4] ⭐ 已过期 → 仍回退 SLA 公式（非 deadline），实得 ${row.dev_estimated_at}`);
+    assert.notStrictEqual(row.dev_estimated_at, `${pastDeadline}:00`, '[F4] 库内值不应是那个已过期的 deadline 本身');
+    assert.ok(eta.expected_gap_days > 0, `[F4] ⭐ C11 照常触发——defaultEta（未来）必晚于已过期的 deadline，expected_gap_days 应为正数，实得 ${eta.expected_gap_days}`);
+    const marker = await timelineByActionCode(id, 'eta_auto_sla');
+    assert.ok(marker, '[F4] 应产出独立 action_code=eta_auto_sla 留痕行');
+    assert.ok(marker.summary.includes('期望已过期') && marker.summary.includes('按默认规则生成'),
+      `[F4] ⭐ summary 须注明"期望已过期，按默认规则生成"（E2 知情面要求），实得 "${marker.summary}"`);
+    ok(`[F4] feature×deadline已过期 → 回退 SLA（${row.dev_estimated_at}），独立 eta_auto_sla 行含"期望已过期，按默认规则生成"，C11 照常触发（gap=${eta.expected_gap_days}天）`);
+  }
+
+  // [F4-SLA已超]【P2 补齐】feature × deadline 已过期 × SLA已超 → featureDirectTake.valid=false（过期不算
+  //   "有效"），slaExceeded=true 时代码结构层面整体跳过 `!slaExceeded` 子分支（deadline 是否存在不再
+  //   影响路径选择），与"为空×已超"汇入同一条既有分支——400 必填照旧，零 §13 新增留痕。
+  {
+    const pastDeadline = fmt(addDays(new Date(), -3));
+    const id = await mkIssue('feature', FAR_PAST_CREATED, { deadline: pastDeadline });
+    // feature 类型 risk_level 恒必填（同 [F3-SLA已超] 注释，与 §13/§14 无关的独立闸，每次调用都带）。
+    let r = await call('POST', `/api/sys-issues/${id}/intake-accept`, liaisonTok, { risk_level: '二级' });
+    assert.strictEqual(r.status, 400, `[F4-SLA已超-反] 不填应 400，实得 ${r.status} ${JSON.stringify(r.body)}`);
+    assert.strictEqual(r.body.code, 'INTAKE_ESTIMATE_REQUIRED', `[F4-SLA已超-反] code 应为 INTAKE_ESTIMATE_REQUIRED（与"为空×已超"汇入同一分支），实得 ${r.body.code}`);
+    const futureVal = fmtLocalNoSec(addDays(new Date(), 3));
+    r = await call('POST', `/api/sys-issues/${id}/intake-accept`, liaisonTok, { risk_level: '二级', dev_estimated_at: futureVal });
+    assert.strictEqual(r.status, 200, `[F4-SLA已超-正] 填未来值应 200，实得 ${r.status} ${JSON.stringify(r.body)}`);
+    assert.strictEqual(r.body.eta.overdue_intake, true, '[F4-SLA已超-正] 超时受理标记');
+    const fromDeadline = await timelineByActionCode(id, 'eta_auto_from_deadline');
+    const slaMarker = await timelineByActionCode(id, 'eta_auto_sla');
+    assert.strictEqual(fromDeadline, undefined, '[F4-SLA已超] ⭐ 已过期 deadline 不算"有效"，不应产出 eta_auto_from_deadline 行');
+    assert.strictEqual(slaMarker, undefined, '[F4-SLA已超] ⭐ SLA 已超时不落入"留空自动生成"子分支，不应产出 eta_auto_sla 行（该码仅 !slaExceeded 子分支才会打）');
+    ok('[F4-SLA已超] feature×deadline已过期×SLA已超 → 与"为空×已超"汇入同一既有分支，400 必填照旧，零 §13 新增留痕（eta_auto_from_deadline/eta_auto_sla 均不产出）');
+  }
+
+  // [F5]【边界·保守向】deadline 恰好等于受理时刻（DB 侧真实 now，秒级精度，非 JS Date() 近似）→ 归"已过期"，
+  //   走回退分支非直取。⭐ 建单端点的 deadline 输入口径只到分钟（normalizeDeadlineDT 恒补 :00 秒），无法
+  //   通过正常建单流程精确构造"秒级相等"——改走直接 DB UPDATE（同既有 [M3]/[M4] 组"造精确边界态"范式，
+  //   非本组独创手法），绕过建单端点的分钟截断，把 deadline 写成与捕获时刻完全相同的秒级字符串。
+  {
+    const id = await mkIssue('feature', nowStrForFixture());   // 先不带 deadline 建单
+    const nowRow = await get(`SELECT datetime('now','localtime') AS n`);
+    const exactNow = nowRow.n;   // 捕获后立即写库——受理调用发生在此刻之后，接受时刻的 now() 只会 ≥ 本值（时间单调不回退）
+    await run(`UPDATE sys_issues SET deadline = ? WHERE id = ?`, [exactNow, id]);
+    const r = await call('POST', `/api/sys-issues/${id}/intake-accept`, liaisonTok, { risk_level: '二级' });
+    assert.strictEqual(r.status, 200, `[F5] 应 200，实得 ${r.status} ${JSON.stringify(r.body)}`);
+    const row = await issueRow(id);
+    const defaultEta = I.computeSysDefaultEta(row.created_at, 'feature');
+    assert.strictEqual(row.dev_estimated_at, defaultEta, `[F5] ⭐【保守向边界】deadline 等于受理时刻应归"已过期"回退 SLA（非直取该值本身），实得 ${row.dev_estimated_at}`);
+    const marker = await timelineByActionCode(id, 'eta_auto_sla');
+    assert.ok(marker, '[F5] 应走"已过期"回退分支产出 eta_auto_sla（非 eta_auto_from_deadline）');
+    ok('[F5] ⭐【边界钉子】deadline 恰好等于受理时刻（DB 真实 now，非 JS Date 近似）→ 归"已过期"（保守向），回退 SLA 而非直取');
+  }
+
+  // [F6]【对照组】improvement × 同样构造"有效" deadline → 完全走现行逻辑，零 eta_auto_from_deadline/eta_auto_sla
+  {
+    const id = await mkIssue('improvement', nowStrForFixture(), { deadline: fmtLocalNoSec(addDays(new Date(), 10)) });
+    const row0 = await issueRow(id);
+    const r = await call('POST', `/api/sys-issues/${id}/intake-accept`, liaisonTok, { risk_level: '二级' });
+    assert.strictEqual(r.status, 200, `[F6] 应 200，实得 ${r.status} ${JSON.stringify(r.body)}`);
+    const row = await issueRow(id);
+    const defaultEta = I.computeSysDefaultEta(row.created_at, 'improvement');
+    assert.strictEqual(row.dev_estimated_at, defaultEta, `[F6] ⭐ improvement 不受 §13 影响——库内值仍是 SLA 公式算出值，非 deadline（${row0.deadline}），实得 ${row.dev_estimated_at}`);
+    assert.notStrictEqual(row.dev_estimated_at, row0.deadline, '[F6] 明确不等于 deadline 本身——证明真的没有走直取分支');
+    const fromDeadline = await timelineByActionCode(id, 'eta_auto_from_deadline');
+    const slaMarker = await timelineByActionCode(id, 'eta_auto_sla');
+    assert.strictEqual(fromDeadline, undefined, '[F6] ⭐ improvement 不应产出 eta_auto_from_deadline 行（§13 明确排除·verify 对照组）');
+    assert.strictEqual(slaMarker, undefined, '[F6] ⭐ improvement 不应产出 eta_auto_sla 行（两新码均 feature 专属，改动前后行为逐字相同）');
+    ok('[F6] ⭐【verify 对照组】improvement×同样构造"有效"deadline → 完全走现行逻辑（值=SLA 公式），零新增 timeline 行——§13 明确排除的类型零受影响');
+  }
+
+  // [F7]【对照组】bug × 同样构造"有效" deadline → 同样零受影响（§13 明确"仅 feature"，bug 双重验证）
+  {
+    const id = await mkIssue('bug', nowStrForFixture(), { deadline: fmtLocalNoSec(addDays(new Date(), 10)) });
+    const row0 = await issueRow(id);
+    const r = await call('POST', `/api/sys-issues/${id}/intake-accept`, liaisonTok, {});
+    assert.strictEqual(r.status, 200, `[F7] 应 200，实得 ${r.status} ${JSON.stringify(r.body)}`);
+    const row = await issueRow(id);
+    const defaultEtaBug = I.computeSysDefaultEta(row.created_at, 'bug');
+    assert.strictEqual(row.dev_estimated_at, defaultEtaBug, `[F7] ⭐ bug 不受 §13 影响——库内值仍是 SLA 公式算出值，非 deadline（${row0.deadline}），实得 ${row.dev_estimated_at}`);
+    assert.notStrictEqual(row.dev_estimated_at, row0.deadline, '[F7] bug 类型同样不应走直取——值不等于 deadline');
+    const fromDeadline = await timelineByActionCode(id, 'eta_auto_from_deadline');
+    assert.strictEqual(fromDeadline, undefined, '[F7] bug 不应产出 eta_auto_from_deadline 行（§13 仅 feature，bug 双重验证不受影响）');
+    ok('[F7]【verify 对照组】bug×同样构造"有效"deadline → 同样零受影响（§13「仅 feature」双重验证）');
+  }
+
+  // ══════════════════════════ [FE]【S8-S10 合并收口批 S10-UX·13】受理弹窗前端镜像判据静态核对 ══════════════════════════
+  //   纯源码文本扫描（同 verify-sys-fastlane-panel-static.js 风格，不起浏览器/不依赖 server）——本批"活体
+  //   套件不实跑"的约束下，用静态断言先钉住"该改的地方真的改了、显隐两条分支源码层面都还在"，活体
+  //   验证留给 S 末终跑覆盖（见交付报告）。
+  {
+    const htmlSrc = fs.readFileSync(path.join(__dirname, '..', 'public', 'Sys_Iteration.html'), 'utf8');
+    function sliceFn(src, startMarker, endMarker) {
+      const s = src.indexOf(startMarker);
+      assert.ok(s > 0, `应能定位到起点标记：${startMarker}`);
+      const e = src.indexOf(endMarker, s + startMarker.length);
+      assert.ok(e > s, `应能定位到终点标记：${endMarker}（起点=${startMarker}）`);
+      return src.slice(s, e);
+    }
+    // ① siResolveFeatureDeadlineDirectTake 镜像函数存在——与后端 resolveFeatureDeadlineDirectTake 同源
+    //   同款（正则/纯日期补 17:00/等于归已过期三条关键规则字面量核对，防"函数名对了但逻辑抄错"）。
+    const mirrorFnSrc = sliceFn(htmlSrc, 'function siResolveFeatureDeadlineDirectTake(deadlineRaw, nowStr) {', 'function siIntakeEtaVisibility(iss) {');
+    assert.ok(/17:00:00/.test(mirrorFnSrc), '[FE①] 前端镜像函数应含"纯日期补 17:00:00"规则（与后端同源）');
+    assert.ok(/candidateValue <= nowStr/.test(mirrorFnSrc), '[FE①] 前端镜像函数应含"等于归已过期"判据（<=，保守向，与后端同源）');
+    ok('[FE①] siResolveFeatureDeadlineDirectTake 前端镜像函数存在，关键规则（纯日期补17:00/等于归已过期）字面量与后端同源');
+
+    // ② siIntakeEtaVisibility 显隐分支成对——feature 直取分支（隐藏）与原三情形分支（improvement/
+    //   deadline 无效时仍展示）两条源码路径都必须存在，缺一即视为回归。
+    const visFnSrc = sliceFn(htmlSrc, 'function siIntakeEtaVisibility(iss) {', 'function siAssignReassignEtaVisibility(iss) {');
+    assert.ok(/directTake:\s*true/.test(visFnSrc), '[FE②-隐藏分支] siIntakeEtaVisibility 应含 directTake:true 返回分支（feature∧有效deadline→隐藏）');
+    assert.ok(/iss\.type === 'feature'/.test(visFnSrc), '[FE②] siIntakeEtaVisibility 应按 iss.type===\'feature\' 门控直取分支（improvement/bug 不受影响）');
+    assert.ok(/kind: 'overdue'/.test(visFnSrc) && /kind: 'c11'/.test(visFnSrc), '[FE②-展示分支] siIntakeEtaVisibility 原三情形展示逻辑（overdue/c11 等 kind）应仍完整保留（非直取时的 improvement/无效 deadline 场景走这条路径）');
+    ok('[FE②] siIntakeEtaVisibility 显隐分支成对：feature∧有效deadline 隐藏分支（directTake:true）+ 原展示逻辑分支（overdue/c11 等）均存在');
+
+    // ③ siEtaFieldGroupHtml 信息行渲染——直取态换成信息文案，非渲染输入框。
+    const groupFnSrc = sliceFn(htmlSrc, 'function siEtaFieldGroupHtml(vis, verbLabel) {', 'function siRevealEtaFieldOnFallback(');
+    assert.ok(/vis\.directTake/.test(groupFnSrc), '[FE③] siEtaFieldGroupHtml 应判断 vis.directTake');
+    assert.ok(/新功能类将直接采用期望完成时间/.test(groupFnSrc), '[FE③] siEtaFieldGroupHtml 直取分支信息行应含约定文案"新功能类将直接采用期望完成时间"');
+    ok('[FE③] siEtaFieldGroupHtml 直取分支渲染信息行（非输入框），文案与约定一致');
+
+    // ④【P3/P6 补齐】来源三值枚举三处硬编码字面量 → 改读 GET meta 下发的 META.sources（同 system_name
+    //   走 META.bizSystems 同一范式，单一收口对齐后端 SYS_SOURCES，防前后端漂移）；编辑/派生两处兜底
+    //   默认由 '业务方' 改 '内部'，对齐 DDL `source DEFAULT '内部'`（建单弹窗无 iss 可读，默认值不属于
+    //   P6 改动范围，保留原字面量）。
+    assert.ok(!/\['业务方'\s*,\s*'内部'\s*,\s*'生产故障'\]/.test(htmlSrc),
+      '[FE④] ⭐ 不应再残留来源三值硬编码字面量数组（三处均应已改读 META.sources）');
+    const sourceLines = htmlSrc.split('\n').filter(l => l.includes(`fSelect('source', '来源',`));
+    assert.strictEqual(sourceLines.length, 3, `[FE④] 应恰好 3 处 fSelect('source',...) 调用，实得 ${sourceLines.length}`);
+    assert.ok(sourceLines.every(l => l.includes('META.sources') || l.includes('sources,')),
+      `[FE④] ⭐ 3 处调用均应引用 META.sources 或局部变量 sources（非裸字面量），实得 ${JSON.stringify(sourceLines)}`);
+    const editLine = sourceLines.find(l => l.includes(`iss.source || '内部'`) && l.includes('sources,'));
+    const deriveLine = sourceLines.find(l => l.includes('META.sources') && l.includes(`iss.source || '内部'`));
+    const createLine = sourceLines.find(l => l.includes('META.sources') && !l.includes('iss.source'));
+    assert.ok(editLine, `[FE④-编辑] 编辑弹窗应存在 sources 局部变量 + 兜底默认 '内部'，实得 ${JSON.stringify(sourceLines)}`);
+    assert.ok(deriveLine, `[FE④-派生] 派生弹窗应存在 META.sources 内联 + 兜底默认 '内部'，实得 ${JSON.stringify(sourceLines)}`);
+    assert.ok(createLine, `[FE④-建单] 建单弹窗应存在 META.sources 内联（默认值不受 P6 约束，允许无 iss.source），实得 ${JSON.stringify(sourceLines)}`);
+    ok('[FE④] 来源三值枚举三处硬编码字面量已消灭，全部改读 META.sources；编辑/派生两处兜底默认已改 \'内部\'（对齐 DDL DEFAULT），建单弹窗默认值原样保留（不在 P6 范围）');
+  }
+
+  // ══════════════════════════ [R6] 前后端直取镜像表驱动向量双端执行对拍 ══════════════════════════
+  //   此前 [FE①] 只做字面量正则匹配（"含 17:00:00 规则字样"），从未真正**执行**前端函数验证其行为
+  //   与后端逐值一致——本组从 HTML 提取 siResolveFeatureDeadlineDirectTake 的函数文本，用 new Function
+  //   编译为可调用函数（同 verify-sys-fastlane-panel-static.js「⑪ HTML 内联 <script> 语法有效」的编译
+  //   先例，那里只验证"能编译"，本组更进一步"编译后真的拿来跑"），与后端 I.resolveFeatureDeadlineDirectTake
+  //   喂同一组向量、逐项比较 present/valid/expired/candidateValue 四键——比"两侧各自断言各自的预期值"更
+  //   强：即便某个预期常量本身写错，只要两侧算法逻辑保持一致，仍会在这里现出原形（两侧算出同一个错
+  //   误值，而非"两侧分别自证无误"这种各说各话）。
+  {
+    const htmlSrc = fs.readFileSync(path.join(__dirname, '..', 'public', 'Sys_Iteration.html'), 'utf8');
+    const fnStart = htmlSrc.indexOf('function siResolveFeatureDeadlineDirectTake(deadlineRaw, nowStr) {');
+    assert.ok(fnStart > 0, '[R6前置] 应能定位前端镜像函数起点');
+    const fnEnd = htmlSrc.indexOf('\n    }', fnStart) + '\n    }'.length;
+    const fnText = htmlSrc.slice(fnStart, fnEnd);
+    assert.ok(fnText.includes('return { present:'), '[R6前置] 提取的函数文本应含完整函数体（含 present:false 早退分支），提取边界可能不对');
+    // eslint-disable-next-line no-new-func
+    const feFn = new Function(`${fnText}\nreturn siResolveFeatureDeadlineDirectTake;`)();
+    assert.strictEqual(typeof feFn, 'function', '[R6前置] 前端镜像函数文本应可编译为可调用函数');
+
+    const VECTORS = [
+      { label: '闰日-有效', deadlineRaw: '2024-02-29 10:00:00', nowStr: '2024-02-29 09:00:00' },
+      { label: '闰日-已过期', deadlineRaw: '2024-02-29 10:00:00', nowStr: '2024-02-29 11:00:00' },
+      { label: '非法日期-2月30', deadlineRaw: '2026-02-30 10:00:00', nowStr: '2026-01-01 00:00:00' },
+      { label: '非法日期-13月', deadlineRaw: '2026-13-01 10:00:00', nowStr: '2026-01-01 00:00:00' },
+      { label: '24:00非法', deadlineRaw: '2026-08-20 24:00:00', nowStr: '2026-01-01 00:00:00' },
+      { label: '缺秒', deadlineRaw: '2026-08-20 09:30', nowStr: '2026-08-20 09:00:00' },
+      { label: '空白', deadlineRaw: '   ', nowStr: '2026-08-20 09:00:00' },
+      { label: '边界-恰等', deadlineRaw: '2026-08-20 09:30:00', nowStr: '2026-08-20 09:30:00' },
+      { label: '边界-1s', deadlineRaw: '2026-08-20 09:30:00', nowStr: '2026-08-20 09:29:59' },
+      { label: '边界+1s', deadlineRaw: '2026-08-20 09:30:00', nowStr: '2026-08-20 09:30:01' },
+      { label: '纯日期-未过期', deadlineRaw: '2026-08-20', nowStr: '2026-08-20 10:00:00' },
+      { label: '纯日期-已过期', deadlineRaw: '2026-08-20', nowStr: '2026-08-20 18:00:00' },
+      { label: '带时分-未过期', deadlineRaw: '2026-08-20 09:30', nowStr: '2026-08-20 09:00:00' },
+      { label: '带时分-带秒', deadlineRaw: '2026-08-20 09:30:45', nowStr: '2026-08-20 09:00:00' },
+      { label: '空值-undefined', deadlineRaw: undefined, nowStr: '2026-08-20 09:00:00' },
+      { label: '空值-null', deadlineRaw: null, nowStr: '2026-08-20 09:00:00' },
+    ];
+    for (const v of VECTORS) {
+      const beResult = I.resolveFeatureDeadlineDirectTake(v.deadlineRaw, v.nowStr);
+      const feResult = feFn(v.deadlineRaw, v.nowStr);
+      for (const key of ['present', 'valid', 'expired', 'candidateValue']) {
+        assert.strictEqual(feResult[key], beResult[key], `[R6-${v.label}] 键 ${key} 前后端不一致：前端=${JSON.stringify(feResult)} 后端=${JSON.stringify(beResult)}`);
+      }
+    }
+    ok(`[R6] 前后端直取镜像表驱动向量对拍：${VECTORS.length} 组向量（闰日/非法日期/24:00/缺秒/空白/边界±1s/纯日期/带时分/空值）逐项比较 present/valid/expired/candidateValue 四键，全部一致`);
+
+    // 红灯自证：故意让"前端函数"算出与后端不同的值（构造一个假的 feFn 结果），确认逐键比较真的会报。
+    const brokenFeResult = { ...feFn('2026-08-20 09:30:00', '2026-08-20 09:00:00'), candidateValue: '被人为改错的值' };
+    let redCaught = false;
+    try {
+      assert.strictEqual(brokenFeResult.candidateValue, I.resolveFeatureDeadlineDirectTake('2026-08-20 09:30:00', '2026-08-20 09:00:00').candidateValue);
+    } catch (_) { redCaught = true; }
+    assert.ok(redCaught, '[R6红灯] 人为构造前后端不一致的 candidateValue 应被 assert.strictEqual 捕获');
+    ok('[R6红灯] 人为构造前后端不一致值 → 断言正确报红（双向证明，非空转绿灯）');
+  }
+
+  // ══════════════════ [A1] 精度 A 案：编辑窗对存量纯日期 deadline 预填 17:00（2026-08-15 用户裁定）══════════════════
+  //   歧义源=siDeadlineToLocalInput 纯日期分支原预填 T00:00（全站唯一"回填补固定时刻"写法）——用户只改
+  //   日期不碰时间格提交后落库 00:00:00，看似精确实为从未选择的时刻。A 案改预填 T17:00（与 SLA 默认时刻/
+  //   §13 直取补 17:00/协作模块智能默认三方同一心智模型）。四案对比与裁定：docs/local/系统迭代/deadline
+  //   精度歧义_设计对比_20260815_v1.0.md。断言按反向一对原则成对：正例钉 17:00 生效（实现坏成什么样这
+  //   条会红：改回 T00:00 立红），反例钉带时分原样不被改写（若实现过激把 00:00 时刻也改写成 17:00——
+  //   00:00 是控件可达的真实用户选择〔R1 止损核实前提〕——反例立红）。
+  {
+    const htmlSrc = fs.readFileSync(path.join(__dirname, '..', 'public', 'Sys_Iteration.html'), 'utf8');
+    const pick = (name) => {
+      const s = htmlSrc.indexOf(`function ${name}(`);
+      assert.ok(s > 0, `[A1前置] 应能定位 ${name} 起点（提不到=守卫空转，不能当通过）`);
+      const e = htmlSrc.indexOf('\n    }', s) + '\n    }'.length;
+      return htmlSrc.slice(s, e);
+    };
+    // siDeadlineToLocalInput 依赖 siToLocalInput，两函数体一并注入
+    // eslint-disable-next-line no-new-func
+    const feDeadlinePrefill = new Function(`${pick('siToLocalInput')}\n${pick('siDeadlineToLocalInput')}\nreturn siDeadlineToLocalInput;`)();
+    assert.strictEqual(typeof feDeadlinePrefill, 'function', '[A1前置] 提取物应可编译为可调用函数');
+    assert.strictEqual(feDeadlinePrefill('2026-08-20'), '2026-08-20T17:00',
+      '[A1正] 存量纯日期预填应为 T17:00（精度 A 案·实现坏成什么样这条会红：改回 T00:00 或删分支立红）');
+    assert.strictEqual(feDeadlinePrefill('2026-08-20 09:30'), '2026-08-20T09:30',
+      '[A1反①] 带时分值应原样回填不被改写——若实现过激把既有时刻也改写成 17:00 本条立红（00:00/09:30 都是控件可达的真实用户选择）');
+    assert.strictEqual(feDeadlinePrefill('2026-08-20 00:00'), '2026-08-20T00:00',
+      '[A1反②] 显式 00:00 时刻（带时分形态=用户真实选择）应原样回填——A 案只改"纯日期缺省预填"，不改写任何已带时刻的值（R1 止损前提维持）');
+    assert.strictEqual(feDeadlinePrefill(''), '', '[A1反③] 空值应回空串（unrenderable 路径不变）');
+    assert.strictEqual(feDeadlinePrefill('garbage-2026'), '', '[A1反④] 脏值应回空串（既非日期时分也非纯日期）');
+    // 闭环：预填 17:00 被用户只改日期后提交，经前端 T→空格替换即后端 normalizeDeadlineDT 的合法输入且不再补时刻
+    const looped = I.normalizeDeadlineDT('2026-08-22 17:00');
+    assert.ok(looped && looped.ok !== false && String(looped.value || looped).startsWith('2026-08-22 17:00'),
+      `[A1闭环] 预填值提交路径经 normalizeDeadlineDT 应合法且保持 17:00（实得 ${JSON.stringify(looped)}）`);
+    ok('[A1] 精度 A 案六断言：纯日期预填 T17:00 生效 + 带时分/显式00:00/空/脏值四反例原样 + 提交闭环合法');
   }
 
   server.close();

@@ -14,6 +14,7 @@
  */
 const fs = require('fs');
 const path = require('path');
+const { findOuterBoundary } = require('./lib/sql-select-boundary');
 
 const ROUTES = fs.readFileSync(path.join(__dirname, '..', 'routes', 'sys-iteration', 'index.js'), 'utf8');
 const TRANS = fs.readFileSync(path.join(__dirname, '..', 'routes', 'sys-iteration', 'transitions.js'), 'utf8');
@@ -123,7 +124,31 @@ console.log('\n--- ② 列表 SELECT：锚点谓词齐备且四列同源 ---');
 {
     const sqlStart = ROUTES.indexOf('`SELECT id, type, status, priority, risk_level, title, system_name');
     must(sqlStart > 0, '列表 SELECT 可定位');
-    const sqlBlock = stripSqlComments(ROUTES.slice(sqlStart, ROUTES.indexOf('FROM sys_issues', sqlStart)));
+    // [S13-b·B1 实测撞见同款修法] 裸 `ROUTES.indexOf('FROM sys_issues', sqlStart)` 会被列表 SELECT 内部
+    //   自身含相关子查询骗到——B1 新增 post_derive_root_id/post_derive_seq 两条标量子查询形如
+    //   `(SELECT d.derive_root_id FROM sys_issues d WHERE d.id = ...)`，其中 "FROM sys_issues" 字面量
+    //   比外层真正的 FROM 更早出现，naive indexOf 会在子查询内部截断，把外层真正 FROM 之前的大段列（含
+    //   本守卫要扫的四个派生列）全部漏进 sqlBlock 之外——与 verify-sys-list-badge-fields.js /
+    //   verify-sys-completion-overrun.js 已修的同款问题同一根因（guard gotchas 家族：字符串扫描器被
+    //   合法 SQL 结构骗过）。改用括号深度感知扫描：跳过子查询内部文本，只认深度=0 时出现的第一个
+    //   "FROM sys_issues" 才是外层列表的真正终点。⚠️ 扫描与切片全程在**已剥注释的字符串自身**内进行、
+    //   不回映射原始 ROUTES 偏移——stripSqlComments 是"删除匹配子串"而非"等长空白替换"，剥注释后长度
+    //   会变短，若把在剥注释文本里找到的下标当成原始 ROUTES 里的偏移量去二次切片会systematically算错
+    //   （首次实现犯过这个错，此处直接改正）。
+    // [S13 收口 MED-2] 深度感知扫描本身抽到 scripts/lib/sql-select-boundary.js 单点实现（与
+    //   verify-sys-list-badge-fields.js 共用同一份，不再两文件各自逐字维护）——顺带补 fail-closed：
+    //   窗口内括号计数一旦变负立即判红，不信任"变负之后又凑巧归零"的假 top-level 命中（否则扫描可能
+    //   悄悄跳到别的语句块同名 FROM 上，选出混了别处内容的超集列集合却不报错，见该模块头注）。
+    const sqlStrippedFull = stripSqlComments(ROUTES.slice(sqlStart, sqlStart + 60000));
+    const sqlBoundaryResult = findOuterBoundary(sqlStrippedFull, 'FROM sys_issues');
+    must(!sqlBoundaryResult.wentNegative, '边界扫描括号深度全程非负（fail-closed：一旦变负说明括号计数已不自洽，不信任后续任何"恰好归零"的命中，防止静默选中混了别处内容的超集范围）');
+    const sqlOuterFromIdxInStripped = sqlBoundaryResult.index;
+    must(sqlOuterFromIdxInStripped > 0, '外层 FROM sys_issues 边界可定位（深度感知扫描，不被子查询内的同字面量截断）');
+    const sqlBlock = sqlOuterFromIdxInStripped > 0 ? sqlStrippedFull.slice(0, sqlOuterFromIdxInStripped) : '';
+    // 边界正确性断言（MED-2 新增）：命中点紧随其后应能看到本条列表 SELECT 自己的动态 WHERE 拼接特征
+    //   `${where...}`，证明这次真落在这条列表查询自己的外层 FROM，不是巧合命中了别处同名字面量。
+    const sqlAfterBoundary = sqlOuterFromIdxInStripped > 0 ? sqlStrippedFull.slice(sqlOuterFromIdxInStripped, sqlOuterFromIdxInStripped + 120) : '';
+    must(sqlAfterBoundary.includes('${where'), `外层边界后文应含本条 SELECT 自己的动态 WHERE 拼接特征 "\${where"（证明命中点确是这条列表查询自己的 FROM，非误中别处），命中点后 120 字符原文：${JSON.stringify(sqlAfterBoundary)}`);
 
     const anchorRe = /AND tla\.event_type = 'status_change' AND tla\.to_status = '待上线'\s*AND \(tla\.action_code = 'accept' OR tla\.action_code IS NULL\)/g;
     const anchorCount = (sqlBlock.match(anchorRe) || []).length;

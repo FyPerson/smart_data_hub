@@ -5,15 +5,18 @@
  * verify-sys-release-panel-static.js：node scripts/verify-sys-post-release-panel-static.js
  * （纯文本源码扫描，无需启动 server，自包含）。
  *
- * 背景：SB1/SB2 只做了后端三个端点（fast-release-authorize/-revoke/submit direct_release），前端 UI
- * 全部留到 SB3 补齐。本脚本钉住"代码里写没写对"这一层（结构性不变量）；"真的显示出来了"那一层交给
- * 四条 Playwright 冒烟套件（test-sys-prerelease-flags/test-sys-detail-ux/test-sys-commit-cols/
- * test-sys-bug-hold-frontend 四套件回归，本轮已全部跑过，见任务报告 E 节），两层互补不重复。
+ * 背景：SB1/SB2 只做了后端三个端点（fast-release-authorize/-revoke/submit direct_release，后者已随
+ * 两步化方案 §4-2 拆除，见 [组B·S2] 订正），前端 UI 全部留到 SB3 补齐。本脚本钉住"代码里写没写对"这一层
+ * （结构性不变量）；"真的显示出来了"那一层交给四条 Playwright 冒烟套件（test-sys-prerelease-flags/
+ * test-sys-detail-ux/test-sys-commit-cols/test-sys-bug-hold-frontend 四套件回归，本轮已全部跑过，见任务
+ * 报告 E 节），两层互补不重复。
  *
  * 覆盖：
- *   ① siHasActiveFastReleaseAuth 是唯一权威判据，同时被 siRenderActions（授权/撤销按钮显隐）与
- *      siModalSubmit（direct_release 勾选框显隐 + 提交收集条件）引用——防两处各写一份判据漂移
- *      （同后端 isActiveFastReleaseAuth 唯一实现先例）。
+ *   ① siHasActiveFastReleaseAuth 是唯一权威判据，被 siRenderActions（授权/撤销按钮显隐）引用——防
+ *      详情页多处各写一份判据漂移（同后端 isActiveFastReleaseAuth 唯一实现先例）。[组B·S2 订正]
+ *      原第二消费点 siModalSubmit（direct_release 勾选框显隐 + 提交收集条件）已随该勾选框整块拆除
+ *      （方案 §4-2「整体替代」拍板），本组新增反向断言：siModalSubmit 函数体不应再出现
+ *      siHasActiveFastReleaseAuth 引用（证明拆除干净，非"删了显示但漏删收集逻辑"这类半吊子拆除）。
  *   ② siRenderActions 的 fastReleaseBtns 块：三个新增动作（授权/撤销/补验收）均只在 isAdminUser 下
  *      渲染；撤销按钮只在 hasActiveAuth 时出现；补验收按钮只在 pending 时出现。
  *   ③ 三个新增弹窗函数（siModalFastReleaseAuthorize/siModalFastReleaseRevoke/siModalPostReleaseAccept）
@@ -66,39 +69,53 @@ function extractFunctionBody(source, fnName) {
 function stripComments(s) {
     return s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^[ \t]*\/\/.*$/gm, '').replace(/([^:])\/\/.*$/gm, '$1');
 }
+// [Opus 合并预筛 LOW-1 顺手修·2026-08-14·非本批引入] stripComments 定义了却从未被调用——本文件全部
+// 断言此前直接拿 extractFunctionBody 的原始（含注释）函数体做 .includes()/正则匹配，与
+// verify-sys-fastlane-panel-static.js 同批修复的缺口逐字同款（本文件的注释同样会提到被检查的函数名/
+// 字段名字面量，"未见调用 X"这类否定式断言可能被注释里的同一字符串误判）。顺手接线：断言面统一改走
+// 本函数（剥注释后再扫描），不直接调用 extractFunctionBody。
+function bodyOf(fnName) {
+    const raw = extractFunctionBody(src, fnName);
+    return raw == null ? null : stripComments(raw);
+}
 
 console.log('— ① siHasActiveFastReleaseAuth 唯一判据·两处引用 —');
 check('siHasActiveFastReleaseAuth 函数已定义', () => {
-    assert.ok(extractFunctionBody(src, 'siHasActiveFastReleaseAuth'), '未提取到 siHasActiveFastReleaseAuth 函数体');
+    assert.ok(bodyOf('siHasActiveFastReleaseAuth'), '未提取到 siHasActiveFastReleaseAuth 函数体');
 });
 check('siRenderActions 引用 siHasActiveFastReleaseAuth（授权/撤销按钮显隐同一判据）', () => {
-    const body = extractFunctionBody(src, 'siRenderActions');
+    const body = bodyOf('siRenderActions');
     assert.ok(body, '未提取到 siRenderActions 函数体');
     assert.ok(body.includes('siHasActiveFastReleaseAuth('), 'siRenderActions 未调用 siHasActiveFastReleaseAuth——授权/撤销按钮显隐可能各写了一份判据');
 });
-check('siModalSubmit 引用 siHasActiveFastReleaseAuth（勾选框显隐 + 提交收集条件同一判据）', () => {
-    const body = extractFunctionBody(src, 'siModalSubmit');
+check('[组B·S2 订正] siModalSubmit 不应再引用 siHasActiveFastReleaseAuth（direct_release 勾选框已随两步化拆除）', () => {
+    const body = bodyOf('siModalSubmit');
     assert.ok(body, '未提取到 siModalSubmit 函数体');
     const hits = (body.match(/siHasActiveFastReleaseAuth\(/g) || []).length;
-    assert.ok(hits >= 2, `siModalSubmit 应至少 2 处引用 siHasActiveFastReleaseAuth（渲染勾选框 + 提交收集各一次），实得 ${hits} 处`);
+    // 若拆除不干净（只删了渲染那一半、漏删提交收集那一半，或反过来），本条会红——用严格等于 0 而非
+    // "<2"这种宽松上界，才能真正钉住"零残留"，不是仅仅"少了一处"。
+    assert.strictEqual(hits, 0, `siModalSubmit 不应再出现 siHasActiveFastReleaseAuth 引用（勾选框已整块拆除），实得 ${hits} 处残留`);
+});
+check('[组B·S2 订正] Sys_Iteration.html 全文不应再出现 siSubmitDirectRelease 元素 id（勾选框 DOM 已整块拆除）', () => {
+    assert.ok(!/siSubmitDirectRelease/.test(src), 'siSubmitDirectRelease 不应再出现在源码任何位置（HTML id 或 JS 读取）');
 });
 
 console.log('— ② siRenderActions fastReleaseBtns 块：三动作显隐条件 —');
 check('fastReleaseBtns 块整体挂 isAdminUser 门（前端非授权源，仅体验层镜像后端 requireAdmin）', () => {
-    const body = extractFunctionBody(src, 'siRenderActions');
+    const body = bodyOf('siRenderActions');
     const idx = body.indexOf('fastReleaseBtns');
     assert.ok(idx >= 0, 'siRenderActions 函数体未找到 fastReleaseBtns 变量');
     const block = body.slice(idx, idx + 1600);
     assert.ok(/isAdminUser\s*&&\s*iss\.type\s*===\s*'bug'/.test(block), 'fastReleaseBtns 块起手判断应为 isAdminUser && iss.type===\'bug\'（未见该条件组合）');
 });
 check('撤销按钮仅在 hasActiveAuth 为真时渲染（先行上线授权撤销）', () => {
-    const body = extractFunctionBody(src, 'siRenderActions');
+    const body = bodyOf('siRenderActions');
     const idx = body.indexOf('fastReleaseBtns');
     const block = body.slice(idx, idx + 1600);
     assert.ok(/if \(hasActiveAuth\) \{[\s\S]*?siModalFastReleaseRevoke/.test(block), '撤销按钮未见挂在 hasActiveAuth 条件分支内');
 });
 check('补验收按钮仅在 online_source_kind===authorized_fastlane 且 post_release_acceptance===pending 时渲染', () => {
-    const body = extractFunctionBody(src, 'siRenderActions');
+    const body = bodyOf('siRenderActions');
     const idx = body.indexOf('fastReleaseBtns');
     const block = body.slice(idx, idx + 1600);
     assert.ok(block.includes("iss.online_source_kind === 'authorized_fastlane'") && block.includes("iss.post_release_acceptance === 'pending'"),
@@ -106,31 +123,31 @@ check('补验收按钮仅在 online_source_kind===authorized_fastlane 且 post_r
     assert.ok(/siModalPostReleaseAccept/.test(block), '未见补验收按钮 onclick 调用 siModalPostReleaseAccept');
 });
 check('fastReleaseBtns 已并入 box.innerHTML 最终拼接（非孤立死变量）', () => {
-    const body = extractFunctionBody(src, 'siRenderActions');
+    const body = bodyOf('siRenderActions');
     const tail = body.slice(body.lastIndexOf('box.innerHTML'));
     assert.ok(tail.includes('fastReleaseBtns'), 'box.innerHTML 最终拼接未包含 fastReleaseBtns（渲染出的按钮永远不会显示——同 blocked 死分支同款漏法）');
 });
 
 console.log('— ③ 三个弹窗函数定义 + 端点路径正确 —');
 check('siModalFastReleaseAuthorize 已定义且调用 POST .../fast-release-authorize', () => {
-    const body = extractFunctionBody(src, 'siModalFastReleaseAuthorize');
+    const body = bodyOf('siModalFastReleaseAuthorize');
     assert.ok(body, '未提取到 siModalFastReleaseAuthorize 函数体');
     assert.ok(body.includes('/fast-release-authorize'), '未见调用 fast-release-authorize 端点');
 });
 check('siModalFastReleaseRevoke 已定义且调用 POST .../fast-release-revoke，body 含 reason', () => {
-    const body = extractFunctionBody(src, 'siModalFastReleaseRevoke');
+    const body = bodyOf('siModalFastReleaseRevoke');
     assert.ok(body, '未提取到 siModalFastReleaseRevoke 函数体');
     assert.ok(body.includes('/fast-release-revoke'), '未见调用 fast-release-revoke 端点');
     assert.ok(/body:\s*\{\s*reason\s*\}/.test(body), '撤销请求 body 未见携带 reason 字段（LOW-3 拍板：撤销原因必填，须传给后端）');
 });
 check('siModalPostReleaseAccept 已定义且调用 POST .../post-release-accept，body 含 verdict', () => {
-    const body = extractFunctionBody(src, 'siModalPostReleaseAccept');
+    const body = bodyOf('siModalPostReleaseAccept');
     assert.ok(body, '未提取到 siModalPostReleaseAccept 函数体');
     assert.ok(body.includes('/post-release-accept'), '未见调用 post-release-accept 端点');
     assert.ok(body.includes('verdict'), '请求体未见 verdict 字段');
 });
 check('撤销弹窗 reason 字段标记必填（fTextarea 第 4 参 req=true）', () => {
-    const body = extractFunctionBody(src, 'siModalFastReleaseRevoke');
+    const body = bodyOf('siModalFastReleaseRevoke');
     assert.ok(/fTextarea\('reason',\s*'撤销原因',\s*'',\s*true/.test(body), '撤销原因字段未见 fTextarea(...,true,...) 必填标记（应与后端 LOW-3 必填校验对齐）');
 });
 
@@ -171,22 +188,22 @@ check('[追加批·M2] postAcceptKv 的 48h 判据改读后端派生字段 iss.p
 
 console.log('— ⑤ 列表徽章 + 48h 判据（[追加批·M2] 判据权威已收归后端，前端只读派生字段） —');
 check('siPostAcceptFlagHtml 已定义且读后端派生字段 post_release_accept_overdue（不再前端自算 48h，判据同源）', () => {
-    const body = extractFunctionBody(src, 'siPostAcceptFlagHtml');
+    const body = bodyOf('siPostAcceptFlagHtml');
     assert.ok(body, '未提取到 siPostAcceptFlagHtml 函数体');
     assert.ok(body.includes('i.post_release_accept_overdue'), 'siPostAcceptFlagHtml 未读 i.post_release_accept_overdue——48h 判据可能仍在前端自算或被内联重写');
 });
 check('前端 siIsPostAcceptOverdue 函数已删除（M2 修正：判据权威收归后端 isPostReleaseAcceptOverdue，不留一份可能与后端漂移的前端副本）', () => {
-    assert.ok(!extractFunctionBody(src, 'siIsPostAcceptOverdue'), '仍能提取到 siIsPostAcceptOverdue 函数体——M2 修正要求删除该前端自算函数，不应仍存在（两份判据必然漂移）');
+    assert.ok(!bodyOf('siIsPostAcceptOverdue'), '仍能提取到 siIsPostAcceptOverdue 函数体——M2 修正要求删除该前端自算函数，不应仍存在（两份判据必然漂移）');
 });
 check('siPostAcceptFlagHtml 已并入 renderSysIterationRows 的 flags 拼接（非孤立死函数）', () => {
-    const body = extractFunctionBody(src, 'renderSysIterationRows');
+    const body = bodyOf('renderSysIterationRows');
     assert.ok(body, '未提取到 renderSysIterationRows 函数体');
     assert.ok(body.includes('siPostAcceptFlagHtml('), 'renderSysIterationRows 未调用 siPostAcceptFlagHtml——列表徽章算出来了但从未拼进 flags（同 blocked 死分支同款漏法）');
 });
 
 console.log('— ⑥ 撤销弹窗必填与后端拍板对齐（交叉核对） —');
 check('前端撤销原因长度上限（200 字）与后端 FAST_RELEASE_REVOKE_REASON_TOO_LONG 校验口径一致', () => {
-    const modalBody = extractFunctionBody(src, 'siModalFastReleaseRevoke');
+    const modalBody = bodyOf('siModalFastReleaseRevoke');
     assert.ok(/reason\.length > 200/.test(modalBody), '前端未见 reason.length > 200 的超长校验（应与后端 200 字上限对齐，早拦一道给及时反馈）');
 });
 

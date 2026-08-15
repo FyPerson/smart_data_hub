@@ -157,7 +157,9 @@ async function main() {
     assert.strictEqual(item.issue_title, '列表可见性测试单', '标题字段正确（无手机号，未触发脱敏，原样返回）');
     assert.strictEqual(item.reason, '列表组测试删除原因', '原因字段正确（无手机号，未触发脱敏，原样返回）');
     // 摘要字段齐全 + 不含大 JSON（列表不应把详情才有的快照字段带出来）
-    const expectedKeys = ['id', 'issue_id', 'issue_type', 'issue_status', 'issue_title', 'operator_id', 'operator_name', 'reason', 'deleted_at'];
+    // [S13-b·B3·矩阵行12] 补 issue_derive_root_id/issue_derive_seq——删除审计双记（子编号+真实 id）的
+    // 列表端数据源，轻量摘要列同 issue_created_by 一类，非快照 JSON，纳入摘要字段集合合理。
+    const expectedKeys = ['id', 'issue_id', 'issue_type', 'issue_status', 'issue_title', 'issue_derive_root_id', 'issue_derive_seq', 'operator_id', 'operator_name', 'reason', 'deleted_at'];
     assert.deepStrictEqual(Object.keys(item).sort(), expectedKeys.sort(), '列表行字段应恰为摘要字段集合（不含 issue_json 等大字段）');
     ok('[L] admin 列表 200 + 含刚删除的单 + 摘要字段齐全且不含大 JSON 快照字段');
   }
@@ -259,8 +261,9 @@ async function main() {
         `INSERT INTO sys_issue_delete_audit (issue_id, issue_type, issue_status, issue_title, issue_created_by, issue_created_at,
            attachment_count, timeline_count, dev_assignee_count, dev_commit_count, dev_event_count, release_snapshot_count,
            issue_json, timeline_json, attachments_json, dev_assignees_json, dev_commits_json, dev_events_json, release_snapshots_json,
+           fast_release_executors_json,
            operator_id, operator_name, reason, deleted_at)
-         VALUES (?,?,?,?,?,?, 0,0,0,0,0,0, ?, '[]','[]','[]','[]','[]','[]', ?,?,?, datetime('now','localtime'))`,
+         VALUES (?,?,?,?,?,?, 0,0,0,0,0,0, ?, '[]','[]','[]','[]','[]','[]', '[]', ?,?,?, datetime('now','localtime'))`,
         [8880002, 'bug', '已作废', '分隔符格式测试单', 1, '2020-01-01 00:00:00', rawIssueJsonSep, 1, '管理员', '分隔符格式测试删除']
       );
       const rSep = await call('GET', `/api/sys-issue-delete-audit/${insSep.lastID}`, adminTok);
@@ -292,8 +295,9 @@ async function main() {
       `INSERT INTO sys_issue_delete_audit (issue_id, issue_type, issue_status, issue_title, issue_created_by, issue_created_at,
          attachment_count, timeline_count, dev_assignee_count, dev_commit_count, dev_event_count, release_snapshot_count,
          issue_json, timeline_json, attachments_json, dev_assignees_json, dev_commits_json, dev_events_json, release_snapshots_json,
+         fast_release_executors_json,
          operator_id, operator_name, reason, deleted_at)
-       VALUES (?,?,?,?,?,?, 0,0,0,0,0,0, ?, '[]','[]','[]','[]','[]','[]', ?,?,?, datetime('now','localtime'))`,
+       VALUES (?,?,?,?,?,?, 0,0,0,0,0,0, ?, '[]','[]','[]','[]','[]','[]', '[]', ?,?,?, datetime('now','localtime'))`,
       [8880001, 'bug', '已作废', '数字手机号测试单', 1, '2020-01-01 00:00:00', rawIssueJson, 1, '管理员', '数字键测试删除']
     );
     const auditId = ins.lastID;
@@ -346,8 +350,9 @@ async function main() {
       `INSERT INTO sys_issue_delete_audit (issue_id, issue_type, issue_status, issue_title, issue_created_by, issue_created_at,
          attachment_count, timeline_count, dev_assignee_count, dev_commit_count, dev_event_count, release_snapshot_count,
          issue_json, timeline_json, attachments_json, dev_assignees_json, dev_commits_json, dev_events_json, release_snapshots_json,
+         fast_release_executors_json,
          operator_id, operator_name, reason, deleted_at)
-       VALUES (?,?,?,?,?,?, 0,0,0,0,0,0, ?, ?,'[]','[]','[]','[]','[]', ?,?,?, datetime('now','localtime'))`,
+       VALUES (?,?,?,?,?,?, 0,0,0,0,0,0, ?, ?,'[]','[]','[]','[]','[]', '[]', ?,?,?, datetime('now','localtime'))`,
       [8880003, 'feature', '已作废', 'OA号防误掩测试单', 1, '2020-01-01 00:00:00', rawIssueJsonOa, rawTimelineJsonOa, 1, '管理员', 'OA号防误掩测试删除']
     );
     const rOa = await call('GET', `/api/sys-issue-delete-audit/${insOa.lastID}`, adminTok);
@@ -402,8 +407,9 @@ async function main() {
         `INSERT INTO sys_issue_delete_audit (issue_id, issue_type, issue_status, issue_title, issue_created_by, issue_created_at,
            attachment_count, timeline_count, dev_assignee_count, dev_commit_count, dev_event_count, release_snapshot_count,
            issue_json, timeline_json, attachments_json, dev_assignees_json, dev_commits_json, dev_events_json, release_snapshots_json,
+           fast_release_executors_json,
            operator_id, operator_name, reason, deleted_at)
-         VALUES (?,?,?,?,?,?, 0,0,0,0,0,0, '{}','[]','[]','[]','[]','[]','[]', ?,?,?, datetime('now','localtime'))`,
+         VALUES (?,?,?,?,?,?, 0,0,0,0,0,0, '{}','[]','[]','[]','[]','[]','[]', '[]', ?,?,?, datetime('now','localtime'))`,
         [dummyIssueIdBase + i, 'bug', '已作废', `分页压测单${i}`, 1, '2020-01-01 00:00:00', 1, '管理员', `分页压测删除${i}`]
       );
       insertedIds.push(insRes.lastID);

@@ -678,6 +678,12 @@ check('[M3] 详情页「上线方式」kv：四分支字典 + 仅已上线单渲
     //      函数内未来任何真实违规），改为精确剥除这一个字面量子串本身（同 siModalAccept 剥除范式的
     //      "剥最小必要单元"精神，只是单元从"整个函数体"收窄到"这一条字面量表达式"）：扫描前把
     //      `r.data.online_source` 替换成一个不含 `.online_source` 的中性占位串，通用正则天然扫不到它。
+    //      [组B·S2 订正] 该字面量表达式已随两步化方案 §4-2 拆直上分支整块删除（direct_release 勾选框
+    //      与响应体消费同批拆除），下方 `.replace(/r\.data\.online_source/g, ...)` 在真实 src 上现已是
+    //      no-op（零匹配）——保留不删：若未来任何函数以同款写法重新消费 submit 响应体的 online_source
+    //      字段（例如 S3+ 落地新的执行确认端点响应体），这行仍能按同一精神精确豁免，不必现在提前删除
+    //      再等下次需要时重写一遍；下方 [M4] 对照组已改为合成注入验证该剥除步骤本身的可逆性，不再依赖
+    //      真实 src 是否含这个具体子串。
     //    ⚠️ 全文核实：除这两处外，全仓 `.online_source` 仅余两条 `== null`（siHasActiveFastReleaseAuth
     //    定义处 + fastReleaseBtns 门控），均是 null 检查（无引号跟在运算符后），正则天然不命中，无需额外剥除。
     const acceptBody = extractFunctionBody(src, 'siModalAccept') || '';
@@ -697,11 +703,22 @@ check('[M3] 详情页「上线方式」kv：四分支字典 + 仅已上线单渲
 //   也没有在剥除响应体读点时顺手把整条正则削断（各自重算 srcSansAccept，不依赖外层 check 的闭包变量，
 //   与本文件其余 check 一贯的"自包含"写法对齐，不引入跨 check 共享状态）。
 check('[M4] ★对照组：把剥除后的中性占位串还原成真实响应体读点前缀，判据不应误报（证明剥除只掐掉这一处，不是把整条正则关掉）', () => {
+    // [组B·S2 订正] 原写法依赖 `src` 真含 `r.data.online_source` 这一具体子串来做"剥除→复原→重新命中"
+    //   的往返验证——该子串是 siModalSubmit 里 direct_release 成功响应体读点，已随两步化方案 §4-2 拆直上
+    //   分支整块删除（见 Sys_Iteration.html S2-2 拆除记录），`src` 里已不再存在这个具体写法，往返验证
+    //   失去真实依托对象。改为**合成注入**：不依赖真实源码是否还含这个具体子串，只验证"剥除+复原"这套
+    //   机制本身对**任意**符合同一形态的字符串都是可逆的、不会把正则本身削断——与紧邻的下一条对照组
+    //   （合成注入 `row.online_source === '…'`）同一精神，只是这条测的是"剥除目标子串本身复原后仍可
+    //   命中"，那条测的是"剥除后正则仍能抓住其它变量名前缀"，两条互补，均不依赖真实业务代码现状。
     const acceptBody = extractFunctionBody(src, 'siModalAccept') || '';
-    const srcSansAccept = src.replace(acceptBody, '')
+    const synthetic = src + "\nconst __synthetic_check = r.data.online_source === 'authorized_fastlane';\n";
+    const syntheticStripped = synthetic.replace(acceptBody, '')
         .replace(/r\.data\.online_source/g, '__SUBMIT_RESPONSE_BODY_ONLINE_SOURCE__');
-    assert.ok(/\b[\w$]+\.online_source\s*[=!]==?\s*'/.test(srcSansAccept.replace(/__SUBMIT_RESPONSE_BODY_ONLINE_SOURCE__/g, 'r.data.online_source')),
-        '还原占位串后正则应重新命中该行（若不命中，说明上面的 assert.ok 是恒真式，剥除逻辑把正则本身削断了而非精确排除了目标子串）');
+    assert.ok(!/\b[\w$]+\.online_source\s*[=!]==?\s*'/.test(syntheticStripped),
+        '合成注入的 r.data.online_source 子串剥除后不应被正则命中（剥除步骤本身应生效）');
+    const restored = syntheticStripped.replace(/__SUBMIT_RESPONSE_BODY_ONLINE_SOURCE__/g, 'r.data.online_source');
+    assert.ok(/\b[\w$]+\.online_source\s*[=!]==?\s*'/.test(restored),
+        '还原占位串后正则应重新命中该行（若不命中，说明剥除逻辑把正则本身削断了而非精确排除了目标子串）');
 });
 check('[M4] ★对照组：注入一个用未白名单变量名（如 row.）写的重算分支，通用正则应判红（证明不再是变量名白名单）', () => {
     const acceptBody = extractFunctionBody(src, 'siModalAccept') || '';

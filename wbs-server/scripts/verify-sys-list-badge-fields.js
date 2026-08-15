@@ -17,6 +17,8 @@
  */
 const fs = require('fs');
 const path = require('path');
+const { findOuterBoundary } = require('./lib/sql-select-boundary');
+const { extractFunctionBody } = require('./lib/extract-function-body');
 
 const HTML = fs.readFileSync(path.join(__dirname, '..', 'public', 'Sys_Iteration.html'), 'utf8');
 const ROUTES = fs.readFileSync(path.join(__dirname, '..', 'routes', 'sys-iteration', 'index.js'), 'utf8');
@@ -42,20 +44,22 @@ const FRONTEND_DERIVED = {
 // ── 取前端列表行渲染路径消费的字段 ──────────────────────────────
 // 口径：renderSysIterationRows 函数体（含 flags 拼接块与整行模板），加上它调用的两个徽章 helper
 //   （siTechLeadNotifyBadgeHtml / siHeldDaysHtml 的形参就是列表行对象/其字段）。
-function extractFunctionBody(src, name) {
-  const start = src.indexOf(`function ${name}(`);
-  if (start < 0) return null;
-  let i = src.indexOf('{', start), depth = 0, end = -1;
-  for (; i < src.length; i++) {
-    if (src[i] === '{') depth++;
-    else if (src[i] === '}') { depth--; if (depth === 0) { end = i; break; } }
-  }
-  return end < 0 ? null : src.slice(start, end + 1);
-}
+// [S13 收口 LOW 追-6] extractFunctionBody 抽到 scripts/lib/extract-function-body.js 单点实现（与
+//   verify-sys-derive-numbering.js DN8 段/verify-sys-derive-display.js 共用同一份，不再三处逐字维护）。
 
 // 剥行注释与块注释（防注释里的 i.xxx 被当成真消费；guard gotchas「文本扫描剥注释先行」）
 function stripComments(s) {
   return s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^[ \t]*\/\/.*$/gm, '').replace(/([^:])\/\/.*$/gm, '$1');
+}
+
+// [S13·派生单子编号批实测撞见] SQL 文本用 `--` 作行注释（非 JS `//`）——列表 SELECT 是 SQL 模板串，
+//   若不剥离，形如 `derive_root_id, derive_seq,   -- ← [S12-b...]` 这种"末尾带同行 SQL 注释"的列会
+//   被注释文本一路合并进下一个逗号之前的 item（本函数下方的顶层逗号扫描器不识别 SQL 注释边界），拼出
+//   不匹配裸列名正则的畸形 item——derive_root_id 因此被误判"不在 SELECT 里"（前端刚开始消费它就撞见）。
+//   ⚠️ 只用于 SQL 文本，不能套用到上面 stripComments 处理 JS 函数体那条路径——JS 侧存在
+//   `var(--sem-xxx-fg)` 这类以 `--` 开头的 CSS 变量名字面量，粗暴按 `--` 截断会把这些字符串腰斩。
+function stripSqlLineComments(s) {
+  return s.replace(/--.*$/gm, '');
 }
 
 const rowBody = extractFunctionBody(HTML, 'renderSysIterationRows');
@@ -67,13 +71,19 @@ const preBody = extractFunctionBody(HTML, 'siPrereleaseFlagHtml');
 //   post_release_acceptance/released_at/post_derive_issue_id 四字段（末者为追加批 failed_derived
 //   分支新引入），必须同批进扫描面。
 const paBody = extractFunctionBody(HTML, 'siPostAcceptFlagHtml');
+// [S7·先行上线两步化 方案 v1.8 §6] 同上理由——「待先行部署 x/N」徽章 helper 消费 type/status/
+//   fast_release_active_auth/fast_release_exec_total_count/fast_release_exec_done_count 五字段，
+//   必须同批进扫描面，否则它消费的两个新 S6 列（total/done count）对本守卫不可见（正是本守卫要防
+//   的 blocked 死分支同款漏法——新 helper 不进扫描面=守卫对它视而不见，照样全绿）。
+const flBody = extractFunctionBody(HTML, 'siFastlaneFlagHtml');
 must(!!rowBody, 'renderSysIterationRows 函数体可提取（提不到=守卫空转，不能当通过）');
 must(!!tlBody, 'siTechLeadNotifyBadgeHtml 函数体可提取');
 must(!!preBody, 'siPrereleaseFlagHtml 函数体可提取（待上线两 flag 的唯一判定出口）');
 must(!!paBody, 'siPostAcceptFlagHtml 函数体可提取（先行上线待补验收徽章的唯一判定出口）');
-if (!rowBody || !tlBody || !preBody || !paBody) { console.log('\n=== FAIL：扫描面缺失 ==='); process.exit(1); }
+must(!!flBody, 'siFastlaneFlagHtml 函数体可提取（待先行部署 x/N 徽章的唯一判定出口）');
+if (!rowBody || !tlBody || !preBody || !paBody || !flBody) { console.log('\n=== FAIL：扫描面缺失 ==='); process.exit(1); }
 
-const consumeSrc = stripComments(rowBody + '\n' + tlBody + '\n' + preBody + '\n' + paBody);
+const consumeSrc = stripComments(rowBody + '\n' + tlBody + '\n' + preBody + '\n' + paBody + '\n' + flBody);
 const consumed = new Set();
 for (const m of consumeSrc.matchAll(/\bi\.([a-z_][a-z0-9_]*)\b/g)) consumed.add(m[1]);
 must(consumed.size >= 15, `前端消费字段实抓 ${consumed.size} 个（过少=正则失配，扫描面须非空）`);
@@ -82,8 +92,38 @@ must(consumed.size >= 15, `前端消费字段实抓 ${consumed.size} 个（过�
 // 定位 GET /sys-issues 端点内那条列表查询（唯一一条：其余 SELECT 均为 WHERE id=? 的单行查询）
 const listSelStart = ROUTES.indexOf('`SELECT id, type, status, priority, risk_level, title, system_name');
 must(listSelStart > 0, '列表 SELECT 可定位（唯一列表供数查询）');
-const fromIdx = ROUTES.indexOf('FROM sys_issues', listSelStart);
-const selectBlock = stripComments(ROUTES.slice(listSelStart, fromIdx));
+// [S13-b·B1 实测撞见] 裸 `ROUTES.indexOf('FROM sys_issues', listSelStart)` 找外层 FROM 的写法会被"列表内
+//   自身含相关子查询"骗到——B1 新增的 post_derive_root_id/post_derive_seq 两条标量子查询形如
+//   `(SELECT d.derive_root_id FROM sys_issues d WHERE d.id = ...)`，子查询里那句 "FROM sys_issues" 字面
+//   量比外层真正的 FROM 更早出现，裸 indexOf 会在子查询内部截断，把外层真正 FROM 之前几十个列全部漏扫
+//   （release_assignee_id 起十余列判"消失"）——本质与已修的「SQL 行注释吞列」同一类"字符串扫描器被合法
+//   SQL 结构骗过"问题（guard gotchas 家族新增实例）。改为**括号深度感知**扫描：跳过子查询内部文本，只认
+//   深度=0 时出现的第一个 "FROM sys_issues" 才是外层列表的真正终点。扫描前先在一个足够宽裕的上界内剥掉
+//   SQL 行注释（先剥注释再找边界——防注释文本本身巧合含 "FROM sys_issues" 字样干扰判定，虽本 SELECT
+//   当前注释里没有这个巧合，但纪律上应遵循「文本扫描剥注释先行」）。
+// [实测订正] 本 SELECT 列多、注释重（含 commit 聚合两条 JSON 子查询），真正的外层 `FROM sys_issues`
+//   （紧跟 `${where.length ? 'WHERE ' + where.join(...) : ''}` 动态 WHERE 拼接）落在距 listSelStart
+//   约 22KB 原文处——早先按"约 60 列 ~5-6KB"估的 12000 上界偏小，命中过又一个"看似找到但其实截断"的假阳性
+//   （findOuterBoundary 在过窄的窗口内返回 -1，若不做 -1 判断会让下方 `.slice(0, -1)` 悄悄吃掉最后
+//   一个字符却不报错——已用显式 `< 0` 早退 + must() 断言堵死这条河）。上界调宽到 60000（对这一个 SELECT
+//   语句块而言仍是安全上界，不会误吞下一个端点的内容——真正终点 FROM 之后立即 return，不继续扫描）。
+// [S13 收口 MED-2] 深度感知扫描本身抽到 scripts/lib/sql-select-boundary.js 单点实现（与
+//   verify-sys-prerelease-flags.js 共用同一份，逐字重复维护改成两文件各自 require）——顺带补上原实现
+//   缺的 fail-closed：窗口内括号计数一旦变负立即判红，不再信任"变负之后又凑巧归零"的假 top-level 命中
+//   （否则将来某处 SQL 字面量里落了个不配对的单括号，扫描可能悄悄跳到别的端点/语句块的同名 FROM 上，
+//   选出一个混了别处内容的超集列集合却不报错，见 sql-select-boundary.js 模块头注）。
+const SELECT_SCAN_UPPER_BOUND = 60000;
+const strippedForBoundary = stripComments(stripSqlLineComments(ROUTES.slice(listSelStart, listSelStart + SELECT_SCAN_UPPER_BOUND)));
+const boundaryResult = findOuterBoundary(strippedForBoundary, 'FROM sys_issues');
+must(!boundaryResult.wentNegative, '边界扫描括号深度全程非负（fail-closed：一旦变负说明括号计数已不自洽，不信任后续任何"恰好归零"的命中，防止静默选中混了别处内容的超集范围）');
+const outerFromIdxInStripped = boundaryResult.index;
+must(outerFromIdxInStripped > 0, '外层 FROM sys_issues 边界可定位（深度感知扫描，不被子查询内的同字面量截断）');
+const selectBlock = outerFromIdxInStripped > 0 ? strippedForBoundary.slice(0, outerFromIdxInStripped) : '';
+// 边界正确性断言（MED-2 新增）：命中点紧随其后应能看到本条列表 SELECT 自己的动态 WHERE 拼接特征
+//   `${where...}`（index.js 该 SELECT 处 `FROM sys_issues\n  ${where.length ? 'WHERE ' + ... : ''}`）——
+//   证明这次真落在"这条列表查询自己的外层 FROM"，不是巧合命中了别处同名字面量后又凑巧深度为 0。
+const afterBoundary = outerFromIdxInStripped > 0 ? strippedForBoundary.slice(outerFromIdxInStripped, outerFromIdxInStripped + 120) : '';
+must(afterBoundary.includes('${where'), `外层边界后文应含本条 SELECT 自己的动态 WHERE 拼接特征 "\${where"（证明命中点确是这条列表查询自己的 FROM，非误中别处），命中点后 120 字符原文：${JSON.stringify(afterBoundary)}`);
 
 const selected = new Set();
 // ① 顶层裸列名：逐字符扫，只收括号深度为 0 的逗号分隔项里形如 `foo` 的整项
@@ -135,6 +175,25 @@ const BADGE_FIELDS = [
   //   "已派生 #N"链接文案的取数列，此前列表 SELECT 从未投影过（只有详情端点 `SELECT sys_issues.*`
   //   隐式带上），是本批新补的列，本条目即为该补列动作的守卫锚点。
   ['post_derive_issue_id', '补验收未通过·悬停"已派生 #N"'],
+  // [S7·先行上线两步化 方案 v1.8 §6] 「待先行部署 x/N」徽章依赖字段（S6 列表投影新增三列）——
+  //   type/status 是既有列，未在此重复点名（BADGE_FIELDS 只登记"因本徽章才需要"的新列，两者
+  //   已被其余徽章条目间接覆盖）。
+  ['fast_release_active_auth', '待先行部署 x/N·徽章条件（活跃授权布尔）'],
+  ['fast_release_exec_total_count', '待先行部署 x/N·分母（当前代次执行人集合总数）'],
+  ['fast_release_exec_done_count', '待先行部署 x/N·分子（已确认执行人数）'],
+  // [S13·§15.3 矩阵行1/2·MED-1 后续] 派生单子编号「#根_序」——单号列（siIssueDisplayNo(i) 直接消费）+
+  //   血缘徽章（i.derive_root_id 用于悬停 title 拼链根，derive_seq 经 siIssueDisplayNo 内部消费不出现
+  //   为字面量 `i.derive_seq`，故不会被本文件 `\bi\.` 扫描器直接抓到，但仍是渲染分支的真实依赖，点名
+  //   钉住防未来漏投影——同 online_source/released_at 两条"供后端/helper 计算依赖"先例）。derive_root_id
+  //   本条正是「S13 前端刚开始消费即撞见 SQL 行注释吞列」缺口的锚点（stripSqlLineComments 修复所指）。
+  ['derive_root_id', '单号列子编号（siIssueDisplayNo）+ 血缘徽章链根悬停 title'],
+  ['derive_seq', '单号列子编号（siIssueDisplayNo 内部消费，非字面量 i.derive_seq，故本文件扫描器抓不到——点名登记防漏投影）'],
+  // [S13-b·B1] 「补验收未通过」徽章"已派生 #N"改子编号——目标派生单的 root/seq 挪进 SELECT 标量子查询
+  //   （不再仅靠前端 siList 内查找兜底），两列均是字面量 `i.post_derive_root_id`/`i.post_derive_seq`
+  //   会被本文件扫描器直接抓到（与 derive_seq 那条"抓不到"不同，点名仍保留是为了对齐既有登记惯例 + 给
+  //   出可读定位）。
+  ['post_derive_root_id', '补验收未通过·已派生子编号——目标派生单 derive_root_id 标量子查询投影'],
+  ['post_derive_seq', '补验收未通过·已派生子编号——目标派生单 derive_seq 标量子查询投影'],
 ];
 for (const [f, label] of BADGE_FIELDS) {
   must(selected.has(f), `徽章「${label}」依赖字段 ${f} 在列表 SELECT 中`);

@@ -24,14 +24,22 @@
 //   [4] 事件①「上线翻牌」·批次发布子路径（_publishReleaseCoreInTxn 内新增的双保险逻辑，SQL 造态）：
 //       正例+对照组。⚠️ 本子路径经真实状态机路径已结构性不可达（case 'accept' 已在同事务终结掉活跃
 //       授权，批内成员到达「待上线」时六列必已是 NULL）——纯纵深防御，用 SQL 造态直接验证。
-//   [5] 终结后 submit direct_release → 409 FAST_RELEASE_SUBMIT_DIRECT_DENIED（复用 [2] 打回后回到
-//       「处理中」的终态单，验证六列已清空后不能再勾选直上）。
-//   [6] 直上消费（fastlane 例外路径）→ 已上线：消费记录逐列完整保留（不属于"终结"范畴）。
+//       [4c]（codex 389 号二批 M2·2026-08-14）批级 fail-closed 负例：同批一干净 fastlane 成员 + 一 SQL
+//       造态注入未软删 done 行的异常成员——发布应 500 FASTLANE_ROSTER_UNEXPECTED_DONE_ON_PUBLISH（先行
+//       上线两步化 S5 §4-7 L3 防线），错误文案含异常单号（L2 定位信息），且整批零副作用（两成员状态/
+//       授权六列/集合行/timeline 全部原值）——清理异常行后重发成功（恢复对照）。
+//   [5]（组B·S2 语义重定义）终结后 submit → 正常 200 进入「待验证」+ 零挂牌（原"409
+//       FAST_RELEASE_SUBMIT_DIRECT_DENIED"依赖的前置闸已随两步化拆直上分支删除，被保护的不变量本身
+//       不变——旧授权已终结，新提交不应被当作活跃授权消费，只是外部可观测形式从"拒绝"变成"正常放行
+//       但不挂牌"）。
+//   [6]（组B·S2 订正）直上消费（fastlane 例外路径）→ 已上线：消费记录逐列完整保留（不属于"终结"
+//       范畴）——原真实 submit direct_release 链路已不可达，改 SQL 造态直接构造消费终态。
 //   [7]（codex 368 号 MED-2）事件④「验收拒绝」（issue_reject 落「已拒绝」）：正例（授权活跃→
 //       issue-reject→六列清空+留痕）+ 对照组（未授权拒绝零终结留痕）。
 //   [8]（codex 368 号 MED-2）事件⑤「作废」（void 落「已作废」，from='*'）：正例+对照组，同款。
 //   [9]（codex 368 号 MED-2）reactivate 断言双向证明：正例（干净态复活不被误伤 + 拒绝轮授权未穿透
-//       进重新开的下一轮，submit direct_release 仍 409）+ 反证（SQL 造态"已拒绝残留活跃授权"→
+//       进重新开的下一轮——[组B·S2 订正] 原断言"submit direct_release 仍 409"改为"新一轮 submit 正常
+//       200 + 零挂牌"，被保护的不变量不变）+ 反证（SQL 造态"已拒绝残留活跃授权"→
 //       reactivate fail-closed 500 拒绝 + 零副作用）。
 //   [10] 不变量探针 fastReleaseUnresolvedAtTerminalStateViolations：全库扫描 + 四态（已上线/已关闭/
 //        已拒绝/已作废）构造违例行反证判红 + 清理恢复 0（[Y5] 范式，双向证明——不只证"能放行合法态"，
@@ -410,17 +418,97 @@ async function main() {
     assert.strictEqual(await statusOf(idCtrl), '已上线', '[4b] 发布后应落已上线');
     assert.strictEqual((await terminatedTlRows(idCtrl)).length, 0, '[4b] ★对照组：未注入活跃授权，发布不应产生任何终结留痕行');
     ok('[4b] ★对照组：批内成员六列本为 NULL（未造态）→ 批次发布正常成功，零终结留痕（证明双保险段是 filter 命中才动作，非无条件扫全批插入）');
+
+    // [4c]（codex 389 号二批 M2）批级 fail-closed 负例：同批一个干净 fastlane 成员 + 一个 SQL 造态注入
+    //   未软删 done 行的异常成员——发布应 500 FASTLANE_ROSTER_UNEXPECTED_DONE_ON_PUBLISH（先行上线两步化
+    //   S5·§4-7 双保险点 L3 防线，见 index.js _publishReleaseCoreInTxn 内该段注释），且**整批零副作用**
+    //   （两成员状态/授权六列/集合行/timeline 全部原值，不是"干净成员照发、异常成员单独失败"这种半批
+    //   语义——同批次事务本就是原子单元）；清理异常行后重发应成功（恢复对照）。
+    const idClean = await bugAtDaishangxian();   // 干净成员：到达"待上线"，六列本为 NULL（accept 已终结）
+    const idBad = await bugAtDaishangxian();     // 异常成员：同样到达"待上线"，随后 SQL 造态注入活跃授权
+    //   六列 + 一行未软删的 fastlane 执行人 done 行——这条 done 行本不该存在（这条边根本没走两步化
+    //   confirm 消费路径，产生它纯粹是造态），正是 L3 要拦的"membersWithActiveAuth 假设失效"那种组合。
+    await run(`UPDATE sys_issues SET fast_release_auth_by = 1, fast_release_auth_by_name = '管理员',
+                 fast_release_auth_at = datetime('now','localtime'), fast_release_auth_note = '[4c] SQL 造态注入'
+               WHERE id = ?`, [idBad]);
+    await run(
+      `INSERT INTO sys_fast_release_executors (issue_id, user_id, user_name, exec_status, executed_at, added_by, added_by_name)
+       VALUES (?, 5, '开发王', 'done', datetime('now','localtime'), 1, '管理员')`,
+      [idBad]
+    );
+
+    const relId4c = await mkRelease();
+    await addToRelease(relId4c, idClean);
+    await addToRelease(relId4c, idBad);
+    await seedExecutorDone(relId4c);
+
+    // 发布前快照——两成员各自 issueRow 全字段快照 + timeline 计数 + 异常成员的集合行快照，供发布失败
+    // 后逐一核对"整批零副作用"。
+    const cleanBefore = await issueRow(idClean);
+    const badBefore = await issueRow(idBad);
+    const cleanTlBefore = await timelineCount(idClean);
+    const badTlBefore = await timelineCount(idBad);
+    const badRosterBefore = await all(`SELECT id, removed_at, exec_status FROM sys_fast_release_executors WHERE issue_id=?`, [idBad]);
+    assert.strictEqual(badRosterBefore.length, 1, '[4c-前置] 异常成员应恰 1 行未软删 done（造态生效）');
+    assert.strictEqual(badRosterBefore[0].removed_at, null, '[4c-前置] 该行应未软删');
+    // [codex 390 号三批 M2 补全] 干净成员的执行人集合行也要快照——闭合声明说的是"两成员...集合行...
+    //   全部原值"，此前只快照+断言了异常成员那份，干净成员那份被漏了（干净成员本无 fastlane 执行人行，
+    //   预期恒为空数组，但"预期恒为空"不能替代"真的断言过"——沿用同款 SELECT 形态对齐异常成员）。
+    const cleanRosterBefore = await all(`SELECT id, removed_at, exec_status FROM sys_fast_release_executors WHERE issue_id=?`, [idClean]);
+    assert.strictEqual(cleanRosterBefore.length, 0, '[4c-前置] 干净成员本不应有任何 fastlane 执行人行');
+
+    let thrown4c = null;
+    try { await publishViaCoreInTxn(relId4c); }
+    catch (e) { thrown4c = e; }
+    assert.ok(thrown4c, '[4c] 发布应抛错（fail-closed 阻断，非静默继续）');
+    assert.strictEqual(thrown4c.httpStatus, 500, `[4c] 应为 500，实得 ${thrown4c.httpStatus}`);
+    assert.strictEqual(thrown4c.code, 'FASTLANE_ROSTER_UNEXPECTED_DONE_ON_PUBLISH', `[4c] 确切码，实得 ${thrown4c.code}`);
+    // [codex 389 号二批 L2] 定位信息——错误文案应含异常单号（非纯计数），便于 admin 直接定位是哪单出问题。
+    assert.ok(thrown4c.message.includes(`#${idBad}`), `[4c] ⭐ 错误文案应含异常单号 #${idBad}（L2 定位信息），实得="${thrown4c.message}"`);
+    // [codex 390 号三批 L2 补全] 本用例只造态 1 单，真实总数(COUNT DISTINCT)=采样条数=1——精确断言文案
+    // 不带"等共 N 单"后缀（该后缀只应在真实总数 > 展示条数时出现），钉住"等共"分支的边界条件不误触发；
+    // 同时用整句相等（非仅 includes）钉死 idsText 精确形态，防止 COUNT 改造引入静默的计数错位。
+    assert.ok(!thrown4c.message.includes('等共'), `[4c] ⭐ 单一异常单号场景不应出现"等共 N 单"后缀，实得="${thrown4c.message}"`);
+    assert.strictEqual(
+      thrown4c.message,
+      `批次内单 #${idBad} 存在已确认执行的先行上线执行人集合行，理论上不应发生（本批成员应均未消费）——为防止销毁真实部署留痕，已阻断本次批次发布，请联系管理员核查该批次成员的 fast_release_* 字段与执行人集合状态`,
+      `[4c] ⭐ 错误文案应整句精确匹配（L2 补全后 idsText 拼装逻辑改用真实总数 totalIssueCount 判定后缀，需钉死单单号场景不受影响），实得="${thrown4c.message}"`
+    );
+
+    // 整批零副作用——两成员状态/授权六列/timeline 计数/异常成员集合行均应与发布前逐字段一致。
+    const cleanAfter = await issueRow(idClean);
+    const badAfter = await issueRow(idBad);
+    assert.deepStrictEqual(cleanAfter, cleanBefore, '[4c] 干净成员应零改动（整批回滚，不因同批另一单出问题就单独早发布）');
+    assert.deepStrictEqual(badAfter, badBefore, '[4c] 异常成员应零改动（整批回滚，含刚才注入的活跃授权六列原样保留）');
+    assert.strictEqual(await timelineCount(idClean), cleanTlBefore, '[4c] 干净成员 timeline 应零新增');
+    assert.strictEqual(await timelineCount(idBad), badTlBefore, '[4c] 异常成员 timeline 应零新增');
+    const badRosterAfter = await all(`SELECT id, removed_at, exec_status FROM sys_fast_release_executors WHERE issue_id=?`, [idBad]);
+    assert.deepStrictEqual(badRosterAfter, badRosterBefore, '[4c] 异常成员的集合行应零改动（未被销毁，L3 防线在动手清空之前就已拦下）');
+    // [codex 390 号三批 M2 补全] 干净成员的集合行同样逐字段核对（补齐此前遗漏的一半断言）。
+    const cleanRosterAfter = await all(`SELECT id, removed_at, exec_status FROM sys_fast_release_executors WHERE issue_id=?`, [idClean]);
+    assert.deepStrictEqual(cleanRosterAfter, cleanRosterBefore, '[4c] ⭐ 干净成员的集合行应零改动（此前遗漏的断言，补齐后"两成员集合行全部原值"才是完整闭合）');
+
+    // 恢复对照：清理异常行后重新发布应成功（证明红灯确系"异常行存在"所致，非批次/端点本身被搞坏）。
+    await run(`UPDATE sys_fast_release_executors SET removed_at = datetime('now','localtime'), removed_by = 1, removed_by_name = '管理员'
+               WHERE issue_id = ? AND removed_at IS NULL`, [idBad]);
+    const outRetry = await publishViaCoreInTxn(relId4c);
+    assert.strictEqual(outRetry.count, 2, `[4c-恢复] 清理后重发应成功且恰含 2 单，实得 ${outRetry.count}`);
+    assert.strictEqual(await statusOf(idClean), '已上线', '[4c-恢复] 干净成员应已上线');
+    assert.strictEqual(await statusOf(idBad), '已上线', '[4c-恢复] 异常成员清理后重发也应已上线');
+    ok(`[4c]（codex 389 号二批 M2）批级 fail-closed 负例：同批一干净成员+一异常成员（SQL 造态注入未软删 done 行）→ 发布 500 FASTLANE_ROSTER_UNEXPECTED_DONE_ON_PUBLISH（含异常单号 #${idBad} 定位信息）+ 两成员状态/授权六列/集合行/timeline 全部原值（整批零副作用）→ 清理异常行后重发成功（恢复对照）`);
   }
 
-  // ══════════════════════════ [5] 终结后 submit direct_release → 409 ══════════════════════════
+  // ══════════════════════════ [5]（组B·S2 语义重定义）终结后 submit → 正常进入待验证 + 零挂牌 ══════════════════════════
+  //   ⚠️ 原语义"终结后 submit direct_release → 409 FAST_RELEASE_SUBMIT_DIRECT_DENIED"依赖的前置闸已随
+  //   两步化方案 §4-2「整体替代」拍板整体拆除（见 verify-sys-fastlane-submit.js 头部 S2 语义翻转声明）。
+  //   新语义：submit 不再有任何路径因"曾有授权但已终结"而拒绝——六列已清空 ⇒ isActiveFastReleaseAuth
+  //   六列判据里 fast_release_auth_at 为 NULL ⇒ 挂牌闸（S2-1 新增）静默不触发，submit 本身正常 200 进入
+  //   「待验证」，与从未获得过授权的单外部表现一致（direct_release 字段本身也已彻底停止消费，见
+  //   validateSubmitBody 内 ALLOWED_TOP_KEYS 旁注）。
   {
-    // 复用 [2a] 手法：授权 → return 打回终结 → 处理中态六列已清空 → 再次提交勾选 direct_release
-    //   应 409 FAST_RELEASE_SUBMIT_DIRECT_DENIED，精确原因文案指向"当前未获得先行上线授权"（非
-    //   "授权属重开前的上一轮"——两者是 deriveFastReleaseSubmitDenyReason 不同优先级的分支，此处
-    //   命中的应是最靠前的"从未获得授权"分支）。
     const id = await bugAtChulizhong();
     await estimateFuture(id);
-    await authorize(id, '[5] 终结后拒绝直上');
+    await authorize(id, '[5] 终结后验证零挂牌');
     const subR = await submitCommits(id);
     assert.strictEqual(subR.status, 200, `[5-submit] 应 200，实得 ${subR.status} ${JSON.stringify(subR.body)}`);
     const returnR = await call('POST', `/api/sys-issues/${id}/return`, adminTok, { reason: '[5] 打回以终结授权' });
@@ -429,26 +517,37 @@ async function main() {
     assertAllNull(rowAfterReturn, '[5-前置] 打回后六列应已清空');
     await estimateFuture(id);   // 打回清空 ETA，重新填才能再次 submit
     const beforeTl = await timelineCount(id);
+    // 仍带 direct_release=true（legacy payload 兼容负例的另一实例）——若拆分支不干净（旧闸残留任一处
+    // 未删），本条会以 409 的形式红；若挂牌闸误把"已终结"当"仍活跃"，本条会以"多插了一行
+    // sys_fast_release_executors"的形式红。
     const dirR = await submitCommits(id, { directRelease: true });
-    assert.strictEqual(dirR.status, 409, `[5] 终结后勾选直上应 409，实得 ${dirR.status} ${JSON.stringify(dirR.body)}`);
-    assert.strictEqual(dirR.body.code, 'FAST_RELEASE_SUBMIT_DIRECT_DENIED', `[5] 确切码，实得 ${dirR.body.code}`);
-    assert.strictEqual(dirR.body.error, '当前未获得先行上线授权，无法直上', `[5] 精确原因文案（六列已被终结清空，非"重开前上一轮"那条分支），实得="${dirR.body.error}"`);
-    const rowAfterDenied = await issueRow(id);
-    assert.strictEqual(rowAfterDenied.status, '处理中', '[5] 零副作用：status 未变');
-    assert.strictEqual(rowAfterDenied.online_source, null, '[5] 零副作用：online_source 未变');
-    assert.strictEqual(await timelineCount(id), beforeTl, '[5] 零副作用：timeline 无新增（拒绝的直上尝试不落任何痕迹）');
-    ok('[5] 终结后 submit direct_release=true → 409 FAST_RELEASE_SUBMIT_DIRECT_DENIED「当前未获得先行上线授权，无法直上」+ 整个 submit 零副作用');
+    assert.strictEqual(dirR.status, 200, `[5] 终结后 submit 应正常 200（不再是 409——旧闸已随两步化拆除），实得 ${dirR.status} ${JSON.stringify(dirR.body)}`);
+    assert.strictEqual(dirR.body.main_status, '待验证', `[5] main_status 应为「待验证」，实得 ${dirR.body.main_status}`);
+    assert.strictEqual(dirR.body.online_source, undefined, `[5] 响应不应携带 online_source 键，实得 ${JSON.stringify(dirR.body.online_source)}`);
+    const rowAfterSubmit = await issueRow(id);
+    assert.strictEqual(rowAfterSubmit.status, '待验证', '[5] status 应为「待验证」');
+    assert.strictEqual(rowAfterSubmit.online_source, null, '[5] online_source 应仍为空（未曾走已上线）');
+    const feRows = await all('SELECT id FROM sys_fast_release_executors WHERE issue_id=?', [id]);
+    assert.strictEqual(feRows.length, 0, `[5] 授权已终结，挂牌闸不应触发：sys_fast_release_executors 应恰 0 行，实得 ${feRows.length}`);
+    assert.strictEqual(await timelineCount(id), beforeTl + 1, '[5] timeline 恰新增 1 条（runWGate 镜像行；无挂牌行、无直上拒绝行）');
+    ok('[5]（语义重定义）终结后 submit（含 direct_release=true legacy payload）：正常 200 进入「待验证」+ 零挂牌（isActiveFastReleaseAuth 因 fast_release_auth_at 已被终结清空而判 false）+ timeline 恰新增 1 条 runWGate 镜像行');
   }
 
-  // ══════════════════════════ [6] 直上消费（fastlane 例外路径）→ 消费记录逐列完整保留 ══════════════════════════
+  // ══════════════════════════ [6]（组B·S2 订正）直上消费（fastlane 例外路径）→ 消费记录逐列完整保留 ══════════════════════════
+  //   ⚠️ 原测法走真实 submit direct_release=true 链路，一次请求内同时完成"消费"与"进入已上线"——该
+  //   分支已随两步化方案 §4-2 拆除，当前代码库暂无任何写 fast_release_consumed_at 的真实路径（S3+
+  //   落地翻牌端点后才会有）。改用 SQL 造态直接构造"消费后"终态：本组要保护的不变量是"B1 三事件的
+  //   终结逻辑不应误伤已经处于消费终态的行"，这是数据形态层面的不变量，与消费动作本身走真实端点还是
+  //   造态构造正交——被测代码（sysIssueTransition 的终结判据、`isActiveFastReleaseAuth` 的
+  //   consumed_at IS NULL 条件）只读现值字段，不关心历史成因。
   {
     const id = await bugAtChulizhong();
     await estimateFuture(id);
     const authResp = await authorize(id, '[6] 直上消费，六列应保留');
     const rowAfterAuth = await fastReleaseRow(id);
-    const dirR = await submitCommits(id, { directRelease: true });
-    assert.strictEqual(dirR.status, 200, `[6-直上] 应 200，实得 ${dirR.status} ${JSON.stringify(dirR.body)}`);
-    assert.strictEqual(dirR.body.online_source, 'authorized_fastlane', '[6-直上] online_source 应为 authorized_fastlane');
+    await run(`UPDATE sys_issues SET status='已上线', released_at=datetime('now','localtime'),
+      online_source='authorized_fastlane', post_release_acceptance='pending',
+      fast_release_consumed_at=datetime('now','localtime') WHERE id=?`, [id]);
     const after = await issueRow(id);
     // 逐列断言（任务②「消费记录完整保留」要求）——不用 deepStrictEqual 整体比对，是因为 consumed_at
     // 这一列在消费瞬间才写入（授权时为 NULL），必须分开断言"哪些列不变/哪些列新增"，不能笼统一句带过。
@@ -462,7 +561,7 @@ async function main() {
     assert.strictEqual(after.post_release_acceptance, 'pending', '[6] post_release_acceptance 应初值 pending（非 B1 清空对象）');
     assert.strictEqual(after.status, '已上线', '[6] status 应落已上线');
     assert.strictEqual((await terminatedTlRows(id)).length, 0, '[6] 直上消费不属于 B1 三事件之一，不应产生 fast_release_auth_terminated 留痕行');
-    ok('[6] 直上消费（fastlane 例外路径）→ 已上线：授权四件套原样保留 + consumed_at 落库 + online_source/post_release_acceptance 保留，零终结留痕（B1 显式例外，逐列断言）');
+    ok('[6]（造态构造消费终态）已上线：授权四件套原样保留 + consumed_at 落库 + online_source/post_release_acceptance 保留，零终结留痕（B1 显式例外，逐列断言；消费机制本身当前无真实触发路径，见组头订正说明）');
   }
 
   // ══════════════════════════ [7] 事件④「验收拒绝」正例 + 对照组 ══════════════════════════
@@ -526,11 +625,14 @@ async function main() {
   // ══════════════════════════ [9] reactivate 断言：无活跃授权可复活 + 违例反证 ══════════════════════════
   //   [codex 368 号 MED-2 收口] reactivate 的唯一前置态「已拒绝」现只能经 issue_reject 到达，[7a] 已
   //   在该分支终结掉活跃授权——本组双向证明新增的 fail-closed 断言：①正常回路不被误伤，且复活后的
-  //   新一轮确认拿不到旧授权（submit direct_release 仍 409，堵住 MED-2 要修的"穿透进下一轮"缺口）；
+  //   新一轮确认拿不到旧授权（[组B·S2 订正] 原断言"submit direct_release 仍 409"依赖的前置闸已随
+  //   拆直上分支删除，改断言"新一轮无活跃授权 ⇒ 挂牌闸不触发"，同样堵住 MED-2 要修的"穿透进下一轮"
+  //   缺口——只是外部可观测的证据从"409 拒绝"换成"零挂牌"，被保护的不变量本身不变：旧授权确实没有
+  //   穿透进新一轮，新一轮的 submit 不会把它当活跃授权消费/挂牌）；
   //   ②SQL 造态构造"已拒绝残留活跃授权"违例行，断言应真的拦下（[[feedback_probe_test_bidirectional_proof]]）。
   {
     // [9a] 正例：授权 → issue-reject 终结 → reactivate（干净态，不应被新断言误拒）→ 重新走完受理/
-    //   指派/估时 → submit direct_release=true 仍应 409（旧授权未穿透进重新开的下一轮）。
+    //   指派/估时 → submit（不再授权）应正常进入待验证，且零挂牌（旧授权未穿透进重新开的下一轮）。
     const idFromReject = await bugAtDaichuli();
     await authorize(idFromReject, '[9a] reactivate 正例：前置授权');
     const rejectR = await call('POST', `/api/sys-issues/${idFromReject}/issue-reject`, adminTok, { reason: '[9a] 前置拒绝：终结授权' });
@@ -547,9 +649,11 @@ async function main() {
     assert.strictEqual(assignR.status, 200, `[9a-assign] 应 200，实得 ${assignR.status} ${JSON.stringify(assignR.body)}`);
     await estimateFuture(idFromReject);
     const dirR = await submitCommits(idFromReject, { directRelease: true });
-    assert.strictEqual(dirR.status, 409, `[9a] 新一轮勾选直上应 409（旧授权未穿透），实得 ${dirR.status} ${JSON.stringify(dirR.body)}`);
-    assert.strictEqual(dirR.body.code, 'FAST_RELEASE_SUBMIT_DIRECT_DENIED', `[9a] 确切码，实得 ${dirR.body.code}`);
-    ok('[9a] reactivate 正例：干净态复活不被新断言误伤 + 拒绝轮的授权未穿透进重新开的下一轮（submit direct_release 仍 409）');
+    assert.strictEqual(dirR.status, 200, `[9a] 新一轮 submit 应正常 200（未重新授权，direct_release 字段已不再消费），实得 ${dirR.status} ${JSON.stringify(dirR.body)}`);
+    assert.strictEqual(dirR.body.main_status, '待验证', `[9a] main_status 应为「待验证」，实得 ${dirR.body.main_status}`);
+    const feRowsAfterReactivate = await all('SELECT id FROM sys_fast_release_executors WHERE issue_id=?', [idFromReject]);
+    assert.strictEqual(feRowsAfterReactivate.length, 0, `[9a] 新一轮无活跃授权，挂牌闸不应触发：sys_fast_release_executors 应恰 0 行，实得 ${feRowsAfterReactivate.length}`);
+    ok('[9a] reactivate 正例：干净态复活不被新断言误伤 + 拒绝轮的授权未穿透进重新开的下一轮（新一轮 submit 正常 200 进入待验证 + 零挂牌，证明旧授权确实没有被当作活跃授权消费）');
 
     // [9b]（★对照组·反证）SQL 造态：已拒绝单人为注入一份"理论上不该出现"的活跃授权（模拟本次收口前的
     //   存量脏数据，或未来新增一条到达「已拒绝」的路径却忘了同步终结），reactivate 应 fail-closed 500
@@ -677,8 +781,8 @@ async function main() {
   server.close();
   console.log(`\n✅ verify-sys-fastrelease-termination 全绿：${passed} 组断言通过`);
   console.log('  覆盖：事件②验收通过(正例+hold对照组) + 事件③验收打回(正例+reassign对照组) + ' +
-    '事件①上线翻牌·C9直翻子路径(正例+未授权对照组) + 事件①上线翻牌·批次发布双保险子路径(SQL造态正例+对照组) + ' +
-    '终结后direct_release拒绝(409精确文案) + 直上消费例外逐列保留 + ' +
+    '事件①上线翻牌·C9直翻子路径(正例+未授权对照组) + 事件①上线翻牌·批次发布双保险子路径(SQL造态正例+对照组+[4c]批级fail-closed负例含定位信息+恢复对照) + ' +
+    '终结后submit零挂牌(语义重定义·不再是409) + 直上消费例外逐列保留(造态构造) + ' +
     '事件④验收拒绝(正例+未授权对照组) + 事件⑤作废(正例+未授权对照组) + ' +
     'reactivate断言(干净态复活+旧授权不穿透新一轮+SQL造态违例500反证) + ' +
     '不变量探针(全库扫描+四态反证判红+清理恢复0+合法态不误判)');

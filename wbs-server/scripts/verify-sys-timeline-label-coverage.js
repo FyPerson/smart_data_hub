@@ -868,7 +868,19 @@ function extractSetLiteralStrings(text, constName) {
 //   前端 SI_TL_NOTE_OWN_LABEL_CODES / isNoteWithOwnLabel 逐字同构（改一处必须同改另一处）。
 //   集合成员：assign_overdue_eta（/reassign 端点 ETA 变更留痕，见 index.js "[MED-2·收口]" 注释）+
 //   [组B] fast_release_authorize / fast_release_revoke（bug 先行上线授权/撤销，方案 v1.3 §3.1）。
-const NOTE_OWN_LABEL_ACTION_CODES = new Set(['assign_overdue_eta', 'fast_release_authorize', 'fast_release_revoke', 'post_release_accept_pass', 'post_release_accept_fail']);
+// [S3·§5] +fast_release_exec_confirm（先行上线执行确认，event_type='note'，同 fast_release_staged 一带
+//   模式）——fast_release_exec_online 刻意**不登记**：该码 event_type='status_change'（同 W-GATE 完成态
+//   镜像范式），走独立于本 Set 的另一条渲染路径，登记进来不生效反而误导。
+// [S4·§4-4a/4b·2026-08-14] +fast_release_roster_added / fast_release_roster_removed（admin 集合调整·
+//   加人/移人，均 event_type='note'，同 fast_release_staged/_exec_confirm 一带模式）。
+// [S5·§4-5/§4-6/§4-7·2026-08-14] +fast_release_roster_cleared（六码族第六码，撤销/五事件终结/批次发布
+//   双保险点共用同一实现 clearFastReleaseRosterOnTermination，event_type='note'，同上模式）。
+// [方案 §13·13.1·2026-08-14] +eta_auto_from_deadline/eta_auto_sla（feature ETA 直取/回退 SLA 独立留痕，
+//   均 event_type='note'，同上模式——与既有码不同之处：本两码刻意登记专属标签，服务§13.1"对接人知情"
+//   诉求，见 index.js 该两处 INSERT 前的注释）。
+// [方案 §14·S11·2026-08-14] +completion_overrun_reason（feature 超期完成理由闸独立留痕行，均
+//   event_type='note'，两处写点：case 'liaison_test_pass' + runWGate feature⑤⑥降级路径，同上模式）。
+const NOTE_OWN_LABEL_ACTION_CODES = new Set(['assign_overdue_eta', 'fast_release_authorize', 'fast_release_revoke', 'fast_release_staged', 'fast_release_exec_confirm', 'fast_release_roster_added', 'fast_release_roster_removed', 'fast_release_roster_cleared', 'post_release_accept_pass', 'post_release_accept_fail', 'eta_auto_from_deadline', 'eta_auto_sla', 'completion_overrun_reason']);
 function computeDisplayKey(eventType, actionCode, releaseScopeKeySet) {
   const hasActionCode = actionCode !== null && actionCode !== undefined && actionCode !== '';
   if (eventType === 'status_change' || eventType === 'release') return hasActionCode ? actionCode : eventType;
@@ -958,7 +970,67 @@ ok(`SI_TL_RELEASE_SCOPE_LABEL 解析到 ${releaseScopeKeys.size} 个 key（\u226
 //   完整可读文案），不为一条新徽章改动 public/Sys_Iteration.html（本批不碰前端静态资产），故不影响
 //   SI_TL_LABEL/SI_TL_NOTE_OWN_LABEL_CODES 两张前端表，主覆盖断言按 computeDisplayKey 规则自然落回
 //   'note' 这个已在表内的既有 key，不落入 KNOWN_GAPS。
-const EXPECTED_INSERT_SITE_COUNT = 37;
+// [组B·S2·先行上线两步化 S2-1 挂牌+S2-2 拆直上分支·2026-08-14] 37 → 37（净零变化，成分置换非"没动"）：
+//   ① **减 1**：原 [组B·SB2·2026-08-13] 记的那条 submit direct_release=true 分支直写 INSERT
+//   （event_type='status_change'，action_code='fast_release_direct_online'）已随两步化方案 §4-2
+//   「整体替代」拍板整体拆除（S2-2）——该单步直上路径不复存在，SI_TL_LABEL 对应词条同批删除。
+//   ② **加 1**：submit 端点新增挂牌逻辑（S2-1，方案 §4-1）——花名册全完成、主状态真正翻到「待验证」
+//   且该单存在活跃先行上线授权时，同事务写一条 event_type='note'、action_code='fast_release_staged'
+//   的直写 INSERT（同 fast-release-authorize/-revoke 既有"自定义端点/引擎内按需追加直写 timeline"
+//   范式，非引擎写点），已登记进 NOTE_OWN_LABEL_ACTION_CODES（独立徽章）+ Sys_Iteration.html 的
+//   SI_TL_LABEL/SI_TL_NOTE_OWN_LABEL_CODES，主覆盖断言自然通过，不落入 KNOWN_GAPS。两处改动经本守卫
+//   实际解析确认：站点总数仍为 37（本行更新前已实跑验证，非手数推断）。
+// [S3·先行上线两步化确认端点+共享翻牌内核·2026-08-14] 37 → 39：新增 2 条直写 INSERT——
+//   ① 确认端点（POST /sys-issues/:id/fast-release-exec-confirm）非末位路径写一条 event_type='note'、
+//   action_code='fast_release_exec_confirm' 的独立徽章行（同 fast-release-authorize/-revoke/
+//   fast_release_staged 既有"自定义端点直写 timeline"范式，非引擎写点），已登记进
+//   NOTE_OWN_LABEL_ACTION_CODES + Sys_Iteration.html 的 SI_TL_LABEL/SI_TL_NOTE_OWN_LABEL_CODES；
+//   ② 共享翻牌内核（attemptFastReleaseFlipInTxn）末位路径写一条 event_type='status_change'、
+//   action_code='fast_release_exec_online' 的镜像行（同 W-GATE 完成态镜像范式），按 computeDisplayKey
+//   规则（status_change 有 action_code 时取 action_code 本身）不落入 note 型 carve-out（无需登记进
+//   NOTE_OWN_LABEL_ACTION_CODES，同 S2 已删的 fast_release_direct_online 旧码同款处置），已登记进
+//   SI_TL_LABEL 独立词条'先行上线翻牌上线'。两处改动经本守卫实际解析确认：站点总数 37→39（本行更新前
+//   已实跑验证，非手数推断）。
+// [S4·§4-4a/4b 执行人集合调整（admin 加人/移人）·2026-08-14] 39 → 41：新增 2 条直写 INSERT——
+//   ① 加人端点（POST /sys-issues/:id/fast-release-executors）成功后写一条 event_type='note'、
+//   action_code='fast_release_roster_added' 的独立徽章行（同 fast-release-authorize/-revoke/
+//   fast_release_staged/_exec_confirm 既有"自定义端点直写 timeline"范式，非引擎写点）；
+//   ② 移人端点（DELETE /sys-issues/:id/fast-release-executors/:userId）成功后写一条 event_type='note'、
+//   action_code='fast_release_roster_removed' 的独立徽章行（同上范式；若移人触发共享翻牌内核
+//   attemptFastReleaseFlipInTxn 翻牌，该内核自身的 fast_release_exec_online 镜像行 INSERT 是既有站点
+//   ②(37→39 那批)，非本批新增）。两码均已登记进 NOTE_OWN_LABEL_ACTION_CODES + Sys_Iteration.html 的
+//   SI_TL_LABEL/SI_TL_CLS/SI_TL_NOTE_OWN_LABEL_CODES。本次改动经本守卫实际解析确认：站点总数 39→41
+//   （本行更新前已实跑验证，非手数推断）。
+// [S5·§4-5/§4-6/§4-7 撤销收紧+验收/打回闸+五事件终结延伸·2026-08-14] 41 → 42：新增 1 条直写
+//   INSERT——共享清集合内核 clearFastReleaseRosterOnTermination（唯一实现）内一条 event_type='note'、
+//   action_code='fast_release_roster_cleared' 的独立徽章行。⚠️ 本次调用点有五处（撤销端点
+//   fast-release-revoke / 引擎共享后处理点覆盖 case 'accept'|'return'|'issue_reject'|'void' 四 case /
+//   批次发布双保险点 _publishReleaseCoreInTxn），但**源码文本层面只有一条 INSERT 语句**（helper 函数
+//   体内），本静态扫描按"源码文本站点数"计数（同 attemptFastReleaseFlipInTxn 的 fast_release_exec_online
+//   INSERT 被确认/移人两端点共用、仍计 1 处站点的既有先例），故只 +1 非 +5。已登记进
+//   NOTE_OWN_LABEL_ACTION_CODES + Sys_Iteration.html 的 SI_TL_LABEL/SI_TL_CLS/SI_TL_NOTE_OWN_LABEL_CODES。
+//   本次改动经本守卫实际解析确认：站点总数 41→42（本行更新前已实跑验证，非手数推断）。
+// [方案 §13·13.1 feature ETA 直取·2026-08-14] 42 → 44：新增 2 条直写 INSERT——case 'intake_accept'
+//   引擎写点之外，独立补两条留痕行：event_type='note'、action_code='eta_auto_from_deadline'（feature 且
+//   deadline 有效时直取分支）与 action_code='eta_auto_sla'（feature 回退 SLA 且系统自动生成子分支）。
+//   两码互斥（同一次至多一条），故各自独立一条 INSERT 语句（非共享同一站点），故 +2 非 +1。已登记进
+//   NOTE_OWN_LABEL_ACTION_CODES + Sys_Iteration.html 的 SI_TL_LABEL/SI_TL_CLS/SI_TL_NOTE_OWN_LABEL_CODES。
+//   本次改动经本守卫实际解析确认：站点总数 42→44（本行更新前已实跑验证，非手数推断）。
+// [方案 §14·S11 feature 超期完成理由闸·2026-08-13] 44 → 46：新增 2 条直写 INSERT——两处写点各自独立补
+//   一条留痕行：event_type='note'、action_code='completion_overrun_reason'（case 'liaison_test_pass'
+//   正常路径 + runWGate feature⑤⑥降级路径，两处结构上不会同一次都命中，但源码文本层面各自一条
+//   INSERT 语句，故 +2 非 +1，同 §13 两码先例）。已登记进 NOTE_OWN_LABEL_ACTION_CODES +
+//   Sys_Iteration.html 的 SI_TL_LABEL/SI_TL_CLS/SI_TL_NOTE_OWN_LABEL_CODES。本次改动经本守卫实际解析
+//   确认：站点总数 44→46（本行更新前已实跑验证，非手数推断）。
+// 【2026-08-14 S11 预筛订正·闸边迁移】46 → 45：case 'liaison_test_pass' 的 completion_overrun_reason
+//   INSERT 已随闸边迁移整体删除（该动作"撤闸"，见 index.js 该处订正注释）——action_code 本身不退场
+//   （runWGate 侧那一条留痕行原样保留，且判定覆盖面从"仅⑤⑥"扩到"⑤⑥⑦"三条开发侧边），只是从两个
+//   源码站点各写一条收拢为一个站点独写一条，物理 INSERT 语句数量 -1。SI_TL_LABEL 等前端登记表不变
+//   （action_code 集合未变，只是产出源收拢）。
+// 【2026-08-14 codex 395 预筛 NEW-1】45 → 46：runWGate 新增分支③（非 submit 触发+理由缺失 → defer 挂起）
+//   补一条独立 INSERT——action_code 仍是既有 'completion_overrun_reason'（不新增码），但这是**新的物理
+//   INSERT 语句**（不同源码位置，与分支①的既有 INSERT 各自独立），故 +1。
+const EXPECTED_INSERT_SITE_COUNT = 46;
 const sites = locateRealInsertSites(indexSrc);
 if (sites.length !== EXPECTED_INSERT_SITE_COUNT) {
   fail(

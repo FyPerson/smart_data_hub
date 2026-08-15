@@ -16,9 +16,11 @@
 //       同样清空（此前已超容差写过理由的单，改填一个容差内的新 ETA 应清空理由，不遗留旧理由挂在新值上）。
 //   [E] 首诺快照（dev_estimated_first_at）跨轮锁死——五个写点任一次首写生效，同一单再次写不同 ETA 不变；
 //       return/reopen 打回不清（新一轮再次写入仍不变）。
-//   [F] release 快照（dev_estimated_at_on_release）三写点全覆盖：C9 免上线直翻 accept / 快车道直上 submit /
-//       批次发布 —— released_at 落库同事务快照 = 当时 dev_estimated_at；reopen 后该列历史值不被清空
-//       （可回溯），主表 dev_estimated_at 则被清空（两者语义分裂，唯一价值正在于此）。
+//   [F] release 快照（dev_estimated_at_on_release）写点覆盖：C9 免上线直翻 accept / 批次发布——released_at
+//       落库同事务快照 = 当时 dev_estimated_at；reopen 后该列历史值不被清空（可回溯），主表
+//       dev_estimated_at 则被清空（两者语义分裂，唯一价值正在于此）。[组B·S2 订正] 原第三写点"快车道
+//       直上 submit"（含 direct_release=true 分支自己的 UPDATE）已随两步化方案 §4-2 拆直上分支整体
+//       删除，本组随之从"三写点"收窄为"二写点"，见 [F] 段内订正说明。
 //   [G] 通知 markdown/发送函数直调（isAutoNotifyEnabled 总闸恒 false，dispatchSysNotify 走不到发送，
 //       故直调 buildSysEtaOverrunReasonMarkdown / sendSysEtaOverrunReasonNotify 验证内容与落库，与既有
 //       verify-sys-notify 对其余 marker 的验证手法同源）。
@@ -730,7 +732,7 @@ async function main() {
     //   与 release 快照测试合并覆盖，reopen 同样触发理由清空，一并断言）。
   }
 
-  // ══════════════════════════ [F] release 快照三写点全覆盖 ══════════════════════════
+  // ══════════════════════════ [F] release 快照写点覆盖（原三写点，S2 拆直上后收窄为二） ══════════════════════════
   {
     // [F1] C9 免上线直翻 accept：bug 单，0 commit，submit(no_code) → accept 直翻已上线。
     let id = await bugToProcessing();
@@ -765,24 +767,37 @@ async function main() {
     assert.strictEqual(row.eta_overrun_reason_code, null, '[F1-reopen] 理由列同样清空（reopen 既有 sideEffect，本单原本就是 bug 不参与容差，恒 NULL 本无悬念，仅作完整性核对）');
     ok('[F1-reopen] reopen 后主表 dev_estimated_at 清空但 release 快照（dev_estimated_at_on_release）保留历史值，可回溯');
 
-    // [F2] 快车道直上 submit（direct_release=true）。
+    // [S3·重建] [F2] release 快照写点②：先行上线确认翻牌（共享翻牌内核 attemptFastReleaseFlipInTxn）。
+    //   S2 拆直上分支时本组曾整组删除（原写点=submit direct_release=true 分支自己的 UPDATE，随分支拆除
+    //   物理消失）并预告"S3+ 落地全员确认翻牌执行端点时应补一个新用例"——现落地：新写点是共享翻牌内核
+    //   的翻牌 UPDATE（方案 §4-3c 模板，见 index.js attemptFastReleaseFlipInTxn 定义处），由末位 confirm
+    //   触发。起点改 SQL 造态（本文件无 fastlane 授权/挂牌基础设施，不为一组用例现搭一整套真实链路——
+    //   同 verify-sys-post-release-accept.js bugAtFastlanePending() 既有造态先例）：直接构造"待验证 +
+    //   活跃授权 + 唯一执行人 pending"终态，再走**真实** confirm 端点触发翻牌（写点本身必须真实执行，
+    //   造态只省略"如何走到这个前置态"的过程，不省略"写点这一刻做了什么"）。
     id = await bugToProcessing();
     r = await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: etaAt(0) });
     assert.strictEqual(r.status, 200, '[F2-前置] estimate 应 200');
     row = await issueRow(id);
     const etaBeforeF2 = row.dev_estimated_at;
-    r = await call('POST', `/api/sys-issues/${id}/fast-release-authorize`, adminTok, { note: 'F2 授权' });
-    assert.strictEqual(r.status, 200, `[F2-前置] 授权应 200，实得 ${r.status} ${JSON.stringify(r.body)}`);
-    r = await call('POST', `/api/sys-issues/${id}/submit`, devTok, {
-      mode: 'no_code', no_code_reason: 'F2 无提交交付', self_tested: true, test_env_deployed: true,
-      bug_cause_note: 'F2 bug 产生原因', direct_release: true,
-    });
-    assert.strictEqual(r.status, 200, `[F2] direct_release submit 应 200，实得 ${r.status} ${JSON.stringify(r.body)}`);
+    assert.ok(etaBeforeF2, '[F2-前置] ETA 已写');
+    assert.strictEqual(row.dev_estimated_at_on_release, null, '[F2-前置] release 快照初始应为 NULL（尚未上线）');
+    // 造态：开发花名册全完成（唯一成员 user5 code_submitted）+ 主状态推进待验证 + 活跃授权六列 + 挂牌
+    // 执行人（唯一，pending，user5 本人——复用同一账号既是开发又是值班执行人，简化夹具，业务上两个
+    // 身份互不冲突）。
+    await run(`UPDATE sys_issue_dev_assignees SET dev_status='code_submitted', resolved_at=datetime('now','localtime') WHERE issue_id=? AND user_id=5`, [id]);
+    await run(`UPDATE sys_issues SET status='待验证', fast_release_auth_at=datetime('now','localtime'),
+                 fast_release_auth_by=1, fast_release_auth_by_name='管理员', fast_release_auth_note='F2 造态'
+               WHERE id=?`, [id]);
+    await run(`INSERT INTO sys_fast_release_executors (issue_id, user_id, user_name, added_by, added_by_name) VALUES (?, 5, '开发王', 1, '管理员')`, [id]);
+    r = await call('POST', `/api/sys-issues/${id}/fast-release-exec-confirm`, devTok, {});
+    assert.strictEqual(r.status, 200, `[F2] confirm 应 200，实得 ${r.status} ${JSON.stringify(r.body)}`);
+    assert.strictEqual(r.body.flipped, true, `[F2] 唯一执行人确认应触发末位翻牌，实得 flipped=${r.body.flipped}`);
     row = await issueRow(id);
-    assert.strictEqual(row.status, '已上线', '[F2] 快车道直上后已上线');
+    assert.strictEqual(row.status, '已上线', '[F2] 翻牌后主状态应为「已上线」');
     assert.ok(row.released_at, '[F2] released_at 已写');
-    assert.strictEqual(row.dev_estimated_at_on_release, etaBeforeF2, '[F2] ⭐ release 快照写点②（快车道直上）：dev_estimated_at_on_release = 上线那一刻的 dev_estimated_at');
-    ok('[F2] release 快照写点②：组 B 快车道直上 submit 同事务落 dev_estimated_at_on_release');
+    assert.strictEqual(row.dev_estimated_at_on_release, etaBeforeF2, '[F2] ⭐ release 快照写点②（S3 共享翻牌内核·confirm 末位路径）：dev_estimated_at_on_release = 翻牌那一刻的 dev_estimated_at');
+    ok('[F2] release 快照写点②：S3 先行上线确认翻牌（共享翻牌内核 attemptFastReleaseFlipInTxn）同事务落 dev_estimated_at_on_release（S2 拆直上删除的旧写点②，本组补回新实现）');
 
     // [F3] 批次发布：bug 单走"有 commit"分支，accept 落「待上线」而非 C9 直翻，再挂批次执行发布。
     id = await bugToProcessing();

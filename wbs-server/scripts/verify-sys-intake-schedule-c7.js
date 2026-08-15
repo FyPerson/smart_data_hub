@@ -121,6 +121,31 @@ function main() {
     ok('[F] C7 前端函数 7 个 + 受理排期端点路径 8 条 + 技术负责人通知行两分支渲染 齐备');
   }
 
+  // ═══ [S8-S10 合并收口批 F1·HIGH] source/related_correction_no 编辑控件齐备 ═══
+  //   方案 §12：两字段已纳入 EDIT_TIER_A_FIELDS（后端可编辑集）+ edit-in-revision 校验分支，但前端
+  //   siModalEditInRevision 当时漏配控件——能力有但用户够不到（同类缺口的静态可检测形态）。scoped 到
+  //   函数体内（下一个函数 siModalChangeIntakeMode 起始处截断），防误命中建单弹窗里同名的
+  //   fSelect('source',...)/fText('related_correction_no',...) 调用（那是另一个函数体）。
+  //   ⚠️ 剥注释后再匹配——首版忘剥，被本文件自己新增的解释性注释（提到建单弹窗同款写法的行号引用）
+  //   误判为真实调用，红灯自证时才发现（guard_static_analysis_gotchas 同款教训：注释文本里出现的
+  //   代码片段会污染朴素正则匹配）。
+  {
+    const start = html.indexOf('function siModalEditInRevision(iss) {');
+    assert.ok(start > 0, 'siModalEditInRevision 函数存在');
+    const end = html.indexOf('function siModalChangeIntakeMode(iss) {', start);
+    assert.ok(end > start, '找到 siModalEditInRevision 函数体结束边界（下一个函数 siModalChangeIntakeMode 起点）');
+    const rawBody = html.slice(start, end);
+    const body = rawBody.split('\n').map(line => {
+      const idx = line.indexOf('//');
+      return idx === -1 ? line : line.slice(0, idx);
+    }).join('\n');
+    assert.ok(/fSelect\(\s*'source'/.test(body), 'siModalEditInRevision 函数体内含 source 的 fSelect 控件（F1 补齐）');
+    assert.ok(/fText\(\s*'related_correction_no'/.test(body), 'siModalEditInRevision 函数体内含 related_correction_no 的 fText 控件（F1 补齐）');
+    assert.ok(/source:\s*v\.source/.test(body), 'siModalEditInRevision 提交体含 source: v.source');
+    assert.ok(/related_correction_no:\s*v\.related_correction_no/.test(body), 'siModalEditInRevision 提交体含 related_correction_no: v.related_correction_no');
+    ok('[F1] 编辑弹窗 source/related_correction_no 控件+提交体键齐备（方案 §12 两档可编辑集前端入口补齐）');
+  }
+
   console.log(`\n✅ verify-sys-intake-schedule-c7 全部通过（${passed} 组）`);
   db.close();
 }

@@ -453,19 +453,24 @@ async function main() {
     //   新增的 fast_release_* 六列（按 alterAddMissingCols [1a-14] 声明顺序）+ [组B·SB2·2026-08-13]
     //   随后新增的 post_release_acceptance/post_accepted_at/post_derive_issue_id 三列（[1a-15]）+
     //   [组C·SC1·2026-08-13] 随后新增的 eta_overrun_reason_code/_note/dev_estimated_first_at/
-    //   dev_estimated_at_on_release 四列（[1a-16]），不多不少不错序——用显式列表 deepStrictEqual 而非
-    //   "只要排在它之前"这种宽松判断，保留原断言（"online_source 必须是表尾往下的固定序列起点"）的精确
-    //   追责能力：若将来再有新列插进这十三列之间、或表尾又新增了别的列组，这里会先于下方
-    //   [9h-fastrelease]/[9h-fastrelease-acceptance]/[9h-eta-overrun-snapshot] 三组报错，逼着显式更新
-    //   这份列表（同时提醒同步该组的表尾断言）。
+    //   dev_estimated_at_on_release 四列（[1a-16]）+ [§14·S11·2026-08-14] 随后新增的
+    //   completion_overrun_reason_code/_note 两列（[1a-17]）+ [§15·S12-a·2026-08-14] 随后新增的
+    //   derive_root_id/derive_seq/derive_seq_alloc 三列（[1a-18]），不多不少不错序——用显式列表
+    //   deepStrictEqual 而非"只要排在它之前"这种宽松判断，保留原断言（"online_source 必须是表尾往下的
+    //   固定序列起点"）的精确追责能力：若将来再有新列插进这十八列之间、或表尾又新增了别的列组，这里会
+    //   先于下方 [9h-fastrelease]/[9h-fastrelease-acceptance]/[9h-eta-overrun-snapshot]/
+    //   [9h-completion-overrun]/[9h-derive-numbering] 五组报错，逼着显式更新这份列表（同时提醒同步该组
+    //   的表尾断言）。
     const allColsForOrder = await all('PRAGMA table_info(sys_issues)');
     const colsAfterOnlineSource = allColsForOrder.slice(c9ColInfo.cid + 1).map(c => c.name);
     assert.deepStrictEqual(colsAfterOnlineSource,
       ['fast_release_auth_by', 'fast_release_auth_by_name', 'fast_release_auth_at', 'fast_release_auth_note',
         'fast_release_revoked_at', 'fast_release_consumed_at',
         'post_release_acceptance', 'post_accepted_at', 'post_derive_issue_id',
-        'eta_overrun_reason_code', 'eta_overrun_reason_note', 'dev_estimated_first_at', 'dev_estimated_at_on_release'],
-      `[M2③] online_source 之后应恰好是 fast_release_* 六列 + post_release_acceptance/post_accepted_at/post_derive_issue_id 三列 + eta_overrun_reason_code/_note/dev_estimated_first_at/dev_estimated_at_on_release 四列（顺序不漂移），实得 ${JSON.stringify(colsAfterOnlineSource)}`);
+        'eta_overrun_reason_code', 'eta_overrun_reason_note', 'dev_estimated_first_at', 'dev_estimated_at_on_release',
+        'completion_overrun_reason_code', 'completion_overrun_reason_note',
+        'derive_root_id', 'derive_seq', 'derive_seq_alloc'],
+      `[M2③] online_source 之后应恰好是 fast_release_* 六列 + post_release_acceptance/post_accepted_at/post_derive_issue_id 三列 + eta_overrun_reason_code/_note/dev_estimated_first_at/dev_estimated_at_on_release 四列 + completion_overrun_reason_code/_note 两列 + derive_root_id/derive_seq/derive_seq_alloc 三列（顺序不漂移），实得 ${JSON.stringify(colsAfterOnlineSource)}`);
     // 默认值行为：裸插入 → NULL
     await run(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name) VALUES ('feature', '开发中', 't-online-source-default', 'BMS', 1, 'admin')`);
     const osDefault = await get(`SELECT online_source FROM sys_issues WHERE title='t-online-source-default'`);
@@ -536,8 +541,10 @@ async function main() {
   // [9h-fastrelease-acceptance] ⭐ 组B（bug 先行上线直上·SB2·方案 v1.3 §3.2/§3.3）：
   //   sys_issues.post_release_acceptance/post_accepted_at/post_derive_issue_id 三列——存在性 + 元数据 +
   //   表尾位置 + "无 CHECK 是有意为之"的双向证明。同 [9h-c9]/[9h-fastrelease] 一带理由：本组新列只有
-  //   verify-sys-fastlane-submit 从**业务行为**侧覆盖（submit direct_release=true 后列里有值），schema 侧
-  //   独立断言防"列被误删/误改类型/被人顺手补个 CHECK"这类业务套件测不出根因的漂移。
+  //   verify-sys-fastlane-submit 从**业务行为**侧覆盖（[组B·S2] submit direct_release=true 分支已随
+  //   两步化拆除，该文件现改用 SQL 造态直接构造三列有值的状态，仍是业务行为侧覆盖，只是起点从真实
+  //   直上链路换成造态——见该文件 S2 语义翻转声明），schema 侧独立断言防"列被误删/误改类型/被人顺手
+  //   补个 CHECK"这类业务套件测不出根因的漂移。
   {
     const paCols = await all('PRAGMA table_info(sys_issues)');
     const acceptanceInfo = paCols.find(c => c.name === 'post_release_acceptance');
@@ -599,13 +606,13 @@ async function main() {
     assert.strictEqual(reasonNoteInfo.type, 'TEXT', `eta_overrun_reason_note 声明类型应为 TEXT，实际 ${reasonNoteInfo.type}`);
     assert.strictEqual(firstAtInfo.type, 'DATETIME', `dev_estimated_first_at 声明类型应为 DATETIME，实际 ${firstAtInfo.type}`);
     assert.strictEqual(onReleaseInfo.type, 'DATETIME', `dev_estimated_at_on_release 声明类型应为 DATETIME，实际 ${onReleaseInfo.type}`);
-    // 列序：四列须按 alterAddMissingCols [1a-16] 内声明顺序连续排在表尾，且 dev_estimated_at_on_release
-    //   就是当前真正的表尾（呼应上方 [M2③] 断言"改动后表尾在这里"）。
+    // 列序：四列须按 alterAddMissingCols [1a-16] 内声明顺序连续排在表尾（区段内部相对顺序不漂移）。
+    //   ⚠️ [§14·S11] dev_estimated_at_on_release 不再是全表表尾——[1a-17] 随后新增了
+    //   completion_overrun_reason_code/_note 两列，"当前真正表尾"的断言职责已下移到新增的
+    //   [9h-completion-overrun] 组（见下方），本组只钉"这四列彼此声明顺序不漂移"这一条，不再声称
+    //   自己是全局表尾（原表尾钉死的措辞随列表增长天然过期，这里如实改写而非放任断言与事实脱节）。
     assert.ok(reasonCodeInfo.cid < reasonNoteInfo.cid && reasonNoteInfo.cid < firstAtInfo.cid && firstAtInfo.cid < onReleaseInfo.cid,
       `组C 四列 cid 应严格递增（声明顺序不漂移），实得 code=${reasonCodeInfo.cid}/note=${reasonNoteInfo.cid}/first_at=${firstAtInfo.cid}/on_release=${onReleaseInfo.cid}`);
-    const lastColEta = etaCols[etaCols.length - 1];
-    assert.strictEqual(lastColEta.name, 'dev_estimated_at_on_release',
-      `[表尾钉死] dev_estimated_at_on_release 应是 sys_issues 当前最后一列（新增列一律排表尾），实际末列=${lastColEta.name}——将来再加新列时本断言会红，提醒把这一行的期望更新为新的末列`);
     // 默认值行为：裸插入 → 四列全 NULL
     await run(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name) VALUES ('improvement', '待受理', 't-eta-overrun-default', 'BMS', 1, 'admin')`);
     const etaDefault = await get(`SELECT eta_overrun_reason_code, eta_overrun_reason_note, dev_estimated_first_at, dev_estimated_at_on_release FROM sys_issues WHERE title='t-eta-overrun-default'`);
@@ -623,7 +630,108 @@ async function main() {
       run(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name, eta_overrun_reason_code) VALUES ('improvement', '开发中', 't-eta-open', 'BMS', 1, 'admin', 'whatever_not_in_domain')`),
       '⭐ eta_overrun_reason_code 写入值域外的任意字符串**也应成功**——本列刻意无 CHECK，值域校验是服务层职责');
   }
-  ok('⭐ 组C（期望对表与准时统计·SC1·方案 v1.3）sys_issues.eta_overrun_reason_code/_note/dev_estimated_first_at/dev_estimated_at_on_release 四列：类型/可空/无 DEFAULT 元数据钉死 + 声明序连续 + dev_estimated_at_on_release 为当前表尾 + 裸插入默认全 NULL + 无 CHECK 双向证明（值域校验交由服务层，DB 层刻意开放）');
+  ok('⭐ 组C（期望对表与准时统计·SC1·方案 v1.3）sys_issues.eta_overrun_reason_code/_note/dev_estimated_first_at/dev_estimated_at_on_release 四列：类型/可空/无 DEFAULT 元数据钉死 + 声明序连续 + 裸插入默认全 NULL + 无 CHECK 双向证明（值域校验交由服务层，DB 层刻意开放）');
+
+  // [9h-completion-overrun] ⭐ 方案 §14（S11·feature 超期完成理由闸）：
+  //   sys_issues.completion_overrun_reason_code/_note 两列——存在性 + 元数据 + 表尾位置 + "无 CHECK 是
+  //   有意为之"的双向证明。同上一组理由：本组新列只有 verify-sys-completion-overrun 从**业务行为**侧
+  //   覆盖，schema 侧独立断言防"列被误删/误改类型/被人顺手补个 CHECK"这类业务套件测不出根因的漂移。
+  {
+    const coCols = await all('PRAGMA table_info(sys_issues)');
+    const coCodeInfo = coCols.find(c => c.name === 'completion_overrun_reason_code');
+    const coNoteInfo = coCols.find(c => c.name === 'completion_overrun_reason_note');
+    for (const [name, info] of [['completion_overrun_reason_code', coCodeInfo], ['completion_overrun_reason_note', coNoteInfo]]) {
+      assert.ok(info, `§14 新列 ${name} 应存在于新库 CREATE 路径（缺失=alterAddMissingCols [1a-17] 定义被误删）`);
+      assert.strictEqual(info.type, 'TEXT', `${name} 声明类型应为 TEXT，实际 ${info.type}`);
+      assert.strictEqual(info.notnull, 0, `${name} 应可空（未超期/不适用时的合法 NULL 态），实际 notnull=${info.notnull}`);
+      assert.strictEqual(info.dflt_value, null, `${name} 不应有 DEFAULT，实际 dflt_value=${info.dflt_value}`);
+    }
+    // 列序：两列须紧邻声明（code 在 note 之前）。
+    //   ⚠️ [§15·S12-a] completion_overrun_reason_note **不再是**全表表尾——[1a-18] 随后新增了
+    //   derive_root_id/derive_seq/derive_seq_alloc 三列，"当前真正表尾"的断言职责已下移到新增的
+    //   [9h-derive-numbering] 组（见下方），本组只钉"这两列彼此声明顺序不漂移"这一条，不再声称自己是
+    //   全局表尾（同上方 [9h-eta-overrun-snapshot] 组 :606-610 的先例：表尾断言随列表增长天然过期，
+    //   这里如实改写而非放任断言与事实脱节）。
+    assert.ok(coCodeInfo.cid < coNoteInfo.cid, `completion_overrun_reason_code/_note 声明顺序应 code 在前，实得 code=${coCodeInfo.cid}/note=${coNoteInfo.cid}`);
+    // 默认值行为：裸插入 → 两列全 NULL。
+    await run(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name) VALUES ('feature', '待受理', 't-completion-overrun-default', 'BMS', 1, 'admin')`);
+    const coDefault = await get(`SELECT completion_overrun_reason_code, completion_overrun_reason_note FROM sys_issues WHERE title='t-completion-overrun-default'`);
+    assert.strictEqual(coDefault.completion_overrun_reason_code, null, '裸插入后 completion_overrun_reason_code 默认应 NULL');
+    assert.strictEqual(coDefault.completion_overrun_reason_note, null, '裸插入后 completion_overrun_reason_note 默认应 NULL');
+    // ⭐ 无 CHECK 的双向证明（同 eta_overrun_reason_* 组理由）：正向=值域内正常值能写；反向=不在值域内
+    //   的任意字符串也能写——值域校验（ETA_OVERRUN_REASON_CODES 五值枚举复用）交由服务层
+    //   resolveCompletionOverrunReasonForWrite，DB 层刻意开放（同一登记接受口径）。若将来有人给这两列
+    //   补上 CHECK，本条会立刻红，须回去重走 index.js [1a-17] 那段"登记接受"决策。
+    await assert.doesNotReject(
+      run(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name, completion_overrun_reason_code, completion_overrun_reason_note) VALUES ('feature', '开发中', 't-co-legit', 'BMS', 1, 'admin', '需求变更', '正常理由')`),
+      'completion_overrun_reason_code/_note 写入合法值域内的值应成功');
+    await assert.doesNotReject(
+      run(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name, completion_overrun_reason_code) VALUES ('feature', '开发中', 't-co-open', 'BMS', 1, 'admin', 'whatever_not_in_domain')`),
+      '⭐ completion_overrun_reason_code 写入值域外的任意字符串**也应成功**——本列刻意无 CHECK，值域校验是服务层职责');
+  }
+  ok('⭐ 方案 §14（S11）sys_issues.completion_overrun_reason_code/_note 两列：类型/可空/无 DEFAULT 元数据钉死 + 声明序（表尾断言职责已下移至 [9h-derive-numbering]）+ 裸插入默认全 NULL + 无 CHECK 双向证明（值域校验交由服务层，DB 层刻意开放）');
+
+  // [9h-derive-numbering] ⭐ 方案 §15（S12-a·派生单子编号「#根_序」）：
+  //   sys_issues.derive_root_id/derive_seq/derive_seq_alloc 三列——存在性 + 元数据 + 表尾位置 +
+  //   部分唯一索引存在 + 索引真实生效双向证明。同上一组理由：本组新列有 verify-sys-derive-numbering
+  //   从**业务行为**侧覆盖，schema 侧独立断言防"列被误删/误改类型/索引被误删"这类业务套件测不出根因
+  //   的漂移。
+  //   ⚠️ 与 eta_overrun_*/completion_overrun_* 两组"无 CHECK=值域开放，服务层校验"的理由不同：本组三列
+  //   没有单列级值域约束这回事（都是整数 id/序号，值域即"任意整数"，无枚举可言）——真正的不变量是
+  //   **跨行**的（(derive_root_id,derive_seq) 组合唯一、序号非负），这类不变量单列 CHECK 表达不了，
+  //   落在部分唯一索引 + 应用层 classifySysDeriveNumbering（utils/sys-derive-numbering.js）两层，
+  //   故本组断言重点是"索引真的建了、真的生效"而非"CHECK 双向开放"。
+  {
+    const dnCols = await all('PRAGMA table_info(sys_issues)');
+    const rootInfo = dnCols.find(c => c.name === 'derive_root_id');
+    const seqInfo = dnCols.find(c => c.name === 'derive_seq');
+    const allocInfo = dnCols.find(c => c.name === 'derive_seq_alloc');
+    for (const [name, info] of [['derive_root_id', rootInfo], ['derive_seq', seqInfo], ['derive_seq_alloc', allocInfo]]) {
+      assert.ok(info, `§15 新列 ${name} 应存在于新库 CREATE 路径（缺失=alterAddMissingCols [1a-18] 定义被误删）`);
+      assert.strictEqual(info.type, 'INTEGER', `${name} 声明类型应为 INTEGER，实际 ${info.type}`);
+      assert.strictEqual(info.notnull, 0, `${name} 应可空（非派生单/根单自身/未回填时的合法 NULL 态），实际 notnull=${info.notnull}`);
+      assert.strictEqual(info.dflt_value, null, `${name} 不应有 DEFAULT，实际 dflt_value=${info.dflt_value}`);
+    }
+    assert.ok(rootInfo.cid < seqInfo.cid && seqInfo.cid < allocInfo.cid,
+      `derive_root_id/derive_seq/derive_seq_alloc 声明顺序应依次递增，实得 root=${rootInfo.cid}/seq=${seqInfo.cid}/alloc=${allocInfo.cid}`);
+    const lastColDn = dnCols[dnCols.length - 1];
+    assert.strictEqual(lastColDn.name, 'derive_seq_alloc',
+      `[表尾钉死] derive_seq_alloc 应是 sys_issues 当前最后一列（新增列一律排表尾），实际末列=${lastColDn.name}——将来再加新列时本断言会红，提醒把这一行的期望更新为新的末列`);
+    // 默认值行为：裸插入 → 三列全 NULL
+    await run(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name) VALUES ('bug', '待受理', 't-derive-num-default', 'BMS', 1, 'admin')`);
+    const dnDefault = await get(`SELECT derive_root_id, derive_seq, derive_seq_alloc FROM sys_issues WHERE title='t-derive-num-default'`);
+    assert.strictEqual(dnDefault.derive_root_id, null, '裸插入后 derive_root_id 默认应 NULL');
+    assert.strictEqual(dnDefault.derive_seq, null, '裸插入后 derive_seq 默认应 NULL');
+    assert.strictEqual(dnDefault.derive_seq_alloc, null, '裸插入后 derive_seq_alloc 默认应 NULL');
+    // 部分唯一索引存在性 + 索引定义精确核对（WHERE 双非空条件）
+    const idxRow = await get(`SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_sys_issues_derive_root_seq'`);
+    assert.ok(idxRow, '部分唯一索引 idx_sys_issues_derive_root_seq 应存在（缺失=迁移链 [1d] 建索引步骤被误删或被熔断跳过）');
+    assert.ok(/UNIQUE/i.test(idxRow.sql), '索引应为 UNIQUE（非普通索引，否则 (root,seq) 重复无法被数据库层拦截）');
+    assert.ok(/derive_root_id\s+IS\s+NOT\s+NULL/i.test(idxRow.sql) && /derive_seq\s+IS\s+NOT\s+NULL/i.test(idxRow.sql),
+      '索引 WHERE 子句应同时限定 derive_root_id/derive_seq 双非空（否则多个非派生单〔两列皆 NULL〕会被误判"重复"而互相拒绝插入）');
+    // 索引真实生效双向证明：① 两个不同 (root,seq) 组合均可正常写入 ② 重复 (root,seq) 组合被拒
+    await run(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name, derive_root_id, derive_seq) VALUES ('bug', '待受理', 't-derive-idx-a', 'BMS', 1, 'admin', 90001, 1)`);
+    await assert.doesNotReject(
+      run(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name, derive_root_id, derive_seq) VALUES ('bug', '待受理', 't-derive-idx-b', 'BMS', 1, 'admin', 90001, 2)`),
+      '不同 (root,seq) 组合应正常写入成功');
+    await assert.rejects(
+      run(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name, derive_root_id, derive_seq) VALUES ('bug', '待受理', 't-derive-idx-dup', 'BMS', 1, 'admin', 90001, 1)`),
+      /UNIQUE constraint failed/,
+      '⭐ 索引真实生效：重复 (derive_root_id=90001, derive_seq=1) 组合应被数据库层拒绝（非仅"索引存在"这种静态断言，这里是真写入触发约束）');
+    // 双 NULL 不受唯一索引约束（多个非派生单可以同时 root/seq 皆 NULL 共存——部分索引 WHERE 子句排除了它们）
+    await run(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name) VALUES ('bug', '待受理', 't-derive-idx-null1', 'BMS', 1, 'admin')`);
+    await assert.doesNotReject(
+      run(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name) VALUES ('bug', '待受理', 't-derive-idx-null2', 'BMS', 1, 'admin')`),
+      '多个 root/seq 皆 NULL 的行应能共存（部分索引 WHERE 子句已排除 NULL，否则会把全部非派生单都误判成唯一冲突）');
+    // [预筛 L4] 清理本组造的行——尤其 t-derive-idx-a/b 携带 root=90001（不对应任何真实存在的根单行，
+    //   是纯人工构造的孤儿编号引用，专为触发部分唯一索引才这么造），若遗留在库里会让"未来若在本文件
+    //   末尾加一段全库语义复检"之类的新断言撞上这批人工孤儿行而误报——同
+    //   verify-sys-derive-numbering.js [C] 小节"清理污染，恢复干净状态"先例。
+    await run(`DELETE FROM sys_issues WHERE title IN ('t-derive-num-default','t-derive-idx-a','t-derive-idx-b','t-derive-idx-null1','t-derive-idx-null2')`);
+    const orphanRemain = await get(`SELECT COUNT(*) c FROM sys_issues WHERE derive_root_id = 90001`);
+    assert.strictEqual(orphanRemain.c, 0, '[9h-derive-numbering] 清理后应零残留 root=90001 的孤儿编号行');
+  }
+  ok('⭐ 方案 §15（S12-a）sys_issues.derive_root_id/derive_seq/derive_seq_alloc 三列：类型/可空/无 DEFAULT 元数据钉死 + 声明序 + 当前表尾 + 裸插入默认全 NULL + 部分唯一索引真实生效双向证明（合法写入成功／重复组合被拒／双 NULL 可共存）');
 
   //   liaison_test_cycle_no / liaison_test_notify_cycle_no CHECK（typeof=integer AND >=0，两列同款）：
   //   负例（负数整数 + 非整数小数——typeof 在此落 real）；正例（0/5）
@@ -1090,7 +1198,11 @@ async function verifyMissingColLib() {
   //   [2] 复查按 checks 数组顺序 sys_issues 排第一，会先于新表命中缺列并 return，新表分支恒不可达；
   //   新表自身缺列场景见下方 verifyMissingDevAssigneesColLib（独立函数，sys_issues 走完整列集）。
   await run2(`CREATE TABLE sys_releases (id INTEGER PRIMARY KEY, release_no TEXT, status TEXT, is_hotfix INTEGER, release_note TEXT, version_tag TEXT)`);
-  await run2(`CREATE TABLE sys_issues (id INTEGER PRIMARY KEY, type TEXT, status TEXT, priority TEXT, system_name TEXT, source TEXT, record_source TEXT, import_batch_id TEXT, origin_issue_id INTEGER, release_id INTEGER, created_by INTEGER, assigned_to INTEGER, assigned_to_name TEXT, dev_estimated_at TEXT, deadline TEXT, assigned_at TEXT, first_submitted_at TEXT, accepted_at TEXT, released_at TEXT, closed_at TEXT, reopened_at TEXT, reopen_count INTEGER, return_count INTEGER, scope_changed INTEGER, notify_status TEXT, notified_at TEXT, notify_message_key TEXT, notify_error TEXT, read_at TEXT, requester_notify_status TEXT)`);
+  // [§15·S12-a 补] created_at 是 sys_issues 首版 CREATE TABLE 就带的基础列（:754，早于任何 ALTER 新增列，
+  //   任何真实存量库都必然有它）——本残缺表此前从未显式列出，因为在本批之前没有任何迁移步骤按名 SELECT
+  //   它；[1d] 派生单子编号回填分类首次需要 created_at 排序族内序号，故此处补齐，避免"缺列"测试撞上一个
+  //   与本测试焦点（effected_at 等评估/通知锚点缺失）无关的 SQLITE_ERROR。
+  await run2(`CREATE TABLE sys_issues (id INTEGER PRIMARY KEY, type TEXT, status TEXT, priority TEXT, system_name TEXT, source TEXT, record_source TEXT, import_batch_id TEXT, origin_issue_id INTEGER, release_id INTEGER, created_by INTEGER, assigned_to INTEGER, assigned_to_name TEXT, dev_estimated_at TEXT, deadline TEXT, assigned_at TEXT, first_submitted_at TEXT, accepted_at TEXT, released_at TEXT, closed_at TEXT, reopened_at TEXT, reopen_count INTEGER, return_count INTEGER, scope_changed INTEGER, notify_status TEXT, notified_at TEXT, notify_message_key TEXT, notify_error TEXT, read_at TEXT, requester_notify_status TEXT, created_at DATETIME DEFAULT (datetime('now','localtime')))`);
   await run2(`CREATE TABLE sys_issue_timeline (id INTEGER PRIMARY KEY, event_type TEXT, from_status TEXT, to_status TEXT, action_code TEXT, ref_id INTEGER, round_no INTEGER)`);
   await run2(`CREATE TABLE sys_issue_attachments (id INTEGER PRIMARY KEY, attachment_type TEXT, round_no INTEGER, status TEXT)`);
   await run2(`CREATE TABLE sys_issue_dev_assignees (id INTEGER PRIMARY KEY, issue_id INTEGER, user_id INTEGER, user_name TEXT, is_primary INTEGER, notify_status TEXT, notified_at DATETIME, read_at DATETIME, notify_message_key TEXT, notify_error TEXT, removed_at DATETIME, dev_status TEXT, resolved_at TEXT, no_code_reason TEXT, superseded_by INTEGER)`);   // [SD1 二轮预筛 LOW-6 收口·注释如实] 本桩表列清单**不是**全列建全——它固定停在 C0 收口时的列集（不含
@@ -1147,7 +1259,7 @@ async function verifyMissingDevAssigneesColLib() {
   });
   // 完整建 sys_issues（含全部 KEY_COLS，含通知改造 11 新列，避免在 sys_issues 分支提前 return）+ 完整 releases/timeline/attachments。
   await run3(`CREATE TABLE sys_releases (id INTEGER PRIMARY KEY, release_no TEXT, status TEXT, is_hotfix INTEGER, release_note TEXT, version_tag TEXT, release_type TEXT)`);
-  await run3(`CREATE TABLE sys_issues (id INTEGER PRIMARY KEY, type TEXT, status TEXT, priority TEXT, system_name TEXT, source TEXT, record_source TEXT, import_batch_id TEXT, origin_issue_id INTEGER, release_id INTEGER, created_by INTEGER, assigned_to INTEGER, assigned_to_name TEXT, dev_estimated_at TEXT, deadline TEXT, assigned_at TEXT, first_submitted_at TEXT, accepted_at TEXT, released_at TEXT, effected_at TEXT, closed_at TEXT, reopened_at TEXT, reopen_count INTEGER, return_count INTEGER, scope_changed INTEGER, notify_status TEXT, notified_at TEXT, notify_message_key TEXT, notify_error TEXT, read_at TEXT, requester_notify_status TEXT, creator_notify_status TEXT, needs_feasibility INTEGER, feasibility_conclusion TEXT, blocked INTEGER, needs_release INTEGER, related_correction_no TEXT, fix_gap_note TEXT, dingtalk_chat_id TEXT, relay_notify_status TEXT)`);
+  await run3(`CREATE TABLE sys_issues (id INTEGER PRIMARY KEY, type TEXT, status TEXT, priority TEXT, system_name TEXT, source TEXT, record_source TEXT, import_batch_id TEXT, origin_issue_id INTEGER, release_id INTEGER, created_by INTEGER, assigned_to INTEGER, assigned_to_name TEXT, dev_estimated_at TEXT, deadline TEXT, assigned_at TEXT, first_submitted_at TEXT, accepted_at TEXT, released_at TEXT, effected_at TEXT, closed_at TEXT, reopened_at TEXT, reopen_count INTEGER, return_count INTEGER, scope_changed INTEGER, notify_status TEXT, notified_at TEXT, notify_message_key TEXT, notify_error TEXT, read_at TEXT, requester_notify_status TEXT, creator_notify_status TEXT, needs_feasibility INTEGER, feasibility_conclusion TEXT, blocked INTEGER, needs_release INTEGER, related_correction_no TEXT, fix_gap_note TEXT, dingtalk_chat_id TEXT, relay_notify_status TEXT, created_at DATETIME DEFAULT (datetime('now','localtime')))`);
   await run3(`CREATE TABLE sys_issue_timeline (id INTEGER PRIMARY KEY, event_type TEXT, from_status TEXT, to_status TEXT, action_code TEXT, ref_id INTEGER, round_no INTEGER)`);
   await run3(`CREATE TABLE sys_issue_attachments (id INTEGER PRIMARY KEY, attachment_type TEXT, round_no INTEGER, status TEXT)`);
   // 新表存在，但故意只建 id/issue_id/user_id/user_name/removed_at——缺 is_primary + notify_status（本场景焦点）。
@@ -1177,7 +1289,7 @@ async function verifyMissingDevAssigneesColLib() {
 async function verifyDevAssigneesGuardAlignment() {
   const mkComplete = async (run) => {
     await run(`CREATE TABLE sys_releases (id INTEGER PRIMARY KEY, release_no TEXT, status TEXT, is_hotfix INTEGER, release_note TEXT, version_tag TEXT, release_type TEXT)`);
-    await run(`CREATE TABLE sys_issues (id INTEGER PRIMARY KEY, type TEXT, status TEXT, priority TEXT, system_name TEXT, source TEXT, record_source TEXT, import_batch_id TEXT, origin_issue_id INTEGER, release_id INTEGER, created_by INTEGER, assigned_to INTEGER, assigned_to_name TEXT, dev_estimated_at TEXT, deadline TEXT, assigned_at TEXT, first_submitted_at TEXT, accepted_at TEXT, released_at TEXT, effected_at TEXT, closed_at TEXT, reopened_at TEXT, reopen_count INTEGER, return_count INTEGER, scope_changed INTEGER, notify_status TEXT, notified_at TEXT, notify_message_key TEXT, notify_error TEXT, read_at TEXT, requester_notify_status TEXT, creator_notify_status TEXT, needs_feasibility INTEGER, feasibility_conclusion TEXT, blocked INTEGER, needs_release INTEGER, related_correction_no TEXT, fix_gap_note TEXT, dingtalk_chat_id TEXT, relay_notify_status TEXT)`);
+    await run(`CREATE TABLE sys_issues (id INTEGER PRIMARY KEY, type TEXT, status TEXT, priority TEXT, system_name TEXT, source TEXT, record_source TEXT, import_batch_id TEXT, origin_issue_id INTEGER, release_id INTEGER, created_by INTEGER, assigned_to INTEGER, assigned_to_name TEXT, dev_estimated_at TEXT, deadline TEXT, assigned_at TEXT, first_submitted_at TEXT, accepted_at TEXT, released_at TEXT, effected_at TEXT, closed_at TEXT, reopened_at TEXT, reopen_count INTEGER, return_count INTEGER, scope_changed INTEGER, notify_status TEXT, notified_at TEXT, notify_message_key TEXT, notify_error TEXT, read_at TEXT, requester_notify_status TEXT, creator_notify_status TEXT, needs_feasibility INTEGER, feasibility_conclusion TEXT, blocked INTEGER, needs_release INTEGER, related_correction_no TEXT, fix_gap_note TEXT, dingtalk_chat_id TEXT, relay_notify_status TEXT, created_at DATETIME DEFAULT (datetime('now','localtime')))`);
     await run(`CREATE TABLE sys_issue_timeline (id INTEGER PRIMARY KEY, event_type TEXT, from_status TEXT, to_status TEXT, action_code TEXT, ref_id INTEGER, round_no INTEGER)`);
     await run(`CREATE TABLE sys_issue_attachments (id INTEGER PRIMARY KEY, attachment_type TEXT, round_no INTEGER, status TEXT)`);
     // C0（多开发协作与 commit 留痕重构 v2.9）3 新表：Case A/B 焦点均在 dev_assignees 自身缺列（checks 数组

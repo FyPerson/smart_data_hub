@@ -115,11 +115,12 @@ const path = require('path');
 
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 
-// 14 个语义层（与 components.css :root、verify-unify-static.js 的 SEM_TIERS 三方同源）
+// 15 个语义层（与 components.css :root、verify-unify-static.js 的 SEM_TIERS 三方同源）
 //   prerelease = 第 14 层（待上线可见性 20260812 v1.0·D1b）：「待上线」专属橙色相，与 staging
 //   （交付/传输语义·数据协作 EXPORTING/TRANSFERRING 共用）分层，不是改 staging。
+//   fastlane = 第 15 层（先行上线两步化 S7·方案 20260813 v1.8 §6）：「待先行部署 x/N」专属靛紫色相。
 const SEM_TIERS = [
-    'wait', 'intake', 'active', 'review', 'special', 'staging', 'prerelease',
+    'wait', 'intake', 'active', 'review', 'special', 'staging', 'prerelease', 'fastlane',
     'done', 'hold', 'rejected', 'failed', 'archived', 'voided', 'legacy',
 ];
 const SEM_TOKEN_SUFFIXES = ['bg', 'fg', 'bd', 'bds', 'dot', 'deco'];
@@ -378,7 +379,9 @@ const PAGE_ALIAS_SPECS = [
                 why: '逐执行人通知五态 → 同上四片段',
             },
         ],
-        renderGateCount: { siStatusClass: 3 },
+        // [S13-b·B2] 3→4：siDeriveFamilyBlockHtml（矩阵行5 派生链区块，新渲染点）新增一处 siStatusClass
+        //   调用（成员状态徽章，同列表行/详情头/批次成员三处既有站点同款用法），非漏登记/非误删旧站点。
+        renderGateCount: { siStatusClass: 4 },
         rawConcatForbidden: [/si-s-\$\{(?!siStatusClass\()/],
     },
     {

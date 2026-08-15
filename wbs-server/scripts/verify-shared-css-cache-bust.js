@@ -41,8 +41,8 @@ const PUBLIC_DIR = path.join(ROOT, 'public');
 const ASSETS = [
     {
         rel: 'assets/css/components.css',
-        version: 'v1.152.0_prereleasetier1',
-        sha256: '7babd91e129d462d2e6ebca6cb39de12e21bdde8d2e79dd173a72b32d5cae1a2',
+        version: 'v1.153.0_fastlanetier15',
+        sha256: '81dd4ef8f68a0d82e840cd543bfea1c9ed34fa624fb792d4f104761eb4a5e94d',
         // 期望引用页**显式清单**（双向对拍，新增/下线页面必须显式改这里）
         pages: [
             'Data_Collab.html', 'Data_Correction.html', 'Issue_Lite.html', 'Issue_Tracker.html',
@@ -52,6 +52,7 @@ const ASSETS = [
         log: [
             ['v1.142.0_notify1', '通知按钮与文本统一（前代登记，本守卫建立前）'],
             ['v1.152.0_prereleasetier1', '状态色板新增第 14 层 sem-prerelease（「待上线」青→橙）+ 两个待上线 flag 的 si-flag 修饰类。串名用 prereleasetier 而非 prerelease，避免被读成"预发布版本"（codex 352 号 LOW）'],
+            ['v1.153.0_fastlanetier15', '状态色板新增第 15 层 sem-fastlane（先行上线两步化 S7·「待先行部署 x/N」徽章·靛紫色相，与第 14 层 prerelease 橙区分）。串名用 fastlanetier15 呼应既有 prereleasetier 命名习惯'],
         ],
     },
     {

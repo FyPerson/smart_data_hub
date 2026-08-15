@@ -25,14 +25,20 @@ const SF = require('./status-families');   // C0/C2：主状态族常量 + W06 �
 const { assertMainStatusTransition } = require('./status-transition-guard');   // C2 交付物①：不变量 7 三层组合统一入口
 const issueNotify = require('../../utils/issue-notify');   // C5 通知 markdown 安全文本（issueSafeText 复用 dingtalk-notify escapeMarkdown，不新建转义，§10.3 require）
 const dingtalkNotify = require('../../utils/dingtalk-notify');   // ③ 真钉钉建群 create-chat（getAccessToken/getUserIdByMobile/createChatGroup/sendGroupMessage/classifyError/escapeMarkdown；stateless util 直接 require，对齐 issueNotify + corrections.js 范式）
+const sysDeriveNumbering = require('../../utils/sys-derive-numbering');   // [S12-a·§15.2] 派生单子编号唯一权威判定实现——
+  // 启动迁移链存量回填 + 独立回填脚本 backfill-sys-derive-root-seq.js + verify-sys-derive-numbering.js 三处同源
+  // require（同规则禁双实现，模块头部有完整说明），stateless util 直接 require，对齐 issueNotify/dingtalkNotify 先例。
 
 // sysIssueTransition 抛的业务/并发错误（endpoint catch 转 HTTP，对齐 corrections CorrectionTransitionError）。
 class SysTransitionError extends Error {
-  constructor(httpStatus, code, message) {
+  constructor(httpStatus, code, message, extra) {
     super(message);
     this.name = 'SysTransitionError';
     this.httpStatus = httpStatus;
     this.code = code;
+    // [§14·S11 MED-1] 可选第 4 参——响应体附加字段（如 need_reason/gap_days），不影响既有三参调用点
+    // （extra undefined 时 sendSysTransitionError 不 spread 任何多余键，逐字兼容全部存量 throw 语句）。
+    this.extra = (extra && typeof extra === 'object') ? extra : undefined;
   }
 }
 
@@ -96,7 +102,11 @@ module.exports = (deps) => {
     'sys_release_duty_roster',
     // ← 上线执行人多选与多人双确认（方案 20260806 v1.7 §4.1，C0）：执行人子表，批次可多人、逐人一行、
     //   代次由行 id 承载（§4.1a，不加 gen 列）。**全新表**，CHECK 一次到位（见 initSchema 2.12 段）。
-    'sys_release_executors'];
+    'sys_release_executors',
+    // ← 先行上线两步化（方案 20260813_v1.8 §3，S1）：值班执行人集合子表，按 issue_id 挂靠、逐人一行、
+    //   代次由行 id 承载（同 sys_release_executors §4.1a 代次语义）。**全新表**，去钉钉通知列组，CHECK
+    //   一次到位（见 initSchema 2.13 段）。
+    'sys_fast_release_executors'];
 
   // readiness 复查是"启动期就绪 status-only 抽样"——挑代表性关键不变量列（三侧通知 status 锚点/质量计数/
   //   来源/血缘批次/config 生效时刻），不做全字段全量校验（那是 verify-sys-schema.js 的职责，对齐 corrections
@@ -196,10 +206,13 @@ module.exports = (deps) => {
     'fast_release_auth_by', 'fast_release_auth_by_name', 'fast_release_auth_at', 'fast_release_auth_note',
     'fast_release_revoked_at', 'fast_release_consumed_at',
     // ← 组 B（bug 先行上线直上·SB2·方案 v1.3 §3.2/§3.3）锚点：post_release_acceptance/post_accepted_at/
-    //   post_derive_issue_id 三列是 submit 直上端点**同一条条件更新的原子写入单元**（direct_release=true
-    //   分支的 UPDATE 显式点名 post_release_acceptance），且 deriveOnlineSourceKind 消费的 online_source
-    //   新值 'authorized_fastlane' 与本三列同批落地——mid-migration 崩溃（六列已补三列未补）会让直上端点的
-    //   UPDATE 撞 no such column → 500，须整组锚定（同 fast_release_auth_* 六列先例）。
+    //   post_derive_issue_id 三列本是 submit 直上端点同一条条件更新的原子写入单元（该分支已随两步化
+    //   方案 §4-2 拆除，S2-2）——三列锚点**保留不删**：post_release_acceptance/post_derive_issue_id
+    //   仍被补验收端点（POST /sys-issues/:id/post-release-accept）持续读写，post_accepted_at 仍随之
+    //   落库，mid-migration 崩溃（六列已补三列未补）会让补验收端点的 UPDATE/SELECT 撞 no such column
+    //   → 500，须整组锚定（同 fast_release_auth_* 六列先例）；deriveOnlineSourceKind 消费的
+    //   online_source 值 'authorized_fastlane' 与本三列同源，写入点从 submit 迁移到 S3+ 待落地的
+    //   翻牌端点后仍会同批落地，锚定理由不因写入点搬家而失效。
     'post_release_acceptance', 'post_accepted_at', 'post_derive_issue_id',
     // ← 组 C（期望对表与准时统计·方案 v1.3 §3C.8）锚点：4 列服务同一批"ETA 写入时刻"事务
     //   （eta_overrun_reason_code/_note 与 dev_estimated_at 同事务写/清；dev_estimated_first_at 与
@@ -208,6 +221,14 @@ module.exports = (deps) => {
     //   撞 no such column，须整组锚定（同 fast_release_* 六列先例）。
     'eta_overrun_reason_code', 'eta_overrun_reason_note',
     'dev_estimated_first_at', 'dev_estimated_at_on_release',
+    // ← [§14·S11] feature 超期完成理由闸锚点：submit/liaison_test_pass 两写点热读列，同 eta_overrun_* 先例
+    //   整组入锚（mid-migration 崩溃会让这两个写点撞 no such column）。
+    'completion_overrun_reason_code', 'completion_overrun_reason_note',
+    // ← [§15·S12-a] 派生单子编号「#根_序」锚点：derive_root_id/derive_seq（派生单自身，insertDerivedSysIssue
+    //   INSERT 显式写点）+ derive_seq_alloc（根单分配计数，同一函数内 UPDATE 热写点）——三列同一取号事务的
+    //   原子写入单元，同 fast_release_* 六列/eta_overrun_* 四列先例整组入锚（mid-migration 崩溃会让取号
+    //   UPDATE 或 INSERT 撞 no such column → 派生端点 500）。
+    'derive_root_id', 'derive_seq', 'derive_seq_alloc',
   ];
   const SYS_RELEASES_KEY_COLS = ['release_no', 'status', 'is_hotfix', 'release_note', 'version_tag',
     'release_type',   // ← bug 流 Commit ① 批次类型隔离锚点（[codex三审:L] 值域非空由 ② 服务端守卫强制，readiness 只查列在）
@@ -253,15 +274,35 @@ module.exports = (deps) => {
   const SYS_DEV_EVENTS_KEY_COLS = ['issue_id', 'dev_assignee_id', 'related_dev_assignee_id', 'action', 'from_status', 'to_status', 'operator_id', 'reason', 'payload_json', 'created_at'];
   const SYS_RELEASE_COMMIT_SNAPSHOTS_KEY_COLS = ['release_id', 'issue_id', 'snapshot_json', 'created_at'];
   // ── 角色权限重构 C2a（方案 v1.7 §4-C2a）：物理删除审计表锚点 ──────────────────────────────────
-  //   同上"结构全列在"模型（一次性 CREATE TABLE，无 ALTER 路径）。本表是**不可逆动作的唯一 DB 留证**——
+  //   建表本体走"结构全列在"模型（一次性 CREATE TABLE）。本表是**不可逆动作的唯一 DB 留证**——
   //   缺列即审计不完整，宁可 readiness 不放行也不能让删除端点在"审计写不全"的库上跑（fail-closed）。
+  //   ⚠️ [S1 收口批订正] 原注释写"无 ALTER 路径"——不再准确：fast_release_executors_json 是本表首个
+  //   经 alterAddMissingCols 补的列（老库场景，见迁移段），新库仍由 CREATE TABLE 一次带出。两条路径
+  //   落地的最终列集须一致，即本处锚点数组不区分新旧库、按"列必须都在"统一校验。
   const SYS_DELETE_AUDIT_KEY_COLS = ['issue_id', 'issue_type', 'issue_status', 'issue_title',
-    'issue_created_by', 'issue_created_at', 'attachment_count', 'timeline_count',
+    'issue_created_by', 'issue_created_at',
+    // ← [S13-b·B3·矩阵行12] 删除审计双记轻量摘要列（issue_json 整行快照本已含，这两列服务列表端点不返回
+    //   快照 JSON 时仍能显示子编号），与 issue_created_by/issue_created_at 同类"摘要字段"非 json+count 配对。
+    'issue_derive_root_id', 'issue_derive_seq',
+    'attachment_count', 'timeline_count',
     // ← 对抗审 F1/F2/F7 收口：四张子表的快照与计数（按 issue_id 子表统一枚举，非"挑三张"）
     'dev_assignee_count', 'dev_commit_count', 'dev_event_count', 'release_snapshot_count',
+    // ← [S1 收口批增量·终裁=补] 第 5 张 issue_id 子表（先行上线两步化执行人集合）的配套 count 列——
+    //   与上面四个同批同源对齐，不再是"6 组 json+count 里唯一漏 count"。
+    'fast_release_executors_count',
     'issue_json', 'timeline_json', 'attachments_json',
     'dev_assignees_json', 'dev_commits_json', 'dev_events_json', 'release_snapshots_json',
+    // ← [S1 收口批·M2] 第 5 张 issue_id 子表快照（先行上线两步化执行人集合）。
+    'fast_release_executors_json',
     'operator_id', 'operator_name', 'reason', 'deleted_at'];
+
+  // ── 先行上线两步化（方案 20260813_v1.8 §3，S1）：值班执行人集合子表锚点，「结构全列在」模型 ──────
+  //   同 sys_issue_delete_audit / sys_release_duty_roster 首版一样：**一次性 CREATE TABLE（无 ALTER
+  //   路径）**——软删成组 CHECK（含 removed_by_name 判空）+ 执行态成组 CHECK 均是首建即终版的硬门槛，
+  //   SQLite 已建表无法补 CHECK。列集取**全部非 id 列**（本表恰 12 列，同 SYS_DELETE_AUDIT_KEY_COLS
+  //   "全列锚点"口径，非 SYS_DUTY_ROSTER_KEY_COLS 那种部分列子集——本表列数少，全列锚点零额外成本）。
+  const SYS_FAST_RELEASE_EXECUTORS_KEY_COLS = ['issue_id', 'user_id', 'user_name', 'exec_status', 'executed_at',
+    'added_by', 'added_by_name', 'created_at', 'removed_at', 'removed_by', 'removed_by_name'];
 
   // ── 受阻三件套清理（§⑥ admin 处置后清当前 blocked 字段）：hold/void 处置 + unblock 解除 + 换轮复用 ──────────
   //   F2b 修（ultracode 对抗审）：F2b 让 blocked=1 首次可达后，hold/void 处置 blocked 单必须清 blocked，
@@ -393,6 +434,11 @@ module.exports = (deps) => {
   //       却换不到等价收益。该范围划定由 verify-sys-intake-gate [SCOPE] 组固化，防日后被误当作"漏了"。
   //   ⚠️ 契约再变（如未来放开某类型免受理）必须 +1，并同步前端 + verify 夹具；旧值一律 400 引导刷新。
   const SYS_INTAKE_CONTRACT_VERSION = 2;   // 1 = C0 之前（受理门可选）；2 = C0 起（全类型必经·参数面封死）
+  // [S8-S10 合并收口批 F5] source（来源）三值枚举单一收口——原三处调用点（建单/edit-in-revision/derive）
+  // 各自手写同一个字面量数组，改一处漏改另一处会造成"某端点接受了另一端点拒绝的值"这类静默漂移。
+  // ⚠️ DDL CHECK（sys_issues.source 列，:658 一带）是静态 SQL 文本，无法引用本 JS 常量——两处仍需人工
+  // 保持同步，verify 补一条断言解析 DDL CHECK 文本与本常量比对集合相等，漂移会直接报红（非纯人工自律）。
+  const SYS_SOURCES = ['业务方', '内部', '生产故障'];
   const SYS_INTAKE_LIAISON_IDS = [13];   // 示例对接人：受理动作（intake_accept/intake_return/request_tech_consult）授权
   const SYS_TECH_LEAD_IDS = [7];         // 示例发布者：技术负责人（被通知·下拉候选·tech_lead_id ∈ 此名单·§6/§8.1）
   //   单一真相点（对齐 isSysBugLiaison 范式）：uid 是否在受理人 / 技术负责人白名单。
@@ -1039,6 +1085,14 @@ module.exports = (deps) => {
         issue_title TEXT,
         issue_created_by INTEGER,
         issue_created_at TEXT,
+        -- [S13 收口 LOW-3] issue_derive_root_id/issue_derive_seq——[S13-b·B3·矩阵行12] 删除审计双记
+        --   轻量摘要列（下方 alterAddMissingCols 迁移段已给老库补过这两列；新库此前只靠该 ALTER 兜底，
+        --   CREATE TABLE 侧一直没有，与本表 :279-281 注释「ALTER 补的列新库仍由 CREATE TABLE 一次带出」
+        --   的契约不符——同 fast_release_executors_json/_count 先例同款两路径都写，此处补齐）。可空
+        --   （历史遗留删除记录/存量未回填单自然为 NULL，前端据此回退真实 id，不熔断不报错，同 ALTER
+        --   段列定义 'INTEGER'——无 DEFAULT，两处类型/可空性逐字一致）。
+        issue_derive_root_id INTEGER,
+        issue_derive_seq INTEGER,
         attachment_count INTEGER NOT NULL DEFAULT 0,
         timeline_count INTEGER NOT NULL DEFAULT 0,
         -- ⭐ 对抗审 F1/F2/F7 收口：**按 issue_id 子表统一枚举**，不再是"挑三张"。
@@ -1050,6 +1104,13 @@ module.exports = (deps) => {
         dev_commit_count INTEGER NOT NULL DEFAULT 0,
         dev_event_count INTEGER NOT NULL DEFAULT 0,
         release_snapshot_count INTEGER NOT NULL DEFAULT 0,
+        -- [S1 收口批增量·主会话终裁=补] fast_release_executors_count——本表六个数组型 *_json 快照
+        --   （timeline/attachments/dev_assignees/dev_commits/dev_events/release_snapshots，此处只列
+        --   有配套 count 的四张，issue_json 无对应"issue_count"、attachments/timeline 二者的 count
+        --   在最上方另列）本各配一张 *_count，先行上线两步化执行人集合是第 5 张 json 快照、原是"6 组
+        --   json+count 配对"里唯一破对称的漏网——正是 M2 本身抓的"唯一漏网"模式在 count 维度复现，
+        --   补齐同族对齐（6/6），不留下一次外审再抓一次同款缺口。
+        fast_release_executors_count INTEGER NOT NULL DEFAULT 0,
         issue_json TEXT NOT NULL,                 -- sys_issues 整行快照（JSON）
         timeline_json TEXT NOT NULL,              -- 被删 timeline 全部行（JSON 数组·按 id 升序）
         attachments_json TEXT NOT NULL,           -- 被删附件清单（JSON 数组·含 file_name/original_name/type/size）
@@ -1057,10 +1118,19 @@ module.exports = (deps) => {
         dev_commits_json TEXT NOT NULL,           -- 被删 commit 留痕行
         dev_events_json TEXT NOT NULL,            -- 被删开发侧事件审计链（含 operator_id/reason）
         release_snapshots_json TEXT NOT NULL,     -- 被删发布冻结快照（守卫②使其正常为空·见端点注释）
+        -- [S1 收口批·Opus 预筛 M2] 先行上线两步化执行人集合快照——本表新建时（2.13 段）漏补进本审计表，
+        --   违反 ⛔ 上方"子表清单必须与 DELETE 清单逐张对齐"契约（见 DELETE 端点内 :9974 一带注释），
+        --   现补齐。[S1 收口批增量订正] 本列首版曾"刻意不配套 *_count 列"（理由=避免一次改动同时牵动
+        --   DDL/ALTER/INSERT/verify 四处），主会话复核后终裁**补齐**——不配对是本表六组 json+count 里
+        --   唯一的不对称，外审必抓，晚补不如现在补（此刻仍是零存量表，CHECK/列结构改动零成本窗口）。
+        fast_release_executors_json TEXT NOT NULL,   -- 被删「先行上线两步化」值班执行人集合（含软删历史行，同 dev_assignees_json 口径）
         operator_id INTEGER NOT NULL,
         operator_name TEXT NOT NULL,
         -- reason 带 DB 层 CHECK（codex C2a 审 MED）：NOT NULL 只挡 NULL，挡不住空白/超长。
-        --   本表是全新表（非 ALTER 演进），可直接带 CHECK 上线——同 sys_issue_dev_commits.commit_ref 既有先例。
+        --   reason 本列随本表最初的 CREATE TABLE 一起建（非 ALTER 追加），可直接带 CHECK 上线——同
+        --   sys_issue_dev_commits.commit_ref 既有先例。⚠️ [S1 收口批订正] 本表整体已不再是"零 ALTER
+        --   演进"表——fast_release_executors_json 是本表首个经 alterAddMissingCols 补的列（见迁移段），
+        --   本条 CHECK 的可行性论据只对 reason 这一列本身成立，不代表全表仍无 ALTER 路径。
         --   意义：端点层校验只覆盖"经端点写入"，而运维直连 SQLite / 未来新端点会绕过它；
         --   审计契约「不可逆删除必须说明原因」应当由 DB 兜底，而不是靠"大家都记得走端点"。
         reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 200),
@@ -1220,6 +1290,91 @@ module.exports = (deps) => {
         ON sys_release_executors(release_id, removed_at)`, recordSysErr('idx_sys_release_exec_release'));
       db.run(`CREATE INDEX IF NOT EXISTS idx_sys_release_exec_user
         ON sys_release_executors(user_id, exec_status)`, recordSysErr('idx_sys_release_exec_user'));
+
+      // ── 2.13 sys_fast_release_executors（先行上线两步化·值班执行人集合，方案 20260813_v1.8 §3）─────
+      //   **全新表**——CREATE TABLE IF NOT EXISTS 首次真建，直接带完整 CHECK 上线（同 2.11/2.12 段首版
+      //   范式，不走 alterAddMissingCols）。⚠️ C0 硬门槛：SQLite 已建表无法补 CHECK，本 DDL 必须在首次
+      //   建表时即为最终版（本表是 S1 数据层地基，S2+ 才接线端点/业务流转，但表结构不能留后手改）。
+      //   语义：本表按 issue_id 挂靠（"挂牌"授权后由值班执行人**全员确认**才翻牌上线，是「开发勾选直上」
+      //   两步化改造的执行人集合），与 2.12 段 sys_release_executors（按 release_id 挂靠、逐批次上线执行人
+      //   多选）是**两张不同语义的表**——本表刻意省去 2.12 段整套钉钉通知五态列组（notify_status/
+      //   notify_started_at/notified_at/notify_message_key/notify_error/notify_token/read_at），理由=
+      //   本批挂牌通知走既有**站内通知渠道**（非钉钉）+ **通知总闸 `isAutoNotifyEnabled()` 恒 false**
+      //   （交互优化 C2 起全 type 手动化，backlog P2 显式挂账，见该函数定义处注释同款登记），钉钉五态
+      //   列组此刻无消费场景，等真接线钉钉再按同一族范式（2.12 段）补 ALTER，不预建"当前用不上"的列组。
+      //   ⚠️ 论据订正（S1 收口批·Opus 预筛 M3）：此前本段误引 `SYS_FASTLANE_ENABLE` 恒 false 作为论据——
+      //   那是「先行上线整链」的**部署闸**，本批部署最后一步就会显式置 1（会翻转，不是稳定事实）；真正
+      //   与"钉钉列组用不上"相关、且不随本批上线与否变化的论据是上面这条通知总闸，两者不是同一件事，
+      //   决策（去钉钉列组）本身不变，只是换了个不会被本批自己的部署动作打脸的论据。
+      //   issue_id 为**逻辑外键**指向 sys_issues.id——本平台恒 `foreign_keys=OFF`（核实#1），不写实体
+      //   FK 约束（同 2.12 段"装饰性 FK 无 enforce 意义"结论，本表干脆不写，减一行装饰）；父子关系靠
+      //   `DELETE /sys-issues/:id` 手写级联维系（见该端点级联删除段本表一行）。
+      //   代次语义：撤销安排=软删全体（同 issue_id 下现存活跃行 removed_at 打标），重新安排=INSERT 新行
+      //   （新 id），旧行不参与 partial UNIQUE 约束，同一 user_id 天然可再插新行（同 2.12 段 §4.1a 代次
+      //   语义，不加 gen 列）。
+      //   ⚠️ 消费点统一谓词：方案 §4-10 要求本表全部消费点（在册判权/done 计数/全员判定/徽章 x/N 投影/
+      //   撤销与终结清集合范围）复用同一 SQL 谓词常量 SYS_FAST_RELEASE_EXEC_ACTIVE_WHERE_SQL（见该常量
+      //   定义处），S1 本阶段只落常量、零消费点（S2 起各消费点必须引用，禁各写一份）。
+      db.run(`CREATE TABLE IF NOT EXISTS sys_fast_release_executors (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        -- issue_id 加 CHECK (issue_id > 0)（S1 收口批·Opus 预筛 L8 裁定=补）：与同表 user_id/added_by
+        --   对称——三列同属"非法 id 静默入库"防线，CHECK 首版即终版、本表零存量是唯一无成本加固窗口
+        --   （2.12 段 sys_release_executors.release_id 无此 CHECK 属既有事实，不回改）。
+        -- ⚠️ codex 382-M2：光有「> 0」不够——SQLite INTEGER affinity 下 'abc' 会以 TEXT 存储，且 TEXT
+        --   与数字比较时 'abc' > 0 恒为真（已实测穿透）；1.5 以 REAL 存储同样 > 0 通过。三列（issue_id/
+        --   user_id/added_by）统一追加类型判定钳制（子句本体见各列 CHECK，与 SQLite 内置类型判定函数
+        --   合取才是真正的正整数防线）。与 2.12 段（release_id 无同款类型钳制）出现差异属本表**加强性
+        --   偏差**——2.12 段系生产已建表，CHECK 首版即终版无法回改，不追平，两段家族边界到此为止
+        --   （不视为不一致要修的缺陷）。
+        -- [codex 383-H1 反质证配套] verify-sys-fastlane-two-phase.js [1i] 组对本建表 DDL 做指纹断言
+        --   （sqlite_master.sql 文本中类型判定函数字面量应恰出现 4 次，对应 issue_id/user_id/added_by/
+        --   removed_by 四处 CHECK）——本段注释故意不重复拼写该函数名的裸字面量，避免污染指纹计数
+        --   （SQLite 原样保留 DDL 文本含注释，函数名若在注释里也写一遍会被计数器重复计入）。
+        issue_id          INTEGER NOT NULL CHECK (typeof(issue_id) = 'integer' AND issue_id > 0),   -- 逻辑外键→sys_issues.id（foreign_keys 恒 OFF，不写实体约束；级联靠 DELETE /sys-issues/:id 手写段）
+        user_id           INTEGER NOT NULL CHECK (typeof(user_id) = 'integer' AND user_id > 0),
+        user_name         TEXT    NOT NULL CHECK (length(trim(user_name, ' ' || char(9) || char(10) || char(13))) > 0),
+
+        -- 执行确认（双确认核心，列名/语义同 2.12 段 sys_release_executors 同名两列，值班执行人标记完成）
+        exec_status       TEXT    NOT NULL DEFAULT 'pending' CHECK (exec_status IN ('pending','done')),
+        executed_at       DATETIME,
+
+        -- 审计
+        added_by          INTEGER NOT NULL CHECK (typeof(added_by) = 'integer' AND added_by > 0),
+        added_by_name     TEXT    NOT NULL CHECK (length(trim(added_by_name, ' ' || char(9) || char(10) || char(13))) > 0),
+        created_at        DATETIME NOT NULL DEFAULT (datetime('now','localtime')),
+        removed_at        DATETIME,
+        removed_by        INTEGER,
+        removed_by_name   TEXT,
+
+        -- 软删三列成组（第二分支须显式判空，否则 CHECK 求值为 NULL 时半软删可逃逸，同 2.11/2.12 段教训）
+        -- ⚠️ codex 382-M2：removed_by 同款追加类型判定钳制（子句本体见下方 CHECK，软删审计人 id 与上面
+        --   三列同属"非法 id 静默入库"防线，'abc'/1.5 同样能穿透裸 > 0 判断），与 issue_id/user_id/
+        --   added_by 三列口径统一。
+        CHECK (
+          (removed_at IS NULL     AND removed_by IS NULL     AND removed_by_name IS NULL)
+          OR
+          (removed_at IS NOT NULL AND datetime(removed_at) IS NOT NULL
+           AND removed_by IS NOT NULL AND typeof(removed_by) = 'integer' AND removed_by > 0
+           AND removed_by_name IS NOT NULL
+           AND length(trim(removed_by_name, ' ' || char(9) || char(10) || char(13))) > 0)
+        ),
+        -- 执行态成组：done 必有时间戳且时间戳合法（同 2.12 段 exec_status/executed_at 同名两列同写法；
+        --   executed_at 系服务端 datetime('now') 生成、无用户输入面，故不需要 2.11 段 duty_date 那种
+        --   '+0 days' 归一化技巧，裸 datetime(x) IS NOT NULL 判 NULL 足够拦空串/垃圾串污染值）
+        CHECK (
+          (exec_status = 'pending' AND executed_at IS NULL)
+          OR
+          (exec_status = 'done' AND executed_at IS NOT NULL AND datetime(executed_at) IS NOT NULL)
+        )
+      )`, recordSysErr('sys_fast_release_executors'));
+      db.run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_sys_fast_release_exec_active
+        ON sys_fast_release_executors(issue_id, user_id) WHERE removed_at IS NULL`, recordSysErr('idx_sys_fast_release_exec_active'));
+      db.run(`CREATE INDEX IF NOT EXISTS idx_sys_fast_release_exec_issue
+        ON sys_fast_release_executors(issue_id, removed_at)`, recordSysErr('idx_sys_fast_release_exec_issue'));
+      // ⚠️ 有意省略 2.12 段那种按 user_id 的第三索引（idx_..._user，如 idx_sys_release_exec_user）：
+      //   方案 §3 本表只列上面两个索引；本表全部已知消费点（在册判权/done 计数/全员判定/徽章投影/
+      //   撤销与终结）均带 issue_id 前缀（单据维度过滤），无"跨单按人聚合"（如"某人本月还有几单待执行"）
+      //   这类查询场景——2.12 段第三索引服务的是批次执行人跨批次统计，本表当前无对应业务需求，不预建。
 
       // ── 2.8 sys_issue_release_commit_snapshots（C0，多开发协作与 commit 留痕重构 v2.9 §9/附录C）──────────
       //   发布冻结快照（D3）；UNIQUE(release_id,issue_id) 保证同一 (release_id,issue_id) 生命周期只快照一次
@@ -1830,9 +1985,65 @@ module.exports = (deps) => {
       ];
       await alterAddMissingCols('sys_issues', ETA_OVERRUN_SNAPSHOT_ISSUE_COLS, '组 C·期望对表与准时统计 方案v1.3§3C.2/§3C.4/§3C.5/§3C.8');
 
+      // [§14·S11] feature 超期完成理由闸——2 列（completion_overrun_reason_code/_note），与 eta_overrun_
+      //   reason_* 同款服务层校验（无 DDL CHECK，理由码值域由 ETA_OVERRUN_REASON_CODES 校验+verify 探针
+      //   双层保障）。列存最新值，历史载体=timeline（write-only 教训同款：仅存最新值的列必配 timeline
+      //   逐次留痕，见 case 'liaison_test_pass'/runWGate 两写点 + buildCompletionOverrunReasonSummarySuffix）。
+      const SYS_COMPLETION_OVERRUN_ISSUE_COLS = [
+        ['completion_overrun_reason_code', 'TEXT'],
+        ['completion_overrun_reason_note', 'TEXT'],
+      ];
+      await alterAddMissingCols('sys_issues', SYS_COMPLETION_OVERRUN_ISSUE_COLS, '方案§14·feature超期完成理由闸 20260813 v1.8');
+
+      // [§15·S12-a] 派生单子编号「#根_序」——3 列（derive_root_id/derive_seq=派生单自身两列，
+      //   derive_seq_alloc=根单已分配最大序号）。无 DDL CHECK（跨行取号+根链不可表达为单行 CHECK），
+      //   fail-closed 由启动迁移链下方 [1d] 回填分类 + 不变量探针 + 部分唯一索引三层兜底（同
+      //   completion_overrun_reason_* 先例：无 CHECK 的服务层校验列）。
+      const SYS_DERIVE_NUMBERING_ISSUE_COLS = [
+        ['derive_root_id', 'INTEGER'],    // NULL=非派生单或未回填；派生单填族根 id（不含自身，根单本身恒 NULL）
+        ['derive_seq', 'INTEGER'],        // 该派生单在其族内的序号（族根下第 N 次派生·不要求稠密，删除留空洞合法）
+        ['derive_seq_alloc', 'INTEGER'],  // 仅根单非 NULL：该族已分配的最大序号（378-H2 取号计数器·单调不减）
+      ];
+      await alterAddMissingCols('sys_issues', SYS_DERIVE_NUMBERING_ISSUE_COLS, '方案§15·派生单子编号「#根_序」20260813 v1.8（S12-a）');
+
       // [codex 291 号 H-2 收口] sys_issue_timeline 首次经 alterAddMissingCols 补列（此前该表无 ALTER 路径，
       //   旧库靠 CREATE TABLE IF NOT EXISTS no-op 停在原 12 列——TEXT 列无 CHECK 语义损失，ALTER 补列本身低风险）。
       await alterAddMissingCols('sys_issue_timeline', [['payload_json', "TEXT CHECK (payload_json IS NULL OR json_valid(payload_json))"]], 'D22 pass 凭证结构化留痕（291 号 H-2·292 号 M-4 补 json_valid 约束与 DDL 同款——读侧 JSON.parse/json_extract 不被脏值击穿的 DB 层保证）');
+
+      // [S1 收口批·Opus 预筛 M2 + 增量终裁] sys_issue_delete_audit 首次经 alterAddMissingCols 补列（同上一条
+      //   sys_issue_timeline.payload_json 先例：此前该表无 ALTER 路径，旧库靠 CREATE TABLE IF NOT
+      //   EXISTS no-op 停在原 23 列）——补 fast_release_executors_json（先行上线两步化执行人集合快照，
+      //   见 2.10 段 DDL 注释）+ fast_release_executors_count（M2 增量终裁=补齐，与其余四对 json+count
+      //   同批同源对齐，不留"6 组配对里唯一漏 count"的不对称）。⚠️ NOT NULL 列的 ALTER 语义：SQLite
+      //   `ALTER TABLE ADD COLUMN` 加 NOT NULL 列必须同时给非 NULL DEFAULT（否则老库已有审计行无值可填，
+      //   ALTER 语句本身会报错）——`DEFAULT '[]'`/`DEFAULT 0` 语义="老库这些历史审计行在本列上线前产生，
+      //   未捕获过该子表快照/计数，视为空数组/零"。
+      //   ⚠️ [codex 382-H1 订正] 此前本条把这与新库 CREATE TABLE 侧两列裸 `NOT NULL`（无 DEFAULT）称作
+      //   "语义等效但字面不同"——这个措辞不准确，如实改写：**两条路径对"省略该列的 INSERT"行为并不
+      //   等效**——升级库（走本条 ALTER，列带 DEFAULT）遇到省列 INSERT 会静默回填 DEFAULT 值放行；新库
+      //   （走 2.10 段 CREATE TABLE，列无 DEFAULT）遇到省列 INSERT 会被 NOT NULL 直接拒绝报错。两者只在
+      //   "INSERT 显式带值"这一路径上行为一致，"INSERT 省略该列"这一路径上行为分叉——主会话裁定不重建
+      //   生产审计表抹平这个分叉（重建代价高于收益），改用护栏堵住"省列 INSERT 未来被引入"这条风险面：
+      //   verify-sys-delete-audit.js 新增静态断言，扫描 routes/ 下全部 `INSERT INTO sys_issue_delete_audit`
+      //   语句，逐条断言列清单显式含 fast_release_executors_json 与 fast_release_executors_count（新写点
+      //   若漏列，静态断言先红，不必等升级库/新库分叉在生产实际触发才发现）。残余风险（护栏是源码正则、
+      //   非运行时强制，维护脚本等旁路 INSERT 若不经过此扫描面仍可能漏检）已登记，待追认锚点见方案
+      //   §9（沿用 293 号 H"报警级登记"同款诚实归类口径，不宣称机制闭合）。
+      await alterAddMissingCols('sys_issue_delete_audit', [
+        ['fast_release_executors_json', "TEXT NOT NULL DEFAULT '[]'"],
+        ['fast_release_executors_count', "INTEGER NOT NULL DEFAULT 0"],
+      ], 'S1 收口批·Opus 预筛 M2（+增量终裁补 count）·补第 5 张 issue_id 子表快照（先行上线两步化执行人集合）');
+      // [S13-b·B3·矩阵行12] 补 issue_derive_root_id/issue_derive_seq——「删除审计」是矩阵唯一双记例外
+      //   （子编号+括号真实 id 都留），理由=删除是子编号失去反查能力的唯一场景，审计须留真实锚点（用户
+      //   2026-08-13 裁定）。issue_json 快照本已含这两列（SELECT * 整行快照天然带出），但列表端点出于
+      //   体积考量不返回 issue_json（详情端点才返回，见其头注），列表若要显示子编号就需要两个轻量标量列
+      //   单独落库——不是 JSON 数组快照，不比照六组 json+count 配对模式，是与 issue_created_by/
+      //   issue_created_at 同类的"从 issue 整行摘出的轻量摘要字段"，可空（历史遗留删除记录/存量未回填单
+      //   自然为 NULL，前端据此回退真实 id，不熔断不报错）。
+      await alterAddMissingCols('sys_issue_delete_audit', [
+        ['issue_derive_root_id', 'INTEGER'],
+        ['issue_derive_seq', 'INTEGER'],
+      ], 'S13-b·B3·矩阵行12 删除审计双记——列表端点子编号展示需要的轻量摘要列（详情端点走 issue_json 整行快照已天然含这两列，无需迁移）');
       // [codex 293 号 H·294 号裁定=报警级登记（阻断不采纳）] 无 CHECK 存量列检测——**有意不阻断启动**：
       //   本检测手段（DDL 文本 includes）是尽力而为的可观测性辅助非精确 oracle（294-M1 自认脆弱可假阳），
       //   脆弱检测+硬阻断=假阳性可瘫痪生产启动，误杀面大于防护收益；「无约束存量列」不存在是**部署
@@ -1955,6 +2166,79 @@ module.exports = (deps) => {
       //   HISTORICAL_SNAPSHOT_MISSING 降级逻辑留给 C3 read-status 端点按此组合判读（不新增标记列，任务书 §批1 口径）。
       //   生产 sys_issues=0 行，本缺口生产不可达；测试库验证见 verify-sys-bug-migration.js。
 
+      // [1d] ⭐ [§15·S12-a] 派生单子编号「#根_序」存量回填（378-H1/H4 + 379-H4' + 380-H4'' 重写·§10-1b 并入
+      //   启动迁移链）：建列（上方 [1a] 已完成）→ 回填（fail-closed 分类）→ 不变量探针 → 建部分唯一索引，
+      //   全链在服务 ready 之前同步完成——`requireSysSchemaReady` 未过则派生/展示端点 503，不存在「代码
+      //   已上线而回填未完成」的写窗口。**无需 sys_schema_migrations 标记**（与 C1/C0 两条需要标记的迁移
+      //   不同）：本步天然幂等——classifySysDeriveNumbering 每次启动都按当前 root/seq 是否为空重新判定
+      //   待回填集合，已回填的行下次直接落入"稳态复核"分支，不会被重复处理，无需额外的一次性标记消歧。
+      //
+      //   ⚠️ 顺序选择（比方案字面"首次回填→稳态校验→不变量探针"更保守）：本实现把"稳态校验"（已回填行的
+      //   根链一致 + seq 正整数复核）与"识别待回填候选"合并进同一次只读 classify 扫描，**在任何写入之前**
+      //   完成——任一类违例（半填/自引用/环/断链/超深/错根/seq 非正）存在即直接熔断、不写任何东西，比"先写
+      //   新增的再统一校验全库"更干净：不需要回答"这批刚写的号是否也要因为别处的历史脏数据被回滚"。
+      {
+        const classified = await sysDeriveNumbering.classifySysDeriveNumbering(dbAllAsync, dbGetAsync);
+        if (classified.hasViolations) {
+          SYS_SCHEMA_STATE.error = `派生单子编号回填熔断（不自动猜测修复，需人工核实后重启）：${sysDeriveNumbering.formatViolationSummary(classified.violations)}`;
+          logger.error(`[系统迭代 C1] 🚫 ${SYS_SCHEMA_STATE.error} → sys-* 写入口将返 503`);
+          return;
+        }
+        // [预筛 M2 修复] 重复组探针提前到任何写入之前——classifySysDeriveNumbering 只做逐行分类，不做
+        // 跨行 (root,seq) 查重（那不是"某一行的判定"，是族内比对），故重复组这一类违例此前只在写入/建索引
+        // 前才查，与本段头部注释"任一类违例存在即不写任何东西"的声称不符（一批已填行本身若已存在历史
+        // 重复，理论上会先被首次回填的写入动作触碰到，声称与实现不一致）。此处对**已填行**先查一遍，命中
+        // 即与其余类别同等熔断+return；下方建索引前那次保留作纵深（首次回填写入之后的第二道防线，覆盖
+        // "回填写入本身产生重复"这一此处查不到的窗口）。
+        const preWriteDupGroups = await sysDeriveNumbering.findDuplicateSeqGroups(dbAllAsync);
+        if (preWriteDupGroups.length > 0) {
+          SYS_SCHEMA_STATE.error = `派生单子编号迁移：检测到 (derive_root_id, derive_seq) 重复脏数据 ${preWriteDupGroups.length} 组（${preWriteDupGroups.map(g => `root=${g.derive_root_id} seq=${g.derive_seq} ids=${g.ids.map(i => `#${i}`).join(',')}`).join('; ')}），无法继续（写入前探针），请先清理`;
+          logger.error(`[系统迭代迁移] ${SYS_SCHEMA_STATE.error}`);
+          return;
+        }
+        if (classified.toBackfill.length > 0) {
+          // 首次回填候选存在（379-H4' 合法未回填族·origin 非空∧root/seq 双空∧链完整可求根）——单一事务内
+          // 按 (created_at,id) 双键升序赋号 + 初始化/续写根单 derive_seq_alloc（确定性：重跑同输入恒同输出；
+          // 原子性：赋值/alloc 写入任一步失败即整体回滚，下次启动仍是全空族重走首次回填，不留半填族）。
+          const existingAllocRows = await dbAllAsync(
+            `SELECT id, derive_seq_alloc FROM sys_issues WHERE derive_seq_alloc IS NOT NULL`, []);
+          const existingAllocByRoot = new Map(existingAllocRows.map(r => [Number(r.id), r.derive_seq_alloc]));
+          const { assignments, allocByRoot } = sysDeriveNumbering.planFirstBackfillAssignments(
+            classified.toBackfill, classified.alreadyFilled, existingAllocByRoot);
+          await dbRunAsync('BEGIN IMMEDIATE');
+          try {
+            await sysDeriveNumbering.applyFirstBackfillAssignments(dbRunAsync, assignments, allocByRoot);
+            await dbRunAsync('COMMIT');
+            logger.info(`[系统迭代迁移] ✅ 派生单子编号首次回填完成：${assignments.length} 单赋号（${allocByRoot.size} 族），家族根 alloc 已同步初始化/续写`);
+          } catch (e) {
+            try { await dbRunAsync('ROLLBACK'); } catch (_) { /* best-effort */ }
+            throw e;   // 抛到外层 catch → SYS_SCHEMA_STATE.error（可观测·不静默吞）·sys 写入口 503
+          }
+        }
+        // 不变量探针（回填提交后·只读）：derive_seq_alloc ≥ 现存该族 MAX(derive_seq)，且"有子单却 alloc
+        // 未初始化"同样判违例——覆盖"回填写入本身有 bug"或"外部直连 SQL 篡改"两类结构性异常。
+        const allocViolations = await sysDeriveNumbering.findAllocInvariantViolations(dbAllAsync);
+        if (allocViolations.length > 0) {
+          SYS_SCHEMA_STATE.error = `派生单子编号 alloc 不变量被破坏：${allocViolations.map(v => `#${v.id}(${v.reason})`).join('；')}`;
+          logger.error(`[系统迭代 C1] 🚫 ${SYS_SCHEMA_STATE.error} → sys-* 写入口将返 503`);
+          return;
+        }
+        // 建部分唯一索引前脏数据探针（同 corrections.js rework_root_id/rework_seq 同款范式）——**第二道**
+        // （第一道见上方 preWriteDupGroups，写入前对存量已填行查过一次）：正常路径下首次回填的原子赋号 +
+        // 取号写点的单写者串行化应使重复结构性不可达，本道仅覆盖"回填写入本身产生重复"这条第一道查不到
+        // 的窗口，属纵深兜底。
+        const dupGroups = await sysDeriveNumbering.findDuplicateSeqGroups(dbAllAsync);
+        if (dupGroups.length > 0) {
+          SYS_SCHEMA_STATE.error = `派生单子编号迁移：检测到 (derive_root_id, derive_seq) 重复脏数据 ${dupGroups.length} 组（${dupGroups.map(g => `root=${g.derive_root_id} seq=${g.derive_seq} ids=${g.ids.map(i => `#${i}`).join(',')}`).join('; ')}），无法建唯一索引，请先清理`;
+          logger.error(`[系统迭代迁移] ${SYS_SCHEMA_STATE.error}`);
+          return;
+        }
+        await dbRunAsync(
+          `CREATE UNIQUE INDEX IF NOT EXISTS idx_sys_issues_derive_root_seq
+             ON sys_issues(derive_root_id, derive_seq)
+             WHERE derive_root_id IS NOT NULL AND derive_seq IS NOT NULL`);
+      }
+
       // [2] 十表关键列 PRAGMA 复查（抽样锚点，非全字段；[1a]/[1a-2]/[1a-4]/[1a-10] ALTER 后的最新列集）
       //   ⚠️ 表数随 SYS_REQUIRED_TABLES 增长（C2a 起含 sys_issue_delete_audit，上线体统一重构 C0 起含
       //   sys_release_duty_roster）——新增表建完必须同时进 SYS_REQUIRED_TABLES（表在）与本 checks（列全），
@@ -1973,6 +2257,11 @@ module.exports = (deps) => {
         ['sys_issue_delete_audit', SYS_DELETE_AUDIT_KEY_COLS],
         // ← 上线体统一重构 C0（方案 v3.4 §6.2）：排班表，结构全列在模型（同 dev_assignees/delete_audit 首版）。
         ['sys_release_duty_roster', SYS_DUTY_ROSTER_KEY_COLS],
+        // ← 先行上线两步化 S1（方案 20260813_v1.8 §3）：值班执行人集合子表，结构全列在模型（同上）。
+        //   ⚠️ 本表登记同时进本 checks 与上方 SYS_REQUIRED_TABLES 两处（避免重蹈 sys_release_executors
+        //   2.12 段的既有缺口——该表只进了 SYS_REQUIRED_TABLES 未进本 checks，列级半成品态查不出，非本次
+        //   引入、原样指出留待后续处置）。
+        ['sys_fast_release_executors', SYS_FAST_RELEASE_EXECUTORS_KEY_COLS],
       ];
       for (const [tbl, keyCols] of checks) {
         const cols = await new Promise((resolve, reject) => {
@@ -2359,6 +2648,42 @@ module.exports = (deps) => {
     return fmtAt1700(dt);
   }
 
+  // ── 系统迭代·feature ETA 直取（方案 §13·13.1 决策表）：deadline 有效性判定 + 直取落库值 ──────────
+  //   单一收口函数——有效性判定与"直取时会写什么值"共用同一次解析结果，避免两处各算一次可能不一致
+  //   （比如一处判"有效"、另一处算出的候选值却已经过期）。
+  //   归一契约同 §3C.2（normalizeDateOnlyForToleranceCalc 同款：trim 后正则前 10 位起步、不整串交给
+  //   Date() 解析、年月日分量回比对真实日期）——本函数额外解析可选的时分秒（deadline 可能纯日期也可能
+  //   带时分，§3C.2 原函数只关心日期分量、丢弃了时间部分，本函数需要保留时间部分算落库候选值）。
+  //   畸形值（正则不命中/日期不存在）按"当空处理"降级——理论不可达（deadline 已经过 normalizeDeadline/
+  //   normalizeDeadlineDT 校验才能入库），不响亮拦截（沿用 computeEtaDeadlineGapDays 同款"deadline 是
+  //   选填字段，畸形值防御性降级不阻断"哲学）。
+  //   返回：{ present: false } —— deadline 为空/未传/畸形（等同"为空"处理）；
+  //         { present: true, valid, expired, candidateValue } —— present 恒 true 时：
+  //           candidateValue = 若直取会写入的值（带时分原样补秒 / 纯日期补 17:00，与 SLA 默认时刻一致）；
+  //           expired = candidateValue <= nowStr（**等于归已过期**，保守向回退，§13.1 边界钉子）；
+  //           valid = !expired（"有效"行判据：非空 ∧ > 受理时刻）。
+  //   ⚠️ 比较用 candidateValue（即"如果直取会写的那个值"）而非裸日期分量——两者在纯日期场景下必须一致
+  //   （纯日期 deadline 补 17:00 后才做比较，不能拿"00:00"这个从未真正使用过的隐含时刻去判断是否已过期，
+  //   否则会出现"判定有效"但"直取值其实已经过 17:00 判据成立"这类判据与落库值不同源的自相矛盾）。
+  function resolveFeatureDeadlineDirectTake(deadlineRaw, nowStr) {
+    if (deadlineRaw === undefined || deadlineRaw === null) return { present: false };
+    const s = String(deadlineRaw).trim();
+    if (!s) return { present: false };
+    const m = /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?$/.exec(s);
+    if (!m) return { present: false };   // 畸形值：理论不可达，按"当空"降级（不响亮拦截，非本判定的职责）
+    const y = Number(m[1]), mo = Number(m[2]), d = Number(m[3]);
+    const dt = new Date(y, mo - 1, d);
+    if (dt.getFullYear() !== y || dt.getMonth() !== mo - 1 || dt.getDate() !== d) return { present: false };
+    const hasTime = m[4] !== undefined;
+    if (hasTime && (Number(m[4]) > 23 || Number(m[5]) > 59 || (m[6] !== undefined && Number(m[6]) > 59))) return { present: false };
+    const pad = (n) => String(n).padStart(2, '0');
+    const candidateValue = hasTime
+      ? `${m[1]}-${m[2]}-${m[3]} ${pad(Number(m[4]))}:${pad(Number(m[5]))}:${m[6] !== undefined ? pad(Number(m[6])) : '00'}`
+      : `${m[1]}-${m[2]}-${m[3]} 17:00:00`;
+    const expired = candidateValue <= nowStr;   // 定长 'YYYY-MM-DD HH:MM:SS' 字典序比较=时间先后比较（同族既有惯例）
+    return { present: true, valid: !expired, expired, candidateValue };
+  }
+
   // ── 组 C（期望对表与准时统计·SC1·方案 v1.3 §3C.2/§3C.3/§3C.4）：容差 + 超期理由 + 首诺快照 ──
   //   容差档位（C4）：improvement 5 自然日／feature 7 自然日／bug、config **不参与**（不入表=不参与，
   //   而非"容差=0"——两者语义不同：不参与=永不要求理由，容差 0=任何正差都要求理由）。
@@ -2494,6 +2819,128 @@ module.exports = (deps) => {
     return '';
   }
 
+  // ── §14（S11·方案 v1.8·feature 超期完成理由闸）：完成超期 + 理由必填 ────────────────────
+  //   诉求：feature 单实际完成（进入「待验证」）晚于期望完成时间（deadline）3 天及以上时，开发必须
+  //   说明原因。校验器为**专用件**，不塞组 C 共用 helper（[[feedback_same_principle_across_layers]]）
+  //   ——语义差异：阈值"达到 3 即触发"（非组 C"严格大于"）、比较对象是"完成当日 vs deadline"（非
+  //   "ETA vs deadline"）、独立错误码族、独立 timeline 后缀文案（buildCompletionOverrunReasonSummarySuffix
+  //   独立 build 函数，不复用 buildEtaOverrunReasonSummarySuffix 本体）。仅日期分量归一算法与组 C 同族
+  //   复用（normalizeDateOnlyForToleranceCalc，§3C.2 同款：trim 后正则前 10 位起步/不进 Date() 整串
+  //   解析/年月日分量回比对真实日期）——:2402-2410 一带同族契约。
+  const SYS_COMPLETION_OVERRUN_THRESHOLD_DAYS = 3;   // 达到即触发（非严格大于，与组 C 容差判据刻意不同）
+
+  // 纯计算——不抛异常，把"为空/畸形/可计算"三态显式区分给调用方（组 C 的 evaluateEtaOverrun 把空值和
+  // 畸形值统一降级为"不适用"，本函数不能这样做：§14 要求畸形值独立 409，不能与"deadline 未填"混同）。
+  function evaluateCompletionOverrun(nowStr, deadlineRaw) {
+    if (deadlineRaw === undefined || deadlineRaw === null || String(deadlineRaw).trim() === '') {
+      return { state: 'empty', gapDays: null };
+    }
+    const dlM = normalizeDateOnlyForToleranceCalc(deadlineRaw);
+    if (!dlM.ok) return { state: 'malformed', gapDays: null };
+    const nowM = normalizeDateOnlyForToleranceCalc(nowStr);
+    if (!nowM.ok) {
+      // 理论不可达——nowStr 恒为服务器 datetime('now','localtime') 自产字符串；同族校验器纪律要求仍
+      // 显式判断不裸假设（sqlite_date_check_gotcha 沉淀同款精神），响亮失败而非静默吞掉。
+      throw new Error(`evaluateCompletionOverrun: nowStr 归一失败（理论不可达，服务器时钟自产字符串），nowStr=${JSON.stringify(nowStr)}`);
+    }
+    const nowDate = new Date(nowM.y, nowM.mo - 1, nowM.d);
+    const dlDate = new Date(dlM.y, dlM.mo - 1, dlM.d);
+    const gapDays = Math.round((nowDate.getTime() - dlDate.getTime()) / 86400000);
+    return { state: 'ok', gapDays };
+  }
+
+  // 完成超期理由校验（缺一即拒；note 上限复用 ETA_OVERRUN_REASON_NOTE_MAX=300，与超容差理由同源单一
+  // 事实源，非另建常量）。COMPLETION_OVERRUN_REASON_NOTE_TOO_LONG 为本次编码期按既有 ETA_OVERRUN_
+  // REASON_NOTE_TOO_LONG 同款范式补的第三个码——方案原文只点名 CODE_REQUIRED/NOTE_REQUIRED 两个，
+  // 未提及超长场景，按既有同族先例补齐，非擅自扩权限。
+  function validateCompletionOverrunReasonInput(body, gapDays, guidanceSuffix) {
+    const code = typeof (body || {}).completion_overrun_reason_code === 'string' ? body.completion_overrun_reason_code.trim() : '';
+    const note = typeof (body || {}).completion_overrun_reason_note === 'string' ? body.completion_overrun_reason_note.trim() : '';
+    if (!ETA_OVERRUN_REASON_CODES.includes(code)) {
+      // [W5 补齐] guidanceSuffix 仅由 runWGate 调用点传入（见 :2757 一带注释）——excuse/dev-assignees/
+      //   reassign/resume 等 8 处 runWGate 调用均以默认 payload={} 触发本函数（[[feedback_single_flag_dual_
+      //   semantic]] 同族：本函数不知道自己被谁调用，只认得到手的 body），此刻 code 结构性不可能非空，
+      //   本 400 对"当前这个动作"而言无法通过重试同一端点解决——须指路到能真正提供理由的入口，否则用户
+      //   会反复对着 excuse 等端点加 code/note 字段却始终 400（[W5-已知边界] 探针钉死该场景）。
+      const guidance = guidanceSuffix ? `；${guidanceSuffix}` : '';
+      return { ok: false, code: 'COMPLETION_OVERRUN_REASON_CODE_REQUIRED', error: `完成时间超出业务方期望 ${gapDays} 天，请选择超期原因（${ETA_OVERRUN_REASON_CODES.join('/')}）${guidance}` };
+    }
+    if (!note) return { ok: false, code: 'COMPLETION_OVERRUN_REASON_NOTE_REQUIRED', error: '请填写完成超期原因说明' };
+    if (note.length > ETA_OVERRUN_REASON_NOTE_MAX) {
+      return { ok: false, code: 'COMPLETION_OVERRUN_REASON_NOTE_TOO_LONG', error: `完成超期原因说明不超过 ${ETA_OVERRUN_REASON_NOTE_MAX} 字` };
+    }
+    return { ok: true, code, note };
+  }
+
+  // 单一收口函数——判定 +（超期时）理由必填校验 + 组装 SET 片段，供唯一写点复用（runWGate，
+  // 【2026-08-14 S11 预筛订正】闸边迁移后 case 'liaison_test_pass' 已撤闸，见该处订正注释）。
+  // type≠'feature' 直接短路清空两列（improvement/bug/config 结构性不受本闸约束，verify 对照组据此
+  // 断言零受影响）。
+  //   返回 { setSql, params, needReason, gapDays, reasonCode, reasonNote }；deadline 畸形直接抛
+  //   SysTransitionError(409,'SYS_DEADLINE_MALFORMED',...)——调用方须在事务内、真写 status 之前调用，
+  //   便于整事务回滚（同 resolveEtaOverrunReasonForWrite 头部注释同款纪律，400/409 = 事务未提交）。
+  function resolveCompletionOverrunReasonForWrite({ type, deadlineRaw, nowStr, body, guidanceSuffix }) {
+    if (type !== 'feature') {
+      return { setSql: 'completion_overrun_reason_code = ?, completion_overrun_reason_note = ?', params: [null, null], needReason: false, gapDays: null, reasonCode: null, reasonNote: null };
+    }
+    const evalResult = evaluateCompletionOverrun(nowStr, deadlineRaw);
+    if (evalResult.state === 'malformed') {
+      // [§14·S11 MED-3] 文案可达性核准（2026-08-14）：本函数唯一调用方=runWGate，触发态恒=「开发中」
+      //   （⑤/⑥/⑦ 三条边均要求 inDev，见该函数）——"编辑口"（edit-in-revision）对变更流 B 档
+      //   （EDIT_TIER_B_CHANGE=['开发中']）恰好开放 deadline 字段（EDIT_TIER_B_FIELDS 含 deadline），
+      //   故本文案不依赖"先打回回开发中"这类额外前置动作，用户当下即可走编辑口——可达性核准通过，
+      //   文案原样保留（闸边迁移前若挂在 liaison_test_pass，触发态是「待对接测试」，编辑口彼时不开放
+      //   deadline，文案会需要"先打回"这层前提；迁移后此前提已消失，勿再脑补加回）。存量脏数据面证据
+      //   见 scripts/probe-sys-deadline-normalize.js（0 行归一失败，2026-08-14 实测）。
+      throw new SysTransitionError(409, 'SYS_DEADLINE_MALFORMED', '期望完成时间格式异常，无法判定完成超期天数——请先通过编辑口修正期望完成时间后再报完工');
+    }
+    if (evalResult.state === 'empty' || evalResult.gapDays < SYS_COMPLETION_OVERRUN_THRESHOLD_DAYS) {
+      // 不满足条件 ⇒ 恒清空两列（防打回重提残留，C7 同哲学）。
+      return {
+        setSql: 'completion_overrun_reason_code = ?, completion_overrun_reason_note = ?',
+        params: [null, null], needReason: false, gapDays: evalResult.state === 'ok' ? evalResult.gapDays : null,
+        reasonCode: null, reasonNote: null,
+      };
+    }
+    // [§14·S11 MED-1] 400 响应体携带 need_reason:true + gap_days——调用方（submit/runWGate 其余 8 处）
+    //   前端据此判定要展开理由块（reveal），不必再靠自己预判 deadline 与当日差这套 UX-only 逻辑去猜；
+    //   服务端判定结果是权威（双层校验里"服务端为准"半条的落地，见方案 §14.3）。
+    const reasonCheck = validateCompletionOverrunReasonInput(body, evalResult.gapDays, guidanceSuffix);
+    if (!reasonCheck.ok) throw new SysTransitionError(400, reasonCheck.code, reasonCheck.error, { need_reason: true, gap_days: evalResult.gapDays });
+    return {
+      setSql: 'completion_overrun_reason_code = ?, completion_overrun_reason_note = ?',
+      params: [reasonCheck.code, reasonCheck.note], needReason: true, gapDays: evalResult.gapDays,
+      reasonCode: reasonCheck.code, reasonNote: reasonCheck.note,
+    };
+  }
+
+  // timeline 后缀——**独立 build 函数**，不复用 buildEtaOverrunReasonSummarySuffix 本体（方案 §14.2
+  // 明文要求）。文案与组 C 刻意区分："超出期望完成 N 天"（完成阶段·本函数）vs 组 C 的"超出期望 N 天"
+  // （改期阶段），避免同一句式在时间线上出现两种不同语义的"超出期望"混淆读者——§13 过期回退行是
+  // "受理时期望已过期"（eta_auto_sla），本节是"完成晚于期望"（completion_overrun_reason），两码两
+  // 文案不构成重复告警。needReason=false 时返回空串（不满足条件的分支不追加任何后缀——§14 无"清除"
+  // 叙事，与组 C return/reopen 打回叙事不同源，本闸的"清空"是静默的，无需在 timeline 里明说"已清除"）。
+  function buildCompletionOverrunReasonSummarySuffix(completionReasonResult) {
+    if (!completionReasonResult || !completionReasonResult.needReason) return '';
+    return `（超出期望完成 ${completionReasonResult.gapDays} 天）——${completionReasonResult.reasonCode}：${completionReasonResult.reasonNote}`;
+  }
+
+  // [§14·S11·成组约束] completion_overrun_reason_code/note 两列同空同非空——不允许"有码无文字"或
+  //   "有文字无码"半成品态（同 fast_release 授权三件套 fastReleaseGroupInvariantViolations 先例范式，
+  //   DB 级 CHECK 不做，登记接受，成组约束靠服务层写点纵深（resolveCompletionOverrunReasonForWrite
+  //   两条出口恒同时写/同时清两列，结构上不会产出半成品）+ verify 全库扫描探针双层保障）。纯函数，
+  //   入参一行（或字段子集），返回违例文案数组（空=合法）；供 verify 全库扫描探针直调，不与写点判据
+  //   各写一份漂移。
+  function completionOverrunGroupInvariantViolations(row) {
+    const violations = [];
+    const codePresent = row.completion_overrun_reason_code !== null && row.completion_overrun_reason_code !== undefined && row.completion_overrun_reason_code !== '';
+    const notePresent = row.completion_overrun_reason_note !== null && row.completion_overrun_reason_note !== undefined && row.completion_overrun_reason_note !== '';
+    if (codePresent !== notePresent) {
+      violations.push(`completion_overrun_reason_code/note 非同空同非空（code=${JSON.stringify(row.completion_overrun_reason_code)}, note=${JSON.stringify(row.completion_overrun_reason_note)}）`);
+    }
+    return violations;
+  }
+
   // ── §3C.7 通知触发谓词扩展（用户拍板 P10 终裁·B3）─────────────────────────────────────
   //   原判据「超容差 ∧ 理由变化（reasonCode/reasonNote 任一变）」被 codex 365 号 MED 指出遗漏一种
   //   真实场景：同一理由标签/文字原样不动，把 ETA 从一个超容差日期改到另一个仍超容差的新日期——业务方
@@ -2562,7 +3009,8 @@ module.exports = (deps) => {
       if (gapDays <= 0) {
         achievementNumerator++;
       } else if (overdueExamples.length < SYS_ETA_STATS_OVERDUE_EXAMPLE_LIMIT) {
-        overdueExamples.push({ id: row.id, title: row.title, type: row.type, deadline: row.deadline, released_at: row.released_at, overdue_days: gapDays });
+        // [S13-b·B3·矩阵行13] 透传 derive_root_id/derive_seq——前端 siIssueDisplayNo 消费需要两列成组。
+        overdueExamples.push({ id: row.id, title: row.title, type: row.type, deadline: row.deadline, released_at: row.released_at, overdue_days: gapDays, derive_root_id: row.derive_root_id, derive_seq: row.derive_seq });
       }
     }
     return {
@@ -2804,18 +3252,21 @@ module.exports = (deps) => {
   //   诉求：前后端都没有 commit 的单（配置/数据/文档类工作），验收通过即生效，不必挂上线批次。
   const SYS_ONLINE_STATUS = '已上线';                          // 与批次发布路径同值（§10.1 字段契约：status 一列不分家）
   const ONLINE_SOURCE_NO_COMMIT = 'no_commit_acceptance';      // online_source 唯一由本路径写入的字面量
-  // [组 B·SB2·先行上线直上] online_source 第三个字面量——submit 端点 direct_release=true 分支唯一写入点
-  //   （方案 v1.3 §3.2 原文字面量）。与 ONLINE_SOURCE_NO_COMMIT 同款"值域开放无 CHECK"设计（见 online_source
-  //   列注释三条理由），本常量只是把字面量集中到一处、供 deriveOnlineSourceKind 与写点共用，不引入新约束。
+  // [组 B·SB2·先行上线直上] online_source 第三个字面量——原为 submit 端点 direct_release=true 分支唯一
+  //   写入点（方案 v1.3 §3.2 原文字面量），该分支已随两步化方案 §4-2「整体替代」拍板拆除（S2-2）。
+  //   本常量**保留不删**：online_source='authorized_fastlane' 是"经先行上线授权而上线"这一业务事实的
+  //   标识值，被 deriveOnlineSourceKind/fastlaneAcceptanceInvariantViolations/补验收端点等多处消费
+  //   （详见该常量后续引用），两步化最终翻牌步骤（S3+ 待落地）预期仍会写同一个值——只是换一个写入点，
+  //   语义不变，故常量本身不属于"随分支消亡"的范围，只是写入点从 submit 迁移。与 ONLINE_SOURCE_NO_COMMIT
+  //   同款"值域开放无 CHECK"设计（见 online_source 列注释三条理由）。
   const ONLINE_SOURCE_AUTHORIZED_FASTLANE = 'authorized_fastlane';
-  // timeline summary——与 hotfix 文案刻意区分（hotfix 相关文案用"应急建单/应急一键"，本路径用"先行上线/
-  //   直上"，grep 全文无重叠，见 verify 报告）。action_code 字面量 'fast_release_direct_online' 直接写在
-  //   submit 端点的 INSERT INTO sys_issue_timeline 语句里（不经变量绑定）——同本文件 29 处既有写入点中
-  //   27 处的惯例：verify-sys-timeline-label-coverage.js 的静态解析器只认字面量/受限变量形态，绑一个定义在
-  //   路由处理函数之外（本 summary 常量所在的外层工厂函数作用域）的标识符会撞该解析器
-  //   resolveIdentifierLiterals 的"仅在调用点所属 function 声明体内搜索"限制而误报，故 action_code 不比照
-  //   summary 这样抽常量。
-  const SYS_FAST_RELEASE_DIRECT_ONLINE_SUMMARY = '先行上线直上（授权直上，跳过待验证/待上线）';
+  // [组B·S2-2·拆直上分支] SYS_FAST_RELEASE_DIRECT_ONLINE_SUMMARY 常量（旧 timeline summary 文案）与
+  //   action_code 字面量 'fast_release_direct_online'（原直接写在 submit 端点 INSERT INTO
+  //   sys_issue_timeline 语句里，不经变量绑定）均已随写入点删除——该分支唯一使用方已不存在。旧码消费点
+  //   处置详见 docs/local/系统迭代/S1_fast_release_direct_online_消费点处置表_20260814.md「主会话终裁」节
+  //   （#4/#1 两行）。新码 `fast_release_staged`（S2-1 挂牌事件）改用变量绑定写法（见 submit 端点内挂牌
+  //   逻辑），未采用本处旧例的"内联字面量避开静态解析器作用域限制"写法——因为挂牌事件的 summary 本就
+  //   是运行时拼接的动态字符串（视值班情况而定），本就不可能抽成模块级常量，不存在该顾虑。
   // ⭐ [C9-fix2 H1] 免上线直翻边的**唯一合法起点**——引擎自调准入判定的门（见 sysIssueTransition 内
   //   「[1b] C9 裁决引擎自调」）。刻意起一个作用域写死在名字里的常量名（而非通用的 SYS_VERIFY_STATUS）：
   //   它只表达"C9 这条边从哪来"，不是本模块「待验证」这个状态的通用别名，避免后人拿它去替换别处字面量。
@@ -3165,7 +3616,47 @@ module.exports = (deps) => {
   //   决策树（⑤ 已删，D21：electRepresentative 结构性保证全员 excused 场景不可达，见方案 §3.0 详述），
   //   improvement/bug 维持原有 DEV↔VERIFY 二元判定不变（本次改造范围严格收窄为 feature-only，不触碰
   //   两者既有稳定路径）。
-  async function runWGate(issueId, issueType, currentStatus, actor) {
+  // [§14·S11 MED-6+LOW-1·2026-08-14 预筛调用面如实化] 全仓 `await runWGate(` 共 **10 处**调用点（非旧
+  //   注释曾误记的"9 处"）。逐点列出 file:line + 可达性（能否触发 [enteringForward && issueType===
+  //   'feature'] 分支，即本函数是否会真正评估一次完成超期闸）+ payload 是否转发 + 写点清单处置：
+  //   ┌─ 可达（7 处，均可能触发闸判定）───────────────────────────────────────────────
+  //   │ · submit          :9140（本文件其一）  payload=req.body（唯一转发方）
+  //   │ · reassign         :7059              payload={}（纯移除差量可使剩余在册恰好全完成）
+  //   │ · dev-assignees DELETE :7213           payload={}（移除末一名 pending 是⑤/⑥经典触发形态）
+  //   │ · excuse            :7260              payload={}（开脱末一名 pending，D11 既有场景）
+  //   │ · estimate           :11981（`if (row.gate_deferred_at)` 门内）payload={}
+  //   │ · feasibility        :12275（同款门）  payload={}
+  //   │ · unblock            :12413（同款门）  payload={}
+  //   │   ⚠️ estimate/feasibility/unblock 三处结构相同：仅在 gate_deferred_at 非空（此前 GATE 判定"全
+  //   │   完成但资格未过"）时才重跑本函数——各自解决 isGateEligibleForVerify 的其中一个资格维度
+  //   │   （ETA/工期缺失 → estimate；工期/评估未过 → feasibility；blocked=1 → unblock），三者均可能是
+  //   │   "压垮资格闸的最后一根稻草"，故均可达。
+  //   ├─ 不适用（3 处，结构性/语义性排除）────────────────────────────────────────────
+  //   │ · dev-assignees POST（加人）:7140      addOrReaddMembers 恒 INSERT dev_status='pending' 新行
+  //   │   （含"复活已移除成员"分支，见该函数——不继承旧状态）——只要 added.length>0，pendingCount 必
+  //   │   >0，allComplete 结构性不可能在本操作后成立；all-skip（全部已在册的空操作）不改变任何
+  //   │   eligibility 维度（ETA/blocked/feasibility/effort 均不由本端点触碰），不会让此前被 defer 的
+  //   │   单突然变得合格——两种情形都到不了 enteringForward 分支。
+  //   │ · supersede-excuse :7335              同理：先移除旧 excused 行、恒插入一条新 dev_status='pending'
+  //   │   行（"开脱恢复=重新给一次机会"，§4.4 既有语义），allComplete 在本操作后结构性恒 false。
+  //   │ · resume（gate_deferred_at 消费分支）:5822   ⚠️ 与上方三个"资格门"同构（`if (row.gate_deferred_at
+  //   │   && toStatus ∈ DEV 族)`），**代码路径确实会触发本函数并可能评估闸**（hold 保留 gate_deferred_at，
+  //   │   见该分支注释"hold 前已被 GATE 判定…hold 本身保留该标记"）——技术可达性与 estimate/feasibility/
+  //   │   unblock 三处并无二致。列为"不适用"是**写点清单审计口径**而非代码豁免（[§14·S11 MED-4]）：
+  //   │   resume 消费的 gate_deferred_at 标记，其锚定的"全员完成"事实发生在 **hold 之前**——resume 本身
+  //   │   不是开发在这一刻新完成了什么工作，是把此前已存在、被暂缓打断的完成事实"解冻"、重新走一遍
+  //   │   资格闸，语义上是"迟到的确认"而非"新的报完工"。last_completed_at 的 SQL 白名单（本文件
+  //   │   :8077 一带，`action_code IN (NULL, 'liaison_test_pass', 'liaison_test_skip_excused',
+  //   │   'liaison_test_skip_liaison')`）已天然覆盖这条路径产出的行（mirrorActionCode 由**结果分支**
+  //   │   决定，与触发源无关，无需为 resume 单独开白名单条目）——本条注记只是审计口径的显式登记，不
+  //   │   要求代码对 resume 做任何特殊分支处理，该走的判定/UPDATE/timeline 一分不少照走。
+  //   └────────────────────────────────────────────────────────────────────────────
+  //   payload 转发面（不变，逻辑同旧注释）：submit 转发自身 req.body（能真正承载 completion_overrun_
+  //   reason_code/note）；其余 9 处传隐式默认空对象（这些端点的请求体天然不携带该字段，UI 无对应输入
+  //   框）。⚠️ 已知窄边界（如实登记，非本批修复范围）：若 7 处"可达"里 submit 之外的任一处恰好命中
+  //   闸判定**且**该单同时完成超期 ≥3 天，会因 payload 缺失理由字段而 400（W5 已补统一指路文案，见
+  //   guidanceSuffix 消费点）——用户当场无法在该操作面提供理由，需改走能修 deadline/加成员的入口。
+  async function runWGate(issueId, issueType, currentStatus, actor, payload = {}, isSubmitTrigger = false) {
     const inDev = SF.isInFamily(issueType, currentStatus, 'DEV');
     const inVerify = SF.isInFamily(issueType, currentStatus, 'VERIFY');
     // LIAISON_TEST 对 improvement/bug 恒空数组（status-families.js）→ isInFamily 恒 false，两者不受影响。
@@ -3183,6 +3674,8 @@ module.exports = (deps) => {
     let mirrorActionCode = null;   // 仅 ⑥ 降级路径写专用 actionCode，其余 GATE 转移恒 null（既有行为不变）
     let extraCasSql = '';          // ⑦ 进入待对接测试：周期号自增 + 通知列组重置，同一 CAS 内原子写入
     let extraCasParams = [];
+    let wGateCompletionOverrunMarkerSummary = null;   // [§14·S11] 非 null → 触发独立 action_code='completion_overrun_reason' 留痕行
+    let wGateCompletionOverrunPayloadJson = null;   // [codex 395 预筛 NEW-3] 与上一变量成对——结构化 {gap_days,reason_code,reason_note}，同一条 note 行的 payload_json 列
 
     if (issueType === 'feature') {
       if (invalidStatusCount > 0) {
@@ -3266,6 +3759,10 @@ module.exports = (deps) => {
         // 弹回（§3.1 点4"脏数据防御分支"）：新 pending 成员打破全完成态 → 回开发中。LIAISON_TEST 侧
         //   正常业务路径下花名册七写入口在该态已 409（族矩阵不含 LIAISON_TEST），理论不可达，此处仅兜底；
         //   VERIFY 侧同既有行为（弹回逻辑不变）。
+        //   ⚠️ [S3 订正] 先行上线仅服务 bug 类型（B1 拍板既有事实），本分支属于 feature 专属决策树
+        //   （外层 `if (issueType === 'feature')`），fastlane 弹回×done 闸门永远不会在此命中——闸门
+        //   实装在下方 else 分支（improvement/bug 二元逻辑）的同名弹回行，勿在此重复加（首版曾误加在
+        //   这里，实测 [18b] 红灯当场揪出：bug 类型走的是 else 分支，本分支代码对 bug 单彻底不可达）。
         if (pendingCount > 0) {
           targetStatus = SF.SYS_DEV_STATUSES[issueType][0];
         }
@@ -3274,7 +3771,7 @@ module.exports = (deps) => {
         await dbRunAsync(`UPDATE sys_issues SET gate_deferred_at = NULL WHERE id = ? AND gate_deferred_at IS NOT NULL`, [issueId]);
       }
     } else {
-      // improvement/bug：原有二元逻辑逐字保留，本次改造不触碰。
+      // improvement/bug：原有二元逻辑逐字保留，本次改造不触碰（弹回分支内新增 S3 闸门除外，见下）。
       if (inDev && allComplete) {
         const eligible = await isGateEligibleForVerify(issueId, issueType);
         if (eligible) {
@@ -3286,6 +3783,48 @@ module.exports = (deps) => {
           );
         }
       } else if (inVerify && pendingCount > 0) {
+        // [S3·§5b 第14行·弹回×done 闸门] 枚举结论（现场逐端点核对 MEMBER_ACTION_FAMILY_MATRIX +
+        //   实际写入逻辑，详见 S3 交付报告枚举表）：VERIFY 族允许调用且真能产生新 pending 行、从而
+        //   触发本弹回分支的端点**有三个**（非单一入口，本分支覆盖 improvement/bug，先行上线仅 bug
+        //   适用但三端点对 bug 单均可达）——
+        //     · POST /dev-assignees（add：新成员默认 pending，族矩阵 add 含 VERIFY）
+        //     · POST /dev-assignees/:id/supersede-excuse（开脱恢复=新插 pending 行，族矩阵 supersede
+        //       含 VERIFY，该端点自身注释已直书"VERIFY→DEV"）
+        //     · POST /reassign（改派 toAdd 新成员同样 pending，族矩阵 reassign 含 VERIFY，bug 走基础
+        //       矩阵这一路，非 feature/improvement 的 type-override）
+        //   DELETE /dev-assignees/:id（remove）虽也允许 VERIFY 调用，但该端点自身已有防御性检查
+        //   （"剩余存在未完成→拒绝"，:6649-6654，codex 384 预筛 LOW-2 订正行号——曾误指 :6507）结构性
+        //   排除"移除后仍有 pending"这条组合，不是候选；
+        //   excuse 族矩阵不含 VERIFY，结构性不可达；estimate/feasibility/unblock/resume 的 runWGate
+        //   调用点均只在 DEV 族触发（gate_deferred_at 语义上只产自 inDev 分支），非候选。
+        //   **多入口 ⇒ 按方案裁定改在本处单点闸**（runWGate 弹回分支内），不逐端点前置闸——免除"新增
+        //   第四个能在 VERIFY 加 pending 行的端点时忘记补闸"这类漏网风险，三端点各自的 runWGate 调用
+        //   点全部会流经这一支代码，一次覆盖三处。
+        //   闸门语义：若该单当前存在活跃先行上线授权 ∧ 已有执行人标记完成（exec_status='done'），说明
+        //   翻牌流程已进行到"至少一人确认执行"这一步——此刻仍放行弹回会让状态机与已发生的部分执行
+        //   事实脱节（花名册被打回处理中，主状态离开「待验证」，但执行人集合仍挂着"已确认"的记录，
+        //   后续 confirm 复核 status='待验证' 时会直接被自身的条件更新拒绝，形成"半执行、半失效"的
+        //   悬空态）。故此刻直接拒绝这次会导致弹回的动作本身（409，不触碰共享状态机——本次花名册
+        //   差量与本 UPDATE 所在的调用方事务一并回滚，等价于这次加人/开脱恢复/改派操作从未发生）。
+        //   无 done 行（S2 pending-only 清场已兜底的常态：挂牌后从未有人确认执行，或曾经确认过但已
+        //   随跨轮清场被软删）弹回照常放行，不受本闸影响——这是绝大多数弹回场景，本闸只掐"执行已在
+        //   进行中"这一条狭窄的高风险路径。⚠️ issueType==='bug' 判据是本闸唯一的类型钳制——improvement
+        //   结构上不可能有活跃先行上线授权（B1 拍板仅 bug 类，授权端点已挡 type），但仍显式判一遍
+        //   type，不完全依赖"结构上不可能"这条隐含前提（同挂牌闸门 codex 383-M2 同款纵深防御精神）。
+        if (issueType === 'bug') {
+          const authProbeRow = await dbGetAsync(
+            `SELECT fast_release_auth_at, fast_release_revoked_at, fast_release_consumed_at, released_at, online_source, reopened_at
+               FROM sys_issues WHERE id = ?`, [issueId]);
+          if (authProbeRow && isActiveFastReleaseAuth(authProbeRow)) {
+            const doneExecRow = await dbGetAsync(
+              `SELECT 1 AS x FROM sys_fast_release_executors WHERE ${sysFastReleaseExecActiveWhere()} AND exec_status = 'done' LIMIT 1`,
+              [issueId]);
+            if (doneExecRow) {
+              throw new SysTransitionError(409, 'FASTLANE_DEPLOY_IN_PROGRESS',
+                '先行上线执行已在进行中（存在已确认执行的执行人），暂不可对开发花名册做会导致弹回处理中的操作，请等待翻牌完成或联系管理员处理');
+            }
+          }
+        }
         targetStatus = SF.SYS_DEV_STATUSES[issueType][0];
       }
       if (inDev && !allComplete) {
@@ -3304,9 +3843,136 @@ module.exports = (deps) => {
     // 进 VERIFY 或 LIAISON_TEST（两者都是"决策树往前走通过 GATE"的方向）时原子清除 gate_deferred_at；
     // 弹回 DEV 不清（弹回≠"资格问题已解决"，是"新增未完成成员"，与 deferred 语义无关，沿用既有口径）。
     const liaisonTestStatusForType = (SF.SYS_LIAISON_TEST_STATUSES[issueType] || [])[0];
-    const enteringForward = targetStatus === SF.SYS_VERIFY_STATUSES[issueType][0]
+    const enteringVerify = targetStatus === SF.SYS_VERIFY_STATUSES[issueType][0];
+    const enteringForward = enteringVerify
       || (!!liaisonTestStatusForType && targetStatus === liaisonTestStatusForType);
     const clearDeferredSql = enteringForward ? ', gate_deferred_at = NULL' : '';
+
+    // [§14·S11]【2026-08-14 S11 预筛订正·闸边迁移】feature 超期完成理由闸——本函数是"开发报完工"边
+    //   的唯一权威落点，覆盖 feature 三条开发侧触发边：⑤/⑥ 降级路径（开发中直达待验证，跳过对接测试段）
+    //   + ⑦ 正常路径（开发中进待对接测试，"开发报完工"这件事本身在这条边发生——submit 弹窗理由块也
+    //   挂在这条边，见方案 §14.3）。判据从 `enteringVerify`（仅 ⑤/⑥）**收窄改迁移**为 `enteringForward`
+    //   （⑤/⑥ ∪ ⑦，上方已算好，语义="决策树往前走通过 GATE 的方向"，天然与"开发侧完成事件"三条边
+    //   重合，无需再定义第三个变量）：
+    //   - 原按方案首版理解，闸挂在 case 'liaison_test_pass'（待对接测试→待验证，对接人验收通过边）+
+    //     本函数 ⑤/⑥ 边——经预筛发现"待验证"边的正常路径操作人是**对接人**（liaison_test_pass 由对接人
+    //     触发），与 F4 口径"当事人自述"（开发本人报完工）相悖，且 gap 基准也随之錯位（对接测试段耗时
+    //     被计入了"开发超期"）。
+    //   - 订正后：liaison_test_pass **撤闸**（已删该 case 内的闸块，见该处订正注释）；本函数把判据从
+    //     `enteringVerify` 换成 `enteringForward`，⑦ 边（进 LIAISON_TEST）与 ⑤/⑥ 边（进 VERIFY）同受判定
+    //     ——三条边共用同一次 nowStr（下方，即"报完工时刻"）、同一份理由 UPDATE/timeline 逻辑，不因目标
+    //     态是 VERIFY 还是 LIAISON_TEST 而分叉写法（judge 一次，两种落点共用同一判定结果）。
+    //   时钟单点（378-M2）：本次转移专用的一次 datetime('now','localtime')，只在真正需要时才查（惰性），
+    //   不给不受影响的多数 runWGate 调用（improvement/bug/未推进方向）增加无谓查询开销。
+    let completionSetSql = '';
+    let completionSetParams = [];
+    let completionOverrunInfo = null;   // [§14·S11 MED-1] 非 null → 供最终 return 透出 need_reason/gap_days（200 响应体亦带判定信息）
+    if (enteringForward && issueType === 'feature') {
+      const completionRow = await dbGetAsync(`SELECT deadline, gate_deferred_at FROM sys_issues WHERE id = ?`, [issueId]);
+      const completionNowRow = await dbGetAsync(`SELECT datetime('now','localtime') AS n`);
+      const completionNowStr = completionNowRow && completionNowRow.n;
+      if (!completionNowStr) throw new SysTransitionError(500, 'COMPLETION_NOW_QUERY_FAILED', '获取服务器时间失败（内部错误）');
+      // [codex 395 预筛 NEW-1·2026-08-14 defer 方案] 三分支（方案 F4 增补）：
+      //   ①payload 携有效理由 ⇒ 现行必填校验+写列+timeline+放行转移（resolveCompletionOverrunReasonForWrite
+      //     不抛异常这一支，完全不变）。
+      //   ②触发方=submit 但理由缺/非法 ⇒ 现行 400（开发在场、submit 请求体有输入面，能当场重试补填）。
+      //   ③非 submit 触发且无理由载体（excuse/dev-assignees/reassign/resume 及 estimate/feasibility/
+      //     unblock 的 gate_deferred_at 消费分支）⇒ 不 400、不放行——复用既有 gate_deferred_at 挂起
+      //     机制+专属 timeline note，操作本身（如 excuse/加人）仍正常 200 成功，只是"进入待验证/待对接
+      //     测试"这一步被结构性拦停，等开发本人 submit 携理由才能真正完成转移（同"开发报完工"这个统一
+      //     叙事——理由本就该由开发自己交代，不该被别人代填/代跳过）。
+      //   ①②沿用同一次 resolveCompletionOverrunReasonForWrite 调用（W5 指路文案继续供②消费）；③靠
+      //   try/catch 拦截该函数的"理由缺失"三码（不拦截 SYS_DEADLINE_MALFORMED 409——数据完整性问题，
+      //   与"是谁触发"无关，两分支都应响亮失败，原样向上抛）。
+      let completionReasonResult = null;
+      let completionDeferGapDays = null;   // 非 null → 命中分支③
+      try {
+        completionReasonResult = resolveCompletionOverrunReasonForWrite({
+          type: issueType, deadlineRaw: completionRow && completionRow.deadline, nowStr: completionNowStr, body: payload,
+          guidanceSuffix: '可先修改期望完成时间，或补充开发成员后由成员报完工时填写原因',
+        });
+      } catch (completionErr) {
+        const REASON_MISSING_CODES = ['COMPLETION_OVERRUN_REASON_CODE_REQUIRED', 'COMPLETION_OVERRUN_REASON_NOTE_REQUIRED', 'COMPLETION_OVERRUN_REASON_NOTE_TOO_LONG'];
+        if (completionErr instanceof SysTransitionError && REASON_MISSING_CODES.includes(completionErr.code) && !isSubmitTrigger) {
+          completionDeferGapDays = (completionErr.extra && typeof completionErr.extra.gap_days === 'number') ? completionErr.extra.gap_days : null;
+        } else {
+          throw completionErr;   // 分支②（submit 触发，行为不变）或 SYS_DEADLINE_MALFORMED（409，两分支通用）。
+        }
+      }
+      if (completionDeferGapDays !== null) {
+        // 分支③：不放行本次转移——targetStatus 原值作废（不推进 status），仅复用既有 gate_deferred_at
+        //   挂起机制（COALESCE 保留首次 defer 时刻，同"④落 gate_deferred_at"既有 UPDATE 逐字同款范式，
+        //   与 estimate/feasibility/unblock 三处既有消费点共用同一套"等资格满足再重跑 runWGate"基建——
+        //   本场景的"资格"新增了一维："完成超期理由已补"，结构上与既有 blocked/ETA/工期三维完全同构）
+        //   + 独立 completion_overrun_reason timeline note（区别于分支①"已写入理由"的 note，本条文案
+        //   明确"待补"，不假装已经处置）。操作本身（本次 runWGate 调用的发起方，如 excuse/加人）不受
+        //   影响，正常走到自己的 200 成功响应——本函数早退返回 changed:false，调用方据此不推进 main_status
+        //   展示（与既有"GATE 未触发"分支同一响应体契约，前端无需识别新状态）。
+        // 【2026-08-14 codex 396 NEW-1】首次挂起才留痕——此前每次命中本分支都无条件 INSERT 一条 note，
+        //   而非 submit 触发（reassign/dev-assignees/excuse/estimate 等 gate_deferred_at 消费点）反复
+        //   命中同一挂起态是常态（如管理员连续加/减多名成员，每次 roster 仍全完成但理由仍缺，都会
+        //   重跑到这里）——同一次挂起被反复留痕，纯审计噪声，不承载新信息（gap_days 等判定结果不变）。
+        //   判据＝"此前已处于挂起态"（completionRow.gate_deferred_at 在本次 UPDATE 之前已非空，即本次
+        //   不是首次进入挂起）**且**"已存在一条未消费的挂起注记行"（同 issue 下 action_code=
+        //   'completion_overrun_reason' 且 payload_json.reason_code 仍为 null 的最新一行——reason_code
+        //   非 null 说明理由已补且已由分支①写过"已处置"note，此刻 gate_deferred_at 理应已被下方成功
+        //   转移的 UPDATE 清空，结构上不会与本分支同时成立，此处仍显式查证据而非只信标志位，避免"标志位
+        //   非空但注记行因异常/迁移缺失"这类边缘态下把审计轨迹漏没了）——两条同时成立才跳过 INSERT，
+        //   单独标志位非空不足以断定"确有前序注记"，双重确认防止误判为重复而漏记首条。
+        const alreadyDeferredBeforeThisCall = !!(completionRow && completionRow.gate_deferred_at);
+        let skipDuplicateDeferNote = false;
+        if (alreadyDeferredBeforeThisCall) {
+          // 【2026-08-14 codex 397·周期限定】注记行必须晚于本轮挂起时刻（created_at >= gate_deferred_at）——
+          //   历史轮次遗留的 reason_code=null 注记（异常/迁移边缘态）不得替本轮作证，否则误判"已留痕"
+          //   而漏记本周期审计轨迹。并发面无需额外原子保障：runWGate 全部 10 处调用点均持
+          //   sysBeginImmediate（进程内 mutex + BEGIN IMMEDIATE 全库写串行化，S3 预筛已逐点核对），
+          //   本查询与随后的 INSERT 恒在同一持锁事务内，跨请求交错结构性不可达——证据落字非声称。
+          const existingUnconsumedDeferNote = await dbGetAsync(
+            `SELECT id FROM sys_issue_timeline
+              WHERE issue_id = ? AND action_code = 'completion_overrun_reason'
+                AND json_extract(payload_json, '$.reason_code') IS NULL
+                AND created_at >= ?
+              ORDER BY id DESC LIMIT 1`,
+            [issueId, completionRow.gate_deferred_at]
+          );
+          skipDuplicateDeferNote = !!existingUnconsumedDeferNote;
+        }
+        await dbRunAsync(
+          `UPDATE sys_issues SET gate_deferred_at = COALESCE(gate_deferred_at, datetime('now','localtime')) WHERE id = ?`,
+          [issueId]
+        );
+        if (!skipDuplicateDeferNote) {
+          // [codex 395 预筛 NEW-3] payload_json 结构化存 {gap_days, reason_code, reason_note}——本条 defer
+          //   note 尚无理由（reason_code/reason_note 恒 null），但 gap_days 结构化写入，供前端 kv 优先读取
+          //   （不必解析 summary 文本正则提数字），与分支①"已有理由"的 note 共用同一 JSON schema（字段集
+          //   合一致，只是取值不同），读侧不必按 action_code 语义分叉解析逻辑。
+          await dbRunAsync(
+            `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, operator_id, operator_name, payload_json)
+             VALUES (?, 'note', ?, 'completion_overrun_reason', ?, ?, ?)`,
+            [issueId, `超期完成待开发报完工补原因（超出期望 ${completionDeferGapDays} 天）`, actor ? actor.id : null, actor ? actor.name : 'system',
+             JSON.stringify({ gap_days: completionDeferGapDays, reason_code: null, reason_note: null })]
+          );
+        }
+        return { changed: false };
+      }
+      completionSetSql = `, ${completionReasonResult.setSql}`;
+      completionSetParams = completionReasonResult.params;
+      const suffix = buildCompletionOverrunReasonSummarySuffix(completionReasonResult);
+      if (suffix) {
+        wGateCompletionOverrunMarkerSummary = `完成超期${suffix}`;
+        // [codex 395 预筛 NEW-3] 与 summary 同一条 note 行的结构化 payload——前端 kv 优先读这里的
+        // gap_days/reason_code/reason_note，不必解析 summary 文本正则提取（旧数据没有 payload_json，
+        // 前端兜底走 summary 正则解析，见 Sys_Iteration.html 消费点注释）。
+        wGateCompletionOverrunPayloadJson = JSON.stringify({
+          gap_days: completionReasonResult.gapDays, reason_code: completionReasonResult.reasonCode, reason_note: completionReasonResult.reasonNote,
+        });
+      }
+      // [§14·S11 MED-1] 200 成功响应亦带判定信息（gapDays 达标而理由已通过校验的一侧同样透出，不止
+      //   400 失败侧）——供 UX 一致消费（如详情页/列表刷新后即时显示"超出期望完成 N 天"提示，不必
+      //   等下一次 GET 详情才拿到）。need_reason 与 400 侧同名字段，语义="本次判定是否要求过理由"
+      //   （200 时恒为 true 才会走到这里；未达标分支 needReason 恒 false，见下方 else 判断）。
+      completionOverrunInfo = { need_reason: completionReasonResult.needReason, gap_days: completionReasonResult.gapDays };
+    }
 
     // [B3·C5d 写入端半] mirror timeline 行的人话 summary——按方向选择文案，不新增 action_code（既有
     //   liaison_test_skip_excused/liaison_test_skip_liaison 两码保留不动，方向语义靠 summary+from/to 列
@@ -3338,8 +4004,8 @@ module.exports = (deps) => {
     // electRepresentative 通用选举 UPDATE——94 号 L1 裁定对暂缓/拒绝/作废终态场景"反伤效率统计终止时刻
     // 语义"仍有效，不在本次范围内）。
     const upd = await dbRunAsync(
-      `UPDATE sys_issues SET status = ?, updated_at = datetime('now','localtime')${clearDeferredSql}${extraCasSql} WHERE id = ? AND status = ?`,
-      [targetStatus, ...extraCasParams, issueId, currentStatus]
+      `UPDATE sys_issues SET status = ?, updated_at = datetime('now','localtime')${clearDeferredSql}${extraCasSql}${completionSetSql} WHERE id = ? AND status = ?`,
+      [targetStatus, ...extraCasParams, ...completionSetParams, issueId, currentStatus]
     );
     if (!upd || upd.changes !== 1) {
       throw new SysTransitionError(409, 'GATE_INVARIANT', '主状态已被并发修改，门禁转移失败（changes≠1）');
@@ -3359,7 +4025,22 @@ module.exports = (deps) => {
        VALUES (?, 'status_change', ?, ?, ?, ?, ?, ?)`,
       [issueId, currentStatus, targetStatus, mirrorSummary, actor ? actor.id : null, actor ? actor.name : 'system', mirrorActionCode]
     );
-    return { changed: true, from: currentStatus, to: targetStatus };
+    // [§14·S11] feature 超期完成理由闸——独立留痕行（event_type='note'+独立 action_code=
+    //   'completion_overrun_reason'，不污染上面这条"主状态变化"镜像行本身的语义；同 §13
+    //   eta_auto_from_deadline/eta_auto_sla 既有范式）。本函数是该 action_code 唯一 INSERT 位
+    //   （【2026-08-14 S11 预筛订正】case 'liaison_test_pass' 已撤闸，见该处订正注释）。
+    if (wGateCompletionOverrunMarkerSummary) {
+      await dbRunAsync(
+        `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, operator_id, operator_name, payload_json)
+         VALUES (?, 'note', ?, 'completion_overrun_reason', ?, ?, ?)`,
+        [issueId, wGateCompletionOverrunMarkerSummary, actor ? actor.id : null, actor ? actor.name : 'system', wGateCompletionOverrunPayloadJson]
+      );
+    }
+    return {
+      changed: true, from: currentStatus, to: targetStatus,
+      // [§14·S11 MED-1] null=本次判定未涉及本闸（非 feature/未进 enteringForward 边）；非 null=判定发生过。
+      ...(completionOverrunInfo ? { completion_overrun: completionOverrunInfo } : {}),
+    };
   }
 
   // C2 交付物③：加人/复活成员共用底层（POST .../dev-assignees 用；reassign 的"插新"半步不复用本函数——
@@ -3574,9 +4255,12 @@ module.exports = (deps) => {
   //   "被授权、却从未走 §3.2 直上消费、单据照常走完常规验收/上线"这条路径一路带着活跃标记漂到很远——
   //   用户终裁改为**一次性通行证**：验收通过 / 验收打回 / 上线翻牌（任意路径）三事件任一发生，若此刻
   //   仍存在未消费的活跃授权（isActiveFastReleaseAuth 六列同一份判据），立即同事务清空六列 + 留痕，
-  //   不再指望"迟早会被消费或被下一次 reopen 间接失活"。fastlane 直上消费路径（submit direct_release=true，
-  //   :7906/:7909 一带）显式排除——消费本身就是这份授权唯一的正当归宿，六列/online_source/
-  //   post_release_acceptance 全部保留作审计痕迹，不属于"终结"范畴。
+  //   不再指望"迟早会被消费或被下一次 reopen 间接失活"。fastlane 消费路径（"消费"=fast_release_consumed_at
+  //   被写入的那一刻）显式排除——消费本身就是这份授权唯一的正当归宿，六列/online_source/
+  //   post_release_acceptance 全部保留作审计痕迹，不属于"终结"范畴。⚠️ [S2-2 现状标注] 原消费路径是
+  //   submit direct_release=true 分支的条件 UPDATE，已随两步化方案 §4-2 拆除（S2-2）——**当前代码库
+  //   不存在任何会写 fast_release_consumed_at 的路径**，"消费态"暂时结构性不可达，本条排除规则是为
+  //   两步化最终翻牌步骤（S3+ 待落地，届时会重新产生消费态）预留的前向兼容语义，不是死代码，故不删。
   //   ⚠️ 既有「授权须晚于最近一次 reopen」谓词（isActiveFastReleaseAuth 第六个条件）保留不动——终结事件制
   //   落地后，正常状态机路径下"活跃授权跨轮存活到 reopen 时刻"已结构性不可达（reopen 的唯一合法前置态
   //   「已关闭」必然先经过 close，而 close 前必先到达「已上线」，到达「已上线」的非豁免路径都已被本组
@@ -3620,6 +4304,189 @@ module.exports = (deps) => {
     'fast_release_consumed_at = NULL',
   ];
 
+  // ── 先行上线两步化 S1（方案 20260813_v1.8 §4-10）：sys_fast_release_executors 全消费点统一谓词 ──────
+  //   方案原文约束：「集合的全部消费点——在册判权/done 计数/全员判定/徽章 x/N 投影/撤销与终结的清集合
+  //   范围——必须复用同一 SQL 谓词 `issue_id = ? AND removed_at IS NULL`（抽常量或 helper，禁各写一份）」。
+  //   S2 起全部消费点必须引用本常量，不得各自拼一份字面量（同族漂移先例见 SYS_REQUIRED_TABLES 单一
+  //   来源派生注释 :1282-1285）。
+  //   ⚠️ 与上方 FAST_RELEASE_ACTIVE_AUTH_WHERE_SQL（:3805，codex 384 预筛 LOW-2 订正行号——曾误指
+  //   :3678，该号系预筛前既存漂移，一并修）是两件事：那条判的是 sys_issues 六列授权态
+  //   "进行中"语义（授权入口闸）；本条判的是 sys_fast_release_executors 子表"当前代次在册行"语义（软删
+  //   =退出本代，同 2.12 段 sys_release_executors 既有全部消费点 `removed_at IS NULL` 惯用写法同源）。
+  //   占位符：单个 `?` 绑 issue_id；本片段不含表名前缀，调用点若涉及多表 JOIN 需自行加别名限定列。
+  //   [S2-1 起首个消费点] submit 端点挂牌逻辑跨轮再挂牌前的"软删上一轮遗留在册行"UPDATE 复用本谓词
+  //   （见该处注释"实测修复"）——真实场景撞出的 UNIQUE 冲突倒逼验证了这条统一谓词约束确有必要，非
+  //   预防性的过度设计。S3+ 加人/撤销/徽章投影等其余消费点落地时继续引用本常量，禁各写一份。
+  //   ⚠️ codex 382-M4：无别名字符串常量只覆盖"单表裸查询"场景；S3+ 一旦出现 JOIN（如按 issue 关联
+  //   sys_issues 一并取字段），列名需要别名限定，若各消费点各自手写 `${alias}.issue_id = ? AND
+  //   ${alias}.removed_at IS NULL` 会长出第二份字面量、与本常量各自维护、容易漂移（改一处忘改另一处）。
+  //   改为单一来源派生：先定义 sysFastReleaseExecActiveWhere(alias) helper，本常量本身即该 helper 在
+  //   alias='' 时的输出——全仓永远只有一处字面量拼法，不允许 JOIN 消费点另起字面量。
+  //   [S5·Opus 预筛 L2 扩形参] 第二形参 correlateTo——供**相关子查询**（correlated subquery）场景：
+  //   issue_id 分量不再绑 `?` 占位符，改与外层查询的某一列做等值关联（如 `sys_issues.id`）。典型消费点
+  //   =撤销端点的 `NOT EXISTS (...)` 子查询（外层是 UPDATE sys_issues，内层子查询按行相关地判"这个
+  //   issue 是否有未软删的 done 行"，issue_id 天然等于外层当前行的 id，不是一个需要调用方传参绑定的
+  //   外部值）。correlateTo 未传时行为逐字不变（issue_id=? 占位符形态，向后兼容全部既有零形参/单形参
+  //   调用点）；传入时该分量直接嵌字面量列引用，**不产生新占位符**（调用方参数数组不需要为这部分多绑
+  //   一个值）。单一来源不变：无论哪种形态，全仓永远只有这一处函数体在拼 issue_id/removed_at 两个
+  //   条件的字面量，两种输出形态共享同一份"字段名+AND 连接"结构，不是两份平行维护的字符串。
+  function sysFastReleaseExecActiveWhere(alias, correlateTo) {
+    const p = alias ? `${alias}.` : '';
+    const issueIdCond = correlateTo ? `${p}issue_id = ${correlateTo}` : `${p}issue_id = ?`;
+    return `${issueIdCond} AND ${p}removed_at IS NULL`;
+  }
+  const SYS_FAST_RELEASE_EXEC_ACTIVE_WHERE_SQL = sysFastReleaseExecActiveWhere();
+
+  // ── S3·§4-4b 共享翻牌内核（方案 v1.8 §4-4b 契约写死·全批唯一翻牌实现）─────────────────────
+  //   职责：全员判定 + 翻牌 UPDATE + §3.3 副作用，仅此三件事。只接受事务上下文（调用方须已持
+  //   sysBeginImmediate），本函数自身不开/不提交/不回滚事务——翻牌与调用方那一步（done 更新/加人/
+  //   移人）永远同一原子单元，任一方失败整体回滚。
+  //   [S4 前瞻] 未来"加移人端点"若也可能触发全员判定（如移除最后一名 pending 执行人后集合恰好变全
+  //   done），必须调用**同一个函数**——本文件其余任何位置严禁再写第二份翻牌 UPDATE（静态守卫钉死，
+  //   见 verify-sys-fastlane-two-phase.js 新增断言"该 UPDATE 语句全仓唯一"）。
+  //   ⚠️ **禁传入调用方预计算的计数/快照**——每次调用都在函数内部重新聚合当前代次执行人集合（统一
+  //   谓词 sysFastReleaseExecActiveWhere），不信任调用方"我已经数过了"这类外部输入：调用方与本函数
+  //   之间哪怕隔着一次 await，集合都可能已被别的并发路径改变（同一事务内理论不可能，但不因"理论不可能"
+  //   就放弃这层校验——同本文件其余"纵深防御，不依赖单一防线"惯例）。
+  //   trigger 参数：本 commit 唯一来路是 'confirm'（先行上线执行确认端点）；S4 移人端点若触发全员判定
+  //   传 'roster_remove'，写入 timeline summary 供审计追溯"这次翻牌是谁/什么动作促成的"。
+  async function attemptFastReleaseFlipInTxn(issueId, actor, trigger = 'confirm') {
+    // [codex 385 预筛 L1] trigger 白名单——本参数只服务 timeline summary 拼词与审计追溯（"这次翻牌是
+    //   谁/什么动作促成的"），取值面必须封闭：当前仅 'confirm'（本 commit 唯一来路，先行上线执行确认
+    //   端点）与 'roster_remove'（S4 移人端点预留，尚未接线）。未知值一律 throw——这是**编程错误**
+    //   （调用方传了个没约定过的字符串），非业务态（业务态由本函数其余分支的 return {flipped:false}/
+    //   抛 FAST_RELEASE_FLIP_CONFLICT 表达），500 语义，不归类到 409/403 这类"业务正常路径上的可预期
+    //   失败"。同 memberActionFamiliesFor 未登记 actionKey 时"throw new Error"的既有断言范式（本文件
+    //   :2941 一带），不专门造一个新的 SysTransitionError 子类——那是给"前端需要按 httpStatus/code 分支
+    //   处理"的场景用的，本条是"这本不该发生"的内部一致性断言，两者性质不同。
+    if (trigger !== 'confirm' && trigger !== 'roster_remove') {
+      throw new Error(`attemptFastReleaseFlipInTxn: 未知 trigger="${trigger}"（仅允许 'confirm'|'roster_remove'，调用方传参错误）`);
+    }
+
+    // 全员判定：重新聚合当前代次执行人集合，非空 ∧ 全 done 才可翻——空集合恒不可翻（方案 §5-⑧，
+    //   "无人可确认"本身不构成"已获全员确认"）。
+    const execRows = await dbAllAsync(
+      `SELECT exec_status FROM sys_fast_release_executors WHERE ${sysFastReleaseExecActiveWhere()}`,
+      [issueId]
+    );
+    const allDone = execRows.length > 0 && execRows.every(r => r.exec_status === 'done');
+    if (!allDone) return { flipped: false };
+
+    // 全员 done——尝试翻牌。守卫校验前置：查当前行 type/status（翻牌 UPDATE 自身的 WHERE 也会再核一遍，
+    //   守卫是纵深第一层，UPDATE 的 WHERE 是纵深第二层，两层判据同源不同实现，任一层被绕过另一层仍拦得住）。
+    const issueRow = await dbGetAsync('SELECT type, status FROM sys_issues WHERE id = ?', [issueId]);
+    if (!issueRow) return { flipped: false };   // 理论不可达（调用方已确认单存在才会走到本函数），fail-closed 兜底不硬闯
+    // 进 RELEASE 族门禁③层要求的开发花名册计数——本条边的 before 恒为「待验证」，开发花名册按 GATE
+    //   前提（单据能到「待验证」的唯一路径）必然在册≥1∧全完成，此刻查询理论恒真，仍照 NO_COMMIT_ONLINE
+    //   既有先例查真值传入、不因"理论恒真"就硬编码 true（status-transition-guard.js 该门禁注释同款交代）。
+    const rosterRows = await dbAllAsync(
+      `SELECT dev_status FROM sys_issue_dev_assignees WHERE issue_id = ? AND removed_at IS NULL`, [issueId]);
+    const { activeCount: rosterActiveCount, allComplete: rosterAllComplete } = analyzeRosterForGate(rosterRows);
+    assertMainStatusTransition({
+      routeKind: 'FAST_RELEASE_CONFIRM', action: 'fast_release_exec_confirm', actionKind: null,
+      issueType: issueRow.type, before: issueRow.status, after: '已上线',
+      rosterActiveCount, rosterAllComplete,
+    });
+
+    // 翻牌 UPDATE（方案 §4-3c 模板逐字 + codex 384 预筛 MED-1 补一列）：WHERE 六列活跃授权同源谓词
+    //   （FAST_RELEASE_ACTIVE_AUTH_WHERE_SQL，与授权入口闸/终结事件制等既有消费点同一份字面量）+
+    //   type/status 双重锁死。SET 八列：
+    //   released_at/online_source/post_release_acceptance/fast_release_consumed_at 四列写入翻牌本身；
+    //   gate_deferred_at 清（同 accept/资格恢复等既有"进已上线即清"惯例，理论上此刻恒为 NULL，仍显式清
+    //   不留隐患）；updated_at 刷新（既有"主状态变更即刷 updated_at"不变量）；dev_estimated_at_on_release
+    //   写点②（组 C·SC1 三处快照写点之一——原①C9 直翻、③批次发布，S2 拆直上删掉的旧②由本条补回，见
+    //   verify-sys-eta-overrun-snapshot.js [F2] 组重建）。post_release_acceptance='pending' 同时天然
+    //   完成"48h 补验收 pending 重置"（§3.3 副作用）——isPostReleaseAcceptOverdue 是纯函数，只读
+    //   released_at 现值算超时，released_at 本条刚写入全新时间戳，无需另外的"重置"动作。
+    //   ⚠️ [codex 384 预筛 MED-1 收口] `release_id = NULL`——方案 §4-3c 模板原文没列这一列，属本条加强性
+    //   偏差：C9 免上线直翻是本边（待验证→已上线）的姊妹边，其 UPDATE（:4858 一带）显式清 release_id，
+    //   旁注明写"deriveOnlineSourceKind 的优先序安全性依赖本行"——那条论证逐字适用本边（同样是
+    //   before=待验证→after=已上线的直翻形状，同样可能挂着一个此前残留的 release_id）；
+    //   `fastlaneAcceptanceInvariantViolations` 不变量③（:4042）明写"fastlane 单 release_id 非空即违例"。
+    //   不清这一列会让本翻牌路径与不变量③、与姊妹边的既有防线出现口径分裂，故同批补上，不等出现真实
+    //   悬垂 release_id 才修（同 C9 那条注释"纵深修复不是止血"的精神）。
+    const flipUpd = await dbRunAsync(
+      `UPDATE sys_issues SET
+         status = '已上线',
+         released_at = datetime('now','localtime'),
+         online_source = ?,
+         release_id = NULL,
+         post_release_acceptance = 'pending',
+         fast_release_consumed_at = datetime('now','localtime'),
+         gate_deferred_at = NULL,
+         updated_at = datetime('now','localtime'),
+         dev_estimated_at_on_release = dev_estimated_at
+       WHERE id = ? AND type = 'bug' AND status = '待验证'
+         AND ${FAST_RELEASE_ACTIVE_AUTH_WHERE_SQL}`,
+      [ONLINE_SOURCE_AUTHORIZED_FASTLANE, issueId]
+    );
+    if (!flipUpd || flipUpd.changes !== 1) {
+      // [契约 d] 内核判定应翻牌但翻牌 UPDATE changes≠1 ⇒ 抛错——调用方（确认端点）的外层 catch 会
+      //   sysRollback 整个事务（含本次 done 更新与调用方尚未提交的 timeline），不留半完成态。
+      throw new SysTransitionError(409, 'FAST_RELEASE_FLIP_CONFLICT',
+        `先行上线翻牌失败：单据状态已变化（changes=${flipUpd && flipUpd.changes}），可能授权已被撤销/消费或单据已不在「待验证」`);
+    }
+
+    // timeline 镜像行（同 W-GATE 完成态镜像范式：event_type='status_change' + from/to 明确 + 专属
+    //   action_code）。⚠️ [codex 384 预筛 HIGH-1 收口] last_completed_at 的 list/detail 子查询**不**消费
+    //   本条 action_code——两步化 fastlane 单必经"进待验证"（该时刻已由既有 action_code IS NULL 分支
+    //   覆盖），本条镜像行只服务 timeline 自身可读 + 前端徽章投影，last_completed_at 恒钉"进待验证"口径
+    //   （方案 §14 F4，详见该子查询注释）。trigger 注明来源，S4 移人触发翻牌时会传不同值，同一份
+    //   summary 拼法即可区分成因，不需要新增 timeline 列。
+    const triggerLabel = trigger === 'roster_remove' ? '移除执行人后自动全员达成' : '执行人确认';
+    await dbRunAsync(
+      `INSERT INTO sys_issue_timeline (issue_id, event_type, from_status, to_status, summary, action_code, operator_id, operator_name)
+       VALUES (?, 'status_change', '待验证', '已上线', ?, 'fast_release_exec_online', ?, ?)`,
+      [issueId, `先行上线翻牌上线（trigger=${trigger}·${triggerLabel}）`, Number(actor.id) || null, actor.name || null]
+    );
+
+    return { flipped: true };
+  }
+
+  // ── S5·§4-5/§4-7 共享清集合内核：软删本表全部未软删行 + timeline `fast_release_roster_cleared` ──────
+  //   全部调用点（撤销端点 fast-release-revoke / 五事件终结共享后处理点 case 'accept'|'return'|
+  //   'issue_reject'|'void' / 批次发布双保险点 _publishReleaseCoreInTxn）统一走本函数——"清集合"逻辑
+  //   全仓唯一实现，禁双写（同 attemptFastReleaseFlipInTxn"翻牌逻辑禁止双实现"同款纪律）。
+  //   ⚠️ WHERE **不带 exec_status 限制**（清全部，含 done）——与 S2 挂牌清场（跨轮再挂牌前软删上一轮
+  //   遗留在册行，WHERE 显式带 `AND exec_status = 'pending'`，见 :8534 一带既有注释）是语义不同的两个
+  //   动作，不能照抄：S2 挂牌清场是"新一轮开局，保护已确认的 done 行不被误清"；本函数是"授权彻底终结，
+  //   done 行也随之失去继续存在的意义"（方案 §5-⑨"done 行恒不被软删"唯一例外正是本函数服务的场景）。
+  //   本函数全部调用点里，accept/return/issue_reject 三处走到这里时结构上已无 done 行——accept/return
+  //   已在 §4-6 新增的"活跃授权∧存在 done 行 ⇒ 409"闸门挡在更早（有 done 的情形走不到这条清集合语句），
+  //   issue_reject 挂牌态「待验证」结构性不可达（roster 从未产生）；**void 是唯一真正能清到 done 行的
+  //   路径**（void 不闸，是终极出口）；revoke 端点自身也已按 §4-5 加了同款 done 闸，走到本函数时同样
+  //   结构上已无 done 行；批次发布双保险点同 accept/return 一带论证（那条边本身走到"待上线"之前就已在
+  //   accept 内终结过一次，本处是纵深防御非当前可达缺口）。
+  //   仅当确有行被软删（changes>0）才写 timeline——集合本就是空的情形（该单从未挂牌、或挂牌时当日无
+  //   值班、或此前已被清过）不产生"清空了什么"的虚假留痕（同本文件其余"不伪造字段/不伪造事件"精神）。
+  //   causeLabel 由各调用点传入区分成因（"验收通过"/"上线翻牌"/"验收打回"/"已拒绝"/"作废"/"撤销授权"/
+  //   "批次发布"），summary 统一格式"先行上线执行人集合已清空（成因）"。
+  //   removed_by_name 归一化说明（限定披露，非"从根上消灭"式绝对声称）：本函数入参 actor 是已折叠的
+  //   `{id,name,role}`（sysActor(req) 的返回形状，或批次发布/引擎调用链路透传的同形状对象），不像
+  //   S4 加人/移人两端点那样能在调用点直接拿到 req.user.display_name/username 做完整三级级联（那两个
+  //   端点是 HTTP 路由处理器本身，本函数被多处非 HTTP-handler 上下文调用——sysIssueTransition/
+  //   _publishReleaseCoreInTxn 均只透传 actor 对象，未透传 req）。本函数对 actor.name 只做**两级**
+  //   （trim 判空 → user#id 兜底），不到三级——若管理员自己的账号 display_name 恰好是纯空白污染值，
+  //   该管理员执行的其余全部 admin 动作（accept/return/void/revoke……）在本文件其它写名点上同样会先
+  //   一步命中同类问题，不是本函数独有的新缺口，风险面收窄到"操作者自身账号已损坏"这一低概率前提。
+  //   调用方须已持事务锁（sysBeginImmediate 或引擎自身的 BEGIN IMMEDIATE），本函数不自己开/提交/回滚。
+  async function clearFastReleaseRosterOnTermination(issueId, actor, causeLabel) {
+    const clearUpd = await dbRunAsync(
+      `UPDATE sys_fast_release_executors SET removed_at = datetime('now','localtime'), removed_by = ?, removed_by_name = ?
+         WHERE ${sysFastReleaseExecActiveWhere()}`,
+      [actor.id, sysFastReleaseSafeName(actor.name, `user#${actor.id}`), issueId]
+    );
+    const clearedCount = clearUpd ? clearUpd.changes : 0;
+    if (clearedCount > 0) {
+      await dbRunAsync(
+        `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, operator_id, operator_name)
+         VALUES (?, 'note', ?, 'fast_release_roster_cleared', ?, ?)`,
+        [issueId, `先行上线执行人集合已清空（${causeLabel}）`, Number(actor.id) || null, actor.name || null]
+      );
+    }
+    return clearedCount;
+  }
+
   // ── 组 B·B1 不变量探针：终态单不应残留"未消费的活跃授权"（供 verify 全库扫描 + 反证判红两用）─────
   //   ⚠️ 与 isActiveFastReleaseAuth **不是同一件事**，不能拿那个谓词扫终态库：那个谓词要求
   //   released_at/online_source 皆空（"进行中"语义，服务于写点门禁），对已经落在「已上线/已关闭」
@@ -3649,6 +4516,67 @@ module.exports = (deps) => {
       const consumed = present(row.fast_release_consumed_at);
       if (!revoked && !consumed) {
         violations.push(`issue ${row.id}（status=「${row.status}」）：fast_release_auth_at 非空且既未撤销也未消费——B1 五事件（验收通过/验收打回/上线翻牌/验收拒绝/作废）之一本应终结却仍残留`);
+      }
+    }
+    return violations;
+  }
+
+  // ── S5·不变量 ⑪（371-H1）探针：授权非活跃单不得存在未软删集合行——供 verify 全库扫描 + 反证判红两用 ──
+  //   与上面 fastReleaseUnresolvedAtTerminalStateViolations 不是同一件事：那个函数扫的是 sys_issues 自身
+  //   （授权三件套是否还挂着），本函数扫的是 sys_fast_release_executors 未软删行是否配得上一份"活跃授权"
+  //   （子表视角）。撤销/终结的清集合动作（S5 新增，见 clearFastReleaseRosterOnTermination）是写侧保证；
+  //   本函数是读侧独立探针，两者互证不互相依赖——探针不会因为写侧代码路径本身有 bug 就连带失效。
+  //   入参 rows：候选行 SQL 粗筛（调用方 JOIN sys_fast_release_executors 与 sys_issues，只取集合行未软删
+  //   的那些，同 [7] 组既有"候选行粗筛→JS 判据精判"范式）→ 本函数 JS 判据精判（isActiveFastReleaseAuth
+  //   六列同源，fail-closed 契约要求六列齐全——调用方 SELECT 必须显式投影全部六列，同该函数自身缺列即
+  //   抛错的既有契约，本函数不额外兜底缺列，直接把六列原样交给它）。
+  //   ⚠️ [S5 编码期实测修复] 方案 §5 不变量 ⑪ 原文枚举"授权非活跃（已撤销/已终结/**已消费**）"三种成因
+  //   都"不得存在未软删集合行"——**已消费这一支与方案自身 §5b 转移表第 7 行直接矛盾**：执行人确认
+  //   （末位）触发翻牌时 `consumed_at 写入 | 集合行**保留（部署留痕）**`，是明确设计意图（成功部署的
+  //   证据本就该留着，不是要清理的对象）。本函数按 §5b（更详细、更具体、后订的表格）为准，从"非活跃"
+  //   里再拆出"已消费=合法保留"单独豁免，不按 §5 原句字面全量实现——同既有 fastReleaseUnresolvedAtTerminalStateViolations
+  //   函数"`!revoked && !consumed` 才算残留"的既有豁免精神一致（本函数不是新发明这条豁免，是把已有
+  //   共识在新探针里对齐落实）。若按 §5 原句字面实现，[49a] 组扫描累计测试库会把**全部翻牌成功的正例**
+  //   （[13][17][22-对照][25b][33][37a][41b] 等十余组）都判成"违例"，探针形同虚设——实测踩中，见 S5
+  //   交付报告"红灯如实"记录。
+  function fastReleaseRosterResidualAtInactiveAuthViolations(rows) {
+    const violations = [];
+    for (const row of rows || []) {
+      if (!row) continue;
+      if (isActiveFastReleaseAuth(row)) continue;
+      if (row.fast_release_consumed_at != null) continue;   // 已消费=合法保留态，非违例（见上方注释）
+      violations.push(`issue ${row.issue_id}（执行人行 id=${row.exec_id}，user_id=${row.user_id}）：授权非活跃（非"已消费"）但集合行未软删——⑪ 违例`);
+    }
+    return violations;
+  }
+
+  // ── S5·不变量 ⑫（372-H1'）探针：不存在持久的"集合非空∧全 done∧待验证∧活跃授权"态——供 verify 全库
+  //   扫描 + 反证判红两用。该状态结构上只应在事务内瞬时存在（确认端点/移人端点两个可能造成"全 done"
+  //   的写点都同事务接共享翻牌内核 attemptFastReleaseFlipInTxn，判定为真即刻翻牌），任何已提交（COMMIT
+  //   落库后）的行都不该停留在这个中间态。
+  //   ⚠️ [Opus 预筛 H2 消解·2026-08-14] "探针命中即说明翻牌内核被绕过或某写路径漏调内核"曾是本注释
+  //   仅列的两条成因——**绝对声称，已证伪**：预筛实测抓出第三条真实成因——重新授权（reopen 后同人/换人
+  //   跨轮重挂牌）若不清上一代残留集合行，跨代次聚合会把"上一代已消费的 done 行"与"本代新执行人的
+  //   pending/done 行"混进同一次全员判定，可能构造出本探针命中的持久态（同人变体在旧代码下实际先撞
+  //   partial UNIQUE 500，换人变体不 500，但会污染判定，两者根因相同）。三条成因如实枚举：①内核被绕过
+  //   （直连 SQL 越过共享内核写 done）；②某条写路径遗漏调用内核（未来新增确认类写点忘记接线）；
+  //   ③重新授权清集合缺失（H1 类）。**H1 已在 fast-release-authorize 端点补上重授权同事务软删上一代
+  //   全部行**（含 done，见该端点调用点注释），成因③已结构性不可达——本注释保留三条枚举是为了如实
+  //   反映"探针命中"这件事历史上/理论上可能的完整成因链，不是把已修复的成因悄悄从记录里抹掉（"结构性
+  //   保证"本身不是自动成立的公理，须有独立读侧证据支持它，同 ⑪ 一带"写侧保证≠不需要读侧探针"精神）。
+  //   入参 rows：每行须投影六列活跃授权判据字段 + type/status + 该 issue 当前代次集合的
+  //   active_count/done_count 聚合（调用方用 GROUP BY 或子查询把聚合结果拼给本函数，纯函数不自己查库，
+  //   同 fastReleaseUnresolvedAtTerminalStateViolations 既有"调用方 SQL 粗筛→本函数 JS 精判"分工）。
+  function fastReleaseNonFlippedFullDoneViolations(rows) {
+    const violations = [];
+    for (const row of rows || []) {
+      if (!row) continue;
+      if (row.type !== 'bug' || row.status !== '待验证') continue;
+      if (!isActiveFastReleaseAuth(row)) continue;
+      const activeCount = Number(row.active_count) || 0;
+      const doneCount = Number(row.done_count) || 0;
+      if (activeCount > 0 && doneCount === activeCount) {
+        violations.push(`issue ${row.id}：集合非空(${activeCount})且全 done(${doneCount})，但仍处于待验证态且授权活跃——⑫ 违例（应已同事务翻牌却未翻）`);
       }
     }
     return violations;
@@ -3772,26 +4700,9 @@ module.exports = (deps) => {
     return `当前状态「${row.status}」不可先行上线授权（仅待处理/处理中可授权）`;
   }
 
-  // [组 B·SB2] submit 端点 direct_release=true 分支的精确拒绝原因文案——同 deriveFastReleaseAuthDenyReason/
-  //   deriveFastReleaseRevokeDenyReason 范式：单一错误码 FAST_RELEASE_SUBMIT_DIRECT_DENIED，仅文案按最贴近
-  //   根因的顺序精判。入参为 submit 端点在同一事务内、任何写操作之前读到的行快照（含
-  //   type/status/fast_release_auth_at/_revoked_at/_consumed_at/released_at/online_source/reopened_at）。
-  //   顺序：①非 bug 类型（B1 拍板仅 bug 类）②状态非「处理中」（bug 的 DEV 族恰好只有「处理中」一个值，
-  //   本条与①存在结构性重叠——type='bug' 时能走到 submit 内核说明 status 必为处理中；仍显式判断，
-  //   一是任务方案 §3.2 原文明列该条件，二是防御 DEV 族快照值未来扩容的情形）③无授权 ④已撤销 ⑤已消费
-  //   ⑥授权属重开前的上一轮（[预筛 MED-2·P7 过渡收紧]，见 isActiveFastReleaseAuth 定义处注释——顺序放在
-  //   ⑤之后④之前的"已消费/已撤销"更贴近原因，本条是它们之外的第三种"授权当下不可用"具体成因）
-  //   ⑦已有上线标记（released_at/online_source 非空——理论不可达，处理中态从未进过 RELEASE 族，仅纵深防御）。
-  function deriveFastReleaseSubmitDenyReason(row) {
-    if (row.type !== 'bug') return '该单非 bug 类型，不支持先行上线直上（仅 bug 类可用）';
-    if (row.status !== '处理中') return `当前状态「${row.status}」不可先行上线直上（仅「处理中」可直上）`;
-    if (row.fast_release_auth_at == null) return '当前未获得先行上线授权，无法直上';
-    if (row.fast_release_revoked_at != null) return '先行上线授权已被撤销，无法直上';
-    if (row.fast_release_consumed_at != null) return '先行上线授权已被消费，无法直上';
-    if (row.reopened_at != null && !(String(row.fast_release_auth_at) >= String(row.reopened_at))) return '授权属重开前的上一轮，需重新授权';
-    if (row.released_at != null || row.online_source != null) return '该单已有上线标记，无法先行上线直上';
-    return '当前不满足先行上线直上条件，请刷新后重试';
-  }
+  // [组B·S2-2·拆直上分支] deriveFastReleaseSubmitDenyReason（submit direct_release=true 分支的精确拒绝
+  //   原因文案函数）随写入点一并**删除**——方案 §4-2「整体替代」拍板：submit 不再支持勾选直上，本函数
+  //   唯一调用点（原 submit 端点前置判定）已随之移除，成为死代码；_internals 导出同批删除（见文件尾）。
 
   // [预筛 MED-3] 撤销端点条件更新失败（changes≠1）时的精确原因文案——错误码族维持单码
   //   FAST_RELEASE_REVOKE_NOT_ALLOWED 不拆分（前端按码分支的成本 > 收益，文案已够人读），但把此前笼统
@@ -4222,6 +5133,23 @@ module.exports = (deps) => {
       //   （作废）四个 case 共五条边可能赋值——命中时供 [7] 主 timeline 写入之后追加一条独立留痕行；
       //   null=本次未终结（该单本无活跃授权，或本次 action 不属于五事件之一）。
       let fastReleaseTerminationSummary = null;
+      // [S5·§4-7 五事件终结延伸] 与上面那个变量姊妹同源、同一批四 case 共同赋值——命中时供 [7] 主
+      //   timeline 写入之后调用 clearFastReleaseRosterOnTermination 软删本表未软删行 + 独立留痕。两个
+      //   变量刻意分开（非复用同一个字符串再拆解）：fastReleaseTerminationSummary 服务"授权终结"这件事
+      //   自身的留痕文案，本变量服务"集合清空"这件事自身的留痕文案（成因措辞可能各自演化，不耦合）。
+      //   null=本次未清（该单本无活跃授权/集合本就是空的——后者由 clearFastReleaseRosterOnTermination
+      //   自身按 changes>0 判断，不在这里判空，见该函数注释"不伪造字段"精神）。
+      let fastReleaseRosterClearCause = null;
+      // [方案 §13·13.1] feature ETA 直取——仅 case 'intake_accept' 可能赋值，其余动作恒 null。两个变量
+      //   互斥（同一次执行至多一个非 null）：分别对应决策表"有效"行（直接=deadline）与"为空/已过期"两行
+      //   落到"系统自动生成 SLA 值"子分支时（§13.3 统计口径="回退"）——**不**覆盖手动填写/强制填写两个
+      //   子分支（那两个子分支本就有人在主动看着 ETA 这件事，§13.1 边界钉子的"对接人知情"诉求已由人工
+      //   输入动作本身满足，无需再补一条系统旁白）。命中时供 [7] 主 timeline 写入之后补一条独立
+      //   event_type='note' 留痕行（同 fastReleaseTerminationSummary 既有范式：event_type 无 DDL CHECK
+      //   白名单，新增 action_code 零迁移，见 376-H 闭合证据）——不复用/不覆盖主"受理"事件本身的
+      //   action_code='intake_accept'（那是一条不同语义的行，服务"受理动作发生了"这件事本身）。
+      let etaDirectTakeMarkerSummary = null;    // 非 null → 触发独立 action_code='eta_auto_from_deadline' 留痕行
+      let etaSlaFallbackMarkerSummary = null;   // 非 null → 触发独立 action_code='eta_auto_sla' 留痕行
 
       switch (action) {
         // [受理排期改造 §4.2 退场] 'schedule' switch 分支已随 schedule 动作退场删除——
@@ -4331,6 +5259,13 @@ module.exports = (deps) => {
             // 字典序比较等价于时间先后比较）。
             const etaExpired = !!existingEta && existingEta <= nowStr;
             const slaExceeded = nowStr >= defaultEta;
+            // [方案 §13·13.1] feature ETA 直取——deadline 有效性判定与本处既有 etaExpired/slaExceeded
+            //   共用同一份 nowStr（同一时刻基准，避免跨语句重复取时钟）。improvement/bug 及未来 type
+            //   一律不计算（type 判定字面量 === 'feature'，§376-M2 闭合：type 值域由建单端点枚举校验 +
+            //   assertKnownIssueStatus 双层既有闸保证，本处不重复造闸）——下方只改现行矩阵"ETA 为空⇒
+            //   生成"格（即 `if (!existingEta)` 分支），"ETA 非空"两行（etaExpired 分支与末尾 else 分支）
+            //   原样不动，featureDirectTake 在那两处从不被读取。
+            const featureDirectTake = (type === 'feature') ? resolveFeatureDeadlineDirectTake(row.deadline, nowStr) : null;
             const rawInputEta = payload.dev_estimated_at;
             // [LOW-3·trim] 纯空白（如 ' '/'\t'）视同未填，走留空逻辑——与 normalizeDeadline 的
             //   "trim 后判空，非判原始值"口径对齐（该函数注释标注 codex 14b M-1 出处）；此前仅判
@@ -4360,7 +5295,56 @@ module.exports = (deps) => {
             };
 
             if (!existingEta) {
-              if (!slaExceeded) {
+              if (featureDirectTake && featureDirectTake.present && featureDirectTake.valid) {
+                // ═══ [方案 §13·13.1「有效」行] feature 且 deadline 有效（非空∧>受理时刻）：ETA 直接=deadline ═══
+                //   SLA 维度不参与（未超/已超均同，§13.1 表格原话）——本分支完全绕开 slaExceeded/inputProvided
+                //   两个既有判据：不弹窗、不校验/不消费调用方是否传了 dev_estimated_at（即便传了也不读取）。
+                //   ⚠️ 编码期设计取舍（方案原文未显式覆盖 inputProvided 维度，本分支按"SLA 维度不参与"同源
+                //   精神延伸为"direct-take 整体不参与既有分支结构"，取舍论证见交付报告）：本行为对齐决策表
+                //   "未超/已超均同"——若仍按 inputProvided 分叉，SLA 已超时会落入下方强制填写分支，与"未超/
+                //   已超均同"矛盾，故 direct-take 必须整体前置、绕开该判据，非本分支特例遗漏。
+                //   ⚠️ 上述"均同/绕开"仅约束 ETA **取值**与**是否弹窗必填**两件事——不覆盖"受理本身是否已超时"
+                //   这个独立事实位。§13.1 原话"SLA 已超时另记既有'超时受理'事实行（受理迟的留痕与 ETA 来源
+                //   无关，保留）"：direct-take 分支仍需读 slaExceeded 一次，只为记录"受理动作发生时 SLA 是否
+                //   已超"这个事实，不参与 ETA 值/弹窗判断（那两件事永远走 directEta/不弹窗，与此处 if 分支
+                //   本身已经是"绕开"的体现一致）——两件事各自独立，不是同一个"均同"豁免的两个侧面。
+                const directEta = featureDirectTake.candidateValue;
+                setFrags.push('dev_estimated_at = ?');
+                setParams.push(directEta);
+                // 受理迟留痕（事实位）与 ETA 来源（下方 eta_auto_from_deadline 行）两行各自语义、彼此独立：
+                //   本 etaNote 驱动的是 [7] 主 INSERT（intake_accept 事件本身的 summary），"超时受理：" 前缀
+                //   照既有形态（:5144 一带"为空×SLA已超"分支同款文案骨架）——ETA 未过期/已过期两分支现成的
+                //   "超时受理" wording 是"人工填写"语境，direct-take 是"系统按 deadline 直取"语境，故价值
+                //   短语改写为"直接取自期望完成时间"，但"超时受理："前缀与置位 overdue_intake 两件事原样照抄。
+                etaNote = slaExceeded
+                  ? `超时受理：新功能预计完成时间直接取自期望完成时间为 ${directEta.slice(0, 16)}（feature 直取，不受 SLA 默认公式约束）`
+                  : `新功能预计完成时间直接取自期望完成时间：${directEta.slice(0, 16)}（feature 直取，不受 SLA 默认公式约束）`;
+                etaOutcome.auto_generated = true;   // 系统据业务规则决定值（非人工在弹窗里敲的），复用既有语义位——
+                // C11 提示只消费 expected_gap_days（本分支恒 null，见下），auto_generated 本身不驱动直取
+                // 特有的前端分支，无需新增响应字段。
+                etaOutcome.overdue_intake = slaExceeded;   // [P1 修复] 此前恒 false（漏读 slaExceeded）——受理迟到
+                // 事实与 ETA 来源无关，direct-take 同样要如实反映"受理动作发生时 SLA 是否已超"，供前端/调用方
+                // 消费（与"非空且未过期×SLA已超"、"为空×SLA已超"两处既有分支同一语义位、同一置位时机）。
+                etaOutcome.dev_estimated_at = directEta;
+                // §13.2 四件事契约①：首诺快照照落（首诺=deadline 值，C6 跨轮锁死逻辑不变——本行只负责本次
+                //   写入，写不写得进去由 writeDevEstimatedFirstSnapshot 自身的双条件守卫决定）。
+                etaFirstSnapshotValue = directEta;
+                // §13.2 四件事契约②：容差校验分支级跳过——判定在先（本 if 分支本身就是"跳过"的实现），
+                //   不调用 resolveEtaOverrunReasonForWrite（不是"复用 helper 后传 skipToleranceCheck=true"，
+                //   是根本不进 helper——§13.2 表格"不是复用旧 helper 后吞异常"原话的字面对应）。
+                // §13.2 四件事契约③：理由处置——eta_overrun_reason_code/note 保持 NULL（豁免=该路径无理由
+                //   语义，不写"豁免原因"占位文案；直接置两列 NULL，不经过理由写入的通用 SQL 片段拼接）。
+                setFrags.push('eta_overrun_reason_code = NULL', 'eta_overrun_reason_note = NULL');
+                // §13.2 四件事契约④：通知——沿用 §3C.7 原谓词不动，即本分支不触碰 etaOutcome.notify_estimate/
+                //   notify_reason，两者维持 [5] 段落头部初始化默认值 false/false（系统决定值，无可归责的人，
+                //   同既有"自动生成"分支的通知哲学，不因"取值来源换成了 deadline"而改变）。
+                // §13.1「有效」行 C11 列="结构性不触发（恒 0 差，非人工禁用）"——本分支从不计算
+                //   expected_gap_days，维持 [5] 段落头部初始化默认值 null（非"算出来是 0 所以不填"，是代码
+                //   结构上压根没有一条路径能碰到这个字段，与"为空"行的"无 deadline 可比,天然不触发"同一种
+                //   "结构性不触发"，非运行时判断出来的偶然结果）。
+                // timeline 生成行：独立 action_code='eta_auto_from_deadline'（[7] 主 INSERT 之后补写，见该处）。
+                etaDirectTakeMarkerSummary = `新功能预计完成时间直接取自期望完成时间：${directEta.slice(0, 16)}（feature 直取，SLA 默认公式不参与）`;
+              } else if (!slaExceeded) {
                 if (inputProvided) {
                   // [MED-1/MED-5·显式输入生效] 为空×SLA未超格：受理弹窗现已带 ETA 输入框（组 A 前端
                   //   改造），若对接人当场就填了值，不该被自动生成默默盖过——用户值优先，自动生成仅在
@@ -4396,6 +5380,19 @@ module.exports = (deps) => {
                   etaNote = `系统自动生成预计完成时间：${defaultEta.slice(0, 16)}（默认 SLA，创建锚）`;
                   etaOutcome.auto_generated = true;
                   etaOutcome.dev_estimated_at = defaultEta;
+                  // [方案 §13·13.1「为空」/「已过期」两行] feature 回退 SLA 且系统自动生成（本子分支特有：
+                  //   无人在场看着这次生成）→ 独立 action_code='eta_auto_sla' 留痕（[7] 主 INSERT 之后补写）。
+                  //   ⚠️ 仅本"留空→自动生成"子分支打标记——上方"人工设定"子分支、下方"超时受理强制填写"
+                  //   子分支均不打（那两个子分支本就有人在主动填写 ETA，§13.1"对接人知情"诉求已由人工输入
+                  //   动作本身满足，无需再补一条系统旁白；§13.3 统计口径把这两类归入"既有手改路径"第三桶，
+                  //   不与 eta_auto_sla 混记）。"已过期"行要求 summary 注明"期望已过期，按默认规则生成"——
+                  //   featureDirectTake.present && expired 精确对应该状态（present=false 时是纯粹的"为空"行，
+                  //   不追加该短语）。
+                  if (type === 'feature') {
+                    etaSlaFallbackMarkerSummary = (featureDirectTake && featureDirectTake.present && featureDirectTake.expired)
+                      ? `新功能预计完成时间按默认规则生成：${defaultEta.slice(0, 16)}（期望已过期，按默认规则生成）`
+                      : `新功能预计完成时间按默认规则生成：${defaultEta.slice(0, 16)}`;
+                  }
                   // [组 C·SC1·§3C.3「受理自动生成」行·C11] 系统动作无可归责的人 → 跳过容差校验（不要求理由），
                   //   同事务清空理由两列（防上一轮残留理由挂在本轮自动生成的 ETA 上）；首诺快照仍写
                   //   （§3C.4：首诺快照与容差判定是两件独立的事，"跳过容差"不等于"跳过首诺"）。
@@ -4583,6 +5580,21 @@ module.exports = (deps) => {
           //   只会进这一次 if）。判定用 [1] 处已锁定的行快照（isActiveFastReleaseAuth 六列同源，SELECT
           //   已扩列，见函数入口一带注释）——事务持锁期间该快照与随后 [6] UPDATE 的真实前置状态一致。
           if (isActiveFastReleaseAuth(row)) {
+            // [S5·§4-6 验收/打回闸] 存在已确认执行（done）行时拒绝本次验收通过——不允许在部署执行已经
+            //   开始之后，让单据从常规验收通道抢跑完成，与已发生的部分执行事实脱节。判据抄 runWGate
+            //   弹回闸/加人冻结闸同源写法（统一谓词 sysFastReleaseExecActiveWhere() AND
+            //   exec_status='done'）。无 done 行维持既有五事件终结路径不变（下方 setFrags/summary
+            //   逐字未动）。放在 isActiveFastReleaseAuth(row) 判断内——auth 本不活跃时结构上不可能有
+            //   在册 done 行（roster 依附活跃授权产生），无需多花一次查询。
+            const fastlaneDoneRow = await dbGetAsync(
+              `SELECT 1 AS x FROM sys_fast_release_executors WHERE ${sysFastReleaseExecActiveWhere()} AND exec_status = 'done' LIMIT 1`,
+              [issueId]);
+            if (fastlaneDoneRow) {
+              // [S5·Opus 预筛 M1] 收信人恒为 admin（本端点 requireAdmin）——改可执行指引，不止说"不行"：
+              //   三条出路任选其一均可解开阻塞，不是"等"这一条路。
+              throw new SysTransitionError(409, 'FASTLANE_DEPLOY_IN_PROGRESS',
+                '先行上线执行已在进行中（存在已确认执行的执行人），暂不可验收通过——可让剩余执行人完成确认以促成翻牌，或移除未确认的执行人触发翻牌，或作废本单据');
+            }
             setFrags.push(...SYS_CLEAR_FAST_RELEASE_AUTH_FIELDS_SQL);
             // 纵深防御：与 [6] 主 UPDATE 既有的 `status = 事务内读到的真实 fromStatus` 双条件守卫叠加，
             //   同一条 UPDATE 的 WHERE 里再重申一遍"活跃授权六列现值"——理论必中（同一事务持锁期间不可能
@@ -4591,6 +5603,9 @@ module.exports = (deps) => {
             fastReleaseTerminationSummary = (toStatus === SYS_ONLINE_STATUS)
               ? '直上授权已失效（上线翻牌）'
               : '直上授权已失效（验收通过）';
+            // [S5·§4-7] 姊妹赋值——供 [7] 后处理点调用 clearFastReleaseRosterOnTermination 软删本表未软删
+            //   行（此刻结构上已无 done 行，上方闸门已挡；C9 直翻/常规验收两条边成因措辞各自区分）。
+            fastReleaseRosterClearCause = (toStatus === SYS_ONLINE_STATUS) ? '上线翻牌' : '验收通过';
           }
           break;
         }
@@ -4675,6 +5690,14 @@ module.exports = (deps) => {
           summary = hasNote
             ? `对接测试通过｜测试说明：${notePreview}${hasAttachment ? '（另有本轮测试附件）' : ''}`
             : '对接测试通过｜凭证：本轮测试附件';
+          // 【2026-08-14 S11 预筛订正·闸边迁移】本 case 曾在此处挂"feature 超期完成理由闸"（首版按方案
+          //   原文括注"（处理中→待验证）"理解为"完成=离开对接测试段那一刻"，实为对 feature 的误读——
+          //   feature 正常流「开发中→待对接测试→待验证」，本 case（对接测试通过）的操作人是**对接人**，
+          //   与 F4 口径"当事人自述"（开发本人报完工）相悖。闸的正确落点是"开发报完工"边（feature 的
+          //   submit 边 + runWGate ⑤⑥降级边，均为开发侧触发），已整体迁移到 runWGate（见该函数
+          //   `issueType === 'feature' && enteringForward` 分支，覆盖⑤⑥直达 VERIFY 与⑦进 LIAISON_TEST
+          //   三条开发侧边）。本 case 自此**不闸**（对接人验收通过不是"完成时刻"，是"验收时刻"，两者
+          //   在语义上从来就不是一回事——本条订正只是让代码追上这个既有区分）。
           break;
         }
         case 'return': {
@@ -4689,14 +5712,29 @@ module.exports = (deps) => {
             //   同事务清空理由两列，C7「期望保留、理由作废」由此天然实现（不动 dev_estimated_first_at/
             //   dev_estimated_at_on_release——首诺跨轮锁死，release 快照是历史事实，均不随打回/重开清空）。
             'eta_overrun_reason_code = NULL', 'eta_overrun_reason_note = NULL',
+            // [§14·S11] 完成超期理由同点同清（方案§14.2 明文要求·对齐既有 eta_overrun_reason_* 三点集合）——
+            //   打回=新一轮，本轮完成超期理由随之作废，重新报完工时按当轮真实情况重新判定。
+            'completion_overrun_reason_code = NULL', 'completion_overrun_reason_note = NULL',
             ...SYS_CLEAR_FEASIBILITY_FIELDS_SQL);   // F2a §六：打回=新一轮，清评估+blocked
           // [组 B·B1·授权终结事件制] 事件③「验收打回」——同 case 'accept' 一带判据（isActiveFastReleaseAuth
           //   六列同源，读的是 [1] 处已锁定的行快照），落点恒不会是「已上线」（return 的 to 恒为
           //   处理中/开发中，见 transitions.js），故文案不需要像 accept 分支那样按 toStatus 分岔。
           if (isActiveFastReleaseAuth(row)) {
+            // [S5·§4-6 验收/打回闸] 同 case 'accept' 一带同源写法——存在已确认执行（done）行时拒绝本次
+            //   验收打回（同样是"不允许在部署执行已经开始之后让状态机与已发生事实脱节"）。无 done 行
+            //   维持既有终结路径不变。
+            const fastlaneDoneRow = await dbGetAsync(
+              `SELECT 1 AS x FROM sys_fast_release_executors WHERE ${sysFastReleaseExecActiveWhere()} AND exec_status = 'done' LIMIT 1`,
+              [issueId]);
+            if (fastlaneDoneRow) {
+              // [S5·Opus 预筛 M1] 同 case 'accept' 一带——可执行指引，收信人恒为 admin。
+              throw new SysTransitionError(409, 'FASTLANE_DEPLOY_IN_PROGRESS',
+                '先行上线执行已在进行中（存在已确认执行的执行人），暂不可验收打回——可让剩余执行人完成确认以促成翻牌，或移除未确认的执行人触发翻牌，或作废本单据');
+            }
             setFrags.push(...SYS_CLEAR_FAST_RELEASE_AUTH_FIELDS_SQL);
             whereFrags.push(FAST_RELEASE_ACTIVE_AUTH_WHERE_SQL);   // 纵深防御，同 case 'accept' 一带范式
             fastReleaseTerminationSummary = '直上授权已失效（验收打回）';
+            fastReleaseRosterClearCause = '验收打回';   // [S5·§4-7] 姊妹赋值，见 case 'accept' 一带同款注释
           }
           break;
         }
@@ -4721,6 +5759,8 @@ module.exports = (deps) => {
           setFrags.push('dev_estimated_at = NULL', 'scheduled_start = NULL', 'gate_deferred_at = NULL',
             // [组 C·SC1·§3C.2] 同 case 'return' 一带——理由与 ETA 同生命周期，同事务清空。
             'eta_overrun_reason_code = NULL', 'eta_overrun_reason_note = NULL',
+            // [§14·S11] 完成超期理由同点同清，理由同上（case 'return' 一带）。
+            'completion_overrun_reason_code = NULL', 'completion_overrun_reason_note = NULL',
             ...SYS_CLEAR_FEASIBILITY_FIELDS_SQL);
           break;
         }
@@ -4771,6 +5811,9 @@ module.exports = (deps) => {
             //   ⚠️ dev_estimated_first_at/dev_estimated_at_on_release **不在本列表**——首诺跨轮锁死
             //   （§3C.4）、release 快照是历史事实不因重开作废（§3C.5），两者均不随本次清空。
             'eta_overrun_reason_code = NULL', 'eta_overrun_reason_note = NULL',
+            // [§14·S11] 完成超期理由同点同清，理由同上（case 'return' 一带）——系统迭代重开是同单折返
+            //   （非归档新单，reopen_count+1），不产生新的"完成"事实，上一轮的完成超期理由随重开作废。
+            'completion_overrun_reason_code = NULL', 'completion_overrun_reason_note = NULL',
             ...SYS_CLEAR_FEASIBILITY_FIELDS_SQL   // F2a §六：重开=新一轮，清评估+blocked
           );
           break;
@@ -4797,9 +5840,13 @@ module.exports = (deps) => {
           //   issue_reject 恒 from=待受理（受理排期改造 §9 前段，从未进授权窗口），isActiveFastReleaseAuth
           //   对该类型行恒 false（auth_at 结构上恒 NULL），本判据对变更流是安全 no-op，不需要按 type 分支。
           if (action === 'issue_reject' && isActiveFastReleaseAuth(row)) {
+            // [S5·§4-6] issue_reject **不加 done 闸**——挂牌态「待验证」∉ 其 from 集（结构性不可达，
+            //   见 transitions.js bug 段 `from: ['待受理','待处理']`），roster 从未产生，结构上不可能
+            //   存在 done 行；加一道用不到的闸只会误导读者以为存在真实风险面。
             setFrags.push(...SYS_CLEAR_FAST_RELEASE_AUTH_FIELDS_SQL);
             whereFrags.push(FAST_RELEASE_ACTIVE_AUTH_WHERE_SQL);   // 纵深防御，同 case 'accept' 一带范式
             fastReleaseTerminationSummary = '直上授权已失效（已拒绝）';
+            fastReleaseRosterClearCause = '已拒绝';   // [S5·§4-7] 姊妹赋值——结构上此刻恒无 roster 行可清（见上），仍传因供 helper 统一处理（changes=0 天然 no-op，不写虚假 timeline）
           }
           // ⭐ 角色权限重构 C0（方案 v1.5 §4-C0）：reactivate 回受理门——落态已恒「待受理」（见上方 [动态目标解析]），
           //   此处同事务把 intake_required 一并置 1，两者必须原子（同一条 UPDATE 的 SET 列表）；否则会留下
@@ -4856,6 +5903,10 @@ module.exports = (deps) => {
             setFrags.push(...SYS_CLEAR_FAST_RELEASE_AUTH_FIELDS_SQL);
             whereFrags.push(FAST_RELEASE_ACTIVE_AUTH_WHERE_SQL);
             fastReleaseTerminationSummary = '直上授权已失效（作废）';
+            // [S5·§4-6/§4-7] void **不闸**——终极出口，终结授权+软删集合行含 done 行（方案 §5-⑨"done
+            //   行恒不被软删"唯一例外，timeline 留痕可溯）。clearFastReleaseRosterOnTermination 的 WHERE
+            //   不带 exec_status 限制，本调用点是全仓唯一真正能清到 done 行的路径。
+            fastReleaseRosterClearCause = '作废';
           }
           break;
         }
@@ -4958,6 +6009,37 @@ module.exports = (deps) => {
           [issueId, fastReleaseTerminationSummary, Number(actor.id) || null, actor.name || null]
         );
       }
+      // [S5·§4-5/§4-7 五事件终结延伸] 姊妹后处理——四 case 共用同一处，软删本表未软删行 + 独立
+      //   fast_release_roster_cleared 留痕（唯一实现见 clearFastReleaseRosterOnTermination 定义处注释）。
+      //   独立 if（非合并进上面那个），避免把"两件不同的事"强行耦合成一个条件表达式。
+      if (fastReleaseRosterClearCause) {
+        await clearFastReleaseRosterOnTermination(issueId, actor, fastReleaseRosterClearCause);
+      }
+      // [方案 §13·13.1] feature ETA 直取——独立留痕行（同 fastReleaseTerminationSummary 一带既有范式：
+      //   event_type='note' + 独立 action_code，event_type 无 DDL CHECK 白名单，新增码零迁移，见 376-H
+      //   闭合证据）。⚠️ 与该范式的一处刻意不同：本两码**登记进**前端 SI_TL_NOTE_OWN_LABEL_CODES 独立徽章
+      //   （fastReleaseTerminationSummary 当初选择不登记，是因为它的 summary 本身已是完整可读文案；本两码
+      //   服务§13.1"对接人知情"的诉求——尤其"已过期"分支明确要求让对接人一眼看到"期望已过期"这件事，
+      //   落回通用「备注」徽章会削弱可见性，故登记专属标签，见 Sys_Iteration.html SI_TL_LABEL/SI_TL_CLS/
+      //   SI_TL_NOTE_OWN_LABEL_CODES 三处同批改动）。两变量互斥（同一次 case 'intake_accept' 执行至多一个
+      //   非 null，见其声明处注释），故两个 if 顺序无关、天然不会同一次写两行。
+      if (etaDirectTakeMarkerSummary) {
+        await dbRunAsync(
+          `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, operator_id, operator_name)
+           VALUES (?, 'note', ?, 'eta_auto_from_deadline', ?, ?)`,
+          [issueId, etaDirectTakeMarkerSummary, Number(actor.id) || null, actor.name || null]
+        );
+      }
+      if (etaSlaFallbackMarkerSummary) {
+        await dbRunAsync(
+          `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, operator_id, operator_name)
+           VALUES (?, 'note', ?, 'eta_auto_sla', ?, ?)`,
+          [issueId, etaSlaFallbackMarkerSummary, Number(actor.id) || null, actor.name || null]
+        );
+      }
+      // 【2026-08-14 S11 预筛订正】completion_overrun_reason 独立留痕行的写点已随闸边迁移整体收拢到
+      //   runWGate（该函数是本模块唯一 completion_overrun_reason INSERT 位，见 :3776 一带）——本函数
+      //   （sysIssueTransition）自此不再产出该 action_code 的行，无残留 if 分支。
 
       // [codex 101 号 HIGH 回填] resume 跨族死锁——resume 是唯一"离开 D_PRE 族恢复回任意活跃族"的动作，恢复
       //   目标若落在 DEV 族且此单带着 gate_deferred_at（hold 前已被 GATE 判定"全完成态但资格未过"，hold 本身
@@ -5196,7 +6278,7 @@ module.exports = (deps) => {
 
   // endpoint catch 转 HTTP（对齐 corrections sendCorrectionTransitionError）。
   function sendSysTransitionError(res, e) {
-    if (e instanceof SysTransitionError) return res.status(e.httpStatus).json({ error: e.message, code: e.code });
+    if (e instanceof SysTransitionError) return res.status(e.httpStatus).json({ error: e.message, code: e.code, ...(e.extra || {}) });
     // C2：status-transition-guard.js 的 MainStatusGuardError 不 instanceof SysTransitionError（独立模块，防循环
     //   依赖不 require index.js）——duck-type 兼容其 .httpStatus/.code 结构，同款转换，不必在每个调用点手动包一层。
     if (e && typeof e.httpStatus === 'number' && typeof e.code === 'string') {
@@ -5226,8 +6308,12 @@ module.exports = (deps) => {
 
   // ── GET /sys-issues/meta：状态机只读视图（决策②，T-M4；前端 fetch 缓存渲染）──────────
   //   ⚠️ 顺序：/sys-issues/meta 必须在 /sys-issues/:id 之前注册，否则 'meta' 被 :id 捕获。
+  //   [P3 补齐] sources：SYS_SOURCES 是 index.js 模块常量（三处后端消费点单一收口，见 :426），buildMeta()
+  //   本体活在 transitions.js（不认识 SYS_SOURCES）——不把常量搬家/不给 transitions.js 加跨模块依赖，
+  //   改在两模块交界的本端点就地合并（同 bizSystems 消费口径：前端一律通过 GET meta 一次性拿全部字典，
+  //   不看常量物理定义在哪个文件）。
   router.get('/sys-issues/meta', authenticateToken, requireSysSchemaReady, (req, res) => {
-    res.json(T.buildMeta());
+    res.json({ ...T.buildMeta(), sources: SYS_SOURCES });
   });
 
   // ── GET /sys-issues/intake-liaisons：对接人下拉候选（建单优化批 C1 §3 改动点5）──────────
@@ -5252,8 +6338,10 @@ module.exports = (deps) => {
   //   防止两处口径各写一份产生漂移。
   router.get('/sys-issues/eta-stats', authenticateToken, requireSysSchemaReady, async (req, res) => {
     try {
+      // [S13-b·B3·矩阵行13] 补 derive_root_id/derive_seq——「未达标示例」按单列出需要子编号（siIssueDisplayNo
+      //   消费，见下方 computeSysEtaStatsForRows 的 overdueExamples.push）。
       const rows = await dbAllAsync(
-        `SELECT id, title, type, deadline, released_at FROM sys_issues WHERE status = '已上线'`
+        `SELECT id, title, type, deadline, released_at, derive_root_id, derive_seq FROM sys_issues WHERE status = '已上线'`
       );
       const overall = computeSysEtaStatsForRows(rows);
       const byTypeMap = new Map();
@@ -5317,8 +6405,8 @@ module.exports = (deps) => {
       }
       // source：native 建单必填三选一（不走 DEFAULT，T-M5）
       const source = (typeof b.source === 'string' ? b.source.trim() : '');
-      if (!['业务方', '内部', '生产故障'].includes(source)) {
-        return res.status(400).json({ error: '来源必填（业务方/内部/生产故障）', code: 'SOURCE_REQUIRED', allowed: ['业务方', '内部', '生产故障'] });
+      if (!SYS_SOURCES.includes(source)) {
+        return res.status(400).json({ error: '来源必填（业务方/内部/生产故障）', code: 'SOURCE_REQUIRED', allowed: SYS_SOURCES });
       }
       const priority = (b.priority && ['P0', 'P1', 'P2', 'P3'].includes(b.priority)) ? b.priority : 'P2';
       // deadline 校验（codex 14 M-2；四处优化 D2 起改用 datetime 版——**四个写 deadline 的端点必须同口径**，
@@ -6610,8 +7698,14 @@ module.exports = (deps) => {
     }
     try {
       const c = await dbGetAsync(
+        // [S13-b·观察项核实] 补 derive_root_id/derive_seq——本端点限定 type='bug'（下方 CHAT_ONLY_FOR_BUG
+        //   闸），派生单同样是 bug 类型，可达此路径；欢迎卡片标题 cardTitle 需要这两列经 sysIssueDisplayNo
+        //   取子编号（见下方 cardTitle 定义处）。⚠️ 与 dingtalk_chat_name/rawName 那条持久群名不同——群名
+        //   一次性固化+外部一致性约束（钉钉客户端里群名一旦定下用户会拿它辨认群，不宜因派生单概念改名），
+        //   本次刻意不动；欢迎卡片是建群后一次性 best-effort 消息，无固化/外部依赖，可安全接子编号。
         `SELECT id, status, type, title, created_by, assigned_to, requester_name, requester_phone,
-                dingtalk_chat_id, dingtalk_open_conversation_id, dingtalk_chat_name
+                dingtalk_chat_id, dingtalk_open_conversation_id, dingtalk_chat_name,
+                derive_root_id, derive_seq
            FROM sys_issues WHERE id = ?`, [id]);
       if (!c) return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' });
 
@@ -6831,7 +7925,9 @@ module.exports = (deps) => {
       // 发欢迎卡片（best-effort，含拉群议题 chat_desc；失败不影响建群）
       try {
         const esc = dingtalkNotify.escapeMarkdown;
-        const cardTitle = `系统迭代讨论群 #${id}`;
+        // [S13-b·观察项核实] 欢迎卡片标题改子编号——c 携带的 derive_root_id/derive_seq 已在上方 SELECT
+        //   补投影，与持久群名（rawName/chatName，见上方定义处注释）不同，本处无固化/外部一致性顾虑。
+        const cardTitle = `系统迭代讨论群 ${sysDeriveNumbering.sysIssueDisplayNo(c)}`;
         const cardMd = [
           `## 系统迭代讨论群已创建`, ``,
           `**标题**：${esc(String(c.title || '-'))}`,
@@ -6951,9 +8047,21 @@ module.exports = (deps) => {
           const releaseExecutorVisibilitySql = `EXISTS (SELECT 1 FROM sys_release_executors e WHERE e.release_id = sys_issues.release_id AND e.user_id = ? AND e.removed_at IS NULL)`;
           // ⭐⭐ [C10-fix5 MED-1·写读同源] 同 bug-liaison 分支：补 `intake_liaison_id = ?` 析取（uid>0 由 :5259 守卫保证）——
           //   非 [13] eligible 成员被绑对接人后列表可见其名下单（读=纯身份·不叠 eligibility·读写不对称见上方分支注释）。
-          // 参数顺序：assigned_to / intake_liaison(MED-1) / release_assignee_id / releaseExecutor / roster / techLead(tech_lead_id) / techLead(operator_id)
-          where.push(`(assigned_to = ? OR intake_liaison_id = ? OR (release_assignee_id = ? AND type = 'bug') OR ${releaseExecutorVisibilitySql} OR ${rosterVisibilitySql} OR ${techLeadVisibilitySql})`);
-          params.push(uid, uid, uid, uid, uid, uid, uid);
+          // ⭐⭐ [Opus 预筛 S6-HIGH-1 修复·2026-08-14] 先行上线值班执行人可见性——照 C4a 批次执行人先例
+          //   （releaseExecutorVisibilitySql 同款子表 EXISTS 写法）补析取，修预筛实测的"值班执行人对
+          //   挂牌单列表 0 条+详情 403"双断（方案 §2 ③④要求执行人能看到自己名下的先行上线单）。
+          //   **口径已拍板**：只认当前代次未软删行（sysFastReleaseExecActiveWhere 统一谓词，与 confirm
+          //   端点在册判权/撤销终结清集合三处同一份谓词，§4-10 统一谓词纪律的第四个消费点）——撤销/
+          //   终结/重授权把上一代集合行软删后，值班人随之失去可见性（语义合理：已不在"这一代"值班
+          //   集合里）；consumed（已消费）单的集合行按 §5b 第 7 行"保留（部署留痕）"语义不会被软删，
+          //   故部署人对已上线单的可见性天然保住，不需要另开一条"曾是部署人"的历史可见性析取项——
+          //   与 rosterVisibilitySql（开发协作子表"在册∨历史参与皆可见"的既有更宽口径）刻意不同源，
+          //   两者服务不同子表、不同角色语义，不强行对齐。本口径落字于此，§9 收尾同步项待用户追认。
+          const fastReleaseExecVisibilitySql = `EXISTS (SELECT 1 FROM sys_fast_release_executors fe WHERE ${sysFastReleaseExecActiveWhere('fe', 'sys_issues.id')} AND fe.user_id = ?)`;
+          // 参数顺序：assigned_to / intake_liaison(MED-1) / release_assignee_id / releaseExecutor /
+          //   fastReleaseExec(HIGH-1) / roster / techLead(tech_lead_id) / techLead(operator_id)
+          where.push(`(assigned_to = ? OR intake_liaison_id = ? OR (release_assignee_id = ? AND type = 'bug') OR ${releaseExecutorVisibilitySql} OR ${fastReleaseExecVisibilitySql} OR ${rosterVisibilitySql} OR ${techLeadVisibilitySql})`);
+          params.push(uid, uid, uid, uid, uid, uid, uid, uid);
         }
       }
       // 默认过滤作废（前端可传 include_voided=1，仅 admin 生效）
@@ -7000,12 +8108,21 @@ module.exports = (deps) => {
                 released_at, post_release_acceptance, post_derive_issue_id,
                 created_by, created_by_name, requester_name, requester_dept,
                 origin_issue_id, release_id, needs_release, online_source,   -- ← [C9] deriveOnlineSourceKind 的输入之一（另两列 status/release_id 本就在）
+                derive_root_id, derive_seq,   -- ← [S12-b·§15.3 helper 契约] 供 S13 前端 sysIssueDisplayNo 消费——本批只投影不接线渲染（前端 helper/树形聚类归 S13）
                 -- ← [组 B·SB3] released_at/post_release_acceptance（上方已列入投影）：列表页「先行上线待补验收」
                 --   徽章 + 48h 圈红计时起点（siPostAcceptFlagHtml 消费·前端计算不落派生列）。
                 -- ← [追加批·2026-08-13] post_derive_issue_id：failed_derived 终态徽章 title 里"已派生 #N"
                 --   的取数列（siPostAcceptFlagHtml 新分支消费；此前列表 SELECT 从未投影过此列，只有
                 --   详情端点 SELECT sys_issues.* 隐式带上——列表徽章要用它必须显式补列，禁反引号见本
                 --   SELECT 块上方既有注释纪律）。
+                -- [S13-b·B1·矩阵行3 后端解法] post_derive_issue_id 目标单的 root/seq 标量子查询投影——
+                --   S13-a 前端曾靠"已加载 siList 内查找"客户端方案兜底（找不到就回退真实 id），本批把权威
+                --   数据挪进 SELECT，前端优先消费投影列、siList 查找降级为投影缺失时的兜底（S13-a 未做项 4
+                --   的解法·主会话裁定）。子查询形状照下方 fast_release_exec_total_count/done_count 先例
+                --   （标量子查询挂在 sys_issues 主行上，非 JOIN）；post_derive_issue_id 为空时子查询天然
+                --   返回 NULL（WHERE d.id = NULL 恒假），不需要额外判空分支。
+                (SELECT d.derive_root_id FROM sys_issues d WHERE d.id = sys_issues.post_derive_issue_id) AS post_derive_root_id,
+                (SELECT d.derive_seq FROM sys_issues d WHERE d.id = sys_issues.post_derive_issue_id) AS post_derive_seq,
                 release_assignee_id, release_assignee_name, release_assignee_notify_status,
                 -- C4a（方案 §4.4 #8）：批次级单列旧字段（上两行）已冻结不再更新，本单所属批次的执行人
                 --   通知态改由子表实时聚合派生（六态优先级判定同 getReleaseNotifySummary/方案 §4.3，
@@ -7035,6 +8152,23 @@ module.exports = (deps) => {
                    WHEN (SELECT COUNT(*) FROM sys_release_executors e WHERE e.release_id = sys_issues.release_id AND e.removed_at IS NULL AND e.notify_status = 'sent') > 0 THEN 'partial'
                    ELSE 'failed'
                  END) AS executor_notify_summary,
+                -- [先行上线两步化 S6·方案 v1.8 §4-8] 徽章「待先行部署 x/N」派生输入三列：
+                --   ① fast_release_active_auth——复用 FAST_RELEASE_ACTIVE_AUTH_WHERE_SQL 同一份字面量
+                --      常量（非另拼一份，与 :3805 一带 UPDATE WHERE 层纵深复核同源），非新增状态标志列，
+                --      方案 §2 末段"徽章条件是纯派生"要求的活跃授权布尔即由本列承担；
+                --   ② fast_release_exec_total_count / ③ fast_release_exec_done_count——当前代次执行人
+                --      集合计数，复用 sysFastReleaseExecActiveWhere('fe','sys_issues.id') 相关子查询
+                --      形态（§4-10 统一谓词，禁另写一份 issue_id/removed_at 字面量）。
+                --   徽章条件=type='bug' AND status='待验证' AND fast_release_active_auth（type/status 均
+                --   已在上方投影，前端自行 AND 组合），同 has_release_remove/has_current_tech_lead_comment
+                --   "SQL 只出数，状态语义交给前端判断"既有范式，非本条新发明。当日无值班挂牌⇒两计数皆
+                --   0，前端渲染「0/0 待配置执行人」（方案 §4-1）——本三列不做 type/status 门控，与其余
+                --   同族列一致。
+                (CASE WHEN ${FAST_RELEASE_ACTIVE_AUTH_WHERE_SQL} THEN 1 ELSE 0 END) AS fast_release_active_auth,
+                (SELECT COUNT(*) FROM sys_fast_release_executors fe
+                   WHERE ${sysFastReleaseExecActiveWhere('fe', 'sys_issues.id')}) AS fast_release_exec_total_count,
+                (SELECT COUNT(*) FROM sys_fast_release_executors fe
+                   WHERE ${sysFastReleaseExecActiveWhere('fe', 'sys_issues.id')} AND fe.exec_status = 'done') AS fast_release_exec_done_count,
                 reopen_count, return_count, scope_changed, created_at, updated_at,
                 tech_lead_id, tech_lead_notify_status,   -- S5 手动化：列表通知徽章消费（193 复审：oa_number 已撤——
                 --   "顺带"加列=未经 187 读权契约证明的扩面；徽章不消费它，列表不需要它）
@@ -7156,19 +8290,38 @@ module.exports = (deps) => {
                 -- liaison_test_skip_excused 曾在 v1.1 D21 撤销决策树⑤分支后一度成死值（无代码路径写
                 -- 它）；随 S12-Opus-1 修复"全员 excused 直落待验证"复活——现在是真实可达的写者，
                 -- 非"宽松匹配富余项"，白名单本身未改动（含义随实现变化，字面数组不变）。
-                -- [组 B·SB2·预筛 MED-1] 直上单从未产生「to_status='待验证'」的 status_change 行（处理中
-                --   直接跳到已上线，跳过整个验证/上线安排阶段）——不补这条分支，直上单的 last_completed_at
-                --   会恒为 NULL，与其它三条完成路径（liaison_test_pass/liaison_test_skip_excused/
-                --   liaison_test_skip_liaison）语义不一致："实际完成"的业务含义是"不再需要开发继续动"，
-                --   直上恰恰是这个语义最强的一种（连验证都跳过了）。新增析取分支：进「已上线」且
-                --   action_code='fast_release_direct_online' 的 status_change 行同样计入完成时刻。
+                -- [组B·S2-2·拆直上分支] 原 [组 B·SB2·预筛 MED-1] 在此新增的析取分支
+                --   「OR (to_status = '已上线' AND action_code = 'fast_release_direct_online')」
+                --   已删除——该分支服务的"submit 勾选直上"路径已随两步化方案 §4-2 拆除（直上单从未产生
+                --   「to_status='待验证'」的 status_change 行这一前提本身也随之消失：submit 现在只走
+                --   常规 runWGate GATE，全部 bug 单的完成路径重新收敛回下面这一条"进待验证"的判据，
+                --   与 improvement/feature 完全同构）。旧码 grep 归零：生产活代码零引用（verify 侧保留
+                --   零计数断言——即"应恒为 0"的检测代码字面量含该字符串，属断言而非消费，不算残留；
+                --   fail-note Playwright 夹具已转 S3——该夹具此前复用同一序列造态，S2 拆直上后已结构性
+                --   断裂，头部已加警示，不代表旧码仍被消费，[codex 382 预筛 L4 收口] 措辞收窄，不再说
+                --   "全仓零残留"这类未做区分的绝对表述）。
+                -- [S3 曾加又删·codex 384 预筛 HIGH-1 裁定=撤销] S3 落地共享翻牌内核后，本处曾一度加回
+                --   一条「OR (to_status = '已上线' AND action_code = 'fast_release_exec_online')」，
+                --   理由是"填补两步化最终翻牌事件的完成时刻"——**该理由不成立，已撤销**：两步化 fastlane
+                --   单必经「待验证」（挂牌前提本身要求花名册全完成才触发挂牌，W-GATE 镜像行 action_code
+                --   为 NULL，早已命中下面「action_code IS NULL」这一支），加那条 OR 不是"补 NULL 缺口"，
+                --   而是让 MAX() 在存在翻牌行时改取**更晚**的那一行——把 last_completed_at 的含义从"最后
+                --   进待验证时刻"悄悄改写成"部署上线时刻"，与方案 §14 F4 明文口径（"last_completed_at=
+                --   最后进待验证时刻"，锚点即本行 index.js:7165 一带，条目原文见方案 v1.8 §14.1 F4 行）
+                --   直接冲突；且与详情页已独立展示的「上线」行（released_at）语义重复；且让本列在
+                --   fastlane 单与非 fastlane 单之间口径不一致，跨单不可比。**终态=删除该析取分支，不
+                --   新增任何 fastlane 专属计入项**——本列对全部 type/来源恒为"最后一次进入待验证"这一
+                --   件事，先行上线路径的"上线"事件不参与本列聚合，与详情页 released_at 各管各的展示面，
+                --   不重复也不混淆。「fast_release_exec_online」镜像行**依然会写**（供 timeline 自身可读
+                --   +徽章投影用，见 SI_TL_LABEL/SI_TL_CLS 词条），只是不再喂给本列 MAX() 聚合。
+                --   ⚠️ 本条口径经本次撤销钉死为**恒真不变量**：verify-sys-fastlane-submit.js 新增断言
+                --   （末位翻牌后 list/detail 两端点 last_completed_at 仍=进待验证时刻、≠released_at）——
+                --   若未来又有人尝试搬回这类"再加一个 to_status 分支"的改法，该断言会立即判红，不再
+                --   只靠这段注释口头劝阻。
                 (SELECT MAX(created_at) FROM sys_issue_timeline
                    WHERE issue_id = sys_issues.id AND event_type = 'status_change'
-                     AND (
-                       (to_status = '待验证'
-                         AND (action_code IS NULL OR action_code IN ('liaison_test_pass', 'liaison_test_skip_excused', 'liaison_test_skip_liaison')))
-                       OR (to_status = '已上线' AND action_code = 'fast_release_direct_online')
-                     )
+                     AND to_status = '待验证'
+                     AND (action_code IS NULL OR action_code IN ('liaison_test_pass', 'liaison_test_skip_excused', 'liaison_test_skip_liaison'))
                 ) AS last_completed_at,
                 -- C1（commit号两列 20260803·锚点 D4）：前端/后端 commit 编码聚合。
                 --   ⚠️ 值协议 = JSON 数组字符串（如 '["a3f9c21","1c5d883"]'），非分隔符拼接明文，两条理由：
@@ -7283,19 +8436,38 @@ module.exports = (deps) => {
       //   IN 白名单——见列表端点处完整注释，理由不重复。
       const row = await dbGetAsync(
         `SELECT sys_issues.*,
-                -- [组 B·SB2·预筛 MED-1] 直上单从未产生「to_status='待验证'」的 status_change 行（处理中
-                --   直接跳到已上线，跳过整个验证/上线安排阶段）——不补这条分支，直上单的 last_completed_at
-                --   会恒为 NULL，与其它三条完成路径（liaison_test_pass/liaison_test_skip_excused/
-                --   liaison_test_skip_liaison）语义不一致："实际完成"的业务含义是"不再需要开发继续动"，
-                --   直上恰恰是这个语义最强的一种（连验证都跳过了）。新增析取分支：进「已上线」且
-                --   action_code='fast_release_direct_online' 的 status_change 行同样计入完成时刻。
+                -- [组B·S2-2·拆直上分支] 原 [组 B·SB2·预筛 MED-1] 在此新增的析取分支
+                --   「OR (to_status = '已上线' AND action_code = 'fast_release_direct_online')」
+                --   已删除——该分支服务的"submit 勾选直上"路径已随两步化方案 §4-2 拆除（直上单从未产生
+                --   「to_status='待验证'」的 status_change 行这一前提本身也随之消失：submit 现在只走
+                --   常规 runWGate GATE，全部 bug 单的完成路径重新收敛回下面这一条"进待验证"的判据，
+                --   与 improvement/feature 完全同构）。旧码 grep 归零：生产活代码零引用（verify 侧保留
+                --   零计数断言——即"应恒为 0"的检测代码字面量含该字符串，属断言而非消费，不算残留；
+                --   fail-note Playwright 夹具已转 S3——该夹具此前复用同一序列造态，S2 拆直上后已结构性
+                --   断裂，头部已加警示，不代表旧码仍被消费，[codex 382 预筛 L4 收口] 措辞收窄，不再说
+                --   "全仓零残留"这类未做区分的绝对表述）。
+                -- [S3 曾加又删·codex 384 预筛 HIGH-1 裁定=撤销] S3 落地共享翻牌内核后，本处曾一度加回
+                --   一条「OR (to_status = '已上线' AND action_code = 'fast_release_exec_online')」，
+                --   理由是"填补两步化最终翻牌事件的完成时刻"——**该理由不成立，已撤销**：两步化 fastlane
+                --   单必经「待验证」（挂牌前提本身要求花名册全完成才触发挂牌，W-GATE 镜像行 action_code
+                --   为 NULL，早已命中下面「action_code IS NULL」这一支），加那条 OR 不是"补 NULL 缺口"，
+                --   而是让 MAX() 在存在翻牌行时改取**更晚**的那一行——把 last_completed_at 的含义从"最后
+                --   进待验证时刻"悄悄改写成"部署上线时刻"，与方案 §14 F4 明文口径（"last_completed_at=
+                --   最后进待验证时刻"，锚点即本行 index.js:7165 一带，条目原文见方案 v1.8 §14.1 F4 行）
+                --   直接冲突；且与详情页已独立展示的「上线」行（released_at）语义重复；且让本列在
+                --   fastlane 单与非 fastlane 单之间口径不一致，跨单不可比。**终态=删除该析取分支，不
+                --   新增任何 fastlane 专属计入项**——本列对全部 type/来源恒为"最后一次进入待验证"这一
+                --   件事，先行上线路径的"上线"事件不参与本列聚合，与详情页 released_at 各管各的展示面，
+                --   不重复也不混淆。「fast_release_exec_online」镜像行**依然会写**（供 timeline 自身可读
+                --   +徽章投影用，见 SI_TL_LABEL/SI_TL_CLS 词条），只是不再喂给本列 MAX() 聚合。
+                --   ⚠️ 本条口径经本次撤销钉死为**恒真不变量**：verify-sys-fastlane-submit.js 新增断言
+                --   （末位翻牌后 list/detail 两端点 last_completed_at 仍=进待验证时刻、≠released_at）——
+                --   若未来又有人尝试搬回这类"再加一个 to_status 分支"的改法，该断言会立即判红，不再
+                --   只靠这段注释口头劝阻。
                 (SELECT MAX(created_at) FROM sys_issue_timeline
                    WHERE issue_id = sys_issues.id AND event_type = 'status_change'
-                     AND (
-                       (to_status = '待验证'
-                         AND (action_code IS NULL OR action_code IN ('liaison_test_pass', 'liaison_test_skip_excused', 'liaison_test_skip_liaison')))
-                       OR (to_status = '已上线' AND action_code = 'fast_release_direct_online')
-                     )
+                     AND to_status = '待验证'
+                     AND (action_code IS NULL OR action_code IN ('liaison_test_pass', 'liaison_test_skip_excused', 'liaison_test_skip_liaison'))
                 ) AS last_completed_at
            FROM sys_issues WHERE id = ?`,
         [id]
@@ -7311,6 +8483,16 @@ module.exports = (deps) => {
       row.online_source_kind = deriveOnlineSourceKind(row);
       // [组 B·SB3·追加批 M2] 48h 圈红——与列表端点同一份判据（isPostReleaseAcceptOverdue），读点不分裂。
       row.post_release_accept_overdue = isPostReleaseAcceptOverdue(row);
+      // [Opus 预筛 S6-MED-1 修复·2026-08-14·判官归一] 详情端补活跃授权布尔——与列表端点 S6 已下发的
+      //   fast_release_active_auth 同一份判据（isActiveFastReleaseAuth，六列同作用域一行事），详情响应
+      //   `SELECT sys_issues.*` 天然带六列输入，直接调用无需额外投影。归一动机：S7 前端此前在详情执行
+      //   区语境自行调用前端镜像谓词 siHasActiveFastReleaseAuth（读六列原始字段），与列表端"后端算好
+      //   布尔、前端只读"的路线不一致——同一件事（活跃授权判定）详情/列表两端各算一次，虽然此刻两份
+      //   判据逐字同源不会立刻出错，但属于"能收敛成单一权威却没收敛"的隐患（S7 本轮一并归一，详情执行
+      //   区改读本字段；siHasActiveFastReleaseAuth 在授权/撤销按钮等其余语境仍保留使用，见前端消费面
+      //   grep 报告，非全删）。0/1 而非布尔字面量——与列表端 CASE WHEN 输出的整数口径一致，前端两端
+      //   同一份"=== 1"比较写法可复用。
+      row.fast_release_active_auth = isActiveFastReleaseAuth(row) ? 1 : 0;
       // ⭐ [C11·方案 v1.7 §10.3·M6] 单组「版本号」DTO 契约（后端唯一权威·前端只按 DTO 渲染不自行判定）：
       //   single_commit_group / group_label（「版本号」）/ allowed_components（命中系统只含 backend）。命中系统的
       //   提交界面渲染单组；详情 commit 表隐藏 component 列、commit_ref 列表头显示 group_label（前端
@@ -7377,6 +8559,60 @@ module.exports = (deps) => {
         (Number(row.release_assignee_id) === uid && row.type === 'bug')
         || isReleaseExecutorInRoster
       );
+      // [Opus 预筛 S6-HIGH-1 修复·2026-08-14] 先行上线值班执行人可见性——与上方列表端点新补的
+      //   fastReleaseExecVisibilitySql 同源同口径（sysFastReleaseExecActiveWhere 统一谓词，只认
+      //   当前代次未软删行，与 confirm 端点在册判权/撤销终结清集合三处同一份谓词，见列表端该处
+      //   完整口径注释）。修复前该角色详情 403，若只改列表不改详情会变成"列表能看见却打不开详情"
+      //   的新写读不一致（[[feedback_write_read_same_semantic]]），故与列表补齐同批修。
+      // [codex 392 号 conditional M1 收口·第三可见性消费面审计·2026-08-14] 全仓 grep（wbs-server/
+      //   routes/ 优先 sys-iteration，assigned_to/intake_liaison_id/*VisibilitySql/NOT_AUTHORIZED_
+      //   TO_VIEW 五类关键词）核实：本端点（详情）+ 上方列表端点已是**全部**需要"值班执行人应可见"
+      //   的读面，其余含类似身份过滤的端点逐一核实为"结构性不可达"或"有意收窄，非视图可见性的第
+      //   三消费面"，无遗漏需补析取——完整审计表见交付报告，结论摘要：
+      //   ① GET/POST .../chat-candidates·create-chat（:7060/:7106，仅 admin∨creator∨assignee）
+      //      ——拉群讨论是开发期协调工具，判据本就窄于本端点可见集（甚至不含 intake_liaison/
+      //      bugLiaison/roster/techLead），是独立于"能否查看详情"之外的"发起权"窄集，非同一可见性
+      //      概念的第三落点；值班执行人只在部署时刻参与，无需加入开发期讨论群；
+      //   ② GET .../attachments/:attId/download（:12574，admin∨intake_liaison(isSysCoordinator)∨
+      //      dev-roster 在册/历史参与）——附件下载圈子本就窄于详情可见圈；且已核实**批次（batch）
+      //      发布路径的 release_executor 角色同样不在这个圈子里**（sysAttachmentRosterState 只查
+      //      sys_issue_dev_assignees，不查 sys_release_executors）——fastlane 执行人与 batch
+      //      执行人在"能否下载附件"这件事上待遇一致，不是 fastlane 特有缺口，是"执行人角色本就不
+      //      含附件下载权"的既有设计，两条部署路径同等对待；
+      //   ③ GET /sys-releases/:id（批次详情，:13999，admin∨对接人∨批次执行人）——结构性不可达：
+      //      fastlane 单 release_id 恒 NULL（从未进任何批次，方案 §10.1 字段契约），值班执行人不会
+      //      也不需要打开这个端点看自己负责的 fastlane 单；
+      //   ④ GET /sys-issues/eta-stats（:5736）+ GET /api/statistics/efficiency(/detail)
+      //      （server.js:10921/10944，内部经 utils/efficiency-stats.js loadSysEfficiencyRecords）
+      //      ——均只挂 authenticateToken，**无任何行级身份过滤**（对全体登录用户返回同一份聚合/
+      //      明细数据），不存在"这个人能看哪些行"的概念，值班执行人此刻已经"看得到"（甚至比修复前
+      //      的列表/详情更宽），无需额外放行；
+      //   ⑤ GET /sys-issues/:id/notify-read-status（:17558，admin/受理人专属）——管理员核查通知
+      //      投递已读状态的审计工具，与"能否查看/操作这张单"是不同维度的关注点，非 issue 可见性面；
+      //   ⑥ My_Workspace.html（工作台）——未消费 sys_issues 任何端点（全文 grep 零命中），N/A；
+      //   ⑦ 导出/CSV 类端点——sys-iteration 模块当前不存在任何此类端点，N/A。
+      //   审计范围声明：本轮聚焦 wbs-server/routes/ 下的 HTTP 读面（含跨文件 server.js 效率统计两
+      //   端点）；未覆盖钉钉消息文案本身（utils/dingtalk-notify.js 已核实零 sys_issues 引用、纯消息
+      //   拼装无访问控制逻辑）与前端展示层（前端不是权限边界，真闸恒在后端，同本文件既有惯例）。
+      // [Opus 合并预筛 LOW-3 修复] 补 `row.type === 'bug' &&` 短路——fastlane 集合行结构上只可能挂在
+      //   bug 单上（授权端点已按 type 门控），非 bug 单查询恒空，与下方 fastReleaseExecutors DTO 块
+      //   （:8152 一带 `if (row.type === 'bug')`）及上方 isReleaseExecutorInRoster（:7932 三元短路）
+      //   同一短路范式，省一次结构上必空的查询。
+      // [codex 392 号 conditional L2 收口·热路径顺序] `isFastReleaseExecutor` 只在"非 admin 且其余
+      //   已算出的放行身份（isAdmin/isAssignee/isIntakeLiaisonUser/isBoundLiaison/isBugLiaison/
+      //   isTechLeadOfIssue/isReleaseExecutor，均在本行之前已求值完毕）均不成立"时才真正执行查询——
+      //   本变量在全文件唯一消费点是下方 :7999 一带的 OR 门禁，只要前面任一身份已为 true，OR 链结果
+      //   已经确定为放行，此时本变量取何值都不影响最终判定，query 是纯粹的浪费（绝大多数请求方是
+      //   admin/assigned_to 本人，二者都会命中这条早退，本查询在热路径上因此近乎不会真正执行）。
+      //   **最终放行语义不变**——`false` 分支只是"提前确定 OR 链已经为真、这个子判定的具体值不重要"，
+      //   非"判它为不放行"；isRosterMember（下方 :7988，晚于本行才求值）不在早退判据之列，因为此刻
+      //   它还没算出来，读取未定义变量会出错，也谈不上"已算放行身份"。
+      const isFastReleaseExecutor = (isAdmin || isAssignee || isIntakeLiaisonUser || isBoundLiaison || isBugLiaison || isTechLeadOfIssue || isReleaseExecutor)
+        ? false
+        : (uid > 0 && row.type === 'bug' && !!(await dbGetAsync(
+            `SELECT 1 FROM sys_fast_release_executors fe WHERE ${sysFastReleaseExecActiveWhere('fe')} AND fe.user_id = ? LIMIT 1`,
+            [id, uid]
+          )));
       // [codex C3 对抗审 HIGH-B 回填] 在册/历史参与成员读可见性——与列表读端同源（同一 EXISTS 语义，SSOT 依据
       //   同上方列表端点注释：方案 v2.9 line 33"历史参与…只读整单"+ line 88"assigned_to 禁作授权源"）。
       //   ⚠️ S4 补强（codex 239 审 M-1）：本变量是**读可见性**判定（这个人能不能看这张单），既不判
@@ -7393,7 +8629,7 @@ module.exports = (deps) => {
       row.can_bug_hold = row.type === 'bug' ? await canBugHold({ id: uid, role }, row) : false;
       // ⭐ C1：受理人加入放行集（全类型·与列表读端同源）
       // ⭐ [C10-fix5 MED-1] isBoundLiaison 加入放行集（与列表 intake_liaison_id 析取同源）。
-      if (!isAdmin && !isIntakeLiaisonUser && !isAssignee && !isBugLiaison && !isReleaseExecutor && !isRosterMember && !isTechLeadOfIssue && !isBoundLiaison) {
+      if (!isAdmin && !isIntakeLiaisonUser && !isAssignee && !isBugLiaison && !isReleaseExecutor && !isFastReleaseExecutor && !isRosterMember && !isTechLeadOfIssue && !isBoundLiaison) {
         return res.status(403).json({ error: '无权查看此迭代单', code: 'NOT_AUTHORIZED_TO_VIEW' });
       }
       if (row.status === '已作废' && !isAdmin) {
@@ -7407,9 +8643,12 @@ module.exports = (deps) => {
       //   本次核实发现：详情端点此前从未把 timeline.id 投影出去（列举式 SELECT 的既有缺口），世界模型
       //   要求的轮内比较结构上做不到，故本次一并补上——纯新增列，不影响任何既有消费方（无消费方按
       //   固定 key 数量/顺序做过 deepStrictEqual，已 grep 全部 verify-sys-*.js 确认）。
+      // [codex 395 预筛 NEW-3] 投影补 payload_json——completion_overrun_reason 行结构化存
+      // {gap_days,reason_code,reason_note}，前端 kv 优先读这一列，不必解析 summary 文本（该列本就
+      // 已在 liaison_test_pass 结构化留痕场景消费，本次是"同一列，新增一类消费方"，非新开列）。
       const timeline = await dbAllAsync(
         `SELECT id, event_type, from_status, to_status, summary, action_code, ref_id, round_no,
-                operator_id, operator_name, created_at
+                operator_id, operator_name, created_at, payload_json
            FROM sys_issue_timeline WHERE issue_id = ? ORDER BY id`,
         [id]
       );
@@ -7563,6 +8802,36 @@ module.exports = (deps) => {
           round_no: r.round_no,
         }));
       }
+      // ── S6（先行上线两步化·方案 v1.8 §4-8）：详情附「值班执行人集合」+ 进度计数 ────────────────
+      //   仅 type='bug' 查询（同上方 bugCauseRecords 判据——非 bug 单结构上不可能产生本表任何行，授权
+      //   端点已按 type 门控，查询本身即无意义，跳过节省一次 DB 往返）。
+      //   ⚠️ 附块条件性取舍（S6 编码期论证，非既有决定，供交付报告留痕）：本查询**不叠加**「status=
+      //   待验证 ∧ 活跃授权」等徽章派生条件——existence-gated（有没有数据决定要不要展示）而非
+      //   business-condition-gated（当前是不是挂牌态才查），与本文件既有附块惯例同源：
+      //     · release_brief 只按 row.release_id 是否存在 + 读者可见性两条件门控，不叠"批次是不是当前
+      //       活跃批次"这类业务态判断（:8143 一带注释）；
+      //     · bugCauseRecords/noCodeRecords 均只按 type/dev_status 存在性门控，不叠状态机当前所处态。
+      //   本查询只按 §4-10 统一谓词 sysFastReleaseExecActiveWhere() 取"当前代次未软删行"，天然覆盖
+      //   两种非空场景而无需分支：①挂牌进行中（集合含 pending/done 混合，⑤活跃授权态）②已消费（⑪
+      //   豁免：done 行按 §5b 第 7 行"保留（部署留痕）"语义结构性保留，本查询同样能捞到）——**同一份
+      //   查询天然身兼"实时执行区数据源"与"已上线单部署留痕只读展示"两种用途，S6 不需要为 consumed
+      //   单另开一个只读专属块**（S7 前端按 issue.fast_release_consumed_at/online_source 是否非空决定
+      //   「执行先行上线」按钮是否可交互展示，非本端点职责）。终结/撤销后被清空的单（软删全部行）与
+      //   从未挂牌的单，查询结果同样自然是空数组——不需要额外的"是否挂牌"判断来决定要不要查询。
+      let fastReleaseExecutors = [];
+      if (row.type === 'bug') {
+        fastReleaseExecutors = await dbAllAsync(
+          `SELECT id, user_id, user_name, exec_status, executed_at
+             FROM sys_fast_release_executors WHERE ${sysFastReleaseExecActiveWhere()} ORDER BY id ASC`,
+          [id]
+        );
+      }
+      // 进度计数（方案 §4-8 字面用词 done_count/total_count）：直接从上面已取到的当前代次数组算，不
+      //   另开一次聚合查询（数组已是 §4-10 统一谓词过滤后的结果，二次计数与它天然同源、不会漂移）。
+      const fastReleaseExecProgress = {
+        done_count: fastReleaseExecutors.filter(r => r.exec_status === 'done').length,
+        total_count: fastReleaseExecutors.length,
+      };
       // 血缘：正向（本单来源 origin_issue_id）+ 反向（已衍生出哪些单，M-2 反查）
       let originIssue = null;
       if (row.origin_issue_id) {
@@ -7572,6 +8841,22 @@ module.exports = (deps) => {
         'SELECT id, title, type, status, system_name FROM sys_issues WHERE origin_issue_id = ? ORDER BY id',
         [id]
       );
+      // [S13-b·B2·矩阵行5] 派生链区块数据源——一次查询取**全族**（非仅直接父/直接子）：derive_root_id
+      //   已在 S12 迁移里扁平化到顶层根，族内任意深度成员（含二级、三级派生）都直接带着同一
+      //   derive_root_id，故不需要像前端 siFamilyRootId 那样递归 origin_issue_id 兜底——服务端有权威列
+      //   直接用。resolvedFamilyRootId：本单若自己是派生单用其 derive_root_id，否则视自己为潜在根
+      //   （即便此刻还没有任何派生子单，这条 WHERE 也只会查出自己一条，下方按 length>1 才当作"确有家族"）。
+      //   ⚠️ 本查询同时充当 postAcceptKv「已派生 #N」的取号数据源——post-release-accept(fail) 新派生的单
+      //   origin_issue_id=本单 id，其 derive_root_id 结构上必然等于 resolvedFamilyRootId（insertDerivedSysIssue
+      //   的 root=origin.derive_root_id??originId 规则决定），故它必然落在这次查询结果里，无需再开一条子查询。
+      const resolvedFamilyRootId = row.derive_root_id != null ? row.derive_root_id : row.id;
+      const deriveFamilyRaw = await dbAllAsync(
+        `SELECT id, title, type, status, derive_root_id, derive_seq, derive_reason
+           FROM sys_issues WHERE id = ? OR derive_root_id = ?
+          ORDER BY (CASE WHEN derive_seq IS NULL THEN 0 ELSE 1 END), derive_seq ASC, id ASC`,
+        [resolvedFamilyRootId, resolvedFamilyRootId]
+      );
+      const deriveFamily = deriveFamilyRaw.length > 1 ? deriveFamilyRaw : [];   // 单成员不算"确有家族"
 
       // §7 关联修正单号软提示（bug 流 Commit ④，不硬校验不 join）：related_correction_no 是自由文本软引用，
       //   best-effort 单独轻查 correction_requests（纯数字→按 id / 否则→按 oa_number 匹配），查到回状态（active/voided）、
@@ -7624,7 +8909,7 @@ module.exports = (deps) => {
       //   （admin ∨ 对接人 ∨ 本批次执行人），其余读者拿 null。前端 siCanOpenRelease 以"brief 非空"为唯一
       //   判据（数据即权限，前端不复算四分支），写读同源单点在此。
       const canSeeReleaseBrief = isAdmin || isIntakeLiaisonUser || isReleaseExecutor;
-      res.json({ issue: row, timeline, attachments: outAttachments, specAttachments: outSpecAttachments, hasSpecAttachment: outSpecAttachments.length > 0, origin_issue: originIssue, derived_issues: derivedIssues, related_correction: relatedCorrection, dev_assignees: devAssignees, dev_commits: devCommits, no_code_records: noCodeRecords, bug_cause_records: bugCauseRecords, release_brief: canSeeReleaseBrief ? releaseBrief : null });
+      res.json({ issue: row, timeline, attachments: outAttachments, specAttachments: outSpecAttachments, hasSpecAttachment: outSpecAttachments.length > 0, origin_issue: originIssue, derived_issues: derivedIssues, derive_family: deriveFamily, related_correction: relatedCorrection, dev_assignees: devAssignees, dev_commits: devCommits, no_code_records: noCodeRecords, bug_cause_records: bugCauseRecords, release_brief: canSeeReleaseBrief ? releaseBrief : null, fast_release_executors: fastReleaseExecutors, fast_release_exec_progress: fastReleaseExecProgress });
     } catch (err) {
       logger.error('[系统迭代] 详情查询失败:', err && err.message);
       res.status(500).json({ error: (err && err.message) || '详情查询失败' });
@@ -7787,7 +9072,29 @@ module.exports = (deps) => {
     //   （派生自 bug 的 bug 单首次提交），此处只做类型层放行（同旧代码 non-string→视为未填，不在此报错），
     //   必填判定与真正校验在事务内进行（见 submit handler 内 [codex 100 号 HIGH-2 回填] 注释）。
     // [v1.1 §3.3·C3] +self_tested/test_env_deployed（提交双勾，恒等 true 校验）。
-    const ALLOWED_TOP_KEYS = ['mode', 'no_code_reason', 'commits', 'fix_gap_note', 'work_note', 'bug_cause_note', SUBMIT_SELF_TESTED_KEY, SUBMIT_TEST_ENV_DEPLOYED_KEY, 'direct_release'];   // P4：+work_note（选填工作说明）；C6：+bug_cause_note（bug 单必填「产生原因」，形状校验型无关，适用面/必填闸见 handler）；[组B·SB2]：+direct_release（可选布尔，先行上线勾选，默认 false=现行为零变化）
+    // [组B·S2-2·拆直上分支] direct_release **仍留在允许键清单里**，但已彻底停止消费——方案 §4-2「整体
+    //   替代」拍板：submit 不再支持勾选直上，前端勾选框已同批拆除，不会再有新客户端发这个键；仍保留
+    //   键名放行（不报"不支持的字段"400）纯粹是为了兼容"客户端缓存了旧版本页面仍在发送该键"这类过渡期
+    //   请求——收到即忽略，行为与未传该键的普通 submit 完全一致（同 verify-sys-fastlane-submit.js [1] 组
+    //   负例断言）。不做类型校验（DIRECT_RELEASE_INVALID 码随之删除），因为值本身已不产生任何行为分支。
+    // [rec③ 弃用契约·codex 383 采纳] direct_release 键位正式弃用状态登记：
+    //   · deprecated since：先行上线两步化（S2 拆直上分支），预计随 v1.154 线上线
+    //   · 当前行为：键位存在但零消费——唯一作用是防止携带该键的旧缓存页面请求被 ALLOWED_TOP_KEYS 白名单
+    //     拒成 400"不支持的字段"，除此之外不读值、不做类型校验、不影响任何分支
+    //   · 移除时机【2026-08-15 S末 评估结论：本轮不删】——评估判据"旧缓存已充分过期"在部署前逻辑上
+    //     不可能满足：生产现役 v1.153 前端此刻就是勾选直上版（正在发送本键），过期窗口自本批部署起才
+    //     开始计时。保留键位放行，顺延到本批上线后 1-2 个版本的下一次评估窗口（届时按下条"移除方式"
+    //     一行删除即可）
+    //   · 移除方式：届时直接从 ALLOWED_TOP_KEYS 数组删掉 'direct_release' 字面量即可，无需额外代码改动
+    //     （因为本键本就零消费，删掉键位放行后该键会被现有"不支持的字段"400 分支自然拦下，行为收敛
+    //     符合预期，不需要新写分支）
+    // [§14·S11] +completion_overrun_reason_code/_note——submit 本身不直接消费（结构层放行同其余"条件
+    //   字段"惯例，同 fix_gap_note），真正消费点在 runWGate 内 resolveCompletionOverrunReasonForWrite
+    //   （见该处调用：`gateResult = await runWGate(id, row.type, row.status, actor, req.body);` 把整个
+    //   req.body 转发进去）——若不放行会被本函数拦成 400"不支持的字段"，字段永远到不了 runWGate，
+    //   §14 的必填闸在 submit 端点上会**结构性哑火**（liaison_test_pass 端点无此白名单不受影响，只有
+    //   submit 触发的 feature⑤⑥降级路径受影响）。
+    const ALLOWED_TOP_KEYS = ['mode', 'no_code_reason', 'commits', 'fix_gap_note', 'work_note', 'bug_cause_note', SUBMIT_SELF_TESTED_KEY, SUBMIT_TEST_ENV_DEPLOYED_KEY, 'direct_release', 'completion_overrun_reason_code', 'completion_overrun_reason_note'];   // P4：+work_note（选填工作说明）；C6：+bug_cause_note（bug 单必填「产生原因」，形状校验型无关，适用面/必填闸见 handler）
     const extraTop = Object.keys(b).filter(k => !ALLOWED_TOP_KEYS.includes(k));
     if (extraTop.length > 0) return { ok: false, message: `不支持的字段：${extraTop.join(',')}` };
     // [codex 272 号 L-1 锁定] mode-first 既有顺序保持不变——结构校验（mode 是否合法）先于字段校验
@@ -7823,15 +9130,6 @@ module.exports = (deps) => {
     if ([...bugCauseNoteRaw].length > 500) return { ok: false, message: 'bug_cause_note 过长（上限 500 字）' };
     const bugCauseNote = bugCauseNoteRaw || null;
 
-    // [组 B·SB2] direct_release（先行上线「已随修复直接上线」勾选）：可选布尔，缺失/undefined→false（现行为
-    //   零变化，同 assertSubmitChecklistFlag 系"缺失=未勾选"语义但本字段非必填，故不复用该函数——那个函数
-    //   把"缺失"当错误拒绝，这里"缺失"是合法默认值）；非 boolean 且非 undefined/null → 400（畸形输入，同
-    //   work_note/bug_cause_note 形状校验写法：拒绝而非静默归一，防前端传字符串 'true' 被误判为已勾选）。
-    if (b.direct_release !== undefined && b.direct_release !== null && typeof b.direct_release !== 'boolean') {
-      return { ok: false, message: 'direct_release 须为布尔值', code: 'DIRECT_RELEASE_INVALID' };
-    }
-    const directRelease = b.direct_release === true;
-
     if (b.mode === 'no_code') {
       if (b.no_code_reason === null) return { ok: false, message: 'no_code_reason 不能为 null' };
       const reason = (typeof b.no_code_reason === 'string' ? b.no_code_reason.trim() : '');
@@ -7843,7 +9141,7 @@ module.exports = (deps) => {
       // [codex 272 号 L-3·273 号 M 修正] 把双勾的**请求体原始值**随 parsed 带出（camelCase，同 noCodeReason
       // 风格）——不硬编码 true：写前不变量断言的是"请求里真的传了 true"这个现实，硬编码会让断言恒真、
       // 未来校验被误放宽时照样把假 true 写进审计（273 号抓的恒真断言变体）。
-      return { ok: true, mode: 'no_code', noCodeReason: reason, commits: [], fixGapNote, workNote, bugCauseNote, selfTested: b[SUBMIT_SELF_TESTED_KEY], testEnvDeployed: b[SUBMIT_TEST_ENV_DEPLOYED_KEY], directRelease };
+      return { ok: true, mode: 'no_code', noCodeReason: reason, commits: [], fixGapNote, workNote, bugCauseNote, selfTested: b[SUBMIT_SELF_TESTED_KEY], testEnvDeployed: b[SUBMIT_TEST_ENV_DEPLOYED_KEY] };
     }
 
     // mode === 'commits'
@@ -7863,7 +9161,7 @@ module.exports = (deps) => {
       if (!ref || ref.length > 200) return { ok: false, message: 'commit_ref 必填（trim 长度 1..200）' };
       commits.push({ component: raw.component, commit_ref: ref });
     }
-    return { ok: true, mode: 'commits', noCodeReason: null, commits, fixGapNote, workNote, bugCauseNote, selfTested: b[SUBMIT_SELF_TESTED_KEY], testEnvDeployed: b[SUBMIT_TEST_ENV_DEPLOYED_KEY], directRelease };   // 273 号 M：带原始值非硬编码（同上方 no_code 分支注释）
+    return { ok: true, mode: 'commits', noCodeReason: null, commits, fixGapNote, workNote, bugCauseNote, selfTested: b[SUBMIT_SELF_TESTED_KEY], testEnvDeployed: b[SUBMIT_TEST_ENV_DEPLOYED_KEY] };   // 273 号 M：带原始值非硬编码（同上方 no_code 分支注释）
   }
 
   router.post('/sys-issues/:id/submit', authenticateToken, requireSysSchemaReady, async (req, res) => {
@@ -7880,11 +9178,11 @@ module.exports = (deps) => {
       let memberRow, targetDevStatus, gateResult, rowStatusAtStart, devAssignees;
       try {
         // §6.2 步骤1：assertKnownIssueStatus → 解析在册实例（0 行→403 NOT_ROSTERED）
-        // [组 B·SB2] 扩 6 列（fast_release_auth_at/_revoked_at/_consumed_at/released_at/online_source/
-        //   reopened_at）——direct_release=true 分支的前置判定需要它们（isActiveFastReleaseAuth/
-        //   deriveFastReleaseSubmitDenyReason 同事务快照读，不额外发查询）。reopened_at 是 [预筛 MED-2·
-        //   P7 过渡收紧] 新增消费列——"授权须晚于最近一次 reopen"判据的另一半输入。direct_release=false
-        //   （现行为路径）不消费这六列，零成本多读。
+        // [组B·S2-1·先行上线两步化·挂牌] 扩 6 列（fast_release_auth_at/_revoked_at/_consumed_at/
+        //   released_at/online_source/reopened_at）——挂牌判定需要它们（isActiveFastReleaseAuth 同事务
+        //   快照读，不额外发查询）。[S2-2 订正] 这 6 列原为 direct_release=true 分支的前置判定所用
+        //   （该分支已随方案 §4-2「整体替代」拆除），S2-1 起改为挂牌判定复用同一份快照——SELECT 列清单
+        //   本身不变（isActiveFastReleaseAuth 判据不变），只是消费方从"直上前置闸"换成"挂牌触发闸"。
         const row = await dbGetAsync(
           `SELECT id, type, status, blocked, needs_feasibility, feasibility_conclusion,
                   feasibility_requirement_confirm, feasibility_risk, dev_estimated_at, estimated_effort_days,
@@ -7905,22 +9203,11 @@ module.exports = (deps) => {
           return res.status(409).json({ error: `当前状态「${row.status}」不可提交`, code: 'INVALID_STATUS' });
         }
 
-        // [组 B·SB2] direct_release=true 前置：type='bug' ∧ status='处理中' ∧ 活跃授权谓词，三者缺一即整个
-        //   submit 回滚（方案 §3.2"勾选直上失败不落半个 submit=原子"）——早于任何写操作，保证失败零副作用。
-        //   ⚠️ type/status 显式并入本条件（不能只靠 isActiveFastReleaseAuth）：该谓词只看 fast_release_*/
-        //   released_at/online_source 五列，不含 type/status——若只判它，一个理论上 type≠bug 却 auth_at
-        //   非空的脏行（结构上不可达：授权端点已挡 type，但仍按 fail-closed 原则不依赖这条防线独家把关）
-        //   会被误判为"活跃"而放行直上，绕过 B1"仅 bug 类"拍板。isActiveFastReleaseAuth 是 :3188 一带
-        //   "活跃授权"权威谓词的唯一实现（该谓词本身的定义就不含 type/status，见该处注释）。
-        //   ⚠️ [预筛 M4·P7b 过渡·登记] isActiveFastReleaseAuth 的跨轮收紧只认 reopened_at，return（打回）
-        //   触发的新一轮未覆盖——见该函数定义处注释，本处不重复展开，只留一行指针防遗忘。
-        if (parsed.directRelease) {
-          const directReleaseEligible = row.type === 'bug' && row.status === '处理中' && isActiveFastReleaseAuth(row);
-          if (!directReleaseEligible) {
-            await sysRollback();
-            return res.status(409).json({ error: deriveFastReleaseSubmitDenyReason(row), code: 'FAST_RELEASE_SUBMIT_DIRECT_DENIED' });
-          }
-        }
+        // [组B·S2-2·拆直上分支] direct_release=true 前置闸（type='bug' ∧ status='处理中' ∧ 活跃授权谓词
+        //   三者缺一即 409 FAST_RELEASE_SUBMIT_DIRECT_DENIED）已随方案 §4-2「整体替代」拍板整体删除——
+        //   submit 不再支持"勾选直接翻牌到已上线"这条单步路径，direct_release 键即便传了也不再产生任何
+        //   行为分支（见 validateSubmitBody 内 ALLOWED_TOP_KEYS 旁注）。走正常验收路的唯一开关是 admin
+        //   撤销先行上线授权（K1 拍板：单一开关，不留两条路径并存）。
 
         // [codex 98 号 HIGH 回填·同批] ESTIMATE_REQUIRED——旧单人 case 'submit'（e39e65b 版 index.js:1376）
         //   `if (!row.dev_estimated_at) throw new SysTransitionError(400, 'ESTIMATE_REQUIRED', ...)`，位于
@@ -8119,85 +9406,119 @@ module.exports = (deps) => {
 
         await electRepresentative(id);
 
-        // [组 B·SB2] direct_release=true：先行上线直上——**不调用 runWGate**（那是常规「全员完成→待验证」
-        //   GATE 语义，与本路径"跳过待验证/待上线，直接进已上线"矛盾：若先调 runWGate，roster 全完成时它会
-        //   把 status 从「处理中」推到「待验证」，随后本分支要求 status='处理中' 的条件更新必然 0 行命中）。
-        //   改为自成一路：①按与 runWGate 完全同源的判据（analyzeRosterForGate）重新读花名册算 allComplete
-        //   ②交给 assertMainStatusTransition 新 routeKind='FAST_RELEASE_DIRECT'（status-transition-guard.js）
-        //   校验边的合法性 + 进 RELEASE 族的花名册门禁——"已上线态不应存在未完成开发"是 GATE/RELEASE/
-        //   NO_COMMIT_ONLINE 三条既有入口共同遵守的不变量，不因来路是"直上"就豁免：若本单尚有其他开发未
-        //   完成（多开发场景），这次提交只完成"本人份内工作"，尚不能把整单直接标记已上线 ③同事务内做方案
-        //   §3.2 原文谓词 + codex 360 M2 超集的条件更新（帖着这条 UPDATE 的 WHERE 走，不额外收紧/放松）。
-        if (parsed.directRelease) {
-          const rosterRowsForDirect = await dbAllAsync(
-            `SELECT dev_status FROM sys_issue_dev_assignees WHERE issue_id = ? AND removed_at IS NULL`, [id]
-          );
-          const rosterForDirect = analyzeRosterForGate(rosterRowsForDirect);
-          // [预筛 LOW-4·登记] 本判据只取 activeCount/allComplete，不查 analyzeRosterForGate 同时返回的
-          //   unknownCount——**有意**，非遗漏：unknownCount 阻断只是 runWGate 的 feature 决策树新增的一层
-          //   防御（:2909-2910"仅 feature 决策树消费 unknownCount 这层新防御"），improvement/bug 走的
-          //   「原有二元逻辑逐字保留」（:3008）从未检查过 unknownCount。本路径专属 bug 类型（B1 拍板），
-          //   沿用 bug 既有的二元口径与 runWGate 同款不查，不为直上单独收紧成 feature 那一套。
-          // [预筛 M1/M2·多人直上语义收敛·裁定=最后提交者勾选] 文案措辞订正——本判据放行的真实条件是
-          //   "本次提交后花名册转为全完成态"，故能成功勾选直上的天然就是**恰好是最后完成的那个人**（谁
-          //   先谁后不重要，谁最后提交谁勾）。旧文案"请等待全部成员提交后再勾选"暗示"再提交一次"的两段式
-          //   动作，但本判据未通过时**整个 submit 已回滚**（含本人 dev_status，见下方 sysRollback）——
-          //   本人若真等到别人都交完再来"重新勾选提交"，那次提交本身就会是最后一次、天然满足本判据，
-          //   不存在"先等待、再补一次单独的勾选动作"这种中间态，旧文案属不可达路径的误导性引导，删除。
-          if (!(rosterForDirect.activeCount >= 1 && rosterForDirect.allComplete)) {
-            await sysRollback();
-            return res.status(409).json({
-              error: '其余成员尚未全部提交：请由最后完成的开发成员在其提交时勾选先行上线',
-              code: 'FAST_RELEASE_SUBMIT_ROSTER_INCOMPLETE',
-            });
-          }
-          assertMainStatusTransition({
-            routeKind: 'FAST_RELEASE_DIRECT', action: 'submit', actionKind: null, issueType: row.type,
-            before: rowStatusAtStart, after: SYS_ONLINE_STATUS,
-            rosterActiveCount: rosterForDirect.activeCount, rosterAllComplete: rosterForDirect.allComplete,
-          });
-          // [方案 §3.2 原文谓词 + codex 360 M2 超集 + 预筛 MED-2 P7 过渡收紧] 单事务条件更新——changes≠1
-          //   统一 409 回滚整个 submit（"勾选直上失败不落半个 submit=原子"）。WHERE 六条 fast_release_*/
-          //   released_at/online_source/reopened_at 条件与本函数入口的前置判定逐字同源
-          //   （isActiveFastReleaseAuth），此处是同一事务内持锁期间的状态机字段 UPDATE 三件套纵深防御
-          //   （理论必中，因整个事务串行持有 BEGIN IMMEDIATE 写锁，期间不可能有其它事务改动本行；
-          //   仍按既有范式显式写全 WHERE + 校验 changes，不省略）。
-          //   ⚠️ 末条 `reopened_at IS NULL OR fast_release_auth_at >= reopened_at` 是 P7 过渡收紧谓词
-          //   在 WHERE 层的重申——与前置判定层同一条件（非严格 `>=`，理由见 isActiveFastReleaseAuth 定义
-          //   处注释：同秒精度下"重开后紧接着重新授权"是合法序列，不应被误伤），两层保持谓词等价（同
-          //   本文件其余条件"前置判定 + WHERE 双层同谓词"的一贯写法，不搞"前置层判一套、WHERE 层判另一套"）。
-          //   gate_deferred_at 一并清（同 runWGate "进 RELEASE/VERIFY 等前进方向清 deferred" 语义，虽然
-          //   bug 类型结构上不会残留该标记——ESTIMATE_REQUIRED 已保证走到这里 dev_estimated_at 非空，
-          //   isGateEligibleForVerify 对 bug 恒 true，此列仍防御性清空）。
-          const directUpd = await dbRunAsync(
-            `UPDATE sys_issues SET status = ?, released_at = datetime('now','localtime'),
-               online_source = ?, post_release_acceptance = 'pending', fast_release_consumed_at = datetime('now','localtime'),
-               gate_deferred_at = NULL, updated_at = datetime('now','localtime'),
-               dev_estimated_at_on_release = dev_estimated_at
-                 -- [组 C·SC1·§3C.5] release 快照写点②（三处之一）：写 released_at 的同事务落库。
-             WHERE id = ? AND type = 'bug' AND status = '处理中'
-               AND fast_release_auth_at IS NOT NULL AND fast_release_revoked_at IS NULL
-               AND fast_release_consumed_at IS NULL AND released_at IS NULL AND online_source IS NULL
-               AND (reopened_at IS NULL OR fast_release_auth_at >= reopened_at)`,
-            [SYS_ONLINE_STATUS, ONLINE_SOURCE_AUTHORIZED_FASTLANE, id]
-          );
-          if (!directUpd || directUpd.changes !== 1) {
-            await sysRollback();
-            return res.status(409).json({
-              error: '先行上线直上并发失败（授权可能已被撤销/消费，或该单已有上线标记），请刷新后重试',
-              code: 'FAST_RELEASE_SUBMIT_DIRECT_DENIED',
-            });
-          }
-          // timeline 记「先行上线直上」——同 runWGate 的 W-GATE 镜像行范式（event_type='status_change'），
-          //   action_code 字面量直写（不经变量绑定，理由见 SYS_FAST_RELEASE_DIRECT_ONLINE_SUMMARY 定义处注释）。
+        // [组B·S2-2·拆直上分支] 「submit 勾选直上到已上线」的独立分支（不调用 runWGate，自成一路走
+        //   RELEASE 族花名册门禁 + 条件更新翻牌到已上线）已随方案 §4-2「整体替代」拍板整体删除——两步化
+        //   用「挂牌 + 值班执行人全员确认才翻牌」取代它，翻牌动作留给后续子阶段的执行确认端点，submit
+        //   本身不再有能直接把主状态推到「已上线」的路径，一律走 runWGate 常规「全员完成→待验证」GATE。
+        // [§14·S11] req.body 作为第 5 参传入——runWGate 内部若判定本次命中 feature⑤⑥降级路径直接进
+        //   「待验证」，需要从中读 completion_overrun_reason_code/note（本端点是唯一真正可能携带这两
+        //   个字段的 runWGate 调用方，其余 9 处调用点维持默认空对象不变）。
+        // [codex 395 预筛 NEW-1] 第 6 参 isSubmitTrigger=true——本端点是"开发本人报完工"的唯一入口，
+        //   理由缺失时应现行 400（分支②，用户当场能在同一次请求里补填重试）；其余调用点维持默认 false，
+        //   落分支③挂起（gate_deferred_at + defer note，不 400 不放行，操作本身仍 200）。
+        gateResult = await runWGate(id, row.type, row.status, actor, req.body, true);
+
+        // [组B·S2-1·先行上线两步化·挂牌·方案 §4-1] 花名册全完成、主状态**真正**从「处理中」翻到「待验证」
+        //   （gateResult.changed && gateResult.to 落在该 issueType 的族 VERIFY 首态）时，若该单当前存在
+        //   活跃先行上线授权（isActiveFastReleaseAuth 同源谓词，:3684 一带唯一实现，非自拼六列判据），
+        //   同事务挂牌：
+        //   ①查当日值班（sys_release_duty_roster，partial UNIQUE 保证同日至多一人在册，SQL 与
+        //   GET /sys-releases/executor-candidates 同款"当日值班"查法）②[codex 382 预筛 M1 收口] 查出
+        //   值班人后**复用同一资格层**（hasReleaseEligibility：:12392，与 executor-candidates 端点
+        //   resolveDefaultCandidate 判据同一函数——⚠️ 此前本行注释写"同 executor-candidates 既有查法"
+        //   实为如实性偏差：S1/S2-1 首版只搬了"查当日值班"这条 SQL，没搬资格层，值班人若已被停用/降为
+        //   viewer/admin 仍会被判定"有值班"直接挂牌，写成一个永远无法确认完成的 pending 执行人——排班行
+        //   留存而人可事后停用/降权是真实生产场景，v1.151.1 已有同族前科（打回/重开跳过停用成员）。现改为
+        //   资格合格 ⇒ INSERT sys_fast_release_executors 一行（user_id/user_name=值班人，exec_status
+        //   默认 'pending'，added_by/added_by_name=本次 submit 操作者）；资格不合格 ⇒ 按"当日无值班"
+        //   同款走 0/0 分支（不 INSERT），但 stagedSummary 文案区分成因（"当日值班已无执行资格"而非
+        //   笼统"无值班"，运维排查时能立刻分清是排班空缺还是账号状态变化）；当日确无排班 ⇒ 同样 0/0
+        //   （方案 §5-⑧ 兜底靠 admin 后补加人，非本 commit 范围）③无论走到哪个分支都写一条 timeline
+        //   `fast_release_staged`（挂牌事件本身发生了，分支只影响 summary 文案与是否落执行人行）④挂牌链
+        //   任一步失败=整个 submit 事务回滚（fail-closed，不做"挂牌失败但 submit 成功"的半完成态——
+        //   挂牌代码与 submit 主体共用同一个 BEGIN IMMEDIATE 事务，任一 await 抛错都会被外层 catch 捕获
+        //   走 sysRollback，天然满足，无需额外包裹）。
+        //   ⚠️ 只在真正翻状态的路径上触发——多开发 W-GATE 非末位 submit（还有其他成员未完成）
+        //   gateResult.changed=false，不挂牌；判据取 gateResult（runWGate 的真实推进结果）而非重新读一遍
+        //   花名册，与"是否真的走到了 GATE 转移"完全同源。
+        //   [codex 382 预筛 L5 收口] gateResult.to 的比较目标从裸字面量 '待验证' 改用与 runWGate 自身
+        //   （:3371/:3431 等）同源的族常量 SF.SYS_VERIFY_STATUSES[row.type][0]——若族表未来改名/调整
+        //   首态取值，本挂牌闸门与 runWGate 判据天然同步变化，不会因两处各写一份字面量而静默失效。
+        //   [codex 383-M2 采纳恢复纵深] 显式判 row.type==='bug'——此前本行注释论证"isActiveFastReleaseAuth
+        //   六列判据结构上只对 bug 单成立（授权端点已挡 type，fast_release_auth_at 只可能在 bug 单上被
+        //   写入），故不复刻已删除的旧 direct_release 分支那层冗余 type/status 判断"，这个论证的前提是
+        //   "写入路径唯一"，但六列本身在 sys_issues 表上对全部 type 都存在、且无 DB 层 CHECK 约束绑定
+        //   type='bug'——脏数据 / 人工 SQL 修复 / 未来新写点漂移都可能让一张 feature/improvement 单带着
+        //   "看似活跃"的六列值进入 VERIFY，若挂牌闸门只看六列不看 type，会被错误挂牌。S2 拆直上分支时把
+        //   这层纵深防御（原分支曾显式重复判 type/status）一并删掉是过度收窄，现恢复：挂牌闸门自身也
+        //   显式判 type='bug'，不完全信任六列判据的"结构上只对 bug 单成立"这条隐含前提，双重防线，
+        //   任一层被绕过另一层仍能拦。
+        // [§14·S11 接缝落字] 与本条件（S2 先行上线挂牌，`row.type === 'bug'`）互斥确认——runWGate 内部
+        //   （见其函数体 [§14·S11] 标注段）新增的完成超期理由闸判据是 `issueType === 'feature'`，两个
+        //   条件在同一 type 字段上互斥（一个要求恰为 'bug'，另一个要求恰为 'feature'，无法同时成立），
+        //   同一次 submit 调用最多命中其一，rebase 后两段逻辑之间无交叉污染风险。
+        if (gateResult.changed && gateResult.to === SF.SYS_VERIFY_STATUSES[row.type][0] && row.type === 'bug' && isActiveFastReleaseAuth(row)) {
+          // [组B·S2-1 实测修复] 跨轮再挂牌须先软删上一轮遗留的在册行，否则同一 (issue_id,user_id) 撞
+          // partial UNIQUE 索引崩 500——真实可达场景：挂牌→（未确认完成前）打回/reopen 开新一轮→新一轮
+          // 授权仍活跃再次全完成进入待验证→再次挂牌，若当日值班人与上一轮相同，INSERT 直接违反
+          // idx_sys_fast_release_exec_active。语义上"新一轮开始"本就该让上一轮未完成的挂牌集合作废
+          // （同 S1 设计的代次语义：撤销安排=软删全体，重新安排=INSERT 新行），故每次挂牌前先按
+          // SYS_FAST_RELEASE_EXEC_ACTIVE_WHERE_SQL 软删该 issue 当前在册行（此刻数量通常是 0 或 1，
+          // 用 UPDATE 批量软删不逐行判断，0 行命中时 changes=0 属正常 no-op）——removed_by 记为本次
+          // submit 操作者（系统性新一轮开局代其执行，非本人主动撤销，同 reopen/return 换轮清场既有范式）。
+          // [codex 382 预筛 M2 收口] ①"新一轮"不止 return/reopen 一条路径——预筛探针实证：待验证态下
+          //   新增一名开发成员（pendingCount>0）会经 runWGate 弹回逻辑（本文件 :3419-3421，inVerify 分支）
+          //   直接把主状态打回处理中，不必经过 return/reopen 端点；随后该成员/其余成员重 submit 使花名册
+          //   再次全完成、再次进入本挂牌闸门，即在**同一轮**（未曾走 return/reopen）内触发第二次挂牌。
+          //   本清场逻辑的"新一轮开始"语义天然覆盖这条弹回路径（不区分"真新一轮"与"同轮内的二次挂牌"，
+          //   两者对本表而言都是"上一批 pending 执行人已过期，需要重新起集合"），removed_by 记为
+          //   触发本次弹回后重新完成 submit 的操作者，是系统代为执行的清场留痕，非该操作者主动撤销。
+          //   ②WHERE 追加 `AND exec_status='pending'`——今日语义中性（S2 尚无 done 概念，本表全部活跃行
+          //   必为 pending），是给 S3「执行确认端点」预埋的写侧防线：S3 落地后 exec_status 可被翻成
+          //   'done'，届时若本弹回路径与"已有人确认完成"并存（例如部分执行人已 done、随后又弹回重挂牌），
+          //   本条件保证已 done 的行不会被这条清场 UPDATE 误软删（方案 §5-⑨"done 行恒不被软删"）。该
+          //   共存场景的完整闸门设计（done 行是否应参与新一轮判定等）留给 S3 收口（锚点 §6 已挂）。
           await dbRunAsync(
-            `INSERT INTO sys_issue_timeline (issue_id, event_type, from_status, to_status, summary, operator_id, operator_name, action_code)
-             VALUES (?, 'status_change', ?, ?, ?, ?, ?, 'fast_release_direct_online')`,
-            [id, rowStatusAtStart, SYS_ONLINE_STATUS, SYS_FAST_RELEASE_DIRECT_ONLINE_SUMMARY, actor.id, actor.name]
+            `UPDATE sys_fast_release_executors SET removed_at = datetime('now','localtime'), removed_by = ?, removed_by_name = ?
+               WHERE ${SYS_FAST_RELEASE_EXEC_ACTIVE_WHERE_SQL} AND exec_status = 'pending'`,
+            [actor.id, actor.name, id]
           );
-          gateResult = { changed: true, from: rowStatusAtStart, to: SYS_ONLINE_STATUS };
-        } else {
-          gateResult = await runWGate(id, row.type, row.status, actor);
+          const dutyRow = await dbGetAsync(
+            `SELECT user_id, user_name FROM sys_release_duty_roster WHERE duty_date = date('now','localtime') AND removed_at IS NULL`
+          );
+          let stagedSummary;
+          if (dutyRow) {
+            // [codex 382 预筛 M1 收口] 挂牌前复用同一资格层（hasReleaseEligibility，:12392）复核值班人——
+            //   排班行留存但人可能已停用/降为 viewer/admin（v1.151.1 同族前科：打回/重开会跳过停用成员），
+            //   不复核会把死账号写成 pending 执行人，S3 后该集合永远无法全员 done。
+            const dutyEligible = await hasReleaseEligibility(dutyRow.user_id);
+            if (dutyEligible) {
+              await dbRunAsync(
+                `INSERT INTO sys_fast_release_executors (issue_id, user_id, user_name, added_by, added_by_name)
+                 VALUES (?, ?, ?, ?, ?)`,
+                [id, dutyRow.user_id, dutyRow.user_name, actor.id, actor.name]
+              );
+              stagedSummary = `先行上线挂牌：待 ${dutyRow.user_name} 确认执行`;
+            } else {
+              stagedSummary = '先行上线挂牌：当日值班已无执行资格·待配置执行人';
+            }
+          } else {
+            stagedSummary = '先行上线挂牌：当日无值班·待配置执行人';
+          }
+          await dbRunAsync(
+            `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, operator_id, operator_name)
+             VALUES (?, 'note', ?, 'fast_release_staged', ?, ?)`,
+            [id, stagedSummary, actor.id, actor.name]
+          );
+          // [组B·S2-1·e 项·codex 382 订正=定论] 站内通知——平台"站内通知"的实体是**派生可见性范式**，
+          //   不是一张独立通知表 + 投递队列：badge / timeline 行 / 角标本身就是通知，同族先例见本文件
+          //   :10937（受阻单已写 blocked timeline 行 + 站内可见，不额外调 dispatchSysNotify）与 :14763
+          //   （创建者侧回填保持 not_sent，站内角标走独立未读逻辑、不读 notify_status）——全仓无任何
+          //   "站内通知"专属数据表。挂牌事件的可见性照此同款范式落地：上面 sys_fast_release_executors
+          //   一行 + 本条 timeline 行即构成完整的站内可见闭环（S6 起再叠列表徽章投影，与本条 timeline
+          //   行是同一事实的两处呈现，不是两套机制）；主动推送（钉钉）走既有 dispatchSysNotify，其总闸
+          //   `isAutoNotifyEnabled()` 恒 false（方案 §11 明确本批不做主动推送），故本处不调用 dispatchSysNotify
+          //   ——省一次必然空跑的调用，不是遗漏。
         }
 
         // [codex 101 号 MED 回填] updated_at——旧版单人 submit 经 sysIssueTransition 共用 UPDATE 必刷
@@ -8219,21 +9540,19 @@ module.exports = (deps) => {
         try { await sysRollback(); } catch (_) { /* ignore */ }
         throw txErr;
       }
-      // [组 B·SB3·B4 闭环通知] 直上成功——通知建单人「bug 已先行上线，待补验收」（事务外，best-effort，
-      //   同 /accept 端点范式：dispatchSysNotify 自身吞错不影响已成功的业务响应）。仅 direct_release 真正
-      //   落地（gateResult.to===SYS_ONLINE_STATUS）时发，与响应体 online_source 键的携带条件同源。
-      if (parsed.directRelease && gateResult.to === SYS_ONLINE_STATUS) {
-        await dispatchSysNotify(id, 'notifyFastReleasePendingToCreator', actor.id);
-      }
+      // [组B·S2-2·拆直上分支] 直上成功后通知建单人「bug 已先行上线，待补验收」的 best-effort 通知已随
+      //   分支删除——submit 不再产生"直接落地已上线"这一结果，没有对应的建单人通知触发点了。
       res.json({
         id, dev_status: targetDevStatus, dev_assignee_id: memberRow.id,
         // main_status 恒填充（同 C2 add/reassign 端点既有惯例，非条件性 undefined）：W-GATE 未触发时=原状态。
         main_status: gateResult.changed ? gateResult.to : rowStatusAtStart,
         dev_assignees: devAssignees,
-        // [组 B·SB2] 仅 direct_release 成功时携带——同 /accept 端点 online_source 响应字段先例
-        // （C9 无 commit 直翻返回 { online_source: ONLINE_SOURCE_NO_COMMIT, ... }），供前端（SB3）判断本次
-        // 提交是否已直接上线、需要不同的成功提示文案；未触发时不带此键（非条件性 null，与既有先例一致）。
-        ...(parsed.directRelease && gateResult.to === SYS_ONLINE_STATUS ? { online_source: ONLINE_SOURCE_AUTHORIZED_FASTLANE } : {}),
+        // [组B·S2-2] online_source 响应键（direct_release 成功时携带·同 /accept 端点先例）已随拆直上分支
+        // 删除——submit 不再有任何路径产出 online_source，响应体不再带这个键。
+        // [§14·S11 MED-1/MED-2] 200 成功响应亦透出完成超期判定信息（need_reason/gap_days）——仅当本次
+        // runWGate 调用真正评估过该闸（gateResult.completion_overrun 非 undefined）才带这个键；前端消费
+        // 见 siModalDevSubmit 成功回调（据此收起理由块/toast 提示，MED-2 双向回补的"服务端说不要"半条）。
+        ...(gateResult.completion_overrun ? { completion_overrun: gateResult.completion_overrun } : {}),
       });
     } catch (err) { sendSysTransitionError(res, err); }
   });
@@ -8638,6 +9957,18 @@ module.exports = (deps) => {
            VALUES (?, 'note', ?, 'fast_release_authorize', ?, ?)`,
           [id, `${isReauth ? '重新先行上线授权' : '先行上线授权'}：${actor.name}${note ? '（' + note + '）' : ''}`,
             Number(actor.id) || null, actor.name || null]);
+        // [S5·Opus 预筛 H1 修法 A（拍板）] 授权 UPDATE 成功后同一事务软删上一代集合行——首次授权集合
+        //   恒空（内核 changes>0 才留痕的既有设计天然兼容，no-op 零副作用）；重授权时软删上一代全部行
+        //   （**含 done**，方案 §5-⑨ 第二例外·2026-08-14 订正：与 void 并列的"done 行恒不被软删"两个
+        //   例外之一；§5b 第 1/13 行同批订正），与撤销清集合对称——同样两条理由逐字适用（§4-5 原文）：
+        //   ① 上一代 done 行若不清，五事件终结判据管不到——已消费单 fast_release_consumed_at 非空，
+        //   isActiveFastReleaseAuth 结构上直接判"非活跃"，该判据永远轮不到这批残留行（S5 预筛 H1 实测
+        //   抓出：同人值班跨轮 submit 500/换值班人跨轮 accept·return·revoke 全 409/无值班时唯一出口
+        //   仅剩 void——五路组合出的不可恢复态，根因正是这里此前没清）；② 新一轮 submit 挂牌重新 INSERT
+        //   会撞 partial UNIQUE（同一 issue_id+user_id 仍有未软删旧行）。部署留痕不丢失——软删行本身 +
+        //   其历史 timeline exec_online 镜像行俱在，只是从"当前代次活跃集合"退出，不再参与任何聚合判定
+        //   （同 §4-10 统一谓词既有代次语义，同 S2 挂牌清场"软删=退出本代非物理删除"同源精神）。
+        await clearFastReleaseRosterOnTermination(id, actor, '重新授权');
         await sysCommit();
         return res.json({
           id, action: 'fast_release_authorize', reauthorized: isReauth,
@@ -8667,6 +9998,20 @@ module.exports = (deps) => {
   //   [组 B·SB3·LOW-3·codex 360 遗留拍板·主会话终裁] 撤销原因**必填**——与 return/reopen 等 admin 逆向
   //   动作一致（同为"撤回既有决定"的动作族，理由留痕同款要求）。body.reason（trim 1..200）写进
   //   timeline summary；缺失/空白/超长均 400 拒绝，不静默放行成"匿名撤销"。
+  //   [S5·§4-5 撤销收紧+清集合] D1 首确认关撤销——存在已确认执行（done）行时禁止撤销：判据抄
+  //   runWGate 弹回闸/加人冻结闸/§4-6 accept·return 闸同源写法（统一谓词 sysFastReleaseExecActiveWhere()
+  //   AND exec_status='done'）。错误码**复用** FASTLANE_DEPLOY_IN_PROGRESS（不新造码——取舍见下方
+  //   注释），错误文案改撤销专属措辞。撤销成功后**同一事务软删该单全部未软删集合行**（此刻结构上已全为
+  //   pending——done 已被本闸+WHERE 双重拦截）+ timeline `fast_release_roster_cleared`（走共享内核
+  //   clearFastReleaseRosterOnTermination，成因="撤销授权"）。不清会残留：授权已非活跃（revoked_at 非空）
+  //   ⇒ 五事件终结判据（isActiveFastReleaseAuth 要求"未撤销"）今后管不到这些行，且重授权后重挂牌 INSERT
+  //   会撞 partial UNIQUE（方案 §4-5 原文明写的两条后果）。
+  //   ⭐ 错误码取舍（报告展开）：本可新造 FASTLANE_REVOKE_DEPLOY_IN_PROGRESS 之类专属码，但选择复用
+  //   FASTLANE_DEPLOY_IN_PROGRESS——三处（runWGate 弹回闸/accept·return 验收闸/本撤销闸）守护的是**同一条
+  //   不变量**："存在已确认执行的执行人时，任何会让状态机与该执行事实脱节的 admin 动作均应被拦下"，
+  //   码复用让前端可以用同一个 code 分支统一提示"执行已在进行中"，而不必为语义上是同一件事的三处各自
+  //   适配一个新 code；差异化交给各端点自己的错误 `error` 文案（本处已改撤销专属措辞），前端历来靠
+  //   `error` 文案渲染提示、靠 `code` 做程序分支，这个分工天然支持"码复用+文案区分"。
   router.post('/sys-issues/:id/fast-release-revoke', authenticateToken, requireSysSchemaReady, requireAdmin, async (req, res) => {
     const id = parsePositiveId(req.params.id);
     if (!id) return res.status(400).json({ error: '无效的迭代单 ID', code: 'INVALID_SYS_ISSUE_ID' });
@@ -8686,13 +10031,46 @@ module.exports = (deps) => {
       await sysBeginImmediate();
       try {
         const row = await dbGetAsync(
-          `SELECT id, fast_release_auth_at, fast_release_revoked_at, fast_release_consumed_at, released_at, online_source
+          `SELECT id, fast_release_auth_at, fast_release_revoked_at, fast_release_consumed_at, released_at, online_source, reopened_at
              FROM sys_issues WHERE id = ?`, [id]);
         if (!row) { await sysRollback(); return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' }); }
+
+        // [S5·§4-5] 前置友好判定——存在 done 行时直接 409（早于下方 UPDATE，给出精确文案；WHERE 层
+        // 仍追加 NOT EXISTS 做写点纵深，见下方，双层防线同本文件既有"前置判定 + WHERE 层双写同一谓词"范式）。
+        // [S5·Opus 预筛二批 M1 闸序修正] done 闸门只在授权**当前活跃**时才有意义——已消费/已撤销/已上线
+        //   这三种"非活跃"成因各自都有更贴切的既有响应（deriveFastReleaseRevokeDenyReason 已精确区分：
+        //   "已被消费"/"重复撤销"/"该单已上线"），不该被本闸抢答成"部署进行中"。最典型的反例：已消费
+        //   （confirm 触发末位翻牌）单按 §5b 第 7 行明文保留 done 行——那是"这次部署已经完成"的合法留痕，
+        //   不是"现在有一次部署正卡在进行中"，对它调 revoke 若命中本闸会给出"暂不可撤销，请让剩余执行人
+        //   确认…"这类文不对题的指引（根本没有"剩余执行人"，也没有"进行中"可言）；改为只在
+        //   isActiveFastReleaseAuth(row) 为真时才查/判 done 闸，非活跃直接落到下方 UPDATE（WHERE 已含
+        //   consumed_at/revoked_at/released_at/online_source 四列否定条件），changes=0 后走既有
+        //   deriveFastReleaseRevokeDenyReason(row) 给出精确原因，与授权非活跃场景下应有的语义一致。
+        if (isActiveFastReleaseAuth(row)) {
+          const fastlaneDoneRow = await dbGetAsync(
+            `SELECT 1 AS x FROM sys_fast_release_executors WHERE ${sysFastReleaseExecActiveWhere()} AND exec_status = 'done' LIMIT 1`,
+            [id]);
+          if (fastlaneDoneRow) {
+            await sysRollback();
+            // [S5·Opus 预筛 M1] 同 case 'accept'/'return' 一带——可执行指引，收信人恒为 admin（本端点 requireAdmin）。
+            return res.status(409).json({
+              error: '已有执行人确认执行，先行上线授权不可撤销（撤销会让已确认的执行事实与授权状态脱节）——可让剩余执行人完成确认以促成翻牌，或移除未确认的执行人触发翻牌，或作废本单据',
+              code: 'FASTLANE_DEPLOY_IN_PROGRESS',
+            });
+          }
+        }
+
+        // [S5·Opus 预筛 L2] 写点纵深子查询改走 sysFastReleaseExecActiveWhere('fe', 'sys_issues.id')
+        //   相关子查询形态——issue_id 分量与外层 UPDATE 当前行的 id 等值关联，不占用绑定参数位；
+        //   removed_at IS NULL 分量与全仓其余消费点同一份字面量派生，不再手拼第二份。
         const upd = await dbRunAsync(
           `UPDATE sys_issues SET fast_release_revoked_at = datetime('now','localtime'), updated_at = datetime('now','localtime')
             WHERE id = ? AND fast_release_auth_at IS NOT NULL AND fast_release_revoked_at IS NULL
-              AND fast_release_consumed_at IS NULL AND released_at IS NULL AND online_source IS NULL`,
+              AND fast_release_consumed_at IS NULL AND released_at IS NULL AND online_source IS NULL
+              AND NOT EXISTS (
+                SELECT 1 FROM sys_fast_release_executors fe
+                 WHERE ${sysFastReleaseExecActiveWhere('fe', 'sys_issues.id')} AND fe.exec_status = 'done'
+              )`,
           [id]);
         if (!upd || upd.changes !== 1) {
           await sysRollback();
@@ -8706,6 +10084,9 @@ module.exports = (deps) => {
           `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, operator_id, operator_name)
            VALUES (?, 'note', ?, 'fast_release_revoke', ?, ?)`,
           [id, `撤销先行上线授权：${actor.name}（${reason}）`, Number(actor.id) || null, actor.name || null]);
+        // [S5·§4-5] 撤销成功——同一事务软删该单全部未软删集合行（此刻结构上全为 pending，done 已被上方
+        // 闸+WHERE 双重拦截）+ timeline fast_release_roster_cleared（共享内核，唯一实现）。
+        await clearFastReleaseRosterOnTermination(id, actor, '撤销授权');
         await sysCommit();
         return res.json({ id, action: 'fast_release_revoke', fast_release_revoked_at: postRow.fast_release_revoked_at, reason });
       } catch (txErr) {
@@ -8716,6 +10097,391 @@ module.exports = (deps) => {
       if (err instanceof SysTransitionError) return sendSysTransitionError(res, err);
       logger.error('[系统迭代] 撤销先行上线授权失败:', err && err.stack || (err && err.message));
       return res.status(500).json({ error: '撤销先行上线授权失败，请稍后重试', code: 'INTERNAL_ERROR' });
+    }
+  });
+
+  // ── S3·§4-3 先行上线执行确认：POST /sys-issues/:id/fast-release-exec-confirm ────────────────
+  //   权限=**任一在册执行人本人**（非 requireAdmin——挂牌进集合的值班执行人本人才是"确认执行"的合法
+  //   主体，同 submit 端点"在册开发本人"权限模型，非 admin 专属动作），中间件只做粗筛（authenticateToken+
+  //   requireSysSchemaReady），精确授权=事务内查该单执行人集合是否含 actor 本人（契约 a）。
+  //   单事务 BEGIN IMMEDIATE，契约 a-e：
+  //     a. 在册判权——本人行存在且未软删（统一谓词 sysFastReleaseExecActiveWhere，禁自拼字面量）；
+  //        不在册 → 403 FAST_RELEASE_EXEC_NOT_ROSTERED（错误码沿用既有 FAST_RELEASE_ 族命名惯例，
+  //        语义对齐开发花名册 NOT_ROSTERED 同款"不在册"含义，前缀区分是哪张表的"在册"）。
+  //     b. done 条件更新——WHERE 全谓词：本人执行人行 `exec_status='pending' AND removed_at IS NULL`
+  //        ∧ 主表联判（EXISTS 子查询：`type='bug' AND status='待验证' AND` 六列活跃授权同源谓词
+  //        FAST_RELEASE_ACTIVE_AUTH_WHERE_SQL）——双条件守卫，changes≠1 统一 409
+  //        FAST_RELEASE_EXEC_CONFIRM_INVALID（已确认过/授权已失效/单据状态已变化，三种成因合并一个
+  //        码，文案给出可能原因，不逐一区分——调用方刷新详情页即可看到真实现状，无需前端按码分支）。
+  //     c. 调共享翻牌内核 attemptFastReleaseFlipInTxn（见该函数定义处，:3865，codex 384 预筛 LOW-2
+  //        订正行号——曾误指 :3805 一带）——全员判定+翻牌
+  //        UPDATE+§3.3 副作用的**唯一实现**，本端点不重复任何一步。
+  //     d. 内核判定应翻牌但翻牌 UPDATE changes≠1 时内核自行抛 FAST_RELEASE_FLIP_CONFLICT（409），冒泡到
+  //        本端点外层 catch → sysRollback 整个事务（含本次 done 更新与尚未提交的 timeline），不留半
+  //        完成态；非末位路径（集合未全 done）本端点自己补一条 `fast_release_exec_confirm` timeline
+  //        note（event_type='note'，同 fast_release_staged 一带既有模式，非落回通用"备注"）——末位路径
+  //        （内核已翻牌）不重复写这条 note，内核自己的 `fast_release_exec_online` status_change 镜像行
+  //        已完整记录"是谁的确认促成了这次翻牌"（trigger 参数），两条 note 会对同一个人的同一次点击
+  //        重复留痕，故非末位/末位路径二选一，不叠加。
+  //     e. 翻牌成功继承 §3.3 副作用：48h 补验收 pending 重置——已由内核翻牌 UPDATE 同一条语句内写入全新
+  //        released_at + post_release_acceptance='pending' 天然满足（isPostReleaseAcceptOverdue 是纯函数
+  //        只读现值算超时，无需另外的"重置"动作，见内核该处注释）。通知：**不新造投递**——先例已读
+  //        POST /accept 端点 C9 免上线直翻分支的处理方式（:8694 一带）：该端点无条件调用
+  //        `dispatchSysNotify(id, r.notifyAfterCommit, actor.id)`，但 accept 的三条 transition 定义
+  //        （transitions.js :290/:626/:915）notifyAfterCommit 均恒为 null——即便 C9 directFlip 命中，
+  //        该调用在 dispatchSysNotify 内部因 marker=null 直接早返回，是**结构性零投递**，非"暂时没实现"。
+  //        本端点不经 sysIssueTransition 引擎（自建独立事务+共享内核，非 transitions.js 具名边），没有
+  //        天然的 notifyAfterCommit marker 可挂，硬造一个恒 null 的调用只是重复"C9 那条反正也不发"的
+  //        空转，不产生任何行为差异——故本端点干脆不调用 dispatchSysNotify（省一次必然空跑的调用，
+  //        同 S2-1 挂牌逻辑该处措辞"不是遗漏"）。可见性仍走既定的**派生可见性范式**：本人 done 更新 +
+  //        （非末位）exec_confirm timeline note ／（末位）exec_online timeline status_change 镜像行 +
+  //        列表徽章（S6 起）即构成完整闭环，同族先例见 index.js :10937/:14763 与 codex 382 交付报告。
+  router.post('/sys-issues/:id/fast-release-exec-confirm', authenticateToken, requireSysSchemaReady, async (req, res) => {
+    const id = parsePositiveId(req.params.id);
+    if (!id) return res.status(400).json({ error: '无效的迭代单 ID', code: 'INVALID_SYS_ISSUE_ID' });
+    try {
+      const actor = sysActor(req);
+      let flipped = false;
+      let rowStatusAtStart = null;
+      await sysBeginImmediate();
+      try {
+        const row = await dbGetAsync('SELECT id, status FROM sys_issues WHERE id = ?', [id]);
+        if (!row) { await sysRollback(); return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' }); }
+        rowStatusAtStart = row.status;
+
+        // a. 在册判权：统一谓词 + user_id，禁自拼 removed_at 判空这类字面量。
+        const execSelf = await dbGetAsync(
+          `SELECT id FROM sys_fast_release_executors WHERE user_id = ? AND ${sysFastReleaseExecActiveWhere()}`,
+          [actor.id, id]
+        );
+        if (!execSelf) {
+          await sysRollback();
+          return res.status(403).json({ error: '当前非该单先行上线在册执行人，无法确认执行', code: 'FAST_RELEASE_EXEC_NOT_ROSTERED' });
+        }
+
+        // b. done 条件更新：本人执行人行 pending→done ∧ 主表联判（EXISTS 子查询，六列活跃授权同源谓词）。
+        const doneUpd = await dbRunAsync(
+          `UPDATE sys_fast_release_executors
+             SET exec_status = 'done', executed_at = datetime('now','localtime')
+           WHERE id = ? AND exec_status = 'pending' AND removed_at IS NULL
+             AND EXISTS (
+               SELECT 1 FROM sys_issues
+                WHERE id = sys_fast_release_executors.issue_id
+                  AND type = 'bug' AND status = '待验证'
+                  AND ${FAST_RELEASE_ACTIVE_AUTH_WHERE_SQL}
+             )`,
+          [execSelf.id]
+        );
+        if (!doneUpd || doneUpd.changes !== 1) {
+          await sysRollback();
+          return res.status(409).json({
+            error: '当前状态不满足执行确认条件（可能已确认过、授权已失效或单据状态已变化，请刷新后重试）',
+            code: 'FAST_RELEASE_EXEC_CONFIRM_INVALID',
+          });
+        }
+
+        // c. 调共享翻牌内核（全员判定+翻牌 UPDATE+§3.3 副作用，唯一实现）。
+        const flipResult = await attemptFastReleaseFlipInTxn(id, actor, 'confirm');
+        flipped = flipResult.flipped;
+
+        if (!flipped) {
+          // d（非末位路径）：集合未全 done，只提交 done + 一条独立 timeline note。
+          await dbRunAsync(
+            `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, operator_id, operator_name)
+             VALUES (?, 'note', ?, 'fast_release_exec_confirm', ?, ?)`,
+            [id, `先行上线执行确认：${actor.name} 已完成执行`, Number(actor.id) || null, actor.name || null]
+          );
+        }
+        // d（末位路径）：内核已写好 fast_release_exec_online 镜像行，不重复记录（见端点头部注释）。
+
+        await sysCommit();
+      } catch (txErr) {
+        try { await sysRollback(); } catch (_) { /* ignore */ }
+        throw txErr;
+      }
+      res.json({
+        id, exec_status: 'done', flipped,
+        main_status: flipped ? '已上线' : rowStatusAtStart,
+      });
+    } catch (err) {
+      sendSysTransitionError(res, err);
+    }
+  });
+
+  // ── S4 集合调整端点共用：落库姓名归一化（Opus 385 预筛 MED-3 收口）────────────────────────────
+  //   users.display_name 在库层无任何格式约束（server.js PUT 路由不校验值域，裸 TEXT 列）——纯 Tab/
+  //   空白值经 JS 单纯 `||` 真值判断会被判"非空"（'\t' 本身是真值）直接穿透，落到本表 user_name/
+  //   added_by_name/removed_by_name 三个双参 trim CHECK 列时 CHECK 求值为假，SQLite 抛 CHECK 约束错误、
+  //   未被本端点任何精确正则捕获，冒泡到外层 sendSysTransitionError 兜底分支拼 500 + 裸错误信息透出
+  //   （预筛实测实锤：display_name='\t' 的目标用户走加人端点会 500 且响应体含原始 SQLite 报错文案）。
+  //   级联每级都先 JS trim 判空——JS String.prototype.trim() 剥离的空白字符集合是本表 CHECK
+  //   `trim(x, ' '||char(9)||char(10)||char(13))`（空格+Tab+LF+CR）剥离集合的**超集**（JS 另含 VT/FF/
+  //   NBSP/多种 Unicode 空白），故任一候选值一旦被 JS trim 判定非空，回填进 SQL 参数后再经 SQLite 那道
+  //   更窄的 trim 检查也必然仍非空——不存在"JS 判非空但 SQL 判空"的缝隙。最后一个候选须为调用方保证的
+  //   字面量兜底（如 `user#${id}`，结构上恒非空且不含首尾空白），本函数对它不再 trim、直接返回。
+  function sysFastReleaseSafeName(...candidates) {
+    for (let i = 0; i < candidates.length - 1; i++) {
+      const t = String(candidates[i] == null ? '' : candidates[i]).trim();
+      if (t) return t;
+    }
+    return candidates[candidates.length - 1];
+  }
+
+  // ── S4·§4-4a 先行上线执行人集合调整·加人：POST /sys-issues/:id/fast-release-executors ─────────
+  //   权限=requireAdmin（同 authorize/revoke 两端点，集合调整是 admin 专属动作，非在册执行人自助——
+  //   与 fast-release-exec-confirm 的"本人在册"权限模型刻意不同）。body：{ user_id }。
+  //   单事务 BEGIN IMMEDIATE，依次：
+  //     a. 主表挂牌态谓词联判——type='bug' ∧ status='待验证' ∧ isActiveFastReleaseAuth(row)（六列活跃
+  //        授权同源判据，JS 侧判据写法同 S2-1 挂牌闸门 :8513 一带"row.type==='bug' && isActiveFastReleaseAuth(row)"
+  //        同款纵深防御精神——不完全依赖"结构上不可能"这条隐含前提）；不满足 → 409 FASTLANE_ROSTER_NOT_STAGED；
+  //     b. 集合无 done 行（372-H1'：首 done 后冻结加人，部署已开始不扩部署留痕面）——判据抄 runWGate
+  //        弹回闸 :3482-3488 一带同源写法（统一谓词 sysFastReleaseExecActiveWhere() AND exec_status='done'）；
+  //        存在 → 409 FASTLANE_ROSTER_FROZEN；
+  //     c. 目标用户资格校验——存在性（不存在 → 400 VALIDATION，同 /dev-assignees POST add 既有措辞）+
+  //        hasReleaseEligibility（与挂牌 M1 口径/executor-candidates 同一函数，status='active' ∧
+  //        role∉{viewer,admin}，定义处见该函数自身注释）不合格 → 400 FASTLANE_ROSTER_TARGET_NOT_ELIGIBLE；
+  //        ⚠️ user_name **不信调用方传参**（本端点 body 本就不收 user_name 字段，只收 user_id）——落库值
+  //        取服务端实时查询 users.display_name→username 级联（预筛 S2-L7 教训：sys_release_duty_roster.
+  //        user_name 是单参 trim CHECK，本表 user_name 是双参 trim CHECK，两表约束不对称，若信调用方
+  //        传参，脏名可能在别处放行却在本表撞 CHECK 500）——服务端权威取值把风险面**收窄到**"仅
+  //        users.display_name/username 本身脏"这一条，而该条已由 sysFastReleaseSafeName 归一化兜底
+  //        （Opus 385 预筛 MED-3：显式级联+每级 trim 判空，非"取服务端值就必然安全"这类未经验证的
+  //        绝对断言——同 /dev-assignees add 端点 :6487 一带"服务端取值"精神一致，但加了归一化这层前人
+  //        没加的保险）；
+  //     d. INSERT——partial UNIQUE(issue_id,user_id) WHERE removed_at IS NULL 撞（已在册）捕获后语义化
+  //        409 FASTLANE_ROSTER_ALREADY_ADDED（精确正则匹配本表本两列，同批次号冲突捕获范式同款写法，
+  //        非宽泛 /UNIQUE/i——避免误吞其余無关 UNIQUE 失败，具体行号见外层 catch 注释）；
+  //     e. timeline `fast_release_roster_added`（event_type='note'，独立徽章，记目标 user_id/user_name+
+  //        操作者，同 fast_release_staged/_exec_confirm 一带既有模式）；
+  //     f. 通知=派生可见性范式（§7 执行段定论）——本条 INSERT + timeline 行即构成完整站内可见闭环，不
+  //        新造投递基建（同 S2-1 挂牌段既有措辞"不是遗漏"）。
+  //   [Opus 385 预筛 LOW-1] res.json 挪到内层 try/catch **之外**（与移人/确认两个兄弟端点结构对齐）——
+  //   若留在内层 try 里，res.json 本身抛错（如响应体含循环引用等极端情形）会被内层 catch 当作"事务体
+  //   内异常"捕获，此时 sysCommit() 早已成功、锁已释放，内层 catch 的 sysRollback() 会对**已提交的
+  //   事务**发出裸 ROLLBACK——这正是 :2790 一带注释"提交失败不释放（防跨请求回滚他人事务）"要杜绝的
+  //   那类形状（虽然本端点响应体是纯字面量对象、实际触发概率趋近于零，但结构对齐不留隐患，同一处
+  //   薄弱点不因"看起来不会触发"就放过）。
+  router.post('/sys-issues/:id/fast-release-executors', authenticateToken, requireSysSchemaReady, requireAdmin, async (req, res) => {
+    const id = parsePositiveId(req.params.id);
+    if (!id) return res.status(400).json({ error: '无效的迭代单 ID', code: 'INVALID_SYS_ISSUE_ID' });
+    const userId = parsePositiveId((req.body || {}).user_id);
+    if (!userId) return res.status(400).json({ error: 'user_id 必须为正整数', code: 'VALIDATION' });
+    try {
+      const actor = sysActor(req);
+      // [Opus 385 预筛 MED-3 实测修复] 传 req.user.display_name/username **两个原始字段**，不传已折叠的
+      // actor.name——sysActor() 内部对 name 的合成本身就是一次"display_name||username||user#id"的裸
+      // OR 判断（:2278 一带），一旦 display_name 是"看似非空实则全空白"的脏值（如纯 Tab），它已经在
+      // sysActor() 那一步被误判为"非空"并抢先赢下，username 这一级候选从此丢失、永远够不着——
+      // 拿这个已折叠的单值再喂给三级 safe-name 只能在"脏 display_name"与"user#id 兜底"之间二选一，
+      // 中间的 username 级别被结构性跳过（首版实现踩过这个坑：[39c] 组断言落库应为 username 却读到
+      // user#id 兜底，红显示三级降为二级）。改直接传两个原始字段，与目标用户侧 targetUser.display_name/
+      // targetUser.username 完全同构，真正三级都参与判定。
+      const actorSafeName = sysFastReleaseSafeName(req.user.display_name, req.user.username, `user#${actor.id}`);
+      let insertedExecutorId = null;
+      let targetName = null;
+      await sysBeginImmediate();
+      try {
+        const row = await dbGetAsync(
+          `SELECT id, type, status, fast_release_auth_at, fast_release_revoked_at, fast_release_consumed_at,
+                  released_at, online_source, reopened_at
+             FROM sys_issues WHERE id = ?`, [id]);
+        if (!row) { await sysRollback(); return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' }); }
+
+        // a. 挂牌态谓词联判（type/status 显式钳制 + 六列活跃授权同源判据，双重防线同 S2-1/S3 既有范式）。
+        if (row.type !== 'bug' || row.status !== '待验证' || !isActiveFastReleaseAuth(row)) {
+          await sysRollback();
+          return res.status(409).json({
+            error: '该单当前不处于先行上线挂牌态（须 bug 类型∧待验证∧活跃授权），无法调整执行人集合',
+            code: 'FASTLANE_ROSTER_NOT_STAGED',
+          });
+        }
+
+        // b. 首 done 后冻结加人（372-H1'）——判据抄 runWGate 弹回闸同源写法。
+        const doneRow = await dbGetAsync(
+          `SELECT 1 AS x FROM sys_fast_release_executors WHERE ${sysFastReleaseExecActiveWhere()} AND exec_status = 'done' LIMIT 1`,
+          [id]);
+        if (doneRow) {
+          await sysRollback();
+          return res.status(409).json({
+            error: '已有执行人确认执行，先行上线执行人集合已冻结，无法加人',
+            code: 'FASTLANE_ROSTER_FROZEN',
+          });
+        }
+
+        // c. 目标用户资格校验——存在性 + hasReleaseEligibility（同挂牌 M1 口径）；user_name 服务端实时
+        //    取值 + 归一化级联（MED-3）。
+        const targetUser = await dbGetAsync('SELECT id, display_name, username, status, role FROM users WHERE id = ?', [userId]);
+        if (!targetUser) { await sysRollback(); return res.status(400).json({ error: `用户不存在（id=${userId}）`, code: 'VALIDATION' }); }
+        const targetEligible = await hasReleaseEligibility(targetUser.id);
+        if (!targetEligible) {
+          await sysRollback();
+          return res.status(400).json({
+            error: '目标用户当前无先行上线执行资格（已停用或角色为查看者/管理员）',
+            code: 'FASTLANE_ROSTER_TARGET_NOT_ELIGIBLE',
+          });
+        }
+        targetName = sysFastReleaseSafeName(targetUser.display_name, targetUser.username, `user#${targetUser.id}`);
+
+        // d. INSERT——partial UNIQUE 撞（已在册）捕获后语义化 409（外层 catch 精确正则识别，见下方）。
+        const insRes = await dbRunAsync(
+          `INSERT INTO sys_fast_release_executors (issue_id, user_id, user_name, added_by, added_by_name)
+           VALUES (?, ?, ?, ?, ?)`,
+          [id, targetUser.id, targetName, actor.id, actorSafeName]
+        );
+        insertedExecutorId = insRes.lastID;
+
+        // e. timeline（event_type='note'，独立徽章，同 fast_release_staged 一带既有模式；operator_name
+        //    同样走归一化值，与 added_by_name 保持同一份姓名事实，不产生"落库名"与"时间线署名"分裂）。
+        await dbRunAsync(
+          `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, operator_id, operator_name)
+           VALUES (?, 'note', ?, 'fast_release_roster_added', ?, ?)`,
+          [id, `先行上线加入执行人：${actorSafeName} 将 ${targetName} 加入执行人集合`, Number(actor.id) || null, actorSafeName]
+        );
+
+        await sysCommit();
+      } catch (txErr) {
+        try { await sysRollback(); } catch (_) { /* ignore */ }
+        throw txErr;
+      }
+      res.json({
+        id, action: 'fast_release_roster_added', executor_id: insertedExecutorId,
+        user_id: userId, user_name: targetName, exec_status: 'pending',
+      });
+    } catch (err) {
+      // [d 项] partial UNIQUE(issue_id,user_id) WHERE removed_at IS NULL 撞索引——SQLite 组合索引报错格式
+      //   恒为 "UNIQUE constraint failed: <table>.<col1>, <table>.<col2>"（已实测核实，非推断），精确匹配
+      //   本表本两列，不用宽泛 /UNIQUE/i（同批次号冲突捕获范式"收窄避免误吞无关 UNIQUE 失败"精神一致，
+      //   具体参照行号见 sys_releases.release_no 那处 UNIQUE 捕获——两处相隔较远，本注释不写死行号避免
+      //   随改动漂移，需要时直接全文搜"UNIQUE constraint failed: sys_releases"定位）。
+      if (err && /UNIQUE constraint failed: sys_fast_release_executors\.issue_id, sys_fast_release_executors\.user_id/.test(err.message || '')) {
+        return res.status(409).json({ error: '该用户已在先行上线执行人集合中', code: 'FASTLANE_ROSTER_ALREADY_ADDED' });
+      }
+      sendSysTransitionError(res, err);
+    }
+  });
+
+  // ── S4·§4-4b 先行上线执行人集合调整·移人：DELETE /sys-issues/:id/fast-release-executors/:userId ──
+  //   权限=requireAdmin（同加人端点）。路径用 user_id 寻址（非该表自增 id）——统一谓词
+  //   sysFastReleaseExecActiveWhere 本就按 (issue_id,user_id) 定位在册行（partial UNIQUE 同一对列），
+  //   admin 视角管理的是"这个人在不在集合里"而非某条内部行 id，与 DELETE /dev-assignees/:assigneeId
+  //   （寻址目标=开发花名册子表自增 id）刻意不同——两表的自然寻址键不同，不强行统一成同一种路径形状。
+  //   单事务 BEGIN IMMEDIATE，依次：
+  //     a. 前置与加人同源的主表挂牌态联判（373-H 落字：type='bug' ∧ status='待验证' ∧ isActiveFastReleaseAuth
+  //        六列同源判据，同一码 FASTLANE_ROSTER_NOT_STAGED——⑪ 的清理面兜底之外再加一层写点纵深）；
+  //     b. 条件更新——软删三列成组，WHERE 复用共享谓词 helper `sysFastReleaseExecActiveWhere()`（issue_id
+  //        分量）+ `AND user_id = ?`（Opus 385 预筛 MED-1 收口：此前本处与加人 :9288/确认端点 :9141 两处
+  //        既有 helper 消费点不对称，手写了一份字面量 `issue_id = ? AND user_id = ? AND removed_at IS NULL`
+  //        ——方案 §4-10 单一来源约束的漏网点，占位符顺序天然对齐（helper 内部先出 issue_id 占位符，
+  //        紧接手写 user_id 占位符，与调用方参数数组 `[..., id, userId]` 顺序逐一对应，改写不影响绑定语义）
+  //        + AND exec_status='pending'，**追加 EXISTS 子查询把 a 项主表挂牌态谓词重申进 WHERE 层**（373-H
+  //        "写点纵深"字面要求——JS 前置判定与 SQL WHERE 层双写同一谓词，同确认端点契约 b 的 EXISTS 子查询
+  //        同款范式，事务串行下理论必中，仍不省略）+ changes 检查，任一失败（不在册/已软删/已 done/主表
+  //        挂牌态已变化）统一 409 FASTLANE_ROSTER_REMOVE_INVALID——**已 done 行结构性移不掉**（方案 §5-⑨）；
+  //     c. timeline `fast_release_roster_removed`（记目标 user_id/user_name+原 exec_status+操作者）——
+  //        exec_status 现值取自移除前的行快照（同一事务内先 SELECT 后 UPDATE，串行下无竞态窗口）。
+  //        [Opus 385 预筛 MED-2 收口] **本步骤须先于下一步 d（共享翻牌内核调用）执行**——内核若判定
+  //        "剩余全 done"会同事务写一条 `fast_release_exec_online` status_change 镜像行，若本条
+  //        roster_removed note 写在内核**之后**，两条行按 timeline 自增 id 升序排列时会出现因果倒置：
+  //        exec_online 的 summary 自称"移除执行人后自动全员达成"，却比真正记录"移除执行人"那条动作的
+  //        roster_removed 行 id 更小、显示在它前面——详情页时间线是"讲一个先后发生的故事"，行号顺序=
+  //        叙事顺序，此处不能颠倒。targetBefore 快照已在上一步 UPDATE 之前取好，不依赖内核任何返回值，
+  //        提前写本条不产生依赖问题。
+  //     d. 移人成功——同一事务调共享翻牌内核 attemptFastReleaseFlipInTxn(id, actor, 'roster_remove')
+  //        （372-H1' 卡死闭合）：剩余非空∧全 done ⇒ 同事务翻牌；剩余为空 ⇒ 不翻，回到 0/0 待配置（此时
+  //        无 done 行，加人自然解冻）。
+  //   res.json 已在内层 try/catch **之外**（与确认端点同结构，本端点原生即如此，LOW-1 只需修加人端点）。
+  router.delete('/sys-issues/:id/fast-release-executors/:userId', authenticateToken, requireSysSchemaReady, requireAdmin, async (req, res) => {
+    const id = parsePositiveId(req.params.id);
+    const userId = parsePositiveId(req.params.userId);
+    if (!id || !userId) return res.status(400).json({ error: '无效的参数', code: 'VALIDATION' });
+    try {
+      const actor = sysActor(req);
+      // [Opus 385 预筛 MED-3 实测修复] 传 req.user.display_name/username **两个原始字段**，不传已折叠的
+      // actor.name——sysActor() 内部对 name 的合成本身就是一次"display_name||username||user#id"的裸
+      // OR 判断（:2278 一带），一旦 display_name 是"看似非空实则全空白"的脏值（如纯 Tab），它已经在
+      // sysActor() 那一步被误判为"非空"并抢先赢下，username 这一级候选从此丢失、永远够不着——
+      // 拿这个已折叠的单值再喂给三级 safe-name 只能在"脏 display_name"与"user#id 兜底"之间二选一，
+      // 中间的 username 级别被结构性跳过（首版实现踩过这个坑：[39c] 组断言落库应为 username 却读到
+      // user#id 兜底，红显示三级降为二级）。改直接传两个原始字段，与目标用户侧 targetUser.display_name/
+      // targetUser.username 完全同构，真正三级都参与判定。
+      const actorSafeName = sysFastReleaseSafeName(req.user.display_name, req.user.username, `user#${actor.id}`);
+      let flipped = false;
+      let rowStatusAtStart = null;
+      let removedUserName = null;
+      await sysBeginImmediate();
+      try {
+        const row = await dbGetAsync(
+          `SELECT id, type, status, fast_release_auth_at, fast_release_revoked_at, fast_release_consumed_at,
+                  released_at, online_source, reopened_at
+             FROM sys_issues WHERE id = ?`, [id]);
+        if (!row) { await sysRollback(); return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' }); }
+        rowStatusAtStart = row.status;
+
+        // a. 前置挂牌态联判——与加人端点同源判据、同一码（本条只是"友好提前判定"，b 项 WHERE 会再核一遍）。
+        if (row.type !== 'bug' || row.status !== '待验证' || !isActiveFastReleaseAuth(row)) {
+          await sysRollback();
+          return res.status(409).json({
+            error: '该单当前不处于先行上线挂牌态（须 bug 类型∧待验证∧活跃授权），无法调整执行人集合',
+            code: 'FASTLANE_ROSTER_NOT_STAGED',
+          });
+        }
+
+        // 移除前快照（供 timeline 记录"原 exec_status"）——同一事务内先读后写，串行下与下方 UPDATE 之间
+        // 不存在竞态窗口；若该行此刻已不在册/已 done，下方 UPDATE 的 changes 会=0，走 409 分支，本快照
+        // 不会被使用到响应/timeline 里。
+        const targetBefore = await dbGetAsync(
+          `SELECT id, user_name, exec_status FROM sys_fast_release_executors
+            WHERE ${sysFastReleaseExecActiveWhere()} AND user_id = ?`,
+          [id, userId]
+        );
+
+        // b.（MED-1 收口）条件更新——软删三列成组，WHERE issue_id 分量复用 helper + AND user_id=? +
+        //    exec_status='pending' + EXISTS 子查询重申主表挂牌态谓词（写点纵深，373-H）。
+        const rmUpd = await dbRunAsync(
+          `UPDATE sys_fast_release_executors
+              SET removed_at = datetime('now','localtime'), removed_by = ?, removed_by_name = ?
+            WHERE ${sysFastReleaseExecActiveWhere()} AND user_id = ? AND exec_status = 'pending'
+              AND EXISTS (
+                SELECT 1 FROM sys_issues
+                 WHERE id = sys_fast_release_executors.issue_id
+                   AND type = 'bug' AND status = '待验证'
+                   AND ${FAST_RELEASE_ACTIVE_AUTH_WHERE_SQL}
+              )`,
+          [actor.id, actorSafeName, id, userId]
+        );
+        if (!rmUpd || rmUpd.changes !== 1) {
+          await sysRollback();
+          return res.status(409).json({
+            error: '当前状态不满足移除条件（可能不在册、已被移除，或已确认执行——已确认执行的执行人无法移除）',
+            code: 'FASTLANE_ROSTER_REMOVE_INVALID',
+          });
+        }
+        removedUserName = targetBefore && targetBefore.user_name;
+
+        // c.（MED-2 收口·提前于 d）timeline（记目标 user_id/user_name+原 exec_status+操作者）——必须先于
+        //    下一步共享翻牌内核调用写入，理由见本端点头部注释 c 项。
+        await dbRunAsync(
+          `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, operator_id, operator_name)
+           VALUES (?, 'note', ?, 'fast_release_roster_removed', ?, ?)`,
+          [id, `先行上线移除执行人：${actorSafeName} 将 ${removedUserName || ('user#' + userId)} 移出执行人集合（移除前状态：${(targetBefore && targetBefore.exec_status) || 'pending'}）`,
+            Number(actor.id) || null, actorSafeName]
+        );
+
+        // d. 移人成功——同一事务调共享翻牌内核（唯一实现，禁双写）。
+        const flipResult = await attemptFastReleaseFlipInTxn(id, actor, 'roster_remove');
+        flipped = flipResult.flipped;
+
+        await sysCommit();
+      } catch (txErr) {
+        try { await sysRollback(); } catch (_) { /* ignore */ }
+        throw txErr;
+      }
+      res.json({
+        id, action: 'fast_release_roster_removed', user_id: userId, user_name: removedUserName,
+        flipped, main_status: flipped ? '已上线' : rowStatusAtStart,
+      });
+    } catch (err) {
+      sendSysTransitionError(res, err);
     }
   });
 
@@ -8771,16 +10537,19 @@ module.exports = (deps) => {
       return res.status(400).json({ error: '补验收不通过必须填写说明', code: 'POST_RELEASE_ACCEPT_FAIL_NOTE_REQUIRED' });
     }
     const actor = sysActor(req);
-    let newDeriveId = null, postRow = null;
+    let newDeriveId = null, postRow = null, newDeriveResult = null;
     try {
       await sysBeginImmediate();
       try {
         // 同事务内读全量需要的列——pass 分支只需前置判定四列；fail 分支还需原单信息供派生新单继承
         //   （同 derive 公开端点 origin 继承字段集：title/system_name/module_name/source/priority/
         //   requester_*/intake_liaison_id，见下方 insertDerivedSysIssue 调用点）。
+        // [§15.2] 补 derive_root_id——insertDerivedSysIssue 取号需要（root = origin.derive_root_id ?? originId）。
+        // [S12-b] 补 derive_seq——本单自身若是派生单，timeline「派生自 #根_序」文案需要它拼出本单自己的
+        //   展示号（derive_root_id 单独不够，见 sysIssueDisplayNo 入参契约：两列须成组）。
         const row = await dbGetAsync(
           `SELECT id, type, status, online_source, post_release_acceptance, post_accepted_at, post_derive_issue_id,
-                  released_at, release_id, fast_release_consumed_at, origin_issue_id,
+                  released_at, release_id, fast_release_consumed_at, origin_issue_id, derive_root_id, derive_seq,
                   title, system_name, module_name, source, priority,
                   requester_dept, requester_name, requester_phone, intake_liaison_id
              FROM sys_issues WHERE id = ?`, [id]);
@@ -8814,9 +10583,14 @@ module.exports = (deps) => {
           //   note 非空校验这件事解耦——万一将来出现第二个调用点未经过本端点的前置闸，该分支仍是安全网；
           //   二是删掉两个字面量字符串没有任何收益，反而让"这两句话曾经是干什么用的"这段历史失去着落）。
           const initialStatus = T.resolveSysInitialStatusForCreate('bug');
-          newDeriveId = await insertDerivedSysIssue({
+          // [S13-b·B3 修正] 改用外层已声明的 newDeriveResult（let，非本块 const）——响应体在 if/else 之后
+          // 统一读取 newDeriveResult.derive_root_id/derive_seq，若仍在此处用 const 会让该变量只在 fail
+          // 分支块级作用域内可见，pass 分支执行到共享的响应拼装代码时触发 ReferenceError（真实撞见：本
+          // 批加这两个响应字段时第一版就是这样，[1] pass 正例当场 500，静态语法检查测不出块级作用域这类
+          // 运行时 ReferenceError，靠亲跑 verify 才抓到）。
+          newDeriveResult = await insertDerivedSysIssue({
             originId: id,
-            origin: { origin_issue_id: row.origin_issue_id },
+            origin: { origin_issue_id: row.origin_issue_id, derive_root_id: row.derive_root_id, derive_seq: row.derive_seq },
             type: 'bug', initialStatus,
             priority: row.priority || 'P2',
             title: `${row.title}（先行上线补验收不通过）`,
@@ -8827,6 +10601,10 @@ module.exports = (deps) => {
             deriveReason: note || '先行上线补验收不通过，自动派生新单核实',
             actor, intakeLiaisonId: row.intake_liaison_id,
           });
+          newDeriveId = newDeriveResult.id;   // 外层变量仍是裸数值 id——供下方外键式 UPDATE/ref_id 使用（列本身是整数外键，不应存文本展示号）
+          // [S12-b·§15.3 行 9] timeline 文案改用新单自己的展示号（insertDerivedSysIssue 内部已算出
+          //   deriveRoot/deriveSeq 随返回对象带出，此处直接取用，不重复查询）。
+          const newDeriveDisplayNo = sysDeriveNumbering.sysIssueDisplayNo(newDeriveResult);
           const upd = await dbRunAsync(
             `UPDATE sys_issues SET post_release_acceptance = 'failed_derived', post_derive_issue_id = ?,
                updated_at = datetime('now','localtime')
@@ -8839,7 +10617,7 @@ module.exports = (deps) => {
           await dbRunAsync(
             `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, ref_id, operator_id, operator_name)
              VALUES (?, 'note', ?, 'post_release_accept_fail', ?, ?, ?)`,
-            [id, `补验收不通过，已派生 #${newDeriveId}：${actor.name}${note ? '（' + note + '）' : ''}`, newDeriveId, Number(actor.id) || null, actor.name || null]);
+            [id, `补验收不通过，已派生 ${newDeriveDisplayNo}：${actor.name}${note ? '（' + note + '）' : ''}`, newDeriveId, Number(actor.id) || null, actor.name || null]);
         }
         postRow = await dbGetAsync(
           `SELECT online_source, post_release_acceptance, post_accepted_at, post_derive_issue_id,
@@ -8854,11 +10632,18 @@ module.exports = (deps) => {
       // 事务已提交，事务外发通知（同 /accept 端点范式：dispatchSysNotify 自身 try/catch 吞错，best-effort
       //   不影响已成功的业务响应；isAutoNotifyEnabled 恒 false 现状=结构就位 no-op，同组 A P2 既有登记）。
       await dispatchSysNotify(id, verdict === 'pass' ? 'notifyPostReleaseAcceptPassedToCreator' : 'notifyPostReleaseAcceptFailedToCreator', actor.id);
+      // [S13-b·B3·矩阵行7] fail 分支响应体补 post_derive_root_id/post_derive_seq——供前端 toast 拼子编号
+      //   （newDeriveResult 已是 insertDerivedSysIssue 的返回对象 {id, derive_root_id, derive_seq}，直接
+      //   透传，不必再等下一次列表刷新才能从 siList 查到刚创建的这条新单——这条 toast 出现的那一刻，新单
+      //   连 siList 里都还没有，siIssueDisplayNoById 兜底会先落回裸 #id，故本处改走响应体直传权威值）。
+      //   pass 分支 newDeriveResult 恒 null，两键随之为 undefined（前端据此判断"未落库/降级"同 B1 契约）。
       return res.json({
         id, action: 'post_release_accept', verdict,
         post_release_acceptance: postRow.post_release_acceptance,
         post_accepted_at: postRow.post_accepted_at,
         post_derive_issue_id: postRow.post_derive_issue_id,
+        post_derive_root_id: newDeriveResult ? newDeriveResult.derive_root_id : undefined,
+        post_derive_seq: newDeriveResult ? newDeriveResult.derive_seq : undefined,
       });
     } catch (err) {
       if (err instanceof SysTransitionError) return sendSysTransitionError(res, err);
@@ -8967,7 +10752,9 @@ module.exports = (deps) => {
       //     再无条件落库·杜绝「注释称失败记 failed 但抛异常路径停在 not_sent」的审计不一致（sendIssueDingtalkRaw 已知失败多返 {ok:false}·
       //     此处兜住极端 throw：sendIssueMarkdown 未包 try 的路径）。creator/issue 缺失记 warn（MED-2 可观测·不加 skipped 状态列·本期不做通知代际）。
       try {
-        const issue = await dbGetAsync('SELECT id, type, title, system_name, created_by FROM sys_issues WHERE id = ?', [id]);
+        // [S12-b] 补 derive_root_id/derive_seq——buildSysIntakeReturnCreatorMarkdown 内的 sysIssueDisplayNo
+        //   取号需要两列成组（缺投影会让 helper 恒走 #id 回退分支=派生单静默错号，非报错）。
+        const issue = await dbGetAsync('SELECT id, type, title, system_name, created_by, derive_root_id, derive_seq FROM sys_issues WHERE id = ?', [id]);
         if (!issue) {
           logger.warn(`[系统迭代] 退改通知：issue ${id} 提交后查不到，跳过通知`);
         } else if (Number(actor.id) === Number(issue.created_by)) {
@@ -9021,9 +10808,64 @@ module.exports = (deps) => {
   const EDIT_TIER_B_CHANGE = ['开发中'];                       // 变更流 B 档（开发期）
   const EDIT_TIER_A_BUG = ['待受理', '待修改', '待处理'];      // bug 流 A 档（指派前）
   const EDIT_TIER_B_BUG = ['处理中'];                          // bug 流 B 档（开发期）
-  const EDIT_TIER_A_FIELDS = ['title', 'description', 'system_name', 'module_name', 'priority', 'deadline', 'needs_feasibility', 'requester_dept', 'requester_name', 'requester_phone'];
+  // ── 方案 v1.8 §12（建单人编辑字段对齐·2026-08-14·独立 commit·codex 393 收口）──────────────────
+  //   口径：可编辑项应等同建单时的填写项（字段集对齐；编辑窗口维持现状不动）。
+  //   [补差①] source（来源·业务方/内部/生产故障）纳入两档——编码前已 grep 全部消费点（交付报告附
+  //   逐点清单）：仅 DDL CHECK 三值枚举 + 建单校验/INSERT + 列表投影 + derive/reactivate 两个衍生
+  //   建单入口的"继承字段集"透传，**零状态机/权限/转移逻辑依赖**，与 requester_* 等既有自由字段
+  //   同一安全等级，可安全开放编辑。
+  //   [补差②·非方案原文点名，编码期 grep 建单表单全字段时一并发现，同一原则延伸处理，见交付报告
+  //   取舍论证] related_correction_no（§7 关联修正单号软引用）——消费点仅 DDL/建单校验(≤100字)/
+  //   INSERT/详情页 best-effort 软查显示（不硬校验不 join 不跳转），同样零状态机依赖，一并纳入。
+  const EDIT_TIER_A_FIELDS = ['title', 'description', 'system_name', 'module_name', 'priority', 'deadline', 'needs_feasibility', 'requester_dept', 'requester_name', 'requester_phone', 'source', 'related_correction_no'];
   const EDIT_TIER_B_FIELDS = EDIT_TIER_A_FIELDS.filter(f => f !== 'needs_feasibility');   // B 档剔除 needs_feasibility
-  const EDIT_FIELD_LABELS = { title: '标题', description: '描述', system_name: '所属系统', module_name: '模块', priority: '优先级', deadline: '预期完成', needs_feasibility: '需可行性评估', requester_dept: '需求方部门', requester_name: '需求方姓名', requester_phone: '需求方电话' };
+  const EDIT_FIELD_LABELS = { title: '标题', description: '描述', system_name: '所属系统', module_name: '模块', priority: '优先级', deadline: '预期完成', needs_feasibility: '需可行性评估', requester_dept: '需求方部门', requester_name: '需求方姓名', requester_phone: '需求方电话', source: '来源', related_correction_no: '关联修正单号' };
+
+  // ── 方案 §12「同源常量化」：建单集 = 可编辑集 ∪ 排除集（verify 断言恒等式，见 verify-sys-edit-window.js
+  //   [⑦]——落此文而非 fastlane 家族：edit-in-revision 本就是本文件的主体端点，source/related_correction_no
+  //   两个新字段与 fastlane 授权/执行人无任何关联，按内聚归属其既有专属套件） ──
+  //   SYS_CREATE_FORM_FIELDS：建单表单让用户填写/由建单流程确定值的字段全集——对照 POST /sys-issues
+  //   请求体消费点（本文件该端点全文）+ 前端 siOpenCreate 创建弹窗逐控件（Sys_Iteration.html :6341
+  //   一带 siModal 字段数组）两处核对得出，非凭空拟定。title 虽无独立输入控件（由 description 首行
+  //   自动派生，"建单优化批 C2『撤标题输入框』"），但其值仍在建单当下被确定（用户输入 description
+  //   即间接决定了 title），故计入本集合——不计入会让下方恒等式因"title 在可编辑集里却不在建单集
+  //   里"而永假。
+  //   ⚠️ [S8-S10 合并收口批 F4 收口·如实化] 本集合**不等于**该端点 `b.<key>` 全部消费点——端点还额外读取
+  //   6 个"协议/结构性拒绝"字段（见下方 SYS_CREATE_PROTOCOL_REJECTED_FIELDS），它们要么是版本协议标记
+  //   （intake_contract_version），要么被读取的唯一目的是拒绝（intake_required/assign_mode/assigned_to/
+  //   collaborator_ids/relay_user_id——受理门固化后 path A/B 已结构性关闭）。这 6 项**不是**"用户填写/
+  //   由建单流程确定值"的表单字段，不计入本集合；verify-sys-edit-window.js 有一条整仓正则扫描断言
+  //   （同 verify-sys-intake-gate.js [I] 组范式）钉死"端点 b.<key> 全集 ⊆ 本集合 ∪ 协议字段"，防未来新增
+  //   请求体消费点时两边都忘了登记。
+  const SYS_CREATE_FORM_FIELDS = [
+    'type', 'title', 'description', 'intake_liaison_id', 'system_name', 'module_name',
+    'priority', 'source', 'requester_dept', 'requester_name', 'requester_phone', 'deadline',
+    'related_correction_no', 'needs_feasibility', 'oa_exempt', 'attachments',
+  ];
+  // 建单端点读取但不属于"表单字段"的协议/结构性拒绝字段——键=字段名，值=理由（同 SYS_EDIT_EXCLUDED_FIELDS
+  // 的"逐项非空理由"纪律）。逐项 file:line 依据见该端点源码（约 :5949-6038 一带）：
+  const SYS_CREATE_PROTOCOL_REJECTED_FIELDS = {
+    intake_contract_version: '客户端契约版本声明（非业务内容字段）——用于区分新旧前端/API 直调（角色权限重构 C0 HIGH-1），缺失或版本不符恒 400 CLIENT_CONTRACT_OUTDATED；值本身不落库、不参与建单内容。',
+    intake_required: '受理门已固化（角色权限重构 C0）——传任意值（含 0/1）恒 400 INTAKE_REQUIRED_FIXED；落态由后端统一解析（intakeRequired 硬编码恒 1，不接受外部输入覆盖）。',
+    assign_mode: '建单即指派两路径（A=直接指派主开发／B=通知对接人）随受理门固化已结构性关闭——intakeRequired 恒为 1 时传任何非 \'none\' 值恒 400 INTAKE_WITH_ASSIGN_CONFLICT；历史遗留的路径解析代码在当前不变量下已不可达（非本次改动范围，如实记录现状，未清理死代码）。',
+    assigned_to: 'path A（建单即指派主开发）专属参数，随 assign_mode 一并结构性关闭，理由同上。',
+    collaborator_ids: 'path A（建单即指派主开发）专属参数，随 assign_mode 一并结构性关闭，理由同上。',
+    relay_user_id: 'path B（建单即通知对接人）专属参数，随 assign_mode 一并结构性关闭，理由同上。',
+  };
+  // 显式排除清单（方案 §12 落字要求·"防『该开没开』与『不该开却开』两向漂移"）——建单集里"故意不给
+  // 编辑口"的字段，逐项写明理由（键=字段名，值=排除理由；供 verify 同时校验"每一条排除都有非空理由"，
+  // 不允许留一个不说明原因的裸排除项）：
+  const SYS_EDIT_EXCLUDED_FIELDS = {
+    type: '换流程=换状态机族（bug/变更两条状态机的允许状态集合、转移矩阵完全不同）——编辑窗口内允许改 type 等于允许一张已在跑的单中途换轨道；填错了正确的收口路径是作废重建，不是"编辑改正"。',
+    intake_liaison_id: '受理链字段——受理通过之后再改对接人，对已完成的受理流程本身已无实际流程意义（受理这件事已经发生过、不可撤回重来）；确需换人须走受理链自己的机制（重新指派/受理链专属端点），不应复用本通用编辑口子悄悄改写受理归属。',
+    attachments: '需求材料（spec 附件）已有独立的上传/删除通道（POST/DELETE /sys-issues/:id/attachments），能力与"编辑"等同（新增材料=上传，撤掉材料=删除），不必也不应该在通用编辑口里重复实现一遍同样的能力。',
+    // [S8-S10 合并收口批 F12 收口] 后半句"攻击叙事"（先免检蒙混过关、指派后悄悄取消豁免掩盖痕迹）已删——
+    // 预筛核实机制方向不符：oa_exempt 当前除建单外无任何其它写点（assertSysDevCommitmentOaGuard 只读不写），
+    // 该叙事描述的"翻转掩盖"路径在现有代码里根本不存在独立通道，不是本排除条目要防的真实威胁；本条目
+    // 收敛到唯一站得住的真依据——可追溯性（一次性声明的值若能来回改，会让"这单当初是不是真的免 OA"这
+    // 件事变得无法审计复原）。
+    oa_exempt: '一次性声明，编辑窗口刻意不提供翻转入口（既有设计，见 assertSysDevCommitmentOaGuard 函数头部注释"一次性定死，编辑窗口不提供翻转入口"）——该值决定指派开发前是否豁免 OA 号格式校验，若创建后允许来回翻转，会让"这单当初是不是真的免 OA"变得不可追溯。',
+  };
   router.post('/sys-issues/:id/edit-in-revision', authenticateToken, requireSysSchemaReady, async (req, res) => {
     const id = parsePositiveId(req.params.id);
     if (!id) return res.status(400).json({ error: '无效的迭代单 ID', code: 'INVALID_SYS_ISSUE_ID' });
@@ -9034,7 +10876,8 @@ module.exports = (deps) => {
       try {
         const row = await dbGetAsync(
           `SELECT id, type, status, created_by, title, description, system_name, module_name, priority, deadline,
-                  needs_feasibility, requester_dept, requester_name, requester_phone, tech_lead_notify_request_event_id
+                  needs_feasibility, requester_dept, requester_name, requester_phone, tech_lead_notify_request_event_id,
+                  source, related_correction_no
              FROM sys_issues WHERE id = ?`, [id]);
         if (!row) { await sysRollback(); return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' }); }
         // 族外/未知状态 fail-closed（codex C3 审 M-1·同 assign 端点 :3033 用法，置于权限判定之前）：
@@ -9099,6 +10942,21 @@ module.exports = (deps) => {
             } else if ([undefined, null, 0, '0', false, ''].includes(raw)) {
               val = 0;
             } else { await sysRollback(); return res.status(400).json({ error: 'needs_feasibility 仅接受 0/1', code: 'INVALID_NEEDS_FEASIBILITY' }); }
+          } else if (f === 'source') {
+            // [方案 §12 补差①] 三选一枚举，非空必填——同建单口径（DDL CHECK 同款三值），编辑不提供
+            // "清空为未分类"这个选项（来源必须恰是三值之一，与 title/system_name/priority 同一收紧等级）。
+            val = (typeof b.source === 'string' ? b.source.trim() : '');
+            if (!SYS_SOURCES.includes(val)) { await sysRollback(); return res.status(400).json({ error: '来源非法（业务方/内部/生产故障）', code: 'INVALID_SOURCE' }); }
+          } else if (f === 'related_correction_no') {
+            // [方案 §12 补差②] 自由文本软引用，选填（可清空为 null）+ 长度上限 100（同建单 §7 口径，
+            // 见 RELATED_CORRECTION_NO_TOO_LONG 同码复用）。
+            const rawv = b.related_correction_no;
+            if (rawv !== null && typeof rawv !== 'string') {
+              await sysRollback();
+              return res.status(400).json({ error: '关联修正单号须为字符串或 null', code: 'INVALID_EDIT_FIELD_TYPE' });
+            }
+            val = (typeof rawv === 'string') ? (rawv.trim() || null) : null;
+            if (val && val.length > 100) { await sysRollback(); return res.status(400).json({ error: '关联修正单号不超过 100 字', code: 'RELATED_CORRECTION_NO_TOO_LONG' }); }
           } else {
             // description/module_name/requester_dept/requester_name/requester_phone：自由文本。
             //   ⚠️ codex C4 MED-2：只接受 string 或 null——非字符串非 null（对象/数组/数字）显式 400，
@@ -9298,7 +11156,8 @@ module.exports = (deps) => {
     if (!expectedEventId) return res.status(400).json({ error: '缺少 expected_request_event_id', code: 'EXPECTED_REQUEST_EVENT_ID_REQUIRED' });
     const actor = sysActor(req);
     try {
-      const row = await dbGetAsync('SELECT id, type, title, system_name, status, intake_liaison_id, tech_lead_id, tech_lead_notify_request_event_id FROM sys_issues WHERE id = ?', [id]);
+      // [S12-b] 补 derive_root_id/derive_seq——buildSysTechLeadMarkdown 内的 sysIssueDisplayNo 取号需要。
+      const row = await dbGetAsync('SELECT id, type, title, system_name, status, intake_liaison_id, tech_lead_id, tech_lead_notify_request_event_id, derive_root_id, derive_seq FROM sys_issues WHERE id = ?', [id]);
       if (!row) return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' });
       // ⭐⭐ [C10-fix M2·绑单精判] 权限收紧为 admin ∨ 该单 intake_liaison_id 本人（与 request-tech-consult/
       //   cancel-consult 对称）——原「admin∨受理人白名单[13]∨建单人」三方收敛；created_by 是权限分支（§10.2 无），
@@ -9401,7 +11260,8 @@ module.exports = (deps) => {
     if (!comment) return res.status(400).json({ error: '评估意见不能为空', code: 'TECH_LEAD_COMMENT_REQUIRED' });
     if (comment.length > 2000) return res.status(400).json({ error: '评估意见不超过 2000 字', code: 'TECH_LEAD_COMMENT_TOO_LONG' });
     try {
-      const row = await dbGetAsync('SELECT id, type, status, title, system_name, tech_lead_id, intake_liaison_id FROM sys_issues WHERE id = ?', [id]);
+      // [S12-b] 补 derive_root_id/derive_seq——buildSysTechLeadCommentReplyMarkdown 内的 sysIssueDisplayNo 取号需要。
+      const row = await dbGetAsync('SELECT id, type, status, title, system_name, tech_lead_id, intake_liaison_id, derive_root_id, derive_seq FROM sys_issues WHERE id = ?', [id]);
       if (!row) return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' });
       // 权限②：本人门
       if (Number(row.tech_lead_id) !== Number(actor.id)) {
@@ -9611,7 +11471,8 @@ module.exports = (deps) => {
     if (!id) return res.status(400).json({ error: '无效的迭代单 ID', code: 'INVALID_SYS_ISSUE_ID' });
     const actor = sysActor(req);
     try {
-      const row = await dbGetAsync('SELECT id, type, status, title, system_name, tech_lead_id, tech_lead_notify_request_event_id, intake_liaison_id FROM sys_issues WHERE id = ?', [id]);
+      // [S12-b] 补 derive_root_id/derive_seq——buildSysTechLeadCommentReplyMarkdown 内的 sysIssueDisplayNo 取号需要。
+      const row = await dbGetAsync('SELECT id, type, status, title, system_name, tech_lead_id, tech_lead_notify_request_event_id, intake_liaison_id, derive_root_id, derive_seq FROM sys_issues WHERE id = ?', [id]);
       if (!row) return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' });
       const isSelfTechLead = isSysTechLead(actor.id) && Number(row.tech_lead_id) === Number(actor.id);
       // ⭐⭐ [C10-fix M2·绑单精判] 「admin∨受理人」段从 isSysCoordinator（admin∨白名单[13]）收紧为
@@ -9808,9 +11669,10 @@ module.exports = (deps) => {
   });
 
   // ── DELETE /sys-issues/:id：物理删除迭代单（admin 专用·不可逆·2026-07-07）──────────
-  //   场景：清理测试/脏单。物理删除（非 void 软删）——sys_issues 主表 + **六张 issue_id 子表**全清 + 附件磁盘文件。
+  //   场景：清理测试/脏单。物理删除（非 void 软删）——sys_issues 主表 + **七张 issue_id 子表**全清 + 附件磁盘文件。
   //   ⚠️ 原文写"admin **单人**清理"是单 admin 时代的化石（生产实为 6 个 active admin）；
-  //     "三张子表"同样是化石（C0 后带 issue_id 的子表已达 6 张）——两处都已按事实更正。
+  //     "三张子表"同样是化石（C0 后带 issue_id 的子表已达 6 张，先行上线两步化 S1 起再加 1 张=7 张）
+  //     ——均已按事实更正。
   //   ⚠️ 级联必须手动做：本库从未开 PRAGMA foreign_keys=ON（子表 FK ON DELETE CASCADE 仅自文档、运行不生效，
   //     见 sys_issue_timeline 建表注释），故显式 DELETE 每张子表，否则留孤儿（timeline / 附件行 / 协作开发通知行）。
   //   守边界（方案 a）：拒删「被别的单派生引用（origin）」或「已挂上线批次（release_id）」的单——防悬空引用 / 破坏
@@ -9877,18 +11739,21 @@ module.exports = (deps) => {
           `SELECT * FROM sys_issue_attachments WHERE issue_id = ? ORDER BY id`, [id]);
 
         // ⭐ C2a 审计快照（必须在 DELETE 之前读——删完就没有了）：单据整行（上方 row）+ 附件清单（上方 atts）
-        //   + 下面这**四张 issue_id 子表**的整行快照。
+        //   + 下面这**五张 issue_id 子表**的整行快照。
         //   ⚠️ **`SELECT *` 不是偷懒，是契约**（codex C2a 审 HIGH）：初版这里列举了 11 列，当时确实一列不漏，
         //   但 timeline 表是演进中的（历史上加过 action_code / ref_id / round_no），挑列快照会在下一次加列时
         //   **静默漏证**——而漏的恰恰是"删除时刻的完整审计链"，事后无从发现。与上方 issue 快照同一口径。
         //
-        // ⭐⭐ **子表清单必须与下方 DELETE 清单逐张对齐**（对抗审 F1/F2/F7 收口）：
+        // ⭐⭐ **子表清单必须与下方 DELETE 清单逐张对齐**（对抗审 F1/F2/F7 收口；先行上线两步化 S1 曾再犯一次
+        //   同款疏漏——建表时只补了 DELETE 一行，快照读/INSERT/KEY_COLS 三处都漏了，S1 收口批 M2 补齐）：
         //   初版快照三份（issue/timeline/attachments）、DELETE 三张（dev_assignees/attachments/timeline），
         //   两份清单**互不相同且都不完整** —— dev_assignees 删了没快照、dev_commits/dev_events 既没删也没快照。
-        //   带 issue_id 的子表实为 **6 张**（timeline / attachments / dev_assignees / dev_commits /
-        //   dev_events / release_commit_snapshots）。加表的人只往 SYS_REQUIRED_TABLES 和 readiness 里加，
-        //   没人回头看"删除端点是不是也要跟着删"——这就是"两份清单必然漂移"在级联场景的实例。
-        //   ⛔ **以后再加带 issue_id 的表，必须同时改这里的快照读、下方的 DELETE、以及 verify 的六表残留断言。**
+        //   带 issue_id 的子表实为 **7 张**（timeline / attachments / dev_assignees / dev_commits /
+        //   dev_events / release_commit_snapshots / fast_release_executors）。加表的人只往
+        //   SYS_REQUIRED_TABLES 和 readiness 里加，没人回头看"删除端点是不是也要跟着删、审计是不是也要
+        //   跟着快照"——这就是"多份清单必然漂移"在级联场景的实例，且不是一次性教训（S1 又犯了一次）。
+        //   ⛔ **以后再加带 issue_id 的表，必须同时改这里的快照读、下方的 DELETE、sys_issue_delete_audit
+        //   的 DDL/ALTER/INSERT/KEY_COLS、以及 verify 的七表残留断言与快照断言——六处，不是四处。**
         const timelineRows = await dbAllAsync(
           `SELECT * FROM sys_issue_timeline WHERE issue_id = ? ORDER BY id`, [id]);
         const devAssigneeRows = await dbAllAsync(
@@ -9903,26 +11768,35 @@ module.exports = (deps) => {
         //   这里会静默留孤儿。显式处理的成本是两行，不值得省。
         const releaseSnapshotRows = await dbAllAsync(
           `SELECT * FROM sys_issue_release_commit_snapshots WHERE issue_id = ? ORDER BY id`, [id]);
+        // [S1 收口批·Opus 预筛 M2] 先行上线两步化执行人集合快照——同上口径（SELECT * 整行、含软删历史行、
+        //   ORDER BY id，与 devAssigneeRows/devCommitRows/devEventRows/releaseSnapshotRows 四个既有读点
+        //   逐字同款）。
+        const fastReleaseExecRows = await dbAllAsync(
+          `SELECT * FROM sys_fast_release_executors WHERE issue_id = ? ORDER BY id`, [id]);
 
         // 审计行先落库：写失败 → 抛 → 外层 catch rollback → 业务行一条不删（"删了但没记"被结构性排除）。
         await dbRunAsync(
           `INSERT INTO sys_issue_delete_audit
              (issue_id, issue_type, issue_status, issue_title, issue_created_by, issue_created_at,
+              issue_derive_root_id, issue_derive_seq,
               attachment_count, timeline_count, dev_assignee_count, dev_commit_count, dev_event_count,
-              release_snapshot_count,
+              release_snapshot_count, fast_release_executors_count,
               issue_json, timeline_json, attachments_json,
               dev_assignees_json, dev_commits_json, dev_events_json, release_snapshots_json,
+              fast_release_executors_json,
               operator_id, operator_name, reason, deleted_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, datetime('now','localtime'))`,
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, datetime('now','localtime'))`,
           [id, row.type, row.status, row.title, row.created_by, row.created_at,
+           row.derive_root_id, row.derive_seq,
            atts.length, timelineRows.length, devAssigneeRows.length, devCommitRows.length,
-           devEventRows.length, releaseSnapshotRows.length,
+           devEventRows.length, releaseSnapshotRows.length, fastReleaseExecRows.length,
            JSON.stringify(row), JSON.stringify(timelineRows), JSON.stringify(atts),
            JSON.stringify(devAssigneeRows), JSON.stringify(devCommitRows),
            JSON.stringify(devEventRows), JSON.stringify(releaseSnapshotRows),
+           JSON.stringify(fastReleaseExecRows),
            actor.id, actor.name, reason]);
 
-        // 删**全部六张** issue_id 子表，再删主表。
+        // 删**全部七张** issue_id 子表，再删主表。
         //   ⚠️ **顺序按依赖从叶子到根**（收口审 MED）：`dev_commits`/`dev_events` 通过 `dev_assignee_id`
         //   引用 `dev_assignees`，故先删前两者。当前 `PRAGMA foreign_keys` 未开启，顺序不影响执行；
         //   但一旦将来开启，反过来的顺序会直接违反外键约束 —— 让顺序与真实依赖一致是零成本的未来兼容。
@@ -9930,9 +11804,15 @@ module.exports = (deps) => {
         //   新增 dev_commits/dev_events/release_commit_snapshots 三张带 issue_id 的表时没回头补这里，
         //   于是 commit 留痕与开发侧事件审计链在物删后成为**永久孤儿**（sys_issues 是 AUTOINCREMENT，
         //   id 不复用，故不会张冠李戴，但"零残留"这个承诺一直是假的）。对抗审 F7 抓出。
+        //   ⚠️ 先行上线两步化 S1（方案 20260813_v1.8 §3）新增 `sys_fast_release_executors`——同 dev_assignees
+        //   一样是独立叶子表（不被其余子表引用，也不引用其余子表），插入位置对依赖顺序无影响。
+        //   [S1 收口批订正] 本行首版（S1 主体）注释原写"该表暂无本子表快照，同…既有缺口同款，留待后续
+        //   处置"——S1 收口批（Opus 预筛 M2）已补齐：本表快照现已随上方 fastReleaseExecRows 读出 +
+        //   写入 sys_issue_delete_audit.fast_release_executors_json（含软删历史行），不再是缺口。
         await dbRunAsync('DELETE FROM sys_issue_dev_commits WHERE issue_id = ?', [id]);            // 叶：引用 dev_assignees.id
         await dbRunAsync('DELETE FROM sys_issue_dev_events WHERE issue_id = ?', [id]);            // 叶：引用 dev_assignees.id
         await dbRunAsync('DELETE FROM sys_issue_release_commit_snapshots WHERE issue_id = ?', [id]);
+        await dbRunAsync('DELETE FROM sys_fast_release_executors WHERE issue_id = ?', [id]);       // 叶：先行上线两步化执行人集合（S1）
         await dbRunAsync('DELETE FROM sys_issue_dev_assignees WHERE issue_id = ?', [id]);
         await dbRunAsync('DELETE FROM sys_issue_attachments WHERE issue_id = ?', [id]);
         await dbRunAsync('DELETE FROM sys_issue_timeline WHERE issue_id = ?', [id]);
@@ -10028,7 +11908,10 @@ module.exports = (deps) => {
     const where = whereParts.length ? ('WHERE ' + whereParts.join(' AND ')) : '';
     try {
       const rows = await dbAllAsync(
-        `SELECT id, issue_id, issue_type, issue_status, issue_title, operator_id, operator_name, reason, deleted_at
+        // [S13-b·B3·矩阵行12] 补 issue_derive_root_id/issue_derive_seq——列表卡片子编号展示需要（不返回
+        //   体积较大的 issue_json，见本端点头注），两列均是轻量 INTEGER，加入列表 SELECT 零性能顾虑。
+        `SELECT id, issue_id, issue_type, issue_status, issue_title, issue_derive_root_id, issue_derive_seq,
+                operator_id, operator_name, reason, deleted_at
            FROM sys_issue_delete_audit ${where}
           ORDER BY id DESC
           LIMIT ?`,
@@ -11036,35 +12919,89 @@ module.exports = (deps) => {
       const parent = await dbGetAsync('SELECT origin_issue_id FROM sys_issues WHERE id = ?', [cursor]);
       cursor = parent ? parent.origin_issue_id : null;
     }
+    // [§15.2·378-H2] 派生单子编号取号：根上分配计数，不依赖表内容/MAX 重算——号码分配持久不回退，
+    //   派生单被硬删除后其序号永不复用。root = 当前 origin 的 derive_root_id（若 origin 自身已是某族的
+    //   派生单，继承其族根）或 originId（若 origin 是族根本身，即从未被派生过——它自己就是新族的根）。
+    //   ⚠️ 用 `originId` 参数而非 `origin.id`——两个调用点（公开 /derive 端点 / 补验收 fail 分支内部派生）
+    //   传入的 origin 对象形态不同（后者只手工拼了 { origin_issue_id, derive_root_id } 两个字段，没有 id），
+    //   originId 在两处均可靠等于"真正被派生的那张原单 id"，是唯一共同锚点。
+    const deriveRoot = (origin.derive_root_id !== null && origin.derive_root_id !== undefined)
+      ? Number(origin.derive_root_id) : Number(originId);
+    // [预筛 H3] 取号 UPDATE 前先校验根行 derive_seq_alloc 的存储类型——SQLite 动态类型下
+    //   `COALESCE(derive_seq_alloc,0)+1` 对文本/实数值会做隐式数值转换而非报错（如 'abc'+1 在 SQLite
+    //   里算出 1），会把一次数据篡改悄悄"洗白"成看似正常的取号结果，事后无从察觉。畸形值必须在这里
+    //   就响亮失败，而非被算术运算掩盖——抛错交由调用方事务整体回滚（同函数头部 __sysTxnRelease 契约：
+    //   本函数假定运行在 sysBeginImmediate 事务内，抛出的异常由调用方 catch 后 rollback）。
+    const rootTypeRow = await dbGetAsync(`SELECT typeof(derive_seq_alloc) AS t FROM sys_issues WHERE id = ?`, [deriveRoot]);
+    if (!rootTypeRow) {
+      throw new Error(`[insertDerivedSysIssue] 派生编号根单 #${deriveRoot} 不存在（取号前置类型校验失败）`);
+    }
+    if (rootTypeRow.t !== 'integer' && rootTypeRow.t !== 'null') {
+      throw new Error(`[insertDerivedSysIssue] 派生编号根单 #${deriveRoot} derive_seq_alloc 存储类型异常（typeof=${rootTypeRow.t}，期望 integer 或 null）——疑似数据被篡改，拒绝取号`);
+    }
+    const allocUpd = await dbRunAsync(
+      `UPDATE sys_issues SET derive_seq_alloc = COALESCE(derive_seq_alloc, 0) + 1 WHERE id = ?`, [deriveRoot]);
+    if (!allocUpd || allocUpd.changes !== 1) {
+      throw new Error(`[insertDerivedSysIssue] 派生编号根单 #${deriveRoot} 分配计数 UPDATE changes=${allocUpd && allocUpd.changes}（期望 1——根单可能不存在，数据异常）`);
+    }
+    const allocRow = await dbGetAsync(`SELECT derive_seq_alloc FROM sys_issues WHERE id = ?`, [deriveRoot]);
+    const deriveSeq = allocRow && Number(allocRow.derive_seq_alloc);
+    if (!Number.isInteger(deriveSeq) || deriveSeq <= 0) {
+      throw new Error(`[insertDerivedSysIssue] 派生编号根单 #${deriveRoot} derive_seq_alloc 取号异常：${allocRow && allocRow.derive_seq_alloc}`);
+    }
     // 建新单（origin_issue_id = 原单 id；[⑤] 落 derive_reason 列——feature 派生留空则存 NULL）
     // ⭐ 建单优化批 C3b（方案 20260801_v1.3 §6c 设计点5）：oa_exempt **刻意不入本 INSERT 列表**——
     //   靠 CREATE TABLE / ALTER 的 `DEFAULT 0` 落 0（fail-closed：衍生单源自业务需求几乎必走 OA，
     //   免 OA 需求真出现再议，入方案 §9 观察项；显式恒 0 也可以，但少一处需要维护的硬编码值，
     //   DEFAULT 本身就是最不容易漂移的"恒 0"实现）。
-    const result = await dbRunAsync(
-      `INSERT INTO sys_issues
-         (type, status, priority, title, description, system_name, module_name, source,
-          requester_dept, requester_name, requester_phone, deadline, origin_issue_id, derive_reason,
-          created_by, created_by_name, record_source, intake_required, intake_liaison_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'native', 1, ?)`,
-      [type, initialStatus, priority, title, description, systemName, moduleName, source,
-       requesterDept, requesterName, requesterPhone, deadline, originId, (deriveReason || null),
-       actor.id, actor.name, intakeLiaisonId]
-    );
+    // [§15.2] derive_root_id/derive_seq 随 INSERT 同落——UNIQUE (derive_root_id,derive_seq) WHERE 两列
+    //   均非空的部分索引冲突（理论不可达，单写者串行化下取号竞争结构性不存在）由路由层 catch 精确捕获
+    //   映射 409，见调用点。
+    let result;
+    try {
+      result = await dbRunAsync(
+        `INSERT INTO sys_issues
+           (type, status, priority, title, description, system_name, module_name, source,
+            requester_dept, requester_name, requester_phone, deadline, origin_issue_id, derive_reason,
+            created_by, created_by_name, record_source, intake_required, intake_liaison_id,
+            derive_root_id, derive_seq)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'native', 1, ?, ?, ?)`,
+        [type, initialStatus, priority, title, description, systemName, moduleName, source,
+         requesterDept, requesterName, requesterPhone, deadline, originId, (deriveReason || null),
+         actor.id, actor.name, intakeLiaisonId, deriveRoot, deriveSeq]
+      );
+    } catch (insErr) {
+      // [§15.2 纵深兜底] 部分唯一索引 idx_sys_issues_derive_root_seq 冲突——理论不可达（BEGIN IMMEDIATE 全库写
+      //   串行化下，本函数内"取号 UPDATE→读号→INSERT"全在同一持锁事务，跨请求无交错窗口），仍给精确错误码
+      //   而非任由原始 SQLITE_CONSTRAINT 消息穿透到路由层 500（同 sys_fast_release_executors/sys_releases.release_no
+      //   两处既有 UNIQUE 捕获先例：SQLite 组合索引报错恒为 "UNIQUE constraint failed: <table>.<col1>, <table>.<col2>"）。
+      if (insErr && /UNIQUE constraint failed: sys_issues\.derive_root_id, sys_issues\.derive_seq/.test(insErr.message || '')) {
+        throw new SysTransitionError(409, 'SYS_DERIVE_SEQ_CONFLICT', '派生编号分配冲突，请重试');
+      }
+      throw insErr;
+    }
     const newId = result.lastID;
+    // [S12-b·§15.3 行 9] timeline 新行用子编号——origin 的展示号（若 origin 自身是派生单，用它自己的
+    //   #根_序；若 origin 是族根本身，回退 #id）。**历史已落库行不回溯**（静态文本，只影响新写入的行，
+    //   见本文件头部/verify 落字声明）。origin 对象两个调用点均已补 derive_seq 投影（见调用点注释），
+    //   与已有的 derive_root_id 投影凑齐 sysIssueDisplayNo 的完整入参。
+    const originDisplayNo = sysDeriveNumbering.sysIssueDisplayNo({ id: originId, derive_root_id: origin.derive_root_id, derive_seq: origin.derive_seq });
     // T-L3：先写 created（新单建立，to_status=初始态），再写 derive（ref_id=原单 id），同事务、created 在前
     await dbRunAsync(
       `INSERT INTO sys_issue_timeline (issue_id, event_type, from_status, to_status, summary, operator_id, operator_name)
        VALUES (?, 'created', NULL, ?, ?, ?, ?)`,
-      [newId, initialStatus, `派生自 #${originId}`, actor.id, actor.name]
+      [newId, initialStatus, `派生自 ${originDisplayNo}`, actor.id, actor.name]
     );
     // [⑤ Q2] derive timeline summary = derive_reason（取代旧 derive_note）；feature 派生留空则回退默认文案
     await dbRunAsync(
       `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, ref_id, operator_id, operator_name)
        VALUES (?, 'derive', ?, ?, ?, ?)`,
-      [newId, deriveReason || `派生自 #${originId}`, originId, actor.id, actor.name]
+      [newId, deriveReason || `派生自 ${originDisplayNo}`, originId, actor.id, actor.name]
     );
-    return newId;
+    // [S12-b] 返回值从裸 newId 改为携带取号结果的对象——调用方（补验收 fail 分支）需要用新单自己的
+    //   root/seq 拼「已派生 #根_序」timeline 文案，此前只拿到 id 就必须再发一次 SELECT 才能取号；
+    //   本函数内部本就已经算出 deriveRoot/deriveSeq（见上方取号段），直接带出去，不重复查询。
+    return { id: newId, derive_root_id: deriveRoot, derive_seq: deriveSeq };
   }
   router.post('/sys-issues/:id/derive', authenticateToken, requireSysSchemaReady, requireAdmin, async (req, res) => {
     const originId = parsePositiveId(req.params.id);
@@ -11079,7 +13016,7 @@ module.exports = (deps) => {
       const systemName = (typeof b.system_name === 'string' ? b.system_name.trim() : '');
       if (!T.BIZ_SYSTEMS.includes(systemName)) return res.status(400).json({ error: '所属系统非法', code: 'INVALID_SYSTEM_NAME', allowed: T.BIZ_SYSTEMS });
       const source = (typeof b.source === 'string' ? b.source.trim() : '');
-      if (!['业务方', '内部', '生产故障'].includes(source)) return res.status(400).json({ error: '来源必填（业务方/内部/生产故障）', code: 'SOURCE_REQUIRED' });
+      if (!SYS_SOURCES.includes(source)) return res.status(400).json({ error: '来源必填（业务方/内部/生产故障）', code: 'SOURCE_REQUIRED' });
       const priority = (b.priority && ['P0', 'P1', 'P2', 'P3'].includes(b.priority)) ? b.priority : 'P2';
       const dl = normalizeDeadlineDT(b.deadline);   // 四处优化 D2：同建单口径（到分钟）
       if (!dl.ok) return res.status(400).json({ error: '期望完成格式非法（应为 YYYY-MM-DD 或 YYYY-MM-DD HH:MM 的真实时间）', code: 'INVALID_DEADLINE' });
@@ -11100,12 +13037,15 @@ module.exports = (deps) => {
       //   （方案 §10.2 未覆盖 derive 口径·选最小行为变更方向·曾评估空单/admin 指定方案均未采纳；已知软肋=
       //   换对接人 L2 端点当前缺失，继承错人时暂由 admin 手动处理，L2 列扩池前置依赖）。
       const actor = sysActor(req);
-      let newId = null, resolvedType = null, resolvedStatus = null;
+      let newId = null, resolvedType = null, resolvedStatus = null, newDeriveRootId = null, newDeriveSeq = null;
       await sysBeginImmediate();
       try {
         // 原单须存在（[⑤] SELECT 补 status——M5 反向约束需判 origin.status；[C10·决策1] 补 intake_liaison_id 供派生单继承；
         //   [组 B·SB3] 补 post_release_acceptance——pending 补验收态禁止普通 derive，见下方判定）
-        const origin = await dbGetAsync('SELECT id, type, status, origin_issue_id, intake_liaison_id, post_release_acceptance FROM sys_issues WHERE id = ?', [originId]);
+        // [§15.2] 补 derive_root_id——insertDerivedSysIssue 取号需要（root = origin.derive_root_id ?? originId）。
+        // [S12-b] 补 derive_seq——origin 自身若是派生单，timeline「派生自 #根_序」文案需要它成组拼出
+        //   origin 自己的展示号（sysIssueDisplayNo 入参契约：root/seq 须两列都在才算"是派生单"）。
+        const origin = await dbGetAsync('SELECT id, type, status, origin_issue_id, intake_liaison_id, post_release_acceptance, derive_root_id, derive_seq FROM sys_issues WHERE id = ?', [originId]);
         if (!origin) { await sysRollback(); return res.status(404).json({ error: '原单不存在', code: 'ORIGIN_NOT_FOUND' }); }
         // [组 B·SB3·不变量⑥·方案 v1.3 §3.3] pending 补验收态禁止普通 derive——该单已先行上线但补验收未完成，
         //   走本公开端点会绕过 failed_derived 语义（post_derive_issue_id 不会被正确挂到本次派生单上，
@@ -11137,7 +13077,7 @@ module.exports = (deps) => {
         resolvedType = type; resolvedStatus = initialStatus;   // 供事务外 201 响应体
         // [组 B·SB3] M-1 防环 + INSERT + 两条 timeline 行已抽成共享核心 insertDerivedSysIssue（见函数定义处
         //   注释）——公开端点与补验收失败内部派生共用同一份逻辑，本处逐字调用，行为与改前完全一致。
-        newId = await insertDerivedSysIssue({
+        const derivedResult = await insertDerivedSysIssue({
           originId, origin, type, initialStatus, priority, title,
           description: (typeof b.description === 'string' ? b.description.trim() : null),
           systemName, moduleName: (typeof b.module_name === 'string' ? b.module_name.trim() : null), source,
@@ -11146,12 +13086,19 @@ module.exports = (deps) => {
           requesterPhone: (typeof b.requester_phone === 'string' ? b.requester_phone.trim() : null),
           deadline: dl.value, deriveReason, actor, intakeLiaisonId: autoIntakeLiaisonId,
         });
+        newId = derivedResult.id;   // [S12-b] insertDerivedSysIssue 返回值已改为携带取号结果的对象（见函数定义处注释）——
+        //   本端点的 JSON 响应体主键仍是矩阵行 11「深链/API/路由」技术锚点，`id` 维持真实 id 不变行为。
+        // [S13-b·B3·矩阵行7] newDeriveRootId/newDeriveSeq——新单此刻还不在前端 siList 里，「已派生新单」
+        //   toast 拿不到子编号只能靠响应体直传；只是**追加**两个新字段，不改 `id` 字段本身的技术锚点语义
+        //   （row 11 例外仍成立：深链/路由/UPDATE 外键继续用 newId 这个真实 id，未受影响）。
+        newDeriveRootId = derivedResult.derive_root_id;
+        newDeriveSeq = derivedResult.derive_seq;
         await sysCommit();
       } catch (txErr) {
         try { await sysRollback(); } catch (_) { /* ignore */ }
         throw txErr;
       }
-      res.status(201).json({ id: newId, origin_issue_id: originId, type: resolvedType, status: resolvedStatus });
+      res.status(201).json({ id: newId, origin_issue_id: originId, type: resolvedType, status: resolvedStatus, derive_root_id: newDeriveRootId, derive_seq: newDeriveSeq });
     } catch (err) {
       if (err instanceof SysTransitionError) return sendSysTransitionError(res, err);   // F2：SYS_BUSY 等保 503
       logger.error('[系统迭代] 派生失败:', err && err.message);
@@ -11831,18 +13778,20 @@ module.exports = (deps) => {
     //   直上消费、走的是常规提交→验证→批次发布这条路），须在本函数把它连同批量翻牌一起终结（事件①
     //   「上线翻牌，任意路径」覆盖本函数）。判据 isActiveFastReleaseAuth 六列同源，与 case 'accept'/
     //   'return' 内联用法一致，不新写第二份判据。
+    // [S13·MED-1] members 补 derive_root_id/derive_seq——本函数下方两条 409 文案经 sysIssueDisplayNo
+    //   取号需要该两列成组投影（缺投影时 helper 静默回退 #id，非报错，故此处必须真实补齐，不能漏）。
     const members = await dbAllAsync(
-      `SELECT id, status, type, title, needs_release,
+      `SELECT id, status, type, title, needs_release, derive_root_id, derive_seq,
               fast_release_auth_at, fast_release_revoked_at, fast_release_consumed_at, released_at,
               online_source, reopened_at
          FROM sys_issues WHERE release_id = ?`, [releaseId]);
     if (members.length === 0) throw new SysTransitionError(409, 'RELEASE_EMPTY', '批次内无待上线单，不能发布');
     const bad = members.find(m => m.status !== '待上线');
-    if (bad) throw new SysTransitionError(409, 'RELEASE_MEMBER_NOT_READY', `批次内 #${bad.id} 非「待上线」（当前「${bad.status}」），请先移除`);
+    if (bad) throw new SysTransitionError(409, 'RELEASE_MEMBER_NOT_READY', `批次内 ${sysDeriveNumbering.sysIssueDisplayNo(bad)} 非「待上线」（当前「${bad.status}」），请先移除`);
     // B（codex M-2）：core 内再校成员 type∈可发布3类，与 add-issues 入口防线一致（纵深防脏库/旧表缺 CHECK/手工修库）。
     //   正常 schema 下 config 受 DB CHECK(type<>'config' OR release_id IS NULL) 永不可成为成员，此守卫为 schema 漂移兜底（对齐 submit 闸门"不全信单入口"哲学）。
     const badType = members.find(m => !RELEASABLE_TYPES.includes(m.type));
-    if (badType) throw new SysTransitionError(409, 'RELEASE_MEMBER_NOT_RELEASABLE', `批次内 #${badType.id} 类型不可发布（${badType.type}），请先移除`);
+    if (badType) throw new SysTransitionError(409, 'RELEASE_MEMBER_NOT_RELEASABLE', `批次内 ${sysDeriveNumbering.sysIssueDisplayNo(badType)} 类型不可发布（${badType.type}），请先移除`);
     // [v1.6 退场·C3b] 旧 needs_release=1 纵深闸（bug 流 Commit ② 引入）已移除——needs_release 唯一写点
     //   set_release_flag 随 R1 一并退场（LEGACY_RELEASE_FLOW_DISABLED），此后 bug 的 needs_release 永远
     //   停在建单时的初值（NULL，转只读残留，F5），若仍强校验 needs_release=1 会让新流程（execute-release
@@ -11906,14 +13855,56 @@ module.exports = (deps) => {
     //   ⚠️ **必须放在下方步骤3 翻牌 UPDATE 之前**——那条 UPDATE 会把 released_at/online_source 改非空，
     //   届时才判 isActiveFastReleaseAuth 会因这两列条件恒假而永远判"非活跃"，把本该终结的授权错判成
     //   "已经不活跃/无需处理"（真正的悬垂授权反而被放过）——先后顺序是本段正确性的前提，非风格选择。
-    //   ⚠️ 直上消费路径（submit direct_release=true，:7906/:7909 一带）不会带着未消费授权走到这里——
-    //   它自己的原子 UPDATE 已在同一事务内同时写 fast_release_consumed_at，isActiveFastReleaseAuth
-    //   对那类单自然判 false（B1 拍板的显式例外：消费记录=审计痕迹，六列/online_source/
-    //   post_release_acceptance 全部保留，不属于"终结"范畴）。
+    //   ⚠️ 直上消费路径不会带着未消费授权走到这里——它自己的原子 UPDATE 会在同一事务内同时写
+    //   fast_release_consumed_at，isActiveFastReleaseAuth 对那类单自然判 false（B1 拍板的显式例外：
+    //   消费记录=审计痕迹，六列/online_source/post_release_acceptance 全部保留，不属于"终结"范畴）。
+    //   [S2-2 现状标注] 该消费路径原为 submit direct_release=true 分支，已随两步化方案 §4-2 拆除——
+    //   当前代码库暂无任何写 fast_release_consumed_at 的路径，本段结论（batch 发布不会遇到"消费态"单）
+    //   在"消费态结构性不可达"的当下更是恒成立；待 S3+ 落地新消费路径后，本段论证依旧适用（新路径同样
+    //   会在同一事务原子写 consumed_at，不改变这里的推理链）。
     const membersWithActiveAuth = members.filter(isActiveFastReleaseAuth);
     if (membersWithActiveAuth.length > 0) {
       const authIds = membersWithActiveAuth.map(m => m.id);
       const authPh = authIds.map(() => '?').join(',');
+      // [S5·Opus 预筛 L3] fail-closed 防御——本函数头部注释论证"membersWithActiveAuth 恒为空数组"
+      //   （能带活跃授权走到「待上线」的单，理应已在 case 'accept' 内被终结过一次），但那是**理论推导**，
+      //   不是数据库层面的硬约束；万一该假设有朝一日失效（新增路径绕过 accept、或直连 SQL/迁移脚本
+      //   造出这种组合），下面即将对 membersWithActiveAuth 逐个调用 clearFastReleaseRosterOnTermination——
+      //   若这批单里真有一个挂着 done 行（=某位执行人已确认执行的真实审计证据），会被这条"双保险"
+      //   路径**静默清空**——那不是"清理残留"，是销毁部署留痕。批内一次查询（非逐单 N 次）确认这批
+      //   authIds 里没有任何单挂着未软删的 done 行，非空直接 500 阻断整批发布（fail-closed，不静默继续，
+      //   代价一次查询），逼人工核查而非让证据无声消失——同 case 'reactivate' 内
+      //   FAST_RELEASE_UNEXPECTED_ACTIVE_AUTH_ON_REACTIVATE 断言式 fail-closed 同款精神。
+      // [S5·Opus 预筛二批 L2 定位信息] 从纯计数改为取异常 issue_id 清单（DISTINCT + LIMIT 20——本查询
+      //   只服务"阻断+报警"，不是分页列表，20 个足以覆盖真实批次规模又不至于查询结果无界；理论上
+      //   membersWithActiveAuth 本身就有限，不会真的命中这个上限，纯属防御性收口）。500 响应 error 文案
+      //   只列前 5 个单号（响应体不宜过长，够 admin 定位问题即可），完整清单走 console.error 结构化
+      //   日志（本端点 requireAdmin，单号本身不是敏感信息，日志/响应均可明文出现，不需要脱敏）。
+      // [codex 390 号三批 L2 补全] 采样清单（LIMIT 20）本身可能小于真实命中总数——原实现把"等共 N 单"
+      //   里的 N 直接等于采样条数，命中超过 20 单时会低报真实规模，故额外补一次 COUNT(DISTINCT issue_id)
+      //   取真实总数（谓词与采样查询同源，多一次索引扫描代价可忽略）；采样查询加 ORDER BY issue_id 保证
+      //   "前几个"是稳定确定的最小单号集合，不受 SQLite 内部行序影响（否则同一违例状态两次调用可能报出
+      //   不同的"前几个"，既不利于人工核查也不利于测试断言稳定性）；日志改结构化字段对象（logger.error
+      //   底层 console.error 支持多参，第二参传对象即结构化——不需要手工 JSON.stringify 拼进消息文本）。
+      const badFastlaneCountRow = await dbGetAsync(
+        `SELECT COUNT(DISTINCT issue_id) AS cnt FROM sys_fast_release_executors WHERE issue_id IN (${authPh}) AND removed_at IS NULL AND exec_status = 'done'`,
+        authIds
+      );
+      const totalIssueCount = (badFastlaneCountRow && Number(badFastlaneCountRow.cnt)) || 0;
+      if (totalIssueCount > 0) {
+        const badFastlaneRows = await dbAllAsync(
+          `SELECT DISTINCT issue_id FROM sys_fast_release_executors WHERE issue_id IN (${authPh}) AND removed_at IS NULL AND exec_status = 'done' ORDER BY issue_id LIMIT 20`,
+          authIds
+        );
+        const badIds = badFastlaneRows.map(r => r.issue_id);
+        const truncated = totalIssueCount > badIds.length;
+        logger.error('[系统迭代] 批次发布 fail-closed 阻断：存在未软删的先行上线 done 行（理论不应发生，需人工核查）',
+          { sampledIssueIds: badIds, totalIssueCount, truncated });
+        const shownIds = badIds.slice(0, 5);
+        const idsText = `#${shownIds.join('、#')}` + (totalIssueCount > shownIds.length ? ` 等共 ${totalIssueCount} 单` : '');
+        throw new SysTransitionError(500, 'FASTLANE_ROSTER_UNEXPECTED_DONE_ON_PUBLISH',
+          `批次内单 ${idsText} 存在已确认执行的先行上线执行人集合行，理论上不应发生（本批成员应均未消费）——为防止销毁真实部署留痕，已阻断本次批次发布，请联系管理员核查该批次成员的 fast_release_* 字段与执行人集合状态`);
+      }
       // 状态机字段 UPDATE 三件套：双条件守卫（id IN 候选集 + 六列活跃授权现值同源复核，纵深防御同
       //   case 'accept'/'return' 范式）+ changes 检查 + 失败响亮抛错回滚（不用 .catch(warn) 静默吞）。
       const authClear = await dbRunAsync(
@@ -11930,6 +13921,10 @@ module.exports = (deps) => {
            VALUES (?, 'note', ?, 'fast_release_auth_terminated', ?, ?)`,
           [m.id, '直上授权已失效（上线翻牌）', Number(actor.id) || null, actor.name || null]
         );
+        // [S5·§4-7 五事件终结延伸·双保险点] 同批清集合——本函数头部注释已论证这整段本身是纵深防御
+        //   （理论上 membersWithActiveAuth 恒为空数组，走到这里的单必然已在 case 'accept' 内被终结过一次），
+        //   本调用同理是"若理论假设有朝一日失效，仍不留残留 roster 行"的兜底，非当前可达缺口。
+        await clearFastReleaseRosterOnTermination(m.id, actor, '批次发布');
       }
     }
 
@@ -13245,8 +15240,12 @@ module.exports = (deps) => {
             [id, iid, ...RELEASABLE_TYPES]
           );
           if (!upd || upd.changes !== 1) {
+            // [S13·MED-1] UPDATE 未命中（单不存在或状态/类型不符），本行本就没有可复用的行数据——单独查
+            //   一次 derive_root_id/derive_seq 供 sysIssueDisplayNo 取号；查无此行时传 { id: iid }，helper
+            //   两列缺省时天然回退 #id，行为与改造前一致，不额外分支硬编码兜底文案。
+            const dnRow = await dbGetAsync('SELECT id, derive_root_id, derive_seq FROM sys_issues WHERE id = ?', [iid]);
             await sysRollback();
-            return res.status(409).json({ error: `#${iid} 不可加入（须为未挂批次的「待上线」单、非配置类）`, code: 'ISSUE_NOT_ADDABLE', issue_id: iid });
+            return res.status(409).json({ error: `${sysDeriveNumbering.sysIssueDisplayNo(dnRow || { id: iid })} 不可加入（须为未挂批次的「待上线」单、非配置类）`, code: 'ISSUE_NOT_ADDABLE', issue_id: iid });
           }
         }
         // C2a §6.11 原语收尾：加单成功后经 applyReleaseChange 原子重置通知/执行人 + 双写 + timeline。
@@ -13350,8 +15349,11 @@ module.exports = (deps) => {
             [iid, id]
           );
           if (!upd || upd.changes !== 1) {
+            // [S13·MED-1] 同 add-issues 分支同款处置：UPDATE 未命中时单独查投影供 sysIssueDisplayNo 取号，
+            //   查无此行时回退 { id: iid }（helper 两列缺省天然回退 #id，非新分支）。
+            const dnRow = await dbGetAsync('SELECT id, derive_root_id, derive_seq FROM sys_issues WHERE id = ?', [iid]);
             await sysRollback();
-            return res.status(409).json({ error: `#${iid} 不在本批次或状态已变更`, code: 'ISSUE_NOT_REMOVABLE', issue_id: iid });
+            return res.status(409).json({ error: `${sysDeriveNumbering.sysIssueDisplayNo(dnRow || { id: iid })} 不在本批次或状态已变更`, code: 'ISSUE_NOT_REMOVABLE', issue_id: iid });
           }
         }
         // F-4（ultracode SM-3）：批次被移空后复位 release_type=NULL，让空批次回到「未定族别」态可被任意族别重新占用，
@@ -14675,15 +16677,16 @@ module.exports = (deps) => {
     const safeTitle = sysNotifyTitle(issue.title);                  // title 字段用纯文本清理（L-1）
     const system = issueNotify.issueSafeText(issue.system_name, 40);
     const link = sysDeepLinkLine(baseUrl, issue.id);
+    const displayNo = sysDeriveNumbering.sysIssueDisplayNo(issue);   // [S12-b·§15.3 行 8] 单号文案统一经 helper 取号
     if (marker === 'notifyReturnedToDeveloper') {
       return {
         title: `🔄 验收打回需返工：${safeTitle}`,
-        md: `### 🔄 验收打回，需返工\n\n- **单号**：#${issue.id}\n- **类型**：${typeLabel}\n- **系统**：${system}\n- **标题**：${title}\n\n请登录平台查看打回原因，返工后重新提交。${link}`,
+        md: `### 🔄 验收打回，需返工\n\n- **单号**：${displayNo}\n- **类型**：${typeLabel}\n- **系统**：${system}\n- **标题**：${title}\n\n请登录平台查看打回原因，返工后重新提交。${link}`,
       };
     }
     return {
       title: `📋 系统迭代单指派：${safeTitle}`,
-      md: `### 📋 迭代单指派给你\n\n- **单号**：#${issue.id}\n- **类型**：${typeLabel}\n- **系统**：${system}\n- **标题**：${title}\n\n请登录平台回填预计完成时间，并着手开发交付。${link}`,
+      md: `### 📋 迭代单指派给你\n\n- **单号**：${displayNo}\n- **类型**：${typeLabel}\n- **系统**：${system}\n- **标题**：${title}\n\n请登录平台回填预计完成时间，并着手开发交付。${link}`,
     };
   }
 
@@ -14729,9 +16732,10 @@ module.exports = (deps) => {
     const safeTitle = sysNotifyTitle(issue.title);
     const system = issueNotify.issueSafeText(issue.system_name, 40);
     const link = sysDeepLinkLine(baseUrl, issue.id);
+    const displayNo = sysDeriveNumbering.sysIssueDisplayNo(issue);   // [S12-b·§15.3 行 8]
     return {
       title: `📮 请协助指派开发：${safeTitle}`,
-      md: `### 📮 新 bug 待指派开发\n\n- **单号**：#${issue.id}\n- **系统**：${system}\n- **标题**：${title}\n\n请登录平台为该问题指派开发处理人。${link}`,
+      md: `### 📮 新 bug 待指派开发\n\n- **单号**：${displayNo}\n- **系统**：${system}\n- **标题**：${title}\n\n请登录平台为该问题指派开发处理人。${link}`,
     };
   }
 
@@ -14742,9 +16746,10 @@ module.exports = (deps) => {
     const system = issueNotify.issueSafeText(issue.system_name, 40);
     const link = sysDeepLinkLine(baseUrl, issue.id);
     const statusLine = issueNotify.issueSafeText(sysStatusDisplayName(issue.status), 20);   // [D22 批2] 显示映射，issue.status 本身不变
+    const displayNo = sysDeriveNumbering.sysIssueDisplayNo(issue);   // [S12-b·§15.3 行 8]
     return {
       title: `📬 迭代单状态更新：${safeTitle}`,
-      md: `### 📬 迭代单状态更新\n\n- **单号**：#${issue.id}\n- **系统**：${system}\n- **标题**：${title}\n- **当前状态**：${statusLine}\n\n请登录平台查看详情。${link}`,
+      md: `### 📬 迭代单状态更新\n\n- **单号**：${displayNo}\n- **系统**：${system}\n- **标题**：${title}\n- **当前状态**：${statusLine}\n\n请登录平台查看详情。${link}`,
     };
   }
 
@@ -14773,9 +16778,10 @@ module.exports = (deps) => {
     const title = issueNotify.issueSafeText(issue.title, 80);
     const safeTitle = sysNotifyTitle(issue.title);
     const link = sysDeepLinkLine(baseUrl, issue.id);
+    const displayNo = sysDeriveNumbering.sysIssueDisplayNo(issue);   // [S12-b·§15.3 行 8]
     return {
       title: `📥 新迭代单待受理：${safeTitle}`,
-      md: `### 📥 新迭代单待受理\n\n- **单号**：#${issue.id}\n- **标题**：${title}\n\n请登录平台受理该单。${link}`,
+      md: `### 📥 新迭代单待受理\n\n- **单号**：${displayNo}\n- **标题**：${title}\n\n请登录平台受理该单。${link}`,
     };
   }
 
@@ -14787,9 +16793,10 @@ module.exports = (deps) => {
     const safeTitle = sysNotifyTitle(issue.title);
     const system = issueNotify.issueSafeText(issue.system_name, 40);
     const link = sysDeepLinkLine(baseUrl, issue.id);
+    const displayNo = sysDeriveNumbering.sysIssueDisplayNo(issue);   // [S12-b·§15.3 行 8]
     return {
       title: `🧪 迭代单待对接测试：${safeTitle}`,
-      md: `### 🧪 迭代单已进入对接测试\n\n- **单号**：#${issue.id}\n- **系统**：${system}\n- **标题**：${title}\n\n开发已完成交付，请登录平台对接测试该单。${link}`,
+      md: `### 🧪 迭代单已进入对接测试\n\n- **单号**：${displayNo}\n- **系统**：${system}\n- **标题**：${title}\n\n开发已完成交付，请登录平台对接测试该单。${link}`,
     };
   }
 
@@ -14801,9 +16808,10 @@ module.exports = (deps) => {
     const system = issueNotify.issueSafeText(issue.system_name, 40);
     const link = sysDeepLinkLine(baseUrl, issue.id);
     const reasonText = issueNotify.issueSafeText(reason, 200);
+    const displayNo = sysDeriveNumbering.sysIssueDisplayNo(issue);   // [S12-b·§15.3 行 8]
     return {
       title: `📝 迭代单需修改后重新提交：${safeTitle}`,
-      md: `### 📝 您提交的迭代单需修改\n\n- **单号**：#${issue.id}\n- **系统**：${system}\n- **标题**：${title}\n- **退改原因**：${reasonText}\n\n请登录平台在「待修改」状态下修改后重新提交受理。${link}`,
+      md: `### 📝 您提交的迭代单需修改\n\n- **单号**：${displayNo}\n- **系统**：${system}\n- **标题**：${title}\n- **退改原因**：${reasonText}\n\n请登录平台在「待修改」状态下修改后重新提交受理。${link}`,
     };
   }
 
@@ -14821,9 +16829,10 @@ module.exports = (deps) => {
     const link = sysDeepLinkLine(baseUrl, issue.id);
     const reasonText = issueNotify.issueSafeText(reason, 200);
     const who = issueNotify.issueSafeText(issue.hold_by_name || '未知', 40);
+    const displayNo = sysDeriveNumbering.sysIssueDisplayNo(issue);   // [S12-b·§15.3 行 8]
     return {
       title: `⏸ 迭代单已暂缓：${safeTitle}`,
-      md: `### ⏸ 迭代单已暂缓\n\n- **单号**：#${issue.id}\n- **系统**：${system}\n- **标题**：${title}\n- **操作人**：${who}\n- **暂缓原因**：${reasonText}\n\n该单已暂缓，观察期内可重启继续处理，或由管理员作废了结。请登录平台查看详情。${link}`,
+      md: `### ⏸ 迭代单已暂缓\n\n- **单号**：${displayNo}\n- **系统**：${system}\n- **标题**：${title}\n- **操作人**：${who}\n- **暂缓原因**：${reasonText}\n\n该单已暂缓，观察期内可重启继续处理，或由管理员作废了结。请登录平台查看详情。${link}`,
     };
   }
 
@@ -14840,9 +16849,10 @@ module.exports = (deps) => {
     const link = sysDeepLinkLine(baseUrl, issue.id);
     const reasonText = issueNotify.issueSafeText(reason, 200);
     const who = issueNotify.issueSafeText(issue.resume_by_name || '未知', 40);
+    const displayNo = sysDeriveNumbering.sysIssueDisplayNo(issue);   // [S12-b·§15.3 行 8]
     return {
       title: `▶️ 迭代单已重启：${safeTitle}`,
-      md: `### ▶️ 迭代单已重启\n\n- **单号**：#${issue.id}\n- **系统**：${system}\n- **标题**：${title}\n- **操作人**：${who}\n- **重启说明**：${reasonText}\n\n该单已恢复处理，请登录平台查看详情并继续跟进。${link}`,
+      md: `### ▶️ 迭代单已重启\n\n- **单号**：${displayNo}\n- **系统**：${system}\n- **标题**：${title}\n- **操作人**：${who}\n- **重启说明**：${reasonText}\n\n该单已恢复处理，请登录平台查看详情并继续跟进。${link}`,
     };
   }
 
@@ -14856,9 +16866,10 @@ module.exports = (deps) => {
     const safeTitle = sysNotifyTitle(issue.title);
     const system = issueNotify.issueSafeText(issue.system_name, 40);
     const link = sysDeepLinkLine(baseUrl, issue.id);
+    const displayNo = sysDeriveNumbering.sysIssueDisplayNo(issue);   // [S12-b·§15.3 行 8]
     return {
       title: `🔧 请协助技术评估：${safeTitle}`,
-      md: `### 🔧 请协助技术评估\n\n- **单号**：#${issue.id}\n- **系统**：${system}\n- **标题**：${title}\n\n对接人就该单发起了技术负责人沟通，请登录平台查看需求并给出技术评估意见。${link}`,
+      md: `### 🔧 请协助技术评估\n\n- **单号**：${displayNo}\n- **系统**：${system}\n- **标题**：${title}\n\n对接人就该单发起了技术负责人沟通，请登录平台查看需求并给出技术评估意见。${link}`,
     };
   }
 
@@ -14870,9 +16881,10 @@ module.exports = (deps) => {
     const safeTitle = sysNotifyTitle(issue.title);
     const system = issueNotify.issueSafeText(issue.system_name, 40);
     const link = sysDeepLinkLine(baseUrl, issue.id);
+    const displayNo = sysDeriveNumbering.sysIssueDisplayNo(issue);   // [S12-b·§15.3 行 8]
     return {
       title: `✅ 技术负责人评估已回复：${safeTitle}`,
-      md: `### ✅ 技术负责人评估已回复\n\n- **单号**：#${issue.id}\n- **系统**：${system}\n- **标题**：${title}\n\n技术负责人已提交本单最终评估意见，请登录平台查看具体内容并决定后续处置。${link}`,
+      md: `### ✅ 技术负责人评估已回复\n\n- **单号**：${displayNo}\n- **系统**：${system}\n- **标题**：${title}\n\n技术负责人已提交本单最终评估意见，请登录平台查看具体内容并决定后续处置。${link}`,
     };
   }
 
@@ -15357,8 +17369,10 @@ module.exports = (deps) => {
         case 'notifyReleasedToRequester':
           await sendSysRequesterNotify(issue, 'released', baseUrl, actorId);
           break;
-        // [组 B·SB3·B4 闭环通知] 直上/补验收结果通知建单人——见 sendSysCreatorAutoNotify 定义处注释。
-        case 'notifyFastReleasePendingToCreator':
+        // [组 B·SB3·B4 闭环通知] 补验收结果通知建单人——见 sendSysCreatorAutoNotify 定义处注释。
+        //   [组B·S2-2] 'notifyFastReleasePendingToCreator'（直上成功通知）随 submit 拆直上分支删除——
+        //   该 marker 唯一调用点已不存在，case 同批删除（sendSysCreatorAutoNotify 函数本身对两个
+        //   仍在用的 marker 无影响，逻辑不按 marker 分叉）。
         case 'notifyPostReleaseAcceptPassedToCreator':
         case 'notifyPostReleaseAcceptFailedToCreator':
           await sendSysCreatorAutoNotify(issue, baseUrl, actorId);
@@ -16655,6 +18669,9 @@ module.exports = (deps) => {
     normalizeDeadlineDT,   // 四处优化 D2②：deadline 专用 datetime 校验器（与上一行**并存**——上一行是纯日期字段的共用校验器，勿合并）
     computeSysDefaultEta,   // [组A] 预计完成时间默认 SLA 计算（verify-sys-eta-generation 直调覆盖边界组）
     deadlineToMinuteText,  // 时间格式统一 S3（D3）：deadline 的**文本**截断件（留痕/通知用；truncToMinute 对纯日期返 null 不能替代）
+    // [§13·S10→P4 补导出] feature ETA 直取纯函数——此前只在 [F1]-[F7] 端到端矩阵间接覆盖，
+    //   P4 补一组不依赖 HTTP/DB 的纯函数边界确定性断言（nowStr 恰等/−1s/+1s），verify 直调同一份实现。
+    resolveFeatureDeadlineDirectTake,
     // 组 C·SC1（期望对表与准时统计·方案 v1.3 §3C.2/§3C.3/§3C.4）：容差判定+理由校验+首诺快照——
     //   verify-sys-eta-overrun-snapshot 直调真实逻辑（RC-L2 防复刻漂移），业务代码一律走各写点内联调用。
     ETA_OVERRUN_TOLERANCE_DAYS,
@@ -16667,6 +18684,13 @@ module.exports = (deps) => {
     isEtaValueChangedForNotify,   // 组 C·B3（§3C.7 P10 拍板）：ETA 值变化半条件——verify 直调同一份实现，防复刻漂移
     buildEtaOverrunReasonSummarySuffix,   // 组 C·SC3·修复 a：timeline 携带理由的唯一收口——verify 直调同一份实现，防复刻漂移
     writeDevEstimatedFirstSnapshot,
+    // [§14·S11] feature 超期完成理由闸——verify 直调真实逻辑，防复刻漂移。
+    evaluateCompletionOverrun,
+    validateCompletionOverrunReasonInput,
+    resolveCompletionOverrunReasonForWrite,
+    buildCompletionOverrunReasonSummarySuffix,
+    completionOverrunGroupInvariantViolations,
+    SYS_COMPLETION_OVERRUN_THRESHOLD_DAYS,
     // 组 C·SC2（期望对表统计·方案 §3C.6）：一期两指标计算——verify 直调真实逻辑（RC-L2）。
     computeSysEtaStatsForRows,
     round1Pct,
@@ -16722,6 +18746,14 @@ module.exports = (deps) => {
     buildSysHoldCreatorMarkdown,
     buildSysResumeDevMarkdown,
     SYS_CLEAR_CREATOR_NOTIFY_FIELDS_SQL,
+    // [S12-b·§15.3 行 8] 剩余 5 个含单号文案的 markdown builder 补导出——同上方 7 个既有先例理由（RC-L2
+    //   防复刻漂移）：verify 需要直调真实实现断言 md 文本里含正确的展示号（子编号/#id 回退），不能靠
+    //   在 verify 里重新拼一份"应该长什么样"的字符串去比对（那样测的是 verify 自己的理解，不是产品代码）。
+    buildSysRelayMarkdown,
+    buildSysLiaisonTestMarkdown,
+    buildSysIntakeReturnCreatorMarkdown,
+    buildSysTechLeadMarkdown,
+    buildSysTechLeadCommentReplyMarkdown,
     // bug 流 Commit ③：真钉钉建群（verify-sys-create-chat require 真实逻辑，防漂移）
     SYS_CHAT_ALLOWED_STATUSES,
     addSysChatMember,
@@ -16775,7 +18807,6 @@ module.exports = (deps) => {
     // 组 B·SB2（bug 先行上线直上，方案 v1.3 §3.2/§3.4）：submit 端点消费的判据/常量导出——同上理由，
     //   verify-sys-fastlane-submit 直调这些函数而不是各写一份等价逻辑（写读同源，防漂移）。
     isActiveFastReleaseAuth,        // :3188 一带"活跃授权"权威谓词的唯一实现
-    deriveFastReleaseSubmitDenyReason,
     fastlaneAcceptanceInvariantViolations,   // 补验收字段组不变量①②③⑦纯函数
     deriveOnlineSourceKind,          // 「已上线」来源三/四分支派生（C9 既有 + SB2 新增 authorized_fastlane 分支）
     analyzeRosterForGate,            // 花名册完成度分析（与 runWGate/FAST_RELEASE_DIRECT 同一份判据）
@@ -16792,6 +18823,23 @@ module.exports = (deps) => {
     SYS_CLEAR_FAST_RELEASE_AUTH_FIELDS_SQL,
     FAST_RELEASE_ACTIVE_AUTH_WHERE_SQL,
     fastReleaseUnresolvedAtTerminalStateViolations,   // 组 B·B1 不变量探针：终态单残留活跃授权，verify 全库扫描 + 反证判红两用
+    // 先行上线两步化 S1（方案 20260813_v1.8 §3/§4-10）：verify 直调导出——同上理由，写读同源防漂移。
+    SYS_FAST_RELEASE_EXECUTORS_KEY_COLS,        // 表结构锚点全列清单（verify [1] schema 断言直读）
+    SYS_FAST_RELEASE_EXEC_ACTIVE_WHERE_SQL,     // 全消费点统一谓词（S1 零消费点，导出供 verify 预先核对常量本体+未来消费点复用）
+    sysFastReleaseExecActiveWhere,              // codex 382-M4：同源 alias helper——S3+ 全部 JOIN 消费点必须走本函数，无别名调用=常量本体
+    attemptFastReleaseFlipInTxn,                 // S3·§4-4b 共享翻牌内核——verify 直调覆盖"空集合恒不可翻"等单元场景（需调用方自行 sysBeginImmediate）
+    // S5（方案 §4-5/§4-6/§4-7）：撤销收紧+验收/打回闸+五事件终结延伸——verify 直调导出，写读同源防漂移。
+    clearFastReleaseRosterOnTermination,        // 共享清集合内核——verify 可直调覆盖"changes=0 不写虚假 timeline"等单元场景（需调用方自行持事务锁）
+    fastReleaseRosterResidualAtInactiveAuthViolations,   // 不变量 ⑪ 探针：verify 全库扫描 + 反证判红两用
+    fastReleaseNonFlippedFullDoneViolations,             // 不变量 ⑫ 探针：verify 全库扫描 + 反证判红两用
+    // 方案 v1.8 §12（建单人编辑字段对齐·2026-08-14）：三集同源常量导出——verify 断言"建单集=可编辑集∪
+    //   排除集"需直读这三个常量本体，禁止在 verify 侧另拼一份字面量清单（那样改一处不改另一处就会
+    //   静默漂移，失去这条守卫的意义）。
+    EDIT_TIER_A_FIELDS,          // 可编辑集（A 档全量；B 档 = 本集合剔除 needs_feasibility，两档并集即"可编辑集"整体）
+    SYS_CREATE_FORM_FIELDS,      // 建单集
+    SYS_EDIT_EXCLUDED_FIELDS,    // 排除集（键=字段名，值=理由，verify 同时校验"每条排除都有非空理由"）
+    SYS_CREATE_PROTOCOL_REJECTED_FIELDS,   // [F4] 建单端点读取但非表单字段的协议/结构性拒绝字段（六项）
+    SYS_SOURCES,   // [F5] 来源三值枚举单一收口（建单/edit-in-revision/derive 三处消费点共用）
   };
 
   return { initSchema, router, _internals };

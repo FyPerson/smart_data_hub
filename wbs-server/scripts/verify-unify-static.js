@@ -240,12 +240,14 @@ const OLD_NAMES = [
 ];
 
 // ── 状态徽章统一 S1 配置区 ────────────────────────────────────────────────
-// 语义层清单（14 层）。与 components.css :root 块、方案 v1.2 §1 色板表三方同源——
+// 语义层清单（15 层）。与 components.css :root 块、方案 v1.2 §1 色板表三方同源——
 // 加层/改层名必须三处同步，否则断言④⑤会立刻红灯（这正是它存在的意义）。
 // prerelease = 第 14 层（待上线可见性 20260812 v1.0·D1b），「待上线」专属橙色相，
 //   与 staging（交付/传输·数据协作 EXPORTING/TRANSFERRING 共用）分层而非改它。
+// fastlane = 第 15 层（先行上线两步化 S7·方案 20260813 v1.8 §6·2026-08-14 启动门拍板），
+//   「待先行部署 x/N」专属靛紫色相，与 prerelease 区分——见 components.css 该层注释。
 const SEM_TIERS = [
-    'wait', 'intake', 'active', 'review', 'special', 'staging', 'prerelease',
+    'wait', 'intake', 'active', 'review', 'special', 'staging', 'prerelease', 'fastlane',
     'done', 'hold', 'rejected', 'failed', 'archived', 'voided', 'legacy',
 ];
 

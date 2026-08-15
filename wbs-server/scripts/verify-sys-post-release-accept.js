@@ -41,6 +41,7 @@ const fs = require('fs');
 const express = require('express');
 const sqlite3 = require('sqlite3');
 const jwt = require('jsonwebtoken');
+const sysDeriveNumbering = require('../utils/sys-derive-numbering');   // [S12-b] RC-L2：直调真实 sysIssueDisplayNo，非拼字符串猜格式
 
 const SECRET = 'verify-sys-post-release-accept-secret';
 const db = new sqlite3.Database(':memory:');
@@ -128,30 +129,32 @@ async function authorize(id, tok = adminTok, note) {
   const r = await call('POST', `/api/sys-issues/${id}/fast-release-authorize`, tok, note ? { note } : {});
   assert.strictEqual(r.status, 200, `[授权] 应 200，实得 ${r.status} ${JSON.stringify(r.body)}`);
 }
-// 真实链路夹具：受理→指派→估时→授权→submit(direct_release=true) → 落地 fastlane pending 态
-// （不用 SQL 造态，走真实端点链，与 verify-sys-fastlane-submit.js [1] 同源）。
+// [组B·S2 订正] 夹具原走真实链路"受理→指派→估时→授权→submit(direct_release=true)"到达 fastlane
+//   pending 态——该 submit 分支已随两步化方案 §4-2「整体替代」拍板拆除（详见 verify-sys-fastlane-submit.js
+//   头部 S2 语义翻转声明），真实链路已不可达。改为 SQL 造态直接构造终点状态：本文件测的是"补验收闭环"
+//   （post-release-accept 端点及其下游 close/derive 联动），起点状态如何抵达（真实提交 vs 造态）与这条
+//   下游链路本身的正确性无关——deriveOnlineSourceKind/post-release-accept 端点只读现值字段，不关心
+//   历史成因。造态字段组与 verify-sys-fastlane-submit.js [8b]/[10] 两处同款夹具逐字段对齐（写读同源，
+//   不在多个文件里各拼一份可能漂移的造态字段清单）。
 async function bugAtFastlanePending() {
   const id = await bugAtChulizhong();
   await estimateFuture(id);
   await authorize(id, adminTok, '补验收探针-授权');
-  const r = await call('POST', `/api/sys-issues/${id}/submit`, devTok, {
-    mode: 'commits', self_tested: true, test_env_deployed: true,
-    bug_cause_note: 'verify 夹具：bug 产生原因',
-    commits: [{ component: 'backend', commit_ref: `svn-${Date.now()}-${Math.random().toString(36).slice(2, 6)}` }],
-    direct_release: true,
-  });
-  assert.strictEqual(r.status, 200, `[夹具-直上] 应 200，实得 ${r.status} ${JSON.stringify(r.body)}`);
-  assert.strictEqual(r.body.online_source, 'authorized_fastlane', '[夹具-直上] 响应应携带 online_source=authorized_fastlane');
+  await run(`UPDATE sys_issues SET status='已上线', released_at=datetime('now','localtime'),
+    online_source='authorized_fastlane', post_release_acceptance='pending',
+    fast_release_consumed_at=datetime('now','localtime') WHERE id=?`, [id]);
   const row = await issueRow(id);
-  assert.strictEqual(row.online_source, 'authorized_fastlane', '[夹具-前置] online_source 应为 authorized_fastlane');
-  assert.strictEqual(row.post_release_acceptance, 'pending', '[夹具-前置] post_release_acceptance 应初值 pending');
+  assert.strictEqual(row.status, '已上线', '[夹具-造态] status 应为「已上线」');
+  assert.strictEqual(row.online_source, 'authorized_fastlane', '[夹具-造态] online_source 应为 authorized_fastlane');
+  assert.strictEqual(row.post_release_acceptance, 'pending', '[夹具-造态] post_release_acceptance 应初值 pending');
   return id;
 }
 
 const issueRow = (id) => get(
   `SELECT id, type, status, released_at, online_source, post_release_acceptance, post_accepted_at,
           post_derive_issue_id, accepted_at, release_id, fast_release_consumed_at, closed_at,
-          creator_notify_status, title, derive_reason, origin_issue_id
+          creator_notify_status, title, derive_reason, origin_issue_id,
+          derive_root_id, derive_seq   -- [S12-b] 供 sysIssueDisplayNo 断言取号（timeline「已派生 #根_序」文案核对）
      FROM sys_issues WHERE id=?`, [id]);
 const timelineRowsByCode = (id, actionCode) => all(
   `SELECT event_type, from_status, to_status, summary, action_code, ref_id, operator_id, operator_name
@@ -233,7 +236,10 @@ async function main() {
     const tlOrig = await timelineRowsByCode(id, 'post_release_accept_fail');
     assert.strictEqual(tlOrig.length, 1, `[2] 原单 action_code=post_release_accept_fail 的 timeline 行恰 1 条，实得 ${tlOrig.length}`);
     assert.strictEqual(tlOrig[0].ref_id, newId, '[2] 原单该行 ref_id 应指向派生单');
-    assert.ok(tlOrig[0].summary.includes('已派生 #' + newId), `[2] summary 含派生单号，实得="${tlOrig[0].summary}"`);
+    // [S12-b] 该行文案由 sysIssueDisplayNo(newDeriveResult) 拼出「已派生 #根_序」（非旧版裸 #newId）——
+    //   直调真实 helper 算出期望值（RC-L2 同源核对，非猜格式硬编码 `_1`）。
+    const expectedChildDisplayNo = sysDeriveNumbering.sysIssueDisplayNo(child);
+    assert.ok(tlOrig[0].summary.includes('已派生 ' + expectedChildDisplayNo), `[2] summary 含派生子编号 ${expectedChildDisplayNo}，实得="${tlOrig[0].summary}"`);
 
     // 派生内核复用证据：新单 timeline 恰 created+derive 两条，与公开 /derive 端点产出形状逐字同构
     // （insertDerivedSysIssue 是唯一实现，两条调用路径共用同一份写入逻辑）。
@@ -426,10 +432,23 @@ async function main() {
     const afterFail = await issueRow(idFail);
     assert.strictEqual(afterFail.creator_notify_status, 'not_sent', '[7-fail] fail 分支同样通知总闸关闭 → creator_notify_status 应保持 not_sent');
 
-    // direct_release 成功分支同样 no-op（submit 端点新增的 notifyFastReleasePendingToCreator marker）
-    const idDirect = await bugAtFastlanePending();   // bugAtFastlanePending 本身即含一次 direct_release 成功
-    assert.strictEqual((await issueRow(idDirect)).creator_notify_status, 'not_sent', '[7-direct] submit direct_release 成功分支新增的通知调用同样 no-op（creator_notify_status 保持 not_sent）');
-    ok('[7] 通知 no-op 断言：isAutoNotifyEnabled 恒 false → post-release-accept 两分支 + submit direct_release 成功分支均不触发真实钉钉，creator_notify_status 全程保持 not_sent');
+    // [codex 382 预筛 L8 收口·[7-direct] 组删除，取舍如实登记] 原第三条断言（[7-direct]）已删除，不是
+    //   静默丢弃：其历史沿革是"原第三条断言的对象是 submit direct_release 成功分支触发的
+    //   notifyFastReleasePendingToCreator marker，该 marker 唯一调用点已随拆直上分支删除，遂改为验证
+    //   'SQL 造态构造 fastlane pending 态不经过任何通知调用点，creator_notify_status 天然保持 not_sent'"
+    //   ——但这条改写后的断言是**近恒真断言**：它只调用 bugAtFastlanePending()（纯 SQL UPDATE 造态）
+    //   后立即读值，全程未调用 post-release-accept 端点，测的是"没执行任何代码时字段没变"，这在
+    //   bugAtFastlanePending() 自身实现（只 UPDATE released_at/online_source/post_release_acceptance/
+    //   fast_release_consumed_at 四列，从不触碰 creator_notify_status）已结构性保证为真，不需要运行时
+    //   断言去发现"造态本身不发通知"这件事——它测不出任何生产代码回归（唯一能让它变红的是有人往
+    //   bugAtFastlanePending() 这个测试夹具函数本身里错误地加一行 dispatchSysNotify 调用，那是测试代码
+    //   自身的假设改变，不是生产端点行为改变）。与其保留一条不测生产代码的断言制造虚假覆盖感，改为
+    //   删除更干净：[7-pass]/[7-fail] 已经用同一个 bugAtFastlanePending() 造态 + **真实调用**
+    //   post-release-accept 端点，穷尽了该端点仅有的两个 verdict 分支（不存在第三个"direct"分支），
+    //   是本组真正对生产代码的覆盖来源；"direct-submit 通知路径已彻底不存在"这一结论已由 codex 382
+    //   修复批的 dispatchSysNotify switch-case 删除 + grep 归零证明覆盖（见该批交付报告），无需在本文件
+    //   重复用近恒真断言再证一次。
+    ok('[7] 通知 no-op 断言：isAutoNotifyEnabled 恒 false → post-release-accept pass/fail 两分支（穷尽该端点全部 verdict）不触发真实钉钉');
   }
 
   // ══════════════════════════ [8]（追加批·codex 363 号 M2）48h 圈红判据后端化 ══════════════════════════

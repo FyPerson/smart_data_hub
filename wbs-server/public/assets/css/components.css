@@ -161,6 +161,16 @@
        层名 prerelease 与前端既有类名 .si-s-prerelease 对齐。dot/bg 对比 ≈2.6:1 落警示档不阻断
        （同 review 层既有 2.07:1）；fg/bg ≈4.9:1 过 4.5 硬线。 */
     --sem-prerelease-bg: #fff7ed; --sem-prerelease-fg: #c2410c; --sem-prerelease-bd: #fdba74; --sem-prerelease-bds: solid; --sem-prerelease-dot: #f97316; --sem-prerelease-deco: none;
+    /* 第 15 层（先行上线两步化 S7·方案 20260813 v1.8 §6·2026-08-14 启动门拍板）：「待先行部署 x/N」
+       专属靛紫色相——与第 14 层 prerelease（橙，「待上线」）区分（两者结构上不会同行共现：prerelease
+       只在 status='待上线' 显示，fastlane 只在 status='待验证' 显示，仍分层是为色板语义独立、不因业务
+       状态互斥就省一层）。色值刻意与本页既有 timeline 事件配色 .si-tl-indigo（#e0e7ff/#4338ca，
+       fast_release_staged/authorize/roster_added 等"程序性/进行中"动作既用此色，见 SI_TL_CLS 字典）
+       同族对齐——挂牌徽章与挂牌 timeline 行视觉呼应，同一事实的两处呈现不该撞色也不该失联。
+       fg=#4338ca 与第 2 层 intake 的 fg 相同值（intake 是"待受理"对接人待办感，同为 indigo 家族语义上
+       亦通——两层不会同行共现：intake 只在 status='待受理' 显示）。
+       WCAG：fg/bg≈6.41:1（远超 4.5 硬线）；dot/bg≈3.63:1（过 3.0 警示线）。 */
+    --sem-fastlane-bg: #e0e7ff; --sem-fastlane-fg: #4338ca; --sem-fastlane-bd: #a5b4fc; --sem-fastlane-bds: solid; --sem-fastlane-dot: #6366f1; --sem-fastlane-deco: none;
     --sem-done-bg: #f0fdf4;     --sem-done-fg: #15803d;     --sem-done-bd: #bbf7d0;     --sem-done-bds: solid;  --sem-done-dot: #22c55e;     --sem-done-deco: none;
     --sem-hold-bg: #fefce8;     --sem-hold-fg: #854d0e;     --sem-hold-bd: #fef08a;     --sem-hold-bds: solid;  --sem-hold-dot: #eab308;     --sem-hold-deco: none;
     --sem-rejected-bg: #fef2f2; --sem-rejected-fg: #991b1b; --sem-rejected-bd: #fecaca; --sem-rejected-bds: solid;  --sem-rejected-dot: #ef4444; --sem-rejected-deco: none;
@@ -209,6 +219,7 @@
 .u-status-badge.sem-special  { --sb-bg: var(--sem-special-bg);   --sb-fg: var(--sem-special-fg);   --sb-bd: var(--sem-special-bd);   --sb-bds: var(--sem-special-bds);   --sb-dot: var(--sem-special-dot);   --sb-deco: var(--sem-special-deco); }
 .u-status-badge.sem-staging  { --sb-bg: var(--sem-staging-bg);   --sb-fg: var(--sem-staging-fg);   --sb-bd: var(--sem-staging-bd);   --sb-bds: var(--sem-staging-bds);   --sb-dot: var(--sem-staging-dot);   --sb-deco: var(--sem-staging-deco); }
 .u-status-badge.sem-prerelease { --sb-bg: var(--sem-prerelease-bg); --sb-fg: var(--sem-prerelease-fg); --sb-bd: var(--sem-prerelease-bd); --sb-bds: var(--sem-prerelease-bds); --sb-dot: var(--sem-prerelease-dot); --sb-deco: var(--sem-prerelease-deco); }
+.u-status-badge.sem-fastlane { --sb-bg: var(--sem-fastlane-bg); --sb-fg: var(--sem-fastlane-fg); --sb-bd: var(--sem-fastlane-bd); --sb-bds: var(--sem-fastlane-bds); --sb-dot: var(--sem-fastlane-dot); --sb-deco: var(--sem-fastlane-deco); }
 .u-status-badge.sem-done     { --sb-bg: var(--sem-done-bg);      --sb-fg: var(--sem-done-fg);      --sb-bd: var(--sem-done-bd);      --sb-bds: var(--sem-done-bds);      --sb-dot: var(--sem-done-dot);      --sb-deco: var(--sem-done-deco); }
 .u-status-badge.sem-hold     { --sb-bg: var(--sem-hold-bg);      --sb-fg: var(--sem-hold-fg);      --sb-bd: var(--sem-hold-bd);      --sb-bds: var(--sem-hold-bds);      --sb-dot: var(--sem-hold-dot);      --sb-deco: var(--sem-hold-deco); }
 .u-status-badge.sem-rejected { --sb-bg: var(--sem-rejected-bg);  --sb-fg: var(--sem-rejected-fg);  --sb-bd: var(--sem-rejected-bd);  --sb-bds: var(--sem-rejected-bds);  --sb-dot: var(--sem-rejected-dot);  --sb-deco: var(--sem-rejected-deco); }
