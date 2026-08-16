@@ -815,14 +815,20 @@ async function main() {
       //   issue_derive_root_id/issue_derive_seq 两列定义（8 行，落在本清单全部 8 处写点**之前**），令
       //   全部 8 处锚点整体再 +8 行——同一批写点、非新增第 9 处（人工核对：8 处行号偏移量完全一致地
       //   +8，且逐条本体 UPDATE 语句字面量与下方 desc 描述仍一一对应，非巧合命中）。
+      // ⚠️ [先行上线授权超时收回 S1 补] 本批在 index.js 新增两处 fast_release_* 六列清空 UPDATE（超时
+      //   终结内核 :4399/批次发布过期分叉 :14299 一带）——两者 SET 子句只含 fast_release_*/updated_at
+      //   列，逐一确认均不含独立 `status` 赋值（非 `_status` 结尾子串），故②处实测计数仍恰 8 处、非新增
+      //   第 9 处；同批新增/改动其余代码在下方 8 处写点**部分之前、部分之间**穿插插入，导致 8 处锚点行号
+      //   **非均匀位移**（与此前"整体 +N"批次不同，本次逐条按 grep 实测行号取值，禁用「旧锚点+估算净插
+      //   行数」推算——见 :825 一带既有纪律，本次订正正是该纪律的落地）。
       { anchorLine: 1696, reachable: false, desc: 'C1 迁移一次性脚本：字面量写「待指派」（历史 待评估/已排期→待指派迁移），与本闸门目标态无关' },
       { anchorLine: 1796, reachable: false, desc: '预沟通段撤销迁移脚本：字面量写「待受理」' },
-      { anchorLine: 4007, reachable: true, gateKind: 'runWGate', desc: 'runWGate 内唯一 UPDATE——targetStatus 变量，feature 决策树 ⑤⑥⑦ 分支据 SF.SYS_VERIFY_STATUSES/SF.SYS_LIAISON_TEST_STATUSES 可解析为待验证/待对接测试；§14 闸门（enteringForward && issueType===feature 分支）在本 UPDATE 之前执行，无理由不放行（同一写点，行号随本批 B1/B3+S13 收口 LOW-3 改动整体下移）' },
-      { anchorLine: 4409, reachable: false, desc: '先行上线翻牌内核 attemptFastReleaseFlipInTxn：字面量写「已上线」，WHERE 限定 type=bug，与 feature 专属闸门结构上无交集' },
-      { anchorLine: 5970, reachable: true, gateKind: 'exempt', desc: 'sysIssueTransition 通用引擎唯一 UPDATE——toStatus 变量，服务全部声明式 transition；feature 流里能落到目标两态的边只有①核实的 liaison_test_pass 一条，该边已撤闸（显式豁免，见下方子断言核实其代码块不引用理由闸函数）' },
-      { anchorLine: 6676, reachable: false, desc: '建单 path A 占位状态 UPDATE：finalStatus 恒为受理门初始态（resolveSysInitialStatusForCreate 落态）或「开发中」，结构上不可能是待对接测试/待验证' },
-      { anchorLine: 6937, reachable: false, desc: '/assign 端点 UPDATE：targetStatus 恒为 SF.SYS_DEV_STATUSES[type][0]（开发中），结构上不可能是待对接测试/待验证' },
-      { anchorLine: 13976, reachable: false, desc: '批量发布执行 UPDATE：字面量写「已上线」（行号随本批 B1/B3+S13 收口 LOW-3 改动插入在其前方整体下移，同一写点，flip UPDATE 语句本体未变；三段位移实测 13943→13971→13976——① S1 值班筛选在 :7966/:8185 两处净插 28 行推移 13943→13971（57a9741 追平）；② S2/S3 前端批（Sys_Iteration.html/verify 脚本）不改 index.js，本条本应零位移，但同批另有主会话在 index.js 落的三处未提交注释修正净插 5 行，13971→13976（本次一并 grep 实测追平，随本 commit 一起提交）；8 锚点仅本条在两次插入点之后，其余 7 条零位移与套件单红自洽，同一写点人工核对。⚠️ 纪律：本行号一律 grep 实测取值（如按本条 UPDATE 语句字面量 grep index.js 定位真实行号），禁用「旧锚点+估算净插行数」的 diff 推算——推算值与实测值即便凑巧一致也不能免验，历次漂移都在证明净插行数本身容易漏算插入点前后的其它并发改动）' },
+      { anchorLine: 4015, reachable: true, gateKind: 'runWGate', desc: 'runWGate 内唯一 UPDATE——targetStatus 变量，feature 决策树 ⑤⑥⑦ 分支据 SF.SYS_VERIFY_STATUSES/SF.SYS_LIAISON_TEST_STATUSES 可解析为待验证/待对接测试；§14 闸门（enteringForward && issueType===feature 分支）在本 UPDATE 之前执行，无理由不放行（同一写点，行号随本批弹回探针过期分叉插入 +8 行）' },
+      { anchorLine: 4561, reachable: false, desc: '先行上线翻牌内核 attemptFastReleaseFlipInTxn：字面量写「已上线」，WHERE 限定 type=bug，与 feature 专属闸门结构上无交集（同一写点，行号随本批先行上线授权超时收回时间基建+幂等终结内核+若干注释同步插入在其前方整体下移；S1-fix/S1-fix3 两批再补若干注释+deadline 函数回比对校验、S2 F4-① 脏数据失败形态登记注释，累计下移）' },
+      { anchorLine: 6204, reachable: true, gateKind: 'exempt', desc: 'sysIssueTransition 通用引擎唯一 UPDATE——toStatus 变量，服务全部声明式 transition；feature 流里能落到目标两态的边只有①核实的 liaison_test_pass 一条，该边已撤闸（显式豁免，见下方子断言核实其代码块不引用理由闸函数）' },
+      { anchorLine: 6916, reachable: false, desc: '建单 path A 占位状态 UPDATE：finalStatus 恒为受理门初始态（resolveSysInitialStatusForCreate 落态）或「开发中」，结构上不可能是待对接测试/待验证' },
+      { anchorLine: 7177, reachable: false, desc: '/assign 端点 UPDATE：targetStatus 恒为 SF.SYS_DEV_STATUSES[type][0]（开发中），结构上不可能是待对接测试/待验证' },
+      { anchorLine: 14417, reachable: false, desc: '批量发布执行 UPDATE：字面量写「已上线」（同一写点，flip UPDATE 语句本体未变；行号随本批 _publishReleaseCoreInTxn 内新增的过期分叉双保险段+S1-fix MED-1 报警闸顺序重排插入在其前方下移）' },
     ];
     assert.strictEqual(EXPECTED_STATUS_WRITE_SITES.length, writeSites.length, '[S③前置] 白名单登记条目数应与②实测写点数一致（防清单本身漂移出真相）');
     writeSites.forEach((site, i) => {

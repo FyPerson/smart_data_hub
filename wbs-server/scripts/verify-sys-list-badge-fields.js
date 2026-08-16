@@ -146,27 +146,69 @@ const selected = new Set();
 }
 must(selected.size >= 25, `列表 SELECT 列集合实抓 ${selected.size} 个（过少=解析失败）`);
 
-// [值班筛选与类型卡 S1·S-fix 3a] selectBlock（WHERE 子句之前的列表部分）恰含 1 个 ? 占位符——该唯一
-//   ? 是 fast_release_my_pending 子查询的 uid 占位符，S1 落地时特意排在 params 数组最前（它是整条
-//   SELECT 文本里位置最早的 ?，sqlite3 driver 按 ? 在最终 SQL 文本出现顺序做 positional 绑定，见
-//   index.js 该处"绑定顺序说明"注释）。若未来有人在 SELECT 列表里再加一个 ? 却忘了同步调整 params
-//   数组顺序，全部可见性筛选/addEq 参数都会集体错位一位——本条把"selectBlock 里恒只有这一个 ?"钉成
-//   显式不变量，不再只靠运行时行为侧面推断。
-const selectBlockQMarks = (selectBlock.match(/\?/g) || []).length;
-must(selectBlockQMarks === 1, `列表 SELECT 列表部分（WHERE 之前）应恰含 1 个 ? 占位符（fast_release_my_pending 子查询的 uid），实得 ${selectBlockQMarks}——多出的 ? 会与 params 数组顺序错位`);
+// [值班筛选与类型卡 S1·S-fix 3a·先行上线授权超时收回 S1 起改判恰 2] selectBlock（WHERE 子句之前的
+//   列表部分）恰含 2 个 ? 占位符——① fast_release_active_auth CASE 改判"可消费"新增的 nowStr 占位符
+//   （文本顺序更早出现）② fast_release_my_pending 子查询的 uid 占位符（原恰 1 个的唯一占位符，S1 前
+//   特意排在 params 数组最前；S1 起两段参数改分离声明+按 SQL 段文本顺序拼接，见 index.js 该处
+//   "绑定协议结构化"注释）。若未来有人在 SELECT 列表里再加一个 ? 却忘了同步调整 selectParams 数组，
+//   全部可见性筛选/addEq 参数都会集体错位一位——本条把"selectBlock 里恒是这两个 ?"钉成显式不变量，
+//   不再只靠运行时行为侧面推断。
+// ⚠️ [先行上线授权超时收回 S1 实测订正·S1-fix MED-3 泛化] fast_release_active_auth 的 nowStr 占位符
+//   **不是**selectBlock 自身文本里的裸 `?`——它藏在具名常量 `FAST_RELEASE_CONSUMABLE_AUTH_WHERE_SQL`
+//   的**定义体**里（CASE 处只有 `${FAST_RELEASE_CONSUMABLE_AUTH_WHERE_SQL}` 这个引用，源码文本层面
+//   看不到 `?`）。本守卫是纯文本扫描（不评估 JS 模板字符串插值），故裸 `.match(/\?/g)` 只能数到
+//   my_pending 那 1 个（首版在此踩了一次坑：以为 selectBlock 源码里恒有 2 个裸 `?`，实测仍是 1，落地
+//   即红）。改为**推导式计数**：单独定位常量的定义体、数出它自身内嵌几个 `?`，乘以本 selectBlock 内
+//   引用该常量的次数，与裸 `?` 计数相加，才是运行期真正展开后的占位符总数——推导逻辑本身也失败即
+//   must() 判红，不静默降级为裸计数（否则本守卫会退化回"只测得到 1"的旧行为，对新占位符视而不见）。
+//   [MED-3 泛化] 首版只认 `FAST_RELEASE_CONSUMABLE_AUTH_WHERE_SQL` 这一个硬编码常量名——若未来 SELECT
+//   列表里再引用别的具名常量（同样携带内嵌 `?`），首版会静默漏数（新常量的引用会被裸 `.match(/\?/g)`
+//   忽略，同一坑复现）。现改为**通用扫描**：selectBlock 内出现的**全部**裸标识符引用 `${IDENT}`
+//   （`[A-Za-z_][A-Za-z0-9_]*` 词法，含括号的函数调用形态如 `${sysFastReleaseExecActiveWhere(...)}`
+//   因内容含 `(` 不匹配本正则，天然排除在外——⚠️ 排除的依据是**当前投影区三处该类调用均传
+//   correlateTo**（相关子查询等值关联，不产生占位符），不是该类表达式的普遍性质：0 参形态会产出
+//   1 个 `?`（index.js SYS_FAST_RELEASE_EXEC_ACTIVE_WHERE_SQL 正是 0 参调用的产物），未来若 0 参/
+//   其它带占位符的函数调用形态进入投影区，须同步扩本守卫的计数面，本正则会静默漏算它们）都会被收集为候选，逐个去定位其 `const IDENT = ...`
+//   定义体、数出内嵌 `?` 数——**任一候选定位失败即 must() 判红**，不允许"找不到就当 0"这类静默降级
+//   （那等于把"新常量忘了同步这条守卫"这个真实漏洞伪装成"没有新占位符"）。
+const identPlaceholderCountCache = {};
+function identPlaceholderCount(identName) {
+  if (Object.prototype.hasOwnProperty.call(identPlaceholderCountCache, identName)) return identPlaceholderCountCache[identName];
+  const defRe = new RegExp('const ' + identName + ' =\\s*\\n?\\s*`([^`]*)`;');
+  const m = ROUTES.match(defRe);
+  must(!!m, `列表 SELECT 引用的具名常量 ${identName} 定义体可定位（供推导其自身内嵌占位符数，纯文本扫描看不进模板插值；MED-3 泛化扫描发现的引用，非硬编码单一常量名）`);
+  const count = m ? (m[1].match(/\?/g) || []).length : -1;
+  identPlaceholderCountCache[identName] = count;
+  return count;
+}
+function countSelectPlaceholders(block) {
+  const raw = (block.match(/\?/g) || []).length;
+  const identRefs = block.match(/\$\{[A-Za-z_][A-Za-z0-9_]*\}/g) || [];
+  const uniqueIdents = [...new Set(identRefs.map(s => s.slice(2, -1)))];
+  let extra = 0;
+  for (const ident of uniqueIdents) {
+    const perOcc = identPlaceholderCount(ident);
+    const occCount = identRefs.filter(r => r === '${' + ident + '}').length;
+    extra += perOcc * occCount;
+  }
+  return raw + extra;
+}
+const selectBlockQMarks = countSelectPlaceholders(selectBlock);
+must(selectBlockQMarks === 2, `列表 SELECT 列表部分（WHERE 之前）应恰含 2 个 ? 占位符（fast_release_active_auth 经 FAST_RELEASE_CONSUMABLE_AUTH_WHERE_SQL 引用内嵌的 nowStr + fast_release_my_pending 裸 ? 的 uid），实得 ${selectBlockQMarks}——多出/缺失的 ? 会与 selectParams 数组顺序错位`);
 // 对照组（[S-fix2] 管线级重写·预筛三轮 S-fix LOW-1：原「selectBlock 副本拼接后 (N+1)!==1」是构造上的
 //   恒真式且不经被测管线——对照组槽位上出现"断言永远成立"正是 guard-gotchas 要防的形态）：把带 ? 的
 //   注入体前置到 ROUTES 切片副本后**重跑同一条提取管线**（stripSqlLineComments→stripComments→
-//   findOuterBoundary→切块→计数），断言得 2——同时注入体里另藏一个**注释内的 ?**（/* ? */），若管线的
-//   注释剥离失效会计得 3 同样判红，一组对照双向证明"计数经真实管线且注释不计入"。
+//   findOuterBoundary→切块→推导式计数），断言得 3（基线 2 + 注入 1 个裸 ?）——同时注入体里另藏一个
+//   **注释内的 ?**（/* ? */），若管线的注释剥离失效会计得 4 同样判红，一组对照双向证明
+//   "计数经真实管线且注释不计入"。
 {
   const mutatedSlice = '/* ? */ (?) ' + ROUTES.slice(listSelStart, listSelStart + SELECT_SCAN_UPPER_BOUND);
   const stripped2 = stripComments(stripSqlLineComments(mutatedSlice));
   const boundary2 = findOuterBoundary(stripped2, 'FROM sys_issues');
   must(!boundary2.wentNegative && boundary2.index > 0, '★对照组前置：注入后管线边界扫描仍应可定位且深度非负（注入体 (?) 括号自平衡）');
   const block2 = stripped2.slice(0, boundary2.index);
-  const fakeQMarks = (block2.match(/\?/g) || []).length;
-  must(fakeQMarks === 2, `★对照组（管线级）：注入 1 个真 ?（注释内另藏 1 个假 ?）后重跑同一条提取管线应恰计 2 个，实得 ${fakeQMarks}——≠2 说明判据恒真、管线未被经过、或注释剥离失效`);
+  const fakeQMarks = countSelectPlaceholders(block2);
+  must(fakeQMarks === 3, `★对照组（管线级）：注入 1 个真裸 ?（注释内另藏 1 个假 ?）后重跑同一条提取管线（含常量引用推导）应恰计 3 个（基线 2 + 注入 1），实得 ${fakeQMarks}——≠3 说明判据恒真、管线未被经过、或注释剥离失效`);
 }
 
 // ── 对拍 ────────────────────────────────────────────────────────

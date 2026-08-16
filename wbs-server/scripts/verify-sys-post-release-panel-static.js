@@ -12,20 +12,25 @@
  * 报告 E 节），两层互补不重复。
  *
  * 覆盖：
- *   ① siHasActiveFastReleaseAuth 是唯一权威判据，被 siRenderActions（授权/撤销按钮显隐）引用——防
+ *   ① siHasActiveFastReleaseAuth 是唯一权威判据，被 siRenderActions（授权按钮"重新"措辞）引用——防
  *      详情页多处各写一份判据漂移（同后端 isActiveFastReleaseAuth 唯一实现先例）。[组B·S2 订正]
  *      原第二消费点 siModalSubmit（direct_release 勾选框显隐 + 提交收集条件）已随该勾选框整块拆除
  *      （方案 §4-2「整体替代」拍板），本组新增反向断言：siModalSubmit 函数体不应再出现
  *      siHasActiveFastReleaseAuth 引用（证明拆除干净，非"删了显示但漏删收集逻辑"这类半吊子拆除）。
+ *      [S2-fix3 ①订正] 撤销按钮显隐已从该镜像判据摘出，改读服务端消费投影 fast_release_active_auth
+ *      （用户裁定"截止时间前一直存在、过了截止时间隐藏"），不再是本条判据的消费点，见 ② 更新说明。
  *   ② siRenderActions 的 fastReleaseBtns 块：三个新增动作（授权/撤销/补验收）均只在 isAdminUser 下
- *      渲染；撤销按钮只在 hasActiveAuth 时出现；补验收按钮只在 pending 时出现。
+ *      渲染；[S2-fix3 ①订正] 撤销按钮改在 Number(iss.fast_release_active_auth)===1 时出现（消费投影，
+ *      不再跟随 hasActiveAuth 残留镜像）；补验收按钮只在 pending 时出现。
  *   ③ 三个新增弹窗函数（siModalFastReleaseAuthorize/siModalFastReleaseRevoke/siModalPostReleaseAccept）
  *      均已定义，且分别调用了正确的端点路径。
  *   ④ 详情页 postAcceptKv 三态分支（pending/passed/failed_derived）均存在且各自显式处理，兜底分支
  *      不静默吞值域外值。
  *   ⑤ 列表徽章 siPostAcceptFlagHtml 与 48h 判据 siIsPostAcceptOverdue 均已定义，且徽章函数确实调用
  *      了判据函数（非各写一份）。
- *   ⑥ 撤销弹窗 reason 字段标记必填（与 LOW-3 拍板"撤销原因必填"一致，前端体验层同步收紧）。
+ *   ⑥ [S2-fix3 ②订正] 撤销弹窗 reason 字段已回归恒必填（fTextarea req 参数恒为 true）——按钮已按 ②
+ *      的消费投影门控结构性过点隐藏，isExpired 快照分叉（曾经的 !isExpired 必填豁免）已无触发路径，
+ *      随之删除；请求体 body.reason 同步恢复无条件携带。
  *   ⑦ HTML 内联 <script> 语法有效（new Function 编译不执行，等价 node -c）。
  */
 'use strict';
@@ -108,11 +113,12 @@ check('fastReleaseBtns 块整体挂 isAdminUser 门（前端非授权源，仅�
     const block = body.slice(idx, idx + 1600);
     assert.ok(/isAdminUser\s*&&\s*iss\.type\s*===\s*'bug'/.test(block), 'fastReleaseBtns 块起手判断应为 isAdminUser && iss.type===\'bug\'（未见该条件组合）');
 });
-check('撤销按钮仅在 hasActiveAuth 为真时渲染（先行上线授权撤销）', () => {
+check('[S2-fix3 ①] 撤销按钮仅在 Number(iss.fast_release_active_auth)===1 时渲染（消费投影，非 hasActiveAuth 残留镜像）', () => {
     const body = bodyOf('siRenderActions');
     const idx = body.indexOf('fastReleaseBtns');
     const block = body.slice(idx, idx + 1600);
-    assert.ok(/if \(hasActiveAuth\) \{[\s\S]*?siModalFastReleaseRevoke/.test(block), '撤销按钮未见挂在 hasActiveAuth 条件分支内');
+    assert.ok(/if \(Number\(iss\.fast_release_active_auth\) === 1\) \{[\s\S]*?siModalFastReleaseRevoke/.test(block), '撤销按钮未见挂在 Number(iss.fast_release_active_auth) === 1 条件分支内');
+    assert.ok(!/if \(hasActiveAuth\) \{[\s\S]*?siModalFastReleaseRevoke/.test(block), '撤销按钮不应仍挂在 hasActiveAuth（残留镜像）条件分支内——过期后仍为 true，会与"过了截止时间隐藏"矛盾');
 });
 check('补验收按钮仅在 online_source_kind===authorized_fastlane 且 post_release_acceptance===pending 时渲染', () => {
     const body = bodyOf('siRenderActions');
@@ -134,11 +140,15 @@ check('siModalFastReleaseAuthorize 已定义且调用 POST .../fast-release-auth
     assert.ok(body, '未提取到 siModalFastReleaseAuthorize 函数体');
     assert.ok(body.includes('/fast-release-authorize'), '未见调用 fast-release-authorize 端点');
 });
-check('siModalFastReleaseRevoke 已定义且调用 POST .../fast-release-revoke，body 含 reason', () => {
+check('siModalFastReleaseRevoke 已定义且调用 POST .../fast-release-revoke，body.reason 无条件携带', () => {
     const body = bodyOf('siModalFastReleaseRevoke');
     assert.ok(body, '未提取到 siModalFastReleaseRevoke 函数体');
     assert.ok(body.includes('/fast-release-revoke'), '未见调用 fast-release-revoke 端点');
-    assert.ok(/body:\s*\{\s*reason\s*\}/.test(body), '撤销请求 body 未见携带 reason 字段（LOW-3 拍板：撤销原因必填，须传给后端）');
+    // [S2-fix3 ②订正] 撤销按钮已按 ② 的消费投影门控结构性过点隐藏，S2/S2-fix/S2-fix2 期间存在过的
+    //   isExpired 快照分叉（reason 有值才携带/收拢在 if (!isExpired) 分支内）已随之删除，回归无条件
+    //   携带 body.reason（详见姊妹文件 verify-sys-fastlane-panel-static.js ⑭ 组的完整覆盖）。
+    assert.ok(/const body = \{ reason \};/.test(body), '未见 body.reason 无条件携带（const body = { reason };）');
+    assert.ok(!/isExpired/.test(body), 'siModalFastReleaseRevoke 不应再出现 isExpired——快照分叉应已随按钮门控变更删除');
 });
 check('siModalPostReleaseAccept 已定义且调用 POST .../post-release-accept，body 含 verdict', () => {
     const body = bodyOf('siModalPostReleaseAccept');
@@ -146,9 +156,12 @@ check('siModalPostReleaseAccept 已定义且调用 POST .../post-release-accept�
     assert.ok(body.includes('/post-release-accept'), '未见调用 post-release-accept 端点');
     assert.ok(body.includes('verdict'), '请求体未见 verdict 字段');
 });
-check('撤销弹窗 reason 字段标记必填（fTextarea 第 4 参 req=true）', () => {
+check('[S2-fix3 ②订正] 撤销弹窗 reason 字段必填标记恢复恒为 true（isExpired 分叉已删，回归无条件必填）', () => {
     const body = bodyOf('siModalFastReleaseRevoke');
-    assert.ok(/fTextarea\('reason',\s*'撤销原因',\s*'',\s*true/.test(body), '撤销原因字段未见 fTextarea(...,true,...) 必填标记（应与后端 LOW-3 必填校验对齐）');
+    // [先行上线授权超时收回·S2 F2 订正] 曾把恒为字面量 true 改成按 !isExpired 分叉——S2-fix3 起撤销
+    //   按钮已按消费投影门控结构性过点隐藏，isExpired 快照分叉不可达，已删除，reason 必填标记回归恒
+    //   为字面量 true，不再是表达式。
+    assert.ok(/fTextarea\('reason',\s*'撤销原因',\s*'',\s*true,/.test(body), '撤销原因字段未见 fTextarea(...,true,...) 恒必填标记');
 });
 
 console.log('— ④ 详情页补验收 kv 三态分支 —');

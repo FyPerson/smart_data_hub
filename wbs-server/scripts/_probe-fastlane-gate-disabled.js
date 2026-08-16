@@ -3,7 +3,9 @@
 //   execFile 调用。为什么独立子进程：routes/sys-iteration 工厂在同一进程内二次实例化会 init 挂起
 //   （进程级单例状态·测试基建限制，非产品缺陷），干净进程单实例=与全部 verify 套件同构的已证可行路径。
 //   本探针：fastlaneAuthorizeEnabled:false + 独立内存库 → 打授权（应 403 FAST_RELEASE_FEATURE_DISABLED，
-//   且闸在 id 校验之前，空库不存在的 id 也应 403 而非 400）+ 打撤销（不受闸，应走常规 400 id 校验）。
+//   且闸在 id 校验之前，空库不存在的 id 也应 403 而非 400）+ 打撤销（不受闸，应走常规业务校验——
+//   [S1·先行上线授权超时收回] 419/420 收口后 reason 校验移到事务内分流之后，故不存在的 id 现在先撞
+//   404 SYS_ISSUE_NOT_FOUND，非旧版的 400 REASON_REQUIRED）。
 //   结果以单行 JSON 写 stdout，断言留在父套件做（探针只采集事实）。
 const http = require('http');
 const express = require('express');

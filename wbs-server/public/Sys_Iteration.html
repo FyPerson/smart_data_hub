@@ -2404,7 +2404,7 @@
     //   type='bug' ∧ status='待验证' ∧ fast_release_active_auth（S6 三列前端直接 AND，禁自拼授权
     //   判据）。活跃授权的权威判定在后端 isActiveFastReleaseAuth，列表端点（S6）已把结果算成布尔值
     //   fast_release_active_auth 随行下发，本函数不读六列原始授权字段自行判断——那会与详情页既有
-    //   siHasActiveFastReleaseAuth（读六列原始字段的前端镜像判据，服务授权/撤销按钮）长出第二份
+    //   siHasActiveFastReleaseAuth（读六列原始字段的前端镜像判据，服务授权按钮"重新"措辞）长出第二份
     //   判据，两处随后端演进必然漂移。列表这条走"后端算好布尔、前端只 AND 组合"路线，是刻意的不同
     //   设计（列表端点本就无法暴露六列原始授权字段——SELECT 是显式列投影，加六列=扩大不必要的
     //   API 面），非与详情页判据矛盾。
@@ -3121,7 +3121,10 @@
         //   的区块，只是分属两条不同的上线路径：orchBlock=批次发布路径，本区块=先行上线快车道路径，
         //   结构上互斥不会同时非空——orchBlock 仅 bug+待上线态出现，本区块仅 bug+待验证态挂牌或
         //   consumed 部署留痕态出现，两者所需 status 不同）。置于 orchBlock 之后、通知之前。
-        const fastlaneBlock = siFastlaneExecSectionHtml(iss, r.data.fast_release_executors, r.data.fast_release_exec_progress);
+        // [S1·先行上线授权超时收回·S2 F1] 授权窗口/超时提示行拼在执行区之前——不依赖 status='待验证'
+        //   门控（siFastlaneAuthWindowHtml 自身条件见其定义处），故待处理/处理中窗口期（执行区尚未出现）
+        //   也能看到；两者拼接输出，非残留时前者为空串，视觉上不留空行。
+        const fastlaneBlock = siFastlaneAuthWindowHtml(iss) + siFastlaneExecSectionHtml(iss, r.data.fast_release_executors, r.data.fast_release_exec_progress);
 
         // 抽屉 body 顺序（对齐 Data_Correction 抽屉范式；附件融入 2026-07-19：spec 融入基本信息、delivery+screenshot
         //   合并为「开发交付」区置于 Commit 记录后，独立「附件」区已取消）：
@@ -3192,10 +3195,11 @@
     //   同一份 isActiveFastReleaseAuth 判据）——**不再**调用前端镜像谓词 siHasActiveFastReleaseAuth。
     //   归一动机：本区块首版曾直接调用该镜像谓词（读六列原始字段自行判断），与列表端"后端算好布尔、
     //   前端只读"的路线不一致，虽然两份判据当时逐字同源不会立刻出错，但属于"能收敛成单一权威却没
-    //   收敛"的隐患。siHasActiveFastReleaseAuth **未删**——授权/撤销按钮（siRenderActions）与授权
-    //   弹窗标题措辞（siModalFastReleaseAuthorize）两处语境仍在用它（那两处不消费 fast_release_
+    //   收敛"的隐患。siHasActiveFastReleaseAuth **未删**——授权按钮"重新"措辞（siRenderActions）与
+    //   授权弹窗标题措辞（siModalFastReleaseAuthorize）两处语境仍在用它（那两处不消费 fast_release_
     //   executors/fast_release_exec_progress，没有对应的 DTO 布尔字段可读，继续保留前端镜像判据），
-    //   本次只切执行区这一个消费点，非全删（grep 消费面见交付报告）。
+    //   本次只切执行区这一个消费点，非全删（grep 消费面见交付报告）。[S2-fix3 ①·用户裁定] 撤销按钮
+    //   显隐已从这份镜像判据摘出改读消费投影 fast_release_active_auth，不再是它的消费点。
     //   区块整体渲染条件 = 徽章条件成立（type='bug' ∧ status='待验证' ∧ fast_release_active_auth）
     //   **或** executors 集合非空（呼应 S6 详情 DTO 的 existence-gated 语义：非空意味着"仍在挂牌进行
     //     中"或"已消费的部署留痕"，见 index.js GET /sys-issues/:id 详情端点 fastReleaseExecutors 查询
@@ -3204,8 +3208,50 @@
     //     后者会漏掉"当日无值班挂牌"的 0/0 场景（此时 executors=[]，但 admin 恰恰需要看到这个区块
     //     才能点「添加执行人」补人，方案 §4-1）。
     function siFastlaneExecHasContent(iss, executors) {
+        // ⚠️ [S1·先行上线授权超时收回] iss.fast_release_active_auth 语义已随 S1 后端批次从"残留"改判
+        //   "可消费"（详情端点同批切换，见 index.js GET /sys-issues/:id 该字段计算处注释）——本判据继续
+        //   逐字复用同一字段，随后端语义变化自动熄灭（过期即 0），无需前端跟着改判据本身。
         const badgeCond = iss.type === 'bug' && iss.status === '待验证' && Number(iss.fast_release_active_auth) === 1;
         return badgeCond || !!(executors && executors.length);
+    }
+    // [S1·先行上线授权超时收回·S2 F1 收口·方案 §6 展示面] 授权窗口/超时信息行——独立于「先行上线执行区」
+    //   （siFastlaneExecSectionHtml 仅 status='待验证' 起才渲染），本函数在授权处于「待处理/处理中」窗口
+    //   期（尚未提交、执行区还不出现）时同样要能看到截止提示，故不依赖 status 门控，只认服务端两个投影
+    //   字段：fast_release_active_auth（S1 起=可消费）/fast_release_auth_expired（残留∧已过期）。
+    //   ⚠️ deadline 字符串取自服务端 fast_release_auth_deadline（仅残留时非空，详情端点 LOW-3 收口）——
+    //   前端不自行推算 deadline，只做展示；"剩余约 N 小时"为加载时一次性粗算，不做秒级/分钟级 tick。
+    function siFastlaneAuthWindowHtml(iss) {
+        if (!iss) return '';
+        // [S2-fix LOW-3] 联判补 fast_release_auth_deadline——deadline 与 expired 同源残留门控（后端详情
+        //   端点同一次 isActiveFastReleaseAuth 判定产出），零成本纵深：万一 expired 字段未来被改成"可
+        //   消费取反"这类与残留脱钩的口径，deadline 仍保持"仅残留时非空"（LOW-3 既有收口），本联判让
+        //   非残留的普通单免疫误显红色"已超时"标——两个字段任一算错都不会单独触发误报。
+        // [S2-fix2 ①·codex 424-M1 精神部分采纳] 联判本身不动（主会话驳回改判据方向，理由已归档：改联判
+        //   会削弱而非加强上面这条纵深防御）——但联判不满足这个理论上不可达的组合态（后端投影两列本应
+        //   同源不可能漂移，若真出现说明详情端点两列计算脱钩）不该静默吞掉，留 console.warn 观察线索，
+        //   不升级为红标（避免把一个后端数据一致性问题误导成"这单真的超时了"）。
+        if (Number(iss.fast_release_auth_expired) === 1) {
+            if (iss.fast_release_auth_deadline) {
+                return `<div class="si-gate-hint" style="color:#dc2626;font-weight:600;background:#fef2f2;border-color:#fecaca">⏰ 已超时（次日 8:00 未启用，转常规验收）</div>`;
+            }
+            console.warn('[siFastlane] expired=1 但 deadline 缺失——后端投影两列漂移，请核详情端点', iss.id);
+        }
+        if (Number(iss.fast_release_active_auth) === 1 && iss.fast_release_auth_deadline) {
+            // deadline='YYYY-MM-DD HH:MM:SS'（服务端 datetime('now','localtime') 出品，本地时区）——分量
+            //   构造 Date，禁止整串扔给 new Date() 解析（同本文件其余日期处理既有纪律：整串解析在纯日期/
+            //   带时分两种输入下分别落 UTC 午夜/本地时区两套规则，容易踩偏移量坑）。
+            const m = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/.exec(String(iss.fast_release_auth_deadline));
+            if (m) {
+                const dl = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5]), Number(m[6]));
+                const hoursLeft = Math.max(0, Math.round((dl.getTime() - Date.now()) / 3600000));
+                const mmdd = m[2] + '-' + m[3];
+                // [S2-fix LOW-1] 渲染服务端 deadline 自带的时分（${m[4]}:${m[5]}），不硬编码"08:00"字面量
+                //   ——次日 8:00 是业务规则，规则本身只应活在后端（fastReleaseAuthConsumeDeadline），前端
+                //   只忠实展示服务端算出的值，不复述规则常量（若规则将来调整，前端零改动自动跟随）。
+                return `<div class="si-gate-hint">⏳ 先行上线窗口截止 ${esc(mmdd)} ${esc(m[4])}:${esc(m[5])}（剩余约 ${hoursLeft} 小时）</div>`;
+            }
+        }
+        return '';
     }
     function siFastlaneExecSectionHtml(iss, executors, progress) {
         if (!siFastlaneExecHasContent(iss, executors)) return '';
@@ -3328,7 +3374,12 @@
         eta_auto_from_deadline: '预计取自期望完成', eta_auto_sla: '预计按默认规则生成',
         // [方案 §14·S11] feature 超期完成理由——独立徽章而非落回通用「备注」（同 §13 两码一带模式，见
         //   下方 SI_TL_NOTE_OWN_LABEL_CODES）——完成超期是需要一眼识别的高关注度事件。
-        completion_overrun_reason: '完成超期'
+        completion_overrun_reason: '完成超期',
+        // [S1·先行上线授权超时收回·S2 F3 收口] 幂等超时终结内核唯一留痕码——独立徽章而非落回通用「备注」
+        //   （同 fast_release_authorize/_revoke 一带模式，见下方 SI_TL_NOTE_OWN_LABEL_CODES）——超时收回是
+        //   需要与"人工撤销"（fast_release_revoke）区分辨识的高关注度事件（成因不同：一个是管理员主动
+        //   操作，一个是系统按规则自动收回）。
+        fast_release_auth_expired: '授权超时收回'
     };
     const SI_TL_CLS = {
         created: 'si-tl-amber', derive: 'si-tl-amber',
@@ -3387,7 +3438,12 @@
         // [方案 §14·S11] 完成超期归 amber（同既有 created/derive/liaison_test_skip_* "值得留意的事件"
         //   同族）——非程序性routine标记（§13 两码"系统决定了取值"的性质），是"完成事实晚于业务方期望"
         //   这一需要引起注意的信号，但也非 return/revoke 那种"拒绝/收回"负面动作，故不归 red。
-        completion_overrun_reason: 'si-tl-amber'
+        completion_overrun_reason: 'si-tl-amber',
+        // [S1·先行上线授权超时收回·S2 F3 收口] 归 red——与既有 fast_release_revoke/fast_release_roster_cleared
+        //   同族语义（"授权/集合被收回"这个动作性质本身，同 :3376 一带"徽章色反映动作性质非底层业务结果
+        //   正负"的既有取色原则），不因触发方是系统自动而非人工操作就改归其它色——对用户而言"这份授权
+        //   没了"是同一件事，只是留痕文案区分成因（授权超时收回 vs 先行上线授权撤销）。
+        fast_release_auth_expired: 'si-tl-red'
     };
     // 上线体统一重构 C2b（199 审 MED-3）：release_add/release_remove/release_date_change/release_schedule_cancel/
     //   release_published 五个 action_code 全部落 event_type='scope_change'（§6.13），此前 siRenderTimeline 的
@@ -3469,7 +3525,7 @@
     //   产出这个值，故本判断只对存量行生效，不影响新行（新行走后面 else 兜底分支原样 esc 显示）。
     // [MED-2·组A 起 + 组B 扩] note 型事件里"取自己徽章而非落回通用「备注」"的 action_code 白名单——
     //   与 verify-sys-timeline-label-coverage.js 的 computeDisplayKey 同一份口径同源，改这里必须同改那边。
-    const SI_TL_NOTE_OWN_LABEL_CODES = new Set(['assign_overdue_eta', 'fast_release_authorize', 'fast_release_revoke', 'fast_release_staged', 'fast_release_exec_confirm', 'fast_release_roster_added', 'fast_release_roster_removed', 'fast_release_roster_cleared', 'post_release_accept_pass', 'post_release_accept_fail', 'eta_auto_from_deadline', 'eta_auto_sla', 'completion_overrun_reason']);
+    const SI_TL_NOTE_OWN_LABEL_CODES = new Set(['assign_overdue_eta', 'fast_release_authorize', 'fast_release_revoke', 'fast_release_staged', 'fast_release_exec_confirm', 'fast_release_roster_added', 'fast_release_roster_removed', 'fast_release_roster_cleared', 'post_release_accept_pass', 'post_release_accept_fail', 'eta_auto_from_deadline', 'eta_auto_sla', 'completion_overrun_reason', 'fast_release_auth_expired']);
     // [S3·§5] fast_release_exec_online **不进本 Set**——event_type='status_change'（同 accept/release/
     //   liaison_test_pass 等既有 status_change 事件同款），走的是另一条渲染路径（直接用 action_code 查
     //   SI_TL_LABEL，不经本 Set 判定），加进来不生效，反而误导读者以为它是 note 型事件。
@@ -4728,15 +4784,23 @@
         //   三个自持端点（fast-release-authorize/-revoke/post-release-accept），不经 meta/typeFlows 通用
         //   roleGuard 模型，独立渲染（同 chatBtn/adminDelBtn/oaBtn 范式）。前端仅镜像展示，真闸在后端；
         //   授权/撤销窗口镜像后端 :7936 一带 WHERE（type='bug' ∧ status∈待处理/处理中 ∧ released_at/
-        //   online_source 皆空）；hasActiveAuth 复用 siHasActiveFastReleaseAuth（与 submit 弹窗勾选框
-        //   显隐同一份判据，防两处漂移）；补验收按钮镜像后端窗口（online_source_kind==='authorized_fastlane'
-        //   ∧ post_release_acceptance==='pending'）。
+        //   online_source 皆空）；hasActiveAuth 复用 siHasActiveFastReleaseAuth（残留镜像，六列判据不含
+        //   时间）——**仅**服务"授权"按钮的"重新"措辞（与 submit 弹窗勾选框显隐同一份判据，防两处漂移）
+        //   及 siModalFastReleaseAuthorize 弹窗标题/说明文案两处语境（是否有旧授权记录会被覆盖，与授权
+        //   是否已过消费窗口无关——即便旧授权已过期，点"授权"仍是覆盖一条旧记录，措辞上仍是"重新"）。
+        //   [S2-fix3 ①·用户裁定] 撤销按钮显隐**不跟随** hasActiveAuth，改读服务端可消费投影
+        //   iss.fast_release_active_auth（残留∧未过消费窗口）——"截止时间前一直存在、过了截止时间隐藏"：
+        //   过期后授权虽仍"残留"（六列未清，等某个写侧触碰点收集），但已无法再被前台消费，继续显示
+        //   撤销按钮会让 admin 误以为还能靠它挽回；过期详情区仍有 siFastlaneAuthWindowHtml 的"已超时"
+        //   红标可见（该函数不动），按钮隐藏不等于线索消失。8:00 后前端零改动自动熄灭（consumable 语义
+        //   是后端算好的布尔，非前端自推时间）。补验收按钮镜像后端窗口（online_source_kind===
+        //   'authorized_fastlane' ∧ post_release_acceptance==='pending'）。
         let fastReleaseBtns = '';
         if (isAdminUser && iss.type === 'bug') {
             if (['待处理', '处理中'].includes(iss.status) && iss.released_at == null && iss.online_source == null) {
                 const hasActiveAuth = siHasActiveFastReleaseAuth(iss);
                 fastReleaseBtns += `<button class="u-btn-secondary u-btn-sm" onclick="siModalFastReleaseAuthorize(siDetail.issue)">${hasActiveAuth ? '重新先行上线授权' : '先行上线授权'}</button>`;
-                if (hasActiveAuth) {
+                if (Number(iss.fast_release_active_auth) === 1) {
                     fastReleaseBtns += `<button class="u-btn-danger u-btn-sm" onclick="siModalFastReleaseRevoke(siDetail.issue)">撤销先行上线授权</button>`;
                 }
             }
@@ -5356,6 +5420,11 @@
         });
     }
     function siModalFastReleaseRevoke(iss) {
+        // [S2-fix3 ②·用户裁定] 撤销按钮改为"截止时间前一直存在、过了截止时间隐藏"（siRenderActions 门控
+        //   已改读 fast_release_active_auth 消费投影）——按钮过点结构性不可达后，本函数曾经的
+        //   isExpired（fast_release_auth_expired===1）快照分支（弹窗文案二选一/placeholder"填写内容不会
+        //   记录"/reason 免必填与长度校验豁免）已无触发路径，**删除**，回归单一撤销语义：reason 无条件
+        //   必填 + 200 字校验无条件生效。
         const fields = [
             note('撤销后开发提交将不再触发先行上线挂牌，需管理员重新授权才能再次使用先行上线通道。'),
             fTextarea('reason', '撤销原因', '', true, '必填：trim 后 1~200 字'),
@@ -5363,9 +5432,15 @@
         siModal('撤销先行上线授权 ' + siIssueDisplayNoById(iss.id), fields, async v => {
             const reason = (v.reason || '').trim();
             if (!reason || reason.length > 200) { showToast('撤销原因必填（trim 1~200字）', 'error'); return false; }
-            const r = await siApi('/sys-issues/' + iss.id + '/fast-release-revoke', { method: 'POST', body: { reason } });
+            const body = { reason };
+            const r = await siApi('/sys-issues/' + iss.id + '/fast-release-revoke', { method: 'POST', body });
             if (!r.ok) { siApiErr(r); return false; }
-            showToast('已撤销先行上线授权', 'success');
+            // [S1·S2 F2·S2-fix3 ②保留] 响应分叉是本函数唯一保留的 expired 相关逻辑——按钮已按消费投影
+            //   隐藏，正常点击路径不会再撞到后端格4（残留∧过期）。但存在并发窗口：用户打开详情页后
+            //   停留跨过次日 8:00，此时前端仍持有过点前渲染出的按钮/未刷新的 iss 快照，提交仍可能落到
+            //   后端 classifyFastReleaseRevokeCase 的格4，返回 expired:true（reason 被后端忽略不落
+            //   summary）。该分叉存在的唯一理由就是这个竞态窗口，不是常规路径。
+            showToast((r.data && r.data.expired === true) ? '已按超时收回（该授权已超时，所填撤销原因未记录）' : '已撤销先行上线授权', 'success');
             return true;
         });
     }

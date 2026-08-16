@@ -1350,7 +1350,8 @@ async function main() {
     // 直接调内核——内核假定调用方已持事务锁，本组自行开/收事务（同全部 verify 直调 _internals 范式，
     // 不经过 sysBeginImmediate/sysCommit——那两个函数未导出，且本组本就是单线程顺序执行，无并发风险）。
     await run('BEGIN IMMEDIATE');
-    const flipResult = await I.attemptFastReleaseFlipInTxn(id, { id: 1, name: '管理员' }, 'confirm');
+    const flip16NowStr = (await get(`SELECT datetime('now','localtime') AS n`)).n;
+    const flipResult = await I.attemptFastReleaseFlipInTxn(id, { id: 1, name: '管理员' }, 'confirm', flip16NowStr);
     await run('COMMIT');
     assert.deepStrictEqual(flipResult, { flipped: false }, `[16] 空集合应恒不可翻，实得 ${JSON.stringify(flipResult)}`);
     const afterRow = await issueRow(id);
@@ -1466,7 +1467,8 @@ async function main() {
 
     await run('BEGIN IMMEDIATE');
     let thrown19b = null;
-    try { await I.attemptFastReleaseFlipInTxn(id2, { id: 1, name: '管理员' }, 'confirm'); }
+    const flip19bNowStr = (await get(`SELECT datetime('now','localtime') AS n`)).n;
+    try { await I.attemptFastReleaseFlipInTxn(id2, { id: 1, name: '管理员' }, 'confirm', flip19bNowStr); }
     catch (e) { thrown19b = e; }
     await run('ROLLBACK');   // 内核自身 UPDATE 未提交生效，这里的 ROLLBACK 只是收掉本组自开的事务外壳
     assert.ok(thrown19b, '[19b] 内核应抛错（changes≠1），不静默返回 flipped:false 掩盖这是"应翻牌但翻牌失败"而非"本就不该翻"');
@@ -1737,7 +1739,8 @@ async function main() {
     assert.strictEqual(r25c.status, 200, `[25c-前置] submit 应 200，实得 ${r25c.status}`);
     await run(`UPDATE sys_fast_release_executors SET exec_status='done', executed_at=datetime('now','localtime') WHERE issue_id=?`, [id25c]);
     await run('BEGIN IMMEDIATE');
-    const flipResult25c = await I.attemptFastReleaseFlipInTxn(id25c, { id: 1, name: '管理员' }, 'roster_remove');
+    const flip25cNowStr = (await get(`SELECT datetime('now','localtime') AS n`)).n;
+    const flipResult25c = await I.attemptFastReleaseFlipInTxn(id25c, { id: 1, name: '管理员' }, 'roster_remove', flip25cNowStr);
     await run('COMMIT');
     assert.strictEqual(flipResult25c.flipped, true, '[25c] 全 done 集合应正常翻牌（roster_remove trigger 同样走全套翻牌逻辑，只是 summary 文案分支不同）');
     const onlineTl25c = await timelineRowsByCode(id25c, 'fast_release_exec_online');
@@ -2643,6 +2646,10 @@ async function main() {
                        LEFT JOIN sys_fast_release_executors fe ON fe.issue_id = i.id AND fe.removed_at IS NULL
                       GROUP BY i.id`;
 
+    // [S1·先行上线授权超时收回] 探针签名 S1 起含 nowStr——本组扫描全程共用同一个物化值（同"扫描开始处
+    //   统一取时"纪律，同 index.js 该函数定义处注释）。
+    const inv12NowStr = (await get(`SELECT datetime('now','localtime') AS n`)).n;
+
     // [50a] 真实本地库（task_pool.db）终态零违例——同 [7c]/[49a] 既有范式。
     const realDbPath50 = path.join(__dirname, '..', 'task_pool.db');
     if (fs.existsSync(realDbPath50)) {
@@ -2651,7 +2658,7 @@ async function main() {
       const realTables50 = await realAll50(`SELECT name FROM sqlite_master WHERE type='table' AND name='sys_fast_release_executors'`);
       if (realTables50.length > 0) {
         const rows = await realAll50(aggSql);
-        const violations = I.fastReleaseNonFlippedFullDoneViolations(rows);
+        const violations = I.fastReleaseNonFlippedFullDoneViolations(rows, inv12NowStr);
         assert.deepStrictEqual(violations, [], `[50a] 真实本地库扫描应零违例（候选 ${rows.length} 单），实得 ${JSON.stringify(violations)}`);
         ok(`[50a] ⭐⭐ 真实本地库（task_pool.db）不变量 ⑫ 探针：候选 ${rows.length} 单，违例计数=0`);
       } else {
@@ -2672,7 +2679,7 @@ async function main() {
     assert.strictEqual((await fastExecRows(id)).length, 1, '[50b-前置] 应恰 1 行（值班人 pending）');
     await run(`UPDATE sys_fast_release_executors SET exec_status='done', executed_at=datetime('now','localtime') WHERE issue_id = ?`, [id]);
     const rowsAfterInject = await all(`${aggSql.replace('GROUP BY i.id', 'WHERE i.id = ? GROUP BY i.id')}`, [id]);
-    const violationsAfterInject = I.fastReleaseNonFlippedFullDoneViolations(rowsAfterInject);
+    const violationsAfterInject = I.fastReleaseNonFlippedFullDoneViolations(rowsAfterInject, inv12NowStr);
     assert.strictEqual(violationsAfterInject.length, 1, `[50b] 探针应恰命中注入的违例（issue ${id}：全 done 但仍待验证），实得 ${JSON.stringify(violationsAfterInject)}`);
     ok(`[50b] ★对照组：SQL 造态绕过共享翻牌内核直接标 done（不经 confirm 端点）→ 探针正确判红（命中 issue ${id}）`);
 
@@ -2680,11 +2687,12 @@ async function main() {
     //   证明内核对这条被污染的行仍能正确判定并翻牌（造态只污染了 exec_status，未污染六列活跃授权，
     //   内核重新聚合后应能翻）。
     await run('BEGIN IMMEDIATE');
-    const flipResult = await I.attemptFastReleaseFlipInTxn(id, { id: 1, name: '管理员' }, 'confirm');
+    const flip50cNowStr = (await get(`SELECT datetime('now','localtime') AS n`)).n;
+    const flipResult = await I.attemptFastReleaseFlipInTxn(id, { id: 1, name: '管理员' }, 'confirm', flip50cNowStr);
     await run('COMMIT');
     assert.strictEqual(flipResult.flipped, true, '[50c] 内核补翻牌应成功（造态未破坏翻牌 WHERE 的前置条件）');
     const rowsAfterCleanup = await all(`${aggSql.replace('GROUP BY i.id', 'WHERE i.id = ? GROUP BY i.id')}`, [id]);
-    const violationsAfterCleanup = I.fastReleaseNonFlippedFullDoneViolations(rowsAfterCleanup);
+    const violationsAfterCleanup = I.fastReleaseNonFlippedFullDoneViolations(rowsAfterCleanup, inv12NowStr);
     assert.deepStrictEqual(violationsAfterCleanup, [], `[50c] 补翻牌后该 issue 应零违例，实得 ${JSON.stringify(violationsAfterCleanup)}`);
     ok('[50c] 清理（内核补翻牌）后探针恢复零违例——违例态本身是可通过"让内核正确执行"消解的瞬时态，非结构性死锁');
   }

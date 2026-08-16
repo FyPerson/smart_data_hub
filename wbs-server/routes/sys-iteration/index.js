@@ -3815,13 +3815,21 @@ module.exports = (deps) => {
           const authProbeRow = await dbGetAsync(
             `SELECT fast_release_auth_at, fast_release_revoked_at, fast_release_consumed_at, released_at, online_source, reopened_at
                FROM sys_issues WHERE id = ?`, [issueId]);
+          // [S1·先行上线授权超时收回·方案 §3 归属表"弹回探针（只读）"] 残留判据仍是外层闸（避免无授权
+          //   场景多查一次时钟）；命中残留后再判"可消费"——过期授权不应再挡弹回（转常规验收的一部分，
+          //   本处只判不终结，终结留给某个写侧触碰点，同方案 §5 表"读侧原则"）。
           if (authProbeRow && isActiveFastReleaseAuth(authProbeRow)) {
-            const doneExecRow = await dbGetAsync(
-              `SELECT 1 AS x FROM sys_fast_release_executors WHERE ${sysFastReleaseExecActiveWhere()} AND exec_status = 'done' LIMIT 1`,
-              [issueId]);
-            if (doneExecRow) {
-              throw new SysTransitionError(409, 'FASTLANE_DEPLOY_IN_PROGRESS',
-                '先行上线执行已在进行中（存在已确认执行的执行人），暂不可对开发花名册做会导致弹回处理中的操作，请等待翻牌完成或联系管理员处理');
+            const nowRow = await dbGetAsync(`SELECT datetime('now','localtime') AS n`);
+            const nowStr = nowRow && nowRow.n;
+            if (!nowStr) throw new SysTransitionError(500, 'FAST_RELEASE_NOW_QUERY_FAILED', '获取服务器时间失败（内部错误）');
+            if (isConsumableFastReleaseAuth(authProbeRow, nowStr)) {
+              const doneExecRow = await dbGetAsync(
+                `SELECT 1 AS x FROM sys_fast_release_executors WHERE ${sysFastReleaseExecActiveWhere()} AND exec_status = 'done' LIMIT 1`,
+                [issueId]);
+              if (doneExecRow) {
+                throw new SysTransitionError(409, 'FASTLANE_DEPLOY_IN_PROGRESS',
+                  '先行上线执行已在进行中（存在已确认执行的执行人），暂不可对开发花名册做会导致弹回处理中的操作，请等待翻牌完成或联系管理员处理');
+              }
             }
           }
         }
@@ -4195,6 +4203,13 @@ module.exports = (deps) => {
   //   没有对应违例项。这是 P7 语境下的已知留白（悬垂授权/跨字段一致性问题留给 §3.2 实现时一并核实），
   //   锚点见 docs/local/系统迭代/任务_预计完成时间与先行上线_长任务锚点_20260812.md §9 P7。
   //
+  //   ⭐⭐ [S1·先行上线授权超时收回·方案 20260816_v1.2 §3 谓词双语义拆分] 本谓词是**残留判据**（应清场，
+  //   不含时间）——本节这条五（六）列定义**逐字冻结不改**。新增"可消费判据"= 残留 ∧ 未过消费窗口
+  //   （见下方 isConsumableFastReleaseAuth/FAST_RELEASE_CONSUMABLE_AUTH_WHERE_SQL，紧邻
+  //   SYS_CLEAR_FAST_RELEASE_AUTH_FIELDS_SQL 之后定义）——凡是"能不能被消费/翻牌/挂牌"的判断点改用
+  //   可消费判据，凡是"是否还挂着一份未清理的授权"（五事件终结检查/成组约束等）的判断点仍用本残留判据，
+  //   两者不是新旧替代关系，是并存的两个不同问题的答案，归属表见方案 §3。
+  //
   // [组 B·SB2 落地] 上方注释块此前只是"将来 §3.2 实现时必须用这条谓词"的规格声明，尚无可调用实现——
   //   本函数是它的唯一落地：入参需含 fast_release_auth_at/_revoked_at/_consumed_at/released_at/
   //   online_source 五列（同事务快照读，submit 端点直上分支的初始 SELECT 已扩展这五列）。
@@ -4304,6 +4319,137 @@ module.exports = (deps) => {
     'fast_release_consumed_at = NULL',
   ];
 
+  // ── B1'·先行上线授权超时收回（方案 20260816_v1.2 §2/§3）：谓词双语义拆分之"可消费判据" ──────────
+  //   背景：上面 isActiveFastReleaseAuth/FAST_RELEASE_ACTIVE_AUTH_WHERE_SQL 只判"残留"（六列现值是否
+  //   还挂着一份未被撤销/消费/终结的授权），不含时间——这是历史既有语义，本批**逐字不改**（v1.2 §3
+  //   归属表明文冻结）。新增"可消费"= 残留 ∧ 未过窗口——窗口 = [fast_release_auth_at, 授权日次日
+  //   08:00:00)，右开区间，等于整点即失效（同 :2663 一带 resolveFeatureDeadlineDirectTake 的
+  //   expired=candidateValue<=nowStr 口径）。
+  //   消费窗口截止时刻计算——y/m/d 数字分量构造 Date 对象（同 computeSysDefaultEta/
+  //   resolveFeatureDeadlineDirectTake 头部注释同款纪律：禁止把 'YYYY-MM-DD HH:MM:SS' 整串扔给
+  //   `new Date(str)` 解析，纯日期会被当 UTC 午夜解析、带时分会被当本地时区解析，两者相差时区偏移量）。
+  //   入参 authAt 理论恒为 datetime('now','localtime') 自产字符串（fast_release_authorize 端点唯一写点），
+  //   仍不信任"理论恒合法"这条隐含前提——正则不命中即 fail-closed 抛 500（同 :4234 isActiveFastReleaseAuth
+  //   逐列 fail-closed 风格，非静默返回一个可能误导后续判定的兜底值）。
+  function fastReleaseAuthConsumeDeadline(authAt) {
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(authAt == null ? '' : authAt));
+    if (!m) {
+      throw new SysTransitionError(500, 'FAST_RELEASE_PREDICATE_INPUT_INVARIANT',
+        `先行上线授权消费截止时刻计算失败：fast_release_auth_at 非法（${JSON.stringify(authAt)}）`);
+    }
+    const y = Number(m[1]), mo = Number(m[2]), d = Number(m[3]);
+    const dt = new Date(y, mo - 1, d);   // 授权日零点（本地分量构造，无 UTC 解析陷阱）
+    // [S1-fix3 L] 构造后回比对——同族既有校验器纪律（normalizeSysDatetime/computeSysDefaultEta 等），
+    //   正则只锁"两位数字"，挡不住 2026-02-30 这类格式合法但日期不存在的值：JS Date 会把它悄悄进位成
+    //   3 月 2 日，此前本函数会静默算出一个基于这个被规范化过的日期的"截止时刻"，与注释自称的 fail-closed
+    //   契约不符。分量不回等即非法日历日期，抛同码 500（与上面正则不命中一致，同一失败面，不新造码）。
+    if (dt.getFullYear() !== y || dt.getMonth() !== mo - 1 || dt.getDate() !== d) {
+      throw new SysTransitionError(500, 'FAST_RELEASE_PREDICATE_INPUT_INVARIANT',
+        `先行上线授权消费截止时刻计算失败：fast_release_auth_at 非法（${JSON.stringify(authAt)}，日历日期不存在）`);
+    }
+    dt.setDate(dt.getDate() + 1);        // 次日
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())} 08:00:00`;
+  }
+  // [S2·F4-①登记] 脏数据（非法日历日期）上 JS 与 SQL 两侧的失败**形态**不同，但**均 fail-closed**，
+  //   非写读不同源：本函数（JS 侧）遇非法 fast_release_auth_at 响亮抛 500，调用方（本文件全部调用点）
+  //   不会静默吞掉这个异常；FAST_RELEASE_CONSUMABLE_AUTH_WHERE_SQL 片段（SQL 侧）里
+  //   `datetime(fast_release_auth_at,'start of day',...)` 遇同样的非法值不报 SQL 错误，而是按 SQLite
+  //   日期函数既有语义静默返回 NULL——`? < NULL` 三值逻辑求值为 NULL（非 TRUE），CASE WHEN 落到 ELSE 0，
+  //   即"判不可消费"。两条路径的失败**表现**不同（一个是异常中断、一个是安全的否定结果），但收敛方向
+  //   一致：脏数据永远不会被误判成"可消费"（JS 侧直接炸穿更早的调用链、SQL 侧稳定落在保守的 0），故
+  //   这不是"同一件事两处实现却给出不同答案"的写读不同源问题，是同一 fail-closed 原则在两种执行环境
+  //   （抛异常 vs 三值逻辑）下的自然不同表现形态。
+
+  // 可消费判据（JS 侧）——内部调用既有 isActiveFastReleaseAuth，六列判据逻辑零复制（残留不成立直接
+  //   false，不必再算截止时刻）；nowStr 由调用方在事务开始处统一物化（方案 §2"统一取时"纪律：同一次
+  //   事务内 JS/SQL 消费同一个 nowStr 值），本函数不自行查询时钟。nowStr 缺失/非字符串 → fail-closed
+  //   抛 500——同 :4234 逐列 fail-closed 风格：宁可响亮失败，也不让"调用方忘了物化 nowStr"这类编程错误
+  //   悄悄产出一个用 undefined/NaN 比较出来的错误判定。
+  function isConsumableFastReleaseAuth(row, nowStr) {
+    if (typeof nowStr !== 'string' || !nowStr) {
+      throw new SysTransitionError(500, 'FAST_RELEASE_PREDICATE_INPUT_INVARIANT',
+        '可消费授权判定缺少 nowStr（调用方须先在事务开始处物化统一取时，同 nowStr 供 JS/SQL 两侧消费）');
+    }
+    if (!isActiveFastReleaseAuth(row)) return false;
+    return nowStr < fastReleaseAuthConsumeDeadline(row.fast_release_auth_at);
+  }
+
+  // 可消费判据（SQL 侧）——与 FAST_RELEASE_ACTIVE_AUTH_WHERE_SQL 逐字拼接（残留判据原样保留，本片段
+  //   只是在其后 AND 上时间条件），唯一占位符绑 nowStr。`datetime(fast_release_auth_at,'start of day',
+  //   '+1 day','+8 hours')` 与上面 fastReleaseAuthConsumeDeadline 同构：'start of day' 取授权日零点、
+  //   '+1 day' 进一天、'+8 hours' 到 08:00:00——JS/SQL 两侧对同一个 authAt 恒算出同一个截止时刻字符串
+  //   （均为本地分量运算，不涉及时区转换，SQLite 的 datetime() 修饰符对纯文本 timestring 同样只做字面
+  //   日历运算）。消费点把本片段接在需要"可消费"而非"仅残留"语义的 WHERE 位置，替换
+  //   FAST_RELEASE_ACTIVE_AUTH_WHERE_SQL 原字面量（见方案 §3 归属表逐点枚举）。
+  const FAST_RELEASE_CONSUMABLE_AUTH_WHERE_SQL =
+    `${FAST_RELEASE_ACTIVE_AUTH_WHERE_SQL} AND ? < datetime(fast_release_auth_at,'start of day','+1 day','+8 hours')`;
+
+  // ── B1'·先行上线授权超时收回·幂等超时终结内核（方案 20260816_v1.2 §4，418-H1' 收口后的精确定位）──
+  //   【唯一所有权声明】本函数是**超时终结副作用的唯一所有者**——超时场景下的清六列/清执行人集合
+  //   （含 done）/超时留痕，只出自本函数；任何触碰点检测到"残留∧过期"后必须调用本函数，禁止自行拼装
+  //   或补写第二条超时留痕（同 attemptFastReleaseFlipInTxn"翻牌逻辑禁止双实现"/clearFastReleaseRosterOnTermination
+  //   "清集合逻辑全仓唯一实现"同款纪律）。窗口内（残留∧未过期）的既有五事件终结（case 'accept'/'return'/
+  //   'issue_reject'/'void'）**不归本内核管**——那是既有 inline 三件套（setFrags 清六列 + timeline
+  //   fast_release_auth_terminated + clearFastReleaseRosterOnTermination），逐字不动，调用层按"残留后
+  //   consumable? 窗口内既有逻辑 : 本内核"二择一分叉（见各触碰点，方案 §5⑤）。
+  //   【幂等范围】以**同一授权代次**为界——前置判据不满足（残留判据已假：六列已被清空或从未授权过，
+  //   或未过期）即 no-op 返回 false；终结后六列全空，同代次内任意后续触碰均 no-op、超时留痕恰一条。
+  //   重授权（触碰点⑦）开启新代次，新授权将来自然过期允许产生**新的**超时留痕，不属"重复留痕"（新
+  //   auth_at 是新代次的起点，与旧代次那条已写入的留痕行是两件独立的审计事实）。
+  //   【入参】issueId/actor 同族常规；trigger 供未来审计追溯标注调用来源（[S1-fix LOW-2] 当前**八个**
+  //   触碰点各自传一个具名字符串：'submit_gate'/'exec_confirm'/'roster_add'/'roster_remove'/
+  //   'event_five'/'revoke'/'reauthorize'/'batch_publish'——首版此处漏数了批次发布双保险点，本条修正），
+  //   本函数当前不按 trigger 分叉任何行为（summary 文案固定，同一件事——"超时未启用，
+  //   收回"——不因触碰来源而改变表述），仅做白名单 fail-closed 校验（同 attemptFastReleaseFlipInTxn 头部
+  //   trigger 校验同款精神：这是编程错误断言，非业务态）；nowStr 由调用方在事务开始处统一物化后透传，
+  //   本函数不自行查询时钟（同 isConsumableFastReleaseAuth 纪律，同一事务内 JS/SQL 消费同一个值）。
+  //   【不信任调用方快照】本函数自己重新 SELECT 六列现值（同 attemptFastReleaseFlipInTxn"禁传入调用方
+  //   预计算的计数/快照"同款精神）——即便调用方已经判过一次残留∧过期，仍在这里独立复核，事务串行下
+  //   两次判定理论必然一致，但不因"理论一致"就省略这层复核（同本文件其余纵深防御范式）。
+  const FAST_RELEASE_EXPIRY_TRIGGERS = ['submit_gate', 'exec_confirm', 'roster_add', 'roster_remove',
+    'event_five', 'revoke', 'reauthorize', 'batch_publish'];
+  async function terminateExpiredFastReleaseAuthInTxn(issueId, actor, trigger, nowStr) {
+    if (!FAST_RELEASE_EXPIRY_TRIGGERS.includes(trigger)) {
+      throw new Error(`terminateExpiredFastReleaseAuthInTxn: 未知 trigger="${trigger}"（调用方传参错误，非业务态）`);
+    }
+    if (typeof nowStr !== 'string' || !nowStr) {
+      throw new Error('terminateExpiredFastReleaseAuthInTxn: 缺少合法 nowStr（调用方须先物化事务内统一取时）');
+    }
+    const row = await dbGetAsync(
+      `SELECT fast_release_auth_at, fast_release_revoked_at, fast_release_consumed_at, released_at,
+              online_source, reopened_at
+         FROM sys_issues WHERE id = ?`, [issueId]);
+    if (!row) return false;   // 理论不可达（调用方均已确认单存在才会走到这里），fail-closed 兜底不硬闯
+    if (!isActiveFastReleaseAuth(row)) return false;   // 残留判据不成立（本无授权/已被别处终结）——no-op
+    if (nowStr < fastReleaseAuthConsumeDeadline(row.fast_release_auth_at)) return false;   // 未过期——no-op
+
+    // [S1-fix MED-2] SET 追加 updated_at 刷新——同族其余 fast_release_* 清列写点（revoke 端点/重授权/
+    //   批次发布双保险等）均刷 updated_at，本内核此前漏刷，补齐同一惯例（"主状态/关键字段变更即刷
+    //   updated_at"不变量）。
+    const clearUpd = await dbRunAsync(
+      `UPDATE sys_issues SET ${SYS_CLEAR_FAST_RELEASE_AUTH_FIELDS_SQL.join(', ')}, updated_at = datetime('now','localtime')
+         WHERE id = ? AND ${FAST_RELEASE_ACTIVE_AUTH_WHERE_SQL}`,
+      [issueId]);
+    if (!clearUpd || clearUpd.changes !== 1) {
+      // 事务串行持锁期间理论不可达（上面刚判定过残留∧过期）——响亮失败而非静默吞，逼人工核查而非
+      // 留下"内核判定应终结但未真正清空"的半完成态。
+      throw new SysTransitionError(500, 'FAST_RELEASE_AUTH_EXPIRY_INVARIANT',
+        `先行上线授权超时终结失败：事务内残留授权状态与终结 UPDATE 不一致（issue ${issueId}）`);
+    }
+    // 清执行人集合（含 done，S5 共享内核——同 void/重授路径"授权彻底终结"语义，唯一实现禁双写）。
+    await clearFastReleaseRosterOnTermination(issueId, actor, '授权超时收回');
+    // 超时留痕——独立 action_code，事件本身独立于既有 fast_release_auth_terminated（窗口内五事件终结）
+    // 之外，前端可据此区分"人为终结" vs "超时自动收回"两类成因。
+    await dbRunAsync(
+      `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, operator_id, operator_name)
+       VALUES (?, 'note', ?, 'fast_release_auth_expired', ?, ?)`,
+      [issueId, '先行上线授权超时未启用（次日 8:00 前未完成），已收回，转常规验收流程',
+        Number(actor.id) || null, actor.name || null]
+    );
+    return true;
+  }
+
   // ── 先行上线两步化 S1（方案 20260813_v1.8 §4-10）：sys_fast_release_executors 全消费点统一谓词 ──────
   //   方案原文约束：「集合的全部消费点——在册判权/done 计数/全员判定/徽章 x/N 投影/撤销与终结的清集合
   //   范围——必须复用同一 SQL 谓词 `issue_id = ? AND removed_at IS NULL`（抽常量或 helper，禁各写一份）」。
@@ -4350,7 +4496,7 @@ module.exports = (deps) => {
   //   就放弃这层校验——同本文件其余"纵深防御，不依赖单一防线"惯例）。
   //   trigger 参数：本 commit 唯一来路是 'confirm'（先行上线执行确认端点）；S4 移人端点若触发全员判定
   //   传 'roster_remove'，写入 timeline summary 供审计追溯"这次翻牌是谁/什么动作促成的"。
-  async function attemptFastReleaseFlipInTxn(issueId, actor, trigger = 'confirm') {
+  async function attemptFastReleaseFlipInTxn(issueId, actor, trigger = 'confirm', nowStr) {
     // [codex 385 预筛 L1] trigger 白名单——本参数只服务 timeline summary 拼词与审计追溯（"这次翻牌是
     //   谁/什么动作促成的"），取值面必须封闭：当前仅 'confirm'（本 commit 唯一来路，先行上线执行确认
     //   端点）与 'roster_remove'（S4 移人端点预留，尚未接线）。未知值一律 throw——这是**编程错误**
@@ -4361,6 +4507,12 @@ module.exports = (deps) => {
     //   处理"的场景用的，本条是"这本不该发生"的内部一致性断言，两者性质不同。
     if (trigger !== 'confirm' && trigger !== 'roster_remove') {
       throw new Error(`attemptFastReleaseFlipInTxn: 未知 trigger="${trigger}"（仅允许 'confirm'|'roster_remove'，调用方传参错误）`);
+    }
+    // [S1·先行上线授权超时收回·方案 §3 归属表] 翻牌 WHERE 改判"可消费"而非仅"残留"——过期授权不应
+    //   再被翻牌消费掉（应转常规验收）。nowStr 由调用方（exec-confirm/roster-remove 两端点）在各自事务
+    //   开始处统一物化后透传，本函数不自行查询时钟（同 isConsumableFastReleaseAuth 纪律）。
+    if (typeof nowStr !== 'string' || !nowStr) {
+      throw new Error('attemptFastReleaseFlipInTxn: 缺少合法 nowStr（调用方须先物化事务内统一取时）');
     }
 
     // 全员判定：重新聚合当前代次执行人集合，非空 ∧ 全 done 才可翻——空集合恒不可翻（方案 §5-⑧，
@@ -4388,9 +4540,9 @@ module.exports = (deps) => {
       rosterActiveCount, rosterAllComplete,
     });
 
-    // 翻牌 UPDATE（方案 §4-3c 模板逐字 + codex 384 预筛 MED-1 补一列）：WHERE 六列活跃授权同源谓词
-    //   （FAST_RELEASE_ACTIVE_AUTH_WHERE_SQL，与授权入口闸/终结事件制等既有消费点同一份字面量）+
-    //   type/status 双重锁死。SET 八列：
+    // 翻牌 UPDATE（方案 §4-3c 模板逐字 + codex 384 预筛 MED-1 补一列）：WHERE 改用"可消费"同源谓词
+    //   （FAST_RELEASE_CONSUMABLE_AUTH_WHERE_SQL——[S1·先行上线授权超时收回] 残留判据原字面量之后
+    //   AND 一条 nowStr 时间条件，新增 1 个占位符）+ type/status 双重锁死。SET 八列：
     //   released_at/online_source/post_release_acceptance/fast_release_consumed_at 四列写入翻牌本身；
     //   gate_deferred_at 清（同 accept/资格恢复等既有"进已上线即清"惯例，理论上此刻恒为 NULL，仍显式清
     //   不留隐患）；updated_at 刷新（既有"主状态变更即刷 updated_at"不变量）；dev_estimated_at_on_release
@@ -4417,8 +4569,8 @@ module.exports = (deps) => {
          updated_at = datetime('now','localtime'),
          dev_estimated_at_on_release = dev_estimated_at
        WHERE id = ? AND type = 'bug' AND status = '待验证'
-         AND ${FAST_RELEASE_ACTIVE_AUTH_WHERE_SQL}`,
-      [ONLINE_SOURCE_AUTHORIZED_FASTLANE, issueId]
+         AND ${FAST_RELEASE_CONSUMABLE_AUTH_WHERE_SQL}`,
+      [ONLINE_SOURCE_AUTHORIZED_FASTLANE, issueId, nowStr]
     );
     if (!flipUpd || flipUpd.changes !== 1) {
       // [契约 d] 内核判定应翻牌但翻牌 UPDATE changes≠1 ⇒ 抛错——调用方（确认端点）的外层 catch 会
@@ -4453,10 +4605,17 @@ module.exports = (deps) => {
   //   done 行也随之失去继续存在的意义"（方案 §5-⑨"done 行恒不被软删"唯一例外正是本函数服务的场景）。
   //   本函数全部调用点里，accept/return/issue_reject 三处走到这里时结构上已无 done 行——accept/return
   //   已在 §4-6 新增的"活跃授权∧存在 done 行 ⇒ 409"闸门挡在更早（有 done 的情形走不到这条清集合语句），
-  //   issue_reject 挂牌态「待验证」结构性不可达（roster 从未产生）；**void 是唯一真正能清到 done 行的
-  //   路径**（void 不闸，是终极出口）；revoke 端点自身也已按 §4-5 加了同款 done 闸，走到本函数时同样
+  //   issue_reject 挂牌态「待验证」结构性不可达（roster 从未产生）；void 不闸，是窗口内路径里唯一真正
+  //   能清到 done 行的出口；revoke 格 2/格 3 端点自身也已按 §4-5 加了同款 done 闸，走到本函数时同样
   //   结构上已无 done 行；批次发布双保险点同 accept/return 一带论证（那条边本身走到"待上线"之前就已在
   //   accept 内终结过一次，本处是纵深防御非当前可达缺口）。
+  //   ⚠️ [S1·先行上线授权超时收回·:4454 收口] 上一句"void 是唯一真正能清到 done 行的路径"这条**绝对
+  //   声称已随本批证伪、不再成立**——过期分叉引入了另外两条能携 done 行到达本函数的出口：① 超时终结
+  //   内核 terminateExpiredFastReleaseAuthInTxn（八个触碰点任一检测到"残留∧过期"时调用，done 有无均
+  //   同，见其定义处"唯一所有权声明"）；② revoke 格 5（跨轮旧授权残迹清理，420 收口明令"不含 NOT
+  //   EXISTS done 限制"）。故本函数当前有**三类**能清到 done 行的调用路径：void（窗口内终极出口）+
+  //   超时终结内核（过期收集，唯一所有权）+ revoke 格 5（跨轮残迹清理面 fail-open）——"done 行恒不被
+  //   软删"这条方案 §5-⑨ 原文的例外集合，需按此三类理解，不再是单一的 void 例外。
   //   仅当确有行被软删（changes>0）才写 timeline——集合本就是空的情形（该单从未挂牌、或挂牌时当日无
   //   值班、或此前已被清过）不产生"清空了什么"的虚假留痕（同本文件其余"不伪造字段/不伪造事件"精神）。
   //   causeLabel 由各调用点传入区分成因（"验收通过"/"上线翻牌"/"验收打回"/"已拒绝"/"作废"/"撤销授权"/
@@ -4522,6 +4681,10 @@ module.exports = (deps) => {
   }
 
   // ── S5·不变量 ⑪（371-H1）探针：授权非活跃单不得存在未软删集合行——供 verify 全库扫描 + 反证判红两用 ──
+  //   [S1·先行上线授权超时收回] 本探针刻意维持"残留"判据不改判"可消费"——过期但尚未被任何触碰点收集
+  //   的授权仍是"残留"（isActiveFastReleaseAuth 为真），此刻集合行若还在册属方案设计内的合法待收集态
+  //   （惰性终结，非违例）；本探针若改判可消费会把这条合法瞬时/持续态误报成违例，见方案 §3 归属表
+  //   "残留=…⑪ 探针"一行明文冻结。
   //   与上面 fastReleaseUnresolvedAtTerminalStateViolations 不是同一件事：那个函数扫的是 sys_issues 自身
   //   （授权三件套是否还挂着），本函数扫的是 sys_fast_release_executors 未软删行是否配得上一份"活跃授权"
   //   （子表视角）。撤销/终结的清集合动作（S5 新增，见 clearFastReleaseRosterOnTermination）是写侧保证；
@@ -4567,16 +4730,22 @@ module.exports = (deps) => {
   //   入参 rows：每行须投影六列活跃授权判据字段 + type/status + 该 issue 当前代次集合的
   //   active_count/done_count 聚合（调用方用 GROUP BY 或子查询把聚合结果拼给本函数，纯函数不自己查库，
   //   同 fastReleaseUnresolvedAtTerminalStateViolations 既有"调用方 SQL 粗筛→本函数 JS 精判"分工）。
-  function fastReleaseNonFlippedFullDoneViolations(rows) {
+  //   [S1·先行上线授权超时收回·方案 §3 归属表] 判据由"残留"改判"可消费"——翻牌 WHERE（:4530 一带）本批
+  //   已改用 FAST_RELEASE_CONSUMABLE_AUTH_WHERE_SQL，过期授权即便集合全 done 也不会再被内核翻牌（转常规
+  //   验收，等某个写侧触碰点收集），这是新设计下的**合法**瞬时/持续态，不再是⑫违例；只有"仍在消费窗口内
+  //   却全 done 未翻牌"才真正说明翻牌内核被绕过或漏接线。入参 nowStr 由调用方（verify 扫描脚本）在扫描
+  //   开始处统一物化，供本次全库扫描的每一行共用同一个时钟基准（同本文件其余"事务/扫描开始处统一取时"
+  //   纪律）——本函数改为非纯函数依赖外部输入 nowStr，不自行查询时钟。
+  function fastReleaseNonFlippedFullDoneViolations(rows, nowStr) {
     const violations = [];
     for (const row of rows || []) {
       if (!row) continue;
       if (row.type !== 'bug' || row.status !== '待验证') continue;
-      if (!isActiveFastReleaseAuth(row)) continue;
+      if (!isConsumableFastReleaseAuth(row, nowStr)) continue;
       const activeCount = Number(row.active_count) || 0;
       const doneCount = Number(row.done_count) || 0;
       if (activeCount > 0 && doneCount === activeCount) {
-        violations.push(`issue ${row.id}：集合非空(${activeCount})且全 done(${doneCount})，但仍处于待验证态且授权活跃——⑫ 违例（应已同事务翻牌却未翻）`);
+        violations.push(`issue ${row.id}：集合非空(${activeCount})且全 done(${doneCount})，但仍处于待验证态且授权可消费——⑫ 违例（应已同事务翻牌却未翻）`);
       }
     }
     return violations;
@@ -5140,6 +5309,26 @@ module.exports = (deps) => {
       //   null=本次未清（该单本无活跃授权/集合本就是空的——后者由 clearFastReleaseRosterOnTermination
       //   自身按 changes>0 判断，不在这里判空，见该函数注释"不伪造字段"精神）。
       let fastReleaseRosterClearCause = null;
+      // [S1·先行上线授权超时收回·触碰点⑤·方案 §5⑤·418-H1' 调用层分叉·S1-fix BLOCK-1 订正] case
+      //   'accept'/'return'/'issue_reject'/'void' 命中"残留∧过期"时**同步**调用超时终结内核（唯一
+      //   所有权，见该内核定义处"唯一所有权声明"），调用点在各 case 内、[6] 主 UPDATE 之前——不再用
+      //   pending 标记延后到 [7] 后处理点（首版曾这样做，被 S1-fix BLOCK-1 抓出时序错误：C9 直翻分支会
+      //   在 [6] 写 released_at/online_source，延后到 [7] 重查残留判据必假，内核静默 no-op）。与
+      //   fastReleaseTerminationSummary/fastReleaseRosterClearCause 互斥（同一次 case 执行只会命中
+      //   "窗口内既有终结逻辑"或"过期转调内核"之一，不会同时为真——分叉发生在调用层而非文案层，v1.1
+      //   "{summary,actionCode}对象"表述已废除，见 §4 收口说明）。
+      // 事务内统一取时——惰性 + 记忆化：只有真正命中 isActiveFastReleaseAuth(row) 的 case 才会触发首次
+      //   查询，其余动作（schedule/close/hold/resume/liaison_test_*/reopen 等多数转移）零额外开销；同一次
+      //   sysIssueTransition 调用内至多查询一次时钟（同 nowStr 供本函数下方全部 fastlane 判据消费，方案
+      //   §2 统一取时纪律）。
+      let _fastReleaseNowStrCache = null;
+      async function fastReleaseNowStrOnce() {
+        if (_fastReleaseNowStrCache) return _fastReleaseNowStrCache;
+        const r = await dbGetAsync(`SELECT datetime('now','localtime') AS n`);
+        _fastReleaseNowStrCache = r && r.n;
+        if (!_fastReleaseNowStrCache) throw new SysTransitionError(500, 'FAST_RELEASE_NOW_QUERY_FAILED', '获取服务器时间失败（内部错误）');
+        return _fastReleaseNowStrCache;
+      }
       // [方案 §13·13.1] feature ETA 直取——仅 case 'intake_accept' 可能赋值，其余动作恒 null。两个变量
       //   互斥（同一次执行至多一个非 null）：分别对应决策表"有效"行（直接=deadline）与"为空/已过期"两行
       //   落到"系统自动生成 SLA 值"子分支时（§13.3 统计口径="回退"）——**不**覆盖手动填写/强制填写两个
@@ -5580,6 +5769,23 @@ module.exports = (deps) => {
           //   只会进这一次 if）。判定用 [1] 处已锁定的行快照（isActiveFastReleaseAuth 六列同源，SELECT
           //   已扩列，见函数入口一带注释）——事务持锁期间该快照与随后 [6] UPDATE 的真实前置状态一致。
           if (isActiveFastReleaseAuth(row)) {
+            // [S1·先行上线授权超时收回·触碰点⑤·方案 §5⑤·S1-fix BLOCK-1] 调用层分叉——过期→**同步**调
+            //   内核（不执行下方既有终结三件套，主状态流转照常继续）。⚠️ 内核调用**必须在这里、[6] 主
+            //   UPDATE 之前**执行，不能延后到 [7] 后处理点：C9 直翻分支会在 [6] 把 released_at/
+            //   online_source 写非空，若内核延后到那之后才重查 isActiveFastReleaseAuth，六列判据里的
+            //   released_at/online_source 条件已恒假，残留判据必判 false，内核静默 no-op（六列残留+
+            //   集合不清+零留痕，S1-fix BLOCK-1 抓出）。改为此处同步调用后，内核的清六列/清集合/留痕
+            //   与 [6] 主状态 UPDATE 落在**同一事务**内——若 [6] 之后事务因其它原因回滚，内核这部分
+            //   副作用一并回滚，不会遗留半完成态，不需要（也不能）依赖"[6] 先成功"这个前提，同批次发布
+            //   双保险点 :14257 一带"过期分叉在批量 UPDATE 之前调用"同一纪律。
+            //   【行序登记】本支 timeline 行序=超时留痕/清集合行早于 [7] 的主 status_change 行（窗口内支
+            //   相反：主行在前、终结行在后）——语义上"授权先被收回，单据再走常规流转"正是过期支的真实
+            //   叙事顺序，与"时间线行号=叙事顺序不能颠倒"的既有先例（:10772 一带）一致而非冲突，勿按
+            //   窗口内支的行序把这里判成缺陷。
+            const acceptFastReleaseNowStr = await fastReleaseNowStrOnce();
+            if (!isConsumableFastReleaseAuth(row, acceptFastReleaseNowStr)) {
+              await terminateExpiredFastReleaseAuthInTxn(issueId, actor, 'event_five', acceptFastReleaseNowStr);
+            } else {
             // [S5·§4-6 验收/打回闸] 存在已确认执行（done）行时拒绝本次验收通过——不允许在部署执行已经
             //   开始之后，让单据从常规验收通道抢跑完成，与已发生的部分执行事实脱节。判据抄 runWGate
             //   弹回闸/加人冻结闸同源写法（统一谓词 sysFastReleaseExecActiveWhere() AND
@@ -5606,6 +5812,7 @@ module.exports = (deps) => {
             // [S5·§4-7] 姊妹赋值——供 [7] 后处理点调用 clearFastReleaseRosterOnTermination 软删本表未软删
             //   行（此刻结构上已无 done 行，上方闸门已挡；C9 直翻/常规验收两条边成因措辞各自区分）。
             fastReleaseRosterClearCause = (toStatus === SYS_ONLINE_STATUS) ? '上线翻牌' : '验收通过';
+            }
           }
           break;
         }
@@ -5720,6 +5927,12 @@ module.exports = (deps) => {
           //   六列同源，读的是 [1] 处已锁定的行快照），落点恒不会是「已上线」（return 的 to 恒为
           //   处理中/开发中，见 transitions.js），故文案不需要像 accept 分支那样按 toStatus 分岔。
           if (isActiveFastReleaseAuth(row)) {
+            // [S1·先行上线授权超时收回·触碰点⑤·S1-fix BLOCK-1] 调用层分叉，同 case 'accept' 一带同款
+            //   写法——内核同步调用在 [6] 主 UPDATE 之前，不延后到 [7]（理由见 case 'accept' 一带详注）。
+            const returnFastReleaseNowStr = await fastReleaseNowStrOnce();
+            if (!isConsumableFastReleaseAuth(row, returnFastReleaseNowStr)) {
+              await terminateExpiredFastReleaseAuthInTxn(issueId, actor, 'event_five', returnFastReleaseNowStr);
+            } else {
             // [S5·§4-6 验收/打回闸] 同 case 'accept' 一带同源写法——存在已确认执行（done）行时拒绝本次
             //   验收打回（同样是"不允许在部署执行已经开始之后让状态机与已发生事实脱节"）。无 done 行
             //   维持既有终结路径不变。
@@ -5735,6 +5948,7 @@ module.exports = (deps) => {
             whereFrags.push(FAST_RELEASE_ACTIVE_AUTH_WHERE_SQL);   // 纵深防御，同 case 'accept' 一带范式
             fastReleaseTerminationSummary = '直上授权已失效（验收打回）';
             fastReleaseRosterClearCause = '验收打回';   // [S5·§4-7] 姊妹赋值，见 case 'accept' 一带同款注释
+            }
           }
           break;
         }
@@ -5840,6 +6054,13 @@ module.exports = (deps) => {
           //   issue_reject 恒 from=待受理（受理排期改造 §9 前段，从未进授权窗口），isActiveFastReleaseAuth
           //   对该类型行恒 false（auth_at 结构上恒 NULL），本判据对变更流是安全 no-op，不需要按 type 分支。
           if (action === 'issue_reject' && isActiveFastReleaseAuth(row)) {
+            // [S1·先行上线授权超时收回·触碰点⑤·S1-fix BLOCK-1] 调用层分叉，同 case 'accept' 一带同款
+            //   写法（issue_reject 结构上唯一能带活跃授权的类型是 bug，见上方注释，nowStr 查询仅在该窄
+            //   路径触发）——内核同步调用在 [6] 主 UPDATE 之前，不延后到 [7]。
+            const issueRejectFastReleaseNowStr = await fastReleaseNowStrOnce();
+            if (!isConsumableFastReleaseAuth(row, issueRejectFastReleaseNowStr)) {
+              await terminateExpiredFastReleaseAuthInTxn(issueId, actor, 'event_five', issueRejectFastReleaseNowStr);
+            } else {
             // [S5·§4-6] issue_reject **不加 done 闸**——挂牌态「待验证」∉ 其 from 集（结构性不可达，
             //   见 transitions.js bug 段 `from: ['待受理','待处理']`），roster 从未产生，结构上不可能
             //   存在 done 行；加一道用不到的闸只会误导读者以为存在真实风险面。
@@ -5847,6 +6068,7 @@ module.exports = (deps) => {
             whereFrags.push(FAST_RELEASE_ACTIVE_AUTH_WHERE_SQL);   // 纵深防御，同 case 'accept' 一带范式
             fastReleaseTerminationSummary = '直上授权已失效（已拒绝）';
             fastReleaseRosterClearCause = '已拒绝';   // [S5·§4-7] 姊妹赋值——结构上此刻恒无 roster 行可清（见上），仍传因供 helper 统一处理（changes=0 天然 no-op，不写虚假 timeline）
+            }
           }
           // ⭐ 角色权限重构 C0（方案 v1.5 §4-C0）：reactivate 回受理门——落态已恒「待受理」（见上方 [动态目标解析]），
           //   此处同事务把 intake_required 一并置 1，两者必须原子（同一条 UPDATE 的 SET 列表）；否则会留下
@@ -5860,7 +6082,9 @@ module.exports = (deps) => {
           if (action === 'reactivate') {
             // [组 B·B1·授权终结事件制·codex 368 号 MED-2 收口·断言] reactivate 的唯一前置态「已拒绝」
             //   现只能经上方 issue_reject 分支到达，而该分支本次同批已终结掉活跃授权——到达这里时
-            //   isActiveFastReleaseAuth(row) 结构上应恒为 false。若仍为 true，只有两种可能：① 本次
+            //   isActiveFastReleaseAuth(row) 结构上应恒为 false。[S1·先行上线授权超时收回] 本断言仍判
+            //   "残留"不改判"可消费"——issue_reject 分支无论走窗口内既有清空还是过期转调内核，六列都
+            //   同样归零，两条路径殊途同归，故本断言判据不需要因过期分叉而调整。若仍为 true，只有两种可能：① 本次
             //   MED-2 收口之前遗留的存量脏数据（旧版本 issue_reject 未终结，授权穿透进了已拒绝态）；
             //   ② 未来新增了另一条到达「已拒绝」的路径却忘了同步终结。两者都不该被静默放行——改为
             //   fail-closed 500 拒绝（同 assertFastReleaseGroupInvariant 既有"不变量被破坏就抛错而非
@@ -5900,6 +6124,12 @@ module.exports = (deps) => {
           //   已作废是不可恢复终态（无 reactivate 一类的复活路径），不需要像 reactivate 那样另加断言——
           //   本分支本身就是这条链路上最后一道终结点。
           if (isActiveFastReleaseAuth(row)) {
+            // [S1·先行上线授权超时收回·触碰点⑤·S1-fix BLOCK-1] 调用层分叉，同 case 'accept' 一带同款
+            //   写法——内核同步调用在 [6] 主 UPDATE 之前，不延后到 [7]。
+            const voidFastReleaseNowStr = await fastReleaseNowStrOnce();
+            if (!isConsumableFastReleaseAuth(row, voidFastReleaseNowStr)) {
+              await terminateExpiredFastReleaseAuthInTxn(issueId, actor, 'event_five', voidFastReleaseNowStr);
+            } else {
             setFrags.push(...SYS_CLEAR_FAST_RELEASE_AUTH_FIELDS_SQL);
             whereFrags.push(FAST_RELEASE_ACTIVE_AUTH_WHERE_SQL);
             fastReleaseTerminationSummary = '直上授权已失效（作废）';
@@ -5907,6 +6137,7 @@ module.exports = (deps) => {
             //   行恒不被软删"唯一例外，timeline 留痕可溯）。clearFastReleaseRosterOnTermination 的 WHERE
             //   不带 exec_status 限制，本调用点是全仓唯一真正能清到 done 行的路径。
             fastReleaseRosterClearCause = '作废';
+            }
           }
           break;
         }
@@ -5930,7 +6161,10 @@ module.exports = (deps) => {
           // [组 B·B1·授权终结事件制·codex 368 号 MED-2 收口·明确不动] hold 不终结活跃授权——暂缓是同一轮
           //   内的暂停（既非新一轮，也非五事件之一），授权应继续存活到本轮真正走到验收/上线/拒绝/作废。
           //   verify-sys-fastrelease-termination.js [1b] 已有对照组覆盖：授权活跃时 hold，六列应逐列原样
-          //   保留（不被误伤）。resume（下方 case）同理，不重复注释。
+          //   保留（不被误伤）。resume（下方 case）同理，不重复注释。[S1·先行上线授权超时收回] hold/resume
+          //   本身不判 isActiveFastReleaseAuth/isConsumableFastReleaseAuth 任一谓词，不属于本批八个触碰
+          //   点之一——暂缓期内授权若自然过期，六列原样残留（残留判据仍真），待暂缓结束后本轮真正走到
+          //   某个触碰点时再被正常收集，不因本批改动而提前收敛。
           break;
         }
         case 'resume': {
@@ -6015,6 +6249,12 @@ module.exports = (deps) => {
       if (fastReleaseRosterClearCause) {
         await clearFastReleaseRosterOnTermination(issueId, actor, fastReleaseRosterClearCause);
       }
+      // [S1-fix BLOCK-1] 过期分叉的内核调用已上移到各 case 内、[6] 主 UPDATE 之前同步执行（见 case
+      //   'accept'/'return'/'issue_reject'/'void' 各自的调用层分叉块）——此处不再需要"[6] 成功之后再调
+      //   内核"这一后处理点：内核的清六列/清集合/留痕与 [6] 主状态 UPDATE 落在同一事务内，[6] 若因其它
+      //   原因失败，整个事务（含内核已做的写入）一并回滚，无需额外等 changes===1 才触发（原理由不成立：
+      //   同事务副作用天然共进退，不存在"内核已提交但主状态没提交"的中间态）。同批次发布双保险点 :14257
+      //   一带"过期分叉在批量 UPDATE 之前调用"同一纪律。
       // [方案 §13·13.1] feature ETA 直取——独立留痕行（同 fastReleaseTerminationSummary 一带既有范式：
       //   event_type='note' + 独立 action_code，event_type 无 DDL CHECK 白名单，新增码零迁移，见 376-H
       //   闭合证据）。⚠️ 与该范式的一处刻意不同：本两码**登记进**前端 SI_TL_NOTE_OWN_LABEL_CODES 独立徽章
@@ -7967,12 +8207,18 @@ module.exports = (deps) => {
       //   参数**分离声明**，执行点按 SQL 段文本顺序拼接 [...selectParams, ...params]——废止原「params.push(uid)
       //   必须排数组最前」的隐式跨段时序协议（sqlite3 按 ? 在最终 SQL 文本出现顺序 positional 绑定；靠
       //   push 时序对齐文本顺序是脆弱约定：将来 WHERE 拼接重排/params 构造拆分/投影区再加占位符都可能
-      //   静默错绑 addEq 的筛选值）。selectParams 只服务 SELECT 投影区占位符（当前恒 1 个=
-      //   fast_release_my_pending 的 uid），投影区将来新增占位符时按投影内文本顺序追加于此，与 WHERE
-      //   参数结构隔离；verify-sys-list-badge-fields「SELECT 恰 1 占位符」守卫仍在（两层互补：结构隔离
-      //   防跨段错位、守卫防投影区占位符数与本数组长度漂移）。uid 可能为 NaN（脏 token）：NaN 传给
-      //   sqlite3 会被转成 NULL，NULL 与 fe.user_id 比较恒不成立，安全退化为"不在任何执行人集合"，不需额外判空。
-      const selectParams = [uid];
+      //   静默错绑 addEq 的筛选值）。selectParams 只服务 SELECT 投影区占位符，投影区将来新增占位符时按
+      //   投影内文本顺序追加于此，与 WHERE 参数结构隔离；verify-sys-list-badge-fields「SELECT 恰 N 占位符」
+      //   守卫仍在（两层互补：结构隔离防跨段错位、守卫防投影区占位符数与本数组长度漂移）。uid 可能为
+      //   NaN（脏 token）：NaN 传给 sqlite3 会被转成 NULL，NULL 与 fe.user_id 比较恒不成立，安全退化为
+      //   "不在任何执行人集合"，不需额外判空。
+      // [S1·先行上线授权超时收回] 恰 2 个（此前恰 1 个，420 号守卫已同步改判恰 2）——① fast_release_active_auth
+      //   CASE 改判"可消费"绑 nowStr（投影区内先出现，见下方）② fast_release_my_pending 绑 uid（后出现），
+      //   nowStr 只查一次、供本次请求内全部 fastlane 判据消费。
+      const listNowRow = await dbGetAsync(`SELECT datetime('now','localtime') AS n`);
+      const listNowStr = listNowRow && listNowRow.n;
+      if (!listNowStr) throw new Error('获取服务器时间失败（内部错误，无法计算先行上线授权可消费性）');
+      const selectParams = [listNowStr, uid];
 
       // 可见性（M-6）：admin 全部 / 开发只看 assigned_to=本人 / 其他登录用户不可见（返空，非 403——列表给空集）
       // [codex C3 对抗审 HIGH-B 回填] 在册成员读可见性——SSOT §0（方案 v2.9 line 33）明定角色读权：
@@ -8179,21 +8425,29 @@ module.exports = (deps) => {
                 --      在当前代次执行人集合中且尚未确认为 1，否则为 0。「原始信号不掺闸·前端消费须自行
                 --      AND fast_release_active_auth」的完整口径**只写在下方子查询本体注释一处**（本处不
                 --      复制全文，避免两处注释各自漂移——同详情端点 last_completed_at 注释先例）。
-                (CASE WHEN ${FAST_RELEASE_ACTIVE_AUTH_WHERE_SQL} THEN 1 ELSE 0 END) AS fast_release_active_auth,
+                -- [S1·先行上线授权超时收回] 本列改判"可消费"（残留∧未过消费窗口）而非仅"残留"——过期
+                --   授权不应再驱动待我确认卡/筛选/x-N 徽章继续显示为"可用"。唯一新增占位符绑本 SELECT
+                --   最上方物化的 listNowStr（与 my_pending 的 uid 共用 selectParams 分段绑定，本 CASE 在
+                --   投影区文本顺序上先于 my_pending 出现，故 selectParams=[listNowStr, uid]）。
+                (CASE WHEN ${FAST_RELEASE_CONSUMABLE_AUTH_WHERE_SQL} THEN 1 ELSE 0 END) AS fast_release_active_auth,
                 (SELECT COUNT(*) FROM sys_fast_release_executors fe
                    WHERE ${sysFastReleaseExecActiveWhere('fe', 'sys_issues.id')}) AS fast_release_exec_total_count,
                 (SELECT COUNT(*) FROM sys_fast_release_executors fe
                    WHERE ${sysFastReleaseExecActiveWhere('fe', 'sys_issues.id')} AND fe.exec_status = 'done') AS fast_release_exec_done_count,
                 --   ④ fast_release_my_pending——[值班筛选与类型卡·S1·锚点 §3 技术自决] 当前登录用户在
                 --      本单当前代次执行人集合中且尚未确认（fe.exec_status <> 'done'）时为 1，否则 0；
-                --      同源谓词（不另写一份 issue_id/removed_at 字面量），唯一新增的占位符绑当前 uid
+                --      同源谓词（不另写一份 issue_id/removed_at 字面量），本列自身占位符绑当前 uid
                 --      （见本路由函数体最上方 selectParams 声明处的分段绑定说明·S-fix3 起 SELECT 段与
-                --      WHERE 段参数分离声明、执行点按 SQL 段文本顺序拼接）。**原始信号不掺闸**：
-                --      本列不 AND fast_release_active_auth——前端消费「待我确认」统计卡/筛选时必须自行
-                --      与 fast_release_active_auth=1 AND（沿用徽章既有前置三条件：type='bug' AND
-                --      status='待验证' AND fast_release_active_auth），本列只回答"我在不在集合里且没确认"
-                --      这一件事，不重复判定授权/挂牌是否仍然有效，与 fast_release_active_auth 各管各的
-                --      语义、由消费端组合，同族列一致（同上 SQL 只出数、状态语义交给前端判断的既有范式）。
+                --      WHERE 段参数分离声明、执行点按 SQL 段文本顺序拼接；[S1·先行上线授权超时收回]
+                --      selectParams 现恒 2 个——本列的 uid 之前还有 fast_release_active_auth CASE 改判
+                --      "可消费"新增的 nowStr，本列不再是"唯一新增占位符"，但仍是自身占位符的绑定值）。
+                --      **原始信号不掺闸**：本列不 AND fast_release_active_auth——前端消费「待我确认」
+                --      统计卡/筛选时必须自行与 fast_release_active_auth=1 AND（沿用徽章既有前置三条件：
+                --      type='bug' AND status='待验证' AND fast_release_active_auth），本列只回答"我在不在
+                --      集合里且没确认"这一件事，不重复判定授权/挂牌是否仍然有效（且不因授权本身超时过期
+                --      而改变——过期只影响 fast_release_active_auth，本列语义与"授权当下是否可消费"正交），
+                --      与 fast_release_active_auth 各管各的语义、由消费端组合，同族列一致（同上 SQL 只出数、
+                --      状态语义交给前端判断的既有范式）。
                 --      比较刻意取否定式 <> 'done'（与同 SELECT 块 305-M2「改正向计数」口径**有意不同源**：
                 --      exec_status 值域被 NOT NULL+CHECK 封闭为 {pending,done} 二值、NULL 结构性不可达，
                 --      两写法当前等价；选否定式是 fail-closed 方向——万一出现脏值应算「待确认」进值班视野，
@@ -8525,7 +8779,25 @@ module.exports = (deps) => {
       //   区改读本字段；siHasActiveFastReleaseAuth 在授权/撤销按钮等其余语境仍保留使用，见前端消费面
       //   grep 报告，非全删）。0/1 而非布尔字面量——与列表端 CASE WHEN 输出的整数口径一致，前端两端
       //   同一份"=== 1"比较写法可复用。
-      row.fast_release_active_auth = isActiveFastReleaseAuth(row) ? 1 : 0;
+      // [S1·先行上线授权超时收回·方案 §6 展示面] 统一取时——本请求内下方三个计算列（active_auth/
+      //   auth_deadline/auth_expired）消费同一 nowStr。fast_release_active_auth 语义随之从"残留"改判
+      //   "可消费"（与列表端点 :8182 一带同批改判同步，前端零改动自动熄灭）；另两列（deadline 字符串+
+      //   过期布尔）供 S2 前端渲染授权区截止提示（本批只产出数据，不碰 Sys_Iteration.html）。
+      const detailNowRow = await dbGetAsync(`SELECT datetime('now','localtime') AS n`);
+      const detailNowStr = detailNowRow && detailNowRow.n;
+      if (!detailNowStr) throw new Error('获取服务器时间失败（内部错误，无法计算先行上线授权可消费性）');
+      const fastReleaseResidual = isActiveFastReleaseAuth(row);
+      const fastReleaseConsumable = isConsumableFastReleaseAuth(row, detailNowStr);
+      row.fast_release_active_auth = fastReleaseConsumable ? 1 : 0;
+      // [S1-fix LOW-3] deadline 收窄为"残留时才非空"——服务端门控，前端不应据此再自行判断"要不要显示"。
+      //   auth_at 非空 ≠ 残留：撤销（只置 revoked_at，auth_at 原样保留供审计）/已消费/已上线 三种非残留
+      //   成因都可能带着一个历史 auth_at，若只判"auth_at 非空"就展示 deadline，会让一份早已退出"是否
+      //   会超时"这个问题讨论范围的历史授权，仍显示一个看似还在倒计时的截止时刻——门控收窄到与
+      //   fast_release_auth_expired 同一判据源（isActiveFastReleaseAuth），两列语义自洽：残留时
+      //   deadline 非空（无论是否已过期，过期用 expired 列区分）；非残留时 deadline 恒 null。
+      row.fast_release_auth_deadline = fastReleaseResidual
+        ? fastReleaseAuthConsumeDeadline(row.fast_release_auth_at) : null;
+      row.fast_release_auth_expired = (fastReleaseResidual && !fastReleaseConsumable) ? 1 : 0;
       // ⭐ [C11·方案 v1.7 §10.3·M6] 单组「版本号」DTO 契约（后端唯一权威·前端只按 DTO 渲染不自行判定）：
       //   single_commit_group / group_label（「版本号」）/ allowed_components（命中系统只含 backend）。命中系统的
       //   提交界面渲染单组；详情 commit 表隐藏 component 列、commit_ref 列表头显示 group_label（前端
@@ -9491,6 +9763,15 @@ module.exports = (deps) => {
         //   条件在同一 type 字段上互斥（一个要求恰为 'bug'，另一个要求恰为 'feature'，无法同时成立），
         //   同一次 submit 调用最多命中其一，rebase 后两段逻辑之间无交叉污染风险。
         if (gateResult.changed && gateResult.to === SF.SYS_VERIFY_STATUSES[row.type][0] && row.type === 'bug' && isActiveFastReleaseAuth(row)) {
+          // [S1·先行上线授权超时收回·触碰点①·方案 §5①] 统一取时——残留判据已由外层 isActiveFastReleaseAuth(row)
+          //   判过，这里再判是否仍在消费窗口内（同一事务，nowStr 只查一次）。过期则转调超时终结内核（submit
+          //   主体不受影响，本条件只决定"要不要挂牌"，主状态照常进入「待验证」走常规验收）。
+          const fastReleaseGateNowRow = await dbGetAsync(`SELECT datetime('now','localtime') AS n`);
+          const fastReleaseGateNowStr = fastReleaseGateNowRow && fastReleaseGateNowRow.n;
+          if (!fastReleaseGateNowStr) throw new SysTransitionError(500, 'FAST_RELEASE_NOW_QUERY_FAILED', '获取服务器时间失败（内部错误）');
+          if (!isConsumableFastReleaseAuth(row, fastReleaseGateNowStr)) {
+            await terminateExpiredFastReleaseAuthInTxn(id, actor, 'submit_gate', fastReleaseGateNowStr);
+          } else {
           // [组B·S2-1 实测修复] 跨轮再挂牌须先软删上一轮遗留的在册行，否则同一 (issue_id,user_id) 撞
           // partial UNIQUE 索引崩 500——真实可达场景：挂牌→（未确认完成前）打回/reopen 开新一轮→新一轮
           // 授权仍活跃再次全完成进入待验证→再次挂牌，若当日值班人与上一轮相同，INSERT 直接违反
@@ -9552,6 +9833,7 @@ module.exports = (deps) => {
           //   行是同一事实的两处呈现，不是两套机制）；主动推送（钉钉）走既有 dispatchSysNotify，其总闸
           //   `isAutoNotifyEnabled()` 恒 false（方案 §11 明确本批不做主动推送），故本处不调用 dispatchSysNotify
           //   ——省一次必然空跑的调用，不是遗漏。
+          }
         }
 
         // [codex 101 号 MED 回填] updated_at——旧版单人 submit 经 sysIssueTransition 共用 UPDATE 必刷
@@ -9961,13 +10243,26 @@ module.exports = (deps) => {
       await sysBeginImmediate();
       try {
         const row = await dbGetAsync(
-          `SELECT id, type, status, fast_release_auth_at, released_at, online_source FROM sys_issues WHERE id = ?`, [id]);
+          `SELECT id, type, status, fast_release_auth_at, fast_release_revoked_at, fast_release_consumed_at,
+                  released_at, online_source, reopened_at
+             FROM sys_issues WHERE id = ?`, [id]);
         if (!row) { await sysRollback(); return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' }); }
         if (row.type !== 'bug') {
           await sysRollback();
           return res.status(409).json({ error: '仅 bug 类型可先行上线授权', code: 'FAST_RELEASE_TYPE_NOT_ALLOWED' });
         }
         const isReauth = row.fast_release_auth_at != null;
+        // [S1·先行上线授权超时收回·触碰点⑦·方案 §5⑦] 重授权覆写前——若现存授权残留∧已过期，先同事务
+        //   落超时终结留痕（该授权即将被下方覆写清零/重写，趁原始 auth_at 仍在时补上超时留痕，避免"授权
+        //   曾经过期"这段事实被静默覆盖、无痕消失）。type='bug' 已在上方判过，六列判据调用安全。
+        if (isReauth && isActiveFastReleaseAuth(row)) {
+          const reauthNowRow = await dbGetAsync(`SELECT datetime('now','localtime') AS n`);
+          const reauthNowStr = reauthNowRow && reauthNowRow.n;
+          if (!reauthNowStr) throw new SysTransitionError(500, 'FAST_RELEASE_NOW_QUERY_FAILED', '获取服务器时间失败（内部错误）');
+          if (!isConsumableFastReleaseAuth(row, reauthNowStr)) {
+            await terminateExpiredFastReleaseAuthInTxn(id, actor, 'reauthorize', reauthNowStr);
+          }
+        }
         const upd = await dbRunAsync(
           `UPDATE sys_issues
               SET fast_release_auth_by = ?, fast_release_auth_by_name = ?,
@@ -10045,21 +10340,43 @@ module.exports = (deps) => {
   //   码复用让前端可以用同一个 code 分支统一提示"执行已在进行中"，而不必为语义上是同一件事的三处各自
   //   适配一个新 code；差异化交给各端点自己的错误 `error` 文案（本处已改撤销专属措辞），前端历来靠
   //   `error` 文案渲染提示、靠 `code` 做程序分支，这个分工天然支持"码复用+文案区分"。
+
+  // ── B1'·先行上线授权超时收回·revoke 五格决策表（方案 20260816_v1.2 §5⑥，418-H2'/419/420/421 四轮收口）──
+  //   五格枚举——JS 前判与 SQL WHERE 必须按同一分层判据实现（禁两套各写，本函数是唯一分类实现，
+  //   revoke 端点与 verify 直调本函数，不各拼一份等价 if/else）：
+  //     格 1 无可撤残迹——五列判据（auth_at 非空∧未撤销∧未消费∧未上线）不命中；
+  //     格 2 残留∧窗口内∧无 done——五列命中 ∧ 第六列（跨轮）条件也命中（=isActiveFastReleaseAuth 为真）
+  //       ∧ 未过期 ∧ 无 done 行；
+  //     格 3 残留∧窗口内∧有 done——同格 2 但有 done 行；
+  //     格 4 残留∧过期——isActiveFastReleaseAuth 为真但已过消费窗口（done 有无均同，格 4 判定优先于
+  //       done 检查——过期与"是否有人已确认执行"是两个维度，过期这件事本身与格 3 的"部署进行中"闸门
+  //       无关，故不查 done 直接判格 4）；
+  //     格 5 五列命中但非残留——第六列条件不命中，即 `fast_release_auth_at < reopened_at`（P7 跨轮旧
+  //       授权残迹，见 :4232 一带 isActiveFastReleaseAuth 第六个条件注释）。
+  //   五格互斥且穷尽（五列不命中 XOR 五列命中；五列命中时 残留 XOR 非残留；残留时 过期 XOR 未过期；
+  //   未过期时 有done XOR 无done）——判定顺序即证明穷尽性，不遗漏任何组合。
+  function classifyFastReleaseRevokeCase(row, nowStr, hasDoneRow) {
+    const fiveColMatch = row.fast_release_auth_at != null
+      && row.fast_release_revoked_at == null
+      && row.fast_release_consumed_at == null
+      && row.released_at == null
+      && row.online_source == null;
+    if (!fiveColMatch) return 1;
+    const residual = isActiveFastReleaseAuth(row);   // 五列 ∧ 第六列（跨轮）条件
+    if (!residual) return 5;   // 五列命中但非残留 ⇒ 结构上必为 auth_at < reopened_at（P7 跨轮残迹）
+    if (!isConsumableFastReleaseAuth(row, nowStr)) return 4;
+    return hasDoneRow ? 3 : 2;
+  }
+
   router.post('/sys-issues/:id/fast-release-revoke', authenticateToken, requireSysSchemaReady, requireAdmin, async (req, res) => {
     const id = parsePositiveId(req.params.id);
     if (!id) return res.status(400).json({ error: '无效的迭代单 ID', code: 'INVALID_SYS_ISSUE_ID' });
     const actor = sysActor(req);
+    // [S1·419/420 收口] reason 校验从端点头部移至事务内五格分流之后——仅格 2/格 5 执行（本格动作会
+    //   真实变更授权状态，需要审计理由）；格 1/格 3 是纯 409 deny（无变更发生，理由无从谈起）；格 4
+    //   的 reason 若有则忽略不落痕（本格动作本质是代为触发超时终结而非撤销，见方案 §5⑥ 表格 4 行）。
+    //   此处只捕获原始值，不在此处提前 400。
     const rawReason = (req.body || {}).reason;
-    if (typeof rawReason !== 'string') {
-      return res.status(400).json({ error: '请填写撤销原因', code: 'FAST_RELEASE_REVOKE_REASON_REQUIRED' });
-    }
-    const reason = rawReason.trim();
-    if (!reason) {
-      return res.status(400).json({ error: '请填写撤销原因', code: 'FAST_RELEASE_REVOKE_REASON_REQUIRED' });
-    }
-    if (reason.length > 200) {
-      return res.status(400).json({ error: '撤销原因不超过 200 字', code: 'FAST_RELEASE_REVOKE_REASON_TOO_LONG' });
-    }
     try {
       await sysBeginImmediate();
       try {
@@ -10068,60 +10385,114 @@ module.exports = (deps) => {
              FROM sys_issues WHERE id = ?`, [id]);
         if (!row) { await sysRollback(); return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' }); }
 
-        // [S5·§4-5] 前置友好判定——存在 done 行时直接 409（早于下方 UPDATE，给出精确文案；WHERE 层
-        // 仍追加 NOT EXISTS 做写点纵深，见下方，双层防线同本文件既有"前置判定 + WHERE 层双写同一谓词"范式）。
-        // [S5·Opus 预筛二批 M1 闸序修正] done 闸门只在授权**当前活跃**时才有意义——已消费/已撤销/已上线
-        //   这三种"非活跃"成因各自都有更贴切的既有响应（deriveFastReleaseRevokeDenyReason 已精确区分：
-        //   "已被消费"/"重复撤销"/"该单已上线"），不该被本闸抢答成"部署进行中"。最典型的反例：已消费
-        //   （confirm 触发末位翻牌）单按 §5b 第 7 行明文保留 done 行——那是"这次部署已经完成"的合法留痕，
-        //   不是"现在有一次部署正卡在进行中"，对它调 revoke 若命中本闸会给出"暂不可撤销，请让剩余执行人
-        //   确认…"这类文不对题的指引（根本没有"剩余执行人"，也没有"进行中"可言）；改为只在
-        //   isActiveFastReleaseAuth(row) 为真时才查/判 done 闸，非活跃直接落到下方 UPDATE（WHERE 已含
-        //   consumed_at/revoked_at/released_at/online_source 四列否定条件），changes=0 后走既有
-        //   deriveFastReleaseRevokeDenyReason(row) 给出精确原因，与授权非活跃场景下应有的语义一致。
-        if (isActiveFastReleaseAuth(row)) {
-          const fastlaneDoneRow = await dbGetAsync(
-            `SELECT 1 AS x FROM sys_fast_release_executors WHERE ${sysFastReleaseExecActiveWhere()} AND exec_status = 'done' LIMIT 1`,
-            [id]);
-          if (fastlaneDoneRow) {
-            await sysRollback();
-            // [S5·Opus 预筛 M1] 同 case 'accept'/'return' 一带——可执行指引，收信人恒为 admin（本端点 requireAdmin）。
-            return res.status(409).json({
-              error: '已有执行人确认执行，先行上线授权不可撤销（撤销会让已确认的执行事实与授权状态脱节）——可让剩余执行人完成确认以促成翻牌，或移除未确认的执行人触发翻牌，或作废本单据',
-              code: 'FASTLANE_DEPLOY_IN_PROGRESS',
-            });
-          }
-        }
+        const nowRow = await dbGetAsync(`SELECT datetime('now','localtime') AS n`);
+        const nowStr = nowRow && nowRow.n;
+        if (!nowStr) throw new SysTransitionError(500, 'FAST_RELEASE_NOW_QUERY_FAILED', '获取服务器时间失败（内部错误）');
 
-        // [S5·Opus 预筛 L2] 写点纵深子查询改走 sysFastReleaseExecActiveWhere('fe', 'sys_issues.id')
-        //   相关子查询形态——issue_id 分量与外层 UPDATE 当前行的 id 等值关联，不占用绑定参数位；
-        //   removed_at IS NULL 分量与全仓其余消费点同一份字面量派生，不再手拼第二份。
-        const upd = await dbRunAsync(
-          `UPDATE sys_issues SET fast_release_revoked_at = datetime('now','localtime'), updated_at = datetime('now','localtime')
-            WHERE id = ? AND fast_release_auth_at IS NOT NULL AND fast_release_revoked_at IS NULL
-              AND fast_release_consumed_at IS NULL AND released_at IS NULL AND online_source IS NULL
-              AND NOT EXISTS (
-                SELECT 1 FROM sys_fast_release_executors fe
-                 WHERE ${sysFastReleaseExecActiveWhere('fe', 'sys_issues.id')} AND fe.exec_status = 'done'
-              )`,
+        // done 行查询——五格枚举本身需要它（格 2/格 3 的唯一区分点），提前查好（同 §4-5 既有"前置判定
+        //   + WHERE 层双写同一谓词"纵深范式，格 2 的 UPDATE WHERE 下方仍保留 NOT EXISTS 复核）。
+        const fastlaneDoneRow = await dbGetAsync(
+          `SELECT 1 AS x FROM sys_fast_release_executors WHERE ${sysFastReleaseExecActiveWhere()} AND exec_status = 'done' LIMIT 1`,
           [id]);
-        if (!upd || upd.changes !== 1) {
+        const revokeCase = classifyFastReleaseRevokeCase(row, nowStr, !!fastlaneDoneRow);
+
+        // 格 1：无可撤残迹——既有 409 deny 不动，reason 不校验。
+        if (revokeCase === 1) {
           await sysRollback();
           return res.status(409).json({ error: deriveFastReleaseRevokeDenyReason(row), code: 'FAST_RELEASE_REVOKE_NOT_ALLOWED' });
         }
-        const postRow = await dbGetAsync(
+        // 格 3：残留∧窗口内∧有 done——既有 done 闸 409 不动，reason 不校验。
+        //   [S5·Opus 预筛 M1] 可执行指引，收信人恒为 admin（本端点 requireAdmin）。
+        if (revokeCase === 3) {
+          await sysRollback();
+          return res.status(409).json({
+            error: '已有执行人确认执行，先行上线授权不可撤销（撤销会让已确认的执行事实与授权状态脱节）——可让剩余执行人完成确认以促成翻牌，或移除未确认的执行人触发翻牌，或作废本单据',
+            code: 'FASTLANE_DEPLOY_IN_PROGRESS',
+          });
+        }
+        // 格 4：残留∧过期——调超时终结内核（不写 revoked_at、不走 done 闸），reason 若有则忽略不落痕；
+        //   `sysCommit()` 之后再返回专属 200（既有"先 rollback 再 return"控制流对本路径不适用）。
+        if (revokeCase === 4) {
+          await terminateExpiredFastReleaseAuthInTxn(id, actor, 'revoke', nowStr);
+          await sysCommit();
+          return res.json({
+            id, action: 'fast_release_revoke', expired: true, fast_release_revoked_at: null,
+            message: '该授权已于次日 8:00 超时，已按超时收回',
+          });
+        }
+
+        // 格 2/格 5：走到这里说明本次会真实变更授权状态——reason 必填（与 return/reopen 等 admin
+        //   逆向动作一致，理由留痕同款要求）。
+        if (typeof rawReason !== 'string') {
+          await sysRollback();
+          return res.status(400).json({ error: '请填写撤销原因', code: 'FAST_RELEASE_REVOKE_REASON_REQUIRED' });
+        }
+        const reason = rawReason.trim();
+        if (!reason) {
+          await sysRollback();
+          return res.status(400).json({ error: '请填写撤销原因', code: 'FAST_RELEASE_REVOKE_REASON_REQUIRED' });
+        }
+        if (reason.length > 200) {
+          await sysRollback();
+          return res.status(400).json({ error: '撤销原因不超过 200 字', code: 'FAST_RELEASE_REVOKE_REASON_TOO_LONG' });
+        }
+
+        if (revokeCase === 2) {
+          // 格 2：既有撤销流不动——五列 WHERE（含 NOT EXISTS done，此刻结构上恒无 done，上方已判过）。
+          const upd = await dbRunAsync(
+            `UPDATE sys_issues SET fast_release_revoked_at = datetime('now','localtime'), updated_at = datetime('now','localtime')
+              WHERE id = ? AND fast_release_auth_at IS NOT NULL AND fast_release_revoked_at IS NULL
+                AND fast_release_consumed_at IS NULL AND released_at IS NULL AND online_source IS NULL
+                AND NOT EXISTS (
+                  SELECT 1 FROM sys_fast_release_executors fe
+                   WHERE ${sysFastReleaseExecActiveWhere('fe', 'sys_issues.id')} AND fe.exec_status = 'done'
+                )`,
+            [id]);
+          if (!upd || upd.changes !== 1) {
+            await sysRollback();
+            return res.status(409).json({ error: deriveFastReleaseRevokeDenyReason(row), code: 'FAST_RELEASE_REVOKE_NOT_ALLOWED' });
+          }
+          const postRow = await dbGetAsync(
+            `SELECT fast_release_auth_by, fast_release_auth_by_name, fast_release_auth_at,
+                    fast_release_revoked_at, fast_release_consumed_at FROM sys_issues WHERE id = ?`, [id]);
+          assertFastReleaseGroupInvariant(postRow, '先行上线授权撤销写点');
+          await dbRunAsync(
+            `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, operator_id, operator_name)
+             VALUES (?, 'note', ?, 'fast_release_revoke', ?, ?)`,
+            [id, `撤销先行上线授权：${actor.name}（${reason}）`, Number(actor.id) || null, actor.name || null]);
+          await clearFastReleaseRosterOnTermination(id, actor, '撤销授权');
+          await sysCommit();
+          return res.json({ id, action: 'fast_release_revoke', fast_release_revoked_at: postRow.fast_release_revoked_at, reason });
+        }
+
+        // 格 5（420 收口）：跨轮旧授权残迹——独立 UPDATE 条件（五列 ∧ 显式 auth_at<reopened_at），
+        //   **禁复用格 2 那条带 NOT EXISTS done 的既有 SQL**——前置 done 闸因非残留（isActiveFastReleaseAuth
+        //   为假）不会在上方触发，NOT EXISTS 却会让本格 changes 恒为 0（清理面被自己的纵深守卫堵死）；
+        //   清理面 fail-open 是平台既有原则（同 :9936-9937 授权开关注释"收尾动作必须永远可用，fail-open
+        //   于清理面、fail-closed 于增量面"）。撤销成功同事务清关联集合含 done（S5 共享内核，上一代
+        //   残留行随清理出口一并退场，同内核/void"授权彻底终结集合失去意义"语义）。summary 加可辨识
+        //   前缀，与常规有效授权撤销在审计上可区分。
+        const upd5 = await dbRunAsync(
+          `UPDATE sys_issues SET fast_release_revoked_at = datetime('now','localtime'), updated_at = datetime('now','localtime')
+            WHERE id = ? AND fast_release_auth_at IS NOT NULL AND fast_release_revoked_at IS NULL
+              AND fast_release_consumed_at IS NULL AND released_at IS NULL AND online_source IS NULL
+              AND reopened_at IS NOT NULL AND fast_release_auth_at < reopened_at`,
+          [id]);
+        if (!upd5 || upd5.changes !== 1) {
+          await sysRollback();
+          return res.status(409).json({ error: deriveFastReleaseRevokeDenyReason(row), code: 'FAST_RELEASE_REVOKE_NOT_ALLOWED' });
+        }
+        const postRow5 = await dbGetAsync(
           `SELECT fast_release_auth_by, fast_release_auth_by_name, fast_release_auth_at,
                   fast_release_revoked_at, fast_release_consumed_at FROM sys_issues WHERE id = ?`, [id]);
-        assertFastReleaseGroupInvariant(postRow, '先行上线授权撤销写点');
+        assertFastReleaseGroupInvariant(postRow5, '先行上线授权撤销写点（跨轮残迹清理）');
         await dbRunAsync(
           `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, operator_id, operator_name)
            VALUES (?, 'note', ?, 'fast_release_revoke', ?, ?)`,
-          [id, `撤销先行上线授权：${actor.name}（${reason}）`, Number(actor.id) || null, actor.name || null]);
-        // [S5·§4-5] 撤销成功——同一事务软删该单全部未软删集合行（此刻结构上全为 pending，done 已被上方
-        // 闸+WHERE 双重拦截）+ timeline fast_release_roster_cleared（共享内核，唯一实现）。
-        await clearFastReleaseRosterOnTermination(id, actor, '撤销授权');
+          [id, `撤销先行上线授权（跨轮失效残迹清理）：${actor.name}（${reason}）`, Number(actor.id) || null, actor.name || null]);
+        await clearFastReleaseRosterOnTermination(id, actor, '撤销授权（跨轮失效残迹清理）');
         await sysCommit();
-        return res.json({ id, action: 'fast_release_revoke', fast_release_revoked_at: postRow.fast_release_revoked_at, reason });
+        return res.json({ id, action: 'fast_release_revoke', fast_release_revoked_at: postRow5.fast_release_revoked_at, reason });
       } catch (txErr) {
         try { await sysRollback(); } catch (_) { /* ignore */ }
         throw txErr;
@@ -10178,7 +10549,10 @@ module.exports = (deps) => {
       let rowStatusAtStart = null;
       await sysBeginImmediate();
       try {
-        const row = await dbGetAsync('SELECT id, status FROM sys_issues WHERE id = ?', [id]);
+        const row = await dbGetAsync(
+          `SELECT id, status, fast_release_auth_at, fast_release_revoked_at, fast_release_consumed_at,
+                  released_at, online_source, reopened_at
+             FROM sys_issues WHERE id = ?`, [id]);
         if (!row) { await sysRollback(); return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' }); }
         rowStatusAtStart = row.status;
 
@@ -10192,7 +10566,22 @@ module.exports = (deps) => {
           return res.status(403).json({ error: '当前非该单先行上线在册执行人，无法确认执行', code: 'FAST_RELEASE_EXEC_NOT_ROSTERED' });
         }
 
-        // b. done 条件更新：本人执行人行 pending→done ∧ 主表联判（EXISTS 子查询，六列活跃授权同源谓词）。
+        // [S1·先行上线授权超时收回·触碰点②·方案 §5②] 统一取时——本事务内下方"过期分流"与"done 条件更新"
+        //   consumable WHERE 消费同一 nowStr（方案 §2 统一取时纪律）。
+        const nowRow = await dbGetAsync(`SELECT datetime('now','localtime') AS n`);
+        const nowStr = nowRow && nowRow.n;
+        if (!nowStr) throw new SysTransitionError(500, 'FAST_RELEASE_NOW_QUERY_FAILED', '获取服务器时间失败（内部错误）');
+
+        // 残留∧过期——触碰即终结：先调内核落超时留痕，`sysCommit()` 之后再返回专属 409（既有"先 rollback
+        //   再 return"控制流对本路径不适用——终结副作用必须落库，不能随 rollback 一并吞掉）。
+        if (isActiveFastReleaseAuth(row) && !isConsumableFastReleaseAuth(row, nowStr)) {
+          await terminateExpiredFastReleaseAuthInTxn(id, actor, 'exec_confirm', nowStr);
+          await sysCommit();
+          return res.status(409).json({ error: '授权已超时收回，本单转常规验收', code: 'FAST_RELEASE_AUTH_EXPIRED' });
+        }
+
+        // b. done 条件更新：本人执行人行 pending→done ∧ 主表联判（EXISTS 子查询，可消费同源谓词——
+        //    上面已排除过期分支，此处仍按纵深防御写全，不因"理论已排除"就退回残留字面量）。
         const doneUpd = await dbRunAsync(
           `UPDATE sys_fast_release_executors
              SET exec_status = 'done', executed_at = datetime('now','localtime')
@@ -10201,9 +10590,9 @@ module.exports = (deps) => {
                SELECT 1 FROM sys_issues
                 WHERE id = sys_fast_release_executors.issue_id
                   AND type = 'bug' AND status = '待验证'
-                  AND ${FAST_RELEASE_ACTIVE_AUTH_WHERE_SQL}
+                  AND ${FAST_RELEASE_CONSUMABLE_AUTH_WHERE_SQL}
              )`,
-          [execSelf.id]
+          [execSelf.id, nowStr]
         );
         if (!doneUpd || doneUpd.changes !== 1) {
           await sysRollback();
@@ -10213,8 +10602,8 @@ module.exports = (deps) => {
           });
         }
 
-        // c. 调共享翻牌内核（全员判定+翻牌 UPDATE+§3.3 副作用，唯一实现）。
-        const flipResult = await attemptFastReleaseFlipInTxn(id, actor, 'confirm');
+        // c. 调共享翻牌内核（全员判定+翻牌 UPDATE+§3.3 副作用，唯一实现，nowStr 透传同一事务统一取时）。
+        const flipResult = await attemptFastReleaseFlipInTxn(id, actor, 'confirm', nowStr);
         flipped = flipResult.flipped;
 
         if (!flipped) {
@@ -10327,6 +10716,20 @@ module.exports = (deps) => {
             error: '该单当前不处于先行上线挂牌态（须 bug 类型∧待验证∧活跃授权），无法调整执行人集合',
             code: 'FASTLANE_ROSTER_NOT_STAGED',
           });
+        }
+
+        // [S1·先行上线授权超时收回·触碰点③·方案 §5③] 残留∧过期——触碰即终结：先调内核落超时留痕，
+        //   `sysCommit()` 之后再返回专属 409（终结副作用必须落库，不能随 rollback 一并吞掉）。
+        const addNowRow = await dbGetAsync(`SELECT datetime('now','localtime') AS n`);
+        const addNowStr = addNowRow && addNowRow.n;
+        if (!addNowStr) throw new SysTransitionError(500, 'FAST_RELEASE_NOW_QUERY_FAILED', '获取服务器时间失败（内部错误）');
+        // [S1-fix LOW-1] 判据统一为显式两段式（与 exec-confirm :10548 一带同构）——上方 a 项已确保
+        //   isActiveFastReleaseAuth(row) 为真才会走到这里，此处仍显式写全，不隐式依赖"前面已经检查过"
+        //   这条纵深防御惯例（同本文件其余"前置判定 + 再次显式判据"范式）。
+        if (isActiveFastReleaseAuth(row) && !isConsumableFastReleaseAuth(row, addNowStr)) {
+          await terminateExpiredFastReleaseAuthInTxn(id, actor, 'roster_add', addNowStr);
+          await sysCommit();
+          return res.status(409).json({ error: '授权已超时收回，本单转常规验收', code: 'FAST_RELEASE_AUTH_EXPIRED' });
         }
 
         // b. 首 done 后冻结加人（372-H1'）——判据抄 runWGate 弹回闸同源写法。
@@ -10459,6 +10862,18 @@ module.exports = (deps) => {
           });
         }
 
+        // [S1·先行上线授权超时收回·触碰点④·方案 §5④] 残留∧过期——触碰即终结：先调内核落超时留痕，
+        //   `sysCommit()` 之后再返回专属 409（同触碰点③控制流，终结副作用不能随 rollback 一并吞掉）。
+        const rmNowRow = await dbGetAsync(`SELECT datetime('now','localtime') AS n`);
+        const rmNowStr = rmNowRow && rmNowRow.n;
+        if (!rmNowStr) throw new SysTransitionError(500, 'FAST_RELEASE_NOW_QUERY_FAILED', '获取服务器时间失败（内部错误）');
+        // [S1-fix LOW-1] 判据统一为显式两段式（与 exec-confirm :10548 一带同构），理由同加人端点一带。
+        if (isActiveFastReleaseAuth(row) && !isConsumableFastReleaseAuth(row, rmNowStr)) {
+          await terminateExpiredFastReleaseAuthInTxn(id, actor, 'roster_remove', rmNowStr);
+          await sysCommit();
+          return res.status(409).json({ error: '授权已超时收回，本单转常规验收', code: 'FAST_RELEASE_AUTH_EXPIRED' });
+        }
+
         // 移除前快照（供 timeline 记录"原 exec_status"）——同一事务内先读后写，串行下与下方 UPDATE 之间
         // 不存在竞态窗口；若该行此刻已不在册/已 done，下方 UPDATE 的 changes 会=0，走 409 分支，本快照
         // 不会被使用到响应/timeline 里。
@@ -10469,7 +10884,8 @@ module.exports = (deps) => {
         );
 
         // b.（MED-1 收口）条件更新——软删三列成组，WHERE issue_id 分量复用 helper + AND user_id=? +
-        //    exec_status='pending' + EXISTS 子查询重申主表挂牌态谓词（写点纵深，373-H）。
+        //    exec_status='pending' + EXISTS 子查询重申主表挂牌态谓词（写点纵深，373-H；[S1] EXISTS 子查询
+        //    换可消费同源谓词，nowStr 追加到参数数组末尾，与 SQL 文本内 `?` 出现顺序一致）。
         const rmUpd = await dbRunAsync(
           `UPDATE sys_fast_release_executors
               SET removed_at = datetime('now','localtime'), removed_by = ?, removed_by_name = ?
@@ -10478,9 +10894,9 @@ module.exports = (deps) => {
                 SELECT 1 FROM sys_issues
                  WHERE id = sys_fast_release_executors.issue_id
                    AND type = 'bug' AND status = '待验证'
-                   AND ${FAST_RELEASE_ACTIVE_AUTH_WHERE_SQL}
+                   AND ${FAST_RELEASE_CONSUMABLE_AUTH_WHERE_SQL}
               )`,
-          [actor.id, actorSafeName, id, userId]
+          [actor.id, actorSafeName, id, userId, rmNowStr]
         );
         if (!rmUpd || rmUpd.changes !== 1) {
           await sysRollback();
@@ -10500,8 +10916,8 @@ module.exports = (deps) => {
             Number(actor.id) || null, actorSafeName]
         );
 
-        // d. 移人成功——同一事务调共享翻牌内核（唯一实现，禁双写）。
-        const flipResult = await attemptFastReleaseFlipInTxn(id, actor, 'roster_remove');
+        // d. 移人成功——同一事务调共享翻牌内核（唯一实现，禁双写；nowStr 透传同一事务统一取时）。
+        const flipResult = await attemptFastReleaseFlipInTxn(id, actor, 'roster_remove', rmNowStr);
         flipped = flipResult.flipped;
 
         await sysCommit();
@@ -13919,6 +14335,11 @@ module.exports = (deps) => {
       //   "前几个"是稳定确定的最小单号集合，不受 SQLite 内部行序影响（否则同一违例状态两次调用可能报出
       //   不同的"前几个"，既不利于人工核查也不利于测试断言稳定性）；日志改结构化字段对象（logger.error
       //   底层 console.error 支持多参，第二参传对象即结构化——不需要手工 JSON.stringify 拼进消息文本）。
+      // [S1-fix MED-1] 报警闸对 **membersWithActiveAuth 全体**执行（非收窄到 membersConsumable）——
+      //   阻断优先于终结：done 行是不可伪造的真实执行证据，无论对应授权此刻是否已过期，只要还挂着未
+      //   软删的 done 行就必须阻断整批发布逼人工核查，方案没有授权"过期即可豁免这道报警"这条口径。本闸
+      //   放在下方"可消费/过期"二分之前——若下方过期分支先跑，会把带 done 行的过期成员静默送进终结
+      //   内核（内核自身按设计会清 done 行），报警闸从此永远看不到这批本该被拦下的异常，故顺序不能换。
       const badFastlaneCountRow = await dbGetAsync(
         `SELECT COUNT(DISTINCT issue_id) AS cnt FROM sys_fast_release_executors WHERE issue_id IN (${authPh}) AND removed_at IS NULL AND exec_status = 'done'`,
         authIds
@@ -13938,26 +14359,44 @@ module.exports = (deps) => {
         throw new SysTransitionError(500, 'FASTLANE_ROSTER_UNEXPECTED_DONE_ON_PUBLISH',
           `批次内单 ${idsText} 存在已确认执行的先行上线执行人集合行，理论上不应发生（本批成员应均未消费）——为防止销毁真实部署留痕，已阻断本次批次发布，请联系管理员核查该批次成员的 fast_release_* 字段与执行人集合状态`);
       }
-      // 状态机字段 UPDATE 三件套：双条件守卫（id IN 候选集 + 六列活跃授权现值同源复核，纵深防御同
-      //   case 'accept'/'return' 范式）+ changes 检查 + 失败响亮抛错回滚（不用 .catch(warn) 静默吞）。
-      const authClear = await dbRunAsync(
-        `UPDATE sys_issues SET ${SYS_CLEAR_FAST_RELEASE_AUTH_FIELDS_SQL.join(', ')}, updated_at = datetime('now','localtime')
-           WHERE id IN (${authPh}) AND ${FAST_RELEASE_ACTIVE_AUTH_WHERE_SQL}`,
-        authIds
-      );
-      if (!authClear || authClear.changes !== authIds.length) {
-        throw new SysTransitionError(409, 'RELEASE_PUBLISH_CONFLICT', '批次内单先行上线授权状态已变更，请刷新重试');
+
+      // [S1·先行上线授权超时收回·触碰点⑤·方案 §5⑤] 报警闸已通过（membersWithActiveAuth 全体均无
+      //   未软删 done 行）——调用层分叉：过期成员逐单调用超时终结内核（唯一所有权，含清六列+清集合+
+      //   超时留痕；此刻结构上已确认无 done 行，"expired 无 done 行的才进内核"天然成立，非额外判断）；
+      //   仍在窗口内的成员维持下方既有双保险（清六列+独立 fast_release_auth_terminated 留痕+清集合）
+      //   逐字不动。
+      const publishNowRow = await dbGetAsync(`SELECT datetime('now','localtime') AS n`);
+      const publishNowStr = publishNowRow && publishNowRow.n;
+      if (!publishNowStr) throw new SysTransitionError(500, 'FAST_RELEASE_NOW_QUERY_FAILED', '获取服务器时间失败（内部错误）');
+      const membersExpired = membersWithActiveAuth.filter(m => !isConsumableFastReleaseAuth(m, publishNowStr));
+      const membersConsumable = membersWithActiveAuth.filter(m => isConsumableFastReleaseAuth(m, publishNowStr));
+      for (const m of membersExpired) {
+        await terminateExpiredFastReleaseAuthInTxn(m.id, actor, 'batch_publish', publishNowStr);
       }
-      for (const m of membersWithActiveAuth) {
-        await dbRunAsync(
-          `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, operator_id, operator_name)
-           VALUES (?, 'note', ?, 'fast_release_auth_terminated', ?, ?)`,
-          [m.id, '直上授权已失效（上线翻牌）', Number(actor.id) || null, actor.name || null]
+      if (membersConsumable.length > 0) {
+        const consumableIds = membersConsumable.map(m => m.id);
+        const consumablePh = consumableIds.map(() => '?').join(',');
+        // 状态机字段 UPDATE 三件套：双条件守卫（id IN 候选集 + 六列活跃授权现值同源复核，纵深防御同
+        //   case 'accept'/'return' 范式）+ changes 检查 + 失败响亮抛错回滚（不用 .catch(warn) 静默吞）。
+        const authClear = await dbRunAsync(
+          `UPDATE sys_issues SET ${SYS_CLEAR_FAST_RELEASE_AUTH_FIELDS_SQL.join(', ')}, updated_at = datetime('now','localtime')
+             WHERE id IN (${consumablePh}) AND ${FAST_RELEASE_ACTIVE_AUTH_WHERE_SQL}`,
+          consumableIds
         );
-        // [S5·§4-7 五事件终结延伸·双保险点] 同批清集合——本函数头部注释已论证这整段本身是纵深防御
-        //   （理论上 membersWithActiveAuth 恒为空数组，走到这里的单必然已在 case 'accept' 内被终结过一次），
-        //   本调用同理是"若理论假设有朝一日失效，仍不留残留 roster 行"的兜底，非当前可达缺口。
-        await clearFastReleaseRosterOnTermination(m.id, actor, '批次发布');
+        if (!authClear || authClear.changes !== consumableIds.length) {
+          throw new SysTransitionError(409, 'RELEASE_PUBLISH_CONFLICT', '批次内单先行上线授权状态已变更，请刷新重试');
+        }
+        for (const m of membersConsumable) {
+          await dbRunAsync(
+            `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, operator_id, operator_name)
+             VALUES (?, 'note', ?, 'fast_release_auth_terminated', ?, ?)`,
+            [m.id, '直上授权已失效（上线翻牌）', Number(actor.id) || null, actor.name || null]
+          );
+          // [S5·§4-7 五事件终结延伸·双保险点] 同批清集合——本函数头部注释已论证这整段本身是纵深防御
+          //   （理论上 membersWithActiveAuth 恒为空数组，走到这里的单必然已在 case 'accept' 内被终结过一次），
+          //   本调用同理是"若理论假设有朝一日失效，仍不留残留 roster 行"的兜底，非当前可达缺口。
+          await clearFastReleaseRosterOnTermination(m.id, actor, '批次发布');
+        }
       }
     }
 
@@ -18864,7 +19303,14 @@ module.exports = (deps) => {
     // S5（方案 §4-5/§4-6/§4-7）：撤销收紧+验收/打回闸+五事件终结延伸——verify 直调导出，写读同源防漂移。
     clearFastReleaseRosterOnTermination,        // 共享清集合内核——verify 可直调覆盖"changes=0 不写虚假 timeline"等单元场景（需调用方自行持事务锁）
     fastReleaseRosterResidualAtInactiveAuthViolations,   // 不变量 ⑪ 探针：verify 全库扫描 + 反证判红两用
-    fastReleaseNonFlippedFullDoneViolations,             // 不变量 ⑫ 探针：verify 全库扫描 + 反证判红两用
+    fastReleaseNonFlippedFullDoneViolations,             // 不变量 ⑫ 探针：verify 全库扫描 + 反证判红两用（S1 起签名含 nowStr）
+    // B1'（先行上线授权超时收回，方案 20260816_v1.2）：可消费判据 + 幂等超时终结内核——verify 直调导出，
+    //   写读同源防漂移（同上方 B1 组既有导出理由）。
+    fastReleaseAuthConsumeDeadline,             // 消费截止时刻计算（JS 侧）——verify 与 SQL 侧对拍
+    isConsumableFastReleaseAuth,                // 可消费判据（JS 侧）——verify 直调覆盖 fail-closed/边界等单元场景
+    FAST_RELEASE_CONSUMABLE_AUTH_WHERE_SQL,     // 可消费判据（SQL 侧）——verify 断言片段本体+占位符数
+    terminateExpiredFastReleaseAuthInTxn,       // 幂等超时终结内核——verify 直调覆盖 no-op/幂等/清集合含 done 等场景（需调用方自行 sysBeginImmediate）
+    classifyFastReleaseRevokeCase,               // revoke 五格枚举——verify 直调覆盖五格分类正确性（写读同源，禁另写一份判据）
     // 方案 v1.8 §12（建单人编辑字段对齐·2026-08-14）：三集同源常量导出——verify 断言"建单集=可编辑集∪
     //   排除集"需直读这三个常量本体，禁止在 verify 侧另拼一份字面量清单（那样改一处不改另一处就会
     //   静默漂移，失去这条守卫的意义）。

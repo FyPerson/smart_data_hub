@@ -880,7 +880,7 @@ function extractSetLiteralStrings(text, constName) {
 //   诉求，见 index.js 该两处 INSERT 前的注释）。
 // [方案 §14·S11·2026-08-14] +completion_overrun_reason（feature 超期完成理由闸独立留痕行，均
 //   event_type='note'，两处写点：case 'liaison_test_pass' + runWGate feature⑤⑥降级路径，同上模式）。
-const NOTE_OWN_LABEL_ACTION_CODES = new Set(['assign_overdue_eta', 'fast_release_authorize', 'fast_release_revoke', 'fast_release_staged', 'fast_release_exec_confirm', 'fast_release_roster_added', 'fast_release_roster_removed', 'fast_release_roster_cleared', 'post_release_accept_pass', 'post_release_accept_fail', 'eta_auto_from_deadline', 'eta_auto_sla', 'completion_overrun_reason']);
+const NOTE_OWN_LABEL_ACTION_CODES = new Set(['assign_overdue_eta', 'fast_release_authorize', 'fast_release_revoke', 'fast_release_staged', 'fast_release_exec_confirm', 'fast_release_roster_added', 'fast_release_roster_removed', 'fast_release_roster_cleared', 'post_release_accept_pass', 'post_release_accept_fail', 'eta_auto_from_deadline', 'eta_auto_sla', 'completion_overrun_reason', 'fast_release_auth_expired']);
 function computeDisplayKey(eventType, actionCode, releaseScopeKeySet) {
   const hasActionCode = actionCode !== null && actionCode !== undefined && actionCode !== '';
   if (eventType === 'status_change' || eventType === 'release') return hasActionCode ? actionCode : eventType;
@@ -1030,7 +1030,27 @@ ok(`SI_TL_RELEASE_SCOPE_LABEL 解析到 ${releaseScopeKeys.size} 个 key（\u226
 // 【2026-08-14 codex 395 预筛 NEW-1】45 → 46：runWGate 新增分支③（非 submit 触发+理由缺失 → defer 挂起）
 //   补一条独立 INSERT——action_code 仍是既有 'completion_overrun_reason'（不新增码），但这是**新的物理
 //   INSERT 语句**（不同源码位置，与分支①的既有 INSERT 各自独立），故 +1。
-const EXPECTED_INSERT_SITE_COUNT = 46;
+// 【2026-08-16 先行上线授权超时收回 S1】46 → 48：新增 2 条直写 INSERT——
+//   ① 幂等超时终结内核 terminateExpiredFastReleaseAuthInTxn（唯一实现）内一条 event_type='note'、
+//   action_code='fast_release_auth_expired'（新码）的独立徽章行。⚠️ 本内核调用点有七处（挂牌闸/
+//   exec-confirm/加人/移人/五事件调用层分叉/revoke 格4/重授权），但**源码文本层面只有一条 INSERT
+//   语句**（helper 函数体内），本静态扫描按"源码文本站点数"计数（同 attemptFastReleaseFlipInTxn 的
+//   fast_release_exec_online INSERT、clearFastReleaseRosterOnTermination 的 fast_release_roster_cleared
+//   INSERT 既有先例），故只 +1 非 +7。【2026-08-16 S2 前端收口订正】该码在 S1 落地时尚未登记前端三表，
+//   落回 event_type='note' 的通用标签（主覆盖断言按 computeDisplayKey 规则自然落回既有 'note' key，
+//   不落入 KNOWN_GAPS）；S2 已补齐登记——SI_TL_LABEL/SI_TL_CLS/SI_TL_NOTE_OWN_LABEL_CODES 三处新增
+//   fast_release_auth_expired 词条（Sys_Iteration.html），本文件下方 NOTE_OWN_LABEL_ACTION_CODES 同步
+//   补齐（两处必须逐字同步，见下方 [预筛 MED-5] 双向核对断言）。
+//   ② revoke 端点五格决策表格 5（跨轮旧授权残迹清理）新增**独立** INSERT 语句——action_code 仍是既有
+//   'fast_release_revoke'（不新增码，summary 前缀"跨轮失效残迹清理"区分成因），但方案 §5⑥/420 收口
+//   明令"禁复用格 2 那条带 NOT EXISTS done 的既有 SQL"（清理面 fail-open 语义与格 2 的既有防线冲突），
+//   故格 5 走独立 UPDATE + 独立 INSERT，物理站点 +1 非复用既有站点。已在既有 NOTE_OWN_LABEL_ACTION_CODES/
+//   SI_TL_LABEL 内（复用既有 'fast_release_revoke' 码词条，无需新增前端登记）。
+//   两处改动经本守卫实际解析确认：站点总数 46→48。
+//   ⚠️ 码表说明文档（docs/local/系统迭代/时间线写入点码表_20260810.md）本批未同步更新——本任务范围
+//   明确限定"只做后端（index.js + scripts/ 下 verify），不碰 docs/"，该文档同步留给下一次触碰 docs/
+//   的批次一并处理（含 fast_release_auth_expired 新码登记）。
+const EXPECTED_INSERT_SITE_COUNT = 48;
 const sites = locateRealInsertSites(indexSrc);
 if (sites.length !== EXPECTED_INSERT_SITE_COUNT) {
   fail(

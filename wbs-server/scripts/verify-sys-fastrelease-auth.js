@@ -763,11 +763,16 @@ async function main() {
     assert.strictEqual(probe.authorize.status, 403, `[11] 禁用实例授权应 403（且优先于 id 校验的 400），实得 ${probe.authorize.status} ${JSON.stringify(probe.authorize.body)}`);
     assert.strictEqual(probe.authorize.body.code, 'FAST_RELEASE_FEATURE_DISABLED', `[11] 确切码，实得 ${probe.authorize.body.code}`);
     assert.ok(/暂未启用/.test(probe.authorize.body.error || ''), `[11] 文案应含"暂未启用"，实得="${probe.authorize.body.error}"`);
-    // 对照组：同一禁用实例上，撤销端点不受闸——同一个不存在 id 应走常规 400 INVALID_SYS_ISSUE_ID
-    //   （≠403 功能禁用码），证明闸只锁增量面（授权），清理面（撤销）fail-open。
-    assert.strictEqual(probe.revoke.status, 400, `[11-撤销不受闸] 应 400 常规 id 校验，实得 ${probe.revoke.status} ${JSON.stringify(probe.revoke.body)}`);
+    // 对照组：同一禁用实例上，撤销端点不受闸——同一个不存在 id 应走常规业务校验（≠403 功能禁用码），
+    //   证明闸只锁增量面（授权），清理面（撤销）fail-open。
+    //   [S1·先行上线授权超时收回] 期望码由 400 REASON_REQUIRED 改为 404 SYS_ISSUE_NOT_FOUND——419/420
+    //   收口把 reason 三段校验从端点头部移到事务内五格分流之后（仅格 2/格 5 执行），分流本身需要先
+    //   SELECT 到行才能判格，故不存在的 id 现在会先撞 404（比旧版"先查 reason 缺失"更准确地反映"这个
+    //   id 压根不存在"这一事实，非本次改动引入的缺陷；本条只关心"不是 403 功能禁用码"这一真实测试意图）。
+    assert.strictEqual(probe.revoke.status, 404, `[11-撤销不受闸] 应 404 常规 id 存在性校验（不存在的 id 先于 reason 校验被发现），实得 ${probe.revoke.status} ${JSON.stringify(probe.revoke.body)}`);
+    assert.strictEqual(probe.revoke.body.code, 'SYS_ISSUE_NOT_FOUND', `[11-撤销不受闸] 确切码，实得 ${probe.revoke.body.code}`);
     assert.notStrictEqual(probe.revoke.body.code, 'FAST_RELEASE_FEATURE_DISABLED', '[11-撤销不受闸] 不得返回功能禁用码（清理面 fail-open）');
-    ok('[11] 部署闸成对用例（子进程探针）：注入 false→授权 403 FAST_RELEASE_FEATURE_DISABLED（优先于 id 校验）+文案；缺省(未注入)=启用由 [1]-[10] 全程活体证明；撤销端点同 id 走常规 400 证明清理面 fail-open');
+    ok('[11] 部署闸成对用例（子进程探针）：注入 false→授权 403 FAST_RELEASE_FEATURE_DISABLED（优先于 id 校验）+文案；缺省(未注入)=启用由 [1]-[10] 全程活体证明；撤销端点同 id 走常规 404 证明清理面 fail-open');
   }
 
   server.close();
