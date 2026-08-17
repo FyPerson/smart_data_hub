@@ -1,0 +1,565 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>系统迭代 · 视觉升级 Demo</title>
+  <style>
+    :root {
+      --bg: #f4f5f7;
+      --panel: #ffffff;
+      --panel-2: #f8f9fb;
+      --ink: #17191d;
+      --ink-2: #4f5663;
+      --ink-3: #818896;
+      --line: #e5e7eb;
+      --line-strong: #d7dae0;
+      --accent: #2356d8;
+      --accent-soft: #eef3ff;
+      --nav: #17191d;
+      --nav-muted: #9ca3af;
+      --danger: #c93939;
+      --warning: #b7670b;
+      --success: #17794b;
+      --purple: #7451c7;
+      --shadow: 0 16px 44px rgba(22, 28, 45, .13);
+      --radius: 10px;
+    }
+
+    [data-theme="dark"] {
+      --bg: #111317;
+      --panel: #181b20;
+      --panel-2: #1d2026;
+      --ink: #f1f3f5;
+      --ink-2: #b0b6c0;
+      --ink-3: #777f8d;
+      --line: #2a2e36;
+      --line-strong: #393f49;
+      --accent: #78a0ff;
+      --accent-soft: #1c2945;
+      --nav: #0d0f12;
+      --nav-muted: #858d9a;
+      --danger: #ff7a7a;
+      --warning: #f2aa54;
+      --success: #61c995;
+      --purple: #aa8cff;
+      --shadow: 0 18px 50px rgba(0, 0, 0, .42);
+    }
+
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: "Segoe UI Variable", "PingFang SC", "Microsoft YaHei", sans-serif;
+      font-size: 13px;
+      overflow: hidden;
+    }
+    button, input, select { font: inherit; color: inherit; }
+    button { cursor: pointer; }
+    svg { width: 18px; height: 18px; display: block; }
+
+    .app { display: grid; grid-template-columns: 224px minmax(0, 1fr); height: 100vh; }
+    .sidebar {
+      background: var(--nav);
+      color: white;
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+      padding: 18px 12px 14px;
+    }
+    .brand { display: flex; align-items: center; gap: 10px; padding: 0 8px 19px; }
+    .brand-mark {
+      width: 30px; height: 30px; display: grid; place-items: center;
+      border-radius: 8px; background: #fff; color: #111318; font-weight: 800;
+      letter-spacing: -.04em;
+    }
+    .brand-name { font-size: 14px; font-weight: 650; letter-spacing: .02em; }
+    .brand-sub { color: #7f8793; font-size: 10px; margin-top: 2px; }
+    .nav-label { padding: 13px 10px 6px; color: #646b76; font-size: 10px; font-weight: 700; letter-spacing: .13em; text-transform: uppercase; }
+    .nav-item {
+      border: 0; width: 100%; color: var(--nav-muted); background: transparent;
+      display: flex; align-items: center; gap: 11px; padding: 9px 10px; border-radius: 7px;
+      text-align: left; margin: 1px 0; transition: .15s ease;
+    }
+    .nav-item:hover { color: #fff; background: rgba(255,255,255,.06); }
+    .nav-item.active { color: #fff; background: #2b3038; box-shadow: inset 2px 0 #77a2ff; }
+    .nav-item .count { margin-left: auto; color: #7d8590; font-size: 11px; }
+    .sidebar-bottom { margin-top: auto; border-top: 1px solid #2a2d32; padding-top: 12px; }
+    .profile { display: flex; align-items: center; gap: 10px; padding: 8px; }
+    .avatar { width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; background: #3158a7; font-size: 11px; font-weight: 700; }
+    .profile-name { font-size: 12px; font-weight: 600; }
+    .profile-role { color: #737b87; font-size: 10px; margin-top: 2px; }
+
+    .workspace { min-width: 0; display: flex; flex-direction: column; }
+    .topbar {
+      height: 58px; flex: 0 0 58px; display: flex; align-items: center; gap: 12px;
+      padding: 0 22px; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--panel) 92%, transparent);
+    }
+    .breadcrumbs { color: var(--ink-3); white-space: nowrap; }
+    .breadcrumbs b { color: var(--ink); font-weight: 600; }
+    .top-spacer { flex: 1; }
+    .command-trigger {
+      width: min(320px, 28vw); height: 34px; border: 1px solid var(--line); background: var(--panel-2);
+      border-radius: 7px; color: var(--ink-3); display: flex; align-items: center; gap: 8px; padding: 0 10px;
+    }
+    .command-trigger span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .key { margin-left: auto; border: 1px solid var(--line-strong); background: var(--panel); border-radius: 4px; padding: 1px 5px; font-size: 10px; color: var(--ink-3); }
+    .icon-button { width: 34px; height: 34px; padding: 0; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); display: grid; place-items: center; color: var(--ink-2); }
+    .icon-button:hover { border-color: var(--line-strong); background: var(--panel-2); color: var(--ink); }
+    .primary-button, .secondary-button {
+      height: 34px; border-radius: 7px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 0 13px; font-weight: 600;
+    }
+    .primary-button { border: 1px solid #1f4fc9; background: var(--accent); color: white; box-shadow: 0 1px 1px rgba(0,0,0,.08); }
+    [data-theme="dark"] .primary-button { color: #0f1628; }
+    .secondary-button { border: 1px solid var(--line); background: var(--panel); color: var(--ink-2); }
+    .primary-button:hover, .secondary-button:hover { filter: brightness(.97); }
+
+    .content { min-height: 0; overflow: auto; padding: 22px; }
+    .page-head { display: flex; align-items: flex-start; gap: 18px; margin-bottom: 18px; }
+    .page-head h1 { margin: 0; font-size: 24px; line-height: 1.2; letter-spacing: -.035em; font-weight: 720; }
+    .page-head p { margin: 6px 0 0; color: var(--ink-3); line-height: 1.5; }
+    .head-actions { margin-left: auto; display: flex; gap: 8px; }
+
+    .overview {
+      display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(250px, .65fr);
+      border: 1px solid var(--line); background: var(--panel); border-radius: var(--radius); overflow: hidden; margin-bottom: 14px;
+    }
+    .flow-panel { padding: 17px 18px 14px; min-width: 0; }
+    .panel-eyebrow { color: var(--ink-3); font-size: 11px; font-weight: 650; letter-spacing: .04em; }
+    .flow-top { display: flex; align-items: baseline; gap: 8px; margin: 5px 0 16px; }
+    .flow-top strong { font-size: 19px; letter-spacing: -.03em; }
+    .flow-top span { color: var(--ink-3); }
+    .flow-track { display: flex; height: 8px; overflow: hidden; border-radius: 2px; background: var(--panel-2); }
+    .flow-track i { display: block; height: 100%; transition: width .25s ease, opacity .15s ease; }
+    .flow-track i:hover { opacity: .75; }
+    .flow-steps { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; margin-top: 14px; }
+    .flow-step { border: 0; text-align: left; background: transparent; padding: 0; min-width: 0; }
+    .flow-step .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; }
+    .flow-step b { font-size: 16px; margin-right: 3px; }
+    .flow-step small { display: block; color: var(--ink-3); margin: 4px 0 0 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .flow-step.active b, .flow-step.active .name { color: var(--accent); }
+    .attention { border-left: 1px solid var(--line); padding: 17px 18px; background: var(--panel-2); }
+    .attention-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 11px; }
+    .attention-head b { font-size: 12px; }
+    .attention-head span { color: var(--danger); font-size: 11px; font-weight: 600; }
+    .attention-item { display: grid; grid-template-columns: 7px 1fr auto; gap: 9px; align-items: center; padding: 8px 0; border-top: 1px solid var(--line); }
+    .attention-item:first-of-type { border-top: 0; }
+    .attention-item i { width: 7px; height: 7px; border-radius: 50%; background: var(--danger); }
+    .attention-item b { display: block; font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .attention-item small { color: var(--ink-3); }
+    .attention-item em { font-style: normal; color: var(--danger); font-size: 11px; white-space: nowrap; }
+
+    .type-strip { display: flex; align-items: center; gap: 4px; margin-bottom: 10px; }
+    .type-chip { border: 1px solid transparent; background: transparent; color: var(--ink-3); padding: 6px 9px; border-radius: 6px; }
+    .type-chip:hover { background: var(--panel); color: var(--ink); }
+    .type-chip.active { color: var(--ink); background: var(--panel); border-color: var(--line); box-shadow: 0 1px 1px rgba(0,0,0,.03); }
+    .type-chip span { margin-left: 5px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+    .type-spacer { flex: 1; }
+    .sync-note { color: var(--ink-3); font-size: 11px; display: flex; align-items: center; gap: 6px; }
+    .sync-note::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: #39a46d; box-shadow: 0 0 0 3px color-mix(in srgb, #39a46d 15%, transparent); }
+
+    .work-panel { border: 1px solid var(--line); background: var(--panel); border-radius: var(--radius); overflow: hidden; }
+    .toolbar { min-height: 48px; display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-bottom: 1px solid var(--line); }
+    .searchbox { position: relative; width: 260px; }
+    .searchbox svg { position: absolute; left: 9px; top: 8px; color: var(--ink-3); width: 16px; height: 16px; pointer-events: none; }
+    .searchbox input, .filter-select {
+      height: 32px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); outline: 0;
+    }
+    .searchbox input { width: 100%; padding: 0 10px 0 31px; }
+    .searchbox input:focus, .filter-select:focus { border-color: color-mix(in srgb, var(--accent) 65%, var(--line)); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 10%, transparent); }
+    .filter-select { color: var(--ink-2); padding: 0 27px 0 9px; }
+    .toolbar-spacer { flex: 1; }
+    .view-switch { height: 32px; display: flex; padding: 2px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel-2); }
+    .view-button { width: 31px; border: 0; border-radius: 5px; background: transparent; color: var(--ink-3); display: grid; place-items: center; }
+    .view-button svg { width: 15px; height: 15px; }
+    .view-button.active { background: var(--panel); color: var(--ink); box-shadow: 0 1px 3px rgba(0,0,0,.09); }
+
+    .table-wrap { overflow: auto; }
+    table { width: 100%; border-collapse: collapse; min-width: 1040px; }
+    th { height: 38px; padding: 0 12px; text-align: left; color: var(--ink-3); font-size: 10px; font-weight: 700; letter-spacing: .045em; text-transform: uppercase; border-bottom: 1px solid var(--line); background: var(--panel-2); white-space: nowrap; }
+    td { height: 55px; padding: 0 12px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+    tbody tr { transition: background .12s ease; }
+    tbody tr:hover { background: color-mix(in srgb, var(--accent) 4%, var(--panel)); }
+    tbody tr.selected { background: color-mix(in srgb, var(--accent) 7%, var(--panel)); box-shadow: inset 2px 0 var(--accent); }
+    tbody tr:last-child td { border-bottom: 0; }
+    .id-cell { color: var(--ink-3); font-variant-numeric: tabular-nums; }
+    .title-cell { max-width: 330px; }
+    .title-main { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .title-sub { color: var(--ink-3); font-size: 11px; margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .status-badge, .type-badge, .priority {
+      display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; font-size: 11px; font-weight: 600;
+    }
+    .status-badge { padding: 3px 7px; border-radius: 99px; background: var(--panel-2); border: 1px solid var(--line); }
+    .status-badge::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--badge); }
+    .s-intake { --badge: #7451c7; color: var(--purple); }
+    .s-dev { --badge: #3976e8; color: var(--accent); }
+    .s-review { --badge: #e29a32; color: var(--warning); }
+    .s-prerelease { --badge: #e06e31; color: #c65c25; }
+    .s-released { --badge: #2da66a; color: var(--success); }
+    .type-badge { padding: 2px 6px; border-radius: 4px; background: var(--panel-2); color: var(--ink-2); border: 1px solid var(--line); }
+    .priority { font-variant-numeric: tabular-nums; }
+    .p0 { color: var(--danger); }
+    .p1 { color: var(--warning); }
+    .p2 { color: var(--accent); }
+    .risk { color: var(--ink-3); font-size: 11px; }
+    .person { display: flex; align-items: center; gap: 7px; white-space: nowrap; }
+    .person-dot { width: 23px; height: 23px; border-radius: 50%; display: grid; place-items: center; color: #fff; font-size: 9px; font-weight: 700; }
+    .date { white-space: nowrap; font-variant-numeric: tabular-nums; color: var(--ink-2); }
+    .date.overdue { color: var(--danger); font-weight: 600; }
+    .row-action { opacity: 0; border: 0; background: transparent; color: var(--ink-3); border-radius: 5px; padding: 5px; }
+    tr:hover .row-action, tr.selected .row-action { opacity: 1; }
+    .row-action:hover { background: var(--panel-2); color: var(--ink); }
+    .empty { padding: 56px 20px; text-align: center; color: var(--ink-3); display: none; }
+    .empty b { display: block; color: var(--ink-2); font-size: 14px; margin-bottom: 5px; }
+    .panel-footer { min-height: 42px; border-top: 1px solid var(--line); display: flex; align-items: center; padding: 0 12px; color: var(--ink-3); font-size: 11px; }
+    .panel-footer .legend { margin-left: auto; display: flex; gap: 13px; }
+    .legend span { display: inline-flex; align-items: center; gap: 5px; }
+    .legend i { width: 6px; height: 6px; border-radius: 50%; }
+
+    .board { display: none; grid-template-columns: repeat(4, minmax(220px, 1fr)); gap: 1px; background: var(--line); overflow: auto; min-height: 350px; }
+    .board.active { display: grid; }
+    .table-wrap.hidden { display: none; }
+    .board-column { background: var(--panel-2); padding: 12px; min-width: 220px; }
+    .board-title { display: flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 650; margin-bottom: 10px; }
+    .board-title i { width: 7px; height: 7px; border-radius: 50%; }
+    .board-title span { color: var(--ink-3); margin-left: auto; font-variant-numeric: tabular-nums; }
+    .board-card { background: var(--panel); border: 1px solid var(--line); border-radius: 7px; padding: 11px; margin-bottom: 8px; box-shadow: 0 1px 1px rgba(0,0,0,.025); }
+    .board-card:hover { border-color: var(--line-strong); box-shadow: 0 4px 13px rgba(20,26,36,.06); }
+    .board-card .title-main { margin: 7px 0 10px; white-space: normal; line-height: 1.45; }
+    .board-meta { display: flex; align-items: center; gap: 8px; color: var(--ink-3); font-size: 10px; }
+    .board-meta .priority { margin-left: auto; }
+
+    .overlay { position: fixed; inset: 0; background: rgba(10,12,17,.35); opacity: 0; visibility: hidden; transition: .2s ease; z-index: 20; }
+    .overlay.open { opacity: 1; visibility: visible; }
+    .drawer {
+      position: fixed; top: 0; right: 0; width: min(520px, 92vw); height: 100vh; background: var(--panel); z-index: 21;
+      transform: translateX(101%); transition: transform .23s cubic-bezier(.2,.8,.2,1); box-shadow: var(--shadow); display: flex; flex-direction: column;
+    }
+    .drawer.open { transform: translateX(0); }
+    .drawer-head { padding: 17px 18px 15px; border-bottom: 1px solid var(--line); }
+    .drawer-top { display: flex; align-items: center; gap: 8px; color: var(--ink-3); font-size: 11px; }
+    .drawer-top .icon-button { margin-left: auto; width: 30px; height: 30px; }
+    .drawer h2 { font-size: 18px; letter-spacing: -.02em; margin: 11px 0 9px; }
+    .drawer-tags { display: flex; gap: 6px; flex-wrap: wrap; }
+    .drawer-body { padding: 17px 18px 90px; overflow: auto; }
+    .detail-section { border-top: 1px solid var(--line); padding: 16px 0; }
+    .detail-section:first-child { border-top: 0; padding-top: 0; }
+    .section-title { font-size: 11px; color: var(--ink-3); font-weight: 700; letter-spacing: .06em; text-transform: uppercase; margin-bottom: 12px; }
+    .brief { line-height: 1.7; color: var(--ink-2); margin: 0; }
+    .detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 13px 20px; }
+    .detail-key { color: var(--ink-3); font-size: 11px; margin-bottom: 4px; }
+    .detail-value { font-weight: 560; }
+    .timeline-item { display: grid; grid-template-columns: 22px 1fr auto; gap: 9px; padding: 8px 0; }
+    .timeline-mark { width: 20px; height: 20px; border-radius: 50%; background: var(--accent-soft); color: var(--accent); display: grid; place-items: center; font-size: 10px; font-weight: 700; }
+    .timeline-item b { font-size: 12px; }
+    .timeline-item p { margin: 3px 0 0; color: var(--ink-3); font-size: 11px; }
+    .timeline-item time { color: var(--ink-3); font-size: 10px; white-space: nowrap; }
+    .drawer-actions { position: absolute; bottom: 0; left: 0; right: 0; padding: 12px 18px; border-top: 1px solid var(--line); background: color-mix(in srgb, var(--panel) 94%, transparent); display: flex; gap: 8px; justify-content: flex-end; }
+
+    .modal { position: fixed; inset: 0; z-index: 30; display: grid; place-items: start center; padding-top: 12vh; background: rgba(8,10,14,.43); opacity: 0; visibility: hidden; transition: .16s ease; }
+    .modal.open { opacity: 1; visibility: visible; }
+    .modal-card { width: min(560px, calc(100vw - 32px)); background: var(--panel); border: 1px solid var(--line); border-radius: 11px; box-shadow: var(--shadow); transform: translateY(-8px) scale(.985); transition: .18s ease; overflow: hidden; }
+    .modal.open .modal-card { transform: translateY(0) scale(1); }
+    .modal-head { padding: 15px 16px; border-bottom: 1px solid var(--line); display: flex; align-items: center; }
+    .modal-head b { font-size: 14px; }
+    .modal-head .icon-button { margin-left: auto; width: 29px; height: 29px; }
+    .modal-body { padding: 16px; }
+    .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 13px; }
+    .field.full { grid-column: 1 / -1; }
+    .field label { display: block; color: var(--ink-2); font-size: 11px; font-weight: 600; margin-bottom: 6px; }
+    .field input, .field select, .field textarea { width: 100%; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); padding: 8px 9px; outline: 0; }
+    .field textarea { height: 76px; resize: vertical; }
+    .field input:focus, .field select:focus, .field textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 10%, transparent); }
+    .modal-foot { padding: 11px 16px; border-top: 1px solid var(--line); display: flex; justify-content: flex-end; gap: 8px; }
+
+    .command-modal .modal-card { width: min(620px, calc(100vw - 32px)); }
+    .command-input { display: flex; align-items: center; gap: 9px; padding: 13px 14px; border-bottom: 1px solid var(--line); }
+    .command-input input { flex: 1; border: 0; outline: 0; background: transparent; font-size: 15px; }
+    .command-results { padding: 7px; max-height: 330px; overflow: auto; }
+    .command-group { padding: 7px 8px 4px; color: var(--ink-3); font-size: 10px; font-weight: 700; letter-spacing: .07em; }
+    .command-item { width: 100%; display: flex; align-items: center; gap: 10px; border: 0; background: transparent; border-radius: 6px; padding: 9px; text-align: left; }
+    .command-item:hover, .command-item:focus { background: var(--accent-soft); color: var(--accent); outline: 0; }
+    .command-item small { margin-left: auto; color: var(--ink-3); }
+    .toast { position: fixed; left: 50%; bottom: 24px; transform: translate(-50%, 15px); background: #17191d; color: #fff; border-radius: 7px; padding: 9px 13px; z-index: 50; opacity: 0; pointer-events: none; transition: .2s ease; box-shadow: var(--shadow); }
+    .toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+    @media (max-width: 1050px) {
+      .app { grid-template-columns: 68px minmax(0, 1fr); }
+      .brand { padding-left: 7px; }
+      .brand-copy, .nav-label, .nav-item span:not(.count), .profile-copy { display: none; }
+      .nav-item { justify-content: center; padding: 10px; }
+      .nav-item .count { display: none; }
+      .profile { justify-content: center; }
+      .overview { grid-template-columns: 1fr; }
+      .attention { border-left: 0; border-top: 1px solid var(--line); }
+    }
+    @media (max-width: 760px) {
+      body { overflow: auto; }
+      .app { display: block; height: auto; min-height: 100vh; }
+      .sidebar { display: none; }
+      .workspace { min-height: 100vh; }
+      .topbar { padding: 0 14px; }
+      .breadcrumbs { display: none; }
+      .command-trigger { width: auto; flex: 1; }
+      .content { padding: 15px; overflow: visible; }
+      .page-head { align-items: center; }
+      .page-head p { display: none; }
+      .flow-steps { grid-template-columns: repeat(3, 1fr); }
+      .flow-step:nth-child(n+4) { display: none; }
+      .toolbar { flex-wrap: wrap; }
+      .searchbox { width: 100%; }
+      .toolbar-spacer { display: none; }
+      .type-strip { overflow-x: auto; }
+      .sync-note { display: none; }
+      .detail-grid, .form-grid { grid-template-columns: 1fr; }
+      .field.full { grid-column: auto; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">数</div>
+        <div class="brand-copy"><div class="brand-name">智数协同平台</div><div class="brand-sub">SMART DATA HUB</div></div>
+      </div>
+      <div class="nav-label">工作台</div>
+      <button class="nav-item" data-nav><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 12 12 4l9 8"/><path d="M5 10v10h14V10"/></svg><span>我的工作台</span><span class="count">5</span></button>
+      <button class="nav-item" data-nav><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M8 9h8M8 13h8M8 17h5"/></svg><span>任务池</span><span class="count">12</span></button>
+      <button class="nav-item" data-nav><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 19h16M6 16l4-5 3 2 5-7"/><circle cx="18" cy="6" r="1.5"/></svg><span>数据开发</span></button>
+      <button class="nav-item active"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v6h-6"/><path d="m9 12 2 2 4-5"/></svg><span>系统迭代</span><span class="count">21</span></button>
+      <div class="nav-label">数据资产</div>
+      <button class="nav-item" data-nav><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg><span>资产中心</span></button>
+      <button class="nav-item" data-nav><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 19h16M7 16V9m5 7V5m5 11v-4"/></svg><span>统计中心</span></button>
+      <button class="nav-item" data-nav><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 4h11l3 3v13H5z"/><path d="M15 4v4h4M8 12h8M8 16h6"/></svg><span>文档中心</span></button>
+      <div class="sidebar-bottom">
+        <button class="nav-item" id="themeToggle"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3a7 7 0 1 0 9 9 9 9 0 0 1-9-9Z"/></svg><span>切换外观</span></button>
+        <div class="profile"><div class="avatar">FY</div><div class="profile-copy"><div class="profile-name">平台管理员</div><div class="profile-role">数据中心 · 管理员</div></div></div>
+      </div>
+    </aside>
+
+    <section class="workspace">
+      <header class="topbar">
+        <div class="breadcrumbs">协同工作台&nbsp; / &nbsp;<b>系统迭代</b></div>
+        <div class="top-spacer"></div>
+        <button class="command-trigger" id="commandTrigger"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><span>搜索或执行命令</span><kbd class="key">Ctrl K</kbd></button>
+        <button class="icon-button" id="bellButton" title="通知"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/></svg></button>
+      </header>
+
+      <main class="content">
+        <div class="page-head">
+          <div><h1>系统迭代</h1><p>聚焦正在推进的变更、风险与上线节奏。</p></div>
+          <div class="head-actions">
+            <button class="secondary-button" id="manageButton"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7h16M7 12h10M9 17h6"/></svg>管理</button>
+            <button class="primary-button" id="createButton"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>新建迭代单</button>
+          </div>
+        </div>
+
+        <section class="overview">
+          <div class="flow-panel">
+            <div class="panel-eyebrow">当前流转概览</div>
+            <div class="flow-top"><strong>21 项进行中</strong><span>本周已完成 8 项</span></div>
+            <div class="flow-track" aria-label="状态分布">
+              <i style="width:22%;background:#7451c7"></i><i style="width:31%;background:#3976e8"></i><i style="width:18%;background:#e29a32"></i><i style="width:13%;background:#e06e31"></i><i style="width:16%;background:#2da66a"></i>
+            </div>
+            <div class="flow-steps">
+              <button class="flow-step" data-status="待受理"><span class="dot" style="background:#7451c7"></span><span class="name">待受理</span><div><b>5</b></div><small>2 项今日新增</small></button>
+              <button class="flow-step" data-status="开发中"><span class="dot" style="background:#3976e8"></span><span class="name">开发中</span><div><b>7</b></div><small>1 项存在风险</small></button>
+              <button class="flow-step" data-status="待验收"><span class="dot" style="background:#e29a32"></span><span class="name">待验收</span><div><b>4</b></div><small>最久等待 3 天</small></button>
+              <button class="flow-step" data-status="待上线"><span class="dot" style="background:#e06e31"></span><span class="name">待上线</span><div><b>3</b></div><small>下一窗口 周四</small></button>
+              <button class="flow-step" data-status="已上线"><span class="dot" style="background:#2da66a"></span><span class="name">已上线</span><div><b>8</b></div><small>近 7 日</small></button>
+            </div>
+          </div>
+          <aside class="attention">
+            <div class="attention-head"><b>需要关注</b><span>3 项</span></div>
+            <div class="attention-item"><i></i><div><b>营销域报表权限粒度调整</b><small>预计完成时间已逾期</small></div><em>逾期 2 天</em></div>
+            <div class="attention-item"><i style="background:#e29a32"></i><div><b>合同台账新增回款维度</b><small>等待需求方验收</small></div><em style="color:var(--warning)">等待 3 天</em></div>
+            <div class="attention-item"><i style="background:#7451c7"></i><div><b>BMS 同步频率配置</b><small>高风险项尚未评估</small></div><em style="color:var(--purple)">待评估</em></div>
+          </aside>
+        </section>
+
+        <div class="type-strip" id="typeStrip">
+          <button class="type-chip active" data-type="全部">全部<span>21</span></button>
+          <button class="type-chip" data-type="BUG">BUG<span>5</span></button>
+          <button class="type-chip" data-type="新功能">新功能<span>7</span></button>
+          <button class="type-chip" data-type="优化">优化<span>6</span></button>
+          <button class="type-chip" data-type="配置变更">配置变更<span>3</span></button>
+          <div class="type-spacer"></div><div class="sync-note">数据已同步 · 16:42</div>
+        </div>
+
+        <section class="work-panel">
+          <div class="toolbar">
+            <div class="searchbox"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><input id="searchInput" placeholder="搜索标题、系统或单号…"></div>
+            <select class="filter-select" id="systemFilter"><option value="全部">全部系统</option><option>经营分析平台</option><option>合同管理系统</option><option>数据资产平台</option><option>BMS</option></select>
+            <select class="filter-select" id="priorityFilter"><option value="全部">全部优先级</option><option>P0</option><option>P1</option><option>P2</option></select>
+            <div class="toolbar-spacer"></div>
+            <button class="secondary-button" id="clearButton" style="height:32px;padding:0 10px">清除筛选</button>
+            <div class="view-switch">
+              <button class="view-button active" data-view="table" title="列表视图"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01"/></svg></button>
+              <button class="view-button" data-view="board" title="看板视图"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="7" height="16" rx="1"/><rect x="14" y="4" width="7" height="10" rx="1"/></svg></button>
+            </div>
+          </div>
+          <div class="table-wrap" id="tableWrap">
+            <table>
+              <thead><tr><th style="width:70px">单号</th><th>迭代事项</th><th>类型</th><th>优先级 / 风险</th><th>状态</th><th>开发</th><th>预计完成</th><th style="width:42px"></th></tr></thead>
+              <tbody id="tableBody"></tbody>
+            </table>
+          </div>
+          <div class="board" id="board"></div>
+          <div class="empty" id="emptyState"><b>没有匹配的迭代项</b>请调整筛选条件或搜索关键词。</div>
+          <footer class="panel-footer"><span id="resultCount">显示 8 项，共 21 项</span><div class="legend"><span><i style="background:var(--danger)"></i>逾期</span><span><i style="background:var(--warning)"></i>需关注</span></div></footer>
+        </section>
+      </main>
+    </section>
+  </div>
+
+  <div class="overlay" id="overlay"></div>
+  <aside class="drawer" id="drawer" aria-hidden="true">
+    <header class="drawer-head">
+      <div class="drawer-top"><span id="drawerId">SYS-0186</span><span>·</span><span id="drawerSystem">经营分析平台</span><button class="icon-button" id="drawerClose" aria-label="关闭"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
+      <h2 id="drawerTitle"></h2><div class="drawer-tags" id="drawerTags"></div>
+    </header>
+    <div class="drawer-body">
+      <section class="detail-section"><div class="section-title">需求摘要</div><p class="brief" id="drawerBrief"></p></section>
+      <section class="detail-section"><div class="section-title">迭代信息</div><div class="detail-grid" id="drawerGrid"></div></section>
+      <section class="detail-section"><div class="section-title">最近动态</div><div id="drawerTimeline"></div></section>
+    </div>
+    <div class="drawer-actions"><button class="secondary-button" id="copyButton">复制链接</button><button class="primary-button" id="advanceButton">推进至下一状态</button></div>
+  </aside>
+
+  <div class="modal" id="createModal">
+    <div class="modal-card">
+      <div class="modal-head"><b>新建迭代单</b><button class="icon-button modal-close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
+      <div class="modal-body"><div class="form-grid">
+        <div class="field full"><label>迭代标题</label><input id="newTitle" placeholder="清晰描述本次变更"></div>
+        <div class="field"><label>所属系统</label><select><option>经营分析平台</option><option>合同管理系统</option><option>数据资产平台</option><option>BMS</option></select></div>
+        <div class="field"><label>类型</label><select><option>新功能</option><option>BUG</option><option>优化</option><option>配置变更</option></select></div>
+        <div class="field"><label>优先级</label><select><option>P2 · 常规排期</option><option>P1 · 近期计划</option><option>P0 · 业务紧急</option></select></div>
+        <div class="field"><label>期望完成</label><input type="date" value="2026-08-28"></div>
+        <div class="field full"><label>需求说明</label><textarea placeholder="说明背景、目标与验收口径"></textarea></div>
+      </div></div>
+      <div class="modal-foot"><button class="secondary-button modal-close">取消</button><button class="primary-button" id="submitCreate">创建并进入受理</button></div>
+    </div>
+  </div>
+
+  <div class="modal command-modal" id="commandModal">
+    <div class="modal-card">
+      <div class="command-input"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><input id="commandInput" placeholder="输入命令或跳转到…" autocomplete="off"><kbd class="key">ESC</kbd></div>
+      <div class="command-results">
+        <div class="command-group">快速操作</div>
+        <button class="command-item" data-command="create"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 5v14M5 12h14"/></svg>新建迭代单<small>N</small></button>
+        <button class="command-item" data-command="overdue"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 7v6l4 2"/></svg>查看逾期事项<small>3 项</small></button>
+        <button class="command-item" data-command="board"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="7" height="16" rx="1"/><rect x="14" y="4" width="7" height="10" rx="1"/></svg>切换到看板视图<small>V</small></button>
+        <div class="command-group">管理</div>
+        <button class="command-item" data-command="release"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m5 16 7-12 7 12-7 4Z"/><path d="M12 10v6"/></svg>上线单管理<small>管理</small></button>
+      </div>
+    </div>
+  </div>
+  <div class="toast" id="toast"></div>
+
+  <script>
+    const issues = [
+      {id:'SYS-0186',title:'营销域报表权限粒度调整',sub:'将区域权限细化至组织与项目双维度',type:'优化',priority:'P0',risk:'高风险',status:'开发中',system:'经营分析平台',owner:'陈宇',avatar:'陈',color:'#3867c8',date:'08-14',overdue:true,brief:'现有营销域报表仅支持区域级权限，无法满足项目团队的最小授权要求。本次将访问控制细化到组织与项目双维度，并补充历史账号迁移策略。'},
+      {id:'SYS-0185',title:'合同台账新增回款维度',sub:'支持按回款状态与账期组合分析',type:'新功能',priority:'P1',risk:'中风险',status:'待验收',system:'合同管理系统',owner:'林妍',avatar:'林',color:'#b05d50',date:'08-19',brief:'为合同台账补充回款状态、计划账期和实际到账日期，并在经营分析看板中支持组合筛选。'},
+      {id:'SYS-0184',title:'BMS 同步频率配置',sub:'支持分主题动态配置同步周期',type:'配置变更',priority:'P1',risk:'高风险',status:'待受理',system:'BMS',owner:'待指派',avatar:'?',color:'#747b86',date:'08-22',brief:'不同业务主题的数据新鲜度要求不同，需要将固定同步周期改为主题级动态配置，并保留变更审计。'},
+      {id:'SYS-0183',title:'资产目录敏感字段识别优化',sub:'降低地址与备注字段的误报率',type:'优化',priority:'P2',risk:'低风险',status:'开发中',system:'数据资产平台',owner:'周凯',avatar:'周',color:'#22816b',date:'08-21',brief:'基于近期人工复核结果调整敏感字段识别规则，减少自由文本字段的误报，并增加规则命中解释。'},
+      {id:'SYS-0182',title:'招投标项目状态回写异常',sub:'修复撤销项目仍显示进行中的问题',type:'BUG',priority:'P0',risk:'中风险',status:'待上线',system:'经营分析平台',owner:'赵一',avatar:'赵',color:'#704db5',date:'08-17',brief:'OA 中已撤销的招投标项目在同步后仍显示为进行中，需修复状态映射并回补近三个月存量数据。'},
+      {id:'SYS-0181',title:'数据标准发布增加二次确认',sub:'高影响标准发布前展示影响范围',type:'新功能',priority:'P2',risk:'中风险',status:'待验收',system:'数据资产平台',owner:'孙哲',avatar:'孙',color:'#9a6b21',date:'08-20',brief:'在数据标准正式发布前展示关联模型、指标和下游任务数量，避免误操作造成大范围影响。'},
+      {id:'SYS-0180',title:'合同附件预览兼容 OFD',sub:'浏览器内直接预览国产版式文件',type:'新功能',priority:'P1',risk:'中风险',status:'开发中',system:'合同管理系统',owner:'林妍',avatar:'林',color:'#b05d50',date:'08-25',brief:'合同归档中存在大量 OFD 格式文件，需要增加在线预览能力，并保持现有权限校验与水印规则。'},
+      {id:'SYS-0179',title:'经营日报口径说明补充',sub:'指标异常时展示口径与数据来源',type:'配置变更',priority:'P2',risk:'低风险',status:'已上线',system:'经营分析平台',owner:'陈宇',avatar:'陈',color:'#3867c8',date:'08-15',brief:'为经营日报关键指标补充口径说明、数据来源和最近更新时间，减少业务侧反复咨询。'}
+    ];
+
+    let state = { type:'全部', status:'全部', system:'全部', priority:'全部', query:'', view:'table', selected:null };
+    const statusClass = {'待受理':'s-intake','开发中':'s-dev','待验收':'s-review','待上线':'s-prerelease','已上线':'s-released'};
+    const nextStatus = {'待受理':'开发中','开发中':'待验收','待验收':'待上线','待上线':'已上线','已上线':'已上线'};
+    const esc = value => String(value ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+    const filteredIssues = () => issues.filter(i =>
+      (state.type === '全部' || i.type === state.type) &&
+      (state.status === '全部' || i.status === state.status) &&
+      (state.system === '全部' || i.system === state.system) &&
+      (state.priority === '全部' || i.priority === state.priority) &&
+      (!state.query || [i.id,i.title,i.sub,i.system,i.owner].join(' ').toLowerCase().includes(state.query.toLowerCase()))
+    );
+
+    function issueRow(i) {
+      return `<tr data-id="${esc(i.id)}" class="${state.selected===i.id?'selected':''}">
+        <td class="id-cell">${esc(i.id.replace('SYS-',''))}</td>
+        <td class="title-cell"><div class="title-main">${esc(i.title)}</div><div class="title-sub">${esc(i.sub)} · ${esc(i.system)}</div></td>
+        <td><span class="type-badge">${esc(i.type)}</span></td>
+        <td><span class="priority ${i.priority.toLowerCase()}">${esc(i.priority)}</span><span class="risk"> / ${esc(i.risk)}</span></td>
+        <td><span class="status-badge ${statusClass[i.status]}">${esc(i.status)}</span></td>
+        <td><div class="person"><span class="person-dot" style="background:${i.color}">${esc(i.avatar)}</span>${esc(i.owner)}</div></td>
+        <td class="date ${i.overdue?'overdue':''}">${i.overdue?'逾期 · ':''}${esc(i.date)}</td>
+        <td><button class="row-action" aria-label="打开详情"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m9 18 6-6-6-6"/></svg></button></td>
+      </tr>`;
+    }
+
+    function renderBoard(list) {
+      const statuses = ['待受理','开发中','待验收','待上线'];
+      const colors = {'待受理':'#7451c7','开发中':'#3976e8','待验收':'#e29a32','待上线':'#e06e31'};
+      document.getElementById('board').innerHTML = statuses.map(status => {
+        const subset = list.filter(i => i.status === status);
+        return `<section class="board-column"><div class="board-title"><i style="background:${colors[status]}"></i>${status}<span>${subset.length}</span></div>${subset.map(i => `<article class="board-card" data-id="${i.id}"><div><span class="type-badge">${i.type}</span></div><div class="title-main">${esc(i.title)}</div><div class="board-meta"><span>${esc(i.id)}</span><span>${esc(i.owner)}</span><span class="priority ${i.priority.toLowerCase()}">${i.priority}</span></div></article>`).join('') || '<div style="padding:22px 4px;color:var(--ink-3);font-size:11px">暂无事项</div>'}</section>`;
+      }).join('');
+    }
+
+    function render() {
+      const list = filteredIssues();
+      document.getElementById('tableBody').innerHTML = list.map(issueRow).join('');
+      renderBoard(list);
+      document.getElementById('emptyState').style.display = list.length ? 'none' : 'block';
+      document.getElementById('tableWrap').style.display = state.view === 'table' && list.length ? 'block' : 'none';
+      document.getElementById('board').classList.toggle('active', state.view === 'board' && list.length > 0);
+      document.getElementById('resultCount').textContent = `显示 ${list.length} 项，共 21 项`;
+      document.querySelectorAll('.flow-step').forEach(el => el.classList.toggle('active', state.status === el.dataset.status));
+      document.querySelectorAll('.type-chip').forEach(el => el.classList.toggle('active', state.type === el.dataset.type));
+    }
+
+    function openDrawer(id) {
+      const i = issues.find(x => x.id === id); if (!i) return;
+      state.selected = id; render();
+      document.getElementById('drawerId').textContent = i.id;
+      document.getElementById('drawerSystem').textContent = i.system;
+      document.getElementById('drawerTitle').textContent = i.title;
+      document.getElementById('drawerTags').innerHTML = `<span class="status-badge ${statusClass[i.status]}">${i.status}</span><span class="type-badge">${i.type}</span><span class="priority ${i.priority.toLowerCase()}">${i.priority}</span>`;
+      document.getElementById('drawerBrief').textContent = i.brief;
+      document.getElementById('drawerGrid').innerHTML = [['所属系统',i.system],['开发负责人',i.owner],['技术风险',i.risk],['预计完成',i.date],['需求方','数字化管理部'],['OA 流程号','OA-202608-1462']].map(([k,v]) => `<div><div class="detail-key">${k}</div><div class="detail-value">${v}</div></div>`).join('');
+      document.getElementById('drawerTimeline').innerHTML = `<div class="timeline-item"><span class="timeline-mark">✓</span><div><b>完成可行性评估</b><p>${i.risk} · 已同步需求方</p></div><time>今天 14:20</time></div><div class="timeline-item"><span class="timeline-mark">→</span><div><b>指派开发负责人</b><p>${i.owner} 接手处理</p></div><time>昨天 17:43</time></div><div class="timeline-item"><span class="timeline-mark">＋</span><div><b>迭代单创建</b><p>由产品运营提交</p></div><time>08-13 10:16</time></div>`;
+      document.getElementById('advanceButton').textContent = i.status === '已上线' ? '已完成上线' : `推进至${nextStatus[i.status]}`;
+      document.getElementById('advanceButton').disabled = i.status === '已上线';
+      document.getElementById('drawer').classList.add('open'); document.getElementById('overlay').classList.add('open'); document.getElementById('drawer').setAttribute('aria-hidden','false');
+    }
+    function closeDrawer() { state.selected = null; render(); document.getElementById('drawer').classList.remove('open'); document.getElementById('overlay').classList.remove('open'); document.getElementById('drawer').setAttribute('aria-hidden','true'); }
+    function openModal(id) { document.getElementById(id).classList.add('open'); if(id==='commandModal') setTimeout(()=>document.getElementById('commandInput').focus(),80); }
+    function closeModals() { document.querySelectorAll('.modal').forEach(x => x.classList.remove('open')); }
+    let toastTimer; function toast(text) { const el=document.getElementById('toast'); el.textContent=text; el.classList.add('show'); clearTimeout(toastTimer); toastTimer=setTimeout(()=>el.classList.remove('show'),1800); }
+
+    document.getElementById('typeStrip').addEventListener('click', e => { const b=e.target.closest('[data-type]'); if(!b)return; state.type=b.dataset.type; render(); });
+    document.querySelectorAll('.flow-step').forEach(b => b.addEventListener('click', () => { state.status = state.status===b.dataset.status?'全部':b.dataset.status; render(); }));
+    document.getElementById('searchInput').addEventListener('input', e => { state.query=e.target.value.trim(); render(); });
+    document.getElementById('systemFilter').addEventListener('change', e => { state.system=e.target.value; render(); });
+    document.getElementById('priorityFilter').addEventListener('change', e => { state.priority=e.target.value; render(); });
+    document.getElementById('clearButton').addEventListener('click', () => { state={...state,type:'全部',status:'全部',system:'全部',priority:'全部',query:''}; document.getElementById('searchInput').value=''; document.getElementById('systemFilter').value='全部'; document.getElementById('priorityFilter').value='全部'; render(); });
+    document.querySelectorAll('.view-button').forEach(b => b.addEventListener('click', () => { state.view=b.dataset.view; document.querySelectorAll('.view-button').forEach(x=>x.classList.toggle('active',x===b)); render(); }));
+    document.getElementById('tableBody').addEventListener('click', e => { const row=e.target.closest('tr[data-id]'); if(row) openDrawer(row.dataset.id); });
+    document.getElementById('board').addEventListener('click', e => { const card=e.target.closest('[data-id]'); if(card) openDrawer(card.dataset.id); });
+    document.getElementById('overlay').addEventListener('click', closeDrawer); document.getElementById('drawerClose').addEventListener('click', closeDrawer);
+    document.getElementById('createButton').addEventListener('click', ()=>openModal('createModal')); document.querySelectorAll('.modal-close').forEach(b=>b.addEventListener('click',closeModals));
+    document.getElementById('createModal').addEventListener('click',e=>{if(e.target===e.currentTarget)closeModals()}); document.getElementById('commandModal').addEventListener('click',e=>{if(e.target===e.currentTarget)closeModals()});
+    document.getElementById('submitCreate').addEventListener('click',()=>{ const title=document.getElementById('newTitle').value.trim(); if(!title){toast('请先填写迭代标题');return;} closeModals(); document.getElementById('newTitle').value=''; toast('迭代单已创建 · SYS-0187'); });
+    document.getElementById('themeToggle').addEventListener('click',()=>{ const html=document.documentElement; html.dataset.theme=html.dataset.theme==='dark'?'light':'dark'; });
+    document.getElementById('commandTrigger').addEventListener('click',()=>openModal('commandModal'));
+    document.getElementById('commandModal').addEventListener('click',e=>{ const item=e.target.closest('[data-command]'); if(!item)return; const cmd=item.dataset.command; closeModals(); if(cmd==='create')openModal('createModal'); if(cmd==='overdue'){state.query='逾期';document.getElementById('searchInput').value='逾期';toast('已定位逾期事项');} if(cmd==='board')document.querySelector('[data-view="board"]').click(); if(cmd==='release')toast('上线单管理入口 · Demo'); });
+    document.getElementById('commandInput').addEventListener('input',e=>{ const q=e.target.value.toLowerCase(); document.querySelectorAll('.command-item').forEach(x=>x.style.display=x.textContent.toLowerCase().includes(q)?'flex':'none'); });
+    document.getElementById('manageButton').addEventListener('click',()=>toast('管理菜单：上线单 / 值班排班 / 上线日志'));
+    document.getElementById('bellButton').addEventListener('click',()=>toast('你有 3 项待处理提醒'));
+    document.querySelectorAll('[data-nav]').forEach(b=>b.addEventListener('click',()=>toast('Demo 中保留当前页面')));
+    document.getElementById('copyButton').addEventListener('click',()=>toast('迭代单链接已复制'));
+    document.getElementById('advanceButton').addEventListener('click',()=>{ const i=issues.find(x=>x.id===state.selected); if(!i||i.status==='已上线')return; i.status=nextStatus[i.status]; toast(`已推进至${i.status}`); openDrawer(i.id); });
+    document.addEventListener('keydown',e=>{ if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='k'){e.preventDefault();openModal('commandModal');} if(e.key==='Escape'){closeDrawer();closeModals();} if(e.key==='/'&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement.tagName)){e.preventDefault();document.getElementById('searchInput').focus();} });
+    render();
+  </script>
+</body>
+</html>

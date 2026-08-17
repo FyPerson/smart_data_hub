@@ -352,16 +352,43 @@ async function main() {
     const bugId = await createBug();
     let r = await call('POST', `/api/sys-issues/${bugId}/void`, adminTok, { reason: '误建作废' });
     assert.strictEqual(r.status, 200, 'admin 作废 bug 200');
-    // 对接人列表：默认看不到已作废 bug
+    // bug 对接人（示例发布者 7，非受理人）列表：默认看不到已作废 bug
     r = await call('GET', '/api/sys-issues', liaison1Tok);
     assert.ok(!(r.body.items || []).some(i => i.id === bugId), 'L-1：对接人列表默认不含已作废 bug');
-    // 对接人详情：已作废 bug → 403（非 admin，与列表看不到同源）
+    // bug 对接人（非受理人）传 include_voided=1 → 参数被忽略仍不含（判据=admin∨受理人，防传参绕过）
+    r = await call('GET', '/api/sys-issues?include_voided=1', liaison1Tok);
+    assert.ok(!(r.body.items || []).some(i => i.id === bugId), 'L-1：非受理人对接人 include_voided=1 被忽略，仍不含已作废');
+    // bug 对接人（非受理人）详情：已作废 bug → 403（与列表看不到同源）
     r = await call('GET', `/api/sys-issues/${bugId}`, liaison1Tok);
-    assert.strictEqual(r.status, 403, 'L-1：对接人开已作废 bug 详情 → 403（读端同源，列表看不到即详情打不开）');
+    assert.strictEqual(r.status, 403, 'L-1：非受理人对接人开已作废 bug 详情 → 403（读端同源，列表看不到即详情打不开）');
     // admin 详情：仍可查看已作废
     r = await call('GET', `/api/sys-issues/${bugId}`, adminTok);
     assert.strictEqual(r.status, 200, 'L-1：admin 仍可查看已作废 bug 详情');
-    ok('[L1] 已作废 bug：对接人列表看不到 + 详情 403（读端同源+已作废例外）+ admin 可查看');
+    // ⭐ 受理人（示例对接人 13）作废可见性开放（2026-08-17 用户拍板·与 admin 同判据）：默认不含 + 勾选含 + 详情可开
+    r = await call('GET', '/api/sys-issues', liaison2Tok);
+    assert.ok(!(r.body.items || []).some(i => i.id === bugId), 'L-1b：受理人列表默认仍不含已作废（勾选才含）');
+    r = await call('GET', '/api/sys-issues?include_voided=1', liaison2Tok);
+    assert.ok((r.body.items || []).some(i => i.id === bugId), 'L-1b：受理人 include_voided=1 含已作废 bug');
+    r = await call('GET', `/api/sys-issues/${bugId}`, liaison2Tok);
+    assert.strictEqual(r.status, 200, 'L-1b：受理人可开已作废 bug 详情（与列表 include_voided 判据同源）');
+    // ⭐ 写路径 canary（codex 428 MED 收口）：作废可见性只放读面，写端点由状态门拒绝且与角色无关——
+    //   受理人与 admin 对已作废 bug 执行 assign 均 409 GATE_INVARIANT（「已作废」刻意在 ALLOWED_STATUSES
+    //   族外，assertKnownIssueStatus 主状态非法边拒绝，早于 findTransition 查表·纯状态判据不看角色；
+    //   对照组=admin 同拒证明是状态门非角色门；编辑端点另有 status IN 白名单双条件守卫恒 409，结构同源）
+    r = await call('POST', `/api/sys-issues/${bugId}/assign`, liaison2Tok, { assigned_to: 5 });
+    assert.ok(r.status === 409 && r.body.code === 'GATE_INVARIANT', `L-1b：受理人对已作废 bug assign → 409 GATE_INVARIANT（实得 ${r.status}/${r.body && r.body.code}）`);
+    r = await call('POST', `/api/sys-issues/${bugId}/assign`, adminTok, { assigned_to: 5 });
+    assert.ok(r.status === 409 && r.body.code === 'GATE_INVARIANT', `L-1b：admin 对已作废 bug assign 同拒（状态门非角色门，实得 ${r.status}/${r.body && r.body.code}）`);
+    ok('[L1] 已作废 bug：非受理人对接人列表看不到（传参也被忽略）+ 详情 403；受理人勾选可见 + 详情可开 + 写路径仍拒；admin 不变');
+  }
+
+  // ═══ [S] BIZ_SYSTEMS 新元素「客户报销平台」真实建单可用（2026-08-17 追加·防常量层数组断言通过而端点校验/落库漂移）═══
+  {
+    const id = await createBug({ system_name: '客户报销平台' });   // createBug 内已断言 201 + 受理 200
+    const r = await call('GET', `/api/sys-issues/${id}`, adminTok);
+    assert.strictEqual(r.status, 200, 'S：新系统名单据详情 200');
+    assert.strictEqual(r.body.issue.system_name, '客户报销平台', 'S：建单落库回读 system_name=客户报销平台（详情 DTO {issue: row}）');
+    ok('[S] 「客户报销平台」建单端到端可用（BIZ_SYSTEMS 校验放行 + 落库回读一致）');
   }
 
   // ═══ [C] 变更流零回归 canary ═══

@@ -85,6 +85,21 @@ const check = (cond, label, detail) => { if (cond) { console.log('  ✓ ' + labe
     check(voidRes.status !== 500, `[写] POST void 作废清理 #${newId} 非 500（流转端点依赖没漏）`, `status=${voidRes.status} ${(voidRes.body || '').slice(0, 100)}`);
   }
 
+  // [写] 所属系统新元素「客户报销平台」端到端建单（2026-08-17 追加·防白名单常量层通过而端点校验/落库漂移）→ 作废清理
+  const createKb = await req('POST', '/api/corrections', {
+    source_system: '客户报销平台', location_info: 'E2E 新系统名冒烟测试单（测后作废）', requester_name: 'E2E 测试',
+    correction_type: 'single', correction_count: 1, reason: 'E2E 客户报销平台建单冒烟原因背景',
+  });
+  let kbId = null;
+  try { const j = JSON.parse(createKb.body || '{}'); kbId = j.id || (j.data && j.data.id); } catch (_) {}
+  check(createKb.status === 200 || createKb.status === 201, `[写] source_system=客户报销平台 建单成功${kbId ? ' #' + kbId : ''}（白名单校验放行）`, `status=${createKb.status} ${(createKb.body || '').slice(0, 150)}`);
+  if (kbId) {
+    const kbDetail = await req('GET', '/api/corrections/' + kbId);
+    check(kbDetail.status === 200 && (kbDetail.body || '').includes('客户报销平台'), `[写] #${kbId} 详情回读 source_system=客户报销平台（落库一致）`, `status=${kbDetail.status}`);
+    const kbVoid = await req('POST', '/api/corrections/' + kbId + '/void', { void_reason: 'E2E 新系统名冒烟测试清理' });
+    check(kbVoid.status !== 500, `[写] POST void 作废清理 #${kbId} 非 500`, `status=${kbVoid.status} ${(kbVoid.body || '').slice(0, 100)}`);
+  }
+
   const crashed = /ReferenceError|is not defined|is not a function|TypeError/.test(log);
   check(!crashed, '服务日志无 ReferenceError/TypeError（注入完整）', crashed ? log.slice(-300) : '');
 

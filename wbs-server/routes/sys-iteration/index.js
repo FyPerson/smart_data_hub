@@ -8259,7 +8259,7 @@ module.exports = (deps) => {
       // ⭐ 角色权限重构 C1（codex C1 审 HIGH-2）：**受理人[13] 全类型可见**，与 admin 同不加 where 限制。
       //   必要性：C1 把指派权扩到全类型，若列表仍只放行 bug，示例对接人就会「后端能指派 feature、界面却找不到那张单」
       //   ——写读不同源造成的功能断裂（[[feedback_write_read_same_semantic]]）。受理人要受理**所有**新单、
-      //   指派**所有**类型，故其可见面与 admin 一致（作废单仍由下方 include_voided 统一过滤，那条仅 admin 生效）。
+      //   指派**所有**类型，故其可见面与 admin 一致（作废单仍由下方 include_voided 统一过滤，那条 admin ∨ 受理人生效，2026-08-17 起）。
       const isIntakeLiaisonUser = isSysIntakeLiaison(uid);
       // ⚠️ codex 审 LOW：列表此前缺 `uid > 0` 防护（详情端有）。uid 非正（脏 token / id 缺失）时下面所有
       //   等值判据都会拿一个无意义的值去比对（`assigned_to = 0` 之类可能命中脏行），故显式挡在最前：
@@ -8320,8 +8320,9 @@ module.exports = (deps) => {
           params.push(uid, uid, uid, uid, uid, uid, uid, uid);
         }
       }
-      // 默认过滤作废（前端可传 include_voided=1，仅 admin 生效）
-      const includeVoided = isAdmin && (req.query.include_voided === '1' || req.query.include_voided === 'true');
+      // 默认过滤作废（前端可传 include_voided=1，admin ∨ 受理人生效——2026-08-17 用户拍板开放示例对接人：
+      //   受理人可见面本与 admin 一致〔C1，上方注释〕，作废单查看权随之对齐；详情端已作废门同步放行，写读同源）
+      const includeVoided = (isAdmin || isIntakeLiaisonUser) && (req.query.include_voided === '1' || req.query.include_voided === 'true');
       if (!includeVoided) where.push("status != '已作废'");
 
       // 可选筛选（type/status/system/priority/release/assigned）
@@ -8937,7 +8938,9 @@ module.exports = (deps) => {
       if (!isAdmin && !isIntakeLiaisonUser && !isAssignee && !isBugLiaison && !isReleaseExecutor && !isFastReleaseExecutor && !isRosterMember && !isTechLeadOfIssue && !isBoundLiaison) {
         return res.status(403).json({ error: '无权查看此迭代单', code: 'NOT_AUTHORIZED_TO_VIEW' });
       }
-      if (row.status === '已作废' && !isAdmin) {
+      // 已作废例外：admin ∨ 受理人可开（与列表 include_voided 判据同源，2026-08-17 开放示例对接人；
+      //   其余身份即便在上方放行集内〔assignee/bug 对接人/在册等〕对已作废单仍 403——列表看不到即详情打不开）
+      if (row.status === '已作废' && !isAdmin && !isIntakeLiaisonUser) {
         return res.status(403).json({ error: '该迭代单已作废', code: 'SYS_ISSUE_VOIDED' });
       }
 

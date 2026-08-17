@@ -772,16 +772,20 @@ check('后端 isSysCoordinator 仅存 2 个读路径调用点（防新写端点�
     assert.ok(/isSysCoordinator\(actor, row\.type\) \|\| isBoundLiaisonOrAdmin\(actor, row\)/.test(indexJsSrc),
         '附件下载应为「isSysCoordinator ∨ isBoundLiaisonOrAdmin」增量式（同上）');
 });
-check('前端 isSiBoundLiaison 判据存在且 per-issue 操作权已断开白名单（isSiIntakeLiaison 仅存 release 级+读路径 7 消费点）', () => {
+check('前端 isSiBoundLiaison 判据存在且 per-issue 操作权已断开白名单（isSiIntakeLiaison 仅存 release 级+读路径 8 消费点）', () => {
     assert.ok(/function isSiBoundLiaison\(iss\)/.test(src), '应定义 isSiBoundLiaison(iss) per-issue 绑单镜像判据');
     assert.ok(/iss\.intake_liaison_id != null\s*\n?\s*&& Number\(iss\.intake_liaison_id\) === Number\(currentUser\.id\)/.test(src),
         'isSiBoundLiaison 应比对本单 intake_liaison_id 与当前用户（null 安全）');
-    // 消费面钉死：isSiIntakeLiaison( 文本恰 9 处 = 常量区注释提及 1（`isSiIntakeLiaison([13]) 的语义…`）+
+    // 消费面钉死：isSiIntakeLiaison( 文本恰 10 处 = 常量区注释提及 1（`isSiIntakeLiaison([13]) 的语义…`）+
     //   定义 1 + release 级调用 4（上线单管理入口/我的批次探测早退/排班表写权/批次执行摘要）+ 读路径增量
-    //   调用 3（通知区可见/变更流查已读/bug 流查已读）。红了=有人把白名单判据接回了 per-issue 操作权
-    //   （或删了刻意保留项），先对齐绑单收口口径再改本数。
+    //   调用 4（通知区可见/变更流查已读/bug 流查已读/含已作废查看权 siCanViewVoided——2026-08-17 开放受理人，
+    //   属白名单语义②「读路径可见性」的合法增量，非 per-issue 操作权）。红了=有人把白名单判据接回了
+    //   per-issue 操作权（或删了刻意保留项），先对齐绑单收口口径再改本数。
     const siCalls = (src.match(/isSiIntakeLiaison\(/g) || []).length;
-    assert.strictEqual(siCalls, 9, `isSiIntakeLiaison( 出现次数应恰 9（注释1+定义1+release级4+读路径3），实得 ${siCalls}`);
+    assert.strictEqual(siCalls, 10, `isSiIntakeLiaison( 出现次数应恰 10（注释1+定义1+release级4+读路径4），实得 ${siCalls}`);
+    // 新消费点锚定：siCanViewVoided 判据应为 admin ∨ 受理人（防未来误改成裸白名单或漏 admin）
+    assert.ok(/function siCanViewVoided\(\) \{ return isAdmin\(\) \|\| \(currentUser && isSiIntakeLiaison\(currentUser\.id\)\); \}/.test(src),
+        'siCanViewVoided 应为「isAdmin() ∨ isSiIntakeLiaison(currentUser.id)」判据');
 });
 
 console.log('— §⑤ HTML 内联 <script> 语法有效 —');

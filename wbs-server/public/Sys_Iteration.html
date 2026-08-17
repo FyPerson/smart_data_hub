@@ -1140,6 +1140,9 @@
     const SI_INTAKE_LIAISON_IDS = [13];   // 示例对接人：release 级窄集合 + 读路径可见性保留（per-issue 操作权已改绑单，见上）
     const SI_TECH_LEAD_IDS = [7];         // 示例发布者：技术负责人（request_tech_consult 下拉候选 + 被通知）
     function isSiIntakeLiaison(uid) { return Number(uid) > 0 && SI_INTAKE_LIAISON_IDS.includes(Number(uid)); }
+    // 「含已作废」查看权：admin ∨ 受理人（2026-08-17 用户拍板开放示例对接人）。受理人列表可见面本就与 admin
+    //   一致（后端 C1），作废单查看随之开放；真闸在后端（列表 include_voided 判据 + 详情已作废门同步放行受理人）。
+    function siCanViewVoided() { return isAdmin() || (currentUser && isSiIntakeLiaison(currentUser.id)); }
     // ⭐ [对接人绑单收口 2026-08-10] per-issue 绑单判据：本单绑定对接人本人。前端**不判 eligibility**（active∧
     //   role∈候选——那要读库，UI 镜像非授权源，真闸在后端叠加 fail-closed eligibility，见 C10-fix5）。
     function isSiBoundLiaison(iss) {
@@ -1784,13 +1787,13 @@
         const systems = (META && META.bizSystems) ? META.bizSystems : [];
         sysSel.innerHTML = '<option value="">全部系统</option>' + systems.map(s => `<option value="${esc(s)}">${esc(s)}</option>`).join('');
         siBuildStatusOptions();
-        // admin 才显示"指派开发"筛选 + 含已作废
+        // admin 才显示"指派开发"筛选；「含已作废」= admin ∨ 受理人（siCanViewVoided，与后端 include_voided 判据同源）
         if (isAdmin()) {
             const aSel = document.getElementById('siFAssigned');
             aSel.style.display = '';
             aSel.innerHTML = '<option value="">全部开发</option>' + siUsers.filter(u => u.role !== 'viewer').map(u => `<option value="${u.id}">${esc(u.display_name || u.username)}</option>`).join('');
-            document.getElementById('siVoidedWrap').style.display = '';
         }
+        if (siCanViewVoided()) document.getElementById('siVoidedWrap').style.display = '';
     }
     function siBuildStatusOptions() {
         // 状态筛选是服务端过滤、type 是客户端过滤，故状态下拉用全类型并集（feature/improvement 状态集相同），切 tab 无需重建
@@ -1814,8 +1817,8 @@
         const prio = document.getElementById('siFPriority').value; if (prio) params.set('priority', prio);
         if (isAdmin()) {
             const asg = document.getElementById('siFAssigned').value; if (asg) params.set('assigned', asg);
-            if (document.getElementById('siFVoided').checked) params.set('include_voided', '1');
         }
+        if (siCanViewVoided() && document.getElementById('siFVoided').checked) params.set('include_voided', '1');
         const r = await siApi('/sys-issues?' + params.toString());
         if (seq !== siListSeq) return;                           // J：已有更新的请求发出，丢弃过时结果
         if (!r.ok) { siApiErr(r, '加载列表失败'); return; }

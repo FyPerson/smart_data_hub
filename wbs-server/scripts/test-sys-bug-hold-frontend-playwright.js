@@ -498,7 +498,7 @@ async function main() {
             await page.waitForLoadState('networkidle');
             await page.waitForTimeout(500);
             // 已作废单默认不入列表（siVisibleTypeList 过滤 status!=='已作废'，见 Sys_Iteration.html:1105）——
-            // 须先勾选「含已作废」（#siFVoided，admin 专属筛选项）才能定位到该行，否则会误读成"行不存在/角标不显示"，
+            // 须先勾选「含已作废」（#siFVoided，admin/受理人筛选项，2026-08-17 起开放受理人）才能定位到该行，否则会误读成"行不存在/角标不显示"，
             // 而实际是行根本没渲染，断言会名不副实地"意外通过"。
             await page.check('#siFVoided');
             await page.waitForTimeout(500);
