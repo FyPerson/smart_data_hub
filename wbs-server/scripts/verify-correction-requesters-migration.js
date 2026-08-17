@@ -238,7 +238,7 @@ const OLD_TABLE_V1840 = `CREATE TABLE correction_requests (
                VALUES (10,'BMS','主单','王五','13800000010','FIXED','single',1,10)`);
     await run(`INSERT INTO correction_requesters (correction_request_id, requester_name, requester_phone, is_primary, seq) VALUES (10,'王五','13800000010',1,1)`);
     await run(`INSERT INTO correction_requests (id, source_system, location_info, requester_name, requester_phone, status, correction_type, created_by, correction_group_id)
-               VALUES (11,'CRM','子单','王五','13800000010','ASSIGNED_PENDING_ESTIMATE','single',1,10)`);
+               VALUES (11,'HRD','子单','王五','13800000010','ASSIGNED_PENDING_ESTIMATE','single',1,10)`);
     // 重启再迁移：回填不得为子单 id=11 造 primary；断言不得因子单缺 primary 熔断
     mod0._internals.CORRECTION_SCHEMA_STATE.ready = false;
     mod0._internals.CORRECTION_SCHEMA_STATE.error = null;

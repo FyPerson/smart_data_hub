@@ -224,7 +224,7 @@ async function mkArchived(o = {}) {
   //   下方 3 处跨系统建单用例依赖自定义 requesters[] 姓名/手机号（notify-done 反查用），须带真实 OA 号。
   const gcb = await reqMultipartCreate( { source_system: 'BMS', location_info: '系统1字段错', correction_type: 'single', oa_number: '900301',
     reason: 'group过滤测试跨系统建单原因文本', requesters: [{ name: '主业务方G', phone: '13800000009' }],
-    error_proof_note: 'err', cross_system: true, system2: { source_system: 'CRM', location_info: '系统2字段错', correction_count: 2 } }, ADMIN);
+    error_proof_note: 'err', cross_system: true, system2: { source_system: 'HRD', location_info: '系统2字段错', correction_count: 2 } }, ADMIN);
   const gMaster = gcb.body.master_id, gChild = gcb.body.child_ids[0];
   await setStatus(gMaster, 'FIXED'); await setStatus(gChild, 'FIXED'); // 两原成员完成
   // 组内直插一张未结返工子单（挂 gMaster，parent/root=gMaster，seq=1）
@@ -263,7 +263,7 @@ async function mkArchived(o = {}) {
   console.log('— I 象限② reopen 跨系统子单 —');
   const icb = await reqMultipartCreate( { source_system: 'BMS', location_info: '系统1象限2字段错', correction_type: 'single', oa_number: '900302',
     reason: '象限2跨系统子单返工测试原因文本', requesters: [{ name: '主业务方I', phone: '13800000019' }],
-    error_proof_note: 'err', cross_system: true, system2: { source_system: 'CRM', location_info: '系统2象限2字段错', correction_count: 2 } }, ADMIN);
+    error_proof_note: 'err', cross_system: true, system2: { source_system: 'HRD', location_info: '系统2象限2字段错', correction_count: 2 } }, ADMIN);
   const iMaster = icb.body.master_id, iChild = icb.body.child_ids[0];
   await dbRunAsync("UPDATE correction_requests SET status='ARCHIVED', closure_type='normal', assigned_to=99, assigned_to_name='开发99' WHERE id=?", [iChild]); // system2 改完归档后发现没改对
   const rI = await reqJson('POST', `/api/corrections/${iChild}/reopen-rework`, { reopen_reason: 'system2 字段没改对需要返工处理' }, ADMIN);
@@ -275,7 +275,7 @@ async function mkArchived(o = {}) {
   // I5 组主单终态（VOIDED/REJECTED）→ 不可对其子单返工（codex M-1）
   const itcb = await reqMultipartCreate( { source_system: 'BMS', location_info: '系统1终态组', correction_type: 'single', oa_number: '900303',
     reason: '终态组主单返工拦截测试原因文本', requesters: [{ name: '主I2', phone: '13800000020' }],
-    error_proof_note: 'err', cross_system: true, system2: { source_system: 'CRM', location_info: '系统2终态组', correction_count: 2 } }, ADMIN);
+    error_proof_note: 'err', cross_system: true, system2: { source_system: 'HRD', location_info: '系统2终态组', correction_count: 2 } }, ADMIN);
   const itMaster = itcb.body.master_id, itChild = itcb.body.child_ids[0];
   await dbRunAsync("UPDATE correction_requests SET status='ARCHIVED', closure_type='normal', assigned_to=99 WHERE id=?", [itChild]);
   await setStatus(itMaster, 'REJECTED'); // 组主单否决（终态）

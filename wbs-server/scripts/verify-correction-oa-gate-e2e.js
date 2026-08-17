@@ -176,7 +176,7 @@ async function waitReady(timeoutMs = 3000) {
   // ⑦ 跨系统建单留空 OA → 子单承接主单"建单人自发现"身份（既有 common 传递机制）
   const c7 = await reqJson('POST', '/api/corrections', {
     source_system: 'BMS', location_info: '跨系统留空OA主单', correction_type: 'single', reason: '跨系统留空OA测试原因背景',
-    cross_system: true, system2: { source_system: 'CRM', location_info: '跨系统留空OA子单' },
+    cross_system: true, system2: { source_system: 'HRD', location_info: '跨系统留空OA子单' },
     requesters: [{ name: '外部业务方丙' }],   // 应被静默忽略
   }, ADMIN);
   ok(c7.status === 200 && c7.body.child_ids.length === 1, '⑦跨系统留空 OA 建单成功');

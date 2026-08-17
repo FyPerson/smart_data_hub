@@ -132,7 +132,7 @@ async function waitReady(timeoutMs = 3000) {
   // ③ 跨系统 + 空 oa_number → 主单/子单各自独立生成 datafix-{own id}（H-1，不继承）
   const c3 = await reqJson('POST', '/api/corrections', {
     source_system: 'BMS', location_info: '跨系统空OA主单', correction_type: 'single', reason: '跨系统空OA测试原因背景', requester_name: '业务方丙',
-    cross_system: true, system2: { source_system: 'CRM', location_info: '跨系统空OA子单' },
+    cross_system: true, system2: { source_system: 'HRD', location_info: '跨系统空OA子单' },
   }, ADMIN);
   ok(c3.status === 200 && c3.body.cross_system === true && c3.body.child_ids.length === 1, '③跨系统建单成功（主单+1子单）');
   const masterId = c3.body.master_id, childId = c3.body.child_ids[0];

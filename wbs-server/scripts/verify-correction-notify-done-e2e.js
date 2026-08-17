@@ -177,7 +177,7 @@ async function createFixed(requesters) {
   // ⑧⑨ 组闸门 + 子单 409：手造 master(500,FIXED) + child(501,IN_PROGRESS)
   await dbRunAsync(`INSERT INTO correction_requests (id,source_system,location_info,requester_name,requester_phone,status,correction_type,created_by,correction_group_id) VALUES (500,'BMS','主单','组主','13800000006','FIXED','single',1,500)`);
   await dbRunAsync(`INSERT INTO correction_requesters (correction_request_id,requester_name,requester_phone,is_primary,seq,completion_notify_status) VALUES (500,'组主','13800000006',1,1,'not_sent')`);
-  await dbRunAsync(`INSERT INTO correction_requests (id,source_system,location_info,requester_name,requester_phone,status,correction_type,created_by,correction_group_id) VALUES (501,'CRM','子单','组主','13800000006','IN_PROGRESS','single',1,500)`);
+  await dbRunAsync(`INSERT INTO correction_requests (id,source_system,location_info,requester_name,requester_phone,status,correction_type,created_by,correction_group_id) VALUES (501,'HRD','子单','组主','13800000006','IN_PROGRESS','single',1,500)`);
   const nG1 = await reqJson('POST', `/api/corrections/500/notify-done`, {}, ADMIN);
   ok(nG1.status === 409 && nG1.body.code === 'GROUP_NOT_ALL_DONE', '组闸门：组内有未完成成员(501 IN_PROGRESS) → 409 GROUP_NOT_ALL_DONE');
   const nChild = await reqJson('POST', `/api/corrections/501/notify-done`, {}, ADMIN);

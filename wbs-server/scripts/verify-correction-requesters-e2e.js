@@ -155,7 +155,7 @@ async function waitReady(timeoutMs = 3000) {
 
   // ② 建单 fallback 旧字段（契约 A 兼容，无 requesters[]）
   const c2 = await reqMultipartCreate( {
-    source_system: 'CRM', location_info: '旧字段兼容', correction_type: 'single', reason: '旧字段兼容测试原因', oa_number: '900002', requester_name: '老张', requester_phone: '13700000002',
+    source_system: 'HRD', location_info: '旧字段兼容', correction_type: 'single', reason: '旧字段兼容测试原因', oa_number: '900002', requester_name: '老张', requester_phone: '13700000002',
   }, ADMIN);
   ok(c2.status === 200 && c2.body.id, `建单 fallback 旧字段 → 200（#${c2.body.id}）`);
   const rq2 = await dbAllAsync('SELECT * FROM correction_requesters WHERE correction_request_id=?', [c2.body.id]);
@@ -221,7 +221,7 @@ async function waitReady(timeoutMs = 3000) {
   // ⑨ codex 49 M-2：锚点不变量——master group_id=id + child group_id=master，从两端 resolve 都返回完整组
   await dbRunAsync(`INSERT INTO correction_requests (id,source_system,location_info,requester_name,status,correction_type,created_by,correction_group_id) VALUES (500,'BMS','主单','主业务方','FIXED','single',1,500)`);
   await dbRunAsync(`INSERT INTO correction_requesters (correction_request_id,requester_name,is_primary,seq) VALUES (500,'主业务方',1,1)`);
-  await dbRunAsync(`INSERT INTO correction_requests (id,source_system,location_info,requester_name,status,correction_type,created_by,correction_group_id) VALUES (501,'CRM','子单','主业务方','ASSIGNED_PENDING_ESTIMATE','single',1,500)`);
+  await dbRunAsync(`INSERT INTO correction_requests (id,source_system,location_info,requester_name,status,correction_type,created_by,correction_group_id) VALUES (501,'HRD','子单','主业务方','ASSIGNED_PENDING_ESTIMATE','single',1,500)`);
   const aM = await I.resolveCorrectionGroupAnchor(500);
   ok(aM.master_id === 500 && aM.is_master === true && aM.group_members.length === 2, 'M-2：从主单 resolve → master=500/is_master=true/组成员 2');
   const aC = await I.resolveCorrectionGroupAnchor(501);

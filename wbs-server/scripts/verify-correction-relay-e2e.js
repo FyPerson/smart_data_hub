@@ -106,7 +106,7 @@ async function cleanup() {
     check(d99.status === 403, `非白名单 user(9) 详情 #${id13} → 403（可见性越权防护）`, `status=${d99.status}`);
 
     // 6. 越权：白名单 relay(13) 看不到/不能派 非本人经手单（relay=7 单）
-    const c7 = await req(T_ADMIN, 'POST', '/api/corrections', { source_system: 'CRM', location_info: 'E2E relay7 单', requester_name: 'E2E', correction_type: 'single', reason: 'relay7 对接人测试原因', relay_notified_user_id: 7 });
+    const c7 = await req(T_ADMIN, 'POST', '/api/corrections', { source_system: 'HRD', location_info: 'E2E relay7 单', requester_name: 'E2E', correction_type: 'single', reason: 'relay7 对接人测试原因', relay_notified_user_id: 7 });
     const id7 = jparse(c7.body).id; if (id7) created.push(id7);
     const d13on7 = await req(T_R13, 'GET', '/api/corrections/' + id7);
     check(d13on7.status === 403, `白名单 relay(13) 详情非本人经手单(relay=7) #${id7} → 403`, `status=${d13on7.status}`);

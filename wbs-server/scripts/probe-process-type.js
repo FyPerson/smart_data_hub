@@ -107,14 +107,14 @@ const baseBody = (extra) => Object.assign({ source_system: 'BMS', location_info:
   ok(C2.status === 200, '[C] process_type 恰 100 字 → 放行 200（边界）');
 
   // [D] 跨系统继承：system2 子单继承主单 process_type
-  const D = await reqJson('POST', '/api/corrections', baseBody({ process_type: '采购流程', cross_system: true, system2: { source_system: 'CRM', location_info: '系统2同字段错' } }), ADMIN);
+  const D = await reqJson('POST', '/api/corrections', baseBody({ process_type: '采购流程', cross_system: true, system2: { source_system: 'HRD', location_info: '系统2同字段错' } }), ADMIN);
   ok(D.status === 200 && D.body.child_ids && D.body.child_ids.length === 1, `[D] 跨系统建两单 → 200（master #${D.body.master_id} + child #${D.body.child_ids && D.body.child_ids[0]}）`);
   const dChild = await dbGetAsync('SELECT process_type FROM correction_requests WHERE id=?', [D.body.child_ids[0]]);
   ok(dChild.process_type === '采购流程', '[D] 跨系统 system2 子单继承主单 process_type=采购流程');
 
   // [E] link-new 追加单继承主单 process_type
   const E = await reqJson('POST', '/api/corrections', baseBody({ process_type: '合同审批' }), ADMIN);
-  const eLink = await reqJson('POST', `/api/corrections/${E.body.id}/link-new`, { source_system: '财务系统', location_info: '第三系统同字段错' }, ADMIN);
+  const eLink = await reqJson('POST', `/api/corrections/${E.body.id}/link-new`, { source_system: '客户报销平台', location_info: '第三系统同字段错' }, ADMIN);
   ok(eLink.status === 200 && eLink.body.id, `[E] link-new 追加单 → 200（#${eLink.body.id}）`);
   const eChild = await dbGetAsync('SELECT process_type FROM correction_requests WHERE id=?', [eLink.body.id]);
   ok(eChild.process_type === '合同审批', '[E] link-new 追加单继承主单 process_type=合同审批');

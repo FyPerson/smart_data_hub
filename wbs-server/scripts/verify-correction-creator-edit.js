@@ -191,10 +191,10 @@ async function historyCount(db, rid) {
         expect(r.status === 200, `其他+说明 → 200（实际 ${r.status}）`);
         row = await dbGet(db, 'SELECT source_system, source_system_other FROM correction_requests WHERE id = ?', [idB]);
         expect(row.source_system === '其他' && row.source_system_other === 'E3自建系统', '其他+说明持久化');
-        r = await api('PUT', `/api/corrections/${idB}`, userToken, { source_system: 'CRM' });
-        expect(r.status === 200, `切回 CRM → 200（实际 ${r.status}）`);
+        r = await api('PUT', `/api/corrections/${idB}`, userToken, { source_system: 'HRD' });
+        expect(r.status === 200, `切回 HRD → 200（实际 ${r.status}）`);
         row = await dbGet(db, 'SELECT source_system, source_system_other FROM correction_requests WHERE id = ?', [idB]);
-        expect(row.source_system === 'CRM' && row.source_system_other == null, '非「其他」时 other 归 NULL（不变量）');
+        expect(row.source_system === 'HRD' && row.source_system_other == null, '非「其他」时 other 归 NULL（不变量）');
 
         // ---- 8. expected_deadline ----
         console.log('\n8. expected_deadline');
@@ -282,7 +282,7 @@ async function historyCount(db, rid) {
         created.push(idG);
         await dbRun(db, 'UPDATE correction_requests SET correction_group_id = ? WHERE id = ?', [idG, idG]);
         await seedRequester(db, idG, '组主业务方', null, true, 1);
-        const idH = await seedCorrection(db, { created_by: fx.CONTACT_ID, source_system: 'CRM', correction_group_id: idG });
+        const idH = await seedCorrection(db, { created_by: fx.CONTACT_ID, source_system: 'HRD', correction_group_id: idG });
         created.push(idH);
         r = await api('PUT', `/api/corrections/${idH}`, userToken, { error_proof_note: '子单想改说明' });
         expect(r.status === 409 && r.json.code === 'ERROR_PROOF_ON_MASTER_ONLY', `子单改 error_proof_note → 409（实际 ${r.status}/${r.json.code}）`);

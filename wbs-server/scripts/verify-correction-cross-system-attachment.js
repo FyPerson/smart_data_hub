@@ -128,7 +128,7 @@ const assignDev = (id, devId) => dbRunAsync(`UPDATE correction_requests SET assi
     source_system: 'BMS', location_info: '系统1：客户X字段错', correction_type: 'single', reason: '跨系统主单错误证明测试原因',
     requesters: [{ name: '主业务方', phone: '13800000001' }],
     error_proof_note: '错误证明：客户名称在两系统都显示乱码', cross_system: true,
-    system2: { source_system: 'CRM', location_info: '系统2：同字段错' },
+    system2: { source_system: 'HRD', location_info: '系统2：同字段错' },
   }, ADMIN);
   assert(cb.status === 200 && cb.body.master_id && cb.body.child_ids.length === 1, '前置：建跨系统两单');
   const masterId = cb.body.master_id, childId = cb.body.child_ids[0];
@@ -216,7 +216,7 @@ const assignDev = (id, devId) => dbRunAsync(`UPDATE correction_requests SET assi
 
   // ⑨ 三单组（M-6 link-new 第三系统）：主+子A+追加子B 都见同一主单 error_proof；三单各自 fix_proof 不互串
   //   用 link-new 在主单上追加第三系统单
-  const ln = await reqJson('POST', `/api/corrections/${masterId}/link-new`, { source_system: '财务系统', location_info: '系统3：同字段错' }, ADMIN);
+  const ln = await reqJson('POST', `/api/corrections/${masterId}/link-new`, { source_system: '客户报销平台', location_info: '系统3：同字段错' }, ADMIN);
   ok(ln.status === 200 && ln.body.master_id === masterId && ln.body.id, `⑨ link-new 追加第三系统单 #${ln.body.id}`);
   const child3Id = ln.body.id;
   await assignDev(child3Id, DEV_S3.id);

@@ -112,7 +112,7 @@ async function mkFixProof(cid, name) {
   // 跨系统组：master gM + sibling gS（均非返工）+ 一张返工子单 gRw（M-1 边缘：跨系统主单【已派生返工】rework_child_count>0，对抗审点名场景）
   const gM = await mkRow({ status: 'FIXED' });
   await dbRunAsync('UPDATE correction_requests SET correction_group_id=?, rework_child_count=1 WHERE id=?', [gM, gM]);
-  const gS = await mkRow({ status: 'FIXED', correction_group_id: gM, source_system: 'CRM' });
+  const gS = await mkRow({ status: 'FIXED', correction_group_id: gM, source_system: 'HRD' });
   const gRw = await mkRow({ status: 'ASSIGNED_PENDING_ESTIMATE', correction_group_id: gM, rework_parent_id: gM, rework_root_id: gM, rework_seq: 1, reopen_reason: '跨系统组返工子单占位原因文本' });
 
   // ── A list 端点补 4 rework 字段 ──

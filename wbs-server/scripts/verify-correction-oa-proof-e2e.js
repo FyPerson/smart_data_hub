@@ -157,7 +157,7 @@ function countFilesRecursive(dir) {
   // ⑤ 跨系统真OA建单：oa_proof 只挂主单，子单详情查自身为空（L-10）
   const c5 = await reqMultipart('/api/corrections',
     { source_system: 'BMS', location_info: '跨系统真OA主单', correction_type: 'single', reason: '跨系统真OA截图单级测试原因', oa_number: '365005', requester_name: '业务方丁',
-      cross_system: true, system2: { source_system: 'CRM', location_info: '跨系统真OA子单' } },
+      cross_system: true, system2: { source_system: 'HRD', location_info: '跨系统真OA子单' } },
     'oa_proof_files', 1, ADMIN);
   ok(c5.status === 200 && c5.body.child_ids && c5.body.child_ids.length === 1, `⑤跨系统真OA建单成功（主单#${c5.body.master_id}+子单#${c5.body.child_ids && c5.body.child_ids[0]}）`);
   const masterAtt = await dbAllAsync(`SELECT * FROM correction_attachments WHERE correction_request_id=? AND attachment_type='oa_proof'`, [c5.body.master_id]);

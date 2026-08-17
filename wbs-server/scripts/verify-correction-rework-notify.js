@@ -187,9 +187,9 @@ async function mkRework(masterId, o = {}) {
   const GM = await mkMaster();
   const gmPhone = '13800000009';
   await mkRequester(GM, { requester_phone: gmPhone });
-  const Sins = await dbRunAsync(`INSERT INTO correction_requests (source_system,location_info,correction_count,reason,correction_type,requester_name,status,closure_type,created_by,correction_group_id) VALUES ('CRM','系统2字段错',1,'象限2跨系统子单原因文本足够长','single','业务张','ARCHIVED','normal',1,?)`, [GM]);
+  const Sins = await dbRunAsync(`INSERT INTO correction_requests (source_system,location_info,correction_count,reason,correction_type,requester_name,status,closure_type,created_by,correction_group_id) VALUES ('HRD','系统2字段错',1,'象限2跨系统子单原因文本足够长','single','业务张','ARCHIVED','normal',1,?)`, [GM]);
   const Sid = Sins.lastID;   // 跨系统子单（group_id=GM，无自己的 requester 子表）
-  const Rxs = await mkRework(GM, { rework_parent_id: Sid, rework_root_id: Sid, rework_seq: 1, source_system: 'CRM' });   // 返工子单：parent=S≠group_id=GM
+  const Rxs = await mkRework(GM, { rework_parent_id: Sid, rework_root_id: Sid, rework_seq: 1, source_system: 'HRD' });   // 返工子单：parent=S≠group_id=GM
   SENDS.length = 0;
   const g1 = await reqHttp('POST', `/api/corrections/${Rxs}/notify-done`, {}, ADMIN);
   ok(g1.status === 200 && g1.body.status === 'sent', 'G1 象限②跨系统子单返工 done → 200 sent');
