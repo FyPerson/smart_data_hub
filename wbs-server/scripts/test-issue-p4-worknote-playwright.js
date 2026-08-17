@@ -86,7 +86,7 @@ async function main() {
   console.log('\n══════ P4 标记我的开发完成 + work_note 端到端冒烟 ══════');
 
   // 造数：变更流单 → schedule → assign 两开发(示例用户B+示例开发B) → 各自回填 estimate
-  const c = await api(adminTok, 'POST', '/api/sys-issues', { intake_contract_version: 2, type: 'feature', title: 'P4冒烟单', system_name: '智数协同', source: '内部', description: 'x', intake_liaison_id: 13 });
+  const c = await api(adminTok, 'POST', '/api/sys-issues', { intake_contract_version: 2, type: 'feature', title: 'P4冒烟单', system_name: 'BMS', source: '内部', description: 'x', intake_liaison_id: 13 });
   if (c.status !== 200 && c.status !== 201) { console.error('建单失败', c.status, c.j); process.exit(1); }
   issueId = c.j.id;
   // [C3 sweep 时发现的预置漂移·与本任务无关] 本脚本自建成后未跟"受理排期改造"（schedule 端点退场）

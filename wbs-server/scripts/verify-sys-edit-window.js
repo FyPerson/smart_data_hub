@@ -168,7 +168,7 @@ async function main() {
     // A 档 · 待修改（bug）：10 字段全改（needs_feasibility=0，bug 类型不适用可行性评估）
     const id2 = await mkIssue('待修改', { type: 'bug' });
     const r2 = await call('POST', `/api/sys-issues/${id2}/edit-in-revision`, adminTok, {
-      title: '新标题-待修改', description: '新描述2', system_name: 'OA', module_name: '模块2',
+      title: '新标题-待修改', description: '新描述2', system_name: '电子签', module_name: '模块2',
       priority: 'P0', deadline: '2026-11-30', needs_feasibility: 0,
       requester_dept: '部门2', requester_name: '姓名2', requester_phone: '13800000002',
     });
@@ -214,7 +214,7 @@ async function main() {
     // B 档 · 处理中（bug）：9 字段
     const id6 = await mkIssue('处理中', { type: 'bug' });
     const r6 = await call('POST', `/api/sys-issues/${id6}/edit-in-revision`, adminTok, {
-      title: '新标题-处理中', description: '新描述6', system_name: 'OA', module_name: '模块6',
+      title: '新标题-处理中', description: '新描述6', system_name: '电子签', module_name: '模块6',
       priority: 'P0', deadline: '2026-07-31',
       requester_dept: '部门6', requester_name: '姓名6', requester_phone: '13800000006',
     });

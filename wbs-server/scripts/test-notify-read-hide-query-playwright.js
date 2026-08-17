@@ -57,7 +57,7 @@ async function main() {
   console.log('\n══════ 通知已读态隐藏「查询已读」冒烟 ══════');
 
   // 造数：变更流单 → schedule → assign 示例用户B → estimate → submit(no_code) → accept → 进「待验证」后 dev 可发通知
-  const c = await api(adminTok, 'POST', '/api/sys-issues', { intake_contract_version: 2, type: 'feature', title: '通知已读隐藏查询冒烟单', system_name: '智数协同', source: '内部', description: 'x', intake_liaison_id: 13 });
+  const c = await api(adminTok, 'POST', '/api/sys-issues', { intake_contract_version: 2, type: 'feature', title: '通知已读隐藏查询冒烟单', system_name: 'BMS', source: '内部', description: 'x', intake_liaison_id: 13 });
   if (c.status !== 200 && c.status !== 201) { console.error('建单失败', c.status, c.j); process.exit(1); }
   issueId = c.j.id;
   // [C3 sweep 时发现的预置漂移·与本任务无关] 同 test-issue-p4-worknote-playwright.js 的三处修法：

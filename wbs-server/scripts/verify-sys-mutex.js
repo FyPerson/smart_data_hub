@@ -213,7 +213,7 @@ async function main() {
   // ── 3. 并发混合事务（建单 + 建批次 + assign 各 10）：零 500 ──────────
   //   受理排期改造：schedule 退场·并发写目标改用 assign（建单直落待指派→并发指派各进开发中·10 个独立单不互斥）。
   const drafts = await Promise.all(Array.from({ length: 10 }, (_, k) =>
-    call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'improvement', title: 'mix-' + k, system_name: 'OA', source: '内部', description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13 })));
+    call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'improvement', title: 'mix-' + k, system_name: 'BMS', source: '内部', description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13 })));
   // ⭐ 角色权限重构 C0：建单恒落受理门前段 → 并发 assign 前先串行推到「待指派」（assign 的合法前置态）。
   //   ⭐ v2.1（C2.5 撤销）：improvement 属变更流，建单落「待受理」→ 直接 intake-accept；随后补 OA 号
   //   （assign 前置校验，§4）——三步都串行。

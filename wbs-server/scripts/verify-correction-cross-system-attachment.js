@@ -216,7 +216,7 @@ const assignDev = (id, devId) => dbRunAsync(`UPDATE correction_requests SET assi
 
   // ⑨ 三单组（M-6 link-new 第三系统）：主+子A+追加子B 都见同一主单 error_proof；三单各自 fix_proof 不互串
   //   用 link-new 在主单上追加第三系统单
-  const ln = await reqJson('POST', `/api/corrections/${masterId}/link-new`, { source_system: 'OA 系统', location_info: '系统3：同字段错' }, ADMIN);
+  const ln = await reqJson('POST', `/api/corrections/${masterId}/link-new`, { source_system: '财务系统', location_info: '系统3：同字段错' }, ADMIN);
   ok(ln.status === 200 && ln.body.master_id === masterId && ln.body.id, `⑨ link-new 追加第三系统单 #${ln.body.id}`);
   const child3Id = ln.body.id;
   await assignDev(child3Id, DEV_S3.id);

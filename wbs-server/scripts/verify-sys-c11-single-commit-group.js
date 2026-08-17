@@ -364,29 +364,31 @@ async function selfCertifyProbes(label) {
   {
     const hrd = await mkIssue('improvement', '开发中', { system_name: 'HRD', title: 'E-HRD' });
     await mkMember(hrd, 5, '开发甲', 'pending');   // 开发中单需 ≥1 在册（P12）
-    const oa = await mkIssue('improvement', '开发中', { system_name: 'OA', title: 'E-OA' });
-    await mkMember(oa, 5, '开发甲', 'pending');
+    // 2026-08-17「OA/智数协同」移出 BIZ_SYSTEMS（用户拍板不在维护范围）：本组原用 OA 充当「白名单内、
+    //   不在默认单组清单」的代表系统，改用 BMS（同样满足两条件），语义与断言结构不变。
+    const bms = await mkIssue('improvement', '开发中', { system_name: 'BMS', title: 'E-BMS' });
+    await mkMember(bms, 5, '开发甲', 'pending');
 
-    // E1：config='OA'（逗号串）→ OA 命中、HRD 掉出（replace 语义·非并集）
-    configValue = 'OA';
-    assert.strictEqual((await detailIssue(oa)).issue.single_commit_group, true, 'E1：config=OA → OA 命中');
-    assert.strictEqual((await detailIssue(hrd)).issue.single_commit_group, false, 'E1：config=OA → HRD 掉出（replace 语义·非并集）');
-    ok('E1：config 写入即以 config 为准（replace）——config=OA 使 OA 命中、HRD 不再命中');
+    // E1：config='BMS'（逗号串）→ BMS 命中、HRD 掉出（replace 语义·非并集）
+    configValue = 'BMS';
+    assert.strictEqual((await detailIssue(bms)).issue.single_commit_group, true, 'E1：config=BMS → BMS 命中');
+    assert.strictEqual((await detailIssue(hrd)).issue.single_commit_group, false, 'E1：config=BMS → HRD 掉出（replace 语义·非并集）');
+    ok('E1：config 写入即以 config 为准（replace）——config=BMS 使 BMS 命中、HRD 不再命中');
 
-    // E2：config='HRD,OA' → 两者皆命中
-    configValue = 'HRD,OA';
-    assert.strictEqual((await detailIssue(hrd)).issue.single_commit_group, true, 'E2：config=HRD,OA → HRD 命中');
-    assert.strictEqual((await detailIssue(oa)).issue.single_commit_group, true, 'E2：config=HRD,OA → OA 命中');
-    ok('E2：config 逗号串多系统——HRD,OA 两者皆命中');
+    // E2：config='HRD,BMS' → 两者皆命中
+    configValue = 'HRD,BMS';
+    assert.strictEqual((await detailIssue(hrd)).issue.single_commit_group, true, 'E2：config=HRD,BMS → HRD 命中');
+    assert.strictEqual((await detailIssue(bms)).issue.single_commit_group, true, 'E2：config=HRD,BMS → BMS 命中');
+    ok('E2：config 逗号串多系统——HRD,BMS 两者皆命中');
 
-    // E3：config='["HRD"]' JSON 数组形态 → HRD 命中、OA 不命中
+    // E3：config='["HRD"]' JSON 数组形态 → HRD 命中、BMS 不命中
     configValue = '["HRD"]';
     assert.strictEqual((await detailIssue(hrd)).issue.single_commit_group, true, 'E3：config=JSON ["HRD"] → HRD 命中');
-    assert.strictEqual((await detailIssue(oa)).issue.single_commit_group, false, 'E3：config=JSON ["HRD"] → OA 不命中');
+    assert.strictEqual((await detailIssue(bms)).issue.single_commit_group, false, 'E3：config=JSON ["HRD"] → BMS 不命中');
     ok('E3：config JSON 数组形态——["HRD"] 命中 HRD');
 
     // E3b（2026-08-12·随「电子签」同批·codex 342 LOW 收口）：**非 ASCII 系统名**走 config 分支。
-    //   ⚠️ 存在理由：E1-E3 的系统名全是 ASCII（HRD/OA），而「电子签」是中文——config 解析链
+    //   ⚠️ 存在理由：E1-E3 的系统名全是 ASCII（HRD/BMS），而「电子签」是中文——config 解析链
     //   （split(',') / JSON.parse / trim / Set.has 比对 / 与 system_name 列值等值判定）对多字节
     //   字符串从未被任何用例证明过。A4 只走 config 缺省分支，覆盖不到这里。
     //   注：本组验的是**解析链**；config 值的 AES 加解密往返不在此（E 组用 readSystemConfig 桩，
@@ -396,33 +398,33 @@ async function selfCertifyProbes(label) {
     configValue = 'HRD,电子签';
     assert.strictEqual((await detailIssue(esignE)).issue.single_commit_group, true, 'E3b：config 逗号串含中文 → 电子签命中');
     assert.strictEqual((await detailIssue(hrd)).issue.single_commit_group, true, 'E3b：config=HRD,电子签 → HRD 同时命中');
-    assert.strictEqual((await detailIssue(oa)).issue.single_commit_group, false, 'E3b：config=HRD,电子签 → OA 不命中（对照组）');
+    assert.strictEqual((await detailIssue(bms)).issue.single_commit_group, false, 'E3b：config=HRD,电子签 → BMS 不命中（对照组）');
     configValue = '["电子签"]';
     assert.strictEqual((await detailIssue(esignE)).issue.single_commit_group, true, 'E3b：config=JSON ["电子签"] → 电子签命中');
     assert.strictEqual((await detailIssue(hrd)).issue.single_commit_group, false, 'E3b：config=JSON ["电子签"] → HRD 掉出（replace 语义对中文同样成立）');
-    ok('E3b：非 ASCII 系统名走 config——逗号串/JSON 两形态均命中电子签 + replace 语义对中文成立（对照组 OA/HRD 不命中）');
+    ok('E3b：非 ASCII 系统名走 config——逗号串/JSON 两形态均命中电子签 + replace 语义对中文成立（对照组 BMS/HRD 不命中）');
 
     // E4：config 空串 / 畸形 JSON → 回落代码默认 HRD
     configValue = '   ';
     assert.strictEqual((await detailIssue(hrd)).issue.single_commit_group, true, 'E4：config 空白 → 回落默认 HRD');
     configValue = '[not-json';
     assert.strictEqual((await detailIssue(hrd)).issue.single_commit_group, true, 'E4：config 畸形 JSON（[ 前缀）→ 回落默认 HRD');
-    assert.strictEqual((await detailIssue(oa)).issue.single_commit_group, false, 'E4：config 畸形 JSON → OA 不命中（默认清单只 HRD）');
+    assert.strictEqual((await detailIssue(bms)).issue.single_commit_group, false, 'E4：config 畸形 JSON → BMS 不命中（默认清单只 HRD）');
     // ⭐ [C11-fix2·codex 320 MED] 判据改「JSON.parse 成败」后·各类畸形 JSON 一律回落默认 HRD（修前多类漏网）：
     //   ① { 前缀对象 ② JSON 标量（数字/布尔/null/带引号字符串）③ 数组含非字符串元素——修前①掉 split（C11-fix
     //   补 { 前缀已挡）、②③仍掉 split 或 String 强转成垃圾集静默移除 HRD。两向断言：命中系统 HRD 恒回落 true·
-    //   垃圾串/JSON 文本未被当系统名（OA/非默认恒 false）。
+    //   垃圾串/JSON 文本未被当系统名（BMS/非默认恒 false）。
     for (const [cv, tag] of [['{}', '对象{}'], ['{"a":1}', '对象{a}'], ['123', 'JSON数字标量'],
                              ['true', 'JSON布尔标量'], ['null', 'JSONnull标量'], ['"HRD"', 'JSON字符串标量'],
                              ['[123]', '数组含数字'], ['[{}]', '数组含对象']]) {
       configValue = cv;
       assert.strictEqual((await detailIssue(hrd)).issue.single_commit_group, true, `E4b：config=${tag}(${cv}) → 回落默认 HRD（非合法系统名清单一律回落·不硬拆垃圾集）`);
-      assert.strictEqual((await detailIssue(oa)).issue.single_commit_group, false, `E4b：config=${tag} → OA 不命中（未把 JSON 文本/标量当系统名）`);
+      assert.strictEqual((await detailIssue(bms)).issue.single_commit_group, false, `E4b：config=${tag} → BMS 不命中（未把 JSON 文本/标量当系统名）`);
     }
     // 反向对照：合法 JSON 数组全字符串 + 合法逗号串 仍正常 replace（不被新判据误杀）
-    configValue = '["OA"]';
-    assert.strictEqual((await detailIssue(oa)).issue.single_commit_group, true, 'E4c：合法 JSON 数组 ["OA"] → OA 命中（新判据不误杀合法数组）');
-    assert.strictEqual((await detailIssue(hrd)).issue.single_commit_group, false, 'E4c：["OA"] replace → HRD 掉出');
+    configValue = '["BMS"]';
+    assert.strictEqual((await detailIssue(bms)).issue.single_commit_group, true, 'E4c：合法 JSON 数组 ["BMS"] → BMS 命中（新判据不误杀合法数组）');
+    assert.strictEqual((await detailIssue(hrd)).issue.single_commit_group, false, 'E4c：["BMS"] replace → HRD 掉出');
     ok('E4：config 空/各类畸形（[ 数组畸形、{ 对象、JSON 标量数字/布尔/null/字符串、数组含非字符串元素、纯空白）一律回落默认 HRD；合法 JSON 数组/逗号串正常 replace（JSON.parse 成败判据·不猜不硬拆垃圾集）');
 
     configValue = null;   // 复位默认，避免污染 F

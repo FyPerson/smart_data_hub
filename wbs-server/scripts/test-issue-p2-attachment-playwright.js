@@ -86,7 +86,7 @@ async function main() {
     await pA.close();
 
     // 造数：开发中单（admin 指派给自己 + estimate·供 B 三块上传 + C 提交）
-    const c = await api(tok, 'POST', '/api/sys-issues', { type: 'feature', title: 'P2冒烟单', system_name: '智数协同', source: '内部', description: 'x', intake_liaison_id: 13 });
+    const c = await api(tok, 'POST', '/api/sys-issues', { type: 'feature', title: 'P2冒烟单', system_name: 'BMS', source: '内部', description: 'x', intake_liaison_id: 13 });
     issueId = c.j.id;
     await api(tok, 'POST', `/api/sys-issues/${issueId}/schedule`, { priority: 'P2' });
     await api(tok, 'POST', `/api/sys-issues/${issueId}/assign`, { assigned_to: ADMIN });

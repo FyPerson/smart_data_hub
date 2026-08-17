@@ -91,7 +91,7 @@ async function main() {
   //   真实 create→受理→排期→指派→估时→提交 链路需由独立套件覆盖（当前缺口，见锚点待追认）。
   const insIssue = await dbRun(
     `INSERT INTO sys_issues (type, status, title, system_name, source, created_by, created_by_name, intake_required, dev_estimated_at)
-     VALUES ('feature', '开发中', ?, '智数协同', '内部', 1, '管理员', 1, '2026-08-01 10:00:00')`,
+     VALUES ('feature', '开发中', ?, 'BMS', '内部', 1, '管理员', 1, '2026-08-01 10:00:00')`,
     ['commit改造冒烟单']);
   issueId = insIssue.lastID;
   await dbRun(

@@ -120,7 +120,7 @@ async function mkIssue({ type, status, title, createdBy = ADMIN_ID, createdByNam
         // 本脚本夹具全部直落已过受理门的活跃态（处理中/开发中/待验证等），语义上"已经受理过"，故写 1。
         `INSERT INTO sys_issues (type, status, priority, title, description, system_name, source,
             created_by, created_by_name, assigned_to, assigned_to_name, intake_required)
-         VALUES (?, ?, 'P2', ?, ?, '智数协同平台', '内部', ?, ?, ?, ?, 1)`,
+         VALUES (?, ?, 'P2', ?, ?, 'BMS', '内部', ?, ?, ?, ?, 1)`,
         [type, status, title, `${title}｜Playwright冒烟-${RUN_TAG}`, createdBy, createdByName, assignedTo, assignedToName]
     );
     const id = r.lastID;

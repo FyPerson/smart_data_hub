@@ -366,7 +366,7 @@ async function main() {
     assert.strictEqual(r.body.attachments.length, 1);
     ok('⭐ 附件：bug 单「处理中」开发本人可传 delivery（isDevWorkState 修复——旧硬编码「开发中」会 409 断链）');
     // 负向：待处理 bug 单（未指派）上传 → 403/409（守卫仍在）
-    const r2 = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'x2', system_name: 'OA', source: '内部', description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13 });
+    const r2 = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: 'x2', system_name: 'BMS', source: '内部', description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13 });
     const rUp = await upload(r2.body.id, devTok, 'x.png', 'delivery');
     assert.ok(rUp.status === 403 || rUp.status === 409, `待处理 bug 上传应拒, got ${rUp.status}`);
     ok('附件负向：待处理（非工作态/非本人）上传仍被拒（isDevWorkState 未放松守卫）');
@@ -889,7 +889,7 @@ async function main() {
 
   // ═══ [G] 旁路：issue_reject / reactivate / void / reassign ═══
   {
-    let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: '误报', system_name: 'OA', source: '内部', description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13 });
+    let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: '误报', system_name: 'BMS', source: '内部', description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13 });
     const rejId = r.body.id;
   // ⭐ 角色权限重构 C0：建单恒落「待受理」（受理门焊死）→ 补一步受理，落态回到旧的 待指派/待处理（下游断言不变）
     await call('POST', `/api/sys-issues/${rejId}/intake-accept`, adminTok, {});

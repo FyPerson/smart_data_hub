@@ -94,7 +94,7 @@ function requireCorrectionSchemaReady(req, res, next) {
 //   Commit A 顺手定义（无害常量，Commit B 建单 source_system 校验用）。
 //   source_system 必 ∈ 此白名单（含字面 '其他'）；='其他' 时 source_system_other 非空（B 阶段校验）。
 const CORRECTION_SOURCE_SYSTEMS = [
-    'BMS', 'CRM', 'HRD', '财务系统', 'OA 系统', 'FineDataLink数仓', '客户报销平台', '其他'   // 2026-08-17 追加「客户报销平台」（用户拍板·前端 Data_Correction.html 同源常量同步）
+    'BMS', 'CRM', 'HRD', '财务系统', 'FineDataLink数仓', '客户报销平台', '其他'   // 2026-08-17 追加「客户报销平台」+ 移除「OA 系统」（用户拍板：不在维护范围·生产存量 0 张核实·前端 Data_Correction.html 同源常量同步）
 ];
 
 // ============================================================

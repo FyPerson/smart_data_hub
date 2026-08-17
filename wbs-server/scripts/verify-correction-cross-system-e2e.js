@@ -179,7 +179,7 @@ const setStatus = (id, status, ct) => dbRunAsync(`UPDATE correction_requests SET
   ok(cN.status === 409 && cN.body.code === 'NOTIFY_DONE_ON_MASTER_ONLY' && cN.body.master_id === masterId, '③ 子单 notify-done → 409 NOTIFY_DONE_ON_MASTER_ONLY + master_id');
   const cE = await reqMultipart(`/api/corrections/${childId}/attachments`, { attachment_type: 'error_proof' }, 'p.png', png, ADMIN);
   ok(cE.status === 409 && cE.body.code === 'ERROR_PROOF_ON_MASTER_ONLY', '③ 子单 error_proof → 409 ERROR_PROOF_ON_MASTER_ONLY');
-  const cL = await reqJson('POST', `/api/corrections/${childId}/link-new`, { source_system: 'OA 系统', location_info: 'z' }, ADMIN);
+  const cL = await reqJson('POST', `/api/corrections/${childId}/link-new`, { source_system: '财务系统', location_info: 'z' }, ADMIN);
   ok(cL.status === 409 && cL.body.code === 'LINK_ON_MASTER_ONLY' && cL.body.master_id === masterId, '③ 子单 link-new → 409 LINK_ON_MASTER_ONLY + master_id');
   await setStatus(childId, 'PENDING_ASSIGN');   // 还原
 
@@ -231,12 +231,12 @@ const setStatus = (id, status, ct) => dbRunAsync(`UPDATE correction_requests SET
 
   // ⑥b 状态收窄：主单 ARCHIVED 终态 → 409；主单业务方已 sent → 409
   await setStatus(soloId, 'ARCHIVED', 'normal');
-  const lnT = await reqJson('POST', `/api/corrections/${soloId}/link-new`, { source_system: 'OA 系统', location_info: 'z' }, ADMIN);
+  const lnT = await reqJson('POST', `/api/corrections/${soloId}/link-new`, { source_system: '财务系统', location_info: 'z' }, ADMIN);
   ok(lnT.status === 409 && lnT.body.code === 'LINK_NOT_ALLOWED_TERMINAL', '⑥b 主单 ARCHIVED 终态 → link-new 409 LINK_NOT_ALLOWED_TERMINAL');
   // 已 sent 阻塞：用一张新单标主业务方 sent
   const s2 = await reqMultipartCreate( { source_system: 'BMS', location_info: '已通知单', correction_type: 'single', oa_number: oa(), reason: '已通知单阻塞测试原因', requesters: [{ name: '甲', phone: '13700000008' }] }, ADMIN);
   await dbRunAsync(`UPDATE correction_requesters SET completion_notify_status='sent' WHERE correction_request_id=? AND is_primary=1`, [s2.body.id]);
-  const lnN = await reqJson('POST', `/api/corrections/${s2.body.id}/link-new`, { source_system: 'OA 系统', location_info: 'z' }, ADMIN);
+  const lnN = await reqJson('POST', `/api/corrections/${s2.body.id}/link-new`, { source_system: '财务系统', location_info: 'z' }, ADMIN);
   ok(lnN.status === 409 && lnN.body.code === 'LINK_NOT_ALLOWED_NOTIFIED', '⑥b 主单业务方已 sent → link-new 409 LINK_NOT_ALLOWED_NOTIFIED');
 
   // ⑦ L5：GET 详情 group.members 含 assigned_to_name（前端关联组区"开发"列）+ 主单优先排序 + 子单 is_master/master_id（banner/隐藏依据）

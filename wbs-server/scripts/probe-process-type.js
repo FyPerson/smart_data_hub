@@ -114,7 +114,7 @@ const baseBody = (extra) => Object.assign({ source_system: 'BMS', location_info:
 
   // [E] link-new 追加单继承主单 process_type
   const E = await reqJson('POST', '/api/corrections', baseBody({ process_type: '合同审批' }), ADMIN);
-  const eLink = await reqJson('POST', `/api/corrections/${E.body.id}/link-new`, { source_system: 'OA 系统', location_info: '第三系统同字段错' }, ADMIN);
+  const eLink = await reqJson('POST', `/api/corrections/${E.body.id}/link-new`, { source_system: '财务系统', location_info: '第三系统同字段错' }, ADMIN);
   ok(eLink.status === 200 && eLink.body.id, `[E] link-new 追加单 → 200（#${eLink.body.id}）`);
   const eChild = await dbGetAsync('SELECT process_type FROM correction_requests WHERE id=?', [eLink.body.id]);
   ok(eChild.process_type === '合同审批', '[E] link-new 追加单继承主单 process_type=合同审批');

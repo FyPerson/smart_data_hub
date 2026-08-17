@@ -69,7 +69,7 @@ async function main() {
   writeTinyPng(tmpPng);
 
   // 造数：变更流单（admin=协调人·可传 spec；非终态）
-  const c = await api(adminTok, 'POST', '/api/sys-issues', { type: 'feature', title: '附件融入冒烟单', system_name: '智数协同', source: '内部', description: '测试描述', intake_liaison_id: 13 });
+  const c = await api(adminTok, 'POST', '/api/sys-issues', { type: 'feature', title: '附件融入冒烟单', system_name: 'BMS', source: '内部', description: '测试描述', intake_liaison_id: 13 });
   if (c.status !== 200 && c.status !== 201) { console.error('建单失败', c.status, c.j); process.exit(1); }
   issueId = c.j.id;
   await api(adminTok, 'POST', `/api/sys-issues/${issueId}/schedule`, { priority: 'P2' });
