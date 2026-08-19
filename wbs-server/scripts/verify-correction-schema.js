@@ -1,4 +1,4 @@
-// 验证脚本：数据修正模块 correction 三表 schema（8 态全字段 + 5 群字段 + NOT NULL + 索引 + CHECK + FK）
+// 验证脚本：数据修正模块 correction 三表 schema（9 态全字段（暂缓方案 v1.1 新增 SUSPENDED）+ 5 群字段 + NOT NULL + 索引 + CHECK + FK）
 // 方案：docs/local/数据修正/数据修正模块_方案_20260612_v1.3.md §2 / §9b（schema 层）
 // 用法：node scripts/verify-correction-schema.js
 //
@@ -50,7 +50,7 @@ const EXPECTED_INDEXES = [
     'idx_corr_status', 'idx_corr_assigned', 'idx_corr_created_by',
     'idx_corr_dev_estimated', 'idx_corr_voided', 'idx_corr_att_rid', 'idx_corr_hist_rid',
 ];
-const CORRECTION_STATUSES = I.CORRECTION_STATUSES;   // 真实导出 8 态
+const CORRECTION_STATUSES = I.CORRECTION_STATUSES;   // 真实导出 9 态（暂缓方案 v1.1 新增 SUSPENDED）
 
 let passed = 0;
 const ok = (msg) => { passed++; console.log(`  ✓ ${msg}`); };
@@ -78,7 +78,7 @@ async function main() {
     const cols = colRows.map(r => r.name);
     const missing = REQ_KEY_COLS.filter(c => !cols.includes(c));
     assert.strictEqual(missing.length, 0, `主表关键列缺失: ${missing.join(',')}`);
-    ok(`correction_requests 关键列齐全（${REQ_KEY_COLS.length} 列含 8 态/5 群/通知/责任链锚点）`);
+    ok(`correction_requests 关键列齐全（${REQ_KEY_COLS.length} 列含 9 态/5 群/通知/责任链锚点）`);
     // [2b] _internals.CORRECTION_REQUESTS_KEY_COLS 每列都在真实表（同源闭环）
     const keyColMissing = I.CORRECTION_REQUESTS_KEY_COLS.filter(c => !cols.includes(c));
     assert.strictEqual(keyColMissing.length, 0, `_internals KEY_COLS 在真实表缺失: ${keyColMissing.join(',')}`);
@@ -151,20 +151,20 @@ async function main() {
     assert.strictEqual(hDefaults.relay_read_at, null, 'relay_read_at 默认应 NULL');
     ok('H 预置字段默认值：closure_type=normal / relay_notify_status=not_sent / relay_read_at=NULL');
 
-    // [8] 8 态枚举全部可写（schema 不限制枚举，后端集中校验）
+    // [8] 9 态枚举全部可写（schema 不限制枚举，后端集中校验；暂缓方案 v1.1 新增 SUSPENDED）
     for (let i = 0; i < CORRECTION_STATUSES.length; i++) {
         await run(`INSERT INTO correction_requests (source_system, location_info, requester_name, created_by, status) VALUES ('CRM', 'loc${i}', '业务李', 1, ?)`, [CORRECTION_STATUSES[i]]);
     }
     const stCount = await get(`SELECT COUNT(DISTINCT status) AS c FROM correction_requests WHERE source_system='CRM'`);
-    assert.strictEqual(stCount.c, CORRECTION_STATUSES.length, `8 态应全部可写，实际 ${stCount.c}`);
-    ok(`8 态全部可写入（schema 不挡合法态，枚举校验归后端写入口）`);
+    assert.strictEqual(stCount.c, CORRECTION_STATUSES.length, `9 态应全部可写，实际 ${stCount.c}`);
+    ok(`9 态全部可写入（schema 不挡合法态，枚举校验归后端写入口）`);
 
     // [9] 软删过滤契约（G-14/L-3）：列表默认 WHERE voided_at IS NULL 只见未作废单
     await run(`UPDATE correction_requests SET voided_at=datetime('now','localtime'), void_reason='误建' WHERE source_system='BMS'`);
     const visible = await get(`SELECT COUNT(*) AS c FROM correction_requests WHERE voided_at IS NULL`);
     const voided = await get(`SELECT COUNT(*) AS c FROM correction_requests WHERE voided_at IS NOT NULL`);
     assert.strictEqual(voided.c, 1, `应有 1 作废单，实际 ${voided.c}`);
-    assert.ok(visible.c >= CORRECTION_STATUSES.length, '未作废列表应仍含 8 态测试单');
+    assert.ok(visible.c >= CORRECTION_STATUSES.length, '未作废列表应仍含 9 态测试单');
     const stillExists = await get(`SELECT id, void_reason FROM correction_requests WHERE source_system='BMS'`);
     assert.ok(stillExists && stillExists.void_reason === '误建', '作废单应物理存在（软删不删行）');
     ok(`软删契约：voided_at 标记不物理删，列表 WHERE voided_at IS NULL 过滤掉作废单`);
@@ -210,7 +210,7 @@ async function main() {
     await assert.rejects(run(`INSERT INTO correction_status_history (correction_request_id, to_status) VALUES (999999, 'PENDING_ASSIGN')`), /FOREIGN KEY|constraint/i, '历史 FK 未拦截孤儿引用');
     ok(`FK 定义正确（L-2，测试期）：附件/历史插入不存在 request_id 被 FK 拒（生产未启用 FK，仅结构声明）`);
 
-    console.log(`\n[全部通过] ${passed}/${passed} ✓ correction schema 验证通过【J3 require 真实 initSchema，非复刻 DDL】（三表 + 8 态字段 + 5 群字段 + NOT NULL + CHECK + 软删过滤 + 闸门/积压 SQL 契约 + FK 定义）`);
+    console.log(`\n[全部通过] ${passed}/${passed} ✓ correction schema 验证通过【J3 require 真实 initSchema，非复刻 DDL】（三表 + 9 态字段（含暂缓方案 v1.1 SUSPENDED）+ 5 群字段 + NOT NULL + CHECK + 软删过滤 + 闸门/积压 SQL 契约 + FK 定义）`);
     db.close();
 }
 

@@ -72,13 +72,21 @@ async function main() {
     await setupSchema();
     ok('schema + users 表就绪（真实 initSchema 建三表 + users：admin 1/4 / user 5 / publisher 7 / viewer 11）');
 
-    // [1] 流转表结构（8 态 + R-1 完成态不可拒）
-    assert.strictEqual(CORRECTION_STATUSES.length, 8, '应 8 态');
+    // [1] 流转表结构（9 态 + R-1 完成态不可拒 + 暂缓与列表导出方案 v1.1 SUSPENDED 边）
+    assert.strictEqual(CORRECTION_STATUSES.length, 9, '应 9 态（8 态 + SUSPENDED，暂缓方案 v1.1）');
     assert.ok(CORRECTION_STATUS_TRANSITIONS['PENDING_ASSIGN'].includes('ASSIGNED_PENDING_ESTIMATE'), 'PENDING_ASSIGN→指派 合法');
     assert.ok(!CORRECTION_STATUS_TRANSITIONS['FIXED'].includes('REJECTED'), 'R-1：FIXED 不可→REJECTED');
     assert.ok(!CORRECTION_STATUS_TRANSITIONS['REFIXED'].includes('REJECTED'), 'R-1：REFIXED 不可→REJECTED');
     assert.strictEqual(CORRECTION_STATUS_TRANSITIONS['VOIDED'], undefined, 'VOIDED 无后续转移');
-    ok('流转表（真实导出）：8 态 + R-1 完成态不可拒 + VOIDED 无后续');
+    // 暂缓方案 v1.1 §2.1.1：逐边核对——入口两态（ASSIGNED_PENDING_ESTIMATE/IN_PROGRESS→SUSPENDED）+ 出口三路（SUSPENDED→恢复/ARCHIVED/VOIDED）
+    assert.ok(CORRECTION_STATUS_TRANSITIONS['ASSIGNED_PENDING_ESTIMATE'].includes('SUSPENDED'), 'ASSIGNED_PENDING_ESTIMATE→SUSPENDED 合法（入口）');
+    assert.ok(CORRECTION_STATUS_TRANSITIONS['IN_PROGRESS'].includes('SUSPENDED'), 'IN_PROGRESS→SUSPENDED 合法（入口）');
+    assert.ok(!CORRECTION_STATUS_TRANSITIONS['PENDING_ASSIGN'].includes('SUSPENDED'), 'PENDING_ASSIGN 不可→SUSPENDED（未指派谈不上开发判断）');
+    assert.ok(!CORRECTION_STATUS_TRANSITIONS['FIXED'].includes('SUSPENDED'), 'FIXED 不可→SUSPENDED（已完成谈不上无法修正）');
+    assert.ok(!CORRECTION_STATUS_TRANSITIONS['REFIXED'].includes('SUSPENDED'), 'REFIXED 不可→SUSPENDED（已完成谈不上无法修正）');
+    assert.deepStrictEqual(CORRECTION_STATUS_TRANSITIONS['SUSPENDED'].slice().sort(),
+        ['ARCHIVED', 'ASSIGNED_PENDING_ESTIMATE', 'VOIDED'], 'SUSPENDED 出口恰三路（恢复/行政闭环/作废，无死锁受困态）');
+    ok('流转表（真实导出）：9 态 + R-1 完成态不可拒 + VOIDED 无后续 + SUSPENDED 入口两态/出口三路（暂缓方案 v1.1 §2.1.1）');
 
     // [2] 建单：INSERT + history 首行 NULL→PENDING_ASSIGN
     const c1 = await createCorrection({ correction_type: 'single' });
@@ -178,10 +186,27 @@ async function main() {
     assert.strictEqual(rac2.closure_reason, null, 'L-1：normal 互斥清 closure_reason=NULL');
     ok('行政闭环边界：admin_closure 不可从 FIXED（INVALID_CLOSURE_SOURCE）；缺 closure_type 默认 normal 向后兼容 + L-1 字段互斥');
 
-    // [9d] L-2 流转表快照断言（codex 28）：ARCHIVED 可达源态 = FIXED/REFIXED(normal) + 3 未完成态(admin_closure)
+    // [9d] L-2 流转表快照断言（codex 28）：ARCHIVED 可达源态 = FIXED/REFIXED(normal) + 4 未完成态(admin_closure)
+    //   暂缓方案 v1.1 §2.1.1：SUSPENDED 加入行政闭环源态白名单（否则 SUSPENDED→ARCHIVED 出口断路），反查集合应由 5→6。
     const archSources = Object.keys(CORRECTION_STATUS_TRANSITIONS).filter(s => (CORRECTION_STATUS_TRANSITIONS[s] || []).includes('ARCHIVED'));
-    assert.deepStrictEqual(archSources.slice().sort(), ['ASSIGNED_PENDING_ESTIMATE', 'FIXED', 'IN_PROGRESS', 'PENDING_ASSIGN', 'REFIXED'], '流转表 ARCHIVED 可达源态应为 5 个');
-    ok('流转表快照（L-2）：ARCHIVED 可达 5 源态（PENDING_ASSIGN/ASSIGNED_PENDING_ESTIMATE/IN_PROGRESS 行政闭环 + FIXED/REFIXED 正常归档）');
+    assert.deepStrictEqual(archSources.slice().sort(), ['ASSIGNED_PENDING_ESTIMATE', 'FIXED', 'IN_PROGRESS', 'PENDING_ASSIGN', 'REFIXED', 'SUSPENDED'], '流转表 ARCHIVED 可达源态应为 6 个（暂缓方案 v1.1 新增 SUSPENDED）');
+    ok('流转表快照（L-2）：ARCHIVED 可达 6 源态（PENDING_ASSIGN/ASSIGNED_PENDING_ESTIMATE/IN_PROGRESS/SUSPENDED 行政闭环 + FIXED/REFIXED 正常归档，暂缓方案 v1.1 §2.1.1）');
+
+    // [9e] 暂缓方案 v1.1 §2.4 运行时冒烟（完整端点/边界断言在专用 verify-correction-suspend.js，此处只证 correctionTransition 真实跑通两条边）
+    const cs1 = await createCorrection({ correction_type: 'single' });
+    await correctionTransition(cs1, 'PENDING_ASSIGN', 'ASSIGNED_PENDING_ESTIMATE', actor, { assigned_to: 5, assigned_to_name: '开发王', assigned_by: 1 });
+    await correctionTransition(cs1, 'ASSIGNED_PENDING_ESTIMATE', 'IN_PROGRESS', ACTOR_DEV, { dev_estimated_at: '2026-06-20 12:00' });
+    await correctionTransition(cs1, 'IN_PROGRESS', 'SUSPENDED', ACTOR_DEV, { reason: '业务源单据未闭环，暂无法修正' });
+    const rs1 = await get('SELECT status, suspended_at, dev_estimated_at FROM correction_requests WHERE id=?', [cs1]);
+    assert.strictEqual(rs1.status, 'SUSPENDED', 'IN_PROGRESS→SUSPENDED 成功');
+    assert.ok(rs1.suspended_at, 'suspended_at 写入');
+    assert.ok(rs1.dev_estimated_at, '暂缓不清空 dev_estimated_at（保留现场，§2.4）');
+    await correctionTransition(cs1, 'SUSPENDED', 'ASSIGNED_PENDING_ESTIMATE', ACTOR_DEV, {});
+    const rs2 = await get('SELECT status, dev_estimated_at, suspended_at FROM correction_requests WHERE id=?', [cs1]);
+    assert.strictEqual(rs2.status, 'ASSIGNED_PENDING_ESTIMATE', '恢复固定回 ASSIGNED_PENDING_ESTIMATE（§2.1.2）');
+    assert.strictEqual(rs2.dev_estimated_at, null, '恢复清空 dev_estimated_at（旧预计失效）');
+    assert.ok(rs2.suspended_at, '恢复不清空 suspended_at（最后一次暂缓时刻，§2.2）');
+    ok('暂缓/恢复冒烟：IN_PROGRESS→SUSPENDED（不清 dev_estimated_at）→ 恢复→ASSIGNED_PENDING_ESTIMATE（清 dev_estimated_at，留 suspended_at）');
 
     // [10] →REJECTED：reason 必填；FIXED→REJECTED 非法（R-1）
     const c3 = await createCorrection({ correction_type: 'single' });
@@ -254,7 +279,7 @@ async function main() {
     assert.strictEqual(conflictRule(false, true), false, '仅对接人 → 不冲突');
     ok('M-4：建单路径 A/B 互斥规则镜像（同传判冲突 ASSIGN_AND_RELAY_CONFLICT；完整 endpoint 断言在 flow verify）');
 
-    console.log(`\n[全部通过] ${passed}/${passed} ✓ correctionTransition 验证通过【J3 require 真实 _internals，非复刻】（8 态闸门 + 双 WHERE 守卫 + VOIDED 旁路 + fix_proof join users 契约 + R-6 + R-1 + codex 09 全 6 项）`);
+    console.log(`\n[全部通过] ${passed}/${passed} ✓ correctionTransition 验证通过【J3 require 真实 _internals，非复刻】（9 态闸门 + 双 WHERE 守卫 + VOIDED 旁路 + fix_proof join users 契约 + R-6 + R-1 + codex 09 全 6 项 + 暂缓方案 v1.1 SUSPENDED 边）`);
     db.close();
 }
 

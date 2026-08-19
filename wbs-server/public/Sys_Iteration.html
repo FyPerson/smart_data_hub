@@ -70,9 +70,21 @@
             background: #fff; border: 1px solid #e5e7eb; border-radius: 10px; box-shadow: 0 10px 30px rgba(0,0,0,.12);
             z-index: 20; padding: 6px; flex-direction: column; gap: 2px; }
         .u-head-menu-list.open { display: flex; }
-        .u-head-menu-item { display: block; width: 100%; text-align: left; padding: 8px 12px; border: none; background: none;
+        .u-head-menu-item { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; padding: 8px 12px; border: none; background: none;
             border-radius: 6px; font-size: 13px; color: #374151; cursor: pointer; white-space: nowrap; font-family: inherit; }
         .u-head-menu-item:hover { background: #f3f4f6; color: #111827; }
+        /* D14（暂缓与列表导出方案 v1.1 §3.6）：菜单项图标从 emoji 字符换成内联 SVG 元素后，display:flex +
+           align-items:center 让图标与文字垂直居中对齐（emoji 是文本字符不需要，SVG 是替换元素需要）；
+           gap 替代原来 emoji 后的手打空格。svg 本身固定尺寸，防不同图标 viewBox 差异撑开行高。 */
+        .u-head-menu-item svg { flex-shrink: 0; width: 14px; height: 14px; }
+
+        /* S6（暂缓与列表导出方案 v1.1 §3.1.2）：导出按钮——次级样式（白底描边+下载图标，hover amber），
+           口径对齐 Export_DateFilter_Demo.html（只读参照）。.si-head-actions 本身已是 flex 容器（见上方
+           规则），导出按钮作为其中一个子项自然与「⚙️ 管理」下拉/「+ 新建迭代单」并排。.u-daterange*
+           系列样式由 u-export.js 的 attachDateRangeFilter 运行时自注入，本页不重复声明。 */
+        .u-btn-export { display: inline-flex; align-items: center; gap: 6px; padding: 7px 14px; background: #fff; color: #374151; border: 1px solid #d1d5db; border-radius: 6px; font-size: 13px; cursor: pointer; transition: border-color .2s, color .2s; white-space: nowrap; }
+        .u-btn-export:hover { border-color: #d97706; color: #d97706; }
+        .u-btn-export:disabled { opacity: .6; cursor: default; }
 
         /* 表格已 harmonize → u-corr-table-wrap/u-corr-table（base 见 components.css）；
            本页跟随共享层默认宽度，和其余列表页保持同一容器/表格骨架。 */
@@ -668,6 +680,9 @@
                 <label class="si-chk" id="siVoidedWrap" style="display:none;">
                     <input type="checkbox" id="siFVoided" onchange="siLoadList()"> 含已作废
                 </label>
+                <!-- S6 D13：创建日期筛选胶囊（插入位置=筛选控件群末尾、搜索框之前，同 Export_DateFilter_Demo.html
+                     口径）；空 div，UnifyHelpers.attachDateRangeFilter 运行时填充结构+样式。 -->
+                <div class="u-daterange" id="siDateRange"></div>
                 <input type="text" id="siFSearch" placeholder="搜索标题/系统/单号…" oninput="siDebounceSearch()">
                 <div style="flex:1;"></div>
                 <div class="si-head-actions" id="siHeadActions"></div>
@@ -811,6 +826,12 @@
          改文件时两处一起 bump——siInitUPaste() 内 UPaste.checkVersion() 会在不一致时 console.error
          （S5 起版本比对逻辑下沉共享层，见 u-paste.js checkVersion()）。 -->
     <script src="assets/js/u-paste.js?v=v1.134.0_upaste2"></script>
+    <!-- S6（暂缓与列表导出方案 v1.1 §3.1）：列表导出（Excel）+ 创建日期范围筛选共享层接入。
+         xlsx vendor 先于 u-export.js 加载（attachExport 运行时依赖全局 XLSX）；两者缓存串与数据修正/
+         数据协作页同串同 KIT 尾缀 v1.157.0_uexport1，与 u-export.js 内 KIT_VERSION='uexport1' 对拍
+         （verify-export-columns 断言 4）。 -->
+    <script src="assets/vendor/xlsx.mini.min.js?v=v1.157.0_uexport1"></script>
+    <script src="assets/js/u-export.js?v=v1.157.0_uexport1"></script>
     <script>
     /* ============================================================
        系统迭代前端 · 纯 meta 驱动（状态机常量来自 GET /api/sys-issues/meta）
@@ -824,6 +845,9 @@
     let siList = [];                 // 当前列表
     let siActiveType = 'all';        // 当前类型 tab
     let siActiveStat = '';           // 顶部统计卡筛选（''=全部）
+    // N1（预筛 C6b）：变量名故意不用 siDateRange——同页有 <div id="siDateRange">，撞名会与元素的隐式
+    //   window 具名属性混淆（同 Data_Correction.html corrDateRangeFilter 同款改名理由）。
+    let siDateRangeFilter = { start: '', end: '' };   // S6 D13：创建日期范围筛选状态，attachDateRangeFilter onChange 写入
     let siOpenId = null;             // 当前打开的详情单 id
     let siDetail = null;             // 当前详情对象
     let siModalConfirm = null;       // 当前弹框确认回调
@@ -1391,7 +1415,8 @@
         // 建单优化批 C2 前端：静默尝试（非 admin 会 403，符合预期，不提示）——为详情页「对接人」姓名解析预热缓存；
         //   建单弹窗自己另有一次带提示的刷新拉取（siOpenCreate 内，见该函数），不依赖这次是否成功。
         await siLoadIntakeLiaisons();
-        siRenderHeadActions();
+        siRenderHeadActions();   // 尾部已自带 siAttachExportButton()（预筛 C6c L-2），导出按钮监听随之接好
+        siInitExport();   // S6：日期筛选胶囊接线 + 导出 kit 版本校验（一次性，与按钮监听拆分见该函数定义处注释）
         siBuildFilters();
         await siLoadList();
         sysIterationSorter.init(); // 前端统一：表头排序初始化（siLoadList 后绑定）
@@ -1481,6 +1506,11 @@
         const box = document.getElementById('siHeadActions');
         let html = '';
         let menuItems = '';
+        // S6（§3.1.2）：导出按钮，「+ 新建迭代单」左侧；D4=能看列表就能导，仅需 currentUser 存在——
+        //   刻意不进 isAdmin()/META_OK 条件块（与下面「+ 新建迭代单」的严格门槛不同）。本按钮不走
+        //   siOpenXxx() 面板打开范式，不受 panel-static 守卫 marker 约束（该守卫只认 onclick="siOpenXxx()"
+        //   标记 + 其 if 条件，本按钮无 onclick，靠 id 选择器给 attachExport 挂点击行为）。
+        if (currentUser) html += `<button class="u-btn-export" id="btnExportSi"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> 导出 Excel</button>`;
         if (META_OK && isAdmin() && siTypeKeys().length) html += `<button class="u-btn-primary" onclick="siOpenCreate()">+ 新建迭代单</button>`;
         // 上线体统一重构 C2b（方案 v3.4 §6.7）：「批次管理」入口须与 META_OK 解耦——meta（/sys-issues/meta，
         //   状态机 typeFlows）加载失败只应影响单据状态动作按钮，不能连带把「安排上线」这个应急兜底通道也锁死
@@ -1492,38 +1522,38 @@
         //   §6.8「撤销上线安排」在生产里会是 0% 可达的死功能。面板内部各按钮各自仍按己方角色门显隐
         //   （+ 加单/发布批次仍 admin-only，见 siOpenBatchDetail 内注释）。
         if (isAdmin() || (currentUser && isSiIntakeLiaison(currentUser.id))) {
-            menuItems += `<button type="button" class="u-head-menu-item" role="menuitem" onclick="siOpenBatch()">📦 上线单管理</button>`;
+            menuItems += `<button type="button" class="u-head-menu-item" role="menuitem" onclick="siOpenBatch()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg> 上线单管理</button>`;
         }
         // 上线体统一重构 C1（方案 v3.4 §6.15）：值班排班入口——**登录即可见**，故意不挂 META_OK 门（不同于本函数
         // 其余按钮）：排班表是独立资源，不依赖 sys-issues/meta 是否加载成功；对接人可写，其余角色打开为只读预览
         // （甲方也要能看排班），可见性不能收窄到只给对接人。写权限判定在面板内部（isSiIntakeLiaison），本按钮
         // 对任意登录用户可见可点。
         if (currentUser) {
-            menuItems += `<button type="button" class="u-head-menu-item" role="menuitem" onclick="siOpenDutyRoster()">📅 值班排班</button>`;
+            menuItems += `<button type="button" class="u-head-menu-item" role="menuitem" onclick="siOpenDutyRoster()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg> 值班排班</button>`;
         }
         // [组 C·SC2·方案 §3C.6] 期望对表统计入口——同值班排班口径：登录即可见（只读聚合信息，
         //   不依赖 META_OK，不做开发个人排名聚合，故不收窄到 admin/对接人）。
         if (currentUser) {
-            menuItems += `<button type="button" class="u-head-menu-item" role="menuitem" onclick="siOpenEtaStats()">📊 期望对表统计</button>`;
+            menuItems += `<button type="button" class="u-head-menu-item" role="menuitem" onclick="siOpenEtaStats()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="20" x2="12" y2="10"/><line x1="18" y1="20" x2="18" y2="4"/><line x1="6" y1="20" x2="6" y2="16"/></svg> 期望对表统计</button>`;
         }
         if (META_OK && isAdmin()) {
             // 上线日志（2026-07-31 用户拍板）：已发布批次 + 成员清单只读浏览——门槛与显隐条件与「删除审计」
             //   完全同款（同一 META_OK 降级条件、同一 admin-only），非应急路径，容忍随 meta 一起降级。
-            menuItems += `<button type="button" class="u-head-menu-item" role="menuitem" onclick="siOpenReleaseLog()">📜 上线日志</button>`;
+            menuItems += `<button type="button" class="u-head-menu-item" role="menuitem" onclick="siOpenReleaseLog()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg> 上线日志</button>`;
             // ⭐ 角色权限重构 C4·F9（172 号对抗审）：物删审计查询入口——仅 admin 可见（前端镜像，真闸在后端
             //   requireAdmin）。C2a 建了审计表但零查询面，本入口补上"看得到"这一步。
-            menuItems += `<button type="button" class="u-head-menu-item" role="menuitem" onclick="siOpenDeleteAudit()">🗑️ 删除审计</button>`;
+            menuItems += `<button type="button" class="u-head-menu-item" role="menuitem" onclick="siOpenDeleteAudit()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg> 删除审计</button>`;
         }
         // [已退场 2026-07-30·用户裁定] 「🚀 上线编排」入口——C7 先隐藏（保留代码过渡），本批随旧家族
         //   4 端点封禁把面板代码整体删除（见文件下方 C-orch 面板 tombstone）；恢复 = git revert 对应 commit。
         if (META_OK && currentUser) {
-            menuItems += `<button type="button" class="u-head-menu-item" role="menuitem" onclick="siOpenFlowGuide()">📖 流程说明</button>`;
+            menuItems += `<button type="button" class="u-head-menu-item" role="menuitem" onclick="siOpenFlowGuide()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg> 流程说明</button>`;
         }
         // 零星事项台账入口（2026-08-02 用户裁定拆独立页 Quick_Log.html，本页头部按钮随之删除——
         // 入口仅保留 admin 头像下拉「📋 零星事项」一处，见 app.js updateUserUI()）。
         if (menuItems) {
             html = `<div class="u-head-menu" id="siHeadMenu">
-                <button type="button" class="u-btn-secondary u-head-menu-trigger" onclick="siToggleHeadMenu(event)" aria-haspopup="true" aria-expanded="false">⚙️ 管理 <span class="u-head-menu-caret">▾</span></button>
+                <button type="button" class="u-btn-secondary u-head-menu-trigger" onclick="siToggleHeadMenu(event)" aria-haspopup="true" aria-expanded="false"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg> 管理 <span class="u-head-menu-caret">▾</span></button>
                 <div class="u-head-menu-list" id="siHeadMenuList" role="menu">${menuItems}</div>
             </div>` + html;
         }
@@ -1533,6 +1563,10 @@
         siCloseHeadMenu();
         box.innerHTML = html;
         siProbeMyReleasesEntry();
+        // 预筛 C6c L-2：导出按钮监听——box.innerHTML 重建后必须立即重绑，定义与推演见 siAttachExportButton
+        // 注释；放在函数尾部无条件调用（不判断 currentUser，交给 siAttachExportButton 内部同款判据短路），
+        // 保证本函数今后任一新增调用点都自动带出正确的重绑行为，不依赖调用方记得配套调用。
+        siAttachExportButton();
     }
 
     // 「⚙️ 管理」下拉开合（页面级监听只挂载一次，不放进 siRenderHeadActions——该函数会被多次重渲染 DOM，
@@ -1613,8 +1647,12 @@
         btn.className = 'u-btn-secondary';
         btn.setAttribute('data-si-my-releases', '1');
         btn.addEventListener('click', () => siOpenBatch());
-        btn.textContent = siMyReleasesEntryData.pending > 0
-            ? `📦 我的上线单（${siMyReleasesEntryData.pending} 待执行）` : '📦 我的上线单';
+        // 预筛 C6c L-3：📦 emoji 换与「上线单管理」菜单项（:1525）同款 package SVG path，尺寸对齐本按钮
+        //   u-btn-secondary 字号（13px，同「⚙️ 管理」触发按钮 :1556 的 svg 尺寸）。pending 恒为
+        //   Array.filter().length 派生的数字，非用户输入，innerHTML 拼接安全，无需 esc()。
+        const siMyReleasesIconSvg = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>';
+        btn.innerHTML = siMyReleasesIconSvg + (siMyReleasesEntryData.pending > 0
+            ? ` 我的上线单（${siMyReleasesEntryData.pending} 待执行）` : ' 我的上线单');
         box.appendChild(btn);
     }
 
@@ -1771,11 +1809,22 @@
             return rid !== null && rootsToKeep.has(rid);
         });
     }
+    // S6 D13：创建日期范围筛选（行级过滤，与既有 siMatchStatFilter 同层 AND，并入 siVisibleList 所在
+    //   过滤链——过滤本身不影响族聚类算法，siClusterFamilyBlocks 仍对过滤后的行集重新聚类，与既有
+    //   type/stat/search 筛选行为完全一致）。
+    function siMatchDateRange(i) {
+        if (!siDateRangeFilter.start && !siDateRangeFilter.end) return true;
+        const prefix = UnifyHelpers.isValidDatePrefix(i.created_at);
+        if (!prefix) return false;   // 无效/空值按不匹配处理即被筛出
+        if (siDateRangeFilter.start && prefix < siDateRangeFilter.start) return false;
+        if (siDateRangeFilter.end && prefix > siDateRangeFilter.end) return false;
+        return true;
+    }
     function siVisibleList() {
-        const matched = siVisibleTypeList().filter((i) => siMatchStatFilter(i, siActiveStat));
+        const matched = siVisibleTypeList().filter((i) => siMatchStatFilter(i, siActiveStat) && siMatchDateRange(i));
         if (!siActiveSearch) return matched;
         const candidatePool = (siActiveType === 'all' ? siList : siList.filter((i) => i.type === siActiveType))
-            .filter((i) => siMatchStatFilter(i, siActiveStat));
+            .filter((i) => siMatchStatFilter(i, siActiveStat) && siMatchDateRange(i));
         return siBroadenBySearchFamily(matched, candidatePool);
     }
 
@@ -9093,6 +9142,182 @@
             selector: '[id^="siPreview_"]',
             keyOf: (el) => el.id.replace(/^siPreview_/, ''),
             collect: (key, files) => { siPickerCollect(key, files); siPickerRender(key); },
+        });
+    }
+
+    // ============================================================
+    // S6（暂缓与列表导出方案 v1.1 §3.1/§3.2.3/§3.3/§3.3.1）：列表导出（Excel）+ 创建日期范围筛选接线
+    //   版本守卫/columns 常量标识符三件套照 Data_Correction.html corrInitExport 现范式（now 通道已收进
+    //   共享层，本页 value() 直接写 ctx.overdueRule(r) 即得）。
+    // ============================================================
+    const SI_UEXPORT_KIT_EXPECTED = 'uexport1';   // 须与 <script src="...u-export.js?v=..._uexport1"> 缓存串尾部一致
+
+    // 系统迭代日期纪律与数据修正/数据协作不同（§3.3 统一规则原文）：按**日期分量**比较、时长只报天——
+    //   避免 deadline 日期/日期时间混存形态带来的时区/解析坑。判定用 isValidDatePrefix 取前 10 位字典序
+    //   比较（不经 Date）；仅"计算超了几天"这一步才用 Date（纯日期部分，本地零点，无时分参与）。
+    function siLocalDatePrefix(d) {
+        const pad = n => (n < 10 ? '0' + n : String(n));
+        return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+    }
+    function siDatePrefixDiffDays(laterPrefix, earlierPrefix) {
+        const a = laterPrefix.split('-').map(Number), b = earlierPrefix.split('-').map(Number);
+        // 预筛 C6d 修5：Date.UTC 锚定日期分量（非本地时区 Date 构造器）——纯日历天数差，天然无 DST 干扰；
+        //   本地 Date 构造器在观察夏令时的时区里，跨 DST 切换边界的两个日期相减会因当天少/多 1 小时导致
+        //   毫秒差不是 86400000 的整倍数，Math.round 兜底能掩盖大多数场景但不保证恒等——UTC 锚点从根源
+        //   消除这类时区相关误差（生产部署时区无 DST，但 Node 测试/开发环境时区不一定与生产一致）。
+        const da = Date.UTC(a[0], a[1] - 1, a[2]), db = Date.UTC(b[0], b[1] - 1, b[2]);
+        return Math.round((da - db) / 86400000);
+    }
+    // siOverdueRule(row, now)：系统迭代逐状态枚举（方案 §3.3.1 SI 表）。**判定一律按 DB 原始中文状态值**
+    //   （row.status 未经 siStatusDisplay 改名，通则①）；「已关闭 无 released_at → 未上线关闭」是状态
+    //   专属分支，优先于「未设时限」通用兜底检查（通则②·优先级条，与数据修正「行政闭环」同一类先例）。
+    function siOverdueRule(row, now) {
+        now = (now instanceof Date) ? now : new Date();
+        const status = row.status;
+        if (status === '已暂缓') return { overdue: '暂缓中', duration: '' };
+        if (status === '已拒绝' || status === '已作废') return { overdue: '—', duration: '' };
+
+        const releasedRaw = row.released_at;
+        const releasedEmpty = (releasedRaw === '' || releasedRaw === null || releasedRaw === undefined ||
+            (typeof releasedRaw === 'string' && releasedRaw.trim() === ''));
+        if (status === '已关闭' && releasedEmpty) return { overdue: '未上线关闭', duration: '' };
+
+        const deadlineRaw = row.deadline;
+        const deadlineEmpty = (deadlineRaw === '' || deadlineRaw === null || deadlineRaw === undefined ||
+            (typeof deadlineRaw === 'string' && deadlineRaw.trim() === ''));
+        if (deadlineEmpty) return { overdue: '未设时限', duration: '' };
+        const deadlinePrefix = UnifyHelpers.isValidDatePrefix(deadlineRaw);
+        if (!deadlinePrefix) return { overdue: '日期无效', duration: '' };   // 非空但格式/日历非法（脏值）
+
+        // 预筛 C6c N-3（前瞻登记）：「待验收」态目前 DB 无实值（对应 config 流状态机 TODO，本批未落地）——
+        //   一旦该状态落地投产，须补进下方 SI_UNFINISHED 名单，且注意其完成锚可能不是 released_at 而是
+        //   effected_at（config 流"生效"语义与迭代流"上线"语义不同源）；漏补会让该状态落入本函数末尾的
+        //   「未知状态」防御兜底（预筛 C6 L-1 已改输出「—」），超时判定悄悄失效而不报错，不易发现。
+        const SI_UNFINISHED = ['待受理', '待修改', '待指派', '待处理', '开发中', '处理中', '待对接测试', '待验证', '待上线'];
+        if (SI_UNFINISHED.indexOf(status) !== -1) {
+            const nowPrefix = siLocalDatePrefix(now);
+            if (nowPrefix > deadlinePrefix) {
+                return { overdue: '进行中已超期', duration: siDatePrefixDiffDays(nowPrefix, deadlinePrefix) + ' 天' };
+            }
+            return { overdue: '未超时', duration: '' };
+        }
+
+        if (status === '已上线' || status === '已生效' || status === '已关闭') {
+            // 已关闭走到这里说明 released_at 非空（空的分支已在上面拦截）；三态统一按完成判——
+            // 通则②：完成锚（released_at）非空但非法（脏值）仍统一「无完成时间」。
+            const releasedPrefix = UnifyHelpers.isValidDatePrefix(releasedRaw);
+            if (!releasedPrefix) return { overdue: '无完成时间', duration: '' };
+            if (releasedPrefix > deadlinePrefix) {
+                return { overdue: '超时', duration: siDatePrefixDiffDays(releasedPrefix, deadlinePrefix) + ' 天' };
+            }
+            return { overdue: '未超时', duration: '' };
+        }
+
+        return { overdue: '—', duration: '' };   // 预筛 C6 L-1：未知状态兜底（脏状态值理论可达；该分支与上方
+        // deadlineEmpty「未设时限」语义不同——deadline 已非空且合法，输出「未设时限」是假陈述）
+    }
+
+    // 18 列白名单（方案 §3.2.3 逐列拍板表）。抽成页面常量再传标识符给 attachExport。
+    //   敏感/内部字段（全部徽章派生字段、commit refs 三列、tech_lead_*、各 notify 列、blocked/
+    //   scope_changed/reopen_count/return_count）恒不入列；oa_number 不入（193 号已决）。
+    const SI_EXPORT_COLUMNS = [
+        { key: 'id', label: 'ID' },
+        { key: 'type', label: '类型', deps: ['type'], value: r => siTypeLabel(r.type) },
+        { key: 'priority', label: '优先级' },
+        { key: 'risk_level', label: '风险等级' },
+        { key: 'status', label: '状态', deps: ['status'], value: r => siStatusDisplay(r.status) },
+        { key: 'title', label: '标题' },
+        { key: 'system_name', label: '系统' },
+        { key: 'module_name', label: '模块' },
+        {
+            // 预筛 C6 M-2：json_group_array 零命中时返回 '[]'（非 NULL）——旧实现只判 !r.dev_roster_names
+            // 拦不住 '[]'，parse 后空数组走 map/filter/join 仍得 ''，与页面显示（siDevRosterCellHtml 空名单
+            // 回退 assigned_to_name）不一致（D5 所见即所得）。改用 siDevRosterNamesResolved 同款单源解析——
+            // 空名单（'[]'/空/parse 失败均归并为空数组，见该函数定义处注释）统一回退 assigned_to_name。
+            key: 'dev_roster_names', label: '开发', deps: ['dev_roster_names', 'assigned_to_name'],
+            value: r => {
+                const names = siDevRosterNamesResolved(r);
+                if (names.length) return names.join('、');
+                return r.assigned_to_name || '';
+            },
+        },
+        { key: 'created_by_name', label: '建单人' },
+        { key: 'requester_name', label: '需求方' },
+        { key: 'requester_dept', label: '需求部门' },
+        { key: 'dev_estimated_at', label: '预计完成' },
+        { key: 'deadline', label: '期望完成' },
+        { key: 'last_completed_at', label: '实际完成' },
+        { key: 'released_at', label: '上线时间' },
+        { key: 'is_overdue', label: '是否超时（对期望时限）', deps: ['status', 'deadline', 'released_at'], value: (r, ctx) => ctx.overdueRule(r).overdue },
+        { key: 'overdue_duration', label: '超时时长', deps: ['status', 'deadline', 'released_at'], value: (r, ctx) => ctx.overdueRule(r).duration },
+    ];
+
+    // getViewRows：与页面显示完全一致的最终行序（族块展开结果）——siVisibleList()（已含 type/stat/search/
+    //   D13 日期范围全部行级筛选）→ sysIterationSorter.getState() 读当前排序态 → siClusterFamilyBlocks
+    //   做族级重排 → 展开为 flat 行数组（不额外分页，导出要"当前筛选全量"）。row 取值键是 `item`
+    //   （siClusterFamilyBlocks 的行对象形状，非 Data_Correction 的 `it`——两页各自的既有命名）。
+    function siGetViewRows() {
+        const items = siVisibleList();
+        const state = sysIterationSorter.getState();
+        const blocks = siClusterFamilyBlocks(items, siList, state.sortBy, state.sortDir);
+        const rows = [];
+        blocks.forEach(blockRows => blockRows.forEach(r => rows.push(r.item)));
+        return rows;
+    }
+
+    function siExportFilename() {
+        const d = new Date();
+        const pad = n => String(n).padStart(2, '0');
+        return `系统迭代_导出_${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}`;
+    }
+
+    // 预筛 C6c L-2：导出按钮的 attachExport 绑定已拆到 siAttachExportButton（见下方定义处注释）——
+    //   #btnExportSi 随 siRenderHeadActions 每次重建 innerHTML 而被销毁重建，不能沿用"一次性"门。
+    //   本函数（siInitExport）收窄为真正只需一次的部分：版本校验 + 日期筛选胶囊（#siDateRange 是
+    //   筛选栏内的稳定容器，不随 siRenderHeadActions 重渲染，_done 门对它仍然适用、也仍然必要——
+    //   否则 attachDateRangeFilter 会在同一个未被替换的容器上重复挂监听）。
+    function siInitExport() {
+        if (siInitExport._done) return;
+        siInitExport._done = true;
+        if (!window.UnifyHelpers || typeof UnifyHelpers.attachExport !== 'function') {
+            console.error('[导出共享层] u-export.js 未加载');
+            return;
+        }
+        UnifyHelpers.uexportCheckVersion(SI_UEXPORT_KIT_EXPECTED, 'Sys_Iteration.html');
+        UnifyHelpers.attachDateRangeFilter({
+            containerSelector: '#siDateRange',
+            label: '创建日期',
+            onChange: (range) => { siDateRangeFilter = range; siRenderTable(); },
+        });
+    }
+
+    // 预筛 C6c L-2：导出按钮监听——从 siInitExport 的一次性初始化里拆出，改为每次 siRenderHeadActions
+    //   重建 #siHeadActions 的 innerHTML 后都重新调用（调用点见 siRenderHeadActions 函数体尾部）。
+    //   最薄改法核实：u-export.js 的 attachExport() 内部每次调用都是 `document.querySelector(buttonSelector)`
+    //   现查节点 + 直接 addEventListener 到该节点，不含跨调用累积的模块级/闭包级状态（已读源码核实，
+    //   见该文件 attachExport 定义处）——不改共享层即可安全复用。"每次渲染后重新调用"不会在同一个按钮
+    //   节点上叠加监听器，前提是调用严格跟在 box.innerHTML 重建之后：旧节点连同其监听器一起被 innerHTML
+    //   替换销毁（浏览器 GC），新节点是全新 DOM 对象，本次 attachExport 是它收到的第一个也是唯一一个
+    //   监听器。若脱离这个"重建后立即调用一次"的时序（例如同一次渲染内被调用两次、或中间夹了另一次
+    //   未重建 DOM 的调用），才会在同一节点上叠加——本函数的唯一调用点在 siRenderHeadActions 尾部，
+    //   无条件跳过分支，不存在这种脱序可能。
+    //   防重复绑定推演：① 首次 siRenderHeadActions → box.innerHTML 写入 → siAttachExportButton 绑定
+    //   到按钮实例 A → 点击触发 1 次导出。② 再次 siRenderHeadActions（如未来新增角色探测后重渲染）→
+    //   box.innerHTML 整体替换 → 实例 A 连同其监听器一并被移除销毁 → 新按钮实例 B 诞生（零监听器）→
+    //   siAttachExportButton 绑定到 B → 点击 B 仍恰好触发 1 次导出（A 已不在 DOM 树上，不可能被点到）。
+    //   全程任一时刻都只有一个"当前可点击"的按钮实例带且仅带一个监听器。
+    function siAttachExportButton() {
+        if (!currentUser) return;   // #btnExportSi 仅 currentUser 存在时才渲染（siRenderHeadActions 同一判据）
+        if (!window.UnifyHelpers || typeof UnifyHelpers.attachExport !== 'function') {
+            console.error('[导出共享层] u-export.js 未加载');
+            return;
+        }
+        UnifyHelpers.attachExport({
+            buttonSelector: '#btnExportSi',
+            getViewRows: siGetViewRows,
+            columns: SI_EXPORT_COLUMNS,
+            filename: siExportFilename,
+            overdueRule: siOverdueRule,
         });
     }
 

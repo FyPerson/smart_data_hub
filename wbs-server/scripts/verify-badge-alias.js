@@ -218,11 +218,13 @@ const PAGE_ALIAS_SPECS = [
     {
         file: 'Data_Correction.html',
         selector: (k) => `.u-status-badge.s-${k}`,
-        // S0 矩阵：8 态 + statusClass() 未命中兜底 s-UNKNOWN（有意不写规则，落 base wait fallback）
+        // S0 矩阵：9 态（暂缓与列表导出方案 v1.1 §2.5.1 新增 SUSPENDED→hold，对齐 Sys_Iteration .si-s-hold 同 tier）
+        //   + statusClass() 未命中兜底 s-UNKNOWN（有意不写规则，落 base wait fallback）
         tiers: {
             PENDING_ASSIGN: 'wait',
             ASSIGNED_PENDING_ESTIMATE: 'intake',
             IN_PROGRESS: 'active',
+            SUSPENDED: 'hold',
             FIXED: 'done',
             REFIXED: 'done',
             ARCHIVED: 'archived',
@@ -1185,6 +1187,8 @@ const SCRIPT_REGISTRY = Object.freeze({
         'assets/js/app.js': '本页不调用 createCard / openTaskDetailDrawer（任务徽章的两个渲染点），只用其中的通用工具函数；本页徽章走 UnifyHelpers + 页内 statusClass',
         'assets/js/unify-helpers.js': '共享 helper，其徽章输出形态由 verify-unify-static.js 断言③⑧ 单独覆盖',
         'assets/js/u-paste.js': '贴图粘贴扩展，只处理 paste 事件与附件上传，不写任何 class',
+        'assets/vendor/xlsx.mini.min.js': '第三方 SheetJS vendor 库（S5，暂缓与列表导出方案 v1.1 §3.1.2），只提供 Excel 生成 API，不操作 DOM/不写任何 class',
+        'assets/js/u-export.js': '列表导出（Excel）+ 创建日期范围筛选共享层（S5，方案 §3.1），只挂导出按钮点击行为与日期胶囊浮层，不写任何徽章相关 class（.u-btn-export/.u-daterange* 均非徽章体系）',
     },
     'Statistics.html': {
         'assets/js/app.js': '同上，本页无任务卡/任务抽屉；徽章走 UnifyHelpers.statusBadgeByMap',
@@ -1204,11 +1208,15 @@ const SCRIPT_REGISTRY = Object.freeze({
         'assets/js/app.js': '同上，本页无任务卡/任务抽屉；徽章由页内 siStatusClass 产出',
         'assets/js/unify-helpers.js': '共享 helper，由 verify-unify-static.js 断言③⑧ 覆盖',
         'assets/js/u-paste.js': '贴图粘贴扩展，不写 class',
+        'assets/vendor/xlsx.mini.min.js': '第三方 SheetJS vendor 库（S6，暂缓与列表导出方案 v1.1 §3.1.2），只提供 Excel 生成 API，不操作 DOM/不写任何 class',
+        'assets/js/u-export.js': '列表导出（Excel）+ 创建日期范围筛选共享层（S6，方案 §3.1），只挂导出按钮点击行为与日期胶囊浮层，不写任何徽章相关 class（.u-btn-export/.u-daterange* 均非徽章体系）',
     },
     'Data_Collab.html': {
         'assets/js/app.js': '同上，本页无任务卡/任务抽屉；徽章由页内 collabStatusClass 产出',
         'assets/js/unify-helpers.js': '共享 helper，由 verify-unify-static.js 断言③⑧ 覆盖',
         'assets/js/u-paste.js': '贴图粘贴扩展，不写 class',
+        'assets/vendor/xlsx.mini.min.js': '第三方 SheetJS vendor 库（S6，暂缓与列表导出方案 v1.1 §3.1.2），只提供 Excel 生成 API，不操作 DOM/不写任何 class',
+        'assets/js/u-export.js': '列表导出（Excel）+ 创建日期范围筛选共享层（S6，方案 §3.1），只挂导出按钮点击行为与日期胶囊浮层，不写任何徽章相关 class（.u-btn-export/.u-daterange* 均非徽章体系）',
     },
     'Periodic_Fetch.html': {
         'assets/js/app.js': '同上，本页无任务卡/任务抽屉；徽章由页内 pfStatusClass 产出',

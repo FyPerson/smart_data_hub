@@ -194,6 +194,9 @@ function initSchema() {
             voided_by_name TEXT,
             void_reason TEXT,
 
+            -- 暂缓（暂缓与列表导出方案 v1.1 §2.2）：最后一次暂缓时刻，恢复时不清空（=最近一次暂缓时刻，同 fixed_at/refixed_at 范式）
+            suspended_at DATETIME,
+
             -- 创建人（created_by 强制 NOT NULL，isCreator 可见性 + 归档/作废/通知权限锚点）
             created_by INTEGER NOT NULL,
             created_by_name TEXT,
@@ -481,6 +484,21 @@ async function runCorrectionMigration(ddlError) {
                 logger.info(`[数据修正迁移] correction_requests ADD COLUMN ${col} ${type}（流程类型字段）`);
             }
         }
+        // [2a-susp] ⭐ 暂缓与列表导出方案 v1.1（2026-08-19）：已上线表演进——加 suspended_at 幂等 ALTER ADD COLUMN
+        //   （同 [2a-pt] process_type 范式）。生产已有数据不能 DROP 重建，CREATE TABLE IF NOT EXISTS 对已存在表 no-op（新列不加），故此处补。
+        //   【不入 KEY_COLS】（可空辅助列，缺失不阻断写入口，与 error_proof_note 同级）→ 无 C-1 顺序硬约束；仍置 [2b] 复查之前以保列集最新。
+        //   col/type 为硬编码常量非用户输入，插值无注入风险；ALTER reject → 外层 catch 置 error（可观测，不静默吞）。
+        const SUSPEND_COLS = [
+            ['suspended_at', 'DATETIME'],   // 最后一次暂缓时刻（恢复时不清空，重复暂缓覆盖为最近一次，方案 §2.2）
+        ];
+        for (const [col, type] of SUSPEND_COLS) {
+            if (!colNames.includes(col)) {
+                await new Promise((resolve, reject) => {
+                    db.run(`ALTER TABLE correction_requests ADD COLUMN ${col} ${type}`, (err) => err ? reject(err) : resolve());
+                });
+                logger.info(`[数据修正迁移] correction_requests ADD COLUMN ${col} ${type}（暂缓方案 v1.1）`);
+            }
+        }
         // [2b] ⭐ ALTER 后【重新】PRAGMA：下方 missingCols 必须用最新列集（C-1：不能复用 [2] 的旧 colNames 复查）
         cols = await new Promise((resolve, reject) => {
             db.all('PRAGMA table_info(correction_requests)', (err, rows) => err ? reject(err) : resolve(rows));
@@ -643,15 +661,18 @@ const router = express.Router();
 //   状态机集中校验枚举（不用 DB CHECK，跟项目惯例，方案 §5.3）。VOIDED 为软删最终态无后续转移；
 //   VOIDED 作为目标走 correctionTransition 通用旁路（§3.4 / G-14）。
 const CORRECTION_STATUSES = [
-    'PENDING_ASSIGN', 'ASSIGNED_PENDING_ESTIMATE', 'IN_PROGRESS', 'FIXED', 'REFIXED',
+    'PENDING_ASSIGN', 'ASSIGNED_PENDING_ESTIMATE', 'IN_PROGRESS', 'SUSPENDED', 'FIXED', 'REFIXED',
     'ARCHIVED', 'REJECTED', 'VOIDED'
 ];
 const CORRECTION_STATUS_TRANSITIONS = {
-    // I2 §3.4：3 个未完成态加 ARCHIVED 为合法目标（仅行政闭环 admin_closure 走，transition 内 closure_type 二次约束源态；
+    // I2 §3.4：4 个未完成态（含 SUSPENDED·暂缓方案 v1.1）加 ARCHIVED 为合法目标（仅行政闭环 admin_closure 走，transition 内 closure_type 二次约束源态；
     //   normal 归档在 transition 内强校验 fromStatus∈{FIXED,REFIXED}，双分支互不污染）
+    // 暂缓与列表导出方案 v1.1 §2.1.1：ASSIGNED_PENDING_ESTIMATE/IN_PROGRESS 两个工作态加 SUSPENDED 为合法目标（入口两态）；
+    //   SUSPENDED 出口三路——恢复（回 ASSIGNED_PENDING_ESTIMATE）/ 行政闭环 ARCHIVED / 作废 VOIDED（§2.1.1 闸门×回路检查，无死锁受困态）。
     'PENDING_ASSIGN':            ['ASSIGNED_PENDING_ESTIMATE', 'ARCHIVED', 'REJECTED', 'VOIDED'],
-    'ASSIGNED_PENDING_ESTIMATE': ['IN_PROGRESS', 'ARCHIVED', 'REJECTED', 'VOIDED'],
-    'IN_PROGRESS':               ['FIXED', 'ARCHIVED', 'REJECTED', 'VOIDED'],
+    'ASSIGNED_PENDING_ESTIMATE': ['IN_PROGRESS', 'SUSPENDED', 'ARCHIVED', 'REJECTED', 'VOIDED'],
+    'IN_PROGRESS':               ['FIXED', 'SUSPENDED', 'ARCHIVED', 'REJECTED', 'VOIDED'],
+    'SUSPENDED':                 ['ASSIGNED_PENDING_ESTIMATE', 'ARCHIVED', 'VOIDED'],   // 恢复固定回「待预计」（不回原状态，§2.1.2）/ 行政闭环 / 作废
     'FIXED':                     ['REFIXED', 'ARCHIVED', 'VOIDED'],   // 重修→REFIXED / 归档→ARCHIVED / 作废
     'REFIXED':                   ['REFIXED', 'ARCHIVED', 'VOIDED'],   // 可再次重修（停 REFIXED·G-9）/ 归档 / 作废
     'ARCHIVED':                  ['VOIDED'],                          // 归档后仍可作废（G-14）
@@ -806,7 +827,14 @@ async function correctionTransition(requestId, expectedFromStatus, toStatus, act
             const isWhitelistRelay = isCorrectionRelayWhitelisted(actor.id) && Number(row.relay_notified_user_id) === Number(actor.id);
             let permitted = false;
             switch (toStatus) {
-                case 'ASSIGNED_PENDING_ESTIMATE': permitted = isAdmin || isPublisher || isWhitelistRelay; break;  // 指派（§7.1 + 路线 B 白名单 relay）
+                case 'ASSIGNED_PENDING_ESTIMATE':
+                    // 暂缓与列表导出方案 v1.1 §2.3：该 case 是「指派」语义，但 SUSPENDED→ASSIGNED_PENDING_ESTIMATE 是「恢复」语义，
+                    //   按 fromStatus 分支切换权限组（case 'REJECTED' 已有按 fromStatus 分态先例，见下方）。
+                    permitted = (fromStatus === 'SUSPENDED')
+                        ? (isAdmin || isAssignee || isCreator)          // 恢复=开发本人/建单人/admin（D10）
+                        : (isAdmin || isPublisher || isWhitelistRelay); // 指派（§7.1 + 路线 B 白名单 relay）
+                    break;
+                case 'SUSPENDED': permitted = isAdmin || isAssignee; break;   // 暂缓=开发本人或 admin（§2.3，D9）
                 case 'IN_PROGRESS': case 'FIXED': case 'REFIXED': permitted = isAdmin || isAssignee; break;     // 回复预计/标完成/重修=开发本人或 admin
                 case 'REJECTED':
                     permitted = (fromStatus === 'PENDING_ASSIGN')
@@ -833,10 +861,48 @@ async function correctionTransition(requestId, expectedFromStatus, toStatus, act
 
         switch (toStatus) {
             case 'ASSIGNED_PENDING_ESTIMATE': {
-                // 指派：写 assigned_to/name/by + assigned_at（R-4 合法性由 endpoint 前置校验）
-                setFrags.push('assigned_to = ?', 'assigned_to_name = ?', 'assigned_by = ?', "assigned_at = datetime('now','localtime')");
-                setParams.push(Number(payload.assigned_to), payload.assigned_to_name || null, Number(payload.assigned_by) || null);
-                historyReason = payload.assigned_to_name ? `指派给 ${payload.assigned_to_name}` : null;
+                if (fromStatus === 'SUSPENDED') {
+                    // 恢复（暂缓与列表导出方案 v1.1 §2.4 恢复分支 / §2.4b 端点隔离）：只写
+                    //   dev_estimated_at/expected_deadline/status——不动 assigned_to/assigned_at（与指派分支写入面物理分开）。
+                    setFrags.push('dev_estimated_at = NULL');   // 旧预计失效，回「待预计」迫使开发重新报预计（§2.1.2 理由 1）
+                    // 预筛 M2·对齐改派/手机号变更重置范式，方案 §2.6 恢复后可催办的前提：恢复清空 dev_estimated_at
+                    //   即 ETA 事实作废，若不重置通知态，notify-developer（:3249）/notify-estimate（:3382）会因
+                    //   already_sent（notify_status/requester_notify_status==='sent' 且对应 message_key 非空）短路拒绝再发。
+                    //   照改派重置块（:1690-1696）+ 手机号变更重置块（:2109-2119）同款字段族重置「开发通知四件套」+
+                    //   「业务方预计通知四件套」；completion 完成通知族不重置（FIXED/REFIXED 不可暂缓，暂缓单必然从未完成，动它属越界）。
+                    setFrags.push(
+                        "notify_status = 'not_sent'", 'notified_at = NULL', 'notify_message_key = NULL', 'notify_error = NULL', 'read_at = NULL',
+                        "requester_notify_status = 'not_sent'", 'requester_notified_at = NULL', 'requester_notify_message_key = NULL', 'requester_notify_error = NULL', 'requester_read_at = NULL'
+                    );
+                    if (payload.expected_deadline !== undefined && payload.expected_deadline !== null && String(payload.expected_deadline).trim() !== '') {
+                        const ed = normalizeCorrectionDatetime(payload.expected_deadline);
+                        if (!ed) throw new CorrectionTransitionError(400, 'INVALID_EXPECTED_DEADLINE', '期望完成时间非法（应为 YYYY-MM-DD HH:mm[:ss] 且真实存在）');
+                        setFrags.push('expected_deadline = ?');
+                        setParams.push(ed);
+                        // 不传/空则不动该列（沿用原值，D11）；允许过去时间——业务闭环时可能早已过原时限，如实记录（§2.4）。
+                    }
+                    const note = (typeof payload.note === 'string') ? payload.note.trim() : '';
+                    historyReason = note || null;
+                } else {
+                    // codex 437 MED-1·防未来新增入边误落指派分支：本分支语义=「指派」，只接受合法源态 PENDING_ASSIGN——
+                    //   当前 CORRECTION_STATUS_TRANSITIONS 到 ASSIGNED_PENDING_ESTIMATE 仅 PENDING_ASSIGN/SUSPENDED 两条入边，
+                    //   SUSPENDED 已被上方 if 分支吃掉；此处兜底防未来若再新增第三条入边，误落到本分支当"指派"写 assigned_to。
+                    //   错误类/码对齐文件既有安全网写法（:1048-1049 case default UNSUPPORTED_TRANSITION）。
+                    if (fromStatus !== 'PENDING_ASSIGN') {
+                        throw new CorrectionTransitionError(400, 'UNSUPPORTED_TRANSITION', `不支持从「${fromStatus}」以指派语义转为 ${toStatus}`);
+                    }
+                    // 指派：写 assigned_to/name/by + assigned_at（R-4 合法性由 endpoint 前置校验）
+                    setFrags.push('assigned_to = ?', 'assigned_to_name = ?', 'assigned_by = ?', "assigned_at = datetime('now','localtime')");
+                    setParams.push(Number(payload.assigned_to), payload.assigned_to_name || null, Number(payload.assigned_by) || null);
+                    historyReason = payload.assigned_to_name ? `指派给 ${payload.assigned_to_name}` : null;
+                }
+                break;
+            }
+            case 'SUSPENDED': {
+                // 暂缓（暂缓与列表导出方案 v1.1 §2.4）：reason 必填校验在端点层（SUSPEND_REASON_REQUIRED）已完成，此处只落库。
+                //   不动 dev_estimated_at（保留现场，恢复时才清，见上方 case 'ASSIGNED_PENDING_ESTIMATE' 的 fromStatus==='SUSPENDED' 分支）。
+                setFrags.push("suspended_at = datetime('now','localtime')");
+                historyReason = (typeof payload.reason === 'string' && payload.reason.trim()) ? payload.reason.trim() : null;
                 break;
             }
             case 'IN_PROGRESS': {
@@ -941,10 +1007,11 @@ async function correctionTransition(requestId, expectedFromStatus, toStatus, act
                     throw new CorrectionTransitionError(400, 'INVALID_CLOSURE_TYPE', 'closure_type 仅 normal | admin_closure');
                 }
                 if (closureType === 'admin_closure') {
-                    // 行政闭环（M-7/M-8）：仅 admin（上方权限已校）从 PENDING_ASSIGN/ASSIGNED_PENDING_ESTIMATE/IN_PROGRESS 记账式收口；
+                    // 行政闭环（M-7/M-8）：仅 admin（上方权限已校）从 PENDING_ASSIGN/ASSIGNED_PENDING_ESTIMATE/IN_PROGRESS/SUSPENDED（暂缓方案 v1.1）记账式收口；
                     //   必填 closure_reason（10-500，transition 内最终强校验防其他路径绕过）；跳过 fix_proof/friction 闸门。
-                    if (!['PENDING_ASSIGN', 'ASSIGNED_PENDING_ESTIMATE', 'IN_PROGRESS'].includes(fromStatus)) {
-                        throw new CorrectionTransitionError(400, 'INVALID_CLOSURE_SOURCE', `行政闭环只能从未完成态（PENDING_ASSIGN/ASSIGNED_PENDING_ESTIMATE/IN_PROGRESS）发起，当前：${fromStatus}`);
+                    // 暂缓与列表导出方案 v1.1 §2.1.1：SUSPENDED 加入行政闭环源态白名单（否则 SUSPENDED→ARCHIVED 在此被拦死，出口断路）。
+                    if (!['PENDING_ASSIGN', 'ASSIGNED_PENDING_ESTIMATE', 'IN_PROGRESS', 'SUSPENDED'].includes(fromStatus)) {
+                        throw new CorrectionTransitionError(400, 'INVALID_CLOSURE_SOURCE', `行政闭环只能从未完成态（PENDING_ASSIGN/ASSIGNED_PENDING_ESTIMATE/IN_PROGRESS/SUSPENDED）发起，当前：${fromStatus}`);
                     }
                     const cr = (typeof payload.closure_reason === 'string' ? payload.closure_reason.trim() : '');
                     if (cr.length < 10 || cr.length > 500) {
@@ -1669,6 +1736,98 @@ router.post('/:id/reassign', authenticateToken, requireCorrectionSchemaReady, co
     }
 });
 
+// ── 暂缓/恢复群消息（暂缓与列表导出方案 v1.1 §2.6 增强项）──────────────────────────────────
+//   单据已有钉钉群（dingtalk_open_conversation_id 非空——与 create-chat 端点 hasChat 判定同一字段，:3024
+//   注释已明确区分 dingtalk_chat_id〔摩擦判定〕vs open_conversation_id〔真正用于发送的会话 id〕）时，
+//   暂缓/恢复成功后各 best-effort 发一条群消息。范式镜像 create-chat 端点的建群欢迎卡（约 :3892
+//   dingtalkNotify.sendGroupMessage 调用 + try/catch 仅 logger.warn 不阻断，见其上文注释"发欢迎卡片
+//   （best-effort，失败不影响建群）"）：本函数把"查群/凭证读取/取 token/组卡片/发送"全部收进同一层
+//   try/catch——任何一步失败（含查询本身）都只 warn，绝不让 best-effort 侧的失败影响已经成功的
+//   暂缓/恢复响应。调用点=端点层、correctionTransition 成功返回之后（其 BEGIN..COMMIT 已提交完毕），
+//   不进事务、不进闸门。
+//   await 形态取舍（预筛 C2b+C3 LOW-5 定案）：保持 await 而非 fire-and-forget——dingtalk-notify 层有
+//   TIMEOUT_MS+AbortController 硬上界（最坏 token 10s+发送 10s，仅有群单命中，不阻塞事件循环），前端提交
+//   按钮已 disabled 无谎报窗口；改 fire-and-forget 反而让 e2e「恰一次」断言变竞态、warn 脱离请求上下文。
+async function notifyCorrectionSuspendResumeChat(id, kind, reasonOrNote) {
+    try {
+        const row = await dbGetAsync('SELECT dingtalk_open_conversation_id, location_info FROM correction_requests WHERE id = ?', [id]);
+        if (!row || !row.dingtalk_open_conversation_id) return;   // 无群不发（含查询异常时 row 为 falsy，同样静默跳过——外层 try 兜住）
+        const [appKey, appSecret, robotCode] = await Promise.all(
+            ['dingtalk_app_key', 'dingtalk_app_secret', 'dingtalk_robot_code'].map(readSystemConfig));
+        if (!appKey || !appSecret || !robotCode) {
+            logger.warn(`[correction-suspend-resume-notify] #${id} 钉钉配置未填写，跳过群消息`);
+            return;
+        }
+        const token = await dingtalkNotify.getAccessToken(appKey, appSecret);
+        const esc = dingtalkNotify.escapeMarkdown;
+        const locLine = `**修正方式**：${esc(String(row.location_info || '-'))}`;
+        let cardTitle, cardMd;
+        if (kind === 'suspend') {
+            const reasonRaw = String(reasonOrNote || '');
+            const reasonBrief = reasonRaw.length > 120 ? reasonRaw.slice(0, 120) + '…' : reasonRaw;   // 卡片内超长截断（实现自定阈值，方案未规定；全文以 history.reason 为准，卡片仅摘要）
+            cardTitle = `数据修正单 #${id} 已暂缓`;
+            cardMd = [`## ${cardTitle}`, ``, locLine, `**暂缓理由**：${esc(reasonBrief)}`, ``, `> 待业务恢复后请在平台点击「恢复」继续推进。`].join('\n');
+        } else {
+            cardTitle = `数据修正单 #${id} 已恢复`;
+            // 预筛 C2b+C3 NIT1：消除 reasonOrNote 死参——resume 分支此前从不读该形参。note 非空（trim 后）才加
+            //   「恢复说明」行，无 note 不加行；截断规则同暂缓理由（120 字阈值，实现自定，方案未规定）。
+            const noteRaw = String(reasonOrNote || '').trim();
+            const cardLines = [`## ${cardTitle}`, ``, locLine];
+            if (noteRaw) {
+                const noteBrief = noteRaw.length > 120 ? noteRaw.slice(0, 120) + '…' : noteRaw;
+                cardLines.push(`**恢复说明**：${esc(noteBrief)}`);
+            }
+            cardLines.push(``, `> 单据已回到「待回复预计」，请开发重新回复预计完成时间。`);   // 恢复提示需重报预计（§2.6）
+            cardMd = cardLines.join('\n');
+        }
+        const cardResp = await dingtalkNotify.sendGroupMessage(token, robotCode, row.dingtalk_open_conversation_id, 'sampleMarkdown', { title: cardTitle, text: cardMd });
+        if (cardResp && cardResp.code) logger.warn(`[correction-suspend-resume-notify] #${id} 群消息发送失败 code=${cardResp.code}`);
+    } catch (err) {
+        logger.warn(`[correction-suspend-resume-notify] #${id} 群消息发送异常（不影响暂缓/恢复流转）：${String(err && err.message || err)}`);
+    }
+}
+
+// ── POST /:id/suspend 暂缓（→SUSPENDED，暂缓与列表导出方案 v1.1 §2.3/§2.4；D9：开发被指派后发现业务未闭环时操作）──
+//   权限/流转合法性/落库全在 correctionTransition 内（case 'SUSPENDED'）；本端点只做 reason 必填前置校验
+//   （镜像既有 400 写法，如 REJECT_REASON_REQUIRED/REASON_REQUIRED）。expectedFromStatus 传 null：两个合法源态
+//   （ASSIGNED_PENDING_ESTIMATE/IN_PROGRESS）靠转移表拦，不锁死单一来源。
+router.post('/:id/suspend', authenticateToken, requireCorrectionSchemaReady, correctionIdGuard, async (req, res) => {
+    try {
+        const id = parseInt(req.params.id, 10);
+        const reason = req.body && req.body.reason;
+        if (typeof reason !== 'string' || !reason.trim()) {
+            return res.status(400).json({ error: '暂缓必须填写理由', code: 'SUSPEND_REASON_REQUIRED' });
+        }
+        const reasonTrimmed = reason.trim();
+        // 预筛 L1：长度上限（trim 后判长度），镜像 /admin-close closure_reason 500 上限的端点体验校验写法（:2940）。
+        if (reasonTrimmed.length > 500) {
+            return res.status(400).json({ error: '暂缓理由不超过 500 字', code: 'SUSPEND_REASON_TOO_LONG' });
+        }
+        const r = await correctionTransition(id, null, 'SUSPENDED', correctionActor(req), { reason: reasonTrimmed });
+        await notifyCorrectionSuspendResumeChat(id, 'suspend', reasonTrimmed);   // §2.6：transition 成功后 best-effort 群消息
+        return res.json({ ok: true, id, status: r.toStatus });
+    } catch (e) { return sendCorrectionTransitionError(res, e); }
+});
+
+// ── POST /:id/resume 恢复（SUSPENDED→ASSIGNED_PENDING_ESTIMATE，方案 §2.1.2/§2.4；D10/D11：开发本人/建单人/admin 可恢复）──
+//   expectedFromStatus 显式传 'SUSPENDED'（非暂缓单调用 → 409 CONCURRENT_STATE_CHANGE 或 400 INVALID_TRANSITION，§2.4b 反向隔离）。
+//   dev_estimated_at 清空 + expected_deadline 校验均在 correctionTransition 内（case 'ASSIGNED_PENDING_ESTIMATE' 的
+//   fromStatus==='SUSPENDED' 分支），本端点只透传 payload，不做业务判断（避免与闸门逻辑重复/漂移）。
+router.post('/:id/resume', authenticateToken, requireCorrectionSchemaReady, correctionIdGuard, async (req, res) => {
+    try {
+        const id = parseInt(req.params.id, 10);
+        const note = (req.body && typeof req.body.note === 'string') ? req.body.note : undefined;
+        // 预筛 L1：长度上限（trim 后判长度），镜像 /admin-close closure_reason 500 上限的端点体验校验写法（:2940）。
+        if (note !== undefined && note.trim().length > 500) {
+            return res.status(400).json({ error: '恢复说明不超过 500 字', code: 'RESUME_NOTE_TOO_LONG' });
+        }
+        const expectedDeadline = req.body ? req.body.expected_deadline : undefined;
+        const r = await correctionTransition(id, 'SUSPENDED', 'ASSIGNED_PENDING_ESTIMATE', correctionActor(req), { note, expected_deadline: expectedDeadline });
+        await notifyCorrectionSuspendResumeChat(id, 'resume', note);   // §2.6：transition 成功后 best-effort 群消息
+        return res.json({ ok: true, id, status: r.toStatus });
+    } catch (e) { return sendCorrectionTransitionError(res, e); }
+});
+
 // ── POST /:id/reopen-rework 归档单事后返工（Commit B，方案 §四）────────────────────────────────
 //   ARCHIVED 终态单事后发现没改对 → 新建一张「返工子单」挂原单下（原单状态零污染），自动指派回原开发。
 //   ⛔ 自管事务【绝不调 correctionTransition】（它无条件 BEGIN IMMEDIATE，嵌套会触发 sqlite 'cannot start a transaction within a transaction'）；
@@ -1810,7 +1969,7 @@ router.post('/:id/reopen-rework', authenticateToken, requireCorrectionSchemaRead
 //   process_type/expected_deadline），业务方行与 error_proof_note 归主单（对齐附件 ERROR_PROOF_ON_MASTER_ONLY）。
 //   ⚠️ 快照语义：跨系统子单建单时复制的主单兼容列（requester_name/phone/dept 等）不随主单编辑联动——
 //   子表（主单 requesters）是完成通知真相源，兼容列仅供列表显示，保持建单时快照（与既有 createLinkedChild 语义一致）。
-const CORRECTION_EDITABLE_STATUSES = ['PENDING_ASSIGN', 'ASSIGNED_PENDING_ESTIMATE', 'IN_PROGRESS', 'FIXED', 'REFIXED'];
+const CORRECTION_EDITABLE_STATUSES = ['PENDING_ASSIGN', 'ASSIGNED_PENDING_ESTIMATE', 'IN_PROGRESS', 'SUSPENDED', 'FIXED', 'REFIXED'];
 router.put('/:id', authenticateToken, requireCorrectionSchemaReady, correctionIdGuard, async (req, res) => {
     let transactionActive = false;
     try {
@@ -2125,7 +2284,7 @@ router.get('/', authenticateToken, requireCorrectionSchemaReady, async (req, res
         const rows = await dbAllAsync(
             `SELECT id, source_system, source_system_other, location_info, correction_type, correction_count, status,
                     requester_name, requester_dept, requester_phone, oa_number, process_type, assigned_to, assigned_to_name,
-                    expected_deadline, dev_estimated_at, created_at, fixed_at, refixed_at, archived_at,
+                    expected_deadline, dev_estimated_at, created_at, fixed_at, refixed_at, archived_at, suspended_at,
                     submission_count, created_by, created_by_name, dingtalk_chat_id,
                     relay_notified_at, relay_notify_status, notify_status, requester_notify_status, completion_notify_status, closure_type,
                     correction_group_id,
@@ -2715,8 +2874,8 @@ router.post('/:id/attachments', authenticateToken, requireCorrectionSchemaReady,
             }
             // 权限限 admin/建单人（建单错误证明是建单侧职责，非开发侧）
             if (!isAdmin && !isCreator) { correctionCleanupPending(req, id); return res.status(403).json({ error: '无权补充错误证明（仅建单人 / admin）', code: 'NOT_AUTHORIZED_FOR_ATTACHMENT' }); }
-            // 早期态可补传：PENDING_ASSIGN/ASSIGNED_PENDING_ESTIMATE/IN_PROGRESS/FIXED/REFIXED（排除 VOIDED/REJECTED/ARCHIVED）
-            const ERROR_PROOF_STATES = ['PENDING_ASSIGN', 'ASSIGNED_PENDING_ESTIMATE', 'IN_PROGRESS', 'FIXED', 'REFIXED'];
+            // 可补传态：PENDING_ASSIGN/ASSIGNED_PENDING_ESTIMATE/IN_PROGRESS/SUSPENDED/FIXED/REFIXED（排除 VOIDED/REJECTED/ARCHIVED；SUSPENDED 系暂缓方案 v1.1 §2.5.2）
+            const ERROR_PROOF_STATES = ['PENDING_ASSIGN', 'ASSIGNED_PENDING_ESTIMATE', 'IN_PROGRESS', 'SUSPENDED', 'FIXED', 'REFIXED'];
             if (!ERROR_PROOF_STATES.includes(row.status)) { correctionCleanupPending(req, id); return res.status(409).json({ error: `当前状态「${row.status}」不可补充错误证明`, code: 'INVALID_STATE_FOR_ATTACHMENT' }); }
             if (files.length === 0) { correctionCleanupPending(req, id); return res.status(400).json({ error: '未收到上传文件（field 名应为 files）', code: 'NO_FILE' }); }
             persisted = await correctionPersistAttachments(id, files, 'error_proof', actor);
@@ -2851,7 +3010,7 @@ router.post('/:id/archive', authenticateToken, requireCorrectionSchemaReady, cor
 
 // ── POST /:id/admin-close 行政闭环（I2 §3，仅 admin，未完成态记账式收口 → ARCHIVED + closure_type='admin_closure'）──
 //   双层校验：endpoint 体验校验（10-500）+ correctionTransition 内对 admin_closure 最终强校验 + 同事务落库（M-8）。
-//   expectedFromStatus=null：多源态（PENDING_ASSIGN/ASSIGNED_PENDING_ESTIMATE/IN_PROGRESS），靠流转表 + closure_type 分支二次约束。
+//   expectedFromStatus=null：多源态（PENDING_ASSIGN/ASSIGNED_PENDING_ESTIMATE/IN_PROGRESS/SUSPENDED·暂缓方案 v1.1 §2.1.1），靠流转表 + closure_type 分支二次约束。
 router.post('/:id/admin-close', authenticateToken, requireCorrectionSchemaReady, correctionIdGuard, requireAdmin, async (req, res) => {
     try {
         const id = parseInt(req.params.id, 10);

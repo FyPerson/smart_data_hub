@@ -1,6 +1,6 @@
 ﻿{
   "name": "wbs-tracker-server",
-  "version": "1.156.4",
+  "version": "1.157.0",
   "description": "Simple WBS Tracker Server",
   "main": "server.js",
   "scripts": {

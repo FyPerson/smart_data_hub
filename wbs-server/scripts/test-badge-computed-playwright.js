@@ -74,6 +74,7 @@ const PAGES = [
         badgeSelector: '.u-corr-table tbody .u-status-badge',
         classToTier: {
             's-PENDING_ASSIGN': 'wait', 's-ASSIGNED_PENDING_ESTIMATE': 'intake', 's-IN_PROGRESS': 'active',
+            's-SUSPENDED': 'hold',   // 暂缓方案 v1.1（与 verify-badge-alias PAGE_ALIAS_SPECS 同源，B13 互校）
             's-FIXED': 'done', 's-REFIXED': 'done', 's-ARCHIVED': 'archived',
             's-REJECTED': 'rejected', 's-VOIDED': 'voided',
         },

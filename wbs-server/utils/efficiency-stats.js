@@ -191,7 +191,9 @@ const EFFICIENCY_MODULES = {
 };
 
 const CORRECTION_DONE_STATUS = 'ARCHIVED';
-const CORRECTION_ABORTED_STATUSES = ['REJECTED', 'VOIDED'];
+const CORRECTION_ABORTED_STATUSES = ['REJECTED', 'VOIDED', 'SUSPENDED'];   // 暂缓与列表导出方案 v1.1 批次1 预筛 M1·对齐 issue/sys 同族已暂缓=aborted 口径。
+//   ⚠️ SUSPENDED 是可恢复中间态（≠终态）——本模块为 API 端点实时聚合（每次请求按当前 status 现算、无历史快照），
+//   暂缓期间不进在途统计、恢复回 ASSIGNED_PENDING_ESTIMATE 后自动脱离 aborted 恢复正常统计（codex 442 L3 口径确认）。
 const ISSUE_DONE_STATUS = '已关闭';
 const ISSUE_ABORTED_STATUSES = ['已拒绝', '已暂缓'];
 const SYS_ABORTED_STATUSES = ['已暂缓', '已拒绝', '已作废'];

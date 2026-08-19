@@ -304,6 +304,64 @@ async function runDbIntegration() {
     assertDeepEqual(corrSummary.counts, { done: 2, inflight: 1, aborted: 1, total: 4 }, 'DB/修正 计数 = {2,1,1,4}');
     assertAggregateAdditivity(corrSummary, 'DB/修正 聚合');
 
+    // ---- 数据修正 9 态全集口径归组（暂缓与列表导出方案 v1.1 批次1 预筛 M1）----
+    //   SUSPENDED 对齐 issue/sys 同族「已暂缓=aborted」口径；CORRECTION_STATUSES 单一真相源直接
+    //   require routes/corrections.js._internals 拿（不手写枚举复刻，防与本文件常量脱节漂移，
+    //   范式对齐 verify-correction-schema.js:29-30）。逐单走真实 EFFICIENCY_LOADERS.correction，
+    //   非直接复刻 statusGroup 判定表达式。
+    {
+        const ceNoop = () => {};
+        const ceAsyncNoop = async () => ({});
+        const ceDb = new sqlite3.Database(':memory:');
+        const ceDeps = {
+            logger: { info: ceNoop, warn: ceNoop, error: ceNoop, debug: ceNoop },
+            db: ceDb,
+            dbRunAsync: (q, p = []) => new Promise((res, rej) => ceDb.run(q, p, function (e) { (e ? rej(e) : res(this)); })),
+            dbGetAsync: (q, p = []) => new Promise((res, rej) => ceDb.get(q, p, (e, r) => (e ? rej(e) : res(r)))),
+            dbAllAsync: (q, p = []) => new Promise((res, rej) => ceDb.all(q, p, (e, rows) => (e ? rej(e) : res(rows)))),
+            authenticateToken: (req, res, next) => next(), requireAdmin: (req, res, next) => next(), requirePublisherOrAdmin: (req, res, next) => next(),
+            sendIssueDingtalkRaw: ceAsyncNoop, UPLOAD_DIR: path.join(require('os').tmpdir(), 'stats-eff-verify-' + process.pid),
+            readSystemConfig: ceAsyncNoop, COLLAB_CHAT_ADMIN_ID: 3, callDingtalkWithTokenRetry: ceAsyncNoop,
+            normalizeAttachmentExt: (x) => x, safeDeleteFileSync: ceNoop, maskPhone: (x) => x,
+        };
+        const CORRECTION_STATUSES = require('../routes/corrections')(ceDeps)._internals.CORRECTION_STATUSES;
+        ceDb.close();
+
+        // 9 态各插一单（id 900+i，无需 history——statusGroup 只由 status 字段决定，与三段边界计算解耦）
+        const GROUP_ID_BASE = 900;
+        for (let i = 0; i < CORRECTION_STATUSES.length; i++) {
+            await dbRunAsync(
+                `INSERT INTO correction_requests (id, location_info, created_at, status, correction_type) VALUES (?, ?, '2026-01-01 00:00:00', ?, 'single')`,
+                [GROUP_ID_BASE + i, `9态#${i}`, CORRECTION_STATUSES[i]]
+            );
+        }
+        const groupRecords = await eff.EFFICIENCY_LOADERS.correction(dbAllAsync, null, null, corrNow);
+        const groupByStatus = Object.fromEntries(
+            groupRecords.filter((r) => r.id >= GROUP_ID_BASE).map((r) => [r.status, r.statusGroup])
+        );
+        // FIXED/REFIXED 既不在 CORRECTION_ABORTED_STATUSES 也非 CORRECTION_DONE_STATUS('ARCHIVED')，归 inflight——
+        //   既有口径不变（完成态但未归档仍算"在途"，本批 M1 只动 SUSPENDED，不改这条既有语义）。
+        const EXPECTED_GROUP = {
+            PENDING_ASSIGN: 'inflight', ASSIGNED_PENDING_ESTIMATE: 'inflight', IN_PROGRESS: 'inflight',
+            SUSPENDED: 'aborted', REJECTED: 'aborted', VOIDED: 'aborted',
+            FIXED: 'inflight', REFIXED: 'inflight',
+            ARCHIVED: 'done',
+        };
+        for (const st of CORRECTION_STATUSES) {
+            check(groupByStatus[st] === EXPECTED_GROUP[st],
+                `DB/修正 9态归组：${st} → ${EXPECTED_GROUP[st]}（预筛 M1）`,
+                `实得 ${groupByStatus[st]}`);
+        }
+        const uncovered = CORRECTION_STATUSES.filter((st) => !Object.prototype.hasOwnProperty.call(EXPECTED_GROUP, st));
+        check(uncovered.length === 0,
+            'DB/修正 9态全集覆盖：CORRECTION_STATUSES 每个成员都被显式归组（防未来第 10 态再漏，预筛 M1）',
+            `未覆盖：${uncovered.join(',')}`);
+        const stale = Object.keys(EXPECTED_GROUP).filter((st) => !CORRECTION_STATUSES.includes(st));
+        check(stale.length === 0,
+            'DB/修正 9态全集覆盖（反向）：EXPECTED_GROUP 无多余/过期状态键（预筛 M1）',
+            `多余：${stale.join(',')}`);
+    }
+
     // ---- 数据开发 ----
     await dbRunAsync(`INSERT INTO issues (id, title, created_at, status, type) VALUES (1, '需求单A', '2026-01-05 00:00:00', '已关闭', '数据质量')`);
     const issueHistory = [

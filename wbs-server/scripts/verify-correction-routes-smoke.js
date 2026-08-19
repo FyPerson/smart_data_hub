@@ -93,14 +93,17 @@ async function expectReject(fn, code, label) {
     '③ T4 真实流转表导出正确（FIXED→REFIXED / ARCHIVED→仅VOIDED）');
 
   // ④ router stack 断言（codex rec：18 端点精确注册 + 路径/method 正确，验证 app.use 挂载等价）
+  //   暂缓与列表导出方案 v1.1（2026-08-19）：新增 /:id/suspend + /:id/resume 两端点，24→26（数字为真实新增而非断言放宽）。
   const reg = mod.router.stack.filter(l => l.route)
     .map(l => l.route.path + '[' + Object.keys(l.route.methods).filter(m => l.route.methods[m]).join(',') + ']');
-  ok(reg.length === 24, '④ router 注册 24 端点（实际 ' + reg.length + '）（含归档单返工 reopen-rework + notify-creator + L-R reassign + L4 link-new + E3 编辑 PUT/附件删除 DELETE）');
+  ok(reg.length === 26, '④ router 注册 26 端点（实际 ' + reg.length + '）（含归档单返工 reopen-rework + notify-creator + L-R reassign + L4 link-new + E3 编辑 PUT/附件删除 DELETE + 暂缓方案 v1.1 suspend/resume）');
   ok(reg.includes('/[post]') && reg.includes('/[get]'), '④ 建单 POST / + 列表 GET / 注册');
   ok(reg.includes('/:id/assign[post]') && reg.includes('/:id/create-chat[post]') && reg.includes('/:id/notify-read-status[get]'),
     '④ 关键端点（assign/create-chat/notify-read-status）路径+method 精确');
   ok(reg.includes('/:id/notify-creator[post]'), '④ 细优② notify-creator 端点注册（POST）');
   ok(reg.includes('/:id/reassign[post]'), '④ L-R 改派 reassign 端点注册（POST）');
+  ok(reg.includes('/:id/suspend[post]'), '④ 暂缓方案 v1.1 suspend 端点注册（POST）');
+  ok(reg.includes('/:id/resume[post]'), '④ 暂缓方案 v1.1 resume 端点注册（POST）');
   ok(reg.includes('/:id/link-new[post]'), '④ L4 追加关联单 link-new 端点注册（POST）');
   ok(reg.includes('/:id/reopen-rework[post]'), '④ 归档单返工 reopen-rework 端点注册（POST，Commit B）');
   ok(reg.includes('/:id[put]'), '④ E3 建单人编辑端点注册（PUT /:id）');

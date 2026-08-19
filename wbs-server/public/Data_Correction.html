@@ -23,10 +23,14 @@
            六值齐设、一律 var() 引用（与共享层 .sem-* 同款纪律，守卫逐条断言）。
            映射依据：S0 双矩阵实测「STATUS_LABELS 语义 + 原 direct 色最近层」双重验证。
            语义变化点（方案 §2.4 已列）：FIXED 琥珀→done、REFIXED 青→done、ARCHIVED 绿→archived 虚线。
+           +SUSPENDED→hold（暂缓与列表导出方案 v1.1，2026-08-19，对齐系统迭代已暂缓同 tier）——现共 9 态。
            statusClass() 未命中时输出 s-UNKNOWN——**有意不为其写规则**，让它落 base 的 wait fallback。 */
         .u-status-badge.s-PENDING_ASSIGN { --sb-bg: var(--sem-wait-bg); --sb-fg: var(--sem-wait-fg); --sb-bd: var(--sem-wait-bd); --sb-bds: var(--sem-wait-bds); --sb-dot: var(--sem-wait-dot); --sb-deco: var(--sem-wait-deco); }
         .u-status-badge.s-ASSIGNED_PENDING_ESTIMATE { --sb-bg: var(--sem-intake-bg); --sb-fg: var(--sem-intake-fg); --sb-bd: var(--sem-intake-bd); --sb-bds: var(--sem-intake-bds); --sb-dot: var(--sem-intake-dot); --sb-deco: var(--sem-intake-deco); }
         .u-status-badge.s-IN_PROGRESS { --sb-bg: var(--sem-active-bg); --sb-fg: var(--sem-active-fg); --sb-bd: var(--sem-active-bd); --sb-bds: var(--sem-active-bds); --sb-dot: var(--sem-active-dot); --sb-deco: var(--sem-active-deco); }
+        /* 暂缓与列表导出方案 v1.1 §2.5.1：色系对齐系统迭代 Sys_Iteration.html .si-s-hold（同走 --sem-hold-* token，非灰紫另造字面量——
+           项目惯例是复用既有语义色板不新增，见本块开头"六值一律 var() 引用"纪律）。 */
+        .u-status-badge.s-SUSPENDED { --sb-bg: var(--sem-hold-bg); --sb-fg: var(--sem-hold-fg); --sb-bd: var(--sem-hold-bd); --sb-bds: var(--sem-hold-bds); --sb-dot: var(--sem-hold-dot); --sb-deco: var(--sem-hold-deco); }
         .u-status-badge.s-FIXED { --sb-bg: var(--sem-done-bg); --sb-fg: var(--sem-done-fg); --sb-bd: var(--sem-done-bd); --sb-bds: var(--sem-done-bds); --sb-dot: var(--sem-done-dot); --sb-deco: var(--sem-done-deco); }
         .u-status-badge.s-REFIXED { --sb-bg: var(--sem-done-bg); --sb-fg: var(--sem-done-fg); --sb-bd: var(--sem-done-bd); --sb-bds: var(--sem-done-bds); --sb-dot: var(--sem-done-dot); --sb-deco: var(--sem-done-deco); }
         .u-status-badge.s-ARCHIVED { --sb-bg: var(--sem-archived-bg); --sb-fg: var(--sem-archived-fg); --sb-bd: var(--sem-archived-bd); --sb-bds: var(--sem-archived-bds); --sb-dot: var(--sem-archived-dot); --sb-deco: var(--sem-archived-deco); }
@@ -36,6 +40,8 @@
         /* 超期/积压高亮标记 */
         .flag-overdue { display: inline-block; margin-left: 6px; font-size: 11px; color: #dc2626; font-weight: 600; }
         .flag-backlog { display: inline-block; margin-left: 6px; font-size: 11px; color: #d97706; font-weight: 600; }
+        /* 「已暂缓 N 天」小字（暂缓与列表导出方案 v1.1 §2.5.1 [P-3]）：引 --sem-hold-fg token（components.css :root），与 s-SUSPENDED 徽章同源跟随 */
+        .flag-suspended { display: inline-block; margin-left: 6px; font-size: 11px; color: var(--sem-hold-fg, #854d0e); font-weight: 600; }
 
         /* 主子单分组标记（P2 2026-06-26 / v2 2026-06-27 层级树重构）：ID 列下挂角色徽章 */
         .corr-group-badge { display: inline-block; margin-top: 3px; margin-left: 5px; padding: 1px 5px; border-radius: 4px; font-size: 10px; font-weight: 600; line-height: 1.6; white-space: nowrap; }   /* margin-left：序号 #id 与组徽章之间留一点点横向空隙（原紧贴，视觉不佳） */
@@ -158,6 +164,14 @@
             max-width: 92vw;
             word-break: break-all;
         }
+
+        /* S5（暂缓与列表导出方案 v1.1 §3.1.2）：导出按钮——次级样式（白底描边+下载图标，hover amber），
+           与 amber 实心主按钮（.u-btn-primary）形成主次操作搭配。口径对齐 Export_DateFilter_Demo.html
+           （只读参照，逐字节复刻其 .u-btn-export 规则，去掉 demo 专属的 display:none/toggle 开关）。
+           .u-daterange* 系列样式由 u-export.js 的 attachDateRangeFilter 运行时自注入，本页不重复声明。 */
+        .u-btn-export { display: inline-flex; align-items: center; gap: 6px; padding: 7px 14px; background: #fff; color: #374151; border: 1px solid #d1d5db; border-radius: 6px; font-size: 13px; cursor: pointer; transition: border-color .2s, color .2s; white-space: nowrap; }
+        .u-btn-export:hover { border-color: #d97706; color: #d97706; }
+        .u-btn-export:disabled { opacity: .6; cursor: default; }
     </style>
 </head>
 
@@ -237,6 +251,11 @@
                 <div class="u-stat-icon" style="background:#dbeafe;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#1d4ed8" stroke-width="2"><path d="M12 2v4"/><path d="M12 18v4"/><path d="M4.93 4.93l2.83 2.83"/><path d="M16.24 16.24l2.83 2.83"/></svg></div>
                 <div class="u-stat-info"><div class="u-stat-num" id="statProgress">0</div><div class="u-stat-label">修正中</div></div>
             </div>
+            <!-- 暂缓与列表导出方案 v1.1 §2.5.1 [P-2]：第 6 张统计卡「已暂缓」，独立卡=天然待督办清单 -->
+            <div class="u-stat-card" onclick="filterByGroup('suspended')" data-group="suspended">
+                <div class="u-stat-icon" style="background:#fefce8;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#854d0e" stroke-width="2"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg></div>
+                <div class="u-stat-info"><div class="u-stat-num" id="statSuspended">0</div><div class="u-stat-label">已暂缓</div></div>
+            </div>
             <div class="u-stat-card" onclick="filterByGroup('fixed')" data-group="fixed">
                 <div class="u-stat-icon" style="background:#fef3c7;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#92400e" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg></div>
                 <div class="u-stat-info"><div class="u-stat-num" id="statFixed">0</div><div class="u-stat-label">已完成待归档</div></div>
@@ -268,8 +287,13 @@
             <label id="includeVoidedWrap" style="font-size:12px; color:#6b7280; display:none; align-items:center; gap:5px; cursor:pointer;">
                 <input type="checkbox" id="filterIncludeVoided" onchange="loadList()"> 含已作废
             </label>
+            <!-- S5 D13：创建日期筛选胶囊（插入位置=筛选控件群末尾、搜索框之前，同 Export_DateFilter_Demo.html
+                 口径）；空 div，UnifyHelpers.attachDateRangeFilter 运行时填充结构+样式。 -->
+            <div class="u-daterange" id="corrDateRange"></div>
             <input type="text" id="filterSearch" placeholder="搜索修正方式/业务方/OA/流程类型/创建人..." onkeyup="debounceSearch()">
             <div style="flex:1;"></div>
+            <!-- S5（§3.1.2）：导出按钮，新建修正单主按钮左侧，能看列表就能导（无角色门，不受 applyRoleVisibility 控制）。 -->
+            <button class="u-btn-export" id="btnExportCorr"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> 导出 Excel</button>
             <button class="u-btn-primary" id="btnNewCorrection" onclick="openCreateModal()" style="display:none;">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
                 新建修正单
@@ -294,6 +318,8 @@
                         <th style="width:100px;" class="u-sortable" data-sort-by="assigned_to_name">开发<span class="u-sort-icon">⇅</span></th>
                         <th style="width:90px;" class="u-sortable" data-sort-by="created_by_name">创建人<span class="u-sort-icon">⇅</span></th>
                         <th style="width:64px;" class="u-sortable" data-sort-by="submission_count">提交次数<span class="u-sort-icon">⇅</span></th>
+                        <!-- S5（§3.4）：完成时间列插在创建时间前，取 fallbackVal(refixed_at, fixed_at)，空显示空白 -->
+                        <th style="width:160px;" class="u-sortable" data-sort-by="completion_time">完成时间<span class="u-sort-icon">⇅</span></th>
                         <th style="width:160px;" class="u-sortable" data-sort-by="created_at">创建时间<span class="u-sort-icon">⇅</span></th>
                     </tr>
                 </thead>
@@ -593,6 +619,37 @@
         </div>
     </div>
 
+    <!-- 暂缓弹窗（暂缓与列表导出方案 v1.1 §2.3/§2.4，D9：开发被指派后发现业务未闭环时操作）-->
+    <div class="u-modal-overlay" id="suspendModal">
+        <div class="u-modal-box" style="max-width:440px;">
+            <div class="u-modal-header"><h2>暂缓修正单</h2><button class="u-drawer-close" onclick="closeModal('suspendModal')">&times;</button></div>
+            <div class="u-modal-body">
+                <input type="hidden" id="suspendCorrId">
+                <div class="u-form-group"><label>暂缓理由 <span class="u-req">*</span></label><textarea id="formSuspendReason" rows="3" maxlength="500" placeholder="如：业务源单据尚未闭环，暂停等待客户确认"></textarea></div>
+            </div>
+            <div class="u-modal-footer"><button class="u-btn-secondary" onclick="closeModal('suspendModal')">取消</button><button class="u-btn-primary" id="btnSubmitSuspend" onclick="submitSuspend()">确认暂缓</button></div>
+        </div>
+    </div>
+
+    <!-- 恢复弹窗（暂缓与列表导出方案 v1.1 §2.1.2/§2.4：恢复固定回「待回复预计」，dev_estimated_at 清空迫使重报预计）-->
+    <div class="u-modal-overlay" id="resumeModal">
+        <div class="u-modal-box" style="max-width:440px;">
+            <div class="u-modal-header"><h2>恢复修正单</h2><button class="u-drawer-close" onclick="closeModal('resumeModal')">&times;</button></div>
+            <div class="u-modal-body">
+                <input type="hidden" id="resumeCorrId">
+                <!-- 预筛 C3c M1：双口径措辞澄清（方案 §3.3.2）——「开发预计完成时间」(dev_estimated_at) 与
+                     「期望完成时限」(expected_deadline，业务口径) 是两个不同指标，并存不合并，避免同一弹窗内
+                     两处文案让用户误读成同一件事（说明区讲的是会被清空的开发预计，下方输入项是选填的业务期望）。 -->
+                <div style="font-size:12px; color:#6b7280; background:#f8fafc; border:1px solid #e2e8f0; border-radius:6px; padding:8px 10px; margin-bottom:10px;">
+                    恢复后单据回到「待回复预计」，恢复后开发预计完成时间将被清空，需开发重新回复。
+                </div>
+                <div class="u-form-group"><label>期望完成时限（业务口径，选填）</label><input type="datetime-local" id="formResumeExpectedDeadline"><div class="u-hint">留空沿用原时限</div></div>
+                <div class="u-form-group"><label>恢复说明（选填）</label><textarea id="formResumeNote" rows="3" maxlength="500" placeholder="如：客户已确认，可继续推进"></textarea></div>
+            </div>
+            <div class="u-modal-footer"><button class="u-btn-secondary" onclick="closeModal('resumeModal')">取消</button><button class="u-btn-primary" id="btnSubmitResume" onclick="submitResume()">确认恢复</button></div>
+        </div>
+    </div>
+
     <!-- 拒绝弹窗 -->
     <div class="u-modal-overlay" id="rejectModal">
         <div class="u-modal-box" style="max-width:440px;">
@@ -646,6 +703,11 @@
     <!-- S4（前端统一 贴图粘贴扩展方案 20260801_v0.1）：Ctrl+V 贴图共享层接入。文件本体未改，沿用
          S3 抽取时的缓存串；改共享层本体时须同步 bump 这里 + 所有引用页。 -->
     <script src="assets/js/u-paste.js?v=v1.134.0_upaste2"></script>
+    <!-- S5（暂缓与列表导出方案 v1.1 §3.1）：列表导出（Excel）+ 创建日期范围筛选共享层接入。
+         xlsx vendor 先于 u-export.js 加载（attachExport 运行时依赖全局 XLSX）；两者缓存串统一
+         v1.157.0_uexport1，与 u-export.js 内 KIT_VERSION='uexport1' 对拍（verify-export-columns 断言 4）。 -->
+    <script src="assets/vendor/xlsx.mini.min.js?v=v1.157.0_uexport1"></script>
+    <script src="assets/js/u-export.js?v=v1.157.0_uexport1"></script>
     <!-- U2：图片附件 lightbox（复刻数据协作范式；点 overlay/×/ESC 关，点图本身不关） -->
     <div id="imgLightbox" class="img-lightbox" onclick="closeLightbox(event)">
         <span class="img-lightbox-close" onclick="closeLightbox(event)" title="关闭">×</span>
@@ -671,7 +733,7 @@
         // 不额外引入新的 UI 报错通路，改动面收在"删常量改引用"这一件事上）。
         const CORRECTION_REQUESTER_DEPTS = window.PLATFORM_REQUESTER_DEPTS || [];
         const STATUS_LABELS = {
-            PENDING_ASSIGN: '待指派', ASSIGNED_PENDING_ESTIMATE: '待回复预计', IN_PROGRESS: '修正中',
+            PENDING_ASSIGN: '待指派', ASSIGNED_PENDING_ESTIMATE: '待回复预计', IN_PROGRESS: '修正中', SUSPENDED: '已暂缓',
             FIXED: '已完成', REFIXED: '已重修', ARCHIVED: '已归档', REJECTED: '已拒绝', VOIDED: '已作废'
         };
         const CHAT_ALLOWED_STATUSES = ['ASSIGNED_PENDING_ESTIMATE', 'IN_PROGRESS', 'FIXED', 'REFIXED'];
@@ -683,11 +745,18 @@
         let searchTimer = null;
         let currentDetail = null;   // M-3：当前详情 request 缓存（归档/拉群读它而非滞后的列表缓存）
         let currentReworkChain = null;   // 归档单返工：当前详情的返工链缓存（供重开弹框算下次返工序号/≥5 强提示）
+        // N1（预筛 C6b）：变量名故意不用 corrDateRange——同页有 <div id="corrDateRange">，若变量与容器 id
+        //   撞名，元素的隐式 window 具名属性（window.corrDateRange 指向该 DOM 节点）与本变量会造成混淆
+        //   （尤其 devtools/Playwright 里裸标识符查找的语义歧义，见 playwright_suite_gotchas 记录的
+        //   window/let 类踩坑）；改名彻底避免撞名，不依赖"let 在脚本作用域会遮蔽 window 属性"这条
+        //   隐式规则本身是否总是可靠。
+        let corrDateRangeFilter = { start: '', end: '' };   // S5 D13：创建日期范围筛选状态，attachDateRangeFilter onChange 写入
 
         // ================= 初始化 =================
         document.addEventListener('DOMContentLoaded', async () => {
             if (typeof checkAuth === 'function') { const ok = await checkAuth(); if (!ok) return; }
             corrInitUPaste();   // S4：注册本页贴图目标区（不依赖登录后数据，越早注册越好）
+            corrInitExport();   // S5：导出按钮+创建日期筛选接线（不依赖登录后数据，越早注册越好）
             applyRoleVisibility();
             fillSystemFilter();
             await loadUsers();
@@ -726,6 +795,20 @@
                 if (!res || !res.ok) return;
                 const data = await res.json();
                 allItems = (data && data.items) || [];
+                // S5（§3.4）：完成时间列——列表渲染/排序专用虚拟字段，页面本地计算一次（fallbackVal 语义：
+                //   refixed_at 优先，空/纯空白回退 fixed_at，两者皆空得空串）。⚠️ 仅供本页列表列渲染+
+                //   CORR_SORT_FIELD_TYPES 排序用；导出 columns 配置的「完成时间」列**不读这个字段**，
+                //   自行从 refixed_at/fixed_at 原始字段现算（deps 必须 ⊆ 数据源真实字段，虚拟字段不算数）。
+                // L2（预筛 C6b）：二次 fallbackVal 归一——若 fixed_at 本身也是纯空白脏值，第一次
+                //   fallbackVal(refixed_at, fixed_at) 只保证 refixed_at 非空才直接返回它，不会对回退
+                //   目标 fixed_at 二次判空，可能把 '   ' 原样留在 completion_time 上；渲染处
+                //   `it.completion_time ? ... : ''` 是原生 truthy 判断，纯空白字符串在 JS 里是真值，
+                //   会被当"有完成时间"误传进 formatFullTime。这里补一次 fallbackVal(x,'') 把纯空白
+                //   归一成真空串，源头统一而非在渲染处补丁。
+                allItems.forEach(it => {
+                    const rawCompletion = UnifyHelpers.fallbackVal(it.refixed_at, it.fixed_at);
+                    it.completion_time = UnifyHelpers.fallbackVal(rawCompletion, '');
+                });
                 renderTable();
                 updateStats();
             } catch (e) { console.error('加载修正单列表失败', e); }
@@ -751,6 +834,7 @@
         function statusGroup(s) {
             if (s === 'PENDING_ASSIGN' || s === 'ASSIGNED_PENDING_ESTIMATE') return 'pending';
             if (s === 'IN_PROGRESS') return 'progress';
+            if (s === 'SUSPENDED') return 'suspended';   // 暂缓与列表导出方案 v1.1 §2.5.1 [P-2]：独立分组，不落 'other'（暂缓单最怕被遗忘）
             if (s === 'FIXED' || s === 'REFIXED') return 'fixed';
             if (s === 'ARCHIVED') return 'archived';
             return 'other'; // REJECTED / VOIDED
@@ -777,7 +861,16 @@
             const base = parseLocalTime(item.refixed_at || item.fixed_at);
             return base && (Date.now() - base.getTime()) > days * 86400000;
         }
-        // 状态 class 白名单归一（L-2）：非 8 态 → UNKNOWN，防脏数据 DOM 注入
+        // 「已暂缓 N 天」小字（暂缓与列表导出方案 v1.1 §2.5.1 [P-3]）：仅 SUSPENDED 态显示，
+        //   N=floor((now-suspended_at)/86400000)；suspended_at 空/非法则不显示。样式对齐 isOverdue/isUnarchivedBacklog 同款小字。
+        function suspendedFlag(item) {
+            if (item.status !== 'SUSPENDED' || !item.suspended_at) return '';
+            const t = parseLocalTime(item.suspended_at);
+            if (!t) return '';
+            const days = Math.max(0, Math.floor((Date.now() - t.getTime()) / 86400000));   // 下界 0：客户端时钟落后/未来时间脏值不渲染负天数
+            return `<span class="flag-suspended">已暂缓 ${days} 天</span>`;
+        }
+        // 状态 class 白名单归一（L-2）：非 9 态（含 SUSPENDED·暂缓方案 v1.1）→ UNKNOWN，防脏数据 DOM 注入
         // 〔状态徽章统一 S4-fix3·B5〕守门从「取值真值」改「键存在性」。
         //   原写法 `STATUS_LABELS[s] ? s : 'UNKNOWN'` 读的是**对象取值**，会走原型链：
         //   `statusClass('constructor')` / `'toString'` / `'__proto__'` 拿到的是继承来的函数（真值），
@@ -787,6 +880,18 @@
         //   ⚠️ 这条推翻了 S2 时「受控页 gate 不动」的口径：当时判断基于"本页已有 gate 守门"，
         //   而复审指出该 gate 的守门谓词本身有漏（真值 ≠ 键存在），属有据推翻，非无故扩范围。
         function statusClass(s) { return Object.prototype.hasOwnProperty.call(STATUS_LABELS, s) ? s : 'UNKNOWN'; }
+        // N6（预筛 C6b）：本页有两套日期解析器，分工刻意不同、不合并——
+        //   parseLocalTime（本函数，宽松版）：供页面既有"旗标"类轻量提示用（isOverdue/isBacklog/
+        //   isUnarchivedBacklog/suspendedFlag，见下方各函数），**不做日历合法性校验**——正则抓到数字
+        //   就直接扔进 `new Date(y,m-1,d,...)`，越界分量（如 13 月）会被 Date 构造器"自动进位"成一个
+        //   仍然可用的时间点而非报错；正则不匹配还兜底 `new Date(s)` 通用解析（接受 ISO/时区后缀等
+        //   任意 Date 能认的格式）。这组场景要的是"能大致排个序/判个新旧"，脏值宁可给一个凑合的时间
+        //   也不要整段旗标逻辑因为一条脏数据而崩掉。
+        //   corrParseDatetimeLocal（S5 新增，严格版，见 :2740）：供导出 overdueRule 判定用——方案 §3.3
+        //   日期纪律要求脏值必须被识别为「日期无效」而非静默吞成一个凑合的时间点，故必须先过
+        //   isValidDatePrefix 的日历合法性校验（月/日范围、闰年），校验不过直接返回 null 让调用方走
+        //   「日期无效」分支，不经通用 `new Date()` 兜底（那个兜底口径对判定语义而言等于悄悄放行脏值）。
+        //   两者语义目标不同（"凑合可用" vs "脏值必须可辨识并拒判"），不能合并成一个共用实现。
         function parseLocalTime(s) {
             if (!s) return null;
             const m = String(s).trim().match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/);
@@ -810,6 +915,15 @@
                     // 2026-07-23 用户拍板：搜索字段补创建人（此前只有业务字段，输入创建人命中 0 条造成困惑）
                     const hay = [it.location_info, it.requester_name, it.oa_number, formatOaNo(it.oa_number), it.process_type, it.created_by_name].map(x => (x || '').toLowerCase()).join(' ');
                     if (!hay.includes(kw)) return false;
+                }
+                // S5 D13：创建日期范围筛选（行级过滤，与既有筛选器同层 AND）——锚 created_at，先验前 10 位
+                //   合法日期前缀（isValidDatePrefix，同 §3.3 日期纪律），无效/空值按不匹配处理即被筛出；
+                //   通过后取前 10 位与 corrDateRangeFilter 字典序闭区间比较，单端为空该端不限。
+                if (corrDateRangeFilter.start || corrDateRangeFilter.end) {
+                    const prefix = UnifyHelpers.isValidDatePrefix(it.created_at);
+                    if (!prefix) return false;
+                    if (corrDateRangeFilter.start && prefix < corrDateRangeFilter.start) return false;
+                    if (corrDateRangeFilter.end && prefix > corrDateRangeFilter.end) return false;
                 }
                 return true;
             });
@@ -838,6 +952,7 @@
             assigned_to_name: 'string',
             created_by_name: 'string',
             submission_count: 'number',
+            completion_time: 'date',   // S5 §3.4：完成时间列排序键，取值函数同口径（fallbackVal(refixed_at,fixed_at)，见 loadList）
             created_at: 'date',
         };
         // 状态业务优先级（进行中方向：待指派/待回复 → 修正中 → 已完成待归档 → 已归档；REJECTED/VOIDED 末尾）
@@ -845,11 +960,12 @@
             PENDING_ASSIGN: 0,
             ASSIGNED_PENDING_ESTIMATE: 1,
             IN_PROGRESS: 2,
-            FIXED: 3,
-            REFIXED: 4,
-            ARCHIVED: 5,
-            REJECTED: 6,
-            VOIDED: 7,
+            SUSPENDED: 3,   // 暂缓与列表导出方案 v1.1 §2.5.1：9 态重排整数序
+            FIXED: 4,
+            REFIXED: 5,
+            ARCHIVED: 6,
+            REJECTED: 7,
+            VOIDED: 8,
         };
 
         // sortField/sortDir 可选：不传=原有行为（blocks 按 maxId 降序，即最新动作的组在前）。
@@ -1034,7 +1150,7 @@
                     <td style="color:#9ca3af; font-size:12px;">${idCell}${groupBadge}</td>
                     <td class="ellip" title="${escapeHtml(oaNo)}">${oaNo ? escapeHtml(oaNo) : '<span style="color:#d1d5db;">-</span>'}</td>
                     <td class="ellip" title="${escapeHtml(it.process_type || '')}">${it.process_type ? escapeHtml(it.process_type) : '<span style="color:#d1d5db;">-</span>'}</td>
-                    <td>${UnifyHelpers.statusBadge(statusClass(it.status), STATUS_LABELS[it.status] || it.status)}${isOverdue(it) ? '<span class="flag-overdue">已超预计</span>' : ''}${isBacklog(it) ? '<span class="flag-backlog">积压</span>' : ''}${isUnarchivedBacklog(it) ? '<span class="flag-backlog">超7天未归档</span>' : ''}${it.status === 'ARCHIVED' && it.closure_type === 'admin_closure' ? '<span class="flag-backlog" style="color:#1d4ed8;">行政闭环</span>' : ''}${reworkFlag}</td>
+                    <td>${UnifyHelpers.statusBadge(statusClass(it.status), STATUS_LABELS[it.status] || it.status)}${isOverdue(it) ? '<span class="flag-overdue">已超预计</span>' : ''}${isBacklog(it) ? '<span class="flag-backlog">积压</span>' : ''}${isUnarchivedBacklog(it) ? '<span class="flag-backlog">超7天未归档</span>' : ''}${it.status === 'ARCHIVED' && it.closure_type === 'admin_closure' ? '<span class="flag-backlog" style="color:#1d4ed8;">行政闭环</span>' : ''}${suspendedFlag(it)}${reworkFlag}</td>
                     <td>${UnifyHelpers.typeTag(it.correction_type === 'batch' ? 'batch' : 'single', it.correction_type === 'batch' ? '批量' : '单')}</td>
                     <td style="text-align:center;">${it.correction_count != null ? it.correction_count : (it.correction_type === 'single' ? 1 : '-')}</td>
                     <td>${escapeHtml(sysLabel(it))}</td>
@@ -1043,6 +1159,7 @@
                     <td>${it.assigned_to_name ? escapeHtml(it.assigned_to_name) : '<span style="color:#d1d5db;">未指派</span>'}</td>
                     <td>${escapeHtml(it.created_by_name || '')}</td>
                     <td style="text-align:center;">${it.submission_count || 0}</td>
+                    <td class="time-absolute">${it.completion_time ? escapeHtml(formatFullTime(it.completion_time)) : ''}</td>
                     <td class="time-absolute">${escapeHtml(formatFullTime(it.created_at))}</td>
                 </tr>
             `;
@@ -1059,6 +1176,7 @@
             document.getElementById('statAll').textContent = allItems.length;
             document.getElementById('statPending').textContent = cnt('pending');
             document.getElementById('statProgress').textContent = cnt('progress');
+            document.getElementById('statSuspended').textContent = cnt('suspended');
             document.getElementById('statFixed').textContent = cnt('fixed');
             document.getElementById('statArchived').textContent = cnt('archived');
         }
@@ -1199,6 +1317,14 @@
             if ((isAdmin || isAssignee) && s === 'IN_PROGRESS') {
                 actions += `<button class="u-btn-primary" onclick="openComplete(${r.id}, '${r.correction_type}', ${isReworkChild})">标完成</button>`;
             }
+            // 暂缓/恢复（暂缓与列表导出方案 v1.1 §2.3）：可见性与后端 correctionTransition 权限 switch 逐字同源
+            //   （暂缓=开发本人/admin，两个工作态；恢复=开发本人/建单人/admin，仅已暂缓态）——前端只是可见性，后端是真权限。
+            if ((isAdmin || isAssignee) && ['ASSIGNED_PENDING_ESTIMATE', 'IN_PROGRESS'].includes(s)) {
+                actions += `<button class="u-btn-secondary" onclick="openSuspend(${r.id})">暂缓</button>`;
+            }
+            if ((isAdmin || isAssignee || isCreator) && s === 'SUSPENDED') {
+                actions += `<button class="u-btn-primary" onclick="openResume(${r.id})">恢复</button>`;
+            }
             if ((isAdmin || isAssignee) && (s === 'FIXED' || s === 'REFIXED')) {
                 actions += `<button class="u-btn-secondary" onclick="openResubmit(${r.id}, '${r.correction_type}', ${isReworkChild})">重修提交</button>`;
             }
@@ -1228,8 +1354,10 @@
             if (isAdmin && !isChild && !['VOIDED', 'REJECTED', 'ARCHIVED'].includes(s)) {
                 actions += `<button class="u-btn-secondary" onclick="openLinkNew(${Number(r.id)})">追加关联单</button>`;
             }
-            // 行政闭环（I2/I3 §3.3）：仅 admin，在未完成态（PENDING_ASSIGN/ASSIGNED_PENDING_ESTIMATE/IN_PROGRESS）记账式收口 → ARCHIVED + admin_closure
-            if (isAdmin && ['PENDING_ASSIGN', 'ASSIGNED_PENDING_ESTIMATE', 'IN_PROGRESS'].includes(s)) {
+            // 行政闭环（I2/I3 §3.3）：仅 admin，在未完成态记账式收口 → ARCHIVED + admin_closure。
+            //   +SUSPENDED（暂缓与列表导出方案 v1.1 §2.1.1 出口三路：业务黄了但不算作废走行政闭环——后端源态白名单已放行，
+            //   此门不加则出口在展示层断路，绕行「先恢复再闭环」会误清 dev_estimated_at+重置通知四件套。预筛 S2 HIGH-1）
+            if (isAdmin && ['PENDING_ASSIGN', 'ASSIGNED_PENDING_ESTIMATE', 'IN_PROGRESS', 'SUSPENDED'].includes(s)) {
                 actions += `<button class="u-btn-primary" style="background:linear-gradient(135deg,#2563eb,#1d4ed8);" onclick="openAdminClose(${r.id})">行政闭环</button>`;
             }
             // E3 编辑录入信息（服务端投影 can_edit：admin∨建单人 + 非终态 + 未作废；PUT /:id 为真闸门）
@@ -1426,7 +1554,7 @@
                 : '';
             // D 块：错误证明→待修复数据（v1.3 §2 正名，改显示不改底层）——error_proof 标识符/变量名/字段名全部不动。
             // L3b 待修复数据区：文字说明 error_proof_note + 补传入口（§6.7：建单人/admin，早期态 PENDING_ASSIGN~REFIXED，非作废）
-            const ERR_PROOF_STATES = ['PENDING_ASSIGN', 'ASSIGNED_PENDING_ESTIMATE', 'IN_PROGRESS', 'FIXED', 'REFIXED'];
+            const ERR_PROOF_STATES = ['PENDING_ASSIGN', 'ASSIGNED_PENDING_ESTIMATE', 'IN_PROGRESS', 'SUSPENDED', 'FIXED', 'REFIXED'];   // +SUSPENDED（暂缓与列表导出方案 v1.1 §2.5.2：与后端 ERROR_PROOF_STATES 同源——暂缓期间可补报错凭证）
             const canAddErrProof = (isAdmin || isCreator) && !isChild && ERR_PROOF_STATES.includes(s) && !r.voided_at;   // L5 子单 error_proof 归主单（后端 ERROR_PROOF_ON_MASTER_ONLY），子单只读展示不带补传入口
             // codex 61 M-4：待修复数据文字说明读统一字段 effective_error_proof_note（主单/无组取自身、子单取主单，后端已算好，前端无分支）。
             const errProofNoteHtml = r.effective_error_proof_note ? `<div style="font-size:13px; color:#374151; margin-bottom:6px; white-space:pre-wrap;">📝 ${escapeHtml(r.effective_error_proof_note)}</div>` : '';
@@ -2607,6 +2735,161 @@
             });
         }
 
+        // ============================================================
+        // S5（暂缓与列表导出方案 v1.1 §3.1/§3.2.1/§3.3/§3.3.1）：列表导出（Excel）+ 创建日期范围筛选接线
+        //   版本守卫照 corrInitUPaste 同款范式；columns 抽成页面常量 CORR_EXPORT_COLUMNS 再传标识符
+        //   （u-export.js 解析器已支持该形态，预筛 C4c H3）。
+        // ============================================================
+        const DC_UEXPORT_KIT_EXPECTED = 'uexport1';   // 须与 <script src="...u-export.js?v=..._uexport1"> 缓存串尾部一致
+
+        // 导出时刻（§3.3）：now 通道已收口进共享层（C5 主会话裁定改 u-export.js）——attachExport 每次点击
+        //   现取一次 exportNow 并绑定进 ctx.overdueRule，本页 value() 写 ctx.overdueRule(r) 即得同基准判定，
+        //   页面不再自管时间闭包（原 corrExportNow 闭包绕过已移除）。
+
+        // 时分从存储串（'YYYY-MM-DD HH:MM:SS'）手工拆分构造本地 Date（§3.3：需要时分差值时按存储格式
+        //   手工拆分，禁字符串直传 Date 防 UTC 解析坑）。isValidDatePrefix 先证前 10 位日历合法，
+        //   校验不过返回 null（调用方据此区分"日期无效"）。
+        // N6（预筛 C6b）：本函数是"严格版"，与页面既有 parseLocalTime（宽松版，见 :883）分工不合并——
+        //   分工理由见 parseLocalTime 定义处的完整注释；一句话版：旗标类提示用宽松版"凑合可用"，
+        //   导出超时判定用本函数"脏值必须可辨识为「日期无效」并拒判"，两者语义目标相反。
+        function corrParseDatetimeLocal(s) {
+            const prefix = UnifyHelpers.isValidDatePrefix(s);
+            if (!prefix) return null;
+            const y = parseInt(prefix.slice(0, 4), 10), mo = parseInt(prefix.slice(5, 7), 10), d = parseInt(prefix.slice(8, 10), 10);
+            // 预筛 C6d 修1：正则锚定完整存储格式（^...$，防"10:00脏后缀"这类被旧版非锚定正则悄悄截断
+            //   接受——旧正则只需前缀匹配，trailing 垃圾不影响 exec 成功）+ 时/分/秒逐段范围校验（超范围
+            //   直接判「日期无效」，禁交给 new Date 自动进位——"99:99"这类脏值旧版会被 Date 静默进位成
+            //   "合法但错误"的未来时刻，不报错也无法从结果反推异常）。
+            const tm = /^\d{4}-\d{2}-\d{2} (\d{2}):(\d{2})(?::(\d{2}))?$/.exec(String(s).trim());
+            if (!tm) return null;
+            const h = parseInt(tm[1], 10), mi = parseInt(tm[2], 10), se = (tm[3] !== undefined) ? parseInt(tm[3], 10) : 0;
+            if (h > 23 || mi > 59 || se > 59) return null;
+            return new Date(y, mo - 1, d, h, mi);
+        }
+        // 超时时长「N 天 M 小时」（§3.3：正值为超时；floor 到小时，不做四舍五入——保守不高估超时程度）。
+        function corrFormatDuration(ms) {
+            const totalHours = Math.floor(ms / 3600000);
+            const days = Math.floor(totalHours / 24);
+            const hours = totalHours % 24;
+            return days + ' 天 ' + hours + ' 小时';
+        }
+        // overdueRule(row, now)：数据修正逐状态枚举（方案 §3.3.1 数据修正表，9 态全覆盖）+ 两条通则
+        //   （①判定按 DB 原始状态值匹配 ②已完成态完成锚缺失/非法统一「无完成时间」）+ 优先级通则
+        //   （状态专属分支先行——暂缓中/—/行政闭环 优先于「未设时限」「无完成时间」两条通用兜底）。
+        //   §3.3 日期比较纪律区分「空」与「非法（脏值）」两态：时限**空**→未设时限；时限**非空但非法**
+        //   （isValidDatePrefix 校验不过）→ 日期无效；完成锚则空/非法统一按「无完成时间」处理（通则②
+        //   原话"统一输出"不区分两态，与时限的处理刻意不同——是方案原文差异，非本次疏漏）。
+        function corrOverdueRule(row, now) {
+            now = (now instanceof Date) ? now : new Date();
+            const status = row.status;
+            if (status === 'SUSPENDED') return { overdue: '暂缓中', duration: '' };
+            if (status === 'REJECTED' || status === 'VOIDED') return { overdue: '—', duration: '' };
+
+            const anchorRaw = UnifyHelpers.fallbackVal(row.refixed_at, row.fixed_at);
+            // L2（预筛 C6b）：补纯空白判空——原判据只认 ''/null/undefined 三态，漏了"回退到的 fixed_at
+            // 本身是纯空白字符串"这一态（fallbackVal 只保证 refixed_at 非空才直接返回它，不对回退目标
+            // fixed_at 做二次判空）。对齐 deadlineEmpty 已有的 trim 尺子：借 fallbackVal(anchorRaw,'')
+            // 再走一次同一套空值判定，比自己重写一遍 trim 逻辑更不容易两处判空标准长出细微差异。
+            const anchorEmpty = UnifyHelpers.fallbackVal(anchorRaw, '') === '';
+            // ARCHIVED 无完成锚＝行政闭环（未修正过就归档），不判——优先于下方「未设时限」检查，
+            //   因为行政闭环这个输出本就不关心期望时限是否设置。
+            if (status === 'ARCHIVED' && anchorEmpty) return { overdue: '行政闭环', duration: '' };
+
+            const deadlineRaw = row.expected_deadline;
+            const deadlineEmpty = (deadlineRaw === '' || deadlineRaw === null || deadlineRaw === undefined ||
+                (typeof deadlineRaw === 'string' && deadlineRaw.trim() === ''));
+            if (deadlineEmpty) return { overdue: '未设时限', duration: '' };
+            const deadlineDt = corrParseDatetimeLocal(deadlineRaw);
+            if (!deadlineDt) return { overdue: '日期无效', duration: '' };   // 非空但格式/日历非法（脏值）
+
+            if (status === 'PENDING_ASSIGN' || status === 'ASSIGNED_PENDING_ESTIMATE' || status === 'IN_PROGRESS') {
+                if (now.getTime() > deadlineDt.getTime()) {
+                    return { overdue: '进行中已超期', duration: corrFormatDuration(now.getTime() - deadlineDt.getTime()) };
+                }
+                return { overdue: '未超时', duration: '' };
+            }
+
+            if (status === 'FIXED' || status === 'REFIXED' || status === 'ARCHIVED') {
+                // 通则②：完成锚缺失/非法 → 统一「无完成时间」（不像时限那样拆成"空"/"日期无效"两态）。
+                const anchorDt = anchorEmpty ? null : corrParseDatetimeLocal(anchorRaw);
+                if (!anchorDt) return { overdue: '无完成时间', duration: '' };
+                if (anchorDt.getTime() > deadlineDt.getTime()) {
+                    return { overdue: '超时', duration: corrFormatDuration(anchorDt.getTime() - deadlineDt.getTime()) };
+                }
+                return { overdue: '未超时', duration: '' };
+            }
+
+            return { overdue: '未设时限', duration: '' };   // 防御兜底：9 态已全覆盖，理论不可达
+        }
+
+        // 19 列白名单（方案 §3.2.1 逐列拍板表）。抽成页面常量再传标识符给 attachExport（H3 标识符形态）。
+        //   敏感字段（requester_phone）与内部运维字段（dingtalk_*/notify_*/*_read_at/*_message_key/
+        //   assigned_by/created_by id/rework 内部列/closure_*/friction_reason/correction_group_id/
+        //   relay_*/suspended_at）恒不入列（§3.2.1 已拍，[P-4] suspended_at 不入）。
+        const CORR_EXPORT_COLUMNS = [
+            { key: 'id', label: 'ID' },
+            { key: 'oa_number', label: 'OA 流程号', deps: ['oa_number'], value: r => formatOaNo(r.oa_number) },
+            { key: 'process_type', label: '流程类型' },
+            { key: 'status', label: '状态', deps: ['status'], value: r => STATUS_LABELS[r.status] || r.status },
+            { key: 'correction_type', label: '修正类型', deps: ['correction_type'], value: r => (r.correction_type === 'batch' ? '批量' : '单条') },
+            { key: 'correction_count', label: '修正条数' },
+            { key: 'source_system', label: '所属系统', deps: ['source_system', 'source_system_other'], value: r => sysLabel(r) },
+            { key: 'location_info', label: '修正方式' },
+            { key: 'requester_name', label: '业务方' },
+            { key: 'requester_dept', label: '业务部门' },
+            { key: 'assigned_to_name', label: '开发' },
+            { key: 'created_by_name', label: '创建人' },
+            { key: 'submission_count', label: '提交次数' },
+            { key: 'created_at', label: '创建时间' },
+            { key: 'expected_deadline', label: '期望完成时限' },
+            // 完成时间：现算不读页面渲染用的虚拟字段 it.completion_time（那是 loadList 里另算的列表展示
+            //   专用缓存，deps 必须 ⊆ 数据源真实字段，虚拟字段不算数——两处 fallbackVal 调用同口径但各自独立）。
+            { key: 'completion_time', label: '完成时间', deps: ['refixed_at', 'fixed_at'], value: r => UnifyHelpers.fallbackVal(r.refixed_at, r.fixed_at) },
+            { key: 'archived_at', label: '归档时间' },
+            { key: 'is_overdue', label: '是否超时（对期望时限）', deps: ['status', 'expected_deadline', 'fixed_at', 'refixed_at'], value: (r, ctx) => ctx.overdueRule(r).overdue },
+            { key: 'overdue_duration', label: '超时时长', deps: ['status', 'expected_deadline', 'fixed_at', 'refixed_at'], value: (r, ctx) => ctx.overdueRule(r).duration },
+        ];
+
+        // getViewRows：与页面显示完全一致的最终行序（块序展开结果）——直接复用 getFilteredItems +
+        //   correctionSorter.getState() + clusterItems 三件套（buildClusteredBlocks 的同一条产线），
+        //   不额外排序。日期筛选已经并入 getFilteredItems（D13 同层 AND），导出零改动继承（D5）。
+        function corrGetViewRows() {
+            const items = getFilteredItems();
+            const state = correctionSorter.getState();
+            const blocks = clusterItems(items, state.sortBy, state.sortDir);
+            const rows = [];
+            blocks.forEach(blockRows => blockRows.forEach(r => rows.push(r.it)));
+            return rows;
+        }
+
+        function corrExportFilename() {
+            const d = new Date();
+            const pad = n => String(n).padStart(2, '0');
+            return `数据修正_导出_${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}`;
+        }
+
+        function corrInitExport() {
+            if (corrInitExport._done) return;
+            corrInitExport._done = true;
+            if (!window.UnifyHelpers || typeof UnifyHelpers.attachExport !== 'function') {
+                console.error('[导出共享层] u-export.js 未加载');
+                return;
+            }
+            UnifyHelpers.uexportCheckVersion(DC_UEXPORT_KIT_EXPECTED, 'Data_Correction.html');
+            UnifyHelpers.attachExport({
+                buttonSelector: '#btnExportCorr',
+                getViewRows: corrGetViewRows,
+                columns: CORR_EXPORT_COLUMNS,
+                filename: corrExportFilename,
+                overdueRule: corrOverdueRule,
+            });
+            UnifyHelpers.attachDateRangeFilter({
+                containerSelector: '#corrDateRange',
+                label: '创建日期',
+                onChange: (range) => { corrDateRangeFilter = range; renderTable(); },
+            });
+        }
+
         // ================= L5 追加关联单（§6.2 / D-9，admin 主单详情触发）=================
         function openLinkNew(masterId) {
             document.getElementById('linkNewMasterId').value = masterId;
@@ -3064,6 +3347,71 @@
                 showToast('已行政闭环', 'success');
                 closeModal('adminCloseModal'); await loadList(); openDrawer(id);
             } catch (e) { showToast('行政闭环失败', 'error'); } finally { btn.disabled = false; }
+        }
+
+        // ================= 暂缓/恢复（暂缓与列表导出方案 v1.1 §2.1.2/§2.3/§2.4）=================
+        // 转移专属码 → 中文文案兜底。独立于 corrErrText/CORRECTION_ERR_TEXT（那是通知发送失败流的五级回退范式，
+        //   §1/§5 已登记码域不含转移类，混进去会模糊其文档化范围）——后端本身已给策展好的中文 error 文本
+        //   （submitReject/submitArchive/submitAdminClose 同款直接透传 data.error），本表只是 data.error 之外的
+        //   稳定兜底第二层，优先级：映射表命中 > data.error > 通用兜底文案。
+        const CORR_SUSPEND_RESUME_ERR_TEXT = Object.freeze({
+            SUSPEND_REASON_REQUIRED: '暂缓必须填写理由',
+            SUSPEND_REASON_TOO_LONG: '暂缓理由不超过 500 字',
+            RESUME_NOTE_TOO_LONG: '恢复说明不超过 500 字',
+            INVALID_EXPECTED_DEADLINE: '期望完成时间不合法（应为真实存在的日期时间）',
+        });
+        function corrSuspendResumeErrText(data, fallback) {
+            const d = data || {};
+            return CORR_SUSPEND_RESUME_ERR_TEXT[d.code] || d.error || fallback;
+        }
+        function openSuspend(id) {
+            document.getElementById('suspendCorrId').value = id;
+            document.getElementById('formSuspendReason').value = '';
+            document.getElementById('suspendModal').classList.add('open');
+        }
+        async function submitSuspend() {
+            const id = document.getElementById('suspendCorrId').value;
+            const reason = document.getElementById('formSuspendReason').value.trim();
+            if (!reason) return showToast('请填写暂缓理由', 'error');
+            const btn = document.getElementById('btnSubmitSuspend'); btn.disabled = true;
+            try {
+                const res = await authFetch(`/api/corrections/${id}/suspend`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reason }) });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) { showToast(corrSuspendResumeErrText(data, '暂缓失败'), 'error'); return; }
+                showToast('已暂缓', 'success');
+                closeModal('suspendModal'); await loadList(); openDrawer(id);
+            } catch (e) { showToast('暂缓失败', 'error'); } finally { btn.disabled = false; }
+        }
+        function openResume(id) {
+            // M-3：优先读详情缓存（含权威 expected_deadline），回退 allItems
+            // 预筛 C3c L1：回退分支补 Number() 归一（与前半句 currentDetail 分支同款写法一致）——id 来自
+            //   onclick="openResume(${r.id})" 通常已是数字，但裸 === 对潜在字符串 id 的调用路径不设防，
+            //   不一致的比较会让预填静默落空（找不到项→{}→expected_deadline undefined），不报错更难查。
+            const item = (currentDetail && Number(currentDetail.id) === Number(id)) ? currentDetail : (allItems.find(i => Number(i.id) === Number(id)) || {});
+            document.getElementById('resumeCorrId').value = id;
+            document.getElementById('formResumeNote').value = '';
+            // 期望完成时间：预填当前值，'YYYY-MM-DD HH:mm:ss' → datetime-local 'YYYY-MM-DDTHH:mm'（同编辑弹窗回填范式 :1656-1657）
+            const ed = String(item.expected_deadline || '');
+            document.getElementById('formResumeExpectedDeadline').value = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}/.test(ed) ? ed.slice(0, 16).replace(' ', 'T') : '';
+            document.getElementById('resumeModal').classList.add('open');
+        }
+        async function submitResume() {
+            const id = document.getElementById('resumeCorrId').value;
+            const note = document.getElementById('formResumeNote').value.trim();
+            // 留空=沿用原值（undefined 不传，同 E3 编辑弹窗 :1911 范式）；非空须过 datetime-local 校验，分钟精度→本地秒精度
+            const edRaw = document.getElementById('formResumeExpectedDeadline').value;
+            const expectedDeadline = (() => {
+                if (!edRaw) return undefined;
+                return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(edRaw) ? edRaw.replace('T', ' ') + ':00' : edRaw.replace('T', ' ');
+            })();
+            const btn = document.getElementById('btnSubmitResume'); btn.disabled = true;
+            try {
+                const res = await authFetch(`/api/corrections/${id}/resume`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ note: note || undefined, expected_deadline: expectedDeadline }) });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) { showToast(corrSuspendResumeErrText(data, '恢复失败'), 'error'); return; }
+                showToast('已恢复，单据回到「待回复预计」', 'success');
+                closeModal('resumeModal'); await loadList(); openDrawer(id);
+            } catch (e) { showToast('恢复失败', 'error'); } finally { btn.disabled = false; }
         }
 
         // ================= 拒绝 =================

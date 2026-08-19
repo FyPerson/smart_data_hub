@@ -13,7 +13,6 @@
            harmonize；本页 filter-bar 无自由文本搜索框，共享层 input[type=text] 宽度差异对本页无影响）。
            仅"新建"按钮 .btn-new 为本页专属（filter-bar 右侧强调按钮，非黑名单），选择器改名 .u-filter-bar 作用域保留。 */
         .u-filter-bar .btn-new {
-            margin-left: auto;
             padding: 7px 16px;
             background: linear-gradient(135deg, #d97706, #b45309);
             color: #fff;
@@ -33,6 +32,16 @@
             width: 14px;
             height: 14px;
         }
+
+        /* 预筛 C6 M-1：导出按钮——次级样式（白底描边+下载图标，hover amber），口径对齐
+           Export_DateFilter_Demo.html（只读参照）。布局改为与 Data_Correction.html / Demo 同款的
+           flex:1 spacer div（HTML 中导出按钮前）负责把"导出+新建"两键推到筛选栏右侧；
+           .u-btn-export 与 .btn-new 均不再自带 margin-left:auto——flexbox 会把剩余空间在多个
+           auto margin 间均分，两键会裂开而非紧邻。.u-daterange* 系列样式由 u-export.js 的
+           attachDateRangeFilter 运行时自注入，本页不重复声明。 */
+        .u-filter-bar .u-btn-export { display: inline-flex; align-items: center; gap: 6px; padding: 7px 14px; background: #fff; color: #374151; border: 1px solid #d1d5db; border-radius: 6px; font-size: 13px; cursor: pointer; transition: border-color .2s, color .2s; white-space: nowrap; }
+        .u-filter-bar .u-btn-export:hover { border-color: #d97706; color: #d97706; }
+        .u-filter-bar .u-btn-export:disabled { opacity: .6; cursor: default; }
 
         /* 表格 */
         .data-table {
@@ -881,8 +890,15 @@
                 <input type="checkbox" id="filterUnrepliedTimeout" onchange="toggleUnrepliedTimeoutFilter()"> 只看超时未回填
             </label>
 
+            <!-- S6 D13：创建日期筛选胶囊（插入位置=筛选控件群末尾、搜索框之前，同 Export_DateFilter_Demo.html
+                 口径）；空 div，UnifyHelpers.attachDateRangeFilter 运行时填充结构+样式。 -->
+            <div class="u-daterange" id="collabDateRange"></div>
             <input type="text" id="filterSearch" placeholder="搜索描述/业务方/OA 流程号..." onkeyup="debounceSearch()">
 
+            <div style="flex:1;"></div>
+            <!-- S6（§3.1.2）：导出按钮，新建协作单左侧，能看列表就能导（无角色门）；文案恰「导出 Excel」，
+                 不得只叫「导出」（协作页语义禁忌：与"数据导出人/导出中"撞语义）。 -->
+            <button class="u-btn-export" id="btnExportCollab"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> 导出 Excel</button>
             <button class="btn-new" onclick="openNewModal()">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                     <line x1="12" y1="5" x2="12" y2="19"/>
@@ -1378,6 +1394,11 @@
     <!-- S5（前端统一 贴图粘贴扩展方案 20260801_v0.1）：Ctrl+V 贴图共享层接入。文件本体未改，沿用
          S5 checkVersion 下沉后的缓存串；改共享层本体时须同步 bump 这里 + 所有引用页。 -->
     <script src="assets/js/u-paste.js?v=v1.134.0_upaste2"></script>
+    <!-- S6（暂缓与列表导出方案 v1.1 §3.1）：列表导出（Excel）+ 创建日期范围筛选共享层接入。
+         xlsx vendor 先于 u-export.js 加载（attachExport 运行时依赖全局 XLSX）；两者缓存串与数据修正页
+         同串同 KIT 尾缀 v1.157.0_uexport1，与 u-export.js 内 KIT_VERSION='uexport1' 对拍（verify-export-columns 断言 4）。 -->
+    <script src="assets/vendor/xlsx.mini.min.js?v=v1.157.0_uexport1"></script>
+    <script src="assets/js/u-export.js?v=v1.157.0_uexport1"></script>
     <script>
         // v1.74.3 纯只读领导账号 id 名单（与后端 server.js READONLY_LEADER_IDS 同步！改动需两处一起改）
         //   示例只读领导A(id=11) / 示例只读领导B(id=6) 为纯只读领导，不参与偏技术类工作，不可被设为协作单数据导出人(exporter)。
@@ -1846,6 +1867,9 @@
         let lastListBackendOrder = [];
         // 阶段2 盯效率：是否只看「超时未回填」（客户端筛选，独立于后端筛选/排序；对 lastListBackendOrder 重过滤后交给排序器渲染）
         let onlyUnrepliedTimeout = false;
+        // N1（预筛 C6b）：变量名故意不用 collabDateRange——同页有 <div id="collabDateRange">，撞名会与
+        //   元素的隐式 window 具名属性混淆（同 Data_Correction.html corrDateRangeFilter 同款改名理由）。
+        let collabDateRangeFilter = { start: '', end: '' };   // S6 D13：创建日期范围筛选状态，attachDateRangeFilter onChange 写入
         // 与下方 renderList 行模板共用同一个 nowTs（避免筛选 nowTs 与渲染 nowTs 两次 Date.now() 极端边界跨阈值不一致，codex L-2 原则延续；
         // collabSortableList()→UnifyHelpers 排序→renderList() 全程同步执行，两次取值间无 await/DOM 操作插入，时间窗口可忽略）
         let renderNowTs = Date.now();
@@ -1854,10 +1878,22 @@
             collabSorter.render();
         }
 
-        // UnifyHelpers.attachTableSort 的 getList()：返回当前待排序数据（应用完客户端"超时未回填"筛选后的结果）
+        // UnifyHelpers.attachTableSort 的 getList()：返回当前待排序数据（应用完客户端"超时未回填"+
+        //   S6 D13"创建日期范围"两层筛选后的结果，与既有 onlyUnrepliedTimeout 同层客户端过滤——不新起
+        //   一条过滤管线，延续本函数已有的"对 lastListBackendOrder 重过滤"范式）。
         function collabSortableList() {
             renderNowTs = Date.now();
-            return onlyUnrepliedTimeout ? lastListBackendOrder.filter(r => unrepliedTimeoutLevel(r, renderNowTs)) : lastListBackendOrder;
+            let list = onlyUnrepliedTimeout ? lastListBackendOrder.filter(r => unrepliedTimeoutLevel(r, renderNowTs)) : lastListBackendOrder;
+            if (collabDateRangeFilter.start || collabDateRangeFilter.end) {
+                list = list.filter(r => {
+                    const prefix = UnifyHelpers.isValidDatePrefix(r.created_at);
+                    if (!prefix) return false;   // 无效/空值按不匹配处理即被筛出（同 §3.3 日期纪律）
+                    if (collabDateRangeFilter.start && prefix < collabDateRangeFilter.start) return false;
+                    if (collabDateRangeFilter.end && prefix > collabDateRangeFilter.end) return false;
+                    return true;
+                });
+            }
+            return list;
         }
 
         // UnifyHelpers.attachTableSort 的 render()：只负责行模板渲染，排序 + 分页切片已由排序器/分页器完成
@@ -5838,6 +5874,156 @@
             });
         }
 
+        // ============================================================
+        // S6（暂缓与列表导出方案 v1.1 §3.1/§3.2.2/§3.3/§3.3.1）：列表导出（Excel）+ 创建日期范围筛选接线
+        //   版本守卫/columns 常量标识符/日期工具三件套照 Data_Correction.html corrInitExport 现范式
+        //   （C5 已收口，now 通道已收进共享层——本页 value() 直接写 ctx.overdueRule(r) 即得，无需自管时间闭包）。
+        // ============================================================
+        const COLLAB_UEXPORT_KIT_EXPECTED = 'uexport1';   // 须与 <script src="...u-export.js?v=..._uexport1"> 缓存串尾部一致
+
+        // 时分从存储串（'YYYY-MM-DD HH:MM:SS'）手工拆分构造本地 Date（§3.3 日期纪律，同 corrParseDatetimeLocal）。
+        function collabParseDatetimeLocal(s) {
+            const prefix = UnifyHelpers.isValidDatePrefix(s);
+            if (!prefix) return null;
+            const y = parseInt(prefix.slice(0, 4), 10), mo = parseInt(prefix.slice(5, 7), 10), d = parseInt(prefix.slice(8, 10), 10);
+            // 预筛 C6d 修1：正则锚定完整存储格式（^...$，防"10:00脏后缀"这类被旧版非锚定正则悄悄截断
+            //   接受——旧正则只需前缀匹配，trailing 垃圾不影响 exec 成功）+ 时/分/秒逐段范围校验（超范围
+            //   直接判「日期无效」，禁交给 new Date 自动进位——"99:99"这类脏值旧版会被 Date 静默进位成
+            //   "合法但错误"的未来时刻，不报错也无法从结果反推异常）。
+            const tm = /^\d{4}-\d{2}-\d{2} (\d{2}):(\d{2})(?::(\d{2}))?$/.exec(String(s).trim());
+            if (!tm) return null;
+            const h = parseInt(tm[1], 10), mi = parseInt(tm[2], 10), se = (tm[3] !== undefined) ? parseInt(tm[3], 10) : 0;
+            if (h > 23 || mi > 59 || se > 59) return null;
+            return new Date(y, mo - 1, d, h, mi);
+        }
+        function collabFormatDuration(ms) {
+            const totalHours = Math.floor(ms / 3600000);
+            const days = Math.floor(totalHours / 24);
+            const hours = totalHours % 24;
+            return days + ' 天 ' + hours + ' 小时';
+        }
+        // collabOverdueRule(row, now)：数据协作逐状态枚举（方案 §3.3.1 协作表）。软删除单（archived_at
+        //   非空）默认不进列表，天然不会被导出，本函数不用单独处理该分支。deadline 建表 NOT NULL，
+        //   「未设时限」是理论不可达的防御分支（方案明确要求保留，不因"理论不出现"而省略）。
+        function collabOverdueRule(row, now) {
+            now = (now instanceof Date) ? now : new Date();
+            const status = row.status;
+
+            const deadlineRaw = row.deadline;
+            const deadlineEmpty = (deadlineRaw === '' || deadlineRaw === null || deadlineRaw === undefined ||
+                (typeof deadlineRaw === 'string' && deadlineRaw.trim() === ''));
+            if (deadlineEmpty) return { overdue: '未设时限', duration: '' };   // 防御：deadline NOT NULL，理论不可达
+            const deadlineDt = collabParseDatetimeLocal(deadlineRaw);
+            if (!deadlineDt) return { overdue: '日期无效', duration: '' };   // 非空但格式/日历非法（脏值）
+
+            const UNFINISHED = ['PENDING_ASSIGN', 'PENDING', 'EXPORTING', 'SUBMITTED', 'CONFIRMED', 'CLAIMED'];
+            if (UNFINISHED.indexOf(status) !== -1) {
+                if (now.getTime() > deadlineDt.getTime()) {
+                    return { overdue: '进行中已超期', duration: collabFormatDuration(now.getTime() - deadlineDt.getTime()) };
+                }
+                return { overdue: '未超时', duration: '' };
+            }
+
+            if (status === 'DONE') {
+                // 通则②：完成态完成锚缺失/非法统一「无完成时间」（DONE 唯一锚 done_at，无 fallbackVal 备用字段）。
+                const doneDt = collabParseDatetimeLocal(row.done_at);
+                if (!doneDt) return { overdue: '无完成时间', duration: '' };
+                if (doneDt.getTime() > deadlineDt.getTime()) {
+                    return { overdue: '超时', duration: collabFormatDuration(doneDt.getTime() - deadlineDt.getTime()) };
+                }
+                return { overdue: '未超时', duration: '' };
+            }
+
+            if (status === 'ARCHIVED') {
+                const anchorRaw = UnifyHelpers.fallbackVal(row.done_at, row.archived_final_at);
+                const anchorDt = collabParseDatetimeLocal(anchorRaw);
+                if (!anchorDt) return { overdue: '无完成时间', duration: '' };
+                if (anchorDt.getTime() > deadlineDt.getTime()) {
+                    return { overdue: '超时', duration: collabFormatDuration(anchorDt.getTime() - deadlineDt.getTime()) };
+                }
+                return { overdue: '未超时', duration: '' };
+            }
+
+            return { overdue: '—', duration: '' };   // 预筛 C6 L-1：未知状态兜底（协作无 DB CHECK，脏值理论可达；
+            // 该分支与上方 deadlineEmpty「未设时限」语义不同——deadline 已非空且合法，输出「未设时限」是假陈述）
+        }
+
+        // 验收状态导出映射（方案 §3.2.2 行14）：7 态纯中文，bypass 优先——对账文件无 emoji 纪律，
+        //   不复用页面 SQL_VALIDATION_LABELS（那份带 emoji，UI 专用）。
+        function collabExportValidationStatus(r) {
+            if (r.bypass_validation === 1 || r.sql_validation_status === 'bypassed') return '旁路放行';
+            if (r.sql_validation_status === 'passed') return '已通过';
+            if (r.sql_validation_status === 'failed') return '待重传';
+            if (r.sql_validation_status === 'running') return '验收中';
+            if (r.sql_validation_status === 'queued') return '排队中';
+            if (r.sql_validation_status === 'admin_closed') return '行政闭环（未执行SQL验收）';
+            return '—';   // 其余/NULL
+        }
+
+        // 17 列白名单（方案 §3.2.2 逐列拍板表）。抽成页面常量再传标识符给 attachExport。
+        //   敏感字段（requester_phone）与内部运维字段（三侧通知/钉钉群/摩擦/旁路/submission_version/
+        //   各 *_by/id 列/assign_mode/attachment_dir/export_summary/accept_remark/submission_note/
+        //   sql_validation_* 除验收状态外其余过程列）恒不入列（§3.2.2 已拍）。
+        const COLLAB_EXPORT_COLUMNS = [
+            { key: 'id', label: 'ID' },
+            { key: 'oa_request_no', label: 'OA 流程号' },
+            { key: 'requester_dept', label: '需求部门' },
+            { key: 'requester_name', label: '业务方' },
+            { key: 'description', label: '需求描述' },
+            { key: 'status', label: '状态', deps: ['status'], value: r => STATUS_LABELS[r.status] || r.status },
+            { key: 'target_db_connection_id', label: '目标业务库', deps: ['target_db_connection_id'], value: r => r.target_db_connection_id ? (targetDbMap[r.target_db_connection_id] || ('#' + r.target_db_connection_id)) : '' },
+            { key: 'contact_person_name', label: '对接人' },
+            { key: 'developer_name', label: '开发' },
+            { key: 'created_at', label: '创建时间' },
+            { key: 'deadline', label: '期望完成时间' },
+            { key: 'dev_estimated_at', label: '预计完成时间' },
+            { key: 'last_submitted_at', label: '最后提交时间' },
+            { key: 'validation_status', label: '验收状态', deps: ['sql_validation_status', 'bypass_validation'], value: r => collabExportValidationStatus(r) },
+            { key: 'completion_time', label: '完成时间', deps: ['done_at', 'archived_final_at'], value: r => UnifyHelpers.fallbackVal(r.done_at, r.archived_final_at) },
+            { key: 'is_overdue', label: '是否超时（对期望时限）', deps: ['status', 'deadline', 'done_at', 'archived_final_at'], value: (r, ctx) => ctx.overdueRule(r).overdue },
+            { key: 'overdue_duration', label: '超时时长', deps: ['status', 'deadline', 'done_at', 'archived_final_at'], value: (r, ctx) => ctx.overdueRule(r).duration },
+        ];
+
+        // getViewRows：与页面显示完全一致的最终行序（attachTableSort 标准契约）——collabSortableList()
+        //   拿到"服务端筛选 + 客户端超时未回填 + D13 日期范围"三层过滤后的结果，再用 collabSorter 暴露的
+        //   sortByField 复用同一份 sortConfig（fieldTypes/statusOrder/labelMaps）排出与页面一致的序；
+        //   无主动排序时回落 defaultSort（{field:'id',dir:'desc'}，与 collabSorter 配置字面量一致，
+        //   :1975-1984 一带），不额外分页（分页只影响渲染切片，导出要"当前筛选全量"）。
+        function collabGetViewRows() {
+            const list = collabSortableList();
+            const state = collabSorter.getState();
+            if (state.sortBy) return collabSorter.sortByField(list, state.sortBy, state.sortDir);
+            return collabSorter.sortByField(list, 'id', 'desc');
+        }
+
+        function collabExportFilename() {
+            const d = new Date();
+            const pad = n => String(n).padStart(2, '0');
+            return `数据协作_导出_${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}`;
+        }
+
+        function collabInitExport() {
+            if (collabInitExport._done) return;
+            collabInitExport._done = true;
+            if (!window.UnifyHelpers || typeof UnifyHelpers.attachExport !== 'function') {
+                console.error('[导出共享层] u-export.js 未加载');
+                return;
+            }
+            UnifyHelpers.uexportCheckVersion(COLLAB_UEXPORT_KIT_EXPECTED, 'Data_Collab.html');
+            UnifyHelpers.attachExport({
+                buttonSelector: '#btnExportCollab',
+                getViewRows: collabGetViewRows,
+                columns: COLLAB_EXPORT_COLUMNS,
+                filename: collabExportFilename,
+                overdueRule: collabOverdueRule,
+            });
+            UnifyHelpers.attachDateRangeFilter({
+                containerSelector: '#collabDateRange',
+                label: '创建日期',
+                onChange: (range) => { collabDateRangeFilter = range; collabSorter.render(); },
+            });
+        }
+
         function removeFile(idx) {
             selectedFiles.splice(idx, 1);
             renderFilePreview();
@@ -6622,6 +6808,7 @@
         // 页面初始化
         document.addEventListener('DOMContentLoaded', async () => {
             collabInitUPaste();   // S5：注册本页贴图目标区（仅图片类两点，见该函数定义处注释）
+            collabInitExport();   // S6：导出按钮+创建日期筛选接线（不依赖登录后数据，越早注册越好）
             // C4·ultracode HIGH#2 修复：兜底覆盖未显式调 hide/restore 的 10 个子弹窗 + 动态注入 reassign/fallback。
             //   监听抽屉 + 14 个静态子弹窗的 open class 变化 + body 直接子节点增删（动态弹窗 append/remove），
             //   任一变化都幂等重算抽屉 inert（syncDrawerInert），杜绝"某子弹窗打开时抽屉未锁"的焦点逃逸。
