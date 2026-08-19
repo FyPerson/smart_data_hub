@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>创建日期筛选胶囊 · 布局心智 Demo</title>
+<style>
+/* ===== 复刻平台基础（components.css 关键类 + 页面底色）===== */
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif; background:#f1f5f9; color:#1e293b; padding:24px 32px 60px; }
+h1 { font-size:18px; margin-bottom:6px; }
+.demo-note { font-size:13px; color:#64748b; margin-bottom:18px; line-height:1.7; }
+.demo-ctrl { display:flex; align-items:center; gap:16px; background:#fff; border:1px solid #e2e8f0; border-radius:10px; padding:12px 20px; margin-bottom:28px; font-size:13px; }
+.demo-ctrl label { display:flex; align-items:center; gap:6px; cursor:pointer; }
+.demo-ctrl button { padding:6px 14px; border:1px solid #d1d5db; border-radius:6px; background:#fff; font-size:13px; cursor:pointer; }
+.demo-ctrl button:hover { border-color:#d97706; color:#d97706; }
+.page-block { margin-bottom:44px; }
+.page-title { font-size:14px; font-weight:600; margin-bottom:10px; color:#334155; }
+.page-title small { font-weight:400; color:#94a3b8; margin-left:8px; }
+
+.u-stats-row { display:flex; gap:12px; margin-bottom:16px; flex-wrap:wrap; }
+.u-stat-card { flex:1; min-width:130px; background:#fff; border-radius:10px; border:1px solid #e2e8f0; padding:14px 18px; display:flex; align-items:center; gap:12px; cursor:pointer; transition:border-color .2s, box-shadow .2s; }
+.u-stat-card:hover { border-color:#d97706; box-shadow:0 2px 8px rgba(217,119,6,.08); }
+.u-stat-card.active { border-color:#d97706; background:#fffbeb; }
+.u-stat-icon { width:36px; height:36px; border-radius:8px; display:flex; align-items:center; justify-content:center; flex-shrink:0; }
+.u-stat-num { font-size:20px; font-weight:700; line-height:1.2; }
+.u-stat-label { font-size:12px; color:#6b7280; white-space:nowrap; }
+
+.u-filter-bar { display:flex; align-items:center; gap:10px; padding:16px 20px; background:#fff; border-radius:10px; border:1px solid #e2e8f0; margin-bottom:16px; flex-wrap:wrap; }
+.u-filter-bar select, .u-filter-bar input { padding:7px 12px; border:1px solid #d1d5db; border-radius:6px; font-size:13px; background:#fff; color:#374151; outline:none; transition:border-color .2s; }
+.u-filter-bar select:focus, .u-filter-bar input:focus { border-color:#d97706; }
+.u-filter-bar input[type="text"] { width:200px; }
+.u-filter-label { font-size:12px; color:#6b7280; margin-right:-4px; }
+.chk-label { font-size:12px; color:#6b7280; display:flex; align-items:center; gap:5px; cursor:pointer; }
+.u-btn-primary { display:inline-flex; align-items:center; gap:6px; padding:8px 16px; background:#d97706; color:#fff; border:none; border-radius:6px; font-size:13px; cursor:pointer; }
+.u-btn-export { display:none; align-items:center; gap:6px; padding:7px 14px; background:#fff; color:#374151; border:1px solid #d1d5db; border-radius:6px; font-size:13px; cursor:pointer; transition:border-color .2s, color .2s; white-space:nowrap; }
+.u-btn-export:hover { border-color:#d97706; color:#d97706; }
+.u-btn-export:disabled { opacity:.6; cursor:default; }
+body.show-capsule .u-btn-export { display:inline-flex; }
+/* 既有次级按钮（如系统迭代「管理」），恒显、不受新增元素开关控制 */
+.u-btn-ghost { display:inline-flex; align-items:center; gap:6px; padding:7px 14px; background:#fff; color:#374151; border:1px solid #d1d5db; border-radius:6px; font-size:13px; cursor:pointer; transition:border-color .2s, color .2s; white-space:nowrap; }
+.u-btn-ghost:hover { border-color:#d97706; color:#d97706; }
+/* 管理下拉（D14 SVG 化预览：emoji → 内联 svg 图标） */
+.head-menu { position:relative; display:inline-block; }
+.head-menu-list { display:none; position:absolute; top:calc(100% + 6px); right:0; z-index:60; background:#fff; border:1px solid #e2e8f0; border-radius:10px; box-shadow:0 8px 24px rgba(15,23,42,.12); padding:6px; min-width:172px; }
+.head-menu.open .head-menu-list { display:block; }
+.head-menu-item { display:flex; align-items:center; gap:9px; width:100%; padding:8px 12px; border:none; background:none; border-radius:6px; font-size:13px; color:#374151; cursor:pointer; text-align:left; }
+.head-menu-item:hover { background:#fff7ed; color:#b45309; }
+.head-menu-item svg { flex-shrink:0; color:#9ca3af; }
+.head-menu-item:hover svg { color:#d97706; }
+.demo-toast { position:fixed; bottom:28px; left:50%; transform:translateX(-50%); background:#1e293b; color:#fff; padding:10px 18px; border-radius:8px; font-size:13px; opacity:0; transition:opacity .3s; pointer-events:none; z-index:99; }
+.demo-toast.on { opacity:1; }
+
+table { width:100%; border-collapse:collapse; background:#fff; border:1px solid #e2e8f0; border-radius:10px; overflow:hidden; font-size:13px; }
+th { text-align:left; padding:9px 12px; background:#f8fafc; color:#64748b; font-weight:500; font-size:12px; border-bottom:1px solid #e2e8f0; white-space:nowrap; }
+td { padding:9px 12px; border-bottom:1px solid #f1f5f9; color:#334155; white-space:nowrap; }
+tr:last-child td { border-bottom:none; }
+.badge { display:inline-block; padding:2px 9px; border-radius:10px; font-size:12px; }
+.b-prog { background:#dbeafe; color:#1d4ed8; } .b-fix { background:#fef3c7; color:#92400e; } .b-arc { background:#d1fae5; color:#065f46; } .b-hold { background:#ede9fe; color:#6d28d9; }
+
+/* ===== 新增：创建日期胶囊 + 浮层（demo 核心）===== */
+.u-daterange { position:relative; display:none; }
+body.show-capsule .u-daterange { display:inline-block; }
+.u-daterange-btn { display:inline-flex; align-items:center; gap:6px; padding:7px 12px; border:1px solid #d1d5db; border-radius:6px; font-size:13px; background:#fff; color:#374151; cursor:pointer; transition:border-color .2s; white-space:nowrap; }
+.u-daterange-btn:hover { border-color:#d97706; }
+.u-daterange-btn svg { flex-shrink:0; }
+.u-daterange-btn .chev { color:#9ca3af; font-size:10px; }
+.u-daterange.filled .u-daterange-btn { border-color:#d97706; background:#fffbeb; color:#92400e; }
+.u-daterange .clear-x { display:none; margin-left:2px; color:#b45309; font-weight:600; padding:0 2px; }
+.u-daterange.filled .clear-x { display:inline; }
+.u-daterange.filled .chev { display:none; }
+.u-daterange-pop { display:none; position:absolute; top:calc(100% + 6px); left:0; z-index:50; background:#fff; border:1px solid #e2e8f0; border-radius:10px; box-shadow:0 8px 24px rgba(15,23,42,.12); padding:14px 16px; width:272px; }
+.u-daterange.open .u-daterange-pop { display:block; }
+.u-daterange-pop .row { display:flex; align-items:center; gap:8px; margin-bottom:10px; }
+.u-daterange-pop .row span { font-size:12px; color:#6b7280; width:24px; flex-shrink:0; }
+.u-daterange-pop input[type="date"] { flex:1; padding:6px 8px; border:1px solid #d1d5db; border-radius:6px; font-size:13px; color:#374151; outline:none; }
+.u-daterange-pop input[type="date"]:focus { border-color:#d97706; }
+.u-daterange-pop .quick { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:12px; }
+.u-daterange-pop .quick button { padding:4px 10px; border:1px solid #e2e8f0; border-radius:12px; background:#f8fafc; font-size:12px; color:#475569; cursor:pointer; }
+.u-daterange-pop .quick button:hover { border-color:#d97706; color:#d97706; }
+.u-daterange-pop .acts { display:flex; justify-content:flex-end; gap:8px; }
+.u-daterange-pop .acts .ghost { padding:5px 12px; border:none; background:none; font-size:12px; color:#94a3b8; cursor:pointer; }
+.u-daterange-pop .acts .apply { padding:5px 14px; border:none; background:#d97706; color:#fff; border-radius:6px; font-size:12px; cursor:pointer; }
+</style>
+</head>
+<body class="show-capsule">
+
+<h1>创建日期筛选胶囊 · 布局心智 Demo</h1>
+<p class="demo-note">
+评估目标：三页筛选栏加「创建日期」胶囊后对整体拥挤度/用户心智的影响。胶囊默认只占一个按钮位，点开浮层选起止（含快捷项），选中后变激活态显示范围、可一键 ×清除。<br>
+建议操作：① 用下方开关切换「有/无胶囊」对比；② 点「一键演示激活态」看选中后的宽度变化；③ 拖动浏览器窗口宽度，观察窄屏下筛选栏的换行行为。
+</p>
+
+<div class="demo-ctrl">
+  <label><input type="checkbox" id="toggleCapsule" checked onchange="document.body.classList.toggle('show-capsule', this.checked)"> 显示新增元素（「创建日期」胶囊 + 「导出 Excel」按钮）</label>
+  <button onclick="demoFillAll()">一键演示激活态（本月）</button>
+  <button onclick="demoClearAll()">全部清除回默认态</button>
+  <span style="color:#94a3b8;">胶囊插入位置：各页筛选控件群末尾、搜索框之前</span>
+</div>
+
+<!-- ═══════════ 页 1：数据修正（筛选栏最满 + 统计卡行）═══════════ -->
+<div class="page-block">
+  <div class="page-title">数据修正 <small>Data_Correction.html · 统计卡 + 筛选栏 1:1 仿真（含长文案 checkbox，本页是三页中最挤的）</small></div>
+  <div class="u-stats-row">
+    <div class="u-stat-card active"><div class="u-stat-icon" style="background:#f3f4f6;">▦</div><div><div class="u-stat-num">86</div><div class="u-stat-label">全部</div></div></div>
+    <div class="u-stat-card"><div class="u-stat-icon" style="background:#f3f4f6;">🕐</div><div><div class="u-stat-num">3</div><div class="u-stat-label">待指派/待回复</div></div></div>
+    <div class="u-stat-card"><div class="u-stat-icon" style="background:#dbeafe;">⚙</div><div><div class="u-stat-num">5</div><div class="u-stat-label">修正中</div></div></div>
+    <div class="u-stat-card"><div class="u-stat-icon" style="background:#ede9fe;">⏸</div><div><div class="u-stat-num">2</div><div class="u-stat-label">已暂缓</div></div></div>
+    <div class="u-stat-card"><div class="u-stat-icon" style="background:#fef3c7;">✓</div><div><div class="u-stat-num">4</div><div class="u-stat-label">已完成待归档</div></div></div>
+    <div class="u-stat-card"><div class="u-stat-icon" style="background:#d1fae5;">▣</div><div><div class="u-stat-num">72</div><div class="u-stat-label">已归档</div></div></div>
+  </div>
+  <div class="u-filter-bar">
+    <span class="u-filter-label">所属系统</span>
+    <select><option>全部系统</option></select>
+    <span class="u-filter-label">类型</span>
+    <select><option>全部类型</option></select>
+    <label class="chk-label"><input type="checkbox"> 仅看积压(对接人已通知超3天未指派)</label>
+    <label class="chk-label"><input type="checkbox"> 仅看完成超7天未归档</label>
+    <div class="u-daterange" id="dr1"></div>
+    <input type="text" placeholder="搜索修正方式/业务方/OA/流程类型/创建人...">
+    <div style="flex:1;"></div>
+    <button class="u-btn-export" onclick="demoExport(this,'数据修正')"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> 导出 Excel</button>
+    <button class="u-btn-primary">＋ 新建修正单</button>
+  </div>
+  <table>
+    <thead><tr><th>ID</th><th>OA 流程号</th><th>状态</th><th>所属系统</th><th>修正方式</th><th>业务方</th><th>开发</th><th>完成时间</th><th>创建时间</th></tr></thead>
+    <tbody>
+      <tr><td>86</td><td>OA-20260815</td><td><span class="badge b-prog">修正中</span></td><td>BMS</td><td>项目编号 P-1102 归属部门错…</td><td>张蕾</td><td>李工</td><td></td><td>2026-08-15 10:22</td></tr>
+      <tr><td>85</td><td>OA-20260812</td><td><span class="badge b-hold">已暂缓</span></td><td>HRD</td><td>入职日期与合同起始不一致…</td><td>王敏</td><td>李工</td><td></td><td>2026-08-12 15:40</td></tr>
+      <tr><td>84</td><td>OA-20260811</td><td><span class="badge b-fix">已完成</span></td><td>客户报销平台</td><td>报销单 BX-2231 金额小数位…</td><td>陈晨</td><td>周工</td><td>2026-08-12 09:15</td><td>2026-08-11 14:03</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- ═══════════ 页 2：数据协作 ═══════════ -->
+<div class="page-block">
+  <div class="page-title">数据协作 <small>Data_Collab.html · 筛选栏 1:1 仿真</small></div>
+  <div class="u-filter-bar">
+    <span class="u-filter-label">状态</span>
+    <select><option>全部</option></select>
+    <span class="u-filter-label">我的角色</span>
+    <select><option>全部</option></select>
+    <span class="u-filter-label">部门</span>
+    <select><option>全部</option></select>
+    <label class="chk-label" style="font-size:13px;color:#475569;"><input type="checkbox"> 只看超时未回填</label>
+    <div class="u-daterange" id="dr2"></div>
+    <input type="text" placeholder="搜索描述/业务方/OA 流程号...">
+    <div style="flex:1;"></div>
+    <button class="u-btn-export" onclick="demoExport(this,'数据协作')"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> 导出 Excel</button>
+    <button class="u-btn-primary">＋ 新建协作单</button>
+  </div>
+  <table>
+    <thead><tr><th>ID</th><th>OA 流程号</th><th>部门</th><th>状态</th><th>业务方</th><th>需求描述</th><th>期望完成</th><th>开发</th><th>创建时间</th></tr></thead>
+    <tbody>
+      <tr><td>132</td><td>OA-20260816</td><td>财务部</td><td><span class="badge b-prog">待开发</span></td><td>刘芳</td><td>7 月已收款项目清单导出…</td><td>2026-08-19 12:00</td><td>周工</td><td>2026-08-16 09:31</td></tr>
+      <tr><td>131</td><td>OA-20260814</td><td>人力资源部</td><td><span class="badge b-arc">已归档</span></td><td>赵倩</td><td>在职人员司龄分布统计…</td><td>2026-08-15 17:00</td><td>李工</td><td>2026-08-14 11:08</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- ═══════════ 页 3：系统迭代 ═══════════ -->
+<div class="page-block">
+  <div class="page-title">系统迭代 <small>Sys_Iteration.html · 筛选栏 1:1 仿真（四连 select）</small></div>
+  <div class="u-filter-bar">
+    <select><option>全部类型</option></select>
+    <select><option>全部状态</option></select>
+    <select><option>全部系统</option></select>
+    <select><option>全部优先级</option></select>
+    <div class="u-daterange" id="dr3"></div>
+    <input type="text" placeholder="搜索标题/系统/单号…">
+    <div style="flex:1;"></div>
+    <div class="head-menu" id="headMenu">
+      <button class="u-btn-ghost" onclick="document.getElementById('headMenu').classList.toggle('open'); event.stopPropagation();">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        管理 <span style="color:#9ca3af;font-size:10px;">▾</span>
+      </button>
+      <div class="head-menu-list">
+        <button class="head-menu-item"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg> 上线单管理</button>
+        <button class="head-menu-item"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg> 值班排班</button>
+        <button class="head-menu-item"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="20" x2="12" y2="10"/><line x1="18" y1="20" x2="18" y2="4"/><line x1="6" y1="20" x2="6" y2="16"/></svg> 期望对表统计</button>
+        <button class="head-menu-item"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg> 上线日志</button>
+        <button class="head-menu-item"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg> 删除审计</button>
+        <button class="head-menu-item"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg> 流程说明</button>
+      </div>
+    </div>
+    <button class="u-btn-export" onclick="demoExport(this,'系统迭代')"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> 导出 Excel</button>
+    <button class="u-btn-primary">＋ 新建迭代单</button>
+  </div>
+  <table>
+    <thead><tr><th>ID</th><th>类型</th><th>状态</th><th>标题</th><th>系统</th><th>开发</th><th>预计完成</th><th>期望完成</th><th>创建时间</th></tr></thead>
+    <tbody>
+      <tr><td>214</td><td>BUG</td><td><span class="badge b-prog">处理中</span></td><td>值班筛选卡计数偏差…</td><td>智数协同</td><td>示例用户A</td><td>2026-08-19</td><td>2026-08-20</td><td>2026-08-17 16:20</td></tr>
+      <tr><td>213</td><td>新功能</td><td><span class="badge b-hold">已暂缓</span></td><td>电子签批量下载…</td><td>电子签</td><td>示例发布者</td><td></td><td>2026-08-25</td><td>2026-08-16 10:05</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="demo-toast" id="demoToast"></div>
+
+<script>
+/* ===== 胶囊组件（demo 版 attachDateRangeFilter）===== */
+function fmtMD(s){ return s ? s.slice(5) : ''; }
+function attachDR(rootId){
+  const root = document.getElementById(rootId);
+  root.innerHTML = `
+    <button class="u-daterange-btn" type="button">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+      <span class="lbl">创建日期</span><span class="chev">▾</span><span class="clear-x" title="清除">×</span>
+    </button>
+    <div class="u-daterange-pop">
+      <div class="row"><span>从</span><input type="date" class="d-start"></div>
+      <div class="row"><span>至</span><input type="date" class="d-end"></div>
+      <div class="quick">
+        <button type="button" data-q="thisM">本月</button>
+        <button type="button" data-q="lastM">上月</button>
+        <button type="button" data-q="d30">近 30 天</button>
+      </div>
+      <div class="acts"><button type="button" class="ghost">清除</button><button type="button" class="apply">应用</button></div>
+    </div>`;
+  const btn = root.querySelector('.u-daterange-btn'), lbl = root.querySelector('.lbl'),
+        clearX = root.querySelector('.clear-x'), si = root.querySelector('.d-start'), ei = root.querySelector('.d-end');
+  const state = { start:'', end:'' };
+  function render(){
+    const filled = state.start || state.end;
+    root.classList.toggle('filled', !!filled);
+    lbl.textContent = filled ? `创建日期 ${fmtMD(state.start)||'…'}~${fmtMD(state.end)||'…'}` : '创建日期';
+  }
+  function apply(s, e){ state.start = s; state.end = e; si.value = s; ei.value = e; render(); root.classList.remove('open'); }
+  btn.addEventListener('click', (ev) => {
+    if (ev.target === clearX) { apply('', ''); ev.stopPropagation(); return; }
+    document.querySelectorAll('.u-daterange.open').forEach(o => { if (o !== root) o.classList.remove('open'); });
+    root.classList.toggle('open');
+  });
+  root.querySelector('.apply').addEventListener('click', () => apply(si.value, ei.value));
+  root.querySelector('.ghost').addEventListener('click', () => apply('', ''));
+  root.querySelectorAll('[data-q]').forEach(q => q.addEventListener('click', () => {
+    const now = new Date(), y = now.getFullYear(), m = now.getMonth();
+    const p = n => String(n).padStart(2, '0');
+    if (q.dataset.q === 'thisM') apply(`${y}-${p(m+1)}-01`, `${y}-${p(m+1)}-${p(new Date(y, m+1, 0).getDate())}`);
+    if (q.dataset.q === 'lastM') { const lm = new Date(y, m-1, 1); apply(`${lm.getFullYear()}-${p(lm.getMonth()+1)}-01`, `${lm.getFullYear()}-${p(lm.getMonth()+1)}-${p(new Date(lm.getFullYear(), lm.getMonth()+1, 0).getDate())}`); }
+    if (q.dataset.q === 'd30') { const s = new Date(now.getTime() - 29*864e5); apply(`${s.getFullYear()}-${p(s.getMonth()+1)}-${p(s.getDate())}`, `${y}-${p(m+1)}-${p(now.getDate())}`); }
+  }));
+  document.addEventListener('click', (ev) => { if (!root.contains(ev.target)) root.classList.remove('open'); });
+  root._demoApply = apply;
+}
+/* 管理下拉：点外部收起 */
+document.addEventListener('click', (ev) => {
+  const hm = document.getElementById('headMenu');
+  if (hm && !hm.contains(ev.target)) hm.classList.remove('open');
+});
+['dr1','dr2','dr3'].forEach(attachDR);
+function demoFillAll(){
+  const now = new Date(), y = now.getFullYear(), m = now.getMonth(), p = n => String(n).padStart(2,'0');
+  const s = `${y}-${p(m+1)}-01`, e = `${y}-${p(m+1)}-${p(new Date(y, m+1, 0).getDate())}`;
+  ['dr1','dr2','dr3'].forEach(id => document.getElementById(id)._demoApply(s, e));
+}
+function demoClearAll(){ ['dr1','dr2','dr3'].forEach(id => document.getElementById(id)._demoApply('','')); }
+/* 导出按钮演示：导出中态 → toast 提示（真实实现 = 生成 xlsx 文件下载） */
+function demoExport(btn, page){
+  const orig = btn.innerHTML;
+  btn.disabled = true; btn.innerHTML = '导出中…';
+  setTimeout(() => {
+    btn.disabled = false; btn.innerHTML = orig;
+    const t = document.getElementById('demoToast');
+    const d = new Date(), p = n => String(n).padStart(2,'0');
+    t.textContent = `（演示）已生成 ${page}_导出_${d.getFullYear()}${p(d.getMonth()+1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}.xlsx · 范围=当前筛选结果全量`;
+    t.classList.add('on'); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('on'), 2600);
+  }, 600);
+}
+</script>
+</body>
+</html>

@@ -9294,8 +9294,19 @@ module.exports = (deps) => {
   // 2026-08-12 追加「电子签」（用户拍板·随 BIZ_SYSTEMS 新增电子签同批）：外采系统无自研前后端之分，
   //   与 HRD 同档走单组「版本号」。**落代码默认而非写 config** 的理由同上行注释——本清单至今无任何写入
   //   端点（仅一次性脚本 _set-sys-single-commit-group.js），本地/生产 config 均为空走本默认，随部署自动
-  //   一致，不必在部署日清单里加"记得写库"。若将来确需 config 覆盖，务必显式含 HRD+电子签（replace 语义）。
-  const DEFAULT_SINGLE_COMMIT_GROUP_SYSTEMS = ['HRD', '电子签'];
+  //   一致，不必在部署日清单里加"记得写库"。若将来确需 config 覆盖，务必显式含 HRD+电子签+RPA程序（replace 语义）。
+  // 2026-08-19 追加「RPA程序」（用户拍板·随 BIZ_SYSTEMS 新增 RPA程序 同批）：RPA 是单一流程包交付，
+  //   无自研前后端之分，与 HRD/电子签同档走单组。⚠️ **但它的代码托管是 git，不是 SVN**——单组路径此前
+  //   把「SVN」写死在 5 处文案里，且软提示会把 git hash 判成「后端组应填 SVN 版本号」的误填（单组
+  //   component 恒 backend）。本批同步把单组路径文案中性化 + 单组豁免软提示（见 Sys_Iteration.html
+  //   siCommitWarnFor 单组判据）：**单组只有一组，结构上不存在「前后端填反」，该提示在单组下本就是
+  //   设计外残留**。故本清单今后不再隐含「成员都是 SVN」，加系统时无需再考虑 VCS 类型。
+  // ⚠️ [codex 435 MED-1 登记接受·**部署前置条件**] 本清单是 replace 语义：只要某环境的 config
+  //   sys_single_commit_group_systems 有非空值，本代码默认整体失效，新成员（如 RPA程序）会静默落成
+  //   双组——失败方向是「功能看起来正常但分了两组」，不报错、不易察觉。2026-08-19 本批已用只读探针
+  //   核实**本地与生产两个环境均为 NOT_FOUND**（本项目只有这两个环境），故默认清单生效。
+  //   今后每次往本清单加成员，都要重跑一次该探针；若哪天 config 真被写入，必须显式含本清单全部成员。
+  const DEFAULT_SINGLE_COMMIT_GROUP_SYSTEMS = ['HRD', '电子签', 'RPA程序'];
 
   // 读配置一次 → 命中系统 Set（批量场景复用·避免逐行 readSystemConfig 的 N 次 DB 往返）。格式照搬
   //   sys_release_default_executor_ids：**逗号串或 JSON 数组**皆可。畸形/空 → 回落 DEFAULT（不猜、不静默塌成空集）。

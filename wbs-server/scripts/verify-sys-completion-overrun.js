@@ -828,7 +828,14 @@ async function main() {
       { anchorLine: 6204, reachable: true, gateKind: 'exempt', desc: 'sysIssueTransition 通用引擎唯一 UPDATE——toStatus 变量，服务全部声明式 transition；feature 流里能落到目标两态的边只有①核实的 liaison_test_pass 一条，该边已撤闸（显式豁免，见下方子断言核实其代码块不引用理由闸函数）' },
       { anchorLine: 6916, reachable: false, desc: '建单 path A 占位状态 UPDATE：finalStatus 恒为受理门初始态（resolveSysInitialStatusForCreate 落态）或「开发中」，结构上不可能是待对接测试/待验证' },
       { anchorLine: 7177, reachable: false, desc: '/assign 端点 UPDATE：targetStatus 恒为 SF.SYS_DEV_STATUSES[type][0]（开发中），结构上不可能是待对接测试/待验证' },
-      { anchorLine: 14417, reachable: false, desc: '批量发布执行 UPDATE：字面量写「已上线」（同一写点，flip UPDATE 语句本体未变；行号随本批 _publishReleaseCoreInTxn 内新增的过期分叉双保险段+S1-fix MED-1 报警闸顺序重排插入在其前方下移）' },
+      // ⚠️ [2026-08-19「RPA程序」批] 本批在 index.js §10.3 单组清单处新增 6 行说明注释（DEFAULT_SINGLE_
+      //   COMMIT_GROUP_SYSTEMS 上方），位置落在写点 #6(7177) 与 #7(本条) **之间**，故仅本条下移、前 7 条
+      //   行号纹丝未动（这本身就是"同一批写点、非新增第 9 处"的旁证：本批未新增任何 UPDATE 语句，②处
+      //   实测计数仍恰 8）。取值按 :825 纪律走 grep 实测，不用旧锚点加估算插行数推算。
+      //   ⚠️ 本批**一批之内被追平两次**（先 14417→14426，codex 435 收口时又补 5 行登记注释→14431），
+      //   是 backlog #25③「绝对行号锚改结构锚」的又一实例：本条锚点对任何位于 #6 与 #7 之间的注释改动
+      //   都零容忍，而那片区域（§10.3 单组清单）恰是加系统时必改的地方。改结构锚前，加系统必带校准本条。
+      { anchorLine: 14431, reachable: false, desc: '批量发布执行 UPDATE：字面量写「已上线」（同一写点，flip UPDATE 语句本体未变；行号随本批 _publishReleaseCoreInTxn 内新增的过期分叉双保险段+S1-fix MED-1 报警闸顺序重排插入在其前方下移）' },
     ];
     assert.strictEqual(EXPECTED_STATUS_WRITE_SITES.length, writeSites.length, '[S③前置] 白名单登记条目数应与②实测写点数一致（防清单本身漂移出真相）');
     writeSites.forEach((site, i) => {

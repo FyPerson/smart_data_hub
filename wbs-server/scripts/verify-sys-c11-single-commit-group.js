@@ -12,6 +12,8 @@
 //   D 校验复用 SVN（零新增）：SVN 样例合法、超长 400、空白 400——复用既有 backend commit_ref trim 1..200 口径。
 //   E config 覆盖（replace 语义 + 默认兜底 + JSON 形态）：写 config 即以 config 为准；空/畸形回落默认 HRD。
 //   F 与 §10.1（C9）交互：HRD 无 commit（no_code）→ 表内 0 行（component 无关），C9 行数判据天然覆盖。
+//   G 前端静态（2026-08-19 RPA程序 批·不起浏览器·纯源码文本）：单组路径文案已中性化（不写死 SVN）+
+//     软提示在单组路径整体豁免且判据早于双组两条判定；**双组路径 SVN 文案原样保留**作对照面。
 //
 // in-process app + 内存库 + 自签 token，同 verify-sys-multidev-commits.js 范式。readSystemConfig 用可控
 // 覆盖桩（configValue 闭包变量）——默认 null（→回落代码默认 HRD），E 组显式改值测 replace/JSON/回落。
@@ -23,6 +25,9 @@ const express = require('express');
 const sqlite3 = require('sqlite3');
 const jwt = require('jsonwebtoken');
 const { runProbes } = require('./lib/sys-multidev-probes');
+const fs = require('fs');                                                  // [G] 前端静态组用
+const path = require('path');                                              // [G] 前端静态组用
+const { extractFunctionBody } = require('./lib/extract-function-body');     // [G] 前端静态组用
 
 const SECRET = 'verify-sys-c11-single-commit-group-secret';
 const db = new sqlite3.Database(':memory:');
@@ -190,7 +195,9 @@ async function selfCertifyProbes(label) {
     //   EXPECTED_DEFAULT_SINGLE 之外，若实现里让它命中了，这里立刻红。**这是有意的摩擦，勿删。**
     //   判定源同源：BIZ_SYSTEMS 走 I.transitions（=mod._internals.transitions，后端唯一权威），
     //   不在测试里另抄一份清单（抄一份的话 BIZ_SYSTEMS 改了这里不会红，退化成永真守卫）。
-    const EXPECTED_DEFAULT_SINGLE = new Set(['HRD', '电子签']);
+    //   2026-08-19 追加「RPA程序」（用户拍板·单一流程包交付无前后端之分；其 VCS 是 git 而非 SVN——
+    //   单组清单自此不再同构于 SVN，相应的前端文案/软提示豁免见 [G] 组）。
+    const EXPECTED_DEFAULT_SINGLE = new Set(['HRD', '电子签', 'RPA程序']);
     const allSystems = I.transitions.BIZ_SYSTEMS;
     assert.ok(Array.isArray(allSystems) && allSystems.length >= 2, 'A4：BIZ_SYSTEMS 应为非空数组（判定源同源自检）');
     for (const sysName of EXPECTED_DEFAULT_SINGLE) {
@@ -446,6 +453,99 @@ async function selfCertifyProbes(label) {
     ok('F：HRD no_code 交付 → 0 commit 行（C9 §10.1 active 行数判据不区分 component·天然覆盖，无需特殊处理）');
 
     await selfCertifyProbes('F');
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // [G] 前端静态：单组路径文案中性化 + 软提示单组豁免（2026-08-19「RPA程序」批）
+  //   存在理由：RPA程序 入单组清单前，单组成员（HRD/电子签）清一色 SVN，故单组路径把「SVN」写死在
+  //   5 处文案里、且软提示（语义=「前端组/后端组填反了」）在单组 component 恒 backend 的前提下会把
+  //   git hash 判成误填。RPA程序 的 VCS 是 git——单组清单自此不同构，上述两点从"没人撞上的残留"
+  //   变成"必现的误报"。本组把「已中性化」和「单组豁免」钉成源码不变量。
+  //   ⚠️ 双组路径（BMS 类）的 SVN/GIT 文案**必须原样保留**，见 G3 对照组——否则"把全文 SVN 删光"
+  //   这种改法能让 G2 全绿，是典型的假绿（guard 假绿七坑·对照组证明）。
+  // ══════════════════════════════════════════════════════════════════════
+  {
+    const HTML = fs.readFileSync(path.join(__dirname, '..', 'public', 'Sys_Iteration.html'), 'utf8');
+    // 剥注释先行：本批新增的说明注释里大量出现「SVN」「单组」字样，不剥则 G2 零残留断言恒红（假红）。
+    //   用删除式 stripComments 而非 lib 的 blankNonCode——后者连字符串字面量内容一起等长掩空，而本组
+    //   断言的恰恰是字面量里的**文案文本**。写法照 verify-sys-derive-display.js:57 同款既有范式。
+    const stripComments = (s) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^[ \t]*\/\/.*$/gm, '').replace(/([^:])\/\/.*$/gm, '$1');
+    const clean = stripComments(HTML);
+
+    // G1：软提示单组豁免——判据必须在两条 component 判定**之前**（放后面=先返回提示，豁免永不生效）。
+    const warnBody = stripComments(extractFunctionBody(HTML, 'siCommitWarnFor'));
+    const iSingle = warnBody.indexOf('single_commit_group');
+    const iFront = warnBody.indexOf("component === 'frontend'");
+    const iBack = warnBody.indexOf("component === 'backend'");
+    assert.ok(iSingle >= 0, 'G1：siCommitWarnFor 必须含单组豁免判据 single_commit_group');
+    assert.ok(iFront >= 0 && iBack >= 0, 'G1：双组两条判定必须仍在（对照组·防把函数体删空让豁免断言"过关"）');
+    assert.ok(iSingle < iFront && iSingle < iBack, `G1：单组豁免必须早于 frontend/backend 两条判定（实测 single=${iSingle} front=${iFront} back=${iBack}·顺序错则豁免不生效）`);
+    assert.ok(/single_commit_group\s*\)\s*return\s*''\s*;/.test(warnBody), 'G1：单组豁免必须是 return 空串早退（不是换一套提示文案——平台不掌握各系统 VCS）');
+    ok('G1：siCommitWarnFor 单组豁免存在、形态为空串早退、且早于双组两条判定（RPA程序 的 git hash 不再被误报为「应填 SVN 版本号」）');
+
+    // G2：单组路径文案零 SVN（逐个文案点正向钉死 + 回退形态负向钉死）。
+    //   ⚠️ [codex 435 LOW-2 登记接受] 上面的 stripComments 是删除式行注释剥离，不是词法级——字符串/
+    //   模板/正则字面量里的 `//` 会被误当行注释起点（`https://` 已被 `([^:])` 前缀规避，其余形态没有）。
+    //   **不改的依据**：本组的负向断言（G2b/G2d）由**同位置的正向断言背书**——回退写法与正确写法是
+    //   替换关系而非新增，任何回退都会先让 G2a 的 `count===2` 或 G2c 的 includes 判红；而 stripComments
+    //   若真误删大段文本，同样是正向断言先红。即两个方向的失败面都收敛到**假红**（可见、会被追查），
+    //   不产生假绿。⚠️ 残留边界：将来若在本组新增**没有正向断言配对**的孤立负向断言，此背书不成立，
+    //   届时须改用词法级剥离或把断言收窄到 extractFunctionBody 抽出的函数体级。
+    assert.strictEqual((clean.match(/groupLabel \+ '（trim 1~200 字）'/g) || []).length, 2,
+      'G2a：补充/编辑 commit 两弹窗的单组字段标签已去 SVN，且恰 2 处（少于 2=漏改一个弹窗·多于 2=有新入口未纳入本组）');
+    assert.ok(!/groupLabel \+ '（SVN/.test(clean), 'G2b：单组字段标签不得回退写死 SVN');
+    assert.ok(clean.includes('填「${esc(submitGroupLabel)}」，可加多行'), 'G2c：提交弹窗单组说明文案已去 SVN');
+    assert.ok(!/submitGroupLabel\}（SVN/.test(clean), 'G2d：提交弹窗单组组标签不得回退写死 SVN');
+    assert.ok(/single \? `\$\{groupLabel\}（1~200字）`/.test(clean), 'G2e：单组行 placeholder 取服务端 group_label，不写死 SVN');
+    ok('G2：单组路径 5 个文案点全部中性化（组标签/说明/placeholder/补充弹窗/编辑弹窗）——单组下「SVN」零出现');
+
+    // G3：对照组——双组路径（BMS 类）SVN/GIT 文案原样保留。缺了任何一条都说明改动越界到了双组。
+    assert.ok(clean.includes("'后端组（SVN 版本号）'"), 'G3a：双组组标签原样保留');
+    assert.ok(clean.includes("'commit_ref（前端 GIT / 后端 SVN）'"), 'G3b：双组 commit 弹窗字段标签原样保留');
+    assert.ok(clean.includes("'SVN 版本号（1~200字）'"), 'G3c：双组行 placeholder 原样保留');
+    assert.ok(clean.includes('这看起来像 GIT commit；后端组通常填 SVN 版本号'), 'G3d：双组软提示文案原样保留');
+    assert.ok(clean.includes('这看起来像 SVN 版本号；前端组通常填 GIT commit'), 'G3e：双组软提示（另一向）原样保留');
+    ok('G3：对照组——双组路径 5 处 SVN/GIT 文案全部原样保留（本批不越界·且堵死"删光 SVN 让 G2 假绿"的改法）');
+
+    // G4 [codex 435 LOW-1 采纳]：**行为**断言。G1-G3 全是文本匹配，只证「源码写没写对」，证不了
+    //   「跑起来对不对」——codex 指出"保留死代码/无关字符串、破坏真实分支"的变异可能让文本断言假绿，
+    //   这正是本仓踩过多次的「层内全绿 ≠ 功能可用」。故把 siCommitWarnFor 抽出来在受控环境真跑。
+    //   依赖注入三件全部**从 HTML 同源取**（siDetail 桩由本组构造 + 两个正则从源码解析），
+    //   不在本文件另抄正则——抄一份的话 HTML 里正则改了这里不会红，退化成永真守卫。
+    //   ⚠️ 登记（非正解）：行为验证的正解位置是 Playwright 层——test-issue-commit-groups-playwright.js
+    //   测的正是本函数的软提示 C4。但该套件 2026-08-17 已定案「存量既有红·年久失修·登记不修」，
+    //   本探针是短期唯一可落地的行为断言，属绕开该层另起炉灶。Playwright 层修复后应把本组并过去。
+    {
+      const pickRe = (name) => {
+        // [codex 436 risk 采纳] 尾部 flags 段必须一起捕获：漏掉的话 /re/i 会被解析成 /re/，注入的正则
+        //   与页面实际行为不同 → G4 变成拿"另一个正则"做的验证（当前两个正则都无 flags，属未来加固）。
+        const m = clean.match(new RegExp('const\\s+' + name + '\\s*=\\s*(\\/.*?\\/[gimsuy]*)\\s*;'));
+        assert.ok(m, `G4：未能从 HTML 解析出 ${name} 定义（同源注入前提失效·勿改成本文件硬编码正则）`);
+        return new Function('return ' + m[1])();
+      };
+      const SVN_RE = pickRe('SI_SVN_REV_RE');
+      const GIT_RE = pickRe('SI_GIT_HASH_RE');
+      assert.ok(GIT_RE.test('a1b2c3d4e5f') && SVN_RE.test('12345'), 'G4：注入的两正则形态自检（样本须分别命中，否则下方三态验证恒不触发=永真）');
+
+      // 完整函数声明外包一层工厂，闭包注入 siDetail 与两正则
+      const fnSrc = extractFunctionBody(HTML, 'siCommitWarnFor');
+      const mkWarn = (single) => new Function('siDetail', 'SI_SVN_REV_RE', 'SI_GIT_HASH_RE',
+        fnSrc + '\nreturn siCommitWarnFor;')({ issue: { single_commit_group: single } }, SVN_RE, GIT_RE);
+      const warnSingle = mkWarn(true);
+      const warnDual = mkWarn(false);
+
+      const GIT_SAMPLE = 'a1b2c3d4e5f';   // 7~40 位 hex = RPA程序 开发者会填的真实形态
+      const SVN_SAMPLE = '12345';         // 纯数字 = HRD/电子签 的 SVN 版本号形态
+
+      // ⭐ 核心对照：**同一个输入**在单组静默、在双组告警——一次同时证明「豁免真生效」与「功能没被删空」。
+      assert.strictEqual(warnSingle('backend', GIT_SAMPLE), '', 'G4a：单组 + git hash → 无提示（RPA程序 主场景·豁免生效）');
+      assert.ok(warnDual('backend', GIT_SAMPLE).includes('SVN 版本号'), 'G4b：双组 backend + 同一个 git hash → 仍告警（对照组·豁免没误伤双组）');
+      assert.strictEqual(warnSingle('frontend', SVN_SAMPLE), '', 'G4c：单组 + 纯数字 → 无提示（豁免对两个方向都生效，非只挡 backend 一侧）');
+      assert.ok(warnDual('frontend', SVN_SAMPLE).includes('GIT commit'), 'G4d：双组 frontend + 同一个纯数字 → 仍告警（对照组·另一向未误伤）');
+      assert.strictEqual(warnSingle('backend', ''), '', 'G4e：单组空值 → 无提示');
+      assert.strictEqual(warnDual('backend', ''), '', 'G4f：双组空值 → 无提示（空值早退是两态共有的既有行为，本批未改）');
+      ok('G4：行为级三态验证——同一 git hash 单组静默/双组告警、同一纯数字单组静默/双组告警、空值两态皆静默（豁免生效 ∧ 双组功能完好，非文本匹配）');
+    }
   }
 
   console.log(`\n✅ verify-sys-c11-single-commit-group 全绿（${passed} 组断言通过）`);

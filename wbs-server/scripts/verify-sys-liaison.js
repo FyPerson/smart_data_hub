@@ -382,13 +382,24 @@ async function main() {
     ok('[L1] 已作废 bug：非受理人对接人列表看不到（传参也被忽略）+ 详情 403；受理人勾选可见 + 详情可开 + 写路径仍拒；admin 不变');
   }
 
-  // ═══ [S] BIZ_SYSTEMS 新元素「客户报销平台」真实建单可用（2026-08-17 追加·防常量层数组断言通过而端点校验/落库漂移）═══
+  // ═══ [S] BIZ_SYSTEMS **全集**真实建单可用（2026-08-17 追加·2026-08-19「RPA程序」批升级为全集遍历）═══
+  //   存在理由：防常量层数组断言通过、而端点白名单校验或落库发生漂移。
+  //   ⚠️ 这条覆盖面 **c11 的 A4 替代不了**：A4 虽已遍历 BIZ_SYSTEMS 全集，但它的 mkIssue 是裸 SQL
+  //   `INSERT INTO sys_issues`，**绕过 POST /api/sys-issues 的白名单校验**——新系统名能不能真的建出单，
+  //   只有本组走真实端点才证得了。
+  //   ⚠️ 2026-08-19 由「只测客户报销平台」改为遍历全集，动机同 A4 的升级史（首版只断言单点=只覆盖
+  //   一个元素，第二个新系统加进来照样全绿）。判定源同源取 transitions.BIZ_SYSTEMS，**不在本文件另抄
+  //   一份清单**——抄一份的话 BIZ_SYSTEMS 改了这里不会红，退化成永真守卫。
   {
-    const id = await createBug({ system_name: '客户报销平台' });   // createBug 内已断言 201 + 受理 200
-    const r = await call('GET', `/api/sys-issues/${id}`, adminTok);
-    assert.strictEqual(r.status, 200, 'S：新系统名单据详情 200');
-    assert.strictEqual(r.body.issue.system_name, '客户报销平台', 'S：建单落库回读 system_name=客户报销平台（详情 DTO {issue: row}）');
-    ok('[S] 「客户报销平台」建单端到端可用（BIZ_SYSTEMS 校验放行 + 落库回读一致）');
+    const { BIZ_SYSTEMS } = require('../routes/sys-iteration/transitions');
+    assert.ok(Array.isArray(BIZ_SYSTEMS) && BIZ_SYSTEMS.length >= 2, 'S：BIZ_SYSTEMS 应为非空数组（判定源同源自检·防本组恒不执行）');
+    for (const sysName of BIZ_SYSTEMS) {
+      const id = await createBug({ system_name: sysName });   // createBug 内已断言 201 + 受理 200
+      const r = await call('GET', `/api/sys-issues/${id}`, adminTok);
+      assert.strictEqual(r.status, 200, `S：${sysName} 单据详情 200`);
+      assert.strictEqual(r.body.issue.system_name, sysName, `S：${sysName} 建单落库回读一致（详情 DTO {issue: row}）`);
+    }
+    ok(`[S] BIZ_SYSTEMS 全集建单端到端可用（${BIZ_SYSTEMS.length} 系统逐个走真实端点：白名单校验放行 + 落库回读一致）`);
   }
 
   // ═══ [C] 变更流零回归 canary ═══

@@ -6592,7 +6592,9 @@
             </div>
             <div id="siSubmitCommitsBox" class="u-form-group"><label>Commit 记录 <span class="u-req">*</span></label>
                 ${submitGroups.map(g => {
-                    const glabel = submitSingleGroup ? `${submitGroupLabel}（SVN 版本号）`
+                    // [RPA 批·2026-08-19] 单组标签去掉「（SVN 版本号）」后缀：单组清单已含 git 系（RPA程序）
+                    //   与 SVN 系（HRD/电子签），平台不再指定 VCS 类型。双组分支原样不动（=本改动的对照面）。
+                    const glabel = submitSingleGroup ? `${submitGroupLabel}`
                         : (g === 'frontend' ? '前端组（GIT commit）' : '后端组（SVN 版本号）');
                     return `<div class="si-commit-group">
                     <div class="si-commit-group-label">${esc(glabel)}</div>
@@ -6601,7 +6603,7 @@
                 </div>`;
                 }).join('')}
                 <div class="u-hint">${submitSingleGroup
-                    ? `填「${esc(submitGroupLabel)}」（SVN 版本号），可加多行，至少填 1 条即可提交。`
+                    ? `填「${esc(submitGroupLabel)}」，可加多行，至少填 1 条即可提交。`
                     : '前端组填 GIT commit，后端组填 SVN 版本号；每组可加多行，前端组或后端组至少填 1 条即可提交。'}</div>
             </div>
             <div id="siSubmitNoCodeBox" class="u-form-group" style="display:none">
@@ -6805,6 +6807,24 @@
     function siCommitWarnFor(component, ref) {
         const v = (ref || '').trim();
         if (!v) return '';
+        // ⭐ [RPA 批·2026-08-19] 单组系统（不分前后端）整体豁免软提示。本提示的语义是「前端组/后端组**填反了**」，
+        //   而单组系统只有一组、结构上不存在填反——它在单组路径下本就是设计外残留（此前 HRD/电子签 填入
+        //   7~40 位 hex 串同样会被无意义警告，只是没人撞上）。RPA程序 入单组清单后必现：单组 component 恒
+        //   backend，其合法的 git hash 会被判成「后端组通常填 SVN 版本号」——这是误报，不是提示。
+        //   判据取后端 DTO single_commit_group（唯一权威·前端不自行判定），与 siRenderDevCommits 内同源同范式。
+        //   ⚠️ 勿改成按 VCS 类型分系统提示：单组清单成员的 VCS 已不同构（HRD/电子签=SVN·RPA程序=git），
+        //   平台不掌握也不应硬编码各系统的 VCS，故此处是"关掉"而非"换一套判据"。
+        //   ⚠️ [codex 435 MED-2 登记接受·**依赖前提写在此处，改动前先读**] 本函数直读全局 siDetail 而非
+        //   取调用方快照，理论上存在「siDetail 与提交行 DOM 不同步」的时序缺口。核实结论=**当前结构下
+        //   不可达**：siDetail 全文件仅两处赋值（:2808 关详情置 null / :2850 开详情赋值），无 setInterval
+        //   无轮询，而提交弹窗是详情页上的模态框——要改 siDetail 必须先关详情，关详情即关弹窗。
+        //   不改的另一理由：同文件 siRenderDevCommits / siModalAddCommit / siModalEditCommit **全部直读
+        //   siDetail**，单独给本函数换成快照会造出第二套取值范式。
+        //   ⚠️ 该结论依赖「提交弹窗只从详情页打开、弹窗期间 siDetail 不变」这条**隐式调用链契约**。
+        //   若将来新增「弹窗内局部刷新详情」「后台轮询更新 siDetail」「弹窗可脱离详情页打开」中的任何
+        //   一条，本豁免与双组提示都会读到过期/错位的判据 —— 那时必须改为打开弹窗时固定 single 快照
+        //   （与 siSubmitRowState 同生命周期重置）。
+        if (siDetail && siDetail.issue && siDetail.issue.single_commit_group) return '';
         if (component === 'frontend' && SI_SVN_REV_RE.test(v)) return '这看起来像 SVN 版本号；前端组通常填 GIT commit（不影响提交）';
         if (component === 'backend' && SI_GIT_HASH_RE.test(v) && !SI_SVN_REV_RE.test(v)) return '这看起来像 GIT commit；后端组通常填 SVN 版本号（不影响提交）';
         return '';
@@ -6815,12 +6835,17 @@
         const box = document.getElementById('siSubmitRows-' + component);
         if (!box) return;
         const rows = siSubmitRowState[component];
-        const placeholder = component === 'frontend' ? 'GIT commit（1~200字）' : 'SVN 版本号（1~200字）';
+        // [RPA 批·2026-08-19] 单组 placeholder 用 group_label 不再写死 SVN（单组清单含 git 系 RPA程序）。
+        //   构造存原值、插入处 esc——groupLabel 是服务端下发值，与本函数 value="${esc(val)}" 同口径。
+        const single = !!(siDetail && siDetail.issue && siDetail.issue.single_commit_group);
+        const groupLabel = (siDetail && siDetail.issue && siDetail.issue.group_label) || '版本号';
+        const placeholder = single ? `${groupLabel}（1~200字）`
+            : (component === 'frontend' ? 'GIT commit（1~200字）' : 'SVN 版本号（1~200字）');
         box.innerHTML = rows.map((val, i) => {
             const warn = siCommitWarnFor(component, val);
             const delBtn = rows.length > 1 ? `<span class="si-commit-row-del" onclick="siSubmitRemoveRow('${component}',${i})">删除</span>` : '';
             return `<div class="si-commit-row">
-                        <input type="text" value="${esc(val)}" placeholder="${placeholder}" oninput="siSubmitRowInput('${component}',${i},this.value)">
+                        <input type="text" value="${esc(val)}" placeholder="${esc(placeholder)}" oninput="siSubmitRowInput('${component}',${i},this.value)">
                         ${delBtn}
                     </div>${warn ? `<div class="si-commit-warn">${esc(warn)}</div>` : ''}`;
         }).join('');
@@ -6861,7 +6886,7 @@
         const single = !!(iss && iss.single_commit_group);
         const groupLabel = (iss && iss.group_label) || '版本号';
         const fields = single
-            ? [fText('commit_ref', groupLabel + '（SVN·trim 1~200 字）', '', true, '')]
+            ? [fText('commit_ref', groupLabel + '（trim 1~200 字）', '', true, '')]
             : [fSelectMap('component', '组件', ['frontend', 'backend'], 'frontend', SI_COMMIT_COMPONENT_LABEL),
                fText('commit_ref', 'commit_ref（前端 GIT / 后端 SVN）','', true, 'trim 后 1~200 字')];
         siModal(single ? ('补充' + groupLabel) : '补充 commit', fields, async v => {
@@ -6881,7 +6906,7 @@
         const single = !!(iss && iss.single_commit_group);
         const groupLabel = (iss && iss.group_label) || '版本号';
         const fields = single
-            ? [fText('commit_ref', groupLabel + '（SVN·trim 1~200 字）', row.commit_ref, true, '')]
+            ? [fText('commit_ref', groupLabel + '（trim 1~200 字）', row.commit_ref, true, '')]
             : [fSelectMap('component', '组件', ['frontend', 'backend'], row.component, SI_COMMIT_COMPONENT_LABEL),
                fText('commit_ref', 'commit_ref（前端 GIT / 后端 SVN）',row.commit_ref, true, 'trim 后 1~200 字')];
         siModal(single ? ('编辑' + groupLabel) : '编辑 commit', fields, async v => {
