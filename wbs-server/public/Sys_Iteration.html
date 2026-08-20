@@ -825,7 +825,7 @@
          抽取（assets/js/u-paste.js 文件头有完整来源说明）。缓存串尾部 tag 须与该文件 KIT_VERSION 一致，
          改文件时两处一起 bump——siInitUPaste() 内 UPaste.checkVersion() 会在不一致时 console.error
          （S5 起版本比对逻辑下沉共享层，见 u-paste.js checkVersion()）。 -->
-    <script src="assets/js/u-paste.js?v=v1.134.0_upaste2"></script>
+    <script src="assets/js/u-paste.js?v=v1.134.0_upaste3"></script>
     <!-- S6（暂缓与列表导出方案 v1.1 §3.1）：列表导出（Excel）+ 创建日期范围筛选共享层接入。
          xlsx vendor 先于 u-export.js 加载（attachExport 运行时依赖全局 XLSX）；两者缓存串与数据修正/
          数据协作页同串同 KIT 尾缀 v1.157.0_uexport1，与 u-export.js 内 KIT_VERSION='uexport1' 对拍
@@ -9024,8 +9024,13 @@
     }
     // 收集（≤5 + 扩展名/大小校验 + 去重，复刻 collectFilesInto）。去重口径=同一物理文件
     //   (name+size+lastModified 三者全同才判重复)——允许同名同大小但修改时间不同的文件并存（不同版本）。
+    // S2c·R1（codex 合并轮 M）：本函数是真实拒收路径（数量上限/扩展名/大小/去重四道闸门，拒收时只
+    //   showToast 不抛异常）——返回本次实际接收（push 成功）的文件数，供 u-paste.js 贴图 dual 路径
+    //   据实提示"已粘贴 N 张"，不再对被闸门拒收的文件也谎报"已粘贴成功"（贴图 collect 回调把这个
+    //   返回值原样透传给共享层，见下方 UPaste.register 的 collect）。
     function siPickerCollect(key, fileList) {
         const arr = siPickerFiles(key);
+        let accepted = 0;
         for (const f of Array.from(fileList || [])) {
             if (arr.length >= SI_SPEC_MAX_FILES) { showToast(`最多 ${SI_SPEC_MAX_FILES} 个文件`, 'error'); break; }
             const ext = (f.name.split('.').pop() || '').toLowerCase();
@@ -9035,7 +9040,9 @@
                 showToast(`该文件已选：${f.name}`, 'info'); continue;
             }
             arr.push(f);
+            accepted++;
         }
+        return accepted;
     }
     // change 事件（追加进数组后 e.target.value='' 允许重选同名再次触发）
     function siPickerOnChange(key, e) {
@@ -9106,7 +9113,7 @@
     //   ② 版本印记比对（对齐 model-detail-normalize.js 的 KIT_VERSION 范式）。行为零变化——回归证据
     //   = test-sys-paste-playwright.js（33/33，抽取等价性判据）。
     // ============================================================
-    const SI_UPASTE_KIT_EXPECTED = 'upaste2';   // 须与 <script src="...u-paste.js?v=..._upaste2"> 缓存串尾部一致，改共享层时两处一起 bump
+    const SI_UPASTE_KIT_EXPECTED = 'upaste3';   // 须与 <script src="...u-paste.js?v=..._upaste3"> 缓存串尾部一致，改共享层时两处一起 bump
     // codex S4 复审 LOW-2 采纳（S5 落地）：版本比对逻辑下沉共享层 UPaste.checkVersion()，页面只留
     // expected 常量 + "未加载"前置判断（这一步天然不能下沉——UPaste 对象都不存在时无法调用它的方法）。
     // 注册本页贴图目标区（原 siPasteResolveTargetKey 逻辑的参数化版本，逐字保留判定语义）：
@@ -9141,7 +9148,8 @@
             },
             selector: '[id^="siPreview_"]',
             keyOf: (el) => el.id.replace(/^siPreview_/, ''),
-            collect: (key, files) => { siPickerCollect(key, files); siPickerRender(key); },
+            // S2c·R1：透传 siPickerCollect 的实际接收数（见其定义旁注），供共享层 dual 路径据实提示。
+            collect: (key, files) => { const accepted = siPickerCollect(key, files); siPickerRender(key); return accepted; },
         });
     }
 

@@ -9,10 +9,11 @@
  *   T2 图片+文本混合、焦点在描述 textarea → 不收附件（不拦截，e.defaultPrevented=false）
  *   T3 纯文本粘贴 → 不拦截（e.defaultPrevented=false，无 preventDefault 调用）
  *   T4 连续两次粘贴同一张图 → 两次均成功入选、各自独立命名（不撞车，非误判为重复）
- *   T5 无弹窗场景：0 个可见实例（真实可构造：关闭弹窗后粘贴）+ ≥2 个可见实例（DOM 注入构造，
- *      见下方 T5 段头部说明——现状 UI 全部 picker 实例都建在 siModal 内，"多实例同时可见"在正常
- *      用户操作路径下无法触达，故用页面内注入两个假 siPreview_ 容器来精确触达该分支）
- *      → 两种情形均应 toast「请先点击目标附件区再粘贴」
+ *   T5 无弹窗场景：0 个可见实例（真实可构造：关闭弹窗后粘贴）+ ≥2 个可见实例且无点击记忆（DOM 注入
+ *      构造，见下方 T5 段头部说明——现状 UI 全部 picker 实例都建在 siModal 内，"多实例同时可见"在
+ *      正常用户操作路径下无法触达，故用页面内注入两个假 siPreview_ 容器来精确触达该分支）
+ *      → 0 候选 toast「UPaste.MSG_NO_CANDIDATE」；≥2 候选无记忆 toast「UPaste.MSG_MULTI_NO_MEMORY」
+ *      （S1b·R2 预筛修复：S6 起两种拒绝场景文案已拆分，断言同源引用 UPaste.* 常量而非硬编码字符串）
  *   T6 全程 0 console error
  *
  * ⚠️⚠️ ClipboardEvent 构造方式说明（Playwright 安全限制的实测应对，如实记录）：
@@ -151,17 +152,33 @@ async function main() {
         await shotOnFail(page, !!(thumbTitle && thumbTitle.startsWith('粘贴截图_')), 't1-preview-title', `T1 缩略图 title 以"粘贴截图_"开头（实得="${thumbTitle}"）`);
 
         // ═══════════════════════════════════════════════════════════════
-        // T2：图片+文本混合、焦点在描述 textarea → 不收附件（不拦截，defaultPrevented=false）
+        // T2（S2·第三缺陷修复语义反转，拍板出处 memory paste_defect_leads.md 2026-08-20 用户决策之二·
+        //   双通道投递）：图片+文本混合、焦点在描述 textarea → **双通道**：文本通道不拦截（defaultPrevented
+        //   =false，浏览器有机会走原生粘贴插入文本）+ 图片通道同步投递进 create-spec（不再是旧版"放行
+        //   默认粘贴=图片被浏览器原生粘贴吞掉、无任何投递尝试"的静默丢图，本条原断言"T2 未收附件"已把
+        //   "丢弃=正确"钉死在案，必须反转）。
         // ═══════════════════════════════════════════════════════════════
-        console.log('\n── T2：图片+文本混合 + 焦点在描述 textarea → 不收附件（放行默认粘贴） ──');
+        console.log('\n── T2：图片+文本混合 + 焦点在描述 textarea → 双通道（文本不拦截+图片同步投递到 create-spec） ──');
         const beforeCount2 = (await page.evaluate(() => siPickerFiles('create-spec').length));
         const r2 = await dispatchPaste(page, { withImage: true, withText: true, textValue: '业务方混合粘贴文本', focusSelector: '#f_description' });
         await shotOnFail(page, r2.activeTag === 'TEXTAREA', 't2-focus-is-textarea', `T2 前置：焦点确实在 textarea（实得 activeTag="${r2.activeTag}"）`);
-        await shotOnFail(page, r2.defaultPrevented === false, 't2-default-not-prevented', `T2 图片+文本混合+可编辑焦点：e.defaultPrevented=false（放行默认粘贴，实得=${r2.defaultPrevented}）`);
+        // 文本通道：defaultPrevented=false 是"文本能进输入框"的必要条件（我们的监听器没有拦截这次粘贴，
+        //   把默认粘贴处理权原样交还浏览器）——真实浏览器场景下这就是文本落框的判据。
+        await shotOnFail(page, r2.defaultPrevented === false, 't2-default-not-prevented', `T2 文本通道：e.defaultPrevented=false（不拦截，浏览器保留原生粘贴插入文本的机会，实得=${r2.defaultPrevented}）`);
         await page.waitForTimeout(200);
-        const afterCount2 = (await page.evaluate(() => siPickerFiles('create-spec').length));
-        await shotOnFail(page, afterCount2 === beforeCount2, 't2-no-attachment-added', `T2 未收附件（附件数不变，前=${beforeCount2}/后=${afterCount2}）`);
-        // 附加信息（非断言判据，见文件头 isTrusted 说明）：记录浏览器是否真的执行了原生文本插入。
+        // 图片通道：S2 双通道投递核心断言——若实现仍是旧版"dual 不拦截=不投递"，afterCount2 会等于
+        //   beforeCount2（这条会红，即预筛描述的"图文混合静默丢图"第三缺陷复现）。
+        const afterFiles2 = await page.evaluate(() => siPickerFiles('create-spec').map(f => f.name));
+        const afterCount2 = afterFiles2.length;
+        await shotOnFail(page, afterCount2 === beforeCount2 + 1, 't2-image-delivered', `T2 图片通道：图片同步投递进 create-spec，附件数 +1（前=${beforeCount2}/后=${afterCount2}，若实现退化回旧版丢图这条会红）`);
+        const pastedName2 = afterFiles2[afterFiles2.length - 1];
+        await shotOnFail(page, /^粘贴截图_/.test(pastedName2 || ''), 't2-image-name-prefix', `T2 图片通道：新投递文件名以"粘贴截图_"开头（实得="${pastedName2}"）`);
+        // 附加信息（非断言判据，见文件头 isTrusted 说明）：记录浏览器是否真的执行了原生文本插入——实测
+        //   结论（本批复核，2026-08-20）：Chromium 对合成 dispatchEvent（isTrusted=false）的 paste 事件不会
+        //   真的执行"把 clipboardData 写入聚焦控件"这一步原生默认动作（即便 defaultPrevented=false 给了
+        //   它机会），这是浏览器/CDP 对不可信事件的既有安全策略、非本模块代码行为，故此处仍只作为附加信息
+        //   记录，不升级为硬断言——升级会制造一条"因测试工具限制而非实现错误"永远变红的断言，反而掩盖真实
+        //   信号（同 feedback_test_assertion_self_error 的"断言自身错"反向情形：不该红的场景被判死红）。
         const textareaVal = await page.locator('#f_description').inputValue().catch(() => '');
         console.log(`     ℹ️ 附加信息（非断言）：合成事件触发后 textarea 实际内容="${textareaVal.replace(/\n/g, '\\n')}"（若浏览器对未信任事件不执行原生粘贴插入，此处可能为空——不影响 T2 通过判定，见文件头说明）`);
 
@@ -204,25 +221,29 @@ async function main() {
         // ═══════════════════════════════════════════════════════════════
         // T5a：无弹窗 + 0 个可见 picker 实例（真实可构造：关闭弹窗后直接粘贴）→ toast 提示
         // ═══════════════════════════════════════════════════════════════
-        console.log('\n── T5a：无弹窗、0 个可见 picker 实例 → toast「请先点击目标附件区再粘贴」 ──');
+        console.log('\n── T5a：无弹窗、0 个可见 picker 实例 → toast UPaste.MSG_NO_CANDIDATE ──');
         await page.evaluate(() => { const c = document.getElementById('toast-container'); if (c) c.innerHTML = ''; });
         const r5a = await dispatchPaste(page, { withImage: true, withText: false });
         await shotOnFail(page, r5a.defaultPrevented === true, 't5a-default-prevented', `T5a：无可判定目标仍 preventDefault（实得=${r5a.defaultPrevented}）`);
         await page.waitForTimeout(300);
         const toast5a = await page.locator('#toast-container').textContent().catch(() => '');
-        await shotOnFail(page, toast5a.includes('请先点击目标附件区再粘贴'), 't5a-toast', `T5a toast 含"请先点击目标附件区再粘贴"（实得="${toast5a}"）`);
+        const msgNoCandidate5a = await page.evaluate(() => UPaste.MSG_NO_CANDIDATE);
+        await shotOnFail(page, toast5a.includes(msgNoCandidate5a), 't5a-toast', `T5a toast 含 UPaste.MSG_NO_CANDIDATE（同源引用="${msgNoCandidate5a}"，实得="${toast5a}"）`);
 
         // ═══════════════════════════════════════════════════════════════
-        // T5b：无弹窗 + ≥2 个可见 picker 实例 → toast 提示
+        // T5b：无弹窗 + ≥2 个可见 picker 实例 + 无点击记忆 → toast 提示
         //   ⚠️ 如实说明：现状 UI 中所有 picker 实例（create-spec/submit-delivery/modal-spec/
         //   modal-delivery/modal-screenshot）均建在 siModal 弹窗内，同一时刻至多一个可见——
         //   "无弹窗下同时有 ≥2 个可见实例"在正常用户操作路径下**无法通过真实 UI 交互构造**（不存在
-        //   能同时打开两个独立、非弹窗的附件区的入口）。为精确触达 siPasteResolveTargetKey() 的
-        //   "≥2 候选"分支，这里在页面 document.body 下注入两个符合选择器约定（id 以 siPreview_
-        //   开头）的可见 div，模拟"未来若出现非弹窗内联多实例"的场景——这是对被测函数本身的真实
-        //   调用（非 mock/stub 被测逻辑），只是构造前置条件的手段是 DOM 注入而非用户点击。
+        //   能同时打开两个独立、非弹窗的附件区的入口）。为精确触达候选收集的"≥2 候选"分支，这里在
+        //   页面 document.body 下注入两个符合选择器约定（id 以 siPreview_ 开头）的可见 div，模拟
+        //   "未来若出现非弹窗内联多实例"的场景——这是对被测函数本身的真实调用（非 mock/stub 被测
+        //   逻辑），只是构造前置条件的手段是 DOM 注入而非用户点击。
+        //   S1b·R2 预筛修复：S6 起"2 候选"不再恒拒——记忆命中则归属，仅"2 候选+无点击记忆"才拒绝
+        //   （拍板出处：memory paste_defect_leads.md 2026-08-20 A1 拍板）。本用例全程未点击任一注入
+        //   的假容器，天然落在"无记忆"分支，断言改为同源引用 UPaste.MSG_MULTI_NO_MEMORY。
         // ═══════════════════════════════════════════════════════════════
-        console.log('\n── T5b：无弹窗 + DOM 注入构造 2 个可见 picker 实例 → toast 提示 ──');
+        console.log('\n── T5b：无弹窗 + DOM 注入构造 2 个可见 picker 实例 + 未点击(无记忆) → 拒绝，toast MSG_MULTI_NO_MEMORY ──');
         await page.evaluate(() => {
             const c = document.getElementById('toast-container'); if (c) c.innerHTML = '';
             for (const k of ['siPreview_fakeA', 'siPreview_fakeB']) {
@@ -237,13 +258,17 @@ async function main() {
         await shotOnFail(page, r5b.defaultPrevented === true, 't5b-default-prevented', `T5b：≥2 候选无法判定仍 preventDefault（实得=${r5b.defaultPrevented}）`);
         await page.waitForTimeout(300);
         const toast5b = await page.locator('#toast-container').textContent().catch(() => '');
-        await shotOnFail(page, toast5b.includes('请先点击目标附件区再粘贴'), 't5b-toast', `T5b toast 含"请先点击目标附件区再粘贴"（实得="${toast5b}"）`);
+        const msgMultiNoMemory5b = await page.evaluate(() => UPaste.MSG_MULTI_NO_MEMORY);
+        await shotOnFail(page, toast5b.includes(msgMultiNoMemory5b), 't5b-toast', `T5b toast 含 UPaste.MSG_MULTI_NO_MEMORY（同源引用="${msgMultiNoMemory5b}"，实得="${toast5b}"）`);
         await page.evaluate(() => { ['siPreview_fakeA', 'siPreview_fakeB'].forEach(k => { const el = document.getElementById(k); if (el) el.remove(); }); });
 
         // ═══════════════════════════════════════════════════════════════
-        // T7（codex 220 M-1）：图片 + 仅 text/html（无 text/plain）+ 焦点 textarea → 放行不收附件
+        // T7（codex 220 M-1 + S2·第三缺陷修复语义反转，拍板出处 memory paste_defect_leads.md 2026-08-20
+        //   用户决策之二·双通道投递）：图片 + 仅 text/html（无 text/plain）+ 焦点 textarea → 双通道：
+        //   文本通道不拦截 + 图片通道同步投递（原"放行不收附件"断言把丢图钉死在案，需反转；text/html 也算
+        //   "有文本"，应同 T2 一样落 dual 分支，不因 MIME 子类型不同而漏判进 intercept）。
         // ═══════════════════════════════════════════════════════════════
-        console.log('\n── T7：图片 + 仅 text/html（无 text/plain）+ 焦点 textarea → 放行不收附件 ──');
+        console.log('\n── T7：图片 + 仅 text/html（无 text/plain）+ 焦点 textarea → 双通道（文本不拦截+图片同步投递） ──');
         await page.click('button:has-text("新建迭代单")');
         await page.waitForSelector('#siModalOverlay.open', { timeout: 5000 });
         await page.waitForTimeout(200);
@@ -251,10 +276,15 @@ async function main() {
         const beforeCount7 = await page.evaluate(() => siPickerFiles('create-spec').length);
         const r7 = await dispatchPaste(page, { withImage: true, withText: true, textValue: '<b>混合HTML文本</b>', textType: 'text/html', focusSelector: '#f_description' });
         await shotOnFail(page, r7.activeTag === 'TEXTAREA', 't7-focus-is-textarea', `T7 前置：焦点在 textarea（实得="${r7.activeTag}"）`);
-        await shotOnFail(page, r7.defaultPrevented === false, 't7-default-not-prevented', `T7 图片+仅text/html+可编辑焦点：e.defaultPrevented=false（codex 220 M-1，原实现漏判会返回 true，实得=${r7.defaultPrevented}）`);
+        await shotOnFail(page, r7.defaultPrevented === false, 't7-default-not-prevented', `T7 文本通道：e.defaultPrevented=false（codex 220 M-1，text/html 也算"有文本"不拦截，实得=${r7.defaultPrevented}）`);
         await page.waitForTimeout(200);
-        const afterCount7 = await page.evaluate(() => siPickerFiles('create-spec').length);
-        await shotOnFail(page, afterCount7 === beforeCount7, 't7-no-attachment-added', `T7 未收附件（附件数不变，前=${beforeCount7}/后=${afterCount7}）`);
+        const afterFiles7 = await page.evaluate(() => siPickerFiles('create-spec').map(f => f.name));
+        const afterCount7 = afterFiles7.length;
+        await shotOnFail(page, afterCount7 === beforeCount7 + 1, 't7-image-delivered', `T7 图片通道：图片同步投递进 create-spec，附件数 +1（前=${beforeCount7}/后=${afterCount7}，若实现漏判 text/html 落回 intercept 或退化为不投递，这条会红）`);
+        // S2b·R4（L2）：补文件名前缀断言，与 T2 族对齐（此前只验证了附件数 +1，未验证投递的确实是
+        //   贴图合成文件名，若实现误传了别的文件/命名逻辑被破坏，这条会红）。
+        const pastedName7 = afterFiles7[afterFiles7.length - 1];
+        await shotOnFail(page, /^粘贴截图_/.test(pastedName7 || ''), 't7-image-name-prefix', `T7 图片通道：新投递文件名以"粘贴截图_"开头（实得="${pastedName7}"）`);
 
         // ═══════════════════════════════════════════════════════════════
         // T8（codex 220 M-3）：粘贴 image/jpeg → 文件名扩展名为 .jpg（按 MIME 映射，非恒 .png）
@@ -331,6 +361,38 @@ async function main() {
         await shotOnFail(page, afterCap === 5, 't11-capped-at-5', `T11 一次粘贴 2 张图但只剩 1 个名额，最终恰好=5（实得=${afterCap}）`);
         const toastCap = await page.locator('#toast-container').textContent().catch(() => '');
         await shotOnFail(page, toastCap.includes(`最多 5 个文件`), 't11-cap-toast', `T11 toast 含"最多 5 个文件"（实得="${toastCap}"）`);
+
+        // ═══════════════════════════════════════════════════════════════
+        // T12（S2d·R3，codex 445 M2 收窄版，拍板出处见任务派单）：create-spec 预填至数量上限（5）后，
+        //   走 dual 路径（图文混合 + 焦点在可编辑 textarea）粘贴——页面闸门 siPickerCollect 全部拒收
+        //   （arr.length 已达 5，本次粘贴的 1 张新图 accepted=0），共享层按 S2c/S2d 契约收到合法的
+        //   accepted=0 应静默、不追加"已粘贴成功"toast；页面自己的"最多 5 个文件"拒收 toast 照常
+        //   出现（siPickerCollect 内部逻辑不受本次改动影响）。
+        //   坏成什么样会红：若适配器（Sys_Iteration.html collect: (key, files) => {...return accepted;}）
+        //   漏了 return（契约退化成 undefined），共享层会按向后兼容分支按 named.length=1 报"已粘贴 1
+        //   张"——即便页面闸门已经全部拒收，这正是预筛 S2c/S2d 描述的"谎报成功"场景，t12-no-success-toast
+        //   这条会红；若共享层本身忽略 accepted 契约（不管合法/非法一律按 named.length 提示），同样会红。
+        // ═══════════════════════════════════════════════════════════════
+        console.log('\n── T12：create-spec 预填至上限(5) + dual 图文混合粘贴 → 无「已粘贴」成功 toast + 页面自身「最多 5 个文件」拒收 toast ──');
+        await page.evaluate(() => {
+            siPickerReset('create-spec');
+            const filler = [];
+            for (let i = 0; i < 5; i++) filler.push(new File([new Uint8Array([1, 2, 3])], `t12-filler-${i}.png`, { type: 'image/png' }));
+            siPickerCollect('create-spec', filler);
+            siPickerRender('create-spec');
+        });
+        const beforeCount12 = await page.evaluate(() => siPickerFiles('create-spec').length);
+        await shotOnFail(page, beforeCount12 === 5, 't12-pre-fill', `T12 前置：create-spec 已预填至上限 5（实得=${beforeCount12}）`);
+        await page.evaluate(() => { const c = document.getElementById('toast-container'); if (c) c.innerHTML = ''; });
+        const r12 = await dispatchPaste(page, { withImage: true, withText: true, textValue: '上限场景混合粘贴文本', focusSelector: '#f_description' });
+        await shotOnFail(page, r12.activeTag === 'TEXTAREA', 't12-focus-is-textarea', `T12 前置：焦点在 textarea（实得="${r12.activeTag}"）`);
+        await shotOnFail(page, r12.defaultPrevented === false, 't12-default-not-prevented', `T12 dual 路径：e.defaultPrevented=false（不拦截事件本身，浏览器保留原生粘贴插入文本的机会，实得=${r12.defaultPrevented}）`);
+        await page.waitForTimeout(300);
+        const afterCount12 = await page.evaluate(() => siPickerFiles('create-spec').length);
+        await shotOnFail(page, afterCount12 === 5, 't12-count-unchanged', `T12 附件数仍为 5（页面闸门全拒收，未新增，实得=${afterCount12}）`);
+        const toast12 = await page.locator('#toast-container').textContent().catch(() => '');
+        await shotOnFail(page, toast12.includes(`最多 5 个文件`), 't12-cap-toast-present', `T12 页面自身「最多 5 个文件」拒收 toast 出现（实得="${toast12}"）`);
+        await shotOnFail(page, !toast12.includes('已粘贴'), 't12-no-success-toast', `T12 无「已粘贴...」成功 toast（accepted=0 应静默，不叠加噪音，实得="${toast12}"）`);
 
         // codex 220 M-4：getAsFile()→null 合成场景——如实说明未能构造，跳过（不造假绿）。
         //   DataTransferItem.getAsFile() 按规范仅在 item.kind!=='file' 时返回 null；本测试添加的 item

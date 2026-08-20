@@ -8,8 +8,11 @@
  *   T1 抽屉打开、唯一目标 #attList 可见 → 纯图粘贴自动收入，走既有 uploadAttach（无前端预校验，
  *      直接调用既有上传函数、真实 POST /api/issue-lite/:id/attachments 落库，附件清单刷新）
  *   T2 抽屉打开，焦点在页面其他可编辑元素（搜索框）+ 图文混合粘贴 → 放行，不触发上传
- *   T3 抽屉打开 + 页面注入第二个假目标区（真实调用 UPaste.register，非 mock 被测逻辑）→ 2 候选不猜，toast
- *   T4 抽屉关闭（position:fixed 平移出视口，非 display:none）→ 粘贴不收（M1 同款空作用域哨兵验证点）
+ *   T3 抽屉打开 + 页面注入第二个假目标区（真实调用 UPaste.register，非 mock 被测逻辑）→ 2 候选+无点击
+ *      记忆不猜，toast UPaste.MSG_MULTI_NO_MEMORY（S1b·R2：S6 起记忆命中则归属，本用例未点击任何候选，
+ *      天然落无记忆分支）
+ *   T4 抽屉关闭（position:fixed 平移出视口，非 display:none）→ 粘贴不收（M1 同款空作用域哨兵验证点，
+ *      toast UPaste.MSG_NO_CANDIDATE）
  *   T5 全程 0 console error
  *
  * 用法：本地 server（3000）已重启到最新分支代码后：node scripts/test-issue-lite-paste-playwright.js
@@ -177,21 +180,37 @@ async function main() {
         await shotOnFail(page, pasteNamedCount1b === afterCount1b, 't1b-names-prefixed', `T1b 全部附件均以"粘贴截图_"命名（贴图命名数=${pasteNamedCount1b}，附件总数=${afterCount1b}）`);
 
         // ═══════════════════════════════════════════════════════════
-        // T2：焦点在页面其他可编辑元素（搜索框）+ 图文混合粘贴 → 放行，不触发上传
+        // T2（S2·第三缺陷修复语义反转，拍板出处 memory paste_defect_leads.md 2026-08-20 用户决策之二·
+        //   双通道投递）：焦点在页面其他可编辑元素（搜索框）+ 图文混合粘贴 → 双通道：文本不拦截 + 图片
+        //   同步投递（抽屉打开时 #attList 是唯一候选，单候选场景恒归属，无需先点击）。原断言"附件清单
+        //   未变化（未误传）"把丢图钉死在案，需反转——搜索框仍是本页唯一有意义的可编辑焦点入口，图文
+        //   混合贴图不该因为焦点恰好不在附件区就把图片吞掉。
         // ═══════════════════════════════════════════════════════════
-        console.log('\n── T2：焦点在搜索框 + 图文混合粘贴 → 放行，不收附件 ──');
+        console.log('\n── T2：焦点在搜索框 + 图文混合粘贴 → 双通道（文本不拦截+图片同步投递到 attList/真实上传） ──');
         const searchSelector = (await page.locator('#filterSearch').count()) > 0 ? '#filterSearch' : 'input[type="text"]';
-        const beforeText2 = await page.locator('#attList').textContent();
+        const beforeCount2 = await page.evaluate(() => (drawerAtts || []).length);
         const r2 = await dispatchPaste(page, { withImage: true, withText: true, textValue: '搜索关键词混合粘贴', focusSelector: searchSelector });
-        await shotOnFail(page, r2.defaultPrevented === false, 't2-default-not-prevented', `T2 图片+文本+可编辑焦点 → e.defaultPrevented=false（实得=${r2.defaultPrevented}）`);
-        await page.waitForTimeout(400);
-        const afterText2 = await page.locator('#attList').textContent();
-        await shotOnFail(page, afterText2 === beforeText2, 't2-no-upload-triggered', 'T2 附件清单未变化（未误传）');
+        await shotOnFail(page, r2.defaultPrevented === false, 't2-default-not-prevented', `T2 文本通道：e.defaultPrevented=false（不拦截，实得=${r2.defaultPrevented}）`);
+        await page.waitForTimeout(800);   // 真实网络上传 + loadAttachments 刷新，同 T1 留时间
+        const afterCount2 = await page.evaluate(() => (drawerAtts || []).length);
+        await shotOnFail(page, afterCount2 === beforeCount2 + 1, 't2-image-delivered', `T2 图片通道：图片同步投递并真实上传到 attList，附件数 +1（前=${beforeCount2}/后=${afterCount2}，若实现退化回旧版丢图这条会红）`);
+        const attListText2 = await page.locator('#attList').textContent();
+        await shotOnFail(page, /粘贴截图_/.test(attListText2 || ''), 't2-image-listed', `T2 图片通道：上传成功后附件清单出现"粘贴截图_"文件名（实得="${(attListText2 || '').trim().slice(0, 80)}"）`);
 
         // ═══════════════════════════════════════════════════════════
         // T3：注入第二个假目标区（真实调用 UPaste.register，非 mock 被测逻辑）→ 2 候选不猜，toast
         // ═══════════════════════════════════════════════════════════
-        console.log('\n── T3：注入第二个可见候选目标 → 2 候选不猜，toast「请先点击目标附件区再粘贴」 ──');
+        // S1b·R2 预筛修复：S6 起"2 候选"不再恒拒——记忆命中则归属，仅"2 候选+无点击记忆"才拒绝
+        //   （拍板出处：memory paste_defect_leads.md 2026-08-20 A1 拍板）。本用例全程未点击 #attList
+        //   或注入的假目标区，天然落在"无记忆"分支，断言改为同源引用 UPaste.MSG_MULTI_NO_MEMORY。
+        // S1c·L6 预筛旁注：#ilFakePasteTarget 直接挂在 document.body 下，未传 clickScopeOf ⇒ 按
+        //   candidateHost 缺省回落 el.parentElement ⇒ 该假候选的"宿主"就是 document.body——意味着
+        //   本 register/unregister 窗口内（201-215 行）**任意一次点击**（不管点在页面哪里）都会命中
+        //   这个假候选，若同时还命中另一个真候选（如 #attList），就会构成"命中数≥2"的歧义，被歧义守卫
+        //   拦下不写记忆。窗口内**勿新增**依赖点击记忆归属（lastClickedKey）生效/不生效的用例——这个假
+        //   候选会把结果搅浑，真要测点击记忆归属请照 test-corr-paste-playwright.js 的 T3c/T3d 范式另起
+        //   独立场景（点击真实候选自己的宿主容器，不与本类"挂 body 的假候选"共存）。
+        console.log('\n── T3：注入第二个可见候选目标 + 未点击(无记忆) → 拒绝，toast MSG_MULTI_NO_MEMORY ──');
         await page.evaluate(() => {
             const d = document.createElement('div');
             d.id = 'ilFakePasteTarget';
@@ -204,7 +223,8 @@ async function main() {
         await shotOnFail(page, r3.defaultPrevented === true, 't3-default-prevented', `T3 仍 preventDefault（实得=${r3.defaultPrevented}）`);
         await page.waitForTimeout(400);
         const toast3 = await page.locator('#toast-container').textContent().catch(() => '');
-        await shotOnFail(page, toast3.includes('请先点击目标附件区再粘贴'), 't3-toast', `T3 toast 提示（实得="${toast3}"）`);
+        const msgMultiNoMemory3 = await page.evaluate(() => UPaste.MSG_MULTI_NO_MEMORY);
+        await shotOnFail(page, toast3.includes(msgMultiNoMemory3), 't3-toast', `T3 toast 含 UPaste.MSG_MULTI_NO_MEMORY（同源引用="${msgMultiNoMemory3}"，实得="${toast3}"）`);
         await page.evaluate(() => { window.__ilFakeUnregister(); const el = document.getElementById('ilFakePasteTarget'); if (el) el.remove(); });
 
         // ═══════════════════════════════════════════════════════════
@@ -224,7 +244,8 @@ async function main() {
         await shotOnFail(page, r4.defaultPrevented === true, 't4-default-prevented', `T4 无可判定目标仍 preventDefault（实得=${r4.defaultPrevented}）`);
         await page.waitForTimeout(400);
         const toast4 = await page.locator('#toast-container').textContent().catch(() => '');
-        await shotOnFail(page, toast4.includes('请先点击目标附件区再粘贴'), 't4-toast', `T4 toast 提示（实得="${toast4}"）`);
+        const msgNoCandidate4 = await page.evaluate(() => UPaste.MSG_NO_CANDIDATE);
+        await shotOnFail(page, toast4.includes(msgNoCandidate4), 't4-toast', `T4 toast 含 UPaste.MSG_NO_CANDIDATE（同源引用="${msgNoCandidate4}"，实得="${toast4}"）`);
 
         // ═══════════════════════════════════════════════════════════
         // T5：全程 0 console error

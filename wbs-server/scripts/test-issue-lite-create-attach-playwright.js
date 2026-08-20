@@ -550,7 +550,8 @@ async function cleanup() {
         expect(r8.defaultPrevented === true, `P8 仍 preventDefault（实得=${r8.defaultPrevented}）`);
         await page.waitForTimeout(400);
         const toast8 = await page.locator('#toast-container').textContent().catch(() => '');
-        expect(toast8.includes('请先点击目标附件区再粘贴'), `P8 toast 提示不猜（实得="${toast8}"）`);
+        const msgNoCandidate8 = await page.evaluate(() => UPaste.MSG_NO_CANDIDATE);
+        expect(toast8.includes(msgNoCandidate8), `P8 toast 含 UPaste.MSG_NO_CANDIDATE（同源引用="${msgNoCandidate8}"，实得="${toast8}"）`);
         // 复核：抽屉/建单弹窗各自的附件区确未被误收（贴图未落进任一容器）
         const p8Unaffected = await page.evaluate(() => ilPickerFiles().length === 0);
         expect(p8Unaffected, 'P8 复核：建单弹窗 picker 数组未被误收贴图（仍为 0）');
@@ -658,10 +659,11 @@ async function cleanup() {
                 await page.waitForTimeout(400);
                 const afterTamperedPaste = await page.evaluate(() => ilPickerFiles().length);
                 const tamperedToast = await page.locator('#toast-container').textContent().catch(() => '');
+                const msgNoCandidateTampered = await page.evaluate(() => UPaste.MSG_NO_CANDIDATE);
                 expect(afterTamperedPaste === beforeTamperedPaste,
                     `反证：篡改后编辑态贴图不再被收入 picker 数组（P5b"贴图后长度2"断言在此变红——数组长度维持不变，实际前=${beforeTamperedPaste} 后=${afterTamperedPaste}）`);
-                expect(tamperedToast.includes('请先点击目标附件区再粘贴'),
-                    `反证：编辑态候选被 isImageArea 排除后共享层判定 0 候选，弹出「请先点击目标附件区再粘贴」（实得="${tamperedToast}"）`);
+                expect(tamperedToast.includes(msgNoCandidateTampered),
+                    `反证：编辑态候选被 isImageArea 排除后共享层判定 0 候选，弹出 UPaste.MSG_NO_CANDIDATE（同源引用="${msgNoCandidateTampered}"，实得="${tamperedToast}"）`);
                 await page.evaluate(() => closeCreateModal());
             } finally {
                 try {

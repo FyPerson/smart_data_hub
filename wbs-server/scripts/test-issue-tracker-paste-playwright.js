@@ -125,15 +125,28 @@ async function main() {
         await shotOnFail(page, afterRemove1c.length === 3 && !afterRemove1c.includes(files1[0]) && afterRemove1c.includes('manual-selected.xlsx'), 't1c-remove-first', `T1c 删除第0项（原贴图）→ 剩3项、已删项不在、其余（含 manual-selected.xlsx）保留（实得=${JSON.stringify(afterRemove1c)}）`);
 
         // ═══════════════════════════════════════════════════════════
-        // T2：焦点在需求描述 + 图文混合粘贴 → 放行，不收附件
+        // T2（S2·第三缺陷修复语义反转 + 指定为"单候选页 dual 端到端用例"，拍板出处 memory
+        //   paste_defect_leads.md 2026-08-20 用户决策之二·双通道投递）：焦点在需求描述 textarea + 图文
+        //   混合粘贴 → 双通道：文本不拦截（进输入框）+ 图片同步投递（进附件区）。本页 #formAttachments
+        //   是整页唯一注册候选（真·单候选页，非"某弹窗内唯一"），归属零歧义，是本批"单候选页图文混合+
+        //   焦点输入框→文本落框+图片落区双断言"新增 dual 端到端用例的落点。原断言"未收附件"把丢图钉死
+        //   在案，需反转。
         // ═══════════════════════════════════════════════════════════
-        console.log('\n── T2：焦点在需求描述 textarea + 图文混合粘贴 → 放行，不收附件 ──');
+        console.log('\n── T2：焦点在需求描述 textarea + 图文混合粘贴 → 双通道（文本不拦截+图片同步投递，单候选页端到端） ──');
         const beforeCount2 = await page.evaluate(() => trPickerFiles().length);
         const r2 = await dispatchPaste(page, { withImage: true, withText: true, textValue: '需求描述混合粘贴文本', focusSelector: '#formDescription' });
-        await shotOnFail(page, r2.defaultPrevented === false, 't2-default-not-prevented', `T2 图片+文本+可编辑焦点 → e.defaultPrevented=false（实得=${r2.defaultPrevented}）`);
+        // 文本通道：defaultPrevented=false 是文本能落进 textarea 的必要条件——本层监听器未拦截，把默认
+        //   粘贴处理权原样交还浏览器（真实 OS 级粘贴场景下这就是文本落框；合成事件在 Chromium 下是否
+        //   真执行原生插入是测试工具层面的已知限制，不是本模块行为，不影响这条断言本身的正确性）。
+        await shotOnFail(page, r2.defaultPrevented === false, 't2-text-channel-not-prevented', `T2 文本通道：e.defaultPrevented=false（不拦截，实得=${r2.defaultPrevented}）`);
         await page.waitForTimeout(300);
-        const afterCount2 = await page.evaluate(() => trPickerFiles().length);
-        await shotOnFail(page, afterCount2 === beforeCount2, 't2-no-attachment-added', `T2 未收附件（前=${beforeCount2}/后=${afterCount2}）`);
+        // 图片通道：S2 双通道投递核心断言——若实现仍是旧版"dual 不拦截=不投递"，afterCount2 会等于
+        //   beforeCount2（这条会红，即预筛描述的"图文混合静默丢图"第三缺陷复现）。
+        const afterFiles2 = await page.evaluate(() => trPickerFiles().map(f => f.name));
+        const afterCount2 = afterFiles2.length;
+        await shotOnFail(page, afterCount2 === beforeCount2 + 1, 't2-image-channel-delivered', `T2 图片通道：图片同步投递进 formAttachments，附件数 +1（前=${beforeCount2}/后=${afterCount2}，若实现退化回旧版丢图这条会红）`);
+        const pastedName2 = afterFiles2[afterFiles2.length - 1];
+        await shotOnFail(page, /^粘贴截图_/.test(pastedName2 || ''), 't2-image-channel-name', `T2 图片通道：新投递文件名以"粘贴截图_"开头（实得="${pastedName2}"）`);
 
         // ═══════════════════════════════════════════════════════════
         // T3：弹窗关闭后粘贴 → 不收（0 候选，toast 提示）
@@ -146,7 +159,8 @@ async function main() {
         await shotOnFail(page, r3.defaultPrevented === true, 't3-default-prevented', `T3 无可判定目标仍 preventDefault（实得=${r3.defaultPrevented}）`);
         await page.waitForTimeout(300);
         const toast3 = await page.locator('#toast-container').textContent().catch(() => '');
-        await shotOnFail(page, toast3.includes('请先点击目标附件区再粘贴'), 't3-toast', `T3 toast 提示（实得="${toast3}"）`);
+        const msgNoCandidate3 = await page.evaluate(() => UPaste.MSG_NO_CANDIDATE);
+        await shotOnFail(page, toast3.includes(msgNoCandidate3), 't3-toast', `T3 toast 含 UPaste.MSG_NO_CANDIDATE（同源引用="${msgNoCandidate3}"，实得="${toast3}"）`);
 
         // ═══════════════════════════════════════════════════════════
         // T4：全程 0 console error

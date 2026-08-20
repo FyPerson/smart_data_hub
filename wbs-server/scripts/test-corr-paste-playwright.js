@@ -174,25 +174,40 @@ async function main() {
         await shotOnFail(page, gateResults.oversizeCount === 0, 'low3-oversize', `LOW-3④ 超 20MB 文件被拒（实得=${gateResults.oversizeCount}）`);
 
         // ═══════════════════════════════════════════════════════════
-        // T2：完成弹窗内焦点在文字说明 + 图文混合 → 放行，不收附件
+        // T2（S2·第三缺陷修复语义反转，拍板出处 memory paste_defect_leads.md 2026-08-20 用户决策之二·
+        //   双通道投递）：完成弹窗内焦点在文字说明 + 图文混合 → 双通道：文本不拦截 + 图片同步投递进
+        //   completeFilesPicked（原断言"未收附件"把丢图钉死在案，需反转）。
+        //   顺带修正数据源：原断言读 `document.getElementById('formCompleteFiles').files.length`——但
+        //   贴图走的是数组持态收集（corrPickerCollect 追加进 CORR_PICKER_FILES[key]），从不触碰裸
+        //   input 的 .files（那只在原生文件选择器 onchange 时才有值，且立即清空），导致这条断言无论
+        //   贴图收没收都恒为 0===0（复核实测：改造前后均绿，测的其实是"input.files 恒空"这个无关事实，
+        //   不是"图收没收"）。改用 T1 同款真数据源 corrPickerFiles('completeFilesPicked')。
         // ═══════════════════════════════════════════════════════════
-        console.log('\n── T2：图文混合 + 焦点在完成说明 textarea → 放行默认粘贴，不收附件 ──');
+        console.log('\n── T2：图文混合 + 焦点在完成说明 textarea → 双通道（文本不拦截+图片同步投递到 completeFilesPicked） ──');
         await page.evaluate((id) => openComplete(id, 'single', false), anyId);
         await page.waitForSelector('#completeModal.open', { timeout: 5000 });
         await page.waitForTimeout(200);
-        const beforeCount2 = await page.evaluate(() => document.getElementById('formCompleteFiles').files.length);
+        const beforeCount2 = await page.evaluate(() => corrPickerFiles('completeFilesPicked').length);
         const r2 = await dispatchPaste(page, { withImage: true, withText: true, textValue: '完成说明混合粘贴文本', focusSelector: '#formCompleteSingleNote' });
-        await shotOnFail(page, r2.defaultPrevented === false, 't2-default-not-prevented', `T2 图片+文本+可编辑焦点 → e.defaultPrevented=false（实得=${r2.defaultPrevented}）`);
+        await shotOnFail(page, r2.defaultPrevented === false, 't2-default-not-prevented', `T2 文本通道：e.defaultPrevented=false（不拦截，实得=${r2.defaultPrevented}）`);
         await page.waitForTimeout(300);
-        const afterCount2 = await page.evaluate(() => document.getElementById('formCompleteFiles').files.length);
-        await shotOnFail(page, afterCount2 === beforeCount2, 't2-no-attachment-added', `T2 未收附件（前=${beforeCount2}/后=${afterCount2}）`);
+        // 注：File 对象经 page.evaluate 返回值序列化到 Node 端会丢失 .name 等属性（结构化克隆对
+        //   File/Blob 支持不完整），.name 提取必须在浏览器上下文内完成，同 T1 既有范式。
+        const afterNames2 = await page.evaluate(() => corrPickerFiles('completeFilesPicked').map(f => f.name));
+        const afterCount2 = afterNames2.length;
+        await shotOnFail(page, afterCount2 === beforeCount2 + 1, 't2-image-delivered', `T2 图片通道：图片同步投递进 completeFilesPicked，数组 +1（前=${beforeCount2}/后=${afterCount2}，若实现退化回旧版丢图这条会红）`);
+        const pastedName2 = afterNames2[afterNames2.length - 1];
+        await shotOnFail(page, /^粘贴截图_/.test(pastedName2 || ''), 't2-image-name-prefix', `T2 图片通道：新投递文件名以"粘贴截图_"开头（实得="${pastedName2}"）`);
         await page.evaluate(() => closeModal('completeModal'));
         await page.waitForTimeout(200);
 
         // ═══════════════════════════════════════════════════════════
         // T3：建单弹窗 2 目标同时可见（OA截图 + 待修复数据）→ 不猜，toast 提示
         // ═══════════════════════════════════════════════════════════
-        console.log('\n── T3：建单弹窗 2 个目标同时可见 → 不猜，toast「请先点击目标附件区再粘贴」 ──');
+        // S1b·R2 预筛修复：S6 起"2 候选"不再恒拒——记忆命中则归属，仅"2 候选+无点击记忆"才拒绝
+        //   （拍板出处：memory paste_defect_leads.md 2026-08-20 A1 拍板）。本用例全程未点击任何候选区，
+        //   天然落在"无记忆"分支，断言随之从硬编码旧文案改为同源引用 UPaste.MSG_MULTI_NO_MEMORY。
+        console.log('\n── T3：建单弹窗 2 个目标同时可见 + 未点击(无记忆) → 拒绝，toast MSG_MULTI_NO_MEMORY ──');
         await page.evaluate(() => openCreateModal());
         await page.waitForSelector('#createModal.open', { timeout: 5000 });
         await page.waitForTimeout(200);
@@ -215,10 +230,52 @@ async function main() {
         await shotOnFail(page, r3.defaultPrevented === true, 't3-default-prevented', `T3 仍 preventDefault（不猜也拦，实得=${r3.defaultPrevented}）`);
         await page.waitForTimeout(300);
         const toast3 = await page.locator('#toast-container').textContent().catch(() => '');
-        await shotOnFail(page, toast3.includes('请先点击目标附件区再粘贴'), 't3-toast', `T3 toast 含"请先点击目标附件区再粘贴"（实得="${toast3}"）`);
+        const msgMultiNoMemory = await page.evaluate(() => UPaste.MSG_MULTI_NO_MEMORY);
+        await shotOnFail(page, toast3.includes(msgMultiNoMemory), 't3-toast', `T3 toast 含 UPaste.MSG_MULTI_NO_MEMORY（同源引用="${msgMultiNoMemory}"，实得="${toast3}"）`);
         const oaFiles3 = await page.evaluate(() => document.getElementById('formOaProofFiles').files.length);
         const epFiles3 = await page.evaluate(() => document.getElementById('formErrorProofFiles').files.length);
         await shotOnFail(page, oaFiles3 === 0 && epFiles3 === 0, 't3-neither-collected', `T3 两个目标均未误收（OA=${oaFiles3}, 待修复=${epFiles3}）`);
+
+        // ═══════════════════════════════════════════════════════════
+        // T3c/T3d（S1b·R1+R2 预筛修复新增，拍板出处同上）：点击记忆归属正向用例——复用 T3 同一 2 候选
+        // 场景（createModal 内 OA 截图区/待修复数据区同时可见），验证"点击候选宿主（非零高度候选元素
+        // 本身，这里点的是各自 .u-form-group 里的 <label>，不是空 chip 预览 div）→ 再粘贴 → 按记忆归属
+        // 到对应候选区"这条 R1 核心链路真的打通了——这是浏览器层能证明 R1 生效的唯一证据：若点了宿主
+        // 记忆仍写不进去，图片会像 T3 一样被拒绝而不是精确归入点击过的那个区，下面两条会红。
+        // ═══════════════════════════════════════════════════════════
+        console.log('\n── T3c：点击 OA 截图区宿主(label，非候选元素本身)后粘贴 → 按记忆归属到 OA 区 ──');
+        await page.evaluate(() => { const c = document.getElementById('toast-container'); if (c) c.innerHTML = ''; });
+        await page.click('#oaProofGroup label');
+        await page.waitForTimeout(100);
+        const before3c = {
+            oa: await page.evaluate(() => corrPickerFiles('createOaProofPicked').length),
+            err: await page.evaluate(() => corrPickerFiles('createErrProofPicked').length),
+        };
+        const r3c = await dispatchPaste(page, { withImage: true });
+        await shotOnFail(page, r3c.defaultPrevented === true, 't3c-default-prevented', `T3c defaultPrevented=true（实得=${r3c.defaultPrevented}）`);
+        await page.waitForTimeout(300);
+        const after3c = {
+            oa: await page.evaluate(() => corrPickerFiles('createOaProofPicked').length),
+            err: await page.evaluate(() => corrPickerFiles('createErrProofPicked').length),
+        };
+        await shotOnFail(page, after3c.oa === before3c.oa + 1 && after3c.err === before3c.err, 't3c-attributed-to-oa',
+            `T3c 点击 OA 区宿主后粘贴 → 精确归入 OA 截图区，不误入待修复数据区（前 OA=${before3c.oa}/待修复=${before3c.err}，后 OA=${after3c.oa}/待修复=${after3c.err}）`);
+
+        console.log('\n── T3d：点击 待修复数据区宿主(label)后粘贴 → 按记忆归属到待修复数据区 ──');
+        await page.evaluate(() => { const c = document.getElementById('toast-container'); if (c) c.innerHTML = ''; });
+        await page.click('#errProofGroup label');
+        await page.waitForTimeout(100);
+        const before3d = { oa: after3c.oa, err: after3c.err };
+        const r3d = await dispatchPaste(page, { withImage: true });
+        await shotOnFail(page, r3d.defaultPrevented === true, 't3d-default-prevented', `T3d defaultPrevented=true（实得=${r3d.defaultPrevented}）`);
+        await page.waitForTimeout(300);
+        const after3d = {
+            oa: await page.evaluate(() => corrPickerFiles('createOaProofPicked').length),
+            err: await page.evaluate(() => corrPickerFiles('createErrProofPicked').length),
+        };
+        await shotOnFail(page, after3d.err === before3d.err + 1 && after3d.oa === before3d.oa, 't3d-attributed-to-errproof',
+            `T3d 点击待修复数据区宿主后粘贴 → 精确归入待修复数据区，不误入 OA 区（前 OA=${before3d.oa}/待修复=${before3d.err}，后 OA=${after3d.oa}/待修复=${after3d.err}）`);
+
         await page.evaluate(() => closeModal('createModal'));
         await page.waitForTimeout(200);
 
@@ -233,7 +290,8 @@ async function main() {
         await shotOnFail(page, r4.defaultPrevented === true, 't4-default-prevented', `T4 无可判定目标仍 preventDefault（实得=${r4.defaultPrevented}）`);
         await page.waitForTimeout(300);
         const toast4 = await page.locator('#toast-container').textContent().catch(() => '');
-        await shotOnFail(page, toast4.includes('请先点击目标附件区再粘贴'), 't4-toast', `T4 toast 提示（实得="${toast4}"）`);
+        const msgNoCandidate4 = await page.evaluate(() => UPaste.MSG_NO_CANDIDATE);
+        await shotOnFail(page, toast4.includes(msgNoCandidate4), 't4-toast', `T4 toast 含 UPaste.MSG_NO_CANDIDATE（同源引用="${msgNoCandidate4}"，实得="${toast4}"）`);
 
         // ═══════════════════════════════════════════════════════════
         // T4b（codex S4 复审 LOW-1 采纳）：两个弹窗人为同时 open（正常操作路径不可达的异常态，防御性
@@ -251,7 +309,8 @@ async function main() {
         await shotOnFail(page, r4b.defaultPrevented === true, 't4b-default-prevented', `T4b 仍 preventDefault（实得=${r4b.defaultPrevented}）`);
         await page.waitForTimeout(300);
         const toast4b = await page.locator('#toast-container').textContent().catch(() => '');
-        await shotOnFail(page, toast4b.includes('请先点击目标附件区再粘贴'), 't4b-toast', `T4b toast 提示（实得="${toast4b}"）`);
+        const msgNoCandidate4b = await page.evaluate(() => UPaste.MSG_NO_CANDIDATE);
+        await shotOnFail(page, toast4b.includes(msgNoCandidate4b), 't4b-toast', `T4b toast 含 UPaste.MSG_NO_CANDIDATE（同源引用="${msgNoCandidate4b}"，实得="${toast4b}"）`);
         const oaFiles4b = await page.evaluate(() => document.getElementById('formOaProofFiles').files.length);
         const epFiles4b = await page.evaluate(() => document.getElementById('formErrorProofFiles').files.length);
         const completeFiles4b = await page.evaluate(() => document.getElementById('formCompleteFiles').files.length);

@@ -702,7 +702,7 @@
     <script src="assets/js/unify-helpers.js?v=v1.141.0_badge1"></script>
     <!-- S4（前端统一 贴图粘贴扩展方案 20260801_v0.1）：Ctrl+V 贴图共享层接入。文件本体未改，沿用
          S3 抽取时的缓存串；改共享层本体时须同步 bump 这里 + 所有引用页。 -->
-    <script src="assets/js/u-paste.js?v=v1.134.0_upaste2"></script>
+    <script src="assets/js/u-paste.js?v=v1.134.0_upaste3"></script>
     <!-- S5（暂缓与列表导出方案 v1.1 §3.1）：列表导出（Excel）+ 创建日期范围筛选共享层接入。
          xlsx vendor 先于 u-export.js 加载（attachExport 运行时依赖全局 XLSX）；两者缓存串统一
          v1.157.0_uexport1，与 u-export.js 内 KIT_VERSION='uexport1' 对拍（verify-export-columns 断言 4）。 -->
@@ -2420,7 +2420,10 @@
         // S4：校验闸门抽成独立函数（原内联在 corrAttachFilesChange 里）——贴图 collect 适配器与文件选择
         //   onchange 现在共用同一份数量上限/白名单/大小/去重逻辑，零漂移风险（对齐 corrAttachCollectFiles
         //   命名习惯，无行为变化：与原内联代码逐字相同，只是包了一层函数）。
+        // S2c·R1（codex 合并轮 M）：本函数是真实拒收路径（数量上限/扩展名/大小/去重四道闸门，拒收时
+        //   只 showToast 不抛异常）——返回本次实际接收数，供 u-paste.js 贴图 dual 路径据实提示。
         function corrAttachCollectFiles(fileList) {
+            let accepted = 0;
             for (const f of Array.from(fileList || [])) {
                 if (corrAttachFiles.length >= CORR_ATTACH_MAX) { showToast(`最多 ${CORR_ATTACH_MAX} 个文件`, 'error'); break; }
                 const ext = f.name.split('.').pop().toLowerCase();
@@ -2430,7 +2433,9 @@
                     showToast(`该文件已选：${f.name}`, 'info'); continue;
                 }
                 corrAttachFiles.push(f);
+                accepted++;
             }
+            return accepted;
         }
         function corrAttachFilesChange(e) {
             corrAttachCollectFiles(e.target.files);
@@ -2671,6 +2676,10 @@
             const t = CORR_PICKER_TARGETS[key];
             if (t) { const input = document.getElementById(t.inputId); if (input) input.value = ''; }
             corrPickerRender(key);
+            // S1b·R4 接线（预筛 MEDIUM-2）：通知共享层清同 key 文件名序号+点击记忆。调用点全在"开弹窗"
+            //   路径 → 每轮弹窗记忆从零开始，防上一轮点击记忆复活导致零点击静默归属（本页是六页中唯一
+            //   的真多候选页，此接线缺席时共享层的 clearClickMemory 对本页形同虚设）。
+            if (window.UPaste && typeof UPaste.resetSeq === 'function') UPaste.resetSeq(key);
         }
         // 6 个裸 input 共用 onchange：读 input.files → 追加进数组 → 立即清空 input（input 不再是真相源，
         //   贴图/多次选择/重选统一走数组追加语义）→ 重渲染预览
@@ -2698,7 +2707,7 @@
         //   共享层回落 document（codex S5 复审 L2 统一表述）——届时 7 个目标容器全部深藏在 display:none
         //   的弹窗内，isVisible() 天然过滤掉，候选恒为 0。
         // ============================================================
-        const DC_UPASTE_KIT_EXPECTED = 'upaste2';   // 须与 <script src="...u-paste.js?v=..._upaste2"> 缓存串尾部一致
+        const DC_UPASTE_KIT_EXPECTED = 'upaste3';   // 须与 <script src="...u-paste.js?v=..._upaste3"> 缓存串尾部一致
         // codex S4 复审 LOW-2 采纳（S5 落地）：版本比对逻辑下沉共享层 UPaste.checkVersion()（见
         // corrInitUPaste 内调用），页面只留 expected 常量 + "未加载"前置判断。
         // codex S4 复审 LOW-1 采纳：原实现"逐个查、第一个命中就返回"在理论异常态（两个弹窗同时带 open
@@ -2727,7 +2736,11 @@
                 selector: selector,
                 keyOf: (el) => el.id,
                 collect: (key, files) => {
-                    if (key === 'corrAttachPreview') { corrAttachCollectFiles(files); renderCorrAttachPreview(); return; }
+                    // S2c·R1：corrAttachPreview 走 corrAttachCollectFiles（真实拒收路径），透传其实际
+                    //   接收数；其余 6 个 CORR_PICKER_TARGETS key 走 corrPickerCollect（纯追加零校验，
+                    //   见其定义旁注），维持不返回（undefined 旧行为对它们才是正确语义——从未拒收过任何
+                    //   文件，files.length 本就等于接收数，无需改动）。
+                    if (key === 'corrAttachPreview') { const accepted = corrAttachCollectFiles(files); renderCorrAttachPreview(); return accepted; }
                     if (!CORR_PICKER_TARGETS[key]) return;
                     corrPickerCollect(key, files);
                     corrPickerRender(key);

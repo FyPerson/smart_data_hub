@@ -48,14 +48,16 @@ async function loginPage(browser, token) {
 }
 
 const TINY_PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
-async function dispatchPaste(page, { withImage = true, withText = false, textValue = '', textType = 'text/plain', focusSelector = null } = {}) {
-    return page.evaluate(({ b64, withImage, withText, textValue, textType, focusSelector }) => {
+// S2d·R3（codex 445 M2 收窄版）新增 imageCount：一次粘贴放几张图（默认 1，向后兼容既有全部调用点）——
+// T5b 需要一次粘贴 2 张图构造"部分拒收"场景，其余既有调用点不传维持单图行为不变。
+async function dispatchPaste(page, { withImage = true, imageCount = 1, withText = false, textValue = '', textType = 'text/plain', focusSelector = null } = {}) {
+    return page.evaluate(({ b64, withImage, imageCount, withText, textValue, textType, focusSelector }) => {
         const dt = new DataTransfer();
         if (withImage) {
             const bin = atob(b64);
             const bytes = new Uint8Array(bin.length);
             for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-            dt.items.add(new File([bytes], 'clipboard-image', { type: 'image/png' }));
+            for (let n = 0; n < imageCount; n++) dt.items.add(new File([bytes], 'clipboard-image', { type: 'image/png' }));
         }
         if (withText) dt.items.add(textValue, textType);
         if (focusSelector) { const el = document.querySelector(focusSelector); if (el) el.focus(); }
@@ -63,7 +65,7 @@ async function dispatchPaste(page, { withImage = true, withText = false, textVal
         const evt = new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: dt });
         document.dispatchEvent(evt);
         return { defaultPrevented: evt.defaultPrevented };
-    }, { b64: TINY_PNG_B64, withImage, withText, textValue, textType, focusSelector });
+    }, { b64: TINY_PNG_B64, withImage, imageCount, withText, textValue, textType, focusSelector });
 }
 
 async function main() {
@@ -146,16 +148,20 @@ async function main() {
         await assertExcluded('T3a', ['f_delivery_script', 'f_delivery_data']);
         const dlScriptBefore = await page.evaluate(() => document.getElementById('f_delivery_script').files.length);
         const dlDataBefore = await page.evaluate(() => document.getElementById('f_delivery_data').files.length);
-        // 本页 showToast(msg, type='success') 是页面自有的单元素实现（#toast，class 切换 show/hide，
-        // 非其余四页共用的 app.js #toast-container 多条堆叠范式，逐字核实：Data_Collab.html:1422-1427）——
-        // u-paste.js 只按位置调用 w.showToast(msg, type)，两种实现的入参顺序恰好兼容，无需改共享层；
-        // 断言口径对应改成读 #toast（不做清空——该元素每次调用直接整体覆盖 textContent，无堆叠残留问题）。
-        await page.evaluate(() => { const t = document.getElementById('toast'); if (t) t.textContent = ''; });
+        // S1b·R2 预筛修复顺带发现并修正的陈旧断言（与 R1-R5 无关，先核实为基线既有问题——退回 dda7eb5
+        // 复测 T3a 同样红且同款空字符串，证明本条不是本批改动引入的回归）：注释原称"本页 showToast 是
+        // 页面自有单元素实现（#toast）"，但 Data_Collab.html:1382-1383 的注释明确写着"原 `#toast` 单例
+        // 宿主节点已删：全站 toast 走 app.js 共享版，容器 #toast-container"（通知统一 N1·D7 批次）——
+        // 本页早已改用共享 app.js#showToast（挂 #toast-container，堆叠范式），旧注释与 #toast 选择器已
+        // 双双过期，读取的元素根本不存在，textContent 恒为空字符串，与 MSG_NO_CANDIDATE 文案变更无关。
+        // 断言口径改回与其余套件一致的 #toast-container。
+        await page.evaluate(() => { const c = document.getElementById('toast-container'); if (c) c.innerHTML = ''; });
         const r3a = await dispatchPaste(page, { withImage: true });
         await shotOnFail(page, r3a.defaultPrevented === true, 't3a-default-prevented', `T3a 无可判定目标仍 preventDefault（实得=${r3a.defaultPrevented}）`);
         await page.waitForTimeout(300);
-        const toast3a = await page.locator('#toast').textContent().catch(() => '');
-        await shotOnFail(page, toast3a.includes('请先点击目标附件区再粘贴'), 't3a-toast', `T3a toast 提示（实得="${toast3a}"）`);
+        const toast3a = await page.locator('#toast-container').textContent().catch(() => '');
+        const msgNoCandidate3a = await page.evaluate(() => UPaste.MSG_NO_CANDIDATE);
+        await shotOnFail(page, toast3a.includes(msgNoCandidate3a), 't3a-toast', `T3a toast 含 UPaste.MSG_NO_CANDIDATE（同源引用="${msgNoCandidate3a}"，实得="${toast3a}"）`);
         const dlScriptAfter = await page.evaluate(() => document.getElementById('f_delivery_script').files.length);
         const dlDataAfter = await page.evaluate(() => document.getElementById('f_delivery_data').files.length);
         await shotOnFail(page, dlScriptAfter === dlScriptBefore && dlDataAfter === dlDataBefore, 't3a-nothing-collected', `T3a SQL/数据文件区 files 长度不变（script ${dlScriptBefore}→${dlScriptAfter}, data ${dlDataBefore}→${dlDataAfter}）`);
@@ -262,19 +268,59 @@ async function main() {
         await page.waitForTimeout(200);
 
         // ═══════════════════════════════════════════════════════════
-        // T5：图文混合 + 焦点在描述 textarea → 放行，不收
+        // T5（S2·第三缺陷修复语义反转，拍板出处 memory paste_defect_leads.md 2026-08-20 用户决策之二·
+        //   双通道投递）：图文混合 + 焦点在描述 textarea → 双通道：文本不拦截 + 图片同步投递（newModal
+        //   内此时唯一候选是 filePreview，归属零歧义）。原断言"未收，不收"把丢图钉死在案，需反转。
         // ═══════════════════════════════════════════════════════════
-        console.log('\n── T5：图文混合 + 焦点在描述 textarea → 放行，不收 ──');
+        console.log('\n── T5：图文混合 + 焦点在描述 textarea → 双通道（文本不拦截+图片同步投递到 filePreview） ──');
         await page.evaluate(() => openNewModal());
         await page.waitForSelector('#newModal.open', { timeout: 5000 });
         await page.waitForTimeout(300);
         const before5 = await page.evaluate(() => selectedFiles.length);
         const r5 = await dispatchPaste(page, { withImage: true, withText: true, textValue: '协作单描述混合粘贴', focusSelector: '#f_desc' });
-        await shotOnFail(page, r5.defaultPrevented === false, 't5-default-not-prevented', `T5 图片+文本+可编辑焦点 → e.defaultPrevented=false（实得=${r5.defaultPrevented}）`);
+        await shotOnFail(page, r5.defaultPrevented === false, 't5-default-not-prevented', `T5 文本通道：e.defaultPrevented=false（不拦截，实得=${r5.defaultPrevented}）`);
         await page.waitForTimeout(300);
         const after5 = await page.evaluate(() => selectedFiles.length);
-        await shotOnFail(page, after5 === before5, 't5-no-collect', `T5 未收附件（前=${before5}/后=${after5}）`);
+        await shotOnFail(page, after5 === before5 + 1, 't5-image-delivered', `T5 图片通道：图片同步投递进 filePreview/selectedFiles，+1（前=${before5}/后=${after5}，若实现退化回旧版丢图这条会红）`);
         await page.evaluate(() => closeNewModal());
+        await page.waitForTimeout(200);
+
+        // ═══════════════════════════════════════════════════════════
+        // T5b（S2d·R3，codex 445 M2 收窄版，拍派单口径）：newModal filePreview 预填至上限-1（4/5）后，
+        //   dual 路径（一次粘贴 2 张图 + 焦点在描述 textarea）→ 页面闸门 collectIntoSelectedFiles 只剩
+        //   1 个名额，实际接收 accepted=1（第 2 张被拒收+页面自身"最多上传 5 个文件"toast），共享层按
+        //   S2c/S2d 契约应据实提示"已粘贴 1 张图片到附件区"（dualDeliveredMsg(1)），不是按尝试投递的
+        //   named.length=2 谎报"已粘贴 2 张"。
+        //   坏成什么样会红：若适配器（Data_Collab.html collect: (key, files) => {...return accepted;}）
+        //   漏了 return（契约退化成 undefined），或共享层忽略 accepted 契约、一律按 named.length 提示，
+        //   会报出"已粘贴 2 张"——这正是预筛描述的"谎报成功"场景，t5b-success-toast-actual-count 这条会红。
+        // ═══════════════════════════════════════════════════════════
+        console.log('\n── T5b：filePreview 预填至上限-1(4/5) + dual 一次粘贴 2 张图 → 成功 toast 按实数「已粘贴 1 张」（非 2 张） ──');
+        await page.evaluate(() => openNewModal());
+        await page.waitForSelector('#newModal.open', { timeout: 5000 });
+        await page.waitForTimeout(300);
+        await page.evaluate(() => {
+            const filler = [];
+            for (let i = 0; i < 4; i++) filler.push(new File([new Uint8Array([1, 2, 3])], `t5b-filler-${i}.png`, { type: 'image/png' }));
+            collectIntoSelectedFiles(filler);
+            renderFilePreview();
+        });
+        const before5b = await page.evaluate(() => selectedFiles.length);
+        await shotOnFail(page, before5b === 4, 't5b-pre-fill', `T5b 前置：filePreview 已预填至 4（上限-1，实得=${before5b}）`);
+        await page.evaluate(() => { const c = document.getElementById('toast-container'); if (c) c.innerHTML = ''; });
+        const r5b = await dispatchPaste(page, { withImage: true, imageCount: 2, withText: true, textValue: '上限-1场景混合粘贴', focusSelector: '#f_desc' });
+        await shotOnFail(page, r5b.defaultPrevented === false, 't5b-default-not-prevented', `T5b dual 路径：e.defaultPrevented=false（不拦截事件本身，实得=${r5b.defaultPrevented}）`);
+        await page.waitForTimeout(300);
+        const after5b = await page.evaluate(() => selectedFiles.length);
+        await shotOnFail(page, after5b === 5, 't5b-count-capped', `T5b 附件数恰好收到 1 张后封顶（4→5，第 2 张被拒收，实得=${after5b}）`);
+        const toast5b = await page.locator('#toast-container').textContent().catch(() => '');
+        await shotOnFail(page, toast5b.includes('最多上传 5 个文件'), 't5b-cap-toast-present', `T5b 页面自身「最多上传 5 个文件」拒收 toast 出现（实得="${toast5b}"）`);
+        const dualMsg1_5b = await page.evaluate(() => UPaste.dualDeliveredMsg(1));
+        const dualMsg2_5b = await page.evaluate(() => UPaste.dualDeliveredMsg(2));
+        await shotOnFail(page, toast5b.includes(dualMsg1_5b) && !toast5b.includes(dualMsg2_5b),
+            't5b-success-toast-actual-count', `T5b 成功 toast 按实数「已粘贴 1 张」（同源引用 dualDeliveredMsg(1)="${dualMsg1_5b}"），非谎报 2 张（dualDeliveredMsg(2)="${dualMsg2_5b}"，实得 toast="${toast5b}"）`);
+        await page.evaluate(() => closeNewModal());
+        await page.waitForTimeout(200);
 
         // ═══════════════════════════════════════════════════════════
         // T6：全程 0 console error

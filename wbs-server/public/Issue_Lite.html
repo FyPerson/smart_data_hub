@@ -283,7 +283,7 @@
     <script src="assets/js/unify-helpers.js?v=v1.141.0_badge1"></script>
     <!-- S4（前端统一 贴图粘贴扩展方案 20260801_v0.1）：Ctrl+V 贴图共享层接入。文件本体未改，沿用
          S3 抽取时的缓存串；改共享层本体时须同步 bump 这里 + 所有引用页。 -->
-    <script src="assets/js/u-paste.js?v=v1.134.0_upaste2"></script>
+    <script src="assets/js/u-paste.js?v=v1.134.0_upaste3"></script>
     <!-- A3：图片附件 lightbox（复刻 Data_Correction 范式；点 overlay/×/ESC 关，点大图/说明文字不关；
          codex 256 L-1 补齐 caption 排除） -->
     <div id="ilLightbox" class="il-lightbox" onclick="ilCloseLightbox(event)">
@@ -1249,7 +1249,7 @@
         //   （逻辑不变，仍是 S4 落地时的 MED-1 分析结论：顺序 await，busy 锁不会吞后续张）；
         //   'ilCreateAttachPreview' 走新 picker 的 collect + render。
         // ============================================================
-        const IL_UPASTE_KIT_EXPECTED = 'upaste2';   // 须与 <script src="...u-paste.js?v=..._upaste2"> 缓存串尾部一致
+        const IL_UPASTE_KIT_EXPECTED = 'upaste3';   // 须与 <script src="...u-paste.js?v=..._upaste3"> 缓存串尾部一致
         // codex S4 复审 LOW-2 采纳（S5 落地）：版本比对逻辑下沉共享层 UPaste.checkVersion()（见
         // ilInitUPaste 内调用），页面只留 expected 常量 + "未加载"前置判断。
         // S3 新增：抽屉 / 建单弹窗互斥判定（对齐 Data_Correction corrPasteScopeResolver 的计数写法，
@@ -1301,6 +1301,17 @@
                     // async 函数跑完（含 finally busy=false 释放锁），下一轮循环才发起下一张的上传。busy
                     // 锁的"若已忙碌直接 return"分支在本循环内永远不会被自己的下一次迭代触发（迭代 N+1
                     // 发起时迭代 N 的 finally 早已执行完毕），故多图不会被 busy 锁吞掉后续几张。
+                    // S2c·R1 已核实但**本批不改**：attList 是真实拒收路径（uploadAttach 网络/服务端拒收，
+                    //   见其定义——失败时自己 showToast 且 return false），但拒收结果是**异步**的——本
+                    //   collect 回调本身是同步函数，内部的 async IIFE 未被 await，函数在 IIFE 完成前就已
+                    //   经返回（同步返回 undefined）。u-paste.js 的 accepted 契约要求"collect 返回时已知
+                    //   实际接收数"，这里在返回的那一刻上传还没跑完，无法用一行 return 表达真实结果——
+                    //   若勉强 return files.length 等价于不改（仍是"尝试投递张数"，不是"接收张数"）；真要
+                    //   解决需要让 deliverImages 感知 Promise（await collect 的返回值），是比"一行 return"
+                    //   大得多的改动，本批未获裁定，不动。已知影响：dual 路径贴图到 attList 时，若之后
+                    //   异步上传失败，会出现"已粘贴 N 张"（提前）+"上传失败"（稍后，uploadAttach 自己弹）
+                    //   两条先后 toast——不算谎报（图确实交去上传了），但顺序上有一瞬的乐观提前量，留作
+                    //   已知限制记录，供后续单独课题评估是否要把 deliverImages 改造成 async-aware。
                     (async () => { for (const f of files) { await uploadAttach(id, f); } })();
                 },
             });

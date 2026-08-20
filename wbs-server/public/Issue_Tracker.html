@@ -584,7 +584,7 @@
     <script src="assets/js/unify-helpers.js?v=v1.141.0_badge1"></script>
     <!-- S5（前端统一 贴图粘贴扩展方案 20260801_v0.1）：Ctrl+V 贴图共享层接入。文件本体未改，沿用
          S5 checkVersion 下沉后的缓存串；改共享层本体时须同步 bump 这里 + 所有引用页。 -->
-    <script src="assets/js/u-paste.js?v=v1.134.0_upaste2"></script>
+    <script src="assets/js/u-paste.js?v=v1.134.0_upaste3"></script>
     <script>
         let allIssues = [];
         let allUsers = [];
@@ -1641,7 +1641,7 @@
         //   未开则返回 null，由共享层回落 document；selector 仍用 #formAttachments 本身（原生文件输入
         //   有真实渲染尺寸，风险最低，不改注册面）。
         // ============================================================
-        const TR_UPASTE_KIT_EXPECTED = 'upaste2';   // 须与 <script src="...u-paste.js?v=..._upaste2"> 缓存串尾部一致
+        const TR_UPASTE_KIT_EXPECTED = 'upaste3';   // 须与 <script src="...u-paste.js?v=..._upaste3"> 缓存串尾部一致
         const TR_ATTACH_FILES = [];   // 单一附件数组（本页仅 1 个上传点，无需 S1 那种 key→数组字典）
         const TR_ATTACH_URLS = [];    // 与 TR_ATTACH_FILES 下标一一对应的 objectURL 缓存（仅图片项非空）
         const TR_IMG_EXTS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'];

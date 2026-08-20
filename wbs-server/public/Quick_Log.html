@@ -140,7 +140,7 @@
     <script src="assets/js/app.js?v=v1.142.0_notify1"></script>
     <!-- 前端统一 贴图粘贴扩展方案 20260801_v0.1：Ctrl+V 贴图共享层接入。缓存串须与共享层 KIT_VERSION 一致，
          改共享层本体时须同步 bump 这里 + 所有引用页（含本页）。 -->
-    <script src="assets/js/u-paste.js?v=v1.134.0_upaste2"></script>
+    <script src="assets/js/u-paste.js?v=v1.134.0_upaste3"></script>
     <script>
         // ============================================================
         // 零星事项台账（独立页，2026-08-02 用户验收裁定：由 Sys_Iteration.html 内嵌弹层面板拆出）
@@ -608,8 +608,11 @@
         }
         // 收集（≤5 + 扩展名/大小校验 + 去重）。去重口径=同一物理文件(name+size+lastModified 三者全同
         // 才判重复)——允许同名同大小但修改时间不同的文件并存（不同版本）。
+        // S2c·R1（codex 合并轮 M）：本函数是真实拒收路径（数量上限/扩展名/大小/去重四道闸门，拒收时
+        //   只 showToast 不抛异常）——返回本次实际接收数，供 u-paste.js 贴图 dual 路径据实提示。
         function qlPickerCollect(key, fileList) {
             const arr = qlPickerFiles(key);
+            let accepted = 0;
             for (const f of Array.from(fileList || [])) {
                 if (arr.length >= QL_MAX_FILES) { showToast(`最多 ${QL_MAX_FILES} 个文件`, 'error'); break; }
                 const ext = (f.name.split('.').pop() || '').toLowerCase();
@@ -619,7 +622,9 @@
                     showToast(`该文件已选：${f.name}`, 'info'); continue;
                 }
                 arr.push(f);
+                accepted++;
             }
+            return accepted;
         }
         // change 事件（追加进数组后 e.target.value='' 允许重选同名再次触发）
         function qlPickerOnChange(key, e) {
@@ -715,7 +720,7 @@
         //   collect——把 File 交还本页既有收集闸门 qlPickerCollect（数量/大小/扩展名/去重校验）+
         //     触发 qlPickerRender 重渲染预览。
         // ============================================================
-        const QL_UPASTE_KIT_EXPECTED = 'upaste2';   // 须与 <script src="...u-paste.js?v=..._upaste2"> 缓存串尾部一致，改共享层时两处一起 bump
+        const QL_UPASTE_KIT_EXPECTED = 'upaste3';   // 须与 <script src="...u-paste.js?v=..._upaste3"> 缓存串尾部一致，改共享层时两处一起 bump
         function qlInitUPaste() {
             // 一次性哨兵：共享层 register() 是裸 push（无去重），若本函数未来被某条路径意外重复调用，
             // 会造成同一目标重复注册，一次粘贴触发多次 collect（重复入选/重复上传）。
@@ -731,7 +736,8 @@
                 },
                 selector: '[id^="qlPreview_"]',
                 keyOf: (el) => el.id.replace(/^qlPreview_/, ''),
-                collect: (key, files) => { qlPickerCollect(key, files); qlPickerRender(key); },
+                // S2c·R1：透传 qlPickerCollect 的实际接收数（见其定义旁注），供共享层 dual 路径据实提示。
+                collect: (key, files) => { const accepted = qlPickerCollect(key, files); qlPickerRender(key); return accepted; },
             });
         }
     </script>
