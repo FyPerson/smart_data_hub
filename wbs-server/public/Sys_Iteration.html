@@ -683,7 +683,7 @@
                 <!-- S6 D13：创建日期筛选胶囊（插入位置=筛选控件群末尾、搜索框之前，同 Export_DateFilter_Demo.html
                      口径）；空 div，UnifyHelpers.attachDateRangeFilter 运行时填充结构+样式。 -->
                 <div class="u-daterange" id="siDateRange"></div>
-                <input type="text" id="siFSearch" placeholder="搜索标题/系统/单号…" oninput="siDebounceSearch()">
+                <input type="text" id="siFSearch" placeholder="搜索标题/系统/单号/建单人…" oninput="siDebounceSearch()">
                 <div style="flex:1;"></div>
                 <div class="si-head-actions" id="siHeadActions"></div>
             </div>
@@ -1687,7 +1687,7 @@
     function siSetTypeFilter(t) {
         siSetType(siActiveType === t ? 'all' : t);
     }
-    // ---- 搜索（客户端·标题/系统名/单号·debounce·对齐 Correction/Data_Collab 的 debounceSearch） ----
+    // ---- 搜索（客户端·标题/系统名/单号/建单人·debounce·对齐 Correction/Data_Collab 的 debounceSearch） ----
     let siActiveSearch = '';
     let siSearchTimer = null;
     function siDebounceSearch() {
@@ -1722,6 +1722,7 @@
         if (siMatchDisplayNoEqual(item, q)) return true;
         return (item.title || '').toLowerCase().includes(q)
             || (item.system_name || '').toLowerCase().includes(q)
+            || (item.created_by_name || '').toLowerCase().includes(q)
             || (idText && idText.includes(q))
             || (idText && q !== '#' && ('#' + idText).includes(q));   // 单独 '#' 不匹配全部
     }

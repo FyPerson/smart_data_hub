@@ -451,6 +451,25 @@ console.log('\n═══ [C4] B4：搜索精确命中族块优先于模糊命中
   M.setActiveSearch('');
 }
 
+// [448-M2] 建单人（created_by_name）搜索匹配——codex 448 指出：既有夹具全部没有 created_by_name 字段，
+//   verify 全绿只能证明"新分支对缺字段行不炸不误匹配"（兼容半边），从未真执行过"输入建单人名字确实
+//   筛得出来"（生效半边）。本块补正反一对（feedback_probe_test_bidirectional_proof：一个判定两个相反
+//   失败方向，用例必须成对）+ 精确/模糊分层归属 + 缺字段兼容，四件都走沙箱内真提取的 siMatchSearch。
+{
+  // 搜索词按真实入口口径给小写（siDebounceSearch 对输入 .trim().toLowerCase() 后才写 siActiveSearch）；
+  //   夹具建单人故意混大小写，顺带锁死"字段侧 toLowerCase 归一"没被省掉。
+  const byCreator = { id: 30, derive_root_id: null, derive_seq: null, title: '与搜索词无关的标题', system_name: 'BMS', created_by_name: 'FengYun' };
+  const byNobody = { id: 31, derive_root_id: null, derive_seq: null, title: '同样无关的标题', system_name: 'HRD', created_by_name: '示例对接人' };
+  const noField = { id: 32, derive_root_id: null, derive_seq: null, title: '缺建单人字段的行', system_name: 'BMS' };
+  M.setActiveSearch('fengyun');
+  assert.strictEqual(M.siMatchSearch(byCreator), true, '[448-M2] ⭐ 正例：搜索词命中建单人子串（大小写不敏感 FengYun←fengyun）应判匹配——实现坏成什么样这条会红：siMatchSearch 若漏掉/误删 created_by_name 分支，标题/系统/id 均不含 "fengyun" 的本行会判 false');
+  assert.strictEqual(M.siMatchSearch(byNobody), false, '[448-M2] ⭐ 反例：建单人/标题/系统/id 均不含搜索词的行不应被带出——实现坏成什么样这条会红：若匹配分支写成恒真（如 (x||q) 之类手滑）或误用 !includes，本行会判 true');
+  assert.strictEqual(M.siMatchSearch(noField), false, '[448-M2] 兼容：无 created_by_name 字段的行（旧夹具形态）不炸、不误匹配');
+  assert.strictEqual(M.siIsExactSearchMatch(byCreator), false, '[448-M2] 分层归属：建单人命中只算模糊命中（不进 siIsExactSearchMatch 精确层，精确层仅子编号/真实 id 等值）');
+  ok('[448-M2] ⭐ 建单人搜索正反一对+分层归属+缺字段兼容：生效半边真执行验证（非仅兼容半边）');
+  M.setActiveSearch('');
+}
+
 // ── [XSS-406-L1] XSS 纵深轻量版：title=/onclick= 插值的编号必须过安全整数归一 ══════════════════
 console.log('\n═══ [XSS-406-L1] 编号值插入 HTML 属性/onclick 前必须过 siSafeIdAttr 安全整数归一 ═══');
 
