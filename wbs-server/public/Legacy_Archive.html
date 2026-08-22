@@ -1,0 +1,713 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>历史台账归档 - 智数协同平台</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="assets/css/style.css?v=v1.141.0_badge2">
+    <link rel="stylesheet" href="assets/css/components.css?v=v1.153.0_fastlanetier15">
+    <style>
+        /* 历史台账归档页 · 页面专属样式（la- 前缀，独立页无跨页复用需求）
+           方案 SSOT：docs/local/历史台账归档/历史台账归档_方案_20260820_v1.0.md §5（页面与查询契约）
+           参考形态：docs/local/历史台账归档/demo_历史台账归档_20260820_v0.1.html（8 tab/列表/详情抽屉/
+           灯箱/归档横幅——正式页照它的形态但改成真实 API 驱动：datasets/rows/rows:id/images 四端点）。
+           骨架/筛选栏/表格/分页复用 components.css 共享层（u-filter-bar/u-corr-table/u-pagination/
+           u-drawer 系列），banner/tabs/kv/lightbox 无既有共享类，页内自定义。 */
+        .la-banner {
+            background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px;
+            padding: 12px 16px; color: #92400e; font-size: 13px; line-height: 1.8; margin-bottom: 16px;
+        }
+        .la-banner b { color: #78350f; }
+        .la-banner code { background: rgba(0, 0, 0, .06); padding: 1px 5px; border-radius: 3px; }
+        .la-banner.la-banner-empty { background: #f1f5f9; border-color: #e2e8f0; color: #64748b; }
+        .la-banner.la-banner-empty b { color: #334155; }
+        .la-banner-actions { margin-top: 8px; }
+        .la-banner-actions .u-btn-secondary { font-size: 13px; }
+
+        .la-tabs { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+        .la-tab {
+            padding: 6px 14px; border: 1px solid #e2e8f0; border-radius: 20px; background: #fff;
+            cursor: pointer; font-size: 13px; color: #64748b; user-select: none; transition: all 0.15s;
+        }
+        .la-tab:hover { border-color: #d97706; }
+        .la-tab:focus-visible { outline: 2px solid #d97706; outline-offset: 2px; }
+        .la-tab .la-tab-n { color: #94a3b8; font-size: 12px; margin-left: 4px; }
+        .la-tab.on { background: #d97706; color: #fff; border-color: #d97706; }
+        .la-tab.on .la-tab-n { color: #fde9c8; }
+
+        #laToolbar { justify-content: flex-start; }
+        #laSearchInput { width: 300px; }
+        .la-cnt { color: #64748b; font-size: 13px; }
+        .la-note { color: #94a3b8; font-size: 12px; margin-left: auto; }
+
+        .la-cell-ellip { max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .la-imgbadge {
+            display: inline-block; font-size: 12px; color: #d97706; background: #fff7ed;
+            border-radius: 4px; padding: 1px 7px; white-space: nowrap;
+        }
+        .la-empty { padding: 40px 16px; text-align: center; color: #94a3b8; font-size: 13px; }
+
+        /* 详情抽屉内容（u-drawer-body 内，components.css 已覆盖抽屉外壳/开合动画） */
+        .la-kv {
+            display: grid; grid-template-columns: 150px 1fr; border: 1px solid #e2e8f0;
+            border-radius: 8px; overflow: hidden; margin-bottom: 16px;
+        }
+        .la-kv .la-k, .la-kv .la-v { padding: 7px 12px; border-bottom: 1px solid #f1f5f9; font-size: 13px; }
+        .la-kv .la-k:last-of-type, .la-kv .la-v:last-of-type { border-bottom: none; }
+        .la-kv .la-k { background: #f8fafc; color: #64748b; }
+        .la-kv .la-v { word-break: break-all; white-space: pre-wrap; }
+        .la-sec { font-size: 13px; font-weight: 600; color: #64748b; margin: 14px 0 8px; }
+        .la-shot {
+            width: 100%; border: 1px solid #e2e8f0; border-radius: 8px; margin-bottom: 10px;
+            cursor: zoom-in; display: block; transition: box-shadow 0.15s;
+        }
+        .la-shot:hover { box-shadow: 0 4px 12px rgba(0, 0, 0, .12); }
+        .la-shot:focus-visible { outline: 2px solid #d97706; outline-offset: 2px; }
+        .la-shot-missing {
+            color: #94a3b8; font-size: 12px; border: 1px dashed #e2e8f0; border-radius: 6px;
+            padding: 14px; text-align: center; margin-bottom: 10px;
+        }
+
+        /* 灯箱（放大截图·点击关闭，z-index 压过 u-drawer 的 901，同 Quick_Log ql-img-lightbox 先例） */
+        .la-lb {
+            display: none; position: fixed; inset: 0; background: rgba(10, 14, 18, .82);
+            z-index: 3000; align-items: center; justify-content: center; cursor: zoom-out;
+        }
+        .la-lb.show { display: flex; }
+        .la-lb img { max-width: 92vw; max-height: 92vh; border-radius: 6px; }
+        .la-lb-close {
+            position: absolute; top: 20px; right: 28px; background: none; border: none;
+            color: #fff; font-size: 32px; line-height: 1; cursor: pointer; padding: 4px 10px; z-index: 1;
+        }
+        .la-lb-close:hover { color: #fca5a5; }
+        .la-lb-close:focus-visible { outline: 2px solid #fde68a; outline-offset: 2px; }
+    </style>
+</head>
+
+<body class="unified-page">
+    <!-- 顶部导航栏（复用全站 navbar；本页不在顶层导航项里——入口收在 admin 头像下拉「📦 历史台账归档」，
+         同「零星事项」「周期取数推送」先例——故无自身高亮项，逐字复制 Quick_Log.html 的 navbar 结构） -->
+    <nav class="navbar fixed-header">
+        <div class="nav-left">
+            <div class="nav-logo">
+                <svg viewBox="0 0 24 24" fill="none" stroke="url(#logo-gradient-la)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <defs><linearGradient id="logo-gradient-la" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" style="stop-color:#d97706"/><stop offset="100%" style="stop-color:#b45309"/></linearGradient></defs>
+                    <circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>
+                </svg>
+            </div>
+            <div class="nav-title">智数协同平台</div>
+        </div>
+        <div class="nav-right">
+            <a href="/Task_Pool.html" class="nav-item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>数仓任务池</a>
+            <a href="/Data_Collab.html" class="nav-item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>数据协作</a>
+            <a href="/Issue_Lite.html" class="nav-item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>数据开发</a>
+            <a href="/Data_Correction.html" class="nav-item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>数据修正</a>
+            <a href="/Sys_Iteration.html" class="nav-item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>系统迭代</a>
+            <div class="nav-dropdown">
+                <button class="nav-dropdown-trigger"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>数据中心<svg class="arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg></button>
+                <div class="nav-dropdown-menu">
+                    <a href="/Dashboard.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>建设总览</a>
+                    <a href="/Asset_Center.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>资产中心</a>
+                    <a href="/Model_Center.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>模型中心</a>
+                    <a href="/Metrics.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>指标中心</a>
+                </div>
+            </div>
+            <a href="/Statistics.html" class="nav-item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="20" x2="12" y2="10"/><line x1="18" y1="20" x2="18" y2="4"/><line x1="6" y1="20" x2="6" y2="16"/></svg>统计中心</a>
+            <a href="/Doc_Viewer.html" target="_blank" class="nav-item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>文档中心</a>
+            <div class="nav-divider"></div>
+            <div id="userProfileArea"></div>
+        </div>
+    </nav>
+
+    <main class="workbench-container">
+        <div class="la-banner" id="laBanner">加载中…</div>
+
+        <div class="la-tabs" id="laTabs"></div>
+
+        <div class="u-filter-bar" id="laToolbar">
+            <input type="text" id="laSearchInput" placeholder="关键字筛选（问题描述 / 处理人 / 进度…）">
+            <span class="la-cnt" id="laCnt"></span>
+            <span class="la-note">只读归档 · 默认按原表行序，点击列头可排序</span>
+        </div>
+
+        <div class="u-corr-table-wrap" id="laTblBox">加载中…</div>
+        <div class="u-pagination" id="laPager"></div>
+    </main>
+
+    <!-- 行详情抽屉（照 components.css u-drawer 系列外壳，本页仅需只读展示） -->
+    <div class="u-drawer-overlay" id="laDrawerOverlay"></div>
+    <div class="u-drawer" id="laDrawer">
+        <div class="u-drawer-header">
+            <h2 id="laDrawerTitle"></h2>
+            <button class="u-drawer-close" id="laDrawerClose" title="关闭">&times;</button>
+        </div>
+        <div class="u-drawer-body" id="laDrawerBody"></div>
+    </div>
+
+    <!-- 截图放大灯箱（L4 a11y：role=dialog+aria-label + 可聚焦关闭按钮 + Escape 关闭 + 焦点移入/还原，见页内脚本） -->
+    <div class="la-lb" id="laLightbox" role="dialog" aria-modal="true" aria-label="截图放大预览" tabindex="-1">
+        <button type="button" class="la-lb-close" id="laLightboxClose" title="关闭" aria-label="关闭放大预览">&times;</button>
+        <img id="laLightboxImg" src="" alt="">
+    </div>
+
+    <script src="assets/js/app.js?v=v1.158.0_legacy1"></script>
+    <script>
+        // ============================================================
+        // 历史台账归档（独立页，仅 admin 可访问，前台永不编辑）
+        // 方案 SSOT：docs/local/历史台账归档/历史台账归档_方案_20260820_v1.0.md §5/§6/§7
+        // A3 已冻结的四端点契约见 routes/legacy-archive/index.js：
+        //   GET /api/legacy-archive/datasets                         → {datasets:[...],batch} 或 {datasets:[],notice}
+        //   GET /api/legacy-archive/datasets/:key/rows?page&pageSize&q&sort&dir → {total,page,pageSize,columns,rows}
+        //   GET /api/legacy-archive/rows/:id                         → {id,dataset_key,row_index,excel_row,data,columns,images}
+        //   GET /api/legacy-archive/images/:batchId/:file            → inline 图片（鉴权端点，须走 authFetch+blob，
+        //     不能直接当 <img src> ——该端点挂 authenticateToken，裸 <img> 标签不带 Authorization 头，
+        //     照 Issue_Lite.html ilLoadAttThumb / Quick_Log.html qlDownloadAtt 同款 blob 回填范式）。
+        //   GET /api/legacy-archive/source-file                      → attachment 源 xlsx（同上须 authFetch+blob）
+        // ============================================================
+        let laDatasets = [];        // [{dataset_key, display_name, row_count}]
+        let laBatchId = null;       // 当前活动批次 id（图片端点拼路径要用，rows/rows:id 响应均不带，需从 datasets 响应缓存）
+        let laCurKey = null;        // 当前选中 dataset_key
+        let laColumns = [];         // 当前 dataset 的 list 列元数据（来自 rows 端点响应，含 field/name/display_order）
+        let laPage = 1;
+        const LA_PAGE_SIZE = 50;
+        let laTotal = 0;
+        let laKw = '';
+        let laSortBy = null;         // 排序键：null=默认原表行序 / '_row' / '_images' / fNNN（列排序·2026-08-22 增）
+        let laSortDir = 'desc';      // 'asc' | 'desc'（仅 laSortBy 非 null 时有效）
+        let laBatchSrcName = null;   // active 批次源文件名（源文件下载另存名·2026-08-22 增）
+        let laGen = 0;               // 异步代际守卫（tab 切换/翻页/搜索期间响应乱序返回时丢弃过期结果）
+        let laKwTimer = null;
+        let laDrawerBlobUrls = [];   // 抽屉内已创建的 objectURL，关闭抽屉时统一 revoke，防内存泄漏
+        let laLbPrevFocusEl = null;  // L4 a11y：打开灯箱前的焦点元素，关闭时焦点还原
+        let laDrawerGen = 0;         // M2（codex 11 采纳·feedback_async_callback_session_token 范式）：抽屉专用
+                                      //   代际令牌，独立于列表 laGen——快速连点两行时，先点行的迟到响应（rows/:id
+                                      //   与图片 blob 均适用）凭旧代际号被丢弃，不覆盖已渲染的后点行内容
+        let laDrawerPrevFocusEl = null; // M3 a11y：打开抽屉前的焦点元素，关闭时焦点还原（同灯箱 laLbPrevFocusEl 范式）
+
+        // 完整转义（转 & < > " '），迁自 Quick_Log.html esc()，逐字对齐。
+        function laEsc(s) {
+            return String(s == null ? '' : s)
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        }
+
+        // ---- 启动 ----
+        document.addEventListener('DOMContentLoaded', async () => {
+            if (typeof checkAuth === 'function') { const ok = await checkAuth(); if (!ok) return; }
+            // 本页仅 admin 可用（后端 legacy-archive 全部端点均 requireAdmin，前端同步拒绝非 admin 访问，
+            // 纵深防御）——逐字对齐 Quick_Log.html/Periodic_Fetch.html 的 admin-only 独立页守卫范式
+            // （同款 alert + 跳转 Task_Pool.html，非本页自创处置方式）。
+            if (typeof isAdmin !== 'function' || !isAdmin()) {
+                alert('需要管理员权限');
+                window.location.href = '/Task_Pool.html';
+                return;
+            }
+            const closeBtn = document.getElementById('laDrawerClose');
+            const overlay = document.getElementById('laDrawerOverlay');
+            const lightbox = document.getElementById('laLightbox');
+            const searchInput = document.getElementById('laSearchInput');
+            if (closeBtn) closeBtn.addEventListener('click', laCloseDrawer);
+            if (overlay) overlay.addEventListener('click', laCloseDrawer);
+            if (lightbox) lightbox.addEventListener('click', laCloseLightbox);
+            if (searchInput) searchInput.addEventListener('input', laDebounceSearch);
+            // L4/M3 a11y：Escape 逐层关闭（照 Quick_Log.html qlCloseLightbox 同款 document 级监听范式）——
+            // 灯箱在上先关灯箱；灯箱已关、抽屉仍开则关抽屉。两层各自的焦点还原逻辑在各自的 close 函数里。
+            document.addEventListener('keydown', (e) => {
+                if (e.key !== 'Escape') return;
+                const lb = document.getElementById('laLightbox');
+                if (lb && lb.classList.contains('show')) { laCloseLightbox(); return; }
+                const drawer = document.getElementById('laDrawer');
+                if (drawer && drawer.classList.contains('open')) { laCloseDrawer(); return; }
+            });
+            laSyncDrawerInert();
+            await laLoadDatasets();
+        });
+
+        // ---- 数据集清单 + 归档横幅 ----
+        async function laLoadDatasets() {
+            const banner = document.getElementById('laBanner');
+            let res;
+            try {
+                res = await authFetch('/api/legacy-archive/datasets');
+            } catch (e) {
+                if (banner) banner.innerHTML = '<b>加载失败</b>：网络异常，请刷新重试';
+                return;
+            }
+            if (!res) return; // 401 已在 authFetch 内 logout
+            if (!res.ok) {
+                if (banner) banner.innerHTML = '<b>加载失败</b>：接口返回异常（' + res.status + '）';
+                return;
+            }
+            const data = await res.json().catch(() => ({}));
+            laDatasets = data.datasets || [];
+            laBatchId = data.batch ? data.batch.id : null;
+            laRenderBanner(data.batch || null, data.notice || null);
+            if (!laDatasets.length) {
+                laRenderEmptyState();
+                return;
+            }
+            laCurKey = laDatasets[0].dataset_key;
+            document.getElementById('laToolbar').style.display = '';
+            laRenderTabs();
+            laPage = 1; laKw = '';
+            laSortBy = null; laSortDir = 'desc';
+            const qInput = document.getElementById('laSearchInput');
+            if (qInput) qInput.value = '';
+            await laLoadRows();
+        }
+
+        function laRenderBanner(batch, notice) {
+            const box = document.getElementById('laBanner');
+            if (!box) return;
+            if (!batch) {
+                box.className = 'la-banner la-banner-empty';
+                box.innerHTML = `<b>历史台账归档</b>：${laEsc(notice || '暂无活动归档批次')}。` +
+                    `本模块只读——待管理员完成首次导入并激活批次后，8/1 前的历史手工台账将在此查阅。`;
+                return;
+            }
+            box.className = 'la-banner';
+            laBatchSrcName = batch.source_file || null;   // 下载另存时的文件名（源文件下载按钮用）
+            const cutoffText = batch.cutoff ? laEsc(batch.cutoff) : '（未记录）';
+            box.innerHTML =
+                `<b>归档说明</b>：数据来源 <b>${laEsc(batch.source_file)}</b>` +
+                `（SHA-256 前 8 位 <code>${laEsc(batch.source_sha256_short)}</code>）` +
+                ` · 导入于 ${laEsc(batch.imported_at)}（脚本版本 ${laEsc(batch.script_version)}）。` +
+                `切分口径：「bug及小优化」按登记日期 &lt; ${cutoffText} 入档（含无日期行），其余数据集整表入档。` +
+                `<b>只读</b>：本页仅供查阅历史台账，前台不提供新增/编辑/删除；` +
+                `${cutoffText === '（未记录）' ? '' : cutoffText + ' 起的登记'}请到系统迭代 / 数据修正等现役模块查询；` +
+                `发现数据有误，纠错唯一路径 = 修正源表后新批次整体重导并切换活动批次。` +
+                `<div class="la-banner-actions"><button type="button" id="laSrcDlBtn" class="u-btn-secondary">` +
+                `⬇ 下载源文件比对（Excel 原件，约 70MB）</button></div>`;
+            const dlBtn = document.getElementById('laSrcDlBtn');
+            if (dlBtn) dlBtn.addEventListener('click', laDownloadSource);
+        }
+
+        // ---- 源文件下载（2026-08-22 增·随 D4 源文件收口）：鉴权端点须走 authFetch+blob（同图片端点
+        //   范式——裸 <a href> 不带 Authorization 头），blob 落地后 a.download 用批次真实文件名另存。----
+        async function laDownloadSource() {
+            const btn = document.getElementById('laSrcDlBtn');
+            if (!btn || btn.disabled) return;
+            btn.disabled = true;
+            const origText = btn.textContent;
+            btn.textContent = '下载中…（文件较大请稍候）';
+            try {
+                let res;
+                try {
+                    res = await authFetch('/api/legacy-archive/source-file');
+                } catch (e) {
+                    alert('源文件下载失败：网络异常，请重试');
+                    return;
+                }
+                if (!res) return; // 401 已在 authFetch 内 logout
+                if (!res.ok) {
+                    let msg = '接口返回 ' + res.status;
+                    try { const j = await res.json(); if (j && j.error) msg = j.error; } catch (_) { /* 非 json */ }
+                    alert('源文件下载失败：' + msg);
+                    return;
+                }
+                const blob = await res.blob();
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                // 另存名优先取本次响应 Content-Disposition 的 filename*（codex 17 MED-3 采纳：
+                // 页面打开后 active 批次被切换时，laBatchSrcName 是旧批次名而响应内容是新批次——
+                // 以响应自述的名字为准，内容与保存名恒同源；解析失败才回退缓存名/固定名）
+                let dlName = laBatchSrcName || 'legacy-archive-source.xlsx';
+                const dispMatch = (res.headers.get('content-disposition') || '').match(/filename\*=UTF-8''([^;]+)/i);
+                if (dispMatch) {
+                    try { dlName = decodeURIComponent(dispMatch[1]); } catch (e) { /* 畸形编码回退缓存名 */ }
+                }
+                a.download = dlName;
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                // 延迟 revoke：立即回收部分浏览器会中断刚触发的另存写盘
+                setTimeout(() => URL.revokeObjectURL(url), 10000);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = origText;
+            }
+        }
+
+        function laRenderEmptyState() {
+            document.getElementById('laTabs').innerHTML = '';
+            document.getElementById('laToolbar').style.display = 'none';
+            document.getElementById('laTblBox').innerHTML = '<div class="la-empty">暂无活动归档批次，暂无数据可查阅。</div>';
+            document.getElementById('laPager').innerHTML = '';
+        }
+
+        // ---- 数据集 tab（M3 a11y：标准 ARIA tablist 模式——role=tablist/tab + aria-selected + roving
+        //   tabindex（仅当前 tab 为 0，其余 -1，Tab 键只停在当前 tab 上）+ 方向键在 tab 间移动焦点并
+        //   立即切换（自动激活模型）+ Enter/Space 对已聚焦 tab 冗余生效） ----
+        function laRenderTabs() {
+            const box = document.getElementById('laTabs');
+            box.setAttribute('role', 'tablist');
+            box.setAttribute('aria-label', '归档数据集切换');
+            box.innerHTML = laDatasets.map(d => {
+                const isOn = d.dataset_key === laCurKey;
+                return `<span class="la-tab${isOn ? ' on' : ''}" data-key="${laEsc(d.dataset_key)}" ` +
+                    `id="la-tab-${laEsc(d.dataset_key)}" role="tab" aria-selected="${isOn}" tabindex="${isOn ? '0' : '-1'}">` +
+                    `${laEsc(d.display_name)}<span class="la-tab-n">${Number(d.row_count) || 0}</span></span>`;
+            }).join('');
+            const tabEls = Array.from(box.querySelectorAll('.la-tab'));
+            tabEls.forEach((t, i) => {
+                t.addEventListener('click', () => laSwitchTab(t.dataset.key));
+                t.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+                        e.preventDefault();
+                        laSwitchTab(t.dataset.key);
+                    } else if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+                        e.preventDefault();
+                        if (tabEls.length < 2) return;
+                        const dir = e.key === 'ArrowRight' ? 1 : -1;
+                        const nextKey = tabEls[(i + dir + tabEls.length) % tabEls.length].dataset.key;
+                        // laSwitchTab 内部 laRenderTabs() 是同步调用（第一个 await 在其后），本行返回时
+                        // DOM 已是切换后的新 tab 集合，可以直接按 id 找新的当前 tab 并聚焦，无需等宏任务。
+                        laSwitchTab(nextKey);
+                        const el = document.getElementById('la-tab-' + nextKey);
+                        if (el) el.focus();
+                    }
+                });
+            });
+        }
+
+        async function laSwitchTab(key) {
+            if (key === laCurKey) return;
+            laCurKey = key;
+            laPage = 1; laKw = '';
+            laSortBy = null; laSortDir = 'desc';   // 列集合随 dataset 变，fNNN 含义不同——切 tab 必重置排序
+            const qInput = document.getElementById('laSearchInput');
+            if (qInput) qInput.value = '';
+            laRenderTabs();
+            await laLoadRows();
+        }
+
+        // ---- 关键字筛选（防抖 300ms，服务端 q 参数） ----
+        function laDebounceSearch() {
+            clearTimeout(laKwTimer);
+            laKwTimer = setTimeout(() => {
+                const input = document.getElementById('laSearchInput');
+                laKw = input ? input.value.trim() : '';
+                laPage = 1;
+                laLoadRows();
+            }, 300);
+        }
+
+        // ---- 行分页列表 ----
+        async function laLoadRows() {
+            if (!laCurKey) return;
+            laGen++;
+            const myGen = laGen;
+            const tblBox = document.getElementById('laTblBox');
+            if (tblBox) tblBox.innerHTML = '<div class="la-empty">加载中…</div>';
+            const qs = new URLSearchParams({ page: String(laPage), pageSize: String(LA_PAGE_SIZE) });
+            if (laKw) qs.set('q', laKw);
+            if (laSortBy) { qs.set('sort', laSortBy); qs.set('dir', laSortDir); }
+            let res;
+            try {
+                res = await authFetch(`/api/legacy-archive/datasets/${encodeURIComponent(laCurKey)}/rows?${qs.toString()}`);
+            } catch (e) {
+                if (myGen !== laGen) return;
+                if (tblBox) tblBox.innerHTML = '<div class="la-empty">加载失败：网络异常，请重试</div>';
+                return;
+            }
+            if (myGen !== laGen) return;
+            if (!res) return;
+            if (!res.ok) {
+                if (tblBox) tblBox.innerHTML = '<div class="la-empty">加载失败（' + res.status + '）</div>';
+                return;
+            }
+            const data = await res.json().catch(() => null);
+            if (myGen !== laGen) return;
+            if (!data) { if (tblBox) tblBox.innerHTML = '<div class="la-empty">加载失败</div>'; return; }
+            laColumns = data.columns || [];
+            laTotal = data.total || 0;
+            laPage = data.page || laPage;
+            laRenderTable(data.rows || []);
+            laRenderPager();
+        }
+
+        function laRenderTable(rows) {
+            const box = document.getElementById('laTblBox');
+            const cnt = document.getElementById('laCnt');
+            // L2（元数据 Number 硬化，纯防御纵深）：当前 A3 契约 total 恒为数字，这里仍显式 Number()
+            // 包裹再拼文本——防未来契约漂移（后端某分支意外传回字符串/null 之类）时把非预期内容裸露给用户。
+            const safeTotalForCnt = Number(laTotal) || 0;
+            if (cnt) cnt.textContent = laKw ? `筛得 ${safeTotalForCnt} 行` : `共 ${safeTotalForCnt} 行`;
+            if (!box) return;
+            if (!rows.length) {
+                box.innerHTML = '<div class="la-empty">本页无数据' + (laKw ? '（筛选条件未命中，换个关键字试试）' : '') + '</div>';
+                return;
+            }
+            // 全字段可排序表头（2026-08-22 增）：交互/图标/类名对齐四页 attachTableSort 范式
+            // （th.u-sortable + data-sort-by + .u-sort-icon ⇅/↑/↓ + active 高亮，components.css 样式
+            // 已声明兼容 .u-corr-table）；数据流不走 attachTableSort 的"前端全量排序"契约——本页
+            // 服务端分页（keep 8232 行不全量进前端），排序由 rows 端点 sort/dir 参数在 SQL 层完成。
+            let html = '<table class="u-corr-table"><thead><tr>' + laThSortable('_row', '原表行号');
+            for (const c of laColumns) html += laThSortable(c.field, laEsc(c.name));
+            html += laThSortable('_images', '图片') + '</tr></thead><tbody>';
+            for (const r of rows) {
+                const rowNo = r.excel_row != null ? r.excel_row : r.row_index;
+                html += `<tr data-row-id="${Number(r.id)}"><td>${laEsc(rowNo)}</td>`;
+                for (const c of laColumns) {
+                    const v = r.data ? r.data[c.field] : null;
+                    const text = v == null ? '' : String(v);
+                    html += `<td class="la-cell-ellip" title="${laEsc(text)}">${laEsc(text)}</td>`;
+                }
+                const badge = (Number(r.image_count) || 0) > 0 ? `<span class="la-imgbadge">📷 ${Number(r.image_count)}</span>` : '';
+                html += `<td>${badge}</td></tr>`;
+            }
+            html += '</tbody></table>';
+            box.innerHTML = html;
+            box.querySelectorAll('tr[data-row-id]').forEach(tr => {
+                tr.addEventListener('click', () => laOpenDrawer(Number(tr.dataset.rowId)));
+            });
+            box.querySelectorAll('th.u-sortable').forEach(th => {
+                th.addEventListener('click', () => laToggleSort(th.dataset.sortBy));
+            });
+        }
+
+        // 表头单元格：th.u-sortable + data-sort-by + 图标三态（对齐 unify-helpers attachTableSort 的
+        // updateIcons 观感：当前列 active+↑/↓，其余 ⇅；默认态无 active 无方向指示=按原表行序）。
+        // label 由调用方先 laEsc（laColumns 的 c.name 来自库内元数据，仍按不可信输入转义）。
+        function laThSortable(key, label) {
+            const isOn = laSortBy === key;
+            const icon = isOn ? (laSortDir === 'asc' ? '↑' : '↓') : '⇅';
+            return `<th class="u-sortable${isOn ? ' active' : ''}" data-sort-by="${laEsc(key)}">` +
+                `${label} <span class="u-sort-icon">${icon}</span></th>`;
+        }
+
+        // 点击循环对齐 attachTableSort.init：首点 desc → 再点 asc → 三点回默认（原表行序）。
+        // 排序变化回第 1 页（服务端排序改变全量行序，停留当前页码无意义）。
+        function laToggleSort(key) {
+            if (!key) return;
+            if (laSortBy !== key) { laSortBy = key; laSortDir = 'desc'; }
+            else if (laSortDir === 'desc') { laSortDir = 'asc'; }
+            else { laSortBy = null; laSortDir = 'desc'; }
+            laPage = 1;
+            laLoadRows();
+        }
+
+        function laSortLabel() {
+            if (!laSortBy) return '按原表行序';
+            let nm;
+            if (laSortBy === '_row') nm = '原表行号';
+            else if (laSortBy === '_images') nm = '图片';
+            else nm = ((laColumns.find(c => c.field === laSortBy) || {}).name) || laSortBy;
+            return `按「${nm}」${laSortDir === 'asc' ? '升序' : '降序'}`;
+        }
+
+        function laRenderPager() {
+            const box = document.getElementById('laPager');
+            if (!box) return;
+            // L2（元数据 Number 硬化，纯防御纵深）：当前 A3 契约 total/page 恒为数字，这里仍显式
+            // Number() 包裹再拼 innerHTML——防未来契约漂移导致 NaN/[object Object] 之类内容裸拼进页面。
+            const safeTotal = Number(laTotal) || 0;
+            const totalPages = Math.max(1, Math.ceil(safeTotal / LA_PAGE_SIZE));
+            let safePage = Number(laPage) || 1;
+            if (safePage > totalPages) safePage = totalPages;
+            if (safePage < 1) safePage = 1;
+            laPage = safePage;
+            box.innerHTML = `<span class="u-page-info">第 ${safePage} / ${totalPages} 页 · 共 ${safeTotal} 条 · ${laEsc(laSortLabel())}</span>` +
+                `<button type="button" class="u-btn-secondary u-page-btn" data-la-page-nav="prev"${safePage <= 1 ? ' disabled' : ''}>上一页</button>` +
+                `<button type="button" class="u-btn-secondary u-page-btn" data-la-page-nav="next"${safePage >= totalPages ? ' disabled' : ''}>下一页</button>`;
+            const prevBtn = box.querySelector('[data-la-page-nav="prev"]');
+            const nextBtn = box.querySelector('[data-la-page-nav="next"]');
+            if (prevBtn) prevBtn.addEventListener('click', () => laGoToPage(safePage - 1));
+            if (nextBtn) nextBtn.addEventListener('click', () => laGoToPage(safePage + 1));
+        }
+
+        function laGoToPage(p) {
+            if (p < 1) return;
+            laPage = p;
+            laLoadRows();
+        }
+
+        // ---- 行详情抽屉（M2·codex 11 采纳：代际令牌守卫——快速连点两行时先点行的迟到响应不得覆盖
+        //   已渲染的后点行；M3·codex 11 采纳：打开时焦点移入关闭按钮、关闭时还原到触发焦点） ----
+        async function laOpenDrawer(rowId) {
+            if (!Number.isSafeInteger(rowId)) return;
+            laDrawerGen++;
+            const myDrawerGen = laDrawerGen;
+            laRevokeDrawerBlobs();
+            laDrawerPrevFocusEl = document.activeElement; // M3：记录触发焦点，关闭时还原
+            document.getElementById('laDrawerTitle').textContent = '加载中…';
+            document.getElementById('laDrawerBody').innerHTML = '<div class="la-empty">加载中…</div>';
+            document.getElementById('laDrawer').classList.add('open');
+            document.getElementById('laDrawerOverlay').classList.add('open');
+            laSyncDrawerInert();
+            const drawerCloseBtn = document.getElementById('laDrawerClose');
+            if (drawerCloseBtn) drawerCloseBtn.focus(); // M3：焦点移入抽屉
+            let res;
+            try {
+                res = await authFetch(`/api/legacy-archive/rows/${rowId}`);
+            } catch (e) {
+                if (myDrawerGen !== laDrawerGen) return; // 抽屉已被关闭/切到别的行，丢弃这条过期响应
+                document.getElementById('laDrawerBody').innerHTML = '<div class="la-empty">加载失败：网络异常</div>';
+                return;
+            }
+            if (myDrawerGen !== laDrawerGen) return;
+            if (!res) return;
+            if (!res.ok) {
+                document.getElementById('laDrawerBody').innerHTML = '<div class="la-empty">加载失败（' + res.status + '）</div>';
+                return;
+            }
+            const detail = await res.json().catch(() => null);
+            if (myDrawerGen !== laDrawerGen) return; // json() 解码期间也可能已经代际变化，二次复查
+            if (!detail) { document.getElementById('laDrawerBody').innerHTML = '<div class="la-empty">加载失败</div>'; return; }
+            laRenderDrawer(detail, myDrawerGen);
+        }
+
+        function laRenderDrawer(detail, gen) {
+            const dsMeta = laDatasets.find(d => d.dataset_key === detail.dataset_key);
+            const dsName = dsMeta ? dsMeta.display_name : detail.dataset_key;
+            const rowNo = detail.excel_row != null ? detail.excel_row : detail.row_index;
+            document.getElementById('laDrawerTitle').textContent = `${dsName} · 原表第 ${rowNo} 行`;
+
+            // 全字段按 columns.visibility 渲染：list+detail 显示文本（按 original_index 原序统一排列），
+            // none（31 个 WPS 图片外溢列）不显示文本——其图片归属改由下方 images[].field 承载。
+            const cols = (detail.columns || [])
+                .filter(c => c && (c.visibility === 'list' || c.visibility === 'detail'))
+                .sort((a, b) => (a.original_index || 0) - (b.original_index || 0));
+
+            let h = '<div class="la-kv">';
+            for (const c of cols) {
+                const v = detail.data ? detail.data[c.field] : null;
+                const text = (v == null || v === '') ? '<span style="color:#c3ccd4">—</span>' : laEsc(String(v));
+                const tag = c.visibility === 'detail' ? ' <span style="color:#c3ccd4;font-weight:400;">（旁注列）</span>' : '';
+                h += `<div class="la-k">${laEsc(c.name)}${tag}</div><div class="la-v">${text}</div>`;
+            }
+            h += '</div>';
+
+            h += '<div class="la-sec">📷 截图</div>';
+            const images = Array.isArray(detail.images) ? detail.images : [];
+            if (images.length) {
+                h += '<div id="laDrawerImages"></div>';
+            } else {
+                h += '<div class="la-empty" style="padding:16px;">本行无截图</div>';
+            }
+            document.getElementById('laDrawerBody').innerHTML = h;
+
+            if (images.length) {
+                const imgBox = document.getElementById('laDrawerImages');
+                images.forEach(im => {
+                    const placeholder = document.createElement('div');
+                    placeholder.className = 'la-shot-missing';
+                    placeholder.textContent = `图片加载中…（${im.orig_id || im.file || ''}）`;
+                    imgBox.appendChild(placeholder);
+                    laLoadDrawerImage(im, placeholder, gen);
+                });
+            }
+        }
+
+        // 鉴权图片端点须走 authFetch + blob 回填（裸 <img src> 不带 Authorization 头会 401）；
+        // 加载失败（网络异常/404/mime 不支持）一律降级为「图缺失」占位，不裂图（方案 §3.3）。
+        // M2（codex 11 采纳）：gen 是打开本次抽屉时的代际快照——异步链路的三个节点（fetch 返回/blob()
+        // 解码返回/objectURL 建好）各复查一次 gen===laDrawerGen，任一环节抽屉已被关闭或切到别的行，
+        // 立即丢弃（objectURL 已建的额外 revoke，不占内存）、绝不再碰已经不属于当前会话的 DOM。
+        async function laLoadDrawerImage(im, placeholderEl, gen) {
+            if (!laBatchId || !im || !im.file) {
+                placeholderEl.textContent = '图缺失';
+                return;
+            }
+            try {
+                const res = await authFetch(`/api/legacy-archive/images/${laBatchId}/${encodeURIComponent(im.file)}`);
+                if (gen !== laDrawerGen) return;
+                if (!res || !res.ok) { placeholderEl.textContent = '图缺失'; return; }
+                const blob = await res.blob();
+                if (gen !== laDrawerGen) return;
+                // L3（mime 校验·对齐方案 §3.3 缺图降级承诺）：接口异常时也可能仍返回 200（如反向代理/
+                // 中间件兜底页返回一段 HTML），此时 Content-Type 非 image/*——不能无脑把任意 blob 塞进
+                // <img src>，浏览器会把非图片内容渲染成裂图图标。这是前端最后一道纵深防御（服务端已有
+                // 文件名白名单+越权校验，这里额外不信任 Content-Type 之外还校验实际拿到的 blob.type），
+                // 非 image/* 一律按"图缺失"降级，不创建 <img> 元素。
+                if (!blob.type || !blob.type.startsWith('image/')) {
+                    placeholderEl.textContent = '图缺失';
+                    return;
+                }
+                const url = URL.createObjectURL(blob);
+                if (gen !== laDrawerGen) { URL.revokeObjectURL(url); return; }
+                laDrawerBlobUrls.push(url);
+                const img = document.createElement('img');
+                img.className = 'la-shot';
+                img.alt = im.orig_id || '';
+                // M3 a11y：截图缩略图键盘可达——tabindex=0 纳入 Tab 序，role=button 声明语义，
+                // Enter/Space 与鼠标点击同效打开灯箱。
+                img.tabIndex = 0;
+                img.setAttribute('role', 'button');
+                img.setAttribute('aria-label', (im.orig_id ? '放大截图 ' + im.orig_id : '放大截图'));
+                img.addEventListener('click', () => laOpenLightbox(url, im.orig_id || ''));
+                img.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+                        e.preventDefault();
+                        laOpenLightbox(url, im.orig_id || '');
+                    }
+                });
+                img.src = url;
+                if (placeholderEl.parentNode) placeholderEl.replaceWith(img);
+            } catch (e) {
+                if (gen !== laDrawerGen) return;
+                placeholderEl.textContent = '图缺失';
+            }
+        }
+
+        function laRevokeDrawerBlobs() {
+            laDrawerBlobUrls.forEach(u => { try { URL.revokeObjectURL(u); } catch (e) { /* ignore */ } });
+            laDrawerBlobUrls = [];
+        }
+
+        function laCloseDrawer() {
+            laDrawerGen++; // M2：关闭也算代际失效——之后到达的任何本次抽屉相关响应一律被丢弃
+            document.getElementById('laDrawer').classList.remove('open');
+            document.getElementById('laDrawerOverlay').classList.remove('open');
+            laSyncDrawerInert();
+            laRevokeDrawerBlobs();
+            // M3：焦点还原到打开前的触发元素（若该元素仍在文档中）
+            if (laDrawerPrevFocusEl && typeof laDrawerPrevFocusEl.focus === 'function' && document.contains(laDrawerPrevFocusEl)) {
+                laDrawerPrevFocusEl.focus();
+            }
+            laDrawerPrevFocusEl = null;
+        }
+
+        // 抽屉焦点可达性：抽屉常驻 DOM（.u-drawer 无条件渲染，仅靠 right 位移出屏），需靠 inert 显式
+        // 接管——抽屉可交互 ⟺ 抽屉 open 且灯箱未盖在上面（照 Data_Collab.html syncDrawerInert 同款范式，
+        // 本页只有灯箱一层子遮罩，判定条件相应简化）。
+        function laSyncDrawerInert() {
+            const drawer = document.getElementById('laDrawer');
+            const lightbox = document.getElementById('laLightbox');
+            if (!drawer) return;
+            const interactive = drawer.classList.contains('open') && !(lightbox && lightbox.classList.contains('show'));
+            drawer.inert = !interactive;
+            if (!interactive) drawer.setAttribute('aria-hidden', 'true');
+            else drawer.removeAttribute('aria-hidden');
+        }
+
+        // ---- 截图灯箱（L4 a11y：role=dialog 见 HTML；这里补打开时焦点移入关闭按钮、关闭时焦点还原
+        //   到触发元素——最小实现，非完整 Tab 循环焦点陷阱，灯箱内唯一可聚焦元素就是关闭按钮） ----
+        function laOpenLightbox(url, caption) {
+            if (!url) return;
+            const lb = document.getElementById('laLightbox');
+            const img = document.getElementById('laLightboxImg');
+            const closeBtn = document.getElementById('laLightboxClose');
+            if (!lb || !img) return;
+            img.src = url;
+            img.alt = caption || '';
+            laLbPrevFocusEl = document.activeElement;  // 记录触发焦点（通常是被点击的截图缩略图）
+            lb.classList.add('show');
+            laSyncDrawerInert();
+            if (closeBtn) closeBtn.focus();
+        }
+        function laCloseLightbox() {
+            document.getElementById('laLightbox').classList.remove('show');
+            laSyncDrawerInert();
+            if (laLbPrevFocusEl && typeof laLbPrevFocusEl.focus === 'function' && document.contains(laLbPrevFocusEl)) {
+                laLbPrevFocusEl.focus();
+            }
+            laLbPrevFocusEl = null;
+        }
+    </script>
+</body>
+
+</html>

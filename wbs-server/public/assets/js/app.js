@@ -569,6 +569,10 @@ function updateUserUI() {
             //   挪到本 admin-only 下拉（照上方"周期取数推送"同款先例，免改各页导航栏 HTML）——
             //   普通用户/开发只用极简台账页，admin 需完整协作能力（指派/改派/拉群/评估/历史）时从这里进重型页。
             menuItems += `<a href="/Issue_Tracker.html" style="text-decoration:none;">🗂️ 数据开发（完整版）</a>`;
+            // 历史台账归档（仅 admin·新增独立只读模块，2026-08-20 方案 §5/§8 D1 拍板：入口=admin
+            //   头像下拉菜单）——同款 admin-only 下拉先例（周期取数推送/零星事项/数据开发完整版），
+            //   免改各页导航栏 HTML。
+            menuItems += `<a href="/Legacy_Archive.html" style="text-decoration:none;">📦 历史台账归档</a>`;
         }
         menuItems += `<a href="#" onclick="openChangePasswordModal()">🔑 修改密码</a>`;
         menuItems += `<a href="#" onclick="logout()" style="color:#e53e3e;">🚪 退出登录</a>`;

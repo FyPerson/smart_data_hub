@@ -772,14 +772,68 @@ app.use(express.static(path.join(__dirname, 'public'), {
     }
 }));
 // Serve uploaded and archived files
-// D3 复审 H-2（数据开发换壳）：issue_lite 附件物理落在 uploads/issue-lite/ 但**不走无鉴权静态服务**——
-//   本拦截中间件（注册在 express.static 之前）挡掉 /uploads/issue-lite/* 直连，强制所有访问走鉴权下载
-//   端点 GET /api/issue-lite/attachments/:aid/download（authenticateToken + isPathSafe + res.download）。
-//   区别于 collab/issues 附件（沿用静态服务 + 文件名不可猜）：issue_lite 数据敏感 + 新模块，收紧为鉴权唯一入口。
-app.use('/uploads/issue-lite', (req, res) => res.status(403).json({ error: '附件请通过登录后的下载入口获取', code: 'DIRECT_ACCESS_FORBIDDEN' }));
-// 零星事项台账（sys_quick_log）附件同款收紧：物理落在 uploads/quick-log/ 但不走无鉴权静态服务，
-//   强制走鉴权下载端点 GET /api/quick-logs/attachments/:attId/download（对齐 issue-lite 上一行）。
-app.use('/uploads/quick-log', (req, res) => res.status(403).json({ error: '附件请通过登录后的下载入口获取', code: 'DIRECT_ACCESS_FORBIDDEN' }));
+// 鉴权唯一入口收紧（三模块统一）：issue-lite / quick-log / legacy-archive 三个模块的附件物理落在
+//   uploads/<模块>/ 下但**不走无鉴权静态服务**，强制走各自的鉴权下载端点——
+//     issue-lite    → GET /api/issue-lite/attachments/:aid/download（authenticateToken + isPathSafe + res.download）
+//     quick-log     → GET /api/quick-logs/attachments/:attId/download
+//     legacy-archive→ GET /api/legacy-archive/images/:batchId/:file（inline 展示）
+//   区别于 collab/issues 老附件（沿用静态服务 + 文件名不可猜）：这三个模块数据敏感，收紧为鉴权唯一入口。
+//
+// ⚠️ %编码绕过修复（S-SEC，2026-08-21 用户裁定连带修·A3 阶段 legacy-archive 已先修·本次合并三处）：
+//   早前写法把每个模块挂在**字面前缀** `app.use('/uploads/<模块>', ...)`——express@4.22.1 下 app.use(prefix,...)
+//   的挂载点匹配用**未解码**的原始 req.url 做前缀判断，而下方 express.static→send 取文件前会先 decodeURIComponent
+//   一次，两处解码时机不一致：`/uploads/issue%2Dlite/...`（%2D=-）、`/uploads/%69ssue-lite/...`（%69=i）、
+//   `/uploads/issue-lite%2F...`（%2F=/）三形态均绕过字面前缀行、落到无鉴权 express.static 吐原文（三模块
+//   逐字复现坐实·repro_issuelite_quicklog.js 5 变体泄漏）。修法=改挂在更宽的 `/uploads` 前缀，中间件内按
+//   "解析后真实落盘路径的容器归属"判定，而非对 URL 串做词法正则。
+//
+//   为什么用 realpath 容器归属而非词法正则（codex 13 HIGH + codex 14 建议·物理探针实证定型）：
+//   词法正则要逐个对齐 send/Windows 的路径规范化 quirk，是打地鼠——已实证漏过的：反斜杠分隔符 %5C
+//   （send 把 \ 当分隔符）、真 ./.. 从放行同级(collab)横切到受限同级、上述的 %2F/%5C 编码变体；还有
+//   条件性风险面 8.3 短名（ISSUE~1 别名 issue-lite）、junction/reparse point、大小写、段尾点空格。
+//   改为：path.join(UPLOAD_DIR, decodedPath) 解 \ 与 ./.. 词法层 → realpath 再解 8.3/junction/大小写/
+//   尾点空格到唯一真相 → 判其是否落在三受限目录容器内。send 自身 root-jail 仍挡 ..逃逸 upload 根（404）。
+//   collab/issues 等真实落点不在三受限目录 → next() 照常走静态服务，不受影响。
+//   注：realpath 每请求一次同步 FS 调用，内网低频可接受；受限目录真实路径启动时算一次缓存。
+//   ⚠️ 残余风险（codex 15·登记接受·依赖部署不变量「uploads 卷对应用外部不可写、无用户可控 junction 创建」）：
+//     ① realpath 检查与 express.static 读取非原子=TOCTOU 窗口（攻击者若能在窗口内把公开路径换成指向受限
+//        目录的 junction 可绕过）——前提=对 uploads 有 FS 写权限=已沦陷，HTTP 用户无 FS 访问故不成立；
+//     ② UPLOADS_PROTECTED_DIRS 启动缓存：受限目录运行中被删/换 junction 则缓存过期——同款 FS 写前提。
+//     两者均为"已控制文件系统才能利用"，非 URL 层缺陷；内网单机 uploads 仅 app 经 multer 写常规文件。
+//   异常处理 fail-closed（codex 15 MED）：realpath 仅 ENOENT/ENOTDIR（路径不存在）退词法解析（send 也 404，
+//     两侧一致不泄漏）；EACCES/EIO/未知错误 = 无法确认真实归属 → 不放行（403），绝不 fail-open。
+function uploadsResolveReal(p, strict) {
+  try {
+    return { real: fs.realpathSync.native(p) };
+  } catch (e) {
+    if (!strict || (e && (e.code === 'ENOENT' || e.code === 'ENOTDIR'))) return { real: path.resolve(p) };
+    return { failClosed: true };
+  }
+}
+const UPLOADS_PROTECTED_DIRS = ['issue-lite', 'quick-log', 'legacy-archive']
+  .map(m => uploadsResolveReal(path.join(UPLOAD_DIR, m), false).real.toLowerCase());
+app.use('/uploads', (req, res, next) => {
+  let decodedPath;
+  try {
+    decodedPath = decodeURIComponent(req.path);
+  } catch (_) {
+    return res.status(400).json({ error: '非法路径编码', code: 'BAD_PATH_ENCODING' });
+  }
+  // NUL/控制字符不在 decode 异常分支内、会让 path.join 抛错落 500（codex 15 LOW）——显式 400 拦下。
+  if (/[\x00-\x1f]/.test(decodedPath)) {
+    return res.status(400).json({ error: '非法路径字符', code: 'BAD_PATH_ENCODING' });
+  }
+  const resolved = uploadsResolveReal(path.join(UPLOAD_DIR, decodedPath), true);
+  if (resolved.failClosed) {
+    return res.status(403).json({ error: '附件路径无法校验', code: 'DIRECT_ACCESS_FORBIDDEN' });
+  }
+  const realTarget = resolved.real.toLowerCase();
+  const blocked = UPLOADS_PROTECTED_DIRS.some(pd => realTarget === pd || realTarget.startsWith(pd + path.sep));
+  if (blocked) {
+    return res.status(403).json({ error: '附件请通过登录后的下载入口获取', code: 'DIRECT_ACCESS_FORBIDDEN' });
+  }
+  next();
+});
 app.use('/uploads', express.static(UPLOAD_DIR));
 app.use('/archive', express.static(ARCHIVE_DIR));
 
@@ -807,6 +861,11 @@ const db = new sqlite3.Database(DB_FILE, (err) => {
         // 周期取数推送模块 集成点1：紧跟 sys-iteration 之后建 periodic 三表（同位置同时序）。
         //   readiness 未就绪期间 periodic-* 端点 503（首启短暂窗口）。periodicFetchModule 在文件后部实例化。
         periodicFetchModule.initSchema();
+        // 历史台账归档模块 Phase A2（M1 修正：与上方三先例同位置同时序，防 DDL 抢跑 busy_timeout
+        //   撞 SQLITE_BUSY 永久 503）：紧跟 periodic-fetch 之后建 legacy_archive 三表。require+工厂
+        //   实例化仍留在原挂载点（文件后部 ~L20440），此刻 const legacyArchiveModule 已完成赋值
+        //   （本回调异步晚于顶层同步执行，同 correction/sys-iteration/periodic 三先例的既有前提）。
+        legacyArchiveModule.initSchema();
     }
 });
 
@@ -20436,6 +20495,21 @@ const quickLogModule = require('./routes/quick-log')({
   COLLAB_ALLOWED_EXTS_UNION,
 });
 app.use('/api', quickLogModule.router);
+
+// ============================================================
+// 历史台账归档模块（Phase A2：schema 三表 + readiness 闸门；Phase A3：只读端点四枚 + 权限矩阵）
+//   业务方案 SSOT = docs/local/历史台账归档/历史台账归档_方案_20260820_v1.0.md §5/§6/§7
+//   工厂/DI 范式对齐 periodic-fetch（schema 建表内嵌本模块，非像 quick-log 那样建在 server.js）；
+//   本处仅 require + 工厂实例化 + 挂载路由——initSchema() 调用挪到上方 db 连接回调内（M1 修正，
+//   与 correction/sys-iteration/periodic-fetch 三先例同位置同时序，防 DDL 抢跑 busy_timeout 撞
+//   SQLITE_BUSY 永久 503）。此处 const 声明先于该回调的实际执行完成，回调内引用无 TDZ 问题。
+//   router 已挂载四枚只读端点（GET datasets / datasets/:key/rows / rows/:id / images/:batchId/:file，
+//   均 authenticateToken→requireAdmin→requireLegacyArchiveSchemaReady），不拦截其他 /api/*。
+// ============================================================
+const legacyArchiveModule = require('./routes/legacy-archive')({
+  logger, dbRunAsync, dbGetAsync, dbAllAsync, authenticateToken, requireAdmin, UPLOAD_DIR,
+});
+app.use('/api', legacyArchiveModule.router);
 
 // ============================================================
 // MCP Demo - 数仓对话查询
