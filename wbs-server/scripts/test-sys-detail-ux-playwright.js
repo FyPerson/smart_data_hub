@@ -74,11 +74,32 @@
  *        位置落在锚点哪一侧即可反证用的是全量串还是截断串）；另断言其「开发」列文本确为截断形态。
  *   [T7] 发布留痕（release_published）展开视图结构化——正例：一条合法快照 JSON（commits 两条，一条
  *        dev_user_id 映射得到真名〔用 seed 的 admin.id〕、一条映射不到〔99999→回退显 #99999，
- *        不伪造〕）→ 展开后 commits 小表行数=2、两行姓名/组件/commit_ref 精确匹配、顶部「发布时
- *        状态：已上线」小字、小表下方二级折叠「查看原始快照」含 schema_version；对照：非法 JSON
+ *        不伪造〕）→ 展开后 commits 小表行数=2、两行姓名/组件/commit_ref/时间精确匹配、顶部「发布时
+ *        状态：已上线」小字、小表下方二级折叠「原始快照（审计原文）」含 schema_version；对照：非法 JSON
  *        → 维持现状「原始记录（解析失败）」文案不动、且不渲染结构化小表（info.ok===false 分支
  *        未被新代码路径影响）。<details> 展开用 page.evaluate 直接置 `.open = true`（验证展开后
  *        内容对不对，不测原生 HTML 折叠交互机制本身）。
+ *        ⭐ [发布留痕降噪批·2026-08-26] 本段随展开视图降噪扩三件：
+ *          ① 新增「时间」列（快照 commits 行的 created_at 经 siFmtDT 到分）——两行给不同时刻，
+ *             顺带证明取的是每行自己的值而非首行复读；
+ *          ② 末列 📋 复制按钮——断言 onclick 实参是**完整** commit_ref（该列有 130px 硬截断，
+ *             按钮的全部意义就是拿全文），非只断言"有个按钮"；
+ *          ③ **反向对照组**（夹具③ OP_RELEASE_SAME）：title_snapshot == 该单当前标题 ⇒ 摘要行
+ *             精确为「BUG · 1 条 commit」不重复标题，而标题不同时（夹具①）必须带「发布时标题：」
+ *             前缀。两组成对才证明该判定的两个方向；同时断言同名组的状态行/小表/二级折叠原文
+ *             一个不少（去重只发生在摘要行，审计原文一字未删）。
+ *        ⭐ codex 本批审查后补齐的断言缺口（原实现无变化，纯加固取证）：
+ *          ④ 📋 取证改**按行绑定**（rowData 逐行带 btnCount/copyArg）——原先扁平聚合只能断言
+ *             "共 2 个且值都在"，拦不住"两个按钮都渲染进第一行"与"两行参数对调"；
+ *          ⑤ 表头逐字断言 [开发,组件,commit_ref,时间,空] + 二级折叠文案精确断言「原始快照（审计原文）」
+ *             + `<pre>` 的 computed `max-height` 断言 150px——三者都是本批的**可见契约**，
+ *             此前只在注释里声称、无断言守（CSS 无运行时自证途径，只能读计算样式锁）；
+ *          ⑥ 夹具④（OP_RELEASE_EVIL）转义链**行为**取证 + 空 ref 分支：含 " < > & ' \ ); 的
+ *             commit_ref 走完整链路后，(a) 单元格文本精确还原 (b) 📋 复制入参精确还原
+ *             (c) 展开区内 img/script/iframe/svg 节点数为 0；另一行空 ref 断言不产按钮、
+ *             不借用别行参数、5 格不塌陷。这把 siJsStringAttr 的安全性从"读实现认为对"升到
+ *             "有行为断言守"（该函数 = 内层 JSON.stringify 转 JS 字面量 + 外层 esc 转 HTML 属性，
+ *             实现见 Sys_Iteration.html 该函数处注释）。
  *
  * F6 新增（估时并发乐观锁前端接线：F2 提示+B1 后端拦截+本件自动刷新，组合缺口闭环）：
  *   [T8] 全程走真实 UI 提交路径（page.fill + page.click('#siMConfirm')，非直接 fetch）：
@@ -776,10 +797,16 @@ async function mkMember(issueId, userId, userName, devStatus, resolvedAt, noCode
         console.log('\n── [T7] 发布留痕展开视图结构化 ──');
         const OP_RELEASE = `TL发布留痕-${RUN_TAG}`;
         const OP_RELEASE_BAD = `TL发布留痕解析失败-${RUN_TAG}`;
+        // [发布留痕降噪批·2026-08-26] OP_RELEASE_SAME = 标题去重判定的**反向对照组**算子名（见下方夹具③）。
+        const OP_RELEASE_SAME = `TL发布留痕同名标题-${RUN_TAG}`;
         const REL_TITLE_SNAPSHOT = `发布留痕结构化夹具-${RUN_TAG}`;
         const REL_REF_FE = `fe-${RUN_TAG}`;
         const REL_REF_BE = `be-${RUN_TAG}`;
-        const iRelease = await mkIssue(`DUX-发布留痕结构化-${RUN_TAG}`, '已上线');
+        const REL_REF_SAME = `same-${RUN_TAG}`;
+        // ⭐ 单标题提成变量：夹具③要让 title_snapshot 与**该单当前标题**逐字相同，两处必须同源，
+        //   写两遍字面量会在将来任一处改动时静默失配（对照组恒走"不同"分支 → 反向断言假绿）。
+        const REL_ISSUE_TITLE = `DUX-发布留痕结构化-${RUN_TAG}`;
+        const iRelease = await mkIssue(REL_ISSUE_TITLE, '已上线');
         const releaseSnapshot = JSON.stringify({
             schema_version: 2,
             type: 'bug',
@@ -795,6 +822,48 @@ async function mkMember(issueId, userId, userName, devStatus, resolvedAt, noCode
         // 解析失败对照：非法 JSON，siFormatReleasePublishedSummary 应返回 ok:false，维持现状单层 <details>+<pre> 文案不动
         await run(`INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, operator_id, operator_name)
                    VALUES (?, 'scope_change', ?, 'release_published', 1, ?)`, [iRelease, '这不是合法JSON{', OP_RELEASE_BAD]);
+        // ⭐ [发布留痕降噪批·2026-08-26] 夹具③＝标题去重判定的**反向对照组**：title_snapshot 与该单当前
+        //   标题逐字相同 → 摘要行**不得**再重复标题。
+        //   为什么必须成对造：夹具①的快照标题（`发布留痕结构化夹具-*`）与单标题（`DUX-发布留痕结构化-*`）
+        //   恰好不同，只有它时"改过名才显示"这个判定**只有'显示'这一半被证明**——一个把标题无条件拼进
+        //   摘要行的实现（即本批改动前的旧实现）能让套件全绿。一个判定有两个相反失败方向时用例必须成对
+        //   （[[feedback_probe_test_bidirectional_proof]]），否则实现可以被诱导进另一个方向的坑而无人拦截。
+        //   commits 给 1 条（≠夹具① 的 2 条）：让两组的摘要行可凭「N 条 commit」互相区分，避免断言串组。
+        const releaseSnapshotSameTitle = JSON.stringify({
+            schema_version: 2,
+            type: 'bug',
+            title_snapshot: REL_ISSUE_TITLE,   // ← 与 mkIssue 传入的单标题同源同值
+            status_at_publish: '已上线',
+            commits: [
+                { commit_id: 3, dev_assignee_id: 1, dev_user_id: admin.id, component: 'frontend', commit_ref: REL_REF_SAME, created_at: '2026-08-11 09:30:00', updated_at: '2026-08-11 09:30:00' },
+            ],
+        });
+        await run(`INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, operator_id, operator_name)
+                   VALUES (?, 'scope_change', ?, 'release_published', 1, ?)`, [iRelease, releaseSnapshotSameTitle, OP_RELEASE_SAME]);
+        // ⭐ [codex 本批 HIGH 驳回衍生 + LOW-1] 夹具④：转义链行为取证 + 空 commit_ref 分支。
+        //   ① 恶意 ref——`siJsStringAttr` 的安全性此前只有"读实现认为它对"这一级证据（内层 JSON.stringify
+        //      产出 JS 字符串字面量、外层 esc() 做 HTML 属性编码，见 Sys_Iteration.html:1394-1416）。这里用
+        //      **行为**把它钉死：含 " < > & ' \ ); 的 ref 走完整链路后，(a) 单元格文本应精确还原原字符串，
+        //      (b) 📋 的复制入参应精确还原原字符串，(c) 展开区里不得出现任何被解析出来的 img/script/iframe/svg
+        //      节点。三条同时成立 = 两层转义都在、且都无损。
+        //      注：本夹具直插 timeline JSON，绕过 sys_issue_dev_commits 的 commit_ref CHECK（长度 1-200），
+        //      这正是要模拟的场景——**历史污染/绕过写入端的载荷**，展示层不能假设它一定干净。
+        //   ② 空 ref——前端新增了 `refText ? 按钮 : ''` 分支（空值不产按钮，避免点了没反应的死控件），
+        //      该分支此前无守卫：空 ref 也渲染按钮、或误复制别行的值，都不会被发现。
+        const OP_RELEASE_EVIL = `TL发布留痕转义取证-${RUN_TAG}`;
+        const REL_REF_EVIL = `evil"<img src=x onerror="window.__xssHit=1">&'\\");alert(1);//-${RUN_TAG}`;
+        const releaseSnapshotEvil = JSON.stringify({
+            schema_version: 2,
+            type: 'bug',
+            title_snapshot: `转义取证夹具-${RUN_TAG}`,
+            status_at_publish: '已上线',
+            commits: [
+                { commit_id: 5, dev_assignee_id: 1, dev_user_id: admin.id, component: 'frontend', commit_ref: REL_REF_EVIL, created_at: '2026-08-12 08:00:00', updated_at: '2026-08-12 08:00:00' },
+                { commit_id: 6, dev_assignee_id: 2, dev_user_id: admin.id, component: 'backend', commit_ref: '', created_at: '2026-08-12 08:05:00', updated_at: '2026-08-12 08:05:00' },
+            ],
+        });
+        await run(`INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, operator_id, operator_name)
+                   VALUES (?, 'scope_change', ?, 'release_published', 1, ?)`, [iRelease, releaseSnapshotEvil, OP_RELEASE_EVIL]);
 
         await page.evaluate((id) => window.siOpenDrawer && window.siOpenDrawer(id), iRelease);
         await page.waitForTimeout(600);
@@ -822,8 +891,37 @@ async function mkMember(issueId, userId, userName, devStatus, resolvedAt, noCode
                 const statusLineEl = outerDetails ? outerDetails.querySelector(':scope > div.si-muted') : null;
                 const table = outerDetails ? outerDetails.querySelector('table.si-commit-table') : null;
                 const rows = table ? [...table.querySelectorAll('tbody tr')] : [];
-                const rowTexts = rows.map(r => [...r.querySelectorAll('td')].map(td => td.textContent.trim()));
+                // [codex 本批 MED-2] 取证改**按行绑定**：原先把全表的 📋 聚合成一个扁平 copyArgs 数组，
+                //   只能断言"共 N 个、值都在"——一个把两个按钮都渲染进第一行、或把前后端两行的复制参数
+                //   对调的实现照样绿。现在每行各自带 btnCount + copyArg，断言得以落到"这一行的按钮复制
+                //   的是这一行的 ref"。onclick 取的是**属性文本**（浏览器已把 &quot; 解码回引号），
+                //   再 JSON.parse 还原成原始字符串，故比的是"按钮真会复制什么"而非"页面上有没有 📋"；
+                //   解析不出来一律记 null（不吞成空串冒充成功）。
+                const rowData = rows.map((r) => {
+                    const tds = [...r.querySelectorAll('td')];
+                    const btns = [...r.querySelectorAll('.si-batch-copy')];
+                    let copyArg = null;
+                    if (btns.length === 1) {
+                        const m = (btns[0].getAttribute('onclick') || '').match(/siCopyBatchCommits\(this,\s*("(?:[^"\\]|\\.)*")\s*\)/);
+                        if (m) { try { copyArg = JSON.parse(m[1]); } catch (_) { copyArg = null; } }
+                    }
+                    return { texts: tds.map(td => td.textContent.trim()), tdCount: tds.length, btnCount: btns.length, copyArg };
+                });
+                const rowTexts = rowData.map(r => r.texts);   // 既有断言沿用此形态，不改口径
                 const rawPre = innerDetails ? innerDetails.querySelector('pre') : null;
+                // [codex 本批 MED-3] 表头文本 + 二级折叠文案：两者都是本批改动的**可见契约**（三列扩五列、
+                //   「查看原始快照」→「原始快照（审计原文）」），此前只在注释里声称、无断言守——实现改错
+                //   或漏改时守卫不会红。
+                const headTexts = table ? [...table.querySelectorAll('thead th')].map(th => th.textContent.trim()) : null;
+                const innerSummaryEl = innerDetails ? innerDetails.querySelector(':scope > summary') : null;
+                // [codex 本批 LOW-2] max-height 是本批用户拍板的可见结果（240px→150px），CSS 无运行时自证
+                //   途径，只能读 computed style 锁住（读最终计算值，不依赖具体 CSS 规则排列或注释）。
+                const preMaxHeight = rawPre ? window.getComputedStyle(rawPre).maxHeight : null;
+                // [codex 本批 HIGH 驳回后的衍生断言] 转义链击穿的**直接行为证据**：恶意 ref 里的
+                //   `<img src=x onerror=...>` 若被当作标签解析，这里就能查到一个真实 img 节点。
+                //   查不到 = 没击穿（比"我读代码认为 esc 是对的"强一个证据等级）。
+                const injectedNodeCount = outerDetails
+                    ? outerDetails.querySelectorAll('img, script, iframe, svg').length : null;
                 return {
                     hasOuterDetails: !!outerDetails,
                     summaryBrief: summaryEl ? summaryEl.textContent : null,
@@ -831,6 +929,11 @@ async function mkMember(issueId, userId, userName, devStatus, resolvedAt, noCode
                     hasTable: !!table,
                     rowCount: rows.length,
                     rowTexts,
+                    rowData,
+                    headTexts,
+                    innerSummaryText: innerSummaryEl ? innerSummaryEl.textContent.trim() : null,
+                    preMaxHeight,
+                    injectedNodeCount,
                     hasInnerDetails: !!innerDetails,
                     rawText: rawPre ? rawPre.textContent : null,
                 };
@@ -838,28 +941,60 @@ async function mkMember(issueId, userId, userName, devStatus, resolvedAt, noCode
             return {
                 ok: extract(findByOp(opNames.ok)),
                 bad: extract(findByOp(opNames.bad)),
+                same: extract(findByOp(opNames.same)),
+                evil: extract(findByOp(opNames.evil)),
             };
-        }, { ok: OP_RELEASE, bad: OP_RELEASE_BAD });
+        }, { ok: OP_RELEASE, bad: OP_RELEASE_BAD, same: OP_RELEASE_SAME, evil: OP_RELEASE_EVIL });
 
         // 正例：结构化小表 + 二级折叠原始快照
         const relOk = releaseInfo.ok;
         must(!!relOk && relOk.hasOuterDetails === true,
             `[T7] 前置：合法快照行应渲染出 details.si-tl-release-json，实得 ${JSON.stringify(relOk)}`);
-        must(!!relOk && !!relOk.summaryBrief && relOk.summaryBrief.includes(REL_TITLE_SNAPSHOT) && relOk.summaryBrief.includes('2 条 commit'),
-            `[T7] 摘要行应含标题快照与「2 条 commit」，实得 summaryBrief="${relOk && relOk.summaryBrief}"`);
+        // [发布留痕降噪批] 快照标题 ≠ 当前单标题（夹具①本就如此）⇒ 走"显示"分支，且必须带「发布时标题：」
+        //   前缀——前缀是这条信息的**语义标记**（告诉读者这是冻结值不是当前值），只断言"含标题"会让一个
+        //   丢了前缀的实现照样绿。反向那半由下面 relSame 对照组守。
+        must(!!relOk && !!relOk.summaryBrief && relOk.summaryBrief.includes(`发布时标题：${REL_TITLE_SNAPSHOT}`) && relOk.summaryBrief.includes('2 条 commit'),
+            `[T7] 摘要行应含「发布时标题：<快照标题>」与「2 条 commit」，实得 summaryBrief="${relOk && relOk.summaryBrief}"`);
         must(!!relOk && !!relOk.statusLineText && relOk.statusLineText.includes('发布时状态：已上线'),
             `[T7] ⭐ C5c：展开区顶部应有「发布时状态：已上线」小字，实得 "${relOk && relOk.statusLineText}"`);
         must(!!relOk && relOk.rowCount === 2,
             `[T7] ⭐ C5c：commits 小表行数应=2，实得 ${relOk && relOk.rowCount}`);
         const adminDisplayName = admin.display_name || admin.username;
-        must(!!relOk && Array.isArray(relOk.rowTexts) && relOk.rowTexts.some(r => r[0] === adminDisplayName && r[1] === '前端' && r[2] === REL_REF_FE),
-            `[T7] ⭐ C5c：dev_user_id 映射得到（admin.id）那行应显真名「${adminDisplayName}」+「前端」+ commit_ref，`
+        // [发布留痕降噪批] 两行断言各加 r[3]＝新增「时间」列（夹具 created_at 经 siFmtDT 到分：秒被吃掉）。
+        //   两行给的是**不同**时刻（10:00 / 10:05），故这两条断言同时也证明该列取的是**每行自己的**
+        //   created_at，而非常量/首行值复读——只造一个时刻的话，一个把首行时间填给所有行的实现会全绿。
+        must(!!relOk && Array.isArray(relOk.rowTexts) && relOk.rowTexts.some(r => r[0] === adminDisplayName && r[1] === '前端' && r[2] === REL_REF_FE && r[3] === '2026-08-10 10:00'),
+            `[T7] ⭐ C5c：dev_user_id 映射得到（admin.id）那行应显真名「${adminDisplayName}」+「前端」+ commit_ref + 时间「2026-08-10 10:00」，`
             + `实得 ${JSON.stringify(relOk && relOk.rowTexts)}`);
-        must(!!relOk && Array.isArray(relOk.rowTexts) && relOk.rowTexts.some(r => r[0] === '#99999' && r[1] === '后端' && r[2] === REL_REF_BE),
-            `[T7] ⭐ C5c：dev_user_id 映射不到（99999）那行应回退显「#99999」（不伪造姓名）+「后端」+ commit_ref，`
+        must(!!relOk && Array.isArray(relOk.rowTexts) && relOk.rowTexts.some(r => r[0] === '#99999' && r[1] === '后端' && r[2] === REL_REF_BE && r[3] === '2026-08-10 10:05'),
+            `[T7] ⭐ C5c：dev_user_id 映射不到（99999）那行应回退显「#99999」（不伪造姓名）+「后端」+ commit_ref + 时间「2026-08-10 10:05」，`
             + `实得 ${JSON.stringify(relOk && relOk.rowTexts)}`);
+        // 📋 复制按钮：每行末列各一个，且 onclick 里带的是**该行自己的完整** commit_ref（这块按钮存在的
+        //   全部意义就是拿到被 130px 截断的全文；只断言"有个按钮"会让复制截断值/复制空串的实现照样绿）。
+        //   [codex 本批 MED-2] 按行绑定断言——按 ref 找到该行、再比该行的 btnCount 与 copyArg，
+        //   能同时拦住"两个按钮都渲染进第一行"和"前后端两行参数对调"两种错误实现。
+        const relOkRowByRef = (ref) => (relOk && Array.isArray(relOk.rowData))
+            ? (relOk.rowData.find(r => r.texts[2] === ref) || null) : null;
+        for (const ref of [REL_REF_FE, REL_REF_BE]) {
+            const row = relOkRowByRef(ref);
+            must(!!row && row.btnCount === 1 && row.copyArg === ref,
+                `[T7] ⭐ 降噪批：commit_ref="${ref}" 那一行应恰有 1 个 📋 且其复制入参精确等于本行 ref，`
+                + `实得 ${JSON.stringify(row)}`);
+        }
+        // [codex 本批 MED-3] 表头（三列扩五列）与二级折叠文案——本批的可见契约，须逐字锁住。
+        must(!!relOk && Array.isArray(relOk.headTexts)
+             && JSON.stringify(relOk.headTexts) === JSON.stringify(['开发', '组件', 'commit_ref', '时间', '']),
+            `[T7] ⭐ 降噪批：commits 小表表头应为 [开发, 组件, commit_ref, 时间, <空操作列>]，`
+            + `实得 ${JSON.stringify(relOk && relOk.headTexts)}`);
+        must(!!relOk && relOk.innerSummaryText === '原始快照（审计原文）',
+            `[T7] ⭐ 降噪批：二级折叠文案应精确为「原始快照（审计原文）」（旧文案「查看原始快照」已废），`
+            + `实得 "${relOk && relOk.innerSummaryText}"`);
+        // [codex 本批 LOW-2] pre 高度 240px→150px 是用户拍板的可见结果，读 computed style 锁住。
+        must(!!relOk && relOk.preMaxHeight === '150px',
+            `[T7] ⭐ 降噪批：原始快照 <pre> 的 max-height 计算值应为 150px（降噪拍板值），`
+            + `实得 "${relOk && relOk.preMaxHeight}"`);
         must(!!relOk && relOk.hasInnerDetails === true,
-            `[T7] ⭐ C5c：小表下方应有二级折叠「查看原始快照」，实得 ${JSON.stringify(relOk)}`);
+            `[T7] ⭐ C5c：小表下方应有二级折叠（文案由上面「原始快照（审计原文）」那条精确断言守），实得 ${JSON.stringify(relOk)}`);
         must(!!relOk && !!relOk.rawText && relOk.rawText.includes('schema_version'),
             `[T7] 二级折叠内容应含原始 JSON（含 schema_version 字段，审计原文不丢），实得 rawText 前 100 字="${relOk && relOk.rawText && relOk.rawText.slice(0, 100)}"`);
 
@@ -871,6 +1006,53 @@ async function mkMember(issueId, userId, userName, devStatus, resolvedAt, noCode
             `[T7] ⭐ C5c 对照：解析失败分支应维持现状文案「原始记录（解析失败）」不动，实得 summaryBrief="${relBad && relBad.summaryBrief}"`);
         must(!!relBad && relBad.hasTable === false,
             `[T7] ⭐ C5c 对照：解析失败行不应渲染结构化 commits 小表（info.ok===false 分支不动，走不到新代码路径），实得 hasTable=${relBad && relBad.hasTable}`);
+
+        // ── ⭐ [发布留痕降噪批·2026-08-26] 反向对照组：快照标题 == 当前单标题 ⇒ 摘要行不重复标题 ──
+        //   与上面 relOk（标题不同→显示）成对，两条合起来才证明"改过名才显示"这个判定的**两个方向**。
+        const relSame = releaseInfo.same;
+        must(!!relSame && relSame.hasOuterDetails === true,
+            `[T7] 前置：同名标题夹具行应渲染出 details.si-tl-release-json，实得 ${JSON.stringify(relSame)}`);
+        must(!!relSame && !!relSame.summaryBrief && relSame.summaryBrief.trim() === 'BUG · 1 条 commit',
+            `[T7] ⭐ 降噪批反向：快照标题与当前单标题逐字相同时，摘要行应精确为「BUG · 1 条 commit」`
+            + `（既不重复标题、也不留「发布时标题：」前缀与空的 · 分隔符），实得 summaryBrief="${relSame && relSame.summaryBrief}"`);
+        must(!!relSame && !!relSame.summaryBrief && !relSame.summaryBrief.includes(REL_ISSUE_TITLE),
+            `[T7] ⭐ 降噪批反向：摘要行不得含当前单标题「${REL_ISSUE_TITLE}」，实得 summaryBrief="${relSame && relSame.summaryBrief}"`);
+        // 去标题**只影响摘要行**：展开区其余部分（状态行 / 小表 / 二级折叠原文）一个都不少——
+        //   否则一个"同名时整块降级不渲染"的实现也能让上面两条断言绿。
+        must(!!relSame && relSame.rowCount === 1 && Array.isArray(relSame.rowTexts)
+             && relSame.rowTexts.some(r => r[2] === REL_REF_SAME && r[3] === '2026-08-11 09:30'),
+            `[T7] ⭐ 降噪批反向：同名标题行的 commits 小表仍应正常渲染（1 行 + commit_ref + 时间），`
+            + `实得 rowCount=${relSame && relSame.rowCount} rowTexts=${JSON.stringify(relSame && relSame.rowTexts)}`);
+        must(!!relSame && !!relSame.statusLineText && relSame.statusLineText.includes('发布时状态：已上线')
+             && relSame.hasInnerDetails === true && !!relSame.rawText && relSame.rawText.includes(REL_ISSUE_TITLE),
+            `[T7] ⭐ 降噪批反向：同名标题行的「发布时状态」行与二级折叠原文仍在，且原文里 title_snapshot 一字未删`
+            + `（去重只发生在摘要行，审计原文不受影响），实得 statusLine="${relSame && relSame.statusLineText}" hasInner=${relSame && relSame.hasInnerDetails}`);
+
+        // ── ⭐ [codex 本批 HIGH 驳回衍生 + LOW-1] 转义链行为取证 + 空 commit_ref 分支 ──
+        const relEvil = releaseInfo.evil;
+        must(!!relEvil && relEvil.rowCount === 2,
+            `[T7] 前置：转义取证夹具应渲染 2 行（恶意 ref + 空 ref），实得 rowCount=${relEvil && relEvil.rowCount}`);
+        const evilRow = (relEvil && Array.isArray(relEvil.rowData)) ? (relEvil.rowData[0] || null) : null;
+        const emptyRow = (relEvil && Array.isArray(relEvil.rowData)) ? (relEvil.rowData[1] || null) : null;
+        // (a) HTML 转义无损：单元格文本应精确还原原字符串（转多了会变成 &amp;lt; 之类，转少了会丢字符/被解析成标签）
+        must(!!evilRow && evilRow.texts[2] === REL_REF_EVIL,
+            `[T7] ⭐⭐ 转义取证(a)：含 " < > & ' \\ ); 的 commit_ref 单元格文本应精确还原原字符串，`
+            + `期望="${REL_REF_EVIL}"，实得="${evilRow && evilRow.texts[2]}"`);
+        // (b) JS 字符串转义无损：📋 的复制入参应精确还原原字符串（siJsStringAttr 两层转义往返不丢不加）
+        must(!!evilRow && evilRow.btnCount === 1 && evilRow.copyArg === REL_REF_EVIL,
+            `[T7] ⭐⭐ 转义取证(b)：该行 📋 的复制入参应精确等于原始 ref（证明 siJsStringAttr 的`
+            + ` JSON.stringify+esc 两层往返无损、未被引号撑破 onclick 边界），实得 ${JSON.stringify(evilRow)}`);
+        // (c) 没被击穿的直接行为证据：payload 里的 <img onerror=...> 不得成为真实 DOM 节点
+        must(!!relEvil && relEvil.injectedNodeCount === 0,
+            `[T7] ⭐⭐ 转义取证(c)：展开区内不得出现被解析出来的 img/script/iframe/svg 节点`
+            + `（出现即说明 HTML 转义链被击穿），实得 injectedNodeCount=${relEvil && relEvil.injectedNodeCount}`);
+        // 空 ref 行：不产按钮，但该行其余列（含时间）照常渲染；且不得"借用"上一行的复制参数
+        must(!!emptyRow && emptyRow.texts[2] === '' && emptyRow.btnCount === 0 && emptyRow.copyArg === null,
+            `[T7] ⭐ 空 commit_ref 分支：该行 ref 单元格应为空、不产 📋（不留点了没反应的死控件）、`
+            + `更不得携带别行的 ref，实得 ${JSON.stringify(emptyRow)}`);
+        must(!!emptyRow && emptyRow.tdCount === 5 && emptyRow.texts[3] === '2026-08-12 08:05',
+            `[T7] ⭐ 空 commit_ref 分支对照：该行仍应是完整 5 格（列数不因空 ref 塌陷）且时间列照常渲染，`
+            + `实得 ${JSON.stringify(emptyRow)}`);
 
         await page.evaluate(() => { if (window.siCloseModal) siCloseModal(); if (window.siCloseDrawer) siCloseDrawer(); });
         await page.waitForTimeout(200);

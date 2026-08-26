@@ -313,7 +313,9 @@
         .si-tl-release-json { display: inline; }
         .si-tl-release-json summary { cursor: pointer; color: #374151; }
         .si-tl-release-json summary:hover { color: #1e293b; }
-        .si-tl-release-json pre { white-space: pre-wrap; word-break: break-all; max-height: 240px; overflow: auto; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; padding: 8px; margin: 4px 0 0; font-size: 11px; font-family: monospace; }
+        /* max-height 240→150（发布留痕降噪批）：原文里对人有意义的字段已被上方结构化小表逐个透出，
+           这块 <pre> 只服务"人工核对冻结原文"这一窄场景，不该按第一阅读对象的体量占位。 */
+        .si-tl-release-json pre { white-space: pre-wrap; word-break: break-all; max-height: 150px; overflow: auto; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; padding: 8px; margin: 4px 0 0; font-size: 11px; font-family: monospace; }
         .si-tl-att a { font-size: 11px; color: #2563eb; cursor: pointer; margin-right: 8px; }
 
         /* 通知行族已 harmonize → u-notify-row/u-nr-label/u-nr-body（base 见 components.css）。
@@ -1402,6 +1404,16 @@
     // 内部转义，对 " \ 换行等按 JSON/JS 通用规则转义）；外层 esc() 再把这段 JS 源码当**HTML 属性值**转义
     // 一次（防其中的 " 撑破 onclick="..." 的外层双引号）。颠倒顺序（先 esc 后 stringify）会把已经是
     // HTML 实体的文本当作普通字符再转义一遍，产出两次转义的乱码，且起不到保护 JS 语法边界的作用。
+    // ⚠️ **适用边界：仅限 HTML 属性上下文**（onclick="..." / data-x="..." 这类），禁用于 script 标签块内。
+    //   外层 esc() 的保护力完全来自"浏览器会对属性值解码 HTML 实体"这一前提；script 标签块内的文本**不**走
+    //   HTML 实体解码，把本函数的输出拼进去，`&quot;` 会原样进入 JS 源码 ⇒ 既起不到转义作用、还直接产出
+    //   语法错误。script 上下文只该用裸 JSON.stringify（另需防内容里的 script 结束标签提前闭合外层块）。
+    //   ⚠️⚠️ 本段刻意**不写** script 结束标签的字面形态——本页 JS 整体内联在一个 script 块里，HTML 解析器
+    //   见到那个字符序列（哪怕在 JS 注释里、哪怕带反引号）就当场结束整个块，其后数千行 JS 会被当成正文
+    //   丢弃、页面直接瘫痪。这不是理论风险：本条注释初版就写了字面量，被内联 JS 语法检查当场抓到
+    //   （可解析块从 8569 行塌到 574 行）。
+    //   写下这条是因为本函数正在从"三处重复写法的封装"长成页面通用工具（现 4 个调用点），
+    //   而它的安全性有隐含前提，前提不写下来就会在下一次复制粘贴时丢失。
     function siJsStringAttr(x) {
         return esc(JSON.stringify(String(x == null ? '' : x)));
     }
@@ -3124,7 +3136,7 @@
             ? `<label style="font-weight:normal;font-size:11px;color:#6b7280;margin-left:12px;cursor:pointer">
                 <input type="checkbox"${siTlHideReleaseScope ? ' checked' : ''} onchange="siToggleTlReleaseScope(this.checked)"> 隐藏上线单调整记录</label>`
             : '';
-        const tl = `<div class="u-detail-section"><h3>演进时间线${tlFilterHtml}</h3>${siRenderTimeline(tlEvents, r.data.attachments || [])}</div>`;
+        const tl = `<div class="u-detail-section"><h3>演进时间线${tlFilterHtml}</h3>${siRenderTimeline(tlEvents, r.data.attachments || [], iss && iss.title)}</div>`;
 
         // 附件区
         // 附件融入（2026-07-19）：spec 已融入基本信息（info 内），delivery+screenshot 合并为「开发交付」区（Commit 记录后）。
@@ -3521,9 +3533,16 @@
     };
     // release_published 的 summary = §6.6a 结构化 JSON（{issue_id,schema_version,type,title_snapshot,
     //   status_at_publish,commits}），直接 esc() 裸展示会在时间线里甩一坨技术 JSON（commits 多时很长）。
-    //   解析出「类型 · 标题 · commit 数」三个人读得懂的字段做摘要；解析失败不伪造字段，只标注"原始记录"+
+    //   解析出「类型 · 标题 · commit 数」几个人读得懂的字段做摘要；解析失败不伪造字段，只标注"原始记录"+
     //   截断（同 getReleaseMembers 降级契约的"不伪造"精神，§6.6b）。
-    function siFormatReleasePublishedSummary(summaryRaw) {
+    //   ⭐ [发布留痕降噪批·2026-08-26] `currentTitle` = 该单**当前**标题（调用方从 siRenderDrawer 的
+    //   `iss.title` 显式传入，不读模块级 siDetail——本函数是纯函数，读全局会让"渲染的是哪个单"隐式化）。
+    //   用途只有一个：`title_snapshot` 与当前标题**逐字相同**时，摘要行不再重复它（详情页顶部已显示同一
+    //   句话，抄一遍是零信息量）；两者不同=该单发布后被改过标题，那才是 title_snapshot 存在的意义，此时
+    //   加「发布时标题：」前缀显式标出，让读者知道这是冻结值不是当前值。
+    //   ⚠️ `currentTitle` 缺省（未传/null）时**一律显示**——回退方向选"多显示"而非"少显示"：漏显示会让
+    //   改过名的单看不出改过名（信息丢失），多显示只是回到本批改动前的样子（信息冗余），两害取轻。
+    function siFormatReleasePublishedSummary(summaryRaw, currentTitle) {
         let parsed = null;
         try { parsed = JSON.parse(summaryRaw); } catch (_) { parsed = null; }
         if (!parsed || typeof parsed !== 'object') {
@@ -3532,14 +3551,28 @@
             return { ok: false, brief: '原始记录（解析失败）' + (short ? '：' + short : ''), raw: String(summaryRaw == null ? '' : summaryRaw), commits: null, statusAtPublish: null };
         }
         const typeLabel = (parsed.type && siTypeLabel(parsed.type)) || parsed.type || '未知类型';
-        const title = parsed.title_snapshot || '（无标题快照）';
+        // [发布留痕降噪批] 标题段三分支（见函数头 currentTitle 说明）：无快照标题→如实标注；与当前标题
+        //   同→整段不产出；不同→带「发布时标题：」前缀。判等前两侧都 String() 归一，不用 == 隐式转换。
+        // [codex 本批 MED-1] 两侧都**严格按字符串**处理，非字符串一律当"无标题快照"，不做跨类型归一：
+        //   ① 原写法 `!rawTitle` 会把 `0`/`false` 误判成无标题，却把对象渲染成 `[object Object]`；
+        //   ② 对象若带不可调用的 toString/valueOf，`String(rawTitle)` 抛 TypeError ⇒ **整条时间线渲染中断**
+        //      （本函数在 siRenderTimeline 的 map 里，一条炸掉整个时间线不出）；
+        //   ③ 跨类型 String() 归一后两侧可能"意外相等"而触发同名隐藏，违背"逐字相同才去重"的语义。
+        //   这三种都只可能来自被污染/历史异常的快照载荷（正常路径 title_snapshot 取自 TEXT 列的 issue.title），
+        //   按"无标题快照"如实标注即可——真值一字未动，仍在下方二级折叠的审计原文里可查（§6.6b 不伪造精神）。
+        const rawTitle = parsed.title_snapshot;
+        const hasTitle = typeof rawTitle === 'string' && rawTitle.length > 0;
+        const curTitle = (typeof currentTitle === 'string') ? currentTitle : null;
+        const titleSeg = !hasTitle ? ' · （无标题快照）'
+            : (curTitle !== null && curTitle === rawTitle) ? ''
+            : ` · 发布时标题：${rawTitle}`;
         // C5c（详情页体验优化批·发布留痕展开视图结构化）：commits 数组与快照级字段 status_at_publish
         // 一并透出，供 siRenderReleasePublishedCommits 渲小表 + summaryHtml 拼「发布时状态」行——
-        // issue_id/schema_version/title_snapshot 三个快照级字段不透出（摘要行已含类型·标题，
-        // schema_version/issue_id 对读者无展示价值，只在下方二级折叠的原始 JSON 里保留）。
+        // issue_id/schema_version 两个快照级字段不透出（对读者无展示价值，只在下方二级折叠的原始 JSON
+        // 里保留）；title_snapshot 按上面三分支条件透出，非无条件拼进摘要行。
         const commits = Array.isArray(parsed.commits) ? parsed.commits : [];
         return {
-            ok: true, brief: `${typeLabel} · ${title} · ${commits.length} 条 commit`,
+            ok: true, brief: `${typeLabel}${titleSeg} · ${commits.length} 条 commit`,
             raw: JSON.stringify(parsed, null, 2), commits, statusAtPublish: parsed.status_at_publish || null,
         };
     }
@@ -3553,23 +3586,40 @@
         const name = u && (u.display_name || u.username);
         return name || ('#' + id);
     }
-    // C5c：发布留痕展开视图——commits 小表（开发/组件/commit_ref 三列，只读，无编辑/删除——这是历史快照，
-    //   不是当前 sys_issue_dev_commits 活动行，编辑没有意义）。组件列复用既有 SI_COMMIT_COMPONENT_LABEL
+    // C5c：发布留痕展开视图——commits 小表（只读，无编辑/删除——这是历史快照，不是当前
+    //   sys_issue_dev_commits 活动行，编辑没有意义）。组件列复用既有 SI_COMMIT_COMPONENT_LABEL
     //   （前端/后端），commit_ref 列复用既有 .si-commit-cell（等宽字体+CSS max-width:130px 溢出省略号，
     //   与列表页 commit 两列同一套视觉语言，不新造截断逻辑），title 挂全文。
+    // ⭐ [发布留痕降噪批·2026-08-26] 列集从「开发/组件/commit_ref」三列扩到**五列**，两处新增：
+    //   ① `时间`＝快照 commits 行的 `created_at`（后端 snapshotReleaseCommitsInTxn 的 SELECT 已冻结该列，
+    //      见 routes/sys-iteration/index.js 该函数）——它此前是**原始 JSON 里唯一对人有价值却没被结构化
+    //      区透出的字段**，提上来后二级折叠的 JSON 才真正只剩内部主键/schema_version。列名用「时间」而非
+    //      「提交时间」：这是 commit 记录**被录入平台**的时间，不是 git commit 时间，措辞与活动 commit 表
+    //      siRenderDevCommits 的表头逐字对齐（同一语义同一叫法，不制造两套词）。格式同走 siFmtDT（到分）。
+    //      ⚠️ 老快照若无该字段，siFmtDT(undefined) 返回「—」，不伪造时间（同 §6.6b 不伪造精神）。
+    //   ② 末列 📋＝复制**完整** commit_ref——commit_ref 列有 130px 硬截断，此前想看全 hash 只能去点开二级
+    //      折叠翻 JSON，那正是这块 JSON 被反复展开的真实原因之一。复制走既有 siCopyBatchCommits（行内就地
+    //      反馈+自增令牌防连点并存态，见其注释）+ siJsStringAttr 过 onclick 属性，不新造一套。
+    //      末列位置与 siRenderDevCommits 的操作列同序（开发/组件/ref/时间/操作），不打乱既有列序心智。
     function siRenderReleasePublishedCommits(commits) {
         if (!commits || !commits.length) return '<div class="si-muted" style="font-size:12px">无 commit 记录</div>';
         const rows = commits.map(c => {
             const devName = siUserNameById(c.dev_user_id);
             const compLabel = SI_COMMIT_COMPONENT_LABEL[c.component] || esc(c.component);
             const refText = String(c.commit_ref == null ? '' : c.commit_ref);
+            // 空 ref 不产出按钮（复制空串对用户是纯噪音），非产出一个点了没反应的按钮。
+            const copyBtn = refText
+                ? `<span class="si-batch-copy" data-label="📋" title="复制完整 commit_ref" onclick="event.stopPropagation();siCopyBatchCommits(this,${siJsStringAttr(refText)})">📋</span>`
+                : '';
             return `<tr>
                 <td>${esc(devName)}</td>
                 <td>${compLabel}</td>
                 <td class="si-commit-cell" title="${esc(refText)}">${esc(refText)}</td>
+                <td>${esc(siFmtDT(c.created_at))}</td>
+                <td>${copyBtn}</td>
             </tr>`;
         }).join('');
-        return `<table class="si-commit-table"><thead><tr><th>开发</th><th>组件</th><th>commit_ref</th></tr></thead><tbody>${rows}</tbody></table>`;
+        return `<table class="si-commit-table"><thead><tr><th>开发</th><th>组件</th><th>commit_ref</th><th>时间</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
     }
     // C5d（详情页体验优化批·时间线渲染层三合一）：W-GATE 存量转译白名单——B3 上线（commit a75e9ea）前
     //   写入的历史行，summary 唯一硬编码定值无变量（精确等值匹配，非 LIKE；出处 docs/local/系统迭代/
@@ -3583,7 +3633,11 @@
     //   liaison_test_pass 等既有 status_change 事件同款），走的是另一条渲染路径（直接用 action_code 查
     //   SI_TL_LABEL，不经本 Set 判定），加进来不生效，反而误导读者以为它是 note 型事件。
     const SI_TL_WGATE_LEGACY_SUMMARY = 'W-GATE 自动门禁转移（成员在册完成态变化）';
-    function siRenderTimeline(list, atts) {
+    // [发布留痕降噪批·2026-08-26] `currentTitle` = 正在渲染的这个单的**当前**标题，由唯一调用点
+    //   siRenderDrawer 从其局部 `iss.title` 传入（不在本函数里读模块级 siDetail——虽然当前只有一个调用点
+    //   且 siDetail 必已同源赋值，但那是"靠调用点顺序成立"的隐式不变量；显式传参后新增第二个调用点时
+    //   编译期就会暴露"这里该传谁的标题"）。只透传给 siFormatReleasePublishedSummary 做标题去重判定。
+    function siRenderTimeline(list, atts, currentTitle) {
         if (!list.length) return '<div class="si-muted">暂无演进记录</div>';
         return '<div class="si-timeline">' + list.map(e => {
             // L-1（codex 复审）：release 事件也优先识别 action_code——「确认上线·不发版」(confirm_online_norelease)
@@ -3613,18 +3667,19 @@
                 ? `<span class="si-tl-to"> →${esc(siStatusDisplay(e.to_status))}</span>` : '';
             // release_published：折叠——原生 <details> 默认收起，摘要行只给三个人读得懂的字段。
             //   C5c（详情页体验优化批·发布留痕展开视图结构化）：点开后不再是裸 JSON——commits 渲染成
-            //   开发/组件/commit_ref 小表，顶部一行「发布时状态」，原始 JSON 降为小表下方的二级折叠
+            //   开发/组件/commit_ref/时间/📋 小表（列集见 siRenderReleasePublishedCommits），顶部一行
+            //   「发布时状态」，原始 JSON 降为小表下方的二级折叠
             //   （审计原文不丢，只是不再是展开区第一眼看到的东西）。解析失败（info.ok===false）分支
             //   维持现状不动——那种情况下 info.commits/statusAtPublish 恒 null，走不到结构化这条路径。
             //   （esc() 后再拼进 <pre>，不走 innerHTML 之外的第二次 DOM 赋值，字符串已按 HTML 语境转义，无 XSS 风险）。
             let summaryHtml;
             if (key === 'release_published' && e.summary) {
-                const info = siFormatReleasePublishedSummary(e.summary);
+                const info = siFormatReleasePublishedSummary(e.summary, currentTitle);
                 if (info.ok) {
                     const statusLine = info.statusAtPublish
                         ? `<div class="si-muted" style="font-size:11px;margin:4px 0">发布时状态：${esc(info.statusAtPublish)}</div>` : '';
                     const commitsTable = siRenderReleasePublishedCommits(info.commits);
-                    summaryHtml = `<details class="si-tl-release-json"><summary>${esc(info.brief)}</summary>${statusLine}${commitsTable}<details class="si-tl-release-json" style="display:block;margin-top:6px"><summary>查看原始快照</summary><pre>${esc(info.raw)}</pre></details></details>`;
+                    summaryHtml = `<details class="si-tl-release-json"><summary>${esc(info.brief)}</summary>${statusLine}${commitsTable}<details class="si-tl-release-json" style="display:block;margin-top:6px"><summary>原始快照（审计原文）</summary><pre>${esc(info.raw)}</pre></details></details>`;
                 } else {
                     summaryHtml = `<details class="si-tl-release-json"><summary>${esc(info.brief)}</summary><pre>${esc(info.raw)}</pre></details>`;
                 }

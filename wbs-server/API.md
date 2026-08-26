@@ -203,6 +203,15 @@ Authorization: Bearer <token>
 ```
 **权限**: admin, publisher
 
+### 恢复软删除模型（保留原 ID）
+```
+POST /api/models/:id/restore
+Authorization: Bearer <token>
+```
+**权限**: admin
+
+恢复操作会清空删除标记，在同一事务写入 `RESTORE` 变更日志；同名活跃模型存在时返回 `409 MODEL_NAME_CONFLICT`。重复调用已恢复模型会幂等返回成功，不重复写审计。
+
 ---
 
 ## 主题域管理

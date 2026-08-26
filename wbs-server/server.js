@@ -20,6 +20,7 @@ const collabSubmitHelpers = require('./utils/collab-submit-helpers');
 const { mapMysqlColumnToSqlServer } = require('./utils/mysql-type-mapper'); // v1.88.0：MySQL 源(HRD) → SQL Server 目标 类型映射
 const { buildMysqlSourceCount, buildMysqlSourcePk, splitMysqlTable } = require('./utils/mysql-source-introspect'); // ODS 验收·MySQL 源行数对比 / 反查源主键
 const efficiencyStats = require('./utils/efficiency-stats'); // 统计中心·效率统计 纯计算 helper（与 verify-statistics-efficiency.js 同源）
+const { restoreModelRecord, ModelRestoreError } = require('./utils/model-restore');
 
 const app = express();
 const PORT = parseInt(process.env.PORT || '3000');
@@ -2752,7 +2753,20 @@ function safeAlterAddColumn(table, column, type) {
 }
 
 // ==================== 密码加密辅助函数 ====================
-const ENCRYPTION_KEY = process.env.DB_ENCRYPTION_KEY || 'change_me_with_random_32bytes_!!'; // 32 bytes
+// fail-closed：缺失即拒绝启动，不设任何默认回退值。
+// 2026-08-26 事故复盘——此处原先带一个硬编码回退常量，而生产四处（.env / PM2 进程 /
+// 系统级 / 用户级）均未设该环境变量，于是长期实际使用那个回退值；该常量随源码进入公开
+// 镜像仓，叠加同一仓库历史中曾被误推的生产 db 快照，密文与密钥同时可得，加密强度归零。
+// 教训：回退值一旦存在，"忘记配置"就会静默降级成"没有加密"，且不会有任何告警。
+// 同一密钥的消费面不止一处（db_connections.password 与 system_configs.config_value_encrypted），
+// 轮转时必须按 encryptPassword/decryptPassword 的全部调用点扫一遍，不能只改先发现的那张表。
+const ENCRYPTION_KEY = process.env.DB_ENCRYPTION_KEY;
+if (!ENCRYPTION_KEY || ENCRYPTION_KEY.length < 32) {
+    console.error('[FATAL] 环境变量 DB_ENCRYPTION_KEY 未设置或长度不足 32 字节。');
+    console.error('        生成方式: openssl rand -base64 32 | cut -c1-32');
+    console.error('        写入 wbs-server/.env 后重启。拒绝以弱加密启动。');
+    process.exit(1);
+}
 const IV_LENGTH = 16;
 
 function encryptPassword(password) {
@@ -7655,6 +7669,44 @@ app.delete('/api/models/:id', authenticateToken, requireNonViewer, async (req, r
     } catch (err) {
         logger.error('Delete model error:', err.message);
         res.status(500).json({ error: err.message });
+    }
+});
+
+// 3.1 恢复已软删除模型（仅管理员，保留原模型 ID，并在同一事务写入恢复审计）
+app.post('/api/models/:id/restore', authenticateToken, requireAdmin, async (req, res) => {
+    const idText = String(req.params.id || '');
+    if (!/^\d+$/.test(idText) || Number(idText) <= 0) {
+        return res.status(400).json({ error: '模型 ID 不合法', code: 'INVALID_MODEL_ID' });
+    }
+
+    const modelId = Number(idText);
+    if (!Number.isSafeInteger(modelId)) {
+        return res.status(400).json({ error: '模型 ID 不合法', code: 'INVALID_MODEL_ID' });
+    }
+    const operatorName = req.user.display_name || req.user.username;
+
+    try {
+        const result = await restoreModelRecord({
+            modelId,
+            operatorId: req.user.id,
+            operatorName,
+            dbRunAsync,
+            dbGetAsync
+        });
+
+        res.json({
+            id: result.model.id,
+            table_name: result.model.table_name,
+            restored: !result.alreadyRestored,
+            already_restored: result.alreadyRestored,
+            message: result.alreadyRestored ? '模型已处于恢复状态' : '模型恢复成功'
+        });
+    } catch (err) {
+        if (err instanceof ModelRestoreError) {
+            return res.status(err.status).json({ error: err.message, code: err.code });
+        }
+        logger.error(`恢复模型失败 id=${modelId}: ${err.message}`);
+        res.status(500).json({ error: '恢复模型失败', code: 'MODEL_RESTORE_FAILED' });
     }
 });
 
