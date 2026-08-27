@@ -417,6 +417,7 @@ console.log('— ⑫ 「待我处理」聚合卡沙箱真执行（siIsMyPending/
     const fnCurrentUid = extractFullFunctionText('siCurrentUid');
     const fnExecPendingMember = extractFullFunctionText('siIsReleaseExecPendingMember');
     const fnIsMyReleaseExecPending = extractFullFunctionText('siIsMyReleaseExecPending');
+    const fnIsMyReleaseSchedulePending = extractFullFunctionText('siIsMyReleaseSchedulePending');   // ⑩ helper（483 LOW-1 抽出）
     const platformAdminUsernamesText = extractConstArrayText('SI_PLATFORM_ADMIN_USERNAMES');
 
     // [S-fix 4c 沿用] 提取前置全部包进 check() 计数体系——裸调用抛错会终止整个进程、其它断言不计数。
@@ -434,6 +435,7 @@ console.log('— ⑫ 「待我处理」聚合卡沙箱真执行（siIsMyPending/
         assert.ok(fnCurrentUid, '未提取到 siCurrentUid（uid 归一单点实现）');
         assert.ok(fnExecPendingMember, '未提取到 siIsReleaseExecPendingMember（⑨ 成员条件）');
         assert.ok(fnIsMyReleaseExecPending, '未提取到 siIsMyReleaseExecPending（⑨ 谓词——提不到则 ⑨ 全组空转）');
+        assert.ok(fnIsMyReleaseSchedulePending, '未提取到 siIsMyReleaseSchedulePending（⑩ helper——提不到则 ⑩ 全组空转）');
         assert.ok(statusGroupsText, '未提取到 SI_STATUS_GROUPS 常量全文');
         assert.ok(devFamilyStatusesText, '未提取到 SI_DEV_FAMILY_STATUSES 常量全文');
         assert.ok(platformAdminUsernamesText, '未提取到 SI_PLATFORM_ADMIN_USERNAMES 常量全文（若被改写成 Object.freeze([...]) 形态，extractConstArrayText 会提不到 ⇒ ① 组正反例全部空转，故在此前置判红）');
@@ -467,7 +469,7 @@ console.log('— ⑫ 「待我处理」聚合卡沙箱真执行（siIsMyPending/
         return `function isAdmin() { return ${JSON.stringify(!!isAdminVal)}; }\nconst currentUser = ${currentUserVal === undefined ? 'null' : JSON.stringify(currentUserVal)};`;
     }
     function compile(returnName, extraTexts, isAdminVal, currentUserVal) {
-        const parts = [stubText(isAdminVal, currentUserVal), statusGroupsText, devFamilyStatusesText, platformAdminUsernamesText, fnIsPlatformAdmin, fnIsCreatorAcceptArchivePending, fnCurrentUid, fnReleaseMemberCond, fnExecPendingMember, fnComputeRepMap, fnIsMyReleaseNeedsExecutor, fnIsMyReleaseExecPending, fnIsMyFastlanePending, ...extraTexts, `return ${returnName};`];
+        const parts = [stubText(isAdminVal, currentUserVal), statusGroupsText, devFamilyStatusesText, platformAdminUsernamesText, fnIsPlatformAdmin, fnIsCreatorAcceptArchivePending, fnCurrentUid, fnReleaseMemberCond, fnExecPendingMember, fnComputeRepMap, fnIsMyReleaseNeedsExecutor, fnIsMyReleaseExecPending, fnIsMyReleaseSchedulePending, fnIsMyFastlanePending, ...extraTexts, `return ${returnName};`];
         // eslint-disable-next-line no-new-func
         return new Function(parts.join('\n'))();
     }
@@ -485,7 +487,7 @@ console.log('— ⑫ 「待我处理」聚合卡沙箱真执行（siIsMyPending/
         const parts = [
             stubText(isAdminVal, currentUserVal), statusGroupsText, devFamilyStatusesText,
             platformAdminUsernamesText, fnIsPlatformAdmin, fnIsCreatorAcceptArchivePending,
-            fnCurrentUid, fnReleaseMemberCond, fnExecPendingMember, fnComputeRepMap, fnIsMyReleaseNeedsExecutor, fnIsMyReleaseExecPending,
+            fnCurrentUid, fnReleaseMemberCond, fnExecPendingMember, fnComputeRepMap, fnIsMyReleaseNeedsExecutor, fnIsMyReleaseExecPending, fnIsMyReleaseSchedulePending,
             fnIsMyFastlanePending, fnIsMyPending,
             'return { isMyPending: siIsMyPending, computeRepMap: siComputeReleaseRepMap };',
         ];
@@ -591,7 +593,12 @@ console.log('— ⑫ 「待我处理」聚合卡沙箱真执行（siIsMyPending/
     assertIsMyPending('①b ⭐反例·别人建的单：非平台管理员 + created_by=其他人 + 待验证 → false（这正是收紧要解决的原问题，不能因开半区而回流）', true, ROLE_ADMIN_BIZ_USER, { status: '待验证', created_by: 4 }, false);
     assertIsMyPending('①b ⭐反例·有意不含待指派：自己建的单 + status=待指派 → false（assign 的责任人是 admin∨受理人，建单人对它无可执行动作，放进来即"看得到点不了"的噪音）', true, ROLE_ADMIN_BIZ_USER, { status: '待指派', ...OWN_BY_BIZ }, false);
     assertIsMyPending('①b 反例·有意不含待处理：自己建的单 + status=待处理 → false（同上，bug 流未指派态责任人是 admin）', true, ROLE_ADMIN_BIZ_USER, { status: '待处理', ...OWN_BY_BIZ }, false);
-    assertIsMyPending('①b 反例·状态不在半区：自己建的单 + status=待上线 → false（等上线，建单人无动作）', true, ROLE_ADMIN_BIZ_USER, { status: '待上线', ...OWN_BY_BIZ }, false);
+    // ⭐ [契约演进·2026-08-27 ⑩ 上线] 本条原断言「自己建的单 + 待上线 → false（等上线，建单人无
+    //   动作）」——⑩ 恰恰推翻了后半句：未挂批次的待上线单，建单人的动作就是**去排期**（谁建单谁负责
+    //   排期上线，用户拍板）。按「新增条款必删被推翻的旧表述」改为两条：未挂批次 → true（经 ⑩）；
+    //   已挂批次且非我批次/非我执行 → false（①b 半区本身仍不含待上线，原防护意图保留在这半条里）。
+    assertIsMyPending('①b→⑩ 契约演进：自己建的单 + 待上线 + 未挂批次 → true（经 ⑩ 待排期命中——原「建单人无动作」表述已被「谁建单谁排期」推翻）', true, ROLE_ADMIN_BIZ_USER, { status: '待上线', ...OWN_BY_BIZ }, true);
+    assertIsMyPending('①b 反例·自己建的单 + 待上线 + **已挂别人批次** → false（①b 半区不含待上线；⑩ 因有批次退出；⑧⑨ 因非我批次/非我执行不命中——原防护意图的存续形态）', true, ROLE_ADMIN_BIZ_USER, { status: '待上线', ...OWN_BY_BIZ, release_id: 501, release_created_by: 4, release_exec_count: 2, my_release_exec_pending: 0 }, false);
     assertIsMyPending('①b 反例·currentUser=null：uid 取不到时半区不放行（uid>0 前置门，同 ⑤⑦ 同族）', true, null, { status: '待验证', ...OWN_BY_BIZ }, false);
     assertIsMyPending('①b 反例·created_by 缺失：字段为 undefined 时不得命中（Number(undefined)=NaN，NaN===uid 恒 false）', true, ROLE_ADMIN_BIZ_USER, { status: '待验证' }, false);
     assertIsMyPending('①b 平台管理员不受影响：仍能看到别人建的待验证单（①a 全局视野保留）', true, { ...PLATFORM_ADMIN_USER }, { status: '待验证', created_by: 18 }, true);
@@ -644,6 +651,45 @@ console.log('— ⑫ 「待我处理」聚合卡沙箱真执行（siIsMyPending/
     check('⑧⑨ 互斥性：⑧ 要求 exec_count=0、⑨ 要求本人在执行人名单（⇒ 至少 1 人），同一张单不可能两者都命中，故共用同一份代表 map 不会互抢代表位', () => {
         assert.strictEqual(myPendingInList(BIZ, [M(30001, { my_release_exec_pending: 1, release_exec_count: 1 })], 30001), true, '已派人 ⇒ ⑧ 不命中，应经 ⑨ 命中');
         assert.strictEqual(myPendingInList(BIZ, [M(30002)], 30002), true, 'exec_count=0 ⇒ ⑨ 不命中，应经 ⑧ 命中');
+    });
+    console.log('    ⑩ 我建的单待排期（2026-08-27·谁建单谁负责排期上线·逐张计入不去重） —');
+    // 生产实例：#81/#87（示例客服B建·待上线·未挂批次）此前只有红「未排期」徽章不进任何人的卡（⑧⑨ 拍板
+    //   时的有意留白），本分支补上。责任链闭环：⑩排期（建单人）→⑧派人（批次创建人）→⑨执行（执行人）。
+    const U = (id, over) => Object.assign({ id, status: '待上线', release_id: null, created_by: ROLE_ADMIN_BIZ_USER.id }, over || {});
+    check('⑩ 正例·我建的待上线单未挂批次 → true（#81/#87 形态）', () => {
+        assert.strictEqual(myPendingInList(BIZ, [U(81)], 81), true);
+    });
+    check('⑩ ⭐逐张计入不去重（与 ⑧⑨ 刻意不同——未排期单无批次可分组，每张单独立决定进哪个批次/定什么计划日）', () => {
+        const list = [U(81), U(87)];
+        const hits = list.filter(x => myPendingInList(BIZ, list, x.id)).map(x => x.id);
+        assert.deepStrictEqual(hits, [81, 87], `两张未排期单应**都**命中（不选代表），实得 ${JSON.stringify(hits)}`);
+    });
+    check('⑩ 反例·别人建的单 → false（归属=建单人，同 ①b⑤ 族判据）', () => {
+        assert.strictEqual(myPendingInList(BIZ, [U(81, { created_by: 4 })], 81), false);
+    });
+    check('⑩ 反例·已挂批次 → false（那是 ⑧/⑨ 的领地——有批次后责任转给批次创建人/执行人，⑩ 不再重复计入）', () => {
+        // 只挂批次但不满足 ⑧（创建人非我）也不满足 ⑨（我不是执行人）⇒ 整体 false，证 ⑩ 真的退出了
+        assert.strictEqual(myPendingInList(BIZ, [U(81, { release_id: 501, release_created_by: 4, release_exec_count: 2, my_release_exec_pending: 0 })], 81), false);
+    });
+    check('⑩ 反例·状态不是待上线 → false（开发中/待验证的单还轮不到排期）', () => {
+        assert.strictEqual(myPendingInList(BIZ, [U(81, { status: '开发中' })], 81), false);
+    });
+    check('⑩ 反例·currentUser=null → false（uid 前置门，同族纪律）', () => {
+        assert.strictEqual(myPendingInList(null, [U(81)], 81), false);
+    });
+    check('⑩ 不判 role：role=user 的建单人同样命中（同 ①b⑧⑨ 族——降权仍应看到自己的待办）', () => {
+        assert.strictEqual(myPendingInList({ ...ROLE_ADMIN_BIZ_USER, role: 'user' }, [U(81)], 81), true);
+    });
+    check('⑩ 谓词与 breakdown「待排期」段共用同一 helper siIsMyReleaseSchedulePending（codex 483 LOW-1 收口——原两处内联靠字面断言钉一致，现结构上消除漂移源）', () => {
+        const bd = extractFullFunctionText('siMyPendingBreakdown');
+        assert.ok(bd && /\['待排期', vis\.filter\(i => siIsMyReleaseSchedulePending\(i, uid\)\)\.length\]/.test(bd),
+            'siMyPendingBreakdown「待排期」段应调用 siIsMyReleaseSchedulePending（不复写判据）');
+        assert.ok(/\|\| siIsMyReleaseSchedulePending\(item, uid\)/.test(fnIsMyPending),
+            'siIsMyPending 分支⑩ 应调用 siIsMyReleaseSchedulePending（不复写判据）');
+        const helper = extractFullFunctionText('siIsMyReleaseSchedulePending');
+        assert.ok(helper, '未提取到 siIsMyReleaseSchedulePending——helper 被删则 ⑩ 整组空转');
+        assert.ok(/item\.status === '待上线'/.test(helper) && /item\.release_id == null/.test(helper) && /Number\(item\.created_by\) === uid/.test(helper),
+            'helper 三条件（待上线/未挂批次/建单人=我）任一缺失即判红');
     });
     check('⑧ 反例·已派执行人 → false（正常在途，无人需要动作）', () => {
         assert.strictEqual(myPendingInList(BIZ, [M(13539, { release_exec_count: 2 })], 13539), false);

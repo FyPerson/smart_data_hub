@@ -1852,8 +1852,23 @@
         //   u-btn-secondary 字号（13px，同「⚙️ 管理」触发按钮 :1556 的 svg 尺寸）。pending 恒为
         //   Array.filter().length 派生的数字，非用户输入，innerHTML 拼接安全，无需 esc()。
         const siMyReleasesIconSvg = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>';
-        btn.innerHTML = siMyReleasesIconSvg + (siMyReleasesEntryData.pending > 0
-            ? ` 我的上线单（${siMyReleasesEntryData.pending} 待执行）` : ' 我的上线单');
+        // ⭐ [iOS 角标升级·2026-08-27 用户拍板] 原「（N 待执行）」括号文字计数升级为按钮右上角红色
+        //   圆形数字角标（iOS 风格），保留「我的上线单」文字（按钮仍承担入口发现职责——用户拍板采纳
+        //   该推荐）。⚠️ **计数复用同一个 siMyReleasesEntryData.pending**（:上方 items.filter 那套
+        //   「计划中 ∧ summary∈{sent,partial} ∧ 本人未 done」口径，verify-sys-l7-executor-badge [7]
+        //   与前端逐字同源）——绝不另算一份，否则角标说 3 点进去 2 比没有角标更伤信任。
+        //   样式走内联 style 不动共享 CSS（免 bump 全站 ?v= 缓存串，同排期徽章先例）；按钮加
+        //   position:relative 作角标定位锚。>99 显示 99+（iOS 惯例，防三位数撑破圆形）。
+        //   pending 恒为 Array.filter().length 派生数字非用户输入，拼接安全无需 esc()（沿既有注释口径）。
+        btn.style.position = 'relative';
+        const pendingN = siMyReleasesEntryData.pending;
+        // [codex 483 LOW-2] 可访问名称：视觉角标对读屏只剩「我的上线单 1」，数字语义丢失——aria-label
+        //   把原括号文字的语义还给辅助技术；角标本体 aria-hidden（数字已在 label 里，不重复播报）。
+        btn.setAttribute('aria-label', pendingN > 0 ? `我的上线单，${pendingN} 个批次待执行` : '我的上线单');
+        const badgeHtml = pendingN > 0
+            ? `<span data-si-exec-badge aria-hidden="true" style="position:absolute;top:-7px;right:-7px;min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:#dc2626;color:#fff;font-size:11px;font-weight:700;line-height:18px;text-align:center;box-sizing:border-box;box-shadow:0 0 0 2px #fff;pointer-events:none">${pendingN > 99 ? '99+' : pendingN}</span>`
+            : '';
+        btn.innerHTML = siMyReleasesIconSvg + ' 我的上线单' + badgeHtml;
         box.appendChild(btn);
     }
 
@@ -2806,6 +2821,17 @@
     //     执行整批），示例开发A那 6 张成员单只需要他点一次；逐张计入会让卡 +6 而动作只有 1 个，与 ⑧ 同理。
     //   【与 ⑧ 互斥】⑧ 要求 exec_count===0、⑨ 要求本人在执行人名单里（⇒ exec_count≥1），两者不可能
     //     同时命中同一张单，故共用同一份代表 map 不会互相抢占代表位。
+    // ⑩ 我建的单待排期（待上线 ∧ 未挂批次）——[codex 483 LOW-1] 抽成 helper 供谓词与 breakdown 两处
+    //   复用（同 479 LOW-1「能抽 helper 就别靠人力约束同步」教训，首版两处内联靠守卫字面断言钉一致）。
+    //   ⚠️ [codex 483 MED-1·登记接受] `release_id == null` 宽松等判把「字段缺失(undefined)」也视为
+    //   未排期——数据契约由 verify-sys-list-badge-fields 兜底：release_id 在其 BADGE_FIELDS 点名清单
+    //   （「批次归属判定」），列表 SELECT 漏投影该列会当场判红，故缺失面不会静默存在。
+    function siIsMyReleaseSchedulePending(item, uid) {
+        return !!(uid > 0 && item
+            && item.status === '待上线'
+            && item.release_id == null
+            && Number(item.created_by) === uid);
+    }
     function siIsReleaseExecPendingMember(item, uid) {
         return !!(uid > 0 && item
             && item.status === '待上线'
@@ -2918,6 +2944,15 @@
             //   ⚠️ 代验收场景（如 #81）不进本卡：后端 roleGuard='admin' 未改，他们仍可从列表/详情页
             //   操作别人的单，只是不主动推到"待我处理"里——那本就不是"我的"待办。
             || siIsCreatorAcceptArchivePending(item, uid)
+            // ⑩ 我建的单待排期（待上线 ∧ 未挂批次）——[2026-08-27 用户拍板]「谁建单谁负责排期上线」。
+            //   与 ①b/⑧ 同一归属哲学，补齐待上线阶段责任链第一环：⑩排期（建单人）→⑧派人（批次创建人）
+            //   →⑨执行（执行人）。生产实证：排期动作 release_add 的历史操作人就是建单的业务方
+            //   （示例客服A 23 次/示例客服B 22 次）。生产现行实例：#81/#87（示例客服B建·未挂批次·此前只有红色
+            //   「未排期」徽章而不进任何人的卡，是 ⑧⑨ 拍板时的有意留白，本次补上）。
+            //   ⚠️ **逐张计入不去重**（与 ⑧⑨ 刻意不同）：未排期单没有批次可分组，且每张单可进不同
+            //   批次、定不同计划日——"排期"对每张单是独立决策，不像派人/执行那样一次动作解决全批。
+            //   ⚠️ 不判 release_created_by（还没有批次）；不判 role（同 ①b⑧⑨ 族纪律）。
+            || siIsMyReleaseSchedulePending(item, uid)
             // ⑧ 我建的上线批次待派执行人（按批次去重，仅代表单命中）——见函数头注释的责任人实证与去重理由
             || siIsMyReleaseNeedsExecutor(item, uid, repMap)
             // ⑨ 我是本批次执行人且未执行（按批次去重）——见 siIsReleaseExecPendingMember 头部注释
@@ -2982,6 +3017,8 @@
             ['历史指定', vis.filter(i => i.type === 'bug' && i.status === '待上线' && uid > 0 && Number(i.release_assignee_id) === uid).length],
             // ⑧ 与谓词 siIsMyReleaseNeedsExecutor 同一实现（不复写判据）——该分支自带按批次去重
             //   （仅代表单命中），故这里直接 filter 即是批次数，无需再去重。
+            // ⑩ 与谓词同判据（内联三条件简单不抽 helper；改谓词时同步这里——两处字面一致由守卫钉住）
+            ['待排期', vis.filter(i => siIsMyReleaseSchedulePending(i, uid)).length],
             ['待派执行人', vis.filter(i => siIsMyReleaseNeedsExecutor(i, uid, repMap)).length],
             ['待我上线', vis.filter(i => siIsMyReleaseExecPending(i, uid, repMap)).length],
         ];

@@ -1198,6 +1198,21 @@ console.log('— §⑰（2026-08-27）预计完成时间的超期口径：完成
     });
 })();
 
+console.log('— §⑱（2026-08-27）「我的上线单」iOS 红色角标 —');
+check('入口按钮改角标形态：保留「我的上线单」文字 + data-si-exec-badge 红色圆形数字（不再是括号文字计数）', () => {
+    const body = stripComments(extractFunctionBody(src, 'siProbeMyReleasesEntry') || '');
+    assert.ok(body, '未提取到 siProbeMyReleasesEntry 函数体');
+    assert.ok(!/待执行）/.test(body), '仍存在「N 待执行）」括号文字计数——已被 iOS 角标取代，两种形态并存会双重显示');
+    assert.ok(/data-si-exec-badge/.test(body), '未见 data-si-exec-badge 角标节点（该属性同时是探针的定位锚，删除会让活体断言失去选择器）');
+    assert.ok(/background:#dc2626/.test(body), '角标应为红底 #dc2626（与逾期徽章同红——都是"欠着的事"语义）');
+    assert.ok(/btn\.style\.position = 'relative'/.test(body), '按钮须设 position:relative 作角标定位锚——漏了角标会相对页面定位飞走');
+    // 计数同源：角标数字必须来自 siMyReleasesEntryData.pending（l7-executor-badge [7] 钉住的那套口径），
+    //   不得另算——否则角标说 3 点进去 2，比没有角标更伤信任。
+    assert.ok(/const pendingN = siMyReleasesEntryData\.pending/.test(body), '角标计数应直读 siMyReleasesEntryData.pending（与 l7 [7] 口径同源），不得另算一份');
+    assert.ok(/pendingN > 99 \? '99\+' : pendingN/.test(body), '>99 应显示 99+（iOS 惯例，防三位数撑破圆形）');
+    assert.ok(/pendingN > 0\s*\?/.test(body) && /:\s*''/.test(body), 'pending=0 时不渲染角标（空串分支）——0 也挂角标是噪音');
+});
+
 console.log('— §⑤ HTML 内联 <script> 语法有效 —');
 check('Sys_Iteration.html 内联脚本可编译（new Function，不执行）', () => {
     const scripts = [...src.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m => m[1]);

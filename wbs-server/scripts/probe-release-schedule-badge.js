@@ -129,9 +129,12 @@ async function readBadge(page, issueId) {
         // [codex 481 LOW-2] 逾期 × 已派人 组合——两个维度都成立时措辞必须只报逾期、不误报"待派执行人"
         const relStaffedOverdue = await mkRelease(`${TAG}-R-逾期已派人`, pastDate);
         const idStaffedOverdue = await mkIssue(`${TAG}-逾期已派人`, relStaffedOverdue);
+        // [iOS 角标活体] notify_status 设 sent——入口角标口径要求 executor_notify_summary∈{sent,partial}
+        //   （DDL 默认 not_sent 会让 summary=none 不计入），本行是下方 ⑨组 角标断言=1 的数据前提。
+        //   DDL CHECK：sent 必须同带 notified_at（状态-字段成组约束），夹具照真实约束造，不绕。
         const soIns = await dbRun(
-            `INSERT INTO sys_release_executors (release_id, user_id, user_name, added_by, added_by_name, created_at)
-             VALUES (?, ?, ?, ?, '管理员', datetime('now','localtime'))`,
+            `INSERT INTO sys_release_executors (release_id, user_id, user_name, added_by, added_by_name, created_at, notify_status, notified_at)
+             VALUES (?, ?, ?, ?, '管理员', datetime('now','localtime'), 'sent', datetime('now','localtime'))`,
             [relStaffedOverdue, execUser.id, execUser.display_name, ownerId]
         );
         created.execs.push(soIns.lastID);
@@ -226,7 +229,11 @@ async function readBadge(page, issueId) {
             must(!(await inCard(idPendingB)), `⑥ ⭐同批次非代表单 #${idPendingB} 不应在卡内——按批次去重计 1，否则一次派人消掉 N 个计数`);
             must(await inCard(idOverdue), `⑥ 逾期未派人批次的代表单 #${idOverdue} 也应在卡内`);
             must(!(await inCard(idStaffed)), `⑥ 已派执行人的批次不应进卡（无人需要动作）`);
-            must(!(await inCard(idNoRelease)), `⑥ 未挂批次的单不应因本分支进卡（那是"未排期"，责任在对接人/admin 加单，非"批次没派人"）`);
+            // ⭐ [契约演进·2026-08-27 ⑩ 上线] 本条原断言「未挂批次的单不应进卡」——当时是 ⑧⑨ 拍板的
+            //   有意留白；⑩（谁建单谁排期）恰好补上了这个留白：夹具建单人=当前用户 admin ⇒ 现在**应**
+            //   经 ⑩ 进卡。原防护意图（未挂批次不经 ⑧「批次没派人」进卡）由守卫 ⑩ 反例「已挂批次→⑩
+            //   退出」+「别人建的→false」两条承接，此处改断正向。
+            must(await inCard(idNoRelease), `⑥→⑩ 契约演进：我建的未挂批次待上线单 #${idNoRelease} 现应经 ⑩ 进卡（原「不进卡」是 ⑧⑨ 时期的有意留白，已被「谁建单谁排期」拍板推翻）`);
             must(!(await inCard(idOrphan)), `⑥ [HIGH-1] 孤儿批次的单不应进卡（无责任人可认领——created_by 已随批次消失，进卡等于"报了警没人负责"）`);
             must(await inCard(idSoftDeleted), `⑥ 执行人全软删的批次代表单应进卡（等同未派人）`);
             must(!(await inCard(idStaffedOverdue)), `⑥ 逾期但已派人的批次不进卡（逾期该催的是"去上线"，不是"去派人"——本分支只管派人）`);
@@ -251,9 +258,70 @@ async function readBadge(page, issueId) {
                 `⑦ [分支⑨去重] 同批次非代表单 #${idExecMineB} 不应在卡内——执行上线是批次级动作（POST /sys-releases/:id/execute），一次点完整批`);
             must(await readBadge(page, idExecMineA) === '已排期',
                 `⑦ 该批次徽章应是「已排期」（执行人已派好，只是还没执行）——⑨ 管的是"该执行了"，与徽章的"该派人了"是两件事，实得「${await readBadge(page, idExecMineA)}」`);
+
+            // ── ⑧组 分支⑩ 逐张计入的活体证明：未排期单不去重（每张独立决定进哪个批次）。
+            //   idNoRelease 已在上方 ⑥→⑩ 断过在卡内，这里加同建单人的第二张证**两张都在**。
+            const idNoRelease2 = await mkIssue(`${TAG}-未排期二`, null);
+            await page.reload(); await page.waitForLoadState('networkidle'); await page.waitForTimeout(600);
+            await page.locator(cardSel).click(); await page.waitForTimeout(500);
+            must((await inCard(idNoRelease)) && (await inCard(idNoRelease2)),
+                `⑧组 [分支⑩·逐张] 两张未排期单应**都**在卡内（#${idNoRelease}/#${idNoRelease2}·不选代表——与 ⑧⑨ 的按批次去重刻意不同）`);
         }
         must(page.__errors.length === 0, `⑥ 页面无 JS 错误（实得 ${page.__errors.length} 条${page.__errors.length ? '：' + page.__errors[0] : ''}）`);
         await page.close();
+
+        console.log('\n— ⑨组 [iOS 角标] 执行人视角「我的上线单」红色数字角标 —');
+        // ⚠️ 入口对 admin/对接人不显示（siProbeMyReleasesEntry 顶部 return），须用执行人（execUser）视角。
+        //   execUser 在两个批次在册：relStaffed（notify not_sent ⇒ 不计入）+ relStaffedOverdue（sent ⇒ 计入）
+        //   ⇒ 角标应恰为 1——顺带证明角标口径与 l7 [7]（summary∈{sent,partial}）同源，不是数在册批次总数。
+        const execTok = await signAs(execUser.id);
+        const pageE = await loginPage(browser, execTok);
+        await pageE.goto(`${BASE_URL}/Sys_Iteration.html`);
+        await pageE.waitForLoadState('networkidle');
+        await pageE.waitForTimeout(800);
+        const badgeInfo = await pageE.evaluate(() => {
+            const btn = document.querySelector('[data-si-my-releases]');
+            if (!btn) return { btnExists: false };
+            const badge = btn.querySelector('[data-si-exec-badge]');
+            // btnText 排除角标子节点——btn.textContent 会把角标数字并入（「我的上线单1」），那不是
+            //   按钮文案变了，是取法把子节点文本卷进来了（首版断言在此判红，属断言取法错非实现错）。
+            const ownText = Array.from(btn.childNodes)
+                .filter(n => n.nodeType === Node.TEXT_NODE)
+                .map(n => n.textContent).join('').trim();
+            return {
+                btnExists: true,
+                btnText: ownText,
+                badgeText: badge ? badge.textContent.trim() : null,
+                badgeBg: badge ? getComputedStyle(badge).backgroundColor : null,
+                btnPos: getComputedStyle(btn).position,
+            };
+        });
+        must(badgeInfo.btnExists, '⑨组 执行人视角应出现「我的上线单」入口按钮');
+        must(badgeInfo.btnText === '我的上线单', `⑨组 按钮文字应恰为「我的上线单」不带括号计数（实得「${badgeInfo.btnText}」）——括号文字已被角标取代`);
+        must(badgeInfo.badgeText === '1', `⑨组 角标数字应为 1（仅 sent 的批次计入，not_sent 不计——与 l7 [7] 口径同源，实得「${badgeInfo.badgeText}」）`);
+        must(/rgb\(220,\s*38,\s*38\)/.test(badgeInfo.badgeBg || ''), `⑨组 角标应真渲染红底 #dc2626（computed 实得「${badgeInfo.badgeBg}」）`);
+        // [codex 483 MED-2] 裁剪检测：角标外扩定位（top/right:-7px），若按钮或任一祖先有
+        //   overflow:hidden/clip 会被裁掉而颜色/position 断言照样绿。getBoundingClientRect 反映的是
+        //   布局矩形不反映裁剪，可靠判据=elementFromPoint 打角标中心点——被裁剪时命中的是底下的元素。
+        const clipCheck = await pageE.evaluate(() => {
+            const badge = document.querySelector('[data-si-exec-badge]');
+            if (!badge) return { ok: false, why: '角标节点不存在' };
+            const r = badge.getBoundingClientRect();
+            if (r.width === 0 || r.height === 0) return { ok: false, why: '角标矩形为 0（display:none 或未布局）' };
+            // ⚠️ 角标实现带 pointer-events:none（防挡按钮点击）——elementFromPoint 会**穿透**它命中
+            //   底下的 BUTTON，首版断言因此误红（命中 BUTTON ≠ 被裁剪）。测量期临时恢复 auto 再还原：
+            //   恢复后命中角标 = 真的可见未被裁；若被祖先 overflow 裁掉，恢复 auto 也命中不了。
+            badge.style.pointerEvents = 'auto';
+            const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+            badge.style.pointerEvents = 'none';
+            return { ok: hit === badge || (hit && badge.contains(hit)), why: hit ? hit.tagName + (hit.getAttribute && hit.getAttribute('data-si-exec-badge') != null ? '[badge]' : '') : 'null' };
+        });
+        must(clipCheck.ok, `⑨组 [MED-2] 角标中心点 elementFromPoint 应命中角标自身（未被祖先 overflow 裁剪；实得命中「${clipCheck.why}」）`);
+        must((await pageE.evaluate(() => document.querySelector('[data-si-my-releases]').getAttribute('aria-label'))) === '我的上线单，1 个批次待执行',
+            '⑨组 [LOW-2] aria-label 应携带数字语义（视觉角标对读屏只剩裸数字，可访问名称补回「N 个批次待执行」）');
+        must(badgeInfo.btnPos === 'relative', `⑨组 按钮 position 应为 relative（角标定位锚，实得「${badgeInfo.btnPos}」）`);
+        must(pageE.__errors.length === 0, `⑨组 执行人页面无 JS 错误（实得 ${pageE.__errors.length} 条）`);
+        await pageE.close();
     } catch (e) {
         fail++; failMsgs.push('异常：' + e.message);
         console.error('\n❌ 探针异常：', e.stack || e.message);
