@@ -3329,10 +3329,14 @@
     //   比，于是已完成的单每天涨一天：#89 在验收完成当天显示"已超预计 1 个自然日"（碰巧对），一周后
     //   会显示"已超 8 天"，一个月后"已超 31 天"——既不反映事实（它实际只超了 1 天），也没有任何行动
     //   意义（单子早完成了）。改为「完成后冻结」，分三种情形：
-    //   ① **锚点取 accepted_at，不取 released_at/closed_at**：`dev_estimated_at` 管的是**开发**工期，
-    //      与之同语义的实际时刻是"验收通过 = 开发交付被确认"。上线时刻(released_at)与归档时刻
-    //      (closed_at)都晚于开发完成，用它们会把**上线排期**和**观察期**算到开发头上——生产 14 张
-    //      待上线单全部已 accepted 却卡在上线排期（#46 那批计划日 08-25 已过期），正是这个冤枉的实例。
+    //   ① **比较锚取 last_completed_at（实际完成=最后一次进待验证），不取 accepted_at/released_at/
+    //      closed_at**：`dev_estimated_at` 管的是**开发**工期，与之同语义的实际时刻是"开发提交完成"。
+    //      〔2026-08-27 二次拍板·#81 实证〕首版锚取 accepted_at（验收），但验收对比预计会把
+    //      「提交→验收」的等待也算到开发头上：#81 实际完成 08-26 15:47 早于预计 17:00（按期），
+    //      验收 08-27 才做 ⇒ 被冤枉显示「实际超期 1 天完成」。released_at/closed_at 更晚（上线排期
+    //      +观察期），首版已排除，理由沿用（生产 14 张待上线单卡排期的实例）。
+    //      ⚠️ **回退链**：last_completed_at 为空（C9 无 commit 直翻等不经「待验证」的路径）或非法时
+    //      回退 accepted_at——那类路径验收即完成时刻，且保持"有锚可冻"不退回实时递增。
     //   ② **判据用"accepted_at 有没有值"而非状态枚举**：生产实测已关闭 49/49、已上线 1/1、待上线
     //      14/14 全部有 accepted_at，而未验收的状态（开发中/待验证/待指派…）恒为空 ⇒ 一条判据自然
     //      分流，既不需要状态映射表，也不会因将来新增状态而漏归（状态枚举式判据最容易在加状态时漏改）。
@@ -3440,8 +3444,11 @@
             if (!target) return '';
             // ③ 放弃态：不显示（放弃不是完成，且多数没有完成时刻可锚）
             if (SI_ABANDONED_STATUSES.includes(iss.status)) return '';
-            // ①② 已验收 ⇒ 工期已定，用验收日冻结，之后无论过多久都不再变
-            const done = siDateOnly(iss.accepted_at);
+            // ①② 已验收 ⇒ 工期已定即冻结（判据仍=accepted_at 有无值：只看 last_completed_at 会在
+            //   打回返工窗口误冻在上次提交时刻）；冻结**锚**=实际完成 last_completed_at，空/非法回退
+            //   验收日（见头注 ① 回退链）。
+            const accepted = siDateOnly(iss.accepted_at);
+            const done = accepted ? (siDateOnly(iss.last_completed_at) || accepted) : null;
             if (done) {
                 const d = Math.round((target - done) / 86400000);
                 if (d > 0) return ` <span class="si-muted">（提前 ${d} 天完成）</span>`;

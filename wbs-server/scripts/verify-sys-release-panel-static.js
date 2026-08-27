@@ -1116,28 +1116,48 @@ console.log('— §⑰（2026-08-27）预计完成时间的超期口径：完成
     const f = new Function(`${abandoned}\n${fnDateOnly}\n${fnRemaining}\nreturn siRemainingDaysHtml;`)();
     const strip = (h) => String(h).replace(/<[^>]*>/g, '').trim();
 
-    check('⑰ ⭐生产 #89 真实形态：预计 2026-08-26 17:10、验收 2026-08-27 13:36 → 「实际超期 1 天完成」（**不随今天变化**，这正是本次要修的）', () => {
+    check('⑰ ⭐生产 #89 真实形态（回退链路：无 last_completed_at ⇒ 锚回退验收日）：预计 2026-08-26 17:10、验收 2026-08-27 13:36 → 「实际超期 1 天完成」（**不随今天变化**）', () => {
         const got = strip(f({ status: '已上线', dev_estimated_at: '2026-08-26 17:10:00', accepted_at: '2026-08-27 13:36:13' }));
         assert.strictEqual(got, '（实际超期 1 天完成）', `实得「${got}」`);
     });
-    check('⑰ 冻结性证明：同一张单，把"今天"往后推不影响结果（因判据只用 accepted_at 与 dev_estimated_at，不读当前时间）', () => {
+    // ⭐ [口径二改·2026-08-27 用户拍板（#81 实证）] 冻结锚由验收日改为**实际完成**（last_completed_at·
+    //   最后一次进待验证），验收对比预计会把「提交→验收」的等待算到开发头上；判据仍=accepted_at 有值
+    //   （只看 last_completed_at 会在打回返工窗口误冻在上次提交时刻）。
+    check('⑰ ⭐⭐生产 #81 真实形态（本次口径二改的靶心）：预计 08-26 17:00、实际完成 08-26 15:47、验收 08-27 09:35 → 「按期完成」（原验收锚显示「实际超期 1 天完成」=把验收等待冤枉到开发头上）', () => {
+        const got = strip(f({ status: '待上线', dev_estimated_at: '2026-08-26 17:00:00', accepted_at: '2026-08-27 09:35:19', last_completed_at: '2026-08-26 15:47:24' }));
+        assert.strictEqual(got, '（按期完成）', `实得「${got}」`);
+    });
+    check('⑰ 实际完成真超期时按实际完成算（不因验收更晚而多算）：预计 08-20、实际完成 08-22、验收 08-27 → 「实际超期 2 天完成」（验收锚会算 7 天）', () => {
+        const got = strip(f({ status: '已关闭', dev_estimated_at: '2026-08-20 09:00:00', accepted_at: '2026-08-27 10:00:00', last_completed_at: '2026-08-22 11:00:00' }));
+        assert.strictEqual(got, '（实际超期 2 天完成）', `实得「${got}」`);
+    });
+    check('⑰ 判据仍是 accepted_at：last_completed_at 有值但未验收（待验证中/可能被打回）→ 仍走实时分支（防"提交即冻结"——打回返工窗口会误冻在上次提交时刻）', () => {
+        const got = strip(f({ status: '待验证', dev_estimated_at: '2026-01-01 12:00:00', accepted_at: null, last_completed_at: '2026-01-01 10:00:00' }));
+        assert.ok(/个自然日/.test(got), `实得「${got}」——未验收单应保持实时算，不因已提交而冻结`);
+    });
+    check('⑰ 回退链·last_completed_at 非法（2026-02-31 会被 Date 进位）→ 锚回退验收日而非算错值', () => {
+        const got = strip(f({ status: '已关闭', dev_estimated_at: '2026-08-20 09:00:00', accepted_at: '2026-08-21 10:00:00', last_completed_at: '2026-02-31 08:00:00' }));
+        assert.strictEqual(got, '（实际超期 1 天完成）', `实得「${got}」——非法实际完成时刻应回退验收日锚`);
+    });
+    check('⑰ 冻结性证明：同一张单，把"今天"往后推不影响结果（冻结分支只用 accepted_at/last_completed_at 与 dev_estimated_at，不读当前时间）', () => {
         // 直接证"不读 now"：函数体内 new Date() 只出现在未验收分支。已验收分支若误用 now，本条无法
-        //   通过纯输入构造出差异——故改用源码结构断言 + 上一条数值断言双证。
+        //   通过纯输入构造出差异——故改用源码结构断言 + 上方数值断言双证。
         const body = fnRemaining;
-        const frozenBranch = body.slice(body.indexOf('const done = siDateOnly'), body.indexOf('// 未验收'));
+        const frozenBranch = body.slice(body.indexOf('const accepted = siDateOnly'), body.indexOf('// 未验收'));
         assert.ok(frozenBranch.length > 0, '未定位到冻结分支');
         assert.ok(!/new Date\(\)/.test(frozenBranch), '冻结分支内出现 new Date()——说明仍在读当前时间，"冻结"名不副实');
-        assert.ok(/target - done/.test(frozenBranch), '冻结分支应以 (target - done) 计差，即预计日与验收日之差');
+        assert.ok(/target - done/.test(frozenBranch), '冻结分支应以 (target - done) 计差，即预计日与实际完成日（回退验收日）之差');
+        assert.ok(/siDateOnly\(iss\.last_completed_at\)\s*\|\|\s*accepted/.test(frozenBranch), '冻结锚应为 siDateOnly(iss.last_completed_at) || accepted（实际完成优先·空/非法回退验收）——缺失说明口径二改被回退');
     });
-    check('⑰ 按期完成：预计日 === 验收日 → 「按期完成」', () => {
+    check('⑰ 按期完成（回退链）：无 last_completed_at 时预计日 === 验收日 → 「按期完成」', () => {
         const got = strip(f({ status: '已关闭', dev_estimated_at: '2026-08-20 09:00:00', accepted_at: '2026-08-20 23:59:00' }));
         assert.strictEqual(got, '（按期完成）', `实得「${got}」——同日应判按期（只比日历日，时分秒不参与）`);
     });
-    check('⑰ 提前完成：验收日早于预计日 → 「提前 N 天完成」', () => {
+    check('⑰ 提前完成（回退链）：无 last_completed_at 时验收日早于预计日 → 「提前 N 天完成」', () => {
         const got = strip(f({ status: '已关闭', dev_estimated_at: '2026-08-25 09:00:00', accepted_at: '2026-08-22 10:00:00' }));
         assert.strictEqual(got, '（提前 3 天完成）', `实得「${got}」`);
     });
-    check('⑰ ⭐待上线单用验收日冻结（生产 14 张全部已 accepted 却卡在上线排期——不得把上线排期算作开发超期）', () => {
+    check('⑰ ⭐待上线单已冻结不随天数涨（回退链走验收日锚；生产 14 张全部已 accepted 却卡在上线排期——不得把上线排期算作开发超期）', () => {
         const got = strip(f({ status: '待上线', dev_estimated_at: '2026-08-20 18:00:00', accepted_at: '2026-08-21 10:00:00' }));
         assert.strictEqual(got, '（实际超期 1 天完成）', `实得「${got}」——待上线应走冻结分支，不随天数递增`);
     });
