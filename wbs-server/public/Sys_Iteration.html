@@ -1308,6 +1308,24 @@
     // 「含已作废」查看权：admin ∨ 受理人（2026-08-17 用户拍板开放示例对接人）。受理人列表可见面本就与 admin
     //   一致（后端 C1），作废单查看随之开放；真闸在后端（列表 include_voided 判据 + 详情已作废门同步放行受理人）。
     function siCanViewVoided() { return isAdmin() || (currentUser && isSiIntakeLiaison(currentUser.id)); }
+    // ⭐ [「待我处理」归属收紧·2026-08-27 用户拍板] 平台管理员白名单——**仅供「待我处理」卡的归属判定**，
+    //   不是权限门（真闸在后端，本次不动后端，见下方 siIsMyPending 分支①注释）。
+    //   起因：`isAdmin()` 判的是 `currentUser.role === 'admin'`，而生产 role='admin' 有 6 个在用账号
+    //   （admin / 示例客服A / 示例客服B / 示例客服C / 示例用户B / 示例管理员A）。后五位在系统迭代里的实际身份是**业务方建单人**
+    //   （各提各的单，对接人反而是 user 角色的开发），却因 role 命中而在卡里看到全平台的待指派/待验证/
+    //   待归档单——那些单的推进义务并不在他们身上。这是"角色 admin"与"平台管理员"两个概念在 role 这
+    //   一个字段上被压平导致的，不是判据写错。
+    //   ⚠️ 用 username 不用 id：口径就是"用户名是 admin 的那个账号"。代价是**改 admin 的用户名会让本
+    //   常量静默失效**（卡里没人再看到待指派单，且没有报错面）——若将来真要改名或增设第二个平台管理员
+    //   账号，必须同步改这里；verify-sys-fastlane-panel-static.js 有一条守卫钉住该常量非空且含 'admin'。
+    //   currentUser 来自 GET /api/auth/me（server.js:4377 实时查库，非 JWT 快照），改库即刻生效、无 8h 滞后。
+    //   形态与同族 SI_INTAKE_LIAISON_IDS/SI_TECH_LEAD_IDS/SI_DEV_FAMILY_STATUSES 一致用裸数组字面量
+    //   （不套 Object.freeze）——守卫的 extractConstArrayText 按 `const X = [` 定位，套了就提取不到、
+    //   沙箱真执行那组断言会静默退化成空转。
+    const SI_PLATFORM_ADMIN_USERNAMES = ['admin'];
+    function siIsPlatformAdmin() {
+        return !!(currentUser && isAdmin() && SI_PLATFORM_ADMIN_USERNAMES.includes(String(currentUser.username || '')));
+    }
     // ⭐ [对接人绑单收口 2026-08-10] per-issue 绑单判据：本单绑定对接人本人。前端**不判 eligibility**（active∧
     //   role∈候选——那要读库，UI 镜像非授权源，真闸在后端叠加 fail-closed eligibility，见 C10-fix5）。
     function isSiBoundLiaison(iss) {
@@ -1485,20 +1503,20 @@
         EXECUTOR_NOT_ACTIVE: '该执行人已不在名单', RELEASE_NOT_PLANNING: '上线单不在计划态',
         RELEASE_EMPTY: '上线单无内容', EXECUTOR_ALREADY_DONE: '该执行人已完成',
         NOTIFY_IN_FLIGHT: '发送在途，请稍候', NOTIFY_CONCURRENT_CHANGED: '通知状态并发变更',
-        // [上线单管理体验优化 R-C5·方案 §3 O3] PATCH /sys-releases/:id 基本信息编辑（R-C4 后端已冻结的错误码，
-        //   本批补齐前端文案登记——RELEASE_NOT_PLANNING/CONCURRENT_STATE_CHANGE 已在上方/下方既有词条，不重复）。
-        RELEASE_NOTIFY_STARTED: '该批次已通知执行人，需请对接人先撤销上线安排',
-        RELEASE_PATCH_UNSUPPORTED_FIELD: '包含不支持的编辑字段（改期请用「改期」按钮）',
-        RELEASE_PATCH_INVALID_TYPE: '字段类型非法', RELEASE_TITLE_TOO_LONG: '批次说明超长',
-        VERSION_TAG_TOO_LONG: '版本号超长', RELEASE_NOTE_TOO_LONG: '上线说明超长',
-        // [上线单管理体验优化 R-C7·方案 §3 O4] DELETE /sys-releases/:id 删除上线单（R-C6 后端已冻结的
-        //   错误码，本批补齐前端文案登记——RELEASE_NOT_PLANNING/RELEASE_NOTIFY_STARTED/INVALID_RELEASE_ID
-        //   已在上方 §6.5 词条，不重复登记；siApiErr 实际优先展示后端 error 原文，本表补齐是登记纪律，
-        //   非该调用点唯一文案源）。
-        RELEASE_NOT_FOUND: '上线批次不存在',
-        RELEASE_DELETE_REASON_REQUIRED: '删除原因必填（trim 后 1..200 字）',
-        RELEASE_MEMBER_STATE_DIRTY: '批次内存在异常状态成员，无法安全删除，请先核实数据',
-        RELEASE_DELETE_CONFLICT: '批次状态已并发变更，请刷新重试',
+        // ⚠️ [收尾批·2026-08-27] PATCH /sys-releases/:id（编辑）与 DELETE /sys-releases/:id（删除）两组
+        //   错误码**刻意不在本表登记**——两处调用点（siReleaseEditInfoModal :9178 / siReleaseDeleteModal
+        //   :9221）走的是 `siApiErr`，而 siApiErr(:1423) 只取 `r.data.error || r.data.code`、**从不查本表**，
+        //   登记进来即死词条（R-C5/R-C7 两批曾各登记 6+4 条，本批一并摘除）。这不是疏漏，是三处既有口径的
+        //   交汇：① `verify-sys-fastlane-panel-static.js` ⑨ 明令「不新造 SI_ERR_TEXT 映射条目——siApiErr
+        //   已直接透出后端完整中文句，新增映射会制造与后端消息漂移的第二份翻译」；② `verify-badge-alias.js`
+        //   ④ 的裁定 3③ 同源：「全站判红会把 60+ 个非通知 CRUD 的 data.error 直出一并打红——那些端点的码
+        //   不在冻结表内，接表反而信息倒退」，编辑/删除正是非通知 CRUD；③ 后端 error 原文信息量严格更大
+        //   （如 `不支持的编辑字段：planned_date（本端点仅支持 title/version_tag/release_note；改期请用
+        //   update-planned-date）` vs 本表可写的短语「包含不支持的编辑字段」）。
+        //   ⇒ **本表只服务 siErrText 的通知域调用点**（:5405/:5660/:8837/:8876 等七处）。文案登记归文档：
+        //   `docs/local/前端统一/通知统一_错误码映射_20260809_v1.0.md` §6.5 已按冻结后补录流程收录这两组码。
+        //   若将来真要让 siApiErr 接 siErrText，先解决"未登记码落 HTTP 兜底变『未知原因』"的退化面（需把
+        //   大批后端中文句补进 SI_LITERAL_TEXT），那是独立课题，不是把词条加回来就成立。
         // §6.6 tech consult / tech-lead-comment
         TECH_LEAD_ID_REQUIRED: '缺少技术负责人参数', TECH_LEAD_NOT_WHITELISTED: '技术负责人不在可通知名单',
         TECH_LEAD_NOT_FOUND: '技术负责人账号不存在', REQUEST_TECH_CONSULT_TYPE_INVALID: '该单类型不支持技术咨询',
@@ -2717,7 +2735,15 @@
             //   6b 步核实：add/reassign 可在「待处理」期间产生在册 pending 行）——即便如此，下方②
             //   开发分支的状态门（SI_DEV_FAMILY_STATUSES 不含「待处理」）仍能正确拦住不命中，因为
             //   「待处理」的推进义务在 admin 指派，不在开发本人动手提交。
-            (isAdmin() && (
+            // ⭐ [归属收紧·2026-08-27 用户拍板] 身份门从 isAdmin()（role='admin'，生产 6 个账号）收紧为
+            //   siIsPlatformAdmin()（role='admin' ∧ username ∈ 白名单）。本分支四类状态的推进义务落在
+            //   平台管理员身上——派单、验收判定、归档都是他做；其余 role=admin 的业务方建单人经 ②-⑦
+            //   分支各自命中与自己相关的单（开发/对接人/建单人待修改/值班/被指定上线），不再被灌入
+            //   全平台的待指派与待验证。⚠️ 连带：他们自己建的「待验证」单也不在卡里了——按拍板口径，
+            //   验证判定属平台管理员动作，本次不给建单人开半区（要开需另立方案，见 §9 P1 同款先例）。
+            //   **只改显示面**：后端写权限（isSysCoordinator = role admin ∨ 受理人）本次一字不动，
+            //   他们仍能从详情页操作别人的单——那是同一口径的另一半，用户拍板留作独立课题。
+            (siIsPlatformAdmin() && (
                 SI_STATUS_GROUPS.pending_archive.includes(item.status)
                 || ['待指派', '待处理', '待验证'].includes(item.status)
                 || item.post_release_acceptance === 'pending'
@@ -2760,7 +2786,10 @@
         //   前端直比分支与谓词 ⑤⑦ 同族，归一必须两处同步（否则主计数 0 而分段有数）。
         const rawUid = currentUser ? Number(currentUser.id) : NaN;
         const uid = (Number.isSafeInteger(rawUid) && rawUid > 0) ? rawUid : null;
-        const admin = isAdmin();
+        // ⭐ [归属收紧·2026-08-27] 与 siIsMyPending 分支① 同源收紧为 siIsPlatformAdmin()——本变量喂的是
+        //   "验收归档"/"待指派"两段计数，正对应谓词分支①的两半。**两处必须同步**（同上方 uid 归一那条
+        //   纪律：一处收紧一处没收，会出现主计数 0 而 tooltip 分段有数的自相矛盾）。
+        const admin = siIsPlatformAdmin();
         const segs = [
             ['验收归档', admin ? vis.filter(i => SI_STATUS_GROUPS.pending_archive.includes(i.status) || i.status === '待验证' || i.post_release_acceptance === 'pending').length : 0],
             ['待指派', admin ? vis.filter(i => i.status === '待指派' || i.status === '待处理').length : 0],
@@ -8684,8 +8713,30 @@
             //   不额外发请求（同 issues.length 原写法零成本）。
             const pendingMemberCount = issues.filter(i => i.status === '待上线').length;
             const voidedMemberCount = issues.filter(i => i.status === '已作废').length;
+            // ⭐ [codex 475 LOW-1 收口·收尾批 2026-08-27] 状态枚举防御断言：后端 DELETE 端点的脏成员闸
+            //   （index.js :16340 一带 `badMembers = members.filter(m => m.status !== '待上线' && m.status
+            //   !== '已作废')`，非空即 409 RELEASE_MEMBER_STATE_DIRTY）**只承认这两态**，故契约上恒有
+            //   `pending + voided === 成员总数`。上方两个计数与下方弹窗四分支措辞全部建立在该契约上：
+            //   若将来后端放宽第三态（如允许「已上线」成员随批次删除）而此处未同步，两计数之和会小于
+            //   总数，弹窗影响面就会**少报**那部分成员（用户看到"影响 3 张"实际动了 5 张）——那是比
+            //   报错更坏的静默失真。这里不猜第三态该怎么措辞（那要等真放开时按新语义定），只做两件事：
+            //   ① fail-loud 到控制台（同 KIT_VERSION 不一致即 console.error 的既有范式，不静默降级）；
+            //   ② 按钮置灰并说明原因——**不是隐藏**：隐藏会让 admin 面对一个没有删除入口又不知为何的
+            //   批次（受困态且不可解释），置灰+title 至少把"去核实数据"这条自救路径明确指出来，且与
+            //   后端 409 的拒绝语义一致（后端本来也会拒，这里只是把那次注定失败的往返省掉）。
+            const memberStateSound = (pendingMemberCount + voidedMemberCount) === issues.length;
+            // 置灰态的 tooltip 先算成独立变量再进模板：内联写 `title="${esc(`…${表达式}…`)}"` 是模板串套
+            //   模板串，读起来要在两层反引号里数括号，改一处很容易断在中间（也让静态守卫的模板串正则没法
+            //   用 [^`]* 这类简单判据）。措辞与后端 RELEASE_MEMBER_STATE_DIRTY 的 error 原文同源，不另造词。
+            const dirtyMemberCount = issues.length - pendingMemberCount - voidedMemberCount;
+            const dirtyDeleteTip = `批次内存在非「待上线」/「已作废」成员（${dirtyMemberCount} 张），无法安全删除，请先核实数据`;
+            if (!memberStateSound) {
+                console.error(`[SI] 批次 #${id} 成员状态越出「待上线」/「已作废」两态契约：pending=${pendingMemberCount} voided=${voidedMemberCount} total=${issues.length}——删除入口已置灰，后端 badMembers 闸亦会拒绝（RELEASE_MEMBER_STATE_DIRTY）`);
+            }
             if (isAdmin() && !notifyStarted) {
-                foot += `<button class="u-btn-danger u-btn-sm" onclick="siReleaseDeleteModal(${id},${siJsStringAttr(rel.release_no || '')},${pendingMemberCount},${voidedMemberCount})">删除上线单</button>`;
+                foot += memberStateSound
+                    ? `<button class="u-btn-danger u-btn-sm" onclick="siReleaseDeleteModal(${id},${siJsStringAttr(rel.release_no || '')},${pendingMemberCount},${voidedMemberCount})">删除上线单</button>`
+                    : `<button class="u-btn-danger u-btn-sm" disabled title="${esc(dirtyDeleteTip)}">删除上线单</button>`;
             }
         }
         document.getElementById('siBatchFoot').innerHTML = foot;

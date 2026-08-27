@@ -978,6 +978,116 @@ check('活体变异对照组②：门槛条件弱化为恒真 isAdmin()（漏 !n
         '变异后严格 if(...) 字面正则仍能匹配——说明该正则对"漏 !notifyStarted"这类変异不敏感，守卫本身失效');
 });
 
+console.log('— §⑯（收尾批 2026-08-27）R 两组错误码不入 SI_ERR_TEXT + 成员状态枚举防御 —');
+// 背景：siApiErr(:1423) 只取 `r.data.error || r.data.code`、从不查 SI_ERR_TEXT，而编辑/删除两处调用点
+//   走的正是 siApiErr ⇒ 登记进 SI_ERR_TEXT 即死词条（R-C5/R-C7 曾各登记 6+4 条，收尾批一并摘除）。
+//   本组守卫钉住"摘掉后别再加回来"，口径与 verify-sys-fastlane-panel-static.js ⑨ 同源（那条盯的是
+//   FASTLANE_*/FAST_RELEASE_EXEC_* 系列），也与 verify-badge-alias.js 裁定 3③「非通知 CRUD 端点的码
+//   不在冻结表内，接表反而信息倒退」一致。文案登记归文档（通知统一_错误码映射 §6.5），不归本表。
+// ⚠️ 不能复用上方 extractConstObjectText：它的起始正则是 `const NAME = {`（裸对象字面量），而
+//   SI_ERR_TEXT 声明形态是 `const SI_ERR_TEXT = Object.freeze({` ⇒ 匹配不上直接返回 null，且它写死
+//   读全局 src、无法喂变异后的源码（活体变异对照组会因此静默失效）。这里按 verify-sys-fastlane-
+//   panel-static.js ⑨ 的同款切片自取，并显式收 source 参数。表体内无嵌套对象字面量，首个 `});` 即
+//   收尾（与那条守卫同一前提）。
+function grabErrTextBlock(source) {
+    const start = source.indexOf('const SI_ERR_TEXT = Object.freeze({');
+    if (start < 0) return null;
+    const end = source.indexOf('});', start);
+    return end < 0 ? null : source.slice(start, end);
+}
+const R_DEAD_CODES = Object.freeze([
+    // R-C5 编辑批六码
+    'RELEASE_NOTIFY_STARTED', 'RELEASE_PATCH_UNSUPPORTED_FIELD', 'RELEASE_PATCH_INVALID_TYPE',
+    'RELEASE_TITLE_TOO_LONG', 'VERSION_TAG_TOO_LONG', 'RELEASE_NOTE_TOO_LONG',
+    // R-C7 删除批四码
+    'RELEASE_NOT_FOUND', 'RELEASE_DELETE_REASON_REQUIRED', 'RELEASE_MEMBER_STATE_DIRTY', 'RELEASE_DELETE_CONFLICT',
+]);
+// [codex 478 MED-1 收口] 主断言抽成可复用函数——变异对照组必须**真正执行同一个断言函数**并要求它
+//   抛错，而不是另写一条"变异后文本里能找到该码"的存在性正则去间接推断。后者的漏洞是：若主断言的
+//   提取范围或正则退化（比如 grabErrTextBlock 少切了一段），主断言会假绿，而存在性正则照样能匹配到
+//   ⇒ 对照组也绿，两条一起失效却无人报警。现在改为同实现同入口，主断言坏掉时对照组必然跟着红。
+// [codex 478 复审 MED-1 收口] 属性键的三种合法写法都要覆盖：裸键 `CODE:`、单引号 `'CODE':`、
+//   双引号 `"CODE":`。首版只写 `\bCODE\s*:`，带引号回流（JS 完全合法、且 SI_ERR_TEXT 里已有别的
+//   条目是这种风格的可能性存在）会从主断言底下溜过去 ⇒ 假绿。前缀限定为行首/空白/逗号/左花括号，
+//   避免把别处的子串误当成属性键。
+function deadCodeKeyRe(code) {
+    return new RegExp(`(?:^|[\\s,{])['"]?${code}['"]?\\s*:`, 'm');
+}
+function assertNoDeadCodes(source) {
+    const block = stripComments(grabErrTextBlock(source) || '');
+    assert.ok(block, '未提取到 SI_ERR_TEXT 常量体——扫描面落空（比断言失败更坏，先修提取器）');
+    // 剥注释先行：本表内部就写着解释这条口径的大段注释，不剥会被自己的注释文本假红。
+    for (const code of R_DEAD_CODES) {
+        assert.ok(!deadCodeKeyRe(code).test(block),
+            `SI_ERR_TEXT 不应登记 ${code}（裸键/单引号键/双引号键三形态均判红）——该码所属端点（PATCH/DELETE /sys-releases/:id）经 siApiErr 直出后端 error 原文，本表条目永不被命中（死词条），且与后端完整中文句构成两份会漂移的翻译。文案登记请写进 docs/local/前端统一/通知统一_错误码映射_20260809_v1.0.md §10.2 登记项 5`);
+    }
+}
+check(`SI_ERR_TEXT 不含编辑/删除两组共 ${R_DEAD_CODES.length} 码（siApiErr 不查表，登记即死词条 + 与后端原文漂移的第二份翻译）`, () => {
+    assertNoDeadCodes(src);
+});
+check('反向对照组：SI_ERR_TEXT 提取器确实抓得到内容（通知域既有码仍在表内——防上一条因提取落空而假绿）', () => {
+    const block = stripComments(grabErrTextBlock(src) || '');
+    // 这四个是通知域真活码（走 siErrText 的调用点消费），必须仍在；若它们也没了，说明提取器抓空或
+    //   有人把整张表删了，上一条的"全部不含"就成了无意义的恒真断言。
+    for (const live of ['RELEASE_NOT_PLANNING', 'EXECUTOR_NOT_ACTIVE', 'NOTIFY_IN_FLIGHT', 'STATUS_NOT_NOTIFIABLE']) {
+        assert.ok(new RegExp(`\\b${live}\\s*:`).test(block), `SI_ERR_TEXT 应仍含通知域活码 ${live}（缺失=提取落空或误删活词条）`);
+    }
+});
+check('活体变异对照组：把一条 R 死码塞回 SI_ERR_TEXT——上方断言函数须真的抛错（codex 478 MED-1 收口）', () => {
+    // 锚点是单行片段：本 HTML 是 CRLF，跨行锚点写 '…\n…' 匹配不上真实的 '\r\n'（会静默变成"变异没
+    //   发生"⇒ 对照组假绿）。塞在 §6.6 注释行**之前**，确保落在 SI_ERR_TEXT 常量体范围内。
+    const anchor = "        // §6.6 tech consult / tech-lead-comment";
+    assert.ok(src.includes(anchor), '变异锚点（§6.6 注释行）未命中——锚点已漂移，需同步本条变异对照组');
+    const mutated = src.replace(anchor, "        RELEASE_DELETE_CONFLICT: '批次状态已并发变更，请刷新重试',\r\n" + anchor);
+    assert.notStrictEqual(mutated, src, '变异替换未产生差异——需同步本条变异对照组');
+    // 关键：跑**同一个** assertNoDeadCodes，要求它对变异源码抛 AssertionError。
+    //   它若没抛，说明主断言对"死码真回流"不敏感 ⇒ 守卫本身失效（而非实现没问题）。
+    let threw = null;
+    try { assertNoDeadCodes(mutated); } catch (e) { threw = e; }
+    assert.ok(threw, '变异后 assertNoDeadCodes 未抛错——上方"不含死码"断言对真实回流不敏感（提取范围或正则失效），守卫本身失效');
+    assert.ok(/RELEASE_DELETE_CONFLICT/.test(threw.message),
+        `变异后确实抛错，但报的不是被塞回的那个码（实得："${String(threw.message).slice(0, 120)}"）——说明红灯来源与本变异无因果关系，仍属假对照`);
+});
+// [codex 478 复审 MED-1] 带引号属性键的第二条变异——首版正则 `\bCODE\s*:` 对这种写法完全无感，
+//   而 `'CODE': '...'` 是合法 JS、真回流时很可能就长这样。两种键形态各一条对照组，缺一不可。
+for (const [quoteLabel, quoted] of [['单引号', "'RELEASE_DELETE_CONFLICT'"], ['双引号', '"RELEASE_DELETE_CONFLICT"']]) {
+    check(`活体变异对照组：以${quoteLabel}属性键塞回死码——assertNoDeadCodes 同样须抛错（防带引号写法绕过）`, () => {
+        const anchor = "        // §6.6 tech consult / tech-lead-comment";
+        assert.ok(src.includes(anchor), '变异锚点（§6.6 注释行）未命中——锚点已漂移，需同步本条变异对照组');
+        const mutated = src.replace(anchor, `        ${quoted}: '批次状态已并发变更，请刷新重试',\r\n` + anchor);
+        assert.notStrictEqual(mutated, src, '变异替换未产生差异——需同步本条变异对照组');
+        let threw = null;
+        try { assertNoDeadCodes(mutated); } catch (e) { threw = e; }
+        assert.ok(threw, `以${quoteLabel}键塞回死码后 assertNoDeadCodes 未抛错——正则只认裸键，带引号写法可绕过主断言（假绿面）`);
+        assert.ok(/RELEASE_DELETE_CONFLICT/.test(threw.message),
+            `抛错了但报的不是被塞回的码（实得："${String(threw.message).slice(0, 120)}"）——红灯与本变异无因果关系`);
+    });
+}
+check('[codex 475 LOW-1] 成员状态枚举防御：pending+voided 恒等于成员总数的契约有断言兜住，破契约时按钮置灰而非隐藏', () => {
+    const body = stripComments(extractFunctionBody(src, 'siOpenBatchDetail') || '');
+    assert.ok(body, '未提取到 siOpenBatchDetail 函数体');
+    assert.ok(/const memberStateSound = \(pendingMemberCount \+ voidedMemberCount\) === issues\.length;/.test(body),
+        '未见 memberStateSound 契约断言——后端 badMembers 闸只承认「待上线」/「已作废」两态，前端两计数之和必须逐字对拍 issues.length（少报成员数是比报错更坏的静默失真）');
+    assert.ok(/if \(!memberStateSound\) \{[\s\S]{0,400}console\.error\(/.test(body),
+        '契约破裂时未 fail-loud 到 console.error（同 KIT_VERSION 不一致即报错的既有范式，不静默降级）');
+    // 红：改成 `memberStateSound && ...` 式的隐藏写法——那会让 admin 面对一个既无删除入口又无解释的
+    //   批次（受困态不可解释）。必须是三元里带 disabled 的置灰分支。
+    assert.ok(/foot \+= memberStateSound\s*\?[\s\S]{0,600}:\s*`<button[^`]*disabled[^`]*>删除上线单<\/button>`/.test(body),
+        '未见"契约成立→可点按钮 / 不成立→disabled 置灰按钮"的三元分支（红：改成隐藏按钮=制造不可解释的受困态）');
+});
+check('活体变异对照组：把置灰分支改成隐藏（disabled 按钮 → 空串）——上方断言须判红', () => {
+    // ⚠️ 锚点必须是**单行内**片段：本 HTML 是 CRLF 行尾，跨行锚点写 '…\n…' 匹配不上真实的 '\r\n'
+    //   （会静默变成"变异没发生"⇒ 对照组假绿）。上方两条既有对照组用的也都是单行片段，同此纪律。
+    const mutated = src.replace(
+        ': `<button class="u-btn-danger u-btn-sm" disabled title="${esc(dirtyDeleteTip)}">删除上线单</button>`;',
+        ": '';"
+    );
+    assert.notStrictEqual(mutated, src, '变异替换未命中原文——置灰分支写法已漂移，需同步本条变异对照组');
+    const mutatedBody = stripComments(extractFunctionBody(mutated, 'siOpenBatchDetail') || '');
+    assert.ok(!/foot \+= memberStateSound\s*\?[\s\S]{0,600}:\s*`<button[^`]*disabled[^`]*>删除上线单<\/button>`/.test(mutatedBody),
+        '变异后三元正则仍能匹配——说明该正则对"置灰改隐藏"这类变异不敏感，守卫本身失效');
+});
+
 console.log('— §⑤ HTML 内联 <script> 语法有效 —');
 check('Sys_Iteration.html 内联脚本可编译（new Function，不执行）', () => {
     const scripts = [...src.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m => m[1]);

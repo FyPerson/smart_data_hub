@@ -395,16 +395,29 @@ console.log('— ⑫ 「待我处理」聚合卡沙箱真执行（siIsMyPending/
     const fnMatchStatFilter = extractFullFunctionText('siMatchStatFilter');
     const statusGroupsText = extractConstObjectText('SI_STATUS_GROUPS');
     const devFamilyStatusesText = extractConstArrayText('SI_DEV_FAMILY_STATUSES');
+    // [归属收紧 2026-08-27] 分支① 的身份门从 isAdmin() 换成 siIsPlatformAdmin()——注入**真实实现+真实
+    //   常量**（不在本文件手抄第二份判据，同 :361 既有纪律），这样 currentUser.username 成为可控输入，
+    //   下方 ① 组正反例测的是线上真判据。
+    const fnIsPlatformAdmin = extractFullFunctionText('siIsPlatformAdmin');
+    const platformAdminUsernamesText = extractConstArrayText('SI_PLATFORM_ADMIN_USERNAMES');
 
     // [S-fix 4c 沿用] 提取前置全部包进 check() 计数体系——裸调用抛错会终止整个进程、其它断言不计数。
-    check('[⑫前置] 五函数+两常量全部提取成功（提不到=守卫空转，不能当通过）', () => {
+    check('[⑫前置] 六函数+三常量全部提取成功（提不到=守卫空转，不能当通过）', () => {
         assert.ok(fnIsMyFastlanePending, '未提取到 siIsMyFastlanePending 函数全文');
         assert.ok(fnIsMyPending, '未提取到 siIsMyPending 函数全文');
         assert.ok(fnMyPendingBreakdown, '未提取到 siMyPendingBreakdown 函数全文');
         assert.ok(fnShouldRenderConditionalCard, '未提取到 siShouldRenderConditionalCard 函数全文（456-H1 泛化改名后的新名）');
         assert.ok(fnMatchStatFilter, '未提取到 siMatchStatFilter 函数全文');
+        assert.ok(fnIsPlatformAdmin, '未提取到 siIsPlatformAdmin 函数全文（归属收紧 2026-08-27 新增，分支① 身份门）');
         assert.ok(statusGroupsText, '未提取到 SI_STATUS_GROUPS 常量全文');
         assert.ok(devFamilyStatusesText, '未提取到 SI_DEV_FAMILY_STATUSES 常量全文');
+        assert.ok(platformAdminUsernamesText, '未提取到 SI_PLATFORM_ADMIN_USERNAMES 常量全文（若被改写成 Object.freeze([...]) 形态，extractConstArrayText 会提不到 ⇒ ① 组正反例全部空转，故在此前置判红）');
+    });
+    check('[归属收紧 2026-08-27] SI_PLATFORM_ADMIN_USERNAMES 提取物非空且含 admin（空数组=没有任何人能看到待指派/待验证/待归档，是静默失效而非报错）', () => {
+        // eslint-disable-next-line no-new-func
+        const arr = new Function(`${platformAdminUsernamesText}\nreturn SI_PLATFORM_ADMIN_USERNAMES;`)();
+        assert.ok(Array.isArray(arr) && arr.length > 0, `SI_PLATFORM_ADMIN_USERNAMES 应为非空数组，实得 ${JSON.stringify(arr)}`);
+        assert.ok(arr.includes('admin'), `SI_PLATFORM_ADMIN_USERNAMES 应含 'admin'（生产平台管理员账号用户名）——若确要改名/换号，请连同本断言与 Sys_Iteration.html 该常量注释一起改，不要只改一头，实得 ${JSON.stringify(arr)}`);
     });
     check('[457-M1 真值表行1] 旧名 siShouldRenderMyFastlaneCard 可执行逻辑不存在（泛化改名后不应再留同名可执行函数，否则说明改名不彻底/留了兼容包袱）', () => {
         const oldFn = extractFullFunctionText('siShouldRenderMyFastlaneCard');
@@ -429,10 +442,16 @@ console.log('— ⑫ 「待我处理」聚合卡沙箱真执行（siIsMyPending/
         return `function isAdmin() { return ${JSON.stringify(!!isAdminVal)}; }\nconst currentUser = ${currentUserVal === undefined ? 'null' : JSON.stringify(currentUserVal)};`;
     }
     function compile(returnName, extraTexts, isAdminVal, currentUserVal) {
-        const parts = [stubText(isAdminVal, currentUserVal), statusGroupsText, devFamilyStatusesText, fnIsMyFastlanePending, ...extraTexts, `return ${returnName};`];
+        const parts = [stubText(isAdminVal, currentUserVal), statusGroupsText, devFamilyStatusesText, platformAdminUsernamesText, fnIsPlatformAdmin, fnIsMyFastlanePending, ...extraTexts, `return ${returnName};`];
         // eslint-disable-next-line no-new-func
         return new Function(parts.join('\n'))();
     }
+    // [归属收紧 2026-08-27] 两个具名用户桩——⑫ 段全域共用。分支① 自本次起要求 role='admin' ∧ username
+    //   ∈ 白名单，凡是"以 admin 身份命中分支①"的既有用例都必须带上平台管理员的 username（此前传 null
+    //   即可，因为判据只看 isAdmin()）。ROLE_ADMIN_BIZ_USER 用生产真实账号形态（示例用户B demo_user_b），是本次
+    //   改动的靶心反例。
+    const PLATFORM_ADMIN_USER = { id: 1, username: 'admin', display_name: '管理员', role: 'admin' };
+    const ROLE_ADMIN_BIZ_USER = { id: 18, username: 'demo_user_b', display_name: '示例用户B', role: 'admin' };
     const isMyPendingWith = (isAdminVal, currentUserVal) => compile('siIsMyPending', [fnIsMyPending], isAdminVal, currentUserVal);
     const breakdownWith = (isAdminVal, currentUserVal) => compile('siMyPendingBreakdown', [fnMyPendingBreakdown], isAdminVal, currentUserVal);
     const matchStatFilterWith = (isAdminVal, currentUserVal) => compile('siMatchStatFilter', [fnIsMyPending, fnMatchStatFilter], isAdminVal, currentUserVal);
@@ -489,9 +508,21 @@ console.log('— ⑫ 「待我处理」聚合卡沙箱真执行（siIsMyPending/
 
     console.log('  — siIsMyPending：七身份逐个正反例（六现行+一历史兼容，各一正例+"状态对身份不对"+"身份对状态不对"反例；若该身份的身份门/状态门任一被误删，对应反例会由 false 翻红成 true） —');
     console.log('    ①admin —');
-    assertIsMyPending('①admin 正例：isAdmin=true + status=待指派 → true', true, null, { status: '待指派' }, true);
-    assertIsMyPending('①admin 状态对身份不对：isAdmin=false + status=待指派 → false（若 isAdmin() 判据被误删，本条会翻红成 true——457-H1 冻结的最易漏点：表格把 admin 的身份写在"身份"列不是判据列）', false, null, { status: '待指派' }, false);
-    assertIsMyPending('①admin 身份对状态不对：isAdmin=true + status=开发中（不在 admin 任一状态子条件内）→ false', true, null, { status: '开发中', my_dev_pending: 0 }, false);
+    // [归属收紧 2026-08-27] 分支① 身份门＝role='admin' **∧** username ∈ SI_PLATFORM_ADMIN_USERNAMES。
+    //   两个条件各自的反例都要有，否则"收紧"可能只是写了个恒真/恒假的壳：
+    //   · isAdmin=true + username=admin        → true （平台管理员，正例）
+    //   · isAdmin=true + username=demo_user_b     → false（示例用户B：role 是 admin 但不是平台管理员——本次改动的靶心）
+    //   · isAdmin=false + username=admin       → false（防有人把判据写成"只看 username"而丢掉 role 门）
+    //   · currentUser=null                     → false（未登录/未加载完，不得放行）
+    assertIsMyPending('①平台管理员 正例：isAdmin=true + username=admin + status=待指派 → true', true, PLATFORM_ADMIN_USER, { status: '待指派' }, true);
+    assertIsMyPending('①⭐归属收紧靶心：isAdmin=true 但 username=demo_user_b（示例用户B·role 是 admin 的业务方）+ status=待指派 → false（改动前恒 true，全平台待指派单都灌进他的卡）', true, ROLE_ADMIN_BIZ_USER, { status: '待指派' }, false);
+    assertIsMyPending('①⭐同上·待验证：isAdmin=true + username=demo_user_b + status=待验证 → false（生产 #32/#61 是示例客服B/示例客服A建的单，不该进示例用户B的卡）', true, ROLE_ADMIN_BIZ_USER, { status: '待验证' }, false);
+    assertIsMyPending('①⭐同上·待归档态：isAdmin=true + username=demo_user_b + status=已上线 → false', true, ROLE_ADMIN_BIZ_USER, { status: '已上线' }, false);
+    assertIsMyPending('①⭐同上·验收 pending：isAdmin=true + username=demo_user_b + post_release_acceptance=pending → false（四个状态子条件逐个证，防只收紧了其中一条）', true, ROLE_ADMIN_BIZ_USER, { status: '已关闭', post_release_acceptance: 'pending' }, false);
+    assertIsMyPending('①role 门仍在：isAdmin=false + username=admin + status=待指派 → false（防判据被写成"只看 username"而丢掉 role 门——那样一个被降权为 user 的 admin 账号仍会看到全部）', false, PLATFORM_ADMIN_USER, { status: '待指派' }, false);
+    assertIsMyPending('①currentUser=null（未登录/未加载完）+ status=待指派 → false（不得因取不到用户就放行）', true, null, { status: '待指派' }, false);
+    assertIsMyPending('①admin 状态对身份不对：isAdmin=false + status=待指派 → false（若身份门判据被误删，本条会翻红成 true——457-H1 冻结的最易漏点：表格把 admin 的身份写在"身份"列不是判据列）', false, null, { status: '待指派' }, false);
+    assertIsMyPending('①admin 身份对状态不对：平台管理员 + status=开发中（不在 admin 任一状态子条件内）→ false', true, PLATFORM_ADMIN_USER, { status: '开发中', my_dev_pending: 0 }, false);
     console.log('    ②开发 —');
     assertIsMyPending('②开发 正例：status∈SI_DEV_FAMILY_STATUSES + my_dev_pending=1 → true', false, null, { status: '开发中', my_dev_pending: 1 }, true);
     assertIsMyPending('②开发 状态对身份不对：status=开发中 + my_dev_pending=0（未在册/非待办）→ false（若 my_dev_pending 判据被误删/改成真值判断，本条会翻红）', false, null, { status: '开发中', my_dev_pending: 0 }, false);
@@ -528,7 +559,7 @@ console.log('— ⑫ 「待我处理」聚合卡沙箱真执行（siIsMyPending/
     }
 
     console.log('  — 3b「待处理」归属专项（本方案自查项，最易写反·N0-6b 增补） —');
-    assertIsMyPending('3b① bug 单 status=待处理 + admin → 命中（admin 待指派义务，SI_STATUS_GROUPS 之外的直接状态子条件覆盖「待处理」）', true, null, { status: '待处理' }, true);
+    assertIsMyPending('3b① bug 单 status=待处理 + 平台管理员 → 命中（admin 待指派义务，SI_STATUS_GROUPS 之外的直接状态子条件覆盖「待处理」）', true, PLATFORM_ADMIN_USER, { status: '待处理' }, true);
     assertIsMyPending('3b② 同单 + 开发身份（非 admin）+ my_dev_pending=0 → 不命中（待处理尚未指派，无在册开发）', false, null, { status: '待处理', my_dev_pending: 0 }, false);
     assertIsMyPending('3b②b（N0-6b 增补，更强）同单 + 开发在册 my_dev_pending=1 → 仍不命中（状态门拦住设计内预指派——SI_DEV_FAMILY_STATUSES 不含「待处理」，即便 add/reassign 产生了在册 pending 行，前端谓词仍正确不命中；若状态门被误删/常量被误改，本条会翻红——见本报告附带的 3b③ 活体变异实证）', false, null, { status: '待处理', my_dev_pending: 1 }, false);
 
@@ -541,24 +572,24 @@ console.log('— ⑫ 「待我处理」聚合卡沙箱真执行（siIsMyPending/
     });
 
     console.log('  — 3d admin 归档分支覆盖「已生效」（P1 明定·v1.0 曾漏） —');
-    assertIsMyPending('3d status=已生效 + admin → 命中（SI_STATUS_GROUPS.pending_archive 复用，非散落硬编码"已上线"）', true, null, { status: '已生效' }, true);
+    assertIsMyPending('3d status=已生效 + 平台管理员 → 命中（SI_STATUS_GROUPS.pending_archive 复用，非散落硬编码"已上线"）', true, PLATFORM_ADMIN_USER, { status: '已生效' }, true);
 
     console.log('  — 并集断言（主计数去重 vs 分段计次允许重叠·方案 §6-4） —');
     check('并集：单张单同时满足 admin(post_release_acceptance=pending) 与开发(my_dev_pending=1) 两身份 → 主计数（vis.filter(siIsMyPending).length）恰为 1（并集去重，非按命中身份数累加；若 siIsMyPending 被改成分段累加式实现，本条会翻红成 2）', () => {
-        const fn = isMyPendingWith(true, { id: 42 });
+        const fn = isMyPendingWith(true, { ...PLATFORM_ADMIN_USER, id: 42 });
         const item = { status: '开发中', post_release_acceptance: 'pending', my_dev_pending: 1 };
         const count = [item].filter(fn).length;
         assert.strictEqual(count, 1, `主计数应为 1（该单虽同时命中 admin 验收归档与开发待提交两个身份，但去重后仍是 1 张单），实得 ${count}`);
     });
     check('并集·方案 §6-4 字面版（S4 预筛提示6 补）：两张单各命中一个身份（admin 归档单 + 开发待提交单）→ 主计数恰为 2（与上一条"单单双身份=1"互补，两条合起来钉死"并集去重且按单计数"两个方向）', () => {
-        const fn = isMyPendingWith(true, { id: 42 });
+        const fn = isMyPendingWith(true, { ...PLATFORM_ADMIN_USER, id: 42 });
         const itemA = { status: '已上线', my_dev_pending: 0 };
         const itemB = { status: '开发中', my_dev_pending: 1 };
         const count = [itemA, itemB].filter(fn).length;
         assert.strictEqual(count, 2, `两张单各命中一身份应计 2，实得 ${count}`);
     });
     check('并集：同一单分段计数（siMyPendingBreakdown）之和 = 2 > 主计数 1（允许重叠，非并集去重）；title 末尾固定含"（同一单可命中多个身份）"（若分段实现互斥优先级化，本条会翻红——方案明文否决互斥优先级方案）', () => {
-        const breakdown = breakdownWith(true, { id: 42 });
+        const breakdown = breakdownWith(true, { ...PLATFORM_ADMIN_USER, id: 42 });
         const item = { status: '开发中', post_release_acceptance: 'pending', my_dev_pending: 1 };
         const text = breakdown([item]);
         assert.ok(/验收归档 1/.test(text), `分段文案应含"验收归档 1"，实得="${text}"`);
@@ -601,7 +632,7 @@ console.log('— ⑫ 「待我处理」聚合卡沙箱真执行（siIsMyPending/
             assert.ok(idxPending < idxGroups, `my_pending 特判（@${idxPending}）应在 SI_STATUS_GROUPS 查找（@${idxGroups}）之前`);
         });
         check('my_pending 路由行为·真例：admin 桩 + 待指派 → true（走 siIsMyPending 而非兜底放行）', () => {
-            assert.strictEqual(matchStatFilterWith(true, { id: 42 })({ status: '待指派' }, 'my_pending'), true);
+            assert.strictEqual(matchStatFilterWith(true, { ...PLATFORM_ADMIN_USER, id: 42 })({ status: '待指派' }, 'my_pending'), true);
         });
         check('my_pending 路由行为·假例：非 admin 非任何身份 + 待指派 → false（若特判失效走 ": true" 兜底，本条会翻红成 true——空转即暴露）', () => {
             assert.strictEqual(matchStatFilterWith(false, { id: 42 })({ status: '待指派' }, 'my_pending'), false);
