@@ -399,6 +399,9 @@ console.log('— ⑫ 「待我处理」聚合卡沙箱真执行（siIsMyPending/
     //   常量**（不在本文件手抄第二份判据，同 :361 既有纪律），这样 currentUser.username 成为可控输入，
     //   下方 ① 组正反例测的是线上真判据。
     const fnIsPlatformAdmin = extractFullFunctionText('siIsPlatformAdmin');
+    // [2026-08-27 #89 修复·codex 479 LOW-1] 建单人验收/归档半区已抽成共享 helper，谓词与 breakdown
+    //   都调用它 ⇒ 沙箱必须注入**真实实现**（不手抄第二份判据，同本段既有纪律）。
+    const fnIsCreatorAcceptArchivePending = extractFullFunctionText('siIsCreatorAcceptArchivePending');
     const platformAdminUsernamesText = extractConstArrayText('SI_PLATFORM_ADMIN_USERNAMES');
 
     // [S-fix 4c 沿用] 提取前置全部包进 check() 计数体系——裸调用抛错会终止整个进程、其它断言不计数。
@@ -409,6 +412,7 @@ console.log('— ⑫ 「待我处理」聚合卡沙箱真执行（siIsMyPending/
         assert.ok(fnShouldRenderConditionalCard, '未提取到 siShouldRenderConditionalCard 函数全文（456-H1 泛化改名后的新名）');
         assert.ok(fnMatchStatFilter, '未提取到 siMatchStatFilter 函数全文');
         assert.ok(fnIsPlatformAdmin, '未提取到 siIsPlatformAdmin 函数全文（归属收紧 2026-08-27 新增，分支① 身份门）');
+        assert.ok(fnIsCreatorAcceptArchivePending, '未提取到 siIsCreatorAcceptArchivePending 函数全文（#89 修复新增，分支①b 建单人验收/归档半区——提不到则 ①b 全组空转）');
         assert.ok(statusGroupsText, '未提取到 SI_STATUS_GROUPS 常量全文');
         assert.ok(devFamilyStatusesText, '未提取到 SI_DEV_FAMILY_STATUSES 常量全文');
         assert.ok(platformAdminUsernamesText, '未提取到 SI_PLATFORM_ADMIN_USERNAMES 常量全文（若被改写成 Object.freeze([...]) 形态，extractConstArrayText 会提不到 ⇒ ① 组正反例全部空转，故在此前置判红）');
@@ -442,7 +446,7 @@ console.log('— ⑫ 「待我处理」聚合卡沙箱真执行（siIsMyPending/
         return `function isAdmin() { return ${JSON.stringify(!!isAdminVal)}; }\nconst currentUser = ${currentUserVal === undefined ? 'null' : JSON.stringify(currentUserVal)};`;
     }
     function compile(returnName, extraTexts, isAdminVal, currentUserVal) {
-        const parts = [stubText(isAdminVal, currentUserVal), statusGroupsText, devFamilyStatusesText, platformAdminUsernamesText, fnIsPlatformAdmin, fnIsMyFastlanePending, ...extraTexts, `return ${returnName};`];
+        const parts = [stubText(isAdminVal, currentUserVal), statusGroupsText, devFamilyStatusesText, platformAdminUsernamesText, fnIsPlatformAdmin, fnIsCreatorAcceptArchivePending, fnIsMyFastlanePending, ...extraTexts, `return ${returnName};`];
         // eslint-disable-next-line no-new-func
         return new Function(parts.join('\n'))();
     }
@@ -523,6 +527,28 @@ console.log('— ⑫ 「待我处理」聚合卡沙箱真执行（siIsMyPending/
     assertIsMyPending('①currentUser=null（未登录/未加载完）+ status=待指派 → false（不得因取不到用户就放行）', true, null, { status: '待指派' }, false);
     assertIsMyPending('①admin 状态对身份不对：isAdmin=false + status=待指派 → false（若身份门判据被误删，本条会翻红成 true——457-H1 冻结的最易漏点：表格把 admin 的身份写在"身份"列不是判据列）', false, null, { status: '待指派' }, false);
     assertIsMyPending('①admin 身份对状态不对：平台管理员 + status=开发中（不在 admin 任一状态子条件内）→ false', true, PLATFORM_ADMIN_USER, { status: '开发中', my_dev_pending: 0 }, false);
+    console.log('    ①b 建单人验收/归档半区（2026-08-27 生产 #89 缺口修复） —');
+    // 依据 transitions.js:915「验收通过：待验证 → 待上线（**建单人**）」+ 生产 timeline 实证
+    //   （近 14 条 accept/close 中 13 条是建单人本人）。⭐ 首例就是把 #89 的真实形态钉进来：
+    //   示例用户B role=admin 但非平台管理员，单是他自己建的、处于「待验证」等他验收。
+    const OWN_BY_BIZ = { created_by: ROLE_ADMIN_BIZ_USER.id };
+    assertIsMyPending('①b ⭐生产 #89 真实形态：非平台管理员 + 自己建的单 + status=待验证 → true（修复前恒 false ⇒ 示例用户B整卡不渲染，验收无入口）', true, ROLE_ADMIN_BIZ_USER, { status: '待验证', ...OWN_BY_BIZ }, true);
+    assertIsMyPending('①b 待归档态（已上线）+ 自己建的单 → true（close 实证同样是建单人本人：示例客服A连关 6 单全是自己建的）', true, ROLE_ADMIN_BIZ_USER, { status: '已上线', ...OWN_BY_BIZ }, true);
+    assertIsMyPending('①b 待归档态（已生效·config 流）+ 自己建的单 → true（走 SI_STATUS_GROUPS.pending_archive 常量，非硬编码"已上线"）', true, ROLE_ADMIN_BIZ_USER, { status: '已生效', ...OWN_BY_BIZ }, true);
+    assertIsMyPending('①b 补验收 pending + 自己建的单 → true（先行上线后的补验收同属验收性质）', true, ROLE_ADMIN_BIZ_USER, { status: '已关闭', post_release_acceptance: 'pending', ...OWN_BY_BIZ }, true);
+    // [codex 479 MED-1 收口] 本条的 currentUser 必须与 OWN_BY_BIZ 的 created_by **同一来源**——
+    //   初版写死 `{ id: 18, ... }`，与 `OWN_BY_BIZ = { created_by: ROLE_ADMIN_BIZ_USER.id }` 只是
+    //   "恰好都是 18"；一旦常量里的 id 改了，这条就变成"用甲的身份去看乙建的单"，语义与期望值相反
+    //   （且会以假绿或假红的形式出现，取决于改成什么值）。改为从同一常量派生，耦合显式化。
+    const DEMOTED_BIZ_USER = { ...ROLE_ADMIN_BIZ_USER, role: 'user' };
+    assertIsMyPending('①b 非 admin 角色同样适用：role≠admin 的建单人 + 待验证 → true（半区判据不含 role 门，业务方将来若降权为 user 仍应看到自己的验收待办；用户桩与 created_by 同源自 ROLE_ADMIN_BIZ_USER，不靠"恰好同 id"）', false, DEMOTED_BIZ_USER, { status: '待验证', ...OWN_BY_BIZ }, true);
+    assertIsMyPending('①b ⭐反例·别人建的单：非平台管理员 + created_by=其他人 + 待验证 → false（这正是收紧要解决的原问题，不能因开半区而回流）', true, ROLE_ADMIN_BIZ_USER, { status: '待验证', created_by: 4 }, false);
+    assertIsMyPending('①b ⭐反例·有意不含待指派：自己建的单 + status=待指派 → false（assign 的责任人是 admin∨受理人，建单人对它无可执行动作，放进来即"看得到点不了"的噪音）', true, ROLE_ADMIN_BIZ_USER, { status: '待指派', ...OWN_BY_BIZ }, false);
+    assertIsMyPending('①b 反例·有意不含待处理：自己建的单 + status=待处理 → false（同上，bug 流未指派态责任人是 admin）', true, ROLE_ADMIN_BIZ_USER, { status: '待处理', ...OWN_BY_BIZ }, false);
+    assertIsMyPending('①b 反例·状态不在半区：自己建的单 + status=待上线 → false（等上线，建单人无动作）', true, ROLE_ADMIN_BIZ_USER, { status: '待上线', ...OWN_BY_BIZ }, false);
+    assertIsMyPending('①b 反例·currentUser=null：uid 取不到时半区不放行（uid>0 前置门，同 ⑤⑦ 同族）', true, null, { status: '待验证', ...OWN_BY_BIZ }, false);
+    assertIsMyPending('①b 反例·created_by 缺失：字段为 undefined 时不得命中（Number(undefined)=NaN，NaN===uid 恒 false）', true, ROLE_ADMIN_BIZ_USER, { status: '待验证' }, false);
+    assertIsMyPending('①b 平台管理员不受影响：仍能看到别人建的待验证单（①a 全局视野保留）', true, { ...PLATFORM_ADMIN_USER }, { status: '待验证', created_by: 18 }, true);
     console.log('    ②开发 —');
     assertIsMyPending('②开发 正例：status∈SI_DEV_FAMILY_STATUSES + my_dev_pending=1 → true', false, null, { status: '开发中', my_dev_pending: 1 }, true);
     assertIsMyPending('②开发 状态对身份不对：status=开发中 + my_dev_pending=0（未在册/非待办）→ false（若 my_dev_pending 判据被误删/改成真值判断，本条会翻红）', false, null, { status: '开发中', my_dev_pending: 0 }, false);

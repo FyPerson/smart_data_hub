@@ -42,6 +42,7 @@ const PLATFORM_ADMIN_USERNAME = 'admin';
 const PROBE_USERNAME = 'probe_bizadmin_tmp';        // 临时账号：role=admin 但不在白名单
 const PROBE_TITLE = 'PMPA-探针-待指派单-勿动';
 const OWN_TITLE   = 'PMPA-探针-临时账号自有待修改单-勿动';
+const OWN_VERIFY_TITLE = 'PMPA-探针-临时账号自有待验证单-勿动';
 
 const db = new sqlite3.Database(DB_PATH);
 const dbGet = (sql, p = []) => new Promise((res, rej) => db.get(sql, p, (e, r) => e ? rej(e) : res(r)));
@@ -105,7 +106,7 @@ async function readMyPending(browser, token, label, targetIssueId) {
 }
 
 (async () => {
-    let probeUserId = null, probeIssueId = null, ownIssueId = null, browser = null, platformAdminId = null;
+    let probeUserId = null, probeIssueId = null, ownIssueId = null, ownVerifyIssueId = null, browser = null, platformAdminId = null;
     try {
         // ── 前置：按 username 解析平台管理员，并核实其角色（codex 478 LOW-1） ──
         const pa = await dbGet('SELECT id, username, display_name, role, status FROM users WHERE username=?', [PLATFORM_ADMIN_USERNAME]);
@@ -145,6 +146,19 @@ async function readMyPending(browser, token, label, targetIssueId) {
         );
         ownIssueId = insOwn.lastID;
         must(ownIssueId > 0, `夹具①b：属于临时账号的「待修改」单已建 (id=${ownIssueId}, created_by=#${probeUserId})——用于点亮他自己的卡，消除 probeDelta 恒真`);
+
+        // ── 夹具①c：属于临时账号的**「待验证」**单（2026-08-27 生产 #89 真实形态） ──
+        //   #89 = 示例用户B(role=admin·非平台管理员)自己建的 bug 单处于「待验证」等他验收，收紧后整卡不渲染、
+        //   验收无入口。依据 transitions.js:915「验收通过：待验证 → 待上线（**建单人**）」+ 生产 timeline
+        //   实证（近 14 条 accept/close 中 13 条是建单人本人）⇒ 建单人半区 ①b 必须放行这一形态。
+        //   本夹具把该真实形态钉进活体层：沙箱断言证谓词，这里证**页面真的把它渲染进卡**。
+        const insOwnVerify = await dbRun(
+            `INSERT INTO sys_issues (title, type, status, system_name, priority, source, intake_required, created_by, created_by_name, created_at, updated_at)
+             VALUES (?, 'bug', '待验证', 'BMS', 'P2', '内部', 1, ?, '探针业务方管理员', datetime('now','localtime'), datetime('now','localtime'))`,
+            [OWN_VERIFY_TITLE, probeUserId]
+        );
+        ownVerifyIssueId = insOwnVerify.lastID;
+        must(ownVerifyIssueId > 0, `夹具①c：属于临时账号的「待验证」单已建 (id=${ownVerifyIssueId})——复刻生产 #89 形态（建单人=他本人，等他验收）`);
 
         browser = await chromium.launch();
         const adminTok = await signAs(platformAdminId);
@@ -213,6 +227,27 @@ async function readMyPending(browser, token, label, targetIssueId) {
         })();
         must(probeOwnVisible,
             `② 非平台管理员的卡内应含**他自己的**单 #${ownIssueId}（分支⑤ 建单人=我 ∧ 待修改）——证明收紧只摘掉了与他无关的单，没有把他自己的待办一并摘掉（不误伤的正面证据）`);
+
+        console.log('\n— ②b ⭐生产 #89 形态：建单人自己的「待验证」单必须在卡内（①b 半区活体验证） —');
+        const probeVerifyVisible = await (async () => {
+            const page = await loginPage(browser, probeTok);
+            await page.goto(`${BASE_URL}/Sys_Iteration.html`);
+            await page.waitForLoadState('networkidle');
+            await page.waitForTimeout(400);
+            let vis = false, cardNum = 0;
+            if ((await statCardLoc(page).count()) > 0) {
+                const txt = await statCardLoc(page).locator('.u-stat-num').textContent().catch(() => null);
+                cardNum = txt == null ? 0 : (Number(txt.trim()) || 0);
+                await statCardLoc(page).click();
+                await page.waitForTimeout(400);
+                vis = (await issueRowLoc(page, ownVerifyIssueId).count()) === 1;
+            }
+            console.log(`  · 非平台管理员视角：卡计数=${cardNum}，自有待验证单#${ownVerifyIssueId} 在卡内=${vis}`);
+            await page.close();
+            return vis;
+        })();
+        must(probeVerifyVisible,
+            `②b 建单人自己的「待验证」单 #${ownVerifyIssueId} 必须出现在他的卡里——这是生产 #89 的真实形态（示例用户B建的 bug 单待他验收）。依据 transitions.js:915「验收通过：待验证 → 待上线（建单人）」+ 生产 timeline 实证 13/14 为建单人本人操作。此条红=①b 半区失效，验收又将无入口`);
 
         console.log('\n— ③ 不误伤：临时账号的列表可见面不受影响（收紧的是归属判定，不是访问权） —');
         // 这条**刻意走 API 不走 DOM**：可见面是后端 GET /sys-issues 的 WHERE 段决定的，用 DOM 行数证会
@@ -286,6 +321,12 @@ async function readMyPending(browser, token, label, targetIssueId) {
                 console.log(`  🧹 已删临时账号自有单 #${ownIssueId}`);
             });
         }
+        if (ownVerifyIssueId) {
+            await cleanupStep(`删临时账号自有待验证单 #${ownVerifyIssueId}`, async () => {
+                await dbRun('DELETE FROM sys_issues WHERE id=?', [ownVerifyIssueId]);
+                console.log(`  🧹 已删临时账号自有待验证单 #${ownVerifyIssueId}`);
+            });
+        }
         if (probeUserId) {
             await cleanupStep(`删临时账号 #${probeUserId}`, async () => {
                 await dbRun('DELETE FROM users WHERE id=?', [probeUserId]);
@@ -297,9 +338,17 @@ async function readMyPending(browser, token, label, targetIssueId) {
         await cleanupStep('残留核实', async () => {
             const leftIssue = probeIssueId ? await dbGet('SELECT id FROM sys_issues WHERE id=?', [probeIssueId]) : null;
             const leftOwn = ownIssueId ? await dbGet('SELECT id FROM sys_issues WHERE id=?', [ownIssueId]) : null;
+            const leftOwnVerify = ownVerifyIssueId ? await dbGet('SELECT id FROM sys_issues WHERE id=?', [ownVerifyIssueId]) : null;
             const leftUser = probeUserId ? await dbGet('SELECT id, username FROM users WHERE id=?', [probeUserId]) : null;
-            const leftDesc = [leftIssue ? `探针单#${leftIssue.id}` : null, leftOwn ? `自有单#${leftOwn.id}` : null, leftUser ? `账号#${leftUser.id}(${leftUser.username})` : null].filter(Boolean).join('、');
-            must(!leftIssue && !leftOwn && !leftUser,
+            // ⚠️ leftDesc 必须与上方 must() 的判据**覆盖同一组对象**——漏一个就会出现"断言判红但提示
+            //   说残留 0"的自相矛盾（本文件曾漏 leftOwnVerify 一次，靠核对文件实际内容才发现）。
+            const leftDesc = [
+                leftIssue ? `探针单#${leftIssue.id}` : null,
+                leftOwn ? `自有单#${leftOwn.id}` : null,
+                leftOwnVerify ? `自有待验证单#${leftOwnVerify.id}` : null,
+                leftUser ? `账号#${leftUser.id}(${leftUser.username})` : null,
+            ].filter(Boolean).join('、');
+            must(!leftIssue && !leftOwn && !leftOwnVerify && !leftUser,
                 leftDesc
                     ? `🧹 夹具清理到磁盘核实：仍有残留=${leftDesc}——⚠️ 需人工删除，否则下次跑本探针会因"临时账号已存在"直接拒绝启动`
                     : '🧹 夹具清理到磁盘核实：探针单与临时账号均已不存在（残留 0）');

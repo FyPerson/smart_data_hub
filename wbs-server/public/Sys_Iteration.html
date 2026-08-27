@@ -2718,6 +2718,32 @@
     //   siIsMyFastlanePending 契约注释一贯的单点维护纪律）。六个现行身份 + 一个仅历史兼容身份，
     //   **同一账号叠加取并集**（|| 短路即可，身份间刻意不做互斥优先级——否决理由见下方分段计数函数
     //   siMyPendingBreakdown 头部注释）。
+    // ⭐ [2026-08-27 生产 #89 缺口修复·codex 479 LOW-1 收口] 建单人的「验收/归档」半区——**谓词
+    //   siIsMyPending 分支①b 与 siMyPendingBreakdown「验收归档」段共用的唯一实现**。
+    //   抽成 helper 而非两处各写一份：codex 479 LOW-1 指出"注释强调必须同步、代码却仍是双写"，
+    //   而本页恰恰有过同款教训（uid 归一双写险些造成主计数 0 而 tooltip 有数）。共享后，将来扩状态
+    //   集合只需改这一处，结构上消除漂移可能，不再依赖"记得同步"这种人力约束。
+    //   【状态集合的依据】
+    //   · 「待验证」= transitions.js:915（bug 流）明文「验收通过：待验证 → 待上线（**建单人**）」；
+    //     界面上 siStatusDisplay 也把它显示为「待验收」。
+    //   · pending_archive（已上线/已生效）= close 动作，生产 timeline 实证近 14 条 accept/close 中
+    //     13 条为建单人本人操作（示例客服A连关 6 单全是自己建的）。用 SI_STATUS_GROUPS 常量不硬编码，
+    //     否则漏 config 流「已生效」。
+    //   · post_release_acceptance==='pending'（先行上线后的补验收）：⚠️ **当前与 pending_archive 冗余**
+    //     ——该值的唯一写点是值班先行上线的翻牌 UPDATE（index.js:4632 一带），同一条语句里
+    //     `status` 由「待验证」写成「已上线」，故 pending 恒伴随「已上线」∈ pending_archive；
+    //     reopen 另会清空该列。保留本条作**防御**（若将来出现别的写点让 pending 落在其它状态，
+    //     建单人仍能看到），非当前必需。codex 479 LOW-2 提的"无状态门"风险据此判定不成立。
+    //   【有意不含】待指派/待处理——那两态动作是 assign（transitions.js:215「admin ∨ 受理人」），
+    //     建单人对其无可执行动作，纳入即"看得到点不了"的死按钮噪音（同本页既有防死按钮纪律）。
+    //   【有意不含 role 门】业务方将来若被降权为 user，自己的验收待办仍应可见。
+    function siIsCreatorAcceptArchivePending(item, uid) {
+        if (!(uid > 0) || !item) return false;
+        if (Number(item.created_by) !== uid) return false;
+        return item.status === '待验证'
+            || SI_STATUS_GROUPS.pending_archive.includes(item.status)
+            || item.post_release_acceptance === 'pending';
+    }
     function siIsMyPending(item) {
         // [codex 467 MED-2] uid 有效域与列表路由同口径归一（routes/sys-iteration/index.js GET /sys-issues
         //   处 466 MED-1 同款）：仅正安全整数保留，否则 null——非安全整数大数经 Number 取整后可能撞
@@ -2748,6 +2774,24 @@
                 || ['待指派', '待处理', '待验证'].includes(item.status)
                 || item.post_release_acceptance === 'pending'
             ))
+            // ①b 建单人的验收/归档半区 —— ⭐ [2026-08-27 生产 #89 缺口修复]
+            //   收紧到 siIsPlatformAdmin() 时把**真实责任人**一并排除了：示例用户B（role=admin·业务方建单人）
+            //   建的 #89 处于「待验证」等他验收，卡里却一张不剩、整卡不渲染。根因是我按 role 字段推导
+            //   身份，没读状态机对责任人的定义——`transitions.js:915`（bug 流）白纸黑字：
+            //     action:'accept'  // 验收通过：待验证 → 待上线（**建单人**；native 建单人恒 admin，
+            //                      //   T-M1 口径 roleGuard='admin'）
+            //   即"验收人=建单人"是业务定义，roleGuard 写 'admin' 只是因为"建单人恒 admin"的近似。
+            //   ⭐ 生产历史实证（sys_issue_timeline 近 14 条 accept/close）：**13 条是建单人本人操作**
+            //   （示例客服A连关 6 单全是自己建的／示例客服B验收自己的），唯一例外 #81 是示例用户B代验收示例客服B的单。
+            //   ⇒ 「待验证」（界面显示「待验收」）与「待归档态」（close：已上线→已关闭，实证同样是
+            //   建单人本人）都必须给建单人开半区；`post_release_acceptance==='pending'`（先行上线后的
+            //   补验收）同属验收性质，一并纳入。
+            //   ⚠️ **有意不含「待指派/待处理」**：那两态的动作是 assign（transitions.js:215「admin ∨
+            //   受理人」），责任人是平台管理员或受理人，不是建单人——建单人对它们没有可执行动作，
+            //   放进来就是"看得到点不了"的噪音（同本页既有"防对接人看到必然 403 的死按钮"纪律）。
+            //   ⚠️ 代验收场景（如 #81）不进本卡：后端 roleGuard='admin' 未改，他们仍可从列表/详情页
+            //   操作别人的单，只是不主动推到"待我处理"里——那本就不是"我的"待办。
+            || siIsCreatorAcceptArchivePending(item, uid)
             // ② 开发——直接引用 SI_DEV_FAMILY_STATUSES 常量本身（禁写第二份 ['开发中','处理中'] 字面量，
             //   与详情页 canSubmit 单一事实源，见该常量声明处注释）；my_dev_pending 是后端派生列（判
             //   "在册∧本人∧dev_status='pending'"，SQL 刻意不含状态门，见 index.js 该列声明处注释），
@@ -2790,8 +2834,16 @@
         //   "验收归档"/"待指派"两段计数，正对应谓词分支①的两半。**两处必须同步**（同上方 uid 归一那条
         //   纪律：一处收紧一处没收，会出现主计数 0 而 tooltip 分段有数的自相矛盾）。
         const admin = siIsPlatformAdmin();
+        // ⭐ [2026-08-27 生产 #89 缺口修复] "验收归档"段与谓词 ①+①b 同源：平台管理员看全部，建单人看
+        //   自己的（待验证/待归档态/补验收）。两处必须同步——只改谓词不改这里，会出现主计数有数而
+        //   tooltip 显示"暂无"的自相矛盾（与上方 uid 归一同款纪律）。用并集去重按单计数，避免
+        //   admin 兼建单人时同一张单在本段被计两次（本段自身是"按段计次"，但段内不应重复计同一单）。
+        // [codex 479 LOW-1 收口] 建单人半区走**与谓词同一个** siIsCreatorAcceptArchivePending，
+        //   不再在本函数内复写一份状态集合（消除"注释要求同步、代码却双写"的漂移源）。
+        const acceptArchiveMine = (i) => siIsCreatorAcceptArchivePending(i, uid);
+        const acceptArchiveAdmin = (i) => SI_STATUS_GROUPS.pending_archive.includes(i.status) || i.status === '待验证' || i.post_release_acceptance === 'pending';
         const segs = [
-            ['验收归档', admin ? vis.filter(i => SI_STATUS_GROUPS.pending_archive.includes(i.status) || i.status === '待验证' || i.post_release_acceptance === 'pending').length : 0],
+            ['验收归档', vis.filter(i => (admin && acceptArchiveAdmin(i)) || acceptArchiveMine(i)).length],
             ['待指派', admin ? vis.filter(i => i.status === '待指派' || i.status === '待处理').length : 0],
             ['待我提交', vis.filter(i => SI_DEV_FAMILY_STATUSES.includes(i.status) && Number(i.my_dev_pending) === 1).length],
             ['对接测试', vis.filter(i => i.status === '待对接测试' && Number(i.is_my_intake_liaison) === 1).length],
