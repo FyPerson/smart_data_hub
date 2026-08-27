@@ -76,7 +76,7 @@ async function loginPage(browser, token) {
 }
 
 // 卡/行定位与就绪等待全部照抄 test-sys-my-pending-playwright.js 已验证的范式（:218-226 / :322-326）——
-//   不自创第二套：那边的 networkidle+400ms 是跑通过 144 断言的既有节奏，而 waitForSelector('#siTableBody tr')
+//   不自创第二套：那边的 networkidle+400ms 是跑通过 144 断言的既有节奏，而 waitForSelector('#siTbody tr')
 //   在"当前用户一行都看不到"的合法场景下会永远等不到，把正常结果误判成超时。
 function statCardLoc(page) {
     return page.locator('.u-stat-card[onclick="siSetStatFilter(\'my_pending\')"]');
@@ -260,21 +260,28 @@ async function readMyPending(browser, token, label, targetIssueId) {
         must(rows.length > 0, `③ 临时账号仍能取到全量列表（${rows.length} 条）——收紧只动「待我处理」卡的归属判定，后端可见面与写权限一字未改`);
 
         // ③b DOM 层补证——**对照式**，不是绝对值断言。
-        //   踩坑留档：初版写的是"临时账号页面应渲染出 >0 行"，实测 0 行，一度当成本次收紧引入的回归。
-        //   拉 admin 做同款对照后发现 **admin 也是 0 行**——`#siTableBody` 在 goto 后不经交互本就长期为空
-        //   （① 之所以读得到行，是因为点了统计卡触发重渲染），属页面固有行为，与身份判定无关。
-        //   教训同 feedback_test_assertion_self_error：红灯第一诊断是"谁错了"，不是"怎么让它绿"；这里
-        //   错的是判据——拿一个连基准账号都不满足的条件去要求被测账号。改为对照：**两个账号在同一判据
-        //   下表现必须一致**，一致即无连坐；若临时账号空而 admin 不空，才是真回归。
+        //   ⚠️⚠️ **结论订正（2026-08-27，务必读完再改这段）**：本段注释此前写着"admin 也是 0 行，属
+        //   页面固有行为"——**那个结论是错的**。真相是选择器名写错了：列表 tbody 的真实 id 是
+        //   `siTbody`，而初版三处都写成了 `siTableBody`，于是**永远选不到任何行**，两个账号自然都读到
+        //   0，"表现一致"的对照断言因两边恒为 0 而**恒成立 ⇒ 假绿**。是后来写另一个探针时同款选择器
+        //   再次读到 0、去 grep 真实 id 才发现（Sys_Iteration.html:2963 `getElementById('siTbody')`）。
+        //   留下这段订正而不是抹掉，是因为**错误结论比错误代码更危险**：它当时已被写进注释与 commit
+        //   message，会让后来人相信"这里本来就读不到行"从而不再追查。
+        //   两重教训：① 红灯第一诊断是"谁错了"（feedback_test_assertion_self_error），而"谁"包括
+        //   **测试自己的选择器**，不能一发现"基准账号也这样"就归因为"固有行为"——两边同时错也会表现
+        //   为一致；② 对照式断言的前提是"判据本身有鉴别力"，否则它退化成恒真（同 codex 478 复审
+        //   MED-2 那条 probeDelta===0 的形态，一日之内第二次踩）。
+        //   现在选择器已修正，本条恢复为真正的对照：两个账号在同一判据下表现须一致，一致即无连坐；
+        //   若临时账号空而 admin 不空，才是真回归。
         async function domRenderState(tok) {
             const p = await loginPage(browser, tok);
             await p.goto(`${BASE_URL}/Sys_Iteration.html`);
             let rendered = true;
             await p.waitForFunction(() => {
-                const tb = document.getElementById('siTableBody');
+                const tb = document.getElementById('siTbody');
                 return !!tb && tb.children.length > 0;
             }, { timeout: 12000 }).catch(() => { rendered = false; });
-            const rowsN = await p.$$eval('#siTableBody tr', trs => trs.length);
+            const rowsN = await p.$$eval('#siTbody tr', trs => trs.length);
             const activeStat = await p.evaluate(() => (typeof siActiveStat === 'string' ? siActiveStat : '(取不到)'));
             const errs = p.__errors.slice();
             await p.close();

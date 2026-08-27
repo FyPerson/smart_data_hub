@@ -130,10 +130,15 @@ console.log('— ② siRenderTypeCards 计数基数真执行：不随 siActiveTy
 // 沙箱工厂：真提取 siRenderTypeCards 函数体，注入受控 siList/siActiveType/siActiveStat/siTypeKeys/
 //   siMatchSearch/siMatchStatFilter（后两者可设为恒真桩或计数 spy），执行后返回容器 innerHTML 供解析。
 //   SI_TYPE_CARD_COLOR/esc/siTypeLabel 打桩为最简实现——本组不关心颜色/文案，只关心计数与 key 传递。
-function runTypeCardsSandbox({ siList, siActiveType, siActiveStat, typeKeys, matchSearchImpl, matchStatFilterImpl }) {
+function runTypeCardsSandbox({ siList, siActiveType, siActiveStat, typeKeys, matchSearchImpl, matchStatFilterImpl, currentUid }) {
     const fnRenderTypeCards = bodyOf('siRenderTypeCards');
     const fnEsc = bodyOf('esc');                    // [S-fix3·codex 414 MED-3] 生产实现原样拼入，不再恒等打桩
     const fnJsAttr = bodyOf('siJsStringAttr');
+    // [codex 481 三轮 MED-1] ⑧⑨ 代表快照三件套注入**真实实现**（不打桩成空 Map，否则类型卡路径上
+    //   "漏传参数/传错基数"永远测不出来）。bodyOf 自带提取失败即判红，不会静默空转。
+    const fnComputeReleaseRepMap = bodyOf('siComputeReleaseRepMap');
+    const fnIsReleaseNeedsExecutorMember = bodyOf('siIsReleaseNeedsExecutorMember');
+    const fnIsReleaseExecPendingMember = bodyOf('siIsReleaseExecPendingMember');
     const src2 = `
         let siActiveType = ${JSON.stringify(siActiveType)};
         let siActiveStat = ${JSON.stringify(siActiveStat)};
@@ -149,7 +154,19 @@ function runTypeCardsSandbox({ siList, siActiveType, siActiveStat, typeKeys, mat
         function siTypeKeys() { return ${JSON.stringify(typeKeys)}; }
         let __searchCalls = 0, __statCalls = [];
         function siMatchSearch(i) { __searchCalls++; return (${matchSearchImpl}).call(null, i); }
-        function siMatchStatFilter(i, k) { __statCalls.push(k); return (${matchStatFilterImpl}).call(null, i, k); }
+        function siMatchStatFilter(i, k, repMap) { __statCalls.push(k); return (${matchStatFilterImpl}).call(null, i, k, repMap); }
+        // [上线排期待办 ⑧⑨·2026-08-27] siRenderTypeCards 现会**按 type 桶各自**算代表快照传给
+        //   siMatchStatFilter（codex 481 三轮 HIGH-2：类型卡按桶分组计数，用全量算一份共用代表会让
+        //   混类型批次的某个桶漏计，出现"卡上 0、点进去 1"）。
+        //   ⚠️ [codex 481 三轮 MED-1] 这里**注入真实实现**，不再用返回空 Map 的打桩——空 Map 会让
+        //   ⑧⑨ 在类型卡路径上恒 false，于是"漏传参数/传错基数"这类缺陷在本套件里永远测不出来
+        //   （审查方原话：即使类型卡漏传参数、传错基数，现有动态测试仍可能全部通过）。
+        //   uid 桩返回 null：本套件的夹具不含 ⑧⑨ 场景，null 让代表 map 恒空但**路径真实走过**；
+        //   若将来要在此验 ⑧⑨ 命中，把 uid 桩改成真实 id 并补夹具即可，实现本身无需再动。
+        function siCurrentUid() { return ${JSON.stringify(currentUid === undefined ? null : currentUid)}; }
+        ${fnComputeReleaseRepMap}
+        ${fnIsReleaseNeedsExecutorMember}
+        ${fnIsReleaseExecPendingMember}
         const __box = { innerHTML: null, style: {} };   // [S-fix2] style 补桩——LOW-2 空键集隐藏容器写 box.style.display
         const document = { getElementById: (id) => id === 'siTypeCardsRow' ? __box : null };
         ${fnRenderTypeCards}
@@ -244,16 +261,59 @@ function parseAllCards(html) {
     // 静态双保险（belt）：即便某个真执行用例恰好算对，字面量层面也不该出现这两个自指来源——精确定位到
     //   `const base = ...;` 这一句本身，不对整个函数体做黑名单扫描（函数体其余处如 active 高亮判断合法
     //   使用 siActiveType，整体扫描会把那处合法使用也判红，见该处代码与注释）。
-    check('静态核对：计数基数表达式（const base = ...）字面量不含 siActiveType / siVisibleTypeList', () => {
+    // [codex 481 四轮 MED] 混类型批次的**动态**证明——三轮 HIGH-2 的反例场景直接做成用例：
+    //   同一 release(501) 含 feature(#10) + improvement(#11) 两成员、创建人=我、执行人 0
+    //   ⇒ feature 卡与 improvement 卡应**各计 1**（各自桶内选出自己的代表），与"切到该 tab 后
+    //   列表在子集内重选代表"的行为逐字一致。旧实现（全量共用一份 map）在此得 feature=1、
+    //   improvement=0——正是"卡上 0、点进去 1"的分叉，本用例对它必判红。
+    check('[四轮 MED] 混类型批次动态证明：同 release 含 feature+improvement 各一成员（我建的批次·执行人 0）→ 两卡各计 1（旧全量共用 map 实现在此 improvement=0 必判红）', () => {
+        const mixedList = [
+            { id: 10, type: 'feature', status: '待上线', release_id: 501, release_created_by: 77, release_exec_count: 0 },
+            { id: 11, type: 'improvement', status: '待上线', release_id: 501, release_created_by: 77, release_exec_count: 0 },
+        ];
+        const r = runTypeCardsSandbox({
+            siList: mixedList, siActiveType: 'all', siActiveStat: 'my_pending',
+            typeKeys: ['feature', 'improvement'],
+            matchSearchImpl: '(i) => true',
+            // 真实 siMatchStatFilter 需要 siIsMyPending 全家族，本沙箱按既有纪律只注入 ⑧⑨ 判据链：
+            //   my_pending 路由直接走 siIsMyReleaseNeedsExecutor 等价判定（成员条件 ∧ 桶内代表）。
+            matchStatFilterImpl: '(i, k, repMap) => k === "my_pending" ? (siIsReleaseNeedsExecutorMember(i, 77) && repMap && repMap.get(Number(i.release_id)) === Number(i.id)) : true',
+            currentUid: 77,
+        });
+        const cards = parseAllCards(r.html);
+        const fCard = cards.find(c => c.label === 'feature');
+        const iCard = cards.find(c => c.label === 'improvement');
+        assert.ok(fCard && iCard, `应渲染 feature 与 improvement 两张卡，实得 ${JSON.stringify(cards.map(c => c.label))}`);
+        assert.strictEqual(fCard.n, 1, `feature 卡应计 1（桶内代表 #10），实得 ${fCard.n}`);
+        assert.strictEqual(iCard.n, 1, `improvement 卡应计 1（桶内代表 #11）——旧全量共用 map 实现在此得 0（全量最小 id 是 feature 的 #10），实得 ${iCard.n}`);
+    });
+    check('静态核对：桶内计数基数（const tList = ... / const n = ...）不含 siActiveType / siVisibleTypeList', () => {
+        // [codex 481 三轮 HIGH-2 收口] 实现由"全量算一份 base 再按 type 分桶"改为"每个 type 桶各自
+        //   取子集 + 桶内选代表"，原先那个 `const base = ...` 变量已不存在。**防护意图逐条保留**：
+        //   基数仍必须来自 siList 按参数 t 过滤（而不是 siActiveType / siVisibleTypeList 这类"已按当前
+        //   选中类型过滤过"的来源——那是自指陷阱：用已过滤集合去算各类型计数，非选中类型恒为 0）。
         const body = bodyOf('siRenderTypeCards');
-        const m = body.match(/const base = ([\s\S]*?);/);
-        assert.ok(m, '未定位到 const base = ... 语句（提取边界可能与实现不符）');
-        const baseExpr = m[1];
-        assert.ok(!/siActiveType/.test(baseExpr), `计数基数表达式不应引用 siActiveType（自指），实得片段：${baseExpr}`);
-        assert.ok(!/siVisibleTypeList/.test(baseExpr), `计数基数表达式不应调用 siVisibleTypeList（那个函数已按 siActiveType 过滤过，等价自指），实得片段：${baseExpr}`);
-        assert.ok(/已作废/.test(baseExpr), '计数基数表达式应含已作废排除');
-        assert.ok(/siMatchSearch/.test(baseExpr), '计数基数表达式应叠加 siMatchSearch');
-        assert.ok(/siMatchStatFilter/.test(baseExpr), '计数基数表达式应叠加 siMatchStatFilter（AND 状态组筛选）');
+        const mList = body.match(/const tList = ([\s\S]*?);/);
+        assert.ok(mList, '未定位到 const tList = ... 语句（桶内基数，提取边界可能与实现不符）');
+        const mCount = body.match(/const n = ([\s\S]*?)\.length;/);
+        assert.ok(mCount, '未定位到 const n = ....length 语句（桶内计数）');
+        const expr = mList[1] + '\n' + mCount[1];
+        assert.ok(!/siActiveType/.test(expr), `桶内计数基数不应引用 siActiveType（自指：用当前选中类型过滤过的集合去算各类型计数，非选中类型恒 0），实得片段：${expr}`);
+        assert.ok(!/siVisibleTypeList/.test(expr), `桶内计数基数不应调用 siVisibleTypeList（该函数已按 siActiveType 过滤过，等价自指），实得片段：${expr}`);
+        assert.ok(/siList\.filter\(i => i\.type === t\)/.test(mList[1]), '桶内基数应为 siList 按**参数 t** 过滤（每个桶取自己那部分，与切到该 tab 后 siVisibleTypeList 同源）');
+        // [codex 481 四轮 LOW] 计数链必须**从 tList 起链**——只查"tList 定义对、tRepMap 对"拦不住
+        //   "n 改回从 siList/别的集合算"的回归（三件各自正确但没接在一起）。
+        assert.ok(/^\s*tList\s*\.filter/.test(mCount[1]) || /=\s*tList\s*$/.test(mCount[1].split('.filter')[0] + ''),
+            `const n = ... 的计数链应从 tList 起链（实得起点片段：${mCount[1].slice(0, 60)}）——从 siList 或其它集合起链即回归到"全量算再分桶"`);
+        assert.ok(/已作废/.test(expr), '桶内计数应含已作废排除');
+        assert.ok(/siMatchSearch/.test(expr), '桶内计数应叠加 siMatchSearch');
+        assert.ok(/siMatchStatFilter/.test(expr), '桶内计数应叠加 siMatchStatFilter（AND 状态组筛选）');
+        // [codex 481 三轮 HIGH-2] 代表必须**按桶算**：若这里退回共用一份全量 map，混类型批次会出现
+        //   "卡上 0、点进去 1"的口径分叉（审查方给出的反例）。
+        assert.ok(/const tRepMap = siComputeReleaseRepMap\(tList,/.test(body),
+            '未见桶内代表快照 `const tRepMap = siComputeReleaseRepMap(tList, ...)`——代表必须在该 type 桶内选，不能用全量 siList 算一份共用');
+        assert.ok(/siMatchStatFilter\(i, siActiveStat, tRepMap\)/.test(body),
+            '桶内 siMatchStatFilter 应传本桶的 tRepMap（传别的 map 等于没按桶选代表）');
     });
 }
 

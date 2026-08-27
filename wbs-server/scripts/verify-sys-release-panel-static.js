@@ -1088,6 +1088,116 @@ check('活体变异对照组：把置灰分支改成隐藏（disabled 按钮 →
         '变异后三元正则仍能匹配——说明该正则对"置灰改隐藏"这类变异不敏感，守卫本身失效');
 });
 
+console.log('— §⑰（2026-08-27）预计完成时间的超期口径：完成后冻结，未完成才实时催 —');
+// 沙箱真执行 siRemainingDaysHtml——文本扫描证不了"算得对不对"，这里直接跑真实现喂真数据。
+//   注入 siDateOnly + SI_ABANDONED_STATUSES + 函数本体（不手抄第二份判据，同既有纪律）。
+(function assertRemainingDays() {
+    function grabFn(name) {
+        const i = src.indexOf('function ' + name + '(');
+        if (i < 0) return null;
+        let d = 0, j = src.indexOf('{', i);
+        const s = j;
+        for (; j < src.length; j++) {
+            if (src[j] === '{') d++;
+            else if (src[j] === '}') { d--; if (d === 0) return src.slice(i, j + 1); }
+        }
+        return null;
+    }
+    const fnDateOnly = grabFn('siDateOnly');
+    const fnRemaining = grabFn('siRemainingDaysHtml');
+    const abandoned = (src.match(/const SI_ABANDONED_STATUSES = \[[^\]]*\];/) || [''])[0];
+    check('[⑰前置] siDateOnly / siRemainingDaysHtml / SI_ABANDONED_STATUSES 均提取成功（提不到=本组空转）', () => {
+        assert.ok(fnDateOnly, '未提取到 siDateOnly');
+        assert.ok(fnRemaining, '未提取到 siRemainingDaysHtml');
+        assert.ok(abandoned, '未提取到 SI_ABANDONED_STATUSES');
+    });
+    if (!fnDateOnly || !fnRemaining || !abandoned) return;
+    // eslint-disable-next-line no-new-func
+    const f = new Function(`${abandoned}\n${fnDateOnly}\n${fnRemaining}\nreturn siRemainingDaysHtml;`)();
+    const strip = (h) => String(h).replace(/<[^>]*>/g, '').trim();
+
+    check('⑰ ⭐生产 #89 真实形态：预计 2026-08-26 17:10、验收 2026-08-27 13:36 → 「实际超期 1 天完成」（**不随今天变化**，这正是本次要修的）', () => {
+        const got = strip(f({ status: '已上线', dev_estimated_at: '2026-08-26 17:10:00', accepted_at: '2026-08-27 13:36:13' }));
+        assert.strictEqual(got, '（实际超期 1 天完成）', `实得「${got}」`);
+    });
+    check('⑰ 冻结性证明：同一张单，把"今天"往后推不影响结果（因判据只用 accepted_at 与 dev_estimated_at，不读当前时间）', () => {
+        // 直接证"不读 now"：函数体内 new Date() 只出现在未验收分支。已验收分支若误用 now，本条无法
+        //   通过纯输入构造出差异——故改用源码结构断言 + 上一条数值断言双证。
+        const body = fnRemaining;
+        const frozenBranch = body.slice(body.indexOf('const done = siDateOnly'), body.indexOf('// 未验收'));
+        assert.ok(frozenBranch.length > 0, '未定位到冻结分支');
+        assert.ok(!/new Date\(\)/.test(frozenBranch), '冻结分支内出现 new Date()——说明仍在读当前时间，"冻结"名不副实');
+        assert.ok(/target - done/.test(frozenBranch), '冻结分支应以 (target - done) 计差，即预计日与验收日之差');
+    });
+    check('⑰ 按期完成：预计日 === 验收日 → 「按期完成」', () => {
+        const got = strip(f({ status: '已关闭', dev_estimated_at: '2026-08-20 09:00:00', accepted_at: '2026-08-20 23:59:00' }));
+        assert.strictEqual(got, '（按期完成）', `实得「${got}」——同日应判按期（只比日历日，时分秒不参与）`);
+    });
+    check('⑰ 提前完成：验收日早于预计日 → 「提前 N 天完成」', () => {
+        const got = strip(f({ status: '已关闭', dev_estimated_at: '2026-08-25 09:00:00', accepted_at: '2026-08-22 10:00:00' }));
+        assert.strictEqual(got, '（提前 3 天完成）', `实得「${got}」`);
+    });
+    check('⑰ ⭐待上线单用验收日冻结（生产 14 张全部已 accepted 却卡在上线排期——不得把上线排期算作开发超期）', () => {
+        const got = strip(f({ status: '待上线', dev_estimated_at: '2026-08-20 18:00:00', accepted_at: '2026-08-21 10:00:00' }));
+        assert.strictEqual(got, '（实际超期 1 天完成）', `实得「${got}」——待上线应走冻结分支，不随天数递增`);
+    });
+    check('⑰ 未验收仍实时催：accepted_at 为空 → 走原实时分支（措辞保持「个自然日」，与冻结分支的「天」区分）', () => {
+        const future = new Date(Date.now() + 3 * 86400000);
+        const y = future.getFullYear(), m = String(future.getMonth() + 1).padStart(2, '0'), d = String(future.getDate()).padStart(2, '0');
+        const got = strip(f({ status: '开发中', dev_estimated_at: `${y}-${m}-${d} 12:00:00`, accepted_at: null }));
+        assert.ok(/距预计完成还有 3 个自然日/.test(got), `实得「${got}」——未验收单应保持实时算`);
+    });
+    check('⑰ 放弃态不显示：已作废 / 已拒绝 即便有预计时间与验收时间也返回空串', () => {
+        for (const st of ['已作废', '已拒绝']) {
+            const got = strip(f({ status: st, dev_estimated_at: '2026-08-20 09:00:00', accepted_at: '2026-08-25 10:00:00' }));
+            assert.strictEqual(got, '', `${st} 应不显示超期，实得「${got}」——放弃不是完成`);
+        }
+    });
+    check('⑰ 无预计时间 → 空串（不因有 accepted_at 就凭空造一个超期结论）', () => {
+        assert.strictEqual(strip(f({ status: '已关闭', dev_estimated_at: null, accepted_at: '2026-08-25 10:00:00' })), '');
+    });
+    check('⑰ 反向对照组：把 accepted_at 抹掉，同一张已完成单会退回实时分支并随天数递增（证冻结分支真的由 accepted_at 驱动，非恒走某一支）', () => {
+        const withAcc = strip(f({ status: '已关闭', dev_estimated_at: '2026-01-01 09:00:00', accepted_at: '2026-01-05 10:00:00' }));
+        const noAcc = strip(f({ status: '已关闭', dev_estimated_at: '2026-01-01 09:00:00', accepted_at: null }));
+        assert.strictEqual(withAcc, '（实际超期 4 天完成）', `有 accepted_at 应冻结为 4 天，实得「${withAcc}」`);
+        assert.ok(/个自然日/.test(noAcc) && noAcc !== withAcc,
+            `无 accepted_at 应走实时分支且与冻结值不同（实得「${noAcc}」）——两支输出相同说明分流没生效`);
+    });
+    check('⑰ [codex 480 MED-1] 非法日期不显示：2026-13-01 / 2026-02-31 这类会被 new Date 自动进位的输入必须判 null 而非算出错值', () => {
+        // new Date(2026,12,1) → 2027-01-01；new Date(2026,1,31) → 2026-03-03。不做 round-trip 校验
+        //   就不会报错，只会安静地算出一个错误天数——比 NaN 更难发现。
+        for (const bad of ['2026-13-01 09:00:00', '2026-02-31 09:00:00', '2026-00-10 09:00:00', '2026-04-31 09:00:00']) {
+            // 预计日非法 ⇒ 整条提示不渲染（没有基准日，任何结论都是编的）
+            assert.strictEqual(strip(f({ status: '已关闭', dev_estimated_at: bad, accepted_at: '2026-05-01 10:00:00' })), '',
+                `非法预计日 ${bad} 应不渲染（实际会被 Date 进位成另一个合法日期，算出错误天数）`);
+            // 验收日非法 ⇒ 视同"未验收"，**保守降级走实时分支**（宁可继续催办，也不冻结在错值上）。
+            //   这里断言"不含冻结分支措辞"而非"等于空串"——空串会把这条降级路径也判红，那是断言写错。
+            const got = strip(f({ status: '已关闭', dev_estimated_at: '2026-05-01 09:00:00', accepted_at: bad }));
+            assert.ok(!/完成）$/.test(got) && !/实际超期|按期完成|提前 \d+ 天/.test(got),
+                `非法验收日 ${bad} 不得据此算出冻结值（实得「${got}」）——应视同未验收，走实时分支`);
+            assert.ok(/个自然日|预计今天完成/.test(got),
+                `非法验收日 ${bad} 应保守降级为实时提示（实得「${got}」）`);
+        }
+    });
+    check('⑰ 合法边界日仍正常：闰年 2/29、月末 31 日不得被误判为非法', () => {
+        assert.strictEqual(strip(f({ status: '已关闭', dev_estimated_at: '2028-02-29 09:00:00', accepted_at: '2028-02-29 18:00:00' })), '（按期完成）');
+        assert.strictEqual(strip(f({ status: '已关闭', dev_estimated_at: '2026-01-31 09:00:00', accepted_at: '2026-01-31 18:00:00' })), '（按期完成）');
+    });
+    check('⑰ [codex 480 LOW-1] 调用点守卫加严：**任何**传日期串的调用形态都判红（不只精确匹配 iss.dev_estimated_at）', () => {
+        assert.ok(/siRemainingDaysHtml\(iss\)/.test(src), '未见 siRemainingDaysHtml(iss) 调用');
+        // 原断言只禁 `siRemainingDaysHtml(iss.dev_estimated_at)` 这一个字面形态，
+        //   `siRemainingDaysHtml(row.dev_estimated_at)` / `(item.dev_estimated_at)` / 传一个日期串变量
+        //   都能绕过 ⇒ 冻结分支静默失效而守卫全绿。改为枚举所有调用实参逐个判定。
+        const calls = [...src.matchAll(/siRemainingDaysHtml\(([^)]*)\)/g)]
+            .map(m => m[1].trim())
+            .filter(a => a !== '' && a !== 'iss');   // 函数定义处的形参名与正确调用均放行
+        for (const arg of calls) {
+            assert.ok(!/dev_estimated_at/.test(arg),
+                `siRemainingDaysHtml 的调用实参「${arg}」含 dev_estimated_at——传日期串会让 status/accepted_at 取不到，冻结分支永不命中（层内全绿但功能不可用的典型）`);
+        }
+    });
+})();
+
 console.log('— §⑤ HTML 内联 <script> 语法有效 —');
 check('Sys_Iteration.html 内联脚本可编译（new Function，不执行）', () => {
     const scripts = [...src.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m => m[1]);

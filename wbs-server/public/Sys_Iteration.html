@@ -1945,7 +1945,7 @@
         const byType = siActiveType === 'all' ? siList : siList.filter(i => i.type === siActiveType);
         return byType.filter(siMatchSearch);
     }
-    function siMatchStatFilter(item, filterKey) {
+    function siMatchStatFilter(item, filterKey, repMap) {
         if (!filterKey) return true;
         // [待我处理全角色卡 方案 v1.3 §3.3] 横切维度特殊 key——必须在 SI_STATUS_GROUPS 查找**之前**
         //   判断：'my_pending' 不是状态组 key，SI_STATUS_GROUPS['my_pending'] 结构上恒 undefined，若
@@ -1954,7 +1954,7 @@
         //   SI_STATUS_GROUPS。原 'my_fastlane' 值班筛选已随「待我处理」聚合卡吸收——siIsMyPending 内部
         //   以"值班执行人"分支原样调用 siIsMyFastlanePending（函数本体未删）；458-H1 判定全仓无旧键
         //   持久化/深链消费者，不写归一入口，本处零 'my_fastlane' 字面量。
-        if (filterKey === 'my_pending') return siIsMyPending(item);
+        if (filterKey === 'my_pending') return siIsMyPending(item, repMap);
         const statuses = SI_STATUS_GROUPS[filterKey];
         return Array.isArray(statuses) ? statuses.includes(item.status) : true;
     }
@@ -2026,10 +2026,16 @@
         return true;
     }
     function siVisibleList() {
-        const matched = siVisibleTypeList().filter((i) => siMatchStatFilter(i, siActiveStat) && siMatchDateRange(i));
+        // [codex 481 复审 HIGH-2 二次收口] 本函数是**所有列表筛选路径的唯一入口**（siRenderTable /
+        //   siBuildFamilyBlocks / siGetViewRows 导出 / sysIterationSorter.getList 四个调用方都经它），
+        //   故在此自算一份当次代表快照传给下游 siMatchStatFilter——不依赖 siRenderStats 是否先跑过。
+        //   基数取 siVisibleTypeList()（与下方 filter 同源）：它比 siRenderStats 的 vis 多含已作废单，
+        //   但 ⑧/⑨ 都要求 status==='待上线'，已作废恒不命中 ⇒ 两处快照对本判据等价。
+        const repMap = siComputeReleaseRepMap(siVisibleTypeList(), siCurrentUid());
+        const matched = siVisibleTypeList().filter((i) => siMatchStatFilter(i, siActiveStat, repMap) && siMatchDateRange(i));
         if (!siActiveSearch) return matched;
         const candidatePool = (siActiveType === 'all' ? siList : siList.filter((i) => i.type === siActiveType))
-            .filter((i) => siMatchStatFilter(i, siActiveStat) && siMatchDateRange(i));
+            .filter((i) => siMatchStatFilter(i, siActiveStat, repMap) && siMatchDateRange(i));
         return siBroadenBySearchFamily(matched, candidatePool);
     }
 
@@ -2095,6 +2101,9 @@
     //   "返工累计"保留纯指标，不参与筛选，避免把 reopen_count（累计次数）误装成状态维度。
     function siRenderStats() {
         const vis = siVisibleTypeList().filter(i => i.status !== '已作废');
+        // [codex 481 复审 HIGH-2 二次收口] 本入口自己算一份**当次快照**并显式传给下方两个消费点，
+        //   不再依赖任何模块级共享状态与执行顺序（见 siComputeReleaseRepMap 头部注释里的调用图证据）。
+        const statsRepMap = siComputeReleaseRepMap(vis, siCurrentUid());
         // 组全集覆盖守卫（codex API 审 MED-1 配套）：出现未归任何组的状态 → console.warn 提示补组，
         //   防未来后端新增状态时重现"点组卡后该单消失"缺口（不阻断渲染，未知态仍计入"全部"）
         const grouped = new Set(Object.values(SI_STATUS_GROUPS).flat());
@@ -2135,13 +2144,13 @@
         //   会让本卡在"筛选激活+计数归零"时消失——正是该函数当初要防的坑，故泛化出第三参 cardKey，
         //   全部调用点同步）。**位置**：插在 stats 数组最前（方案 §3.3 冻结的位置合同，非"全部"卡
         //   之后）。
-        const myPendingCount = vis.filter(siIsMyPending).length;
+        const myPendingCount = vis.filter(i => siIsMyPending(i, statsRepMap)).length;
         if (siShouldRenderConditionalCard(myPendingCount, siActiveStat, 'my_pending')) {
             stats.unshift({
                 key: 'my_pending', bg: '#e0e7ff',
                 icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#4338ca" stroke-width="2"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>',
                 label: '待我处理', n: myPendingCount,
-                title: siMyPendingBreakdown(vis),
+                title: siMyPendingBreakdown(vis, statsRepMap),
             });
         }
         document.getElementById('siStatsRow').innerHTML = stats.map((s) => {
@@ -2201,14 +2210,27 @@
         //   残留 16px 空白条（META 加载前一瞬/typeFlows 为空时常驻）。
         box.style.display = keys.length ? '' : 'none';
         if (!keys.length) { box.innerHTML = ''; return; }
-        const base = siList.filter(i => i.status !== '已作废')
-            .filter(siMatchSearch)
-            .filter(i => siMatchStatFilter(i, siActiveStat));
+        // [codex 481 复审 HIGH-2 二次收口] 本处（类型卡）**不经 siVisibleList**，是第三个独立消费
+        //   siMatchStatFilter 的入口，同样自算快照——基数用 siList 全量（与下方 filter 同源）。
+        // ⚠️ [codex 481 三轮 HIGH-2 收口] 类型卡**按 type 分桶计数**，故代表必须**按桶各自选**，
+        //   不能用全量 siList 算一份共用。反例（审查方给出，成立）：一个 change 批次混 feature +
+        //   improvement 且需要我派人，全量最小 id 若属 feature，则 improvement 桶里那个成员不是代表
+        //   ⇒ improvement 卡显示 0；可用户点进 improvement tab 后，siVisibleList 会在该 type 子集内
+        //   **重选代表** ⇒ 列表显示 1 件 —— **卡上说 0、点进去有 1**，这正是本轮要消灭的口径分叉。
+        //   按桶选代表后，每个桶与"切到该 tab 后的列表"逐字同源。跨桶会各出一个代表（同一批次在
+        //   feature 卡和 improvement 卡各计 1）——这是**正确的**：用户在任一 tab 都能看到并处理它，
+        //   与切 tab 后的列表行为一致；类型卡本就是"各类型各自有几件"，不承担跨类型去重的语义。
+        const typeCardUid = siCurrentUid();
         box.innerHTML = keys.map((t) => {
             // [S-fix2·预筛三轮 LOW-1] hasOwnProperty 守门（同 siTypeClass :1459 既有范式）——裸方括号对
             //   原型键（constructor/toString）会取到函数、color.bg 渲染出 background:undefined。
             const color = Object.prototype.hasOwnProperty.call(SI_TYPE_CARD_COLOR, t) ? SI_TYPE_CARD_COLOR[t] : SI_TYPE_CARD_COLOR.__default__;
-            const n = base.filter(i => i.type === t).length;
+            // 桶内基数 = 该 type 的全部单（与切到该 tab 后 siVisibleTypeList() 同源），代表在桶内选。
+            const tList = siList.filter(i => i.type === t);
+            const tRepMap = siComputeReleaseRepMap(tList, typeCardUid);
+            const n = tList.filter(i => i.status !== '已作废')
+                .filter(siMatchSearch)
+                .filter(i => siMatchStatFilter(i, siActiveStat, tRepMap)).length;
             const classes = ['u-stat-card'].concat(siActiveType === t ? ['active'] : []);
             // 图标——统一「标签」轮廓（呼应"类型=标签"这一概念），仅按类型换 stroke/bg 色（同 u-type-tag
             //   四条分类色，见 SI_TYPE_CARD_COLOR 定义处注释），不为四类各设计一套不同形状图标。
@@ -2737,6 +2759,111 @@
     //   【有意不含】待指派/待处理——那两态动作是 assign（transitions.js:215「admin ∨ 受理人」），
     //     建单人对其无可执行动作，纳入即"看得到点不了"的死按钮噪音（同本页既有防死按钮纪律）。
     //   【有意不含 role 门】业务方将来若被降权为 user，自己的验收待办仍应可见。
+    // ⭐ [上线排期三态徽章·待办侧·2026-08-27 用户拍板] 分支⑧：我建的上线批次还没派执行人。
+    //   【责任人依据】不是猜的：`PUT /sys-releases/:id/executors` 是 requireAdmin，但**生产实证**
+    //     （sys_release_executors.added_by 对拍 sys_releases.created_by，近 12 个批次）**12/12 全部同人**
+    //     ——谁建的批次谁派执行人。故待办归**批次创建人**，既不是平台管理员也不是全体 admin。
+    //     这是 #89 的直接教训：只看权限门（requireAdmin）会把待办发给一群不干这活的人，
+    //     或者发不到真正在干的人手上。
+    //   【去重】用户拍板"按批次去重计 1"：批次未派人是**批次级**的一件事，一次派人解开全批。若逐张
+    //     成员单计入，R-20260824-1 那种 5 成员批次会让卡数 +5，一个动作消掉 5 个计数、淹没其他真待办。
+    //     代表单 = 后端派生列 release_rep_issue_id（批次内 status='待上线' 的最小 id），只有代表单命中。
+    //   【状态门】只在 status==='待上线' 时成立——与徽章同口径。已发布批次的成员早已不是待上线态。
+    //   ⚠️ 不判 role：与 ①b 同理，业务方将来若降权也仍该看到自己建的批次的待办。
+    // 成员条件（**不含**代表判定）——"这张单所属批次是我建的、且还没派执行人"。徽章与待办共用同一
+    //   份条件，避免两处各写一遍导致口径漂移。
+    //   ⚠️ [codex 481 HIGH-1] `release_created_by != null` 是**孤儿批次判据**：本项目 PRAGMA
+    //   foreign_keys 恒 OFF（生产实查 =0），故 release_id 指向一条已不存在的 sys_releases 行在机制上
+    //   可能发生（生产当前实查孤儿 0 行）。此时四个派生列取 0/NULL/NULL/NULL，若只按 release_id 是否
+    //   为空分流，会把它错误地展示成"待派执行人"，而待办又因 created_by 为 NULL 无人认领——**说了话
+    //   却没人负责**。sys_releases.created_by 是 NOT NULL ⇒ "批次存在 ⇔ release_created_by 非 NULL"，
+    //   用已有列即可判定，无需再加 release_exists 列。
+    function siIsReleaseNeedsExecutorMember(item, uid) {
+        return !!(uid > 0 && item
+            && item.status === '待上线'
+            && item.release_id != null
+            && item.release_created_by != null                        // 孤儿批次不计入（见上）
+            // ⚠️ [codex 481 复审 HIGH-1 二次要求·**论证后不采纳**] 审查方要求再查一次"创建人账号是否
+            //   仍 active"，理由是"创建人失效则待办无人认领"。**该校验在本判据下是冗余的**：下一行
+            //   `release_created_by === uid` 里的 uid 来自当前登录用户，而登录端点本身就带
+            //   `WHERE status='active'`（server.js:4328）⇒ 能走到这段代码的人必然是有效账号，
+            //   "创建人是我"已隐含"认领人有效"。代价却是实打实的：为此需在列表 SELECT 里 JOIN users，
+            //   而 verify-sys-my-pending-cols / verify-sys-commit-cols 等守卫用 :memory: 库**只建
+            //   sys-iteration 模块表**，该依赖会让它们直接 500（已实测）——为一个生产 0 例的边缘场景
+            //   打破多个守卫的隔离设计不划算。
+            //   **登记接受的残留**：创建人账号被停用后，其名下未派人批次确实没人会去派，徽章仍显示
+            //   「待派执行人」（事实陈述，不是错话）。这属于运维层面（停用账号时应转移其名下批次），
+            //   不是一个徽章能解决的问题。
+            && Number(item.release_created_by) === uid
+            && (Number(item.release_exec_count) || 0) === 0);
+    }
+    // ⑨ 我是本批次在册执行人且尚未执行 —— 与 ⑧ 构成待上线阶段闭环（⑧ 催"去派人"、⑨ 催"去执行"）。
+    //   【责任人依据】`my_release_exec_pending` 是后端派生列，判"在册(removed_at IS NULL) ∧ 本人 ∧
+    //     exec_status='pending'"，与 release_exec_count 的在册口径同源。
+    //   【生产实例】示例开发A在 R-20260824-3 上 exec_status='pending'、批次计划日 08-25 已逾期 2 天，
+    //     钉钉 notify_status 早已 sent——**一次性通知发过就过去了**，而持续在办清单里没有他这一条。
+    //   【为什么也按批次去重】「执行上线」是**批次级动作**（端点 POST /sys-releases/:id/execute，一次
+    //     执行整批），示例开发A那 6 张成员单只需要他点一次；逐张计入会让卡 +6 而动作只有 1 个，与 ⑧ 同理。
+    //   【与 ⑧ 互斥】⑧ 要求 exec_count===0、⑨ 要求本人在执行人名单里（⇒ exec_count≥1），两者不可能
+    //     同时命中同一张单，故共用同一份代表 map 不会互相抢占代表位。
+    function siIsReleaseExecPendingMember(item, uid) {
+        return !!(uid > 0 && item
+            && item.status === '待上线'
+            && item.release_id != null
+            && Number(item.my_release_exec_pending) === 1);
+    }
+    // 当前可见基数内的「批次 → 代表单 id」映射。
+    //   ⚠️ [codex 481 HIGH-2] 代表单**不能用后端的全局 release_rep_issue_id**：那是"全表内该批次最小
+    //   待上线 id"，而卡计数的基数 vis 会被 type tab 裁剪（change 批次可混 feature+improvement，切到
+    //   具体 tab 时全局代表可能不在 vis 里）⇒ 该批次所有可见成员都不命中，**整批待办从卡里消失**。
+    //   改为在**与计数同一基数**上动态选代表（该基数内最小 id），保证"只要还有可见成员，就恰好有一个
+    //   代表命中"。后端 release_rep_issue_id 列保留但前端不再依赖它作判据（守卫有负向断言钉住）。
+    //   时序：siRenderStats 算完 vis 后立即刷新，而 siRenderStats 恒在 siRenderTable 之前调用
+    //   （:1882-1883 等各调用点），故 siMatchStatFilter 走到时 map 必为最新。
+    //   ⚠️⚠️ [codex 481 复审 HIGH-2 二次收口] 首版把这张 map 做成**模块级可变状态**、只在 siRenderStats
+    //   里刷新，并声称"siRenderStats 恒先执行"。审查方要求拿完整调用图证明而不是声称——一查确实不成立：
+    //   `siVisibleList()` 另有三个调用方（siBuildFamilyBlocks :2482、**siGetViewRows :10112 导出功能**、
+    //   sysIterationSorter 的 getList :2312），`siRenderTypeCards` 还独立调 siMatchStatFilter（:2213），
+    //   它们都可能在 siRenderStats 之外走到 ⑧/⑨ 判据 ⇒ 读到空的或过期的 map，待办静默漏计（导出尤其
+    //   危险：导出的是"当前筛选全量"，漏了不会有任何提示）。
+    //   ⇒ 改为**纯函数 + 显式传参**：每个入口自己算一份当次快照传下去，正确性不再依赖任何执行顺序。
+    //   不传 repMap 时 ⑧/⑨ 恒 false（安全降级，宁可漏提醒也不误判），守卫对三个入口都有传参断言。
+    // uid 归一单点实现——正安全整数外恒 null（此前 siIsMyPending/siMyPendingBreakdown 各写一份，
+    //   新增入口还要再写第三份 ⇒ 抽出来，同 codex 479 LOW-1「能抽 helper 就别靠人力约束同步」）。
+    function siCurrentUid() {
+        const raw = currentUser ? Number(currentUser.id) : NaN;
+        return (Number.isSafeInteger(raw) && raw > 0) ? raw : null;
+    }
+    function siComputeReleaseRepMap(list, uid) {
+        const m = new Map();
+        if (!(uid > 0) || !Array.isArray(list)) return m;
+        for (const i of list) {
+            if (!siIsReleaseNeedsExecutorMember(i, uid) && !siIsReleaseExecPendingMember(i, uid)) continue;
+            // [codex 481 复审 LOW] id/release_id 走安全整数校验：脏数据（非法字符串/超安全范围）会让
+            //   Number() 得 NaN 或精度碰撞，导致某批次选不出代表或两个批次被并成一个。
+            const rid = Number(i.release_id), id = Number(i.id);
+            if (!Number.isSafeInteger(rid) || !Number.isSafeInteger(id)) continue;
+            // ⚠️ [codex 481 三轮 MED-3] ⑧⑨ 共用这一份代表 map，其互斥性依赖两个派生列对同一批次保持
+            //   一致：⑧ 要求 release_exec_count===0（无在册执行人），⑨ 要求 my_release_exec_pending===1
+            //   （我是在册执行人且 pending）——两者由**同一条 SQL 的两个子查询**产出且都用
+            //   `removed_at IS NULL` 同一在册口径，故逻辑上不可能同时成立。这里加一条 fail-loud：真同时
+            //   成立说明两个子查询的口径已被改得不自洽（或数据脏），此时两个分支会竞争同一个代表位、
+            //   行为不可预测。不阻断渲染（宁可继续显示也不白屏），但必须在控制台留下可追查的信号。
+            if (siIsReleaseNeedsExecutorMember(i, uid) && siIsReleaseExecPendingMember(i, uid)) {
+                console.error(`[SI] 批次 #${rid} 单 #${id} 同时满足 ⑧（无在册执行人）与 ⑨（我是在册执行人且待执行）——两列口径已不自洽（release_exec_count=${i.release_exec_count} / my_release_exec_pending=${i.my_release_exec_pending}），请核对列表 SELECT 的两个子查询`);
+            }
+            if (!m.has(rid) || id < m.get(rid)) m.set(rid, id);
+        }
+        return m;
+    }
+    function siIsMyReleaseNeedsExecutor(item, uid, repMap) {
+        if (!siIsReleaseNeedsExecutorMember(item, uid)) return false;
+        return !!repMap && repMap.get(Number(item.release_id)) === Number(item.id);   // 按批次去重计 1
+    }
+    function siIsMyReleaseExecPending(item, uid, repMap) {
+        if (!siIsReleaseExecPendingMember(item, uid)) return false;
+        return !!repMap && repMap.get(Number(item.release_id)) === Number(item.id);   // 同样按批次去重计 1
+    }
     function siIsCreatorAcceptArchivePending(item, uid) {
         if (!(uid > 0) || !item) return false;
         if (Number(item.created_by) !== uid) return false;
@@ -2744,13 +2871,12 @@
             || SI_STATUS_GROUPS.pending_archive.includes(item.status)
             || item.post_release_acceptance === 'pending';
     }
-    function siIsMyPending(item) {
+    function siIsMyPending(item, repMap) {
         // [codex 467 MED-2] uid 有效域与列表路由同口径归一（routes/sys-iteration/index.js GET /sys-issues
         //   处 466 MED-1 同款）：仅正安全整数保留，否则 null——非安全整数大数经 Number 取整后可能撞
         //   created_by/release_assignee_id（⑤⑦ 两个前端直比分支），后端派生列已归 0 而前端命中=跨端
         //   接缝不一致。null 时 uid > 0 恒 false，⑤⑦ 自动不命中。
-        const rawUid = currentUser ? Number(currentUser.id) : NaN;
-        const uid = (Number.isSafeInteger(rawUid) && rawUid > 0) ? rawUid : null;
+        const uid = siCurrentUid();   // [codex 481 三轮 LOW-1] 归一走单点实现（siCurrentUid），三处不再各写一份
         return (
             // ① admin——⭐ 457-H1 冻结形态：表格把 admin 的身份写在"身份"列而非判据列——admin 的
             //   "身份"不是"这单与我有关"，是"我这个角色对这单有推进义务"，实现时必须显式写
@@ -2792,6 +2918,10 @@
             //   ⚠️ 代验收场景（如 #81）不进本卡：后端 roleGuard='admin' 未改，他们仍可从列表/详情页
             //   操作别人的单，只是不主动推到"待我处理"里——那本就不是"我的"待办。
             || siIsCreatorAcceptArchivePending(item, uid)
+            // ⑧ 我建的上线批次待派执行人（按批次去重，仅代表单命中）——见函数头注释的责任人实证与去重理由
+            || siIsMyReleaseNeedsExecutor(item, uid, repMap)
+            // ⑨ 我是本批次执行人且未执行（按批次去重）——见 siIsReleaseExecPendingMember 头部注释
+            || siIsMyReleaseExecPending(item, uid, repMap)
             // ② 开发——直接引用 SI_DEV_FAMILY_STATUSES 常量本身（禁写第二份 ['开发中','处理中'] 字面量，
             //   与详情页 canSubmit 单一事实源，见该常量声明处注释）；my_dev_pending 是后端派生列（判
             //   "在册∧本人∧dev_status='pending'"，SQL 刻意不含状态门，见 index.js 该列声明处注释），
@@ -2825,11 +2955,10 @@
     //   siIsMyPending 整体谓词、并集去重）刻意不同源，故 title 末尾固定追加"（同一单可命中多个身份）"
     //   防止用户误读成统计错误。**否决"互斥优先级"方案**——那会让 admin 兼开发的人看到"我明明是
     //   开发却被归到 admin 段"，更难理解（方案 §3.3 原文）。计 0 的段不显示。
-    function siMyPendingBreakdown(vis) {
+    function siMyPendingBreakdown(vis, repMap) {
         // [codex 467 MED-2] uid 归一与 siIsMyPending 同口径（正安全整数外恒 null）——分段⑥⑧ 两个
         //   前端直比分支与谓词 ⑤⑦ 同族，归一必须两处同步（否则主计数 0 而分段有数）。
-        const rawUid = currentUser ? Number(currentUser.id) : NaN;
-        const uid = (Number.isSafeInteger(rawUid) && rawUid > 0) ? rawUid : null;
+        const uid = siCurrentUid();   // [codex 481 三轮 LOW-1] 归一走单点实现，不再本地复写一份
         // ⭐ [归属收紧·2026-08-27] 与 siIsMyPending 分支① 同源收紧为 siIsPlatformAdmin()——本变量喂的是
         //   "验收归档"/"待指派"两段计数，正对应谓词分支①的两半。**两处必须同步**（同上方 uid 归一那条
         //   纪律：一处收紧一处没收，会出现主计数 0 而 tooltip 分段有数的自相矛盾）。
@@ -2851,6 +2980,10 @@
             ['待修改', vis.filter(i => i.status === '待修改' && uid > 0 && Number(i.created_by) === uid).length],
             ['值班部署', vis.filter(siIsMyFastlanePending).length],
             ['历史指定', vis.filter(i => i.type === 'bug' && i.status === '待上线' && uid > 0 && Number(i.release_assignee_id) === uid).length],
+            // ⑧ 与谓词 siIsMyReleaseNeedsExecutor 同一实现（不复写判据）——该分支自带按批次去重
+            //   （仅代表单命中），故这里直接 filter 即是批次数，无需再去重。
+            ['待派执行人', vis.filter(i => siIsMyReleaseNeedsExecutor(i, uid, repMap)).length],
+            ['待我上线', vis.filter(i => siIsMyReleaseExecPending(i, uid, repMap)).length],
         ];
         const parts = segs.filter(([, n]) => n > 0).map(([label, n]) => `${label} ${n}`);
         return (parts.length ? parts.join(' · ') : '暂无') + '（同一单可命中多个身份）';
@@ -2960,7 +3093,7 @@
                 <td>${idCell}</td>
                 <td><span class="u-type-tag ${siTypeClass(i.type)}">${esc(siTypeLabel(i.type))}</span></td>
                 <td>${siPriRiskCellHtml(i)}</td>
-                <td><span class="u-status-badge si-s-${siStatusClass(i.status)}">${esc(siStatusDisplay(i.status))}</span></td>
+                <td><span class="u-status-badge si-s-${siStatusClass(i.status)}">${esc(siStatusDisplay(i.status))}</span>${siReleaseScheduleBadgeHtml(i)}</td>
                 <td>${esc(i.title)}${lineage}${flags}</td>
                 <td>${siSystemCellHtml(i)}</td>
                 <td>${siDevRosterCellHtml(i)}</td>
@@ -3187,11 +3320,118 @@
     //   ⚠️ codex C7 MED-2 诚实化：用浏览器本地时区 new Date()·非显式 Asia/Shanghai——内网用户均东八区·本地≡Asia/Shanghai·
     //     纯参考显示（§7.4「粗略」「告警不拦」）不为零收益做 TZ 无关计算。target 取 server 已校验的 dev_estimated_at 日期部分·不会是非法日期。
     //   不称"工期"·仅参考。dev_estimated_at 是 'YYYY-MM-DD HH:MM' 本地串·取日期部分算日历日差。
-    function siRemainingDaysHtml(est) {
+    // ⭐ [超期口径修正·2026-08-27 用户拍板] 原实现**无论单据处于什么状态**都拿"预计完成日"和**今天**
+    //   比，于是已完成的单每天涨一天：#89 在验收完成当天显示"已超预计 1 个自然日"（碰巧对），一周后
+    //   会显示"已超 8 天"，一个月后"已超 31 天"——既不反映事实（它实际只超了 1 天），也没有任何行动
+    //   意义（单子早完成了）。改为「完成后冻结」，分三种情形：
+    //   ① **锚点取 accepted_at，不取 released_at/closed_at**：`dev_estimated_at` 管的是**开发**工期，
+    //      与之同语义的实际时刻是"验收通过 = 开发交付被确认"。上线时刻(released_at)与归档时刻
+    //      (closed_at)都晚于开发完成，用它们会把**上线排期**和**观察期**算到开发头上——生产 14 张
+    //      待上线单全部已 accepted 却卡在上线排期（#46 那批计划日 08-25 已过期），正是这个冤枉的实例。
+    //   ② **判据用"accepted_at 有没有值"而非状态枚举**：生产实测已关闭 49/49、已上线 1/1、待上线
+    //      14/14 全部有 accepted_at，而未验收的状态（开发中/待验证/待指派…）恒为空 ⇒ 一条判据自然
+    //      分流，既不需要状态映射表，也不会因将来新增状态而漏归（状态枚举式判据最容易在加状态时漏改）。
+    //      ⚠️ [codex 480 MED-2·**登记接受**] 该判据的前提是"accepted_at 只由状态机写"。已核实：生产
+    //      代码写该列**仅两处**，都在状态机内——index.js:5792（accept 动作写入）与 :6071（reopen 清空，
+    //      与 released_at/closed_at/dev_estimated_at 一并清）；其余写点全在 scripts/ 测试脚本里造夹具，
+    //      不碰生产库。存量侧实证：生产所有**未完成状态**（待受理/待指派/开发中/处理中/待验证/已暂缓）
+    //      的 accepted_at **全为 0 行**。故当前无"未完成却带 accepted_at"的脏态。
+    //      按审查方要求**登记为风险接受而非声称不存在**：若将来新增绕过状态机直写该列的路径（迁移
+    //      脚本/管理端 SQL/批量修复），未完成的单会被误判为已完成并冻结在旧值上。**刻意不加状态
+    //      枚举兜底**——那正是 ② 要避免的脆弱性（加状态时漏改），宁可保持判据单一并在此登记前提。
+    //   ③ **放弃态不显示**：已作废/已拒绝是放弃 ≠ 完成，生产 17 张作废单里 16 张根本没有完成时刻。
+    //   ⚠️ **刻意不复用 SI_FROZEN_STATUSES**（:4160）——那个常量管的是"提交/编辑动作是否冻结"，与
+    //      "工期是否已定"只是当前成员碰巧重叠，语义不同；复用会让两处将来互相牵连（改一个动另一个）。
+    //   时区口径沿用既有诚实化说明：浏览器本地时区、日历日差、同日=0、纯前端不落库、告警不拦。
+    //   冻结分支两端都是 'YYYY-MM-DD' 日期串，比较不涉及时分秒，无跨时区漂移风险。
+    const SI_ABANDONED_STATUSES = ['已作废', '已拒绝'];
+    // 取日期部分构造本地零点 Date——两处（预计日/验收日）共用，不各写一份正则（同 codex 479 LOW-1
+    //   "能抽 helper 就别靠人力约束同步"的教训）。非法/空值统一返回 null，调用方按 null 分流。
+    //   ⚠️ [codex 480 MED-1 收口] 必须做 **round-trip 校验**：`new Date(2026, 12, 1)` 不会失败，而是
+    //   自动进位成 2027-01-01；`2026-02-31` 会变成 3 月 3 日。只靠正则"看起来像日期"就返回 Date，
+    //   遇到脏数据不会渲染 NaN（那还容易发现），而是**安安静静算出一个错误的天数**——比报错更坏。
+    //   构造后逐段比对年/月/日，任一不符即判非法返回 null（上层据此不渲染，而不是显示错值）。
+    //   这也是"注释声称什么就必须真做什么"的又一例：原注释写着"非法统一返回 null"而实现没做，
+    //   属虚构声称（[[feedback_comment_is_review_input]]），被审查方当场点破。
+    function siDateOnly(v) {
+        const m = String(v == null ? '' : v).match(/^(\d{4})-(\d{2})-(\d{2})/);
+        if (!m) return null;
+        const y = Number(m[1]), mo = Number(m[2]), d = Number(m[3]);
+        const dt = new Date(y, mo - 1, d);
+        if (dt.getFullYear() !== y || dt.getMonth() !== mo - 1 || dt.getDate() !== d) return null;
+        return dt;
+    }
+    // ⭐ [上线排期三态徽章·2026-08-27 用户拍板] 「待上线」单的排期/派人处境——列表扫视用。
+    //   **为什么需要**：待上线单现在只显示「待上线」，看不出它是"排了期等上线"还是"连执行人都没派"，
+    //   甚至"连批次都没挂"。生产实况正是三种处境混在一起：未挂批次 2 张（#81/#87）、已排期但执行人
+    //   0 人 6 张（R-20260824-1 五张 + R-20260825-2 一张）、已排期已派人 6 张（R-20260824-3）。
+    //   【三态判据】（用户拍板三态，不是两态——"未排期"是卡在流程外、最该催的一种，两态会把它和
+    //     正常态混为一谈）
+    //     · release_id 为空          → 未排期（还没进任何上线批次）
+    //     · 有批次 ∧ 在册执行人 = 0  → 待派执行人
+    //     · 有批次 ∧ 在册执行人 > 0  → 已排期（正常在途，无人需要动作）
+    //   【逾期叠加】用户拍板"叠加到徽章上变红"而非并排第四个徽章（一行里两个徽章会挤）。逾期 =
+    //     计划上线日 < 今天且仍未上线；生产已有 2 个逾期批次（R-20260824-3 计划 08-25、R-20260825-2
+    //     计划 08-26）。
+    //   ⚠️ **逾期判定放前端**，与后端的 isPostReleaseAcceptOverdue（48h 补验收超时）**有意不同源**：
+    //     那个判的是"距 released_at 过了多少小时"，含时分秒、跨时区会误判，故必须在后端与写入同进程
+    //     同时区算；本条判的是"业务日历日 planned_date（纯 YYYY-MM-DD 无时分秒）有没有过去"，日历日
+    //     比较不涉及时区换算，复用本页 siDateOnly 即可，不值得为它新增一个后端派生列。
+    //   ⚠️ 只对 status==='待上线' 显示（用户拍板）：更早的状态（开发中/待验证）用户关心的是开发进度，
+    //     不是上线排期，那时显示是噪音。
+    //   样式走内联 style 而非新增 CSS class——本页既有大量同款用法（如 :3357 的 color:#dc2626），
+    //     且共享 CSS 一改就要 bump 全站 ?v= 缓存串，为一个徽章不值当。
+    function siReleaseScheduleBadgeHtml(i) {
+        if (!i || i.status !== '待上线') return '';
+        const wrap = (bg, fg, text, title) =>
+            ` <span class="u-status-badge" style="background:${bg};color:${fg};margin-left:4px" title="${esc(title)}">${esc(text)}</span>`;
+        if (i.release_id == null) {
+            return wrap('#fee2e2', '#b91c1c', '未排期', '该单尚未加入任何上线批次——需先在「上线单管理」里建批次或加单');
+        }
+        // ⚠️ [codex 481 HIGH-1] 孤儿批次：release_id 非空但批次行已不存在（本项目 PRAGMA foreign_keys
+        //   恒 OFF，生产实查 =0 但机制上可发生）。此时执行人数子查询得 0，若跟着走下面的"未派执行人"
+        //   分支就会**说一句错话**——它不是"没派人"，是这条关联本身失效了；而且待办谓词因 created_by
+        //   为 NULL 无人认领，等于"报了警却没有责任人"。判据取 release_created_by 是否为 NULL
+        //   （sys_releases.created_by 是 NOT NULL ⇒ 批次存在必非空），单列一态如实说明，不混进三态。
+        if (i.release_created_by == null) {
+            return wrap('#fee2e2', '#b91c1c', '批次已失效', `该单挂着上线批次 #${Number(i.release_id) || '?'}，但该批次记录已不存在（数据异常）——请联系管理员核实后重新排期`);
+        }
+        const execs = Number(i.release_exec_count) || 0;
+        // 逾期天数：计划日已过去多少个自然日（同日不算逾期）。planned_date 为空=未设定计划日，不判逾期。
+        const planned = siDateOnly(i.release_planned_date);
+        let overdueDays = 0;
+        if (planned) {
+            const now = new Date();
+            const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+            const d = Math.round((today - planned) / 86400000);
+            if (d > 0) overdueDays = d;
+        }
+        const dateHint = i.release_planned_date ? `计划上线日 ${i.release_planned_date}` : '未设定计划上线日';
+        if (execs === 0) {
+            return overdueDays > 0
+                ? wrap('#fee2e2', '#b91c1c', `⚠ 逾期${overdueDays}天·待派执行人`, `${dateHint}，已逾期 ${overdueDays} 天且尚未安排执行人`)
+                : wrap('#fef3c7', '#b45309', '待派执行人', `${dateHint}，尚未安排执行人`);
+        }
+        return overdueDays > 0
+            ? wrap('#fee2e2', '#b91c1c', `⚠ 逾期${overdueDays}天`, `${dateHint}，已逾期 ${overdueDays} 天（执行人 ${execs} 人已安排）`)
+            : wrap('#d1fae5', '#065f46', '已排期', `${dateHint}，执行人 ${execs} 人已安排`);
+    }
+    function siRemainingDaysHtml(iss) {
         try {
-            const m = String(est).match(/^(\d{4})-(\d{2})-(\d{2})/);
-            if (!m) return '';
-            const target = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+            if (!iss) return '';
+            const target = siDateOnly(iss.dev_estimated_at);
+            if (!target) return '';
+            // ③ 放弃态：不显示（放弃不是完成，且多数没有完成时刻可锚）
+            if (SI_ABANDONED_STATUSES.includes(iss.status)) return '';
+            // ①② 已验收 ⇒ 工期已定，用验收日冻结，之后无论过多久都不再变
+            const done = siDateOnly(iss.accepted_at);
+            if (done) {
+                const d = Math.round((target - done) / 86400000);
+                if (d > 0) return ` <span class="si-muted">（提前 ${d} 天完成）</span>`;
+                if (d === 0) return ` <span class="si-muted">（按期完成）</span>`;
+                return ` <span style="color:#dc2626">（实际超期 ${-d} 天完成）</span>`;
+            }
+            // 未验收 ⇒ 开发仍在途，保持实时催办（原行为逐字不变）
             const now = new Date();
             const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
             const diff = Math.round((target - today) / 86400000);
@@ -3437,7 +3677,7 @@
             <div class="u-kv-item"><label>优先级</label><div class="v"><span class="u-pri ${siPriClass(iss.priority)}" title="${SI_PRIORITY_HELP_TEXT}">${esc(iss.priority)}</span></div></div>
             ${(iss.type === 'feature' || iss.type === 'improvement') ? `<div class="u-kv-item"><label>风险等级</label><div class="v"><span title="${SI_RISK_LEVEL_HELP_TEXT}" style="cursor:help">${iss.risk_level ? esc(iss.risk_level) : '<span class="si-muted">未定级</span>'}</span></div></div>` : ''}
             ${effortKv}
-            <div class="u-kv-item"><label>预计完成时间</label><div class="v">${iss.dev_estimated_at ? (esc(siFmtDT(iss.dev_estimated_at)) + siRemainingDaysHtml(iss.dev_estimated_at)) : '<span class="si-muted">未回填</span>'}${siEtaAutoGenHintHtml(iss)}</div></div>
+            <div class="u-kv-item"><label>预计完成时间</label><div class="v">${iss.dev_estimated_at ? (esc(siFmtDT(iss.dev_estimated_at)) + siRemainingDaysHtml(iss)) : '<span class="si-muted">未回填</span>'}${siEtaAutoGenHintHtml(iss)}</div></div>
             ${siEtaOverrunReasonReadonlyHtml(iss)}
             ${siCompletionOverrunReasonReadonlyHtml(iss)}
             <div class="u-kv-item"><label>计划开工日</label><div class="v">${iss.scheduled_start ? esc(iss.scheduled_start) : '<span class="si-muted">—</span>'}</div></div>
@@ -7544,11 +7784,18 @@
             fText('module_name', '模块（选填）', iss.module_name || ''),
             // ⑤ Q2：derive_reason 取代旧 derive_note（既落新单 derive_reason 列、又作 derive 时间线说明）
             fTextarea('derive_reason', reasonRequired ? '派生原因' : '派生原因（选填）', '', reasonRequired,
-                reasonRequired ? '必填：为什么上线后又派生（复盘素材，不作考核）' : '选填：为什么在原单基础上迭代')
+                reasonRequired ? '必填：为什么上线后又派生（复盘素材，不作考核）' : '选填：为什么在原单基础上迭代'),
+            // ⭐ [免 OA 派生通道·2026-08-27 用户拍板] 默认值**继承原单 oa_exempt**（可改）——两次生产
+            //   卡死（#26_1/#49、#85/#56）的根因都是"原单免 OA 而派生单恒落 0"，在「待指派」被
+            //   ASSIGN_REQUIRES_OA_NUMBER 拦死且无任何免 OA 出口。继承让常态零输入即正确（例外驱动
+            //   输入）；后端另有服务端兜底继承（请求体不带该键时落原单值），本勾选框是显式改的入口。
+            //   文案与建单弹窗 :7928 同款（跨表单同语义同措辞）。
+            fCheckbox('oa_exempt', '本单无需 OA 号（内部自发/未走 OA 立项流程）', Number(iss.oa_exempt) === 1)
         ], async v => {
             if (!v.title.trim()) { showToast('标题必填', 'error'); return false; }
             if (reasonRequired && !v.derive_reason.trim()) { showToast('派生自 bug 的单需填写派生原因', 'error'); return false; }
             const body = { type: v.type, title: v.title.trim(), system_name: v.system_name, source: v.source };
+            body.oa_exempt = v.oa_exempt ? 1 : 0;   // 显式提交勾选态（同建单 :7961 写法；不传则服务端继承原单，传了以勾选为准）
             if (v.module_name.trim()) body.module_name = v.module_name.trim();
             if (v.derive_reason.trim()) body.derive_reason = v.derive_reason.trim();
             const r = await siApi('/sys-issues/' + iss.id + '/derive', { method: 'POST', body });

@@ -8274,13 +8274,16 @@ module.exports = (deps) => {
   //   （457-H2 冻结）。本次抽取是纯结构重排：SQL 列表文本逐字符原样保留，零契约变化（跨阶段契约
   //   §3.1 B1→B2 基线对拍钉住"抽取前后 key 集合/行数/行序完全一致"）。
   function buildSysIssuesListSelect({ uid, nowStr }) {
-    // [「待我处理」全角色卡·方案 §3.1 selectParams 冻结口径] 恰 4 个（此前恰 2 个）——按投影区文本
-    //   出现顺序：① fast_release_active_auth CASE 绑 nowStr ② fast_release_my_pending 绑 uid（以上
+    // [「待我处理」全角色卡·方案 §3.1 selectParams 冻结口径] **恰 5 个**（历经 2 → 4 → 5）——按投影区
+    //   文本出现顺序：① fast_release_active_auth CASE 绑 nowStr ② fast_release_my_pending 绑 uid（以上
     //   两个即 S1 起既有的"恰 2 个"）③ my_dev_pending 绑 uid（紧随 fast_release_my_pending 之后新插）
-    //   ④ is_my_intake_liaison 绑 uid（紧随 my_dev_pending 之后）。verify-sys-list-badge-fields
-    //   「SELECT 恰 N 占位符」守卫同批改判恰 4（唯一权威口径=方案 §3.1；本注释、下方 fast_release_my_pending
-    //   批注与 badge-fields 守卫期望值均为其副本——改数字须按方案口径同步全部副本，勿只改一处）。
-    const selectParams = [nowStr, uid, uid, uid];
+    //   ④ is_my_intake_liaison 绑 uid（紧随 my_dev_pending 之后）⑤ **my_release_exec_pending 绑 uid**
+    //   （分支⑨·2026-08-27 新增，位于 release 派生列组末尾；同组另三列 release_exec_count/
+    //   release_planned_date/release_created_by/release_rep_issue_id 均为纯子
+    //   查询**不带占位符**，只有本列需要绑 uid）。verify-sys-list-badge-fields「SELECT 恰 N 占位符」
+    //   守卫同批改判恰 5（唯一权威口径=方案 §3.1；本注释、下方 fast_release_my_pending 批注与
+    //   badge-fields 守卫期望值均为其副本——改数字须按方案口径同步全部副本，勿只改一处）。
+    const selectParams = [nowStr, uid, uid, uid, uid];
         // [C8 风险/优先级双显·方案 v1.7 §9.2] risk_level 加入列表 SELECT——**只读扩字段**，纯展示用途
         //   （列表页优先级列改上下双行：上=优先级徽章、下=风险等级小字）。不加筛选、不加排序、不进任何
         //   写路径；C5 受理门 intake_accept 仍是该列唯一写点，本次零改动。
@@ -8411,6 +8414,41 @@ module.exports = (deps) => {
                 --   状态门（待对接测试/待受理）由前端叠加，同 has_current_tech_lead_comment/last_held_at
                 --   既有范式（SQL 只出数，状态语义交给前端）。**身份原始信号，非待办判据**。
                 (CASE WHEN intake_liaison_id = ? THEN 1 ELSE 0 END) AS is_my_intake_liaison,
+                -- [上线排期三态徽章·2026-08-27 用户拍板] 四个 release 侧派生列——供列表「待上线」徽章
+                --   （未排期／已排期未派执行人／已排期已派执行人 + 逾期叠加）与「待我处理」新分支消费。
+                --   ⚠️ **四列均不带占位符**（纯子查询，无 ? 绑定）⇒ 上方 selectParams「恰 4 个」的冻结
+                --   契约与 verify-sys-list-badge-fields 的占位符守卫**均不受影响**，勿误改那处数字。
+                --   ⚠️ 本段注释禁用反引号（整条 SQL 在 JS 模板字符串内，反引号会提前终止字符串）。
+                --   release_id 为 NULL（未挂批次）时四列的天然取值：COUNT 得 0、两个标量子查询得 NULL、
+                --   MIN 得 NULL——NULL 不等于任何值，子查询自然空集，无需额外 CASE 兜底。
+                (SELECT COUNT(*) FROM sys_release_executors e
+                   WHERE e.release_id = sys_issues.release_id AND e.removed_at IS NULL)
+                  AS release_exec_count,          -- 在册执行人数（软删不计，同 idx_sys_release_exec_active 口径）
+                (SELECT r.planned_date FROM sys_releases r WHERE r.id = sys_issues.release_id)
+                  AS release_planned_date,        -- 计划上线日（纯日期串 YYYY-MM-DD·逾期判定在前端算，见
+                                                  --   siReleaseScheduleBadgeHtml 处注释说明为何与
+                                                  --   isPostReleaseAcceptOverdue 的后端 48h 判定不同源）
+                (SELECT r.created_by FROM sys_releases r WHERE r.id = sys_issues.release_id)
+                  AS release_created_by,          -- 批次创建人（待办归属·前端比 uid，同 ⑤⑦ 分支范式）
+                -- 批次内「待上线」成员的最小 id ＝ 该批次在待办卡里的**代表单**。用途：批次未派执行人
+                --   是**批次级**的一件事，若把成员单逐张计入「待我处理」，一个动作（派一次人）会消掉
+                --   N 个计数、淹没其他真待办（用户 2026-08-27 拍板「按批次去重计 1」）。
+                --   限定 status='待上线' 而非全成员取 MIN——否则代表可能落在已作废成员上，而作废单既不
+                --   显示徽章也不进待办，代表就成了空指针（该批次在卡里永远不出现）。
+                (SELECT MIN(i2.id) FROM sys_issues i2
+                   WHERE i2.release_id = sys_issues.release_id AND i2.status = '待上线')
+                  AS release_rep_issue_id,
+                -- [分支⑨·上线执行人待执行·2026-08-27 用户拍板] 我是不是本批次的在册执行人、且尚未执行。
+                --   与 ⑧ 构成待上线阶段闭环：⑧ 催"去派人"（批次创建人），⑨ 催"去执行上线"（执行人）。
+                --   生产实例：示例开发A在 R-20260824-3 上 exec_status='pending'、批次计划日 08-25 已逾期，
+                --   钉钉 notify_status 早已 sent——一次性通知发过就过去了，持续在办清单里却没有他这一条。
+                --   ⚠️ removed_at IS NULL 与上方 release_exec_count 同口径（软删的执行人不算数）。
+                --   ⚠️ 本列**带 uid 占位符**——是四列 release 派生列里唯一带绑定参数的，故 selectParams
+                --   由「恰 4 个」变为「恰 5 个」，见本函数最上方声明处的同步说明。
+                (SELECT EXISTS(SELECT 1 FROM sys_release_executors e2
+                   WHERE e2.release_id = sys_issues.release_id AND e2.removed_at IS NULL
+                     AND e2.user_id = ? AND e2.exec_status = 'pending'))
+                  AS my_release_exec_pending,
                 reopen_count, return_count, scope_changed, created_at, updated_at,
                 tech_lead_id, tech_lead_notify_status,   -- S5 手动化：列表通知徽章消费（193 复审：oa_number 已撤——
                 --   "顺带"加列=未经 187 读权契约证明的扩面；徽章不消费它，列表不需要它）
@@ -11151,7 +11189,7 @@ module.exports = (deps) => {
           `SELECT id, type, status, online_source, post_release_acceptance, post_accepted_at, post_derive_issue_id,
                   released_at, release_id, fast_release_consumed_at, origin_issue_id, derive_root_id, derive_seq,
                   title, system_name, module_name, source, priority,
-                  requester_dept, requester_name, requester_phone, intake_liaison_id
+                  requester_dept, requester_name, requester_phone, intake_liaison_id, oa_exempt
              FROM sys_issues WHERE id = ?`, [id]);
         if (!row) { await sysRollback(); return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' }); }
         if (row.online_source !== ONLINE_SOURCE_AUTHORIZED_FASTLANE || row.post_release_acceptance !== 'pending') {
@@ -11200,6 +11238,9 @@ module.exports = (deps) => {
             deadline: null,
             deriveReason: note || '先行上线补验收不通过，自动派生新单核实',
             actor, intakeLiaisonId: row.intake_liaison_id,
+            // [免 OA 派生通道 2026-08-27] 固定继承原单——本分支是系统自动派生（补验收不通过），无表单
+            //   可勾选；核实性质的新单与原单同一个 OA 立项语境，继承与公开端点的默认值语义一致。
+            oaExempt: Number(row.oa_exempt) === 1 ? 1 : 0,
           });
           newDeriveId = newDeriveResult.id;   // 外层变量仍是裸数值 id——供下方外键式 UPDATE/ref_id 使用（列本身是整数外键，不应存文本展示号）
           // [S12-b·§15.3 行 9] timeline 文案改用新单自己的展示号（insertDerivedSysIssue 内部已算出
@@ -13499,7 +13540,7 @@ module.exports = (deps) => {
   //   入参 origin 需含 origin_issue_id（M-1 防环用）；intakeLiaisonId 由调用方按 C10 决策1 传 origin 的继承值。
   async function insertDerivedSysIssue({ originId, origin, type, initialStatus, priority, title, description,
       systemName, moduleName, source, requesterDept, requesterName, requesterPhone, deadline, deriveReason,
-      actor, intakeLiaisonId }) {
+      actor, intakeLiaisonId, oaExempt }) {
     // [追加批·codex 363 号 M3] 无事务上下文误调防线——本函数假定调用方已持有 sysBeginImmediate 开启的
     //   事务（函数头注释"须在同一事务内调用"是契约声明，本行是把它变成运行时会响亮失败的真闸）：若被
     //   误在事务外直调，下方 M-1 防环的多条 SELECT 与 INSERT 会在 sqlite3 默认自动提交模式下各自独立
@@ -13550,10 +13591,20 @@ module.exports = (deps) => {
       throw new Error(`[insertDerivedSysIssue] 派生编号根单 #${deriveRoot} derive_seq_alloc 取号异常：${allocRow && allocRow.derive_seq_alloc}`);
     }
     // 建新单（origin_issue_id = 原单 id；[⑤] 落 derive_reason 列——feature 派生留空则存 NULL）
-    // ⭐ 建单优化批 C3b（方案 20260801_v1.3 §6c 设计点5）：oa_exempt **刻意不入本 INSERT 列表**——
-    //   靠 CREATE TABLE / ALTER 的 `DEFAULT 0` 落 0（fail-closed：衍生单源自业务需求几乎必走 OA，
-    //   免 OA 需求真出现再议，入方案 §9 观察项；显式恒 0 也可以，但少一处需要维护的硬编码值，
-    //   DEFAULT 本身就是最不容易漂移的"恒 0"实现）。
+    // ⭐ [免 OA 派生通道·2026-08-27 用户拍板] oa_exempt 由「刻意不入 INSERT（恒 DEFAULT 0）」改为
+    //   **显式落列**。C3b（方案 20260801_v1.3 §6c 设计点5）当时登记的观察项「免 OA 需求真出现再议」
+    //   已被**两次生产实锤触发**：① #26_1（id=49）——原单 #26 免 OA，派生单恒落 0 后在「待指派」被
+    //   ASSIGN_REQUIRES_OA_NUMBER 拦死，2026-08-18 数据修正放行（timeline id=463）；② #85——原单 #56
+    //   同样免 OA，2026-08-27 同款卡死。同一形态二次发生 ⇒ 按登记重开决策，走根治。
+    //   语义：oaExempt 由调用方传入已收窄的 0/1（公开 derive 端点默认**继承原单 oa_exempt**、勾选框
+    //   可改；补验收 fail 分支固定继承原单——那条链路无表单，见调用点注释）。
+    //   仍是 fail-closed 方向：不传（undefined）时归 0，与旧行为逐字一致。
+    //   ⚠️ [codex 482 MED-2] 函数内**再收窄一次**为严格 0/1：公开端点已做三段收窄，但未来新增内部
+    //   调用点可绕过端点校验直传脏值；而生产库该列**没有 CHECK 兜底**——CREATE TABLE 版（:713）带
+    //   CHECK(oa_exempt IN (0,1))，存量表走的 ALTER 路径（:1939）**带不了**（SQLite ALTER ADD COLUMN
+    //   不支持 CHECK），生产正是存量表。非 0/1 一律归 0（fail-closed 方向），不抛错——本函数在事务
+    //   深处，抛错代价是整个派生回滚，为一个防御性归一不值得。
+    const oaExemptNorm = (oaExempt === 1 || oaExempt === '1' || oaExempt === true) ? 1 : 0;
     // [§15.2] derive_root_id/derive_seq 随 INSERT 同落——UNIQUE (derive_root_id,derive_seq) WHERE 两列
     //   均非空的部分索引冲突（理论不可达，单写者串行化下取号竞争结构性不存在）由路由层 catch 精确捕获
     //   映射 409，见调用点。
@@ -13564,11 +13615,11 @@ module.exports = (deps) => {
            (type, status, priority, title, description, system_name, module_name, source,
             requester_dept, requester_name, requester_phone, deadline, origin_issue_id, derive_reason,
             created_by, created_by_name, record_source, intake_required, intake_liaison_id,
-            derive_root_id, derive_seq)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'native', 1, ?, ?, ?)`,
+            derive_root_id, derive_seq, oa_exempt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'native', 1, ?, ?, ?, ?)`,
         [type, initialStatus, priority, title, description, systemName, moduleName, source,
          requesterDept, requesterName, requesterPhone, deadline, originId, (deriveReason || null),
-         actor.id, actor.name, intakeLiaisonId, deriveRoot, deriveSeq]
+         actor.id, actor.name, intakeLiaisonId, deriveRoot, deriveSeq, oaExemptNorm]
       );
     } catch (insErr) {
       // [§15.2 纵深兜底] 部分唯一索引 idx_sys_issues_derive_root_seq 冲突——理论不可达（BEGIN IMMEDIATE 全库写
@@ -13645,7 +13696,9 @@ module.exports = (deps) => {
         // [§15.2] 补 derive_root_id——insertDerivedSysIssue 取号需要（root = origin.derive_root_id ?? originId）。
         // [S12-b] 补 derive_seq——origin 自身若是派生单，timeline「派生自 #根_序」文案需要它成组拼出
         //   origin 自己的展示号（sysIssueDisplayNo 入参契约：root/seq 须两列都在才算"是派生单"）。
-        const origin = await dbGetAsync('SELECT id, type, status, origin_issue_id, intake_liaison_id, post_release_acceptance, derive_root_id, derive_seq FROM sys_issues WHERE id = ?', [originId]);
+        // [免 OA 派生通道 2026-08-27] 补 oa_exempt 投影——勾选框默认值继承原单（前端展示用详情数据，
+        //   这里是**服务端兜底继承**的数据源：请求体不带 oa_exempt 时落原单值，见下方收窄段）。
+        const origin = await dbGetAsync('SELECT id, type, status, origin_issue_id, intake_liaison_id, post_release_acceptance, derive_root_id, derive_seq, oa_exempt FROM sys_issues WHERE id = ?', [originId]);
         if (!origin) { await sysRollback(); return res.status(404).json({ error: '原单不存在', code: 'ORIGIN_NOT_FOUND' }); }
         // [组 B·SB3·不变量⑥·方案 v1.3 §3.3] pending 补验收态禁止普通 derive——该单已先行上线但补验收未完成，
         //   走本公开端点会绕过 failed_derived 语义（post_derive_issue_id 不会被正确挂到本次派生单上，
@@ -13677,6 +13730,25 @@ module.exports = (deps) => {
         resolvedType = type; resolvedStatus = initialStatus;   // 供事务外 201 响应体
         // [组 B·SB3] M-1 防环 + INSERT + 两条 timeline 行已抽成共享核心 insertDerivedSysIssue（见函数定义处
         //   注释）——公开端点与补验收失败内部派生共用同一份逻辑，本处逐字调用，行为与改前完全一致。
+        // [免 OA 派生通道 2026-08-27] oa_exempt 输入收窄——与建单端点 §6c 设计点3 **同款三段**
+        //   （TRUTHY/FALSY/其余 400），仅默认值不同：建单默认 0（fail-closed），**派生默认继承原单**
+        //   （两次生产卡死 #26_1/#85 的根因就是"原单免 OA 而派生恒 0"；继承让常态零输入即正确，
+        //   勾选框仍可显式翻转——例外驱动输入）。undefined/null/'' 视为"未表态"走继承，显式 0/'0'/false
+        //   视为"要 OA"落 0——两类都在 FALSY 集里但语义不同，故先判"未表态"再进集合判断。
+        let deriveOaExempt;
+        {
+          const rawOa = b.oa_exempt;
+          if (rawOa === undefined || rawOa === null || rawOa === '') {
+            deriveOaExempt = Number(origin.oa_exempt) === 1 ? 1 : 0;   // 未表态 ⇒ 继承原单
+          } else if ([1, '1', true].includes(rawOa)) {
+            deriveOaExempt = 1;
+          } else if ([0, '0', false].includes(rawOa)) {
+            deriveOaExempt = 0;
+          } else {
+            await sysRollback();
+            return res.status(400).json({ error: 'oa_exempt 仅接受 0/1（布尔）', code: 'INVALID_OA_EXEMPT' });
+          }
+        }
         const derivedResult = await insertDerivedSysIssue({
           originId, origin, type, initialStatus, priority, title,
           description: (typeof b.description === 'string' ? b.description.trim() : null),
@@ -13685,6 +13757,7 @@ module.exports = (deps) => {
           requesterName: (typeof b.requester_name === 'string' ? b.requester_name.trim() : null),
           requesterPhone: (typeof b.requester_phone === 'string' ? b.requester_phone.trim() : null),
           deadline: dl.value, deriveReason, actor, intakeLiaisonId: autoIntakeLiaisonId,
+          oaExempt: deriveOaExempt,
         });
         newId = derivedResult.id;   // [S12-b] insertDerivedSysIssue 返回值已改为携带取号结果的对象（见函数定义处注释）——
         //   本端点的 JSON 响应体主键仍是矩阵行 11「深链/API/路由」技术锚点，`id` 维持真实 id 不变行为。

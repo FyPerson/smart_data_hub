@@ -182,8 +182,11 @@ async function main() {
     const { sql, bindParams } = I.buildSysIssuesListQuery({
       nowStr: '__NOW__', uid: '__UID__', whereSql, whereParams: ['__W1__', '__W2__'],
     });
-    assert.deepStrictEqual(bindParams, ['__NOW__', '__UID__', '__UID__', '__UID__', '__W1__', '__W2__'],
-      `[5-结构] bindParams 应恰为 [__NOW__,__UID__,__UID__,__UID__,__W1__,__W2__]（完整顺序逐项），实得 ${JSON.stringify(bindParams)}`);
+    // [分支⑨ 2026-08-27] 新增 my_release_exec_pending 绑 uid，位于 release 派生列组末尾 ⇒ SELECT 段
+    //   由 4 参变 5 参（nowStr + uid×4），WHERE 段两参不变。同组另三列（release_exec_count/
+    //   planned_date/created_by/rep_issue_id）是纯子查询不带占位符，故只 +1。
+    assert.deepStrictEqual(bindParams, ['__NOW__', '__UID__', '__UID__', '__UID__', '__UID__', '__W1__', '__W2__'],
+      `[5-结构] bindParams 应恰为 [__NOW__,__UID__,__UID__,__UID__,__UID__,__W1__,__W2__]（完整顺序逐项），实得 ${JSON.stringify(bindParams)}`);
     // [codex 466 MED-2] ? 计数须语法感知：剥掉 SQL 行注释（-- 到行尾）与单引号字符串后再数——
     //   否则将来注释/字符串里出现问号会误报，且"真实占位符增减"与"注释问号增减"可互相抵消成假绿。
     // [codex 467 MED-3] 占位符计数用 SQLite 词法状态机（非正则模拟）：正则版"先剥注释"会把字符串

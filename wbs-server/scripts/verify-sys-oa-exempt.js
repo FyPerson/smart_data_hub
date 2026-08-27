@@ -12,7 +12,7 @@
 //   [⑥] exempt=0（默认）无号变更单 assign 仍 409 ASSIGN_REQUIRES_OA_NUMBER
 //   [⑦] bug 类型无号恒放行（不受 oa_exempt 取值影响——bug 结构性不进 OA 守卫）
 //   [⑧] oa_exempt 非法值 400 INVALID_OA_EXEMPT
-//   [⑨] 衍生入口 oa_exempt 恒 0（不继承 origin 的 exempt=1）
+//   [⑨] 衍生入口 oa_exempt 默认继承原单（2026-08-27 契约反转·原「恒 0」两次生产卡死后废除）
 //   [⑩] exempt 单仍可正常 set-oa-number 填号（200，填号不清 exempt 标志，号与豁免正交）
 //   [⑪] timeline 免 OA 标注：exempt 单 assign 成功 summary 含"（免 OA 单）"；非 exempt 单不含
 //
@@ -214,7 +214,7 @@ async function main() {
     ok('[⑧] oa_exempt 非法值（字符串"yes"/数字2/字符串"true"）→ 400 INVALID_OA_EXEMPT，不静默降级');
   }
 
-  // ═══ [⑨] 衍生入口 oa_exempt 恒 0（不继承 origin 的 exempt=1）═══
+  // ═══ [⑨] 衍生入口 oa_exempt 默认继承原单（2026-08-27 契约反转·原「恒 0」已废）═══
   {
     const originR = await call('POST', '/api/sys-issues', adminTok, createBody({ type: 'feature', oa_exempt: 1, title: '派生源单-exempt' }));
     assert.strictEqual(originR.status, 201, `[⑨] 夹具建源单 201, got ${originR.status}`);
@@ -223,8 +223,15 @@ async function main() {
     const deriveR = await call('POST', `/api/sys-issues/${originId}/derive`, adminTok, { type: 'feature', title: '派生新单-不继承exempt', system_name: 'BMS', source: '内部' });
     assert.strictEqual(deriveR.status, 201, `[⑨] derive 期望 201, got ${deriveR.status} ${JSON.stringify(deriveR.body)}`);
     const derivedRow = await issueRow(deriveR.body.id);
-    assert.strictEqual(derivedRow.oa_exempt, 0, '[⑨] 派生单 oa_exempt 恒 0，不继承 origin 的 exempt=1（fail-closed：衍生单默认须走 OA）');
-    ok('[⑨] 衍生入口 oa_exempt 恒 0（不继承 origin 的 exempt=1，靠列 DEFAULT 落 0）');
+    // ⭐ [契约反转·2026-08-27 用户拍板] 本断言原钉「派生恒 0 不继承」（C3b §6c 设计点5 的 fail-closed
+    //   契约）——该契约的观察项「免 OA 需求真出现再议」被**两次生产实锤触发**（#26_1/id=49 与 #85，
+    //   原单免 OA 而派生恒 0，在待指派被 ASSIGN_REQUIRES_OA_NUMBER 拦死且无出口，均靠数据修正放行），
+    //   按登记重开决策后反转为「**默认继承原单**（请求可显式覆盖）」。新契约的完整正反用例矩阵在
+    //   verify-sys-bug-derive.js [D11] 四组（继承双向/显式翻转双向/守卫放行端到端/非法值 400）；
+    //   本处只改断这一条主干：不带 oa_exempt 派生免 OA 原单 → 新单继承 1（旧断言在新实现下必红，
+    //   属**被推翻的旧契约**而非回归——新增条款必删被推翻的旧表述）。
+    assert.strictEqual(derivedRow.oa_exempt, 1, '[⑨] 派生单未带 oa_exempt 时应**继承**原单的 exempt=1（2026-08-27 契约反转·#26_1/#85 两次生产卡死后根治；旧「恒 0」契约已废）');
+    ok('[⑨] 衍生入口 oa_exempt 默认继承原单（2026-08-27 契约反转·完整矩阵见 verify-sys-bug-derive [D11]）');
   }
 
   // ═══ [⑩] exempt 单仍可正常 set-oa-number 填号（号与豁免正交）═══
@@ -294,7 +301,7 @@ async function main() {
 
   server.close();
   console.log(`\n✅ verify-sys-oa-exempt 全绿：${passed} 组断言通过`);
-  console.log('  覆盖：三类建单缺省固化 + 任一有值整组按提交 + 提供值优先 + 无电话不造假值 + exempt=1放行/exempt=0仍409 + bug恒过 + 非法值400(含字符串true) + 衍生入口恒0 + exempt单set-oa-number仍200 + timeline免OA标注(出现/不出现) + requester字段类型白名单400 + oa_exempt全库脏值扫描=0');
+  console.log('  覆盖：三类建单缺省固化 + 任一有值整组按提交 + 提供值优先 + 无电话不造假值 + exempt=1放行/exempt=0仍409 + bug恒过 + 非法值400(含字符串true) + 衍生入口默认继承原单(2026-08-27契约反转) + exempt单set-oa-number仍200 + timeline免OA标注(出现/不出现) + requester字段类型白名单400 + oa_exempt全库脏值扫描=0');
 }
 
 main().catch(e => { console.error('❌ verify-sys-oa-exempt 失败:', e && e.stack || e); process.exit(1); });

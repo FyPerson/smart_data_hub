@@ -387,6 +387,108 @@ async function main() {
     ok('[D10] fix_gap_note 闸门 fail-closed：origin_issue_id 指向不存在行 → 409 SYS_ORIGIN_MISSING（不静默放行绕过留痕）');
   }
 
+  // ═══ [D11] 免 OA 派生通道（2026-08-27 用户拍板·生产 #26_1/#85 两次同款卡死后根治）═══
+  //   C3b 原设计「oa_exempt 刻意不入派生 INSERT（恒 DEFAULT 0）」的观察项已被两次触发：原单免 OA 而
+  //   派生单恒落 0，在「待指派」被 ASSIGN_REQUIRES_OA_NUMBER 拦死且无任何免 OA 出口。
+  //   三组用例（backlog 修法原文）：继承默认 / 显式翻转 / 守卫放行；另补非法值 400 与"要 OA 原单不
+  //   被误豁免"反例——继承是双向的，只测 1→1 不测 0→0 会漏"恒 1"这种错误实现。
+  {
+    // ── 组1a 继承默认（正向）：原单免 OA，派生请求不带 oa_exempt → 新单继承 1 ──
+    const exemptOrigin = await seedBugToOnline();
+    await run('UPDATE sys_issues SET oa_exempt = 1 WHERE id = ?', [exemptOrigin]);
+    let r = await call('POST', `/api/sys-issues/${exemptOrigin}/derive`, adminTok, { type: 'bug', title: 'D11 继承默认', system_name: 'BMS', source: '内部', derive_reason: 'D11 组1a' });
+    assert.strictEqual(r.status, 201, `D11-1a 派生 201, got ${r.status} ${JSON.stringify(r.body)}`);
+    const inh = await get('SELECT oa_exempt, status FROM sys_issues WHERE id=?', [r.body.id]);
+    assert.strictEqual(Number(inh.oa_exempt), 1, `D11-1a 未带 oa_exempt 时应继承原单的 1，实得 ${inh.oa_exempt}——恒 DEFAULT 0 即生产 #26_1/#85 的卡死根因`);
+    // ── 组1b 继承默认（反向）：原单要 OA（oa_exempt=0），不带键 → 新单 0（防"恒 1"错误实现）──
+    const normalOrigin = await seedBugToOnline();
+    r = await call('POST', `/api/sys-issues/${normalOrigin}/derive`, adminTok, { type: 'bug', title: 'D11 继承反向', system_name: 'BMS', source: '内部', derive_reason: 'D11 组1b' });
+    assert.strictEqual(r.status, 201);
+    assert.strictEqual(Number((await get('SELECT oa_exempt FROM sys_issues WHERE id=?', [r.body.id])).oa_exempt), 0, 'D11-1b 原单 oa_exempt=0 不带键应继承 0——只测 1→1 抓不住"恒 1"实现');
+    ok('[D11-1] 继承默认双向：原单 1→新单 1（未带键·#26_1/#85 根因即此缺失）；原单 0→新单 0（防恒 1）');
+
+    // ── 组2 显式翻转（两个方向）──
+    const flipOrigin = await seedBugToOnline();
+    await run('UPDATE sys_issues SET oa_exempt = 1 WHERE id = ?', [flipOrigin]);
+    r = await call('POST', `/api/sys-issues/${flipOrigin}/derive`, adminTok, { type: 'bug', title: 'D11 翻转1→0', system_name: 'BMS', source: '内部', derive_reason: 'D11 组2', oa_exempt: 0 });
+    assert.strictEqual(r.status, 201);
+    assert.strictEqual(Number((await get('SELECT oa_exempt FROM sys_issues WHERE id=?', [r.body.id])).oa_exempt), 0, 'D11-2 显式 0 应覆盖继承（原单 1 → 新单 0）——显式提交以勾选为准');
+    r = await call('POST', `/api/sys-issues/${normalOrigin}/derive`, adminTok, { type: 'bug', title: 'D11 翻转0→1', system_name: 'BMS', source: '内部', derive_reason: 'D11 组2b', oa_exempt: 1 });
+    assert.strictEqual(r.status, 201);
+    const flippedUpId = r.body.id;
+    assert.strictEqual(Number((await get('SELECT oa_exempt FROM sys_issues WHERE id=?', [flippedUpId])).oa_exempt), 1, 'D11-2b 显式 1 应覆盖继承（原单 0 → 新单 1）');
+    ok('[D11-2] 显式翻转双向：1→0 与 0→1 均以提交值为准（勾选框可改，非只读继承）');
+
+    // ── 组3 守卫放行端到端：免 OA 派生单走 受理→指派 全链不被 ASSIGN_REQUIRES_OA_NUMBER 拦 ──
+    //   这正是 #85 卡死的那扇门——继承落列只是手段，"能派单"才是要治的病。
+    //   ⚠️ [codex 482 HIGH 收口] 派生单必须用**变更流类型（feature）**：本组首版用 bug 派生单证放行，
+    //   而 bug 结构性不进 OA 守卫（oa-exempt 套件 [⑦]「bug 类型无号恒放行、不受 oa_exempt 影响」）
+    //   ⇒ 即便继承完全失效断言照样绿，是假证明。#85 本身就是 improvement（变更流）派生单，用
+    //   feature 才走到真正拦死它的守卫路径。bug 原单派生 feature 新单是既有先例（[D7] :299 同款）。
+    const guardOrigin = await seedBugToOnline();
+    await run('UPDATE sys_issues SET oa_exempt = 1 WHERE id = ?', [guardOrigin]);
+    r = await call('POST', `/api/sys-issues/${guardOrigin}/derive`, adminTok, { type: 'feature', title: 'D11 守卫放行·变更流', system_name: 'BMS', source: '内部', derive_reason: 'D11 组3' });
+    assert.strictEqual(r.status, 201, `D11-3 feature 派生 201, got ${r.status} ${JSON.stringify(r.body)}`);
+    const guardId = r.body.id;
+    assert.strictEqual(Number((await get('SELECT oa_exempt FROM sys_issues WHERE id=?', [guardId])).oa_exempt), 1, 'D11-3 前置：feature 派生单已继承 oa_exempt=1');
+    r = await call('POST', `/api/sys-issues/${guardId}/intake-accept`, adminTok, { risk_level: '二级' });
+    assert.strictEqual(r.status, 200, `D11-3 受理 200, got ${r.status} ${JSON.stringify(r.body)}`);
+    r = await call('POST', `/api/sys-issues/${guardId}/assign`, adminTok, { assigned_to: 5 });
+    assert.strictEqual(r.status, 200, `D11-3 免 OA feature 派生单 assign 应 200（不被 ASSIGN_REQUIRES_OA_NUMBER 拦——#85 卡死的正是这扇门·变更流才真进该守卫）, got ${r.status} ${JSON.stringify(r.body)}`);
+    // 对照组：oa_exempt=0 的 feature 派生单（显式覆盖继承）无号 assign 必 409——证上面那条 200 不是
+    //   "守卫根本没开"的假绿，守卫对非豁免变更流仍在拦。
+    r = await call('POST', `/api/sys-issues/${guardOrigin}/derive`, adminTok, { type: 'feature', title: 'D11 守卫对照·要OA', system_name: 'BMS', source: '内部', derive_reason: 'D11 组3对照', oa_exempt: 0 });
+    assert.strictEqual(r.status, 201);
+    const ctrlId = r.body.id;
+    await call('POST', `/api/sys-issues/${ctrlId}/intake-accept`, adminTok, { risk_level: '二级' });
+    r = await call('POST', `/api/sys-issues/${ctrlId}/assign`, adminTok, { assigned_to: 5 });
+    assert.strictEqual(r.status, 409, `D11-3 对照：oa_exempt=0 无号 feature 派生单 assign 应 409, got ${r.status}`);
+    assert.strictEqual(r.body.code, 'ASSIGN_REQUIRES_OA_NUMBER', `D11-3 对照 code, got ${r.body.code}`);
+    ok('[D11-3] 守卫放行端到端（**变更流 feature**·codex 482 HIGH 收口）：免 OA 派生单 受理→指派 200 + 对照组 oa_exempt=0 同链 409（证守卫仍在拦非豁免单，200 非假绿）');
+
+    // ── 组3b [codex 482 MED-1] 表驱动收窄矩阵：逐值钉住三段语义（继承/显式/400）──
+    //   派生端点与建单端点对 null/'' 的判定**有意不同**（建单默认 0、派生走继承）——差异是设计结果，
+    //   用表驱动把每个值的归属显式钉死，防将来"统一口径"改坏任一侧。
+    {
+        const tblOrigin = await seedBugToOnline();
+        await run('UPDATE sys_issues SET oa_exempt = 1 WHERE id = ?', [tblOrigin]);
+        const CASES = [
+            { v: undefined, expect: 1, label: '缺键→继承(1)' },
+            { v: null, expect: 1, label: 'null→继承(1)' },
+            { v: '', expect: 1, label: '空串→继承(1)' },
+            { v: 0, expect: 0, label: '显式0→0' },
+            { v: '0', expect: 0, label: "字符串'0'→0" },
+            { v: false, expect: 0, label: 'false→0' },
+            { v: 1, expect: 1, label: '显式1→1' },
+            { v: '1', expect: 1, label: "字符串'1'→1" },
+            { v: true, expect: 1, label: 'true→1' },
+            { v: 'false', expect: 400, label: "字符串'false'→400（不在任何集合，禁静默降级）" },
+            { v: [], expect: 400, label: '数组→400' },
+            { v: {}, expect: 400, label: '对象→400' },
+        ];
+        for (const c of CASES) {
+            const body = { type: 'bug', title: `D11-3b ${c.label}`, system_name: 'BMS', source: '内部', derive_reason: 'D11 组3b' };
+            if (c.v !== undefined) body.oa_exempt = c.v;
+            const rr = await call('POST', `/api/sys-issues/${tblOrigin}/derive`, adminTok, body);
+            if (c.expect === 400) {
+                assert.strictEqual(rr.status, 400, `[3b·${c.label}] 应 400, got ${rr.status}`);
+                assert.strictEqual(rr.body.code, 'INVALID_OA_EXEMPT', `[3b·${c.label}] code`);
+            } else {
+                assert.strictEqual(rr.status, 201, `[3b·${c.label}] 应 201, got ${rr.status} ${JSON.stringify(rr.body)}`);
+                const got = Number((await get('SELECT oa_exempt FROM sys_issues WHERE id=?', [rr.body.id])).oa_exempt);
+                assert.strictEqual(got, c.expect, `[3b·${c.label}] 落库应 ${c.expect}，实得 ${got}`);
+            }
+        }
+        ok(`[D11-3b] 表驱动收窄矩阵 ${CASES.length} 值逐一钉死：缺键/null/'' 三态继承、0/'0'/false 显式 0、1/'1'/true 显式 1、'false'/[]/{}  400（与建单端点对 null/'' 的默认 0 判定有意不同，差异即设计）`);
+    }
+
+    // ── 组4 输入收窄：非法值 400 INVALID_OA_EXEMPT（与建单端点同款三段收窄）──
+    r = await call('POST', `/api/sys-issues/${normalOrigin}/derive`, adminTok, { type: 'bug', title: 'D11 非法值', system_name: 'BMS', source: '内部', derive_reason: 'D11 组4', oa_exempt: 'yes' });
+    assert.strictEqual(r.status, 400, `D11-4 非法 oa_exempt 应 400, got ${r.status}`);
+    assert.strictEqual(r.body.code, 'INVALID_OA_EXEMPT', `D11-4 code, got ${r.body.code}`);
+    ok('[D11-4] 输入收窄：oa_exempt 非法值 400 INVALID_OA_EXEMPT（不静默降级为继承或 0）');
+  }
+
   console.log(`\n✅ verify-sys-bug-derive 全绿：${passed} 项`);
   server.close();
   db.close();

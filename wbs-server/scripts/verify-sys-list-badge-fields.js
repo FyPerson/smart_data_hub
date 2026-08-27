@@ -76,14 +76,21 @@ const paBody = extractFunctionBody(HTML, 'siPostAcceptFlagHtml');
 //   必须同批进扫描面，否则它消费的两个新 S6 列（total/done count）对本守卫不可见（正是本守卫要防
 //   的 blocked 死分支同款漏法——新 helper 不进扫描面=守卫对它视而不见，照样全绿）。
 const flBody = extractFunctionBody(HTML, 'siFastlaneFlagHtml');
+// [上线排期三态徽章 20260827] 同上理由——「未排期／待派执行人／已排期(+逾期)」徽章 helper 消费
+//   status/release_id/release_exec_count/release_planned_date 四字段（后三者为本批新增的 release 侧
+//   派生列），必须同批进扫描面。⚠️ 本批首次加时就漏了这一步：守卫照常报"消费 38 ⊆ 供给 62"全绿，
+//   而新字段其实完全没进消费集——若 SELECT 漏投影某列，守卫不会判红、徽章静默失效。这正是本守卫
+//   头部注释三次强调"新徽章 helper 必须同时进扫描面"要防的同款漏法，第四次实证。
+const rsBody = extractFunctionBody(HTML, 'siReleaseScheduleBadgeHtml');
 must(!!rowBody, 'renderSysIterationRows 函数体可提取（提不到=守卫空转，不能当通过）');
+must(!!rsBody, 'siReleaseScheduleBadgeHtml 函数体可提取（上线排期三态徽章的唯一判定出口）');
 must(!!tlBody, 'siTechLeadNotifyBadgeHtml 函数体可提取');
 must(!!preBody, 'siPrereleaseFlagHtml 函数体可提取（待上线两 flag 的唯一判定出口）');
 must(!!paBody, 'siPostAcceptFlagHtml 函数体可提取（先行上线待补验收徽章的唯一判定出口）');
 must(!!flBody, 'siFastlaneFlagHtml 函数体可提取（待先行部署 x/N 徽章的唯一判定出口）');
-if (!rowBody || !tlBody || !preBody || !paBody || !flBody) { console.log('\n=== FAIL：扫描面缺失 ==='); process.exit(1); }
+if (!rowBody || !tlBody || !preBody || !paBody || !flBody || !rsBody) { console.log('\n=== FAIL：扫描面缺失 ==='); process.exit(1); }
 
-const consumeSrc = stripComments(rowBody + '\n' + tlBody + '\n' + preBody + '\n' + paBody + '\n' + flBody);
+const consumeSrc = stripComments(rowBody + '\n' + tlBody + '\n' + preBody + '\n' + paBody + '\n' + flBody + '\n' + rsBody);
 const consumed = new Set();
 for (const m of consumeSrc.matchAll(/\bi\.([a-z_][a-z0-9_]*)\b/g)) consumed.add(m[1]);
 must(consumed.size >= 15, `前端消费字段实抓 ${consumed.size} 个（过少=正则失配，扫描面须非空）`);
@@ -200,15 +207,18 @@ function countSelectPlaceholders(block) {
   return raw + extra;
 }
 const selectBlockQMarks = countSelectPlaceholders(selectBlock);
-// [「待我处理」全角色卡·方案 §3.1 selectParams 冻结口径·唯一权威口径] 恰 4 个（此前恰 2 个）——新增两列
-//   my_dev_pending（裸 ? 绑 uid）/ is_my_intake_liaison（裸 ? 绑 uid）各带 1 个占位符，插在
-//   fast_release_my_pending 之后（index.js 该处投影区文本顺序）。
-must(selectBlockQMarks === 4, `列表 SELECT 列表部分（WHERE 之前）应恰含 4 个 ? 占位符（fast_release_active_auth 经 FAST_RELEASE_CONSUMABLE_AUTH_WHERE_SQL 引用内嵌的 nowStr + fast_release_my_pending 裸 ? 的 uid + my_dev_pending 裸 ? 的 uid + is_my_intake_liaison 裸 ? 的 uid），实得 ${selectBlockQMarks}——多出/缺失的 ? 会与 selectParams 数组顺序错位`);
+// [「待我处理」全角色卡·方案 §3.1 selectParams 冻结口径·唯一权威口径] **恰 5 个**（历经 2 → 4 → 5）——
+//   my_dev_pending（裸 ? 绑 uid）/ is_my_intake_liaison（裸 ? 绑 uid）插在 fast_release_my_pending 之后；
+//   2026-08-27 分支⑨ 新增 my_release_exec_pending（裸 ? 绑 uid）位于 release 派生列组末尾。
+//   ⚠️ 同组另五列（release_exec_count/planned_date/created_by/rep_issue_id）均为纯子
+//   查询**不带占位符**，只有 my_release_exec_pending 需要绑 uid——加 release 侧列时先确认是否真需要 ?，
+//   不需要就不该动这个数字。
+must(selectBlockQMarks === 5, `列表 SELECT 列表部分（WHERE 之前）应恰含 5 个 ? 占位符（fast_release_active_auth 经 FAST_RELEASE_CONSUMABLE_AUTH_WHERE_SQL 引用内嵌的 nowStr + fast_release_my_pending 裸 ? 的 uid + my_dev_pending 裸 ? 的 uid + is_my_intake_liaison 裸 ? 的 uid + my_release_exec_pending 裸 ? 的 uid），实得 ${selectBlockQMarks}——多出/缺失的 ? 会与 selectParams 数组顺序错位`);
 // 对照组（[S-fix2] 管线级重写·预筛三轮 S-fix LOW-1：原「selectBlock 副本拼接后 (N+1)!==1」是构造上的
 //   恒真式且不经被测管线——对照组槽位上出现"断言永远成立"正是 guard-gotchas 要防的形态）：把带 ? 的
 //   注入体前置到 ROUTES 切片副本后**重跑同一条提取管线**（stripSqlLineComments→stripComments→
-//   findOuterBoundary→切块→推导式计数），断言得 5（基线 4 + 注入 1 个裸 ?）——同时注入体里另藏一个
-//   **注释内的 ?**（/* ? */），若管线的注释剥离失效会计得 6 同样判红，一组对照双向证明
+//   findOuterBoundary→切块→推导式计数），断言得 6（基线 5 + 注入 1 个裸 ?）——同时注入体里另藏一个
+//   **注释内的 ?**（/* ? */），若管线的注释剥离失效会计得 7 同样判红，一组对照双向证明
 //   "计数经真实管线且注释不计入"。
 {
   const mutatedSlice = '/* ? */ (?) ' + ROUTES.slice(listSelStart, listSelStart + SELECT_SCAN_UPPER_BOUND);
@@ -217,7 +227,7 @@ must(selectBlockQMarks === 4, `列表 SELECT 列表部分（WHERE 之前）应�
   must(!boundary2.wentNegative && boundary2.index > 0, '★对照组前置：注入后管线边界扫描仍应可定位且深度非负（注入体 (?) 括号自平衡）');
   const block2 = stripped2.slice(0, boundary2.index);
   const fakeQMarks = countSelectPlaceholders(block2);
-  must(fakeQMarks === 5, `★对照组（管线级）：注入 1 个真裸 ?（注释内另藏 1 个假 ?）后重跑同一条提取管线（含常量引用推导）应恰计 5 个（基线 4 + 注入 1），实得 ${fakeQMarks}——≠5 说明判据恒真、管线未被经过、或注释剥离失效`);
+  must(fakeQMarks === 6, `★对照组（管线级）：注入 1 个真裸 ?（注释内另藏 1 个假 ?）后重跑同一条提取管线（含常量引用推导）应恰计 6 个（基线 5 + 注入 1），实得 ${fakeQMarks}——≠6 说明判据恒真、管线未被经过、或注释剥离失效`);
 }
 
 // ── 对拍 ────────────────────────────────────────────────────────

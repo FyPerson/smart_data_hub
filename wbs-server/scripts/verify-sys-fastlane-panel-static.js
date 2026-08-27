@@ -402,6 +402,21 @@ console.log('— ⑫ 「待我处理」聚合卡沙箱真执行（siIsMyPending/
     // [2026-08-27 #89 修复·codex 479 LOW-1] 建单人验收/归档半区已抽成共享 helper，谓词与 breakdown
     //   都调用它 ⇒ 沙箱必须注入**真实实现**（不手抄第二份判据，同本段既有纪律）。
     const fnIsCreatorAcceptArchivePending = extractFullFunctionText('siIsCreatorAcceptArchivePending');
+    // [上线排期三态徽章·待办侧 2026-08-27] 分支⑧ 同样抽成独立函数，沙箱注入真实实现。
+    const fnIsMyReleaseNeedsExecutor = extractFullFunctionText('siIsMyReleaseNeedsExecutor');
+    // [codex 481 HIGH-1/HIGH-2 收口] ⑧ 拆成三件：成员条件 + 动态代表 map + 谓词。沙箱须全注入，
+    //   且 map 是**模块级可变状态**——每条用例前要显式刷新，否则测的是上一条留下的 map。
+    const fnReleaseMemberCond = extractFullFunctionText('siIsReleaseNeedsExecutorMember');
+    // [codex 481 复审 HIGH-2 二次收口] 代表 map 已由「模块级可变状态 + 隐式时序」改为**纯函数 + 显式
+    //   传参**（线上三个入口各自算一份当次快照）。故这里注入的是 siComputeReleaseRepMap，不再有那个
+    //   `let siMyPendingRepMap` 全局声明。
+    //   〔留档〕旧版提取它时正则写成 `new Map()` 未转义括号——() 是捕获组，实际在找 `new Map;`，永远
+    //   匹配不到；而当时 ⑧ 那组断言照样全绿（沙箱缺声明，但刷新器内的赋值在非严格模式下隐式创建全局
+    //   变量，侥幸跑通）⇒ 典型假绿，全靠前置提取断言拦住。这条经验对下面几个 extract 同样适用。
+    const fnComputeRepMap = extractFullFunctionText('siComputeReleaseRepMap');
+    const fnCurrentUid = extractFullFunctionText('siCurrentUid');
+    const fnExecPendingMember = extractFullFunctionText('siIsReleaseExecPendingMember');
+    const fnIsMyReleaseExecPending = extractFullFunctionText('siIsMyReleaseExecPending');
     const platformAdminUsernamesText = extractConstArrayText('SI_PLATFORM_ADMIN_USERNAMES');
 
     // [S-fix 4c 沿用] 提取前置全部包进 check() 计数体系——裸调用抛错会终止整个进程、其它断言不计数。
@@ -413,6 +428,12 @@ console.log('— ⑫ 「待我处理」聚合卡沙箱真执行（siIsMyPending/
         assert.ok(fnMatchStatFilter, '未提取到 siMatchStatFilter 函数全文');
         assert.ok(fnIsPlatformAdmin, '未提取到 siIsPlatformAdmin 函数全文（归属收紧 2026-08-27 新增，分支① 身份门）');
         assert.ok(fnIsCreatorAcceptArchivePending, '未提取到 siIsCreatorAcceptArchivePending 函数全文（#89 修复新增，分支①b 建单人验收/归档半区——提不到则 ①b 全组空转）');
+        assert.ok(fnIsMyReleaseNeedsExecutor, '未提取到 siIsMyReleaseNeedsExecutor 函数全文（分支⑧——提不到则 ⑧ 全组空转）');
+        assert.ok(fnReleaseMemberCond, '未提取到 siIsReleaseNeedsExecutorMember（⑧ 成员条件）');
+        assert.ok(fnComputeRepMap, '未提取到 siComputeReleaseRepMap（⑧⑨ 代表快照纯函数——提不到则去重判据整组空转）');
+        assert.ok(fnCurrentUid, '未提取到 siCurrentUid（uid 归一单点实现）');
+        assert.ok(fnExecPendingMember, '未提取到 siIsReleaseExecPendingMember（⑨ 成员条件）');
+        assert.ok(fnIsMyReleaseExecPending, '未提取到 siIsMyReleaseExecPending（⑨ 谓词——提不到则 ⑨ 全组空转）');
         assert.ok(statusGroupsText, '未提取到 SI_STATUS_GROUPS 常量全文');
         assert.ok(devFamilyStatusesText, '未提取到 SI_DEV_FAMILY_STATUSES 常量全文');
         assert.ok(platformAdminUsernamesText, '未提取到 SI_PLATFORM_ADMIN_USERNAMES 常量全文（若被改写成 Object.freeze([...]) 形态，extractConstArrayText 会提不到 ⇒ ① 组正反例全部空转，故在此前置判红）');
@@ -446,7 +467,7 @@ console.log('— ⑫ 「待我处理」聚合卡沙箱真执行（siIsMyPending/
         return `function isAdmin() { return ${JSON.stringify(!!isAdminVal)}; }\nconst currentUser = ${currentUserVal === undefined ? 'null' : JSON.stringify(currentUserVal)};`;
     }
     function compile(returnName, extraTexts, isAdminVal, currentUserVal) {
-        const parts = [stubText(isAdminVal, currentUserVal), statusGroupsText, devFamilyStatusesText, platformAdminUsernamesText, fnIsPlatformAdmin, fnIsCreatorAcceptArchivePending, fnIsMyFastlanePending, ...extraTexts, `return ${returnName};`];
+        const parts = [stubText(isAdminVal, currentUserVal), statusGroupsText, devFamilyStatusesText, platformAdminUsernamesText, fnIsPlatformAdmin, fnIsCreatorAcceptArchivePending, fnCurrentUid, fnReleaseMemberCond, fnExecPendingMember, fnComputeRepMap, fnIsMyReleaseNeedsExecutor, fnIsMyReleaseExecPending, fnIsMyFastlanePending, ...extraTexts, `return ${returnName};`];
         // eslint-disable-next-line no-new-func
         return new Function(parts.join('\n'))();
     }
@@ -457,6 +478,31 @@ console.log('— ⑫ 「待我处理」聚合卡沙箱真执行（siIsMyPending/
     const PLATFORM_ADMIN_USER = { id: 1, username: 'admin', display_name: '管理员', role: 'admin' };
     const ROLE_ADMIN_BIZ_USER = { id: 18, username: 'demo_user_b', display_name: '示例用户B', role: 'admin' };
     const isMyPendingWith = (isAdminVal, currentUserVal) => compile('siIsMyPending', [fnIsMyPending], isAdminVal, currentUserVal);
+    // [codex 481 HIGH-2 收口] ⑧ 依赖模块级 siMyPendingRepMap（在与计数同一基数上动态选代表），
+    //   故它的用例必须能**先喂一份 list 刷新 map、再判某一行**。返回同一沙箱内的两个函数，
+    //   保证判定读到的正是刚刚刷新的那份 map（分两次 compile 会各自持有独立 map，测不出真实行为）。
+    function releaseBranchSandbox(isAdminVal, currentUserVal) {
+        const parts = [
+            stubText(isAdminVal, currentUserVal), statusGroupsText, devFamilyStatusesText,
+            platformAdminUsernamesText, fnIsPlatformAdmin, fnIsCreatorAcceptArchivePending,
+            fnCurrentUid, fnReleaseMemberCond, fnExecPendingMember, fnComputeRepMap, fnIsMyReleaseNeedsExecutor, fnIsMyReleaseExecPending,
+            fnIsMyFastlanePending, fnIsMyPending,
+            'return { isMyPending: siIsMyPending, computeRepMap: siComputeReleaseRepMap };',
+        ];
+        // eslint-disable-next-line no-new-func
+        return new Function(parts.join('\n'))();
+    }
+    // 喂 list 刷新代表 map 后，判 list 中某个 id 是否命中「待我处理」。
+    function myPendingInList(currentUserVal, list, targetId) {
+        const sb = releaseBranchSandbox(false, currentUserVal);
+        const uid = currentUserVal && Number(currentUserVal.id) > 0 ? Number(currentUserVal.id) : null;
+        // [codex 481 复审 HIGH-2 二次收口] 显式算快照再传入——与线上三个入口的用法一致；
+        //   若某天实现退回"内部读全局 map"，这里传进去的快照会被忽略，下方"代表被裁掉"用例会判红。
+        const repMap = sb.computeRepMap(list, uid);
+        const item = list.find(x => Number(x.id) === Number(targetId));
+        assert.ok(item, `用例数据错误：list 中找不到 id=${targetId}`);
+        return sb.isMyPending(item, repMap);
+    }
     const breakdownWith = (isAdminVal, currentUserVal) => compile('siMyPendingBreakdown', [fnMyPendingBreakdown], isAdminVal, currentUserVal);
     const matchStatFilterWith = (isAdminVal, currentUserVal) => compile('siMatchStatFilter', [fnIsMyPending, fnMatchStatFilter], isAdminVal, currentUserVal);
 
@@ -549,6 +595,83 @@ console.log('— ⑫ 「待我处理」聚合卡沙箱真执行（siIsMyPending/
     assertIsMyPending('①b 反例·currentUser=null：uid 取不到时半区不放行（uid>0 前置门，同 ⑤⑦ 同族）', true, null, { status: '待验证', ...OWN_BY_BIZ }, false);
     assertIsMyPending('①b 反例·created_by 缺失：字段为 undefined 时不得命中（Number(undefined)=NaN，NaN===uid 恒 false）', true, ROLE_ADMIN_BIZ_USER, { status: '待验证' }, false);
     assertIsMyPending('①b 平台管理员不受影响：仍能看到别人建的待验证单（①a 全局视野保留）', true, { ...PLATFORM_ADMIN_USER }, { status: '待验证', created_by: 18 }, true);
+    console.log('    ⑧ 我建的上线批次待派执行人（2026-08-27·按批次去重·codex 481 两 HIGH 收口后） —');
+    // 责任人依据=生产实证 added_by 对拍 created_by 近 12 批次 12/12 同人（谁建批次谁派人）。
+    //   代表单**在当前可见基数内动态选取**（codex 481 HIGH-2），故所有用例都经 myPendingInList
+    //   喂完整 list 后再判——这样测的是这份可见集合下谁是代表，而不是某个全局常量。
+    const M = (id, over) => Object.assign({ id, status: '待上线', release_id: 501, release_created_by: ROLE_ADMIN_BIZ_USER.id, release_exec_count: 0 }, over || {});
+    const BIZ = ROLE_ADMIN_BIZ_USER;
+    check('⑧ 正例·可见集合内最小 id 即代表 → true', () => {
+        assert.strictEqual(myPendingInList(BIZ, [M(13539), M(13540), M(13541)], 13539), true);
+    });
+    check('⑧ ⭐去重·同批次非代表单 → false（一次派人解开全批，逐张计入会让卡数虚高并淹没其他真待办）', () => {
+        const list = [M(13539), M(13540), M(13541)];
+        assert.strictEqual(myPendingInList(BIZ, list, 13540), false);
+        assert.strictEqual(myPendingInList(BIZ, list, 13541), false);
+        const hits = list.filter(x => myPendingInList(BIZ, list, x.id)).length;
+        assert.strictEqual(hits, 1, `同一批次在卡里应恰好命中 1 行（按批次去重），实得 ${hits}`);
+    });
+    check('⑧ ⭐[codex 481 HIGH-2] 代表被 type tab 裁掉时，剩余可见成员里应重新产生代表（旧实现依赖全局 rep 列，整批待办会消失）', () => {
+        // 模拟 change 批次混 feature+improvement：全局最小 id 13539 因切 tab 不在可见集合内
+        const visible = [M(13540), M(13541)];
+        const hits = visible.filter(x => myPendingInList(BIZ, visible, x.id)).length;
+        assert.strictEqual(hits, 1, `全局代表被裁掉后，剩余可见成员里仍应恰好有 1 个代表命中，实得 ${hits}——为 0 即该批次待办整批从卡里消失（codex 481 HIGH-2 的原缺陷形态）`);
+        assert.strictEqual(myPendingInList(BIZ, visible, 13540), true, '剩余成员中的最小 id 应接任代表');
+    });
+    check('⑧ ⭐[codex 481 HIGH-1] 孤儿批次（release_id 非空但 release_created_by 为 NULL）→ false（批次记录已不存在，不是没派人）', () => {
+        const list = [M(13539, { release_created_by: null })];
+        assert.strictEqual(myPendingInList(BIZ, list, 13539), false);
+    });
+    console.log('    ⑨ 我是本批次执行人且未执行（2026-08-27·与 ⑧ 构成待上线闭环） —');
+    const X = (id, over) => Object.assign({ id, status: '待上线', release_id: 601, my_release_exec_pending: 1 }, over || {});
+    check('⑨ 正例·我是在册执行人且 exec_status=pending → true（生产实例：示例开发A在 R-20260824-3 上 pending、批次逾期 2 天，钉钉早已 sent 但持续清单里没有他这条）', () => {
+        assert.strictEqual(myPendingInList(BIZ, [X(20101)], 20101), true);
+    });
+    check('⑨ ⭐去重·同批次多张成员单只出一个代表（执行上线是批次级动作 POST /sys-releases/:id/execute，示例开发A那 6 张单只需点一次）', () => {
+        const list = [X(20101), X(20102), X(20103)];
+        const hits = list.filter(x => myPendingInList(BIZ, list, x.id)).map(x => x.id);
+        assert.deepStrictEqual(hits, [20101], `同批次应恰命中最小 id 一个，实得 ${JSON.stringify(hits)}`);
+    });
+    check('⑨ 反例·我不在执行人名单（my_release_exec_pending=0）→ false', () => {
+        assert.strictEqual(myPendingInList(BIZ, [X(20101, { my_release_exec_pending: 0 })], 20101), false);
+    });
+    check('⑨ 反例·状态不是待上线 → false（批次已发布后成员不再是待上线态）', () => {
+        assert.strictEqual(myPendingInList(BIZ, [X(20101, { status: '已上线' })], 20101), false);
+    });
+    check('⑨ 反例·currentUser=null → false', () => {
+        assert.strictEqual(myPendingInList(null, [X(20101)], 20101), false);
+    });
+    check('⑧⑨ 互斥性：⑧ 要求 exec_count=0、⑨ 要求本人在执行人名单（⇒ 至少 1 人），同一张单不可能两者都命中，故共用同一份代表 map 不会互抢代表位', () => {
+        assert.strictEqual(myPendingInList(BIZ, [M(30001, { my_release_exec_pending: 1, release_exec_count: 1 })], 30001), true, '已派人 ⇒ ⑧ 不命中，应经 ⑨ 命中');
+        assert.strictEqual(myPendingInList(BIZ, [M(30002)], 30002), true, 'exec_count=0 ⇒ ⑨ 不命中，应经 ⑧ 命中');
+    });
+    check('⑧ 反例·已派执行人 → false（正常在途，无人需要动作）', () => {
+        assert.strictEqual(myPendingInList(BIZ, [M(13539, { release_exec_count: 2 })], 13539), false);
+    });
+    check('⑧ 反例·别人建的批次 → false（待办只归批次创建人，实证 12/12 同人）', () => {
+        assert.strictEqual(myPendingInList(BIZ, [M(13539, { release_created_by: 4 })], 13539), false);
+    });
+    check('⑧ 反例·未挂批次 → false（那是未排期，责任在加单方，不是批次没派人）', () => {
+        assert.strictEqual(myPendingInList(BIZ, [M(13539, { release_id: null })], 13539), false);
+    });
+    check('⑧ 反例·状态不符（已上线）→ false（与徽章同口径）', () => {
+        assert.strictEqual(myPendingInList(BIZ, [M(13539, { status: '已上线' })], 13539), false);
+    });
+    check('⑧ 反例·currentUser=null → false（uid 取不到不放行，同 ⑤⑦①b 同族前置门）', () => {
+        assert.strictEqual(myPendingInList(null, [M(13539)], 13539), false);
+    });
+    check('⑧ 不判 role：role=user 的批次创建人同样命中（业务方将来降权仍应看到自己批次的待办）', () => {
+        assert.strictEqual(myPendingInList({ ...BIZ, role: 'user' }, [M(13539)], 13539), true);
+    });
+    check('⑧ 多批次并存：两个批次各出一个代表，互不吞并', () => {
+        const list = [M(13539), M(13540), M(20001, { release_id: 502 }), M(20002, { release_id: 502 })];
+        const hits = list.filter(x => myPendingInList(BIZ, list, x.id)).map(x => x.id);
+        assert.deepStrictEqual(hits, [13539, 20001], `两个批次应各命中自己的最小 id 一个、互不吞并，实得 ${JSON.stringify(hits)}`);
+    });
+    check('⑧ 前端不得再依赖后端全局 rep 列作判据（codex 481 HIGH-2 修复后的负向断言）', () => {
+        assert.ok(!/release_rep_issue_id/.test(fnIsMyReleaseNeedsExecutor) && !/release_rep_issue_id/.test(fnReleaseMemberCond),
+            'siIsMyReleaseNeedsExecutor/siIsReleaseNeedsExecutorMember 中仍出现 release_rep_issue_id——全局代表在 type tab 裁剪下会让整批待办消失，必须用可见基数内动态代表');
+    });
     console.log('    ②开发 —');
     assertIsMyPending('②开发 正例：status∈SI_DEV_FAMILY_STATUSES + my_dev_pending=1 → true', false, null, { status: '开发中', my_dev_pending: 1 }, true);
     assertIsMyPending('②开发 状态对身份不对：status=开发中 + my_dev_pending=0（未在册/非待办）→ false（若 my_dev_pending 判据被误删/改成真值判断，本条会翻红）', false, null, { status: '开发中', my_dev_pending: 0 }, false);
@@ -768,8 +891,11 @@ console.log('— ⑫ 「待我处理」聚合卡沙箱真执行（siIsMyPending/
         assert.ok(cardKeyMatch, '未在该 if 分支内提取到 key: \'...\' 字面量');
 
         const msfBody = bodyOf('siMatchStatFilter');
-        const routeLineMatch = msfBody.match(/filterKey === '([^']*)'\)\s*return\s*siIsMyPending\(item\)/);
-        assert.ok(routeLineMatch, 'siMatchStatFilter 内未提取到路由到 siIsMyPending 的 filterKey === \'...\' 判断行');
+        // [codex 481 复审 HIGH-2 二次收口] 路由行由 siIsMyPending(item) 改为透传第二参 repMap。
+        //   仍钉住"必须透传"——若这里退回 siIsMyPending(item)，点卡筛选那条路径的 ⑧⑨ 会静默恒 false，
+        //   表现为"卡上有数字、点进去少行"。
+        const routeLineMatch = msfBody.match(/filterKey === '([^']*)'\)\s*return\s*siIsMyPending\(item,\s*repMap\)/);
+        assert.ok(routeLineMatch, 'siMatchStatFilter 内未提取到路由行 `filterKey === \'...\') return siIsMyPending(item, repMap)`——第二参 repMap 必须透传，否则筛选路径上 ⑧⑨ 恒 false');
 
         assert.strictEqual(cardKeyMatch[1], routeLineMatch[1], `卡 key 字面量（${cardKeyMatch[1]}）应与筛选路由字面量（${routeLineMatch[1]}）逐字相同——一处改动另一处未同步会在此判红`);
     });
@@ -777,7 +903,14 @@ console.log('— ⑫ 「待我处理」聚合卡沙箱真执行（siIsMyPending/
     //   不到"基数变量选对了没有"，本条直接钉住字面量。
     check('接线④：「待我处理」计数基数确实来自 vis（与其余状态卡同一基数变量，非另开一份口径）', () => {
         const body = bodyOf('siRenderStats');
-        assert.ok(/myPendingCount\s*=\s*vis\.filter\(siIsMyPending\)\.length/.test(body), '未见 myPendingCount = vis.filter(siIsMyPending).length —— 计数基数应用与其余卡相同的 vis 变量');
+        // [codex 481 复审 HIGH-2 二次收口] siIsMyPending 现需第二参 repMap（代表快照显式传入），故计数
+        //   写法由裸函数引用 `vis.filter(siIsMyPending)` 改为箭头包裹 `vis.filter(i => siIsMyPending(i, statsRepMap))`。
+        //   本断言的**防护意图不变**：计数基数必须仍是 vis（与其余状态卡同一份），且必须**真的把快照传进去**
+        //   ——漏传 repMap 会让 ⑧⑨ 恒 false（安全降级但静默漏计），故一并钉住第二参非空。
+        assert.ok(/myPendingCount\s*=\s*vis\.filter\(\s*i\s*=>\s*siIsMyPending\(i,\s*statsRepMap\)\s*\)\.length/.test(body),
+            '未见 myPendingCount = vis.filter(i => siIsMyPending(i, statsRepMap)).length —— 计数基数应用与其余卡相同的 vis 变量，且必须显式传入本次算出的代表快照 statsRepMap（漏传则 ⑧⑨ 静默恒 false）');
+        assert.ok(/const statsRepMap = siComputeReleaseRepMap\(vis, siCurrentUid\(\)\)/.test(body),
+            'siRenderStats 未在本函数内自算代表快照——正确性不得依赖别处先跑过（codex 481 复审 HIGH-2：调用图证明 siVisibleList 另有三个调用方、siRenderTypeCards 还独立调 siMatchStatFilter）');
     });
     // [S-fix4·codex 414/415 MED-1] 可点卡交互语义静态钉扎（真执行两态断言在 verify-sys-type-cards ⑤ 组，
     //   本文件按自身文本级定位补状态卡循环侧）——通用断言，与本次「待我处理」改写无关，原样保留未改。
