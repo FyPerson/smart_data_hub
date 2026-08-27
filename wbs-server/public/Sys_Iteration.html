@@ -49,6 +49,65 @@
         /* 统计卡——前端统一：si-stat-card（num+label 竖排，②档曾判定与共享 icon+横排结构不兼容而保留
            残留）已换皮为共享 .u-stat-card 结构（icon+u-stat-info，见 siRenderStats()），本节残留删除。 */
 
+        /* [待我处理全角色卡 方案 v1.3 §3.4·P4] 紧凑一屏：拆卡后本页统计行常驻 8 张（+条件渲染的
+           「待我处理」共 9 张，S3 起已吸收原「待我确认」值班卡），共享层 .u-stat-card 默认 min-width:130px / padding:14px 18px
+           是面向 5-6 卡设计，9 卡在 1280 档会溢出换行。.si-wrap 作用域覆盖收窄尺寸（不动
+           components.css，先例见 :42 .u-btn-sm 覆盖），min-width:0 让 flex 基础尺寸真正跟随可用宽度
+           收缩（不加则 130px 最小宽度仍会把卡挤到换行）；icon/num/label 尺寸同步下调，label 加
+           nowrap+ellipsis 防卡内文字溢出（方案 §6 Playwright 断言：同行看 offsetTop 一致 +
+           scrollWidth<=clientWidth 无溢出）。具体像素值按 1280/1440/1920 三档实测微调，冻结的是
+           "不动共享层 + 一行 9 张不换行" 这两条合同，不是像素值本身。本作用域覆盖同时命中第二排
+           类型卡（#siTypeCardsRow 同为 .u-stat-card）——两排同尺寸紧凑，有意为之非溢出。 */
+        .si-wrap .u-stats-row { gap: 8px; }
+        .si-wrap .u-stat-card { min-width: 0; padding: 10px 10px; gap: 8px; }
+        .si-wrap .u-stat-icon { width: 28px; height: 28px; font-size: 13px; flex-shrink: 0; }
+        .si-wrap .u-stat-info { min-width: 0; }
+        .si-wrap .u-stat-info .u-stat-num { font-size: 18px; }
+        .si-wrap .u-stat-info .u-stat-label {
+            font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        }
+        /* [观察反馈优化批·2026-08-27] 「待我处理」卡 count>0 状态强化——demo 三轮定稿 V3（红点+状态色），
+           值全部照抄 E:\tmp\demo_待我处理卡与徽章样式_20260827_v1.0.html 区块1 V3 标注，不自创。
+           class 由 siRenderStats 在 s.key==='my_pending' && s.n>0 时追加（count=0 恒不带此类，见该函数）。
+           红点走 ::after 伪元素（非新增 DOM 子节点）——MPPW- 的 readStatCardCount 选择器
+           `.u-stat-card[onclick="siSetStatFilter('my_pending')"] .u-stat-num` 只认已有的真实子节点，
+           加 class 不改结构，该选择器不受影响。position:relative 只加在本类上（不动基础 .u-stat-card，
+           那条在共享 components.css，本批禁碰）。 */
+        /* [codex 477 回卷 MED-2] 原 border-left:3px solid 会与 components.css 基础 .u-stat-card 已有的
+           border（1px）叠加/替换出几何差异——count 0↔1 切换时卡片左边框从"共享层 1px"变成"本层 3px"，
+           整卡宽度跟着抖 2px（border 计入盒模型，会挤压内容区）。改用 inset box-shadow：box-shadow
+           不参与布局计算，画在 border 内侧、纯视觉图层，count 切换时 padding/border 宽度全程不变，
+           零几何影响——用 Playwright 实测过 boundingClientRect 宽度前后一致才定稿。 */
+        .si-wrap .u-stat-card.si-stat-alert {
+            position: relative; box-shadow: inset 3px 0 0 #dc2626; background: #fef2f2;
+        }
+        .si-wrap .u-stat-card.si-stat-alert .u-stat-num { color: #dc2626; font-weight: 800; }
+        .si-wrap .u-stat-card.si-stat-alert::after {
+            content: ''; position: absolute; top: 8px; right: 8px; width: 8px; height: 8px; border-radius: 50%;
+            background: #ef4444; box-shadow: 0 0 0 2px #fff;
+        }
+        /* [codex 477 复审「顺手核实」] grep 核实结论：components.css 基础 .u-stat-card 本身**无**
+           box-shadow；但 .u-stat-card:hover（(0,2,0)）声明了 box-shadow:0 2px 8px rgba(217,119,6,.08)
+           （琥珀色悬浮阴影）。box-shadow 不是可累加的层叠属性——同一元素上只有**单条规则**的 box-shadow
+           值最终生效（特异性更高者整体覆盖，不会跟别的规则"各贡献一部分"）。.si-wrap .u-stat-card
+           .si-stat-alert 的特异性 (0,3,0) 高于 :hover 的 (0,2,0)，若不补一条组合规则，鼠标悬浮在
+           「待我处理」告警态卡片上时，本该有的琥珀悬浮阴影会被红色内嵌线**整体顶替**（不是消失，是
+           被换成别的视觉，用户会觉得"这张卡 hover 没反应"）。修法=在 :hover 组合选择器里用逗号把两条
+           阴影合成同一个声明的多值——这是 box-shadow 唯一支持"多重效果共存"的写法。 */
+        .si-wrap .u-stat-card.si-stat-alert:hover {
+            box-shadow: 0 2px 8px rgba(217, 119, 6, .08), inset 3px 0 0 #dc2626;
+        }
+        /* [Opus 预筛拦截-1] 特异性坑：.si-stat-alert(0,3,0) 会盖掉共享 .u-stat-card.active(0,2,0)——
+           点卡筛选是本卡唯一交互用途，一点就 alert+active 叠加却丢了选中视觉反馈（aria-pressed 仍为
+           true，视觉与 aria 漂移）。补组合选择器恢复 active 色系（同 components.css .u-stat-card.active
+           取值）。[codex 477 回卷 MED-2 更新] 红色左侧强调已改走 box-shadow（见上方 .si-stat-alert
+           本体规则），独立于 border 之外、不受 border-color 覆盖影响，本组合规则因此**不需要**再单独
+           覆盖任何 border-left-color——.active 自身把 border-color 统一改成 #d97706（4 边都变，含左侧
+           那道边框本身，这是基础卡既有行为不算抖动），box-shadow 的红色内嵌线原样叠在其上继续可见。 */
+        .si-wrap .u-stat-card.si-stat-alert.active {
+            background: #fffbeb; border-color: #d97706;
+        }
+
         /* 筛选栏改用共享 .u-filter-bar 白卡片（对齐数据修正/数据协作）；本页仅保留 si-chk 复选框（含已作废）样式，
            select/input base 样式由 components.css .u-filter-bar 共享层提供 */
         .u-filter-bar label.si-chk { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; font-size: 13px; color: #374151; white-space: nowrap; }
@@ -99,6 +158,29 @@
         .u-type-tag.t-feature { background: #dbeafe; color: #1d4ed8; }
         .u-type-tag.t-improvement { background: #d1fae5; color: #047857; }
         .u-type-tag.t-config { background: #ede9fe; color: #6d28d9; }
+
+        /* [上线单管理体验优化 O1·方案 20260824_v1.3 §3 O1·R-C3] 加单候选列表「所属系统」徽章——
+           D1 拍板统一中性 slate，不按六系统分色（类型标签已占红/蓝/绿/紫，系统再配色会视觉过载）。
+           复用 .u-type-tag 的尺寸/圆角/字号（inline-block/padding:2px 8px/border-radius:4px/
+           font-size:11px/font-weight:500）另加 1px 边框（浅底色在白底上需边框成"片"，盒高较类型
+           标签大 2px·同 .u-status-badge 带框先例），独立成类不挂 .u-type-tag 前缀——系统与类型是两个维度，
+           挂同一基类会让选择器语义混淆（"这是类型标签的变体"），故各自独立声明同款尺寸值。
+           white-space:nowrap 显式声明（449-L1：长系统名"客户报销平台"防候选行内被压缩换行）。
+           落页面内 <style>，不进共享 components.css——O1 是本页专属展示，免 ?v= bump 与四页回归。 */
+        .u-sys-tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 500; background: #f1f5f9; color: #475569; border: 1px solid #e2e8f0; white-space: nowrap; }
+        /* [观察反馈优化批·2026-08-27] 所属系统徽章六色映射——demo 三轮定稿 V1（六系统分色 tinted），
+           色值逐字照抄 E:\tmp\demo_待我处理卡与徽章样式_20260827_v1.0.html 区块2 V1 标注，不自创。
+           叠加在基础 .u-sys-tag 之上（class="u-sys-tag u-sys-tag-xxx"）——尺寸/圆角/字号/nowrap 等
+           版式属性仍由 .u-sys-tag 提供，本组变体只覆盖 background/color/border-color 三项。
+           未登记的 system_name（不在下方六选）不追加变体 class，落回 .u-sys-tag 基础灰
+           （现状色，见 siSysTagClass 的 class 片段 gate 写法，同 siTypeClass 既有范式）——
+           后端透传任意 system_name 不会导致样式炸裂或出现不存在的选择器。 */
+        .u-sys-tag-bms   { background: #fef3c7; color: #92400e; border-color: #fde68a; }
+        .u-sys-tag-hrd   { background: #ccfbf1; color: #0f766e; border-color: #99f6e4; }
+        .u-sys-tag-esign { background: #dbeafe; color: #1d4ed8; border-color: #bfdbfe; }
+        .u-sys-tag-reimb { background: #d1fae5; color: #047857; border-color: #a7f3d0; }
+        .u-sys-tag-rpa   { background: #ede9fe; color: #6d28d9; border-color: #ddd6fe; }
+        .u-sys-tag-other { background: #f5f5f4; color: #57534e; border-color: #e7e5e4; }
         /* 优先级徽章已升共享层 components.css .u-pri（状态列/优先级列统一轮 2026-07-10：本页原
            si-prio 即共享版蓝本，原样上移后本地删除；数据开发页同步从圆点迁入同款） */
 
@@ -377,17 +459,67 @@
         .si-modal-overlay { position: fixed; inset: 0; background: rgba(15,23,42,.5); display: none; align-items: center; justify-content: center; z-index: 1200; }
         .si-modal-overlay.open { display: flex; }
         #siBatchOverlay { z-index: 1100; }
-        .si-modal { background: #fff; border-radius: 12px; width: 500px; max-width: 94vw; max-height: 90vh; overflow-y: auto; box-shadow: 0 20px 50px rgba(0,0,0,.25); }
+        .si-modal { background: #fff; border-radius: 12px; width: 500px; max-width: 94vw; max-height: 90vh; display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 20px 50px rgba(0,0,0,.25); }
         .si-modal.wide { width: 720px; }
         /* 四处优化 D4（E7）：只放大上线单管理弹窗，**不改 .si-modal.wide 通用类**（值班排班面板也用它，
            内容是窄表格，跟着变宽反而空旷）。合同：宽 clamp(720px, 78vw, 1280px)、max-height 92vh。
            下限 720px = 原 .wide 宽度，防窄视口下反而比改造前更窄（codex 250 MED-1）。
            验收范围 = PC 桌面 1280/1440/1920 三档，由 [T21] 逐档锁定；决策推理见 codex审查记录 250。 */
         #siBatchBox { width: clamp(720px, 78vw, 1280px); max-height: 92vh; }
-        .si-modal-head { padding: 16px 22px; border-bottom: 1px solid #eef2f7; font-size: 15px; font-weight: 700; display: flex; justify-content: space-between; align-items: center; }
+        /* 上线单管理体验优化 O2（方案 20260824_v1.3 §3 O2）：`.si-modal` 通用类改三段固定布局，对齐同页
+           `.si-drawer` 既有范式（:283 一带 display:flex;flex-direction:column + :289 body flex:1;overflow-y:auto）。
+           根因：原先 overflow-y:auto 挂在 .si-modal 整体，body 无独立滚动区，内容一长标题与底部按钮一起
+           滚出视野。head/foot 恒 flex-shrink:0 固定不滚，仅 body 可滚。
+           body 的 min-height:0 为防御性显式声明——按 Flexbox 规范 overflow 非 visible 的 flex 项自动
+           最小尺寸已归零（同页 .si-drawer-body 未写也正常即实证），显式写防将来 overflow 被挪到内层
+           包装层时 min-height:auto 复活撑破容器（方案冻结+守卫钉死，见 verify-sys-modal-scroll-static.js）。 */
+        .si-modal-head { padding: 16px 22px; border-bottom: 1px solid #eef2f7; font-size: 15px; font-weight: 700; display: flex; justify-content: space-between; align-items: center; flex-shrink: 0; }
         .si-modal-head .si-close { cursor: pointer; font-size: 22px; color: #94a3b8; line-height: 1; background: none; border: none; }
-        .si-modal-body { padding: 18px 22px; }
-        .si-modal-foot { padding: 14px 22px; border-top: 1px solid #eef2f7; display: flex; justify-content: flex-end; gap: 9px; }
+        .si-modal-body { padding: 18px 22px; flex: 1; overflow-y: auto; min-height: 0; overscroll-behavior: contain; }
+        .si-modal-foot { padding: 14px 22px; border-top: 1px solid #eef2f7; display: flex; justify-content: flex-end; gap: 9px; flex-shrink: 0; }
+        /* [观察反馈优化批·2026-08-27] 上线单管理弹窗 head/foot 调优——demo 三轮定稿「X 独立行版」，
+           值全部照抄 E:\tmp\demo_待我处理卡与徽章样式_20260827_v1.0.html 区块3 调整版标注，不自创。
+           ⚠️ 只动 #siBatchOverlay 范围——通用 .si-modal 小确认弹窗（#siModalBox）与 #siFlowGuideBox/
+           #siDutyRosterBox 不动：小弹窗 head 从未挤过（无 head 动作位，标题+关闭两项足够宽松），本批
+           范围明确限定在"批次管理面板"这一个高频、head 三元素（标题/动作位/关闭）拥挤的容器。
+           #siBatchBox 直接子结构因此从 3 段（head/body/foot）变 4 段：close-bar 独立成第一个子元素，
+           head 行内的 X 移除（只剩标题+动作位两项，不再需要为 X 让位）——DOM 改动见 :860 一带，
+           静态守卫同步见 verify-sys-modal-scroll-static.js。 */
+        #siBatchOverlay .si-modal-head { padding: 14px 22px 22px 22px; }
+        /* [Opus 预筛提示-7] 三条裸类选择器补 #siBatchOverlay 前缀限定——与上方 :464 注释"只动
+           #siBatchOverlay 范围"的声称保持一致（裸类此前只是恰好未被其余三容器复用，非真正限定，
+           一旦有人在别处也用到同名类会静默漏泄跨容器）。.si-close-bar 补 flex-shrink:0——四段
+           （close-bar/head/body/foot）里独属它没写，对齐 head/foot 已有的收缩防御，防未来 body
+           内容把这一行也一并压缩变形。 */
+        #siBatchOverlay .si-close-bar { display: flex; justify-content: flex-end; align-items: center; padding: 8px 22px; flex-shrink: 0; }
+        #siBatchOverlay .si-close-handle {
+            width: 32px; height: 32px; display: flex; align-items: center; justify-content: center;
+            font-size: 20px; line-height: 1; color: #94a3b8; background: none; border: none; border-radius: 6px;
+            cursor: pointer; transition: background .15s ease, color .15s ease;
+        }
+        #siBatchOverlay .si-close-handle:hover { background: #f5f5f4; color: #57534e; }
+        /* foot 6 处纯「关闭」按钮已去掉（innerHTML 置 ''）——空 foot 整条隐藏，不留一条空白横条占位
+           （DOM 三段结构本身不动，:siBatchFoot 仍是 #siBatchBox 的直接子元素，只是内容可能为空）。 */
+        #siBatchFoot:empty { display: none; }
+        /* 上线单管理体验优化 O2 改造 2（方案 §3 O2·R-C2）：head 内新增 #siBatchHeadActions 动作位承载
+           「+ 新建上线单」等入口（原挂 foot，本批上移）。[观察反馈优化批 R7 更新] 关闭出口已收敛至
+           独立 .si-close-bar 行（见上方 :462 一带注释），foot 与 head 均不再承载任何关闭按钮。
+           #siBatchHead 标题补 min-width:0（flex 子项默认 min-width:auto，长单号标题——如
+           "上线单 " + release_no——会把动作位撑出可视区，449-M3 明文与视口宽度无关，1280 档同样
+           可复现）+ 单行省略号三件套（标题因此"可省略"，而非撑破容器）；动作位自身 flex-shrink:0
+           恒不缩——它只承载一个 admin 专属按钮，短标签不需要额外挤压空间。
+           [观察反馈优化批 R7] head 现只剩标题+动作位两个子项（关闭按钮已移出），原"关闭按钮不额外
+           加 flex-shrink:0"整段论证（针对 head 内还有第三个「×」子项时的收缩分配）随之失效，已删——
+           不再有第三个子项参与 flex 收缩分配。 */
+        /* [S7 预筛拦截·MED，观察反馈优化批 R7 更新] flex:1 不能省：.si-modal-head 是 space-between
+           两子项布局（标题/动作位），标题不吃满剩余空间时动作位会落在 head 水平居中——与 449-M1
+           空态文案「点右上角」自相矛盾。flex:1 让标题吃满左侧、动作位贴右。
+           margin-right 原为 12px（防与 head 内第三个子项「×」贴死），[Opus 预筛拦截-3] 该子项已随
+           R7 移出 head（独立成 .si-close-bar），旧理由不再成立且遗留 12px 会让「+ 新建上线单」右缘
+           （距视口右边 34px）与下方 close-bar 里 X 的右缘（22px）视觉错位——改 margin-right:0（demo
+           第二轮定稿 :418 行内 style="margin-right:0" 同一场景已如此覆盖，此前实现漏了这条）。 */
+        #siBatchHead { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        #siBatchHeadActions { flex-shrink: 0; display: flex; align-items: center; gap: 8px; margin-right: 0; }
 
         /* 表单（弹窗内）已 harmonize → u-form-group（base 见 components.css）；.req 专属规则删除，交共享 .u-req 统一着色。
            style污染根治 B 方案（20260709 v1.1）：本节原有两条"泄漏收回"补丁——① tie-flip：对抗 style.css 裸
@@ -794,7 +926,8 @@
     <!-- 批次管理弹框（独立容器） -->
     <div class="si-modal-overlay" id="siBatchOverlay">
         <div class="si-modal wide" id="siBatchBox">
-            <div class="si-modal-head"><span id="siBatchHead">上线单管理</span><button class="si-close" onclick="siCloseBatch()">&times;</button></div>
+            <div class="si-close-bar"><button type="button" class="si-close-handle" aria-label="关闭" onclick="siCloseBatch()">&times;</button></div>
+            <div class="si-modal-head"><span id="siBatchHead">上线单管理</span><span id="siBatchHeadActions"></span></div>
             <div class="si-modal-body" id="siBatchBody"></div>
             <div class="si-modal-foot" id="siBatchFoot"></div>
         </div>
@@ -1120,10 +1253,16 @@
         // "开发已交付、等某方判定通过/打回"，与待验证/待验收同一心智模型（仅判定方不同：对接人 vs 业务方）。
         acceptance: ['待对接测试', '待验证', '待验收'],
         release: ['待上线'],
-        done: ['已上线', '已关闭', '已生效'],
-        // codex API 审 MED-1（2026-07-10）：后端状态机含合法旁路态 已暂缓/已拒绝（transitions.js
-        //   hold/reject 真实流转入口），原 4 组不覆盖 → 这些单在"全部"计数内但点任一组卡后消失。
-        //   补第 5 组；组全集覆盖由 siRenderStats 内守卫兜底（新状态漏归组时 console.warn）。
+        // [待我处理全角色卡 方案 v1.3 §3.2·P1] 原 done 组（已上线/已关闭/已生效）拆两组：待归档=
+        //   已上线/已生效（观察期内，等归档动作）、已归档=已关闭（观察期已结束）。不是改名——直接改名
+        //   会让已归档单顶着"待归档"标签。已生效=config 流预留终态（现网恒不产生），按"生效≈已上线、
+        //   观察期后同样待归档"归 pending_archive，config 流落地时复核归属。不动 DB 状态值/API，纯
+        //   前端展示层分组。
+        pending_archive: ['已上线', '已生效'],
+        archived: ['已关闭'],
+        // （历史·当时共 4 组）codex API 审 MED-1（2026-07-10）：后端状态机含合法旁路态 已暂缓/已拒绝
+        //   （transitions.js hold/reject 真实流转入口），原组集不覆盖 → 这些单在"全部"计数内但点任一
+        //   组卡后消失。补本组；组全集覆盖由 siRenderStats 内守卫兜底（新状态漏归组时 console.warn）。
         paused: ['已暂缓', '已拒绝'],
     };
 
@@ -1346,6 +1485,20 @@
         EXECUTOR_NOT_ACTIVE: '该执行人已不在名单', RELEASE_NOT_PLANNING: '上线单不在计划态',
         RELEASE_EMPTY: '上线单无内容', EXECUTOR_ALREADY_DONE: '该执行人已完成',
         NOTIFY_IN_FLIGHT: '发送在途，请稍候', NOTIFY_CONCURRENT_CHANGED: '通知状态并发变更',
+        // [上线单管理体验优化 R-C5·方案 §3 O3] PATCH /sys-releases/:id 基本信息编辑（R-C4 后端已冻结的错误码，
+        //   本批补齐前端文案登记——RELEASE_NOT_PLANNING/CONCURRENT_STATE_CHANGE 已在上方/下方既有词条，不重复）。
+        RELEASE_NOTIFY_STARTED: '该批次已通知执行人，需请对接人先撤销上线安排',
+        RELEASE_PATCH_UNSUPPORTED_FIELD: '包含不支持的编辑字段（改期请用「改期」按钮）',
+        RELEASE_PATCH_INVALID_TYPE: '字段类型非法', RELEASE_TITLE_TOO_LONG: '批次说明超长',
+        VERSION_TAG_TOO_LONG: '版本号超长', RELEASE_NOTE_TOO_LONG: '上线说明超长',
+        // [上线单管理体验优化 R-C7·方案 §3 O4] DELETE /sys-releases/:id 删除上线单（R-C6 后端已冻结的
+        //   错误码，本批补齐前端文案登记——RELEASE_NOT_PLANNING/RELEASE_NOTIFY_STARTED/INVALID_RELEASE_ID
+        //   已在上方 §6.5 词条，不重复登记；siApiErr 实际优先展示后端 error 原文，本表补齐是登记纪律，
+        //   非该调用点唯一文案源）。
+        RELEASE_NOT_FOUND: '上线批次不存在',
+        RELEASE_DELETE_REASON_REQUIRED: '删除原因必填（trim 后 1..200 字）',
+        RELEASE_MEMBER_STATE_DIRTY: '批次内存在异常状态成员，无法安全删除，请先核实数据',
+        RELEASE_DELETE_CONFLICT: '批次状态已并发变更，请刷新重试',
         // §6.6 tech consult / tech-lead-comment
         TECH_LEAD_ID_REQUIRED: '缺少技术负责人参数', TECH_LEAD_NOT_WHITELISTED: '技术负责人不在可通知名单',
         TECH_LEAD_NOT_FOUND: '技术负责人账号不存在', REQUEST_TECH_CONSULT_TYPE_INVALID: '该单类型不支持技术咨询',
@@ -1501,6 +1654,21 @@
         UnifyHelpers.warnBadgeOnce('Sys_Iteration.siTypeClass', t);
         return '';
     }
+    // [观察反馈优化批·2026-08-27] 所属系统徽章六色映射（demo V1 拍板值，见页面内 <style> .u-sys-tag-*
+    //   六条规则处注释）——class 片段 gate 同 siTypeClass 同款范式：BIZ_SYSTEMS 六值各配一个变体，
+    //   往集合加成员前先查同构性——未登记的 system_name（后端透传的任意值，非本页六值白名单成员）
+    //   降级为无变体（落回 .u-sys-tag 基础灰，非炸样式），并 warnBadgeOnce 一次性告警（不静默吞信号）。
+    // [Opus 预筛提示-9] 补 Object.freeze——对齐同页 SI_EXEC_SUMMARY_CLS/SI_TYPE_CLASS 等同款「class
+    //   片段 gate」映射表的既有写法（均已 freeze），防运行期被意外改写。
+    const SI_SYS_TAG_CLASS = Object.freeze({
+        'BMS': 'u-sys-tag-bms', 'HRD': 'u-sys-tag-hrd', '电子签': 'u-sys-tag-esign',
+        '客户报销平台': 'u-sys-tag-reimb', 'RPA程序': 'u-sys-tag-rpa', '其他': 'u-sys-tag-other',
+    });
+    function siSysTagClass(sys) {
+        if (Object.prototype.hasOwnProperty.call(SI_SYS_TAG_CLASS, sys)) return SI_SYS_TAG_CLASS[sys];
+        UnifyHelpers.warnBadgeOnce('Sys_Iteration.siSysTagClass', sys);
+        return '';
+    }
     // D-A：批次族别（bug vs 非bug）——与后端 releaseFamilyOf 同源，供加单候选过滤（config 不进批次返 null）
     function siReleaseFamily(t) { return t === 'bug' ? 'bug' : (t === 'feature' || t === 'improvement') ? 'change' : null; }
 
@@ -1613,6 +1781,9 @@
         const clickedMenuItem = e.target.closest && e.target.closest('.u-head-menu-list button');
         if (!menu.contains(e.target) || clickedMenuItem) siCloseHeadMenu();
     });
+    // [codex 477 三审终解] 本监听器**不纳入** SI_ESC_LAYERS 集中路由器（siCloseBatch 定义处一带）——
+    //   .u-head-menu 挂在页面头部 navbar 层、未声明 z-index，批次面板打开时的半透明遮罩会盖住整个
+    //   视口，菜单结构上已不可见/不可点，两者不存在真实同开的可达状态，独立保留自己这个小监听器即可。
     document.addEventListener('keydown', (e) => {
         if (e.key === 'Escape' && siHeadMenuOpen) siCloseHeadMenu();
     });
@@ -1758,11 +1929,14 @@
     }
     function siMatchStatFilter(item, filterKey) {
         if (!filterKey) return true;
-        // [值班筛选与类型卡·S2] 横切维度特殊 key——必须在 SI_STATUS_GROUPS 查找**之前**判断：'my_fastlane'
-        //   不是状态组 key，SI_STATUS_GROUPS['my_fastlane'] 结构上恒 undefined，若放在下面按现状"未知 key
-        //   走 `: true` 兜底放行"的逻辑处理，会让这个横切筛选对所有单据放行而非按谓词筛选。判据与统计卡
-        //   计数共用同一函数 siIsMyFastlanePending（禁两处各写一份），不读 SI_STATUS_GROUPS。
-        if (filterKey === 'my_fastlane') return siIsMyFastlanePending(item);
+        // [待我处理全角色卡 方案 v1.3 §3.3] 横切维度特殊 key——必须在 SI_STATUS_GROUPS 查找**之前**
+        //   判断：'my_pending' 不是状态组 key，SI_STATUS_GROUPS['my_pending'] 结构上恒 undefined，若
+        //   放在下面按现状"未知 key 走 `: true` 兜底放行"的逻辑处理，会让这个横切筛选对所有单据放行
+        //   而非按谓词筛选。判据与统计卡计数共用同一函数 siIsMyPending（禁两处各写一份），不读
+        //   SI_STATUS_GROUPS。原 'my_fastlane' 值班筛选已随「待我处理」聚合卡吸收——siIsMyPending 内部
+        //   以"值班执行人"分支原样调用 siIsMyFastlanePending（函数本体未删）；458-H1 判定全仓无旧键
+        //   持久化/深链消费者，不写归一入口，本处零 'my_fastlane' 字面量。
+        if (filterKey === 'my_pending') return siIsMyPending(item);
         const statuses = SI_STATUS_GROUPS[filterKey];
         return Array.isArray(statuses) ? statuses.includes(item.status) : true;
     }
@@ -1895,11 +2069,11 @@
 
     // [S-fix4·codex 414/415 MED-1] 可点统计卡键盘语义共享处理器——Enter/Space 触发该卡既有 onclick
     //   （复用 currentTarget.click()，不在 keydown 里复制各卡的处理调用=单一事实源），其余键不拦不吞。
-    //   两排卡（状态/待我确认/类型）通用；静态卡不挂本处理器。
+    //   两排卡（状态/待我处理/类型）通用；静态卡不挂本处理器。
     function siCardKeydown(ev) {
         if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); ev.currentTarget.click(); }
     }
-    // 前端统一补齐：顶部统计卡与其他列表页一致，提供"全部 + 4 组状态"筛选，默认选中"全部"；
+    // 前端统一补齐：顶部统计卡与其他列表页一致，提供"全部 + 分组状态卡"筛选（组集=SI_STATUS_GROUPS 键，勿在此复述数量），默认选中"全部"；
     //   "返工累计"保留纯指标，不参与筛选，避免把 reopen_count（累计次数）误装成状态维度。
     function siRenderStats() {
         const vis = siVisibleTypeList().filter(i => i.status !== '已作废');
@@ -1911,8 +2085,10 @@
         //   （打回=验收环节退回·事前发现／重开=已上线后重新打开·事后发现；用户原话"重开实际上就是返工，
         //   无非是事后发现而已"）。原实现只累计 reopen_count 是口径缺口——与 v1.149.0 列表「打回×N」徽章
         //   并排后会出现"卡说返工 0、行上挂着打回×1"的直观矛盾（生产实况即如此：#23 打回 1、重开 0）。
-        // ⚠️ 拆解走 title 不进 label：label 加长会撑宽本卡，.u-stat-card 是 flex:1/min-width:130px 且
-        //   .u-stats-row 带 flex-wrap，长 label 会把 7 卡一行挤成两行（观感回退）。主数字本身已是完整
+        // ⚠️ 拆解走 title 不进 label：label 加长会撑宽本卡。[待我处理全角色卡 方案 v1.3 §3.4·P4]
+        //   拆卡后为 8 常驻卡（+条件渲染的「待我处理」共 9 张，S3 起已吸收原「待我确认」值班卡）一行不换行，页面 <style>
+        //   段已加 .si-wrap 作用域紧凑覆盖（收窄 padding/gap/字号，不动共享 components.css），
+        //   label 若变长仍会顶穿这份紧凑预算、把一行挤成两行（观感回退）。主数字本身已是完整
         //   答案，title 只作结构补充——与 S3「无代码交付原因是唯一凭证不能藏 tooltip」的场景不同（那里
         //   tooltip 是唯一载体，这里不是；详情页 kv「返工」行另有逐项全貌）。
         // ⚠️ Number() 包住两个累加值：`a + (i.x || 0)` 在 x 为字符串时会退化成**字符串拼接**（0 + '1'
@@ -1926,22 +2102,28 @@
             { key: 'active', bg: '#dbeafe', icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#1d4ed8" stroke-width="2"><path d="M12 2v4"/><path d="M12 18v4"/><path d="M4.93 4.93l2.83 2.83"/><path d="M16.24 16.24l2.83 2.83"/></svg>', label: '进行中', n: vis.filter(i => SI_STATUS_GROUPS.active.includes(i.status)).length },
             { key: 'acceptance', bg: '#fef3c7', icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#92400e" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>', label: '待验收', n: vis.filter(i => SI_STATUS_GROUPS.acceptance.includes(i.status)).length },
             { key: 'release', bg: '#ccfbf1', icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#0f766e" stroke-width="2"><path d="M12 2v12"/><path d="M5 9l7-7 7 7"/><path d="M5 20h14"/></svg>', label: '待上线', n: vis.filter(i => SI_STATUS_GROUPS.release.includes(i.status)).length },
-            { key: 'done', bg: '#d1fae5', icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#065f46" stroke-width="2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>', label: '已完成', n: vis.filter(i => SI_STATUS_GROUPS.done.includes(i.status)).length },
+            { key: 'pending_archive', bg: '#fde68a', icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#b45309" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M3 10h18"/><path d="M9 14h6"/></svg>', label: '待归档', n: vis.filter(i => SI_STATUS_GROUPS.pending_archive.includes(i.status)).length },
+            { key: 'archived', bg: '#d1fae5', icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#065f46" stroke-width="2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>', label: '已归档', n: vis.filter(i => SI_STATUS_GROUPS.archived.includes(i.status)).length },
             { key: 'paused', bg: '#fef9c3', icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#854d0e" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="10" y1="9" x2="10" y2="15"/><line x1="14" y1="9" x2="14" y2="15"/></svg>', label: '暂缓/拒绝', n: vis.filter(i => SI_STATUS_GROUPS.paused.includes(i.status)).length },
             { key: null, bg: '#fee2e2', icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>', label: '返工累计', n: siReturnedSum + siReopenSum, title: `打回 ${siReturnedSum} 次（验收环节退回·事前发现）· 重开 ${siReopenSum} 次（已上线后重新打开·事后发现）` },
         ];
-        // [值班筛选与类型卡·S2·锚点 §3 技术自决] 「待我确认」统计卡——值班执行人一键筛出"等我确认部署"的
-        //   先行上线单。count 基数与其余卡一致（vis=siVisibleTypeList 去已作废），过 siIsMyFastlanePending
-        //   （统计卡计数与 siMatchStatFilter 筛选共用同一谓词，禁两处各写一份）。末尾追加、条件渲染
-        //   （siShouldRenderMyFastlaneCard：count>0 或本卡正被激活为筛选条件时才显示——后者堵陷阱：筛选
-        //   激活时确认完最后一单，卡若随 count 归零而消失，用户会被困在空筛选结果里找不到"全部"退出）。
-        const myFastlaneCount = vis.filter(siIsMyFastlanePending).length;
-        if (siShouldRenderMyFastlaneCard(myFastlaneCount, siActiveStat)) {
-            stats.push({
-                key: 'my_fastlane', bg: '#e0e7ff',
-                icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#4338ca" stroke-width="2"><path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z"/><path d="m12 15-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z"/><path d="M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0"/><path d="M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5"/></svg>',
-                label: '待我确认', n: myFastlaneCount,
-                title: `先行上线单等待我做部署确认：${myFastlaneCount} 单`,
+        // [待我处理全角色卡 方案 v1.3 §3.3] 聚合卡——七身份判据取并集（siIsMyPending，函数定义于下方
+        //   siIsMyFastlanePending 附近），吸收原「待我确认」值班卡（siIsMyFastlanePending 判据现为其中
+        //   "值班执行人"一个分支，函数本体未删、原样调用）。count 基数与其余卡一致（vis=
+        //   siVisibleTypeList 去已作废），title 走分段计数函数 siMyPendingBreakdown（按身份计次、允许
+        //   重叠，非并集去重——两种计数刻意不同源，故 title 末尾固定追加"同一单可命中多个身份"提示，
+        //   见该函数注释）。条件渲染复用泛化后的 siShouldRenderConditionalCard（⭐ 456-H1 冻结：原
+        //   siShouldRenderMyFastlaneCard 内部硬编码 activeStat==='my_fastlane'，只换调用对象不改内部
+        //   会让本卡在"筛选激活+计数归零"时消失——正是该函数当初要防的坑，故泛化出第三参 cardKey，
+        //   全部调用点同步）。**位置**：插在 stats 数组最前（方案 §3.3 冻结的位置合同，非"全部"卡
+        //   之后）。
+        const myPendingCount = vis.filter(siIsMyPending).length;
+        if (siShouldRenderConditionalCard(myPendingCount, siActiveStat, 'my_pending')) {
+            stats.unshift({
+                key: 'my_pending', bg: '#e0e7ff',
+                icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#4338ca" stroke-width="2"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>',
+                label: '待我处理', n: myPendingCount,
+                title: siMyPendingBreakdown(vis),
             });
         }
         document.getElementById('siStatsRow').innerHTML = stats.map((s) => {
@@ -1949,6 +2131,10 @@
             if (s.key === null) classes.push('static');
             if (s.key !== null && s.key === siActiveStat) classes.push('active');
             if (s.key === '' && siActiveStat === '') classes.push('active');
+            // [观察反馈优化批·2026-08-27·demo V3 定稿] 「待我处理」卡 count>0 才加状态强化类；
+            // count=0 恒不带（含"筛选激活但已归零"分支——siShouldRenderConditionalCard 的转义态，
+            // 那时 s.n===0，本行天然不追加，同该转义态"卡仍在但不该看起来像还有事"的语义一致）。
+            if (s.key === 'my_pending' && s.n > 0) classes.push('si-stat-alert');
             const onClick = s.key === null ? '' : ` onclick="siSetStatFilter('${s.key}')"`
             // [S-fix4·codex 414/415 MED-1] 可点卡补全交互语义四件（role="button"/tabindex=0/Enter·Space
             //   键盘触发/aria-pressed）——415 裁断「新增交互面不得继续复制既有无障碍缺陷」采纳；本页全部
@@ -1957,7 +2143,7 @@
             //   与视觉 active class 同源（classes.includes('active')·单一事实源）；静态卡（返工累计）
             //   不挂交互语义、维持 role="img" 分支。
             const interactive = s.key === null ? '' : ` role="button" tabindex="0" onkeydown="siCardKeydown(event)" aria-pressed="${classes.includes('active')}"`;
-            // 拆解信息可选（返工累计静态卡 + 值班筛选与类型卡·S2 的「待我确认」可点卡两处用），无 title
+            // 拆解信息可选（返工累计静态卡 + 待我处理全角色卡·S3 的「待我处理」可点卡两处用），无 title
             //   的卡不渲染这些属性、不留空 title=""。
             //   ⚠️ title 与 aria-label **成对**——照搬本页 SI_PRIORITY_LABEL / SI_RISK_LEVEL_LABEL 既有范式
             //   （codex60 L-2 沉淀："title 给鼠标、aria-label 给屏幕阅读器/键盘"）：title 只在桌面悬停可见，
@@ -1966,7 +2152,7 @@
             //   故 aria-label 必须自带标签+数字（不能只写拆解，否则读屏用户丢失主信息）。
             //   ⚠️ [S-fix 修复批·2026-08-15·5a] role="img" 只应加在**不可点**的静态卡（返工累计，
             //   s.key===null，onClick 恒空串）——role="img" 会把元素的语义角色改判成"图片"，可点的
-            //   「待我确认」卡（有 onclick，本是可交互的筛选按钮）若也套上这个角色，读屏会把它播报成
+            //   「待我处理」卡（有 onclick，本是可交互的筛选按钮）若也套上这个角色，读屏会把它播报成
             //   一张图，可点击这件事本身对读屏用户变得不可发现。有 onclick 时不加 role，title/aria-label
             //   两项照旧保留（读屏仍能读到完整拆解文案，只是不再被误标成"图片"）。
             const infoAttr = s.title
@@ -2064,7 +2250,7 @@
         //   'localtime') 全量值，不存在纯日期/带时分混存的形态漂移，不踩上面 deadline 注释记的 UTC 陷阱）。
         last_completed_at: 'date',
     };
-    // 状态业务序（与 siRenderStats 分组方向一致：进行中→待验收→待上线→已完成→暂缓/拒绝；已作废排末尾）
+    // 状态业务序（与 siRenderStats 分组方向一致：进行中→待验收→待上线→待归档→已归档→暂缓/拒绝；已作废排末尾）
     // codex API 审 MED-2（2026-07-10）：补 已暂缓/已拒绝 显式序——共享排序对未知状态给 99 会
     //   排到已作废之后，与"已作废排末尾"注释矛盾；显式放已生效后、已作废前。
     const SI_STATUS_SORT_ORDER = {
@@ -2078,7 +2264,9 @@
         待受理: 0, 待修改: 1, 待指派: 2, 待处理: 2, 开发中: 3,
         待对接测试: 4, 处理中: 5,
         待验证: 6, 待验收: 7, 待上线: 8,
-        已上线: 9, 已关闭: 10, 已生效: 11,
+        // [codex 465 MED-1·P-C1] 已生效↔已关闭序值对调：拆组后 pending_archive（已上线/已生效）须整体
+        //   早于 archived（已关闭），旧序 已生效:11>已关闭:10 会让列表状态序与卡分组方向交错。
+        已上线: 9, 已生效: 10, 已关闭: 11,
         已暂缓: 12, 已拒绝: 13,
         已作废: 14,
     };
@@ -2507,7 +2695,90 @@
         //   解法本就是内联 style，非新增修饰类。
         return `<span class="u-status-badge sem-fastlane" style="margin-left:6px" title="${esc(title)}">待先行部署 ${done}/${total}${suffix}</span>`;
     }
-    // [值班筛选与类型卡·S1/S2·锚点 §3 技术自决] 「待我确认」统计卡 + 点卡筛选**共用的唯一判据**——
+    // [待我处理全角色卡 方案 v1.3 §3.3] 七身份判据——聚合卡「待我处理」的计数（siRenderStats）与点卡
+    //   筛选（siMatchStatFilter 的 'my_pending' 分支）**共用的唯一判据**，禁两处各写一份（同下方
+    //   siIsMyFastlanePending 契约注释一贯的单点维护纪律）。六个现行身份 + 一个仅历史兼容身份，
+    //   **同一账号叠加取并集**（|| 短路即可，身份间刻意不做互斥优先级——否决理由见下方分段计数函数
+    //   siMyPendingBreakdown 头部注释）。
+    function siIsMyPending(item) {
+        // [codex 467 MED-2] uid 有效域与列表路由同口径归一（routes/sys-iteration/index.js GET /sys-issues
+        //   处 466 MED-1 同款）：仅正安全整数保留，否则 null——非安全整数大数经 Number 取整后可能撞
+        //   created_by/release_assignee_id（⑤⑦ 两个前端直比分支），后端派生列已归 0 而前端命中=跨端
+        //   接缝不一致。null 时 uid > 0 恒 false，⑤⑦ 自动不命中。
+        const rawUid = currentUser ? Number(currentUser.id) : NaN;
+        const uid = (Number.isSafeInteger(rawUid) && rawUid > 0) ? rawUid : null;
+        return (
+            // ① admin——⭐ 457-H1 冻结形态：表格把 admin 的身份写在"身份"列而非判据列——admin 的
+            //   "身份"不是"这单与我有关"，是"我这个角色对这单有推进义务"，实现时必须显式写
+            //   isAdmin() &&，否则会让下面三条状态判据对所有登录用户生效（最易漏的坑）。归档分支
+            //   复用 SI_STATUS_GROUPS.pending_archive（不散落硬编码"已上线"，否则漏 config 流"已生效"，
+            //   v1.0 曾漏）。「待处理」归本分支非开发分支——方案 §3.3 修正 2：bug 流「待处理」=
+            //   尚未指派开发，常规路径下开发侧 my_dev_pending 恒 0，但存在设计内预指派写路径（N0 第
+            //   6b 步核实：add/reassign 可在「待处理」期间产生在册 pending 行）——即便如此，下方②
+            //   开发分支的状态门（SI_DEV_FAMILY_STATUSES 不含「待处理」）仍能正确拦住不命中，因为
+            //   「待处理」的推进义务在 admin 指派，不在开发本人动手提交。
+            (isAdmin() && (
+                SI_STATUS_GROUPS.pending_archive.includes(item.status)
+                || ['待指派', '待处理', '待验证'].includes(item.status)
+                || item.post_release_acceptance === 'pending'
+            ))
+            // ② 开发——直接引用 SI_DEV_FAMILY_STATUSES 常量本身（禁写第二份 ['开发中','处理中'] 字面量，
+            //   与详情页 canSubmit 单一事实源，见该常量声明处注释）；my_dev_pending 是后端派生列（判
+            //   "在册∧本人∧dev_status='pending'"，SQL 刻意不含状态门，见 index.js 该列声明处注释），
+            //   状态门在此叠加。
+            || (SI_DEV_FAMILY_STATUSES.includes(item.status) && Number(item.my_dev_pending) === 1)
+            // ③ 绑定对接人——身份门内含在判据里（is_my_intake_liaison===1 即"这单对接人是我"）
+            || (item.status === '待对接测试' && Number(item.is_my_intake_liaison) === 1)
+            // ④ 受理人——⭐ 空单可认领半区**有意不写**（§9 P1 自决·2026-08-26·S3 前置发现：列表投影
+            //   无"未绑定"信号，is_my_intake_liaison 这个 B1 布尔列上"未绑定"与"绑的是别人"同为 0，
+            //   前端无法在列表行区分；备份实证全库 intake_liaison_id NULL 行=0，详情页认领链路不受
+            //   影响，故不补这半区）。若未来出现空单，需在列表投影新增 is_intake_unbound 列（同
+            //   my_dev_pending/is_my_intake_liaison 先例）才能补全，不能靠前端猜测判断。
+            || (item.status === '待受理' && Number(item.is_my_intake_liaison) === 1)
+            // ⑤ 建单人——uid 取法对齐本页既有惯例（如 :4703 一带 isCreatorUser 的 uid>0 防御写法）
+            || (item.status === '待修改' && uid > 0 && Number(item.created_by) === uid)
+            // ⑥ 值班执行人——原样调用，函数本体一字不动（siIsMyFastlanePending 保留独立可测，见其
+            //   自身头部注释）
+            || siIsMyFastlanePending(item)
+            // ⑦ 被指定上线开发——仅历史兼容·机制 2026-07-30 全封无新写入·2026-08-26 核查存量 0
+            //   （D-A 保留拍板，见方案 §4「N0 执行结果」第 5 步归档 SQL：release_assignee_id IS NOT
+            //   NULL AND type='bug' AND status='待上线' → count=0）。type 显式限定 'bug'——该字段仅在
+            //   bug 流写入，非万能匹配。
+            || (item.type === 'bug' && item.status === '待上线' && uid > 0 && Number(item.release_assignee_id) === uid)
+        );
+    }
+    // [待我处理全角色卡 方案 v1.3 §3.3·455-M3 冻结分段合同] 供 title 悬停文案的分段计数——admin
+    //   判据内含 3 个状态子条件，为让 tooltip 可读，把它拆成两段展示："验收归档"（待归档态 ∨ 待验证 ∨
+    //   验收态，语义都是"等判定/等归档"）与"待指派"（待指派 ∨ 待处理，语义是"等我往下派"）；其余 6 段
+    //   与 siIsMyPending 表格其余 6 个身份一一对应。**分段按命中身份计次、允许重叠**（同一单可能同时
+    //   落进多段，如 admin 兼开发时该单在"验收归档/待指派"与"待我提交"都计一次）——与主计数（
+    //   siIsMyPending 整体谓词、并集去重）刻意不同源，故 title 末尾固定追加"（同一单可命中多个身份）"
+    //   防止用户误读成统计错误。**否决"互斥优先级"方案**——那会让 admin 兼开发的人看到"我明明是
+    //   开发却被归到 admin 段"，更难理解（方案 §3.3 原文）。计 0 的段不显示。
+    function siMyPendingBreakdown(vis) {
+        // [codex 467 MED-2] uid 归一与 siIsMyPending 同口径（正安全整数外恒 null）——分段⑥⑧ 两个
+        //   前端直比分支与谓词 ⑤⑦ 同族，归一必须两处同步（否则主计数 0 而分段有数）。
+        const rawUid = currentUser ? Number(currentUser.id) : NaN;
+        const uid = (Number.isSafeInteger(rawUid) && rawUid > 0) ? rawUid : null;
+        const admin = isAdmin();
+        const segs = [
+            ['验收归档', admin ? vis.filter(i => SI_STATUS_GROUPS.pending_archive.includes(i.status) || i.status === '待验证' || i.post_release_acceptance === 'pending').length : 0],
+            ['待指派', admin ? vis.filter(i => i.status === '待指派' || i.status === '待处理').length : 0],
+            ['待我提交', vis.filter(i => SI_DEV_FAMILY_STATUSES.includes(i.status) && Number(i.my_dev_pending) === 1).length],
+            ['对接测试', vis.filter(i => i.status === '待对接测试' && Number(i.is_my_intake_liaison) === 1).length],
+            ['待受理', vis.filter(i => i.status === '待受理' && Number(i.is_my_intake_liaison) === 1).length],
+            ['待修改', vis.filter(i => i.status === '待修改' && uid > 0 && Number(i.created_by) === uid).length],
+            ['值班部署', vis.filter(siIsMyFastlanePending).length],
+            ['历史指定', vis.filter(i => i.type === 'bug' && i.status === '待上线' && uid > 0 && Number(i.release_assignee_id) === uid).length],
+        ];
+        const parts = segs.filter(([, n]) => n > 0).map(([label, n]) => `${label} ${n}`);
+        return (parts.length ? parts.join(' · ') : '暂无') + '（同一单可命中多个身份）';
+    }
+    // ⚠️ [S3 起语义更新·待我处理全角色卡 §3.3] 本函数已降为 siIsMyPending 聚合谓词的"值班执行人"
+    //   身份分支⑥——独立「待我确认」卡已移除，siRenderStats 计数与 siMatchStatFilter 筛选两个原直接
+    //   消费点均已上移到 siIsMyPending（本函数经其间接消费）。下段历史注释里"统计卡+筛选共用唯一判据/
+    //   必须调用同一个本函数"的措辞描述的是 S1-S2 时期形态，其单点维护纪律现由 siIsMyPending 承接。
+    // [值班筛选与类型卡·S1/S2·锚点 §3 技术自决]（历史）「待我确认」统计卡 + 点卡筛选**共用的唯一判据**——
     //   徽章前置三条件（type==='bug' ∧ status==='待验证' ∧ fast_release_active_auth）AND 后端新字段
     //   fast_release_my_pending（S1 交付报告"原始信号不掺闸，前端消费须 AND"的消费端落点）。siRenderStats
     //   统计卡计数与 siMatchStatFilter 的筛选路由必须调用**同一个**本函数，禁两处各写一份判据（同族
@@ -2525,15 +2796,20 @@
             && Number(i.fast_release_active_auth) === 1
             && Number(i.fast_release_my_pending) === 1;
     }
-    // [值班筛选与类型卡·S2] 「待我确认」统计卡渲染条件——count>0 时天然可见；count=0 但本卡当前正是
-    //   激活筛选（siActiveStat==='my_fastlane'）时**仍渲染**（堵陷阱：筛选激活时确认完最后一单，卡若
-    //   随 count 归零而消失，用户会被困在一个空筛选结果里，找不到入口点"全部"退出——见锚点 §3 技术
-    //   自决原文）。拆成独立纯函数（不内联进 siRenderStats 的 if）纯为可测——siRenderStats 本体重度
-    //   依赖 DOM（document.getElementById），render 条件这个布尔判断单独拎出才能被 verify 沙箱真执行
-    //   覆盖三态，同 siIsMyFastlanePending 一并归入本页"判据抽成纯函数，两处只调用不重复实现"的既有
-    //   惯例（siIsDevAction 即同款范式）。
-    function siShouldRenderMyFastlaneCard(count, activeStat) {
-        return count > 0 || activeStat === 'my_fastlane';
+    // [待我处理全角色卡 方案 v1.3 §3.3·456-H1 冻结非可选] 条件渲染卡通用判据——count>0 时天然可见；
+    //   count=0 但本卡当前正是激活筛选（activeStat===cardKey）时**仍渲染**（堵陷阱：筛选激活时处理完
+    //   最后一单，卡若随 count 归零而消失，用户会被困在一个空筛选结果里，找不到入口点"全部"退出——
+    //   原为值班筛选与类型卡·S2 锚点 §3 技术自决的 siShouldRenderMyFastlaneCard，内部曾硬编码
+    //   activeStat==='my_fastlane'）。⭐ 泛化改名为本函数、内部改用第三参 cardKey——若当初只换调用
+    //   对象（「待我处理」卡）而不改内部硬编码，会让本卡在"筛选激活+计数归零"时消失，正是这个函数
+    //   当初要防的坑（456-H1 冻结，非可选）；**全部调用点已同步**（现仅 siRenderStats 一处，见
+    //   `siShouldRenderConditionalCard(myPendingCount, siActiveStat, 'my_pending')`）。拆成独立纯函数
+    //   （不内联进 siRenderStats 的 if）纯为可测——siRenderStats 本体重度依赖 DOM
+    //   （document.getElementById），render 条件这个布尔判断单独拎出才能被 verify 沙箱真执行覆盖三态，
+    //   同 siIsMyFastlanePending/siIsMyPending 一并归入本页"判据抽成纯函数，两处只调用不重复实现"的
+    //   既有惯例（siIsDevAction 即同款范式）。
+    function siShouldRenderConditionalCard(count, activeStat, cardKey) {
+        return count > 0 || activeStat === cardKey;
     }
     // [S13·§15.4] 入参从"平铺 item 数组"改为"族聚类后的行描述数组"（{item, role, isContext, isLast,
     //   rooted}，见 siClusterFamilyBlocks/siPackFamilyPages）——解构时把 item 仍绑到变量名 `i`，本函数
@@ -3444,7 +3720,21 @@
         //   （同 fast_release_authorize/_revoke 一带模式，见下方 SI_TL_NOTE_OWN_LABEL_CODES）——超时收回是
         //   需要与"人工撤销"（fast_release_revoke）区分辨识的高关注度事件（成因不同：一个是管理员主动
         //   操作，一个是系统按规则自动收回）。
-        fast_release_auth_expired: '授权超时收回'
+        fast_release_auth_expired: '授权超时收回',
+        // [上线单管理体验优化 R-C5·方案 §3 O3·449-H2/D9] 上线单基本信息编辑（title/version_tag/release_note
+        //   三字段任一实际变更，PATCH /sys-releases/:id，R-C4 后端已写好 event_type='note'+本 action_code，
+        //   R-C5 补齐前端三处登记）——独立徽章而非落回通用「备注」：summary 已是完整可读文案"上线单信息
+        //   修改（标题、版本号）"这类，但仍给专属标签便于时间线里快速扫到"这单被改过基本信息"，同
+        //   completion_overrun_reason 等既有一带模式。⚠️ 不注册进 SI_TL_RELEASE_SCOPE_LABEL——那会被
+        //   「隐藏上线单调整记录」过滤器连带隐藏，违反 D9「信息修改始终可见」（方案 §3 O3 明文）。
+        release_info_edit: '上线单信息修改',
+        // [上线单管理体验优化 R-C7·方案 §3 O4] 删除上线单——独立徽章而非落回通用「备注」：与
+        //   release_info_edit 同一带模式（成员单被删批次波及本身就是需要一眼识别的高关注度事件），
+        //   summary 已区分"退回「待上线」"/"历史批次关联已清除（单据保持「已作废」）"两种措辞（见
+        //   index.js DELETE /sys-releases/:id 步骤⑤），标签统一用中性描述"上线单已删除"。⚠️ 同 D9
+        //   不注册进 SI_TL_RELEASE_SCOPE_LABEL——那会被「隐藏上线单调整记录」过滤器连带隐藏（方案未
+        //   明文要求 O4 走 D9，但 O4 删除是比 O3 编辑更高关注度的事件，理应同等甚至更强地"始终可见"）。
+        release_deleted: '上线单已删除'
     };
     const SI_TL_CLS = {
         created: 'si-tl-amber', derive: 'si-tl-amber',
@@ -3508,7 +3798,14 @@
         //   同族语义（"授权/集合被收回"这个动作性质本身，同 :3376 一带"徽章色反映动作性质非底层业务结果
         //   正负"的既有取色原则），不因触发方是系统自动而非人工操作就改归其它色——对用户而言"这份授权
         //   没了"是同一件事，只是留痕文案区分成因（授权超时收回 vs 先行上线授权撤销）。
-        fast_release_auth_expired: 'si-tl-red'
+        fast_release_auth_expired: 'si-tl-red',
+        // [R-C5] 归 indigo——与既有 schedule/assign/set_release_flag/fast_release_authorize 等"程序性/
+        //   描述性信息编辑"动作同族（非成功/失败/收回类语义，标题/版本号/说明被改动本身是中性事实）。
+        release_info_edit: 'si-tl-indigo',
+        // [R-C7] 归 red——与既有 fast_release_revoke/fast_release_roster_cleared/fast_release_auth_expired
+        //   同族语义（"批次/关联被收回或清除"这个动作性质本身，同 :3376 一带既有取色原则），删除是
+        //   本页最高关注度的收回类动作。
+        release_deleted: 'si-tl-red'
     };
     // 上线体统一重构 C2b（199 审 MED-3）：release_add/release_remove/release_date_change/release_schedule_cancel/
     //   release_published 五个 action_code 全部落 event_type='scope_change'（§6.13），此前 siRenderTimeline 的
@@ -3628,7 +3925,13 @@
     //   产出这个值，故本判断只对存量行生效，不影响新行（新行走后面 else 兜底分支原样 esc 显示）。
     // [MED-2·组A 起 + 组B 扩] note 型事件里"取自己徽章而非落回通用「备注」"的 action_code 白名单——
     //   与 verify-sys-timeline-label-coverage.js 的 computeDisplayKey 同一份口径同源，改这里必须同改那边。
-    const SI_TL_NOTE_OWN_LABEL_CODES = new Set(['assign_overdue_eta', 'fast_release_authorize', 'fast_release_revoke', 'fast_release_staged', 'fast_release_exec_confirm', 'fast_release_roster_added', 'fast_release_roster_removed', 'fast_release_roster_cleared', 'post_release_accept_pass', 'post_release_accept_fail', 'eta_auto_from_deadline', 'eta_auto_sla', 'completion_overrun_reason', 'fast_release_auth_expired']);
+    // [上线单管理体验优化 R-C5·方案 §3 O3] +release_info_edit（上线单基本信息编辑独立徽章，见上方
+    //   SI_TL_LABEL/SI_TL_CLS 处注释；与 verify-sys-timeline-label-coverage.js 的 NOTE_OWN_LABEL_ACTION_CODES
+    //   同一份口径同源，改这里必须同改那边——本文件头部 :3786 一带注释已明文本条纪律）。
+    // [上线单管理体验优化 R-C7·方案 §3 O4] +release_deleted（删除上线单独立徽章，见上方 SI_TL_LABEL/
+    //   SI_TL_CLS 处注释；同款口径同源纪律——已同步改 verify-sys-timeline-label-coverage.js 的
+    //   NOTE_OWN_LABEL_ACTION_CODES，见该文件 R-C7 一带注释）。
+    const SI_TL_NOTE_OWN_LABEL_CODES = new Set(['assign_overdue_eta', 'fast_release_authorize', 'fast_release_revoke', 'fast_release_staged', 'fast_release_exec_confirm', 'fast_release_roster_added', 'fast_release_roster_removed', 'fast_release_roster_cleared', 'post_release_accept_pass', 'post_release_accept_fail', 'eta_auto_from_deadline', 'eta_auto_sla', 'completion_overrun_reason', 'fast_release_auth_expired', 'release_info_edit', 'release_deleted']);
     // [S3·§5] fast_release_exec_online **不进本 Set**——event_type='status_change'（同 accept/release/
     //   liaison_test_pass 等既有 status_change 事件同款），走的是另一条渲染路径（直接用 action_code 查
     //   SI_TL_LABEL，不经本 Set 判定），加进来不生效，反而误导读者以为它是 note 型事件。
@@ -6010,7 +6313,7 @@
             `<label class="si-chk-row"><input type="checkbox" class="si-collab-chk" value="${u.id}" ${pre.has(Number(u.id)) ? 'checked' : ''}><span class="si-chk-text">${esc(u.display_name || u.username)}</span></label>`
         ).join('');
         return `<div class="u-form-group"><label>${esc(label || '开发成员（可多选）')}</label>
-            <div style="max-height:150px;overflow:auto;border:1px solid #e5e7eb;border-radius:6px;padding:6px">${opts || '<span class="si-muted">无可选用户</span>'}</div>
+            <div style="max-height:min(150px,45vh);overflow:auto;overscroll-behavior:contain;border:1px solid #e5e7eb;border-radius:6px;padding:6px">${opts || '<span class="si-muted">无可选用户</span>'}</div>
         </div>`;
     }
     function siReadCollabChkIds(excludeId) {
@@ -6077,7 +6380,7 @@
         const expectedMemberIds = devAssignees.map(d => Number(d.user_id));
         const pre = new Set(expectedMemberIds);
         const pickerHtml = `<div class="u-form-group"><label>开发成员（勾选=最终在册名单，去主次·无「主开发」）</label>
-            <div style="max-height:180px;overflow:auto;border:1px solid #e5e7eb;border-radius:6px;padding:6px">
+            <div style="max-height:min(180px,45vh);overflow:auto;overscroll-behavior:contain;border:1px solid #e5e7eb;border-radius:6px;padding:6px">
             ${siUsers.filter(u => u.role !== 'viewer').map(u =>
                 `<label class="si-chk-row"><input type="checkbox" class="si-member-chk" value="${u.id}" ${pre.has(Number(u.id)) ? 'checked' : ''}><span class="si-chk-text">${esc(u.display_name || u.username)}</span></label>`
             ).join('') || '<span class="si-muted">无可选用户</span>'}
@@ -6141,7 +6444,7 @@
         const reqInfo = (cr.data && cr.data.requester) || { eligible: false, name: '' };
         const baseNames = baseM.map(b => esc(b.display_name)).join('、') || '群主/建单人/开发/你';
         const pickerHtml = `<div class="u-form-group"><label>可选拉入成员（有手机号的系统用户，手动勾选）</label>
-            <div style="max-height:150px;overflow:auto;border:1px solid #e5e7eb;border-radius:6px;padding:6px">
+            <div style="max-height:min(150px,45vh);overflow:auto;overscroll-behavior:contain;border:1px solid #e5e7eb;border-radius:6px;padding:6px">
               ${cand.length ? cand.map(u => `<label class="si-chk-row"><input type="checkbox" class="si-mp-chk" value="${u.id}"><span class="si-chk-text">${esc(u.display_name)}</span></label>`).join('') : '<span class="si-muted">无其他可选成员（无绑手机号的系统用户）</span>'}
             </div>
             <div class="u-hint">固定入群（无需勾选）：${baseNames}</div>
@@ -7460,6 +7763,74 @@
     //   防止"关闭其中一个面板后紧接着打开另一个共享面板"这个窗口期内，上一个面板一条还在飞的旧请求
     //   晚到，凭旧令牌值巧合仍等于当前值而误写进已经被其他面板占用的 DOM。
     function siCloseBatch() { document.getElementById('siBatchOverlay').classList.remove('open'); siAuditGen++; siBatchDetailRel = null; }
+    // ============================================================
+    // Esc 关闭路由器（SI_ESC_ROUTER，codex 477 三审终解）——单一 document keydown 监听器 + 分层注册表，
+    // 是全文**唯一**处理"Esc 关闭弹层"逻辑的代码。取代此前两轮"分散监听器各自 preventDefault + 消费
+    // 协议"的方案——那套方案两轮补丁都没能补平：① preventDefault 被拿来当跨监听器的业务标记用，一旦
+    // 将来任何无关逻辑也调用了它就会被误读成"已消费本次 Esc"；② 高层弹层之间（如 FlowGuide 与
+    // DutyRoster 同为 z-1200）彼此仍可能互穿，双防线协议只堵了"高层→批次"这一条方向，没堵"高层→
+    // 高层"。集中路由器结构性杜绝这两类问题：只有一个监听器在判断"该关谁"，不存在"谁先执行"的竞态，
+    // 也不存在"该不该信任 preventDefault"的语义歧义。
+    //
+    // SI_ESC_LAYERS 是 Esc 关闭行为的**唯一权威源**——按视觉层级从高到低（z-index 降序）排列：
+    //   siImgLightbox（z-3000，show 类，siCloseLightbox）
+    //   siModalOverlay（z-1200，open 类，close:null——**阻塞层**，见下方说明）
+    //   siFlowGuideOverlay（z-1200，open 类，siCloseFlowGuide）
+    //   siDutyRosterOverlay（z-1200，open 类，siCloseDutyRoster——与 FlowGuide 同 z-1200，两者互斥由
+    //     各自打开函数保证运行时不会同时 open，见 siOpenFlowGuide/siOpenDutyRoster 处注释；数组里的
+    //     先后顺序只是"万一真的同开"这种理论场景下的兜底判据，不是防止同开的机制本身）
+    //   siBatchOverlay（z-1100，open 类，siCloseBatch）
+    // 路由逻辑：Esc 触发时从数组第一项开始逐个检查，找到**第一个**处于打开态的层：
+    //   · 若该层 close 是函数——preventDefault() + 调用它关闭该层 + return；
+    //   · 若该层 close 是 null（**阻塞层**，目前只有 siModalOverlay）——preventDefault() + return，
+    //     不调用任何关闭动作。preventDefault 仍然要调用（消费掉这次 Esc，维持"通用弹窗按键无副作用
+    //     但事件本身已被处理"的语义），只是不产生"关闭"这个副作用。
+    // 一次 Esc 恒定只处理最上面那一层（关闭或阻塞二选一），层间穿透在结构上不可能发生——不是"靠判断
+    // 避免"，是遍历顺序 + "找到第一个就 return"本身保证了这一点。
+    //
+    // [codex 477 四审 HIGH 收口] siModalOverlay 为什么要作为**阻塞层**登记进数组，而不是像上一版那样
+    // 在遍历之前单独写一个"siModalOverlay open 就直接 return"的前置特判？——前置特判版本有一个结构性
+    // 漏洞：它比整个遍历循环都靠前，一旦命中就直接 return，**不管 Lightbox 是否恰好也开着**都会被
+    // 挡在最外层无法继续判断。虽然 modal（siModalOverlay）与 Lightbox 互为全屏遮罩，正常使用路径下
+    // 结构上很难同时打开，但"结构上很难"不等于"结构上不可能"（防御性代码不应该靠"业务上不会发生"
+    // 来免检）——与其继续声称一个未被结构强制保证的不变量，不如把优先级模型本身补完整：阻塞层现在
+    // 只是数组里众多层之一，天然排在 Lightbox 之后、FlowGuide/DutyRoster/批次面板之前——真遇到
+    // "Lightbox 恰好叠在 modal 之上"这种异常态，Esc 会按正常的"从上往下找第一个 open 的层"逻辑先关
+    // Lightbox（因为它在数组里排得更靠前，遍历会先检查到它），而不会被 modal 的特判挡在外面动弹不得；
+    // modal 单独打开（无 Lightbox）时的行为和上一版完全一致——仍然是"这次 Esc 无操作"。
+    //
+    // headMenu（「⚙️ 管理」下拉菜单，:1743 一带）独立保留自己的 Esc 处理器，不迁入本路由器：菜单
+    // 语义与"全屏遮罩弹层"不同（点外/选项即收起，非"层叠遮挡"关系），且 z-index 远低于 1100——批次
+    // 面板打开时其半透明遮罩会盖住整个视口，菜单结构上已不可见/不可点，不存在"菜单开着的同时更高层
+    // 弹层也开着"这种真实可达状态。
+    //
+    // ⚠️ 新增任何弹层需要 Esc 可关时，三步走：① 按其 z-index 在 SI_ESC_LAYERS 数组中插入到正确位置
+    // （降序）② 提供 { id, openClass, close } 三字段（无需关闭动作的阻塞层填 close:null）③ 静态守卫
+    // verify-sys-modal-scroll-static.js §⑬ 会交叉核对数组顺序/字段值，同步不到位会在那里判红。
+    // ⚠️ [codex 477 五审 LOW 登记] 若新增/修改的是**某个具体 ID 专属**的 z-index 覆盖规则（如
+    // `#siFlowGuideOverlay{z-index:1300}` 这种只作用于单个元素、不是共享 class 规则的写法），必须
+    // 同步手动核对本注册表的顺序与静态守卫——§⑬ 的 z-index 哨兵按 class 选择器（.si-modal-overlay 等）
+    // 读取层级，读不到 ID 级覆盖规则（已知形态哨兵边界，非漏检：不引入运行时 computed style 校验是
+    // 明确的成本取舍，见 extractZIndexMap 定义处注释）。
+    // ============================================================
+    const SI_ESC_LAYERS = [
+        { id: 'siImgLightbox', openClass: 'show', close: () => siCloseLightbox(null) },
+        { id: 'siModalOverlay', openClass: 'open', close: null },
+        { id: 'siFlowGuideOverlay', openClass: 'open', close: siCloseFlowGuide },
+        { id: 'siDutyRosterOverlay', openClass: 'open', close: siCloseDutyRoster },
+        { id: 'siBatchOverlay', openClass: 'open', close: siCloseBatch },
+    ];
+    document.addEventListener('keydown', function (e) {
+        if (e.key !== 'Escape') return;
+        for (const layer of SI_ESC_LAYERS) {
+            const el = document.getElementById(layer.id);
+            if (el && el.classList.contains(layer.openClass)) {
+                e.preventDefault();
+                if (layer.close) layer.close();   // 阻塞层（close:null）只消费本次 Esc，不产生关闭副作用
+                return;
+            }
+        }
+    });
     // 上线体统一重构 C3 第2批：从单据详情（drawer）深链直达某上线单详情——镜像既有反向跳转
     // `siCloseBatch();siOpenDrawer(id)`（批次→单据）先例，本函数是它的逆（单据→批次），供「已建上线单 #X」
     // 引导按钮 + bug 上线编排区块「前往上线单」按钮共用，不必各自重复打开 overlay + 调用 siOpenBatchDetail。
@@ -7471,12 +7842,18 @@
 
     // 流程说明弹层（iframe 懒加载独立页 Sys_Guide.html）
     function siOpenFlowGuide() {
+        // [codex 477 四审 MED-1] 同 z-1200 互斥固化为运行时保证（非仅注释声称）——主动关闭 DutyRoster
+        //   再开自己，保证两者不会真的同时 open。SI_ESC_LAYERS 里两者的先后顺序只是"万一真的同开"这种
+        //   理论场景的兜底判据，真正防止同开的是这里 + siOpenDutyRoster 处对称的一行。
+        siCloseDutyRoster();
         const f = document.getElementById('siFlowGuideFrame');
         if (!f.getAttribute('src')) f.setAttribute('src', 'Sys_Guide.html');   // 懒加载·首次打开才载
         document.getElementById('siFlowGuideOverlay').classList.add('open');
     }
+    // [codex 477 三审终解] Esc 关闭已迁入集中路由器 SI_ESC_LAYERS（siCloseBatch 定义处一带，:7766
+    //   附近）——本函数只负责"怎么关"，"什么时候该关"（含与其它弹层的层级避让）统一由路由器判断，
+    //   本处不再单独挂 keydown 监听器。
     function siCloseFlowGuide() { document.getElementById('siFlowGuideOverlay').classList.remove('open'); }
-    document.addEventListener('keydown', function(e){ if (e.key === 'Escape' && document.getElementById('siFlowGuideOverlay').classList.contains('open')) siCloseFlowGuide(); });
 
     // ============================================================
     // 组 C·SC2（期望对表与准时统计·方案 §3C.6）：只读统计面板
@@ -7520,7 +7897,7 @@
             <tbody>${byTypeRows}</tbody></table></div>` : '';
         const examples = overall.overdue_examples || [];
         const examplesHtml = examples.length ? `<div class="u-form-group"><label>未达标示例（实际上线晚于期望完成，按单列出，当前显示 ${examples.length} 条；达成率数字按全量计，示例列表仅供抽查）</label>
-            <div style="max-height:220px;overflow:auto">${examples.map(e =>
+            <div style="max-height:min(220px,45vh);overflow:auto;overscroll-behavior:contain">${examples.map(e =>
                 // [S13-b·B3·矩阵行13] 子编号——e 已含 derive_root_id/derive_seq（后端补投影）。
                 `<div class="si-note-box" style="margin-bottom:6px">${esc(siIssueDisplayNo(e))} ${esc(e.title || '')}｜期望 ${esc(e.deadline)}｜实际上线 ${esc(siFmtDT(e.released_at))}｜超出 ${e.overdue_days} 天</div>`
             ).join('')}</div></div>` : '';
@@ -7564,6 +7941,10 @@
         //   均对"本就未打开"的面板安全 no-op（classList.remove 对不存在的类是安全操作）。
         //   siImgLightbox 不在此列——它设计为可与其余面板叠加显示（z-index 3000 高于 si-modal-overlay 1200，
         //   本就是"查看大图时不关闭底下面板"的既有行为，不属于本条要处理的"全屏面板互斥"范畴。
+        //   [codex 477 四审 MED-1] 下面这行 siCloseFlowGuide() 同时也是"FlowGuide/DutyRoster 同 z-1200
+        //   互斥"的运行时保证那一半——对称的另一半在 siOpenFlowGuide() 里（新增的 siCloseDutyRoster()
+        //   调用）。两个打开函数各自主动关闭对方，保证两者不会真的同时 open（非仅注释声称的"结构上
+        //   不会同开"）。
         siCloseDrawer();
         siCloseModal();
         siCloseBatch();
@@ -7574,12 +7955,13 @@
         //   一年安排；区间合并展示后约 12 段行，默认展示无压力（原 [−7, +30]）。
         await siLoadDutyRoster(siDutyDateStr(-7), siDutyDateStr(358));
     }
+    // [codex 477 三审终解] Esc 关闭已迁入集中路由器 SI_ESC_LAYERS（siCloseBatch 定义处一带）——本函数
+    //   只负责"怎么关"，本处不再单独挂 keydown 监听器，同 siCloseFlowGuide 处注释。
     function siCloseDutyRoster() {
         document.getElementById('siDutyRosterOverlay').classList.remove('open');
         siDutyRosterUsersCache = null;
         siDutyGen++;   // [C9 前端块·MED-4] 作废任何仍在飞的旧 siLoadDutyRoster 请求
     }
-    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && document.getElementById('siDutyRosterOverlay').classList.contains('open')) siCloseDutyRoster(); });
 
     async function siLoadDutyRoster(from, to) {
         // [C9 前端块·codex 206 审 MED-4] 发请求前先递增令牌并捕获——每次调用都视为"进入一个新视图"
@@ -7798,9 +8180,18 @@
         const myGen = siAuditGen;
         document.getElementById('siBatchHead').textContent = '上线单管理';
         document.getElementById('siBatchBody').innerHTML = '<div class="si-empty">加载中…</div>';
-        // C2b 第2批：入口对接人也可达（见 GET /sys-releases 权限放开注释），「+ 新建上线单」调用 POST /sys-releases
-        // 仍是 requireAdmin，故本按钮维持 admin 专属，对接人不应看到会必然 403 的死按钮。
-        document.getElementById('siBatchFoot').innerHTML = `<button class="u-btn-secondary" onclick="siCloseBatch()">关闭</button>${isAdmin() ? '<button class="u-btn-primary" onclick="siModalCreateBatch()">+ 新建上线单</button>' : ''}`;
+        // 上线单管理体验优化 O2 改造 2（方案 §3 O2·R-C2）：head 动作位状态泄漏防护——六个入口函数
+        // （siRenderBatchList/siOpenDeleteAudit/siRenderDeleteAuditListBody/siOpenDeleteAuditDetail/
+        // siOpenReleaseLog/siOpenBatchDetail）各自无条件清空 #siBatchHeadActions（本函数与其余五个
+        // 同款语句），再按各自需要重新渲染；值班排班不在此列（不复用本共享面板 DOM）。「+ 新建上线单」
+        // 从 foot 上移到本动作位（C2b 第2批遗留注释仍适用：入口对接人也可达，见 GET /sys-releases 权限
+        // 放开注释；本按钮调用的 POST /sys-releases 仍是 requireAdmin，故维持 admin 专属，对接人不应
+        // 看到会必然 403 的死按钮）。
+        // [观察反馈优化批·2026-08-27] foot 纯「关闭」按钮去掉（X 已挪到独立 close-bar 行，foot 不再
+        //   需要重复一个关闭出口）——置空，#siBatchFoot:empty{display:none} 会让空 foot 整条隐藏。
+        document.getElementById('siBatchHeadActions').innerHTML = '';
+        if (isAdmin()) document.getElementById('siBatchHeadActions').innerHTML = '<button class="u-btn-primary" onclick="siModalCreateBatch()">+ 新建上线单</button>';
+        document.getElementById('siBatchFoot').innerHTML = '';
         // [C9 二次收口·codex 207 审 MED-2] try/catch 兜异常路径——同 siLoadDutyRoster 处注释：siApi 不兜
         // fetch() 自身抛出的网络异常，此前无 try/catch 会让视图卡死在「加载中…」。本函数不递归调用自己，
         // catch 分支直接就地显示失败文案即可（不像 siOpenBatchDetail 那样需要"回退到列表"这条退路）。
@@ -7819,7 +8210,12 @@
         //   标题改「我的上线单」；空态不引导"新建"（普通用户无建单权，页脚按钮本就 admin 专属不受影响）。
         const isMine = !!(r.data && r.data.scope === 'mine');
         if (isMine) document.getElementById('siBatchHead').textContent = '我的上线单';
-        if (!items.length) { document.getElementById('siBatchBody').innerHTML = `<div class="si-empty">${isMine ? '暂无指派给你的上线单' : '暂无上线单，点右下角「新建上线单」'}</div>`; return; }
+        // [上线单管理体验优化 R-C5·S7 预筛登记] `!isMine` 分支覆盖 admin 与对接人两种视角（C2b 第2批已把
+        //   GET /sys-releases 权限放开给对接人，见 :7981 一带注释）——旧文案不分身份统一引导"点右上角
+        //   「新建上线单」"，但该按钮只在 isAdmin() 下渲染（:7985），对接人看到这句引导却点不到按钮，
+        //   是纯误导。按 isAdmin() 再分一层：admin 保留原引导文案，非 admin（对接人）改中性「暂无上线单」。
+        const emptyText = isMine ? '暂无指派给你的上线单' : (isAdmin() ? '暂无上线单，点右上角「新建上线单」' : '暂无上线单');
+        if (!items.length) { document.getElementById('siBatchBody').innerHTML = `<div class="si-empty">${emptyText}</div>`; return; }
         document.getElementById('siBatchBody').innerHTML = items.map(b => {
             const badge = b.status === '已发布' ? '<span class="si-release-badge done">已发布</span>' : '<span class="si-release-badge plan">计划中</span>';
             const hot = b.is_hotfix ? ' · <span style="color:#b45309">hotfix</span>' : '';
@@ -7875,8 +8271,9 @@
         siAuditItems = []; siAuditNextBeforeId = null; siAuditLoadingMore = false;
         // 同步重置（见上方①）：不等异步 fetch 回来才清面板内容。
         document.getElementById('siBatchHead').textContent = '删除审计';
+        document.getElementById('siBatchHeadActions').innerHTML = '';  // O2 改造2·R-C2：head 动作位状态泄漏防护（本面板不渲染任何动作，恒清空）
         document.getElementById('siBatchBody').innerHTML = '<div class="si-empty">加载中…</div>';
-        document.getElementById('siBatchFoot').innerHTML = `<button class="u-btn-secondary" onclick="siCloseBatch()">关闭</button>`;
+        document.getElementById('siBatchFoot').innerHTML = '';   // [观察反馈优化批] 纯「关闭」去掉，X 已在独立 close-bar 行
         document.getElementById('siBatchOverlay').classList.add('open');
         siLoadDeleteAuditPage(myGen);
     }
@@ -7898,9 +8295,10 @@
     }
     function siRenderDeleteAuditListBody() {
         document.getElementById('siBatchHead').textContent = '删除审计';
+        document.getElementById('siBatchHeadActions').innerHTML = '';  // O2 改造2·R-C2：head 动作位状态泄漏防护（可经 siBackToDeleteAuditList 直接重入，须自带清空）
         if (!siAuditItems.length) {
             document.getElementById('siBatchBody').innerHTML = '<div class="si-empty">暂无删除审计记录</div>';
-            document.getElementById('siBatchFoot').innerHTML = `<button class="u-btn-secondary" onclick="siCloseBatch()">关闭</button>`;
+            document.getElementById('siBatchFoot').innerHTML = '';   // [观察反馈优化批] 纯「关闭」去掉，X 已在独立 close-bar 行
             return;
         }
         // 复用批次管理列表卡片同款样式（si-batch-item/si-batch-meta），不新起一套 CSS。reason 摘要截断
@@ -7914,7 +8312,9 @@
                     <div class="si-batch-meta" title="删除于 ${esc(siFmtDTSec(it.deleted_at))}">删除于 ${esc(siFmtDT(it.deleted_at))} · 操作者 ${esc(it.operator_name || ('#' + it.operator_id))} · 原因：${reasonShort}</div>
                 </div>`;
             }).join('');
-        document.getElementById('siBatchFoot').innerHTML = `<button class="u-btn-secondary" onclick="siCloseBatch()">关闭</button>` +
+        // [观察反馈优化批] 纯「关闭」前缀去掉（X 已在独立 close-bar 行），只保留有条件的「加载更多」；
+        //   siAuditNextBeforeId 为空时 foot 整串为 ''，靠 #siBatchFoot:empty{display:none} 隐藏空行。
+        document.getElementById('siBatchFoot').innerHTML =
             (siAuditNextBeforeId ? `<button class="u-btn-secondary" onclick="siLoadDeleteAuditPage()">加载更多</button>` : '');
     }
     // ⭐ codex C4 审 Round-2 收口（MED）：从详情返回列表也要令牌失效——否则"点了返回列表，但上一次
@@ -7932,8 +8332,10 @@
         siAuditGen++;   // 新开一个视图（详情）——令牌 +1，届时列表侧任何还在飞的旧请求会被自动丢弃
         const myGen = siAuditGen;
         document.getElementById('siBatchHead').textContent = '删除审计详情 #' + auditId;
+        document.getElementById('siBatchHeadActions').innerHTML = '';  // O2 改造2·R-C2：head 动作位状态泄漏防护（本面板不渲染任何动作，恒清空）
         document.getElementById('siBatchBody').innerHTML = '<div class="si-empty">加载中…</div>';
-        document.getElementById('siBatchFoot').innerHTML = `<button class="u-btn-secondary" onclick="siBackToDeleteAuditList()">← 返回列表</button><button class="u-btn-secondary" onclick="siCloseBatch()">关闭</button>`;
+        // [观察反馈优化批] 只保留「← 返回列表」，尾随的纯「关闭」去掉（X 已在独立 close-bar 行）。
+        document.getElementById('siBatchFoot').innerHTML = `<button class="u-btn-secondary" onclick="siBackToDeleteAuditList()">← 返回列表</button>`;
         const r = await siApi('/sys-issue-delete-audit/' + auditId);
         if (myGen !== siAuditGen) return;   // 面板已切走/关闭重开，丢弃过期响应
         if (!r.ok) { document.getElementById('siBatchBody').innerHTML = '<div class="si-empty">加载失败</div>'; siApiErr(r); return; }
@@ -7983,8 +8385,9 @@
         siAuditGen++;
         const myGen = siAuditGen;
         document.getElementById('siBatchHead').textContent = '上线日志';
+        document.getElementById('siBatchHeadActions').innerHTML = '';  // O2 改造2·R-C2：head 动作位状态泄漏防护（本面板不渲染任何动作，恒清空）
         document.getElementById('siBatchBody').innerHTML = '<div class="si-empty">加载中…</div>';
-        document.getElementById('siBatchFoot').innerHTML = `<button class="u-btn-secondary" onclick="siCloseBatch()">关闭</button>`;
+        document.getElementById('siBatchFoot').innerHTML = '';   // [观察反馈优化批] 纯「关闭」去掉，X 已在独立 close-bar 行
         document.getElementById('siBatchOverlay').classList.add('open');
         let r;
         try {
@@ -8079,6 +8482,10 @@
         siAuditGen++;
         const myGen = siAuditGen;
         document.getElementById('siBatchBody').innerHTML = '<div class="si-empty">加载中…</div>';
+        // [S7 预筛 P1] 动作位清空必须在首个 await 之前的同步段——原在 await 之后，列表→详情的加载
+        //   窗口内 admin 的「+新建上线单」会连同旧标题滞留且可点，与"六函数无条件清空"的注释及守卫
+        //   §⑨ 措辞不符（注释是审查输入）。O3/O4 的编辑/删除按钮落 kv 行/foot 非本动作位（R-C4/R-C6）。
+        document.getElementById('siBatchHeadActions').innerHTML = '';
         // [C9 二次收口·codex 207 审 MED-2] try/catch 兜异常路径——同 siLoadDutyRoster/siRenderBatchList
         // 处注释。catch 分支的退路镜像下方既有的 !r.ok 失败分支（toast 提示 + 回退列表）：siRenderBatchList
         // 自己也已同批加了 try/catch，不会在这条回退路径上再抛一次，无递归风险。
@@ -8202,9 +8609,23 @@
         //   六态），逐人明细挪到下方独立的「执行人」区块（siExecutorSectionHtml）——单格已装不下多人。
         const plannedDateEditBtn = (planning && isAdmin())
             ? `<button class="u-btn-secondary u-btn-sm" style="margin-left:8px" onclick="siReleaseUpdatePlannedDateModal(${id})">改期</button>` : '';
+        // [上线单管理体验优化 R-C5·方案 §3 O3] 基本信息编辑入口——门槛镜像后端 D8 三道门（R-C4 index.js
+        //   PATCH /sys-releases/:id 注释）：admin ∧ planning 恒需，第三条 `!notifyStarted || titleBlank`
+        //   与后端「status 门 → 空变更集短路 → 通知门（含 D8 例外）」的**通知门**判据同构——`notifyStarted`
+        //   取自本函数上方已算好的 `execSummary`（与后端 getReleaseNotifySummary 同源聚合态），`titleBlank`
+        //   镜像后端 `(row.title ?? '').trim() === ''`。⚠️ 这只是前端可见性预判（省一次必然 409 的往返），
+        //   真正的门禁仍在后端事务里——并发窗口下前端判断为"可编"仍可能撞上后端最新态返回 409/CONCURRENT_
+        //   STATE_CHANGE，siReleaseEditInfoModal 提交失败分支照常经 siApiErr 显示服务端返回的准确原因，
+        //   不假装前端判断是唯一真相源。
+        const notifyStarted = !['none', 'not_sent'].includes(execSummary);
+        const titleBlank = !(rel.title && String(rel.title).trim());
+        const canEditReleaseInfo = planning && isAdmin() && (!notifyStarted || titleBlank);
+        const releaseEditBtn = canEditReleaseInfo
+            ? `<button class="u-btn-secondary u-btn-sm" style="margin-left:8px" onclick="siReleaseEditInfoModal(${id})">编辑</button>` : '';
         document.getElementById('siBatchBody').innerHTML =
             degradedHtml +
             `<div class="u-kv-grid" style="margin-bottom:14px">
+                <div class="u-kv-item full"><label>标题</label><div class="v">${rel.title != null && String(rel.title).trim() ? esc(rel.title) : '<span class="si-muted">未设置</span>'}${releaseEditBtn}</div></div>
                 <div class="u-kv-item"><label>状态</label><div class="v">${planning ? '<span class="si-release-badge plan">计划中</span>' : '<span class="si-release-badge done">已发布</span>'}</div></div>
                 <div class="u-kv-item"><label>版本号</label><div class="v">${rel.version_tag ? esc(rel.version_tag) : '—'}</div></div>
                 <div class="u-kv-item"><label>计划上线日期</label><div class="v">${rel.planned_date ? esc(rel.planned_date) : '<span class="si-muted">未设置</span>'}${plannedDateEditBtn}</div></div>
@@ -8252,6 +8673,19 @@
             // 409 NOTIFY_NOT_SENT，防呆收窄。
             if (myExecRow && myExecRow.exec_status === 'pending' && myExecRow.notify_status === 'sent') {
                 foot += `<button class="u-btn-primary" onclick="siReleaseExecuteModal(${id})">✅ 确认上线完成（我这部分）</button>`;
+            }
+            // [上线单管理体验优化 R-C7·方案 §3 O4] 删除上线单——门槛镜像后端状态门（index.js DELETE
+            //   端点：status='计划中' ∧ 通知未启动，**无 D8 title 补空例外**，该例外是 edit 专属，delete
+            //   没有"补空不算改"这回事，故不像 canEditReleaseInfo 那样再叠加 `|| titleBlank`）。
+            //   ⭐ [codex 475 回卷 MED-1] 后端 R-C6 修法(b) 对「已作废」成员只清 release_id 指针、status
+            //   保持「已作废」不变（同上方 3628 一带时间线 summary 分支同源语义），不是"退回待上线"——
+            //   影响面文案必须能区分这两类，不能统一宣称"N 张单据会退回待上线"。issues 数组（本函数已有，
+            //   见 :8316 一带赋值）逐张带 status，此处按后端唯二承认的两态分别计数随按钮一并传给弹窗，
+            //   不额外发请求（同 issues.length 原写法零成本）。
+            const pendingMemberCount = issues.filter(i => i.status === '待上线').length;
+            const voidedMemberCount = issues.filter(i => i.status === '已作废').length;
+            if (isAdmin() && !notifyStarted) {
+                foot += `<button class="u-btn-danger u-btn-sm" onclick="siReleaseDeleteModal(${id},${siJsStringAttr(rel.release_no || '')},${pendingMemberCount},${voidedMemberCount})">删除上线单</button>`;
             }
         }
         document.getElementById('siBatchFoot').innerHTML = foot;
@@ -8534,7 +8968,7 @@
                 <label>执行人（至少选择 1 名）</label>
                 <input type="text" id="siExecPickSearch" placeholder="按姓名搜索" oninput="siExecPickerFilter()" style="margin-bottom:8px">
                 ${skippedHtml}
-                <div id="siExecPickList" style="max-height:320px;overflow-y:auto">${rowsHtml || '<span class="si-muted">无候选人员</span>'}</div>
+                <div id="siExecPickList" style="max-height:min(320px,45vh);overflow-y:auto;overscroll-behavior:contain">${rowsHtml || '<span class="si-muted">无候选人员</span>'}</div>
                 <div id="siExecPickHint" class="u-hint" style="margin-top:6px"></div>
             </div>` }
         ], async () => {
@@ -8727,6 +9161,77 @@
         });
     }
 
+    // [上线单管理体验优化 R-C5·方案 §3 O3] 基本信息编辑弹窗——D3 三字段（title/version_tag/release_note），
+    //   一次性全量提交三个字段（沿用当前值预填，非"只提交变了的那个"）：这正是后端 450-H2 判据="实际
+    //   变更集"而非"提交字段集"所覆盖的形态（verify-sys-release-edit.js [6d] D8 例外边界二同款用例）——
+    //   version_tag/release_note 若与现值相同不会进变更集，D8 例外（title 补空）不会被这两个提交值误撑破。
+    //   449-H4 转义契约：fText/fTextarea 回填 value/textarea 内部已 esc()，本函数不再手写第二遍。
+    function siReleaseEditInfoModal(releaseId) {
+        const rel = siBatchDetailRel || {};
+        siModal('编辑上线单信息', [
+            fText('title', '标题', rel.title || '', false, '≤200 字'),
+            fText('version_tag', '版本号', rel.version_tag || '', false, '≤100 字'),
+            fTextarea('release_note', '上线说明', rel.release_note || '', false, '≤1000 字'),
+            note('仅「计划中」批次可编辑；若已通知执行人，仅允许在标题为空时补写标题（D8 例外——通知文案里本无标题，补空不构成"已发内容与现状不一致"），其余改动需请对接人先撤销上线安排后再编辑。')
+        ], async v => {
+            const r = await siApi('/sys-releases/' + releaseId, { method: 'PATCH', body: { title: v.title, version_tag: v.version_tag, release_note: v.release_note } });
+            if (!r.ok) { siApiErr(r, '编辑失败'); return false; }
+            const d = r.data || {};
+            showToast(d.changed ? '已保存' : '未做任何修改', d.changed ? 'success' : 'warning');
+            siCloseModal(); await siOpenBatchDetail(releaseId); return false;
+        });
+    }
+
+    // [上线单管理体验优化 R-C7·方案 §3 O4] 删除上线单——同 siDeleteIssue（:6147 一带）确认弹窗范式：
+    //   note() 说明 + reason 必填 textarea，区别是本弹窗需展示影响面（releaseNo/pendingCount/
+    //   voidedCount 由调用方随按钮一并传入，非另发一次请求现查）。releaseNo 走 esc()（同 siDeleteIssue
+    //   对 iss.title 的处理，虽值域受 UNIQUE 约束但前端不信任后端数据形态，转义惯例统一）。
+    //   删除成功后回列表（siRenderBatchList，非 siOpenBatchDetail——批次本身已不存在，详情页无处可留）。
+    //   ⭐ [codex 475 回卷 MED-1] 后端 R-C6 修法(b)：「已作废」成员删批次时只清 release_id 指针、status
+    //   保持「已作废」不变（不是"退回待上线"）——四分支按 pendingCount/voidedCount 组合精确措辞，
+    //   不再统一宣称"N 张单据会退回待上线"（那对含已作废成员的批次是错误的不可恢复操作提示）。
+    function siReleaseDeleteModal(releaseId, releaseNo, pendingCount, voidedCount) {
+        // ⚠️ 命名避坑：本函数下方 siModal(...) 的确认回调固定用 `async v => {...}`（本文件全局既有
+        //   约定，回调参数 v=表单字段值对象）——此处故意不用 `v` 存 voidedCount（哪怕只在回调定义之前
+        //   使用、语法上不会撞车），改用 pCount/vCount，避免"同函数内先出现表示计数的 v、后出现表示
+        //   表单对象的 v"这种读者一眼分不清、以后改起来容易接错线的命名陷阱。
+        const pCount = Number(pendingCount) || 0;
+        const vCount = Number(voidedCount) || 0;
+        const nameHtml = `<b>${esc(releaseNo || ('#' + releaseId))}</b>`;
+        let impactText;
+        if (pCount > 0 && vCount > 0) {
+            impactText = `确认删除上线单 ${nameHtml}？此操作<b>不可恢复</b>，其中 <b>${pCount}</b> 张待上线单据会退回「待上线」，<b>${vCount}</b> 张已作废单据仅解除与本上线单的关联（保持「已作废」）。`;
+        } else if (pCount > 0) {
+            impactText = `确认删除上线单 ${nameHtml}？此操作<b>不可恢复</b>，其中 <b>${pCount}</b> 张单据会退回「待上线」。`;
+        } else if (vCount > 0) {
+            impactText = `确认删除上线单 ${nameHtml}？此操作<b>不可恢复</b>，其中 <b>${vCount}</b> 张已作废单据仅解除与本上线单的关联（保持「已作废」）。`;
+        } else {
+            impactText = `确认删除上线单 ${nameHtml}？此操作<b>不可恢复</b>（该批次当前无成员）。`;
+        }
+        siModal(
+            '删除上线单 ' + (releaseNo || ('#' + releaseId)),
+            [
+                note(`${impactText}<br><br>删除动作本身会留审计记录（含操作人、时间、原因，以及批次与执行人的完整快照）。`),
+                fTextarea('reason', '删除原因', '', true, '必填：trim 1..200')
+            ],
+            async v => {
+                const reason = (v.reason || '').trim();
+                if (!reason || reason.length > 200) { showToast('删除原因必填（trim 1~200字）', 'error'); return false; }
+                const r = await siApi('/sys-releases/' + releaseId, { method: 'DELETE', body: { reason } });
+                if (!r.ok) { siApiErr(r, '删除失败'); return false; }
+                showToast('已删除', 'success');
+                // ⭐ [Opus 预筛 S12 回卷提示5] siRenderBatchList 是 async 函数（内部含 await siApi 网络请求），
+                //   同族 siReleaseEditInfoModal（await siOpenBatchDetail）/siRemoveFromBatch（await
+                //   siOpenBatchDetail）等收尾调用均 await——本处原漏 await 会产生一次未追踪的 Promise：
+                //   若其内部异步抛错（如 fetch 网络异常，虽已有 try/catch 兜底但仍属"该 await 而未 await"
+                //   的一般纪律），会成为未处理的 rejection，且调用方（本 onConfirm）在列表真正渲染完成前
+                //   就已 return false，与其余同族收尾"确保下一视图渲染完成再交还控制权"的既有节奏不一致。
+                siCloseModal(); await siRenderBatchList(); return false;
+            },
+            '确认删除'
+        );
+    }
+
     async function siModalAddToBatch(releaseId, batchFamily) {
         // 候选 = 待上线 + 未挂批次（列表接口按 status 拉，release 为空）
         const r = await siApi('/sys-issues?' + new URLSearchParams({ status: '待上线' }).toString());
@@ -8744,8 +9249,22 @@
         if (!cands.length) { showToast(bf ? `没有可加入本上线单（${bf === 'bug' ? 'bug' : '功能/优化'}）的「待上线」单据` : '没有可加入的「待上线」单据', 'warning'); return; }
         // [S13-b·B3·矩阵行13] 子编号——cands 来自 GET /sys-issues 列表端点，早已投影 derive_root_id/
         // derive_seq（S12-b/S13-a），siIssueDisplayNo 零额外数据依赖直接消费。
-        const opts = cands.map(i => `<label class="si-chk-row si-chk-row-wide"><input type="checkbox" class="si-add-chk" value="${i.id}"> ${esc(siIssueDisplayNo(i))} <span class="u-type-tag ${siTypeClass(i.type)}">${esc(siTypeLabel(i.type))}</span> ${esc(i.title)}</label>`).join('');
-        siModal('加入上线单', [{ k: null, html: `<div class="u-form-group"><label>选择待上线单据</label><div style="max-height:320px;overflow-y:auto">${opts}</div></div>` }], async () => {
+        // [O1·方案 v1.3 §3 O1·R-C3] 候选行加「所属系统」徽章——system_name 同样来自该 SELECT 投影
+        // （buildSysIssuesListSelect，index.js 已含此列，O1 后端零改），值走 esc() 转义（虽值域受后端
+        // BIZ_SYSTEMS 六值白名单约束，前端仍不信任后端数据形态，走既有转义惯例）；假值（NULL/空串）
+        // 不渲染空徽章。标题改包 .si-chk-text（flex:1;min-width:0 既有范式）使其成为行内唯一可收缩
+        // 项——checkbox（flex:0 0 auto）与类型标签/系统徽章（nowrap）不收缩；编号是裸文本节点（匿名
+        //   flex item·默认可收缩，500px 定宽下实际不触发断行），新增一列后标题让出空间而非撑破候选行。
+        const opts = cands.map(i => {
+            // [观察反馈优化批·2026-08-27] 六色分色变体（demo V1）叠加在基础 .u-sys-tag 之上；
+            //   siSysTagClass 未登记值返回空串，class 属性据此省略多余空格（不产出 class="u-sys-tag "）。
+            const sysCls = siSysTagClass(i.system_name);
+            const sysTag = i.system_name ? ` <span class="u-sys-tag${sysCls ? ' ' + sysCls : ''}">${esc(i.system_name)}</span>` : '';
+            // [codex 471 LOW-1] value 走 Number() 强转——输出恒为数字字面/NaN/Infinity 三形态，无引号无
+            //   标签零属性注入面（id 本为整数主键，防的是接口数据被篡改/类型约束失效的残余面）。
+            return `<label class="si-chk-row si-chk-row-wide"><input type="checkbox" class="si-add-chk" value="${Number(i.id)}"> ${esc(siIssueDisplayNo(i))} <span class="u-type-tag ${siTypeClass(i.type)}">${esc(siTypeLabel(i.type))}</span>${sysTag} <span class="si-chk-text">${esc(i.title)}</span></label>`;
+        }).join('');
+        siModal('加入上线单', [{ k: null, html: `<div class="u-form-group"><label>选择待上线单据</label><div style="max-height:min(320px,45vh);overflow-y:auto;overscroll-behavior:contain">${opts}</div></div>` }], async () => {
             const ids = [...document.querySelectorAll('.si-add-chk:checked')].map(c => parseInt(c.value, 10));
             if (!ids.length) { showToast('请至少选择一个单据', 'error'); return false; }
             const rr = await siApi('/sys-releases/' + releaseId + '/add-issues', { method: 'POST', body: { issue_ids: ids } });
@@ -9039,6 +9558,8 @@
         lb.classList.add('show');
         document.body.style.overflow = 'hidden';
     }
+    // [codex 477 三审终解] Esc 关闭已迁入集中路由器 SI_ESC_LAYERS（siCloseBatch 定义处一带）——本函数
+    //   只负责"怎么关"，本处不再单独挂 keydown 监听器，同 siCloseFlowGuide 处注释。
     function siCloseLightbox(event) {
         // 点击 img 本身不关（让用户可看原图）；点 overlay/关闭按钮才关
         if (event && event.target && event.target.tagName === 'IMG' && event.target.id === 'siImgLightboxImg') return;
@@ -9049,12 +9570,6 @@
         if (img) img.src = '';
         document.body.style.overflow = siLbPrevOverflow;   // L2 修：恢复原值而非固定空串
     }
-    document.addEventListener('keydown', function (e) {
-        if (e.key === 'Escape') {
-            const lb = document.getElementById('siImgLightbox');
-            if (lb && lb.classList.contains('show')) siCloseLightbox(null);
-        }
-    });
 
     // ---- 建单需求材料（spec）文件组件 ----
     // ── P2：通用文件选择组件（key-based 多实例·C1 建单单例组件通用化）──────────────────────────────

@@ -880,7 +880,11 @@ function extractSetLiteralStrings(text, constName) {
 //   诉求，见 index.js 该两处 INSERT 前的注释）。
 // [方案 §14·S11·2026-08-14] +completion_overrun_reason（feature 超期完成理由闸独立留痕行，均
 //   event_type='note'，两处写点：case 'liaison_test_pass' + runWGate feature⑤⑥降级路径，同上模式）。
-const NOTE_OWN_LABEL_ACTION_CODES = new Set(['assign_overdue_eta', 'fast_release_authorize', 'fast_release_revoke', 'fast_release_staged', 'fast_release_exec_confirm', 'fast_release_roster_added', 'fast_release_roster_removed', 'fast_release_roster_cleared', 'post_release_accept_pass', 'post_release_accept_fail', 'eta_auto_from_deadline', 'eta_auto_sla', 'completion_overrun_reason', 'fast_release_auth_expired']);
+// 【上线单管理体验优化 R-C5·2026-08-26】+release_info_edit——R-C4 落地时（见下方 EXPECTED_INSERT_SITE_COUNT
+//   48→49 处注释）本码刻意暂未登记，前端三处登记留给 R-C5；本批已在 Sys_Iteration.html 补齐
+//   SI_TL_LABEL/SI_TL_CLS/SI_TL_NOTE_OWN_LABEL_CODES 三处，此处同步补齐（两处必须逐字同步，见下方
+//   [预筛 MED-5] 双向核对断言）。
+const NOTE_OWN_LABEL_ACTION_CODES = new Set(['assign_overdue_eta', 'fast_release_authorize', 'fast_release_revoke', 'fast_release_staged', 'fast_release_exec_confirm', 'fast_release_roster_added', 'fast_release_roster_removed', 'fast_release_roster_cleared', 'post_release_accept_pass', 'post_release_accept_fail', 'eta_auto_from_deadline', 'eta_auto_sla', 'completion_overrun_reason', 'fast_release_auth_expired', 'release_info_edit', 'release_deleted']);
 function computeDisplayKey(eventType, actionCode, releaseScopeKeySet) {
   const hasActionCode = actionCode !== null && actionCode !== undefined && actionCode !== '';
   if (eventType === 'status_change' || eventType === 'release') return hasActionCode ? actionCode : eventType;
@@ -1050,7 +1054,35 @@ ok(`SI_TL_RELEASE_SCOPE_LABEL 解析到 ${releaseScopeKeys.size} 个 key（\u226
 //   ⚠️ 码表说明文档（docs/local/系统迭代/时间线写入点码表_20260810.md）本批未同步更新——本任务范围
 //   明确限定"只做后端（index.js + scripts/ 下 verify），不碰 docs/"，该文档同步留给下一次触碰 docs/
 //   的批次一并处理（含 fast_release_auth_expired 新码登记）。
-const EXPECTED_INSERT_SITE_COUNT = 48;
+// 【上线单管理体验优化 R-C4·2026-08-26】48 → 49：新增 PATCH /sys-releases/:id 端点（方案 §3 O3），逐在册
+//   成员写一条 event_type='note'、action_code='release_info_edit' 的独立留痕行（同 completion_overrun_reason
+//   一带"自定义端点直写 timeline"范式，非引擎写点）。R-C4 落地时本码**刻意暂未登记进** NOTE_OWN_LABEL_
+//   ACTION_CODES——同 fast_release_auth_expired 在 S1 落地时的处置（本文件上方 【2026-08-16 先行上线授权
+//   超时收回 S1】一带注释）：R-C4 范围明确收窄为"只做后端"，Sys_Iteration.html 的 SI_TL_LABEL/SI_TL_CLS/
+//   SI_TL_NOTE_OWN_LABEL_CODES 三处前端登记留给 R-C5 一并做，R-C4 阶段落回 event_type='note' 的通用
+//   「备注」标签，按 computeDisplayKey 规则主覆盖断言自然落回既有 'note' key，不落入 KNOWN_GAPS（同
+//   fast_release_auth_expired S1 阶段先例）。
+// 【上线单管理体验优化 R-C5·2026-08-26】前端三处登记已补齐（Sys_Iteration.html 的 SI_TL_LABEL/SI_TL_CLS/
+//   SI_TL_NOTE_OWN_LABEL_CODES + 本文件 NOTE_OWN_LABEL_ACTION_CODES 同步）——release_info_edit 起改走
+//   computeDisplayKey 的 note carve-out 分支，产出独立 display key 'release_info_edit'，与「备注」通用
+//   key 分离；主覆盖断言按此新 key 校验前端 SI_TL_LABEL 已登记（非落入 KNOWN_GAPS 缓冲）。
+//   ⚠️ SI_TL_CLS 与 Set 的**正向登记**不归本文件守——由 verify-sys-release-panel-static.js §⑭ 三表
+//   断言钉住（S10 预筛 B1 抓获：本注释初版声称"均已校验"对 CLS 是假的——本文件从不解析 SI_TL_CLS）。
+// 【上线单管理体验优化 R-C6·2026-08-26】49 → 50：新增 DELETE /sys-releases/:id 端点（方案 §3 O4），
+//   逐在册成员写一条 event_type='note'、action_code='release_deleted' 的独立留痕行（同 release_info_edit
+//   一带"自定义端点直写 timeline"范式，非引擎写点）。R-C6 落地时本码**刻意暂未登记进** NOTE_OWN_LABEL_
+//   ACTION_CODES——同 release_info_edit 在 R-C4 落地时的处置（本文件上方 【上线单管理体验优化 R-C4】
+//   一带注释）：R-C6 范围明确收窄为"只做后端"，Sys_Iteration.html 的 SI_TL_LABEL/SI_TL_CLS/
+//   SI_TL_NOTE_OWN_LABEL_CODES 三处前端登记留给 R-C7 一并做（方案 §4 实施步骤表 C7 行"release_deleted
+//   三处注册"），R-C6 阶段落回 event_type='note' 的通用「备注」标签，按 computeDisplayKey 规则主覆盖
+//   断言自然落回既有 'note' key，不落入 KNOWN_GAPS（同 release_info_edit R-C4 阶段先例）。
+// 【上线单管理体验优化 R-C7·2026-08-27】前端三处登记已补齐（Sys_Iteration.html 的 SI_TL_LABEL/SI_TL_CLS/
+//   SI_TL_NOTE_OWN_LABEL_CODES + 本文件 NOTE_OWN_LABEL_ACTION_CODES 同步）——release_deleted 起改走
+//   computeDisplayKey 的 note carve-out 分支，产出独立 display key 'release_deleted'，与「备注」通用
+//   key 分离；主覆盖断言按此新 key 校验前端 SI_TL_LABEL 已登记（非落入 KNOWN_GAPS 缓冲）。站点总数不变
+//   （仍 50——R-C7 只补前端登记，不新增后端 INSERT 写入点）。SI_TL_CLS 与 Set 的正向登记同 R-C5 一带
+//   注释所述，不归本文件守，由 verify-sys-release-panel-static.js §⑮ 三表断言钉住。
+const EXPECTED_INSERT_SITE_COUNT = 50;
 const sites = locateRealInsertSites(indexSrc);
 if (sites.length !== EXPECTED_INSERT_SITE_COUNT) {
   fail(

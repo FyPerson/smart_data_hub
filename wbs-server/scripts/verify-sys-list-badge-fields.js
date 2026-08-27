@@ -102,8 +102,12 @@ must(listSelStart > 0, '列表 SELECT 可定位（唯一列表供数查询）');
 //   SQL 行注释（先剥注释再找边界——防注释文本本身巧合含 "FROM sys_issues" 字样干扰判定，虽本 SELECT
 //   当前注释里没有这个巧合，但纪律上应遵循「文本扫描剥注释先行」）。
 // [实测订正] 本 SELECT 列多、注释重（含 commit 聚合两条 JSON 子查询），真正的外层 `FROM sys_issues`
-//   （紧跟 `${where.length ? 'WHERE ' + where.join(...) : ''}` 动态 WHERE 拼接）落在距 listSelStart
-//   约 22KB 原文处——早先按"约 60 列 ~5-6KB"估的 12000 上界偏小，命中过又一个"看似找到但其实截断"的假阳性
+//   落在距 listSelStart 约 22KB 原文处——早先按"约 60 列 ~5-6KB"估的 12000 上界偏小，命中过又一个"看似找到但其实截断"的假阳性
+//   ⚠️ [「待我处理」全角色卡·方案 §6 断言 5·457-H2 冻结] 查询构建抽成 buildSysIssuesListSelect/
+//   buildSysIssuesListQuery 两个纯函数后，`FROM sys_issues` 已不再与 `${where...}` 动态 WHERE 拼接同处
+//   一个模板字符串——FROM 留在 buildSysIssuesListSelect 收尾（selectSql 的一部分），WHERE/ORDER BY 挪到
+//   buildSysIssuesListQuery 里单独拼接（见 index.js 该处"badge-fields 守卫兼容"注释）。下方紧邻性断言
+//   的指纹文本已同步改为 buildSysIssuesListSelect 收尾处的 `return { selectSql, selectParams }`。
 //   （findOuterBoundary 在过窄的窗口内返回 -1，若不做 -1 判断会让下方 `.slice(0, -1)` 悄悄吃掉最后
 //   一个字符却不报错——已用显式 `< 0` 早退 + must() 断言堵死这条河）。上界调宽到 60000（对这一个 SELECT
 //   语句块而言仍是安全上界，不会误吞下一个端点的内容——真正终点 FROM 之后立即 return，不继续扫描）。
@@ -119,11 +123,13 @@ must(!boundaryResult.wentNegative, '边界扫描括号深度全程非负（fail-
 const outerFromIdxInStripped = boundaryResult.index;
 must(outerFromIdxInStripped > 0, '外层 FROM sys_issues 边界可定位（深度感知扫描，不被子查询内的同字面量截断）');
 const selectBlock = outerFromIdxInStripped > 0 ? strippedForBoundary.slice(0, outerFromIdxInStripped) : '';
-// 边界正确性断言（MED-2 新增）：命中点紧随其后应能看到本条列表 SELECT 自己的动态 WHERE 拼接特征
-//   `${where...}`（index.js 该 SELECT 处 `FROM sys_issues\n  ${where.length ? 'WHERE ' + ... : ''}`）——
-//   证明这次真落在"这条列表查询自己的外层 FROM"，不是巧合命中了别处同名字面量后又凑巧深度为 0。
+// 边界正确性断言（MED-2 新增，457-H2 收口后指纹改版）：命中点紧随其后应能看到本条列表 SELECT 自己的
+//   收尾特征——查询构建抽成 buildSysIssuesListSelect 后，FROM sys_issues 是该函数 selectSql 的收尾行，
+//   紧接着就是 `return { selectSql, selectParams };`（index.js 该处逐字如此）——证明这次真落在"这条
+//   列表查询自己的外层 FROM"，不是巧合命中了别处同名字面量后又凑巧深度为 0（全仓 `FROM sys_issues`
+//   字面量出现在几十处子查询/详情端点里，这条指纹断言是防止误中它们的唯一保险）。
 const afterBoundary = outerFromIdxInStripped > 0 ? strippedForBoundary.slice(outerFromIdxInStripped, outerFromIdxInStripped + 120) : '';
-must(afterBoundary.includes('${where'), `外层边界后文应含本条 SELECT 自己的动态 WHERE 拼接特征 "\${where"（证明命中点确是这条列表查询自己的 FROM，非误中别处），命中点后 120 字符原文：${JSON.stringify(afterBoundary)}`);
+must(afterBoundary.includes('return { selectSql, selectParams }'), `外层边界后文应含本条 SELECT 自己的收尾特征 "return { selectSql, selectParams }"（证明命中点确是 buildSysIssuesListSelect 收尾处的 FROM，非误中别处），命中点后 120 字符原文：${JSON.stringify(afterBoundary)}`);
 
 const selected = new Set();
 // ① 顶层裸列名：逐字符扫，只收括号深度为 0 的逗号分隔项里形如 `foo` 的整项
@@ -194,12 +200,15 @@ function countSelectPlaceholders(block) {
   return raw + extra;
 }
 const selectBlockQMarks = countSelectPlaceholders(selectBlock);
-must(selectBlockQMarks === 2, `列表 SELECT 列表部分（WHERE 之前）应恰含 2 个 ? 占位符（fast_release_active_auth 经 FAST_RELEASE_CONSUMABLE_AUTH_WHERE_SQL 引用内嵌的 nowStr + fast_release_my_pending 裸 ? 的 uid），实得 ${selectBlockQMarks}——多出/缺失的 ? 会与 selectParams 数组顺序错位`);
+// [「待我处理」全角色卡·方案 §3.1 selectParams 冻结口径·唯一权威口径] 恰 4 个（此前恰 2 个）——新增两列
+//   my_dev_pending（裸 ? 绑 uid）/ is_my_intake_liaison（裸 ? 绑 uid）各带 1 个占位符，插在
+//   fast_release_my_pending 之后（index.js 该处投影区文本顺序）。
+must(selectBlockQMarks === 4, `列表 SELECT 列表部分（WHERE 之前）应恰含 4 个 ? 占位符（fast_release_active_auth 经 FAST_RELEASE_CONSUMABLE_AUTH_WHERE_SQL 引用内嵌的 nowStr + fast_release_my_pending 裸 ? 的 uid + my_dev_pending 裸 ? 的 uid + is_my_intake_liaison 裸 ? 的 uid），实得 ${selectBlockQMarks}——多出/缺失的 ? 会与 selectParams 数组顺序错位`);
 // 对照组（[S-fix2] 管线级重写·预筛三轮 S-fix LOW-1：原「selectBlock 副本拼接后 (N+1)!==1」是构造上的
 //   恒真式且不经被测管线——对照组槽位上出现"断言永远成立"正是 guard-gotchas 要防的形态）：把带 ? 的
 //   注入体前置到 ROUTES 切片副本后**重跑同一条提取管线**（stripSqlLineComments→stripComments→
-//   findOuterBoundary→切块→推导式计数），断言得 3（基线 2 + 注入 1 个裸 ?）——同时注入体里另藏一个
-//   **注释内的 ?**（/* ? */），若管线的注释剥离失效会计得 4 同样判红，一组对照双向证明
+//   findOuterBoundary→切块→推导式计数），断言得 5（基线 4 + 注入 1 个裸 ?）——同时注入体里另藏一个
+//   **注释内的 ?**（/* ? */），若管线的注释剥离失效会计得 6 同样判红，一组对照双向证明
 //   "计数经真实管线且注释不计入"。
 {
   const mutatedSlice = '/* ? */ (?) ' + ROUTES.slice(listSelStart, listSelStart + SELECT_SCAN_UPPER_BOUND);
@@ -208,7 +217,7 @@ must(selectBlockQMarks === 2, `列表 SELECT 列表部分（WHERE 之前）应�
   must(!boundary2.wentNegative && boundary2.index > 0, '★对照组前置：注入后管线边界扫描仍应可定位且深度非负（注入体 (?) 括号自平衡）');
   const block2 = stripped2.slice(0, boundary2.index);
   const fakeQMarks = countSelectPlaceholders(block2);
-  must(fakeQMarks === 3, `★对照组（管线级）：注入 1 个真裸 ?（注释内另藏 1 个假 ?）后重跑同一条提取管线（含常量引用推导）应恰计 3 个（基线 2 + 注入 1），实得 ${fakeQMarks}——≠3 说明判据恒真、管线未被经过、或注释剥离失效`);
+  must(fakeQMarks === 5, `★对照组（管线级）：注入 1 个真裸 ?（注释内另藏 1 个假 ?）后重跑同一条提取管线（含常量引用推导）应恰计 5 个（基线 4 + 注入 1），实得 ${fakeQMarks}——≠5 说明判据恒真、管线未被经过、或注释剥离失效`);
 }
 
 // ── 对拍 ────────────────────────────────────────────────────────
@@ -259,15 +268,16 @@ const BADGE_FIELDS = [
   //   出可读定位）。
   ['post_derive_root_id', '补验收未通过·已派生子编号——目标派生单 derive_root_id 标量子查询投影'],
   ['post_derive_seq', '补验收未通过·已派生子编号——目标派生单 derive_seq 标量子查询投影'],
-  // [值班筛选与类型卡 S1/S2·S-fix 3b] fast_release_my_pending——同 derive_seq 先例：本列被
-  //   siIsMyFastlanePending(i)（Sys_Iteration.html 内定义，非本文件五个扫描函数体
-  //   renderSysIterationRows/siTechLeadNotifyBadgeHtml/siPrereleaseFlagHtml/siPostAcceptFlagHtml/
-  //   siFastlaneFlagHtml 之一——统计卡/筛选路径在"列表行渲染"之外，超出本守卫头部注释明写的
-  //   "只覆盖列表行渲染路径"扫描面）以 i.fast_release_my_pending 字面量消费，本文件的 \bi\. 扫描器
-  //   天然抓不到这条消费。若不点名登记，后端未来一旦漏投影/误删该列，本守卫会全绿放过——「待我
-  //   确认」统计卡与 my_fastlane 横切筛选会静默恒读到 undefined（卡恒 0、点卡筛选恒空结果集），
-  //   却没有任何断言会报红。
-  ['fast_release_my_pending', '值班「待我确认」统计卡计数 + siMatchStatFilter my_fastlane 横切筛选（siIsMyFastlanePending 消费，本守卫扫描面之外，点名登记兜底）'],
+  // [值班筛选与类型卡 S1/S2·S-fix 3b·「待我处理」全角色卡 C4 措辞同步] fast_release_my_pending——
+  //   同 derive_seq 先例：本列被 siIsMyFastlanePending(i)（Sys_Iteration.html 内定义，非本文件五个
+  //   扫描函数体 renderSysIterationRows/siTechLeadNotifyBadgeHtml/siPrereleaseFlagHtml/
+  //   siPostAcceptFlagHtml/siFastlaneFlagHtml 之一——聚合卡/筛选路径在"列表行渲染"之外，超出本守卫
+  //   头部注释明写的"只覆盖列表行渲染路径"扫描面）以 i.fast_release_my_pending 字面量消费，本文件的
+  //   \bi\. 扫描器天然抓不到这条消费。若不点名登记，后端未来一旦漏投影/误删该列，本守卫会全绿放过——
+  //   「待我处理」聚合卡的值班身份分支（siIsMyPending 内 ⑥ 值班执行人一支，原样调用
+  //   siIsMyFastlanePending，独立「待我确认」值班卡已随该批吸收移除）会静默恒读到 undefined（该
+  //   身份分支恒不命中），却没有任何断言会报红。
+  ['fast_release_my_pending', '「待我处理」聚合卡·值班执行人身份分支计数（siIsMyFastlanePending 消费，经 siIsMyPending 聚合调用，本守卫扫描面之外，点名登记兜底）'],
 ];
 for (const [f, label] of BADGE_FIELDS) {
   must(selected.has(f), `徽章「${label}」依赖字段 ${f} 在列表 SELECT 中`);

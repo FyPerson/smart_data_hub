@@ -33,22 +33,38 @@
  *   ⑪ HTML 内联 <script> 语法有效（new Function 编译不执行，等价 node -c）。
  *
  * [值班筛选与类型卡·S2·2026-08-15 追加·SSOT=docs/local/系统迭代/
- * 任务_值班筛选与类型卡_长任务锚点_20260815.md §3 技术自决] 新增：
- *   ⑫ siIsMyFastlanePending/siMatchStatFilter/siShouldRenderMyFastlaneCard **沙箱真执行**（非静态
- *      文本匹配——照 verify-sys-eta-generation.js [A1]/[R6] 先例，提取函数全文用 new Function 编译为
- *      真可调用函数，喂真实输入向量真执行断言，能证明"四条件逐一翻转会不会正确翻转判定"这类行为，
- *      纯文本 .includes()/正则做不到）：谓词四条件逐一翻转→false + 全真→true（反向一对）；
- *      siMatchStatFilter 的 'my_fastlane' 横切 key 路由到谓词（真/假各一）+ 既有状态组 key 行为不变
- *      + 未知 key 仍放行（现状兜底语义未被改坏）；siShouldRenderMyFastlaneCard 卡渲染条件三态
- *      （count>0 渲染／count=0 非激活不渲染／count=0 但激活仍渲染）。
+ * 任务_值班筛选与类型卡_长任务锚点_20260815.md §3 技术自决]（历史形态，S3 起已被下方「待我处理全
+ * 角色卡」批次吸收改写——保留本段仅为沿革记录，⑫ 组当前真实内容见下段）：
+ *   ⑫ siIsMyFastlanePending/siMatchStatFilter/siShouldRenderMyFastlaneCard 沙箱真执行、siRenderStats
+ *      接线四条——独立「待我确认」值班卡形态，S3 起已被「待我处理」聚合卡吸收，siShouldRenderMyFastlane
+ *      Card 已泛化改名（见下段），旧值班卡专属断言组已随之整组重写。
  *
- * [S-fix 修复批·2026-08-15 追加] 预筛两轮意见收口：
- *   ⑫ 组补 siRenderStats 接线四条（预筛 M4-M7 四破法各对一条，②③两条依赖同一段 if 分支文本提取，
- *      互不替代——②证"push 真在条件内"，③证"分支内的 key 与筛选路由的 key 逐字相同"）：①确实调用
- *      siIsMyFastlanePending（非内联另一份判据）②stats.push 确实挂在 siShouldRenderMyFastlaneCard
- *      条件内（非无条件 push）③卡 key 字面量与 siMatchStatFilter 路由字面量提取真实值逐字比对（S2-M4
- *      同款陷阱：存在性文本检查测不出"两处各自拼错但都存在"这种漂移）④计数基数确实来自 vis（同其余
- *      状态卡口径，非另开一份）。
+ * [「待我处理」全角色卡·方案 20260825_v1.3 §6·Phase P Commit 4·2026-08-26 重写] ⑫ 组整组改写为
+ * 「待我处理」聚合卡断言族（SSOT=docs/local/系统迭代/待我处理全角色卡_方案_20260825_v1.3.md §6）：
+ *   ⑫ siIsMyPending（七身份聚合谓词，六现行+一历史兼容）/siMyPendingBreakdown（分段计次）/
+ *      siShouldRenderConditionalCard（456-H1 冻结·由 siShouldRenderMyFastlaneCard 泛化改名，第三参
+ *      cardKey）/siMatchStatFilter（'my_pending' 横切 key 路由）**沙箱真执行**（同 S2 先例：提取函数
+ *      全文用 new Function 编译为真可调用函数，喂真实输入向量真执行断言）：
+ *        · 泛化函数真值表五行（457-M1／codex 467 MED-1 承接：旧名可执行逻辑不存在／(0,'my_pending',
+ *          'my_pending')=true／(0,'other','my_pending')=false／(3,'','my_pending')=true／siRenderStats
+ *          以 'my_pending' 第三参调用=结构锚）。
+ *        · 七身份逐个正反例（六现行+一历史兼容，各一正例+"状态对身份不对"+"身份对状态不对"反例）+
+ *          codex 467 MED-2 回归（uid 桩=2**53/'not-a-number' → ⑤建单人⑦历史兼容均不命中）。
+ *        · 3b「待处理」归属专项（admin 命中／开发 my_dev_pending=0 不命中／my_dev_pending=1 仍不命中
+ *          =状态门拦住设计内预指派，N0-6b 增补）+ 3c 状态族单一事实源（结构锚：引用 SI_DEV_FAMILY_
+ *          STATUSES 标识符本身，不含 '开发中' 字面量）+ 3d admin 归档分支覆盖「已生效」。
+ *        · 并集断言：主计数（siIsMyPending 去重）恰 1 vs 分段计数（siMyPendingBreakdown 允许重叠）
+ *          之和 > 1，title 固定含"（同一单可命中多个身份）"。
+ *        · 值班卡已移除：'my_fastlane' 字面量在 siRenderStats/siMatchStatFilter 零出现（458-H1 判定
+ *          全仓无旧键消费者，零字面量口径，无归一豁免入口）；siIsMyFastlanePending 仍定义且被
+ *          siIsMyPending 原样调用（值班身份⑥分支）。
+ *        · 465 LOW-2：紧凑 CSS（.si-wrap .u-stat-card 族）不外溢 components.css + 'u-stat-card' 产出点
+ *          页面内恰 2 处（statsRow+typeCardsRow，防未来第三区被连带压缩无感知）。
+ *   ⑫ 组补 siRenderStats 接线四条（M4-M7 四破法沿用，现改抓「待我处理」聚合卡接线）：①确实调用
+ *      siIsMyPending（非内联另一份判据）②stats.unshift 确实挂在 siShouldRenderConditionalCard 条件内
+ *      （非无条件插入）③卡 key 字面量与 siMatchStatFilter 路由字面量提取真实值逐字比对④计数基数确实
+ *      来自 vis（同其余状态卡口径）。接线⑤a/⑤b（可点卡交互语义四件套）为通用断言，与本次改写无关，
+ *      原样保留未改。
  *   [⑫前置] 提取/编译步骤（此前是裸 assert.ok/new Function，抛错会终止整个进程、不计入 check() 计数）
  *      改包进 check()；SI_STATUS_GROUPS 提取物新增键集 deepStrictEqual 核验（防括号计数被字面量骗偏
  *      导致静默截断成半个对象）。
@@ -332,19 +348,18 @@ check('Sys_Iteration.html 内联脚本可编译（new Function，不执行）', 
     }
 });
 
-console.log('— ⑫ [值班筛选与类型卡·S2] siIsMyFastlanePending/siMatchStatFilter/siShouldRenderMyFastlaneCard 沙箱真执行 —');
+console.log('— ⑫ 「待我处理」聚合卡沙箱真执行（siIsMyPending/siMyPendingBreakdown/siShouldRenderConditionalCard/siMatchStatFilter） —');
 {
     // 真执行范式（照 verify-sys-eta-generation.js [A1]/[R6] 先例）：静态 .includes()/正则只能证明
-    //   "字符串出现过"，证不了"四条件逐一翻转会不会正确翻转判定"这类行为——本组从 HTML 提取函数
+    //   "字符串出现过"，证不了"七身份逐一命中/不命中会不会正确翻转判定"这类行为——本组从 HTML 提取函数
     //   全文（含签名，非 bodyOf() 剥壳后的纯体，需要签名才能 new Function 后按名取出），编译为真
-    //   可调用函数，喂真实输入向量真执行断言。
-    // [S-fix 4b] 单参数写法委派模块顶部已引入的 extractFunctionFullText（隐式绑定 src）——保持下方
-    //   调用点 extractFullFunctionText('fnName') 的既有书写形态不变，不再手写裸括号扫描器。
+    //   可调用函数，喂真实输入向量真执行断言。isAdmin()/currentUser 两个全局符号用可控桩注入（沙箱内
+    //   按每条用例的 isAdminVal/currentUserVal 现编译一份，不共用一个固定全局状态）。
     const extractFullFunctionText = (fnName) => extractFunctionFullText(src, fnName);
     // SI_STATUS_GROUPS 是 `const X = { ... };` 常量声明（非函数），shared 模块的 extractFunctionBody
     //   只支持 `function name(...) {` 形态，故此处仍保留本地裸括号扫描器（无共用替代品可用）；
-    //   siMatchStatFilter 真执行时需要真实值——从源码提取而非在本文件手抄一份，避免两份状态组定义
-    //   各自维护、后续新增状态组时漂移。[S-fix 4c] 提取物额外过键集完整性核验（见下方 check），防
+    //   siMatchStatFilter/siIsMyPending 真执行时需要真实值——从源码提取而非在本文件手抄一份，避免
+    //   两份状态组定义各自维护、后续新增状态组时漂移。[S-fix 4c] 提取物额外过键集完整性核验，防
     //   括号计数被字面量骗偏导致静默截断成半个对象却不报错。
     function extractConstObjectText(constName) {
         const startIdx = src.indexOf(`const ${constName} = {`);
@@ -357,145 +372,358 @@ console.log('— ⑫ [值班筛选与类型卡·S2] siIsMyFastlanePending/siMatc
         }
         return null;
     }
+    // [「待我处理」全角色卡 C4 新增] SI_DEV_FAMILY_STATUSES 是 `const X = [ ... ];` 数组字面量（非对象），
+    //   extractConstObjectText 的花括号扫描器不适用，另写一份方括号深度扫描——3b③/3c 两条活体变异需要
+    //   拿到本常量的真实文本以便在真实文件上做临时替换（见本文件外的报告：真实编辑+重跑+还原，非本
+    //   文件内部字符串替换沙箱），此处只负责"提取到 + 编译出基线值"两件事。
+    function extractConstArrayText(constName) {
+        const startIdx = src.indexOf(`const ${constName} = [`);
+        if (startIdx < 0) return null;
+        const bracketStart = src.indexOf('[', startIdx);
+        let depth = 0, i = bracketStart;
+        for (; i < src.length; i++) {
+            if (src[i] === '[') depth++;
+            else if (src[i] === ']') { depth--; if (depth === 0) return src.slice(startIdx, i + 1) + ';'; }
+        }
+        return null;
+    }
 
     const fnIsMyFastlanePending = extractFullFunctionText('siIsMyFastlanePending');
-    const fnShouldRenderCard = extractFullFunctionText('siShouldRenderMyFastlaneCard');
+    const fnIsMyPending = extractFullFunctionText('siIsMyPending');
+    const fnMyPendingBreakdown = extractFullFunctionText('siMyPendingBreakdown');
+    const fnShouldRenderConditionalCard = extractFullFunctionText('siShouldRenderConditionalCard');
     const fnMatchStatFilter = extractFullFunctionText('siMatchStatFilter');
     const statusGroupsText = extractConstObjectText('SI_STATUS_GROUPS');
+    const devFamilyStatusesText = extractConstArrayText('SI_DEV_FAMILY_STATUSES');
 
-    // [S-fix 4c] 提取前置全部包进 check() 计数体系——此前 4 条 assert.ok 与下方 3 个 new Function 编译
-    //   调用均是裸调用，提取失败/编译失败会抛出未捕获异常直接终止整个进程（该组之前/之后的全部断言
-    //   都不会被计数，只留一条与本组无关的堆栈），而非像其余断言一样被记成一条可读的红色失败行。
-    check('[⑫前置] 三函数+一常量全部提取成功（提不到=守卫空转，不能当通过）', () => {
+    // [S-fix 4c 沿用] 提取前置全部包进 check() 计数体系——裸调用抛错会终止整个进程、其它断言不计数。
+    check('[⑫前置] 五函数+两常量全部提取成功（提不到=守卫空转，不能当通过）', () => {
         assert.ok(fnIsMyFastlanePending, '未提取到 siIsMyFastlanePending 函数全文');
-        assert.ok(fnShouldRenderCard, '未提取到 siShouldRenderMyFastlaneCard 函数全文');
+        assert.ok(fnIsMyPending, '未提取到 siIsMyPending 函数全文');
+        assert.ok(fnMyPendingBreakdown, '未提取到 siMyPendingBreakdown 函数全文');
+        assert.ok(fnShouldRenderConditionalCard, '未提取到 siShouldRenderConditionalCard 函数全文（456-H1 泛化改名后的新名）');
         assert.ok(fnMatchStatFilter, '未提取到 siMatchStatFilter 函数全文');
         assert.ok(statusGroupsText, '未提取到 SI_STATUS_GROUPS 常量全文');
+        assert.ok(devFamilyStatusesText, '未提取到 SI_DEV_FAMILY_STATUSES 常量全文');
+    });
+    check('[457-M1 真值表行1] 旧名 siShouldRenderMyFastlaneCard 可执行逻辑不存在（泛化改名后不应再留同名可执行函数，否则说明改名不彻底/留了兼容包袱）', () => {
+        const oldFn = extractFullFunctionText('siShouldRenderMyFastlaneCard');
+        assert.ok(!oldFn, `旧名函数仍可提取到可执行逻辑——456-H1 冻结的泛化改名应已删除旧名，实得非空文本（前 80 字符）：${oldFn && oldFn.slice(0, 80)}`);
     });
     check('[⑫前置] SI_STATUS_GROUPS 提取物键集完整（防提取静默截断——括号计数一旦被字面量骗偏，可能只切到半个对象却不报错，仍会 new Function 成功但少几个组）', () => {
         // eslint-disable-next-line no-new-func
         const statusGroupsObj = new Function(`${statusGroupsText}\nreturn SI_STATUS_GROUPS;`)();
-        assert.deepStrictEqual(Object.keys(statusGroupsObj).sort(), ['acceptance', 'active', 'done', 'paused', 'release'],
-            `SI_STATUS_GROUPS 提取物键集应恰为这 5 个（排序后比对），实得 ${JSON.stringify(Object.keys(statusGroupsObj).sort())}`);
+        // [待我处理全角色卡 方案 v1.3 §3.2·P1] done 组拆为 pending_archive（待归档=已上线/已生效）+
+        //   archived（已归档=已关闭），键集由 5 → 6。
+        assert.deepStrictEqual(Object.keys(statusGroupsObj).sort(), ['acceptance', 'active', 'archived', 'paused', 'pending_archive', 'release'],
+            `SI_STATUS_GROUPS 提取物键集应恰为这 6 个（排序后比对），实得 ${JSON.stringify(Object.keys(statusGroupsObj).sort())}`);
     });
-
-    let isMyFastlanePending, shouldRenderCard, matchStatFilter;
-    check('[⑫前置] 三函数提取物均可编译为可调用函数', () => {
+    check('[⑫前置] SI_DEV_FAMILY_STATUSES 提取物基线值恰为 [开发中,处理中]（防提取静默截断；同时是 3b③/3c 两条活体变异的基线快照——变异前先证基线，变异后再证真的变了）', () => {
         // eslint-disable-next-line no-new-func
-        isMyFastlanePending = new Function(`${fnIsMyFastlanePending}\nreturn siIsMyFastlanePending;`)();
+        const arr = new Function(`${devFamilyStatusesText}\nreturn SI_DEV_FAMILY_STATUSES;`)();
+        assert.deepStrictEqual(arr, ['开发中', '处理中'], `SI_DEV_FAMILY_STATUSES 提取物应恰为 ['开发中','处理中']，实得 ${JSON.stringify(arr)}`);
+    });
+
+    // 编译工厂——每条用例按自己的 isAdminVal/currentUserVal 现编译一份（互不干扰，非共用一份可变全局态）。
+    function stubText(isAdminVal, currentUserVal) {
+        return `function isAdmin() { return ${JSON.stringify(!!isAdminVal)}; }\nconst currentUser = ${currentUserVal === undefined ? 'null' : JSON.stringify(currentUserVal)};`;
+    }
+    function compile(returnName, extraTexts, isAdminVal, currentUserVal) {
+        const parts = [stubText(isAdminVal, currentUserVal), statusGroupsText, devFamilyStatusesText, fnIsMyFastlanePending, ...extraTexts, `return ${returnName};`];
         // eslint-disable-next-line no-new-func
-        shouldRenderCard = new Function(`${fnShouldRenderCard}\nreturn siShouldRenderMyFastlaneCard;`)();
-        // siMatchStatFilter 依赖 SI_STATUS_GROUPS 常量与 siIsMyFastlanePending 函数两个外部符号——一并
-        //   注入同一份编译文本（函数声明具名提升，siMatchStatFilter 体内可直接引用），同 [A1] 组
-        //   "siDeadlineToLocalInput 依赖 siToLocalInput，两函数体一并注入"同一手法。
+        return new Function(parts.join('\n'))();
+    }
+    const isMyPendingWith = (isAdminVal, currentUserVal) => compile('siIsMyPending', [fnIsMyPending], isAdminVal, currentUserVal);
+    const breakdownWith = (isAdminVal, currentUserVal) => compile('siMyPendingBreakdown', [fnMyPendingBreakdown], isAdminVal, currentUserVal);
+    const matchStatFilterWith = (isAdminVal, currentUserVal) => compile('siMatchStatFilter', [fnIsMyPending, fnMatchStatFilter], isAdminVal, currentUserVal);
+
+    check('[⑫前置] siIsMyPending 可编译（默认桩 isAdmin=false/currentUser=null）', () => {
+        assert.strictEqual(typeof isMyPendingWith(false, null), 'function', 'siIsMyPending 应可编译为函数');
+    });
+    check('[⑫前置] siMyPendingBreakdown 可编译', () => {
+        assert.strictEqual(typeof breakdownWith(false, null), 'function', 'siMyPendingBreakdown 应可编译为函数');
+    });
+    check('[⑫前置] siShouldRenderConditionalCard 可编译（独立于上两条——真值表家族依赖本函数，不得被聚合谓词改动连坐，3ed63b9 三独立 check 纪律）', () => {
         // eslint-disable-next-line no-new-func
-        matchStatFilter = new Function(`${statusGroupsText}\n${fnIsMyFastlanePending}\n${fnMatchStatFilter}\nreturn siMatchStatFilter;`)();
-        assert.strictEqual(typeof isMyFastlanePending, 'function', 'siIsMyFastlanePending 应可编译为函数');
-        assert.strictEqual(typeof shouldRenderCard, 'function', 'siShouldRenderMyFastlaneCard 应可编译为函数');
-        assert.strictEqual(typeof matchStatFilter, 'function', 'siMatchStatFilter 应可编译为函数');
+        const fn = new Function(`${fnShouldRenderConditionalCard}\nreturn siShouldRenderConditionalCard;`)();
+        assert.strictEqual(typeof fn, 'function', 'siShouldRenderConditionalCard 应可编译为函数');
+    });
+    check('[⑫前置] siMatchStatFilter 可编译（独立于上三条——拆组归属家族依赖本函数，不得被聚合卡改名连坐）', () => {
+        assert.strictEqual(typeof matchStatFilterWith(false, null), 'function', 'siMatchStatFilter 应可编译为函数');
     });
 
-    console.log('  — siIsMyFastlanePending：四条件逐一翻转 + 全真（反向一对） —');
-    const BASE = { type: 'bug', status: '待验证', fast_release_active_auth: 1, fast_release_my_pending: 1 };
-    check('全真 ⇒ true（实现坏成什么样这条会红：任一条件判据被误删会立即由下面四条反例现形）', () => {
-        assert.strictEqual(isMyFastlanePending(BASE), true, '四条件全真应判 true');
-    });
-    check('type 翻转（非 bug）⇒ false', () => {
-        assert.strictEqual(isMyFastlanePending({ ...BASE, type: 'feature' }), false);
-    });
-    check('status 翻转（非待验证）⇒ false', () => {
-        assert.strictEqual(isMyFastlanePending({ ...BASE, status: '处理中' }), false);
-    });
-    check('fast_release_active_auth 翻转（0）⇒ false（原始信号不掺闸的消费端必须真的 AND 了它）', () => {
-        assert.strictEqual(isMyFastlanePending({ ...BASE, fast_release_active_auth: 0 }), false);
-    });
-    check('fast_release_my_pending 翻转（0）⇒ false', () => {
-        assert.strictEqual(isMyFastlanePending({ ...BASE, fast_release_my_pending: 0 }), false);
-    });
-    check('字符串型合法值（\'1\'）经 Number() 强制转换仍判 true（防止用严格 === 裸比较误杀后端下发的合法数值）', () => {
-        assert.strictEqual(isMyFastlanePending({ ...BASE, fast_release_active_auth: '1', fast_release_my_pending: '1' }), true);
-    });
-    check('字符串脏值（\'0\'）经 Number() 转换判 false（防真值判断把非空字符串 \'0\' 误判为真，与 siFastlaneFlagHtml 既有惯例同源）', () => {
-        assert.strictEqual(isMyFastlanePending({ ...BASE, fast_release_my_pending: '0' }), false);
+    // 每条用例统一走本 helper：编译→真执行→比对，message 里带上完整输入，红了就能直接看出是哪个身份
+    // /哪个字段翻了车（"实现坏成什么样这条会红"落在每条用例自身的输入设计里，非事后补一句话）。
+    function assertIsMyPending(label, isAdminVal, currentUserVal, item, expected) {
+        check(label, () => {
+            const fn = isMyPendingWith(isAdminVal, currentUserVal);
+            const actual = fn(item);
+            assert.strictEqual(actual, expected,
+                `siIsMyPending(${JSON.stringify(item)})（isAdmin=${isAdminVal}, currentUser=${JSON.stringify(currentUserVal)}）应为 ${expected}，实得 ${actual}`);
+        });
+    }
+
+    console.log('  — siShouldRenderConditionalCard 真值表五行（457-M1／codex 467 MED-1 承接：泛化提取三参改抓 cardKey） —');
+    {
+        let shouldRenderCard;
+        check('[前置] siShouldRenderConditionalCard 可编译（S4 预筛提示4：编译包进 check，失败红在此处而非匿名抛错）', () => {
+            // eslint-disable-next-line no-new-func
+            shouldRenderCard = new Function(`${fnShouldRenderConditionalCard}\nreturn siShouldRenderConditionalCard;`)();
+            assert.strictEqual(typeof shouldRenderCard, 'function');
+        });
+        check('真值表行2：(0,\'my_pending\',\'my_pending\') === true（count=0 但激活筛选正是本卡仍渲染——堵陷阱：处理完最后一单卡不消失；若第三参被忽略/内部仍硬编码旧字面量，本条会红）', () => {
+            assert.strictEqual(shouldRenderCard(0, 'my_pending', 'my_pending'), true);
+        });
+        check('真值表行3：(0,\'other\',\'my_pending\') === false（count=0 且激活筛选是别的卡——应隐藏；若实现退化成恒 true，本条会红）', () => {
+            assert.strictEqual(shouldRenderCard(0, 'other', 'my_pending'), false);
+        });
+        check('真值表行4：(3,\'\',\'my_pending\') === true（count>0 天然可见，不论激活态；若第一分支被误删，本条会红）', () => {
+            assert.strictEqual(shouldRenderCard(3, '', 'my_pending'), true);
+        });
+        check('真值表行5：siRenderStats 以字面量 \'my_pending\' 第三参调用 siShouldRenderConditionalCard（结构锚，防"只换调用对象不改内部硬编码"回归——456-H1 冻结要防的坑，若调用点漏传第三参或参数顺序错位，本条会红）', () => {
+            const body = bodyOf('siRenderStats');
+            assert.ok(/siShouldRenderConditionalCard\(myPendingCount,\s*siActiveStat,\s*'my_pending'\)/.test(body),
+                '未见 siShouldRenderConditionalCard(myPendingCount, siActiveStat, \'my_pending\') 调用');
+        });
+    }
+
+    console.log('  — siIsMyPending：七身份逐个正反例（六现行+一历史兼容，各一正例+"状态对身份不对"+"身份对状态不对"反例；若该身份的身份门/状态门任一被误删，对应反例会由 false 翻红成 true） —');
+    console.log('    ①admin —');
+    assertIsMyPending('①admin 正例：isAdmin=true + status=待指派 → true', true, null, { status: '待指派' }, true);
+    assertIsMyPending('①admin 状态对身份不对：isAdmin=false + status=待指派 → false（若 isAdmin() 判据被误删，本条会翻红成 true——457-H1 冻结的最易漏点：表格把 admin 的身份写在"身份"列不是判据列）', false, null, { status: '待指派' }, false);
+    assertIsMyPending('①admin 身份对状态不对：isAdmin=true + status=开发中（不在 admin 任一状态子条件内）→ false', true, null, { status: '开发中', my_dev_pending: 0 }, false);
+    console.log('    ②开发 —');
+    assertIsMyPending('②开发 正例：status∈SI_DEV_FAMILY_STATUSES + my_dev_pending=1 → true', false, null, { status: '开发中', my_dev_pending: 1 }, true);
+    assertIsMyPending('②开发 状态对身份不对：status=开发中 + my_dev_pending=0（未在册/非待办）→ false（若 my_dev_pending 判据被误删/改成真值判断，本条会翻红）', false, null, { status: '开发中', my_dev_pending: 0 }, false);
+    assertIsMyPending('②开发 身份对状态不对：my_dev_pending=1 但 status=待验证（不在开发家族状态内）→ false（禁止 my_dev_pending 单独放行，必须叠状态门，若状态门被误删本条会翻红）', false, null, { status: '待验证', my_dev_pending: 1 }, false);
+    console.log('    ③对接人（待对接测试） —');
+    assertIsMyPending('③对接人 正例：status=待对接测试 + is_my_intake_liaison=1 → true', false, null, { status: '待对接测试', is_my_intake_liaison: 1 }, true);
+    assertIsMyPending('③对接人 状态对身份不对：status=待对接测试 + is_my_intake_liaison=0 → false（若身份门被误删，本条会翻红）', false, null, { status: '待对接测试', is_my_intake_liaison: 0 }, false);
+    assertIsMyPending('③对接人 身份对状态不对：is_my_intake_liaison=1 但 status=开发中（非待对接测试）→ false（若状态门被误删，本条会翻红）', false, null, { status: '开发中', is_my_intake_liaison: 1, my_dev_pending: 0 }, false);
+    console.log('    ④受理人（待受理） —');
+    assertIsMyPending('④受理人 正例：status=待受理 + is_my_intake_liaison=1 → true', false, null, { status: '待受理', is_my_intake_liaison: 1 }, true);
+    assertIsMyPending('④受理人 状态对身份不对：status=待受理 + is_my_intake_liaison=0 → false（若身份门被误删，本条会翻红）', false, null, { status: '待受理', is_my_intake_liaison: 0 }, false);
+    assertIsMyPending('④受理人 身份对状态不对：is_my_intake_liaison=1 但 status=开发中（非待受理）→ false（若状态门被误删，本条会翻红）', false, null, { status: '开发中', is_my_intake_liaison: 1, my_dev_pending: 0 }, false);
+    console.log('    ⑤建单人（待修改） —');
+    assertIsMyPending('⑤建单人 正例：status=待修改 + created_by=uid(42) → true', false, { id: 42 }, { status: '待修改', created_by: 42 }, true);
+    assertIsMyPending('⑤建单人 状态对身份不对：status=待修改 + created_by=99（非本人）→ false（若 created_by===uid 比对被误删，本条会翻红）', false, { id: 42 }, { status: '待修改', created_by: 99 }, false);
+    assertIsMyPending('⑤建单人 身份对状态不对：created_by=uid(42) 但 status=开发中（非待修改）→ false（若状态门被误删，本条会翻红）', false, { id: 42 }, { status: '开发中', created_by: 42, my_dev_pending: 0 }, false);
+    console.log('    ⑥值班执行人（原样调用 siIsMyFastlanePending，函数本体一字不动） —');
+    assertIsMyPending('⑥值班 正例：type=bug ∧ status=待验证 ∧ fast_release_active_auth=1 ∧ fast_release_my_pending=1 → true（同时证「断言5」值班分支真命中聚合谓词，非孤立可执行但接不上线）', false, null, { type: 'bug', status: '待验证', fast_release_active_auth: 1, fast_release_my_pending: 1 }, true);
+    assertIsMyPending('⑥值班 状态对身份不对：status=待验证 但 fast_release_my_pending=0（不在集合内）→ false', false, null, { type: 'bug', status: '待验证', fast_release_active_auth: 1, fast_release_my_pending: 0 }, false);
+    assertIsMyPending('⑥值班 身份对状态不对：fast_release_my_pending=1 但 status=开发中（非待验证）→ false', false, null, { type: 'bug', status: '开发中', fast_release_active_auth: 1, fast_release_my_pending: 1, my_dev_pending: 0 }, false);
+    console.log('    ⑦历史兼容（被指定上线开发·D-A 拍板保留，2026-08-26 存量核查全库 release_assignee_id 非空行=0）—');
+    assertIsMyPending('⑦历史兼容 正例：type=bug ∧ status=待上线 ∧ release_assignee_id=uid(42) → true', false, { id: 42 }, { type: 'bug', status: '待上线', release_assignee_id: 42 }, true);
+    assertIsMyPending('⑦历史兼容 反例：release_assignee_id=99（非本人）→ false（若 ===uid 比对被误删/改成真值判断，本条会翻红）', false, { id: 42 }, { type: 'bug', status: '待上线', release_assignee_id: 99 }, false);
+
+    console.log('  — codex 467 MED-2 回归：uid 桩=2**53（非安全整数）/\'not-a-number\'（非数字）→ 归一 null，⑤建单人⑦历史兼容均不命中（即便原始字段恰好同值也不命中） —');
+    // [S4 预筛提示3·label 按真实变异面改写] 2**53 两条的真实防御=Number.isSafeInteger 归一（删掉归一
+    //   才翻红；只删 uid>0 时 Number(x)===null 仍 false 不翻红）；'not-a-number' 两条挡的是"归一被改成
+    //   宽松转换/== 比较"类回归——注释声称的变异方向必须与实测相符（comment_is_review_input）。
+    for (const badId of [2 ** 53, 'not-a-number']) {
+        assertIsMyPending(`⑤建单人 uid 桩=${JSON.stringify(badId)} → uid 归一 null，created_by 恰好同值仍不命中（2**53 条：若 Number.isSafeInteger 归一被误删，本条会翻红）`,
+            false, { id: badId }, { status: '待修改', created_by: badId }, false);
+        assertIsMyPending(`⑦历史兼容 uid 桩=${JSON.stringify(badId)} → uid 归一 null，release_assignee_id 恰好同值仍不命中（2**53 条：若 Number.isSafeInteger 归一被误删，本条会翻红）`,
+            false, { id: badId }, { type: 'bug', status: '待上线', release_assignee_id: badId }, false);
+    }
+
+    console.log('  — 3b「待处理」归属专项（本方案自查项，最易写反·N0-6b 增补） —');
+    assertIsMyPending('3b① bug 单 status=待处理 + admin → 命中（admin 待指派义务，SI_STATUS_GROUPS 之外的直接状态子条件覆盖「待处理」）', true, null, { status: '待处理' }, true);
+    assertIsMyPending('3b② 同单 + 开发身份（非 admin）+ my_dev_pending=0 → 不命中（待处理尚未指派，无在册开发）', false, null, { status: '待处理', my_dev_pending: 0 }, false);
+    assertIsMyPending('3b②b（N0-6b 增补，更强）同单 + 开发在册 my_dev_pending=1 → 仍不命中（状态门拦住设计内预指派——SI_DEV_FAMILY_STATUSES 不含「待处理」，即便 add/reassign 产生了在册 pending 行，前端谓词仍正确不命中；若状态门被误删/常量被误改，本条会翻红——见本报告附带的 3b③ 活体变异实证）', false, null, { status: '待处理', my_dev_pending: 1 }, false);
+
+    console.log('  — 3c 状态族单一事实源（结构锚：siIsMyPending 函数体须引用 SI_DEV_FAMILY_STATUSES 标识符本身，不含 \'开发中\' 字面量） —');
+    check('3c siIsMyPending 函数体（剥注释后）含 SI_DEV_FAMILY_STATUSES 标识符引用，且不含 \'开发中\' 字面量（禁止另写一份状态数组，单一事实源同 canSubmit 先例）', () => {
+        const body = bodyOf('siIsMyPending');
+        assert.ok(body, '未提取到 siIsMyPending 函数体');
+        assert.ok(/\bSI_DEV_FAMILY_STATUSES\b/.test(body), '未见 SI_DEV_FAMILY_STATUSES 标识符引用');
+        assert.ok(!body.includes("'开发中'"), '不应出现 \'开发中\' 字面量——应复用 SI_DEV_FAMILY_STATUSES 常量本身，非另写一份状态数组');
     });
 
-    console.log('  — siMatchStatFilter：my_fastlane 横切 key 路由 + 既有状态组 key 行为不变 + 未知 key 仍放行 —');
-    check('my_fastlane 路由到谓词·真例', () => {
-        assert.strictEqual(matchStatFilter(BASE, 'my_fastlane'), true);
+    console.log('  — 3d admin 归档分支覆盖「已生效」（P1 明定·v1.0 曾漏） —');
+    assertIsMyPending('3d status=已生效 + admin → 命中（SI_STATUS_GROUPS.pending_archive 复用，非散落硬编码"已上线"）', true, null, { status: '已生效' }, true);
+
+    console.log('  — 并集断言（主计数去重 vs 分段计次允许重叠·方案 §6-4） —');
+    check('并集：单张单同时满足 admin(post_release_acceptance=pending) 与开发(my_dev_pending=1) 两身份 → 主计数（vis.filter(siIsMyPending).length）恰为 1（并集去重，非按命中身份数累加；若 siIsMyPending 被改成分段累加式实现，本条会翻红成 2）', () => {
+        const fn = isMyPendingWith(true, { id: 42 });
+        const item = { status: '开发中', post_release_acceptance: 'pending', my_dev_pending: 1 };
+        const count = [item].filter(fn).length;
+        assert.strictEqual(count, 1, `主计数应为 1（该单虽同时命中 admin 验收归档与开发待提交两个身份，但去重后仍是 1 张单），实得 ${count}`);
     });
-    check('my_fastlane 路由到谓词·假例', () => {
-        assert.strictEqual(matchStatFilter({ ...BASE, fast_release_my_pending: 0 }, 'my_fastlane'), false);
+    check('并集·方案 §6-4 字面版（S4 预筛提示6 补）：两张单各命中一个身份（admin 归档单 + 开发待提交单）→ 主计数恰为 2（与上一条"单单双身份=1"互补，两条合起来钉死"并集去重且按单计数"两个方向）', () => {
+        const fn = isMyPendingWith(true, { id: 42 });
+        const itemA = { status: '已上线', my_dev_pending: 0 };
+        const itemB = { status: '开发中', my_dev_pending: 1 };
+        const count = [itemA, itemB].filter(fn).length;
+        assert.strictEqual(count, 2, `两张单各命中一身份应计 2，实得 ${count}`);
     });
-    check('既有状态组 key（active）行为不变·命中', () => {
-        assert.strictEqual(matchStatFilter({ status: '开发中' }, 'active'), true);
-    });
-    check('既有状态组 key（active）行为不变·不命中', () => {
-        assert.strictEqual(matchStatFilter({ status: '已上线' }, 'active'), false);
-    });
-    check('未知 key 仍放行（现状既有兜底语义未被本次改动破坏）', () => {
-        assert.strictEqual(matchStatFilter({ status: '随便什么状态' }, 'no_such_key_xyz'), true);
-    });
-    check('空 filterKey 仍放行（现状既有兜底语义未被本次改动破坏）', () => {
-        assert.strictEqual(matchStatFilter({ status: '随便什么状态' }, ''), true);
+    check('并集：同一单分段计数（siMyPendingBreakdown）之和 = 2 > 主计数 1（允许重叠，非并集去重）；title 末尾固定含"（同一单可命中多个身份）"（若分段实现互斥优先级化，本条会翻红——方案明文否决互斥优先级方案）', () => {
+        const breakdown = breakdownWith(true, { id: 42 });
+        const item = { status: '开发中', post_release_acceptance: 'pending', my_dev_pending: 1 };
+        const text = breakdown([item]);
+        assert.ok(/验收归档 1/.test(text), `分段文案应含"验收归档 1"，实得="${text}"`);
+        assert.ok(/待我提交 1/.test(text), `分段文案应含"待我提交 1"，实得="${text}"`);
+        assert.ok(text.endsWith('（同一单可命中多个身份）'), `分段文案应以固定提示收尾，实得="${text}"`);
     });
 
-    console.log('  — siShouldRenderMyFastlaneCard：卡渲染条件三态 —');
-    check('count>0 时渲染（不论是否激活）', () => {
-        assert.strictEqual(shouldRenderCard(3, ''), true);
-    });
-    check('count=0 且非激活不渲染（若实现退化成恒 true，本条会红）', () => {
-        assert.strictEqual(shouldRenderCard(0, ''), false);
-    });
-    check('count=0 但 siActiveStat===my_fastlane 仍渲染（堵陷阱：筛选激活时确认完最后一单，卡若消失用户被困在空筛选里出不来）', () => {
-        assert.strictEqual(shouldRenderCard(0, 'my_fastlane'), true);
-    });
-
-    console.log('  — siRenderStats 接线四条（S-fix 4a，预筛 M4-M7 四破法各对一条）—');
-    // M4 破法：siRenderStats 计数改成内联另一份判据（不再调用 siIsMyFastlanePending）——上面①-⑪的沙箱
-    //   真执行只验证了"siIsMyFastlanePending 这个函数自己对不对"，没验证 siRenderStats 是否真的调用了
-    //   它，这条正是补上这个缺口。
-    check('接线①：siRenderStats 内确实调用了 siIsMyFastlanePending（非内联另一份判据）', () => {
+    console.log('  — 断言5：值班卡已移除（\'my_fastlane\' 字面量零出现）+ siIsMyFastlanePending 仍被 siIsMyPending 调用 —');
+    check('siRenderStats 函数体（剥注释后）不含 \'my_fastlane\' 字面量（值班卡已吸收进「待我处理」聚合卡，横切筛选改用 my_pending；若残留旧 key，本条会翻红）', () => {
         const body = bodyOf('siRenderStats');
-        assert.ok(/\bsiIsMyFastlanePending\b/.test(body), '未见 siIsMyFastlanePending 调用——统计卡计数应复用唯一谓词函数，不应另写一份判据（禁双实现）');
+        assert.ok(!body.includes("'my_fastlane'"), 'siRenderStats 不应再出现 \'my_fastlane\' 字面量');
     });
-    // M5 破法：stats.push(key: my_fastlane, ...) 被挪到 siShouldRenderMyFastlaneCard(...) 判断之外
-    //   （变成无条件 push），三态渲染函数本身测得再对，接不上线也白测。
-    check('接线②：stats.push(key:\'my_fastlane\',...) 确实挂在 siShouldRenderMyFastlaneCard(...) 条件分支内部（非无条件 push）', () => {
+    check('siMatchStatFilter 函数体（剥注释后）不含 \'my_fastlane\' 字面量（458-H1 判定全仓无旧键消费者，零字面量口径，无归一豁免入口）', () => {
+        const body = bodyOf('siMatchStatFilter');
+        assert.ok(!body.includes("'my_fastlane'"), 'siMatchStatFilter 不应再出现 \'my_fastlane\' 字面量');
+    });
+    check('siIsMyFastlanePending 函数仍定义（未被顺手删除——降级为聚合谓词⑥值班分支，函数本体保留独立可测）', () => {
+        assert.ok(bodyOf('siIsMyFastlanePending'), '未提取到 siIsMyFastlanePending 函数体');
+    });
+    check('siIsMyPending 函数体调用 siIsMyFastlanePending(（值班身份分支原样复用，非另写一份判据；⑥组正例已沙箱真执行证明命中，本条补证接线未断）', () => {
+        const body = bodyOf('siIsMyPending');
+        assert.ok(body.includes('siIsMyFastlanePending('), '未见 siIsMyPending 调用 siIsMyFastlanePending——值班身份分支应原样复用该函数');
+    });
+
+    console.log('  — siMatchStatFilter：my_pending 路由（S4 预筛拦截1）+ 既有状态组 key 行为不变 + 未知/空 key 仍放行 + 拆组归属 —');
+    {
+        let matchStatFilter;
+        check('[前置] siMatchStatFilter 编译工厂可用（S4 预筛提示4：包进 check）', () => {
+            matchStatFilter = matchStatFilterWith(false, null);
+            assert.strictEqual(typeof matchStatFilter, 'function');
+        });
+        // [S4 预筛拦截1] my_pending 路由分支的静态次序锚 + 行为真/假一对——此前两面皆空：若 :1792 的
+        //   特判被挪到组查找之后，SI_STATUS_GROUPS['my_pending'] 恒 undefined 走 ': true' 兜底=点卡对
+        //   全部单据放行，而守卫 118 条全绿。次序锚+行为对是同一防线的两面，缺一不可。
+        check('my_pending 特判位于 SI_STATUS_GROUPS 查找之前（次序结构锚·方案 §6-2；若特判被挪后，本条会红）', () => {
+            const body = bodyOf('siMatchStatFilter');
+            const idxPending = body.indexOf("'my_pending'");
+            const idxGroups = body.indexOf('SI_STATUS_GROUPS[');
+            assert.ok(idxPending >= 0 && idxGroups >= 0, `两个锚点都应存在（my_pending@${idxPending}·组查找@${idxGroups}）`);
+            assert.ok(idxPending < idxGroups, `my_pending 特判（@${idxPending}）应在 SI_STATUS_GROUPS 查找（@${idxGroups}）之前`);
+        });
+        check('my_pending 路由行为·真例：admin 桩 + 待指派 → true（走 siIsMyPending 而非兜底放行）', () => {
+            assert.strictEqual(matchStatFilterWith(true, { id: 42 })({ status: '待指派' }, 'my_pending'), true);
+        });
+        check('my_pending 路由行为·假例：非 admin 非任何身份 + 待指派 → false（若特判失效走 ": true" 兜底，本条会翻红成 true——空转即暴露）', () => {
+            assert.strictEqual(matchStatFilterWith(false, { id: 42 })({ status: '待指派' }, 'my_pending'), false);
+        });
+        check('既有状态组 key（active）行为不变·命中', () => {
+            assert.strictEqual(matchStatFilter({ status: '开发中' }, 'active'), true);
+        });
+        check('既有状态组 key（active）行为不变·不命中', () => {
+            assert.strictEqual(matchStatFilter({ status: '已上线' }, 'active'), false);
+        });
+        // [P-C1 预筛拦截①] 键集断言只证"键名对"不证"状态归属对"——两组状态数组对调后键集照样 6 个、
+        //   77 断言全绿而卡计数全错。行为断言四条钉死归属方向（反向一对防对调，probe 双向证明范式）。
+        check('拆组归属·已上线∈pending_archive', () => {
+            assert.strictEqual(matchStatFilter({ status: '已上线' }, 'pending_archive'), true);
+        });
+        check('拆组归属·已生效∈pending_archive（方案 P1 明定·v1.0 曾漏）', () => {
+            assert.strictEqual(matchStatFilter({ status: '已生效' }, 'pending_archive'), true);
+        });
+        check('拆组归属·已关闭∈archived', () => {
+            assert.strictEqual(matchStatFilter({ status: '已关闭' }, 'archived'), true);
+        });
+        check('拆组归属·反向：已上线∉archived（防两组对调）', () => {
+            assert.strictEqual(matchStatFilter({ status: '已上线' }, 'archived'), false);
+        });
+        // [codex 465 MED-1/LOW-1] 拆组三补强：①已关闭∉pending_archive（与"已上线∉archived"合成双向，
+        //   防单状态被重复归进两组）②组全集无重复（结构化防回归：任何状态出现在两组=两张卡计数同含一单）
+        //   ③排序序值组间断言——SI_STATUS_SORT_ORDER 中待归档组每个状态的序值必须整体早于已归档组
+        //   （465 抓获实际缺陷：拆组时 已生效:11 仍排在 已关闭:10 之后，列表状态序与卡分组语义交错）。
+        check('拆组归属·反向：已关闭∉pending_archive（防重复归组）', () => {
+            assert.strictEqual(matchStatFilter({ status: '已关闭' }, 'pending_archive'), false);
+        });
+        check('组全集无重复（任一状态只属一组）', () => {
+            // eslint-disable-next-line no-new-func
+            const groupsObj = new Function(`${statusGroupsText}\nreturn SI_STATUS_GROUPS;`)();
+            const flat = Object.values(groupsObj).flat();
+            assert.strictEqual(flat.length, new Set(flat).size,
+                `状态出现在多个组：${JSON.stringify(flat.filter((s, i) => flat.indexOf(s) !== i))}`);
+        });
+        check('排序序值·待归档组整体早于已归档组（列表状态序与卡分组同向·codex 465 MED-1）', () => {
+            // eslint-disable-next-line no-new-func
+            const groupsObj = new Function(`${statusGroupsText}\nreturn SI_STATUS_GROUPS;`)();
+            const sortOrderText = extractConstObjectText('SI_STATUS_SORT_ORDER');
+            assert.ok(sortOrderText, '未提取到 SI_STATUS_SORT_ORDER 常量全文');
+            // eslint-disable-next-line no-new-func
+            const sortOrder = new Function(`${sortOrderText}\nreturn SI_STATUS_SORT_ORDER;`)();
+            groupsObj.pending_archive.concat(groupsObj.archived).forEach(s => {
+                assert.ok(Number.isFinite(sortOrder[s]), `状态「${s}」未在 SI_STATUS_SORT_ORDER 登记序值`);
+            });
+            const maxPending = Math.max(...groupsObj.pending_archive.map(s => sortOrder[s]));
+            const minArchived = Math.min(...groupsObj.archived.map(s => sortOrder[s]));
+            assert.ok(maxPending < minArchived,
+                `待归档组最大序值 ${maxPending} 应小于已归档组最小序值 ${minArchived}（否则列表默认排序与卡分组方向矛盾）`);
+        });
+        check('未知 key 仍放行（现状既有兜底语义未被本次改动破坏）', () => {
+            assert.strictEqual(matchStatFilter({ status: '随便什么状态' }, 'no_such_key_xyz'), true);
+        });
+        check('空 filterKey 仍放行（现状既有兜底语义未被本次改动破坏）', () => {
+            assert.strictEqual(matchStatFilter({ status: '随便什么状态' }, ''), true);
+        });
+    }
+
+    console.log('  — 465 LOW-2：紧凑 CSS 归属核验（.si-wrap 族不外溢 components.css）+ \'u-stat-card\' 产出点恰 2 处 —');
+    check('components.css 全文不含 \'.si-wrap\'（紧凑一屏覆盖应只活在 Sys_Iteration.html 页面内 <style>，不外溢共享层，否则会波及其它页面；若有人误把这批规则挪进共享层，本条会翻红）', () => {
+        assert.ok(!css.includes('.si-wrap'), 'components.css 不应出现 .si-wrap 选择器');
+    });
+    check('页面内 <style> 确含 .si-wrap .u-stat-card 紧凑覆盖（S4 预筛提示5 正向对照——纯否定式断言在"整段紧凑 CSS 被删"时照样绿，本条补上对照组：删了会红）', () => {
+        assert.ok(src.includes('.si-wrap .u-stat-card'), '页面内应存在 .si-wrap .u-stat-card 紧凑覆盖规则');
+    });
+    check('页面内 \'u-stat-card\' classes 数组产出点恰 2 处（statsRow 统计卡 + typeCardsRow 类型卡），防未来第三处渲染区被连带压缩无感知（若新开一个卡渲染区，本条会翻红提醒同步纳入紧凑覆盖评估）', () => {
+        const strippedSrc = stripComments(src);
+        const occurrences = (strippedSrc.match(/\['u-stat-card'\]/g) || []).length;
+        assert.strictEqual(occurrences, 2, `'u-stat-card' classes 数组字面量应恰出现 2 处，实得 ${occurrences}`);
+        const statsBody = bodyOf('siRenderStats');
+        const typeBody = bodyOf('siRenderTypeCards');
+        assert.ok(statsBody && /\['u-stat-card'\]/.test(statsBody), 'siRenderStats 函数体内未见 u-stat-card 产出点');
+        assert.ok(typeBody && /\['u-stat-card'\]/.test(typeBody), 'siRenderTypeCards 函数体内未见 u-stat-card 产出点');
+    });
+
+    console.log('  — siRenderStats 接线四条（M4-M7 四破法沿用，现改抓「待我处理」聚合卡接线）—');
+    // M4 破法：siRenderStats 计数改成内联另一份判据（不再调用 siIsMyPending）——上面沙箱真执行只验证了
+    //   "siIsMyPending 这个函数自己对不对"，没验证 siRenderStats 是否真的调用了它，本条补上这个缺口。
+    check('接线①：siRenderStats 内确实调用了 siIsMyPending（非内联另一份判据）', () => {
         const body = bodyOf('siRenderStats');
-        const ifIdx = body.indexOf('if (siShouldRenderMyFastlaneCard(');
-        assert.ok(ifIdx >= 0, '未见 if (siShouldRenderMyFastlaneCard(...)) 条件分支');
+        assert.ok(/\bsiIsMyPending\b/.test(body), '未见 siIsMyPending 调用——统计卡计数应复用唯一聚合谓词函数，不应另写一份判据（禁双实现）');
+    });
+    // M5 破法：stats.unshift({key:'my_pending',...}) 被挪到 siShouldRenderConditionalCard(...) 判断之外
+    //   （变成无条件插入），真值表本身测得再对，接不上线也白测。
+    check('接线②：stats.unshift({key:\'my_pending\',...}) 确实挂在 siShouldRenderConditionalCard(...) 条件分支内部（非无条件插入）', () => {
+        const body = bodyOf('siRenderStats');
+        const ifIdx = body.indexOf('if (siShouldRenderConditionalCard(');
+        assert.ok(ifIdx >= 0, '未见 if (siShouldRenderConditionalCard(...)) 条件分支');
         const closeIdx = body.indexOf('\n        }', ifIdx);
         assert.ok(closeIdx > ifIdx, '未能定位该 if 分支收尾（8 空格缩进假设可能与实现不符，需人工核实）');
         const ifBlock = body.slice(ifIdx, closeIdx);
-        assert.ok(/stats\.push\(/.test(ifBlock), `stats.push(...) 应在 siShouldRenderMyFastlaneCard(...) 条件分支内部，实得该分支内容：${ifBlock}`);
+        assert.ok(/stats\.unshift\(/.test(ifBlock), `stats.unshift(...) 应在 siShouldRenderConditionalCard(...) 条件分支内部，实得该分支内容：${ifBlock}`);
     });
-    // M6 破法（S2-M4 同款陷阱）：卡对象字面量 key: 'my_fastlane' 与 siMatchStatFilter 里路由判断的
-    //   'my_fastlane' 分开维护，一处改了拼写另一处忘改——"两处都出现这串字符"这类存在性文本检查测不出
-    //   这种漂移（改错的那一处照样"存在一个字符串"），必须提取两处**各自真实值**做相等比对，值不同才
-    //   判红（非"匹配不到预设的固定字面量"这种弱信号）。
-    check('接线③：卡 key 字面量与 siMatchStatFilter 路由到 siIsMyFastlanePending 的 key 字面量同串比对（提取两处真实值逐字比对，一处改另一处不改即判红）', () => {
+    // M6 破法（S2-M4 同款陷阱）：卡对象字面量 key: 'my_pending' 与 siMatchStatFilter 里路由判断的
+    //   'my_pending' 分开维护，一处改了拼写另一处忘改——"两处都出现这串字符"这类存在性文本检查测不出
+    //   这种漂移，必须提取两处**各自真实值**做相等比对，值不同才判红。
+    check('接线③：卡 key 字面量与 siMatchStatFilter 路由到 siIsMyPending 的 key 字面量同串比对（提取两处真实值逐字比对，一处改另一处不改即判红）', () => {
         const rsBody = bodyOf('siRenderStats');
-        const ifIdx = rsBody.indexOf('if (siShouldRenderMyFastlaneCard(');
-        assert.ok(ifIdx >= 0, '未见 siShouldRenderMyFastlaneCard 条件分支（若接线②已红，此处连带红属预期，非独立缺陷）');
+        const ifIdx = rsBody.indexOf('if (siShouldRenderConditionalCard(');
+        assert.ok(ifIdx >= 0, '未见 siShouldRenderConditionalCard 条件分支（若接线②已红，此处连带红属预期，非独立缺陷）');
         const closeIdx = rsBody.indexOf('\n        }', ifIdx);
         const ifBlock = rsBody.slice(ifIdx, closeIdx > ifIdx ? closeIdx : rsBody.length);
         const cardKeyMatch = ifBlock.match(/key:\s*'([^']*)'/);
         assert.ok(cardKeyMatch, '未在该 if 分支内提取到 key: \'...\' 字面量');
 
         const msfBody = bodyOf('siMatchStatFilter');
-        const routeLineMatch = msfBody.match(/filterKey === '([^']*)'\)\s*return\s*siIsMyFastlanePending\(item\)/);
-        assert.ok(routeLineMatch, 'siMatchStatFilter 内未提取到路由到 siIsMyFastlanePending 的 filterKey === \'...\' 判断行');
+        const routeLineMatch = msfBody.match(/filterKey === '([^']*)'\)\s*return\s*siIsMyPending\(item\)/);
+        assert.ok(routeLineMatch, 'siMatchStatFilter 内未提取到路由到 siIsMyPending 的 filterKey === \'...\' 判断行');
 
         assert.strictEqual(cardKeyMatch[1], routeLineMatch[1], `卡 key 字面量（${cardKeyMatch[1]}）应与筛选路由字面量（${routeLineMatch[1]}）逐字相同——一处改动另一处未同步会在此判红`);
     });
-    // M7 破法：计数基数改用别的变量/别的过滤链（如误用已按 siActiveType 过滤过的集合），既有断言组
-    //   （S2 遗留的四条件真执行断言）测不到"基数变量选对了没有"，本条直接钉住字面量。
-    check('接线④：「待我确认」计数基数确实来自 vis（与其余状态卡同一基数变量，非另开一份口径）', () => {
+    // M7 破法：计数基数改用别的变量/别的过滤链（如误用已按 siActiveType 过滤过的集合），既有断言组测
+    //   不到"基数变量选对了没有"，本条直接钉住字面量。
+    check('接线④：「待我处理」计数基数确实来自 vis（与其余状态卡同一基数变量，非另开一份口径）', () => {
         const body = bodyOf('siRenderStats');
-        assert.ok(/myFastlaneCount\s*=\s*vis\.filter\(/.test(body), '未见 myFastlaneCount = vis.filter(...) —— 计数基数应用与其余卡相同的 vis 变量');
+        assert.ok(/myPendingCount\s*=\s*vis\.filter\(siIsMyPending\)\.length/.test(body), '未见 myPendingCount = vis.filter(siIsMyPending).length —— 计数基数应用与其余卡相同的 vis 变量');
     });
     // [S-fix4·codex 414/415 MED-1] 可点卡交互语义静态钉扎（真执行两态断言在 verify-sys-type-cards ⑤ 组，
-    //   本文件按自身文本级定位补状态卡循环侧）：
+    //   本文件按自身文本级定位补状态卡循环侧）——通用断言，与本次「待我处理」改写无关，原样保留未改。
     check('接线⑤a：状态卡循环对可点卡输出 role="button"+tabindex+onkeydown 三件套且与 s.key===null 静态卡互斥', () => {
         const body = bodyOf('siRenderStats');
         assert.ok(/const interactive = s\.key === null \? '' : ` role="button" tabindex="0" onkeydown="siCardKeydown\(event\)" aria-pressed=/.test(body), '未见 interactive 属性三件套的静态卡互斥三元（s.key===null 不挂）');
@@ -504,6 +732,69 @@ console.log('— ⑫ [值班筛选与类型卡·S2] siIsMyFastlanePending/siMatc
     check('接线⑤b：aria-pressed 与视觉 active class 同源（classes.includes(\'active\')·非另写一份激活判据）', () => {
         const body = bodyOf('siRenderStats');
         assert.ok(/aria-pressed="\$\{classes\.includes\('active'\)\}"/.test(body), 'aria-pressed 应取 classes.includes(\'active\')——另写判据会与视觉激活态漂移');
+    });
+    // [观察反馈优化批 R7] 「待我处理」卡 count>0 状态强化（红点+状态色，demo V3 定稿）——同 M4-M7
+    //   系列纪律：钉住"真的接在 siRenderStats 里、真的按 s.key==='my_pending' && s.n>0 门控"，
+    //   不满足于"class 名字符串在全文出现过"这类弱存在性检查。count=0 时（含"筛选激活但已归零"的
+    //   siShouldRenderConditionalCard 转义分支，那时 s.n===0）该 class 不应被追加。
+    check('接线⑥：siRenderStats 内确实按 s.key===\'my_pending\' && s.n>0 门控追加 si-stat-alert class（红：门控条件被弱化/缺失——count=0 时不该带该 class）', () => {
+        const body = bodyOf('siRenderStats');
+        assert.ok(/if\s*\(\s*s\.key\s*===\s*'my_pending'\s*&&\s*s\.n\s*>\s*0\s*\)\s*classes\.push\('si-stat-alert'\);/.test(body),
+            '未找到 "if (s.key===\'my_pending\' && s.n>0) classes.push(\'si-stat-alert\');" 门控语句');
+    });
+    check('活体变异对照组：门控条件弱化为恒真（漏 && s.n>0）——上方严格正则字面匹配须判红（证明本条真的钉住 && s.n>0 这个条件，非"class 名字符串出现过"这类弱存在性检查）', () => {
+        const mutated = bodyOf('siRenderStats').replace(
+            "if (s.key === 'my_pending' && s.n > 0) classes.push('si-stat-alert');",
+            "if (s.key === 'my_pending') classes.push('si-stat-alert');"
+        );
+        assert.ok(!/if\s*\(\s*s\.key\s*===\s*'my_pending'\s*&&\s*s\.n\s*>\s*0\s*\)\s*classes\.push\('si-stat-alert'\);/.test(mutated),
+            '变异后的弱化门控文本不应再匹配严格正则（若仍匹配说明上方断言未真的锁死 && s.n>0 这个条件）');
+    });
+    check('.si-wrap .u-stat-card.si-stat-alert 规则声明体存在（红：CSS 变体规则缺失，class 加了但样式没跟上——沿用 465 LOW-2 精神，页面内 <style> 而非共享 components.css）', () => {
+        assert.ok(src.includes('.si-wrap .u-stat-card.si-stat-alert'), '页面内应存在 .si-wrap .u-stat-card.si-stat-alert 规则');
+        assert.ok(!css.includes('si-stat-alert'), 'components.css 不应包含 si-stat-alert（应仅存在于 Sys_Iteration.html 页面内 <style>）');
+    });
+    // [codex 477 回卷 MED-2] 原 border-left:3px solid 会与 components.css 基础 .u-stat-card 已有 border
+    //   叠加出几何差异——count 0↔1 切换时卡片左边框从"共享 1px"变成"本层 3px"，整卡宽度跟着抖 2px。
+    //   改用 inset box-shadow（不参与盒模型/布局计算，纯视觉图层，count 切换零几何影响）。
+    check('.si-wrap .u-stat-card.si-stat-alert 规则用 box-shadow:inset 3px 0 0 #dc2626 表达左侧红色强调，且不再声明 border-left（红：border-left 计入盒模型，count 0↔1 切换时卡片宽度会抖 2px；box-shadow 不参与布局，是 codex 477 MED-2 裁定的零几何影响修法）', () => {
+        const re = /\.si-wrap \.u-stat-card\.si-stat-alert\s*\{([^}]*)\}/;
+        const m = re.exec(src);
+        assert.ok(m, '页面内应存在 .si-wrap .u-stat-card.si-stat-alert 规则');
+        const rule = m[1];
+        assert.ok(/box-shadow:\s*inset\s+3px\s+0\s+0\s+#dc2626/.test(rule), '规则缺 box-shadow:inset 3px 0 0 #dc2626');
+        assert.ok(!/border-left:/.test(rule), '规则不应再含 border-left（会引入几何抖动，须已被上面的 box-shadow 取代）');
+    });
+    // [codex 477 复审「顺手核实」] components.css 的 .u-stat-card:hover((0,2,0)) 声明了
+    //   box-shadow:0 2px 8px rgba(217,119,6,.08)——box-shadow 不可跨规则累加，特异性更高的
+    //   .si-stat-alert((0,3,0)) 若不补 :hover 组合规则，会把悬浮阴影整体顶替掉（不是消失，是被换成
+    //   别的视觉），鼠标悬浮在告警态卡片上时看起来"没反应"。修法=在 :hover 组合选择器里用逗号把两条
+    //   阴影合成同一声明的多值——box-shadow 唯一支持"多重效果共存"的写法。
+    check('.si-wrap .u-stat-card.si-stat-alert:hover 组合规则存在，同一 box-shadow 声明内以逗号叠加悬浮阴影（0 2px 8px rgba(217,119,6,.08)）与红色内嵌线（inset 3px 0 0 #dc2626）两值（红：缺该组合规则——悬浮告警态卡片时琥珀悬浮阴影会被红色内嵌线整体顶替而非共存，用户会觉得"hover 没反应"）', () => {
+        const re = /\.si-wrap \.u-stat-card\.si-stat-alert:hover\s*\{([^}]*)\}/;
+        const m = re.exec(src);
+        assert.ok(m, '页面内应存在 .si-wrap .u-stat-card.si-stat-alert:hover 规则');
+        const rule = m[1];
+        const bsMatch = /box-shadow:\s*([^;]+);/.exec(rule);
+        assert.ok(bsMatch, '规则缺 box-shadow 声明');
+        const value = bsMatch[1];
+        assert.ok(/0\s+2px\s+8px\s+rgba\(217,\s*119,\s*6,\s*\.08\)/.test(value), `box-shadow 值应含悬浮阴影 0 2px 8px rgba(217,119,6,.08)，实际：${value}`);
+        assert.ok(/inset\s+3px\s+0\s+0\s+#dc2626/.test(value), `box-shadow 值应含红色内嵌线 inset 3px 0 0 #dc2626，实际：${value}`);
+        assert.ok(value.includes(','), `两个阴影值应在同一 box-shadow 声明内用逗号叠加（box-shadow 不支持跨规则累加，必须同一声明多值），实际：${value}`);
+    });
+    // [Opus 预筛拦截-1] .si-stat-alert(0,3,0) 特异性会盖掉共享 .u-stat-card.active(0,2,0)——点卡筛选
+    //   是本卡唯一交互用途，一点就 alert+active 叠加却丢了选中视觉反馈（aria-pressed 仍为 true，视觉
+    //   与 aria 漂移）。补组合选择器规则钉住：命中态恢复 active 色系（background/border-color 同
+    //   components.css .u-stat-card.active 取值）。[codex 477 回卷 MED-2 更新] 红色左侧强调已改走
+    //   box-shadow（独立于 border 之外），本组合规则因此不再需要覆盖 border-left-color。
+    check('.si-wrap .u-stat-card.si-stat-alert.active 组合规则存在，恢复 active 色系（background:#fffbeb ∧ border-color:#d97706），且不再含（已随 MED-2 删除的）border-left-color（红：缺该组合规则——点选中「待我处理」卡时会丢失选中视觉反馈；或仍残留 border-left-color——box-shadow 已独立表达红色强调，不该再靠 border 通道叠一份）', () => {
+        const re = /\.si-wrap \.u-stat-card\.si-stat-alert\.active\s*\{([^}]*)\}/;
+        const m = re.exec(src);
+        assert.ok(m, '页面内应存在 .si-wrap .u-stat-card.si-stat-alert.active 组合规则');
+        const rule = m[1];
+        assert.ok(/background:\s*#fffbeb/.test(rule), '组合规则缺 background:#fffbeb（应恢复 .u-stat-card.active 色系）');
+        assert.ok(/border-color:\s*#d97706/.test(rule), '组合规则缺 border-color:#d97706（应恢复 .u-stat-card.active 色系）');
+        assert.ok(!/border-left-color:/.test(rule), '组合规则不应再含 border-left-color（MED-2 后红色强调已独立走 box-shadow，不该再靠 border 通道表达，留着会是死代码/混淆信号）');
     });
 }
 

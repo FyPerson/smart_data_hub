@@ -145,10 +145,15 @@ console.log('\n--- ② 列表 SELECT：锚点谓词齐备且四列同源 ---');
     const sqlOuterFromIdxInStripped = sqlBoundaryResult.index;
     must(sqlOuterFromIdxInStripped > 0, '外层 FROM sys_issues 边界可定位（深度感知扫描，不被子查询内的同字面量截断）');
     const sqlBlock = sqlOuterFromIdxInStripped > 0 ? sqlStrippedFull.slice(0, sqlOuterFromIdxInStripped) : '';
-    // 边界正确性断言（MED-2 新增）：命中点紧随其后应能看到本条列表 SELECT 自己的动态 WHERE 拼接特征
-    //   `${where...}`，证明这次真落在这条列表查询自己的外层 FROM，不是巧合命中了别处同名字面量。
+    // 边界正确性断言（MED-2 新增，457-H2 收口后指纹改版）：命中点紧随其后应能看到本条列表 SELECT 自己
+    //   的收尾特征，证明这次真落在这条列表查询自己的外层 FROM，不是巧合命中了别处同名字面量。
+    //   ⚠️ [「待我处理」全角色卡·方案 §6 断言 5·457-H2 冻结] 查询构建抽成 buildSysIssuesListSelect/
+    //   buildSysIssuesListQuery 两个纯函数后，`FROM sys_issues` 已不再与 `${where...}` 动态 WHERE 拼接
+    //   同处一个模板字符串——FROM 留在 buildSysIssuesListSelect 收尾（selectSql 的一部分），WHERE/
+    //   ORDER BY 挪到 buildSysIssuesListQuery 里单独拼接。指纹改为 buildSysIssuesListSelect 收尾处的
+    //   `return { selectSql, selectParams }`（与 verify-sys-list-badge-fields.js 同批同款修法）。
     const sqlAfterBoundary = sqlOuterFromIdxInStripped > 0 ? sqlStrippedFull.slice(sqlOuterFromIdxInStripped, sqlOuterFromIdxInStripped + 120) : '';
-    must(sqlAfterBoundary.includes('${where'), `外层边界后文应含本条 SELECT 自己的动态 WHERE 拼接特征 "\${where"（证明命中点确是这条列表查询自己的 FROM，非误中别处），命中点后 120 字符原文：${JSON.stringify(sqlAfterBoundary)}`);
+    must(sqlAfterBoundary.includes('return { selectSql, selectParams }'), `外层边界后文应含本条 SELECT 自己的收尾特征 "return { selectSql, selectParams }"（证明命中点确是 buildSysIssuesListSelect 收尾处的 FROM，非误中别处），命中点后 120 字符原文：${JSON.stringify(sqlAfterBoundary)}`);
 
     const anchorRe = /AND tla\.event_type = 'status_change' AND tla\.to_status = '待上线'\s*AND \(tla\.action_code = 'accept' OR tla\.action_code IS NULL\)/g;
     const anchorCount = (sqlBlock.match(anchorRe) || []).length;

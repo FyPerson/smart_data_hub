@@ -106,7 +106,12 @@ module.exports = (deps) => {
     // ← 先行上线两步化（方案 20260813_v1.8 §3，S1）：值班执行人集合子表，按 issue_id 挂靠、逐人一行、
     //   代次由行 id 承载（同 sys_release_executors §4.1a 代次语义）。**全新表**，去钉钉通知列组，CHECK
     //   一次到位（见 initSchema 2.13 段）。
-    'sys_fast_release_executors'];
+    'sys_fast_release_executors',
+    // ← 上线单管理体验优化 R-C4（方案 20260824_v1.3 §3.0）：批次级审计表（O3 编辑/O4 删除共用）。
+    //   **必须进 readiness 硬清单**——同 sys_issue_delete_audit 先例（角色权限重构 C2a）："宁可整个 sys
+    //   写入口 503，也不放行一个审计写不进去的删除端点"，本表同理：编辑是不可撤销的留痕动作，D9「信息
+    //   修改始终可见」依赖本表恒 1 条留痕兜底空批次场景，表不在就不能放行 PATCH /sys-releases/:id。
+    'sys_release_audit'];
 
   // readiness 复查是"启动期就绪 status-only 抽样"——挑代表性关键不变量列（三侧通知 status 锚点/质量计数/
   //   来源/血缘批次/config 生效时刻），不做全字段全量校验（那是 verify-sys-schema.js 的职责，对齐 corrections
@@ -303,6 +308,14 @@ module.exports = (deps) => {
   //   "全列锚点"口径，非 SYS_DUTY_ROSTER_KEY_COLS 那种部分列子集——本表列数少，全列锚点零额外成本）。
   const SYS_FAST_RELEASE_EXECUTORS_KEY_COLS = ['issue_id', 'user_id', 'user_name', 'exec_status', 'executed_at',
     'added_by', 'added_by_name', 'created_at', 'removed_at', 'removed_by', 'removed_by_name'];
+
+  // ── 上线单管理体验优化 R-C4（方案 20260824_v1.3 §3.0）：批次级审计表锚点，「结构全列在」模型 ──────
+  //   同 sys_issue_delete_audit / sys_fast_release_executors 首版一样：**一次性 CREATE TABLE（无 ALTER
+  //   路径）**——一表两形态组合 CHECK（451-M2）是首建即终版的硬门槛，SQLite 已建表无法补 CHECK。
+  //   列集取全部非 id 列（同 SYS_DELETE_AUDIT_KEY_COLS/SYS_FAST_RELEASE_EXECUTORS_KEY_COLS"全列锚点"口径，
+  //   本表列数少，全列锚点零额外成本）。
+  const SYS_RELEASE_AUDIT_KEY_COLS = ['release_id', 'release_no', 'action', 'release_json', 'changes_json',
+    'executors_json', 'member_issue_ids', 'member_count', 'reason', 'operator_id', 'operator_name', 'created_at'];
 
   // ── 受阻三件套清理（§⑥ admin 处置后清当前 blocked 字段）：hold/void 处置 + unblock 解除 + 换轮复用 ──────────
   //   F2b 修（ultracode 对抗审）：F2b 让 blocked=1 首次可达后，hold/void 处置 blocked 单必须清 blocked，
@@ -1376,6 +1389,61 @@ module.exports = (deps) => {
       //   撤销与终结）均带 issue_id 前缀（单据维度过滤），无"跨单按人聚合"（如"某人本月还有几单待执行"）
       //   这类查询场景——2.12 段第三索引服务的是批次执行人跨批次统计，本表当前无对应业务需求，不预建。
 
+      // ── 2.14 sys_release_audit（上线单管理体验优化 R-C4，方案 20260824_v1.3 §3.0）──────────
+      //   **全新表**——CREATE TABLE IF NOT EXISTS 首次真建，直接带完整 CHECK 上线（同 2.11/2.12/2.13
+      //   段首版范式，不走 alterAddMissingCols）。⚠️ C0 硬门槛：SQLite 已建表无法补 CHECK，本 DDL 必须
+      //   在首次建表时即为最终版（方案 §3.0 三轮 codex 审 0-HIGH 定稿，DDL 逐字冻结，不做"优化"）。
+      //   本表是**批次级**审计载体（区别于 sys_issue_timeline 按 issue_id 挂靠、批次本身没有自己的时间
+      //   线）——O3（本表首个消费者，PATCH 编辑）与 O4（后续删除端点）共用同一张表，一表两形态：
+      //   action='edit' 时 changes_json 必填、executors_json/reason 必为 NULL；action='delete' 时
+      //   executors_json/reason 必填、changes_json 必为 NULL——完整性由下方组合 CHECK 在 DB 层冻结，
+      //   不依赖每个写入点自觉守规矩（方案 451-M2："防结构合法但语义错误的审计行，也让查询端仅凭 DB
+      //   约束就能识别坏记录"）。member_issue_ids/member_count 必须由调用方显式传入同一份成员 ID 集合
+      //   （451-H1：DDL 给了默认值 '[]'/0 只是兜底，实现若只插必填列，非空批次的审计会被静默记成空批次）。
+      //   ⚠️ 本表是方案首次引入，v1.0-v1.2 均未部署过，不存在"旧库缺组合 CHECK"的升级路径（452-M2）——
+      //   CREATE TABLE IF NOT EXISTS 对新库/旧库都会带全套约束建表，无需 alterAddMissingCols 兜底分支。
+      //   ⚠️ 建表须在下方「真正最后一个 DDL」（2.8 段 sys_issue_release_commit_snapshots）之前——同
+      //   2.9 段 sys_schema_migrations 注释同款时序铁律（serialize 队列末条 db.run callback 触发
+      //   runSysMigration，本表必须排在它之前才能被同一批 serialize 建表）。
+      db.run(`CREATE TABLE IF NOT EXISTS sys_release_audit (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        release_id       INTEGER NOT NULL,              -- 批次已删时为历史值（不加 FK，本项目 FK 恒 OFF）
+        release_no       TEXT    NOT NULL,              -- 冗余存号，批次删后仍可读
+        action           TEXT    NOT NULL CHECK (action IN ('edit','delete')),
+        release_json     TEXT    NOT NULL,              -- 操作前整行快照（SELECT * 序列化）
+        changes_json     TEXT,                          -- edit 专用：[{field,old,new}]；delete 为 NULL
+        executors_json   TEXT,                          -- delete 专用：执行人整行快照数组；edit 为 NULL
+        member_issue_ids TEXT    NOT NULL DEFAULT '[]', -- JSON 数组，空批次为 '[]'
+        member_count     INTEGER NOT NULL DEFAULT 0,
+        reason           TEXT,                          -- delete 必填（服务层守卫）；edit 为 NULL
+        operator_id      INTEGER NOT NULL,
+        operator_name    TEXT    NOT NULL,
+        created_at       DATETIME NOT NULL DEFAULT (datetime('now','localtime')),
+        -- ⭐ 451-M2：一表两形态的完整性用组合 CHECK 冻结在 DB 层（codex 明确'当前范围不必拆表'）——
+        --   防'结构合法但语义错误'的审计行（未来新增写入点/异常分支最容易产生这种），
+        --   也让查询端仅凭 DB 约束就能识别坏记录，不必信任每个写入点都守规矩。
+        CHECK ((action='edit'   AND changes_json IS NOT NULL AND executors_json IS NULL     AND reason IS NULL)
+            OR (action='delete' AND changes_json IS NULL     AND executors_json IS NOT NULL AND reason IS NOT NULL)),
+        -- ⭐ 472-MED-2：负载最小语义完整性（两形态 CHECK 只管 NULL 组合管不到内容）——空串/非 JSON/
+        --   负计数在 DB 层兜底拒绝，O4 及未来写入点漏校验时数据库不放行（json_valid 本项目基线可用，
+        --   badge-fields 守卫/json_group_array 既有消费）。edit 的 changes_json 须非空 JSON 数组；
+        --   delete 的 executors_json 须 JSON 数组、reason 去空白后非空。方案 §3.0 冻结 DDL 的本次修订
+        --   已回写方案（472 审查驱动·修订留痕）。
+        CHECK (member_count >= 0),
+        CHECK (json_valid(member_issue_ids) AND json_type(member_issue_ids) = 'array'),
+        -- ⭐ 476-MED（末次合并审采纳）：member_count 必须与 member_issue_ids 实际元素数一致——此前只各自
+        --   校验形状（非负整数 / 合法 JSON 数组），没有校验两者数值对得上，允许"结构合法但两个字段互相
+        --   矛盾"的坏行插入（如 member_count=3 但数组只有 2 个元素）。json_array_length 是 SQLite 内建
+        --   函数，同上一条 json_valid/json_type 同源可用，不引入新依赖。
+        CHECK (member_count = json_array_length(member_issue_ids)),
+        CHECK (json_valid(release_json) AND json_type(release_json) = 'object'),  -- 472 复审收紧：写入点唯一（SELECT * 序列化）恒对象，标量/数组即坏行
+        CHECK (changes_json IS NULL OR (json_valid(changes_json) AND json_type(changes_json) = 'array' AND json_array_length(changes_json) > 0)),
+        CHECK (executors_json IS NULL OR (json_valid(executors_json) AND json_type(executors_json) = 'array')),
+        CHECK (reason IS NULL OR trim(reason) <> '')
+      )`, recordSysErr('sys_release_audit'));
+      db.run(`CREATE INDEX IF NOT EXISTS idx_sys_release_audit_release ON sys_release_audit(release_id)`, recordSysErr('idx_sys_release_audit_release'));
+      db.run(`CREATE INDEX IF NOT EXISTS idx_sys_release_audit_created ON sys_release_audit(created_at)`, recordSysErr('idx_sys_release_audit_created'));
+
       // ── 2.8 sys_issue_release_commit_snapshots（C0，多开发协作与 commit 留痕重构 v2.9 §9/附录C）──────────
       //   发布冻结快照（D3）；UNIQUE(release_id,issue_id) 保证同一 (release_id,issue_id) 生命周期只快照一次
       //   （方案 §8「快照基数与插入语义」，写入用 ON CONFLICT(release_id,issue_id) DO NOTHING，禁 INSERT OR IGNORE
@@ -2262,6 +2330,8 @@ module.exports = (deps) => {
         //   2.12 段的既有缺口——该表只进了 SYS_REQUIRED_TABLES 未进本 checks，列级半成品态查不出，非本次
         //   引入、原样指出留待后续处置）。
         ['sys_fast_release_executors', SYS_FAST_RELEASE_EXECUTORS_KEY_COLS],
+        // ← 上线单管理体验优化 R-C4（方案 20260824_v1.3 §3.0）：批次级审计表，结构全列在模型（同上）。
+        ['sys_release_audit', SYS_RELEASE_AUDIT_KEY_COLS],
       ];
       for (const [tbl, keyCols] of checks) {
         const cols = await new Promise((resolve, reject) => {
@@ -8195,163 +8265,22 @@ module.exports = (deps) => {
     }
   });
 
-  // ── GET /sys-issues：列表（可见性 admin 全部 / 开发仅本人 / 其他 403，M-6）──────────
-  router.get('/sys-issues', authenticateToken, requireSysSchemaReady, async (req, res) => {
-    try {
-      const role = req.user.role;
-      const uid = Number(req.user.id);
-      const isAdmin = role === 'admin';
-      const where = [];
-      const params = [];
-      // [值班筛选与类型卡·S-fix3·codex 414 MED-2] 绑定协议结构化：SELECT 投影段参数与 WHERE/addEq 段
-      //   参数**分离声明**，执行点按 SQL 段文本顺序拼接 [...selectParams, ...params]——废止原「params.push(uid)
-      //   必须排数组最前」的隐式跨段时序协议（sqlite3 按 ? 在最终 SQL 文本出现顺序 positional 绑定；靠
-      //   push 时序对齐文本顺序是脆弱约定：将来 WHERE 拼接重排/params 构造拆分/投影区再加占位符都可能
-      //   静默错绑 addEq 的筛选值）。selectParams 只服务 SELECT 投影区占位符，投影区将来新增占位符时按
-      //   投影内文本顺序追加于此，与 WHERE 参数结构隔离；verify-sys-list-badge-fields「SELECT 恰 N 占位符」
-      //   守卫仍在（两层互补：结构隔离防跨段错位、守卫防投影区占位符数与本数组长度漂移）。uid 可能为
-      //   NaN（脏 token）：NaN 传给 sqlite3 会被转成 NULL，NULL 与 fe.user_id 比较恒不成立，安全退化为
-      //   "不在任何执行人集合"，不需额外判空。
-      // [S1·先行上线授权超时收回] 恰 2 个（此前恰 1 个，420 号守卫已同步改判恰 2）——① fast_release_active_auth
-      //   CASE 改判"可消费"绑 nowStr（投影区内先出现，见下方）② fast_release_my_pending 绑 uid（后出现），
-      //   nowStr 只查一次、供本次请求内全部 fastlane 判据消费。
-      const listNowRow = await dbGetAsync(`SELECT datetime('now','localtime') AS n`);
-      const listNowStr = listNowRow && listNowRow.n;
-      if (!listNowStr) throw new Error('获取服务器时间失败（内部错误，无法计算先行上线授权可消费性）');
-      const selectParams = [listNowStr, uid];
-
-      // 可见性（M-6）：admin 全部 / 开发只看 assigned_to=本人 / 其他登录用户不可见（返空，非 403——列表给空集）
-      // [codex C3 对抗审 HIGH-B 回填] 在册成员读可见性——SSOT §0（方案 v2.9 line 33）明定角色读权：
-      //   "开发=在册∧pending；历史参与=子表曾有行且当前不在册——只读整单+可下附件"，且 line 88
-      //   "`is_primary`/`assigned_to` 禁作授权源"。此前列表 WHERE 只认 assigned_to（纯派生代表，去主次后
-      //   不再等于"谁在干活"）——非代表的在册协作成员（assertDevMember 判定有写权）反而列表看不到、详情
-      //   直接 403，与 SSOT 字面定义矛盾。历史参与是否可见按 SSOT 原文"只读整单"字面理解（非"仅可下附件"，
-      //   附件是历史参与读权的子集示例非全部）——一并纳入，用 `EXISTS` 子查询覆盖"曾有行"（不筛 removed_at，
-      //   在册与历史参与同等可见，与 SSOT 措辞完全对应，不额外区分）。
-      const rosterVisibilitySql = `EXISTS (SELECT 1 FROM sys_issue_dev_assignees da WHERE da.issue_id = sys_issues.id AND da.user_id = ?)`;
-      // ⭐⭐ 技术负责人读权（2026-07-28 手工验收发现·**写读不同源**）：C3 把提交评估意见的**写权**给了
-      //   本单技术负责人（含变更流的「待商议」单），但读端可见性还停在 C1 时代的 `type='bug'`——
-      //   方案 §4-C1 核实表当时判「可见性默认保持」，那是 C2.5 预沟通段**还不存在**时做的决定，
-      //   C2.5/C3 把技术负责人的工作对象扩到变更流后，这条决定就过期了，没人回头改它。
-      //   后果（实测）：示例发布者列表看不到被咨询的 feature 单、详情 403、钉钉深链点进去也 403——
-      //   方案 §3 角色表要求他「平台回一条最终评估意见」，而他**在平台上根本够不到那张单**。
-      //   ⚠️ 判定**刻意不依赖 SYS_TECH_LEAD_IDS 白名单**（与 rosterVisibilitySql 同范式）：
-      //     `tech_lead_id=我` 与「timeline 里有我提交的 tech_lead_comment」这两个条件本身就是参与证据，
-      //     只有真被咨询过的人才满足。挂白名单反而会让「日后换人」把前任已写的评估记录一并锁死。
-      //   ⚠️ 覆盖两段（用户 2026-07-28 拍板选 A）：① 当前被咨询 ② 历史回过意见（咨询已被 cancel /
-      //     PH-2 自动清 / reactivate 清九列之后，仍看得到自己写过的那张单）——与开发成员「曾有行即可见」一致。
-      //   ⚠️⚠️ **本改动把 sys_issue_timeline 从「纯审计日志」提升为「授权依据」**（codex 审 MED 的
-      //     recommendation·已验证当前不成立但必须固化）：一旦某条 `action_code='tech_lead_comment'`
-      //     的流水行可被伪造，伪造者就获得该单的**持久读权**。当前**生产运行时写路径**（routes/ 下的
-      //     HTTP 路由与服务端代码）已核实成立的三条不变量：
-      //       ① 全部 10 处 `INSERT INTO sys_issue_timeline` 的 `action_code` 均为 **SQL 字面量**，
-      //          无一处用占位符从变量/请求体传入；
-      //       ② `'tech_lead_comment'` 在生产代码内只有 tech-lead-comment 端点一处写入，`operator_id` 取
-      //          `sysActor(req)` 的认证用户 id（非请求体字段）；
-      //       ③ 不存在通用的 timeline 写入 / 修改 HTTP 端点。
-      //     ⚠️ 核实范围**刻意排除 `scripts/` 验证夹具**（187 号审 LOW 收窄）：verify-sys-tech-lead-comment
-      //     的 [V] 组自身就用 raw SQL 插入该 action_code 造"历史参与"夹具——那是测试进程内存库里的受控
-      //     写入，非生产攻击面；此前"全仓"的表述把它也圈了进去，会误导后续安全审查以为夹具也被禁止。
-      //     ⚠️ **日后若新增"可自定义 action_code 的 timeline 写入口"（含导入、后台脚本、批量修复工具），
-      //     必须同步评估本处授权语义**——那不再只是多了一条日志，而是多了一条发读权的路。
-      const techLeadVisibilitySql = `(tech_lead_id = ? OR EXISTS (SELECT 1 FROM sys_issue_timeline tl
-             WHERE tl.issue_id = sys_issues.id AND tl.action_code = 'tech_lead_comment' AND tl.operator_id = ?))`;
-      // ⭐ 角色权限重构 C1（codex C1 审 HIGH-2）：**受理人[13] 全类型可见**，与 admin 同不加 where 限制。
-      //   必要性：C1 把指派权扩到全类型，若列表仍只放行 bug，示例对接人就会「后端能指派 feature、界面却找不到那张单」
-      //   ——写读不同源造成的功能断裂（[[feedback_write_read_same_semantic]]）。受理人要受理**所有**新单、
-      //   指派**所有**类型，故其可见面与 admin 一致（作废单仍由下方 include_voided 统一过滤，那条 admin ∨ 受理人生效，2026-08-17 起）。
-      const isIntakeLiaisonUser = isSysIntakeLiaison(uid);
-      // ⚠️ codex 审 LOW：列表此前缺 `uid > 0` 防护（详情端有）。uid 非正（脏 token / id 缺失）时下面所有
-      //   等值判据都会拿一个无意义的值去比对（`assigned_to = 0` 之类可能命中脏行），故显式挡在最前：
-      //   非 admin 非受理人且 uid 非正 → 恒空集（与"其他登录用户不可见"的既有语义一致，非 403）。
-      if (!isAdmin && !isIntakeLiaisonUser && !(uid > 0)) {
-        where.push('1 = 0');
-      } else if (!isAdmin && !isIntakeLiaisonUser) {
-        // ④ bug 对接人白名单（**可见性语义·非操作权**）：C1 后该名单在写路径上已完全退场，
-        //   这里保留是因为技术负责人示例发布者[7] 仍需看到 bug 单才能接收咨询、回评估意见（C3）。
-        //   ⚠️ 必与详情读端同源，否则「列表看不到但能开详情」写读不一致。
-        // ⭐⭐ [C10-fix5 MED-1·写读同源·向绑定人授读权] 本单 intake_liaison_id 本人可见其名下单——补 `intake_liaison_id = ?`
-        //   析取（`uid > 0` 由上方 :5259 前置守卫保证：非 admin 非[13] 且 uid 非正已落 `1=0` 空集分支·此处 uid 恒正·多推冗余但不错）。
-        //   现网 [13] 走 isIntakeLiaisonUser 全量可见分支、加此析取对其冗余；**非 [13] eligible 成员被绑对接人**（有操作权
-        //   isBoundLiaisonEligibleOrAdmin 但此前列表看不到/详情 403）加了才可见（[[feedback_write_read_same_semantic]] fail-closed 收口）。
-        //   ⚠️⚠️ **读写不对称·有意设计非疏漏**：可见性=**纯绑定身份**（不叠 isIntakeLiaisonEligible），操作权=身份 ∧ 当前 eligible
-        //     （HIGH 已 403 挡撤销资格者操作）。故被撤销候选资格（role→viewer）的旧对接人**仍能看到名下旧单**（曾负责可查·非
-        //     越权）但改不动它——读比写宽。列表叠 eligibility 需对每行子查询 users 表、成本高收益低，故只在写路径（操作）收 eligibility。
-        if (isSysBugLiaison(uid)) {
-          // 参数顺序：assigned_to / intake_liaison(MED-1) / roster / techLead(tech_lead_id) / techLead(operator_id)——type='bug' 无占位符
-          where.push(`(assigned_to = ? OR intake_liaison_id = ? OR type = 'bug' OR ${rosterVisibilitySql} OR ${techLeadVisibilitySql})`);
-          params.push(uid, uid, uid, uid, uid);
-        } else {
-          // 非 admin 非对接人：自己被指派的单（开发）∪ 旧上线编排指定执行开发的历史单（release_assignee_id，
-          //   2026-07-07 机制，4 端点已于 2026-07-30 全封，纯只读残留，仅历史 bug 单可能非空）∪ **本批次上线
-          //   执行人子表在册**（sys_release_executors，方案 v1.7 §4.4 改造 8，替代此前批次级
-          //   sys_releases.release_assignee_id 单列——旧单列本就未曾接入本 WHERE，本条 EXISTS 是新增放行，非
-          //   替换）∪ 在册/历史参与该单的成员（HIGH-B）。
-          //   ⚠️ 写读同源（[[feedback_write_read_same_semantic]]）：详情端点（GET /sys-issues/:id）isReleaseExecutor
-          //   已改子表 EXISTS 判定（C4a），列表须镜像同一集合——否则「详情打得开、列表看不见」写读不一致。
-          //   ⚠️ 迭代单维度关联键必须 `e.release_id = sys_issues.release_id`（本单所属批次），不可与批次维度
-          //   `e.release_id = r.id` 混用（方案 §4.4 #11 复制陷阱）。
-          // ⭐ [C9 读点标注·方案 v1.7 §10.1 逐点标注要求] **本「我的」可见面读点显式声明：不按「已上线」
-          //   来源分流，但免上线直翻单只能靠前两条析取项被看见，这是设计如此、不是遗漏。**
-          //   直翻单 `release_id` 恒 NULL（§10.1 字段契约：不伪造批次关联），故本行 releaseExecutor
-          //   的 EXISTS（关联键 `e.release_id = sys_issues.release_id`）对它**结构性永不命中**——NULL
-          //   参与等值比较恒为 NULL/不成立。这不构成可见性缺口：批次执行人这条可见理由的前提就是
-          //   "这单挂在某个批次上、而我是那个批次的执行人"，而直翻单**从来没进过任何批次**，也就不存在
-          //   "执行人"这个角色。直翻单的开发照常经 `assigned_to` 与 roster/历史参与两条析取项看到自己的单。
-          //   ⚠️ 日后若给直翻单补任何"伪批次"关联来让它出现在批次视图里，等于推翻 §10.1 字段契约，
-          //     须先回方案改口径，不可在本 SQL 里绕（那会让 DTO 四分支把它误判成 release_publish）。
-          const releaseExecutorVisibilitySql = `EXISTS (SELECT 1 FROM sys_release_executors e WHERE e.release_id = sys_issues.release_id AND e.user_id = ? AND e.removed_at IS NULL)`;
-          // ⭐⭐ [C10-fix5 MED-1·写读同源] 同 bug-liaison 分支：补 `intake_liaison_id = ?` 析取（uid>0 由 :5259 守卫保证）——
-          //   非 [13] eligible 成员被绑对接人后列表可见其名下单（读=纯身份·不叠 eligibility·读写不对称见上方分支注释）。
-          // ⭐⭐ [Opus 预筛 S6-HIGH-1 修复·2026-08-14] 先行上线值班执行人可见性——照 C4a 批次执行人先例
-          //   （releaseExecutorVisibilitySql 同款子表 EXISTS 写法）补析取，修预筛实测的"值班执行人对
-          //   挂牌单列表 0 条+详情 403"双断（方案 §2 ③④要求执行人能看到自己名下的先行上线单）。
-          //   **口径已拍板**：只认当前代次未软删行（sysFastReleaseExecActiveWhere 统一谓词，与 confirm
-          //   端点在册判权/撤销终结清集合三处同一份谓词，§4-10 统一谓词纪律的第四个消费点）——撤销/
-          //   终结/重授权把上一代集合行软删后，值班人随之失去可见性（语义合理：已不在"这一代"值班
-          //   集合里）；consumed（已消费）单的集合行按 §5b 第 7 行"保留（部署留痕）"语义不会被软删，
-          //   故部署人对已上线单的可见性天然保住，不需要另开一条"曾是部署人"的历史可见性析取项——
-          //   与 rosterVisibilitySql（开发协作子表"在册∨历史参与皆可见"的既有更宽口径）刻意不同源，
-          //   两者服务不同子表、不同角色语义，不强行对齐。本口径落字于此，§9 收尾同步项待用户追认。
-          const fastReleaseExecVisibilitySql = `EXISTS (SELECT 1 FROM sys_fast_release_executors fe WHERE ${sysFastReleaseExecActiveWhere('fe', 'sys_issues.id')} AND fe.user_id = ?)`;
-          // 参数顺序：assigned_to / intake_liaison(MED-1) / release_assignee_id / releaseExecutor /
-          //   fastReleaseExec(HIGH-1) / roster / techLead(tech_lead_id) / techLead(operator_id)
-          where.push(`(assigned_to = ? OR intake_liaison_id = ? OR (release_assignee_id = ? AND type = 'bug') OR ${releaseExecutorVisibilitySql} OR ${fastReleaseExecVisibilitySql} OR ${rosterVisibilitySql} OR ${techLeadVisibilitySql})`);
-          params.push(uid, uid, uid, uid, uid, uid, uid, uid);
-        }
-      }
-      // 默认过滤作废（前端可传 include_voided=1，admin ∨ 受理人生效——2026-08-17 用户拍板开放示例对接人：
-      //   受理人可见面本与 admin 一致〔C1，上方注释〕，作废单查看权随之对齐；详情端已作废门同步放行，写读同源）
-      const includeVoided = (isAdmin || isIntakeLiaisonUser) && (req.query.include_voided === '1' || req.query.include_voided === 'true');
-      if (!includeVoided) where.push("status != '已作废'");
-
-      // 可选筛选（type/status/system/priority/release/assigned）
-      const addEq = (col, val) => { if (val !== undefined && val !== null && val !== '') { where.push(`${col} = ?`); params.push(val); } };
-      addEq('type', req.query.type);
-      // ⭐ [C9 读点标注·方案 v1.7 §10.1 逐点标注要求] **本读点显式声明：status 筛选不区分「已上线」的来源。**
-      //   `?status=已上线` 命中的是**两条入口写出的全部已上线单**（批次发布 release_publish + 免上线直翻
-      //   no_commit_acceptance），因为两条路径写的是同一根 status 列的同一个值——这是 §10.1 字段契约
-      //   「status 一列不分家」的直接后果，不是遗漏。用户按状态筛选时想看的是"哪些单已经上线了"，
-      //   来源是列表里「上线方式」那一格回答的问题，不是筛选条件要回答的。
-      //   ⚠️ 刻意**不提供** `?online_source=` 筛选：C9 是纯展示扩字段（同 C8 risk_level 的既定口径，
-      //     见下方 SELECT 注释与 panel-static 的反向断言），加筛选属独立需求，须另行立项。
-      addEq('status', req.query.status);
-      addEq('system_name', req.query.system);
-      addEq('priority', req.query.priority);
-      addEq('release_id', req.query.release ? parsePositiveId(req.query.release) : undefined);
-      if (isAdmin) addEq('assigned_to', req.query.assigned ? parsePositiveId(req.query.assigned) : undefined);
-
-      // C1（多开发协作与 commit 留痕重构 v2.9 §13 S1）：列表负责人列改多人展示——子查询聚合在册成员名
-      //   （removed_at IS NULL，按 user_id 升序），避免逐行 N+1 查询；assigned_to_name 原样保留（兼容旧前端/
-      //   其余读它的地方不动，C1 只加不减）。
-      //   ⚠️ LOW-1（89 号审）：`dev_roster_names` 字段值协议 = **JSON 数组字符串**（如 '["张三","李四"]'），
-      //   非逗号拼接明文——display_name 无"禁逗号"约束，人名本身可能含英文逗号，逗号拼接不可逆（前端 split(',')
-      //   会把 "张三,李" 这种单个含逗号的名字错拆成两截）。改用 json_group_array（内层子查询仍先 ORDER BY 再
-      //   聚合，json_group_array 同 GROUP_CONCAT 一样不支持直接 ORDER BY）——零命中时返回合法空数组 '[]'
-      //   （非 NULL，SQLite 聚合函数对 json_group_array 的空集特例，已用真实 db 验证），前端 JSON.parse 后
-      //   按数组长度判断是否需要回退 assigned_to_name。字段名保留 `dev_roster_names` 不改（减少改动面），
-      //   值类型变更已在本注释 + 前端 JSON.parse 处双向留痕。
-      const rows = await dbAllAsync(
+  // [「待我处理」全角色卡·方案 20260825_v1.3 §6 断言 5·457-H2 冻结·跨阶段契约 v1.1 §3.1] GET /sys-issues
+  //   列表查询构建——投影 SQL 段与参数分离声明抽成模块内纯函数，供 verify-sys-my-pending-cols.js 经
+  //   _internals 直调做参数边界哨兵值断言（源码文本扫描证明不了运行时拼接顺序，必须真执行）。
+  //   buildSysIssuesListSelect 只负责 SELECT 投影段（SQL 文本 + 对应 selectParams）；
+  //   buildSysIssuesListQuery 在其基础上拼出完整可执行 SQL + 与 WHERE/addEq 段参数拼接后的
+  //   bindParams——路由是本函数**唯一调用方**，只把返回值直接交给 dbAllAsync，不得在外面再拼一次
+  //   （457-H2 冻结）。本次抽取是纯结构重排：SQL 列表文本逐字符原样保留，零契约变化（跨阶段契约
+  //   §3.1 B1→B2 基线对拍钉住"抽取前后 key 集合/行数/行序完全一致"）。
+  function buildSysIssuesListSelect({ uid, nowStr }) {
+    // [「待我处理」全角色卡·方案 §3.1 selectParams 冻结口径] 恰 4 个（此前恰 2 个）——按投影区文本
+    //   出现顺序：① fast_release_active_auth CASE 绑 nowStr ② fast_release_my_pending 绑 uid（以上
+    //   两个即 S1 起既有的"恰 2 个"）③ my_dev_pending 绑 uid（紧随 fast_release_my_pending 之后新插）
+    //   ④ is_my_intake_liaison 绑 uid（紧随 my_dev_pending 之后）。verify-sys-list-badge-fields
+    //   「SELECT 恰 N 占位符」守卫同批改判恰 4（唯一权威口径=方案 §3.1；本注释、下方 fast_release_my_pending
+    //   批注与 badge-fields 守卫期望值均为其副本——改数字须按方案口径同步全部副本，勿只改一处）。
+    const selectParams = [nowStr, uid, uid, uid];
         // [C8 风险/优先级双显·方案 v1.7 §9.2] risk_level 加入列表 SELECT——**只读扩字段**，纯展示用途
         //   （列表页优先级列改上下双行：上=优先级徽章、下=风险等级小字）。不加筛选、不加排序、不进任何
         //   写路径；C5 受理门 intake_accept 仍是该列唯一写点，本次零改动。
@@ -8359,7 +8288,7 @@ module.exports = (deps) => {
         //   都必须在此列出——显式列投影下漏列不会报错，只会让对应渲染分支静默失效（`i.x` 恒 undefined）。
         //   新增/改动列表徽章时同步补列；`scripts/verify-sys-list-badge-fields.js` 自动对拍两端并在漏列时判红。
         //   blocked 属只读展示字段（唯一写点仍是 block/unblock 端点），不参与筛选/排序/写路径。
-        `SELECT id, type, status, priority, risk_level, title, system_name, module_name, source,
+    const selectSql = `SELECT id, type, status, priority, risk_level, title, system_name, module_name, source,
                 assigned_to, assigned_to_name, scheduled_start, dev_estimated_at, deadline,
                 blocked,
                 released_at, post_release_acceptance, post_derive_issue_id,
@@ -8409,8 +8338,8 @@ module.exports = (deps) => {
                    WHEN (SELECT COUNT(*) FROM sys_release_executors e WHERE e.release_id = sys_issues.release_id AND e.removed_at IS NULL AND e.notify_status = 'sent') > 0 THEN 'partial'
                    ELSE 'failed'
                  END) AS executor_notify_summary,
-                -- [先行上线两步化 S6·方案 v1.8 §4-8 + 值班筛选与类型卡·S1] 徽章「待先行部署 x/N」+ 值班
-                --   「待我确认」筛选的派生输入四列：
+                -- [先行上线两步化 S6·方案 v1.8 §4-8 + 值班筛选与类型卡·S1] 徽章「待先行部署 x/N」+ 前端
+                --   「待我处理」卡（值班身份分支）消费的派生输入四列：
                 --   ① fast_release_active_auth——复用 FAST_RELEASE_ACTIVE_AUTH_WHERE_SQL 同一份字面量
                 --      常量（非另拼一份，与 :3805 一带 UPDATE WHERE 层纵深复核同源），非新增状态标志列，
                 --      方案 §2 末段"徽章条件是纯派生"要求的活跃授权布尔即由本列承担；
@@ -8427,9 +8356,11 @@ module.exports = (deps) => {
                 --      AND fast_release_active_auth」的完整口径**只写在下方子查询本体注释一处**（本处不
                 --      复制全文，避免两处注释各自漂移——同详情端点 last_completed_at 注释先例）。
                 -- [S1·先行上线授权超时收回] 本列改判"可消费"（残留∧未过消费窗口）而非仅"残留"——过期
-                --   授权不应再驱动待我确认卡/筛选/x-N 徽章继续显示为"可用"。唯一新增占位符绑本 SELECT
-                --   最上方物化的 listNowStr（与 my_pending 的 uid 共用 selectParams 分段绑定，本 CASE 在
-                --   投影区文本顺序上先于 my_pending 出现，故 selectParams=[listNowStr, uid]）。
+                --   授权不应再驱动前端「待我处理」卡（值班身份分支）/筛选/x-N 徽章继续显示为"可用"。
+                --   唯一新增占位符绑本 SELECT
+                --   最上方物化的 listNowStr（与后续三个 uid 共用 selectParams 分段绑定，本 CASE 在投影区
+                --   文本顺序上最先出现，故 selectParams 首位恒为 listNowStr——完整四元组见本函数
+                --   （buildSysIssuesListSelect）最上方 selectParams 声明处的「待我处理」全角色卡批注）。
                 (CASE WHEN ${FAST_RELEASE_CONSUMABLE_AUTH_WHERE_SQL} THEN 1 ELSE 0 END) AS fast_release_active_auth,
                 (SELECT COUNT(*) FROM sys_fast_release_executors fe
                    WHERE ${sysFastReleaseExecActiveWhere('fe', 'sys_issues.id')}) AS fast_release_exec_total_count,
@@ -8438,12 +8369,13 @@ module.exports = (deps) => {
                 --   ④ fast_release_my_pending——[值班筛选与类型卡·S1·锚点 §3 技术自决] 当前登录用户在
                 --      本单当前代次执行人集合中且尚未确认（fe.exec_status <> 'done'）时为 1，否则 0；
                 --      同源谓词（不另写一份 issue_id/removed_at 字面量），本列自身占位符绑当前 uid
-                --      （见本路由函数体最上方 selectParams 声明处的分段绑定说明·S-fix3 起 SELECT 段与
-                --      WHERE 段参数分离声明、执行点按 SQL 段文本顺序拼接；[S1·先行上线授权超时收回]
-                --      selectParams 现恒 2 个——本列的 uid 之前还有 fast_release_active_auth CASE 改判
-                --      "可消费"新增的 nowStr，本列不再是"唯一新增占位符"，但仍是自身占位符的绑定值）。
-                --      **原始信号不掺闸**：本列不 AND fast_release_active_auth——前端消费「待我确认」
-                --      统计卡/筛选时必须自行与 fast_release_active_auth=1 AND（沿用徽章既有前置三条件：
+                --      （见本函数 buildSysIssuesListSelect 最上方 selectParams 声明处的分段绑定说明·S-fix3 起 SELECT 段与
+                --      WHERE 段参数分离声明、执行点按 SQL 段文本顺序拼接；[「待我处理」全角色卡批注]
+                --      selectParams 现恒 4 个——本列的 uid 之前还有 fast_release_active_auth CASE 改判
+                --      "可消费"新增的 nowStr，本列之后还有 my_dev_pending/is_my_intake_liaison 各绑一个
+                --      uid，本列不是"唯一新增占位符"，但仍是自身占位符的绑定值）。
+                --      **原始信号不掺闸**：本列不 AND fast_release_active_auth——前端「待我处理」卡
+                --      （值班身份分支）/筛选消费时必须自行与 fast_release_active_auth=1 AND（沿用徽章既有前置三条件：
                 --      type='bug' AND status='待验证' AND fast_release_active_auth），本列只回答"我在不在
                 --      集合里且没确认"这一件事，不重复判定授权/挂牌是否仍然有效（且不因授权本身超时过期
                 --      而改变——过期只影响 fast_release_active_auth，本列语义与"授权当下是否可消费"正交），
@@ -8457,6 +8389,28 @@ module.exports = (deps) => {
                    WHERE ${sysFastReleaseExecActiveWhere('fe', 'sys_issues.id')}
                      AND fe.user_id = ? AND fe.exec_status <> 'done')
                 ) AS fast_release_my_pending,
+                -- [「待我处理」全角色卡·方案 20260825_v1.3 §3.1] 开发身份「待我处理」派生列——与详情页
+                --   canSubmit（Sys_Iteration.html grep「canSubmit:」定位·行号会漂勿锚死）的**前两个合取项**
+                --   同源：本列判 在册（removed_at IS NULL）∧ 本人 ∧ dev_status='pending' 三条件；
+                --   canSubmit 在此之上还多一个 inDevFamily 状态门——本列**刻意不含状态门**（前端谓词按
+                --   SI_DEV_FAMILY_STATUSES 叠加·方案 §3.3），SQL 只出身份与提交态原始信号。
+                --   excused 不计入（本次免除此人提交≠待办）；code_submitted/no_code
+                --   均为已交。⚠️ 本段注释禁用反引号（整条 SQL 在 JS 模板字符串内，反引号会提前终止字符串
+                --   ——本文件上方多处已踩过这个坑，此处改用中文书名号代指字面量）。本列刻意用**正向等值**
+                --   （SQL 写法＝ =pending）（与上方 fast_release_my_pending 的否定式 exec_status<>done
+                --   **有意不同源**）：dev_status 值域是四值（pending/code_submitted/no_code/excused），
+                --   不是像 exec_status 那样封闭的二值——否定式写法（<>code_submitted）会把 no_code/excused
+                --   一并算成待办，方向错误。此差异写在此处，防后人"统一口径"改坏。
+                (SELECT EXISTS(SELECT 1 FROM sys_issue_dev_assignees da
+                   WHERE da.issue_id = sys_issues.id AND da.removed_at IS NULL
+                     AND da.user_id = ? AND da.dev_status = 'pending')
+                ) AS my_dev_pending,
+                -- [「待我处理」全角色卡·方案 §3.1·D-B 采纳 B1] 对接人/受理人身份——只回答"这单的对接人是不是
+                --   我"，不下发是谁（读权最小面）。⚠️ **命名（455-M2）**：本列只表达身份、完全不含待办语义
+                --   （状态门由前端叠加）——不叫 my_liaison_pending，避免被后续消费者误当完整待办信号。
+                --   状态门（待对接测试/待受理）由前端叠加，同 has_current_tech_lead_comment/last_held_at
+                --   既有范式（SQL 只出数，状态语义交给前端）。**身份原始信号，非待办判据**。
+                (CASE WHEN intake_liaison_id = ? THEN 1 ELSE 0 END) AS is_my_intake_liaison,
                 reopen_count, return_count, scope_changed, created_at, updated_at,
                 tech_lead_id, tech_lead_notify_status,   -- S5 手动化：列表通知徽章消费（193 复审：oa_number 已撤——
                 --   "顺带"加列=未经 187 读权契约证明的扩面；徽章不消费它，列表不需要它）
@@ -8674,11 +8628,194 @@ module.exports = (deps) => {
                       AND trim(commit_ref, char(32) || char(9) || char(10) || char(13)) <> ''
                     ORDER BY id ASC
                  )) AS all_commit_refs
-           FROM sys_issues
-          ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
-          ORDER BY id DESC`,
-        [...selectParams, ...params]   // [S-fix3] SELECT 投影段参数在前、WHERE/addEq 段在后——与 SQL 段文本顺序一致（声明处注释详述）
-      );
+           FROM sys_issues`;
+    return { selectSql, selectParams };
+  }
+
+  function buildSysIssuesListQuery({ uid, nowStr, whereSql, whereParams }) {
+    const { selectSql, selectParams } = buildSysIssuesListSelect({ uid, nowStr });
+    // ⚠️ [badge-fields 守卫兼容·457-H2 收口] FROM sys_issues 刻意留在 selectSql 内（buildSysIssuesListSelect
+    //   收尾，而非本函数才拼接）——verify-sys-list-badge-fields.js 用纯文本括号深度扫描定位"列表 SELECT
+    //   投影段"边界，扫描逻辑要求 FROM sys_issues 紧跟在投影列清单之后原地出现；若把 FROM 挪到本函数（结构
+    //   上会在文件中制造第二处"FROM sys_issues"字面量，且更早于真正边界出现），该守卫的边界扫描会误锁定
+    //   本函数模板里的 FROM、把 buildSysIssuesListQuery 自身的函数体（含对 buildSysIssuesListSelect 的
+    //   ${selectSql} 引用）一并纳入"投影段"文本，导致其 identPlaceholderCount 推导对 selectSql 常量二次
+    //   递归计数、把恰 4 个占位符误算成 7 个（本次实测撞见）。下方 WHERE/ORDER BY 的空白排布与原内联版本
+    //   逐字符一致（原 WHERE 行 10 空格缩进、ORDER BY 行 10 空格缩进）——纯结构重排要求最终 sql 字符串与
+    //   抽取前的内联字符串完全相等，不能顺手改排版。
+    const sql = `${selectSql}
+          ${whereSql}
+          ORDER BY id DESC`;
+    return { sql, bindParams: [...selectParams, ...whereParams] };
+  }
+
+  // ── GET /sys-issues：列表（可见性 admin 全部 / 开发仅本人 / 其他 403，M-6）──────────
+  router.get('/sys-issues', authenticateToken, requireSysSchemaReady, async (req, res) => {
+    try {
+      const role = req.user.role;
+      // [codex 466 MED-1] uid 有效域归一：仅正安全整数保留原值，其余（NaN/0/负数/非安全整数）统一归
+      //   null——sqlite3 对 null 的等值比较恒不成立，投影三派生列（fast_release_my_pending/
+      //   my_dev_pending/is_my_intake_liaison）与非 admin 可见性 WHERE 段一体安全退化为"不在任何集合"。
+      //   此前仅 NaN 有此退化（NaN→NULL 是 sqlite3 转换的副产品）；0/-1 等"数值但无效"的身份若撞上
+      //   脏关联行（user_id=0 等）会错误产生待办信号。归一收在路由取值处（单点），buildSysIssuesListSelect
+      //   保持纯透传（守卫哨兵值断言依赖字符串哨兵可区分性，不得在纯函数内做数值过滤）。admin 全量
+      //   可见性不走本参数，不受影响。
+      const rawUid = Number(req.user.id);
+      const uid = (Number.isSafeInteger(rawUid) && rawUid > 0) ? rawUid : null;
+      const isAdmin = role === 'admin';
+      const where = [];
+      const params = [];
+      // [值班筛选与类型卡·S-fix3·codex 414 MED-2] 绑定协议结构化：SELECT 投影段参数与 WHERE/addEq 段
+      //   参数**分离声明**——废止原「params.push(uid) 必须排数组最前」的隐式跨段时序协议（sqlite3
+      //   按 ? 在最终 SQL 文本出现顺序 positional 绑定；靠 push 时序对齐文本顺序是脆弱约定：将来
+      //   WHERE 拼接重排/params 构造拆分/投影区再加占位符都可能静默错绑 addEq 的筛选值）。uid 可能
+      //   为 NaN（脏 token）：NaN 传给 sqlite3 会被转成 NULL，NULL 与 fe.user_id 比较恒不成立，安全
+      //   退化为"不在任何执行人集合"，不需额外判空。
+      // [「待我处理」全角色卡·方案 §3.1·457-H2 冻结] SELECT 投影区占位符与 selectParams 完整冻结口径
+      //   已抽成模块内纯函数 buildSysIssuesListSelect（定义于本路由之前，经 _internals 导出）——路由
+      //   不再自行声明 selectParams 数组，只算 nowStr 传给该函数；完整 4 元组口径见其函数头注释。
+      const listNowRow = await dbGetAsync(`SELECT datetime('now','localtime') AS n`);
+      const listNowStr = listNowRow && listNowRow.n;
+      if (!listNowStr) throw new Error('获取服务器时间失败（内部错误，无法计算先行上线授权可消费性）');
+
+      // 可见性（M-6）：admin 全部 / 开发只看 assigned_to=本人 / 其他登录用户不可见（返空，非 403——列表给空集）
+      // [codex C3 对抗审 HIGH-B 回填] 在册成员读可见性——SSOT §0（方案 v2.9 line 33）明定角色读权：
+      //   "开发=在册∧pending；历史参与=子表曾有行且当前不在册——只读整单+可下附件"，且 line 88
+      //   "`is_primary`/`assigned_to` 禁作授权源"。此前列表 WHERE 只认 assigned_to（纯派生代表，去主次后
+      //   不再等于"谁在干活"）——非代表的在册协作成员（assertDevMember 判定有写权）反而列表看不到、详情
+      //   直接 403，与 SSOT 字面定义矛盾。历史参与是否可见按 SSOT 原文"只读整单"字面理解（非"仅可下附件"，
+      //   附件是历史参与读权的子集示例非全部）——一并纳入，用 `EXISTS` 子查询覆盖"曾有行"（不筛 removed_at，
+      //   在册与历史参与同等可见，与 SSOT 措辞完全对应，不额外区分）。
+      const rosterVisibilitySql = `EXISTS (SELECT 1 FROM sys_issue_dev_assignees da WHERE da.issue_id = sys_issues.id AND da.user_id = ?)`;
+      // ⭐⭐ 技术负责人读权（2026-07-28 手工验收发现·**写读不同源**）：C3 把提交评估意见的**写权**给了
+      //   本单技术负责人（含变更流的「待商议」单），但读端可见性还停在 C1 时代的 `type='bug'`——
+      //   方案 §4-C1 核实表当时判「可见性默认保持」，那是 C2.5 预沟通段**还不存在**时做的决定，
+      //   C2.5/C3 把技术负责人的工作对象扩到变更流后，这条决定就过期了，没人回头改它。
+      //   后果（实测）：示例发布者列表看不到被咨询的 feature 单、详情 403、钉钉深链点进去也 403——
+      //   方案 §3 角色表要求他「平台回一条最终评估意见」，而他**在平台上根本够不到那张单**。
+      //   ⚠️ 判定**刻意不依赖 SYS_TECH_LEAD_IDS 白名单**（与 rosterVisibilitySql 同范式）：
+      //     `tech_lead_id=我` 与「timeline 里有我提交的 tech_lead_comment」这两个条件本身就是参与证据，
+      //     只有真被咨询过的人才满足。挂白名单反而会让「日后换人」把前任已写的评估记录一并锁死。
+      //   ⚠️ 覆盖两段（用户 2026-07-28 拍板选 A）：① 当前被咨询 ② 历史回过意见（咨询已被 cancel /
+      //     PH-2 自动清 / reactivate 清九列之后，仍看得到自己写过的那张单）——与开发成员「曾有行即可见」一致。
+      //   ⚠️⚠️ **本改动把 sys_issue_timeline 从「纯审计日志」提升为「授权依据」**（codex 审 MED 的
+      //     recommendation·已验证当前不成立但必须固化）：一旦某条 `action_code='tech_lead_comment'`
+      //     的流水行可被伪造，伪造者就获得该单的**持久读权**。当前**生产运行时写路径**（routes/ 下的
+      //     HTTP 路由与服务端代码）已核实成立的三条不变量：
+      //       ① 全部 10 处 `INSERT INTO sys_issue_timeline` 的 `action_code` 均为 **SQL 字面量**，
+      //          无一处用占位符从变量/请求体传入；
+      //       ② `'tech_lead_comment'` 在生产代码内只有 tech-lead-comment 端点一处写入，`operator_id` 取
+      //          `sysActor(req)` 的认证用户 id（非请求体字段）；
+      //       ③ 不存在通用的 timeline 写入 / 修改 HTTP 端点。
+      //     ⚠️ 核实范围**刻意排除 `scripts/` 验证夹具**（187 号审 LOW 收窄）：verify-sys-tech-lead-comment
+      //     的 [V] 组自身就用 raw SQL 插入该 action_code 造"历史参与"夹具——那是测试进程内存库里的受控
+      //     写入，非生产攻击面；此前"全仓"的表述把它也圈了进去，会误导后续安全审查以为夹具也被禁止。
+      //     ⚠️ **日后若新增"可自定义 action_code 的 timeline 写入口"（含导入、后台脚本、批量修复工具），
+      //     必须同步评估本处授权语义**——那不再只是多了一条日志，而是多了一条发读权的路。
+      const techLeadVisibilitySql = `(tech_lead_id = ? OR EXISTS (SELECT 1 FROM sys_issue_timeline tl
+             WHERE tl.issue_id = sys_issues.id AND tl.action_code = 'tech_lead_comment' AND tl.operator_id = ?))`;
+      // ⭐ 角色权限重构 C1（codex C1 审 HIGH-2）：**受理人[13] 全类型可见**，与 admin 同不加 where 限制。
+      //   必要性：C1 把指派权扩到全类型，若列表仍只放行 bug，示例对接人就会「后端能指派 feature、界面却找不到那张单」
+      //   ——写读不同源造成的功能断裂（[[feedback_write_read_same_semantic]]）。受理人要受理**所有**新单、
+      //   指派**所有**类型，故其可见面与 admin 一致（作废单仍由下方 include_voided 统一过滤，那条 admin ∨ 受理人生效，2026-08-17 起）。
+      const isIntakeLiaisonUser = isSysIntakeLiaison(uid);
+      // ⚠️ codex 审 LOW：列表此前缺 `uid > 0` 防护（详情端有）。uid 非正（脏 token / id 缺失）时下面所有
+      //   等值判据都会拿一个无意义的值去比对（`assigned_to = 0` 之类可能命中脏行），故显式挡在最前：
+      //   非 admin 非受理人且 uid 非正 → 恒空集（与"其他登录用户不可见"的既有语义一致，非 403）。
+      if (!isAdmin && !isIntakeLiaisonUser && !(uid > 0)) {
+        where.push('1 = 0');
+      } else if (!isAdmin && !isIntakeLiaisonUser) {
+        // ④ bug 对接人白名单（**可见性语义·非操作权**）：C1 后该名单在写路径上已完全退场，
+        //   这里保留是因为技术负责人示例发布者[7] 仍需看到 bug 单才能接收咨询、回评估意见（C3）。
+        //   ⚠️ 必与详情读端同源，否则「列表看不到但能开详情」写读不一致。
+        // ⭐⭐ [C10-fix5 MED-1·写读同源·向绑定人授读权] 本单 intake_liaison_id 本人可见其名下单——补 `intake_liaison_id = ?`
+        //   析取（`uid > 0` 由上方 :5259 前置守卫保证：非 admin 非[13] 且 uid 非正已落 `1=0` 空集分支·此处 uid 恒正·多推冗余但不错）。
+        //   现网 [13] 走 isIntakeLiaisonUser 全量可见分支、加此析取对其冗余；**非 [13] eligible 成员被绑对接人**（有操作权
+        //   isBoundLiaisonEligibleOrAdmin 但此前列表看不到/详情 403）加了才可见（[[feedback_write_read_same_semantic]] fail-closed 收口）。
+        //   ⚠️⚠️ **读写不对称·有意设计非疏漏**：可见性=**纯绑定身份**（不叠 isIntakeLiaisonEligible），操作权=身份 ∧ 当前 eligible
+        //     （HIGH 已 403 挡撤销资格者操作）。故被撤销候选资格（role→viewer）的旧对接人**仍能看到名下旧单**（曾负责可查·非
+        //     越权）但改不动它——读比写宽。列表叠 eligibility 需对每行子查询 users 表、成本高收益低，故只在写路径（操作）收 eligibility。
+        if (isSysBugLiaison(uid)) {
+          // 参数顺序：assigned_to / intake_liaison(MED-1) / roster / techLead(tech_lead_id) / techLead(operator_id)——type='bug' 无占位符
+          where.push(`(assigned_to = ? OR intake_liaison_id = ? OR type = 'bug' OR ${rosterVisibilitySql} OR ${techLeadVisibilitySql})`);
+          params.push(uid, uid, uid, uid, uid);
+        } else {
+          // 非 admin 非对接人：自己被指派的单（开发）∪ 旧上线编排指定执行开发的历史单（release_assignee_id，
+          //   2026-07-07 机制，4 端点已于 2026-07-30 全封，纯只读残留，仅历史 bug 单可能非空）∪ **本批次上线
+          //   执行人子表在册**（sys_release_executors，方案 v1.7 §4.4 改造 8，替代此前批次级
+          //   sys_releases.release_assignee_id 单列——旧单列本就未曾接入本 WHERE，本条 EXISTS 是新增放行，非
+          //   替换）∪ 在册/历史参与该单的成员（HIGH-B）。
+          //   ⚠️ 写读同源（[[feedback_write_read_same_semantic]]）：详情端点（GET /sys-issues/:id）isReleaseExecutor
+          //   已改子表 EXISTS 判定（C4a），列表须镜像同一集合——否则「详情打得开、列表看不见」写读不一致。
+          //   ⚠️ 迭代单维度关联键必须 `e.release_id = sys_issues.release_id`（本单所属批次），不可与批次维度
+          //   `e.release_id = r.id` 混用（方案 §4.4 #11 复制陷阱）。
+          // ⭐ [C9 读点标注·方案 v1.7 §10.1 逐点标注要求] **本「我的」可见面读点显式声明：不按「已上线」
+          //   来源分流，但免上线直翻单只能靠前两条析取项被看见，这是设计如此、不是遗漏。**
+          //   直翻单 `release_id` 恒 NULL（§10.1 字段契约：不伪造批次关联），故本行 releaseExecutor
+          //   的 EXISTS（关联键 `e.release_id = sys_issues.release_id`）对它**结构性永不命中**——NULL
+          //   参与等值比较恒为 NULL/不成立。这不构成可见性缺口：批次执行人这条可见理由的前提就是
+          //   "这单挂在某个批次上、而我是那个批次的执行人"，而直翻单**从来没进过任何批次**，也就不存在
+          //   "执行人"这个角色。直翻单的开发照常经 `assigned_to` 与 roster/历史参与两条析取项看到自己的单。
+          //   ⚠️ 日后若给直翻单补任何"伪批次"关联来让它出现在批次视图里，等于推翻 §10.1 字段契约，
+          //     须先回方案改口径，不可在本 SQL 里绕（那会让 DTO 四分支把它误判成 release_publish）。
+          const releaseExecutorVisibilitySql = `EXISTS (SELECT 1 FROM sys_release_executors e WHERE e.release_id = sys_issues.release_id AND e.user_id = ? AND e.removed_at IS NULL)`;
+          // ⭐⭐ [C10-fix5 MED-1·写读同源] 同 bug-liaison 分支：补 `intake_liaison_id = ?` 析取（uid>0 由 :5259 守卫保证）——
+          //   非 [13] eligible 成员被绑对接人后列表可见其名下单（读=纯身份·不叠 eligibility·读写不对称见上方分支注释）。
+          // ⭐⭐ [Opus 预筛 S6-HIGH-1 修复·2026-08-14] 先行上线值班执行人可见性——照 C4a 批次执行人先例
+          //   （releaseExecutorVisibilitySql 同款子表 EXISTS 写法）补析取，修预筛实测的"值班执行人对
+          //   挂牌单列表 0 条+详情 403"双断（方案 §2 ③④要求执行人能看到自己名下的先行上线单）。
+          //   **口径已拍板**：只认当前代次未软删行（sysFastReleaseExecActiveWhere 统一谓词，与 confirm
+          //   端点在册判权/撤销终结清集合三处同一份谓词，§4-10 统一谓词纪律的第四个消费点）——撤销/
+          //   终结/重授权把上一代集合行软删后，值班人随之失去可见性（语义合理：已不在"这一代"值班
+          //   集合里）；consumed（已消费）单的集合行按 §5b 第 7 行"保留（部署留痕）"语义不会被软删，
+          //   故部署人对已上线单的可见性天然保住，不需要另开一条"曾是部署人"的历史可见性析取项——
+          //   与 rosterVisibilitySql（开发协作子表"在册∨历史参与皆可见"的既有更宽口径）刻意不同源，
+          //   两者服务不同子表、不同角色语义，不强行对齐。本口径落字于此，§9 收尾同步项待用户追认。
+          const fastReleaseExecVisibilitySql = `EXISTS (SELECT 1 FROM sys_fast_release_executors fe WHERE ${sysFastReleaseExecActiveWhere('fe', 'sys_issues.id')} AND fe.user_id = ?)`;
+          // 参数顺序：assigned_to / intake_liaison(MED-1) / release_assignee_id / releaseExecutor /
+          //   fastReleaseExec(HIGH-1) / roster / techLead(tech_lead_id) / techLead(operator_id)
+          where.push(`(assigned_to = ? OR intake_liaison_id = ? OR (release_assignee_id = ? AND type = 'bug') OR ${releaseExecutorVisibilitySql} OR ${fastReleaseExecVisibilitySql} OR ${rosterVisibilitySql} OR ${techLeadVisibilitySql})`);
+          params.push(uid, uid, uid, uid, uid, uid, uid, uid);
+        }
+      }
+      // 默认过滤作废（前端可传 include_voided=1，admin ∨ 受理人生效——2026-08-17 用户拍板开放示例对接人：
+      //   受理人可见面本与 admin 一致〔C1，上方注释〕，作废单查看权随之对齐；详情端已作废门同步放行，写读同源）
+      const includeVoided = (isAdmin || isIntakeLiaisonUser) && (req.query.include_voided === '1' || req.query.include_voided === 'true');
+      if (!includeVoided) where.push("status != '已作废'");
+
+      // 可选筛选（type/status/system/priority/release/assigned）
+      const addEq = (col, val) => { if (val !== undefined && val !== null && val !== '') { where.push(`${col} = ?`); params.push(val); } };
+      addEq('type', req.query.type);
+      // ⭐ [C9 读点标注·方案 v1.7 §10.1 逐点标注要求] **本读点显式声明：status 筛选不区分「已上线」的来源。**
+      //   `?status=已上线` 命中的是**两条入口写出的全部已上线单**（批次发布 release_publish + 免上线直翻
+      //   no_commit_acceptance），因为两条路径写的是同一根 status 列的同一个值——这是 §10.1 字段契约
+      //   「status 一列不分家」的直接后果，不是遗漏。用户按状态筛选时想看的是"哪些单已经上线了"，
+      //   来源是列表里「上线方式」那一格回答的问题，不是筛选条件要回答的。
+      //   ⚠️ 刻意**不提供** `?online_source=` 筛选：C9 是纯展示扩字段（同 C8 risk_level 的既定口径，
+      //     见下方 SELECT 注释与 panel-static 的反向断言），加筛选属独立需求，须另行立项。
+      addEq('status', req.query.status);
+      addEq('system_name', req.query.system);
+      addEq('priority', req.query.priority);
+      addEq('release_id', req.query.release ? parsePositiveId(req.query.release) : undefined);
+      if (isAdmin) addEq('assigned_to', req.query.assigned ? parsePositiveId(req.query.assigned) : undefined);
+
+      // C1（多开发协作与 commit 留痕重构 v2.9 §13 S1）：列表负责人列改多人展示——子查询聚合在册成员名
+      //   （removed_at IS NULL，按 user_id 升序），避免逐行 N+1 查询；assigned_to_name 原样保留（兼容旧前端/
+      //   其余读它的地方不动，C1 只加不减）。
+      //   ⚠️ LOW-1（89 号审）：`dev_roster_names` 字段值协议 = **JSON 数组字符串**（如 '["张三","李四"]'），
+      //   非逗号拼接明文——display_name 无"禁逗号"约束，人名本身可能含英文逗号，逗号拼接不可逆（前端 split(',')
+      //   会把 "张三,李" 这种单个含逗号的名字错拆成两截）。改用 json_group_array（内层子查询仍先 ORDER BY 再
+      //   聚合，json_group_array 同 GROUP_CONCAT 一样不支持直接 ORDER BY）——零命中时返回合法空数组 '[]'
+      //   （非 NULL，SQLite 聚合函数对 json_group_array 的空集特例，已用真实 db 验证），前端 JSON.parse 后
+      //   按数组长度判断是否需要回退 assigned_to_name。字段名保留 `dev_roster_names` 不改（减少改动面），
+      //   值类型变更已在本注释 + 前端 JSON.parse 处双向留痕。
+      const sysIssuesWhereSql = where.length ? 'WHERE ' + where.join(' AND ') : '';
+      // ⭐ [457-H2 冻结·跨阶段契约 §3.1] 本端点唯一供数查询——查询构建已抽成模块内纯函数
+      //   buildSysIssuesListQuery（定义于本路由之前），路由只把返回值直接交给 dbAllAsync，不在外面再拼一次。
+      const { sql: sysIssuesListSql, bindParams: sysIssuesListBindParams } = buildSysIssuesListQuery({
+        uid, nowStr: listNowStr, whereSql: sysIssuesWhereSql, whereParams: params,
+      });
+      const rows = await dbAllAsync(sysIssuesListSql, sysIssuesListBindParams);
       // ⭐ [C9·§10.1 + 组 B·SB2] 列表逐行派生「已上线」来源四分支——与详情端点走**同一个** deriveOnlineSourceKind，
       //   不在这里重写一份判据（读点分散是 §10.1"所有已上线读点逐点标注"要防的事）。
       //   ⚠️ 本 SELECT 必须取到 status/release_id/online_source 三列，派生函数才有输入（online_source
@@ -15943,6 +16080,417 @@ module.exports = (deps) => {
     }
   });
 
+  // 时间线摘要用中文字段名（仅供 PATCH 编辑端点拼 summary 文本，非校验/存储契约）。
+  const SYS_RELEASE_EDIT_FIELD_LABEL = { title: '标题', version_tag: '版本号', release_note: '上线说明' };
+
+  // ── PATCH /sys-releases/:id：上线单基本信息编辑（admin·仅「计划中」·D3 三字段·方案 §3 O3）──────────
+  //   可编辑：title / version_tag / release_note（D3 拍板，不含单号）。不可编辑（写代码注释防后人加）：
+  //   planned_date（走改期端点，撞 applyReleaseChange 契约）／release_no（UNIQUE + 已进通知文案/时间线/
+  //   快照）／release_type（族别语义）／is_hotfix・release_kind（流程语义）。
+  //   字段存在性严格 PATCH 语义（450-H2）：仅处理请求体里 hasOwnProperty 命中的字段，未出现字段保持
+  //   原值；出现且为 null/'' = 显式清空（合法意图）；出现且非字符串 → 400。三形态禁止合并判断（本项目
+  //   已踩过的坑：字段闸 null 三形态混判会让"显式传值"被静默降级）。
+  //   ⭐ 三道门优先级冻结（452-M1，方案 §3 O3 第 0 条，顺序不可调换）：
+  //     ① status 门恒最前——非「计划中」恒 409 RELEASE_NOT_PLANNING，**含 no-op 请求**（已发布批次接受
+  //        编辑会让前端把"无效编辑"显示成功，API 语义与产品状态门分叉）。
+  //     ② 空变更集短路——status 门通过后，变更集为空 → 200 {changed:false}，零写入（不进通知门）。
+  //     ③ 通知门（含 D8 例外）——只对**有实际变更**的请求生效，只越过通知门，永不越过 status 门。
+  //   D8：已通知执行人后锁定编辑，要改先由对接人撤销上线安排；例外（方案 B）——判据="实际变更集
+  //   ⊆ {title}" 且 title 现值为空/空白（补空不算改，通知文案里本无标题，不产生"已发内容与现状不一致"）。
+  //   长度校验先于 D8 例外判定（超长恒 400，不因走例外通道而放过）。
+  //   写入语义（服务端比对制，同 feedback_server_side_diff_for_audit）：归一（对称，旧新同一 norm 函数，
+  //   451-M3）→ 读现值比对算出实际变更集 → 变更集为空立即短路 → 非空则 CAS（三字段全比对，同状态机
+  //   UPDATE 三件套：双条件守卫 WHERE 含期望前置 status + changes 检查 + 失败阻断不静默吞）→ 事务内
+  //   逐成员单（release_id 命中——sys_issues 无软删列，成员关系即该指针；⚠️ **实况订正（S11 预筛拦截①
+  //   抓获，本行此前误称"作废/退回路径均已置 NULL"）**：reopen（:6067）／C9 免上线直翻（:5817）／bug
+  //   先行上线翻牌（:4630）三处写路径均显式清该指针，**唯 case 'void'（:6178 一带）不清**——已作废单
+  //   可携带历史批次指针。本 PATCH 端点只逐张现有成员单只读遍历、不改 release_id，不受此影响；
+  //   DELETE /sys-releases/:id 端点（O4，同文件下方）会真实遇到"批次内混着已作废成员"这一态，其步骤③④
+  //   已按此现实放宽 dirty 判据 + 拆分退回分支处置，见该端点注释）
+  //   写 note 型时间线（N 条，D9：不注册进 SI_TL_RELEASE_SCOPE_LABEL，不进「隐藏上线单调整
+  //   记录」过滤器）+ 审计表 sys_release_audit 恒 1 条（§3.0，含空批次，member_issue_ids/member_count
+  //   用同一份成员 ID 集合——451-H1：不能只插必填列导致非空批次被记成空批次）。
+  //   不调 applyReleaseChange（描述性字段编辑不重置执行人通知，也不属其四类 delta 任何一类）。
+  router.patch('/sys-releases/:id', authenticateToken, requireSysSchemaReady, requireAdmin, async (req, res) => {
+    const id = parsePositiveId(req.params.id);
+    if (!id) return res.status(400).json({ error: '无效的批次 ID', code: 'INVALID_RELEASE_ID' });
+    const b = req.body || {};
+    // 字段存在性三形态（450-H2）：hasOwnProperty 命中才处理，未出现字段整条不进 presentFields——
+    //   保证"未出现的字段绝不被清空"直接由代码结构成立，不依赖后面某一步"记得别动它"。
+    const PATCH_FIELD_META = {
+      title:        { max: SYS_RELEASE_TITLE_MAX, tooLongCode: 'RELEASE_TITLE_TOO_LONG', tooLongMsg: '标题超长' },  // S10 预筛提示3：编辑 UI 三处均称「标题」，'批次说明'指向不存在字段（POST 建单旧文案不动=范围纪律）
+      version_tag:  { max: SYS_VERSION_TAG_MAX,   tooLongCode: 'VERSION_TAG_TOO_LONG',   tooLongMsg: '版本号超长' },
+      release_note: { max: SYS_RELEASE_NOTE_MAX,  tooLongCode: 'RELEASE_NOTE_TOO_LONG',  tooLongMsg: '上线说明超长' },
+    };
+    // [codex 472 MED-1] body 须为非数组对象；未知键显式 400——planned_date（已有独立改期端点）/
+    //   release_no/拼写错误字段若被静默忽略会返回 200 changed:false，调用方误判"操作成功"而什么都没发生。
+    //   空对象 {} 保留既定行为（走 status 门后 changed:false=452-M1 要求）。
+    if (typeof b !== 'object' || b === null || Array.isArray(b)) {
+      return res.status(400).json({ error: '请求体须为 JSON 对象', code: 'RELEASE_PATCH_INVALID_BODY' });
+    }
+    const unknownFields = Object.keys(b).filter(k => !Object.prototype.hasOwnProperty.call(PATCH_FIELD_META, k));
+    if (unknownFields.length) {
+      return res.status(400).json({ error: `不支持的编辑字段：${unknownFields.join('、')}（本端点仅支持 title/version_tag/release_note；改期请用 update-planned-date）`, code: 'RELEASE_PATCH_UNSUPPORTED_FIELD', fields: unknownFields });
+    }
+    const presentFields = Object.keys(PATCH_FIELD_META).filter(k => Object.prototype.hasOwnProperty.call(b, k));
+    const norm = (v) => (v == null ? '' : v).trim() || null;   // 对称归一（451-M3）：旧值/新值走同一函数
+    const newRaw = {};   // field -> 原始提交值（string|null），仅 presentFields 命中的键
+    for (const f of presentFields) {
+      const v = b[f];
+      if (v !== null && typeof v !== 'string') {
+        return res.status(400).json({ error: `${f} 类型非法（须为字符串或 null）`, code: 'RELEASE_PATCH_INVALID_TYPE', field: f });
+      }
+      newRaw[f] = v;
+    }
+    // 长度校验（复用建单三常量，先于 D8 例外判定——方案 §3 O3 明文：超长恒 400，不因走例外通道而放过）。
+    // 与 POST /sys-releases 同口径：校验的是归一（trim）后的非空值，本身不依赖事务/现值，故放在事务外。
+    for (const f of presentFields) {
+      const normed = norm(newRaw[f]);
+      if (normed !== null && normed.length > PATCH_FIELD_META[f].max) {
+        return res.status(400).json({ error: PATCH_FIELD_META[f].tooLongMsg, code: PATCH_FIELD_META[f].tooLongCode });
+      }
+    }
+
+    const actor = sysActor(req);
+    try {
+      await sysBeginImmediate();
+      try {
+        // SELECT * ——审计"操作前整行快照"要求全列（同 sys_issue_delete_audit 既有注释："审计要的正是
+        // 操作当时的全貌，漏列即漏证"），不用列举式，同时供 status/三字段现值读取复用同一次查询。
+        const beforeRow = await dbGetAsync('SELECT * FROM sys_releases WHERE id = ?', [id]);
+        if (!beforeRow) { await sysRollback(); return res.status(404).json({ error: '上线批次不存在', code: 'RELEASE_NOT_FOUND' }); }
+
+        // ⭐ 三道门①：status 门恒最前，含 no-op 也先过（452-M1）。
+        if (beforeRow.status !== '计划中') {
+          await sysRollback();
+          return res.status(409).json({ error: '批次非「计划中」，不能编辑', code: 'RELEASE_NOT_PLANNING' });
+        }
+
+        // 归一对称比对，算出实际变更集（仅 presentFields 参与——未出现字段天然不比较、不落入变更集）。
+        const changes = [];
+        for (const f of presentFields) {
+          const oldNorm = norm(beforeRow[f]);
+          const newNorm = norm(newRaw[f]);
+          if (oldNorm !== newNorm) changes.push({ field: f, old: beforeRow[f], new: newNorm });
+        }
+
+        // ⭐ 三道门②：空变更集短路——status 已过，变更集为空立即 200，不进通知门、不写库、不写时间线、
+        // 不写审计（451-M3：即使通知已启动，no-op 也不该报错）。
+        if (changes.length === 0) {
+          await sysCommit();
+          return res.json({ id, changed: false });
+        }
+
+        // ⭐ 三道门③：通知门（含 D8 例外），仅对有实际变更的请求生效。
+        const execSummary = await getReleaseNotifySummary(id);
+        const notifyStarted = !['none', 'not_sent'].includes(execSummary);
+        if (notifyStarted) {
+          // D8 例外（方案 B）：判据="实际变更集 ⊆ {title}" 且 title 现值为空/空白——补空不算改。450-H2：
+          // 判据是"实际变更集"不是"提交字段集"，三字段全量提交但只有 title 真变，其余提交值=现值同样放行。
+          const onlyTitleChanged = changes.length === 1 && changes[0].field === 'title';
+          const oldTitleBlank = norm(beforeRow.title) === null;
+          const exceptionApplies = onlyTitleChanged && oldTitleBlank;
+          if (!exceptionApplies) {
+            await sysRollback();
+            return res.status(409).json({
+              error: '该批次已通知执行人，需请对接人先撤销上线安排',
+              code: 'RELEASE_NOTIFY_STARTED',
+            });
+          }
+        }
+
+        // CAS：三字段全比对（同 update-planned-date 单字段 CAS 范式扩展到三列，方案 §3 O3 明文）——
+        // WHERE 含期望前置 status + 三字段旧值，changes!==1 说明并发窗口内已被别的请求改过（状态机
+        // UPDATE 三件套：双条件守卫 + changes 检查 + 失败阻断不静默吞）。
+        // [codex 472 HIGH-1] 最终写入值由**实际变更集**驱动，不由 presentFields 驱动——presentFields
+        //   命中但未进 changes 的字段（oldNorm===newNorm 而原始值不同，如库内脏空白 '   ' vs 提交 ''）
+        //   若写 norm 值会发生"实际库写入（'   '→NULL）却不见于 changes/时间线/审计"的无痕归一化写回，
+        //   破坏"改后实际值均可见"的审计语义。未变更字段恒写回 beforeRow 原始值（UPDATE 等值自写=零变化）。
+        const changedFields = new Set(changes.map((c) => c.field));
+        const finalTitle = changedFields.has('title') ? norm(newRaw.title) : beforeRow.title;
+        const finalVersionTag = changedFields.has('version_tag') ? norm(newRaw.version_tag) : beforeRow.version_tag;
+        const finalReleaseNote = changedFields.has('release_note') ? norm(newRaw.release_note) : beforeRow.release_note;
+        const upd = await dbRunAsync(
+          `UPDATE sys_releases SET title = ?, version_tag = ?, release_note = ?
+             WHERE id = ? AND status = '计划中'
+               AND COALESCE(title,'') = COALESCE(?,'')
+               AND COALESCE(version_tag,'') = COALESCE(?,'')
+               AND COALESCE(release_note,'') = COALESCE(?,'')`,
+          [finalTitle, finalVersionTag, finalReleaseNote, id,
+           beforeRow.title, beforeRow.version_tag, beforeRow.release_note]
+        );
+        if (!upd || upd.changes !== 1) {
+          await sysRollback();
+          return res.status(409).json({ error: '批次状态已并发变更，请刷新重试', code: 'CONCURRENT_STATE_CHANGE' });
+        }
+
+        // 逐在册成员写时间线（D9：不进「隐藏上线单调整记录」过滤器——event_type='note' + action_code=
+        // 'release_info_edit'，不注册进 SI_TL_RELEASE_SCOPE_LABEL，同方案 §3 O3 明文）。
+        const memberRows = await dbAllAsync('SELECT id FROM sys_issues WHERE release_id = ?', [id]);
+        const memberIds = memberRows.map(m => m.id);
+        const changeSummaryText = changes.map(c => SYS_RELEASE_EDIT_FIELD_LABEL[c.field] || c.field).join('、');
+        const timelineSummary = `上线单信息修改（${changeSummaryText}）`;
+        // ⚠️ 两个载体的 JSON 形状不同，不可共用一份序列化值：sys_issue_timeline.payload_json 是"结构化
+        //   载荷"通用列，同族既有写点（如 completion_overrun_reason）均落对象形态 {字段...}；而
+        //   sys_release_audit.changes_json 按 DDL 注释与 472-MED-2 新增 CHECK（json_type(changes_json)
+        //   = 'array' ∧ json_array_length > 0）明确要求是**裸数组** [{field,old,new}]，不是包一层对象。
+        //   此前误把同一份 {changes} 对象形态塞进两处，changes_json 撞新 CHECK 500——现分列两个变量。
+        const timelinePayloadJson = JSON.stringify({ changes });
+        const changesArrayJson = JSON.stringify(changes);
+        for (const mid of memberIds) {
+          await dbRunAsync(
+            `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, ref_id, operator_id, operator_name, payload_json)
+             VALUES (?, 'note', ?, 'release_info_edit', ?, ?, ?, ?)`,
+            [mid, timelineSummary, id, actor.id, actor.name, timelinePayloadJson]
+          );
+        }
+
+        // sys_release_audit 恒 1 条（§3.0，含空批次）——member_issue_ids/member_count 用上面同一份
+        // memberIds（451-H1：必须与实际写时间线的集合同源，不能只插必填列导致非空批次被记成空批次）。
+        await dbRunAsync(
+          `INSERT INTO sys_release_audit
+             (release_id, release_no, action, release_json, changes_json, executors_json,
+              member_issue_ids, member_count, reason, operator_id, operator_name)
+           VALUES (?, ?, 'edit', ?, ?, NULL, ?, ?, NULL, ?, ?)`,
+          [id, beforeRow.release_no, JSON.stringify(beforeRow), changesArrayJson,
+           JSON.stringify(memberIds), memberIds.length, actor.id, actor.name]
+        );
+
+        await sysCommit();
+        res.json({ id, changed: true, changes });
+      } catch (txErr) {
+        try { await sysRollback(); } catch (_) { /* ignore */ }
+        throw txErr;
+      }
+    } catch (err) {
+      if (err instanceof SysTransitionError) return sendSysTransitionError(res, err);
+      logger.error('[系统迭代] 上线单信息编辑失败:', err && err.message);
+      res.status(500).json({ error: (err && err.message) || '上线单信息编辑失败' });
+    }
+  });
+
+  // ── DELETE /sys-releases/:id：删除上线单（O4，方案 20260824_v1.3 §3 O4，R-C6）──────────────────
+  //   兑现 codex 307 号 L1 登记（"批次删除路径级联核查"）——解开真实死锁：DELETE /sys-issues/:id 守卫②
+  //   （:12263 一带）拒删已挂批次的单，此前上线单又无删除端点 ⇒ 建错的批次永久留存、无法回收（见该守卫
+  //   注释、方案 §2.4"删除现状"）。⚠️ 不得放宽守卫②——死锁的正确解锁路径是"先删批次"，不是拆单据删除
+  //   的闸门（方案 §3 O4"边界守护"明文）。
+  //   ⚠️ FK 恒 OFF（server.js:1478），DDL 里 sys_release_executors 的 ON DELETE CASCADE（:1285）不生效，
+  //   级联全手写（同 sys_issue_delete_audit 既有范式，:12302 起）。
+  //   状态门与 O3/PATCH 同一条闸（status='计划中' ∧ 通知未启动），不另起判据——已发布批次永不可删（快照
+  //   与时间线是历史事实）；本闸**无 D8 title 补空例外**（那是 edit 专属，delete 没有"补空不算改"这回事）。
+  router.delete('/sys-releases/:id', authenticateToken, requireSysSchemaReady, requireAdmin, async (req, res) => {
+    const id = parsePositiveId(req.params.id);
+    if (!id) return res.status(400).json({ error: '无效的批次 ID', code: 'INVALID_RELEASE_ID' });
+    // reason 必填（trim 1..200），照抄 DELETE /sys-issues/:id 全套范式——入事务前先校，省一次无谓持锁；
+    //   同时也是 sys_release_audit 组合 CHECK（action='delete' ⇒ reason IS NOT NULL 且 trim 非空白）的
+    //   服务层前置守卫，落库前先在应用层挡一道。
+    const reason = (typeof (req.body || {}).reason === 'string' ? req.body.reason.trim() : '');
+    if (!reason || reason.length > 200) return res.status(400).json({ error: '删除原因必填（trim 后 1..200 字）', code: 'RELEASE_DELETE_REASON_REQUIRED' });
+    const actor = sysActor(req);
+    let releaseNoForLog = '';
+    // ⭐ codex 474 MED-1：commit 后路径隔离——committed=true 之后发生的任何异常（收尾日志格式化/logger
+    //   实现自身抛错等）都不再代表"删除失败"，只代表"删除已成功但收尾记录环节出了问题"，两者必须能被
+    //   下方 catch 链区分处理：已提交的删除绝不能因日志异常回 500（客户端据此重试会撞 404 空欢喜一场，
+    //   且 txErr 分支的 CRITICAL 日志文案会把一次成功的删除误记成"事务异常"，误导人工排查）。
+    let committed = false;
+    // ⭐ codex 474 复审 LOW-1：成功响应体提前在函数顶部声明（与 committed 同级作用域）——正常路径与
+    //   committed 降级路径（在外层 catch 里，与内层 try 不同作用域，取不到内层局部变量）必须共用同一个
+    //   对象，极端路径的响应契约才能与正常路径逐字段一致（含 member_count），不因为走了降级分支就少
+    //   一个字段。
+    let successBody = null;
+    try {
+      await sysBeginImmediate();
+      try {
+        // 【方案 §3 O4 步骤①】SELECT * 整行 → 审计快照（列举式 SELECT 是错的，同 sys_issue_delete_audit
+        //   既有注释："审计要的正是删除当时的全貌，漏列即漏证"；sys_releases 仍在演进）。同一行也供下方
+        //   状态门判定，一次读两用（不再单独跑一条快照查询，不存在"两次读之间行被改"的窗口）。
+        const beforeRow = await dbGetAsync('SELECT * FROM sys_releases WHERE id = ?', [id]);
+        if (!beforeRow) { await sysRollback(); return res.status(404).json({ error: '上线批次不存在', code: 'RELEASE_NOT_FOUND' }); }
+        releaseNoForLog = beforeRow.release_no || '';
+
+        // 状态门（与 O3/PATCH 同一条闸，方案 §3 O4 明文"不另起判据"）——
+        //   ① status='计划中'，否则 409（已发布批次快照/时间线是历史事实，永不可删）。
+        if (beforeRow.status !== '计划中') {
+          await sysRollback();
+          return res.status(409).json({ error: '批次非「计划中」，不能删除', code: 'RELEASE_NOT_PLANNING' });
+        }
+        //   ② 执行人通知未启动（聚合态 ∈ ('none','not_sent')，镜像 :8362 一带既有判据，与 O3 复用同一
+        //   getReleaseNotifySummary），否则需请对接人先撤销上线安排。⚠️ 本闸**无 D8 例外**——delete 不存在
+        //   "补空不算改"的豁免场景，通知已启动就是硬拒。
+        const execSummary = await getReleaseNotifySummary(id);
+        if (!['none', 'not_sent'].includes(execSummary)) {
+          await sysRollback();
+          return res.status(409).json({ error: '该批次已通知执行人，需请对接人先撤销上线安排', code: 'RELEASE_NOTIFY_STARTED' });
+        }
+
+        // 【步骤②】读当前成员清单。
+        const members = await dbAllAsync('SELECT id, status FROM sys_issues WHERE release_id = ? ORDER BY id', [id]);
+
+        // 【步骤③·450-M1 fail-closed，S11 预筛拦截①收口】成员状态一致性校验：DB 层没有"release_id 非空
+        //   ⇒ status='待上线'"的约束，脏数据/并发前置异常下若照删，会留下"无批次且不可预期状态"的单——
+        //   既不满足 D10，也再也加不回任何批次（制造新死锁）。宁可拒绝并要求先修数据，不静默按"多数成员
+        //   待上线"处理。
+        //   ⭐ 判据放宽（S11 预筛拦截①，2026-08-26·HIGH）：允许成员为「已作废」——迁移引擎 case 'void'
+        //   （:6178 一带）**不清 release_id**（同族 case 'reopen' :6067／C9 免上线直翻 :5817／bug 先行上线
+        //   翻牌 :4630 三处写路径均显式清该指针，唯 void 缺该 frag，是既有历史行为，本批不改 void 端点本身，
+        //   见下方步骤④分支处置 + :16099 一带 PATCH 端点注释的同步订正）。若仍按原判据（非「待上线」即脏）
+        //   拒绝，"已作废但仍挂批次"的成员会让本判卡死：① 整个批次因该成员脏而永久无法删除（本闸卡死）；
+        //   ② 该单自身走 remove-issues／DELETE /sys-issues/:id 又因 release_id 非空被守卫②拒绝（两口一起
+        //   锁死）；③ 已作废是不可恢复终态，不存在"先改回待上线再删"的自救路径——三者叠加构成真实受困态。
+        //   已作废是业务已主动放弃的终态，不应反过来人质整个批次的回收，故放宽为：仅当成员**既非「待上线」
+        //   也非「已作废」**才算脏。
+        const badMembers = members.filter(m => m.status !== '待上线' && m.status !== '已作废');
+        if (badMembers.length > 0) {
+          await sysRollback();
+          return res.status(409).json({
+            error: `批次内存在非「待上线」/「已作废」成员（${badMembers.length} 张），无法安全删除——请先核实数据：${badMembers.map(b => `#${b.id}(${b.status})`).join('、')}`,
+            code: 'RELEASE_MEMBER_STATE_DIRTY',
+            bad_member_ids: badMembers.map(b => b.id),
+          });
+        }
+        // 放宽后成员分两类，退回处置不同（步骤④）——但留痕（步骤⑤时间线、步骤⑧审计 member_issue_ids）
+        // 一视同仁覆盖全部成员，不因分支化处理而漏记已作废成员。
+        const memberIds = members.map(m => m.id);
+        const pendingMemberIds = members.filter(m => m.status === '待上线').map(m => m.id);
+        const voidedMemberIds = members.filter(m => m.status === '已作废').map(m => m.id);
+
+        // 【步骤④·D10，S11 预筛拦截①收口拆分·codex 474 HIGH-1 收口】成员退回：两条独立 UPDATE，不合并
+        //   成一条不带 status 限定的宽松语句——待上线成员=既有 D10 语义（回「待上线」，同 applyReleaseChange
+        //   移除分支语义：移单只清 release_id、status 保持）；已作废成员=新增分支，只清指针、**不动
+        //   status**（终态保持，不因批次被删而对已作废单发生任何状态位移，避免"顺带复活"的误解）。
+        //   ⭐ 两支**均**走 `release_id=?` 集合谓词（codex 474 HIGH-1：已作废分支此前用 `id IN (...)`
+        //   逐 id 占位符——缺 release_id 归属守卫〔谓词本身不限定这些 id 必须属于本批次，只是"碰巧"是
+        //   本次快照到的 id，若上层逻辑有误会清到别批次的行而 SQL 层拦不住〕，且大量成员会撞 SQLite 参数
+        //   上限（单条语句默认上限 999）。改为单条集合 UPDATE 后，两支的归属安全性**同源同构**——都是
+        //   "仅动本批次名下的行"，不依赖"传进来的 id 列表都是对的"这个更弱的前提。changes 计数核对（对拍
+        //   voidedMemberIds.length）与三件套纪律照旧不变：WHERE 叠 status 限定 + changes 计数核对是状态机
+        //   UPDATE 三件套的纵深防线：本身已在 sysBeginImmediate 全局互斥事务内、理论上不会被并发改写，但
+        //   同 remove-issues 既有范式一致，不因"理论上安全"而省略这道闸；changes 与快照成员数不符即视为
+        //   不可信的内部不变量破裂（非正常业务分支），抛错交由下方 txErr 分支整体回滚 + CRITICAL 日志，而
+        //   非当作普通 409 静默处理。
+        const updPending = await dbRunAsync(
+          `UPDATE sys_issues SET release_id = NULL, updated_at = datetime('now','localtime')
+             WHERE release_id = ? AND status = '待上线'`,
+          [id]
+        );
+        if (!updPending || updPending.changes !== pendingMemberIds.length) {
+          throw new Error(`待上线成员退回行数（${updPending ? updPending.changes : 'null'}）与快照数（${pendingMemberIds.length}）不一致，疑似未预期并发写，拒绝继续`);
+        }
+        if (voidedMemberIds.length > 0) {
+          const updVoided = await dbRunAsync(
+            `UPDATE sys_issues SET release_id = NULL, updated_at = datetime('now','localtime')
+               WHERE release_id = ? AND status = '已作废'`,
+            [id]
+          );
+          if (!updVoided || updVoided.changes !== voidedMemberIds.length) {
+            throw new Error(`已作废成员退回行数（${updVoided ? updVoided.changes : 'null'}）与快照数（${voidedMemberIds.length}）不一致，疑似未预期并发写，拒绝继续`);
+          }
+        }
+
+        // 【步骤⑤·D9】逐张成员写时间线（含已作废成员，留痕完整——不因步骤④分支化处理而漏记）：
+        //   event_type='note'+action_code='release_deleted'，不注册进 SI_TL_RELEASE_SCOPE_LABEL（不被
+        //   "隐藏上线单调整记录"过滤器捕获）。前端三处注册（SI_TL_LABEL/SI_TL_CLS/SI_TL_NOTE_OWN_LABEL_
+        //   CODES）留给 R-C7——同 R-C4 阶段 release_info_edit 先例，本阶段落回 event_type='note' 的通用
+        //   「备注」标签，不影响功能正确性（verify-sys-timeline-label-coverage EXPECTED_INSERT_SITE_COUNT
+        //   49→50 同批更新，见该文件注释）。⭐ S11 预筛拦截①收口：摘要文案按成员实际退回结果分两版——
+        //   待上线成员确实"退回待上线"；已作废成员只是清了历史指针、单据本身仍是已作废，若沿用同一句
+        //   "已退回「待上线」"会对已是终态的单据做出错误宣称。
+        const deleteSummaryPending = `上线单 ${beforeRow.release_no} 已删除，本单已退回「待上线」`;
+        const deleteSummaryVoided = `上线单 ${beforeRow.release_no} 已删除，本单历史批次关联已清除（单据保持「已作废」）`;
+        const deletePayloadJson = JSON.stringify({ release_id: id, release_no: beforeRow.release_no, reason });
+        for (const m of members) {
+          const summaryText = m.status === '已作废' ? deleteSummaryVoided : deleteSummaryPending;
+          await dbRunAsync(
+            `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, ref_id, operator_id, operator_name, payload_json)
+             VALUES (?, 'note', ?, 'release_deleted', ?, ?, ?, ?)`,
+            [m.id, summaryText, id, actor.id, actor.name, deletePayloadJson]
+          );
+        }
+
+        // 【步骤⑥·450-H3】执行人行物理删除（不软删）：快照固定 `SELECT * ... ORDER BY id`，不按
+        //   removed_at 过滤（451-M1：快照须含全部在册+历史软删行，防执行人变更链断裂）。全量快照 → 进审计
+        //   executors_json → 全量物理删（含 removed_at 非空的历史行）——release_id NOT NULL，父行硬删后
+        //   软删行会成为孤儿引用，不能沿用软删语义（该列语义是"批次还在、这个人被移出"，父批次已不存在时
+        //   不成立）。
+        const execRows = await dbAllAsync('SELECT * FROM sys_release_executors WHERE release_id = ? ORDER BY id', [id]);
+        await dbRunAsync('DELETE FROM sys_release_executors WHERE release_id = ?', [id]);
+
+        // 【步骤⑦】sys_issue_release_commit_snapshots：计划中批次恒无快照行（守卫②"已挂批次不可删"的
+        //   间接推论），仍显式执行 DELETE 兜底——同 sys_issue_delete_audit 既有注释"跨条件的间接论证一旦
+        //   前提变化会静默留孤儿"，显式处理成本两行，不值得省。
+        await dbRunAsync('DELETE FROM sys_issue_release_commit_snapshots WHERE release_id = ?', [id]);
+
+        // 【步骤⑧】写 sys_release_audit（action='delete'，§3.0）——恒 1 条含空批次；reason 必填，
+        //   executors_json 与 member_issue_ids 同源于本次实际读取/写入的集合（非事后另查，防"结构合法但
+        //   数据说谎"）。⭐ member_issue_ids 含**全部**成员（待上线+已作废两类，S11 预筛拦截①收口）——
+        //   即使已作废成员走的是步骤④的另一条 UPDATE 分支，它仍是"本次删除批次真实处理过的成员"，审计
+        //   留痕不因分支化处理而遗漏。
+        await dbRunAsync(
+          `INSERT INTO sys_release_audit
+             (release_id, release_no, action, release_json, changes_json, executors_json,
+              member_issue_ids, member_count, reason, operator_id, operator_name)
+           VALUES (?, ?, 'delete', ?, NULL, ?, ?, ?, ?, ?, ?)`,
+          [id, beforeRow.release_no, JSON.stringify(beforeRow), JSON.stringify(execRows),
+           JSON.stringify(memberIds), memberIds.length, reason, actor.id, actor.name]
+        );
+
+        // 【步骤⑨】硬删批次主表（末位——审计已先落库，写失败→抛→外层 catch rollback→业务行一条不删，
+        //   "删了但没记"被结构性排除，⚠️ **成立域到此为止：sys 模块内·同 DELETE /sys-issues F5 收窄口径**
+        //   （对抗审 F5 收口：本项目单个共享 sqlite3 连接，sys mutex 只串行化 sys 模块自己的事务点，
+        //   跨模块另有裸 BEGIN 场景不在本条保证范围，见 :12287 一带完整说明，此处不重复整段论证）。
+        const del = await dbRunAsync('DELETE FROM sys_releases WHERE id = ?', [id]);
+        if (!del || del.changes !== 1) {
+          await sysRollback();
+          return res.status(409).json({ error: '批次状态已并发变更，请刷新重试', code: 'RELEASE_DELETE_CONFLICT' });
+        }
+        await sysCommit();
+        committed = true;   // ⭐ codex 474 MED-1：commit 成功即置位，见函数顶部声明处注释
+        successBody = { ok: true, id, member_count: memberIds.length };   // 见函数顶部声明处 LOW-1 注释
+        // 收尾日志包独立 try/catch——格式化/logger 实现自身若抛错，只降级为 console.warn，绝不冒泡到
+        // txErr/外层 catch（那会让一次已成功提交的删除被误判为失败并回 500）。
+        try {
+          const reasonForLog = reason.replace(/[\r\n\t]+/g, ' ').slice(0, 120);
+          const releaseNoForLogSafe1 = releaseNoForLog.replace(/[\r\n\t]+/g, ' ').slice(0, 120);
+          logger.info(`用户 ${req.user.username} 删除上线批次 #${id}（${releaseNoForLogSafe1}）+ 退回待上线 ${pendingMemberIds.length} 张·清指针（已作废）${voidedMemberIds.length} 张·原因：${reasonForLog}`);
+        } catch (logErr) {
+          try { console.warn(`[系统迭代] 上线批次 #${id} 删除成功后收尾日志异常（不影响删除结果）:`, logErr && logErr.message); } catch (_) { /* best-effort */ }
+        }
+        return res.json(successBody);
+      } catch (txErr) {
+        if (committed) {
+          // 已提交后才炸的异常（理论上只剩 res.json 序列化这类极端边缘情况——收尾日志已在上面自行兜底，
+          // 不会冒泡到这里）：不是事务异常，没有可回滚的东西，也不打误导性的 CRITICAL 日志——直接交给
+          // 外层 catch 的 committed 分支统一做"降级记录仍返回成功"处理。
+          throw txErr;
+        }
+        try { await sysRollback(); } catch (_) { /* ignore */ }
+        // 物理删除是不可逆动作（同 DELETE /sys-issues/:id 既有 CRITICAL 日志范式）：若异常发生在部分
+        // DELETE 已被提交之后（跨模块事务纠缠等极端场景），这条日志是唯一的人工补审计入口。
+        const releaseNoForLogSafe2 = releaseNoForLog.replace(/[\r\n\t]+/g, ' ').slice(0, 120);
+        logger.error(`[系统迭代][CRITICAL] 上线批次物理删除事务异常 #${id} —— 若业务行已消失而审计表无对应行，` +
+          `请据本条人工补审计：operator=${actor.id}/${actor.name}·reason=${reason.replace(/[\r\n\t]+/g, ' ').slice(0, 120)}·` +
+          `release_no=${releaseNoForLogSafe2}·err=${(txErr && txErr.message) || txErr}`);
+        throw txErr;
+      }
+    } catch (err) {
+      if (committed) {
+        // ⭐ codex 474 MED-1：commit 已成功，走到这里的异常只可能来自收尾响应阶段，不是业务失败——绝不能
+        //   回 500（客户端据此重试会撞 404 空欢喜一场）。降级记录后仍视为成功返回。
+        // ⭐ codex 474 复审 LOW-1：返回 successBody（与正常路径同一个对象，逐字段一致，含 member_count）
+        //   ——committed=true 时 successBody 必已在上面赋值（两行紧邻），`|| { ok: true, id }` 只是理论
+        //   上的兜底，不代表这是预期形状。
+        try { console.warn(`[系统迭代] 上线批次 #${id} 已成功提交删除，但响应阶段发生异常（删除结果不受影响，已降级记录）:`, err && err.message); } catch (_) { /* best-effort */ }
+        if (!res.headersSent) {
+          try { return res.json(successBody || { ok: true, id }); } catch (_) { return; }
+        }
+        return;
+      }
+      if (err instanceof SysTransitionError) return sendSysTransitionError(res, err);
+      logger.error('[系统迭代] 上线批次删除失败:', err && err.message);
+      return res.status(500).json({ error: (err && err.message) || '上线批次删除失败' });
+    }
+  });
+
   // ── POST /sys-releases/:id/cancel-schedule：撤销上线安排（仅对接人，admin 403，§6.8）──────────
   //   C4a（方案 §4.4 改造 5·v1.2 H1）：准入不再看聚合通知态——旧 sent/stale/failed 限制已删除，只要批次
   //   「计划中」即可撤销（partial 态必须有恢复路径，否则卡死）。子表整体软删（不回带，§4.1a 代次语义）；
@@ -19140,6 +19688,9 @@ module.exports = (deps) => {
     SYS_RELEASE_COMMIT_SNAPSHOTS_KEY_COLS,
     // 上线体统一重构 C0（方案 v3.4 §6.2）新增排班表锚点（verify-sys-schema 等 require 真实逻辑）
     SYS_DUTY_ROSTER_KEY_COLS,
+    // 上线单管理体验优化 R-C4（方案 20260824_v1.3 §3.0）：批次级审计表锚点（verify-sys-release-audit-schema
+    //   等 require 真实逻辑，RC-L2 防复刻漂移）。
+    SYS_RELEASE_AUDIT_KEY_COLS,
     requireSysSchemaReady,
     runSysMigration,
     // C2：状态机 + helper（verify require 真实逻辑）
@@ -19204,6 +19755,7 @@ module.exports = (deps) => {
     _publishReleaseCoreInTxn,
     nextReleaseNo,
     RELEASABLE_TYPES,
+    SYS_RELEASE_TITLE_MAX,
     SYS_RELEASE_NOTE_MAX,
     SYS_VERSION_TAG_MAX,
     // C6：发布冻结快照（verify-sys-multidev-snapshots require 真实逻辑，RC-L2 防复刻漂移；
@@ -19333,6 +19885,11 @@ module.exports = (deps) => {
     SYS_EDIT_EXCLUDED_FIELDS,    // 排除集（键=字段名，值=理由，verify 同时校验"每条排除都有非空理由"）
     SYS_CREATE_PROTOCOL_REJECTED_FIELDS,   // [F4] 建单端点读取但非表单字段的协议/结构性拒绝字段（六项）
     SYS_SOURCES,   // [F5] 来源三值枚举单一收口（建单/edit-in-revision/derive 三处消费点共用）
+    // [「待我处理」全角色卡·方案 §6 断言 5·457-H2 冻结] GET /sys-issues 列表查询构建纯函数——
+    //   verify-sys-my-pending-cols.js 直调 buildSysIssuesListQuery 做哨兵值参数边界断言（源码文本扫描
+    //   证明不了运行时拼接顺序，必须真执行）；buildSysIssuesListSelect 单独导出供更细粒度断言需要时使用。
+    buildSysIssuesListSelect,
+    buildSysIssuesListQuery,
   };
 
   return { initSchema, router, _internals };

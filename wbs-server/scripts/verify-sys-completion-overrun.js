@@ -821,13 +821,29 @@ async function main() {
       //   第 9 处；同批新增/改动其余代码在下方 8 处写点**部分之前、部分之间**穿插插入，导致 8 处锚点行号
       //   **非均匀位移**（与此前"整体 +N"批次不同，本次逐条按 grep 实测行号取值，禁用「旧锚点+估算净插
       //   行数」推算——见 :825 一带既有纪律，本次订正正是该纪律的落地）。
-      { anchorLine: 1696, reachable: false, desc: 'C1 迁移一次性脚本：字面量写「待指派」（历史 待评估/已排期→待指派迁移），与本闸门目标态无关' },
-      { anchorLine: 1796, reachable: false, desc: '预沟通段撤销迁移脚本：字面量写「待受理」' },
-      { anchorLine: 4015, reachable: true, gateKind: 'runWGate', desc: 'runWGate 内唯一 UPDATE——targetStatus 变量，feature 决策树 ⑤⑥⑦ 分支据 SF.SYS_VERIFY_STATUSES/SF.SYS_LIAISON_TEST_STATUSES 可解析为待验证/待对接测试；§14 闸门（enteringForward && issueType===feature 分支）在本 UPDATE 之前执行，无理由不放行（同一写点，行号随本批弹回探针过期分叉插入 +8 行）' },
-      { anchorLine: 4561, reachable: false, desc: '先行上线翻牌内核 attemptFastReleaseFlipInTxn：字面量写「已上线」，WHERE 限定 type=bug，与 feature 专属闸门结构上无交集（同一写点，行号随本批先行上线授权超时收回时间基建+幂等终结内核+若干注释同步插入在其前方整体下移；S1-fix/S1-fix3 两批再补若干注释+deadline 函数回比对校验、S2 F4-① 脏数据失败形态登记注释，累计下移）' },
-      { anchorLine: 6204, reachable: true, gateKind: 'exempt', desc: 'sysIssueTransition 通用引擎唯一 UPDATE——toStatus 变量，服务全部声明式 transition；feature 流里能落到目标两态的边只有①核实的 liaison_test_pass 一条，该边已撤闸（显式豁免，见下方子断言核实其代码块不引用理由闸函数）' },
-      { anchorLine: 6916, reachable: false, desc: '建单 path A 占位状态 UPDATE：finalStatus 恒为受理门初始态（resolveSysInitialStatusForCreate 落态）或「开发中」，结构上不可能是待对接测试/待验证' },
-      { anchorLine: 7177, reachable: false, desc: '/assign 端点 UPDATE：targetStatus 恒为 SF.SYS_DEV_STATUSES[type][0]（开发中），结构上不可能是待对接测试/待验证' },
+      // ⚠️ [上线单管理体验优化 R-C4·2026-08-26] sys_release_audit 建表落在写点 #1/#2 之前（2.10~2.13
+      //   段之后、2.8 段之前），净增 52 行；readiness [2] checks 数组新增一条注册落在写点 #2 与 #3 之间
+      //   （:2264 一带），净增 2 行——前两条锚点各 +52，其余六条锚点各 +54（52+2）。PATCH /sys-releases/:id
+      //   端点本体插在 update-planned-date 之后（原 :16011 一带），晚于全部 8 处写点，不影响任何一条锚点。
+      //   人工核对：8 处 UPDATE 语句字面量逐字未变，仍是原 8 处同一批写点，非新增第 9 处。
+      // ⚠️ [R-C4·codex 472 审收口批·2026-08-26] 主会话直改 index.js 三处（HIGH-1 finalTitle 等改
+      //   changedFields 驱动/MED-1 body 非法闸+未知字段 400/MED-2 sys_release_audit DDL 补六条 CHECK）
+      //   均落在 sys_release_audit 建表 DDL 段与 PATCH 端点内部——前者仍在全部 8 处写点**之前**，净增
+      //   11 行（DDL 段内的注释+六条 CHECK，checks 数组本身零改动）；后者在全部 8 处写点**之后**——故本批
+      //   8 处锚点**均匀** +11（非本批新增/改动内容位于 #2 与 #3 之间那 2 行 checks 数组附近，那次是 R-C4
+      //   首批的历史差异，本批未再触碰）。人工核对：8 处 UPDATE 语句字面量逐字未变，非新增第 9 处。
+      // ⚠️ [codex 476 收口批 `972fe1b`·2026-08-27] sys_release_audit DDL 追加 member_count 一致性
+      //   CHECK+注释（:1434-1438 一带净增 5 行），位于全部 8 处写点之前 ⇒ 8 锚**均匀 +5**（grep 实测
+      //   1764/1864/4085/4631/6274/6986/7247/14568，UPDATE 字面量逐字未变非新增第 9 处）。⚠️ 本次追平
+      //   系合并后 main 全家族复验才拦获——当批收口亲跑面未含本守卫=「动 index.js 必跑全家族」纪律再犯
+      //   （97c43d7 后第二次），第 7 次追平，backlog #25③ 结构锚改造实例再 +1。
+      { anchorLine: 1764, reachable: false, desc: 'C1 迁移一次性脚本：字面量写「待指派」（历史 待评估/已排期→待指派迁移），与本闸门目标态无关' },
+      { anchorLine: 1864, reachable: false, desc: '预沟通段撤销迁移脚本：字面量写「待受理」' },
+      { anchorLine: 4085, reachable: true, gateKind: 'runWGate', desc: 'runWGate 内唯一 UPDATE——targetStatus 变量，feature 决策树 ⑤⑥⑦ 分支据 SF.SYS_VERIFY_STATUSES/SF.SYS_LIAISON_TEST_STATUSES 可解析为待验证/待对接测试；§14 闸门（enteringForward && issueType===feature 分支）在本 UPDATE 之前执行，无理由不放行（同一写点，行号随本批弹回探针过期分叉插入 +8 行）' },
+      { anchorLine: 4631, reachable: false, desc: '先行上线翻牌内核 attemptFastReleaseFlipInTxn：字面量写「已上线」，WHERE 限定 type=bug，与 feature 专属闸门结构上无交集（同一写点，行号随本批先行上线授权超时收回时间基建+幂等终结内核+若干注释同步插入在其前方整体下移；S1-fix/S1-fix3 两批再补若干注释+deadline 函数回比对校验、S2 F4-① 脏数据失败形态登记注释，累计下移）' },
+      { anchorLine: 6274, reachable: true, gateKind: 'exempt', desc: 'sysIssueTransition 通用引擎唯一 UPDATE——toStatus 变量，服务全部声明式 transition；feature 流里能落到目标两态的边只有①核实的 liaison_test_pass 一条，该边已撤闸（显式豁免，见下方子断言核实其代码块不引用理由闸函数）' },
+      { anchorLine: 6986, reachable: false, desc: '建单 path A 占位状态 UPDATE：finalStatus 恒为受理门初始态（resolveSysInitialStatusForCreate 落态）或「开发中」，结构上不可能是待对接测试/待验证' },
+      { anchorLine: 7247, reachable: false, desc: '/assign 端点 UPDATE：targetStatus 恒为 SF.SYS_DEV_STATUSES[type][0]（开发中），结构上不可能是待对接测试/待验证' },
       // ⚠️ [2026-08-19「RPA程序」批] 本批在 index.js §10.3 单组清单处新增 6 行说明注释（DEFAULT_SINGLE_
       //   COMMIT_GROUP_SYSTEMS 上方），位置落在写点 #6(7177) 与 #7(本条) **之间**，故仅本条下移、前 7 条
       //   行号纹丝未动（这本身就是"同一批写点、非新增第 9 处"的旁证：本批未新增任何 UPDATE 语句，②处
@@ -835,7 +851,12 @@ async function main() {
       //   ⚠️ 本批**一批之内被追平两次**（先 14417→14426，codex 435 收口时又补 5 行登记注释→14431），
       //   是 backlog #25③「绝对行号锚改结构锚」的又一实例：本条锚点对任何位于 #6 与 #7 之间的注释改动
       //   都零容忍，而那片区域（§10.3 单组清单）恰是加系统时必改的地方。改结构锚前，加系统必带校准本条。
-      { anchorLine: 14431, reachable: false, desc: '批量发布执行 UPDATE：字面量写「已上线」（同一写点，flip UPDATE 语句本体未变；行号随本批 _publishReleaseCoreInTxn 内新增的过期分叉双保险段+S1-fix MED-1 报警闸顺序重排插入在其前方下移）' },
+      // ⚠️ [「待我处理」全角色卡 Phase P·C2 批·2026-08-26] GET /sys-issues 列表查询构建抽成
+      //   buildSysIssuesListSelect/buildSysIssuesListQuery 两个纯函数 + 新增两派生列（457-H2 冻结），
+      //   落在写点 #6(7177) 与 #7(本条) 之间的区域（:8198 一带起），全文件净增 59 行——本条锚点随之整体
+      //   下移 14431→14485（人工核对：UPDATE 语句字面量逐字未变，仍是"批量发布执行"同一处写点，非新增
+      //   第 9 处）。
+      { anchorLine: 14568, reachable: false, desc: '批量发布执行 UPDATE：字面量写「已上线」（同一写点，flip UPDATE 语句本体未变；行号历经多批注释/重排/纯函数抽取累计下移，见上方各批注释；R-C4 首批 +54、codex 472 审收口批再 +11、476 收口批 DDL CHECK 再 +5——本锚已第 7 次被无关改动追平，backlog #25③「绝对行号锚改结构锚」实例再 +1）' },
     ];
     assert.strictEqual(EXPECTED_STATUS_WRITE_SITES.length, writeSites.length, '[S③前置] 白名单登记条目数应与②实测写点数一致（防清单本身漂移出真相）');
     writeSites.forEach((site, i) => {

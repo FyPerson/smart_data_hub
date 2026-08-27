@@ -662,8 +662,8 @@ async function main() {
   }
 
   // ═══ [7]（307 号 M3①·codex 对抗审）sys_release_executors 全体写点静态普查 ═══
-  //   目的：全项目对 sys_release_executors 的每一处 UPDATE/INSERT，要么处于 sysBeginImmediate() 全局互斥
-  //   事务保护下，要么是有明文设计理由的刻意例外——本组不重新证明每条写路径的业务正确性（那是上面 [1]-[6]
+  //   目的：全项目对 sys_release_executors 的每一处 UPDATE/INSERT/DELETE，要么处于 sysBeginImmediate()
+  //   全局互斥事务保护下，要么是有明文设计理由的刻意例外——本组不重新证明每条写路径的业务正确性（那是上面 [1]-[6]
   //   组的事），只钉住"写点清单本身"与"各自的保护机制归类"，防未来新增/挪动写点时悄悄漏掉加锁却没人发现。
   //   白名单式：写点集合变化（新增/删除/跨上下文挪动/写点首行被改）→ 清单比对直接红；保护机制归类
   //   变化（比如某条从"直接持锁"改成"调用方持锁"却忘了同步改调用方）→ 对应分类断言红。
@@ -718,13 +718,16 @@ async function main() {
       // `UPDATE ...; INSERT INTO sys_release_executors ...` 这种紧凑写法）会静默把两个独立写点合并成
       // 一个，白名单比对照样能过，实际上漏计了一条真实写点。不去重后，若未来真出现同行双写点，
       // writeLineNumbers 里会带重复行号，长度/内容与白名单对不上，deepStrictEqual 直接报红，逼着显式
-      // 认领这条新写点（而不是被去重悄悄吃掉）。当前全部 11 处写点各自独占一行，不去重不改变现状输出。
+      // 认领这条新写点（而不是被去重悄悄吃掉）。当前全部 12 处写点各自独占一行，不去重不改变现状输出。
       return hits;
     }
-    // L15（codex 预筛）：正则窗口扩 DELETE FROM / REPLACE INTO——预防性加固，本表当前无任何删除/替换
-    // 写法（307 号 L1 已用 `grep DELETE FROM sys_releases` 核实生产路径零删除，本表同理确认现全仓 0
-    // 命中），扩了窗口后白名单集合不变，这里只是让"万一将来真出现"这种写点也逃不过普查，不是发现了
-    // 遗漏。
+    // L15（codex 预筛）：正则窗口扩 DELETE FROM / REPLACE INTO——预防性加固，立项时本表尚无任何删除/替换
+    // 写法（307 号 L1 已用 `grep DELETE FROM sys_releases` 核实生产路径零删除，本表同理确认当时全仓 0
+    // 命中），扩了窗口后白名单集合不变，当时只是让"万一将来真出现"这种写点也逃不过普查——**S11（上线单
+    // 管理体验优化 R-C6·2026-08-26）起该预防性加固已兑现**：新增 `DELETE /sys-releases/:id` 端点（O4
+    // 步骤⑥·450-H3 执行人行物理删除）真实产出了本表首个 `DELETE FROM sys_release_executors` 写点——
+    // 若当年只扩 UPDATE/INSERT 两种谓词，这条真实新写点会从普查窗口外溜过去，白名单永远不会红，是
+    // "预防性加固不是摆设"的实证。
     const writeLineNumbers = scanRealStatementLines(/(UPDATE|INSERT\s+INTO|DELETE\s+FROM|REPLACE\s+INTO)\s+sys_release_executors\b/gi);
 
     // ── S0-a 锚点定位：把上面扫到的行号换算成不含行号的稳定键 ──────────
@@ -884,7 +887,7 @@ async function main() {
       // B 类（2 处）：惰性 stale 转换两助手，刻意的架构例外（见下方 B 类分诊）
       "fn:staleTransitionForExecutorRow :: UPDATE sys_release_executors SET notify_status = 'stale'",
       "fn:staleTransitionForExecutorRelease :: UPDATE sys_release_executors SET notify_status = 'stale'",
-      // A 类（9 处）：均受全局互斥保护，a/b/c/d 四种保护形态细分见下
+      // A 类（10 处）：均受全局互斥保护，a/b/c/d 四种保护形态细分见下
       "fn:applyReleaseChange :: UPDATE sys_release_executors SET removed_at = datetime('now','localtime'), removed_by = ?, removed_by_name = ?",
       "fn:preemptReleaseExecutorNotifySend :: UPDATE sys_release_executors SET",
       "fn:sendReleaseExecutorNotifyAndWriteback :: UPDATE sys_release_executors SET",
@@ -894,6 +897,10 @@ async function main() {
       "GET /sys-releases/:id/executors/:userId/read-status :: UPDATE sys_release_executors SET read_at = ?",
       "POST /sys-releases/:id/execute :: UPDATE sys_release_executors SET exec_status='done', executed_at=datetime('now','localtime')",
       "POST /sys-issues/:id/hotfix-publish :: INSERT INTO sys_release_executors (release_id, user_id, user_name, added_by, added_by_name) VALUES (?, ?, ?, ?, ?)",
+      // [R-C6·2026-08-26] 新增：DELETE /sys-releases/:id（O4 步骤⑥·450-H3 执行人行物理删除，方案 §3 O4）——
+      //   路由体直写，A类a（自身窗口须含 sysBeginImmediate），自动被下方 directRouteAnchors 动态派生覆盖，
+      //   无需另加进 CALLER_HELD/SELF_TXN_FN/B_CLASS_FNS 任一分类名单。
+      "DELETE /sys-releases/:id :: await dbRunAsync('DELETE FROM sys_release_executors WHERE release_id = ?', [id]);",
     ];
     assert.deepStrictEqual(
       writeAnchors.map((a) => a.key).sort(),
@@ -975,7 +982,8 @@ async function main() {
     }
 
     // A 类细分：
-    //   a) 路由体直写（自身窗口须含 sysBeginImmediate）：cancel-schedule / PUT executors×2 / execute / hotfix-publish
+    //   a) 路由体直写（自身窗口须含 sysBeginImmediate）：DELETE /sys-releases/:id（S11·R-C6 新增）/
+    //      cancel-schedule / PUT executors×2 / execute / hotfix-publish
     //   b) 自持事务的函数（函数体自身须含 sysBeginImmediate）：sendReleaseExecutorNotifyAndWriteback
     //   c) 经 sysNotifyWrite/sysNotifyWriteRun 包装（写点紧邻处出现该包装调用，且包装函数自身持锁）：read-status 路由
     //   d) 调用方持锁的裸助手（函数体自身不持锁，但**全部**调用点各自窗口须含 sysBeginImmediate）：

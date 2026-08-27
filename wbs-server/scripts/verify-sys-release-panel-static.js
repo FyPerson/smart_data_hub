@@ -93,6 +93,22 @@ function stripComments(code) {
     return code.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
 }
 
+// 取 `const <name> = {` 起花括号平衡的对象字面量全文（照 verify-sys-fastlane-panel-static.js 同款范式·
+// S10 预筛拦截 B1 三表正向断言专用）。
+function extractConstObjectText(name) {
+    const startRe = new RegExp(`const\\s+${name}\\s*=\\s*\\{`);
+    const m = startRe.exec(src);
+    if (!m) return null;
+    let depth = 0;
+    let i = m.index + m[0].length - 1;
+    const start = i;
+    for (; i < src.length; i++) {
+        if (src[i] === '{') depth++;
+        else if (src[i] === '}') { depth--; if (depth === 0) return src.slice(start, i + 1); }
+    }
+    return null;
+}
+
 // 找到 marker 之前最近一个 `if (` 的守卫条件文本（从该 `if (` 到与之配对的 `)`，括号深度平衡）。
 // 用于精确定位"这个按钮到底被哪个 if 条件控制"，而不是笼统扫整个函数体（那样会把不相关按钮的
 // 条件误判为目标按钮的条件，尤其本文件多个按钮共享同一个大函数体）。
@@ -786,6 +802,180 @@ check('前端 isSiBoundLiaison 判据存在且 per-issue 操作权已断开白�
     // 新消费点锚定：siCanViewVoided 判据应为 admin ∨ 受理人（防未来误改成裸白名单或漏 admin）
     assert.ok(/function siCanViewVoided\(\) \{ return isAdmin\(\) \|\| \(currentUser && isSiIntakeLiaison\(currentUser\.id\)\); \}/.test(src),
         'siCanViewVoided 应为「isAdmin() ∨ isSiIntakeLiaison(currentUser.id)」判据');
+});
+
+console.log('— §⑭（R-C5·方案 §3 O3）上线单基本信息编辑前端不变量 —');
+check('详情 kv 网格新增「标题」行（且挂在 siOpenBatchDetail 函数体内，非另起渲染路径）', () => {
+    const body = stripComments(extractFunctionBody(src, 'siOpenBatchDetail') || '');
+    assert.ok(body, '未提取到 siOpenBatchDetail 函数体');
+    // 红：kv 行被删/label 文案改动/挪出本函数——N0-R 订正明文"须新增一整行 kv"，不是往既有行插按钮。
+    assert.ok(/<div class="u-kv-item full"><label>标题<\/label>/.test(body), 'kv 网格未见「标题」行（class 应为 full，同「上线说明」整行占位）');
+});
+check('编辑门槛条件与后端 D8 通知门同构：planning ∧ isAdmin() ∧（未通知 ∨ 标题为空例外）', () => {
+    const body = stripComments(extractFunctionBody(src, 'siOpenBatchDetail') || '');
+    assert.ok(body, '未提取到 siOpenBatchDetail 函数体');
+    // 红：任一子条件被删（如漏 `|| titleBlank`）——例外通道会消失，已通知批次的"忘记写标题"场景补不了；
+    //   或反过来漏 `!notifyStarted &&` 前提——会在未通知的正常场景也一并锁死编辑入口。
+    assert.ok(body.includes("const canEditReleaseInfo = planning && isAdmin() && (!notifyStarted || titleBlank);"),
+        '未见 canEditReleaseInfo 门槛表达式（或被改写成非等价形式）——须与后端 D8 三道门第③条（通知门含例外）同构');
+    assert.ok(body.includes("const notifyStarted = !['none', 'not_sent'].includes(execSummary);"),
+        'notifyStarted 判据应与后端 getReleaseNotifySummary 聚合态口径同源（none/not_sent 两态视为未通知）');
+    // [S10 预筛提示1] titleBlank 口径字面锚——丢 trim 会与后端 norm 分叉（title='   ' 时前端藏按钮而后端本可放行）
+    assert.ok(body.includes("const titleBlank = !(rel.title && String(rel.title).trim());"),
+        '未见 titleBlank 判据（须含 trim·与后端 norm(beforeRow.title)===null 口径同源）');
+});
+check('编辑按钮 onclick 走 siReleaseEditInfoModal 且挂在门槛变量之后（不是恒渲染）', () => {
+    const body = stripComments(extractFunctionBody(src, 'siOpenBatchDetail') || '');
+    assert.ok(body, '未提取到 siOpenBatchDetail 函数体');
+    assert.ok(body.includes('onclick="siReleaseEditInfoModal(${id})"'), '未见「编辑」按钮 onclick 调用 siReleaseEditInfoModal');
+    // [S10 预筛提示5] 结构锚（非行内换行锚·格式化免疫）：同一赋值语句内 canEditReleaseInfo 与调用名共现
+    const btnStmt = /const releaseEditBtn = canEditReleaseInfo[\s\S]{0,200}siReleaseEditInfoModal/.test(body);
+    assert.ok(btnStmt, '编辑按钮 HTML 应由 canEditReleaseInfo 门控产出且 200 字符内接 siReleaseEditInfoModal 调用（红：恒渲染或条件弱化）');
+});
+check('release_info_edit 三表正向登记（[S10 预筛拦截 B1] 照 fastlane:877 同族先例——SI_TL_CLS 此前零守卫：摘掉词条 84 断言全绿而运行时静默降级灰徽章；Set 双向相等断言只证两处一致不证含本码）', () => {
+    const labelBody = stripComments(extractConstObjectText('SI_TL_LABEL') || '');
+    const clsBody = stripComments(extractConstObjectText('SI_TL_CLS') || '');
+    assert.ok(labelBody && /release_info_edit:\s*'上线单信息修改'/.test(labelBody), 'SI_TL_LABEL 应含 release_info_edit 词条');
+    assert.ok(clsBody && /release_info_edit:\s*'si-tl-indigo'/.test(clsBody), 'SI_TL_CLS 应含 release_info_edit 词条（缺失=运行时静默降级 si-tl-gray）');
+    assert.ok(/SI_TL_NOTE_OWN_LABEL_CODES\s*=\s*new Set\(\[[\s\S]*?'release_info_edit'/.test(src), 'SI_TL_NOTE_OWN_LABEL_CODES 应含 release_info_edit（缺失=落回通用「备注」徽章）');
+});
+check('siReleaseEditInfoModal：PATCH 同一批次资源（非改期/加单等子路由）且三字段齐全提交', () => {
+    const body = stripComments(extractFunctionBody(src, 'siReleaseEditInfoModal') || '');
+    assert.ok(body, '未提取到 siReleaseEditInfoModal 函数体');
+    // 红：改成拼接了子路径（如 /update-planned-date）——会打到错误端点；或漏了三字段之一——D8 例外边界二
+    //   （三字段全量提交但只有 title 真变）这条既有后端用例的前端触发条件就不成立了。
+    assert.ok(/siApi\('\/sys-releases\/'\s*\+\s*releaseId,\s*\{\s*method:\s*'PATCH'/.test(body),
+        '未见 PATCH /sys-releases/:id 调用（应直拼 releaseId，不带任何子路径后缀）');
+    assert.ok(/body:\s*\{\s*title:\s*v\.title,\s*version_tag:\s*v\.version_tag,\s*release_note:\s*v\.release_note\s*\}/.test(body),
+        'PATCH body 应恰好三字段（title/version_tag/release_note）齐全提交，不做客户端预筛选');
+});
+check('siReleaseEditInfoModal 三字段回填走 fText/fTextarea 既有转义 helper（449-H4 转义契约，不手写插值）', () => {
+    const body = stripComments(extractFunctionBody(src, 'siReleaseEditInfoModal') || '');
+    assert.ok(body, '未提取到 siReleaseEditInfoModal 函数体');
+    // 红：改成裸模板字符串插值（如 `value="${rel.title}"`）——fText/fTextarea 内部已 esc()，绕开它们
+    //   等于绕开了转义契约本身，需要重新证明新写法同样安全。
+    assert.ok(/fText\('title', '标题', rel\.title \|\| '', false/.test(body), 'title 字段未见走 fText helper 回填');
+    assert.ok(/fText\('version_tag', '版本号', rel\.version_tag \|\| '', false/.test(body), 'version_tag 字段未见走 fText helper 回填');
+    assert.ok(/fTextarea\('release_note', '上线说明', rel\.release_note \|\| '', false/.test(body), 'release_note 字段未见走 fTextarea helper 回填');
+});
+check('D9：release_info_edit 不注册进 SI_TL_RELEASE_SCOPE_LABEL（否则会被「隐藏上线单调整记录」过滤器连带隐藏）', () => {
+    const m = stripComments(src).match(/const SI_TL_RELEASE_SCOPE_LABEL = \{[\s\S]*?\n {4}\};/);
+    assert.ok(m, '未定位到 SI_TL_RELEASE_SCOPE_LABEL 对象字面量');
+    assert.ok(!m[0].includes('release_info_edit'), 'release_info_edit 不应出现在 SI_TL_RELEASE_SCOPE_LABEL 内（违反 D9「信息修改始终可见」）');
+});
+check('P2 遗留收口：siRenderBatchList 空态文案按 isAdmin() 三分支实现（非 admin 不再看到必然点不到的「新建上线单」引导）', () => {
+    const body = extractFunctionBody(src, 'siRenderBatchList');
+    assert.ok(body, '未提取到 siRenderBatchList 函数体');
+    // 红：isAdmin() 分支被合并/删除——「+ 新建上线单」按钮本就只对 isAdmin() 渲染（头部动作位），
+    //   若空态文案退回旧的 isMine 二分支，对接人（!isMine 但非 admin）会重新看到点不到的引导文案。
+    assert.ok(body.includes("const emptyText = isMine ? '暂无指派给你的上线单' : (isAdmin() ? '暂无上线单，点右上角「新建上线单」' : '暂无上线单');"),
+        '空态文案未按 isAdmin() 三分支实现');
+});
+
+console.log('— §⑮（R-C7·方案 §3 O4）删除上线单前端不变量 —');
+check('删除按钮门槛条件与后端状态门同构：isAdmin() ∧ 通知未启动（无 D8 title 补空例外——delete 无该豁免）', () => {
+    const body = stripComments(extractFunctionBody(src, 'siOpenBatchDetail') || '');
+    assert.ok(body, '未提取到 siOpenBatchDetail 函数体');
+    // 红：条件里出现 titleBlank（误把 O3 的 D8 例外抄进 delete，与"delete 没有补空不算改这回事"矛盾）；
+    //   或漏 !notifyStarted（会在通知已启动的批次上误开删除按钮，撞后端必然 409）。
+    // ⚠️ 用严格的整段 if(...) 字面匹配（而非"两个子串各自邻域出现"的弱判据）——门槛条件必须逐字等于
+    //   `isAdmin() && !notifyStarted`（外层允许空白），这样"误抄 D8 例外多加 (…||titleBlank)"这类変异
+    //   会因整段字面量不再匹配而被本条直接判红，不依赖另一条独立的反向正则（下方变异对照组验证的正是
+    //   这条严格匹配本身，而非另一条更弱的反向断言）。
+    assert.ok(/if\s*\(\s*isAdmin\(\)\s*&&\s*!notifyStarted\s*\)\s*\{/.test(body),
+        '未见 `if (isAdmin() && !notifyStarted) {` 删除按钮门槛（或条件被改写成非等价形式，如误加 titleBlank/其它子条件）');
+});
+check('删除按钮 onclick 走 siReleaseDeleteModal，且门槛条件与调用在 200 字符邻域内共现（非恒渲染）', () => {
+    const body = stripComments(extractFunctionBody(src, 'siOpenBatchDetail') || '');
+    assert.ok(body, '未提取到 siOpenBatchDetail 函数体');
+    assert.ok(/isAdmin\(\)\s*&&\s*!notifyStarted[\s\S]{0,200}siReleaseDeleteModal/.test(body),
+        '删除按钮 HTML 应由 isAdmin() && !notifyStarted 门控产出且 200 字符内接 siReleaseDeleteModal 调用（红：恒渲染或条件弱化）');
+    // ⭐ [codex 475 回卷 MED-1] 四参传漏——releaseNo/pendingMemberCount/voidedMemberCount 是二次确认弹窗
+    //   分状态措辞的数据源（后端「已作废」成员删批次只清指针不改 status，不是"退回待上线"，见
+    //   siReleaseDeleteModal 处注释），漏传或传错任一个都会让影响面文案与后端真实行为脱节。
+    assert.ok(/siReleaseDeleteModal\(\$\{id\},\$\{siJsStringAttr\(rel\.release_no \|\| ''\)\},\$\{pendingMemberCount\},\$\{voidedMemberCount\}\)/.test(body),
+        '删除按钮 onclick 应传恰四参：releaseId/release_no（siJsStringAttr 转义）/pendingMemberCount/voidedMemberCount');
+    // 红：两个计数改用 issues.length 或其它裸计数——必须是按 i.status 精确分类算出的两个独立计数，
+    //   不能用总数模糊代替（那正是本次修法要消灭的问题：总数无法区分"退回待上线"与"仅清指针"两类）。
+    assert.ok(/const pendingMemberCount = issues\.filter\(i => i\.status === '待上线'\)\.length;/.test(body),
+        '未见 pendingMemberCount = issues.filter(i => i.status === \'待上线\').length 的精确计数');
+    assert.ok(/const voidedMemberCount = issues\.filter\(i => i\.status === '已作废'\)\.length;/.test(body),
+        '未见 voidedMemberCount = issues.filter(i => i.status === \'已作废\').length 的精确计数');
+});
+check('release_deleted 三表正向登记（同 release_info_edit R-C5 同款先例：SI_TL_CLS 无独立守卫，摘掉词条会静默降级灰徽章；Set 双向相等断言只证两处一致不证含本码）', () => {
+    const labelBody = stripComments(extractConstObjectText('SI_TL_LABEL') || '');
+    const clsBody = stripComments(extractConstObjectText('SI_TL_CLS') || '');
+    assert.ok(labelBody && /release_deleted:\s*'上线单已删除'/.test(labelBody), 'SI_TL_LABEL 应含 release_deleted 词条');
+    assert.ok(clsBody && /release_deleted:\s*'si-tl-red'/.test(clsBody), 'SI_TL_CLS 应含 release_deleted 词条（缺失=运行时静默降级 si-tl-gray）');
+    assert.ok(/SI_TL_NOTE_OWN_LABEL_CODES\s*=\s*new Set\(\[[\s\S]*?'release_deleted'/.test(src), 'SI_TL_NOTE_OWN_LABEL_CODES 应含 release_deleted（缺失=落回通用「备注」徽章）');
+});
+check('release_deleted 不注册进 SI_TL_RELEASE_SCOPE_LABEL（同 D9 精神——若误入会被「隐藏上线单调整记录」过滤器连带隐藏，删除是比编辑更高关注度的事件，理应同等可见）', () => {
+    const m = stripComments(src).match(/const SI_TL_RELEASE_SCOPE_LABEL = \{[\s\S]*?\n {4}\};/);
+    assert.ok(m, '未定位到 SI_TL_RELEASE_SCOPE_LABEL 对象字面量');
+    assert.ok(!m[0].includes('release_deleted'), 'release_deleted 不应出现在 SI_TL_RELEASE_SCOPE_LABEL 内');
+});
+check('siReleaseDeleteModal：DELETE 同一批次资源（非子路由）+ reason 必填 fTextarea + 提交前 trim/长度校验 + 成功后回列表（非回详情——批次已不存在）', () => {
+    const body = stripComments(extractFunctionBody(src, 'siReleaseDeleteModal') || '');
+    assert.ok(body, '未提取到 siReleaseDeleteModal 函数体');
+    // 红：改成拼接了子路径——会打到错误端点。
+    assert.ok(/siApi\('\/sys-releases\/'\s*\+\s*releaseId,\s*\{\s*method:\s*'DELETE'/.test(body),
+        '未见 DELETE /sys-releases/:id 调用（应直拼 releaseId，不带任何子路径后缀）');
+    assert.ok(/body:\s*\{\s*reason\s*\}/.test(body), 'DELETE 请求体应恰为 { reason }');
+    assert.ok(body.includes("fTextarea('reason', '删除原因', '', true"), '未见 reason 必填 fTextarea 字段（第4参应为 true）');
+    // 红：提交前不做 trim/长度前置校验——虽然后端会 400 拒绝，但前端应同后端一致做前置防呆（同 siDeleteIssue 既有范式）。
+    assert.ok(/reason\.length > 200/.test(body), '未见前端 reason 超长（>200）前置校验');
+    // 红：成功后调 siOpenBatchDetail(releaseId) 而非 siRenderBatchList()——删除后该批次已物理不存在，
+    //   详情页无处可留，必须回列表（同 siDeleteIssue 删除成功后 siCloseDrawer+siLoadList 的范式精神）。
+    // ⭐ [Opus 预筛 S12 回卷提示5] siRenderBatchList 前须 await——同族 siReleaseEditInfoModal（await
+    //   siOpenBatchDetail）/siRemoveFromBatch（await siOpenBatchDetail）等收尾调用均 await，漏 await
+    //   会产生未追踪的 Promise（unhandled rejection 面）。
+    assert.ok(/showToast\('已删除', 'success'\);\s*\n[\s\S]{0,400}\n\s*siCloseModal\(\); await siRenderBatchList\(\); return false;/.test(body),
+        '删除成功后应 siCloseModal() + await siRenderBatchList()（回列表，非 siOpenBatchDetail——批次已不存在；且必须 await，不留未追踪 Promise）');
+});
+check('[codex 475 回卷 MED-1] siReleaseDeleteModal 影响面文案四分支——已作废成员措辞与后端 R-C6 修法(b) 真实行为（只清指针不改 status）同构，不再统一宣称"退回待上线"', () => {
+    const body = stripComments(extractFunctionBody(src, 'siReleaseDeleteModal') || '');
+    assert.ok(body, '未提取到 siReleaseDeleteModal 函数体');
+    // 红：signature 退回三参/改名——四分支逻辑的输入面必须是 pendingCount/voidedCount 两个独立计数。
+    //   ⚠️ 签名行在 `{` 之前，不属于 extractFunctionBody 返回的 body（body 从 `{` 起算）——故对 src 判断。
+    assert.ok(src.includes('function siReleaseDeleteModal(releaseId, releaseNo, pendingCount, voidedCount)'),
+        '未见 siReleaseDeleteModal(releaseId, releaseNo, pendingCount, voidedCount) 四参签名');
+    // 分支①：pending>0 且 voided>0——必须同时出现"退回「待上线」"与"仅解除与本上线单的关联（保持「已作废」）"
+    //   两段措辞，且分别绑定 pCount/vCount（不能两段共用同一个数字——那会把"多少张已作废"误报成"多少张待上线"）。
+    assert.ok(/张待上线单据会退回「待上线」，<b>\$\{vCount\}<\/b> 张已作废单据仅解除与本上线单的关联（保持「已作废」）。`;/.test(body),
+        '混合分支（pending>0∧voided>0）文案未见"…张待上线单据会退回「待上线」，N 张已作废单据仅解除与本上线单的关联（保持「已作废」）。"完整形态');
+    assert.ok(/\$\{pCount\}<\/b> 张待上线单据会退回「待上线」/.test(body), '混合分支的 pending 计数应绑定 pCount 变量');
+    // 分支②：仅 pending（voided=0）——保留原"N 张单据会退回「待上线」"措辞（不带"待上线单据"限定词，
+    //   因为此时没有第二类需要区分的成员）。
+    assert.ok(/\$\{pCount\}<\/b> 张单据会退回「待上线」。`;/.test(body), '仅 pending 分支未见"…其中 N 张单据会退回「待上线」。"（不应带"待上线单据"限定词）');
+    // 分支③：仅 voided（pending=0）——"N 张已作废单据仅解除与本上线单的关联（保持「已作废」）"，且不得
+    //   出现"退回待上线"字样（那是分支①②专属，voided-only 场景下没有任何单据会退回待上线）。
+    assert.ok(/\$\{vCount\}<\/b> 张已作废单据仅解除与本上线单的关联（保持「已作废」）。`;/.test(body), '仅 voided 分支未见"…其中 N 张已作废单据仅解除与本上线单的关联（保持「已作废」）。"');
+    // 分支④：全 0——维持"该批次当前无成员"措辞不变。
+    assert.ok(/不可恢复<\/b>（该批次当前无成员）。`;/.test(body), '全 0 分支未见"（该批次当前无成员）"措辞');
+    // 反向锚点：仅 voided 分支绝不能出现"张单据会退回「待上线」"（没有 pCount 变量介入的裸"退回待上线"），
+    //   防止有人在分支③误抄分支②的措辞导致"已作废单据"也被宣称会退回待上线。
+    const voidedOnlyBranch = (body.match(/else if \(vCount > 0\) \{[\s\S]*?\n {8}\}/) || [''])[0];
+    assert.ok(voidedOnlyBranch && !voidedOnlyBranch.includes('退回「待上线」'), '仅 voided 分支（else if (vCount > 0)）不应出现"退回「待上线」"字样——已作废成员不会退回待上线');
+});
+check('活体变异对照组①：门槛条件叠加 titleBlank（误抄 D8 例外）——上方严格 if(...) 字面匹配须判红', () => {
+    const mutated = src.replace(
+        'if (isAdmin() && !notifyStarted) {',
+        'if (isAdmin() && (!notifyStarted || titleBlank)) {'
+    );
+    assert.notStrictEqual(mutated, src, '变异替换未命中原文——门槛条件字面量已漂移，需同步本条变异对照组');
+    const mutatedBody = stripComments(extractFunctionBody(mutated, 'siOpenBatchDetail') || '');
+    assert.ok(!/if\s*\(\s*isAdmin\(\)\s*&&\s*!notifyStarted\s*\)\s*\{/.test(mutatedBody),
+        '变异后严格 if(...) 字面正则仍能匹配——说明该正则对"误抄 D8 例外"这类変异不敏感，守卫本身失效');
+});
+check('活体变异对照组②：门槛条件弱化为恒真 isAdmin()（漏 !notifyStarted）——上方严格 if(...) 字面匹配须判红', () => {
+    const mutated = src.replace(
+        'if (isAdmin() && !notifyStarted) {',
+        'if (isAdmin()) {'
+    );
+    assert.notStrictEqual(mutated, src, '变异替换未命中原文——门槛条件字面量已漂移，需同步本条变异对照组');
+    const mutatedBody = stripComments(extractFunctionBody(mutated, 'siOpenBatchDetail') || '');
+    assert.ok(!/if\s*\(\s*isAdmin\(\)\s*&&\s*!notifyStarted\s*\)\s*\{/.test(mutatedBody),
+        '变异后严格 if(...) 字面正则仍能匹配——说明该正则对"漏 !notifyStarted"这类変异不敏感，守卫本身失效');
 });
 
 console.log('— §⑤ HTML 内联 <script> 语法有效 —');

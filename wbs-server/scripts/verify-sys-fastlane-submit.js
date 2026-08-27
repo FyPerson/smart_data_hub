@@ -3329,8 +3329,10 @@ async function main() {
   // ══════════════════════════ [59]（值班筛选与类型卡·S1）fast_release_my_pending 列表投影成对用例 ══════════════════════════
   //   SSOT = docs/local/系统迭代/任务_值班筛选与类型卡_长任务锚点_20260815.md §3 技术自决——当前登录
   //   用户在本单当前代次执行人集合中且尚未确认（exec_status<>'done'）时为 1，否则 0；**不掺**
-  //   fast_release_active_auth（前端消费「待我确认」入口时才 AND，本列只回答"我在不在集合里且没
-  //   确认"这一件事，与既有 total/done 两列同族，不做 type/status 门控）。
+  //   fast_release_active_auth（前端「待我处理」聚合卡的值班身份分支——siIsMyPending 内原样调用
+  //   siIsMyFastlanePending——消费时才 AND，本列只回答"我在不在集合里且没确认"这一件事，与既有
+  //   total/done 两列同族，不做 type/status 门控；「待我处理」全角色卡批次起，独立「待我确认」值班
+  //   卡已被聚合卡吸收移除，本列语义与投影不变）。
   {
     // [59-前置1][59a][59b] 正例 + 反例②——当日值班（user20）挂牌单，唯一执行人尚未确认。
     const id1 = await bugAtChulizhong();
