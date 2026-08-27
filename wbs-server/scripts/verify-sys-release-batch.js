@@ -567,6 +567,11 @@ async function main() {
     assertBatchLevelFrozenAtInitial(await relRow(relId), '⑦移单后批次');
 
     // execute 真发布——issue1 全程在批次内未被移出，补完整 dev roster + 行级子表两人确认。
+    // [未来上线日期执行闸·2026-08-27] 上一步改期把 planned_date 设到了未来（nextDutyDate 恒 2031-xx），
+    //   新闸下未到计划日不可 execute（409 RELEASE_DATE_NOT_REACHED）——本组测的是旧列冻结不是日期闸，
+    //   直连 SQL 把日期归到当日（不走 update-planned-date 端点，避开其"改期即重置执行人"副作用；
+    //   日期闸自身的正/反例在 verify-sys-release-executors [8r/8s]）。
+    await run(`UPDATE sys_releases SET planned_date=date('now','localtime') WHERE id=?`, [relId]);
     await mkCompleteRoster(issue1, 5, '开发甲');
     await setExecutors(relId, [5, 6]);
     await markSent(relId, [5, 6]);
@@ -633,6 +638,9 @@ async function main() {
     // 执行人选定（PUT executors，新权威路径）+ 行级通知 + 两人确认真发布。
     const rowsMap13a = await setExecutors(cycRel1, [5, 6]);
     await markSent(cycRel1, [5, 6]);
+    // [未来上线日期执行闸·2026-08-27] 夹具 plannedDate=d13（2031-xx 值班日期锚）在新闸下不可提前
+    //   execute——本组测跨阶段冒烟不是日期闸，直连 SQL 归当日（闸的正/反例在 verify-sys-release-executors [8r/8s]）。
+    await run(`UPDATE sys_releases SET planned_date=date('now','localtime') WHERE id=?`, [cycRel1]);
     // 303-M2（Opus 对抗审·全文扫描收口）：中间预确认不许静默吞——断言 6 号真成功且未提前触发发布。
     const r13aPre6 = await call('POST', `/api/sys-releases/${cycRel1}/execute`, dev6Tok, { executor_row_id: rowsMap13a[6] });
     assert.strictEqual(r13aPre6.status, 200, `⑬首轮-pre 6号预确认期望 200, got ${r13aPre6.status} ${JSON.stringify(r13aPre6.body)}`);
@@ -694,6 +702,8 @@ async function main() {
     await addIssuesTo(cycRel2, [cycIssue]);
     const rowsMap13b = await setExecutors(cycRel2, [5, 6]);
     await markSent(cycRel2, [5, 6]);
+    // [未来上线日期执行闸·2026-08-27] 同上：二轮批次日期归当日再 execute。
+    await run(`UPDATE sys_releases SET planned_date=date('now','localtime') WHERE id=?`, [cycRel2]);
     // 303-M2（Opus 对抗审·全文扫描收口）：中间预确认不许静默吞——断言 6 号真成功且未提前触发发布。
     const r13bPre6 = await call('POST', `/api/sys-releases/${cycRel2}/execute`, dev6Tok, { executor_row_id: rowsMap13b[6] });
     assert.strictEqual(r13bPre6.status, 200, `⑬二轮-pre 6号预确认期望 200, got ${r13bPre6.status} ${JSON.stringify(r13bPre6.body)}`);

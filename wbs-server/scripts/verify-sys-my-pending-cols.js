@@ -184,7 +184,7 @@ async function main() {
     });
     // [分支⑨ 2026-08-27] 新增 my_release_exec_pending 绑 uid，位于 release 派生列组末尾 ⇒ SELECT 段
     //   由 4 参变 5 参（nowStr + uid×4），WHERE 段两参不变。同组另三列（release_exec_count/
-    //   planned_date/created_by/rep_issue_id）是纯子查询不带占位符，故只 +1。
+    //   planned_date/created_by）是纯子查询不带占位符，故只 +1（rep_issue_id 已随去重拆除移除）。
     assert.deepStrictEqual(bindParams, ['__NOW__', '__UID__', '__UID__', '__UID__', '__UID__', '__W1__', '__W2__'],
       `[5-结构] bindParams 应恰为 [__NOW__,__UID__,__UID__,__UID__,__UID__,__W1__,__W2__]（完整顺序逐项），实得 ${JSON.stringify(bindParams)}`);
     // [codex 466 MED-2] ? 计数须语法感知：剥掉 SQL 行注释（-- 到行尾）与单引号字符串后再数——

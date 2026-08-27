@@ -1152,6 +1152,63 @@ async function main() {
     assert.strictEqual(r8d.body.code, 'NOTIFY_NOT_SENT', `[8d]code 应为 NOTIFY_NOT_SENT，实际 ${r8d.body.code}`);
     ok('[8d] notify_status≠sent（仍 not_sent）→ 409 NOTIFY_NOT_SENT（幂等三分诊③）');
 
+    // [8r] 未来上线日期执行闸（2026-08-27 用户拍板）：planned_date 在未来 → 409 RELEASE_DATE_NOT_REACHED
+    //   且行保持 pending 零副作用；逾期/当日均放行（`>` 严格比较）；NULL 不拦——由本组其余全部用例
+    //   隐式覆盖（夹具默认不设 planned_date 而 execute 正常走到各自分诊，即"空日期不拦"的既有证明）。
+    const rel8r = await mkRelease({ title: 'C3-execute-8r-未来日期闸' });
+    const issue8r = await mkIssue({ title: 'C3-execute-8r-成员单' });
+    await addIssueTo(rel8r, issue8r);
+    await mkCompleteRoster(issue8r);
+    await run(
+      `INSERT INTO sys_release_executors (release_id, user_id, user_name, notify_status, notified_at, exec_status, added_by, added_by_name)
+       VALUES (?, 5, '开发甲', 'sent', datetime('now','localtime'), 'pending', 1, '管理员')`,
+      [rel8r]
+    );
+    const row5_8r = await execRow(rel8r, 5);
+    await run(`UPDATE sys_releases SET planned_date=date('now','localtime','+2 day') WHERE id=?`, [rel8r]);
+    const r8r1 = await call('POST', `/api/sys-releases/${rel8r}/execute`, dev5Tok, { release_note: 'x', executor_row_id: row5_8r.id });
+    assert.strictEqual(r8r1.status, 409, `[8r-1]期望 409, got ${r8r1.status} ${JSON.stringify(r8r1.body)}`);
+    assert.strictEqual(r8r1.body.code, 'RELEASE_DATE_NOT_REACHED', `[8r-1]code 应为 RELEASE_DATE_NOT_REACHED，实际 ${r8r1.body.code}`);
+    const row5_8rMid = await get(`SELECT exec_status FROM sys_release_executors WHERE id=?`, [row5_8r.id]);
+    assert.strictEqual(row5_8rMid.exec_status, 'pending', '[8r-1]零副作用：被日期闸拦下后行仍 pending，未被烧成 done');
+    // 逾期（计划日在过去）不拦：闸只拦"未到"，逾期恰恰该放行去执行
+    await run(`UPDATE sys_releases SET planned_date=date('now','localtime','-2 day') WHERE id=?`, [rel8r]);
+    const r8r2 = await call('POST', `/api/sys-releases/${rel8r}/execute`, dev5Tok, { release_note: '逾期补执行', executor_row_id: row5_8r.id });
+    assert.strictEqual(r8r2.status, 200, `[8r-2]期望 200（逾期不拦）, got ${r8r2.status} ${JSON.stringify(r8r2.body)}`);
+    assert.strictEqual(r8r2.body.released, true, '[8r-2]逾期批次执行成功并真实触发发布');
+    // 当日可执行（`>` 严格比较，同日不算"未到"）——另建同构单人批次设 planned_date=今天 → 200
+    const rel8s = await mkRelease({ title: 'C3-execute-8s-当日可执行' });
+    const issue8s = await mkIssue({ title: 'C3-execute-8s-成员单' });
+    await addIssueTo(rel8s, issue8s);
+    await mkCompleteRoster(issue8s);
+    await run(
+      `INSERT INTO sys_release_executors (release_id, user_id, user_name, notify_status, notified_at, exec_status, added_by, added_by_name)
+       VALUES (?, 5, '开发甲', 'sent', datetime('now','localtime'), 'pending', 1, '管理员')`,
+      [rel8s]
+    );
+    const row5_8s = await execRow(rel8s, 5);
+    await run(`UPDATE sys_releases SET planned_date=date('now','localtime') WHERE id=?`, [rel8s]);
+    const r8s = await call('POST', `/api/sys-releases/${rel8s}/execute`, dev5Tok, { release_note: '当日执行', executor_row_id: row5_8s.id });
+    assert.strictEqual(r8s.status, 200, `[8s]期望 200（当日可执行）, got ${r8s.status} ${JSON.stringify(r8s.body)}`);
+    assert.strictEqual(r8s.body.released, true, '[8s]当日批次执行成功并真实触发发布');
+    // [8t] 脏值 fail-open（codex 484 HIGH-1）：形似 YYYY-MM-DD 但非真实日历日（2099-13-99 通过正则、
+    //   字符串比较大于今天）——闸必须经 round-trip 校验放行，否则脏数据把批次永久锁死。
+    const rel8t = await mkRelease({ title: 'C3-execute-8t-脏日期failopen' });
+    const issue8t = await mkIssue({ title: 'C3-execute-8t-成员单' });
+    await addIssueTo(rel8t, issue8t);
+    await mkCompleteRoster(issue8t);
+    await run(
+      `INSERT INTO sys_release_executors (release_id, user_id, user_name, notify_status, notified_at, exec_status, added_by, added_by_name)
+       VALUES (?, 5, '开发甲', 'sent', datetime('now','localtime'), 'pending', 1, '管理员')`,
+      [rel8t]
+    );
+    const row5_8t = await execRow(rel8t, 5);
+    await run(`UPDATE sys_releases SET planned_date='2099-13-99' WHERE id=?`, [rel8t]);
+    const r8t = await call('POST', `/api/sys-releases/${rel8t}/execute`, dev5Tok, { release_note: '脏日期放行', executor_row_id: row5_8t.id });
+    assert.strictEqual(r8t.status, 200, `[8t]期望 200（形似未来的非法日历日 fail-open 放行）, got ${r8t.status} ${JSON.stringify(r8t.body)}`);
+    assert.strictEqual(r8t.body.released, true, '[8t]脏日期批次执行成功——闸未被正则外形骗住（round-trip 校验生效）');
+    ok('[8r/8s/8t] 未来日期闸：未来 409 RELEASE_DATE_NOT_REACHED 零副作用 / 逾期放行 / 当日放行 / 形似脏值 fail-open 放行（空日期由其余用例隐式覆盖）');
+
     // [8i]（反转·用户拍板决策 7 第三次修正，方案 v1.7 二订）：MED-1/302-M1 那道"CAS 之前的在册人数闸"
     //   已随下限 2→1 整体删除（见 execute 路由头部注释）——本组原断言"单人在册批次 execute → 409
     //   EXECUTORS_TOO_FEW"钉的正是那道已删除的闸，红灯诊断=断言过时非实现错（[[feedback_test_assertion_

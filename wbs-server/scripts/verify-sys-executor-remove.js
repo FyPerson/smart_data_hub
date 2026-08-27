@@ -319,6 +319,10 @@ async function main() {
     assert.strictEqual(execRowsA2.length, 2, '[A2]keepExecutor 保留全体在册行：移单后子表在册仍是 2 行（6/5 均在，不只 actor 一人）');
     const rowIdOf6A2 = execRowsA2.find(r => r.user_id === 6).id;
     const rowIdOf5A2 = execRowsA2.find(r => r.user_id === 5).id;
+    // [未来上线日期执行闸·2026-08-27] 夹具 planned_date=nextDutyDate() 恒 2032-xx（值班日期锚），新闸下
+    //   未到计划日不可 execute——本组测的是移单不是日期闸，直连 SQL 归到当日（日期闸正/反例在
+    //   verify-sys-release-executors [8r/8s]）。
+    await run(`UPDATE sys_releases SET planned_date=date('now','localtime') WHERE id=?`, [relId]);
     // 303-M2（Opus 对抗审·全文扫描收口）：中间预确认不许静默吞——断言 5 号真成功且未提前触发发布。
     const rA2Pre5 = await call('POST', `/api/sys-releases/${relId}/execute`, dev5Tok, { executor_row_id: rowIdOf5A2 });
     assert.strictEqual(rA2Pre5.status, 200, `[A2-pre]5号预确认期望 200, got ${rA2Pre5.status} ${JSON.stringify(rA2Pre5.body)}`);
@@ -508,6 +512,8 @@ async function main() {
     const rowIdOf5F = execRowsF.find(r => r.user_id === 5).id;
     const rowIdOf6F = execRowsF.find(r => r.user_id === 6).id;
     await run(`UPDATE sys_release_executors SET notify_status='sent', notified_at=datetime('now','localtime') WHERE release_id=? AND removed_at IS NULL`, [relId]);
+    // [未来上线日期执行闸·2026-08-27] 同 [A2] 处说明：夹具日期归当日再 execute（本组测已发布批次移单回归）。
+    await run(`UPDATE sys_releases SET planned_date=date('now','localtime') WHERE id=?`, [relId]);
     // 303-M2（Opus 对抗审·全文扫描收口）：中间预确认不许静默吞——断言 6 号真成功且未提前触发发布。
     const rFPre6 = await call('POST', `/api/sys-releases/${relId}/execute`, dev6Tok, { executor_row_id: rowIdOf6F });
     assert.strictEqual(rFPre6.status, 200, `[F-pre]6号预确认期望 200, got ${rFPre6.status} ${JSON.stringify(rFPre6.body)}`);

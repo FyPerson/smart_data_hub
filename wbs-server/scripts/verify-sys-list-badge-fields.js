@@ -210,7 +210,7 @@ const selectBlockQMarks = countSelectPlaceholders(selectBlock);
 // [「待我处理」全角色卡·方案 §3.1 selectParams 冻结口径·唯一权威口径] **恰 5 个**（历经 2 → 4 → 5）——
 //   my_dev_pending（裸 ? 绑 uid）/ is_my_intake_liaison（裸 ? 绑 uid）插在 fast_release_my_pending 之后；
 //   2026-08-27 分支⑨ 新增 my_release_exec_pending（裸 ? 绑 uid）位于 release 派生列组末尾。
-//   ⚠️ 同组另五列（release_exec_count/planned_date/created_by/rep_issue_id）均为纯子
+//   ⚠️ 同组另三列（release_exec_count/planned_date/created_by）均为纯子
 //   查询**不带占位符**，只有 my_release_exec_pending 需要绑 uid——加 release 侧列时先确认是否真需要 ?，
 //   不需要就不该动这个数字。
 must(selectBlockQMarks === 5, `列表 SELECT 列表部分（WHERE 之前）应恰含 5 个 ? 占位符（fast_release_active_auth 经 FAST_RELEASE_CONSUMABLE_AUTH_WHERE_SQL 引用内嵌的 nowStr + fast_release_my_pending 裸 ? 的 uid + my_dev_pending 裸 ? 的 uid + is_my_intake_liaison 裸 ? 的 uid + my_release_exec_pending 裸 ? 的 uid），实得 ${selectBlockQMarks}——多出/缺失的 ? 会与 selectParams 数组顺序错位`);

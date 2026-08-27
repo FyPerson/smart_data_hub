@@ -218,17 +218,45 @@ async function main() {
   ok('[6] all 视角（admin/对接人）不下发 my_executor_*，批次级徽标不受影响');
 
   // ── [7] 入口计数（siProbeMyReleasesEntry 同款过滤）：本人 done 的批次不计入 ──────
-  //   过滤器 = status==='计划中' ∧ summary∈{sent,partial} ∧ my_executor_done !== true（与前端逐字同源）。
+  //   过滤器 = status==='计划中' ∧ summary∈{sent,partial} ∧ my_executor_done !== true ∧ 计划上线日不在
+  //   未来（与前端逐字同源；末条为 2026-08-27 未来上线日期执行闸的待办联动，前端走 siIsReleaseDateFuture，
+  //   此处按同口径复刻：仅合法 YYYY-MM-DD 且 > 今天才算未来，空/脏值不算——fail-open 同后端闸）。
+  const isFutureDate = (v) => {
+    const m = String(v == null ? '' : v).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!m) return false;
+    // round-trip 校验（codex 484 MED-2）：与前端 siDateOnly 同口径——new Date(2026,12,99) 会静默
+    // 进位而非报错，不回写比对会把前端判为脏值 fail-open 的值在这里误判成"未来"，镜像失真。
+    const y = Number(m[1]), mo = Number(m[2]), d = Number(m[3]);
+    const dt = new Date(y, mo - 1, d);
+    if (dt.getFullYear() !== y || dt.getMonth() !== mo - 1 || dt.getDate() !== d) return false;
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    return dt.getTime() > today.getTime();
+  };
   const entryPending = (resp) => resp.body.items.filter(
-    x => x.status === '计划中' && ['sent', 'partial'].includes(x.executor_notify_summary) && x.my_executor_done !== true
+    x => x.status === '计划中' && ['sent', 'partial'].includes(x.executor_notify_summary) && x.my_executor_done !== true && !isFutureDate(x.planned_date)
   ).length;
-  // A：R-L7-1 done + R-L7-3 done，仅 R-L7-2 未 done → 计数=1
+  // A：R-L7-1 done + R-L7-3 done，仅 R-L7-2 未 done → 计数=1（三批次 planned_date 均 NULL，不触发日期条款）
   const aFinal = await call('GET', '/api/sys-releases', aTok);
   assert.strictEqual(entryPending(aFinal), 1, 'A 入口计数=1（R-L7-1/R-L7-3 已 done 不计，仅剩 R-L7-2）');
   // B：R-L7-1(pending) + R-L7-3(pending，partial 亦计) → 计数=2
   const bFinal = await call('GET', '/api/sys-releases', bTok);
   assert.strictEqual(entryPending(bFinal), 2, 'B 入口计数=2（R-L7-1 + R-L7-3 均未 done）');
   ok('[7] 入口计数：本人 done 批次不计入待执行数（A=1 / B=2）');
+
+  // ── [8] 入口计数·未来上线日期联动（2026-08-27 执行闸）：计划日在未来的批次不计入 ──────
+  //   给 A 仅剩的待执行批次 R-L7-2 设未来计划日 → A 计数 1→0；改回当日 → 恢复 1（同日可执行，不算未来）。
+  const futureDay = (await get(`SELECT date('now','localtime','+3 day') AS d`)).d;
+  const todayDay = (await get(`SELECT date('now','localtime') AS d`)).d;
+  await run(`UPDATE sys_releases SET planned_date=? WHERE id=?`, [futureDay, rel2]);
+  assert.strictEqual(entryPending(await call('GET', '/api/sys-releases', aTok)), 0, `A 入口计数=0（R-L7-2 计划日 ${futureDay} 在未来，不计入待执行）`);
+  await run(`UPDATE sys_releases SET planned_date=? WHERE id=?`, [todayDay, rel2]);
+  assert.strictEqual(entryPending(await call('GET', '/api/sys-releases', aTok)), 1, 'A 入口计数=1（计划日=当日不算未来，恢复计入）');
+  // 脏值 fail-open（codex 484 MED-2 配套用例）：形似未来的非法日历日不得被排除——与前端 siDateOnly
+  // 判 null 后照常计入同口径。
+  await run(`UPDATE sys_releases SET planned_date='2099-13-99' WHERE id=?`, [rel2]);
+  assert.strictEqual(entryPending(await call('GET', '/api/sys-releases', aTok)), 1, 'A 入口计数=1（2099-13-99 形似未来但非真实日历日，fail-open 照常计入）');
+  await run(`UPDATE sys_releases SET planned_date=? WHERE id=?`, [todayDay, rel2]);
+  ok('[8] 入口计数·未来日期联动：未来计划日不计入，当日恢复计入，形似脏值 fail-open 照常计入');
 
   console.log(`\n✅ verify-sys-l7-executor-badge 全部通过（${passed} 组）`);
   server.close(); db.close();

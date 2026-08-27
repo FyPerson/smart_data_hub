@@ -46,6 +46,7 @@ const ASSETS = [
         // 期望引用页**显式清单**（双向对拍，新增/下线页面必须显式改这里）
         pages: [
             'Data_Collab.html', 'Data_Correction.html', 'Issue_Lite.html', 'Issue_Tracker.html',
+            'Legacy_Archive.html',   // 2026-08-27 补登记：Phase A cherry-pick 上主干时新增页漏登记（守卫双向对拍抓出）
             'Model_Center.html', 'My_Workspace.html', 'Periodic_Fetch.html', 'Quick_Log.html',
             'Statistics.html', 'Sys_Iteration.html', 'Task_Pool.html',
         ],
@@ -63,7 +64,9 @@ const ASSETS = [
         //   （codex 352 号 LOW 建议后续单独守；配置表化后顺手纳入，零额外成本）
         pages: [
             'admin.html', 'Asset_Center.html', 'Dashboard.html', 'Data_Collab.html', 'Data_Correction.html',
-            'Domain_Manager.html', 'Issue_Lite.html', 'Issue_Tracker.html', 'Metrics.html', 'Model_Center.html',
+            'Domain_Manager.html', 'Issue_Lite.html', 'Issue_Tracker.html',
+            'Legacy_Archive.html',   // 2026-08-27 补登记：同上（components.css 条目的说明）
+            'Metrics.html', 'Model_Center.html',
             'My_Workspace.html', 'Periodic_Fetch.html', 'Quick_Log.html', 'Statistics.html',
             'Sys_Iteration.html', 'Task_Pool.html',
         ],

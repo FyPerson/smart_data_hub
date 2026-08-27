@@ -8279,8 +8279,9 @@ module.exports = (deps) => {
     //   两个即 S1 起既有的"恰 2 个"）③ my_dev_pending 绑 uid（紧随 fast_release_my_pending 之后新插）
     //   ④ is_my_intake_liaison 绑 uid（紧随 my_dev_pending 之后）⑤ **my_release_exec_pending 绑 uid**
     //   （分支⑨·2026-08-27 新增，位于 release 派生列组末尾；同组另三列 release_exec_count/
-    //   release_planned_date/release_created_by/release_rep_issue_id 均为纯子
-    //   查询**不带占位符**，只有本列需要绑 uid）。verify-sys-list-badge-fields「SELECT 恰 N 占位符」
+    //   release_planned_date/release_created_by 均为纯子查询**不带占位符**，只有本列需要绑 uid；
+    //   原 release_rep_issue_id 已随「待办不去重」二次拍板移除，不影响占位符数）。
+    //   verify-sys-list-badge-fields「SELECT 恰 N 占位符」
     //   守卫同批改判恰 5（唯一权威口径=方案 §3.1；本注释、下方 fast_release_my_pending 批注与
     //   badge-fields 守卫期望值均为其副本——改数字须按方案口径同步全部副本，勿只改一处）。
     const selectParams = [nowStr, uid, uid, uid, uid];
@@ -8414,13 +8415,16 @@ module.exports = (deps) => {
                 --   状态门（待对接测试/待受理）由前端叠加，同 has_current_tech_lead_comment/last_held_at
                 --   既有范式（SQL 只出数，状态语义交给前端）。**身份原始信号，非待办判据**。
                 (CASE WHEN intake_liaison_id = ? THEN 1 ELSE 0 END) AS is_my_intake_liaison,
-                -- [上线排期三态徽章·2026-08-27 用户拍板] 四个 release 侧派生列——供列表「待上线」徽章
+                -- [上线排期三态徽章·2026-08-27 用户拍板] release 侧派生列——供列表「待上线」徽章
                 --   （未排期／已排期未派执行人／已排期已派执行人 + 逾期叠加）与「待我处理」新分支消费。
-                --   ⚠️ **四列均不带占位符**（纯子查询，无 ? 绑定）⇒ 上方 selectParams「恰 4 个」的冻结
-                --   契约与 verify-sys-list-badge-fields 的占位符守卫**均不受影响**，勿误改那处数字。
+                --   ⚠️ 前三列均不带占位符（纯子查询，无 ? 绑定），仅 my_release_exec_pending 带 uid ⇒
+                --   上方 selectParams「恰 5 个」的冻结契约与 verify-sys-list-badge-fields 的占位符守卫
+                --   **均不受影响**，勿误改那处数字。
+                --   （原第四列 release_rep_issue_id「批次代表单」已随 2026-08-27 二次拍板「待办不去重、
+                --   逐张计入」移除——前端从未消费该列，代表机制整体拆除见 Sys_Iteration.html ⑧ 头注释。）
                 --   ⚠️ 本段注释禁用反引号（整条 SQL 在 JS 模板字符串内，反引号会提前终止字符串）。
-                --   release_id 为 NULL（未挂批次）时四列的天然取值：COUNT 得 0、两个标量子查询得 NULL、
-                --   MIN 得 NULL——NULL 不等于任何值，子查询自然空集，无需额外 CASE 兜底。
+                --   release_id 为 NULL（未挂批次）时各列的天然取值：COUNT 得 0、两个标量子查询得 NULL
+                --   ——NULL 不等于任何值，子查询自然空集，无需额外 CASE 兜底。
                 (SELECT COUNT(*) FROM sys_release_executors e
                    WHERE e.release_id = sys_issues.release_id AND e.removed_at IS NULL)
                   AS release_exec_count,          -- 在册执行人数（软删不计，同 idx_sys_release_exec_active 口径）
@@ -8430,14 +8434,6 @@ module.exports = (deps) => {
                                                   --   isPostReleaseAcceptOverdue 的后端 48h 判定不同源）
                 (SELECT r.created_by FROM sys_releases r WHERE r.id = sys_issues.release_id)
                   AS release_created_by,          -- 批次创建人（待办归属·前端比 uid，同 ⑤⑦ 分支范式）
-                -- 批次内「待上线」成员的最小 id ＝ 该批次在待办卡里的**代表单**。用途：批次未派执行人
-                --   是**批次级**的一件事，若把成员单逐张计入「待我处理」，一个动作（派一次人）会消掉
-                --   N 个计数、淹没其他真待办（用户 2026-08-27 拍板「按批次去重计 1」）。
-                --   限定 status='待上线' 而非全成员取 MIN——否则代表可能落在已作废成员上，而作废单既不
-                --   显示徽章也不进待办，代表就成了空指针（该批次在卡里永远不出现）。
-                (SELECT MIN(i2.id) FROM sys_issues i2
-                   WHERE i2.release_id = sys_issues.release_id AND i2.status = '待上线')
-                  AS release_rep_issue_id,
                 -- [分支⑨·上线执行人待执行·2026-08-27 用户拍板] 我是不是本批次的在册执行人、且尚未执行。
                 --   与 ⑧ 构成待上线阶段闭环：⑧ 催"去派人"（批次创建人），⑨ 催"去执行上线"（执行人）。
                 --   生产实例：示例开发A在 R-20260824-3 上 exec_status='pending'、批次计划日 08-25 已逾期，
@@ -17235,7 +17231,9 @@ module.exports = (deps) => {
       let outcome = null;   // { kind:'published', result } | { kind:'pending', pendingCount }
       await sysBeginImmediate();
       try {
-        const rel = await dbGetAsync(`SELECT id FROM sys_releases WHERE id=?`, [id]);
+        // [未来上线日期执行闸·2026-08-27 用户拍板] planned_date 一并取出，供下方 pending 路径的日期闸
+        //   比较（done 幂等路径刻意不经该闸——已完成的确认是既成事实，见判序注释）。
+        const rel = await dbGetAsync(`SELECT id, planned_date FROM sys_releases WHERE id=?`, [id]);
         if (!rel) { await sysRollback(); return res.status(404).json({ error: '上线批次不存在', code: 'RELEASE_NOT_FOUND' }); }
 
         // 302-M1/303-M1（Opus 预筛/对抗审）判序遗产（人数闸本身已随决策 7 三修删除，判序结构保留）：
@@ -17292,6 +17290,41 @@ module.exports = (deps) => {
         if (!eligible) {
           await sysRollback();
           return res.status(403).json({ error: '当前账号无执行上线资格（非在职，或为查看者/管理员）', code: 'EXECUTOR_NOT_ELIGIBLE' });
+        }
+
+        // [未来上线日期执行闸·2026-08-27 用户拍板] 计划上线日在未来 ⇒ 不可提前执行。**只拦本端点**
+        //   （「确认上线完成」）——移单 remove-issues 刻意不拦（执行前发现带错单时的自救口，闸门×回路
+        //   检查面：新闸不得堵旧自救口）。口径四条：
+        //   · planned_date 为 NULL（未设定计划日）不拦——建单弹窗该字段本就选填，拦了=未排期批次死锁；
+        //   · **当日即可执行**（`>` 严格比较·日历日），与前端逾期徽章"同日不算逾期"同一口径；
+        //   · 已逾期不拦——逾期该催"去执行"，不是再拦一道；
+        //   · 格式守卫：仅对**真实存在的日历日**比较（正则外形 + 构造后逐段回写比对，同前端 siDateOnly
+        //     的 round-trip 口径——codex 484 HIGH-1：只做正则会让 2026-13-99 这类形似脏值按字符串比较
+        //     误判为未来而锁死批次）；三个写点 normalizeDeadline×2/date('now','localtime') 均保证合法
+        //     格式，脏值 fail-open 仅是防御，不是常态路径。
+        //   回路核对（无永久受困态）：确需提前 ⇒ admin 改期 update-planned-date 改到当日或清空（既有
+        //   副作用=执行人子表软删重置，需重派+重通知，即"改期=重新安排"语义）；否则等到期自动解闸。
+        //   admin 不会被本闸误伤：上一步 hasReleaseEligibility 已结构性把 admin 拒在 403，走不到这里；
+        //   hotfix-publish 写的 planned_date 恒为当日，天然不触发。时区：date('now','localtime') 与
+        //   planned_date 写点同一 SQLite localtime（单机部署同 TZ，同 isPostReleaseAcceptOverdue 注释）。
+        const plannedDateStr = String(rel.planned_date || '');
+        const pdMatch = plannedDateStr.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+        if (pdMatch) {
+          // round-trip 校验（同前端 siDateOnly）：new Date(2026,12,99) 会静默进位而非报错，
+          // 只有构造后年月日逐段一致才是真实日历日，才有资格参与"未来"判定。
+          const py = Number(pdMatch[1]), pm = Number(pdMatch[2]), pdDay = Number(pdMatch[3]);
+          const pdDate = new Date(py, pm - 1, pdDay);
+          const pdValid = pdDate.getFullYear() === py && pdDate.getMonth() === pm - 1 && pdDate.getDate() === pdDay;
+          if (pdValid) {
+            const todayRow = await dbGetAsync(`SELECT date('now','localtime') AS d`);
+            if (todayRow && todayRow.d && plannedDateStr > todayRow.d) {
+              await sysRollback();
+              return res.status(409).json({
+                error: `未到计划上线日（${plannedDateStr}），不可提前执行；如需提前上线请联系管理员改期`,
+                code: 'RELEASE_DATE_NOT_REACHED', planned_date: plannedDateStr,
+              });
+            }
+          }
         }
 
         // 行级 CAS（§4.3 定稿逐字，条件不变）

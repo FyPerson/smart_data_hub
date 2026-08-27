@@ -14,7 +14,7 @@
  *   ③ 已排期·执行人 >0                 → 徽章「已排期」
  *   ④ 逾期叠加（planned_date < 今天）  → 徽章变红并含「逾期N天」，且与 ②③ 组合措辞正确
  *   ⑤ 非「待上线」状态                 → 无徽章（范围门）
- *   ⑥ 待办按批次去重                   → 代表单进卡、同批次其它成员不进
+ *   ⑥ 待办逐张计入（2026-08-27 二次拍板）→ 同批次全部成员单都进卡、不选代表
  *
  * 夹具纪律：所有改动在 finally 里逐步独立还原（cleanupStep），并到磁盘核实；
  *   **只改本探针自己造的批次与单据**，不碰既有数据。
@@ -114,8 +114,8 @@ async function readBadge(page, issueId) {
 
         const idNoRelease = await mkIssue(`${TAG}-未排期`, null);
         const relPending = await mkRelease(`${TAG}-R-未派人`, futureDate);
-        const idPendingA = await mkIssue(`${TAG}-已排期未派人-代表`, relPending);
-        const idPendingB = await mkIssue(`${TAG}-已排期未派人-非代表`, relPending);
+        const idPendingA = await mkIssue(`${TAG}-已排期未派人-成员一`, relPending);
+        const idPendingB = await mkIssue(`${TAG}-已排期未派人-成员二`, relPending);
         const relStaffed = await mkRelease(`${TAG}-R-已派人`, futureDate);
         const idStaffed = await mkIssue(`${TAG}-已排期已派人`, relStaffed);
         const execIns = await dbRun(
@@ -156,8 +156,8 @@ async function readBadge(page, issueId) {
             [`${TAG}-R-我是执行人`, futureDate, execUser.id]
         );
         created.releases.push(relMineToExec.lastID);
-        const idExecMineA = await mkIssue(`${TAG}-我要上线-代表`, relMineToExec.lastID);
-        const idExecMineB = await mkIssue(`${TAG}-我要上线-非代表`, relMineToExec.lastID);
+        const idExecMineA = await mkIssue(`${TAG}-我要上线-成员一`, relMineToExec.lastID);
+        const idExecMineB = await mkIssue(`${TAG}-我要上线-成员二`, relMineToExec.lastID);
         const meExecIns = await dbRun(
             `INSERT INTO sys_release_executors (release_id, user_id, user_name, added_by, added_by_name, created_at, exec_status)
              VALUES (?, ?, '管理员', ?, '他人', datetime('now','localtime'), 'pending')`,
@@ -217,7 +217,7 @@ async function readBadge(page, issueId) {
         must(await readBadge(page, idNotRelease.lastID) === '(无排期徽章)',
             `⑤ 非「待上线」状态（开发中）即便挂了批次也不显示排期徽章（实得「${await readBadge(page, idNotRelease.lastID)}」）`);
 
-        console.log('\n— 「待我处理」按批次去重 —');
+        console.log('\n— 「待我处理」逐张计入（2026-08-27 二次拍板拆除批次去重） —');
         const cardSel = '.u-stat-card[onclick="siSetStatFilter(\'my_pending\')"]';
         const hasCard = (await page.locator(cardSel).count()) > 0;
         must(hasCard, '⑥ 「待我处理」卡应渲染（批次创建人有待派执行人的批次）');
@@ -225,9 +225,9 @@ async function readBadge(page, issueId) {
             await page.locator(cardSel).click();
             await page.waitForTimeout(500);
             const inCard = async (id) => (await page.locator(`tr[onclick="siOpenDrawer(${id})"]`).count()) === 1;
-            must(await inCard(idPendingA), `⑥ 代表单 #${idPendingA} 应在卡内（批次待派执行人）`);
-            must(!(await inCard(idPendingB)), `⑥ ⭐同批次非代表单 #${idPendingB} 不应在卡内——按批次去重计 1，否则一次派人消掉 N 个计数`);
-            must(await inCard(idOverdue), `⑥ 逾期未派人批次的代表单 #${idOverdue} 也应在卡内`);
+            must(await inCard(idPendingA), `⑥ 成员单 #${idPendingA} 应在卡内（批次待派执行人）`);
+            must(await inCard(idPendingB), `⑥ ⭐同批次第二张成员单 #${idPendingB} 也应在卡内——2026-08-27 二次拍板：待办卡展示内容逐张计入不去重`);
+            must(await inCard(idOverdue), `⑥ 逾期未派人批次的成员单 #${idOverdue} 也应在卡内`);
             must(!(await inCard(idStaffed)), `⑥ 已派执行人的批次不应进卡（无人需要动作）`);
             // ⭐ [契约演进·2026-08-27 ⑩ 上线] 本条原断言「未挂批次的单不应进卡」——当时是 ⑧⑨ 拍板的
             //   有意留白；⑩（谁建单谁排期）恰好补上了这个留白：夹具建单人=当前用户 admin ⇒ 现在**应**
@@ -235,12 +235,11 @@ async function readBadge(page, issueId) {
             //   退出」+「别人建的→false」两条承接，此处改断正向。
             must(await inCard(idNoRelease), `⑥→⑩ 契约演进：我建的未挂批次待上线单 #${idNoRelease} 现应经 ⑩ 进卡（原「不进卡」是 ⑧⑨ 时期的有意留白，已被「谁建单谁排期」拍板推翻）`);
             must(!(await inCard(idOrphan)), `⑥ [HIGH-1] 孤儿批次的单不应进卡（无责任人可认领——created_by 已随批次消失，进卡等于"报了警没人负责"）`);
-            must(await inCard(idSoftDeleted), `⑥ 执行人全软删的批次代表单应进卡（等同未派人）`);
+            must(await inCard(idSoftDeleted), `⑥ 执行人全软删的批次成员单应进卡（等同未派人）`);
             must(!(await inCard(idStaffedOverdue)), `⑥ 逾期但已派人的批次不进卡（逾期该催的是"去上线"，不是"去派人"——本分支只管派人）`);
-            // [codex 481 LOW-2] 去重的**聚合**证明：逐条"某行在不在"只证明了单点，证明不了"整体上
-            //   N 个成员塌缩成 M 个待办"。这里对本探针造的 4 张待派人成员单（分属 3 个批次：未派人
-            //   批次含 2 成员、逾期未派人 1、软删 1）做聚合计数——卡内应恰 3 张（每批次 1 个代表），
-            //   若未去重会是 4。
+            // [2026-08-27 二次拍板·去重拆除] 逐张计入的**聚合**证明：逐条"某行在不在"只证明了单点，
+            //   这里对本探针造的 4 张待派人成员单（分属 3 个批次：未派人批次含 2 成员、逾期未派人 1、
+            //   软删 1）做聚合计数——卡内应恰 4 张（成员单全部逐张计入），若代表去重被重新引入会是 3。
             //   ⚠️ 刻意**不用"卡计数 == 点卡后行数"**：列表有分页（实测计数 53 / 首页 25 行），该等式
             //   本身不成立，首版这么写是断言错而非实现错（一日内第三次同类：判据没考虑被测系统的
             //   既有机制）。本聚合判据只数自己造的夹具，不受分页与他人数据影响。
@@ -248,14 +247,14 @@ async function readBadge(page, issueId) {
             const inCardFlags = [];
             for (const id of myFixtureMembers) inCardFlags.push(await inCard(id));
             const inCardCount = inCardFlags.filter(Boolean).length;
-            must(inCardCount === 3,
-                `⑥ ⭐去重聚合证明：4 张待派人成员单分属 3 个批次，卡内应恰 3 张（每批次 1 个代表），实得 ${inCardCount}——为 4 说明未去重（同批次两个成员都进了卡）`);
+            must(inCardCount === 4,
+                `⑥ ⭐逐张计入聚合证明：4 张待派人成员单应全部在卡内（不选代表），实得 ${inCardCount}——为 3 说明批次去重被重新引入，与二次拍板口径相悖`);
 
             // ── ⑦ 分支⑨：我是执行人且未执行（示例开发A形态）──
             must(await inCard(idExecMineA),
-                `⑦ ⭐[分支⑨] 我是在册执行人且 exec_status=pending 的批次，其代表单 #${idExecMineA} 应在卡内——这正是示例开发A在 R-20260824-3 上的处境（钉钉早发过、批次已逾期，持续清单里却没有他这条）`);
-            must(!(await inCard(idExecMineB)),
-                `⑦ [分支⑨去重] 同批次非代表单 #${idExecMineB} 不应在卡内——执行上线是批次级动作（POST /sys-releases/:id/execute），一次点完整批`);
+                `⑦ ⭐[分支⑨] 我是在册执行人且 exec_status=pending 的批次，其成员单 #${idExecMineA} 应在卡内——这正是示例开发A在 R-20260824-3 上的处境（钉钉早发过、批次已逾期，持续清单里却没有他这条）`);
+            must(await inCard(idExecMineB),
+                `⑦ [分支⑨逐张] 同批次第二张成员单 #${idExecMineB} 也应在卡内——2026-08-27 二次拍板逐张计入；执行仍是批次级动作，点一次后整批同时消失`);
             must(await readBadge(page, idExecMineA) === '已排期',
                 `⑦ 该批次徽章应是「已排期」（执行人已派好，只是还没执行）——⑨ 管的是"该执行了"，与徽章的"该派人了"是两件事，实得「${await readBadge(page, idExecMineA)}」`);
 
@@ -265,8 +264,31 @@ async function readBadge(page, issueId) {
             await page.reload(); await page.waitForLoadState('networkidle'); await page.waitForTimeout(600);
             await page.locator(cardSel).click(); await page.waitForTimeout(500);
             must((await inCard(idNoRelease)) && (await inCard(idNoRelease2)),
-                `⑧组 [分支⑩·逐张] 两张未排期单应**都**在卡内（#${idNoRelease}/#${idNoRelease2}·不选代表——与 ⑧⑨ 的按批次去重刻意不同）`);
+                `⑧组 [分支⑩·逐张] 两张未排期单应**都**在卡内（#${idNoRelease}/#${idNoRelease2}·2026-08-27 二次拍板后 ⑧⑨⑩ 口径统一为逐张）`);
         }
+        // ── ⑧b组 [失源过滤拆除·2026-08-27] 混批加单：bug 单必须出现在 change 批次的加单候选里 ──
+        //   生产 #98（bug）加不进 R-20260825-2（change）撞出的孤儿过滤：后端族别隔离已在 C5 收口批
+        //   拆除（R-20260825-1 混 4 improvement + 3 bug 已发布），前端候选过滤却还在拦。本用例把
+        //   新契约（待上线∧未挂批次∧非 config 即可加入任意批次）钉在真实弹窗上。
+        await dbRun("UPDATE sys_releases SET release_type='change' WHERE id=?", [relPending]);
+        const idBugFree = await dbRun(
+            `INSERT INTO sys_issues (title, type, status, system_name, priority, source, intake_required, created_by, created_by_name, release_id, created_at, updated_at)
+             VALUES (?, 'bug', '待上线', 'BMS', 'P2', '内部', 1, ?, '管理员', NULL, datetime('now','localtime'), datetime('now','localtime'))`,
+            [`${TAG}-bug未挂批次`, ownerId]
+        );
+        created.issues.push(idBugFree.lastID);
+        const candCheck = await page.evaluate(async (args) => {
+            await siModalAddToBatch(args.relId);
+            await new Promise(r => setTimeout(r, 600));
+            const modal = document.querySelector('.si-modal, [class*=modal]');
+            const text = modal ? modal.textContent : document.body.textContent;
+            const hit = text.includes(args.needle);
+            // 关弹窗还原现场
+            if (typeof siCloseModal === 'function') siCloseModal();
+            return hit;
+        }, { relId: relPending, needle: `${TAG}-bug未挂批次` });
+        must(candCheck, `⑧b [#98 场景] bug 待上线单应出现在 change 批次的加单候选里——后端混批守卫已拆（R-20260825-1 混族已发布实证），前端失源过滤已同步拆除`);
+
         must(page.__errors.length === 0, `⑥ 页面无 JS 错误（实得 ${page.__errors.length} 条${page.__errors.length ? '：' + page.__errors[0] : ''}）`);
         await page.close();
 
