@@ -8927,7 +8927,17 @@ module.exports = (deps) => {
                    WHERE issue_id = sys_issues.id AND event_type = 'status_change'
                      AND to_status = '待验证'
                      AND (action_code IS NULL OR action_code IN ('liaison_test_pass', 'liaison_test_skip_excused', 'liaison_test_skip_liaison'))
-                ) AS last_completed_at
+                ) AS last_completed_at,
+                -- [上线单标识对齐·2026-08-28 用户报障] 详情页「所属上线单」此前渲染内部主键 #release_id，
+                --   而上线单管理界面全程只认 release_no（R-YYYYMMDD-N）、内部 id 从不示人——用户拿着
+                --   「#16」在上线单列表/详情无处可寻。补下发 release_no 供前端主显；release_id 为 NULL
+                --   或批次记录已不存在时子查询天然回 NULL，前端回退 '#'+id（后者恰是「批次已失效」异常
+                --   态的唯一残余标识）。子查询非 JOIN=最小侵入；sys_issues 自身无同名列（已核），无遮蔽。
+                --   ⚠️ 与既有 release_brief.release_no 刻意不复用：release_brief 是**条件下发**（仅
+                --   canSeeReleaseBrief 可见集），而「所属上线单」kv 对全体详情读者渲染——复用它则无权限
+                --   读者仍看 #id，报障场景对他们依旧成立；编号字符串本身是标识符、敏感度低，顶层无条件
+                --   下发不扩大业务态可见面（status/assignee 等仍走 release_brief 门控不变）。
+                (SELECT release_no FROM sys_releases WHERE sys_releases.id = sys_issues.release_id) AS release_no
            FROM sys_issues WHERE id = ?`,
         [id]
       );
@@ -17526,7 +17536,10 @@ module.exports = (deps) => {
           );
           if (!rel || rel.release_kind !== 'emergency') {
             await sysRollback();
-            return res.status(409).json({ error: `该任务已在上线单 #${issue.release_id} 中，请勿混用应急口`, code: 'ISSUE_IN_NON_EMERGENCY_RELEASE' });
+            // [上线单标识对齐·2026-08-28] 用户可见文案 release_no 主显、'#'+id 回退（同详情页三处口径；
+            //   rel 上一行已查含 release_no 零额外查询；!rel=批次记录不存在时回退 #id 是唯一残余标识）。
+            //   本处是 codex 488 MED-3 语义检索抓出的漏网——变量名 issue 非 iss，字面模式扫描没覆盖。
+            return res.status(409).json({ error: `该任务已在上线单 ${(rel && rel.release_no) || ('#' + issue.release_id)} 中，请勿混用应急口`, code: 'ISSUE_IN_NON_EMERGENCY_RELEASE' });
           }
           if (rel.status === '已发布') {
             await sysRollback();

@@ -1252,6 +1252,19 @@ check('详情 kv 含建单人行：姓名经 esc + 建单时间条件化经 siFm
         '建单时间应条件化渲染（rel.created_at 有值才显示）且经 siFmtDT 格式化 + esc 转义——三件缺一即回归');
 });
 
+console.log('— §上线单标识对齐（codex 488 LOW-2·2026-08-28 用户报障「#16 无处可寻」）—');
+check('迭代单详情四处上线单标识=release_no 主显+#id 回退（防退回内部主键）', () => {
+    // 2026-08-28 拍板：用户可见面的上线单标识统一 release_no（R-YYYYMMDD-N·上线单管理唯一认这个），
+    //   内部主键 #id 仅作回退（release_no NULL=批次记录已不存在的唯一残余标识）。窄断言只钉表达式
+    //   形状与处数：kv「所属上线单」（链接/纯文本两分支各一）+ 应急上线闸提示 + 待上线闸提示恰 4 处；「批次已失效」异常提示
+    //   刻意保留 #id（不在计数内）。后端同款口径一处（应急口 409 文案·index.js）不在本守卫扫描面，
+    //   由 API 套件与审查覆盖。
+    const hits = (stripComments(src).match(/esc\(iss\.release_no \|\| \('#' \+ iss\.release_id\)\)/g) || []).length;
+    assert.strictEqual(hits, 4, `「release_no 主显+#id 回退」表达式应恰 4 处（kv 行链接/纯文本两分支 + 应急闸 + 待上线闸），实得 ${hits}——少了=有展示点退回 #id，多了=新增展示点未登记本守卫`);
+    // 回退分支不可被"简化"掉：主显表达式里必须保留 '#' + iss.release_id 兜底（release_no NULL 时
+    //   不能渲染成空白——上面恰-3 断言已隐含，此处单独留言明确失败语义）。
+});
+
 console.log('— §⑤ HTML 内联 <script> 语法有效 —');
 check('Sys_Iteration.html 内联脚本可编译（new Function，不执行）', () => {
     const scripts = [...src.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m => m[1]);

@@ -856,7 +856,7 @@ async function main() {
       //   落在写点 #6(7177) 与 #7(本条) 之间的区域（:8198 一带起），全文件净增 59 行——本条锚点随之整体
       //   下移 14431→14485（人工核对：UPDATE 语句字面量逐字未变，仍是"批量发布执行"同一处写点，非新增
       //   第 9 处）。
-      { anchorLine: 14637, reachable: false, desc: '批量发布执行 UPDATE：字面量写「已上线」（同一写点，flip UPDATE 语句本体未变；行号历经多批注释/重排/纯函数抽取累计下移，见上方各批注释；R-C4 首批 +54、codex 472 审收口批再 +11、476 收口批 DDL CHECK 再 +5——2026-08-27 一天之内被本模块**连续四次**追平：加 4 个 release 侧派生列(+24 行) → 加 my_release_exec_pending(+25 行) → 论证后撤回 release_creator_active(-11 行) → 去重拆除删 release_rep_issue_id 派生列(-4 行)。同一个锚一天校准四遍，backlog #25③「绝对行号锚改结构锚」已不是"应该做"而是"再不做，每次动 index.js 都要重来一遍"，该债已具备立即处理的充分理由）' },
+      { anchorLine: 14647, reachable: false, desc: '批量发布执行 UPDATE：字面量写「已上线」（同一写点，flip UPDATE 语句本体未变；行号历经多批注释/重排/纯函数抽取累计下移，见上方各批注释；R-C4 首批 +54、codex 472 审收口批再 +11、476 收口批 DDL CHECK 再 +5——2026-08-27 一天之内被本模块**连续四次**追平：加 4 个 release 侧派生列(+24 行) → 加 my_release_exec_pending(+25 行) → 论证后撤回 release_creator_active(-11 行) → 去重拆除删 release_rep_issue_id 派生列(-4 行)。同一个锚一天校准四遍，backlog #25③「绝对行号锚改结构锚」已不是"应该做"而是"再不做，每次动 index.js 都要重来一遍"，该债已具备立即处理的充分理由；2026-08-28 上线单标识对齐批再+10 行=**第 13 次校准**）' },
     ];
     assert.strictEqual(EXPECTED_STATUS_WRITE_SITES.length, writeSites.length, '[S③前置] 白名单登记条目数应与②实测写点数一致（防清单本身漂移出真相）');
     writeSites.forEach((site, i) => {

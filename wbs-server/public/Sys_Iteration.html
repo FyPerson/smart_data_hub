@@ -3708,7 +3708,7 @@
             <div class="u-kv-item"><label>期望完成(deadline)</label><div class="v">${iss.deadline ? esc(siFmtDeadline(iss.deadline)) : '<span class="si-muted">—</span>'}</div></div>
             <div class="u-kv-item"><label>需求方</label><div class="v">${siRequesterText(iss)}</div></div>
             <div class="u-kv-item"><label>OA 流程号</label><div class="v">${iss.oa_number ? esc(iss.oa_number) : (Number(iss.oa_exempt) === 1 ? '<span class="si-muted">无需 OA（内部自发）</span>' : ((iss.type !== 'bug' && siOaFillable(iss)) ? (iss.status === '待指派' ? '<span style="color:#b45309;font-weight:600">尚未补填 OA 号，指派开发前必填</span>' : '<span style="color:#b45309">尚未补填 OA 号，请补充台账信息</span>') : '<span class="si-muted">—</span>'))}</div></div>
-            <div class="u-kv-item"><label>所属上线单</label><div class="v">${iss.release_id ? (siCanOpenRelease(iss) ? `<a style="cursor:pointer;color:#2563eb" onclick="siGotoBatchDetail(${iss.release_id})">#${iss.release_id}</a>` : ('#' + iss.release_id)) : '<span class="si-muted">—</span>'}</div></div>
+            <div class="u-kv-item"><label>所属上线单</label><div class="v">${iss.release_id ? (siCanOpenRelease(iss) ? `<a style="cursor:pointer;color:#2563eb" onclick="siGotoBatchDetail(${iss.release_id})">${esc(iss.release_no || ('#' + iss.release_id))}</a>` : esc(iss.release_no || ('#' + iss.release_id))) : '<span class="si-muted">—</span>'}</div></div>
             <!-- ⭐ [C9-fix M3] 「上线方式」——**仅「已上线」单渲染**：后端 deriveOnlineSourceKind 对非已上线单
                  恒返 null（index.js:2311 第一行就 return），这一格对它们不是"未知"而是"这个维度还不存在"，
                  与工期 kv 的 K3 三态门控、列表页 bug 行「留空≠未定级」是同一条判断标准（不适用一律整行不渲染，
@@ -3854,7 +3854,7 @@
             // [C9 前端块·codex 206 审 MED-2 → 2026-07-31 执行人入口批解除] 此前详情端点不返回批次级
             // release_assignee_id，第三条"本批次执行人"分支前端判不了，按"宁可少显示"锁 admin∨对接人
             // （07-30 记录的已知限制）；本批后端新增 release_brief 字段后数据源补齐，限制解除。
-            gate = `<div class="si-gate-hint">📦 已建应急上线单 #${iss.release_id}，请到上线单详情查看进度/执行上线。</div>`;
+            gate = `<div class="si-gate-hint">📦 已建应急上线单 ${esc(iss.release_no || ('#' + iss.release_id))}，请到上线单详情查看进度/执行上线。</div>`;
             if (siCanOpenRelease(iss)) {
                 btns = `<button class="u-btn-secondary u-btn-sm" onclick="siGotoBatchDetail(${iss.release_id})">前往上线单</button>`;
             }
@@ -5439,7 +5439,7 @@
             // 上线体统一重构 C3 第2批（⑨）：旧文案"请在批次管理中发布"是单阶段旧语义遗留——C3 收窄后本步骤
             //   只完成"建单/加单"，真正发布要等被通知的值班执行人调用 /execute（两阶段，§6.7）。改为准确指向
             //   「批次管理」查看/安排上线（而非"发布"），并直接给可点深链，不用再让甲方自己去列表里找。
-            gate = `<div class="si-gate-hint">📦 已建上线单 #${iss.release_id}，请到「上线单管理」安排/查看上线进度。${siCanOpenRelease(iss) ? `<button class="u-btn-secondary u-btn-sm" style="margin-left:6px" onclick="siGotoBatchDetail(${iss.release_id})">前往上线单</button>` : ''}</div>`;
+            gate = `<div class="si-gate-hint">📦 已建上线单 ${esc(iss.release_no || ('#' + iss.release_id))}，请到「上线单管理」安排/查看上线进度。${siCanOpenRelease(iss) ? `<button class="u-btn-secondary u-btn-sm" style="margin-left:6px" onclick="siGotoBatchDetail(${iss.release_id})">前往上线单</button>` : ''}</div>`;
         } else if (iss.status === '待受理') {
             // 受理排期改造 C8：受理阶段角色引导（判定镜像后端资格·前端提示非授权源）
             // ⭐ C2.5b 微调：受理门语义已重定义为排期/指派入口（方案 §3）——退回的理由只能是"信息不全"。
