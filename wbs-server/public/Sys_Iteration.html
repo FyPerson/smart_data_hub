@@ -7856,40 +7856,15 @@
             if (!showNf) nfChk.checked = false;
         }
     }
-    // 建单优化批 C3b（方案 20260801_v1.3 §6c 设计点3）：「本单无需 OA 号」勾选框默认状态联动——
-    //   需求方三字段（部门/姓名/电话）全空 → 默认勾选；任一非空 → 默认不勾；用户手动点过勾选框后
-    //   （change 事件）联动即停止覆盖（"联动只设初始/未触碰态"，不是持续同步）。
-    function siWireOaExemptLinkage() {
-        const chk = document.getElementById('f_oa_exempt');
-        const deptEl = document.getElementById('f_requester_dept');
-        const nameEl = document.getElementById('f_requester_name');
-        const phoneEl = document.getElementById('f_requester_phone');
-        if (!chk) return;
-        let touched = false;
-        chk.addEventListener('change', () => { touched = true; });
-        const typeEl = document.getElementById('f_type');
-        const syncDefault = () => {
-            if (touched) return;
-            // [OA 豁免默认·improvement 覆盖联动·2026-08-10 用户拍板（#20 触发）] 优化类单默认勾选「本单
-            //   无需 OA 号」，需求方三字段是否填写不再取消勾——生产实证 8 张 improvement 里 7 张豁免；
-            //   唯一反例 #19（走了 OA 立项的优化）靠建单人手动取消勾（touched 后联动即停，机制不变）。
-            //   两条已知代价（拍板时如实摆过）：①反例型单漏取消勾 → 详情显示「无需 OA」且无补号琥珀提醒
-            //   （兜底=admin 补号入口不因豁免隐藏 :3575 + 后端号与豁免正交放行）②exempt=1 不再恒等于
-            //   「主动声明」（默认勾与主动勾在数据上不可分）。bug/feature 维持原三字段联动。
-            if (typeEl && typeEl.value === 'improvement') { chk.checked = true; return; }
-            // codex 219 L-1：deptEl.value 补 .trim()，与 name/phone 口径统一（select 空占位项值本恒为
-            // ''，此处统一处理只为消除三字段判空逻辑的形式不一致，非修复已知可复现 bug）。
-            const allEmpty = !(deptEl && deptEl.value.trim()) && !(nameEl && nameEl.value.trim()) && !(phoneEl && phoneEl.value.trim());
-            chk.checked = allEmpty;
-        };
-        if (deptEl) deptEl.addEventListener('change', syncDefault);
-        if (nameEl) nameEl.addEventListener('input', syncDefault);
-        if (phoneEl) phoneEl.addEventListener('input', syncDefault);
-        // type 切换也要重算默认（addEventListener 与既有 onchange=siToggleCreateTypeFields 属性赋值共存，
-        //   互不覆盖）——improvement↔其他类型来回切换时，未触碰态下勾选默认随之切换。
-        if (typeEl) typeEl.addEventListener('change', syncDefault);
-        syncDefault();   // 弹窗打开时按当前 type 与需求方三字段（恒空）定初始态
-    }
+    // [OA 豁免默认·恒勾选·2026-08-28 用户拍板] 「本单无需 OA 号」默认恒勾选——不分 type、不看需求方
+    //   三字段。原 C3b（方案 20260801_v1.3 §6c 设计点3）「三字段留空↔勾选」联动与 2026-08-10
+    //   「improvement 覆盖联动」（siWireOaExemptLinkage 函数）一并拆除；默认值唯一来源=建单表单
+    //   fCheckbox('oa_exempt', ..., true) 第三参，用户手动改后即最终态（建单弹窗内已无任何改写
+    //   f_oa_exempt.checked 的代码路径——该绝对声明由 verify-sys-oa-exempt [⑮] 静态守卫钉住：剥注释后
+    //   siWireOaExemptLinkage 零残留 + .checked 零写点，codex 486 MED-3）。代价沿用 2026-08-10 拍板原样：走了 OA 立项的单需建单人
+    //   手动取消勾，漏取消则详情显示「无需 OA」且无补号琥珀提醒（兜底=admin 补号入口不因豁免隐藏
+    //   + 后端号与豁免正交放行，两者均未动）。派生表单默认=继承原单 oa_exempt（2026-08-27 拍板的
+    //   独立契约，不在本次范围）。
     // C4（20260714）：需求方部门下拉字段构造（共享常量 window.PLATFORM_REQUESTER_DEPTS）。
     // 不用 fSelect：其 opts 数组假设 value===label，无法表达"（不指定）"文案与空串 value 分离。
     // 不用 fSelectMap：其 HTML 硬编码必填红星（本页现有 5 处调用均为必填字段的既定语义），
@@ -7956,6 +7931,8 @@
             fDateTime('deadline', '期望完成（选填；填则需精确到分钟）', ''),
             fText('related_correction_no', '关联修正单号（选填，BUG 类用）', '', false, '软引用触发本次迭代的数据修正单（OA号/修正单ID），不联动不跳转，仅留痕'),
             fCheckbox('needs_feasibility', '需要可行性评估（开发进入后先做可行性评估）', false),
+            // 默认恒勾选（2026-08-28 拍板）：本行第三参 true 是唯一默认来源——不分 type、不看需求方
+            //   三字段（原 C3b/improvement 覆盖两代联动已拆，详见 siRequesterDeptFieldHtml 上方注释）。
             fCheckbox('oa_exempt', '本单无需 OA 号（内部自发/未走 OA 立项流程）', true),
             { k: null, html: `<div class="u-form-group"><label>需求材料（选填，图片/PDF/Excel/Word/csv/txt/md，单个≤20MB，最多5个）</label>
                 ${siFilePickerHtml('create-spec', '选择文件')}</div>` },
@@ -8031,8 +8008,8 @@
         const typeSel = document.getElementById('f_type');
         if (typeSel) typeSel.onchange = siToggleCreateTypeFields;
         siToggleCreateTypeFields();
-        // 建单优化批 C3b（方案 §6c）：挂「本单无需 OA 号」默认状态联动（需求方三字段留空↔勾选）。
-        siWireOaExemptLinkage();
+        // 「本单无需 OA 号」默认恒勾选（2026-08-28 拍板·原 C3b 联动挂接已随 siWireOaExemptLinkage 拆除，
+        //   见函数原位注释）——此处无需任何挂接，fCheckbox 第三参 true 即完整默认逻辑。
         // 交互体验优化 Commit①：建单弹窗打开时重置 spec 文件组件（实例隔离——每次建单从空开始，
         //   revoke 上次残留的 object URL）；预览容器已随 siMBody 重渲染为空，这里清数组 + 保险再渲一次。
         //   siCreateModalOpen 标记供 siCloseModal 判定"当前是建单弹窗"以在关闭时清理资源（M1，防误清其他弹窗）。
@@ -8590,9 +8567,13 @@
             const awaitingExec = b.status === '计划中' && ['sent', 'partial'].includes(b.executor_notify_summary) && !myDone;
             const execBadge = awaitingExec ? ' · <span style="color:#b45309;font-weight:600">⏳ 待执行</span>' : '';
             const assigneeMeta = '';
+            // [建单人展示·2026-08-28 用户拍板] created_by_name 建表起就落库（NOT NULL）且列表端点一直
+            //   下发，前端此前从未消费——补「建单人 X」方便按人查历史；|| '—' 仅防御性兜底（列 NOT NULL，
+            //   正常数据不会走到）。建单时间不进列表 meta（行已长，完整时间在详情「建单人」kv 行）。
+            const creatorMeta = ' · 建单人 ' + esc(b.created_by_name || '—');
             return `<div class="si-batch-item" onclick="siOpenBatchDetail(${b.id})">
                 <div><span class="si-batch-no">${esc(b.release_no)}</span> ${badge}${hot}${execBadge}${degradedBadge}</div>
-                <div class="si-batch-meta">${esc(b.title || '（无标题）')}${b.version_tag ? ' · ' + esc(b.version_tag) : ''} · 含 ${b.issue_count || 0} 单${assigneeMeta}${b.released_at ? ' · 发布于 ' + esc(siFmtDT(b.released_at)) : ''}</div>
+                <div class="si-batch-meta">${esc(b.title || '（无标题）')}${b.version_tag ? ' · ' + esc(b.version_tag) : ''} · 含 ${b.issue_count || 0} 单${creatorMeta}${assigneeMeta}${b.released_at ? ' · 发布于 ' + esc(siFmtDT(b.released_at)) : ''}</div>
             </div>`;
         }).join('');
     }
@@ -8982,6 +8963,7 @@
                 <div class="u-kv-item"><label>版本号</label><div class="v">${rel.version_tag ? esc(rel.version_tag) : '—'}</div></div>
                 <div class="u-kv-item"><label>计划上线日期</label><div class="v">${rel.planned_date ? esc(rel.planned_date) : '<span class="si-muted">未设置</span>'}${plannedDateEditBtn}</div></div>
                 <div class="u-kv-item"><label>执行人通知状态</label><div class="v">${siExecSummaryBadgeHtml(execSummary)}</div></div>
+                <div class="u-kv-item"><label>建单人</label><div class="v">${esc(rel.created_by_name || '—')}${rel.created_at ? ' <span class="si-muted">· ' + esc(siFmtDT(rel.created_at)) + '</span>' : ''}</div></div>
                 <div class="u-kv-item full"><label>上线说明</label><div class="v">${rel.release_note ? esc(rel.release_note) : '—'}</div></div>
             </div>
             ${siExecutorSectionHtml(id, siBatchDetailExecutors, execSummary, planning)}

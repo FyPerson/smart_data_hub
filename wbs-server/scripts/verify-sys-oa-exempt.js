@@ -299,9 +299,33 @@ async function main() {
     ok('[⑭] 脏值扫描：全库 oa_exempt ∈ {0,1} 且非 NULL（ALTER 路径无 CHECK 的可观测性补偿，服务层白名单校验兜底）');
   }
 
+  // ═══ [⑮] codex 486 MED-3：前端「恒勾选默认」静态守卫——注释里的绝对声明配可持续验证 ═══
+  //   2026-08-28 拍板拆除 siWireOaExemptLinkage（C3b 三字段联动 + improvement 覆盖联动两代规则）后，
+  //   Sys_Iteration.html 注释声称「建单弹窗内已无任何改写 f_oa_exempt.checked 的代码路径」——绝对词
+  //   不能只活在注释里（改共享资源守卫经验：规则在但执行面缺失更骗自己）。剥注释后静态断言两条：
+  //   ① siWireOaExemptLinkage 标识符零残留（联动函数不得复活）；
+  //   ② 任何对 f_oa_exempt 的 .checked 赋值为零（防新写点绕开「fCheckbox 第三参 true=唯一默认来源」）。
+  //   ⚠️ 已知局限（登记）：②按行匹配，跨行写法（getElementById 换行接 .checked=）抓不到；// 剥除是
+  //   行级粗粒度，字符串内含 // 的行会被截断——两者对本守卫的两个 token 模式均不产生误报，够用。
+  {
+    const fs2 = require('fs');
+    const path2 = require('path');
+    const htmlRaw = fs2.readFileSync(path2.join(__dirname, '..', 'public', 'Sys_Iteration.html'), 'utf8');
+    // 剥注释先行（guard gotchas 既有范式）：/* */ 块注释 → <!-- --> HTML 注释 → 行级 // 注释
+    const stripped = htmlRaw
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/<!--[\s\S]*?-->/g, '')
+      .split('\n').map(l => { const i = l.indexOf('//'); return i >= 0 ? l.slice(0, i) : l; }).join('\n');
+    const linkageResidue = (stripped.match(/siWireOaExemptLinkage/g) || []).length;
+    assert.strictEqual(linkageResidue, 0, `[⑮] 剥注释后 siWireOaExemptLinkage 应零残留（联动函数不得复活），实得 ${linkageResidue}`);
+    const checkedWrites = stripped.split('\n').filter(l => /f_oa_exempt/.test(l) && /\.checked\s*=(?!=)/.test(l));
+    assert.strictEqual(checkedWrites.length, 0, `[⑮] 对 f_oa_exempt 的 .checked 赋值应为 0（恒勾默认唯一来源=fCheckbox 第三参），实得 ${checkedWrites.length}：${checkedWrites.join(' | ')}`);
+    ok('[⑮] 恒勾选默认静态守卫（codex 486 MED-3）：siWireOaExemptLinkage 零残留 + f_oa_exempt.checked 零写点（剥注释后）');
+  }
+
   server.close();
   console.log(`\n✅ verify-sys-oa-exempt 全绿：${passed} 组断言通过`);
-  console.log('  覆盖：三类建单缺省固化 + 任一有值整组按提交 + 提供值优先 + 无电话不造假值 + exempt=1放行/exempt=0仍409 + bug恒过 + 非法值400(含字符串true) + 衍生入口默认继承原单(2026-08-27契约反转) + exempt单set-oa-number仍200 + timeline免OA标注(出现/不出现) + requester字段类型白名单400 + oa_exempt全库脏值扫描=0');
+  console.log('  覆盖：三类建单缺省固化 + 任一有值整组按提交 + 提供值优先 + 无电话不造假值 + exempt=1放行/exempt=0仍409 + bug恒过 + 非法值400(含字符串true) + 衍生入口默认继承原单(2026-08-27契约反转) + exempt单set-oa-number仍200 + timeline免OA标注(出现/不出现) + requester字段类型白名单400 + oa_exempt全库脏值扫描=0 + 恒勾选默认前端静态守卫(联动零残留/checked零写点)');
 }
 
 main().catch(e => { console.error('❌ verify-sys-oa-exempt 失败:', e && e.stack || e); process.exit(1); });

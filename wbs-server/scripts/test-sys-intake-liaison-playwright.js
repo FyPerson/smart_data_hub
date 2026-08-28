@@ -56,7 +56,8 @@ const JWT_SECRET = process.env.JWT_SECRET || 'default_secret_key_change_me';
 const SCREENSHOT_DIR = path.join(os.tmpdir(), 'sys-playwright-shots');
 
 const ADMIN_ID = 1;
-const LIAISON_ID = 13;   // 示例对接人，本地唯一 active 受理人（SYS_INTAKE_LIAISON_IDS=[13]）
+const LIAISON_ID = 13;   // 示例对接人（v1.141 C10 起下拉候选=全 eligible 角色成员，她是其中之一；
+                         //   SYS_INTAKE_LIAISON_IDS=[13] 现只管 release/roster 级窄集合授权，不再决定候选池）
 
 const db = new sqlite3.Database(DB_PATH);
 const dbGet = (sql, params = []) => new Promise((res, rej) => db.get(sql, params, (e, row) => e ? rej(e) : res(row)));
@@ -94,10 +95,11 @@ async function loginPage(browser, token) {
 }
 
 async function main() {
-    // 前置：确认本地唯一 active 受理人事实（否则「默认选中」断言的前提就不成立，不能盲测）。
+    // 前置：确认示例对接人(id=13)在本地是 active（T2/T3/T6 都以她为选中对象；C10 后候选池是全 eligible
+    //   成员，「唯一受理人」前提已不存在，此处只需她本人在池即可）。
     const activeLiaisons = await dbAll(`SELECT id, display_name, status FROM users WHERE id=? AND status='active'`, [LIAISON_ID]);
-    if (activeLiaisons.length !== 1) throw new Error(`前置条件不满足：预期本地恰有 1 个 active 受理人(id=${LIAISON_ID})，实得 ${JSON.stringify(activeLiaisons)}`);
-    console.log(`  前置确认：唯一 active 受理人 = ${activeLiaisons[0].display_name}(${LIAISON_ID})`);
+    if (activeLiaisons.length !== 1) throw new Error(`前置条件不满足：预期 id=${LIAISON_ID} 受理人为 active，实得 ${JSON.stringify(activeLiaisons)}`);
+    console.log(`  前置确认：受理人 ${activeLiaisons[0].display_name}(${LIAISON_ID}) active`);
 
     const adminTok = await signAs(ADMIN_ID);
     console.log('\n══════ 建单优化批 C1/C2 前端 Playwright 冒烟 ══════');
@@ -137,20 +139,32 @@ async function main() {
 
             const liaisonSel = page.locator('#f_intake_liaison_id');
             await shotOnFail(page, (await liaisonSel.count()) === 1, 't1-liaison-field-exists', '建单弹窗存在 #f_intake_liaison_id 对接人下拉');
-            const liaisonVal = await liaisonSel.inputValue();
-            await shotOnFail(page, liaisonVal === String(LIAISON_ID), 't1-liaison-default-selected', `对接人下拉默认选中 id=${LIAISON_ID}（实得 value="${liaisonVal}"）`);
-            const liaisonText = await page.locator('#f_intake_liaison_id option:checked').textContent();
-            await shotOnFail(page, liaisonText.includes('示例对接人'), 't1-liaison-default-name', `对接人下拉默认选项显示"示例对接人"（实得："${liaisonText}"）`);
 
-            // codex 217 MED：补候选数与下拉 option 数量一致断言——"唯一候选默认选中"这条断言依赖本地固定数据，
-            //   之前只靠脚本头部前置 dbAll 核对 users 表，没直接核对建单弹窗实际调用的 GET intake-liaisons
-            //   接口返回值与渲染出的 option 数量是否一致（两者理论同源但没断言过，此处补上）。
+            // ⭐ [C10 契约对齐·2026-08-28] v1.141 C10 起候选池=全 eligible 角色 active 成员（后端
+            //   resolveActiveSysIntakeLiaisons 角色判据），不再是「唯一受理人」——原三断言（恰 1 候选/
+            //   默认选中 13/option 数=候选数）自 C10 起对现行契约失效（本套件写于建单优化批·C10 之前，
+            //   之后未再跑过，2026-08-28 OA 恒勾选批顺带发现修正）。现行契约（siIntakeLiaisonFieldHtml）：
+            //   候选 ≥1 且含示例对接人(id=13)；多候选时下拉带「（请选择）」空白占位（option 数=候选数+1）且
+            //   默认未选中；唯一候选时不加占位、默认选中——两态用同一组断言按候选数分派。
             const liaisonResp = await fetch(`${BASE_URL}/api/sys-issues/intake-liaisons`, { headers: { Authorization: `Bearer ${adminTok}` } });
             const liaisonRespData = await liaisonResp.json().catch(() => null);
             const liaisonCandidates = (liaisonResp.ok && liaisonRespData && Array.isArray(liaisonRespData.items)) ? liaisonRespData.items : null;
-            await shotOnFail(page, Array.isArray(liaisonCandidates) && liaisonCandidates.length === 1, 't1-liaison-candidates-count-one', `GET intake-liaisons 恰返回 1 个候选（"默认选中"断言的前提显式化，实得：${JSON.stringify(liaisonCandidates)}）`);
+            await shotOnFail(page, Array.isArray(liaisonCandidates) && liaisonCandidates.length >= 1 && liaisonCandidates.some(c => c.id === LIAISON_ID), 't1-liaison-candidates-contains-13', `GET intake-liaisons 候选 ≥1 且含示例对接人 id=${LIAISON_ID}（C10 后候选=全 eligible 成员，实得：${JSON.stringify(liaisonCandidates)}）`);
             const liaisonOptionCount = await liaisonSel.locator('option').count();
-            await shotOnFail(page, Array.isArray(liaisonCandidates) && liaisonOptionCount === liaisonCandidates.length, 't1-liaison-option-count-matches', `对接人下拉 option 数量（${liaisonOptionCount}）= 接口候选数（${liaisonCandidates ? liaisonCandidates.length : 'N/A'}）（唯一候选时不加空白占位项，见 siIntakeLiaisonFieldHtml）`);
+            const liaisonExpectedOpts = Array.isArray(liaisonCandidates) ? liaisonCandidates.length + (liaisonCandidates.length > 1 ? 1 : 0) : -1;
+            await shotOnFail(page, liaisonOptionCount === liaisonExpectedOpts, 't1-liaison-option-count-matches', `对接人下拉 option 数量（${liaisonOptionCount}）= 候选数${Array.isArray(liaisonCandidates) && liaisonCandidates.length > 1 ? '+1 空白占位' : ''}（期望 ${liaisonExpectedOpts}·唯一候选不加占位，见 siIntakeLiaisonFieldHtml）`);
+            const liaisonVal = await liaisonSel.inputValue();
+            const liaisonExpectedDefault = Array.isArray(liaisonCandidates) && liaisonCandidates.length === 1 ? String(liaisonCandidates[0].id) : '';
+            await shotOnFail(page, liaisonVal === liaisonExpectedDefault, 't1-liaison-default-value', `对接人下拉默认值="${liaisonExpectedDefault}"（唯一候选默认选中/多候选默认未选，实得 value="${liaisonVal}"）`);
+            // 〔codex 486 MED-2〕候选集合一致性：仅「数量相同 + 含 13」抓不住漏项/错项/错标签的渲染——
+            //   从接口 items 派生期望（id 集合 + id→姓名映射）与 DOM 非空 option 双向比对。
+            const liaisonDomOpts = await liaisonSel.locator('option').evaluateAll(os => os.filter(o => o.value !== '').map(o => ({ value: o.value, label: (o.textContent || '').trim() })));
+            const liaisonApiIds = new Set((liaisonCandidates || []).map(c => String(c.id)));
+            const liaisonDomIds = new Set(liaisonDomOpts.map(o => o.value));
+            const liaisonSetsEqual = liaisonApiIds.size === liaisonDomIds.size && [...liaisonApiIds].every(v => liaisonDomIds.has(v));
+            await shotOnFail(page, liaisonSetsEqual, 't1-liaison-option-set-equals-api', `下拉非空 option value 集合 = 接口候选 id 集合（双向相等，API={${[...liaisonApiIds].join(',')}} DOM={${[...liaisonDomIds].join(',')}}）`);
+            const liaisonLabelsMatch = (liaisonCandidates || []).every(c => { const o = liaisonDomOpts.find(x => x.value === String(c.id)); return o && o.label.includes(c.name); });
+            await shotOnFail(page, liaisonLabelsMatch, 't1-liaison-option-labels-match', `每个候选 option 文本含接口返回姓名（按 id 对应，实得=${JSON.stringify(liaisonDomOpts)}）`);
 
             // 描述必填拦截：留空点确定 → toast「描述必填」+ 弹窗不关闭（siModal onConfirm 返回 false）。
             await page.click('#siMConfirm');
@@ -162,7 +176,9 @@ async function main() {
 
             console.log('\n── T2：无 title 建单成功，description 首行 = 落库 title ──');
             await descField.fill(descFull);
-            // 对接人已默认选中、所属系统已有 META 默认值，无需额外操作，直接提交。
+            // [C10 契约对齐] 多候选时对接人默认未选中——显式选中示例对接人(id=13)再提交（原「已默认选中直接
+            //   提交」是唯一候选时代的假设）；所属系统仍有 META 默认值无需操作。
+            await page.selectOption('#f_intake_liaison_id', String(LIAISON_ID));
             await page.click('#siMConfirm');
             await page.waitForTimeout(800);
 
@@ -195,12 +211,12 @@ async function main() {
         }
 
         // ═══════════════════════════════════════════════════════════════
-        // T1.5（建单优化批 C3b·方案 20260801_v1.3 §6c）：「本单无需 OA 号」勾选框存在 + 默认联动
-        //   （需求方留空↔勾选）+ 手动改后提交落库核对。独立开一个页面/夹具，不复用 T1-T3 的
-        //   createdIssueId（避免与既有 35 断言的流程状态耦合，改动面收窄到新增内容本身）。
+        // T1.5：「本单无需 OA 号」勾选框存在 + 默认恒勾选（2026-08-28 用户拍板·原 C3b「需求方留空↔勾选」
+        //   联动与 improvement 覆盖联动均已拆除）+ 手动改后提交落库核对。独立开一个页面/夹具，不复用
+        //   T1-T3 的 createdIssueId（避免与既有 35 断言的流程状态耦合，改动面收窄到新增内容本身）。
         // ═══════════════════════════════════════════════════════════════
         {
-            console.log('\n── T1.5：oa_exempt 勾选框存在 + 默认联动（需求方留空↔勾选）+ 手动改后提交落库核对 ──');
+            console.log('\n── T1.5：oa_exempt 勾选框存在 + 默认恒勾选（联动已拆）+ 手动改后提交落库核对 ──');
             const page = await loginPage(browser, adminTok);
             await page.goto(`${BASE_URL}/Sys_Iteration.html`);
             await page.waitForLoadState('networkidle');
@@ -212,30 +228,44 @@ async function main() {
 
             const oaChk = page.locator('#f_oa_exempt');
             await shotOnFail(page, (await oaChk.count()) === 1, 't1.5-checkbox-exists', '建单弹窗存在 #f_oa_exempt 勾选框（本单无需 OA 号）');
-            await shotOnFail(page, await oaChk.isChecked(), 't1.5-default-checked-when-empty', '需求方三字段皆空时，勾选框默认勾选（弹窗打开时的初始联动态）');
+            await shotOnFail(page, await oaChk.isChecked(), 't1.5-default-checked', '弹窗打开时勾选框默认勾选（恒勾默认）');
 
-            // 联动①：填需求方姓名 → 自动取消勾选
+            // 恒勾①：填需求方姓名 + 选需求方部门 → 勾选保持不动（2026-08-28 拍板拆除「任一非空→取消勾」
+            //   旧联动——选部门取消勾正是触发本次拍板的用户报障场景）
+            //   〔codex 486 MED-1〕部门选择不允许静默跳过：非空候选存在 + 实际选中值非空均为显式前置断言，
+            //   部门清单加载失败（下拉 disabled 只剩占位项）时此处必须红，不得退化为「没测部门路径也绿」。
             await page.fill('#f_requester_name', '业务方老王');
+            const oaDeptRealOpts = await page.locator('#f_requester_dept option:not([value=""])').count();
+            await shotOnFail(page, oaDeptRealOpts >= 1, 't1.5-dept-options-exist', `需求方部门下拉存在非空候选（实得=${oaDeptRealOpts}）`);
+            await page.selectOption('#f_requester_dept', { index: 1 });
+            const oaDeptVal = await page.locator('#f_requester_dept').inputValue();
+            await shotOnFail(page, oaDeptVal.trim() !== '', 't1.5-dept-selected-nonempty', `需求方部门已实际选中非空值（实得="${oaDeptVal}"）`);
             await page.waitForTimeout(150);
-            await shotOnFail(page, !(await oaChk.isChecked()), 't1.5-uncheck-on-requester-filled', '填入需求方姓名后，勾选框自动取消勾选（联动生效）');
+            await shotOnFail(page, await oaChk.isChecked(), 't1.5-stays-checked-on-requester-filled', '填入需求方姓名+选部门后，勾选框保持勾选（恒勾·旧联动此处会自动取消）');
 
-            // 联动②：清空需求方姓名 → 自动恢复勾选（未手动碰过勾选框，联动持续生效）
+            // 恒勾②：清空需求方姓名/部门 → 依旧勾选（勾选框不再被任何字段变化改写，两个方向都不）
             await page.fill('#f_requester_name', '');
+            await page.selectOption('#f_requester_dept', '');
             await page.waitForTimeout(150);
-            await shotOnFail(page, await oaChk.isChecked(), 't1.5-recheck-on-requester-cleared', '清空需求方姓名后，勾选框自动恢复勾选（联动持续生效，未被手动碰过）');
+            await shotOnFail(page, await oaChk.isChecked(), 't1.5-stays-checked-on-cleared', '清空需求方字段后依旧勾选（无任何字段联动改写勾选框）');
 
-            // 手动改：用户显式点击勾选框（切到未勾选）——此后联动应停止覆盖（"联动只设初始/未触碰态"）
+            // 手动改：用户显式取消勾选 → 手动态即最终态，后续字段变化不得写回。
+            //   〔codex 486 L-1 措辞校准〕本段锁的是现契约「手动态不被字段事件覆盖」——对旧实现同样绿
+            //   （touched 停锁），判别证据在上方恒勾①②（未触碰态旧联动必取消勾）。
             await oaChk.uncheck();
             await page.waitForTimeout(100);
             await shotOnFail(page, !(await oaChk.isChecked()), 't1.5-manual-uncheck', '用户手动取消勾选后，勾选框呈未勾选态');
-            await page.fill('#f_requester_name', '');   // 需求方字段回到"皆空"（若联动未停止会被强制勾回）
+            await page.fill('#f_requester_name', '业务方老王');   // 再动需求方字段（锁手动态不被字段事件覆盖）
+            await page.fill('#f_requester_name', '');
             await page.waitForTimeout(150);
-            await shotOnFail(page, !(await oaChk.isChecked()), 't1.5-manual-touch-stops-linkage', '手动碰过勾选框后，需求方字段变化不再覆盖用户的手动选择（联动只设初始/未触碰态，非持续同步）');
+            await shotOnFail(page, !(await oaChk.isChecked()), 't1.5-manual-state-final', '手动取消后需求方字段任意变化不得把勾选写回（手动态即最终态）');
 
             // 手动改后提交：勾选框保持手动设的"未勾选"，提交后核对落库 oa_exempt=0（与前端手动态一致，
             //   非被联动悄悄改回的 1）。
             const oaExemptTag = `Playwright-oa豁免冒烟-${RUN_TAG}`;
             await page.fill('#f_description', oaExemptTag);
+            // [C10 契约对齐] 多候选时对接人默认未选中——显式选中再提交，否则被「对接人必填」拦截
+            await page.selectOption('#f_intake_liaison_id', String(LIAISON_ID));
             await page.click('#siMConfirm');
             await page.waitForTimeout(800);
             const oaRow = await dbGet(`SELECT id, oa_exempt, requester_name FROM sys_issues WHERE description LIKE ?`, [`${oaExemptTag}%`]);
@@ -279,9 +309,12 @@ async function main() {
             const failedStatusText = await notifyRowFailed.textContent();
             await shotOnFail(page, failedStatusText.includes('失败'), 't4-failed-status-text', `SQL 模拟 failed 后状态文字含「失败」（实得摘要："${failedStatusText.replace(/\s+/g, ' ').trim().slice(0, 60)}"）`);
             const retryBtnText = await notifyRowFailed.locator('button').first().textContent().catch(() => '');
-            await shotOnFail(page, retryBtnText.includes('重发'), 't4-retry-btn-label', `failed 态按钮文案「重发」（实得："${retryBtnText}"）`);
+            // [v1.143 通知统一对齐·2026-08-28] failed 态按钮文案「重发」→「重试」（〔S10〕统一批改词，
+            //   见 Sys_Iteration.html intake btnLabel `intakeStatus === 'failed' ? '重试' : '发送通知'`）；
+            //   本套件写于统一前，原断言自 v1.143 起对现行文案失效（OA 恒勾选批顺带发现修正）。
+            await shotOnFail(page, retryBtnText.includes('重试'), 't4-retry-btn-label', `failed 态按钮文案「重试」（v1.143 统一后文案，实得："${retryBtnText}"）`);
             const retryBtnEnabled = await notifyRowFailed.locator('button').first().isEnabled().catch(() => false);
-            await shotOnFail(page, retryBtnEnabled, 't4-retry-btn-enabled', '「重发」按钮可点（非 disabled，验证"重发可点"，但本脚本不实际点击——点击会真实外呼钉钉）');
+            await shotOnFail(page, retryBtnEnabled, 't4-retry-btn-enabled', '「重试」按钮可点（非 disabled，验证"重试可点"，但本脚本不实际点击——点击会真实外呼钉钉）');
 
             // codex 217 HIGH 收口：sent 态零断言补齐——本 commit 最关键语义（sent 是本轮终态，不可重发；
             //   仅回受理门归零才恢复可发）此前完全没有回归锁。SQL 直接模拟 sent（不经真实外呼，同上方 failed
@@ -305,8 +338,8 @@ async function main() {
             await shotOnFail(page, sentUnreadRowCount === 1, 't4-sent-unread-row-count-one', `sent+未读态「对接人受理」通知行恰 1 行（按钮计数断言的前提显式化，实得=${sentUnreadRowCount}）`);
             const sentUnreadSendCount = await notifyRowSentUnread.locator('button:has-text("发送通知")').count();
             await shotOnFail(page, sentUnreadSendCount === 0, 't4-sent-unread-no-send-btn', `sent+未读态显式无「发送通知」按钮（实得=${sentUnreadSendCount}）`);
-            const sentUnreadRetryCount = await notifyRowSentUnread.locator('button:has-text("重发")').count();
-            await shotOnFail(page, sentUnreadRetryCount === 0, 't4-sent-unread-no-retry-btn', `sent+未读态显式无「重发」按钮（实得=${sentUnreadRetryCount}）`);
+            const sentUnreadRetryCount = await notifyRowSentUnread.locator('button:has-text("重试")').count();
+            await shotOnFail(page, sentUnreadRetryCount === 0, 't4-sent-unread-no-retry-btn', `sent+未读态显式无「重试」按钮（v1.143 统一后文案·查旧词「重发」会恒真失去检出力，实得=${sentUnreadRetryCount}）`);
 
             // 再置 read_at 非空 → 已读态。⚠️ 实现语义核实（写断言前先读 Sys_Iteration.html 源码确认，非按 codex
             //   修法原文直接照抄）：siRenderIntakeNotifyRow 的「查询已读」按钮条件含 `!iss.intake_read_at`——
@@ -445,8 +478,8 @@ async function main() {
             await pageDev8.waitForTimeout(600);
             const dev8IntakeRow = pageDev8.locator('.u-notify-row:has-text("对接人受理")');
             await shotOnFail(pageDev8, (await dev8IntakeRow.count()) > 0, 't6-a3-nonadmin-row-visible', '[284 A3] 非 admin 在册开发视角：intake 通知行可见（展示面——canSeeNotify 命中 isRosterMember 分支，detail DTO 字段面对在册开发未收窄）');
-            const dev8SendCount = await dev8IntakeRow.locator('button:has-text("发送通知"), button:has-text("重发")').count();
-            await shotOnFail(pageDev8, dev8SendCount === 0, 't6-a3-nonadmin-no-send-btn', '[284 A3] 非 admin：无发送/重发按钮（授权面——canOperateIntake 固定只认 isAdminUser，在册身份不豁免）');
+            const dev8SendCount = await dev8IntakeRow.locator('button:has-text("发送通知"), button:has-text("重试")').count();
+            await shotOnFail(pageDev8, dev8SendCount === 0, 't6-a3-nonadmin-no-send-btn', '[284 A3] 非 admin：无发送/重试按钮（v1.143 统一后文案·授权面——canOperateIntake 固定只认 isAdminUser，在册身份不豁免）');
             const dev8QueryReadCount = await dev8IntakeRow.locator('button:has-text("查询已读")').count();
             await shotOnFail(pageDev8, dev8QueryReadCount === 0, 't6-a3-nonadmin-no-query-read-btn', '[284 A3] 非 admin：无查询已读按钮（admin 门——canQueryReadIntake 固定只认 isAdminUser；此刻已是 sent 态，admin 视角本该出现该按钮，对照见上方 T4 sent+未读态断言）');
             // ⚠️ 本文件 T1-T4 全程用 adminTok，这是本文件首次以非 admin 身份打开详情页——首次实测即撞出

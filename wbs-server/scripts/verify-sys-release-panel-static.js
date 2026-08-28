@@ -1233,6 +1233,25 @@ check('入口按钮改角标形态：保留「我的上线单」文字 + data-si
     assert.ok(/pendingN > 0\s*\?/.test(body) && /:\s*''/.test(body), 'pending=0 时不渲染角标（空串分支）——0 也挂角标是噪音');
 });
 
+console.log('— §建单人展示（codex 487 LOW·2026-08-28 用户拍板）—');
+// created_by/created_by_name 建表起 NOT NULL 落库、两端点一直下发，前端 2026-08-28 起消费。
+// 窄断言（按 487 建议不绑整段 HTML/文案顺序）：只钉「展示存在 + 走 esc 转义 + 时间条件化经 siFmtDT」
+// 三个不变量，防止重构 siRenderBatchList / 详情 kv 时静默回归；具体措辞与位置留自由度。
+check('列表卡片 meta 含建单人且经 esc 转义（siRenderBatchList）', () => {
+    const body = stripComments(extractFunctionBody(src, 'siRenderBatchList') || '');
+    assert.ok(body, '未提取到 siRenderBatchList 函数体');
+    assert.ok(body.includes('建单人'), '列表渲染未见「建单人」文案——展示点被删即回归（2026-08-28 用户拍板）');
+    assert.ok(/esc\(b\.created_by_name/.test(body), '列表 created_by_name 未经 esc() 包裹（XSS 纵深防线，不因来源是服务端落库而豁免）');
+});
+check('详情 kv 含建单人行：姓名经 esc + 建单时间条件化经 siFmtDT（siOpenBatchDetail）', () => {
+    const body = stripComments(extractFunctionBody(src, 'siOpenBatchDetail') || '');
+    assert.ok(body, '未提取到 siOpenBatchDetail 函数体');
+    assert.ok(/<label>建单人<\/label>/.test(body), '详情 kv 网格未见「建单人」行');
+    assert.ok(/esc\(rel\.created_by_name/.test(body), '详情 created_by_name 未经 esc() 包裹');
+    assert.ok(/rel\.created_at\s*\?[^:]*esc\(siFmtDT\(rel\.created_at\)\)/.test(body),
+        '建单时间应条件化渲染（rel.created_at 有值才显示）且经 siFmtDT 格式化 + esc 转义——三件缺一即回归');
+});
+
 console.log('— §⑤ HTML 内联 <script> 语法有效 —');
 check('Sys_Iteration.html 内联脚本可编译（new Function，不执行）', () => {
     const scripts = [...src.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m => m[1]);

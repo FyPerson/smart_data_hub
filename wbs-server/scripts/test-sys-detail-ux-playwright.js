@@ -1410,11 +1410,12 @@ async function mkMember(issueId, userId, userName, devStatus, resolvedAt, noCode
         await page.evaluate(() => { if (window.siCloseModal) siCloseModal(); if (window.siCloseDrawer) siCloseDrawer(); });
         await page.waitForTimeout(200);
 
-        // ── [T10] OA 豁免默认勾选联动（2026-08-10 用户拍板·improvement 覆盖需求方联动·hotfix）────────
-        //   规则终态：type=improvement → 未触碰态恒勾（需求方填不填都不取消）；bug/feature → 维持原
-        //   「需求方三字段任一非空→取消勾」联动；用户手动点过勾选框（touched）→ 联动整体停止。
+        // ── [T10] OA 豁免默认恒勾选（2026-08-28 用户拍板·联动整体拆除·hotfix）─────────────────────
+        //   规则终态：默认**恒勾选**——不分 type、不看需求方三字段（原 C3b「三字段留空↔勾选」联动与
+        //   2026-08-10「improvement 覆盖联动」两代规则均废除，siWireOaExemptLinkage 已删）；用户手动改
+        //   后即最终态，任何字段变化都不得改写勾选框。
         //   纯 DOM 交互断言（不真提交建单——建单链路由既有套件覆盖，本组只测勾选框默认逻辑本身）。
-        console.log('\n── [T10] OA 豁免默认勾选联动 ──');
+        console.log('\n── [T10] OA 豁免默认恒勾选 ──');
         await page.evaluate(() => siOpenCreate());
         await page.waitForSelector('#f_oa_exempt', { state: 'attached', timeout: 3000 });
         const t10a = await page.evaluate(() => ({
@@ -1422,54 +1423,71 @@ async function mkMember(issueId, userId, userName, devStatus, resolvedAt, noCode
             checked: document.getElementById('f_oa_exempt').checked,
         }));
         must(t10a.checked === true,
-            `[T10]① 弹窗初开（需求方三字段恒空）勾选应为 true（既有初始态），实得 type=${t10a.type} checked=${t10a.checked}`);
-        // ② 切 improvement + 填需求方姓名 → 勾选仍 true（本次新规则的核心判别断言：旧联动在此会取消勾）
+            `[T10]① 弹窗初开勾选应为 true（恒勾默认），实得 type=${t10a.type} checked=${t10a.checked}`);
+        // ② ⭐ 新契约核心判别：feature+需求方三字段全填 → 勾选仍 true（旧三字段联动在此必取消勾——
+        //   正是本次拍板的触发场景：用户选了需求方部门后默认勾消失）
         const t10b = await page.evaluate(() => {
+            const typeEl = document.getElementById('f_type');
+            typeEl.value = 'feature'; typeEl.dispatchEvent(new Event('change'));
+            const deptEl = document.getElementById('f_requester_dept');
+            const deptRealOpts = deptEl ? Array.from(deptEl.options).filter(o => o.value.trim() !== '').length : 0;
+            if (deptEl && deptRealOpts > 0) { deptEl.selectedIndex = 1; deptEl.dispatchEvent(new Event('change')); }
+            const nameEl = document.getElementById('f_requester_name');
+            nameEl.value = '联动探针姓名'; nameEl.dispatchEvent(new Event('input'));
+            const phoneEl = document.getElementById('f_requester_phone');
+            if (phoneEl) { phoneEl.value = '13800000000'; phoneEl.dispatchEvent(new Event('input')); }
+            return {
+                checked: document.getElementById('f_oa_exempt').checked,
+                deptRealOpts,
+                deptVal: deptEl ? deptEl.value : null,
+            };
+        });
+        // 〔codex 486 MED-1〕部门选择不允许静默跳过：非空候选存在 + 实际选中值非空均为显式前置断言——
+        //   部门清单加载失败（下拉 disabled 只剩占位项）时本组必须红，不得退化为「没测部门路径也绿」
+        //   （用户报障场景正是「选了部门」）。
+        must(t10b.deptRealOpts >= 1 && typeof t10b.deptVal === 'string' && t10b.deptVal.trim() !== '',
+            `[T10]②a 前置：需求方部门下拉存在非空候选且已实际选中（实得 候选=${t10b.deptRealOpts} 选中值="${t10b.deptVal}"）`);
+        must(t10b.checked === true,
+            `[T10]② ⭐ feature+需求方三字段全填（含部门下拉）→ 勾选仍应为 true（恒勾·旧联动此处会取消勾），实得 ${t10b.checked}`);
+        // ③ type 三枚举来回切（需求方仍非空）→ 勾选纹丝不动（旧规则 type change 会重算默认）
+        const t10c = await page.evaluate(() => {
+            const typeEl = document.getElementById('f_type');
+            const states = [];
+            for (const t of ['improvement', 'bug', 'feature']) {
+                typeEl.value = t; typeEl.dispatchEvent(new Event('change'));
+                states.push(document.getElementById('f_oa_exempt').checked);
+            }
+            return states;
+        });
+        must(t10c.every(v => v === true),
+            `[T10]③ ⭐ type 三枚举来回切（需求方仍非空）→ 勾选恒 true，实得 ${JSON.stringify(t10c)}`);
+        // ④ 反向成对（探针双向证明纪律）：手动取消后，切 type / 清空需求方都不得把勾选写回 true。
+        //   〔codex 486 L-1 措辞校准〕本断言锁的是现契约「手动态不被任何字段事件覆盖」——它对旧实现
+        //   同样绿（旧联动手动 change 后有 touched 停锁），不构成「旧联动已拆」的判别证据；判别证据在
+        //   ②③（未触碰态下旧联动必取消勾）。留着它防的是将来新增无 touched 类保护的回写路径。
+        const t10d = await page.evaluate(() => {
+            const chk = document.getElementById('f_oa_exempt');
+            chk.checked = false; chk.dispatchEvent(new Event('change'));   // 手动取消
             const typeEl = document.getElementById('f_type');
             typeEl.value = 'improvement'; typeEl.dispatchEvent(new Event('change'));
             const nameEl = document.getElementById('f_requester_name');
-            nameEl.value = '联动探针姓名'; nameEl.dispatchEvent(new Event('input'));
-            return document.getElementById('f_oa_exempt').checked;
-        });
-        must(t10b === true,
-            `[T10]② ⭐ improvement+需求方已填 → 勾选仍应为 true（improvement 覆盖联动·旧规则此处会取消勾），实得 ${t10b}`);
-        // ③ 切回 feature（需求方仍非空）→ 勾选变 false（原联动对非 improvement 类型仍然生效，未被误杀）
-        const t10c = await page.evaluate(() => {
-            const typeEl = document.getElementById('f_type');
-            typeEl.value = 'feature'; typeEl.dispatchEvent(new Event('change'));
-            return document.getElementById('f_oa_exempt').checked;
-        });
-        must(t10c === false,
-            `[T10]③ ⭐ 切回 feature（需求方仍非空）→ 勾选应变 false（三字段联动对 bug/feature 仍活·对照组），实得 ${t10c}`);
-        // ④ 手动点勾选框（touched）后再切 improvement → 联动不得再覆盖用户的手动状态（停锁不因新规则回归）
-        const t10d = await page.evaluate(() => {
-            const chk = document.getElementById('f_oa_exempt');
-            chk.checked = true; chk.dispatchEvent(new Event('change'));   // 手动勾上 → touched
-            chk.checked = false; chk.dispatchEvent(new Event('change'));  // 再手动取消 → 最终手动态=false
-            const typeEl = document.getElementById('f_type');
-            typeEl.value = 'improvement'; typeEl.dispatchEvent(new Event('change'));
+            nameEl.value = ''; nameEl.dispatchEvent(new Event('input'));
+            const deptEl = document.getElementById('f_requester_dept');
+            if (deptEl) { deptEl.selectedIndex = 0; deptEl.dispatchEvent(new Event('change')); }
+            const phoneEl = document.getElementById('f_requester_phone');
+            if (phoneEl) { phoneEl.value = ''; phoneEl.dispatchEvent(new Event('input')); }
             return document.getElementById('f_oa_exempt').checked;
         });
         must(t10d === false,
-            `[T10]④ ⭐ touched 后切 improvement → 联动不得覆盖手动取消态（停锁优先于新规则），实得 ${t10d}`);
-        // ⑤〔codex 330 LOW-2〕三维组合补漏：未触碰态下 improvement→清空需求方→切回 feature → 应恢复勾选
-        //   （证明 improvement 短路分支没有破坏旧规则的「三字段全空→勾」半边——②③只测了非空侧）。
-        //   需重开弹窗取未触碰态（④已 touched·touched 是弹窗实例级闭包变量，重开即重置）。
+            `[T10]④ 手动取消后切 improvement+清空需求方三字段 → 不得被写回 true（锁手动态不被字段事件覆盖·判别证据在②③），实得 ${t10d}`);
+        // ⑤ 弹窗实例隔离：④ 的手动取消态不跨实例泄漏——重开弹窗恢复恒勾默认
         await page.evaluate(() => { if (window.siCloseModal) siCloseModal(); });
         await page.waitForTimeout(200);
         await page.evaluate(() => siOpenCreate());
         await page.waitForSelector('#f_oa_exempt', { state: 'attached', timeout: 3000 });
-        const t10e = await page.evaluate(() => {
-            const typeEl = document.getElementById('f_type');
-            typeEl.value = 'improvement'; typeEl.dispatchEvent(new Event('change'));
-            const nameEl = document.getElementById('f_requester_name');
-            nameEl.value = '组合探针'; nameEl.dispatchEvent(new Event('input'));   // improvement 态下填入
-            nameEl.value = ''; nameEl.dispatchEvent(new Event('input'));           // 再清空
-            typeEl.value = 'feature'; typeEl.dispatchEvent(new Event('change'));   // 切回 feature（三字段全空）
-            return document.getElementById('f_oa_exempt').checked;
-        });
+        const t10e = await page.evaluate(() => document.getElementById('f_oa_exempt').checked);
         must(t10e === true,
-            `[T10]⑤ ⭐ 未触碰态 improvement→清空需求方→切回 feature → 应恢复勾选（旧规则空字段半边未被短路破坏），实得 ${t10e}`);
+            `[T10]⑤ 重开弹窗 → 恢复恒勾默认 true（勾选态随弹窗实例重建，不跨实例泄漏），实得 ${t10e}`);
         await page.evaluate(() => { if (window.siCloseModal) siCloseModal(); if (window.siCloseDrawer) siCloseDrawer(); });
         await page.waitForTimeout(200);
 
