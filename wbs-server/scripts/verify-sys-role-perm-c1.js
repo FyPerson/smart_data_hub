@@ -242,7 +242,7 @@ async function main() {
     (1,'admin','管理员','admin','13800000001'),(2,'admin2','管理员乙','admin','13800000002'),
     (5,'dev','开发王','user','13800000005'),
     (6,'dev2','开发李','user','13800000006'),(7,'shenjun','示例发布者','publisher','13800000007'),
-    (13,'wangtaotao','示例对接人','user','13800000013')`);
+    (13,'wangtaotao','示例对接人','user','19900000024')`);
   const app = express();
   app.use(express.json());
   app.use('/api', mod.router);

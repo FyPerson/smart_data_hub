@@ -127,7 +127,9 @@ async function setCollabState(id, patch) {
         // 导出通知业务方（2026-05-29）：造 DONE 直派单 + 测 done_* 已读跟踪
         'done_notified_at', 'done_notify_message_key', 'done_read_at',
         // 通知/对接人字段（造测试单时直接设）
-        'contact_person_id', 'contact_person_name'
+        'contact_person_id', 'contact_person_name',
+        // v1.77.0 创建人发送权限：T5d 造"创建人非 admin"单（创建 endpoint 仅 admin，模拟需直改）
+        'created_by', 'created_by_name'
     ];
     const sets = [];
     const params = [];

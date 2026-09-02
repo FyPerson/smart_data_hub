@@ -147,7 +147,7 @@ async function main() {
   await run(`INSERT INTO users (id, username, display_name, role, phone, dingtalk_user_id) VALUES
     (1,'admin','管理员','admin','13800000001','ding1'),(2,'admin2','第二管理员','admin','13800000002','ding2'),
     (5,'dev','开发王','user','13800000005','ding5'),(6,'dev6','开发李','user','13800000006','ding6'),
-    (13,'wangtaotao','示例对接人','user','13800000013','ding13')`);
+    (13,'wangtaotao','示例对接人','user','19900000024','ding13')`);
   const app = express();
   app.use(express.json());
   app.use('/api', mod.router);

@@ -14,7 +14,17 @@
 // ── 被迭代的业务系统白名单（决策①，§12 GET /sys-systems 下拉源）──────────
 //   照 correction source_system 范式（后端常量 + '其他' 兜底，非字典表）。
 //   system_name 后端白名单校验，不进 DB CHECK（业务系统列表可能微调，常量层更灵活）。
-const BIZ_SYSTEMS = ['BMS', 'HRD', '电子签', '客户报销平台', 'RPA程序', '其他'];   // 2026-08-19 追加「RPA程序」（用户拍板·单 commit 组但代码托管走 git·插「其他」前——bizSystems[0]='BMS' 是建单默认值不可占位）；2026-08-17 追加「客户报销平台」+ 移除「OA」「智数协同」（用户拍板：两系统不在维护范围·生产存量均 0 张核实后干净移除·verify-sys-meta 断言同步）
+const BIZ_SYSTEMS = ['BMS', 'HRD', '电子签', '客户报销平台', 'RPA程序', '小程序-智荟人力', '其他'];   // 2026-08-19 追加「RPA程序」（用户拍板·单 commit 组但代码托管走 git·插「其他」前——bizSystems[0]='BMS' 是建单默认值不可占位）；2026-08-17 追加「客户报销平台」+ 移除「OA」「智数协同」（用户拍板：两系统不在维护范围·生产存量均 0 张核实后干净移除·verify-sys-meta 断言同步）；2026-09-02 追加「小程序-智荟人力」
+
+// ── 单组「版本号」commit 提交系统清单（C11·§10.3，2026-09-02 S2c 收口上移）──────────
+//   判定源单一：本清单原定义在 index.js（§10.3 单组归一逻辑消费处），2026-09-02 codex 493 H1 指出
+//   一次性脚本 scripts/_set-sys-single-commit-group.js 的默认参数 'HRD' 是该清单 config replace 语义
+//   失败路径（config 一旦写入即整体覆盖代码默认）的唯一现成入口，注释警告不构成运行时保护——脚本与
+//   index.js 各抄一份清单，脚本那份若漏更新，写库时会用**过期清单**去 replace，静默丢成员。故把常量
+//   上移到本纯常量模块，index.js 与 _set-sys-single-commit-group.js 一起 require 同一份，杜绝抄第二份。
+//   **replace 语义**：某环境 config `sys_single_commit_group_systems` 一旦非空，本清单整体失效——新增
+//   成员必须显式含在写入值里（见 _set-sys-single-commit-group.js 的 ⊇ 校验）。
+const DEFAULT_SINGLE_COMMIT_GROUP_SYSTEMS = ['HRD', '电子签', 'RPA程序', '小程序-智荟人力'];
 
 // ── 类型 → 无受理分支的初始态（建单未选对接人时落地态，受理排期改造 §9）──────────
 //   ⚠️ 受理排期改造：初始态不再是单一常量——依 intake_required 分两支（选对接人→待受理 / 未选→本表）。
@@ -1263,6 +1273,7 @@ const INTAKE_GATE_ACTIONS = new Set(['intake_accept', 'intake_return', 'resubmit
 
 module.exports = {
   BIZ_SYSTEMS,
+  DEFAULT_SINGLE_COMMIT_GROUP_SYSTEMS,   // C11 单组「版本号」commit 清单单一来源（2026-09-02 S2c 收口上移）
   INITIAL_STATUS_WITHOUT_INTAKE_BY_TYPE,
   resolveInitialStatus,          // 受理排期改造 §9：落态解析器（C0 后创建路径不再直调·仅 change_intake_mode 与 meta 组装消费）
   resolveSysInitialStatusForCreate,   // 角色权限重构 C0：创建路径（建单/derive/reactivate）落态唯一入口·恒 intake=1·C2.5 起按 type 分流

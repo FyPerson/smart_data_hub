@@ -1169,6 +1169,48 @@ if (newGaps.length > 0) {
 }
 ok(`主覆盖断言通过：全部 ${producedKeys.size} 个写入点 display key \u2286 前端标签表并集 \u222a KNOWN_GAPS（无新缺口）`);
 
+// [S3·所属系统「小程序-智荟人力」接入 方案 v1.2 §4.4 第 8 处消费面·489-H6 核心警示收口]
+//   上方"主覆盖断言"只证明 producedKeys（后端可产出的 display key）是前端标签表并集的子集——它能
+//   抓住"漏加标签"，但抓不住"改了测试期望却漏改产品代码"这类假绿（489-H6：漏改 last_completed_at
+//   白名单的后果是"实际完成时间"列恒空，这是运行时行为缺陷，不是"缺标签"，主覆盖断言的产出来源
+//   producedKeys 完全不经过 index.js 的 last_completed_at 子查询，天然测不到这一类漏改）。
+//   本节额外显式断言 liaison_test_skip_system 同时出现在三处独立位置——精确文本/精确 key 集合
+//   等值，不用弱正则、不复用主覆盖断言的 covered 判定：
+//     ① SI_TL_LABEL（前端时间线标签）
+//     ② SI_TL_CLS（前端时间线样式类映射——本文件此前从未解析该表，见上方"SI_TL_CLS 不归本文件
+//        守"的既有边界声明；此处只做单个 key 的存在性抽查，不承接该表的通用结构校验职责，那仍归
+//        verify-sys-release-panel-static.js）
+//     ③ index.js 两处 last_completed_at 白名单（list/detail 端点，精确文本命中次数=2）
+{
+  const S3_SKIP_SYSTEM_KEY = 'liaison_test_skip_system';
+  if (!labelKeys.has(S3_SKIP_SYSTEM_KEY)) {
+    fail(`[S3] "${S3_SKIP_SYSTEM_KEY}" 未在 SI_TL_LABEL（前端时间线标签表）中找到——按系统跳过对接测试的留痕行会显示裸英文 action_code，不可读`);
+  }
+  const clsKeys = new Set(extractObjectKeys(htmlSrc, 'SI_TL_CLS'));
+  if (!clsKeys.has(S3_SKIP_SYSTEM_KEY)) {
+    fail(`[S3] "${S3_SKIP_SYSTEM_KEY}" 未在 SI_TL_CLS（前端时间线样式类映射）中找到——该留痕行会退化为无专属配色（siRenderTimeline 兜底样式），与另两个 skip 码视觉不一致`);
+  }
+  const LAST_COMPLETED_AT_WHITELIST_MARKER =
+    "AND (action_code IS NULL OR action_code IN ('liaison_test_pass', 'liaison_test_skip_excused', 'liaison_test_skip_liaison', 'liaison_test_skip_system'))";
+  // [codex 494 L1 采纳] 计数前先剥 JS 注释（复用本文件 stripComments 状态机），再要求每次命中的后文 400 字符内
+  //   出现 `) AS last_completed_at`——把命中钉在真实子查询上；注释/字符串里出现同文本既不计入、也无法凑数。
+  const strippedIndexSrc = stripComments(indexSrc);
+  const markerParts = strippedIndexSrc.split(LAST_COMPLETED_AT_WHITELIST_MARKER);
+  const lastCompletedAtHits = markerParts.length - 1;
+  let anchoredHits = 0;
+  for (let i = 1; i < markerParts.length; i++) {
+    if (/\)\s*AS\s+last_completed_at/.test(markerParts[i].slice(0, 400))) anchoredHits++;
+  }
+  if (lastCompletedAtHits !== 2 || anchoredHits !== 2) {
+    fail(
+      `[S3] index.js（剥注释后）中精确文本\n  "${LAST_COMPLETED_AT_WHITELIST_MARKER}"\n命中次数=${lastCompletedAtHits}、` +
+      `其中紧跟 ") AS last_completed_at" 的真实子查询命中=${anchoredHits}，与预期 2/2（list 端点 + detail 端点各一处）不符——` +
+      `"${S3_SKIP_SYSTEM_KEY}" 可能未同步补进两处 last_completed_at 白名单之一，漏改的那一处会导致「实际完成时间」列对命中该分支的单据恒空`
+    );
+  }
+  ok(`[S3] "${S3_SKIP_SYSTEM_KEY}" 三处消费面显式核对通过：SI_TL_LABEL 含该 key / SI_TL_CLS 含该 key / index.js 剥注释后两处 last_completed_at 真实子查询白名单各命中 1 次（共 2 次·均锚在 ") AS last_completed_at"）`);
+}
+
 // [B5·LOW-3b] "待 F4 清零" 字样已过时（KNOWN_GAPS 已清零）——改三元：仅当 KNOWN_GAPS 非空时才附临时
 //   豁免提示，为空时不再暗示"还有事没做完"。
 const gapSuffix = KNOWN_GAPS.length > 0 ? `，含 ${KNOWN_GAPS.length} 项临时豁免待清零` : '';

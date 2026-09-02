@@ -19,8 +19,8 @@
  *      computed display=flex、#siBatchBody scrollHeight>clientHeight（真实溢出）、head/foot
  *      getBoundingClientRect 仍在视口内（未被内容顶出）、外层 .si-modal 本身不滚（scrollTop 恒 0，
  *      含主动尝试设置 scrollTop 后仍归零的行为级证明，非仅读初值）。
- *   ② O1 徽章活体：加单弹窗候选行 .u-sys-tag 存在且文本 ∈ 六系统值（BMS/HRD/电子签/客户报销平台/
- *      RPA程序/其他）。
+ *   ② O1 徽章活体：加单弹窗候选行 .u-sys-tag 存在且文本 ∈ 七系统值（BMS/HRD/电子签/客户报销平台/
+ *      RPA程序/小程序-智荟人力/其他）。
  *   ③ 473 LOW-2 时间线三值：对批次做一次真实 PATCH 编辑（admin）→ 打开成员单详情时间线 →
  *      release_info_edit 事件 display 文案='上线单信息修改' + CSS class 含 si-tl-indigo +
  *      D9=「隐藏上线单调整记录」过滤开关打开后该事件仍可见（同批次的 release_add scope_change 事件
@@ -29,8 +29,8 @@
  *      「删除上线单」→ 填 reason → 确认 → 断言 200 + 列表刷新批次消失 + 全部 22 张成员单 release_id
  *      清空且 status 仍「待上线」（D10：退回，不误动终态）。
  *
- * 夹具口径：22 张成员单直连 SQL 造（type='bug'，status='待上线'，release_id 初始 NULL）——6 张各配一个
- *   不同 system_name（覆盖六系统值域，供②断言），16 张 system_name='BMS' 补量凑到 22（超过方案 §6
+ * 夹具口径：22 张成员单直连 SQL 造（type='bug'，status='待上线'，release_id 初始 NULL）——7 张各配一个
+ *   不同 system_name（覆盖七系统值域，供②断言），15 张 system_name='BMS' 补量凑到 22（超过方案 §6
  *   "≥20 成员详情 foot 五按钮不滚走"验收阈值，稳定触发①的真实滚动）。全部通过真实 POST .../add-issues
  *   端点（经加单弹窗勾选，非直接 SQL 挂 release_id）加入批次——同一动作顺带覆盖②的候选徽章断言，
  *   不另起夹具。
@@ -53,8 +53,8 @@ const SCREENSHOT_DIR = path.join(os.tmpdir(), 'sys-release-mgmt-playwright-shots
 const TITLE_PREFIX = 'RELMG-';
 
 const ADMIN_ID = 1;
-const BIZ_SYSTEMS = ['BMS', 'HRD', '电子签', '客户报销平台', 'RPA程序', '其他'];
-const N_PLAIN_MEMBERS = 16;   // + 6 张系统标签夹具 = 22 张成员（>20 验收阈值）
+const BIZ_SYSTEMS = ['BMS', 'HRD', '电子签', '客户报销平台', 'RPA程序', '小程序-智荟人力', '其他'];
+const N_PLAIN_MEMBERS = 15;   // + 7 张系统标签夹具 = 22 张成员（>20 验收阈值）
 
 const db = new sqlite3.Database(DB_PATH);
 const dbGet = (sql, params = []) => new Promise((res, rej) => db.get(sql, params, (e, row) => e ? rej(e) : res(row)));
@@ -168,7 +168,7 @@ async function main() {
         releaseNo = createR.body.release_no;
         console.log(`  （夹具批次 #${releaseId} / ${releaseNo} 已建）`);
 
-        // ── 夹具：6 张系统标签成员（一系统一张）+ 16 张补量成员，全部「待上线」未挂批次 ──
+        // ── 夹具：7 张系统标签成员（一系统一张）+ 15 张补量成员，全部「待上线」未挂批次 ──
         const taggedMembers = [];
         for (const sys of BIZ_SYSTEMS) {
             const m = await mkPendingIssue(`tag-${sys}`, sys);
@@ -191,7 +191,7 @@ async function main() {
         // ═══════════════════════════════════════════════════════════════
         // ② O1 徽章活体 + 加单（用同一动作把 22 张成员挂进批次，供①③④复用）
         // ═══════════════════════════════════════════════════════════════
-        console.log('\n── ② O1 徽章活体：加单弹窗候选行 .u-sys-tag 存在且文本 ∈ 六系统值 ──');
+        console.log('\n── ② O1 徽章活体：加单弹窗候选行 .u-sys-tag 存在且文本 ∈ 七系统值 ──');
         await page.goto(`${BASE_URL}/Sys_Iteration.html?release=${releaseId}`);
         await page.waitForLoadState('networkidle');
         await page.waitForTimeout(500);
@@ -216,10 +216,10 @@ async function main() {
         // [Opus 预筛 S12 回卷提示2] 原判据 `BIZ_SYSTEMS.every(s => taggedMembers.some(...))` 是恒真式——
         //   taggedMembers 本就是遍历 BIZ_SYSTEMS 逐一构造出来的（见上方 mkPendingIssue 循环），此断言只是
         //   把构造时的输入原样念一遍，不读取任何页面实际渲染结果，页面就算把 .u-sys-tag 全部渲染错也不会
-        //   变红。改为对 renderedTags——本组循环里真实从 DOM 读到的 6 个 .u-sys-tag 文本——做值域覆盖
-        //   判断：唯有页面真渲染出恰好六个互不相同且逐一命中 BIZ_SYSTEMS 的值才算过。
+        //   变红。改为对 renderedTags——本组循环里真实从 DOM 读到的 7 个 .u-sys-tag 文本——做值域覆盖
+        //   判断：唯有页面真渲染出恰好七个互不相同且逐一命中 BIZ_SYSTEMS 的值才算过。
         const renderedTagSet = new Set(renderedTags);
-        await shotOnFail(page, renderedTagSet.size === BIZ_SYSTEMS.length && BIZ_SYSTEMS.every(s => renderedTagSet.has(s)), '2-domain-coverage', `候选行实际渲染的 .u-sys-tag 文本集合应恰好覆盖六系统值域，实得 ${JSON.stringify([...renderedTagSet])}`);
+        await shotOnFail(page, renderedTagSet.size === BIZ_SYSTEMS.length && BIZ_SYSTEMS.every(s => renderedTagSet.has(s)), '2-domain-coverage', `候选行实际渲染的 .u-sys-tag 文本集合应恰好覆盖七系统值域，实得 ${JSON.stringify([...renderedTagSet])}`);
 
         // 勾选全部 22 张夹具成员（精确按 value 定位，不动任何非本次夹具的真实候选行）。
         for (const id of allMemberIds) {

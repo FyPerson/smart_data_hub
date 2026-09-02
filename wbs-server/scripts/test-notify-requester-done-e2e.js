@@ -82,16 +82,16 @@ const tests = [];
 function defTest(name, fn) { tests.push({ name, fn }); }
 
 // ============================================================
-// T2：权限——非本单 exporter 点 → 403 NOT_OWN_EXPORTER
+// T2：权限——非本单 exporter/创建人/admin → 403 NOT_AUTHORIZED_TO_NOTIFY（v1.77.0 改码）
 // ============================================================
-defTest('T2: 非本单 exporter 通知 → 403 NOT_OWN_EXPORTER', async () => {
+defTest('T2: 无关用户通知 → 403 NOT_AUTHORIZED_TO_NOTIFY', async () => {
     const adminToken = await fx.signAs(fx.ADMIN_ID);
     const id = await makeDoneDirectFixture(adminToken, `OA_NRD_T2_${Date.now()}`);
-    // VIEWER2（示例客服B，非本单 exporter，也非 admin）
+    // VIEWER2（示例客服B，非本单 exporter，非创建人（创建人=admin），也非 admin）
     const otherToken = await fx.signAs(fx.VIEWER2_ID);
     const res = await notifyRequesterDone(otherToken, id);
-    if (res.status !== 403 || res.body.code !== 'NOT_OWN_EXPORTER') {
-        throw new Error(`expected 403 NOT_OWN_EXPORTER, got ${res.status} ${JSON.stringify(res.body)}`);
+    if (res.status !== 403 || res.body.code !== 'NOT_AUTHORIZED_TO_NOTIFY') {
+        throw new Error(`expected 403 NOT_AUTHORIZED_TO_NOTIFY, got ${res.status} ${JSON.stringify(res.body)}`);
     }
 });
 
@@ -143,32 +143,65 @@ defTest('T5: normal 路径通知放行 → 走过范围守卫到 409 RESULT_DATA
 });
 
 // ============================================================
-// T5b：权限——exporter_user_id=0 占位 + 非 admin → 403 NOT_OWN_EXPORTER
-//   （范围守卫已删，hasValidExporter 仍在权限守卫起作用：占位单非 admin 无人可发）
+// T5b：权限——exporter_user_id=0 占位 + 非 admin 非创建人 → 403 NOT_AUTHORIZED_TO_NOTIFY（v1.77.0 改码）
+//   （hasValidExporter 在权限守卫起作用：占位单上原 exporter 用户已无身份，且非创建人）
 // ============================================================
-defTest('T5b: exporter_user_id=0 占位 + 非 admin → 403 NOT_OWN_EXPORTER', async () => {
+defTest('T5b: exporter_user_id=0 占位 + 非 admin 非创建人 → 403 NOT_AUTHORIZED_TO_NOTIFY', async () => {
     const adminToken = await fx.signAs(fx.ADMIN_ID);
     const id = await makeDoneDirectFixture(adminToken, `OA_NRD_T5b_${Date.now()}`);
     await fx.setCollabState(id, { exporter_user_id: 0 });
-    // 用原 exporter 用户调（exporter_user_id 已被清 0，hasValidExporter=false → 403）
+    // 用原 exporter 用户调（exporter_user_id 已被清 0，非创建人（创建人=admin）→ 403）
     const exporterToken = await fx.signAs(fx.EXPORTER_ID);
     const res = await notifyRequesterDone(exporterToken, id);
-    if (res.status !== 403 || res.body.code !== 'NOT_OWN_EXPORTER') {
-        throw new Error(`expected 403 NOT_OWN_EXPORTER (占位值非 admin), got ${res.status} ${JSON.stringify(res.body)}`);
+    if (res.status !== 403 || res.body.code !== 'NOT_AUTHORIZED_TO_NOTIFY') {
+        throw new Error(`expected 403 NOT_AUTHORIZED_TO_NOTIFY (占位值非 admin 非创建人), got ${res.status} ${JSON.stringify(res.body)}`);
     }
 });
 
 // ============================================================
-// T5c：范围——exporter_user_id=0 占位 + admin → 409 NOT_EXPORTER_PATH
-//   （codex 79 H-1：范围硬守卫，admin 也不能对无有效 exporter 的 DONE 单发送）
+// T5c（v1.77.0 翻案）：exporter_user_id=0 + admin → developer 交付路径放行
+//   原 codex 79 H-1 的 409 NOT_EXPORTER_PATH 已业务驱动放开（开发 /submit 路径 DONE 单
+//   有 active result_data，创建人/admin 可发）；白名单断言停在物理检查证明放行
 // ============================================================
-defTest('T5c: exporter_user_id=0 占位 + admin → 409 NOT_EXPORTER_PATH', async () => {
+defTest('T5c: exporter_user_id=0 + admin → developer 路径放行至 409 RESULT_DATA_FILE_MISSING', async () => {
     const adminToken = await fx.signAs(fx.ADMIN_ID);
     const id = await makeDoneDirectFixture(adminToken, `OA_NRD_T5c_${Date.now()}`);
     await fx.setCollabState(id, { exporter_user_id: 0 });
     const res = await notifyRequesterDone(adminToken, id);
-    if (res.status !== 409 || res.body.code !== 'NOT_EXPORTER_PATH') {
-        throw new Error(`expected 409 NOT_EXPORTER_PATH (admin+占位值被范围守卫拦), got ${res.status} ${JSON.stringify(res.body)}`);
+    if (res.status !== 409 || res.body.code !== 'RESULT_DATA_FILE_MISSING') {
+        throw new Error(`expected 409 RESULT_DATA_FILE_MISSING (developer 路径放行+假路径), got ${res.status} ${JSON.stringify(res.body)}`);
+    }
+});
+
+// ============================================================
+// T5d（v1.77.0 新增）：创建人（非 admin 非 exporter）→ 放行至 409 RESULT_DATA_FILE_MISSING
+//   协作单创建 endpoint 仅 admin（生产现实创建人=admin，isAdmin 已短路 isCreator）——
+//   isCreator 分支用 setCollabState 改 created_by=publisher 模拟"创建人非 admin"验证逻辑本身
+// ============================================================
+defTest('T5d: 创建人（非 admin）发送开发交付文件 → 放行至 409 RESULT_DATA_FILE_MISSING', async () => {
+    const adminToken = await fx.signAs(fx.ADMIN_ID);
+    const id = await makeDoneDirectFixture(adminToken, `OA_NRD_T5d_${Date.now()}`);
+    // 开发交付路径（exporter=0）+ 创建人改为 publisher（非 admin 非 exporter）
+    await fx.setCollabState(id, { exporter_user_id: 0, created_by: fx.PUBLISHER_ID });
+    const pubToken = await fx.signAs(fx.PUBLISHER_ID);
+    const res = await notifyRequesterDone(pubToken, id);
+    if (res.status !== 409 || res.body.code !== 'RESULT_DATA_FILE_MISSING') {
+        throw new Error(`expected 409 RESULT_DATA_FILE_MISSING (创建人放行+假路径), got ${res.status} ${JSON.stringify(res.body)}`);
+    }
+});
+
+// ============================================================
+// T5e（v1.77.0 新增）：对接人（非创建人非 exporter 非 admin）→ 403
+//   边界固化：对接人是内部流转角色，不在发送权限内
+// ============================================================
+defTest('T5e: 对接人发送 → 403 NOT_AUTHORIZED_TO_NOTIFY', async () => {
+    const adminToken = await fx.signAs(fx.ADMIN_ID);
+    const id = await makeDoneDirectFixture(adminToken, `OA_NRD_T5e_${Date.now()}`);
+    await fx.setCollabState(id, { exporter_user_id: 0 });
+    const contactToken = await fx.signAs(fx.CONTACT_ID);
+    const res = await notifyRequesterDone(contactToken, id);
+    if (res.status !== 403 || res.body.code !== 'NOT_AUTHORIZED_TO_NOTIFY') {
+        throw new Error(`expected 403 NOT_AUTHORIZED_TO_NOTIFY (对接人非创建人), got ${res.status} ${JSON.stringify(res.body)}`);
     }
 });
 

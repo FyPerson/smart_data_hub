@@ -407,6 +407,14 @@ async function runTests() {
         assert(res.status === 400 && res.body.code === 'INVALID_SCREENSHOT', `T19 screenshot 错类型拒 code=${res.body && res.body.code}`);
     }
 
+    console.log('\n=== T19b: 导出截图传 .pdf → 400（v1.77.0 screenshot 规则放开 PDF 但导出截图入口单独排除）===');
+    {
+        const ctx = await makeExportingFixture();
+        const res = await postSubmitExport(ctx.id, exporterToken, { shotExt: '.pdf' });
+        assert(res.status === 400 && res.body.code === 'INVALID_SCREENSHOT', `T19b 导出截图 PDF 拒 code=${res.body && res.body.code}`);
+        assert(/不支持 PDF/.test(res.body.error || ''), `T19b 错误文案明示不支持 PDF`);
+    }
+
     console.log('\n=== T20: export_summary > 500 字 → 400 EXPORT_SUMMARY_TOO_LONG ===');
     {
         const ctx = await makeExportingFixture();

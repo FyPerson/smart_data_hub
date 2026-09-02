@@ -468,7 +468,7 @@ Write-Host "  [OK] 替换完成: $changedFiles 个文件" -ForegroundColor Green
 Write-Phase "[4/6] 残留敏感词扫描"
 # 复用步骤 3 收集的 $files（同一文件后缀来源 $textExts，codex H-2/L-2 收集一次）
 # 宽兜底模式（比替换更宽，catch 未列出的变体；手工维护）
-#   ⚠️ 不放手机号宽匹配 1[3-9]\d{9}：会误伤测试假号（如 13800000013）。真实手机号靠 $phoneMap 派生精确匹配。
+#   ⚠️ 不放手机号宽匹配 1[3-9]\d{9}：会误伤测试假号（如 19900000024）。真实手机号靠 $phoneMap 派生精确匹配。
 $broadPatterns = @(
     "172\.16\.[0-9]+\.[0-9]+",
     "change_me_on_first_login", "change_me_on_first_login",

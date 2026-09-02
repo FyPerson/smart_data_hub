@@ -1348,9 +1348,11 @@
                 <button class="modal-close" onclick="closeExportUploadModal()">×</button>
             </div>
             <div class="u-modal-body">
-                <!-- v1.120.0 Commit C：真直派单显示「大文件线下传递·无附件提交」提示条 -->
+                <!-- v1.120.0 Commit C 引入（原仅真直派单显示）；v1.164.2 起对所有 EXPORTING 单显示——
+                     无附件提交已放开到「导出人本人」，不再限单类型（后端 submit-export 守卫②已废除）。
+                     初始 display:none 仅防 JS 未跑时闪现，openExportUploadDialog 恒置 block。 -->
                 <div class="u-hint" id="exportNoFileTip" style="display:none;margin-bottom:10px;padding:8px 10px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:6px;color:#1e40af;">
-                    📦 本单为 admin 直派单。若导出结果为大文件无法上传平台，可<strong>不选附件</strong>直接提交，
+                    📦 若导出结果为大文件无法上传平台（线下移交），可<strong>不选附件</strong>直接提交，
                     但需在下方<strong>导出概要</strong>里写明（≥10 字）：导出了什么、为何不传附件、线下如何移交。
                 </div>
                 <div class="u-form-group">
@@ -1369,7 +1371,8 @@
                     <div class="u-hint">最多 500 字。该概要将展示在详情页并附带在钉钉通知前 80 字。</div>
                 </div>
                 <div class="u-hint" style="margin-top:8px;color:#6b7280;">
-                    提交后协作单进入「已提交」状态，由开发或 admin 走最终验收 / 行政闭环。
+                    提交后协作单直接进入「已完成」终态，标记为「行政闭环（未执行 SQL 验收）」。
+                    如需修正交付物，由 admin 走「修正交付物」。
                 </div>
             </div>
             <div class="u-modal-footer">
@@ -4932,8 +4935,12 @@
         // ---------- exportUpload modal ----------
         // codex 41 H-3 采纳：multer field 名 result_data_screenshot
         // codex 41 M-2 采纳：superseded_attachments.length > 0 时 toast 覆盖数量
-        // v1.120.0 Commit C：genuineDirect=true（真直派单）时放开附件必填 UI——
-        //   附件 * 去掉、显示无附件提示条、概要标签改「可选」为「可选（无附件时必填 ≥10 字）」。
+        // v1.120.0 Commit C：genuineDirect=true（真直派单）时放开附件必填 UI。
+        // v1.164.2：附件必填 UI 对**所有** EXPORTING 单放开（后端守卫②已废除，无附件提交不再限单类型）——
+        //   附件 * 恒去掉、提示条恒显示。gd 此后只再决定「有附件时概要要不要必填」：
+        //     · gd=true（真直派单）：概要恒必填 ≥10 字（红星常亮，2026-07-21 用户调整，不变）
+        //     · gd=false（normal 单）：概要仅在无附件时必填（红星不亮，标签写明条件）
+        //   与后端守卫③ `isGenuineDirectExporting || !hasFiles` 逐字对齐。
         let _exportUploadGenuineDirect = false;
         function openExportUploadDialog(id, genuineDirect) {
             const safeId = Number(id);
@@ -4947,19 +4954,20 @@
             document.getElementById('f_export_result_data').value = '';
             document.getElementById('f_export_screenshot').value = '';
             document.getElementById('f_export_summary').value = '';
-            // 真直派单：放开附件必填 UI + 导出概要变必填（无论有无附件·≥10 字·加红星 *）
+            // v1.164.2：附件必填 UI 对所有单放开（提示条恒显示、附件红星恒去掉）；
+            //   概要必填与否仍按 gd 分流（真直派恒必填 / normal 单仅无附件时必填）。
             const gd = _exportUploadGenuineDirect;
-            document.getElementById('exportNoFileTip').style.display = gd ? 'block' : 'none';
-            document.getElementById('exportDataStar').style.display = gd ? 'none' : '';
-            document.getElementById('exportShotStar').style.display = gd ? 'none' : '';
+            document.getElementById('exportNoFileTip').style.display = 'block';
+            document.getElementById('exportDataStar').style.display = 'none';
+            document.getElementById('exportShotStar').style.display = 'none';
             document.getElementById('exportSummaryLabel').textContent = gd
                 ? '导出概要（≥10 字）'
-                : '操作概要（可选）';
+                : '操作概要（不传附件时必填 ≥10 字）';
             document.getElementById('exportSummaryStar').style.display = gd ? '' : 'none';
             // codex 审 LOW-2：placeholder 随模式切换，避免「必填标签 + 可选 placeholder」文案冲突
             document.getElementById('f_export_summary').placeholder = gd
                 ? '必填（≥10 字）：说明本次导出了什么、附件情况；如为大文件线下移交，请说明移交方式'
-                : '可选：简述本次导出的范围与操作要点（如时间段、过滤条件、是否脱敏等）';
+                : '传附件时可选；不传附件时必填（≥10 字）：说明导出了什么、为何不传附件、线下如何移交';
             const btn = document.getElementById('btnExportUpload');
             btn.disabled = false;
             btn.textContent = '提交';
@@ -4980,24 +4988,22 @@
             const summary = (document.getElementById('f_export_summary').value || '').trim();
             const gd = _exportUploadGenuineDirect;
 
-            // v1.120.0 Commit C：附件校验分两路（与后端 submit-export 对齐）
-            //   · 非真直派单：两附件必填（原逻辑），概要仍可选
-            //   · 真直派单：允许无附件，但两附件必须「同时有或同时无」；导出概要**无论有无附件都必填 ≥10 字**
-            //     （2026-07-21 用户调整：直派模式概要为必填项，便于留痕说明导出内容/线下移交方式）
+            // v1.164.2：附件校验对所有单统一（与后端 submit-export 守卫②废除后逐字对齐）
+            //   · 两附件必须「同时有或同时无」（半残 → 拒，对应后端 PARTIAL_ATTACHMENTS）
+            //   · 概要必填 ≥10 字的条件 = gd（真直派单，无论有无附件）|| 无附件（任意单）
+            //     ——与后端 `isGenuineDirectExporting || !hasFiles` 同构，前端不得比后端宽松
             const hasData = !!dataFile, hasShot = !!shotFile;
-            if (!gd) {
-                if (!hasData) { showToast('请选择结果数据文件', 'error'); return; }
-                if (!hasShot) { showToast('请选择导出界面截图', 'error'); return; }
-            } else {
-                if (hasData !== hasShot) {
-                    showToast('结果数据与截图需同时提交，或同时留空（无附件提交需填写导出概要 ≥10 字）', 'error');
-                    return;
-                }
-                // 直派模式导出概要必填 ≥10 字（无论有无附件）
-                if (summary.length < 10) {
-                    showToast('直派单提交时，导出概要必填且不少于 10 字（说明导出了什么、附件情况、如需线下移交请说明方式）', 'error');
-                    return;
-                }
+            if (hasData !== hasShot) {
+                showToast('结果数据与截图需同时提交，或同时留空（不传附件需填写导出概要 ≥10 字）', 'error');
+                return;
+            }
+            const noFiles = !hasData;
+            if ((gd || noFiles) && summary.length < 10) {
+                showToast(noFiles
+                    ? '不传附件时，导出概要必填且不少于 10 字（说明导出了什么、为何不传附件、线下如何移交）'
+                    : '直派单提交时，导出概要必填且不少于 10 字（说明导出了什么、附件情况、如需线下移交请说明方式）',
+                    'error');
+                return;
             }
 
             if (summary.length > 500) {

@@ -228,7 +228,7 @@ async function main() {
   await run(`INSERT INTO users (id, username, display_name, role, phone) VALUES
     (1,'admin','管理员','admin','13800000001'),(2,'admin2','管理员乙','admin','13800000002'),
     (5,'dev','开发王','user','13800000005'),(7,'shenjun','示例发布者','publisher','13800000007'),
-    (13,'wangtaotao','示例对接人','user','13800000013')`);
+    (13,'wangtaotao','示例对接人','user','19900000024')`);
   await new Promise((res) => { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = app.listen(0, () => { port = server.address().port; res(); }); });
   ok('readiness ready + HTTP harness（admin1/admin2 / 受理人13 / 技术负责人7 / dev5）');
 

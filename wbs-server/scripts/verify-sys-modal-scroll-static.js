@@ -593,7 +593,7 @@ check('.u-sys-tag 规则声明体存在于 Sys_Iteration.html 页面内 <style>�
     assert.ok(/background:\s*#f1f5f9/.test(rule), '缺 background:#f1f5f9（D1 中性 slate 底色）');
     assert.ok(/color:\s*#475569/.test(rule), '缺 color:#475569（D1 中性 slate 字色）');
     assert.ok(/border:[^;]*#e2e8f0/.test(rule), '缺 border 含 #e2e8f0（D1 中性 slate 边色）');
-    assert.ok(/white-space:\s*nowrap/.test(rule), '缺 white-space:nowrap（449-L1：长系统名"客户报销平台"防撑挤）');
+    assert.ok(/white-space:\s*nowrap/.test(rule), '缺 white-space:nowrap（449-L1：长系统名「小程序-智荟人力」（现最长·7 个汉字加 1 个连字符共 8 字符）防撑挤）');
 });
 check('.u-sys-tag 不出现在共享 components.css（红：被误挪进共享层——O1 明文"落页面内 <style>，免 ?v= bump 与四页回归"，误挪会让本页与另三页产生非预期共享耦合）', () => {
     const componentsCssPath = path.join(__dirname, '..', 'public', 'assets', 'css', 'components.css');
@@ -603,21 +603,21 @@ check('.u-sys-tag 不出现在共享 components.css（红：被误挪进共享�
 check('siModalAddToBatch 候选行模板：system_name 假值不渲染空徽章（红：改成恒渲染或用 `|| ""` 之类总会产出 <span> 外壳的写法——空系统名的单会显示一个空徽章）', () => {
     const body = extractFunctionBody(src, 'siModalAddToBatch');
     assert.ok(body, '未提取到 siModalAddToBatch 函数体');
-    // [观察反馈优化批 R7] 六色分色变体后 class 属性多了条件片段 ${sysCls ? ' '+sysCls : ''}——
+    // [观察反馈优化批 R7] 七色分色变体后 class 属性多了条件片段 ${sysCls ? ' '+sysCls : ''}——
     //   条件渲染判据本体（i.system_name ? ... : ''）不变，只放宽 class 属性内部的精确匹配。
     assert.ok(/i\.system_name\s*\?\s*`?\s*<span class="u-sys-tag\$\{sysCls/.test(body), '未找到 "i.system_name ? ... <span class=\\"u-sys-tag${sysCls" 条件渲染写法');
 });
-check('siModalAddToBatch 候选行模板：.u-sys-tag 徽章值经 esc() 转义（红：改成裸拼接 ${i.system_name}——虽值域受后端 BIZ_SYSTEMS 六值白名单约束，前端仍不信任后端数据形态，须走既有转义惯例）', () => {
+check('siModalAddToBatch 候选行模板：.u-sys-tag 徽章值经 esc() 转义（红：改成裸拼接 ${i.system_name}——虽值域受后端 BIZ_SYSTEMS 七值白名单约束，前端仍不信任后端数据形态，须走既有转义惯例）', () => {
     const body = extractFunctionBody(src, 'siModalAddToBatch');
     assert.ok(body, '未提取到 siModalAddToBatch 函数体');
     assert.ok(/<span class="u-sys-tag\$\{sysCls[^}]*\}">\$\{esc\(i\.system_name\)\}<\/span>/.test(body), '未找到 "<span class=\\"u-sys-tag${sysCls...}\\">${esc(i.system_name)}</span>" 转义写法');
 });
 
-console.log('— §⑪b（观察反馈优化批 R7）所属系统徽章六色映射——demo V1 拍板值 —');
-const SIX_SYS_TAG_CLASSES = ['u-sys-tag-bms', 'u-sys-tag-hrd', 'u-sys-tag-esign', 'u-sys-tag-reimb', 'u-sys-tag-rpa', 'u-sys-tag-other'];
+console.log('— §⑪b（观察反馈优化批 R7）所属系统徽章七色映射——demo V1 拍板值 —');
+const EXPECTED_SYS_TAG_CLASSES = ['u-sys-tag-bms', 'u-sys-tag-hrd', 'u-sys-tag-esign', 'u-sys-tag-reimb', 'u-sys-tag-rpa', 'u-sys-tag-miniapp', 'u-sys-tag-other'];
 // [Opus 预筛拦截-5] SI_SYS_TAG_CLASS 是前端对 BIZ_SYSTEMS 的硬编码副本——若守卫只自证"页面内这份
-//   映射表内部自洽"（6 组键值、类名互不相同），对不上真正的权威源，退化成永真守卫：BIZ_SYSTEMS 改了
-//   （历史已发生两次：新增「电子签」「RPA程序」、移除「OA」「智数协同」），前端这份副本忘改，三套
+//   映射表内部自洽"（7 组键值、类名互不相同），对不上真正的权威源，退化成永真守卫：BIZ_SYSTEMS 改了
+//   （历史已发生三次：新增「电子签」「RPA程序」「小程序-智荟人力」、移除「OA」「智数协同」），前端这份副本忘改，三套
 //   守卫（本文件+RELMG-+MPPW-）全绿却漏了新系统的徽章配色。判定源同源：直接 require 后端 transitions.js
 //   （纯常量模块，无 DB/Express 依赖，同 verify-sys-c11 的判定源同源纪律）取真正的 BIZ_SYSTEMS。
 const { BIZ_SYSTEMS } = require(path.join(__dirname, '..', 'routes', 'sys-iteration', 'transitions'));
@@ -628,13 +628,13 @@ function extractSiSysTagClassEntries() {
     assert.ok(m, '未找到 SI_SYS_TAG_CLASS 映射表定义（含 Object.freeze 包裹）');
     return [...m[1].matchAll(/'([^']+)':\s*'(u-sys-tag-[a-z]+)'/g)].map((e) => [e[1], e[2]]);
 }
-check('SI_SYS_TAG_CLASS 映射表恰含 6 组键值，映射到 6 个互不相同的 u-sys-tag-* 变体类名，且 key 集合与真正的后端 BIZ_SYSTEMS 逐一相等（红：漏配/多配/多键映射同一类名导致视觉混淆；或前端副本与 BIZ_SYSTEMS 权威源脱节——判定源同源，非自证自的另一份清单）', () => {
+check('SI_SYS_TAG_CLASS 映射表恰含 7 组键值，映射到 7 个互不相同的 u-sys-tag-* 变体类名，且 key 集合与真正的后端 BIZ_SYSTEMS 逐一相等（红：漏配/多配/多键映射同一类名导致视觉混淆；或前端副本与 BIZ_SYSTEMS 权威源脱节——判定源同源，非自证自的另一份清单）', () => {
     const entries = extractSiSysTagClassEntries();
-    assert.strictEqual(entries.length, 6, `SI_SYS_TAG_CLASS 应恰 6 组键值，实得 ${entries.length}`);
+    assert.strictEqual(entries.length, 7, `SI_SYS_TAG_CLASS 应恰 7 组键值，实得 ${entries.length}`);
     const keys = entries.map((e) => e[0]);
     const classNames = entries.map((e) => e[1]);
-    assert.strictEqual(new Set(classNames).size, 6, `6 个类名应互不相同，实得去重后 ${new Set(classNames).size} 个：${JSON.stringify(classNames)}`);
-    for (const cls of SIX_SYS_TAG_CLASSES) assert.ok(classNames.includes(cls), `缺少类名 ${cls}`);
+    assert.strictEqual(new Set(classNames).size, 7, `7 个类名应互不相同，实得去重后 ${new Set(classNames).size} 个：${JSON.stringify(classNames)}`);
+    for (const cls of EXPECTED_SYS_TAG_CLASSES) assert.ok(classNames.includes(cls), `缺少类名 ${cls}`);
     assert.ok(Array.isArray(BIZ_SYSTEMS) && BIZ_SYSTEMS.length >= 2, 'BIZ_SYSTEMS 应为非空数组（判定源同源自检——同 verify-sys-c11 A4 同款前置断言）');
     const keySet = new Set(keys), bizSet = new Set(BIZ_SYSTEMS);
     assert.strictEqual(keySet.size, bizSet.size, `SI_SYS_TAG_CLASS key 数（${keySet.size}）应与 BIZ_SYSTEMS 数（${bizSet.size}）相等——实得 SI_SYS_TAG_CLASS keys=${JSON.stringify(keys)}／BIZ_SYSTEMS=${JSON.stringify(BIZ_SYSTEMS)}`);
@@ -642,16 +642,16 @@ check('SI_SYS_TAG_CLASS 映射表恰含 6 组键值，映射到 6 个互不相�
     for (const k of keys) assert.ok(bizSet.has(k), `SI_SYS_TAG_CLASS 的「${k}」不在 BIZ_SYSTEMS 内（前端多配了一个后端已不承认的系统）`);
 });
 // [Opus 预筛提示-4] 配对断言——上面的集合成员校验证不出"key→class 被两两对调"：把 BMS 的类名和
-//   HRD 的类名互换，keys 集合仍是那 6 个、classNames 集合仍是那 6 个，两条既有断言原样通过。必须
-//   逐对 deepStrictEqual 才能钉死配对本身。六对顺序取当前 demo V1 拍板的书写顺序（非 BIZ_SYSTEMS
+//   HRD 的类名互换，keys 集合仍是那 7 个、classNames 集合仍是那 7 个，两条既有断言原样通过。必须
+//   逐对 deepStrictEqual 才能钉死配对本身。七对顺序取当前 demo V1 拍板的书写顺序（非 BIZ_SYSTEMS
 //   数组顺序——两者本可不同序，这里只钉"页面内这份声明的书写顺序不能变"，不重复造一次顺序无关判据）。
 const EXPECTED_SYS_TAG_PAIRS = [
     ['BMS', 'u-sys-tag-bms'], ['HRD', 'u-sys-tag-hrd'], ['电子签', 'u-sys-tag-esign'],
-    ['客户报销平台', 'u-sys-tag-reimb'], ['RPA程序', 'u-sys-tag-rpa'], ['其他', 'u-sys-tag-other'],
+    ['客户报销平台', 'u-sys-tag-reimb'], ['RPA程序', 'u-sys-tag-rpa'], ['小程序-智荟人力', 'u-sys-tag-miniapp'], ['其他', 'u-sys-tag-other'],
 ];
-check('SI_SYS_TAG_CLASS 六对 key→class 精确配对（红：任意两个系统的类名被对调——keys 集合和 classNames 集合各自仍然齐全，只有逐对 deepStrictEqual 才能抓出，纯集合校验对此类缺陷视而不见）', () => {
+check('SI_SYS_TAG_CLASS 七对 key→class 精确配对（红：任意两个系统的类名被对调——keys 集合和 classNames 集合各自仍然齐全，只有逐对 deepStrictEqual 才能抓出，纯集合校验对此类缺陷视而不见）', () => {
     const entries = extractSiSysTagClassEntries();
-    assert.deepStrictEqual(entries, EXPECTED_SYS_TAG_PAIRS, `六对 key→class 应逐对精确匹配 ${JSON.stringify(EXPECTED_SYS_TAG_PAIRS)}，实得 ${JSON.stringify(entries)}`);
+    assert.deepStrictEqual(entries, EXPECTED_SYS_TAG_PAIRS, `七对 key→class 应逐对精确匹配 ${JSON.stringify(EXPECTED_SYS_TAG_PAIRS)}，实得 ${JSON.stringify(entries)}`);
 });
 check('SI_SYS_TAG_CLASS 声明已用 Object.freeze 包裹（对齐同页 SI_TYPE_CLASS/SI_EXEC_SUMMARY_CLS 等同款「class 片段 gate」映射表写法，红：漏包会让本表在运行期可被意外改写）', () => {
     assert.ok(/const SI_SYS_TAG_CLASS = Object\.freeze\(\{/.test(src), '未找到 "const SI_SYS_TAG_CLASS = Object.freeze({" 声明形态');
@@ -663,20 +663,20 @@ check('siSysTagClass() 走同 siTypeClass 同款「class 片段 gate」范式：
     assert.ok(/UnifyHelpers\.warnBadgeOnce\(/.test(body), '未找到 UnifyHelpers.warnBadgeOnce(...) 告警调用');
     assert.ok(/return\s+'';/.test(body), "未找到兜底 return ''（未登记值应静默降级为无变体，非崩溃/非伪造）");
 });
-check('六条 .u-sys-tag-* CSS 规则各自存在且 background 色值互不相同（红：某两个系统被误配成同一色值，用户将无法用颜色区分系统）', () => {
-    const rules = SIX_SYS_TAG_CLASSES.map((cls) => extractCssRule(src, '.' + cls));
-    rules.forEach((r, i) => assert.ok(r, `未找到 .${SIX_SYS_TAG_CLASSES[i]} 规则声明体`));
+check('七条 .u-sys-tag-* CSS 规则各自存在且 background 色值互不相同（红：某两个系统被误配成同一色值，用户将无法用颜色区分系统）', () => {
+    const rules = EXPECTED_SYS_TAG_CLASSES.map((cls) => extractCssRule(src, '.' + cls));
+    rules.forEach((r, i) => assert.ok(r, `未找到 .${EXPECTED_SYS_TAG_CLASSES[i]} 规则声明体`));
     // [Opus 预筛拦截-4] 原判据直接 `(r.match(...) || [])[1]` 塞进 Set——若某条规则 background 提取
-    //   失败（正则不匹配），结果为 undefined，恰好可能与"其余 5 个互不相同的真色值"凑成 size=6 而
-    //   静默放行，自蔽成"6 个互不相同"（实际是 5 真值 + 1 个 undefined）。改为先逐条断言捕获成功，
+    //   失败（正则不匹配），结果为 undefined，恰好可能与"其余 6 个互不相同的真色值"凑成 size=7 而
+    //   静默放行，自蔽成"7 个互不相同"（实际是 6 真值 + 1 个 undefined）。改为先逐条断言捕获成功，
     //   捕获失败必须在这里就单独判红，不允许流入 Set 计数掩盖。
     const bgs = rules.map((r, i) => {
         const m = r.match(/background:\s*(#[0-9a-fA-F]+)/);
-        assert.ok(m, `.${SIX_SYS_TAG_CLASSES[i]} 规则未能提取到 background 色值（正则不匹配——须先修复提取本身，非"色值恰好重复"）`);
+        assert.ok(m, `.${EXPECTED_SYS_TAG_CLASSES[i]} 规则未能提取到 background 色值（正则不匹配——须先修复提取本身，非"色值恰好重复"）`);
         return m[1];
     });
     const bgSet = new Set(bgs);
-    assert.strictEqual(bgSet.size, 6, `6 条规则的 background 色值应互不相同，实得去重后 ${bgSet.size} 个：${JSON.stringify(bgs)}`);
+    assert.strictEqual(bgSet.size, 7, `7 条规则的 background 色值应互不相同，实得去重后 ${bgSet.size} 个：${JSON.stringify(bgs)}`);
 });
 check('siModalAddToBatch 候选行模板：标题改包 .si-chk-text（既有 flex:1;min-width:0 范式）作为行内唯一可收缩项（红：标题退回裸文本拼接——checkbox/编号/类型标签/系统徽章均定宽 nowrap，新增系统徽章后若标题不可收缩会撑破候选行）', () => {
     const body = extractFunctionBody(src, 'siModalAddToBatch');

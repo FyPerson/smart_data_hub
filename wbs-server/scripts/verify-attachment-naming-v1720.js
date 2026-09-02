@@ -64,6 +64,14 @@ check('T5 rd failed',
     v.buildFinalAttachmentName({oaRequestNo: 'OA-364265', createdAt: '2026-05-22 10:30:00', seq: 3, attachmentType: 'result_data', isFailed: true, displayName: '示例用户A', username: 'demo_user_a', ext: '.xlsx'}),
     'OA-364265_20260522_003_rd_failed_示例用户A.xlsx');
 
+check('T5b ds (data_scope, v1.77.0)',
+    v.buildFinalAttachmentName({oaRequestNo: 'OA-364265', createdAt: '2026-06-10 10:00:00', seq: 1, attachmentType: 'data_scope', isFailed: false, displayName: '管理员', username: 'admin', ext: '.txt'}),
+    'OA-364265_20260610_001_ds_管理员.txt');
+
+check('T5c sc 支持 .pdf (v1.77.0)',
+    v.buildFinalAttachmentName({oaRequestNo: 'OA-364265', createdAt: '2026-06-10 10:00:00', seq: 2, attachmentType: 'screenshot', isFailed: false, displayName: '管理员', username: 'admin', ext: '.PDF'}),
+    'OA-364265_20260610_002_sc_管理员.pdf');
+
 console.log('\n--- 字符净化 T6-T9 ---');
 check('T6 OA 含 / 空格 _',
     v.buildFinalAttachmentName({oaRequestNo: 'TEST/OA 123_456', createdAt: '2026-05-22 10:30:00', seq: 1, attachmentType: 'result_data', isFailed: false, displayName: '示例用户A', username: 'fy', ext: '.xlsx'}),

@@ -109,20 +109,21 @@ function mockFetch(status, jsonBody, { throwOnJson = false } = {}) {
         catch (e) { assert.ok(/non-JSON/.test(e.message)); }
     });
 
-    // --- buildRequesterDoneCard ---
-    await t('buildRequesterDoneCard: 入参 escapeMarkdown 转义', async () => {
-        const c = d.buildRequesterDoneCard({ oaRequestNo: 'OA-*1*', description: 'a_b', exporterName: '示例用户A' });
+    // --- buildRequesterDoneCard（v1.77.0：联系人 = 单据发送人 senderName，非 exporterName）---
+    await t('buildRequesterDoneCard: 入参 escapeMarkdown 转义 + 发送人署名', async () => {
+        const c = d.buildRequesterDoneCard({ oaRequestNo: 'OA-*1*', description: 'a_b', senderName: '示例用户A' });
         assert.ok(c.text.includes('OA-\\*1\\*'), 'oaRequestNo 应转义');
         assert.ok(c.text.includes('a\\_b'), 'description 应转义');
-        assert.ok(c.text.includes('示例用户A'), '含导出人名');
+        assert.ok(c.text.includes('请联系单据发送人 示例用户A'), '联系人=单据发送人署名');
+        assert.ok(!c.text.includes('数据导出人'), '不再出现"数据导出人"角色词');
     });
-    await t('buildRequesterDoneCard: exporterName 空 → 改"平台管理员"无末尾空白', async () => {
+    await t('buildRequesterDoneCard: senderName 空 → 改"平台管理员"无末尾空白', async () => {
         const c = d.buildRequesterDoneCard({ oaRequestNo: 'OA-1', description: 'x' });
         assert.ok(c.text.includes('请联系平台管理员。'), '空名应转平台管理员');
-        assert.ok(!c.text.includes('数据导出人 。'), '不应有末尾空白');
+        assert.ok(!c.text.includes('单据发送人 。'), '不应有末尾空白');
     });
     await t('buildRequesterDoneCard: description 空 → 不渲染需求行', async () => {
-        const c = d.buildRequesterDoneCard({ oaRequestNo: 'OA-1', exporterName: '示例用户A' });
+        const c = d.buildRequesterDoneCard({ oaRequestNo: 'OA-1', senderName: '示例用户A' });
         assert.ok(!c.text.includes('**需求**'), 'description 空不应有需求行');
     });
 

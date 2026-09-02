@@ -260,7 +260,7 @@ async function main() {
   await run(`CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT, status TEXT DEFAULT 'active', phone TEXT, dingtalk_user_id TEXT)`);
   await run(`INSERT INTO users (id, username, display_name, role, status, phone) VALUES
     (1,'admin','管理员','admin','active','13800000001'),
-    (13,'wangtaotao','示例对接人','user','active','13800000013'),
+    (13,'wangtaotao','示例对接人','user','active','19900000024'),
     (5,'dev5','开发甲','user','active','13800000005'),
     (6,'dev6','开发乙','user','active','13800000006'),
     (9,'dev9','开发丙','user','active','13800000009')`);

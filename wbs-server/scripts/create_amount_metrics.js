@@ -135,7 +135,7 @@ const metrics = [
 ];
 
 async function main() {
-  const login = await request('POST', '/api/auth/login', { username: 'admin', password: process.env.API_PASSWORD || 'change_me_on_first_login' });
+  const login = await request('POST', '/api/auth/login', { username: 'admin', password: 'change_me_on_first_login' });
   const token = login.token;
   console.log('Login OK\n');
 

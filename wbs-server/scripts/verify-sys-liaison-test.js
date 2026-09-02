@@ -27,6 +27,9 @@
 //   [15] codex 277 号审 H-2：最终回写保护——单次异常重试成功仍 sent / 连续两次异常 200+writeback_failed 警示
 //   [16] codex 277/278 号审 M-2/M-5：认证层同构替身测试——源码断言+最小可行复刻中间件（非真实服务入口
 //        集成，见该段注释披露），停用账号 403+业务零执行
+//   [M] M1-M9 小程序按系统跳过对接测试专项（S3/S6·M9 贯穿提交→跳过→验收→混批→上线；执行人已通知
+//       前置由 SQL 夹具注入·不覆盖通知发送转换；真实端点 POST /sys-releases/:id/executors/:userId/notify
+//       本轮不改走）
 //
 // in-process app + 内存库 + 自签 token，照 verify-sys-multidev-members.js 范式：issue/roster 直接 raw SQL
 // 造数（本文件测的是 runWGate 决策树与两条新引擎边，非建单/受理/指派链路本身），真实 HTTP 调用触发被测端点。
@@ -152,8 +155,13 @@ async function runWithWritebackHook(sql, params) {
   }
   return run(sql, params);
 }
+// [S3·M7] 捕获 logger.error 调用参数——供 fail-closed「查无单据」断言核实日志信号是否真的写出。仍是
+//   纯记录、零行为影响（不像 noop 那样丢弃，只是多做一步 push），不改变任何既有用例的可观测行为——
+//   本文件其余用例从不读取 capturedLoggerErrors，噪声调用（如 [3] 段"未知 dev_status"分支）不会被
+//   任何断言消费，M7 自己按调用前后长度差取"新增"这一段，不受历史噪声干扰。
+const capturedLoggerErrors = [];
 const mod = require('../routes/sys-iteration')({
-  logger: { info: noop, warn: noop, error: noop, debug: noop },
+  logger: { info: noop, warn: noop, error: (...args) => { capturedLoggerErrors.push(args); }, debug: noop },
   db, dbRunAsync: runWithWritebackHook, dbGetAsync: getWithRaceHook, dbAllAsync: all,
   authenticateToken, requireAdmin,
   ...require('./_sys-attach-test-deps'),
@@ -200,13 +208,17 @@ function futureEst(days) {
 // ── 造数 helper（同 verify-sys-multidev-members.js 范式：raw SQL 直造 issue/roster，测的是 runWGate 决策树
 //   与 liaison_test_pass/return 两条新引擎边本身，非建单/受理/指派链路）。──────────
 //   intakeLiaisonId：默认=13（有效对接人，走 ⑦ 正常路径）；传 null 或不在池内的 id（如 999999）走 ⑥ 降级。
+//   [S3·所属系统「小程序-智荟人力」接入] systemName：默认='BMS'（原有全部调用点零改动，向后兼容）——
+//   之前 system_name 列在 VALUES 里是裸字面量 'BMS'（不可参数化），本次改成 `?` 占位符 + extra.systemName
+//   回落 'BMS'，供 M 组夹具传 '小程序-智荟人力' 造按系统跳过对接测试的正例/对照组。
 async function mkIssue(type, status, extra = {}) {
   const est = extra.devEstimatedAt === null ? null : (extra.devEstimatedAt || futureEst(30));
   const intakeLiaisonId = Object.prototype.hasOwnProperty.call(extra, 'intakeLiaisonId') ? extra.intakeLiaisonId : 13;
+  const systemName = extra.systemName || 'BMS';
   const r = await run(
     `INSERT INTO sys_issues (type, status, title, system_name, source, created_by, created_by_name, dev_estimated_at, oa_number, intake_liaison_id, needs_feasibility, feasibility_conclusion, feasibility_requirement_confirm, estimated_effort_days, return_count)
-     VALUES (?, ?, ?, 'BMS', '内部', 1, '管理员', ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [type, status, extra.title || `${type}-${status}-单`, est, extra.oaNumber === null ? null : (extra.oaNumber || '20260728300'),
+     VALUES (?, ?, ?, ?, '内部', 1, '管理员', ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [type, status, extra.title || `${type}-${status}-单`, systemName, est, extra.oaNumber === null ? null : (extra.oaNumber || '20260728300'),
      intakeLiaisonId,
      extra.needsFeasibility || 0, extra.feasibilityConclusion || null, extra.feasibilityRequirementConfirm || null,
      // [C7 工时评估补全·方案 v1.7 §9.1] 工期资格从「nf=1 ∧ feature」扩到「feature/improvement × nf 两值」
@@ -252,7 +264,7 @@ async function lastCompletedAt(issueId) {
     `SELECT (SELECT MAX(created_at) FROM sys_issue_timeline
                 WHERE issue_id = sys_issues.id AND event_type = 'status_change'
                   AND to_status = '待验证'
-                  AND (action_code IS NULL OR action_code IN ('liaison_test_pass', 'liaison_test_skip_excused', 'liaison_test_skip_liaison'))
+                  AND (action_code IS NULL OR action_code IN ('liaison_test_pass', 'liaison_test_skip_excused', 'liaison_test_skip_liaison', 'liaison_test_skip_system'))
              ) AS last_completed_at
        FROM sys_issues WHERE id = ?`,
     [issueId]
@@ -1984,6 +1996,376 @@ async function main() {
     }
     ok('[E-race] [S12 双路审查 codex 287 号 M-1 收口] 已接受的 sending 竞态契约测试——① pass 分支：sending 中途 pass 200 不阻塞 + 主状态与通知态互不触碰 + 晚到成功回写仍精确落地（dormant sent 数据与 advanced 待验证共存）；② return 分支：sending 中途 return 200 不阻塞 + 晚到失败回写（ok=false 分支）同样精确落地（dormant failed 数据与 advanced 开发中共存）——两条用例收尾均落回合法终态，不给后续全表扫描留脏数据');
   }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // [M] S3·所属系统「小程序-智荟人力」接入 方案 v1.2 §4：按系统跳过对接测试
+  //   M1 正例 + M6 运行时映射／M2 反证（BMS 对照）／M3 优先级对照（不吞 ⑤变体）／M4 回路（含 BMS
+  //   对照）／M5 fail-closed 单元级（经 _internals）。放在 [17]/[17b]/[终态] 全表扫描之前——本组
+  //   构造的单据不触碰通知列组，但让文件末尾的全表终态扫描一并覆盖到它们（额外保障，非必需）。
+  // ══════════════════════════════════════════════════════════════════════
+  {
+    // ── M5：fail-closed 单元级（经 _internals 直调，不经 HTTP）──────────────────────────
+    assert.strictEqual(I.isSkipLiaisonTestSystem(null), false, '[M5] null 不命中');
+    assert.strictEqual(I.isSkipLiaisonTestSystem(''), false, '[M5] 空串不命中');
+    assert.strictEqual(I.isSkipLiaisonTestSystem(undefined), false, '[M5] undefined 不命中');
+    assert.strictEqual(I.isSkipLiaisonTestSystem('BMS'), false, '[M5] 非命中系统（BMS）不命中');
+    assert.strictEqual(I.isSkipLiaisonTestSystem('小程序-智荟人力'), true, '[M5] ⭐ 命中系统命中');
+    assert.deepStrictEqual(I.DEFAULT_SKIP_LIAISON_TEST_SYSTEMS, ['小程序-智荟人力'], '[M5] ⭐ 清单本体 deepStrictEqual——有意摩擦，改清单必须来改这里（同 C11 EXPECTED_DEFAULT_SINGLE 注释先例），实现坏成什么样这条会红：清单被误改/误加成员/顺序变化全部会红');
+    ok('[M5] fail-closed 单元级：isSkipLiaisonTestSystem(null/空串/undefined/非命中系统) 全 false、(小程序-智荟人力) true，DEFAULT_SKIP_LIAISON_TEST_SYSTEMS 清单本体逐字相等');
+  }
+  {
+    // ── M7：fail-closed「查无单据」（经 _internals 直调 isSkipLiaisonTestSystemForIssue）──────────
+    //   999999901 是一个确定不存在的 issue id（本文件全程用自增主键，测试量级不可能触及该值）。
+    //   实现坏成什么样这条会红：① 查不到行时误返回 true（会导致 runWGate 对不存在的单据也判定"跳过"，
+    //   虽然结构上不可达但契约本身就错）；② 该函数抛异常而非返回 false（fail-closed 契约①明确"查不到
+    //   行→不跳过"，不是"查不到行→抛错"，抛错会让调用方 runWGate 整个事务异常终止，行为错位）。
+    const errCountBefore = capturedLoggerErrors.length;
+    const hit = await I.isSkipLiaisonTestSystemForIssue(999999901);
+    assert.strictEqual(hit, false, '[M7] ⭐ 查无单据（issue id=999999901 确定不存在）→ 返回 false（不跳过），不抛异常');
+    const newErrs = capturedLoggerErrors.slice(errCountBefore);
+    // logger 桩可捕获（见文件头 capturedLoggerErrors 定义）——能捕到就断言消息内容，不满足于"返回值对了"
+    // 这一层，把 fail-closed 契约①"留 logger.error 可观测信号"也纳入断言面，而非仅靠代码审查。
+    const hasExpectedLogMsg = newErrs.some(args => args.some(a => typeof a === 'string' && a.includes('W-GATE skip-system 查无单据')));
+    assert.ok(newErrs.length >= 1, '[M7] ⭐ 查无单据分支应留 logger.error 可观测信号（本套件 logger 桩可捕获调用参数）');
+    assert.ok(hasExpectedLogMsg, `[M7] ⭐ logger.error 消息应含"W-GATE skip-system 查无单据"字样，实际新增日志=${JSON.stringify(newErrs)}`);
+    ok('[M7] fail-closed「查无单据」：经 _internals 直调 isSkipLiaisonTestSystemForIssue(999999901) 返回 false（不跳过、不抛异常），且 logger.error 捕获到含"W-GATE skip-system 查无单据"字样的可观测信号（日志内容断言，非仅代码审查）');
+  }
+  {
+    // ── M1 正例 + M6 运行时映射：小程序 feature 单全员完成 + 对接人有效 → 跳过对接测试直落待验证 ──
+    const id = await mkIssue('feature', '开发中', { intakeLiaisonId: 13, systemName: '小程序-智荟人力' });
+    await mkMember(id, 5, '开发甲', 'code_submitted');
+    const daId2 = await mkMember(id, 6, '开发乙', 'pending');
+    const r = await triggerGateViaExcuse(id, daId2, '[M1] 开发乙请假');
+    assert.strictEqual(r.status, 200, `[M1] excuse 触发 GATE 应 200，实际 ${r.status} ${JSON.stringify(r.body)}`);
+    assert.strictEqual(r.body.main_status, '待验证', '[M1] ⭐ 小程序单命中按系统跳过对接测试，直落待验证（非待对接测试）——实现坏成什么样这条会红：若分支判定失效/清单未命中，main_status 会是待对接测试');
+    const row = await issueRow(id);
+    assert.strictEqual(row.status, '待验证', '[M1] 落库 status=待验证');
+    assert.strictEqual(row.liaison_test_cycle_no, 0, '[M1] ⭐ liaison_test_cycle_no 不动（跳过路径不消费周期号，同 ⑥ 既有语义）——实现坏成什么样这条会红：若误走 ⑦ 分支或误共用 CAS，cycle_no 会变成 1');
+    assert.strictEqual(row.liaison_test_recipient_id, null, '[M1] recipient_id 不写（未进测试段，无需通知对象）');
+    assert.strictEqual(row.liaison_test_notify_status, 'not_sent', '[M1] notify_status=not_sent（⚠️ 本条无区分力：⑦ 的 CAS 重置也写 not_sent，两条路径同值，仅作列默认值留痕；真正扛区分力的是下一条 notify_cycle_no 与上方 recipient_id/cycle_no）');
+    assert.strictEqual(row.liaison_test_notify_cycle_no, 0, '[M1] ⭐ notify_cycle_no=0（DDL 默认 0；⑦ 的 CAS 写 cycle_no+1≥1）——实现坏成什么样这条会红：若误走 ⑦ 或误共用其 CAS 重置，此列变 1');
+    assert.strictEqual(row.gate_deferred_at, null, '[M1] gate_deferred_at 清（跳过也是通过 GATE 的前向方向）');
+    const tl = await latestTimeline(id);
+    assert.strictEqual(tl.from_status, '开发中', '[M1] from=开发中');
+    assert.strictEqual(tl.to_status, '待验证', '[M1] to=待验证（跳过待对接测试）');
+    assert.strictEqual(tl.action_code, 'liaison_test_skip_system', '[M1] ⭐ 专用 actionCode 留痕（区分于 liaison_test_skip_liaison/liaison_test_skip_excused）——实现坏成什么样这条会红：若 D4 拍板被回退成复用 liaison_test_skip_liaison，这里会读到错的码');
+    ok('[M1] 决策树【新】正例：小程序-智荟人力 feature 单全员完成+对接人有效 → 按系统跳过对接测试，直落「待验证」，action_code=liaison_test_skip_system 留痕，周期号/通知列组均不动');
+
+    // M6：运行时映射（489-H6 核心）——last_completed_at 两处白名单 + W_GATE_SKIP_SUMMARY 文案，
+    //   经真实 HTTP 端点核实（非复制 SQL 查库，同 [9a-HTTP]/[9b-HTTP] 既有证据标准）。
+    assert.strictEqual(tl.summary, '所属系统策略跳过对接测试，自动流转', '[M6] ⭐ W_GATE_SKIP_SUMMARY[liaison_test_skip_system] 生效——实现坏成什么样这条会红：若漏加该键，summary 会退化成兜底文案"成员在册完成态变化，自动流转"');
+    const listM6 = await call('GET', `/api/sys-issues?status=${encodeURIComponent('待验证')}`, adminTok);
+    assert.strictEqual(listM6.status, 200, `[M6] 列表端点应 200，实际 ${listM6.status}`);
+    const listItemM6 = (listM6.body && listM6.body.items || []).find(x => x.id === id);
+    assert.ok(listItemM6, `[M6] status=待验证 过滤后的列表响应应含本单 #${id}`);
+    assert.strictEqual(listItemM6.last_completed_at, tl.created_at, '[M6] ⭐ 列表端点真实响应 last_completed_at 非空且精确等于 skip_system 事件时刻——实现坏成什么样这条会红：若 index.js:8663 一带白名单漏加该码，此列会恒为 null');
+    const detailM6 = await call('GET', `/api/sys-issues/${id}`, adminTok);
+    assert.strictEqual(detailM6.status, 200, `[M6] 详情端点应 200，实际 ${detailM6.status}`);
+    assert.strictEqual(detailM6.body.issue.last_completed_at, tl.created_at, '[M6] ⭐ 详情端点真实响应 last_completed_at 精确等于 skip_system 事件时刻——实现坏成什么样这条会红：若 index.js:8992 一带白名单漏加该码，此列会恒为 null');
+    ok('[M6] 489-H6 运行时映射核实：liaison_test_skip_system 在 last_completed_at 两处白名单（list/detail 真实端点）均生效，W_GATE_SKIP_SUMMARY 文案精确落地（非仅标签表覆盖）');
+  }
+  {
+    // ── M2 反证：同条件 BMS 单（对照组）——不命中跳过清单，走既有 ⑦ 正常路径 ──────────────────
+    const id = await mkIssue('feature', '开发中', { intakeLiaisonId: 13 });   // systemName 默认 BMS
+    await mkMember(id, 5, '开发甲', 'code_submitted');
+    const daId2 = await mkMember(id, 6, '开发乙', 'pending');
+    const r = await triggerGateViaExcuse(id, daId2, '[M2] 开发乙请假');
+    assert.strictEqual(r.status, 200, `[M2] excuse 触发 GATE 应 200，实际 ${r.status} ${JSON.stringify(r.body)}`);
+    assert.strictEqual(r.body.main_status, '待对接测试', '[M2] ⭐ 对照：同条件 BMS 单不命中跳过清单，仍走 ⑦ 正常路径进入待对接测试——实现坏成什么样这条会红：若判定逻辑对所有系统都跳过（清单失效为"全量跳过"），这里会错误落到待验证');
+    const row = await issueRow(id);
+    assert.strictEqual(row.status, '待对接测试', '[M2] 落库 status=待对接测试');
+    assert.strictEqual(row.liaison_test_cycle_no, 1, '[M2] ⭐ cycle_no 正常自增至 1（对照：跳过路径的 M1 恒 0）');
+    ok('[M2] 决策树反证（跳过类断言必须成对）：同条件 BMS 单不命中所属系统跳过清单，正常进入「待对接测试」，cycle_no=1——与 M1 形成对照');
+  }
+  {
+    // ── M3 优先级对照：小程序单 deliverableCount===0（全员 excused）→ 仍走 ⑤变体 skip_excused ──
+    //   （证明【新】分支排在 ⑤变体之后、未吞掉它——同 [4] 段既有夹具范式）。
+    const id = await mkIssue('feature', '开发中', { intakeLiaisonId: 13, systemName: '小程序-智荟人力' });
+    await mkMember(id, 5, '开发甲', 'excused');
+    const daId2 = await mkMember(id, 6, '开发乙', 'pending');
+    const r = await triggerGateViaExcuse(id, daId2, '[M3] 开发乙也请假（全员 excused）');
+    assert.strictEqual(r.status, 200, `[M3] excuse 应 200，实际 ${r.status} ${JSON.stringify(r.body)}`);
+    assert.strictEqual(r.body.main_status, '待验证', '[M3] 前置：全员 excused 仍直落待验证（与 [4] 段既有语义一致）');
+    const tl = await latestTimeline(id);
+    assert.strictEqual(tl.action_code, 'liaison_test_skip_excused', '[M3] ⭐ 优先级对照：小程序单 deliverableCount===0 时仍走 ⑤变体 liaison_test_skip_excused，非 liaison_test_skip_system——实现坏成什么样这条会红：若【新】分支被错误地插在 ⑤变体之前（或 ⑤变体判定被打断），这里会读到 liaison_test_skip_system');
+    ok('[M3] 优先级对照：小程序单全员 excused（deliverableCount===0）时【新】分支未吞掉 ⑤变体，仍精确落 liaison_test_skip_excused（排序：⑤变体先于【新】分支判定）');
+  }
+  {
+    // ── M4 回路：小程序单 待验证→新增 pending→回开发中→再次全员完成→仍落待验证且 cycle_no 保持 0；
+    //   BMS 对照组同款"加人触发 VERIFY→DEV 回弹"机制下，重新进入「待对接测试」且 cycle_no 递增。
+    //   两组用同一种回弹手段（POST /dev-assignees 在「待验证」态新增成员，VERIFY 族允许 add，见
+    //   MEMBER_ACTION_FAMILY_MATRIX），唯一变量是所属系统——直接对照"isSkipLiaisonTestSystemForIssue
+    //   每轮都重新查库判定"这一回路正确性声称（489-H7）。
+    const idLoop = await mkIssue('feature', '开发中', { intakeLiaisonId: 13, systemName: '小程序-智荟人力' });
+    await mkMember(idLoop, 5, '开发甲', 'code_submitted');
+    const daLoopB = await mkMember(idLoop, 6, '开发乙', 'pending');
+    await triggerGateViaExcuse(idLoop, daLoopB, '[M4] 第一次进入待验证');
+    assert.strictEqual(await statusOf(idLoop), '待验证', '[M4] 前置：小程序单首次跳过对接测试直落待验证');
+    assert.strictEqual((await issueRow(idLoop)).liaison_test_cycle_no, 0, '[M4] 前置：cycle_no=0');
+
+    const addR = await call('POST', `/api/sys-issues/${idLoop}/dev-assignees`, adminTok, { user_ids: [7] });
+    assert.strictEqual(addR.status, 200, `[M4] 待验证态 add 应 200（VERIFY 族允许 add），实际 ${addR.status} ${JSON.stringify(addR.body)}`);
+    assert.strictEqual(addR.body.main_status, '开发中', '[M4] ⭐ 新增 pending 成员打破全完成态，回弹到开发中');
+    assert.strictEqual(await statusOf(idLoop), '开发中', '[M4] 落库 status=开发中');
+
+    const da7Row = await get('SELECT id FROM sys_issue_dev_assignees WHERE issue_id=? AND user_id=7 AND removed_at IS NULL', [idLoop]);
+    assert.ok(da7Row, '[M4] 前置：新增成员应在册');
+    const r2 = await triggerGateViaExcuse(idLoop, da7Row.id, '[M4] 第二次全员完成');
+    assert.strictEqual(r2.status, 200, `[M4] 第二次 excuse 应 200，实际 ${r2.status} ${JSON.stringify(r2.body)}`);
+    assert.strictEqual(r2.body.main_status, '待验证', '[M4] ⭐ 回路：小程序单再次全员完成后仍落待验证（非待对接测试）——实现坏成什么样这条会红：若 isSkipLiaisonTestSystemForIssue 只在首次判定生效（被缓存/一次性快照），第二轮会误判为不命中');
+    const rowLoop = await issueRow(idLoop);
+    assert.strictEqual(rowLoop.status, '待验证', '[M4] 落库 status=待验证');
+    assert.strictEqual(rowLoop.liaison_test_cycle_no, 0, '[M4] ⭐ cycle_no 全程保持 0（本分支不消费周期号，即使经历一次完整回路——收窄为「未经 ⑦ 的单恒 0」：若单据曾经 ⑦ 进过待对接测试、打回后在开发中被 edit-in-revision 改 system_name 为小程序，cycle_no 会保留旧值，那是 ⑥ 今日同款的残留形态，不在本条覆盖）');
+    const tlLoop = await latestTimeline(idLoop);
+    assert.strictEqual(tlLoop.action_code, 'liaison_test_skip_system', '[M4] 第二次判定仍精确落 liaison_test_skip_system');
+
+    // BMS 对照组：同款"加人回弹"机制，但走正常 ⑦ 路径——待对接测试→pass→待验证→加人回弹→再完成→
+    //   重新进入待对接测试，cycle_no 递增至 2（与上方小程序恒 0 形成对照）。
+    const idLoopBms = await mkIssue('feature', '开发中', { intakeLiaisonId: 13 });
+    await mkMember(idLoopBms, 5, '开发甲', 'code_submitted');
+    const daBmsB = await mkMember(idLoopBms, 6, '开发乙', 'pending');
+    await triggerGateViaExcuse(idLoopBms, daBmsB, '[M4-BMS] 第一次进入待对接测试');
+    assert.strictEqual(await statusOf(idLoopBms), '待对接测试', '[M4-BMS] 前置：BMS 单正常进入待对接测试（对照，非跳过）');
+    assert.strictEqual((await issueRow(idLoopBms)).liaison_test_cycle_no, 1, '[M4-BMS] 前置：cycle_no=1');
+    const passRBms = await call('POST', `/api/sys-issues/${idLoopBms}/liaison-test-pass`, liaisonTok, { test_note: '[M4-BMS] 测试通过' });
+    assert.strictEqual(passRBms.status, 200, `[M4-BMS] pass 应 200，实际 ${passRBms.status} ${JSON.stringify(passRBms.body)}`);
+    assert.strictEqual(await statusOf(idLoopBms), '待验证', '[M4-BMS] 前置：pass 后落待验证');
+    const addRBms = await call('POST', `/api/sys-issues/${idLoopBms}/dev-assignees`, adminTok, { user_ids: [8] });
+    assert.strictEqual(addRBms.status, 200, `[M4-BMS] 待验证态 add 应 200，实际 ${addRBms.status} ${JSON.stringify(addRBms.body)}`);
+    assert.strictEqual(addRBms.body.main_status, '开发中', '[M4-BMS] 新增 pending 成员回弹到开发中（VERIFY 族允许 add，同小程序侧同款机制）');
+    const da8Row = await get('SELECT id FROM sys_issue_dev_assignees WHERE issue_id=? AND user_id=8 AND removed_at IS NULL', [idLoopBms]);
+    assert.ok(da8Row, '[M4-BMS] 前置：新增成员应在册');
+    const r2Bms = await triggerGateViaExcuse(idLoopBms, da8Row.id, '[M4-BMS] 第二次全员完成');
+    assert.strictEqual(r2Bms.status, 200, `[M4-BMS] 第二次 excuse 应 200，实际 ${r2Bms.status} ${JSON.stringify(r2Bms.body)}`);
+    assert.strictEqual(r2Bms.body.main_status, '待对接测试', '[M4-BMS] ⭐ 对照：BMS 再次全员完成后重新进入待对接测试（非待验证）');
+    assert.strictEqual((await issueRow(idLoopBms)).liaison_test_cycle_no, 2, '[M4-BMS] ⭐ cycle_no 递增至 2（正常路径每次进入都消费周期号，与小程序恒 0 形成对照）');
+
+    ok('[M4] 回路（成对）：小程序单待验证→新增 pending→回开发中→再次全员完成→仍落待验证且 cycle_no 保持 0；BMS 对照组同款"加人回弹"机制下重新进入待对接测试且 cycle_no 递增至 2——证明 isSkipLiaisonTestSystemForIssue 每轮都重新查库判定，非一次性快照（489-H7 回路正确性声称的直接实证）');
+  }
+  {
+    // ── M8 = S2×S3 合流正例（生产真实链路，非 excuse 捷径）───────────────────────────────
+    //   S1-S7 全经 admin excuse 端点触发 GATE，非"开发本人在 submit 弹窗填单组发版标识"这条真实生产
+    //   链路（POST /submit → validateSubmitBody → runWGate isSubmitTrigger=true）。本组用两名在册
+    //   开发全员 pending（照 [1] 段 mkIssue/mkMember 结构），最后一名成员经真实 submit 触发全员完成
+    //   判定，同时验证 S2（单组清单强制归一 component=backend，判定源=system_name）与 S3（按系统跳过
+    //   对接测试，判定源=同一个 system_name）在真实提交事务内正确合流、互不干扰。
+    const id = await mkIssue('feature', '开发中', { intakeLiaisonId: 13, systemName: '小程序-智荟人力' });
+    await mkMember(id, 5, '开发甲', 'pending');
+    await mkMember(id, 6, '开发乙', 'pending');
+
+    // 开发甲先提交自己的一份（客户端故意传 frontend，验证 S2 归一）——全员未完成，主状态不推进。
+    const r1 = await call('POST', `/api/sys-issues/${id}/submit`, devTok(5), {
+      mode: 'commits',
+      commits: [{ component: 'frontend', commit_ref: '20260902-1' }],
+      self_tested: true, test_env_deployed: true,
+    });
+    assert.strictEqual(r1.status, 200, `[M8] 开发甲 submit 应 200，实际 ${r1.status} ${JSON.stringify(r1.body)}`);
+    assert.strictEqual(r1.body.main_status, '开发中', '[M8] 前置：开发甲提交后开发乙仍 pending，未全完成，主状态不推进（main_status=gateResult.changed?to:rowStatusAtStart，此处 changed=false）');
+    assert.strictEqual(await statusOf(id), '开发中', '[M8] 前置：落库仍为开发中');
+
+    // 最后一名成员（开发乙）真实提交——触发全员完成，runWGate(isSubmitTrigger=true) 判定命中新分支。
+    const r2 = await call('POST', `/api/sys-issues/${id}/submit`, devTok(6), {
+      mode: 'commits',
+      commits: [{ component: 'frontend', commit_ref: '20260902-2' }],   // 同样故意传 frontend
+      self_tested: true, test_env_deployed: true,
+    });
+    assert.strictEqual(r2.status, 200, `[M8] 开发乙（最后一名）submit 应 200，实际 ${r2.status} ${JSON.stringify(r2.body)}`);
+    assert.strictEqual(r2.body.main_status, '待验证', '[M8] ⭐ 真实 submit 链路（最后一名成员触发全员完成）：小程序单直落待验证（非待对接测试）——实现坏成什么样这条会红：submit 触发路径漏经新分支（只有 excuse 测试捷径生效，生产真实链路走不到）会落到待对接测试');
+
+    const row = await issueRow(id);
+    assert.strictEqual(row.status, '待验证', '[M8] 落库 status=待验证');
+    assert.strictEqual(row.liaison_test_cycle_no, 0, '[M8] cycle_no=0（跳过路径不消费周期号）');
+    assert.strictEqual(row.liaison_test_notify_cycle_no, 0, '[M8] notify_cycle_no=0（同上，与 M1 同款判据）');
+
+    const tl = await latestTimeline(id);
+    assert.strictEqual(tl.to_status, '待验证', '[M8] timeline to=待验证');
+    assert.strictEqual(tl.action_code, 'liaison_test_skip_system', '[M8] ⭐ action_code=liaison_test_skip_system（真实 submit 链路同样精确落码，非仅 excuse 路径生效）');
+
+    // S2×S3 合流核心断言：两条 commit 均由真实 submit 写入，客户端均传 frontend，服务端应无视客户端
+    // 传值、强制归一 backend——归一逻辑（isSingleCommitGroupSystem(row.system_name)）与跳过对接测试
+    // 判定（isSkipLiaisonTestSystemForIssue(issueId)）读的是同一个 system_name，但各自独立求值、写入
+    // 各自的目标列（component vs targetStatus/mirrorActionCode），互不干扰。
+    const commitRows = await all('SELECT dev_assignee_id, component, commit_ref FROM sys_issue_dev_commits WHERE issue_id=? ORDER BY id ASC', [id]);
+    assert.strictEqual(commitRows.length, 2, `[M8] 两名开发各自的 commit 均应落库，实际 ${commitRows.length} 条`);
+    assert.ok(commitRows.every(c => c.component === 'backend'), `[M8] ⭐ S2 单组归一：两条 commit 客户端均传 frontend，服务端应强制归一 component=backend（无视客户端传值），与 S3 跳过分支互不干扰——实现坏成什么样这条会红：单组归一与跳过分支互相干扰导致 component 未归一，或归一逻辑在小程序系统上被跳过分支意外短路，实际 ${JSON.stringify(commitRows.map(c => c.component))}`);
+    assert.deepStrictEqual(commitRows.map(c => c.commit_ref), ['20260902-1', '20260902-2'], '[M8] commit_ref 精确落库（发版标识形态 YYYYMMDD-N，两人各自序号）');
+
+    // last_completed_at 运行时映射（真实 submit 链路，非 excuse 触发）——同 M6 证据标准。
+    const listM8 = await call('GET', `/api/sys-issues?status=${encodeURIComponent('待验证')}`, adminTok);
+    assert.strictEqual(listM8.status, 200, `[M8] 列表端点应 200，实际 ${listM8.status}`);
+    const listItemM8 = (listM8.body && listM8.body.items || []).find(x => x.id === id);
+    assert.ok(listItemM8, `[M8] status=待验证 过滤后的列表响应应含本单 #${id}`);
+    assert.strictEqual(listItemM8.last_completed_at, tl.created_at, '[M8] ⭐ 列表端点 last_completed_at 精确等于本次事件时刻（真实 submit 链路同样正确回填两处白名单）');
+    const detailM8 = await call('GET', `/api/sys-issues/${id}`, adminTok);
+    assert.strictEqual(detailM8.status, 200, `[M8] 详情端点应 200，实际 ${detailM8.status}`);
+    assert.strictEqual(detailM8.body.issue.last_completed_at, tl.created_at, '[M8] ⭐ 详情端点 last_completed_at 精确等于本次事件时刻');
+
+    ok('[M8] S2×S3 合流正例（生产真实链路）：小程序 feature 单两名在册开发全员 pending，最后一名经真实 POST /submit（mode:commits）触发 runWGate(isSubmitTrigger=true) 全员完成判定 → 200/待验证/liaison_test_skip_system/cycle_no=notify_cycle_no=0；两条 commit 客户端均传 frontend，S2 单组归一强制 backend 与 S3 跳过分支互不干扰（各自独立求值同一 system_name）；list/detail 端点 last_completed_at 精确回填');
+  }
+
+  {
+    // ══════════════════════════════════════════════════════════════════════
+    // [M9] S6 追加（用户裁定「现在就补」）：同一张小程序 feature 单从提交到已上线的连续端到端断言。
+    //   业务状态转移（submit/accept/add-issues/execute）走真实端点；roster/issue 结构性造数仍走本文件
+    //   既有 mkIssue/mkMember 惯例，同 M1-M8；执行人「已通知」前置按既有 verify-sys-release-batch.js
+    //   :241-252 范式由 SQL 夹具直接置 notify_status='sent'，本用例不覆盖通知发送状态转换本身（真实
+    //   通知端点=POST /sys-releases/:id/executors/:userId/notify，见文件头 [M] 条目，本轮不改走）。
+    //   混批对照=BMS bug 单同批推进到已上线，验证跳过对接测试留下的留痕
+    //   （liaison_test_skip_system / last_completed_at / cycle_no 组）在验收→上线单→发布全链路里
+    //   不被覆盖/污染，且与非跳过系统共处同一上线单不互相干扰。
+    //   照抄范式（file:line）：
+    //     · accept 调用方=adminTok——verify-sys-release.js:141（`await call('POST', `/api/sys-issues/${id}/accept`, adminTok, {});`），
+    //       同"建单人 native 恒 admin"口径——口径原话见 routes/sys-iteration/transitions.js:925
+    //       （bug 表·三表 accept 均 roleGuard:'admin'）；本单是 feature，实际边=FEATURE_FLOW_TRANSITIONS
+    //       的 accept（:635-642）。
+    //     · BMS bug 单到「待上线」最短路径——verify-sys-bug-transitions.js:150-171 seedBugToDev/
+    //       seedBugToReady（建单→intake-accept→assign→estimate→submit(bug_cause_note)→accept）。
+    //     · 上线单 execute 单执行人一次确认即翻牌——verify-sys-release-batch.js:241-252
+    //       setExecutors/markSent 定义 + :420-441 execute 序列（PUT /executors → markSent → POST
+    //       /execute，决策 7 三修下限≥1，本组只设 1 名执行人，一次确认直接触发发布）。
+    // ══════════════════════════════════════════════════════════════════════
+
+    // ① 造小程序 feature 单（对接人有效·两名开发 pending）+ BMS bug 单推进到「待上线」混批对照
+    const miniId = await mkIssue('feature', '开发中', { intakeLiaisonId: 13, systemName: '小程序-智荟人力' });
+    await mkMember(miniId, 5, '开发甲', 'pending');
+    await mkMember(miniId, 6, '开发乙', 'pending');
+
+    let r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'bug', title: '[M9] BMS 混批对照', system_name: 'BMS', source: '内部', description: '[M9] 混批对照单', intake_liaison_id: 13 });
+    assert.strictEqual(r.status, 201, `[M9] ①BMS bug 建单应 201，实际 ${r.status} ${JSON.stringify(r.body)}`);
+    const bmsId = r.body.id;
+    await call('POST', `/api/sys-issues/${bmsId}/intake-accept`, adminTok, {});
+    r = await call('POST', `/api/sys-issues/${bmsId}/assign`, adminTok, { assigned_to: 7 });
+    assert.strictEqual(r.status, 200, `[M9] ①BMS assign 应 200，实际 ${r.status} ${JSON.stringify(r.body)}`);
+    r = await call('POST', `/api/sys-issues/${bmsId}/estimate`, devTok(7), { dev_estimated_at: futureEst(30) });
+    assert.strictEqual(r.status, 200, `[M9] ①BMS estimate 应 200，实际 ${r.status} ${JSON.stringify(r.body)}`);
+    r = await call('POST', `/api/sys-issues/${bmsId}/submit`, devTok(7), { mode: 'commits', commits: [{ component: 'backend', commit_ref: 'm9-bms-1' }], self_tested: true, test_env_deployed: true, bug_cause_note: '[M9] bug 产生原因占位（混批对照夹具）' });
+    assert.strictEqual(r.status, 200, `[M9] ①BMS submit 应 200，实际 ${r.status} ${JSON.stringify(r.body)}`);
+    r = await call('POST', `/api/sys-issues/${bmsId}/accept`, adminTok, {});
+    assert.strictEqual(r.status, 200, `[M9] ①BMS accept 应 200，实际 ${r.status} ${JSON.stringify(r.body)}`);
+    assert.strictEqual(await statusOf(bmsId), SF.SYS_RELEASE_STATUSES.bug[0], `[M9] ①前置：BMS 对照单应停在「${SF.SYS_RELEASE_STATUSES.bug[0]}」`);
+    ok('[M9] ①两单夹具就绪：小程序 feature 单两名开发 pending（对接人有效）；BMS bug 单经真实建单→intake-accept→assign→estimate→submit→accept 推进到待上线（混批对照）');
+
+    // ② 两名开发依次真实 submit（commits 模式，均 component:'frontend'，commit_ref '20260902-1'——
+    //   同一 ref 在两名不同开发身上不冲突：自然键查重是 dev_assignee_id+component+commit_ref 实例级，
+    //   非 issue 级，见 index.js 步骤4 注释）。
+    const rSub1 = await call('POST', `/api/sys-issues/${miniId}/submit`, devTok(5), {
+      mode: 'commits', commits: [{ component: 'frontend', commit_ref: '20260902-1' }],
+      self_tested: true, test_env_deployed: true,
+    });
+    assert.strictEqual(rSub1.status, 200, `[M9] ②开发甲 submit 应 200，实际 ${rSub1.status} ${JSON.stringify(rSub1.body)}`);
+    assert.strictEqual(rSub1.body.main_status, '开发中', '[M9] ②前置：开发甲提交后开发乙仍 pending，未全完成，主状态不推进');
+
+    const rSub2 = await call('POST', `/api/sys-issues/${miniId}/submit`, devTok(6), {
+      mode: 'commits', commits: [{ component: 'frontend', commit_ref: '20260902-1' }],
+      self_tested: true, test_env_deployed: true,
+    });
+    assert.strictEqual(rSub2.status, 200, `[M9] ②开发乙（最后一名）submit 应 200，实际 ${rSub2.status} ${JSON.stringify(rSub2.body)}`);
+    assert.strictEqual(rSub2.body.main_status, '待验证', '[M9] ⭐②真实链路首端：全员完成后直落待验证（非待对接测试）——实现坏成什么样这条会红：跳过分支在完整上线链路的入口就已失效（例如被本组新建的 BMS 对照单沾染成跨单误判），会落到待对接测试');
+
+    const tlSkip = await latestTimeline(miniId);
+    assert.strictEqual(tlSkip.to_status, '待验证', '[M9] ②timeline to=待验证');
+    assert.strictEqual(tlSkip.action_code, 'liaison_test_skip_system', '[M9] ⭐②最新 status_change action_code=liaison_test_skip_system——实现坏成什么样这条会红：判定源在混批场景下被 BMS 单的 system_name 污染，或码写错成 skip_liaison/skip_excused');
+    const T_skip = tlSkip.created_at;
+
+    const listT1 = await call('GET', `/api/sys-issues?status=${encodeURIComponent('待验证')}`, adminTok);
+    assert.strictEqual(listT1.status, 200, `[M9] ②列表端点应 200，实际 ${listT1.status}`);
+    const listItemT1 = (listT1.body && listT1.body.items || []).find(x => x.id === miniId);
+    assert.ok(listItemT1, `[M9] ②列表应含本单 #${miniId}`);
+    assert.strictEqual(listItemT1.last_completed_at, T_skip, '[M9] ⭐②列表端点 last_completed_at 精确等于 T_skip——记为验收/上线前的基线快照，供 ⑥ 终态比对是否被后续动作覆盖');
+    const detailT1 = await call('GET', `/api/sys-issues/${miniId}`, adminTok);
+    assert.strictEqual(detailT1.status, 200, `[M9] ②详情端点应 200，实际 ${detailT1.status}`);
+    assert.strictEqual(detailT1.body.issue.last_completed_at, T_skip, '[M9] ⭐②详情端点 last_completed_at 精确等于 T_skip（同上基线）');
+    ok('[M9]② 真实链路首端：两开发 /submit → 待验证 + skip_system + T_skip 基线 == list/detail last_completed_at');
+
+    // ③ 建单人验收通过（native 建单人恒 admin——口径原话见 transitions.js:925〔bug 表·三表 accept
+    //   均 roleGuard:'admin'〕；本单实际边=FEATURE_FLOW_TRANSITIONS 的 accept，:635-642）→ 待上线族
+    const rAccept = await call('POST', `/api/sys-issues/${miniId}/accept`, adminTok, {});
+    assert.strictEqual(rAccept.status, 200, `[M9] ③accept 应 200，实际 ${rAccept.status} ${JSON.stringify(rAccept.body)}`);
+    assert.strictEqual(rAccept.body.status, SF.SYS_RELEASE_STATUSES.feature[0], `[M9] ⭐③accept 后进入待上线族（${SF.SYS_RELEASE_STATUSES.feature[0]}）——实现坏成什么样这条会红：验收端点对小程序单因 liaison_test 列组恒 0/空（cycle_no=notify_cycle_no=0、recipient_id/recipient_name 全 NULL——本单从未真正进过待对接测试）误判为异常/不完整数据而拒绝，或抛 500`);
+    assert.strictEqual(await statusOf(miniId), SF.SYS_RELEASE_STATUSES.feature[0], '[M9] ③落库同步为待上线');
+    ok('[M9] ③验收通过：小程序单从「待验证」经真实 /accept 进入「待上线」——liaison_test 列组恒 0/空不构成验收阻塞');
+
+    // ④ admin 建上线单 → add-issues 同批加入小程序单 + BMS 单（混批）
+    const rRel = await call('POST', '/api/sys-releases', adminTok, { title: '[M9] 混批测试批次' });
+    assert.strictEqual(rRel.status, 201, `[M9] ④建上线单应 201，实际 ${rRel.status} ${JSON.stringify(rRel.body)}`);
+    const relId = rRel.body.id;
+    const rAdd = await call('POST', `/api/sys-releases/${relId}/add-issues`, adminTok, { issue_ids: [miniId, bmsId] });
+    assert.strictEqual(rAdd.status, 200, `[M9] ④add-issues（混批）应 200，实际 ${rAdd.status} ${JSON.stringify(rAdd.body)}`);
+    const miniAfterAdd = await get('SELECT release_id FROM sys_issues WHERE id=?', [miniId]);
+    const bmsAfterAdd = await get('SELECT release_id FROM sys_issues WHERE id=?', [bmsId]);
+    assert.strictEqual(miniAfterAdd.release_id, relId, '[M9] ⭐④小程序单已挂上本批次——实现坏成什么样这条会红：混批按 system 拒绝会导致本行落 null 或整个 add-issues 请求 400');
+    assert.strictEqual(bmsAfterAdd.release_id, relId, '[M9] ⭐④BMS 单同批挂上——证明本批是真实混批（两种不同 system_name 共存于同一上线单），非分批各自加');
+    ok('[M9] ④上线单建成 + 混批加单：小程序单与 BMS 单同一批次 add-issues 一次成功，两单 release_id 均落本批次');
+
+    // ⑤ execute（照 verify-sys-release-batch.js setExecutors/markSent + 单执行人一次确认即翻牌，
+    //   决策 7 三修下限≥1——本批不设第二人，验证"最短合法路径"本身也能真正触发发布）
+    const rSetExec = await call('PUT', `/api/sys-releases/${relId}/executors`, adminTok, { user_ids: [5] });
+    assert.strictEqual(rSetExec.status, 200, `[M9] ⑤设执行人应 200，实际 ${rSetExec.status} ${JSON.stringify(rSetExec.body)}`);
+    const execRow = await get('SELECT id FROM sys_release_executors WHERE release_id=? AND user_id=5 AND removed_at IS NULL', [relId]);
+    assert.ok(execRow, '[M9] ⑤前置：执行人行应已在册');
+    await run(`UPDATE sys_release_executors SET notify_status='sent', notified_at=datetime('now','localtime') WHERE id=?`, [execRow.id]);
+
+    // [S6b·H] 同秒恒真修复：SQLite 秒级时间戳，T_skip 与即将发生的上线事件很可能落在同一秒——若
+    //   last_completed_at 子查询实现选错了事件（如误纳入某个 to_status='已上线' 的 status_change 行），
+    //   恰好同秒时返回值仍与 T_skip 相等，⑥ 的等值断言会假绿（旧变异只证「白名单缺分支→null」这一种
+    //   失败形态，证不了「选错事件但同值」这一种——codex 497 号 H 指出）。execute 前先确定性跨过
+    //   T_skip 所在秒（同格式字符串比较，非时间戳数值比较——与列本身的存储格式一致）。
+    const waitCrossSkipSecondStart = Date.now();
+    let nowAfterSkip = null;
+    for (;;) {
+      nowAfterSkip = (await get(`SELECT datetime('now','localtime') AS now`)).now;
+      if (nowAfterSkip !== T_skip) break;
+      if (Date.now() - waitCrossSkipSecondStart > 2000) {
+        assert.fail(`[M9] ⑤前置：等待跨过 T_skip=${T_skip} 所在秒超时（2s 上限），当前 now=${nowAfterSkip}——系统时钟异常，需人工排查`);
+      }
+      await new Promise(res => setTimeout(res, 75));
+    }
+
+    const rExec = await call('POST', `/api/sys-releases/${relId}/execute`, devTok(5), { release_note: '[M9] 混批测试发布', executor_row_id: execRow.id });
+    assert.strictEqual(rExec.status, 200, `[M9] ⑤execute 应 200，实际 ${rExec.status} ${JSON.stringify(rExec.body)}`);
+    assert.strictEqual(rExec.body.released, true, '[M9] ⑤单一在册执行人一次确认即真翻牌（R-GATE 下限≥1）');
+
+    const miniFinal = await get('SELECT status, released_at, release_id FROM sys_issues WHERE id=?', [miniId]);
+    assert.strictEqual(miniFinal.status, SF.SYS_RELEASE_STATUSES.feature[1], `[M9] ⑤小程序单状态应=已上线（${SF.SYS_RELEASE_STATUSES.feature[1]}），实际 ${miniFinal.status}`);
+    assert.ok(miniFinal.released_at, '[M9] ⑤小程序单 released_at 非空');
+    assert.strictEqual(miniFinal.release_id, relId, '[M9] ⑤小程序单 release_id 仍为本批次');
+    const bmsFinal = await get('SELECT status, released_at, release_id FROM sys_issues WHERE id=?', [bmsId]);
+    assert.strictEqual(bmsFinal.status, SF.SYS_RELEASE_STATUSES.bug[1], `[M9] ⑤BMS 单状态应=已上线（${SF.SYS_RELEASE_STATUSES.bug[1]}），实际 ${bmsFinal.status}`);
+    assert.ok(bmsFinal.released_at, '[M9] ⑤BMS 单 released_at 非空');
+    assert.strictEqual(bmsFinal.release_id, relId, '[M9] ⑤BMS 单 release_id 仍为本批次');
+    ok('[M9] ⑤发布：单一在册执行人一次确认即真翻牌——小程序单与 BMS 单同批均转已上线、released_at 非空、release_id 保持本批次不变');
+
+    // [S6b·H] 前置核验：⑤ 已确定性跨过 T_skip 所在秒才 execute，故此处两单 released_at、以及小程序单
+    //   自己的上线（release 事件）created_at，理应与 T_skip 精确不同——如果 last_completed_at 子查询被
+    //   放宽到也纳入上线相关事件（选错事件），下方 ⑥ 的等值断言会失去「同秒撞见就假绿」的退路，真正
+    //   靠不同值判红（而非巧合的同秒相等）。
+    assert.notStrictEqual(miniFinal.released_at, T_skip, '[M9] ⭐⑥前置：小程序单 released_at 与 T_skip 不同秒——实现坏成什么样这条会红：若本条恰好与 T_skip 同秒，下方 last_completed_at 等值断言即便选错了事件也会碰巧算对（假绿），故先证明两个时间戳确实不同');
+    assert.notStrictEqual(bmsFinal.released_at, T_skip, '[M9] ⭐⑥前置：BMS 单 released_at 与 T_skip 不同秒（两单同批同一次 UPDATE 写入，理应同值，同上理由）');
+    const tlOnlineRow = await get(`SELECT created_at FROM sys_issue_timeline WHERE issue_id=? AND event_type='release' AND to_status=?`, [miniId, SF.SYS_RELEASE_STATUSES.feature[1]]);
+    assert.ok(tlOnlineRow, '[M9] ⑥前置：应能查到小程序单的上线留痕行（event_type=release, to_status=已上线——批次发布内核实际写入的事件类型，非 status_change，见 index.js _publishReleaseCoreInTxn H-3 步骤4）');
+    assert.notStrictEqual(tlOnlineRow.created_at, T_skip, '[M9] ⭐⑥小程序单上线事件 created_at 与 T_skip 不同秒（同上理由，独立核实这一具体行本身不与 T_skip 同秒，而非仅信赖 released_at 那一列）');
+
+    // ⑥ 终态留痕不变量：跳过事件行未被删/改，last_completed_at 仍==T_skip（上线不覆盖「实际完成时间」）
+    const tlSkipRowAfter = await get(`SELECT created_at FROM sys_issue_timeline WHERE issue_id=? AND action_code='liaison_test_skip_system'`, [miniId]);
+    assert.ok(tlSkipRowAfter, '[M9] ⑥跳过事件行仍存在（未被上线流程删除）');
+    assert.strictEqual(tlSkipRowAfter.created_at, T_skip, '[M9] ⑥跳过事件行 created_at 精确未变（未被改写）');
+
+    const listT2 = await call('GET', `/api/sys-issues?status=${encodeURIComponent(SF.SYS_RELEASE_STATUSES.feature[1])}`, adminTok);
+    assert.strictEqual(listT2.status, 200, `[M9] ⑥（已上线）列表端点应 200，实际 ${listT2.status}`);
+    const listItemT2 = (listT2.body && listT2.body.items || []).find(x => x.id === miniId);
+    assert.ok(listItemT2, `[M9] ⑥列表（已上线过滤）应含本单 #${miniId}`);
+    assert.strictEqual(listItemT2.last_completed_at, T_skip, "[M9] ⭐⑥列表端点 last_completed_at 上线后仍精确等于 T_skip（未被覆盖）——实现坏成什么样这条会红：若 last_completed_at 白名单被上线相关的 action_code 干扰而改取上线事件时刻（last_completed_at 非存储列，是 list/detail 两处 SELECT 的子查询计算列，发布内核翻牌 UPDATE 无此列可写，故非「UPDATE 误写」这一失败形态）。变异注：只放宽 to_status 不放宽 event_type 时上线行（event_type='release'）不入候选集=空转；须同时放宽 event_type 才命中，实测判红且两时间戳相差 1 秒");
+    const detailT2 = await call('GET', `/api/sys-issues/${miniId}`, adminTok);
+    assert.strictEqual(detailT2.status, 200, `[M9] ⑥详情端点应 200，实际 ${detailT2.status}`);
+    assert.strictEqual(detailT2.body.issue.last_completed_at, T_skip, '[M9] ⭐⑥详情端点 last_completed_at 上线后仍精确等于 T_skip（同上）');
+
+    const miniCycleFinal = await get('SELECT liaison_test_cycle_no, liaison_test_notify_cycle_no FROM sys_issues WHERE id=?', [miniId]);
+    assert.strictEqual(miniCycleFinal.liaison_test_cycle_no, 0, '[M9] ⑥cycle_no 全程保持 0（从建单到已上线，跳过路径恒不消费周期号）——实现坏成什么样这条会红：若上线流程的任一环节误共用了 ⑦ 分支的 CAS 重置逻辑');
+    assert.strictEqual(miniCycleFinal.liaison_test_notify_cycle_no, 0, '[M9] ⑥notify_cycle_no 全程保持 0（同上）');
+
+    ok('[M9] 同一张小程序 feature 单从提交到已上线的连续断言（终态留痕不变量）：跳过事件行未删未改（created_at 精确不变）、list/detail 端点 last_completed_at 上线后仍 == T_skip（上线不覆盖「实际完成时间」）、liaison_test_cycle_no/notify_cycle_no 全程为 0；BMS 混批对照单同批已上线，两条产品线互不干扰');
+  }
+
 
   // ══════════════════════════════════════════════════════════════════════
   // [17] 284 号 B3-②：通知跨列不变量——全表扫描（部署硬闸门范式，同 verify-sys-intake-liaison.js

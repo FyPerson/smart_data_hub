@@ -1,17 +1,32 @@
 /**
- * v1.120.0 Commit A 验证：submit-export 放开附件必填（直派大文件行政闭环）
+ * submit-export 放开附件必填（大文件行政闭环）验证
  *
- * 背景：直派单（assign_mode='admin_direct'）交付物可能是十几 G 大文件无法上传平台，
- *   只能线下传递。放开 submit-export 附件必填，允许「无附件提交」——但仅限直派单，
- *   且无附件时 export_summary 必填（≥10 字）。
+ * 背景：导出交付物可能是十几 G 大文件无法上传平台，只能线下传递。
+ *   · v1.120.0 Commit A：放开 submit-export 附件必填，允许「无附件提交」——但仅限真直派单
+ *     （assign_mode='admin_direct' && forwarded_to_exporter_at IS NULL），且无附件时概要必填 ≥10 字。
+ *   · v1.164.2（2026-09-01）：无附件提交**放开到任意 EXPORTING 单的导出人本人**（守卫②废除）。
+ *     触发实证 = 生产协作单 #45（normal 单经三级转发，大文件线下移交，三条到 DONE 的通道全被挡死）。
+ *     概要必填条件相应扩为「真直派单（无论有无附件）|| 任意单无附件」。
+ *     ⚠️ admin-submit-on-behalf 的 EXPORTING 分支仍要求真直派，本次**不放开**（防 admin 越过 exporter）。
  *
- * 覆盖：
- *   T1 正向：直派 EXPORTING 单 + 无附件 + 概要≥10字 → 200 DONE + export_summary 落库 + 无新增附件行
- *   T2 负向：normal 单（非直派）+ 无附件 → 400 NO_FILE_ONLY_FOR_DIRECT
- *   T3 负向：直派单 + 无附件 + 概要<10字 → 400 EXPORT_SUMMARY_REQUIRED_DIRECT
- *   T4 负向：直派单 + 无附件 + 完全不带概要 → 400 EXPORT_SUMMARY_REQUIRED_DIRECT
- *   T5 回归：直派单 + 两附件齐全 → 200 DONE（老路径不破，附件正常入库）
- *   T6 负向：直派单 + 只传 1 个附件（半残）→ 400 PARTIAL_ATTACHMENTS
+ * 覆盖（正向 = 应闭环成功；负向 = 应被拒且状态不变）：
+ *   T1  正向：真直派单 + 无附件 + 概要≥10字 → 200 DONE + 概要落库 + 无新增附件行 + 日志字段
+ *   T2  正向【v1.164.2 翻转】：normal 单（已三级转发·复刻 #45 形态）+ 无附件 + 概要≥10字 → 200 DONE
+ *   T2b 负向【v1.164.2 新增】：normal 单 + 无附件 + 概要<10字 → 400 EXPORT_SUMMARY_REQUIRED_DIRECT
+ *   T2c 负向【v1.164.2 新增】：normal 单 + 无附件 + 不带概要 → 400 EXPORT_SUMMARY_REQUIRED_DIRECT
+ *   T3  负向：真直派单 + 无附件 + 概要<10字 → 400 EXPORT_SUMMARY_REQUIRED_DIRECT
+ *   T4  负向：真直派单 + 无附件 + 完全不带概要 → 400 EXPORT_SUMMARY_REQUIRED_DIRECT
+ *   T5  回归：真直派单 + 两附件齐全 + 概要≥10字 → 200 DONE（老路径不破，附件正常入库）
+ *   T5b 负向：真直派单 + 两附件齐全 + 概要<10字 → 400（直派单有附件也必填概要）
+ *   T5c 回归：normal 单 + 两附件齐全 + 无概要 → 200 DONE（有附件时 normal 概要仍可选）
+ *   T6  负向：只传 1 个附件（半残）→ 400 PARTIAL_ATTACHMENTS
+ *   T7  正向【v1.164.2 翻转】：admin_direct 但已被三级转发 + 无附件 + 概要≥10字 → 200 DONE
+ *   T7b 正向【判据区分力】：admin_direct 但已被三级转发 + 两附件 + 无概要 → 200 DONE
+ *        （与 T5b 成对：钉住 isGenuineDirectExporting 仍按双字段判定，被简化成单看 assign_mode 即判红）
+ *   T8  正向：真直派单 forwarded_to_exporter_at IS NULL + 无附件 → DONE（HIGH-1 判据不误伤）
+ *   T9  审计：无附件提交且单上无既有附件 → 日志 superseded_attachments 为空
+ *   T10 正向：真直派单模拟 reassign 换人（forwarded 仍 NULL）+ 无附件 → DONE
+ *   T11 审计：带 active 附件的真直派单无附件提交，审计正确显示未覆盖
  *
  * 前置：dev 服务器需在 BASE 运行（本脚本直改本地 dev 库，测完 cleanup）。
  * 运行：node scripts/verify-collab-direct-close-no-file.js
@@ -146,14 +161,47 @@ async function main() {
         }
     }
 
-    console.log('\n=== T2 负向：normal 单 + 无附件 → 400 NO_FILE_ONLY_FOR_DIRECT ===');
+    console.log('\n=== T2 正向【v1.164.2 放开·原为负向】：normal 单（已三级转发）+ 无附件 + 概要≥10字 → DONE ===');
+    // ⚠️ 本用例 2026-09-01 由负向翻转为正向：原断言「normal 单无附件 → 400 NO_FILE_ONLY_FOR_DIRECT」，
+    //   随 submit-export 守卫②废除而失效（错误码 NO_FILE_ONLY_FOR_DIRECT 已全仓不再产生）。
+    //   夹具精确复刻生产协作单 #45 形态：assign_mode='normal' + forwarded_to_exporter_at 非 NULL
+    //   （经三级转发到导出人），这正是放开前唯一无法闭环的组合。
     {
         const f = await makeExportingFixture('normal');
-        const res = await submitExportNoFile(f.id, f.exporterToken, '这是一段足够长的导出概要说明用于测试正常流转单被拒');
-        ok('T2 响应 400', res.status === 400, `got ${res.status}`);
-        ok('T2 code=NO_FILE_ONLY_FOR_DIRECT', res.body && res.body.code === 'NO_FILE_ONLY_FOR_DIRECT', JSON.stringify(res.body));
+        await dbRun('UPDATE collab_requests SET forwarded_to_exporter_at=? WHERE id=?', ['2026-09-01 17:29:37', f.id]);
+        const summary = '导出报表元素全量数据约 13G，文件过大无法上传平台，已通过内网共享盘线下移交业务方，平台只做闭环登记';
+        const res = await submitExportNoFile(f.id, f.exporterToken, summary);
+        ok('T2 响应 200', res.status === 200, `got ${res.status} ${JSON.stringify(res.body)}`);
+        ok('T2 current_status=DONE', res.body && res.body.current_status === 'DONE', JSON.stringify(res.body));
+        const row = await dbGet('SELECT status, export_summary, done_at, sql_validation_status FROM collab_requests WHERE id=?', [f.id]);
+        ok('T2 库内 status=DONE', row && row.status === 'DONE', JSON.stringify(row));
+        ok('T2 export_summary 落库完整', row && row.export_summary === summary, `got: ${row && row.export_summary}`);
+        ok('T2 done_at 已写', !!(row && row.done_at), JSON.stringify(row));
+        ok('T2 sql_validation_status=admin_closed（行政闭环语义）', row && row.sql_validation_status === 'admin_closed', JSON.stringify(row));
+        const atts = await dbAll("SELECT * FROM collab_attachments WHERE collab_request_id=? AND status='active'", [f.id]);
+        ok('T2 无新增 active 附件行', atts.length === 0, `got ${atts.length} 行`);
+    }
+
+    console.log('\n=== T2b 负向【v1.164.2 新增·防放开过头】：normal 单 + 无附件 + 概要<10字 → 400 EXPORT_SUMMARY_REQUIRED_DIRECT ===');
+    // 放开「不限单类型」后，「无附件必须有概要留痕」成为唯一拦截线——必须有负向用例钉住，
+    //   否则守卫③若被误写成只判 isGenuineDirectExporting，normal 单可无附件且无概要静默闭环（零留痕）。
+    {
+        const f = await makeExportingFixture('normal');
+        const res = await submitExportNoFile(f.id, f.exporterToken, '太短了');
+        ok('T2b 响应 400', res.status === 400, `got ${res.status} ${JSON.stringify(res.body)}`);
+        ok('T2b code=EXPORT_SUMMARY_REQUIRED_DIRECT', res.body && res.body.code === 'EXPORT_SUMMARY_REQUIRED_DIRECT', JSON.stringify(res.body));
         const row = await dbGet('SELECT status FROM collab_requests WHERE id=?', [f.id]);
-        ok('T2 状态未变（仍 EXPORTING）', row && row.status === 'EXPORTING', JSON.stringify(row));
+        ok('T2b 状态未变（仍 EXPORTING）', row && row.status === 'EXPORTING', JSON.stringify(row));
+    }
+
+    console.log('\n=== T2c 负向【v1.164.2 新增·防放开过头】：normal 单 + 无附件 + 完全不带概要 → 400 ===');
+    {
+        const f = await makeExportingFixture('normal');
+        const res = await submitExportNoFile(f.id, f.exporterToken, undefined);
+        ok('T2c 响应 400', res.status === 400, `got ${res.status} ${JSON.stringify(res.body)}`);
+        ok('T2c code=EXPORT_SUMMARY_REQUIRED_DIRECT', res.body && res.body.code === 'EXPORT_SUMMARY_REQUIRED_DIRECT', JSON.stringify(res.body));
+        const row = await dbGet('SELECT status FROM collab_requests WHERE id=?', [f.id]);
+        ok('T2c 状态未变（仍 EXPORTING）', row && row.status === 'EXPORTING', JSON.stringify(row));
     }
 
     console.log('\n=== T3 负向：直派单 + 无附件 + 概要<10字 → 400 EXPORT_SUMMARY_REQUIRED_DIRECT ===');
@@ -214,18 +262,34 @@ async function main() {
         ok('T6 状态未变（仍 EXPORTING）', row && row.status === 'EXPORTING', JSON.stringify(row));
     }
 
-    console.log('\n=== T7 负向【HIGH-1 收严】：admin_direct 单但已被三级转发（forwarded_to_exporter_at 非 NULL）+ 无附件 → 400 NO_FILE_ONLY_FOR_DIRECT ===');
-    // 模拟绕过链：admin_direct 单 fallback 切回流转后重新 forward-to-exporter 到 EXPORTING，
-    // 此时 assign_mode 仍 admin_direct 但 forwarded_to_exporter_at 非 NULL → 应被守卫识破拒绝
+    console.log('\n=== T7 正向【v1.164.2 放开·原为负向】：admin_direct 单但已被三级转发 + 无附件 + 概要≥10字 → DONE ===');
+    // ⚠️ 本用例 2026-09-01 由负向翻转为正向。原断言依据 codex 02 审 HIGH-1「fallback 后重新流转的
+    //   admin_direct 单是正常流转语义，不该无附件闭环」——该收严意图**未被推翻，只是换了载体**：
+    //   HIGH-1 真正要防的「admin 越过 exporter 闭环」仍由 admin-submit-on-behalf 的 EXPORTING 分支
+    //   （仍要求 assign_mode='admin_direct' && forwarded_to_exporter_at IS NULL）原样守住。
+    //   本端点恒由 ONLY_EXPORTER_CAN_SUBMIT 保证是 exporter 本人自助，无越权维度，故放开。
     {
         const f = await makeExportingFixture('admin_direct');
         // 造"已被三级转发"痕迹：设 forwarded_to_exporter_at
         await dbRun('UPDATE collab_requests SET forwarded_to_exporter_at=? WHERE id=?', ['2026-07-21 09:00:00', f.id]);
-        const res = await submitExportNoFile(f.id, f.exporterToken, '这单曾 fallback 后重新流转，实际是正常流转语义，不该无附件闭环');
-        ok('T7 响应 400', res.status === 400, `got ${res.status} ${JSON.stringify(res.body)}`);
-        ok('T7 code=NO_FILE_ONLY_FOR_DIRECT', res.body && res.body.code === 'NO_FILE_ONLY_FOR_DIRECT', JSON.stringify(res.body));
+        const res = await submitExportNoFile(f.id, f.exporterToken, '这单曾 fallback 后重新流转，交付物为大文件线下移交，平台只做闭环登记');
+        ok('T7 响应 200', res.status === 200, `got ${res.status} ${JSON.stringify(res.body)}`);
+        const row = await dbGet('SELECT status, sql_validation_status FROM collab_requests WHERE id=?', [f.id]);
+        ok('T7 库内 status=DONE', row && row.status === 'DONE', JSON.stringify(row));
+        ok('T7 sql_validation_status=admin_closed', row && row.sql_validation_status === 'admin_closed', JSON.stringify(row));
+    }
+
+    console.log('\n=== T7b 正向【judge 判据区分力】：admin_direct 单但已被三级转发 + 两附件齐全 + 无概要 → DONE（非真直派，概要可选）===');
+    // 钉住 isGenuineDirectExporting 仍在按「assign_mode + forwarded_to_exporter_at」双字段判定：
+    //   若有人把它简化成 assign_mode==='admin_direct'，本例会因概要必填被误拒 400 → 判红。
+    //   与 T5b（真直派 + 两附件 + 概要<10字 → 400）成对，构成该判据的双向证明。
+    {
+        const f = await makeExportingFixture('admin_direct');
+        await dbRun('UPDATE collab_requests SET forwarded_to_exporter_at=? WHERE id=?', ['2026-07-21 09:00:00', f.id]);
+        const res = await submitExportWithFiles(f.id, f.exporterToken, { withData: true, withShot: true }); // 不传概要
+        ok('T7b 响应 200', res.status === 200, `got ${res.status} ${JSON.stringify(res.body)}`);
         const row = await dbGet('SELECT status FROM collab_requests WHERE id=?', [f.id]);
-        ok('T7 状态未变（仍 EXPORTING）', row && row.status === 'EXPORTING', JSON.stringify(row));
+        ok('T7b 库内 status=DONE（已转发的 admin_direct 单概要可选）', row && row.status === 'DONE', JSON.stringify(row));
     }
 
     console.log('\n=== T8 正向【HIGH-1 判据不误伤】：真直派单 forwarded_to_exporter_at IS NULL + 无附件 → DONE ===');

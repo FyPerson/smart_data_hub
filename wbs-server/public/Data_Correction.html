@@ -722,7 +722,7 @@
         // 群主固定示例用户A（与后端 COLLAB_CHAT_ADMIN_ID 同源）；将来改人需前后端同步
         const CORRECTION_CHAT_ADMIN_ID = 3;
         // 所属系统白名单（与后端 CORRECTION_SOURCE_SYSTEMS 同源）
-        const CORRECTION_SOURCE_SYSTEMS = ['BMS', 'HRD', '客户报销平台', '其他'];
+        const CORRECTION_SOURCE_SYSTEMS = ['BMS', 'HRD', '客户报销平台', '小程序-智荟人力', '其他'];   // 2026-09-02 追加「小程序-智荟人力」（与后端 routes/corrections.js 同批双改·「其他」恒末位）
         // 对接人白名单（路线 B）——与后端 routes/corrections.js 的 CORRECTION_RELAY_USER_IDS 同源！
         //   改名单需三处同步：后端常量 + 本处 + scripts/verify-correction-relay-whitelist.js（verify 卡字面量一致）。
         const CORRECTION_RELAY_USER_IDS = [7, 13];

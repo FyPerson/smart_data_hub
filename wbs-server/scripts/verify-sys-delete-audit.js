@@ -173,7 +173,7 @@ async function main() {
   await run(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT, status TEXT DEFAULT 'active', phone TEXT, dingtalk_user_id TEXT)`);
   await run(`INSERT INTO users (id, username, display_name, role, phone) VALUES
     (1,'admin','管理员','admin','13800000001'),(2,'admin2','第二管理员','admin','13800000002'),
-    (5,'dev','开发王','user','13800000005'),(13,'wangtaotao','示例对接人','user','13800000013')`);
+    (5,'dev','开发王','user','13800000005'),(13,'wangtaotao','示例对接人','user','19900000024')`);
   const app = express();
   app.use(express.json());
   app.use('/api', mod.router);

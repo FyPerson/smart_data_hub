@@ -168,11 +168,11 @@
            white-space:nowrap 显式声明（449-L1：长系统名"客户报销平台"防候选行内被压缩换行）。
            落页面内 <style>，不进共享 components.css——O1 是本页专属展示，免 ?v= bump 与四页回归。 */
         .u-sys-tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 500; background: #f1f5f9; color: #475569; border: 1px solid #e2e8f0; white-space: nowrap; }
-        /* [观察反馈优化批·2026-08-27] 所属系统徽章六色映射——demo 三轮定稿 V1（六系统分色 tinted），
+        /* [观察反馈优化批·2026-08-27] 所属系统徽章七色映射——demo 三轮定稿 V1 六色 + 2026-09-02「小程序-智荟人力」玫红（七系统分色 tinted），
            色值逐字照抄 E:\tmp\demo_待我处理卡与徽章样式_20260827_v1.0.html 区块2 V1 标注，不自创。
            叠加在基础 .u-sys-tag 之上（class="u-sys-tag u-sys-tag-xxx"）——尺寸/圆角/字号/nowrap 等
            版式属性仍由 .u-sys-tag 提供，本组变体只覆盖 background/color/border-color 三项。
-           未登记的 system_name（不在下方六选）不追加变体 class，落回 .u-sys-tag 基础灰
+           未登记的 system_name（不在下方七选）不追加变体 class，落回 .u-sys-tag 基础灰
            （现状色，见 siSysTagClass 的 class 片段 gate 写法，同 siTypeClass 既有范式）——
            后端透传任意 system_name 不会导致样式炸裂或出现不存在的选择器。 */
         .u-sys-tag-bms   { background: #fef3c7; color: #92400e; border-color: #fde68a; }
@@ -180,6 +180,7 @@
         .u-sys-tag-esign { background: #dbeafe; color: #1d4ed8; border-color: #bfdbfe; }
         .u-sys-tag-reimb { background: #d1fae5; color: #047857; border-color: #a7f3d0; }
         .u-sys-tag-rpa   { background: #ede9fe; color: #6d28d9; border-color: #ddd6fe; }
+        .u-sys-tag-miniapp { background: #ffe4e6; color: #9f1239; border-color: #fecdd3; }
         .u-sys-tag-other { background: #f5f5f4; color: #57534e; border-color: #e7e5e4; }
         /* 优先级徽章已升共享层 components.css .u-pri（状态列/优先级列统一轮 2026-07-10：本页原
            si-prio 即共享版蓝本，原样上移后本地删除；数据开发页同步从圆点迁入同款） */
@@ -1679,15 +1680,15 @@
         UnifyHelpers.warnBadgeOnce('Sys_Iteration.siTypeClass', t);
         return '';
     }
-    // [观察反馈优化批·2026-08-27] 所属系统徽章六色映射（demo V1 拍板值，见页面内 <style> .u-sys-tag-*
-    //   六条规则处注释）——class 片段 gate 同 siTypeClass 同款范式：BIZ_SYSTEMS 六值各配一个变体，
-    //   往集合加成员前先查同构性——未登记的 system_name（后端透传的任意值，非本页六值白名单成员）
+    // [观察反馈优化批·2026-08-27] 所属系统徽章七色映射（demo V1 拍板六色 + 2026-09-02「小程序-智荟人力」玫红，见页面内 <style> .u-sys-tag-*
+    //   七条规则处注释）——class 片段 gate 同 siTypeClass 同款范式：BIZ_SYSTEMS 七值各配一个变体，
+    //   往集合加成员前先查同构性——未登记的 system_name（后端透传的任意值，非本页七值白名单成员）
     //   降级为无变体（落回 .u-sys-tag 基础灰，非炸样式），并 warnBadgeOnce 一次性告警（不静默吞信号）。
     // [Opus 预筛提示-9] 补 Object.freeze——对齐同页 SI_EXEC_SUMMARY_CLS/SI_TYPE_CLASS 等同款「class
     //   片段 gate」映射表的既有写法（均已 freeze），防运行期被意外改写。
     const SI_SYS_TAG_CLASS = Object.freeze({
         'BMS': 'u-sys-tag-bms', 'HRD': 'u-sys-tag-hrd', '电子签': 'u-sys-tag-esign',
-        '客户报销平台': 'u-sys-tag-reimb', 'RPA程序': 'u-sys-tag-rpa', '其他': 'u-sys-tag-other',
+        '客户报销平台': 'u-sys-tag-reimb', 'RPA程序': 'u-sys-tag-rpa', '小程序-智荟人力': 'u-sys-tag-miniapp', '其他': 'u-sys-tag-other',
     });
     function siSysTagClass(sys) {
         if (Object.prototype.hasOwnProperty.call(SI_SYS_TAG_CLASS, sys)) return SI_SYS_TAG_CLASS[sys];
@@ -4016,8 +4017,9 @@
         intake_accept: '受理', intake_return: '受理退改', resubmit_intake: '重新提交受理',
         liaison_test_pass: '对接测试通过', liaison_test_return: '对接测试打回',
         liaison_test_skip_excused: '跳过对接测试（全员开脱）', liaison_test_skip_liaison: '跳过对接测试（对接人失效）',
+        liaison_test_skip_system: '跳过对接测试（系统策略）',   // [S3·方案 v1.2 §4.4] 小程序-智荟人力等按系统策略跳过对接测试
         status_change: '状态流转',   // 通用兜底——裸 status_change（action_code=null，index.js:2876 默认路径）的正名；
-        //   W-GATE 那三种 mirrorActionCode 变体走各自更具体的码（本条只兜底真正裸的 status_change 行）
+        //   W-GATE 那四种 mirrorActionCode 变体走各自更具体的码（本条只兜底真正裸的 status_change 行）
         change_intake_mode: '受理模式变更',   // 仅存量兜底：路由已恒 409（非当前代码可达写点），但库里历史行仍可能带此码
         // [MED-2·组A] /reassign 端点 ETA 变更留痕——event_type='note' 但独立徽章而非落回通用「备注」，
         //   同 scope_change 走 action_code 当 key 的既有模式（见下方 siRenderTimeline key 计算 isNoteWithOwnLabel）。
@@ -4100,9 +4102,11 @@
         liaison_test_pass: 'si-tl-green',
         //   打回类（对接测试打回）归 red；
         liaison_test_return: 'si-tl-red',
-        //   跳过类两码选 amber（非 gray）——两者都是"系统因例外情况自动代走一步"（全员开脱/对接人失效），
-        //   语义上更接近既有 created/derive 的"值得留意的自动事件"，非 hold/void 那种中性静默态；
+        //   跳过类三码选 amber（非 gray）[S3 补第三码：按系统策略跳过]——三者都是"系统因例外情况自动
+        //   代走一步"（全员开脱/对接人失效/所属系统策略），语义上更接近既有 created/derive 的"值得
+        //   留意的自动事件"，非 hold/void 那种中性静默态；
         liaison_test_skip_excused: 'si-tl-amber', liaison_test_skip_liaison: 'si-tl-amber',
+        liaison_test_skip_system: 'si-tl-amber',
         // 通用兜底 status_change 归 gray（中性，未归类到任何具体语义族的裸状态流转）
         status_change: 'si-tl-gray',
         // [MED-2·组A] 与既有 assign/reassign/estimate 同族（"预计完成时间"相关的程序性动作），归 indigo。
@@ -4335,7 +4339,7 @@
                 // C5d 存量转译（写入端半见 index.js :2873-2879 B3 commit a75e9ea）：本判断只服务 B3 上线前写入的
                 // 存量行——新行 summary 已是人话，走不到这条精确等值分支。方向感知、译文与写入端 W_GATE_SKIP_SUMMARY/
                 // mirrorSummary 逐字一致，不重新发明措辞：
-                //   ① mirrorActionCode 非空（两个 skip 码）优先——同写入端"①②优先于③④"判定顺序；
+                //   ① mirrorActionCode 非空（三个 skip 码）优先——同写入端"①②③优先于④⑤"判定顺序；
                 //   ② 否则按 to_status 是否落在 DEV 族（SI_DEV_FAMILY_STATUSES，出处见该常量声明处——
                 //      查证 routes/sys-iteration/status-families.js:55-59 SYS_DEV_STATUSES）判方向：DEV 族=回弹
                 //      （新 pending 成员打破全完成态），否则（VERIFY/LIAISON_TEST）=前进（全部完成）。
@@ -4344,6 +4348,7 @@
                 let translated;
                 if (e.action_code === 'liaison_test_skip_excused') translated = '在册开发全员开脱，跳过对接测试自动流转';
                 else if (e.action_code === 'liaison_test_skip_liaison') translated = '对接人不可用，跳过对接测试自动流转';
+                else if (e.action_code === 'liaison_test_skip_system') translated = '所属系统策略跳过对接测试，自动流转';
                 else if (SI_DEV_FAMILY_STATUSES.includes(e.to_status)) translated = '出现新的待提交成员，自动退回开发中';
                 else translated = '全部在册开发已完成，自动流转';
                 // title 挂原文——机制名"W-GATE 自动门禁转移"不丢，悬浮可查（审计要求）。
@@ -7392,10 +7397,11 @@
         // [codex 291 号 M-2 收口] 原固定文案"…自动进入「待验收」"对 feature 失实——feature 主路径先进
         // 「待对接测试」（W-GATE §3.0-⑦），对接人测试通过（liaison_test_pass）后才到「待验收」；仅
         // improvement/bug 才是"全部完成→直接待验收"。⭐ feature 还存在 ⑥ 降级分支（对接人当前失效等
-        // 情形会跳过测试段直落「待验收」，见 runWGate ⑥），落点在提交那一刻不确定，故用"通常/或"的
-        // 诚实表述，不承诺唯一确定结果。
+        // 情形会跳过测试段直落「待验收」，见 runWGate ⑥）与 [S3·2026-09-02] 按所属系统策略跳过分支
+        // （如小程序-智荟人力恒不经对接测试，见 runWGate isSkipLiaisonTestSystemForIssue），落点在提交
+        // 那一刻不确定，故用"通常/或"的诚实表述并列两种归因，不承诺唯一确定结果。
         const submitCompleteHint = iss.type === 'feature'
-            ? '仅标记<b>你本人</b>的开发项完成；全部在册开发都完成后，本单通常进入「待对接测试」（若对接人当前不可用等情形会直接跳至「待验收」，视对接人状态而定），对接测试通过后再进入「待验收」。'
+            ? '仅标记<b>你本人</b>的开发项完成；全部在册开发都完成后，本单通常进入「待对接测试」（若对接人当前不可用、或所属系统策略不经对接测试〔如小程序-智荟人力〕等情形会直接跳至「待验收」），对接测试通过后再进入「待验收」。'
             : '仅标记<b>你本人</b>的开发项完成；全部在册开发都完成后，本单才自动进入「待验收」。';
         const fields = [{ k: null, html: `<div class="u-hint" style="margin-bottom:8px">${submitCompleteHint}</div>` }, { k: null, html: modeHtml }];
         if (needGap) fields.push(fTextarea('fix_gap_note', '修复缺口说明', '', true, '必填：上一版修复缺口在哪（复盘素材，不作考核）'));
@@ -9617,12 +9623,12 @@
         // derive_seq（S12-b/S13-a），siIssueDisplayNo 零额外数据依赖直接消费。
         // [O1·方案 v1.3 §3 O1·R-C3] 候选行加「所属系统」徽章——system_name 同样来自该 SELECT 投影
         // （buildSysIssuesListSelect，index.js 已含此列，O1 后端零改），值走 esc() 转义（虽值域受后端
-        // BIZ_SYSTEMS 六值白名单约束，前端仍不信任后端数据形态，走既有转义惯例）；假值（NULL/空串）
+        // BIZ_SYSTEMS 七值白名单约束，前端仍不信任后端数据形态，走既有转义惯例）；假值（NULL/空串）
         // 不渲染空徽章。标题改包 .si-chk-text（flex:1;min-width:0 既有范式）使其成为行内唯一可收缩
         // 项——checkbox（flex:0 0 auto）与类型标签/系统徽章（nowrap）不收缩；编号是裸文本节点（匿名
         //   flex item·默认可收缩，500px 定宽下实际不触发断行），新增一列后标题让出空间而非撑破候选行。
         const opts = cands.map(i => {
-            // [观察反馈优化批·2026-08-27] 六色分色变体（demo V1）叠加在基础 .u-sys-tag 之上；
+            // [观察反馈优化批·2026-08-27] 七色分色变体（demo V1 六色 + 2026-09-02 小程序玫红）叠加在基础 .u-sys-tag 之上；
             //   siSysTagClass 未登记值返回空串，class 属性据此省略多余空格（不产出 class="u-sys-tag "）。
             const sysCls = siSysTagClass(i.system_name);
             const sysTag = i.system_name ? ` <span class="u-sys-tag${sysCls ? ' ' + sysCls : ''}">${esc(i.system_name)}</span>` : '';

@@ -17855,11 +17855,13 @@ const VALID_RETURN_REASONS = ['business_permission', 'dev_permission', 'underlyi
 const RETURN_NOTE_MAX_LEN = 500;
 // v1.71.0 Commit E：数据导出人提交交付物 export_summary 上限（与 RETURN_NOTE 对齐）
 const EXPORT_SUMMARY_MAX_LEN = 500;
-// v1.120.0 直派大文件行政闭环：真直派单 submit-export 的 export_summary 必填下限 10 字。
-//   业务理由：直派单交付物可能是十几 G 大文件无法上传平台，只能线下传递；
+// 大文件行政闭环：submit-export 的 export_summary 必填下限 10 字。
+//   业务理由：导出交付物可能是十几 G 大文件无法上传平台，只能线下传递；
 //   要求导出人写清「导出了什么 + 附件情况 / 线下怎么给」留痕（≥10 字）。
-//   2026-07-21 用户调整：从「无附件才必填」扩为「真直派单无论有无附件都必填」（故改名 _DIRECT）。
-//   normal 单 export_summary 仍可选（不受此下限约束）。
+//   沿革：v1.120.0 立「无附件才必填」→ 2026-07-21 用户调整为「真直派单无论有无附件都必填」（故名 _DIRECT）
+//     → v1.164.2 放开无附件不限单类型后，触发条件 =「真直派单」**或**「任意单无附件」。
+//   ⚠️ 常量名 _DIRECT 后缀已名不副实（保留仅因其为既有标识，改名波及面 > 收益）；准确条件见 submit-export 守卫③。
+//   normal 单**有附件**时 export_summary 仍可选（不受此下限约束）。
 const EXPORT_SUMMARY_MIN_LEN_DIRECT = 10;
 
 app.post('/api/collab/requests/:id/return-to-dev', authenticateToken, requireExporterOrNonViewer, async (req, res) => {
@@ -18325,8 +18327,9 @@ app.post('/api/collab/requests/:id/submit-export',
 
         // === 前置：附件探测 + 格式校验（v1.120.0 放开必填）===
         //   放开前：result_data + screenshot 两附件均必填（十几 G 大文件传不了 → 卡死）。
-        //   放开后：允许「无附件提交」——但仅限直派单（assign_mode='admin_direct'，守卫延到 SELECT 后，
-        //   因 assign_mode 需查库），且无附件时 export_summary 变必填（≥10 字，见下方 SELECT 后校验）。
+        //   放开后：允许「无附件提交」——v1.120.0 仅限直派单，**v1.164.2 起放开到任意 EXPORTING 单的
+        //   导出人本人**（调用者身份已由 ONLY_EXPORTER_CAN_SUBMIT 守住）；无附件时 export_summary
+        //   变必填（≥10 字，见下方 SELECT 后守卫③）。
         //   本段只做：①探测有无附件 ②「同时有或同时无」互斥（防只传一个的半残状态）③有附件时校验格式。
         const resultDataFile = req.files && req.files.result_data && req.files.result_data[0];
         const screenshotFile = req.files && req.files.result_data_screenshot && req.files.result_data_screenshot[0];
@@ -18445,9 +18448,25 @@ app.post('/api/collab/requests/:id/submit-export',
                 });
             }
 
-            // === v1.120.0 无附件路径业务守卫（仅在 hasFiles=false 时生效）===
-            //   缺口来源：直派单交付物可能是十几 G 大文件无法上传平台，只能线下传递。
-            //   守卫①：仅限「真直派 EXPORTING 单」。判据 = assign_mode='admin_direct' && forwarded_to_exporter_at IS NULL。
+            // === 无附件路径业务守卫（仅在 hasFiles=false 时生效）===
+            //   缺口来源：导出交付物可能是十几 G 大文件无法上传平台，只能线下传递。
+            //
+            // 【v1.164.2 放开·2026-09-01】无附件提交从「仅真直派单」扩展到**任意 EXPORTING 单的导出人本人**。
+            //   业务实证：生产协作单 #45（OA-402917 市场营销部）是 normal 流转单经三级转发到导出人，
+            //     导出结果为大文件线下移交，但三条到 DONE 的通道全被挡死（本端点无附件仅限直派 / bypass 与
+            //     admin-submit-on-behalf 都要 SUBMITTED，而 EXPORTING 只能退回 PENDING 回不到 SUBMITTED）
+            //     → 单子无法闭环。证明 normal 流转单同样存在「大文件线下转交」的真实场景。
+            //   ⚠️ 为什么放开不推翻下述 codex 02 审 HIGH-1 的收严意图：
+            //     HIGH-1 防的是「**admin 越过 exporter** 单方面闭环 normal 单」，其载体是
+            //     admin-submit-on-behalf 的 EXPORTING 分支——**那道守卫本次原样保留，不在放开范围内**。
+            //     本端点已由上方 ONLY_EXPORTER_CAN_SUBMIT 保证调用者恒为「当前 exporter_user_id 本人」，
+            //     是导出人**自助**闭环自己手上的单，不存在越权维度；exporter 本就有权决定交付物形态
+            //     （传两个附件同样直接 DONE，无附件只是少了平台存档、多了概要留痕）。
+            //   ∴ 放开后无附件路径的不变量 = 「status='EXPORTING' + exporter 本人 + 未归档 + 概要≥10 字」，
+            //     不再依赖 assign_mode / forwarded_to_exporter_at——这两个字段此后只用于判「有附件时概要是否必填」。
+            //   ⚠️ 下述守卫①的 forwarded_to_exporter_at 判据推导**仍然有效且仍在使用**（isGenuineDirectExporting
+            //     仍是守卫③的触发条件之一），故整段保留；仅「守卫②=无附件仅限真直派」这一条被本次放开推翻。
+            //   守卫①（判据推导·保留）：「真直派 EXPORTING 单」判据 = assign_mode='admin_direct' && forwarded_to_exporter_at IS NULL。
             //     ⚠️ codex 02 审 HIGH-1 收严（2026-07-21）：assign_mode 是「来源/历史标识」非「当前流程模式」，
             //     单看 assign_mode='admin_direct'+EXPORTING 会被下述绕过链骗过：
             //       admin_direct 单 → admin-direct-fallback 切回流转（status→PENDING_ASSIGN，assign_mode 仍 admin_direct，
@@ -18461,24 +18480,25 @@ app.post('/api/collab/requests/:id/submit-export',
             //     ∴ status='EXPORTING' && forwarded_to_exporter_at IS NULL 的唯一来源=admin-direct-create（含 reassign 换人后），
             //       从未被 forward 过——fallback 清 NULL 那刻状态已是 PENDING_ASSIGN，要回 EXPORTING 必经 forward（重写非 NULL）。
             //       故该判据严密等价于「当前是真直派导出态」。
-            //   守卫②：无附件提交仅限真直派单。
-            //   守卫③（2026-07-21 用户调整）：真直派单 export_summary **无论有无附件都必填**（≥10 字符），
-            //     便于留痕说明「导出了什么 + 附件情况 / 线下如何移交」。非直派单概要仍可选（原逻辑）。
+            //   守卫②【v1.164.2 已废除】：原「无附件提交仅限真直派单」（返 400 NO_FILE_ONLY_FOR_DIRECT）
+            //     已随本次放开删除——错误码 NO_FILE_ONLY_FOR_DIRECT 此后全仓不再产生（含前端不再消费）。
+            //   守卫③：export_summary 必填 ≥10 字，触发条件 =「真直派单（无论有无附件）」**或**「任意单无附件」。
+            //     · 真直派单有附件也必填：2026-07-21 用户调整（直派交付语境需说明导出内容），保留不变。
+            //     · 任意单无附件必填（v1.164.2 新增）：平台无交付物存档时概要是唯一留痕载体，
+            //       必须写明导出了什么、为何不传附件、线下如何移交。
+            //     · normal 单有附件：概要仍可选（原逻辑不变）。
+            //   ⚠️ 错误码 EXPORT_SUMMARY_REQUIRED_DIRECT 保留原名（_DIRECT 是 v1.120.0 历史命名，实际触发
+            //     条件已如上扩展）——错误码属对外契约，改名会破坏既有 verify 脚本与生产日志检索，
+            //     收益仅命名美观，故只改 error 文案不改 code。
             const isGenuineDirectExporting =
                 collab.assign_mode === 'admin_direct' && collab.forwarded_to_exporter_at == null;
-            if (!hasFiles && !isGenuineDirectExporting) {
-                cleanupPending();
-                return res.status(400).json({
-                    error: '仅直派单支持无附件提交；本单为正常流转单，请上传导出结果与截图',
-                    code: 'NO_FILE_ONLY_FOR_DIRECT'
-                });
-            }
-            if (isGenuineDirectExporting) {
-                // 真直派单：概要必填 ≥10 字（无论有无附件）
+            if (isGenuineDirectExporting || !hasFiles) {
                 if (!exportSummary || exportSummary.length < EXPORT_SUMMARY_MIN_LEN_DIRECT) {
                     cleanupPending();
                     return res.status(400).json({
-                        error: `直派单提交时，导出概要必填且不少于 ${EXPORT_SUMMARY_MIN_LEN_DIRECT} 字符（说明导出了什么、附件情况，如需线下移交请说明方式）`,
+                        error: hasFiles
+                            ? `直派单提交时，导出概要必填且不少于 ${EXPORT_SUMMARY_MIN_LEN_DIRECT} 字符（说明导出了什么、附件情况，如需线下移交请说明方式）`
+                            : `无附件提交时，导出概要必填且不少于 ${EXPORT_SUMMARY_MIN_LEN_DIRECT} 字符（说明导出了什么、为何不传附件、线下如何移交）`,
                         code: 'EXPORT_SUMMARY_REQUIRED_DIRECT',
                         min_length: EXPORT_SUMMARY_MIN_LEN_DIRECT,
                         actual_length: exportSummary ? exportSummary.length : 0
@@ -18628,13 +18648,15 @@ app.post('/api/collab/requests/:id/submit-export',
                 //   admin 兜底：若 exporter 上传错误，admin 走 admin-submit-on-behalf 走 DONE→DONE 路径替换文件
                 // codex 39 M-5 采纳保留：清 sql_validation_error + validation_started_at（不残留 dev submit 旧校验）
                 // 双轨守卫：status=EXPORTING + exporter_user_id=userId + archived 双轨
-                // v1.120.0 codex 02 审 MED-1 收严：无附件路径把「真直派 EXPORTING」不变量下沉到 UPDATE 的 WHERE
-                //   （assign_mode='admin_direct' + forwarded_to_exporter_at IS NULL），让数据库写入点兜底——
-                //   即使 SELECT 与 UPDATE 之间被未走本 mutex 的管理端更新改了状态，写点仍守住不变量（changes=0 → 409）。
-                //   有附件路径不加此条件（正常流转单 EXPORTING 传附件闭环是合法的），保持原行为。
-                const noFileWhereGuard = hasFiles
-                    ? ''
-                    : ` AND assign_mode = 'admin_direct' AND forwarded_to_exporter_at IS NULL`;
+                // v1.120.0 codex 02 审 MED-1 曾把「真直派 EXPORTING」不变量下沉到无附件路径的 UPDATE WHERE
+                //   （assign_mode='admin_direct' + forwarded_to_exporter_at IS NULL）做数据库写点兜底。
+                // 【v1.164.2】该条件随守卫②废除一并移除——**不是削弱兜底，是被兜底的不变量本身变了**：
+                //   放开后无附件路径的不变量 =「EXPORTING + exporter 本人 + 未归档」，
+                //   已被下方 WHERE 的 status/exporter_user_id/archived 三条原样守住（MED-1 要的
+                //   「SELECT 与 UPDATE 之间被并发改状态则 changes=0 → 409」保护力度不变）。
+                //   若继续保留 assign_mode 条件，normal 单无附件提交会在应用层放行后被 DB 静默拒（changes=0），
+                //   即前后端放开而写点没放开的「半放开」不一致态。
+                // ∴ 此后有/无附件两条路径的 WHERE 完全一致，不再需要分支变量。
                 const updResult = await dbRunAsync(
                     `UPDATE collab_requests
                         SET status = 'DONE',
@@ -18650,7 +18672,7 @@ app.post('/api/collab/requests/:id/submit-export',
                         AND status = 'EXPORTING'
                         AND exporter_user_id = ?
                         AND archived_at IS NULL
-                        AND archived_final_at IS NULL${noFileWhereGuard}`,
+                        AND archived_final_at IS NULL`,
                     [exportSummary, attachmentDirName, id, userId]
                 );
 

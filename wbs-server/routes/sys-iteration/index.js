@@ -3716,9 +3716,11 @@ module.exports = (deps) => {
   //   │   resume 消费的 gate_deferred_at 标记，其锚定的"全员完成"事实发生在 **hold 之前**——resume 本身
   //   │   不是开发在这一刻新完成了什么工作，是把此前已存在、被暂缓打断的完成事实"解冻"、重新走一遍
   //   │   资格闸，语义上是"迟到的确认"而非"新的报完工"。last_completed_at 的 SQL 白名单（本文件
-  //   │   :8077 一带，`action_code IN (NULL, 'liaison_test_pass', 'liaison_test_skip_excused',
-  //   │   'liaison_test_skip_liaison')`）已天然覆盖这条路径产出的行（mirrorActionCode 由**结果分支**
-  //   │   决定，与触发源无关，无需为 resume 单独开白名单条目）——本条注记只是审计口径的显式登记，不
+  //   │   grep `action_code IN ('liaison_test_pass'` 两处 list/detail 端点子查询——绝对行号随改动
+  //   │   漂移，此处不再记；取值 `action_code IN (NULL, 'liaison_test_pass', 'liaison_test_skip_excused',
+  //   │   'liaison_test_skip_liaison', 'liaison_test_skip_system')`，S3 新增第四码同批补入）已天然
+  //   │   覆盖这条路径产出的行（mirrorActionCode 由**结果分支**决定，与触发源无关，无需为 resume
+  //   │   单独开白名单条目）——本条注记只是审计口径的显式登记，不
   //   │   要求代码对 resume 做任何特殊分支处理，该走的判定/UPDATE/timeline 一分不少照走。
   //   └────────────────────────────────────────────────────────────────────────────
   //   payload 转发面（不变，逻辑同旧注释）：submit 转发自身 req.body（能真正承载 completion_overrun_
@@ -3726,6 +3728,43 @@ module.exports = (deps) => {
   //   框）。⚠️ 已知窄边界（如实登记，非本批修复范围）：若 7 处"可达"里 submit 之外的任一处恰好命中
   //   闸判定**且**该单同时完成超期 ≥3 天，会因 payload 缺失理由字段而 400（W5 已补统一指路文案，见
   //   guidanceSuffix 消费点）——用户当场无法在该操作面提供理由，需改走能修 deadline/加成员的入口。
+
+  // ============================================================
+  // [S3·所属系统「小程序-智荟人力」接入 方案 v1.2 §4.3] 按系统跳过对接测试——判定源单一收口。
+  //   「小程序-智荟人力」发版没有版本号、不区分前后端，开发全员自测完直转建单人验收，不经对接人
+  //   测试段（用户口径 D，§1.1）。improvement/bug 天然无对接测试段（现状已满足，§4.1），本组只处理
+  //   feature 决策树。
+  //   照搬 C11（DEFAULT_SINGLE_COMMIT_GROUP_SYSTEMS，本文件 :9493 一带）的清单+纯函数范式命名，
+  //   **不做 config 覆盖层**：C11 的 loadSingleCommitGroupSystemSet() 含约 40 行畸形值回落逻辑，但
+  //   该 config 至今无写入端点（仅一次性脚本）、两环境实测均空（部署前置探针 §9.2-1），属"预留但
+  //   零使用"复杂度；本组只做代码常量，避免复制未被使用的分支及其测试面，将来需配置化再按 C11 补齐。
+  // ============================================================
+  const DEFAULT_SKIP_LIAISON_TEST_SYSTEMS = ['小程序-智荟人力'];
+  function isSkipLiaisonTestSystem(systemName) {
+    // null/空串不命中——同 hasValidLiaison（:3653 一带 `if (!row || !row.intake_liaison_id) return null;`）
+    //   既有的 falsy 短路早退写法。
+    if (!systemName) return false;
+    return DEFAULT_SKIP_LIAISON_TEST_SYSTEMS.includes(systemName);
+  }
+  // runWGate 决策树内查询包装——**fail-closed 三契约**（方案 §4.2）：
+  //   ① 查不到该单据行 → 不跳过（走既有 ⑥/⑦），留 logger.error 可观测信号（含"W-GATE skip-system
+  //      查无单据"字样，供 verify/生产日志检索）。跳过=绕过一道验收，失败方向必须保守。
+  //   ② 查询本身抛异常 → 不吞，沿既有异常策略向上抛（调用方事务回滚），不 .catch(warn) 静默吞
+  //      （状态机字段 UPDATE 三件套精神）。
+  //   ③ system_name 为 null/空 → isSkipLiaisonTestSystem 首行已判 false，天然不命中，无需本函数
+  //      重复判断。
+  //   查询时机收窄：仅调用点（下方 ⑤变体之后、⑥ 之前）本身已收窄在
+  //   `issueType==='feature' && inDev && eligible && deliverableCount>0` 之后，避免非 feature/
+  //   非开发族/未全完成/零交付的调用无谓 DB 往返。
+  async function isSkipLiaisonTestSystemForIssue(issueId) {
+    const row = await dbGetAsync('SELECT system_name FROM sys_issues WHERE id = ?', [issueId]);
+    if (!row) {
+      logger.error(`[系统迭代][W-GATE] issue=${issueId} W-GATE skip-system 查无单据，按 fail-closed 不跳过对接测试，改走既有对接人有效性判定`);
+      return false;
+    }
+    return isSkipLiaisonTestSystem(row.system_name);
+  }
+
   async function runWGate(issueId, issueType, currentStatus, actor, payload = {}, isSubmitTrigger = false) {
     const inDev = SF.isInFamily(issueType, currentStatus, 'DEV');
     const inVerify = SF.isInFamily(issueType, currentStatus, 'VERIFY');
@@ -3741,7 +3780,7 @@ module.exports = (deps) => {
     const { activeCount, pendingCount, allComplete, deliverableCount, unknownCount: invalidStatusCount } = analyzeRosterForGate(rosterRows);
 
     let targetStatus = null;
-    let mirrorActionCode = null;   // 仅 ⑥ 降级路径写专用 actionCode，其余 GATE 转移恒 null（既有行为不变）
+    let mirrorActionCode = null;   // 三条跳过路径（⑤变体 skip_excused／⑥ skip_liaison／S3 按系统 skip_system）写专用 actionCode，其余 GATE 转移恒 null
     let extraCasSql = '';          // ⑦ 进入待对接测试：周期号自增 + 通知列组重置，同一 CAS 内原子写入
     let extraCasParams = [];
     let wGateCompletionOverrunMarkerSummary = null;   // [§14·S11] 非 null → 触发独立 action_code='completion_overrun_reason' 留痕行
@@ -3776,13 +3815,35 @@ module.exports = (deps) => {
             //   待对接测试态的花名册七写入口矩阵全部 409（族矩阵不含 LIAISON_TEST）；hold 同样被状态
             //   矩阵拒绝——单据落进一个只剩 void 能救的死胡同。
             //   修法：deliverableCount===0 时走与 ⑥ 同款的降级形态，直落待验证，但用专属 actionCode
-            //   `liaison_test_skip_excused` 区分（该码在 last_completed_at 白名单 :4642/:4714 两处
-            //   早已在位——D21 撤销决策树⑤分支后曾判定为"死值"，本次修复令其重新可达，勿动白名单本身，
-            //   只更新其旁注释，见该处）。业务含义与 D11/方案 §2 一致："现网全员 excused 天然进待验证"，
+            //   `liaison_test_skip_excused` 区分（该码在 list/detail 两端点的 last_completed_at 子查询
+            //   白名单——本文件 grep `action_code IN ('liaison_test_pass'` 可定位两处——早已在位，D21
+            //   撤销决策树⑤分支后曾判定为"死值"，本次修复令其重新可达，勿动白名单本身，只更新其旁
+            //   注释，见该处）。[S3 订正·N0 复核发现的仓库陈旧引用] 该白名单此前长期被本注释误记为
+            //   绝对行号 :4642/:4714（历次改动漂移未同步才会误记）——绝对行号本身就是漂移源头，此处
+            //   起不再记录任何具体行号，改用上方 grep 定位方式一劳永逸。业务含义与 D11/方案 §2 一致："现网全员 excused 天然进待验证"，
             //   本质是⑥降级的姊妹分支：⑥ 是"对接人失效"导致测试段跳过，本分支是"没有交付物可测"
             //   导致测试段跳过，两者共享同一落点（待验证）与同一降级语义，仅原因不同。
             targetStatus = SF.SYS_VERIFY_STATUSES[issueType][0];
             mirrorActionCode = 'liaison_test_skip_excused';
+          } else if (await isSkipLiaisonTestSystemForIssue(issueId)) {
+            // [S3·方案 v1.2 §4.4] 按系统跳过对接测试——「小程序-智荟人力」开发全员自测完直转建单人
+            //   验收，不经对接人测试段（用户口径 D，§1.1）。
+            //   排在 ⑤变体之后：deliverableCount===0 的防死胡同处置（上方长注释）对所有系统一致，
+            //   不因所属系统而异，故先判它。
+            //   排在 ⑥（hasValidLiaison）之前：小程序单不再要求对接人测试，但对接人在受理环节仍有
+            //   作用且建单必填（建单端点 intake_liaison 必填校验，与 INVALID_SYSTEM_NAME 白名单校验同段——grep 定位，不记绝对行号），故本分支不查
+            //   hasValidLiaison——即使小程序单当前对接人恰好失效，也走本分支而非 ⑥（两者殊途同归，
+            //   都落待验证，但留痕码需精确反映真实原因，见下方 D4 决策依据）。
+            //   489-H7 已确认本位置不吞掉 ⑤变体，且"待验证→新增 pending→回开发中→再次全员完成"会
+            //   重新经过本判定（回路正确——isSkipLiaisonTestSystemForIssue 每次判定都重新查库，非
+            //   一次性快照，system_name 若被后续编辑改变也会如实反映最新值）。
+            //   D4 决策依据（2026-08-31 拍板新造 `liaison_test_skip_system`，不复用 `liaison_test_
+            //   skip_liaison`）：复用会让时间线显示"对接人不可用"这一事实错误的原因，污染留痕语义
+            //   ——本分支与 ⑥ 共享同一降级形态（直落待验证、cycle_no/通知列组 CAS 恒不消费，同 ⑥
+            //   既有语义），仅落痕原因不同，故用独立 actionCode 区分（§4.4 消费面共 8 处，另见
+            //   W_GATE_SKIP_SUMMARY/时间线标签样式/last_completed_at 两处白名单/覆盖率守卫）。
+            targetStatus = SF.SYS_VERIFY_STATUSES[issueType][0];
+            mirrorActionCode = 'liaison_test_skip_system';
           } else {
             const liaison = await hasValidLiaison(issueId);
             if (!liaison) {
@@ -4053,28 +4114,32 @@ module.exports = (deps) => {
     }
 
     // [B3·C5d 写入端半] mirror timeline 行的人话 summary——按方向选择文案，不新增 action_code（既有
-    //   liaison_test_skip_excused/liaison_test_skip_liaison 两码保留不动，方向语义靠 summary+from/to 列
-    //   已足够承载，跨线协调新码的前端标签/守卫 allowlist 过渡态没有必要）。
-    //   四类方向穷尽本函数全部会走到本 INSERT 的分支（feature 决策树 + improvement/bug 二元逻辑共用同一
+    //   liaison_test_skip_excused/liaison_test_skip_liaison/liaison_test_skip_system 三码保留不动
+    //   [S3 补第三码同批更新]，方向语义靠 summary+from/to 列已足够承载，跨线协调新码的前端标签/守卫
+    //   allowlist 过渡态没有必要）。
+    //   五类方向穷尽本函数全部会走到本 INSERT 的分支（feature 决策树 + improvement/bug 二元逻辑共用同一
     //   段尾部代码，见函数体）：
-    //     ① mirrorActionCode='liaison_test_skip_excused'（feature ⑦ 分支变体·全员 excused）
+    //     ① mirrorActionCode='liaison_test_skip_excused'（feature ⑤变体·全员 excused）
     //     ② mirrorActionCode='liaison_test_skip_liaison'（feature ⑥ 降级·对接人失效）
-    //     ③ mirrorActionCode=null 且 enteringForward=true（feature ⑦ 正常/improvement·bug 二元逻辑的
+    //     ③ mirrorActionCode='liaison_test_skip_system'（feature【新】·所属系统策略跳过对接测试，
+    //        [S3·方案 v1.2 §4.4] 排在 ①②之间但判定顺序上①在前，见 runWGate 决策树注释）
+    //     ④ mirrorActionCode=null 且 enteringForward=true（feature ⑦ 正常/improvement·bug 二元逻辑的
     //        "全完成→VERIFY" 分支，进 VERIFY 或 LIAISON_TEST 两个目的地共用同一句——不重复状态名，前端已用
     //        from/to 渲染 →状态 后缀）
-    //     ④ mirrorActionCode=null 且 enteringForward=false（"回弹"——feature 的 inLiaisonTest||inVerify
+    //     ⑤ mirrorActionCode=null 且 enteringForward=false（"回弹"——feature 的 inLiaisonTest||inVerify
     //        分支与 improvement/bug 的 inVerify 分支，pendingCount>0 时新 pending 成员打破全完成态退回 DEV；
     //        targetStatus 走到这里只可能是 VERIFY[0]/LIAISON_TEST[0]/DEV[0] 三者之一，enteringForward=false
     //        时穷尽只剩 DEV[0] 这一种，故此分支等价于"回弹"、无需额外判空 targetStatus===DEV[0]）。
-    //   ⚠️ ①②优先于③④判定——两个 skip 码只在 targetStatus=VERIFY 时被置（不可能与"回弹"同时成立），
+    //   ⚠️ ①②③优先于④⑤判定——三个 skip 码只在 targetStatus=VERIFY 时被置（不可能与"回弹"同时成立），
     //   但作为方向信号它们比"是否 enteringForward"更具体（明确点出"跳过对接测试"这层业务含义），故取值时
     //   mirrorActionCode 非空优先读它，为空才退到 enteringForward 的二分方向判断。
     const W_GATE_SKIP_SUMMARY = {
       liaison_test_skip_excused: '在册开发全员开脱，跳过对接测试自动流转',
       liaison_test_skip_liaison: '对接人不可用，跳过对接测试自动流转',
+      liaison_test_skip_system: '所属系统策略跳过对接测试，自动流转',
     };
     const mirrorSummary = mirrorActionCode
-      ? (W_GATE_SKIP_SUMMARY[mirrorActionCode] || '成员在册完成态变化，自动流转')   // 兜底：结构上不可达（mirrorActionCode 仅 3 种取值，另一种是 null），防御性保留
+      ? (W_GATE_SKIP_SUMMARY[mirrorActionCode] || '成员在册完成态变化，自动流转')   // 兜底：结构上不可达（mirrorActionCode 仅 4 种取值，另一种是 null），防御性保留
       : (enteringForward ? '全部在册开发已完成，自动流转' : '出现新的待提交成员，自动退回开发中');
 
     // [codex 101 号 MED 回填] updated_at——旧版 assign/submit 公共 UPDATE 都刷 updated_at，本处（W-GATE 状态
@@ -4097,7 +4162,8 @@ module.exports = (deps) => {
     //   'liaison_test_skip_liaison'（其余转移仍是 NULL，未改变既有行为），供 last_completed_at 白名单
     //   （§3.1 点7 D17）与 verify 探针识别"这条 W-GATE 转移是否降级路径"。
     //   [B3·C5d 写入端半] summary 改人话（见上方 mirrorSummary 计算块及其注释）——不再落内部机制名
-    //   "W-GATE 自动门禁转移"，按方向选四选一文案；action_code 三值维持不变（不新增码，见上方注释）。
+    //   "W-GATE 自动门禁转移"，按方向选五选一文案；action_code 取值=三跳过码+null（S3 新增 liaison_test_skip_system
+    //   已同批补进前端标签/样式/文案、last_completed_at 两处白名单与 tl-coverage 守卫 allowlist，见上方注释）。
     await dbRunAsync(
       `INSERT INTO sys_issue_timeline (issue_id, event_type, from_status, to_status, summary, operator_id, operator_name, action_code)
        VALUES (?, 'status_change', ?, ?, ?, ?, ?, ?)`,
@@ -8554,15 +8620,17 @@ module.exports = (deps) => {
                 --     本就含 action_code 这一列——只是其值取自 mirrorActionCode 变量，这两个 type 走的
                 --     分支该变量恒为 null，故这两个 type 落库的 action_code 恒 NULL，未受 v1.1 触碰）。
                 --   · feature（[工期对接测试与风险等级拆分 方案 v1.1 §3.1 点7/D17·C4 收口]）：走测试段
-                --     后完成落点从"mirrorActionCode 恒 null"的默认路径，挪到该 INSERT 同一列写入三个
+                --     后完成落点从"mirrorActionCode 恒 null"的默认路径，挪到该 INSERT 同一列写入四个
                 --     具名 actionCode 之一——liaison_test_pass 恒写（liaison-test-pass 端点独立事务）、
-                --     liaison_test_skip_liaison / liaison_test_skip_excused 两条降级路径由 runWGate
-                --     本体写（mirrorActionCode 变量在这两条分支被赋具名值）。若不跟着改，所有 feature
-                --     单实际完成时刻恒 NULL（C0 矩阵验证清单 §A-H1 静默回归）。"实际完成"=
+                --     liaison_test_skip_liaison / liaison_test_skip_excused / liaison_test_skip_system 三条
+                --     跳过路径由 runWGate 本体写（mirrorActionCode 变量在这三条分支被赋具名值）。若不跟着
+                --     改，所有 feature 单实际完成时刻恒 NULL（C0 矩阵验证清单 §A-H1 静默回归）。"实际完成"=
                 --     liaison_test_pass 正常通过、或 ⑥ liaison_test_skip_liaison（对接人失效降级）、
                 --     或 liaison_test_skip_excused（S12 双路审查 Opus-1 HIGH 修复新增：全员 excused
-                --     无交付物可测，同款降级），三者业务含义相同——"不再需要开发继续动，进入验收侧
-                --     视野"，只是触发原因不同。
+                --     无交付物可测，同款降级）、或 liaison_test_skip_system（S3·2026-09-02 所属系统策略
+                --     不经对接测试，如小程序-智荟人力），四者业务含义相同——"不再需要开发继续动，进入
+                --     验收侧视野"，只是触发原因不同。⚠️ 本白名单全仓三份（本处 list／detail 端点同款／
+                --     verify-sys-liaison-test.js 复刻 SQL），加码须三处同步。
                 -- liaison_test_skip_excused 曾在 v1.1 D21 撤销决策树⑤分支后一度成死值（无代码路径写
                 -- 它）；随 S12-Opus-1 修复"全员 excused 直落待验证"复活——现在是真实可达的写者，
                 -- 非"宽松匹配富余项"，白名单本身未改动（含义随实现变化，字面数组不变）。
@@ -8597,7 +8665,7 @@ module.exports = (deps) => {
                 (SELECT MAX(created_at) FROM sys_issue_timeline
                    WHERE issue_id = sys_issues.id AND event_type = 'status_change'
                      AND to_status = '待验证'
-                     AND (action_code IS NULL OR action_code IN ('liaison_test_pass', 'liaison_test_skip_excused', 'liaison_test_skip_liaison'))
+                     AND (action_code IS NULL OR action_code IN ('liaison_test_pass', 'liaison_test_skip_excused', 'liaison_test_skip_liaison', 'liaison_test_skip_system'))
                 ) AS last_completed_at,
                 -- C1（commit号两列 20260803·锚点 D4）：前端/后端 commit 编码聚合。
                 --   ⚠️ 值协议 = JSON 数组字符串（如 '["a3f9c21","1c5d883"]'），非分隔符拼接明文，两条理由：
@@ -8926,7 +8994,7 @@ module.exports = (deps) => {
                 (SELECT MAX(created_at) FROM sys_issue_timeline
                    WHERE issue_id = sys_issues.id AND event_type = 'status_change'
                      AND to_status = '待验证'
-                     AND (action_code IS NULL OR action_code IN ('liaison_test_pass', 'liaison_test_skip_excused', 'liaison_test_skip_liaison'))
+                     AND (action_code IS NULL OR action_code IN ('liaison_test_pass', 'liaison_test_skip_excused', 'liaison_test_skip_liaison', 'liaison_test_skip_system'))
                 ) AS last_completed_at,
                 -- [上线单标识对齐·2026-08-28 用户报障] 详情页「所属上线单」此前渲染内部主键 #release_id，
                 --   而上线单管理界面全程只认 release_no（R-YYYYMMDD-N）、内部 id 从不示人——用户拿着
@@ -9475,7 +9543,8 @@ module.exports = (deps) => {
   // 2026-08-12 追加「电子签」（用户拍板·随 BIZ_SYSTEMS 新增电子签同批）：外采系统无自研前后端之分，
   //   与 HRD 同档走单组「版本号」。**落代码默认而非写 config** 的理由同上行注释——本清单至今无任何写入
   //   端点（仅一次性脚本 _set-sys-single-commit-group.js），本地/生产 config 均为空走本默认，随部署自动
-  //   一致，不必在部署日清单里加"记得写库"。若将来确需 config 覆盖，务必显式含 HRD+电子签+RPA程序（replace 语义）。
+  //   一致，不必在部署日清单里加"记得写库"。若将来确需 config 覆盖，务必显式含本清单全部成员（以下方
+  //   DEFAULT_SINGLE_COMMIT_GROUP_SYSTEMS 常量为准，2026-09-02 起含小程序-智荟人力；replace 语义）。
   // 2026-08-19 追加「RPA程序」（用户拍板·随 BIZ_SYSTEMS 新增 RPA程序 同批）：RPA 是单一流程包交付，
   //   无自研前后端之分，与 HRD/电子签同档走单组。⚠️ **但它的代码托管是 git，不是 SVN**——单组路径此前
   //   把「SVN」写死在 5 处文案里，且软提示会把 git hash 判成「后端组应填 SVN 版本号」的误填（单组
@@ -9483,11 +9552,14 @@ module.exports = (deps) => {
   //   siCommitWarnFor 单组判据）：**单组只有一组，结构上不存在「前后端填反」，该提示在单组下本就是
   //   设计外残留**。故本清单今后不再隐含「成员都是 SVN」，加系统时无需再考虑 VCS 类型。
   // ⚠️ [codex 435 MED-1 登记接受·**部署前置条件**] 本清单是 replace 语义：只要某环境的 config
-  //   sys_single_commit_group_systems 有非空值，本代码默认整体失效，新成员（如 RPA程序）会静默落成
-  //   双组——失败方向是「功能看起来正常但分了两组」，不报错、不易察觉。2026-08-19 本批已用只读探针
-  //   核实**本地与生产两个环境均为 NOT_FOUND**（本项目只有这两个环境），故默认清单生效。
+  //   sys_single_commit_group_systems 有非空值，本代码默认整体失效，新成员（如 RPA程序、小程序-智荟人力）
+  //   会静默落成双组——失败方向是「功能看起来正常但分了两组」，不报错、不易察觉。2026-08-19 本批已用只读
+  //   探针核实**本地与生产两个环境均为 NOT_FOUND**（本项目只有这两个环境），故默认清单生效。
   //   今后每次往本清单加成员，都要重跑一次该探针；若哪天 config 真被写入，必须显式含本清单全部成员。
-  const DEFAULT_SINGLE_COMMIT_GROUP_SYSTEMS = ['HRD', '电子签', 'RPA程序'];
+  //   2026-09-02 N0 已复跑：本地/生产两环境 sys_single_commit_group_systems 均 NOT_FOUND。
+  // 2026-09-02 追加「小程序-智荟人力」（发版无版本号不分前后端·commit 槽位填发版标识 YYYYMMDD-N·
+  //   可选第二行填小程序版本号·D1 不做格式校验 D2 沿用「版本号」组标签）：
+  const DEFAULT_SINGLE_COMMIT_GROUP_SYSTEMS = T.DEFAULT_SINGLE_COMMIT_GROUP_SYSTEMS;
 
   // 读配置一次 → 命中系统 Set（批量场景复用·避免逐行 readSystemConfig 的 N 次 DB 往返）。格式照搬
   //   sys_release_default_executor_ids：**逗号串或 JSON 数组**皆可。畸形/空 → 回落 DEFAULT（不猜、不静默塌成空集）。
@@ -10099,6 +10171,12 @@ module.exports = (deps) => {
   //   多余字段/null → 400（COMMIT_COMPONENTS.includes(null/undefined) 天然 false、typeof null !== 'string' 天然
   //   拒绝，无需再显式 null 特判）；镜像 validateSubmitBody 内 commits 元素校验但独立成 body 顶层校验（POST/PUT
   //   body 顶层即 {component, commit_ref}，非 submit 的 {mode, commits:[...]} 信封）。
+  // 2026-09-02（S2·发版标识约定）：commit_ref 仅长度校验（1..200）无格式正则。单组系统
+  //   （DEFAULT_SINGLE_COMMIT_GROUP_SYSTEMS）中「小程序-智荟人力」约定在此槽位填发版标识
+  //   `YYYYMMDD-N`（当天第 N 次发版·序号手填·D1 拍板不做格式校验：系统在提交时点算不出"当天第几次"，
+  //   且 release_no 已有当日发号器，不再造第二个；填错仅致标识不规范无功能损害，真实上线时刻由
+  //   released_at 兜底）。查重键为实例级（dev_assignee_id+component+commit_ref，见本函数下方 POST/PUT
+  //   端点内的查重 SELECT），两单同乘一次发版填同标识合法。
   function validateCommitFieldsBody(body) {
     const b = body || {};
     const ALLOWED_KEYS = ['component', 'commit_ref'];
@@ -19935,6 +20013,12 @@ module.exports = (deps) => {
     assertMainStatusTransition,
     electRepresentative,
     runWGate,
+    // S3（所属系统「小程序-智荟人力」接入 方案 v1.2 §4.3）：按系统跳过对接测试——判定源单一收口，
+    //   verify-sys-liaison-test.js 直调做 fail-closed 单元级断言（M5：null/''/undefined/'BMS' 全
+    //   false、'小程序-智荟人力' true；清单本体 deepStrictEqual，有意摩擦——改清单必须来改这里）。
+    DEFAULT_SKIP_LIAISON_TEST_SYSTEMS,
+    isSkipLiaisonTestSystem,
+    isSkipLiaisonTestSystemForIssue,   // M7 直调：fail-closed「查无单据」分支——verify 直调覆盖 e2e 结构性不可达的分支
     insertDevEvent,
     addOrReaddMembers,
     fetchActiveDevAssignees,
@@ -20009,6 +20093,7 @@ module.exports = (deps) => {
     //   证明不了运行时拼接顺序，必须真执行）；buildSysIssuesListSelect 单独导出供更细粒度断言需要时使用。
     buildSysIssuesListSelect,
     buildSysIssuesListQuery,
+    DEFAULT_SINGLE_COMMIT_GROUP_SYSTEMS,   // [S2d·codex 493-R M] I0 同对象断言——钉住 index.js 消费的正是 transitions.js 导出的同一引用，非各自维护副本
   };
 
   return { initSchema, router, _internals };

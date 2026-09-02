@@ -44,12 +44,12 @@ async function seed() {
   await run("UPDATE users SET phone = '13800000007' WHERE id = 7");                    // 临时给示例发布者补 phone（path B 测）
   const existing13 = await get('SELECT id FROM users WHERE id = 13');
   if (!existing13) {
-    const row13 = Object.assign({}, u7, { id: 13, username: 'TEST_RELAY_13', display_name: '示例对接人(e2e)', role: 'user', phone: '13800000013' });
+    const row13 = Object.assign({}, u7, { id: 13, username: 'TEST_RELAY_13', display_name: '示例对接人(e2e)', role: 'user', phone: '19900000024' });
     const cols = Object.keys(row13);
     await run(`INSERT INTO users (${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')})`, cols.map(c => row13[c]));
     seeded13 = true;
   } else {
-    await run("UPDATE users SET role='user', phone='13800000013' WHERE id=13");
+    await run("UPDATE users SET role='user', phone='19900000024' WHERE id=13");
   }
 }
 async function cleanup() {
