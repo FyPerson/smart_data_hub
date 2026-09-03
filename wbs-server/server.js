@@ -17,6 +17,26 @@ const issueNotify = require('./utils/issue-notify');  // v1.74.0 C2：需求跟�
 const issueLiteNotify = require('./utils/issue-lite-notify');  // 数据开发换壳 C2：极简台账通知 markdown builder（薄编排，复用 issueNotify 无状态部件）
 const collabVersioning = require('./utils/collab-attachment-versioning');
 const collabSubmitHelpers = require('./utils/collab-submit-helpers');
+// C1（数据协作接入外部源 G1）：sql_validation_status 唯一枚举源 + 写入前置断言
+const { assertSqlValidationStatus, VALIDATION_MODES } = require('./utils/collab-validation-status');
+// C2a（数据协作接入外部源）：外部源判定 + type 过滤片段生成（/submit 两阶段查询 + 三处放行复用）
+// C2b：连接管理写入口白名单（DB_CONNECTION_TYPES_WRITABLE，与 RELATIONAL 语义不同——见该文件 JSDoc）
+//   + source_system_code 格式校验正则（SOURCE_SYSTEM_CODE_PATTERN，仅约束新建行 D22）
+const {
+    EXTERNAL_DB_CONNECTION_TYPE,
+    DB_CONNECTION_TYPES_RELATIONAL,
+    SOURCE_SYSTEM_CODE_PATTERN,
+    isRegisteredExternalSource,
+    isWritableDbType,
+    externalSourceSqlFilter,
+} = require('./utils/collab-external-sources');
+// 〔08-M6·codex 08 审 + R3·Opus 预筛〕/submit 通用异常兜底分支 error.code 透传白名单——只透传
+// 业务语义明确、面向用户可读的错误码（当前仅 D25 revalidate 抛出的 EXTERNAL_SOURCE_REVOKED，
+// 用于前端区分"外部源登记被撤销"与"系统真故障"）。SQLITE_*/ENOENT/EPERM 等底层驱动/文件系统
+// 错误码不进白名单——它们暴露的是实现细节（磁盘路径结构、数据库引擎），不是业务语义，透传给
+// 前端既无实际用处又可能间接暴露内部信息，与本行上方"message 文案保持通用不额外暴露内部细节"
+// 的既有原则相悖。白名单式收口（而非黑名单排除已知敏感码），新增透传码需显式登记进这个集合。
+const SUBMIT_PASSTHRU_CODES = new Set(['EXTERNAL_SOURCE_REVOKED']);
 const { mapMysqlColumnToSqlServer } = require('./utils/mysql-type-mapper'); // v1.88.0：MySQL 源(HRD) → SQL Server 目标 类型映射
 const { buildMysqlSourceCount, buildMysqlSourcePk, splitMysqlTable } = require('./utils/mysql-source-introspect'); // ODS 验收·MySQL 源行数对比 / 反查源主键
 const efficiencyStats = require('./utils/efficiency-stats'); // 统计中心·效率统计 纯计算 helper（与 verify-statistics-efficiency.js 同源）
@@ -8301,6 +8321,73 @@ app.post('/api/models/batch', authenticateToken, requirePublisherOrAdmin, async 
 
 // ==================== ODS 自动验收 API ====================
 
+// C6〔D29 采纳·G2 P4 并发实测暴露〕新建 dbConnectionsWriteMutex：db-connections 管理端点
+//   （POST 新建 / PUT 更新）的事务体内显式 `BEGIN IMMEDIATE`（C11·codex 11 审 H1/M2 引入）
+//   在真并发场景会互相撞车——server.js 全文件只有一个共享 sqlite 连接（非连接池），两个并发
+//   请求交错执行时，第二个 `BEGIN IMMEDIATE` 会在第一个事务尚未 COMMIT/ROLLBACK 时抛
+//   「cannot start a transaction within a transaction」，最终两个请求都收到 500（G2 §P4
+//   两个并发同 code POST 实测复现 `[200,500]`，而非预期的 `[200,409]`）。这正是 D14 当初选择
+//   "不开显式事务、只靠单语句 INSERT...SELECT...WHERE NOT EXISTS 去重"的原因（见 8477 行注释）——
+//   C11 引入显式事务包裹去重语句后，必须补齐并发串行化，否则退化成比 D14 之前更差的状态：
+//   不仅第二个请求拿不到期望的 409 去重语义，还会平白多出一次 500。
+// 设计对齐既有 collabExporterTransitionMutex（17387 行起，同款 IIFE 闭包 acquire/release）：
+//   单全局锁，不分连接 id；db-connections 管理是低频 admin 操作（内网 ~10 人），锁内事务体
+//   耗时 <100ms，串行化开销可忽略；5s 超时与既有惯例一致（超时返回 503 而非挂起请求）。
+// 〔14-H1 采纳〕DELETE /api/db-connections/:id 单语句仍需锁：共享连接上会被插入他人事务——
+//   server.js 全文件只有一个共享 sqlite 连接，POST/PUT 已 `BEGIN IMMEDIATE` 开启显式事务、
+//   尚未 COMMIT/ROLLBACK 时，若 DELETE 不占这把锁直接执行，sqlite 会把这条 DELETE 语句
+//   插入进该未提交事务、成为其一部分；一旦该事务后续 ROLLBACK（例如 PUT 的 409 外部源保护
+//   分支），会连带撤销这条本应独立生效的 DELETE，造成"接口报删除成功但实际被悄悄回滚"。
+//   之前"单语句本身即原子操作、不需要这把锁"的结论只考虑了 DELETE 自身的原子性，没考虑
+//   它会被插入别人未提交事务的问题——两者是不同层面，DELETE 端点已改为占用同一把锁
+//   （见 8694 行区），处置详见该处注释；此闭合同时解决"DELETE 后 stillExists 判定非原子"
+//   （14-L1）：两条语句现同在锁保护窗口内，不会再被其他并发写请求打断。
+const dbConnectionsWriteMutex = (() => {
+    let locked = false;
+    const waiters = [];
+
+    function acquire(timeoutMs = 5000) {
+        return new Promise((resolve, reject) => {
+            const node = { resolve, timer: null, acquired: false };
+            if (!locked) {
+                locked = true;
+                node.acquired = true;
+                return resolve(makeRelease(node));
+            }
+            waiters.push(node);
+            node.timer = setTimeout(() => {
+                if (node.acquired) return;
+                const idx = waiters.indexOf(node);
+                if (idx >= 0) waiters.splice(idx, 1);
+                const e = new Error('DB_CONNECTIONS_MUTEX_WAIT_TIMEOUT');
+                e.code = 'DB_CONNECTIONS_MUTEX_WAIT_TIMEOUT';
+                reject(e);
+            }, timeoutMs);
+        });
+    }
+
+    function makeRelease(node) {
+        let released = false;
+        return function release() {
+            if (released) return;
+            released = true;
+            while (waiters.length > 0) {
+                const next = waiters.shift();
+                if (next.acquired) {
+                    console.warn('[db-connections-mutex] invariant violated: waiter.acquired=true while still in queue');
+                    continue;
+                }
+                if (next.timer) clearTimeout(next.timer);
+                next.acquired = true;
+                return next.resolve(makeRelease(next));
+            }
+            locked = false;
+        };
+    }
+
+    return { acquire };
+})();
+
 // 1. 获取数据库连接列表 (仅管理员)
 app.get('/api/db-connections', authenticateToken, requireAdmin, (req, res) => {
     db.all("SELECT id, name, type, host, port, database, default_schema, username, is_default, connection_type, source_system_code, created_at, updated_at FROM db_connections ORDER BY is_default DESC, id", [], (err, rows) => {
@@ -8315,6 +8402,12 @@ app.post('/api/db-connections/test-new', authenticateToken, requireAdmin, async 
 
     if (!host || !database || !username || !password) {
         return res.status(400).json({ error: '缺少必要参数' });
+    }
+    // C2b〔D15 写入口白名单〕在任何建连之前拒绝——test-new 本就是"测试未保存的连接"，不落库，
+    // 但仍要挡住 external/越界 type，防止有人拿这个端点当探针试探外部源占位地址（host='-' 等）。
+    // G2-F2〔抽 isWritableDbType helper〕未提供/越界两条判断收进同一个函数，见该函数 JSDoc。
+    if (!isWritableDbType(type)) {
+        return res.status(400).json({ error: '不支持的数据库类型', code: 'DB_TYPE_NOT_ALLOWED' });
     }
 
     const dialect = (type === 'mysql') ? 'mysql' : 'sqlserver';  // v1.69.1：默认 sqlserver 保持向后兼容
@@ -8384,30 +8477,128 @@ app.post('/api/db-connections', authenticateToken, requireAdmin, async (req, res
         return res.status(400).json({ error: '缺少必要参数' });
     }
 
-    // 源系统连接必须填写源系统代码
-    if (connection_type === 'source' && !source_system_code) {
-        return res.status(400).json({ error: '源系统连接必须填写源系统代码' });
+    // C2b〔D15 写入口白名单〕显式给出的 type 必须落在受控集合内（含 external 在内的任意越界值
+    // 都拒）；未显式给出（undefined/null/''）时仍缺省 sqlserver，与现状行为一致，不收紧这条。
+    // G2-F2〔抽 isWritableDbType helper〕
+    if (!isWritableDbType(type)) {
+        return res.status(400).json({ error: '不支持的数据库类型', code: 'DB_TYPE_NOT_ALLOWED' });
     }
 
+    // 〔C11·codex 11 审 M1 采纳〕connection_type 归一化：只允许 'warehouse'/'source'，未显式提供
+    // （undefined/null/''）缺省 warehouse（与改造前现状一致）；其余任何显式值一律 400，堵住"写一个
+    // 既非 warehouse 也非 source 的怪值落库"的口子。归一化之后，下面 source 必填 code 校验、
+    // finalIsDefault 判定、INSERT 落库值统一改读 normalizedConnectionType，不再读原始
+    // connection_type——避免归一化后仍有代码路径读到未归一化的原始值，出现两套判断。
+    const normalizedConnectionType = (connection_type === undefined || connection_type === null || connection_type === '')
+        ? 'warehouse'
+        : connection_type;
+    if (!['warehouse', 'source'].includes(normalizedConnectionType)) {
+        return res.status(400).json({ error: '不支持的连接类型', code: 'CONNECTION_TYPE_INVALID' });
+    }
+
+    // 源系统连接必须填写源系统代码
+    if (normalizedConnectionType === 'source' && !source_system_code) {
+        return res.status(400).json({ error: '源系统连接必须填写源系统代码' });
+    }
+    // C2b〔D22〕source_system_code 格式约束——仅约束本入口新建行，非空时才校验；既有「source 时
+    // 非空」的检查保留在上面不动。
+    // 〔08-M1·codex 08 审〕补 typeof 前置判定：`RegExp.test()` 对非字符串值会先做隐式 toString()
+    // 再匹配——数字 33 会被强转成字符串 '33'（2 位数字，恰好落在格式白名单 2-32 位内），绕过本该
+    // 拒绝的校验直接落库；单元素数组 [33] 同理（Array.prototype.toString 对单元素数组不加逗号，
+    // 强转结果同样是 '33'）。非字符串值（数字/数组/对象/布尔）一律先判非法，不进入正则匹配。
+    // 〔09-H1·codex 09 审〕原写法 `source_system_code && (...)` 对 falsy 但"已提供"的非字符串值
+    // （0/false）会整体短路成 false，绕过这条格式校验——`0`/`false` 会被当成"未填"直接放行，
+    // 落到下面 8441 行 `if (source_system_code)` 同样短路，走 else 分支把 source_system_code
+    // 悄悄写成 NULL，等于放行了一个本该被拒绝的非法值（只是不会真的把 0/false 存进库）。改用显式
+    // "已提供"判定：仅 undefined/null/''（与 8423 行"必须填写"检查的语义对齐）算"未提供"，其余
+    // 一切值（含 falsy 的 0/false，以及真值的 []/{} 等）都算"已提供"，必须通过 typeof==='string'
+    // + 格式正则双重校验，否则一律 400——0/false/[]/{} 全部落在拒绝之列。
+    const codeProvided = source_system_code !== undefined && source_system_code !== null && source_system_code !== '';
+    if (codeProvided && (typeof source_system_code !== 'string' || !SOURCE_SYSTEM_CODE_PATTERN.test(source_system_code))) {
+        return res.status(400).json({ error: '源系统代码格式非法（仅大写字母/数字/下划线，2-32 位）', code: 'SOURCE_SYSTEM_CODE_INVALID' });
+    }
+
+    // 〔C11·codex 11 审 H1 采纳·D28〕POST 落库改同一事务：BEGIN IMMEDIATE → 原子 INSERT（D14 去重
+    // 单语句不变）→ changes===0 → ROLLBACK+409 → 若 finalIsDefault → 清默认位 UPDATE → COMMIT →
+    // res.json 成功响应（〔14-L2 采纳〕未显式设置状态码，Express 默认 200，不是 201——本注释
+    // 此前写"COMMIT → 201"与实际响应不一致，予以更正）。
+    // 此前是两条独立语句（INSERT 成功后再单独 UPDATE 清默认位）：中间存在"可见双默认"窗口，且第二句
+    // 失败时已插入的新行与被清空的旧默认位不会回滚，永久遗留双默认（或都不是默认）的半成品状态。
+    // 改为同一事务后，UPDATE 失败会连同刚插入的行一起回滚，不会遗留半成品；任何异常统一在外层 catch
+    // 里 ROLLBACK（ROLLBACK 自身失败只 logger.warn，不重新抛出，避免异常处理链悬挂）。
+    // 〔D29 采纳〕BEGIN 前必须先拿 dbConnectionsWriteMutex——见该锁定义处（8324 行区）注释，
+    // 避免并发两次 BEGIN IMMEDIATE 撞车成「cannot start a transaction within a transaction」。
+    let transactionActive = false;
+    let release;
+    try {
+        release = await dbConnectionsWriteMutex.acquire(5000);
+    } catch (mutexErr) {
+        logger.warn(`[db-connections-post] 等待 dbConnectionsWriteMutex 超时: ${mutexErr.message}`);
+        return res.status(503).json({ error: '系统繁忙，请稍后重试', code: 'DB_CONNECTIONS_MUTEX_BUSY' });
+    }
     try {
         const encryptedPassword = encryptPassword(password);
+        const finalIsDefault = (is_default && normalizedConnectionType === 'warehouse') ? 1 : 0;
+        let result;
 
-        // 如果设置为默认连接，先清除其他默认（仅对数仓连接）
-        if (is_default && connection_type !== 'source') {
-            await dbRunAsync("UPDATE db_connections SET is_default = 0 WHERE connection_type = 'warehouse' OR connection_type IS NULL");
+        await dbRunAsync('BEGIN IMMEDIATE');
+        transactionActive = true;
+
+        if (source_system_code) {
+            // C2b〔D14 去重原子化〕单语句 INSERT...SELECT...WHERE NOT EXISTS 把"查重复+插入"收进
+            // 同一条 SQL 语句——WHERE NOT EXISTS 命中已存在的 code 时 SELECT 结果集为空，INSERT 插
+            // 0 行，`changes===0` 直接判 409，不会出现"先判重又被并发抢先插入"的 TOCTOU 窗口。
+            // 〔H1〕现在外层包了 BEGIN IMMEDIATE，本语句仍保持原文不变（去重语义不受事务包裹影响）。
+            result = await dbRunAsync(
+                `INSERT INTO db_connections (name, type, host, port, database, default_schema, username, password, is_default, connection_type, source_system_code)
+                 SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                  WHERE NOT EXISTS (SELECT 1 FROM db_connections WHERE source_system_code = ?)`,
+                [name, type || 'sqlserver', host, port || 1433, database, default_schema || 'dbo', username, encryptedPassword,
+                 finalIsDefault, normalizedConnectionType, source_system_code, source_system_code]
+            );
+            if (!result || result.changes === 0) {
+                await dbRunAsync('ROLLBACK');
+                transactionActive = false;
+                return res.status(409).json({ error: '源系统代码已存在', code: 'SOURCE_SYSTEM_CODE_DUPLICATE' });
+            }
+        } else {
+            // code 为空/未填 → 不做去重（历史上 source_system_code 本就允许多行同为 NULL），走原 INSERT
+            result = await dbRunAsync(
+                `INSERT INTO db_connections (name, type, host, port, database, default_schema, username, password, is_default, connection_type, source_system_code)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [name, type || 'sqlserver', host, port || 1433, database, default_schema || 'dbo', username, encryptedPassword,
+                 finalIsDefault, normalizedConnectionType, null]
+            );
         }
 
-        const result = await dbRunAsync(
-            `INSERT INTO db_connections (name, type, host, port, database, default_schema, username, password, is_default, connection_type, source_system_code)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [name, type || 'sqlserver', host, port || 1433, database, default_schema || 'dbo', username, encryptedPassword,
-             (is_default && connection_type !== 'source') ? 1 : 0, connection_type || 'warehouse', source_system_code || null]
-        );
+        // G2-F1〔清默认位挪到 INSERT 成功之后〕如果设置为默认连接，清除其他默认（仅对数仓连接），
+        // 且排除刚插入的这一行自己。旧写法把这条 UPDATE 放在 INSERT 之前——source_system_code
+        // 去重分支 409 早退时（`changes===0`），全库数仓默认连接已被清空且不会补回，6 个依赖
+        // `is_default=1 AND connection_type='warehouse'` 取默认连接的端点会全部拿不到默认库。
+        // 现在改为 INSERT 成功且新行确实要当默认时才清，且与 INSERT 同在一个事务内——两条语句
+        // 要么一起提交、要么一起回滚，不会再出现"INSERT 已提交但清默认位失败"的半成品。
+        if (finalIsDefault) {
+            await dbRunAsync(
+                "UPDATE db_connections SET is_default = 0 WHERE (connection_type = 'warehouse' OR connection_type IS NULL) AND id != ?",
+                [result.lastID]
+            );
+        }
+
+        await dbRunAsync('COMMIT');
+        transactionActive = false;
 
         res.json({ id: result.lastID, message: '数据库连接创建成功' });
     } catch (err) {
+        if (transactionActive) {
+            try { await dbRunAsync('ROLLBACK'); } catch (rollbackErr) { logger.warn('Create db connection rollback failed:', rollbackErr.message); }
+            transactionActive = false;
+        }
         logger.error('Create db connection error:', err.message);
         res.status(500).json({ error: err.message });
+    } finally {
+        // 〔D29 采纳〕无论成功/异常/提前 return（含上面 409 分支）都要释放锁，否则后续所有
+        // db-connections 写请求永久阻塞在 acquire 上直到 5s 超时。
+        if (release) release();
     }
 });
 
@@ -8416,29 +8607,93 @@ app.put('/api/db-connections/:id', authenticateToken, requireAdmin, async (req, 
     const { id } = req.params;
     const { name, type, host, port, database, default_schema, username, password, is_default } = req.body;
 
+    // 〔C11·codex 11 审 M2 采纳〕事务活跃标志——同 POST 端点范式，仅本请求成功 BEGIN 后才允许
+    // ROLLBACK（防误滚共享连接上他人事务），COMMIT/显式 ROLLBACK 后立即复位。
+    let transactionActive = false;
+    let release;
     try {
-        // 如果设置为默认连接，先清除其他默认
-        if (is_default) {
-            await dbRunAsync("UPDATE db_connections SET is_default = 0 WHERE id != ?", [id]);
+        // C2b〔D15 保护 external + 拒 PUT 晋升〕两条检查都必须在任何 UPDATE（含下面 is_default
+        // 清空的那条）之前完成——保护判定不能被其他写操作抢跑。
+        //   ① 当前行（按 id 查，元数据查询，不取密码列）已是 external → 409，禁止任何修改；
+        //   ② 请求体显式给出的 type（若提供）不在写入口白名单内 → 400（堵"普通行 PUT 改 type
+        //      晋升成 external"这条路——不管当前行是不是 external，只要想把它改成非白名单值就拒）。
+        const currentConn = await dbGetAsync('SELECT id, type FROM db_connections WHERE id = ?', [id]);
+        if (currentConn && currentConn.type === EXTERNAL_DB_CONNECTION_TYPE) {
+            return res.status(409).json({ error: '外部源连接受保护，不允许修改', code: 'EXTERNAL_SOURCE_PROTECTED' });
+        }
+        // G2-F2〔抽 isWritableDbType helper〕
+        if (!isWritableDbType(type)) {
+            return res.status(400).json({ error: '不支持的数据库类型', code: 'DB_TYPE_NOT_ALLOWED' });
         }
 
         let sql, params;
         if (password) {
             // 更新密码
             const encryptedPassword = encryptPassword(password);
-            sql = `UPDATE db_connections SET name = ?, type = ?, host = ?, port = ?, database = ?, default_schema = ?, username = ?, password = ?, is_default = ?, updated_at = datetime('now', 'localtime') WHERE id = ?`;
+            // 〔C11·codex 11 审 M2 采纳·纵深防御〕最终写语句加 `AND type <> 'external'`——预检
+            // （上面按 id 查 type）与本次真正写入之间存在 TOCTOU 窗口；即便当前所有写入口都不允许把
+            // 一行的 type 改成/保持 external，这里仍在最终 UPDATE 上再钉一道条件，命中 external 行
+            // 时 changes=0，下方统一按"行存在但被最终条件拦下"判 409，不依赖预检单独兜底。
+            sql = `UPDATE db_connections SET name = ?, type = ?, host = ?, port = ?, database = ?, default_schema = ?, username = ?, password = ?, is_default = ?, updated_at = datetime('now', 'localtime') WHERE id = ? AND type <> 'external'`;
             params = [name, type, host, port, database, default_schema, username, encryptedPassword, is_default ? 1 : 0, id];
         } else {
             // 不更新密码
-            sql = `UPDATE db_connections SET name = ?, type = ?, host = ?, port = ?, database = ?, default_schema = ?, username = ?, is_default = ?, updated_at = datetime('now', 'localtime') WHERE id = ?`;
+            sql = `UPDATE db_connections SET name = ?, type = ?, host = ?, port = ?, database = ?, default_schema = ?, username = ?, is_default = ?, updated_at = datetime('now', 'localtime') WHERE id = ? AND type <> 'external'`;
             params = [name, type, host, port, database, default_schema, username, is_default ? 1 : 0, id];
         }
 
-        await dbRunAsync(sql, params);
+        // 〔C11·codex 11 审 M2 采纳〕is_default 清空 UPDATE 与主 UPDATE 包进同一事务（同 H1
+        // 事务风格）——两条语句要么一起提交、要么一起回滚，不会出现"清空了别人的默认位但自己这行
+        // 更新失败"的半成品。清空语句同样加 `AND type <> 'external'` 纵深防御（不清 external 行的
+        // is_default，虽然写入口本就不允许 external 行携带 is_default=1，仍按纵深防御原则加上）。
+        // 〔D29 采纳〕BEGIN 前必须先拿 dbConnectionsWriteMutex——见该锁定义处（8324 行区）注释，
+        // 避免并发两次 BEGIN IMMEDIATE 撞车成「cannot start a transaction within a transaction」。
+        // 上面的 currentConn 元数据预检 + isWritableDbType 校验都是只读/纯函数判断，不需要占锁，
+        // 只在真正要写库（BEGIN）之前才拿锁，尽量缩小串行化窗口。
+        try {
+            release = await dbConnectionsWriteMutex.acquire(5000);
+        } catch (mutexErr) {
+            logger.warn(`[db-connections-put] 等待 dbConnectionsWriteMutex 超时: ${mutexErr.message}`);
+            return res.status(503).json({ error: '系统繁忙，请稍后重试', code: 'DB_CONNECTIONS_MUTEX_BUSY' });
+        }
+
+        await dbRunAsync('BEGIN IMMEDIATE');
+        transactionActive = true;
+
+        if (is_default) {
+            await dbRunAsync("UPDATE db_connections SET is_default = 0 WHERE id != ? AND type <> 'external'", [id]);
+        }
+
+        const result = await dbRunAsync(sql, params);
+
+        if (!result || result.changes === 0) {
+            // 主 UPDATE 0 changes：先查行是否仍存在，区分"行存在但被最终 `type <> 'external'`
+            // 条件拦下"（判 409 外部源保护）与"行本不存在"（改造前该分支本就不做变更检查，统一走
+            // 成功响应——保留这条既有行为，非本批 M2 处置范围）。
+            const stillExists = await dbGetAsync('SELECT id FROM db_connections WHERE id = ?', [id]);
+            if (stillExists) {
+                await dbRunAsync('ROLLBACK');
+                transactionActive = false;
+                return res.status(409).json({ error: '外部源连接受保护，不允许修改', code: 'EXTERNAL_SOURCE_PROTECTED' });
+            }
+        }
+
+        await dbRunAsync('COMMIT');
+        transactionActive = false;
+
         res.json({ message: '数据库连接更新成功' });
     } catch (err) {
+        if (transactionActive) {
+            try { await dbRunAsync('ROLLBACK'); } catch (rollbackErr) { logger.warn('Update db connection rollback failed:', rollbackErr.message); }
+            transactionActive = false;
+        }
         logger.error('Update db connection error:', err.message);
         res.status(500).json({ error: err.message });
+    } finally {
+        // 〔D29 采纳〕无论成功/异常/提前 return（含 409 外部源保护分支）都要释放锁；若从未
+        // 走到 acquire（如上面 currentConn/isWritableDbType 预检早退）release 为 undefined，
+        // 跳过即可——锁本就没被这次请求拿到，不存在"该释放却漏释放"的问题。
+        if (release) release();
     }
 });
 
@@ -8446,12 +8701,47 @@ app.put('/api/db-connections/:id', authenticateToken, requireAdmin, async (req, 
 app.delete('/api/db-connections/:id', authenticateToken, requireAdmin, async (req, res) => {
     const { id } = req.params;
 
+    let release;
     try {
-        await dbRunAsync("DELETE FROM db_connections WHERE id = ?", [id]);
+        // C2b〔D15 保护 external〕元数据查询（不取密码）在 DELETE 之前完成判定。只读判断，
+        // 不需要占锁（同 PUT 端点惯例：预检判断在拿锁之前完成，尽量缩小串行化窗口）。
+        const currentConn = await dbGetAsync('SELECT id, type FROM db_connections WHERE id = ?', [id]);
+        if (currentConn && currentConn.type === EXTERNAL_DB_CONNECTION_TYPE) {
+            return res.status(409).json({ error: '外部源连接受保护，不允许修改', code: 'EXTERNAL_SOURCE_PROTECTED' });
+        }
+
+        // 〔14-H1 采纳·D29 扩展〕DELETE 语句 + 其后的 stillExists 判定整体包进
+        // dbConnectionsWriteMutex——单条 DELETE 虽自身原子，但 server.js 只有一个共享 sqlite
+        // 连接，POST/PUT 已 `BEGIN IMMEDIATE` 开启显式事务、尚未提交时，不占锁的 DELETE 会被
+        // 插入该未提交事务成为其一部分，对方 ROLLBACK 会连带撤销这条本应独立生效的 DELETE。
+        // 照 POST/PUT 写法：acquire 失败（等锁超时）返回 503，成功后 finally 里无条件 release，
+        // 覆盖正常返回/404/409/异常抛出等所有路径。此闭合同时解决 14-L1（DELETE 后 SELECT
+        // 非原子）——两条语句现同在锁保护窗口内，不会再被其他并发写请求打断。
+        try {
+            release = await dbConnectionsWriteMutex.acquire(5000);
+        } catch (mutexErr) {
+            logger.warn(`[db-connections-delete] 等待 dbConnectionsWriteMutex 超时: ${mutexErr.message}`);
+            return res.status(503).json({ error: '系统繁忙，请稍后重试', code: 'DB_CONNECTIONS_MUTEX_BUSY' });
+        }
+
+        // 〔C11·codex 11 审 M2 采纳·纵深防御〕DELETE 语句同样加 `AND type <> 'external'`，changes=0
+        // 时先查行是否仍存在——存在则判"被最终条件拦下"→ 409；不存在则保留改造前既有行为（原代码
+        // 本就不区分"删除成功"与"行本不存在"，统一走成功响应，非本批处置范围）。
+        const result = await dbRunAsync("DELETE FROM db_connections WHERE id = ? AND type <> 'external'", [id]);
+        if (!result || result.changes === 0) {
+            const stillExists = await dbGetAsync('SELECT id FROM db_connections WHERE id = ?', [id]);
+            if (stillExists) {
+                return res.status(409).json({ error: '外部源连接受保护，不允许修改', code: 'EXTERNAL_SOURCE_PROTECTED' });
+            }
+        }
         res.json({ message: '数据库连接删除成功' });
     } catch (err) {
         logger.error('Delete db connection error:', err.message);
         res.status(500).json({ error: err.message });
+    } finally {
+        // 〔D29 采纳〕无论成功/404/409/异常都要释放锁；若从未走到 acquire（如上面 currentConn
+        // 预检早退），release 为 undefined，跳过即可——锁本就没被这次请求拿到。
+        if (release) release();
     }
 });
 
@@ -8463,6 +8753,11 @@ app.post('/api/db-connections/:id/test', authenticateToken, requireAdmin, async 
         const conn = await dbGetAsync("SELECT * FROM db_connections WHERE id = ?", [id]);
         if (!conn) {
             return res.status(404).json({ error: '连接配置不存在' });
+        }
+        // C2b〔D15 保护 external〕在解密密码之前拦截——external 行的 password 列只是占位符
+        // （不是真凭证），走到 decryptPassword 只会白白抛一个无意义的解密异常。
+        if (conn.type === EXTERNAL_DB_CONNECTION_TYPE) {
+            return res.status(409).json({ error: '外部源不可连接测试', code: 'EXTERNAL_SOURCE_NOT_TESTABLE' });
         }
 
         const password = decryptPassword(conn.password);
@@ -8503,13 +8798,47 @@ app.get('/api/db-connections/table-columns', authenticateToken, async (req, res)
     }
 
     try {
-        // 根据源系统代码查找源系统连接
-        const conn = await dbGetAsync(
-            "SELECT * FROM db_connections WHERE connection_type = 'source' AND source_system_code = ?",
+        // C2b〔D19-1 两阶段查询〕先取元数据（不含密码列），按 type 判定是否要真的取凭证连库——
+        // external 行没有真实凭证，压根不该走到 decryptPassword/getXxxPool。
+        // 〔08-H1·codex 08 审〕同一 source_system_code 理论上可能挂多行（生产实测该码唯一——N0
+        // 探针核实；POST D14 原子去重 + 种子脚本 C3 都拒绝重复插入；同码多行只可能来自遗留脏数据）。
+        // 原查询无 ORDER BY，命中多行时"选中哪一行"依赖 SQLite 未文档化的返回顺序（观察上接近
+        // rowid/插入序，非规范保证）——加显式确定性排序：关系型（type ∈ DB_CONNECTION_TYPES_
+        // RELATIONAL）优先于其他类型，同优先级内按 id 升序，只取第一行。只有该码下全部是 external
+        // （或全部非关系型）时才会选中非关系型行，进而按下方判断走 422/原路径，语义不变。
+        const relTypesSqlD19a = DB_CONNECTION_TYPES_RELATIONAL.map((t) => `'${t}'`).join(',');
+        const connMeta = await dbGetAsync(
+            `SELECT id, type, source_system_code FROM db_connections
+              WHERE connection_type = 'source' AND source_system_code = ?
+              ORDER BY CASE WHEN type IN (${relTypesSqlD19a}) THEN 0 ELSE 1 END, id ASC
+              LIMIT 1`,
             [source_system]
+        );
+        if (!connMeta) {
+            return res.status(404).json({
+                error: `未找到源系统 ${source_system} 的数据库连接配置`,
+                hint: '请联系管理员在「管理后台 → 数据库连接」中配置源系统连接'
+            });
+        }
+        // G2-F4〔非关系型 ≠ 外部源〕只有 type === external 才判定为"外部源无 schema"；其他非关系型
+        // type（如 oracle、脏数据 NULL）走改造前的原路径（阶段二取凭证、按原 dialect 路由处理，
+        // 逐字不变），不要把它们也误判成外部源报 422。
+        if (connMeta.type === EXTERNAL_DB_CONNECTION_TYPE) {
+            return res.status(422).json({ error: '外部源无可读取的表结构', code: 'EXTERNAL_SOURCE_NO_SCHEMA' });
+        }
+
+        // G2-F3〔D19 阶段二按 id 查询〕阶段一已用 connMeta.id 精确锁定唯一行——阶段二不再按非唯一的
+        // source_system_code 重查（同一 source_system_code 可能挂多行，如 G2 种子里 ①external 与
+        // ③sqlserver 共用 MINIAPP_ZHHL，按 code 重查存在"命中另一行"的隐患，此前只是靠 rowid 顺序
+        // 兜着），改按 id 精确复查同一行，并保留 connection_type='source' 作为纵深防御（与 /submit
+        // 阶段二同款写法）。
+        const conn = await dbGetAsync(
+            "SELECT * FROM db_connections WHERE id = ? AND connection_type = 'source'",
+            [connMeta.id]
         );
 
         if (!conn) {
+            // 并发边角：阶段一命中后、阶段二之前该行被删——按现状"查无"处理
             return res.status(404).json({
                 error: `未找到源系统 ${source_system} 的数据库连接配置`,
                 hint: '请联系管理员在「管理后台 → 数据库连接」中配置源系统连接'
@@ -9143,8 +9472,10 @@ app.get('/api/models/:id/metadata', authenticateToken, async (req, res) => {
             return res.status(404).json({ error: '模型不存在' });
         }
 
-        // 获取默认数据库连接
-        const conn = await dbGetAsync("SELECT * FROM db_connections WHERE is_default = 1 LIMIT 1");
+        // 获取默认数据库连接（〔P21·2026-09-03 用户裁定·codex 14-M1〕与其余 7 处取默认连接的查询同款谓词：
+        // 只认 warehouse/未分类连接，source 类（含 external 外部源）即使 is_default 被置 1 也不会被选中——
+        // 纵深防御，第一道仍是 POST/PUT/种子三方维持的「external 行 is_default 恒 0」不变量）
+        const conn = await dbGetAsync("SELECT * FROM db_connections WHERE is_default = 1 AND (connection_type = 'warehouse' OR connection_type IS NULL) LIMIT 1");
         if (!conn) {
             return res.status(400).json({ error: '未配置默认数据库连接' });
         }
@@ -9343,40 +9674,68 @@ app.post('/api/models/:id/validate', authenticateToken, requireNonViewer, async 
 
             // 如果模型有源系统和源表信息，尝试获取源系统连接进行数据量对比
             if (model.source_system && model.source_table) {
-                const sourceConn = await dbGetAsync(
-                    "SELECT * FROM db_connections WHERE connection_type = 'source' AND source_system_code = ?",
+                // C2b〔D19-2 两阶段查询〕先取元数据（不含密码），按 type 判定要不要真的取凭证连库。
+                // 〔08-H1·codex 08 审，同 table-columns 端点（D19-1）同款处置，理由见该处注释〕
+                //   加确定性排序：关系型优先、同优先级按 id 升序，只取第一行，堵"同码多行时选中
+                //   哪一行靠 SQLite 未文档化返回序"这个隐患。
+                const relTypesSqlD19b = DB_CONNECTION_TYPES_RELATIONAL.map((t) => `'${t}'`).join(',');
+                const sourceConnMeta = await dbGetAsync(
+                    `SELECT id, type, source_system_code FROM db_connections
+                      WHERE connection_type = 'source' AND source_system_code = ?
+                      ORDER BY CASE WHEN type IN (${relTypesSqlD19b}) THEN 0 ELSE 1 END, id ASC
+                      LIMIT 1`,
                     [model.source_system]
                 );
 
-                if (sourceConn) {
-                    try {
-                        const sourcePassword = decryptPassword(sourceConn.password);
-                        const sourceDialect = (sourceConn.type === 'mysql') ? 'mysql' : 'sqlserver'; // v1.69.1 多方言范式：源恒按 type 分流
-                        const sourcePool = (sourceDialect === 'mysql')
-                            ? await getMysqlPool({
-                                host: sourceConn.host,
-                                port: sourceConn.port,
-                                database: sourceConn.database,
-                                username: sourceConn.username,
-                                password: sourcePassword
-                            })
-                            : await getMssqlPool({
-                                host: sourceConn.host,
-                                port: sourceConn.port,
-                                database: sourceConn.database,
-                                username: sourceConn.username,
-                                password: sourcePassword
-                            });
+                // G2-F4〔非关系型 ≠ 外部源〕只有 type === external 才判定为"外部源，跳过连库校验"；
+                // 其他非关系型 type（如 oracle、脏数据 NULL）走改造前的原路径——原逻辑本就不按类型
+                // 分流，对任意非 external 的 type 都会尝试连接，连不上则落到下方 catch 里 warn，
+                // 不会把它们误判成外部源。
+                if (sourceConnMeta && sourceConnMeta.type === EXTERNAL_DB_CONNECTION_TYPE) {
+                    // C2b〔D19-2〕命中且为已登记/未登记外部源 → 跳过连库对比，不影响主流程；
+                    // 返回结构与"查无连接"一致（validationParams 不带 sourcePool 等字段）
+                    logger.warn(`[ods-validate] 源系统 ${model.source_system} 为外部源，跳过连库校验`);
+                } else if (sourceConnMeta) {
+                    // G2-F3〔D19 阶段二按 id 查询〕阶段一已用 sourceConnMeta.id 精确锁定唯一行——
+                    // 阶段二不再按非唯一的 source_system_code 重查（同一 code 可能挂多行，与
+                    // table-columns 端点同款隐患，见该处注释），改按 id 精确复查同一行。
+                    const sourceConn = await dbGetAsync(
+                        "SELECT * FROM db_connections WHERE id = ? AND connection_type = 'source'",
+                        [sourceConnMeta.id]
+                    );
+                    if (sourceConn) {
+                        try {
+                            const sourcePassword = decryptPassword(sourceConn.password);
+                            const sourceDialect = (sourceConn.type === 'mysql') ? 'mysql' : 'sqlserver'; // v1.69.1 多方言范式：源恒按 type 分流
+                            const sourcePool = (sourceDialect === 'mysql')
+                                ? await getMysqlPool({
+                                    host: sourceConn.host,
+                                    port: sourceConn.port,
+                                    database: sourceConn.database,
+                                    username: sourceConn.username,
+                                    password: sourcePassword
+                                })
+                                : await getMssqlPool({
+                                    host: sourceConn.host,
+                                    port: sourceConn.port,
+                                    database: sourceConn.database,
+                                    username: sourceConn.username,
+                                    password: sourcePassword
+                                });
 
-                        validationParams.sourcePool = sourcePool;
-                        validationParams.sourceDialect = sourceDialect;
-                        validationParams.sourceSchema = sourceConn.default_schema;
-                        validationParams.sourceTable = model.source_table;
-                        validationParams.sourceDatabase = sourceConn.database;
+                            validationParams.sourcePool = sourcePool;
+                            validationParams.sourceDialect = sourceDialect;
+                            validationParams.sourceSchema = sourceConn.default_schema;
+                            validationParams.sourceTable = model.source_table;
+                            validationParams.sourceDatabase = sourceConn.database;
 
-                        logger.info(`Source system connection found for ${model.source_system} (${sourceDialect}), will compare with source table ${model.source_table}`);
-                    } catch (sourceConnErr) {
-                        logger.warn(`Failed to connect to source system ${model.source_system}:`, sourceConnErr.message);
+                            logger.info(`Source system connection found for ${model.source_system} (${sourceDialect}), will compare with source table ${model.source_table}`);
+                        } catch (sourceConnErr) {
+                            logger.warn(`Failed to connect to source system ${model.source_system}:`, sourceConnErr.message);
+                        }
+                    } else {
+                        // 并发边角：阶段一命中后、阶段二之前该行被删——按现状"查无"处理
+                        logger.info(`No source system connection configured for ${model.source_system}`);
                     }
                 } else {
                     logger.info(`No source system connection configured for ${model.source_system}`);
@@ -14331,9 +14690,13 @@ async function validateCollabRequestFields(body, isCreate = true) {
 app.get('/api/collab/db-connections/source', authenticateToken, requireAdmin, (req, res) => {
     // v1.68.0 路由式多方言（2026-05-20）：放开 sqlserver / mysql 双方言
     // Deploy 3 单方言决策已升级 — sql-validator 与 runRealSmokeTest 按 connection.type 分派
+    // 数据协作接入外部源（v1.6 方案 §3.7 E）：type 过滤片段改用 externalSourceSqlFilter()
+    // 统一生成（关系型 ∪ 已登记外部源），不再手写 type IN (...)；connection_type = 'source' 这半
+    // 由调用方自己拼（filter 只含 type 维度，见 utils/collab-external-sources.js JSDoc）。
+    const sourceFilter = externalSourceSqlFilter();
     db.all(
-        "SELECT id, name, type, host, port, database, source_system_code FROM db_connections WHERE connection_type = 'source' AND type IN ('sqlserver', 'mysql') ORDER BY name ASC, id ASC",
-        [],
+        `SELECT id, name, type, host, port, database, source_system_code FROM db_connections WHERE connection_type = 'source' AND ${sourceFilter.sql} ORDER BY name ASC, id ASC`,
+        [...sourceFilter.params],
         (err, rows) => {
             if (err) {
                 logger.error('source 连接列表查询失败:', err);
@@ -14354,9 +14717,12 @@ app.get('/api/collab/db-connections/source', authenticateToken, requireAdmin, (r
 //   - 当前 4-5 用户内网工具 + admin 自管 db 连接，此边界可接受
 //   - 未来扩展场景（外部审计 / viewer 角色增加 / 多租户）需要收敛为"按用户可见协作单 target_db_id 过滤"
 app.get('/api/collab/db-connections/lookup', authenticateToken, (req, res) => {
+    // 数据协作接入外部源（v1.6 方案 §3.7 E）：同 /source 改用 externalSourceSqlFilter()；
+    // SELECT 增补 source_system_code——前端 lookup 映射需要区分外部源展示徽章（C4）。
+    const lookupFilter = externalSourceSqlFilter();
     db.all(
-        "SELECT id, name, type FROM db_connections WHERE connection_type = 'source' AND type IN ('sqlserver', 'mysql') ORDER BY name ASC, id ASC",
-        [],
+        `SELECT id, name, type, source_system_code FROM db_connections WHERE connection_type = 'source' AND ${lookupFilter.sql} ORDER BY name ASC, id ASC`,
+        [...lookupFilter.params],
         (err, rows) => {
             if (err) {
                 logger.error('source 连接 lookup 查询失败:', err);
@@ -14534,26 +14900,32 @@ app.get('/api/collab/requests/:id', authenticateToken, async (req, res) => {
         );
 
         // 取数交付质量记录 v3.0 Commit E：附带质量数据（同 items/attachments/logs 一次拉全范式，用户拍板）
-        //   - quality_records：每次提交一行（C2 旁路写），按提交序升序
+        //   - quality_records（响应体字段）：每次提交一行（C2 旁路写），按提交序升序
         //   - return_records：每次打回一行（D 写），按打回时间升序
         //   - quality_summary：后端算好的汇总（交付时长 M-7 / 提交次数 / 打回次数 / 返工次数），口径集中后端一处
         //
         // ⭐ 双校验 Commit D §8b.1 关键过滤（方案明确"最易漏"）：只展示正式交付质量 record_kind='passed'，
         //   不展示 failed 过程留痕（failed 是 append-only 调试用途，业务用户看到会混淆"已交付"判断）。
-        //   buildQualitySummary 接收过滤后的数组自动生效（不改 helper）；未来若需 debug 接口看 failed，另起 endpoint。
-        const qualityRecords = await dbAllAsync(
-            "SELECT * FROM collab_quality_record WHERE collab_request_id = ? AND record_kind = 'passed' ORDER BY submission_seq ASC, id ASC",
+        //
+        // 数据协作接入外部源（v1.6 方案 §3.4 C，D23 拍板）：qrsAll 双重身份——buildQualitySummary
+        //   既用它算 submit_count/latest_*（只认 passed，过滤逻辑在 helper 内部不变），又用它算新增
+        //   machine_passed_count/machine_checked_count（分母要含 failed，才能算出"机器校验通过率"）。
+        //   SQL 放宽到 IN ('passed','failed')，把两类都喂给 buildQualitySummary；对外契约字面不变——
+        //   响应体 quality_records 单独过滤回只剩 'passed'（下方），failed 行只进汇总分母，不落地到
+        //   前端能看见的明细列表。
+        const qualityRecordsAll = await dbAllAsync(
+            "SELECT * FROM collab_quality_record WHERE collab_request_id = ? AND record_kind IN ('passed', 'failed') ORDER BY submission_seq ASC, id ASC",
             [id]
         );
         const returnRecords = await dbAllAsync(
             'SELECT * FROM collab_return_record WHERE collab_request_id = ? ORDER BY returned_at ASC, id ASC',
             [id]
         );
-        const qualitySummary = collabSubmitHelpers.buildQualitySummary(request, qualityRecords, returnRecords);
+        const qualitySummary = collabSubmitHelpers.buildQualitySummary(request, qualityRecordsAll, returnRecords);
 
         res.json({
             ...request, items, attachments, logs,
-            quality_records: qualityRecords,
+            quality_records: qualityRecordsAll.filter(r => r.record_kind === 'passed'), // 对外契约字面不变，failed 不展示
             return_records: returnRecords,
             quality_summary: qualitySummary,
         });
@@ -16140,13 +16512,52 @@ app.post('/api/collab/requests/:id/submit',
                 return res.status(409).json({ error: '协作单缺少目标业务库配置（target_db_connection_id 为空）' });
             }
             // v1.68.0 路由式多方言：放开 sqlserver / mysql，按 type 分派 smoke test
-            const targetConn = await dbGetAsync(
-                `SELECT id, name, type, host, port, database, username, password
+            // 数据协作接入外部源（v1.6 方案 §3.2 A）：两阶段查询，元数据先行、凭证按需再取——
+            //   阶段一（不取凭证列）先按 type 分流：
+            //     ① 关系型（DB_CONNECTION_TYPES_RELATIONAL）→ 进阶段二取完整凭证行，走原有 smoke 路径
+            //     ② external 且已登记免验（isRegisteredExternalSource）→ 不进阶段二，跳过 smoke，
+            //        targetConn 直接用阶段一这行（无凭证列，external 也用不到）
+            //     ③ external 但未登记 → 422（"存在但未被系统信任"，与"配置缺失"的 500 语义分开，
+            //        便于前端/运营一眼看出是"需要先登记"而非"随便填错了 id"）
+            //     ④ 其他 type（既非关系型也非已知 external）→ 500 原文案（等价于现状 type IN 查无）
+            //   两阶段都在前置 UPDATE 之前执行，保持"查无/方言不支持"类错误副作用与改造前逐字一致。
+            let validationMode;
+            let targetConn;
+            const targetConnMeta = await dbGetAsync(
+                `SELECT id, name, type, connection_type, source_system_code
                    FROM db_connections
-                  WHERE id = ? AND connection_type = 'source' AND type IN ('sqlserver', 'mysql')`,
+                  WHERE id = ? AND connection_type = 'source'`,
                 [collab.target_db_connection_id]
             );
-            if (!targetConn) {
+            if (!targetConnMeta) {
+                cleanupPending();
+                return res.status(500).json({ error: '目标业务库配置缺失或方言不支持（仅支持 SQL Server / MySQL）' });
+            }
+            if (DB_CONNECTION_TYPES_RELATIONAL.includes(targetConnMeta.type)) {
+                validationMode = VALIDATION_MODES.smoke;
+                // R1〔主会话预筛返工·2026-09-02〕阶段二 SQL 曾手写 type IN ('sqlserver','mysql')，
+                // 与阶段一判分流用的 DB_CONNECTION_TYPES_RELATIONAL 是两份独立字面量——常量改了
+                // 这里不会跟着变。改用同一常量拼 SQL，杜绝副本漂移；并发守卫语义不变（阶段二仍是
+                // id + connection_type='source' + 关系型 type 的精确复查，查无仍按"并发边角"处理）。
+                const relTypesSql = DB_CONNECTION_TYPES_RELATIONAL.map((t) => `'${t}'`).join(',');
+                targetConn = await dbGetAsync(
+                    `SELECT id, name, type, host, port, database, username, password
+                       FROM db_connections
+                      WHERE id = ? AND connection_type = 'source' AND type IN (${relTypesSql})`,
+                    [collab.target_db_connection_id]
+                );
+                if (!targetConn) {
+                    // 并发边角：阶段一命中后、阶段二之前该行被删/改型
+                    cleanupPending();
+                    return res.status(500).json({ error: '目标业务库配置缺失或方言不支持（仅支持 SQL Server / MySQL）' });
+                }
+            } else if (targetConnMeta.type === EXTERNAL_DB_CONNECTION_TYPE && isRegisteredExternalSource(targetConnMeta)) {
+                validationMode = VALIDATION_MODES.external_skip;
+                targetConn = targetConnMeta; // 无凭证列，external_skip 模式全程用不到
+            } else if (targetConnMeta.type === EXTERNAL_DB_CONNECTION_TYPE) {
+                cleanupPending();
+                return res.status(422).json({ error: '外部源未登记免验策略', code: 'EXTERNAL_SOURCE_NOT_REGISTERED' });
+            } else {
                 cleanupPending();
                 return res.status(500).json({ error: '目标业务库配置缺失或方言不支持（仅支持 SQL Server / MySQL）' });
             }
@@ -16180,12 +16591,14 @@ app.post('/api/collab/requests/:id/submit',
             //   - 同时清空 done_at + sql_validation_error，避免新一轮验收中详情页仍展示旧"已完成"
             //     语义污染（友好用户：开发删了交付物准备重传时，原 DONE 视觉应消失）
             //   - 不动 friction_* 字段（business 决策：摩擦记录跟"协作过程"而非"单次提交"绑定）
+            // C1 G1：写入前先过唯一枚举断言（值不变，仅加一道合法性校验入口）
+            const queuedStatus = assertSqlValidationStatus('queued');
             const preUpdate = await dbRunAsync(
                 `UPDATE collab_requests
                     SET status = 'SUBMITTED',
                         submitted_at = COALESCE(submitted_at, datetime('now','localtime')),
                         last_submitted_at = datetime('now','localtime'),
-                        sql_validation_status = 'queued',
+                        sql_validation_status = '${queuedStatus}',
                         validation_started_at = NULL,
                         done_at = NULL,
                         sql_validation_error = NULL
@@ -16239,66 +16652,74 @@ app.post('/api/collab/requests/:id/submit',
                 }
             })();
 
-            // === 解密目标库密码 ===
-            let dbPassword;
-            try {
-                dbPassword = decryptPassword(targetConn.password);
-            } catch (e) {
-                cleanupPending();
-                logger.error(`[collab-submit] 目标库密码解密失败: ${e.message}`);
-                // codex 十审 #7：密码/连接失败按"业务验证失败"处理（停留 SUBMITTED + sql_validation_status=failed）
-                // 这里仅写 validation 失败标记，**不回滚 status**（前置 UPDATE 已置 SUBMITTED）
-                // 开发能在详情页看到错误，admin 知晓后调整目标库配置
-                await dbRunAsync(
-                    `UPDATE collab_requests
-                        SET sql_validation_status = 'failed',
-                            sql_validation_error = '目标库配置异常，请联系管理员'
-                      WHERE id = ? AND submission_version = ?`,
-                    [id, oldVer]
-                ).catch(() => {});
-                return res.status(500).json({ error: '目标库配置异常，请联系管理员' });
-            }
+            // === 解密目标库密码 + 拿连接池 + 建 smoke 闭包（仅 smoke 模式）===
+            // 数据协作接入外部源（v1.6 方案 §3.2 A.3）：external_skip 模式全程不解密、不建池、
+            //   不构造 smoke 闭包——targetConn（阶段一元数据行）本就没有凭证列。runSmokeTestClosure
+            //   缺省 null，供 A.4 activateNewVersion 调用点按 validationMode 判断是否传入。
+            let runSmokeTestClosure = null;
+            if (validationMode === VALIDATION_MODES.smoke) {
+                let dbPassword;
+                try {
+                    dbPassword = decryptPassword(targetConn.password);
+                } catch (e) {
+                    cleanupPending();
+                    logger.error(`[collab-submit] 目标库密码解密失败: ${e.message}`);
+                    // codex 十审 #7：密码/连接失败按"业务验证失败"处理（停留 SUBMITTED + sql_validation_status=failed）
+                    // 这里仅写 validation 失败标记，**不回滚 status**（前置 UPDATE 已置 SUBMITTED）
+                    // 开发能在详情页看到错误，admin 知晓后调整目标库配置
+                    const failedStatus1 = assertSqlValidationStatus('failed'); // C1 G1
+                    await dbRunAsync(
+                        `UPDATE collab_requests
+                            SET sql_validation_status = '${failedStatus1}',
+                                sql_validation_error = '目标库配置异常，请联系管理员'
+                          WHERE id = ? AND submission_version = ?`,
+                        [id, oldVer]
+                    ).catch(() => {});
+                    return res.status(500).json({ error: '目标库配置异常，请联系管理员' });
+                }
 
-            // === 拿连接池（v1.68.0 路由式多方言按 type 分派） ===
-            const dialect = targetConn.type;  // 'sqlserver' / 'mysql'
-            let pool;
-            try {
-                const poolConfig = {
-                    host: targetConn.host,
-                    port: targetConn.port,
-                    database: targetConn.database,
-                    username: targetConn.username,
-                    password: dbPassword,
-                };
-                pool = dialect === 'mysql' ? await getMysqlPool(poolConfig) : await getMssqlPool(poolConfig);
-            } catch (e) {
-                cleanupPending();
-                logger.error(`[collab-submit] 目标库连接失败 (dialect=${dialect}): ${e.message}`);
-                // codex 十审 #7：连接失败 = 业务验证失败，停留 SUBMITTED（不回滚 status）
-                await dbRunAsync(
-                    `UPDATE collab_requests
-                        SET sql_validation_status = 'failed',
-                            sql_validation_error = ?
-                      WHERE id = ? AND submission_version = ?`,
-                    [collabSubmitHelpers.sanitizeSqlError(`连接业务库失败: ${e.message}`), id, oldVer]
-                ).catch(() => {});
-                insertCollabLog(id, 'SUBMIT_VALIDATION_FAILED', userId, userName, `连接业务库失败`);
-                return res.status(500).json({ error: '业务库连接失败，请联系管理员' });
-            }
+                // === 拿连接池（v1.68.0 路由式多方言按 type 分派） ===
+                const dialect = targetConn.type;  // 'sqlserver' / 'mysql'
+                let pool;
+                try {
+                    const poolConfig = {
+                        host: targetConn.host,
+                        port: targetConn.port,
+                        database: targetConn.database,
+                        username: targetConn.username,
+                        password: dbPassword,
+                    };
+                    pool = dialect === 'mysql' ? await getMysqlPool(poolConfig) : await getMssqlPool(poolConfig);
+                } catch (e) {
+                    cleanupPending();
+                    logger.error(`[collab-submit] 目标库连接失败 (dialect=${dialect}): ${e.message}`);
+                    // codex 十审 #7：连接失败 = 业务验证失败，停留 SUBMITTED（不回滚 status）
+                    const failedStatus2 = assertSqlValidationStatus('failed'); // C1 G1
+                    await dbRunAsync(
+                        `UPDATE collab_requests
+                            SET sql_validation_status = '${failedStatus2}',
+                                sql_validation_error = ?
+                          WHERE id = ? AND submission_version = ?`,
+                        [collabSubmitHelpers.sanitizeSqlError(`连接业务库失败: ${e.message}`), id, oldVer]
+                    ).catch(() => {});
+                    insertCollabLog(id, 'SUBMIT_VALIDATION_FAILED', userId, userName, `连接业务库失败`);
+                    return res.status(500).json({ error: '业务库连接失败，请联系管理员' });
+                }
 
-            // === 调 activateNewVersion ===
-            // runSmokeTest 闭包注入 runRealSmokeTest，传 pool + ctx（含 dbAsync 用于拿锁后写 running）
-            // codex 十一审 #2：runRealSmokeTest 拿到 Mutex 锁后才把 sql_validation_status 从 'queued' 升级为 'running'
-            // v1.68.0：dialect + allowedDb（业务库名）随 ctx 传入，runRealSmokeTest 用于 sql-validator 路由
-            const runSmokeTestClosure = (scriptPath) =>
-                collabSubmitHelpers.runRealSmokeTest(scriptPath, pool, {
-                    requestId: id,
-                    oldVer,
-                    dbAsync: { runAsync: dbRunAsync },
-                    logger,
-                    dialect,
-                    allowedDb: targetConn.database,
-                });
+                // === 调 activateNewVersion ===
+                // runSmokeTest 闭包注入 runRealSmokeTest，传 pool + ctx（含 dbAsync 用于拿锁后写 running）
+                // codex 十一审 #2：runRealSmokeTest 拿到 Mutex 锁后才把 sql_validation_status 从 'queued' 升级为 'running'
+                // v1.68.0：dialect + allowedDb（业务库名）随 ctx 传入，runRealSmokeTest 用于 sql-validator 路由
+                runSmokeTestClosure = (scriptPath) =>
+                    collabSubmitHelpers.runRealSmokeTest(scriptPath, pool, {
+                        requestId: id,
+                        oldVer,
+                        dbAsync: { runAsync: dbRunAsync },
+                        logger,
+                        dialect,
+                        allowedDb: targetConn.database,
+                    });
+            }
 
             // 多文件上传 M2（RC-M1/RC2-M2）：uploadedFiles 严格来自 grouped.orderedFiles（唯一遍历源，禁 concat/重排）。
             //   保序 = 上传序（D1）；typeOrdinal 透传给 activateNewVersion 用于文件名唯一（RC-H1，active+failed 全路径）。
@@ -16327,6 +16748,24 @@ app.post('/api/collab/requests/:id/submit',
                     uploadedFiles,
                     runSmokeTest: runSmokeTestClosure,
                     logger,
+                    validationMode, // C2a：external_skip 时 activateNewVersion 内部跳过 smoke + 写 external_skipped
+                    // 〔D25·codex 06 审 H1〕external_skip 必传 revalidate——写事务内二次复核该连接
+                    // 仍是"已登记的免验外部源"，堵阶段一命中之后到真正写库激活之间的并发撤销窗口
+                    // （删行/改 type/改 code）。smoke 模式传 undefined，activateNewVersion 内部
+                    // 不会调用它。
+                    revalidate: validationMode === VALIDATION_MODES.external_skip
+                        ? async () => {
+                            const row = await dbGetAsync(
+                                'SELECT id, type, connection_type, source_system_code FROM db_connections WHERE id = ?',
+                                [collab.target_db_connection_id]
+                            );
+                            if (!row || !isRegisteredExternalSource(row)) {
+                                const e = new Error('外部源登记已撤销或变更，请联系管理员');
+                                e.code = 'EXTERNAL_SOURCE_REVOKED';
+                                throw e;
+                            }
+                        }
+                        : undefined,
                 });
             } catch (e) {
                 // 分支处理（codex C1 + 对照表）
@@ -16336,9 +16775,10 @@ app.post('/api/collab/requests/:id/submit',
                     // activateNewVersion 内部已 INSERT failed 行（BEGIN IMMEDIATE 事务）
                     // e.failedAttachments 含本次 failed 行明细 [{ id, attachment_type, failed_attempt_seq, file_name }]
                     const sqlErr = collabSubmitHelpers.sanitizeSqlError(e.smokeError || e.message);
+                    const failedStatus3 = assertSqlValidationStatus('failed'); // C1 G1
                     await dbRunAsync(
                         `UPDATE collab_requests
-                            SET sql_validation_status = 'failed',
+                            SET sql_validation_status = '${failedStatus3}',
                                 sql_validation_error = ?,
                                 sql_validated_at = datetime('now','localtime')
                           WHERE id = ? AND submission_version = ?`,
@@ -16508,14 +16948,21 @@ app.post('/api/collab/requests/:id/submit',
                 // codex 十审 #5：原始 e.message 可能含本地路径/SQL 片段/连接信息，仅写日志不返前端
                 cleanupPending();
                 logger.error(`[collab-submit] activateNewVersion 未知异常: ${e.message}`, e);
+                const failedStatus4 = assertSqlValidationStatus('failed'); // C1 G1
                 await dbRunAsync(
                     `UPDATE collab_requests
-                        SET sql_validation_status = 'failed',
+                        SET sql_validation_status = '${failedStatus4}',
                             sql_validation_error = ?
                       WHERE id = ? AND submission_version = ?`,
                     [collabSubmitHelpers.sanitizeSqlError(`提交失败: ${e.message}`), id, oldVer]
                 ).catch(() => {});
-                return res.status(500).json({ error: '提交失败，请联系管理员' });
+                // 〔08-M6·codex 08 审，R3·Opus 预筛收窄为白名单〕本分支是"其他异常"通用兜底，也是
+                // D25 revalidate 抛出 EXTERNAL_SOURCE_REVOKED（外部源登记被并发撤销）的落点——此前
+                // 响应体只有一句通用文案，前端/客户端无法区分"外部源被撤销"与"系统真故障"两类完全
+                // 不同性质的失败。仅 SUBMIT_PASSTHRU_CODES 白名单内的 err.code 透传（SQLITE_*/
+                // ENOENT/EPERM 等底层错误码不透传，理由见该常量定义处注释）；message 文案保持通用
+                // 不额外暴露内部细节。
+                return res.status(500).json({ error: '提交失败，请联系管理员', ...(e.code && SUBMIT_PASSTHRU_CODES.has(e.code) ? { code: e.code } : {}) });
             }
 
             // === activateNewVersion 内部已 UPDATE：submission_version + sql_validation_status='passed' + sql_validated_at + status='DONE' + done_at + attachment_dir ===
@@ -16523,6 +16970,26 @@ app.post('/api/collab/requests/:id/submit',
 
             insertCollabLog(id, 'SUBMIT_SUCCESS', userId, userName,
                 `newVer=${activateResult.newVer}, dir=${activateResult.attachmentDir}`);
+
+            // 数据协作接入外部源（v1.6 方案 §3.2 A.5）：external_skip 成功后额外留痕一条
+            //   SMOKE_SKIPPED_EXTERNAL——与 SUBMIT_SUCCESS 是两件事（一条是"提交成功"的通用留痕，
+            //   一条是"这次为什么没跑 smoke"的专属说明）。
+            //   〔S5 返工·主会话预筛·2026-09-02，注释更正为实话〕insertCollabLog（server.js:13866）
+            //   内部是 `db.run(sql, params, (err) => { if (err) logger.error(...) })`——即发即走，
+            //   不返回 Promise，调用点本身同步立刻返回；真正的 DB 写入错误发生在**之后**的异步
+            //   回调里，被 insertCollabLog 自己的回调 `logger.error` 吃掉，根本不会冒泡回这里。
+            //   下面这层 try/catch 因此**catch 不到** DB 写失败——它能接住的只是"调用
+            //   insertCollabLog 之前/之中的同步 JS 异常"（如传参本身导致的 TypeError，理论上
+            //   凭当前入参不会发生）。保留这层 try/catch 是防御性写法（成本几乎为零），但不要
+            //   误读成"它兜住了 DB 错误"——DB 错误的兜底其实在 insertCollabLog 内部，不在这里。
+            if (activateResult.validationMode === VALIDATION_MODES.external_skip) {
+                try {
+                    insertCollabLog(id, 'SMOKE_SKIPPED_EXTERNAL', userId, userName,
+                        `外部源免验（系统策略）：${targetConn.name}`);
+                } catch (e) {
+                    logger.error(`[collab-submit] 协作单 #${id} 调用 insertCollabLog(SMOKE_SKIPPED_EXTERNAL) 同步异常: ${e.message}`);
+                }
+            }
 
             // === 取数质量双校验增强 Commit C：主事务成功后旁路写双校验记录（方案 §5.3 passed→DONE 路径）===
             //   - 切换 v3.0 recordQualityOnSubmit → recordQualityForDeveloperSubmit（双校验：SQL+excel；record_kind='passed'；INSERT OR IGNORE）
@@ -16576,6 +17043,7 @@ app.post('/api/collab/requests/:id/submit',
                         resultDataAttachment: resultDataAttach,
                         insertLog: insertCollabLog,
                         logger,
+                        validationMode: activateResult.validationMode, // C2a：external_skip 时跳过列比对
                     });
                     if (qr) qualityCheck = qr;
                     // 透明度统一日志（H-3/RC2-M3）：passed 路径取首 id + 各类型总数（替换原 dualcheck_passed_attach）
@@ -16592,9 +17060,11 @@ app.post('/api/collab/requests/:id/submit',
                 message: '提交成功',
                 new_version: newVer,
                 attachment_dir: activateResult.attachmentDir,
-                sql_validation_status: 'passed',
+                // C2a：不再硬编码 'passed'——external_skip 时 activateResult.validationStatus 是
+                // 'external_skipped'，经 assertSqlValidationStatus 过一遍枚举校验后原样透传
+                sql_validation_status: assertSqlValidationStatus(activateResult.validationStatus),
                 smoke_test_validated_at: activateResult.smokeTestResult.validatedAt,
-                smoke_test_row_count: activateResult.smokeTestResult.rowCount,
+                smoke_test_row_count: activateResult.smokeTestResult.rowCount, // external 合成结果 rowCount:null，自动透传
                 current_status: 'DONE',
                 // 取数质量双校验结果（方案 §6.1 稳定 schema：sql/excel/check_status/persistence_status）
                 //   前端 Commit D 据此弹双侧缺列提醒（不阻塞）+ persistence_status 用于排查
@@ -18657,6 +19127,7 @@ app.post('/api/collab/requests/:id/submit-export',
                 //   若继续保留 assign_mode 条件，normal 单无附件提交会在应用层放行后被 DB 静默拒（changes=0），
                 //   即前后端放开而写点没放开的「半放开」不一致态。
                 // ∴ 此后有/无附件两条路径的 WHERE 完全一致，不再需要分支变量。
+                const exporterDoneStatus = assertSqlValidationStatus('admin_closed'); // C1 G1
                 const updResult = await dbRunAsync(
                     `UPDATE collab_requests
                         SET status = 'DONE',
@@ -18664,7 +19135,7 @@ app.post('/api/collab/requests/:id/submit-export',
                             submitted_at = COALESCE(submitted_at, datetime('now','localtime')),
                             last_submitted_at = datetime('now','localtime'),
                             done_at = datetime('now','localtime'),
-                            sql_validation_status = 'admin_closed',
+                            sql_validation_status = '${exporterDoneStatus}',
                             sql_validation_error = NULL,
                             validation_started_at = NULL,
                             attachment_dir = COALESCE(attachment_dir, ?)
@@ -19152,10 +19623,11 @@ app.post('/api/collab/requests/:id/bypass', authenticateToken, requireAdmin, asy
 
         // === 条件 UPDATE：兜底并发（防 SELECT 后 UPDATE 前状态被改）===
         // 方案 §6.5.2 字段集 + codex 14 #6 不写 sql_validated_at
+        const bypassedStatus = assertSqlValidationStatus('bypassed'); // C1 G1
         const result = await dbRunAsync(
             `UPDATE collab_requests SET
                 status = 'DONE',
-                sql_validation_status = 'bypassed',
+                sql_validation_status = '${bypassedStatus}',
                 bypass_validation = 1,
                 bypass_reason = ?,
                 bypass_by = ?,
@@ -19415,9 +19887,11 @@ app.post('/api/collab/requests/:id/admin-fix', authenticateToken, requireAdmin, 
                 if (exists) businessErrors.push(`OA 号 ${canonicalOa} 已存在（协作单 #${exists.id}）`);
             }
             if (field === 'target_db_connection_id') {
+                // 数据协作接入外部源（v1.6 方案 §3.7 E）：同 /source、/lookup 改用 externalSourceSqlFilter()
+                const adminFixConnFilter = externalSourceSqlFilter();
                 const conn = await dbGetAsync(
-                    `SELECT id, type FROM db_connections WHERE id = ? AND connection_type='source' AND type IN ('sqlserver','mysql')`,
-                    [newVal]
+                    `SELECT id, type FROM db_connections WHERE id = ? AND connection_type='source' AND ${adminFixConnFilter.sql}`,
+                    [newVal, ...adminFixConnFilter.params]
                 );
                 if (!conn) businessErrors.push(`目标库 ID ${newVal} 不存在或不可用`);
             }
@@ -19463,7 +19937,28 @@ app.post('/api/collab/requests/:id/admin-fix', authenticateToken, requireAdmin, 
             && (collab.sql_validation_error != null || collab.sql_validation_status != null);
         if (clearedSqlValidation) {
             setClauses.push(`sql_validation_error = NULL`);
-            setClauses.push(`sql_validation_status = NULL`);
+            // 数据协作接入外部源（v1.6 方案 §3.5 D）：清错不清态。
+            //   〔R2 返工·主会话预筛·2026-09-02，纠正原措辞的绝对化表述〕本分支只管
+            //   admin-fix 这一个入口——admin-fix 定位是"字段订正"（改个人员/描述/连接配置等，
+            //   顺手把挂着的 error 文本擦掉），不是"重新提交"。真要让协作单重走一轮校验，走的是
+            //   return-quality（server.js:18267 clearFields 清 done_at/sql_validated_at/
+            //   sql_validation_status/sql_validation_error 全部四列回 PENDING，开发重新提交后
+            //   external 源仍会再次落回 external_skipped——G2 H7 已断言这条"清掉重试"路径确实
+            //   存在且工作正常）。原措辞"不存在清掉重试语义、平台永远无法连接外部库"是把
+            //   admin-fix 一个入口的行为泛化成了平台级绝对声明，被 return-quality 的既有契约
+            //   证伪，特此更正为限定到本入口的表述。
+            //   admin-fix 场景下只清 sql_validation_error（万一历史脏数据上面挂了个 error
+            //   文本），sql_validation_status 与 sql_validated_at 一律保留（后者本来就不在这个
+            //   if 分支的清空范围内，天然保留）——字段订正不该顺带把校验终态一起抹掉。
+            //   〔D24 拍板〕本分支目前是纵深防御：上方 19366-19368 对 status==='DONE' 恒 409
+            //   TERMINAL_STATE_PROTECTED——external_skipped 恒伴随 status='DONE'（B 段
+            //   activateNewVersion 的 UPDATE 把 status/sql_validation_status 同一事务写入），当前
+            //   请求根本到不了这里（DONE 已被上面的终态保护拦截）。若日后放开 DONE 闸（如允许
+            //   admin 在 DONE 态修正个别字段），此处语义已经正确，不需要再补。
+            if (collab.sql_validation_status !== 'external_skipped') {
+                assertSqlValidationStatus(null, { allowNull: true }); // C1 G1：清空路径同样经断言
+                setClauses.push(`sql_validation_status = NULL`);
+            }
         }
 
         // codex 26 审 #3：UPDATE WHERE 加状态守卫，防 SELECT 后协作单被改成 DONE / ARCHIVED 的并发竞态
@@ -19967,13 +20462,15 @@ app.post('/api/collab/requests/:id/admin-submit-on-behalf',
                             deadline,
                             datetime('now','localtime')
                         )`;
+                const adminFixClosedStatus = assertSqlValidationStatus('admin_closed'); // C1 G1（仅约束字面量分支；
+                //   isDoneFix 分支的 `sql_validation_status` 是列自引用/保留原值，不是 JS 字面量，无值可断言）
                 const updResult = await dbRunAsync(
                     `UPDATE collab_requests
                         SET status = 'DONE',
                             done_at = ${doneAtExpr},
                             sql_validation_status = ${isDoneFix
                                 ? `sql_validation_status`
-                                : `'admin_closed'`},
+                                : `'${adminFixClosedStatus}'`},
                             sql_validation_error = NULL,
                             attachment_dir = COALESCE(attachment_dir, ?)
                       WHERE id = ?
@@ -21053,9 +21550,10 @@ app.listen(PORT, '0.0.0.0', () => {
         try {
             // codex 十二审 #4：错误文案改为"校验流程被中断"——避免开发误以为 SQL 本身有问题
             // 真实语义：可能 smoke 已通过但 DB 事务未 commit 就崩溃了（at-least-once 重提语义）
+            const resumeFailedStatus = assertSqlValidationStatus('failed'); // C1 G1
             const result = await dbRunAsync(
                 `UPDATE collab_requests
-                    SET sql_validation_status = 'failed',
+                    SET sql_validation_status = '${resumeFailedStatus}',
                         sql_validation_error = '服务重启时校验流程被中断，请重新提交（这不代表您的 SQL 有问题）'
                   WHERE status = 'SUBMITTED'
                     AND sql_validation_status = 'running'

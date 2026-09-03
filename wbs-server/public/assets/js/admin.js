@@ -369,15 +369,17 @@ async function loadDbConnections() {
         const connections = await res.json();
         renderDbConnections(connections);
     } catch (e) {
+        // C4：admin.html 表头新增「方言」列，colspan 8→9（与 renderDbConnections 空态同步）
         document.getElementById('dbConnectionList').innerHTML =
-            '<tr><td colspan="8" style="text-align:center;color:#e53e3e;">加载失败</td></tr>';
+            '<tr><td colspan="9" style="text-align:center;color:#e53e3e;">加载失败</td></tr>';
     }
 }
 
 function renderDbConnections(connections) {
     const tbody = document.getElementById('dbConnectionList');
     if (connections.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:#a0aec0;">暂无连接配置</td></tr>';
+        // C4：colspan 8→9，同上
+        tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:#a0aec0;">暂无连接配置</td></tr>';
         return;
     }
 
@@ -386,19 +388,43 @@ function renderDbConnections(connections) {
         const typeLabel = connType === 'source'
             ? `<span style="background:#f59e0b; color:white; padding:2px 8px; border-radius:4px; font-size:0.8em;">源系统${conn.source_system_code ? ' (' + conn.source_system_code + ')' : ''}</span>`
             : '<span style="background:#3b82f6; color:white; padding:2px 8px; border-radius:4px; font-size:0.8em;">数仓</span>';
+        // C4（数据协作接入外部源方案 §3.5.6）：新增「方言」列渲染 conn.type（sqlserver/mysql/
+        // oracle/external），与上面 typeLabel（connection_type：source/warehouse）是不同维度，
+        // 不合并进同一列。external 用徽章「外部源」——本页（admin.html）除既有 <link> 引用的共享
+        // assets/css/style.css 外无本地 <style> 块，本批 admin.html 只许改表头一行，不能新增
+        // <style>，故不落 CSS class（偏离 spec 字面"本页本地 class"，记待主会话裁定），改用与本
+        // 函数上面 typeLabel/setDefaultConnection 按钮同款的内联 style 徽章写法，玫红色借
+        // Data_Collab.html .val-external/.db-tag-external 同一借色理由（15 层调色板无玫红色相，
+        // 该色相在本页尚未被占用）。
+        const isExternal = conn.type === 'external';
+        // 〔R1·Opus 预筛〕conn.type 走 escapeHtmlAdmin（同文件 148 行既有 helper，与本函数其余字段
+        // 一致改走转义——虽是 admin-only 页面，字符串仍来自建连接时的自由输入）。
+        const dialectLabel = isExternal
+            ? `<span style="background:#ec4899; color:white; padding:2px 8px; border-radius:4px; font-size:0.8em;">外部源</span>`
+            : `<span style="color:#475569;">${escapeHtmlAdmin(conn.type) || '-'}</span>`;
+        // 〔R1·Opus 预筛〕external 行的 host/port/database/default_schema 是种子契约占位值
+        // （host='-'/port=0/database='-'/default_schema=NULL），原样拼接会露出误导性的字面量：
+        // "-:0"（host:port 模板串拼接）以及 default_schema 为 NULL 时 JS 模板串把它转成字面量
+        // 字符串 "null"（全库首个 default_schema 为 NULL 的行——此前所有关系型行 DDL 默认值都是
+        // 'dbo'，从未在这条渲染路径上真正遇到过 null，本次外部源接入才第一次暴露）。external 行
+        // 这三个格子统一折叠显示为 "-"，不展示这些无意义的占位细节。
+        const hostPortCell = isExternal ? '-' : `${conn.host}:${conn.port}`;
+        const databaseCell = isExternal ? '-' : conn.database;
+        const schemaCell = isExternal ? '-' : (conn.default_schema || '-');
         return `
             <tr>
                 <td>${conn.id}</td>
                 <td>${typeLabel}</td>
+                <td>${dialectLabel}</td>
                 <td>${conn.name}</td>
-                <td>${conn.host}:${conn.port}</td>
-                <td>${conn.database}</td>
-                <td>${conn.default_schema}</td>
+                <td>${hostPortCell}</td>
+                <td>${databaseCell}</td>
+                <td>${schemaCell}</td>
                 <td>${conn.is_default ? '<span style="color:#16a34a; font-weight:bold;">✓ 默认</span>' : '-'}</td>
                 <td class="action-btns">
-                    <button class="btn btn-success" onclick="testDbConnection(${conn.id})">测试</button>
+                    ${!isExternal ? `<button class="btn btn-success" onclick="testDbConnection(${conn.id})">测试</button>` : ''}
                     ${connType === 'warehouse' && !conn.is_default ? `<button class="btn" style="background:#f59e0b; color:white;" onclick="setDefaultConnection(${conn.id})">设为默认</button>` : ''}
-                    <button class="btn btn-danger" onclick="deleteDbConnection(${conn.id})">删除</button>
+                    ${!isExternal ? `<button class="btn btn-danger" onclick="deleteDbConnection(${conn.id})">删除</button>` : ''}
                 </td>
             </tr>
         `;

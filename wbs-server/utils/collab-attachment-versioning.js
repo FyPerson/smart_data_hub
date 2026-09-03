@@ -36,6 +36,8 @@
 
 const fs = require('fs');
 const path = require('path');
+// C1（数据协作接入外部源 G1）：sql_validation_status 唯一枚举源 + 写入前置断言
+const { assertSqlValidationStatus, VALIDATION_MODES } = require('./collab-validation-status');
 
 // ---------------------------------------------------------------------------
 // §0 可版本化开发交付物 attachment_type 白名单（v1.70.2 codex 28 审 #4）
@@ -330,8 +332,15 @@ async function allocateAttachmentSeq(dbAsync, requestId, attachmentType) {
  * @param {Array<{attachment_type, file_name, original_name, source_path, uploaded_by, uploaded_by_name}>} params.uploadedFiles
  *        source_path 必须在 _pending/{requestId}/ 下
  * @param {Function} params.runSmokeTest async fn(scriptFinalPath) → { ok, validatedAt? , error? }
- * @returns {Promise<{ newVer: number, attachmentDir: string, smokeTestResult: object }>}
- * @throws  乐观锁失败 → { code:'CONCURRENT_SUBMIT', orphanedDir }
+ * @param {string}   [params.validationMode] 'smoke'（缺省）| 'external_skip'
+ * @param {Function} [params.revalidate] async fn() → void；validationMode='external_skip' 时
+ *        **必传**——写事务内、任何 INSERT/UPDATE 之前调用一次，二次复核外部源登记仍有效
+ *        （D25，codex 06 审 H1）；抛错走既有事务异常路径（ROLLBACK + moveToOrphaned）。
+ *        smoke 模式不需要/不会调用。
+ * @returns {Promise<{ newVer: number, attachmentDir: string, smokeTestResult: object, validationMode: string, validationStatus: string }>}
+ * @throws  非法 mode → { code:'INVALID_VALIDATION_MODE' }
+ *          external_skip 未传 revalidate → { code:'REVALIDATE_REQUIRED' }
+ *          乐观锁失败 → { code:'CONCURRENT_SUBMIT', orphanedDir }
  *          完整快照缺漏 → { code:'INCOMPLETE_SNAPSHOT' }
  *          smoke test 失败 → { code:'SMOKE_TEST_FAILED', smokeError }
  *          路径校验失败 → { code:'PATH_VIOLATION', detail }
@@ -339,8 +348,28 @@ async function allocateAttachmentSeq(dbAsync, requestId, attachmentType) {
 async function activateNewVersion(params) {
     const { db, dbAsync, requestId, oldVer, collabRoot, description, attachmentDir,
             oaRequestNo, collabCreatedAt,
-            uploadedFiles, runSmokeTest, logger } = params;
+            uploadedFiles, runSmokeTest, logger,
+            validationMode = VALIDATION_MODES.smoke, revalidate } = params;
     const log = logger || console;
+
+    // 数据协作接入外部源（v1.6 方案 §3.3 B）：mode 枚举校验必须在函数入口、任何文件移动之前——
+    //   不合法值直接 throw，绝不能带着一个未知 mode 往下走到 §3.4 的 rename/§3.6 的 UPDATE。
+    if (validationMode !== VALIDATION_MODES.smoke && validationMode !== VALIDATION_MODES.external_skip) {
+        const err = new Error(`activateNewVersion: 非法 validationMode='${validationMode}'（仅允许 '${VALIDATION_MODES.smoke}'/'${VALIDATION_MODES.external_skip}'）`);
+        err.code = 'INVALID_VALIDATION_MODE';
+        throw err;
+    }
+    // 〔D25·codex 06 审 H1 采纳〕external_skip 分支从阶段一命中"已登记免验"到本函数真正写库激活
+    // 之间，存在一个未复查窗口：若在此期间该连接的登记被并发撤销（删行/改 type/改 code），
+    // external 分支仍会照常免验落 DONE。堵法：external_skip 模式**必传** revalidate（写事务内、
+    // UPDATE 之前调用一次），缺失视为调用方违反契约——与非法 mode 同级，函数入口就近拒绝，
+    // 不允许带着"没有复查手段"的 external_skip 往下走到任何文件操作。smoke 模式不需要
+    // revalidate（它本身就是"当场真连库跑 smoke"，不存在同类窗口）。
+    if (validationMode === VALIDATION_MODES.external_skip && typeof revalidate !== 'function') {
+        const err = new Error('activateNewVersion: validationMode=external_skip 时 revalidate 必传（写库前二次复核登记状态）');
+        err.code = 'REVALIDATE_REQUIRED';
+        throw err;
+    }
 
     // §3.1 完整快照校验
     //   多文件上传 M2（H-1，方案 §B）：原"每类恰好 1 个"放宽为「各 1..5 个」（D2/D3）。
@@ -437,15 +466,36 @@ async function activateNewVersion(params) {
     }
 
     // §3.5 smoke test（L2 callback 注入）
+    // 数据协作接入外部源（v1.6 方案 §3.3 B）：external_skip 模式不调 runSmokeTest（入参本就可为
+    //   null——external 分支上游 server.js 压根没构造 runSmokeTestClosure），合成一个恒 ok:true 的
+    //   冻结结果，rowCount/columns 均为 null（平台无法连库，没有真实列/行数可报）。
+    // 〔M1·codex 06 审措辞收窄〕原口径"external_skip 永不进入 cleanupMovedFiles"是绝对化表述，
+    // 已被 D25 的 revalidate 机制打破——现在收窄为准确的两句话：
+    //   ① external_skip 仍然**不会**进入下面 482-488 行的 cleanupMovedFiles catch（那是
+    //      smoke test 引擎自己抛错时的清理，external_skip 压根不调 runSmokeTest）、也不会进入
+    //      490 行起的 "ok=false → _failed rename" 分支（合成结果 ok 恒 true）——这两条 smoke
+    //      专属路径的判断没有变。
+    //   ② 但 external_skip 现在有一条**独立**的失败路径：写事务内 revalidate() 抛错，走的是
+    //      §3.6 末尾统一的事务异常 catch（ROLLBACK + moveToOrphaned），这条清理路径 smoke/
+    //      external_skip 两种模式通用、共用同一段代码（U4 已用"构造乐观锁冲突"的方式验证过
+    //      moveToOrphaned 对 external_skip 模式确实生效）。
     let smokeTestResult;
-    try {
-        smokeTestResult = await runSmokeTest(scriptFinalPath);
-    } catch (e) {
-        // smoke test 抛错（含 placeholder 的 SMOKE_TEST_NOT_IMPLEMENTED / SMOKE_MUTEX_WAIT_TIMEOUT / RUNNING_UPDATE_*）
-        // → 删本次文件 + 透传错误
-        // 注意：这类是"smoke test 引擎自己出问题"，不属于"业务 SQL 错"，仍走删除路径
-        await cleanupMovedFiles(movedFiles, log);
-        throw e;
+    if (validationMode === VALIDATION_MODES.external_skip) {
+        // S5〔主会话预筛·2026-09-02〕`skipped: 'external'` 是方案 §3.3 冻结的标识字段——
+        // 当前调用链（server.js 响应体、recordQualityForDeveloperSubmit）都不读取这个字段，
+        // 纯为下游/日志诊断预留（未来若要在响应体/日志里区分"跳过原因"，不必再改这条合成
+        // 结果的 schema）。保留字段本身不引入行为——只是多一个没人读的 key。
+        smokeTestResult = Object.freeze({ ok: true, validatedAt: new Date(), rowCount: null, columns: null, skipped: 'external' });
+    } else {
+        try {
+            smokeTestResult = await runSmokeTest(scriptFinalPath);
+        } catch (e) {
+            // smoke test 抛错（含 placeholder 的 SMOKE_TEST_NOT_IMPLEMENTED / SMOKE_MUTEX_WAIT_TIMEOUT / RUNNING_UPDATE_*）
+            // → 删本次文件 + 透传错误
+            // 注意：这类是"smoke test 引擎自己出问题"，不属于"业务 SQL 错"，仍走删除路径
+            await cleanupMovedFiles(movedFiles, log);
+            throw e;
+        }
     }
     if (!smokeTestResult || !smokeTestResult.ok) {
         // v1.70.0 方案 §1.2 撞墙附件保留改造：
@@ -521,6 +571,15 @@ async function activateNewVersion(params) {
     try {
         await dbAsync.runAsync('BEGIN TRANSACTION');
 
+        // 〔D25·codex 06 审 H1〕external_skip 二次复核：写事务内、任何 INSERT/UPDATE 之前调用
+        // revalidate()，重新确认该外部源登记在"阶段一命中"到"这一刻真正写库"之间没有被并发
+        // 撤销（删行/改 type/改 code）。revalidate 抛错会被下方统一的事务异常 catch 接住
+        // （ROLLBACK + moveToOrphaned 把本次文件挪到 _orphaned + 透传错误），与其他事务内异常
+        // 走同一条路径，不单独开分支。smoke 模式不传 revalidate，这里天然跳过。
+        if (validationMode === VALIDATION_MODES.external_skip) {
+            await revalidate();
+        }
+
         // a. INSERT 新版本
         // ⚠️ 取首契约护栏（M-B，codex 审）：严格按 movedFiles 顺序（= orderedFiles = 上传序）逐条 INSERT，
         //   使自增 id 序 = 上传序——passed/failed 双校验取首（SELECT ORDER BY id ASC + find）依赖此不变量。
@@ -559,10 +618,18 @@ async function activateNewVersion(params) {
         // 原 validatedAt.toISOString() 写 ISO 8601 UTC 导致前端 fmtDate 截前 16 字符显示比北京时间早 8 小时（codex 27 审 #5 修正方向）
         // 例：OA-364265 实际北京时间 15:45 通过 smoke，DB 存 ISO UTC 07:45Z，前端截显 "2026-05-22 07:45"
         // 入参 validatedAt 仍保留接收但不写库（向后兼容签名；当前无外部调用方依赖此入参传入后被持久化）
+        // 数据协作接入外部源（v1.6 方案 §3.3 B）：写入值按 mode 二选一——external_skip 写
+        //   'external_skipped'，否则写 'passed'。实参保持三元整体传入 assertSqlValidationStatus
+        //   （而非拆成 if/else 两次独立 assert 调用）：拆两支会让"文本序上离写入点最近的 assert
+        //   调用"只剩后写的那一支，静态覆盖守卫（G1）测不到未命中的另一支——三元单点更安全，
+        //   G1 侧已扩展出"三元实参"解析路径配合本写法（见 verify-collab-validation-status-coverage.js）。
+        const validationStatus = assertSqlValidationStatus(
+            validationMode === VALIDATION_MODES.external_skip ? 'external_skipped' : 'passed'
+        ); // C1 G1
         const upd = await dbAsync.runAsync(
             `UPDATE collab_requests
                 SET submission_version=?,
-                    sql_validation_status='passed',
+                    sql_validation_status='${validationStatus}',
                     sql_validated_at=datetime('now','localtime'),
                     status='DONE',
                     done_at=datetime('now','localtime'),
@@ -584,7 +651,7 @@ async function activateNewVersion(params) {
 
         await dbAsync.runAsync('COMMIT');
         log.info(`[collab-versioning] 协作单 #${requestId} 激活 v${newVer} 成功，目录 ${dirName}`);
-        return { newVer, attachmentDir: dirName, smokeTestResult };
+        return { newVer, attachmentDir: dirName, smokeTestResult, validationMode, validationStatus };
     } catch (e) {
         // 事务异常（非乐观锁失败）回滚
         if (e.code !== 'CONCURRENT_SUBMIT') {

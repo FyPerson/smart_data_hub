@@ -544,7 +544,16 @@
         // 复用数据协作模块既有只读列表端点（GET，requireAdmin），不在本模块重复造一个"列 source 连接"端点。
         const r = await pfApi('/collab/db-connections/source');
         if (!r.ok) { pfSourceConns = []; return; }
-        pfSourceConns = (r.data && r.data.items) || (Array.isArray(r.data) ? r.data : []) || [];
+        // C4（方案 §3.5.8，D12）：/source 端点已按 externalSourceSqlFilter() 把已登记外部源也纳入
+        // 返回集（服务于数据协作建单选库），周期取数模块创建/更新/执行三路由后端本就拒绝 external
+        // 连接（G3 Q3 主断言：/api/periodic-tasks 三路由命中 external id 一律 400/409
+        // SOURCE_CONNECTION_NOT_FOUND，见 verify-collab-external-source.js §Q1）——前端下拉不给
+        // external 选项，客户端先过滤一次，避免用户选了必定会被后端拒绝的连接、白走一次报错往返。
+        // 过滤发生在赋值 pfSourceConns 之后、构建 opts 之前，两处消费者（本函数的新建下拉 + 671
+        // 行编辑表单下拉）共用同一份已过滤数组，天然同步不必两处各自过滤。
+        // 〔codex 10-L1〕元素级防御：非对象/空条目跳过（不让一条脏数据把整个下拉加载炸掉），再过滤 external。
+        pfSourceConns = ((r.data && r.data.items) || (Array.isArray(r.data) ? r.data : []) || [])
+            .filter(c => c && typeof c === 'object' && c.type !== 'external');
         const opts = ['<option value="">请选择目标库</option>']
             .concat(pfSourceConns.map(c => `<option value="${c.id}">${esc(c.name)}（${esc(c.type)}）</option>`));
         const sel = document.getElementById('pfNewConn');

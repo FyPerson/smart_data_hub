@@ -413,8 +413,15 @@ const PAGE_ALIAS_SPECS = [
         extraWhitelistConsts: [
             {
                 name: 'SQL_VALIDATION_LABELS', shape: 'objectValues', field: 'cls',
-                values: ['val-bypassed', 'val-failed', 'val-passed', 'val-running'],
-                why: '验收态四值 → val-badge 四片段',
+                // C1（数据协作接入外部源 G1）新增三键：admin_closed→val-admin-closed /
+                //   external_skipped→val-external / queued→val-running（〔R3 返工〕queued 与
+                //   running 共用同一片段 val-running——与 renderValidationSection 里两者共用
+                //   val-running-bg 详情框同层，不新占一个片段；val-pending 因此不进这份片段集，
+                //   它仍是列表页"尚无验收记录"占位符的专属类，不挂在任何 LABELS key 上）。
+                //   本判据是**精确集合**（见 assertWhitelistConstStructure 的 valOk 判定），七个
+                //   key 去重后落 6 个片段。
+                values: ['val-admin-closed', 'val-bypassed', 'val-external', 'val-failed', 'val-passed', 'val-running'],
+                why: '验收态七键 → val-badge 六片段（queued 与 running 共用 val-running）',
             },
         ],
         renderGateCount: { collabStatusClass: 2, 'collabStatusClass(r.status)': 1, 'collabStatusClass(d.status)': 1 },
@@ -3258,11 +3265,20 @@ const CHANNEL_ALIASES = Object.freeze({ background: ['background', 'background-c
 //   顺手就改坏了几个借色站点——而借色站点的注释散在各页 CSS 里，改 token 的人不会去翻。
 //   这张表是**唯一集中处**：调整下列任一层的 token 前，先查这里谁在借它。
 //   下方断言把这张表与 spec 的实际映射对账，防止表和代码各自漂移。
+// 〔R4·Opus 预筛，2026-09 数据协作接入外部源 C4〕交叉引用（数组本身不动）：
+//   Data_Collab.html `.db-tag-external`（页内本地徽章，标"这条数据库连接是外部登记源"——
+//   与本表登记的 val-*-bg 详情底色是不同对象：那些标"这条协作单的验收结果"，这个标"这条数据库
+//   连接本身"，语义上常同屏出现）同样借了 staging 层，但**不登记进本表**——本表要求登记项的
+//   family 在下方 SECONDARY_FAMILY_SPECS 里有对应条目（assertBorrowedTiersRegistry 拿这两张表
+//   对账），而 .db-tag-external 是纯页内本地样式，没有对应的 SECONDARY_FAMILY_SPECS 条目
+//   （不是别名页六族之一，也不是次级状态徽章族），登记进本表反而会让 assertBorrowedTiersRegistry
+//   找不到匹配的 family 定义而判红。理由与登记档案见 Data_Collab.html 该 class 的 CSS 注释。
 const BORROWED_TIERS = Object.freeze([
     { family: '开发成员态 si-dev-status-badge（Sys_Iteration）', cls: 'excused', tier: 'intake', why: '语义=本次免除此人提交，非"待受理"；借色约束＝达标层 ∧ 与同行 pending(wait 灰) 可分' },
     { family: '开发成员态 si-dev-status-badge（Sys_Iteration）', cls: 'no_code', tier: 'hold', why: '语义=本次无代码提交，非"暂缓"；四态里无更贴的层，原色琥珀与 hold 同系' },
     { family: '收件人推送态 pf-recip-status（Periodic_Fetch）', cls: 'pushed_superseded', tier: 'intake', why: '语义=被强制重发替代的技术终态，非"待受理"；借色约束＝达标层 ∧ 与 pushed_skipped(wait 灰) 可分' },
     { family: '验收详情底色 val-*-bg（Data_Collab·平行族）', cls: 'val-admin-closed-bg', tier: 'special', why: '语义=行政闭环（管理员直接关单），非"对接测试"；紫是唯一能与同族绿/红/琥珀/蓝全部拉开的层' },
+    { family: '验收详情底色 val-*-bg（Data_Collab·平行族）', cls: 'val-external-bg', tier: 'staging', why: 'C1：语义=外部登记源交付（平台无法连对方库校验，交付以开发上传结果为准），非"交付/传输中"；15 层调色板无玫红色相，staging 青色在本族已用 6 值（绿/红/琥珀/蓝/紫）之外仍可分辨，且"交付/对接"语感与"外部源交付"最贴近' },
 ]);
 //   ⚠️ 主状态族的借色站点（Statistics 的 `aborted→wait`）不在本表：那一族有自己的 spec 与注释，
 //     且 wait 层的调整会先撞主族的一堆断言。本表只管次级族——它们没有那层保护。
@@ -3363,6 +3379,9 @@ const SECONDARY_FAMILY_SPECS = [
         classes: {
             'val-pending': 'wait', 'val-passed': 'done', 'val-failed': 'failed',
             'val-running': 'active', 'val-bypassed': 'review',   // HIGH-1：原 voided，次级族禁用豁免层
+            // C1（数据协作接入外部源 G1）新增两值——与 417-466 区"验收详情底色"平行族的
+            // val-admin-closed-bg / val-external-bg 同层借色（badge/box 呈现同一状态一致色）
+            'val-admin-closed': 'special', 'val-external': 'staging',
         },
         tokenized: true,
         // 〔H4〕`.val-pending` **原本就只有 color、没有背景**（既有设计：待验证态不上底色），
@@ -3448,6 +3467,7 @@ const SECONDARY_FAMILY_SPECS = [
         classes: {
             'val-passed-bg': 'done', 'val-failed-bg': 'failed', 'val-bypassed-bg': 'review',
             'val-admin-closed-bg': 'special', 'val-running-bg': 'active',
+            'val-external-bg': 'staging',   // C1（数据协作接入外部源 G1）新增，见 BORROWED_TIERS 借色理由
         },
         tokenized: true,
     },

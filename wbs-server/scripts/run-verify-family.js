@@ -5,8 +5,9 @@
 //   单命令跑全量（静态可分析·可白名单），同时保持退出码校验制（任一套件红 ⇒ 本脚本 exit 1，
 //   杜绝管道 |tail 吞退出码类事故——见 13354ac 沉淀）。
 // 行为契约：
-//   - 扫描面 = scripts/verify-sys-*.js 全部 + 三静态守卫（verify-unify-static/verify-badge-alias/
-//     verify-shared-css-cache-bust）；新增 verify-sys-* 套件零配置自动纳入。
+//   - 扫描面 = scripts/verify-sys-*.js 全部 + 静态守卫（见文件内 GUARDS 数组——数量与具体名单
+//     以该数组为准，不在本注释里重复罗列/计数，避免像 R5〔12a-L1〕之前那样"三静态守卫"这句话
+//     随数组扩容悄悄过期失真）；新增 verify-sys-* 套件零配置自动纳入。
 //   - 成功套件静默只计数；失败套件立即打印其完整输出（stdout+stderr）便于定位。
 //   - 工作目录由脚本自身位置推导（chdir 到 wbs-server 根），与调用方 cwd 无关。
 //   - 汇总行格式固定：`FAMILY PASS=<n> FAIL=<n>` + 每守卫一行 `GUARD <name> OK|RED`，供上层 grep。
@@ -39,7 +40,7 @@ for (const f of familyFiles) {
 }
 console.log(`FAMILY PASS=${pass} FAIL=${failed.length}${failed.length ? ' FAILED: ' + failed.join(' ') : ''}`);
 
-const GUARDS = ['verify-unify-static', 'verify-badge-alias', 'verify-shared-css-cache-bust'];
+const GUARDS = ['verify-unify-static', 'verify-badge-alias', 'verify-shared-css-cache-bust', 'verify-collab-validation-status-coverage', 'verify-db-connections-writers'];
 let guardRed = 0;
 for (const g of GUARDS) {
   const r = runOne(path.join('scripts', `${g}.js`));

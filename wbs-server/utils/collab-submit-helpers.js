@@ -16,6 +16,8 @@ const fs = require('fs');
 const fsp = fs.promises;
 const path = require('path');
 const sqlValidator = require('./sql-validator');
+// C1（数据协作接入外部源 G1）：sql_validation_status 唯一枚举源 + 写入前置断言
+const { assertSqlValidationStatus, VALIDATION_MODES } = require('./collab-validation-status');
 // 取数交付质量记录 v3.0 Commit C2：列对齐写入依赖 B 的两个纯 helper
 const { readXlsxHeader } = require('./xlsx-header-reader');
 const { compareColumns } = require('./column-alignment-checker');
@@ -376,9 +378,10 @@ async function runRealSmokeTest(scriptFilePath, pool, ctx) {
         // 4. 拿锁后写 running + validation_started_at
         let upd;
         try {
+            const runningStatus = assertSqlValidationStatus('running'); // C1 G1
             upd = await dbAsync.runAsync(
                 `UPDATE collab_requests
-                    SET sql_validation_status = 'running',
+                    SET sql_validation_status = '${runningStatus}',
                         validation_started_at = datetime('now','localtime')
                   WHERE id = ?
                     AND submission_version = ?
@@ -878,6 +881,14 @@ async function transitionToDevPending(dbAsync, opts) {
             e.code = 'INVALID_CLEAR_FIELD';
             throw e;
         }
+        // C1 G1：clearFields 是字段名白名单化的通用清空机制（字段名来自运行时变量 f，源码里
+        //   "sql_validation_status" 与 "=" 从不相邻，静态正则天然扫不到这条写入）——
+        //   sql_validation_status 单独过一遍统一断言（allowNull=true），值恒为 NULL，行为不变，
+        //   只是补上"清空路径也经枚举校验入口"这一环。覆盖面见
+        //   scripts/verify-collab-validation-status-coverage.js §①「动态清空」锚点检测。
+        if (f === 'sql_validation_status') {
+            assertSqlValidationStatus(null, { allowNull: true });
+        }
         clearSql += `, ${f} = NULL`;
     }
 
@@ -1013,6 +1024,24 @@ function buildQualitySummary(request, qualityRecords, returnRecords) {
     }
     const reworkCount = rrs.filter(r => r.reason_type === 'DEV_QUALITY').length;
 
+    // 数据协作接入外部源（v1.6 方案 §3.4 C）：质量双口径——旧字段一个不改名，纯新增。
+    //   分母/分子都基于 qrsAll（本函数入参，未按 record_kind 过滤的原始数组；C2a 起
+    //   server.js:14549 一带详情端点已把喂给本函数的 SQL 放宽到 record_kind IN ('passed','failed')，
+    //   qrs 过滤逻辑一个字不动，仍只服务 submit_count/latest_*）：
+    //   - machinePassedCount：真正被机器 smoke test 判"通过"的次数（免验行 record_kind='passed'
+    //     但 sql_unchecked_reason='external_skipped'，不是机器判过，不计入分子）
+    //   - machineCheckedCount：被机器实际校验过的次数（分母，含 failed——"校验了没过"仍算"验过"）
+    //   - machinePassRate：分母为 0（全部提交都是免验/无有效记录）时 null，避免除零假 100%
+    //   〔S1 返工·主会话预筛·2026-09-02〕原判断写成 `(x == null || x !== 'external_skipped')`——
+    //   前半恒真蕴含后半（null/undefined 本身就满足 `!== 'external_skipped'`），前半是死代码，
+    //   化简为单条 `!== 'external_skipped'`（null/undefined/其余任意字符串都保留，仅排除恰好
+    //   等于 'external_skipped' 的值），语义完全不变。
+    const machinePassedCount = qrsAll.filter(r => r && r.record_kind === 'passed'
+        && r.sql_unchecked_reason !== 'external_skipped').length;
+    const machineCheckedCount = qrsAll.filter(r => r && ['passed', 'failed'].includes(r.record_kind)
+        && r.sql_unchecked_reason !== 'external_skipped').length;
+    const machinePassRate = machineCheckedCount > 0 ? machinePassedCount / machineCheckedCount : null;
+
     return {
         delivery_duration_minutes: deliveryDurationMinutes,
         submit_count: qrs.length,
@@ -1033,6 +1062,10 @@ function buildQualitySummary(request, qualityRecords, returnRecords) {
         latest_excel_unchecked_reason: (latest && latest.excel_unchecked_reason) ? latest.excel_unchecked_reason : null,
         // record_kind 归一：缺失时归 'passed'（v3.0 老单 ALTER 加列后 DEFAULT 落 passed；新单总有值）
         latest_record_kind: (latest && latest.record_kind) ? latest.record_kind : (latest ? 'passed' : null),
+        // 数据协作接入外部源（v1.6 方案 §3.4 C）：质量双口径三个新字段，见上方 machinePassedCount 等注释
+        machine_passed_count: machinePassedCount,
+        machine_checked_count: machineCheckedCount,
+        machine_pass_rate: machinePassRate,
     };
 }
 
@@ -1162,13 +1195,23 @@ async function recordQualityForDeveloperSubmit(ctx) {
         }
 
         // [1] 模板侧（双校验共用，§3.2 两侧 reason 同值）
-        const { templateCols, templateUncheckedReason } = await _evaluateTemplateForDualCheck(dbAsync, requestId, log);
+        // 数据协作接入外部源（v1.6 方案 §3.4 C）：external_skip 时最高优先级短路——平台没有可执行
+        //   SQL、也没有 admin 上传模板意义上的"预期列集"可比对，不读结果文件表头（不产生缺列提醒），
+        //   两侧统一 reason='external_skipped'（不复用 SMOKE_FAILED/NO_TEMPLATE 等既有 reason——
+        //   语义不同：那些是"想比对但比不了"，这个是"结构性不需要比对"）。
+        const isExternalSkip = ctx.validationMode === VALIDATION_MODES.external_skip;
+
+        const { templateCols, templateUncheckedReason } = isExternalSkip
+            ? { templateCols: null, templateUncheckedReason: null }
+            : await _evaluateTemplateForDualCheck(dbAsync, requestId, log);
 
         // [2] SQL 侧
         //   passed 路径有 sqlSmokeResult.columns；failed 路径 → SMOKE_FAILED
         //   模板前置不可比对时（templateUncheckedReason !== null）→ SQL 侧用模板 reason（同 excel 侧）
         let sqlSide;
-        if (recordKind === 'failed') {
+        if (isExternalSkip) {
+            sqlSide = { is_complete: null, missing: [], reason: 'external_skipped', snapshot: null };
+        } else if (recordKind === 'failed') {
             sqlSide = { is_complete: null, missing: [], reason: 'SMOKE_FAILED', snapshot: [] };
         } else if (templateUncheckedReason) {
             sqlSide = { is_complete: null, missing: [], reason: templateUncheckedReason, snapshot: null };
@@ -1184,10 +1227,13 @@ async function recordQualityForDeveloperSubmit(ctx) {
         }
 
         // [3] excel 侧
+        //   external_skip → 同上，不读结果文件表头
         //   模板前置不可比对时 → excel 侧用同一个模板 reason（§3.2 两侧同值）
         //   模板可比对时 → 跑 _evaluateExcelSide（result_data 缺失/非 excel/读失败 各自独立 reason）
         let excelSide;
-        if (templateUncheckedReason) {
+        if (isExternalSkip) {
+            excelSide = { is_complete: null, missing: [], reason: 'external_skipped', snapshot: null };
+        } else if (templateUncheckedReason) {
             excelSide = { is_complete: null, missing: [], reason: templateUncheckedReason, snapshot: null };
         } else {
             excelSide = _evaluateExcelSide(ctx.resultDataAttachment, templateCols, requestId, log);

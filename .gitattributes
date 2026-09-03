@@ -1,0 +1,2 @@
+# vendor/minified 资产按原字节存取，不做行尾转换（2026-09-03·P2：autocrlf 把 LF 检出成 CRLF 导致 verify-export-columns N5 与 node_modules 逐字节比对恒红）
+wbs-server/public/assets/vendor/** -text

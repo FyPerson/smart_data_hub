@@ -154,6 +154,15 @@
         .val-failed   { background: var(--sem-failed-bg); color: var(--sem-failed-fg); }
         .val-running  { background: var(--sem-active-bg); color: var(--sem-active-fg); }
         .val-bypassed { background: var(--sem-review-bg); color: var(--sem-review-fg); }
+        /* C1（数据协作接入外部源 G1）新增两值，与验收详情底色 .val-admin-closed-bg / .val-external-bg
+           （下方 417-466 区）同层借色，badge/box 两处呈现同一状态用同一层：
+             admin_closed → special（与既有 .val-admin-closed-bg 同层，"行政闭环"语义，紫系）
+             external → staging（15 层调色板无玫红色相；staging"交付/对接"语义与"外部源交付、
+               平台不参与校验"最贴近，且是本族 6 个已注册值之外唯一未被占用的可分辨色相，
+               借色不借语义——本页 staging 层色值同时用于 .status-EXPORTING，两者是不同徽章族，
+               同页不同列不会造成语境混淆） */
+        .val-admin-closed { background: var(--sem-special-bg); color: var(--sem-special-fg); }
+        .val-external     { background: var(--sem-staging-bg); color: var(--sem-staging-fg); }
         .friction-mark { color: #b91c1c; font-size: 16px; }
         /* 阶段2 盯效率：超时未回填标记（橙=刚超 / 红=严重超） */
         .unreplied-timeout-mark { font-size: 12px; margin-left: 6px; padding: 1px 6px; border-radius: 4px; white-space: nowrap; }
@@ -169,6 +178,29 @@
             color: #1976d2;
             border-radius: 3px;
             font-size: 0.8em;
+            font-weight: 600;
+            vertical-align: middle;
+            white-space: nowrap;
+        }
+
+        /* C4（数据协作接入外部源 v1.6 方案 §3.5）目标库外部源标签——列表/详情/admin-fix 下拉三处
+           共用。〔待主会话裁定：偏离方案字面 class 名〕方案原文写 `u-db-tag-external`，但仓内 `u-`
+           前缀是共享组件根类（前端统一范式，components.css 集中定义 + verify-unify-static.js 静态
+           派生守卫），本页本地徽章不经共享层、不受该守卫管辖，用 `u-` 前缀会被误读成"共享组件"，
+           故改用无前缀的 `db-tag-external`（页内本地 class，同页 .admin-direct-tag 命名先例）。
+           配色借 --sem-staging-*（与验收徽章 .val-external 同层——见上方 ~165 行注释：外部源交付
+           语义与 staging"交付/对接"最贴近，同族未被 val-* 占用的唯一可分辨色相；本 class 与
+           .val-external 语义同源但对象不同：那个标"这条协作单的验收结果免验"，这个标"这条数据库
+           连接本身是外部登记源"，两者常同屏出现（如列表一行既显示目标库外部源标签又显示验收
+           外部免验徽章），故意用同一色系强化"外部源"这条主题色，不是巧合共享。） */
+        .db-tag-external {
+            display: inline-block;
+            padding: 1px 6px;
+            margin-left: 4px;
+            background: var(--sem-staging-bg);
+            color: var(--sem-staging-fg);
+            border-radius: 8px;
+            font-size: 0.78em;
             font-weight: 600;
             vertical-align: middle;
             white-space: nowrap;
@@ -431,6 +463,9 @@
         .val-bypassed-bg { background: var(--sem-review-bg); color: var(--sem-review-fg); }
         .val-admin-closed-bg { background: var(--sem-special-bg); color: var(--sem-special-fg); }
         .val-running-bg  { background: var(--sem-active-bg); color: var(--sem-active-fg); }
+        /* 〔C1·借色，同上方 139-156 区 .val-external 的登记理由〕external_skipped 详情底色，
+           与徽章 .val-external 同层（staging），badge/box 呈现同一状态一致底色 */
+        .val-external-bg { background: var(--sem-staging-bg); color: var(--sem-staging-fg); }
         .val-title { font-weight: 600; font-size: 14px; margin-bottom: 6px; }
         .val-meta  { color: #6b7280; font-size: 12px; margin-bottom: 4px; }
         .val-reason {
@@ -1194,7 +1229,8 @@
                 <div class="u-form-group">
                     <label>SQL 脚本 <span class="required">*</span></label>
                     <input type="file" id="f_delivery_script" accept=".sql,.txt" multiple>
-                    <div class="u-hint">扩展名 .sql / .txt，每个 ≤ 1MB，最多 5 个。第一份脚本将在目标业务库执行 smoke test，其余为附带交付物。</div>
+                    <!-- C4：id 供 openSubmitDeliveryDialog 按目标库是否 external 动态切换提示文案 -->
+                    <div class="u-hint" id="submitScriptSmokeHint">扩展名 .sql / .txt，每个 ≤ 1MB，最多 5 个。第一份脚本将在目标业务库执行 smoke test，其余为附带交付物。</div>
                     <div id="deliveryScriptPreview" class="file-preview"></div>
                 </div>
                 <div class="u-form-group">
@@ -1203,7 +1239,7 @@
                     <div class="u-hint">扩展名 .xlsx / .xls，每个 ≤ 100MB，最多 5 个。本地跑出的取数结果供业务方验收对照；第一份参与列对齐校验，其余为附带交付物。</div>
                     <div id="deliveryDataPreview" class="file-preview"></div>
                 </div>
-                <div class="u-hint" style="margin-top:8px;color:#6b7280;">
+                <div class="u-hint" style="margin-top:8px;color:#6b7280;" id="submitGeneralSmokeHint">
                     提交后系统会对 SQL 脚本做 4 层防御 smoke test（语法解析 / 黑名单 / 只读校验 / 真连业务库试跑）。验收通过协作单进入 DONE，否则停留 SUBMITTED 状态并显示错误，可继续重提。
                 </div>
             </div>
@@ -1491,7 +1527,17 @@
             'passed':   Object.freeze({ text: '✅ 已通过', cls: 'val-passed' }),
             'failed':   Object.freeze({ text: '❌ 待重传', cls: 'val-failed' }),
             'running':  Object.freeze({ text: '🕐 验收中', cls: 'val-running' }),
-            'bypassed': Object.freeze({ text: '⚠️ 旁路放行', cls: 'val-bypassed' })
+            'bypassed': Object.freeze({ text: '⚠️ 旁路放行', cls: 'val-bypassed' }),
+            // C1（数据协作接入外部源 G1）新增三值——与后端 utils/collab-validation-status.js
+            // SQL_VALIDATION_STATUSES 同源，改枚举先改那边。
+            // 〔R3 返工·2026-09-02〕queued 的 cls 由 val-pending 改 val-running：详情框里 queued
+            //   本就和 running 共用 val-running-bg（见 renderValidationSection 的
+            //   `vs === 'running' || vs === 'queued'` 分支），badge/box 该同层；val-pending
+            //   只有 color、没有 background（既有设计——它是列表页"尚无验收记录"占位符专属），
+            //   挂到 `.val-badge` 胶囊上会渲不出底色，变成一个只有文字没有胶囊感的"裸字"。
+            'queued':           Object.freeze({ text: '🕐 排队中', cls: 'val-running' }),
+            'admin_closed':     Object.freeze({ text: '行政闭环', cls: 'val-admin-closed' }),
+            'external_skipped': Object.freeze({ text: '🔗 外部源免验', cls: 'val-external' })
         });
 
         // 摩擦归因文案（方案 §6.6）
@@ -1851,18 +1897,50 @@
             document.querySelectorAll('#collabStatsRow .u-stat-card').forEach(c => c.classList.toggle('active', c.dataset.status === cur));
         }
 
-        // 目标业务库缓存（id → name）；列表渲染时按需查
+        // 目标业务库缓存（id → DTO）；列表渲染时按需查
         // v1.70.2 修：改用 /lookup endpoint（所有登录用户可查），原 /source 仅 admin 可查导致开发账号 #2 fallback
+        // C4（数据协作接入外部源）：/lookup 已升级返回 { id, name, type, source_system_code } 四列
+        // （server.js 14510-14522），改存整条 DTO（原只存 name 字符串）——六类消费者（列表/排序
+        // getter/详情/修正历史/admin-fix 下拉/导出）都要按 type==='external' 判是否加外部源标签，
+        // 光存 name 字符串无法区分。targetDbNameMap 是 targetDbMap 的 { id: name } 投影，专供表头
+        // 排序 getter 用（共享层 UnifyHelpers.attachTableSort 的 labelMap 比较会 String(map[id])，
+        // 传整条 DTO 对象会被强转成 "[object Object]" 拖垮排序字典序——不改 unify-helpers，改这里
+        // 传一份只含 name 的投影）。
         let targetDbMap = {};
+        let targetDbNameMap = {};
         async function loadTargetDbMap() {
             try {
                 const res = await authFetch('/api/collab/db-connections/lookup');
                 if (!res || !res.ok) return;
                 const list = await res.json();
                 targetDbMap = {};
-                (list || []).forEach(c => { targetDbMap[c.id] = c.name; });
+                targetDbNameMap = {};
+                (list || []).forEach(c => { targetDbMap[c.id] = c; targetDbNameMap[c.id] = c.name; });
             } catch (e) { /* 静默 */ }
         }
+        // external 徽章 HTML 片段——六类消费者里"列表/详情"两处会拼进已 escapeHtml 的文本之后
+        // （name 本身仍走 escapeHtml，标签是固定字面量不需要转义）。
+        function dbTagExternalHtml() { return ' <span class="db-tag-external">外部源</span>'; }
+        // 〔R3·主会话裁定 D27〕判定目标库是否 external——查法与 openSubmitDeliveryDialog 一致
+        // （target_db_connection_id → targetDbMap[.id].type），抽成共享 helper 供
+        // renderDeliverySection/renderValidationSection 三处文案切换复用，不各自重写一遍查找逻辑。
+        function isTargetDbExternal(targetDbConnectionId) {
+            const c = targetDbConnectionId ? targetDbMap[targetDbConnectionId] : null;
+            return !!(c && c.type === 'external');
+        }
+
+        // C4（方案 §3.5.3）：上传交付物弹窗两条 smoke test 提示的默认文案（与 DOM 原始文本逐字一致，
+        // 供 openSubmitDeliveryDialog 每次打开时按目标库是否 external 二选一——弹窗复用同一组 DOM，
+        // 上一次若显示过 external 文案，这次打开非 external 单必须显式还原，不能只在 external 分支
+        // 覆写、依赖"没人会连续打开两个不同单"这种偶然）。
+        const SUBMIT_SMOKE_HINT_DEFAULT_SCRIPT = '扩展名 .sql / .txt，每个 ≤ 1MB，最多 5 个。第一份脚本将在目标业务库执行 smoke test，其余为附带交付物。';
+        const SUBMIT_SMOKE_HINT_DEFAULT_GENERAL = '提交后系统会对 SQL 脚本做 4 层防御 smoke test（语法解析 / 黑名单 / 只读校验 / 真连业务库试跑）。验收通过协作单进入 DONE，否则停留 SUBMITTED 状态并显示错误，可继续重提。';
+        // 〔C13·codex 13-L1〕external 分支不能整句覆盖——submitScriptSmokeHint 原文前半段是文件
+        // 格式/大小/数量约束（与是否 external 无关，external 单一样要遵守），只有后半段的 smoke
+        // 描述才该替换成外部源说明；submitGeneralSmokeHint 原文通篇都是 smoke 描述，无格式约束
+        // 可保留，整句替换即是"只换 smoke 那一句"。
+        const SUBMIT_SMOKE_HINT_SCRIPT_EXTERNAL = '扩展名 .sql / .txt，每个 ≤ 1MB，最多 5 个。该单目标库为外部源，平台不执行 SQL 校验，请确认结果文件为实际导出数据。';
+        const SUBMIT_SMOKE_HINT_GENERAL_EXTERNAL = '该单目标库为外部源，平台不执行 SQL 校验，请确认结果文件为实际导出数据。';
 
         // 缓存最近一次后端返回的原始顺序，供表头排序清空态还原（不需重新拉接口）。
         // 前端统一：不再靠 currentSortBy===null 条件判断是否重缓存——loadList() 每次拉取成功后无条件写入，
@@ -1935,8 +2013,11 @@
                 const oa = oaFmt
                     ? escapeHtml(oaFmt) + adminDirectTag
                     : '<span style="color:#9ca3af">—</span>' + adminDirectTag;
+                // C4：targetDbMap 现存 DTO（见 loadTargetDbMap），此处取 .name；external 行名称后
+                // 加外部源标签（坏法：直接 escapeHtml(DTO对象) 会渲染成字面量 "[object Object]"）。
+                const targetDbConn = r.target_db_connection_id ? targetDbMap[r.target_db_connection_id] : null;
                 const targetDb = r.target_db_connection_id
-                    ? escapeHtml(targetDbMap[r.target_db_connection_id] || `#${r.target_db_connection_id}`)
+                    ? escapeHtml((targetDbConn && targetDbConn.name) || `#${r.target_db_connection_id}`) + (targetDbConn && targetDbConn.type === 'external' ? dbTagExternalHtml() : '')
                     : '<span style="color:#9ca3af">—</span>';
 
                 // v3 开发列（原名处理人·列名术语统一轮 2026-07-10）：优先级 exporter > developer > 待指派
@@ -1982,7 +2063,7 @@
             oa_request_no: 'string',
             requester_dept: 'string',
             requester_name: 'string',
-            target_db_connection_id: 'labelMap',   // 经 labelMaps.target_db_connection_id 解析 targetDbMap 后字典序
+            target_db_connection_id: 'labelMap',   // 〔R4·Opus 预筛〕经 labelMaps.target_db_connection_id 解析投影 targetDbNameMap 后字典序（非 targetDbMap 本体，见该 getter 定义处注释）
             description: 'string',
             created_at: 'date',
             deadline: 'date',
@@ -2005,9 +2086,13 @@
             ARCHIVED: 5,
         };
 
-        // codex 审 MED-1：labelMaps 传 getter（() => targetDbMap）而非对象引用——loadTargetDbMap() 里
-        // `targetDbMap = {}` 是**整体重绑**（非原地填充），传引用会让共享层永远持旧空对象，库名列排序
-        // 退化为 '#id' 兜底字典序；getter 每次比较现取当前绑定，重绑后立即生效。
+        // codex 审 MED-1：labelMaps 传 getter（() => targetDbNameMap）而非对象引用——loadTargetDbMap()
+        // 里 `targetDbNameMap = {}` 是**整体重绑**（非原地填充），传引用会让共享层永远持旧空对象，
+        // 库名列排序退化为 '#id' 兜底字典序；getter 每次比较现取当前绑定，重绑后立即生效。
+        // C4：targetDbMap 现存 DTO（见 loadTargetDbMap），传 { id: name } 投影 targetDbNameMap，
+        // 不传 targetDbMap 本体——共享层 UnifyHelpers.attachTableSort 的 labelMap 比较会
+        // `String(map[id])`（unify-helpers.js:102-103），传整条 DTO 对象会被强转成 "[object Object]"
+        // 参与字典序比较，排序结果整体失真（不改共享层，改这里传投影）。
         // defaultSort 沿用 v1.72.1 拍板：ID 倒序，刻意覆盖后端「status 优先级→deadline ASC→id DESC」
         // 三级业务排序（server.js GET /api/collab/requests）——用户拍板统一 ID 倒序，知情接受
         // "待指派/紧急单不再默认置顶"。
@@ -2015,7 +2100,7 @@
             tableSelector: '#collabListTable',
             fieldTypes: SORT_FIELD_TYPES,
             statusOrder: STATUS_SORT_ORDER,
-            labelMaps: { target_db_connection_id: () => targetDbMap },
+            labelMaps: { target_db_connection_id: () => targetDbNameMap },
             getList: collabSortableList,
             render: renderList,
             defaultSort: { field: 'id', dir: 'desc' },
@@ -2809,9 +2894,14 @@
                 return;
             }
             d = { ...d, id: safeId };  // 后续模板里 ${d.id} 已是 safeId
+            // C4：targetDbMap 现存 DTO，取 .name；external 时另外拼一个标签片段（模板里
+            // escapeHtml(targetDbName) 会把 HTML 标签转义成实体，标签必须拼在 escapeHtml 之外，
+            // 故拆成两个变量，模板处 ${escapeHtml(targetDbName)}${targetDbExternalTag} 两截拼接）。
+            const targetDbConnDetail = d.target_db_connection_id ? targetDbMap[d.target_db_connection_id] : null;
             const targetDbName = d.target_db_connection_id
-                ? (targetDbMap[d.target_db_connection_id] || `#${d.target_db_connection_id}`)
+                ? ((targetDbConnDetail && targetDbConnDetail.name) || `#${d.target_db_connection_id}`)
                 : '—';
+            const targetDbExternalTag = (targetDbConnDetail && targetDbConnDetail.type === 'external') ? dbTagExternalHtml() : '';
 
             // 1. 任务信息区块（v3 加对接人 + 指派开发元数据）
             const isUnassigned = d.status === 'PENDING_ASSIGN' || Number(d.developer_id) === 0;
@@ -2931,7 +3021,7 @@
                             <div class="detail-kv-label">OA 流程号</div>
                             <div class="detail-kv-value">${formatOaNo(d.oa_request_no) ? escapeHtml(formatOaNo(d.oa_request_no)) : '<span style="color:#9ca3af">—</span>'}</div>
                             <div class="detail-kv-label">目标业务库</div>
-                            <div class="detail-kv-value">${escapeHtml(targetDbName)}</div>
+                            <div class="detail-kv-value">${escapeHtml(targetDbName)}${targetDbExternalTag}</div>
                             <div class="detail-kv-label">需求部门</div>
                             <div class="detail-kv-value">${escapeHtml(d.requester_dept)}</div>
                             <div class="detail-kv-label">业务方负责人</div>
@@ -3394,6 +3484,10 @@
             //   开发本人此前仍能看到每个交付附件的"删除"+底部"🔄 重新上传交付物"两个写入口。加 collabTerminalKind==='active'
             //   门后隐藏这两个写按钮，交付文件列表（预览/下载链接）不动——只 gate canModifyDelivery 派生的 deleteBtn/reuploadBtn。
             const canModifyDelivery = isCurrentDeveloper && d.status === 'DONE' && collabTerminalKind(d) === 'active';
+            // 〔R3·主会话裁定 D27〕external 目标库不跑 smoke test，"重传后会自动重走 smoke test
+            // 验收"这句提示对 external 单是假话——两处重传提示（空交付物态 / 有交付物态）复用
+            // 同一个判定。
+            const deliveryTargetIsExternal = isTargetDbExternal(d.target_db_connection_id);
             if (deliveryFiles.length === 0) {
                 // #11 交付物删光重传缺口（2026-07-23）：「提交过但交付物被删光」的 DONE 单不能一并 return——
                 //   否则「🔄 重新上传交付物」入口随区块消失，开发删光后无法自助重传（后端 /submit 状态白名单
@@ -3407,7 +3501,7 @@
                 const emptyReuploadBtn = canModifyDelivery
                     ? `<div style="margin-top:12px;">
                            <button class="btn" style="background:#f59e0b;color:white;" onclick="openSubmitDeliveryDialog(${d.id})">🔄 重新上传交付物</button>
-                           <span style="color:#92400e;font-size:12px;margin-left:10px;">重传后会自动重走 smoke test 验收</span>
+                           <span style="color:#92400e;font-size:12px;margin-left:10px;">${deliveryTargetIsExternal ? '重传后按外部源免验直接生效' : '重传后会自动重走 smoke test 验收'}</span>
                        </div>`
                     : '';
                 // codex 22 审 L-2：文案改「当前无有效交付物」（superseded 历史仍在库，"已全部删除"过于绝对）；
@@ -3453,7 +3547,7 @@
             const reuploadBtn = canModifyDelivery
                 ? `<div style="margin-top:12px;padding-top:12px;border-top:1px dashed #e5e7eb;">
                        <button class="btn" style="background:#f59e0b;color:white;" onclick="openSubmitDeliveryDialog(${d.id})">🔄 重新上传交付物</button>
-                       <span style="color:#92400e;font-size:12px;margin-left:10px;">归档前可修改：重传后会自动重走 smoke test 验收</span>
+                       <span style="color:#92400e;font-size:12px;margin-left:10px;">归档前可修改：${deliveryTargetIsExternal ? '重传后按外部源免验直接生效' : '重传后会自动重走 smoke test 验收'}</span>
                    </div>`
                 : '';
             // M3 透明度（§C）：同类型 active >1 时提示"仅首份参与校验，其余附带"（计数已上移 map 前）
@@ -3661,6 +3755,11 @@
                     NON_EXCEL_RESULT: '数据文件非 xlsx，未比对',
                     RESULT_READ_FAILED: '数据文件读取失败，未比对',
                     QUALITY_CHECK_FAILED: '校验计算失败',
+                    // C4（数据协作接入外部源）：external_skip 单 sql_unchecked_reason='external_skipped'
+                    // （utils/collab-submit-helpers.js:1032/1040/1042）——C2a 预研发现缺失时会落
+                    // 下方 `reasonMap[reason] || '未比对'` 的通用兜底文案，语义不清（像"系统没查"而非
+                    // "系统本来就不查"），补精确文案区分。
+                    external_skipped: '外部源免验（未比对）',
                     // v3.0 兼容
                     C2_FAILED: '校验异常（v3.0 老路径）',
                     XLSX_READ_FAILED: '读取失败（v3.0 旧枚举）',
@@ -3794,7 +3893,7 @@
                             <div class="detail-section-body">
                                 <div class="val-box" style="background:#eff6ff;border:1px solid #bfdbfe;">
                                     <div class="val-title" style="color:#1e40af;">📤 尚未提交交付物</div>
-                                    <div class="val-meta">上传 SQL 脚本 + 结果数据，系统会自动跑 smoke test 验收</div>
+                                    <div class="val-meta">${isTargetDbExternal(d.target_db_connection_id) ? '上传 SQL 脚本 + 结果数据，外部源不执行 smoke test，以结果文件为准' : '上传 SQL 脚本 + 结果数据，系统会自动跑 smoke test 验收'}</div>
                                     ${isTerminal ? '' : `<div class="val-actions" style="margin-top:10px;">
                                         <button class="val-btn val-btn-retry" onclick="openSubmitDeliveryDialog(${d.id})">上传交付物</button>
                                     </div>`}
@@ -3858,6 +3957,14 @@
                         <div class="val-title">📋 行政闭环（未执行 SQL 验收）</div>
                         <div class="val-meta">操作人：${escapeHtml(adminCloseOperator)} · ${fmtDate(d.done_at)}</div>
                         <div class="val-reason">${escapeHtml(adminCloseReason)}</div>
+                    </div>`;
+            } else if (vs === 'external_skipped') {
+                // C1（数据协作接入外部源）：外部登记源交付，平台无法连库跑 smoke test，不渲染
+                // 重试/旁路按钮（与 admin_closed 一样是"跳过校验"的终态展示，非可操作的失败态）
+                bodyHtml = `
+                    <div class="val-box val-external-bg">
+                        <div class="val-title">${escapeHtml(SQL_VALIDATION_LABELS.external_skipped.text)}</div>
+                        <div class="val-meta">外部源·未执行校验（平台无法连接小程序库），交付以开发上传的结果文件为准</div>
                     </div>`;
             } else if (vs === 'failed') {
                 // v3：仅本单 developer 本人可见"重新上传"按钮（admin 不再代提交，与 §6 权限矩阵一致）
@@ -3966,7 +4073,11 @@
                     if (value == null || value === '') return '—';
                     const strVal = String(value);
                     if (field === 'target_db_connection_id') {
-                        const name = (typeof targetDbMap !== 'undefined') ? targetDbMap[strVal] : null;
+                        // C4：targetDbMap 现存 DTO，取 .name；本区块结果恒经 escapeHtml 包裹渲染
+                        // （见下方 admin-fix-change-row 模板），不加外部源标签（历史 diff 纯文本，
+                        // 加徽章会被转义成实体反而更乱，spec 本条也只要求 .name）。
+                        const conn = (typeof targetDbMap !== 'undefined') ? targetDbMap[strVal] : null;
+                        const name = conn ? conn.name : null;
                         return name ? `${name}（#${strVal}）` : `#${strVal}`;
                     }
                     if (field === 'contact_person_id' || field === 'developer_id') {
@@ -4294,8 +4405,11 @@
                     inputHtml = `<textarea id="f_admin_fix_${field}" data-field="${field}" placeholder="${meta.placeholder || ''}" maxlength="2000" style="min-height:60px;">${escapeHtml(currentVal || '')}</textarea>`;
                 } else if (meta.type === 'db_select') {
                     // codex 26 审 #5：currentVal 不在 targetDbMap 时插占位 option 标"当前/不可用"
+                    // C4：targetDbMap 现存 DTO，取 .conn.name；external 行 option 文本尾部加
+                    // "（外部源）"纯文本后缀（<option> 内不支持嵌套 HTML 标签，不能用 dbTagExternalHtml
+                    // 那个 <span> 徽章，与列表/详情两处不同介质，按 spec 用文字后缀）。
                     let opts = Object.entries(targetDbMap)
-                        .map(([id, name]) => `<option value="${id}">${escapeHtml(name)}</option>`)
+                        .map(([id, conn]) => `<option value="${id}">${escapeHtml(conn.name)}${conn.type === 'external' ? '（外部源）' : ''}</option>`)
                         .join('');
                     if (currentVal != null && !(String(currentVal) in targetDbMap)) {
                         opts = `<option value="${currentVal}" disabled>#${currentVal}（当前/不可用）</option>` + opts;
@@ -4436,6 +4550,19 @@
 
         // 首次提交（PENDING）入口：打开上传交付物弹窗
         function openSubmitDeliveryDialog(id) {
+            // 〔R2·Opus 预筛〕收窄前置断言：四处调用点（3487/3533/3882 直调 onclick="openSubmitDeliveryDialog(${d.id})"
+            // + 3958 经 onclick="openRetryDialog(${d.id})" 转调）全部落在 renderDetail(d) 系模板
+            // 字符串内部，理论上 d 恒等于 currentDetail（模板只在详情已渲染时才会出现在 DOM 里）；
+            // 但这层"理论上"依赖的是"渲染时 d 是当时的 currentDetail 快照且用户没有在渲染完成后
+            // 切换到另一单"这个假设——同页复用同一批 DOM（不是每次重新查询），若未来出现"详情已
+            // 切到另一单但旧模板按钮还没重渲染就被点到"的竞态窗口，下面按 currentDetail 现取的
+            // external 判断就会用错单的目标库信息。改为显式收窄（同页 isSameDetailRefresh 先例：
+            // 同款"currentDetail.id 与传入 id 是否一致"判断），不满足直接拒绝 + 提示，不静默用
+            // 可能过期的 currentDetail 继续往下走。
+            if (!currentDetail || String(currentDetail.id) !== String(id)) {
+                showToast('请先打开该协作单详情', 'warning');
+                return;
+            }
             _submitDeliveryCollabId = id;
             document.getElementById('submitDeliveryTitle').textContent = `上传交付物 · 协作单 #${id}`;
             document.getElementById('f_delivery_script').value = '';
@@ -4448,6 +4575,19 @@
             const btn = document.getElementById('btnSubmitDelivery');
             btn.disabled = false;
             btn.textContent = '提交';
+            // C4（方案 §3.5.3）：按 currentDetail.target_db_connection_id（不是协作单 id）查
+            // targetDbMap 判目标库是否 external——四处调用点（3487/3533/3882 直调 + 3958 经
+            // openRetryDialog 转调）均在 renderDetail(d) 模板内，上面的前置断言已确认
+            // d===currentDetail（同一单），直接读不用另外传参/另外拉取。两条提示每次都显式二选一
+            // （不是只在 external 分支覆写），防上一次打开 external 单的文案残留到这次打开的非
+            // external 单。
+            const submitTargetConn = (currentDetail && currentDetail.target_db_connection_id)
+                ? targetDbMap[currentDetail.target_db_connection_id] : null;
+            const isSubmitTargetExternal = !!(submitTargetConn && submitTargetConn.type === 'external');
+            document.getElementById('submitScriptSmokeHint').textContent = isSubmitTargetExternal
+                ? SUBMIT_SMOKE_HINT_SCRIPT_EXTERNAL : SUBMIT_SMOKE_HINT_DEFAULT_SCRIPT;
+            document.getElementById('submitGeneralSmokeHint').textContent = isSubmitTargetExternal
+                ? SUBMIT_SMOKE_HINT_GENERAL_EXTERNAL : SUBMIT_SMOKE_HINT_DEFAULT_GENERAL;
             document.getElementById('submitDeliveryModal').classList.add('open');
         }
 
@@ -4490,7 +4630,12 @@
                 });
                 const data = await res.json().catch(() => ({}));
                 if (res.ok) {
-                    showToast('✅ 提交成功，系统正在跑 smoke test', 'success');
+                    // C4（方案 §3.5.3）：external_skipped 时平台没跑 smoke test，原文案会误导用户
+                    // 以为系统仍在校验；按响应体 sql_validation_status 切换措辞，data 已在上面
+                    // `res.json().catch(() => ({}))` 解析过，data.sql_validation_status 缺失时
+                    // （catch 兜底空对象）走原文案，不误判为 external。
+                    showToast(data.sql_validation_status === 'external_skipped'
+                        ? '✅ 已提交（外部源免验）' : '✅ 提交成功，系统正在跑 smoke test', 'success');
                     closeSubmitDeliveryModal();
                     // 取数交付质量记录 v3.0 Commit E 方案乙：列对齐缺列非阻塞提醒（不影响提交成功，开发可当场自纠重传）
                     //   响应 quality_check.is_columns_complete===0 表示缺列（=== null 是未比对不提醒）；missing_columns 始终数组
@@ -5989,6 +6134,7 @@
             if (r.sql_validation_status === 'running') return '验收中';
             if (r.sql_validation_status === 'queued') return '排队中';
             if (r.sql_validation_status === 'admin_closed') return '行政闭环（未执行SQL验收）';
+            if (r.sql_validation_status === 'external_skipped') return '外部源免验';
             return '—';   // 其余/NULL
         }
 
@@ -6003,7 +6149,9 @@
             { key: 'requester_name', label: '业务方' },
             { key: 'description', label: '需求描述' },
             { key: 'status', label: '状态', deps: ['status'], value: r => STATUS_LABELS[r.status] || r.status },
-            { key: 'target_db_connection_id', label: '目标业务库', deps: ['target_db_connection_id'], value: r => r.target_db_connection_id ? (targetDbMap[r.target_db_connection_id] || ('#' + r.target_db_connection_id)) : '' },
+            // C4：targetDbMap 现存 DTO，取 .name（导出是纯文本 xlsx 单元格，不加外部源标签——列数/
+            // 列内容形态不变，符合 spec"导出列数不变"）。
+            { key: 'target_db_connection_id', label: '目标业务库', deps: ['target_db_connection_id'], value: r => r.target_db_connection_id ? ((targetDbMap[r.target_db_connection_id] && targetDbMap[r.target_db_connection_id].name) || ('#' + r.target_db_connection_id)) : '' },
             { key: 'contact_person_name', label: '对接人' },
             { key: 'developer_name', label: '开发' },
             { key: 'created_at', label: '创建时间' },
@@ -6406,8 +6554,12 @@
                     sel.innerHTML = '<option value="">尚无 source 连接，请管理员配置</option>';
                     return;
                 }
+                // C4（方案 §3.5.2）：external 行没有真实 host/database（占位值 '-'/0），不拼这两列，
+                // 改用「名称（外部源）」——与建单时"这条连接是外部登记源，无法真连"的语义对齐。
                 sel.innerHTML = '<option value="">请选择</option>' + data.map(c =>
-                    `<option value="${c.id}">${escapeHtml(c.name)} · ${escapeHtml(c.host)} / ${escapeHtml(c.database || '')}</option>`
+                    c.type === 'external'
+                        ? `<option value="${c.id}">${escapeHtml(c.name)}（外部源）</option>`
+                        : `<option value="${c.id}">${escapeHtml(c.name)} · ${escapeHtml(c.host)} / ${escapeHtml(c.database || '')}</option>`
                 ).join('');
             } catch (e) {
                 sel.innerHTML = '<option value="">加载失败</option>';
