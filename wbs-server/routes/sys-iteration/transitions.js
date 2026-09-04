@@ -230,7 +230,16 @@ const IMPROVEMENT_FLOW_TRANSITIONS = [
     //     直接 403，「受理人全类型主导」这个 C1 核心目标根本跑不通（v1.5 §2.2 源码核实时发现）。
     roleGuard: 'intake_liaison', ownerGuard: null,
     requiredPayload: ['assigned_to'],
-    sideEffects: ['assigned_to/_name/assigned_at 写入'],   // codex 14 L-1：DDL 无 assigned_by 字段（系统迭代 admin 集中主导，"谁指派"恒 admin 不单记）
+    // [codex 499 LOW-2 订正·2026-09-04] 原注释写"系统迭代 admin 集中主导，谁指派恒 admin 不单记"——那是
+    //   角色权限重构 C1 之前的旧口径，与本条现行 roleGuard='intake_liaison'（admin ∨ 该单绑定受理人）
+    //   相反。生产实证：sys_issue_timeline 全量 assign 137 条，137/137 的 operator_id 等于该单**查询时
+    //   当前**的 intake_liaison_id，零例操作人是 admin 账号（**不等于"事件发生当时他就是绑定人"**，
+    //   见下方限定）。DDL 不设 assigned_by 的理由改述为：操作人由 timeline 记录（event_type='assign' 的
+    //   operator_id），不在主表另开冗余列——不是因为"操作人恒 admin"。
+    //   ⚠️ 137/137 是历史运行分布，不是权限不变量（admin 代指派在授权上仍成立），勿据此再收窄闸门；
+    //     且该对拍用的是**查询时的当前 intake_liaison_id**（非事件时绑定快照），换过对接人的单会低估
+    //     "当时由别人操作"的情形——样本方向足够支撑待办归属，不足以支撑任何"只有受理人能指派"的断言。
+    sideEffects: ['assigned_to/_name/assigned_at 写入'],   // codex 14 L-1：DDL 无 assigned_by 字段（操作人经 timeline 留痕，不在主表冗余）
     timelineEvent: 'assign', actionCode: null,
     notifyAfterCommit: 'notifyAssignedDeveloper',  // C5 落地
   },
@@ -549,7 +558,16 @@ const FEATURE_FLOW_TRANSITIONS = [
     from: ['待指派'], to: '开发中',         // 受理排期改造：from 由「已排期」改「待指派」
     roleGuard: 'intake_liaison', ownerGuard: null,
     requiredPayload: ['assigned_to'],
-    sideEffects: ['assigned_to/_name/assigned_at 写入'],   // codex 14 L-1：DDL 无 assigned_by 字段（系统迭代 admin 集中主导，"谁指派"恒 admin 不单记）
+    // [codex 499 LOW-2 订正·2026-09-04] 原注释写"系统迭代 admin 集中主导，谁指派恒 admin 不单记"——那是
+    //   角色权限重构 C1 之前的旧口径，与本条现行 roleGuard='intake_liaison'（admin ∨ 该单绑定受理人）
+    //   相反。生产实证：sys_issue_timeline 全量 assign 137 条，137/137 的 operator_id 等于该单**查询时
+    //   当前**的 intake_liaison_id，零例操作人是 admin 账号（**不等于"事件发生当时他就是绑定人"**，
+    //   见下方限定）。DDL 不设 assigned_by 的理由改述为：操作人由 timeline 记录（event_type='assign' 的
+    //   operator_id），不在主表另开冗余列——不是因为"操作人恒 admin"。
+    //   ⚠️ 137/137 是历史运行分布，不是权限不变量（admin 代指派在授权上仍成立），勿据此再收窄闸门；
+    //     且该对拍用的是**查询时的当前 intake_liaison_id**（非事件时绑定快照），换过对接人的单会低估
+    //     "当时由别人操作"的情形——样本方向足够支撑待办归属，不足以支撑任何"只有受理人能指派"的断言。
+    sideEffects: ['assigned_to/_name/assigned_at 写入'],   // codex 14 L-1：DDL 无 assigned_by 字段（操作人经 timeline 留痕，不在主表冗余）
     timelineEvent: 'assign', actionCode: null,
     notifyAfterCommit: 'notifyAssignedDeveloper',  // C5 落地
   },

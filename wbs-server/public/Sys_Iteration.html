@@ -2866,6 +2866,65 @@
             || SI_STATUS_GROUPS.pending_archive.includes(item.status)
             || item.post_release_acceptance === 'pending';
     }
+    // ⭐ [2026-09-04 生产 #116 缺口修复] 绑定受理人的「指派」半区——谓词分支 ④b 与 siMyPendingBreakdown
+    //   「待指派」段**共用的唯一实现**（同 ①b 的 siIsCreatorAcceptArchivePending 先例：能抽 helper 就别
+    //   靠人力约束同步，codex 479 LOW-1 教训）。
+    //   【责任人依据】不是按 role 推的：`transitions.js` 三条 assign 条目（feature/improvement 的
+    //     待指派→开发中、bug 的 待处理→处理中）roleGuard 均为 'intake_liaison'，引擎 index.js:5334 判
+    //     `isAdmin || isBoundLiaison || isUnboundAcceptClaim` ⇒ **admin ∨ 该单绑定受理人**。
+    //   ⭐ 生产实证（2026-09-04 只读实查）：sys_issue_timeline 全量 event_type='assign' 共 137 条，
+    //     截至当日所查样本 **137/137 的 operator_id 都等于该单查询时的当前 intake_liaison_id**，
+    //     零例操作人是 admin 账号。**这条分布支持"给绑定受理人开放指派半区"，但不证明操作人在
+    //     事件发生当时就是该单的绑定人**（见下方限定②）。
+    //     ⚠️ [codex 499-R LOW-2 / 500-R2 MED] 两条限定，防这句话被后人读成不变量：① 这是**历史运行
+    //       分布**不是权限不变量，admin 代指派在授权上始终成立（引擎 isAdmin 分支），**不得据此收窄
+    //       闸门**；② 对拍用的是**查询时的当前 intake_liaison_id**，不是事件发生时的绑定快照——若某单
+    //       事后换过对接人，"当时由别人操作"的情形会被这条比对掩盖。样本量大且方向一致，作为"该给
+    //       受理人开半区"的依据足够，但不足以支撑任何"只有受理人能/会指派"的强断言。
+    //   【为什么之前漏】2026-08-27「归属收紧」把分支① 从 isAdmin() 收窄为 siIsPlatformAdmin()（白名单
+    //     仅 ['admin']）后，这两态就只剩一个账号看得见；而真正的责任人（生产受理人多为 role='user'
+    //     的开发）从来不在分支① 的覆盖面里。与 #89 同款根因：按 role 字段推身份，没回状态机读责任人
+    //     定义。生产实例 #116（improvement·待指派·intake_liaison_id=8 示例开发A·role=user）——他在列表
+    //     里翻得到这单（后端可见性 WHERE 有 `intake_liaison_id = ?` 析取），却不进「待我处理」、
+    //     点卡也筛不出，待办静默积压。
+    //   【逐张计入】assign 是单张粒度动作（POST /sys-issues/:id/action），天然逐张，不涉及 ⑧⑨⑩ 那种
+    //     批次去重问题。
+    //   【有意不含 reassign 的「开发中/待验证」】受理人在那两态虽有改派权（reassign 同为
+    //     roleGuard='intake_liaison'），但推进义务在开发本人手上，纳入即"看得到点不了"的死按钮噪音
+    //     （同 ①b 有意不含待指派、④ 有意不写空单认领半区的同族纪律）。
+    //   【不判 role】同 ①b⑧⑨⑩ 族：is_my_intake_liaison 是后端派生列（intake_liaison_id = uid·无状态门），
+    //     身份门已内含在判据里；受理人日后被降权也仍应看到自己名下待指派的单。
+    //   ⚠️⚠️ **登记接受的已知残留**（codex 499 HIGH·2026-09-04 亲核属实，非"不存在"）：后端 assign 的
+    //     `isBoundLiaison`（index.js:5331）在"绑定本人"之外**还叠了 `await isIntakeLiaisonEligible()`**
+    //     （status='active' ∧ role ∈ ['user','publisher']）。故存在一个理论失配面：某人仍是本单
+    //     intake_liaison_id、列表也因绑定关系对他可见，但其受理资格已被撤销（role 改成 viewer 之类）
+    //     ⇒ ④b 照样把单推进他的「待我处理」，他点「指派」会吃 403 NOT_BOUND_LIAISON——正是本注释上方
+    //     说要避免的死待办形态。
+    //     · **为何本次接受而不修**：① 生产实况 0 例（2026-09-04 只读实查：6 个绑定受理人全部
+    //       role='user' ∧ status='active'，全部 eligible）；② **status≠active 这条路径不可达**——
+    //       [codex 499-R 质疑后亲核] `authenticateToken`（server.js:4141-4146）**逐请求实时查库**
+    //       校验 `users.status`，非 active 直接 403，连列表都拉不到；不是只靠"登录端点 WHERE
+    //       status='active'"（那确实只能挡新会话、挡不住已签发的 token），旧 token 同样被挡；
+    //       ③ **既有分支③④（待对接测试/待受理）是完全同款形态**——它们也只判 is_my_intake_liaison，
+    //       本次不是引入新缺陷，而是继承了受理人族的既有口径，单独给 ④b 加 eligibility 镜像反而制造
+    //       同族不一致（同 [[feedback_family_inconsistency_check_constraint]]）。
+    //     · **仍然可达的唯一路径**（如实登记，非"不存在"）：active 用户被改成 role='viewer' 之类
+    //       非 eligible 角色、且其名下未完成单没有迁移。用户编辑端点（server.js:4503 一带
+    //       `UPDATE users SET display_name=?, role=?, status=?`）**对此没有任何校验或提示**（已亲核），
+    //       所以这条约束目前只活在运维习惯里，不在代码里。
+    //     · **正解方向**（若将来要修，应三分支一起做）：后端在列表 SELECT 投影一个与真实授权同源的
+    //       派生列（如 can_assign / my_assign_pending，把 eligibility 一并算进去），前端谓词直接消费——
+    //       而不是让前端各自镜像一份 role 判断。这属于改后端投影面，超出本次"只改显示面"（D3）的范围。
+    //     · **运维侧的等价约束**：撤销某人的受理资格时，应同时迁移其名下未完成单的 intake_liaison_id。
+    //     · ⏳ **待办登记**（codex 499-R 的合入门槛之二·2026-09-04 记入·等用户点名）：「受理人
+    //       eligibility 与绑定关系失配」统一治理——后端投影 can_assign 类派生列供 ③④④b 三分支统一
+    //       消费，或在用户编辑端点加"改 role 前先迁单"的阻断/提示。**当前 backlog 里尚无编号**，
+    //       本次以本注释 + 交付说明登记，用户拍板后进 sys_iteration_backlog。
+    function siIsMyIntakeAssignPending(item) {
+        return !!(item
+            && SI_ASSIGN_PENDING_STATUSES.includes(item.status)
+            && Number(item.is_my_intake_liaison) === 1);
+    }
     function siIsMyPending(item) {
         // [codex 467 MED-2] uid 有效域与列表路由同口径归一（routes/sys-iteration/index.js GET /sys-issues
         //   处 466 MED-1 同款）：仅正安全整数保留，否则 null——非安全整数大数经 Number 取整后可能撞
@@ -2892,7 +2951,10 @@
             //   他们仍能从详情页操作别人的单——那是同一口径的另一半，用户拍板留作独立课题。
             (siIsPlatformAdmin() && (
                 SI_STATUS_GROUPS.pending_archive.includes(item.status)
-                || ['待指派', '待处理', '待验证'].includes(item.status)
+                // [2026-09-04 #116 修复] 「待指派/待处理」改引 SI_ASSIGN_PENDING_STATUSES 常量——本分支
+                //   与新增的 ④b（绑定受理人半区）覆盖同一组状态，两处各写一份字面量必漂移（同
+                //   SI_DEV_FAMILY_STATUSES 的单一事实源纪律）。'待验证' 不属 assign 前置态，留在本行。
+                || [...SI_ASSIGN_PENDING_STATUSES, '待验证'].includes(item.status)
                 || item.post_release_acceptance === 'pending'
             ))
             // ①b 建单人的验收/归档半区 —— ⭐ [2026-08-27 生产 #89 缺口修复]
@@ -2939,6 +3001,11 @@
             //   影响，故不补这半区）。若未来出现空单，需在列表投影新增 is_intake_unbound 列（同
             //   my_dev_pending/is_my_intake_liaison 先例）才能补全，不能靠前端猜测判断。
             || (item.status === '待受理' && Number(item.is_my_intake_liaison) === 1)
+            // ④b 绑定受理人的「指派」半区 —— ⭐ [2026-09-04 生产 #116 缺口修复] 待指派（变更流）/
+            //   待处理（bug 流）两态的 assign 责任人 = admin ∨ **该单绑定受理人**（roleGuard
+            //   'intake_liaison' + 生产 137/137 实证），此前只有分支① 的平台管理员一个账号看得到。
+            //   判据与 breakdown「待指派」段共用 siIsMyIntakeAssignPending（见其头部注释全文依据）。
+            || siIsMyIntakeAssignPending(item)
             // ⑤ 建单人——uid 取法对齐本页既有惯例（如 :4703 一带 isCreatorUser 的 uid>0 防御写法）
             || (item.status === '待修改' && uid > 0 && Number(item.created_by) === uid)
             // ⑥ 值班执行人——原样调用，函数本体一字不动（siIsMyFastlanePending 保留独立可测，见其
@@ -2977,7 +3044,12 @@
         const acceptArchiveAdmin = (i) => SI_STATUS_GROUPS.pending_archive.includes(i.status) || i.status === '待验证' || i.post_release_acceptance === 'pending';
         const segs = [
             ['验收归档', vis.filter(i => (admin && acceptArchiveAdmin(i)) || acceptArchiveMine(i)).length],
-            ['待指派', admin ? vis.filter(i => i.status === '待指派' || i.status === '待处理').length : 0],
+            // ⭐ [2026-09-04 #116 缺口修复] 与谓词 ①+④b 同源：平台管理员看全部待指派/待处理，绑定受理人
+            //   看自己名下的。**两处必须同步**（同上方"验收归档"段 ①+①b 的同款纪律：只改谓词不改这里，
+            //   会出现主计数有数而 tooltip 显示"暂无"的自相矛盾）。受理人半区走**与谓词同一个**
+            //   siIsMyIntakeAssignPending，不在本函数内复写状态集合；并集去重按单计数，避免 admin 兼
+            //   受理人时同一张单在本段被计两次。
+            ['待指派', vis.filter(i => (admin && SI_ASSIGN_PENDING_STATUSES.includes(i.status)) || siIsMyIntakeAssignPending(i)).length],
             ['待我提交', vis.filter(i => SI_DEV_FAMILY_STATUSES.includes(i.status) && Number(i.my_dev_pending) === 1).length],
             ['对接测试', vis.filter(i => i.status === '待对接测试' && Number(i.is_my_intake_liaison) === 1).length],
             ['待受理', vis.filter(i => i.status === '待受理' && Number(i.is_my_intake_liaison) === 1).length],
@@ -4426,6 +4498,13 @@
     // 二次核实出处 routes/sys-iteration/status-families.js:55-59 `SYS_DEV_STATUSES = { feature:['开发中'],
     // improvement:['开发中'], bug:['处理中'] }`，并集恰为 ['开发中','处理中']，与此处字面量一致。
     const SI_DEV_FAMILY_STATUSES = ['开发中', '处理中'];
+    // ⭐ [2026-09-04 #116 缺口修复] assign 动作的前置态并集（变更流「待指派」+ bug 流「待处理」）——
+    //   siIsMyPending 分支①（平台管理员）与 siIsMyIntakeAssignPending（④b 绑定受理人）**共用**，
+    //   禁两处各写一份字面量（同上方 SI_DEV_FAMILY_STATUSES 的单一事实源纪律）。
+    //   出处 routes/sys-iteration/transitions.js 三条 assign 条目的 from：feature=['待指派']、
+    //   improvement=['待指派']、bug=['待处理']（node 枚举 TRANSITIONS 实取，非凭印象），并集恰为本值。
+    //   ⚠️ 不含 reassign 的 from（开发中/待验证）——那是"改派已在办的单"，非"等着被指派"，语义不同族。
+    const SI_ASSIGN_PENDING_STATUSES = ['待指派', '待处理'];
     const SI_FROZEN_STATUSES = ['已上线', '已关闭', '已拒绝', '已作废', '待上线'];
 
     // §11 四布尔（后端同源，仅前端 UI 镜像，真闸在后端各端点内部断言）：

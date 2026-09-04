@@ -164,7 +164,7 @@ async function main() {
         }
         const results = await Promise.all(promises);
         assert(results.every(r => r === 'SMOKE_MUTEX_WAIT_TIMEOUT'),
-            `所有 waiter 应超时: ${JSON.stringify(results)}`);
+            `所有 waiter 示例开发N时: ${JSON.stringify(results)}`);
 
         // 关键：3 个全超时后 A 仍持锁
         assert(mu._stats().locked === true, 'A should still hold lock');

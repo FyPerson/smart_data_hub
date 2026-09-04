@@ -5,7 +5,10 @@
 # Flow:
 #   0.  前置检查
 #   1.  robocopy 源项目 → 镜像（同字节文件自动跳过）
-#   2.  清除镜像中的非公开内容（mcp-*, docs/local, etc）
+#   2.  清除镜像中的非公开内容（具名黑名单块——第二道防线，含诊断信息）
+#       + fail-closed 兜底扫（2026-08-28 #20 整改·唯一权威判定，跑在本步骤末尾）：
+#       镜像内任一文件，唯一放行依据 = 「主仓 git 已跟踪该相对路径」∨「命中 $mirrorOnlyWhitelist」，
+#       不满足即删除。天然覆盖二进制/整目录，不依赖任何一方的 .gitignore。
 #   2.5 脱敏完整性预检（读 users 表，任一真名/手机号未配脱敏规则即 fail-fast）★兜底报警
 #   3.  跑批量敏感词替换（真名/手机号从 $nameMap/$phoneMap 单一来源生成）
 #   4.  残留敏感词扫描（fail-fast；扫描模式从同一来源自动派生，与替换表零漂移）
@@ -23,9 +26,28 @@
 #   · 预检默认 fail-fast：读不到 users 表即中止；确需跳过传 -SkipNameAudit。
 #   · 预检优先读最新「生产数据库备份」（比本地库更接近生产真相），缺则回落本地。
 #   · -DryRun 跑全部脱敏 + 预检 + 扫描但不 commit/push，用于安全验证。
+#
+# ★ Fail-closed 兜底（2026-08-28，步骤 2 末尾）：$mirrorOnlyWhitelist 是唯一的镜像专属例外名单，
+#   见函数 Invoke-FailClosedSweep 上方注释。测试入口：-FailClosedSweepOnly（配 -SourcePath/
+#   -MirrorPath 指向临时目录、不需要 -CommitMessage，JSON 输出到 stdout）——
+#   由 wbs-server/scripts/verify-sync-fail-closed.js 独立调用，真实 /deploy 流程不会传这两个开关。
+#   · 判据显式绑定 main 分支树（`git ls-tree -r --name-only main`），不绑定当前 checkout 分支
+#     ——本仓当前工作分支常年是 feature/legacy-archive 类长期分支，若判据跟当前分支走，会把
+#     main 已跟踪、但当前分支未合并/已改名的真源文件误判"未跟踪"进而误删（已实测复现 12 个
+#     真源文件误删）。core.quotepath=false 同样对 ls-tree 生效，保持 CJK 文件名不转义。
+#   · 待删数 > 20（首跑预计 90+）默认 fail-fast、一个都不删，打印完整清单，需 -SweepForce 放行。
+#   · 单个文件删除失败（异常或 Test-Path 复核发现残留）不再静默吞掉，整体 exit 1。
+#   · 枚举跳过 ReparsePoint 目录（junction/符号链接）不跟进，防止经由链接逃出镜像根目录误删
+#     外部真实文件。
+#   · 2026-08-29 三收口批（S-20 尾巴微批，codex 76 号 M1/L1 处置）：main 至少含一个跟踪文件是
+#     Get-SourceTrackedFileSet 的显式前置条件（本机实测 470 个，见函数内注释）；NUL 分隔路径
+#     解析逻辑抽成独立函数 ConvertFrom-NulSeparatedGitOutput，新增 -FailClosedParseNulTestFile
+#     测试出口供验证脚本脱离 git/真实文件系统限制注入换行/引号/反斜杠等特殊字符做真实解析回归。
 
 param(
-    [Parameter(Mandatory=$true)]
+    # 2026-08-28 #20 整改：不再用 [Parameter(Mandatory=$true)] 属性——该属性在缺参数时会
+    # 触发 PowerShell 交互式提示（阻塞无人值守/脚本化调用，含本文件自身的 -FailClosedSweepOnly
+    # 测试入口）。改为下方"手动校验"区显式 fail-fast，语义等价且不会阻塞。
     [string]$CommitMessage,
 
     [string]$SourcePath = "e:\数据开发与治理规范手册",
@@ -41,7 +63,35 @@ param(
     [switch]$DryRun,
 
     # 显式跳过脱敏完整性预检（默认 fail-fast）。仅在确认 users 库不可读且人工已核对时用。
-    [switch]$SkipNameAudit
+    [switch]$SkipNameAudit,
+
+    # ── 以下两个开关仅供 wbs-server/scripts/verify-sync-fail-closed.js 独立调用测试，
+    #    真实同步流程（/deploy）永远不会传它们 ──
+    # 只跑 fail-closed 清除逻辑（Invoke-FailClosedSweep）并把结果以 JSON 打到 stdout 后立即
+    # exit，不进入 git add/commit/push 主流程，也不要求 -CommitMessage。
+    [switch]$FailClosedSweepOnly,
+    # 配合 -FailClosedSweepOnly：让 Invoke-FailClosedSweep 的放行判定恒为真（相当于把
+    # fail-closed 判定"注释掉"，退化回"什么都不清"的旧行为）。仅用于验证脚本的双向自证——
+    # 证明"主测试里的删除断言，若真的没有 fail-closed 判定就会判红"。
+    [switch]$FailClosedDisableForTest,
+    # 配合 -FailClosedSweepOnly：让 Invoke-FailClosedSweep 对指定相对路径"假装跳过真实删除"，
+    # 用于验证脚本测试"删后 Test-Path 复核发现残留即判失败"这条 fail-closed 路径——真实文件
+    # 锁定在 Windows 下难以稳定复现（Remove-Item -Force 通常能穿透只读属性；持句柄测试对
+    # 进程时序敏感、不稳定），故用测试桩覆盖该分支，语义等价。真实同步流程绝不传它。
+    [string]$FailClosedSimulateResidualFor,
+
+    # L1（codex 76 新增）：仅供 wbs-server/scripts/verify-sync-fail-closed.js 独立调用测试
+    # ConvertFrom-NulSeparatedGitOutput 本身，脱离 git 调用与真实文件系统限制。传入一个文件路径，
+    # 文件内容是模拟的 ls-tree -z 原始字节（NUL 分隔的路径记录，某些记录可能含真实换行/引号/
+    # 反斜杠字符——这些字符真实文件系统上无法构造，见函数注释）。脚本读取该文件、还原成待测
+    # 函数的输入形态，把解析结果 JSON 打到 stdout 后立即退出，不进入任何其余流程。真实同步流程
+    # 绝不传它。
+    [string]$FailClosedParseNulTestFile,
+
+    # 2026-08-29 收口批新增：sweep 待删数超安全阀阈值（20）时默认 fail-fast、一个都不删，
+    # 见 Invoke-FailClosedSweep 内"安全阀"注释。带此开关才放行执行删除——真实首跑（预计
+    # 删 90+，历史六例漏网黑名单模式的累积残留）将由用户在场核对完整清单后显式传入。
+    [switch]$SweepForce
 )
 
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8   # 捕获 node 等原生命令 stdout 的解码编码
@@ -90,6 +140,9 @@ $nameMap = [ordered]@{
     '示例开发M' = '示例开发M'        # id=24 user，新增 2026-08-08（预检拦获后补）
     '示例用户C' = '示例用户C'        # id=25 user，新增（2026-08-26 v1.159.0 同步时预检 fail-fast 拦获后补）
     '示例管理员B' = '示例管理员B'      # id=26 admin，新增（2026-08-28 v1.164.0 同步时预检 fail-fast 拦获后补）
+    '示例开发N'   = '示例开发N'        # id=27 user，新增（2026-09-04 v1.166.1 同步时预检 fail-fast 拦获后补）
+    '示例开发O' = '示例开发O'        # id=28 user，新增（2026-09-04 v1.166.1 同步时预检 fail-fast 拦获后补）
+    '示例管理员C' = '示例管理员C'      # id=29 admin，新增（2026-09-04 v1.166.1 同步时预检 fail-fast 拦获后补）
 }
 
 # 集团关联方 / 实体名（非 users 表，无完整性预检，手工维护）
@@ -129,6 +182,10 @@ $phoneMap = [ordered]@{
     '19900000021' = '19900000021'   # id=24 示例开发M phone（2026-08-19 v1.156.4 同步时预检 fail-fast 拦获后补·与上行 username 是两个不同号码）
     '19900000022' = '19900000022'   # id=25 示例用户C username 与 phone **同号**（已查库确认两列相等，故只需一条；2026-08-26 v1.159.0 同步时预检 fail-fast 拦获后补）
     '19900000023' = '19900000023'   # id=26 示例管理员B phone（其登录名非手机号、且已有专属残留扫描 pattern 兜底，无需另配·已查库确认；2026-08-28 v1.164.0 同步时预检 fail-fast 拦获后补·⚠️ 勿在任何注释写该登录名字面量——步骤 4 残留扫描会拦）
+    '19900000024' = '19900000024'   # id=13 示例对接人 phone 列（本地库测试号·生产库 users 无此号〔备份 task_pool.db.backup_20260902_131321 只读查证〕；2026-09-02 v1.165.0 同步预检 fail-fast 拦获后补——预检审计的是 -SourcePath 所在库，本次源=发布 worktree 的本地库副本）
+    '19900000025' = '19900000025'   # id=27 示例开发N username 与 phone **同号**（已查库确认两列相等，故只需一条；2026-09-04 v1.166.1 同步预检 fail-fast 拦获后补）
+    '19900000026' = '19900000026'   # id=28 示例开发O username 与 phone **同号**（已查库确认两列相等，故只需一条；同上批）
+    '19900000027' = '19900000027'   # id=29 示例管理员C phone（其登录名非手机号，形态同 id=26 那条，无需另配·已查库确认；同上批·⚠️ 勿在任何注释写该登录名字面量——步骤 4 残留扫描会拦）
 }
 
 # 受脱敏覆盖的文本文件后缀「单一来源」（替换步骤3 与扫描步骤4 共用，防后缀表漂移 — codex H-2）。
@@ -160,6 +217,378 @@ if ($selfCheckErrors.Count -gt 0) {
     Write-Phase "[自检] 脱敏表健壮性检查"
     foreach ($e in $selfCheckErrors) { Write-Host "  [SELF-CHECK] $e" -ForegroundColor Red }
     Write-Host "  [ERROR] 脱敏表自检未通过，请修正 `$nameMap/`$entityMap/`$phoneMap 后重跑" -ForegroundColor Red
+    exit 1
+}
+
+# ════════════════════════════════════════════════════════════════════════════
+#  Fail-closed 镜像内容过滤（2026-08-28 未了项 #20 整改）
+#  ── 根因：步骤 2 曾是"黑名单逐文件/逐目录补条目"，6 例同根因漏网（_seed/_set-sys-notify
+#     两脚本、_demo-notify-unify-manifest.json、__screenshots__/ 21 张 PNG 整目录、
+#     test-screenshots/ 6 张 PNG 已推送后紧急摘除、three-r185+demo 文件）——黑名单必然再漏。
+#  ── 新判定：镜像内任一文件，唯一放行依据 = 「主仓 git 已跟踪该相对路径」∨「命中下方白名单」。
+#     不满足即删除。天然覆盖二进制（PNG/pyc 等）与整目录（判据是路径存在性，不做内容嗅探），
+#     且不依赖 .gitignore（镜像仓有独立忽略规则，主仓 .gitignore 对镜像无效——本判据也不认它，
+#     只认主仓 git 跟踪状态，避免同一类"gitignore 认知偏差"重演）。
+#  ── 原有的具名黑名单块（templates/gen_notice.py/package.json/docs 若干目录/mcp-bms/
+#     临时脚本前缀/unify-baseline/生产备份/docs 本地三目录）予以保留，作为"第二道防线"——
+#     它们跑在前面，给已知风险类别一个更具体的提示信息；但最终是否留在镜像里，只看本区块
+#     末尾跑的 fail-closed 扫描结果，不看黑名单是否"记得"删过。
+# ════════════════════════════════════════════════════════════════════════════
+
+# 镜像专属文件——源仓库没有、但镜像必须保留的极少数例外。新增前必须能说清
+# "为什么这个文件应该公开、但又不该被主仓 git 跟踪"，并在注释里留证据来源。
+$mirrorOnlyWhitelist = @(
+    # 镜像仓自身的开源门面文件（LICENSE/.env.example 主仓从未有过；README.md/.gitignore
+    # 主仓虽也跟踪同名路径但内容是镜像专属版本——那两个靠"路径在主仓已跟踪"天然放行，
+    # 不需要进这张白名单，见步骤 1 注释 "镜像专属文件"）
+    "LICENSE",
+    ".env.example",
+    # 2026-08-19 用户裁定保留（PROJECT_STATUS.md 未了项 #20 记录："Export_DateFilter_Demo.html
+    # 用户裁保留=低风险残余仍未跟踪会随镜像"）——主仓已删除该 demo 文件，但公开镜像侧显式决定
+    # 留着（低风险、非同类的 three-r185/Sys_Iteration_*_Demo.html 已随主仓删除自然清除）。
+    "wbs-server/public/Export_DateFilter_Demo.html"
+)
+
+# 读取【main 分支】已跟踪文件清单（相对路径、正斜杠，UTF-8 正确解码——core.quotepath=false 防中文
+# 文件名被 git 转成八进制转义串，[Console]::OutputEncoding 已在文件顶部设为 UTF8）。
+#
+# ⚠️ 2026-08-29 收口批修复：显式读 main 分支树（`git ls-tree -r --name-only main`），不再用
+#    `git ls-files`（后者读的是【当前 checkout 分支】的索引/工作树）。真实事故根因：本仓当前
+#    工作分支常年是 feature/legacy-archive 之类的长期分支，若判据绑定当前 checkout 分支，会把
+#    main 已跟踪、但当前分支尚未合并/已改名的真源文件误判为"未跟踪"从而从公开镜像误删——
+#    已实测复现 12 个 main 已跟踪真源文件被误删。改用 ls-tree 读 main 分支树后，无论当前
+#    checkout 哪个分支，判据恒定绑定 main，与"公开镜像应体现 main 的公开内容"这一意图对齐。
+#    -c core.quotepath=false 对 ls-tree 同样生效（保持既有 CJK 文件名不转义行为）。
+# L1（codex 76 新增）：把「ls-tree -z 输出 → NUL 分隔路径列表」的解析逻辑抽成独立函数，使其可以
+# 脱离 git 调用与真实文件系统限制被单测——NTFS 禁止文件名含换行/引号等字符（0x00-0x1F 及
+# `< > : " / \ | ? *`），而这些恰好是没有 `-z` 时 git 会做 C 风格转义/引号包裹的触发字符集合，
+# 本机因此无法用真实文件端到端构造回归 fixture（见下方 Get-SourceTrackedFileSet 注释）。抽出
+# 后，验证脚本可以直接构造模拟的 ls-tree -z 原始字节（含换行/引号/反斜杠的路径）喂给这个函数，
+# 不经过 git、不落真实文件，断言路径被完整还原——真正覆盖"解析器行为"而非仅"源码字面量"。
+# 行为与原内联代码零差异（纯抽取，未改动任何一行判断逻辑）。
+#   -RawOut：镜像 `& git ... -z` 的原生命令捕获结果——可能是单个 System.String（多数情况），
+#     也可能因为字节流中含真实换行符被 PowerShell 拆成字符串数组（每个数组元素对应一"行"）；
+#     两种输入形态都要能正确处理，故先 `-join "`n"` 复原成单一字符串，再按 NUL 切分。
+function ConvertFrom-NulSeparatedGitOutput {
+    param($RawOut)
+    $tracked = @()
+    if ($RawOut) {
+        $joined = ($RawOut -join "`n")
+        $tracked = $joined -split "`0" | Where-Object { $_ -ne '' }
+    }
+    return ,$tracked
+}
+
+function Get-SourceTrackedFileSet {
+    param([Parameter(Mandatory=$true)][string]$SrcPath)
+
+    # 2026-08-29 二收口批（codex 74 H2）：判据的输入清单本身必须先证明"可信"，安全阀（待删数阈值）
+    # 只是附加保护，不能替代这道校验——main 分支不存在/ls-tree 失败若不拦，得到的可能是空清单，
+    # 待删数恰好 ≤20 时安全阀不会触发，真源文件被当"未跟踪"直接误删（codex 74 H2 原话）。
+    #
+    # H2①：先用 rev-parse --verify 显式确认 main 分支树存在。⚠️ `^{tree}` 里的花括号在 PowerShell
+    # 里必须加引号——不加引号时 `{tree}` 会被 PowerShell 分词器当脚本块起始符处理，参数传给 git 的
+    # 内容就不是字面的 `refs/heads/main^{tree}`（本机实测复现：不加引号时，即使 main 真实存在，
+    # rev-parse 依然报 "fatal: Needed a single revision"）。
+    $verifyErrTmp = [System.IO.Path]::GetTempFileName()
+    try {
+        & git -C $SrcPath rev-parse --verify "refs/heads/main^{tree}" 2> $verifyErrTmp | Out-Null
+        $verifyExit = $LASTEXITCODE
+        $verifyErrText = (Get-Content -LiteralPath $verifyErrTmp -Raw -ErrorAction SilentlyContinue)
+    } finally {
+        Remove-Item -LiteralPath $verifyErrTmp -Force -ErrorAction SilentlyContinue
+    }
+    if ($verifyExit -ne 0) {
+        Write-Host "  [ERROR] main 分支引用不存在或不可验证（$SrcPath），fail-closed 拒绝以不可信清单继续：" -ForegroundColor Red
+        if ($verifyErrText) { Write-Host "    $verifyErrText" -ForegroundColor Red }
+        exit 1
+    }
+
+    # H2②：ls-tree 本体。刻意不用 `2>&1`——PS 5.1 下原生命令的 stderr 经 `2>&1` 合并进管道会被
+    # 逐行包成 NativeCommandError（污染输出、且即便 exe 退出码 0 也会让 `$?`=false，难以和真实失败
+    # 区分）。改用 PowerShell 自带的 `2> file` 重定向，把 stderr 单独落一个临时文件，仅用
+    # `$LASTEXITCODE` 判定成败，stderr 文件内容只作诊断展示（本机实测已验证此写法能正确捕获
+    # git 失败时的错误文本，且不影响 stdout 正常解析）。
+    # L1（codex 74 L1）：`-z` 让路径以 NUL 分隔输出，而非按行分隔——避免路径中出现换行/引号/反斜杠
+    # 等字符时被 C 风格转义或按行误拆导致已跟踪文件被误判为未跟踪。`-z` 模式下 git 本就不做
+    # quote 转义（不依赖 core.quotepath），CJK 文件名同样原样输出（本机实测已验证）。
+    $lsTreeErrTmp = [System.IO.Path]::GetTempFileName()
+    try {
+        $rawOut = & git -C $SrcPath -c core.quotepath=false ls-tree -r -z --name-only main 2> $lsTreeErrTmp
+        $lsTreeExit = $LASTEXITCODE
+        $lsTreeErrText = (Get-Content -LiteralPath $lsTreeErrTmp -Raw -ErrorAction SilentlyContinue)
+    } finally {
+        Remove-Item -LiteralPath $lsTreeErrTmp -Force -ErrorAction SilentlyContinue
+    }
+    if ($lsTreeExit -ne 0) {
+        Write-Host "  [ERROR] git ls-tree 读取 main 分支树失败（$SrcPath，exit=$lsTreeExit），fail-closed 拒绝以不可信清单继续：" -ForegroundColor Red
+        if ($lsTreeErrText) { Write-Host "    $lsTreeErrText" -ForegroundColor Red }
+        exit 1
+    }
+
+    # `& git ... 2> file` 捕获的 stdout 在只有一行/一个 NUL 分隔大字符串时是单个 System.String
+    # （本机实测已验证：多文件场景下 `-z` 输出仍是单个字符串，不像无 `-z` 时会被 PowerShell 按
+    # 换行自动拆成字符串数组）；解析逻辑已抽成 ConvertFrom-NulSeparatedGitOutput（L1，见上方
+    # 函数注释），行为不变——本处只是调用，不再内联重复实现。
+    $tracked = ConvertFrom-NulSeparatedGitOutput -RawOut $rawOut
+
+    # H2③：main 分支存在、ls-tree 也成功退出，但清单 0 条——主仓不可能 0 个跟踪文件，这本身就是
+    # "读取环节出了问题但没体现在退出码上"的信号（例如误传空仓库路径），同样 fail-closed 中止。
+    # M1（codex 76 裁定）：本仓 main 恒非空（本机实测 2026-08-28：`git ls-tree -r --name-only main`
+    # 共 470 个跟踪文件），「main 至少含一个文件」是本函数的同步前置条件——空清单不是"合法的极小
+    # 仓库"，而视为读取环节异常（误传路径/仓库损坏等），这是有意策略而非误判边界，不改行为。
+    if (@($tracked).Count -eq 0) {
+        Write-Host "  [ERROR] main 分支跟踪文件清单为空（$SrcPath）——主仓不可能 0 个跟踪文件，视为读取异常，fail-closed 中止" -ForegroundColor Red
+        exit 1
+    }
+
+    # 2026-08-29 收口批修复：大小写不敏感比对（Windows 文件系统本身大小写不敏感）——避免
+    # "仅大小写改名"的历史文件被误判为未跟踪而误删；代价=纯大小写变体的镜像文件会被误放行，
+    # 这类文件本就极罕见且低危，两害相权取宽松一侧。
+    $set = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($p in $tracked) {
+        if ($p) { [void]$set.Add($p) }
+    }
+    # 2026-08-29 收口批修复：`return $set` 在 PowerShell 管线语义下会把 HashSet 当集合展开——
+    # 0 个元素时输出 $null（调用方 .Contains() 对 $null 调用方法会报错）；恰好 1 个元素时输出
+    # 会被降级为裸字符串，调用方 `$trackedSet.Contains($rel)` 就变成 String.Contains()
+    # （子串匹配，而非精确匹配）——会把"路径只是恰好包含该唯一跟踪文件名作为子串"的镜像文件
+    # 误判为已跟踪从而误放行。用逗号运算符包一层数组，让管线只展开外层数组（长度1），
+    # 内层 HashSet 对象原样透传给调用方。
+    return ,$set
+}
+
+# 手写栈式递归遍历 $RootPath，跳过 .git 与任何 ReparsePoint 目录（junction/符号链接）——不进
+# 入其内部，天然阻断"通过 junction 逃出镜像根目录、误删外部真实文件/目录"的风险
+# （PowerShell 5.1 的 `Get-ChildItem -Recurse` 默认会跟进 reparse point 目录深入枚举其内部内容，
+#  这是已知隐患；单纯对结果做 Where-Object 过滤只能挡住 junction 条目本身，挡不住已经递归进
+#  它内部、返回的文件/子目录——必须手写栈式遍历，在下钻前就判断并跳过，才是真正的"不跟进"。
+#  2026-08-29 收口批修复）。返回值同时给 Invoke-FailClosedSweep（要 Files）与
+#  Remove-EmptyMirrorDirectories（要 Dirs）复用，避免重复扫盘。
+function Get-MirrorTreeSkippingReparsePoints {
+    param([Parameter(Mandatory=$true)][string]$RootPath)
+    $files = New-Object 'System.Collections.Generic.List[System.IO.FileInfo]'
+    $dirs  = New-Object 'System.Collections.Generic.List[System.IO.DirectoryInfo]'
+    $errors = New-Object 'System.Collections.Generic.List[string]'
+
+    $rootItem = Get-Item -LiteralPath $RootPath -Force
+    # H3①（codex 74）：镜像根路径自身若是 reparse point（junction/符号链接），直接拒绝扫描——
+    # 路径配置错误（如 -MirrorPath 传错指向一个链接）时，继续扫描可能会枚举/删除链接目标（镜像根
+    # 之外）的真实内容。不返回任何 Files/Dirs（Errors 非空即代表"这次结果不可信"，调用方不应把
+    # 空结果当作"确实没有文件"）。
+    if ($rootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+        $errors.Add("镜像根路径本身是 reparse point（junction/符号链接），拒绝扫描：$RootPath")
+        return [PSCustomObject]@{ Files = $files; Dirs = $dirs; Errors = $errors }
+    }
+
+    $stack = New-Object 'System.Collections.Generic.Stack[System.IO.DirectoryInfo]'
+    $stack.Push($rootItem)
+    while ($stack.Count -gt 0) {
+        $dir = $stack.Pop()
+        # H1（codex 74）：枚举错误不再用 -ErrorAction SilentlyContinue 单纯吞掉——那样访问被拒绝/
+        # 路径异常时整个子树会被静默漏过、照常判定"扫描成功"继续同步，形成 fail-open 绕过。改用
+        # -ErrorVariable 收集本次 Get-ChildItem 产生的非终止错误（仍不中断整体遍历，好让报告能一次
+        # 列全所有出问题的目录，而不是遇到第一个就停）；错误清单非空由调用方统一判定 fail-closed。
+        $enumErr = $null
+        $children = Get-ChildItem -LiteralPath $dir.FullName -Force -ErrorAction SilentlyContinue -ErrorVariable enumErr
+        if ($enumErr) {
+            foreach ($e in $enumErr) {
+                $errors.Add("目录枚举失败：$($dir.FullName) —— $($e.Exception.Message)")
+            }
+        }
+        foreach ($c in $children) {
+            if ($c.FullName -match '\\\.git(\\|$)') { continue }
+            if ($c.PSIsContainer) {
+                if ($c.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+                    # H3②（codex 74）：子目录 reparse point 不再静默跳过——不跟进枚举（仍然防止经由
+                    # 链接逃出镜像根目录），但记入异常清单；清单非空会让调用方整体判定失败、阻止同步
+                    # （保守取向：不自动删除链接本身，只是不允许它悄悄留在一次"判定为成功"的同步里）。
+                    $errors.Add("子目录是 reparse point（junction/符号链接），未跟进枚举，已记入异常并阻止同步：$($c.FullName)")
+                    continue
+                }
+                $dirs.Add($c)
+                $stack.Push($c)
+            } else {
+                $files.Add($c)
+            }
+        }
+    }
+    return [PSCustomObject]@{ Files = $files; Dirs = $dirs; Errors = $errors }
+}
+
+# 自底向上删除镜像内的空目录（清理 fail-closed 删完文件后留下的空壳，纯 hygiene，
+# 不影响下次 robocopy——/E 会按需重建）。跳过 .git 与 ReparsePoint 目录（同上）。
+function Remove-EmptyMirrorDirectories {
+    param([Parameter(Mandatory=$true)][string]$MirPath)
+    $root = (Resolve-Path $MirPath).Path.TrimEnd('\')
+    $tree = Get-MirrorTreeSkippingReparsePoints -RootPath $root
+    if ($tree.Errors.Count -gt 0) {
+        # H1/H3：这一遍扫描（用于清理空目录壳）本身也可能撞见枚举失败/reparse point 异常——
+        # 纯 hygiene 步骤不能建立在不可信的枚举结果之上，原样把异常透传给调用方
+        # （Invoke-FailClosedSweep）统一判定 fail-closed，不在这里单独吞掉或半途剪目录。
+        return [PSCustomObject]@{ Removed = @(); Errors = $tree.Errors }
+    }
+    $dirs = $tree.Dirs | Sort-Object { $_.FullName.Length } -Descending
+    $removed = @()
+    foreach ($d in $dirs) {
+        if ((Get-ChildItem -Path $d.FullName -Force | Measure-Object).Count -eq 0) {
+            Remove-Item -LiteralPath $d.FullName -Force
+            $removed += $d.FullName.Substring($root.Length + 1) -replace '\\', '/'
+        }
+    }
+    return [PSCustomObject]@{ Removed = $removed; Errors = @() }
+}
+
+# 核心扫描：镜像内每个文件，只要「主仓 main 分支已跟踪该相对路径」∨「命中白名单」就保留，否则删除。
+# -DisableJudgment：仅供测试用，放行判定恒为真（模拟"没有 fail-closed 判定"的旧行为），
+#   用于验证脚本的双向自证，真实同步流程绝不传它。
+# -SweepForce：待删数超 $BlastRadiusThreshold 时的放行开关，见下方"安全阀"注释。
+# -SimulateResidualFor：仅供验证脚本测试用，见下方"fail-closed 删除"注释。
+function Invoke-FailClosedSweep {
+    param(
+        [Parameter(Mandatory=$true)][string]$SrcPath,
+        [Parameter(Mandatory=$true)][string]$MirPath,
+        [string[]]$Whitelist = @(),
+        [switch]$DisableJudgment,
+        [switch]$SweepForce,
+        [int]$BlastRadiusThreshold = 20,
+        [string]$SimulateResidualFor
+    )
+    $trackedSet = Get-SourceTrackedFileSet -SrcPath $SrcPath
+    # 2026-08-29 收口批修复：白名单集合同样改大小写不敏感（理由同 Get-SourceTrackedFileSet 注释）。
+    $whitelistSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($w in $Whitelist) { [void]$whitelistSet.Add($w) }
+
+    $mirrorRoot = (Resolve-Path $MirPath).Path.TrimEnd('\')
+    # 2026-08-29 收口批修复：改用手写栈式遍历，跳过 ReparsePoint 目录（junction/符号链接）
+    # 不跟进——见 Get-MirrorTreeSkippingReparsePoints 注释。
+    $mirrorTree = Get-MirrorTreeSkippingReparsePoints -RootPath $mirrorRoot
+
+    # H1/H3（codex 74 二收口批）：镜像根扫描本身若撞见枚举错误或 reparse point 异常，直接判失败——
+    # 在此之前不做任何 toRemove/删除判定（结果不可信的枚举清单不能作为删除依据）。整体语义与
+    # 安全阀/删除失败一致：调用方发现 EnumerationErrors 非空即打印明细 + exit 1，禁止后续
+    # git add/commit/push。
+    if ($mirrorTree.Errors.Count -gt 0) {
+        return [PSCustomObject]@{
+            Removed             = @()
+            Kept                = @()
+            PrunedDirs          = @()
+            FailedDeletions     = @()
+            BlastRadiusExceeded = $false
+            WouldRemove         = @()
+            EnumerationErrors   = @($mirrorTree.Errors)
+        }
+    }
+    $allFiles = $mirrorTree.Files
+
+    $kept = @()
+    $toRemove = @()
+    foreach ($f in $allFiles) {
+        $rel = $f.FullName.Substring($mirrorRoot.Length + 1) -replace '\\', '/'
+        $allowed = $DisableJudgment -or $trackedSet.Contains($rel) -or $whitelistSet.Contains($rel)
+        if ($allowed) {
+            $kept += $rel
+        } else {
+            $toRemove += [PSCustomObject]@{ Rel = $rel; FullName = $f.FullName }
+        }
+    }
+
+    # ── 安全阀（2026-08-29 收口批新增）：待删数超阈值 fail-fast，一个都不删 ──
+    # 真实首跑预计删 90+（历史六例漏网黑名单模式的累积残留），交给用户在场核对完整清单后
+    # 显式带 -SweepForce 复跑；日常增量同步待删数通常是个位数，超阈值本身就是"该停下来看
+    # 一眼"的信号（例如判据写错、SrcPath/MirrorPath 传错导致大面积误判）。
+    if ($toRemove.Count -gt $BlastRadiusThreshold -and -not $SweepForce) {
+        return [PSCustomObject]@{
+            Removed             = @()
+            Kept                = $kept
+            PrunedDirs          = @()
+            FailedDeletions     = @()
+            BlastRadiusExceeded = $true
+            WouldRemove         = @($toRemove | ForEach-Object { $_.Rel })
+            EnumerationErrors   = @()
+        }
+    }
+
+    # ── fail-closed 删除（2026-08-29 收口批新增）：删除失败不再静默吞掉——
+    # try/catch 捕获异常 + 删后 Test-Path 复核残留，任一失败都计入 FailedDeletions，调用方据此
+    # 整体 exit 1（语义：删不掉 = 不许推，公开镜像宁可同步中止，也不能带着"该删未删"的敏感
+    # 文件继续走 git add/commit/push）。
+    $removed = @()
+    $failedDeletions = @()
+    foreach ($item in $toRemove) {
+        $rel = $item.Rel
+        $deleteOk = $true
+        $failReason = $null
+        if ($SimulateResidualFor -and $rel -eq $SimulateResidualFor) {
+            # 测试桩（仅验证脚本使用）：跳过真实 Remove-Item，模拟"删除声称成功但磁盘未生效"，
+            # 用于验证下方 Test-Path 复核路径——真实文件锁定在 Windows 下难以稳定复现
+            # （Remove-Item -Force 通常能穿透只读属性；持句柄测试对进程时序敏感、不稳定）。
+        } else {
+            try {
+                Remove-Item -LiteralPath $item.FullName -Force -ErrorAction Stop
+            } catch {
+                $deleteOk = $false
+                $failReason = $_.Exception.Message
+            }
+        }
+        if ($deleteOk -and (Test-Path -LiteralPath $item.FullName)) {
+            $deleteOk = $false
+            $failReason = "Test-Path 复核发现文件仍残留（删除声称成功但磁盘未生效）"
+        }
+        if ($deleteOk) {
+            $removed += $rel
+        } else {
+            $failedDeletions += [PSCustomObject]@{ Path = $rel; Reason = $failReason }
+        }
+    }
+    # H1/H3：清空目录壳这一遍扫描（Remove-EmptyMirrorDirectories 内部）也可能撞见新的枚举错误/
+    # reparse point 异常——即便本次删除已经落盘，仍把异常并入 EnumerationErrors 统一交给调用方
+    # fail-closed（阻止后续 git add/commit/push；已发生的本地删除无法也不需要撤销）。
+    $pruneResult = Remove-EmptyMirrorDirectories -MirPath $mirrorRoot
+    return [PSCustomObject]@{
+        Removed             = $removed
+        Kept                = $kept
+        PrunedDirs          = $pruneResult.Removed
+        FailedDeletions     = $failedDeletions
+        BlastRadiusExceeded = $false
+        WouldRemove         = @()
+        EnumerationErrors   = @($pruneResult.Errors)
+    }
+}
+
+# ── 测试专用出口：L1（codex 76 新增）——只跑 NUL 分隔路径解析函数，JSON 输出，立即退出。
+#    模拟"原生命令捕获遇到字节流中真实换行符，会被拆成多个字符串数组元素"的场景（真实
+#    `& git ... -z` 调用同理，见 ConvertFrom-NulSeparatedGitOutput / Get-SourceTrackedFileSet
+#    注释）——按 `n` 把还原后的原始字符串切成数组，再喂给待测函数，走与生产完全相同的
+#    join(`n`)→split(NUL) 路径，而不是直接把整段字符串传进去（那样会绕过"多行数组重新拼接"
+#    这条最需要验证的分支）。──
+if ($FailClosedParseNulTestFile) {
+    $rawBytes = [System.IO.File]::ReadAllBytes($FailClosedParseNulTestFile)
+    $rawString = [System.Text.Encoding]::UTF8.GetString($rawBytes)
+    $simulatedRawOut = $rawString -split "`n"
+    $parsedResult = ConvertFrom-NulSeparatedGitOutput -RawOut $simulatedRawOut
+    ConvertTo-Json -InputObject $parsedResult -Depth 3 -Compress
+    exit 0
+}
+
+# ── 测试专用出口：只跑 sweep，JSON 输出，立即退出（不碰 git add/commit/push） ──
+if ($FailClosedSweepOnly) {
+    $result = Invoke-FailClosedSweep -SrcPath $SourcePath -MirPath $MirrorPath `
+        -Whitelist $mirrorOnlyWhitelist -DisableJudgment:$FailClosedDisableForTest `
+        -SweepForce:$SweepForce -SimulateResidualFor $FailClosedSimulateResidualFor
+    $result | ConvertTo-Json -Depth 5 -Compress
+    # 2026-08-29 收口批新增：安全阀触发或存在删除失败时，测试出口也要以非 0 退出——
+    # 让验证脚本能靠 spawnSync 的退出码判定，而不只是解析 JSON 字段。
+    # 二收口批新增（H1/H3）：枚举错误/reparse point 异常同样计入非 0 退出。
+    if ($result.BlastRadiusExceeded -or (@($result.FailedDeletions).Count -gt 0) -or (@($result.EnumerationErrors).Count -gt 0)) {
+        exit 1
+    }
+    exit 0
+}
+
+# ── 真实同步流程的 -CommitMessage 手动校验（替代原 Mandatory=$true，见 param 块注释） ──
+if ([string]::IsNullOrWhiteSpace($CommitMessage)) {
+    Write-Host "  [ERROR] -CommitMessage 是必填参数" -ForegroundColor Red
     exit 1
 }
 
@@ -284,7 +713,8 @@ if (Test-Path "$MirrorPath\mcp-bms") {
 #   2026-08-09 补 `_seed-*.js`（主仓无已跟踪 _seed 脚本，通配安全）+ `_set-sys-notify-dry-run.js`
 #   （必须精确名——`_set-*` 通配会误删已跟踪的 `_set-sys-single-commit-group.js`）：
 #   两者 2026-08-06 出现后因黑名单没补条目漏进公开仓（2026-08-09 已从公开仓 HEAD 删除）。
-#   黑名单模式必然再漏，fail-closed 改造（删除镜像内所有主仓未跟踪文件+白名单放行）已登记 PROJECT_STATUS 未了项。
+#   黑名单模式必然再漏——此块 2026-08-28 起降级为"第二道防线/诊断信息"，真正兜底见本步骤
+#   末尾的 fail-closed 扫描（Invoke-FailClosedSweep，PROJECT_STATUS 未了项 #20 已整改）。
 $tmpScriptPatterns = @("_demo-*.js", "_restore-*.js", "_seed-*.js", "_set-sys-notify-dry-run.js")
 foreach ($pat in $tmpScriptPatterns) {
     Get-ChildItem "$MirrorPath\wbs-server\scripts" -Filter $pat -File -ErrorAction SilentlyContinue | ForEach-Object {
@@ -328,6 +758,62 @@ foreach ($p in $localDocsToRemove) {
         Remove-Item $p -Recurse -Force
         Write-Host "  [SECURITY] removed $($p.Replace($MirrorPath + '\', ''))（本地文档目录·robocopy /XD 兜底）" -ForegroundColor Red
     }
+}
+
+# ── Fail-closed 兜底扫（2026-08-28 #20 整改）——唯一权威判定，跑在所有具名黑名单块之后 ──
+# 无论上面的具名块删没删干净，最终能留在镜像里的文件，必须满足「主仓 main 分支已跟踪 ∨ 白名单」。
+Write-Host ""
+Write-Host "  [Fail-Closed] 扫描镜像内文件，唯一放行依据 = 主仓 main 分支已跟踪 ∨ `$mirrorOnlyWhitelist ..." -ForegroundColor Cyan
+$sweepResult = Invoke-FailClosedSweep -SrcPath $SourcePath -MirPath $MirrorPath -Whitelist $mirrorOnlyWhitelist -SweepForce:$SweepForce
+
+# 安全阀触发（2026-08-29 收口批新增）：打印完整清单，一个都不删，中止同步。
+if ($sweepResult.BlastRadiusExceeded) {
+    Write-Host ""
+    Write-Host "  [Fail-Closed] ABORT：待删 $($sweepResult.WouldRemove.Count) 个文件，超过安全阀阈值（20），一个都未删：" -ForegroundColor Red
+    foreach ($r in $sweepResult.WouldRemove) {
+        Write-Host "    - $r" -ForegroundColor Red
+    }
+    Write-Host "  确认以上清单符合预期后，带 -SweepForce 复跑本脚本以放行删除。" -ForegroundColor Yellow
+    exit 1
+}
+
+# 枚举错误/reparse point 异常 fail-closed（2026-08-29 二收口批新增，codex 74 H1/H3）：
+# 目录访问被拒绝、枚举异常、镜像根本身是 reparse point、子目录命中 reparse point 均在此列——
+# 任一发生，本次扫描结果不可信，禁止后续 git add/commit/push（此时 Removed/Kept 恒为空数组，
+# 不能被下方"零残留 OK"分支误读为"确实没有需要清理的文件"）。
+if (@($sweepResult.EnumerationErrors).Count -gt 0) {
+    Write-Host ""
+    Write-Host "  [Fail-Closed] ERROR：扫描过程出现 $($sweepResult.EnumerationErrors.Count) 处枚举错误/reparse point 异常，" -ForegroundColor Red
+    Write-Host "  结果不可信，同步已中止（fail-closed：看不清 = 不许推）：" -ForegroundColor Red
+    foreach ($e in $sweepResult.EnumerationErrors) {
+        Write-Host "    - $e" -ForegroundColor Red
+    }
+    exit 1
+}
+
+if ($sweepResult.Removed.Count -gt 0) {
+    Write-Host "  [Fail-Closed] 清除 $($sweepResult.Removed.Count) 个主仓未跟踪文件（未命中白名单）：" -ForegroundColor Red
+    foreach ($r in ($sweepResult.Removed | Select-Object -First 40)) {
+        Write-Host "    - $r" -ForegroundColor Red
+    }
+    if ($sweepResult.Removed.Count -gt 40) {
+        Write-Host "    ... 还有 $($sweepResult.Removed.Count - 40) 个" -ForegroundColor Red
+    }
+} else {
+    Write-Host "  [Fail-Closed] OK：镜像内文件全部为「主仓已跟踪 ∨ 白名单」，零主仓未跟踪残留" -ForegroundColor Green
+}
+if ($sweepResult.PrunedDirs.Count -gt 0) {
+    Write-Host "  [Fail-Closed] 清理 $($sweepResult.PrunedDirs.Count) 个删空后的目录壳" -ForegroundColor Gray
+}
+
+# 删除失败 fail-closed（2026-08-29 收口批新增）：删不掉 = 不许推，中止同步。
+if (@($sweepResult.FailedDeletions).Count -gt 0) {
+    Write-Host ""
+    Write-Host "  [Fail-Closed] ERROR：$($sweepResult.FailedDeletions.Count) 个文件删除失败（fail-closed：删不掉 = 不许推）：" -ForegroundColor Red
+    foreach ($fd in $sweepResult.FailedDeletions) {
+        Write-Host "    - $($fd.Path): $($fd.Reason)" -ForegroundColor Red
+    }
+    exit 1
 }
 
 # === 步骤 2.5: 脱敏完整性预检（系统梳理兜底报警） ===

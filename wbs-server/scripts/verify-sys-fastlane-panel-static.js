@@ -415,6 +415,10 @@ console.log('— ⑫ 「待我处理」聚合卡沙箱真执行（siIsMyPending/
     const fnIsReleaseDateFuture = extractFullFunctionText('siIsReleaseDateFuture');
     const fnIsMyReleaseSchedulePending = extractFullFunctionText('siIsMyReleaseSchedulePending');   // ⑩ helper（483 LOW-1 抽出）
     const platformAdminUsernamesText = extractConstArrayText('SI_PLATFORM_ADMIN_USERNAMES');
+    // [2026-09-04 #116 缺口修复] 分支④b（绑定受理人的待指派/待处理半区）同样抽成共享 helper（谓词与
+    //   breakdown 两处共用）⇒ 沙箱注入**真实实现 + 真实常量**，不在本文件手抄第二份判据（同 ①b 纪律）。
+    const fnIsMyIntakeAssignPending = extractFullFunctionText('siIsMyIntakeAssignPending');
+    const assignPendingStatusesText = extractConstArrayText('SI_ASSIGN_PENDING_STATUSES');
 
     // [S-fix 4c 沿用] 提取前置全部包进 check() 计数体系——裸调用抛错会终止整个进程、其它断言不计数。
     check('[⑫前置] 六函数+三常量全部提取成功（提不到=守卫空转，不能当通过）', () => {
@@ -433,6 +437,8 @@ console.log('— ⑫ 「待我处理」聚合卡沙箱真执行（siIsMyPending/
         assert.ok(fnIsMyReleaseSchedulePending, '未提取到 siIsMyReleaseSchedulePending（⑩ helper——提不到则 ⑩ 全组空转）');
         assert.ok(statusGroupsText, '未提取到 SI_STATUS_GROUPS 常量全文');
         assert.ok(devFamilyStatusesText, '未提取到 SI_DEV_FAMILY_STATUSES 常量全文');
+        assert.ok(fnIsMyIntakeAssignPending, '未提取到 siIsMyIntakeAssignPending 函数全文（#116 修复新增，分支④b 绑定受理人的指派半区——提不到则 ④b 全组空转）');
+        assert.ok(assignPendingStatusesText, '未提取到 SI_ASSIGN_PENDING_STATUSES 常量全文（分支①与④b 共用的 assign 前置态集合）');
         assert.ok(platformAdminUsernamesText, '未提取到 SI_PLATFORM_ADMIN_USERNAMES 常量全文（若被改写成 Object.freeze([...]) 形态，extractConstArrayText 会提不到 ⇒ ① 组正反例全部空转，故在此前置判红）');
     });
     check('[归属收紧 2026-08-27] SI_PLATFORM_ADMIN_USERNAMES 提取物非空且含 admin（空数组=没有任何人能看到待指派/待验证/待归档，是静默失效而非报错）', () => {
@@ -458,13 +464,36 @@ console.log('— ⑫ 「待我处理」聚合卡沙箱真执行（siIsMyPending/
         const arr = new Function(`${devFamilyStatusesText}\nreturn SI_DEV_FAMILY_STATUSES;`)();
         assert.deepStrictEqual(arr, ['开发中', '处理中'], `SI_DEV_FAMILY_STATUSES 提取物应恰为 ['开发中','处理中']，实得 ${JSON.stringify(arr)}`);
     });
+    check('[⑫前置·#116] SI_ASSIGN_PENDING_STATUSES 提取物恰为 [待指派,待处理]（防提取静默截断；同时钉住"两流对称"——出处 transitions.js 三条 assign 条目的 from 并集，漏掉 bug 流「待处理」会让 bug 单的受理人重新变成看不见）', () => {
+        // eslint-disable-next-line no-new-func
+        const arr = new Function(`${assignPendingStatusesText}\nreturn SI_ASSIGN_PENDING_STATUSES;`)();
+        assert.deepStrictEqual(arr, ['待指派', '待处理'], `SI_ASSIGN_PENDING_STATUSES 提取物应恰为 ['待指派','待处理']，实得 ${JSON.stringify(arr)}`);
+    });
+    // ⭐ [codex 499 MED-1 收口] 上一条只是"前端常量 vs 守卫里手写的期望值"自比——两边都是手写字面量，
+    //   后端将来给 assign 增删 from（如新增一个 assign 前置态）时，前端常量与本守卫可以**一起保持旧值
+    //   全绿**，形成跨层静默漂移（守卫覆盖了自己，没覆盖真相源）。本条直接 require 后端状态机模块，
+    //   按 action==='assign' 展开 from 并集与前端常量双向比对——真相源变了，本条当场判红。
+    check('[#116·跨层真相源对拍] 前端 SI_ASSIGN_PENDING_STATUSES == 后端 transitions.js 全部 assign 条目的 from 并集（双向：前端多一个/少一个都红；后端改 from 而前端没跟，本条是唯一能发现的地方）', () => {
+        const T = require(path.join(__dirname, '..', 'routes', 'sys-iteration', 'transitions.js')).TRANSITIONS;
+        const backendFrom = [...new Set(
+            Object.values(T).flat().filter((t) => t.action === 'assign').flatMap((t) => t.from || [])
+        )].sort();
+        assert.ok(backendFrom.length > 0, '后端 TRANSITIONS 里未找到任何 assign 条目——真相源提取失败，本条会空转，先修提取');
+        // eslint-disable-next-line no-new-func
+        const front = new Function(`${assignPendingStatusesText}\nreturn SI_ASSIGN_PENDING_STATUSES;`)();
+        assert.deepStrictEqual([...front].sort(), backendFrom,
+            `前端 assign 前置态常量与后端状态机不一致：前端=${JSON.stringify([...front].sort())} 后端=${JSON.stringify(backendFrom)}——两者必须同集合，否则受理人的待办面与他实际能做的动作错位`);
+    });
 
     // 编译工厂——每条用例按自己的 isAdminVal/currentUserVal 现编译一份（互不干扰，非共用一份可变全局态）。
     function stubText(isAdminVal, currentUserVal) {
         return `function isAdmin() { return ${JSON.stringify(!!isAdminVal)}; }\nconst currentUser = ${currentUserVal === undefined ? 'null' : JSON.stringify(currentUserVal)};`;
     }
     function compile(returnName, extraTexts, isAdminVal, currentUserVal) {
-        const parts = [stubText(isAdminVal, currentUserVal), statusGroupsText, devFamilyStatusesText, platformAdminUsernamesText, fnIsPlatformAdmin, fnIsCreatorAcceptArchivePending, fnCurrentUid, fnDateOnly, fnIsReleaseDateFuture, fnIsMyReleaseNeedsExecutor, fnIsMyReleaseExecPending, fnIsMyReleaseSchedulePending, fnIsMyFastlanePending, ...extraTexts, `return ${returnName};`];
+        // [#116] assignPendingStatusesText 必须排在 fnIsMyIntakeAssignPending 之前——const 有 TDZ，
+        //   虽然函数体内引用要到调用时才求值（顺序理论上无所谓），但常量统一前置是本 parts 既有排布，
+        //   照旧不破例。
+        const parts = [stubText(isAdminVal, currentUserVal), statusGroupsText, devFamilyStatusesText, assignPendingStatusesText, platformAdminUsernamesText, fnIsPlatformAdmin, fnIsCreatorAcceptArchivePending, fnIsMyIntakeAssignPending, fnCurrentUid, fnDateOnly, fnIsReleaseDateFuture, fnIsMyReleaseNeedsExecutor, fnIsMyReleaseExecPending, fnIsMyReleaseSchedulePending, fnIsMyFastlanePending, ...extraTexts, `return ${returnName};`];
         // eslint-disable-next-line no-new-func
         return new Function(parts.join('\n'))();
     }
@@ -725,6 +754,34 @@ console.log('— ⑫ 「待我处理」聚合卡沙箱真执行（siIsMyPending/
     assertIsMyPending('④受理人 正例：status=待受理 + is_my_intake_liaison=1 → true', false, null, { status: '待受理', is_my_intake_liaison: 1 }, true);
     assertIsMyPending('④受理人 状态对身份不对：status=待受理 + is_my_intake_liaison=0 → false（若身份门被误删，本条会翻红）', false, null, { status: '待受理', is_my_intake_liaison: 0 }, false);
     assertIsMyPending('④受理人 身份对状态不对：is_my_intake_liaison=1 但 status=开发中（非待受理）→ false（若状态门被误删，本条会翻红）', false, null, { status: '开发中', is_my_intake_liaison: 1, my_dev_pending: 0 }, false);
+    console.log('    ④b 绑定受理人·指派半区（待指派/待处理·2026-09-04 生产 #116 缺口修复） —');
+    // 责任人依据=transitions.js 三条 assign 条目 roleGuard='intake_liaison'（引擎 index.js:5334 判
+    //   admin ∨ 绑定受理人）+ 生产实证 sys_issue_timeline 全量 assign 137 条 137/137 由绑定受理人本人操作。
+    //   两流各一正例（变更流待指派 / bug 流待处理）——只写一条会让"两流对称"这个口径失去防护。
+    assertIsMyPending('④b 正例·变更流：status=待指派 + is_my_intake_liaison=1 → true（生产 #116 示例开发A的形态：role=user 的绑定受理人，改动前恒 false，单子静默积压在他看不见的地方）', false, null, { status: '待指派', is_my_intake_liaison: 1 }, true);
+    assertIsMyPending('④b 正例·bug 流：status=待处理 + is_my_intake_liaison=1 → true（bug 的 assign 前置态是「待处理」，若 SI_ASSIGN_PENDING_STATUSES 漏掉它，本条会红）', false, null, { status: '待处理', is_my_intake_liaison: 1 }, true);
+    assertIsMyPending('④b 状态对身份不对：status=待指派 + is_my_intake_liaison=0（别人名下的单）→ false（若身份门被误删成"只看状态"，本条会翻红成 true——那等于全平台待指派单灌进每个登录用户的卡，比修复前更坏）', false, null, { status: '待指派', is_my_intake_liaison: 0 }, false);
+    assertIsMyPending('④b 身份门·字段缺失：is_my_intake_liaison 未投影（undefined）→ false（Number(undefined)=NaN，NaN===1 恒 false；若判据被写成真值判断，本条会翻红）', false, null, { status: '待指派' }, false);
+    assertIsMyPending('④b 身份对状态不对·待验证不是 assign 前置态：is_my_intake_liaison=1 + status=待验证 → false（若 SI_ASSIGN_PENDING_STATUSES 被误加「待验证」，本条会翻红——验收判定的责任人是平台管理员/建单人，不是受理人）', false, null, { status: '待验证', is_my_intake_liaison: 1 }, false);
+    assertIsMyPending('④b ⭐有意不含 reassign 态：is_my_intake_liaison=1 + status=开发中 + my_dev_pending=0 → false（受理人在开发中/待验证虽有 reassign 权，但推进义务在开发本人；纳入即"看得到点不了"的死按钮噪音——若有人顺手把 reassign 的 from 也塞进常量，本条会翻红）', false, null, { status: '开发中', is_my_intake_liaison: 1, my_dev_pending: 0 }, false);
+    assertIsMyPending('④b ⭐归属收紧不被冲垮：role=admin 的业务方（示例用户B）+ status=待指派 + 非本人受理（is_my_intake_liaison=0）→ 仍 false（2026-08-27 收紧的靶心不变量；本次是"给真责任人开半区"，不是"把闸放宽回去"——若 ④b 被写成不判身份，本条会翻红）', true, ROLE_ADMIN_BIZ_USER, { status: '待指派', is_my_intake_liaison: 0 }, false);
+    check('④b 谓词与 breakdown「待指派」段共用同一 helper siIsMyIntakeAssignPending（同 ⑩ 的 483 LOW-1 收口纪律——结构上消除"注释要求同步、代码却双写"的漂移源）', () => {
+        const bd = extractFullFunctionText('siMyPendingBreakdown');
+        assert.ok(bd && /siIsMyIntakeAssignPending\(i\)/.test(bd),
+            'siMyPendingBreakdown「待指派」段应调用 siIsMyIntakeAssignPending（不复写判据）');
+        assert.ok(/\|\| siIsMyIntakeAssignPending\(item\)/.test(fnIsMyPending),
+            'siIsMyPending 分支④b 应调用 siIsMyIntakeAssignPending（不复写判据）');
+        const helper = extractFullFunctionText('siIsMyIntakeAssignPending');
+        assert.ok(helper, '未提取到 siIsMyIntakeAssignPending——helper 被删则 ④b 整组空转');
+        assert.ok(/SI_ASSIGN_PENDING_STATUSES\.includes\(item\.status\)/.test(helper) && /Number\(item\.is_my_intake_liaison\) === 1/.test(helper),
+            'helper 两条件（状态 ∈ assign 前置态常量 / 绑定受理人是我）任一缺失即判红');
+        assert.ok(!/'待指派'|'待处理'/.test(helper),
+            'helper 内不应出现「待指派」/「待处理」字面量——应复用 SI_ASSIGN_PENDING_STATUSES 常量本身（单一事实源，同 3c 对 SI_DEV_FAMILY_STATUSES 的同款结构锚）');
+    });
+    check('④b 分支① 也复用同一常量（不再各写一份 assign 前置态字面量——两处漂移会让"管理员看得到、受理人看不到"或反过来）', () => {
+        assert.ok(/\[\.\.\.SI_ASSIGN_PENDING_STATUSES, '待验证'\]\.includes\(item\.status\)/.test(fnIsMyPending),
+            'siIsMyPending 分支① 应以 [...SI_ASSIGN_PENDING_STATUSES, \'待验证\'] 形态引用常量');
+    });
     console.log('    ⑤建单人（待修改） —');
     assertIsMyPending('⑤建单人 正例：status=待修改 + created_by=uid(42) → true', false, { id: 42 }, { status: '待修改', created_by: 42 }, true);
     assertIsMyPending('⑤建单人 状态对身份不对：status=待修改 + created_by=99（非本人）→ false（若 created_by===uid 比对被误删，本条会翻红）', false, { id: 42 }, { status: '待修改', created_by: 99 }, false);
@@ -786,6 +843,32 @@ console.log('— ⑫ 「待我处理」聚合卡沙箱真执行（siIsMyPending/
         assert.ok(/待我提交 1/.test(text), `分段文案应含"待我提交 1"，实得="${text}"`);
         assert.ok(text.endsWith('（同一单可命中多个身份）'), `分段文案应以固定提示收尾，实得="${text}"`);
     });
+    // ⭐ [codex 499 MED-2 收口] ④b 的 breakdown 侧此前**只有结构锚**（"出现了 helper 调用"），没有行为断言：
+    //   把 :3020 的 `|| siIsMyIntakeAssignPending(i)` 误改成 `&&`，结构锚照样匹配得到 helper 名，但非平台
+    //   管理员的主计数=1 而 tooltip「待指派」段=0（主计数有数、悬停显示暂无的自相矛盾）。四组真执行断言
+    //   把这条组合逻辑本身钉住，配套变异 M6（||→&&）在活体自证脚本里。
+    console.log('  — ④b breakdown「待指派」段行为四组（codex 499 MED-2：结构锚挡不住运算符/括号错误） —');
+    {
+        const ASSIGN_ITEM_MINE = { id: 9001, status: '待指派', is_my_intake_liaison: 1 };
+        const ASSIGN_ITEM_OTHERS = { id: 9002, status: '待指派', is_my_intake_liaison: 0 };
+        const LIAISON_USER = { id: 8, username: '19900000005', display_name: '示例开发A', role: 'user' };
+        check('④b-bd① 非平台管理员 + 本人受理的待指派单 → 段计 1（`||` 被误改成 `&&` 时本条红：admin=false 使整段恒 0）', () => {
+            const text = breakdownWith(false, LIAISON_USER)([ASSIGN_ITEM_MINE]);
+            assert.ok(/待指派 1/.test(text), `应含"待指派 1"，实得="${text}"`);
+        });
+        check('④b-bd② 非平台管理员 + 别人受理的待指派单 → 段计 0（计 0 的段不显示；若身份门在 breakdown 侧被漏掉，本条红）', () => {
+            const text = breakdownWith(false, LIAISON_USER)([ASSIGN_ITEM_OTHERS]);
+            assert.ok(!/待指派 \d/.test(text), `不应出现"待指派 N"段，实得="${text}"`);
+        });
+        check('④b-bd③ 平台管理员 + 非本人受理的待指派单 → 段仍计 1（admin 全量视野在本段保留，未被 ④b 的身份门收窄）', () => {
+            const text = breakdownWith(true, PLATFORM_ADMIN_USER)([ASSIGN_ITEM_OTHERS]);
+            assert.ok(/待指派 1/.test(text), `应含"待指派 1"，实得="${text}"`);
+        });
+        check('④b-bd④ 平台管理员**兼**本单受理人 → 同一张单仍只计 1（段内并集去重，非两个身份各计一次；若写成两个 filter 相加，本条红成 2）', () => {
+            const text = breakdownWith(true, { ...PLATFORM_ADMIN_USER, id: 8 })([{ ...ASSIGN_ITEM_MINE }]);
+            assert.ok(/待指派 1/.test(text), `应含"待指派 1"（不是 2），实得="${text}"`);
+        });
+    }
 
     console.log('  — 断言5：值班卡已移除（\'my_fastlane\' 字面量零出现）+ siIsMyFastlanePending 仍被 siIsMyPending 调用 —');
     check('siRenderStats 函数体（剥注释后）不含 \'my_fastlane\' 字面量（值班卡已吸收进「待我处理」聚合卡，横切筛选改用 my_pending；若残留旧 key，本条会翻红）', () => {

@@ -138,9 +138,12 @@ async function createBug(adminTok, titleTag, extra = {}) {
     if (r.status !== 201) throw new Error(`[夹具-建单-${titleTag}] 应 201，实得 ${r.status} ${JSON.stringify(r.body)}`);
     return r.body.id;
 }
-// 建单→受理通过（待受理→待处理）——admin 身份场景止步于此。
-async function acceptToDaichuli(adminTok, id) {
-    const r = await fetchJson(`/api/sys-issues/${id}/intake-accept`, adminTok, { method: 'POST', body: {} });
+// 建单→受理通过（bug：待受理→待处理；变更流：待受理→待指派）——admin 身份场景止步于此。
+// [2026-09-04 #116] 加 extraBody 可选参：变更流（feature/improvement）的 intake_accept
+//   requiredPayload 含 risk_level（一级/二级/三级），不传会被后端 400 RISK_LEVEL_REQUIRED 拒；
+//   bug 流不需要，既有调用点传两参行为一字不变。
+async function acceptToDaichuli(adminTok, id, extraBody = {}) {
+    const r = await fetchJson(`/api/sys-issues/${id}/intake-accept`, adminTok, { method: 'POST', body: { ...extraBody } });
     if (r.status !== 200) throw new Error(`[夹具-受理] 应 200，实得 ${r.status} ${JSON.stringify(r.body)}`);
     return r.body;
 }
@@ -438,6 +441,54 @@ async function main() {
             await page.waitForTimeout(400);
             await shotOnFail(page, (await issueRowLoc(page, idLiaison).count()) === 0, '1-liaison-negative-under-duty', `①对接人 夹具单 #${idLiaison} 不应出现在值班开发角色的「待我处理」筛选结果里`);
             await assertPredicateMiss(page, idLiaison, '①对接人负例·值班视角');
+            await page.close();
+        }
+
+        // ④b-对接人（受理人·待指派态）：⭐ 2026-09-04 生产 #116 缺口修复的真实链路复刻。
+        //   现场：#116（improvement·待指派·intake_liaison_id=示例开发A·role=user）——受理人在列表里翻得到
+        //   这单，点「待我处理」却筛不出来，待办静默积压。修复前本组三条断言全红（卡计数不 +1、
+        //   点卡筛不出该行、谓词判 false），是本次改动的活体靶心。
+        //   用 improvement 单（非 bug）刻意与 ①-对接人 的 bug 夹具区分：assign 前置态在变更流叫
+        //   「待指派」、在 bug 流叫「待处理」，两流状态名不同——这条走的正是 #116 的那条流。
+        let idLiaisonAssign;
+        {
+            const page0 = await loginPage(browser, liaisonTok);
+            await page0.goto(`${BASE_URL}/Sys_Iteration.html`);
+            await page0.waitForLoadState('networkidle');
+            await page0.waitForTimeout(400);
+            const before = (await readStatCardCount(page0, 'my_pending')) || 0;
+            await page0.close();
+
+            idLiaisonAssign = await createBug(adminTok, 'liaisonAssign', { type: 'improvement' });
+            createdIds.push(idLiaisonAssign);
+            const acc = await acceptToDaichuli(adminTok, idLiaisonAssign, { risk_level: '二级' });   // improvement：待受理 → 待指派（变更流受理必填风险等级）
+            must(acc && acc.status === '待指派', `[④b 夹具前提] improvement 受理通过后应落「待指派」，实得 ${acc && acc.status}——状态不对则本组测的不是 #116 那条流`);
+
+            const page = await loginPage(browser, liaisonTok);
+            await page.goto(`${BASE_URL}/Sys_Iteration.html`);
+            await page.waitForLoadState('networkidle');
+            await page.waitForTimeout(400);
+            const after = await readStatCardCount(page, 'my_pending');
+            await shotOnFail(page, after === before + 1, '4b-liaison-assign-count-delta', `④b 受理人「待指派」单应使卡计数 +1（before=${before}, after=${after}）——修复前恒不变，即 #116 的现场`);
+            await statCardLoc(page, 'my_pending').click();
+            await page.waitForTimeout(400);
+            await shotOnFail(page, (await issueRowLoc(page, idLiaisonAssign).count()) === 1, '4b-liaison-assign-row-present', `④b 点卡筛选后应看到本单 #${idLiaisonAssign}（用户报的正是"点了卡筛不出这张单"）`);
+            const cardNum = await readStatCardCount(page, 'my_pending');
+            const rowCnt = await tableBodyRowCount(page);
+            assertFilteredResultNonEmpty(rowCnt, cardNum, '④b对接人待指派');
+            await page.close();
+        }
+        // ④b 负例：开发视角不应看到 idLiaisonAssign（状态=待指派，身份门要求 intake_liaison_id 是我）
+        //   ——证"给受理人开半区"没有顺手放宽成"所有人都看得到全平台待指派单"。
+        {
+            const page = await loginPage(browser, devTok);
+            await page.goto(`${BASE_URL}/Sys_Iteration.html`);
+            await page.waitForLoadState('networkidle');
+            await page.waitForTimeout(400);
+            await activateStatFilter(page, 'my_pending');
+            await page.waitForTimeout(400);
+            await shotOnFail(page, (await issueRowLoc(page, idLiaisonAssign).count()) === 0, '4b-negative-under-dev', `④b 夹具单 #${idLiaisonAssign} 不应出现在开发角色的「待我处理」筛选结果里（他不是这单的受理人）`);
+            await assertPredicateMiss(page, idLiaisonAssign, '④b负例·开发视角');
             await page.close();
         }
 
