@@ -95,12 +95,16 @@ console.log('\n═══ [C2-S] 矩阵可静态断言面：siIssueDisplayNo 系�
 
   // ③ 弹窗标题（矩阵行6）——siIssueDisplayNoById 全部消费点计数，与 S13-b 报告登记的 15 处 siModal +
   //   2 处非 siModal（批次成员行）逐一核对，防未来新增/删除弹窗时这条契约悄悄漂移不被发现。
-  // 全文匹配含函数定义自身那一行（`function siIssueDisplayNoById(id) {`）——18 = 1 定义 + 17 消费
-  // （15 处 siModal 标题 + 2 处批次成员行降级展示，S13-b 报告登记基线）。
+  // 全文匹配含函数定义自身那一行（`function siIssueDisplayNoById(id) {`）——19 = 1 定义 + 18 消费
+  // （16 处 siModal 标题 + 2 处批次成员行降级展示）。
+  // [2026-09-07 决策记录 D4/J6/J8·验收打回附件] +1 来源=siModalReturn 弹窗标题
+  //   `siModal('验收打回 ' + siIssueDisplayNoById(iss.id), ...)`——原 case 'return' 走 siModalReason
+  //   （不消费本 helper，用裸 title 字符串），改走专用弹窗后新增一处标题消费点，基线由 18/15 各 +1 校准
+  //   为 19/16（S2b 批次，原 18/15 基线=S13-b 报告登记值）。
   const byIdCalls = [...clean.matchAll(/siIssueDisplayNoById\(/g)].length;
-  assert.strictEqual(byIdCalls, 18, `[C2-S③] siIssueDisplayNoById 全文匹配应恰 18 处（1 处函数定义 + 17 处消费：15 处 siModal 标题 + 2 处批次成员行降级展示，S13-b 报告登记基线），实抓 ${byIdCalls}——数量变化需人工核实是新增消费点未登记，还是既有消费点被误删`);
+  assert.strictEqual(byIdCalls, 19, `[C2-S③] siIssueDisplayNoById 全文匹配应恰 19 处（1 处函数定义 + 18 处消费：16 处 siModal 标题 + 2 处批次成员行降级展示，2026-09-07 校准基线：原 18=S13-b 报告登记值，siModalReturn 新增标题消费点 +1），实抓 ${byIdCalls}——数量变化需人工核实是新增消费点未登记，还是既有消费点被误删`);
   const modalTitleCalls = [...clean.matchAll(/siModal\([^;]*?siIssueDisplayNoById\(/gs)].length;
-  assert.strictEqual(modalTitleCalls, 15, `[C2-S③] siModal(...) 调用中直接含 siIssueDisplayNoById(...) 的应恰 15 处，实抓 ${modalTitleCalls}`);
+  assert.strictEqual(modalTitleCalls, 16, `[C2-S③] siModal(...) 调用中直接含 siIssueDisplayNoById(...) 的应恰 16 处（2026-09-07 校准：原 15+siModalReturn 新增 1），实抓 ${modalTitleCalls}`);
   // [408-M3①] 补删除任务弹窗——此前两条断言都只扫 siIssueDisplayNoById，漏了 siDeleteIssue（:5654 一带）
   // 的删除任务弹窗标题：它走的是 siIssueDisplayNo(iss) **直接传对象**分支（siDetail.issue 现成在手，
   // 不需要像其余弹窗那样只有 issueId 时退化查 siList），不含 "ById" 字样，两条既有正则完全扫不到它——
@@ -122,7 +126,7 @@ console.log('\n═══ [C2-S] 矩阵可静态断言面：siIssueDisplayNo 系�
   const deleteModalCalls = [...deleteIssueBodyClean.matchAll(/siModal\([^;]*?siIssueDisplayNo\(iss\)/gs)].length;
   assert.strictEqual(deleteModalCalls, 1, `[C2-S③] siDeleteIssue 函数体内（非全文，函数作用域限定）siModal(...) 调用中直接含 siIssueDisplayNo(iss)（非 ById 变体——已持有 issue 对象走直传分支）的应恰 1 处，实抓 ${deleteModalCalls}——此前 verify 断言未覆盖这一处，是矩阵验收表"15+2=17"与"全文18处"对不上号的根因`);
   assert.ok(/siModal\(\s*'删除任务 '\s*\+\s*siIssueDisplayNo\(iss\)/.test(deleteIssueBodyClean), `[C2-S③] siDeleteIssue 的弹窗标题应精确是 '删除任务 ' + siIssueDisplayNo(iss) 字面量拼接（不只证数量，证内容确实是这个标题字符串），函数体片段：${deleteIssueBodyClean.slice(0, 300)}`);
-  ok(`[C2-S③] 矩阵行6 弹窗标题：真实总数 16 处（${modalTitleCalls} 处经 siIssueDisplayNoById 的 siModal 标题 + ${deleteModalCalls} 处经 siIssueDisplayNo(iss) 直调的删除任务弹窗，判定域限定在 siDeleteIssue 函数体内且标题内容已核对）；另有 2 处 siIssueDisplayNoById 消费点是批次成员行降级展示（非弹窗，语义属矩阵行13范畴，不计入本行）；siIssueDisplayNoById 全文 ${byIdCalls} 处（1 定义+17 消费=15 弹窗+2 批次成员）自身计数保持不变`);
+  ok(`[C2-S③] 矩阵行6 弹窗标题：真实总数 17 处（${modalTitleCalls} 处经 siIssueDisplayNoById 的 siModal 标题 + ${deleteModalCalls} 处经 siIssueDisplayNo(iss) 直调的删除任务弹窗，判定域限定在 siDeleteIssue 函数体内且标题内容已核对）；另有 2 处 siIssueDisplayNoById 消费点是批次成员行降级展示（非弹窗，语义属矩阵行13范畴，不计入本行）；siIssueDisplayNoById 全文 ${byIdCalls} 处（1 定义+18 消费=16 弹窗+2 批次成员，2026-09-07 校准：siModalReturn 新增标题消费点 +1）自身计数保持不变`);
 
   // ④ 树形/灰显/命中高亮/子编号标签的 CSS class 与其 JS 渲染端 class 拼接均存在（静态双向核对：样式
   //   定义了但没人挂 class、或挂了 class 但没定义样式，两种半成品都要拦）。

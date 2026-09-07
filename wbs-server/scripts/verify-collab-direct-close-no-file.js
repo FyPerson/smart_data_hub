@@ -7,7 +7,9 @@
  *   · v1.164.2（2026-09-01）：无附件提交**放开到任意 EXPORTING 单的导出人本人**（守卫②废除）。
  *     触发实证 = 生产协作单 #45（normal 单经三级转发，大文件线下移交，三条到 DONE 的通道全被挡死）。
  *     概要必填条件相应扩为「真直派单（无论有无附件）|| 任意单无附件」。
- *     ⚠️ admin-submit-on-behalf 的 EXPORTING 分支仍要求真直派，本次**不放开**（防 admin 越过 exporter）。
+ *     ⚠️ admin-submit-on-behalf 的 EXPORTING 分支路径已于 2026-09-06 随决策记录 D2 放开
+ *       （放开到任意 EXPORTING 单，见 verify-collab-admin-close-exporting.js），本文件的断言不受影响
+ *       ——T8 仍是 submit-export（exporter 自助提交）侧「真直派判据不误伤」的验证，与 admin 路径正交。
  *
  * 覆盖（正向 = 应闭环成功；负向 = 应被拒且状态不变）：
  *   T1  正向：真直派单 + 无附件 + 概要≥10字 → 200 DONE + 概要落库 + 无新增附件行 + 日志字段
@@ -264,10 +266,12 @@ async function main() {
 
     console.log('\n=== T7 正向【v1.164.2 放开·原为负向】：admin_direct 单但已被三级转发 + 无附件 + 概要≥10字 → DONE ===');
     // ⚠️ 本用例 2026-09-01 由负向翻转为正向。原断言依据 codex 02 审 HIGH-1「fallback 后重新流转的
-    //   admin_direct 单是正常流转语义，不该无附件闭环」——该收严意图**未被推翻，只是换了载体**：
-    //   HIGH-1 真正要防的「admin 越过 exporter 闭环」仍由 admin-submit-on-behalf 的 EXPORTING 分支
-    //   （仍要求 assign_mode='admin_direct' && forwarded_to_exporter_at IS NULL）原样守住。
-    //   本端点恒由 ONLY_EXPORTER_CAN_SUBMIT 保证是 exporter 本人自助，无越权维度，故放开。
+    //   admin_direct 单是正常流转语义，不该无附件闭环」。沿革（codex 08 LOW 订正措辞）：
+    //   · 2026-09-01（v1.164.2）：本端点（submit-export）放开，HIGH-1 的「admin 越过 exporter」边界当时仍由
+    //     admin-submit-on-behalf 的 EXPORTING 分支守住；
+    //   · 2026-09-06（决策记录 D2）：**该旧边界已被用户明确推翻**——admin 可对任意来源 EXPORTING 单行政闭环
+    //     （见 verify-collab-admin-close-exporting）。本文件断言不受影响：submit-export 恒由 ONLY_EXPORTER_CAN_SUBMIT
+    //     保证是 exporter 本人自助，与 admin 路径的区分在「调用者是谁」，不在 assign_mode/forwarded 判据。
     {
         const f = await makeExportingFixture('admin_direct');
         // 造"已被三级转发"痕迹：设 forwarded_to_exporter_at

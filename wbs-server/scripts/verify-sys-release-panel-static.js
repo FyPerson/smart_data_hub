@@ -628,8 +628,13 @@ check('[H1] 直翻结果以响应体 online_source 为准，不复用事前预�
     assert.ok(/d\.online_source === 'no_commit_acceptance'/.test(code),
         '成功回调应按响应体 online_source 判定实际结果——事前预告只是体验层提示，存在 stale 窗口（详情打开后他人补 commit）');
     // 结果分支不得复用 likelyDirect：那会把"我以为会直翻"当成"确实直翻了"
-    const cbIdx = code.indexOf('siApi(');
-    assert.ok(cbIdx > 0, '应能定位 siApi 调用（锚点漂移时先红，不静默切错片段）');
+    // [2026-09-07 主会话裁定 L4] 锚点由 code.indexOf('siApi(') 改 code.indexOf('/accept')——S2b
+    //   验收说明附件批给 siModalAccept 加了"先传附件"两步链，函数体内第一个 siApi( 调用现在是
+    //   POST .../attachments（上传），不再是 POST .../accept；旧锚点会把切片起点提前到上传调用处，
+    //   偏离本组"accept 调用之后的结果处理段"的真实检查意图。改锚定 '/accept' 字面量（该请求路径
+    //   在函数体内唯一，精确定位到 accept 调用本身）。
+    const cbIdx = code.indexOf('/accept');
+    assert.ok(cbIdx > 0, '应能定位 /accept 调用（锚点漂移时先红，不静默切错片段）');
     assert.ok(!/likelyDirect/.test(code.slice(cbIdx)),
         '[H1] siApi 调用之后的结果处理段不得引用 likelyDirect——预告与结果必须各判各的，复用等于把客户端快照当成服务端裁决');
 });

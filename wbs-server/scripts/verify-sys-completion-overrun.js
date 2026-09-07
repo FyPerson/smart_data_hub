@@ -848,13 +848,23 @@ async function main() {
       //   =1764/1864/4150/4697/6340/7052/7313/14725，见 #8 desc 末尾；本注释不再并存历史值，防两组「实测值」互斥）；
       //   UPDATE 语句字面量逐字未变，仍是原 8 处同一批写点，非新增第 9 处；:3729 一带 runWGate 签名本身
       //   位置不变，本次是函数体内部新增分支+函数上方新增小节，非搬迁）。
-      { anchorLine: 1764, reachable: false, desc: 'C1 迁移一次性脚本：字面量写「待指派」（历史 待评估/已排期→待指派迁移），与本闸门目标态无关' },
-      { anchorLine: 1864, reachable: false, desc: '预沟通段撤销迁移脚本：字面量写「待受理」' },
-      { anchorLine: 4150, reachable: true, gateKind: 'runWGate', desc: 'runWGate 内唯一 UPDATE——targetStatus 变量，feature 决策树 ⑤⑤变体【新skip_system】⑥⑦ 分支据 SF.SYS_VERIFY_STATUSES/SF.SYS_LIAISON_TEST_STATUSES 可解析为待验证/待对接测试；§14 闸门（enteringForward && issueType===feature 分支）在本 UPDATE 之前执行，无理由不放行（同一写点，行号随 S3 按系统跳过对接测试新增分支+小节 +65 行·grep 实测）' },
-      { anchorLine: 4697, reachable: false, desc: '先行上线翻牌内核 attemptFastReleaseFlipInTxn：字面量写「已上线」，WHERE 限定 type=bug，与 feature 专属闸门结构上无交集（同一写点，行号随 S3 上方改动整体下移 +65·grep 实测）' },
-      { anchorLine: 6340, reachable: true, gateKind: 'exempt', desc: 'sysIssueTransition 通用引擎唯一 UPDATE——toStatus 变量，服务全部声明式 transition；feature 流里能落到目标两态的边只有①核实的 liaison_test_pass 一条，该边已撤闸（显式豁免，见下方子断言核实其代码块不引用理由闸函数；行号随 S3 上方改动整体下移 +65·grep 实测）' },
-      { anchorLine: 7052, reachable: false, desc: '建单 path A 占位状态 UPDATE：finalStatus 恒为受理门初始态（resolveSysInitialStatusForCreate 落态）或「开发中」，结构上不可能是待对接测试/待验证（行号随 S3 上方改动整体下移 +65·grep 实测）' },
-      { anchorLine: 7313, reachable: false, desc: '/assign 端点 UPDATE：targetStatus 恒为 SF.SYS_DEV_STATUSES[type][0]（开发中），结构上不可能是待对接测试/待验证（行号随 S3 上方改动整体下移 +65·grep 实测）' },
+      // ⚠️ [2026-09-06 验收说明附件与 admin 闭环放开 S2a 批] sysIssueTransition 内新增共享 helper
+      //   resolveEvidenceAttachmentIds（落在写点 #3 runWGate **之前**，紧邻 analyzeRosterForGate，净增
+      //   约 33 行）+ case 'accept'/'return' 内追加说明/附件校验逻辑（落在写点 #5 通用引擎 UPDATE **之前**，
+      //   净增约 43 行）——本批零新增/零删除 UPDATE sys_issues SET status 语句（②处实测计数仍恰 8，
+      //   逐条核对 8 处 UPDATE 语句字面量未变，非新增第 9 处），故按 :825 纪律 grep 实测重新校准：
+      //   #1/#2（1764/1864）在两处插入点之前，各 +2（一带 DDL 注释批同步扩充，见 payload_json 列注释）；
+      //   #3/#4（runWGate/先行上线翻牌，均在 sysIssueTransition 定义之前）各随 helper 插入 +35；
+      //   #5-#8（通用引擎/建单/assign/批量发布，均在 sysIssueTransition switch 之后）叠加 helper+
+      //   accept/return 两处插入共 +84~+85——**第 17 次校准**，grep 实测 1766/1866/4185/4732/6424/
+      //   7137/7398/14810。
+      { anchorLine: 1766, reachable: false, desc: 'C1 迁移一次性脚本：字面量写「待指派」（历史 待评估/已排期→待指派迁移），与本闸门目标态无关' },
+      { anchorLine: 1866, reachable: false, desc: '预沟通段撤销迁移脚本：字面量写「待受理」' },
+      { anchorLine: 4185, reachable: true, gateKind: 'runWGate', desc: 'runWGate 内唯一 UPDATE——targetStatus 变量，feature 决策树 ⑤⑤变体【新skip_system】⑥⑦ 分支据 SF.SYS_VERIFY_STATUSES/SF.SYS_LIAISON_TEST_STATUSES 可解析为待验证/待对接测试；§14 闸门（enteringForward && issueType===feature 分支）在本 UPDATE 之前执行，无理由不放行（同一写点，行号随 2026-09-06 验收说明附件批 resolveEvidenceAttachmentIds helper 插入 +35 行·grep 实测·第 17 次校准）' },
+      { anchorLine: 4732, reachable: false, desc: '先行上线翻牌内核 attemptFastReleaseFlipInTxn：字面量写「已上线」，WHERE 限定 type=bug，与 feature 专属闸门结构上无交集（同一写点，行号随 2026-09-06 验收说明附件批 helper 插入整体下移 +35·grep 实测·第 17 次校准）' },
+      { anchorLine: 6424, reachable: true, gateKind: 'exempt', desc: 'sysIssueTransition 通用引擎唯一 UPDATE——toStatus 变量，服务全部声明式 transition；feature 流里能落到目标两态的边只有①核实的 liaison_test_pass 一条，该边已撤闸（显式豁免，见下方子断言核实其代码块不引用理由闸函数；行号随 2026-09-06 验收说明附件批 helper+accept/return 追加逻辑下移 +84·grep 实测·第 17 次校准）' },
+      { anchorLine: 7137, reachable: false, desc: '建单 path A 占位状态 UPDATE：finalStatus 恒为受理门初始态（resolveSysInitialStatusForCreate 落态）或「开发中」，结构上不可能是待对接测试/待验证（行号随 2026-09-06 验收说明附件批下移 +85·grep 实测·第 17 次校准）' },
+      { anchorLine: 7398, reachable: false, desc: '/assign 端点 UPDATE：targetStatus 恒为 SF.SYS_DEV_STATUSES[type][0]（开发中），结构上不可能是待对接测试/待验证（行号随 2026-09-06 验收说明附件批下移 +85·grep 实测·第 17 次校准）' },
       // ⚠️ [2026-08-19「RPA程序」批] 本批在 index.js §10.3 单组清单处新增 6 行说明注释（DEFAULT_SINGLE_
       //   COMMIT_GROUP_SYSTEMS 上方），位置落在写点 #6(7177) 与 #7(本条) **之间**，故仅本条下移、前 7 条
       //   行号纹丝未动（这本身就是"同一批写点、非新增第 9 处"的旁证：本批未新增任何 UPDATE 语句，②处
@@ -867,7 +877,7 @@ async function main() {
       //   落在写点 #6(7177) 与 #7(本条) 之间的区域（:8198 一带起），全文件净增 59 行——本条锚点随之整体
       //   下移 14431→14485（人工核对：UPDATE 语句字面量逐字未变，仍是"批量发布执行"同一处写点，非新增
       //   第 9 处）。
-      { anchorLine: 14725, reachable: false, desc: '批量发布执行 UPDATE：字面量写「已上线」（同一写点，flip UPDATE 语句本体未变；行号历经多批注释/重排/纯函数抽取累计下移，见上方各批注释；R-C4 首批 +54、codex 472 审收口批再 +11、476 收口批 DDL CHECK 再 +5——2026-08-27 一天之内被本模块**连续四次**追平：加 4 个 release 侧派生列(+24 行) → 加 my_release_exec_pending(+25 行) → 论证后撤回 release_creator_active(-11 行) → 去重拆除删 release_rep_issue_id 派生列(-4 行)。同一个锚一天校准四遍，backlog #25③「绝对行号锚改结构锚」已不是"应该做"而是"再不做，每次动 index.js 都要重来一遍"，该债已具备立即处理的充分理由；2026-08-28 上线单标识对齐批再+10 行=**第 13 次校准**；2026-09-02 小程序-智荟人力接入 S2 在 §10.3 单组清单与 validateCommitFieldsBody 两处插注释 +9 行=**第 14 次校准**，正是本条上方注释预言的「加系统必带校准本条」；2026-09-02 小程序-智荟人力接入 S3 跳过分支+留痕码消费面 +65 行=第 15 次校准〔首版 +63 算术误记·Opus 预筛 grep 对拍纠正为 14722，#8 曾压满容差零余量〕；S3 收口注释批（W_GATE_SKIP_SUMMARY 方向枚举 +1／last_completed_at 权威口径 +2）再 +3=**第 16 次校准**〔grep 实测 4697/6340/7052/7313/14725·一日之内本锚被本任务连续校准三次，backlog #25③ 结构锚改造的充分理由再 +1〕）' },
+      { anchorLine: 14829, reachable: false, desc: '批量发布执行 UPDATE：字面量写「已上线」（同一写点，flip UPDATE 语句本体未变；行号历经多批注释/重排/纯函数抽取累计下移，见上方各批注释；R-C4 首批 +54、codex 472 审收口批再 +11、476 收口批 DDL CHECK 再 +5——2026-08-27 一天之内被本模块**连续四次**追平：加 4 个 release 侧派生列(+24 行) → 加 my_release_exec_pending(+25 行) → 论证后撤回 release_creator_active(-11 行) → 去重拆除删 release_rep_issue_id 派生列(-4 行)。同一个锚一天校准四遍，backlog #25③「绝对行号锚改结构锚」已不是"应该做"而是"再不做，每次动 index.js 都要重来一遍"，该债已具备立即处理的充分理由；2026-08-28 上线单标识对齐批再+10 行=**第 13 次校准**；2026-09-02 小程序-智荟人力接入 S2 在 §10.3 单组清单与 validateCommitFieldsBody 两处插注释 +9 行=**第 14 次校准**，正是本条上方注释预言的「加系统必带校准本条」；2026-09-02 小程序-智荟人力接入 S3 跳过分支+留痕码消费面 +65 行=第 15 次校准〔首版 +63 算术误记·Opus 预筛 grep 对拍纠正为 14722，#8 曾压满容差零余量〕；S3 收口注释批（W_GATE_SKIP_SUMMARY 方向枚举 +1／last_completed_at 权威口径 +2）再 +3=第 16 次校准〔grep 实测 4697/6340/7052/7313/14725·一日之内本锚被本任务连续校准三次，backlog #25③ 结构锚改造的充分理由再 +1〕；2026-09-06 验收说明附件与 admin 闭环放开 S2a 批（resolveEvidenceAttachmentIds helper+case accept/return 追加逻辑）再 +85=**第 17 次校准**〔grep 实测 1766/1866/4185/4732/6424/7137/7398/14810，backlog #25③ 结构锚改造的充分理由再 +1〕；同批 codex 500 H1 采纳在附件 DELETE 端点（:14317 一带·本条写点**之前**）插入「被时间线凭证引用的附件不可删」引用闸 +19 行，另 helper 注释扩 1 行令 #3-#7 各 +1（容差内不动值）=**第 18 次校准**〔grep 实测 14829〕）' },
     ];
     assert.strictEqual(EXPECTED_STATUS_WRITE_SITES.length, writeSites.length, '[S③前置] 白名单登记条目数应与②实测写点数一致（防清单本身漂移出真相）');
     writeSites.forEach((site, i) => {

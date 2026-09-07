@@ -245,7 +245,7 @@ module.exports = (deps) => {
     'release_assignee_notify_message_key', 'release_assignee_notify_error',
     'release_assignee_notify_token', 'release_assignee_read_at', 'release_kind'];
   const SYS_TIMELINE_KEY_COLS = ['event_type', 'from_status', 'to_status', 'action_code', 'ref_id', 'round_no',
-    'payload_json'];   // ← [codex 291 号 H-2 收口] liaison_test_pass 写点热读列，同 §156 一带"整组入锚"哲学
+    'payload_json'];   // ← [codex 291 号 H-2 收口] liaison_test_pass 写点热读列（2026-09-06 起 accept/return 亦写值·决策记录 J6），同 §156 一带"整组入锚"哲学
   const SYS_ATTACHMENTS_KEY_COLS = ['attachment_type', 'round_no', 'status'];
   // ← 通知改造 C1a 新表锚点（bug流通知改造_方案_20260703_v1.5.md §4.1）。sys_issue_dev_assignees 是**一次性
   //   CREATE TABLE（无 ALTER 路径）**——要么整表建全要么不存在，故 readiness 用"结构全列在"模型（非 sys_issues 那种
@@ -961,8 +961,10 @@ module.exports = (deps) => {
         -- [codex 291 号 H-2 收口·2026-08-06] 结构化留痕列——恢复方案 D22-④ 拍板原意（"留痕进 pass 事件
         --   payload"）。批2曾因发现本表当时无此列，退而求其次落 summary 文本；291 号裁定=改，本列到位后
         --   summary 收窄为 80 字展示摘要，完整凭证（test_note 全文/attachment_ids/evidence/cycle_no）
-        --   走本列，键名 schema 冻结见 index.js case 'liaison_test_pass' 写入处注释。目前仅 liaison_test_pass
-        --   一个写点消费；本表其余 9 种 event_type 不写此列（保持 NULL），非本次范围扩张。
+        --   走本列，键名 schema 冻结见 index.js case 'liaison_test_pass' 写入处注释。[2026-09-06 决策
+        --   记录 D3/D4/J4/J6·验收说明附件] sysIssueTransition 引擎内 liaison_test_pass / accept /
+        --   return 三个 case 写值（accept：note/attachment_ids 均可选；return：attachment_ids 可选，
+        --   reason 已在 summary 不重复）；引擎其余 case 不写此列（保持 NULL），非本次范围扩张。
         payload_json TEXT CHECK (payload_json IS NULL OR json_valid(payload_json)),
         FOREIGN KEY (issue_id) REFERENCES sys_issues(id) ON DELETE CASCADE
       )`, recordSysErr('sys_issue_timeline'));
@@ -3682,6 +3684,40 @@ module.exports = (deps) => {
     };
   }
 
+  // [2026-09-06 决策记录 D3/D4/J4·验收说明附件与打回附件] 共享校验 helper——case 'accept'/'return' 两处
+  //   复用同一份 attachment_ids 校验逻辑（J4：附件关联模型=前端先上传拿 id，再随 accept/return body 传
+  //   attachment_ids，后端逐 id 校验归属，任一不符即整事务回滚，fail-closed）。
+  //   rawIds：payload.attachment_ids 原始值——undefined/null 视为"未传"（返回 []，两个动作均可选，见
+  //   决策记录 D3）；非数组/长度>5/含非正整数元素 → 400 `${codePrefix}_ATTACHMENT_IDS_INVALID`（格式闸，
+  //   不查库）。格式合法后去重升序，查 sys_issue_attachments 校验「属本单 ∧ status='active' ∧
+  //   attachment_type ∈ (delivery,screenshot)」——命中数与去重后个数不等（含"部分命中"）→ 400
+  //   `${codePrefix}_ATTACHMENT_INVALID`（不区分"不属本单/已失效/类型不符"三种子因，同 J4 拍板文案）。
+  //   零 DDL：不新增 attachment_type 枚举值，沿用既有 delivery/screenshot 两类（J5：附件类型固定
+  //   screenshot 由前端上传时写死；本 helper 校验口径额外放行 delivery 属 **API 级兼容/预留**——当前前端
+  //   只有"新选文件→新传 screenshot"一条路，没有"引用本单既有 delivery 附件"的入口〔Opus 预筛 S2b M3
+  //   订正：勿把此处读成已有 UI 能力；要做引用入口另立项〕，verify [A10] 钉住的是端点契约不是 UI）。
+  //   调用方须在 sysBeginImmediate 之后（本函数查询与调用方主 UPDATE 同一事务，配合上层 fail-closed 回滚）。
+  async function resolveEvidenceAttachmentIds(issueId, rawIds, codePrefix) {
+    if (rawIds === undefined || rawIds === null) return [];
+    const isPositiveInt = (v) => Number.isInteger(v) && v > 0;
+    if (!Array.isArray(rawIds) || rawIds.length > 5 || !rawIds.every(isPositiveInt)) {
+      throw new SysTransitionError(400, `${codePrefix}_ATTACHMENT_IDS_INVALID`, '附件 id 列表格式错误');
+    }
+    const uniqueIds = Array.from(new Set(rawIds)).sort((a, b) => a - b);
+    if (uniqueIds.length === 0) return [];
+    const placeholders = uniqueIds.map(() => '?').join(',');
+    const hitRows = await dbAllAsync(
+      `SELECT id FROM sys_issue_attachments
+         WHERE issue_id = ? AND status = 'active' AND attachment_type IN ('delivery','screenshot')
+           AND id IN (${placeholders})`,
+      [issueId, ...uniqueIds]
+    );
+    if (hitRows.length !== uniqueIds.length) {
+      throw new SysTransitionError(400, `${codePrefix}_ATTACHMENT_INVALID`, '验收附件不属于本单、已失效或类型不符');
+    }
+    return uniqueIds;
+  }
+
   // [工期对接测试与风险等级拆分 方案 v1.1 §3.0·C4] runWGate 改造——feature 类型走新的 ①②③④⑥⑦ 分型
   //   决策树（⑤ 已删，D21：electRepresentative 结构性保证全员 excused 场景不可达，见方案 §3.0 详述），
   //   improvement/bug 维持原有 DEV↔VERIFY 二元判定不变（本次改造范围严格收窄为 feature-only，不触碰
@@ -5419,7 +5455,8 @@ module.exports = (deps) => {
       const setParams = [];
       let summary = null;
       let timelineRoundNo = null;   // C3b：submit 写本轮交付轮次到 timeline.round_no（其余动作 NULL）
-      let timelinePayloadJson = null;   // [codex 291 号 H-2] 结构化留痕，目前仅 case 'liaison_test_pass' 写值，其余动作恒 NULL
+      let timelinePayloadJson = null;   // [codex 291 号 H-2] 结构化留痕，[2026-09-06 决策记录 D3/D4/J4] 现由
+      //   case 'liaison_test_pass' / 'accept' / 'return' 三处写值，其余动作恒 NULL
       // [组A·2.2/2.4] 受理 ETA 结果——仅 case 'intake_accept' 写值，其余动作恒 null；makeTransitionEndpoint
       //   据此在响应体里附带 eta 信息块（自动生成/超时受理提示）并按需追加 estimate 通知派发。
       let etaOutcome = null;
@@ -5950,6 +5987,47 @@ module.exports = (deps) => {
             fastReleaseRosterClearCause = (toStatus === SYS_ONLINE_STATUS) ? '上线翻牌' : '验收通过';
             }
           }
+          // [2026-09-06 决策记录 D3/J4/J6/J7·验收说明与附件] 说明可选（trim 后 ≤500 码点）+ 附件可选
+          //   （resolveEvidenceAttachmentIds 逐 id 校验归属），二者互不依赖、皆可省略——省略时
+          //   timelinePayloadJson 保持 null、summary 保持既有值不变，与改前逐字相同行为（D3：90 处既有
+          //   `/accept` 调用零改动）。刻意放在本 case 末尾、break 之前追加，不改上方 C9 直翻/授权终结/
+          //   S5 闸任何既有分支（J1 纪律：既有块一字不动）。
+          {
+            const acceptNoteRaw = payload.note;
+            if (acceptNoteRaw !== undefined && acceptNoteRaw !== null && typeof acceptNoteRaw !== 'string') {
+              throw new SysTransitionError(400, 'ACCEPT_NOTE_INVALID', '验收说明格式错误（须为字符串）');
+            }
+            const acceptNoteTrim = (typeof acceptNoteRaw === 'string') ? acceptNoteRaw.trim() : '';
+            // ⚠️ 码点长度（`[...s].length`），非 UTF-16 code unit 长度——emoji 等代理对字符按 500 上限
+            // 计数时不应被双算（区别于 liaison_test_pass 一带沿用的 .length 简化写法，本次按决策记录
+            // 显式口径实现）。
+            if ([...acceptNoteTrim].length > 500) {
+              throw new SysTransitionError(400, 'ACCEPT_NOTE_TOO_LONG', '验收说明不超过 500 字');
+            }
+            const hasAcceptNote = acceptNoteTrim.length > 0;
+            const acceptAttachmentIds = await resolveEvidenceAttachmentIds(issueId, payload.attachment_ids, 'ACCEPT');
+            const hasAcceptAttachment = acceptAttachmentIds.length > 0;
+            // payload_json 键 schema（冻结，决策记录 J6）：{ note?: string, attachment_ids?: number[] }——
+            //   仅有值时加键，同 liaison_test_pass 惯例；两者皆无时 timelinePayloadJson 保持上方初始值 null。
+            if (hasAcceptNote || hasAcceptAttachment) {
+              const acceptPayloadObj = {};
+              if (hasAcceptNote) acceptPayloadObj.note = acceptNoteTrim;
+              if (hasAcceptAttachment) acceptPayloadObj.attachment_ids = acceptAttachmentIds;
+              timelinePayloadJson = JSON.stringify(acceptPayloadObj);
+            }
+            // summary（决策记录 J7）：仅当 C9 直翻分支未写（summary 仍为上方初始值 null）时才由说明/附件
+            //   推导——直翻分支的 SYS_NO_COMMIT_ONLINE_SUMMARY 是审计口径文案，优先且不被验收说明挤掉，
+            //   说明这种情况下只进 payload_json 不进 summary。
+            if (summary == null) {
+              if (hasAcceptNote) {
+                const acceptNoteCps = [...acceptNoteTrim];
+                const acceptNotePreview = acceptNoteCps.length > 80 ? acceptNoteCps.slice(0, 80).join('') + '…' : acceptNoteTrim;
+                summary = `验收说明：${acceptNotePreview}` + (hasAcceptAttachment ? `（另有 ${acceptAttachmentIds.length} 个验收附件）` : '');
+              } else if (hasAcceptAttachment) {
+                summary = `验收附件 ${acceptAttachmentIds.length} 个`;
+              }
+            }
+          }
           break;
         }
         // [工期对接测试与风险等级拆分 方案 v1.1 §3.1 点5·C4 新增] 对接测试通过：待对接测试 → 待验证。
@@ -6048,6 +6126,13 @@ module.exports = (deps) => {
           const reason = (typeof payload.reason === 'string' ? payload.reason.trim() : '');
           if (!reason) throw new SysTransitionError(400, 'RETURN_REASON_REQUIRED', '请填写打回原因');
           summary = reason;
+          // [2026-09-06 决策记录 D4/J6·验收打回附件] 附件可选，逐 id 校验归属复用 accept 同一份 helper
+          //   （resolveEvidenceAttachmentIds，codePrefix='RETURN'）。summary 恒=reason 不变（决策记录 J7：
+          //   附件只进 payload_json，不重复展示原因文本）。
+          const returnAttachmentIds = await resolveEvidenceAttachmentIds(issueId, payload.attachment_ids, 'RETURN');
+          if (returnAttachmentIds.length > 0) {
+            timelinePayloadJson = JSON.stringify({ attachment_ids: returnAttachmentIds });
+          }
           setFrags.push('return_count = return_count + 1', 'dev_estimated_at = NULL',
             'scheduled_start = NULL',    // 受理排期改造 §7.2（C6·补声明未实现缺口）：打回=预计完成失效→计划开工日随之失效（transitions.js return sideEffects 已声明·此前引擎未实现）
             'gate_deferred_at = NULL',   // [codex 100 号 HIGH-1] 打回=新一轮，roster 完成态保留但需求重新提交，清陈旧 deferred 标记（不该被后续 estimate/feasibility 误消费弹回 VERIFY）
@@ -6352,7 +6437,8 @@ module.exports = (deps) => {
       }
 
       // [7] timeline 写入（event_type + action_code 按 transition 常量，summary 按动作，round_no 仅 submit 非空 C3b，
-      //   payload_json 仅 liaison_test_pass 非空 C4/291 号 H-2·其余动作恒 NULL）
+      //   payload_json 由 liaison_test_pass / accept / return 三处写值 C4/291 号 H-2·[2026-09-06 决策记录
+      //   D3/D4/J4]·其余动作恒 NULL）
       await dbRunAsync(
         `INSERT INTO sys_issue_timeline
            (issue_id, event_type, from_status, to_status, summary, action_code, round_no, operator_id, operator_name, payload_json)
@@ -14276,6 +14362,24 @@ module.exports = (deps) => {
         if (!gateRecheck || SF.isInFamily(row.type, gateRecheck.status, 'TERMINAL')) {
           await sysRollback();
           return res.status(409).json({ error: '迭代单状态已变更（进入终态），请刷新重试', code: 'ATTACHMENT_BOUND_NOT_DELETABLE' });
+        }
+        // [codex 500 HIGH 采纳·2026-09-07·验收说明附件] 被时间线凭证引用的附件不可删——liaison_test_pass / accept /
+        //   return 三写点把附件 id 落进 sys_issue_timeline.payload_json.attachment_ids（决策记录 J6），物理删除会让
+        //   历史留痕悬空（时间线 📎 静默消失、审计链断）。锁内查引用（json_each 展开数组），命中即 409；主键
+        //   AUTOINCREMENT 保证 id 不复用，故只需挡删除。⚠️ 行为变更：此前 liaison_test_pass 凭证同样可删，本批一并
+        //   保护（凭证不可变是审计口径，传错了用新附件覆盖说明，不改历史）。
+        const evidenceRef = await dbGetAsync(
+          `SELECT COUNT(*) AS c FROM sys_issue_timeline t, json_each(t.payload_json, '$.attachment_ids') je
+             WHERE t.issue_id = ? AND t.payload_json IS NOT NULL AND je.value = ?`,
+          [id, attId]
+        );
+        if (evidenceRef && evidenceRef.c > 0) {
+          await sysRollback();
+          return res.status(409).json({
+            error: '该附件已作为验收/测试凭证关联到时间线留痕，不可删除（凭证不可变；如传错请另传新附件并在说明中注明）',
+            code: 'ATTACHMENT_REFERENCED_BY_TIMELINE',
+            referenced_by: evidenceRef.c,
+          });
         }
         // [codex 106 号 HIGH 回填] 锁内授权重验：admin/协调人身份=JWT role+SYS_BUG_LIAISON_USER_IDS 常量白名单
         //   （非 DB 可变态，预检读到即终值，不随时间窗口变化，故不重查）；仅"凭上传者资格"这一路径的合法性依赖

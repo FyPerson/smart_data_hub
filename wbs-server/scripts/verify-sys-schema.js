@@ -1079,14 +1079,15 @@ async function main() {
 
   // [12a] ⭐ [codex 291 号 H-2 收口·292 号 M-4 后注释修实（293-M2）] sys_issue_timeline.payload_json 列——
   //   TEXT + CHECK(json_valid)（292 号补约束后本注释原「纯 TEXT 无 CHECK」表述已过时），可空
-  //   （目前仅 liaison_test_pass 写值，其余 9 种 event_type 恒 NULL，见该列 DDL 注释）；写读圆整验证
+  //   （写点=引擎内 liaison_test_pass / accept / return 三个 case〔2026-09-06 验收说明附件·决策记录 J6 起〕，
+  //   其余动作恒 NULL，见该列 DDL 注释）；写读圆整验证
   //   （非仅列存在性）：写入一段结构化 JSON，读回精确等于原文，无编码/截断损耗。
   {
     const timelineCols = (await all('PRAGMA table_info(sys_issue_timeline)')).map(r => r.name);
     assert.ok(timelineCols.includes('payload_json'), 'sys_issue_timeline 应存在 payload_json 列');
     await assert.doesNotReject(
       run(`INSERT INTO sys_issue_timeline (issue_id, event_type, operator_id, operator_name, payload_json) VALUES (?, 'status_change', 1, 'admin', NULL)`, [issueId]),
-      'payload_json 可空（未写值的 9 种 event_type 恒 NULL，NULL 应合法插入）');
+      'payload_json 可空（未写值的动作恒 NULL，NULL 应合法插入）');
     const payloadSample = JSON.stringify({ evidence: 'both', cycle_no: 1, test_note: '含中文与"引号"的说明', attachment_ids: [10, 11] });
     await run(`INSERT INTO sys_issue_timeline (issue_id, event_type, operator_id, operator_name, payload_json) VALUES (?, 'status_change', 1, 'admin', ?)`, [issueId, payloadSample]);
     const readBack = await get(`SELECT payload_json FROM sys_issue_timeline WHERE issue_id = ? AND payload_json IS NOT NULL ORDER BY id DESC LIMIT 1`, [issueId]);

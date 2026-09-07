@@ -1,11 +1,15 @@
 #!/usr/bin/env node
 /**
- * 夹具播种：为数据协作「提交导出物」前端 UI 测试造两张 EXPORTING 单。
+ * 夹具播种：为数据协作「提交导出物」前端 UI 测试造 EXPORTING 单。
  *
  * 产出（既写 JSON 供独立调用，也可被 require 直接拿返回值）：
  *   · dc-testsingle.json —— 真直派单（assign_mode='admin_direct' + forwarded_to_exporter_at IS NULL）
  *   · dc-testnormal.json —— normal 流转单且**已三级转发**（forwarded_to_exporter_at 非 NULL），
  *                            精确复刻生产协作单 #45 形态（v1.164.2 放开无附件闭环的触发实证）。
+ *   · dc-testnormal2.json —— 【2026-09-06 新增】第二张 normal 已转发单，专供 admin 侧行政闭环用例
+ *                             （C-UI-7）消费，避免与 exporter 侧 C-UI-4/5/6 共用同一张 `normal`
+ *                             单——C-UI-4 会把 `normal` 真实闭环成 DONE，C-UI-7 需要一张仍处于
+ *                             EXPORTING 的新鲜单。
  *
  * 动机：原 Commit C Playwright 脚本硬依赖这两个 JSON 却没有配套播种脚本，夹具丢失后
  *   直接 ENOENT 崩溃、整套 UI 回归跑不了（2026-09-01 实遇）。本脚本把播种固化并可被自动调用。
@@ -27,6 +31,7 @@ const fx = require('./_test-fixture');
 
 const SINGLE_PATH = path.join(os.tmpdir(), 'dc-testsingle.json');
 const NORMAL_PATH = path.join(os.tmpdir(), 'dc-testnormal.json');
+const NORMAL2_PATH = path.join(os.tmpdir(), 'dc-testnormal2.json');
 
 function dbGet(sql, params) {
     return new Promise((resolve, reject) => {
@@ -59,7 +64,7 @@ async function makeExporting(assignMode, forwarded) {
 }
 
 /**
- * 播种两张单。返回 { single:{id,...}, normal:{id,...}, ids:[] }。
+ * 播种三张单。返回 { single:{id,...}, normal:{id,...}, normal2:{id,...}, ids:[] }。
  *
  * @param {object}  opts
  * @param {boolean} opts.quiet     静默（被其他脚本 require 时不打印）
@@ -100,6 +105,11 @@ async function seed(opts = {}) {
         createdIds.push(direct.id);
         const normal = await makeExporting('normal', '2026-09-01 17:29:37');
         createdIds.push(normal.id);
+        // 2026-09-06 新增：第二张 normal 已转发单，专供 admin 侧行政闭环用例（C-UI-7）——
+        //   与 exporter 侧 C-UI-4/5/6 共用的 `normal` 分开，避免 C-UI-4 把单闭环成 DONE 后
+        //   C-UI-7 拿到的已不是 EXPORTING 态。
+        const normal2 = await makeExporting('normal', '2026-09-01 17:29:37');
+        createdIds.push(normal2.id);
 
         // 形态自校验：防「播种成功但形态不对」静默误导下游 UI 断言（夹具错会让断言测的是别的东西）
         const bad = [];
@@ -109,23 +119,29 @@ async function seed(opts = {}) {
         if (normal.row.assign_mode !== 'normal' || normal.row.forwarded_to_exporter_at == null) {
             bad.push(`normal 单形态错: ${JSON.stringify(normal.row)}`);
         }
-        if (direct.row.status !== 'EXPORTING' || normal.row.status !== 'EXPORTING') {
-            bad.push(`状态非 EXPORTING: direct=${direct.row.status} normal=${normal.row.status}`);
+        if (normal2.row.assign_mode !== 'normal' || normal2.row.forwarded_to_exporter_at == null) {
+            bad.push(`normal2 单形态错: ${JSON.stringify(normal2.row)}`);
+        }
+        if (direct.row.status !== 'EXPORTING' || normal.row.status !== 'EXPORTING' || normal2.row.status !== 'EXPORTING') {
+            bad.push(`状态非 EXPORTING: direct=${direct.row.status} normal=${normal.row.status} normal2=${normal2.row.status}`);
         }
         if (bad.length) throw new Error('夹具形态校验失败:\n  ' + bad.join('\n  '));
 
         const single = { id: direct.id, adminToken, exporterToken };
         const norm = { id: normal.id, adminToken, exporterToken };
+        const norm2 = { id: normal2.id, adminToken, exporterToken };
 
         if (writeJson) {
             fs.writeFileSync(SINGLE_PATH, JSON.stringify(single, null, 2), 'utf8');
             fs.writeFileSync(NORMAL_PATH, JSON.stringify(norm, null, 2), 'utf8');
+            fs.writeFileSync(NORMAL2_PATH, JSON.stringify(norm2, null, 2), 'utf8');
         }
         if (!quiet) {
             console.log(`✓ 真直派单 #${direct.id}${writeJson ? '  → ' + SINGLE_PATH : ''}`);
             console.log(`✓ normal 已转发单 #${normal.id}（#45 形态）${writeJson ? '→ ' + NORMAL_PATH : ''}`);
+            console.log(`✓ normal 已转发单（第二张）#${normal2.id}${writeJson ? '→ ' + NORMAL2_PATH : ''}`);
         }
-        return { single, normal: norm, ids: createdIds };
+        return { single, normal: norm, normal2: norm2, ids: createdIds };
     } catch (e) {
         // 失败回滚：删掉本次已创建的单，避免半截夹具残留在库里
         await cleanupSeeded(createdIds, true);
@@ -153,7 +169,7 @@ async function cleanupSeeded(ids, quiet = false) {
     return errs;
 }
 
-module.exports = { seed, cleanupSeeded, SINGLE_PATH, NORMAL_PATH };
+module.exports = { seed, cleanupSeeded, SINGLE_PATH, NORMAL_PATH, NORMAL2_PATH };
 
 if (require.main === module) {
     // 独立 CLI 运行才落 JSON（供人工排查/手动跑 UI 脚本）；内嵌调用默认不写，见 seed() 注释

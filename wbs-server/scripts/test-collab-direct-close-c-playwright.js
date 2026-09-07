@@ -1,22 +1,27 @@
 /**
  * v1.120.0 Commit C 前端 UI 验证（Playwright）：直派大文件行政闭环前端配套
  *
- * 验证（UI 渲染/交互 + 一条端到端，后端逻辑由 verify-collab-direct-close-no-file 等覆盖）：
+ * 验证（UI 渲染/交互 + 端到端，后端逻辑由 verify-collab-direct-close-no-file /
+ *   verify-collab-admin-close-exporting 等覆盖）：
  *   C-UI-1 导出人·真直派单：提交弹框附件 * 隐藏 + 无附件提示条显示 + 概要标签变必填
  *   C-UI-2 admin·真直派 EXPORTING 单：footer 出现「🗂️ 直接行政闭环」按钮
  *   C-UI-3 normal 单（已三级转发·#45 形态）：
  *          ✅ 已放开 → 附件 * 隐藏 + 提示条显示 + 概要标签写明「不传附件时必填」
- *          ⛔ 未放开 → 概要红星不亮（有附件时可选）+ admin 仍无「直接行政闭环」按钮
+ *          ✅ 【2026-09-06 由「admin 仍无按钮」翻转】admin 对 normal 单也出现「🗂️ 直接行政闭环」按钮
+ *             （决策记录 D2：admin 行政闭环放开到任意 EXPORTING 单，不再限真直派单）
  *   C-UI-4 端到端·normal 单：不传附件 + 概要≥10字 → 真实提交成 DONE + 详情页显示「行政闭环」
+ *   C-UI-7【2026-09-06 新增】端到端·admin 对另一张 normal 已转发单点「直接行政闭环」→
+ *          填 reason ≥10 字 → 直查库 status=DONE ∧ sql_validation_status=admin_closed
  *
  * 沿革：v1.120.0 Commit C 建立（当时 C-UI-3 断言「normal 不放开」）；
- *   2026-09-01 v1.164.2 无附件闭环放开到导出人本人后，C-UI-3 前两条断言翻转、新增 C-UI-4。
+ *   2026-09-01 v1.164.2 无附件闭环放开到导出人本人后，C-UI-3 前两条断言翻转、新增 C-UI-4；
+ *   2026-09-06 决策记录 D2 放开 admin-submit-on-behalf 到任意 EXPORTING 单后，C-UI-3 第四条
+ *   断言（「admin 仍无按钮」）翻转为「admin 有按钮」，新增 C-UI-7 真实链路。
  *
- * 前置：dev 服务器运行 + 先跑 `node scripts/_seed-dc-ui-fixtures.js` 播种两张测试单
- *   （产出 <tmp>/dc-testsingle.json 真直派 + <tmp>/dc-testnormal.json normal 已转发）。
  * 前置：dev 服务器运行即可——**夹具由本脚本每次自动播种**（require ./make-dc-ui-fixtures）。
  *   原先硬读 <tmp>/dc-testsingle.json，夹具丢失即 ENOENT 崩溃、整套回归跑不了（2026-09-01 实遇）；
  *   且 C-UI-4 会把 normal 单真实闭环成 DONE，复用旧夹具必判红 → 恒新播种最稳。跑完自动清理测试单。
+ *   C-UI-7 消费 seed() 新增的第二张 `normal2` 单，与 C-UI-4/5/6 消费的 `normal` 单互不干扰。
  * 运行：node scripts/test-collab-direct-close-c-playwright.js
  */
 'use strict';
@@ -70,7 +75,8 @@ async function main() {
         seeded = await fixtures.seed({ quiet: true });   // 内嵌调用不落 JSON（token 不外泄到临时目录）
         const single = seeded.single;
         const normal = seeded.normal;
-        console.log(`（夹具：真直派单 #${single.id} / normal 已转发单 #${normal.id}）`);
+        const normal2 = seeded.normal2;
+        console.log(`（夹具：真直派单 #${single.id} / normal 已转发单 #${normal.id} / normal 已转发单（第二张）#${normal2.id}）`);
 
         browser = await chromium.launch();
         // ===== C-UI-1 导出人视角 =====
@@ -127,12 +133,15 @@ async function main() {
         // ===== C-UI-3 normal 单（已三级转发·#45 形态）=====
         // ⚠️ 2026-09-01 v1.164.2：本段前两条断言由「normal 不放开」翻转为「normal 也放开」。
         //   原契约=无附件闭环仅真直派单；新契约=**导出人本人**在任意 EXPORTING 单都可无附件闭环。
-        //   ⭐ 第三、四条断言**刻意保持不变**，它们钉住的是本次**未放开**的部分：
-        //     · 概要红星只对真直派亮（normal 单有附件时概要仍可选）
-        //     · admin 的「🗂️ 直接行政闭环」按钮对 normal 单仍不出现
-        //       ——即 codex 02 审 HIGH-1「防 admin 越过 exporter 闭环」的收严原样保留。
+        //   ⭐ 第三条断言刻意保持不变：概要红星只对真直派亮（normal 单有附件时概要仍可选，
+        //     这属于 submit-export 端点自己的守卫③，2026-09-06 本次未动）。
+        //   ⭐ 第四条断言【2026-09-06 由「admin 仍无按钮」翻转为「admin 有按钮」】：
+        //     决策记录 D2 拍板 admin-submit-on-behalf 的 EXPORTING 分支放开到任意来源
+        //     （normal 已转发单 / fallback 重流转单 / 真直派单一视同仁），codex 02 审 HIGH-1
+        //     「防 admin 越过 exporter 闭环」的收严意图未被推翻——用户已明确接受这一新边界，
+        //     留证沿用 reason≥10 字 + admin_closed + flow（见 verify-collab-admin-close-exporting B2/B3）。
         {
-            console.log('\n=== C-UI-3 normal EXPORTING 单：附件 UI 已放开（v1.164.2）+ admin 仍无「直接行政闭环」按钮 ===');
+            console.log('\n=== C-UI-3 normal EXPORTING 单：附件 UI 已放开（v1.164.2）+ admin 现有「直接行政闭环」按钮（2026-09-06）===');
             // 导出人视角：附件 * 隐藏、无附件提示条显示、概要红星仍不亮（有附件时可选）
             {
                 const ctx = await browser.newContext();
@@ -158,13 +167,13 @@ async function main() {
                 }
                 await ctx.close();
             }
-            // admin 视角：仍无「直接行政闭环」按钮（本次**不放开** admin 越权路径）
+            // admin 视角：【2026-09-06 翻转】现有「直接行政闭环」按钮（决策记录 D2 放开）
             {
                 const ctx = await browser.newContext();
                 const page = await loginAs(ctx, normal.adminToken, normal.id);
                 await page.waitForTimeout(1500);
                 const closeBtnVisible = await page.locator('button:has-text("直接行政闭环")').first().isVisible().catch(() => false);
-                ok('C-UI-3 admin 仍无「直接行政闭环」按钮（HIGH-1 收严保留·未放开项）', !closeBtnVisible);
+                ok('C-UI-3 admin 现有「直接行政闭环」按钮（2026-09-06 决策记录 D2 放开）', closeBtnVisible);
                 await ctx.close();
             }
 
@@ -274,6 +283,53 @@ async function main() {
                 }
                 await ctx.close();
             }
+        }
+
+        // ===== C-UI-7【2026-09-06 新增】端到端·admin 视角对另一张 normal 已转发 EXPORTING 单
+        //   点「直接行政闭环」→ 填 reason ≥10 字 → 直查库终态 =====
+        // 用 seed() 新增的第二张 normal2 单（与 C-UI-4 消费的 normal 单区分开，
+        //   避免 C-UI-4 先把 normal 单闭环成 DONE 后本用例拿到的已不是 EXPORTING 态）。
+        console.log('\n=== C-UI-7 端到端·admin 对 normal2（已转发）EXPORTING 单点「直接行政闭环」→ DONE ===');
+        {
+            const ctx = await browser.newContext();
+            const page = await loginAs(ctx, normal2.adminToken, normal2.id);
+            await page.waitForTimeout(1500);
+            const closeBtn = page.locator('button:has-text("直接行政闭环")').first();
+            const closeBtnVisible = await closeBtn.isVisible().catch(() => false);
+            ok('C-UI-7 「🗂️ 直接行政闭环」按钮可见（normal2 已转发单）', closeBtnVisible);
+            if (closeBtnVisible) {
+                const REASON = '大文件线下已转交业务方，导出人不便自助提交，admin 代为行政闭环';
+                await closeBtn.click();
+                await page.waitForTimeout(500);
+                const modalOpen = await page.locator('#adminSubmitModal.open').isVisible().catch(() => false);
+                ok('C-UI-7 行政闭环弹框已打开', modalOpen);
+                if (modalOpen) {
+                    await page.fill('#f_admin_submit_reason', REASON);
+                    await page.click('#btnAdminSubmit');
+                    await page.waitForTimeout(2000);
+                    const modalStillOpen = await page.locator('#adminSubmitModal.open').isVisible().catch(() => false);
+                    ok('C-UI-7 弹框已关闭（提交成功）', !modalStillOpen, '弹框未关说明被拒了');
+                    // 直查库：终态精确断言（UI 文案不足以证明状态真的变了）
+                    const row = await dbGet(
+                        'SELECT status, sql_validation_status, done_at FROM collab_requests WHERE id=?',
+                        [normal2.id]);
+                    ok('C-UI-7 库内 status=DONE', row && row.status === 'DONE', JSON.stringify(row));
+                    ok('C-UI-7 库内 sql_validation_status=admin_closed', row && row.sql_validation_status === 'admin_closed', JSON.stringify(row));
+                    ok('C-UI-7 库内 done_at 已写', !!(row && row.done_at), JSON.stringify(row));
+                    // Opus 预筛 L2：exporter 自助 submit-export 的 EXPORTING→DONE 同样写 admin_closed，上面三项分不出走的是哪条路；
+                    //   用操作日志钉住「确实走的是 admin-submit-on-behalf 端点」。
+                    const opLogs = await dbAll(
+                        "SELECT reason FROM collab_operation_logs WHERE collab_request_id=? AND operation_type='ADMIN_SUBMIT_ON_BEHALF'",
+                        [normal2.id]);
+                    ok('C-UI-7 ADMIN_SUBMIT_ON_BEHALF 日志恰 1 条', opLogs.length === 1, `got ${opLogs.length}`);
+                    if (opLogs.length === 1) {
+                        let flow = null;
+                        try { flow = JSON.parse(opLogs[0].reason).flow; } catch (_) { flow = 'PARSE_ERROR'; }
+                        ok('C-UI-7 日志 flow=exporting_to_done_admin_closure', flow === 'exporting_to_done_admin_closure', String(flow));
+                    }
+                }
+            }
+            await ctx.close();
         }
 
         console.log(`\n========== 结果：${pass} 通过 / ${fail} 失败 ==========`);

@@ -18928,8 +18928,10 @@ app.post('/api/collab/requests/:id/submit-export',
             //     → 单子无法闭环。证明 normal 流转单同样存在「大文件线下转交」的真实场景。
             //   ⚠️ 为什么放开不推翻下述 codex 02 审 HIGH-1 的收严意图：
             //     HIGH-1 防的是「**admin 越过 exporter** 单方面闭环 normal 单」，其载体是
-            //     admin-submit-on-behalf 的 EXPORTING 分支——**那道守卫本次原样保留，不在放开范围内**。
-            //     本端点已由上方 ONLY_EXPORTER_CAN_SUBMIT 保证调用者恒为「当前 exporter_user_id 本人」，
+            //     admin-submit-on-behalf 的 EXPORTING 分支——该分支 2026-09-01 本次放开时原样保留，
+            //     但已于 **2026-09-06 随决策记录 D2 放开到任意 EXPORTING 单**（用户明确拍板接受
+            //     「admin 越过导出人对任意来源 EXPORTING 单行政闭环」，见该端点内 2026-09-06 注释）。
+            //     本端点（submit-export）已由上方 ONLY_EXPORTER_CAN_SUBMIT 保证调用者恒为「当前 exporter_user_id 本人」，
             //     是导出人**自助**闭环自己手上的单，不存在越权维度；exporter 本就有权决定交付物形态
             //     （传两个附件同样直接 DONE，无附件只是少了平台存档、多了概要留痕）。
             //   ∴ 放开后无附件路径的不变量 = 「status='EXPORTING' + exporter 本人 + 未归档 + 概要≥10 字」，
@@ -20129,6 +20131,8 @@ app.post('/api/collab/requests/:id/friction-record', authenticateToken, requireA
 // 语义：admin 把协作单强制推进到 DONE，不走 smoke test、不要求传附件。
 //   - SUBMITTED → DONE（v1.70.4 原语义）：admin 替 developer 画句号
 //   - DONE → DONE（v1.72.10 扩展）：admin 修正已 exporter 闭环单的交付物文件（替换 result_data）
+//   - EXPORTING → DONE（v1.120.0 仅真直派；**2026-09-06 决策记录 D2 放开到任意来源**）：大文件线下移交、
+//     导出人不便自助提交时 admin 代为行政闭环（admin 越过导出人的边界由用户明确接受，留证=reason+admin_closed+flow）
 // 触发场景：
 //   1) D1→D2 链路（v1.70.4 原场景）：admin 录错关键字段 → 开发上传 smoke 失败 → admin-fix
 //      修字段后，开发已完成本职工作，admin 走本 endpoint 单方面闭环。
@@ -20138,13 +20142,16 @@ app.post('/api/collab/requests/:id/friction-record', authenticateToken, requireA
 //
 // 业务规则：
 //   - 只 admin 可调
-//   - 状态机：SUBMITTED → DONE 或 DONE → DONE（v1.72.10 扩展；PENDING 还没提交不该跳过；ARCHIVED 已严格归档）
+//   - 状态机：SUBMITTED → DONE 或 DONE → DONE 或 EXPORTING → DONE（v1.72.10 / v1.120.0 / 2026-09-06 三次扩展；
+//     PENDING_ASSIGN/PENDING 还没到导出或提交环节不该跳过；ARCHIVED 已严格归档）
 //   - sql_validation_status='admin_closed'（新值，区别于 passed/failed/bypassed，表示"行政闭环未验证"）
 //   - sql_validation_error 强制清空（避免详情页继续展示旧错误污染语义）
 //   - done_at 取值（v1.70.4 codex 30 审 #2：合并到 UPDATE 子查询消除 SELECT/UPDATE 间附件集合变化竞态）：
 //       1. 优先取 collab_attachments 中 status='active' 的最新 created_at（dev 最后一次有效提交时间）
 //       2. 若无 active 附件，取 collab_requests.deadline（要求完成时间）
 //       3. 若 deadline 也异常（不应该，schema NOT NULL），最后兜底 datetime('now','localtime')
+//       ⚠️ EXPORTING → DONE 分支例外：done_at **恒** datetime('now')（v1.120.0 轻复审 HIGH：该分支语义=本次
+//          闭环动作时间，且不能被 fallback/reassign 残留的历史 active 附件时间带偏），见下方 UPDATE 处注释。
 //   - reason ≥10 字 ≤500 字（与 admin-fix / bypass / archive 一致）
 //   - 不发钉钉（只写日志，与 bypass 同节奏）
 //   - 不动 failed 历史附件、friction_*、submission_version（保留审计证据）
@@ -20218,6 +20225,28 @@ app.post('/api/collab/requests/:id/admin-submit-on-behalf',
             cleanupPending();
             return res.status(400).json({ error: '行政闭环原因不能超过 500 个字符', code: 'REASON_TOO_LONG' });
         }
+        // [codex 08 HIGH-1 采纳·2026-09-06] 可选乐观前置 expected_status：本端点一条路由承载三种转移
+        //   （SUBMITTED→DONE / DONE→DONE 修正 / EXPORTING→DONE），互斥锁只串行化事务、不保留请求发起时的意图——
+        //   排队中的第二个请求拿锁后重读到别人刚写成的 DONE，会被**重解释**为 DONE→DONE 修正（带附件时直接替换
+        //   刚提交的交付物、再落一条修正日志）。D2 放开 EXPORTING 到任意来源后该窗口扩大（exporter 自助提交与
+        //   admin 代闭环可能同时发生），故前端从打开弹层时的 currentDetail.status 传入本字段，锁内要求 DB 现状严格
+        //   等于它，否则 409 STATE_CHANGED（与下方 UPDATE changes=0 的兜底同码，语义一致=「状态已变更，请刷新重试」）。
+        //   [codex 08-R 收紧] ①字段**存在**即校验：空串/纯空白/重复字段（multer 收成数组）/非白名单值一律 400
+        //     INVALID_EXPECTED_STATUS（fail-closed，不再把空值当「未传」静默放行）；②**带附件的请求必须携带**（见锁内
+        //     EXPECTED_STATUS_REQUIRED）——能覆盖交付物的只有带附件路径，无附件的排队请求本就被 DONE 修正闸
+        //     MISSING_ATTACHMENT_FOR_DONE_FIX 挡住，故「不带附件可省略」不留竞态口；既有无附件调用零改动。
+        const ADMIN_SUBMIT_EXPECTED_STATUSES = ['SUBMITTED', 'DONE', 'EXPORTING'];
+        const hasExpectedStatusField = Object.prototype.hasOwnProperty.call(req.body || {}, 'expected_status');
+        const expectedStatusRaw = hasExpectedStatusField ? req.body.expected_status : undefined;
+        let expectedStatus = null;
+        if (hasExpectedStatusField) {
+            const trimmed = (typeof expectedStatusRaw === 'string') ? expectedStatusRaw.trim() : '';
+            if (!trimmed || !ADMIN_SUBMIT_EXPECTED_STATUSES.includes(trimmed)) {
+                cleanupPending();
+                return res.status(400).json({ error: `expected_status 非法（须为 ${ADMIN_SUBMIT_EXPECTED_STATUSES.join(' / ')} 之一的非空字符串）`, code: 'INVALID_EXPECTED_STATUS' });
+            }
+            expectedStatus = trimmed;
+        }
 
         const userId = req.user.id;
         const userName = req.user.display_name || req.user.username;
@@ -20250,6 +20279,8 @@ app.post('/api/collab/requests/:id/admin-submit-on-behalf',
         }
 
         try {
+            // 2026-09-06 D2 放开后 assign_mode / forwarded_to_exporter_at 在本端点内已无判据消费（准入与 WHERE
+            //   都只看 status），两列仍投影只为日志/排障时能看到来源形态，不再参与任何分支判断。
             const collab = await dbGetAsync(
                 `SELECT id, status, deadline, description, attachment_dir, submission_version,
                         archived_at, archived_final_at, sql_validation_status,
@@ -20270,26 +20301,32 @@ app.post('/api/collab/requests/:id/admin-submit-on-behalf',
                 cleanupPending();
                 return res.status(409).json({ error: '已归档协作单不允许行政闭环', code: 'ARCHIVED_PROTECTED' });
             }
+            // [codex 08 HIGH-1 采纳] 锁内核对乐观前置（见上方 expectedStatus 注释）：调用方声明的意图状态与 DB 现状不符
+            //   → 409 STATE_CHANGED，绝不把「想闭 EXPORTING」的请求静默重解释成「修正 DONE」。放在准入判据之前，
+            //   让"意图错位"先于"状态不允许"被报出（两者都 409，但文案不同，前者提示刷新）。
+            if (expectedStatus !== null && collab.status !== expectedStatus) {
+                cleanupPending();
+                return res.status(409).json({
+                    error: `协作单状态已由 ${expectedStatus} 变为 ${collab.status}，本次操作未执行，请刷新后重试`,
+                    code: 'STATE_CHANGED',
+                    expected_status: expectedStatus,
+                    current_status: collab.status,
+                });
+            }
             // v1.72.10：扩展支持 DONE→DONE（admin 修正已 exporter 闭环单的交付物）
             // v1.120.0 Commit B：扩展支持 EXPORTING→DONE（admin 在直派导出态直接行政闭环，
             //   缺口=十几 G 大文件线下传递、导出人不便自助提交时由 admin 兜底闭环）。
-            //   ⚠️ EXPORTING 仅限「真直派单」= assign_mode='admin_direct' && forwarded_to_exporter_at IS NULL
-            //   （与 submit-export 无附件路径同判据，见该端点状态转换矩阵注释）。
-            //   正常流转单（normal）或 fallback 后重流转单的 EXPORTING = exporter 待提交态，
-            //   不该被 admin 意外行政闭环绕过 exporter 验收（[[feedback_state_machine_update_invariant]]）。
-            const isGenuineDirectExporting =
-                collab.assign_mode === 'admin_direct' && collab.forwarded_to_exporter_at == null;
+            //   v1.120.0 仅真直派 → 2026-09-06 放开到任意 EXPORTING 单（决策记录 D2）：
+            //   normal 已转发/fallback 重流转的 EXPORTING 也允许 admin 越过导出人行政闭环——
+            //   用户明确接受该边界，留证=reason≥10 字+admin_closed+flow。
             const isAllowedAdminSubmitState =
                 collab.status === 'SUBMITTED' ||
                 collab.status === 'DONE' ||
-                (collab.status === 'EXPORTING' && isGenuineDirectExporting);
+                collab.status === 'EXPORTING';
             if (!isAllowedAdminSubmitState) {
                 cleanupPending();
-                const exportingHint = collab.status === 'EXPORTING'
-                    ? '（EXPORTING 仅直派单可由 admin 行政闭环）'
-                    : '';
                 return res.status(409).json({
-                    error: `当前状态 ${collab.status} 不允许行政闭环（仅 SUBMITTED / DONE / 直派 EXPORTING 可走）${exportingHint}`,
+                    error: `当前状态 ${collab.status} 不允许行政闭环（仅 SUBMITTED / DONE / EXPORTING 可走）`,
                     code: 'STATE_NOT_ALLOWED_FOR_ADMIN_SUBMIT',
                     current_status: collab.status,
                 });
@@ -20302,6 +20339,19 @@ app.post('/api/collab/requests/:id/admin-submit-on-behalf',
                 return res.status(400).json({
                     error: 'DONE 状态行政修正必须上传 result_data 替换交付物',
                     code: 'MISSING_ATTACHMENT_FOR_DONE_FIX',
+                });
+            }
+            // [codex 08-R HIGH 收紧·2026-09-07] 带附件的请求必须声明意图状态：附件是唯一能覆盖交付物的路径，若允许省略
+            //   expected_status，排队中的「想闭 EXPORTING」带附件请求拿锁后仍会被上方 DONE 分支接纳成 DONE→DONE 修正
+            //   （替换刚提交的交付物）。放在状态准入与 DONE 无附件闸**之后**：状态本就不允许的请求仍先收到 409（V9a/V9b
+            //   语义不变），只有走到"要动附件"这一步才要求意图声明。前端恒传（openAdminSubmitDialog 快照），既有无附件
+            //   脚本调用不受影响；带附件脚本调用须显式传 expected_status（本仓 verify/e2e 已同步）。
+            if (hasAdminUpload && expectedStatus === null) {
+                cleanupPending();
+                return res.status(400).json({
+                    error: '带附件的行政闭环/修正必须携带 expected_status（打开弹层时的单据状态），以防排队请求被重解释为对新状态的修正',
+                    code: 'EXPECTED_STATUS_REQUIRED',
+                    current_status: collab.status,
                 });
             }
 
@@ -20430,20 +20480,20 @@ app.post('/api/collab/requests/:id/admin-submit-on-behalf',
                 //   - DONE→DONE 路径：COALESCE(done_at, ...) 已有 done_at 保留，不被新上传附件 max(created_at) 改写
                 //     业务上 admin 兜底修文件不应改写"首次完成时间"
                 // v1.120.0 Commit B：EXPORTING→DONE 走与 SUBMITTED→DONE 同款（isDoneFix=false → done_at 走
-                //   COALESCE 子查询 + sql_validation_status='admin_closed'），语义=admin 替直派导出人画句号未走 smoke。
+                //   COALESCE 子查询 + sql_validation_status='admin_closed'），语义=admin 替导出人（任意来源单·2026-09-06 D2）画句号未走 smoke。
                 const isDoneFix = (collab.status === 'DONE');
                 const isExportingClosure = (collab.status === 'EXPORTING');
-                // v1.120.0 Commit B：WHERE 加 EXPORTING（真直派下沉守卫），有附件路径不影响。
-                //   EXPORTING 分支必须带 assign_mode='admin_direct' AND forwarded_to_exporter_at IS NULL，
-                //   防止 SELECT 与 UPDATE 之间被并发改状态，让写点兜住「仅真直派 EXPORTING 可 admin 闭环」不变量。
-                const exportingWhereGuard = isExportingClosure
-                    ? ` AND assign_mode = 'admin_direct' AND forwarded_to_exporter_at IS NULL`
-                    : '';
+                // 2026-09-06 放开（决策记录 D2）：EXPORTING 分支的写点不变量简化为
+                //   「status='EXPORTING' ∧ 未归档（既有 archived_at/archived_final_at 守卫）」，
+                //   不再要求 assign_mode='admin_direct' AND forwarded_to_exporter_at IS NULL——
+                //   normal 已转发单、fallback 重流转单的 EXPORTING 现在都允许 admin 行政闭环，
+                //   与上方准入判据 isAllowedAdminSubmitState 同步放开，SELECT/UPDATE 之间的并发
+                //   改状态仍由 status IN (...) + archived 双守卫兜住。
                 const allowedStatesInWhere = isExportingClosure
                     ? `('EXPORTING')`
                     : `('SUBMITTED', 'DONE')`;
                 // v1.120.0 Commit B codex 02-B 审 MED + 末次审 MED-3 + 轻复审 HIGH 采纳（done_at = 本次闭环时间）：
-                //   EXPORTING→DONE 是直派大文件「快速留痕闭环」，done_at 语义 = 本次行政闭环动作时间。
+                //   EXPORTING→DONE 是大文件线下移交类「快速留痕闭环」（v1.120.0 直派起·2026-09-06 D2 任意来源），done_at 语义 = 本次行政闭环动作时间。
                 //   ⭐ 轻复审 HIGH 收严：EXPORTING→DONE **无论有无本次上传，done_at 一律 datetime('now')**。
                 //     不再查「全表 active 附件 MAX(created_at)」——该子查询无法限定到「本次插入的附件」，
                 //     若单上有历史残留 active 附件（fallback/reassign 边界）且其 created_at 更晚，MAX 会取到历史时间。
@@ -20476,7 +20526,7 @@ app.post('/api/collab/requests/:id/admin-submit-on-behalf',
                       WHERE id = ?
                         AND status IN ${allowedStatesInWhere}
                         AND archived_at IS NULL
-                        AND archived_final_at IS NULL${exportingWhereGuard}`,
+                        AND archived_final_at IS NULL`,
                     [hasAdminUpload ? attachmentDirName : null, id]
                 );
 
@@ -20541,7 +20591,7 @@ app.post('/api/collab/requests/:id/admin-submit-on-behalf',
             // flow 取值（v1.120.0 Commit B 加 exporting_to_done_admin_closure 第三态）：
             //   · SUBMITTED→DONE = 'submitted_to_done_admin_closure'（admin 替开发画句号）
             //   · DONE→DONE      = 'done_to_done_admin_fix'（admin 修正已闭环单交付物）
-            //   · EXPORTING→DONE = 'exporting_to_done_admin_closure'（admin 在直派导出态直接行政闭环·大文件线下传递）
+            //   · EXPORTING→DONE = 'exporting_to_done_admin_closure'（admin 对任意来源 EXPORTING 单直接行政闭环·大文件线下传递·2026-09-06 D2 起不限直派）
             const adminSubmitFlow =
                 collab.status === 'DONE' ? 'done_to_done_admin_fix'
                 : collab.status === 'EXPORTING' ? 'exporting_to_done_admin_closure'

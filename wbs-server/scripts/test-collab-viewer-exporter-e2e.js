@@ -92,6 +92,8 @@ async function postGenericAttachment(reqId, token) {
 async function postAdminSubmitOnBehalf(reqId, token, options = {}) {
     const fd = new FormData();
     fd.append('reason', options.reason || 'admin e2e 兑底修正');
+    // [codex 08-R·2026-09-07] 带附件的调用须声明意图状态（后端 EXPECTED_STATUS_REQUIRED）；调用点按场景传 'DONE'/'EXPORTING'
+    if (options.expectedStatus) fd.append('expected_status', options.expectedStatus);
     if (options.uploadResultData !== false) {
         const buf = Buffer.from('admin e2e replacement result_data ' + Date.now());
         fd.append('result_data', new Blob([buf]), 'admin-fix.xlsx');
@@ -282,7 +284,8 @@ defTest('V8: viewer DONE → admin 上传 result_data 替换 → 仍 DONE + sql_
 
     // 2. admin 走 admin-submit-on-behalf 上传新 result_data（codex 50 H-2 修订：必须 multipart 上传）
     const res = await postAdminSubmitOnBehalf(cr.body.id, adminToken, {
-        reason: 'admin 兑底修正 viewer 上传错误（v1.72.10 e2e V8 验证 DONE→DONE multipart 上传替换）'
+        reason: 'admin 兑底修正 viewer 上传错误（v1.72.10 e2e V8 验证 DONE→DONE multipart 上传替换）',
+        expectedStatus: 'DONE'   // codex 08-R：带附件须声明意图状态
     });
     if (res.status !== 200) {
         throw new Error(`admin-submit-on-behalf DONE→DONE expected 200, got ${res.status} ${JSON.stringify(res.body)}`);
@@ -344,7 +347,8 @@ defTest('V8c: DONE smoke passed 单 admin 调 admin-submit-on-behalf → sql_val
     });
 
     const res = await postAdminSubmitOnBehalf(ctx.id, adminToken, {
-        reason: 'admin 替换 smoke passed 单的交付物（v1.72.10 codex 50 H-1 验证不降级）'
+        reason: 'admin 替换 smoke passed 单的交付物（v1.72.10 codex 50 H-1 验证不降级）',
+        expectedStatus: 'DONE'   // codex 08-R：带附件须声明意图状态
     });
     if (res.status !== 200) {
         throw new Error(`expected 200, got ${res.status} ${JSON.stringify(res.body)}`);
@@ -361,9 +365,12 @@ defTest('V8c: DONE smoke passed 单 admin 调 admin-submit-on-behalf → sql_val
 
 // ============================================================
 // V9: v1.72.10 codex 50 L-1 修订 — admin-submit-on-behalf 状态准入边界全覆盖（参数化）
-// 仅 SUBMITTED/DONE 放行，PENDING_ASSIGN/PENDING/EXPORTING/ARCHIVED/archived_final 全拒
+// 原：仅 SUBMITTED/DONE 放行，PENDING_ASSIGN/PENDING/EXPORTING/ARCHIVED/archived_final 全拒
+// 2026-09-06（决策记录 D2）：EXPORTING 放开为任意来源均放行（V9c 由 409 翻转为 200 + DONE）；
+//   PENDING_ASSIGN/PENDING（V9a/V9b）与 ARCHIVED（V9d·ARCHIVED_PROTECTED）不受影响，仍 409；
+//   archived_final（软归档终态）历史上就没有独立用例（原头注释属 overclaim），本次不补。
 // ============================================================
-defTest('V9: admin-submit-on-behalf 状态边界 4 种非法状态全部 409', async () => {
+defTest('V9: admin-submit-on-behalf 状态边界 —— PENDING_ASSIGN/PENDING/ARCHIVED 409、EXPORTING 200(2026-09-06 放开)', async () => {
     const adminToken = await fx.signAs(fx.ADMIN_ID);
 
     // V9a: PENDING_ASSIGN → STATE_NOT_ALLOWED_FOR_ADMIN_SUBMIT
@@ -390,15 +397,27 @@ defTest('V9: admin-submit-on-behalf 状态边界 4 种非法状态全部 409', a
         }
     }
 
-    // V9c: EXPORTING → STATE_NOT_ALLOWED_FOR_ADMIN_SUBMIT
+    // V9c【2026-09-06 由 409 翻转为 200】：EXPORTING（本夹具 assign_mode 默认 'normal'，并显式写
+    //   forwarded_to_exporter_at 模拟三级转发——normal 进 EXPORTING 在生产只能经 forward 写非 NULL，
+    //   见 server.js submit-export 守卫①推导；Opus 预筛 M1）→ 决策记录 D2 放开后允许 admin 行政闭环，库内应落 DONE。
+    //   V9a/V9b（PENDING_ASSIGN / PENDING）不受本次放开影响，原样保持 409。
+    //   uploadResultData:false——聚焦状态放行本身，不掺附件路径（附件路径由
+    //   verify-collab-admin-close-exporting.js 的 B12 覆盖）。
     {
         const ctx = await fx.createPendingFixture();
         createdFixtureIds.push(ctx.id);
-        await fx.setCollabState(ctx.id, { status: 'EXPORTING', exporter_user_id: fx.EXPORTER_ID, exporter_name: '示例开发A' });
-        const res = await postAdminSubmitOnBehalf(ctx.id, adminToken, { reason: 'V9c EXPORTING 不应允许' });
-        if (res.status !== 409) throw new Error(`V9c expected 409, got ${res.status}`);
-        if (res.body && res.body.code !== 'STATE_NOT_ALLOWED_FOR_ADMIN_SUBMIT') {
-            throw new Error(`V9c expected STATE_NOT_ALLOWED_FOR_ADMIN_SUBMIT, got ${res.body && res.body.code}`);
+        await fx.setCollabState(ctx.id, { status: 'EXPORTING', exporter_user_id: fx.EXPORTER_ID, exporter_name: '示例开发A', forwarded_to_exporter_at: '2026-09-01 17:29:37' });
+        const res = await postAdminSubmitOnBehalf(ctx.id, adminToken, {
+            reason: 'V9c normal 单 EXPORTING 行政闭环放开验证',
+            uploadResultData: false,
+        });
+        if (res.status !== 200) throw new Error(`V9c expected 200, got ${res.status} ${JSON.stringify(res.body)}`);
+        const row = await getCollab(ctx.id);
+        if (!row || row.status !== 'DONE') {
+            throw new Error(`V9c expected 库内 status=DONE, got ${JSON.stringify(row)}`);
+        }
+        if (row.sql_validation_status !== 'admin_closed') {
+            throw new Error(`V9c expected sql_validation_status=admin_closed, got ${row.sql_validation_status}`);
         }
     }
 

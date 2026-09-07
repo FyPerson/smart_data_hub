@@ -124,6 +124,8 @@ async function setCollabState(id, patch) {
         'exporter_user_id', 'exporter_name',
         // v1.72.3 admin 直派模式
         'assign_mode',
+        // 2026-09-06：V9c 造「normal 已转发 EXPORTING」真实形态（Opus 预筛 M1）
+        'forwarded_to_exporter_at',
         // 导出通知业务方（2026-05-29）：造 DONE 直派单 + 测 done_* 已读跟踪
         'done_notified_at', 'done_notify_message_key', 'done_read_at',
         // 通知/对接人字段（造测试单时直接设）

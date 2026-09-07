@@ -3544,7 +3544,8 @@
     async function siOpenDrawer(id) {
         // P2 迭代（弹窗式）：切单时清空三块上传弹窗组件残留（防上一单未上传的选择串到本单·revoke objectURL）。
         // S4：resume-spec（重启弹窗附件）同批纳入——切单同样应清残留，避免上一单的选择串到本单。
-        ['modal-spec', 'modal-delivery', 'modal-screenshot', 'resume-spec'].forEach(k => siPickerReset(k));
+        // [2026-09-06 决策记录 J8] accept-evidence/return-evidence 同批纳入——理由同上。
+        ['modal-spec', 'modal-delivery', 'modal-screenshot', 'resume-spec', 'accept-evidence', 'return-evidence'].forEach(k => siPickerReset(k));
         siOpenId = id;
         // codex123 末次审 MED-1：切单起手即失效旧缩略图（在替换 siDBody 前 revoke + 递增代际），
         //   使"切单即失效"而非"渲染成功才失效"——否则 siRenderDrawer 请求挂起/非 403-404 失败时
@@ -3562,7 +3563,7 @@
     }
     function siCloseDrawer() {
         siOpenId = null; siDetail = null;
-        ['modal-spec', 'modal-delivery', 'modal-screenshot', 'resume-spec'].forEach(k => siPickerReset(k));   // P2 迭代：关闭清理三块上传弹窗组件资源（S4 补 resume-spec）
+        ['modal-spec', 'modal-delivery', 'modal-screenshot', 'resume-spec', 'accept-evidence', 'return-evidence'].forEach(k => siPickerReset(k));   // P2 迭代：关闭清理三块上传弹窗组件资源（S4 补 resume-spec，2026-09-06 决策记录 J8 补 accept/return-evidence）
         siRevokeAttThumbs();   // 附件融入：关抽屉 revoke 缩略图 objectURL 防内存泄漏
         document.getElementById('siOverlay').classList.remove('open');
         document.getElementById('siDrawer').classList.remove('open');
@@ -4386,6 +4387,31 @@
                     attHtml = '<span class="si-tl-att">' + files.map(a =>
                         `<a onclick="siDownloadAtt(${siOpenId},${a.id})">📎${esc(a.original_name || a.file_name)}</a>`).join('') + '</span>';
                 }
+            }
+            // [2026-09-07 决策记录 J13 修订·三写点统一凭证展示] 通用凭证渲染——payload_json.attachment_ids
+            //   非空的行按 id 从 atts 匹配渲染 📎，**不按 action_code 收窄判据**，故对三个写点统一生效：
+            //   liaison_test_pass（对接测试通过·evidence='attachment'/'both' 时带该键，见 index.js case
+            //   'liaison_test_pass'）、accept、return（均见 index.js case 'accept'/'return'）——首版实现
+            //   曾误写"当前仅 accept/return 两个写点会带该键"，S2a Opus 预筛 HIGH 指出对接测试通过行
+            //   （同为 event_type='status_change'）payload_json 同构含 attachment_ids 却被注释排除在外，
+            //   主会话裁定该外溢是期望行为（对接测试通过的凭证附件同样值得在时间线直接可见，不必先打开
+            //   附件区）而非缺陷，本注释据此订正为如实描述，代码逻辑本身零改动。任意 attachment_type
+            //   （非仅 delivery——J5 附件类型虽固定 screenshot，但历史 delivery 附件也可能被选作验收/
+            //   测试凭证，见 resolveEvidenceAttachmentIds 校验口径）匹配，渲染与 submit 行同形态的 📎
+            //   下载链接。parse 失败/非本批 schema 静默跳过（既有绝大多数行 payload_json 为 null，
+            //   `if (e.payload_json)` 提前短路，不进 try 分支）。
+            if (e.payload_json) {
+                try {
+                    const p = JSON.parse(e.payload_json);
+                    if (p && Array.isArray(p.attachment_ids) && p.attachment_ids.length) {
+                        const evidenceIdSet = new Set(p.attachment_ids);
+                        const evidenceFiles = (atts || []).filter(a => evidenceIdSet.has(a.id));
+                        if (evidenceFiles.length) {
+                            attHtml += '<span class="si-tl-att">' + evidenceFiles.map(a =>
+                                `<a onclick="siDownloadAtt(${siOpenId},${a.id})">📎${esc(a.original_name || a.file_name)}</a>`).join('') + '</span>';
+                        }
+                    }
+                } catch (_) { /* payload_json 非 JSON 或不含本批 schema 键——静默跳过，不影响其余渲染 */ }
             }
             const flow = (e.from_status && e.to_status && e.from_status !== e.to_status)
                 ? `<span class="si-tl-to"> →${esc(siStatusDisplay(e.to_status))}</span>` : '';
@@ -5692,7 +5718,9 @@
             case 'unblock': return siModalReason(iss, 'unblock', '解除受阻', '解除说明', '/unblock');
             case 'submit': return siModalSubmit(iss);
             case 'accept': return siModalAccept(iss);
-            case 'return': return siModalReason(iss, 'return', '验收打回', '打回原因', '/return');
+            // [2026-09-06 决策记录 D4/J6/J8·验收打回附件] 改走专用弹窗 siModalReturn（原因必填 + 附件
+            //   可选两步链），siModalReason 其余调用点不动。
+            case 'return': return siModalReturn(iss);
             // [工期对接测试与风险等级拆分 方案 v1.1 §7·C4b] 对接测试通过/打回——对接人视角两按钮。
             //   [方案 D22-④·批2 2026-08-06] pass 改带测试说明文本框（凭证二选一：本轮已传附件可留空，
             //   否则须填）——见 siModalLiaisonTestPass；return 原因必填不变（同 return/reopen 等既有
@@ -6209,9 +6237,87 @@
         if (likelyDirect) {
             notes.push(note('ℹ️ 本单当前没有任何 commit 提交记录，也未挂上线批次。<b>若确认时该单仍无在案 commit 且未挂 active 上线批次</b>，验收通过后将<b>直接标记为「已上线」</b>（无提交免上线），不再需要安排上线批次；<b>否则</b>照常进入「待上线」等待安排批次。最终以服务端判定为准。'));
         }
-        siModal('确认验收通过？', notes, async () => {
-            const r = await siApi('/sys-issues/' + iss.id + '/accept', { method: 'POST', body: {} });
-            if (!r.ok) { siApiErr(r); return false; }
+        // [2026-09-06 决策记录 D3/J4/J6-J9·验收说明与附件] picker key='accept-evidence'；说明+附件均
+        //   可选，两步链（先传附件拿 id → 再带 note/attachment_ids 提交 accept，与 siModalResume「先动作
+        //   后传」相反、与 liaison_test_pass 凭证模型同向——accept 后落 RELEASE 族，上传守卫会 409，
+        //   附件必须在 accept 之前传完）。uploadedIds/softConfirmed 为本次弹窗生命周期内的闭包变量，
+        //   随每次 siModalAccept(iss) 调用重新创建，不跨开合泄漏。
+        const evidenceKey = 'accept-evidence';
+        siPickerReset(evidenceKey);
+        let uploadedIds = null;
+        let softConfirmed = false;
+        siModal('确认验收通过？', [
+            ...notes,
+            fTextarea('note', '验收说明（选填）', '', false, 'trim 后 ≤500 字；不填且不传附件时会二次确认'),
+            { k: null, html: `<div class="u-form-group"><label>验收附件（选填，图片/PDF/Excel/Word/csv/txt/md，单个≤20MB，最多 5 个）</label>
+                ${siFilePickerHtml(evidenceKey, '选择验收附件')}
+                <div class="u-hint">作为验收截图保存到本单附件区，并关联到本次验收留痕</div>
+                <div id="siAcceptUploadedHint" class="u-hint" style="display:none;color:#15803d"></div></div>` },
+            { k: null, html: `<div id="siAcceptSoftWarn" class="u-hint" style="display:none;color:#b45309">未填写验收说明也未选附件——再点一次「确定」将直接验收通过</div>` },
+        ], async v => {
+            // [M1·2026-09-07 主会话裁定 H1/M1 修订] 软提示与本次调用的当前输入状态绑定——每次点确定
+            //   开头先隐藏旧状态，只有真命中"无说明∧无已选新文件∧无已上传附件"这一具体路径才重新显示；
+            //   一旦这次调用带了任何非空输入，softConfirmed 同步复位为 false，防止"先触发过软提示→
+            //   回填内容又清空→再点确定却因 softConfirmed 残留 true 而跳过警示"的状态错配。
+            const warnEl = document.getElementById('siAcceptSoftWarn');
+            if (warnEl) warnEl.style.display = 'none';
+            const noteVal = (v.note || '').trim();
+            if ([...noteVal].length > 500) { showToast('验收说明不超过 500 字', 'error'); return false; }
+            const files = siPickerFiles(evidenceKey).slice();
+            // 软约束（D3/J9）：不填说明且未选附件且未有已上传附件——第一次点确定只警示不提交，第二次
+            //   （softConfirmed 已置位）放行直接验收通过，后端不设闸（90 处既有 /accept 调用零改动契约）。
+            if (!noteVal && files.length === 0 && !uploadedIds) {
+                if (!softConfirmed) {
+                    softConfirmed = true;
+                    if (warnEl) warnEl.style.display = '';
+                    return false;
+                }
+            } else {
+                softConfirmed = false;
+            }
+            // [H1·2026-09-07 主会话裁定] uploadedIds 累加而非覆盖——accept 失败弹窗保留后，用户追加/
+            //   重选文件时，此前已成功上传的附件 id 不能被静默丢弃，新选的文件也不能因 uploadedIds
+            //   已非空而被跳过上传（旧写法 `&&!uploadedIds` 会让第二批文件永远传不出去）。上传前先卡
+            //   总量闸（≤5，含已上传），防止"先落库超量附件、再被后端 ACCEPT_ATTACHMENT_IDS_INVALID
+            //   拒绝"留下孤儿附件行。
+            if (files.length > 0) {
+                const existingCount = uploadedIds ? uploadedIds.length : 0;
+                if (existingCount + files.length > 5) {
+                    showToast(`验收附件最多 5 个（含已上传 ${existingCount} 个）`, 'error');
+                    return false;
+                }
+                const fd = new FormData();
+                fd.append('attachment_type', 'screenshot');
+                files.forEach(f => fd.append('files', f));
+                const upR = await siApi('/sys-issues/' + iss.id + '/attachments', { method: 'POST', body: fd, isForm: true });
+                if (!upR.ok) { siApiErr(upR); return false; }   // 上传失败中止流转：弹窗保留、已选文件不丢（picker 未 reset）
+                // [codex 500 M 采纳] 上传响应 fail-closed：attachments 数量须等于本批文件数、id 皆正整数且无重复，
+                //   否则按上传失败处理（不 reset picker、不流转）——防「200 但空/部分数组」让验收在无凭证下完成。
+                const newIds = ((upR.data && upR.data.attachments) || []).map(a => a && a.id);
+                const newIdsValid = newIds.length === files.length && newIds.every(x => Number.isInteger(x) && x > 0) && new Set(newIds).size === newIds.length;
+                if (!newIdsValid) { showToast(`附件上传响应不完整（期望 ${files.length} 个，实得 ${newIds.length} 个），请重试`, 'error'); return false; }
+                uploadedIds = (uploadedIds || []).concat(newIds);
+                siPickerReset(evidenceKey);   // 已上传不重传（重试时走下方 uploadedIds 分支直接复用）
+                const uploadedHintEl = document.getElementById('siAcceptUploadedHint');
+                if (uploadedHintEl) { uploadedHintEl.textContent = `已上传 ${uploadedIds.length} 个附件，重试不会重传`; uploadedHintEl.style.display = ''; }
+            }
+            const body = {};
+            if (noteVal) body.note = noteVal;
+            if (uploadedIds && uploadedIds.length) body.attachment_ids = uploadedIds;
+            const r = await siApi('/sys-issues/' + iss.id + '/accept', { method: 'POST', body });
+            if (!r.ok) {
+                // [H1] 附件已失效（不属本单/已失效/类型不符）——旧 uploadedIds 不再可信，清空重来，
+                //   避免用户带着一批已失效 id 无论怎么重试都恒败（且恒败文案还是泛化的"操作失败"）。
+                if (r.data && r.data.code === 'ACCEPT_ATTACHMENT_INVALID') {
+                    uploadedIds = null;
+                    const uploadedHintElInvalid = document.getElementById('siAcceptUploadedHint');
+                    if (uploadedHintElInvalid) uploadedHintElInvalid.style.display = 'none';
+                    showToast('已传附件已失效，请重新选择', 'error');
+                } else {
+                    siApiErr(r);
+                }
+                return false;
+            }
             const d = r.data || {};
             if (d.online_source === 'no_commit_acceptance') {
                 // N=0 不显示（§10.1 逐字）——只有真发生过删除提交动作才提示，避免给正常单加噪音
@@ -6230,6 +6336,63 @@
             }
             return true;
         }, '确定');
+    }
+    // [2026-09-06 决策记录 D4/J6/J8·验收打回附件] picker key='return-evidence'；打回原因仍必填，附件
+    //   可选，两步链同 siModalAccept（先传附件拿 id → 再带 reason/attachment_ids 提交 return）。
+    function siModalReturn(iss) {
+        const evidenceKey = 'return-evidence';
+        siPickerReset(evidenceKey);
+        let uploadedIds = null;
+        siModal('验收打回 ' + siIssueDisplayNoById(iss.id), [
+            fTextarea('reason', '打回原因', '', true, '必填，trim 后非空'),
+            { k: null, html: `<div class="u-form-group"><label>问题截图/附件（选填，图片/PDF/Excel/Word/csv/txt/md，单个≤20MB，最多 5 个）</label>
+                ${siFilePickerHtml(evidenceKey, '选择附件')}
+                <div class="u-hint">作为问题凭证保存到本单附件区，并关联到本次打回留痕</div>
+                <div id="siReturnUploadedHint" class="u-hint" style="display:none;color:#15803d"></div></div>` },
+        ], async v => {
+            const reason = (v.reason || '').trim();
+            if (!reason) { showToast('打回原因必填', 'error'); return false; }
+            const files = siPickerFiles(evidenceKey).slice();
+            // [H1·2026-09-07 主会话裁定] uploadedIds 累加而非覆盖——同 siModalAccept 一带详注：旧写法
+            //   `&&!uploadedIds` 会让 return 失败弹窗保留后用户追加/重选的文件被静默跳过。上传前先卡
+            //   总量闸（≤5，含已上传），防止先落库超量附件再被后端 IDS_INVALID 拒绝留下孤儿附件行。
+            if (files.length > 0) {
+                const existingCount = uploadedIds ? uploadedIds.length : 0;
+                if (existingCount + files.length > 5) {
+                    showToast(`打回附件最多 5 个（含已上传 ${existingCount} 个）`, 'error');
+                    return false;
+                }
+                const fd = new FormData();
+                fd.append('attachment_type', 'screenshot');
+                files.forEach(f => fd.append('files', f));
+                const upR = await siApi('/sys-issues/' + iss.id + '/attachments', { method: 'POST', body: fd, isForm: true });
+                if (!upR.ok) { siApiErr(upR); return false; }   // 上传失败中止流转：弹窗保留、已选文件不丢
+                // [codex 500 M 采纳] 上传响应 fail-closed（与 siModalAccept 同款）
+                const newIds = ((upR.data && upR.data.attachments) || []).map(a => a && a.id);
+                const newIdsValid = newIds.length === files.length && newIds.every(x => Number.isInteger(x) && x > 0) && new Set(newIds).size === newIds.length;
+                if (!newIdsValid) { showToast(`附件上传响应不完整（期望 ${files.length} 个，实得 ${newIds.length} 个），请重试`, 'error'); return false; }
+                uploadedIds = (uploadedIds || []).concat(newIds);
+                siPickerReset(evidenceKey);
+                const uploadedHintEl = document.getElementById('siReturnUploadedHint');
+                if (uploadedHintEl) { uploadedHintEl.textContent = `已上传 ${uploadedIds.length} 个附件，重试不会重传`; uploadedHintEl.style.display = ''; }
+            }
+            const body = { reason };
+            if (uploadedIds && uploadedIds.length) body.attachment_ids = uploadedIds;
+            const r = await siApi('/sys-issues/' + iss.id + '/return', { method: 'POST', body });
+            if (!r.ok) {
+                // [H1] 附件已失效——旧 uploadedIds 不再可信，清空重来，避免恒败重试。
+                if (r.data && r.data.code === 'RETURN_ATTACHMENT_INVALID') {
+                    uploadedIds = null;
+                    const uploadedHintElInvalid = document.getElementById('siReturnUploadedHint');
+                    if (uploadedHintElInvalid) uploadedHintElInvalid.style.display = 'none';
+                    showToast('已传附件已失效，请重新选择', 'error');
+                } else {
+                    siApiErr(r);
+                }
+                return false;
+            }
+            showToast('验收打回完成', 'success'); return true;
+        });
     }
     function siConfirmSimple(iss, action, prompt, path) {
         siModal(prompt, [note(prompt)], async () => {
@@ -9785,7 +9948,9 @@
         siPickerReset('submit-delivery');
         // P2 迭代（弹窗式上传）：三块上传弹窗组件同样在关弹窗时 reset（取消/×/上传收尾）——防 objectURL 累积。
         // S4：resume-spec（重启弹窗附件，siModalResume）同批纳入——理由与上面三块逐字一致。
-        ['modal-spec', 'modal-delivery', 'modal-screenshot', 'resume-spec'].forEach(k => siPickerReset(k));
+        // [2026-09-06 决策记录 J8] accept-evidence/return-evidence（siModalAccept/siModalReturn 两步链
+        //   附件组件）同批纳入——理由与上面各块逐字一致，防 objectURL 累积/文件残留跨开关泄漏。
+        ['modal-spec', 'modal-delivery', 'modal-screenshot', 'resume-spec', 'accept-evidence', 'return-evidence'].forEach(k => siPickerReset(k));
         // M1：若关闭的是建单弹窗，释放 spec 组件资源（取消/×关闭/建单成功收尾都经此）。提交链已用
         //   siPickerFiles('create-spec').slice() 取快照，此处清空不影响进行中的上传。
         if (siCreateModalOpen) {
@@ -10147,8 +10312,11 @@
     //     该契约），不返回 null，从而保持"这种异常态下候选池为空"的原始安全行为。
     //   selector——[id^="siPreview_"] 覆盖本页全部 picker 实例（create-spec/submit-delivery/
     //     modal-spec/modal-delivery/modal-screenshot/resume-spec——S4 新增重启弹窗附件，前缀选择器
-    //     天然覆盖，新增本条仅为保持枚举注释与实际实例集一致，非功能变更）。ql-create/ql-edit 两个
-    //     零星事项台账实例已随 2026-08-02 独立页拆分（Quick_Log.html）整体迁走，不再在本页选择器覆盖范围内。
+    //     天然覆盖，新增本条仅为保持枚举注释与实际实例集一致，非功能变更）；accept-evidence/
+    //     return-evidence（2026-09-06 决策记录 J8·siModalAccept/siModalReturn 两步链附件组件）同批
+    //     纳入枚举——同样是前缀选择器天然覆盖，本行仅为保持注释与实际实例集一致，非功能变更。
+    //     ql-create/ql-edit 两个零星事项台账实例已随 2026-08-02 独立页拆分（Quick_Log.html）整体迁走，
+    //     不再在本页选择器覆盖范围内。
     //   keyOf——从 id 去前缀取 key，与原实现逐字同规则。
     //   collect——把 File 交还本页既有收集闸门 siPickerCollect（数量/大小/扩展名/去重校验）+ 触发
     //     siPickerRender 重渲染预览，与抽取前完全同一收尾动作（原来是 siPickerCollect+siPickerRender

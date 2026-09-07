@@ -310,7 +310,7 @@ const IMPROVEMENT_FLOW_TRANSITIONS = [
     from: ['待验证'], to: '待上线',
     roleGuard: 'admin', ownerGuard: null,
     requiredPayload: [],
-    sideEffects: ['accepted_at=now'],
+    sideEffects: ['accepted_at=now', 'note/attachment_ids 均可选 → timeline payload_json（2026-09-06 验收说明附件·决策记录 J4/J6）'],
     timelineEvent: 'status_change', actionCode: 'accept',
     notifyAfterCommit: null,
   },
@@ -319,7 +319,7 @@ const IMPROVEMENT_FLOW_TRANSITIONS = [
     from: ['待验证'], to: '开发中',
     roleGuard: 'admin', ownerGuard: null,
     requiredPayload: ['reason'],            // 打回原因 trim 非空
-    sideEffects: ['return_count++（U-2）', 'dev_estimated_at 清空（T-M2）', 'scheduled_start 清空（受理排期改造 §7.2·预计变则开工日失效）'],
+    sideEffects: ['return_count++（U-2）', 'dev_estimated_at 清空（T-M2）', 'scheduled_start 清空（受理排期改造 §7.2·预计变则开工日失效）', 'attachment_ids 可选 → timeline payload_json（2026-09-06）'],
     timelineEvent: 'return', actionCode: null,
     notifyAfterCommit: 'notifyReturnedToDeveloper',  // C5
   },
@@ -655,7 +655,7 @@ const FEATURE_FLOW_TRANSITIONS = [
     from: ['待验证'], to: '待上线',
     roleGuard: 'admin', ownerGuard: null,
     requiredPayload: [],
-    sideEffects: ['accepted_at=now'],
+    sideEffects: ['accepted_at=now', 'note/attachment_ids 均可选 → timeline payload_json（2026-09-06 验收说明附件·决策记录 J4/J6）'],
     timelineEvent: 'status_change', actionCode: 'accept',
     notifyAfterCommit: null,
   },
@@ -664,7 +664,7 @@ const FEATURE_FLOW_TRANSITIONS = [
     from: ['待验证'], to: '开发中',
     roleGuard: 'admin', ownerGuard: null,
     requiredPayload: ['reason'],            // 打回原因 trim 非空
-    sideEffects: ['return_count++（U-2）', 'dev_estimated_at 清空（T-M2）', 'scheduled_start 清空（受理排期改造 §7.2·预计变则开工日失效）'],
+    sideEffects: ['return_count++（U-2）', 'dev_estimated_at 清空（T-M2）', 'scheduled_start 清空（受理排期改造 §7.2·预计变则开工日失效）', 'attachment_ids 可选 → timeline payload_json（2026-09-06）'],
     timelineEvent: 'return', actionCode: null,
     notifyAfterCommit: 'notifyReturnedToDeveloper',  // C5
   },
@@ -944,7 +944,7 @@ const BUG_FLOW_TRANSITIONS = [
     from: ['待验证'], to: '待上线',
     roleGuard: 'admin', ownerGuard: null,
     requiredPayload: [],
-    sideEffects: ['accepted_at=now'],
+    sideEffects: ['accepted_at=now', 'note/attachment_ids 均可选 → timeline payload_json（2026-09-06 验收说明附件·决策记录 J4/J6）'],
     timelineEvent: 'status_change', actionCode: 'accept',
     notifyAfterCommit: null,
   },
@@ -954,7 +954,7 @@ const BUG_FLOW_TRANSITIONS = [
     roleGuard: 'admin', ownerGuard: null,
     requiredPayload: ['reason'],
     sideEffects: ['return_count++', 'dev_estimated_at 清空', 'scheduled_start 清空（受理排期改造 §7.2·H2）',
-      '（共享 switch 分支连带清评估+blocked 字段——bug 恒 NULL/0，零副作用）'],
+      '（共享 switch 分支连带清评估+blocked 字段——bug 恒 NULL/0，零副作用）', 'attachment_ids 可选 → timeline payload_json（2026-09-06）'],
     timelineEvent: 'return', actionCode: null,
     notifyAfterCommit: 'notifyReturnedToDeveloper',
   },

@@ -1084,7 +1084,10 @@
                 <button class="modal-close" onclick="closeAdminSubmitModal()">×</button>
             </div>
             <div class="u-modal-body">
-                <div style="padding:12px;background:#dbeafe;border:1px solid #93c5fd;border-radius:6px;margin-bottom:14px;color:#1e3a8a;font-size:13px;line-height:1.7;">
+                <!-- 2026-09-06（决策记录 D2）：提示块按当前单据状态切换文案——EXPORTING 态（任意来源）走
+                     「导出人不便自助提交/大文件线下移交」口径且完成时间=本次闭环时间；SUBMITTED/DONE 沿用原文案。
+                     内容由 openAdminSubmitDialog 写入（两段静态 HTML 常量，不含任何接口数据）。 -->
+                <div id="adminSubmitTip" style="padding:12px;background:#dbeafe;border:1px solid #93c5fd;border-radius:6px;margin-bottom:14px;color:#1e3a8a;font-size:13px;line-height:1.7;">
                     📋 适用于：admin 因创建协作单时录入错误（如选错业务库），导致开发交付物 smoke test 失败。<br/>
                     通过 admin 修正字段后，<strong>不让开发再回来重传</strong>，admin 单方面将协作单从 SUBMITTED 闭环到 DONE。<br/>
                     <span style="color:#991b1b;">⚠️ 行政闭环<strong>不跑 smoke test</strong>，仅作需求记账，不追溯结果数据；完成时间取最后一次有效提交时间，无则取期望完成时间。</span>
@@ -2327,9 +2330,12 @@
         //   ⚠️ codex 04 审 MED 收紧（2026-07-21）：逐字复刻后端 `IS NULL`，去掉原 `=== ''` 分支。
         //     forwarded_to_exporter_at 是 DATETIME 列，全部写点只写 datetime() 或 NULL（server.js:15538/15997），
         //     从不写空字符串 → 空串分支实际不可达；去掉它消除「前端比后端宽松」隐患（防字段语义漂移）。
-        //   用途：控制①导出人无附件提交②admin 直接行政闭环两个入口只对真直派单放开。
-        //   normal 单 / fallback 后重流转单（forwarded_to_exporter_at 非 NULL）不算——其 EXPORTING=
-        //   exporter 待提交态，须传附件走正常验收，不放开无附件 / admin 越权闭环。
+        //   用途（2026-09-06 更新）：原控制①导出人无附件提交②admin 直接行政闭环两个入口只对真直派单
+        //   放开——①已于 v1.164.2（2026-09-01）放开到任意 EXPORTING 单的导出人本人；②已于 2026-09-06
+        //   随决策记录 D2 放开到任意 EXPORTING 单。本 helper 现仅用于**③真直派单有附件时概要也必填**的
+        //   genuineDirect 标志（供 openExportUploadDialog 判断概要是否必填），非真直派单仍可选填概要。
+        //   normal 单 / fallback 后重流转单（forwarded_to_exporter_at 非 NULL）不算真直派——其概要
+        //   必填条件走「无附件必填」，有附件时概要仍可选。
         function isGenuineDirectExportingSingle(d) {
             // codex 末次审 MED-1：用 === null（不匹配 undefined）。详情/列表接口 SELECT * 保证
             //   forwarded_to_exporter_at 字段一定存在（值为 null 或时间戳），=== null 逐字对齐后端 IS NULL；
@@ -3178,7 +3184,9 @@
         //   - 提交导出物 + 退回任务：EXPORTING + 仅当前 exporter
         //   - 转发给数据导出人：已搬到通知区块（renderExporterNotifySubsection + canForwardToExporter helper）
         function decideFooterButtons(d, currentUserId, isAdminUser) {
-            const isArchivedFinal = d.status === 'ARCHIVED';
+            // [codex 08-R LOW 采纳·2026-09-07] 最终归档短路同时看 archived_final_at——后端 admin-submit-on-behalf 的
+            //   ARCHIVED_PROTECTED 守卫是 `status==='ARCHIVED' || archived_final_at`，前端逐字同构，防两列漂移时露出必 409 的入口。
+            const isArchivedFinal = d.status === 'ARCHIVED' || !!d.archived_final_at;
             // codex 42 M-2 采纳：软删除条件加 `&& !isArchivedFinal` 防御 admin 在已归档单上误调 archive 触发 archived_at 写入
             // 终态短路顺序：先判 ARCHIVED 最终归档，再判软删除（避免一个单同时有 archived_at + status='ARCHIVED' 时被误显示为"已作废"）
             const isArchived = !!d.archived_at && !isArchivedFinal;
@@ -3225,14 +3233,15 @@
             //   SUBMITTED：D1→D2 链路 admin 替开发画句号（v1.70.4 原场景）
             //   DONE：兑底修正已 exporter 完成单的交付物（v1.72.10 新增；admin 单方面替换 result_data 保持 DONE 终态）
             // v1.120.0 Commit C：EXPORTING（真直派单）扩展——大文件线下传递、导出人不便自助提交时
-            //   admin 直接行政闭环。真直派判据 = assign_mode='admin_direct' && !forwarded_to_exporter_at
-            //   （与后端 submit-export/admin-submit-on-behalf 同判据；normal / fallback 重流转单不放开，
-            //   其 EXPORTING=exporter 待提交态，不该被 admin 越过验收）。
+            //   admin 直接行政闭环。
+            // 2026-09-06（决策记录 D2）：EXPORTING 分支进一步放开到**任意 EXPORTING 单**——normal 已转发单 /
+            //   fallback 重流转单也允许 admin 越过导出人行政闭环，不再要求真直派判据；EXPORTING 态按钮文案
+            //   统一「🗂️ 直接行政闭环」，局部变量 isGenuineDirectExporting 因判据合并已删除（真直派专用的
+            //   isGenuineDirectExportingSingle 仍保留供 openExportUploadDialog 判概要是否必填）。
             // codex 50 M-4 采纳：按状态区分按钮文案降低 admin 认知摩擦
-            const isGenuineDirectExporting = status === 'EXPORTING' && isGenuineDirectExportingSingle(d);
-            if (isAdminUser && (status === 'SUBMITTED' || status === 'DONE' || isGenuineDirectExporting)) {
+            if (isAdminUser && (status === 'SUBMITTED' || status === 'DONE' || status === 'EXPORTING')) {
                 const adminSubmitLabel = status === 'DONE' ? '🔧 修正交付物'
-                    : isGenuineDirectExporting ? '🗂️ 直接行政闭环'
+                    : status === 'EXPORTING' ? '🗂️ 直接行政闭环'
                     : '📋 行政闭环';
                 buttons.push(`<button class="btn" style="background:#dbeafe;color:#1e40af;border:1px solid #93c5fd;" onclick="openAdminSubmitDialog()">${adminSubmitLabel}</button>`);
             }
@@ -6807,9 +6816,24 @@
 
         // v1.70.4 ③ 行政闭环 modal handlers
         let _adminSubmitCollabId = null;
+        let _adminSubmitExpectedStatus = null;   // [codex 08 HIGH-1] 打开弹层时的单据状态快照（乐观前置）
+        // 2026-09-06（决策记录 D2）：行政闭环弹层提示块按状态分流。两段都是源码内静态 HTML（不拼接任何
+        //   接口数据/用户输入），innerHTML 赋值无 XSS 面。EXPORTING 文案与后端语义逐字对齐：done_at 恒为本次
+        //   闭环时间（server.js admin-submit-on-behalf EXPORTING 分支），成功 toast 的「取自当前时间」与之一致。
+        const ADMIN_SUBMIT_TIP_DEFAULT = `📋 适用于：admin 因创建协作单时录入错误（如选错业务库），导致开发交付物 smoke test 失败。<br/>
+                    通过 admin 修正字段后，<strong>不让开发再回来重传</strong>，admin 单方面将协作单从 SUBMITTED 闭环到 DONE。<br/>
+                    <span style="color:#991b1b;">⚠️ 行政闭环<strong>不跑 smoke test</strong>，仅作需求记账，不追溯结果数据；完成时间取最后一次有效提交时间，无则取期望完成时间。</span>`;
+        const ADMIN_SUBMIT_TIP_EXPORTING = `🗂️ 适用于：导出结果为大文件已线下移交、或导出人不便在平台自助提交时，admin 代为把处于「导出中」的协作单直接闭环到 DONE（任意来源单均可，2026-09-06 起）。<br/>
+                    请在原因里写明<strong>导出了什么、为何未在平台提交、线下如何移交</strong>——平台无交付物存档时，这段原因是唯一留痕。<br/>
+                    <span style="color:#991b1b;">⚠️ 行政闭环<strong>不跑 smoke test</strong>，仅作需求记账；完成时间=本次闭环时间；导出人不会收到通知，如需知会请线下沟通。</span>`;
         function openAdminSubmitDialog() {
             if (!currentDetail) return showToast('协作单数据未加载', 'error');
             _adminSubmitCollabId = currentDetail.id;
+            // [codex 08 HIGH-1 采纳] 记住打开弹层那一刻的状态作乐观前置，提交时随 FormData 传 expected_status——
+            //   后端锁内核对，若单据已被别人（exporter 自助提交/另一 admin）推进，返回 409 而不是把本次请求重解释成 DONE 修正。
+            _adminSubmitExpectedStatus = currentDetail.status || null;
+            const tipEl = document.getElementById('adminSubmitTip');
+            if (tipEl) tipEl.innerHTML = currentDetail.status === 'EXPORTING' ? ADMIN_SUBMIT_TIP_EXPORTING : ADMIN_SUBMIT_TIP_DEFAULT;
             document.getElementById('f_admin_submit_reason').value = '';
             // v1.70.5 重置文件选择框（避免上次残留）
             const scriptInput = document.getElementById('f_admin_submit_script');
@@ -6839,6 +6863,7 @@
             // v1.70.5 用 FormData 携带可选附件（multer.fields result_script / result_data，各最多 1）
             const fd = new FormData();
             fd.append('reason', reason);
+            if (_adminSubmitExpectedStatus) fd.append('expected_status', _adminSubmitExpectedStatus);   // [codex 08 HIGH-1] 乐观前置
             const scriptInput = document.getElementById('f_admin_submit_script');
             const dataInput = document.getElementById('f_admin_submit_data');
             const scriptFile = scriptInput && scriptInput.files && scriptInput.files[0];
