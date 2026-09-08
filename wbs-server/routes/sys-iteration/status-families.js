@@ -13,9 +13,10 @@
 //     CHANGE_FLOW_STATUSES/BUG_FLOW_STATUSES 与本文件下方 BASE_FAMILY_NAMES 为准，不在注释里重复计数。
 //
 // ── 按 issue_type 索引（禁平面集合、禁「等」）──────────
-//   现网只有 feature/improvement/bug 三类流已定义状态机（transitions.js CHANGE_FLOW_STATUSES / BUG_FLOW_STATUSES）；
-//   config 流状态机在 transitions.js 留 TODO 空位（尚未定义状态集），本文件同步不臆造 config 的族归属——
-//   isInFamily 对未登记 issue_type 一律返回 false（族外拒绝，不变量 7 ②层 assertKnownIssueStatus 的基石）。
+//   [S1a 订正] 现网四类流均已定义状态机（transitions.js CHANGE_FLOW_STATUSES/BUG_FLOW_STATUSES/
+//   CONFIG_FLOW_STATUSES）——config 流已随 config流激活_方案_20260907_v1.0 §3 落地，本文件七族快照
+//   同批补齐 config 键。isInFamily 对未登记 issue_type（如未来新增而未同步本文件）仍一律返回 false
+//   （族外拒绝，不变量 7 ②层 assertKnownIssueStatus 的基石），该 fail-closed 设计保留不变。
 //   feature/improvement 共用同一条变更流（CHANGE_FLOW_TRANSITIONS 共享），族值逐字相同，两个 key 各自显式列出
 //   （不用共享引用别名，防未来两流分裂时漏改其一——与 transitions.js TRANSITIONS={feature:X,improvement:X} 的
 //   "共用同一数组引用"写法刻意不同：那是"转移规则"共用可以引用同一份，这里是"状态字符串快照"独立誊抄更利于
@@ -36,6 +37,7 @@ const SYS_INTAKE_STATUSES = {
   feature: ['待受理', '待修改'],
   improvement: ['待受理', '待修改'],
   bug: ['待受理', '待修改'],
+  config: ['待受理', '待修改'],   // [S1a·config 流激活] 同 feature（config流激活_方案_20260907_v1.0 §3）
 };
 
 // ── 开发前态（D_PRE）：受理通过后、进入开发前的态 ──────────
@@ -49,6 +51,7 @@ const SYS_D_PRE_STATUSES = {
   feature: ['待指派', '已暂缓'],
   improvement: ['待指派', '已暂缓'],
   bug: ['待处理', '已暂缓'],
+  config: ['待处理', '已暂缓'],   // [S1a·config 流激活] 同 bug（受理通过落态'待处理'，方案 §3）
 };
 
 // ── 开发执行态（DEV）：开发正在干活的态 ──────────
@@ -56,6 +59,7 @@ const SYS_DEV_STATUSES = {
   feature: ['开发中'],
   improvement: ['开发中'],
   bug: ['处理中'],
+  config: ['处理中'],   // [S1a·config 流激活] 同 bug（方案 §3）
 };
 
 // ── 对接测试态（LIAISON_TEST）：feature 独有，全员提交+GATE 通过后、对接人测试验收前的态 ──────────
@@ -75,6 +79,7 @@ const SYS_LIAISON_TEST_STATUSES = {
   feature: ['待对接测试'],
   improvement: [],
   bug: [],
+  config: [],   // [S1a·config 流激活] 无对接测试段（同 improvement/bug，方案 §3）
 };
 
 // ── 待验证态（VERIFY）：全员完成态、等待验收 ──────────
@@ -82,6 +87,7 @@ const SYS_VERIFY_STATUSES = {
   feature: ['待验证'],
   improvement: ['待验证'],
   bug: ['待验证'],
+  config: ['待验证'],   // [S1a·config 流激活] 同其余三流（方案 §3）
 };
 
 // ── 发布控制态（RELEASE）：待上线 + 已上线（进入边见方案 §4.0/计划 §2.6，本文件不建边校验逻辑，仅状态归属）──────────
@@ -89,6 +95,7 @@ const SYS_RELEASE_STATUSES = {
   feature: ['待上线', '已上线'],
   improvement: ['待上线', '已上线'],
   bug: ['待上线', '已上线'],
+  config: ['待上线', '已上线'],   // [S1a·config 流激活] 同其余三流——config 进上线单，方案 §3/§4
 };
 
 // ── 非发布终态（NONRELEASE_TERMINAL）：不经发布流程结束的态 ──────────
@@ -100,6 +107,7 @@ const SYS_NONRELEASE_TERMINAL_STATUSES = {
   feature: ['已关闭', '已拒绝', '已作废'],
   improvement: ['已关闭', '已拒绝', '已作废'],
   bug: ['已关闭', '已拒绝', '已作废'],
+  config: ['已关闭', '已拒绝', '已作废'],   // [S1a·config 流激活] 同其余三流（方案 §3）
 };
 
 // ── 派生族（不在方案 §4.0 表内单独定义快照值，由上面 4 族按 type 逐一并集算出）──────────
@@ -139,7 +147,7 @@ const FAMILIES = {
 };
 const FAMILY_NAMES = Object.keys(FAMILIES);
 
-// 该 issue_type 是否有已定义的状态机族归属（config 等未登记类型 → false，族外拒绝的基石）。
+// 该 issue_type 是否有已定义的状态机族归属（[S1a 起] config 已登记 → true；未来新类型未同步本文件时 → false，族外拒绝的基石）。
 function isKnownIssueType(issueType) {
   return Object.prototype.hasOwnProperty.call(SYS_D_PRE_STATUSES, issueType);
 }
@@ -186,14 +194,16 @@ function familyOfStatus(issueType, status) {
 //   submit 虽也 ownerGuard='assignee' 但会改 status（开发中→待验证），是独立的主状态转换动作，非 W06（C3 归属，
 //   走 handleDevSubmit 唯一入口，不在此表）。逐条对照 transitions.js 现网 CHANGE_FLOW_TRANSITIONS +
 //   BUG_FLOW_TRANSITIONS 的 from 数组固化（2026-07-16 复核，与 v1.113.0 现网 100% 一致）：
-//   - estimate：feature/improvement from=['开发中']；bug from=['处理中']（bug 无 feasibility/blocked，§2.2 裁剪）
+//   - estimate：feature/improvement from=['开发中']；bug/config from=['处理中']（bug/config 无 feasibility/blocked，§2.2 裁剪）
 //   - feasibility：仅 feature/improvement from=['开发中']（评估环节 F2a，bug/config 不适用）
 //   - blocked：仅 feature/improvement from=['开发中']（unblock 是 admin 动作 roleGuard='admin'，非 W06——
 //     解除受阻不是"开发自服务"，不入本表）
-//   本表当前仅"固化"，C2 不接线到任何端点（W06 各端点仍走现网 estimate/feasibility/blocked 独立实现，未来
-//   迁移到 assertDevMember + 本表的改造属 C3 前置，见开发计划 v2.9 §5「留 C2/C3 前」）。
+//   ⚠️ [S1a 订正] 本表**并非"仅固化未接线"**——`/estimate`/`/feasibility`/`/blocked` 三端点均已实际调用
+//   `SF.isW06Allowed`（见 index.js 对应端点内 `if (!SF.isW06Allowed(...))` 判定），是真实运行时闸门，
+//   非文档常量；漏登记某 type 会让该 type 在这里被结构性拒绝（本次为 config 补上 estimate 一行正是
+//   此坑的直接证据——若不补，config 单永远无法通过 /estimate，进而卡死在 submit 前置 ESTIMATE_REQUIRED）。
 const SYS_W06_ALLOWED_STATUS = {
-  estimate: { feature: ['开发中'], improvement: ['开发中'], bug: ['处理中'] },
+  estimate: { feature: ['开发中'], improvement: ['开发中'], bug: ['处理中'], config: ['处理中'] },   // [S1a] +config
   feasibility: { feature: ['开发中'], improvement: ['开发中'] },
   blocked: { feature: ['开发中'], improvement: ['开发中'] },
 };

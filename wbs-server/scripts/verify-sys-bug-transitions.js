@@ -282,7 +282,8 @@ async function main() {
     assert.strictEqual(T.isDevWorkState('bug', '开发中'), false, 'bug 开发中≠工作态（态名按类型）');
     assert.strictEqual(T.isDevWorkState('feature', '开发中'), true);
     assert.strictEqual(T.isDevWorkState('feature', '处理中'), false);
-    assert.strictEqual(T.isDevWorkState('config', '处理中'), false, 'config 未定义 → false（追加 config 流时补）');
+    assert.strictEqual(T.isDevWorkState('config', '处理中'), true, 'config 已登记（S1a config流激活）→ 处理中=工作态');
+    assert.strictEqual(T.isDevWorkState('config', '开发中'), false, 'config 开发中≠工作态（态名按类型）');
     assert.strictEqual(T.isDevWorkState('bug', null), false, 'null status → false');
     assert.ok(T.REQUIRES_ASSIGNEE_STATUSES.includes('处理中') && T.REQUIRES_ASSIGNEE_STATUSES.includes('开发中'), 'RC-M5 全集含 处理中+开发中');
     assert.ok(!T.REQUIRES_ASSIGNEE_STATUSES.includes('待处理'), 'RC-M5 全集不含 待处理（未指派前段）');
@@ -290,12 +291,16 @@ async function main() {
     //   该值已跨类型通用（非按 type 拆分的数组，见 transitions.js 该常量处注释），本断言钉死不因未来
     //   改动误删。
     assert.ok(T.REQUIRES_ASSIGNEE_STATUSES.includes('已关闭'), '[C6] RC-M5 全集含 已关闭（bug 补终态后仍须有 assigned_to）');
-    ok('isDevWorkState 单元（bug=处理中/feature=开发中/config 未定义 false/null false）+ REQUIRES_ASSIGNEE_STATUSES 边界（含 [C6] 已关闭锁定）');
+    ok('isDevWorkState 单元（bug=处理中/feature=开发中/config 处理中 true·开发中 false/null false）+ REQUIRES_ASSIGNEE_STATUSES 边界（含 [C6] 已关闭锁定）');
   }
   {
     assert.ok(I.RELEASABLE_TYPES.includes('bug'), '② 恢复：RELEASABLE_TYPES 含 bug（见 [R]）');
-    assert.deepStrictEqual(I.RELEASABLE_TYPES, ['feature', 'improvement', 'bug'], 'RELEASABLE_TYPES=[feature,improvement,bug]');
-    ok('⭐ ② 铁证：RELEASABLE_TYPES 恢复含 bug（[2026-07-29 双闸拆除] 曾在 add-issues/hotfix-publish/_publishReleaseCoreInTxn 三处同步落地的 needs_release=1 闸门已随本次双闸拆除全数删除，bug 现与其余可发布类型共用同一道 type IN RELEASABLE_TYPES 闸，见 [R]）');
+    // [S1a 补丁 T·T6] RELEASABLE_TYPES 随 config 流激活扩容为四值（config 走验收→上线单主流程，
+    //   online_mode='release'）——先 includes 单独钉住 config（防四值断言改动时误删该维度信号），
+    //   再整组严格比对四元素数组。
+    assert.ok(I.RELEASABLE_TYPES.includes('config'), '② S1a：RELEASABLE_TYPES 含 config');
+    assert.deepStrictEqual(I.RELEASABLE_TYPES, ['feature', 'improvement', 'bug', 'config'], 'RELEASABLE_TYPES=[feature,improvement,bug,config]');
+    ok('⭐ ② 铁证：RELEASABLE_TYPES 恢复含 bug（[2026-07-29 双闸拆除] 曾在 add-issues/hotfix-publish/_publishReleaseCoreInTxn 三处同步落地的 needs_release=1 闸门已随本次双闸拆除全数删除，bug 现与其余可发布类型共用同一道 type IN RELEASABLE_TYPES 闸，见 [R]）+ [S1a] config 扩容为第四值');
   }
   {
     // KEY_COLS 锚点（[审:M1]）：readiness 与新列同源
@@ -465,8 +470,10 @@ async function main() {
     ok('[R2退场] confirm-online-norelease：bug 一律 409 LEGACY_RELEASE_FLOW_DISABLED，单未被误翻已上线');
 
     // [R3 反向：C3"全类型统一"] hotfix-publish 现**放行** bug——旧"bug 一律 409 LEGACY_RELEASE_FLOW_DISABLED"
-    //   随上线体统一重构 C3 撤销（附录A明文类型一律 RELEASABLE_TYPES=bug/feature/improvement，config 单独
-    //   负例；hotfix-publish 不再对 bug 特殊拒绝，见 index.js 路由处注释）。断言改为：bug 可成功建应急单，
+    //   随上线体统一重构 C3 撤销（附录A明文类型一律 RELEASABLE_TYPES=bug/feature/improvement；[S1a 起]
+    //   RELEASABLE_TYPES 扩容含 config，hotfix-publish 对 config 现走同一条 TYPE_NOT_RELEASABLE 兜底
+    //   （结构上恒不命中）——但 config 单在 S1b 迁移拆表级 CHECK 前撞 DB 层约束 500，见 verify-sys-release.js
+    //   过渡断言组；hotfix-publish 不再对 bug 特殊拒绝，见 index.js 路由处注释）。断言改为：bug 可成功建应急单，
     //   响应=200（非 201，C3 响应契约收窄为"返回即已安排"）+ created_new=true；单本身仍停在「待上线」（真正
     //   翻已上线要等被通知的值班执行人调用 /execute，两阶段语义，见方案 §6.7）。
     const r3 = await seedBugToReady(5, devTok);
@@ -487,7 +494,9 @@ async function main() {
 
     // [R5①放行·2026-07-29 双闸拆除] add-issues 现同样放行任意 bug 单——bugIssueIds 恒 409 闸门 +
     //   needs_release=1 条件已一并拆除（2026-07-29 主会话裁定选项 A，方案 v3.4 §5a/§5b），bug 与
-    //   feature/improvement 完全同源，仅剩 type IN RELEASABLE_TYPES 一道闸（config 除外）。
+    //   feature/improvement 完全同源，仅剩 type IN RELEASABLE_TYPES 一道闸（[S1a 起] 该闸对 config 同样
+    //   放行；sys_issues 表级 CHECK 已随 S1b 受控重建移除，config 单挂批次现同样正常成功，见
+    //   verify-sys-release.js/verify-sys-config-flow.js [U] 组）。
     const r5Bug = await seedBugToReady(5, devTok);
     const relForBug = (await call('POST', '/api/sys-releases', adminTok, {})).body.id;
     r = await call('POST', `/api/sys-releases/${relForBug}/add-issues`, adminTok, { issue_ids: [r5Bug] });
@@ -769,19 +778,26 @@ async function main() {
     assert.strictEqual(row.status, '已关闭', '[C6] bug close → 已关闭');
     assert.ok(row.closed_at, '[C6] closed_at 已盖');
 
-    // config 负例（附录 A 末行）：config 单 close/reopen 一律拒绝（本就无 transitions 条目，恒 400，未变）。
+    // [S1a 补丁 U·主会话裁定 §4] config close/reopen 语义不再对称：S1a 后 config 的 close 已是合法转换
+    //   （CONFIG_FLOW_TRANSITIONS 有 close 条目：已上线→已关闭，见方案 §3），findTransition 不再拒绝。
+    //   本组改测 [C6] 跨类型通用不变量对 config 同样生效：进入「已关闭」前必须有开发负责人（引擎 [4] 号闸
+    //   type-agnostic，index.js:5505-5515，REQUIRES_ASSIGNEE_STATUSES 含「已关闭」）——本夹具刻意裸 SQL
+    //   插入、不带 assigned_to，正是为了命中这道闸，非测"转换不存在"。reopen 仍无条目（D3「不重开」）
+    //   → 400 INVALID_TRANSITION，与 close 不再同码：close 是"转换存在但业务闸拒"，reopen 是"转换本不存在"。
     const cfgIns = await run(
       "INSERT INTO sys_issues (type, status, priority, title, system_name, source, created_by, created_by_name) VALUES ('config','已上线','P2','c','BMS','内部',1,'管理员')"
     );
     const cfgId = cfgIns.lastID;
+    // 实现坏成什么样这条会红：若有人把 [4] 号闸按 type 放行 config（如误加排除条件），本条从 409 变
+    //   200（无 assignee 也能 close）；若同时误把 CONFIG_FLOW_TRANSITIONS 的 close 条目删掉，则变回 400。
     r = await call('POST', `/api/sys-issues/${cfgId}/close`, adminTok, {});
-    assert.strictEqual(r.status, 400, `[C6负例] config close 应 400, got ${r.status} ${JSON.stringify(r.body)}`);
-    assert.strictEqual(r.body.code, 'INVALID_TRANSITION', '[C6负例] config close → INVALID_TRANSITION（config 无 transitions 定义，族外拒绝，未变）');
+    assert.strictEqual(r.status, 409, `[C6负例] config close（无 assignee）应 409, got ${r.status} ${JSON.stringify(r.body)}`);
+    assert.strictEqual(r.body.code, 'NO_ASSIGNEE_FOR_DEV_STATE', '[C6负例] config close → NO_ASSIGNEE_FOR_DEV_STATE（S1a 后 close 是合法转换，[4] 号跨类型通用闸对 config 同样生效，未变）');
     await run("UPDATE sys_issues SET status='已关闭' WHERE id=?", [cfgId]);
     r = await call('POST', `/api/sys-issues/${cfgId}/reopen`, adminTok, { reason: 'x' });
     assert.strictEqual(r.status, 400, `[C6负例] config reopen 应 400, got ${r.status} ${JSON.stringify(r.body)}`);
-    assert.strictEqual(r.body.code, 'INVALID_TRANSITION', '[C6负例] config reopen → INVALID_TRANSITION（同上，未变）');
-    ok('[C6负例] config 单 close/reopen 一律 400 INVALID_TRANSITION（config 无 transitions 定义，族外拒绝，附录A末行·本方案不改变既有 config 流程）');
+    assert.strictEqual(r.body.code, 'INVALID_TRANSITION', '[C6负例] config reopen → INVALID_TRANSITION（config 无 reopen 条目，D3「不重开」，未变）');
+    ok('[C6负例] config 单：close（无 assignee）409 NO_ASSIGNEE_FOR_DEV_STATE（S1a 后 close 合法但跨类型通用「已关闭须有开发负责人」闸仍挡）；reopen 仍 400 INVALID_TRANSITION（D3 不重开，config 无该条目）——两码不再对称，正例见 verify-sys-config-flow.js [H]');
 
     // 重开（reopen）：已关闭 → 处理中（bug 目标态，与变更流「开发中」对称）。
     r = await call('POST', `/api/sys-issues/${c6Bug}/reopen`, adminTok, { reason: '上线后回归缺陷' });

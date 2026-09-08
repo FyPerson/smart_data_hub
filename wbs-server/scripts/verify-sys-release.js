@@ -3,14 +3,14 @@
 //
 // in-process express app（挂真实 router）+ 内存库 + 自签 token，覆盖（方案 §6 / 编码方案 §五 C4）：
 //   1. 建批次（自动号 R-YYYYMMDD-N 递增 / 手填 / 手填重号 409 / 超长 400 / 计划上线日期非法 400）
-//   2. 加单 M-8（待上线+未挂批次成功 / 非待上线 409 / 已挂批次 409 / config 类 409 / 计划中外 409 / 原子全败）
+//   2. 加单 M-8（待上线+未挂批次成功 / 非待上线 409 / 已挂批次 409 / config 类 S1b 翻正 200（DB CHECK 已移除）/ 计划中外 409 / 原子全败）
 //   3. 移除单 M-8（在本批次成功清 release_id / 不在本批次 409 / 计划中外 409）
 //   4. 发布闸门③（release_note/version_tag trim 非空 + 长度上限）
 //   5. 发布 H-3 原子性（≥1 校验 / 全待上线 / 批量翻已上线校 changes / 每单 release timeline ref_id=批次 / 批次已发布+released_at）
 //   6. 空批次发布 409 / 成员非待上线 409 / 已发布批次再发/加/删 409
-//   7. hotfix-publish（单条自动建 is_hotfix=1 批次 + 一键发布原子 / 非待上线 409 / config 409 / 缺说明 400）
+//   7. hotfix-publish（单条自动建 is_hotfix=1 批次 + 一键发布原子 / 非待上线 409 / config 类 S1b 翻正 200（DB CHECK 已移除）/ 缺说明 400）
 //   8. 权限（非 admin 403）+ 列表/详情
-//   9. config DB CHECK（release_id 永空，直接 UPDATE 被拒）+ [C6·§6.5] reopen 收窄：已上线未归档 reopen→409
+//   9. config DB CHECK（release_id 永空 CHECK 已随 S1b 受控重建移除，直接 UPDATE 正常成功）+ [C6·§6.5] reopen 收窄：已上线未归档 reopen→409
 //      ISSUE_NOT_ARCHIVED（须先归档）+ 归档(close)后 reopen→开发中清 release_id 脱离批次（§6.4/§6.5 集成）
 //   9b. [C6·§6.5 完整回环] 发布→归档→重开→重新开发到待上线→加入新批次→再发布：逐环断言 release_id/
 //      released_at/closed_at 清空 + 能成功加入新批次 + 新旧两 release 快照/timeline 互不干扰 + 旧 release
@@ -288,7 +288,11 @@ async function main() {
   r = await call('POST', `/api/sys-releases/${relB}/add-issues`, adminTok, { issue_ids: [i1] });
   assert.strictEqual(r.status, 409); assert.strictEqual(r.body.code, 'ISSUE_NOT_ADDABLE');
   assert.strictEqual((await issueRow(i1)).release_id, relA, '加失败后 i1 仍属 relA（未被抢占）');
-  ok('已挂批次单加入它批次 → 409 ISSUE_NOT_ADDABLE');
+  // [Y3] 文案钉全文——S1b 起 config 可正常加单，"须为未挂批次的「待上线」单、非配置类"这句会误导管理员
+  // 去查单据类型（真正原因永远是"非待上线"或"已挂批次"），故整句精确匹配（不止 !/配置类/ 反向排除）。
+  assert.ok(!/配置类/.test(r.body.error), '[Y3] 409 文案不应再提"非配置类"（S1b 起 config 可正常加单）');
+  assert.strictEqual(r.body.error, `#${i1} 不可加入（须为未挂批次的「待上线」单）`, `[Y3] 409 文案应精确等于「#${i1} 不可加入（须为未挂批次的「待上线」单）」, 实际「${r.body.error}」`);
+  ok('已挂批次单加入它批次 → 409 ISSUE_NOT_ADDABLE，文案精确钉「须为未挂批次的「待上线」单」（不再提非配置类，补丁Y·Y3）');
 
   // 非待上线（新建未走流程，状态=待评估）→ 不能加
   const draftId = (await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type: 'feature', title: 'd', system_name: 'BMS', source: '内部', description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13 })).body.id;
@@ -303,14 +307,30 @@ async function main() {
   assert.strictEqual((await issueRow(i3)).release_id, null, '原子回滚：i3 未被加（全败）');
   ok('混合加单原子全败 → 待上线单也回滚');
 
-  // config 类不可加（直接造一张 config·待上线·未挂批次的脏数据测 type 闸门）
+  // [S1b 翻转·2026-09-07] RELEASABLE_TYPES 已含 config（config流激活_方案_20260907_v1.0），type 闸门已放行；
+  //   sys_issues 表级 CHECK (type <> 'config' OR release_id IS NULL) 已随受控重建移除（index.js:943 一带，
+  //   scripts/migrate-sys-issues-drop-config-release-check.js），config 单现应正常挂入批次：200 +
+  //   release_id=目标批次 + 批次详情端点返回的成员含该单（codex 505-B2 M3 强度要求）。
+  //   ⚠️ 用**新建**的 relCfg（不复用 relB）——relB 下方 449 行"空批次发布→409 RELEASE_EMPTY"用例依赖
+  //   它在那之前保持零成员，若本组把 config 单挂进 relB 会污染那条断言的前置状态。
+  const relCfgAddRes = await call('POST', '/api/sys-releases', adminTok, {});
+  assert.strictEqual(relCfgAddRes.status, 201, '[S1b 翻转] 夹具：建独立批次（不复用 relB，避免污染其"空批次"前置状态）');
+  const relCfgAdd = relCfgAddRes.body.id;
   const cfgRes = await run(
     "INSERT INTO sys_issues (type, status, priority, title, system_name, source, created_by, created_by_name) VALUES ('config','待上线','P2','c','BMS','内部',1,'管理员')"
   );
   const cfgId = cfgRes.lastID;
-  r = await call('POST', `/api/sys-releases/${relB}/add-issues`, adminTok, { issue_ids: [cfgId] });
-  assert.strictEqual(r.status, 409); assert.strictEqual(r.body.code, 'ISSUE_NOT_ADDABLE');
-  ok('config 类加单 → 409（type 闸门挡）');
+  r = await call('POST', `/api/sys-releases/${relCfgAdd}/add-issues`, adminTok, { issue_ids: [cfgId] });
+  assert.strictEqual(r.status, 200, `[S1b 翻转] config 加单应 200, got ${r.status} ${JSON.stringify(r.body)}`);
+  assert.strictEqual(r.body.count, 1, '[S1b 翻转] add-issues 响应 count=1');
+  assert.strictEqual((await issueRow(cfgId)).release_id, relCfgAdd, '[S1b 翻转] config 单 release_id 已绑目标批次（DB CHECK 已移除，成功挂入）');
+  const relCfgAddMemberCount = (await get(`SELECT COUNT(*) AS c FROM sys_issues WHERE release_id = ?`, [relCfgAdd])).c;
+  assert.strictEqual(relCfgAddMemberCount, 1, '[S1b 翻转] 该批次成员计数=1（config 单真实挂入，非半写）');
+  const relCfgAddDetail = await call('GET', `/api/sys-releases/${relCfgAdd}`, adminTok);
+  assert.strictEqual(relCfgAddDetail.status, 200, `[S1b 翻转] 批次详情端点应 200, got ${relCfgAddDetail.status}`);
+  assert.ok(relCfgAddDetail.body.issues.some((it) => it.id === cfgId),
+    `[S1b 翻转] 批次详情端点返回的成员含该 config 单, got ${JSON.stringify(relCfgAddDetail.body.issues.map((it) => it.id))}`);
+  ok('[S1b 翻转] config 类加单：200 + release_id=目标批次 + 批次成员计数=1 + 批次详情端点返回的成员含该单（DB CHECK 已随 S1b 受控重建移除）');
 
   // 加单负向：批次不存在 / id 非法 / 空数组
   r = await call('POST', `/api/sys-releases/999999/add-issues`, adminTok, { issue_ids: [i3] });
@@ -731,19 +751,39 @@ async function main() {
   const hf2TimelineCountAfter = (await get(`SELECT COUNT(*) AS c FROM sys_issue_timeline WHERE issue_id=?`, [hf2])).c;
   assert.strictEqual(hf2TimelineCountAfter, hf2TimelineCountBefore, '缺说明 400 后该单 timeline 计数不变（无新增，零副作用；本身已有的 assign/estimate/submit/accept 等历史行不受影响）');
   ok('hotfix 缺上线说明 → 400，库内零残留（sys_releases 计数不变 + issue 状态/release_id 未动 + timeline 计数不变）');
-  // hotfix config → CONFIG_NO_RELEASE（用上面 cfgId，状态待上线；C2b：须带合法 executors[] 才能通过输入面校验走到类型闸）
+  // [S1b 翻转·2026-09-07] hotfix-publish 对 config：type 闸门（TYPE_NOT_RELEASABLE）已放行；原
+  //   CONFIG_NO_RELEASE 专属 409 分支已随 S1a 主批删除；sys_issues 表级 CHECK 已随 S1b 受控重建移除，
+  //   config 单现应正常走 hotfix 应急建单：200 + created_new=true + 真实生成 is_hotfix=1 批次行 +
+  //   config 单关联该批次（codex 505-B2 M3 强度要求）。用**新建**的 cfgHfId（不复用上方 cfgId——
+  //   cfgId 已在 add-issues 组挂进独立批次 relCfgAdd，若复用会命中 hotfix-publish「重复调用」分支的
+  //   ISSUE_IN_NON_EMERGENCY_RELEASE，测的就不是"首次调用"这条路径了）。
+  const cfgHfRes = await run(
+    "INSERT INTO sys_issues (type, status, priority, title, system_name, source, created_by, created_by_name) VALUES ('config','待上线','P2','c-hf','BMS','内部',1,'管理员')"
+  );
+  const cfgHfId = cfgHfRes.lastID;
   const releasesCountBefore2 = (await get(`SELECT COUNT(*) AS c FROM sys_releases`)).c;
-  const cfgTimelineCountBefore = (await get(`SELECT COUNT(*) AS c FROM sys_issue_timeline WHERE issue_id=?`, [cfgId])).c;
-  r = await call('POST', `/api/sys-issues/${cfgId}/hotfix-publish`, adminTok, { release_note: 'a', version_tag: 'b', executors: [5, 13] });
-  assert.strictEqual(r.status, 409); assert.strictEqual(r.body.code, 'CONFIG_NO_RELEASE');
+  const cfgTimelineCountBefore = (await get(`SELECT COUNT(*) AS c FROM sys_issue_timeline WHERE issue_id=?`, [cfgHfId])).c;
+  r = await call('POST', `/api/sys-issues/${cfgHfId}/hotfix-publish`, adminTok, { release_note: 'a', version_tag: 'b', executors: [5, 13] });
+  assert.strictEqual(r.status, 200, `[S1b 翻转] hotfix-publish 对 config 应 200, got ${r.status} ${JSON.stringify(r.body)}`);
+  assert.strictEqual(r.body.created_new, true, '[S1b 翻转] created_new=true（首次调用真建单）');
+  const cfgRow = await issueRow(cfgHfId);
+  assert.strictEqual(cfgRow.status, '待上线', '[S1b 翻转] hotfix 建单后 issue 仍停在待上线（原子建单不直接翻已上线，同 [7-①] 既有语义）');
+  assert.ok(cfgRow.release_id, '[S1b 翻转] config 单已挂上自动建的应急批次');
+  const cfgHfRel = await get(`SELECT is_hotfix, release_kind FROM sys_releases WHERE id=?`, [cfgRow.release_id]);
+  assert.strictEqual(cfgHfRel.is_hotfix, 1, '[S1b 翻转] 真实生成 is_hotfix=1 批次行');
+  assert.strictEqual(cfgHfRel.release_kind, 'emergency', '[S1b 翻转] release_kind=emergency');
   const releasesCountAfter2 = (await get(`SELECT COUNT(*) AS c FROM sys_releases`)).c;
-  assert.strictEqual(releasesCountAfter2, releasesCountBefore2, 'config 类 409 后 sys_releases 计数不变（未建任何批次）');
-  const cfgRow = await issueRow(cfgId);
-  assert.strictEqual(cfgRow.status, '待上线', 'config 类 409 后 issue 状态仍待上线（未被误动）');
-  assert.strictEqual(cfgRow.release_id, null, 'config 类 409 后 issue release_id 仍 NULL（DB CHECK 本就禁 config 带 release_id，此处再验一次运行时行为）');
-  const cfgTimelineCountAfter = (await get(`SELECT COUNT(*) AS c FROM sys_issue_timeline WHERE issue_id=?`, [cfgId])).c;
-  assert.strictEqual(cfgTimelineCountAfter, cfgTimelineCountBefore, 'config 类 409 后该单 timeline 计数不变（无新增，零副作用）');
-  ok('hotfix config 类 → 409 CONFIG_NO_RELEASE（附录A"config 单独负例"），库内零残留（sys_releases 计数不变 + issue 状态/release_id 未动 + timeline 计数不变）');
+  assert.strictEqual(releasesCountAfter2, releasesCountBefore2 + 1, '[S1b 翻转] sys_releases 计数 +1（真建了应急批次）');
+  // [Y8] 钉死增量而非"不减少"——hotfix-publish 首次调用分支固定写 2 条 timeline（index.js:18194-18203：
+  // event_type='scope_change' action_code='release_hotfix_create'「应急建单」+ action_code='release_executors_set'
+  // 「设置上线执行人」，均只写一次、不在循环内），`>=` 在成功/失败两种情况下都为真，零鉴别力（补丁Y·M5）。
+  const cfgTimelineRowsAfter = await all(`SELECT event_type, action_code, ref_id FROM sys_issue_timeline WHERE issue_id=? ORDER BY id`, [cfgHfId]);
+  const cfgTimelineCountAfter = cfgTimelineRowsAfter.length;
+  assert.strictEqual(cfgTimelineCountAfter, cfgTimelineCountBefore + 2, `[Y3/Y8] hotfix 建单后该单 timeline 应恰好 +2（应急建单+执行人指派两条），实际 ${cfgTimelineCountBefore}→${cfgTimelineCountAfter}`);
+  const newTlRows = cfgTimelineRowsAfter.slice(cfgTimelineCountBefore);
+  assert.deepStrictEqual(newTlRows.map((r) => r.action_code).sort(), ['release_executors_set', 'release_hotfix_create'], '[Y8] 新增两条 timeline 的 action_code 精确等于「应急建单+执行人指派」这两个，非泛泛的"某两条"');
+  assert.ok(newTlRows.every((r) => r.event_type === 'scope_change' && r.ref_id === cfgRow.release_id), '[Y8] 两条新增行 event_type 均为 scope_change 且 ref_id 均关联到新建的应急批次');
+  ok('[S1b 翻转] hotfix-publish 对 config：200 + created_new=true + 真实生成 is_hotfix=1/emergency 批次行 + config 单关联该批次 + issue 仍待上线（原子建单不直翻）+ sys_releases 计数 +1 + timeline 精确 +2（应急建单/执行人指派，补丁Y·Y8 钉死增量）（DB CHECK 已随 S1b 受控重建移除）');
 
   // ── 8. 权限 + 列表/详情 ──────────
   r = await call('POST', '/api/sys-releases', devTok, { title: 'x' });
@@ -807,12 +847,13 @@ async function main() {
   r = await call('GET', `/api/sys-releases/999999`, adminTok, null);
   assert.strictEqual(r.status, 404); ok('批次详情不存在 → 404');
 
-  // ── 9. config DB CHECK + 重开清 release_id（§6.4 集成）──────────
-  let checkRejected = false;
-  try { await run("UPDATE sys_issues SET release_id=? WHERE id=?", [relB, cfgId]); }
-  catch (e) { checkRejected = /CHECK|constraint/i.test(e.message); }
-  assert.ok(checkRejected, 'DB CHECK 拒绝给 config 写 release_id');
-  ok('config release_id 永空 DB CHECK 生效（直接 UPDATE 被拒）');
+  // ── 9. [S1b 翻转·2026-09-07] config release_id DB CHECK 已移除 + 重开清 release_id（§6.4 集成）──────────
+  //   DB CHECK (type <> 'config' OR release_id IS NULL) 已随受控重建移除，直接 UPDATE 给 config 行写
+  //   release_id 现应正常成功（不再抛 CHECK constraint 错误）。
+  await run("UPDATE sys_issues SET release_id=? WHERE id=?", [relB, cfgId]);
+  const cfgAfterDirectUpdate = await issueRow(cfgId);
+  assert.strictEqual(cfgAfterDirectUpdate.release_id, relB, '[S1b 翻转] 直接 UPDATE 给 config 写 release_id 成功落库（DB CHECK 已移除）');
+  ok('[S1b 翻转] config release_id DB CHECK（12-H2）已移除：直接 UPDATE 正常成功落库');
 
   // [C6·方案 v3.4 §6.5] reopen 收窄：i1 当前「已上线」（未归档）直接 reopen → 409 须先归档（附录 A 明列，
   //   原 §6.4 时代"重开已上线单直接清 release_id"这条行为已作废——现须先 close 归档再 reopen）。

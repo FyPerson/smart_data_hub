@@ -24,7 +24,11 @@ let passed = 0;
 const ok = (m) => { passed++; console.log('  ✓ ' + m); };
 
 // ── 旧库 DDL（v1.102.x 生产现态：C1 首版列集，无 bug 流 10 列）──────────
-//   与 index.js 首版 CREATE TABLE 逐字对齐（含 CHECK/DEFAULT），模拟真实生产 sqlite_master。
+//   [Y13·2026-09-07 补丁 Y 订正] 与 index.js 首版 CREATE TABLE 逐字对齐（含 CHECK/DEFAULT）——本 fixture
+//   模拟的是「2026-09-07 config流激活_方案 S1b 受控重建之前」的历史库形态，含目标 CHECK
+//   `CHECK (type <> 'config' OR release_id IS NULL)`（S1b 已从活库移除，见
+//   scripts/migrate-sys-issues-drop-config-release-check.js）。本文件验证的是 bug 流 Commit ① 的旧库
+//   ALTER 迁移（与 config CHECK 移除是两件独立的事），fixture 冻结在该历史时点不受影响，继续有效。
 async function createOldSchema() {
   await run(`CREATE TABLE sys_releases (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

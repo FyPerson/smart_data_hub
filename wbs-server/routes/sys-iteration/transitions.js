@@ -8,7 +8,9 @@
 //   - **bug 流已追加（bug流_方案_20260702_v1.2）**：BUG_FLOW_TRANSITIONS 见下方——
 //     Commit ① 前段（建单→…→待上线）+ Commit ② 两条确认上线路径（填发版信息/发版 hotfix/不发版专用 transition，死端解除）；
 //     真钉钉建群=③；手动链式通知+对接人白名单=④；派生双描述=⑤。
-//   - config 流的常量 **留空位 + TODO 标注**，追加 config 时增量填（不动既有流）。
+//   - **config 流已追加（S1a·config流激活_方案_20260907_v1.0 §3）**：CONFIG_FLOW_TRANSITIONS 见下方——
+//     与 bug 流状态集同形（无「待对接测试」），删评估/对接测试/范围变更/reopen 四类动作，
+//     assign/reassign 新增 exec_mode/vendor_name 契约，submit 强制 no_code，accept 按 online_mode 分流上线。
 'use strict';
 
 // ── 被迭代的业务系统白名单（决策①，§12 GET /sys-systems 下拉源）──────────
@@ -34,7 +36,8 @@ const INITIAL_STATUS_WITHOUT_INTAKE_BY_TYPE = {
   feature: '待指派',
   improvement: '待指派',
   bug: '待处理',           // bug 前段最短（建单直落 待处理，bug 方案 §2.1）
-  // config: '待处理',     // TODO 追加 config 流时填
+  config: '待处理',        // [S1a·config 流激活 方案 v1.0 §3] 仅常量完整性——现行建单恒 intake_required=1，
+                           //   本分支（intake_required=0）结构性不可达（C0 焊死受理门），此值不会被 resolveInitialStatus 实际用到。
 };
 
 // resolveInitialStatus(type, intakeRequired)：建单/派生/reactivate 落态唯一权威（受理排期改造 §9）。
@@ -118,11 +121,18 @@ const BUG_FLOW_STATUSES = [
   '已暂缓',                                                              // ← 新增（bug暂缓方案 20260803 v0.4）
   '已拒绝', '已作废',                                                     // 旁路态
 ];
+// config 流状态集（config流激活_方案_20260907_v1.0 §3）：与 BUG_FLOW_STATUSES 同形（无「待对接测试」，
+//   受理门后落「待处理」→开发「处理中」，与 bug 一致；独立誊抄非引用，同本文件三份既有流的既定范式）。
+const CONFIG_FLOW_STATUSES = [
+  '待受理', '待修改', '待处理', '处理中', '待验证', '待上线', '已上线', '已关闭',
+  '已暂缓',
+  '已拒绝', '已作废',
+];
 const ALLOWED_STATUSES = {
   feature: FEATURE_FLOW_STATUSES,
   improvement: IMPROVEMENT_FLOW_STATUSES,
   bug: BUG_FLOW_STATUSES,
-  // config: [...],     // TODO 追加 config 流时填（待处理→处理中→待验收→已生效，§18.2）
+  config: CONFIG_FLOW_STATUSES,   // [S1a] config 流激活
 };
 
 // ── 状态机 transition 常量（每条 10 维度，§3.7 / §3.6 转移矩阵 / §9 权限矩阵）──────────
@@ -420,7 +430,10 @@ const IMPROVEMENT_FLOW_TRANSITIONS = [
   //   评估环节确立"绝对禁止开发态调需求"（v1.7 §十九 ⑦）→ feature/improvement 彻底移除 scope_change 动作
   //   （非 from=[]，是不展示该动作；buildMeta typeFlows 自然不含，前端无范围变更按钮）；
   //   需求变化统一走 derive 派生新单 / 作废重开。
-  //   ⚠️ config 流 scope_change 不受影响（§18.9 config 支持范围变更）——追加 config 流时在 CONFIG_FLOW_TRANSITIONS 自带。
+  //   ⚠️ [S1a 订正] 旧注释"config 流支持 scope_change（§18.9）"已作废——config流激活_方案_20260907_v1.0
+  //   §3 明确 config **不提供** scope_change（评估/范围变更段不适用），CONFIG_FLOW_TRANSITIONS 无此条目，
+  //   findTransition('config','scope_change',任意态) 恒 null，与 bug 走同一条 409 SCOPE_STATUS_INVALID
+  //   兜底路径（端点层 type 守卫只拦 feature/improvement，见 index.js scope-change 端点）。
   //   端点层 POST /scope-change 另加 type 守卫（409 SCOPE_CHANGE_DISABLED）双保险，防直接调 API。
   // ── 可行性评估旁路动作（F2b §3.1 / v1.7 §十九，feature/improvement，to=null 不改 status）──────────
   //   三动作端点独立事务实现（不走 sysIssueTransition，照 estimate 范式），常量在表里供 meta/findTransition 一致性。
@@ -1111,14 +1124,252 @@ const BUG_FLOW_TRANSITIONS = [
   },
 ];
 
-// 全部 transitions（按 type 组织；config 追加时 concat）。
+// ── config 流 transitions（config流激活_方案_20260907_v1.0 §3，S1a）──────────
+//   从 IMPROVEMENT_FLOW_TRANSITIONS 复制后按方案 §3 逐条替换（非共享引用，同本文件既有三流"独立誊抄"范式）：
+//   · 状态名替换：待指派→待处理、开发中→处理中（其余同名）。
+//   · 删除 feasibility/blocked/unblock/scope_change/liaison_test_pass/liaison_test_return——§3 明列
+//     config 不提供评估/对接测试/范围变更段（无对应条目，findTransition 对这些 action 恒 null）。
+//   · [S1a 补丁 X·X1] 删除 change_intake_mode——config 是新类型（无历史 timeline 行、无兼容需求），且
+//     该动作对应路由 change-intake-mode 已对全类型恒 409 INTAKE_MODE_SWITCH_DISABLED（C0 焊死受理门后
+//     语义消失），保留条目只是让 meta 声明一个结构上恒失败的动作。三既有流（feature/improvement/bug）
+//     的同名条目本批不动，留待阶段 2 随路由一并删除。
+//   · reopen 整体不设条目（D3「不重开，改动走派生」）——findTransition('config','reopen',任意态) 恒
+//     null，引擎 [1] 找不到边时走通用 400 INVALID_TRANSITION 兜底（唯一码，不像 bug/变更流那样在
+//     「已上线→已关闭」路径上额外精判 409 ISSUE_NOT_ARCHIVED——那条精判要求 findTransition(type,
+//     'reopen','已关闭') 非 null 才触发，config 恒不满足，故任何 fromStatus 下 reopen 均是同一 400）。
+//   · assign 新增 exec_mode（首次指派必带，D1/D13）+ vendor_name（vendor 时必填 1..100，否则清空）——
+//     契约在 index.js assign 端点内校验落库，本条目 requiredPayload 仅记无条件必填字段（vendor_name
+//     条件必填不入列，同 liaison_test_pass 的 test_note 先例）。
+//   · reassign 可附 exec_mode/vendor_name 变更（不带则保留，J18）——no-op 判据扩为"成员集合∧exec_mode∧
+//     归一化 vendor_name 三者全不变才 409"（其他类型仍 400 VALIDATION），仅方式/名称变化时跳过成员
+//     增删/代表选举/成员门重算/成员变化通知，改动详见 index.js reassign 端点。
+//   · submit 在事务内强制 mode='no_code'（D12，带 commits→400 CONFIG_NO_COMMITS）；no_code_reason 承载
+//     配置说明，config 专属 10..500 码点（其他类型仍 1..500 码元，J17 分层校验见 index.js）。
+//   · accept 必带 online_mode∈'release'|'direct'（D11）——本条目 to 仍是静态「待上线」（同 bug/变更流写法），
+//     online_mode='direct' 时由 index.js 调用层驱动既有 C9 引擎（evaluateNoCommitDirectOnline）在事务内
+//     改判「已上线」，不额外引入 dynamicTarget/possibleTargets（沿用现行动态目标范式，不新造机制）。
+const CONFIG_FLOW_TRANSITIONS = [
+  {
+    action: 'create',                       // 建单（端点 POST /sys-issues，不走 transition，单独 INSERT；此条供 meta 完整性）
+    from: [], to: null, dynamicTarget: 'initial_status', targetEntity: 'current_issue',
+    roleGuard: 'admin', ownerGuard: null,
+    requiredPayload: ['type', 'title', 'system_name', 'source'],
+    sideEffects: ['INSERT 主表 + 写 created timeline'],
+    timelineEvent: 'created', actionCode: null,
+    notifyAfterCommit: null,
+  },
+  {
+    action: 'intake_accept',                // 受理通过：待受理 → 待处理（状态名替换，对接人∨admin，风险等级必填 D15）
+    from: ['待受理'], to: '待处理',
+    roleGuard: 'intake_liaison', ownerGuard: null,
+    requiredPayload: ['risk_level'],
+    sideEffects: ['risk_level 与 status 同一 UPDATE 原子落库'],
+    timelineEvent: 'status_change', actionCode: 'intake_accept',
+    notifyAfterCommit: null,
+  },
+  {
+    action: 'intake_return',                // 受理退改：待受理 → 待修改（同 improvement，无差异）
+    from: ['待受理'], to: '待修改',
+    roleGuard: 'intake_liaison', ownerGuard: null,
+    requiredPayload: ['reason'],
+    sideEffects: ['notify 建单人（退改需修改）'],
+    timelineEvent: 'status_change', actionCode: 'intake_return',
+    notifyAfterCommit: null,
+  },
+  {
+    action: 'resubmit_intake',              // 修改后重新提交：待修改 → 待受理（同 improvement，无差异）
+    from: ['待修改'], to: '待受理',
+    roleGuard: 'creator_or_admin', ownerGuard: null,
+    requiredPayload: [],
+    sideEffects: [],
+    timelineEvent: 'status_change', actionCode: 'resubmit_intake',
+    notifyAfterCommit: null,
+  },
+  {
+    action: 'request_tech_consult',         // 发起技术负责人沟通：待受理 → 待受理（同 improvement，无差异）
+    from: ['待受理'], to: null,
+    roleGuard: 'intake_liaison', ownerGuard: null,
+    requiredPayload: ['tech_lead_id'],
+    sideEffects: ['tech_lead_id/_name 写入', '通知列组重置为 not_sent（用户点「发送通知」经 resend-tech-consult 手动发）'],
+    timelineEvent: 'note', actionCode: 'request_tech_consult',
+    notifyAfterCommit: null,
+  },
+  {
+    action: 'edit_in_revision',             // 编辑内容：指派前/开发期均可编辑（状态名替换：待受理/待修改/待处理/处理中）
+    from: ['待受理', '待修改', '待处理', '处理中'], to: null,
+    roleGuard: 'creator_or_admin', ownerGuard: null,
+    requiredPayload: [],
+    sideEffects: ['两档白名单字段更新', 'note timeline 快照改动字段'],
+    timelineEvent: 'note', actionCode: 'edit_in_revision',
+    notifyAfterCommit: null,
+  },
+  // [S1a 补丁 X·X1·codex 506-A M1（缩到 config）] change_intake_mode 条目已删除——config 是新类型（无
+  //   历史 timeline 行、无兼容需求），且 change-intake-mode 路由已对全类型恒 409
+  //   INTAKE_MODE_SWITCH_DISABLED（该动作语义随 C0 焊死受理门已消失）；保留条目只是让 meta/typeFlows
+  //   声明一个结构上恒失败的动作，无意义。三既有流（feature/improvement/bug）的同名条目**本批不动**，
+  //   留待阶段 2 随路由一并删除（避免跨批次牵连三条既有流的行为面）。
+  {
+    action: 'assign',                       // 指派：待处理 → 处理中（状态名替换，intake_liaison）
+    from: ['待处理'], to: '处理中',
+    roleGuard: 'intake_liaison', ownerGuard: null,
+    // D1/D13：config 首次指派必带 exec_mode（self/assigned/vendor）；vendor 时 vendor_name 必填 1..100
+    //   （条件必填，不入本无条件必填清单，同 liaison_test_pass 的 test_note 先例）；非 config 携带
+    //   exec_mode/vendor_name 任一字段 → 400 EXEC_MODE_NOT_APPLICABLE（index.js 端点内校验）。
+    requiredPayload: ['assigned_to', 'exec_mode'],
+    sideEffects: ['assigned_to/_name/assigned_at 写入', 'exec_mode/vendor_name 同一 UPDATE 原子落库（非 vendor 时 vendor_name 清空）'],
+    timelineEvent: 'assign', actionCode: null,
+    notifyAfterCommit: 'notifyAssignedDeveloper',
+  },
+  {
+    action: 'reassign',                     // 改派：处理中/待验证（状态名替换），可附 exec_mode/vendor_name 变更（D13/J18）
+    from: ['处理中', '待验证'], to: null,
+    roleGuard: 'intake_liaison', ownerGuard: null,
+    requiredPayload: ['member_ids', 'reason'],
+    sideEffects: ['开发集合差量应用（新增 INSERT pending / 移除软删）', '选举 electRepresentative 重算 assigned_to/_name',
+      'W-GATE 按新 roster 完成态判定主状态是否联动', '仅代表真实变化时才 notifyAssignedDeveloper',
+      // J18：exec_mode/vendor_name 不带则保留（归一化=trim+非 vendor 清空）；no-op 判据=成员集合∧exec_mode∧
+      //   归一化 vendor_name 三者全不变才 409（其他类型仍 400 VALIDATION）；仅方式/名称变化时同事务写字段 +
+      //   时间线 payload_json（exec_mode_from/to、vendor_name_from/to），跳过成员增删/代表选举/成员门重算/
+      //   成员变化通知（index.js reassign 端点内实现）。
+      'exec_mode/vendor_name 可附带变更（不带则保留，J18：仅方式/名称变化跳过成员增删/代表选举/成员门重算/成员变化通知）',
+    ],
+    timelineEvent: null, actionCode: null,
+    notifyAfterCommit: 'notifyAssignedDeveloper',
+  },
+  {
+    action: 'estimate',                     // 回填预计完成：处理中（状态名替换，不改 status）
+    from: ['处理中'], to: null,
+    roleGuard: null, ownerGuard: 'assignee',
+    requiredPayload: ['dev_estimated_at'],
+    sideEffects: ['dev_estimated_at 写入（>=assigned_at 校验）'],
+    timelineEvent: 'estimate', actionCode: null,
+    notifyAfterCommit: 'notifyEstimateToCreatorAndRequester',
+  },
+  {
+    action: 'set_scheduled_start',          // 定计划开工日：处理中（状态名替换，不改 status）
+    from: ['处理中'], to: null,
+    roleGuard: 'admin', ownerGuard: null,
+    requiredPayload: ['scheduled_start'],
+    sideEffects: ['scheduled_start 写入/清除（参考字段·非闸门）'],
+    timelineEvent: 'note', actionCode: 'set_scheduled_start',
+    notifyAfterCommit: null,
+  },
+  {
+    // D12：config 在事务内取真实类型后强制 mode='no_code'（带 commits → 400 CONFIG_NO_COMMITS，index.js
+    //   submit 端点内实现）；no_code_reason 承载配置说明，config 专属 10..500 码点下限（其他类型仍
+    //   1..500 码元，事务前公共上限改按码点判定，J17 分层校验见 index.js validateSubmitBody/submit 端点）。
+    action: 'submit',                       // 提交：处理中 → 待验证（状态名替换，无对接测试段，直落待验证）
+    from: ['处理中'], to: '待验证',
+    roleGuard: null, ownerGuard: 'assignee',
+    requiredPayload: ['self_tested', 'test_env_deployed'],
+    sideEffects: ['first_submitted_at（首次永不变）', 'round_no 递增 + submit timeline',
+      'no_code_reason 承载配置说明（D12，10..500 码点）'],
+    timelineEvent: 'submit', actionCode: null,
+    notifyAfterCommit: 'notifySubmittedToAdmin',
+  },
+  {
+    // D11：config 必带 online_mode∈'release'|'direct'（缺省/非法 400，index.js accept 端点内校验）；
+    //   release → 不调 C9 资格判定（evaluateNoCommitDirectOnline），恒落本条目静态 to「待上线」；
+    //   direct → 须过 C9 资格函数（零 active commit ∧ 无活跃批次关联），否则 409 DIRECT_ONLINE_NOT_ELIGIBLE，
+    //   通过则由既有 C9 引擎在同一事务内改判「已上线」（online_source 复用 'no_code_acceptance' 既有值，
+    //   与 bug/变更流的免上线直翻走同一条底层机制，仅调用层按 type×online_mode 多一层分流）。
+    action: 'accept',                       // 验收通过：待验证 → 待上线／已上线（online_mode 分流，D11）
+    from: ['待验证'], to: '待上线',
+    roleGuard: 'admin', ownerGuard: null,
+    requiredPayload: ['online_mode'],
+    sideEffects: ['accepted_at=now', 'online_mode=release 时不触发免上线直翻（即便零 commit 也停在待上线）',
+      'online_mode=direct 时须过 C9 资格函数否则 409 DIRECT_ONLINE_NOT_ELIGIBLE，通过则同事务改判已上线',
+      'note/attachment_ids 均可选 → timeline payload_json（2026-09-06 验收说明附件·决策记录 J4/J6，逐字复用）',
+      '[S1a 补丁 T·T2] config 单额外落 online_mode（release/direct）→ 同一条 accept timeline payload_json（D11「选项写时间线」，纯选 release 且无 note/附件时也落该键）'],
+    timelineEvent: 'status_change', actionCode: 'accept',
+    notifyAfterCommit: null,
+  },
+  {
+    action: 'return',                       // 验收打回：待验证 → 处理中（状态名替换，打回原因必填）
+    from: ['待验证'], to: '处理中',
+    roleGuard: 'admin', ownerGuard: null,
+    requiredPayload: ['reason'],
+    sideEffects: ['return_count++', 'dev_estimated_at 清空', 'scheduled_start 清空', 'attachment_ids 可选 → timeline payload_json（2026-09-06）'],
+    timelineEvent: 'return', actionCode: null,
+    notifyAfterCommit: 'notifyReturnedToDeveloper',
+  },
+  {
+    action: 'close',                        // 关闭：已上线 → 已关闭（同 improvement，无差异）
+    from: ['已上线'], to: '已关闭',
+    roleGuard: 'admin', ownerGuard: null,
+    requiredPayload: [],
+    sideEffects: ['closed_at=now'],
+    timelineEvent: 'status_change', actionCode: 'close',
+    notifyAfterCommit: null,
+  },
+  {
+    action: 'hold',                         // 暂缓：状态名替换（待处理/处理中/待验证/待上线 → 已暂缓）
+    from: ['待处理', '处理中', '待验证', '待上线'], to: '已暂缓',
+    roleGuard: 'admin', ownerGuard: null,
+    requiredPayload: ['reason'],
+    sideEffects: ['进入暂缓前活跃态记入 timeline from_status（resume 解析用）'],
+    timelineEvent: 'status_change', actionCode: 'hold',
+    notifyAfterCommit: null,
+  },
+  {
+    action: 'resume',                       // 暂缓恢复：已暂缓 → 暂缓前活跃态（同 improvement，理由必填）
+    from: ['已暂缓'], to: null,
+    roleGuard: 'admin', ownerGuard: null,
+    requiredPayload: ['reason'],
+    sideEffects: ['恢复到最近一次进入暂缓前的活跃态（校验属当前 type 合法活跃态，否则 409）'],
+    timelineEvent: 'status_change', actionCode: 'resume',
+    notifyAfterCommit: null,
+  },
+  {
+    action: 'reactivate',                   // 重新激活：已拒绝 → 初始态（同 improvement，不计返工）
+    from: ['已拒绝'], to: null, dynamicTarget: 'initial_status', targetEntity: 'current_issue',
+    roleGuard: 'admin', ownerGuard: null,
+    requiredPayload: ['reason'],
+    sideEffects: ['回初始态重走受理/指派流程（reopen_count 不变）'],
+    timelineEvent: 'status_change', actionCode: 'reactivate',
+    notifyAfterCommit: null,
+  },
+  {
+    action: 'issue_reject',                 // 拒绝：待受理 → 已拒绝（**仅受理人**·意见前置·同 improvement）
+    from: ['待受理'], to: '已拒绝',
+    roleGuard: 'intake_liaison_only', ownerGuard: null,
+    requiredPayload: ['reason'],
+    sideEffects: ['前置守卫：当前轮已有 tech_lead_comment（引擎执行器·REJECT_REQUIRES_TECH_COMMENT）'],
+    timelineEvent: 'status_change', actionCode: 'issue_reject',
+    notifyAfterCommit: null,
+  },
+  {
+    action: 'void',                         // 作废：任意态 → 已作废（同 improvement，原因必填）
+    from: '*', to: '已作废',
+    roleGuard: 'admin', ownerGuard: null,
+    requiredPayload: ['reason'],
+    sideEffects: ['软删除，前端隐藏'],
+    timelineEvent: 'status_change', actionCode: 'void',
+    notifyAfterCommit: null,
+  },
+  // ── reopen：不提供（D3「不重开，改动走派生」）——刻意不设条目，findTransition 恒 null，
+  //   引擎 [1] 走通用 400 INVALID_TRANSITION 兜底（唯一码，见本数组头注释与 index.js sysIssueTransition [1]）。
+  // ── feasibility/blocked/unblock/scope_change/liaison_test_pass/liaison_test_return：不提供
+  //   （方案 §3 明列，config 无评估/对接测试/范围变更段）——刻意不设条目，findTransition 恒 null。
+  {
+    action: 'derive',                       // 派生迭代：原单任意态 → 新建一单（同 improvement，防环）
+    from: '*', to: null, createdIssueDynamicTarget: 'initial_status', targetEntity: 'created_issue',
+    roleGuard: 'admin', ownerGuard: null,
+    requiredPayload: ['type', 'title', 'system_name', 'source'],
+    sideEffects: ['新建单 origin_issue_id=原单 id·新单恒 intake_required=1', '先写 created 再写 derive（T-L3）', '防环 M-1'],
+    timelineEvent: 'derive', actionCode: null,
+    notifyAfterCommit: null,
+  },
+];
+
+// 全部 transitions（按 type 组织）。
 // [工期对接测试与风险等级拆分 方案 v1.1 §3.1-1·C4] feature/improvement 从共享同一数组引用改为
 //   各自独立数组（拆分动机与内容见上方 FEATURE_FLOW_TRANSITIONS/IMPROVEMENT_FLOW_TRANSITIONS 注释）。
 const TRANSITIONS = {
   feature: FEATURE_FLOW_TRANSITIONS,
   improvement: IMPROVEMENT_FLOW_TRANSITIONS,
   bug: BUG_FLOW_TRANSITIONS,               // bug 流（bug流_方案_20260702_v1.2，Commit ① 起）
-  // config: CONFIG_FLOW_TRANSITIONS,      // TODO 追加 config 流
+  config: CONFIG_FLOW_TRANSITIONS,         // [S1a] config 流（config流激活_方案_20260907_v1.0）
 };
 
 // ── 查表 helper（sysIssueTransition / 端点用）──────────
@@ -1173,7 +1424,7 @@ const DEV_WORK_STATUS_BY_TYPE = {
   feature: '开发中',
   improvement: '开发中',
   bug: '处理中',
-  // config: '处理中',   // TODO 追加 config 流时填（§18.2）
+  config: '处理中',   // [S1a] config 流激活（方案 §3）
 };
 function isDevWorkState(type, status) {
   return !!status && DEV_WORK_STATUS_BY_TYPE[type] === status;
@@ -1210,8 +1461,10 @@ function buildMeta() {
     set_scheduled_start: '定计划开工日',
     // C2.5 撤销·R4：OA 号补填端点的 timeline action_code 标签（set-oa-number 是旁路路由不进 TRANSITIONS·仅供渲染）
     set_oa_number: '补填 OA 号',
-    // scope_change label 为 config 流预留（feature/improvement 已移除该动作，typeFlows 不含）——
-    //   meta.actions 是全动作 label 超集，前端按 typeFlows 显隐按钮，故残留此 label 无害（ultracode 对抗审确认）。
+    // [S1a 订正] scope_change label 原为"config 流预留"——config流激活_方案_20260907_v1.0 §3 已明确
+    //   config 不提供该动作（CONFIG_FLOW_TRANSITIONS 无此条目），此标签现纯粹是历史 timeline 行渲染兜底
+    //   （feature/improvement 早年曾产生过该 action_code 的行）——meta.actions 是全动作 label 超集，
+    //   前端按 typeFlows 显隐按钮，残留此 label 无害（同 pre_discuss_pass/set_release_flag 等历史标签先例）。
     scope_change: '范围变更', derive: '派生迭代',
     // bug 流 Commit ②：确认上线两路径 + 填发版信息 ——⚠️ 标签保留供历史 timeline 行渲染 action_code
     //   （v1.6 §2.3 [C-1 回填]：三条 action 已从 BUG_FLOW_TRANSITIONS 移除退场，但历史单曾产生的

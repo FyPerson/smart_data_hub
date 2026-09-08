@@ -8,7 +8,8 @@
 //
 // C1 断言覆盖：4 表存在 + 关键列齐（含 effected_at，11-M1）+ 索引建上 + readiness 三态（干净库 ready / 缺列库 false）
 //   + 建表顺序不报错 + 三侧通知 5 列全量（07-M3）+ 枚举 CHECK 生效（type/source/priority/event_type/attachment_type/
-//   release status/三侧 notify_status）+ config release_id 永空 DB CHECK（12-H2）+ FK 定义正确性（测试期）+
+//   release status/三侧 notify_status）+ config release_id 永空 DB CHECK（12-H2）已随 S1b 受控重建移除
+//   （2026-09-07，config 单可进上线批次，铁律例外见项目记忆 sys_issues_rebuild_exception）+ FK 定义正确性（测试期）+
 //   默认值（priority/三侧通知/计数/record_source）+ _internals KEY_COLS 与真实表同源。
 //   ⚠️ HTTP 503 等 C2 真端点（C1 空 router 无业务端点，07-L1）。
 const assert = require('assert');
@@ -184,20 +185,21 @@ async function main() {
   await assert.rejects(run(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name, creator_notify_status) VALUES ('feature', '待评估', 't', 'BMS', 1, 'admin', 'x')`), /CHECK|constraint/i, 'creator_notify_status=x 应被 CHECK 拒');
   ok('三侧 notify_status CHECK：not_sent/sent/failed 之外的值（dev/requester/creator）全被拒');
 
-  // [9] ⭐ config release_id 永空 DB CHECK（12-H2）：config 带 release_id 被拒，非 config 可带
+  // [9] ⭐ [S1b 翻转·2026-09-07] config release_id 永空 DB CHECK（12-H2）已随受控重建移除——
+  //   config 单 2026-09-07 起需要能进上线批次（用户拍板，铁律例外见项目记忆 sys_issues_rebuild_exception，
+  //   迁移脚本 scripts/migrate-sys-issues-drop-config-release-check.js）。本组从「拒绝」翻为「接受」：
+  //   config 带 release_id 现应正常写入（DB 层不再拦，业务层准入口径见 config流激活_方案_v1.0 §3/§4）。
   //   先建一个批次供 release_id 引用（FK 已开，需真实 release id）
   await run(`INSERT INTO sys_releases (release_no, created_by, created_by_name) VALUES ('R-20260625-1', 1, 'admin')`);
   const relId = (await get(`SELECT id FROM sys_releases WHERE release_no='R-20260625-1'`)).id;
-  await assert.rejects(
-    run(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name, release_id) VALUES ('config', '待处理', 't', 'OA', 1, 'admin', ?)`, [relId]),
-    /CHECK|constraint/i, 'config 带 release_id 应被 DB CHECK 拒（12-H2）');
-  // 非 config（feature）可带 release_id
+  await run(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name, release_id) VALUES ('config', '待上线', 't', 'OA', 1, 'admin', ?)`, [relId]);
+  const configWithRelease = await get(`SELECT COUNT(*) AS c FROM sys_issues WHERE type='config' AND release_id = ?`, [relId]);
+  assert.strictEqual(configWithRelease.c, 1, '[S1b 翻转] config 带 release_id 应被接受，落库可查（DB CHECK 已移除）');
+  // 非 config（feature）仍可带 release_id（零回归）
   await run(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name, release_id) VALUES ('feature', '待上线', 't', 'BMS', 1, 'admin', ?)`, [relId]);
-  // config 不带 release_id 正常写入
+  // config 不带 release_id 仍正常写入（release_id 可空，未被本次移除影响）
   await run(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name) VALUES ('config', '待处理', 't', 'OA', 1, 'admin')`);
-  const configBad = await get(`SELECT COUNT(*) AS c FROM sys_issues WHERE type='config' AND release_id IS NOT NULL`);
-  assert.strictEqual(configBad.c, 0, 'config 单不应存在带 release_id 的记录');
-  ok('config release_id 永空 DB CHECK（12-H2）：config 带 release_id 被拒，feature 可带，不存在 config+release_id');
+  ok('[S1b 翻转] config release_id 永空 DB CHECK（12-H2）已移除：config 带 release_id 正常写入且可查、feature 带 release_id 零回归、config 不带 release_id 仍正常');
 
   // [9b] ⭐ 可行性评估 CHECK + 默认值（F1 §2.1）
   //   needs_feasibility/blocked 硬 CHECK(0,1)（codex 17 M-2：承担 submit 闸门逻辑，不照 scope_changed 无 CHECK 范式）
@@ -455,9 +457,10 @@ async function main() {
     //   [组C·SC1·2026-08-13] 随后新增的 eta_overrun_reason_code/_note/dev_estimated_first_at/
     //   dev_estimated_at_on_release 四列（[1a-16]）+ [§14·S11·2026-08-14] 随后新增的
     //   completion_overrun_reason_code/_note 两列（[1a-17]）+ [§15·S12-a·2026-08-14] 随后新增的
-    //   derive_root_id/derive_seq/derive_seq_alloc 三列（[1a-18]），不多不少不错序——用显式列表
+    //   derive_root_id/derive_seq/derive_seq_alloc 三列（[1a-18]）+ [S1a·2026-09-07] exec_mode/
+    //   vendor_name 两列（[1a-19]·config 流激活执行方式契约），不多不少不错序——用显式列表
     //   deepStrictEqual 而非"只要排在它之前"这种宽松判断，保留原断言（"online_source 必须是表尾往下的
-    //   固定序列起点"）的精确追责能力：若将来再有新列插进这十八列之间、或表尾又新增了别的列组，这里会
+    //   固定序列起点"）的精确追责能力：若将来再有新列插进这二十列之间、或表尾又新增了别的列组，这里会
     //   先于下方 [9h-fastrelease]/[9h-fastrelease-acceptance]/[9h-eta-overrun-snapshot]/
     //   [9h-completion-overrun]/[9h-derive-numbering] 五组报错，逼着显式更新这份列表（同时提醒同步该组
     //   的表尾断言）。
@@ -469,8 +472,9 @@ async function main() {
         'post_release_acceptance', 'post_accepted_at', 'post_derive_issue_id',
         'eta_overrun_reason_code', 'eta_overrun_reason_note', 'dev_estimated_first_at', 'dev_estimated_at_on_release',
         'completion_overrun_reason_code', 'completion_overrun_reason_note',
-        'derive_root_id', 'derive_seq', 'derive_seq_alloc'],
-      `[M2③] online_source 之后应恰好是 fast_release_* 六列 + post_release_acceptance/post_accepted_at/post_derive_issue_id 三列 + eta_overrun_reason_code/_note/dev_estimated_first_at/dev_estimated_at_on_release 四列 + completion_overrun_reason_code/_note 两列 + derive_root_id/derive_seq/derive_seq_alloc 三列（顺序不漂移），实得 ${JSON.stringify(colsAfterOnlineSource)}`);
+        'derive_root_id', 'derive_seq', 'derive_seq_alloc',
+        'exec_mode', 'vendor_name'],
+      `[M2③] online_source 之后应恰好是 fast_release_* 六列 + post_release_acceptance/post_accepted_at/post_derive_issue_id 三列 + eta_overrun_reason_code/_note/dev_estimated_first_at/dev_estimated_at_on_release 四列 + completion_overrun_reason_code/_note 两列 + derive_root_id/derive_seq/derive_seq_alloc 三列 + [S1a·2026-09-07] exec_mode/vendor_name 两列（[1a-19]）（顺序不漂移），实得 ${JSON.stringify(colsAfterOnlineSource)}`);
     // 默认值行为：裸插入 → NULL
     await run(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name) VALUES ('feature', '开发中', 't-online-source-default', 'BMS', 1, 'admin')`);
     const osDefault = await get(`SELECT online_source FROM sys_issues WHERE title='t-online-source-default'`);
@@ -694,9 +698,14 @@ async function main() {
     }
     assert.ok(rootInfo.cid < seqInfo.cid && seqInfo.cid < allocInfo.cid,
       `derive_root_id/derive_seq/derive_seq_alloc 声明顺序应依次递增，实得 root=${rootInfo.cid}/seq=${seqInfo.cid}/alloc=${allocInfo.cid}`);
+    // [S1a 补丁 T·T11] derive_seq_alloc 已不再是表尾——[S1a·2026-09-07] exec_mode/vendor_name 两列
+    //   （[1a-19]，config 流激活执行方式契约）新增在其后，vendor_name 现为真正末列（见上方 [9h-c9]
+    //   colsAfterOnlineSource 列表已同源钉住该顺序）。derive_root_id/derive_seq/derive_seq_alloc 三列
+    //   自身的声明序（root<seq<alloc，见上方 assert.ok）与本组"派生单编号"语义无关的 exec_mode/
+    //   vendor_name 无需并入——那是另一个特性的三列内部相对顺序，不是"谁是表尾"这件事。
     const lastColDn = dnCols[dnCols.length - 1];
-    assert.strictEqual(lastColDn.name, 'derive_seq_alloc',
-      `[表尾钉死] derive_seq_alloc 应是 sys_issues 当前最后一列（新增列一律排表尾），实际末列=${lastColDn.name}——将来再加新列时本断言会红，提醒把这一行的期望更新为新的末列`);
+    assert.strictEqual(lastColDn.name, 'vendor_name',
+      `[表尾钉死] vendor_name 应是 sys_issues 当前最后一列（S1a exec_mode/vendor_name 两列新增，vendor_name 排在 exec_mode 之后，新增列一律排表尾），实际末列=${lastColDn.name}——将来再加新列时本断言会红，提醒把这一行的期望更新为新的末列`);
     // 默认值行为：裸插入 → 三列全 NULL
     await run(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name) VALUES ('bug', '待受理', 't-derive-num-default', 'BMS', 1, 'admin')`);
     const dnDefault = await get(`SELECT derive_root_id, derive_seq, derive_seq_alloc FROM sys_issues WHERE title='t-derive-num-default'`);
@@ -1166,7 +1175,7 @@ async function main() {
   await verifyLiaisonTestAlterMigration();
 
   console.log(`\n[全部通过] ${passed}/${passed} ✓ 系统迭代 sys 七表 schema 验证通过【require 真实 initSchema，非复刻 DDL】`);
-  console.log(`  覆盖：7 表（含通知改造 C1a 新表 sys_issue_dev_assignees + 上线体统一重构 C0 新表 sys_release_duty_roster + 上线执行人多选与多人双确认新表 sys_release_executors）+ 关键列（含 effected_at/三侧通知 5 列全量/可行性评估 7 列/通知改造 11 新列/上线体统一重构 C0 的 sys_releases 10 新列 + 排班表 11 列 + 执行人子表 19 列）+ 18 索引（含 G12 部分唯一索引 + C0 新增 4 索引 + 执行人多选 C0 新增 3 索引[含部分唯一索引/代次语义闸]）+ type/source/priority/三通知/relay_notify_status/event_type(15)/attachment/release status/release_assignee_notify_status(5态)/release_kind/feasibility_conclusion/needs_feasibility·blocked(0,1)/dev_assignees is_primary·notify_status/排班表 duty_date 与软删成组 CHECK/执行人子表通知态·执行态·软删三组 CHECK + config release_id 永空 DB CHECK（12-H2）+ NOT NULL + UNIQUE + 部分唯一索引(软删复活/唯一活跃值班/执行人代次) + FK 定义 + readiness 三态（含新表专项）`);
+  console.log(`  覆盖：7 表（含通知改造 C1a 新表 sys_issue_dev_assignees + 上线体统一重构 C0 新表 sys_release_duty_roster + 上线执行人多选与多人双确认新表 sys_release_executors）+ 关键列（含 effected_at/三侧通知 5 列全量/可行性评估 7 列/通知改造 11 新列/上线体统一重构 C0 的 sys_releases 10 新列 + 排班表 11 列 + 执行人子表 19 列）+ 18 索引（含 G12 部分唯一索引 + C0 新增 4 索引 + 执行人多选 C0 新增 3 索引[含部分唯一索引/代次语义闸]）+ type/source/priority/三通知/relay_notify_status/event_type(15)/attachment/release status/release_assignee_notify_status(5态)/release_kind/feasibility_conclusion/needs_feasibility·blocked(0,1)/dev_assignees is_primary·notify_status/排班表 duty_date 与软删成组 CHECK/执行人子表通知态·执行态·软删三组 CHECK + config release_id DB CHECK（12-H2）已随 S1b 受控重建移除·config 带 release_id 正常写入 + NOT NULL + UNIQUE + 部分唯一索引(软删复活/唯一活跃值班/执行人代次) + FK 定义 + readiness 三态（含新表专项）`);
   db.close();
 }
 

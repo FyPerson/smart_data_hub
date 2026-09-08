@@ -513,7 +513,7 @@ async function main() {
     ok('[⑦-陈旧缓存不回写] 重发后旧 read_at 哨兵被清空，查已读不再误用陈旧缓存直接返回，而是走到真实查询路径');
   }
 
-  // ═══ [⑧] 仅「待受理」态可发；未知业务 type 400；非 admin 403 ═══
+  // ═══ [⑧] 仅「待受理」态可发；config 同样可发；非 admin 403 ═══
   {
     // 非待受理态 → 409 STATUS_NOT_NOTIFIABLE
     const id = await mkLegacyIssue('待受理', { title: '状态闸门单' });
@@ -529,14 +529,60 @@ async function main() {
     const rowAfterStatus = await issueRow(id);
     assert.strictEqual(rowAfterStatus.intake_notify_status, 'not_sent', '[⑧] 零副作用：intake_notify_status 未变');
 
-    // 未知业务 type（直造脏数据，绕过建单入口的 TYPE_NOT_SUPPORTED 闸）→ 400 MANUAL_NOTIFY_TYPE_NA
+    // [S1a 订正] config 不再是"未知业务 type"——sys_issues.type 的 DB CHECK 四值在 S1a 后全部登记，
+    //   HTTP 层已无可达的未登记 type。本段改为正例：config/待受理 单同样可发 intake 通知。
+    //   MANUAL_NOTIFY_TYPE_NA 仍保留 fail-closed（sysManualNotifyGuard 兜底分支未删），但 S1a 后经 HTTP
+    //   不可达，不再有端点级用例（该兜底现只服务"未来若真出现未登记 type"的防御纵深）。
     const rConfig = await run(
       `INSERT INTO sys_issues (type, status, title, description, system_name, source, created_by, created_by_name)
-       VALUES ('config', '待受理', '脏type单', '脏type描述', 'BMS', '内部', 1, '管理员')`
+       VALUES ('config', '待受理', 'config待受理单', 'config描述', 'BMS', '内部', 1, '管理员')`
     );
     const rType = await call('POST', `/api/sys-issues/${rConfig.lastID}/notify-intake`, adminTok, {});
-    assert.strictEqual(rType.status, 400, `[⑧] 未知业务 type 期望 400, got ${rType.status} ${JSON.stringify(rType.body)}`);
-    assert.strictEqual(rType.body.code, 'MANUAL_NOTIFY_TYPE_NA', '[⑧] 确切码 MANUAL_NOTIFY_TYPE_NA（与状态闸门 409 分清，type 门限用 400）');
+    assert.strictEqual(rType.status, 200, `[⑧] config/待受理 期望 200（S1a 起 config 同样可发）, got ${rType.status} ${JSON.stringify(rType.body)}`);
+    const rowAfterConfig = await issueRow(rConfig.lastID);
+    assert.strictEqual(rowAfterConfig.intake_notify_status, 'sent', '[⑧] config 通知真发送（intake_notify_status=sent）');
+
+    // [S1a 补丁 V·V7·codex 505-B2 M2] 恢复端点级 fail-closed 覆盖——S1a 前"未知业务 type"负例已随四值全部
+    //   登记而结构性不可达，但 sysManualNotifyGuard 的 intake 通道兜底分支（MANUAL_NOTIFY_TYPE_NA）与
+    //   notify-read-status 端点自己的 issue.type 白名单仍在，需要端点级证据。PRAGMA 造脏行同 tech-lead-comment
+    //   [GN] 同款范式：ON→插→立即 OFF→用第二次插入证明 OFF 生效→调端点。
+    await run('PRAGMA ignore_check_constraints = ON');
+    const dirtyIns = await run(
+      `INSERT INTO sys_issues (type, status, title, description, system_name, source, created_by, created_by_name)
+       VALUES ('hotfix', '待受理', 'fail-closed 脏行', '脏行描述', 'BMS', '内部', 1, '管理员')`
+    );
+    await run('PRAGMA ignore_check_constraints = OFF');
+    await assert.rejects(
+      run(`INSERT INTO sys_issues (type, status, title, description, system_name, source, created_by, created_by_name)
+           VALUES ('hotfix', '待受理', 'x', 'y', 'BMS', '内部', 1, '管理员')`),
+      /CHECK constraint failed/,
+      '[⑧] PRAGMA ignore_check_constraints 应已恢复 OFF（第二次插入同样非法 type 应被 CHECK 拒绝）'
+    );
+    const dirtyId = dirtyIns.lastID;
+    // [S1a 补丁 X·X4·codex 506-B #13] 零副作用对拍——两次端点调用前后对拍 intake_notify_* 列组 +
+    //   intake_read_at + 时间线计数，证明两处 fail-closed 分支拒绝前没有半写任何字段。
+    const INTAKE_NOTIFY_COLS = 'intake_notify_status, intake_notify_message_key, intake_notify_error, intake_read_at, intake_notify_sent_by';
+    const dirtyRowBefore1 = await get(`SELECT ${INTAKE_NOTIFY_COLS} FROM sys_issues WHERE id=?`, [dirtyId]);
+    const dirtyTlCountBefore = (await get(`SELECT COUNT(*) AS c FROM sys_issue_timeline WHERE issue_id=?`, [dirtyId])).c;
+    const rDirtyNotify = await call('POST', `/api/sys-issues/${dirtyId}/notify-intake`, adminTok, {});
+    assert.strictEqual(rDirtyNotify.status, 400, `[⑧] 未登记 type 脏行 notify-intake 应 400, got ${rDirtyNotify.status} ${JSON.stringify(rDirtyNotify.body)}`);
+    assert.strictEqual(rDirtyNotify.body.code, 'MANUAL_NOTIFY_TYPE_NA', '[⑧] 脏行 notify-intake code=MANUAL_NOTIFY_TYPE_NA（sysManualNotifyGuard intake 通道兜底分支，fail-closed 端点级证据恢复）');
+    const rowAfterDirty = await issueRow(dirtyId);
+    assert.strictEqual(rowAfterDirty.intake_notify_status, 'not_sent', '[⑧] 脏行被拒后 intake_notify_status 仍 not_sent（零副作用）');
+    const rDirtyRead = await call('GET', `/api/sys-issues/${dirtyId}/notify-read-status?type=intake`, adminTok);
+    assert.strictEqual(rDirtyRead.status, 400, `[⑧] 未登记 type 脏行 notify-read-status 应 400, got ${rDirtyRead.status} ${JSON.stringify(rDirtyRead.body)}`);
+    assert.strictEqual(rDirtyRead.body.code, 'MANUAL_NOTIFY_TYPE_NA', '[⑧] 脏行 notify-read-status code=MANUAL_NOTIFY_TYPE_NA（issue.type 白名单 fail-closed，与发送侧写读同源）');
+    const dirtyRowAfter1 = await get(`SELECT ${INTAKE_NOTIFY_COLS} FROM sys_issues WHERE id=?`, [dirtyId]);
+    assert.deepStrictEqual(dirtyRowAfter1, dirtyRowBefore1, '[⑧] 脏行两次调用后 intake_notify_* 列组 + intake_read_at 零写（补丁 X·X4）');
+    const dirtyTlCountAfter = (await get(`SELECT COUNT(*) AS c FROM sys_issue_timeline WHERE issue_id=?`, [dirtyId])).c;
+    assert.strictEqual(dirtyTlCountAfter, dirtyTlCountBefore, '[⑧] 脏行两次调用后时间线计数不变（补丁 X·X4）');
+
+    // [S1a 补丁 X·X4] 脏行隔离——断言完成后立即 DELETE，防其残留污染本文件后续任何 COUNT(*)/列表长度/
+    //   全集断言（已 grep 全文件 [⑧] 组之后的相关断言，见报告核过的行号清单，删行后天然不受影响）。
+    const dirtyDel = await run(`DELETE FROM sys_issues WHERE id=?`, [dirtyId]);
+    assert.strictEqual(dirtyDel.changes, 1, '[⑧] 脏行 DELETE 应命中恰 1 行');
+    const dirtyRemain = (await get(`SELECT COUNT(*) AS c FROM sys_issues WHERE type='hotfix'`)).c;
+    assert.strictEqual(dirtyRemain, 0, '[⑧] 脏行删除后全库 type=\'hotfix\' 行数为 0（补丁 X·X4）');
 
     // 非 admin（含受理人本人）→ 403（路由级 requireAdmin 唯一放行，受理人无该权限——通知对象是受理人本人）
     const idForAuth = await mkLegacyIssue('待受理', { title: '权限单' });
@@ -547,7 +593,7 @@ async function main() {
     const rowAfterAuth = await issueRow(idForAuth);
     assert.strictEqual(rowAfterAuth.intake_notify_status, 'not_sent', '[⑧] 非 admin 调用零副作用');
 
-    ok('[⑧] 状态闸门：非待受理 409 STATUS_NOT_NOTIFIABLE / 未知 type 400 MANUAL_NOTIFY_TYPE_NA（400 vs 409 分清）/ 受理人本人∨普通用户 403（路由级 requireAdmin 唯一放行），均零副作用');
+    ok('[⑧] 状态闸门：非待受理 409 STATUS_NOT_NOTIFIABLE / config 同样可发 200 sent（S1a 起 HTTP 层无未登记 type，MANUAL_NOTIFY_TYPE_NA 兜底不可达）/ PRAGMA 造脏行恢复端点级覆盖：notify-intake 与 notify-read-status 均 400 MANUAL_NOTIFY_TYPE_NA（补丁 V·V7）+ 零副作用对拍(intake_notify_*列组+intake_read_at+timeline计数)+DELETE隔离（补丁 X·X4）/ 受理人本人∨普通用户 403（路由级 requireAdmin 唯一放行），均零副作用');
   }
 
   // ═══ [⑨] 回受理门（reactivate / resubmit-intake）：intake 通知 5 列归零 + intake_liaison_id 保留 ═══

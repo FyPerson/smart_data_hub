@@ -8,7 +8,7 @@
 // 覆盖：
 //   [I] 创建入口不变量（源码扫描）：routes/ 下 INSERT INTO sys_issues 恰 2 处 + 三入口全部调用统一函数
 //       + 创建路径不再直调 resolveInitialStatus（防日后新增入口时"忘了走统一函数"这类静默回归）
-//   [C1] 建单三类型 → 恒「待受理」+ 入库 intake_required=1
+//   [C1] 建单四类型 → 恒「待受理」+ 入库 intake_required=1
 //   [C2] derive 派生新单 → 恒「待受理」+ **INSERT 显式落 intake_required=1**（原 INSERT 未列该列·靠 DEFAULT 0
 //        会造出「待受理 + ir=0」矛盾单 → 受理门不变量拒 409 → 单永久卡死。本组是该回归的专门哨兵）
 //   [C3] reactivate（已拒绝 → 初始态）→ 恒「待受理」+ 同事务置 intake_required=1；含 ir=0 脏单可自愈
@@ -189,8 +189,9 @@ async function main() {
     // ⭐ 角色权限重构 C2.5 撤销（v2.1 §5）：落态**全类型归一「待受理」**——预沟通段/PRE_DISCUSS 族整体撤销，
     //   建单/derive/reactivate 三入口统一收敛为恰一个目标值，不再按 type 分流。C0 焊死的「不受调用方影响」
     //   （函数不收 intake 参数、三入口只能调它）不变，只是分流表退化为单值表。
-    const EXPECT_CREATE_STATUS = { feature: '待受理', improvement: '待受理', bug: '待受理' };
-    for (const t of ['feature', 'improvement', 'bug']) {
+    // [S1a 补丁 T·T8] config 已走受理门，纳入循环（config 已登记 → 不应再靠字面量白名单排除在覆盖面外）。
+    const EXPECT_CREATE_STATUS = { feature: '待受理', improvement: '待受理', bug: '待受理', config: '待受理' };
+    for (const t of ['feature', 'improvement', 'bug', 'config']) {
       assert.strictEqual(T.resolveSysInitialStatusForCreate(t), EXPECT_CREATE_STATUS[t],
         `${t} 统一函数落态应为「${EXPECT_CREATE_STATUS[t]}」（v2.1：C2.5 撤销后全类型归一待受理）`);
     }
@@ -200,23 +201,26 @@ async function main() {
     assert.strictEqual(T.SYS_PRE_DISCUSS_TYPES, undefined, 'SYS_PRE_DISCUSS_TYPES 应已随 C2.5 撤销被删除（不得残留可执行状态引用）');
     assert.strictEqual(T.SYS_PRE_DISCUSS_STATUS, undefined, 'SYS_PRE_DISCUSS_STATUS 应已随 C2.5 撤销被删除（不得残留可执行状态引用）');
     assert.throws(() => T.resolveSysInitialStatusForCreate('unknown_type'), /未知\/未登记 type/, '未知 type fail-closed 抛错（不静默落态）');
-    // ⭐ config **不参与受理流**（codex 九轮审 HIGH）：它没有 transitions，若能建单就会产生
-    //   「config/待受理」这种**无受理转换可走**的卡死单。这里用三条断言把"已被拒绝"钉死，
-    //   而不是只靠注释声明"不适用"。
-    assert.ok(!T.ALLOWED_STATUSES.config, 'config 不在 ALLOWED_STATUSES（无合法状态集）');
-    assert.ok(!T.TRANSITIONS.config, 'config 不在 TRANSITIONS（无状态机）');
-    assert.throws(() => T.resolveSysInitialStatusForCreate('config'), /未知\/未登记 type/,
-      'config 落态解析 fail-closed 抛错（不会产生 config/待受理 卡死单）');
-    ok('[I] 创建入口不变量：服务端 INSERT INTO sys_issues 恰 2 处且均显式列出 intake_required + index.js 统一函数调用恰 3 处 + 不再直调 resolveInitialStatus(0 处) + 统一函数单形参/落态全类型归一待受理(v2.1 撤销分流) + PRE_DISCUSS 导出撤销哨兵 + 未知 type 与 config fail-closed');
+    // ⭐ [S1a 订正] 原顾虑（codex 九轮审 HIGH："config 没有 transitions，若能建单就会产生「config/待受理」
+    //   这种无受理转换可走的卡死单"）已由 config流激活_方案_20260907_v1.0 §3 给 config 完整状态机解决——
+    //   本组改为钉住"config 受理链存在"：ALLOWED_STATUSES/TRANSITIONS 均已登记，intake_accept 有真实的
+    //   待受理→待处理转换，建单落态恒「待受理」（受理门恒开，不会再卡死）。
+    assert.ok(Array.isArray(T.ALLOWED_STATUSES.config) && T.ALLOWED_STATUSES.config.includes('待受理'), 'config 在 ALLOWED_STATUSES 且含 待受理（S1a）');
+    assert.ok(Array.isArray(T.TRANSITIONS.config) && T.TRANSITIONS.config.some(t => t.action === 'intake_accept' && t.from.includes('待受理') && t.to === '待处理'), 'config 有 intake_accept 待受理→待处理 转换（九轮审 HIGH 顾虑的卡死单已不成立）');
+    assert.strictEqual(T.resolveSysInitialStatusForCreate('config'), '待受理', 'config 建单落 待受理（受理门恒开）');
+    ok('[I] 创建入口不变量：服务端 INSERT INTO sys_issues 恰 2 处且均显式列出 intake_required + index.js 统一函数调用恰 3 处 + 不再直调 resolveInitialStatus(0 处) + 统一函数单形参/落态全类型归一待受理(v2.1 撤销分流) + PRE_DISCUSS 导出撤销哨兵 + 未知 type fail-closed + [S1a] config 受理链存在（不再 fail-closed，建单落待受理）');
   }
 
-  // ═══ [C1] 建单三类型 → 落态全类型归一「待受理」（C2.5 撤销后）+ 入库 intake_required=1 恒成立（C0 不变量）═══
-  //   ⭐ 角色权限重构 C2.5 撤销（v2.1）：预沟通段整体撤销后，三类型建单统一落「待受理」；
+  // ═══ [C1] 建单四类型 → 落态全类型归一「待受理」（C2.5 撤销后）+ 入库 intake_required=1 恒成立（C0 不变量）═══
+  //   [S1a 补丁 V·V9·codex 505-B2 L1] 「三类型」→「四类型」——S1a 起 config 已走受理门并纳入本组循环
+  //   （补丁 T·T8），三类型的旧表述已过期。
+  //   ⭐ 角色权限重构 C2.5 撤销（v2.1）：预沟通段整体撤销后，四类型建单统一落「待受理」；
   //     intake_required 恒 1 这条 C0 不变量不受影响，受理门（DB 触发器只判 intake_required·与 status 无关）
-  //     对三条路径**同样必经**。
+  //     对四条路径**同样必经**。
   {
-    const EXPECT_CREATE_STATUS = { feature: '待受理', improvement: '待受理', bug: '待受理' };
-    for (const type of ['feature', 'improvement', 'bug']) {
+    // [S1a 补丁 T·T8] config 已走受理门，纳入循环（与上方 [I] 常量层同步扩容，防第二份清单漂移）。
+    const EXPECT_CREATE_STATUS = { feature: '待受理', improvement: '待受理', bug: '待受理', config: '待受理' };
+    for (const type of ['feature', 'improvement', 'bug', 'config']) {
       const r = await create({ type });
       assert.strictEqual(r.status, 201, `${type} 建单 201, got ${r.status} ${JSON.stringify(r.body)}`);
       assert.strictEqual(r.body.status, EXPECT_CREATE_STATUS[type], `${type} 建单响应 status=${EXPECT_CREATE_STATUS[type]}`);
@@ -224,10 +228,12 @@ async function main() {
       assert.strictEqual(row.status, EXPECT_CREATE_STATUS[type], `${type} 落库 status=${EXPECT_CREATE_STATUS[type]}`);
       assert.strictEqual(row.intake_required, 1, `${type} 落库 intake_required=1`);
     }
-    // ⭐ config 建单端到端被拒（承 [I] 的常量层断言·这里证 HTTP 入口同样拒绝）
+    // [S1a 补丁 T·T10·裁定采纳] config 建单端到端成功（承 [I] 的常量层断言，S1a 后 HTTP 层同样放行——
+    //   与上方循环重复覆盖一次，本组独立保留是为了与 [I] 常量层断言逐一对应，形成"常量层→HTTP 层"两层
+    //   证据链，非冗余）。
     const rc = await create({ type: 'config' });
-    assert.strictEqual(rc.status, 400, `config 建单应 400, got ${rc.status} ${JSON.stringify(rc.body)}`);
-    assert.strictEqual(rc.body.code, 'TYPE_NOT_SUPPORTED', 'config 建单 code=TYPE_NOT_SUPPORTED（无受理流·不可能产生卡死单）');
+    assert.strictEqual(rc.status, 201, `config 建单应 201, got ${rc.status} ${JSON.stringify(rc.body)}`);
+    assert.strictEqual(rc.body.status, '待受理', 'config 建单响应 status=待受理（受理门恒开，S1a 后不再卡死）');
 
     // 参数面封死（与 c10 [A2] 同源·此处只取代表值做冒烟，避免重复覆盖）
     const rj = await create({ intake_required: 0 });
@@ -256,7 +262,7 @@ async function main() {
     // 零副作用：四次被拒均未建单
     const cnt = (await get(`SELECT COUNT(*) c FROM sys_issues WHERE title='旧页面模拟'`)).c;
     assert.strictEqual(cnt, 0, '契约闸拒绝时不建单（守卫早于 INSERT）');
-    ok('[C1] 建单三类型落态全类型归一待受理（v2.1：C2.5 撤销）+ 入库 ir=1 恒成立（C0 不变量）；intake_required 传值 400 FIXED；⭐ 契约版本缺失/过旧/非法一律 400 CLIENT_CONTRACT_OUTDATED（含"旧页面取消勾选"这一静默改义缺口）+ 零副作用');
+    ok('[C1] 建单四类型落态全类型归一待受理（v2.1：C2.5 撤销）+ 入库 ir=1 恒成立（C0 不变量）；intake_required 传值 400 FIXED；⭐ 契约版本缺失/过旧/非法一律 400 CLIENT_CONTRACT_OUTDATED（含"旧页面取消勾选"这一静默改义缺口）+ 零副作用');
   }
 
   // ═══ [C2] derive 派生新单：落态全类型归一「待受理」（C2.5 撤销）+ INSERT 显式落 intake_required=1（矛盾单哨兵）═══

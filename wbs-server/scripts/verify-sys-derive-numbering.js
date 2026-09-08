@@ -1336,19 +1336,22 @@ async function main() {
     ok(`[DN6]③ 发布核内 RELEASE_MEMBER_NOT_READY 文案含子编号 ${expectB}（真实 HTTP：POST /execute 触发 R-GATE→_publishReleaseCoreInTxn 核内校验，非直调内部函数，实现坏成什么样这条会红：members SELECT 漏投影两列会让 bad 对象取不到 root/seq，helper 静默回退裸 #id）`);
 
     // ④ RELEASE_MEMBER_NOT_RELEASABLE（index.js :13710 一带 badType 分支）——造不了，如实登记原因：该分支
-    //   唯一触发条件是「批次成员 type 不在 RELEASABLE_TYPES 内」，而 sys_issues 表级 DDL 有
-    //   `CHECK (type <> 'config' OR release_id IS NULL)`（唯一会落到 badType 的类型是 'config'，其余三类
-    //   均在 RELEASABLE_TYPES 内）——任何试图在 release_id 非空时把 type 改成 'config' 的写入都会被该
-    //   CHECK 在 DB 层拒绝，结构性不可达，非正常 schema 下可构造的真实 409 场景（:13710 上方注释同款判断）。
-    //   不空口白牌，实测证明——若这条断言本身失败（CHECK 未真正拒绝），说明该分支其实可达，需要另行补
-    //   真实用例而非继续登记"造不了"：
+    //   唯一触发条件是「批次成员 type 不在 RELEASABLE_TYPES 内」。[S1b 订正·2026-09-07] 原推理链依赖已被
+    //   移除的组合 CHECK（`CHECK (type <> 'config' OR release_id IS NULL)`，见
+    //   scripts/migrate-sys-issues-drop-config-release-check.js），该 CHECK 移除后原证据法（UPDATE type='config'
+    //   预期被拒）已失效——但**结论本身不变，只是需要换一条证据链**：RELEASABLE_TYPES=['feature',
+    //   'improvement','bug','config']（index.js:14767）与 type 列自身的枚举 CHECK
+    //   `CHECK (type IN ('bug','feature','improvement','config'))`**逐值重合**（4 值对 4 值），故
+    //   badType 分支对**任何合法 type 取值**都不可能命中——唯一能落到该分支的路径是把 type 改成枚举外
+    //   的非法值，而这本身会被 type 列自身的 CHECK 挡在 DB 层（该 CHECK 未受 S1b 影响，S1b 只删了
+    //   config+release_id 组合 CHECK，type 列枚举 CHECK 原样保留）。改用这条更直接的证据：
     let dn6BadTypeErr = null;
     try {
-      await run(`UPDATE sys_issues SET type='config' WHERE id=?`, [dn6ChildB]);
+      await run(`UPDATE sys_issues SET type='not_a_real_type' WHERE id=?`, [dn6ChildB]);
     } catch (e) { dn6BadTypeErr = e; }
-    assert.ok(dn6BadTypeErr, '[DN6]④ 证据：release_id 非空时把 type 改成 config 应被 DB CHECK 拒绝写入');
+    assert.ok(dn6BadTypeErr, '[DN6]④ 证据：type 改成枚举外非法值应被 type 列自身 CHECK 拒绝写入');
     assert.ok(/constraint|CHECK/i.test(dn6BadTypeErr.message), `[DN6]④ 拒绝原因应是 CHECK 约束违例, got「${dn6BadTypeErr.message}」`);
-    ok('[DN6]④ RELEASE_MEMBER_NOT_RELEASABLE（:13710）如实登记「造不了」：实测证明 DB CHECK 令该分支在合法 schema 下结构性不可达（非偷懒未测——唯一可触达路径需要先破坏 schema）');
+    ok('[DN6]④ RELEASE_MEMBER_NOT_RELEASABLE（:13710）如实登记「造不了」：RELEASABLE_TYPES 与 type 列枚举 CHECK 逐值重合，badType 分支对任何合法 type 取值结构性不可达（S1b 订正：证据链改用 type 列自身枚举 CHECK，原依赖的 config+release_id 组合 CHECK 已随受控重建移除）');
   }
 
   // ─── [DN7] S13-b·B1 后端投影：post_derive_root_id/post_derive_seq 真实 HTTP DTO 断言（同 DN5 写法） ───

@@ -177,7 +177,11 @@ check('postAcceptKv 三态（pending/passed/failed_derived）均显式处理 + �
 check('postAcceptKv 已并入 info 模板（非孤立死变量，渲染面真的会显示）', () => {
     const infoIdx = src.indexOf('const info = `<div class="u-detail-section"><h3>基本信息</h3>');
     assert.ok(infoIdx >= 0, '未找到 info 模板声明起点');
-    const infoBlock = src.slice(infoIdx, infoIdx + 4000);
+    // [2026-09-07 config 流激活 S1c 校准] info 模板新增「执行方式/乙方名称」两 kv 行（config 单据级描述字段）后
+    //   模板体超过原 4000 字符切片窗口，`${postAcceptKv}` 插值（仍在模板内）落到窗口外 → 假红。窗口放宽到
+    //   8000 并改为「到模板闭合反引号为止」的结构锚：先找起点后的第一个 "`;"（模板结束），再在其内查插值。
+    const infoEnd = src.indexOf('`;', infoIdx);
+    const infoBlock = src.slice(infoIdx, infoEnd > infoIdx ? infoEnd : infoIdx + 8000);
     assert.ok(infoBlock.includes('${postAcceptKv}'), 'info 模板未插值 ${postAcceptKv}——kv 算出来了但从未渲染（同 blocked 死分支同款漏法）');
 });
 check('failed_derived 分支含派生单可点击链接（siOpenDrawer）', () => {

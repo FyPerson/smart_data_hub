@@ -339,9 +339,13 @@ const PAGE_ALIAS_SPECS = [
         // 本页是全站唯一原本就有 key→class 白名单的页：SI_STATUS_CLASS 的 **value 集**就是 class 片段
         // 全集，故 kind='objectValues'（它的 key 是中文状态值，与本表的英文片段 key 不同名）。
         statusSource: { const: 'SI_STATUS_CLASS', kind: 'objectValues' },
-        // B-H7①：16 中文状态 → 12 class 片段的**完整期望表**，抄自 S0 双矩阵 §1.1 Sys_Iteration ③b。
+        // B-H7①：15 中文状态 → 12 class 片段的**完整期望表**，抄自 S0 双矩阵 §1.1 Sys_Iteration ③b。
         //   与页面 SI_STATUS_CLASS 逐对比对——只比成员集合的话，把 dev/review 两条 value 互换照样全绿，
         //   而页面会给"开发中"渲染成"待验证"的颜色。
+        //   [S1c·config流激活 方案v1.0 D5/D14·2026-09-07] 「已生效」预留态随方案拆除——期望表去掉该条
+        //   （原 16→15 条，class 片段仍 12 个不变：'released' 仍由 '已上线' 一条覆盖）。下方逐对比对同时
+        //   查"缺条目"与"多条目"两个方向（:1643 `多出 '${k}'` 分支）——若未来又在页面 SI_STATUS_CLASS
+        //   里加回 '已生效' 别名而漏改本处，会被判"多出 '已生效'"，天然充当反向断言，无需另写一条。
         fullMap: {
             const: 'SI_STATUS_CLASS',
             entries: {
@@ -351,7 +355,7 @@ const PAGE_ALIAS_SPECS = [
                 '待对接测试': 'liaisontest',
                 '待验证': 'review', '待验收': 'review',
                 '待上线': 'prerelease',
-                '已上线': 'released', '已生效': 'released',
+                '已上线': 'released',
                 '已关闭': 'closed',
                 '已暂缓': 'hold',
                 '已拒绝': 'rejected',

@@ -19,7 +19,7 @@
 //   [M2] admin 专属族 × 四角色（accept×3类型 / hold / close）—— 证受理人拿到的不是泛化 admin 权；
 //        另附④⑤两格上线编排封禁契约（assign-release-dev / reassign-release-dev，2026-07-30 全封，
 //        四角色一律 409，已不是"admin 专属"语义，只是挂在 M2 组里顺带回归）
-//   [M3] 通知三通道 × 三类型 × 四角色（developer / creator / requester）
+//   [M3] 通知三通道 × 四类型[S1a +config] × 四角色（developer / creator / requester）
 //   [M4] 查已读通道差异：dev/creator/requester = admin∨受理人；relay/release_executor = **仅 admin**（死按钮防线）
 //   [M5] ⭐ 角色轴 × 开发轴正交：示例发布者兼任开发后，开发动作放行、协调人动作仍全拒（把方案 §3 口径测死）
 //   [V]  可见性：受理人对**未指派的三类型**列表可见 + 详情可开（否则"能指派却找不到单"功能断裂）
@@ -126,7 +126,9 @@ function futureEst(days) {
   const p = n => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
-const TYPES = ['bug', 'feature', 'improvement'];
+// [S1a·config 流激活] TYPES 加 config，使本文件的角色权限矩阵覆盖第 4 种类型（该类型的权限口径
+//   同 feature/improvement：admin ∨ 受理人[13] 全权，示例发布者[7]/dev[5] 拒绝，与 C1"去 type 精判"结论一致）。
+const TYPES = ['bug', 'feature', 'improvement', 'config'];
 const ROLES = [
   { who: 'admin(1)',   tok: adminTok,  isAdmin: true,  isIntake: false },
   { who: '示例对接人(13)', tok: intakeTok, isAdmin: false, isIntake: true },
@@ -135,12 +137,12 @@ const ROLES = [
 ];
 
 // ── 夹具：每一步都断言状态码**并核对真实落态**（C1 复审 MED-3：夹具只看状态码会让后续断言跑在错误前置态上假绿）──
-const ASSIGNABLE_STATUS = { bug: '待处理', feature: '待指派', improvement: '待指派' };   // 受理后落态（bug 前段最短，无排期）
-const DEV_STATUS        = { bug: '处理中', feature: '开发中', improvement: '开发中' };   // 指派后落态
+const ASSIGNABLE_STATUS = { bug: '待处理', feature: '待指派', improvement: '待指派', config: '待处理' };   // 受理后落态（bug/config 前段最短，无排期）
+const DEV_STATUS        = { bug: '处理中', feature: '开发中', improvement: '开发中', config: '处理中' };   // 指派后落态
 
 async function statusOf(id) { return (await get('SELECT status FROM sys_issues WHERE id=?', [id])).status; }
 
-// 建单（C0 后恒落待受理）→ 受理 → 落「待指派」(变更流) /「待处理」(bug)
+// 建单（C0 后恒落待受理）→ 受理 → 落「待指派」(变更流) /「待处理」(bug/config)
 async function mkAssignable(type) {
   const r = await call('POST', '/api/sys-issues', adminTok,
     { intake_contract_version: 2, type, title: `${type}-C1`, system_name: 'BMS', source: '内部', requester_phone: '13800000009',
@@ -148,15 +150,19 @@ async function mkAssignable(type) {
   assert.strictEqual(r.status, 201, `建 ${type} 单 201, got ${r.status} ${JSON.stringify(r.body)}`);
   // ⭐ 角色权限重构 C2.5 撤销（v2.1）：三类型建单均直落「待受理」，预沟通段整体撤销，无需按 type 分支中转。
   // [工期对接测试与风险等级拆分 方案 v1.1 §3.4·C5] feature 受理必带 risk_level（否则 400 RISK_LEVEL_REQUIRED）。
-  const acc = await call('POST', `/api/sys-issues/${r.body.id}/intake-accept`, adminTok, (type === 'feature' || type === 'improvement') ? { risk_level: '二级' } : {});
+  // [S1a·D15] config 受理同样必带 risk_level（风险等级适用面扩至 config，与 feature/improvement 同必填）。
+  const acc = await call('POST', `/api/sys-issues/${r.body.id}/intake-accept`, adminTok, (type === 'feature' || type === 'improvement' || type === 'config') ? { risk_level: '二级' } : {});
   assert.strictEqual(acc.status, 200, `${type} 受理 200, got ${acc.status} ${JSON.stringify(acc.body)}`);
   assert.strictEqual(await statusOf(r.body.id), ASSIGNABLE_STATUS[type],
     `夹具 mkAssignable(${type})：受理后须真落「${ASSIGNABLE_STATUS[type]}」`);
-  // ⭐ 角色权限重构 v2.1 §4：变更流 assign 前置要求 oa_number 通过校验（bug 不受限）→ 本 helper 名为
+  // ⭐ 角色权限重构 v2.1 §4：变更流 assign 前置要求 oa_number 通过校验（bug/config 不受限）→ 本 helper 名为
   //   "可指派"，把 OA 前置一并做进来，使所有调用点的 assign 测的都是"权限/状态"本身，不被"忘设 OA"
-  //   这个无关变量污染。⚠️ 这个分支本身就是被测语义之一：若哪天 bug 也被误拉进 OA 门槛，这里会因
-  //   set-oa-number 未被调用而在下游 assign 处当场红灯（bug 分支不调用，故不受影响）。
-  if (type !== 'bug') {
+  //   这个无关变量污染。⚠️ 这个分支本身就是被测语义之一：若哪天 bug/config 也被误拉进 OA 门槛，这里会因
+  //   set-oa-number 未被调用而在下游 assign 处当场红灯。
+  // [S1a 订正] 条件从 `type !== 'bug'` 改显式枚举 `feature/improvement`——原写法在新增 config 后会连带把
+  //   config 也拉进 OA 分支（assertSysDevCommitmentOaGuard 对 config 同 bug 直接 return，config 单据从不
+  //   要求 OA 号，调用 set-oa-number 本身无害但语义不对，显式枚举更贴合"仅变更流需要 OA"的真实口径）。
+  if (type === 'feature' || type === 'improvement') {
     const oa = await call('POST', `/api/sys-issues/${r.body.id}/set-oa-number`, adminTok, { oa_number: '2026070001' });
     assert.strictEqual(oa.status, 200, `${type} 补 OA 号 200, got ${oa.status} ${JSON.stringify(oa.body)}`);
   }
@@ -169,7 +175,9 @@ async function mkAssignable(type) {
 //   矩阵全塌。故把 999999 失效窗口收窄到「仅 submit 期间」（下移进 mkVerifying），mkInDev 产物恒绑 13。
 async function mkInDev(type) {
   const id = await mkAssignable(type);
-  const r = await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5 });
+  // [S1a·D1/D13] config 首次指派必带 exec_mode（其余类型不适用，携带即 400 EXEC_MODE_NOT_APPLICABLE，
+  //   故仅对 config 加这个字段——本矩阵夹具目的是权限而非 exec_mode 契约本身，覆盖面见 verify-sys-config-flow.js）。
+  const r = await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5, ...(type === 'config' ? { exec_mode: 'assigned' } : {}) });
   assert.strictEqual(r.status, 200, `${type} assign 200, got ${r.status} ${JSON.stringify(r.body)}`);
   assert.strictEqual(await statusOf(id), DEV_STATUS[type], `夹具 mkInDev(${type})：指派后须真落「${DEV_STATUS[type]}」`);
   return id;
@@ -181,11 +189,17 @@ async function mkVerifying(type) {
   //   「待验证」（跳过「待对接测试」）需 submit 时 intake_liaison_id 失效——**仅 submit 期间置 999999**，
   //   submit 后立即复位为 13（bound），使下游 [M1]/[M3] 断言按真实绑定态（受理人=13 本人）判权限（C10 绑单精判）。
   await run(`UPDATE sys_issues SET intake_liaison_id = 999999 WHERE id = ?`, [id]);
-  const e = await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: futureEst(30), ...(type === 'bug' ? {} : { estimated_effort_days: 1 }) });
+  // [S1a] config 无工期维度（同 bug，§2.2 裁剪）——ternary 从"仅 bug 排除"扩为"bug/config 均排除"。
+  const e = await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: futureEst(30), ...((type === 'bug' || type === 'config') ? {} : { estimated_effort_days: 1 }) });
   assert.strictEqual(e.status, 200, `夹具 mkVerifying(${type}) estimate 200, got ${e.status} ${JSON.stringify(e.body)}`);
-  // [B4b 全仓扫净] mkVerifying(type) 是跨三类型共用的通用夹具（TYPES=['bug','feature','improvement']）——
+  // [B4b 全仓扫净] mkVerifying(type) 是跨类型共用的通用夹具（TYPES=['bug','feature','improvement','config']）——
   //   type==='bug' 时必填 bug_cause_note（C6 拍板生效后），其余类型不加（加了会撞 NOT_APPLICABLE）。
-  const s = await call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'commits', commits: [{ component: 'backend', commit_ref: 'c9-keep-batch-28' }], self_tested: true, test_env_deployed: true, ...(type === 'bug' ? { bug_cause_note: 'verify 夹具：bug 产生原因（role-perm-c1）' } : {}) });
+  // [S1a·D12] config 事务内强制 mode='no_code'（带 commits → 400 CONFIG_NO_COMMITS），故 submit body
+  //   按 type 分叉：config 走 no_code_reason（≥10 码点），其余类型走既有 commits 分支。
+  const submitBody = type === 'config'
+    ? { mode: 'no_code', no_code_reason: 'verify 夹具：配置变更已在测试环境验证完成', self_tested: true, test_env_deployed: true }
+    : { mode: 'commits', commits: [{ component: 'backend', commit_ref: 'c9-keep-batch-28' }], self_tested: true, test_env_deployed: true, ...(type === 'bug' ? { bug_cause_note: 'verify 夹具：bug 产生原因（role-perm-c1）' } : {}) };
+  const s = await call('POST', `/api/sys-issues/${id}/submit`, devTok, submitBody);
   assert.strictEqual(s.status, 200, `夹具 mkVerifying(${type}) submit 200, got ${s.status} ${JSON.stringify(s.body)}`);
   assert.strictEqual(await statusOf(id), '待验证', `夹具 mkVerifying(${type})：提交后须真落「待验证」`);
   await run(`UPDATE sys_issues SET intake_liaison_id = 13 WHERE id = ?`, [id]);   // 复位绑定为受理人 13（submit 降级已完成）
@@ -194,7 +208,9 @@ async function mkVerifying(type) {
 // 推进到「待上线」（admin 验收）——close / assign-release-dev 的前置
 async function mkPendingRelease(type) {
   const id = await mkVerifying(type);
-  const a = await call('POST', `/api/sys-issues/${id}/accept`, adminTok, {});
+  // [S1a·D11] config accept 必带 online_mode（release→待上线／direct→已上线）；本 helper 名为"推进到
+  //   待上线"，故固定传 release（其余类型不适用，携带即 400 ONLINE_MODE_NOT_APPLICABLE）。
+  const a = await call('POST', `/api/sys-issues/${id}/accept`, adminTok, type === 'config' ? { online_mode: 'release' } : {});
   assert.strictEqual(a.status, 200, `夹具 mkPendingRelease(${type}) accept 200, got ${a.status} ${JSON.stringify(a.body)}`);
   assert.strictEqual(await statusOf(id), '待上线', `夹具 mkPendingRelease(${type})：验收后须真落「待上线」`);
   return id;
@@ -256,9 +272,9 @@ async function main() {
     for (const type of TYPES) {
       for (const role of ROLES) {
         const allow = role.isAdmin || role.isIntake;
-        // ① assign
+        // ① assign（[S1a] config 必带 exec_mode——非授权角色仍先撞权限闸 403，exec_mode 校验到不了）
         let id = await mkAssignable(type);
-        let r = await call('POST', `/api/sys-issues/${id}/assign`, role.tok, { assigned_to: 5 });
+        let r = await call('POST', `/api/sys-issues/${id}/assign`, role.tok, { assigned_to: 5, ...(type === 'config' ? { exec_mode: 'assigned' } : {}) });
         assert.strictEqual(r.status, allow ? 200 : 403,
           `[M1/assign] ${role.who} × ${type} 期望 ${allow ? 200 : 403}, got ${r.status} ${JSON.stringify(r.body)}`);
         if (allow) {
@@ -282,7 +298,7 @@ async function main() {
           `[M1/附件spec] ${role.who} × ${type} 期望 ${allow ? 200 : 403}, got ${r.status} ${JSON.stringify(r.body)}`);
       }
     }
-    ok('[M1] 协调人族 × 3 类型 × 4 角色 = 48 格：admin/受理人(13) 全 200（assign 还验真落 assigned_to）；示例发布者(7)/dev(5) 全 403 —— C1 去 type 精判后三类型一致');
+    ok('[M1] 协调人族 × 4 类型[S1a +config] × 4 角色 = 64 格：admin/受理人(13) 全 200（assign 还验真落 assigned_to）；示例发布者(7)/dev(5) 全 403 —— C1 去 type 精判后四类型一致');
   }
 
   // ═══ [M2] admin 专属族：受理人拿到的不是泛化 admin 权 ═══
@@ -291,11 +307,13 @@ async function main() {
   //     现改为**每格独立夹具**：正例断言 200 + 真落态，负例断言 403 + 状态未被改动。
   {
     let m2Cells = 0;
-    // ① accept（验收：待验证 → 待上线）—— 三类型 × 四角色，每格一张新单
+    // ① accept（验收：待验证 → 待上线）—— 四类型[S1a +config] × 四角色，每格一张新单
+    //   [S1a] config 必带 online_mode；该校验延后到权限判定之后（见 index.js case 'accept' 排序哲学），
+    //   非 admin 角色仍先撞 403 权限闸，不会因缺 online_mode 而误判成 400。
     for (const type of TYPES) {
       for (const role of ROLES) {
         const id = await mkVerifying(type);
-        const r = await call('POST', `/api/sys-issues/${id}/accept`, role.tok, {});
+        const r = await call('POST', `/api/sys-issues/${id}/accept`, role.tok, type === 'config' ? { online_mode: 'release' } : {});
         assert.strictEqual(r.status, role.isAdmin ? 200 : 403,
           `[M2/accept] ${role.who} × ${type} 期望 ${role.isAdmin ? 200 : 403}（验收仅 admin）, got ${r.status} ${JSON.stringify(r.body)}`);
         assert.strictEqual(await statusOf(id), role.isAdmin ? '待上线' : '待验证',
@@ -360,11 +378,16 @@ async function main() {
       m2Cells++;
     }
     // [C6] close 由 2 类型扩为 3 类型（+bug），36→40 格。④⑤ 转封禁契约后格数不变（仍各 4 角色）。
-    assert.strictEqual(m2Cells, 3 * 4 + 2 * 4 + 3 * 4 + 4 + 4, `[M2] 应跑满 40 格，实跑 ${m2Cells}（防再次出现 break 跳格）`);
-    ok(`[M2] admin 专属族 ${m2Cells} 格（accept×3类型 / hold×2类型 / close×3类型[C6] 仍是"仅 admin 200/其余 403"专属族闸；assign-release-dev / reassign-release-dev 两格 2026-07-30 起转"旧上线编排家族封禁契约"——四角色一律 409 LEGACY_RELEASE_FLOW_DISABLED + 落库零副作用，各 4 角色·每格独立夹具）：专属族部分 admin 200 真落态、受理人(13)/示例发布者(7)/dev(5) 403 状态原样，证 C1 只放开协调人族未泛化为 admin 权；上线编排两格证封禁不分角色`);
+    // [S1a] accept/close 随 TYPES 扩至 4 类型（+config），40→48 格；hold 仍固定 ['feature','improvement']（2 类型不变，
+    //   config 的 hold 覆盖由 verify-sys-config-flow.js [J] 单独测，不重复扩进本组通用矩阵）。
+    assert.strictEqual(m2Cells, 4 * 4 + 2 * 4 + 4 * 4 + 4 + 4, `[M2] 应跑满 48 格，实跑 ${m2Cells}（防再次出现 break 跳格）`);
+    ok(`[M2] admin 专属族 ${m2Cells} 格（accept×4类型[S1a +config] / hold×2类型 / close×4类型[S1a +config] 仍是"仅 admin 200/其余 403"专属族闸；assign-release-dev / reassign-release-dev 两格 2026-07-30 起转"旧上线编排家族封禁契约"——四角色一律 409 LEGACY_RELEASE_FLOW_DISABLED + 落库零副作用，各 4 角色·每格独立夹具）：专属族部分 admin 200 真落态、受理人(13)/示例发布者(7)/dev(5) 403 状态原样，证 C1 只放开协调人族未泛化为 admin 权；上线编排两格证封禁不分角色`);
   }
 
-  // ═══ [M3] 通知三通道 × 三类型 × 四角色（C1 删除了「变更流仅 admin」特判）═══
+  // ═══ [M3] 通知三通道 × 四类型[S1a +config] × 四角色（C1 删除了「变更流仅 admin」特判）═══
+  //   [S1a 补丁 V·V9·codex 505-B2 L1] 「三类型」→「四类型」——m3Cells 早已按 4*4*3=48 跑满四类型
+  //   （见下方 assert.strictEqual(m3Cells, 4*4*3, ...) 与 ok() 文案），本组两处标题注释的「三类型」
+  //   是唯二未同步的陈旧表述，此处订正。
   //   ⚠️ C1 复审 MED-3 重构：原实现三通道共用**开发态**夹具且正例只断言 `status!==403`。但 creator/requester 的
   //     可发状态白名单是「待验证/待上线/已上线」（sysNotifyStatusesFor），开发态调用**必然 409 STATUS_NOT_NOTIFIABLE**
   //     —— 36 格里 24 格正例其实一次都没真正走通授权后的发送路径，却因为"不是 403"全绿。
@@ -468,8 +491,9 @@ async function main() {
       ok('⭐ [M3/多admin] 两个 admin 互为"他人"：建单人本人触发 → self-guard skipped 且不落发送态；**另一 admin 触发 → 不跳过、真发送 sent**；另一 admin 可代办他人建单的指派并真落库（T-M1）—— 修掉"admin 总被跳过"这条只在单 admin 下成立的旧断言');
     }
 
-    assert.strictEqual(m3Cells, 3 * 4 * 3, `[M3] 应跑满 36 格，实跑 ${m3Cells}`);
-    ok(`[M3] 通知三通道 × 3 类型 × 4 角色 = ${m3Cells} 格：admin/受理人 **200 且真落 notify_status='sent'**（admin creator 走 self-guard skipped）、示例发布者/dev 403 —— 证「变更流仅 admin」特判已删、三通道全类型统一`);
+    // [S1a] TYPES 扩至 4（+config），36→48 格。
+    assert.strictEqual(m3Cells, 4 * 4 * 3, `[M3] 应跑满 48 格，实跑 ${m3Cells}`);
+    ok(`[M3] 通知三通道 × 4 类型[S1a +config] × 4 角色 = ${m3Cells} 格：admin/受理人 **200 且真落 notify_status='sent'**（admin creator 走 self-guard skipped）、示例发布者/dev 403 —— 证「变更流仅 admin」特判已删、通道全类型统一`);
   }
 
   // ═══ [M4] 查已读的**通道差异**（写读同源 + 死按钮防线）═══
@@ -619,7 +643,7 @@ async function main() {
     ok(`⭐ [M5] 角色轴 × 开发轴正交：示例发布者(7) 被指派为开发后 —— 开发轴 estimate + submit 均放行且真落库（提交后落「待验证」）；协调人轴 ${coordCases.length} 类动作（assign/reassign/加人/excuse/supersede-excuse/移除他人/三通知/附件）仍全 403，且名单·assigned_to·三侧通知字段·开脱态·附件行**全部原样**；边界：自移除放行（授权=协调人∨本人）—— 方案 v1.5 §3「兼任开发」口径被代码测住`);
   }
 
-  // ═══ [V] 可见性：受理人对未指派的三类型必须列表可见 + 详情可开 ═══
+  // ═══ [V] 可见性：受理人对未指派的四类型[S1a +config]必须列表可见 + 详情可开 ═══
   //   若缺这一层，C1 的"全类型指派权"就是空的——后端能指派、界面找不到单（写读不同源的功能断裂）。
   {
     const ids = {};
@@ -638,7 +662,7 @@ async function main() {
     for (const type of TYPES) {
       assert.ok(!devIds.includes(ids[type]), `[V] 对照：普通开发不应看到未指派的 ${type} 单（可见性未被顺带放宽）`);
     }
-    ok('[V] 可见性写读同源：受理人对未指派的 bug/feature/improvement 列表可见 + 详情可开；普通开发仍看不到（放宽范围精确）');
+    ok('[V] 可见性写读同源：受理人对未指派的 bug/feature/improvement/config 列表可见 + 详情可开；普通开发仍看不到（放宽范围精确）');
   }
 
   // ═══ [G] sysManualNotifyGuard 未知通道 fail-closed ═══

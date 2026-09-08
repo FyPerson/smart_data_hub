@@ -24,7 +24,8 @@
 //   · --ids 严格校验：必须是纯正整数、不重复、且全部属于实际违规集合（含任何非违规 id 直接拒绝）。
 //   · --as-bypass 只接受**前段状态**（待受理/待修改/待指派/待处理）；后期态（已进开发/上线/终态）拒绝自动处理，
 //     因为它们已关联 roster/commit/release，简单退回会留下悬挂数据，必须逐单人工方案。
-//   · type=config 拒绝（config 无受理流 transitions）。
+//   · [S1a 起] type=config 已纳入支持范围（SUPPORTED_TYPES 真相源驱动 T.ALLOWED_STATUSES 键集，
+//     config 已有完整受理流 CONFIG_FLOW_TRANSITIONS）；未登记的未知 type 仍拒绝。
 //   · 写模式要求 C0 迁移标记已落；标记未落说明该库尚未进入 C0 语义，用本脚本属误用。
 //   · 全程单事务（BEGIN IMMEDIATE），逐单条件更新 + changes!==1 即整体回滚。
 //   · 每单写一条 sys_issue_timeline（event_type='note'）审计事件，记录裁决类型、原 status、操作人。
@@ -45,7 +46,12 @@ const T = require('../routes/sys-iteration/transitions');
 // ⚠️ type 与 status 必须按**组合**校验，不能各用一个白名单（codex 八轮审 MED-1）：
 //   两个独立白名单放行的是笛卡尔积，会让 bug/待指派、feature/待处理 这类**本就不合状态机**的组合
 //   也被"自动修复"，等于把状态损坏一并掩盖。这里直接复用 transitions.js 的权威定义。
-const SUPPORTED_TYPES = new Set(['bug', 'feature', 'improvement']);   // config 无受理流 transitions
+// [S1a 补丁 T·T7] 真相源驱动：config 已随 config流激活_方案_20260907_v1.0 拥有完整受理流
+//   （TRANSITIONS.config 含 intake_accept/intake_return/resubmit_intake，见 transitions.js
+//   CONFIG_FLOW_TRANSITIONS）——旧字面量白名单会让违规的 config 单被本脚本静默跳过（不修、不报）。
+//   改为直接读 T.ALLOWED_STATUSES 键集（该文件已 require transitions），四类型自动同步，不再需要
+//   手工同步第二份清单。
+const SUPPORTED_TYPES = new Set(Object.keys(T.ALLOWED_STATUSES));
 // bypass 可安全自动回退的原状态 = 该 type 的**前段态**（尚未关联 roster/commit/release）：
 //   受理门两态（全类型共有）+ 该 type 的无受理落点（feature/improvement=待指派·bug=待处理）。
 const bypassSafeStatuses = (type) => new Set(['待受理', '待修改', T.INITIAL_STATUS_WITHOUT_INTAKE_BY_TYPE[type]].filter(Boolean));

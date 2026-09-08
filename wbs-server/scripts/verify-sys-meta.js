@@ -282,17 +282,45 @@ async function main() {
   //   ⚠️ 族门含 D_PRE ≠「已暂缓」进最终权威集合，S2 起两者分离由状态级排除表控制，见下方 [6b] 负向断言。
   assert.ok(!famFor('reassign', 'feature').includes('D_PRE'), '[6] 变更流(feature) reassign 族门应排除 D_PRE');
   assert.ok(famFor('reassign', 'bug').includes('D_PRE'), '[6] bug reassign 族门应保留 D_PRE（待处理态预指派后可改派，不受§4.5b状态级排除影响）');
-  for (const type of ['feature', 'improvement', 'bug']) {
+  // [S1a 补丁 T·T3] config 同 feature/improvement：MEMBER_ACTION_FAMILY_TYPE_OVERRIDE.reassign.config 已排除
+  //   D_PRE（暂缓期改派冻结不变量，见 index.js:3295 一带注释）——写读同源自证，防覆盖表写错静默回落基础矩阵。
+  assert.ok(!famFor('reassign', 'config').includes('D_PRE'), '[6] config reassign 族门应排除 D_PRE（暂缓期改派冻结不变量）');
+  // [S1a 补丁 V·V6·codex 505-B2 M1] 循环真相源驱动：不再手写字面量类型清单——「声明了 reassign 条目的
+  //   类型」直接从 T.ALLOWED_STATUSES 键集动态发现并按 T.transitionsForType(type) 是否含 reassign 条目
+  //   过滤，未来新增/删除类型或某类型的 reassign 条目被撤销都会自动反映，不需要人工同步第二份清单。
+  //   覆盖发现（本循环）与全集锁定（下方独立断言）分离——前者回答"这些类型各自的 reassign.from 对不
+  //   对"，后者回答"当前到底有几个类型"，两者漂移会各自独立报红，不互相掩盖。
+  const reassignDeclaredTypes = Object.keys(T.ALLOWED_STATUSES).filter(type => T.transitionsForType(type).some(x => x.action === 'reassign'));
+  // [S1e·补丁 AM·codex 520-M2 根治] 上方注释原称「某类型的 reassign 条目被撤销会自动反映」——**不成立**：
+  //   条目被删 → 该类型直接从 reassignDeclaredTypes 里被 filter 掉 → 下方循环压根不遍历它 → `assert.ok(t)`
+  //   永不执行；而 [6] 末尾的「全集锁定」断的是 `Object.keys(T.ALLOWED_STATUSES)`，**不受 reassign 条目
+  //   增删影响**，照样绿。于是「删掉某类型的 reassign」这个真缺陷全程无失败信号（发现即上报的能力声明
+  //   大于实作）。补一条**独立于 filter 结果**的存在性断言：声明 reassign 的类型集合必须**恰为**四类型。
+  //   与下方全集锁定的分工：那条回答「一共有几个类型」，本条回答「这几个类型是不是都还声明着 reassign」，
+  //   两条都红才代表两个维度同时漂移，互不掩盖。
+  assert.deepStrictEqual(reassignDeclaredTypes.slice().sort(), ['bug', 'config', 'feature', 'improvement'],
+    `[6] 声明 reassign 的类型集合应恰为 bug/config/feature/improvement（某类型的 reassign 条目被删会让它从本集合消失 → 本条先红，而非被动态 filter 静默吸收），实得 ${JSON.stringify(reassignDeclaredTypes.slice().sort())}`);
+  for (const type of reassignDeclaredTypes) {
     // 直接按 action 取条目（不经 findTransition，避免"用待验证的 from 元素去找 from"这种自我耦合的假阳性——
     // 若 from 漏了某个权威态，findTransition(type,'reassign',那个态) 会返 null，反而让本测试提前误判"条目不存在"
     // 而非"from 缺项"，掩盖真实问题）。
-    const t = T.transitionsForType(type).find(x => x.action === 'reassign');
+    // [S1e·补丁 AM·codex 520-M2] 原用 find() 只取第一条——重复条目（同一 type 声明两次 reassign，from
+    //   互相矛盾）会被静默吞掉，只校验先出现的那条。改 filter + 恰一条断言，重复声明立即报红。
+    const reassignEntries = T.transitionsForType(type).filter(x => x.action === 'reassign');
+    assert.strictEqual(reassignEntries.length, 1,
+      `[6] ${type} 的 reassign 条目应恰有 1 条（0 条=动作缺失，≥2 条=重复声明且 from 可能互相矛盾），实得 ${reassignEntries.length} 条`);
+    const t = reassignEntries[0];
     assert.ok(t, `[6] ${type} reassign 常量应存在`);
     const expected = reassignAuthoritativeStatuses(type).slice().sort();
     const actual = (t.from || []).slice().sort();
     assert.deepStrictEqual(actual, expected, `[6] ${type} reassign.from 应与后端 memberActionAuthoritativeStatuses('reassign',${type}) 展开状态集合完全一致（写读同源·族门展开-状态级排除），实际 from=${JSON.stringify(actual)} 权威=${JSON.stringify(expected)}`);
   }
-  ok('[6] MED-2/C2c/S2·§4.5b：reassign.from（feature/improvement/bug 三份）与后端 memberActionAuthoritativeStatuses type 感知放行集合（族门展开 - MEMBER_ACTION_STATUS_EXCLUDE 状态级排除，动态取自 MEMBER_ACTION_FAMILY_MATRIX + TYPE_OVERRIDE + status-families.js）完全一致，写读同源');
+  // [S1a 补丁 V·V6] 全集锁定：与上方覆盖发现独立——本断言只回答"当前类型全集是不是恰好这四种"，
+  //   未来新增第五类型时本条会先红，逼着显式评估该类型是否也要纳入 reassign 覆盖面（而不是被
+  //   reassignDeclaredTypes 的动态 filter 静默吸收、无人察觉多了一个类型）。
+  assert.deepStrictEqual(Object.keys(T.ALLOWED_STATUSES).sort(), ['bug', 'config', 'feature', 'improvement'],
+    `[6] 类型全集应恰为 bug/config/feature/improvement，实得 ${JSON.stringify(Object.keys(T.ALLOWED_STATUSES).sort())}`);
+  ok('[6] MED-2/C2c/S2·§4.5b：reassign.from（真相源驱动发现的各声明类型）与后端 memberActionAuthoritativeStatuses type 感知放行集合（族门展开 - MEMBER_ACTION_STATUS_EXCLUDE 状态级排除，动态取自 MEMBER_ACTION_FAMILY_MATRIX + TYPE_OVERRIDE + status-families.js）完全一致，写读同源 + 类型全集独立锁定四种');
 
   // [6b] ⭐ S2（bug暂缓方案 §4.5b·codex 236 L-1·口径已定死）：负向断言——「已暂缓」不出现在 bug reassign
   //   的 meta/from 中（声明侧）；族门本身仍含 D_PRE（bug 待处理态改派能力不受影响，与上方 [6] 正向互证，
@@ -323,7 +351,9 @@ async function main() {
   //   FEATURE_FLOW_STATUSES/ALLOWED_STATUSES.feature 补上「待对接测试」（transitions.js），豁免的前提
   //   条件（diffExtra 恰为 {'待对接测试'}）已自然收敛为空集，按当初注释的明确指示删除豁免分支，改回
   //   原始的双向严格集合相等——不允许"临时豁免"变成长期存活的新常态。
-  for (const type of ['feature', 'improvement', 'bug']) {
+  // [S1a 补丁 V·V6] 真相源驱动：[7] 面向"全体已注册类型"（非仅声明了 reassign 的子集），直接用
+  //   Object.keys(T.ALLOWED_STATUSES)——与上方 [6] 的全集锁定断言同一份真相源，两处漂移会同时暴露。
+  for (const type of Object.keys(T.ALLOWED_STATUSES)) {
     const unionSet = new Set();
     const seenIn = new Map();   // status → 命中的族名（用于两两不相交的具体定位）
     let disjointViolation = null;

@@ -1082,7 +1082,10 @@ ok(`SI_TL_RELEASE_SCOPE_LABEL 解析到 ${releaseScopeKeys.size} 个 key（\u226
 //   key 分离；主覆盖断言按此新 key 校验前端 SI_TL_LABEL 已登记（非落入 KNOWN_GAPS 缓冲）。站点总数不变
 //   （仍 50——R-C7 只补前端登记，不新增后端 INSERT 写入点）。SI_TL_CLS 与 Set 的正向登记同 R-C5 一带
 //   注释所述，不归本文件守，由 verify-sys-release-panel-static.js §⑮ 三表断言钉住。
-const EXPECTED_INSERT_SITE_COUNT = 50;
+//   [2026-09-07 S1a config 流激活] 50→51：reassign 端点新增「执行方式/乙方名称变更」写入点
+//   （event_type='note'·action_code=null·payload_json={exec_mode_from,exec_mode_to,vendor_name_from,vendor_name_to}·
+//   仅 config 类型且字段确有变化时写入·方案 v1.0 J18）——码表 时间线写入点码表_20260810.md 同步登记。
+const EXPECTED_INSERT_SITE_COUNT = 51;
 const sites = locateRealInsertSites(indexSrc);
 if (sites.length !== EXPECTED_INSERT_SITE_COUNT) {
   fail(

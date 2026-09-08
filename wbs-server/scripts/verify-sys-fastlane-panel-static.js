@@ -52,7 +52,8 @@
  *          codex 467 MED-2 回归（uid 桩=2**53/'not-a-number' → ⑤建单人⑦历史兼容均不命中）。
  *        · 3b「待处理」归属专项（admin 命中／开发 my_dev_pending=0 不命中／my_dev_pending=1 仍不命中
  *          =状态门拦住设计内预指派，N0-6b 增补）+ 3c 状态族单一事实源（结构锚：引用 SI_DEV_FAMILY_
- *          STATUSES 标识符本身，不含 '开发中' 字面量）+ 3d admin 归档分支覆盖「已生效」。
+ *          STATUSES 标识符本身，不含 '开发中' 字面量）+ 3d admin 归档分支覆盖 config 单「已上线」
+ *          （「已生效」预留态已随 2026-09-07 S1c 方案拆除，config 终态复用「已上线」）。
  *        · 并集断言：主计数（siIsMyPending 去重）恰 1 vs 分段计数（siMyPendingBreakdown 允许重叠）
  *          之和 > 1，title 固定含"（同一单可命中多个身份）"。
  *        · 值班卡已移除：'my_fastlane' 字面量在 siRenderStats/siMatchStatFilter 零出现（458-H1 判定
@@ -454,8 +455,10 @@ console.log('— ⑫ 「待我处理」聚合卡沙箱真执行（siIsMyPending/
     check('[⑫前置] SI_STATUS_GROUPS 提取物键集完整（防提取静默截断——括号计数一旦被字面量骗偏，可能只切到半个对象却不报错，仍会 new Function 成功但少几个组）', () => {
         // eslint-disable-next-line no-new-func
         const statusGroupsObj = new Function(`${statusGroupsText}\nreturn SI_STATUS_GROUPS;`)();
-        // [待我处理全角色卡 方案 v1.3 §3.2·P1] done 组拆为 pending_archive（待归档=已上线/已生效）+
-        //   archived（已归档=已关闭），键集由 5 → 6。
+        // [待我处理全角色卡 方案 v1.3 §3.2·P1] done 组拆为 pending_archive（待归档=已上线，P1 明定时
+        //   曾含「已生效」config 流预留态）+ archived（已归档=已关闭），键集由 5 → 6。「已生效」预留态
+        //   已随 2026-09-07 S1c config 流激活方案拆除（config 终态复用「已上线」），pending_archive
+        //   现只剩 '已上线' 一个成员，键集数（6）不受影响。
         assert.deepStrictEqual(Object.keys(statusGroupsObj).sort(), ['acceptance', 'active', 'archived', 'paused', 'pending_archive', 'release'],
             `SI_STATUS_GROUPS 提取物键集应恰为这 6 个（排序后比对），实得 ${JSON.stringify(Object.keys(statusGroupsObj).sort())}`);
     });
@@ -589,7 +592,16 @@ console.log('— ⑫ 「待我处理」聚合卡沙箱真执行（siIsMyPending/
     const OWN_BY_BIZ = { created_by: ROLE_ADMIN_BIZ_USER.id };
     assertIsMyPending('①b ⭐生产 #89 真实形态：非平台管理员 + 自己建的单 + status=待验证 → true（修复前恒 false ⇒ 示例用户B整卡不渲染，验收无入口）', true, ROLE_ADMIN_BIZ_USER, { status: '待验证', ...OWN_BY_BIZ }, true);
     assertIsMyPending('①b 待归档态（已上线）+ 自己建的单 → true（close 实证同样是建单人本人：示例客服A连关 6 单全是自己建的）', true, ROLE_ADMIN_BIZ_USER, { status: '已上线', ...OWN_BY_BIZ }, true);
-    assertIsMyPending('①b 待归档态（已生效·config 流）+ 自己建的单 → true（走 SI_STATUS_GROUPS.pending_archive 常量，非硬编码"已上线"）', true, ROLE_ADMIN_BIZ_USER, { status: '已生效', ...OWN_BY_BIZ }, true);
+    // [S1c 补丁 AC·AC3·2026-09-07] 「已生效」预留态已随 config 流激活方案拆除（config 终态复用
+    //   「已上线」，SI_STATUS_GROUPS.pending_archive 现只剩 '已上线' 一个成员）——原用例的"另一个状态值
+    //   也在同组内"这条判别力已随预留态消失而不复存在。改为 config 类型单据的正向覆盖。
+    // [S1e·补丁 AN·codex 520-B6⑥ → 补丁 AP·codex 522 收口] 本块原有两句能力声明，**均已删除**（不是
+    //   在下面追加订正，而是把被推翻的旧句从上文里删掉，避免同一处并存新旧两个契约）：
+    //   ①「证明本半区判据**不看 item.type**」——单个正例证明不了实现完全不读 type；
+    //   ②「经 SI_STATUS_GROUPS.pending_archive 常量（**非硬编码字面量**）命中」——预留态拆除后该常量
+    //      只剩 '已上线' 一个成员，正例在「读常量」与「硬编码字面量」两种实现下表现完全相同，无分辨力。
+    //   本条实际证到的、且只证到的：**config ∧ 已上线 ∧ 本人创建 这一个正例命中半区**。
+    assertIsMyPending('①b 待归档态（已上线·config 单）+ 自己建的单 → true（**本条只证这一个正例**：type=config ∧ status=已上线 ∧ 自己建的单命中半区。⚠️ 单个正例既不证明实现完全不读 item.type，也不证明走的是 SI_STATUS_GROUPS.pending_archive 常量而非硬编码字面量——后者因该常量现只剩「已上线」单一成员而天然无分辨力）', true, ROLE_ADMIN_BIZ_USER, { status: '已上线', type: 'config', ...OWN_BY_BIZ }, true);
     assertIsMyPending('①b 补验收 pending + 自己建的单 → true（先行上线后的补验收同属验收性质）', true, ROLE_ADMIN_BIZ_USER, { status: '已关闭', post_release_acceptance: 'pending', ...OWN_BY_BIZ }, true);
     // [codex 479 MED-1 收口] 本条的 currentUser 必须与 OWN_BY_BIZ 的 created_by **同一来源**——
     //   初版写死 `{ id: 18, ... }`，与 `OWN_BY_BIZ = { created_by: ROLE_ADMIN_BIZ_USER.id }` 只是
@@ -818,8 +830,8 @@ console.log('— ⑫ 「待我处理」聚合卡沙箱真执行（siIsMyPending/
         assert.ok(!body.includes("'开发中'"), '不应出现 \'开发中\' 字面量——应复用 SI_DEV_FAMILY_STATUSES 常量本身，非另写一份状态数组');
     });
 
-    console.log('  — 3d admin 归档分支覆盖「已生效」（P1 明定·v1.0 曾漏） —');
-    assertIsMyPending('3d status=已生效 + 平台管理员 → 命中（SI_STATUS_GROUPS.pending_archive 复用，非散落硬编码"已上线"）', true, PLATFORM_ADMIN_USER, { status: '已生效' }, true);
+    console.log('  — 3d admin 归档分支覆盖 config 单「已上线」（P1 明定·「已生效」预留已随 2026-09-07 S1c 方案拆除） —');
+    assertIsMyPending('3d status=已上线·config 单 + 平台管理员 → 命中（SI_STATUS_GROUPS.pending_archive 复用，非散落硬编码"已上线"；「已生效」预留态已拆除，config 终态复用「已上线」，同一常量天然覆盖）', true, PLATFORM_ADMIN_USER, { status: '已上线', type: 'config' }, true);
 
     console.log('  — 并集断言（主计数去重 vs 分段计次允许重叠·方案 §6-4） —');
     check('并集：单张单同时满足 admin(post_release_acceptance=pending) 与开发(my_dev_pending=1) 两身份 → 主计数（vis.filter(siIsMyPending).length）恰为 1（并集去重，非按命中身份数累加；若 siIsMyPending 被改成分段累加式实现，本条会翻红成 2）', () => {
@@ -921,8 +933,23 @@ console.log('— ⑫ 「待我处理」聚合卡沙箱真执行（siIsMyPending/
         check('拆组归属·已上线∈pending_archive', () => {
             assert.strictEqual(matchStatFilter({ status: '已上线' }, 'pending_archive'), true);
         });
-        check('拆组归属·已生效∈pending_archive（方案 P1 明定·v1.0 曾漏）', () => {
-            assert.strictEqual(matchStatFilter({ status: '已生效' }, 'pending_archive'), true);
+        check('拆组归属·已上线（config 单）∈pending_archive（「已生效」预留态已随 2026-09-07 S1c 方案拆除，config 终态复用「已上线」，同一常量天然覆盖）', () => {
+            assert.strictEqual(matchStatFilter({ status: '已上线', type: 'config' }, 'pending_archive'), true);
+        });
+        // [S1c 补丁 AC·AC3·反向钉死拆除] 「已生效」不应再出现在任何 SI_STATUS_GROUPS 分组、也不应再是
+        // SI_STATUS_CLASS 的键——两者都是本次拆除动作要清空的落点，任一处若被误加回本条即判红。
+        check('反向·「已生效」预留态拆除钉死：不在任何 SI_STATUS_GROUPS 分组 + SI_STATUS_CLASS 无该键（2026-09-07 S1c 方案拆除，若未来误加回会在此判红）', () => {
+            // eslint-disable-next-line no-new-func
+            const groupsObj = new Function(`${statusGroupsText}\nreturn SI_STATUS_GROUPS;`)();
+            const flatAll = Object.values(groupsObj).flat();
+            assert.ok(!flatAll.includes('已生效'),
+                `「已生效」不应出现在任何 SI_STATUS_GROUPS 分组，实得出现在：${JSON.stringify(Object.entries(groupsObj).filter(([, v]) => v.includes('已生效')).map(([k]) => k))}`);
+            const statusClassText = extractConstObjectText('SI_STATUS_CLASS');
+            assert.ok(statusClassText, '未提取到 SI_STATUS_CLASS 常量全文（锚点漂移时先红）');
+            // eslint-disable-next-line no-new-func
+            const statusClassObj = new Function(`${statusClassText}\nreturn SI_STATUS_CLASS;`)();
+            assert.ok(!Object.prototype.hasOwnProperty.call(statusClassObj, '已生效'),
+                `SI_STATUS_CLASS 不应含 '已生效' 键，实得键集=${JSON.stringify(Object.keys(statusClassObj))}`);
         });
         check('拆组归属·已关闭∈archived', () => {
             assert.strictEqual(matchStatFilter({ status: '已关闭' }, 'archived'), true);
@@ -933,7 +960,9 @@ console.log('— ⑫ 「待我处理」聚合卡沙箱真执行（siIsMyPending/
         // [codex 465 MED-1/LOW-1] 拆组三补强：①已关闭∉pending_archive（与"已上线∉archived"合成双向，
         //   防单状态被重复归进两组）②组全集无重复（结构化防回归：任何状态出现在两组=两张卡计数同含一单）
         //   ③排序序值组间断言——SI_STATUS_SORT_ORDER 中待归档组每个状态的序值必须整体早于已归档组
-        //   （465 抓获实际缺陷：拆组时 已生效:11 仍排在 已关闭:10 之后，列表状态序与卡分组语义交错）。
+        //   （465 抓获实际缺陷：拆组时 已生效:11 仍排在 已关闭:10 之后，列表状态序与卡分组语义交错——
+        //   「已生效」这一态本身已随 2026-09-07 S1c 方案拆除，本段历史记述保留供沿革参考，断言逻辑
+        //   已改按 groupsObj.pending_archive 实际成员通用遍历，不依赖该态是否存在）。
         check('拆组归属·反向：已关闭∉pending_archive（防重复归组）', () => {
             assert.strictEqual(matchStatFilter({ status: '已关闭' }, 'pending_archive'), false);
         });

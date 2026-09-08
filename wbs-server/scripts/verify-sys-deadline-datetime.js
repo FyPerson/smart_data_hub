@@ -248,10 +248,16 @@ async function main() {
     //   届时应补真正的正负向断言。
     //   ⚠️ codex 248-B MED-2：首版只锁了 feature 一类，那只证明了前提的四分之一——improvement 换条路
     //   或 bug 变可达，断言都不会红。改为**逐 type 全覆盖**，并把 type 全集本身也锁住。
+    //   [S1a 订正] config流激活_方案_20260907_v1.0 §3 已激活 config 流（ALLOWED_STATUSES/TRANSITIONS
+    //   均含 config 键）——但 config 依然"不提供 scope_change 动作"（CONFIG_FLOW_TRANSITIONS 无此条目，
+    //   与本条断言的"不可达"结论同向未变，只是 type 全集从 3 个变 4 个）。
     const typeKeys = Object.keys(I.transitions.ALLOWED_STATUSES || {}).sort();
-    assert.deepStrictEqual(typeKeys, ['bug', 'feature', 'improvement'],
-      `[C] type 全集应恰为 bug/feature/improvement（源码注释提到的 "config 流"当前并不存在）。新增 type 时本条会红 —— 那正是提醒：新 type 的 scope-change 可达性必须重新评估，实得 ${JSON.stringify(typeKeys)}`);
-    const scopeExpect = { feature: 'SCOPE_CHANGE_DISABLED', improvement: 'SCOPE_CHANGE_DISABLED', bug: 'SCOPE_STATUS_INVALID' };
+    assert.deepStrictEqual(typeKeys, ['bug', 'config', 'feature', 'improvement'],
+      `[C] type 全集应恰为 bug/config/feature/improvement（[S1a] config 流已激活）。新增 type 时本条会红 —— 那正是提醒：新 type 的 scope-change 可达性必须重新评估，实得 ${JSON.stringify(typeKeys)}`);
+    // [S1a 补丁 T·T9] config 走引擎兜底（findTransition('config','scope_change',...) 恒 null，无端点级
+    //   前置守卫拦截，与 bug 同码同源）——[N] 组已实证该码，此处补全覆盖，防"新增 type 时本条会红"的
+    //   自陈提醒被静默漏评估（typeKeys 断言已 4 类全集，scopeExpect 若不同步会让 config 悄悄脱离本 for 循环）。
+    const scopeExpect = { feature: 'SCOPE_CHANGE_DISABLED', improvement: 'SCOPE_CHANGE_DISABLED', bug: 'SCOPE_STATUS_INVALID', config: 'SCOPE_STATUS_INVALID' };
     for (const [ty, expectCode] of Object.entries(scopeExpect)) {
       const si = await createIssue({ type: ty });
       const rs = await call('POST', `/api/sys-issues/${si.body.id}/scope-change`, adminTok, { summary: 's', deadline: `${DAY2} 10:00` });
@@ -259,7 +265,7 @@ async function main() {
       assert.strictEqual(rs.body && rs.body.code, expectCode,
         `[C] ${ty} 的拦截码应为 ${expectCode}（变成别的码或 2xx = 端点变可达了，需补真正的 deadline 正负向断言），实得 ${JSON.stringify(rs.body)}`);
     }
-    ok('[C8] scope-change 的 deadline 分支不可达前提**逐 type 锁定**（feature/improvement→SCOPE_CHANGE_DISABLED、bug→SCOPE_STATUS_INVALID）+ type 全集锁 —— 不硬造测试，也不默默跳过');
+    ok('[C8] scope-change 的 deadline 分支不可达前提**逐 type 锁定**（feature/improvement→SCOPE_CHANGE_DISABLED、bug/config→SCOPE_STATUS_INVALID）+ type 全集锁 —— 不硬造测试，也不默默跳过');
 
     // ══ [D] 存量兼容：未传 deadline 的编辑不得改动既有值（E2 不刷写存量）═══════════════
     //   模拟存量：直接 SQL 写一行**纯日期**（存量 7 行就是这个形态）

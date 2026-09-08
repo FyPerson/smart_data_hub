@@ -709,22 +709,63 @@ async function main() {
     assert.strictEqual(I.sysTechConsultGateStatus('improvement'), '待受理', "improvement → 待受理（v2.1：C2.5 撤销）");
     assert.strictEqual(I.sysTechConsultGateStatus('bug'), '待受理', "bug → 待受理");
     assert.strictEqual(I.sysTechConsultGateStatus('hotfix'), null, "未登记 type 'hotfix' → null（fail-closed，非静默回退待受理）");
-    assert.strictEqual(I.sysTechConsultGateStatus('config'), null, "未登记 type 'config' → null");
+    assert.strictEqual(I.sysTechConsultGateStatus('config'), '待受理', "config → 待受理（S1a 登记）");
     assert.strictEqual(I.sysTechConsultGateStatus(''), null, "空串 → null");
     assert.strictEqual(I.sysTechConsultGateStatus(undefined), null, "undefined → null");
 
-    // 端点层：把已建单的单据 type 原子 SQL 改成"合法入库但未登记"的值（config——sys_issues.type 的 DB CHECK
-    //   只认 bug/feature/improvement/config 四值，'hotfix' 会被 CHECK 直接拒绝写不进去，故用 config：它能通过
-    //   DB CHECK，但从未在 sysTechConsultGateStatus 里登记——precisely 是本组要测的
-    //   "未登记 type"），request-tech-consult 应 409 REQUEST_TECH_CONSULT_TYPE_INVALID（而非误判成"状态不对"——
-    //   分流函数返 null 时 `row.status !== null` 恒真，若不显式判断会产出一条误导性的"仅「null」态可发起..."错误信息）
+    // [S1a 订正] config 不再是"合法入库但未登记"的 type——S1a 后 sys_issues.type 的 DB CHECK 四值
+    //   （bug/feature/improvement/config）全部在 sysTechConsultGateStatus 登记，"未登记 type→409
+    //   REQUEST_TECH_CONSULT_TYPE_INVALID" 这条路径经 HTTP 已不可达（四个合法 DB 值均有映射）。
+    //   fail-closed 分支本身仍由 711 行 'hotfix'（DB CHECK 就拒绝写入、连建库都到不了）这一单元级用例钉住。
+    //   本段改为正例：config 建单后同样可发起技术负责人沟通（同 improvement 无差异，方案 §3）。
     const c = await create('feature');
     const id = c.body.id;
     await run(`UPDATE sys_issues SET type='config' WHERE id=?`, [id]);
     const r = await consult(id, liaisonTok);
-    assert.strictEqual(r.status, 409, `非法 type 应 409, got ${r.status} ${JSON.stringify(r.body)}`);
-    assert.strictEqual(r.body.code, 'REQUEST_TECH_CONSULT_TYPE_INVALID', '应为 REQUEST_TECH_CONSULT_TYPE_INVALID');
-    assert.ok(!/null/.test(r.body.error), `错误信息不应出现误导性的"null"字样，实际：${r.body.error}`);
+    assert.strictEqual(r.status, 200, `config 应 200（S1a 登记：request-tech-consult 同 improvement 无差异）, got ${r.status} ${JSON.stringify(r.body)}`);
+    assert.ok(r.body && r.body.request_event_id, `config 响应体应含合理的 request_event_id，实际：${JSON.stringify(r.body)}`);
+
+    // [S1a 补丁 V·V7·codex 505-B2 M2] 恢复端点级 fail-closed 覆盖——S1a 前的"未登记 type"负例已随四值
+    //   全部登记而结构性不可达（HTTP 层再也造不出一个合法建单流程产生未登记 type），但 sysTechConsultGateStatus
+    //   的 fail-closed 分支（gateStatus===null → 409 REQUEST_TECH_CONSULT_TYPE_INVALID）代码仍在，需要一条
+    //   端点级证据证明它真的挡得住"万一脏数据出现"这种场景，不能只靠 711 行的单元级直测。
+    //   PRAGMA ignore_check_constraints 直插一行 type='hotfix'（DB CHECK 未登记的值）→ 立即关闭 PRAGMA 并用
+    //   第二次插入验证关闭生效（不留会话级开关常开的风险）→ 调端点验证 fail-closed 代码路径真实可达。
+    await run('PRAGMA ignore_check_constraints = ON');
+    const dirtyIns = await run(
+      `INSERT INTO sys_issues (type, status, priority, title, system_name, source, created_by, created_by_name)
+       VALUES ('hotfix', '待受理', 'P2', 'fail-closed 脏行', 'BMS', '内部', 1, '管理员')`
+    );
+    await run('PRAGMA ignore_check_constraints = OFF');
+    // 断言 OFF 已恢复生效：同样非法 type 的第二次插入应被 CHECK 拒绝（证明本次开关是本次调用的临时行为，
+    //   非会话级永久放宽——若忘记关闭，后续所有脏数据探针都会静默失真）。
+    await assert.rejects(
+      run(`INSERT INTO sys_issues (type, status, priority, title, system_name, source, created_by, created_by_name)
+           VALUES ('hotfix', '待受理', 'P2', 'x', 'BMS', '内部', 1, '管理员')`),
+      /CHECK constraint failed/,
+      '[GN] PRAGMA ignore_check_constraints 应已恢复 OFF（第二次插入同样非法 type 应被 CHECK 拒绝）'
+    );
+    const dirtyId = dirtyIns.lastID;
+    // [S1a 补丁 X·X4·codex 506-B #13] 零副作用对拍——端点调用前后对拍该脏单据的咨询通知列组（tech_lead_*
+    //   九列）与时间线计数，证明 409 fail-closed 分支在拒绝之前没有半写任何字段。
+    const TECH_LEAD_COLS = 'tech_lead_id, tech_lead_name, tech_lead_notify_status, tech_lead_notified_at, tech_lead_notify_message_key, tech_lead_read_at, tech_lead_notify_error, tech_lead_notify_sent_by, tech_lead_notify_request_event_id';
+    const dirtyRowBefore = await get(`SELECT ${TECH_LEAD_COLS} FROM sys_issues WHERE id=?`, [dirtyId]);
+    const dirtyTlCountBefore = (await get(`SELECT COUNT(*) AS c FROM sys_issue_timeline WHERE issue_id=?`, [dirtyId])).c;
+    const rDirty = await consult(dirtyId, adminTok);   // admin 绕开 isBoundLiaisonEligibleOrAdmin 精判，直达 gateStatus 判定
+    assert.strictEqual(rDirty.status, 409, `[GN] 未登记 type 脏行 request-tech-consult 应 409, got ${rDirty.status} ${JSON.stringify(rDirty.body)}`);
+    assert.strictEqual(rDirty.body.code, 'REQUEST_TECH_CONSULT_TYPE_INVALID', '[GN] 脏行 code=REQUEST_TECH_CONSULT_TYPE_INVALID（fail-closed 端点级证据恢复）');
+    assert.ok(!/null/i.test(JSON.stringify(rDirty.body)), `[GN] 脏行错误信息不应含 "null"（实际 ${JSON.stringify(rDirty.body)}）`);
+    const dirtyRowAfter = await get(`SELECT ${TECH_LEAD_COLS} FROM sys_issues WHERE id=?`, [dirtyId]);
+    assert.deepStrictEqual(dirtyRowAfter, dirtyRowBefore, '[GN] 脏行拒绝后 tech_lead_* 九列零写（补丁 X·X4）');
+    const dirtyTlCountAfter = (await get(`SELECT COUNT(*) AS c FROM sys_issue_timeline WHERE issue_id=?`, [dirtyId])).c;
+    assert.strictEqual(dirtyTlCountAfter, dirtyTlCountBefore, '[GN] 脏行拒绝后时间线计数不变（补丁 X·X4）');
+
+    // [S1a 补丁 X·X4] 脏行隔离——断言完成后立即 DELETE，防其残留污染本文件后续任何 COUNT(*)/列表长度/
+    //   全集断言（已 grep 全文件 [GN] 组之后的相关断言，见报告核过的行号清单，删行后天然不受影响）。
+    const dirtyDel = await run(`DELETE FROM sys_issues WHERE id=?`, [dirtyId]);
+    assert.strictEqual(dirtyDel.changes, 1, '[GN] 脏行 DELETE 应命中恰 1 行');
+    const dirtyRemain = (await get(`SELECT COUNT(*) AS c FROM sys_issues WHERE type='hotfix'`)).c;
+    assert.strictEqual(dirtyRemain, 0, '[GN] 脏行删除后全库 type=\'hotfix\' 行数为 0（补丁 X·X4）');
 
     // ⭐ 角色权限重构 C4·184 号预审（PM-4·漂移哨兵，不做权威源大重构；合并复审 MED 收尾补全三型）：
     //   sysTechConsultGateStatus 是 request/resend-tech-consult 用来判定"开放态"的独立映射函数，但
@@ -736,7 +777,7 @@ async function main() {
     //   变成多个状态，"取 from[0]" 这个简化比对本身就不再成立，必须显式炸出来，不能悄悄只比对第一个
     //   元素就宣称一致）②from[0] 与 sysTechConsultGateStatus(type) 逐字相等，红灯即两份表达已经漂移。
     //   `T.TRANSITIONS[type]` 是既有导出面（transitions.js module.exports 已含 TRANSITIONS），无需为此新增导出。
-    for (const type of ['feature', 'improvement', 'bug']) {
+    for (const type of ['feature', 'improvement', 'bug', 'config']) {
       const rtc = (T.TRANSITIONS[type] || []).find(t => t.action === 'request_tech_consult');
       assert.ok(rtc, `前置：${type} 的 TRANSITIONS 应有 request_tech_consult 条目`);
       assert.ok(Array.isArray(rtc.from), `${type} 的 request_tech_consult.from 应为数组，实际 ${JSON.stringify(rtc.from)}`);
@@ -745,7 +786,7 @@ async function main() {
         `漂移哨兵②：sysTechConsultGateStatus('${type}')=${I.sysTechConsultGateStatus(type)} 应等于 transitions.js request_tech_consult 条目 from[0]=${rtc.from[0]}`);
     }
 
-    ok('[GN] sysTechConsultGateStatus 显式映射（v2.1）：feature/improvement/bug 三型均→待受理·未登记 type(含空串/undefined)→null（fail-closed）+ 端点对 null 显式 409 REQUEST_TECH_CONSULT_TYPE_INVALID（非误判状态不对）+ 漂移哨兵：feature/improvement/bug 三型逐一核对 from 恰单元素数组 + from[0] 与 transitions.js request_tech_consult 条目逐字一致');
+    ok('[GN] sysTechConsultGateStatus 显式映射（v2.1+S1a）：feature/improvement/bug/config 四型均→待受理·未登记 type(含空串/undefined)→null（fail-closed）+ 端点对 config 正例 200（S1a 起同 improvement 无差异）+ PRAGMA 造脏行端点级 409 REQUEST_TECH_CONSULT_TYPE_INVALID 恢复（补丁 V·V7）+ 脏行零副作用对拍(tech_lead_*九列+timeline计数)+DELETE隔离（补丁 X·X4）+ 漂移哨兵：四型逐一核对 from 恰单元素数组 + from[0] 与 transitions.js request_tech_consult 条目逐字一致');
   }
 
   // ═══ [CR] cancel-consult 换轮诊断分支单元验证（codex Round-A 审 MED·Round-C 审 LOW 改名+收窄措辞）═══

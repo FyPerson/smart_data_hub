@@ -1065,11 +1065,11 @@
     const SI_ETA_OVERRUN_REASON_CODES = ['需求变更', '技术难度超预期', '依赖阻塞', '资源冲突', '其他'];
     const SI_ETA_TOLERANCE_DAYS = { improvement: 5, feature: 7 };   // bug/config 不参与（不入表，见 evaluateEtaOverrun 同款语义）
 
-    // [2026-08-10 用户拍板·「P2/三级」合并形态口径③] 列表页 bug/config 行风险段 "-" 占位的悬浮说明。
-    //   不适用集合=bug/config 两类，逐状态对照过权威源 DDL CHECK (type IN ('bug','feature','improvement','config'))
-    //   （routes/sys-iteration/index.js 建表段）——非 feature/improvement 一律 "-"（口径①），将来加第五 type
-    //   时此文案与 siPriRiskCellHtml 的门控须同步核对。
-    const SI_RISK_NA_TITLE = 'bug/config 单不适用风险等级（风险等级仅在受理 feature/improvement 单时判定）';
+    // [2026-08-10 用户拍板·「P2/三级」合并形态口径③] 列表页 bug 行风险段 "-" 占位的悬浮说明。
+    //   [S1c·config流激活 方案v1.0 D15] 风险等级现适用 config（受理门 risk_level 必填同 feature/
+    //   improvement）——不适用集合收窄为仅 bug 一类，逐状态对照过权威源 DDL CHECK (type IN
+    //   ('bug','feature','improvement','config'))（routes/sys-iteration/index.js 建表段）。
+    const SI_RISK_NA_TITLE = 'bug 单不适用风险等级（风险等级在受理 feature/improvement/config 单时判定）';
 
     // ⭐ [C9-fix M3] 「已上线」来源分支的展示文案——**判定在后端**（deriveOnlineSourceKind 是唯一权威，
     //   index.js:2310），前端只做 kind→中文 的字典映射，不自己看 release_id/online_source 推断（否则又是
@@ -1084,6 +1084,10 @@
     //   ⚠️ 未在字典内的值（后端将来加第五分支而前端未同步）走 `|| kind` 兜底显示原始 key——宁可露出一个
     //     英文标识让人发现漏改，也不静默显示成空白或错误分类。
     const SI_ONLINE_SOURCE_LABEL = { release_publish: '批次发布', no_commit_acceptance: '免上线直翻', authorized_fastlane: '先行上线', unknown_legacy: '历史存量' };
+
+    // [S1c·config流激活 方案v1.0 §4·D1] 执行方式三值 kind→中文字典——值域镜像后端 SYS_EXEC_MODES
+    // （GET meta 下发 execModes，见 META.execModes 消费点），纯展示映射，判定权威在后端。
+    const SI_EXEC_MODE_LABEL = { self: '本人执行', assigned: '指派执行', vendor: '乙方执行' };
 
     // [组 B·SB3·补验收闭环·方案 v1.3 §3.3] post_release_acceptance 三态中文映射——判定在后端（值域由
     // 写点 fastlaneAcceptanceInvariantViolations 校验），前端只做 kind→中文 字典映射，不自推导（与
@@ -1119,22 +1123,24 @@
     //   verify-sys-release-panel-static §⑥）。左=优先级徽章（.u-pri 共享层，与改造前逐字相同），
     //   右=si-risk-line（"/" 分隔符 + 风险文本），**三种 type 形态统一渲染两段结构**，不再有
     //   bug 行"孤徽章"的参差。风险文本三种形态：
-    //     · bug/config：半角 "-"（口径①②）——结构上没有风险等级维度（受理门只对 feature/improvement
-    //       判定 risk_level，bug/config 恒 NULL，见 index.js case 'intake_accept'）。原「留空」口径
-    //       升级为 "-" 占位：三值三形态（"-"=不适用／「未定级」=该定没定／空白=歧义——列头写着
-    //       「优先级/风险」时右侧空白会被读成数据缺失）。挂 SI_RISK_NA_TITLE 悬浮说明（口径③）。
-    //       与详情页 :2134 kv 的口径差是**刻意的**：详情页 bug/config 整行不渲染风险 kv（无列头
-    //       对齐压力，不渲染即最准确），列表页因列头恒在才需要 "-" 占位，两处不是漂移。
-    //     · feature/improvement 已定级：显示等级文本（title 挂三级口径，鼠标悬浮即可看判定依据）。
-    //     · feature/improvement 未定级：灰字「未定级」——与详情页 kv 的 `si-muted 未定级` 逐字同口径。
+    //     · bug：半角 "-"（口径①②）——结构上没有风险等级维度（受理门只对 feature/improvement/config
+    //       判定 risk_level，bug 恒 NULL，见 index.js case 'intake_accept'）。[S1c·D15] config 随
+    //       方案改判适用，从本分支移出。原「留空」口径升级为 "-" 占位：三值三形态（"-"=不适用／
+    //       「未定级」=该定没定／空白=歧义——列头写着「优先级/风险」时右侧空白会被读成数据缺失）。
+    //       挂 SI_RISK_NA_TITLE 悬浮说明（口径③）。与详情页 kv 的口径差是**刻意的**：详情页 bug
+    //       整行不渲染风险 kv（无列头对齐压力，不渲染即最准确），列表页因列头恒在才需要 "-" 占位，
+    //       两处不是漂移。
+    //     · feature/improvement/config 已定级：显示等级文本（title 挂三级口径，鼠标悬浮即可看判定依据）。
+    //     · feature/improvement/config 未定级：灰字「未定级」——与详情页 kv 的 `si-muted 未定级` 逐字同口径。
     //   风险文本不参与排序（列头 data-sort-by 仍为 priority）。
     //   导出口径（297-L2）：**本页当前无导出功能**（全文 grep `siExport`/`exportToCsv`/`downloadCsv` 零命中），
     //     故本次没有导出列头要同步。将来若加导出，风险等级应作为**独立列**导出而不是拼进优先级列
     //     ——同格并显是列表页"不加列"约束下的视觉妥协，不是数据模型；导出无横滚约束，没有理由继承它。
-    //     bug/config 行的风险导出值仍应落**空**（"-" 只是列表展示层占位，不是数据，导出禁带占位文本）。
+    //     bug 行的风险导出值仍应落**空**（"-" 只是列表展示层占位，不是数据，导出禁带占位文本）。
     function siPriRiskCellHtml(i) {
         const pri = `<span class="u-pri ${siPriClass(i.priority)}">${esc(i.priority)}</span>`;
-        const riskApplicable = i && (i.type === 'feature' || i.type === 'improvement');
+        // [S1c·config流激活 方案v1.0 D15] 风险等级适用集合三类：feature/improvement/config；仅 bug 不适用。
+        const riskApplicable = i && (i.type === 'feature' || i.type === 'improvement' || i.type === 'config');
         const riskText = !riskApplicable
             ? `<span class="si-risk-sub si-muted si-risk-na" title="${SI_RISK_NA_TITLE}">-</span>`
             : (i.risk_level
@@ -1174,7 +1180,9 @@
         '待对接测试': 'liaisontest',
         '待验证': 'review', '待验收': 'review',
         '待上线': 'prerelease',
-        '已上线': 'released', '已生效': 'released',
+        // [S1c·config流激活 方案v1.0 D5/D14] 「已生效」预留态拆除——config 终态复用「已上线」，不再
+        //   保留这个从未产生过任何真实数据的别名映射。
+        '已上线': 'released',
         '已关闭': 'closed',
         '已暂缓': 'hold',
         '已拒绝': 'rejected',
@@ -1261,12 +1269,12 @@
         // "开发已交付、等某方判定通过/打回"，与待验证/待验收同一心智模型（仅判定方不同：对接人 vs 业务方）。
         acceptance: ['待对接测试', '待验证', '待验收'],
         release: ['待上线'],
-        // [待我处理全角色卡 方案 v1.3 §3.2·P1] 原 done 组（已上线/已关闭/已生效）拆两组：待归档=
-        //   已上线/已生效（观察期内，等归档动作）、已归档=已关闭（观察期已结束）。不是改名——直接改名
-        //   会让已归档单顶着"待归档"标签。已生效=config 流预留终态（现网恒不产生），按"生效≈已上线、
-        //   观察期后同样待归档"归 pending_archive，config 流落地时复核归属。不动 DB 状态值/API，纯
-        //   前端展示层分组。
-        pending_archive: ['已上线', '已生效'],
+        // [待我处理全角色卡 方案 v1.3 §3.2·P1] 原 done 组（已上线/已关闭）拆两组：待归档=已上线
+        //   （观察期内，等归档动作）、已归档=已关闭（观察期已结束）。不是改名——直接改名会让已归档单
+        //   顶着"待归档"标签。不动 DB 状态值/API，纯前端展示层分组。
+        // [S1c·config流激活 方案v1.0 D5/D14] 「已生效」预留态已拆除——config 终态复用「已上线」，
+        //   已在本组的 '已上线' 键位下天然覆盖，不再另列别名（config 流落地复核完毕）。
+        pending_archive: ['已上线'],
         archived: ['已关闭'],
         // （历史·当时共 4 组）codex API 审 MED-1（2026-07-10）：后端状态机含合法旁路态 已暂缓/已拒绝
         //   （transitions.js hold/reject 真实流转入口），原组集不覆盖 → 这些单在"全部"计数内但点任一
@@ -1288,7 +1296,11 @@
     //   `type === undefined`，若不显式判断，`type === 'bug'` 判 false 会**静默落到变更流分支**（正是要
     //   避免的失败形态：漏传时理应报错，不该"看起来正常工作"）。
     function siIsDevAction(action, type) {
-        if (type !== 'feature' && type !== 'improvement' && type !== 'bug') {
+        // [S1c·config流激活 方案v1.0 §3/§4] config 加入合法类型白名单——开发动作集合同 improvement
+        //   （estimate/submit 走 SI_DEV_ACTIONS 全局 Set；config 无 feasibility/blocked 流转，typeFlows
+        //   本就不含这两个动作，故不需要在此另设排除分支）。hold 的 bug 专属例外**保持不扩**——config
+        //   同 improvement，hold 归 admin 分支（方案 §3：hold | admin | 同 improvement）。
+        if (type !== 'feature' && type !== 'improvement' && type !== 'bug' && type !== 'config') {
             console.error('[siIsDevAction] type 缺失或非法：', type, 'action=', action);
             return false;   // fail-closed：不当作开发动作，落到下方 admin/协调人分支判断（更保守，不多显）
         }
@@ -1397,6 +1409,14 @@
         feature: ['待指派', '开发中', '待验证', '待上线', '已上线', '已暂缓'],
         improvement: ['待指派', '开发中', '待验证', '待上线', '已上线', '已暂缓'],
         bug: ['待处理', '处理中', '待验证', '待上线', '已上线'],
+        // [S1c 补丁 AD·AD1·预筛 H1] config OA 可填窗口——镜像后端 SYS_OA_ALLOWED_STATUSES.config
+        //   （index.js:11799，improvement 集合的状态名替换：待指派→待处理、开发中→处理中，其余四态
+        //   逐字保留）。config 单来源即 OA 流入（方案 §1），OA 号必须可回填；"可填窗口"与"指派前是否
+        //   必填"两件事正交（后端 assertSysDevCommitmentOaGuard:4324 只对 feature/improvement 强制必填，
+        //   config 与 bug 同属豁免，但豁免必填≠禁止设号）。⚠️ 本表头注（:1406）"改后端必同步此处"——
+        //   S1a 补丁 R 给后端加了 config 键，前端漏同步，本批补齐，记一笔教训：改后端常量必须同批检查
+        //   前端镜像表。
+        config: ['待处理', '处理中', '待验证', '待上线', '已上线', '已暂缓'],
     };
     function siOaFillable(iss) { return (SI_OA_ALLOWED_STATUSES[iss.type] || []).includes(iss.status); }
     // [codex29 L-3] 拉群可发起态——⚠️ 须与后端 SYS_CHAT_ALLOWED_STATUSES（index.js）同源：改一端必须改另一端。
@@ -1419,6 +1439,13 @@
     const SI_NOTIFY_DEV_STATUSES_CHANGE = ['开发中', '待验证'];
     const SI_NOTIFY_CREATOR_STATUSES_CHANGE = ['待验证', '待上线', '已上线'];
     const SI_NOTIFY_REQUESTER_STATUSES_CHANGE = ['待验证', '待上线', '已上线'];
+    // [S1c·config流激活 方案v1.0 §4] config 手动通知状态白名单——镜像后端 SYS_NOTIFY_DEV_STATUSES_CONFIG
+    //   （开发侧处理中/待验证，态名同 config 自身 DEV_WORK_STATUS_BY_TYPE）；creator/requester 复用既有
+    //   *_CHANGE 常量（不新造同值常量，同后端口径）；relay 通道禁用（未在下方 switch 分支给值，落 []）。
+    //   ⚠️ 此前本函数只处理 bug/feature/improvement 三分支、config 落 return []（未知 type 兜底），会让
+    //   config 单的通知按钮全部隐藏——与后端 sysNotifyStatusesFor（index.js :19120-19126）已实现的 config
+    //   分支不一致，属遗漏未同步，本批一并补齐（发现于逐字对齐后端契约核查，非方案原列改动点）。
+    const SI_NOTIFY_DEV_STATUSES_CONFIG = ['处理中', '待验证'];
     // 镜像后端 sysNotifyStatusesFor(type, channel)：按类型×通道取 sendable 状态集（后端唯一权威，前端镜像控按钮显隐）。
     function siNotifyStatusesFor(type, channel) {
         if (type === 'bug') {
@@ -1427,6 +1454,10 @@
         }
         if (type === 'feature' || type === 'improvement') {
             return { developer: SI_NOTIFY_DEV_STATUSES_CHANGE, relay: [],
+                     creator: SI_NOTIFY_CREATOR_STATUSES_CHANGE, requester: SI_NOTIFY_REQUESTER_STATUSES_CHANGE }[channel] || [];
+        }
+        if (type === 'config') {
+            return { developer: SI_NOTIFY_DEV_STATUSES_CONFIG, relay: [],
                      creator: SI_NOTIFY_CREATOR_STATUSES_CHANGE, requester: SI_NOTIFY_REQUESTER_STATUSES_CHANGE }[channel] || [];
         }
         return [];   // 未知 type 默认无 sendable 状态（与后端默认拒绝对齐）
@@ -2315,7 +2346,7 @@
     };
     // 状态业务序（与 siRenderStats 分组方向一致：进行中→待验收→待上线→待归档→已归档→暂缓/拒绝；已作废排末尾）
     // codex API 审 MED-2（2026-07-10）：补 已暂缓/已拒绝 显式序——共享排序对未知状态给 99 会
-    //   排到已作废之后，与"已作废排末尾"注释矛盾；显式放已生效后、已作废前。
+    //   排到已作废之后，与"已作废排末尾"注释矛盾。
     const SI_STATUS_SORT_ORDER = {
         // ⚠️ 漏登记不是"少个颜色"这种小事：共享排序对未知状态给 99，会把最早的态排到「已作废」**之后**，
         //   与本表"已作废排末尾"的语义直接矛盾（同 2026-07-10 codex MED-2 已暂缓/已拒绝 漏序的踩法）。
@@ -2323,15 +2354,15 @@
         //   其余各态序号相应前移。
         // 受理排期改造：删「待评估/已排期」→ 前段序=待受理→待修改→待指派/待处理（受理门在最前·待派开发次之）。
         // [工期对接测试与风险等级拆分 方案 v1.1 §7·C4b] 插入「待对接测试」（序 4，开发中之后/处理中之前）
-        // ——其后所有序号统一 +1（原 处理中4/待验证5/待验收6/待上线7/已上线8/已关闭9/已生效10/已暂缓11/已拒绝12/已作废13）。
+        // ——其后所有序号统一 +1（原 处理中4/待验证5/待验收6/待上线7/已上线8/已关闭9/已暂缓10/已拒绝11/已作废12）。
+        // [S1c·config流激活 方案v1.0 D5/D14] 「已生效」预留序位（原 10，插在已上线/已关闭之间）随预留态
+        //   拆除一并删除，其后序号相应前移。
         待受理: 0, 待修改: 1, 待指派: 2, 待处理: 2, 开发中: 3,
         待对接测试: 4, 处理中: 5,
         待验证: 6, 待验收: 7, 待上线: 8,
-        // [codex 465 MED-1·P-C1] 已生效↔已关闭序值对调：拆组后 pending_archive（已上线/已生效）须整体
-        //   早于 archived（已关闭），旧序 已生效:11>已关闭:10 会让列表状态序与卡分组方向交错。
-        已上线: 9, 已生效: 10, 已关闭: 11,
-        已暂缓: 12, 已拒绝: 13,
-        已作废: 14,
+        已上线: 9, 已关闭: 10,
+        已暂缓: 11, 已拒绝: 12,
+        已作废: 13,
     };
     // [S13·§15.4 分页改造] attachTableSort 的一体 pagination 路径（config.pagination）不透传 packPages
     //   （unify-helpers.js:254-260 组合处只传 containerSelector/pageSize/render 三项，硬切片不认块边界）
@@ -2771,9 +2802,9 @@
     //   【状态集合的依据】
     //   · 「待验证」= transitions.js:915（bug 流）明文「验收通过：待验证 → 待上线（**建单人**）」；
     //     界面上 siStatusDisplay 也把它显示为「待验收」。
-    //   · pending_archive（已上线/已生效）= close 动作，生产 timeline 实证近 14 条 accept/close 中
-    //     13 条为建单人本人操作（示例客服A连关 6 单全是自己建的）。用 SI_STATUS_GROUPS 常量不硬编码，
-    //     否则漏 config 流「已生效」。
+    //   · pending_archive（已上线，[S1c] 「已生效」预留态已随方案 D14 拆除）= close 动作，生产
+    //     timeline 实证近 14 条 accept/close 中 13 条为建单人本人操作（示例客服A连关 6 单全是自己建的）。
+    //     用 SI_STATUS_GROUPS 常量不硬编码，config 单落「已上线」天然覆盖，无需另列别名。
     //   · post_release_acceptance==='pending'（先行上线后的补验收）：⚠️ **当前与 pending_archive 冗余**
     //     ——该值的唯一写点是值班先行上线的翻牌 UPDATE（index.js:4632 一带），同一条语句里
     //     `status` 由「待验证」写成「已上线」，故 pending 恒伴随「已上线」∈ pending_archive；
@@ -2935,8 +2966,9 @@
             // ① admin——⭐ 457-H1 冻结形态：表格把 admin 的身份写在"身份"列而非判据列——admin 的
             //   "身份"不是"这单与我有关"，是"我这个角色对这单有推进义务"，实现时必须显式写
             //   isAdmin() &&，否则会让下面三条状态判据对所有登录用户生效（最易漏的坑）。归档分支
-            //   复用 SI_STATUS_GROUPS.pending_archive（不散落硬编码"已上线"，否则漏 config 流"已生效"，
-            //   v1.0 曾漏）。「待处理」归本分支非开发分支——方案 §3.3 修正 2：bug 流「待处理」=
+            //   复用 SI_STATUS_GROUPS.pending_archive（不散落硬编码"已上线"）——[S1c] config 流最终
+            //   落地未产生独立的「已生效」态（方案 D14 已拆除该预留），config 单落「已上线」天然
+            //   覆盖，本常量无需另列别名。「待处理」归本分支非开发分支——方案 §3.3 修正 2：bug 流「待处理」=
             //   尚未指派开发，常规路径下开发侧 my_dev_pending 恒 0，但存在设计内预指派写路径（N0 第
             //   6b 步核实：add/reassign 可在「待处理」期间产生在册 pending 行）——即便如此，下方②
             //   开发分支的状态门（SI_DEV_FAMILY_STATUSES 不含「待处理」）仍能正确拦住不命中，因为
@@ -3773,7 +3805,14 @@
                  与风险等级 kv 就在下一行形成了不对称。两者是同层的判定维度（业务紧急度 / 技术风险），应当
                  并排出现。title 挂既有 SI_PRIORITY_HELP_TEXT（与 siDMeta 徽章同一事实源，不新增副本）。 -->
             <div class="u-kv-item"><label>优先级</label><div class="v"><span class="u-pri ${siPriClass(iss.priority)}" title="${SI_PRIORITY_HELP_TEXT}">${esc(iss.priority)}</span></div></div>
-            ${(iss.type === 'feature' || iss.type === 'improvement') ? `<div class="u-kv-item"><label>风险等级</label><div class="v"><span title="${SI_RISK_LEVEL_HELP_TEXT}" style="cursor:help">${iss.risk_level ? esc(iss.risk_level) : '<span class="si-muted">未定级</span>'}</span></div></div>` : ''}
+            <!-- [S1c·config流激活 方案v1.0 D15] 风险等级适用集合三类：feature/improvement/config（同
+                 siPriRiskCellHtml riskApplicable 单一事实源，仅 bug 不适用）。 -->
+            ${(iss.type === 'feature' || iss.type === 'improvement' || iss.type === 'config') ? `<div class="u-kv-item"><label>风险等级</label><div class="v"><span title="${SI_RISK_LEVEL_HELP_TEXT}" style="cursor:help">${iss.risk_level ? esc(iss.risk_level) : '<span class="si-muted">未定级</span>'}</span></div></div>` : ''}
+            <!-- [S1c·config流激活 方案v1.0 §4·D1/D13] 执行方式/乙方名称——仅 config 且 exec_mode 已设值
+                 （首次指派后）才渲染；建单/待受理阶段 exec_mode 恒 NULL，整格不出现（同风险等级"未回填不
+                 强行占位"的既有 K3 三态门控哲学，非「未设置」文案占位）。 -->
+            ${(iss.type === 'config' && iss.exec_mode) ? `<div class="u-kv-item"><label>执行方式</label><div class="v">${esc(SI_EXEC_MODE_LABEL[iss.exec_mode] || iss.exec_mode)}</div></div>` : ''}
+            ${(iss.type === 'config' && iss.exec_mode === 'vendor') ? `<div class="u-kv-item"><label>乙方名称</label><div class="v">${iss.vendor_name ? esc(iss.vendor_name) : '<span class="si-muted">—</span>'}</div></div>` : ''}
             ${effortKv}
             <div class="u-kv-item"><label>预计完成时间</label><div class="v">${iss.dev_estimated_at ? (esc(siFmtDT(iss.dev_estimated_at)) + siRemainingDaysHtml(iss)) : '<span class="si-muted">未回填</span>'}${siEtaAutoGenHintHtml(iss)}</div></div>
             ${siEtaOverrunReasonReadonlyHtml(iss)}
@@ -3781,7 +3820,11 @@
             <div class="u-kv-item"><label>计划开工日</label><div class="v">${iss.scheduled_start ? esc(iss.scheduled_start) : '<span class="si-muted">—</span>'}</div></div>
             <div class="u-kv-item"><label>期望完成(deadline)</label><div class="v">${iss.deadline ? esc(siFmtDeadline(iss.deadline)) : '<span class="si-muted">—</span>'}</div></div>
             <div class="u-kv-item"><label>需求方</label><div class="v">${siRequesterText(iss)}</div></div>
-            <div class="u-kv-item"><label>OA 流程号</label><div class="v">${iss.oa_number ? esc(iss.oa_number) : (Number(iss.oa_exempt) === 1 ? '<span class="si-muted">无需 OA（内部自发）</span>' : ((iss.type !== 'bug' && siOaFillable(iss)) ? (iss.status === '待指派' ? '<span style="color:#b45309;font-weight:600">尚未补填 OA 号，指派开发前必填</span>' : '<span style="color:#b45309">尚未补填 OA 号，请补充台账信息</span>') : '<span class="si-muted">—</span>'))}</div></div>
+            <!-- [S1c 补丁 AD·AD1·预筛 H1②] 琥珀提醒判据从 type!=='bug' 改为显式变更流二值——
+                 与 siModalSetOaNumber 的 oaRequired 同一语义（config 与 bug 同属"OA 可选、无强制"，
+                 不该被推上"尚未补填"的醒目提醒；config 落 siOaFillable 为真但 type 判据已排除，回退
+                 到中性「—」，与 config 单可自愿在「补填 OA 号」入口设号并不矛盾）。 -->
+            <div class="u-kv-item"><label>OA 流程号</label><div class="v">${iss.oa_number ? esc(iss.oa_number) : (Number(iss.oa_exempt) === 1 ? '<span class="si-muted">无需 OA（内部自发）</span>' : (((iss.type === 'feature' || iss.type === 'improvement') && siOaFillable(iss)) ? (iss.status === '待指派' ? '<span style="color:#b45309;font-weight:600">尚未补填 OA 号，指派开发前必填</span>' : '<span style="color:#b45309">尚未补填 OA 号，请补充台账信息</span>') : '<span class="si-muted">—</span>'))}</div></div>
             <div class="u-kv-item"><label>所属上线单</label><div class="v">${iss.release_id ? (siCanOpenRelease(iss) ? `<a style="cursor:pointer;color:#2563eb" onclick="siGotoBatchDetail(${iss.release_id})">${esc(iss.release_no || ('#' + iss.release_id))}</a>` : esc(iss.release_no || ('#' + iss.release_id))) : '<span class="si-muted">—</span>'}</div></div>
             <!-- ⭐ [C9-fix M3] 「上线方式」——**仅「已上线」单渲染**：后端 deriveOnlineSourceKind 对非已上线单
                  恒返 null（index.js:2311 第一行就 return），这一格对它们不是"未知"而是"这个维度还不存在"，
@@ -3860,9 +3903,12 @@
         //   加宽后其余既有行（intake/dev/creator/requester）按钮仍各自受 canOperate* 独立门控（admin∨
         //   受理人），不因本次加宽而多出操作权，只是多了"看得见"。
         // [对接人绑单收口 2026-08-10] 可见性=读路径：候选[13] 保留（决策4 不收窄）+ 增量放行本单绑定对接人
+        // [S1c·config流激活 方案v1.0 §4] config 在册开发同样应"看得见通知区"——同 feature/improvement 一带
+        //   理由（本条本身不新增操作权，区内各行仍各自受 canOperate* 独立门控·admin∨受理人）；发现于
+        //   逐字对齐后端契约核查（同 siNotifyStatusesFor 遗漏，本批一并补齐，非方案原列改动点）。
         const canSeeNotify = isAdmin() || (currentUser && isSiIntakeLiaison(currentUser.id)) || isSiBoundLiaison(iss)
             || (iss.type === 'bug' && currentUser && (isSiBugLiaison(currentUser.id) || (Number(iss.assigned_to) === Number(currentUser.id) && currentUser.id > 0) || (siCaps && siCaps.isRosterMember)))
-            || ((iss.type === 'feature' || iss.type === 'improvement') && currentUser && (siCaps && siCaps.isRosterMember));
+            || ((iss.type === 'feature' || iss.type === 'improvement' || iss.type === 'config') && currentUser && (siCaps && siCaps.isRosterMember));
         const notify = canSeeNotify ? siRenderNotify(iss, r.data.dev_assignees) : '';
 
         // 讨论群（§5 bug 流拉群；已建才展示，留痕：议题 + 拉群时间）
@@ -4082,7 +4128,9 @@
         submit: '交付', return: '打回', release: '上线', reopen: '重开', derive: '派生',
         scope_change: '范围变更', feasibility: '可行性评估', blocked: '标记受阻', unblock: '解除受阻', note: '备注',
         schedule: '排期', accept: '验收通过', close: '关闭', hold: '暂缓', resume: '恢复',
-        reactivate: '重新激活', issue_reject: '拒绝', void: '作废', effected: '已生效',
+        reactivate: '重新激活', issue_reject: '拒绝', void: '作废',
+        // [S1c·config流激活 方案v1.0 D5/D14] 「已生效」预留态拆除——`effected` 从未有对应的后端
+        //   action/TRANSITIONS 条目（全仓 grep 零命中），本就是从未触发过的死标签，随预留态一并删除。
         set_release_flag: '填发版信息',   // F-3：set-release-flag 写 status_change+action_code，补前端标签防裸英文
         confirm_online_norelease: '确认上线（不发版）',   // L-1：release 事件带此 action_code 时区分「不发版直接上线」（批次/hotfix 发版仍显「上线」）
         // C5a（详情页体验优化批·时间线渲染层三合一）：补 9 码，来源=docs/local/系统迭代/时间线写入点码表_20260810.md
@@ -4161,7 +4209,7 @@
         schedule: 'si-tl-indigo', assign: 'si-tl-indigo', reassign: 'si-tl-indigo', estimate: 'si-tl-indigo', feasibility: 'si-tl-indigo', set_release_flag: 'si-tl-indigo',
         submit: 'si-tl-blue',
         return: 'si-tl-red', reopen: 'si-tl-red', issue_reject: 'si-tl-red', blocked: 'si-tl-red',
-        accept: 'si-tl-green', release: 'si-tl-green', effected: 'si-tl-green', close: 'si-tl-green', unblock: 'si-tl-green', confirm_online_norelease: 'si-tl-green',
+        accept: 'si-tl-green', release: 'si-tl-green', close: 'si-tl-green', unblock: 'si-tl-green', confirm_online_norelease: 'si-tl-green',
         scope_change: 'si-tl-orange',
         hold: 'si-tl-gray', resume: 'si-tl-gray', void: 'si-tl-gray', reactivate: 'si-tl-gray', note: 'si-tl-gray',
         // C5a 配色（按既有四族语义就近归类，非新族）：
@@ -4195,7 +4243,7 @@
         // [S3·§5] confirm 类比"确认动作色"——但不用绿（绿留给全单真正翻牌成功那一刻），归 blue：
         //   语义上更接近 submit（"某一位成员确认了自己那一份工作"，同样是"个人贡献完成"而非"整单成功"），
         //   与既有 submit 同一族色。online 是真正的翻牌上线事件（同 W-GATE 完成态镜像范式的落点），
-        //   归 green，与既有 accept/release/effected/confirm_online_norelease 等"上线成功"事件同族——
+        //   归 green，与既有 accept/release/confirm_online_norelease 等"上线成功"事件同族——
         //   与 fast_release_staged 头部注释预告的"翻牌镜像行落地时再归 green"一致。
         fast_release_exec_confirm: 'si-tl-blue', fast_release_exec_online: 'si-tl-green',
         // [S4·§4-4a/4b] 加人=程序性/准备性动作（新增一名待确认执行人，同 fast_release_staged/
@@ -4400,9 +4448,14 @@
             //   测试凭证，见 resolveEvidenceAttachmentIds 校验口径）匹配，渲染与 submit 行同形态的 📎
             //   下载链接。parse 失败/非本批 schema 静默跳过（既有绝大多数行 payload_json 为 null，
             //   `if (e.payload_json)` 提前短路，不进 try 分支）。
+            // [S1c 补丁 AD·AD3·预筛 M1+L2] parsedPayload 单点解析——供下方 summaryHtml 链复用（exec_mode
+            //   变更译中文 + accept 行 online_mode 译中文），避免同一个 payload_json 字符串在本函数内
+            //   被 JSON.parse 两次（一次在这里、一次在 summaryHtml 分支各写各的 try/catch）。
+            let parsedPayload = null;
             if (e.payload_json) {
                 try {
                     const p = JSON.parse(e.payload_json);
+                    parsedPayload = p;
                     if (p && Array.isArray(p.attachment_ids) && p.attachment_ids.length) {
                         const evidenceIdSet = new Set(p.attachment_ids);
                         const evidenceFiles = (atts || []).filter(a => evidenceIdSet.has(a.id));
@@ -4475,6 +4528,35 @@
                 //   字符——改用 `[...e.summary]` 展开成码点数组再判长/切片/join，对齐全仓其余长度口径
                 //   （work_note 上限 1000、bug_cause_note 上限 500 均按 `[...s].length` 码点计数）。
                 summaryHtml = `<span title="${esc(e.summary)}">${esc([...e.summary].slice(0, 60).join('') + '…')}</span>`;
+            } else if (e.event_type === 'note' && !e.action_code && parsedPayload && (parsedPayload.exec_mode_to !== undefined || parsedPayload.vendor_name_to !== undefined)) {
+                // [S1c 补丁 AD·AD3·预筛 M1] config 改派 exec_mode/vendor_name 变更行——写入端
+                //   （index.js:7931-7952）event_type='note' 且 action_code 留空，服务端拼好的 summary
+                //   值域是裸英文枚举原文（如"执行方式：assigned → vendor"），本支改从 payload_json 的
+                //   exec_mode_from/to、vendor_name_from/to 四键直接用 SI_EXEC_MODE_LABEL 重建中文展示
+                //   （同既有 notify_sent/request_tech_consult 两支"折叠不丢原文"范式，title 挂 e.summary
+                //   原文，不新造第五套折叠逻辑）。
+                const execParts = [];
+                if (parsedPayload.exec_mode_to !== undefined && (parsedPayload.exec_mode_from || null) !== (parsedPayload.exec_mode_to || null)) {
+                    const fromLabel = parsedPayload.exec_mode_from ? (SI_EXEC_MODE_LABEL[parsedPayload.exec_mode_from] || parsedPayload.exec_mode_from) : '（未设置）';
+                    const toLabel = SI_EXEC_MODE_LABEL[parsedPayload.exec_mode_to] || parsedPayload.exec_mode_to;
+                    execParts.push(`执行方式：${fromLabel} → ${toLabel}`);
+                }
+                if (parsedPayload.vendor_name_to !== undefined && (parsedPayload.vendor_name_from || '') !== (parsedPayload.vendor_name_to || '')) {
+                    execParts.push(`乙方名称：${esc(parsedPayload.vendor_name_from || '（无）')} → ${esc(parsedPayload.vendor_name_to || '（无）')}`);
+                }
+                summaryHtml = execParts.length
+                    ? `<span title="${esc(e.summary || '')}">${execParts.join('｜')}</span>`
+                    : (e.summary ? esc(e.summary) : '');
+            } else if (parsedPayload && parsedPayload.online_mode != null) {
+                // [S1c 补丁 AD·AD3·预筛 L2] accept 行 online_mode 消费——config 验收通过选的 release/
+                //   direct 落在 payload_json.online_mode（index.js:6118，D11「选项写时间线」），此前前端
+                //   只消费 attachment_ids，release 分支若无验收说明/附件时 summary 也是 null，时间线上
+                //   完全看不出选过什么。文案与弹层单选 label 保持一致（siModalAccept 的 release/direct
+                //   两个单选项文案，非另造第三套措辞）。
+                const modeLabel = parsedPayload.online_mode === 'direct' ? '已在生产生效，直接完成'
+                    : (parsedPayload.online_mode === 'release' ? '加入上线单，按排期生效' : parsedPayload.online_mode);
+                const baseText = e.summary ? esc(e.summary) : '';
+                summaryHtml = `${baseText}<span class="si-muted" style="margin-left:6px">（上线方式：${esc(modeLabel)}）</span>`;
             } else {
                 summaryHtml = e.summary ? esc(e.summary) : '';
             }
@@ -5333,7 +5415,16 @@
         //   无上线执行 release_executor：前者后端永远拒绝 CHANNEL_NA，后者是 bug 专属上线编排）。
         //   权限=admin∨受理人（**2026-07-28 修正过期镜像**：C1 起后端 sysManualNotifyGuard 三通道
         //   全类型=admin∨受理人，前端此处一直停在"仅 admin"——受理人缺合法按钮·写读不同源）。
-        if (iss.type === 'feature' || iss.type === 'improvement') {
+        // [S1c 补丁 AC·AC2·需裁定②裁定=走变更流布局] config 并入本分支——config 是"去掉可行性评估/
+        //   对接测试的 improvement 流"，通知通道形状（developer/creator/requester/intake 四通道、无
+        //   relay、无 release_executor）与变更流逐字同构（后端 sysNotifyStatusesFor 的 config 分支已
+        //   证实：relay=[]、intake=INTAKE 集同三型、creator/requester 复用 *_CHANGE，仅 developer 换成
+        //   config 专属状态集——见 siNotifyStatusesFor :1440-1449 已补的 config 分支，本行内四个
+        //   siRender*NotifyRow 全部走该函数取 sendable 状态，天然按 config 的状态集渲染，无需另开分支）。
+        //   本分支唯一一处按 type 细分的行——siRenderLiaisonTestNotifyRow（对接测试通知，:5189）——
+        //   自身已有 `iss.type !== 'feature'` 前置 return ''，config 落入该 early return，天然不渲染，
+        //   无需额外改动（Playwright 补断言钉住这条"零改动即正确"的结论，防未来该行前置判据被误改）。
+        if (iss.type === 'feature' || iss.type === 'improvement' || iss.type === 'config') {
             // ⭐ [对接人绑单收口 2026-08-10] 发送（写路径）镜像 sysManualNotifyGuard(enforceBinding)=admin∨绑定本人；
             //   查已读（读路径）镜像 guard 读分支=admin∨候选[13]（决策4 保留）∨绑定本人（本批增量）——两口径自此分离。
             const canOperate = isAdminUser || isSiBoundLiaison(iss);
@@ -5345,7 +5436,10 @@
                 ${siRenderLiaisonTestNotifyRow(iss)}
                 ${siRenderCreatorNotifyRow(iss, canOperate, canQueryReadChange)}
                 ${siRenderRequesterNotifyRow(iss, canOperate, canQueryReadChange)}
-                <div class="u-nt-muted" style="font-size:11px;margin-top:6px">变更流通知均<b>手动触发</b>——指派/改派后在此点「发送通知」；「查已读」查询钉钉已读回执。<br>
+                <!-- [S1c 补丁 AD·AD9·预筛 L1] 去掉"变更流"三字——本批注释自陈"不扩 isChangeFlow 把 config
+                     当变更流"，而 config 现已并入本分支（AC2），若仍用"变更流通知均"描述会对 config 单
+                     失实（"本单"泛指三种类型，中性不失实）。 -->
+                <div class="u-nt-muted" style="font-size:11px;margin-top:6px">本单通知均<b>手动触发</b>——指派/改派后在此点「发送通知」；「查已读」查询钉钉已读回执。<br>
                     通知行显示的时间与状态是<b>最近一次发送</b>的记录；若期间发生过改派/打回，旧「已通知」不代表已就当前动作重新通知，请按需重发。</div>
             </div>`;
         }
@@ -5592,14 +5686,24 @@
 
         // 上线体统一重构 C3 第2批（⑦⑧任务B-②）：「应急上线」独立按钮——脱离 meta 驱动的 acts 循环（原
         //   'publish' TRANSITIONS 条目已删，见 transitions.js），改为**类型统一**的直接入口：待上线 +
-        //   尚未挂上线单 + 类型∈RELEASABLE_TYPES（镜像后端同名常量 bug/feature/improvement，config 不进）
-        //   即可发起，admin 专属（镜像后端 hotfix-publish 的 requireAdmin）。全类型可见的依据=方案 §6.7/附录 A：
-        //   hotfix-publish 对三可发布类型一视同仁、仅 config 负例。[主会话验收更正 2026-07-29] bug 并非只有
-        //   本按钮一条建单路：bug 现与 feature/improvement 完全同源，可无条件经 add-issues 直接进普通批次
-        //   （2026-07-29 双闸拆除，见 index.js add-issues 路由处注释）——本按钮是应急口，非唯一口。
+        //   尚未挂上线单 + 类型∈RELEASABLE_TYPES（镜像后端同名常量，index.js:14770 `['feature',
+        //   'improvement', 'bug', 'config']`——GET meta 当前不下发该集合，此处显式复刻四值字面量。
+        //   ⚠️ [补丁 AQ·codex 524 问项2 措辞订正] 原写「与后端常量**同源**」——**失实**：这是**手工镜像**，
+        //   没有任何自动同步机制，改任一侧要靠人记得改另一侧。同款做法已在加单候选处酿成第三次失源过滤
+        //   （S1h·用户实测抓出）。本处**当前含 config、行为正确**，故不在本批改动（改它须先读 hotfix-publish
+        //   完整路由确认其独立类型校验与拒绝行为，超出本次缺陷修复范围）；长期取向＝两处共同消费后端下发
+        //   的元数据，已登记 backlog）即可发起，admin 专属（镜像后端 hotfix-publish 的
+        //   requireAdmin）。全类型可见的依据=方案 §6.7/附录 A：hotfix-publish 对四可发布类型一视同仁。
+        //   [主会话验收更正 2026-07-29] bug 并非只有本按钮一条建单路：bug 现与 feature/improvement 完全
+        //   同源，可无条件经 add-issues 直接进普通批次（2026-07-29 双闸拆除，见 index.js add-issues
+        //   路由处注释）——本按钮是应急口，非唯一口。
+        //   [S1c 补丁 AC·AC1·需裁定①裁定=放开] config 随方案 D3 之后追认——config 已随 S1a 并入
+        //   RELEASABLE_TYPES + hotfix-publish 的 CONFIG_NO_RELEASE 拒绝分支已删除（index.js:18097 一带），
+        //   结构上后端已接受 config 的应急上线请求，前端本条件此前遗漏，本批补齐（原"仅 config 负例"
+        //   表述随之作废）。
         let hotfixBtn = '';
         if (isAdminUser && iss.status === '待上线' && !iss.release_id
-            && (iss.type === 'bug' || iss.type === 'feature' || iss.type === 'improvement')) {
+            && (iss.type === 'bug' || iss.type === 'feature' || iss.type === 'improvement' || iss.type === 'config')) {
             hotfixBtn = `<button class="u-btn-primary u-btn-sm" onclick="siModalHotfix(siDetail.issue)">应急上线</button>`;
         }
 
@@ -6181,15 +6285,25 @@
     //   ⚠️ 校验与后端 assertSysOaNumber **逐字同源**（1-20 位纯数字）：前端先挡省一次往返，
     //     但真闸在后端（前端非授权源）。两处若哪天要改口径，必须同批改（写读同源）。
     function siModalSetOaNumber(iss) {
+        // [S1c 补丁 AD·AD1·预筛 H1②] 必填判据从 `iss.type !== 'bug'` 改为显式变更流二值——后端
+        // `assertSysDevCommitmentOaGuard`（index.js:4324）首行 `if (issueType !== 'feature' &&
+        // issueType !== 'improvement') return;` 只对 feature/improvement 强制必填，bug 与 config
+        // 同属豁免。旧判据把"非 bug"等同"变更流"，会让 config 被误标必填、并对用户声称一条后端根本
+        // 不执行的规则（"变更流单据指派开发前必填，否则「指派」会被后端拒绝"）——D2/D13 均未要求 config
+        // 必填 OA，"可填窗口"（AD1①）与"是否必填"是正交的两件事。
+        const oaRequired = iss.type === 'feature' || iss.type === 'improvement';
+        const oaOptionalNote = iss.type === 'bug'
+            ? 'bug 单 OA 号可选，仅供台账关联使用。'
+            : 'config 单 OA 号可选，用于台账关联（config 单来源即 OA 流入，建议尽量补填）。';
         siModal('补填 OA 号 ' + siIssueDisplayNoById(iss.id), [
-            note('受理通过后回填 OA 立项流程号。<br>' + (iss.type === 'bug' ? 'bug 单 OA 号可选，仅供台账关联使用。' : '变更流单据<b>指派开发前必填</b>，否则「指派」会被后端拒绝。') + '<br>已有号时可覆盖（覆盖会留痕）；填入相同号不产生变更。'),
-            fText('oa_number', 'OA 流程号', iss.oa_number || '', iss.type !== 'bug', '1-20 位纯数字（业务方 OA 需求流程的单号）' + (iss.type === 'bug' ? '，可留空' : '，必填'))
+            note('受理通过后回填 OA 立项流程号。<br>' + (oaRequired ? '变更流单据<b>指派开发前必填</b>，否则「指派」会被后端拒绝。' : oaOptionalNote) + '<br>已有号时可覆盖（覆盖会留痕）；填入相同号不产生变更。'),
+            fText('oa_number', 'OA 流程号', iss.oa_number || '', oaRequired, '1-20 位纯数字（业务方 OA 需求流程的单号）' + (oaRequired ? '，必填' : '，可留空'))
         ], async v => {
             const oa = (v.oa_number || '').trim();
             if (!oa) {
-                // bug 单 OA 可选（D2）：留空视为"本次不填"，不调用后端（assertSysOaNumber 对空值恒拒绝，
+                // bug/config 单 OA 可选：留空视为"本次不填"，不调用后端（assertSysOaNumber 对空值恒拒绝，
                 //   调了必 400）；变更流单据前面已挡必填，理论到不了这里，双重保险仍保留判断。
-                if (iss.type !== 'bug') { showToast('变更流单据 OA 流程号必填', 'error'); return false; }
+                if (oaRequired) { showToast('变更流单据 OA 流程号必填', 'error'); return false; }
                 showToast('未填写，已跳过', 'success'); return true;
             }
             if (!/^\d{1,20}$/.test(oa)) { showToast('OA 流程号须为 1-20 位纯数字', 'error'); return false; }
@@ -6233,10 +6347,26 @@
         //     （"否则进入待上线"）都写在句子里。这样无论后端最终怎么判，这句话都是真的，stale 窗口不再是
         //     "会说错话的窗口"而只是"两个分支里走了另一个"。声称与实现对齐，注释也随之改写（[[feedback_comment_is_review_input]]）。
         const likelyDirect = Array.isArray(siDetail && siDetail.dev_commits) && siDetail.dev_commits.length === 0 && !iss.release_id;
+        // [S1c·config流激活 方案v1.0 §3·D11] config 验收弹层不复用既有的自动 C9 预告——它须显式二选一
+        //   （online_mode∈release/direct，无默认智能判断），改走下方独立的单选块。非 config 的既有
+        //   likelyDirect 自动预告逻辑逐字不动。
+        const isConfig = iss.type === 'config';
         const notes = [note('确认验收通过？')];
-        if (likelyDirect) {
+        if (!isConfig && likelyDirect) {
             notes.push(note('ℹ️ 本单当前没有任何 commit 提交记录，也未挂上线批次。<b>若确认时该单仍无在案 commit 且未挂 active 上线批次</b>，验收通过后将<b>直接标记为「已上线」</b>（无提交免上线），不再需要安排上线批次；<b>否则</b>照常进入「待上线」等待安排批次。最终以服务端判定为准。'));
         }
+        // [S1c·D11] online_mode 单选——仅 config 渲染，默认 release；direct 选中时复用上方 likelyDirect
+        //   同款预告文案（改写为显式选择语境）。非 config 不渲染、不传字段（后端非 config 携带该字段 400
+        //   ONLINE_MODE_NOT_APPLICABLE）。
+        const onlineModeHtml = isConfig ? `<div class="u-form-group"><label>上线方式 <span class="u-req">*</span></label>
+            <div class="si-radio-row">
+                <label class="si-radio-opt"><input type="radio" name="si-accept-online-mode" value="release" checked onchange="siAcceptOnlineModeChanged()"> 加入上线单，按排期生效</label>
+                <label class="si-radio-opt"><input type="radio" name="si-accept-online-mode" value="direct" onchange="siAcceptOnlineModeChanged()"> 已在生产生效，直接完成</label>
+            </div>
+            <div id="siAcceptOnlineModeHint" class="u-hint" style="display:none">${likelyDirect
+                ? 'ℹ️ 本单当前没有任何 commit 提交记录，也未挂上线批次。<b>若确认时仍满足该条件</b>，验收通过后将<b>直接标记为「已上线」</b>；否则以服务端判定为准，可能被拒绝（409），需改选「加入上线单，按排期生效」。'
+                : '⚠️ 当前存在未清空的开发提交记录，或已关联上线批次，服务端很可能会拒绝本次「直接完成」（409 DIRECT_ONLINE_NOT_ELIGIBLE），请确认后再选，或改选「加入上线单，按排期生效」。'}</div>
+        </div>` : '';
         // [2026-09-06 决策记录 D3/J4/J6-J9·验收说明与附件] picker key='accept-evidence'；说明+附件均
         //   可选，两步链（先传附件拿 id → 再带 note/attachment_ids 提交 accept，与 siModalResume「先动作
         //   后传」相反、与 liaison_test_pass 凭证模型同向——accept 后落 RELEASE 族，上传守卫会 409，
@@ -6248,6 +6378,7 @@
         let softConfirmed = false;
         siModal('确认验收通过？', [
             ...notes,
+            { k: null, html: onlineModeHtml },
             fTextarea('note', '验收说明（选填）', '', false, 'trim 后 ≤500 字；不填且不传附件时会二次确认'),
             { k: null, html: `<div class="u-form-group"><label>验收附件（选填，图片/PDF/Excel/Word/csv/txt/md，单个≤20MB，最多 5 个）</label>
                 ${siFilePickerHtml(evidenceKey, '选择验收附件')}
@@ -6302,6 +6433,12 @@
                 if (uploadedHintEl) { uploadedHintEl.textContent = `已上传 ${uploadedIds.length} 个附件，重试不会重传`; uploadedHintEl.style.display = ''; }
             }
             const body = {};
+            // [S1c·D11] config 必带 online_mode（默认 release 单选已 checked，读不到时兜底 release，
+            //   不静默丢字段——后端缺省/非法值 400 ONLINE_MODE_REQUIRED/INVALID_ONLINE_MODE 兜底）。
+            if (isConfig) {
+                const omChecked = document.querySelector('input[name="si-accept-online-mode"]:checked');
+                body.online_mode = omChecked ? omChecked.value : 'release';
+            }
             if (noteVal) body.note = noteVal;
             if (uploadedIds && uploadedIds.length) body.attachment_ids = uploadedIds;
             const r = await siApi('/sys-issues/' + iss.id + '/accept', { method: 'POST', body });
@@ -6336,6 +6473,14 @@
             }
             return true;
         }, '确定');
+    }
+    // [S1c·D11] online_mode 单选 onchange——仅当选中 direct 时展开预告 hint（release 恒隐藏，同既有
+    //   siAcceptSoftWarn 一带"按需展开"范式，避免默认态就甩一段警示文案）。
+    function siAcceptOnlineModeChanged() {
+        const checked = document.querySelector('input[name="si-accept-online-mode"]:checked');
+        const hintEl = document.getElementById('siAcceptOnlineModeHint');
+        if (!hintEl) return;
+        hintEl.style.display = (checked && checked.value === 'direct') ? '' : 'none';
     }
     // [2026-09-06 决策记录 D4/J6/J8·验收打回附件] picker key='return-evidence'；打回原因仍必填，附件
     //   可选，两步链同 siModalAccept（先传附件拿 id → 再带 reason/attachment_ids 提交 return）。
@@ -6552,12 +6697,13 @@
     // [工期对接测试与风险等级拆分 方案 v1.1 §3.4/§7·C5] 受理通过——feature/improvement 单需同时判定
     //   风险等级（技术风险，对接人视角，一级/二级/三级），与端点 intake-accept 的 risk_level 必填闸同源
     //   （服务端才是真闸，前端仅体验层拦截）。⭐ 用户拍板批1改造B（2026-08-06）：判据从"仅 feature"
-    //   扩到"feature∨improvement"——原「非 feature 不涉及风险等级」表述已废止，bug 单不渲染风险等级
-    //   控件（不把该控件泄漏给 bug，判据见下方 isChange）。
+    //   扩到"feature∨improvement"——原「非 feature 不涉及风险等级」表述已废止；[S1c·config流激活
+    //   方案v1.0 D15] 2026-09-07 再扩到 config（三类适用，仅 bug 不渲染风险等级控件，判据见下方
+    //   riskApplicable）。
     //   [LOW-4·过时表述订正] 本行上一版称"现只有 bug 沿用既有零输入确认弹窗（siConfirmSimple，行为完全
     //   不变，body 恒 {}）"——该表述已被组 A（2026-08-12）推翻：bug 单受理弹窗现在也带可选 ETA 输入框
     //   （见下方 :4436 一带"[组A·2.2]"注释），不再是"零输入"，也不再单独调用 siConfirmSimple，三种类型
-    //   统一走本函数（siModalIntakeAccept）同一个表单，只是 risk_level 字段按 isChange 条件渲染。
+    //   统一走本函数（siModalIntakeAccept）同一个表单，只是 risk_level 字段按 riskApplicable 条件渲染。
     //   ⭐ 用户拍板批1改造A：值域「高/中/低」全仓改名为「一级/二级/三级」。默认选中「三级」（用户拍板=
     //   前端默认体验，服务端必填闸不变，仍可手动切回「请选择」触发必选拦截，见下方 T6 回归覆盖）。
     //   ⚠️ [codex 290 号 M-1 收口] 默认值不是"人工评估过"的证据：必填闸门只能证明请求确实携带了一个
@@ -6734,11 +6880,20 @@
         }
     }
     function siModalIntakeAccept(iss) {
-        const isChange = iss.type === 'feature' || iss.type === 'improvement';
+        // [S1c·config流激活 方案v1.0 D15] 风险等级适用集合三类：feature/improvement/config（同
+        //   siPriRiskCellHtml riskApplicable 单一事实源）——原 `isChange` 只含 feature/improvement，
+        //   config 会漏渲染风险等级选择框，导致提交请求体不带 risk_level，后端 400 RISK_LEVEL_REQUIRED
+        //   卡死整条 config 受理链路（发现于逐字对齐后端契约核查+直接探针实测，非方案 §1 原列改动点，
+        //   但属阻断性缺口，本批一并修复）。**拆成两个独立判据**（此前 `isChange` 一个变量同时控制
+        //   "进入指派/处理阶段"文案与"是否判风险等级"，因 config 首次让两者分岔而不能再共用一个布尔）：
+        //   isChangeFlowStage 只管受理后阶段文案（config 受理后落「待处理」·态名同 bug，故文案走"处理"
+        //   分支，逐字沿用原 isChange 判据不变）；riskApplicable 只管风险等级字段是否渲染（config 加入）。
+        const isChangeFlowStage = iss.type === 'feature' || iss.type === 'improvement';
+        const riskApplicable = isChangeFlowStage || iss.type === 'config';
         const fields = [];
-        fields.push(note('受理后单据进入' + (isChange ? '指派' : '处理') + '阶段。'
-            + (isChange ? '请同时判定本单风险等级（技术风险，对接人视角）。' : '')));
-        if (isChange) {
+        fields.push(note('受理后单据进入' + (isChangeFlowStage ? '指派' : '处理') + '阶段。'
+            + (riskApplicable ? '请同时判定本单风险等级（技术风险，对接人视角）。' : '')));
+        if (riskApplicable) {
             // [C8·方案 v1.7 §9.2 末条] label 挂三级口径问号徽章（SI_RISK_LEVEL_LABEL 内含 si-help）——
             //   本弹窗是全站**唯一**渲染"风险等级选择"的表单（建单/编辑表单均无该字段，风险等级由受理门
             //   判定，见 :3288 注释），故徽章只此一处即全覆盖。范式与 SI_PRIORITY_LABEL 完全一致。
@@ -6756,7 +6911,7 @@
         fields.push(...fEtaOverrunReasonBlock(etaReasonBlockId, '', ''));
         siModal('受理通过 ' + siIssueDisplayNoById(iss.id), fields, async v => {
             const body = {};
-            if (isChange) {
+            if (riskApplicable) {
                 const riskLevel = (v.risk_level || '').trim();
                 if (!riskLevel) { showToast('请选择风险等级', 'error'); return false; }
                 body.risk_level = riskLevel;
@@ -6925,8 +7080,25 @@
         const etaReasonBlockId = 'si-eta-reason-assign';
         const etaVis = siAssignReassignEtaVisibility(iss);
         const etaBoxId = 'si-eta-box-assign';
+        // [S1c·config流激活 方案v1.0 §3/§4·D1/D13] config 首次指派必带执行方式——候选项读 META.execModes
+        //   （后端下发，源=SYS_EXEC_MODES）；vendor 时联动显示乙方名称输入，非 vendor 隐藏并清空。
+        const isConfigAssign = iss.type === 'config';
+        // [S1c 补丁 AD·AD8·预筛 M6] 兜底改 || []（与同页 :7546 一带 sources 既有防漂移范式一致：
+        //   META 缺失时页面本就整体不可用，MET_OK 门控已保证不会走到这里渲染真实弹层；硬编码三值副本
+        //   会在后端将来新增第四种 exec_mode 时静默过期，不该在这里替 meta 兜一份会漂移的清单）。
+        const assignExecModes = (META && META.execModes) || [];
+        const assignExecModeHtml = isConfigAssign ? `<div class="u-form-group"><label>执行方式 <span class="u-req">*</span></label>
+            <div class="si-radio-row">
+                ${assignExecModes.map(m => `<label class="si-radio-opt"><input type="radio" name="si-assign-exec-mode" value="${esc(m)}" onchange="siAssignExecModeChanged()"> ${esc(SI_EXEC_MODE_LABEL[m] || m)}</label>`).join('')}
+            </div>
+            <div id="si-assign-vendor-name-box" class="u-form-group" style="display:none;margin-top:8px">
+                <label>乙方名称 <span class="u-req">*</span></label>
+                <input type="text" id="si-assign-vendor-name" maxlength="100" placeholder="1-100 字">
+            </div>
+        </div>` : '';
         siModal('指派开发', [
             { k: null, html: siCollaboratorPickerHtml([], '开发成员（可多选，勾选=在册开发名单）') },
+            { k: null, html: assignExecModeHtml },
             { k: null, html: `<div id="${etaBoxId}">${siEtaFieldGroupHtml(etaVis, '指派')}</div>` },
             { k: 'dev_estimated_at', html: '' },   // 值收集占位（元素不存在时 siModal 的 `if (el)` 天然跳过）
             ...fEtaOverrunReasonBlock(etaReasonBlockId, '', ''),
@@ -6936,6 +7108,18 @@
             if (!memberIds.length) { showToast('请至少勾选 1 名开发', 'error'); return false; }
             const body = { assigned_to: memberIds[0] };                          // 首批候选（后端 electRepresentative 重选代表）
             if (memberIds.length > 1) body.collaborator_ids = memberIds.slice(1);
+            // [S1c·D1/D13] config 执行方式必填校验——非 config 不读该 DOM、不传字段。
+            if (isConfigAssign) {
+                const emChecked = document.querySelector('input[name="si-assign-exec-mode"]:checked');
+                if (!emChecked) { showToast('请选择执行方式', 'error'); return false; }
+                body.exec_mode = emChecked.value;
+                if (emChecked.value === 'vendor') {
+                    const vnEl = document.getElementById('si-assign-vendor-name');
+                    const vn = ((vnEl && vnEl.value) || '').trim();
+                    if (!vn || vn.length > 100) { showToast('请填写乙方名称（1-100 字）', 'error'); return false; }
+                    body.vendor_name = vn;
+                }
+            }
             if (v.dev_estimated_at) {
                 body.dev_estimated_at = siFromLocalInput(v.dev_estimated_at);
                 const reason = siCollectEtaOverrunReason(etaReasonBlockId, v);
@@ -6958,6 +7142,13 @@
             showToast('已指派开发', 'success'); return true;   // 去主次 + 对齐 P3 通知全手动（不再自动通知，改「已指派」）
         });
         siWireEtaOverrunReasonBlock(etaReasonBlockId, 'f_dev_estimated_at', iss.type, iss.deadline);
+    }
+    // [S1c·D1/D13] 指派弹层执行方式联动——切到 vendor 才显示乙方名称输入，其余隐藏（不清空已填值，
+    //   防用户切回 vendor 时白填一次；真正的清空发生在提交时按最终选中值决定是否携带 vendor_name）。
+    function siAssignExecModeChanged() {
+        const checked = document.querySelector('input[name="si-assign-exec-mode"]:checked');
+        const box = document.getElementById('si-assign-vendor-name-box');
+        if (box) box.style.display = (checked && checked.value === 'vendor') ? '' : 'none';
     }
 
     // C7 重做（方案 v2.9 §3 reassign 段 + §10 API 契约）：旧「换主/留主改协作」二分语义随 C2 后端全语义
@@ -6983,8 +7174,26 @@
         const etaReasonBlockId = 'si-eta-reason-reassign';
         const etaVis = siAssignReassignEtaVisibility(iss);
         const etaBoxId = 'si-eta-box-reassign';
+        // [S1c·config流激活 方案v1.0 §3/§4·D13/J18] config 改派可附带执行方式/乙方名称变更——弹层预填
+        //   当前值（iss.exec_mode/vendor_name，详情端点已投影），提交时只在**真发生变化**才携带字段，
+        //   未改动不传（"不带则不传字段"，与后端"未传则保留现值"语义对齐，避免无意义写 + no-op 误判）。
+        const isConfigReassign = iss.type === 'config';
+        // [S1c 补丁 AD·AD8·预筛 M6] 同 siModalAssign 一带（:7079）——兜底改 || []，不留第二份会漂移的硬编码副本。
+        const reassignExecModes = (META && META.execModes) || [];
+        const initialExecMode = iss.exec_mode || '';
+        const initialVendorName = iss.vendor_name || '';
+        const reassignExecModeHtml = isConfigReassign ? `<div class="u-form-group"><label>执行方式（可改）</label>
+            <div class="si-radio-row">
+                ${reassignExecModes.map(m => `<label class="si-radio-opt"><input type="radio" name="si-reassign-exec-mode" value="${esc(m)}" ${initialExecMode === m ? 'checked' : ''} onchange="siReassignExecModeChanged()"> ${esc(SI_EXEC_MODE_LABEL[m] || m)}</label>`).join('')}
+            </div>
+            <div id="si-reassign-vendor-name-box" class="u-form-group" style="display:${initialExecMode === 'vendor' ? '' : 'none'};margin-top:8px">
+                <label>乙方名称</label>
+                <input type="text" id="si-reassign-vendor-name" maxlength="100" value="${esc(initialVendorName)}" placeholder="1-100 字">
+            </div>
+        </div>` : '';
         siModal('管理开发成员', [
             { k: null, html: pickerHtml },
+            { k: null, html: reassignExecModeHtml },
             fTextarea('reason', '调整原因', '', true, '必填：本次名单调整的原因，trim 1..200'),
             { k: null, html: `<div id="${etaBoxId}">${siEtaFieldGroupHtml(etaVis, '改派')}</div>` },
             { k: 'dev_estimated_at', html: '' },   // 值收集占位（元素不存在时 siModal 的 `if (el)` 天然跳过）
@@ -6996,6 +7205,23 @@
             const mbody = document.getElementById('siMBody');
             const memberIds = [...mbody.querySelectorAll('.si-member-chk:checked')].map(x => parseInt(x.value, 10)).filter(Boolean);
             const body = { member_ids: memberIds, reason, expected_member_ids: expectedMemberIds };
+            // [S1c·D13/J18] 仅真发生变化才携带 exec_mode/vendor_name（比对预填初值）。
+            if (isConfigReassign) {
+                const emChecked = document.querySelector('input[name="si-reassign-exec-mode"]:checked');
+                const curMode = emChecked ? emChecked.value : initialExecMode;
+                const vnEl = document.getElementById('si-reassign-vendor-name');
+                const curVendorName = curMode === 'vendor' ? ((vnEl && vnEl.value) || '').trim() : '';
+                const modeChanged = curMode !== initialExecMode;
+                const vendorChanged = curMode === 'vendor' && curVendorName !== initialVendorName.trim();
+                if (modeChanged || vendorChanged) {
+                    if (!curMode) { showToast('请选择执行方式', 'error'); return false; }
+                    body.exec_mode = curMode;
+                    if (curMode === 'vendor') {
+                        if (!curVendorName || curVendorName.length > 100) { showToast('请填写乙方名称（1-100 字）', 'error'); return false; }
+                        body.vendor_name = curVendorName;
+                    }
+                }
+            }
             if (v.dev_estimated_at) {
                 body.dev_estimated_at = siFromLocalInput(v.dev_estimated_at);
                 const etaReason = siCollectEtaOverrunReason(etaReasonBlockId, v);
@@ -7025,6 +7251,12 @@
             showToast('开发成员已更新', 'success'); return true;
         });
         siWireEtaOverrunReasonBlock(etaReasonBlockId, 'f_dev_estimated_at', iss.type, iss.deadline);
+    }
+    // [S1c·D13/J18] 改派弹层执行方式联动——同 siAssignExecModeChanged，切到 vendor 才显示乙方名称输入。
+    function siReassignExecModeChanged() {
+        const checked = document.querySelector('input[name="si-reassign-exec-mode"]:checked');
+        const box = document.getElementById('si-reassign-vendor-name-box');
+        if (box) box.style.display = (checked && checked.value === 'vendor') ? '' : 'none';
     }
 
     async function siModalCreateChat(iss) {
@@ -7383,9 +7615,16 @@
         //   与后端同源，不再前端硬编码三字面量副本，防漂移）。
         const sources = (META && META.sources) || [];
         const isChangeFlow = (iss.type === 'feature' || iss.type === 'improvement');
-        // B 档按流分档（§6.1·codex C3 审 L-3）：变更流看「开发中」、bug 流看「处理中」——不用无条件 OR
-        //   （虽然两态在状态机里互斥，同 or 结果一致，但按流精判更贴合后端 EDIT_TIER_B_CHANGE/EDIT_TIER_B_BUG 的语义，不依赖"两态互斥"这条隐含前提）。
-        const isDevTier = isChangeFlow ? (iss.status === '开发中') : (iss.status === '处理中');
+        // B 档判定（§6.1·codex C3 审 L-3 原按流分叉「变更流看开发中／bug 流看处理中」）：
+        //   [S1c·config流激活 方案v1.0 §3/§4] 改按 meta DEV_WORK_STATUS_BY_TYPE 语义推导——后端
+        //   buildMeta() 当前不下发该常量，改读本页已有的类型无关联合集 SI_DEV_FAMILY_STATUSES
+        //   （='开发中'∪'处理中'，定义处注释已声明"镜像 transitions.js DEV_WORK_STATUS_BY_TYPE"）。
+        //   ⚠️ 不扩 isChangeFlow 把 config 当变更流——isChangeFlow 仍只含 feature/improvement，本行为
+        //   config/bug 共用的判据。行为等价性：各类型的开发工作态状态名互斥（feature/improvement 只会
+        //   落「开发中」，bug/config 只会落「处理中」），故按并集判定与原按流分叉判定结果逐类型相同，
+        //   只是把"哪个状态名对应哪个类型"的知识从本函数下沉到单一事实源常量，新增 config 类型时无需
+        //   再改本行。
+        const isDevTier = SI_DEV_FAMILY_STATUSES.includes(iss.status);
         // ⭐ codex 248 HIGH-1：存量 deadline 是纯日期，预填要补 T00:00（否则控件空着、保存即静默清空原值），
         //   但**预填 ≠ 该写回库**。保存体若无条件带上 deadline，用户只改标题、根本没碰这个字段，也会把
         //   库里的 '2026-08-10' 被动改写成 '2026-08-10 00:00' —— 这正是 E2 要防的"伪造精度"。
@@ -7566,10 +7805,15 @@
     //   去掉 component 下拉与「同 component 至多 1 条」限制（前后端去重均已删，后端仅保留自然键查重防完全重复行）；
     //   前端预校验为镜像，后端 §6.2 步骤2/2b/2c 才是真闸。
     function siModalSubmit(iss) {
+        // [S1c·config流激活 方案v1.0 §3·D12/J17] config 提交统一走 no_code 路径承载配置说明——不呈现
+        //   commit 分组 UI（结构上不可能提交 commits，同后端 CONFIG_NO_COMMITS 强制一致）。
+        const isConfigSubmit = iss.type === 'config';
         // [C11·§10.3] 命中「不分前后端系统」→ 单组「版本号」（allowed_components=['backend']·后端 DTO 唯一权威）；
         //   非命中系统照旧「前端组/后端组」两组。分组、行状态、提交收集、软提示全部按 groups 数据驱动。
-        const submitGroups = (iss && Array.isArray(iss.allowed_components) && iss.allowed_components.length)
-            ? iss.allowed_components : ['frontend', 'backend'];
+        //   config 强制空数组——commits 分组渲染整块跳过（见下方 modeHtml），siRenderSubmitRows 对不存在
+        //   的容器 id 天然 no-op（函数头 `if (!box) return;`），循环安全。
+        const submitGroups = isConfigSubmit ? [] : ((iss && Array.isArray(iss.allowed_components) && iss.allowed_components.length)
+            ? iss.allowed_components : ['frontend', 'backend']);
         const submitSingleGroup = !!(iss && iss.single_commit_group);
         const submitGroupLabel = (iss && iss.group_label) || '版本号';
         // commit 记录改造：每次打开重置分组行状态（每组默认 1 空行；siModal 渲染后 siRenderSubmitRows 铺行）。
@@ -7586,11 +7830,11 @@
         const modeHtml = `
             <div class="u-form-group"><label>提交方式</label>
                 <div class="si-radio-row">
-                    <label class="si-radio-opt"><input type="radio" name="si-submit-mode" value="commits" checked onchange="siSubmitModeChanged()"> 提交 commit</label>
-                    <label class="si-radio-opt"><input type="radio" name="si-submit-mode" value="no_code" onchange="siSubmitModeChanged()"> 无代码交付</label>
+                    ${isConfigSubmit ? '' : `<label class="si-radio-opt"><input type="radio" name="si-submit-mode" value="commits" checked onchange="siSubmitModeChanged()"> 提交 commit</label>`}
+                    <label class="si-radio-opt"><input type="radio" name="si-submit-mode" value="no_code" ${isConfigSubmit ? 'checked' : ''} onchange="siSubmitModeChanged()"> 无代码交付${isConfigSubmit ? '（配置变更统一走此方式）' : ''}</label>
                 </div>
             </div>
-            <div id="siSubmitCommitsBox" class="u-form-group"><label>Commit 记录 <span class="u-req">*</span></label>
+            ${isConfigSubmit ? '' : `<div id="siSubmitCommitsBox" class="u-form-group"><label>Commit 记录 <span class="u-req">*</span></label>
                 ${submitGroups.map(g => {
                     // [RPA 批·2026-08-19] 单组标签去掉「（SVN 版本号）」后缀：单组清单已含 git 系（RPA程序）
                     //   与 SVN 系（HRD/电子签），平台不再指定 VCS 类型。双组分支原样不动（=本改动的对照面）。
@@ -7605,10 +7849,10 @@
                 <div class="u-hint">${submitSingleGroup
                     ? `填「${esc(submitGroupLabel)}」，可加多行，至少填 1 条即可提交。`
                     : '前端组填 GIT commit，后端组填 SVN 版本号；每组可加多行，前端组或后端组至少填 1 条即可提交。'}</div>
-            </div>
-            <div id="siSubmitNoCodeBox" class="u-form-group" style="display:none">
-                <label>无代码交付原因 <span class="u-req">*</span></label>
-                <textarea id="siSubmitNoCodeReason" placeholder="trim 后 1~500 字：为何本次无需代码提交"></textarea>
+            </div>`}
+            <div id="siSubmitNoCodeBox" class="u-form-group" ${isConfigSubmit ? '' : 'style="display:none"'}>
+                <label>${isConfigSubmit ? '配置说明' : '无代码交付原因'} <span class="u-req">*</span></label>
+                <textarea id="siSubmitNoCodeReason" placeholder="${isConfigSubmit ? 'trim 后 10~500 字：配置内容／验证结果／生产操作范围' : 'trim 后 1~500 字：为何本次无需代码提交'}"></textarea>
             </div>
             ${iss.type === 'bug' ? `<div class="u-form-group"><label>bug 产生原因 <span class="u-req">*</span></label>
                 <textarea id="siSubmitBugCauseNote" placeholder="必填：这个 bug 为什么会产生（trim 后 1~500 字·每轮提交都需填写）"></textarea>
@@ -7625,8 +7869,8 @@
             </div>
             <div class="u-form-group">
                 <label>提交前确认 <span class="u-req">*</span></label>
-                <div class="u-form-group inline-chk" style="margin-bottom:6px"><input type="checkbox" id="siSubmitSelfTested"><label for="siSubmitSelfTested">已完成自测</label></div>
-                <div class="u-form-group inline-chk" style="margin-bottom:0"><input type="checkbox" id="siSubmitTestEnvDeployed"><label for="siSubmitTestEnvDeployed">已上测试库</label></div>
+                <div class="u-form-group inline-chk" style="margin-bottom:6px"><input type="checkbox" id="siSubmitSelfTested"><label for="siSubmitSelfTested">${isConfigSubmit ? '已在测试环境验证' : '已完成自测'}</label></div>
+                <div class="u-form-group inline-chk" style="margin-bottom:0"><input type="checkbox" id="siSubmitTestEnvDeployed"><label for="siSubmitTestEnvDeployed">${isConfigSubmit ? '已确认生产操作范围' : '已上测试库'}</label></div>
                 <div class="u-hint">两项均须勾选才能提交（默认不勾·确认清单式，按人留痕）。</div>
             </div>
             `;
@@ -7661,9 +7905,11 @@
             // 硬闸兜底 SELF_TESTED_REQUIRED/TEST_ENV_DEPLOYED_REQUIRED，前端先拦一道给及时反馈）。放在
             // mode 无关的最前面校验，与后端 validateSubmitBody 的检查顺序一致。
             const selfTestedChecked = !!(document.getElementById('siSubmitSelfTested') && document.getElementById('siSubmitSelfTested').checked);
-            if (!selfTestedChecked) { showToast('请先勾选"已完成自测"', 'error'); return false; }
+            // [S1c] 提示文案与弹层内实际勾选框文案同源（config 改文案后，提示语必须跟着改，防止
+            //   "提示说自测、页面写着测试环境验证"的写读不同源）。
+            if (!selfTestedChecked) { showToast(isConfigSubmit ? '请先勾选"已在测试环境验证"' : '请先勾选"已完成自测"', 'error'); return false; }
             const testEnvDeployedChecked = !!(document.getElementById('siSubmitTestEnvDeployed') && document.getElementById('siSubmitTestEnvDeployed').checked);
-            if (!testEnvDeployedChecked) { showToast('请先勾选"已上测试库"', 'error'); return false; }
+            if (!testEnvDeployedChecked) { showToast(isConfigSubmit ? '请先勾选"已确认生产操作范围"' : '请先勾选"已上测试库"', 'error'); return false; }
             body.self_tested = true;
             body.test_env_deployed = true;
             // [组B·S2-2·拆直上分支] 先行上线「已随修复直接上线」勾选的读取与 direct_release 键拼装已随
@@ -7685,7 +7931,15 @@
             }
             if (mode === 'no_code') {
                 const reason = (document.getElementById('siSubmitNoCodeReason').value || '').trim();
-                if (!reason || reason.length > 500) { showToast('无代码交付原因必填（trim 1~500字）', 'error'); return false; }
+                if (isConfigSubmit) {
+                    // [S1c·D12/J17] 前端 ≥10 码点提示，与后端同构 `[...s].length`（码点计数，非 UTF-16
+                    //   码元）——上限 500 与事务前公共上限（trim 后 ≤500 码点）对齐，非 config 分支的
+                    //   `.length`（码元）口径不动。
+                    const cp = [...reason].length;
+                    if (cp < 10 || cp > 500) { showToast('配置说明必填（trim 后 10~500 字）', 'error'); return false; }
+                } else if (!reason || reason.length > 500) {
+                    showToast('无代码交付原因必填（trim 1~500字）', 'error'); return false;
+                }
                 body.no_code_reason = reason;
             } else {
                 // commit 记录改造（2026-07-19）：前端组/后端组两固定分组，组固定 component、组内多行。
@@ -9856,10 +10110,28 @@
         //   **声称同源实际失源的孤儿逻辑**，且与建批次入口（不过滤）自相矛盾——用户实测 #98（bug）
         //   加不进 R-20260825-2（change）撞出。⚠️ 讽刺的是：当时拆后端双闸时同段注释里刚删过
         //   needs_release 过滤（理由="继续过滤会静默架空后端已放行的能力"），却漏删了旁边这个同款，
-        //   **失源过滤第二例**。现口径与后端唯一闸对齐：待上线 ∧ 未挂批次 ∧ 非 config，任何可发布
-        //   类型都可加入任意批次。
-        const cands = ((r.data && r.data.items) || []).filter(i =>
-            !i.release_id && i.type !== 'config');
+        //   **失源过滤第二例**。
+        // ⭐⭐ [失源过滤**第三例**·2026-09-08 用户实测抓出·S1h] 上一版此处口径写「待上线 ∧ 未挂批次
+        //   ∧ **非 config**」——在当时（config 不可发布）是正确的同源过滤；但 **S1a 已把 config 并入
+        //   后端 `RELEASABLE_TYPES`**（index.js:14770 四值）、`add-issues` 的 `type IN (...)` 闸随之放行，
+        //   **本处前端过滤没跟着改**，于是又一次变成「声称同源、实际失源」的孤儿逻辑：后端能加，前端
+        //   候选列表里根本看不到 config 单 → 用户实测「建了上线单点加单，选不到配置变更」。
+        //   ⚠️ 讽刺三连：同一段注释里已经写着两次失源过滤的教训（needs_release、族别），仍然发生第三次。
+        //   **根因是「前端复刻一份后端集合」这个做法本身**——复刻件永远会漂移，且漂移方向恒为「静默
+        //   架空后端已放行的能力」（三次全是这个方向）。
+        //   **修法取向**：不再在前端复刻类型集合，**type 面完全交给后端唯一闸**（`add-issues` 的
+        //   `RELEASABLE_TYPES`）。前端只保留与类型无关的两条：`status='待上线'`（列表接口入参）
+        //   ∧ 未挂批次。代价＝若将来新增**不可发布**类型，它会出现在候选里、点了才收 409
+        //   `ISSUE_NOT_ADDABLE`；这个代价**明确优于**继续复刻（体验回退 vs 功能静默失效，且后者已三犯）。
+        //   防再犯：Playwright 补端到端断言「加单候选里能看到 config 待上线单」（见 T15）。
+        //   [补丁 AQ·codex 524 问项1 差集②] 判据用 `=== null` 而非 `!i.release_id`：后端闸是
+        //   `release_id IS NULL`，而 `!x` 会把 `0`/`''` 这类**非 NULL 假值**也当成"未挂批次"放进候选，
+        //   点了才被后端拒。两端判据按字面对齐，差集只剩「类型不在 RELEASABLE_TYPES」这一类。
+        //   ⚠️ [补丁 AS·codex 525 risks] 上一版写成 `=== null || === undefined`，与「字面对齐」这个
+        //   说法**不一致**（多出的 undefined 分支＝字段缺失时也当"未挂批次"，是宽松方向）。已核实
+        //   `release_id` 在 `verify-sys-list-badge-fields.js` 的 BADGE_FIELDS 必返清单内（守卫保证
+        //   列表投影恒含该字段），故不为 undefined 另开分支——真正只认 `=== null`，与后端严格一致。
+        const cands = ((r.data && r.data.items) || []).filter(i => i.release_id === null);
         if (!cands.length) { showToast('没有可加入的「待上线」单据', 'warning'); return; }
         // [S13-b·B3·矩阵行13] 子编号——cands 来自 GET /sys-issues 列表端点，早已投影 derive_root_id/
         // derive_seq（S12-b/S13-a），siIssueDisplayNo 零额外数据依赖直接消费。
@@ -10387,10 +10659,11 @@
         const deadlinePrefix = UnifyHelpers.isValidDatePrefix(deadlineRaw);
         if (!deadlinePrefix) return { overdue: '日期无效', duration: '' };   // 非空但格式/日历非法（脏值）
 
-        // 预筛 C6c N-3（前瞻登记）：「待验收」态目前 DB 无实值（对应 config 流状态机 TODO，本批未落地）——
-        //   一旦该状态落地投产，须补进下方 SI_UNFINISHED 名单，且注意其完成锚可能不是 released_at 而是
-        //   effected_at（config 流"生效"语义与迭代流"上线"语义不同源）；漏补会让该状态落入本函数末尾的
-        //   「未知状态」防御兜底（预筛 C6 L-1 已改输出「—」），超时判定悄悄失效而不报错，不易发现。
+        // [S1c·config流激活 方案v1.0 落地复核] 此前"待验收态 DB 无实值"的前瞻登记已过期作废——
+        //   config 流最终落地未新增独立的"待验收"存储态，其未完成态复用现有字符串值（待受理/待修改/
+        //   待处理/处理中/待验证/待上线，与 bug 流同名同构，见 transitions.js CONFIG_FLOW_STATUSES），
+        //   下方 SI_UNFINISHED 名单本就逐字含这些值，无需再补。完成锚同样复用 released_at（D5：终态
+        //   复用「已上线」；effected_at 列随 D14 预留拆除仅历史保留、不再写入，本函数不消费该列）。
         const SI_UNFINISHED = ['待受理', '待修改', '待指派', '待处理', '开发中', '处理中', '待对接测试', '待验证', '待上线'];
         if (SI_UNFINISHED.indexOf(status) !== -1) {
             const nowPrefix = siLocalDatePrefix(now);
@@ -10400,7 +10673,8 @@
             return { overdue: '未超时', duration: '' };
         }
 
-        if (status === '已上线' || status === '已生效' || status === '已关闭') {
+        // [S1c·D5/D14] 「已生效」预留态已拆除（config 终态复用「已上线」），不再单独判定。
+        if (status === '已上线' || status === '已关闭') {
             // 已关闭走到这里说明 released_at 非空（空的分支已在上面拦截）；三态统一按完成判——
             // 通则②：完成锚（released_at）非空但非法（脏值）仍统一「无完成时间」。
             const releasedPrefix = UnifyHelpers.isValidDatePrefix(releasedRaw);

@@ -234,6 +234,10 @@ module.exports = (deps) => {
     //   原子写入单元，同 fast_release_* 六列/eta_overrun_* 四列先例整组入锚（mid-migration 崩溃会让取号
     //   UPDATE 或 INSERT 撞 no such column → 派生端点 500）。
     'derive_root_id', 'derive_seq', 'derive_seq_alloc',
+    // ← [S1a·config 流激活] exec_mode/vendor_name：**被消费的热路径列**——assign/reassign 端点写、
+    //   详情/列表读，mid-migration 崩溃（key 列已补本组未补）会让这些语句撞 no such column → 500
+    //   （同 release_assignee_id/gate_deferred_at 先例），须整组入锚点。
+    'exec_mode', 'vendor_name',
   ];
   const SYS_RELEASES_KEY_COLS = ['release_no', 'status', 'is_hotfix', 'release_note', 'version_tag',
     'release_type',   // ← bug 流 Commit ① 批次类型隔离锚点（[codex三审:L] 值域非空由 ② 服务端守卫强制，readiness 只查列在）
@@ -452,6 +456,15 @@ module.exports = (deps) => {
   // ⚠️ DDL CHECK（sys_issues.source 列，:658 一带）是静态 SQL 文本，无法引用本 JS 常量——两处仍需人工
   // 保持同步，verify 补一条断言解析 DDL CHECK 文本与本常量比对集合相等，漂移会直接报红（非纯人工自律）。
   const SYS_SOURCES = ['业务方', '内部', '生产故障'];
+  // [S1a·config 流激活 方案 v1.0 §4·D1] 执行方式枚举——单据级字段，仅 config 可写：self=绑定受理人本人
+  //   执行、assigned=平台成员执行、vendor=受理人跟踪乙方（需配 vendor_name）。沿 SYS_SOURCES 范式
+  //   （常量 + meta 下发 execModes，见 GET /sys-issues/meta），前端读 meta 渲染选项，不硬编码字面量。
+  const SYS_EXEC_MODES = ['self', 'assigned', 'vendor'];
+  // [S1a 补丁 V·V5·codex 505-A H2 反驳落注释（不改逻辑）] 语义=单据级协调方式描述（方案 v1.0 §4：
+  //   self=绑定受理人本人执行／assigned=平台成员执行／vendor=受理人跟踪乙方；**多人成员时仍是单据级
+  //   描述**）——刻意不与 assigned_to/成员集合建立约束（如 exec_mode='self' 时校验 assigned_to 必须
+  //   等于某个固定人）。若将来要把 exec_mode 与具体成员强绑定，须改方案 D1，非本批范围。同源反驳见
+  //   补丁 W·B1-H2（[C] 组 assigned_to=5 的正例保持不变，本条只补文档说明）。
   const SYS_INTAKE_LIAISON_IDS = [13];   // 示例对接人：受理动作（intake_accept/intake_return/request_tech_consult）授权
   const SYS_TECH_LEAD_IDS = [7];         // 示例发布者：技术负责人（被通知·下拉候选·tech_lead_id ∈ 此名单·§6/§8.1）
   //   单一真相点（对齐 isSysBugLiaison 范式）：uid 是否在受理人 / 技术负责人白名单。
@@ -540,8 +553,10 @@ module.exports = (deps) => {
   //   ⭐⭐ C2.5 撤销（方案 v2.1 §3）：**全类型收敛为「待受理」单值**——预沟通段废除，变更流与 bug 的
   //   咨询开放态自此同值（v1.9 的 P5 分流随撤销自然消失）。fail-closed 对未登记 type 保留。
   function sysTechConsultGateStatus(type) {
-    if (type === 'feature' || type === 'improvement' || type === 'bug') return '待受理';
-    return null;                                       // 未登记 type（config/脏数据/拼写错误）→ fail-closed
+    // [S1a·config 流激活] config 的 request_tech_consult 同 improvement"无差异"（方案 §3），并入本判定；
+    //   fail-closed 仍对真正未登记 type（脏数据/拼写错误）生效。
+    if (type === 'feature' || type === 'improvement' || type === 'bug' || type === 'config') return '待受理';
+    return null;                                       // 未登记 type（脏数据/拼写错误）→ fail-closed
   }
   //   粗筛中间件：放行 admin ∨ 受理人白名单；
   //   进 handler 后由 sysIssueTransition [3] roleGuard='intake_liaison' 精判（引擎权威·中间件只粗筛）。
@@ -677,7 +692,9 @@ module.exports = (deps) => {
 
       // ── 2.2 sys_issues（主表，§4.1）──────────
       //   type CHECK 一次定全 4 类（含 config，避免后续 ALTER 重建表）；
-      //   config release_id 永空 DDL CHECK（12-H2）：CHECK (type <> 'config' OR release_id IS NULL) 覆盖所有写入口；
+      //   [2026-09-07 S1b·config流激活_方案_v1.0 §5] config release_id 永空 DDL CHECK（12-H2）已随受控重建
+      //   移除——config 单 2026-09-07 起改为需要能进上线批次（用户拍板，铁律例外见项目记忆
+      //   sys_issues_rebuild_exception），迁移脚本 scripts/migrate-sys-issues-drop-config-release-check.js；
       //   source/priority/三侧 notify_status/record_source 均带 CHECK（方案 L-2/T-M5）。
       db.run(`CREATE TABLE IF NOT EXISTS sys_issues (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -928,9 +945,7 @@ module.exports = (deps) => {
         --   关联"这一事实推出 release_publish）；存量历史 NULL + 无关联 ⇒ unknown_legacy。
         --   刻意无 CHECK（值域开放、只读不判、唯一写入点是源码常量）——逐条理由见 alterAddMissingCols
         --   侧同名列注释（C9_ONLINE_SOURCE_ISSUE_COLS 组）。
-        online_source TEXT,
-
-        CHECK (type <> 'config' OR release_id IS NULL)
+        online_source TEXT
       )`, recordSysErr('sys_issues'));
       db.run(`CREATE INDEX IF NOT EXISTS idx_sys_issues_status   ON sys_issues(status)`, recordSysErr('idx_sys_issues_status'));
       db.run(`CREATE INDEX IF NOT EXISTS idx_sys_issues_type     ON sys_issues(type)`, recordSysErr('idx_sys_issues_type'));
@@ -2075,6 +2090,15 @@ module.exports = (deps) => {
         ['derive_seq_alloc', 'INTEGER'],  // 仅根单非 NULL：该族已分配的最大序号（378-H2 取号计数器·单调不减）
       ];
       await alterAddMissingCols('sys_issues', SYS_DERIVE_NUMBERING_ISSUE_COLS, '方案§15·派生单子编号「#根_序」20260813 v1.8（S12-a）');
+
+      // [S1a·config 流激活 方案 v1.0 §4] 执行方式契约两列——仅 config 可写：exec_mode（self/assigned/
+      //   vendor，服务层白名单 SYS_EXEC_MODES）+ vendor_name（vendor 时必填 1..100，否则清空）。无 DDL
+      //   CHECK（同 completion_overrun_reason_* 先例：值域仅服务层强校验，ALTER 路径不补约束）。
+      const SYS_CONFIG_FLOW_ISSUE_COLS = [
+        ['exec_mode', 'TEXT'],
+        ['vendor_name', 'TEXT'],
+      ];
+      await alterAddMissingCols('sys_issues', SYS_CONFIG_FLOW_ISSUE_COLS, 'S1a·config流激活_方案_20260907_v1.0 §4 执行方式契约');
 
       // [codex 291 号 H-2 收口] sys_issue_timeline 首次经 alterAddMissingCols 补列（此前该表无 ALTER 路径，
       //   旧库靠 CREATE TABLE IF NOT EXISTS no-op 停在原 12 列——TEXT 列无 CHECK 语义损失，ALTER 补列本身低风险）。
@@ -3277,6 +3301,11 @@ module.exports = (deps) => {
     reassign: {
       feature: ['DEV', 'VERIFY'],
       improvement: ['DEV', 'VERIFY'],
+      // [S1a 补丁 T·T3] config 同 improvement：与 CONFIG_FLOW_TRANSITIONS.reassign.from=['处理中','待验证']
+      //   同源，去掉基础矩阵的 D_PRE（待处理/已暂缓）——待处理须走 assign 采集 exec_mode 不得绕过，
+      //   已暂缓沿模块级「暂缓期改派冻结」不变量（§4.5）。裁定：加 override，不扩 CONFIG_FLOW_TRANSITIONS
+      //   的 from（扩 from 会让 config 成为唯一允许暂缓期改派的类型，与该不变量冲突）。
+      config: ['DEV', 'VERIFY'],
       // bug 未列 → 回落基础矩阵（含 D_PRE）
     },
   };
@@ -5171,9 +5200,10 @@ module.exports = (deps) => {
         //   仅对 reopen 单独精判，不改动其余动作的 400 兜底面（那些是"动作对该态从未定义过"的真泛化拒绝）。
         //   ⭐ [codex 204 审收口] 精判加两道限定，避免收窄带来的两处语义回退：
         //   ① **类型限定**（审 HIGH-1 降级采纳为防御纵深）：仅对"确实支持归档→重开"的类型精判——用
-        //      `findTransition(type,'reopen','已关闭')` 非 null 表达（config 等未登记类型恒 null，
-        //      transitions.js:64 fail-closed 基石）。当前 config 流是 TODO 未实现、建单入口即 400
-        //      TYPE_NOT_SUPPORTED 拒绝，故该分支当前不可达；此限定是为"未来 config 流实现时不误伤"预留。
+        //      `findTransition(type,'reopen','已关闭')` 非 null 表达。[S1a 订正] config 流已激活
+        //      （config流激活_方案_20260907_v1.0 §3·D3「不重开」），但 CONFIG_FLOW_TRANSITIONS 刻意
+        //      不设 reopen 条目——`findTransition('config','reopen','已关闭')` 仍恒 null，此限定对
+        //      config 天然不命中（任意 fromStatus 下 reopen 均落 400 INVALID_TRANSITION 兜底，唯一码）。
         //   ② **权限限定**（审 MED-1 采纳·真回退）：本精判位于 [1]，早于 [3] roleGuard——收窄前该边存在时
         //      非 admin 会在 [3] 得 403，收窄后若一律给 409 等于把业务态信息（"该单已上线未归档"）暴露给
         //      无权限者，且权限语义回退。故仅 admin 得精判 409，非 admin 落下方泛化 400（不泄露业务事实）。
@@ -5184,6 +5214,21 @@ module.exports = (deps) => {
         }
         throw new SysTransitionError(400, 'INVALID_TRANSITION', `「${type}」单在「${fromStatus}」态不能执行「${action}」`);
       }
+
+      // [S1a·config 流激活 方案 v1.0 §3·D11] accept 的 online_mode 契约：config 必带 online_mode∈
+      //   'release'|'direct'（缺省/非法 400）；非 config 携带该字段 → 400 ONLINE_MODE_NOT_APPLICABLE。
+      //   ⚠️ **必填/合法性/资格三类拒绝延后到 case 'accept'（switch 内，晚于下方 [3] 权限校验）才 throw**——
+      //   此处只做**不抛错**的归一化提取，供 [1b]/[2b] 决定是否调用 C9 资格函数与选 routeKind：
+      //   业务字段校验若排在权限判定之前，会让未授权者也能通过 400/409 的错误码差异探知"这个字段该填什么"
+      //   （同 R4 OA 号守卫"置于权限精判之后"的排序哲学——同 risk_level 在 case 'intake_accept' 内校验的
+      //   既有先例，两者都是 switch-case 内校验、非本处 [1] 提前校验）。非法/缺省值在此归一为 null（安全
+      //   默认＝不触发 C9 直翻，等价于当作"release"处理），真正的 400/409 稍后在 case 'accept' 内补抛。
+      let configOnlineMode = null;   // 'release' | 'direct' | null（缺省/非法，此刻不报错）
+      if (action === 'accept' && type === 'config') {
+        const raw = payload.online_mode;
+        if (raw === 'release' || raw === 'direct') configOnlineMode = raw;
+      }
+      let configDirectOnlineNotEligible = false;   // [1b] 内设置，供 case 'accept' 延后 throw 409
 
       // ⭐⭐ [1b] [C9-fix2 H1·裁决收归引擎] 免上线直翻的准入判定由**引擎自己发起**，结果只存引擎局部变量。
       //   改前：accept 端点构造 `opts.directOnlineInfo` 可变载体传进来，钩子在事务内 Object.assign(verdict)，
@@ -5202,7 +5247,30 @@ module.exports = (deps) => {
       //   ⚠️ row.status 用的是**事务内锁定后读到的真实值**（BEGIN IMMEDIATE 之后），不是端点事务外预检值。
       let noCommitOnlineVerdict = null;
       if (action === 'accept' && row.status === SYS_NO_COMMIT_ONLINE_FROM_STATUS) {
-        noCommitOnlineVerdict = await evaluateNoCommitDirectOnline(row.id, row);
+        // [S1a·config 流激活 方案 v1.0 §3/§4·D11] 调用层按 type × online_mode 分流（C9 资格函数
+        //   evaluateNoCommitDirectOnline 本身不变，只判 DB 条件）：
+        //   · config + online_mode='release' → **不调用**资格判定（即便零 commit 也不触发免上线直翻，
+        //     恒落静态目标态「待上线」，用户显式选择"加入上线单，按排期生效"）；
+        //   · config + online_mode='direct' → 必须调用且必须通过，否则 409 DIRECT_ONLINE_NOT_ELIGIBLE
+        //     （不像其他类型那样"不满足就静默停在待上线"——direct 是用户显式声明"已在生产生效"，
+        //     不满足硬性条件时必须响亮拒绝，不能假装成功进了上线单）；
+        //   · 非 config（bug/feature/improvement）→ 逐字沿用既有行为，恒调用资格函数。
+        if (type === 'config') {
+          if (configOnlineMode === 'direct') {
+            noCommitOnlineVerdict = await evaluateNoCommitDirectOnline(row.id, row);
+            // ⚠️ 此处**不 throw**——权限校验[3]尚未执行到，业务拒绝提前于权限判定会泄露信息（同上方
+            //   configOnlineMode 提取处的排序哲学）。资格不满足只记录标志，稍后在 case 'accept'
+            //   （晚于[3]）统一补抛 409 DIRECT_ONLINE_NOT_ELIGIBLE，此刻仅保证 toStatus/routeKind
+            //   走正常 ADMIN_TRANSITION 分支（noCommitOnlineVerdict.directFlip=false 时下方逻辑自然
+            //   不会把 toStatus 改判为已上线，不会误闯 NO_COMMIT_ONLINE 路由）。
+            if (!noCommitOnlineVerdict.directFlip) {
+              configDirectOnlineNotEligible = true;
+            }
+          }
+          // configOnlineMode === 'release'/null（缺省或非法，稍后再报）：均不触发 C9 判定。
+        } else {
+          noCommitOnlineVerdict = await evaluateNoCommitDirectOnline(row.id, row);
+        }
       }
 
       // 目标态解析（codex 15 M-1：动态目标态必须在事务内解析，杜绝 stale 并发读）：
@@ -5420,7 +5488,9 @@ module.exports = (deps) => {
       //     一律 409。"当前轮已回复"判定与 PH-1 轮次模型同源（timeline.id > 本轮 event_id）。
       //   位置=[3.5] 同段（权限[3]之后·UPDATE 之前·同事务读锁定行）：无权者稳得 403 不泄露咨询态；
       //   bug 的 issue_reject 不进本守卫（保持 admin 现状·未回复悬挂由 [PH-2 挂点] 自动清收口）。
-      if (action === 'intake_accept' || (action === 'issue_reject' && (row.type === 'feature' || row.type === 'improvement'))) {
+      //   [S1a·config 流激活] config 的 issue_reject 并入本守卫——方案 §3「issue_reject 同 improvement，
+      //   无差异」明文要求，CONFIG_FLOW_TRANSITIONS 该条目 sideEffects 也声明了同款前置守卫，两处须同源。
+      if (action === 'intake_accept' || (action === 'issue_reject' && (row.type === 'feature' || row.type === 'improvement' || row.type === 'config'))) {
         // ⚠️ 守卫**自查两列**（S3 红灯诊断修）：引擎各路径加载 row 的 SELECT 列清单不一，row.tech_lead_id
         //   可能是 undefined——而 `undefined != null` 为 false，会让 hasActiveConsult 恒 false → 变更流拒绝
         //   恒 409（首跑 [RA] 组红灯坐实）。同事务内单查一次，不依赖调用方 row 的形状。
@@ -5568,7 +5638,10 @@ module.exports = (deps) => {
           // 只有非空非 null 的具体字符串才算"真的传了值"。改造B后本宽松语义仅对 bug 生效（唯一还会
           // 落到 else 分支的类型）。
           const riskProvided = riskRaw !== undefined && riskRaw !== null && riskRaw !== '';
-          if (type === 'feature' || type === 'improvement') {
+          // [S1a·config 流激活 方案 v1.0 §2·D15] 风险等级适用面扩至 config（与 feature/improvement 同必填）——
+          //   config流激活_方案_20260907_v1.0 §2 D15「风险等级适用 config」+ §3 intake_accept 行
+          //   requiredPayload:['risk_level']；不适用面收窄为仅 bug 独占（下方 else 分支）。
+          if (type === 'feature' || type === 'improvement' || type === 'config') {
             const riskTrim = (typeof riskRaw === 'string') ? riskRaw.trim() : '';
             if (!riskProvided) {
               throw new SysTransitionError(400, 'RISK_LEVEL_REQUIRED', '请选择风险等级');
@@ -5580,7 +5653,7 @@ module.exports = (deps) => {
             setParams.push(riskTrim);
           } else {
             if (riskProvided) {
-              // bug：risk_level 恒 NULL（对接人受理时仅对 feature/improvement 定级）——bug 传
+              // bug：risk_level 恒 NULL（对接人受理时仅对 feature/improvement/config 定级）——bug 传
               // 具体值是语义错误，显式拒绝（不静默丢弃：静默丢弃会让调用方误以为传了就生效，掩盖真实的
               // 调用方 bug）。null/空串已在上面 riskProvided 判定里被当"未传"，不会走到这里。
               throw new SysTransitionError(409, 'RISK_LEVEL_NOT_APPLICABLE', `「${type}」类型不支持风险等级`);
@@ -5892,6 +5965,28 @@ module.exports = (deps) => {
           break;
         }
         case 'accept': {
+          // [S1a·config 流激活 D11] online_mode 必填/合法性/资格三类拒绝——**延后到此处**（switch 内，
+          //   晚于上方 [3] 权限校验）才真正 throw，同 case 'intake_accept' 内 risk_level 校验的既有排序
+          //   哲学（业务字段校验不得抢在权限判定之前，防止未授权者靠错误码差异探知字段契约/单据状态）。
+          // [S1a 补丁 V·V2·codex 505-A M2] 「携带」判据按分支拆两套：config 分支仍看**是否有非 null 值**
+          //   （`hasOnlineModeField`，null 视为未携带 → ONLINE_MODE_REQUIRED）；非 config 分支只看**键是否
+          //   存在**（不再 `&& payload.online_mode != null`）——`online_mode: null` 这种显式传空值现在
+          //   也会被非 config 类型拒绝，不再因 `!= null` 短路而静默放行。
+          if (type === 'config') {
+            const hasOnlineModeField = Object.prototype.hasOwnProperty.call(payload, 'online_mode') && payload.online_mode != null;
+            if (!hasOnlineModeField) {
+              throw new SysTransitionError(400, 'ONLINE_MODE_REQUIRED', '请选择上线方式（「加入上线单，按排期生效」／「已在生产直接生效」）');
+            }
+            if (payload.online_mode !== 'release' && payload.online_mode !== 'direct') {
+              throw new SysTransitionError(400, 'INVALID_ONLINE_MODE', `非法的上线方式：${payload.online_mode}`);
+            }
+            if (payload.online_mode === 'direct' && configDirectOnlineNotEligible) {
+              throw new SysTransitionError(409, 'DIRECT_ONLINE_NOT_ELIGIBLE',
+                '当前不满足「已在生产直接生效」条件（存在未清空的开发提交记录，或关联了活跃上线批次），请改选「加入上线单，按排期生效」');
+            }
+          } else if (Object.prototype.hasOwnProperty.call(payload, 'online_mode')) {
+            throw new SysTransitionError(400, 'ONLINE_MODE_NOT_APPLICABLE', `「${type}」类型不支持指定上线方式`);
+          }
           setFrags.push("accepted_at = datetime('now','localtime')");
           // ⭐ [C9 无 commit 单验收直翻·方案 v1.7 §10.1] 目标态若已被 resolveToStatusInTxn 判成「已上线」
           //   （准入四条件全满足，判定函数=evaluateNoCommitDirectOnline，与本 UPDATE **同一事务**），
@@ -6007,12 +6102,20 @@ module.exports = (deps) => {
             const hasAcceptNote = acceptNoteTrim.length > 0;
             const acceptAttachmentIds = await resolveEvidenceAttachmentIds(issueId, payload.attachment_ids, 'ACCEPT');
             const hasAcceptAttachment = acceptAttachmentIds.length > 0;
-            // payload_json 键 schema（冻结，决策记录 J6）：{ note?: string, attachment_ids?: number[] }——
-            //   仅有值时加键，同 liaison_test_pass 惯例；两者皆无时 timelinePayloadJson 保持上方初始值 null。
-            if (hasAcceptNote || hasAcceptAttachment) {
+            // payload_json 键 schema（冻结，决策记录 J6）：{ note?: string, attachment_ids?: number[],
+            //   online_mode?: 'release'|'direct' }——仅有值时加键，同 liaison_test_pass 惯例；三者皆无
+            //   （非 config 且无 note/附件）时 timelinePayloadJson 保持上方初始值 null。
+            // [S1a 补丁 T·T2·D11「选项写时间线」] config 单纯选 release 且无 note/附件时也要落
+            //   {"online_mode":"release"}——故进入条件补 `type === 'config'`，不依赖 note/附件是否填写。
+            //   configOnlineMode 此刻已由上方 case 'accept' 校验（:5961-5975）确认为 'release'/'direct'
+            //   合法值（与 payload.online_mode 同源，见 :5216-5219 归一化提取），direct 分支与 release
+            //   分支共用同一条 case 'accept' 尾部逻辑（本块在 break 之前，C9 直翻写点不提前 return/break），
+            //   故 online_mode 键落的是**同一条 accept timeline 行**，非 C9 另写的行。
+            if (hasAcceptNote || hasAcceptAttachment || type === 'config') {
               const acceptPayloadObj = {};
               if (hasAcceptNote) acceptPayloadObj.note = acceptNoteTrim;
               if (hasAcceptAttachment) acceptPayloadObj.attachment_ids = acceptAttachmentIds;
+              if (type === 'config') acceptPayloadObj.online_mode = configOnlineMode;
               timelinePayloadJson = JSON.stringify(acceptPayloadObj);
             }
             // summary（决策记录 J7）：仅当 C9 直翻分支未写（summary 仍为上方初始值 null）时才由说明/附件
@@ -6775,7 +6878,7 @@ module.exports = (deps) => {
   //   改在两模块交界的本端点就地合并（同 bizSystems 消费口径：前端一律通过 GET meta 一次性拿全部字典，
   //   不看常量物理定义在哪个文件）。
   router.get('/sys-issues/meta', authenticateToken, requireSysSchemaReady, (req, res) => {
-    res.json({ ...T.buildMeta(), sources: SYS_SOURCES });
+    res.json({ ...T.buildMeta(), sources: SYS_SOURCES, execModes: SYS_EXEC_MODES });
   });
 
   // ── GET /sys-issues/intake-liaisons：对接人下拉候选（建单优化批 C1 §3 改动点5）──────────
@@ -7221,6 +7324,7 @@ module.exports = (deps) => {
       let devAssignees, primaryRow, targetStatus;
       let assignEtaOverdue = null;   // [组A·2.3] 提到外层——事务内写，post-commit notify/响应体两处都要读
       let assignNotifyReason = false;   // [组 C·SC1·§3C.7] 超容差理由写入/变化时通知建单人
+      let assignIssueType = null, assignExecMode = null, assignVendorName = null;   // [S1a] 提到外层——响应体读
       try {
         const row = await dbGetAsync('SELECT id, type, status, oa_number, oa_exempt, intake_liaison_id, reopen_count, return_count, dev_estimated_at, deadline, eta_overrun_reason_code, eta_overrun_reason_note FROM sys_issues WHERE id = ?', [id]);
         if (!row) { await sysRollback(); return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' }); }
@@ -7233,6 +7337,42 @@ module.exports = (deps) => {
         if (!(await isBoundLiaisonEligibleOrAdmin(actor, row))) {
           await sysRollback();
           return res.status(403).json({ error: '仅管理员或该单对接人可执行此操作', code: 'NOT_BOUND_LIAISON' });
+        }
+        // [S1a·config 流激活 方案 v1.0 §3/§4·D1/D13] exec_mode/vendor_name 契约：config 首次指派必带
+        //   exec_mode（非法/缺省 400）；vendor 时 vendor_name 必填 trim 1..100，否则清空；非 config
+        //   携带任一字段 → 400 EXEC_MODE_NOT_APPLICABLE（字段存在即校验，不静默忽略）。
+        // [S1a 补丁 V·V2·codex 505-A M2] 「携带」判据按分支拆两套：非 config 分支只看**键是否存在**
+        //   （`assignHasExecModeKey`/`assignHasVendorNameKey`，不看值）——`exec_mode: null` 这种显式传空
+        //   值也应被视为"携带了该字段"而拒绝，不能因为 `!= null` 短路而静默放行；config 分支仍看
+        //   **是否有非 null 值**（`assignHasExecModeField`/`assignHasVendorNameField`）——null 在 config
+        //   语境下等价于「未提供」，走 EXEC_MODE_REQUIRED 缺省分支，语义不变。
+        assignIssueType = row.type;   // 提到外层的变量赋值（响应体读，非重新声明）
+        const assignHasExecModeKey = Object.prototype.hasOwnProperty.call(req.body || {}, 'exec_mode');
+        const assignHasVendorNameKey = Object.prototype.hasOwnProperty.call(req.body || {}, 'vendor_name');
+        const assignHasExecModeField = assignHasExecModeKey && (req.body || {}).exec_mode != null;
+        const assignHasVendorNameField = assignHasVendorNameKey && (req.body || {}).vendor_name != null;
+        if (row.type === 'config') {
+          if (!assignHasExecModeField) {
+            await sysRollback();
+            return res.status(400).json({ error: '请选择执行方式', code: 'EXEC_MODE_REQUIRED' });
+          }
+          const rawExecMode = (req.body || {}).exec_mode;
+          if (!SYS_EXEC_MODES.includes(rawExecMode)) {
+            await sysRollback();
+            return res.status(400).json({ error: `非法的执行方式：${rawExecMode}`, code: 'INVALID_EXEC_MODE' });
+          }
+          assignExecMode = rawExecMode;
+          if (assignExecMode === 'vendor') {
+            const rawVendorName = (typeof (req.body || {}).vendor_name === 'string' ? (req.body || {}).vendor_name.trim() : '');
+            if (!rawVendorName || rawVendorName.length > 100) {
+              await sysRollback();
+              return res.status(400).json({ error: '请填写乙方名称（1-100 字）', code: 'VENDOR_NAME_REQUIRED' });
+            }
+            assignVendorName = rawVendorName;
+          }   // 非 vendor：assignVendorName 恒清空（保持初值 null）
+        } else if (assignHasExecModeKey || assignHasVendorNameKey) {
+          await sysRollback();
+          return res.status(400).json({ error: `「${row.type}」类型不支持执行方式设置`, code: 'EXEC_MODE_NOT_APPLICABLE' });
         }
         // [组A·2.3 超时指派] 既有 ETA 已过期（非空∧≤now）→ 强制指派操作者重填新值，不填不能提交；
         //   §3C.3 组C接管点——本写点将来由组 C 接管容差/理由，此处保持局部清晰。
@@ -7395,9 +7535,12 @@ module.exports = (deps) => {
         const etaSetParams = assignEtaOverdue
           ? [assignEtaOverdue.newEta, assignEtaReasonResult.reasonCode, assignEtaReasonResult.reasonNote]
           : [];
+        // [S1a·config 流激活] exec_mode/vendor_name 与状态流转同一 UPDATE 原子落库（config 专属，D1/D13）。
+        const execSetFrag = row.type === 'config' ? ', exec_mode = ?, vendor_name = ?' : '';
+        const execSetParams = row.type === 'config' ? [assignExecMode, assignVendorName] : [];
         const upd = await dbRunAsync(
-          `UPDATE sys_issues SET status = ?, updated_at = datetime('now','localtime'), gate_deferred_at = NULL${etaSetFrag} WHERE id = ? AND status = ?`,
-          [targetStatus, ...etaSetParams, id, row.status]
+          `UPDATE sys_issues SET status = ?, updated_at = datetime('now','localtime'), gate_deferred_at = NULL${etaSetFrag}${execSetFrag} WHERE id = ? AND status = ?`,
+          [targetStatus, ...etaSetParams, ...execSetParams, id, row.status]
         );
         if (!upd || upd.changes !== 1) {
           throw new SysTransitionError(409, 'GATE_INVARIANT', '迭代单状态已变更，请刷新重试');
@@ -7436,7 +7579,11 @@ module.exports = (deps) => {
           // [组 C·SC3·修复 a] timeline 携带理由——三态文案共用同一条追加（同段落，不逐分支重复判定）。
           assignEtaSummaryPart += buildEtaOverrunReasonSummarySuffix(assignEtaReasonResult, row.eta_overrun_reason_code || null);
         }
-        const assignSummary = `指派给 ${devName}` + (Number(row.oa_exempt) === 1 ? '（免 OA 单）' : '') + assignEtaSummaryPart;
+        // [S1a·config 流激活] 执行方式留痕并入 assign timeline 行摘要（不新开 INSERT 站点，同 ETA/免 OA 折叠范式）。
+        const assignExecSummaryPart = row.type === 'config'
+          ? `｜执行方式：${assignExecMode}` + (assignExecMode === 'vendor' ? `（乙方：${assignVendorName}）` : '')
+          : '';
+        const assignSummary = `指派给 ${devName}` + (Number(row.oa_exempt) === 1 ? '（免 OA 单）' : '') + assignEtaSummaryPart + assignExecSummaryPart;
         await dbRunAsync(
           `INSERT INTO sys_issue_timeline (issue_id, event_type, from_status, to_status, summary, operator_id, operator_name)
            VALUES (?, 'assign', ?, ?, ?, ?, ?)`,
@@ -7475,6 +7622,8 @@ module.exports = (deps) => {
           source: assignEtaOverdue.overdue ? 'overdue' : 'voluntary',
           dev_estimated_at: assignEtaOverdue.newEta,
         } } : {}),
+        // [S1a·config 流激活] 响应体带执行方式（仅 config 有值，其余类型不返该键，前端零改动）。
+        ...(assignIssueType === 'config' ? { exec_mode: assignExecMode, vendor_name: assignVendorName } : {}),
       });
     } catch (err) { sendSysTransitionError(res, err); }
   });
@@ -7502,10 +7651,12 @@ module.exports = (deps) => {
     let repChanged = false, newRepUserId = null;
     let reassignEtaOverdue = null;   // [组A·2.3] 提到外层——事务内写，post-commit notify/响应体两处都要读
     let reassignNotifyReason = false;   // [组 C·SC1·§3C.7] 超容差理由写入/变化时通知建单人
+    let reassignIssueType = null, reassignExecMode = null, reassignVendorName = null;   // [S1a] 提到外层——响应体读
+    let reassignExecOrVendorChanged = false;   // [S1a·J18] 供响应体标注本次是否写了执行方式/乙方名称
     try {
       await sysBeginImmediate();
       try {
-        const row = await dbGetAsync('SELECT id, type, status, assigned_to, intake_liaison_id, reopen_count, return_count, dev_estimated_at, deadline, eta_overrun_reason_code, eta_overrun_reason_note FROM sys_issues WHERE id = ?', [id]);
+        const row = await dbGetAsync('SELECT id, type, status, assigned_to, intake_liaison_id, reopen_count, return_count, dev_estimated_at, deadline, eta_overrun_reason_code, eta_overrun_reason_note, exec_mode, vendor_name FROM sys_issues WHERE id = ?', [id]);
         if (!row) { await sysRollback(); return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' }); }
         rowStatusAtStart = row.status;
         const prevAssignedTo = (row.assigned_to !== null && row.assigned_to !== undefined) ? Number(row.assigned_to) : null;
@@ -7530,6 +7681,65 @@ module.exports = (deps) => {
         assertRosterNotFrozen(row.type, row.status);   // S2·§4.5：暂缓期改派冻结（bug-only）
         assertMemberActionFamilyAllowed('reassign', row.type, row.status);
         const family = SF.familyOfStatus(row.type, row.status);
+        reassignIssueType = row.type;   // 提到外层的变量赋值（响应体读，非重新声明）
+
+        // [S1a·config 流激活 方案 v1.0 §3/§4·D13/J18] reassign 可附带 exec_mode/vendor_name 变更——
+        //   config 专属，不带则保留现值；归一化=trim + 非 vendor 时恒清空；非 config 携带任一字段 → 400。
+        // [S1a 补丁 V·V2·codex 505-A M2] 「携带」判据按分支拆两套（同 assign 端点同款拆分）：非 config
+        //   分支只看**键是否存在**（`reassignHasExecModeKey`/`reassignHasVendorNameKey`），`exec_mode:
+        //   null` 显式传空值也应被视为"携带"而拒绝；config 分支仍看**是否有非 null 值**
+        //   （`reassignHasExecModeField`/`reassignHasVendorNameField`）——null 视为未携带、保留现值，
+        //   语义不变（真正的"vendor 终态但名称为空"由 V1 的终态校验兜底，不靠这里的携带判据）。
+        reassignExecMode = row.exec_mode;      // 默认保留现值
+        reassignVendorName = row.vendor_name;  // 默认保留现值
+        let reassignExecModeChanged = false, reassignVendorNameChanged = false;
+        const reassignHasExecModeKey = Object.prototype.hasOwnProperty.call(req.body || {}, 'exec_mode');
+        const reassignHasVendorNameKey = Object.prototype.hasOwnProperty.call(req.body || {}, 'vendor_name');
+        const reassignHasExecModeField = reassignHasExecModeKey && (req.body || {}).exec_mode != null;
+        const reassignHasVendorNameField = reassignHasVendorNameKey && (req.body || {}).vendor_name != null;
+        if (row.type === 'config') {
+          if (reassignHasExecModeField) {
+            const rawExecMode = (req.body || {}).exec_mode;
+            if (!SYS_EXEC_MODES.includes(rawExecMode)) {
+              await sysRollback();
+              return res.status(400).json({ error: `非法的执行方式：${rawExecMode}`, code: 'INVALID_EXEC_MODE' });
+            }
+            reassignExecMode = rawExecMode;
+          }
+          if (reassignExecMode === 'vendor') {
+            if (reassignHasVendorNameField) {
+              const rawVendorName = (typeof (req.body || {}).vendor_name === 'string' ? (req.body || {}).vendor_name.trim() : '');
+              if (!rawVendorName || rawVendorName.length > 100) {
+                await sysRollback();
+                return res.status(400).json({ error: '请填写乙方名称（1-100 字）', code: 'VENDOR_NAME_REQUIRED' });
+              }
+              reassignVendorName = rawVendorName;
+            }   // 未传 vendor_name：沿用现值（保留现有乙方名称，允许"只改方式不改名称"）
+          } else {
+            reassignVendorName = null;   // 非 vendor：恒清空
+          }
+          reassignExecModeChanged = (row.exec_mode || null) !== (reassignExecMode || null);
+          const normalizedOldVendor = (row.vendor_name || '').trim();
+          const normalizedNewVendor = (reassignVendorName || '').trim();
+          reassignVendorNameChanged = normalizedOldVendor !== normalizedNewVendor;
+          // [S1a 补丁 V·V1·codex 505-A H1] 终态校验（归一化完成后、任何写之前）：非 vendor→vendor 切换
+          //   不带 vendor_name 时，上方"未传则沿用现值"沿用的是切换前的旧值——旧值在非 vendor 态下恒为
+          //   NULL（:7696 非 vendor 恒清空），会落成 exec_mode='vendor' ∧ vendor_name=NULL 的无名 vendor
+          //   脏态。改按**终态**校验（不看"是否传了这个字段"，只看"归一化后 exec_mode 最终是不是
+          //   vendor 且 vendor_name 最终是否非空"）——沿用既有 VENDOR_NAME_REQUIRED 码与文案，「只改名称
+          //   不改方式」「vendor→vendor 不传名称沿用现值」两条既有语义不受影响（两者归一化后 vendor_name
+          //   本就非空）。
+          if (reassignExecMode === 'vendor' && !(reassignVendorName || '').trim()) {
+            await sysRollback();
+            return res.status(400).json({ error: '请填写乙方名称（1-100 字）', code: 'VENDOR_NAME_REQUIRED' });
+          }
+        } else if (reassignHasExecModeKey || reassignHasVendorNameKey) {
+          await sysRollback();
+          return res.status(400).json({ error: `「${row.type}」类型不支持执行方式设置`, code: 'EXEC_MODE_NOT_APPLICABLE' });
+        }
+        // execOnlyChange：仅方式/名称变化（成员集合本身无差量）——J18 判据 = 三者非全不变即成立，
+        //   下方 no-op 判定/成员增删/代表选举/成员门重算/成员变化通知均据此分流。
+        reassignExecOrVendorChanged = reassignExecModeChanged || reassignVendorNameChanged;
 
         const currentRows = await dbAllAsync(`SELECT id, user_id FROM sys_issue_dev_assignees WHERE issue_id = ? AND removed_at IS NULL`, [id]);
         const currentIds = currentRows.map(r => Number(r.user_id));
@@ -7572,9 +7782,16 @@ module.exports = (deps) => {
           }
         }
 
-        if (toAdd.length === 0 && toRemove.length === 0) {
+        // [S1a·J18] execOnlyChange：成员集合无差量但 config 的 exec_mode/vendor_name 确有变化——
+        //   不算 no-op，跳过下方成员增删/代表选举/成员门重算/成员变化通知（见本函数下方对应分支）。
+        const execOnlyChange = row.type === 'config' && toAdd.length === 0 && toRemove.length === 0 && reassignExecOrVendorChanged;
+        if (toAdd.length === 0 && toRemove.length === 0 && !execOnlyChange) {
           await sysRollback();
-          return res.status(400).json({ error: '开发集合无变更，无需改派', code: 'VALIDATION' });
+          // config 的 no-op 判据=成员集合∧exec_mode∧归一化 vendor_name 三者全不变（409）；其他类型不变（400 VALIDATION）。
+          return res.status(row.type === 'config' ? 409 : 400).json({
+            error: row.type === 'config' ? '开发集合与执行方式均无变更，无需改派' : '开发集合无变更，无需改派',
+            code: 'VALIDATION',
+          });
         }
         if ((family === 'DEV' || family === 'VERIFY') && targetIds.length === 0) {
           await sysRollback();
@@ -7711,6 +7928,29 @@ module.exports = (deps) => {
             [id, reassignEtaSummary, Number(actor.id) || null, actor.name || null]
           );
         }
+        // [S1a·config 流激活 D13/J18] exec_mode/vendor_name 变更落库 + 时间线留痕（同事务，仅 config 且确有
+        //   变化时写；成员集合是否同时变化不影响本段——两种情形都要落这两列 + 一条 note）。
+        if (row.type === 'config' && reassignExecOrVendorChanged) {
+          const execUpd = await dbRunAsync(
+            `UPDATE sys_issues SET exec_mode = ?, vendor_name = ?, updated_at = datetime('now','localtime') WHERE id = ?`,
+            [reassignExecMode, reassignVendorName, id]
+          );
+          if (!execUpd || execUpd.changes !== 1) {
+            throw new SysTransitionError(409, 'GATE_INVARIANT', 'reassign 执行方式写入失败（单据可能已被并发修改）');
+          }
+          const execPayload = {
+            exec_mode_from: row.exec_mode || null, exec_mode_to: reassignExecMode || null,
+            vendor_name_from: row.vendor_name || null, vendor_name_to: reassignVendorName || null,
+          };
+          const execSummaryParts = [];
+          if ((row.exec_mode || null) !== (reassignExecMode || null)) execSummaryParts.push(`执行方式：${row.exec_mode || '（未设置）'} → ${reassignExecMode}`);
+          if ((row.vendor_name || '') !== (reassignVendorName || '')) execSummaryParts.push(`乙方名称：${row.vendor_name || '（无）'} → ${reassignVendorName || '（无）'}`);
+          await dbRunAsync(
+            `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, payload_json, operator_id, operator_name)
+             VALUES (?, 'note', ?, ?, ?, ?)`,
+            [id, execSummaryParts.join('｜'), JSON.stringify(execPayload), actor.id, actor.name]
+          );
+        }
         // 先插新（§3：与 supersede-excuse 顺序相反）——始终 INSERT 新行，不复活旧软删行（§4.4 同一原则）。
         for (const uid of toAdd) {
           const user = await dbGetAsync('SELECT id, display_name, username, role FROM users WHERE id = ?', [uid]);
@@ -7751,12 +7991,16 @@ module.exports = (deps) => {
             `reassign 差量应用后在册集合与目标集合不一致：目标=${JSON.stringify([...targetSetFinal])} 实际=${JSON.stringify([...postDiffSet])}`);
         }
 
-        await electRepresentative(id);
-        const afterRow = await dbGetAsync('SELECT assigned_to FROM sys_issues WHERE id = ?', [id]);
-        newRepUserId = (afterRow && afterRow.assigned_to !== null && afterRow.assigned_to !== undefined) ? Number(afterRow.assigned_to) : null;
-        repChanged = prevAssignedTo !== newRepUserId;
+        // [S1a·J18] execOnlyChange（仅方式/名称变化，成员集合本身无差量）：跳过代表选举/成员门重算——
+        //   J18 明文"跳过成员增删/代表选举/成员门重算/成员变化通知"，repChanged 保持初值 false（不通知）。
+        if (!execOnlyChange) {
+          await electRepresentative(id);
+          const afterRow = await dbGetAsync('SELECT assigned_to FROM sys_issues WHERE id = ?', [id]);
+          newRepUserId = (afterRow && afterRow.assigned_to !== null && afterRow.assigned_to !== undefined) ? Number(afterRow.assigned_to) : null;
+          repChanged = prevAssignedTo !== newRepUserId;
 
-        gateResult = await runWGate(id, row.type, row.status, actor);   // 一次 W-GATE（差量已全部落地）
+          gateResult = await runWGate(id, row.type, row.status, actor);   // 一次 W-GATE（差量已全部落地）
+        }
         await sysCommit();
       } catch (txErr) {
         try { await sysRollback(); } catch (_) { /* ignore */ }
@@ -7792,6 +8036,8 @@ module.exports = (deps) => {
           source: reassignEtaOverdue.overdue ? 'overdue' : 'voluntary',
           dev_estimated_at: reassignEtaOverdue.newEta,
         } } : {}),
+        // [S1a·config 流激活] 响应体带执行方式现值（仅 config 有值，其余类型不返该键）。
+        ...(reassignIssueType === 'config' ? { exec_mode: reassignExecMode, vendor_name: reassignVendorName } : {}),
       });
     } catch (err) {
       sendSysTransitionError(res, err);
@@ -9791,15 +10037,25 @@ module.exports = (deps) => {
     if (b.mode === 'no_code') {
       if (b.no_code_reason === null) return { ok: false, message: 'no_code_reason 不能为 null' };
       const reason = (typeof b.no_code_reason === 'string' ? b.no_code_reason.trim() : '');
-      if (!reason || reason.length > 500) return { ok: false, message: 'no_code_reason 必填（trim 长度 1..500）' };
+      // [S1a·config 流激活 J17] 事务前（本函数不知道真实 type）只做公共上限：trim 非空 + ≤500 **码点**
+      //   （`[...s].length`，非 UTF-16 code unit）——事务内取真实类型后再分层收紧：config 加 10 码点
+      //   下限；其他类型仍按原 500 码元上限复核（见 submit 端点内实现），本处上限口径从"码元"改"码点"
+      //   是为放行 config 侧潜在的高码点补充平面字符样本，不影响既有三类型的正常输入。
+      if (!reason || [...reason].length > 500) return { ok: false, message: 'no_code_reason 必填（trim 长度 1..500）' };
+      // [S1a 补丁 V·V3·codex 505-A M3] 事务外（本函数不知道真实 type）只做 commits 的**形状**校验
+      //   （必须是数组），**不再**在此拒绝"非空"——把"no_code 且携带非空 commits"记成标志
+      //   `noCodeHasNonEmptyCommits`，真正的拒绝下沉到事务内、取真实 type 并过 assertDevMember（权限
+      //   判定）之后：config → 400 CONFIG_NO_COMMITS（与 commits 模式下的既有码统一）；非 config →
+      //   400 VALIDATION，文案逐字沿用本处原句「no_code 模式不应携带非空 commits」。
+      let noCodeHasNonEmptyCommits = false;
       if (b.commits !== undefined && b.commits !== null) {
         if (!Array.isArray(b.commits)) return { ok: false, message: 'commits 须为数组' };
-        if (b.commits.length > 0) return { ok: false, message: 'no_code 模式不应携带非空 commits' };
+        if (b.commits.length > 0) noCodeHasNonEmptyCommits = true;
       }
       // [codex 272 号 L-3·273 号 M 修正] 把双勾的**请求体原始值**随 parsed 带出（camelCase，同 noCodeReason
       // 风格）——不硬编码 true：写前不变量断言的是"请求里真的传了 true"这个现实，硬编码会让断言恒真、
       // 未来校验被误放宽时照样把假 true 写进审计（273 号抓的恒真断言变体）。
-      return { ok: true, mode: 'no_code', noCodeReason: reason, commits: [], fixGapNote, workNote, bugCauseNote, selfTested: b[SUBMIT_SELF_TESTED_KEY], testEnvDeployed: b[SUBMIT_TEST_ENV_DEPLOYED_KEY] };
+      return { ok: true, mode: 'no_code', noCodeReason: reason, commits: [], noCodeHasNonEmptyCommits, fixGapNote, workNote, bugCauseNote, selfTested: b[SUBMIT_SELF_TESTED_KEY], testEnvDeployed: b[SUBMIT_TEST_ENV_DEPLOYED_KEY] };
     }
 
     // mode === 'commits'
@@ -9855,10 +10111,42 @@ module.exports = (deps) => {
         assertKnownIssueStatus(row.type, row.status);
         memberRow = await assertDevMember(id, actor.id);
 
+        // [S1a 补丁 X·X2·codex 506-A M3] 畸形体优先级前移——no_code 携带非空 commits 是"请求体本身不
+        //   合法"，须排在状态合法性 409 之前判定（同非 config 三流改前既有优先级：畸形体 400 先于状态
+        //   409）；且必须排在上面 assertDevMember（权限）之后，不得抢在权限判定之前（防止未授权者靠
+        //   错误码差异探知请求体是否合法，同本模块一贯的"权限先于业务"排序哲学）。原判定曾分裂成两处
+        //   （config 分支内一处、非 config else-if 一处，见补丁 V·V3），本批合并成单一前置判定，避免
+        //   双写/漂移。
+        if (parsed.noCodeHasNonEmptyCommits) {
+          await sysRollback();
+          if (row.type === 'config') return res.status(400).json({ error: '配置变更提交不接受代码提交记录', code: 'CONFIG_NO_COMMITS' });
+          return res.status(400).json({ error: 'no_code 模式不应携带非空 commits', code: 'VALIDATION' });
+        }
+
         // §6.2 步骤2：断言主状态∈SYS_DEV（按 issue_type）——body 已在路由层前置校验
         if (!SF.isInFamily(row.type, row.status, 'DEV')) {
           await sysRollback();
           return res.status(409).json({ error: `当前状态「${row.status}」不可提交`, code: 'INVALID_STATUS' });
+        }
+
+        // [S1a·config 流激活 方案 v1.0 §3·D12/J17] config 在事务内取真实类型后强制 mode='no_code'
+        //   （带 commits → 400 CONFIG_NO_COMMITS）；no_code_reason 长度分层收紧：config 加 10 码点下限，
+        //   其他类型仍按原 500 码元上限复核（validateSubmitBody 事务前已改按码点判 ≤500 公共上限，
+        //   此处对非 config 类型按码元二次收紧，沿用原 400/VALIDATION 文案，行为与改前逐字相同）。
+        //   [S1a 补丁 X·X2] noCodeHasNonEmptyCommits 判定已上移至 assertDevMember 之后、INVALID_STATUS
+        //   之前（本处不再重复判定，避免双写）。
+        if (row.type === 'config') {
+          if (parsed.mode !== 'no_code') {
+            await sysRollback();
+            return res.status(400).json({ error: '配置变更提交不接受代码提交记录', code: 'CONFIG_NO_COMMITS' });
+          }
+          if ([...parsed.noCodeReason].length < 10) {
+            await sysRollback();
+            return res.status(400).json({ error: '配置说明需 10..500 字', code: 'VALIDATION' });
+          }
+        } else if (parsed.mode === 'no_code' && parsed.noCodeReason.length > 500) {
+          await sysRollback();
+          return res.status(400).json({ error: 'no_code_reason 必填（trim 长度 1..500）', code: 'VALIDATION' });
         }
 
         // [组B·S2-2·拆直上分支] direct_release=true 前置闸（type='bug' ∧ status='处理中' ∧ 活跃授权谓词
@@ -10294,6 +10582,11 @@ module.exports = (deps) => {
         // 守卫①：actor 当前在册（COMMIT_SCOPE，非默认 NOT_ROSTERED——契约裁定点①）；同时取得 POST 所需的
         //   "actor 当前在册实例"（守卫④复用，无需重复查询）。
         const activeRow = await assertDevMember(id, actor.id, { code: 'COMMIT_SCOPE', message: '仅当前在册开发可提交 commit 行' });
+        // [S1a 补丁 T·T4] config 单强制 no_code 提交，commit 三写入口一并拒绝（纵深防线，正常路径下 config
+        //   单 dev_status 恒不落 code_submitted 结构性不可达，同 submit 端点 CONFIG_NO_COMMITS 口径）。移到
+        //   守卫①（assertDevMember/权限判定）之后——权限 403 先于业务 400，与 submit 端点既有排序哲学同形，
+        //   防止非在册用户靠错误码差异（400 vs 403）探知"这单是 config 类型"。
+        if (row.type === 'config') { await sysRollback(); return res.status(400).json({ error: '配置变更不支持代码提交记录', code: 'CONFIG_NO_COMMITS' }); }
         // 守卫③：主状态∈(SYS_DEV∪SYS_VERIFY)
         assertMemberActionFamilyAllowed('commit', row.type, row.status);
         // 守卫④（POST 专属）：只挂 actor 当前在册实例且该实例 dev_status='code_submitted'（契约裁定点②：400 INVALID_STATUS）
@@ -10358,6 +10651,9 @@ module.exports = (deps) => {
         // 守卫①：actor 当前在册（COMMIT_SCOPE）——只判"是否在册"，不要求目标行属于本次查到的这一实例
         // （守卫②另判目标行归属，允许本人在册时编辑名下所有行含已 removed 旧实例行，§6.3②）。
         await assertDevMember(id, actor.id, { code: 'COMMIT_SCOPE', message: '仅当前在册开发可编辑 commit 行' });
+        // [S1a 补丁 T·T4] config 单强制 no_code 提交，commit 三写入口一并拒绝（纵深防线）。移到守卫①
+        //   （assertDevMember）之后——权限 403 先于业务 400，同 POST 端点排序哲学。
+        if (row.type === 'config') { await sysRollback(); return res.status(400).json({ error: '配置变更不支持代码提交记录', code: 'CONFIG_NO_COMMITS' }); }
 
         // 守卫②：目标行 dev_user_id=actor.id ∧ issue_id=路由 issue_id；不存在/跨 issue/非本人 → 403 COMMIT_SCOPE（S38③）
         const target = await dbGetAsync(
@@ -10439,6 +10735,9 @@ module.exports = (deps) => {
 
         // 守卫①
         await assertDevMember(id, actor.id, { code: 'COMMIT_SCOPE', message: '仅当前在册开发可删除 commit 行' });
+        // [S1a 补丁 T·T4] config 单强制 no_code 提交，commit 三写入口一并拒绝（纵深防线）。移到守卫①
+        //   （assertDevMember）之后——权限 403 先于业务 400，同 POST/PUT 端点排序哲学。
+        if (row.type === 'config') { await sysRollback(); return res.status(400).json({ error: '配置变更不支持代码提交记录', code: 'CONFIG_NO_COMMITS' }); }
 
         // 守卫②
         const target = await dbGetAsync(
@@ -11491,6 +11790,13 @@ module.exports = (deps) => {
     //   bug 直接 return（bug 从不校验该守卫），暂缓期补号对 bug 没有实际用途。数组值本身不动——这是
     //   §4.4 的负向断言之一，若未来有人把「已暂缓」加进本集合，需先回看方案 §4.4 确认口径未变。
     bug: ['待处理', '处理中', '待验证', '待上线', '已上线'],
+    // 2026-09-07 S1a 主会话 J 判断：config OA 流入·集合=improvement 替换状态名——config 单来源本就是
+    //   OA 流入（方案 v1.6 §18.1），OA 号应可设，按"improvement 流复制 + 状态名替换"原则登记：
+    //   improvement 集合 ['待指派','开发中',...] 把 待指派→待处理、开发中→处理中，其余四态（待验证/
+    //   待上线/已上线/已暂缓）逐字保留。与 bug 的"结构性不进 OA 守卫"不同——config 走 assertSysDevCommitmentOaGuard
+    //   时该守卫仅豁免 feature/improvement 之外的类型的**必填**校验（config 不强制要求指派前必须有号），
+    //   但不等于"config 不能设号"：本集合管的是 set-oa-number 端点的**可填窗口**，两件事正交。
+    config: ['待处理', '处理中', '待验证', '待上线', '已上线', '已暂缓'],
   };
   router.post('/sys-issues/:id/set-oa-number', authenticateToken, requireSysSchemaReady, requireAdmin, async (req, res) => {
     const id = parsePositiveId(req.params.id);
@@ -11700,7 +12006,10 @@ module.exports = (deps) => {
         const isCreator = Number(row.created_by) === Number(actor.id) && Number(actor.id) > 0;
         if (!(isAdmin || isCreator)) { await sysRollback(); return res.status(403).json({ error: '仅建单人或管理员可编辑', code: 'NOT_AUTHORIZED_FOR_EDIT' }); }
         // 两档判定（§6.1·M-1 按流分档）：以事务内刚读到的真实 status/type 为准，不在事务外预计算
-        //   （§6.2 并发终闸前提）。assertKnownIssueStatus 已保证 row.type ∈ {feature,improvement,bug}。
+        //   （§6.2 并发终闸前提）。assertKnownIssueStatus 已保证 row.type ∈ {feature,improvement,bug,config}——
+        //   [S1a] config 的 edit_in_revision 窗口态与 bug 同形（待受理/待修改/待处理/处理中，见
+        //   CONFIG_FLOW_TRANSITIONS 该条目），故 isChangeFlowRow=false 分支（沿用 BUG 档位数组）
+        //   对 config 天然正确，无需新增第三分支。
         const isChangeFlowRow = (row.type === 'feature' || row.type === 'improvement');
         const rowTierAStatuses = isChangeFlowRow ? EDIT_TIER_A_CHANGE : EDIT_TIER_A_BUG;
         const rowTierBStatuses = isChangeFlowRow ? EDIT_TIER_B_CHANGE : EDIT_TIER_B_BUG;
@@ -13563,10 +13872,14 @@ module.exports = (deps) => {
       // ⭐⭐ S2（bug暂缓方案 §4.2·实现错回填）：本常量此前只列变更流活跃态——写这行时 bug 还没有 hold/resume
       //   （S1 才新增，见 transitions.js bug hold/resume 条目）。bug 的 hold.from 只有 ['处理中']，即 bug
       //   resume 唯一可能的暂缓前态恒为「处理中」，若不加入本表，resume 会在事务内被下方 `!ACTIVE_STATES.includes(target)`
-      //   拦截，抛 409 RESUME_TARGET_INVALID——**bug hold→resume 全流程此前从未真正跑通过**（S1 只做常量层，
-      //   未做集成测试；S2 集成测试[死锁反证用例]首次实测到本缺口）。下方紧跟 `T.ALLOWED_STATUSES[row.type].includes(target)`
+      //   拦截，抛 409 RESUME_TARGET_INVALID——**bug hold→resume 全流程此前从未真正跑通过**（S1 才新增见 transitions.js bug hold/resume 条目）。下方紧跟 `T.ALLOWED_STATUSES[row.type].includes(target)`
       //   仍按 type 精确二次校验，加入「处理中」不会让 feature/improvement 误通过（其 ALLOWED_STATUSES 不含处理中）。
-      const ACTIVE_STATES = ['待指派', '开发中', '待验证', '待上线', '处理中'];   // 变更流 + bug 活跃态并集（已上线/已关闭=终态，旁路态/INTAKE 不在内）
+      // [S1a·config 流激活] 同理补「待处理」——config 的 hold.from 含 D_PRE 态「待处理」（同 feature/improvement
+      //   的 hold.from 含「待指派」，与 bug 收窄到仅 ['处理中'] 不同），config 可从「待处理」暂缓，resume 必须
+      //   能把它认作合法活跃态才能恢复回去（本次实测踩到——首跑即撞 RESUME_TARGET_INVALID，同 bug 当年 S1→S2
+      //   同一模式的坑）。二次校验（ALLOWED_STATUSES[row.type]）同样兜底：'待处理' 对 bug 也在其 ALLOWED_STATUSES
+      //   内，但 bug 的 hold.from 结构上不含'待处理'，故 target 永远不会是它，加入本表对 bug 零副作用。
+      const ACTIVE_STATES = ['待指派', '开发中', '待验证', '待上线', '处理中', '待处理'];   // 变更流 + bug + config 活跃态并集（已上线/已关闭=终态，旁路态/INTAKE 不在内）
       // [codex C3 对抗审 HIGH-A 回填] resume 降级回 DEV 族——暂缓窗口内成员换血/移除完成态成员后，若仍机械
       //   恢复到暂缓前的 VERIFY/RELEASE 态，会被 [2b] 的进族门禁（enteringVerify/enteringRelease 要求
       //   在册≥1∧全完成）永久拒绝，且 resume 目标由 timeline 历史确定性推导、无法绕过（return/reopen/derive
@@ -13593,7 +13906,15 @@ module.exports = (deps) => {
         //   生产 sys 空表·当前无历史 hold·此为防御性闭合（zero-risk·映射后仍过下方 ACTIVE_STATES 校验）。
         if (target === '待评估' || target === '已排期') target = '待指派';
         // 校验 target 是当前 type 的合法【活跃态】（非终态/旁路态；防注入非法态）
-        if (!ACTIVE_STATES.includes(target) || !(T.ALLOWED_STATUSES[row.type] || []).includes(target)) {
+        // [S1a 补丁 V·V4·codex 505-A L1] 补第三道：target 须属于**该 type 自己 hold 条目的 from 集合**
+        //   （非仅"活跃态并集 + ALLOWED_STATUSES 通用集"）——bug 的 hold.from 恰为 ['处理中']（口径 #5，
+        //   不照抄变更流四态），若 timeline 脏数据把 bug 某次 hold 行的 from_status 写成"待处理"（bug
+        //   从未允许从待处理 hold），前两道判断仍会放行（'待处理' ∈ ACTIVE_STATES ∧ ∈
+        //   ALLOWED_STATUSES.bug），resume 会把单据恢复到该类型 hold 从未允许过的态。本闸把"resume
+        //   目标必须是当初 hold 时真实可能落到的态"这条不变量钉死，与 hold 声明同源（同一份
+        //   CONFIG_FLOW_TRANSITIONS/等四流常量），非硬编码第二份清单。
+        const holdT = (T.TRANSITIONS[row.type] || []).find(t => t.action === 'hold');
+        if (!ACTIVE_STATES.includes(target) || !(T.ALLOWED_STATUSES[row.type] || []).includes(target) || !holdT || !holdT.from.includes(target)) {
           throw new SysTransitionError(409, 'RESUME_TARGET_INVALID', `暂缓前状态「${target}」非合法活跃态，不可恢复`);
         }
         const targetFamily = SF.familyOfStatus(row.type, target);
@@ -13651,10 +13972,12 @@ module.exports = (deps) => {
         if (!row) { await sysRollback(); return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' }); }
         // F2a §4.4：feature/improvement 全禁范围变更（评估环节"禁开发态调需求"，v1.7 §十九 ⑦）——
         //   双保险：transitions.js 已移除 feature/improvement 的 scope_change 动作（findTransition 返 null），此处再加显式 type 守卫给明确错误码。
-        //   config 流支持 scope_change（§18.9），追加时不受此守卫影响（仅拦 feature/improvement）。
-        //   ⚠️ ultracode 对抗审：下方端点主体（findTransition/deadline 留痕/scope_changed=1/timeline）当前无任何 type 可达
-        //     （config/bug 建单未放开 + feature/improvement 被本守卫前置拦截）——保留供 config 流复用，其内部逻辑（含 codex 15 M-3 空白 deadline 防误清）
-        //     的端到端覆盖随 config 流追加时补回（verify-sys-flow [8] 已对应改写为仅验证 409 守卫）。
+        //   [S1a 订正] 旧注释"config 流支持 scope_change（§18.9）"已作废——config流激活_方案_20260907_v1.0
+        //   §3 明确 config **不提供** scope_change（CONFIG_FLOW_TRANSITIONS 无此条目），config 不受本守卫
+        //   拦截（仅拦 feature/improvement），走到下方 findTransition 时恒查无该边 → 409 SCOPE_STATUS_INVALID
+        //   （与 bug 走同一条兜底路径，非 SCOPE_CHANGE_DISABLED）。
+        //   ⚠️ 下方端点主体（findTransition/deadline 留痕/scope_changed=1/timeline）对 bug/config 仍是
+        //   "查无此边即 409"的纯兜底路径，无端到端可达用例（config 不提供该动作，非"待追加测试"）。
         if (['feature', 'improvement'].includes(row.type)) {
           await sysRollback();
           return res.status(409).json({ error: '变更类单据不支持范围变更，请改用「派生迭代」新建单或作废重开', code: 'SCOPE_CHANGE_DISABLED' });
@@ -14426,7 +14749,10 @@ module.exports = (deps) => {
   //   但复用同一套状态校验 + timeline 写入规范（H-2）：BEGIN IMMEDIATE 拿写锁串行化 →
   //   校批次「计划中」→ 读组内 issue（≥1 且全「待上线」AND release_id=:id）→ 批量翻「已上线」校 changes →
   //   每单写 release timeline（ref_id=批次）→ 批次置「已发布」。RC-M3 事务模式统一。
-  //   config 不进批次（§6.1）：加单 type 白名单 + DB CHECK(type<>'config' OR release_id IS NULL) 双防。
+  //   [2026-09-07 S1b] config流激活_方案_20260907_v1.0 §3 起 config 走验收→上线单主流程；表级 CHECK
+  //   (type<>'config' OR release_id IS NULL) 已随受控重建移除（迁移脚本
+  //   migrate-sys-issues-drop-config-release-check.js），加单 type 白名单（RELEASABLE_TYPES）现为唯一防线
+  //   （历史上曾有 type 白名单 + DB CHECK 两道防线并存的阶段，现只剩前者）。
   // ============================================================
   const SYS_RELEASE_NOTE_MAX = 1000;    // 上线说明长度上限（§7 闸门③）
   const SYS_VERSION_TAG_MAX = 100;      // 版本号长度上限
@@ -14438,18 +14764,22 @@ module.exports = (deps) => {
   //   （§8.3 [审:L1]，add-issues 校一致禁混批）。**历史设计，现状**：_publishReleaseCoreInTxn 的校验随
   //   v1.6/C3b 退场（见其函数体内注释）、release_type 族别隔离随 C5"混批守卫拆除"整体删除（方案 §5a）、
   //   add-issues 的 needs_release=1 条件随本次双闸拆除删除（2026-07-29 主会话裁定选项 A）——三处校验现已
-  //   全部不存在，config 不进批次（§6.1）是本表仅存的原样闸门。
-  const RELEASABLE_TYPES = ['feature', 'improvement', 'bug'];
+  //   全部不存在。[S1a 订正] 原句"config 不进批次（§6.1）是本表仅存的原样闸门"已作废——
+  //   config流激活_方案_20260907_v1.0 §3 明确 config 走验收→上线单主流程（online_mode='release'），
+  //   本表现含四值。
+  const RELEASABLE_TYPES = ['feature', 'improvement', 'bug', 'config'];
 
   // ── D-A（codex H-1 + ultracode CT-1，用户 2026-07-03 拍板）：批次按「族别」隔离，非精确 type ──────────
   //   隔离的**唯一真实理由** = bug 有 needs_release（发版/不发版）语义、feature/improvement 没有；
   //   而 feature 与 improvement 共用 CHANGE_FLOW_TRANSITIONS、上线语义逐字相同，拆开零收益纯摩擦，
   //   且已上线 C4 允许 feature+improvement 同批（保住「一个版本=一个批次」）。故 release_type 存**族别**
-  //   `'bug'` / `'change'`（非精确 type）：`bug`→'bug'，`feature`/`improvement`→'change'，`config` 永不进批次。
-  //   这同时消解 codex H-2（历史 release_type=NULL 混批未 fail-closed）——历史批次（bug 流未上线前只可能含
-  //   feature/improvement）全归 'change'，不再有 NULL-mixed 哑弹。
-  const RELEASE_FAMILY_BY_TYPE = { bug: 'bug', feature: 'change', improvement: 'change' };
-  const releaseFamilyOf = (type) => RELEASE_FAMILY_BY_TYPE[type] || null;   // config/未知 → null（不可进批次）
+  //   `'bug'` / `'change'`（非精确 type）：`bug`→'bug'，`feature`/`improvement`→'change'。
+  //   [S1a·config 流激活] `config`→'change'（与 feature/improvement 同族——config 无发版/不发版语义，
+  //   与 bug 隔离的唯一理由不适用；已按方案 N0 结论核实无需求要求 config 单独族别，主会话 J 判断记锚点
+  //   §9）。这同时消解 codex H-2（历史 release_type=NULL 混批未 fail-closed）——历史批次（bug 流未上线前
+  //   只可能含 feature/improvement）全归 'change'，不再有 NULL-mixed 哑弹。
+  const RELEASE_FAMILY_BY_TYPE = { bug: 'bug', feature: 'change', improvement: 'change', config: 'change' };
+  const releaseFamilyOf = (type) => RELEASE_FAMILY_BY_TYPE[type] || null;   // [S1a] config→'change'；仅真正未知 type → null（不可进批次）
 
   // 自动批次号 R-YYYYMMDD-N（N=当天最大数字后缀 + 1）。**须在 BEGIN IMMEDIATE 事务内调用**。
   //   A（codex M-1 + ultracode CONFIRMED）：用 **MAX(数字后缀)+1**，**不用 COUNT+1**——
@@ -14649,8 +14979,10 @@ module.exports = (deps) => {
     if (members.length === 0) throw new SysTransitionError(409, 'RELEASE_EMPTY', '批次内无待上线单，不能发布');
     const bad = members.find(m => m.status !== '待上线');
     if (bad) throw new SysTransitionError(409, 'RELEASE_MEMBER_NOT_READY', `批次内 ${sysDeriveNumbering.sysIssueDisplayNo(bad)} 非「待上线」（当前「${bad.status}」），请先移除`);
-    // B（codex M-2）：core 内再校成员 type∈可发布3类，与 add-issues 入口防线一致（纵深防脏库/旧表缺 CHECK/手工修库）。
-    //   正常 schema 下 config 受 DB CHECK(type<>'config' OR release_id IS NULL) 永不可成为成员，此守卫为 schema 漂移兜底（对齐 submit 闸门"不全信单入口"哲学）。
+    // B（codex M-2）：core 内再校成员 type∈可发布4类（[S1a] 含 config），与 add-issues 入口防线一致
+    //   （纵深防脏库/旧表缺 CHECK/手工修库）。[2026-09-07 S1b] 该表级 CHECK 已随受控重建移除
+    //   （迁移脚本 migrate-sys-issues-drop-config-release-check.js），本闸（type 白名单/badType 守卫）
+    //   现为唯一防线——不再是"代码放行但 DB 层仍挡"的过渡态兜底，是真实生效中的业务闸。
     const badType = members.find(m => !RELEASABLE_TYPES.includes(m.type));
     if (badType) throw new SysTransitionError(409, 'RELEASE_MEMBER_NOT_RELEASABLE', `批次内 ${sysDeriveNumbering.sysIssueDisplayNo(badType)} 类型不可发布（${badType.type}），请先移除`);
     // [v1.6 退场·C3b] 旧 needs_release=1 纵深闸（bug 流 Commit ② 引入）已移除——needs_release 唯一写点
@@ -14668,8 +15000,8 @@ module.exports = (deps) => {
     //   "混批守卫 → 拆除"，§6.10 发布事务内校验清单里"④ 类型一致"一条也已删除；C3"全类型统一"落地后，
     //   bug/feature/improvement 可合法同批（deriveReleaseType 把 mixed 列为合法派生值本身即是佐证）。
     //   原两条检查（① 组内成员族别不可混 ② 与批次已存 release_type 不符也拒）连同 memberFamilies 变量
-    //   一并删除——badType（上方，config 排除）与 needs_release 校验（同上，v1.6 已退场）逐字不动，
-    //   本次只删族别隔离这一层，不影响其余闸门。
+    //   一并删除——badType（上方，[S1a 起] 含 config 在内四类均放行，DB CHECK 移除前仍受 S1b 迁移兜底）
+    //   与 needs_release 校验（同上，v1.6 已退场）逐字不动，本次只删族别隔离这一层，不影响其余闸门。
     const expected = members.length;
 
     // [codex 102 号 HIGH 回填] RELEASE 守卫接线——此前守卫纯函数已实现 RELEASE 的 action/actionKind 配对 +
@@ -15102,7 +15434,7 @@ module.exports = (deps) => {
 
   // ── §6.9 release_type 类型派生：从 getReleaseMembers() 的返回结果派生，不回落读当前任务表/存量
   //   release_type 列——那一列已"停止作为可写事实"（§6.9，本函数是它的读端替代）。三值：
-  //   `{category:'single', type:'bug'|'feature'|'improvement'}` / `{category:'mixed', type:null}` /
+  //   `{category:'single', type:'bug'|'feature'|'improvement'|'config'}` / `{category:'mixed', type:null}` /
   //   `{category:'unknown', type:null}`（members 为空，或 type 字段已在 unavailable_fields 中——降级且
   //   type 不可用时，此时即使 members[].type 恰好非 null 也不可信任，必须先查 unavailable_fields 短路，
   //   不能只看字段值本身是否为空来判断，方案原话"不回落读当前任务表"正是防止这种情形下悄悄信了脏值）。
@@ -15114,6 +15446,9 @@ module.exports = (deps) => {
     if (types.size === 0) return { category: 'unknown', type: null };   // 防御：unavailable_fields 未标但值仍全空
     if (types.size > 1) return { category: 'mixed', type: null };
     const only = [...types][0];
+    // [补丁 AS·codex 525 点名] 判据是 `RELEASABLE_TYPES.includes`（S1a 起含 config），**实现一直无误**；
+    //   上方文档注释的三值枚举曾漏写 `'config'`（注释是审查输入，漏写会让读者以为 config 单落 unknown），
+    //   已按本行实现订正。
     return RELEASABLE_TYPES.includes(only) ? { category: 'single', type: only } : { category: 'unknown', type: null };
   }
 
@@ -16087,15 +16422,18 @@ module.exports = (deps) => {
   });
 
   // ── POST /sys-releases/:id/add-issues：加单（admin，M-8 双 WHERE 原子全成或全败）──────────
-  //   闸门：批次「计划中」+ 每单「待上线」AND release_id IS NULL AND type∈可发布3类（防多批次抢占/config 混入）。
+  //   闸门：批次「计划中」+ 每单「待上线」AND release_id IS NULL AND type IN RELEASABLE_TYPES（[S1a 起]
+  //   四类：feature/improvement/bug/config）。[2026-09-07 S1b] 该表级 CHECK 已随受控重建移除
+  //   （迁移脚本 migrate-sys-issues-drop-config-release-check.js），本闸（type 白名单）现为唯一防线，
+  //   config 单可正常挂入批次（真实端到端验证见 verify-sys-release.js §2 / verify-sys-config-flow.js [U] 组）。
   //   [上线体统一重构] bug 双闸拆除（2026-07-29 主会话裁定选项 A，依据方案 v3.4 §5a 架构决策表「混批守卫/
   //   needs_release/release_type 可写性 → 拆除/废弃/停止」+ §5b #2「needs_release｜废弃」+ #3「上线单类型｜
-  //   完全不限（config 除外）」）：① 恒 409 的 bugIssueIds 闸门（曾把任意 bug 单挡在 add-issues 门外，见本
-  //   commit 前的历史注释）② 逐单 UPDATE 里的 `(type <> 'bug' OR needs_release = 1)` 条件（needs_release
-  //   唯一写点 set-release-flag 已随 C3 退场为 410 Gone，此条件对 bug 恒假，与①叠加后 bug 100% 无法加单，
-  //   见 needs_release 列定义处的完整只读残留说明）——两者一并拆除后，bug 与 feature/improvement 完全同源，
-  //   仅剩 type IN (${typePh}) 这一道类型闸（RELEASABLE_TYPES 排除 config，附录 A 明文负例，与本次拆闸无关，
-  //   逐字保留）。
+  //   完全不限（[S1a 前] config 除外）」）：① 恒 409 的 bugIssueIds 闸门（曾把任意 bug 单挡在 add-issues
+  //   门外，见本 commit 前的历史注释）② 逐单 UPDATE 里的 `(type <> 'bug' OR needs_release = 1)` 条件
+  //   （needs_release 唯一写点 set-release-flag 已随 C3 退场为 410 Gone，此条件对 bug 恒假，与①叠加后
+  //   bug 100% 无法加单，见 needs_release 列定义处的完整只读残留说明）——两者一并拆除后，bug 与
+  //   feature/improvement 完全同源，仅剩 type IN (${typePh}) 这一道类型闸（[S1a 起] RELEASABLE_TYPES
+  //   含 config，S1b 起该闸是 config 进批次的唯一防线，非过渡态）。
   router.post('/sys-releases/:id/add-issues', authenticateToken, requireSysSchemaReady, requireAdmin, async (req, res) => {
     const id = parsePositiveId(req.params.id);
     if (!id) return res.status(400).json({ error: '无效的批次 ID', code: 'INVALID_RELEASE_ID' });
@@ -16115,8 +16453,9 @@ module.exports = (deps) => {
         // [C5 收口批·C3 遗留补做] release_type 族别隔离（D-A：bug vs 非bug）已整体删除——方案 §5a"混批守卫→
         //   拆除"，原逻辑（本次入参族别唯一 + 与批次已定族别一致 + 批次未定族别时连读已有成员一并判定）
         //   连同其落地机制（famClause 限定 WHERE + release_type 首次落定回填）一并删除。
-        // 逐单 UPDATE：仅剩"可发布类型"一道闸（config 排除靠 type IN 子句）——bugIssueIds 恒 409 闸门 +
-        //   needs_release=1 条件已一并拆除（见上方端点头注释），bug 与 feature/improvement 完全同源。
+        // 逐单 UPDATE：仅剩"可发布类型"一道闸（[S1a 起] type IN 子句含 config；[S1b] 表级 CHECK 已移除，
+        //   本闸现为唯一防线，见上方端点头注释）——bugIssueIds 恒 409 闸门 + needs_release=1 条件已一并
+        //   拆除（见上方端点头注释），bug 与 feature/improvement 完全同源。
         for (const iid of issueIds) {
           const upd = await dbRunAsync(
             `UPDATE sys_issues SET release_id = ?, updated_at = datetime('now','localtime')
@@ -16129,7 +16468,7 @@ module.exports = (deps) => {
             //   两列缺省时天然回退 #id，行为与改造前一致，不额外分支硬编码兜底文案。
             const dnRow = await dbGetAsync('SELECT id, derive_root_id, derive_seq FROM sys_issues WHERE id = ?', [iid]);
             await sysRollback();
-            return res.status(409).json({ error: `${sysDeriveNumbering.sysIssueDisplayNo(dnRow || { id: iid })} 不可加入（须为未挂批次的「待上线」单、非配置类）`, code: 'ISSUE_NOT_ADDABLE', issue_id: iid });
+            return res.status(409).json({ error: `${sysDeriveNumbering.sysIssueDisplayNo(dnRow || { id: iid })} 不可加入（须为未挂批次的「待上线」单）`, code: 'ISSUE_NOT_ADDABLE', issue_id: iid });
           }
         }
         // C2a §6.11 原语收尾：加单成功后经 applyReleaseChange 原子重置通知/执行人 + 双写 + timeline。
@@ -17671,8 +18010,9 @@ module.exports = (deps) => {
   //   （我们自己都还没 INSERT 过一行）——"全部在册行都满足 X"这个全称命题在空集上恒真，不依赖"谁看得见
   //   谁看不见未提交数据"这类连接可见性假设（单连接场景下同连接本就能看见自己的未提交写入，原表述不
   //   成立）。显式补查这两道闸只是验证一个数学上不可能为假的条件，纯粹死代码，故不写。
-  //   **全类型统一**：RELEASABLE_TYPES（bug/feature/improvement）一视同仁，不再对 bug 特殊拒绝——上线体
-  //   统一重构 C3 的核心目标（旧 bug 专属 execute-release 通道本次一并 409 退场，见其路由处）。
+  //   **全类型统一**：RELEASABLE_TYPES（[S1a 起] feature/improvement/bug/config）一视同仁，不再对 bug
+  //   特殊拒绝——上线体统一重构 C3 的核心目标（旧 bug 专属 execute-release 通道本次一并 409 退场，见其
+  //   路由处）。
   router.post('/sys-issues/:id/hotfix-publish', authenticateToken, requireSysSchemaReady, requireAdmin, async (req, res) => {
     const issueId = parsePositiveId(req.params.id);
     if (!issueId) return res.status(400).json({ error: '无效的迭代单 ID', code: 'INVALID_SYS_ISSUE_ID' });
@@ -17757,11 +18097,12 @@ module.exports = (deps) => {
         }
 
         // ── 首次调用：校验 + 执行人闸门 + 建 release_kind='emergency' 批次 + 抢占绑单 + 写执行人子表 ──
+        // [S1a 订正] config 已随 RELEASABLE_TYPES 扩容加入可发布类型，原 CONFIG_NO_RELEASE 专属分支
+        //   （409「配置类不进上线批次」）已删除——config 现与其余三类型走同一条 TYPE_NOT_RELEASABLE
+        //   兜底（结构上恒不命中，因为 config ∈ RELEASABLE_TYPES；保留该分支只会成为死代码/误导注释）。
         if (!RELEASABLE_TYPES.includes(issue.type)) {
           await sysRollback();
-          return res.status(409).json(issue.type === 'config'
-            ? { error: '配置类不进上线批次', code: 'CONFIG_NO_RELEASE' }
-            : { error: `该类型暂不可进上线批次（当前仅 ${RELEASABLE_TYPES.join('/')}）`, code: 'TYPE_NOT_RELEASABLE' });
+          return res.status(409).json({ error: `该类型暂不可进上线批次（当前仅 ${RELEASABLE_TYPES.join('/')}）`, code: 'TYPE_NOT_RELEASABLE' });
         }
         if (issue.status !== '待上线') {
           await sysRollback();
@@ -18762,7 +19103,11 @@ module.exports = (deps) => {
   const SYS_NOTIFY_DEV_STATUSES_CHANGE = ['开发中', '待验证'];
   const SYS_NOTIFY_CREATOR_STATUSES_CHANGE = ['待验证', '待上线', '已上线'];
   const SYS_NOTIFY_REQUESTER_STATUSES_CHANGE = ['待验证', '待上线', '已上线'];
-  // 按 type + 通道取可发状态白名单（bug 用原常量，变更流用 *_CHANGE；未知 type 返空=一律不可发，默认拒绝）。
+  // [S1a·config 流激活 方案 v1.0 §4] config 手动通知状态白名单——开发侧显式给出（处理中/待验证，同变更流
+  //   *_CHANGE 的"开发在干活或待验证回合"口径，仅态名替换）；建单人/需求方复用既有 *_CHANGE 常量
+  //   （不新造一份同值常量）；relay 通道禁用（config 无对接人 path B 概念，同变更流口径）。
+  const SYS_NOTIFY_DEV_STATUSES_CONFIG = ['处理中', '待验证'];
+  // 按 type + 通道取可发状态白名单（bug 用原常量，变更流/config 用 *_CHANGE；未知 type 返空=一律不可发，默认拒绝）。
   function sysNotifyStatusesFor(type, channel) {
     if (type === 'bug') {
       return { developer: SYS_NOTIFY_DEV_STATUSES, relay: SYS_NOTIFY_RELAY_STATUSES,
@@ -18775,7 +19120,14 @@ module.exports = (deps) => {
                creator: SYS_NOTIFY_CREATOR_STATUSES_CHANGE, requester: SYS_NOTIFY_REQUESTER_STATUSES_CHANGE,
                intake: SYS_NOTIFY_INTAKE_STATUSES }[channel] || [];
     }
-    return [];   // 未知 type（含 config 未定）默认拒绝
+    if (type === 'config') {
+      // [S1a] config 无 relay 通道（同变更流），developer 侧用专属常量（处理中/待验证），
+      //   creator/requester 复用变更流 *_CHANGE（待验证/待上线/已上线，值恰同）。
+      return { developer: SYS_NOTIFY_DEV_STATUSES_CONFIG, relay: [],
+               creator: SYS_NOTIFY_CREATOR_STATUSES_CHANGE, requester: SYS_NOTIFY_REQUESTER_STATUSES_CHANGE,
+               intake: SYS_NOTIFY_INTAKE_STATUSES }[channel] || [];
+    }
+    return [];   // 未知 type 默认拒绝
   }
 
   // ── 交互优化 C2a：手动通知统一授权守卫（方案 §3.2 授权表 type×channel）──────────────────────
@@ -18816,6 +19168,7 @@ module.exports = (deps) => {
       if (type === 'feature' || type === 'improvement') {
         return { status: 400, body: { error: '变更流无对接人通知', code: 'MANUAL_NOTIFY_CHANNEL_NA' } };
       }
+      // [S1a] config 落此兜底分支——同变更流禁用 relay 通道（同 sysNotifyStatusesFor 的 relay:[] 口径）。
       return { status: 400, body: { error: '该类型暂不支持手动通知', code: 'MANUAL_NOTIFY_TYPE_NA' } };
     }
     // ── 建单优化批 C1（方案 §4 改动点2，审 215 M-5）：intake 通道——路由级 requireAdmin 是唯一放行条件，
@@ -18824,13 +19177,14 @@ module.exports = (deps) => {
     //   是通知对象本人，不给自己发；全类型统一，不像 relay 那样仅 bug 可用，因 intake_liaison_id 适用
     //   全部三类型）。
     if (channel === 'intake') {
-      if (type === 'bug' || type === 'feature' || type === 'improvement') {
+      // [S1a] config 同样受理门统一（intake_liaison_id 适用全部四类型），并入本判定。
+      if (type === 'bug' || type === 'feature' || type === 'improvement' || type === 'config') {
         return isAdmin ? null : { status: 403, body: { error: '仅管理员可通知对接人受理', code: 'NOT_AUTHORIZED_FOR_NOTIFY' } };
       }
       return { status: 400, body: { error: '该类型暂不支持手动通知', code: 'MANUAL_NOTIFY_TYPE_NA' } };
     }
-    // developer / creator / requester：C1 起**全类型统一** = admin ∨ 受理人[13]
-    if (type === 'bug' || type === 'feature' || type === 'improvement') {
+    // developer / creator / requester：C1 起**全类型统一** = admin ∨ 受理人[13]（[S1a] 含 config）
+    if (type === 'bug' || type === 'feature' || type === 'improvement' || type === 'config') {
       // ⭐⭐ [C10·决策2·绑单精判] 写路径（enforceBinding）：admin ∨ 该单 intake_liaison_id 本人（行为变更·
       //   示例对接人从"可发所有单通知"→"仅名下单"）。读路径（read-status）：保持 admin∨候选[13]（决策4 可见性不动）。
       // ⭐⭐⭐ [C10-fix5 HIGH·守卫保同步·eligibility 经 opts 预读传入] 绑单分支叠加 eligibility（撤销资格即失操作权·
@@ -19825,7 +20179,8 @@ module.exports = (deps) => {
         return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' });
       }
       // C2a·codex L1：未知 issue.type 统一先拒（400 MANUAL_NOTIFY_TYPE_NA，与发送端点错误码一致；不再用"变更流"文案误标）。
-      if (!['bug', 'feature', 'improvement'].includes(issue.type)) {
+      // [S1a 补丁 T·T1] 写读同源：与 sysManualNotifyGuard 白名单一致（:19098/:19104 均含 config）。
+      if (!['bug', 'feature', 'improvement', 'config'].includes(issue.type)) {
         return res.status(400).json({ error: '该类型暂不支持通知查已读', code: 'MANUAL_NOTIFY_TYPE_NA' });
       }
       // C2a·codex M2：查已读改**逐通道**授权（与发送侧 sysManualNotifyGuard 完全写读同源），非仅单据级 type 判——
@@ -20056,6 +20411,25 @@ module.exports = (deps) => {
     _publishReleaseCoreInTxn,
     nextReleaseNo,
     RELEASABLE_TYPES,
+    RELEASE_FAMILY_BY_TYPE,   // [S1a] verify-sys-config-flow.js 断言族别映射（同 RELEASABLE_TYPES 既有导出理由）
+    SYS_EXEC_MODES,   // [S1a 补丁 W·W2②] verify-sys-config-flow.js [A] 断言 GET meta 的 execModes 与本常量同值（同 RELEASABLE_TYPES 既有导出理由，防第二份清单漂移）
+    // [S1d·L4] 通知状态白名单四族八常量导出——Sys_Iteration.html 的 SI_NOTIFY_* 系列（siNotifyStatusesFor
+    //   函数用到的字面量，:1450 一带）是本组常量的手抄副本，全仓 scripts/ 此前无任何守卫比对这一族
+    //   常量是否漂移（既有 bug 一族 + feature/improvement 共用的 *_CHANGE 一族同样裸奔，非 config 新增
+    //   才有此问题）。同 SYS_EXEC_MODES 既有导出理由，供 verify-sys-config-flow.js 新增 [L4] 组用
+    //   require 的真值 + 正则提取前端字面量做前后端对拍，防第二份副本漂移。
+    SYS_NOTIFY_DEV_STATUSES,
+    SYS_NOTIFY_RELAY_STATUSES,
+    SYS_NOTIFY_CREATOR_STATUSES,
+    SYS_NOTIFY_REQUESTER_STATUSES,
+    SYS_NOTIFY_DEV_STATUSES_CHANGE,
+    SYS_NOTIFY_CREATOR_STATUSES_CHANGE,
+    SYS_NOTIFY_REQUESTER_STATUSES_CHANGE,
+    SYS_NOTIFY_DEV_STATUSES_CONFIG,
+    SYS_NOTIFY_INTAKE_STATUSES,   // [S1d·补丁 AH·AH4/AH5] verify-sys-config-flow.js [L4] 组补 intake 通道对拍用
+    sysNotifyStatusesFor,          // [S1d·补丁 AH·AH5] 导出分派函数本身——供 [L4] 组按 type×channel 对拍"接线"
+                                   // （而非只对拍常量的值：值全等但接线错误——如 config 分支误取 bug 的常量——
+                                   // 此前只比值的写法看不出来）。
     SYS_RELEASE_TITLE_MAX,
     SYS_RELEASE_NOTE_MAX,
     SYS_VERSION_TAG_MAX,
