@@ -20133,6 +20133,10 @@ app.post('/api/collab/requests/:id/friction-record', authenticateToken, requireA
 //   - DONE → DONE（v1.72.10 扩展）：admin 修正已 exporter 闭环单的交付物文件（替换 result_data）
 //   - EXPORTING → DONE（v1.120.0 仅真直派；**2026-09-06 决策记录 D2 放开到任意来源**）：大文件线下移交、
 //     导出人不便自助提交时 admin 代为行政闭环（admin 越过导出人的边界由用户明确接受，留证=reason+admin_closed+flow）
+//   - PENDING_ASSIGN → DONE / PENDING → DONE（**2026-09-07 用户拍板·决策记录《数据协作·admin 行政闭环放开到
+//     任意状态》D1/D2**）：单据尚未提交任何交付物（待指派＝还没指派开发，待开发＝已指派未提交），线下已经把事
+//     办完 / 需求已作废但要记账完成时，admin 代为记账闭环。不分流转方式（normal／admin_direct／fallback）与
+//     需求类型，留证=reason≥10 字 + admin_closed + 逐状态 flow 值（+ 可选补传脚本/结果数据，不跑 smoke test）
 // 触发场景：
 //   1) D1→D2 链路（v1.70.4 原场景）：admin 录错关键字段 → 开发上传 smoke 失败 → admin-fix
 //      修字段后，开发已完成本职工作，admin 走本 endpoint 单方面闭环。
@@ -20142,8 +20146,10 @@ app.post('/api/collab/requests/:id/friction-record', authenticateToken, requireA
 //
 // 业务规则：
 //   - 只 admin 可调
-//   - 状态机：SUBMITTED → DONE 或 DONE → DONE 或 EXPORTING → DONE（v1.72.10 / v1.120.0 / 2026-09-06 三次扩展；
-//     PENDING_ASSIGN/PENDING 还没到导出或提交环节不该跳过；ARCHIVED 已严格归档）
+//   - 状态机：PENDING_ASSIGN / PENDING / SUBMITTED / DONE / EXPORTING → DONE 五态准入
+//     （v1.72.10 / v1.120.0 / 2026-09-06 / **2026-09-07 用户拍板放开到任意状态** 四次扩展）。
+//     ⚠️ 已作废（archived_at）与已归档（ARCHIVED / archived_final_at）**仍然保护**，两条守卫在准入之前。
+//     旧口径「PENDING_ASSIGN/PENDING 还没到导出或提交环节不该跳过」已于 2026-09-07 被用户明确推翻，勿再据此收紧。
 //   - sql_validation_status='admin_closed'（新值，区别于 passed/failed/bypassed，表示"行政闭环未验证"）
 //   - sql_validation_error 强制清空（避免详情页继续展示旧错误污染语义）
 //   - done_at 取值（v1.70.4 codex 30 审 #2：合并到 UPDATE 子查询消除 SELECT/UPDATE 间附件集合变化竞态）：
@@ -20152,6 +20158,9 @@ app.post('/api/collab/requests/:id/friction-record', authenticateToken, requireA
 //       3. 若 deadline 也异常（不应该，schema NOT NULL），最后兜底 datetime('now','localtime')
 //       ⚠️ EXPORTING → DONE 分支例外：done_at **恒** datetime('now')（v1.120.0 轻复审 HIGH：该分支语义=本次
 //          闭环动作时间，且不能被 fallback/reassign 残留的历史 active 附件时间带偏），见下方 UPDATE 处注释。
+//       ⚠️ PENDING_ASSIGN / PENDING → DONE 分支同样例外：done_at **恒** datetime('now')（2026-09-07 J1——
+//          这两态没有任何可锚定的提交动作，deadline 是"要求完成时间"不是"实际完成时间"，用它会把未开工的单
+//          记成按期完成）。done_at_source 一并沿 EXPORTING 既有取值 'now'，不新造枚举值。
 //   - reason ≥10 字 ≤500 字（与 admin-fix / bypass / archive 一致）
 //   - 不发钉钉（只写日志，与 bypass 同节奏）
 //   - 不动 failed 历史附件、friction_*、submission_version（保留审计证据）
@@ -20235,7 +20244,9 @@ app.post('/api/collab/requests/:id/admin-submit-on-behalf',
         //     INVALID_EXPECTED_STATUS（fail-closed，不再把空值当「未传」静默放行）；②**带附件的请求必须携带**（见锁内
         //     EXPECTED_STATUS_REQUIRED）——能覆盖交付物的只有带附件路径，无附件的排队请求本就被 DONE 修正闸
         //     MISSING_ATTACHMENT_FOR_DONE_FIX 挡住，故「不带附件可省略」不留竞态口；既有无附件调用零改动。
-        const ADMIN_SUBMIT_EXPECTED_STATUSES = ['SUBMITTED', 'DONE', 'EXPORTING'];
+        //   [2026-09-07 J3] 放开到五态后本白名单同步扩为五态（顺序按状态机推进方向）：带附件的 PENDING 单闭环
+        //     同样可能与"开发此刻正在提交"竞争，乐观前置对新两态与老三态一视同仁。
+        const ADMIN_SUBMIT_EXPECTED_STATUSES = ['PENDING_ASSIGN', 'PENDING', 'SUBMITTED', 'DONE', 'EXPORTING'];
         const hasExpectedStatusField = Object.prototype.hasOwnProperty.call(req.body || {}, 'expected_status');
         const expectedStatusRaw = hasExpectedStatusField ? req.body.expected_status : undefined;
         let expectedStatus = null;
@@ -20319,14 +20330,19 @@ app.post('/api/collab/requests/:id/admin-submit-on-behalf',
             //   v1.120.0 仅真直派 → 2026-09-06 放开到任意 EXPORTING 单（决策记录 D2）：
             //   normal 已转发/fallback 重流转的 EXPORTING 也允许 admin 越过导出人行政闭环——
             //   用户明确接受该边界，留证=reason≥10 字+admin_closed+flow。
+            //   2026-09-07 用户拍板（决策记录 D1/D2）：再放开 PENDING_ASSIGN / PENDING 两个「尚未提交交付物」态——
+            //   业务上线下已把事办完 / 需求作废但要记账完成时，admin 直接代为记账闭环，不分流转方式与需求类型。
+            //   ⚠️ 本判据只管"状态允许"；已作废/已归档的保护在上方两条守卫（先于此处返回），不在本表内重复。
             const isAllowedAdminSubmitState =
+                collab.status === 'PENDING_ASSIGN' ||
+                collab.status === 'PENDING' ||
                 collab.status === 'SUBMITTED' ||
                 collab.status === 'DONE' ||
                 collab.status === 'EXPORTING';
             if (!isAllowedAdminSubmitState) {
                 cleanupPending();
                 return res.status(409).json({
-                    error: `当前状态 ${collab.status} 不允许行政闭环（仅 SUBMITTED / DONE / EXPORTING 可走）`,
+                    error: `当前状态 ${collab.status} 不允许行政闭环（仅 PENDING_ASSIGN / PENDING / SUBMITTED / DONE / EXPORTING 可走）`,
                     code: 'STATE_NOT_ALLOWED_FOR_ADMIN_SUBMIT',
                     current_status: collab.status,
                 });
@@ -20483,15 +20499,36 @@ app.post('/api/collab/requests/:id/admin-submit-on-behalf',
                 //   COALESCE 子查询 + sql_validation_status='admin_closed'），语义=admin 替导出人（任意来源单·2026-09-06 D2）画句号未走 smoke。
                 const isDoneFix = (collab.status === 'DONE');
                 const isExportingClosure = (collab.status === 'EXPORTING');
+                // 2026-09-07 J1：待指派/待开发两态＝「尚未提交任何交付物」，done_at 语义与 EXPORTING 分支同类
+                //   （本次闭环动作时间），下方 doneAtExpr 与 doneAtSource 都据此走 now() 而非 COALESCE 链。
+                const isPendingClosure = (collab.status === 'PENDING_ASSIGN' || collab.status === 'PENDING');
                 // 2026-09-06 放开（决策记录 D2）：EXPORTING 分支的写点不变量简化为
                 //   「status='EXPORTING' ∧ 未归档（既有 archived_at/archived_final_at 守卫）」，
                 //   不再要求 assign_mode='admin_direct' AND forwarded_to_exporter_at IS NULL——
                 //   normal 已转发单、fallback 重流转单的 EXPORTING 现在都允许 admin 行政闭环，
                 //   与上方准入判据 isAllowedAdminSubmitState 同步放开，SELECT/UPDATE 之间的并发
                 //   改状态仍由 status IN (...) + archived 双守卫兜住。
-                const allowedStatesInWhere = isExportingClosure
-                    ? `('EXPORTING')`
-                    : `('SUBMITTED', 'DONE')`;
+                // 2026-09-07 放开到 PENDING_ASSIGN / PENDING（决策记录 D2）：这两态的写点不变量**逐状态精确复述**，
+                //   刻意不写成合并集合 `IN ('PENDING_ASSIGN','PENDING')`。
+                //   ⚠️ 两层防线各守**不同的时间窗**，别把它们的功劳记混（codex 11 号审 M1 订正）：
+                //     · expected_status 乐观前置：守「前端打开弹层快照 → 锁内 SELECT」这一段。不带附件的调用可省略它。
+                //     · 本条逐状态 WHERE：守「锁内 SELECT（本表达式据其生成）→ 最终 UPDATE」这一段。
+                //   后一段是**真实可达**的：本端点持 collabExporterTransitionMutex，但 `POST /:id/assign`（server.js:17098）
+                //   **不持这把锁**，故一次 PENDING_ASSIGN → PENDING 的指派完全可能落在我们 SELECT 之后、UPDATE 之前。
+                //   合并集合会让这种单照样被写成 DONE（还带着"未指派"的 flow 值）；逐状态写法下它命中 changes=0
+                //   → ROLLBACK → 409 STATE_CHANGED。
+                //   ⚠️ 该交错依赖真实并发时序，本仓测试框架无确定性注入点 → **本层无用例覆盖，登记接受**；
+                //     现有 M2 变异只能证明"这个分支活着"，证明不了"逐状态 vs 合并"的差别（无交错时两者行为相同）。
+                const pendingClosureStatesInWhere =
+                    collab.status === 'PENDING_ASSIGN' ? `('PENDING_ASSIGN')`
+                    : collab.status === 'PENDING' ? `('PENDING')`
+                    : null;   // isPendingClosure 为真时恒非 null；若未来往 isPendingClosure 加成员却漏了本表，
+                              //   这里返回 null 会让 SQL 立刻语法失败（fail-loud），不会静默放宽写点守卫
+                const allowedStatesInWhere = isPendingClosure
+                    ? pendingClosureStatesInWhere
+                    : isExportingClosure
+                        ? `('EXPORTING')`
+                        : `('SUBMITTED', 'DONE')`;
                 // v1.120.0 Commit B codex 02-B 审 MED + 末次审 MED-3 + 轻复审 HIGH 采纳（done_at = 本次闭环时间）：
                 //   EXPORTING→DONE 是大文件线下移交类「快速留痕闭环」（v1.120.0 直派起·2026-09-06 D2 任意来源），done_at 语义 = 本次行政闭环动作时间。
                 //   ⭐ 轻复审 HIGH 收严：EXPORTING→DONE **无论有无本次上传，done_at 一律 datetime('now')**。
@@ -20500,11 +20537,17 @@ app.post('/api/collab/requests/:id/admin-submit-on-behalf',
                 //     直接用 now() 彻底根治（有本次上传时附件时间与 now 仅差上传耗时秒级，对闭环时间语义无影响），
                 //     且更简单——契合「留痕闭环 done_at=闭环动作时间」定位，不做「记录本次附件 ID 再查」的过度设计。
                 //   SUBMITTED→DONE / DONE→DONE 老路径保持原 COALESCE（含 deadline / 保留原 done_at）不变，避免回归。
+                //   2026-09-07 J1：PENDING_ASSIGN / PENDING → DONE 同样恒 datetime('now')。这两态一定没有 active
+                //     交付物附件，老 COALESCE 链会退到 deadline（"要求完成时间"），把一张从未开工的单记成按期完成；
+                //     即便 admin 本次补传了附件，附件时间也只是补档时间、不是完成时间。逐状态各写一支不与 EXPORTING
+                //     合并，便于审计时按状态回溯该分支的取值理由。
                 const doneAtExpr = isDoneFix
                     ? `COALESCE(done_at, datetime('now','localtime'))`
                     : isExportingClosure
                         ? `datetime('now','localtime')`
-                        : `COALESCE(
+                        : isPendingClosure
+                            ? `datetime('now','localtime')`
+                            : `COALESCE(
                             (SELECT MAX(created_at) FROM collab_attachments
                               WHERE collab_request_id = collab_requests.id
                                 AND status = 'active'
@@ -20566,7 +20609,13 @@ app.post('/api/collab/requests/:id/admin-submit-on-behalf',
             const finalDoneAt = updated && updated.done_at;
             // v1.120.0 轻复审：EXPORTING→DONE 的 done_at 恒为 now()（快速留痕闭环），doneAtSource 直接 'now'，
             //   跳过附件反推——避免历史残留 active 附件的 created_at 极端下毫秒级等于 now 时被误标为附件来源。
-            if (finalDoneAt && collab.status !== 'EXPORTING') {
+            // 2026-09-07：PENDING_ASSIGN / PENDING 同样跳过附件反推。这两态 done_at 恒 now()，而 admin 本次补传的
+            //   附件 created_at 与 now() 常常同秒相等 —— 不跳过就会被反推标成 'admin_supplemental_attachment'，
+            //   把"闭环动作时间"谎报成"补传附件时间"（与 EXPORTING 分支当年同一个坑）。逐状态列出不写集合。
+            if (finalDoneAt
+                && collab.status !== 'EXPORTING'
+                && collab.status !== 'PENDING_ASSIGN'
+                && collab.status !== 'PENDING') {
                 const lastActive = await dbGetAsync(
                     `SELECT MAX(created_at) AS last_at FROM collab_attachments
                       WHERE collab_request_id = ?
@@ -20592,10 +20641,19 @@ app.post('/api/collab/requests/:id/admin-submit-on-behalf',
             //   · SUBMITTED→DONE = 'submitted_to_done_admin_closure'（admin 替开发画句号）
             //   · DONE→DONE      = 'done_to_done_admin_fix'（admin 修正已闭环单交付物）
             //   · EXPORTING→DONE = 'exporting_to_done_admin_closure'（admin 对任意来源 EXPORTING 单直接行政闭环·大文件线下传递·2026-09-06 D2 起不限直派）
+            //   · PENDING_ASSIGN→DONE = 'pending_assign_to_done_admin_closure'（2026-09-07 J2·尚未指派开发即记账闭环）
+            //   · PENDING→DONE        = 'pending_to_done_admin_closure'（2026-09-07 J2·已指派未提交即记账闭环）
+            //   两个新值**逐状态各占一个**，不合并成 pending_to_done_admin_closure 一个值——审计要能区分"连开发都没派"
+            //   和"派了没做完"，这是行政闭环事后复盘最关心的一条分界。
+            //   末支不再兜底成 SUBMITTED：准入五态之外理论上到不了这里，真到了就落 unknown_* 让审计一眼看见，
+            //   而不是被静默记成 submitted_to_done（将来若有人放宽准入却忘了扩本表，这里会自曝而非说谎）。
             const adminSubmitFlow =
                 collab.status === 'DONE' ? 'done_to_done_admin_fix'
                 : collab.status === 'EXPORTING' ? 'exporting_to_done_admin_closure'
-                : 'submitted_to_done_admin_closure';
+                : collab.status === 'PENDING_ASSIGN' ? 'pending_assign_to_done_admin_closure'
+                : collab.status === 'PENDING' ? 'pending_to_done_admin_closure'
+                : collab.status === 'SUBMITTED' ? 'submitted_to_done_admin_closure'
+                : `unknown_${String(collab.status || 'null').toLowerCase()}_to_done_admin_closure`;
             insertCollabLog(id, 'ADMIN_SUBMIT_ON_BEHALF', userId, userName, JSON.stringify({
                 reason,
                 flow: adminSubmitFlow,

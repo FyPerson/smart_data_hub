@@ -22,6 +22,9 @@
  *   原先硬读 <tmp>/dc-testsingle.json，夹具丢失即 ENOENT 崩溃、整套回归跑不了（2026-09-01 实遇）；
  *   且 C-UI-4 会把 normal 单真实闭环成 DONE，复用旧夹具必判红 → 恒新播种最稳。跑完自动清理测试单。
  *   C-UI-7 消费 seed() 新增的第二张 `normal2` 单，与 C-UI-4/5/6 消费的 `normal` 单互不干扰。
+ *   2026-09-07 用户拍板放开到 PENDING_ASSIGN / PENDING 后新增 C-UI-8：admin 对 PENDING 待开发单
+ *   点「📋 行政闭环」真实走完（按钮可见 + 弹层注记走 PENDING 分支 + 直查库 DONE/admin_closed/flow），
+ *   消费 seed() 新增的 `pending` 单。
  * 运行：node scripts/test-collab-direct-close-c-playwright.js
  */
 'use strict';
@@ -76,7 +79,8 @@ async function main() {
         const single = seeded.single;
         const normal = seeded.normal;
         const normal2 = seeded.normal2;
-        console.log(`（夹具：真直派单 #${single.id} / normal 已转发单 #${normal.id} / normal 已转发单（第二张）#${normal2.id}）`);
+        const pending = seeded.pending;   // 2026-09-07 C-UI-8：PENDING 待开发单
+        console.log(`（夹具：真直派单 #${single.id} / normal 已转发单 #${normal.id} / normal 已转发单（第二张）#${normal2.id} / PENDING 待开发单 #${pending.id}）`);
 
         browser = await chromium.launch();
         // ===== C-UI-1 导出人视角 =====
@@ -326,6 +330,58 @@ async function main() {
                         let flow = null;
                         try { flow = JSON.parse(opLogs[0].reason).flow; } catch (_) { flow = 'PARSE_ERROR'; }
                         ok('C-UI-7 日志 flow=exporting_to_done_admin_closure', flow === 'exporting_to_done_admin_closure', String(flow));
+                    }
+                }
+            }
+            await ctx.close();
+        }
+
+        // ===== C-UI-8【2026-09-07 新增】端到端·admin 视角对 PENDING（待开发）单点「📋 行政闭环」
+        //   → 填 reason ≥10 字 → 直查库终态。放开到任意状态后，"待开发单上到底有没有这个按钮"
+        //   只有真实渲染能证明——后端 verify 覆盖的是端点，前端按钮条件是另一处独立判据。 =====
+        console.log('\n=== C-UI-8 端到端·admin 对 PENDING 待开发单点「📋 行政闭环」→ DONE ===');
+        {
+            const ctx = await browser.newContext();
+            const page = await loginAs(ctx, pending.adminToken, pending.id);
+            await page.waitForTimeout(1500);
+            const closeBtn = page.locator('button:has-text("行政闭环")').first();
+            const closeBtnVisible = await closeBtn.isVisible().catch(() => false);
+            ok('C-UI-8 「📋 行政闭环」按钮在 PENDING 单可见（放开前该按钮不渲染）', closeBtnVisible);
+            if (closeBtnVisible) {
+                const REASON = '业务方线下已自行取数完成，需求不再走平台开发，admin 代为记账闭环';
+                await closeBtn.click();
+                await page.waitForTimeout(500);
+                const modalOpen = await page.locator('#adminSubmitModal.open').isVisible().catch(() => false);
+                ok('C-UI-8 行政闭环弹框已打开', modalOpen);
+                if (modalOpen) {
+                    // 注记三分：PENDING 应拿到 ADMIN_SUBMIT_TIP_PENDING，不能落回 DEFAULT（那段讲的是
+                    //   "SUBMITTED 单 smoke 失败"场景，对待开发单是错的指引）。取文本特征串判别。
+                    const tipText = await page.locator('#adminSubmitTip').innerText().catch(() => '');
+                    ok('C-UI-8 弹层注记走 PENDING 分支（含"尚未提交任何交付物"）',
+                        tipText.includes('尚未提交任何交付物'), tipText.slice(0, 60));
+                    ok('C-UI-8 弹层注记未落回 DEFAULT 分支（不含"录入错误"口径）',
+                        !tipText.includes('录入错误'), tipText.slice(0, 60));
+                    await page.fill('#f_admin_submit_reason', REASON);
+                    await page.click('#btnAdminSubmit');
+                    await page.waitForTimeout(2000);
+                    const modalStillOpen = await page.locator('#adminSubmitModal.open').isVisible().catch(() => false);
+                    ok('C-UI-8 弹框已关闭（提交成功）', !modalStillOpen, '弹框未关说明被拒了');
+                    // 直查库：UI 文案不足以证明状态真变了（07 号 M3 教训）
+                    const row = await dbGet(
+                        'SELECT status, sql_validation_status, done_at, deadline FROM collab_requests WHERE id=?',
+                        [pending.id]);
+                    ok('C-UI-8 库内 status=DONE', row && row.status === 'DONE', JSON.stringify(row));
+                    ok('C-UI-8 库内 sql_validation_status=admin_closed', row && row.sql_validation_status === 'admin_closed', JSON.stringify(row));
+                    ok('C-UI-8 库内 done_at 已写且不等于 deadline（=本次闭环时刻，非要求完成时间）',
+                        !!(row && row.done_at && row.done_at !== row.deadline), JSON.stringify(row));
+                    const opLogs = await dbAll(
+                        "SELECT reason FROM collab_operation_logs WHERE collab_request_id=? AND operation_type='ADMIN_SUBMIT_ON_BEHALF'",
+                        [pending.id]);
+                    ok('C-UI-8 ADMIN_SUBMIT_ON_BEHALF 日志恰 1 条', opLogs.length === 1, `got ${opLogs.length}`);
+                    if (opLogs.length === 1) {
+                        let flow = null;
+                        try { flow = JSON.parse(opLogs[0].reason).flow; } catch (_) { flow = 'PARSE_ERROR'; }
+                        ok('C-UI-8 日志 flow=pending_to_done_admin_closure', flow === 'pending_to_done_admin_closure', String(flow));
                     }
                 }
             }

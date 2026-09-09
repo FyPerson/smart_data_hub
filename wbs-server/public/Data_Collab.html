@@ -1084,9 +1084,14 @@
                 <button class="modal-close" onclick="closeAdminSubmitModal()">×</button>
             </div>
             <div class="u-modal-body">
-                <!-- 2026-09-06（决策记录 D2）：提示块按当前单据状态切换文案——EXPORTING 态（任意来源）走
-                     「导出人不便自助提交/大文件线下移交」口径且完成时间=本次闭环时间；SUBMITTED/DONE 沿用原文案。
-                     内容由 openAdminSubmitDialog 写入（两段静态 HTML 常量，不含任何接口数据）。 -->
+                <!-- 提示块按当前单据状态切换文案，由 openAdminSubmitDialog 写入（**三段**静态 HTML 常量，
+                     均不含任何接口数据/用户输入）：
+                       · EXPORTING（2026-09-06 D2·任意来源）→ ADMIN_SUBMIT_TIP_EXPORTING：「导出人不便自助提交／
+                         大文件线下移交」口径，完成时间=本次闭环时间
+                       · PENDING_ASSIGN / PENDING（2026-09-07 D1/D2·J5）→ ADMIN_SUBMIT_TIP_PENDING：「尚未提交
+                         交付物、线下已办完或需求不做了要记账收口」口径，完成时间=本次闭环时刻
+                       · SUBMITTED / DONE → ADMIN_SUBMIT_TIP_DEFAULT（下方静态兜底文案即这一段，原文案不动）
+                     ⚠️ 下面写死的 HTML 只是 DEFAULT 那一段的静态副本（首屏兜底），改 DEFAULT 常量时要一并改这里。 -->
                 <div id="adminSubmitTip" style="padding:12px;background:#dbeafe;border:1px solid #93c5fd;border-radius:6px;margin-bottom:14px;color:#1e3a8a;font-size:13px;line-height:1.7;">
                     📋 适用于：admin 因创建协作单时录入错误（如选错业务库），导致开发交付物 smoke test 失败。<br/>
                     通过 admin 修正字段后，<strong>不让开发再回来重传</strong>，admin 单方面将协作单从 SUBMITTED 闭环到 DONE。<br/>
@@ -3169,7 +3174,7 @@
         //
         // 按钮顺序（codex 推荐 + 防顺序漂移）：
         //   ① 主业务动作：编辑（unsubmitted）/ 转发给数据导出人（PENDING）/ 提交导出物（exporter+EXPORTING）/ 退回任务（exporter+EXPORTING）
-        //   ② 修正 / 闭环动作：管理员修正（admin+三态）/ 行政闭环（admin+SUBMITTED）/ 归档（admin+DONE）
+        //   ② 修正 / 闭环动作：管理员修正（admin+三态）/ 行政闭环（admin+五态：PENDING_ASSIGN/PENDING/SUBMITTED/DONE/EXPORTING）/ 归档（admin+DONE）
         //   ③ 危险动作：作废（admin+非终态）
         //
         // 优先终态短路：
@@ -3239,7 +3244,10 @@
             //   统一「🗂️ 直接行政闭环」，局部变量 isGenuineDirectExporting 因判据合并已删除（真直派专用的
             //   isGenuineDirectExportingSingle 仍保留供 openExportUploadDialog 判概要是否必填）。
             // codex 50 M-4 采纳：按状态区分按钮文案降低 admin 认知摩擦
-            if (isAdminUser && (status === 'SUBMITTED' || status === 'DONE' || status === 'EXPORTING')) {
+            // 2026-09-07（用户拍板·决策记录《admin 行政闭环放开到任意状态》D1/D2）：再放开待指派/待开发两态。
+            //   这两态与 SUBMITTED 共用「📋 行政闭环」文案（都是"admin 替别人画句号"，不像 DONE 是修交付物、
+            //   也不像 EXPORTING 要强调"越过导出人"），差异在弹层注记里讲清楚，见 ADMIN_SUBMIT_TIP_PENDING。
+            if (isAdminUser && (status === 'PENDING_ASSIGN' || status === 'PENDING' || status === 'SUBMITTED' || status === 'DONE' || status === 'EXPORTING')) {
                 const adminSubmitLabel = status === 'DONE' ? '🔧 修正交付物'
                     : status === 'EXPORTING' ? '🗂️ 直接行政闭环'
                     : '📋 行政闭环';
@@ -6826,6 +6834,12 @@
         const ADMIN_SUBMIT_TIP_EXPORTING = `🗂️ 适用于：导出结果为大文件已线下移交、或导出人不便在平台自助提交时，admin 代为把处于「导出中」的协作单直接闭环到 DONE（任意来源单均可，2026-09-06 起）。<br/>
                     请在原因里写明<strong>导出了什么、为何未在平台提交、线下如何移交</strong>——平台无交付物存档时，这段原因是唯一留痕。<br/>
                     <span style="color:#991b1b;">⚠️ 行政闭环<strong>不跑 smoke test</strong>，仅作需求记账；完成时间=本次闭环时间；导出人不会收到通知，如需知会请线下沟通。</span>`;
+        // 2026-09-07（决策记录 D1/D2 + J5）：待指派 / 待开发两态的注记。与上面两段一样是源码内静态 HTML，
+        //   不拼接任何接口数据/用户输入，innerHTML 赋值无 XSS 面。文案与后端逐字对齐：done_at 恒为本次闭环
+        //   时刻（server.js isPendingClosure 分支），成功 toast 的「取自当前时间」（done_at_source='now'）与之一致。
+        const ADMIN_SUBMIT_TIP_PENDING = `📋 适用于：该单<strong>尚未提交任何交付物</strong>（待指派＝还没指派开发，待开发＝已指派但开发未提交），而事情线下已经办完、或需求已经不做了但需要把单子记账收口。<br/>
+                    请在原因里写明<strong>这件事实际怎么处理的、为什么不在平台走完流程</strong>——平台没有交付物存档时，这段原因是唯一留痕。<br/>
+                    <span style="color:#991b1b;">⚠️ 行政闭环<strong>不跑 smoke test</strong>，仅作需求记账；完成时间=本次闭环时刻（不是期望完成时间）；开发/对接人不会收到通知，如需知会请线下沟通。可选补传脚本或结果数据仅作留档，不执行冒烟测试。</span>`;
         function openAdminSubmitDialog() {
             if (!currentDetail) return showToast('协作单数据未加载', 'error');
             _adminSubmitCollabId = currentDetail.id;
@@ -6833,7 +6847,13 @@
             //   后端锁内核对，若单据已被别人（exporter 自助提交/另一 admin）推进，返回 409 而不是把本次请求重解释成 DONE 修正。
             _adminSubmitExpectedStatus = currentDetail.status || null;
             const tipEl = document.getElementById('adminSubmitTip');
-            if (tipEl) tipEl.innerHTML = currentDetail.status === 'EXPORTING' ? ADMIN_SUBMIT_TIP_EXPORTING : ADMIN_SUBMIT_TIP_DEFAULT;
+            // 2026-09-07：注记三分（原二分）。待指派/待开发逐状态列出、不写集合，与后端 isPendingClosure 同源。
+            if (tipEl) {
+                tipEl.innerHTML =
+                    currentDetail.status === 'EXPORTING' ? ADMIN_SUBMIT_TIP_EXPORTING
+                    : (currentDetail.status === 'PENDING_ASSIGN' || currentDetail.status === 'PENDING') ? ADMIN_SUBMIT_TIP_PENDING
+                    : ADMIN_SUBMIT_TIP_DEFAULT;
+            }
             document.getElementById('f_admin_submit_reason').value = '';
             // v1.70.5 重置文件选择框（避免上次残留）
             const scriptInput = document.getElementById('f_admin_submit_script');

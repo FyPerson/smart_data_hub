@@ -118,6 +118,41 @@ async function getCollab(id) {
     });
 }
 
+// 2026-09-07 V9a/V9b 翻转配套：读 ADMIN_SUBMIT_ON_BEHALF 日志（flow 值断言用）
+async function getAdminSubmitLogs(id) {
+    return new Promise((resolve, reject) => {
+        const db = new sqlite3.Database(DB_PATH);
+        db.all(
+            "SELECT reason FROM collab_operation_logs WHERE collab_request_id=? AND operation_type='ADMIN_SUBMIT_ON_BEHALF' ORDER BY id",
+            [id],
+            (err, rows) => { db.close(); err ? reject(err) : resolve(rows || []); }
+        );
+    });
+}
+
+// 把已指派的夹具改成真·未指派形态（codex 11-M2）。developer_id / developer_name 是 NOT NULL 列，
+//   故写 0 与 '(待指派)' 而非 NULL——与生产真实 PENDING_ASSIGN 单一致。
+async function clearAssignment(id) {
+    return new Promise((resolve, reject) => {
+        const db = new sqlite3.Database(DB_PATH);
+        db.run("UPDATE collab_requests SET developer_id=0, developer_name='(待指派)', assigned_at=NULL, assigned_by=NULL WHERE id=?",
+            [id], function (err) { db.close(); err ? reject(err) : resolve(this.changes); });
+    });
+}
+
+// 取 **SQLite 自己的** localtime 当前时刻。done_at 由 datetime('now','localtime') 写入，用 JS 侧时间做上下界
+//   会引入时区/时钟偏移，必须同源取值。V9a/V9b 用它把 done_at 卡进 [请求前, 请求后] 这个窗口——
+//   这一对上下界才是真正的判别力所在：夹具 deadline='2026-12-31 18:00:00' 是未来时间，
+//   只断言"done_at 非空"或"done_at ≥ 请求前"都拦不住"pending 分支被删→回落 deadline"这个变异。
+async function dbNowLocal() {
+    return new Promise((resolve, reject) => {
+        const db = new sqlite3.Database(DB_PATH);
+        db.get("SELECT datetime('now','localtime') AS t", [], (err, row) => {
+            db.close(); err ? reject(err) : resolve(row && row.t);
+        });
+    });
+}
+
 const tests = [];
 function defTest(name, fn) { tests.push({ name, fn }); }
 
@@ -366,41 +401,89 @@ defTest('V8c: DONE smoke passed 单 admin 调 admin-submit-on-behalf → sql_val
 // ============================================================
 // V9: v1.72.10 codex 50 L-1 修订 — admin-submit-on-behalf 状态准入边界全覆盖（参数化）
 // 原：仅 SUBMITTED/DONE 放行，PENDING_ASSIGN/PENDING/EXPORTING/ARCHIVED/archived_final 全拒
-// 2026-09-06（决策记录 D2）：EXPORTING 放开为任意来源均放行（V9c 由 409 翻转为 200 + DONE）；
-//   PENDING_ASSIGN/PENDING（V9a/V9b）与 ARCHIVED（V9d·ARCHIVED_PROTECTED）不受影响，仍 409；
-//   archived_final（软归档终态）历史上就没有独立用例（原头注释属 overclaim），本次不补。
+// 2026-09-06（决策记录 D2）：EXPORTING 放开为任意来源均放行（V9c 由 409 翻转为 200 + DONE）。
+// 2026-09-07（用户拍板·决策记录《admin 行政闭环放开到任意状态》D1/D2）：**V9a/V9b 由 409 翻转为 200**——
+//   PENDING_ASSIGN / PENDING 两个「尚未提交交付物」态现在也允许 admin 记账闭环，逐状态 flow 值区分；
+//   ARCHIVED（V9d·ARCHIVED_PROTECTED）仍 409，是本端点放开后**唯一**还在拒的既有用例（软作废 archived_at
+//   由 verify-collab-admin-close-exporting.js B 组覆盖）；archived_final 历史上就没有独立用例，本次不补。
 // ============================================================
-defTest('V9: admin-submit-on-behalf 状态边界 —— PENDING_ASSIGN/PENDING/ARCHIVED 409、EXPORTING 200(2026-09-06 放开)', async () => {
+defTest('V9: admin-submit-on-behalf 状态边界 —— PENDING_ASSIGN/PENDING/EXPORTING 200(逐状态 flow)、ARCHIVED 409', async () => {
     const adminToken = await fx.signAs(fx.ADMIN_ID);
 
-    // V9a: PENDING_ASSIGN → STATE_NOT_ALLOWED_FOR_ADMIN_SUBMIT
+    // V9a【2026-09-07 由 409 翻转为 200】：PENDING_ASSIGN → DONE（还没指派开发就记账闭环）
     {
         const ctx = await fx.createPendingFixture();
         createdFixtureIds.push(ctx.id);
         await fx.setCollabState(ctx.id, { status: 'PENDING_ASSIGN' });
-        const res = await postAdminSubmitOnBehalf(ctx.id, adminToken, { reason: 'V9a PENDING_ASSIGN 不应允许' });
-        if (res.status !== 409) throw new Error(`V9a expected 409, got ${res.status}`);
-        if (res.body && res.body.code !== 'STATE_NOT_ALLOWED_FOR_ADMIN_SUBMIT') {
-            throw new Error(`V9a expected STATE_NOT_ALLOWED_FOR_ADMIN_SUBMIT, got ${res.body && res.body.code}`);
+        // codex 11 号审 M2：只翻 status 不等于"未指派"——createPendingFixture 已 assign 过 dev1。
+        //   真实形态（生产实测）= developer_id=0 / developer_name='(待指派)' / assigned_at=NULL（两列 NOT NULL 故用 0 与占位串）。
+        await clearAssignment(ctx.id);
+        const preA = await getCollab(ctx.id);
+        if (!preA || Number(preA.developer_id) !== 0 || preA.assigned_at != null) {
+            throw new Error(`V9a 夹具不是真·未指派形态: ${JSON.stringify({ dev: preA && preA.developer_id, at: preA && preA.assigned_at })}`);
+        }
+        const before = await dbNowLocal();
+        const res = await postAdminSubmitOnBehalf(ctx.id, adminToken, {
+            reason: 'V9a 待指派单线下已办完，行政闭环记账',
+            uploadResultData: false,   // 聚焦状态放行；带附件路径由 verify-collab-admin-close-exporting B 组覆盖
+        });
+        const after = await dbNowLocal();
+        if (res.status !== 200) throw new Error(`V9a expected 200, got ${res.status} ${JSON.stringify(res.body)}`);
+        const row = await getCollab(ctx.id);
+        if (!row || row.status !== 'DONE') throw new Error(`V9a expected 库内 status=DONE, got ${JSON.stringify(row)}`);
+        if (row.sql_validation_status !== 'admin_closed') {
+            throw new Error(`V9a expected sql_validation_status=admin_closed, got ${row.sql_validation_status}`);
+        }
+        // done_at 必须落在 [请求前, 请求后] 这个闭环时刻窗口内。上界不可省：夹具 deadline 是 2026-12-31，
+        //   若 doneAtExpr 的 pending 分支被删、回落到 COALESCE(...,deadline,...)，只有上界能把它判红。
+        if (!row.done_at || row.done_at < before || row.done_at > after) {
+            throw new Error(`V9a expected done_at ∈ [${before}, ${after}]（本次闭环时刻），got ${row.done_at}（deadline=${row.deadline}）`);
+        }
+        if (res.body.done_at_source !== 'now') {
+            throw new Error(`V9a expected done_at_source='now'（沿 EXPORTING 既有取值，不新造枚举）, got ${res.body.done_at_source}`);
+        }
+        const logs = await getAdminSubmitLogs(ctx.id);
+        if (logs.length !== 1) throw new Error(`V9a expected ADMIN_SUBMIT_ON_BEHALF 日志恰 1 条, got ${logs.length}`);
+        const flowA = JSON.parse(logs[0].reason).flow;
+        if (flowA !== 'pending_assign_to_done_admin_closure') {
+            throw new Error(`V9a expected flow=pending_assign_to_done_admin_closure（不可与 PENDING 串味）, got ${flowA}`);
         }
     }
 
-    // V9b: PENDING → STATE_NOT_ALLOWED_FOR_ADMIN_SUBMIT
+    // V9b【2026-09-07 由 409 翻转为 200】：PENDING → DONE（已指派未提交就记账闭环）
     {
         const ctx = await fx.createPendingFixture();
         createdFixtureIds.push(ctx.id);
         // createPendingFixture 已是 PENDING
-        const res = await postAdminSubmitOnBehalf(ctx.id, adminToken, { reason: 'V9b PENDING 不应允许' });
-        if (res.status !== 409) throw new Error(`V9b expected 409, got ${res.status}`);
-        if (res.body && res.body.code !== 'STATE_NOT_ALLOWED_FOR_ADMIN_SUBMIT') {
-            throw new Error(`V9b expected STATE_NOT_ALLOWED_FOR_ADMIN_SUBMIT, got ${res.body && res.body.code}`);
+        const before = await dbNowLocal();
+        const res = await postAdminSubmitOnBehalf(ctx.id, adminToken, {
+            reason: 'V9b 待开发单需求已取消，行政闭环记账',
+            uploadResultData: false,
+        });
+        const after = await dbNowLocal();
+        if (res.status !== 200) throw new Error(`V9b expected 200, got ${res.status} ${JSON.stringify(res.body)}`);
+        const row = await getCollab(ctx.id);
+        if (!row || row.status !== 'DONE') throw new Error(`V9b expected 库内 status=DONE, got ${JSON.stringify(row)}`);
+        if (row.sql_validation_status !== 'admin_closed') {
+            throw new Error(`V9b expected sql_validation_status=admin_closed, got ${row.sql_validation_status}`);
+        }
+        if (!row.done_at || row.done_at < before || row.done_at > after) {
+            throw new Error(`V9b expected done_at ∈ [${before}, ${after}]（本次闭环时刻），got ${row.done_at}（deadline=${row.deadline}）`);
+        }
+        if (res.body.done_at_source !== 'now') {
+            throw new Error(`V9b expected done_at_source='now', got ${res.body.done_at_source}`);
+        }
+        const logs = await getAdminSubmitLogs(ctx.id);
+        if (logs.length !== 1) throw new Error(`V9b expected ADMIN_SUBMIT_ON_BEHALF 日志恰 1 条, got ${logs.length}`);
+        const flowB = JSON.parse(logs[0].reason).flow;
+        if (flowB !== 'pending_to_done_admin_closure') {
+            throw new Error(`V9b expected flow=pending_to_done_admin_closure（不可与 PENDING_ASSIGN 串味）, got ${flowB}`);
         }
     }
 
     // V9c【2026-09-06 由 409 翻转为 200】：EXPORTING（本夹具 assign_mode 默认 'normal'，并显式写
     //   forwarded_to_exporter_at 模拟三级转发——normal 进 EXPORTING 在生产只能经 forward 写非 NULL，
     //   见 server.js submit-export 守卫①推导；Opus 预筛 M1）→ 决策记录 D2 放开后允许 admin 行政闭环，库内应落 DONE。
-    //   V9a/V9b（PENDING_ASSIGN / PENDING）不受本次放开影响，原样保持 409。
     //   uploadResultData:false——聚焦状态放行本身，不掺附件路径（附件路径由
     //   verify-collab-admin-close-exporting.js 的 B12 覆盖）。
     {
